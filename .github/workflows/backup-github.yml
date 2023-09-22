@@ -1,0 +1,67 @@
+name: backup-github
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3,13,18,23 * * *"
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create backup directory
+        run: |
+          mkdir backup
+          cd backup
+
+      - name: List repositories
+        run: |
+          TOKEN="${{ secrets.PAT }}"
+          curl -s -H "Authorization: token $TOKEN" "https://api.github.com/user/repos?type=all&per_page=100" | grep -e 'clone_url*' | cut -d \" -f 4  > repositories.txt
+
+      - name: Clone repositories
+        run: |
+          TOKEN="${{ secrets.PAT }}"
+          while IFS= read -r repo; do
+            echo "$repo"
+            git clone "$repo" || echo "git clone $repo 失败"
+          done < repositories.txt
+
+      - name: check backup
+        run: |
+          pwd
+          ls
+          du -sh .
+      - name: rclone-install
+        run: |
+          # 安装 rclone
+          curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
+          unzip rclone-current-linux-amd64.zip
+          cd rclone-*-linux-amd64
+          sudo mv rclone /usr/bin
+          sudo chmod +x /usr/bin/rclone
+      - name: rclone-config
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE }}
+        run: |
+          # 写配置文件
+          mkdir -p ~/.config/rclone/
+          cat << EOF > ~/.config/rclone/rclone.conf
+          $RCLONE_CONFIG
+          EOF
+      - name: rclone-run
+        run: |
+          # Rclone-Run
+          # 更改时区
+          sudo cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime  
+          echo "==========开始同步==========="
+          rclone sync --ignore-errors . i:backup/github -vv
+          rclone size --ignore-errors i:backup/github -vv
+          echo "==========结束同步==========="
+      - name: send notification
+        run: |
+          curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github backup-github 任务执行结束"

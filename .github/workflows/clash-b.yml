@@ -1,0 +1,23 @@
+name: "update clash config b"
+on:
+  schedule:
+    - cron: '10 * 11-20 * *'
+  workflow_dispatch:
+  watch:
+    types: started
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: get clash config b
+      run: |
+        curl -k -o clash '${{ secrets.B }}'     
+    - name: deploy to gists
+      uses: exuanbo/actions-deploy-gist@v1
+      with:
+        token: ${{ secrets.PAT }}
+        gist_id: ${{ secrets.ID }}
+        gist_file_name: clash
+        file_path: clash

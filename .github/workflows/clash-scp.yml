@@ -1,0 +1,25 @@
+name: "update clash config scp"
+on:
+  schedule:
+    - cron: '10 * * * *'
+  workflow_dispatch:
+  watch:
+    types: started
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: get clash config
+      run: |
+        curl -k -o clash '${{ secrets.SCP }}'
+        ls
+        sed -i "s/cf-lt.sharecentre.online/doge.787878.cf/g" clash
+    - name: deploy to gists
+      uses: exuanbo/actions-deploy-gist@v1
+      with:
+        token: ${{ secrets.PAT }}
+        gist_id: ${{ secrets.ID }}
+        gist_file_name: clash
+        file_path: clash
