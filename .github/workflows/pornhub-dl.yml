@@ -2,7 +2,7 @@ name: pornhub-dl
 
 on:
   schedule:
-    - cron: '0 17 * * *'
+    - cron: '0 */6 * * *'
   workflow_dispatch:
   watch:
     types: started
