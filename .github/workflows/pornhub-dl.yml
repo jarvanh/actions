@@ -31,8 +31,8 @@ jobs:
       - name: rclone-run
         run: |
           sudo apt-get install fuse3
-          mkdir ~/j
-          nohup rclone --vfs-cache-mode full mount j: ~/j &
+          sudo mkdir ~/j
+          sudo nohup rclone --vfs-cache-mode full mount j: ~/j &
           echo "~/j 文件列表"
           cd ~/j
           ls
@@ -44,6 +44,8 @@ jobs:
           pip3 install --upgrade yt-dlp
           cd ~
           cd ~/j/1024j/视频/pornhub-favorites
+          echo "favorites文件列表"
+          ls
           echo "favorites文件夹 下载前大小"
           du -sh ~/j/1024j/视频/pornhub-favorites
           # yt-dlp -f bestvideo+bestaudio/best --force-overwrites --no-part -i https://www.pornhub.com/users/'${{ secrets. PORNHUBNAME }}'/videos/favorites || echo "url不存在"
@@ -106,6 +108,8 @@ jobs:
             mkdir ~/j/1024j/视频/pornhub-channel/$dir || echo "文件夹已存在"
             cd ~
             cd ~/j/1024j/视频/pornhub-channel/$dir
+            echo "$dir文件列表"
+            ls
             echo "$dir文件夹 下载前大小"
             du -sh ~/j/1024j/视频/pornhub-channel/$dir
             # yt-dlp -f bestvideo+bestaudio/best --force-overwrites --no-part -i "$url" || echo "url不存在"
