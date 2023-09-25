@@ -43,7 +43,7 @@ jobs:
           sudo apt-get install ffmpeg -y
           pip3 install --upgrade yt-dlp
           cd ~
-          cd ~/j/1024j/视频/pornhub-favorites
+          sudo cd ~/j/1024j/视频/pornhub-favorites
           echo "favorites文件列表"
           ls
           echo "favorites文件夹 下载前大小"
