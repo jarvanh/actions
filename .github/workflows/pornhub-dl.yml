@@ -31,8 +31,8 @@ jobs:
       - name: rclone-run
         run: |
           sudo apt-get install fuse3
-          sudo mkdir ~/j
-          sudo nohup rclone --vfs-cache-mode full mount j: ~/j &
+          mkdir ~/j
+          nohup rclone --vfs-cache-mode full mount j: ~/j &
           echo "~/j 文件列表"
           cd ~/j
           ls
