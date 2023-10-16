@@ -65,6 +65,22 @@ jobs:
           sudo nohup rclone mount av1: /content/drive/MyDrive/my/av1 --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
           sudo mkdir /content/drive/MyDrive/my/av2
           sudo nohup rclone mount av2: /content/drive/MyDrive/my/av2 --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
+          echo "==========i==========="
+          rclone lsf i:
+          echo "==========j==========="
+          rclone lsf j:
+          echo "==========k==========="
+          rclone lsf k:
+          echo "==========o==========="
+          rclone lsf o:
+          echo "==========1024==========="
+          rclone lsf 1024:
+          echo "==========av1==========="
+          rclone lsf av1:
+          echo "==========av2==========="
+          rclone lsf av2:
+          echo "==========dropbox==========="
+          rclone lsf dropbox:
       - name: install emby
         run: |
           curl -L -o emby-server.deb $(curl -s https://api.github.com/repos/MediaBrowser/Emby.Releases/releases/latest | grep -oP '"browser_download_url": "\K(.*emby-server-deb.*amd64.deb)(?=")')
