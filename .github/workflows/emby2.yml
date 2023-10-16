@@ -54,17 +54,17 @@ jobs:
           sudo mkdir /content/drive/MyDrive/
           sudo mkdir /content/drive/MyDrive/my
           sudo mkdir /content/drive/MyDrive/1024
-          sudo nohup rclone --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G mount 1024: /content/drive/MyDrive/1024 &
+          sudo nohup rclone mount 1024: /content/drive/MyDrive/1024 --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
           sudo mkdir /content/drive/MyDrive/my/i
-          sudo nohup rclone --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G mount i: /content/drive/MyDrive/my/i &
+          sudo nohup rclone mount i: /content/drive/MyDrive/my/i --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
           sudo mkdir /content/drive/MyDrive/my/j
-          sudo nohup rclone --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G mount j: /content/drive/MyDrive/my/j &
+          sudo nohup rclone mount j: /content/drive/MyDrive/my/j --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
           sudo mkdir /content/drive/MyDrive/my/k
-          sudo nohup rclone --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G mount k: /content/drive/MyDrive/my/k &
+          sudo nohup rclone mount k: /content/drive/MyDrive/my/k --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
           sudo mkdir /content/drive/MyDrive/my/av1
-          sudo nohup rclone --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G mount av1: /content/drive/MyDrive/my/av1 &
+          sudo nohup rclone mount av1: /content/drive/MyDrive/my/av1 --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
           sudo mkdir /content/drive/MyDrive/my/av2
-          sudo nohup rclone --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G mount av2: /content/drive/MyDrive/my/av2 &
+          sudo nohup rclone mount av2: /content/drive/MyDrive/my/av2 --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
       - name: install emby
         run: |
           curl -L -o emby-server.deb $(curl -s https://api.github.com/repos/MediaBrowser/Emby.Releases/releases/latest | grep -oP '"browser_download_url": "\K(.*emby-server-deb.*amd64.deb)(?=")')
