@@ -99,8 +99,11 @@ jobs:
                   break
               fi
           done
+          echo "==========/content/drive/MyDrive/my/j/emby2==========="
           ls /content/drive/MyDrive/my/j/emby2
           sudo ln -s /content/drive/MyDrive/my/j/emby2 /var/lib/emby
+          echo "==========/var/lib/emby==========="
+          ls /var/lib/emby
       - name: run emby
         run: |
           sudo nohup /opt/emby-server/bin/emby-server &
