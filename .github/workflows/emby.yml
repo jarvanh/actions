@@ -88,7 +88,7 @@ jobs:
           while true; do
               if [ -d /var/lib/emby ]; then
                   echo "Directory exists, deleting..."
-                  if rm -rf /var/lib/emby; then
+                  if sudo rm -rf /var/lib/emby; then
                       echo "Directory deleted successfully"
                       break
                   else
