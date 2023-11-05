@@ -85,12 +85,20 @@ jobs:
         run: |
           curl -L -o emby-server.deb $(curl -s https://api.github.com/repos/MediaBrowser/Emby.Releases/releases/latest | grep -oP '"browser_download_url": "\K(.*emby-server-deb.*amd64.deb)(?=")')
           sudo dpkg -i emby-server.deb
-          # sudo rm -rf /var/lib/emby/*
-          # sudo rm -r /var/lib/emby/
-          # if [ -d /var/lib/emby ]; then
-          #   echo "Directory exists, exiting workflow"
-          #   exit 31
-          # fi
+          while true; do
+              if [ -d /var/lib/emby ]; then
+                  echo "Directory exists, deleting..."
+                  if rm -rf /var/lib/emby; then
+                      echo "Directory deleted successfully"
+                      break
+                  else
+                      echo "Failed to delete directory, retrying..."
+                  fi
+              else
+                  echo "Directory does not exist"
+                  break
+              fi
+          done
           sudo ln -s /content/drive/MyDrive/my/j/emby2 /var/lib/emby
       - name: run emby
         run: |
