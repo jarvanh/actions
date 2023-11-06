@@ -65,6 +65,8 @@ jobs:
           sudo nohup rclone mount av1: /content/drive/MyDrive/my/av1 --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
           sudo mkdir /content/drive/MyDrive/my/av2
           sudo nohup rclone mount av2: /content/drive/MyDrive/my/av2 --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
+          sudo mkdir /content/drive/MyDrive/my/dropbox
+          sudo nohup rclone mount dropbox: /content/drive/MyDrive/my/dropbox --allow-non-empty --no-gzip-encoding --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
           echo "==========i==========="
           rclone lsf i:
           echo "==========j==========="
@@ -99,11 +101,11 @@ jobs:
                   break
               fi
           done
-          echo "==========/content/drive/MyDrive/my/j/emby==========="
-          ls /content/drive/MyDrive/my/j/emby
-          sudo ln -s /content/drive/MyDrive/my/j/emby /var/lib/emby
+          echo "==========/content/drive/MyDrive/my/dropbox/emby==========="
+          sudo ls /content/drive/MyDrive/my/dropbox/emby
+          sudo ln -s /content/drive/MyDrive/my/dropbox/emby /var/lib/emby
           echo "==========/var/lib/emby==========="
-          ls /var/lib/emby
+          sudo ls /var/lib/emby
       - name: run emby
         run: |
           sudo nohup /opt/emby-server/bin/emby-server &
