@@ -102,6 +102,7 @@ jobs:
             "cosplayhands|https://www.pornhub.com/model/cosplayhands"
             "slrabbit|https://www.pornhub.com/model/slrabbit"
             "lama-grey|https://www.pornhub.com/model/lama-grey"
+            "flamehel|https://www.pornhub.com/model/flamehel"
           )
           for channel in "${channels[@]}"; do
             IFS='|' read -r dir url <<< "$channel"
