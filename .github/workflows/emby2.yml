@@ -120,7 +120,7 @@ jobs:
           cloudflared tunnel route dns ee ee.'${{ secrets.VD }}'.eu.org
           nohup cloudflared tunnel run --url http://127.0.0.1:8096 ee &
       - name: sleep
-        run: sleep 3m
+        run: sleep 10m
 
       - name: stop current job
         uses: actions/github-script@v4
