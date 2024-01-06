@@ -85,35 +85,35 @@ jobs:
 
           # 赵水莲
           # https://v.douyin.com/iL1rBxQN
-          # python TikTokTool.py --uid https://v.douyin.com/iL1rBxQN --mode post --save ../Download --music yes --cover yes --desc yes --folderize yes --interval all --naming {create}_{desc}_{id} --cookie ${{ secrets.DOUYIN }}
+          python TikTokTool.py --uid https://v.douyin.com/iL1rBxQN --mode post --save ../Download --music yes --cover yes --desc yes --folderize yes --interval all --naming {create}_{desc}_{id} --cookie '${{ secrets.DOUYIN }}'
           # https://v.douyin.com/iL1kYmEk
-          python TikTokTool.py --uid https://v.douyin.com/iL1kYmEk --mode post --save ../Download --music yes --cover yes --desc yes --folderize yes --interval all --naming {create}_{desc}_{id} --cookie ${{ secrets.DOUYIN }}
+          python TikTokTool.py --uid https://v.douyin.com/iL1kYmEk --mode post --save ../Download --music yes --cover yes --desc yes --folderize yes --interval all --naming {create}_{desc}_{id} --cookie '${{ secrets.DOUYIN }}'
 
           # 何金玲
           # https://v.douyin.com/iL1rjFCd
-          python TikTokTool.py --uid https://v.douyin.com/iL1rjFCd --mode post --save ../Download --music yes --cover yes --desc yes --folderize yes --interval all --naming {create}_{desc}_{id} --cookie ${{ secrets.DOUYIN }}
+          python TikTokTool.py --uid https://v.douyin.com/iL1rjFCd --mode post --save ../Download --music yes --cover yes --desc yes --folderize yes --interval all --naming {create}_{desc}_{id} --cookie '${{ secrets.DOUYIN }}'
 
           # Auto parts-Jessy 🚗
           # https://v.douyin.com/i8oTnRfK
-          python TikTokTool.py --uid https://v.douyin.com/i8oTnRfK --mode post --save ../Download --music yes --cover yes --desc yes --folderize yes --interval all --naming {create}_{desc}_{id} --cookie ${{ secrets.DOUYIN }}
+          python TikTokTool.py --uid https://v.douyin.com/i8oTnRfK --mode post --save ../Download --music yes --cover yes --desc yes --folderize yes --interval all --naming {create}_{desc}_{id} --cookie '${{ secrets.DOUYIN }}'
 
           # 咩咩小i
           # uid = https://www.douyin.com/user/MS4wLjABAAAAwW6vDX_a-o7_I4pA1a01uctdLHVm_tjGoiIiDMSGHl7MeG_gc138NrNM_dJ7LRPK
-          python TikTokTool.py --uid https://www.douyin.com/user/MS4wLjABAAAAwW6vDX_a-o7_I4pA1a01uctdLHVm_tjGoiIiDMSGHl7MeG_gc138NrNM_dJ7LRPK --mode post --save ../Download --music yes --cover yes --desc yes --folderize yes --interval all --naming {create}_{desc}_{id} --cookie ${{ secrets.DOUYIN }}
+          python TikTokTool.py --uid https://www.douyin.com/user/MS4wLjABAAAAwW6vDX_a-o7_I4pA1a01uctdLHVm_tjGoiIiDMSGHl7MeG_gc138NrNM_dJ7LRPK --mode post --save ../Download --music yes --cover yes --desc yes --folderize yes --interval all --naming {create}_{desc}_{id} --cookie '${{ secrets.DOUYIN }}'
           # uid = https://v.douyin.com/i8tohAuj
-          python TikTokTool.py --uid https://v.douyin.com/i8tohAuj --mode post --save ../Download --music yes --cover yes --desc yes --folderize yes --interval all --naming {create}_{desc}_{id} --cookie ${{ secrets.DOUYIN }}
+          python TikTokTool.py --uid https://v.douyin.com/i8tohAuj --mode post --save ../Download --music yes --cover yes --desc yes --folderize yes --interval all --naming {create}_{desc}_{id} --cookie '${{ secrets.DOUYIN }}'
           
           # 程程Cc
           # uid = https://v.douyin.com/i8toAVY6
-          python TikTokTool.py --uid https://v.douyin.com/i8toAVY6 --mode post --save ../Download --music yes --cover yes --desc yes --folderize yes --interval all --naming {create}_{desc}_{id} --cookie ${{ secrets.DOUYIN }}
+          python TikTokTool.py --uid https://v.douyin.com/i8toAVY6 --mode post --save ../Download --music yes --cover yes --desc yes --folderize yes --interval all --naming {create}_{desc}_{id} --cookie '${{ secrets.DOUYIN }}'
           # uid = https://v.douyin.com/i8to55Db
-          python TikTokTool.py --uid https://v.douyin.com/i8to55Db --mode post --save ../Download --music yes --cover yes --desc yes --folderize yes --interval all --naming {create}_{desc}_{id} --cookie ${{ secrets.DOUYIN }}
+          python TikTokTool.py --uid https://v.douyin.com/i8to55Db --mode post --save ../Download --music yes --cover yes --desc yes --folderize yes --interval all --naming {create}_{desc}_{id} --cookie '${{ secrets.DOUYIN }}'
           
           # 爆炸小脑袋
           # https://v.douyin.com/iL1hhtwy
-          python TikTokTool.py --uid https://v.douyin.com/iL1hhtwy --mode post --save ../Download --music yes --cover yes --desc yes --folderize yes --interval all --naming {create}_{desc}_{id} --cookie ${{ secrets.DOUYIN }}   
+          python TikTokTool.py --uid https://v.douyin.com/iL1hhtwy --mode post --save ../Download --music yes --cover yes --desc yes --folderize yes --interval all --naming {create}_{desc}_{id} --cookie '${{ secrets.DOUYIN }}'
           # https://v.douyin.com/iL1hLVud
-          python TikTokTool.py --uid https://v.douyin.com/iL1hLVud --mode post --save ../Download --music yes --cover yes --desc yes --folderize yes --interval all --naming {create}_{desc}_{id} --cookie ${{ secrets.DOUYIN }}
+          python TikTokTool.py --uid https://v.douyin.com/iL1hLVud --mode post --save ../Download --music yes --cover yes --desc yes --folderize yes --interval all --naming {create}_{desc}_{id} --cookie '${{ secrets.DOUYIN }}'
 
           echo "github douyin 任务执行结束"
           curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github douyin 任务执行结束"
