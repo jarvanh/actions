@@ -71,7 +71,6 @@ jobs:
           sudo apt-get update
           sudo timedatectl set-timezone Asia/Shanghai
           timedatectl
-          sudo systemctl restart systemd-timesyncd
 
           cd /content/drive/MyDrive/my/i/backup/douyin/TikTokTool
           # 用户主页(非视频链接)
