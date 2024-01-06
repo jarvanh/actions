@@ -73,7 +73,6 @@ jobs:
           timedatectl
 
           cd /content/drive/MyDrive/my/i/backup/douyin/TikTokTool
-          git pull
           pip install -r requirements.txt
           
           # 用户主页(非视频链接)
