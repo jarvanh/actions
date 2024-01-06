@@ -38,15 +38,11 @@ jobs:
           ls
       - name: run pixivutil2
         run: |
-          rclone copy j:PixivUtil2 ~/PixivUtil2 -vv
-          cd  ~/PixivUtil2
+          sleep 3m
+          cd  ~/j/PixivUtil2
           git pull https://github.com/Nandaka/PixivUtil2.git
           pip install -r requirements.txt
 
-          python ~/PixivUtil2/PixivUtil2.py -c ~/PixivUtil2/config-github.ini -s 6  -x
-          cho "github PixivUtil2 任务执行结束"
-          curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github PixivUtil2 任务执行结束"  
-          
-          rclone sync ~/PixivUtil2 j:PixivUtil2 -vv
-          cho "github rclone sync ~/PixivUtil2 j:PixivUtil2 -vv 任务执行结束"
-          curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github rclone sync ~/PixivUtil2 j:PixivUtil2 -vv 任务执行结束"
+          python ~/j/PixivUtil2/PixivUtil2.py -c ~/j/PixivUtil2/config-github.ini -s 6  -x
+          echo "github PixivUtil2 任务执行结束"
+          curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github PixivUtil2 任务执行结束"
