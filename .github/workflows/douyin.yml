@@ -73,6 +73,9 @@ jobs:
           timedatectl
 
           cd /content/drive/MyDrive/my/i/backup/douyin/TikTokTool
+          git pull
+          pip install -r requirements.txt
+          
           # 用户主页(非视频链接)
           # Saber
           # uid = https://www.douyin.com/user/MS4wLjABAAAADdqSYeEX6BTn_jQ_THNEDECn2oH5jkfUq1bLTHF6gzA
