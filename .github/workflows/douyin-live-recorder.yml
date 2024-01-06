@@ -89,7 +89,7 @@ jobs:
           sudo apt install ffmpeg
           sudo timedatectl set-timezone Asia/Shanghai
           timedatectl
-          sudo systemctl restart systemd-timesyncd
+          
           cd /content/drive/MyDrive/my/i/backup/douyin/DouyinLiveRecorder
           git pull
           pip install -r requirements.txt    
