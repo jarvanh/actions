@@ -33,12 +33,12 @@ jobs:
           sudo apt-get install fuse3
           mkdir ~/j
           nohup rclone --vfs-cache-mode full mount j: ~/j &
+          sleep 3m
           echo "~/j 文件列表"
           cd ~/j
           ls
       - name: run pixivutil2
         run: |
-          sleep 3m
           cd  ~/j/PixivUtil2
           git pull https://github.com/Nandaka/PixivUtil2.git
           pip install -r requirements.txt
