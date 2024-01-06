@@ -70,8 +70,7 @@ jobs:
       - name: run icloud-photos-downloader
         run: |
           sudo apt-get update
-          sudo apt-get install -y python
-          sudo pip install icloudpd
+          pip install icloudpd
           icloudpd --list-libraries --cookie-directory /content/drive/MyDrive/my/i/backup/iCloudPhotosCookie --username ${{ secrets.APPLEID }} --password ${{ secrets.APPLEPASSWORD }} --auto-delete      
           icloudpd --library SharedSync-6D80D39D-BDF2-49D1-9E6C-1EE9B681177F --directory /content/drive/MyDrive/my/i/backup/iCloudPhotosShared --cookie-directory /content/drive/MyDrive/my/i/backup/iCloudPhotosCookie --username ${{ secrets.APPLEID }} --password ${{ secrets.APPLEPASSWORD }} --auto-delete  
           icloudpd --library PrimarySync --directory /content/drive/MyDrive/my/i/backup/iCloudPhotosPersonal --cookie-directory /content/drive/MyDrive/my/i/backup/iCloudPhotosCookie --username ${{ secrets.APPLEID }} --password ${{ secrets.APPLEPASSWORD }} --auto-delete  
