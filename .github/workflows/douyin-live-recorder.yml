@@ -92,7 +92,7 @@ jobs:
           git pull
           pip install -r requirements.txt    
           pip install ffmpeg
-          pip install ffmpeg-python
+          ffmpeg -version
           python main.py
           echo "github douyin-live-recorder 任务执行结束"
           curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github douyin-live-recorder 任务执行结束"
