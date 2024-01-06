@@ -85,7 +85,7 @@ jobs:
 
           # 赵水莲
           # https://v.douyin.com/iL1rBxQN
-          python TikTokTool.py --uid https://v.douyin.com/iL1rBxQN --mode post --save ../Download --music yes --cover yes --desc yes --folderize yes --interval all --naming {create}_{desc}_{id} --cookie ${{ secrets.DOUYIN }}
+          # python TikTokTool.py --uid https://v.douyin.com/iL1rBxQN --mode post --save ../Download --music yes --cover yes --desc yes --folderize yes --interval all --naming {create}_{desc}_{id} --cookie ${{ secrets.DOUYIN }}
           # https://v.douyin.com/iL1kYmEk
           python TikTokTool.py --uid https://v.douyin.com/iL1kYmEk --mode post --save ../Download --music yes --cover yes --desc yes --folderize yes --interval all --naming {create}_{desc}_{id} --cookie ${{ secrets.DOUYIN }}
 
