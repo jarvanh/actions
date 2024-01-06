@@ -85,14 +85,11 @@ jobs:
           rclone lsf dropbox:
       - name: run douyin-live-recorder
         run: |
-          sudo apt-get install -y ffmpeg tzdata && \
-          ln -fs /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \
-          dpkg-reconfigure -f noninteractive tzdata
+          sudo apt update
+          sudo apt install ffmpeg
           cd /content/drive/MyDrive/my/i/backup/douyin/DouyinLiveRecorder
           git pull
           pip install -r requirements.txt    
-          pip install ffmpeg
-          ffmpeg -version
           python main.py
           echo "github douyin-live-recorder 任务执行结束"
           curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github douyin-live-recorder 任务执行结束"
