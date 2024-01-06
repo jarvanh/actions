@@ -85,6 +85,9 @@ jobs:
           rclone lsf dropbox:
       - name: run douyin-live-recorder
         run: |
+          sudo apt-get install -y ffmpeg tzdata && \
+          ln -fs /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \
+          dpkg-reconfigure -f noninteractive tzdata
           cd /content/drive/MyDrive/my/i/backup/douyin/DouyinLiveRecorder
           git pull
           pip install -r requirements.txt    
