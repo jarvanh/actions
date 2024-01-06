@@ -59,7 +59,10 @@ jobs:
           # 更改时区
           sudo cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime  
           echo "==========开始同步==========="
-          rclone sync --ignore-errors . i:backup/github -vv
+          # 根据[rclone的文档]，如果你想在同步的时候保留目标目录下的文件夹，你可以使用--backup-dir选项，指定一个备份目录，把要删除的文件移动到那里。例如，你可以这样执行：
+          # rclone sync --ignore-errors . i:backup/github -vv --backup-dir i:backup/github-old
+          # 这样，你就可以在i:backup/github目录下保留原来的文件夹，而把要删除的文件移动到i:backup/github-old目录下。希望这能帮到你。👍
+          rclone sync --ignore-errors . i:backup/github -vv --backup-dir i:backup/github-old
           rclone size --ignore-errors i:backup/github -vv
           echo "==========结束同步==========="
       - name: send notification
