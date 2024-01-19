@@ -91,7 +91,7 @@ jobs:
           timedatectl
           
           cd /content/drive/MyDrive/my/i/backup/douyin/DouyinLiveRecorder
-          git pull
+          # git pull
           pip install -r requirements.txt    
           python main.py
           echo "github douyin-live-recorder 任务执行结束"
