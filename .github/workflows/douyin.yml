@@ -116,5 +116,9 @@ jobs:
           # https://v.douyin.com/iL1hLVud
           python TikTokTool.py --uid https://v.douyin.com/iL1hLVud --mode post --save ../Download --music yes --cover yes --desc yes --folderize yes --interval all --naming {create}_{desc}_{id} || echo "失败"
 
+          # 乐怡leyi
+          # https://www.douyin.com/user/MS4wLjABAAAAQlV4nWmUMeCBUAvFzlQlbDzhALDob7IyvOkgh6dZtXk
+          python TikTokTool.py --uid https://www.douyin.com/user/MS4wLjABAAAAQlV4nWmUMeCBUAvFzlQlbDzhALDob7IyvOkgh6dZtXk --mode post --save ../Download --music yes --cover yes --desc yes --folderize yes --interval all --naming {create}_{desc}_{id} || echo "失败"
+
           echo "github douyin 任务执行结束"
           curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github douyin 任务执行结束"
