@@ -85,6 +85,11 @@ jobs:
           rclone lsf dropbox:
       - name: install jellyfin
         run: |
+          sudo rm /etc/apt/sources.list.d/jellyfin.list
+          sudo apt install apt-transport-https
+          sudo add-apt-repository universe
+          sudo curl -fsSL https://repo.jellyfin.org/ubuntu/jellyfin_team.gpg.key | gpg --dearmor -o /etc/apt/trusted.gpg.d/debian-jellyfin.gpg
+          sudo echo "deb [arch=$( dpkg --print-architecture )] https://repo.jellyfin.org/ubuntu $( lsb_release -c -s ) main" | sudo tee /etc/apt/sources.list.d/jellyfin.list
           sudo apt update
           sudo apt install jellyfin
       - name: run jellyfin
