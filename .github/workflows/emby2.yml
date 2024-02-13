@@ -101,14 +101,14 @@ jobs:
                   break
               fi
           done
-          echo "==========/content/drive/MyDrive/my/j/emby2==========="
-          sudo ls /content/drive/MyDrive/my/j/emby2
-          sudo ln -s /content/drive/MyDrive/my/j/emby2 /var/lib/emby
+          echo "==========/content/drive/MyDrive/my/dropbox/emby2==========="
+          sudo ls /content/drive/MyDrive/my/dropbox/emby2
+          sudo ln -s /content/drive/MyDrive/my/dropbox/emby2 /var/lib/emby
           echo "==========/var/lib/emby==========="
           sudo ls /var/lib/emby
           sudo rm -rf /var/lib/emby2/config/system.xml
           # sudo rclone copy j:emby2/system.xml j:emby2/config/
-          # sudo chown -R emby:emby /var/lib/emby
+          sudo chown -R emby:emby /var/lib/emby
       - name: run emby
         run: |
           sudo nohup /opt/emby-server/bin/emby-server &
