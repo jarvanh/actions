@@ -88,7 +88,7 @@ jobs:
           curl https://repo.jellyfin.org/install-debuntu.sh | sudo bash
       - name: run jellyfin
         run: |
-          sudo nohup /usr/bin/jellyfin -w /usr/share/jellyfin/web --datadir /content/drive/MyDrive/my/dropbox/jellyfin &
+          sudo nohup /usr/bin/jellyfin -w /usr/share/jellyfin/web --datadir /content/drive/MyDrive/my/j/jellyfin &
       - name: run cloudflared
         run: |
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
