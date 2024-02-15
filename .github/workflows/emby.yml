@@ -85,6 +85,7 @@ jobs:
           rclone lsf dropbox:
       - name: install emby
         run: |
+          sudo rclone sync j:emby/system.xml j:emby/config/system.xml -vv
           curl -L -o emby-server.deb $(curl -s https://api.github.com/repos/MediaBrowser/Emby.Releases/releases/latest | grep -oP '"browser_download_url": "\K(.*emby-server-deb.*amd64.deb)(?=")')
           sudo dpkg -i emby-server.deb
           while true; do
@@ -106,8 +107,6 @@ jobs:
           sudo ln -s /content/drive/MyDrive/my/j/emby /var/lib/emby
           echo "==========/var/lib/emby==========="
           sudo ls /var/lib/emby
-          sudo rm -rf /var/lib/emby/config/system.xml
-          sudo rclone copy j:emby/system.xml j:emby/config/ -vv
           sudo chown -R emby:emby /var/lib/emby
       - name: run emby
         run: |
