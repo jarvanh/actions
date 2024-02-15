@@ -107,7 +107,7 @@ jobs:
           echo "==========/var/lib/emby==========="
           sudo ls /var/lib/emby
           sudo rm -rf /var/lib/emby/config/system.xml
-          sudo rclone copy j:emby/system.xml j:emby/config/
+          sudo rclone copy j:emby/system.xml j:emby/config/ -vv
           sudo chown -R emby:emby /var/lib/emby
       - name: run emby
         run: |
