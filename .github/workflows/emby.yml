@@ -48,7 +48,8 @@ jobs:
           EOF
       - name: rclone-run
         run: |
-          sudo rclone sync j:emby/system.xml j:emby/config/system.xml -vv
+          sudo rclone delete j:emby/config/system.xml -vv
+          sudo rclone copy j:emby/system.xml j:emby/config/ -vv
           sudo apt-get install fuse3
           sudo mkdir /content/
           sudo mkdir /content/drive/
@@ -86,8 +87,6 @@ jobs:
           rclone lsf dropbox:
       - name: install emby
         run: |
-          # sudo rclone delete j:emby/config/system.xml -vv
-          # sudo rclone copy j:emby/system.xml j:emby/config/ -vv
           curl -L -o emby-server.deb $(curl -s https://api.github.com/repos/MediaBrowser/Emby.Releases/releases/latest | grep -oP '"browser_download_url": "\K(.*emby-server-deb.*amd64.deb)(?=")')
           sudo dpkg -i emby-server.deb
           while true; do
