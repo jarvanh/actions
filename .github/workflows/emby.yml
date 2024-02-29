@@ -48,6 +48,7 @@ jobs:
           EOF
       - name: rclone-run
         run: |
+          sudo rclone sync j:emby/system.xml j:emby/config/system.xml -vv
           sudo apt-get install fuse3
           sudo mkdir /content/
           sudo mkdir /content/drive/
