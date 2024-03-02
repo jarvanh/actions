@@ -48,8 +48,8 @@ jobs:
           EOF
       - name: rclone-run
         run: |
-          sudo rclone delete j:emby2/config/system.xml -vv
-          sudo rclone copy j:emby2/system.xml j:emby2/config/ -vv
+          sudo rclone delete j:emby2/config/system.xml --ignore-errors -vv
+          sudo rclone copy j:emby2/system.xml j:emby2/config/ --ignore-errors -vv
           sudo apt-get install fuse3
           sudo mkdir /content/
           sudo mkdir /content/drive/
