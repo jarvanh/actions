@@ -73,7 +73,6 @@ jobs:
           timedatectl
 
           cd /content/drive/MyDrive/my/i/backup/douyin/TikTokTool
-          pip install f2
           pip install -r requirements.txt
           python TikTokTool.py --update
           rm -rf /logs
