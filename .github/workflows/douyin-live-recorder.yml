@@ -89,10 +89,14 @@ jobs:
           sudo apt install ffmpeg
           sudo timedatectl set-timezone Asia/Shanghai
           timedatectl
-          
-          cd /content/drive/MyDrive/my/i/backup/douyin/DouyinLiveRecorder
-          # git pull
-          pip install -r requirements.txt    
+
+          cd ~
+          git clone https://github.com/ihmily/DouyinLiveRecorder.git
+          cd ~/DouyinLiveRecorder
+          pip3 install -r requirements.txt
+          rclone sync i:backup/douyin/DouyinLiveRecorderConfig ~/DouyinLiveRecorder/config -vv
+        
           python main.py
+          
           echo "github douyin-live-recorder 任务执行结束"
           curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github douyin-live-recorder 任务执行结束"
