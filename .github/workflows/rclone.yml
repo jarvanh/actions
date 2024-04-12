@@ -67,4 +67,4 @@ jobs:
           echo "==========onedrive==========="
           rclone lsf onedrive:
 
-          rclone sync j:1024j onedrive:1024j --server-side-across-configs -vv
+          rclone sync j:1024j onedrive:1024j -vv
