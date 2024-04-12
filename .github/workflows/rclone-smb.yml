@@ -67,4 +67,4 @@ jobs:
           echo "==========onedrive==========="
           rclone lsf onedrive:
 
-          rclone sync i:SMB onedrive:SMB -vv --check-first --checkers=10 --transfers=10 --onedrive-chunk-size=100M --buffer-size=200M --cache-chunk-total-size=50G
+          rclone sync i:SMB onedrive:0/SMB -vv --check-first --checkers=10 --transfers=10 --onedrive-chunk-size=100M --buffer-size=200M --cache-chunk-total-size=50G
