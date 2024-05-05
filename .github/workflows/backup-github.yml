@@ -13,29 +13,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Create backup directory
-        run: |
-          mkdir backup
-          cd backup
-
-      - name: List repositories
-        run: |
-          TOKEN="${{ secrets.PAT }}"
-          curl -s -H "Authorization: token $TOKEN" "https://api.github.com/user/repos?type=all&per_page=100" | grep -e 'clone_url*' | cut -d \" -f 4  > repositories.txt
-
-      - name: Clone repositories
-        run: |
-          TOKEN="${{ secrets.PAT }}"
-          while IFS= read -r repo; do
-            echo "$repo"
-            git clone "$repo" || echo "git clone $repo 失败"
-          done < repositories.txt
-
-      - name: check backup
-        run: |
-          pwd
-          ls
-          du -sh .
       - name: rclone-install
         run: |
           # 安装 rclone
@@ -57,7 +34,11 @@ jobs:
         run: |
           # Rclone-Run
           # 更改时区
-          sudo cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime  
+          sudo cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
+
+          sudo mkdir /onedrive
+          sudo nohup rclone mount onedrive: /onedrive --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
+          cd /onedrive
           echo "==========开始同步==========="
           # 根据[rclone的文档]，如果你想在同步的时候保留目标目录下的文件夹，你可以使用--backup-dir选项，指定一个备份目录，把要删除的文件移动到那里。例如，你可以这样执行：
           # rclone sync --ignore-errors . i:backup/github -vv --backup-dir i:backup/github-old
@@ -65,6 +46,39 @@ jobs:
           rclone sync --ignore-errors . i:backup/github -vv --backup-dir i:backup/github-old
           rclone size --ignore-errors i:backup/github -vv
           echo "==========结束同步==========="
+
+      # - name: Create backup directory
+      #   run: |
+      #     mkdir backup
+      #     cd backup
+
+      - name: List repositories
+        run: |
+          TOKEN="${{ secrets.PAT }}"
+          curl -s -H "Authorization: token $TOKEN" "https://api.github.com/user/repos?type=all&per_page=100" | grep -e 'clone_url*' | cut -d \" -f 4  > repositories.txt
+
+      - name: Clone repositories
+        run: |
+          TOKEN="${{ secrets.PAT }}"
+          while IFS= read -r repo; do
+            echo "$repo"
+            git clone "$repo" || echo "git clone $repo 失败"
+          done < repositories.txt
+
+      - name: Pull repositories
+        run: |
+          TOKEN="${{ secrets.PAT }}"
+          while IFS= read -r repo; do
+            echo "$repo"
+            git pull origin "$repo" || echo "git pull origin $repo 失败"
+          done < repositories.txt
+
+      - name: check backup
+        run: |
+          pwd
+          ls
+          du -sh .
+
       - name: send notification
         run: |
           curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github backup-github 任务执行结束"
