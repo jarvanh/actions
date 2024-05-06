@@ -79,9 +79,9 @@ jobs:
                   break
               fi
           done
-          echo "==========onedrive:0/j/emby==========="
-          sudo ls onedrive:0/j/emby
-          sudo ln -s onedrive:0/j/emby /var/lib/emby
+          echo "==========onedrive/0/j/emby==========="
+          sudo ls onedrive/0/j/emby
+          sudo ln -s onedrive/0/j/emby /var/lib/emby
           echo "==========/var/lib/emby==========="
           sudo ls /var/lib/emby
           sudo chown -R emby:emby /var/lib/emby
