@@ -37,7 +37,7 @@ jobs:
           sudo cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
 
           sudo mkdir /onedrive
-          sudo nohup rclone mount onedrive: /onedrive --vfs-cache-mode full &
+          sudo nohup rclone mount --vfs-cache-mode fullonedrive: /onedrive &
           sleep 3m
           cd /onedrive/backup/github
           pwd
