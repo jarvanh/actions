@@ -48,41 +48,17 @@ jobs:
           EOF
       - name: rclone-run
         run: |
-          sudo rclone delete j:emby/config/system.xml --ignore-errors -vv
-          sudo rclone copy j:emby/system.xml j:emby/config/ --ignore-errors -vv
+          sudo rclone delete onedrive:0/j/emby/config/system.xml --ignore-errors -vv
+          sudo rclone onedrive:0/j/emby/system.xml onedrive:0/j/emby/config/ --ignore-errors -vv
           sudo apt-get install fuse3
-          sudo mkdir /content/
-          sudo mkdir /content/drive/
-          sudo mkdir /content/drive/MyDrive/
-          sudo mkdir /content/drive/MyDrive/my
-          sudo mkdir /content/drive/MyDrive/1024
-          sudo nohup rclone mount 1024: /content/drive/MyDrive/1024 --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
-          sudo mkdir /content/drive/MyDrive/my/i
-          sudo nohup rclone mount i: /content/drive/MyDrive/my/i --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
-          sudo mkdir /content/drive/MyDrive/my/j
-          sudo nohup rclone mount j: /content/drive/MyDrive/my/j --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
-          sudo mkdir /content/drive/MyDrive/my/k
-          sudo nohup rclone mount k: /content/drive/MyDrive/my/k --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
-          sudo mkdir /content/drive/MyDrive/my/av1
-          sudo nohup rclone mount av1: /content/drive/MyDrive/my/av1 --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
-          sudo mkdir /content/drive/MyDrive/my/av2
-          sudo nohup rclone mount av2: /content/drive/MyDrive/my/av2 --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
-          sudo mkdir /content/drive/MyDrive/my/dropbox
-          sudo nohup rclone mount dropbox: /content/drive/MyDrive/my/dropbox --allow-non-empty --no-gzip-encoding --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
+          sudo mkdir /onedrive
+          sudo nohup rclone mount onedrive: /onedrive --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
           echo "==========i==========="
           rclone lsf i:
           echo "==========j==========="
           rclone lsf j:
-          echo "==========k==========="
-          rclone lsf k:
-          echo "==========o==========="
-          rclone lsf o:
-          echo "==========1024==========="
-          rclone lsf 1024:
-          echo "==========av1==========="
-          rclone lsf av1:
-          echo "==========av2==========="
-          rclone lsf av2:
+          echo "==========onedrive==========="
+          rclone lsf onedrive:
           echo "==========dropbox==========="
           rclone lsf dropbox:
       - name: install emby
@@ -103,9 +79,9 @@ jobs:
                   break
               fi
           done
-          echo "==========/content/drive/MyDrive/my/j/emby==========="
-          sudo ls /content/drive/MyDrive/my/j/emby
-          sudo ln -s /content/drive/MyDrive/my/j/emby /var/lib/emby
+          echo "==========onedrive:0/j/emby==========="
+          sudo ls onedrive:0/j/emby
+          sudo ln -s onedrive:0/j/emby /var/lib/emby
           echo "==========/var/lib/emby==========="
           sudo ls /var/lib/emby
           sudo chown -R emby:emby /var/lib/emby
