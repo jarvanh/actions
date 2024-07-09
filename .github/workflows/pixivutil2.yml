@@ -40,7 +40,6 @@ jobs:
           cd /onedrive/software/PixivUtil2
           git pull https://github.com/Nandaka/PixivUtil2.git
           pip install -r requirements.txt
-          pip install PixivBrowserFactory
 
           python PixivUtil2.py -c config.ini -s 6  -x
           echo "github PixivUtil2 任务执行结束"
