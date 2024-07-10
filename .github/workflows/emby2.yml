@@ -48,8 +48,8 @@ jobs:
           EOF
       - name: rclone-run
         run: |
-          sudo rclone delete onedrive:0/j/emby2/config/system.xml --ignore-errors -vv
-          sudo rclone copy onedrive:0/j/emby2/system.xml onedrive:0/j/emby2/config/ --ignore-errors -vv
+          sudo rclone delete onedrive:self-hosted/emby2/config/system.xml --ignore-errors -vv
+          sudo rclone copy onedrive:self-hosted/emby2/system.xml onedrive:0/j/emby2/config/ --ignore-errors -vv
           sudo apt-get install fuse3
           sudo mkdir /onedrive
           sudo nohup rclone mount onedrive: /onedrive --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
@@ -79,9 +79,9 @@ jobs:
                   break
               fi
           done
-          echo "==========/onedrive/0/j/emby2==========="
-          sudo ls /onedrive/0/j/emby2
-          sudo ln -s /onedrive/0/j/emby2 /var/lib/emby
+          echo "==========/onedrive/self-hosted/emby2==========="
+          sudo ls /onedrive/self-hosted/emby2
+          sudo ln -s /onedrive/self-hosted/emby2 /var/lib/emby
           echo "==========/var/lib/emby==========="
           sudo ls /var/lib/emby
           sudo chown -R emby:emby /var/lib/emby
