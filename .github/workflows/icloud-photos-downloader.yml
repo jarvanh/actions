@@ -34,9 +34,9 @@ jobs:
         run: |
           sudo apt-get install fuse3
           sudo mkdir /onedrive
-          sudo nohup rclone mount onedrive: /onedrive --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 2G --buffer-size 100M --vfs-cache-max-size 10G &
+          sudo nohup rclone mount onedrive: /onedrive --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 2G --buffer-size 100M --vfs-cache-max-size 2G &
           sudo mkdir /i
-          sudo nohup rclone mount i: /i --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 2G &    
+          sudo nohup rclone mount i: /i --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 2G --buffer-size 100M --vfs-cache-max-size 2G &    
       - name: run icloud-photos-downloader
         run: |
           sudo apt-get update
