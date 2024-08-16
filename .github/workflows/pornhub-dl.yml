@@ -31,10 +31,10 @@ jobs:
       - name: rclone-run
         run: |
           sudo apt-get install fuse3
-          mkdir ~/j
-          nohup rclone --vfs-cache-mode full mount j: ~/j &
-          echo "~/j 文件列表"
-          cd ~/j
+          mkdir ~/onedrive
+          nohup rclone --vfs-cache-mode full mount onedrive: ~/onedrive &
+          echo "~/onedrive 文件列表"
+          cd ~/onedrive
           ls
       - name: run pornhub-dl favorites
         run: |
@@ -43,15 +43,15 @@ jobs:
           sudo apt-get install ffmpeg -y
           pip3 install --upgrade yt-dlp
           cd ~
-          cd ~/j/1024j/视频/pornhub-favorites
+          cd ~/onedrive/0/j-1024j-视频-pornhub-favorites
           echo "favorites文件列表"
           ls
           echo "favorites文件夹 下载前大小"
-          du -sh ~/j/1024j/视频/pornhub-favorites
+          du -sh ~/onedrive/0/j-1024j-视频-pornhub-favorites
           # yt-dlp -f bestvideo+bestaudio/best --force-overwrites --no-part -i https://www.pornhub.com/users/'${{ secrets. PORNHUBNAME }}'/videos/favorites || echo "url不存在"
           yt-dlp -f bestvideo+bestaudio/best --force-overwrites --no-part --download-archive archive.txt -i https://www.pornhub.com/users/'${{ secrets. PORNHUBNAME }}'/videos/favorites || echo "url不存在"
           echo "favorites文件夹 下载后大小"
-          du -sh ~/j/1024j/视频/pornhub-favorites
+          du -sh ~/onedrive/0/j-1024j-视频-pornhub-favorites
           curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github p站下载任务执行完毕 favorites"
       # - name: run pornhub-dl
       #   run: |
