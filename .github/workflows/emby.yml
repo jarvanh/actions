@@ -89,7 +89,7 @@ jobs:
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
           sudo mkdir ~/.cloudflared/
-          sudo rclone copy i:SyncBack/'${{ secrets.VD }}'/.cloudflared ~/.cloudflared -vv
+          sudo rclone copy onedrive:backup/SyncBack/'${{ secrets.VD }}'/.cloudflared ~/.cloudflared -vv
           cloudflared tunnel route dns e e.'${{ secrets.VD }}'.eu.org
           nohup cloudflared tunnel run --url http://127.0.0.1:8096 e &
       - name: sleep
