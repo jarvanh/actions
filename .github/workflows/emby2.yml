@@ -94,7 +94,7 @@ jobs:
           sudo dpkg -i cloudflared-linux-amd64.deb
           sudo mkdir ~/.cloudflared/
           sudo rclone copy i:SyncBack/'${{ secrets.VD }}'/.cloudflared ~/.cloudflared -vv
-          cloudflared tunnel route dns ee ee.'${{ secrets.VD }}'.eu.org
+          cloudflared tunnel route dns ee ee.'${{ secrets.VD }}'.us.kg
           nohup cloudflared tunnel run --url http://127.0.0.1:8096 ee &
       - name: sleep
         run: |
