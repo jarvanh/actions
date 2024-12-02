@@ -90,7 +90,7 @@ jobs:
           sudo dpkg -i cloudflared-linux-amd64.deb
           sudo mkdir ~/.cloudflared/
           sudo rclone copy onedrive:backup/SyncBack/'${{ secrets.VD }}'/.cloudflared ~/.cloudflared -vv
-          cloudflared tunnel route dns e e.'${{ secrets.VD }}'.eu.org
+          cloudflared tunnel route dns e e.'${{ secrets.VD }}'.us.kg
           nohup cloudflared tunnel run --url http://127.0.0.1:8096 e &
       - name: sleep
         run: |
