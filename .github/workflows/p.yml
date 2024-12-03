@@ -58,7 +58,7 @@ jobs:
       - name: Set up Docker
         uses: docker/setup-buildx-action@v2
       - name: Run vaultwarden container
-        run: ${{ secrets.vaultwarden }}
+        run: ${{ secrets.VAULTWARDEN }}
       - name: Verify container is running
         run: docker ps    
       - name: run cloudflared
