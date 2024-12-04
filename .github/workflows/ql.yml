@@ -50,7 +50,7 @@ jobs:
         run: |
           sudo apt-get install fuse3
           sudo mkdir /onedrive
-          sudo nohup rclone mount onedrive: /onedrive --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
+          sudo nohup rclone mount dropbox: /dropbox --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
           echo "==========onedrive==========="
           rclone lsf onedrive:
           echo "==========dropbox==========="
@@ -60,7 +60,7 @@ jobs:
       - name: Run docker container
         run: |
           docker run -dit \
-            -v /onedrive/self-hosted/ql:/ql/data \
+            -v /dropbox/self-hosted/ql:/ql/data \
             -p 5700:5700 \
             --name qinglong \
             --hostname qinglong \
@@ -73,7 +73,7 @@ jobs:
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
           sudo mkdir ~/.cloudflared/
-          sudo rclone copy onedrive:backup/SyncBack/'${{ secrets.VD }}'/.cloudflared ~/.cloudflared -vv
+          sudo rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
           cloudflared tunnel route dns ql ql.'${{ secrets.VD }}'.us.kg
           nohup cloudflared tunnel run --url http://127.0.0.1:5700 ql &
       - name: sleep
