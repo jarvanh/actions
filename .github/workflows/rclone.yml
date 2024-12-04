@@ -1,9 +1,9 @@
 name: "rclone"
 
 on:
-  schedule:
+  # schedule:
     # - cron: "0 2,8,14,20 * * *"
-    - cron: "*/5 * * * *"
+    # - cron: "*/5 * * * *"
   workflow_dispatch:
   watch:
     # types: started
@@ -48,23 +48,11 @@ jobs:
           EOF
       - name: rclone-run
         run: |
-          echo "==========i==========="
-          rclone lsf i:
-          echo "==========j==========="
-          rclone lsf j:
-          echo "==========k==========="
-          rclone lsf k:
           echo "==========o==========="
           rclone lsf o:
-          echo "==========1024==========="
-          rclone lsf 1024:
-          echo "==========av1==========="
-          rclone lsf av1:
-          echo "==========av2==========="
-          rclone lsf av2:
           echo "==========dropbox==========="
           rclone lsf dropbox:
           echo "==========onedrive==========="
           rclone lsf onedrive:
 
-          rclone sync j:0 onedrive:0 -vv --check-first --checkers=10 --transfers=10 --onedrive-chunk-size=100M --buffer-size=200M --cache-chunk-total-size=50G
+          rclone sync onedrive:self-hosted dropbox:self-hosted -vv --check-first --checkers=10 --transfers=10 --onedrive-chunk-size=100M --buffer-size=200M --cache-chunk-total-size=50G
