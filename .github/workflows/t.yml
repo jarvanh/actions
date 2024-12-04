@@ -51,6 +51,7 @@ jobs:
           sudo apt-get install fuse3
           sudo mkdir /dropbox
           sudo nohup rclone mount dropbox: /dropbox --vfs-cache-mode full &
+          sudo chmod -R 755 /dropbox/self-hosted/teslamate
           echo "==========onedrive==========="
           rclone lsf onedrive:
           echo "==========dropbox==========="
