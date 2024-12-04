@@ -55,4 +55,4 @@ jobs:
           echo "==========onedrive==========="
           rclone lsf onedrive:
 
-          rclone sync onedrive:self-hosted dropbox:self-hosted -vv --check-first --checkers=10 --transfers=10 --onedrive-chunk-size=100M --buffer-size=200M --cache-chunk-total-size=50G
+          rclone sync onedrive:self-hosted/ql dropbox:self-hosted/ql -vv --check-first --checkers=10 --transfers=10 --onedrive-chunk-size=100M --buffer-size=200M --cache-chunk-total-size=50G
