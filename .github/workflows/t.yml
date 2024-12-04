@@ -50,6 +50,7 @@ jobs:
         run: |
           sudo mkdir ~/teslamate/
           sudo rclone copy dropbox:self-hosted/teslamate ~/teslamate -vv
+          sudo chmod -R 777 ~/teslamate
           # sudo apt-get install fuse3
           # sudo mkdir /dropbox
           # sudo nohup rclone mount dropbox: /dropbox --vfs-cache-mode full &
