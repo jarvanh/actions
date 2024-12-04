@@ -49,9 +49,9 @@ jobs:
       - name: rclone-run
         run: |
           sudo rclone delete dropbox:self-hosted/emby/config/system.xml --ignore-errors -vv
-          sudo rclone copy dropbox:self-hosted/emby/system.xml onedrive:self-hosted/emby/config/ --ignore-errors -vv
+          sudo rclone copy dropbox:self-hosted/emby/system.xml dropbox:self-hosted/emby/config/ --ignore-errors -vv
           sudo apt-get install fuse3
-          sudo mkdir /onedrive
+          sudo mkdir /dropbox
           sudo nohup rclone mount dropbox: /dropbox --vfs-cache-mode full &
           echo "==========onedrive==========="
           rclone lsf onedrive:
