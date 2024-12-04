@@ -48,11 +48,12 @@ jobs:
           EOF
       - name: rclone-run
         run: |
-          sudo apt-get install fuse3
-          sudo mkdir /dropbox
-          sudo nohup rclone mount dropbox: /dropbox --vfs-cache-mode full &
-          sudo ls /dropbox
-          sudo ls /dropbox/self-hosted
+          sudo mkdir ~/teslamate/
+          sudo rclone copy dropbox:self-hosted/teslamate ~/teslamate -vv
+          # sudo apt-get install fuse3
+          # sudo mkdir /dropbox
+          # sudo nohup rclone mount dropbox: /dropbox --vfs-cache-mode full &
+          # sudo ls /dropbox/self-hosted/teslamate
           echo "==========onedrive==========="
           rclone lsf onedrive:
           echo "==========dropbox==========="
@@ -60,7 +61,8 @@ jobs:
       - name: Set up Docker
         uses: docker/setup-buildx-action@v2
       - name: Run teslamate container
-        run: cd /dropbox && cd /self-hosted && cd /teslamate && docker compose up -d
+        # run: cd /dropbox/self-hosted/teslamate && docker compose up -d
+        run: cd ~/teslamate && docker compose up -d
       - name: Verify docker container is running
         run: docker ps 
       - name: run cloudflared
@@ -77,6 +79,7 @@ jobs:
       - name: Stop
         run: |
           docker stop teslamate
+          sudo rclone sync ~/teslamate dropbox:self-hosted/teslamate -vv
           sleep 1m 
           echo "Stopping GitHub Actions"
           exit 1
