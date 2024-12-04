@@ -52,6 +52,7 @@ jobs:
           sudo mkdir /dropbox
           sudo nohup rclone mount dropbox: /dropbox --vfs-cache-mode full &
           sleep 1m 
+          sudo chmod -R 755 /dropbox/self-hosted/teslamate
           echo "==========onedrive==========="
           rclone lsf onedrive:
           echo "==========dropbox==========="
