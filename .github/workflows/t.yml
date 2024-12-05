@@ -48,13 +48,10 @@ jobs:
           EOF
       - name: rclone-run
         run: |
-          sudo mkdir ~/teslamate/
-          sudo rclone copy dropbox:self-hosted/teslamate ~/teslamate -vv
-          sudo chmod -R 777 ~/teslamate
-          # sudo apt-get install fuse3
-          # sudo mkdir /dropbox
-          # sudo nohup rclone mount dropbox: /dropbox --vfs-cache-mode full &
-          # sudo ls /dropbox/self-hosted/teslamate
+          sudo apt-get install fuse3
+          sudo mkdir /dropbox
+          sudo nohup rclone mount dropbox: /dropbox --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
+          sudo ls /dropbox/self-hosted/teslamate
           echo "==========onedrive==========="
           rclone lsf onedrive:
           echo "==========dropbox==========="
@@ -62,8 +59,7 @@ jobs:
       - name: Set up Docker
         uses: docker/setup-buildx-action@v2
       - name: Run teslamate container
-        # run: cd /dropbox/self-hosted/teslamate && docker compose up -d
-        run: cd ~/teslamate && docker compose up -d
+        run: cd /dropbox/self-hosted/teslamate && docker compose up -d
       - name: Verify docker container is running
         run: docker ps 
       - name: run cloudflared
@@ -75,7 +71,7 @@ jobs:
           cloudflared tunnel route dns t t.'${{ secrets.VD }}'.us.kg
           nohup cloudflared tunnel run --url http://127.0.0.1:5900 t &
           cloudflared tunnel route dns tt tt.'${{ secrets.VD }}'.us.kg
-          nohup cloudflared tunnel run --url http://127.0.0.1:5800 tt &
+          nohup cloudflared tunnel run --url http://127.0.0.1:4000 tt &
       - name: sleep
         run: |
           sudo sleep 350m          
