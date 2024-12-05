@@ -75,7 +75,7 @@ jobs:
           cloudflared tunnel route dns t t.'${{ secrets.VD }}'.us.kg
           nohup cloudflared tunnel run --url http://127.0.0.1:5900 t &
           cloudflared tunnel route dns tt tt.'${{ secrets.VD }}'.us.kg
-          nohup cloudflared tunnel run --url http://127.0.0.1:4000 tt &
+          nohup cloudflared tunnel run --url http://127.0.0.1:5800 tt &
       - name: sleep
         run: |
           sudo sleep 350m          
