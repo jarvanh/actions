@@ -51,9 +51,11 @@ jobs:
           sudo rclone delete dropbox:self-hosted/emby/config/system.xml --ignore-errors -vv
           sudo rclone copy dropbox:self-hosted/emby/system.xml dropbox:self-hosted/emby/config/ --ignore-errors -vv
           # sudo apt-get install fuse3
-          # sudo mkdir /dropbox
-          # sudo nohup rclone mount dropbox: /dropbox --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
-          sudo rclone sync dropbox:self-hosted/emby /var/lib/emby -vv
+          sudo mkdir /onedrive
+          sudo nohup rclone mount onedrive: /onedrive --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
+          sudo mkdir /dropbox
+          sudo nohup rclone mount dropbox: /dropbox --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
+          # sudo rclone sync dropbox:self-hosted/emby /var/lib/emby -vv
           echo "==========onedrive==========="
           rclone lsf onedrive:
           echo "==========dropbox==========="
@@ -62,25 +64,25 @@ jobs:
         run: |
           curl -L -o emby-server.deb $(curl -s https://api.github.com/repos/MediaBrowser/Emby.Releases/releases/latest | grep -oP '"browser_download_url": "\K(.*emby-server-deb.*amd64.deb)(?=")')
           sudo dpkg -i emby-server.deb
-          # while true; do
-          #     if [ -d /var/lib/emby ]; then
-          #         echo "Directory exists, deleting..."
-          #         if sudo rm -rf /var/lib/emby; then
-          #             echo "Directory deleted successfully"
-          #             break
-          #         else
-          #             echo "Failed to delete directory, retrying..."
-          #         fi
-          #     else
-          #         echo "Directory does not exist"
-          #         break
-          #     fi
-          # done
-          # echo "==========/dropbox/self-hosted/emby==========="
-          # sudo ls /dropbox/self-hosted/emby
-          # sudo ln -s /dropbox/self-hosted/emby /var/lib/emby
-          # echo "==========/var/lib/emby==========="
-          # sudo ls /var/lib/emby
+          while true; do
+              if [ -d /var/lib/emby ]; then
+                  echo "Directory exists, deleting..."
+                  if sudo rm -rf /var/lib/emby; then
+                      echo "Directory deleted successfully"
+                      break
+                  else
+                      echo "Failed to delete directory, retrying..."
+                  fi
+              else
+                  echo "Directory does not exist"
+                  break
+              fi
+          done
+          echo "==========/dropbox/self-hosted/emby==========="
+          sudo ls /dropbox/self-hosted/emby
+          sudo ln -s /dropbox/self-hosted/emby /var/lib/emby
+          echo "==========/var/lib/emby==========="
+          sudo ls /var/lib/emby
           sudo chown -R emby:emby /var/lib/emby
           sudo chmod -R 755 /var/lib/emby
       - name: run emby
