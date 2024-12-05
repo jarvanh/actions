@@ -57,11 +57,7 @@ jobs:
       - name: backup
         run: |
           DATE=$(date +'%Y-%m-%d')
-          BACKUP_DIR="/dropbox/self-hosted_backup/$DATE"
-          echo "BACKUP_DIR=$BACKUP_DIR" >> $GITHUB_ENV
-          echo "Current backup directory: $BACKUP_DIR"
-          sudo mkdir -p $BACKUP_DIR
-          rclone copy /dropbox/self-hosted $BACKUP_DIR    
+          rclone sync dropbox:self-hosted dropbox:self-hosted_backup/$DATE
       - name: Remove old backups
         run: |
           BACKUP_PATH="/dropbox/self-hosted_backup"
