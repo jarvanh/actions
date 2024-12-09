@@ -63,7 +63,6 @@ jobs:
         run: docker ps    
       - name: run cloudflared
         run: |
-          curl '127.0.0.1:9876/test' 
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
           sudo mkdir ~/.cloudflared/
@@ -72,6 +71,8 @@ jobs:
           nohup cloudflared tunnel run --url http://127.0.0.1:3001 sub-store &
       - name: sleep
         run: |
+          sudo sleep 1m 
+          curl 127.0.0.1:9876/test
           sudo sleep 350m          
       - name: Stop
         run: |
