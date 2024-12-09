@@ -60,9 +60,10 @@ jobs:
       - name: Run sub-store container
         run: |
           docker run -it -d --restart=always --network host -e "SUB_STORE_BACKEND_SYNC_CRON=25,55 * * * *" -e SUB_STORE_FRONTEND_BACKEND_PATH=/65jwaf2357gsnret4uods docker run -d -p 9876:9876 -p 3001:3001 -v /dropbox/self-hosted/sub-store:/opt/app/data --name sub-store xream/sub-store:http-meta
-          curl '127.0.0.1:9876/test' 
       - name: Verify container is running
-        run: docker ps    
+        run: |
+          docker ps
+          curl '127.0.0.1:9876/test' 
       - name: run cloudflared
         run: |
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
