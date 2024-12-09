@@ -72,7 +72,7 @@ jobs:
       - name: sleep
         run: |
           sudo sleep 1m 
-          curl 127.0.0.1:9876/test
+          curl '127.0.0.1:9876/test' 
           sudo sleep 350m          
       - name: Stop
         run: |
