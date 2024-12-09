@@ -69,10 +69,10 @@ jobs:
           sudo rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
           cloudflared tunnel route dns sub-store sub-store.'${{ secrets.VD }}'.us.kg
           nohup cloudflared tunnel run --url http://127.0.0.1:3001 sub-store &
+          sudo sleep 1m 
+          sudo curl '127.0.0.1:9876/test' 
       - name: sleep
         run: |
-          sudo sleep 1m 
-          curl '127.0.0.1:9876/test' 
           sudo sleep 350m          
       - name: Stop
         run: |
