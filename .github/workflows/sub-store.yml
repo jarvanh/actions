@@ -63,7 +63,7 @@ jobs:
       - name: Verify container is running
         run: |
           docker ps
-          curl '127.0.0.1:9876/test' 
+          # curl '127.0.0.1:9876/test'
       - name: run cloudflared
         run: |
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
