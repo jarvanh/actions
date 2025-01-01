@@ -1,0 +1,23 @@
+name: "update clash config linuxdo"
+on:
+  schedule:
+    - cron: '10 7,12,16,20,22 * * *'
+  workflow_dispatch:
+  watch:
+    types: started
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: get clash config
+      run: |
+        curl -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36" -o clash '${{ secrets.LINUXDO }}'
+    - name: deploy to gists
+      uses: exuanbo/actions-deploy-gist@v1
+      with:
+        token: ${{ secrets.PAT }}
+        gist_id: ${{ secrets.GISTLINUXDO }}
+        gist_file_name: clashlinuxdo.yaml
+        file_path: clash

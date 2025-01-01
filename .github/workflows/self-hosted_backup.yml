@@ -1,0 +1,70 @@
+name: self-hosted_backup
+
+on:
+  schedule:
+    - cron: '0 2 * * *' # 每天凌晨2点运行
+  workflow_dispatch: # 手动触发
+  watch:
+    types: started
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Workflow Status
+        run: |
+          workflow_runs=$(curl -s -X GET \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Authorization: Bearer ${{ secrets.PAT }}" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs")
+          
+          isRunning=$(echo "$workflow_runs" | jq '.workflow_runs[] | select(.name == "self-hosted_backup" and .status == "in_progress")')
+          
+          if [[ -n $isRunning ]]; then
+            echo "Another workflow is already running. Aborting current workflow."
+            exit 31
+          else
+            echo "No running workflows found. Continuing with the workflow execution."
+          fi
+      - name: rclone-install
+        run: |
+          # 安装 rclone
+          # curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
+          # curl -O https://beta.rclone.org/rclone-beta-latest-linux-amd64.zip
+          # unzip rclone-*-amd64.zip
+          # cd rclone-*-linux-amd64
+          # sudo mv rclone /usr/bin
+          # sudo chmod +x /usr/bin/rclone
+          sudo apt-get install rclone
+      - name: rclone-config
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE }}
+        run: |
+          # 写配置文件
+          mkdir -p ~/.config/rclone/
+          cat << EOF > ~/.config/rclone/rclone.conf
+          $RCLONE_CONFIG
+          EOF
+      - name: rclone-run
+        run: |
+          sudo apt-get install fuse3
+          sudo mkdir /dropbox
+          sudo nohup rclone mount dropbox: /dropbox --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
+          echo "==========onedrive==========="
+          rclone lsf onedrive:
+          echo "==========dropbox==========="
+          rclone lsf dropbox:
+      - name: backup
+        run: |
+          DATE=$(date +'%Y-%m-%d')
+          rclone sync dropbox:self-hosted dropbox:self-hosted_backup/$DATE -vv
+          sleep 3m
+          rclone sync dropbox:self-hosted dropbox:self-hosted_backup/$DATE -vv
+          sleep 3m
+          rclone sync dropbox:self-hosted dropbox:self-hosted_backup/$DATE -vv
+      - name: Remove old backups
+        run: |
+          BACKUP_PATH="/dropbox/self-hosted_backup"
+          # 按创建时间排序并保留最近 14 个备份
+          cd $BACKUP_PATH
+          ls -1t | tail -n +15 | xargs -I {} rm -rf {}

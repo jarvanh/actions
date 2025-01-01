@@ -1,0 +1,102 @@
+name: emby2
+
+on:
+  schedule:
+    # - cron: "0 3,9,15,21 * * *"
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+  watch:
+    # types: started
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Workflow Status
+        run: |
+          workflow_runs=$(curl -s -X GET \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Authorization: Bearer ${{ secrets.PAT }}" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs")
+          
+          isRunning=$(echo "$workflow_runs" | jq '.workflow_runs[] | select(.name == "emby2" and .status == "in_progress")')
+          
+          if [[ -n $isRunning ]]; then
+            echo "Another workflow is already running. Aborting current workflow."
+            exit 1
+          else
+            echo "No running workflows found. Continuing with the workflow execution."
+          fi
+      - name: rclone-install
+        run: |
+          # 安装 rclone
+          # curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
+          # curl -O https://beta.rclone.org/rclone-beta-latest-linux-amd64.zip
+          # unzip rclone-*-amd64.zip
+          # cd rclone-*-linux-amd64
+          # sudo mv rclone /usr/bin
+          # sudo chmod +x /usr/bin/rclone
+          sudo apt-get install rclone
+      - name: rclone-config
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE }}
+        run: |
+          # 写配置文件
+          mkdir -p ~/.config/rclone/
+          cat << EOF > ~/.config/rclone/rclone.conf
+          $RCLONE_CONFIG
+          EOF
+      - name: rclone-run
+        run: |
+          sudo rclone delete onedrive:self-hosted/emby2/config/system.xml --ignore-errors -vv
+          sudo rclone copy onedrive:self-hosted/emby2/system.xml onedrive:0/j/emby2/config/ --ignore-errors -vv
+          sudo apt-get install fuse3
+          sudo mkdir /onedrive
+          sudo nohup rclone mount onedrive: /onedrive --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
+          echo "==========i==========="
+          rclone lsf i:
+          echo "==========j==========="
+          rclone lsf j:
+          echo "==========onedrive==========="
+          rclone lsf onedrive:
+          echo "==========dropbox==========="
+          rclone lsf dropbox:
+      - name: install emby
+        run: |
+          curl -L -o emby-server.deb $(curl -s https://api.github.com/repos/MediaBrowser/Emby.Releases/releases/latest | grep -oP '"browser_download_url": "\K(.*emby-server-deb.*amd64.deb)(?=")')
+          sudo dpkg -i emby-server.deb
+          while true; do
+              if [ -d /var/lib/emby ]; then
+                  echo "Directory exists, deleting..."
+                  if sudo rm -rf /var/lib/emby; then
+                      echo "Directory deleted successfully"
+                      break
+                  else
+                      echo "Failed to delete directory, retrying..."
+                  fi
+              else
+                  echo "Directory does not exist"
+                  break
+              fi
+          done
+          echo "==========/onedrive/self-hosted/emby2==========="
+          sudo ls /onedrive/self-hosted/emby2
+          sudo ln -s /onedrive/self-hosted/emby2 /var/lib/emby
+          echo "==========/var/lib/emby==========="
+          sudo ls /var/lib/emby
+          sudo chown -R emby:emby /var/lib/emby
+      - name: run emby
+        run: |
+          sudo nohup /opt/emby-server/bin/emby-server &
+      - name: run cloudflared
+        run: |
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
+          sudo mkdir ~/.cloudflared/
+          sudo rclone copy i:SyncBack/'${{ secrets.VD }}'/.cloudflared ~/.cloudflared -vv
+          cloudflared tunnel route dns ee ee.'${{ secrets.VD }}'.us.kg
+          nohup cloudflared tunnel run --url http://127.0.0.1:8096 ee &
+      - name: sleep
+        run: |
+          sudo sleep 340m && curl -X POST -H "X-Emby-Token: c33a66119cd94788882617a5bde7f962" http://127.0.0.1:8096/System/Shutdown
+          sleep 3m

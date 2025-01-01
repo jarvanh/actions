@@ -1,0 +1,46 @@
+name: pixivutil2
+
+on:
+  schedule:
+    - cron: '0 19 * * *'
+  workflow_dispatch:
+  watch:
+    types: started
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: rclone-install
+        run: |
+          # 安装 rclone
+          # curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
+          # curl -O https://beta.rclone.org/rclone-beta-latest-linux-amd64.zip
+          # unzip rclone-*-amd64.zip
+          # cd rclone-*-linux-amd64
+          # sudo mv rclone /usr/bin
+          # sudo chmod +x /usr/bin/rclone
+          sudo apt-get install rclone
+      - name: rclone-config
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE }}
+        run: |
+          # 写配置文件
+          mkdir -p ~/.config/rclone/
+          cat << EOF > ~/.config/rclone/rclone.conf
+          $RCLONE_CONFIG
+          EOF
+      - name: rclone-run
+        run: |
+          sudo apt-get install fuse3
+          sudo mkdir /onedrive
+          sudo nohup rclone mount onedrive: /onedrive --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
+      - name: run pixivutil2
+        run: |
+          cd /onedrive/software/PixivUtil2
+          git pull https://github.com/Nandaka/PixivUtil2.git
+          pip install -r requirements.txt
+
+          python PixivUtil2.py -c config.ini -s 6  -x
+          echo "github PixivUtil2 任务执行结束"
+          curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github PixivUtil2 任务执行结束"

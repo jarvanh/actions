@@ -1,0 +1,103 @@
+name: jellyfin
+
+on:
+  schedule:
+    # - cron: "0 2,8,14,20 * * *"
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+  watch:
+    # types: started
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Workflow Status
+        run: |
+          workflow_runs=$(curl -s -X GET \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Authorization: Bearer ${{ secrets.PAT }}" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs")
+          
+          isRunning=$(echo "$workflow_runs" | jq '.workflow_runs[] | select(.name == "jellyfin" and .status == "in_progress")')
+          
+          if [[ -n $isRunning ]]; then
+            echo "Another workflow is already running. Aborting current workflow."
+            exit 31
+          else
+            echo "No running workflows found. Continuing with the workflow execution."
+          fi
+      - name: rclone-install
+        run: |
+          # 安装 rclone
+          # curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
+          # curl -O https://beta.rclone.org/rclone-beta-latest-linux-amd64.zip
+          # unzip rclone-*-amd64.zip
+          # cd rclone-*-linux-amd64
+          # sudo mv rclone /usr/bin
+          # sudo chmod +x /usr/bin/rclone
+          sudo apt-get install rclone
+      - name: rclone-config
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE }}
+        run: |
+          # 写配置文件
+          mkdir -p ~/.config/rclone/
+          cat << EOF > ~/.config/rclone/rclone.conf
+          $RCLONE_CONFIG
+          EOF
+      - name: rclone-run
+        run: |
+          sudo apt-get install fuse3
+          sudo mkdir /content/
+          sudo mkdir /content/drive/
+          sudo mkdir /content/drive/MyDrive/
+          sudo mkdir /content/drive/MyDrive/my
+          sudo mkdir /content/drive/MyDrive/1024
+          sudo nohup rclone mount 1024: /content/drive/MyDrive/1024 --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
+          sudo mkdir /content/drive/MyDrive/my/i
+          sudo nohup rclone mount i: /content/drive/MyDrive/my/i --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
+          sudo mkdir /content/drive/MyDrive/my/j
+          sudo nohup rclone mount j: /content/drive/MyDrive/my/j --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
+          sudo mkdir /content/drive/MyDrive/my/k
+          sudo nohup rclone mount k: /content/drive/MyDrive/my/k --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
+          sudo mkdir /content/drive/MyDrive/my/av1
+          sudo nohup rclone mount av1: /content/drive/MyDrive/my/av1 --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
+          sudo mkdir /content/drive/MyDrive/my/av2
+          sudo nohup rclone mount av2: /content/drive/MyDrive/my/av2 --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
+          sudo mkdir /content/drive/MyDrive/my/dropbox
+          sudo nohup rclone mount dropbox: /content/drive/MyDrive/my/dropbox --allow-non-empty --no-gzip-encoding --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
+          echo "==========i==========="
+          rclone lsf i:
+          echo "==========j==========="
+          rclone lsf j:
+          echo "==========k==========="
+          rclone lsf k:
+          echo "==========o==========="
+          rclone lsf o:
+          echo "==========1024==========="
+          rclone lsf 1024:
+          echo "==========av1==========="
+          rclone lsf av1:
+          echo "==========av2==========="
+          rclone lsf av2:
+          echo "==========dropbox==========="
+          rclone lsf dropbox:
+      - name: install jellyfin
+        run: |
+          curl https://repo.jellyfin.org/install-debuntu.sh | sudo bash
+      - name: run jellyfin
+        run: |
+          sudo nohup /usr/bin/jellyfin -w /usr/share/jellyfin/web --datadir /content/drive/MyDrive/my/j/jellyfin &
+      - name: run cloudflared
+        run: |
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
+          sudo mkdir ~/.cloudflared/
+          sudo rclone copy i:SyncBack/'${{ secrets.VD }}'/.cloudflared ~/.cloudflared -vv
+          cloudflared tunnel route dns j j.'${{ secrets.VD }}'.eu.org
+          nohup cloudflared tunnel run --url http://127.0.0.1:8096 j &
+      - name: sleep
+        run: |
+          sudo sleep 340m && curl -X POST -H "X-Emby-Token: d81ced113e714504aeac7c42d5dbda57" http://127.0.0.1:8096/System/Shutdown
+          sleep 10m
