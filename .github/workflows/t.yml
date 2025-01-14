@@ -107,7 +107,7 @@ jobs:
         run: docker ps 
       - name: sleep
         run: |
-          sudo sleep 300m          
+          sudo sleep 10m          
       - name: Stop
         run: |
           docker stop teslamate
