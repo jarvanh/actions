@@ -107,7 +107,7 @@ jobs:
         run: docker ps 
       - name: sleep
         run: |
-          sudo sleep 10m          
+          sudo sleep 330m          
       - name: Stop
         run: |
           cd /dropbox/self-hosted/teslamate && sudo docker compose stop
@@ -115,5 +115,7 @@ jobs:
           sleep 1m 
           sudo rclone sync /dropbox/self-hosted/teslamate dropbox:self-hosted/teslamate -vv --create-empty-src-dirs
           sleep 1m 
+          sudo rclone sync /dropbox/self-hosted/teslamate dropbox:self-hosted/teslamate -vv --create-empty-src-dirs
+          sleep 1m 
           echo "Stopping GitHub Actions"
-          exit 1
+          exit 31
