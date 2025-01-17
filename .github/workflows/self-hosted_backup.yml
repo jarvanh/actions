@@ -57,11 +57,11 @@ jobs:
       - name: backup
         run: |
           DATE=$(date +'%Y-%m-%d')
-          rclone sync dropbox:self-hosted dropbox:self-hosted_backup/$DATE -vv
+          rclone sync dropbox:self-hosted dropbox:self-hosted_backup/$DATE --create-empty-src-dirs -vv
           sleep 3m
-          rclone sync dropbox:self-hosted dropbox:self-hosted_backup/$DATE -vv
+          rclone sync dropbox:self-hosted dropbox:self-hosted_backup/$DATE --create-empty-src-dirs -vv
           sleep 3m
-          rclone sync dropbox:self-hosted dropbox:self-hosted_backup/$DATE -vv
+          rclone sync dropbox:self-hosted dropbox:self-hosted_backup/$DATE --create-empty-src-dirs -vv
       - name: Remove old backups
         run: |
           BACKUP_PATH="/dropbox/self-hosted_backup"
