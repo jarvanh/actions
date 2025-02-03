@@ -53,7 +53,6 @@ jobs:
           EOF
       - name: rclone-run
         run: |
-          sudo chown -R 472:472 /dropbox/self-hosted/teslamate/teslamate-grafana-data/
           echo "==========onedrive==========="
           rclone lsf onedrive:
           echo "==========dropbox==========="
@@ -64,6 +63,7 @@ jobs:
           sudo rclone sync dropbox:self-hosted_backup/2025-01-31/teslamate dropbox:self-hosted/teslamate -vv --create-empty-src-dirs
           sudo rclone sync dropbox:self-hosted/teslamate /dropbox/self-hosted/teslamate -vv --create-empty-src-dirs
           sudo ls /dropbox/self-hosted/teslamate
+          sudo chown -R 472:472 /dropbox/self-hosted/teslamate/teslamate-grafana-data/
       - name: Check if the tunnel is running
         env:
           TUNNEL_NAME: "t" # 替换为你的隧道名称
