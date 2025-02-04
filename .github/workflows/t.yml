@@ -60,7 +60,7 @@ jobs:
           sudo apt-get install fuse3
           sudo mkdir /dropbox
           # sudo nohup rclone mount dropbox: /dropbox --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
-          sudo rclone sync dropbox:self-hosted_backup/2025-01-18/teslamate dropbox:self-hosted/teslamate -vv --create-empty-src-dirs
+          # sudo rclone sync dropbox:self-hosted_backup/2025-01-18/teslamate dropbox:self-hosted/teslamate -vv --create-empty-src-dirs
           sudo rclone sync dropbox:self-hosted/teslamate /dropbox/self-hosted/teslamate -vv --create-empty-src-dirs
           sudo ls /dropbox/self-hosted/teslamate
           sudo chown -R 472:472 /dropbox/self-hosted/teslamate/teslamate-grafana-data/
@@ -114,11 +114,11 @@ jobs:
           cd /dropbox/self-hosted/teslamate && sudo docker compose stop
           docker ps
           sleep 1m
-          tar -czvf /dropbox/self-hosted/teslamate.tar.gz -C /dropbox/self-hosted teslamate
+          sudo tar -czvf /dropbox/self-hosted/teslamate.tar.gz -C /dropbox/self-hosted teslamate
           sudo rclone sync /dropbox/self-hosted/teslamate.tar.gz dropbox:self-hosted/ -vv
           # sudo rclone sync /dropbox/self-hosted/teslamate dropbox:self-hosted/teslamate -vv --create-empty-src-dirs
           sleep 1m 
-          sudo rclone sync /dropbox/self-hosted/teslamate dropbox:self-hosted/teslamate -vv --create-empty-src-dirs
+          # sudo rclone sync /dropbox/self-hosted/teslamate dropbox:self-hosted/teslamate -vv --create-empty-src-dirs
           sleep 1m 
           echo "Stopping GitHub Actions"
           exit 31
