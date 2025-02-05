@@ -71,9 +71,11 @@ jobs:
           sudo tar -xvpzf /dropbox/self-hosted/teslamate.tar.gz -C /dropbox/self-hosted/
           
           echo "====================="
-          sudo ls /dropbox/self-hosted
+          sudo ls /dropbox
           echo "====================="
-          sudo ls /dropbox/self-hosted/teslamate
+          sudo ls /dropbox/self-hosted
+          # echo "====================="
+          # sudo ls /dropbox/self-hosted/teslamate
           sudo chown -R 472:472 /dropbox/self-hosted/teslamate/teslamate-grafana-data/
       - name: Check if the tunnel is running
         env:
