@@ -65,10 +65,10 @@ jobs:
           # sudo tar -cvpzf /dropbox/self-hosted/teslamate.tar.gz -C /dropbox/self-hosted teslamate
           # sudo rclone sync /dropbox/self-hosted/teslamate.tar.gz dropbox:self-hosted/ -vv
           
-          # sudo rclone sync dropbox:self-hosted/teslamate /dropbox/self-hosted/teslamate -vv --create-empty-src-dirs
+          sudo rclone sync dropbox:self-hosted/teslamate /dropbox/self-hosted/teslamate -vv --create-empty-src-dirs
           
-          sudo rclone sync dropbox:self-hosted/teslamate.tar.gz /dropbox/self-hosted/ -vv
-          sudo tar -xvpzf /dropbox/self-hosted/teslamate.tar.gz -C /dropbox/self-hosted/
+          # sudo rclone sync dropbox:self-hosted/teslamate.tar.gz /dropbox/self-hosted/ -vv
+          # sudo tar -xvpzf /dropbox/self-hosted/teslamate.tar.gz -C /dropbox/self-hosted/
           
           sudo ls /dropbox/self-hosted/teslamate
           sudo chown -R 472:472 /dropbox/self-hosted/teslamate/teslamate-grafana-data/
@@ -102,7 +102,7 @@ jobs:
       - name: Set up Docker
         uses: docker/setup-buildx-action@v2
       - name: Run teslamate container
-        run: cd /dropbox/self-hosted/teslamate && sudo docker compose up
+        run: cd /dropbox/self-hosted/teslamate && sudo docker compose up -d
       - name: sleep
         run: |
           sudo sleep 1m    
@@ -122,7 +122,7 @@ jobs:
           cd /dropbox/self-hosted/teslamate && sudo docker compose stop
           docker ps
           sleep 1m
-          sudo tar -cvpzf /dropbox/self-hosted/teslamate.tar.gz -C /dropbox/self-hosted teslamate
+          sudo find /dropbox/self-hosted/teslamate -print | sudo tar -cvpzf /dropbox/self-hosted/teslamate.tar.gz -T -
           sudo rclone sync /dropbox/self-hosted/teslamate.tar.gz dropbox:self-hosted/ -vv
           # sudo rclone sync /dropbox/self-hosted/teslamate dropbox:self-hosted/teslamate -vv --create-empty-src-dirs
           sleep 1m 
