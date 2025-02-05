@@ -63,11 +63,11 @@ jobs:
           
           # sudo rclone sync dropbox:self-hosted_backup/2025-01-18/teslamate dropbox:self-hosted/teslamate -vv --retries 0 --create-empty-src-dirs
           # sudo tar -cvpzf /dropbox/self-hosted/teslamate.tar.gz -C /dropbox/self-hosted teslamate
-          # sudo rclone sync /dropbox/self-hosted/teslamate.tar.gz dropbox:self-hosted/ -vv --retries 0
+          # sudo rclone sync /dropbox/self-hosted/teslamate.tar.gz dropbox:self-hosted/ -vv --retries 100
           
           sudo rclone sync dropbox:self-hosted/teslamate /dropbox/self-hosted/teslamate -vv --create-empty-src-dirs --retries 0
           
-          # sudo rclone sync dropbox:self-hosted/teslamate.tar.gz /dropbox/self-hosted/ -vv --retries 0
+          # sudo rclone sync dropbox:self-hosted/teslamate.tar.gz /dropbox/self-hosted/ -vv --retries 100
           # sudo tar -xvpzf /dropbox/self-hosted/teslamate.tar.gz -C /dropbox/self-hosted/
           
           sudo ls /dropbox/self-hosted/teslamate
@@ -123,10 +123,10 @@ jobs:
           docker ps
           sleep 1m
           sudo find /dropbox/self-hosted/teslamate -print | sudo tar -cvpzf /dropbox/self-hosted/teslamate.tar.gz -T -
-          sudo rclone sync /dropbox/self-hosted/teslamate.tar.gz dropbox:self-hosted/ -vv --retries 0
+          sudo rclone sync /dropbox/self-hosted/teslamate.tar.gz dropbox:self-hosted/ -vv --retries 100
           # sudo rclone sync /dropbox/self-hosted/teslamate dropbox:self-hosted/teslamate -vv --create-empty-src-dirs
           sleep 1m 
-          sudo rclone sync /dropbox/self-hosted/teslamate.tar.gz dropbox:self-hosted/ -vv --retries 0
+          sudo rclone sync /dropbox/self-hosted/teslamate.tar.gz dropbox:self-hosted/ -vv --retries 100
           # sudo rclone sync /dropbox/self-hosted/teslamate dropbox:self-hosted/teslamate -vv --create-empty-src-dirs
           sleep 1m 
           echo "Stopping GitHub Actions"
