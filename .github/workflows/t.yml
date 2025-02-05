@@ -121,7 +121,7 @@ jobs:
         run: docker ps 
       - name: sleep
         run: |
-          sudo sleep 300m          
+          sudo sleep 3m          
       - name: Stop
         run: |
           cd /dropbox/self-hosted/teslamate && sudo docker compose stop
