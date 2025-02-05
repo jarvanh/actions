@@ -58,7 +58,7 @@ jobs:
           echo "==========dropbox==========="
           rclone lsf dropbox:
           sudo apt-get install fuse3
-          sudo mkdir /dropbox
+          sudo mkdir -p /dropbox/self-hosted/teslamate
           # sudo nohup rclone mount dropbox: /dropbox --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
           
           # sudo rclone sync dropbox:self-hosted_backup/2025-01-18/teslamate dropbox:self-hosted/teslamate -vv --retries 0 --create-empty-src-dirs
@@ -70,7 +70,9 @@ jobs:
           sudo rclone sync dropbox:self-hosted/teslamate.tar.gz /dropbox/self-hosted/ -vv --retries 100
           sudo tar -xvpzf /dropbox/self-hosted/teslamate.tar.gz -C /dropbox/self-hosted/
           
+          echo "====================="
           sudo ls /dropbox/self-hosted
+          echo "====================="
           sudo ls /dropbox/self-hosted/teslamate
           sudo chown -R 472:472 /dropbox/self-hosted/teslamate/teslamate-grafana-data/
       - name: Check if the tunnel is running
