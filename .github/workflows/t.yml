@@ -76,6 +76,10 @@ jobs:
           sudo ls /dropbox/self-hosted
           echo "====================="
           sudo ls /dropbox/self-hosted/teslamate
+          echo "====================="
+          sudo ls /dropbox/self-hosted/teslamate/dropbox
+          echo "====================="
+          sudo ls /dropbox/self-hosted/teslamate/dropbox/self-hosted
           sudo chown -R 472:472 /dropbox/self-hosted/teslamate/teslamate-grafana-data/
       - name: Check if the tunnel is running
         env:
