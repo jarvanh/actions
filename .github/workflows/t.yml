@@ -65,17 +65,17 @@ jobs:
           # sudo tar -cvpzf /dropbox/self-hosted/teslamate.tar.gz -C /dropbox/self-hosted teslamate
           # sudo rclone sync /dropbox/self-hosted/teslamate.tar.gz dropbox:self-hosted/ -vv --retries 100
           
-          # sudo rclone sync dropbox:self-hosted/teslamate /dropbox/self-hosted/teslamate -vv --create-empty-src-dirs --retries 100
+          sudo rclone sync dropbox:self-hosted/teslamate /dropbox/self-hosted/teslamate -vv --create-empty-src-dirs --retries 100
           
-          sudo rclone sync dropbox:self-hosted/teslamate.tar.gz /dropbox/self-hosted/ -vv --retries 100
-          sudo tar -xvpzf /dropbox/self-hosted/teslamate.tar.gz -C /dropbox/self-hosted/
+          # sudo rclone sync dropbox:self-hosted/teslamate.tar.gz /dropbox/self-hosted/ -vv --retries 100
+          # sudo tar -xvpzf /dropbox/self-hosted/teslamate.tar.gz -C /dropbox/self-hosted/
           
           echo "====================="
           sudo ls /dropbox
           echo "====================="
           sudo ls /dropbox/self-hosted
-          # echo "====================="
-          # sudo ls /dropbox/self-hosted/teslamate
+          echo "====================="
+          sudo ls /dropbox/self-hosted/teslamate
           sudo chown -R 472:472 /dropbox/self-hosted/teslamate/teslamate-grafana-data/
       - name: Check if the tunnel is running
         env:
@@ -127,7 +127,7 @@ jobs:
           cd /dropbox/self-hosted/teslamate && sudo docker compose stop
           docker ps
           sleep 1m
-          sudo find /dropbox/self-hosted/teslamate -print | sudo tar -cvpzf /dropbox/self-hosted/teslamate.tar.gz -T -
+          sudo find /dropbox/self-hosted/teslamate -print | sudo tar --transform 's|^/dropbox/self-hosted/||' -cvpzf /dropbox/self-hosted/teslamate.tar.gz -T -
           sudo rclone sync /dropbox/self-hosted/teslamate.tar.gz dropbox:self-hosted/ -vv --retries 100
           # sudo rclone sync /dropbox/self-hosted/teslamate dropbox:self-hosted/teslamate -vv --create-empty-src-dirs
           sleep 1m 
