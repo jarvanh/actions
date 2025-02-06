@@ -3,7 +3,7 @@ name: alist
 on:
   schedule:
     # - cron: "0 2,8,14,20 * * *"
-    - cron: "0 1 * * *"
+    - cron: "0 * * * *"
   workflow_dispatch:
   # workflow_run:
   #   workflows:
@@ -86,8 +86,4 @@ jobs:
         run: docker ps
       - name: sleep
         run: |
-          sudo sleep 60m          
-      - name: Stop
-        run: |
-          echo "Stopping GitHub Actions"
-          exit 31
+          sudo sleep 10m          
