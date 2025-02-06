@@ -79,9 +79,9 @@ jobs:
           echo "==========alist==========="
           rclone lsf alist:
 
-          sudo rclone sync onedrive:1 alist:123pan1Crypt/1 -vv --retries 100
-          sudo rclone sync onedrive:2 alist:123pan2Crypt/3 -vv --retries 100
-          sudo rclone sync onedrive:3 alist:123pan2Crypt/3 -vv --retries 100
+          sudo rclone sync onedrive:1 alist:123pan1Crypt/1 -vv --ignore-existing --fast-list --tpslimit=10 --transfers=8 --checkers=16 --drive-chunk-size=128M --multi-thread-cutoff=50M --multi-thread-streams=4 --retries=10 --low-level-retries=20
+          sudo rclone sync onedrive:2 alist:123pan2Crypt/3 -vv --ignore-existing --fast-list --tpslimit=10 --transfers=8 --checkers=16 --drive-chunk-size=128M --multi-thread-cutoff=50M --multi-thread-streams=4 --retries=10 --low-level-retries=20
+          sudo rclone sync onedrive:3 alist:123pan2Crypt/3 -vv --ignore-existing --fast-list --tpslimit=10 --transfers=8 --checkers=16 --drive-chunk-size=128M --multi-thread-cutoff=50M --multi-thread-streams=4 --retries=10 --low-level-retries=20
       - name: Verify docker container is running
         run: docker ps
       - name: sleep
