@@ -57,9 +57,5 @@ jobs:
           rclone lsf onedrive:
           echo "==========dropbox==========="
           rclone lsf dropbox:
-          echo "==========icloud==========="
-          rclone lsf icloud:
-          echo "==========pikpak==========="
-          rclone lsf pikpak:
 
           sudo rclone copy pikpak: icloud:pikpak -vv --retries 100
