@@ -59,4 +59,4 @@ jobs:
           echo "==========dropbox==========="
           rclone lsf dropbox:
 
-          sudo rclone copy pikpak: icloud:pikpak -vv --ignore-existing --fast-list --tpslimit=10 --transfers=8 --checkers=16 --drive-chunk-size=128M --multi-thread-cutoff=50M --multi-thread-streams=4 --retries=10 --low-level-retries=20
+          sudo rclone copy pikpak: icloud:pikpak -vv --ignore-existing --fast-list --drive-chunk-size=128M --multi-thread-cutoff=50M --multi-thread-streams=4 --retries=10 --low-level-retries=20
