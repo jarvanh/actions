@@ -24,7 +24,7 @@ jobs:
             -H "Authorization: Bearer ${{ secrets.PAT }}" \
             "https://api.github.com/repos/${{ github.repository }}/actions/runs")
           
-          isRunning=$(echo "$workflow_runs" | jq '.workflow_runs[] | select(.name == "alist" and .status == "in_progress")')
+          isRunning=$(echo "$workflow_runs" | jq '.workflow_runs[] | select(.name == "icloud" and .status == "in_progress")')
           
           if [[ -n $isRunning ]]; then
             echo "Another workflow is already running. Aborting current workflow."
