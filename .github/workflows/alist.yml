@@ -1,0 +1,93 @@
+name: alist
+
+on:
+  schedule:
+    # - cron: "0 2,8,14,20 * * *"
+    - cron: "0 1 * * *"
+  workflow_dispatch:
+  # workflow_run:
+  #   workflows:
+  #     - t
+  #   types:
+  #     - completed  # 工作流完成后触发
+  watch:
+    # types: started
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Workflow Status
+        run: |
+          workflow_runs=$(curl -s -X GET \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Authorization: Bearer ${{ secrets.PAT }}" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs")
+          
+          isRunning=$(echo "$workflow_runs" | jq '.workflow_runs[] | select(.name == "alist" and .status == "in_progress")')
+          
+          if [[ -n $isRunning ]]; then
+            echo "Another workflow is already running. Aborting current workflow."
+            exit 31
+          else
+            echo "No running workflows found. Continuing with the workflow execution."
+          fi
+      - name: rclone-install
+        run: |
+          # 安装 rclone
+          # curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
+          # curl -O https://beta.rclone.org/rclone-beta-latest-linux-amd64.zip
+          # unzip rclone-*-amd64.zip
+          # cd rclone-*-linux-amd64
+          # sudo mv rclone /usr/bin
+          # sudo chmod +x /usr/bin/rclone
+          sudo apt-get install rclone
+      - name: rclone-config
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE }}
+        run: |
+          # 写配置文件
+          mkdir -p ~/.config/rclone/
+          cat << EOF > ~/.config/rclone/rclone.conf
+          $RCLONE_CONFIG
+          EOF
+      - name: rclone-run
+        run: |
+          echo "==========onedrive==========="
+          rclone lsf onedrive:
+          echo "==========dropbox==========="
+          rclone lsf dropbox:
+
+          sudo apt-get install fuse3
+          sudo mkdir -p /dropbox
+          sudo nohup rclone mount dropbox: /dropbox --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 10G &
+      - name: Set up Docker
+        uses: docker/setup-buildx-action@v2
+      - name: Run teslamate container
+        run: docker run -d --restart=unless-stopped -v /dropbox/self-hosted/alist:/opt/alist/data -p 5244:5244 -e PUID=0 -e PGID=0 -e UMASK=022 --name="alist" xhofe/alist:latest
+      - name: sleep
+        run: |
+          sudo sleep 1m    
+      - name: Verify docker container is running
+        run: docker ps
+      - name: rclone-sync
+        run: |
+          echo "==========onedrive==========="
+          rclone lsf onedrive:
+          echo "==========dropbox==========="
+          rclone lsf dropbox:
+          echo "==========alist==========="
+          rclone lsf alist:
+
+          sudo rclone sync onedrive:1 alist:123pan1Crypt/1 -vv --retries 100
+          sudo rclone sync onedrive:2 alist:123pan2Crypt/3 -vv --retries 100
+          sudo rclone sync onedrive:3 alist:123pan2Crypt/3 -vv --retries 100
+      - name: Verify docker container is running
+        run: docker ps
+      - name: sleep
+        run: |
+          sudo sleep 60m          
+      - name: Stop
+        run: |
+          echo "Stopping GitHub Actions"
+          exit 31
