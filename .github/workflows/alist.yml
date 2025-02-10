@@ -86,9 +86,13 @@ jobs:
           # echo "==========  onedrive:3  ==========="
           # rclone lsf  onedrive:3 --files-only --min-size 4G
           
-          sudo rclone sync onedrive:1 alist:123pan1Crypt/1 -vv --fast-list --retries=10 --low-level-retries=20
-          sudo rclone sync onedrive:2 alist:123pan2Crypt/3 -vv --fast-list --retries=10 --low-level-retries=20
-          sudo rclone sync onedrive:3 alist:123pan2Crypt/3 -vv --fast-list --retries=10 --low-level-retries=20
+          sudo rclone sync onedrive:1 alist:123pan1Crypt/1 -vv --fast-list --retries=10 --low-level-retries=20 &
+          sudo rclone sync onedrive:2 alist:123pan2Crypt/2 -vv --fast-list --retries=10 --low-level-retries=20 &
+          sudo rclone sync onedrive:3 alist:123pan2Crypt/3 -vv --fast-list --retries=10 --low-level-retries=20 &
+          sudo rclone sync onedrive:1 alist:baidupanCrypt/1 -vv --fast-list --retries=10 --low-level-retries=20 &
+          sudo rclone sync onedrive:2 alist:baidupanCrypt/2 -vv --fast-list --retries=10 --low-level-retries=20 &
+          sudo rclone sync onedrive:3 alist:baidupanCrypt/3 -vv --fast-list --retries=10 --low-level-retries=20 &
+          wait  # 等待所有任务完成
       - name: Verify docker container is running
         run: docker ps
       - name: sleep
