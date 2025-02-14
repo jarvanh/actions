@@ -106,4 +106,7 @@ jobs:
         run: docker ps
       - name: sleep
         run: |
-          sudo sleep 10m          
+          sudo sleep 10m
+      - name: send notification
+        run: |
+          curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github alist任务执行完毕"
