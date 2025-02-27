@@ -1,0 +1,56 @@
+name: subs-check
+
+on:
+  schedule:
+    # - cron: "0 2,8,14,20 * * *"
+    - cron: "0 14 * * *"
+  workflow_dispatch:
+  watch:
+    # types: started
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: rclone-install
+        run: |
+          # 安装 rclone
+          # curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
+          # curl -O https://beta.rclone.org/rclone-beta-latest-linux-amd64.zip
+          # unzip rclone-*-amd64.zip
+          # cd rclone-*-linux-amd64
+          # sudo mv rclone /usr/bin
+          # sudo chmod +x /usr/bin/rclone
+          sudo apt-get install rclone
+      - name: rclone-config
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE }}
+        run: |
+          # 写配置文件
+          mkdir -p ~/.config/rclone/
+          cat << EOF > ~/.config/rclone/rclone.conf
+          $RCLONE_CONFIG
+          EOF
+      - name: rclone-run
+        run: |
+          sudo apt-get install fuse3
+          sudo mkdir /dropbox
+          sudo nohup rclone mount dropbox: /dropbox --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
+          echo "==========onedrive==========="
+          rclone lsf onedrive:
+          echo "==========dropbox==========="
+          rclone lsf dropbox:
+      - name: Set up Docker
+        uses: docker/setup-buildx-action@v2
+      - name: Run docker container
+        run: |
+          docker run -d --name subs-check -p 8199:8199 -v /dropbox/self-hosted/subs-check/config:/app/config -v /dropbox/self-hosted/subs-check/output:/app/output --restart always ghcr.io/beck-8/subs-check:latest
+      - name: Verify container is running
+        run: docker ps    
+      - name: sleep
+        run: |
+          sudo sleep 100m          
+      - name: Stop
+        run: |
+          echo "Stopping GitHub Actions"
+          exit 1
