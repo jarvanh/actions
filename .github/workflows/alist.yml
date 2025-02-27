@@ -3,7 +3,7 @@ name: alist
 on:
   schedule:
     # - cron: "0 2,8,14,20 * * *"
-    - cron: "*/30 * * * *"
+    - cron: "*/300 * * * *"
   workflow_dispatch:
   # workflow_run:
   #   workflows:
