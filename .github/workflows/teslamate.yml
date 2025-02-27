@@ -1,0 +1,139 @@
+name: teslamate
+
+on:
+  schedule:
+    # - cron: "0 2,8,14,20 * * *"
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+  # workflow_run:
+  #   workflows:
+  #     - t
+  #   types:
+  #     - completed  # 工作流完成后触发
+  watch:
+    # types: started
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Workflow Status
+        run: |
+          workflow_runs=$(curl -s -X GET \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Authorization: Bearer ${{ secrets.PAT }}" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs")
+          
+          isRunning=$(echo "$workflow_runs" | jq '.workflow_runs[] | select(.name == "teslamate" and (.status == "in_progress" or .status == "queued"))')
+          
+          if [[ -n $isRunning ]]; then
+            echo "Another workflow is already running. Aborting current workflow."
+            exit 31
+          else
+            echo "No running workflows found. Continuing with the workflow execution."
+          fi
+      - name: rclone-install
+        run: |
+          # 安装 rclone
+          # curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
+          # curl -O https://beta.rclone.org/rclone-beta-latest-linux-amd64.zip
+          # unzip rclone-*-amd64.zip
+          # cd rclone-*-linux-amd64
+          # sudo mv rclone /usr/bin
+          # sudo chmod +x /usr/bin/rclone
+          sudo apt-get install rclone
+      - name: rclone-config
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE }}
+        run: |
+          # 写配置文件
+          mkdir -p ~/.config/rclone/
+          cat << EOF > ~/.config/rclone/rclone.conf
+          $RCLONE_CONFIG
+          EOF
+      - name: rclone-run
+        run: |
+          echo "==========onedrive==========="
+          rclone lsf onedrive:
+          echo "==========dropbox==========="
+          rclone lsf dropbox:
+          sudo apt-get install fuse3
+          sudo mkdir -p /dropbox/self-hosted/teslamate
+          # sudo nohup rclone mount dropbox: /dropbox --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
+          
+          # sudo rclone sync dropbox:self-hosted_backup/2025-01-18/teslamate dropbox:self-hosted/teslamate -vv --retries 0 --create-empty-src-dirs
+          # sudo tar -cvpzf /dropbox/self-hosted/teslamate.tar.gz -C /dropbox/self-hosted teslamate
+          # sudo rclone sync /dropbox/self-hosted/teslamate.tar.gz dropbox:self-hosted/ -vv --retries 100
+          
+          sudo rclone sync onedrive:backup/SyncBack/root/teslamate dropbox:self-hosted/teslamate -vv --create-empty-src-dirs --retries 100
+          sudo rclone sync dropbox:self-hosted/teslamate /dropbox/self-hosted/teslamate -vv --create-empty-src-dirs --retries 100
+
+          # sudo rclone sync dropbox:self-hosted/teslamate.tar.gz /dropbox/self-hosted/ -vv --retries 100
+          # sudo tar -xvpzf /dropbox/self-hosted/teslamate.tar.gz -C /
+          
+          echo "====================="
+          sudo ls /dropbox
+          echo "====================="
+          sudo ls /dropbox/self-hosted
+          echo "====================="
+          sudo ls /dropbox/self-hosted/teslamate
+          sudo chown -R 472:472 /dropbox/self-hosted/teslamate/teslamate-grafana-data/
+      - name: Check if the tunnel is running
+        env:
+          TUNNEL_NAME: "t" # 替换为你的隧道名称
+        run: |
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
+          sudo mkdir ~/.cloudflared/
+          sudo rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
+
+          # 获取隧道列表
+          OUTPUT=$(cloudflared tunnel list)
+          
+          # 查找目标隧道的行
+          TUNNEL_LINE=$(echo "$OUTPUT" | grep -w "$TUNNEL_NAME")
+          if [ -z "$TUNNEL_LINE" ]; then
+            echo "The tunnel '$TUNNEL_NAME' does not exist. Proceeding."
+            exit 31
+          fi
+  
+          # 提取 CONNECTIONS 列并检查是否为空
+          CONNECTIONS=$(echo "$TUNNEL_LINE" | awk '{if (NF>=4) print $4; else print "-"}')
+          if [ "$CONNECTIONS" == "-" ]; then
+            echo "The tunnel '$TUNNEL_NAME' exists but has no active connections. Proceeding."
+          else
+            echo "The tunnel '$TUNNEL_NAME' is running with connections: $CONNECTIONS. Stopping actions."
+            exit 31
+          fi
+      - name: Set up Docker
+        uses: docker/setup-buildx-action@v2
+      - name: Run teslamate container
+        run: cd /dropbox/self-hosted/teslamate && sudo docker compose up -d
+      - name: sleep
+        run: |
+          sudo sleep 1m    
+      - name: Verify docker container is running
+        run: docker ps 
+      - name: run cloudflared
+        run: |
+          cloudflared tunnel route dns t t.'${{ secrets.VD }}'.eu.org
+          nohup cloudflared tunnel run --url http://127.0.0.1:5900 t &
+      - name: Verify docker container is running
+        run: docker ps 
+      - name: sleep
+        run: |
+          sudo sleep 300m          
+      - name: Stop
+        run: |
+          cd /dropbox/self-hosted/teslamate && sudo docker compose stop
+          docker ps
+          sleep 1m
+          # sudo find /dropbox/self-hosted/teslamate -print | sudo tar -cvpzf /dropbox/self-hosted/teslamate.tar.gz -T -
+          # sudo rclone sync /dropbox/self-hosted/teslamate.tar.gz dropbox:self-hosted/ -vv --retries 100
+          sudo rclone sync /dropbox/self-hosted/teslamate dropbox:self-hosted/teslamate -vv --create-empty-src-dirs --retries 100
+          sleep 1m 
+          # sudo rclone sync /dropbox/self-hosted/teslamate.tar.gz dropbox:self-hosted/ -vv --retries 100
+          sudo rclone sync /dropbox/self-hosted/teslamate dropbox:self-hosted/teslamate -vv --create-empty-src-dirs --retries 100
+          sleep 1m 
+          echo "Stopping GitHub Actions"
+          exit 31
