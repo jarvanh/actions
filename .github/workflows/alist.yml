@@ -93,14 +93,13 @@ jobs:
           # sudo rclone sync onedrive:5 alist:baidupanCrypt/5 -vv --tpslimit 5 --transfers 2 --checkers 4 --low-level-retries 10 --retries 5 --retries-sleep 10s --drive-chunk-size 64M --disable ListR --onedrive-server-side-across-configs &
           
           # 在 wait 之前添加新的同步任务
-          sudo rclone sync onedrive: alist:123pan1Crypt/onedrive -P -vv \
+          sudo rclone sync onedrive: alist:123pan1Crypt/onedrive -vv \
               --exclude "1/**" \
               --exclude "2/**" \
               --exclude "3/**" \
               --exclude "4/**" \
               --exclude "5/**" \
-              --tpslimit 5 --transfers 2 --checkers 4 --low-level-retries 10 --retries 5 --retries-sleep 10s --drive-chunk-size 64M --disable ListR --onedrive-server-side-across-configs &
-          
+              --tpslimit 5 --transfers 1 --checkers 2 --low-level-retries 10 --retries 5 --retries-sleep 10s --cache-chunk-size=64M --cache-total-chunk-size=10G --drive-chunk-size 64M --disable ListR --onedrive-server-side-across-configs &          
           wait  # 等待所有任务完成
       - name: Verify docker container is running
         run: docker ps
