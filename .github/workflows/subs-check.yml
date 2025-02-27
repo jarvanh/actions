@@ -47,3 +47,10 @@ jobs:
           docker run -d --name subs-check -p 8199:8199 -v /dropbox/self-hosted/subs-check/config:/app/config -v /dropbox/self-hosted/subs-check/output:/app/output --restart always ghcr.io/beck-8/subs-check:latest
           docker ps  
           docker logs -f subs-check
+      - name: sleep
+        run: |
+          sudo sleep 100m          
+      - name: Stop
+        run: |
+          echo "Stopping GitHub Actions"
+          exit 31
