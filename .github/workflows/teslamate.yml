@@ -65,7 +65,7 @@ jobs:
           # sudo tar -cvpzf /dropbox/self-hosted/teslamate.tar.gz -C /dropbox/self-hosted teslamate
           # sudo rclone sync /dropbox/self-hosted/teslamate.tar.gz dropbox:self-hosted/ -vv --retries 100
           
-          sudo rclone sync onedrive:backup/SyncBack/root/teslamate dropbox:self-hosted/teslamate -vv --create-empty-src-dirs --retries 100
+          # sudo rclone sync onedrive:backup/SyncBack/root/teslamate dropbox:self-hosted/teslamate -vv --create-empty-src-dirs --retries 100
           sudo rclone sync dropbox:self-hosted/teslamate /dropbox/self-hosted/teslamate -vv --create-empty-src-dirs --retries 100
 
           # sudo rclone sync dropbox:self-hosted/teslamate.tar.gz /dropbox/self-hosted/ -vv --retries 100
