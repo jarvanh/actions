@@ -99,7 +99,7 @@ jobs:
               --exclude "3/**" \
               --exclude "4/**" \
               --exclude "5/**" \
-              --tpslimit 5 --transfers 1 --checkers 2 --low-level-retries 10 --retries 5 --retries-sleep 10s --cache-chunk-size=64M --cache-total-chunk-size=10G --drive-chunk-size 64M --disable ListR --onedrive-server-side-across-configs &          
+              --tpslimit 5 --transfers 1 --checkers 2 --low-level-retries 10 --retries 5 --retries-sleep 10s --cache-chunk-size=64M --drive-chunk-size 64M --disable ListR --onedrive-server-side-across-configs &          
           wait  # 等待所有任务完成
       - name: Verify docker container is running
         run: docker ps
