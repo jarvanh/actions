@@ -12,21 +12,21 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Check Workflow Status
-        run: |
-          workflow_runs=$(curl -s -X GET \
-            -H "Accept: application/vnd.github.v3+json" \
-            -H "Authorization: Bearer ${{ secrets.PAT }}" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/runs")
+      # - name: Check Workflow Status
+      #   run: |
+      #     workflow_runs=$(curl -s -X GET \
+      #       -H "Accept: application/vnd.github.v3+json" \
+      #       -H "Authorization: Bearer ${{ secrets.PAT }}" \
+      #       "https://api.github.com/repos/${{ github.repository }}/actions/runs")
           
-          isRunning=$(echo "$workflow_runs" | jq '.workflow_runs[] | select(.name == "ql" and .status == "in_progress")')
+      #     isRunning=$(echo "$workflow_runs" | jq '.workflow_runs[] | select(.name == "ql" and .status == "in_progress")')
           
-          if [[ -n $isRunning ]]; then
-            echo "Another workflow is already running. Aborting current workflow."
-            exit 31
-          else
-            echo "No running workflows found. Continuing with the workflow execution."
-          fi
+      #     if [[ -n $isRunning ]]; then
+      #       echo "Another workflow is already running. Aborting current workflow."
+      #       exit 31
+      #     else
+      #       echo "No running workflows found. Continuing with the workflow execution."
+      #     fi
       - name: rclone-install
         run: |
           # 安装 rclone
