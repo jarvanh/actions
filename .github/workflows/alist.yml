@@ -85,7 +85,7 @@ jobs:
           # echo "==========  onedrive:3  ==========="
           # rclone lsf  onedrive:3 --files-only --min-size 4G
           
-          sudo rclone sync onedrive:666 alist:123pan1Crypt/onedrive/666 -vv --fast-list --size-only --tpslimit 5 --transfers 16 --checkers 32 --low-level-retries 10 --retries 5 --retries-sleep 10s --drive-chunk-size 64M --disable ListR --onedrive-server-side-across-configs
+          sudo rclone sync onedrive:666 alist:123pan1Crypt/onedrive/666 -vv --fast-list --size-only --tpslimit 5 --transfers 6 --checkers 128 --low-level-retries 10 --retries 5 --retries-sleep 10s --drive-chunk-size 64M --disable ListR --onedrive-server-side-across-configs
 
           # sudo rclone sync onedrive:1 alist:123pan1Crypt/1 -vv --tpslimit 5 --transfers 2 --checkers 4 --low-level-retries 10 --retries 5 --retries-sleep 10s --drive-chunk-size 64M --disable ListR --onedrive-server-side-across-configs &
           # sudo rclone sync onedrive:2 alist:123pan2Crypt/2 -vv --tpslimit 5 --transfers 2 --checkers 4 --low-level-retries 10 --retries 5 --retries-sleep 10s --drive-chunk-size 64M --disable ListR --onedrive-server-side-across-configs &
