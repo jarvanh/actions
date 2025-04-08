@@ -88,7 +88,9 @@ jobs:
           # sudo rclone sync onedrive:666 alist:123pan1Crypt/onedrive/666 -vv --fast-list --size-only --tpslimit 5 --transfers 2 --checkers 128 --low-level-retries 10 --retries 5 --retries-sleep 10s --drive-chunk-size 64M --disable ListR --onedrive-server-side-across-configs
 
           # sudo rclone sync onedrive:1 alist:123pan1Crypt/1 -vv --tpslimit 5 --transfers 2 --checkers 4 --low-level-retries 10 --retries 5 --retries-sleep 10s --drive-chunk-size 64M --disable ListR --onedrive-server-side-across-configs &
-          rclone sync onedrive:2 alist:123pan2Crypt/2 -vv --tpslimit 5 --transfers 2 --checkers 4 --low-level-retries 10 --retries 5 --retries-sleep 10s --drive-chunk-size 64M --onedrive-server-side-across-configs &
+          rclone ls onedrive:2
+          rclone ls alist:123pan2Crypt/2
+          sudo rclone sync onedrive:2 alist:123pan2Crypt/2 -vv --tpslimit 5 --transfers 2 --checkers 4 --low-level-retries 10 --retries 5 --retries-sleep 10s --drive-chunk-size 64M --onedrive-server-side-across-configs &
           # sudo rclone sync onedrive:3 alist:123pan2Crypt/3 -vv --tpslimit 5 --transfers 2 --checkers 4 --low-level-retries 10 --retries 5 --retries-sleep 10s --drive-chunk-size 64M --disable ListR --onedrive-server-side-across-configs &
           # sudo rclone sync onedrive:4 alist:baidupanCrypt/4 -vv --tpslimit 5 --transfers 2 --checkers 4 --low-level-retries 10 --retries 5 --retries-sleep 10s --drive-chunk-size 64M --disable ListR --onedrive-server-side-across-configs &
           # sudo rclone sync onedrive:5 alist:baidupanCrypt/5 -vv --tpslimit 5 --transfers 2 --checkers 4 --low-level-retries 10 --retries 5 --retries-sleep 10s --drive-chunk-size 64M --disable ListR --onedrive-server-side-across-configs &
