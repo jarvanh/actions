@@ -91,7 +91,7 @@ jobs:
           # sudo rclone sync onedrive:2 alist:123pan2Crypt/2 -vv --tpslimit 5 --transfers 2 --checkers 4 --low-level-retries 10 --retries 5 --retries-sleep 10s --drive-chunk-size 64M --onedrive-server-side-across-configs &
           # sudo rclone sync onedrive:3 alist:123pan2Crypt/3 -vv --tpslimit 5 --transfers 2 --checkers 4 --low-level-retries 10 --retries 5 --retries-sleep 10s --drive-chunk-size 64M --disable ListR --onedrive-server-side-across-configs &
           # sudo rclone sync onedrive:4 alist:baidupanCrypt/4 -vv --tpslimit 5 --transfers 2 --checkers 4 --low-level-retries 10 --retries 5 --retries-sleep 10s --drive-chunk-size 64M --disable ListR --onedrive-server-side-across-configs &
-          sudo rclone sync onedrive:5 alist:baidupanCrypt/5 -vv --tpslimit 5 --transfers 2 --checkers 4 --low-level-retries 10 --retries 5 --retries-sleep 10s --drive-chunk-size 64M --disable ListR --onedrive-server-side-across-configs &
+          sudo rclone sync onedrive:5 alist:baidupanCrypt/5 -vv --tpslimit 5 --transfers 2 --checkers 4 --low-level-retries 10 --retries 5 --retries-sleep 10s --drive-chunk-size 64M --disable ListR --onedrive-server-side-across-configs
           
           # # 在 wait 之前添加新的同步任务
           # sudo rclone sync onedrive: alist:123pan1Crypt/onedrive -vv \
