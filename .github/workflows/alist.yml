@@ -63,7 +63,7 @@ jobs:
       - name: Set up Docker
         uses: docker/setup-buildx-action@v2
       - name: Run alist container
-        run: docker run -d --restart=unless-stopped -v /dropbox/self-hosted/alist:/opt/alist/data -p 5244:5244 -e PUID=0 -e PGID=0 -e UMASK=022 --name="alist" xhofe/alist:latest
+        run: docker run -d --restart=unless-stopped -v /dropbox/self-hosted/alist/data:/opt/alist/data -p 5244:5244 -e PUID=0 -e PGID=0 -e UMASK=022 --name="alist" xhofe/alist:latest
       - name: sleep
         run: |
           sudo sleep 1m    
