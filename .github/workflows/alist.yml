@@ -79,15 +79,15 @@ jobs:
           rclone lsf alist:
 
           echo "==========  onedrive:1  ==========="
-          rclone lsf  onedrive:1 --files-only --min-size 4G
+          rclone ls onedrive:1 --min-size 4G --size-only --order-by size --desc
           echo "==========  onedrive:2  ==========="
-          rclone lsf  onedrive:2 --files-only --min-size 4G
+          rclone ls onedrive:2 --min-size 4G --size-only --order-by size --desc
           echo "==========  onedrive:3  ==========="
-          rclone lsf  onedrive:3 --files-only --min-size 4G
+          rclone ls onedrive:3 --min-size 4G --size-only --order-by size --desc
           echo "==========  onedrive:4  ==========="
-          rclone lsf  onedrive:4 --files-only --min-size 4G
+          rclone ls onedrive:4 --min-size 4G --size-only --order-by size --desc
           echo "==========  onedrive:5  ==========="
-          rclone lsf  onedrive:5 --files-only --min-size 4G
+          rclone ls onedrive:5 --min-size 4G --size-only --order-by size --desc
      
           # sudo rclone copy onedrive:1 alist:123pan1Crypt/1 --progress --fast-list --size-only --transfers 2 --checkers 32
           # sudo rclone copy onedrive:2 alist:123pan2Crypt/2 --progress --fast-list --size-only --transfers 2 --checkers 32
