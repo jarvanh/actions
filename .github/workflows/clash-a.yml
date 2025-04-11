@@ -9,16 +9,10 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
     - name: get clash config a
       run: |
-        curl -k -o clash \
-        -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36" \
-        -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8" \
-        -H "Accept-Language: en-US,en;q=0.5" \
-        -H "Connection: keep-alive" \     
-        ${{ secrets.A }}   
+        curl -k -o clash '${{ secrets.A }}'      
     - name: deploy to gists
       uses: exuanbo/actions-deploy-gist@v1
       with:
