@@ -130,10 +130,10 @@ jobs:
           sleep 1m
           # sudo find /dropbox/self-hosted/teslamate -print | sudo tar -cvpzf /dropbox/self-hosted/teslamate.tar.gz -T -
           # sudo rclone sync /dropbox/self-hosted/teslamate.tar.gz dropbox:self-hosted/ -vv --retries 100
-          sudo rclone sync /dropbox/self-hosted/teslamate dropbox:self-hosted/teslamate -vv --create-empty-src-dirs --retries 100
-          sleep 1m 
+          sudo rclone copy /dropbox/self-hosted/teslamate dropbox:self-hosted/teslamate -vv --create-empty-src-dirs --retries 100
+          sleep 3m 
           # sudo rclone sync /dropbox/self-hosted/teslamate.tar.gz dropbox:self-hosted/ -vv --retries 100
           sudo rclone sync /dropbox/self-hosted/teslamate dropbox:self-hosted/teslamate -vv --create-empty-src-dirs --retries 100
-          sleep 1m 
+          sleep 3m 
           echo "Stopping GitHub Actions"
           exit 31
