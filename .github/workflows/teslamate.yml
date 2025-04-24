@@ -108,7 +108,7 @@ jobs:
       - name: Set up Docker
         uses: docker/setup-buildx-action@v2
       - name: Run teslamate container
-        run: cd /dropbox/self-hosted/teslamate && sudo docker compose up -d
+        run: cd /dropbox/self-hosted/teslamate && sudo docker compose up 
       - name: sleep
         run: |
           sudo sleep 1m    
