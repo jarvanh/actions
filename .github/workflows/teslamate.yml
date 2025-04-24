@@ -127,7 +127,8 @@ jobs:
         run: |
           cd /dropbox/self-hosted/teslamate
           sudo docker compose exec -T database pg_dump -U teslamate teslamate > backup/teslamate_$(date +"%Y-%m-%d").bck
-          find backup -name "teslamate_*.bck" -mtime +13 -exec rm {} \;
+          # 保留最新的14个备份
+          ls -t backup/teslamate_*.bck | tail -n +15 | xargs -r rm -f
           sudo docker compose stop
           docker ps
           sleep 1m
