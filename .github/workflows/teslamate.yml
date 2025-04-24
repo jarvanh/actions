@@ -125,7 +125,10 @@ jobs:
           sudo sleep 300m          
       - name: Stop
         run: |
-          cd /dropbox/self-hosted/teslamate && sudo docker compose stop
+          cd /dropbox/self-hosted/teslamate
+          sudo docker compose exec -T database pg_dump -U teslamate teslamate > backup/teslamate_$(date +"%Y-%m-%d").bck
+          find backup -name "teslamate_*.bck" -mtime +13 -exec rm {} \;
+          sudo docker compose stop
           docker ps
           sleep 1m
           # sudo find /dropbox/self-hosted/teslamate -print | sudo tar -cvpzf /dropbox/self-hosted/teslamate.tar.gz -T -
