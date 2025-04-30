@@ -91,10 +91,10 @@ jobs:
           # rclone ls onedrive:5 --min-size 4G --size-only --order-by size
      
           # sudo rclone copy onedrive:1 alist:123pan1Crypt/1 --progress --fast-list --size-only --transfers 20 --checkers 32
-          sudo rclone copy onedrive:2 alist:123pan2Crypt/2 --progress --fast-list --size-only --transfers 2 --checkers 32
-          sudo rclone copy onedrive:3 alist:123pan2Crypt/3 --progress --fast-list --size-only --transfers 2 --checkers 32
-          # sudo rclone copy onedrive:4 alist:baidupanCrypt/4 --progress --fast-list --size-only --transfers 2 --checkers 32
-          # sudo rclone copy onedrive:5 alist:baidupanCrypt/5 --progress --fast-list --size-only --transfers 2 --checkers 32
+          sudo rclone copy onedrive:2 alist:123pan2Crypt/2 --progress --fast-list --size-only --transfers 20 --checkers 32
+          sudo rclone copy onedrive:3 alist:123pan2Crypt/3 --progress --fast-list --size-only --transfers 20 --checkers 32
+          # sudo rclone copy onedrive:4 alist:baidupanCrypt/4 --progress --fast-list --size-only --transfers 20 --checkers 32
+          # sudo rclone copy onedrive:5 alist:baidupanCrypt/5 --progress --fast-list --size-only --transfers 20 --checkers 32
           
           # sudo rclone copy onedrive: alist:123pan1Crypt/onedrive \
           #     --exclude "1/**" \
