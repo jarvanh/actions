@@ -64,6 +64,15 @@ jobs:
           sudo mkdir ~/.cloudflared/
           sudo rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
 
+          # 查看目录权限
+          ls -ld /dropbox/self-hosted/ql/data/
+          
+          # 修改权限（确保用户有权写入）
+          sudo chmod -R u+rwx /dropbox/self-hosted/ql/data/
+          
+          # 如果目录归属用户不对，修改所有者（例如用户为 `user`）
+          sudo chown -R $(whoami):$(whoami) /dropbox/self-hosted/ql/data/
+
           # 获取隧道列表
           OUTPUT=$(cloudflared tunnel list)
           
