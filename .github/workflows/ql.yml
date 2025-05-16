@@ -100,6 +100,9 @@ jobs:
             --hostname qinglong \
             --restart unless-stopped \
             whyour/qinglong:latest  
+      - name: sleep
+        run: |
+          sudo sleep 1m       
       - name: Verify Qinglong container is running
         run: docker ps    
       - name: run cloudflared
