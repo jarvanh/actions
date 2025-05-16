@@ -49,12 +49,14 @@ jobs:
       - name: rclone-run
         run: |
           sudo apt-get install fuse3
-          sudo mkdir /dropbox
-          sudo nohup rclone mount dropbox: /dropbox --vfs-cache-mode full &
+          # sudo mkdir /dropbox
+          # sudo nohup rclone mount dropbox: /dropbox --vfs-cache-mode full &
           echo "==========onedrive==========="
           rclone lsf onedrive:
           echo "==========dropbox==========="
           rclone lsf dropbox:
+          rclone purge dropbox:self-hosted/ql/data/dep_cache
+          rclone sync dropbox:self-hosted/ql ~/ql -vv
       - name: Check if the tunnel is running
         env:
           TUNNEL_NAME: "ql" # 替换为你的隧道名称
@@ -87,7 +89,8 @@ jobs:
       - name: Run docker container
         run: |
           docker run -dit \
-            -v /dropbox/self-hosted/ql:/ql/data \
+            # -v /dropbox/self-hosted/ql:/ql/data \
+            -v ~/ql:/ql/data \
             -p 5700:5700 \
             --name qinglong \
             --hostname qinglong \
@@ -101,10 +104,12 @@ jobs:
           nohup cloudflared tunnel run --url http://127.0.0.1:5700 ql &
       - name: sleep
         run: |
-          sudo sleep 350m          
+          sudo sleep 330m          
       - name: Stop
         run: |
           docker stop qinglong
           sleep 1m 
+          rclone purge ~/ql/data/dep_cache
+          rclone sync ~/ql dropbox:self-hosted/ql -vv
           echo "Stopping GitHub Actions"
           exit 1
