@@ -55,7 +55,12 @@ jobs:
           rclone lsf onedrive:
           echo "==========dropbox==========="
           rclone lsf dropbox:
-          rclone purge dropbox:self-hosted/ql/data/dep_cache
+          if rclone lsd dropbox:self-hosted/ql/data/dep_cache &>/dev/null; then
+            echo "目录存在，开始删除..."
+            rclone purge dropbox:self-hosted/ql/data/dep_cache
+          else
+            echo "目录不存在，无需删除"
+          fi
           rclone sync dropbox:self-hosted/ql ~/ql -vv
       - name: Check if the tunnel is running
         env:
