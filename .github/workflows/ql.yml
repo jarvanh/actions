@@ -94,7 +94,6 @@ jobs:
       - name: Run docker container
         run: |
           docker run -dit \
-            # -v /dropbox/self-hosted/ql:/ql/data \
             -v ~/ql:/ql/data \
             -p 5700:5700 \
             --name qinglong \
