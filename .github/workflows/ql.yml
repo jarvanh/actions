@@ -111,7 +111,7 @@ jobs:
           nohup cloudflared tunnel run --url http://127.0.0.1:5700 ql &
       - name: sleep
         run: |
-          sudo sleep 330m          
+          sudo sleep 300m          
       - name: Stop
         run: |
           docker stop qinglong
