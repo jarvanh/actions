@@ -117,6 +117,13 @@ jobs:
           docker stop qinglong
           sleep 1m 
           rclone purge dropbox:self-hosted/ql -vv
-          rclone sync ~/ql dropbox:self-hosted/ql -vv --exclude "data/dep_cache/**"
+          rclone sync ~/ql dropbox:self-hosted/ql -vv \
+            --transfers 64 \
+            --checkers 64 \
+            --fast-list \
+            --size-only \
+            --exclude "data/dep_cache/**" \
+            --exclude "*.tmp" \
+            --exclude "*.log"
           echo "Stopping GitHub Actions"
           exit 1
