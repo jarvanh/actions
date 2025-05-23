@@ -116,7 +116,7 @@ jobs:
       - name: Stop
         run: |
           # docker stop qinglong
-          # sleep 1m 
-          tar -czvf ~/ql.tar.gz -C ~/ql . --exclude="*.tmp" --exclude="*.log" && rclone sync ~/ql.tar.gz dropbox:self-hosted/ql/ -vv
+          # sleep 1m
+          tar -czvf ~/ql.tar.gz --exclude="*.tmp" --exclude="*.log" -C ~/ql . && rclone sync ~/ql.tar.gz dropbox:self-hosted/ql/ -vv
           echo "Stopping GitHub Actions"
           exit 1
