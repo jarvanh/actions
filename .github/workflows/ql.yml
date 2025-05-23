@@ -110,9 +110,9 @@ jobs:
         run: |
           cloudflared tunnel route dns ql ql.'${{ secrets.VD }}'.eu.org
           nohup cloudflared tunnel run --url http://127.0.0.1:5700 ql &
-      - name: sleep
-        run: |
-          sudo sleep 330m          
+      # - name: sleep
+      #   run: |
+      #     sudo sleep 330m          
       - name: Stop
         run: |
           docker stop qinglong
