@@ -61,8 +61,8 @@ jobs:
           # else
           #   echo "目录不存在，无需删除"
           # fi
-          rclone sync dropbox:self-hosted/ql ~/ql -vv
-          # rclone sync dropbox:self-hosted/ql/ql.tar.gz ~/ -vv && mkdir -p ~/ql && tar -xzvf ~/ql.tar.gz -C ~/ql
+          # rclone sync dropbox:self-hosted/ql ~/ql -vv
+          rclone sync dropbox:self-hosted/ql/ql.tar.gz ~/ -vv && mkdir -p ~/ql && tar -xzvf ~/ql.tar.gz -C ~/ql
       - name: Check if the tunnel is running
         env:
           TUNNEL_NAME: "ql" # 替换为你的隧道名称
@@ -92,15 +92,15 @@ jobs:
           fi
       - name: Set up Docker
         uses: docker/setup-buildx-action@v2
-      # - name: Run docker container
-      #   run: |
-      #     docker run -dit \
-      #       -v ~/ql:/ql/data \
-      #       -p 5700:5700 \
-      #       --name qinglong \
-      #       --hostname qinglong \
-      #       --restart unless-stopped \
-      #       whyour/qinglong:latest  
+      - name: Run docker container
+        run: |
+          docker run -dit \
+            -v ~/ql:/ql/data \
+            -p 5700:5700 \
+            --name qinglong \
+            --hostname qinglong \
+            --restart unless-stopped \
+            whyour/qinglong:latest  
       - name: sleep
         run: |
           sudo sleep 1m       
@@ -110,9 +110,9 @@ jobs:
         run: |
           cloudflared tunnel route dns ql ql.'${{ secrets.VD }}'.eu.org
           nohup cloudflared tunnel run --url http://127.0.0.1:5700 ql &
-      # - name: sleep
-      #   run: |
-      #     sudo sleep 330m          
+      - name: sleep
+        run: |
+          sudo sleep 350m          
       - name: Stop
         run: |
           # docker stop qinglong
