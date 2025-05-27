@@ -2,8 +2,8 @@ name: alist
 
 on:
   schedule:
-    # - cron: "0 1,7,13,19 * * *"
-    - cron: "0 * * * *"
+    - cron: "0 1,7,13,19 * * *"
+    # - cron: "0 * * * *"
   workflow_dispatch:
   # workflow_run:
   #   workflows:
@@ -16,7 +16,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # timeout-minutes: 60
     steps:
       # - name: Check Workflow Status
       #   run: |
@@ -91,11 +91,11 @@ jobs:
           # echo "==========  onedrive:5  ==========="
           # rclone ls onedrive:5 --min-size 4G --size-only --order-by size
      
-          sudo rclone copy onedrive:1 alist:123pan1Crypt/1 --progress --fast-list --size-only --transfers 20 --checkers 32
-          # sudo rclone copy onedrive:2 alist:123pan2Crypt/2 --progress --fast-list --size-only --transfers 2 --checkers 32
-          # sudo rclone copy onedrive:3 alist:123pan2Crypt/3 --progress --fast-list --size-only --transfers 2 --checkers 32
-          # sudo rclone copy onedrive:4 alist:baidupanCrypt/4 --progress --fast-list --size-only --transfers 2 --checkers 32
-          # sudo rclone copy onedrive:5 alist:baidupanCrypt/5 --progress --fast-list --size-only --transfers 2 --checkers 32
+          sudo rclone copy onedrive:1 alist:123pan1Crypt/1 --progress --fast-list --size-only --transfers 1 --checkers 32
+          # sudo rclone copy onedrive:2 alist:123pan2Crypt/2 --progress --fast-list --size-only --transfers 1 --checkers 32
+          # sudo rclone copy onedrive:3 alist:123pan2Crypt/3 --progress --fast-list --size-only --transfers 1 --checkers 32
+          # sudo rclone copy onedrive:4 alist:baidupanCrypt/4 --progress --fast-list --size-only --transfers 1 --checkers 32
+          # sudo rclone copy onedrive:5 alist:baidupanCrypt/5 --progress --fast-list --size-only --transfers 1 --checkers 32
           
           sudo rclone copy onedrive: alist:123pan1Crypt/onedrive \
               --exclude "1/**" \
@@ -103,7 +103,7 @@ jobs:
               --exclude "3/**" \
               --exclude "4/**" \
               --exclude "5/**" \
-              --progress --fast-list --size-only --transfers 20 --checkers 32 
+              --progress --fast-list --size-only --transfers 1 --checkers 32 
       - name: Verify docker container is running
         run: docker ps
       - name: sleep
