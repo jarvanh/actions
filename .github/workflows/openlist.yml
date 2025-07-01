@@ -25,7 +25,7 @@ jobs:
       #       -H "Authorization: Bearer ${{ secrets.PAT }}" \
       #       "https://api.github.com/repos/${{ github.repository }}/actions/runs")
           
-      #     isRunning=$(echo "$workflow_runs" | jq '.workflow_runs[] | select(.name == "alist" and .status == "in_progress")')
+      #     isRunning=$(echo "$workflow_runs" | jq '.workflow_runs[] | select(.name == "openlist" and .status == "in_progress")')
           
       #     if [[ -n $isRunning ]]; then
       #       echo "Another workflow is already running. Aborting current workflow."
@@ -65,7 +65,7 @@ jobs:
       - name: Set up Docker
         uses: docker/setup-buildx-action@v2
       - name: Run alist container
-        run: docker run -d --restart=unless-stopped -v /dropbox/self-hosted/alist/data:/opt/alist/data -p 5244:5244 -e PUID=0 -e PGID=0 -e UMASK=022 --name="alist" xhofe/alist:latest
+        run: docker run -d --restart=unless-stopped -v /dropbox/self-hosted/openlist:/opt/openlist/data -p 5244:5244 -e PUID=0 -e PGID=0 -e UMASK=022 --name="openlist" openlistteam/openlist:latest
       - name: sleep
         run: |
           sudo sleep 1m    
@@ -77,8 +77,8 @@ jobs:
           rclone lsf onedrive:
           echo "==========dropbox==========="
           rclone lsf dropbox:
-          echo "==========alist==========="
-          rclone lsf alist:
+          echo "==========openlist==========="
+          rclone lsf openlist:
 
           # echo "==========  onedrive:1  ==========="
           # rclone ls onedrive:1 --min-size 4G --size-only --order-by size
@@ -91,13 +91,13 @@ jobs:
           # echo "==========  onedrive:5  ==========="
           # rclone ls onedrive:5 --min-size 4G --size-only --order-by size
      
-          sudo rclone copy onedrive:1 alist:123pan1Crypt/1 --progress --fast-list --size-only --transfers 1 --checkers 32
-          # sudo rclone copy onedrive:2 alist:123pan2Crypt/2 --progress --fast-list --size-only --transfers 1 --checkers 32
-          # sudo rclone copy onedrive:3 alist:123pan2Crypt/3 --progress --fast-list --size-only --transfers 1 --checkers 32
-          # sudo rclone copy onedrive:4 alist:baidupanCrypt/4 --progress --fast-list --size-only --transfers 1 --checkers 32
-          # sudo rclone copy onedrive:5 alist:baidupanCrypt/5 --progress --fast-list --size-only --transfers 1 --checkers 32
+          sudo rclone copy onedrive:1 openlist:123pan1Crypt/1 --progress --fast-list --size-only --transfers 1 --checkers 32
+          # sudo rclone copy onedrive:2 openlist:123pan2Crypt/2 --progress --fast-list --size-only --transfers 1 --checkers 32
+          # sudo rclone copy onedrive:3 openlist:123pan2Crypt/3 --progress --fast-list --size-only --transfers 1 --checkers 32
+          # sudo rclone copy onedrive:4 openlist:baidupanCrypt/4 --progress --fast-list --size-only --transfers 1 --checkers 32
+          # sudo rclone copy onedrive:5 openlist:baidupanCrypt/5 --progress --fast-list --size-only --transfers 1 --checkers 32
           
-          sudo rclone copy onedrive: alist:123pan1Crypt/onedrive \
+          sudo rclone copy onedrive: openlist:123pan1Crypt/onedrive \
               --exclude "1/**" \
               --exclude "2/**" \
               --exclude "3/**" \
