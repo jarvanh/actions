@@ -115,10 +115,11 @@ jobs:
           sudo sleep 5m          
       - name: Stop
         run: |
-          # docker stop qinglong
-          # sleep 1m
+          docker stop qinglong
+          sleep 1m
           tar -czvf ~/ql.tar.gz --exclude="*.tmp" --exclude="*.log" -C ~/ql .
-          echo "Sync Sync Sync"
+      - name: sync
+        run: |
           rclone sync ~/ql.tar.gz dropbox:self-hosted/ql/ -vv
           sleep 3m
           echo "Stopping GitHub Actions"
