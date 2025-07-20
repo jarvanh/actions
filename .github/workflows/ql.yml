@@ -112,7 +112,7 @@ jobs:
           nohup cloudflared tunnel run --url http://127.0.0.1:5700 ql &
       - name: sleep
         run: |
-          sudo sleep 5m          
+          sudo sleep 350m          
       - name: Stop
         run: |
           docker stop qinglong
@@ -121,6 +121,8 @@ jobs:
       - name: sync
         run: |
           rclone sync ~/ql.tar.gz dropbox:self-hosted/ql/ -vv
-          sleep 3m
+          sleep 1m
+          rclone sync ~/ql.tar.gz dropbox:self-hosted/ql/ -vv
+          sleep 1m
           echo "Stopping GitHub Actions"
           exit 1
