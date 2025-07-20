@@ -117,7 +117,7 @@ jobs:
         run: |
           docker stop qinglong
           sleep 1m
-          tar -czvf ~/ql.tar.gz --exclude="*.tmp" --exclude="*.log" -C ~/ql .
+          tar -czvf ~/ql.tar.gz --exclude="*.tmp" --exclude="*.log" --exclude="./dep_cache" -C ~/ql .
       - name: sync
         run: |
           rclone sync ~/ql.tar.gz dropbox:self-hosted/ql/ -vv
