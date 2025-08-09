@@ -2,8 +2,8 @@ name: openlist
 
 on:
   schedule:
-    - cron: "0 1,7,13,19 * * *"
-    # - cron: "0 * * * *"
+    # - cron: "0 1,7,13,19 * * *"
+    - cron: "*/180 * * * *"
   workflow_dispatch:
   # workflow_run:
   #   workflows:
@@ -91,7 +91,7 @@ jobs:
           # echo "==========  onedrive:5  ==========="
           # rclone ls onedrive:5 --min-size 4G --size-only --order-by size
      
-          # sudo rclone copy onedrive:1 openlist:baidupanCrypt/1 --progress --fast-list --size-only --transfers 1 --checkers 32
+          sudo rclone copy onedrive:1 openlist:baidupanCrypt/1 --progress --fast-list --size-only --transfers 1 --checkers 32
           # sudo rclone copy onedrive:2 openlist:123pan1Crypt/2 --progress --fast-list --size-only --transfers 1 --checkers 32
           # sudo rclone copy onedrive:3 openlist:123pan1Crypt/3 --progress --fast-list --size-only --transfers 1 --checkers 32
           # sudo rclone copy onedrive:4 openlist:123pan2Crypt/4 --progress --fast-list --size-only --transfers 1 --checkers 32
