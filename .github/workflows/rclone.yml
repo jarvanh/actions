@@ -55,4 +55,4 @@ jobs:
           echo "==========onedrive==========="
           rclone lsf onedrive:
 
-          rclone sync onedrive:self-hosted/teslamate dropbox:self-hosted/teslamate -vv
+          rclone sync onedrive:0000 onedrive:0 -vv
