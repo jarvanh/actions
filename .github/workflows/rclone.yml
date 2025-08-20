@@ -48,8 +48,6 @@ jobs:
           EOF
       - name: rclone-run
         run: |
-          echo "==========o==========="
-          rclone lsf o:
           echo "==========dropbox==========="
           rclone lsf dropbox:
           echo "==========onedrive==========="
