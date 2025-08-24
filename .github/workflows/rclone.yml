@@ -30,7 +30,7 @@ jobs:
       - name: rclone-install
         run: |
           # 安装 rclone
-          curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
+          # curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
           curl -O https://beta.rclone.org/rclone-beta-latest-linux-amd64.zip
           unzip rclone-*-amd64.zip
           cd rclone-*-linux-amd64
