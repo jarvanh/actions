@@ -53,4 +53,4 @@ jobs:
           echo "==========onedrive==========="
           rclone lsf onedrive:
           rclone sync onedrive:0-old/ o:0/ -vv --drive-server-side-across-configs
-          rclone sync onedrive:0-old gd:0 -vv --drive-server-side-across-configs
+          # rclone sync onedrive:0-old gd:0 -vv --drive-server-side-across-configs
