@@ -52,4 +52,4 @@ jobs:
           rclone lsf dropbox:
           echo "==========onedrive==========="
           rclone lsf onedrive:
-          # rclone sync onedrive:1 gd:0 -vv
+          rclone sync onedrive:1 gd:0 -vv
