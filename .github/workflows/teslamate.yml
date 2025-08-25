@@ -127,17 +127,18 @@ jobs:
         run: |
           cd /dropbox/self-hosted/teslamate && sudo docker compose exec -T database pg_dump -U teslamate teslamate > ~/teslamate_$(date +"%Y-%m-%d").bck
           sudo rclone copy ~/teslamate_$(date +"%Y-%m-%d").bck /dropbox/self-hosted/teslamate/backup/ -vv
-          # 保留最新的14个备份
-          ls -t /dropbox/self-hosted/teslamate/backup/teslamate_*.bck | tail -n +15 | xargs -r rm -f
           sudo docker compose stop
           docker ps
           sleep 1m
           # sudo find /dropbox/self-hosted/teslamate -print | sudo tar -cvpzf /dropbox/self-hosted/teslamate.tar.gz -T -
           # sudo rclone sync /dropbox/self-hosted/teslamate.tar.gz dropbox:self-hosted/ -vv --retries 100
           sudo rclone copy /dropbox/self-hosted/teslamate dropbox:self-hosted/teslamate -vv --create-empty-src-dirs --retries 100
-          sleep 3m 
+          sleep 1m 
           # sudo rclone sync /dropbox/self-hosted/teslamate.tar.gz dropbox:self-hosted/ -vv --retries 100
           sudo rclone sync /dropbox/self-hosted/teslamate dropbox:self-hosted/teslamate -vv --create-empty-src-dirs --retries 100
-          sleep 3m 
+          sleep 1m
+          # 保留最新的14个备份
+          ls -t /dropbox/self-hosted/teslamate/backup/teslamate_*.bck | tail -n +15 | xargs -r sudo rm -f
+          sleep 1m
           echo "Stopping GitHub Actions"
           exit 31
