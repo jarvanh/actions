@@ -52,6 +52,6 @@ jobs:
           rclone lsf dropbox:
           echo "==========onedrive==========="
           rclone lsf onedrive:
-          rclone sync onedrive:backup000/ o:backup -vv --drive-server-side-across-configs
+          # rclone sync onedrive:backup000/ o:backup -vv --drive-server-side-across-configs
           rclone sync onedrive:0-old/ o:0/ -vv --drive-server-side-across-configs
           # rclone sync onedrive:0-old gd:0 -vv --drive-server-side-across-configs
