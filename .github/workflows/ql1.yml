@@ -61,7 +61,7 @@ jobs:
           # else
           #   echo "目录不存在，无需删除"
           # fi
-          rclone sync dropbox:self-hosted/ql1 ~/ql -vv --exclude "*.log" --exclude "dep_cache/**"
+          rclone sync dropbox:self-hosted/ql1 ~/ql -vv --exclude "*.log" --exclude "dep_cache/**" --exclude "repo/**" --exclude "scripts/**"
           # rclone sync dropbox:self-hosted/ql/ql.tar.gz ~/ -vv && mkdir -p ~/ql && tar -xzvf ~/ql.tar.gz -C ~/ql
       - name: Check if the tunnel is running
         env:
@@ -123,7 +123,7 @@ jobs:
           # rclone sync ~/ql.tar.gz dropbox:self-hosted/ql/ -vv
           # sleep 1m
           # rclone sync ~/ql.tar.gz dropbox:self-hosted/ql/ -vv
-          rclone sync ~/ql dropbox:self-hosted/ql1 -vv --exclude "*.log" --exclude "dep_cache/**"
+          rclone sync ~/ql dropbox:self-hosted/ql1 -vv --exclude "*.log" --exclude "dep_cache/**" --exclude "repo/**" --exclude "scripts/**"
           sleep 1m
           echo "Stopping GitHub Actions"
           exit 1
