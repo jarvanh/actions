@@ -1,0 +1,129 @@
+name: ql3
+
+on:
+  schedule:
+    # - cron: "0 2,8,14,20 * * *"
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+  watch:
+    # types: started
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # - name: Check Workflow Status
+      #   run: |
+      #     workflow_runs=$(curl -s -X GET \
+      #       -H "Accept: application/vnd.github.v3+json" \
+      #       -H "Authorization: Bearer ${{ secrets.PAT }}" \
+      #       "https://api.github.com/repos/${{ github.repository }}/actions/runs")
+          
+      #     isRunning=$(echo "$workflow_runs" | jq '.workflow_runs[] | select(.name == "ql" and .status == "in_progress")')
+          
+      #     if [[ -n $isRunning ]]; then
+      #       echo "Another workflow is already running. Aborting current workflow."
+      #       exit 31
+      #     else
+      #       echo "No running workflows found. Continuing with the workflow execution."
+      #     fi
+      - name: rclone-install
+        run: |
+          # 安装 rclone
+          curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
+          # curl -O https://beta.rclone.org/rclone-beta-latest-linux-amd64.zip
+          unzip rclone-*-amd64.zip
+          cd rclone-*-linux-amd64
+          sudo mv rclone /usr/bin
+          sudo chmod +x /usr/bin/rclone
+          # sudo apt-get install rclone
+      - name: rclone-config
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE }}
+        run: |
+          # 写配置文件
+          mkdir -p ~/.config/rclone/
+          cat << EOF > ~/.config/rclone/rclone.conf
+          $RCLONE_CONFIG
+          EOF
+      - name: rclone-run
+        run: |
+          sudo apt-get install fuse3
+          # sudo mkdir /dropbox
+          # sudo nohup rclone mount dropbox: /dropbox --vfs-cache-mode full &
+          echo "==========onedrive==========="
+          rclone lsf onedrive:
+          echo "==========dropbox==========="
+          rclone lsf dropbox:
+          # if rclone lsd dropbox:self-hosted/ql/data/dep_cache &>/dev/null; then
+          #   echo "目录存在，开始删除..."
+          #   rclone purge dropbox:self-hosted/ql/data/dep_cache
+          # else
+          #   echo "目录不存在，无需删除"
+          # fi
+          # rclone sync dropbox:self-hosted/ql3 ~/ql -vv --exclude "*.log" --exclude "dep_cache/**" --exclude "repo/**" --exclude "scripts/**"
+          rclone sync dropbox:self-hosted/ql3/ql.tar.gz ~/ -vv && mkdir -p ~/ql && tar -xzvf ~/ql.tar.gz -C ~/ql
+      - name: Check if the tunnel is running
+        env:
+          TUNNEL_NAME: "ql3" # 替换为你的隧道名称
+        run: |
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
+          sudo mkdir ~/.cloudflared/
+          sudo rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
+
+          # 获取隧道列表
+          OUTPUT=$(cloudflared tunnel list)
+          
+          # 查找目标隧道的行
+          TUNNEL_LINE=$(echo "$OUTPUT" | grep -w "$TUNNEL_NAME")
+          if [ -z "$TUNNEL_LINE" ]; then
+            echo "The tunnel '$TUNNEL_NAME' does not exist. Proceeding."
+            exit 31
+          fi
+  
+          # 提取 CONNECTIONS 列并检查是否为空
+          CONNECTIONS=$(echo "$TUNNEL_LINE" | awk '{if (NF>=4) print $4; else print "-"}')
+          if [ "$CONNECTIONS" == "-" ]; then
+            echo "The tunnel '$TUNNEL_NAME' exists but has no active connections. Proceeding."
+          else
+            echo "The tunnel '$TUNNEL_NAME' is running with connections: $CONNECTIONS. Stopping actions."
+            exit 31
+          fi
+      - name: Set up Docker
+        uses: docker/setup-buildx-action@v2
+      - name: Run docker container
+        run: |
+          docker run -dit \
+            -v ~/ql:/ql/data \
+            -p 5700:5700 \
+            --name qinglong \
+            --hostname qinglong \
+            --restart unless-stopped \
+            whyour/qinglong:latest  
+      - name: sleep
+        run: |
+          sudo sleep 1m       
+      - name: Verify Qinglong container is running
+        run: docker ps    
+      - name: run cloudflared
+        run: |
+          cloudflared tunnel route dns ql3 ql3.'${{ secrets.VD }}'.eu.org
+          nohup cloudflared tunnel run --url http://127.0.0.1:5700 ql3 &
+      - name: sleep
+        run: |
+          sudo sleep 350m          
+      - name: Stop
+        run: |
+          docker stop qinglong
+          sleep 1m
+          tar -czvf ~/ql.tar.gz --exclude="*.tmp" --exclude="*.log" --exclude="./dep_cache" -C ~/ql .
+      - name: sync
+        run: |
+          rclone sync ~/ql.tar.gz dropbox:self-hosted/ql3/ -vv
+          sleep 1m
+          rclone sync ~/ql.tar.gz dropbox:self-hosted/ql3/ -vv
+          # rclone sync ~/ql dropbox:self-hosted/ql3 -vv --exclude "*.log" --exclude "dep_cache/**" --exclude "repo/**" --exclude "scripts/**"
+          sleep 1m
+          echo "Stopping GitHub Actions"
+          exit 1
