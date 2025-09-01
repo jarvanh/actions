@@ -80,8 +80,8 @@ jobs:
           echo "==========openlist==========="
           rclone lsf openlist:
 
-          echo "==========  onedrive:0  ==========="
-          rclone ls onedrive:0 --min-size 4G --size-only --order-by size
+          # echo "==========  onedrive:0  ==========="
+          # rclone ls onedrive:0 --min-size 4G --size-only --order-by size
           # echo "==========  onedrive:1  ==========="
           # rclone ls onedrive:1 --min-size 4G --size-only --order-by size
           # echo "==========  onedrive:2  ==========="
@@ -92,7 +92,7 @@ jobs:
           # rclone ls onedrive:4 --min-size 4G --size-only --order-by size
           # echo "==========  onedrive:5  ==========="
           # rclone ls onedrive:5 --min-size 4G --size-only --order-by size
-          echo "==========  onedrive:  ==========="
+          # echo "==========  onedrive:  ==========="
           # rclone ls onedrive: \
           #     --exclude "1/**" \
           #     --exclude "2/**" \
@@ -100,20 +100,22 @@ jobs:
           #     --exclude "4/**" \
           #     --exclude "5/**" \
           #     --min-size 4G --size-only --order-by size
+
+          sudo rclone sync onedrive: openlist:baidupanCrypt/onedrive \
+              --exclude "1/**" \
+              --exclude "2/**" \
+              --exclude "3/**" \
+              --exclude "4/**" \
+              --exclude "5/**" \
+              --progress --fast-list --size-only --transfers 1 --checkers 32 
      
-          # sudo rclone sync onedrive:1 openlist:baidupanCrypt/1 --progress --fast-list --size-only --transfers 1 --checkers 32
-          # sudo rclone sync onedrive:2 openlist:123pan1Crypt/2 --progress --fast-list --size-only --transfers 1 --checkers 32
-          # sudo rclone sync onedrive:3 openlist:123pan1Crypt/3 --progress --fast-list --size-only --transfers 1 --checkers 32
-          # sudo rclone sync onedrive:4 openlist:123pan2Crypt/4 --progress --fast-list --size-only --transfers 1 --checkers 32
-          # sudo rclone sync onedrive:5 openlist:123pan2Crypt/5 --progress --fast-list --size-only --transfers 1 --checkers 32
+          sudo rclone sync onedrive:1 openlist:baidupanCrypt/1 --progress --fast-list --size-only --transfers 1 --checkers 32
+          sudo rclone sync onedrive:2 openlist:123pan1Crypt/2 --progress --fast-list --size-only --transfers 1 --checkers 32
+          sudo rclone sync onedrive:3 openlist:123pan1Crypt/3 --progress --fast-list --size-only --transfers 1 --checkers 32
+          sudo rclone sync onedrive:4 openlist:123pan2Crypt/4 --progress --fast-list --size-only --transfers 1 --checkers 32
+          sudo rclone sync onedrive:5 openlist:123pan2Crypt/5 --progress --fast-list --size-only --transfers 1 --checkers 32
           
-          # sudo rclone sync onedrive: openlist:baidupanCrypt/onedrive \
-          #     --exclude "1/**" \
-          #     --exclude "2/**" \
-          #     --exclude "3/**" \
-          #     --exclude "4/**" \
-          #     --exclude "5/**" \
-          #     --progress --fast-list --size-only --transfers 1 --checkers 32 
+
       - name: Verify docker container is running
         run: docker ps
       - name: sleep
