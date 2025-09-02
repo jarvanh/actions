@@ -103,54 +103,54 @@ jobs:
 
 
           
-          # 统计 onedrive:0 的总大小
-          echo "==========  onedrive:0  ==========="
-          rclone size onedrive:0
+          # # 统计 onedrive:0 的总大小
+          # echo "==========  onedrive:0  ==========="
+          # rclone size onedrive:0
           
-          # 统计 onedrive:1 的总大小
-          echo "==========  onedrive:1  ==========="
-          rclone size onedrive:1
+          # # 统计 onedrive:1 的总大小
+          # echo "==========  onedrive:1  ==========="
+          # rclone size onedrive:1
           
-          # 统计 onedrive:2 的总大小
-          echo "==========  onedrive:2  ==========="
-          rclone size onedrive:2
+          # # 统计 onedrive:2 的总大小
+          # echo "==========  onedrive:2  ==========="
+          # rclone size onedrive:2
           
-          # 统计 onedrive:3 的总大小
-          echo "==========  onedrive:3  ==========="
-          rclone size onedrive:3
+          # # 统计 onedrive:3 的总大小
+          # echo "==========  onedrive:3  ==========="
+          # rclone size onedrive:3
           
-          # 统计 onedrive:4 的总大小
-          echo "==========  onedrive:4  ==========="
-          rclone size onedrive:4
+          # # 统计 onedrive:4 的总大小
+          # echo "==========  onedrive:4  ==========="
+          # rclone size onedrive:4
           
-          # 统计 onedrive:5 的总大小
-          echo "==========  onedrive:5  ==========="
-          rclone size onedrive:5
+          # # 统计 onedrive:5 的总大小
+          # echo "==========  onedrive:5  ==========="
+          # rclone size onedrive:5
           
-          # 统计根目录（排除子目录 1-5）的总大小
-          echo "==========  onedrive: (excluding 1-5) ==========="
-          rclone size onedrive: \
-              --exclude "1/**" \
-              --exclude "2/**" \
-              --exclude "3/**" \
-              --exclude "4/**" \
-              --exclude "5/**"
-          
-
-
-          # sudo rclone sync onedrive: openlist:baidupanCrypt/onedrive \
+          # # 统计根目录（排除子目录 1-5）的总大小
+          # echo "==========  onedrive: (excluding 1-5) ==========="
+          # rclone size onedrive: \
           #     --exclude "1/**" \
           #     --exclude "2/**" \
           #     --exclude "3/**" \
           #     --exclude "4/**" \
-          #     --exclude "5/**" \
-          #     --progress --fast-list --size-only --transfers 1 --checkers 32 
+          #     --exclude "5/**"
+          
+
+
+          sudo rclone sync onedrive: openlist:baidupanCrypt/onedrive \
+              --exclude "1/**" \
+              --exclude "2/**" \
+              --exclude "3/**" \
+              --exclude "4/**" \
+              --exclude "5/**" \
+              --progress --fast-list --size-only --transfers 1 --checkers 32 
      
-          # sudo rclone sync onedrive:1 openlist:baidupanCrypt/1 --progress --fast-list --size-only --transfers 1 --checkers 32
-          # sudo rclone sync onedrive:2 openlist:123pan1Crypt/2 --progress --fast-list --size-only --transfers 1 --checkers 32
-          # sudo rclone sync onedrive:3 openlist:123pan1Crypt/3 --progress --fast-list --size-only --transfers 1 --checkers 32
-          # sudo rclone sync onedrive:4 openlist:123pan2Crypt/4 --progress --fast-list --size-only --transfers 1 --checkers 32
-          # sudo rclone sync onedrive:5 openlist:123pan2Crypt/5 --progress --fast-list --size-only --transfers 1 --checkers 32
+          sudo rclone sync onedrive:1 openlist:baidupanCrypt/1 --progress --fast-list --size-only --transfers 1 --checkers 32
+          sudo rclone sync onedrive:2 openlist:123pan1Crypt/2 --progress --fast-list --size-only --transfers 1 --checkers 32
+          sudo rclone sync onedrive:3 openlist:123pan1Crypt/3 --progress --fast-list --size-only --transfers 1 --checkers 32
+          sudo rclone sync onedrive:4 openlist:123pan2Crypt/4 --progress --fast-list --size-only --transfers 1 --checkers 32
+          sudo rclone sync onedrive:5 openlist:123pan2Crypt/5 --progress --fast-list --size-only --transfers 1 --checkers 32
         
       - name: Verify docker container is running
         run: docker ps
