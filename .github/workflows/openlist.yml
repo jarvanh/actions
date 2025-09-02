@@ -18,7 +18,7 @@ jobs:
     concurrency: openlist-singleton
     runs-on: ubuntu-latest
     # timeout-minutes: 60
-    # steps:
+    steps:
     #   - name: Check Workflow Status
     #     run: |
     #       # 获取当前工作流的运行ID
