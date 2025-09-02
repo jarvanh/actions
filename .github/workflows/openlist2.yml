@@ -3,7 +3,7 @@ name: openlist2
 on:
   schedule:
     # - cron: "0 1,7,13,19 * * *"
-    - cron: "*/180 * * * *"
+    - cron: "*/360 * * * *"
   workflow_dispatch:
   # workflow_run:
   #   workflows:
