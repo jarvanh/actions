@@ -15,23 +15,29 @@ on:
 
 jobs:
   build:
+    concurrency: openlist2-singleton 
     runs-on: ubuntu-latest
     # timeout-minutes: 60
     steps:
       - name: Check Workflow Status
         run: |
+          # 获取当前工作流的运行ID
+          CURRENT_RUN_ID=${{ github.run_id }}
+    
           workflow_runs=$(curl -s -X GET \
             -H "Accept: application/vnd.github.v3+json" \
             -H "Authorization: Bearer ${{ secrets.PAT }}" \
             "https://api.github.com/repos/${{ github.repository }}/actions/runs")
-          
-          isRunning=$(echo "$workflow_runs" | jq '.workflow_runs[] | select(.name == "openlist2" and .status == "in_progress")')
-          
-          if [[ -n $isRunning ]]; then
+    
+          # 排除当前运行ID后检查是否有其他运行中的工作流
+          otherRunning=$(echo "$workflow_runs" | jq --arg current_id "$CURRENT_RUN_ID" \
+            '.workflow_runs[] | select(.name == "openlist2" and .status == "in_progress" and .id != ($current_id | tonumber))')
+    
+          if [[ -n $otherRunning ]]; then
             echo "Another workflow is already running. Aborting current workflow."
             exit 31
           else
-            echo "No running workflows found. Continuing with the workflow execution."
+            echo "No other running workflows found. Continuing."
           fi
       - name: rclone-install
         run: |
