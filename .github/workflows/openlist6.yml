@@ -98,8 +98,8 @@ jobs:
           # rclone ls onedrive:5 --min-size 4G --size-only --order-by size
      
           # sudo rclone sync onedrive:1 openlist:baidupanCrypt/1 -vv --progress --fast-list --size-only --transfers 1 --checkers 32
-          sudo rclone sync onedrive:2 openlist:wopan/2 -vv --progress
-          sudo rclone sync onedrive:3 openlist:wopan/3 -vv --progress
+          sudo rclone sync onedrive:2 openlist:wopanCrypt/2 -vv --progress
+          sudo rclone sync onedrive:3 openlist:wopanCrypt/3 -vv --progress
           # sudo rclone sync onedrive:3 openlist:123pan1Crypt/3 -vv --progress --fast-list --size-only --transfers 1 --checkers 32
           # sudo rclone sync onedrive:4 openlist:123pan2Crypt/4 -vv --progress --fast-list --size-only --transfers 1 --checkers 32
           # sudo rclone sync onedrive:5 openlist:123pan2Crypt/5 -vv --progress --fast-list --size-only --transfers 1 --checkers 32
