@@ -125,8 +125,8 @@ jobs:
           sudo sleep 300m          
       - name: Stop
         run: |
-          cd /dropbox/self-hosted/teslamate && sudo docker compose exec -T database pg_dump -U teslamate teslamate > ~/teslamate_$(date +"%Y-%m-%d").bck
-          sudo rclone copy ~/teslamate_$(date +"%Y-%m-%d").bck /dropbox/self-hosted/teslamate/backup/ -vv
+          # cd /dropbox/self-hosted/teslamate && sudo docker compose exec -T database pg_dump -U teslamate teslamate > ~/teslamate_$(date +"%Y-%m-%d").bck
+          # sudo rclone copy ~/teslamate_$(date +"%Y-%m-%d").bck /dropbox/self-hosted/teslamate/backup/ -vv
           sudo docker compose stop
           sleep 1m
           docker ps      
