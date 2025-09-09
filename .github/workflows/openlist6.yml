@@ -64,6 +64,8 @@ jobs:
           rclone lsf onedrive:
           echo "==========dropbox==========="
           rclone lsf dropbox:
+          echo "==========openlist==========="
+          rclone lsf openlist:
 
           sudo apt-get install fuse3
           sudo mkdir -p /dropbox
@@ -84,7 +86,7 @@ jobs:
           echo "==========dropbox==========="
           rclone lsf dropbox:
           echo "==========openlist==========="
-          rclone lsf openlist:
+          rclone lsf openlist:wopanCrypt
 
           # echo "==========  onedrive:1  ==========="
           # rclone ls onedrive:1 --min-size 4G --size-only --order-by size
