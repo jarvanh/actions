@@ -86,7 +86,7 @@ jobs:
           echo "==========dropbox==========="
           rclone lsf dropbox:
           echo "==========openlist==========="
-          rclone lsf openlist:wopanCrypt
+          rclone lsf openlist:wopan
 
           # echo "==========  onedrive:1  ==========="
           # rclone ls onedrive:1 --min-size 4G --size-only --order-by size
