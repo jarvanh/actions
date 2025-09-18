@@ -122,23 +122,35 @@ jobs:
         run: docker ps 
       - name: sleep
         run: |
-          sudo sleep 300m          
+          sudo sleep 10m          
+      # - name: Stop
+      #   run: |
+      #     cd /dropbox/self-hosted/teslamate && sudo docker compose exec -T database pg_dump -U teslamate teslamate > ~/teslamate_$(date +"%Y-%m-%d").bck
+      #     sudo rclone copy ~/teslamate_$(date +"%Y-%m-%d").bck /dropbox/self-hosted/teslamate/backup/ -vv
+      #     sudo docker compose stop
+      #     sleep 1m
+      #     docker ps      
+      #     sudo find /dropbox/self-hosted/teslamate -print | sudo tar -cvpzf /dropbox/self-hosted/teslamate.tar.gz -T -
+      #     sudo rclone sync /dropbox/self-hosted/teslamate.tar.gz dropbox:self-hosted/ -vv --retries 100
+      #     sudo rclone sync /dropbox/self-hosted/teslamate dropbox:self-hosted/teslamate -vv --create-empty-src-dirs --retries 100
+      #     sleep 1m 
+      #     sudo rclone sync /dropbox/self-hosted/teslamate.tar.gz dropbox:self-hosted/ -vv --retries 100
+      #     sudo rclone sync /dropbox/self-hosted/teslamate dropbox:self-hosted/teslamate -vv --create-empty-src-dirs --retries 100
+      #     sleep 1m
+      #     # 保留最新的7个备份
+      #     # ls -t /dropbox/self-hosted/teslamate/backup/teslamate_*.bck | tail -n +8 | xargs -r sudo rm -f
+      #     sleep 1m
+      #     echo "Stopping GitHub Actions"
+      #     exit 31
       - name: Stop
         run: |
-          # cd /dropbox/self-hosted/teslamate && sudo docker compose exec -T database pg_dump -U teslamate teslamate > ~/teslamate_$(date +"%Y-%m-%d").bck
-          # sudo rclone copy ~/teslamate_$(date +"%Y-%m-%d").bck /dropbox/self-hosted/teslamate/backup/ -vv
           sudo docker compose stop
           sleep 1m
           docker ps      
           sudo find /dropbox/self-hosted/teslamate -print | sudo tar -cvpzf /dropbox/self-hosted/teslamate.tar.gz -T -
           sudo rclone sync /dropbox/self-hosted/teslamate.tar.gz dropbox:self-hosted/ -vv --retries 100
-          # sudo rclone sync /dropbox/self-hosted/teslamate dropbox:self-hosted/teslamate -vv --create-empty-src-dirs --retries 100
           sleep 1m 
           sudo rclone sync /dropbox/self-hosted/teslamate.tar.gz dropbox:self-hosted/ -vv --retries 100
-          # sudo rclone sync /dropbox/self-hosted/teslamate dropbox:self-hosted/teslamate -vv --create-empty-src-dirs --retries 100
           sleep 1m
-          # 保留最新的7个备份
-          # ls -t /dropbox/self-hosted/teslamate/backup/teslamate_*.bck | tail -n +8 | xargs -r sudo rm -f
-          sleep 1m
-          echo "Stopping GitHub Actions"
-          exit 31
+          echo "成功​​ ✅"
+          exit 0
