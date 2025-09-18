@@ -49,7 +49,11 @@ jobs:
       - name: rclone-run
         run: |
           # sudo apt-get install fuse3
-          rclone lsf dropbox:self-hosted/emby/config/ --files-only | grep -q "system.xml" && rclone delete dropbox:self-hosted/emby/config/system.xml -vv
+          if rclone lsf dropbox:self-hosted/emby/config/ --files-only | grep -q "system.xml"; then
+            if ! rclone delete dropbox:self-hosted/emby/config/system.xml -vv; then
+              echo "[WARNING] Failed to delete system.xml, skipping" >&2
+            fi
+          fi
           sudo rclone copy dropbox:self-hosted/emby/system.xml dropbox:self-hosted/emby/config/ --ignore-errors -vv
           sudo mkdir /onedrive
           sudo nohup rclone mount onedrive: /onedrive --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
