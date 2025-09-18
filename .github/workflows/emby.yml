@@ -10,6 +10,7 @@ on:
 
 jobs:
   build:
+    concurrency: emby-singleton
     runs-on: ubuntu-latest
     steps:
       # - name: Check Workflow Status
@@ -90,7 +91,7 @@ jobs:
             echo "The tunnel '$TUNNEL_NAME' exists but has no active connections. Proceeding."
           else
             echo "The tunnel '$TUNNEL_NAME' is running with connections: $CONNECTIONS. Stopping actions."
-            exit 31
+            exit 0
           fi
       - name: install emby
         run: |
