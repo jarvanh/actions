@@ -10,6 +10,7 @@ on:
 
 jobs:
   build:
+    concurrency: ql5-singleton
     runs-on: ubuntu-latest
     steps:
       # - name: Check Workflow Status
@@ -23,7 +24,7 @@ jobs:
           
       #     if [[ -n $isRunning ]]; then
       #       echo "Another workflow is already running. Aborting current workflow."
-      #       exit 31
+      #       exit 0
       #     else
       #       echo "No running workflows found. Continuing with the workflow execution."
       #     fi
@@ -79,7 +80,7 @@ jobs:
           TUNNEL_LINE=$(echo "$OUTPUT" | grep -w "$TUNNEL_NAME")
           if [ -z "$TUNNEL_LINE" ]; then
             echo "The tunnel '$TUNNEL_NAME' does not exist. Proceeding."
-            exit 31
+            exit 0
           fi
   
           # 提取 CONNECTIONS 列并检查是否为空
@@ -126,4 +127,3 @@ jobs:
           # rclone sync ~/ql dropbox:self-hosted/ql5 -vv --exclude "*.log" --exclude "dep_cache/**" --exclude "repo/**" --exclude "scripts/**"
           sleep 1m
           echo "Stopping GitHub Actions"
-          exit 1
