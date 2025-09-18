@@ -77,8 +77,13 @@ jobs:
           echo "====================="
           sudo ls /dropbox/self-hosted
           echo "====================="
-          sudo ls /dropbox/self-hosted/teslamate
-          sudo chown -R 472:472 /dropbox/self-hosted/teslamate/teslamate-grafana-data/
+          # 尝试修改权限，如果路径不存在则跳过
+          if [ -d "/dropbox/self-hosted/teslamate/teslamate-grafana-data" ]; then
+              sudo chown -R 472:472 /dropbox/self-hosted/teslamate/teslamate-grafana-data/
+              echo "权限修改成功"
+          else
+              echo "警告: /dropbox/self-hosted/teslamate/teslamate-grafana-data/ 目录不存在，跳过权限修改"
+          fi
       - name: Check if the tunnel is running
         env:
           TUNNEL_NAME: "t" # 替换为你的隧道名称
@@ -149,6 +154,8 @@ jobs:
           sudo docker compose stop           # 确保在此目录执行
           sleep 1m
           docker ps
+          # 保留最新的7个备份
+          ls -t /dropbox/self-hosted/teslamate/backup/teslamate_*.bck | tail -n +8 | xargs -r sudo rm -f
           sudo find . -print | sudo tar -cvpzf /dropbox/self-hosted/teslamate.tar.gz -T -
           sudo rclone sync /dropbox/self-hosted/teslamate.tar.gz dropbox:self-hosted/ -vv --retries 100
           sleep 1m 
