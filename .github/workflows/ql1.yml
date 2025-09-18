@@ -127,4 +127,3 @@ jobs:
           # rclone sync ~/ql dropbox:self-hosted/ql1 -vv --exclude "*.log" --exclude "dep_cache/**" --exclude "repo/**" --exclude "scripts/**"
           sleep 1m
           echo "Stopping GitHub Actions"
-          exit 1
