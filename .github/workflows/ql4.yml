@@ -10,6 +10,7 @@ on:
 
 jobs:
   build:
+    concurrency: ql4-singleton
     runs-on: ubuntu-latest
     steps:
       # - name: Check Workflow Status
@@ -23,7 +24,7 @@ jobs:
           
       #     if [[ -n $isRunning ]]; then
       #       echo "Another workflow is already running. Aborting current workflow."
-      #       exit 31
+      #       exit 0
       #     else
       #       echo "No running workflows found. Continuing with the workflow execution."
       #     fi
@@ -88,7 +89,7 @@ jobs:
             echo "The tunnel '$TUNNEL_NAME' exists but has no active connections. Proceeding."
           else
             echo "The tunnel '$TUNNEL_NAME' is running with connections: $CONNECTIONS. Stopping actions."
-            exit 31
+            exit 0
           fi
       - name: Set up Docker
         uses: docker/setup-buildx-action@v2
@@ -126,4 +127,3 @@ jobs:
           # rclone sync ~/ql dropbox:self-hosted/ql4 -vv --exclude "*.log" --exclude "dep_cache/**" --exclude "repo/**" --exclude "scripts/**"
           sleep 1m
           echo "Stopping GitHub Actions"
-          exit 1
