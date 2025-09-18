@@ -144,13 +144,13 @@ jobs:
       #     exit 31
       - name: Stop
         run: |
-          sudo docker compose stop
+          cd /dropbox/self-hosted/teslamate  # 进入配置目录
+          sudo docker compose stop           # 确保在此目录执行
           sleep 1m
-          docker ps      
-          sudo find /dropbox/self-hosted/teslamate -print | sudo tar -cvpzf /dropbox/self-hosted/teslamate.tar.gz -T -
+          docker ps
+          sudo find . -print | sudo tar -cvpzf /dropbox/self-hosted/teslamate.tar.gz -T -
           sudo rclone sync /dropbox/self-hosted/teslamate.tar.gz dropbox:self-hosted/ -vv --retries 100
           sleep 1m 
           sudo rclone sync /dropbox/self-hosted/teslamate.tar.gz dropbox:self-hosted/ -vv --retries 100
           sleep 1m
-          echo "成功​​ ✅"
-          exit 0
+          echo "成功 ✅"
