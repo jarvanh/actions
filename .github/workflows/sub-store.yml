@@ -100,4 +100,3 @@ jobs:
           docker stop sub-store
           sleep 1m 
           echo "Stopping GitHub Actions"
-          exit 1
