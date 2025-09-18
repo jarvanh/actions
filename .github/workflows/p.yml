@@ -101,4 +101,3 @@ jobs:
           docker stop vaultwarden
           sleep 1m 
           echo "Stopping GitHub Actions"
-          exit 1
