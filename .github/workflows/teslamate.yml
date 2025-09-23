@@ -67,10 +67,10 @@ jobs:
           # sudo rclone sync /dropbox/self-hosted/teslamate.tar.gz dropbox:self-hosted/ -vv --retries 100
           
           # sudo rclone sync onedrive:backup/SyncBack/root/teslamate dropbox:self-hosted/teslamate -vv --create-empty-src-dirs --retries 100
-          sudo rclone sync dropbox:self-hosted/teslamate /dropbox/self-hosted/teslamate -vv --create-empty-src-dirs --retries 100
+          # sudo rclone sync dropbox:self-hosted/teslamate /dropbox/self-hosted/teslamate -vv --create-empty-src-dirs --retries 100
 
-          # sudo rclone sync dropbox:self-hosted/teslamate.tar.gz /dropbox/self-hosted/ -vv --retries 100
-          # sudo tar -xvpzf /dropbox/self-hosted/teslamate.tar.gz -C /
+          sudo rclone sync dropbox:self-hosted/teslamate.tar.gz /dropbox/self-hosted/ -vv --retries 100
+          sudo tar -xvpzf /dropbox/self-hosted/teslamate.tar.gz -C /
           
           echo "====================="
           sudo ls /dropbox
@@ -158,14 +158,9 @@ jobs:
           # 保留最新的7个备份
           ls -t /dropbox/self-hosted/teslamate/backup/teslamate_*.bck | tail -n +8 | xargs -r sudo rm -f
           
-          # sudo find . -print | sudo tar -cvpzf /dropbox/self-hosted/teslamate.tar.gz -T -
-          # sudo rclone sync /dropbox/self-hosted/teslamate.tar.gz dropbox:self-hosted/ -vv --retries 100
-          sudo rclone sync /dropbox/self-hosted/teslamate dropbox:self-hosted/teslamate -vv --create-empty-src-dirs --retries 100
-
+          sudo find . -print | sudo tar -cvpzf /dropbox/self-hosted/teslamate.tar.gz -T -
+          sudo rclone sync /dropbox/self-hosted/teslamate.tar.gz dropbox:self-hosted/ -vv --retries 100
           sleep 1m 
-          
-          # sudo rclone sync /dropbox/self-hosted/teslamate.tar.gz dropbox:self-hosted/ -vv --retries 100
-          sudo rclone sync /dropbox/self-hosted/teslamate dropbox:self-hosted/teslamate -vv --create-empty-src-dirs --retries 100
-         
+          sudo rclone sync /dropbox/self-hosted/teslamate.tar.gz dropbox:self-hosted/ -vv --retries 100      
           sleep 1m
           echo "成功 ✅"
