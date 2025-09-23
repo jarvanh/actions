@@ -151,7 +151,7 @@ jobs:
       - name: Stop
         run: |
           cd /dropbox/self-hosted/teslamate # 进入配置目录
-          sudo docker compose stop teslamate # 确保在此目录执行
+          sudo docker compose -p teslamate stop # 确保在此目录执行
           sleep 1m
           docker ps
           # 保留最新的7个备份
