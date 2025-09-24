@@ -133,7 +133,7 @@ jobs:
       - name: Set up Docker
         uses: docker/setup-buildx-action@v2
       - name: Run teslamate container
-        run: cd /dropbox/self-hosted/teslamate && sudo docker compose -p teslamate up -d
+        run: cd /dropbox/self-hosted/teslamate && docker compose -p teslamate up -d
       - name: sleep
         run: |
           sudo sleep 1m    
@@ -151,9 +151,9 @@ jobs:
       - name: Stop
         run: |
           cd /dropbox/self-hosted/teslamate
-          sudo docker compose -p teslamate exec -T database pg_dump -U teslamate teslamate > ./backup/teslamate_$(date +"%Y-%m-%d").bck
+          docker compose -p teslamate exec -T database pg_dump -U teslamate teslamate > ./backup/teslamate_$(date +"%Y-%m-%d").bck
           
-          sudo docker compose -p teslamate stop
+          docker compose -p teslamate stop
           sleep 1m
           
           保留最新的7个备份
