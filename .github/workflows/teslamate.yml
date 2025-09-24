@@ -128,7 +128,7 @@ jobs:
         run: docker ps 
       - name: sleep
         run: |
-          sudo sleep 10m          
+          sudo sleep 3m          
       # - name: Stop
       #   run: |
       #     cd /dropbox/self-hosted/teslamate && sudo docker compose exec -T database pg_dump -U teslamate teslamate > ~/teslamate_$(date +"%Y-%m-%d").bck
@@ -150,15 +150,25 @@ jobs:
       #     exit 31
       - name: Stop
         run: |
-          cd /dropbox/self-hosted/teslamate # 进入配置目录
-          sudo docker compose -p teslamate stop # 确保在此目录执行
+          # 确保备份目录存在
+          sudo mkdir -p /dropbox/self-hosted/teslamate/backup
+          
+          # 备份数据库
+          cd /dropbox/self-hosted/teslamate
+          sudo docker compose exec -T database pg_dump -U teslamate teslamate > ./backup/teslamate_$(date +"%Y-%m-%d").bck
+          
+          # 停止容器
+          sudo docker compose -p teslamate stop
           sleep 1m
           docker ps
           
           # 保留最新的7个备份
-          ls -t /dropbox/self-hosted/teslamate/backup/teslamate_*.bck | tail -n +8 | xargs -r sudo rm -f
+          ls -t ./backup/teslamate_*.bck | tail -n +8 | xargs -r sudo rm -f
           
-          sudo find . -print | sudo tar -cvpzf /dropbox/self-hosted/teslamate.tar.gz -T -
+          # 正确压缩整个目录
+          sudo tar -cvpzf /dropbox/self-hosted/teslamate.tar.gz -C /dropbox/self-hosted teslamate
+          
+          # 同步到云存储
           sudo rclone sync /dropbox/self-hosted/teslamate.tar.gz dropbox:self-hosted/ -vv --retries 100
           sleep 1m 
           sudo rclone sync /dropbox/self-hosted/teslamate.tar.gz dropbox:self-hosted/ -vv --retries 100      
