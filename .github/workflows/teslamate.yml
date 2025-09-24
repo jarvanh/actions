@@ -156,7 +156,7 @@ jobs:
           
           # 备份数据库（使用当前用户权限）
           cd /dropbox/self-hosted/teslamate
-          docker compose exec -T database pg_dump -U teslamate teslamate > ./backup/teslamate_$(date +"%Y-%m-%d").bck
+          sudo docker compose -p teslamate exec -T database pg_dump -U teslamate teslamate > ./backup/teslamate_$(date +"%Y-%m-%d").bck
           
           # 停止容器
           sudo docker compose -p teslamate stop
