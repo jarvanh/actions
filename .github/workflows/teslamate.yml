@@ -20,7 +20,7 @@ jobs:
           # curl -O https://beta.rclone.org/rclone-beta-latest-linux-amd64.zip
           unzip rclone-*-amd64.zip
           cd rclone-*-linux-amd64
-          mv rclone /usr/bin
+          sudo mv rclone /usr/bin
           chmod +x /usr/bin/rclone
           # apt-get install rclone
       - name: rclone-config
