@@ -4,12 +4,6 @@ on:
   schedule:
     # - cron: "0 2,8,14,20 * * *"
     - cron: "*/5 * * * *"
-  workflow_dispatch:
-  # workflow_run:
-  #   workflows:
-  #     - t
-  #   types:
-  #     - completed  # 工作流完成后触发
   watch:
     # types: started
 
@@ -18,21 +12,6 @@ jobs:
     concurrency: teslamate-singleton
     runs-on: ubuntu-latest
     steps:
-      # - name: Check Workflow Status
-      #   run: |
-      #     workflow_runs=$(curl -s -X GET \
-      #       -H "Accept: application/vnd.github.v3+json" \
-      #       -H "Authorization: Bearer ${{ secrets.PAT }}" \
-      #       "https://api.github.com/repos/${{ github.repository }}/actions/runs")
-          
-      #     isRunning=$(echo "$workflow_runs" | jq '.workflow_runs[] | select(.name == "teslamate" and .status == "in_progress")')
-          
-      #     if [[ -n $isRunning ]]; then
-      #       echo "Another workflow is already running. Aborting current workflow."
-      #       exit 0
-      #     else
-      #       echo "No running workflows found. Continuing with the workflow execution."
-      #     fi
       - name: rclone-install
         run: |
           # 安装 rclone
@@ -59,23 +38,13 @@ jobs:
           echo "==========dropbox==========="
           rclone lsf dropbox:
           sudo apt-get install fuse3
-          sudo mkdir -p /dropbox/self-hosted/teslamate
-          # sudo nohup rclone mount dropbox: /dropbox --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
-          
-          # sudo rclone sync dropbox:self-hosted_backup/2025-01-18/teslamate dropbox:self-hosted/teslamate -vv --retries 0 --create-empty-src-dirs
-          # sudo tar -cvpzf /dropbox/self-hosted/teslamate.tar.gz -C /dropbox/self-hosted teslamate
-          # sudo rclone sync /dropbox/self-hosted/teslamate.tar.gz dropbox:self-hosted/ -vv --retries 100
-          
-          # sudo rclone sync onedrive:backup/SyncBack/root/teslamate dropbox:self-hosted/teslamate -vv --create-empty-src-dirs --retries 100
-          # sudo rclone sync dropbox:self-hosted/teslamate /dropbox/self-hosted/teslamate -vv --create-empty-src-dirs --retries 100
-
-          sudo rclone sync dropbox:self-hosted/teslamate.tar.gz /dropbox/self-hosted/ -vv --retries 100
-          sudo tar -xvpzf /dropbox/self-hosted/teslamate.tar.gz -C /
+          sudo mkdir -p /dropbox
+          sudo nohup rclone mount dropbox: /dropbox --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
           
           echo "====================="
           sudo ls /dropbox
           echo "====================="
-          sudo ls /dropbox/self-hosted
+          sudo ls /dropbox/self-hosted/teslamate
           echo "====================="
           # 尝试修改权限，如果路径不存在则跳过
           if [ -d "/dropbox/self-hosted/teslamate/teslamate-grafana-data" ]; then
@@ -129,44 +98,16 @@ jobs:
       - name: sleep
         run: |
           sudo sleep 3m          
-      # - name: Stop
-      #   run: |
-      #     cd /dropbox/self-hosted/teslamate && sudo docker compose exec -T database pg_dump -U teslamate teslamate > ~/teslamate_$(date +"%Y-%m-%d").bck
-      #     sudo rclone copy ~/teslamate_$(date +"%Y-%m-%d").bck /dropbox/self-hosted/teslamate/backup/ -vv
-      #     sudo docker compose stop
-      #     sleep 1m
-      #     docker ps      
-      #     sudo find /dropbox/self-hosted/teslamate -print | sudo tar -cvpzf /dropbox/self-hosted/teslamate.tar.gz -T -
-      #     sudo rclone sync /dropbox/self-hosted/teslamate.tar.gz dropbox:self-hosted/ -vv --retries 100
-      #     sudo rclone sync /dropbox/self-hosted/teslamate dropbox:self-hosted/teslamate -vv --create-empty-src-dirs --retries 100
-      #     sleep 1m 
-      #     sudo rclone sync /dropbox/self-hosted/teslamate.tar.gz dropbox:self-hosted/ -vv --retries 100
-      #     sudo rclone sync /dropbox/self-hosted/teslamate dropbox:self-hosted/teslamate -vv --create-empty-src-dirs --retries 100
-      #     sleep 1m
-      #     # 保留最新的7个备份
-      #     # ls -t /dropbox/self-hosted/teslamate/backup/teslamate_*.bck | tail -n +8 | xargs -r sudo rm -f
-      #     sleep 1m
-      #     echo "Stopping GitHub Actions"
-      #     exit 31
       - name: Stop
         run: |
-          # cd /dropbox/self-hosted/teslamate
-          # sudo docker compose -p teslamate exec -T database pg_dump -U teslamate teslamate > ./backup/teslamate_$(date +"%Y-%m-%d").bck
+          cd /dropbox/self-hosted/teslamate
+          sudo docker compose -p teslamate exec -T database pg_dump -U teslamate teslamate > ./backup/teslamate_$(date +"%Y-%m-%d").bck
           
           sudo docker compose -p teslamate stop
           sleep 1m
-          docker ps
           
-          # 保留最新的7个备份
-          # cd /dropbox/self-hosted/teslamate/backup
-          # ls -t teslamate_*.bck | tail -n +8 | xargs -r sudo rm -f
+          保留最新的7个备份
+          cd /dropbox/self-hosted/teslamate/backup
+          ls -t teslamate_*.bck | tail -n +8 | xargs -r sudo rm -f
           
-          cd /dropbox/self-hosted
-          sudo tar -cvpzf teslamate.tar.gz teslamate
-          
-          # 同步到云存储
-          sudo rclone sync teslamate.tar.gz dropbox:self-hosted/ -vv --retries 100
-          sleep 1m 
-          sudo rclone sync teslamate.tar.gz dropbox:self-hosted/ -vv --retries 100      
-          sleep 1m
           echo "成功 ✅"
