@@ -150,24 +150,17 @@ jobs:
       #     exit 31
       - name: Stop
         run: |
-          # 确保备份目录存在并设置正确权限
-          sudo mkdir -p /dropbox/self-hosted/teslamate/backup
-          sudo chown -R runner:runner /dropbox/self-hosted/teslamate/backup
+          # cd /dropbox/self-hosted/teslamate
+          # sudo docker compose -p teslamate exec -T database pg_dump -U teslamate teslamate > ./backup/teslamate_$(date +"%Y-%m-%d").bck
           
-          # 备份数据库（使用当前用户权限）
-          cd /dropbox/self-hosted/teslamate
-          sudo docker compose -p teslamate exec -T database pg_dump -U teslamate teslamate > ./backup/teslamate_$(date +"%Y-%m-%d").bck
-          
-          # 停止容器
           sudo docker compose -p teslamate stop
           sleep 1m
           docker ps
           
           # 保留最新的7个备份
-          cd /dropbox/self-hosted/teslamate/backup
-          ls -t teslamate_*.bck | tail -n +8 | xargs -r sudo rm -f
+          # cd /dropbox/self-hosted/teslamate/backup
+          # ls -t teslamate_*.bck | tail -n +8 | xargs -r sudo rm -f
           
-          # 正确压缩整个目录
           cd /dropbox/self-hosted
           sudo tar -cvpzf teslamate.tar.gz teslamate
           
