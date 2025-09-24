@@ -1,3 +1,4 @@
+
 name: teslamate
 
 on:
@@ -21,8 +22,8 @@ jobs:
           unzip rclone-*-amd64.zip
           cd rclone-*-linux-amd64
           sudo mv rclone /usr/bin
-          chmod +x /usr/bin/rclone
-          # apt-get install rclone
+          sudo chmod +x /usr/bin/rclone
+          # sudo apt-get install rclone
       - name: rclone-config
         env:
           RCLONE_CONFIG: ${{ secrets.RCLONE }}
@@ -40,14 +41,14 @@ jobs:
           echo "========== dropbox ==========="
           rclone lsf dropbox:
           
-          apt-get install -y fuse3
+          sudo apt-get install -y fuse3
           
           # 创建挂载点
-          mkdir -p /dropbox
+          sudo mkdir -p /dropbox
           
           # 挂载 Dropbox
           echo "挂载 Dropbox..."
-          rclone mount --allow-other --daemon --log-file=/tmp/rclone.log dropbox: /dropbox
+          sudo rclone mount --allow-other --daemon --log-file=/tmp/rclone.log dropbox: /dropbox
           
           # 等待挂载完成（最多尝试20次，每次等待2秒）
           echo "等待挂载完成..."
@@ -64,7 +65,7 @@ jobs:
             if ! pgrep -f "rclone mount" > /dev/null; then
               echo "错误：rclone 进程已退出"
               echo "查看挂载日志："
-              cat /tmp/rclone.log
+              sudo cat /tmp/rclone.log
               exit 1
             fi
             
@@ -77,18 +78,18 @@ jobs:
           if ! mount | grep -q '/dropbox'; then
             echo "错误：Dropbox 挂载失败！"
             echo "查看挂载日志："
-            cat /tmp/rclone.log
+            sudo cat /tmp/rclone.log
             exit 1
           fi
           
           echo "====================="
           echo "挂载点内容:"
-          ls /dropbox
+          sudo ls /dropbox
           
           echo "====================="
           echo "检查 teslamate 目录:"
           if [ -d "/dropbox/self-hosted/teslamate" ]; then
-            ls /dropbox/self-hosted/teslamate
+            sudo ls /dropbox/self-hosted/teslamate
           else
             echo "警告：/dropbox/self-hosted/teslamate 目录不存在"
             echo "Dropbox 根目录内容:"
@@ -98,7 +99,7 @@ jobs:
           fi
           # 尝试修改权限，如果路径不存在则跳过
           if [ -d "/dropbox/self-hosted/teslamate/teslamate-grafana-data" ]; then
-              chown -R 472:472 /dropbox/self-hosted/teslamate/teslamate-grafana-data/
+              sudo chown -R 472:472 /dropbox/self-hosted/teslamate/teslamate-grafana-data/
               echo "权限修改成功"
           else
               echo "警告: /dropbox/self-hosted/teslamate/teslamate-grafana-data/ 目录不存在，跳过权限修改"
@@ -108,9 +109,9 @@ jobs:
           TUNNEL_NAME: "t" # 替换为你的隧道名称
         run: |
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-          dpkg -i cloudflared-linux-amd64.deb
-          mkdir ~/.cloudflared/
-          rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
+          sudo dpkg -i cloudflared-linux-amd64.deb
+          sudo mkdir ~/.cloudflared/
+          sudo rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
 
           # 获取隧道列表
           OUTPUT=$(cloudflared tunnel list)
@@ -130,13 +131,13 @@ jobs:
             echo "The tunnel '$TUNNEL_NAME' is running with connections: $CONNECTIONS. Stopping actions."
             exit 31
           fi
-      - name: Set up Docker
-        uses: docker/setup-buildx-action@v2
+      # - name: Set up Docker
+      #   uses: docker/setup-buildx-action@v2
       - name: Run teslamate container
-        run: cd /dropbox/self-hosted/teslamate && docker compose -p teslamate up -d
+        run: cd /dropbox/self-hosted/teslamate && sudo docker compose -p teslamate up -d
       - name: sleep
         run: |
-          sleep 1m    
+          sudo sleep 1m    
       - name: Verify docker container is running
         run: docker ps 
       - name: run cloudflared
@@ -147,17 +148,17 @@ jobs:
         run: docker ps 
       - name: sleep
         run: |
-          sleep 3m          
+          sudo sleep 3m          
       - name: Stop
         run: |
           cd /dropbox/self-hosted/teslamate
-          docker compose -p teslamate exec -T database pg_dump -U teslamate teslamate > ./backup/teslamate_$(date +"%Y-%m-%d").bck
+          sudo docker compose -p teslamate exec -T database pg_dump -U teslamate teslamate > ./backup/teslamate_$(date +"%Y-%m-%d").bck
           
-          docker compose -p teslamate stop
+          sudo docker compose -p teslamate stop
           sleep 1m
           
           保留最新的7个备份
           cd /dropbox/self-hosted/teslamate/backup
-          ls -t teslamate_*.bck | tail -n +8 | xargs -r rm -f
+          ls -t teslamate_*.bck | tail -n +8 | xargs -r sudo rm -f
           
           echo "成功 ✅"
