@@ -34,19 +34,57 @@ jobs:
           EOF
       - name: rclone-run
         run: |
-          echo "==========onedrive==========="
+          echo "========== onedrive ==========="
           rclone lsf onedrive:
-          echo "==========dropbox==========="
+          
+          echo "========== dropbox ==========="
           rclone lsf dropbox:
-          sudo apt-get install fuse3
+          
+          sudo apt-get install -y fuse3
+          
+          # 创建挂载点
           sudo mkdir -p /dropbox
-          sudo nohup rclone mount dropbox: /dropbox &
+          
+          # 挂载 Dropbox
+          echo "挂载 Dropbox..."
+          sudo nohup rclone mount --allow-other --vfs-cache-mode full dropbox: /dropbox &
+          
+          # 等待挂载完成（最多尝试15次，每次等待2秒）
+          echo "等待挂载完成..."
+          counter=0
+          max_retries=15
+          while [ $counter -lt $max_retries ]; do
+            if mount | grep -q '/dropbox'; then
+              echo "Dropbox 已成功挂载"
+              break
+            else
+              echo "等待挂载...($((counter+1))/${max_retries})"
+              sleep 2
+              ((counter++))
+            fi
+          done
+          
+          # 检查是否挂载成功
+          if ! mount | grep -q '/dropbox'; then
+            echo "错误：Dropbox 挂载失败！"
+            exit 1
+          fi
           
           echo "====================="
+          echo "挂载点内容:"
           sudo ls /dropbox
+    
           echo "====================="
-          sudo ls /dropbox/self-hosted/teslamate
-          echo "====================="
+          echo "检查 teslamate 目录:"
+          if [ -d "/dropbox/self-hosted/teslamate" ]; then
+            sudo ls /dropbox/self-hosted/teslamate
+          else
+            echo "警告：/dropbox/self-hosted/teslamate 目录不存在"
+            echo "Dropbox 根目录内容:"
+            rclone lsf dropbox:
+            echo "self-hosted 目录内容:"
+            rclone lsf dropbox:self-hosted
+          fi
           # 尝试修改权限，如果路径不存在则跳过
           if [ -d "/dropbox/self-hosted/teslamate/teslamate-grafana-data" ]; then
               sudo chown -R 472:472 /dropbox/self-hosted/teslamate/teslamate-grafana-data/
