@@ -20,9 +20,9 @@ jobs:
           # curl -O https://beta.rclone.org/rclone-beta-latest-linux-amd64.zip
           unzip rclone-*-amd64.zip
           cd rclone-*-linux-amd64
-          sudo mv rclone /usr/bin
-          sudo chmod +x /usr/bin/rclone
-          # sudo apt-get install rclone
+          mv rclone /usr/bin
+          chmod +x /usr/bin/rclone
+          # apt-get install rclone
       - name: rclone-config
         env:
           RCLONE_CONFIG: ${{ secrets.RCLONE }}
@@ -40,14 +40,14 @@ jobs:
           echo "========== dropbox ==========="
           rclone lsf dropbox:
           
-          sudo apt-get install -y fuse3
+          apt-get install -y fuse3
           
           # 创建挂载点
-          sudo mkdir -p /dropbox
+          mkdir -p /dropbox
           
           # 挂载 Dropbox
           echo "挂载 Dropbox..."
-          sudo rclone mount --allow-other --daemon --log-file=/tmp/rclone.log dropbox: /dropbox
+          rclone mount --allow-other --daemon --log-file=/tmp/rclone.log dropbox: /dropbox
           
           # 等待挂载完成（最多尝试20次，每次等待2秒）
           echo "等待挂载完成..."
@@ -64,7 +64,7 @@ jobs:
             if ! pgrep -f "rclone mount" > /dev/null; then
               echo "错误：rclone 进程已退出"
               echo "查看挂载日志："
-              sudo cat /tmp/rclone.log
+              cat /tmp/rclone.log
               exit 1
             fi
             
@@ -77,18 +77,18 @@ jobs:
           if ! mount | grep -q '/dropbox'; then
             echo "错误：Dropbox 挂载失败！"
             echo "查看挂载日志："
-            sudo cat /tmp/rclone.log
+            cat /tmp/rclone.log
             exit 1
           fi
           
           echo "====================="
           echo "挂载点内容:"
-          sudo ls /dropbox
+          ls /dropbox
           
           echo "====================="
           echo "检查 teslamate 目录:"
           if [ -d "/dropbox/self-hosted/teslamate" ]; then
-            sudo ls /dropbox/self-hosted/teslamate
+            ls /dropbox/self-hosted/teslamate
           else
             echo "警告：/dropbox/self-hosted/teslamate 目录不存在"
             echo "Dropbox 根目录内容:"
@@ -98,7 +98,7 @@ jobs:
           fi
           # 尝试修改权限，如果路径不存在则跳过
           if [ -d "/dropbox/self-hosted/teslamate/teslamate-grafana-data" ]; then
-              sudo chown -R 472:472 /dropbox/self-hosted/teslamate/teslamate-grafana-data/
+              chown -R 472:472 /dropbox/self-hosted/teslamate/teslamate-grafana-data/
               echo "权限修改成功"
           else
               echo "警告: /dropbox/self-hosted/teslamate/teslamate-grafana-data/ 目录不存在，跳过权限修改"
@@ -108,9 +108,9 @@ jobs:
           TUNNEL_NAME: "t" # 替换为你的隧道名称
         run: |
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-          sudo dpkg -i cloudflared-linux-amd64.deb
-          sudo mkdir ~/.cloudflared/
-          sudo rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
+          dpkg -i cloudflared-linux-amd64.deb
+          mkdir ~/.cloudflared/
+          rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
 
           # 获取隧道列表
           OUTPUT=$(cloudflared tunnel list)
@@ -136,7 +136,7 @@ jobs:
         run: cd /dropbox/self-hosted/teslamate && docker compose -p teslamate up -d
       - name: sleep
         run: |
-          sudo sleep 1m    
+          sleep 1m    
       - name: Verify docker container is running
         run: docker ps 
       - name: run cloudflared
@@ -147,7 +147,7 @@ jobs:
         run: docker ps 
       - name: sleep
         run: |
-          sudo sleep 3m          
+          sleep 3m          
       - name: Stop
         run: |
           cd /dropbox/self-hosted/teslamate
@@ -158,6 +158,6 @@ jobs:
           
           保留最新的7个备份
           cd /dropbox/self-hosted/teslamate/backup
-          ls -t teslamate_*.bck | tail -n +8 | xargs -r sudo rm -f
+          ls -t teslamate_*.bck | tail -n +8 | xargs -r rm -f
           
           echo "成功 ✅"
