@@ -47,33 +47,44 @@ jobs:
           
           # 挂载 Dropbox
           echo "挂载 Dropbox..."
-          sudo nohup rclone mount --allow-other --vfs-cache-mode full dropbox: /dropbox &
+          sudo rclone mount --allow-other --daemon --log-file=/tmp/rclone.log dropbox: /dropbox
           
-          # 等待挂载完成（最多尝试15次，每次等待2秒）
+          # 等待挂载完成（最多尝试20次，每次等待2秒）
           echo "等待挂载完成..."
           counter=0
-          max_retries=15
+          max_retries=20
           while [ $counter -lt $max_retries ]; do
+            # 检查挂载状态
             if mount | grep -q '/dropbox'; then
               echo "Dropbox 已成功挂载"
               break
-            else
-              echo "等待挂载...($((counter+1))/${max_retries})"
-              sleep 2
-              ((counter++))
             fi
+            
+            # 检查进程是否仍在运行
+            if ! pgrep -f "rclone mount" > /dev/null; then
+              echo "错误：rclone 进程已退出"
+              echo "查看挂载日志："
+              sudo cat /tmp/rclone.log
+              exit 1
+            fi
+            
+            echo "等待挂载...($((counter+1))/${max_retries})"
+            sleep 2
+            ((counter++))
           done
           
           # 检查是否挂载成功
           if ! mount | grep -q '/dropbox'; then
             echo "错误：Dropbox 挂载失败！"
+            echo "查看挂载日志："
+            sudo cat /tmp/rclone.log
             exit 1
           fi
           
           echo "====================="
           echo "挂载点内容:"
           sudo ls /dropbox
-    
+          
           echo "====================="
           echo "检查 teslamate 目录:"
           if [ -d "/dropbox/self-hosted/teslamate" ]; then
