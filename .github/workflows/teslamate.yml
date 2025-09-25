@@ -158,7 +158,7 @@ jobs:
           
           # 启动新容器
           sudo docker compose -p teslamate up -d
-          sleep 3m
+          sleep 1m
           
           # 检查新数据库状态
           NEW_DB_EXISTS=$(sudo docker compose -p teslamate exec -T database psql -U teslamate -lqt | cut -d \| -f 1 | grep -w teslamate | wc -l)
