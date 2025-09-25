@@ -189,7 +189,6 @@ jobs:
           # 验证
           echo "验证升级:"
           sudo docker compose -p teslamate exec database psql -U teslamate -d teslamate -c "SELECT version();"
-          sudo docker compose -p teslamate exec database psql -U teslamate -d teslamate -c "SELECT COUNT(*) FROM pg_tables WHERE schemaname = 'public';"
           
           echo "PostgreSQL 升级完成!"
     
@@ -197,12 +196,14 @@ jobs:
         run: |
           cd ./teslamate
           
-          # 清理行驶记录
-          DRIVES_DELETED=$(sudo docker compose -p teslamate exec -T database psql -U teslamate -d teslamate -t -c "DELETE FROM drives WHERE end_date IS NULL AND distance IS NULL AND duration_min IS NULL RETURNING COUNT(*);" | tr -d '[:space:]')
+          # 清理行驶记录并获取删除数量
+          echo "清理行驶记录..."
+          DRIVES_DELETED=$(sudo docker compose -p teslamate exec -T database psql -U teslamate -d teslamate -t -c "WITH deleted AS (DELETE FROM drives WHERE end_date IS NULL AND distance IS NULL AND duration_min IS NULL RETURNING *) SELECT COUNT(*) FROM deleted;" | tr -d '[:space:]')
           DRIVES_DELETED=${DRIVES_DELETED:-0}  # 默认为0
           
-          # 清理充电记录
-          CHARGING_DELETED=$(sudo docker compose -p teslamate exec -T database psql -U teslamate -d teslamate -t -c "DELETE FROM charging_processes WHERE end_date IS NULL OR charge_energy_added IS NULL OR end_battery_level IS NULL RETURNING COUNT(*);" | tr -d '[:space:]')
+          # 清理充电记录并获取删除数量
+          echo "清理充电记录..."
+          CHARGING_DELETED=$(sudo docker compose -p teslamate exec -T database psql -U teslamate -d teslamate -t -c "WITH deleted AS (DELETE FROM charging_processes WHERE end_date IS NULL OR charge_energy_added IS NULL OR end_battery_level IS NULL RETURNING *) SELECT COUNT(*) FROM deleted;" | tr -d '[:space:]')
           CHARGING_DELETED=${CHARGING_DELETED:-0}  # 默认为0
           
           # 获取剩余记录
@@ -223,6 +224,13 @@ jobs:
           # 如果有剩余记录，显示警告
           if [ "$DRIVES_REMAINING" -gt 0 ] || [ "$CHARGING_REMAINING" -gt 0 ]; then
             echo "警告: 仍有无效记录存在，可能需要进一步处理"
+          fi
+          
+          # 如果删除了记录，显示成功消息
+          if [ "$DRIVES_DELETED" -gt 0 ] || [ "$CHARGING_DELETED" -gt 0 ]; then
+            echo "成功: 清理了 $DRIVES_DELETED 条行驶记录和 $CHARGING_DELETED 条充电记录"
+          else
+            echo "没有需要清理的记录"
           fi
           
       - name: sleep
@@ -247,7 +255,7 @@ jobs:
           
       - name: Compress and upload
         run: |
-          # 关键修改：从正确位置压缩整个目录
+          # 从正确位置压缩整个目录
           echo "正在压缩目录..."
           sudo tar -czf teslamate.tar.gz ./teslamate
           
