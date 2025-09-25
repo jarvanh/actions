@@ -68,8 +68,6 @@ jobs:
           sudo apt-get install fuse3
           sudo mkdir -p /dropbox
           sudo nohup rclone mount dropbox: /dropbox --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 10G &
-      - name: Set up Docker
-        uses: docker/setup-buildx-action@v2
       - name: Run openlist container
         run: docker run -d --restart=unless-stopped -v /dropbox/self-hosted/openlist/data:/opt/openlist/data -p 5244:5244 -e PUID=0 -e PGID=0 -e UMASK=022 --name="openlist" openlistteam/openlist:latest
       - name: sleep
@@ -86,10 +84,18 @@ jobs:
           echo "==========openlist==========="
           rclone lsf openlist:
 
-          # # echo "==========  onedrive:0  ==========="
-          # rclone ls onedrive:0 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
-          # # echo "==========  onedrive:1  ==========="
-          # rclone ls onedrive:1 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
+          # echo "==========  onedrive:  ==========="
+          rclone ls onedrive: \
+              --exclude "1/**" \
+              --exclude "2/**" \
+              --exclude "3/**" \
+              --exclude "4/**" \
+              --exclude "5/**" \
+              --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
+          # echo "==========  onedrive:0  ==========="
+          rclone ls onedrive:0 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
+          # echo "==========  onedrive:1  ==========="
+          rclone ls onedrive:1 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
           # # echo "==========  onedrive:2  ==========="
           # rclone ls onedrive:2 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
           # # echo "==========  onedrive:3  ==========="
@@ -98,15 +104,6 @@ jobs:
           # rclone ls onedrive:4 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
           # # echo "==========  onedrive:5  ==========="
           # rclone ls onedrive:5 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
-          # # echo "==========  onedrive:  ==========="
-          # rclone ls onedrive: \
-          #     --exclude "1/**" \
-          #     --exclude "2/**" \
-          #     --exclude "3/**" \
-          #     --exclude "4/**" \
-          #     --exclude "5/**" \
-          #     --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
-
 
           
           # # 统计 onedrive:0 的总大小
