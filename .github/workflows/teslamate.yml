@@ -67,7 +67,7 @@ jobs:
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
           sudo mkdir ~/.cloudflared/
-          rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
+          sudo rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
 
           # 获取隧道列表
           OUTPUT=$(cloudflared tunnel list)
