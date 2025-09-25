@@ -201,20 +201,25 @@ jobs:
           
           # 第二步：备份数据库
           echo "备份数据库..."
-          sudo docker compose -p teslamate up -d database  # 确保数据库容器运行
+          sudo docker compose -p teslamate up -d database
           sleep 10  # 等待数据库启动
           sudo docker compose -p teslamate exec -T database pg_dump -U teslamate -Fc teslamate > teslamate_backup_$(date +%Y%m%d).dump
           
-          # 第三步：重建数据库
+          # 第三步：修复模板数据库
+          echo "修复模板数据库..."
+          # 刷新模板数据库的排序规则版本
+          sudo docker compose -p teslamate exec -T database psql -U postgres -d template1 -c "ALTER DATABASE template1 REFRESH COLLATION VERSION;"
+          
+          # 第四步：重建TeslaMate数据库
           echo "重建数据库以解决排序规则问题..."
           sudo docker compose -p teslamate exec -T database dropdb -U teslamate teslamate
           sudo docker compose -p teslamate exec -T database createdb -U teslamate teslamate
           
-          # 第四步：恢复备份
+          # 第五步：恢复备份
           echo "恢复数据库备份..."
           sudo docker compose -p teslamate exec -T database pg_restore -U teslamate -d teslamate < teslamate_backup_$(date +%Y%m%d).dump
           
-          # 第五步：重启服务
+          # 第六步：重启服务
           echo "重启TeslaMate服务..."
           sudo docker compose -p teslamate up -d
           sleep 1m  # 等待服务完全启动
