@@ -88,6 +88,7 @@ jobs:
           echo "====================="
           echo "检查 teslamate 目录:"
           if [ -d "/dropbox/self-hosted/teslamate" ]; then
+            sudo chmod -R 775 /dropbox/self-hosted/teslamate
             sudo ls /dropbox/self-hosted/teslamate
           else
             echo "警告：/dropbox/self-hosted/teslamate 目录不存在"
