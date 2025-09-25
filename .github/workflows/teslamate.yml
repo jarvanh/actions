@@ -99,9 +99,20 @@ jobs:
           # 尝试修改权限，如果路径不存在则跳过
           if [ -d "/dropbox/self-hosted/teslamate/teslamate-grafana-data" ]; then
               sudo chown -R 472:472 /dropbox/self-hosted/teslamate/teslamate-grafana-data/
-              echo "权限修改成功"
+              echo "teslamate-grafana-data 权限修改成功"
           else
               echo "警告: /dropbox/self-hosted/teslamate/teslamate-grafana-data/ 目录不存在，跳过权限修改"
+              
+          if [ -d "/dropbox/self-hosted/teslamate/teslamate-database-data" ]; then
+              sudo chown -R 999:999 /dropbox/self-hosted/teslamate/teslamate-database-data/
+              echo "teslamate-database-data 权限修改成功"
+          else
+              echo "警告: /dropbox/self-hosted/teslamate/teslamate-database-data/ 目录不存在，跳过权限修改"
+              # 验证权限
+          echo "Grafana 目录权限:"
+          sudo ls -ld /dropbox/self-hosted/teslamate/teslamate-grafana-data
+          echo "Database 目录权限:"
+          sudo ls -ld /dropbox/self-hosted/teslamate/teslamate-database-data
           fi
       - name: Check if the tunnel is running
         env:
