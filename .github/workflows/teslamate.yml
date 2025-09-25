@@ -118,60 +118,113 @@ jobs:
       - name: Verify docker container is running
         run: docker ps 
       
-      - name: Upgrade PostgreSQL
+      - name: Upgrade PostgreSQL with full state checks
         run: |
           cd ./teslamate
           
-          # 备份当前数据库
-          echo "创建数据库备份..."
-          sudo docker compose -p teslamate exec -T database pg_dumpall -U teslamate > full_backup.sql
+          # 检查是否需要升级
+          CURRENT_VERSION=$(grep 'image: postgres:' docker-compose.yml | cut -d':' -f3)
+          TARGET_VERSION="15"
           
-          # 停止并移除容器
-          echo "停止容器..."
+          if [ "$CURRENT_VERSION" == "$TARGET_VERSION" ]; then
+            echo "PostgreSQL 已是最新版本 ($TARGET_VERSION)，跳过升级"
+            exit 0
+          fi
+          
+          echo "当前 PostgreSQL 版本: $CURRENT_VERSION，开始升级到 $TARGET_VERSION..."
+          
+          # 检查旧数据库状态
+          OLD_DB_EXISTS=$(sudo docker compose -p teslamate exec -T database psql -U teslamate -lqt | cut -d \| -f 1 | grep -w teslamate | wc -l)
+          OLD_TABLE_COUNT=$(sudo docker compose -p teslamate exec -T database psql -U teslamate -d teslamate -c "SELECT COUNT(*) FROM pg_tables WHERE schemaname = 'public';" -t | tr -d '[:space:]')
+          
+          if [ "$OLD_DB_EXISTS" -eq 1 ] && [ "$OLD_TABLE_COUNT" -gt 10 ]; then
+            echo "旧数据库存在且包含 $OLD_TABLE_COUNT 张表，需要备份"
+            NEED_BACKUP=true
+            # 备份到容器内的 /tmp 目录
+            sudo docker compose -p teslamate exec -T database pg_dump -U teslamate -d teslamate > /tmp/teslamate_data.sql
+          else
+            echo "旧数据库不存在或为空（$OLD_TABLE_COUNT 张表），无需备份"
+            NEED_BACKUP=false
+          fi
+          
+          # 停止容器
           sudo docker compose -p teslamate down
           
-          # 重命名旧数据卷
-          echo "重命名旧数据卷..."
+          # 备份旧数据卷
           sudo mv teslamate-db teslamate-db-old
           
-          # 修改docker-compose.yml
-          echo "更新PostgreSQL版本..."
-          sed -i 's/image: postgres:[0-9.]\+/image: postgres:15/' docker-compose.yml
+          # 更新版本
+          sed -i "s|image: postgres:[0-9.]*|image: postgres:$TARGET_VERSION|" docker-compose.yml
           
-          # 启动新版本容器
-          echo "启动新版本容器..."
+          # 启动新容器
           sudo docker compose -p teslamate up -d
+          sleep 3m
           
-          # 等待容器启动
-          echo "等待新容器启动..."
-          sleep 2m
+          # 检查新数据库状态
+          NEW_DB_EXISTS=$(sudo docker compose -p teslamate exec -T database psql -U teslamate -lqt | cut -d \| -f 1 | grep -w teslamate | wc -l)
+          NEW_TABLE_COUNT=$(sudo docker compose -p teslamate exec -T database psql -U teslamate -d teslamate -c "SELECT COUNT(*) FROM pg_tables WHERE schemaname = 'public';" -t | tr -d '[:space:]')
           
-          # 恢复数据
-          echo "恢复数据库..."
-          sudo docker compose -p teslamate exec -T database psql -U teslamate -d postgres < full_backup.sql
+          # 创建数据库（如果需要）
+          if [ "$NEW_DB_EXISTS" -eq 0 ]; then
+            echo "创建新数据库..."
+            sudo docker compose -p teslamate exec -T database createdb -U teslamate teslamate
+            # 创建后重新检查表数量
+            NEW_TABLE_COUNT=0
+          fi
           
-          # 验证升级
+          # 决定是否需要恢复
+          if [ "$NEED_BACKUP" = true ] && [ "$NEW_TABLE_COUNT" -eq 0 ]; then
+            echo "新数据库为空，恢复数据..."
+            # 使用容器内的备份文件
+            sudo docker compose -p teslamate exec -T database psql -U teslamate -d teslamate -f /tmp/teslamate_data.sql
+            
+            # 删除容器内的备份文件
+            sudo docker compose -p teslamate exec -T database rm -f /tmp/teslamate_data.sql
+          elif [ "$NEED_BACKUP" = true ]; then
+            echo "新数据库已有数据($NEW_TABLE_COUNT 张表)，跳过恢复"
+            # 删除容器内的备份文件
+            sudo docker compose -p teslamate exec -T database rm -f /tmp/teslamate_data.sql
+          fi
+          
+          # 验证
           echo "验证升级:"
           sudo docker compose -p teslamate exec database psql -U teslamate -d teslamate -c "SELECT version();"
-          
-          # 清理
-          echo "清理旧数据..."
-          sudo rm -rf teslamate-db-old
-          sudo rm full_backup.sql
+          sudo docker compose -p teslamate exec database psql -U teslamate -d teslamate -c "SELECT COUNT(*) FROM pg_tables WHERE schemaname = 'public';"
           
           echo "PostgreSQL 升级完成!"
     
       - name: Clean up incomplete data
         run: |
           cd ./teslamate
-          # 清理不完整的行驶记录
-          sudo docker compose -p teslamate exec -T database psql -U teslamate -d teslamate -c "DELETE FROM drives WHERE end_date IS NULL AND distance IS NULL AND duration_min IS NULL;"
-          # 清理不完整的充电记录
-          sudo docker compose -p teslamate exec -T database psql -U teslamate -d teslamate -c "DELETE FROM charging_processes WHERE end_date IS NULL OR charge_energy_added IS NULL OR end_battery_level IS NULL;"
-          # 显示清理结果
-          sudo docker compose -p teslamate exec -T database psql -U teslamate -d teslamate -c "SELECT '行驶记录清理: ' || (SELECT COUNT(*) FROM drives WHERE end_date IS NULL) || ' 条剩余';"
-          sudo docker compose -p teslamate exec -T database psql -U teslamate -d teslamate -c "SELECT '充电记录清理: ' || (SELECT COUNT(*) FROM charging_processes WHERE end_date IS NULL) || ' 条剩余';"   
-      
+          
+          # 清理行驶记录
+          DRIVES_DELETED=$(sudo docker compose -p teslamate exec -T database psql -U teslamate -d teslamate -t -c "DELETE FROM drives WHERE end_date IS NULL AND distance IS NULL AND duration_min IS NULL RETURNING COUNT(*);" | tr -d '[:space:]')
+          DRIVES_DELETED=${DRIVES_DELETED:-0}  # 默认为0
+          
+          # 清理充电记录
+          CHARGING_DELETED=$(sudo docker compose -p teslamate exec -T database psql -U teslamate -d teslamate -t -c "DELETE FROM charging_processes WHERE end_date IS NULL OR charge_energy_added IS NULL OR end_battery_level IS NULL RETURNING COUNT(*);" | tr -d '[:space:]')
+          CHARGING_DELETED=${CHARGING_DELETED:-0}  # 默认为0
+          
+          # 获取剩余记录
+          DRIVES_REMAINING=$(sudo docker compose -p teslamate exec -T database psql -U teslamate -d teslamate -t -c "SELECT COUNT(*) FROM drives WHERE end_date IS NULL;" | tr -d '[:space:]')
+          CHARGING_REMAINING=$(sudo docker compose -p teslamate exec -T database psql -U teslamate -d teslamate -t -c "SELECT COUNT(*) FROM charging_processes WHERE end_date IS NULL;" | tr -d '[:space:]')
+          
+          # 格式化输出
+          echo ""
+          echo "======================================"
+          echo "          数据清理报告"
+          echo "======================================"
+          printf "%-15s | %-10s | %-10s\n" "记录类型" "已删除" "剩余"
+          printf "%-15s | %-10s | %-10s\n" "行驶记录" "$DRIVES_DELETED" "$DRIVES_REMAINING"
+          printf "%-15s | %-10s | %-10s\n" "充电记录" "$CHARGING_DELETED" "$CHARGING_REMAINING"
+          echo "======================================"
+          echo ""
+          
+          # 如果有剩余记录，显示警告
+          if [ "$DRIVES_REMAINING" -gt 0 ] || [ "$CHARGING_REMAINING" -gt 0 ]; then
+            echo "警告: 仍有无效记录存在，可能需要进一步处理"
+          fi
+          
       - name: sleep
         run: |
           sudo sleep 3m          
