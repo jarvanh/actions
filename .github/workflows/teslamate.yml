@@ -2,7 +2,6 @@ name: teslamate
 
 on:
   schedule:
-    # - cron: "0 2,8,14,20 * * *"
     - cron: "*/5 * * * *"
   workflow_dispatch:
   watch:
@@ -15,7 +14,6 @@ jobs:
     steps:
       - name: rclone-install
         run: |
-          # 安装 rclone
           curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
           unzip rclone-*-amd64.zip
           cd rclone-*-linux-amd64
@@ -26,26 +24,33 @@ jobs:
         env:
           RCLONE_CONFIG: ${{ secrets.RCLONE }}
         run: |
-          # 写配置文件
           mkdir -p ~/.config/rclone/
           cat << EOF > ~/.config/rclone/rclone.conf
           $RCLONE_CONFIG
           EOF
           
-      - name: Sync from Dropbox
+      - name: Download and extract teslamate.tar.gz
         run: |
           # 创建本地工作目录
           mkdir -p ./teslamate
           
-          # 从Dropbox同步TeslaMate数据到本地
-          rclone sync -v dropbox:self-hosted/teslamate ./teslamate
+          # 检查压缩文件是否存在
+          if rclone ls dropbox:self-hosted/teslamate.tar.gz > /dev/null 2>&1; then
+            echo "找到 teslamate.tar.gz，正在下载..."
+            rclone copy dropbox:self-hosted/teslamate.tar.gz ./
+            
+            echo "解压缩..."
+            tar -xzf teslamate.tar.gz -C ./teslamate
+            echo "解压缩完成"
+          else
+            echo "未找到 teslamate.tar.gz，使用空目录"
+          fi
           
           echo "本地目录内容:"
           ls -la ./teslamate
           
       - name: Set permissions
         run: |
-          # 设置本地目录权限
           if [ -d "./teslamate/teslamate-grafana-data" ]; then
               sudo chown -R 472:472 ./teslamate/teslamate-grafana-data/
               echo "teslamate-grafana-data 权限修改成功"
@@ -62,24 +67,20 @@ jobs:
           
       - name: Check if the tunnel is running
         env:
-          TUNNEL_NAME: "t" # 替换为你的隧道名称
+          TUNNEL_NAME: "t"
         run: |
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
           sudo mkdir ~/.cloudflared/
           sudo rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
 
-          # 获取隧道列表
           OUTPUT=$(cloudflared tunnel list)
-          
-          # 查找目标隧道的行
           TUNNEL_LINE=$(echo "$OUTPUT" | grep -w "$TUNNEL_NAME")
           if [ -z "$TUNNEL_LINE" ]; then
             echo "The tunnel '$TUNNEL_NAME' does not exist. Proceeding."
             exit 0
           fi
   
-          # 提取 CONNECTIONS 列并检查是否为空
           CONNECTIONS=$(echo "$TUNNEL_LINE" | awk '{if (NF>=4) print $4; else print "-"}')
           if [ "$CONNECTIONS" == "-" ]; then
             echo "The tunnel '$TUNNEL_NAME' exists but has no active connections. Proceeding."
@@ -115,7 +116,6 @@ jobs:
       - name: Stop and backup
         run: |
           cd ./teslamate
-          # 创建备份目录（如果不存在）
           mkdir -p backup
           
           # 执行数据库备份
@@ -129,9 +129,14 @@ jobs:
           cd backup
           ls -t teslamate_*.bck | tail -n +8 | xargs -r sudo rm -f
           
-      - name: Sync back to Dropbox
+      - name: Compress and upload
         run: |
-          # 将本地更改同步回Dropbox
-          rclone sync -v ./teslamate dropbox:self-hosted/teslamate
+          # 压缩整个teslamate目录
+          echo "正在压缩目录..."
+          tar -czf teslamate.tar.gz ./teslamate
           
-          echo "同步完成 ✅"
+          # 上传到Dropbox
+          echo "上传到Dropbox..."
+          rclone copy -v teslamate.tar.gz dropbox:self-hosted/
+          
+          echo "完成 ✅"
