@@ -117,7 +117,50 @@ jobs:
           
       - name: Verify docker container is running
         run: docker ps 
-        
+      
+      - name: Upgrade PostgreSQL
+        run: |
+          cd ./teslamate
+          
+          # 备份当前数据库
+          echo "创建数据库备份..."
+          sudo docker compose -p teslamate exec -T database pg_dumpall -U teslamate > full_backup.sql
+          
+          # 停止并移除容器
+          echo "停止容器..."
+          sudo docker compose -p teslamate down
+          
+          # 重命名旧数据卷
+          echo "重命名旧数据卷..."
+          sudo mv teslamate-db teslamate-db-old
+          
+          # 修改docker-compose.yml
+          echo "更新PostgreSQL版本..."
+          sed -i 's/image: postgres:[0-9.]\+/image: postgres:15/' docker-compose.yml
+          
+          # 启动新版本容器
+          echo "启动新版本容器..."
+          sudo docker compose -p teslamate up -d
+          
+          # 等待容器启动
+          echo "等待新容器启动..."
+          sleep 2m
+          
+          # 恢复数据
+          echo "恢复数据库..."
+          sudo docker compose -p teslamate exec -T database psql -U teslamate -d postgres < full_backup.sql
+          
+          # 验证升级
+          echo "验证升级:"
+          sudo docker compose -p teslamate exec database psql -U teslamate -d teslamate -c "SELECT version();"
+          
+          # 清理
+          echo "清理旧数据..."
+          sudo rm -rf teslamate-db-old
+          sudo rm full_backup.sql
+          
+          echo "PostgreSQL 升级完成!"
+    
       - name: Clean up incomplete data
         run: |
           cd ./teslamate
