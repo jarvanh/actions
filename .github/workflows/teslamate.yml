@@ -118,12 +118,17 @@ jobs:
       - name: Verify docker container is running
         run: docker ps 
         
-      - name: Clean up incomplete charging data
+      - name: Clean up incomplete data
         run: |
           cd ./teslamate
+          # 清理不完整的行驶记录
+          sudo docker compose -p teslamate exec -T database psql -U teslamate -d teslamate -c "DELETE FROM drives WHERE end_date IS NULL AND distance IS NULL AND duration_min IS NULL;"
+          # 清理不完整的充电记录
           sudo docker compose -p teslamate exec -T database psql -U teslamate -d teslamate -c "DELETE FROM charging_processes WHERE end_date IS NULL OR charge_energy_added IS NULL OR end_battery_level IS NULL;"
-          sudo docker compose -p teslamate exec -T database psql -U teslamate -d teslamate -c "SELECT '清理完成，删除了 ' || COUNT(*) || ' 条无效记录' FROM charging_processes WHERE end_date IS NULL;"
-                
+          # 显示清理结果
+          sudo docker compose -p teslamate exec -T database psql -U teslamate -d teslamate -c "SELECT '行驶记录清理: ' || (SELECT COUNT(*) FROM drives WHERE end_date IS NULL) || ' 条剩余';"
+          sudo docker compose -p teslamate exec -T database psql -U teslamate -d teslamate -c "SELECT '充电记录清理: ' || (SELECT COUNT(*) FROM charging_processes WHERE end_date IS NULL) || ' 条剩余';"   
+      
       - name: sleep
         run: |
           sudo sleep 3m          
