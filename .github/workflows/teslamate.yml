@@ -207,8 +207,8 @@ jobs:
           
           # 第三步：修复模板数据库
           echo "修复模板数据库..."
-          # 刷新模板数据库的排序规则版本
-          sudo docker compose -p teslamate exec -T database psql -U postgres -d template1 -c "ALTER DATABASE template1 REFRESH COLLATION VERSION;"
+          # 使用现有的 teslamate 用户刷新模板数据库
+          sudo docker compose -p teslamate exec -T database psql -U teslamate -d template1 -c "ALTER DATABASE template1 REFRESH COLLATION VERSION;"
           
           # 第四步：重建TeslaMate数据库
           echo "重建数据库以解决排序规则问题..."
