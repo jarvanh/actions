@@ -118,9 +118,29 @@ jobs:
       - name: Verify docker container is running
         run: docker ps 
         
+      - name: Clean up incomplete charging data
+        run: |
+          cd ./teslamate
+          # 创建清理脚本
+          cat > cleanup.sql << 'EOF'
+          -- 删除无效的充电记录
+          DELETE FROM charging_processes 
+          WHERE end_date IS NULL 
+             OR charge_energy_added IS NULL 
+             OR end_battery_level IS NULL;
+          
+          -- 显示清理结果
+          SELECT '清理完成，删除了 ' || COUNT(*) || ' 条无效记录' 
+          FROM charging_processes 
+          WHERE end_date IS NULL;
+          EOF
+          
+          # 执行清理
+          sudo docker compose -p teslamate exec -T database psql -U teslamate -d teslamate -f /tmp/cleanup.sql   
+          
       - name: sleep
         run: |
-          sudo sleep 350m          
+          sudo sleep 3m          
           
       - name: Stop and backup
         run: |
