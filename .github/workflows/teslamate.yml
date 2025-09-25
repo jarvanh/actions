@@ -124,7 +124,7 @@ jobs:
           
           # 检查是否需要升级
           CURRENT_VERSION=$(grep 'image: postgres:' docker-compose.yml | cut -d':' -f3)
-          TARGET_VERSION="15"
+          TARGET_VERSION="18"
           
           if [ "$CURRENT_VERSION" == "$TARGET_VERSION" ]; then
             echo "PostgreSQL 已是最新版本 ($TARGET_VERSION)，跳过升级"
