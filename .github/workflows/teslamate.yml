@@ -31,35 +31,34 @@ jobs:
           
       - name: Download and extract teslamate.tar.gz
         run: |
-          # 创建本地工作目录
-          mkdir -p ./teslamate
-          
           # 检查压缩文件是否存在
           if rclone ls dropbox:self-hosted/teslamate.tar.gz > /dev/null 2>&1; then
             echo "找到 teslamate.tar.gz，正在下载..."
             rclone copy dropbox:self-hosted/teslamate.tar.gz ./
             
             echo "解压缩..."
-            tar -xzf teslamate.tar.gz -C ./teslamate
+            # 直接解压到当前目录，不要使用 -C 参数
+            tar -xzf teslamate.tar.gz
             echo "解压缩完成"
           else
-            echo "未找到 teslamate.tar.gz，使用空目录"
+            echo "未找到 teslamate.tar.gz，创建空目录结构"
+            mkdir -p teslamate-db teslamate-grafana-data import backup mosquitto-conf mosquitto-data
           fi
           
           echo "本地目录内容:"
-          ls -la ./teslamate
+          ls -la
           
       - name: Set permissions
         run: |
-          if [ -d "./teslamate/teslamate-grafana-data" ]; then
-              sudo chown -R 472:472 ./teslamate/teslamate-grafana-data/
+          if [ -d "teslamate-grafana-data" ]; then
+              sudo chown -R 472:472 teslamate-grafana-data/
               echo "teslamate-grafana-data 权限修改成功"
           else
               echo "警告: teslamate-grafana-data 目录不存在，跳过权限修改"
           fi
           
-          if [ -d "./teslamate/teslamate-db" ]; then
-              sudo chown -R 999:999 ./teslamate/teslamate-db/
+          if [ -d "teslamate-db" ]; then
+              sudo chown -R 999:999 teslamate-db/
               echo "teslamate-database-data 权限修改成功"
           else
               echo "警告: teslamate-db 目录不存在，跳过权限修改"
@@ -91,7 +90,7 @@ jobs:
             
       - name: Run teslamate container
         run: |
-          cd ./teslamate
+          # 直接在当前目录运行，不需要 cd
           sudo docker compose -p teslamate up -d
           
       - name: sleep
@@ -115,7 +114,6 @@ jobs:
           
       - name: Stop and backup
         run: |
-          cd ./teslamate
           mkdir -p backup
           
           # 执行数据库备份
@@ -128,12 +126,13 @@ jobs:
           # 保留最新的7个备份
           cd backup
           ls -t teslamate_*.bck | tail -n +8 | xargs -r sudo rm -f
+          cd ..
           
       - name: Compress and upload
         run: |
-          # 压缩整个teslamate目录
+          # 压缩当前目录下的所有teslamate相关文件
           echo "正在压缩目录..."
-          sudo tar -czf teslamate.tar.gz ./teslamate
+          sudo tar -czf teslamate.tar.gz teslamate-db teslamate-grafana-data import backup mosquitto-conf mosquitto-data docker-compose.yml
           
           # 上传到Dropbox
           echo "上传到Dropbox..."
