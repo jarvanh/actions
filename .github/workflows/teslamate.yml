@@ -13,6 +13,8 @@ jobs:
     concurrency: teslamate-singleton
     runs-on: ubuntu-latest
     steps:
+      - name: Ensure QEMU
+        uses: docker/setup-qemu-action@v3
       - name: Set up Docker
         uses: docker/setup-buildx-action@v3
       - name: rclone-install
