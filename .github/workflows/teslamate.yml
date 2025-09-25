@@ -1,141 +1,54 @@
-name: teslamate
+- name: Set permissions
+  run: |
+    if [ -d "./teslamate-grafana-data" ]; then
+        sudo chown -R 472:472 ./teslamate-grafana-data/
+        echo "teslamate-grafana-data 权限修改成功"
+    else
+        echo "警告: teslamate-grafana-data 目录不存在，跳过权限修改"
+    fi
+    
+    if [ -d "./teslamate-db" ]; then
+        sudo chown -R 999:999 ./teslamate-db/
+        echo "teslamate-database-data 权限修改成功"
+    else
+        echo "警告: teslamate-db 目录不存在，跳过权限修改"
+    fi
 
-on:
-  schedule:
-    - cron: "*/5 * * * *"
-  workflow_dispatch:
-  watch:
-    # types: started
+- name: Run teslamate container
+  run: |
+    sudo docker compose -p teslamate up -d
 
-jobs:
-  build:
-    concurrency: teslamate-singleton
-    runs-on: ubuntu-latest
-    steps:
-      - name: rclone-install
-        run: |
-          curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
-          unzip rclone-*-amd64.zip
-          cd rclone-*-linux-amd64
-          sudo mv rclone /usr/bin
-          sudo chmod +x /usr/bin/rclone
-          
-      - name: rclone-config
-        env:
-          RCLONE_CONFIG: ${{ secrets.RCLONE }}
-        run: |
-          mkdir -p ~/.config/rclone/
-          cat << EOF > ~/.config/rclone/rclone.conf
-          $RCLONE_CONFIG
-          EOF
-          
-      - name: Download and extract teslamate.tar.gz
-        run: |
-          # 检查压缩文件是否存在
-          if rclone ls dropbox:self-hosted/teslamate.tar.gz > /dev/null 2>&1; then
-            echo "找到 teslamate.tar.gz，正在下载..."
-            rclone copy dropbox:self-hosted/teslamate.tar.gz ./
-            
-            echo "解压缩..."
-            # 直接解压到当前目录，不要使用 -C 参数
-            tar -xzf teslamate.tar.gz
-            echo "解压缩完成"
-          else
-            echo "未找到 teslamate.tar.gz，创建空目录结构"
-            mkdir -p teslamate-db teslamate-grafana-data import backup mosquitto-conf mosquitto-data
-          fi
-          
-          echo "本地目录内容:"
-          ls -la
-          
-      - name: Set permissions
-        run: |
-          if [ -d "teslamate-grafana-data" ]; then
-              sudo chown -R 472:472 teslamate-grafana-data/
-              echo "teslamate-grafana-data 权限修改成功"
-          else
-              echo "警告: teslamate-grafana-data 目录不存在，跳过权限修改"
-          fi
-          
-          if [ -d "teslamate-db" ]; then
-              sudo chown -R 999:999 teslamate-db/
-              echo "teslamate-database-data 权限修改成功"
-          else
-              echo "警告: teslamate-db 目录不存在，跳过权限修改"
-          fi
-          
-      - name: Check if the tunnel is running
-        env:
-          TUNNEL_NAME: "t"
-        run: |
-          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-          sudo dpkg -i cloudflared-linux-amd64.deb
-          sudo mkdir ~/.cloudflared/
-          sudo rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
+- name: Stop and backup
+  run: |
+    mkdir -p backup
+    
+    # 执行数据库备份
+    sudo docker compose -p teslamate exec -T database pg_dump -U teslamate teslamate > ./backup/teslamate_$(date +"%Y-%m-%d").bck
+    
+    # 停止容器
+    sudo docker compose -p teslamate stop
+    sleep 1m
+    
+    # 保留最新的7个备份
+    cd backup
+    ls -t teslamate_*.bck | tail -n +8 | xargs -r sudo rm -f
+    cd ..
 
-          OUTPUT=$(cloudflared tunnel list)
-          TUNNEL_LINE=$(echo "$OUTPUT" | grep -w "$TUNNEL_NAME")
-          if [ -z "$TUNNEL_LINE" ]; then
-            echo "The tunnel '$TUNNEL_NAME' does not exist. Proceeding."
-            exit 0
-          fi
-  
-          CONNECTIONS=$(echo "$TUNNEL_LINE" | awk '{if (NF>=4) print $4; else print "-"}')
-          if [ "$CONNECTIONS" == "-" ]; then
-            echo "The tunnel '$TUNNEL_NAME' exists but has no active connections. Proceeding."
-          else
-            echo "The tunnel '$TUNNEL_NAME' is running with connections: $CONNECTIONS. Stopping actions."
-            exit 31
-          fi
-            
-      - name: Run teslamate container
-        run: |
-          # 直接在当前目录运行，不需要 cd
-          sudo docker compose -p teslamate up -d
-          
-      - name: sleep
-        run: |
-          sudo sleep 1m    
-          
-      - name: Verify docker container is running
-        run: docker ps 
-        
-      - name: run cloudflared
-        run: |
-          cloudflared tunnel route dns t t.'${{ secrets.VD }}'.eu.org
-          nohup cloudflared tunnel run --url http://127.0.0.1:5900 t &
-          
-      - name: Verify docker container is running
-        run: docker ps 
-        
-      - name: sleep
-        run: |
-          sudo sleep 3m          
-          
-      - name: Stop and backup
-        run: |
-          mkdir -p backup
-          
-          # 执行数据库备份
-          sudo docker compose -p teslamate exec -T database pg_dump -U teslamate teslamate > ./backup/teslamate_$(date +"%Y-%m-%d").bck
-          
-          # 停止容器
-          sudo docker compose -p teslamate stop
-          sleep 1m
-          
-          # 保留最新的7个备份
-          cd backup
-          ls -t teslamate_*.bck | tail -n +8 | xargs -r sudo rm -f
-          cd ..
-          
-      - name: Compress and upload
-        run: |
-          # 压缩当前目录下的所有teslamate相关文件
-          echo "正在压缩目录..."
-          sudo tar -czf teslamate.tar.gz teslamate-db teslamate-grafana-data import backup mosquitto-conf mosquitto-data docker-compose.yml
-          
-          # 上传到Dropbox
-          echo "上传到Dropbox..."
-          rclone copy -v teslamate.tar.gz dropbox:self-hosted/
-          
-          echo "完成 ✅"
+- name: Compress and upload
+  run: |
+    # 压缩当前目录下的teslamate相关文件
+    echo "正在压缩目录..."
+    sudo tar -czf teslamate.tar.gz \
+        teslamate-db \
+        teslamate-grafana-data \
+        import \
+        mosquitto-conf \
+        mosquitto-data \
+        backup \
+        docker-compose.yml
+    
+    # 上传到Dropbox
+    echo "上传到Dropbox..."
+    rclone copy -v teslamate.tar.gz dropbox:self-hosted/
+    
+    echo "完成 ✅"
