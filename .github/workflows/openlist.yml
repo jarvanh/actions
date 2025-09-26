@@ -84,7 +84,7 @@ jobs:
           echo "==========openlist==========="
           rclone lsf openlist:
 
-          # echo "==========  onedrive:  ==========="
+          echo "==========  onedrive:  ==========="
           rclone ls onedrive: \
               --exclude "1/**" \
               --exclude "2/**" \
@@ -92,18 +92,18 @@ jobs:
               --exclude "4/**" \
               --exclude "5/**" \
               --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
-          # echo "==========  onedrive:0  ==========="
+          echo "==========  onedrive:0  ==========="
           rclone ls onedrive:0 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
-          # echo "==========  onedrive:1  ==========="
+          echo "==========  onedrive:1  ==========="
           rclone ls onedrive:1 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
-          # # echo "==========  onedrive:2  ==========="
-          # rclone ls onedrive:2 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
-          # # echo "==========  onedrive:3  ==========="
-          # rclone ls onedrive:3 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
-          # # echo "==========  onedrive:4  ==========="
-          # rclone ls onedrive:4 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
-          # # echo "==========  onedrive:5  ==========="
-          # rclone ls onedrive:5 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
+          echo "==========  onedrive:2  ==========="
+          rclone ls onedrive:2 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
+          echo "==========  onedrive:3  ==========="
+          rclone ls onedrive:3 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
+          echo "==========  onedrive:4  ==========="
+          rclone ls onedrive:4 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
+          echo "==========  onedrive:5  ==========="
+          rclone ls onedrive:5 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
 
           
           # # 统计 onedrive:0 的总大小
