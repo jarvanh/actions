@@ -92,9 +92,9 @@ jobs:
             exit 0  # 即使临时目录创建失败也不中断工作流
           }
           
-          # 列出onedrive:1中超过4G的视频文件（使用lsf命令获取完整路径，避免空格和特殊字符问题）
+          # 列出onedrive:1中超过4G的视频文件（使用lsf命令获取完整路径，避免空格和特殊字符问题，只列出文件）
           echo "========== 列出onedrive:1中超过4G的视频文件 ============"
-          if ! rclone lsf onedrive:1 --min-size 4G --include "*.mp4" --include "*.mkv" --include "*.avi" --include "*.mov" --include "*.wmv" --absolute > /tmp/large_videos.txt 2>/dev/null; then
+          if ! rclone lsf onedrive:1 --min-size 4G --include "*.mp4" --include "*.mkv" --include "*.avi" --include "*.mov" --include "*.wmv" --absolute --files-only > /tmp/large_videos.txt 2>/dev/null; then
             echo "警告: 列出文件时出现错误，可能是目录不存在或权限问题"
             touch /tmp/large_videos.txt  # 创建空文件以避免后续检查失败
           fi
@@ -115,6 +115,12 @@ jobs:
               fi
               
               echo "处理视频文件: $video_path"
+              
+              # 检查是否为有效的视频文件（文件名包含扩展名）
+              if [[ "$video_path" != *.* ]]; then
+                echo "警告: 不是有效的视频文件（缺少扩展名），跳过此文件: $video_path"
+                continue
+              fi
               
               # 提取文件名和扩展名
               filename=$(basename "$video_path")
@@ -331,16 +337,3 @@ jobs:
 
           sudo rclone sync onedrive:5 openlist:123pan2Crypt/5 --progress --fast-list --size-only --transfers 1 --checkers 32
           curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 5任务执行完毕"
-
-      - name: Verify docker container is running
-        run: docker ps
-      - name: sleep
-        run: |
-          sudo sleep 10m
-      - name: send notification
-        run: |
-          curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist 任务执行完毕"
-
-
-
-
