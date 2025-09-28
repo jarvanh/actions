@@ -77,197 +77,89 @@ jobs:
         run: docker ps
       - name: video-split
         run: |
-          # 设置shell选项，让命令失败时不中断整个脚本
-          set -euo pipefail
-          
-          # 安装ffmpeg工具和bc计算器
-          echo "安装必要的工具..."
-          sudo apt-get update && sudo apt-get install -y ffmpeg bc || {
-            echo "警告: 安装工具失败，可能影响视频处理功能"
-          }
+          # 安装ffmpeg用于视频处理
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
           
           # 创建临时目录用于处理视频
-          mkdir -p /tmp/videos || {
-            echo "错误: 无法创建临时目录"
-            exit 0  # 即使临时目录创建失败也不中断工作流
-          }
+          mkdir -p /tmp/video_processing
           
-          # 列出onedrive:1中超过4G的视频文件（使用更直接的方法）
-          echo "========== 列出onedrive:1中超过4G的视频文件 ============"
+          # 查找onedrive:1中超过4G的视频文件
+          echo "查找onedrive:1中超过4G的视频文件..."
+          rclone ls onedrive:1 --min-size 4G --size-only --include "*.mp4" --include "*.mkv" --include "*.avi" --include "*.mov" --include "*.wmv" --include "*.flv" --include "*.webm" --include "*.m4v" --include "*.3gp" > /tmp/large_videos.txt
           
-          # 先尝试使用rclone find命令，这是最可靠的查找文件方法
-          echo "尝试使用rclone find命令查找文件..."
-          rclone find onedrive:1 --min-size 4G -name "*.mp4" -o -name "*.mkv" -o -name "*.avi" -o -name "*.mov" -o -name "*.wmv" 2>&1 | tee /tmp/find_result.txt
-          
-          # 提取相对路径（去掉开头的onedrive:1/）
-          grep -v "^rclone: " /tmp/find_result.txt | sed 's|^onedrive:1/||' > /tmp/large_videos.txt
-          
-          # 如果find命令没有找到文件，尝试使用ls方法作为备选
-          if [ ! -s /tmp/large_videos.txt ]; then
-            echo "rclone find未找到文件，尝试使用rclone ls方法..."
-            rclone ls onedrive:1 --min-size 4G --include "*.mp4" --include "*.mkv" --include "*.avi" --include "*.mov" --include "*.wmv" 2>&1 | tee /tmp/ls_result.txt
-            
-            # 从ls结果中提取路径（去掉大小列）
-            grep -v "^rclone: " /tmp/ls_result.txt | awk '{$1=""; print substr($0,2)}' > /tmp/large_videos.txt
-          fi
-          
-          # 添加调试信息：显示实际使用的rclone版本
-          echo "当前rclone版本: $(rclone version | head -n 1)"
-          
-          # 显示获取的文件列表（完整列表）用于调试
-          echo "获取的文件列表："
-          cat /tmp/large_videos.txt || echo "文件列表为空"
-          
-          # 显示找到的文件数量
-          file_count=$(wc -l < /tmp/large_videos.txt 2>/dev/null || echo 0)
-          echo "总共找到 $file_count 个超过4G的视频文件"
-          
-          # 检查是否有大视频文件需要处理
-          if [ -s /tmp/large_videos.txt ]; then
-            echo "找到以下大视频文件需要处理："
-            cat /tmp/large_videos.txt
-            
-            # 遍历每个大视频文件进行切割
-            while read -r video_path || [ -n "$video_path" ]; do
-              # 跳过空行
-              if [ -z "$video_path" ]; then
-                continue
-              fi
+          # 处理每个大视频文件
+          while IFS= read -r line; do
+            if [ -n "$line" ]; then
+              size=$(echo "$line" | awk '{print $1}')
+              filepath=$(echo "$line" | awk '{print $2}')
+              filename=$(basename "$filepath")
               
-              echo "处理视频文件: $video_path"
+              echo "处理文件: $filepath (大小: $size)"
               
-              # 检查是否为有效的视频文件（文件名包含扩展名）
-              if [[ "$video_path" != *.* ]]; then
-                echo "警告: 不是有效的视频文件（缺少扩展名），跳过此文件: $video_path"
-                continue
-              fi
+              # 下载视频文件到临时目录
+              echo "下载文件..."
+              rclone copy "onedrive:1/$filepath" /tmp/video_processing/
               
-              # 提取文件名和扩展名
-              filename=$(basename "$video_path")
-              extension="${filename##*.}"
-              filename_noext="${filename%.*}"
+              # 获取视频时长（秒）
+              duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "/tmp/video_processing/$filename" | cut -d. -f1)
               
-              # 创建该视频的临时目录
-              video_tmp_dir="/tmp/videos/${filename_noext}"
-              mkdir -p "$video_tmp_dir" || {
-                echo "错误: 无法创建视频临时目录，跳过此文件"
-                continue
-              }
+              # 计算需要分割的段数（每段不超过3.8G，留一些余量）
+              target_size=3800000000  # 3.8G in bytes
+              file_size=$(stat -c%s "/tmp/video_processing/$filename")
+              segments=$(( (file_size + target_size - 1) / target_size ))
               
-              # 验证文件是否存在
-              echo "验证文件是否存在..."
-              if rclone lsf "onedrive:1/$video_path" > /dev/null 2>&1; then
-                # 下载视频文件
-                echo "下载视频文件到本地..."
-                if ! rclone copy "onedrive:1/$video_path" "$video_tmp_dir/" 2>/dev/null; then
-                  echo "错误: 下载视频文件失败，跳过此文件"
-                  continue
-                fi
+              echo "视频时长: ${duration}秒, 需要分割成 $segments 段"
+              
+              if [ $segments -gt 1 ]; then
+                # 计算每段的时长
+                segment_duration=$(( duration / segments ))
+                
+                # 分割视频
+                for ((i=0; i<$segments; i++)); do
+                  start_time=$(( i * segment_duration ))
+                  
+                  # 如果是最后一段，确保覆盖到视频结束
+                  if [ $i -eq $((segments-1)) ]; then
+                    ffmpeg -i "/tmp/video_processing/$filename" -ss $start_time -c copy -avoid_negative_ts make_zero "/tmp/video_processing/${filename%.*}_part$((i+1)).${filename##*.}"
+                  else
+                    ffmpeg -i "/tmp/video_processing/$filename" -ss $start_time -t $segment_duration -c copy -avoid_negative_ts make_zero "/tmp/video_processing/${filename%.*}_part$((i+1)).${filename##*.}"
+                  fi
+                  
+                  echo "已创建分段: ${filename%.*}_part$((i+1)).${filename##*.}"
+                done
+                
+                # 上传分割后的文件到onedrive:1
+                echo "上传分割后的文件..."
+                for part_file in /tmp/video_processing/${filename%.*}_part*; do
+                  if [ -f "$part_file" ]; then
+                    part_filename=$(basename "$part_file")
+                    # 上传到原目录
+                    rclone copy "$part_file" "onedrive:1/$(dirname "$filepath")/"
+                    echo "已上传: $part_filename"
+                  fi
+                done
+                
+                # 删除原始大文件（可选，取消注释以下行来启用）
+                # echo "删除原始大文件..."
+                # rclone delete "onedrive:1/$filepath"
+                
               else
-                echo "警告: 文件不存在: onedrive:1/$video_path，跳过此文件"
-                continue
+                echo "文件不需要分割"
               fi
               
-              # 检查本地是否成功下载了文件
-              if [ ! -f "$video_tmp_dir/$filename" ]; then
-                echo "错误: 本地未找到下载的视频文件，跳过此文件"
-                continue
-              fi
-              
-              # 获取视频文件大小，转换为字节
-              video_size=$(stat -c%s "$video_tmp_dir/$filename")
-              video_size_gb=$(echo "scale=2; $video_size / 1024 / 1024 / 1024" | bc || echo "0.00")
-              
-              echo "视频大小: ${video_size_gb}GB"
-              
-              # 定义每段的最大大小（4GB减去100MB作为余量，避免超过限制）
-              max_segment_size=$((4000 * 1024 * 1024))
-              
-              # 检查文件是否真的超过4GB（可能rclone的min-size筛选有误差）
-              if [ "$video_size" -le "$max_segment_size" ]; then
-                echo "文件大小未超过4GB，无需切割"
-                continue
-              fi
-              
-              # 计算需要切割成多少段
-              segments=$(echo "$video_size / $max_segment_size" | bc || echo "1")
-              if [ $(echo "$video_size % $max_segment_size" | bc || echo "0") -gt 0 ]; then
-                segments=$((segments + 1))
-              fi
-              
-              echo "计划切割成 ${segments} 段"
-              
-              # 使用ffprobe获取视频总时长（秒）
-              video_duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$video_tmp_dir/$filename" 2>/dev/null || echo "0")
-              video_duration_seconds=$(printf "%.0f" "$video_duration")
-              
-              # 如果无法获取时长，使用默认值
-              if [ "$video_duration_seconds" -le "0" ]; then
-                echo "警告: 无法获取视频时长，使用默认值"
-                video_duration_seconds=3600  # 默认1小时
-              fi
-              
-              # 计算每段视频的目标时长（秒）
-              segment_duration=$(echo "$video_duration_seconds / $segments" | bc || echo "3600")
-              
-              echo "视频总时长: ${video_duration_seconds}秒，每段约 ${segment_duration}秒"
-              
-              # 使用ffmpeg基于时间切割视频，保持原始编码以确保质量和兼容性
-              echo "开始切割视频..."
-              if ! ffmpeg -i "$video_tmp_dir/$filename" -c copy -map 0 -f segment -segment_time $segment_duration -reset_timestamps 1 "$video_tmp_dir/${filename_noext}_part_%02d.${extension}" 2>/dev/null; then
-                echo "错误: 视频切割失败，跳过此文件"
-                continue
-              fi
-              
-              # 检查切割结果
-              echo "切割结果："
-              ls -lh "$video_tmp_dir/"
-              
-              # 获取原文件所在的目录路径
-              video_dir=$(dirname "$video_path")
-              
-              # 创建目标目录（如果不存在）
-              echo "确保目标目录存在..."
-              rclone mkdir "onedrive:1/$video_dir" 2>/dev/null || {
-                echo "警告: 创建目标目录失败，但继续尝试上传"
-              }
-              
-              # 上传切割后的视频到原视频所在目录
-              echo "上传切割后的视频到原目录..."
-              if ! rclone copy "$video_tmp_dir/" "onedrive:1/$video_dir/" --include "${filename_noext}_part_*.${extension}" 2>/dev/null; then
-                echo "错误: 上传切割后的视频失败，跳过此文件"
-                continue
-              fi
-              
-              # 验证上传是否成功
-              echo "验证上传结果..."
-              uploaded_count=$(rclone ls "onedrive:1/$video_dir/" --include "${filename_noext}_part_*.${extension}" 2>/dev/null | wc -l)
-              
-              if [ "$uploaded_count" -gt 0 ]; then
-                echo "切割后的视频上传成功，准备删除原视频文件..."
-                # 删除原视频文件
-                if rclone delete "onedrive:1/$video_path" 2>/dev/null; then
-                  echo "原视频文件已删除: $video_path"
-                else
-                  echo "警告: 删除原视频文件失败"
-                fi
-              else
-                echo "警告: 切割后的视频上传失败，保留原视频文件"
-              fi
-              
-              echo "视频处理完成: $filename"
-              # 清理临时文件，节省空间
-              rm -rf "$video_tmp_dir"
-            done < /tmp/large_videos.txt
-          else
-            echo "没有找到超过4G的视频文件需要处理"
-          fi
+              # 清理临时文件
+              rm -f "/tmp/video_processing/$filename"
+              rm -f /tmp/video_processing/${filename%.*}_part*
+            fi
+          done < /tmp/large_videos.txt
           
           # 清理临时文件
           rm -f /tmp/large_videos.txt
-          rm -rf /tmp/videos
+          rm -rf /tmp/video_processing
           
-          echo "视频处理步骤完成"
+          echo "视频分割处理完成"
+          
       - name: rclone-sync
         run: |
           echo "==========onedrive==========="
@@ -331,7 +223,7 @@ jobs:
           #     --exclude "3/**" \
           #     --exclude "4/**" \
           #     --exclude "5/**"
-           
+          
 
 
           sudo rclone sync onedrive: openlist:baidupanCrypt/onedrive \
@@ -340,7 +232,7 @@ jobs:
               --exclude "3/**" \
               --exclude "4/**" \
               --exclude "5/**" \
-              --progress --fast-list --size-only --transfers 1 --checkers 32
+              --progress --fast-list --size-only --transfers 1 --checkers 32 
           curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 任务执行完毕"
      
           sudo rclone sync onedrive:1 openlist:baidupanCrypt/1 --progress --fast-list --size-only --transfers 1 --checkers 32
@@ -357,3 +249,7 @@ jobs:
 
           sudo rclone sync onedrive:5 openlist:123pan2Crypt/5 --progress --fast-list --size-only --transfers 1 --checkers 32
           curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 5任务执行完毕"
+
+
+
+
