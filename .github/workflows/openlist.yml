@@ -80,8 +80,7 @@ jobs:
         run: |
           # 安装必要工具
           sudo apt-get update
-          sudo apt-get install -y ffmpeg python3-pip
-          pip3 install vmaf
+          sudo apt-get install -y ffmpeg
           
           # 获取大文件列表
           min_size=4294967296  # 4GB in bytes
