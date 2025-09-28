@@ -140,9 +140,9 @@ jobs:
                   fi
                 done
                 
-                # 删除原始大文件（可选，取消注释以下行来启用）
-                # echo "删除原始大文件..."
-                # rclone delete "onedrive:1/$filepath"
+                # 删除原始大文件
+                echo "删除原始大文件..."
+                rclone delete "onedrive:1/$filepath"
                 
               else
                 echo "文件不需要分割"
