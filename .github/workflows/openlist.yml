@@ -75,82 +75,57 @@ jobs:
           sudo sleep 1m    
       - name: Verify docker container is running
         run: docker ps
-      - name: Split large videos by size
+      - name: Split large videos
         run: |
           # 安装必要工具
           sudo apt-get update
           sudo apt-get install -y ffmpeg python3-pip
           pip3 install tqdm
-          
+
           # 创建临时工作目录
           WORK_DIR="/tmp/video_processing"
-          sudo mkdir -p $WORK_DIR
-          sudo chmod 777 $WORK_DIR
-          
-          # 创建输入和输出目录
-          INPUT_DIR="$WORK_DIR/input"
-          OUTPUT_DIR="$WORK_DIR/output"
-          sudo mkdir -p $INPUT_DIR $OUTPUT_DIR
-          
-          # 最大文件大小 (4GB)
-          MAX_SIZE=$((4 * 1024 * 1024 * 1024))  # 4GB
-          TARGET_SIZE=$((3 * 1024 * 1024 * 1024))  # 3GB (安全大小)
-          
-          # 使用 rclone copy 复制 onedrive:1 内容到输入目录
-          echo "Copying files from onedrive:1 to local directory..."
-          rclone copy onedrive:1 $INPUT_DIR --progress --transfers 1
-          
-          # 处理大文件
-          find $INPUT_DIR -type f \( -iname "*.mp4" -o -iname "*.mkv" -o -iname "*.avi" \) | while read file; do
-            size=$(stat -c %s "$file")
-            if [ $size -gt $MAX_SIZE ]; then
-              echo "Processing large file: $file ($((size/1024/1024)) MB)"
-              
-              # 获取文件名和相对路径
-              filename=$(basename "$file")
-              relative_path=$(realpath --relative-to=$INPUT_DIR "$(dirname "$file")")
-              
-              # 创建输出目录结构
-              output_dir="$OUTPUT_DIR/$relative_path"
-              mkdir -p "$output_dir"
-              
-              # 计算需要分割的片段数量
-              segments=$(( (size + TARGET_SIZE - 1) / TARGET_SIZE ))
-              echo "Splitting into $segments segments..."
-              
-              # 使用ffmpeg分割视频（不重新编码）
-              # 创建分割点文件
-              SPLIT_POINTS_FILE="$WORK_DIR/split_points.txt"
-              > $SPLIT_POINTS_FILE
-              
-              # 计算每个片段的大小（字节）
-              segment_size=$((size / segments))
-              
-              # 生成分割点
-              for i in $(seq 1 $((segments - 1))); do
-                split_point=$((i * segment_size))
-                echo "file '$file'" >> $SPLIT_POINTS_FILE
-                echo "inpoint $((split_point - 1000000))" >> $SPLIT_POINTS_FILE  # 稍微提前开始以确保关键帧
-                echo "outpoint $split_point" >> $SPLIT_POINTS_FILE
-              done
-              
-              # 执行分割
-              ffmpeg -f concat -safe 0 -i $SPLIT_POINTS_FILE -c copy "$output_dir/${filename%.*}_part%03d.${filename##*.}"
-              
-              # 添加最后一段
-              ffmpeg -ss $(( (segments - 1) * segment_size )) -i "$file" -c copy "$output_dir/${filename%.*}_part$(printf "%03d" $segments).${filename##*.}"
-              
-              # 清理临时文件
-              rm $SPLIT_POINTS_FILE
-            else
-              # 对于不需要分割的文件，直接复制到输出目录
-              cp "$file" "$output_dir/$filename"
-            fi
-          done
-          
-          # 将处理后的文件复制回 onedrive:1
-          echo "Copying processed files back to onedrive:1..."
-          rclone copy $OUTPUT_DIR onedrive:1 --progress --transfers 1
+          mkdir -p "$WORK_DIR"
+          cd "$WORK_DIR"
+
+          # 获取onedrive:1中大于4GB的视频文件列表
+          echo "正在扫描大于4GB的视频文件..."
+          rclone lsf onedrive:1 --files-only --format "sp" | awk '$1 > 4294967296 {print $2}' > large_videos.txt
+
+          # 处理每个大视频文件
+          while IFS= read -r video; do
+            echo "处理视频: $video"
+            
+            # 只复制超过4GB的视频到本地
+            rclone copy "onedrive:1/$video" .
+            
+            # 获取视频信息
+            DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$video")
+            FILESIZE=$(stat -c%s "$video")
+            
+            # 计算需要分割的片段数量
+            SEGMENTS=$(( (FILESIZE + 4294967295) / 4294967296 ))  # 向上取整
+            
+            # 计算每个片段的时长（秒）
+            SEGMENT_DURATION=$(echo "scale=2; $DURATION / $SEGMENTS" | bc)
+            
+            # 使用ffmpeg无损切割视频
+            echo "切割视频为 $SEGMENTS 个片段..."
+            ffmpeg -i "$video" -c copy -map 0 -segment_time "$SEGMENT_DURATION" -f segment -reset_timestamps 1 "${video%.*}_part%03d.${video##*.}"
+            
+            # 上传切割后的片段
+            for part in "${video%.*}"_part*."${video##*.}"; do
+              echo "上传片段: $part"
+              rclone copyto "$part" "onedrive:1/$part"
+              rm "$part"
+            done
+            
+            # 删除本地原始文件
+            rm "$video"
+            
+            # 删除云端原始文件
+            rclone delete "onedrive:1/$video"
+            
+          done < large_videos.txt
           
       - name: rclone-sync
         run: |
