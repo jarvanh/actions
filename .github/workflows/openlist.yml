@@ -92,12 +92,15 @@ jobs:
             exit 0  # 即使临时目录创建失败也不中断工作流
           }
           
-          # 列出onedrive:1中超过4G的视频文件
+          # 列出onedrive:1中超过4G的视频文件（使用lsf命令获取完整路径，避免空格和特殊字符问题）
           echo "========== 列出onedrive:1中超过4G的视频文件 ============"
-          if ! rclone ls onedrive:1 --min-size 4G --include "*.mp4" --include "*.mkv" --include "*.avi" --include "*.mov" --include "*.wmv" | awk '{print $2}' > /tmp/large_videos.txt 2>/dev/null; then
+          if ! rclone lsf onedrive:1 --min-size 4G --include "*.mp4" --include "*.mkv" --include "*.avi" --include "*.mov" --include "*.wmv" --absolute > /tmp/large_videos.txt 2>/dev/null; then
             echo "警告: 列出文件时出现错误，可能是目录不存在或权限问题"
             touch /tmp/large_videos.txt  # 创建空文件以避免后续检查失败
           fi
+          
+          # 处理文件列表，移除开头的斜杠
+          sed -i 's|^/||' /tmp/large_videos.txt || true
           
           # 检查是否有大视频文件需要处理
           if [ -s /tmp/large_videos.txt ]; then
@@ -127,7 +130,7 @@ jobs:
               
               # 验证文件是否存在
               echo "验证文件是否存在..."
-              if rclone ls "onedrive:1/$video_path" > /dev/null 2>&1; then
+              if rclone lsf "onedrive:1/$video_path" > /dev/null 2>&1; then
                 # 下载视频文件
                 echo "下载视频文件到本地..."
                 if ! rclone copy "onedrive:1/$video_path" "$video_tmp_dir/" 2>/dev/null; then
