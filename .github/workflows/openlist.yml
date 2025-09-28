@@ -92,15 +92,35 @@ jobs:
             exit 0  # 即使临时目录创建失败也不中断工作流
           }
           
-          # 列出onedrive:1中超过4G的视频文件（使用lsf命令获取完整路径，避免空格和特殊字符问题，只列出文件）
+          # 列出onedrive:1中超过4G的视频文件（使用更直接的方法）
           echo "========== 列出onedrive:1中超过4G的视频文件 ============"
-          if ! rclone lsf onedrive:1 --min-size 4G --include "*.mp4" --include "*.mkv" --include "*.avi" --include "*.mov" --include "*.wmv" --absolute --files-only > /tmp/large_videos.txt 2>/dev/null; then
-            echo "警告: 列出文件时出现错误，可能是目录不存在或权限问题"
-            touch /tmp/large_videos.txt  # 创建空文件以避免后续检查失败
+          
+          # 先尝试使用rclone find命令，这是最可靠的查找文件方法
+          echo "尝试使用rclone find命令查找文件..."
+          rclone find onedrive:1 --min-size 4G -name "*.mp4" -o -name "*.mkv" -o -name "*.avi" -o -name "*.mov" -o -name "*.wmv" 2>&1 | tee /tmp/find_result.txt
+          
+          # 提取相对路径（去掉开头的onedrive:1/）
+          grep -v "^rclone: " /tmp/find_result.txt | sed 's|^onedrive:1/||' > /tmp/large_videos.txt
+          
+          # 如果find命令没有找到文件，尝试使用ls方法作为备选
+          if [ ! -s /tmp/large_videos.txt ]; then
+            echo "rclone find未找到文件，尝试使用rclone ls方法..."
+            rclone ls onedrive:1 --min-size 4G --include "*.mp4" --include "*.mkv" --include "*.avi" --include "*.mov" --include "*.wmv" 2>&1 | tee /tmp/ls_result.txt
+            
+            # 从ls结果中提取路径（去掉大小列）
+            grep -v "^rclone: " /tmp/ls_result.txt | awk '{$1=""; print substr($0,2)}' > /tmp/large_videos.txt
           fi
           
-          # 处理文件列表，移除开头的斜杠
-          sed -i 's|^/||' /tmp/large_videos.txt || true
+          # 添加调试信息：显示实际使用的rclone版本
+          echo "当前rclone版本: $(rclone version | head -n 1)"
+          
+          # 显示获取的文件列表（完整列表）用于调试
+          echo "获取的文件列表："
+          cat /tmp/large_videos.txt || echo "文件列表为空"
+          
+          # 显示找到的文件数量
+          file_count=$(wc -l < /tmp/large_videos.txt 2>/dev/null || echo 0)
+          echo "总共找到 $file_count 个超过4G的视频文件"
           
           # 检查是否有大视频文件需要处理
           if [ -s /tmp/large_videos.txt ]; then
