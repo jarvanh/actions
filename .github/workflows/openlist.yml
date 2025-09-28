@@ -87,29 +87,32 @@ jobs:
           sudo mkdir -p $WORK_DIR
           sudo chmod 777 $WORK_DIR
           
-          # 挂载 onedrive:1
-          ONEDRIVE_MOUNT="$WORK_DIR/onedrive1"
-          sudo mkdir -p $ONEDRIVE_MOUNT
-          sudo nohup rclone mount onedrive:1 $ONEDRIVE_MOUNT --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 10G &
-          sleep 10  # 等待挂载完成
+          # 创建输入和输出目录
+          INPUT_DIR="$WORK_DIR/input"
+          OUTPUT_DIR="$WORK_DIR/output"
+          sudo mkdir -p $INPUT_DIR $OUTPUT_DIR
           
           # 最大文件大小 (4GB)
           MAX_SIZE=$((4 * 1024 * 1024 * 1024))  # 4GB
-          TARGET_SIZE=$((3.9 * 1024 * 1024 * 1024))  # 3.9GB (预留缓冲)
+          TARGET_SIZE=$((3 * 1024 * 1024 * 1024))  # 3GB (安全大小)
           
-          # 查找并处理大文件
-          find $ONEDRIVE_MOUNT -type f \( -iname "*.mp4" -o -iname "*.mkv" -o -iname "*.avi" \) | while read file; do
+          # 使用 rclone copy 复制 onedrive:1 内容到输入目录
+          echo "Copying files from onedrive:1 to local directory..."
+          rclone copy onedrive:1 $INPUT_DIR --progress --transfers 1
+          
+          # 处理大文件
+          find $INPUT_DIR -type f \( -iname "*.mp4" -o -iname "*.mkv" -o -iname "*.avi" \) | while read file; do
             size=$(stat -c %s "$file")
             if [ $size -gt $MAX_SIZE ]; then
               echo "Processing large file: $file ($((size/1024/1024)) MB)"
               
-              # 获取文件名和目录
+              # 获取文件名和相对路径
               filename=$(basename "$file")
-              dirpath=$(dirname "$file")
-              tempfile="$WORK_DIR/$filename"
+              relative_path=$(realpath --relative-to=$INPUT_DIR "$(dirname "$file")")
               
-              # 复制文件到临时目录处理
-              cp "$file" "$tempfile"
+              # 创建输出目录结构
+              output_dir="$OUTPUT_DIR/$relative_path"
+              mkdir -p "$output_dir"
               
               # 计算需要分割的片段数量
               segments=$(( (size + TARGET_SIZE - 1) / TARGET_SIZE ))
@@ -126,32 +129,28 @@ jobs:
               # 生成分割点
               for i in $(seq 1 $((segments - 1))); do
                 split_point=$((i * segment_size))
-                echo "file '$tempfile'" >> $SPLIT_POINTS_FILE
+                echo "file '$file'" >> $SPLIT_POINTS_FILE
                 echo "inpoint $((split_point - 1000000))" >> $SPLIT_POINTS_FILE  # 稍微提前开始以确保关键帧
                 echo "outpoint $split_point" >> $SPLIT_POINTS_FILE
               done
               
               # 执行分割
-              ffmpeg -f concat -safe 0 -i $SPLIT_POINTS_FILE -c copy "$WORK_DIR/${filename%.*}_part%03d.${filename##*.}"
+              ffmpeg -f concat -safe 0 -i $SPLIT_POINTS_FILE -c copy "$output_dir/${filename%.*}_part%03d.${filename##*.}"
               
               # 添加最后一段
-              ffmpeg -ss $(( (segments - 1) * segment_size )) -i "$tempfile" -c copy "$WORK_DIR/${filename%.*}_part$(printf "%03d" $segments).${filename##*.}"
-              
-              # 移动分割后的文件回原目录
-              for part in "$WORK_DIR/${filename%.*}_part"*; do
-                mv "$part" "$dirpath/"
-              done
+              ffmpeg -ss $(( (segments - 1) * segment_size )) -i "$file" -c copy "$output_dir/${filename%.*}_part$(printf "%03d" $segments).${filename##*.}"
               
               # 清理临时文件
-              rm "$tempfile" $SPLIT_POINTS_FILE
-              
-              # 可选：删除原始大文件（谨慎操作）
-              # rm "$file"
+              rm $SPLIT_POINTS_FILE
+            else
+              # 对于不需要分割的文件，直接复制到输出目录
+              cp "$file" "$output_dir/$filename"
             fi
           done
-        
-          # 卸载挂载点
-          sudo umount $ONEDRIVE_MOUNT
+          
+          # 将处理后的文件复制回 onedrive:1
+          echo "Copying processed files back to onedrive:1..."
+          rclone copy $OUTPUT_DIR onedrive:1 --progress --transfers 1
           
       - name: rclone-sync
         run: |
