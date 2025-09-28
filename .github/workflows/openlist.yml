@@ -19,23 +19,45 @@ jobs:
     runs-on: ubuntu-latest
     # timeout-minutes: 60
     steps:
+    #   - name: Check Workflow Status
+    #     run: |
+    #       # 获取当前工作流的运行ID
+    #       CURRENT_RUN_ID=${{ github.run_id }}
+    
+    #       workflow_runs=$(curl -s -X GET \
+    #         -H "Accept: application/vnd.github.v3+json" \
+    #         -H "Authorization: Bearer ${{ secrets.PAT }}" \
+    #         "https://api.github.com/repos/${{ github.repository }}/actions/runs")
+    
+    #       # 排除当前运行ID后检查是否有其他运行中的工作流
+    #       otherRunning=$(echo "$workflow_runs" | jq --arg current_id "$CURRENT_RUN_ID" \
+    #         '.workflow_runs[] | select(.name == "openlist" and .status == "in_progress" and .id != ($current_id | tonumber))')
+    
+    #       if [[ -n $otherRunning ]]; then
+    #         echo "Another workflow is already running. Aborting current workflow."
+    #         exit 31
+    #       else
+    #         echo "No other running workflows found. Continuing."
+    #       fi
       - name: rclone-install
         run: |
+          # 安装 rclone
+          # curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
           curl -O https://beta.rclone.org/rclone-beta-latest-linux-amd64.zip
           unzip rclone-*-amd64.zip
           cd rclone-*-linux-amd64
           sudo mv rclone /usr/bin
           sudo chmod +x /usr/bin/rclone
-
+          # sudo apt-get install rclone
       - name: rclone-config
         env:
           RCLONE_CONFIG: ${{ secrets.RCLONE }}
         run: |
+          # 写配置文件
           mkdir -p ~/.config/rclone/
           cat << EOF > ~/.config/rclone/rclone.conf
           $RCLONE_CONFIG
           EOF
-
       - name: rclone-run
         run: |
           echo "==========onedrive==========="
@@ -43,45 +65,77 @@ jobs:
           echo "==========dropbox==========="
           rclone lsf dropbox:
 
-          sudo apt-get install -y fuse3
+          sudo apt-get install fuse3
           sudo mkdir -p /dropbox
           sudo nohup rclone mount dropbox: /dropbox --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 10G &
-
       - name: Run openlist container
         run: docker run -d --restart=unless-stopped -v /dropbox/self-hosted/openlist/data:/opt/openlist/data -p 5244:5244 -e PUID=0 -e PGID=0 -e UMASK=022 --name="openlist" openlistteam/openlist:latest
-
       - name: sleep
         run: |
           sudo sleep 1m    
-
       - name: Verify docker container is running
         run: docker ps
-      
-      - name: video-compress
+        
+      - name: Compress large videos
         run: |
-          sudo apt-get update && sudo apt-get install -y ffmpeg jq
+          # 安装必要的视频处理工具
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
 
-          echo "开始压缩 onedrive:1 中超过4G的视频文件..."
-          mkdir -p /tmp/videos
+          # 创建临时目录用于处理视频
+          mkdir -p /tmp/video_processing
           
-          # 下载超过 4G 的视频文件到本地 /tmp/videos
-          rclone lsjson onedrive:1 --files-only --min-size 4G --fast-list | jq -r '.[].Path' | while read file; do
-            echo "处理文件: $file"
-            rclone copy "onedrive:1/$file" /tmp/videos/ --progress
-
-            src="/tmp/videos/$(basename "$file")"
-            out="/tmp/videos/$(basename "${file%.*}")_compressed.${file##*.}"
-
-            # 压缩视频 (使用 H.265 保持质量, 限制码率避免失真)
-            ffmpeg -i "$src" -c:v libx265 -preset veryslow -crf 18 -c:a copy "$out"
-
-            # 画质验证 (SSIM/PSNR)
-            ffmpeg -i "$src" -i "$out" -lavfi "[0:v][1:v]ssim;[0:v][1:v]psnr" -f null - || true
-
-            # 上传压缩后文件到相同目录
-            rclone copy "$out" "onedrive:1/$(dirname "$file")/" --progress
-          done
-
+          # 获取onedrive:1中超过4G的视频文件列表
+          echo "正在查找onedrive:1中超过4G的视频文件..."
+          rclone ls onedrive:1 --min-size 4G --size-only | grep -E '\.mp4$|\.mkv$|\.avi$|\.mov$|\.wmv$' > /tmp/large_videos.txt
+          
+          # 处理每个视频文件
+          while IFS= read -r line; do
+            size=$(echo "$line" | awk '{print $1}')
+            file_path=$(echo "$line" | awk '{$1=""; print substr($0,2)}')
+            file_name=$(basename "$file_path")
+            file_dir=$(dirname "$file_path")
+            
+            echo "处理文件: $file_path (大小: $size 字节)"
+            
+            # 下载原始视频到临时目录
+            echo "下载视频文件..."
+            rclone copy "onedrive:1/$file_path" /tmp/video_processing/
+            
+            # 获取文件名和扩展名
+            filename_noext="${file_name%.*}"
+            extension="${file_name##*.}"
+            compressed_file="${filename_noext}_compressed.${extension}"
+            
+            # 使用ffmpeg进行压缩，保持画质的同时减小文件大小
+            echo "压缩视频文件..."
+            ffmpeg -i "/tmp/video_processing/$file_name" -c:v libx264 -crf 23 -preset medium -c:a aac -b:a 128k "/tmp/video_processing/$compressed_file"
+            
+            # 验证压缩后的视频质量
+            echo "验证压缩后的视频质量..."
+            original_duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "/tmp/video_processing/$file_name")
+            compressed_duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "/tmp/video_processing/$compressed_file")
+            
+            # 检查压缩后的视频时长是否与原视频相同（允许1秒误差）
+            duration_diff=$(echo "$original_duration - $compressed_duration" | bc | awk '{print ($1 < 0) ? -$1 : $1}')
+            
+            if (( $(echo "$duration_diff < 1" | bc -l) )); then
+              echo "视频质量验证通过，上传压缩后的视频..."
+              # 上传压缩后的视频到原目录
+              rclone copy "/tmp/video_processing/$compressed_file" "onedrive:1/$file_dir/"
+              echo "成功压缩并上传: $compressed_file"
+            else
+              echo "视频质量验证失败，跳过上传"
+            fi
+            
+            # 清理临时文件
+            rm -f "/tmp/video_processing/$file_name" "/tmp/video_processing/$compressed_file"
+            
+          done < /tmp/large_videos.txt
+          
+          # 清理临时目录
+          rm -rf /tmp/video_processing
+          rm -f /tmp/large_videos.txt
       - name: rclone-sync
         run: |
           echo "==========onedrive==========="
@@ -91,8 +145,62 @@ jobs:
           echo "==========openlist==========="
           rclone lsf openlist:
 
+          echo "==========  onedrive:  ==========="
+          rclone ls onedrive: \
+              --exclude "1/**" \
+              --exclude "2/**" \
+              --exclude "3/**" \
+              --exclude "4/**" \
+              --exclude "5/**" \
+              --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
+          echo "==========  onedrive:0  ==========="
+          rclone ls onedrive:0 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
           echo "==========  onedrive:1  ==========="
           rclone ls onedrive:1 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
+          echo "==========  onedrive:2  ==========="
+          rclone ls onedrive:2 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
+          echo "==========  onedrive:3  ==========="
+          rclone ls onedrive:3 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
+          echo "==========  onedrive:4  ==========="
+          rclone ls onedrive:4 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
+          echo "==========  onedrive:5  ==========="
+          rclone ls onedrive:5 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
+
+          
+          # # 统计 onedrive:0 的总大小
+          # echo "==========  onedrive:0  ==========="
+          # rclone size onedrive:0
+          
+          # # 统计 onedrive:1 的总大小
+          # echo "==========  onedrive:1  ==========="
+          # rclone size onedrive:1
+          
+          # # 统计 onedrive:2 的总大小
+          # echo "==========  onedrive:2  ==========="
+          # rclone size onedrive:2
+          
+          # # 统计 onedrive:3 的总大小
+          # echo "==========  onedrive:3  ==========="
+          # rclone size onedrive:3
+          
+          # # 统计 onedrive:4 的总大小
+          # echo "==========  onedrive:4  ==========="
+          # rclone size onedrive:4
+          
+          # # 统计 onedrive:5 的总大小
+          # echo "==========  onedrive:5  ==========="
+          # rclone size onedrive:5
+          
+          # # 统计根目录（排除子目录 1-5）的总大小
+          # echo "==========  onedrive: (excluding 1-5) ==========="
+          # rclone size onedrive: \
+          #     --exclude "1/**" \
+          #     --exclude "2/**" \
+          #     --exclude "3/**" \
+          #     --exclude "4/**" \
+          #     --exclude "5/**"
+          
+
 
           sudo rclone sync onedrive: openlist:baidupanCrypt/onedrive \
               --exclude "1/**" \
@@ -100,21 +208,18 @@ jobs:
               --exclude "3/**" \
               --exclude "4/**" \
               --exclude "5/**" \
-              --progress --fast-list --size-only --transfers 1 --checkers 32 
-     
+              --progress --fast-list --size-only --transfers 1 --checkers 32          
           sudo rclone sync onedrive:1 openlist:baidupanCrypt/1 --progress --fast-list --size-only --transfers 1 --checkers 32
           sudo rclone sync onedrive:2 openlist:aliyundriveCrypt/2 -vv --progress --fast-list --size-only --transfers 1 --checkers 32
           sudo rclone sync onedrive:3 openlist:aliyundriveCrypt/3 -vv --progress --fast-list --size-only --transfers 1 --checkers 32
           # sudo rclone sync onedrive:4 openlist:123pan2Crypt/4 --progress --fast-list --size-only --transfers 1 --checkers 32
           # sudo rclone sync onedrive:5 openlist:123pan2Crypt/5 --progress --fast-list --size-only --transfers 1 --checkers 32
-
+        
       - name: Verify docker container is running
         run: docker ps
-
       - name: sleep
         run: |
           sudo sleep 10m
-
       - name: send notification
         run: |
           curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist 任务执行完毕"
