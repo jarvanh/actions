@@ -109,7 +109,7 @@ jobs:
             
             # 使用ffmpeg进行压缩，保持画质的同时减小文件大小
             echo "压缩视频文件..."
-            ffmpeg -i "/tmp/video_processing/$file_name" -c:v libx265 -crf 18 -preset veryslow -c:a copy "/tmp/video_processing/$compressed_file"
+            ffmpeg -i "/tmp/video_processing/$file_name" -c:v libx265 -crf 18 -preset medium -c:a copy "/tmp/video_processing/$compressed_file"
             
             # 验证压缩后的视频质量
             echo "验证压缩后的视频质量..."
