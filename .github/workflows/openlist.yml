@@ -75,6 +75,83 @@ jobs:
           sudo sleep 1m    
       - name: Verify docker container is running
         run: docker ps
+          # 新增视频压缩步骤
+      - name: Compress large videos
+        run: |
+          # 安装必要工具
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg python3-pip
+          pip3 install vmaf
+          
+          # 获取大文件列表
+          min_size=4294967296  # 4GB in bytes
+          large_files=$(rclone ls onedrive:1 --min-size $min_size --size-only --order-by size --descending | awk '{$1=""; print $0}' | sed 's/^ //')
+          
+          if [ -z "$large_files" ]; then
+            echo "No large video files found for compression."
+            exit 0
+          fi
+          
+          # 处理每个大文件
+          while IFS= read -r file; do
+            # 检查是否已压缩
+            filename=$(basename "$file")
+            dirpath=$(dirname "$file")
+            base="${filename%.*}"
+            ext="${filename##*.}"
+            compressed_file="${base}_compressed.${ext}"
+            
+            # 检查压缩文件是否已存在
+            if rclone ls "onedrive:1/$dirpath/$compressed_file" &> /dev/null; then
+              echo "Skipping $file - compressed version already exists"
+              continue
+            fi
+            
+            echo "Processing $file..."
+            
+            # 创建临时目录
+            temp_dir=$(mktemp -d)
+            cd "$temp_dir"
+            
+            # 下载文件
+            rclone copy "onedrive:1/$file" .
+            
+            # 原始文件信息
+            orig_size=$(stat -c%s "$filename")
+            echo "Original size: $((orig_size/1024/1024)) MB"
+            
+            # 压缩视频 (使用CRF 18保持高质量)
+            ffmpeg -i "$filename" -c:v libx265 -crf 18 -preset veryslow -c:a copy "$compressed_file" -y
+            
+            # 压缩后文件信息
+            comp_size=$(stat -c%s "$compressed_file")
+            echo "Compressed size: $((comp_size/1024/1024)) MB"
+            reduction=$((100 - comp_size * 100 / orig_size))
+            echo "Size reduction: ${reduction}%"
+            
+            # 画质验证 (使用VMAF)
+            ffmpeg -i "$compressed_file" -i "$filename" \
+                   -lavfi "[0:v][1:v]libvmaf=log_path=vmaf.log:model_path=/usr/local/share/model/vmaf_v0.6.1.json" \
+                   -f null - 2> vmaf_output.txt
+            
+            # 提取VMAF分数
+            vmaf_score=$(grep 'VMAF score' vmaf_output.txt | awk '{print $4}')
+            echo "VMAF score: $vmaf_score"
+            
+            # 验证标准 (VMAF > 95 表示高质量)
+            if (( $(echo "$vmaf_score > 95" | bc -l) )); then
+              echo "Quality maintained. Uploading compressed version."
+              # 上传压缩文件
+              rclone copy "$compressed_file" "onedrive:1/$dirpath/"
+            else
+              echo "Quality check failed (VMAF: $vmaf_score). Skipping upload."
+            fi
+            
+            # 清理临时文件
+            cd ..
+            rm -rf "$temp_dir"
+            
+          done <<< "$large_files"
       - name: rclone-sync
         run: |
           echo "==========onedrive==========="
