@@ -80,7 +80,7 @@ jobs:
           echo "==========  Split large videos in onedrive:1  ==========="
           # 安装ffmpeg和相关工具用于视频切割
           sudo apt-get update
-          sudo apt-get install -y ffmpeg ffprobe jq
+          sudo apt-get install -y ffmpeg jq
           
           # 查找大于4GB的视频文件并进行切割
           rclone lsf onedrive:1 --include "*.{mp4,mkv,avi,mov,wmv,flv,webm}" --min-size 4G --format "pi" | while IFS='|' read -r path id; do
