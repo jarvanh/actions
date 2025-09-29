@@ -98,14 +98,28 @@ jobs:
           # 处理每个大视频文件
           while IFS= read -r line; do
             if [ -n "$line" ]; then
-              # 使用更稳健的方法提取文件路径，处理特殊字符
-              size=$(echo "$line" | awk '{print $1}')
-              filepath=$(echo "$line" | sed 's/^[0-9]* //')
+              # 使用更稳健的方法提取文件路径和大小
+              # rclone ls 输出格式: 大小 文件路径
+              # 使用正则表达式确保正确提取
+              if echo "$line" | grep -q '^[0-9]\+ '; then
+                size=$(echo "$line" | sed 's/^\([0-9]\+\).*/\1/')
+                filepath=$(echo "$line" | sed 's/^[0-9]\+ //')
+              else
+                echo "跳过格式错误的行: $line"
+                continue
+              fi
+              
               filename=$(basename "$filepath")
               
               # 检查文件名是否包含非法字符
               if echo "$filename" | grep -q '[^[:print:]]'; then
                 echo "跳过包含非法字符的文件: $filepath"
+                continue
+              fi
+              
+              # 检查文件路径是否有效
+              if [ -z "$filepath" ] || [ "$filepath" = "$size" ]; then
+                echo "跳过无效的文件路径: $line"
                 continue
               fi
               
@@ -290,3 +304,7 @@ jobs:
 
           sudo rclone sync onedrive:5 openlist:123pan2Crypt/5 --progress --fast-list --size-only --transfers 1 --checkers 32
           curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 5任务执行完毕"
+
+
+
+
