@@ -75,59 +75,75 @@ jobs:
           sudo sleep 1m    
       - name: Verify docker container is running
         run: docker ps
-      - name: Install ffmpeg
+      - name: video-split
         run: |
+          # 安装 ffmpeg 用于视频切割
           sudo apt-get update
           sudo apt-get install -y ffmpeg
-      - name: Split large videos in onedrive:1
-        run: |
-          # Set of common video file extensions
-          EXTENSIONS="mkv,mp4,mov,avi,wmv,flv,webm"
-          # Find video files larger than 4GB in onedrive:1
-          rclone lsf onedrive:1 --min-size 4G --files-only --include "*.{${EXTENSIONS}}" --format "p" | while read -r file; do
-            echo "Processing large video file: ${file}"
-            # Create a temporary directory for processing
-            TMP_DIR=$(mktemp -d)
-            LOCAL_FILE="${TMP_DIR}/$(basename "${file}")"
-            echo "Downloading ${file} to ${LOCAL_FILE}..."
-            if ! rclone copyto "onedrive:1/${file}" "${LOCAL_FILE}"; then
-              echo "Failed to download ${file}. Skipping."
-              rm -rf "${TMP_DIR}"
-              continue
-            fi
-            # Get video duration and size
-            DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${LOCAL_FILE}")
-            DURATION_INT=$(printf "%.0f" "${DURATION}")
-            SIZE=$(stat -c%s "${LOCAL_FILE}")
-            # 4GiB limit in bytes (a bit less to be safe)
-            LIMIT=4290000000 
-            if [ "${SIZE}" -le "${LIMIT}" ]; then
-              echo "${file} is not larger than the limit after download. Skipping."
-              rm -rf "${TMP_DIR}"
-              continue
-            fi
-            # Calculate number of parts and duration of each part
-            NUM_PARTS=$(( (SIZE + LIMIT - 1) / LIMIT ))
-            PART_DURATION=$(( DURATION_INT / NUM_PARTS + 1))
-            echo "Splitting ${file} into ${NUM_PARTS} parts of ~${PART_DURATION}s each..."
-            FILENAME=$(basename "${file}")
-            EXTENSION="${FILENAME##*.}"
-            BASENAME="${FILENAME%.*}"
-            # Split the video using ffmpeg, -c copy ensures no re-encoding
-            ffmpeg -i "${LOCAL_FILE}" -c copy -map 0 -segment_time "${PART_DURATION}" -f segment -reset_timestamps 1 "${TMP_DIR}/${BASENAME}-part%03d.${EXTENSION}"
-            if [ $? -eq 0 ]; then
-              echo "Split successful. Uploading parts..."
-              # Upload split parts to a new folder named after the original file
-              rclone move "${TMP_DIR}" "onedrive:1/${BASENAME}_split" --include "*-part*.${EXTENSION}" --progress
+          
+          # 创建临时目录用于处理视频
+          mkdir -p /tmp/video_split
+          
+          # 获取 onedrive:1 中超过4G的视频文件列表
+          echo "正在扫描 onedrive:1 中超过4G的视频文件..."
+          rclone ls onedrive:1 --min-size 4G --size-only --include "*.mp4" --include "*.mkv" --include "*.avi" --include "*.mov" --include "*.wmv" --include "*.flv" --include "*.webm" > /tmp/large_videos.txt
+          
+          # 处理每个大视频文件
+          while IFS= read -r line; do
+            if [ -n "$line" ]; then
+              size=$(echo "$line" | awk '{print $1}')
+              filepath=$(echo "$line" | awk '{print $2}')
+              filename=$(basename "$filepath")
               
-              echo "Deleting original file: ${file}"
-              rclone delete "onedrive:1/${file}"
-            else
-              echo "ffmpeg split failed for ${file}"
+              echo "处理文件: $filename (大小: $size bytes)"
+              
+              # 计算需要分割的段数（每段不超过3.5G以确保安全）
+              segment_size=3750000000  # 3.5GB in bytes
+              file_size=$size
+              segments=$(( (file_size + segment_size - 1) / segment_size ))
+              
+              echo "文件需要分割成 $segments 段"
+              
+              # 下载视频文件到临时目录
+              echo "正在下载文件: $filepath"
+              rclone copy "onedrive:1/$filepath" /tmp/video_split/
+              
+              # 使用 ffmpeg 进行无损分割（按时间分割，保持可播放性）
+              # 先获取视频总时长
+              duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "/tmp/video_split/$filename")
+              segment_duration=$(echo "scale=2; $duration / $segments" | bc)
+              
+              echo "视频总时长: $duration 秒，每段时长: $segment_duration 秒"
+              
+              # 分割视频
+              for ((i=0; i<segments; i++)); do
+                start_time=$(echo "scale=2; $i * $segment_duration" | bc)
+                segment_name="${filename%.*}_part$((i+1)).${filename##*.}"
+                
+                echo "正在生成第 $((i+1)) 段: $segment_name"
+                
+                # 使用 ffmpeg 进行分割，保持视频质量
+                ffmpeg -i "/tmp/video_split/$filename" -ss "$start_time" -t "$segment_duration" -c copy -avoid_negative_ts make_zero "/tmp/video_split/$segment_name" -y
+                
+                # 上传分割后的文件到 onedrive:1 的 split_videos 目录
+                rclone copy "/tmp/video_split/$segment_name" "onedrive:1/split_videos/"
+                
+                # 删除本地分割文件
+                rm -f "/tmp/video_split/$segment_name"
+              done
+              
+              # 删除原始下载的文件
+              rm -f "/tmp/video_split/$filename"
+              
+              echo "文件 $filename 分割完成"
             fi
-            # Clean up temporary directory
-            rm -rf "${TMP_DIR}"
-          done
+          done < /tmp/large_videos.txt
+          
+          # 清理临时文件
+          rm -f /tmp/large_videos.txt
+          rm -rf /tmp/video_split
+          
+          echo "视频分割任务完成"
       - name: rclone-sync
         run: |
           echo "==========onedrive==========="
