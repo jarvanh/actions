@@ -75,71 +75,8 @@ jobs:
           sudo sleep 1m    
       - name: Verify docker container is running
         run: docker ps
-      - name: rclone-sync
+      - name: split-large-videos
         run: |
-          echo "==========onedrive==========="
-          rclone lsf onedrive:
-          echo "==========dropbox==========="
-          rclone lsf dropbox:
-          echo "==========openlist==========="
-          rclone lsf openlist:
-
-          echo "==========  onedrive:  ==========="
-          rclone ls onedrive: \
-              --exclude "1/**" \
-              --exclude "2/**" \
-              --exclude "3/**" \
-              --exclude "4/**" \
-              --exclude "5/**" \
-              --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
-          echo "==========  onedrive:0  ==========="
-          rclone ls onedrive:0 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
-          echo "==========  onedrive:1  ==========="
-          rclone ls onedrive:1 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
-          echo "==========  onedrive:2  ==========="
-          rclone ls onedrive:2 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
-          echo "==========  onedrive:3  ==========="
-          rclone ls onedrive:3 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
-          echo "==========  onedrive:4  ==========="
-          rclone ls onedrive:4 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
-          echo "==========  onedrive:5  ==========="
-          rclone ls onedrive:5 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
-
-          
-          # # 统计 onedrive:0 的总大小
-          # echo "==========  onedrive:0  ==========="
-          # rclone size onedrive:0
-          
-          # # 统计 onedrive:1 的总大小
-          # echo "==========  onedrive:1  ==========="
-          # rclone size onedrive:1
-          
-          # # 统计 onedrive:2 的总大小
-          # echo "==========  onedrive:2  ==========="
-          # rclone size onedrive:2
-          
-          # # 统计 onedrive:3 的总大小
-          # echo "==========  onedrive:3  ==========="
-          # rclone size onedrive:3
-          
-          # # 统计 onedrive:4 的总大小
-          # echo "==========  onedrive:4  ==========="
-          # rclone size onedrive:4
-          
-          # # 统计 onedrive:5 的总大小
-          # echo "==========  onedrive:5  ==========="
-          # rclone size onedrive:5
-          
-          # # 统计根目录（排除子目录 1-5）的总大小
-          # echo "==========  onedrive: (excluding 1-5) ==========="
-          # rclone size onedrive: \
-          #     --exclude "1/**" \
-          #     --exclude "2/**" \
-          #     --exclude "3/**" \
-          #     --exclude "4/**" \
-          #     --exclude "5/**"
-          
-          # 切割onedrive:1中超过4GB的视频文件
           echo "==========  Split large videos in onedrive:1  ==========="
           # 安装ffmpeg和相关工具用于视频切割
           sudo apt-get update
@@ -242,6 +179,69 @@ jobs:
               echo "文件未超过4GB限制，无需分割: $path"
             fi
           done
+      - name: rclone-sync
+        run: |
+          echo "==========onedrive==========="
+          rclone lsf onedrive:
+          echo "==========dropbox==========="
+          rclone lsf dropbox:
+          echo "==========openlist==========="
+          rclone lsf openlist:
+
+          echo "==========  onedrive:  ==========="
+          rclone ls onedrive: \
+              --exclude "1/**" \
+              --exclude "2/**" \
+              --exclude "3/**" \
+              --exclude "4/**" \
+              --exclude "5/**" \
+              --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
+          echo "==========  onedrive:0  ==========="
+          rclone ls onedrive:0 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
+          echo "==========  onedrive:1  ==========="
+          rclone ls onedrive:1 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
+          echo "==========  onedrive:2  ==========="
+          rclone ls onedrive:2 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
+          echo "==========  onedrive:3  ==========="
+          rclone ls onedrive:3 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
+          echo "==========  onedrive:4  ==========="
+          rclone ls onedrive:4 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
+          echo "==========  onedrive:5  ==========="
+          rclone ls onedrive:5 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
+
+          
+          # # 统计 onedrive:0 的总大小
+          # echo "==========  onedrive:0  ==========="
+          # rclone size onedrive:0
+          
+          # # 统计 onedrive:1 的总大小
+          # echo "==========  onedrive:1  ==========="
+          # rclone size onedrive:1
+          
+          # # 统计 onedrive:2 的总大小
+          # echo "==========  onedrive:2  ==========="
+          # rclone size onedrive:2
+          
+          # # 统计 onedrive:3 的总大小
+          # echo "==========  onedrive:3  ==========="
+          # rclone size onedrive:3
+          
+          # # 统计 onedrive:4 的总大小
+          # echo "==========  onedrive:4  ==========="
+          # rclone size onedrive:4
+          
+          # # 统计 onedrive:5 的总大小
+          # echo "==========  onedrive:5  ==========="
+          # rclone size onedrive:5
+          
+          # # 统计根目录（排除子目录 1-5）的总大小
+          # echo "==========  onedrive: (excluding 1-5) ==========="
+          # rclone size onedrive: \
+          #     --exclude "1/**" \
+          #     --exclude "2/**" \
+          #     --exclude "3/**" \
+          #     --exclude "4/**" \
+          #     --exclude "5/**"
 
 
           sudo rclone sync onedrive: openlist:baidupanCrypt/onedrive \
