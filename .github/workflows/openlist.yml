@@ -179,10 +179,17 @@ jobs:
           VIDEO_EXTENSIONS="\\.(mp4|mkv|mov|avi|flv|webm)$"
 
           echo "Searching for non-video files larger than 4GB in ${REMOTE_PATH}..."
-
+          
           # 2. 使用 rclone lsjson 查找并筛选大文件，排除视频文件
           rclone lsjson --recursive ${REMOTE_PATH} --min-size 4G | \
-          jq -r '.[] | select((.Path | test("'"$VIDEO_EXTENSIONS"'"; "i") | not) and .IsDir == false) | "\(.Path)\t\(.Size)"' | \
+          jq --arg video_re "$VIDEO_EXTENSIONS" -r '
+            .[] | 
+            select(
+              (.Path | test($video_re; "i") | not) and 
+              .IsDir == false
+            ) | 
+            "\(.Path)\t\(.Size)"
+          ' | \
           while IFS=$'\t' read -r general_file FILE_SIZE; do
             
             if [ -z "$general_file" ]; then continue; fi
