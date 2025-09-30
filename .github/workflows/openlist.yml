@@ -52,108 +52,108 @@ jobs:
       - name: Verify docker container is running
         run: docker ps
 
-      # - name: Split large videos
-      #   run: |
-      #     # 1. 安装 ffmpeg, jq, 和 coreutils (为了 dirname)
-      #     echo "Installing ffmpeg, jq, and coreutils..."
-      #     # 确保安装了 numfmt (属于 coreutils)
-      #     sudo apt-get update && sudo apt-get install -y ffmpeg jq coreutils
+      - name: Split large videos
+        run: |
+          # 1. 安装 ffmpeg, jq, 和 coreutils (为了 dirname)
+          echo "Installing ffmpeg, jq, and coreutils..."
+          # 确保安装了 numfmt (属于 coreutils)
+          sudo apt-get update && sudo apt-get install -y ffmpeg jq coreutils
           
-      #     # 2. 定义参数
-      #     LIMIT_BYTES=3900000000
-      #     REMOTE_PATH="onedrive:1"
-      #     TEMP_DIR="temp_split_videos"
-      #     mkdir -p "$TEMP_DIR"
+          # 2. 定义参数
+          LIMIT_BYTES=3900000000
+          REMOTE_PATH="onedrive:1"
+          TEMP_DIR="temp_split_videos"
+          mkdir -p "$TEMP_DIR"
 
-      #     echo "Searching for video files larger than 4GB in ${REMOTE_PATH} and all subdirectories..."
+          echo "Searching for video files larger than 4GB in ${REMOTE_PATH} and all subdirectories..."
 
-      #     # 3. 使用 rclone lsjson --recursive 递归查找并筛选大视频文件
-      #     rclone lsjson --recursive ${REMOTE_PATH} --min-size 4G | \
-      #     jq -r '.[] | select((.Path | test("\\.(mp4|mkv|mov|avi|flv|webm)$"; "i")) and .IsDir == false) | "\(.Path | @base64)\t\(.Size | tostring | @base64)"' | \
-      #     while IFS=$'\t' read -r video_file_b64 FILE_SIZE_b64; do
-      #         # 检查是否读取到有效数据
-      #         if [ -z "$video_file_b64" ]; then
-      #           continue
-      #         fi
+          # 3. 使用 rclone lsjson --recursive 递归查找并筛选大视频文件
+          rclone lsjson --recursive ${REMOTE_PATH} --min-size 4G | \
+          jq -r '.[] | select((.Path | test("\\.(mp4|mkv|mov|avi|flv|webm)$"; "i")) and .IsDir == false) | "\(.Path | @base64)\t\(.Size | tostring | @base64)"' | \
+          while IFS=$'\t' read -r video_file_b64 FILE_SIZE_b64; do
+              # 检查是否读取到有效数据
+              if [ -z "$video_file_b64" ]; then
+                continue
+              fi
               
-      #         # Base64 解码
-      #         video_file=$(echo "$video_file_b64" | base64 --decode)
-      #         FILE_SIZE=$(echo "$FILE_SIZE_b64" | base64 --decode)
+              # Base64 解码
+              video_file=$(echo "$video_file_b64" | base64 --decode)
+              FILE_SIZE=$(echo "$FILE_SIZE_b64" | base64 --decode)
           
-      #         echo "-----------------------------------------------------"
-      #         echo "Found large video: \"$video_file\""
+              echo "-----------------------------------------------------"
+              echo "Found large video: \"$video_file\""
 
-      #       # 4. 下载大文件到本地临时目录
-      #       echo "Downloading..."
-      #       # 增加输出重定向以避免不必要的日志干扰
-      #       rclone copy "${REMOTE_PATH}/${video_file}" "$TEMP_DIR" > /dev/null 2>&1
-      #       if [ $? -ne 0 ]; then
-      #           echo "Error: Failed to download \"$video_file\". Skipping."
-      #           continue
-      #       fi
+            # 4. 下载大文件到本地临时目录
+            echo "Downloading..."
+            # 增加输出重定向以避免不必要的日志干扰
+            rclone copy "${REMOTE_PATH}/${video_file}" "$TEMP_DIR" > /dev/null 2>&1
+            if [ $? -ne 0 ]; then
+                echo "Error: Failed to download \"$video_file\". Skipping."
+                continue
+            fi
 
-      #       LOCAL_FILE_PATH="${TEMP_DIR}/$(basename -- "$video_file")"
+            LOCAL_FILE_PATH="${TEMP_DIR}/$(basename -- "$video_file")"
             
-      #       # 5. 计算切割参数
-      #       # 使用 -v silent 避免 ffprobe 输出干扰
-      #       DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$LOCAL_FILE_PATH")
+            # 5. 计算切割参数
+            # 使用 -v silent 避免 ffprobe 输出干扰
+            DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$LOCAL_FILE_PATH")
             
-      #       # 检查 DURATION 是否有效 (如果 ffprobe 失败或文件不是有效的视频)
-      #       if [ -z "$DURATION" ] || ! echo "$DURATION" | grep -q '^[0-9.]\+$'; then
-      #           echo "Error: Could not get valid duration for \"$video_file\". Skipping."
-      #           rm -f "$LOCAL_FILE_PATH"
-      #           continue
-      #       fi
+            # 检查 DURATION 是否有效 (如果 ffprobe 失败或文件不是有效的视频)
+            if [ -z "$DURATION" ] || ! echo "$DURATION" | grep -q '^[0-9.]\+$'; then
+                echo "Error: Could not get valid duration for \"$video_file\". Skipping."
+                rm -f "$LOCAL_FILE_PATH"
+                continue
+            fi
             
-      #       NUM_PARTS=$(awk "BEGIN {print int(($FILE_SIZE + $LIMIT_BYTES - 1) / $LIMIT_BYTES)}")
+            NUM_PARTS=$(awk "BEGIN {print int(($FILE_SIZE + $LIMIT_BYTES - 1) / $LIMIT_BYTES)}")
             
-      #       if [ "$NUM_PARTS" -le 1 ]; then
-      #           echo "\"$video_file\" does not need splitting. Skipping."
-      #           rm -f "$LOCAL_FILE_PATH"
-      #           continue
-      #       fi
+            if [ "$NUM_PARTS" -le 1 ]; then
+                echo "\"$video_file\" does not need splitting. Skipping."
+                rm -f "$LOCAL_FILE_PATH"
+                continue
+            fi
             
-      #       SEGMENT_DURATION=$(awk "BEGIN {print $DURATION / $NUM_PARTS}")
+            SEGMENT_DURATION=$(awk "BEGIN {print $DURATION / $NUM_PARTS}")
 
-      #       echo "File size: $(numfmt --to=iec $FILE_SIZE), Duration: $DURATION s"
-      #       echo "Splitting into $NUM_PARTS parts, each approx $SEGMENT_DURATION seconds long."
+            echo "File size: $(numfmt --to=iec $FILE_SIZE), Duration: $DURATION s"
+            echo "Splitting into $NUM_PARTS parts, each approx $SEGMENT_DURATION seconds long."
 
-      #       BASENAME=$(basename -- "$video_file")
-      #       FILENAME="${BASENAME%.*}"
-      #       EXTENSION="${BASENAME##*.}"
+            BASENAME=$(basename -- "$video_file")
+            FILENAME="${BASENAME%.*}"
+            EXTENSION="${BASENAME##*.}"
 
-      #       # 6. 执行 ffmpeg 切割
-      #       # -loglevel warning 减少不必要的输出
-      #       ffmpeg -i "$LOCAL_FILE_PATH" -c copy -map 0 -f segment -segment_time "$SEGMENT_DURATION" -reset_timestamps 1 -loglevel warning "${TEMP_DIR}/${FILENAME}_part%03d.${EXTENSION}"
+            # 6. 执行 ffmpeg 切割
+            # -loglevel warning 减少不必要的输出
+            ffmpeg -i "$LOCAL_FILE_PATH" -c copy -map 0 -f segment -segment_time "$SEGMENT_DURATION" -reset_timestamps 1 -loglevel warning "${TEMP_DIR}/${FILENAME}_part%03d.${EXTENSION}"
             
-      #       if [ $? -ne 0 ]; then
-      #           echo "Error: FFmpeg failed to split \"$video_file\". Cleaning up and skipping."
-      #           # 删除所有临时文件
-      #           find "$TEMP_DIR" -maxdepth 1 -name "${FILENAME}_part*.*" -exec rm -f {} \;
-      #           rm -f "$LOCAL_FILE_PATH"
-      #           continue
-      #       fi
+            if [ $? -ne 0 ]; then
+                echo "Error: FFmpeg failed to split \"$video_file\". Cleaning up and skipping."
+                # 删除所有临时文件
+                find "$TEMP_DIR" -maxdepth 1 -name "${FILENAME}_part*.*" -exec rm -f {} \;
+                rm -f "$LOCAL_FILE_PATH"
+                continue
+            fi
             
-      #       # 7. 确定原始目录并上传切割后的小文件到【原始目录】
-      #       original_dir=$(dirname "$video_file")
-      #       echo "Uploading split parts to ${REMOTE_PATH}/${original_dir}/"
-      #       # 将 rclone move 的所有输出重定向到 /dev/null, 确保循环的输入流不被干扰
-      #       rclone move "$TEMP_DIR" "${REMOTE_PATH}/${original_dir}/" --include "${FILENAME}_part*.*" --delete-empty-src-dirs > /dev/null 2>&1
+            # 7. 确定原始目录并上传切割后的小文件到【原始目录】
+            original_dir=$(dirname "$video_file")
+            echo "Uploading split parts to ${REMOTE_PATH}/${original_dir}/"
+            # 将 rclone move 的所有输出重定向到 /dev/null, 确保循环的输入流不被干扰
+            rclone move "$TEMP_DIR" "${REMOTE_PATH}/${original_dir}/" --include "${FILENAME}_part*.*" --delete-empty-src-dirs > /dev/null 2>&1
             
-      #       # 8. 删除云端的原始大文件
-      #       echo "Deleting original file: ${REMOTE_PATH}/${video_file}"
-      #       # 将 rclone delete 的所有输出重定向到 /dev/null
-      #       rclone delete "${REMOTE_PATH}/${video_file}" > /dev/null 2>&1
+            # 8. 删除云端的原始大文件
+            echo "Deleting original file: ${REMOTE_PATH}/${video_file}"
+            # 将 rclone delete 的所有输出重定向到 /dev/null
+            rclone delete "${REMOTE_PATH}/${video_file}" > /dev/null 2>&1
 
-      #       # 9. 清理本地的原始下载文件 (仅清理原文件, 分割文件已经在 rclone move 中被清理)
-      #       rm -f "$LOCAL_FILE_PATH"
+            # 9. 清理本地的原始下载文件 (仅清理原文件, 分割文件已经在 rclone move 中被清理)
+            rm -f "$LOCAL_FILE_PATH"
 
-      #     done
+          done
           
-      #     # 10. 清理临时工作目录
-      #     rm -rf "$TEMP_DIR"
-      #     echo "-----------------------------------------------------"
-      #     echo "Video splitting process completed."
+          # 10. 清理临时工作目录
+          rm -rf "$TEMP_DIR"
+          echo "-----------------------------------------------------"
+          echo "Video splitting process completed."
       
       # ====================================================================
       # ================= 安装 7z 工具  ======================
