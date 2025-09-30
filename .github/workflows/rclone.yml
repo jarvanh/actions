@@ -12,21 +12,6 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      # - name: Check Workflow Status
-      #   run: |
-      #     workflow_runs=$(curl -s -X GET \
-      #       -H "Accept: application/vnd.github.v3+json" \
-      #       -H "Authorization: Bearer ${{ secrets.PAT }}" \
-      #       "https://api.github.com/repos/${{ github.repository }}/actions/runs")
-          
-      #     isRunning=$(echo "$workflow_runs" | jq '.workflow_runs[] | select(.name == "rclone" and .status == "in_progress")')
-          
-      #     if [[ -n $isRunning ]]; then
-      #       echo "Another workflow is already running. Aborting current workflow."
-      #       exit 31
-      #     else
-      #       echo "No running workflows found. Continuing with the workflow execution."
-      #     fi
       - name: rclone-install
         run: |
           # 安装 rclone
@@ -52,10 +37,36 @@ jobs:
           rclone lsf dropbox:
           echo "==========onedrive==========="
           rclone lsf onedrive:
-          # rclone sync onedrive:backup000/ o:backup -vv --drive-server-side-across-configs
-          # rclone sync onedrive:123/ o:0/123 -vv --drive-server-side-across-configs
-          rclone sync onedrive:0 gd:0 -vv --drive-server-side-across-configs
-          rclone sync onedrive:backup gd:backup -vv --drive-server-side-across-configs
-          # rclone lsf -R dropbox: | grep '/$' | while read -r dir; do
-          #     echo "Size of $dir: $(rclone size "dropbox:$dir" --json | jq -r '.bytes') bytes"
-          # done
+      # ====================================================================
+      # ================= 列出 Dropbox: 最大 100 文件 =====================
+      # ====================================================================
+      - name: List Top 100 Largest Files on dropbox:
+        run: |
+          echo "========== Listing Top 100 Largest Files on dropbox: ==========="
+          
+          # 1. 使用 rclone lsjson --recursive 获取所有文件的 JSON 数据
+          # 2. 使用 jq 筛选出非目录的文件，并输出大小 (Size) 和路径 (Path)
+          #    jq -r: 原始输出
+          #    "\n": 使用换行符作为分隔符，确保路径中的空格不会被后续命令错误分割
+          rclone lsjson --recursive dropbox: | \
+          jq -r '.[] | select(.IsDir == false) | "\(.Size)\n\(.Path)"' | \
+          
+          # 3. 使用 paste 将每两行（大小和路径）重新合并为一行，以制表符分隔
+          #    例如：[Size1, Path1, Size2, Path2] -> [Size1\tPath1, Size2\tPath2]
+          paste -d '\t' - - | \
+          
+          # 4. 按第一列（大小）进行数值降序排序
+          #    -k1,1: 按照第一列进行排序
+          #    -n: 数值排序
+          #    -r: 逆序 (Largest first)
+          sort -k1,1nr | \
+          
+          # 5. 只取最大的前 100 个文件
+          head -n 100 | \
+          
+          # 6. 格式化输出：将第一列 (Size) 转换为可读的 IEC 格式 (e.g., 4.0G)
+          #    awk 打印格式化后的大小和路径
+          awk -F '\t' '{ printf "%10s\t%s\n", $1, $2 }' | \
+          numfmt --to=iec --field=1 --padding=10
+          
+          echo "================================================================"
