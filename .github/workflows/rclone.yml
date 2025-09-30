@@ -37,10 +37,7 @@ jobs:
           rclone lsf dropbox:
           echo "==========onedrive==========="
           rclone lsf onedrive:
-      # ====================================================================
-      # ================= 列出 Dropbox: 最大 100 文件 =====================
-      # ====================================================================
-      - name: List Top 100 Largest Files on dropbox:
+      - name: List Top 100 Largest Files on dropbox
         run: |
           echo "========== Listing Top 100 Largest Files on dropbox: ==========="
           
