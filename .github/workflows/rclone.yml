@@ -45,7 +45,7 @@ jobs:
           # 2. 使用 jq 筛选出非目录的文件，并输出大小 (Size) 和路径 (Path)
           #    jq -r: 原始输出
           #    "\n": 使用换行符作为分隔符，确保路径中的空格不会被后续命令错误分割
-          rclone lsjson --recursive dropbox: --fast-list | \
+          rclone lsjson --recursive dropbox: --fast-list --tpslimit 3 | \
           jq -r '.[] | select(.IsDir == false) | "\(.Size)\n\(.Path)"' | \
           
           # 3. 使用 paste 将每两行（大小和路径）重新合并为一行，以制表符分隔
