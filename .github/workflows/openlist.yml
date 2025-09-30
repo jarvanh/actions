@@ -21,19 +21,15 @@ jobs:
     steps:
       - name: rclone-install
         run: |
-          # 安装 rclone
-          # curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
           curl -O https://beta.rclone.org/rclone-beta-latest-linux-amd64.zip
           unzip rclone-*-amd64.zip
           cd rclone-*-linux-amd64
           sudo mv rclone /usr/bin
           sudo chmod +x /usr/bin/rclone
-          # sudo apt-get install rclone
       - name: rclone-config
         env:
           RCLONE_CONFIG: ${{ secrets.RCLONE }}
         run: |
-          # 写配置文件
           mkdir -p ~/.config/rclone/
           cat << EOF > ~/.config/rclone/rclone.conf
           $RCLONE_CONFIG
@@ -57,26 +53,24 @@ jobs:
         run: docker ps
         
       # ====================================================================
-      # ================ 新增的视频切割步骤 (已修复文件名问题) ===============
+      # ================= 视频切割步骤 (最终递归搜索版) ====================
       # ====================================================================
-      - name: Split large videos in onedrive:1
+      - name: Split large videos in onedrive:1 (Recursive)
         run: |
-          # 1. 安装 ffmpeg
-          echo "Installing ffmpeg and jq..."
-          sudo apt-get update && sudo apt-get install -y ffmpeg jq
+          # 1. 安装 ffmpeg, jq, 和 coreutils (为了 dirname)
+          echo "Installing ffmpeg, jq, and coreutils..."
+          sudo apt-get update && sudo apt-get install -y ffmpeg jq coreutils
           
           # 2. 定义参数
-          LIMIT_BYTES=4000000000 # 目标大小限制（略小于4GB），单位：字节
-          REMOTE_PATH="onedrive:1" # 远程目录
-          TEMP_DIR="temp_split_videos" # 临时本地工作目录
+          LIMIT_BYTES=4000000000
+          REMOTE_PATH="onedrive:1"
+          TEMP_DIR="temp_split_videos"
           mkdir -p "$TEMP_DIR"
 
-          echo "Searching for video files larger than 4GB in ${REMOTE_PATH}"
+          echo "Searching for video files larger than 4GB in ${REMOTE_PATH} and all subdirectories..."
 
-          # 3. 使用 rclone lsjson 查找并筛选大视频文件。
-          # 通过管道将每个文件的JSON信息逐行传递给while循环，这是处理特殊文件名的最稳健方法。
-          rclone lsjson ${REMOTE_PATH} --min-size 4G | jq -c '.[] | select((.Path | test("\\.(mp4|mkv|mov|avi|flv|webm)$"; "i")) and .IsDir == false)' | while IFS= read -r json_line; do
-            # 从JSON中提取文件名和大小
+          # 3. 使用 rclone lsjson --recursive 递归查找并筛选大视频文件
+          rclone lsjson --recursive ${REMOTE_PATH} --min-size 4G | jq -c '.[] | select((.Path | test("\\.(mp4|mkv|mov|avi|flv|webm)$"; "i")) and .IsDir == false)' | while IFS= read -r json_line; do
             video_file=$(echo "$json_line" | jq -r '.Path')
             FILE_SIZE=$(echo "$json_line" | jq -r '.Size')
 
@@ -91,50 +85,48 @@ jobs:
                 continue
             fi
 
-            LOCAL_FILE_PATH="${TEMP_DIR}/${video_file}"
+            LOCAL_FILE_PATH="${TEMP_DIR}/$(basename -- "$video_file")"
             
             # 5. 计算切割参数
             DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$LOCAL_FILE_PATH")
-            
-            # 计算需要切割的份数（向上取整）
             NUM_PARTS=$(awk "BEGIN {print int(($FILE_SIZE + $LIMIT_BYTES - 1) / $LIMIT_BYTES)}")
             
             if [ "$NUM_PARTS" -le 1 ]; then
                 echo "\"$video_file\" does not need splitting. Skipping."
-                rm -f "$LOCAL_FILE_PATH" # 清理已下载的文件
+                rm -f "$LOCAL_FILE_PATH"
                 continue
             fi
             
-            # 计算每段的时长
             SEGMENT_DURATION=$(awk "BEGIN {print $DURATION / $NUM_PARTS}")
 
             echo "File size: $(numfmt --to=iec $FILE_SIZE), Duration: $DURATION s"
             echo "Splitting into $NUM_PARTS parts, each approx $SEGMENT_DURATION seconds long."
 
-            # 准备输出文件名
             BASENAME=$(basename -- "$video_file")
             FILENAME="${BASENAME%.*}"
             EXTENSION="${BASENAME##*.}"
 
-            # 6. 执行 ffmpeg 切割（-c copy 是无损且极快的模式）
+            # 6. 执行 ffmpeg 切割
             ffmpeg -i "$LOCAL_FILE_PATH" -c copy -map 0 -f segment -segment_time "$SEGMENT_DURATION" -reset_timestamps 1 "${TEMP_DIR}/${FILENAME}_part%03d.${EXTENSION}"
             
             if [ $? -ne 0 ]; then
-                echo "Error: FFmpeg failed to split \"$video_file\". Skipping upload and deletion."
-                rm -f "${TEMP_DIR}/${FILENAME}"* # 清理产生的碎片文件
-                rm -f "$LOCAL_FILE_PATH" # 清理原始下载文件
+                echo "Error: FFmpeg failed to split \"$video_file\". Skipping."
+                rm -f "${TEMP_DIR}/${FILENAME}"*
+                rm -f "$LOCAL_FILE_PATH"
                 continue
             fi
             
-            # 7. 上传切割后的小文件到【原目录】
-            echo "Uploading split parts to ${REMOTE_PATH}/"
-            rclone move "$TEMP_DIR" "${REMOTE_PATH}/" --include "${FILENAME}_part*.*" --delete-empty-src-dirs
+            # 7. 确定原始目录并上传切割后的小文件到【原始目录】
+            original_dir=$(dirname "$video_file")
+            # 如果文件在根目录, dirname会返回'.', rclone能正确处理
+            echo "Uploading split parts to ${REMOTE_PATH}/${original_dir}/"
+            rclone move "$TEMP_DIR" "${REMOTE_PATH}/${original_dir}/" --include "${FILENAME}_part*.*" --delete-empty-src-dirs
             
             # 8. 删除云端的原始大文件
             echo "Deleting original file: ${REMOTE_PATH}/${video_file}"
             rclone delete "${REMOTE_PATH}/${video_file}"
 
-            # 9. 清理本地的原始下载文件（以防万一）
+            # 9. 清理本地的原始下载文件
             rm -f "$LOCAL_FILE_PATH"
 
           done
