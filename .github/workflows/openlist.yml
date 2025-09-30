@@ -68,10 +68,9 @@ jobs:
           echo "Searching for video files larger than 4GB in ${REMOTE_PATH} and all subdirectories..."
 
           # 3. 使用 rclone lsjson --recursive 递归查找并筛选大视频文件
-          #    jq -r 输出 Path 和 Size, 以制表符分隔, 保证输出格式稳定
           rclone lsjson --recursive ${REMOTE_PATH} --min-size 4G | \
           jq -r '.[] | select((.Path | test("\\.(mp4|mkv|mov|avi|flv|webm)$"; "i")) and .IsDir == false) | "\(.Path)\t\(.Size)"' | \
-          while IFS=$'\t' read -r video_file FILE_SIZE; do
+          while read -r video_file FILE_SIZE; do
 
             if [ -z "$video_file" ]; then
                 # 忽略空行
