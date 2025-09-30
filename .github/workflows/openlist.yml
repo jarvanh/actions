@@ -170,7 +170,8 @@ jobs:
       - name: Compress and split large general files
         run: |
           # 1. 定义参数
-          LIMIT_BYTES=3900000000 # 3.9GB
+          # 1. 定义参数
+          VOLUME_SIZE="2g" # 明确改为分卷大小的变量
           REMOTE_PATH="onedrive:backup"
           TEMP_DIR="temp_compress_split" # 使用新的临时目录
           mkdir -p "$TEMP_DIR"
@@ -213,11 +214,11 @@ jobs:
             COMPRESSED_PREFIX="${TEMP_DIR}/${BASENAME}.7z"
             
             echo "File size: $(numfmt --to=iec $FILE_SIZE)"
-            echo "Compressing and splitting into 4G .7z volumes..."
+            echo "Compressing and splitting into ${VOLUME_SIZE} .7z volumes..."
 
             # 5. 执行 7z 压缩并分卷
             # 'a' (Add to archive), '-v4g' (Volume size 4GB), '-m0=lzma2' (启用强大的压缩算法)
-            7z a -v4g -m0=lzma2 "$COMPRESSED_PREFIX" "$LOCAL_FILE_PATH"
+            7z a -v${VOLUME_SIZE} -m0=lzma2 "$COMPRESSED_PREFIX" "$LOCAL_FILE_PATH"
             
             if [ $? -ne 0 ]; then
                 echo "Error: 7z compression/splitting failed for \"$general_file\". Cleaning up and skipping."
