@@ -60,7 +60,7 @@ jobs:
       #     sudo apt-get update && sudo apt-get install -y ffmpeg jq coreutils
           
       #     # 2. 定义参数
-      #     LIMIT_BYTES=4000000000
+      #     LIMIT_BYTES=3900000000
       #     REMOTE_PATH="onedrive:1"
       #     TEMP_DIR="temp_split_videos"
       #     mkdir -p "$TEMP_DIR"
@@ -170,7 +170,7 @@ jobs:
       - name: Compress and split large general files
         run: |
           # 1. 定义参数
-          LIMIT_BYTES=4000000000 # 4GB
+          LIMIT_BYTES=3900000000 # 3.9GB
           REMOTE_PATH="onedrive:backup"
           TEMP_DIR="temp_compress_split" # 使用新的临时目录
           mkdir -p "$TEMP_DIR"
