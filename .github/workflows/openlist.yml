@@ -19,26 +19,6 @@ jobs:
     runs-on: ubuntu-latest
     # timeout-minutes: 60
     steps:
-    #   - name: Check Workflow Status
-    #     run: |
-    #       # 获取当前工作流的运行ID
-    #       CURRENT_RUN_ID=${{ github.run_id }}
-    
-    #       workflow_runs=$(curl -s -X GET \
-    #         -H "Accept: application/vnd.github.v3+json" \
-    #         -H "Authorization: Bearer ${{ secrets.PAT }}" \
-    #         "https://api.github.com/repos/${{ github.repository }}/actions/runs")
-    
-    #       # 排除当前运行ID后检查是否有其他运行中的工作流
-    #       otherRunning=$(echo "$workflow_runs" | jq --arg current_id "$CURRENT_RUN_ID" \
-    #         '.workflow_runs[] | select(.name == "openlist" and .status == "in_progress" and .id != ($current_id | tonumber))')
-    
-    #       if [[ -n $otherRunning ]]; then
-    #         echo "Another workflow is already running. Aborting current workflow."
-    #         exit 31
-    #       else
-    #         echo "No other running workflows found. Continuing."
-    #       fi
       - name: rclone-install
         run: |
           # 安装 rclone
@@ -72,78 +52,100 @@ jobs:
         run: docker run -d --restart=unless-stopped -v /dropbox/self-hosted/openlist/data:/opt/openlist/data -p 5244:5244 -e PUID=0 -e PGID=0 -e UMASK=022 --name="openlist" openlistteam/openlist:latest
       - name: sleep
         run: |
-          sudo sleep 1m    
+          sudo sleep 1m      
       - name: Verify docker container is running
         run: docker ps
-      - name: video-split
+        
+      # ====================================================================
+      # ======================= 新增的视频切割步骤 =======================
+      # ====================================================================
+      - name: Split large videos in onedrive:1
         run: |
-          # 安装 ffmpeg 用于视频切割
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          # 1. 安装 ffmpeg
+          echo "Installing ffmpeg..."
+          sudo apt-get update && sudo apt-get install -y ffmpeg
           
-          # 创建临时目录用于处理视频
-          mkdir -p /tmp/video_split
-          
-          # 获取 onedrive:1 中超过4G的视频文件列表
-          echo "正在扫描 onedrive:1 中超过4G的视频文件..."
-          rclone ls onedrive:1 --min-size 4G --size-only --include "*.mp4" --include "*.mkv" --include "*.avi" --include "*.mov" --include "*.wmv" --include "*.flv" --include "*.webm" > /tmp/large_videos.txt
-          
-          # 处理每个大视频文件
-          while IFS= read -r line; do
-            if [ -n "$line" ]; then
-              size=$(echo "$line" | awk '{print $1}')
-              filepath=$(echo "$line" | awk '{print $2}')
-              filename=$(basename "$filepath")
-              
-              echo "处理文件: $filename (大小: $size bytes)"
-              
-              # 计算需要分割的段数（每段不超过3.5G以确保安全）
-              segment_size=3750000000  # 3.5GB in bytes
-              file_size=$size
-              segments=$(( (file_size + segment_size - 1) / segment_size ))
-              
-              echo "文件需要分割成 $segments 段"
-              
-              # 下载视频文件到临时目录
-              echo "正在下载文件: $filepath"
-              rclone copy "onedrive:1/$filepath" /tmp/video_split/
-              
-              # 使用 ffmpeg 进行无损分割（按时间分割，保持可播放性）
-              # 先获取视频总时长
-              duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "/tmp/video_split/$filename")
-              segment_duration=$(echo "scale=2; $duration / $segments" | bc)
-              
-              echo "视频总时长: $duration 秒，每段时长: $segment_duration 秒"
-              
-              # 分割视频
-              for ((i=0; i<segments; i++)); do
-                start_time=$(echo "scale=2; $i * $segment_duration" | bc)
-                segment_name="${filename%.*}_part$((i+1)).${filename##*.}"
-                
-                echo "正在生成第 $((i+1)) 段: $segment_name"
-                
-                # 使用 ffmpeg 进行分割，保持视频质量
-                ffmpeg -i "/tmp/video_split/$filename" -ss "$start_time" -t "$segment_duration" -c copy -avoid_negative_ts make_zero "/tmp/video_split/$segment_name" -y
-                
-                # 上传分割后的文件到 onedrive:1 的 split_videos 目录
-                rclone copy "/tmp/video_split/$segment_name" "onedrive:1/split_videos/"
-                
-                # 删除本地分割文件
-                rm -f "/tmp/video_split/$segment_name"
-              done
-              
-              # 删除原始下载的文件
-              rm -f "/tmp/video_split/$filename"
-              
-              echo "文件 $filename 分割完成"
+          # 2. 定义参数
+          # 目标大小限制（略小于4GB，以防万一），单位：字节
+          LIMIT_BYTES=4000000000
+          # 远程目录
+          REMOTE_PATH="onedrive:1"
+          # 切割后文件存放的目录
+          SPLIT_REMOTE_PATH="${REMOTE_PATH}/splited"
+          # 临时本地工作目录
+          TEMP_DIR="temp_split_videos"
+          mkdir -p "$TEMP_DIR"
+
+          echo "Searching for video files larger than 4GB in ${REMOTE_PATH}"
+
+          # 3. 使用 rclone lsjson 查找并筛选大视频文件 (mp4, mkv, mov)
+          # 使用 lsjson 和 jq 可以更精确地处理文件名中包含空格等特殊字符的情况
+          rclone lsjson ${REMOTE_PATH} --min-size 4G | jq -r '.[] | select((.Path | test("\\.(mp4|mkv|mov|avi|flv|webm)$"; "i")) and .IsDir == false) | .Path' | while read -r video_file; do
+            echo "-----------------------------------------------------"
+            echo "Found large video: $video_file"
+
+            # 4. 下载大文件到本地临时目录
+            echo "Downloading '$video_file'..."
+            rclone copy "${REMOTE_PATH}/${video_file}" "$TEMP_DIR"
+            if [ $? -ne 0 ]; then
+                echo "Error: Failed to download '$video_file'. Skipping."
+                continue
             fi
-          done < /tmp/large_videos.txt
+
+            LOCAL_FILE_PATH="${TEMP_DIR}/${video_file}"
+            
+            # 5. 计算切割参数
+            FILE_SIZE=$(stat -c%s "$LOCAL_FILE_PATH")
+            DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$LOCAL_FILE_PATH")
+            
+            # 计算需要切割的份数（向上取整）
+            NUM_PARTS=$(awk "BEGIN {print int(($FILE_SIZE + $LIMIT_BYTES - 1) / $LIMIT_BYTES)}")
+            
+            if [ "$NUM_PARTS" -le 1 ]; then
+                echo "'$video_file' does not need splitting. Skipping."
+                rm -f "$LOCAL_FILE_PATH" # 清理已下载的文件
+                continue
+            fi
+            
+            # 计算每段的时长
+            SEGMENT_DURATION=$(awk "BEGIN {print $DURATION / $NUM_PARTS}")
+
+            echo "File size: $(numfmt --to=iec $FILE_SIZE), Duration: $DURATION s"
+            echo "Splitting into $NUM_PARTS parts, each approx $SEGMENT_DURATION seconds long."
+
+            # 准备输出文件名
+            BASENAME=$(basename -- "$video_file")
+            FILENAME="${BASENAME%.*}"
+            EXTENSION="${BASENAME##*.}"
+
+            # 6. 执行 ffmpeg 切割（-c copy 是无损且极快的模式）
+            ffmpeg -i "$LOCAL_FILE_PATH" -c copy -map 0 -f segment -segment_time "$SEGMENT_DURATION" -reset_timestamps 1 "${TEMP_DIR}/${FILENAME}_part%03d.${EXTENSION}"
+            
+            if [ $? -ne 0 ]; then
+                echo "Error: FFmpeg failed to split '$video_file'. Skipping upload and deletion."
+                # 清理本地所有相关文件
+                rm -f "${TEMP_DIR}/${FILENAME}"*
+                continue
+            fi
+            
+            # 7. 上传切割后的小文件到一个新的子目录
+            echo "Uploading split parts to ${SPLIT_REMOTE_PATH}/${FILENAME}/"
+            rclone move "$TEMP_DIR" "${SPLIT_REMOTE_PATH}/${FILENAME}/" --include "${FILENAME}_part*.*" --delete-empty-src-dirs
+            
+            # 8. 删除原始的大文件
+            echo "Deleting original file: ${REMOTE_PATH}/${video_file}"
+            rclone delete "${REMOTE_PATH}/${video_file}"
+
+            # 9. 清理本地的原始下载文件（如果还存在的话）
+            rm -f "$LOCAL_FILE_PATH"
+
+          done
           
-          # 清理临时文件
-          rm -f /tmp/large_videos.txt
-          rm -rf /tmp/video_split
-          
-          echo "视频分割任务完成"
+          # 10. 清理临时工作目录
+          rm -rf "$TEMP_DIR"
+          echo "-----------------------------------------------------"
+          echo "Video splitting process completed."
+
       - name: rclone-sync
         run: |
           echo "==========onedrive==========="
@@ -174,41 +176,6 @@ jobs:
           echo "==========  onedrive:5  ==========="
           rclone ls onedrive:5 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
 
-          
-          # # 统计 onedrive:0 的总大小
-          # echo "==========  onedrive:0  ==========="
-          # rclone size onedrive:0
-          
-          # # 统计 onedrive:1 的总大小
-          # echo "==========  onedrive:1  ==========="
-          # rclone size onedrive:1
-          
-          # # 统计 onedrive:2 的总大小
-          # echo "==========  onedrive:2  ==========="
-          # rclone size onedrive:2
-          
-          # # 统计 onedrive:3 的总大小
-          # echo "==========  onedrive:3  ==========="
-          # rclone size onedrive:3
-          
-          # # 统计 onedrive:4 的总大小
-          # echo "==========  onedrive:4  ==========="
-          # rclone size onedrive:4
-          
-          # # 统计 onedrive:5 的总大小
-          # echo "==========  onedrive:5  ==========="
-          # rclone size onedrive:5
-          
-          # # 统计根目录（排除子目录 1-5）的总大小
-          # echo "==========  onedrive: (excluding 1-5) ==========="
-          # rclone size onedrive: \
-          #     --exclude "1/**" \
-          #     --exclude "2/**" \
-          #     --exclude "3/**" \
-          #     --exclude "4/**" \
-          #     --exclude "5/**"
-          
-
 
           sudo rclone sync onedrive: openlist:baidupanCrypt/onedrive \
               --exclude "1/**" \
@@ -216,9 +183,9 @@ jobs:
               --exclude "3/**" \
               --exclude "4/**" \
               --exclude "5/**" \
-              --progress --fast-list --size-only --transfers 1 --checkers 32 
+              --progress --fast-list --size-only --transfers 1 --checkers 32  
           curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 任务执行完毕"
-     
+      
           sudo rclone sync onedrive:1 openlist:baidupanCrypt/1 --progress --fast-list --size-only --transfers 1 --checkers 32
           curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 1 任务执行完毕"
 
