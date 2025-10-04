@@ -277,7 +277,11 @@ jobs:
           # echo "==========  onedrive:5  ==========="
           # rclone ls onedrive:5 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
 
-
+          sudo rclone check onedrive: openlist:baidupanCrypt/onedrive \
+              --exclude "backup/notion/**" \
+              --exclude "{1..5}/**" \
+              --size-only --fast-list --one-way --log-level INFO
+              
           sudo rclone sync onedrive: openlist:baidupanCrypt/onedrive \
               --exclude "backup/notion/**" \
               --exclude "1/**" \
