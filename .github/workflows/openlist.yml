@@ -69,7 +69,7 @@ jobs:
           if [ -f "$LOCAL_FILE" ]; then
             FILE_SIZE=$(stat -c%s "$LOCAL_FILE" 2>/dev/null || stat -f%z "$LOCAL_FILE" 2>/dev/null)
             # 4GB 的字节阈值（4 * 1024^3 = 4294967296）
-            THRESHOLD=4294967296
+            THRESHOLD=3750000000
       
             if [ "$FILE_SIZE" -gt "$THRESHOLD" ]; then
               echo "文件大小超过 4GB，开始分割..."
