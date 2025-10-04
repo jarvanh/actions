@@ -58,8 +58,8 @@ jobs:
           echo "Installing ffmpeg, jq, and coreutils..."
           sudo apt-get update && sudo apt-get install -y ffmpeg jq coreutils
           
-          # 定义参数 - 设置LIMIT_BYTES为3.6GB (3.6 * 1000^3)
-          LIMIT_BYTES=3600000000
+          # 定义参数 - 调整为更接近4GB但确保安全
+          LIMIT_BYTES=3990000000  # 3.99GB，更接近4GB但留有安全边际
           REMOTE_PATHS=("onedrive:0" "onedrive:1")
           TEMP_BASE_DIR="temp_split_videos"
           mkdir -p "$TEMP_BASE_DIR"
@@ -71,20 +71,31 @@ jobs:
             TEMP_DIR="${TEMP_BASE_DIR}/${REMOTE_PATH//:/_}"
             mkdir -p "$TEMP_DIR"
       
-            echo "Searching for large video files in ${REMOTE_PATH}..."
+            echo "Searching for large video files (接近4GB) in ${REMOTE_PATH}..."
             
-            # 递归查找大视频文件 - 使用LIMIT_BYTES作为查找阈值
-            rclone lsjson --recursive "${REMOTE_PATH}" --min-size $((LIMIT_BYTES)) | \
-            jq -r '.[] | select((.Path | test("\\.(mp4|mkv|mov|avi|flv|webm)$"; "i")) and .IsDir == false) | "\(.Path | @base64)\t\(.Size | tostring | @base64)"' | \
-            while IFS=$'\t' read -r video_file_b64 FILE_SIZE_b64; do
-                [ -z "$video_file_b64" ] && continue
+            # 降低阈值到3.8GB，确保捕获所有接近4GB的文件
+            rclone lsjson --recursive "${REMOTE_PATH}" --min-size 3800000000 | \
+            jq -r '.[] | select((.Path | test("\\.(mp4|mkv|mov|avi|flv|webm)$"; "i")) and .IsDir == false) | "\(.Path)\t\(.Size)"' | \
+            while IFS=$'\t' read -r video_file FILE_SIZE; do
+                [ -z "$video_file" ] && continue
                 
-                # Base64 解码
-                video_file=$(echo "$video_file_b64" | base64 --decode)
-                FILE_SIZE=$(echo "$FILE_SIZE_b64" | base64 --decode)
-            
                 echo "-----------------------------------------------------"
-                echo "Processing: \"$video_file\" (Size: $(numfmt --to=iec $FILE_SIZE))"
+                echo "Found video: \"$video_file\" (Size: $(numfmt --to=iec $FILE_SIZE))"
+      
+                # 添加详细的大小检查
+                SIZE_GB=$(echo "scale=2; $FILE_SIZE/1000000000" | bc -l 2>/dev/null || echo "0")
+                echo "File size: ${SIZE_GB} GB ($FILE_SIZE bytes)"
+      
+                # 检查是否真的需要分割（接近4GB的文件）
+                if [ "$FILE_SIZE" -lt 3800000000 ]; then
+                    echo "File is smaller than 3.8GB, skipping."
+                    continue
+                fi
+      
+                # 对于接近4GB的文件，即使略小于4GB也进行处理（安全起见）
+                if [ "$FILE_SIZE" -lt 4000000000 ]; then
+                    echo "File is close to 4GB (${SIZE_GB} GB), processing for safety..."
+                fi
       
               # 下载文件
               echo "Downloading..."
@@ -93,7 +104,8 @@ jobs:
                   continue
               }
       
-              LOCAL_FILE_PATH="${TEMP_DIR}/$(basename -- "$video_file")"
+              LOCAL_FILE_NAME=$(basename -- "$video_file")
+              LOCAL_FILE_PATH="${TEMP_DIR}/${LOCAL_FILE_NAME}"
               
               # 获取视频时长
               DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$LOCAL_FILE_PATH" 2>/dev/null)
@@ -103,13 +115,19 @@ jobs:
                   continue
               fi
               
-              # 计算分割参数 - 使用LIMIT_BYTES作为上限
+              # 计算分割参数 - 使用更接近4GB的限制
               NUM_PARTS=$(( (FILE_SIZE + LIMIT_BYTES - 1) / LIMIT_BYTES ))
-              (( NUM_PARTS < 2 )) && {
-                  echo "File does not require splitting. Skipping."
-                  rm -f "$LOCAL_FILE_PATH"
-                  continue
-              }
+              if [ "$NUM_PARTS" -le 1 ]; then
+                  # 对于接近4GB但略小的文件，仍然分割为2部分以确保安全
+                  if [ "$FILE_SIZE" -gt 3900000000 ]; then
+                      echo "File is very close to 4GB, splitting into 2 parts for safety."
+                      NUM_PARTS=2
+                  else
+                      echo "File does not require splitting. Skipping."
+                      rm -f "$LOCAL_FILE_PATH"
+                      continue
+                  fi
+              fi
               
               SEGMENT_DURATION=$(awk -v d="$DURATION" -v n="$NUM_PARTS" 'BEGIN {print d / n}')
               echo "Splitting into $NUM_PARTS parts (~${SEGMENT_DURATION}s each)"
@@ -138,6 +156,7 @@ jobs:
               echo "Deleting original: ${REMOTE_PATH}/${video_file}"
               rclone delete "${REMOTE_PATH}/${video_file}" > /dev/null 2>&1
               rm -f "$LOCAL_FILE_PATH"
+              echo "Successfully processed: $video_file"
       
             done
             
