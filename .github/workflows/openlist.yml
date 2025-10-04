@@ -57,131 +57,61 @@ jobs:
           # 安装依赖
           echo "Installing ffmpeg, jq, and coreutils..."
           sudo apt-get update && sudo apt-get install -y ffmpeg jq coreutils
-          
-          # 定义参数
-          LIMIT_BYTES=3990000000  # 3.99GB，接近4GB的安全边际
-          MIN_SIZE=3500000000     # 降低阈值至3.5GB确保捕获所有接近4GB的文件
-          REMOTE_PATHS=("onedrive:0/照片/相簿/marry" "onedrive:1")
-          TEMP_BASE_DIR="temp_split_videos"
-          mkdir -p "$TEMP_BASE_DIR"
-          
-          # 处理每个远程路径
-          for REMOTE_PATH in "${REMOTE_PATHS[@]}"; do
-            echo "-----------------------------------------------------"
-            echo "Processing remote path: ${REMOTE_PATH}"
-            TEMP_DIR="${TEMP_BASE_DIR}/${REMOTE_PATH//:/_}"
-            mkdir -p "$TEMP_DIR"
-          
-            echo "Searching for large video files (>3.5GB) in ${REMOTE_PATH}..."
-            
-            # 使用更宽松的匹配条件并处理特殊字符
-            rclone lsjson --recursive "${REMOTE_PATH}" --min-size $MIN_SIZE | \
-            jq -r '.[] | select(.IsDir == false) | select(.Path | test(".*\\.(mp4|mkv|mov|avi|flv|webm)$"; "i")) | "\(.Path)\t\(.Size)"' | \
-            while IFS=$'\t' read -r video_file FILE_SIZE; do
-                [ -z "$video_file" ] && continue
-                
-                echo "-----------------------------------------------------"
-                echo "Found video: \"$video_file\" (Size: $(numfmt --to=iec $FILE_SIZE))"
-          
-                # 添加详细的大小检查
-                SIZE_GB=$(echo "scale=2; $FILE_SIZE/1000000000" | bc -l 2>/dev/null || echo "0")
-                echo "File size: ${SIZE_GB} GB ($FILE_SIZE bytes)"
-          
-                # 检查是否真的需要分割（接近4GB的文件）
-                if [ "$FILE_SIZE" -lt 3800000000 ]; then
-                    echo "File is smaller than 3.8GB, skipping."
-                    continue
-                fi
-          
-                # 对于接近4GB的文件，即使略小于4GB也进行处理（安全起见）
-                if [ "$FILE_SIZE" -lt 4000000000 ]; then
-                    echo "File is close to 4GB (${SIZE_GB} GB), processing for safety..."
-                fi
-          
-                # 下载文件（处理特殊字符路径）
-                echo "Downloading..."
-                ENCODED_SRC=$(printf "%q" "${REMOTE_PATH}/${video_file}")
-                rclone copy "$ENCODED_SRC" "$TEMP_DIR" --log-level=INFO || {
-                    echo "Error: Download failed for \"$video_file\". Skipping."
-                    continue
-                }
-          
-                LOCAL_FILE_NAME=$(basename -- "$video_file")
-                LOCAL_FILE_PATH="${TEMP_DIR}/${LOCAL_FILE_NAME}"
-                
-                # 验证文件是否下载成功
-                if [ ! -f "$LOCAL_FILE_PATH" ]; then
-                    echo "Error: File not found after download. Skipping."
-                    continue
-                fi
-                
-                # 获取视频时长
-                DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$LOCAL_FILE_PATH" 2>/dev/null)
-                if ! [[ "$DURATION" =~ ^[0-9.]+$ ]]; then
-                    echo "Error: Invalid duration for \"$video_file\". Skipping."
-                    rm -f "$LOCAL_FILE_PATH"
-                    continue
-                fi
-                
-                # 计算分割参数 - 使用更接近4GB的限制
-                NUM_PARTS=$(( (FILE_SIZE + LIMIT_BYTES - 1) / LIMIT_BYTES ))
-                if [ "$NUM_PARTS" -le 1 ]; then
-                    # 对于接近4GB但略小的文件，仍然分割为2部分以确保安全
-                    if [ "$FILE_SIZE" -gt 3900000000 ]; then
-                        echo "File is very close to 4GB, splitting into 2 parts for safety."
-                        NUM_PARTS=2
-                    else
-                        echo "File does not require splitting. Skipping."
-                        rm -f "$LOCAL_FILE_PATH"
-                        continue
-                    fi
-                fi
-                
-                SEGMENT_DURATION=$(awk -v d="$DURATION" -v n="$NUM_PARTS" 'BEGIN {print d / n}')
-                echo "Splitting into $NUM_PARTS parts (~${SEGMENT_DURATION}s each)"
-          
-                # 准备文件名
-                BASENAME=$(basename -- "$video_file")
-                FILENAME="${BASENAME%.*}"
-                EXTENSION="${BASENAME##*.}"
-          
-                # 执行分割
-                ffmpeg -i "$LOCAL_FILE_PATH" -c copy -map 0 -f segment \
-                       -segment_time "$SEGMENT_DURATION" -reset_timestamps 1 \
-                       -loglevel warning "${TEMP_DIR}/${FILENAME}_part%03d.${EXTENSION}" || {
-                    echo "Error: Splitting failed for \"$video_file\". Cleaning up."
-                    rm -f "${TEMP_DIR}/${FILENAME}_part"* 
-                    rm -f "$LOCAL_FILE_PATH"
-                    continue
-                }
-                
-                # 上传分割文件并删除原始文件
-                original_dir=$(dirname "$video_file")
-                echo "Uploading parts to ${REMOTE_PATH}/${original_dir}/"
-                rclone move "$TEMP_DIR" "${REMOTE_PATH}/${original_dir}/" \
-                      --include "${FILENAME}_part*.*" --delete-empty-src-dirs > /dev/null 2>&1
-                
-                echo "Deleting original: ${REMOTE_PATH}/${video_file}"
-                rclone delete "${REMOTE_PATH}/${video_file}" > /dev/null 2>&1
-                rm -f "$LOCAL_FILE_PATH"
-                echo "Successfully processed: $video_file"
-          
-            done
-            
-            # 清理当前路径的临时目录
-            rm -rf "$TEMP_DIR"
-          done
-          
-          # 最终清理
-          rm -rf "$TEMP_BASE_DIR"
-          echo "-----------------------------------------------------"
-          echo "Video splitting completed for all paths."
+
+          # 定义远程文件路径和本地文件名
+          REMOTE_FILE="onedrive:0/照片/相簿/marry/婚礼视频（幸福花园）/全程.mp4"
+          LOCAL_FILE="全程.mp4"
       
-      - name: Install 7z tool for compression and splitting
-        run: |
-          echo "Installing p7zip-full for 7z command..."
-          # p7zip-full 包含了 7z 命令行工具
-          sudo apt-get update && sudo apt-get install -y p7zip-full
+          # 下载文件到当前目录
+          rclone copy "$REMOTE_FILE" .
+      
+          # 检查文件大小（字节），兼容不同系统的 stat 命令
+          if [ -f "$LOCAL_FILE" ]; then
+            FILE_SIZE=$(stat -c%s "$LOCAL_FILE" 2>/dev/null || stat -f%z "$LOCAL_FILE" 2>/dev/null)
+            # 4GB 的字节阈值（4 * 1024^3 = 4294967296）
+            THRESHOLD=4294967296
+      
+            if [ "$FILE_SIZE" -gt "$THRESHOLD" ]; then
+              echo "文件大小超过 4GB，开始分割..."
+      
+              # 获取视频时长（秒）
+              DURATION=$(ffprobe -i "$LOCAL_FILE" -show_entries format=duration -v quiet -of csv="p=0")
+              # 计算最大部分大小（这里设为 3.5GB，以确保每部分小于 4GB）
+              MAX_PART_SIZE=3750000000
+              # 计算需要分割成的部分数（向上取整）
+              N=$(( (FILE_SIZE + MAX_PART_SIZE - 1) / MAX_PART_SIZE ))
+              # 计算每段的时长（秒）
+              SEGMENT_TIME=$(echo "scale=2; $DURATION / $N" | bc)
+      
+              # 基础文件名和扩展名
+              BASE_NAME="${LOCAL_FILE%.*}"
+              EXTENSION="${LOCAL_FILE##*.}"
+      
+              # 使用 ffmpeg 分割视频（复制流，避免重新编码）
+              ffmpeg -i "$LOCAL_FILE" -c copy -map 0 -segment_time "$SEGMENT_TIME" -f segment -reset_timestamps 1 "${BASE_NAME}_part%03d.${EXTENSION}"
+      
+              # 上传分割后的文件到原目录
+              for part in "${BASE_NAME}_part"*."${EXTENSION}"; do
+                rclone copy "$part" "onedrive:0/照片/相簿/marry/婚礼视频（幸福花园）/"
+                echo "已上传: $part"
+              done
+      
+              # 清理本地文件（可选）
+              rm "$LOCAL_FILE"
+              rm "${BASE_NAME}_part"*."${EXTENSION}"
+              echo "视频分割完成。"
+            else
+              echo "文件大小不超过 4GB，无需分割。"
+            fi
+          else
+            echo "错误：文件下载失败或不存在。"
+          fi
+      
+      # - name: Install 7z tool for compression and splitting
+      #   run: |
+      #     echo "Installing p7zip-full for 7z command..."
+      #     # p7zip-full 包含了 7z 命令行工具
+      #     sudo apt-get update && sudo apt-get install -y p7zip-full
           
       # ====================================================================
       # ================ 通用大文件压缩并分卷 ================
