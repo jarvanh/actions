@@ -60,7 +60,7 @@ jobs:
           
           # 定义参数 - 调整为更接近4GB但确保安全
           LIMIT_BYTES=3990000000  # 3.99GB，更接近4GB但留有安全边际
-          REMOTE_PATHS=("onedrive:0" "onedrive:1")
+          REMOTE_PATHS=("onedrive:0/照片/相簿/marry" "onedrive:1")
           TEMP_BASE_DIR="temp_split_videos"
           mkdir -p "$TEMP_BASE_DIR"
       
