@@ -59,7 +59,7 @@ jobs:
           sudo apt-get update && sudo apt-get install -y ffmpeg jq coreutils
 
           # 定义远程文件路径和本地文件名
-          REMOTE_FILE="onedrive:0/照片/相簿/marry/婚礼视频（幸福花园）/全程.mp4"
+          REMOTE_FILE="onedrive:0/照片/Derrick/照片/20220222_132907.mp4"
           LOCAL_FILE="全程.mp4"
       
           # 下载文件到当前目录
@@ -92,7 +92,7 @@ jobs:
       
               # 上传分割后的文件到原目录
               for part in "${BASE_NAME}_part"*."${EXTENSION}"; do
-                rclone copy "$part" "onedrive:0/照片/相簿/marry/婚礼视频（幸福花园）/"
+                rclone copy "$part" "onedrive:0/照片/Derrick/照片/"
                 echo "已上传: $part"
               done
       
