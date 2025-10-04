@@ -60,7 +60,7 @@ jobs:
 
           # 定义远程文件路径和本地文件名
           REMOTE_FILE="onedrive:0/照片/Derrick/照片/20220222_132907.mp4"
-          LOCAL_FILE="全程.mp4"
+          LOCAL_FILE="20220222_132907.mp4"
       
           # 下载文件到当前目录
           rclone copy "$REMOTE_FILE" .
