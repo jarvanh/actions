@@ -58,9 +58,9 @@ jobs:
           echo "Installing ffmpeg, jq, and coreutils..."
           sudo apt-get update && sudo apt-get install -y ffmpeg jq coreutils
           
-          # 定义参数
-          LIMIT_BYTES=3900000000
-          REMOTE_PATHS=("onedrive:0" "onedrive:1")  # 添加多个路径
+          # 定义参数 - 设置LIMIT_BYTES为3.95GB (3.95 * 1000^3)
+          LIMIT_BYTES=3950000000
+          REMOTE_PATHS=("onedrive:0" "onedrive:1")
           TEMP_BASE_DIR="temp_split_videos"
           mkdir -p "$TEMP_BASE_DIR"
       
@@ -68,13 +68,13 @@ jobs:
           for REMOTE_PATH in "${REMOTE_PATHS[@]}"; do
             echo "-----------------------------------------------------"
             echo "Processing remote path: ${REMOTE_PATH}"
-            TEMP_DIR="${TEMP_BASE_DIR}/${REMOTE_PATH//:/_}"  # 创建唯一临时目录
+            TEMP_DIR="${TEMP_BASE_DIR}/${REMOTE_PATH//:/_}"
             mkdir -p "$TEMP_DIR"
       
-            echo "Searching for large video files in ${REMOTE_PATH}..."
+            echo "Searching for large video files (>3.95GB) in ${REMOTE_PATH}..."
             
-            # 递归查找大视频文件
-            rclone lsjson --recursive "${REMOTE_PATH}" --min-size 4G | \
+            # 递归查找大视频文件 - 使用LIMIT_BYTES作为查找阈值
+            rclone lsjson --recursive "${REMOTE_PATH}" --min-size $((LIMIT_BYTES)) | \
             jq -r '.[] | select((.Path | test("\\.(mp4|mkv|mov|avi|flv|webm)$"; "i")) and .IsDir == false) | "\(.Path | @base64)\t\(.Size | tostring | @base64)"' | \
             while IFS=$'\t' read -r video_file_b64 FILE_SIZE_b64; do
                 [ -z "$video_file_b64" ] && continue
@@ -103,7 +103,7 @@ jobs:
                   continue
               fi
               
-              # 计算分割参数
+              # 计算分割参数 - 使用LIMIT_BYTES作为上限
               NUM_PARTS=$(( (FILE_SIZE + LIMIT_BYTES - 1) / LIMIT_BYTES ))
               (( NUM_PARTS < 2 )) && {
                   echo "File does not require splitting. Skipping."
