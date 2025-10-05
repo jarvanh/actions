@@ -52,60 +52,60 @@ jobs:
       - name: Verify docker container is running
         run: docker ps
 
-      - name: Split large videos (FIXED)
-        run: |
-          # 安装依赖
-          echo "Installing ffmpeg, jq, and coreutils..."
-          sudo apt-get update && sudo apt-get install -y ffmpeg jq coreutils
+      # - name: Split large videos (FIXED)
+      #   run: |
+      #     # 安装依赖
+      #     echo "Installing ffmpeg, jq, and coreutils..."
+      #     sudo apt-get update && sudo apt-get install -y ffmpeg jq coreutils
 
-          # 定义远程文件路径和本地文件名
-          REMOTE_FILE="onedrive:0/照片/Derrick/照片/20220215_192413.mp4"
-          LOCAL_FILE="20220215_192413.mp4"
+      #     # 定义远程文件路径和本地文件名
+      #     REMOTE_FILE="onedrive:0/照片/Derrick/照片/20220215_192413.mp4"
+      #     LOCAL_FILE="20220215_192413.mp4"
       
-          # 下载文件到当前目录
-          rclone copy "$REMOTE_FILE" .
+      #     # 下载文件到当前目录
+      #     rclone copy "$REMOTE_FILE" .
       
-          # 检查文件大小（字节），兼容不同系统的 stat 命令
-          if [ -f "$LOCAL_FILE" ]; then
-            FILE_SIZE=$(stat -c%s "$LOCAL_FILE" 2>/dev/null || stat -f%z "$LOCAL_FILE" 2>/dev/null)
-            # 4GB 的字节阈值（4 * 1024^3 = 4294967296）
-            THRESHOLD=3750000000
+      #     # 检查文件大小（字节），兼容不同系统的 stat 命令
+      #     if [ -f "$LOCAL_FILE" ]; then
+      #       FILE_SIZE=$(stat -c%s "$LOCAL_FILE" 2>/dev/null || stat -f%z "$LOCAL_FILE" 2>/dev/null)
+      #       # 4GB 的字节阈值（4 * 1024^3 = 4294967296）
+      #       THRESHOLD=3750000000
       
-            if [ "$FILE_SIZE" -gt "$THRESHOLD" ]; then
-              echo "文件大小超过 4GB，开始分割..."
+      #       if [ "$FILE_SIZE" -gt "$THRESHOLD" ]; then
+      #         echo "文件大小超过 4GB，开始分割..."
       
-              # 获取视频时长（秒）
-              DURATION=$(ffprobe -i "$LOCAL_FILE" -show_entries format=duration -v quiet -of csv="p=0")
-              # 计算最大部分大小（这里设为 3.5GB，以确保每部分小于 4GB）
-              MAX_PART_SIZE=3750000000
-              # 计算需要分割成的部分数（向上取整）
-              N=$(( (FILE_SIZE + MAX_PART_SIZE - 1) / MAX_PART_SIZE ))
-              # 计算每段的时长（秒）
-              SEGMENT_TIME=$(echo "scale=2; $DURATION / $N" | bc)
+      #         # 获取视频时长（秒）
+      #         DURATION=$(ffprobe -i "$LOCAL_FILE" -show_entries format=duration -v quiet -of csv="p=0")
+      #         # 计算最大部分大小（这里设为 3.5GB，以确保每部分小于 4GB）
+      #         MAX_PART_SIZE=3750000000
+      #         # 计算需要分割成的部分数（向上取整）
+      #         N=$(( (FILE_SIZE + MAX_PART_SIZE - 1) / MAX_PART_SIZE ))
+      #         # 计算每段的时长（秒）
+      #         SEGMENT_TIME=$(echo "scale=2; $DURATION / $N" | bc)
       
-              # 基础文件名和扩展名
-              BASE_NAME="${LOCAL_FILE%.*}"
-              EXTENSION="${LOCAL_FILE##*.}"
+      #         # 基础文件名和扩展名
+      #         BASE_NAME="${LOCAL_FILE%.*}"
+      #         EXTENSION="${LOCAL_FILE##*.}"
       
-              # 使用 ffmpeg 分割视频（复制流，避免重新编码）
-              ffmpeg -i "$LOCAL_FILE" -c copy -map 0 -segment_time "$SEGMENT_TIME" -f segment -reset_timestamps 1 "${BASE_NAME}_part%03d.${EXTENSION}"
+      #         # 使用 ffmpeg 分割视频（复制流，避免重新编码）
+      #         ffmpeg -i "$LOCAL_FILE" -c copy -map 0 -segment_time "$SEGMENT_TIME" -f segment -reset_timestamps 1 "${BASE_NAME}_part%03d.${EXTENSION}"
       
-              # 上传分割后的文件到原目录
-              for part in "${BASE_NAME}_part"*."${EXTENSION}"; do
-                rclone copy "$part" "onedrive:0/照片/Derrick/照片/"
-                echo "已上传: $part"
-              done
+      #         # 上传分割后的文件到原目录
+      #         for part in "${BASE_NAME}_part"*."${EXTENSION}"; do
+      #           rclone copy "$part" "onedrive:0/照片/Derrick/照片/"
+      #           echo "已上传: $part"
+      #         done
       
-              # 清理本地文件（可选）
-              rm "$LOCAL_FILE"
-              rm "${BASE_NAME}_part"*."${EXTENSION}"
-              echo "视频分割完成。"
-            else
-              echo "文件大小不超过 4GB，无需分割。"
-            fi
-          else
-            echo "错误：文件下载失败或不存在。"
-          fi
+      #         # 清理本地文件（可选）
+      #         rm "$LOCAL_FILE"
+      #         rm "${BASE_NAME}_part"*."${EXTENSION}"
+      #         echo "视频分割完成。"
+      #       else
+      #         echo "文件大小不超过 4GB，无需分割。"
+      #       fi
+      #     else
+      #       echo "错误：文件下载失败或不存在。"
+      #     fi
       
       # - name: Install 7z tool for compression and splitting
       #   run: |
