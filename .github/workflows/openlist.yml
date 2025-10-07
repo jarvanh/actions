@@ -195,8 +195,8 @@ jobs:
       #     rm -rf "$TEMP_DIR"
       #     echo "-----------------------------------------------------"
       #     echo "General file compression and splitting process completed."
-          
-      - name: rclone-sync
+
+      - name: rclone-lsf
         run: |
           echo "==========onedrive==========="
           rclone lsf onedrive:
@@ -204,7 +204,14 @@ jobs:
           rclone lsf dropbox:
           echo "==========openlist==========="
           rclone lsf openlist:
-
+          echo "==========openlist:baidupanCrypt==========="
+          rclone lsf openlist:
+          echo "==========openlist:aliyundriveCrypt==========="
+          rclone lsf openlist:
+          echo "==========openlist:123pan2Crypt==========="
+          rclone lsf openlist:
+      - name: rclone-sync
+        run: |
           # echo "==========  onedrive:0  ==========="
           # rclone ls onedrive:0 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
           # echo "==========  onedrive:1  ==========="
