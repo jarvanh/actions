@@ -205,11 +205,11 @@ jobs:
           echo "==========openlist==========="
           rclone lsf openlist:
           echo "==========openlist:baidupanCrypt==========="
-          rclone lsf openlist:
+          rclone lsf openlist:baidupanCrypt
           echo "==========openlist:aliyundriveCrypt==========="
-          rclone lsf openlist:
+          rclone lsf openlist:aliyundriveCrypt
           echo "==========openlist:123pan2Crypt==========="
-          rclone lsf openlist:
+          rclone lsf openlist:123pan2Crypt
       - name: rclone-sync
         run: |
           # echo "==========  onedrive:0  ==========="
