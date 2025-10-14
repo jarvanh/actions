@@ -37,13 +37,5 @@ jobs:
           rclone lsf dropbox:
           echo "==========onedrive==========="
           rclone lsf onedrive:
-      - name: List Top 100 Largest Files on dropbox
-        run: |
-      - name: List Top 100 Largest Files on dropbox
-        run: |
-          echo "========== rclone Listing Top 100 Largest Files on dropbox: ==========="
-          # 假设你的 rclone 配置中 Dropbox 的名称是 'dropbox'
-          # rclone lsl 列出文件的大小和路径
-          # sort -nrk 1 按第一列（大小）进行数值逆序排序 (n=数值, r=逆序, k=键/列)
-          # head -n 100 截取前100行
-          rclone lsl dropbox: | sort -nrk 1 | head -n 100
+
+          rclone copy dropbox: onedrive: -vv
