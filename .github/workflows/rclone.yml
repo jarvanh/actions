@@ -38,4 +38,4 @@ jobs:
           echo "==========onedrive==========="
           rclone lsf onedrive:
 
-          rclone copy dropbox: onedrive: -vv
+          rclone sync dropbox:self-hosted onedrive:self-hosted -vv
