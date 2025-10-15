@@ -50,8 +50,8 @@ jobs:
       - name: rclone-run
         run: |
           sudo apt-get install fuse3
-          sudo mkdir /dropbox
-          sudo nohup rclone mount dropbox: /dropbox --vfs-cache-mode full &
+          sudo mkdir /onedrive
+          sudo nohup rclone mount onedrive: /onedrive --vfs-cache-mode full &
           echo "==========onedrive==========="
           rclone lsf onedrive:
           echo "==========dropbox==========="
@@ -63,7 +63,7 @@ jobs:
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
           sudo mkdir ~/.cloudflared/
-          sudo rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
+          sudo rclone copy onedrive:self-hosted/.cloudflared ~/.cloudflared -vv
 
           # 获取隧道列表
           OUTPUT=$(cloudflared tunnel list)
