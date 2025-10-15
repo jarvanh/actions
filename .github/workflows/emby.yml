@@ -50,16 +50,16 @@ jobs:
       - name: rclone-run
         run: |
           # sudo apt-get install fuse3
-          if rclone lsf dropbox:self-hosted/emby/config/ --files-only | grep -q "system.xml"; then
-            if ! rclone delete dropbox:self-hosted/emby/config/system.xml -vv; then
+          if rclone lsf onedrive:self-hosted/emby/config/ --files-only | grep -q "system.xml"; then
+            if ! rclone delete onedrive:self-hosted/emby/config/system.xml -vv; then
               echo "[WARNING] Failed to delete system.xml, skipping" >&2
             fi
           fi
-          sudo rclone copy dropbox:self-hosted/emby/system.xml dropbox:self-hosted/emby/config/ --ignore-errors -vv
+          sudo rclone copy onedrive:self-hosted/emby/system.xml onedrive:self-hosted/emby/config/ --ignore-errors -vv
           sudo mkdir /onedrive
           sudo nohup rclone mount onedrive: /onedrive --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
-          sudo mkdir /dropbox
-          sudo nohup rclone mount dropbox: /dropbox --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
+          # sudo mkdir /dropbox
+          # sudo nohup rclone mount dropbox: /dropbox --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
           # sudo rclone sync dropbox:self-hosted/emby /var/lib/emby -vv
           echo "==========onedrive==========="
           rclone lsf onedrive:
@@ -68,7 +68,7 @@ jobs:
       - name: install cloudflared
         run: |
           sudo mkdir ~/.cloudflared/
-          sudo rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
+          sudo rclone copy onedrive:self-hosted/.cloudflared ~/.cloudflared -vv
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
       - name: Check if the tunnel is running
@@ -111,9 +111,9 @@ jobs:
                   break
               fi
           done
-          echo "==========/dropbox/self-hosted/emby==========="
-          sudo ls /dropbox/self-hosted/emby
-          sudo ln -s /dropbox/self-hosted/emby /var/lib/emby
+          echo "==========/onedrive/self-hosted/emby==========="
+          sudo ls /onedrive/self-hosted/emby
+          sudo ln -s /onedrive/self-hosted/emby /var/lib/emby
           echo "==========/var/lib/emby==========="
           sudo ls /var/lib/emby
           # sudo chown -R emby:emby /var/lib/emby
