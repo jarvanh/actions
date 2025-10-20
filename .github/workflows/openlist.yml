@@ -52,6 +52,40 @@ jobs:
       - name: Verify docker container is running
         run: docker ps
 
+      - name: install cloudflared
+        run: |
+          sudo mkdir ~/.cloudflared/
+          sudo rclone copy onedrive:self-hosted/.cloudflared ~/.cloudflared -vv
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
+      - name: Check if the tunnel is running
+        env:
+          TUNNEL_NAME: "openlist" # 替换为你的隧道名称
+        run: |
+          # 获取隧道列表
+          OUTPUT=$(cloudflared tunnel list)
+          
+          # 查找目标隧道的行
+          TUNNEL_LINE=$(echo "$OUTPUT" | grep -w "$TUNNEL_NAME")
+          if [ -z "$TUNNEL_LINE" ]; then
+            echo "The tunnel '$TUNNEL_NAME' does not exist. Proceeding."
+            exit 31
+          fi
+  
+          # 提取 CONNECTIONS 列并检查是否为空
+          CONNECTIONS=$(echo "$TUNNEL_LINE" | awk '{if (NF>=4) print $4; else print "-"}')
+          if [ "$CONNECTIONS" == "-" ]; then
+            echo "The tunnel '$TUNNEL_NAME' exists but has no active connections. Proceeding."
+          else
+            echo "The tunnel '$TUNNEL_NAME' is running with connections: $CONNECTIONS. Stopping actions."
+            exit 0
+          fi
+
+      - name: run cloudflared
+        run: |
+          cloudflared tunnel route dns openlist openlist.'${{ secrets.VD }}'.eu.org
+          nohup cloudflared tunnel run --url http://127.0.0.1:5244 openlist &
+
       # - name: Split large videos (FIXED)
       #   run: |
       #     # 安装依赖
