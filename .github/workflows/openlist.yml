@@ -87,7 +87,7 @@ jobs:
           nohup cloudflared tunnel run --url http://127.0.0.1:5244 openlist &
           
           cloudflared tunnel route dns webdav webdav.'${{ secrets.VD }}'.eu.org
-          nohup cloudflared tunnel run --url http://127.0.0.1:5244/dav webdav &
+          nohup cloudflared tunnel run --url http://127.0.0.1:5244/dav/ webdav &
           
       # - name: Split large videos (FIXED)
       #   run: |
