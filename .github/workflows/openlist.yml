@@ -230,20 +230,20 @@ jobs:
       #     echo "-----------------------------------------------------"
       #     echo "General file compression and splitting process completed."
 
-      - name: rclone-lsf
-        run: |
-          echo "==========onedrive==========="
-          rclone lsf onedrive:
-          echo "==========dropbox==========="
-          rclone lsf dropbox:
-          echo "==========openlist==========="
-          rclone lsf openlist:
-          echo "==========openlist:baidupanCrypt==========="
-          rclone lsf openlist:baidupanCrypt
-          echo "==========openlist:aliyundriveCrypt==========="
-          rclone lsf openlist:aliyundriveCrypt
-          echo "==========openlist:123panCrypt==========="
-          rclone lsf openlist:123panCrypt
+      # - name: rclone-lsf
+      #   run: |
+      #     echo "==========onedrive==========="
+      #     rclone lsf onedrive:
+      #     echo "==========dropbox==========="
+      #     rclone lsf dropbox:
+      #     echo "==========openlist==========="
+      #     rclone lsf openlist:
+      #     echo "==========openlist:baidupanCrypt==========="
+      #     rclone lsf openlist:baidupanCrypt
+      #     echo "==========openlist:aliyundriveCrypt==========="
+      #     rclone lsf openlist:aliyundriveCrypt
+      #     echo "==========openlist:123panCrypt==========="
+      #     rclone lsf openlist:123panCrypt
       - name: rclone-sync
         run: |
           # echo "==========  onedrive:0  ==========="
