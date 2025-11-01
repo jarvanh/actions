@@ -259,8 +259,8 @@ jobs:
           # echo "==========  onedrive:5  ==========="
           # rclone ls onedrive:5 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
               
-          sudo rclone sync onedrive:0/archive openlist:baidupanCrypt/0/archive --progress --fast-list --size-only --transfers 1 --checkers 32
-          curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 0 任务执行完毕"
+          # sudo rclone sync onedrive:0 openlist:baidupanCrypt/0 --progress --fast-list --size-only --transfers 1 --checkers 32
+          # curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 0 任务执行完毕"
 
           sudo rclone sync onedrive:1 openlist:baidupanCrypt/1 --progress --fast-list --size-only --transfers 1 --checkers 32
           curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 1 任务执行完毕"
