@@ -35,8 +35,10 @@ jobs:
       - name: rclone-run
         run: |
           sudo apt-get install fuse3
-          sudo mkdir /onedrive
-          sudo nohup rclone mount onedrive: /onedrive --vfs-cache-mode full &
+          # sudo mkdir /onedrive
+          # sudo nohup rclone mount onedrive: /onedrive --vfs-cache-mode full &
+          mkdir -p ~/sub-store
+          rclone copy onedrive:self-hosted/sub-store ~/sub-store
           echo "==========onedrive==========="
           rclone lsf onedrive:
           echo "==========dropbox==========="
@@ -84,5 +86,7 @@ jobs:
       - name: Stop
         run: |
           docker stop sub-store
+          sleep 1m 
+          rclone sync ~/sub-store onedrive:self-hosted/sub-store
           sleep 1m 
           echo "Stopping GitHub Actions"
