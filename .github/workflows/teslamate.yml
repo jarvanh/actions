@@ -267,7 +267,7 @@ jobs:
           
       - name: sleep
         run: |
-          sudo sleep 3m          
+          sudo sleep 340m          
           
       - name: Stop and backup
         run: |
@@ -293,8 +293,8 @@ jobs:
           
           # 上传到onedrive
           echo "上传到onedrive..."
-          # rclone sync -v teslamate.tar.gz onedrive:self-hosted/
-          # sleep 1m
+          rclone sync -v teslamate.tar.gz onedrive:self-hosted/
+          sleep 1m
           rclone delete onedrive:self-hosted/teslamate.tar.gz
           sleep 1m
           rclone sync -v teslamate.tar.gz onedrive:self-hosted/
