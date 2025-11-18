@@ -113,7 +113,7 @@ jobs:
           nohup cloudflared tunnel run --url http://127.0.0.1:5700 ql &
       - name: sleep
         run: |
-          sudo sleep 5m          
+          sudo sleep 340m          
       - name: Stop
         run: |
           docker stop qinglong
@@ -121,9 +121,9 @@ jobs:
           tar -czvf ~/ql.tar.gz --exclude="*.tmp" --exclude="*.log" --exclude="./dep_cache" -C ~/ql .
       - name: sync
         run: |
-          rclone delete onedrive:self-hosted/ql/ql.tar.gz
-          sleep 1m
           rclone sync ~/ql.tar.gz onedrive:self-hosted/ql/ -vv
+          sleep 1m
+          rclone delete onedrive:self-hosted/ql/ql.tar.gz
           sleep 1m
           rclone sync ~/ql.tar.gz onedrive:self-hosted/ql/ -vv
           sleep 1m
