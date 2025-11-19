@@ -39,4 +39,6 @@ jobs:
           rclone lsf onedrive:
 
           # rclone sync dropbox:self-hosted onedrive:self-hosted -vv
-          rclone sync onedrive:self-hosted dropbox:self-hosted -vv
+          # rclone sync onedrive:self-hosted dropbox:self-hosted -vv
+          rclone size onedrive:self-hosted -v
+          rclone size dropbox:self-hosted -v
