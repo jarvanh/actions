@@ -40,5 +40,8 @@ jobs:
 
           # rclone sync dropbox:self-hosted onedrive:self-hosted -vv
           # rclone sync onedrive:self-hosted dropbox:self-hosted -vv
-          rclone size onedrive:self-hosted -v
-          rclone size dropbox:self-hosted -v
+          for d in $(rclone lsf onedrive:self-hosted --dirs-only); do
+              echo "=== $d ==="
+              rclone size onedrive:self-hosted/"$d"
+          done
+
