@@ -42,10 +42,10 @@ jobs:
           rclone lsf dropbox:
 
           sudo apt-get install fuse3
-          sudo mkdir -p /onedrive
-          sudo nohup rclone mount onedrive: /onedrive --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 10G &
+          sudo mkdir -p /dropbox
+          sudo nohup rclone mount dropbox: /dropbox --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 10G &
       - name: Run openlist container
-        run: docker run -d --restart=unless-stopped -v /onedrive/self-hosted/openlist/data:/opt/openlist/data -p 5244:5244 -e PUID=0 -e PGID=0 -e UMASK=022 --name="openlist" openlistteam/openlist:latest
+        run: docker run -d --restart=unless-stopped -v /dropbox/self-hosted/openlist/data:/opt/openlist/data -p 5244:5244 -e PUID=0 -e PGID=0 -e UMASK=022 --name="openlist" openlistteam/openlist:latest
       - name: sleep
         run: |
           sudo sleep 1m      
@@ -55,7 +55,7 @@ jobs:
       - name: install cloudflared
         run: |
           sudo mkdir ~/.cloudflared/
-          sudo rclone copy onedrive:self-hosted/.cloudflared ~/.cloudflared -vv
+          sudo rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
       - name: Check if the tunnel is running
