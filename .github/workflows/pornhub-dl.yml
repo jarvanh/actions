@@ -119,6 +119,6 @@ jobs:
       #       du -sh ~/j/1024j/视频/pornhub-channel/$dir
       #       # curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github p站下载任务执行完毕 "$channel""            
       #     done
-      - name: send notification
-        run: |
-          curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github p站下载任务执行完毕 全部"
+      # - name: send notification
+      #   run: |
+      #     curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github p站下载任务执行完毕 全部"
