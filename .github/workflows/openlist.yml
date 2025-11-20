@@ -85,7 +85,6 @@ jobs:
         run: |
           cloudflared tunnel route dns openlist openlist.'${{ secrets.VD }}'.eu.org
           nohup cloudflared tunnel run --url http://127.0.0.1:5244 openlist &
-          sudo sleep 350m  
           
       # - name: Split large videos (FIXED)
       #   run: |
@@ -259,7 +258,16 @@ jobs:
           # rclone ls onedrive:4 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
           # echo "==========  onedrive:5  ==========="
           # rclone ls onedrive:5 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
-              
+
+          sudo rclone sync onedrive: openlist:baidupanCrypt/onedrive \
+              --exclude "1/**" \
+              --exclude "2/**" \
+              --exclude "3/**" \
+              --exclude "4/**" \
+              --exclude "5/**" \
+              --progress --fast-list --size-only --transfers 1 --checkers 32  
+          curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 任务执行完毕"
+
           # sudo rclone sync onedrive:0 openlist:baidupanCrypt/0 --progress --fast-list --size-only --transfers 1 --checkers 32
           # curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 0 任务执行完毕"
 
@@ -277,3 +285,5 @@ jobs:
 
           sudo rclone sync onedrive:5 openlist:123panCrypt/5 --progress --fast-list --size-only --transfers 1 --checkers 32
           curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 5任务执行完毕"
+          
+          sudo sleep 350m  
