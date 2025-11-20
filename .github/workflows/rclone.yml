@@ -39,9 +39,9 @@ jobs:
           rclone lsf onedrive:
 
           # rclone sync dropbox:self-hosted onedrive:self-hosted -vv
-          # rclone sync onedrive:self-hosted dropbox:self-hosted -vv
-          for d in $(rclone lsf onedrive:self-hosted/emby --dirs-only); do
-              echo "=== $d ==="
-              rclone size onedrive:self-hosted/emby/"$d"
-          done
+          rclone sync onedrive:self-hosted dropbox:self-hosted -vv --exclude "emby/**"
+          # for d in $(rclone lsf onedrive:self-hosted/emby --dirs-only); do
+          #     echo "=== $d ==="
+          #     rclone size onedrive:self-hosted/emby/"$d"
+          # done
 
