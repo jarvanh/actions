@@ -39,8 +39,8 @@ jobs:
           rclone lsf onedrive:
 
           # rclone sync dropbox:self-hosted onedrive:self-hosted -vv
-          rclone sync onedrive:backup-from-icloud_cryptomator dropbox:backup-from-icloud_cryptomator -vv
-          rclone sync onedrive:backup-from-mega_cryptomator dropbox:backup-from-mega_cryptomator -vv
+          # rclone sync onedrive:backup-from-icloud_cryptomator dropbox:backup-from-icloud_cryptomator -vv
+          # rclone sync onedrive:backup-from-mega_cryptomator dropbox:backup-from-mega_cryptomator -vv
           # for d in $(rclone lsf onedrive:self-hosted/emby --dirs-only); do
           #     echo "=== $d ==="
           #     rclone size onedrive:self-hosted/emby/"$d"
