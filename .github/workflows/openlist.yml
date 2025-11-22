@@ -85,7 +85,7 @@ jobs:
         run: |
           cloudflared tunnel route dns openlist openlist.'${{ secrets.VD }}'.eu.org
           nohup cloudflared tunnel run --url http://127.0.0.1:5244 openlist &
-          
+          sudo sleep 5m      
       # - name: Split large videos (FIXED)
       #   run: |
       #     # 安装依赖
