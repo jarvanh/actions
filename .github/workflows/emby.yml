@@ -13,21 +13,6 @@ jobs:
     concurrency: emby-singleton
     runs-on: ubuntu-latest
     steps:
-      # - name: Check Workflow Status
-      #   run: |
-      #     workflow_runs=$(curl -s -X GET \
-      #       -H "Accept: application/vnd.github.v3+json" \
-      #       -H "Authorization: Bearer ${{ secrets.PAT }}" \
-      #       "https://api.github.com/repos/${{ github.repository }}/actions/runs")
-          
-      #     isRunning=$(echo "$workflow_runs" | jq '.workflow_runs[] | select(.name == "emby" and .status == "in_progress")')
-          
-      #     if [[ -n $isRunning ]]; then
-      #       echo "Another workflow is already running. Aborting current workflow."
-      #       exit 31
-      #     else
-      #       echo "No running workflows found. Continuing with the workflow execution."
-      #     fi
       - name: rclone-install
         run: |
           # 安装 rclone
@@ -50,14 +35,14 @@ jobs:
       - name: rclone-run
         run: |
           # sudo apt-get install fuse3
-          if rclone lsf onedrive:self-hosted/emby/config/ --files-only | grep -q "system.xml"; then
-            if ! rclone delete onedrive:self-hosted/emby/config/system.xml -vv; then
-              echo "[WARNING] Failed to delete system.xml, skipping" >&2
-            fi
-          fi
-          sudo rclone copy onedrive:self-hosted/emby/system.xml onedrive:self-hosted/emby/config/ --ignore-errors -vv
-          sudo mkdir /onedrive
-          sudo nohup rclone mount onedrive: /onedrive --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
+          # if rclone lsf onedrive:self-hosted/emby/config/ --files-only | grep -q "system.xml"; then
+          #   if ! rclone delete onedrive:self-hosted/emby/config/system.xml -vv; then
+          #     echo "[WARNING] Failed to delete system.xml, skipping" >&2
+          #   fi
+          # fi
+          # sudo rclone copy onedrive:self-hosted/emby/system.xml onedrive:self-hosted/emby/config/ --ignore-errors -vv
+          # sudo mkdir /onedrive
+          # sudo nohup rclone mount onedrive: /onedrive --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
           # sudo mkdir /dropbox
           # sudo nohup rclone mount dropbox: /dropbox --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
           # sudo rclone sync dropbox:self-hosted/emby /var/lib/emby -vv
@@ -65,6 +50,13 @@ jobs:
           rclone lsf onedrive:
           echo "==========dropbox==========="
           rclone lsf dropbox:
+      - name: Run openlist container
+        run: |
+          docker run -d --restart=unless-stopped -v /dropbox/self-hosted/openlist/data:/opt/openlist/data -p 5244:5244 -e PUID=0 -e PGID=0 -e UMASK=022 --name="openlist" openlistteam/openlist:latest
+          sudo sleep 1m     
+          docker ps
+          sudo mkdir -p /openlist
+          sudo nohup rclone mount openlist: /openlist --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 10G &
       - name: install cloudflared
         run: |
           sudo mkdir ~/.cloudflared/
@@ -111,9 +103,9 @@ jobs:
                   break
               fi
           done
-          echo "==========/onedrive/self-hosted/emby==========="
-          sudo ls /onedrive/self-hosted/emby
-          sudo ln -s /onedrive/self-hosted/emby /var/lib/emby
+          echo "==========/openlist/aliyundriveCrypt/self-hosted/emby==========="
+          sudo ls /openlist/aliyundriveCrypt/self-hosted/emby
+          sudo ln -s /openlist/aliyundriveCrypt/self-hosted/emby /var/lib/emby
           echo "==========/var/lib/emby==========="
           sudo ls /var/lib/emby
           # sudo chown -R emby:emby /var/lib/emby
