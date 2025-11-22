@@ -267,7 +267,10 @@ jobs:
           #     --exclude "5/**" \
           #     --progress --fast-list --size-only --transfers 1 --checkers 32  
           # curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 任务执行完毕"
- 
+   
+          sudo rclone sync onedrive:self-hosted openlist:aliyundriveCrypt/self-hosted --progress --fast-list --size-only
+          curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist aliyundriveCrypt/self-hosted 任务执行完毕"
+
           sudo rclone sync onedrive:backup openlist:baidupanCrypt/backup --progress --fast-list --size-only
           curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive:backup 任务执行完毕"
 
