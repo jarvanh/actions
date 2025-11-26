@@ -1,0 +1,261 @@
+name: openlist4
+
+on:
+  schedule:
+    # - cron: "0 1,7,13,19 * * *"
+    - cron: "0 * * * *"
+  workflow_dispatch:
+  # workflow_run:
+  #   workflows:
+  #     - t
+  #   types:
+  #     - completed  # 工作流完成后触发
+  watch:
+    # types: started
+
+jobs:
+  build:
+    concurrency: openlist4-singleton
+    runs-on: ubuntu-latest
+    # timeout-minutes: 60
+    steps:
+      - name: rclone-install
+        run: |
+          curl -O https://beta.rclone.org/rclone-beta-latest-linux-amd64.zip
+          unzip rclone-*-amd64.zip
+          cd rclone-*-linux-amd64
+          sudo mv rclone /usr/bin
+          sudo chmod +x /usr/bin/rclone
+      - name: rclone-config
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE }}
+        run: |
+          mkdir -p ~/.config/rclone/
+          cat << EOF > ~/.config/rclone/rclone.conf
+          $RCLONE_CONFIG
+          EOF
+      - name: rclone-run
+        run: |
+          echo "==========onedrive==========="
+          rclone lsf onedrive:
+          echo "==========dropbox==========="
+          rclone lsf dropbox:
+
+          sudo apt-get install fuse3
+          sudo mkdir -p /dropbox
+          sudo nohup rclone mount dropbox: /dropbox --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 10G &
+      - name: Run openlist container
+        run: docker run -d --restart=unless-stopped -v /dropbox/self-hosted/openlist/data:/opt/openlist/data -p 5244:5244 -e PUID=0 -e PGID=0 -e UMASK=022 --name="openlist" openlistteam/openlist:latest
+      - name: sleep
+        run: |
+          sudo sleep 1m      
+      - name: Verify docker container is running
+        run: docker ps
+
+      # - name: Split large videos (FIXED)
+      #   run: |
+      #     # 安装依赖
+      #     echo "Installing ffmpeg, jq, and coreutils..."
+      #     sudo apt-get update && sudo apt-get install -y ffmpeg jq coreutils
+
+      #     # 定义远程文件路径和本地文件名
+      #     REMOTE_FILE="onedrive:0/照片/Derrick/照片/20220226_102713.mp4"
+      #     LOCAL_FILE="20220226_102713.mp4"
+      
+      #     # 下载文件到当前目录
+      #     rclone copy "$REMOTE_FILE" .
+      
+      #     # 检查文件大小（字节），兼容不同系统的 stat 命令
+      #     if [ -f "$LOCAL_FILE" ]; then
+      #       FILE_SIZE=$(stat -c%s "$LOCAL_FILE" 2>/dev/null || stat -f%z "$LOCAL_FILE" 2>/dev/null)
+      #       # 4GB 的字节阈值（4 * 1024^3 = 4294967296）
+      #       THRESHOLD=1750000000
+      
+      #       if [ "$FILE_SIZE" -gt "$THRESHOLD" ]; then
+      #         echo "文件大小超过 4GB，开始分割..."
+      
+      #         # 获取视频时长（秒）
+      #         DURATION=$(ffprobe -i "$LOCAL_FILE" -show_entries format=duration -v quiet -of csv="p=0")
+      #         # 计算最大部分大小（这里设为 3.5GB，以确保每部分小于 4GB）
+      #         MAX_PART_SIZE=1750000000
+      #         # 计算需要分割成的部分数（向上取整）
+      #         N=$(( (FILE_SIZE + MAX_PART_SIZE - 1) / MAX_PART_SIZE ))
+      #         # 计算每段的时长（秒）
+      #         SEGMENT_TIME=$(echo "scale=2; $DURATION / $N" | bc)
+      
+      #         # 基础文件名和扩展名
+      #         BASE_NAME="${LOCAL_FILE%.*}"
+      #         EXTENSION="${LOCAL_FILE##*.}"
+      
+      #         # 使用 ffmpeg 分割视频（复制流，避免重新编码）
+      #         ffmpeg -i "$LOCAL_FILE" -c copy -map 0 -segment_time "$SEGMENT_TIME" -f segment -reset_timestamps 1 "${BASE_NAME}_part%03d.${EXTENSION}"
+      
+      #         # 上传分割后的文件到原目录
+      #         for part in "${BASE_NAME}_part"*."${EXTENSION}"; do
+      #           rclone copy "$part" "onedrive:0/照片/Derrick/照片/"
+      #           echo "已上传: $part"
+      #         done
+      
+      #         # 清理本地文件（可选）
+      #         rm "$LOCAL_FILE"
+      #         rm "${BASE_NAME}_part"*."${EXTENSION}"
+      #         echo "视频分割完成。"
+      #       else
+      #         echo "文件大小不超过 4GB，无需分割。"
+      #       fi
+      #     else
+      #       echo "错误：文件下载失败或不存在。"
+      #     fi
+      
+      # - name: Install 7z tool for compression and splitting
+      #   run: |
+      #     echo "Installing p7zip-full for 7z command..."
+      #     # p7zip-full 包含了 7z 命令行工具
+      #     sudo apt-get update && sudo apt-get install -y p7zip-full
+          
+      # ====================================================================
+      # ================ 通用大文件压缩并分卷 ================
+      # ====================================================================
+      # - name: Compress and split large general files
+      #   run: |
+      #     # 1. 定义参数
+      #     # 1. 定义参数
+      #     VOLUME_SIZE="2g" # 明确改为分卷大小的变量
+      #     REMOTE_PATH="onedrive:backup"
+      #     TEMP_DIR="temp_compress_split" # 使用新的临时目录
+      #     mkdir -p "$TEMP_DIR"
+          
+      #     # 定义需要排除的视频文件扩展名，以防止对视频文件进行二次处理
+      #     VIDEO_EXTENSIONS="\\.(mp4|mkv|mov|avi|flv|webm)$"
+
+      #     echo "Searching for non-video files larger than 4GB in ${REMOTE_PATH}..."
+          
+      #     # 2. 使用 rclone lsjson 查找并筛选大文件，排除视频文件
+      #     rclone lsjson --recursive ${REMOTE_PATH} --min-size 4G | \
+      #     jq --arg video_re "$VIDEO_EXTENSIONS" -r '
+      #       .[] | 
+      #       select(
+      #         (.Path | test($video_re; "i") | not) and 
+      #         .IsDir == false
+      #       ) | 
+      #       "\(.Path)\t\(.Size)"
+      #     ' | \
+      #     while IFS=$'\t' read -r general_file FILE_SIZE; do
+            
+      #       if [ -z "$general_file" ]; then continue; fi
+
+      #       echo "-----------------------------------------------------"
+      #       echo "Found large file for compression: \"$general_file\""
+            
+      #       # 3. 下载大文件到本地临时目录
+      #       echo "Downloading file to compress..."
+      #       rclone copy "${REMOTE_PATH}/${general_file}" "$TEMP_DIR" > /dev/null 2>&1
+      #       if [ $? -ne 0 ]; then
+      #           echo "Error: Failed to download \"$general_file\". Skipping."
+      #           continue
+      #       fi
+
+      #       LOCAL_FILE_PATH="${TEMP_DIR}/$(basename -- "$general_file")"
+      #       BASENAME=$(basename -- "$general_file")
+            
+      #       # 4. 定义分卷压缩后的文件名
+      #       # 例如：input.iso -> input.7z.001, input.7z.002
+      #       COMPRESSED_PREFIX="${TEMP_DIR}/${BASENAME}.7z"
+            
+      #       echo "File size: $(numfmt --to=iec $FILE_SIZE)"
+      #       echo "Compressing and splitting into ${VOLUME_SIZE} .7z volumes..."
+
+      #       # 5. 执行 7z 压缩并分卷
+      #       # 'a' (Add to archive), '-v4g' (Volume size 4GB), '-m0=lzma2' (启用强大的压缩算法)
+      #       7z a -v${VOLUME_SIZE} -m0=lzma2 "$COMPRESSED_PREFIX" "$LOCAL_FILE_PATH"
+            
+      #       if [ $? -ne 0 ]; then
+      #           echo "Error: 7z compression/splitting failed for \"$general_file\". Cleaning up and skipping."
+      #           find "$TEMP_DIR" -maxdepth 1 -name "${BASENAME}.7z*" -exec rm -f {} \;
+      #           rm -f "$LOCAL_FILE_PATH"
+      #           continue
+      #       fi
+            
+      #       # 6. 上传分卷文件到【原始目录】
+      #       original_dir=$(dirname "$general_file")
+      #       echo "Uploading split volumes to ${REMOTE_PATH}/${original_dir}/"
+      #       # 移动所有 .7z 或 .7z.001/.7z.002 等文件
+      #       rclone move "$TEMP_DIR" "${REMOTE_PATH}/${original_dir}/" --include "${BASENAME}.7z*" --delete-empty-src-dirs > /dev/null 2>&1
+            
+      #       # 7. 删除云端的原始大文件
+      #       echo "Deleting original file: ${REMOTE_PATH}/${general_file}"
+      #       rclone delete "${REMOTE_PATH}/${general_file}" > /dev/null 2>&1
+
+      #       # 8. 清理本地文件
+      #       rm -f "$LOCAL_FILE_PATH"
+
+      #     done
+          
+      #     # 9. 清理临时工作目录
+      #     rm -rf "$TEMP_DIR"
+      #     echo "-----------------------------------------------------"
+      #     echo "General file compression and splitting process completed."
+
+      # - name: rclone-lsf
+      #   run: |
+      #     echo "==========onedrive==========="
+      #     rclone lsf onedrive:
+      #     echo "==========dropbox==========="
+      #     rclone lsf dropbox:
+      #     echo "==========openlist==========="
+      #     rclone lsf openlist:
+      #     echo "==========openlist:baidupanCrypt==========="
+      #     rclone lsf openlist:baidupanCrypt
+      #     echo "==========openlist:aliyundriveCrypt==========="
+      #     rclone lsf openlist:aliyundriveCrypt
+      #     echo "==========openlist:123panCrypt==========="
+      #     rclone lsf openlist:123panCrypt
+      - name: rclone-sync
+        run: |
+          # echo "==========  onedrive:0  ==========="
+          # rclone ls onedrive:0 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
+          # echo "==========  onedrive:1  ==========="
+          # rclone ls onedrive:1 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
+          # echo "==========  onedrive:2  ==========="
+          # rclone ls onedrive:2 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
+          # echo "==========  onedrive:3  ==========="
+          # rclone ls onedrive:3 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
+          # echo "==========  onedrive:4  ==========="
+          # rclone ls onedrive:4 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
+          # echo "==========  onedrive:5  ==========="
+          # rclone ls onedrive:5 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
+
+          # sudo rclone sync onedrive: openlist:baidupanCrypt/onedrive \
+          #     --exclude "1/**" \
+          #     --exclude "2/**" \
+          #     --exclude "3/**" \
+          #     --exclude "4/**" \
+          #     --exclude "5/**" \
+          #     --progress --fast-list --size-only --transfers 1 --checkers 32  
+          # curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 任务执行完毕"
+   
+          # sudo rclone sync onedrive:self-hosted openlist:123panCrypt/self-hosted --progress --fast-list --size-only
+          # curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist 123panCrypt/self-hosted 任务执行完毕"
+
+          # sudo rclone sync onedrive:backup openlist:123panCrypt/backup --progress --fast-list --size-only
+          # curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive:backup 任务执行完毕"
+
+          # sudo rclone sync onedrive:0 openlist:123panCrypt/0 --progress --fast-list --size-only --transfers 1 --checkers 32
+          # curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 0 任务执行完毕"
+
+          # sudo rclone sync onedrive:1 openlist:123panCrypt/1 --progress --fast-list --size-only --transfers 1 --checkers 32
+          # curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 1 任务执行完毕"
+
+          # sudo rclone sync onedrive:2 openlist:aliyundriveCrypt/2 -vv --progress --fast-list --size-only --transfers 1 --checkers 32
+          # curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 2 任务执行完毕"
+
+          # sudo rclone sync onedrive:3 openlist:aliyundriveCrypt/3 -vv --progress --fast-list --size-only --transfers 1 --checkers 32
+          # curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 3 任务执行完毕"
+
+          sudo rclone sync onedrive:4 openlist:baidupanCrypt/4 --progress --fast-list --size-only --transfers 1 --checkers 32
+          curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 4任务执行完毕"
+
+          # sudo rclone sync onedrive:5 openlist:baidupanCrypt/5 --progress --fast-list --size-only --transfers 1 --checkers 32
+          # curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 5任务执行完毕"
+          
+          sudo sleep 350m  
