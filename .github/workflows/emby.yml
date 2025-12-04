@@ -34,7 +34,7 @@ jobs:
           EOF
       - name: rclone-run
         run: |
-          # sudo apt-get install fuse3
+          sudo apt-get install fuse3
           # if rclone lsf onedrive:self-hosted/emby/config/ --files-only | grep -q "system.xml"; then
           #   if ! rclone delete onedrive:self-hosted/emby/config/system.xml -vv; then
           #     echo "[WARNING] Failed to delete system.xml, skipping" >&2
@@ -89,6 +89,15 @@ jobs:
         run: |
           curl -L -o emby-server.deb $(curl -s https://api.github.com/repos/MediaBrowser/Emby.Releases/releases/latest | grep -oP '"browser_download_url": "\K(.*emby-server-deb.*amd64.deb)(?=")')
           sudo dpkg -i emby-server.deb
+          
+          if rclone lsf openlist:aliyundriveCrypt/self-hosted/emby/config/ --files-only | grep -q "system.xml"; then
+            if ! rclone delete openlist:aliyundriveCrypt/self-hosted/emby/config/system.xml -vv; then
+              echo "[WARNING] Failed to delete system.xml, skipping" >&2
+            fi
+          fi
+          sudo rclone copy openlist:aliyundriveCrypt/self-hosted/emby/system.xml openlist:aliyundriveCrypt/self-hosted/emby/config/ --ignore-errors -vv
+
+          
           while true; do
               if [ -d /var/lib/emby ]; then
                   echo "Directory exists, deleting..."
