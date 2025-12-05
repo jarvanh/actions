@@ -126,7 +126,7 @@ jobs:
       - name: run cloudflared
         run: |
           cloudflared tunnel route dns e e.'${{ secrets.VD }}'.eu.org
-          nohup cloudflared tunnel run --url http://127.0.0.1:8096 e &
+          sudo nohup cloudflared tunnel run --url http://127.0.0.1:8096 e &
       - name: sleep
         run: |
           sudo sleep 340m && curl -X POST -H "X-Emby-Token: c33a66119cd94788882617a5bde7f962" http://127.0.0.1:8096/System/Shutdown
