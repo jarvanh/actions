@@ -125,9 +125,9 @@ jobs:
               fi
           done
           
-          # echo "==========/gd/self-hosted/emby==========="
-          # sudo ls /gd/self-hosted/emby
-          # sudo ln -s /gd/self-hosted/emby /var/lib/emby
+          echo "==========/gd/self-hosted/emby==========="
+          sudo ls /gd/self-hosted/emby
+          sudo ln -s /gd/self-hosted/emby /var/lib/emby
           # echo "==========/dropbox/self-hosted/emby==========="
           # sudo ls /dropbox/self-hosted/emby
           # sudo ln -s /dropbox/self-hosted/emby /var/lib/emby
