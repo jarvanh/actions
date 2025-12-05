@@ -113,9 +113,12 @@ jobs:
               fi
           done
           
-          echo "==========/dropbox/self-hosted/emby==========="
-          sudo ls /dropbox/self-hosted/emby
-          sudo ln -s /dropbox/self-hosted/emby /var/lib/emby
+          # echo "==========/dropbox/self-hosted/emby==========="
+          # sudo ls /dropbox/self-hosted/emby
+          # sudo ln -s /dropbox/self-hosted/emby /var/lib/emby
+          echo "==========/openlist/aliyundriveCrypt/self-hosted/emby==========="
+          sudo ls /openlist/aliyundriveCrypt/self-hosted/emby
+          sudo ln -s /openlist/aliyundriveCrypt/self-hosted/emby /var/lib/emby
           echo "==========/var/lib/emby==========="
           sudo ls /var/lib/emby
           # sudo chown -R emby:emby /var/lib/emby
