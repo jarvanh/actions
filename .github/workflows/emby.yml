@@ -63,8 +63,8 @@ jobs:
           fi
           sudo rclone copy openlist:aliyundriveCrypt/self-hosted/emby/system.xml openlist:aliyundriveCrypt/self-hosted/emby/config/ --ignore-errors -vv
 
-          # sudo mkdir -p /openlist
-          # sudo nohup rclone mount openlist: /openlist --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 10G &
+          sudo mkdir -p /openlist
+          sudo nohup rclone mount openlist: /openlist --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 10G &
       - name: install cloudflared
         run: |
           sudo mkdir ~/.cloudflared/
