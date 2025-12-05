@@ -55,6 +55,14 @@ jobs:
           sudo docker run -d --restart=unless-stopped -v /dropbox/self-hosted/openlist/data:/opt/openlist/data -p 5244:5244 -e PUID=0 -e PGID=0 -e UMASK=022 --name="openlist" openlistteam/openlist:latest
           sudo sleep 1m     
           docker ps
+
+          if rclone lsf openlist:aliyundriveCrypt/self-hosted/emby/config/ --files-only | grep -q "system.xml"; then
+            if ! rclone delete openlist:aliyundriveCrypt/self-hosted/emby/config/system.xml -vv; then
+              echo "[WARNING] Failed to delete system.xml, skipping" >&2
+            fi
+          fi
+          sudo rclone copy openlist:aliyundriveCrypt/self-hosted/emby/system.xml openlist:aliyundriveCrypt/self-hosted/emby/config/ --ignore-errors -vv
+
           sudo mkdir -p /openlist
           sudo nohup rclone mount openlist: /openlist --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 10G &
       - name: install cloudflared
@@ -90,14 +98,6 @@ jobs:
           curl -L -o emby-server.deb $(curl -s https://api.github.com/repos/MediaBrowser/Emby.Releases/releases/latest | grep -oP '"browser_download_url": "\K(.*emby-server-deb.*amd64.deb)(?=")')
           sudo dpkg -i emby-server.deb
           
-          if rclone lsf openlist:aliyundriveCrypt/self-hosted/emby/config/ --files-only | grep -q "system.xml"; then
-            if ! rclone delete openlist:aliyundriveCrypt/self-hosted/emby/config/system.xml -vv; then
-              echo "[WARNING] Failed to delete system.xml, skipping" >&2
-            fi
-          fi
-          sudo rclone copy openlist:aliyundriveCrypt/self-hosted/emby/system.xml openlist:aliyundriveCrypt/self-hosted/emby/config/ --ignore-errors -vv
-
-          
           while true; do
               if [ -d /var/lib/emby ]; then
                   echo "Directory exists, deleting..."
@@ -112,6 +112,7 @@ jobs:
                   break
               fi
           done
+          
           echo "==========/openlist/aliyundriveCrypt/self-hosted/emby==========="
           sudo ls /openlist/aliyundriveCrypt/self-hosted/emby
           sudo ln -s /openlist/aliyundriveCrypt/self-hosted/emby /var/lib/emby
