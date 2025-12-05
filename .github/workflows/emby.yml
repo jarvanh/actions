@@ -125,7 +125,7 @@ jobs:
           sudo nohup /opt/emby-server/bin/emby-server &
       - name: run cloudflared
         run: |
-          cloudflared tunnel route dns e e.'${{ secrets.VD }}'.eu.org
+          sudo cloudflared tunnel route dns e e.'${{ secrets.VD }}'.eu.org
           sudo nohup cloudflared tunnel run --url http://127.0.0.1:8096 e &
       - name: sleep
         run: |
