@@ -3,7 +3,7 @@ name: subs-check
 on:
   schedule:
     # - cron: "0 2,8,14,20 * * *"
-    - cron: "0 14 * * *"
+    - cron: "15 * * * *"
   workflow_dispatch:
   watch:
     # types: started
@@ -33,15 +33,13 @@ jobs:
           EOF
       - name: rclone-run
         run: |
-          apt-get install fuse3
-          mkdir /dropbox
-          nohup rclone mount dropbox: /dropbox --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
+          sudo apt-get install fuse3
+          sudo mkdir /dropbox
+          sudo nohup rclone mount dropbox: /dropbox --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
           echo "==========onedrive==========="
           rclone lsf onedrive:
           echo "==========dropbox==========="
           rclone lsf dropbox:
-      - name: Set up Docker
-        uses: docker/setup-buildx-action@v2
       - name: Run docker container
         run: |
-          docker run --name subs-check -p 8199:8199 -v /dropbox/self-hosted/subs-check/config:/app/config -v /dropbox/self-hosted/subs-check/output:/app/output --restart always ghcr.io/beck-8/subs-check:latest
+          sudo docker run --name subs-check -p 8199:8199 -v /dropbox/self-hosted/subs-check/config:/app/config -v /dropbox/self-hosted/subs-check/output:/app/output --restart always ghcr.io/beck-8/subs-check:latest
