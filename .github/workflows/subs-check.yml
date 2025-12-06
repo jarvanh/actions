@@ -3,13 +3,14 @@ name: subs-check
 on:
   schedule:
     # - cron: "0 2,8,14,20 * * *"
-    - cron: "15 * * * *"
+    - cron: "*/5 * * * *"
   workflow_dispatch:
   watch:
     # types: started
 
 jobs:
   build:
+    concurrency: subs-check-singleton
     runs-on: ubuntu-latest
     steps:
       - name: rclone-install
