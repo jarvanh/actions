@@ -246,8 +246,8 @@ jobs:
           # sudo rclone sync onedrive:1 openlist:aliyundriveCrypt/1 --progress --fast-list --size-only --transfers 1 --checkers 32
           # curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 1 任务执行完毕"
 
-          sudo rclone sync onedrive:2 openlist:123panCrypt/2 -vv --progress --fast-list --size-only
-          curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 2 任务执行完毕"
+          # sudo rclone sync onedrive:2 openlist:123panCrypt/2 -vv --progress --fast-list --size-only
+          # curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 2 任务执行完毕"
 
           sudo rclone sync onedrive:3 openlist:123panCrypt/3 -vv --progress --fast-list --size-only
           curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 3 任务执行完毕"
