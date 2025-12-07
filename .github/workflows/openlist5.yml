@@ -255,7 +255,11 @@ jobs:
           # sudo rclone sync onedrive:4 openlist:baidupanCrypt/4 --progress --fast-list --size-only --transfers 1 --checkers 32
           # curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 4任务执行完毕"
 
-          sudo rclone sync onedrive:5 openlist:baidupanCrypt/5 --progress --fast-list --size-only
+          sudo rclone sync onedrive:5 openlist:baidupanCrypt/5 --progress --fast-list --size-only --transfers 1 --checkers 1 --ignore-errors --verbose 2>&1 | tee errors5.log
+          # 从日志中提取错误
+          grep "ERROR\|error\|failed" errors5.log | grep -oP 'onedrive:5[^:]*' | sort -u > error_files5.txt
+          echo "错误文件列表已保存到 error_files5.txt"
+          cat error_files5.txt
           curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 5任务执行完毕"
           
           sudo sleep 350m  
