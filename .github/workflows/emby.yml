@@ -50,8 +50,8 @@ jobs:
 
           # sudo mkdir -p /openlist
           # sudo nohup rclone mount openlist: /openlist --vfs-cache-mode full &
-          # sudo mkdir /onedrive
-          # sudo nohup rclone mount onedrive: /onedrive --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
+          sudo mkdir /onedrive
+          sudo nohup rclone mount onedrive: /onedrive --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
           sudo mkdir /dropbox
           sudo nohup rclone mount dropbox: /dropbox --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
           sudo mkdir /gd
