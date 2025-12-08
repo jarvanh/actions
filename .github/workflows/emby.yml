@@ -41,6 +41,7 @@ jobs:
           #   fi
           # fi
           # sudo rclone copy dropbox:self-hosted/emby/system.xml dropbox:self-hosted/emby/config/ --ignore-errors -vv
+         
           if rclone lsf gd:self-hosted/emby/config/ --files-only | grep -q "system.xml"; then
             if ! rclone delete gd:self-hosted/emby/config/system.xml -vv; then
               echo "[WARNING] Failed to delete system.xml, skipping" >&2
@@ -136,8 +137,8 @@ jobs:
           # sudo ln -s /openlist/aliyundriveCrypt/self-hosted/emby /var/lib/emby
           echo "==========/var/lib/emby==========="
           sudo ls /var/lib/emby
-          # sudo chown -R emby:emby /var/lib/emby
-          # sudo chmod -R 755 /var/lib/emby
+          sudo chown -R emby:emby /var/lib/emby
+          sudo chmod -R 755 /var/lib/emby
       - name: run emby
         run: |
           sudo nohup /opt/emby-server/bin/emby-server &
