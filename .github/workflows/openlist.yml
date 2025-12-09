@@ -276,6 +276,9 @@ jobs:
 
           # sudo rclone sync onedrive:0 openlist:aliyundriveCrypt/0 --progress --fast-list --size-only
           # curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 0 任务执行完毕"
+          
+          sudo rclone sync onedrive:0 gd:0 --progress --fast-list --size-only
+          curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 0 任务执行完毕"
 
           sudo rclone sync onedrive:1 openlist:aliyundriveCrypt/1 --progress --fast-list --size-only
           curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 1 任务执行完毕"
