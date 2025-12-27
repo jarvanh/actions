@@ -137,8 +137,8 @@ jobs:
           # sudo ln -s /openlist/aliyundriveCrypt/self-hosted/emby /var/lib/emby
           echo "==========/var/lib/emby==========="
           sudo ls /var/lib/emby
-          sudo chown -R emby:emby /var/lib/emby
-          sudo chmod -R 755 /var/lib/emby
+          # sudo chown -R emby:emby /var/lib/emby
+          # sudo chmod -R 755 /var/lib/emby
       - name: run emby
         run: |
           sudo nohup /opt/emby-server/bin/emby-server &
