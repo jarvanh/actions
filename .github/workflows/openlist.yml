@@ -268,22 +268,51 @@ jobs:
           #     --progress --fast-list --size-only --transfers 1 --checkers 32  
           # curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 任务执行完毕"
 
-          sudo rclone sync onedrive:backup openlist:aliyundriveCrypt/backup --progress --fast-list --size-only
+          sudo rclone sync onedrive:backup openlist:aliyundriveCrypt/backup --progress
           curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive:backup 任务执行完毕"
     
-          sudo rclone sync onedrive:0 openlist:123panCrypt/0 --progress --fast-list --size-only
+          # 生成带时间戳的错误日志文件名
+          LOG_FILENAME="onedrive:0_error_$(date +%Y%m%d_%H%M%S).log"
+          
+          # 执行同步命令
+          sudo rclone sync onedrive:0 openlist:123panCrypt/0 \
+            --progress \
+            --ignore-errors \
+            --verbose \
+            2>&1 | tee "$LOG_FILENAME"
+          
+          # 上传错误日志到onedrive
+          rclone copyto "$LOG_FILENAME" "onedrive:0/$LOG_FILENAME"
+          
+          # 清理本地临时文件
+          rm -f "$LOG_FILENAME"
+          
+          # 清理旧日志
+          rclone lsf onedrive:0 --files-only | grep "^onedrive:0_error_.*\.log$" | sort > /tmp/log_list.txt
+          # 计算需要保留的数量（最多7个）
+          LOG_COUNT=$(wc -l < /tmp/log_list.txt)
+          if [ "$LOG_COUNT" -gt 7 ]; then
+            # 获取需要删除的文件列表（从旧文件开始删除）
+            DELETE_COUNT=$((LOG_COUNT - 7))
+            head -n "$DELETE_COUNT" /tmp/log_list.txt | while read -r old_file; do
+              echo "删除旧日志: $old_file"
+              rclone delete "onedrive:0/$old_file"
+            done
+          fi
+          rm -f /tmp/log_list.txt
           curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 0 任务执行完毕"
+
         
-          sudo rclone sync onedrive:1 openlist:123panCrypt/1 --progress --fast-list --size-only
+          sudo rclone sync onedrive:1 openlist:123panCrypt/1 --progress
           curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 1 任务执行完毕"
 
-          sudo rclone sync onedrive:2 openlist:aliyundriveCrypt/2 -vv --progress --fast-list --size-only
+          sudo rclone sync onedrive:2 openlist:aliyundriveCrypt/2 -vv --progress
           curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 2 任务执行完毕"
 
-          sudo rclone sync onedrive:3 openlist:aliyundriveCrypt/3 -vv --progress --fast-list --size-only
+          sudo rclone sync onedrive:3 openlist:aliyundriveCrypt/3 -vv --progress
           curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 3 任务执行完毕"
 
-          # sudo rclone sync onedrive:4 openlist:baidupanCrypt/4 --progress --fast-list --size-only
+          # sudo rclone sync onedrive:4 openlist:baidupanCrypt/4 --progress
           # curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 4任务执行完毕"
 
           # # 生成带时间戳的错误日志文件名
@@ -292,8 +321,6 @@ jobs:
           # # 执行同步命令
           # sudo rclone sync onedrive:5 openlist:baidupanCrypt/5 \
           #   --progress \
-          #   --fast-list \
-          #   --size-only \
           #   --ignore-errors \
           #   --verbose \
           #   2>&1 | tee "$LOG_FILENAME"
