@@ -14,33 +14,60 @@ jobs:
       - name: rclone-install
         run: |
           # 安装 rclone
-          # curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
-          # curl -O https://beta.rclone.org/rclone-beta-latest-linux-amd64.zip
-          # unzip rclone-*-amd64.zip
-          # cd rclone-*-linux-amd64
-          # sudo mv rclone /usr/bin
-          # sudo chmod +x /usr/bin/rclone
-          sudo apt-get install rclone
+          sudo apt-get update
+          sudo apt-get install -y rclone
       - name: rclone-config
         env:
           RCLONE_CONFIG: ${{ secrets.RCLONE }}
         run: |
           # 写配置文件
           mkdir -p ~/.config/rclone/
-          cat << EOF > ~/.config/rclone/rclone.conf
-          $RCLONE_CONFIG
-          EOF
+          echo "$RCLONE_CONFIG" > ~/.config/rclone/rclone.conf
       - name: rclone-run
         run: |
-          sudo apt-get install fuse3
-          sudo mkdir /onedrive
-          sudo nohup rclone mount onedrive: /onedrive --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
+          sudo apt-get install -y fuse3
+          sudo mkdir -p /onedrive
+          # 尝试卸载已挂载的目录（如果存在）
+          sudo fusermount -uz /onedrive 2>/dev/null || true
+          # 启动 rclone mount
+          sudo rclone mount onedrive: /onedrive --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G --daemon
+          # 等待挂载完成
+          sleep 5
       - name: run pixivutil2
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           cd /onedrive/software/PixivUtil2
+          
+          # 备份配置文件
+          if [ -f config.ini ]; then
+            cp config.ini /tmp/config.ini.backup
+          fi
+          
+          # 丢弃所有本地修改，避免 git pull 冲突
+          git reset --hard
+          git clean -fd
+          
+          # 拉取最新代码
           git pull https://github.com/Nandaka/PixivUtil2.git
+          
+          # 恢复配置文件
+          if [ -f /tmp/config.ini.backup ]; then
+            cp /tmp/config.ini.backup config.ini
+          fi
+          
+          # 安装依赖
           pip install -r requirements.txt
-
-          python PixivUtil2.py -c config.ini -s 6  -x
+          
+          # 运行 PixivUtil2
+          python PixivUtil2.py -c config.ini -s 6 -x
+          
           echo "github PixivUtil2 任务执行结束"
-          curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github PixivUtil2 任务执行结束"
+          
+          # 发送 Telegram 通知
+          if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d "chat_id=${TELEGRAM_CHAT_ID}" \
+              -d "text=github PixivUtil2 任务执行结束"
+          fi
