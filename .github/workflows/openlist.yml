@@ -272,7 +272,7 @@ jobs:
           curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive:backup 任务执行完毕"
     
           # 生成带时间戳的错误日志文件名
-          LOG_FILENAME="onedrive:0_error_$(date +%Y%m%d_%H%M%S).log"
+          LOG_FILENAME="onedrive_0_error_$(date +%Y%m%d_%H%M%S).log"
           
           # 执行同步命令
           sudo rclone sync onedrive:0 openlist:123panCrypt/0 \
@@ -316,7 +316,7 @@ jobs:
           # curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 4任务执行完毕"
 
           # # 生成带时间戳的错误日志文件名
-          # LOG_FILENAME="onedrive:5_error_$(date +%Y%m%d_%H%M%S).log"
+          # LOG_FILENAME="onedrive_5_error_$(date +%Y%m%d_%H%M%S).log"
           
           # # 执行同步命令
           # sudo rclone sync onedrive:5 openlist:baidupanCrypt/5 \
