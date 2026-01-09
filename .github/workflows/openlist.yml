@@ -87,7 +87,14 @@ jobs:
           nohup cloudflared tunnel run --url http://127.0.0.1:5244 openlist &
           sudo sleep 5m
       
+      - name: Install required tools
+        run: |
+          echo "Installing ffmpeg, jq, coreutils..."
+          sudo apt-get update && sudo apt-get install -y ffmpeg jq coreutils
+      
       - name: rclone-sync-with-logging
+        env:
+          PROCESSED_FILES_LOG: "processed_videos.log"
         run: |
           # 发送日志到Telegram的函数
           send_log_to_telegram() {
@@ -155,6 +162,192 @@ jobs:
             fi
           }
           
+          # 视频文件分割函数
+          split_large_video() {
+            local remote_path="$1"
+            local remote_source="$2"  # 例如: onedrive
+            local local_file_path="$3"
+            local file_name="$4"
+            
+            echo "开始分割视频文件: $file_name"
+            
+            # 基础文件名和扩展名
+            local base_name="${file_name%.*}"
+            local extension="${file_name##*.}"
+            
+            # 获取视频时长（秒）
+            echo "获取视频时长..."
+            local duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$local_file_path" 2>/dev/null || echo 0)
+            
+            if [ "$(echo "$duration > 0" | bc)" -eq 1 ]; then
+              echo "视频时长: $duration 秒"
+              
+              # 计算文件大小和所需分片数
+              local file_size=$(stat -c%s "$local_file_path" 2>/dev/null || stat -f%z "$local_file_path" 2>/dev/null)
+              local max_part_size=3750000000  # 3.5GB，留出安全余量
+              local n=$(( (file_size + max_part_size - 1) / max_part_size ))
+              
+              # 确保至少分割成1部分
+              if [ $n -lt 1 ]; then
+                n=1
+              fi
+              
+              echo "文件大小: $(numfmt --to=iec-i --suffix=B "$file_size" 2>/dev/null || echo "${file_size}B")"
+              echo "将分割成 $n 个部分"
+              
+              # 计算每段的时长（秒）
+              local segment_time=$(echo "scale=2; $duration / $n" | bc)
+              echo "每段时长: ${segment_time}秒"
+              
+              # 使用 ffmpeg 分割视频（复制流，避免重新编码）
+              echo "开始分割视频..."
+              ffmpeg -i "$local_file_path" -c copy -map 0 -segment_time "$segment_time" -f segment -reset_timestamps 1 "${base_name}_part%03d.${extension}"
+              
+              if [ $? -eq 0 ]; then
+                echo "视频分割完成，开始上传分割后的文件..."
+                
+                # 上传分割后的文件到原目录
+                for part in "${base_name}_part"*."${extension}"; do
+                  if [ -f "$part" ]; then
+                    rclone copyto "$part" "${remote_source}:${remote_path}/${part}"
+                    echo "已上传: $part"
+                    
+                    # 验证文件已上传
+                    rclone lsf "${remote_source}:${remote_path}/${part}" >/dev/null 2>&1
+                    if [ $? -eq 0 ]; then
+                      echo "✅ 验证成功: $part 已上传"
+                    else
+                      echo "❌ 验证失败: $part 上传可能有问题"
+                    fi
+                  fi
+                done
+                
+                # 删除云端的原始大文件
+                echo "删除原始文件: ${remote_source}:${remote_path}/${file_name}"
+                rclone deletefile "${remote_source}:${remote_path}/${file_name}"
+                
+                # 清理本地文件
+                rm -f "$local_file_path"
+                rm -f "${base_name}_part"*."${extension}"
+                echo "视频分割和清理完成"
+                
+                # 记录已处理的文件
+                echo "$(date +%Y-%m-%d_%H:%M:%S) - ${remote_source}:${remote_path}/${file_name}" >> "$PROCESSED_FILES_LOG"
+                
+                return 0
+              else
+                echo "❌ ffmpeg 分割失败"
+                return 1
+              fi
+            else
+              echo "❌ 无法获取视频时长"
+              return 1
+            fi
+          }
+          
+          # 分析错误日志，查找失败的大视频文件
+          process_failed_videos() {
+            local log_file="$1"
+            local remote_source="$2"
+            local task_name="$3"
+            
+            echo "分析错误日志，查找失败的视频文件..."
+            
+            # 从日志中提取失败的视频文件路径
+            # 查找包含错误信息且包含视频文件的行
+            local failed_videos=$(grep -i "error\|failed\|too large\|size" "$log_file" | grep -E "\.(mp4|mkv|mov|avi|flv|webm|m4v|wmv|mpg|mpeg)$" | head -20 || true)
+            
+            if [ -n "$failed_videos" ]; then
+              echo "找到可能失败的视频文件:"
+              echo "$failed_videos"
+              
+              # 提取具体的文件路径
+              local file_patterns=$(echo "$failed_videos" | grep -oE "[a-zA-Z0-9_\-./]+\.(mp4|mkv|mov|avi|flv|webm|m4v|wmv|mpg|mpeg)" | sort -u)
+              
+              for file_pattern in $file_patterns; do
+                # 清理文件路径
+                local cleaned_path=$(echo "$file_pattern" | sed 's/^.*\///')
+                
+                # 尝试查找完整的文件路径
+                local full_path=""
+                
+                # 根据任务名确定搜索路径
+                case "$task_name" in
+                  "backup")
+                    search_paths=("backup")
+                    ;;
+                  "task0")
+                    search_paths=("0")
+                    ;;
+                  "task2")
+                    search_paths=("2")
+                    ;;
+                  "task3")
+                    search_paths=("3")
+                    ;;
+                  *)
+                    # 默认在所有可能的路径中查找
+                    search_paths=("backup" "0" "2" "3")
+                    ;;
+                esac
+                
+                # 在可能的路径中查找文件
+                for search_path in "${search_paths[@]}"; do
+                  echo "在路径 ${remote_source}:${search_path} 中查找文件: $cleaned_path"
+                  local found_file=$(rclone lsf "${remote_source}:${search_path}" --include "*${cleaned_path}*" 2>/dev/null | head -1)
+                  
+                  if [ -n "$found_file" ]; then
+                    # 获取文件大小
+                    local file_info=$(rclone size "${remote_source}:${search_path}/${found_file}" 2>/dev/null || echo "0")
+                    local file_size=$(echo "$file_info" | grep "Total size" | grep -oE '[0-9]+' || echo "0")
+                    
+                    # 检查文件大小是否超过3.5GB
+                    if [ "$file_size" -gt 3500000000 ]; then
+                      echo "找到大视频文件: ${search_path}/${found_file} (大小: $file_size 字节)"
+                      full_path="${search_path}/${found_file}"
+                      break
+                    fi
+                  fi
+                done
+                
+                if [ -n "$full_path" ]; then
+                  echo "尝试分割大视频文件: $full_path"
+                  
+                  # 创建临时目录
+                  local temp_dir="temp_video_split_$(date +%s)"
+                  mkdir -p "$temp_dir"
+                  
+                  # 下载文件
+                  echo "下载文件: ${remote_source}:${full_path}"
+                  rclone copy "${remote_source}:${full_path}" "$temp_dir/"
+                  
+                  local local_file="$temp_dir/$(basename "$full_path")"
+                  
+                  if [ -f "$local_file" ]; then
+                    # 分割视频
+                    if split_large_video "$(dirname "$full_path")" "$remote_source" "$local_file" "$(basename "$full_path")"; then
+                      echo "✅ 视频分割成功: $full_path"
+                      # 发送成功通知
+                      curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
+                        -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
+                        -d text="✅ 已自动分割大视频文件:\n${remote_source}:${full_path}\n文件大小: $(numfmt --to=iec-i --suffix=B "$file_size" 2>/dev/null || echo "${file_size}B")" \
+                        -d parse_mode="Markdown" || true
+                    else
+                      echo "❌ 视频分割失败: $full_path"
+                    fi
+                  else
+                    echo "❌ 下载文件失败: ${remote_source}:${full_path}"
+                  fi
+                  
+                  # 清理临时目录
+                  rm -rf "$temp_dir" 2>/dev/null || true
+                fi
+              done
+            else
+              echo "未找到可识别的大视频文件错误"
+            fi
+          }
+          
           # 统一的错误日志处理函数
           sync_with_logging() {
             local source_path="$1"
@@ -211,14 +404,20 @@ jobs:
               echo "同步失败: $source_path (退出码: $SYNC_STATUS)"
               # 调用函数发送日志到Telegram
               send_log_to_telegram "$LOG_FILENAME" "$task_name" "$SYNC_STATUS"
+              
+              # 如果同步失败，尝试分析日志，处理失败的大视频文件
+              echo "尝试分析失败原因，处理大视频文件..."
+              process_failed_videos "$LOG_FILENAME" "onedrive" "$task_name"
             fi
             
             # 清理本地临时文件
             rm -f "$LOG_FILENAME" 2>/dev/null || true
             
-            # 即使失败也返回0，确保后续任务继续执行
             return 0
           }
+          
+          # 初始化已处理文件日志
+          echo "=== 初始化已处理文件日志 ===" > "$PROCESSED_FILES_LOG"
           
           # 执行所有同步任务
           echo "开始执行所有同步任务..."
