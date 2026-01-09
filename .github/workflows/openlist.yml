@@ -2,8 +2,8 @@ name: openlist
 
 on:
   # schedule:
-    # - cron: "0 1,7,13,19 * * *"
-    # - cron: "0 * * * *"
+  #   - cron: "0 1,7,13,19 * * *"
+  #   - cron: "0 * * * *"
   workflow_dispatch:
   # workflow_run:
   #   workflows:
@@ -85,264 +85,162 @@ jobs:
         run: |
           cloudflared tunnel route dns openlist openlist.'${{ secrets.VD }}'.eu.org
           nohup cloudflared tunnel run --url http://127.0.0.1:5244 openlist &
-          sudo sleep 5m      
-      # - name: Split large videos (FIXED)
-      #   run: |
-      #     # 安装依赖
-      #     echo "Installing ffmpeg, jq, and coreutils..."
-      #     sudo apt-get update && sudo apt-get install -y ffmpeg jq coreutils
-
-      #     # 定义远程文件路径和本地文件名
-      #     REMOTE_FILE="onedrive:0/照片/Derrick/照片/20220226_102713.mp4"
-      #     LOCAL_FILE="20220226_102713.mp4"
+          sudo sleep 5m
       
-      #     # 下载文件到当前目录
-      #     rclone copy "$REMOTE_FILE" .
-      
-      #     # 检查文件大小（字节），兼容不同系统的 stat 命令
-      #     if [ -f "$LOCAL_FILE" ]; then
-      #       FILE_SIZE=$(stat -c%s "$LOCAL_FILE" 2>/dev/null || stat -f%z "$LOCAL_FILE" 2>/dev/null)
-      #       # 4GB 的字节阈值（4 * 1024^3 = 4294967296）
-      #       THRESHOLD=1750000000
-      
-      #       if [ "$FILE_SIZE" -gt "$THRESHOLD" ]; then
-      #         echo "文件大小超过 4GB，开始分割..."
-      
-      #         # 获取视频时长（秒）
-      #         DURATION=$(ffprobe -i "$LOCAL_FILE" -show_entries format=duration -v quiet -of csv="p=0")
-      #         # 计算最大部分大小（这里设为 3.5GB，以确保每部分小于 4GB）
-      #         MAX_PART_SIZE=1750000000
-      #         # 计算需要分割成的部分数（向上取整）
-      #         N=$(( (FILE_SIZE + MAX_PART_SIZE - 1) / MAX_PART_SIZE ))
-      #         # 计算每段的时长（秒）
-      #         SEGMENT_TIME=$(echo "scale=2; $DURATION / $N" | bc)
-      
-      #         # 基础文件名和扩展名
-      #         BASE_NAME="${LOCAL_FILE%.*}"
-      #         EXTENSION="${LOCAL_FILE##*.}"
-      
-      #         # 使用 ffmpeg 分割视频（复制流，避免重新编码）
-      #         ffmpeg -i "$LOCAL_FILE" -c copy -map 0 -segment_time "$SEGMENT_TIME" -f segment -reset_timestamps 1 "${BASE_NAME}_part%03d.${EXTENSION}"
-      
-      #         # 上传分割后的文件到原目录
-      #         for part in "${BASE_NAME}_part"*."${EXTENSION}"; do
-      #           rclone copy "$part" "onedrive:0/照片/Derrick/照片/"
-      #           echo "已上传: $part"
-      #         done
-      
-      #         # 清理本地文件（可选）
-      #         rm "$LOCAL_FILE"
-      #         rm "${BASE_NAME}_part"*."${EXTENSION}"
-      #         echo "视频分割完成。"
-      #       else
-      #         echo "文件大小不超过 4GB，无需分割。"
-      #       fi
-      #     else
-      #       echo "错误：文件下载失败或不存在。"
-      #     fi
-      
-      # - name: Install 7z tool for compression and splitting
-      #   run: |
-      #     echo "Installing p7zip-full for 7z command..."
-      #     # p7zip-full 包含了 7z 命令行工具
-      #     sudo apt-get update && sudo apt-get install -y p7zip-full
-          
-      # ====================================================================
-      # ================ 通用大文件压缩并分卷 ================
-      # ====================================================================
-      # - name: Compress and split large general files
-      #   run: |
-      #     # 1. 定义参数
-      #     # 1. 定义参数
-      #     VOLUME_SIZE="2g" # 明确改为分卷大小的变量
-      #     REMOTE_PATH="onedrive:backup"
-      #     TEMP_DIR="temp_compress_split" # 使用新的临时目录
-      #     mkdir -p "$TEMP_DIR"
-          
-      #     # 定义需要排除的视频文件扩展名，以防止对视频文件进行二次处理
-      #     VIDEO_EXTENSIONS="\\.(mp4|mkv|mov|avi|flv|webm)$"
-
-      #     echo "Searching for non-video files larger than 4GB in ${REMOTE_PATH}..."
-          
-      #     # 2. 使用 rclone lsjson 查找并筛选大文件，排除视频文件
-      #     rclone lsjson --recursive ${REMOTE_PATH} --min-size 4G | \
-      #     jq --arg video_re "$VIDEO_EXTENSIONS" -r '
-      #       .[] | 
-      #       select(
-      #         (.Path | test($video_re; "i") | not) and 
-      #         .IsDir == false
-      #       ) | 
-      #       "\(.Path)\t\(.Size)"
-      #     ' | \
-      #     while IFS=$'\t' read -r general_file FILE_SIZE; do
-            
-      #       if [ -z "$general_file" ]; then continue; fi
-
-      #       echo "-----------------------------------------------------"
-      #       echo "Found large file for compression: \"$general_file\""
-            
-      #       # 3. 下载大文件到本地临时目录
-      #       echo "Downloading file to compress..."
-      #       rclone copy "${REMOTE_PATH}/${general_file}" "$TEMP_DIR" > /dev/null 2>&1
-      #       if [ $? -ne 0 ]; then
-      #           echo "Error: Failed to download \"$general_file\". Skipping."
-      #           continue
-      #       fi
-
-      #       LOCAL_FILE_PATH="${TEMP_DIR}/$(basename -- "$general_file")"
-      #       BASENAME=$(basename -- "$general_file")
-            
-      #       # 4. 定义分卷压缩后的文件名
-      #       # 例如：input.iso -> input.7z.001, input.7z.002
-      #       COMPRESSED_PREFIX="${TEMP_DIR}/${BASENAME}.7z"
-            
-      #       echo "File size: $(numfmt --to=iec $FILE_SIZE)"
-      #       echo "Compressing and splitting into ${VOLUME_SIZE} .7z volumes..."
-
-      #       # 5. 执行 7z 压缩并分卷
-      #       # 'a' (Add to archive), '-v4g' (Volume size 4GB), '-m0=lzma2' (启用强大的压缩算法)
-      #       7z a -v${VOLUME_SIZE} -m0=lzma2 "$COMPRESSED_PREFIX" "$LOCAL_FILE_PATH"
-            
-      #       if [ $? -ne 0 ]; then
-      #           echo "Error: 7z compression/splitting failed for \"$general_file\". Cleaning up and skipping."
-      #           find "$TEMP_DIR" -maxdepth 1 -name "${BASENAME}.7z*" -exec rm -f {} \;
-      #           rm -f "$LOCAL_FILE_PATH"
-      #           continue
-      #       fi
-            
-      #       # 6. 上传分卷文件到【原始目录】
-      #       original_dir=$(dirname "$general_file")
-      #       echo "Uploading split volumes to ${REMOTE_PATH}/${original_dir}/"
-      #       # 移动所有 .7z 或 .7z.001/.7z.002 等文件
-      #       rclone move "$TEMP_DIR" "${REMOTE_PATH}/${original_dir}/" --include "${BASENAME}.7z*" --delete-empty-src-dirs > /dev/null 2>&1
-            
-      #       # 7. 删除云端的原始大文件
-      #       echo "Deleting original file: ${REMOTE_PATH}/${general_file}"
-      #       rclone delete "${REMOTE_PATH}/${general_file}" > /dev/null 2>&1
-
-      #       # 8. 清理本地文件
-      #       rm -f "$LOCAL_FILE_PATH"
-
-      #     done
-          
-      #     # 9. 清理临时工作目录
-      #     rm -rf "$TEMP_DIR"
-      #     echo "-----------------------------------------------------"
-      #     echo "General file compression and splitting process completed."
-
-      # - name: rclone-lsf
-      #   run: |
-      #     echo "==========onedrive==========="
-      #     rclone lsf onedrive:
-      #     echo "==========dropbox==========="
-      #     rclone lsf dropbox:
-      #     echo "==========openlist==========="
-      #     rclone lsf openlist:
-      #     echo "==========openlist:baidupanCrypt==========="
-      #     rclone lsf openlist:baidupanCrypt
-      #     echo "==========openlist:aliyundriveCrypt==========="
-      #     rclone lsf openlist:aliyundriveCrypt
-      #     echo "==========openlist:123panCrypt==========="
-      #     rclone lsf openlist:123panCrypt
-      - name: rclone-sync
+      - name: rclone-sync-with-logging
         run: |
-          # echo "==========  onedrive:0  ==========="
-          # rclone ls onedrive:0 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
-          # echo "==========  onedrive:1  ==========="
-          # rclone ls onedrive:1 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
-          # echo "==========  onedrive:2  ==========="
-          # rclone ls onedrive:2 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
-          # echo "==========  onedrive:3  ==========="
-          # rclone ls onedrive:3 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
-          # echo "==========  onedrive:4  ==========="
-          # rclone ls onedrive:4 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
-          # echo "==========  onedrive:5  ==========="
-          # rclone ls onedrive:5 --min-size 4G --size-only --order-by size | awk '{printf "%s\t%s\n", $1, $2}' | numfmt --to=iec --field=1 --padding=8
-
-          # sudo rclone sync onedrive: openlist:aliyundriveCrypt/onedrive \
-          #     --exclude "1/**" \
-          #     --exclude "2/**" \
-          #     --exclude "3/**" \
-          #     --exclude "4/**" \
-          #     --exclude "5/**" \
-          #     --progress --fast-list --size-only --transfers 1 --checkers 32  
-          # curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 任务执行完毕"
-
-          sudo rclone sync onedrive:backup openlist:aliyundriveCrypt/backup --progress
-          curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive:backup 任务执行完毕"
-    
-          # 生成带时间戳的错误日志文件名
-          LOG_FILENAME="onedrive_0_error_$(date +%Y%m%d_%H%M%S).log"
+          # 发送日志到Telegram的函数
+          send_log_to_telegram() {
+            local log_file="$1"
+            local task_name="$2"
+            local exit_code="$3"
+            
+            # 检查文件大小
+            local file_size=$(stat -c%s "$log_file" 2>/dev/null || stat -f%z "$log_file" 2>/dev/null || echo 0)
+            
+            if [ -f "$log_file" ] && [ "$file_size" -gt 0 ]; then
+              # 获取最后3000个字符作为摘要
+              local log_summary=$(tail -c 3000 "$log_file" 2>/dev/null || echo "无法读取日志文件")
+              
+              # 构建消息
+              local message="❌ $task_name 同步失败 (退出码: $exit_code)\n\n"
+              message+="📁 日志文件: $log_file\n"
+              message+="📊 文件大小: $(numfmt --to=iec-i --suffix=B "$file_size" 2>/dev/null || echo "${file_size}B")\n\n"
+              message+="📋 错误摘要:\n\`\`\`\n$log_summary\n\`\`\`"
+              
+              # 发送摘要消息
+              curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
+                -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
+                -d text="$message" \
+                -d parse_mode="Markdown"
+              
+              # 如果文件小于50MB（Telegram文档限制），发送完整日志文件
+              if [ "$file_size" -lt 50000000 ]; then
+                # 发送文档
+                curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendDocument \
+                  -F chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
+                  -F document=@"$log_file" \
+                  -F caption="📁 完整日志文件: $task_name"
+                
+                echo "已发送完整日志文件到 Telegram"
+              else
+                # 文件太大，发送压缩版本
+                echo "日志文件太大 ($file_size 字节)，尝试压缩..."
+                
+                # 压缩日志文件
+                local compressed_log="${log_file}.gz"
+                gzip -c "$log_file" > "$compressed_log"
+                local compressed_size=$(stat -c%s "$compressed_log" 2>/dev/null || stat -f%z "$compressed_log" 2>/dev/null || echo 0)
+                
+                if [ "$compressed_size" -lt 50000000 ]; then
+                  # 发送压缩后的日志
+                  curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendDocument \
+                    -F chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
+                    -F document=@"$compressed_log" \
+                    -F caption="📁 压缩的日志文件: $task_name (原大小: $(numfmt --to=iec-i --suffix=B "$file_size" 2>/dev/null || echo "${file_size}B"))"
+                  
+                  rm -f "$compressed_log"
+                else
+                  echo "压缩后的文件仍然太大，无法通过Telegram发送"
+                  curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
+                    -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
+                    -d text="⚠️ 日志文件过大 ($(numfmt --to=iec-i --suffix=B "$file_size" 2>/dev/null || echo "${file_size}B"))，无法通过Telegram发送。请在OneDrive查看完整日志。"
+                fi
+              fi
+            else
+              # 没有日志文件
+              curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
+                -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
+                -d text="❌ $task_name 同步失败 (退出码: $exit_code)\n\n⚠️ 没有生成日志文件"
+            fi
+          }
           
-          # 执行同步命令
-          sudo rclone sync onedrive:0 openlist:123panCrypt/0 \
-            --progress \
-            --ignore-errors \
-            --verbose \
-            2>&1 | tee "$LOG_FILENAME"
+          # 统一的错误日志处理函数
+          sync_with_logging() {
+            local source_path="$1"
+            local dest_path="$2"
+            local task_name="$3"
+            
+            echo "开始同步: $source_path -> $dest_path"
+            
+            # 生成带时间戳的错误日志文件名
+            TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+            LOG_FILENAME="${task_name}_sync_error_${TIMESTAMP}.log"
+            
+            # 执行同步命令，记录日志
+            echo "同步日志将保存在: $LOG_FILENAME"
+            rclone sync "$source_path" "$dest_path" \
+              --progress \
+              --ignore-errors \
+              --verbose \
+              2>&1 | tee "$LOG_FILENAME"
+            
+            # 检查同步结果
+            SYNC_STATUS=${PIPESTATUS[0]}
+            
+            # 上传错误日志到onedrive根目录
+            echo "上传日志到: onedrive:/$LOG_FILENAME"
+            rclone copyto "$LOG_FILENAME" "onedrive:/$LOG_FILENAME"
+            
+            # 清理旧日志（最多保留7个）
+            echo "清理旧日志..."
+            rclone lsf onedrive: --files-only 2>/dev/null | \
+              grep "^${task_name}_sync_error_.*\.log$" | \
+              sort > /tmp/log_list.txt
+            
+            if [ -f /tmp/log_list.txt ]; then
+              LOG_COUNT=$(wc -l < /tmp/log_list.txt)
+              if [ "$LOG_COUNT" -gt 7 ]; then
+                DELETE_COUNT=$((LOG_COUNT - 7))
+                echo "需要删除 $DELETE_COUNT 个旧日志文件"
+                head -n "$DELETE_COUNT" /tmp/log_list.txt | while read -r old_file; do
+                  echo "删除旧日志: $old_file"
+                  rclone delete "onedrive:/$old_file"
+                done
+              fi
+              rm -f /tmp/log_list.txt
+            fi
+            
+            # 发送通知
+            if [ "$SYNC_STATUS" -eq 0 ]; then
+              echo "同步成功: $source_path"
+              curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
+                -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
+                -d text="✅ $task_name 同步完成"
+            else
+              echo "同步失败: $source_path (退出码: $SYNC_STATUS)"
+              # 调用函数发送日志到Telegram
+              send_log_to_telegram "$LOG_FILENAME" "$task_name" "$SYNC_STATUS"
+            fi
+            
+            # 清理本地临时文件
+            rm -f "$LOG_FILENAME"
+            
+            return $SYNC_STATUS
+          }
           
-          # 上传错误日志到onedrive
-          rclone copyto "$LOG_FILENAME" "onedrive:0/$LOG_FILENAME"
+          # 执行所有同步任务
+          echo "开始执行所有同步任务..."
           
-          # 清理本地临时文件
-          rm -f "$LOG_FILENAME"
+          # 同步 backup
+          sync_with_logging "onedrive:backup" "openlist:aliyundriveCrypt/backup" "backup"
           
-          # 清理旧日志
-          rclone lsf onedrive:0 --files-only | grep "^onedrive:0_error_.*\.log$" | sort > /tmp/log_list.txt
-          # 计算需要保留的数量（最多7个）
-          LOG_COUNT=$(wc -l < /tmp/log_list.txt)
-          if [ "$LOG_COUNT" -gt 7 ]; then
-            # 获取需要删除的文件列表（从旧文件开始删除）
-            DELETE_COUNT=$((LOG_COUNT - 7))
-            head -n "$DELETE_COUNT" /tmp/log_list.txt | while read -r old_file; do
-              echo "删除旧日志: $old_file"
-              rclone delete "onedrive:0/$old_file"
-            done
-          fi
-          rm -f /tmp/log_list.txt
-          curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 0 任务执行完毕"
-
-        
-          sudo rclone sync onedrive:1 openlist:123panCrypt/1 --progress
-          curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 1 任务执行完毕"
-
-          sudo rclone sync onedrive:2 openlist:aliyundriveCrypt/2 -vv --progress
-          curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 2 任务执行完毕"
-
-          sudo rclone sync onedrive:3 openlist:aliyundriveCrypt/3 -vv --progress
-          curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 3 任务执行完毕"
-
-          # sudo rclone sync onedrive:4 openlist:baidupanCrypt/4 --progress
-          # curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 4任务执行完毕"
-
-          # # 生成带时间戳的错误日志文件名
-          # LOG_FILENAME="onedrive_5_error_$(date +%Y%m%d_%H%M%S).log"
+          # 同步 0
+          sync_with_logging "onedrive:0" "openlist:123panCrypt/0" "task0"
           
-          # # 执行同步命令
-          # sudo rclone sync onedrive:5 openlist:baidupanCrypt/5 \
-          #   --progress \
-          #   --ignore-errors \
-          #   --verbose \
-          #   2>&1 | tee "$LOG_FILENAME"
+          # 同步 1
+          sync_with_logging "onedrive:1" "openlist:123panCrypt/1" "task1"
           
-          # # 上传错误日志到onedrive
-          # rclone copyto "$LOG_FILENAME" "onedrive:5/$LOG_FILENAME"
+          # 同步 2
+          sync_with_logging "onedrive:2" "openlist:aliyundriveCrypt/2" "task2"
           
-          # # 清理本地临时文件
-          # rm -f "$LOG_FILENAME"
+          # 同步 3
+          sync_with_logging "onedrive:3" "openlist:aliyundriveCrypt/3" "task3"
           
-          # # 清理旧日志
-          # rclone lsf onedrive:5 --files-only | grep "^onedrive:5_error_.*\.log$" | sort > /tmp/log_list.txt
-          # # 计算需要保留的数量（最多7个）
-          # LOG_COUNT=$(wc -l < /tmp/log_list.txt)
-          # if [ "$LOG_COUNT" -gt 7 ]; then
-          #   # 获取需要删除的文件列表（从旧文件开始删除）
-          #   DELETE_COUNT=$((LOG_COUNT - 7))
-          #   head -n "$DELETE_COUNT" /tmp/log_list.txt | while read -r old_file; do
-          #     echo "删除旧日志: $old_file"
-          #     rclone delete "onedrive:5/$old_file"
-          #   done
-          # fi
-          # rm -f /tmp/log_list.txt
+          # 同步 4 (如果被注释掉，可以取消注释)
+          # sync_with_logging "onedrive:4" "openlist:baidupanCrypt/4" "task4"
           
-          # curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github openlist onedrive 5任务执行完毕"
+          # 同步 5
+          # sync_with_logging "onedrive:5" "openlist:baidupanCrypt/5" "task5"
+          
+          echo "所有同步任务完成！"
