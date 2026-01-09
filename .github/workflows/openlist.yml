@@ -90,12 +90,11 @@ jobs:
       - name: Install required tools
         run: |
           echo "Installing ffmpeg, jq, coreutils..."
-          sudo apt-get update && sudo apt-get install -y ffmpeg jq coreutils
+          sudo apt-get update && sudo apt-get install -y ffmpeg jq coreutils bc
       
-      - name: rclone-sync-with-logging
-        env:
-          PROCESSED_FILES_LOG: "processed_videos.log"
+      - name: Setup helper functions
         run: |
+          cat > /tmp/functions.sh << 'EOF'
           # 发送日志到Telegram的函数
           send_log_to_telegram() {
             local log_file="$1"
@@ -594,44 +593,77 @@ jobs:
             
             return 0
           }
+          EOF
+      
+      - name: Initialize sync
+        run: |
+          # 加载函数
+          source /tmp/functions.sh
           
           # 初始化已处理文件日志
+          PROCESSED_FILES_LOG="processed_videos.log"
           echo "=== 初始化已处理文件日志 ===" > "$PROCESSED_FILES_LOG"
           echo "开始时间: $(date)" >> "$PROCESSED_FILES_LOG"
           echo "==========================" >> "$PROCESSED_FILES_LOG"
+      
+      - name: Sync backup task
+        run: |
+          # 加载函数
+          source /tmp/functions.sh
           
-          # 执行所有同步任务
-          echo "开始执行所有同步任务..."
-          
-          # 同步 backup
           echo "=== 开始同步 backup 任务 ==="
           sync_with_logging "onedrive:backup" "openlist:aliyundriveCrypt/backup" "backup"
+      
+      - name: Sync task0
+        run: |
+          # 加载函数
+          source /tmp/functions.sh
           
-          # 同步 0
           echo "=== 开始同步 0 任务 ==="
           sync_with_logging "onedrive:0" "openlist:123panCrypt/0" "task0"
+      
+      - name: Sync task1
+        run: |
+          # 加载函数
+          source /tmp/functions.sh
           
-          # 同步 1
           echo "=== 开始同步 1 任务 ==="
           sync_with_logging "onedrive:1" "openlist:123panCrypt/1" "task1"
+      
+      - name: Sync task2
+        run: |
+          # 加载函数
+          source /tmp/functions.sh
           
-          # 同步 2
           echo "=== 开始同步 2 任务 ==="
           sync_with_logging "onedrive:2" "openlist:aliyundriveCrypt/2" "task2"
+      
+      - name: Sync task3
+        run: |
+          # 加载函数
+          source /tmp/functions.sh
           
-          # 同步 3
           echo "=== 开始同步 3 任务 ==="
           sync_with_logging "onedrive:3" "openlist:aliyundriveCrypt/3" "task3"
+      
+      - name: Finalize and cleanup
+        run: |
+          # 加载函数
+          source /tmp/functions.sh
           
-          # 记录处理完成
-          echo "==========================" >> "$PROCESSED_FILES_LOG"
-          echo "结束时间: $(date)" >> "$PROCESSED_FILES_LOG"
-          echo "=== 所有同步任务完成 ===" >> "$PROCESSED_FILES_LOG"
+          PROCESSED_FILES_LOG="processed_videos.log"
           
-          # 上传处理日志到OneDrive
-          rclone copyto "$PROCESSED_FILES_LOG" "onedrive:/processed_videos_$(date +%Y%m%d_%H%M%S).log" || true
+          if [ -f "$PROCESSED_FILES_LOG" ]; then
+            # 记录处理完成
+            echo "==========================" >> "$PROCESSED_FILES_LOG"
+            echo "结束时间: $(date)" >> "$PROCESSED_FILES_LOG"
+            echo "=== 所有同步任务完成 ===" >> "$PROCESSED_FILES_LOG"
+            
+            # 上传处理日志到OneDrive
+            rclone copyto "$PROCESSED_FILES_LOG" "onedrive:/processed_videos_$(date +%Y%m%d_%H%M%S).log" || true
+            
+            # 清理本地处理日志
+            rm -f "$PROCESSED_FILES_LOG" 2>/dev/null || true
+          fi
           
           echo "所有同步任务完成！"
-          
-          # 清理本地处理日志
-          rm -f "$PROCESSED_FILES_LOG" 2>/dev/null || true
