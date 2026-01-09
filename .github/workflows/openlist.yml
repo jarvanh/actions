@@ -112,7 +112,7 @@ jobs:
               curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
                 -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
                 -d text="$message" \
-                -d parse_mode="Markdown"
+                -d parse_mode="Markdown" || true
               
               # 如果文件小于50MB（Telegram文档限制），发送完整日志文件
               if [ "$file_size" -lt 50000000 ]; then
@@ -120,7 +120,7 @@ jobs:
                 curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendDocument \
                   -F chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
                   -F document=@"$log_file" \
-                  -F caption="📁 完整日志文件: $task_name"
+                  -F caption="📁 完整日志文件: $task_name" || true
                 
                 echo "已发送完整日志文件到 Telegram"
               else
@@ -129,7 +129,7 @@ jobs:
                 
                 # 压缩日志文件
                 local compressed_log="${log_file}.gz"
-                gzip -c "$log_file" > "$compressed_log"
+                gzip -c "$log_file" > "$compressed_log" 2>/dev/null
                 local compressed_size=$(stat -c%s "$compressed_log" 2>/dev/null || stat -f%z "$compressed_log" 2>/dev/null || echo 0)
                 
                 if [ "$compressed_size" -lt 50000000 ]; then
@@ -137,21 +137,21 @@ jobs:
                   curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendDocument \
                     -F chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
                     -F document=@"$compressed_log" \
-                    -F caption="📁 压缩的日志文件: $task_name (原大小: $(numfmt --to=iec-i --suffix=B "$file_size" 2>/dev/null || echo "${file_size}B"))"
+                    -F caption="📁 压缩的日志文件: $task_name (原大小: $(numfmt --to=iec-i --suffix=B "$file_size" 2>/dev/null || echo "${file_size}B"))" || true
                   
-                  rm -f "$compressed_log"
+                  rm -f "$compressed_log" 2>/dev/null || true
                 else
                   echo "压缩后的文件仍然太大，无法通过Telegram发送"
                   curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
                     -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
-                    -d text="⚠️ 日志文件过大 ($(numfmt --to=iec-i --suffix=B "$file_size" 2>/dev/null || echo "${file_size}B"))，无法通过Telegram发送。请在OneDrive查看完整日志。"
+                    -d text="⚠️ 日志文件过大 ($(numfmt --to=iec-i --suffix=B "$file_size" 2>/dev/null || echo "${file_size}B"))，无法通过Telegram发送。请在OneDrive查看完整日志。" || true
                 fi
               fi
             else
               # 没有日志文件
               curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
                 -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
-                -d text="❌ $task_name 同步失败 (退出码: $exit_code)\n\n⚠️ 没有生成日志文件"
+                -d text="❌ $task_name 同步失败 (退出码: $exit_code)\n\n⚠️ 没有生成日志文件" || true
             fi
           }
           
@@ -180,25 +180,25 @@ jobs:
             
             # 上传错误日志到onedrive根目录
             echo "上传日志到: onedrive:/$LOG_FILENAME"
-            rclone copyto "$LOG_FILENAME" "onedrive:/$LOG_FILENAME"
+            rclone copyto "$LOG_FILENAME" "onedrive:/$LOG_FILENAME" || echo "上传日志文件失败，继续执行"
             
-            # 清理旧日志（最多保留7个）
+            # 清理旧日志（最多保留7个），使用list命令避免删除错误
             echo "清理旧日志..."
             rclone lsf onedrive: --files-only 2>/dev/null | \
               grep "^${task_name}_sync_error_.*\.log$" | \
-              sort > /tmp/log_list.txt
+              sort > /tmp/log_list.txt 2>/dev/null || true
             
             if [ -f /tmp/log_list.txt ]; then
-              LOG_COUNT=$(wc -l < /tmp/log_list.txt)
+              LOG_COUNT=$(wc -l < /tmp/log_list.txt 2>/dev/null || echo 0)
               if [ "$LOG_COUNT" -gt 7 ]; then
                 DELETE_COUNT=$((LOG_COUNT - 7))
                 echo "需要删除 $DELETE_COUNT 个旧日志文件"
                 head -n "$DELETE_COUNT" /tmp/log_list.txt | while read -r old_file; do
                   echo "删除旧日志: $old_file"
-                  rclone delete "onedrive:/$old_file"
+                  rclone delete "onedrive:/$old_file" 2>/dev/null || echo "删除旧日志失败: $old_file，跳过"
                 done
               fi
-              rm -f /tmp/log_list.txt
+              rm -f /tmp/log_list.txt 2>/dev/null || true
             fi
             
             # 发送通知
@@ -206,7 +206,7 @@ jobs:
               echo "同步成功: $source_path"
               curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
                 -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
-                -d text="✅ $task_name 同步完成"
+                -d text="✅ $task_name 同步完成" || true
             else
               echo "同步失败: $source_path (退出码: $SYNC_STATUS)"
               # 调用函数发送日志到Telegram
@@ -214,33 +214,41 @@ jobs:
             fi
             
             # 清理本地临时文件
-            rm -f "$LOG_FILENAME"
+            rm -f "$LOG_FILENAME" 2>/dev/null || true
             
-            return $SYNC_STATUS
+            # 即使失败也返回0，确保后续任务继续执行
+            return 0
           }
           
           # 执行所有同步任务
           echo "开始执行所有同步任务..."
           
           # 同步 backup
+          echo "=== 开始同步 backup 任务 ==="
           sync_with_logging "onedrive:backup" "openlist:aliyundriveCrypt/backup" "backup"
           
           # 同步 0
+          echo "=== 开始同步 0 任务 ==="
           sync_with_logging "onedrive:0" "openlist:123panCrypt/0" "task0"
           
           # 同步 1
+          echo "=== 开始同步 1 任务 ==="
           sync_with_logging "onedrive:1" "openlist:123panCrypt/1" "task1"
           
           # 同步 2
+          echo "=== 开始同步 2 任务 ==="
           sync_with_logging "onedrive:2" "openlist:aliyundriveCrypt/2" "task2"
           
           # 同步 3
+          echo "=== 开始同步 3 任务 ==="
           sync_with_logging "onedrive:3" "openlist:aliyundriveCrypt/3" "task3"
           
           # 同步 4 (如果被注释掉，可以取消注释)
+          # echo "=== 开始同步 4 任务 ==="
           # sync_with_logging "onedrive:4" "openlist:baidupanCrypt/4" "task4"
           
           # 同步 5
+          # echo "=== 开始同步 5 任务 ==="
           # sync_with_logging "onedrive:5" "openlist:baidupanCrypt/5" "task5"
           
           echo "所有同步任务完成！"
