@@ -1,23 +1,14 @@
 name: openlist
 
 on:
-  # schedule:
-  #   - cron: "0 1,7,13,19 * * *"
-  #   - cron: "0 * * * *"
   workflow_dispatch:
-  # workflow_run:
-  #   workflows:
-  #     - t
-  #   types:
-  #     - completed  # 工作流完成后触发
   watch:
-    # types: started
+    types: started
 
 jobs:
   build:
     concurrency: openlist-singleton
     runs-on: ubuntu-latest
-    # timeout-minutes: 60
     steps:
       - name: rclone-install
         run: |
@@ -106,6 +97,26 @@ jobs:
             local file_size=$(stat -c%s "$log_file" 2>/dev/null || stat -f%z "$log_file" 2>/dev/null || echo 0)
             
             if [ -f "$log_file" ] && [ "$file_size" -gt 0 ]; then
+              # 检查日志是否只包含传输统计信息
+              local is_transfer_only=true
+              if grep -qi "error\|fail\|timeout\|connection refused\|permission denied" "$log_file"; then
+                is_transfer_only=false
+              fi
+              
+              if [ "$is_transfer_only" = true ]; then
+                # 只包含传输统计信息，不发送完整日志
+                local message="⚠️ $task_name 同步完成但有警告\n\n"
+                message+="📁 日志文件: $log_file\n"
+                message+="📊 文件大小: $(numfmt --to=iec-i --suffix=B "$file_size" 2>/dev/null || echo "${file_size}B")\n"
+                message+="ℹ️ 仅包含传输统计信息\n"
+                message+="退出码: $exit_code"
+                
+                curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
+                  -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
+                  -d text="$message" || true
+                return
+              fi
+              
               # 获取最后3000个字符作为摘要
               local log_summary=$(tail -c 3000 "$log_file" 2>/dev/null || echo "无法读取日志文件")
               
@@ -162,6 +173,26 @@ jobs:
             fi
           }
           
+          # 检查日志是否有实际内容（不只是传输统计信息）
+          has_real_content() {
+            local log_file="$1"
+            
+            # 检查文件是否存在且不为空
+            if [ ! -f "$log_file" ] || [ ! -s "$log_file" ]; then
+              echo "empty"
+              return
+            fi
+            
+            # 读取日志内容
+            local log_content=$(grep -v "^Transferred:\|^Checks:\|^Elapsed time:\|^ *$" "$log_file" 2>/dev/null | head -20)
+            
+            if [ -z "$log_content" ]; then
+              echo "transfer_only"
+            else
+              echo "has_content"
+            fi
+          }
+          
           # 视频分割日志记录函数
           log_video_split() {
             local log_file="$1"
@@ -192,10 +223,13 @@ jobs:
               message+="💡 失败原因: $result"
             fi
             
-            # 如果有日志文件，附加日志摘要
+            # 如果有日志文件，检查是否有实际内容
             if [ -f "$log_file" ]; then
-              local log_summary=$(tail -c 2000 "$log_file" 2>/dev/null || echo "无法读取日志")
-              message+="\n\n📋 分割日志摘要:\n\`\`\`\n$log_summary\n\`\`\`"
+              local log_status=$(has_real_content "$log_file")
+              if [ "$log_status" = "has_content" ]; then
+                local log_summary=$(tail -c 2000 "$log_file" 2>/dev/null || echo "无法读取日志")
+                message+="\n\n📋 分割日志摘要:\n\`\`\`\n$log_summary\n\`\`\`"
+              fi
             fi
             
             curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
@@ -210,18 +244,28 @@ jobs:
             local remote_path="$2"
             
             if [ -f "$log_file" ] && [ -s "$log_file" ]; then
-              log_video_split "$log_file" "上传视频分割日志到OneDrive: $remote_path"
-              rclone copyto "$log_file" "onedrive:/video_split_logs/$remote_path" 2>/dev/null || \
-              rclone copyto "$log_file" "onedrive:/$remote_path" 2>/dev/null || \
-              echo "上传视频分割日志失败，继续执行"
+              # 检查日志是否有实际内容
+              local log_status=$(has_real_content "$log_file")
               
-              # 清理旧的视频分割日志（保留最近10个）
-              rclone lsf onedrive:video_split_logs/ 2>/dev/null | \
-                grep "^video_split_.*\.log$" | \
-                sort | head -n -10 | while read -r old_file; do
-                  echo "删除旧视频分割日志: $old_file"
-                  rclone delete "onedrive:video_split_logs/$old_file" 2>/dev/null || true
-                done
+              if [ "$log_status" = "has_content" ]; then
+                log_video_split "$log_file" "上传视频分割日志到OneDrive: $remote_path"
+                rclone copyto "$log_file" "onedrive:/video_split_logs/$remote_path" 2>/dev/null || \
+                rclone copyto "$log_file" "onedrive:/$remote_path" 2>/dev/null || \
+                echo "上传视频分割日志失败，继续执行"
+                
+                # 清理旧的视频分割日志（保留最近10个）
+                rclone lsf onedrive:video_split_logs/ 2>/dev/null | \
+                  grep "^video_split_.*\.log$" | \
+                  sort | head -n -10 | while read -r old_file; do
+                    echo "删除旧视频分割日志: $old_file"
+                    rclone delete "onedrive:video_split_logs/$old_file" 2>/dev/null || true
+                  done
+              else
+                log_video_split "$log_file" "跳过上传空日志文件"
+                echo "跳过上传空视频分割日志: $log_file"
+              fi
+            else
+              echo "视频分割日志为空或不存在，不上传"
             fi
           }
           
@@ -370,6 +414,13 @@ jobs:
             
             echo "分析错误日志，查找失败的视频文件..."
             
+            # 检查日志文件是否有实际内容
+            local log_status=$(has_real_content "$log_file")
+            if [ "$log_status" != "has_content" ]; then
+              echo "日志文件没有实际错误内容，跳过视频处理"
+              return
+            fi
+            
             # 创建视频分割日志文件
             local video_split_log="video_split_${task_name}_$(date +%Y%m%d_%H%M%S).log"
             echo "=== 视频分割日志 - 开始于 $(date) ===" > "$video_split_log"
@@ -410,6 +461,9 @@ jobs:
                   "task0")
                     search_paths=("0")
                     ;;
+                  "task1")
+                    search_paths=("1")
+                    ;;
                   "task2")
                     search_paths=("2")
                     ;;
@@ -418,7 +472,7 @@ jobs:
                     ;;
                   *)
                     # 默认在所有可能的路径中查找
-                    search_paths=("backup" "0" "2" "3")
+                    search_paths=("backup" "0" "1" "2" "3")
                     ;;
                 esac
                 
@@ -518,7 +572,7 @@ jobs:
               log_video_split "$video_split_log" "未找到可识别的大视频文件错误"
               log_video_split "$video_split_log" "=== 视频分割日志 - 结束于 $(date) ==="
               
-              # 上传空日志
+              # 只上传有实际内容的日志
               upload_video_split_log "$video_split_log" "video_split_logs/$video_split_log"
             fi
             
@@ -549,43 +603,80 @@ jobs:
             # 检查同步结果
             SYNC_STATUS=${PIPESTATUS[0]}
             
-            # 上传错误日志到onedrive根目录
-            echo "上传日志到: onedrive:/$LOG_FILENAME"
-            rclone copyto "$LOG_FILENAME" "onedrive:/$LOG_FILENAME" || echo "上传日志文件失败，继续执行"
+            # 检查日志内容类型
+            local log_status=$(has_real_content "$LOG_FILENAME")
             
-            # 清理旧日志（最多保留7个），使用list命令避免删除错误
-            echo "清理旧日志..."
-            rclone lsf onedrive: --files-only 2>/dev/null | \
-              grep "^${task_name}_sync_error_.*\.log$" | \
-              sort > /tmp/log_list.txt 2>/dev/null || true
-            
-            if [ -f /tmp/log_list.txt ]; then
-              LOG_COUNT=$(wc -l < /tmp/log_list.txt 2>/dev/null || echo 0)
-              if [ "$LOG_COUNT" -gt 7 ]; then
-                DELETE_COUNT=$((LOG_COUNT - 7))
-                echo "需要删除 $DELETE_COUNT 个旧日志文件"
-                head -n "$DELETE_COUNT" /tmp/log_list.txt | while read -r old_file; do
-                  echo "删除旧日志: $old_file"
-                  rclone delete "onedrive:/$old_file" 2>/dev/null || echo "删除旧日志失败: $old_file，跳过"
-                done
-              fi
-              rm -f /tmp/log_list.txt 2>/dev/null || true
-            fi
-            
-            # 发送通知
             if [ "$SYNC_STATUS" -eq 0 ]; then
               echo "同步成功: $source_path"
+              # 检查日志是否有实际内容
+              if [ "$log_status" = "has_content" ]; then
+                # 同步成功但日志有错误内容
+                echo "同步成功但日志包含错误信息，上传日志到OneDrive"
+                rclone copyto "$LOG_FILENAME" "onedrive:/$LOG_FILENAME" || echo "上传日志文件失败，继续执行"
+                
+                # 清理旧日志（最多保留7个），使用list命令避免删除错误
+                rclone lsf onedrive: --files-only 2>/dev/null | \
+                  grep "^${task_name}_sync_error_.*\.log$" | \
+                  sort > /tmp/log_list.txt 2>/dev/null || true
+                
+                if [ -f /tmp/log_list.txt ]; then
+                  LOG_COUNT=$(wc -l < /tmp/log_list.txt 2>/dev/null || echo 0)
+                  if [ "$LOG_COUNT" -gt 7 ]; then
+                    DELETE_COUNT=$((LOG_COUNT - 7))
+                    echo "需要删除 $DELETE_COUNT 个旧日志文件"
+                    head -n "$DELETE_COUNT" /tmp/log_list.txt | while read -r old_file; do
+                      echo "删除旧日志: $old_file"
+                      rclone delete "onedrive:/$old_file" 2>/dev/null || echo "删除旧日志失败: $old_file，跳过"
+                    done
+                  fi
+                  rm -f /tmp/log_list.txt 2>/dev/null || true
+                fi
+              else
+                echo "同步成功且日志只包含传输统计信息，不上传到OneDrive"
+              fi
+              
+              # 发送成功消息
               curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
                 -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
                 -d text="✅ $task_name 同步完成" || true
             else
               echo "同步失败: $source_path (退出码: $SYNC_STATUS)"
+              
+              # 上传错误日志到onedrive根目录
+              if [ "$log_status" = "has_content" ]; then
+                echo "上传日志到: onedrive:/$LOG_FILENAME"
+                rclone copyto "$LOG_FILENAME" "onedrive:/$LOG_FILENAME" || echo "上传日志文件失败，继续执行"
+                
+                # 清理旧日志（最多保留7个），使用list命令避免删除错误
+                echo "清理旧日志..."
+                rclone lsf onedrive: --files-only 2>/dev/null | \
+                  grep "^${task_name}_sync_error_.*\.log$" | \
+                  sort > /tmp/log_list.txt 2>/dev/null || true
+                
+                if [ -f /tmp/log_list.txt ]; then
+                  LOG_COUNT=$(wc -l < /tmp/log_list.txt 2>/dev/null || echo 0)
+                  if [ "$LOG_COUNT" -gt 7 ]; then
+                    DELETE_COUNT=$((LOG_COUNT - 7))
+                    echo "需要删除 $DELETE_COUNT 个旧日志文件"
+                    head -n "$DELETE_COUNT" /tmp/log_list.txt | while read -r old_file; do
+                      echo "删除旧日志: $old_file"
+                      rclone delete "onedrive:/$old_file" 2>/dev/null || echo "删除旧日志失败: $old_file，跳过"
+                    done
+                  fi
+                  rm -f /tmp/log_list.txt 2>/dev/null || true
+                fi
+              else
+                echo "日志只包含传输统计信息，不上传到OneDrive"
+              fi
+              
               # 调用函数发送日志到Telegram
               send_log_to_telegram "$LOG_FILENAME" "$task_name" "$SYNC_STATUS"
               
               # 如果同步失败，尝试分析日志，处理失败的大视频文件
-              echo "尝试分析失败原因，处理大于3.9GB的视频文件..."
-              process_failed_videos "$LOG_FILENAME" "onedrive" "$task_name"
+              if [ "$log_status" = "has_content" ]; then
+                echo "尝试分析失败原因，处理大于3.9GB的视频文件..."
+                process_failed_videos "$LOG_FILENAME" "onedrive" "$task_name"
+              fi
             fi
             
             # 清理本地临时文件
@@ -659,8 +750,14 @@ jobs:
             echo "结束时间: $(date)" >> "$PROCESSED_FILES_LOG"
             echo "=== 所有同步任务完成 ===" >> "$PROCESSED_FILES_LOG"
             
-            # 上传处理日志到OneDrive
-            rclone copyto "$PROCESSED_FILES_LOG" "onedrive:/processed_videos_$(date +%Y%m%d_%H%M%S).log" || true
+            # 检查日志是否有实际内容
+            LOG_SIZE=$(wc -l < "$PROCESSED_FILES_LOG" 2>/dev/null || echo 0)
+            if [ "$LOG_SIZE" -gt 5 ]; then
+              echo "上传处理日志到OneDrive"
+              rclone copyto "$PROCESSED_FILES_LOG" "onedrive:/processed_videos_$(date +%Y%m%d_%H%M%S).log" || true
+            else
+              echo "处理日志为空，不上传到OneDrive"
+            fi
             
             # 清理本地处理日志
             rm -f "$PROCESSED_FILES_LOG" 2>/dev/null || true
