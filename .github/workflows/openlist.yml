@@ -62,7 +62,7 @@ jobs:
             echo "The tunnel '$TUNNEL_NAME' does not exist. Proceeding."
             exit 31
           fi
-  
+   
           # 提取 CONNECTIONS 列并检查是否为空
           CONNECTIONS=$(echo "$TUNNEL_LINE" | awk '{if (NF>=4) print $4; else print "-"}')
           if [ "$CONNECTIONS" == "-" ]; then
@@ -77,12 +77,12 @@ jobs:
           cloudflared tunnel route dns openlist openlist.'${{ secrets.VD }}'.eu.org
           nohup cloudflared tunnel run --url http://127.0.0.1:5244 openlist &
           sudo sleep 5m
-      
+       
       - name: Install required tools
         run: |
           echo "Installing ffmpeg, jq, coreutils..."
           sudo apt-get update && sudo apt-get install -y ffmpeg jq coreutils bc
-      
+       
       - name: Setup helper functions - part 1
         run: |
           cat > /tmp/functions_part1.sh << 'EOF'
@@ -92,17 +92,17 @@ jobs:
             local task_name="$2"
             local exit_code="$3"
             local log_type="${4:-sync}"  # 默认为sync日志
-            
+           
             # 检查文件大小
             local file_size=$(stat -c%s "$log_file" 2>/dev/null || stat -f%z "$log_file" 2>/dev/null || echo 0)
-            
+           
             if [ -f "$log_file" ] && [ "$file_size" -gt 0 ]; then
               # 检查日志是否只包含传输统计信息
               local is_transfer_only=true
               if grep -qi "error\|fail\|timeout\|connection refused\|permission denied" "$log_file"; then
                 is_transfer_only=false
               fi
-              
+             
               if [ "$is_transfer_only" = true ]; then
                 # 只包含传输统计信息，不发送完整日志
                 local message="⚠️ $task_name 同步完成但有警告\n\n"
@@ -110,28 +110,28 @@ jobs:
                 message+="📊 文件大小: $(numfmt --to=iec-i --suffix=B "$file_size" 2>/dev/null || echo "${file_size}B")\n"
                 message+="ℹ️ 仅包含传输统计信息\n"
                 message+="退出码: $exit_code"
-                
+               
                 curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
                   -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
                   -d text="$message" || true
                 return
               fi
-              
+             
               # 获取最后3000个字符作为摘要
               local log_summary=$(tail -c 3000 "$log_file" 2>/dev/null || echo "无法读取日志文件")
-              
+             
               # 构建消息
               local message="❌ $task_name ${log_type}日志 (退出码: $exit_code)\n\n"
               message+="📁 日志文件: $log_file\n"
               message+="📊 文件大小: $(numfmt --to=iec-i --suffix=B "$file_size" 2>/dev/null || echo "${file_size}B")\n\n"
               message+="📋 错误摘要:\n\`\`\`\n$log_summary\n\`\`\`"
-              
+             
               # 发送摘要消息
               curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
                 -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
                 -d text="$message" \
                 -d parse_mode="Markdown" || true
-              
+             
               # 如果文件小于50MB（Telegram文档限制），发送完整日志文件
               if [ "$file_size" -lt 50000000 ]; then
                 # 发送文档
@@ -139,24 +139,24 @@ jobs:
                   -F chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
                   -F document=@"$log_file" \
                   -F caption="📁 ${log_type}完整日志文件: $task_name" || true
-                
+               
                 echo "已发送完整日志文件到 Telegram"
               else
                 # 文件太大，发送压缩版本
                 echo "日志文件太大 ($file_size 字节)，尝试压缩..."
-                
+               
                 # 压缩日志文件
                 local compressed_log="${log_file}.gz"
                 gzip -c "$log_file" > "$compressed_log" 2>/dev/null
                 local compressed_size=$(stat -c%s "$compressed_log" 2>/dev/null || stat -f%z "$compressed_log" 2>/dev/null || echo 0)
-                
+               
                 if [ "$compressed_size" -lt 50000000 ]; then
                   # 发送压缩后的日志
                   curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendDocument \
                     -F chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
                     -F document=@"$compressed_log" \
                     -F caption="📁 压缩的${log_type}日志文件: $task_name (原大小: $(numfmt --to=iec-i --suffix=B "$file_size" 2>/dev/null || echo "${file_size}B"))" || true
-                  
+                 
                   rm -f "$compressed_log" 2>/dev/null || true
                 else
                   echo "压缩后的文件仍然太大，无法通过Telegram发送"
@@ -172,27 +172,27 @@ jobs:
                 -d text="❌ $task_name ${log_type}失败 (退出码: $exit_code)\n\n⚠️ 没有生成日志文件" || true
             fi
           }
-          
+           
           # 检查日志是否有实际内容（不只是传输统计信息）
           has_real_content() {
             local log_file="$1"
-            
+           
             # 检查文件是否存在且不为空
             if [ ! -f "$log_file" ] || [ ! -s "$log_file" ]; then
               echo "empty"
               return
             fi
-            
+           
             # 读取日志内容
             local log_content=$(grep -v "^Transferred:\|^Checks:\|^Elapsed time:\|^ *$" "$log_file" 2>/dev/null | head -20)
-            
+           
             if [ -z "$log_content" ]; then
               echo "transfer_only"
             else
               echo "has_content"
             fi
           }
-          
+           
           # 视频分割日志记录函数
           log_video_split() {
             local log_file="$1"
@@ -201,7 +201,7 @@ jobs:
             echo "$message"
           }
           EOF
-      
+       
       - name: Setup helper functions - part 2
         run: |
           cat > /tmp/functions_part2.sh << 'EOF'
@@ -212,9 +212,9 @@ jobs:
             local parts_count="$3"
             local result="$4"
             local log_file="$5"
-            
+           
             local file_size_human=$(numfmt --to=iec-i --suffix=B "$file_size" 2>/dev/null || echo "${file_size}B")
-            
+           
             if [ "$result" = "success" ]; then
               local message="✅ 视频分割成功\n"
               message+="📁 文件: $file_path\n"
@@ -226,7 +226,7 @@ jobs:
               message+="📊 文件大小: $file_size_human\n"
               message+="💡 失败原因: $result"
             fi
-            
+           
             # 如果有日志文件，检查是否有实际内容
             if [ -f "$log_file" ]; then
               local log_status=$(has_real_content "$log_file")
@@ -235,34 +235,36 @@ jobs:
                 message+="\n\n📋 分割日志摘要:\n\`\`\`\n$log_summary\n\`\`\`"
               fi
             fi
-            
+           
             curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
               -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
               -d text="$message" \
               -d parse_mode="Markdown" || true
           }
-          
-          # 上传视频分割日志到OneDrive
+           
+          # 上传视频分割日志到OneDrive (路径优化版)
           upload_video_split_log() {
             local log_file="$1"
-            local remote_path="$2"
-            
+            # $2 参数在这里被忽略，因为我们将统一管理路径
+           
             if [ -f "$log_file" ] && [ -s "$log_file" ]; then
               # 检查日志是否有实际内容
               local log_status=$(has_real_content "$log_file")
-              
+             
               if [ "$log_status" = "has_content" ]; then
-                log_video_split "$log_file" "上传视频分割日志到OneDrive: $remote_path"
-                rclone copyto "$log_file" "onedrive:/video_split_logs/$remote_path" 2>/dev/null || \
-                rclone copyto "$log_file" "onedrive:/$remote_path" 2>/dev/null || \
-                echo "上传视频分割日志失败，继续执行"
+                # 定义统一的日志目录
+                local REMOTE_LOG_DIR="onedrive:/logs/video_split"
                 
+                log_video_split "$log_file" "上传视频分割日志到OneDrive: $REMOTE_LOG_DIR"
+                rclone copyto "$log_file" "$REMOTE_LOG_DIR/$(basename "$log_file")" 2>/dev/null || \
+                echo "上传视频分割日志失败，继续执行"
+               
                 # 清理旧的视频分割日志（保留最近10个）
-                rclone lsf onedrive:video_split_logs/ 2>/dev/null | \
+                rclone lsf "$REMOTE_LOG_DIR/" 2>/dev/null | \
                   grep "^video_split_.*\.log$" | \
                   sort | head -n -10 | while read -r old_file; do
                     echo "删除旧视频分割日志: $old_file"
-                    rclone delete "onedrive:video_split_logs/$old_file" 2>/dev/null || true
+                    rclone delete "$REMOTE_LOG_DIR/$old_file" 2>/dev/null || true
                   done
               else
                 log_video_split "$log_file" "跳过上传空日志文件"
@@ -273,7 +275,7 @@ jobs:
             fi
           }
           EOF
-      
+       
       - name: Setup helper functions - part 3
         run: |
           cat > /tmp/functions_part3.sh << 'EOF'
@@ -284,64 +286,64 @@ jobs:
             local local_file_path="$3"
             local file_name="$4"
             local video_split_log="$5"
-            
+           
             log_video_split "$video_split_log" "开始分割视频文件: $file_name"
-            
+           
             # 基础文件名和扩展名
             local base_name="${file_name%.*}"
             local extension="${file_name##*.}"
-            
+           
             # 获取文件大小
             local file_size=$(stat -c%s "$local_file_path" 2>/dev/null || stat -f%z "$local_file_path" 2>/dev/null)
             log_video_split "$video_split_log" "文件大小: $(numfmt --to=iec-i --suffix=B "$file_size" 2>/dev/null || echo "${file_size}B")"
-            
+           
             # 获取视频时长（秒）
             log_video_split "$video_split_log" "获取视频时长..."
             local duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$local_file_path" 2>/dev/null || echo 0)
-            
+           
             if [ "$(echo "$duration > 0" | bc 2>/dev/null || echo 0)" -eq 1 ]; then
               log_video_split "$video_split_log" "视频时长: $duration 秒"
-              
+             
               # 计算文件大小和所需分片数（每个分片3.9GB）
               local max_part_size=3900000000  # 3.9GB
               local n=$(( (file_size + max_part_size - 1) / max_part_size ))
-              
+             
               # 确保至少分割成1部分
               if [ $n -lt 1 ]; then
                 n=1
               fi
-              
+             
               log_video_split "$video_split_log" "文件大小: $(numfmt --to=iec-i --suffix=B "$file_size" 2>/dev/null || echo "${file_size}B")"
               log_video_split "$video_split_log" "将分割成 $n 个部分，每个部分最大3.9GB"
-              
+             
               # 计算每段的时长（秒）
               local segment_time=$(echo "scale=2; $duration / $n" | bc 2>/dev/null || echo 0)
               log_video_split "$video_split_log" "每段时长: ${segment_time}秒"
-              
+             
               # 使用 ffmpeg 分割视频（复制流，避免重新编码）
               log_video_split "$video_split_log" "开始分割视频..."
-              
+             
               # 创建分割输出目录
               local split_dir="split_${base_name}_$(date +%s)"
               mkdir -p "$split_dir"
-              
+             
               # 进入分割目录
               cd "$split_dir"
-              
+             
               # 分割视频
               ffmpeg -i "../$local_file_path" -c copy -map 0 -segment_time "$segment_time" -f segment -reset_timestamps 1 "${base_name}_part%03d.${extension}" 2>&1 | \
                 while IFS= read -r line; do
                   log_video_split "../$video_split_log" "ffmpeg: $line"
                 done
-              
+             
               local ffmpeg_exit_code=${PIPESTATUS[0]}
-              
+             
               # 返回上级目录
               cd ..
-              
+             
               if [ $ffmpeg_exit_code -eq 0 ]; then
                 log_video_split "$video_split_log" "视频分割完成，开始上传分割后的文件..."
-                
+               
                 # 统计分割后的文件
                 local part_count=0
                 for part in "$split_dir/${base_name}_part"*."${extension}"; do
@@ -349,9 +351,9 @@ jobs:
                     part_count=$((part_count + 1))
                   fi
                 done
-                
+               
                 log_video_split "$video_split_log" "共分割成 $part_count 个文件"
-                
+               
                 # 上传分割后的文件到原目录
                 for part in "$split_dir/${base_name}_part"*."${extension}"; do
                   if [ -f "$part" ]; then
@@ -361,7 +363,7 @@ jobs:
                       while IFS= read -r line; do
                         log_video_split "$video_split_log" "rclone: $line"
                       done
-                    
+                   
                     # 验证文件已上传
                     rclone lsf "${remote_source}:${remote_path}/${part_name}" >/dev/null 2>&1
                     if [ $? -eq 0 ]; then
@@ -371,50 +373,50 @@ jobs:
                     fi
                   fi
                 done
-                
+               
                 # 删除云端的原始大文件
                 log_video_split "$video_split_log" "删除原始文件: ${remote_source}:${remote_path}/${file_name}"
                 rclone deletefile "${remote_source}:${remote_path}/${file_name}" 2>&1 | \
                   while IFS= read -r line; do
                     log_video_split "$video_split_log" "rclone delete: $line"
                   done
-                
+               
                 # 清理本地文件
                 rm -f "$local_file_path"
                 rm -rf "$split_dir"
                 log_video_split "$video_split_log" "视频分割和清理完成"
-                
+               
                 # 记录已处理的文件
                 echo "$(date +%Y-%m-%d_%H:%M:%S) - ${remote_source}:${remote_path}/${file_name} - 分割成 $part_count 个部分" >> "$PROCESSED_FILES_LOG"
-                
+               
                 # 发送成功通知
                 send_video_split_notification "${remote_source}:${remote_path}/${file_name}" "$file_size" "$part_count" "success" "$video_split_log"
-                
+               
                 return 0
               else
                 log_video_split "$video_split_log" "❌ ffmpeg 分割失败，退出码: $ffmpeg_exit_code"
                 # 清理临时文件
                 rm -f "$local_file_path" 2>/dev/null || true
                 rm -rf "$split_dir" 2>/dev/null || true
-                
+               
                 # 发送失败通知
                 send_video_split_notification "${remote_source}:${remote_path}/${file_name}" "$file_size" "0" "ffmpeg分割失败" "$video_split_log"
-                
+               
                 return 1
               fi
             else
               log_video_split "$video_split_log" "❌ 无法获取视频时长"
               # 清理临时文件
               rm -f "$local_file_path" 2>/dev/null || true
-              
+             
               # 发送失败通知
               send_video_split_notification "${remote_source}:${remote_path}/${file_name}" "$file_size" "0" "无法获取视频时长" "$video_split_log"
-              
+             
               return 1
             fi
           }
           EOF
-      
+       
       - name: Setup helper functions - part 4
         run: |
           cat > /tmp/functions_part4.sh << 'EOF'
@@ -423,16 +425,16 @@ jobs:
             local log_file="$1"
             local remote_source="$2"
             local task_name="$3"
-            
+           
             echo "分析错误日志，查找失败的视频文件..."
-            
+           
             # 检查日志文件是否有实际内容
             local log_status=$(has_real_content "$log_file")
             if [ "$log_status" != "has_content" ]; then
               echo "日志文件没有实际错误内容，跳过视频处理"
               return
             fi
-            
+           
             # 创建视频分割日志文件
             local video_split_log="video_split_${task_name}_$(date +%Y%m%d_%H%M%S).log"
             echo "=== 视频分割日志 - 开始于 $(date) ===" > "$video_split_log"
@@ -440,67 +442,51 @@ jobs:
             echo "远程源: $remote_source" >> "$video_split_log"
             echo "错误日志: $log_file" >> "$video_split_log"
             echo "======================================" >> "$video_split_log"
-            
+           
             # 从日志中提取失败的视频文件路径
-            # 查找包含错误信息且包含视频文件的行
             local failed_videos=$(grep -i "error\|failed\|too large\|size" "$log_file" | grep -E "\.(mp4|mkv|mov|avi|flv|webm|m4v|wmv|mpg|mpeg|3gp|mp3|wav|aac|flac|m4a)$" | head -20 || true)
-            
+           
             if [ -n "$failed_videos" ]; then
               echo "找到可能失败的视频/音频文件:"
               echo "$failed_videos"
               log_video_split "$video_split_log" "找到可能失败的视频/音频文件:"
               log_video_split "$video_split_log" "$failed_videos"
-              
+             
               # 提取具体的文件路径
               local file_patterns=$(echo "$failed_videos" | grep -oE "[a-zA-Z09_\-./]+\.(mp4|mkv|mov|avi|flv|webm|m4v|wmv|mpg|mpeg|3gp|mp3|wav|aac|flac|m4a)" | sort -u)
-              
+             
               local processed_count=0
               local success_count=0
-              
+             
               for file_pattern in $file_patterns; do
                 # 清理文件路径
                 local cleaned_path=$(echo "$file_pattern" | sed 's/^.*\///')
-                
+               
                 # 尝试查找完整的文件路径
                 local full_path=""
                 local file_size=0
-                
+               
                 # 根据任务名确定搜索路径
                 case "$task_name" in
-                  "backup")
-                    search_paths=("backup")
-                    ;;
-                  "task0")
-                    search_paths=("0")
-                    ;;
-                  "task1")
-                    search_paths=("1")
-                    ;;
-                  "task2")
-                    search_paths=("2")
-                    ;;
-                  "task3")
-                    search_paths=("3")
-                    ;;
-                  *)
-                    # 默认在所有可能的路径中查找
-                    search_paths=("backup" "0" "1" "2" "3")
-                    ;;
+                  "backup") search_paths=("backup") ;;
+                  "task0") search_paths=("0") ;;
+                  "task1") search_paths=("1") ;;
+                  "task2") search_paths=("2") ;;
+                  "task3") search_paths=("3") ;;
+                  *) search_paths=("backup" "0" "1" "2" "3") ;;
                 esac
-                
+               
                 # 在可能的路径中查找文件
                 for search_path in "${search_paths[@]}"; do
                   echo "在路径 ${remote_source}:${search_path} 中查找文件: $cleaned_path"
                   log_video_split "$video_split_log" "在路径 ${remote_source}:${search_path} 中查找文件: $cleaned_path"
-                  
+                 
                   local found_file=$(rclone lsf "${remote_source}:${search_path}" --include "*${cleaned_path}*" 2>/dev/null | head -1)
-                  
+                 
                   if [ -n "$found_file" ]; then
-                    # 获取文件大小
                     local file_info=$(rclone size "${remote_source}:${search_path}/${found_file}" 2>/dev/null || echo "0")
                     file_size=$(echo "$file_info" | grep "Total size" | grep -oE '[0-9]+' || echo "0")
-                    
-                    # 检查文件大小是否超过3.9GB
+                   
                     if [ "$file_size" -gt 3900000000 ]; then
                       echo "找到大视频文件: ${search_path}/${found_file} (大小: $file_size 字节)"
                       log_video_split "$video_split_log" "找到大视频文件: ${search_path}/${found_file} (大小: $(numfmt --to=iec-i --suffix=B "$file_size" 2>/dev/null || echo "${file_size}B"))"
@@ -512,30 +498,26 @@ jobs:
                     fi
                   fi
                 done
-                
+               
                 if [ -n "$full_path" ] && [ "$file_size" -gt 3900000000 ]; then
                   echo "尝试分割大视频文件: $full_path"
                   log_video_split "$video_split_log" "尝试分割大视频文件: $full_path"
-                  
                   processed_count=$((processed_count + 1))
-                  
-                  # 创建临时目录
+                 
                   local temp_dir="temp_video_split_$(date +%s)_${processed_count}"
                   mkdir -p "$temp_dir"
-                  
-                  # 下载文件
+                 
                   echo "下载文件: ${remote_source}:${full_path}"
                   log_video_split "$video_split_log" "下载文件: ${remote_source}:${full_path}"
-                  
+                 
                   rclone copy "${remote_source}:${full_path}" "$temp_dir/" 2>&1 | \
                     while IFS= read -r line; do
                       log_video_split "$video_split_log" "rclone copy: $line"
                     done
-                  
+                 
                   local local_file="$temp_dir/$(basename "$full_path")"
-                  
+                 
                   if [ -f "$local_file" ]; then
-                    # 分割视频
                     if split_large_video "$(dirname "$full_path")" "$remote_source" "$local_file" "$(basename "$full_path")" "$video_split_log"; then
                       echo "✅ 视频分割成功: $full_path"
                       success_count=$((success_count + 1))
@@ -546,24 +528,20 @@ jobs:
                     echo "❌ 下载文件失败: ${remote_source}:${full_path}"
                     log_video_split "$video_split_log" "❌ 下载文件失败: ${remote_source}:${full_path}"
                   fi
-                  
-                  # 清理临时目录
                   rm -rf "$temp_dir" 2>/dev/null || true
                 fi
               done
-              
-              # 记录处理结果
+             
               log_video_split "$video_split_log" "======================================"
               log_video_split "$video_split_log" "处理完成"
               log_video_split "$video_split_log" "总共发现文件: $(echo "$file_patterns" | wc -w)"
               log_video_split "$video_split_log" "尝试处理: $processed_count 个文件"
               log_video_split "$video_split_log" "处理成功: $success_count 个文件"
               log_video_split "$video_split_log" "=== 视频分割日志 - 结束于 $(date) ==="
-              
-              # 上传视频分割日志到OneDrive
-              upload_video_split_log "$video_split_log" "video_split_logs/$video_split_log"
-              
-              # 发送视频分割总结到Telegram
+             
+              # 上传视频分割日志 (路径将由函数内部处理)
+              upload_video_split_log "$video_split_log"
+             
               if [ $processed_count -gt 0 ]; then
                 local summary_message="📊 视频分割处理总结\n"
                 summary_message+="📁 任务: $task_name\n"
@@ -572,27 +550,22 @@ jobs:
                 summary_message+="🔄 尝试处理: $processed_count\n"
                 summary_message+="✅ 处理成功: $success_count\n"
                 summary_message+="📈 成功率: $((success_count * 100 / processed_count))%"
-                
+               
                 curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
                   -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
                   -d text="$summary_message" \
                   -d parse_mode="Markdown" || true
               fi
-              
             else
               echo "未找到可识别的大视频文件错误"
               log_video_split "$video_split_log" "未找到可识别的大视频文件错误"
               log_video_split "$video_split_log" "=== 视频分割日志 - 结束于 $(date) ==="
-              
-              # 只上传有实际内容的日志
-              upload_video_split_log "$video_split_log" "video_split_logs/$video_split_log"
+              upload_video_split_log "$video_split_log"
             fi
-            
-            # 清理本地日志文件
             rm -f "$video_split_log" 2>/dev/null || true
           }
           EOF
-      
+       
       - name: Setup helper functions - part 5
         run: |
           cat > /tmp/functions_part5.sh << 'EOF'
@@ -602,12 +575,15 @@ jobs:
             local dest_path="$2"
             local task_name="$3"
             
+            # 定义统一的远程日志目录
+            local REMOTE_LOG_DIR="onedrive:/logs/sync_error"
+           
             echo "开始同步: $source_path -> $dest_path"
-            
+           
             # 生成带时间戳的错误日志文件名
             local TIMESTAMP=$(date +%Y%m%d_%H%M%S)
             local LOG_FILENAME="${task_name}_sync_error_${TIMESTAMP}.log"
-            
+           
             # 执行同步命令，记录日志
             echo "同步日志将保存在: $LOG_FILENAME"
             rclone sync "$source_path" "$dest_path" \
@@ -615,176 +591,167 @@ jobs:
               --ignore-errors \
               --verbose \
               2>&1 | tee "$LOG_FILENAME"
-            
+           
             # 检查同步结果
             local SYNC_STATUS=${PIPESTATUS[0]}
             
-            # 检查日志内容类型
-            local log_status=$(has_real_content "$LOG_FILENAME")
+            # 判断是否需要上传日志
+            # 条件：退出码不为0 (硬错误) 或者 日志中包含 "error" 或 "failed" (软错误)
+            local SHOULD_UPLOAD=false
             
-            if [ "$SYNC_STATUS" -eq 0 ]; then
-              echo "同步成功: $source_path"
-              # 检查日志是否有实际内容
-              if [ "$log_status" = "has_content" ]; then
-                # 同步成功但日志有错误内容
-                echo "同步成功但日志包含错误信息，上传日志到OneDrive"
-                rclone copyto "$LOG_FILENAME" "onedrive:/$LOG_FILENAME" || echo "上传日志文件失败，继续执行"
-                
-                # 清理旧日志（最多保留7个），使用list命令避免删除错误
-                rclone lsf onedrive: --files-only 2>/dev/null | \
-                  grep "^${task_name}_sync_error_.*\.log$" | \
-                  sort > /tmp/log_list.txt 2>/dev/null || true
-                
-                if [ -f /tmp/log_list.txt ]; then
-                  local LOG_COUNT=$(wc -l < /tmp/log_list.txt 2>/dev/null || echo 0)
-                  if [ "$LOG_COUNT" -gt 7 ]; then
-                    local DELETE_COUNT=$((LOG_COUNT - 7))
-                    echo "需要删除 $DELETE_COUNT 个旧日志文件"
-                    head -n "$DELETE_COUNT" /tmp/log_list.txt | while read -r old_file; do
-                      echo "删除旧日志: $old_file"
-                      rclone delete "onedrive:/$old_file" 2>/dev/null || echo "删除旧日志失败: $old_file，跳过"
-                    done
-                  fi
-                  rm -f /tmp/log_list.txt 2>/dev/null || true
-                fi
-              else
-                echo "同步成功且日志只包含传输统计信息，不上传到OneDrive"
-              fi
-              
-              # 发送成功消息
-              curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
-                -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
-                -d text="✅ $task_name 同步完成" || true
+            if [ "$SYNC_STATUS" -ne 0 ]; then
+                echo "同步退出码异常 ($SYNC_STATUS)，标记为需要上传日志"
+                SHOULD_UPLOAD=true
             else
-              echo "同步失败: $source_path (退出码: $SYNC_STATUS)"
-              
-              # 上传错误日志到onedrive根目录
-              if [ "$log_status" = "has_content" ]; then
-                echo "上传日志到: onedrive:/$LOG_FILENAME"
-                rclone copyto "$LOG_FILENAME" "onedrive:/$LOG_FILENAME" || echo "上传日志文件失败，继续执行"
-                
-                # 清理旧日志（最多保留7个），使用list命令避免删除错误
-                echo "清理旧日志..."
-                rclone lsf onedrive: --files-only 2>/dev/null | \
-                  grep "^${task_name}_sync_error_.*\.log$" | \
-                  sort > /tmp/log_list.txt 2>/dev/null || true
-                
-                if [ -f /tmp/log_list.txt ]; then
-                  local LOG_COUNT=$(wc -l < /tmp/log_list.txt 2>/dev/null || echo 0)
-                  if [ "$LOG_COUNT" -gt 7 ]; then
-                    local DELETE_COUNT=$((LOG_COUNT - 7))
-                    echo "需要删除 $DELETE_COUNT 个旧日志文件"
-                    head -n "$DELETE_COUNT" /tmp/log_list.txt | while read -r old_file; do
-                      echo "删除旧日志: $old_file"
-                      rclone delete "onedrive:/$old_file" 2>/dev/null || echo "删除旧日志失败: $old_file，跳过"
-                    done
-                  fi
-                  rm -f /tmp/log_list.txt 2>/dev/null || true
+                # 退出码为0，检查日志中是否有明确的错误关键字（忽略大小写）
+                # 排除一些非关键信息（如果需要）
+                if grep -qi "error\|failed" "$LOG_FILENAME"; then
+                    echo "同步日志中发现错误关键字，标记为需要上传日志"
+                    SHOULD_UPLOAD=true
+                else
+                    echo "同步成功且无明显错误，无需上传日志"
                 fi
+            fi
+           
+            if [ "$SHOULD_UPLOAD" = true ]; then
+              if [ "$SYNC_STATUS" -eq 0 ]; then
+                 echo "同步完成但有警告/软错误"
               else
-                echo "日志只包含传输统计信息，不上传到OneDrive"
+                 echo "同步失败: $source_path (退出码: $SYNC_STATUS)"
               fi
               
+              # 检查日志文件是否存在且不为空
+              if [ -s "$LOG_FILENAME" ]; then
+                  echo "上传日志到: $REMOTE_LOG_DIR/$LOG_FILENAME"
+                  rclone copyto "$LOG_FILENAME" "$REMOTE_LOG_DIR/$LOG_FILENAME" || echo "上传日志文件失败，继续执行"
+                 
+                  # 清理旧日志（保留最近7个）
+                  echo "清理旧日志..."
+                  rclone lsf "$REMOTE_LOG_DIR/" --files-only 2>/dev/null | \
+                    grep "^${task_name}_sync_error_.*\.log$" | \
+                    sort > /tmp/log_list.txt 2>/dev/null || true
+                 
+                  if [ -f /tmp/log_list.txt ]; then
+                    local LOG_COUNT=$(wc -l < /tmp/log_list.txt 2>/dev/null || echo 0)
+                    if [ "$LOG_COUNT" -gt 7 ]; then
+                      local DELETE_COUNT=$((LOG_COUNT - 7))
+                      echo "需要删除 $DELETE_COUNT 个旧日志文件"
+                      head -n "$DELETE_COUNT" /tmp/log_list.txt | while read -r old_file; do
+                        echo "删除旧日志: $old_file"
+                        rclone delete "$REMOTE_LOG_DIR/$old_file" 2>/dev/null || echo "删除旧日志失败: $old_file，跳过"
+                      done
+                    fi
+                    rm -f /tmp/log_list.txt 2>/dev/null || true
+                  fi
+              fi
+           
               # 调用函数发送日志到Telegram
               send_log_to_telegram "$LOG_FILENAME" "$task_name" "$SYNC_STATUS"
+           
+              # 尝试分析日志，处理失败的大视频文件
+              echo "尝试分析失败原因，处理大于3.9GB的视频文件..."
+              process_failed_videos "$LOG_FILENAME" "onedrive" "$task_name"
               
-              # 如果同步失败，尝试分析日志，处理失败的大视频文件
-              if [ "$log_status" = "has_content" ]; then
-                echo "尝试分析失败原因，处理大于3.9GB的视频文件..."
-                process_failed_videos "$LOG_FILENAME" "onedrive" "$task_name"
-              fi
+            else
+              # 不需要上传，直接发送简单的成功通知
+              curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
+                -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
+                -d text="✅ $task_name 同步完成 (无错误)" || true
+                
+              # 删除本地日志文件，保持清洁
+              echo "删除本地日志文件: $LOG_FILENAME"
+              rm -f "$LOG_FILENAME" 2>/dev/null || true
             fi
-            
-            # 清理本地临时文件
-            rm -f "$LOG_FILENAME" 2>/dev/null || true
-            
+           
             return 0
           }
           EOF
-      
+       
       - name: Combine all functions
         run: |
           # 合并所有函数文件
           cat /tmp/functions_part1.sh /tmp/functions_part2.sh /tmp/functions_part3.sh /tmp/functions_part4.sh /tmp/functions_part5.sh > /tmp/functions.sh
-          
+         
           # 清理临时文件
           rm -f /tmp/functions_part*.sh
-      
+       
       - name: Initialize sync
         run: |
           # 加载函数
           source /tmp/functions.sh
-          
+         
           # 初始化已处理文件日志
           PROCESSED_FILES_LOG="processed_videos.log"
           echo "=== 初始化已处理文件日志 ===" > "$PROCESSED_FILES_LOG"
           echo "开始时间: $(date)" >> "$PROCESSED_FILES_LOG"
           echo "==========================" >> "$PROCESSED_FILES_LOG"
-      
+       
       - name: Sync backup task
         run: |
           # 加载函数
           source /tmp/functions.sh
-          
+         
           echo "=== 开始同步 backup 任务 ==="
           sync_with_logging "onedrive:backup" "openlist:aliyundriveCrypt/backup" "backup"
-      
+       
       - name: Sync task0
         run: |
           # 加载函数
           source /tmp/functions.sh
-          
+         
           echo "=== 开始同步 0 任务 ==="
           sync_with_logging "onedrive:0" "openlist:123panCrypt/0" "task0"
-      
+       
       - name: Sync task1
         run: |
           # 加载函数
           source /tmp/functions.sh
-          
+         
           echo "=== 开始同步 1 任务 ==="
           sync_with_logging "onedrive:1" "openlist:123panCrypt/1" "task1"
-      
+       
       - name: Sync task2
         run: |
           # 加载函数
           source /tmp/functions.sh
-          
+         
           echo "=== 开始同步 2 任务 ==="
           sync_with_logging "onedrive:2" "openlist:aliyundriveCrypt/2" "task2"
-      
+       
       - name: Sync task3
         run: |
           # 加载函数
           source /tmp/functions.sh
-          
+         
           echo "=== 开始同步 3 任务 ==="
           sync_with_logging "onedrive:3" "openlist:aliyundriveCrypt/3" "task3"
-      
+       
       - name: Finalize and cleanup
         run: |
           # 加载函数
           source /tmp/functions.sh
-          
+         
           PROCESSED_FILES_LOG="processed_videos.log"
-          
+         
           if [ -f "$PROCESSED_FILES_LOG" ]; then
             # 记录处理完成
             echo "==========================" >> "$PROCESSED_FILES_LOG"
             echo "结束时间: $(date)" >> "$PROCESSED_FILES_LOG"
             echo "=== 所有同步任务完成 ===" >> "$PROCESSED_FILES_LOG"
-            
+           
             # 检查日志是否有实际内容
             LOG_SIZE=$(wc -l < "$PROCESSED_FILES_LOG" 2>/dev/null || echo 0)
             if [ "$LOG_SIZE" -gt 5 ]; then
-              echo "上传处理日志到OneDrive"
-              rclone copyto "$PROCESSED_FILES_LOG" "onedrive:/processed_videos_$(date +%Y%m%d_%H%M%S).log" || true
+              # 路径优化: 上传到 logs/processed/
+              REMOTE_PROC_LOG="onedrive:/logs/processed/processed_videos_$(date +%Y%m%d_%H%M%S).log"
+              echo "上传处理日志到 $REMOTE_PROC_LOG"
+              rclone copyto "$PROCESSED_FILES_LOG" "$REMOTE_PROC_LOG" || true
             else
               echo "处理日志为空，不上传到OneDrive"
             fi
-            
+           
             # 清理本地处理日志
             rm -f "$PROCESSED_FILES_LOG" 2>/dev/null || true
           fi
-          
+         
           echo "所有同步任务完成！"
