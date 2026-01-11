@@ -83,9 +83,9 @@ jobs:
           echo "Installing ffmpeg, jq, coreutils..."
           sudo apt-get update && sudo apt-get install -y ffmpeg jq coreutils bc
       
-      - name: Setup helper functions
+      - name: Setup helper functions - part 1
         run: |
-          cat > /tmp/functions.sh << 'EOF'
+          cat > /tmp/functions_part1.sh << 'EOF'
           # 发送日志到Telegram的函数
           send_log_to_telegram() {
             local log_file="$1"
@@ -200,7 +200,11 @@ jobs:
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] $message" >> "$log_file"
             echo "$message"
           }
-          
+          EOF
+      
+      - name: Setup helper functions - part 2
+        run: |
+          cat > /tmp/functions_part2.sh << 'EOF'
           # 发送视频分割通知到Telegram
           send_video_split_notification() {
             local file_path="$1"
@@ -268,7 +272,11 @@ jobs:
               echo "视频分割日志为空或不存在，不上传"
             fi
           }
-          
+          EOF
+      
+      - name: Setup helper functions - part 3
+        run: |
+          cat > /tmp/functions_part3.sh << 'EOF'
           # 视频文件分割函数
           split_large_video() {
             local remote_path="$1"
@@ -405,7 +413,11 @@ jobs:
               return 1
             fi
           }
-          
+          EOF
+      
+      - name: Setup helper functions - part 4
+        run: |
+          cat > /tmp/functions_part4.sh << 'EOF'
           # 分析错误日志，查找失败的大视频文件
           process_failed_videos() {
             local log_file="$1"
@@ -440,7 +452,7 @@ jobs:
               log_video_split "$video_split_log" "$failed_videos"
               
               # 提取具体的文件路径
-              local file_patterns=$(echo "$failed_videos" | grep -oE "[a-zA-Z0-9_\-./]+\.(mp4|mkv|mov|avi|flv|webm|m4v|wmv|mpg|mpeg|3gp|mp3|wav|aac|flac|m4a)" | sort -u)
+              local file_patterns=$(echo "$failed_videos" | grep -oE "[a-zA-Z09_\-./]+\.(mp4|mkv|mov|avi|flv|webm|m4v|wmv|mpg|mpeg|3gp|mp3|wav|aac|flac|m4a)" | sort -u)
               
               local processed_count=0
               local success_count=0
@@ -579,7 +591,11 @@ jobs:
             # 清理本地日志文件
             rm -f "$video_split_log" 2>/dev/null || true
           }
-          
+          EOF
+      
+      - name: Setup helper functions - part 5
+        run: |
+          cat > /tmp/functions_part5.sh << 'EOF'
           # 统一的错误日志处理函数
           sync_with_logging() {
             local source_path="$1"
@@ -589,8 +605,8 @@ jobs:
             echo "开始同步: $source_path -> $dest_path"
             
             # 生成带时间戳的错误日志文件名
-            TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-            LOG_FILENAME="${task_name}_sync_error_${TIMESTAMP}.log"
+            local TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+            local LOG_FILENAME="${task_name}_sync_error_${TIMESTAMP}.log"
             
             # 执行同步命令，记录日志
             echo "同步日志将保存在: $LOG_FILENAME"
@@ -601,7 +617,7 @@ jobs:
               2>&1 | tee "$LOG_FILENAME"
             
             # 检查同步结果
-            SYNC_STATUS=${PIPESTATUS[0]}
+            local SYNC_STATUS=${PIPESTATUS[0]}
             
             # 检查日志内容类型
             local log_status=$(has_real_content "$LOG_FILENAME")
@@ -620,9 +636,9 @@ jobs:
                   sort > /tmp/log_list.txt 2>/dev/null || true
                 
                 if [ -f /tmp/log_list.txt ]; then
-                  LOG_COUNT=$(wc -l < /tmp/log_list.txt 2>/dev/null || echo 0)
+                  local LOG_COUNT=$(wc -l < /tmp/log_list.txt 2>/dev/null || echo 0)
                   if [ "$LOG_COUNT" -gt 7 ]; then
-                    DELETE_COUNT=$((LOG_COUNT - 7))
+                    local DELETE_COUNT=$((LOG_COUNT - 7))
                     echo "需要删除 $DELETE_COUNT 个旧日志文件"
                     head -n "$DELETE_COUNT" /tmp/log_list.txt | while read -r old_file; do
                       echo "删除旧日志: $old_file"
@@ -654,9 +670,9 @@ jobs:
                   sort > /tmp/log_list.txt 2>/dev/null || true
                 
                 if [ -f /tmp/log_list.txt ]; then
-                  LOG_COUNT=$(wc -l < /tmp/log_list.txt 2>/dev/null || echo 0)
+                  local LOG_COUNT=$(wc -l < /tmp/log_list.txt 2>/dev/null || echo 0)
                   if [ "$LOG_COUNT" -gt 7 ]; then
-                    DELETE_COUNT=$((LOG_COUNT - 7))
+                    local DELETE_COUNT=$((LOG_COUNT - 7))
                     echo "需要删除 $DELETE_COUNT 个旧日志文件"
                     head -n "$DELETE_COUNT" /tmp/log_list.txt | while read -r old_file; do
                       echo "删除旧日志: $old_file"
@@ -685,6 +701,14 @@ jobs:
             return 0
           }
           EOF
+      
+      - name: Combine all functions
+        run: |
+          # 合并所有函数文件
+          cat /tmp/functions_part1.sh /tmp/functions_part2.sh /tmp/functions_part3.sh /tmp/functions_part4.sh /tmp/functions_part5.sh > /tmp/functions.sh
+          
+          # 清理临时文件
+          rm -f /tmp/functions_part*.sh
       
       - name: Initialize sync
         run: |
