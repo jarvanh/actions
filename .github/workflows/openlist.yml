@@ -734,24 +734,51 @@ jobs:
           PROCESSED_FILES_LOG="processed_videos.log"
          
           if [ -f "$PROCESSED_FILES_LOG" ]; then
+            # 计算实际处理记录的行数（排除头尾固定行）
+            local actual_entries=0
+            if [ -f "$PROCESSED_FILES_LOG" ]; then
+              # 获取总行数
+              local total_lines=$(wc -l < "$PROCESSED_FILES_LOG" 2>/dev/null || echo 0)
+              
+              # 计算实际处理记录数（总行数减去固定的5行）
+              actual_entries=$((total_lines - 5))
+              
+              if [ "$actual_entries" -gt 0 ]; then
+                echo "找到 $actual_entries 个实际处理记录"
+              else
+                echo "没有实际处理记录，只有头尾信息"
+              fi
+            fi
+           
             # 记录处理完成
             echo "==========================" >> "$PROCESSED_FILES_LOG"
             echo "结束时间: $(date)" >> "$PROCESSED_FILES_LOG"
             echo "=== 所有同步任务完成 ===" >> "$PROCESSED_FILES_LOG"
            
-            # 检查日志是否有实际内容
-            LOG_SIZE=$(wc -l < "$PROCESSED_FILES_LOG" 2>/dev/null || echo 0)
-            if [ "$LOG_SIZE" -gt 5 ]; then
-              # 路径优化: 上传到 logs/processed/
+            # 只有有实际处理记录时才上传
+            if [ "$actual_entries" -gt 0 ]; then
+              # 上传到 logs/processed/ 目录
               REMOTE_PROC_LOG="onedrive:/logs/processed/processed_videos_$(date +%Y%m%d_%H%M%S).log"
               echo "上传处理日志到 $REMOTE_PROC_LOG"
               rclone copyto "$PROCESSED_FILES_LOG" "$REMOTE_PROC_LOG" || true
+              echo "处理日志已上传到 OneDrive"
+              
+              # 清理旧的已处理日志（保留最近7个）
+              echo "清理旧的处理日志..."
+              rclone lsf "onedrive:/logs/processed/" 2>/dev/null | \
+                grep "^processed_videos_.*\.log$" | \
+                sort | head -n -7 | while read -r old_file; do
+                  echo "删除旧日志: $old_file"
+                  rclone delete "onedrive:/logs/processed/$old_file" 2>/dev/null || true
+                done
             else
-              echo "处理日志为空，不上传到OneDrive"
+              echo "没有实际处理记录，不上传空日志到OneDrive"
             fi
            
             # 清理本地处理日志
             rm -f "$PROCESSED_FILES_LOG" 2>/dev/null || true
+          else
+            echo "处理日志文件不存在，跳过上传"
           fi
          
           echo "所有同步任务完成！"
