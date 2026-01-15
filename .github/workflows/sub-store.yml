@@ -73,7 +73,7 @@ jobs:
       - name: Set up Docker
         uses: docker/setup-buildx-action@v2
       - name: Run sub-store container
-        run: docker run -it -d --restart=always -e "SUB_STORE_BACKEND_SYNC_CRON=*/5 * * * *" -e SUB_STORE_FRONTEND_BACKEND_PATH=/65jwaf2357gsnret4uods -p 9876:9876 -p 127.0.0.1:3001:3001 -v /dropbox/self-hosted/sub-store:/opt/app/data --name sub-store xream/sub-store:http-meta
+        run: docker run -it -d --restart=always -e "SUB_STORE_BACKEND_SYNC_CRON=10 */3 * * *" -e SUB_STORE_FRONTEND_BACKEND_PATH=/65jwaf2357gsnret4uods -p 9876:9876 -p 127.0.0.1:3001:3001 -v /dropbox/self-hosted/sub-store:/opt/app/data --name sub-store xream/sub-store:http-meta
       - name: Verify container is running
         run: docker ps    
       - name: run cloudflared
