@@ -67,6 +67,7 @@ jobs:
           else
             echo "The tunnel '$TUNNEL_NAME' is running with connections: $CONNECTIONS. Stopping actions."
             exit 0 
+          fi
       - name: run cloudflared
         run: |
           cloudflared tunnel route dns subs-check subs-check.'${{ secrets.VD }}'.eu.org
