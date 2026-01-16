@@ -44,3 +44,33 @@ jobs:
       - name: Run docker container
         run: |
           docker run --name subs-check -p 8199:8199 -v /dropbox/self-hosted/subs-check/config:/app/config -v /dropbox/self-hosted/subs-check/output:/app/output --restart always ghcr.io/beck-8/subs-check:latest
+      - name: Check if the tunnel is running
+        env:
+          TUNNEL_NAME: "subs-check" # 替换为你的隧道名称
+        run: |
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
+          sudo mkdir ~/.cloudflared/
+          sudo rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
+          
+          cloudflared tunnel list
+          # 获取隧道列表
+          OUTPUT=$(cloudflared tunnel list)      
+          # 查找目标隧道的行
+          TUNNEL_LINE=$(echo "$OUTPUT" | grep -w "$TUNNEL_NAME")
+          if [ -z "$TUNNEL_LINE" ]; then
+            echo "The tunnel '$TUNNEL_NAME' does not exist. Proceeding."
+            exit 0
+          fi
+  
+          # 提取 CONNECTIONS 列并检查是否为空
+          CONNECTIONS=$(echo "$TUNNEL_LINE" | awk '{if (NF>=4) print $4; else print "-"}')
+          if [ "$CONNECTIONS" == "-" ]; then
+            echo "The tunnel '$TUNNEL_NAME' exists but has no active connections. Proceeding."
+          else
+            echo "The tunnel '$TUNNEL_NAME' is running with connections: $CONNECTIONS. Stopping actions."
+            exit 0 
+      - name: run cloudflared
+        run: |
+          cloudflared tunnel route dns subs-check subs-check.'${{ secrets.VD }}'.eu.org
+          nohup cloudflared tunnel run --url http://127.0.0.1:8199 subs-check &
