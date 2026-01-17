@@ -79,7 +79,10 @@ jobs:
           cloudflared tunnel route dns openlist openlist.'${{ secrets.VD }}'.eu.org
           nohup cloudflared tunnel run --url http://127.0.0.1:5244 openlist &
           sudo sleep 5m
-       
+      - name: sleep
+        run: |
+          sudo sleep 10m      
+          sudo docker stop openlist
       - name: Install required tools
         run: |
           echo "Installing ffmpeg, jq, coreutils..."
