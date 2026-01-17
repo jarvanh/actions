@@ -78,6 +78,13 @@ jobs:
         run: |
           cloudflared tunnel route dns openlist openlist.'${{ secrets.VD }}'.eu.org
           nohup cloudflared tunnel run --url http://127.0.0.1:5244 openlist &
+
+      - name: rclone sync
+        run: |
+          sudo rclone sync onedrive:3/影视/电影 openlist:wopan/000 \
+            --progress \
+            --ignore-errors \
+            --verbose \
       - name: Install required tools
         run: |
           echo "Installing ffmpeg, jq, coreutils..."
