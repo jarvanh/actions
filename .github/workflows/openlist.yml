@@ -81,13 +81,13 @@ jobs:
 
       - name: rclone sync
         run: |
-          sudo sleep 5m      
-          sudo docker stop openlist
-          # sudo rclone sync onedrive:3/影视/电影 openlist:wopan/000 \
-          #   --progress \
-          #   --ignore-errors \
-          #   --verbose \
-          #   --transfers 1 \
+          # sudo sleep 5m      
+          # sudo docker stop openlist
+          sudo rclone sync onedrive:3/影视/电影 openlist:wopan/000 \
+            --progress \
+            --ignore-errors \
+            --verbose \
+            --transfers 1 \
       - name: Install required tools
         run: |
           echo "Installing ffmpeg, jq, coreutils..."
