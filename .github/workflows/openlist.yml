@@ -3,7 +3,7 @@ name: openlist
 on:
   workflow_dispatch:
   schedule:
-    - cron: "20 3 * * *"
+    - cron: "*/5 * * * *"
   watch:
     types: started
 
@@ -800,3 +800,6 @@ jobs:
           rm -f /tmp/functions.sh 2>/dev/null || true
          
           echo "所有同步任务完成！"
+      - name: sleep
+        run: |
+          sudo sleep 330m     
