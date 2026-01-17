@@ -85,6 +85,7 @@ jobs:
             --progress \
             --ignore-errors \
             --verbose \
+            --transfers 1 \
       - name: Install required tools
         run: |
           echo "Installing ffmpeg, jq, coreutils..."
