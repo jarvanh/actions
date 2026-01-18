@@ -83,7 +83,7 @@ jobs:
         run: |
           # sudo sleep 5m      
           # sudo docker stop openlist
-          sudo rclone sync onedrive:3/影视/动漫剧集 openlist:wopan/111 \
+          sudo rclone sync onedrive:3/影视/电影 openlist:wopan/000 \
             --progress \
             --ignore-errors \
             --verbose \
