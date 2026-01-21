@@ -10,7 +10,7 @@ on:
 jobs:
   ha:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    concurrency: HomeAssistant-singleton
 
     steps:
     - name: Checkout
