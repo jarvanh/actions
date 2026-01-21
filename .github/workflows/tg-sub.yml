@@ -29,7 +29,6 @@ jobs:
         from telethon.sessions import StringSession
         from github import Github
         import time
-        from pathlib import Path
 
         # 获取环境变量
         api_id = int(os.environ['TG_API_ID'])
@@ -103,18 +102,30 @@ jobs:
                 gist = g.get_gist(TG_SUB_GIST_ID)
                 
                 # 获取当前Gist文件列表
-                print(f'Gist 原始文件: {list(gist.files.keys())}')
+                existing_files = list(gist.files.keys())
+                print(f'Gist 原始文件: {existing_files}')
                 
-                # 先尝试删除旧文件（如果存在）
-                try:
-                    gist.edit(files={filename: None})
-                    print(f"已删除旧文件 {filename}")
-                    time.sleep(1)  # 等待1秒
-                except:
-                    print(f"文件 {filename} 不存在或无法删除，将创建新文件")
+                # 创建文件字典，确保我们更新所有文件
+                files_dict = {}
                 
-                # 创建新文件
-                gist.edit(files={filename: {'content': file_content}})
+                # 复制现有文件
+                for file_name in existing_files:
+                    if file_name != filename:  # 不复制我们要更新的文件
+                        # 获取现有文件内容
+                        try:
+                            files_dict[file_name] = {
+                                'content': gist.files[file_name].content
+                            }
+                            print(f"保留现有文件: {file_name}")
+                        except Exception as e:
+                            print(f"获取文件 {file_name} 内容失败: {e}")
+                
+                # 添加/更新我们要的文件
+                files_dict[filename] = {'content': file_content}
+                print(f"添加/更新文件: {filename}")
+                
+                # 更新Gist
+                gist.edit(files=files_dict)
                 print('✅ Gist 更新成功！')
                 
                 # 清理临时文件
