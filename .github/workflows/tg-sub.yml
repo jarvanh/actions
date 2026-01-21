@@ -87,18 +87,16 @@ jobs:
                 print('正在上传至 Gist...')
                 g = Github(PAT)
                 gist = g.get_gist(TG_SUB_GIST_ID)
-
+                
                 print(f'Gist 当前文件列表: {list(gist.files.keys())}')
-
+                
                 gist.edit(
                     description="Telegram proxy auto sync",
                     files={
-                        filename: {
-                            "content": final_yaml
-                        }
+                        filename: final_yaml
                     }
                 )
-
+                
                 print('✅ Gist 更新成功！')
 
             except Exception as e:
