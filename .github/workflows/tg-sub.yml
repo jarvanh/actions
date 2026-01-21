@@ -72,7 +72,7 @@ jobs:
                             # 将该文件的节点加入总列表
                             combined_proxies.extend(content['proxies'])
                             count += 1
-                            print(f'  -> 成功提取 {len(content['proxies'])} 个节点')
+                            print(f"  -> 成功提取 {len(content['proxies'])} 个节点")
                         else:
                             print(f'  -> 跳过: 格式不符或无 proxies 字段')
                     except Exception as e:
