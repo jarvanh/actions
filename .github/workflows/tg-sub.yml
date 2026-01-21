@@ -24,7 +24,7 @@ jobs:
         cat > sync_proxies.py << 'EOF'
         import os
         import asyncio
-        yaml
+        import yaml
         from telethon import TelegramClient
         from telethon.sessions import StringSession
         from github import Github
