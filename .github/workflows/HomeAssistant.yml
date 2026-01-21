@@ -1,169 +1,192 @@
-name: HomeAssistant
+name: Deploy Home Assistant with HACS
 
 on:
-  schedule:
-    - cron: "*/5 * * * *"
   workflow_dispatch:
-  watch:
-    # types: started
+  push:
+    branches: [ main ]
 
 jobs:
-  ha:
+  deploy:
     runs-on: ubuntu-latest
-    concurrency: HomeAssistant-singleton
-
+    
     steps:
     - name: Checkout
-      uses: actions/checkout@v4
+      uses: actions/checkout@v3
 
-    # ---------------------------
-    # 1️⃣ 安装 rclone 并挂载 Dropbox
-    # ---------------------------
-    - name: rclone-install
+    - name: Setup Docker
       run: |
-        curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
-        unzip rclone-*-amd64.zip
-        cd rclone-*-linux-amd64
-        sudo mv rclone /usr/bin
-        sudo chmod +x /usr/bin/rclone
+        sudo systemctl start docker
+        docker --version
 
-    - name: rclone-config
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y fuse3 wget unzip curl
+
+    - name: Install and configure rclone
       env:
         RCLONE_CONFIG: ${{ secrets.RCLONE }}
       run: |
+        # 安装 rclone
+        curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
+        unzip rclone-*-linux-amd64.zip
+        cd rclone-*-linux-amd64
+        sudo cp rclone /usr/bin/
+        sudo chmod +x /usr/bin/rclone
+        
+        # 配置 rclone
         mkdir -p ~/.config/rclone/
-        cat << EOF > ~/.config/rclone/rclone.conf
-        $RCLONE_CONFIG
-        EOF
+        echo "$RCLONE_CONFIG" > ~/.config/rclone/rclone.conf
+        chmod 600 ~/.config/rclone/rclone.conf
+        
+        rclone version
 
-    - name: rclone-mount
+    - name: Mount Dropbox directly
       run: |
-        sudo apt-get update
-        sudo apt-get install -y fuse3
-        sudo mkdir -p /ha
-        sudo nohup rclone mount dropbox:self-hosted/HomeAssistant /ha \
-          --vfs-cache-mode full \
-          --allow-other &
+        # 创建挂载点
+        sudo mkdir -p /dropbox
+        sudo chmod 777 /dropbox
+        
+        # 直接挂载Dropbox
+        sudo nohup rclone mount dropbox: /dropbox --vfs-cache-mode full --daemon &
+        
+        # 等待挂载完成
         sleep 10
-        ls -la /ha
+        ls -la /dropbox/
+        
+        # 检查Home Assistant配置目录是否存在
+        if [ -d "/dropbox/self-hosted/HomeAssistant" ]; then
+          echo "Home Assistant config directory found"
+          ls -la /dropbox/self-hosted/HomeAssistant/
+        else
+          echo "Creating Home Assistant config directory"
+          sudo mkdir -p /dropbox/self-hosted/HomeAssistant
+          sudo chmod -R 777 /dropbox/self-hosted/HomeAssistant
+        fi
 
-    - name: Pre-create HA user
+    - name: Start Home Assistant Container with direct mount
       run: |
-        mkdir -p /ha/.storage
-        cat << 'EOF' > /ha/.storage/auth
-        {
-          "data": {
-            "users": {
-              "admin": {
-                "id": "admin",
-                "name": "admin",
-                "is_owner": true,
-                "is_active": true,
-                "system_generated": false
-              }
-            },
-            "refresh_tokens": {}
-          },
-          "key": "auth",
-          "version": 1
-        }
-        EOF
-    
-    - name: Disable onboarding
-      run: |
-        cat << 'EOF' > /ha/.storage/onboarding
-        {
-          "data": {
-            "done": true
-          },
-          "key": "onboarding",
-          "version": 1
-        }
-        EOF
-    
-    - name: Create core storage
-      run: |
-        cat << 'EOF' > /ha/.storage/core
-        {
-          "data": {
-            "config": {
-              "latitude": 0,
-              "longitude": 0,
-              "elevation": 0,
-              "unit_system": "metric",
-              "time_zone": "UTC",
-              "currency": "USD",
-              "language": "en"
-            }
-          },
-          "key": "core",
-          "version": 1
-        }
-        EOF
-
-    # ---------------------------
-    # 2️⃣ 启动 Home Assistant Docker
-    # ---------------------------
-    - name: Run Home Assistant
-      run: |
+        # 确保custom_components目录存在
+        sudo mkdir -p /dropbox/self-hosted/HomeAssistant/custom_components
+        sudo chmod -R 777 /dropbox/self-hosted/HomeAssistant
+        
+        # 启动Home Assistant容器，直接使用Dropbox挂载目录
         docker run -d \
           --name homeassistant \
           --privileged \
-          --restart unless-stopped \
-          -e TZ=Asia/Shanghai \
-          -v /ha:/config \
+          --restart=unless-stopped \
+          -v /dropbox/self-hosted/HomeAssistant:/config \
+          -v /etc/localtime:/etc/localtime:ro \
           -p 8123:8123 \
-          ghcr.io/home-assistant/home-assistant:stable
+          homeassistant/home-assistant:stable
 
-    # ---------------------------
-    # 3️⃣ 安装 HACS（按官方文档）
-    # ---------------------------
-    - name: Install HACS
+        # 等待容器启动
+        echo "Waiting for Home Assistant to start..."
+        sleep 60
+        docker ps -a
+        docker logs homeassistant --tail 30
+
+    - name: Install HACS in Home Assistant
       run: |
-        sleep 30
+        # 进入容器安装HACS
+        echo "Installing HACS..."
         docker exec homeassistant bash -c "
+          apt-get update && apt-get install -y wget
           wget -O - https://get.hacs.xyz | bash -
         "
-        sleep 30
-        docker restart homeassistant
-        sleep 30
-        docker ps
+        
+        # 等待安装完成
+        sleep 15
+        echo "HACS installation logs:"
+        docker logs homeassistant --tail 50 | grep -i hacs || echo "No HACS-specific logs found"
+        
+        # 检查HACS是否安装成功
+        if [ -d "/dropbox/self-hosted/HomeAssistant/custom_components/hacs" ]; then
+          echo "✅ HACS installed successfully"
+          ls -la /dropbox/self-hosted/HomeAssistant/custom_components/hacs/
+        else
+          echo "❌ HACS installation may have failed"
+        fi
 
-    # ---------------------------
-    # 4️⃣ 安装 cloudflared
-    # ---------------------------
-    - name: install cloudflared
+    - name: Restart Home Assistant to apply HACS
       run: |
-        sudo mkdir -p ~/.cloudflared
-        sudo rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
+        docker restart homeassistant
+        echo "Waiting for restart..."
+        sleep 30
+        docker logs homeassistant --tail 30
+
+    - name: Install and configure cloudflared
+      run: |
+        # 安装cloudflared
         wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
         sudo dpkg -i cloudflared-linux-amd64.deb
-
-    - name: Check if the tunnel is running
-      env:
-        TUNNEL_NAME: "home"
-      run: |
-        OUTPUT=$(cloudflared tunnel list)
-        TUNNEL_LINE=$(echo "$OUTPUT" | grep -w "$TUNNEL_NAME")
-        if [ -z "$TUNNEL_LINE" ]; then
-          echo "Tunnel not exist"
-          exit 31
+        
+        # 复制配置文件（如果存在）
+        if [ -d "/dropbox/self-hosted/.cloudflared" ]; then
+          sudo cp -r /dropbox/self-hosted/.cloudflared ~/
+          sudo chmod -R 600 ~/.cloudflared/
         fi
-        CONNECTIONS=$(echo "$TUNNEL_LINE" | awk '{print $4}')
-        if [ "$CONNECTIONS" != "-" ]; then
-          echo "Tunnel already running"
-          exit 0
-        fi
+        
+        cloudflared --version
 
-    - name: run cloudflared
+    - name: Setup Cloudflare Tunnel
       run: |
+        # 创建或更新隧道配置
+        sudo mkdir -p ~/.cloudflared
+        
+        cat << EOF > ~/.cloudflared/config.yml
+        tunnel: home
+        credentials-file: /root/.cloudflared/home.json
+        ingress:
+          - hostname: home.${{ secrets.VD }}.eu.org
+            service: http://localhost:8123
+          - service: http_status:404
+        EOF
+        
+        # 配置隧道（如果不存在）
+        if ! cloudflared tunnel list | grep -q "home"; then
+          echo "Creating new tunnel..."
+          cloudflared tunnel create home
+        fi
+        
+        # 配置DNS路由
         cloudflared tunnel route dns home home.${{ secrets.VD }}.eu.org
-        nohup cloudflared tunnel run --url http://127.0.0.1:8123 home &
+        
+        # 启动隧道
+        nohup cloudflared tunnel run home &
+        
+        sleep 10
+        echo "Cloudflared tunnel status:"
+        cloudflared tunnel list
 
-    # ---------------------------
-    # 5️⃣ 保持 Runner 不退出
-    # ---------------------------
-    - name: Keep alive
+    - name: Verify installation
       run: |
-        echo "Home Assistant is running..."
-        sleep 6h
+        echo "=== Service Status ==="
+        docker ps -a
+        ps aux | grep cloudflared
+        
+        echo "=== Home Assistant Config Structure ==="
+        ls -la /dropbox/self-hosted/HomeAssistant/
+        
+        echo "=== HACS Directory ==="
+        ls -la /dropbox/self-hosted/HomeAssistant/custom_components/ || echo "No custom_components directory"
+        
+        echo "=== Testing Home Assistant API ==="
+        timeout 30 bash -c 'until curl -s http://localhost:8123 > /dev/null; do sleep 2; done' && \
+        echo "✅ Home Assistant is running" || echo "❌ Home Assistant may not be accessible"
+
+    - name: Keep services running
+      run: |
+        echo "🚀 Deployment completed successfully!"
+        echo "📊 Home Assistant: http://localhost:8123"
+        echo "🌐 Public URL: https://home.${{ secrets.VD }}.eu.org"
+        echo "💾 Config stored in: /dropbox/self-hosted/HomeAssistant"
+        echo ""
+        echo "⏰ This workflow will run for up to 6 hours (GitHub Actions limit)"
+        echo "📋 Next steps:"
+        echo "   1. Access Home Assistant and complete initial setup"
+        echo "   2. Configure HACS with your GitHub token"
+        echo "   3. Install integrations through HACS"
+        
+        # 保持工作流运行（最长6小时）
+        sleep 21600
