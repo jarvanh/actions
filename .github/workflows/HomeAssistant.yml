@@ -155,10 +155,12 @@ jobs:
           DOMAIN_PREFIX: ${{ secrets.VD }}
         run: |
           # 设置 DNS 路由
-          # 注意：这里修正了你原始代码中的中文引号 ’ 为英文 '
           cloudflared tunnel route dns $TUNNEL_NAME home.${DOMAIN_PREFIX}.eu.org
           
-          # 前台运行隧道，这将阻塞步骤直到 6 小时超时
-          # 如果这里使用 nohup & 后台运行，GitHub Action 会因为所有步骤完成而立即结束，导致服务下线
           echo "Starting tunnel to expose http://127.0.0.1:8123"
-          cloudflared tunnel run --url http://127.0.0.1:8123 $TUNNEL_NAME
+          nohup cloudflared tunnel run --url http://127.0.0.1:8123 $TUNNEL_NAME &
+      - name: sleep
+        run: |
+          sudo sleep 340m      
+          sudo docker stop homeassistant 
+          sudo sleep 1m   
