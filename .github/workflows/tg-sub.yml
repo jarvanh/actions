@@ -1,0 +1,106 @@
+name: Sync Telegram Proxies to Gist
+
+on:
+  schedule:
+    - cron: '10 * * * *'
+  workflow_dispatch: # 允许手动点击运行
+
+jobs:
+  merge-and-push:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Install dependencies
+      run: |
+        pip install telethon PyGithub pyyaml
+
+    - name: Execute Sync Script
+      env:
+        TG_API_ID: ${{ secrets.TG_API_ID }}
+        TG_API_HASH: ${{ secrets.TG_API_HASH }}
+        TG_SESSION: ${{ secrets.TG_SESSION }}
+        PAT: ${{ secrets.PAT }}
+        TG_SUB_GIST_ID: ${{ secrets.TG_SUB_GIST_ID }}
+        TARGET_CHANNEL: 'SubscriptionShare'
+        GIST_FILENAME: 'subscribe.yaml' # Gist中保存的文件名
+      run: |
+        python -c "
+        import os
+        import asyncio
+        import yaml
+        from telethon import TelegramClient
+        from telethon.sessions import StringSession
+        from github import Github
+
+        # 获取环境变量
+        api_id = int(os.environ['TG_API_ID'])
+        api_hash = os.environ['TG_API_HASH']
+        session_str = os.environ['TG_SESSION']
+        PAT = os.environ['PAT']
+        TG_SUB_GIST_ID = os.environ['TG_SUB_GIST_ID']
+        channel = os.environ['TARGET_CHANNEL']
+        filename = os.environ['GIST_FILENAME']
+
+        async def main():
+            print(f'正在连接 Telegram...')
+            client = TelegramClient(StringSession(session_str), api_id, api_hash)
+            await client.start()
+
+            print(f'正在扫描频道: {channel}')
+            
+            combined_proxies = []
+            count = 0
+            
+            # 遍历最近的 50 条消息
+            async for message in client.iter_messages(channel, limit=50):
+                if count >= 10:
+                    break
+                
+                # 检查是否为 yaml/yml 附件
+                if message.file and message.file.name and message.file.name.lower().endswith(('.yaml', '.yml')):
+                    try:
+                        print(f'发现文件: {message.file.name}...')
+                        file_data = await message.download_media(file=bytes)
+                        content = yaml.safe_load(file_data)
+                        
+                        if content and 'proxies' in content and isinstance(content['proxies'], list):
+                            # 将该文件的节点加入总列表
+                            combined_proxies.extend(content['proxies'])
+                            count += 1
+                            print(f'  -> 成功提取 {len(content['proxies'])} 个节点')
+                        else:
+                            print(f'  -> 跳过: 格式不符或无 proxies 字段')
+                    except Exception as e:
+                        print(f'  -> 处理错误: {e}')
+
+            await client.disconnect()
+
+            if not combined_proxies:
+                print('未找到任何有效节点，终止运行。')
+                return
+
+            print(f'\\n扫描结束，共整合 {len(combined_proxies)} 个节点。')
+
+            # 构建最终 YAML
+            final_data = {'proxies': combined_proxies}
+            final_yaml = yaml.dump(final_data, allow_unicode=True, sort_keys=False)
+
+            # 上传到 Gist
+            try:
+                print('正在上传至 Gist...')
+                g = Github(PAT)
+                gist = g.get_gist(TG_SUB_GIST_ID)
+                gist.edit(files={filename: {'content': final_yaml}})
+                print('✅ Gist 更新成功！')
+            except Exception as e:
+                print(f'❌ Gist 更新失败: {e}')
+                exit(1)
+
+        if __name__ == '__main__':
+            asyncio.run(main())
+        "
