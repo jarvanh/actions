@@ -3,7 +3,7 @@ name: Sync Telegram Proxies to Gist
 on:
   schedule:
     - cron: '10 * * * *'
-  workflow_dispatch: # 允许手动点击运行
+  workflow_dispatch:
 
 jobs:
   merge-and-push:
@@ -28,7 +28,7 @@ jobs:
         from telethon import TelegramClient
         from telethon.sessions import StringSession
         from github import Github
-        import sys
+        from github import GithubException  # 关键修复：添加此导入
 
         # 获取环境变量
         api_id = int(os.environ['TG_API_ID'])
@@ -82,12 +82,40 @@ jobs:
             # 构建最终 YAML
             final_data = {'proxies': combined_proxies}
             final_yaml = yaml.dump(final_data, allow_unicode=True, sort_keys=False)
-            
-            # 检查文件大小
-            yaml_size = len(final_yaml.encode('utf-8'))
-            print(f'生成的YAML大小: {yaml_size} 字节')
-            
-            # 如果文件太大，进行截断
-            MAX_SIZE = 1000000  # Gist 文件大小限制约 1MB
-            if yaml_size > MAX_SIZE:
-                print(f'警告: 文件大小超过 {MAX_SIZE} 字节限制，正在截断...')
+
+            # 上传到 Gist (修复后的异常处理)
+            try:
+                print('正在上传至 Gist...')
+                g = Github(PAT)
+                gist = g.get_gist(TG_SUB_GIST_ID)
+                
+                # 调试信息：打印当前文件列表
+                print(f'Gist 原始文件: {list(gist.files.keys())}')
+                
+                gist.edit(files={filename: {'content': final_yaml}})
+                print('✅ Gist 更新成功！')
+            except GithubException as e:
+                print(f'❌ GitHub API 错误:')
+                print(f'状态码: {e.status}')
+                print(f'错误消息: {e.data["message"] if "message" in e.data else e.data}')
+                print(f'完整响应: {e.data}')
+                exit(1)
+            except Exception as e:
+                print(f'❌ 未知错误: {str(e)}')
+                exit(1)
+
+        if __name__ == '__main__':
+            asyncio.run(main())
+        EOF
+
+    - name: Execute Sync Script
+      env:
+        TG_API_ID: ${{ secrets.TG_API_ID }}
+        TG_API_HASH: ${{ secrets.TG_API_HASH }}
+        TG_SESSION: ${{ secrets.TG_SESSION }}
+        PAT: ${{ secrets.PAT }}
+        TG_SUB_GIST_ID: ${{ secrets.TG_SUB_GIST_ID }}
+        TARGET_CHANNEL: 'SubscriptionShare'
+        GIST_FILENAME: 'subscribe.yaml'
+      run: |
+        python sync_proxies.py
