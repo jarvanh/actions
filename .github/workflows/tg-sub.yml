@@ -53,8 +53,8 @@ jobs:
               combined_proxies = []
               count = 0
 
-              async for message in client.iter_messages(channel, limit=50):
-                  if count >= 10:
+              async for message in client.iter_messages(channel, limit=10):
+                  if count >= 1:
                       break
 
                   if message.file and message.file.name and message.file.name.lower().endswith((".yaml", ".yml")):
