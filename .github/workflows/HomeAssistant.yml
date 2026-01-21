@@ -47,6 +47,60 @@ jobs:
         sleep 10
         ls -la /ha
 
+    - name: Pre-create HA user
+      run: |
+        mkdir -p /ha/.storage
+        cat << 'EOF' > /ha/.storage/auth
+        {
+          "data": {
+            "users": {
+              "admin": {
+                "id": "admin",
+                "name": "admin",
+                "is_owner": true,
+                "is_active": true,
+                "system_generated": false
+              }
+            },
+            "refresh_tokens": {}
+          },
+          "key": "auth",
+          "version": 1
+        }
+        EOF
+    
+    - name: Disable onboarding
+      run: |
+        cat << 'EOF' > /ha/.storage/onboarding
+        {
+          "data": {
+            "done": true
+          },
+          "key": "onboarding",
+          "version": 1
+        }
+        EOF
+    
+    - name: Create core storage
+      run: |
+        cat << 'EOF' > /ha/.storage/core
+        {
+          "data": {
+            "config": {
+              "latitude": 0,
+              "longitude": 0,
+              "elevation": 0,
+              "unit_system": "metric",
+              "time_zone": "UTC",
+              "currency": "USD",
+              "language": "en"
+            }
+          },
+          "key": "core",
+          "version": 1
+        }
+        EOF
+
     # ---------------------------
     # 2️⃣ 启动 Home Assistant Docker
     # ---------------------------
