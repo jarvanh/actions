@@ -87,11 +87,29 @@ jobs:
                 print('正在上传至 Gist...')
                 g = Github(PAT)
                 gist = g.get_gist(TG_SUB_GIST_ID)
-                gist.edit(files={filename: {'content': final_yaml}})
+
+                print(f'Gist 当前文件列表: {list(gist.files.keys())}')
+
+                gist.edit(
+                    description="Telegram proxy auto sync",
+                    files={
+                        filename: {
+                            "content": final_yaml
+                        }
+                    }
+                )
+
                 print('✅ Gist 更新成功！')
+
             except Exception as e:
-                print(f'❌ Gist 更新失败: {e}')
-                exit(1)
+                print('❌ Gist 更新失败')
+                print('异常类型:', type(e))
+                print('异常 repr:', repr(e))
+                if hasattr(e, 'status'):
+                    print('HTTP Status:', e.status)
+                if hasattr(e, 'data'):
+                    print('Error Data:', e.data)
+                raise
 
         if __name__ == '__main__':
             asyncio.run(main())
@@ -105,6 +123,6 @@ jobs:
         PAT: ${{ secrets.PAT }}
         TG_SUB_GIST_ID: ${{ secrets.TG_SUB_GIST_ID }}
         TARGET_CHANNEL: 'SubscriptionShare'
-        GIST_FILENAME: 'subscribe.yaml' # Gist中保存的文件名
+        GIST_FILENAME: 'tg-sub.yaml' # Gist中保存的文件名
       run: |
         python sync_proxies.py
