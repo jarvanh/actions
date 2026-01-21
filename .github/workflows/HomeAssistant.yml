@@ -70,19 +70,6 @@ jobs:
         docker exec homeassistant bash -c "
           wget -O - https://get.hacs.xyz | bash -
         "
-    - name: Preinstall Xiaomi & Midea components
-      run: |
-        mkdir -p /ha/custom_components
-    
-        # Xiaomi Miot
-        cd /ha/custom_components
-        git clone https://github.com/al-one/hass-xiaomi-miot.git xiaomi_miot
-    
-        # Midea
-        git clone https://github.com/mac-zhou/midea_ac_lan.git midea_ac_lan
-
-    - name: Restart Home Assistant
-      run: |
         docker restart homeassistant
 
     # ---------------------------
