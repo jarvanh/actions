@@ -53,7 +53,7 @@ jobs:
         run: |
           sudo mkdir -p ~/.cloudflared/
           # 尝试从网盘恢复 cloudflared 证书 (如果需要)
-          # sudo rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv || true
+          sudo rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
           
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
