@@ -3,7 +3,7 @@ name: Sync Telegram Proxies to Gist
 on:
   schedule:
     - cron: '10 * * * *'
-  workflow_dispatch: # 允许手动点击运行
+  workflow_dispatch:
 
 jobs:
   merge-and-push:
@@ -28,7 +28,7 @@ jobs:
         from telethon import TelegramClient
         from telethon.sessions import StringSession
         from github import Github
-        import time
+        from github import GithubException  # 关键修复：添加此导入
 
         # 获取环境变量
         api_id = int(os.environ['TG_API_ID'])
@@ -77,74 +77,31 @@ jobs:
                 print('未找到任何有效节点，终止运行。')
                 return
 
-            print(f'\n扫描结束，共整合 {len(combined_proxies)} 个节点。')
+            print(f'\\n扫描结束，共整合 {len(combined_proxies)} 个节点。')
 
             # 构建最终 YAML
             final_data = {'proxies': combined_proxies}
-            final_yaml = yaml.dump(final_data, allow_unicode=True, sort_keys=False, default_flow_style=False)
-            
-            # 将 YAML 内容保存到临时文件
-            temp_file = f"temp_{filename}"
-            with open(temp_file, 'w', encoding='utf-8') as f:
-                f.write(final_yaml)
-            
-            print(f'YAML 内容已保存到 {temp_file}，文件大小: {len(final_yaml)} 字节')
-            
-            # 读取文件内容以确认
-            with open(temp_file, 'r', encoding='utf-8') as f:
-                file_content = f.read()
-                print(f"文件前100个字符: {file_content[:100]}...")
+            final_yaml = yaml.dump(final_data, allow_unicode=True, sort_keys=False)
 
-            # 上传到 Gist
+            # 上传到 Gist (修复后的异常处理)
             try:
                 print('正在上传至 Gist...')
                 g = Github(PAT)
                 gist = g.get_gist(TG_SUB_GIST_ID)
                 
-                # 获取当前Gist文件列表
-                existing_files = list(gist.files.keys())
-                print(f'Gist 原始文件: {existing_files}')
+                # 调试信息：打印当前文件列表
+                print(f'Gist 原始文件: {list(gist.files.keys())}')
                 
-                # 创建文件字典，确保我们更新所有文件
-                files_dict = {}
-                
-                # 复制现有文件
-                for file_name in existing_files:
-                    if file_name != filename:  # 不复制我们要更新的文件
-                        # 获取现有文件内容
-                        try:
-                            files_dict[file_name] = {
-                                'content': gist.files[file_name].content
-                            }
-                            print(f"保留现有文件: {file_name}")
-                        except Exception as e:
-                            print(f"获取文件 {file_name} 内容失败: {e}")
-                
-                # 添加/更新我们要的文件
-                files_dict[filename] = {'content': file_content}
-                print(f"添加/更新文件: {filename}")
-                
-                # 更新Gist
-                gist.edit(files=files_dict)
+                gist.edit(files={filename: {'content': final_yaml}})
                 print('✅ Gist 更新成功！')
-                
-                # 清理临时文件
-                if os.path.exists(temp_file):
-                    os.remove(temp_file)
-                    
+            except GithubException as e:
+                print(f'❌ GitHub API 错误:')
+                print(f'状态码: {e.status}')
+                print(f'错误消息: {e.data["message"] if "message" in e.data else e.data}')
+                print(f'完整响应: {e.data}')
+                exit(1)
             except Exception as e:
-                print(f'❌ Gist 更新失败: {e}')
-                import traceback
-                traceback.print_exc()
-                
-                # 如果失败，保存错误日志
-                error_log = f'error_log_{int(time.time())}.txt'
-                with open(error_log, 'w', encoding='utf-8') as f:
-                    f.write(f"Error: {e}\n\n")
-                    f.write(f"Traceback:\n")
-                    traceback.print_exc(file=f)
-                print(f'错误日志已保存到: {error_log}')
-                
+                print(f'❌ 未知错误: {str(e)}')
                 exit(1)
 
         if __name__ == '__main__':
