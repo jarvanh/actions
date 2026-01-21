@@ -8,55 +8,104 @@ on:
     # types: started
 
 jobs:
-  deploy-homeassistant:
-    concurrency: HomeAssistant-singleton
+  ha:
     runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/home-assistant/home-assistant:stable
-      options: --privileged
+    timeout-minutes: 360
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+    - name: Checkout
+      uses: actions/checkout@v4
 
-      - name: Setup directories
-        run: |
-          mkdir -p /tmp/config
-          mkdir -p /tmp/config/custom_components
+    # ---------------------------
+    # 1️⃣ 安装 rclone 并挂载 Dropbox
+    # ---------------------------
+    - name: rclone-install
+      run: |
+        curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
+        unzip rclone-*-amd64.zip
+        cd rclone-*-linux-amd64
+        sudo mv rclone /usr/bin
+        sudo chmod +x /usr/bin/rclone
 
-      - name: Install HACS
-        run: |
-          mkdir -p /tmp/config/custom_components/hacs
-          curl -fsSL -o /tmp/hacs.zip https://github.com/hacs/integration/releases/latest/download/hacs.zip
-          unzip -o /tmp/hacs.zip -d /tmp/config/custom_components/hacs
-          
-          # 添加 HACS 配置
-          echo "hacs:" >> /tmp/config/configuration.yaml
-          echo "  token: ${{ secrets.PAT }}" >> /tmp/config/configuration.yaml
-          echo "  appdaemon: true" >> /tmp/config/configuration.yaml
-          echo "  python_script: true" >> /tmp/config/configuration.yaml
-          echo "  theme: true" >> /tmp/config/configuration.yaml
+    - name: rclone-config
+      env:
+        RCLONE_CONFIG: ${{ secrets.RCLONE }}
+      run: |
+        mkdir -p ~/.config/rclone/
+        cat << EOF > ~/.config/rclone/rclone.conf
+        $RCLONE_CONFIG
+        EOF
 
-      - name: Copy configuration
-        run: |
-          # 复制仓库中的配置文件
-          cp -r ./* /tmp/config/ || true
+    - name: rclone-mount
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y fuse3
+        sudo mkdir -p /ha
+        sudo nohup rclone mount dropbox:self-hosted/HomeAssistant /ha \
+          --vfs-cache-mode full \
+          --allow-other &
+        sleep 10
+        ls -la /ha
 
-      - name: Start HomeAssistant
-        run: |
-          # 启动 HomeAssistant
-          nohup hass -c /tmp/config --debug > /tmp/ha.log 2>&1 &
-          
-          # 等待服务启动
-          for i in {1..30}; do
-            if curl -s -o /dev/null -w "%{http_code}" http://localhost:8123 | grep -q "200"; then
-              echo "HomeAssistant is ready!"
-              break
-            fi
-            echo "Waiting for HomeAssistant to start... ($i/30)"
-            sleep 10
-          done
-          
-          # 显示最后100行日志用于调试
-          echo "=== HomeAssistant Logs ==="
-          tail -n 100 /tmp/ha.log
+    # ---------------------------
+    # 2️⃣ 启动 Home Assistant Docker
+    # ---------------------------
+    - name: Run Home Assistant
+      run: |
+        docker run -d \
+          --name homeassistant \
+          --privileged \
+          --restart unless-stopped \
+          -e TZ=Asia/Shanghai \
+          -v /ha:/config \
+          -p 8123:8123 \
+          ghcr.io/home-assistant/home-assistant:stable
+
+    # ---------------------------
+    # 3️⃣ 安装 HACS（按官方文档）
+    # ---------------------------
+    - name: Install HACS
+      run: |
+        sleep 30
+        docker exec homeassistant bash -c "
+          wget -O - https://get.hacs.xyz | bash -
+        "
+
+    # ---------------------------
+    # 4️⃣ 安装 cloudflared
+    # ---------------------------
+    - name: install cloudflared
+      run: |
+        sudo mkdir -p ~/.cloudflared
+        sudo rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
+        wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+        sudo dpkg -i cloudflared-linux-amd64.deb
+
+    - name: Check if the tunnel is running
+      env:
+        TUNNEL_NAME: "home"
+      run: |
+        OUTPUT=$(cloudflared tunnel list)
+        TUNNEL_LINE=$(echo "$OUTPUT" | grep -w "$TUNNEL_NAME")
+        if [ -z "$TUNNEL_LINE" ]; then
+          echo "Tunnel not exist"
+          exit 31
+        fi
+        CONNECTIONS=$(echo "$TUNNEL_LINE" | awk '{print $4}')
+        if [ "$CONNECTIONS" != "-" ]; then
+          echo "Tunnel already running"
+          exit 0
+        fi
+
+    - name: run cloudflared
+      run: |
+        cloudflared tunnel route dns home home.${{ secrets.VD }}.eu.org
+        nohup cloudflared tunnel run --url http://127.0.0.1:8123 home &
+
+    # ---------------------------
+    # 5️⃣ 保持 Runner 不退出
+    # ---------------------------
+    - name: Keep alive
+      run: |
+        echo "Home Assistant is running..."
+        sleep 6h
