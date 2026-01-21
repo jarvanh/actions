@@ -70,7 +70,10 @@ jobs:
         docker exec homeassistant bash -c "
           wget -O - https://get.hacs.xyz | bash -
         "
+        sleep 30
         docker restart homeassistant
+        sleep 30
+        docker ps
 
     # ---------------------------
     # 4️⃣ 安装 cloudflared
