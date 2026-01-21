@@ -45,7 +45,33 @@ jobs:
             echo "Directory not found, creating it..."
             sudo mkdir -p /dropbox/self-hosted/HomeAssistant
           fi
-
+          
+      # -----------------------------------------------------------
+      # 插入修正步骤：解决 400 Bad Request 问题
+      # -----------------------------------------------------------
+      - name: Configure HA for Reverse Proxy
+        run: |
+          CONFIG_FILE="/dropbox/self-hosted/HomeAssistant/configuration.yaml"
+          
+          # 检查 configuration.yaml 是否存在，如果不存在则创建
+          if [ ! -f "$CONFIG_FILE" ]; then
+            touch "$CONFIG_FILE"
+            echo "default_config:" >> "$CONFIG_FILE"
+          fi
+          
+          # 检查是否已经配置了 http 组件，如果没有则追加配置
+          if ! grep -q "trusted_proxies" "$CONFIG_FILE"; then
+            echo "" >> "$CONFIG_FILE"
+            echo "http:" >> "$CONFIG_FILE"
+            echo "  use_x_forwarded_for: true" >> "$CONFIG_FILE"
+            echo "  trusted_proxies:" >> "$CONFIG_FILE"
+            echo "    - 127.0.0.1" >> "$CONFIG_FILE"
+            echo "    - ::1" >> "$CONFIG_FILE"
+            echo "Config injected: Trusted proxies added."
+          else
+            echo "Config already contains trusted_proxies. Skipping."
+          fi
+          
       # -----------------------------------------------------------
       # 2. 安装 Cloudflared 并检查隧道状态
       # -----------------------------------------------------------
