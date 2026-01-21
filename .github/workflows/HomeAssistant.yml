@@ -1,0 +1,42 @@
+name: HomeAssistant
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+  watch:
+    # types: started
+
+jobs:
+  deploy-homeassistant:
+    concurrency: HomeAssistant-singleton
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/home-assistant/home-assistant:stable
+      options: --privileged # 此选项对某些设备通信是必需的
+
+    steps:
+      - name: Checkout repository code
+        uses: actions/checkout@v4
+
+      - name: Create HomeAssistant configuration directory
+        run: mkdir -p /tmp/config
+
+      - name: Install HACS
+        run: |
+          # 使用curl命令下载并安装HACS
+          curl -fsSL -o /tmp/hacs.zip https://github.com/hacs/integration/releases/latest/download/hacs.zip
+          # 假设你的配置文件在仓库的某个目录下
+          unzip -o /tmp/hacs.zip -d /tmp/config/custom_components/hacs
+
+      # - name: Copy your configuration files
+      #   run: |
+      #     # 将你仓库中的HomeAssistant配置文件（如configuration.yaml）复制到容器的配置目录
+      #     cp -r ./* /tmp/config/ || true
+
+      - name: Start HomeAssistant and wait for it to be ready
+        run: |
+          # 在后台启动HomeAssistant容器
+          nohup hass -c /tmp/config --debug &
+          # 等待HomeAssistant服务启动（8123端口）
+          timeout 300 bash -c 'until echo > /dev/tcp/localhost/8123; do sleep 5; done' || exit 1
