@@ -3,7 +3,7 @@ name: Sync Telegram Proxies to Gist
 on:
   schedule:
     - cron: '10 * * * *'
-  workflow_dispatch:
+  workflow_dispatch: # 允许手动点击运行
 
 jobs:
   merge-and-push:
@@ -24,11 +24,12 @@ jobs:
         cat > sync_proxies.py << 'EOF'
         import os
         import asyncio
-        import yaml
+        yaml
         from telethon import TelegramClient
         from telethon.sessions import StringSession
         from github import Github
-        from github import GithubException  # 关键修复：添加此导入
+        import time
+        from pathlib import Path
 
         # 获取环境变量
         api_id = int(os.environ['TG_API_ID'])
@@ -77,31 +78,62 @@ jobs:
                 print('未找到任何有效节点，终止运行。')
                 return
 
-            print(f'\\n扫描结束，共整合 {len(combined_proxies)} 个节点。')
+            print(f'\n扫描结束，共整合 {len(combined_proxies)} 个节点。')
 
             # 构建最终 YAML
             final_data = {'proxies': combined_proxies}
-            final_yaml = yaml.dump(final_data, allow_unicode=True, sort_keys=False)
+            final_yaml = yaml.dump(final_data, allow_unicode=True, sort_keys=False, default_flow_style=False)
+            
+            # 将 YAML 内容保存到临时文件
+            temp_file = f"temp_{filename}"
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                f.write(final_yaml)
+            
+            print(f'YAML 内容已保存到 {temp_file}，文件大小: {len(final_yaml)} 字节')
+            
+            # 读取文件内容以确认
+            with open(temp_file, 'r', encoding='utf-8') as f:
+                file_content = f.read()
+                print(f"文件前100个字符: {file_content[:100]}...")
 
-            # 上传到 Gist (修复后的异常处理)
+            # 上传到 Gist
             try:
                 print('正在上传至 Gist...')
                 g = Github(PAT)
                 gist = g.get_gist(TG_SUB_GIST_ID)
                 
-                # 调试信息：打印当前文件列表
+                # 获取当前Gist文件列表
                 print(f'Gist 原始文件: {list(gist.files.keys())}')
                 
-                gist.edit(files={filename: {'content': final_yaml}})
+                # 先尝试删除旧文件（如果存在）
+                try:
+                    gist.edit(files={filename: None})
+                    print(f"已删除旧文件 {filename}")
+                    time.sleep(1)  # 等待1秒
+                except:
+                    print(f"文件 {filename} 不存在或无法删除，将创建新文件")
+                
+                # 创建新文件
+                gist.edit(files={filename: {'content': file_content}})
                 print('✅ Gist 更新成功！')
-            except GithubException as e:
-                print(f'❌ GitHub API 错误:')
-                print(f'状态码: {e.status}')
-                print(f'错误消息: {e.data["message"] if "message" in e.data else e.data}')
-                print(f'完整响应: {e.data}')
-                exit(1)
+                
+                # 清理临时文件
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
+                    
             except Exception as e:
-                print(f'❌ 未知错误: {str(e)}')
+                print(f'❌ Gist 更新失败: {e}')
+                import traceback
+                traceback.print_exc()
+                
+                # 如果失败，保存错误日志
+                error_log = f'error_log_{int(time.time())}.txt'
+                with open(error_log, 'w', encoding='utf-8') as f:
+                    f.write(f"Error: {e}\n\n")
+                    f.write(f"Traceback:\n")
+                    traceback.print_exc(file=f)
+                print(f'错误日志已保存到: {error_log}')
+                
                 exit(1)
 
         if __name__ == '__main__':
