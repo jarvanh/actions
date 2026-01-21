@@ -13,30 +13,50 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/home-assistant/home-assistant:stable
-      options: --privileged # 此选项对某些设备通信是必需的
+      options: --privileged
 
     steps:
-      - name: Checkout repository code
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Create HomeAssistant configuration directory
-        run: mkdir -p /tmp/config
+      - name: Setup directories
+        run: |
+          mkdir -p /tmp/config
+          mkdir -p /tmp/config/custom_components
 
       - name: Install HACS
         run: |
-          # 使用curl命令下载并安装HACS
+          mkdir -p /tmp/config/custom_components/hacs
           curl -fsSL -o /tmp/hacs.zip https://github.com/hacs/integration/releases/latest/download/hacs.zip
-          # 假设你的配置文件在仓库的某个目录下
           unzip -o /tmp/hacs.zip -d /tmp/config/custom_components/hacs
+          
+          # 添加 HACS 配置
+          echo "hacs:" >> /tmp/config/configuration.yaml
+          echo "  token: ${{ secrets.PAT }}" >> /tmp/config/configuration.yaml
+          echo "  appdaemon: true" >> /tmp/config/configuration.yaml
+          echo "  python_script: true" >> /tmp/config/configuration.yaml
+          echo "  theme: true" >> /tmp/config/configuration.yaml
 
-      # - name: Copy your configuration files
-      #   run: |
-      #     # 将你仓库中的HomeAssistant配置文件（如configuration.yaml）复制到容器的配置目录
-      #     cp -r ./* /tmp/config/ || true
-
-      - name: Start HomeAssistant and wait for it to be ready
+      - name: Copy configuration
         run: |
-          # 在后台启动HomeAssistant容器
-          nohup hass -c /tmp/config --debug &
-          # 等待HomeAssistant服务启动（8123端口）
-          timeout 300 bash -c 'until echo > /dev/tcp/localhost/8123; do sleep 5; done' || exit 1
+          # 复制仓库中的配置文件
+          cp -r ./* /tmp/config/ || true
+
+      - name: Start HomeAssistant
+        run: |
+          # 启动 HomeAssistant
+          nohup hass -c /tmp/config --debug > /tmp/ha.log 2>&1 &
+          
+          # 等待服务启动
+          for i in {1..30}; do
+            if curl -s -o /dev/null -w "%{http_code}" http://localhost:8123 | grep -q "200"; then
+              echo "HomeAssistant is ready!"
+              break
+            fi
+            echo "Waiting for HomeAssistant to start... ($i/30)"
+            sleep 10
+          done
+          
+          # 显示最后100行日志用于调试
+          echo "=== HomeAssistant Logs ==="
+          tail -n 100 /tmp/ha.log
