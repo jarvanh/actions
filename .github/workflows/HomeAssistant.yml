@@ -133,18 +133,27 @@ jobs:
           echo "Home Assistant is up!"
 
       # -----------------------------------------------------------
-      # 4. 安装 HACS
+      # 4. 安装 HACS (仅在不存在时安装)
       # -----------------------------------------------------------
-      - name: Install HACS
+      - name: Install HACS (Conditional)
         run: |
-          # 进入容器下载并运行 HACS 安装脚本
-          docker exec homeassistant bash -c "wget -O - https://get.hacs.xyz | bash"
+          # 定义 HACS 在宿主机上的挂载路径
+          HACS_DIR="/dropbox/self-hosted/HomeAssistant/custom_components/hacs"
           
-          echo "HACS installed. Restarting Home Assistant..."
-          docker restart homeassistant
-          
-          # 再次等待启动
-          timeout 180s bash -c 'until curl -s http://localhost:8123 > /dev/null; do sleep 5; done'
+          if [ -d "$HACS_DIR" ]; then
+            echo "✅ HACS directory found. Skipping installation."
+          else
+            echo "🚀 HACS not found. Installing..."
+            
+            # 进入容器下载并运行 HACS 安装脚本
+            docker exec homeassistant bash -c "wget -O - https://get.hacs.xyz | bash"
+            
+            echo "HACS installed. Restarting Home Assistant to apply changes..."
+            docker restart homeassistant
+            
+            # 只有在安装了 HACS 后才需要等待重启
+            timeout 180s bash -c 'until curl -s http://localhost:8123 > /dev/null; do sleep 5; done'
+          fi
 
       # -----------------------------------------------------------
       # 5. 启动 Cloudflared 隧道 (保持运行)
