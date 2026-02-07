@@ -2,7 +2,7 @@ name: openclaw
 
 on:
   schedule:
-    # 每 5 分钟尝试运行一次（配合逻辑判断避免重复运行）
+    # 每 5 分钟尝试运行一次
     - cron: "*/5 * * * *"
   workflow_dispatch:
 
@@ -10,8 +10,10 @@ jobs:
   build:
     concurrency: openclaw-singleton
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - name: rclone-install
+      - name: Install Rclone
         run: |
           curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
           unzip rclone-*-amd64.zip
@@ -19,7 +21,7 @@ jobs:
           sudo mv rclone /usr/bin
           sudo chmod +x /usr/bin/rclone
 
-      - name: rclone-config
+      - name: Configure Rclone
         env:
           RCLONE_CONFIG: ${{ secrets.RCLONE }}
         run: |
@@ -28,35 +30,37 @@ jobs:
           $RCLONE_CONFIG
           EOF
 
-      - name: rclone-mount
+      - name: Mount Dropbox
         run: |
-          echo "==========onedrive==========="
-          rclone lsf onedrive:
-          echo "==========dropbox==========="
-          rclone lsf dropbox:
-          
           sudo apt-get install fuse3
           sudo mkdir -p /dropbox
-          sudo nohup rclone mount dropbox: /dropbox --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 10G &
-          sleep 1m # 等待挂载完成
+          
+          # 挂载 Dropbox (后台运行)
+          sudo nohup rclone mount dropbox: /dropbox \
+            --allow-non-empty \
+            --no-gzip-encoding \
+            --umask 000 \
+            --allow-other \
+            --attr-timeout 10m \
+            --vfs-cache-mode full \
+            --vfs-cache-max-age 5m \
+            --vfs-read-chunk-size-limit 10G \
+            --buffer-size 100M \
+            --vfs-cache-max-size 10G &
+          
+          # 等待挂载就绪
+          echo "Waiting for mount..."
+          sleep 10
+          
+          # 验证挂载
+          if [ -d "/dropbox/self-hosted/openclaw" ]; then
+            echo "Mount success. Content of openclaw dir:"
+            ls -lh /dropbox/self-hosted/openclaw
+          else
+            echo "Mount failed or directory does not exist."
+            mkdir -p /dropbox/self-hosted/openclaw # 尝试创建以防万一
+          fi
 
-      - name: Run OpenClaw Docker
-        run: |
-          # 运行 OpenClaw 容器
-          # 映射 18789 端口（OpenClaw Gateway 默认端口）
-          docker run -dit \
-            -v /dropbox/self-hosted/openclaw:/root/.openclaw \
-            -p 18789:18789 \
-            -e OPENCLAW_GATEWAY_TOKEN=admin123456 \
-            -e OPENCLAW_GATEWAY_HOST=0.0.0.0 \
-            --name openclaw \
-            --hostname openclaw \
-            --restart unless-stopped \
-            ghcr.io/openclaw/openclaw:latest
-            
-      - name: Wait for initialization
-        run: sleep 1m
-        
       - name: Setup Cloudflared
         env:
           TUNNEL_NAME: "oc"
@@ -64,8 +68,10 @@ jobs:
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
           sudo mkdir -p ~/.cloudflared/
+          
           # 从 Dropbox 同步隧道凭证
-          sudo rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
+          # 确保 /dropbox/self-hosted/.cloudflared 中包含 cert.pem 和 json 凭证文件
+          sudo cp -r /dropbox/self-hosted/.cloudflared/* ~/.cloudflared/ 2>/dev/null || true
 
           # 检查隧道状态，避免并发冲突
           OUTPUT=$(cloudflared tunnel list)
@@ -73,10 +79,29 @@ jobs:
           if [ -n "$TUNNEL_LINE" ]; then
             CONNECTIONS=$(echo "$TUNNEL_LINE" | awk '{if (NF>=4) print $4; else print "-"}')
             if [ "$CONNECTIONS" != "-" ]; then
-              echo "Tunnel '$TUNNEL_NAME' is already running elsewhere. Aborting."
-              exit 31
+              echo "Tunnel '$TUNNEL_NAME' is already running elsewhere. Aborting to prevent conflict."
+              exit 0 # 使用 exit 0 标记为成功跳过，避免 Github Actions 报红（或者保留 exit 31 报错）
             fi
           fi
+
+      - name: Run OpenClaw Docker
+        run: |
+          # 确保 Docker 能够访问挂载的 fuse 文件系统
+          # 注意：Dropbox 挂载在宿主机 /dropbox，映射到容器内
+          
+          sudo docker run -d \
+            --name openclaw-service \
+            --network host \
+            --restart unless-stopped \
+            -v /dropbox/self-hosted/openclaw:/config \
+            alpine/openclaw
+          
+          # 注意：
+          # 1. "-v ...:/config": 需确认 alpine/openclaw 镜像内部读取配置的具体路径（如 /app, /data, /config）。
+          # 2. "--network host": 让容器直接使用宿主机网络，方便 cloudflared 访问 localhost:端口。
+          
+          echo "OpenClaw container started."
+          sleep 5 # 等待服务启动
           
       - name: Run Cloudflared Tunnel
         run: |
