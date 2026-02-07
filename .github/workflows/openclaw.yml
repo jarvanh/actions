@@ -121,7 +121,7 @@ jobs:
 
           DEVICES=$(docker run --rm \
             -e OPENCLAW_GATEWAY_TOKEN="$TOKEN" \
-            alpine/openclaw-cli devices list)
+            openclaw/openclaw-cli devices list)
 
           echo "$DEVICES"
 
@@ -131,7 +131,7 @@ jobs:
             echo "Approving device: $REQUEST_ID"
             docker run --rm \
               -e OPENCLAW_GATEWAY_TOKEN="$TOKEN" \
-              alpine/openclaw-cli devices approve "$REQUEST_ID"
+              openclaw/openclaw-cli devices approve "$REQUEST_ID"
           else
             echo "No pending devices found."
           fi
