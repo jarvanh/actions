@@ -2,9 +2,22 @@ name: openclaw
 
 on:
   schedule:
-    # 每 5 分钟尝试运行一次
     - cron: "*/5 * * * *"
   workflow_dispatch:
+    inputs:
+      maintenance_mode:
+        description: '选择运行模式 (默认 normal 为正常运行)'
+        required: true
+        default: 'normal'
+        type: choice
+        options:
+        - normal
+        - generate_dashboard_link
+        - list_devices
+        - approve_device
+      request_id:
+        description: '输入 Request ID (仅在 approve_device 模式下需要)'
+        required: false
 
 jobs:
   build:
@@ -35,7 +48,7 @@ jobs:
           sudo apt-get install fuse3
           sudo mkdir -p /dropbox
           
-          # 挂载 Dropbox (后台运行)
+          # 挂载 Dropbox
           sudo nohup rclone mount dropbox: /dropbox \
             --allow-non-empty \
             --no-gzip-encoding \
@@ -48,50 +61,43 @@ jobs:
             --buffer-size 100M \
             --vfs-cache-max-size 10G &
           
-          # 等待挂载就绪
           echo "Waiting for mount..."
           sleep 10
           
-          # 验证挂载
           if [ -d "/dropbox/self-hosted/openclaw" ]; then
-            echo "Mount success. Content of openclaw dir:"
-            ls -lh /dropbox/self-hosted/openclaw
+            echo "Mount success."
           else
-            echo "Mount failed or directory does not exist."
-            mkdir -p /dropbox/self-hosted/openclaw # 尝试创建以防万一
+            echo "Mount failed or directory does not exist. Creating..."
+            mkdir -p /dropbox/self-hosted/openclaw
           fi
 
       - name: Setup Cloudflared
+        # 仅在正常模式或生成仪表盘链接时启动隧道
+        if: ${{ github.event.inputs.maintenance_mode != 'approve_device' && github.event.inputs.maintenance_mode != 'list_devices' }}
         env:
           TUNNEL_NAME: "oc"
         run: |
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
           sudo mkdir -p ~/.cloudflared/
-          
-          # 从 Dropbox 同步隧道凭证
-          # 确保 /dropbox/self-hosted/.cloudflared 中包含 cert.pem 和 json 凭证文件
           sudo cp -r /dropbox/self-hosted/.cloudflared/* ~/.cloudflared/ 2>/dev/null || true
 
-          # 检查隧道状态，避免并发冲突
           OUTPUT=$(cloudflared tunnel list)
           TUNNEL_LINE=$(echo "$OUTPUT" | grep -w "$TUNNEL_NAME")
           if [ -n "$TUNNEL_LINE" ]; then
             CONNECTIONS=$(echo "$TUNNEL_LINE" | awk '{if (NF>=4) print $4; else print "-"}')
             if [ "$CONNECTIONS" != "-" ]; then
-              echo "Tunnel '$TUNNEL_NAME' is already running elsewhere. Aborting to prevent conflict."
-              exit 0 # 使用 exit 0 标记为成功跳过，避免 Github Actions 报红（或者保留 exit 31 报错）
+              echo "Tunnel already running. Skipping."
             fi
           fi
 
-      - name: Run OpenClaw Docker
+      - name: Start OpenClaw Container
         env:
-          # 将 GitHub Secret 映射为环境变量，或者直接在这里写死临时 Token
           TOKEN: ${{ secrets.OPENCLAW_TOKEN }} 
         run: |
-          # 如果没有设置 Secret，给一个默认值防止报错（可选）
-          [ -z "$TOKEN" ] && TOKEN="my-temporary-secret-token-123"
+          [ -z "$TOKEN" ] && TOKEN="default-token"
 
+          # 启动容器（所有模式都需要容器运行来处理数据库/配置）
           sudo docker run -d \
             --name openclaw \
             --network host \
@@ -101,23 +107,63 @@ jobs:
             alpine/openclaw
           
           echo "OpenClaw container started."
-          sleep 5
-          
-      - name: Run Cloudflared Tunnel
+          sleep 10
+
+      # --- 维护模式逻辑开始 ---
+
+      - name: [Mode] Generate Dashboard Link
+        if: ${{ github.event.inputs.maintenance_mode == 'generate_dashboard_link' }}
         run: |
-          # 绑定域名并启动隧道
+          echo "Generating Dashboard Link..."
+          # 执行 dashboard 命令并打印日志
+          sudo docker exec openclaw ./openclaw dashboard --no-open
+          
+          echo "========================================================"
+          echo "请复制上面的 URL 在浏览器中打开。"
+          echo "浏览器会提示 'Pairing request sent'。"
+          echo "然后请手动停止此工作流，并运行 'list_devices' 模式。"
+          echo "========================================================"
+          
+          # 保持运行一段时间，让你有时间点击链接
+          sleep 600 
+
+      - name: [Mode] List Devices
+        if: ${{ github.event.inputs.maintenance_mode == 'list_devices' }}
+        run: |
+          echo "Listing Devices..."
+          sudo docker exec openclaw ./openclaw devices list
+          
+          echo "========================================================"
+          echo "请在上方日志中找到您的 Request ID。"
+          echo "复制该 ID，然后运行 'approve_device' 模式。"
+          echo "========================================================"
+
+      - name: [Mode] Approve Device
+        if: ${{ github.event.inputs.maintenance_mode == 'approve_device' }}
+        env:
+          REQ_ID: ${{ github.event.inputs.request_id }}
+        run: |
+          if [ -z "$REQ_ID" ]; then
+            echo "Error: Request ID is missing."
+            exit 1
+          fi
+          echo "Approving device: $REQ_ID"
+          sudo docker exec openclaw ./openclaw devices approve $REQ_ID
+          
+          echo "Device approved! Configuration saved to Dropbox."
+
+      # --- 维护模式逻辑结束 ---
+
+      - name: Run Cloudflared Tunnel (Normal Mode)
+        if: ${{ github.event.inputs.maintenance_mode == 'normal' || github.event.inputs.maintenance_mode == '' }}
+        run: |
           cloudflared tunnel route dns oc oc.'${{ secrets.VD }}'.eu.org
-          # 将隧道指向 OpenClaw 的 Gateway 端口 18789
           nohup cloudflared tunnel run --url http://127.0.0.1:18789 oc &
        
-      - name: Wait and Check Logs
+      - name: Keep Alive (Normal Mode Only)
+        if: ${{ github.event.inputs.maintenance_mode == 'normal' || github.event.inputs.maintenance_mode == '' }}
         run: |
-          echo "Waiting for OpenClaw to stabilize..."
+          echo "OpenClaw is running normally."
           docker ps
-          docker logs openclaw           
-          
-      - name: Keep Alive
-        run: |
-          echo "OpenClaw is running at https://oc.${{ secrets.VD }}.eu.org"
-          docker ps
-          sudo sleep 350m
+          # 保持运行 6 小时
+          sudo sleep 360m
