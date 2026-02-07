@@ -52,8 +52,8 @@ jobs:
             --name openclaw \
             --hostname openclaw \
             --restart unless-stopped \
-            openclaw/openclaw:latest
-
+            ghcr.io/openclaw/openclaw:latest
+            
       - name: Wait for initialization
         run: sleep 1m
         
