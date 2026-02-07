@@ -48,7 +48,7 @@ jobs:
           sudo apt-get install fuse3
           sudo mkdir -p /dropbox
           
-          # 挂载 Dropbox
+          # 挂载 Dropbox (增加权限参数)
           sudo nohup rclone mount dropbox: /dropbox \
             --allow-non-empty \
             --no-gzip-encoding \
@@ -63,7 +63,10 @@ jobs:
           
           echo "Waiting for mount..."
           sleep 10
-          mkdir -p /dropbox/self-hosted/openclaw
+          
+          # 关键修复：确保目录存在且权限开放，否则 node 用户无法写入
+          sudo mkdir -p /dropbox/self-hosted/openclaw
+          sudo chmod 777 /dropbox/self-hosted/openclaw
 
       - name: Install Cloudflared
         run: |
@@ -78,39 +81,38 @@ jobs:
         run: |
           [ -z "$TOKEN" ] && TOKEN="default-token"
 
+          # 关键修复：修改挂载路径 -v ...:/home/node/.openclaw
           sudo docker run -d \
             --name openclaw \
             --network host \
             --restart unless-stopped \
             -e OPENCLAW_GATEWAY_TOKEN="$TOKEN" \
-            -v /dropbox/self-hosted/openclaw:/config \
+            -v /dropbox/self-hosted/openclaw:/home/node/.openclaw \
             alpine/openclaw
           
           echo "OpenClaw container started. Initializing..."
 
-      # --- 新增：核心健康检查步骤 ---
-      # 这一步会阻塞流程，直到 OpenClaw 真正准备好，避免 1006 错误
+      # --- 健康检查 ---
       - name: Wait for OpenClaw Readiness
         run: |
           echo "Waiting for OpenClaw port 18789 to be open..."
-          
-          # 循环尝试连接，最多等待 60 秒
           RETRIES=0
           until curl -s http://127.0.0.1:18789 > /dev/null || [ $RETRIES -eq 30 ]; do
             echo "Waiting for server (Attempt $((++RETRIES)))..."
             sleep 2
           done
           
-          # 如果等待超时，打印日志并报错
           if ! curl -s http://127.0.0.1:18789 > /dev/null; then
-            echo "❌ Error: Server failed to start within 60 seconds."
-            echo "=== DOCKER LOGS (DEBUG) ==="
+            echo "❌ Error: Server failed to start."
             sudo docker logs openclaw
-            echo "==========================="
             exit 1
           fi
           
-          echo "✅ Server is UP and Ready!"
+          echo "✅ Server is UP!"
+          
+          # 验证文件是否已生成
+          echo "Checking if files are created in Dropbox..."
+          ls -la /dropbox/self-hosted/openclaw
 
       # --- 维护模式逻辑 ---
 
@@ -137,15 +139,16 @@ jobs:
           
           echo "========================================================"
           echo "【访问链接】"
-          echo "https://oc.${{ secrets.VD }}.eu.org/?token=${{ secrets.OPENCLAW_TOKEN }}"
+          echo "请在浏览器访问： https://oc.${{ secrets.VD }}.eu.org/?token=${{ secrets.OPENCLAW_TOKEN }}"
           echo "========================================================"
           cat dashboard_output.txt
+          
+          echo "正在保持运行，请访问链接。访问后请等待 1-2 分钟让数据同步..."
           sleep 600
 
       - name: "[Mode] List Devices"
         if: ${{ github.event.inputs.maintenance_mode == 'list_devices' }}
         run: |
-          # 查找入口
           JS_FILE=""
           for path in /app/index.js /app/dist/index.js /app/main.js; do
             if sudo docker exec openclaw ls $path >/dev/null 2>&1; then JS_FILE=$path; break; fi
@@ -155,7 +158,7 @@ jobs:
           sudo docker exec openclaw node $JS_FILE devices list
           
           echo "========================================================"
-          echo "请复制上面的 Request ID。"
+          echo "请查找 'Pending' 下方的 Request ID。"
           echo "========================================================"
 
       - name: "[Mode] Approve Device"
