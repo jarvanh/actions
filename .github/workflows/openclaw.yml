@@ -4,19 +4,28 @@ on:
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
+    inputs:
+      maintenance_mode:
+        description: '选择运行模式 (默认 normal 为正常运行)'
+        required: true
+        default: 'normal'
+        type: choice
+        options:
+        - normal
+        - generate_dashboard_link
+        - list_devices
+        - approve_device
+      request_id:
+        description: '输入 Request ID (仅在 approve_device 模式下需要)'
+        required: false
 
 jobs:
   build:
     concurrency: openclaw-singleton
     runs-on: ubuntu-latest
-
     permissions:
       contents: read
-
     steps:
-      # --------------------------------------------------
-      # 1. 安装 rclone
-      # --------------------------------------------------
       - name: Install Rclone
         run: |
           curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
@@ -25,146 +34,135 @@ jobs:
           sudo mv rclone /usr/bin
           sudo chmod +x /usr/bin/rclone
 
-      # --------------------------------------------------
-      # 2. 配置 rclone
-      # --------------------------------------------------
       - name: Configure Rclone
         env:
           RCLONE_CONFIG: ${{ secrets.RCLONE }}
         run: |
-          mkdir -p ~/.config/rclone
+          mkdir -p ~/.config/rclone/
           cat << EOF > ~/.config/rclone/rclone.conf
           $RCLONE_CONFIG
           EOF
 
-      # --------------------------------------------------
-      # 3. 挂载 Dropbox
-      # --------------------------------------------------
       - name: Mount Dropbox
         run: |
-          sudo apt-get update
-          sudo apt-get install -y fuse3
+          sudo apt-get install fuse3
           sudo mkdir -p /dropbox
-
+          
+          # 挂载 Dropbox
           sudo nohup rclone mount dropbox: /dropbox \
             --allow-non-empty \
-            --allow-other \
+            --no-gzip-encoding \
             --umask 000 \
+            --allow-other \
             --attr-timeout 10m \
             --vfs-cache-mode full \
-            --vfs-cache-max-size 10G \
             --vfs-cache-max-age 5m \
-            --buffer-size 100M &
-
+            --vfs-read-chunk-size-limit 10G \
+            --buffer-size 100M \
+            --vfs-cache-max-size 10G &
+          
           echo "Waiting for mount..."
-          sleep 15
+          sleep 10
+          
+          if [ -d "/dropbox/self-hosted/openclaw" ]; then
+            echo "Mount success."
+          else
+            echo "Mount failed or directory does not exist. Creating..."
+            mkdir -p /dropbox/self-hosted/openclaw
+          fi
 
-          mkdir -p /dropbox/self-hosted/openclaw
-          mkdir -p /dropbox/self-hosted/.cloudflared
-
-          ls -lh /dropbox/self-hosted || true
-
-      # --------------------------------------------------
-      # 4. 安装 cloudflared + 同步凭证
-      # --------------------------------------------------
       - name: Setup Cloudflared
+        # 仅在正常模式或生成仪表盘链接时启动隧道
+        if: ${{ github.event.inputs.maintenance_mode != 'approve_device' && github.event.inputs.maintenance_mode != 'list_devices' }}
         env:
-          TUNNEL_NAME: oc
+          TUNNEL_NAME: "oc"
         run: |
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
+          sudo mkdir -p ~/.cloudflared/
+          sudo cp -r /dropbox/self-hosted/.cloudflared/* ~/.cloudflared/ 2>/dev/null || true
 
-          mkdir -p ~/.cloudflared
-          cp -r /dropbox/self-hosted/.cloudflared/* ~/.cloudflared/ 2>/dev/null || true
-
-          echo "Checking tunnel status..."
-          OUTPUT=$(cloudflared tunnel list || true)
-          echo "$OUTPUT"
-
-          if echo "$OUTPUT" | grep -w "$TUNNEL_NAME" | grep -q '[0-9]'; then
-            echo "Tunnel already active elsewhere. Exit gracefully."
-            exit 0
+          OUTPUT=$(cloudflared tunnel list)
+          TUNNEL_LINE=$(echo "$OUTPUT" | grep -w "$TUNNEL_NAME")
+          if [ -n "$TUNNEL_LINE" ]; then
+            CONNECTIONS=$(echo "$TUNNEL_LINE" | awk '{if (NF>=4) print $4; else print "-"}')
+            if [ "$CONNECTIONS" != "-" ]; then
+              echo "Tunnel already running. Skipping."
+            fi
           fi
 
-      # --------------------------------------------------
-      # 5. 启动 OpenClaw Gateway
-      # --------------------------------------------------
-      - name: Run OpenClaw Docker
+      - name: Start OpenClaw Container
         env:
-          TOKEN: ${{ secrets.OPENCLAW_TOKEN }}
+          TOKEN: ${{ secrets.OPENCLAW_TOKEN }} 
         run: |
-          [ -z "$TOKEN" ] && echo "OPENCLAW_TOKEN is missing!" && exit 1
+          [ -z "$TOKEN" ] && TOKEN="default-token"
 
-          docker rm -f openclaw 2>/dev/null || true
-
-          docker run -d \
+          # 启动容器（所有模式都需要容器运行来处理数据库/配置）
+          sudo docker run -d \
             --name openclaw \
             --network host \
             --restart unless-stopped \
             -e OPENCLAW_GATEWAY_TOKEN="$TOKEN" \
             -v /dropbox/self-hosted/openclaw:/config \
             alpine/openclaw
-
-          echo "Waiting OpenClaw startup..."
+          
+          echo "OpenClaw container started."
           sleep 10
-          docker logs openclaw || true
 
-      # --------------------------------------------------
-      # 6. 🔐 自动批准设备（最关键）
-      # --------------------------------------------------
-      - name: Auto Approve OpenClaw Device
-        env:
-          TOKEN: ${{ secrets.OPENCLAW_TOKEN }}
+      # --- 维护模式逻辑开始 ---
+
+      - name: [Mode] Generate Dashboard Link
+        if: ${{ github.event.inputs.maintenance_mode == 'generate_dashboard_link' }}
         run: |
-          echo "Waiting for device request..."
-          sleep 10
+          echo "Generating Dashboard Link..."
+          # 执行 dashboard 命令并打印日志
+          sudo docker exec openclaw ./openclaw dashboard --no-open
+          
+          echo "========================================================"
+          echo "请复制上面的 URL 在浏览器中打开。"
+          echo "浏览器会提示 'Pairing request sent'。"
+          echo "然后请手动停止此工作流，并运行 'list_devices' 模式。"
+          echo "========================================================"
+          
+          # 保持运行一段时间，让你有时间点击链接
+          sleep 600 
 
-          DEVICES=$(docker run --rm \
-            -e OPENCLAW_GATEWAY_TOKEN="$TOKEN" \
-            openclaw/openclaw-cli devices list)
+      - name: [Mode] List Devices
+        if: ${{ github.event.inputs.maintenance_mode == 'list_devices' }}
+        run: |
+          echo "Listing Devices..."
+          sudo docker exec openclaw ./openclaw devices list
+          
+          echo "========================================================"
+          echo "请在上方日志中找到您的 Request ID。"
+          echo "复制该 ID，然后运行 'approve_device' 模式。"
+          echo "========================================================"
 
-          echo "$DEVICES"
-
-          REQUEST_ID=$(echo "$DEVICES" | grep -i pending | awk '{print $1}')
-
-          if [ -n "$REQUEST_ID" ]; then
-            echo "Approving device: $REQUEST_ID"
-            docker run --rm \
-              -e OPENCLAW_GATEWAY_TOKEN="$TOKEN" \
-              openclaw/openclaw-cli devices approve "$REQUEST_ID"
-          else
-            echo "No pending devices found."
+      - name: [Mode] Approve Device
+        if: ${{ github.event.inputs.maintenance_mode == 'approve_device' }}
+        env:
+          REQ_ID: ${{ github.event.inputs.request_id }}
+        run: |
+          if [ -z "$REQ_ID" ]; then
+            echo "Error: Request ID is missing."
+            exit 1
           fi
+          echo "Approving device: $REQ_ID"
+          sudo docker exec openclaw ./openclaw devices approve $REQ_ID
+          
+          echo "Device approved! Configuration saved to Dropbox."
 
-      # --------------------------------------------------
-      # 7. 启动 Cloudflare Tunnel
-      # --------------------------------------------------
-      - name: Run Cloudflared Tunnel
-        env:
-          VD: ${{ secrets.VD }}
+      # --- 维护模式逻辑结束 ---
+
+      - name: Run Cloudflared Tunnel (Normal Mode)
+        if: ${{ github.event.inputs.maintenance_mode == 'normal' || github.event.inputs.maintenance_mode == '' }}
         run: |
-          cloudflared tunnel route dns oc oc.${VD}.eu.org || true
-
-          nohup cloudflared tunnel run \
-            --url http://127.0.0.1:18789 \
-            oc &
-
-          sleep 5
-
-      # --------------------------------------------------
-      # 8. 状态检查
-      # --------------------------------------------------
-      - name: Check Status
+          cloudflared tunnel route dns oc oc.'${{ secrets.VD }}'.eu.org
+          nohup cloudflared tunnel run --url http://127.0.0.1:18789 oc &
+       
+      - name: Keep Alive (Normal Mode Only)
+        if: ${{ github.event.inputs.maintenance_mode == 'normal' || github.event.inputs.maintenance_mode == '' }}
         run: |
+          echo "OpenClaw is running normally."
           docker ps
-          docker logs openclaw || true
-
-      # --------------------------------------------------
-      # 9. Keep Alive
-      # --------------------------------------------------
-      - name: Keep Alive
-        env:
-          VD: ${{ secrets.VD }}
-        run: |
-          echo "OpenClaw running at https://oc.${VD}.eu.org"
-          sleep 350m
+          sudo sleep 350m
