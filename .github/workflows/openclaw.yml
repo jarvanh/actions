@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       maintenance_mode:
-        description: '选择运行模式 (默认 normal 为正常运行)'
+        description: '选择运行模式'
         required: true
         default: 'normal'
         type: choice
@@ -63,16 +63,10 @@ jobs:
           
           echo "Waiting for mount..."
           sleep 10
-          
-          if [ -d "/dropbox/self-hosted/openclaw" ]; then
-            echo "Mount success."
-          else
-            echo "Mount failed or directory does not exist. Creating..."
-            mkdir -p /dropbox/self-hosted/openclaw
-          fi
+          mkdir -p /dropbox/self-hosted/openclaw
 
       - name: Setup Cloudflared
-        if: ${{ github.event.inputs.maintenance_mode != 'approve_device' && github.event.inputs.maintenance_mode != 'list_devices' }}
+        if: ${{ github.event.inputs.maintenance_mode != 'approve_device' && github.event.inputs.maintenance_mode != 'list_devices' && github.event.inputs.maintenance_mode != 'generate_dashboard_link' }}
         env:
           TUNNEL_NAME: "oc"
         run: |
@@ -80,15 +74,6 @@ jobs:
           sudo dpkg -i cloudflared-linux-amd64.deb
           sudo mkdir -p ~/.cloudflared/
           sudo cp -r /dropbox/self-hosted/.cloudflared/* ~/.cloudflared/ 2>/dev/null || true
-
-          OUTPUT=$(cloudflared tunnel list)
-          TUNNEL_LINE=$(echo "$OUTPUT" | grep -w "$TUNNEL_NAME")
-          if [ -n "$TUNNEL_LINE" ]; then
-            CONNECTIONS=$(echo "$TUNNEL_LINE" | awk '{if (NF>=4) print $4; else print "-"}')
-            if [ "$CONNECTIONS" != "-" ]; then
-              echo "Tunnel already running. Skipping."
-            fi
-          fi
 
       - name: Start OpenClaw Container
         env:
@@ -107,45 +92,74 @@ jobs:
           echo "OpenClaw container started."
           sleep 10
 
-      # --- 维护模式逻辑开始 ---
+      # --- 智能侦测与执行脚本 ---
 
       - name: "[Mode] Generate Dashboard Link"
         if: ${{ github.event.inputs.maintenance_mode == 'generate_dashboard_link' }}
         run: |
-          echo "Locating OpenClaw binary..."
-          # 自动查找二进制文件位置并执行
-          BIN_PATH=$(sudo docker exec openclaw find / -type f -name openclaw 2>/dev/null | head -n 1)
+          echo "Debug: Listing /app directory..."
+          sudo docker exec openclaw ls -F /app
           
-          if [ -z "$BIN_PATH" ]; then
-            echo "Error: Could not find 'openclaw' binary in container."
-            echo "Debug: Listing root directory..."
-            sudo docker exec openclaw ls -la /
-            exit 1
+          echo "Detecting entrypoint..."
+          # 从 Docker 配置中抓取启动命令 (Cmd)
+          ENTRY_CMD=$(sudo docker inspect --format='{{range .Config.Cmd}}{{.}} {{end}}' openclaw)
+          echo "Container Start Command: $ENTRY_CMD"
+          
+          # 尝试从启动命令中提取 .js 文件路径
+          JS_FILE=$(echo "$ENTRY_CMD" | grep -oE '/app/[a-zA-Z0-9_./-]+\.js' | head -n 1)
+          
+          # 如果提取失败，尝试常见的默认路径
+          if [ -z "$JS_FILE" ]; then
+             echo "Could not auto-detect JS file from CMD. Trying common defaults..."
+             if sudo docker exec openclaw ls /app/index.js >/dev/null 2>&1; then
+                JS_FILE="/app/index.js"
+             elif sudo docker exec openclaw ls /app/dist/index.js >/dev/null 2>&1; then
+                JS_FILE="/app/dist/index.js"
+             elif sudo docker exec openclaw ls /app/main.js >/dev/null 2>&1; then
+                JS_FILE="/app/main.js"
+             fi
           fi
           
-          echo "Found binary at: $BIN_PATH"
-          sudo docker exec openclaw $BIN_PATH dashboard --no-open
+          if [ -z "$JS_FILE" ]; then
+             echo "Error: Cannot find the main JS file. Please check the 'ls /app' log above."
+             exit 1
+          fi
+          
+          echo "Found entry file: $JS_FILE"
+          echo "Executing Dashboard command..."
+          
+          # 使用 node 执行找到的文件
+          sudo docker exec openclaw node $JS_FILE dashboard --no-open
           
           echo "========================================================"
           echo "请复制上面的 URL 在浏览器中打开。"
-          echo "浏览器会提示 'Pairing request sent'。"
-          echo "然后请手动停止此工作流，并运行 'list_devices' 模式。"
           echo "========================================================"
-          
-          sleep 600 
+          sleep 600
 
       - name: "[Mode] List Devices"
         if: ${{ github.event.inputs.maintenance_mode == 'list_devices' }}
         run: |
-          echo "Locating OpenClaw binary..."
-          BIN_PATH=$(sudo docker exec openclaw find / -type f -name openclaw 2>/dev/null | head -n 1)
-          echo "Found binary at: $BIN_PATH"
+          # 简化逻辑：直接复用上面的查找逻辑（为了代码简洁，这里使用最可能的路径）
+          # 根据刚才的经验，我们先找文件
+          JS_FILE=""
+          for path in /app/index.js /app/dist/index.js /app/main.js; do
+            if sudo docker exec openclaw ls $path >/dev/null 2>&1; then
+               JS_FILE=$path
+               break
+            fi
+          done
           
-          sudo docker exec openclaw $BIN_PATH devices list
+          if [ -z "$JS_FILE" ]; then
+             # 如果找不到，尝试 inspect
+             ENTRY_CMD=$(sudo docker inspect --format='{{range .Config.Cmd}}{{.}} {{end}}' openclaw)
+             JS_FILE=$(echo "$ENTRY_CMD" | grep -oE '/app/[a-zA-Z0-9_./-]+\.js' | head -n 1)
+          fi
+          
+          echo "Executing using: $JS_FILE"
+          sudo docker exec openclaw node $JS_FILE devices list
           
           echo "========================================================"
-          echo "请在上方日志中找到您的 Request ID。"
-          echo "复制该 ID，然后运行 'approve_device' 模式。"
+          echo "请复制 Request ID。"
           echo "========================================================"
 
       - name: "[Mode] Approve Device"
@@ -153,21 +167,23 @@ jobs:
         env:
           REQ_ID: ${{ github.event.inputs.request_id }}
         run: |
-          if [ -z "$REQ_ID" ]; then
-            echo "Error: Request ID is missing."
-            exit 1
+          JS_FILE=""
+          for path in /app/index.js /app/dist/index.js /app/main.js; do
+            if sudo docker exec openclaw ls $path >/dev/null 2>&1; then
+               JS_FILE=$path
+               break
+            fi
+          done
+          
+          if [ -z "$JS_FILE" ]; then
+             ENTRY_CMD=$(sudo docker inspect --format='{{range .Config.Cmd}}{{.}} {{end}}' openclaw)
+             JS_FILE=$(echo "$ENTRY_CMD" | grep -oE '/app/[a-zA-Z0-9_./-]+\.js' | head -n 1)
           fi
           
-          echo "Locating OpenClaw binary..."
-          BIN_PATH=$(sudo docker exec openclaw find / -type f -name openclaw 2>/dev/null | head -n 1)
-          echo "Found binary at: $BIN_PATH"
-          
-          echo "Approving device: $REQ_ID"
-          sudo docker exec openclaw $BIN_PATH devices approve $REQ_ID
-          
-          echo "Device approved! Configuration saved to Dropbox."
+          sudo docker exec openclaw node $JS_FILE devices approve $REQ_ID
+          echo "Device Approved."
 
-      # --- 维护模式逻辑结束 ---
+      # --- 结束 ---
 
       - name: Run Cloudflared Tunnel (Normal Mode)
         if: ${{ github.event.inputs.maintenance_mode == 'normal' || github.event.inputs.maintenance_mode == '' }}
@@ -178,6 +194,6 @@ jobs:
       - name: Keep Alive (Normal Mode Only)
         if: ${{ github.event.inputs.maintenance_mode == 'normal' || github.event.inputs.maintenance_mode == '' }}
         run: |
-          echo "OpenClaw is running normally."
+          echo "OpenClaw is running."
           docker ps
           sudo sleep 360m
