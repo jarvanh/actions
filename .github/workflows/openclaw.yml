@@ -97,7 +97,7 @@ jobs:
         run: |
           [ -z "$TOKEN" ] && TOKEN="default-token"
 
-          # 启动容器（所有模式都需要容器运行来处理数据库/配置）
+          # 启动容器
           sudo docker run -d \
             --name openclaw \
             --network host \
@@ -111,11 +111,10 @@ jobs:
 
       # --- 维护模式逻辑开始 ---
 
-      - name: [Mode] Generate Dashboard Link
+      - name: "[Mode] Generate Dashboard Link"
         if: ${{ github.event.inputs.maintenance_mode == 'generate_dashboard_link' }}
         run: |
           echo "Generating Dashboard Link..."
-          # 执行 dashboard 命令并打印日志
           sudo docker exec openclaw ./openclaw dashboard --no-open
           
           echo "========================================================"
@@ -124,10 +123,9 @@ jobs:
           echo "然后请手动停止此工作流，并运行 'list_devices' 模式。"
           echo "========================================================"
           
-          # 保持运行一段时间，让你有时间点击链接
           sleep 600 
 
-      - name: [Mode] List Devices
+      - name: "[Mode] List Devices"
         if: ${{ github.event.inputs.maintenance_mode == 'list_devices' }}
         run: |
           echo "Listing Devices..."
@@ -138,7 +136,7 @@ jobs:
           echo "复制该 ID，然后运行 'approve_device' 模式。"
           echo "========================================================"
 
-      - name: [Mode] Approve Device
+      - name: "[Mode] Approve Device"
         if: ${{ github.event.inputs.maintenance_mode == 'approve_device' }}
         env:
           REQ_ID: ${{ github.event.inputs.request_id }}
@@ -165,4 +163,4 @@ jobs:
         run: |
           echo "OpenClaw is running normally."
           docker ps
-          sudo sleep 350m
+          sudo sleep 360m
