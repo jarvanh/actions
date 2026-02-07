@@ -1,0 +1,92 @@
+name: openclaw
+
+on:
+  schedule:
+    # 每 5 分钟尝试运行一次（配合逻辑判断避免重复运行）
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  build:
+    concurrency: openclaw-singleton
+    runs-on: ubuntu-latest
+    steps:
+      - name: rclone-install
+        run: |
+          curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
+          unzip rclone-*-amd64.zip
+          cd rclone-*-linux-amd64
+          sudo mv rclone /usr/bin
+          sudo chmod +x /usr/bin/rclone
+
+      - name: rclone-config
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE }}
+        run: |
+          mkdir -p ~/.config/rclone/
+          cat << EOF > ~/.config/rclone/rclone.conf
+          $RCLONE_CONFIG
+          EOF
+
+      - name: rclone-mount
+        run: |
+          echo "==========onedrive==========="
+          rclone lsf onedrive:
+          echo "==========dropbox==========="
+          rclone lsf dropbox:
+          
+          sudo apt-get install fuse3
+          sudo mkdir -p /dropbox
+          sudo nohup rclone mount dropbox: /dropbox --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 10G &
+          sleep 1m # 等待挂载完成
+
+      - name: Run OpenClaw Docker
+        run: |
+          # 创建数据目录
+          sudo mkdir -p /dropbox/openclaw
+          # 运行 OpenClaw 容器
+          # 映射 18789 端口（OpenClaw Gateway 默认端口）
+          docker run -dit \
+            -v /dropbox/openclaw:/root/.openclaw \
+            -p 18789:18789 \
+            --name openclaw \
+            --hostname openclaw \
+            --restart unless-stopped \
+            openclaw/openclaw:latest
+
+      - name: Wait for initialization
+        run: sleep 1m
+        
+      - name: Setup Cloudflared
+        env:
+          TUNNEL_NAME: "oc"
+        run: |
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
+          sudo mkdir -p ~/.cloudflared/
+          # 从 Dropbox 同步隧道凭证
+          sudo rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
+
+          # 检查隧道状态，避免并发冲突
+          OUTPUT=$(cloudflared tunnel list)
+          TUNNEL_LINE=$(echo "$OUTPUT" | grep -w "$TUNNEL_NAME")
+          if [ -n "$TUNNEL_LINE" ]; then
+            CONNECTIONS=$(echo "$TUNNEL_LINE" | awk '{if (NF>=4) print $4; else print "-"}')
+            if [ "$CONNECTIONS" != "-" ]; then
+              echo "Tunnel '$TUNNEL_NAME' is already running elsewhere. Aborting."
+              exit 31
+            fi
+          fi
+          
+      - name: Run Cloudflared Tunnel
+        run: |
+          # 绑定域名并启动隧道
+          cloudflared tunnel route dns oc oc.'${{ secrets.VD }}'.eu.org
+          # 将隧道指向 OpenClaw 的 Gateway 端口 18789
+          nohup cloudflared tunnel run --url http://127.0.0.1:18789 oc &
+
+      - name: Keep Alive
+        run: |
+          echo "OpenClaw is running at https://oc.${{ secrets.VD }}.eu.org"
+          docker ps
+          sudo sleep 340m
