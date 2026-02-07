@@ -85,23 +85,23 @@ jobs:
           fi
 
       - name: Run OpenClaw Docker
+        env:
+          # 将 GitHub Secret 映射为环境变量，或者直接在这里写死临时 Token
+          TOKEN: ${{ secrets.OPENCLAW_TOKEN }} 
         run: |
-          # 确保 Docker 能够访问挂载的 fuse 文件系统
-          # 注意：Dropbox 挂载在宿主机 /dropbox，映射到容器内
-          
+          # 如果没有设置 Secret，给一个默认值防止报错（可选）
+          [ -z "$TOKEN" ] && TOKEN="my-temporary-secret-token-123"
+
           sudo docker run -d \
-            --name openclaw \
+            --name openclaw-service \
             --network host \
             --restart unless-stopped \
+            -e OPENCLAW_GATEWAY_TOKEN="$TOKEN" \
             -v /dropbox/self-hosted/openclaw:/config \
             alpine/openclaw
           
-          # 注意：
-          # 1. "-v ...:/config": 需确认 alpine/openclaw 镜像内部读取配置的具体路径（如 /app, /data, /config）。
-          # 2. "--network host": 让容器直接使用宿主机网络，方便 cloudflared 访问 localhost:端口。
-          
           echo "OpenClaw container started."
-          sleep 5 # 等待服务启动
+          sleep 5
           
       - name: Run Cloudflared Tunnel
         run: |
