@@ -90,7 +90,7 @@ jobs:
           # 注意：Dropbox 挂载在宿主机 /dropbox，映射到容器内
           
           sudo docker run -d \
-            --name openclaw-service \
+            --name openclaw \
             --network host \
             --restart unless-stopped \
             -v /dropbox/self-hosted/openclaw:/config \
