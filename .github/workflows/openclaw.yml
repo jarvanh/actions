@@ -39,33 +39,6 @@ jobs:
           sudo mkdir -p /dropbox
           sudo nohup rclone mount dropbox: /dropbox --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 10G &
           sleep 1m # 等待挂载完成
-      - name: Generate OpenClaw Config if not exists
-        run: |
-          CONFIG_PATH="/dropbox/self-hosted/openclaw/openclaw.json"
-          # 设置一个你喜欢的登录密码（Token）
-          MY_TOKEN="admin123456" 
-          
-          if [ -f "$CONFIG_PATH" ]; then
-            echo "✅ 发现现有配置，正在确保 Token 环境变量生效。"
-          else
-            echo "⚠️ 正在生成包含 Token 的基础配置..."
-            sudo mkdir -p /dropbox/openclaw
-            sudo tee "$CONFIG_PATH" > /dev/null <<EOF
-          {
-            "gateway": {
-              "auth": {
-                "type": "token",
-                "token": "$MY_TOKEN"
-              }
-            }
-          }
-          EOF
-          fi
-          
-          sudo chmod -R 777 /dropbox/openclaw
-          
-          # 确保权限正确，防止 Docker 无法读取
-          sudo chmod -R 777 /dropbox/self-hosted/openclaw
 
       - name: Run OpenClaw Docker
         run: |
@@ -74,6 +47,7 @@ jobs:
           docker run -dit \
             -v /dropbox/self-hosted/openclaw:/root/.openclaw \
             -p 18789:18789 \
+            -e OPENCLAW_GATEWAY_TOKEN=admin123456 \
             --name openclaw \
             --hostname openclaw \
             --restart unless-stopped \
