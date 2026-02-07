@@ -115,7 +115,8 @@ jobs:
         if: ${{ github.event.inputs.maintenance_mode == 'generate_dashboard_link' }}
         run: |
           echo "Generating Dashboard Link..."
-          sudo docker exec openclaw ./openclaw dashboard --no-open
+          # 修正点：去掉 ./，直接调用 openclaw
+          sudo docker exec openclaw openclaw dashboard --no-open
           
           echo "========================================================"
           echo "请复制上面的 URL 在浏览器中打开。"
@@ -129,7 +130,8 @@ jobs:
         if: ${{ github.event.inputs.maintenance_mode == 'list_devices' }}
         run: |
           echo "Listing Devices..."
-          sudo docker exec openclaw ./openclaw devices list
+          # 修正点：去掉 ./
+          sudo docker exec openclaw openclaw devices list
           
           echo "========================================================"
           echo "请在上方日志中找到您的 Request ID。"
@@ -146,21 +148,7 @@ jobs:
             exit 1
           fi
           echo "Approving device: $REQ_ID"
-          sudo docker exec openclaw ./openclaw devices approve $REQ_ID
+          # 修正点：去掉 ./
+          sudo docker exec openclaw openclaw devices approve $REQ_ID
           
-          echo "Device approved! Configuration saved to Dropbox."
-
-      # --- 维护模式逻辑结束 ---
-
-      - name: Run Cloudflared Tunnel (Normal Mode)
-        if: ${{ github.event.inputs.maintenance_mode == 'normal' || github.event.inputs.maintenance_mode == '' }}
-        run: |
-          cloudflared tunnel route dns oc oc.'${{ secrets.VD }}'.eu.org
-          nohup cloudflared tunnel run --url http://127.0.0.1:18789 oc &
-       
-      - name: Keep Alive (Normal Mode Only)
-        if: ${{ github.event.inputs.maintenance_mode == 'normal' || github.event.inputs.maintenance_mode == '' }}
-        run: |
-          echo "OpenClaw is running normally."
-          docker ps
-          sudo sleep 360m
+          echo "Device approved! Configuration
