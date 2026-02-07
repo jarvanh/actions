@@ -168,13 +168,34 @@ jobs:
         run: |
           if [ -z "$REQ_ID" ]; then echo "Error: Request ID missing"; exit 1; fi
           
+          # 1. 查找执行入口
           JS_FILE=""
           for path in /app/index.js /app/dist/index.js /app/main.js; do
             if sudo docker exec openclaw ls $path >/dev/null 2>&1; then JS_FILE=$path; break; fi
           done
           
+          # 2. 执行批准
+          echo "Approving device..."
           sudo docker exec openclaw node $JS_FILE devices approve $REQ_ID
-          echo "Device Approved."
+          echo "✅ Device Approved command sent."
+          
+          # 3. 关键步骤：停止容器以强制 SQLite 写入磁盘
+          echo "🛑 Stopping container to flush database..."
+          sudo docker stop openclaw
+          
+          # 4. 关键步骤：强制同步
+          # Rclone 的 VFS 缓存需要时间上传。我们通过列出文件和显式复制来触发同步。
+          echo "⏳ Waiting for Rclone to sync to Dropbox (sleeping 60s)..."
+          sleep 60
+          
+          echo "📂 Checking local mount content:"
+          ls -lh /dropbox/self-hosted/openclaw/
+          
+          echo "🔄 Force triggering Rclone upload..."
+          # 这一步看似多余，但能确保缓存被“推”到云端
+          rclone copy /dropbox/self-hosted/openclaw/ dropbox:self-hosted/openclaw/ --transfers 4 --ignore-times
+          
+          echo "✅ Sync complete. Configuration should be safe now."
 
       # --- 正常运行逻辑 ---
 
