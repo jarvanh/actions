@@ -72,7 +72,6 @@ jobs:
           fi
 
       - name: Setup Cloudflared
-        # 仅在正常模式或生成仪表盘链接时启动隧道
         if: ${{ github.event.inputs.maintenance_mode != 'approve_device' && github.event.inputs.maintenance_mode != 'list_devices' }}
         env:
           TUNNEL_NAME: "oc"
@@ -97,7 +96,6 @@ jobs:
         run: |
           [ -z "$TOKEN" ] && TOKEN="default-token"
 
-          # 启动容器
           sudo docker run -d \
             --name openclaw \
             --network host \
@@ -114,9 +112,19 @@ jobs:
       - name: "[Mode] Generate Dashboard Link"
         if: ${{ github.event.inputs.maintenance_mode == 'generate_dashboard_link' }}
         run: |
-          echo "Generating Dashboard Link..."
-          # 修正点：去掉 ./，直接调用 openclaw
-          sudo docker exec openclaw openclaw dashboard --no-open
+          echo "Locating OpenClaw binary..."
+          # 自动查找二进制文件位置并执行
+          BIN_PATH=$(sudo docker exec openclaw find / -type f -name openclaw 2>/dev/null | head -n 1)
+          
+          if [ -z "$BIN_PATH" ]; then
+            echo "Error: Could not find 'openclaw' binary in container."
+            echo "Debug: Listing root directory..."
+            sudo docker exec openclaw ls -la /
+            exit 1
+          fi
+          
+          echo "Found binary at: $BIN_PATH"
+          sudo docker exec openclaw $BIN_PATH dashboard --no-open
           
           echo "========================================================"
           echo "请复制上面的 URL 在浏览器中打开。"
@@ -129,9 +137,11 @@ jobs:
       - name: "[Mode] List Devices"
         if: ${{ github.event.inputs.maintenance_mode == 'list_devices' }}
         run: |
-          echo "Listing Devices..."
-          # 修正点：去掉 ./
-          sudo docker exec openclaw openclaw devices list
+          echo "Locating OpenClaw binary..."
+          BIN_PATH=$(sudo docker exec openclaw find / -type f -name openclaw 2>/dev/null | head -n 1)
+          echo "Found binary at: $BIN_PATH"
+          
+          sudo docker exec openclaw $BIN_PATH devices list
           
           echo "========================================================"
           echo "请在上方日志中找到您的 Request ID。"
@@ -147,8 +157,27 @@ jobs:
             echo "Error: Request ID is missing."
             exit 1
           fi
-          echo "Approving device: $REQ_ID"
-          # 修正点：去掉 ./
-          sudo docker exec openclaw openclaw devices approve $REQ_ID
           
-          echo "Device approved! Configuration
+          echo "Locating OpenClaw binary..."
+          BIN_PATH=$(sudo docker exec openclaw find / -type f -name openclaw 2>/dev/null | head -n 1)
+          echo "Found binary at: $BIN_PATH"
+          
+          echo "Approving device: $REQ_ID"
+          sudo docker exec openclaw $BIN_PATH devices approve $REQ_ID
+          
+          echo "Device approved! Configuration saved to Dropbox."
+
+      # --- 维护模式逻辑结束 ---
+
+      - name: Run Cloudflared Tunnel (Normal Mode)
+        if: ${{ github.event.inputs.maintenance_mode == 'normal' || github.event.inputs.maintenance_mode == '' }}
+        run: |
+          cloudflared tunnel route dns oc oc.'${{ secrets.VD }}'.eu.org
+          nohup cloudflared tunnel run --url http://127.0.0.1:18789 oc &
+       
+      - name: Keep Alive (Normal Mode Only)
+        if: ${{ github.event.inputs.maintenance_mode == 'normal' || github.event.inputs.maintenance_mode == '' }}
+        run: |
+          echo "OpenClaw is running normally."
+          docker ps
+          sudo sleep 360m
