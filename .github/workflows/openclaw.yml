@@ -116,7 +116,13 @@ jobs:
           cloudflared tunnel route dns oc oc.'${{ secrets.VD }}'.eu.org
           # 将隧道指向 OpenClaw 的 Gateway 端口 18789
           nohup cloudflared tunnel run --url http://127.0.0.1:18789 oc &
-                  
+       
+      - name: Wait and Check Logs
+        run: |
+          echo "Waiting for OpenClaw to stabilize..."
+          docker ps
+          docker logs openclaw           
+          
       - name: Keep Alive
         run: |
           echo "OpenClaw is running at https://oc.${{ secrets.VD }}.eu.org"
