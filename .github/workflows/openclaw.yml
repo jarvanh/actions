@@ -77,12 +77,16 @@ jobs:
             fi
           fi
           
-      - name: Run Cloudflared Tunnel
+      - name: run cloudflared
         run: |
-          # 绑定域名并启动隧道
           cloudflared tunnel route dns oc oc.'${{ secrets.VD }}'.eu.org
-          # 将隧道指向 OpenClaw 的 Gateway 端口 18789
-          nohup cloudflared tunnel run --url ws:://127.0.0.1:18789 oc &
+          
+          # 获取 Docker 容器在桥接网络中的真实 IP 地址
+          CONTAINER_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' openclaw)
+          echo "OpenClaw Container IP: $CONTAINER_IP"
+          
+          # 将隧道指向容器的内网 IP
+          nohup cloudflared tunnel run --url http://$CONTAINER_IP:18789 oc &
        
       - name: Wait and Check Logs
         run: |
