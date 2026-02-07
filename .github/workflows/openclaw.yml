@@ -39,15 +39,47 @@ jobs:
           sudo mkdir -p /dropbox
           sudo nohup rclone mount dropbox: /dropbox --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 10G &
           sleep 1m # 等待挂载完成
+      - name: Generate OpenClaw Config if not exists
+        run: |
+          # 等待挂载同步
+          sleep 5
+          
+          CONFIG_PATH="/dropbox/self-hosted/openclaw/openclaw.json"
+          
+          if [ -f "$CONFIG_PATH" ]; then
+            echo "✅ 发现现有配置文件，跳过初始化生成。"
+          else
+            echo "⚠️ 未发现配置文件，正在生成基础配置..."
+            sudo mkdir -p /dropbox/self-hosted/openclaw
+            
+            # 写入基础 JSON 配置
+            sudo tee "$CONFIG_PATH" > /dev/null <<EOF
+          {
+            "gateway": {
+              "port": 18789,
+              "host": "0.0.0.0"
+            },
+            "storage": {
+              "type": "fs",
+              "baseDir": "/root/.openclaw"
+            },
+            "auth": {
+              "enabled": false
+            }
+          }
+          EOF
+            echo "🚀 基础配置已生成至 $CONFIG_PATH"
+          fi
+          
+          # 确保权限正确，防止 Docker 无法读取
+          sudo chmod -R 777 /dropbox/self-hosted/openclaw
 
       - name: Run OpenClaw Docker
         run: |
-          # 创建数据目录
-          sudo mkdir -p /dropbox/openclaw
           # 运行 OpenClaw 容器
           # 映射 18789 端口（OpenClaw Gateway 默认端口）
           docker run -dit \
-            -v /dropbox/openclaw:/root/.openclaw \
+            -v /dropbox/self-hosted/openclaw:/root/.openclaw \
             -p 18789:18789 \
             --name openclaw \
             --hostname openclaw \
@@ -84,14 +116,7 @@ jobs:
           cloudflared tunnel route dns oc oc.'${{ secrets.VD }}'.eu.org
           # 将隧道指向 OpenClaw 的 Gateway 端口 18789
           nohup cloudflared tunnel run --url http://127.0.0.1:18789 oc &
-          
-      - name: Wait and Check Logs
-        run: |
-          echo "Waiting for OpenClaw to stabilize..."
-          sleep 60s
-          docker ps
-          docker logs openclaw
-          
+                  
       - name: Keep Alive
         run: |
           echo "OpenClaw is running at https://oc.${{ secrets.VD }}.eu.org"
