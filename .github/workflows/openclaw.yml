@@ -96,6 +96,7 @@ jobs:
             --name openclaw \
             --network host \
             --restart unless-stopped \
+            -e OPENCLAW_GATEWAY_TOKEN="$TOKEN" \
             -v /dropbox/self-hosted/openclaw:/config \
             alpine/openclaw
           
