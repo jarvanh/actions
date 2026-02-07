@@ -48,6 +48,7 @@ jobs:
             -v /dropbox/self-hosted/openclaw:/root/.openclaw \
             -p 18789:18789 \
             -e OPENCLAW_GATEWAY_TOKEN=admin123456 \
+            -e OPENCLAW_GATEWAY_HOST=0.0.0.0 \
             --name openclaw \
             --hostname openclaw \
             --restart unless-stopped \
