@@ -41,35 +41,28 @@ jobs:
           sleep 1m # 等待挂载完成
       - name: Generate OpenClaw Config if not exists
         run: |
-          # 等待挂载同步
-          sleep 5
-          
           CONFIG_PATH="/dropbox/self-hosted/openclaw/openclaw.json"
+          # 设置一个你喜欢的登录密码（Token）
+          MY_TOKEN="admin123456" 
           
           if [ -f "$CONFIG_PATH" ]; then
-            echo "✅ 发现现有配置文件，跳过初始化生成。"
+            echo "✅ 发现现有配置，正在确保 Token 环境变量生效。"
           else
-            echo "⚠️ 未发现配置文件，正在生成基础配置..."
-            sudo mkdir -p /dropbox/self-hosted/openclaw
-            
-            # 写入基础 JSON 配置
+            echo "⚠️ 正在生成包含 Token 的基础配置..."
+            sudo mkdir -p /dropbox/openclaw
             sudo tee "$CONFIG_PATH" > /dev/null <<EOF
           {
             "gateway": {
-              "port": 18789,
-              "host": "0.0.0.0"
-            },
-            "storage": {
-              "type": "fs",
-              "baseDir": "/root/.openclaw"
-            },
-            "auth": {
-              "enabled": false
+              "auth": {
+                "type": "token",
+                "token": "$MY_TOKEN"
+              }
             }
           }
           EOF
-            echo "🚀 基础配置已生成至 $CONFIG_PATH"
           fi
+          
+          sudo chmod -R 777 /dropbox/openclaw
           
           # 确保权限正确，防止 Docker 无法读取
           sudo chmod -R 777 /dropbox/self-hosted/openclaw
