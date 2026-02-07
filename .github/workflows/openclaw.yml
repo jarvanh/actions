@@ -162,4 +162,36 @@ jobs:
           echo "然后运行 'approve_device' 模式。"
           echo "========================================================"
 
-      - name: "[Mode
+      - name: "[Mode] Approve Device"
+        if: ${{ github.event.inputs.maintenance_mode == 'approve_device' }}
+        env:
+          REQ_ID: ${{ github.event.inputs.request_id }}
+        run: |
+          if [ -z "$REQ_ID" ]; then echo "Error: Request ID missing"; exit 1; fi
+
+          JS_FILE=""
+          for path in /app/index.js /app/dist/index.js /app/main.js; do
+            if sudo docker exec openclaw ls $path >/dev/null 2>&1; then JS_FILE=$path; break; fi
+          done
+          if [ -z "$JS_FILE" ]; then
+             ENTRY_CMD=$(sudo docker inspect --format='{{range .Config.Cmd}}{{.}} {{end}}' openclaw)
+             JS_FILE=$(echo "$ENTRY_CMD" | grep -oE '/app/[a-zA-Z0-9_./-]+\.js' | head -n 1)
+          fi
+          
+          sudo docker exec openclaw node $JS_FILE devices approve $REQ_ID
+          echo "Device Approved."
+
+      # --- 维护模式逻辑结束 ---
+
+      - name: Run Cloudflared Tunnel (Normal Mode)
+        if: ${{ github.event.inputs.maintenance_mode == 'normal' || github.event.inputs.maintenance_mode == '' }}
+        run: |
+          cloudflared tunnel route dns oc oc.'${{ secrets.VD }}'.eu.org
+          nohup cloudflared tunnel run --url http://127.0.0.1:18789 oc &
+       
+      - name: Keep Alive (Normal Mode Only)
+        if: ${{ github.event.inputs.maintenance_mode == 'normal' || github.event.inputs.maintenance_mode == '' }}
+        run: |
+          echo "OpenClaw is running."
+          docker ps
+          sudo sleep 360m
