@@ -72,6 +72,7 @@ jobs:
 
       - name: Install OpenClaw
         run: |
+          npm install -g @google/gemini-cli
           rm -rf ~/.openclaw
           # 建立链接：让 ~/.openclaw 指向 Dropbox
           ln -s /dropbox/self-hosted/openclaw ~/.openclaw
