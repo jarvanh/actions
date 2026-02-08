@@ -12,6 +12,10 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'current' # 始终使用官方发布的最新版
       - name: Install Rclone
         run: |
           curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
@@ -71,7 +75,7 @@ jobs:
           echo "Installing OpenClaw..."
           # 执行安装脚本
           curl -fsSL https://openclaw.ai/install.sh | bash -s -- --no-onboard
-          echo "Installation script finished. Checking files..."
+          echo "/home/runner/.npm-global/bin" >> $GITHUB_PATH
 
       - name: Setup tmate session
         uses: mxschmitt/action-tmate@v3
