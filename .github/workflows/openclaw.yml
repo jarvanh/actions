@@ -72,6 +72,10 @@ jobs:
 
       - name: Install OpenClaw
         run: |
+          rm -rf ~/.openclaw
+          # 建立链接：让 ~/.openclaw 指向 Dropbox
+          ln -s /dropbox/self-hosted/openclaw ~/.openclaw
+          echo "Symlink created: ~/.openclaw -> /dropbox/self-hosted/openclaw"
           echo "Installing OpenClaw..."
           # 执行安装脚本
           curl -fsSL https://openclaw.ai/install.sh | bash -s -- --no-onboard
