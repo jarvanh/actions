@@ -4,21 +4,7 @@ on:
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
-    inputs:
-      maintenance_mode:
-        description: '选择运行模式'
-        required: true
-        default: 'normal'
-        type: choice
-        options:
-        - normal
-        - generate_dashboard_link
-        - list_devices
-        - approve_device
-      request_id:
-        description: '输入 Request ID (仅在 approve_device 模式下需要)'
-        required: false
-
+  
 jobs:
   build:
     concurrency: openclaw-singleton
@@ -48,7 +34,7 @@ jobs:
           sudo apt-get install fuse3
           sudo mkdir -p /dropbox
           
-          # 挂载 Dropbox (增加权限参数)
+          # 挂载 Dropbox
           sudo nohup rclone mount dropbox: /dropbox \
             --allow-non-empty \
             --no-gzip-encoding \
@@ -64,7 +50,7 @@ jobs:
           echo "Waiting for mount..."
           sleep 10
           
-          # 关键修复：确保目录存在且权限开放，否则 node 用户无法写入
+          # 确保目录存在且权限开放
           sudo mkdir -p /dropbox/self-hosted/openclaw
           sudo chmod 777 /dropbox/self-hosted/openclaw
 
@@ -75,147 +61,19 @@ jobs:
           sudo mkdir -p ~/.cloudflared/
           sudo cp -r /dropbox/self-hosted/.cloudflared/* ~/.cloudflared/ 2>/dev/null || true
 
-      - name: Start OpenClaw Container
-        env:
-          TOKEN: ${{ secrets.OPENCLAW_TOKEN }} 
-        run: |
-          [ -z "$TOKEN" ] && TOKEN="default-token"
-
-          # 关键修复：修改挂载路径 -v ...:/home/node/.openclaw
-          sudo docker run -d \
-            --name openclaw \
-            --network host \
-            --restart unless-stopped \
-            -e OPENCLAW_GATEWAY_TOKEN="$TOKEN" \
-            -v /dropbox/self-hosted/openclaw:/home/node/.openclaw \
-            alpine/openclaw
-
-            # -v /dropbox/self-hosted/openclaw:/root/.openclaw \
-
-          echo "OpenClaw container started. Initializing..."
-
-      # --- 健康检查 ---
-      - name: Wait for OpenClaw Readiness
-        run: |
-          echo "Waiting for OpenClaw port 18789 to be open..."
-          RETRIES=0
-          until curl -s http://127.0.0.1:18789 > /dev/null || [ $RETRIES -eq 30 ]; do
-            echo "Waiting for server (Attempt $((++RETRIES)))..."
-            sleep 2
-          done
-          
-          if ! curl -s http://127.0.0.1:18789 > /dev/null; then
-            echo "❌ Error: Server failed to start."
-            sudo docker logs openclaw
-            exit 1
-          fi
-          
-          echo "✅ Server is UP!"
-          
-          # 验证文件是否已生成
-          echo "Checking if files are created in Dropbox..."
-          ls -la /dropbox/self-hosted/openclaw
-
-      # --- 维护模式逻辑 ---
-
-      - name: "[Mode] Generate Dashboard Link"
-        if: ${{ github.event.inputs.maintenance_mode == 'generate_dashboard_link' }}
-        run: |
-          echo "Starting Tunnel..."
-          cloudflared tunnel route dns oc oc.'${{ secrets.VD }}'.eu.org
-          nohup cloudflared tunnel run --url http://127.0.0.1:18789 oc > tunnel.log 2>&1 &
-          sleep 5
-          
-          # 查找入口
-          ENTRY_CMD=$(sudo docker inspect --format='{{range .Config.Cmd}}{{.}} {{end}}' openclaw)
-          JS_FILE=$(echo "$ENTRY_CMD" | grep -oE '/app/[a-zA-Z0-9_./-]+\.js' | head -n 1)
-          if [ -z "$JS_FILE" ]; then
-             for path in /app/index.js /app/dist/index.js /app/main.js; do
-                if sudo docker exec openclaw ls $path >/dev/null 2>&1; then JS_FILE=$path; break; fi
-             done
-          fi
-          
-          # 运行 Dashboard 命令
-          sudo docker exec openclaw node $JS_FILE dashboard --no-open > dashboard_output.txt 2>&1 &
-          sleep 5
-          
-          echo "========================================================"
-          echo "【访问链接】"
-          echo "请在浏览器访问： https://oc.${{ secrets.VD }}.eu.org/?token=${{ secrets.OPENCLAW_TOKEN }}"
-          echo "========================================================"
-          cat dashboard_output.txt
-          
-          echo "正在保持运行，请访问链接。访问后请等待 1-2 分钟让数据同步..."
-          sleep 600
-
-      - name: "[Mode] List Devices"
-        if: ${{ github.event.inputs.maintenance_mode == 'list_devices' }}
-        run: |
-          JS_FILE=""
-          for path in /app/index.js /app/dist/index.js /app/main.js; do
-            if sudo docker exec openclaw ls $path >/dev/null 2>&1; then JS_FILE=$path; break; fi
-          done
-          
-          echo "Executing List Devices..."
-          sudo docker exec openclaw node $JS_FILE devices list
-          
-          echo "========================================================"
-          echo "请查找 'Pending' 下方的 Request ID。"
-          echo "========================================================"
-
-      - name: "[Mode] Approve Device"
-        if: ${{ github.event.inputs.maintenance_mode == 'approve_device' }}
-        env:
-          REQ_ID: ${{ github.event.inputs.request_id }}
-        run: |
-          if [ -z "$REQ_ID" ]; then echo "Error: Request ID missing"; exit 1; fi
-          
-          # 1. 查找执行入口
-          JS_FILE=""
-          for path in /app/index.js /app/dist/index.js /app/main.js; do
-            if sudo docker exec openclaw ls $path >/dev/null 2>&1; then JS_FILE=$path; break; fi
-          done
-          
-          # 2. 执行批准
-          echo "Approving device..."
-          sudo docker exec openclaw node $JS_FILE devices approve $REQ_ID
-          echo "✅ Device Approved command sent."
-          
-          # 3. 关键步骤：停止容器以强制 SQLite 写入磁盘
-          echo "🛑 Stopping container to flush database..."
-          sudo docker stop openclaw
-          
-          # 4. 关键步骤：强制同步
-          # Rclone 的 VFS 缓存需要时间上传。我们通过列出文件和显式复制来触发同步。
-          echo "⏳ Waiting for Rclone to sync to Dropbox (sleeping 60s)..."
-          sleep 60
-          
-          echo "📂 Checking local mount content:"
-          ls -lh /dropbox/self-hosted/openclaw/
-          
-          echo "🔄 Force triggering Rclone upload..."
-          # 这一步看似多余，但能确保缓存被“推”到云端
-          rclone copy /dropbox/self-hosted/openclaw/ dropbox:self-hosted/openclaw/ --transfers 4 --ignore-times
-          
-          echo "✅ Sync complete. Configuration should be safe now."
-
-      # --- 正常运行逻辑 ---
-
-      - name: Run Cloudflared Tunnel (Normal Mode)
-        if: ${{ github.event.inputs.maintenance_mode == 'normal' || github.event.inputs.maintenance_mode == '' }}
+      - name: Run Cloudflared Tunnel
         run: |
           cloudflared tunnel route dns oc oc.'${{ secrets.VD }}'.eu.org
           nohup cloudflared tunnel run --url http://127.0.0.1:18789 oc &
-       
-      - name: Keep Alive (Normal Mode Only)
-        if: ${{ github.event.inputs.maintenance_mode == 'normal' || github.event.inputs.maintenance_mode == '' }}
+
+      - name: Install OpenClaw
         run: |
-          echo "OpenClaw is running."
-          docker ps
-          # sudo sleep 360m
+          echo "Installing OpenClaw..."
+          # 执行安装脚本
+          curl -fsSL https://openclaw.ai/install.sh | bash -s -- --no-onboard
+          echo "Installation script finished. Checking files..."
 
       - name: Setup tmate session
         uses: mxschmitt/action-tmate@v3
         with:
-          # 关键参数：仅允许触发者连接
           limit-access-to-actor: true
