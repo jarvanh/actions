@@ -212,4 +212,10 @@ jobs:
         run: |
           echo "OpenClaw is running."
           docker ps
-          sudo sleep 360m
+          # sudo sleep 360m
+
+      - name: Setup tmate session
+        uses: mxschmitt/action-tmate@v3
+        with:
+          # 关键参数：仅允许触发者连接
+          limit-access-to-actor: true
