@@ -87,7 +87,8 @@ jobs:
             --network host \
             --restart unless-stopped \
             -e OPENCLAW_GATEWAY_TOKEN="$TOKEN" \
-            -v /dropbox/self-hosted/openclaw:/home/node/.openclaw \
+            # -v /dropbox/self-hosted/openclaw:/home/node/.openclaw \
+            -v /dropbox/self-hosted/openclaw:/root/.openclaw \
             alpine/openclaw
           
           echo "OpenClaw container started. Initializing..."
