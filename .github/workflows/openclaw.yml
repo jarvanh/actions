@@ -72,25 +72,25 @@ jobs:
 
       - name: Install OpenClaw
         run: |
-          # 1. 设置主配置目录软链接 (保持你原有的逻辑)
-          rm -rf ~/.openclaw
-          ln -s /dropbox/self-hosted/openclaw ~/.openclaw
-          echo "Symlink created: ~/.openclaw -> /dropbox/self-hosted/openclaw"
-          
-          # 2. 安装 OpenClaw
+          # 安装 OpenClaw
           echo "Installing OpenClaw..."
           curl -fsSL https://openclaw.ai/install.sh | bash -s -- --no-onboard
           echo "/home/runner/.npm-global/bin" >> $GITHUB_PATH
 
+          # 设置主配置目录软链接 (保持你原有的逻辑)
+          rm -rf ~/.openclaw
+          ln -s /dropbox/self-hosted/openclaw ~/.openclaw
+          echo "Symlink created: ~/.openclaw -> /dropbox/self-hosted/openclaw"
+
           # ========================================================
-          # 核心修改：持久化 Built-in Skills
+          # 持久化 Built-in Skills
           # ========================================================
           
           # A. 动态获取 npm 全局安装路径 (例如 /opt/hostedtoolcache/node/xx/lib/node_modules)
           NPM_ROOT=$(npm root -g)
           INSTALLED_SKILLS="$NPM_ROOT/openclaw/skills"
           # 目标持久化路径 (通过之前的软链接，实际上指向 Dropbox)
-          PERSISTED_SKILLS="$HOME/.openclaw/skills"
+          PERSISTED_SKILLS="$HOME/.openclaw/built-in-skills"
 
           echo "Detected Install Path: $INSTALLED_SKILLS"
           echo "Target Persist Path: $PERSISTED_SKILLS"
