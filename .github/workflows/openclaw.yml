@@ -143,12 +143,3 @@ jobs:
         uses: mxschmitt/action-tmate@v3
         with:
           limit-access-to-actor: true
-          detached: true  # 让 Tmate 在后台运行，不占用控制台输出
-
-      - name: Hold Runner
-        run: |
-          echo "✅ Tmate session started in background."
-          echo "ℹ️  Check the 'Setup tmate session' step logs above for the SSH connection string."
-          echo "⏳ Runner is holding ..."
-          sleep 350m
-          openclaw gateway stop
