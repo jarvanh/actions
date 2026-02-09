@@ -72,18 +72,54 @@ jobs:
 
       - name: Install OpenClaw
         run: |
-          npm install -g @google/gemini-cli
-          echo "Checking gemini version..."
-          gemini --version || echo "gemini not found in PATH"
+          # 1. 设置主配置目录软链接 (保持你原有的逻辑)
           rm -rf ~/.openclaw
-          # 建立链接：让 ~/.openclaw 指向 Dropbox
           ln -s /dropbox/self-hosted/openclaw ~/.openclaw
           echo "Symlink created: ~/.openclaw -> /dropbox/self-hosted/openclaw"
+          
+          # 2. 安装 OpenClaw
           echo "Installing OpenClaw..."
-          # 执行安装脚本
           curl -fsSL https://openclaw.ai/install.sh | bash -s -- --no-onboard
           echo "/home/runner/.npm-global/bin" >> $GITHUB_PATH
 
+          # ========================================================
+          # 核心修改：持久化 Built-in Skills
+          # ========================================================
+          
+          # A. 动态获取 npm 全局安装路径 (例如 /opt/hostedtoolcache/node/xx/lib/node_modules)
+          NPM_ROOT=$(npm root -g)
+          INSTALLED_SKILLS="$NPM_ROOT/openclaw/skills"
+          # 目标持久化路径 (通过之前的软链接，实际上指向 Dropbox)
+          PERSISTED_SKILLS="$HOME/.openclaw/skills"
+
+          echo "Detected Install Path: $INSTALLED_SKILLS"
+          echo "Target Persist Path: $PERSISTED_SKILLS"
+
+          # B. 检查 Dropbox 中是否已经有备份的 Skills
+          if [ -d "$PERSISTED_SKILLS" ] && [ "$(ls -A $PERSISTED_SKILLS)" ]; then
+              echo "✅ Found existing skills in Dropbox. Using them."
+              # 如果 Dropbox 里有货，直接删除刚安装生成的默认文件夹，防止冲突
+              sudo rm -rf "$INSTALLED_SKILLS"
+          else
+              echo "🆕 No existing skills found. Initializing from default..."
+              # 如果 Dropbox 是空的，把刚安装好的默认 Skills 移动过去作为初始数据
+              # 确保父目录存在
+              mkdir -p "$HOME/.openclaw"
+              sudo mv "$INSTALLED_SKILLS" "$PERSISTED_SKILLS"
+          fi
+
+          # C. 创建软链接：让 OpenClaw 运行读取 -> 指向 -> Dropbox 存储
+          # 此时 $INSTALLED_SKILLS 应该是不存在的（被删了或被移走了）
+          sudo ln -s "$PERSISTED_SKILLS" "$INSTALLED_SKILLS"
+          
+          echo "🔗 Symlink created: $INSTALLED_SKILLS -> $PERSISTED_SKILLS"
+          ls -l "$INSTALLED_SKILLS"
+          # ========================================================
+
+          npm install -g @google/gemini-cli
+          echo "Checking gemini version..."
+          gemini --version || echo "gemini not found in PATH"
+          
       - name: Configure OpenClaw
         run: |
         
