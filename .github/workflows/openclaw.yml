@@ -123,12 +123,6 @@ jobs:
           tmp=$(mktemp)
           jq '.gateway.controlUi = { "enabled": true, "allowInsecureAuth": true }' "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
 
-          # 设置 skills 使用 npm 且自动安装
-          jq '
-            .gateway.controlUi = { "enabled": true, "allowInsecureAuth": true } |
-            .skills.manager = "npm" | 
-            .skills.autoInstall = true
-          ' "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
       - name: Run OpenClaw
         run: |
           nohup openclaw gateway --verbose > openclaw.log 2>&1 &
