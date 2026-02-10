@@ -85,6 +85,7 @@ jobs:
           npm install -g @google/gemini-cli
           echo "Checking gemini version..."
           gemini --version || echo "gemini not found in PATH"
+          npm i -g clawhub
           
       - name: Configure OpenClaw
         run: |
