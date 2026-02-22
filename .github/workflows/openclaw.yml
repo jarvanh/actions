@@ -75,7 +75,7 @@ jobs:
 
       - name: Run OpenClaw
         run: |
-          nohup openclaw gateway --verbose > openclaw.log 2>&1 &
+          HOSTNAME="openclaw-gw" nohup openclaw gateway --verbose > openclaw.log 2>&1 &
           sleep 30
           
           if lsof -Pi :18789 -sTCP:LISTEN -t >/dev/null ; then
