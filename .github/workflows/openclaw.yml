@@ -70,31 +70,6 @@ jobs:
           cloudflared tunnel route dns oc oc.'${{ secrets.VD }}'.eu.org
           nohup cloudflared tunnel run --url http://127.0.0.1:18789 oc &
 
-      - name: Link npm global node_modules to Dropbox
-        run: |
-          # 1. 动态获取 npm 全局 node_modules 路径
-          NPM_GLOBAL_ROOT=$(npm root -g)
-          echo "NPM Global Root is: $NPM_GLOBAL_ROOT"
-
-          # 2. 确保 Dropbox 侧的 node_modules 目录存在
-          sudo mkdir -p /dropbox/self-hosted/openclaw/node_modules
-          sudo chmod 777 /dropbox/self-hosted/openclaw/node_modules
-
-          # 3. 处理已存在的默认全局目录
-          # 如果目录存在且不是软链接，先将内置的包（如 npm 自身）同步到 Dropbox，然后删除原目录
-          if [ -d "$NPM_GLOBAL_ROOT" ] && [ ! -L "$NPM_GLOBAL_ROOT" ]; then
-            echo "Backing up default global modules to Dropbox..."
-            sudo cp -a "$NPM_GLOBAL_ROOT/." /dropbox/self-hosted/openclaw/node_modules/ 2>/dev/null || true
-            sudo rm -rf "$NPM_GLOBAL_ROOT"
-          fi
-
-          # 4. 创建软链接 (目标 <- 源)
-          sudo ln -s /dropbox/self-hosted/openclaw/node_modules "$NPM_GLOBAL_ROOT"
-          
-          # 5. 验证软链接
-          echo "Symlink verification:"
-          ls -ld "$NPM_GLOBAL_ROOT"
-
       - name: Install OpenClaw
         run: |
           # 安装 OpenClaw
