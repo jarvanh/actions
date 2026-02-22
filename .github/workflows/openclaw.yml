@@ -75,7 +75,9 @@ jobs:
 
       - name: Run OpenClaw
         run: |
-          sudo hostname "runner-gw"
+          # 具体的变量名取决于 OpenClaw 的文档，常见格式如下：
+          export HOSTNAME="runner-gw"
+          export INSTANCE_NAME="runner-gw"
           nohup openclaw gateway --verbose > openclaw.log 2>&1 &
           sleep 30
           
