@@ -85,32 +85,7 @@ jobs:
               tail -n 50 openclaw.log || true
           fi
 
-      - name: Start VNC Remote Desktop (Replace tmate)
-        env:
-          NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
-        run: |
-          echo "Configuring VNC Server..."
-          # 截取 Token 的前 8 个字符
-          VNC_PWD="${NGROK_AUTH_TOKEN:0:8}"
-          echo "Configuring macOS Screen Sharing (VNC)..."
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -activate -configure -access -on -restart -agent -privs -all
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -configure -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw "$VNC_PWD"
-          echo "Starting Ngrok TCP tunnel for VNC..."
-          ngrok config add-authtoken $NGROK_AUTH_TOKEN
-          # 穿透 VNC 默认的 5900 端口
-          nohup ngrok tcp 5900 > ngrok.log 2>&1 &
-          
-          sleep 5
-          
-          # 获取并打印 VNC 连接地址
-          VNC_URL=$(curl -s http://localhost:4040/api/tunnels | jq -r .tunnels[0].public_url | sed 's/tcp:\/\//vnc:\/\//')
-          
-          echo "========================================="
-          echo "🖥️  Remote Desktop is Ready!"
-          echo "🔗 Connection URL: $VNC_URL"
-          echo "🔑 VNC Password: NGROK_AUTH_TOKEN"
-          echo "👉 Open your VNC Viewer (e.g., RealVNC, macOS Screen Sharing) and paste the URL above."
-          echo "========================================="
-          
-          # 保持 Action 运行，以便我们可以通过 VNC 连接
-          sleep 350m
+      - name: Setup tmate session
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: true
