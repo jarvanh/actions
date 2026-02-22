@@ -30,20 +30,20 @@ jobs:
 
       - name: Rclone Initial Sync (Pull)
         run: |
-          mkdir -p ~/dropbox/self-hosted
+          mkdir -p ~/dropbox/self-hosted/openclaw
           echo "Syncing data from Dropbox..."
           # 将 Dropbox 中的数据拉取到本地
-          rclone sync dropbox:self-hosted ~/dropbox/self-hosted --progress
+          rclone sync dropbox:self-hosted/openclaw ~/dropbox/self-hosted/openclaw --progress
 
       - name: Setup Background Sync (Push)
         run: |
           # 启动后台任务：每 1 分钟将本地更改同步回 Dropbox
-          nohup bash -c 'while true; do rclone sync ~/dropbox/self-hosted dropbox:self-hosted; sleep 60; done' > rclone_sync.log 2>&1 &
+          nohup bash -c 'while true; do rclone sync ~/dropbox/self-hosted/openclaw dropbox:self-hosted/openclaw; sleep 60; done' > rclone_sync.log 2>&1 &
 
       - name: Run Cloudflared Tunnel
         run: |
           mkdir -p ~/.cloudflared/
-          cp -r ~/dropbox/self-hosted/.cloudflared/* ~/.cloudflared/ 2>/dev/null || true
+          rclone sync dropbox:self-hosted/.cloudflared/* ~/.cloudflared/ 2>/dev/null || true
           
           cloudflared tunnel route dns oc oc.'${{ secrets.VD }}'.eu.org
           nohup cloudflared tunnel run --url http://127.0.0.1:18789 oc &
@@ -112,4 +112,4 @@ jobs:
           echo "========================================="
           
           # 保持 Action 运行，以便我们可以通过 VNC 连接
-          sleep 86400
+          sleep 350m
