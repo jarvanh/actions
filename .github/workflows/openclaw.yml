@@ -68,6 +68,7 @@ jobs:
         run: |
           # 安装 OpenClaw
           git clone https://github.com/openclaw/openclaw.git
+          cd openclaw
           ./docker-setup.sh
 
           echo "/home/runner/.npm-global/bin" >> $GITHUB_PATH
