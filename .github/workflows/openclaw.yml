@@ -9,8 +9,6 @@ jobs:
   build:
     concurrency: openclaw-singleton
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     steps:
       # - name: Setup Node.js
       #   uses: actions/setup-node@v6
