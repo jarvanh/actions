@@ -10,6 +10,11 @@ jobs:
     concurrency: openclaw-singleton
     runs-on: ubuntu-latest
     steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          # node-version: 22
+          node-version: 'current' # 始终使用官方发布的最新版
       - name: Install Rclone
         run: |
           curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
@@ -50,7 +55,7 @@ jobs:
           
           # 确保目录存在且权限开放
           sudo mkdir -p /dropbox/self-hosted/openclaw
-          sudo chown -R 1000:1000 /dropbox/self-hosted/openclaw
+          sudo chmod 777 /dropbox/self-hosted/openclaw
 
       - name: Install Cloudflared
         run: |
@@ -66,20 +71,65 @@ jobs:
 
       - name: Install OpenClaw
         run: |
-          # # 设置主配置目录软链接 (保持你原有的逻辑)
-          # rm -rf /home/node
-          # sudo ln -s /dropbox/self-hosted/openclaw /home/node
-          # echo "Symlink created: /home/node -> /dropbox/self-hosted/openclaw"
-          
           # 安装 OpenClaw
-          git clone https://github.com/openclaw/openclaw.git
-          cd openclaw
-          export OPENCLAW_HOME_VOLUME="openclaw_home"
-          ./docker-setup.sh
+          echo "Installing OpenClaw..."
+          curl -fsSL https://openclaw.ai/install.sh | bash -s -- --no-onboard
+          echo "/home/runner/.npm-global/bin" >> $GITHUB_PATH
 
-      - name: Check OpenClaw
+          # 设置主配置目录软链接 (保持你原有的逻辑)
+          # rm -rf ~/.openclaw
+          # ln -s /dropbox/self-hosted/openclaw ~/.openclaw
+          # echo "Symlink created: ~/.openclaw -> /dropbox/self-hosted/openclaw"
+
+          npm install -g @google/gemini-cli
+          echo "Checking gemini version..."
+          gemini --version || echo "gemini not found in PATH"
+          npm i -g clawhub
+          
+      - name: Configure OpenClaw
         run: |
-          # echo "Waiting for OpenClaw ..."
+        
+          # 插入配置解决 "disconnected (1008): pairing required" Error
+          # https://github.com/openclaw/openclaw/issues/6959
+          
+          #   "gateway": {
+          #     "port": 18789,
+          #     "mode": "local",
+          #     "bind": "loopback",
+          #     "controlUi": { // 一定要添加
+          #       "enabled": true,
+          #       "allowInsecureAuth": true
+          #     },
+
+          # 1. 安装 jq 工具
+          sudo apt-get update && sudo apt-get install -y jq
+
+          # 2. 定义变量
+          CONFIG_DIR="$HOME/.openclaw"
+          CONFIG_FILE="$CONFIG_DIR/openclaw.json"
+
+          # 3. 确保目录存在
+          mkdir -p "$CONFIG_DIR"
+
+          # 4. 核心逻辑：文件状态检查
+          # -s 判断文件是否存在且大小不为0
+          if [ ! -s "$CONFIG_FILE" ]; then
+            echo "Config file not found or empty. Creating new one..."
+            echo '{}' > "$CONFIG_FILE"
+          else
+            echo "Config file exists. Updating..."
+          fi
+
+          # 5. 使用 jq 插入/更新配置
+          # 逻辑：即使 gateway 对象不存在，jq 也会自动创建它
+          tmp=$(mktemp)
+          jq '.gateway.controlUi = { "enabled": true, "allowInsecureAuth": true }' "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
+
+      - name: Run OpenClaw
+        run: |
+          nohup openclaw gateway --verbose > openclaw.log 2>&1 &
+          
+          echo "Waiting for OpenClaw ..."
           sleep 30
           
           # 检查端口是否启动
