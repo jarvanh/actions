@@ -1,27 +1,24 @@
-name: openclaw
+name: openclaw-macos
 
 on:
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
-  
+
 jobs:
   build:
     concurrency: openclaw-singleton
-    runs-on: ubuntu-latest
+    runs-on: macos-latest # 修改为 macOS 运行环境
     steps:
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v4 # 建议升级到 v4 版本以获取更好的兼容性
         with:
-          # node-version: 22
-          node-version: 'current' # 始终使用官方发布的最新版
-      - name: Install Rclone
+          node-version: 'current'
+
+      - name: Install Dependencies (Rclone, jq, Cloudflared)
         run: |
-          curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
-          unzip rclone-*-amd64.zip
-          cd rclone-*-linux-amd64
-          sudo mv rclone /usr/bin
-          sudo chmod +x /usr/bin/rclone
+          # 使用 Homebrew 统一安装依赖，比手动下载解压更稳定
+          brew install rclone jq cloudflared
 
       - name: Configure Rclone
         env:
@@ -34,11 +31,15 @@ jobs:
 
       - name: Mount Dropbox
         run: |
-          sudo apt-get install fuse3
-          sudo mkdir -p /dropbox
+          # 安装 macfuse (macOS 上的 FUSE 替代品)
+          brew install --cask macfuse
+          
+          # ⚠️ 重要: macOS 存在 SIP (系统完整性保护)，根目录只读。
+          # 因此将挂载点从 /dropbox 改为用户目录下的 ~/dropbox
+          mkdir -p ~/dropbox
           
           # 挂载 Dropbox
-          sudo nohup rclone mount dropbox: /dropbox \
+          nohup rclone mount dropbox: ~/dropbox \
             --allow-non-empty \
             --no-gzip-encoding \
             --umask 000 \
@@ -53,34 +54,26 @@ jobs:
           echo "Waiting for mount..."
           sleep 10
           
-          # 确保目录存在且权限开放
-          sudo mkdir -p /dropbox/self-hosted/openclaw
-          sudo chmod 777 /dropbox/self-hosted/openclaw
-
-      - name: Install Cloudflared
-        run: |
-          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-          sudo dpkg -i cloudflared-linux-amd64.deb
-          sudo mkdir -p ~/.cloudflared/
-          sudo cp -r /dropbox/self-hosted/.cloudflared/* ~/.cloudflared/ 2>/dev/null || true
+          # 对应调整后续目录路径
+          mkdir -p ~/dropbox/self-hosted/openclaw
+          chmod 777 ~/dropbox/self-hosted/openclaw
 
       - name: Run Cloudflared Tunnel
         run: |
+          # 复制配置时使用新的挂载路径
+          mkdir -p ~/.cloudflared/
+          cp -r ~/dropbox/self-hosted/.cloudflared/* ~/.cloudflared/ 2>/dev/null || true
+          
           cloudflared tunnel route dns oc oc.'${{ secrets.VD }}'.eu.org
           nohup cloudflared tunnel run --url http://127.0.0.1:18789 oc &
 
       - name: Install OpenClaw
         run: |
-          # 安装 OpenClaw
           echo "Installing OpenClaw..."
           curl -fsSL https://openclaw.ai/install.sh | bash -s -- --no-onboard
-          echo "/home/runner/.npm-global/bin" >> $GITHUB_PATH
-
-          # 设置主配置目录软链接 (保持你原有的逻辑)
-          # rm -rf ~/.openclaw
-          # ln -s /dropbox/self-hosted/openclaw ~/.openclaw
-          # echo "Symlink created: ~/.openclaw -> /dropbox/self-hosted/openclaw"
-
+          
+          # 在 macOS 上 setup-node 通常会自动处理好全局 PATH，这里无需再手动写入 GITHUB_PATH
+          
           npm install -g @google/gemini-cli
           echo "Checking gemini version..."
           gemini --version || echo "gemini not found in PATH"
@@ -88,40 +81,18 @@ jobs:
           
       - name: Configure OpenClaw
         run: |
-        
-          # 插入配置解决 "disconnected (1008): pairing required" Error
-          # https://github.com/openclaw/openclaw/issues/6959
-          
-          #   "gateway": {
-          #     "port": 18789,
-          #     "mode": "local",
-          #     "bind": "loopback",
-          #     "controlUi": { // 一定要添加
-          #       "enabled": true,
-          #       "allowInsecureAuth": true
-          #     },
-
-          # 1. 安装 jq 工具
-          sudo apt-get update && sudo apt-get install -y jq
-
-          # 2. 定义变量
           CONFIG_DIR="$HOME/.openclaw"
           CONFIG_FILE="$CONFIG_DIR/openclaw.json"
-
-          # 3. 确保目录存在
+          
           mkdir -p "$CONFIG_DIR"
-
-          # 4. 核心逻辑：文件状态检查
-          # -s 判断文件是否存在且大小不为0
+          
           if [ ! -s "$CONFIG_FILE" ]; then
             echo "Config file not found or empty. Creating new one..."
             echo '{}' > "$CONFIG_FILE"
           else
             echo "Config file exists. Updating..."
           fi
-
-          # 5. 使用 jq 插入/更新配置
-          # 逻辑：即使 gateway 对象不存在，jq 也会自动创建它
+          
           tmp=$(mktemp)
           jq '.gateway.controlUi = { "enabled": true, "allowInsecureAuth": true }' "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
 
@@ -132,12 +103,11 @@ jobs:
           echo "Waiting for OpenClaw ..."
           sleep 30
           
-          # 检查端口是否启动
-          if sudo lsof -Pi :18789 -sTCP:LISTEN -t >/dev/null ; then
+          # 在 macOS 上去掉了 sudo，因为普通用户通常可以直接 lsof 自己的端口
+          if lsof -Pi :18789 -sTCP:LISTEN -t >/dev/null ; then
               echo "✅ OpenClaw Gateway is running!"
           else
               echo "⚠️ Gateway not responding yet. Checking logs:"
-              # 打印更多日志以便排查
               tail -n 50 openclaw.log || echo "No log file found."
           fi
 
