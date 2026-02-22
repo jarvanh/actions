@@ -13,9 +13,10 @@ jobs:
       contents: read
     steps:
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: 'current' # 始终使用官方发布的最新版
+          node-version: 22
+          # node-version: 'current' # 始终使用官方发布的最新版
       - name: Install Rclone
         run: |
           curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
