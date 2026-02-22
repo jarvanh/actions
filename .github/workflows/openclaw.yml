@@ -76,7 +76,6 @@ jobs:
           cd openclaw
           export OPENCLAW_HOME_VOLUME="openclaw_home"
           docker build -t openclaw:local -f Dockerfile .
-          docker compose run --rm openclaw-cli gateway --verbose
           docker compose up -d openclaw-gateway
 
       - name: Check OpenClaw
