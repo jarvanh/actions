@@ -75,8 +75,7 @@ jobs:
           git clone https://github.com/openclaw/openclaw.git
           cd openclaw
           export OPENCLAW_HOME_VOLUME="openclaw_home"
-          docker build -t openclaw:local -f Dockerfile .
-          docker compose up -d openclaw-gateway
+          ./docker-setup.sh
 
       - name: Check OpenClaw
         run: |
