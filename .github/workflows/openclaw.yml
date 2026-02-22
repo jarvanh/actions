@@ -92,7 +92,7 @@ jobs:
           echo "Configuring VNC Server..."
           # 开启 macOS 屏幕共享 (VNC) 并设置密码为 123456
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -activate -configure -access -on -restart -agent -privs -all
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -configure -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw $NGROK_AUTH_TOKEN
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -configure -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw "$NGROK_AUTH_TOKEN"
           
           echo "Starting Ngrok TCP tunnel for VNC..."
           ngrok config add-authtoken $NGROK_AUTH_TOKEN
