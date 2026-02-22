@@ -1,23 +1,27 @@
-name: openclaw-macos-sync-vnc
+name: openclaw
 
 on:
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
-
+  
 jobs:
   build:
     concurrency: openclaw-singleton
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     steps:
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: 'current'
-
-      - name: Install Dependencies
+          # node-version: 22
+          node-version: 'current' # 始终使用官方发布的最新版
+      - name: Install Rclone
         run: |
-          brew install rclone jq cloudflared ngrok
+          curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
+          unzip rclone-*-amd64.zip
+          cd rclone-*-linux-amd64
+          sudo mv rclone /usr/bin
+          sudo chmod +x /usr/bin/rclone
 
       - name: Configure Rclone
         env:
@@ -28,64 +32,113 @@ jobs:
           $RCLONE_CONFIG
           EOF
 
-      - name: Rclone Initial Sync (Pull)
+      - name: Mount Dropbox
         run: |
-          mkdir -p ~/dropbox/self-hosted/openclaw
-          echo "Syncing data from Dropbox..."
-          # 将 Dropbox 中的数据拉取到本地
-          rclone sync dropbox:self-hosted/openclaw ~/dropbox/self-hosted/openclaw --progress
+          sudo apt-get install fuse3
+          sudo mkdir -p /dropbox
+          
+          # 挂载 Dropbox
+          sudo nohup rclone mount dropbox: /dropbox \
+            --allow-non-empty \
+            --no-gzip-encoding \
+            --umask 000 \
+            --allow-other \
+            --attr-timeout 10m \
+            --vfs-cache-mode full \
+            --vfs-cache-max-age 5m \
+            --vfs-read-chunk-size-limit 10G \
+            --buffer-size 100M \
+            --vfs-cache-max-size 10G &
+          
+          echo "Waiting for mount..."
+          sleep 10
+          
+          # 确保目录存在且权限开放
+          sudo mkdir -p /dropbox/self-hosted/openclaw
+          sudo chmod 777 /dropbox/self-hosted/openclaw
 
-      - name: Setup Background Sync (Push)
+      - name: Install Cloudflared
         run: |
-          # 启动后台任务：每 1 分钟将本地更改同步回 Dropbox
-          nohup bash -c 'while true; do rclone sync ~/dropbox/self-hosted/openclaw dropbox:self-hosted/openclaw; sleep 60; done' > rclone_sync.log 2>&1 &
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
+          sudo mkdir -p ~/.cloudflared/
+          sudo cp -r /dropbox/self-hosted/.cloudflared/* ~/.cloudflared/ 2>/dev/null || true
 
       - name: Run Cloudflared Tunnel
         run: |
-          mkdir -p ~/.cloudflared/
-          sudo rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
-          
           cloudflared tunnel route dns oc oc.'${{ secrets.VD }}'.eu.org
           nohup cloudflared tunnel run --url http://127.0.0.1:18789 oc &
 
-      - name: Install OpenClaw & Link Config
+      - name: Install OpenClaw
         run: |
+          # 安装 OpenClaw
           echo "Installing OpenClaw..."
           curl -fsSL https://openclaw.ai/install.sh | bash -s -- --no-onboard
-          
+          echo "/home/runner/.npm-global/bin" >> $GITHUB_PATH
+
+          # 设置主配置目录软链接 (保持你原有的逻辑)
+          # rm -rf ~/.openclaw
+          # ln -s /dropbox/self-hosted/openclaw ~/.openclaw
+          # echo "Symlink created: ~/.openclaw -> /dropbox/self-hosted/openclaw"
+
           npm install -g @google/gemini-cli
+          echo "Checking gemini version..."
+          gemini --version || echo "gemini not found in PATH"
           npm i -g clawhub
-
-          # 将配置目录软链接到 sync 目录，确保数据得以保存
-          rm -rf ~/.openclaw
-          mkdir -p ~/dropbox/self-hosted/openclaw
-          ln -s ~/dropbox/self-hosted/openclaw ~/.openclaw
-
+          
       - name: Configure OpenClaw
         run: |
+        
+          # 插入配置解决 "disconnected (1008): pairing required" Error
+          # https://github.com/openclaw/openclaw/issues/6959
+          
+          #   "gateway": {
+          #     "port": 18789,
+          #     "mode": "local",
+          #     "bind": "loopback",
+          #     "controlUi": { // 一定要添加
+          #       "enabled": true,
+          #       "allowInsecureAuth": true
+          #     },
+
+          # 1. 安装 jq 工具
+          sudo apt-get update && sudo apt-get install -y jq
+
+          # 2. 定义变量
           CONFIG_DIR="$HOME/.openclaw"
           CONFIG_FILE="$CONFIG_DIR/openclaw.json"
-          
+
+          # 3. 确保目录存在
+          mkdir -p "$CONFIG_DIR"
+
+          # 4. 核心逻辑：文件状态检查
+          # -s 判断文件是否存在且大小不为0
           if [ ! -s "$CONFIG_FILE" ]; then
+            echo "Config file not found or empty. Creating new one..."
             echo '{}' > "$CONFIG_FILE"
+          else
+            echo "Config file exists. Updating..."
           fi
-          
+
+          # 5. 使用 jq 插入/更新配置
+          # 逻辑：即使 gateway 对象不存在，jq 也会自动创建它
           tmp=$(mktemp)
           jq '.gateway.controlUi = { "enabled": true, "allowInsecureAuth": true }' "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
 
       - name: Run OpenClaw
         run: |
-          # 具体的变量名取决于 OpenClaw 的文档，常见格式如下：
-          export HOSTNAME="runner-gw"
-          export INSTANCE_NAME="runner-gw"
           nohup openclaw gateway --verbose > openclaw.log 2>&1 &
-          sleep 30
           
-          if lsof -Pi :18789 -sTCP:LISTEN -t >/dev/null ; then
+          echo "Waiting for OpenClaw ..."
+          sleep 10
+          
+          # 检查端口是否启动
+          if sudo lsof -Pi :18789 -sTCP:LISTEN -t >/dev/null ; then
               echo "✅ OpenClaw Gateway is running!"
           else
               echo "⚠️ Gateway not responding yet. Checking logs:"
-              tail -n 50 openclaw.log || true
+              # 打印更多日志以便排查
+              tail -n 50 openclaw.log || echo "No log file found."
           fi
 
       - name: Setup tmate session
