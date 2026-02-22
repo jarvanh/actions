@@ -1,4 +1,4 @@
-name: openclaw-macos
+name: openclaw-macos-sync-vnc
 
 on:
   schedule:
@@ -8,17 +8,16 @@ on:
 jobs:
   build:
     concurrency: openclaw-singleton
-    runs-on: macos-latest # 修改为 macOS 运行环境
+    runs-on: macos-latest
     steps:
       - name: Setup Node.js
-        uses: actions/setup-node@v4 # 建议升级到 v4 版本以获取更好的兼容性
+        uses: actions/setup-node@v4
         with:
           node-version: 'current'
 
-      - name: Install Dependencies (Rclone, jq, Cloudflared)
+      - name: Install Dependencies
         run: |
-          # 使用 Homebrew 统一安装依赖，比手动下载解压更稳定
-          brew install rclone jq cloudflared
+          brew install rclone jq cloudflared ngrok
 
       - name: Configure Rclone
         env:
@@ -29,68 +28,46 @@ jobs:
           $RCLONE_CONFIG
           EOF
 
-      - name: Mount Dropbox
+      - name: Rclone Initial Sync (Pull)
         run: |
-          # 安装 macfuse (macOS 上的 FUSE 替代品)
-          brew install --cask macfuse
-          
-          # ⚠️ 重要: macOS 存在 SIP (系统完整性保护)，根目录只读。
-          # 因此将挂载点从 /dropbox 改为用户目录下的 ~/dropbox
-          mkdir -p ~/dropbox
-          
-          # 挂载 Dropbox
-          nohup rclone mount dropbox: ~/dropbox \
-            --allow-non-empty \
-            --no-gzip-encoding \
-            --umask 000 \
-            --allow-other \
-            --attr-timeout 10m \
-            --vfs-cache-mode full \
-            --vfs-cache-max-age 5m \
-            --vfs-read-chunk-size-limit 10G \
-            --buffer-size 100M \
-            --vfs-cache-max-size 10G &
-          
-          echo "Waiting for mount..."
-          sleep 10
-          
-          # 对应调整后续目录路径
-          mkdir -p ~/dropbox/self-hosted/openclaw
-          chmod 777 ~/dropbox/self-hosted/openclaw
+          mkdir -p ~/dropbox/self-hosted
+          echo "Syncing data from Dropbox..."
+          # 将 Dropbox 中的数据拉取到本地
+          rclone sync dropbox:self-hosted ~/dropbox/self-hosted --progress
+
+      - name: Setup Background Sync (Push)
+        run: |
+          # 启动后台任务：每 5 分钟将本地更改同步回 Dropbox
+          nohup bash -c 'while true; do rclone sync ~/dropbox/self-hosted dropbox:self-hosted; sleep 300; done' > rclone_sync.log 2>&1 &
 
       - name: Run Cloudflared Tunnel
         run: |
-          # 复制配置时使用新的挂载路径
           mkdir -p ~/.cloudflared/
           cp -r ~/dropbox/self-hosted/.cloudflared/* ~/.cloudflared/ 2>/dev/null || true
           
           cloudflared tunnel route dns oc oc.'${{ secrets.VD }}'.eu.org
           nohup cloudflared tunnel run --url http://127.0.0.1:18789 oc &
 
-      - name: Install OpenClaw
+      - name: Install OpenClaw & Link Config
         run: |
           echo "Installing OpenClaw..."
           curl -fsSL https://openclaw.ai/install.sh | bash -s -- --no-onboard
           
-          # 在 macOS 上 setup-node 通常会自动处理好全局 PATH，这里无需再手动写入 GITHUB_PATH
-          
           npm install -g @google/gemini-cli
-          echo "Checking gemini version..."
-          gemini --version || echo "gemini not found in PATH"
           npm i -g clawhub
-          
+
+          # 将配置目录软链接到 sync 目录，确保数据得以保存
+          rm -rf ~/.openclaw
+          mkdir -p ~/dropbox/self-hosted/openclaw
+          ln -s ~/dropbox/self-hosted/openclaw ~/.openclaw
+
       - name: Configure OpenClaw
         run: |
           CONFIG_DIR="$HOME/.openclaw"
           CONFIG_FILE="$CONFIG_DIR/openclaw.json"
           
-          mkdir -p "$CONFIG_DIR"
-          
           if [ ! -s "$CONFIG_FILE" ]; then
-            echo "Config file not found or empty. Creating new one..."
             echo '{}' > "$CONFIG_FILE"
-          else
-            echo "Config file exists. Updating..."
           fi
           
           tmp=$(mktemp)
@@ -99,19 +76,40 @@ jobs:
       - name: Run OpenClaw
         run: |
           nohup openclaw gateway --verbose > openclaw.log 2>&1 &
-          
-          echo "Waiting for OpenClaw ..."
           sleep 30
           
-          # 在 macOS 上去掉了 sudo，因为普通用户通常可以直接 lsof 自己的端口
           if lsof -Pi :18789 -sTCP:LISTEN -t >/dev/null ; then
               echo "✅ OpenClaw Gateway is running!"
           else
               echo "⚠️ Gateway not responding yet. Checking logs:"
-              tail -n 50 openclaw.log || echo "No log file found."
+              tail -n 50 openclaw.log || true
           fi
 
-      - name: Setup tmate session
-        uses: mxschmitt/action-tmate@v3
-        with:
-          limit-access-to-actor: true
+      - name: Start VNC Remote Desktop (Replace tmate)
+        env:
+          NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+        run: |
+          echo "Configuring VNC Server..."
+          # 开启 macOS 屏幕共享 (VNC) 并设置密码为 123456
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -activate -configure -access -on -restart -agent -privs -all
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -configure -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw 123456
+          
+          echo "Starting Ngrok TCP tunnel for VNC..."
+          ngrok config add-authtoken $NGROK_AUTH_TOKEN
+          # 穿透 VNC 默认的 5900 端口
+          nohup ngrok tcp 5900 > ngrok.log 2>&1 &
+          
+          sleep 5
+          
+          # 获取并打印 VNC 连接地址
+          VNC_URL=$(curl -s http://localhost:4040/api/tunnels | jq -r .tunnels[0].public_url | sed 's/tcp:\/\//vnc:\/\//')
+          
+          echo "========================================="
+          echo "🖥️  Remote Desktop is Ready!"
+          echo "🔗 Connection URL: $VNC_URL"
+          echo "🔑 VNC Password: NGROK_AUTH_TOKEN"
+          echo "👉 Open your VNC Viewer (e.g., RealVNC, macOS Screen Sharing) and paste the URL above."
+          echo "========================================="
+          
+          # 保持 Action 运行，以便我们可以通过 VNC 连接
+          sleep 86400
