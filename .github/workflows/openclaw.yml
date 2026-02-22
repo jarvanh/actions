@@ -66,10 +66,10 @@ jobs:
 
       - name: Install OpenClaw
         run: |
-          # 设置主配置目录软链接 (保持你原有的逻辑)
-          rm -rf /home/node
-          sudo ln -s /dropbox/self-hosted/openclaw /home/node
-          echo "Symlink created: /home/node -> /dropbox/self-hosted/openclaw"
+          # # 设置主配置目录软链接 (保持你原有的逻辑)
+          # rm -rf /home/node
+          # sudo ln -s /dropbox/self-hosted/openclaw /home/node
+          # echo "Symlink created: /home/node -> /dropbox/self-hosted/openclaw"
           
           # 安装 OpenClaw
           git clone https://github.com/openclaw/openclaw.git
