@@ -43,7 +43,7 @@ jobs:
       - name: Run Cloudflared Tunnel
         run: |
           mkdir -p ~/.cloudflared/
-          rclone sync dropbox:self-hosted/.cloudflared/* ~/.cloudflared/ 2>/dev/null || true
+          sudo rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
           
           cloudflared tunnel route dns oc oc.'${{ secrets.VD }}'.eu.org
           nohup cloudflared tunnel run --url http://127.0.0.1:18789 oc &
