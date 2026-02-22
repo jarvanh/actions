@@ -128,6 +128,7 @@ jobs:
 
       - name: Run OpenClaw
         run: |
+          openclaw doctor --fix
           nohup openclaw gateway --verbose > openclaw.log 2>&1 &
           
           echo "Waiting for OpenClaw ..."
