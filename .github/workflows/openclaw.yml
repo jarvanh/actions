@@ -37,8 +37,8 @@ jobs:
 
       - name: Setup Background Sync (Push)
         run: |
-          # 启动后台任务：每 5 分钟将本地更改同步回 Dropbox
-          nohup bash -c 'while true; do rclone sync ~/dropbox/self-hosted dropbox:self-hosted; sleep 300; done' > rclone_sync.log 2>&1 &
+          # 启动后台任务：每 1 分钟将本地更改同步回 Dropbox
+          nohup bash -c 'while true; do rclone sync ~/dropbox/self-hosted dropbox:self-hosted; sleep 60; done' > rclone_sync.log 2>&1 &
 
       - name: Run Cloudflared Tunnel
         run: |
@@ -92,7 +92,7 @@ jobs:
           echo "Configuring VNC Server..."
           # 开启 macOS 屏幕共享 (VNC) 并设置密码为 123456
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -activate -configure -access -on -restart -agent -privs -all
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -configure -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw 123456
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -configure -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw $NGROK_AUTH_TOKEN
           
           echo "Starting Ngrok TCP tunnel for VNC..."
           ngrok config add-authtoken $NGROK_AUTH_TOKEN
