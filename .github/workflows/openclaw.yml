@@ -74,6 +74,30 @@ jobs:
           # 安装 OpenClaw 依赖
           echo "Installing OpenClaw base..."
           curl -fsSL https://openclaw.ai/install.sh | bash -s -- --no-onboard
+
+          
+          # 定义配置文件路径
+          CONFIG_FILE="/dropbox/self-hosted/openclaw/openclaw.json"
+          
+          # 设置默认版本（如果读取失败或文件不存在时的保底版本）
+          TARGET_VERSION="2026.2.6-3" 
+          
+          # 尝试提取 lastRunVersion
+          if [ -s "$CONFIG_FILE" ]; then
+            # 也可以使用 .meta.lastTouchedVersion，这里按照你的要求使用 .wizard.lastRunVersion
+            READ_VERSION=$(sudo jq -r '.wizard.lastRunVersion // empty' "$CONFIG_FILE" 2>/dev/null)
+            if [ -n "$READ_VERSION" ]; then
+              TARGET_VERSION="$READ_VERSION"
+              echo "✅ Found version in config: $TARGET_VERSION"
+            else
+              echo "⚠️ Version key not found in JSON, using fallback: $TARGET_VERSION"
+            fi
+          else
+            echo "⚠️ Config file STILL not found or empty at $CONFIG_FILE. Using fallback: $TARGET_VERSION"
+          fi
+
+          echo "Installing openclaw@$TARGET_VERSION ..."
+          npm i -g "openclaw@$TARGET_VERSION"
           
           echo "/home/runner/.npm-global/bin" >> $GITHUB_PATH
 
@@ -125,31 +149,6 @@ jobs:
           # 逻辑：即使 gateway 对象不存在，jq 也会自动创建它
           tmp=$(mktemp)
           jq '.gateway.controlUi = { "enabled": true, "allowInsecureAuth": true }' "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
-
-
-
-          # 定义配置文件路径
-          CONFIG_FILE="~/.openclaw/openclaw.json"
-          
-          # 设置默认版本（如果读取失败或文件不存在时的保底版本）
-          TARGET_VERSION="2026.2.6-3" 
-          
-          # 尝试提取 lastRunVersion
-          if [ -s "$CONFIG_FILE" ]; then
-            # 也可以使用 .meta.lastTouchedVersion，这里按照你的要求使用 .wizard.lastRunVersion
-            READ_VERSION=$(sudo jq -r '.wizard.lastRunVersion // empty' "$CONFIG_FILE" 2>/dev/null)
-            if [ -n "$READ_VERSION" ]; then
-              TARGET_VERSION="$READ_VERSION"
-              echo "✅ Found version in config: $TARGET_VERSION"
-            else
-              echo "⚠️ Version key not found in JSON, using fallback: $TARGET_VERSION"
-            fi
-          else
-            echo "⚠️ Config file STILL not found or empty at $CONFIG_FILE. Using fallback: $TARGET_VERSION"
-          fi
-
-          echo "Installing openclaw@$TARGET_VERSION ..."
-          npm i -g "openclaw@$TARGET_VERSION"
           
       - name: Run OpenClaw
         run: |
