@@ -13,8 +13,8 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          # node-version: 22
           node-version: 'current' # 始终使用官方发布的最新版
+
       - name: Install Rclone
         run: |
           curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
@@ -74,30 +74,6 @@ jobs:
           # 安装 OpenClaw 依赖
           echo "Installing OpenClaw base..."
           curl -fsSL https://openclaw.ai/install.sh | bash -s -- --no-onboard
-
-          
-          # 定义配置文件路径
-          CONFIG_FILE="/dropbox/self-hosted/openclaw/openclaw.json"
-          
-          # 设置默认版本（如果读取失败或文件不存在时的保底版本）
-          TARGET_VERSION="2026.2.6-3" 
-          
-          # 尝试提取 lastRunVersion
-          if [ -s "$CONFIG_FILE" ]; then
-            # 也可以使用 .meta.lastTouchedVersion，这里按照你的要求使用 .wizard.lastRunVersion
-            READ_VERSION=$(sudo jq -r '.wizard.lastRunVersion // empty' "$CONFIG_FILE" 2>/dev/null)
-            if [ -n "$READ_VERSION" ]; then
-              TARGET_VERSION="$READ_VERSION"
-              echo "✅ Found version in config: $TARGET_VERSION"
-            else
-              echo "⚠️ Version key not found in JSON, using fallback: $TARGET_VERSION"
-            fi
-          else
-            echo "⚠️ Config file STILL not found or empty at $CONFIG_FILE. Using fallback: $TARGET_VERSION"
-          fi
-
-          echo "Installing openclaw@$TARGET_VERSION ..."
-          npm i -g "openclaw@$TARGET_VERSION"
           
           echo "/home/runner/.npm-global/bin" >> $GITHUB_PATH
 
@@ -113,19 +89,6 @@ jobs:
           
       - name: Configure OpenClaw
         run: |
-        
-          # 插入配置解决 "disconnected (1008): pairing required" Error
-          # https://github.com/openclaw/openclaw/issues/6959
-          
-          #   "gateway": {
-          #     "port": 18789,
-          #     "mode": "local",
-          #     "bind": "loopback",
-          #     "controlUi": { // 一定要添加
-          #       "enabled": true,
-          #       "allowInsecureAuth": true
-          #     },
-
           # 1. 安装 jq 工具
           sudo apt-get update && sudo apt-get install -y jq
 
@@ -137,7 +100,6 @@ jobs:
           mkdir -p "$CONFIG_DIR"
 
           # 4. 核心逻辑：文件状态检查
-          # -s 判断文件是否存在且大小不为0
           if [ ! -s "$CONFIG_FILE" ]; then
             echo "Config file not found or empty. Creating new one..."
             echo '{}' > "$CONFIG_FILE"
@@ -146,7 +108,6 @@ jobs:
           fi
 
           # 5. 使用 jq 插入/更新配置
-          # 逻辑：即使 gateway 对象不存在，jq 也会自动创建它
           tmp=$(mktemp)
           jq '.gateway.controlUi = { "enabled": true, "allowInsecureAuth": true }' "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
           
@@ -155,18 +116,56 @@ jobs:
           nohup openclaw gateway --verbose > openclaw.log 2>&1 &
           
           echo "Waiting for OpenClaw ..."
-          sleep 10
+          sleep 30
           
-          # 检查端口是否启动
+          # 第一次检查端口是否启动
           if sudo lsof -Pi :18789 -sTCP:LISTEN -t >/dev/null ; then
               echo "✅ OpenClaw Gateway is running!"
           else
               echo "⚠️ Gateway not responding yet. Checking logs:"
-              # 打印更多日志以便排查
-              tail -n 50 openclaw.log || echo "No log file found."
+              tail -n 20 openclaw.log || echo "No log file found."
+              
+              echo "🔄 Attempting to fallback and reinstall specific OpenClaw version..."
+              
+              # 定义配置文件路径
+              CONFIG_FILE="/dropbox/self-hosted/openclaw/openclaw.json"
+              TARGET_VERSION="2026.2.6-3" 
+              
+              # 尝试提取 lastRunVersion
+              if [ -s "$CONFIG_FILE" ]; then
+                READ_VERSION=$(sudo jq -r '.wizard.lastRunVersion // empty' "$CONFIG_FILE" 2>/dev/null)
+                if [ -n "$READ_VERSION" ]; then
+                  TARGET_VERSION="$READ_VERSION"
+                  echo "✅ Found version in config: $TARGET_VERSION"
+                else
+                  echo "⚠️ Version key not found in JSON, using fallback: $TARGET_VERSION"
+                fi
+              else
+                echo "⚠️ Config file STILL not found or empty at $CONFIG_FILE. Using fallback: $TARGET_VERSION"
+              fi
+
+              echo "Installing openclaw@$TARGET_VERSION ..."
+              npm i -g "openclaw@$TARGET_VERSION"
+              
+              echo "Restarting OpenClaw..."
+              # 杀掉可能卡住的旧进程
+              pkill -f "openclaw gateway" || true
+              
+              nohup openclaw gateway --verbose > openclaw_retry.log 2>&1 &
+              sleep 30
+              
+              # 第二次检查端口是否启动
+              if sudo lsof -Pi :18789 -sTCP:LISTEN -t >/dev/null ; then
+                  echo "✅ OpenClaw Gateway is running after fallback installation!"
+              else
+                  echo "❌ Gateway STILL not responding after fallback. Failing workflow."
+                  tail -n 50 openclaw_retry.log || echo "No log file found."
+                  exit 1
+              fi
           fi
 
       - name: Setup tmate session
         uses: mxschmitt/action-tmate@v3
+        if: always() # 确保即使前面的步骤失败（比如启动失败），你也能进入 tmate 排查问题
         with:
           limit-access-to-actor: true
