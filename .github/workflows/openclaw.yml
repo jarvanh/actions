@@ -10,17 +10,10 @@ jobs:
     concurrency: openclaw-singleton
     runs-on: ubuntu-latest
     steps:
-      - name: Disable Ubuntu auto-updates
+      - name: Update System
         run: |
-          echo "Stopping and disabling apt-daily services..."
-          sudo systemctl stop apt-daily.timer
-          sudo systemctl stop apt-daily-upgrade.timer
-          sudo systemctl disable apt-daily.timer
-          sudo systemctl disable apt-daily-upgrade.timer
-          sudo systemctl kill --kill-who=all apt-daily.service || true
-          sudo systemctl kill --kill-who=all apt-daily-upgrade.service || true
-          # 稍作等待确保后台进程已退出
-          sleep 5
+          sudo apt-get update
+          sudo apt-get upgrade -y
           
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -176,7 +169,7 @@ jobs:
               fi
           fi
 
-      - name: Setup tmate session
+      - name: Setup tmate
         uses: mxschmitt/action-tmate@v3
         if: always()
         with:
