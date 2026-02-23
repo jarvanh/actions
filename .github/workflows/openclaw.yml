@@ -163,9 +163,9 @@ jobs:
                   exit 1
               fi
           fi
-
+          sleep 30
+          
       - name: Setup tmate session
         uses: mxschmitt/action-tmate@v3
-        if: always() # 确保即使前面的步骤失败（比如启动失败），你也能进入 tmate 排查问题
         with:
           limit-access-to-actor: true
