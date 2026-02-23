@@ -163,9 +163,17 @@ jobs:
                   exit 1
               fi
           fi
-          sleep 30
-          
+
+      - name: Force unlock apt-get
+        if: always()
+        run: |
+          echo "Clearing dpkg/apt locks..."
+          sudo killall apt apt-get dpkg || true
+          sudo rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock
+          sudo dpkg --configure -a || true
+
       - name: Setup tmate session
         uses: mxschmitt/action-tmate@v3
+        if: always()
         with:
           limit-access-to-actor: true
