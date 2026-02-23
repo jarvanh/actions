@@ -152,7 +152,7 @@ jobs:
               pkill -f "openclaw gateway" || true
               
               nohup openclaw gateway --verbose > openclaw_retry.log 2>&1 &
-              sleep 18
+              sleep 15
               
               # 第二次检查端口是否启动
               if sudo lsof -Pi :18789 -sTCP:LISTEN -t >/dev/null ; then
