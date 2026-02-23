@@ -10,6 +10,18 @@ jobs:
     concurrency: openclaw-singleton
     runs-on: ubuntu-latest
     steps:
+      - name: Disable Ubuntu auto-updates
+        run: |
+          echo "Stopping and disabling apt-daily services..."
+          sudo systemctl stop apt-daily.timer
+          sudo systemctl stop apt-daily-upgrade.timer
+          sudo systemctl disable apt-daily.timer
+          sudo systemctl disable apt-daily-upgrade.timer
+          sudo systemctl kill --kill-who=all apt-daily.service || true
+          sudo systemctl kill --kill-who=all apt-daily-upgrade.service || true
+          # 稍作等待确保后台进程已退出
+          sleep 5
+          
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
@@ -163,14 +175,6 @@ jobs:
                   exit 1
               fi
           fi
-
-      - name: Force unlock apt-get
-        if: always()
-        run: |
-          echo "Clearing dpkg/apt locks..."
-          sudo killall apt apt-get dpkg || true
-          sudo rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock
-          sudo dpkg --configure -a || true
 
       - name: Setup tmate session
         uses: mxschmitt/action-tmate@v3
