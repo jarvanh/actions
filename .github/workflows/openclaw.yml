@@ -71,9 +71,10 @@ jobs:
 
       - name: Install OpenClaw
         run: |
-          # 安装 OpenClaw
-          echo "Installing OpenClaw..."
+          # 安装 OpenClaw 依赖
+          echo "Installing OpenClaw base..."
           curl -fsSL https://openclaw.ai/install.sh | bash -s -- --no-onboard
+          
           echo "/home/runner/.npm-global/bin" >> $GITHUB_PATH
 
           # 设置主配置目录软链接
@@ -85,6 +86,28 @@ jobs:
           echo "Checking gemini version..."
           gemini --version || echo "gemini not found in PATH"
           npm i -g clawhub
+
+          # 定义配置文件路径
+          CONFIG_FILE="~/.openclaw/openclaw.json"
+          
+          # 设置默认版本（如果读取失败或文件不存在时的保底版本）
+          TARGET_VERSION="latest" 
+          
+          # 尝试提取 lastRunVersion
+          if [ -s "$CONFIG_FILE" ]; then
+            READ_VERSION=$(jq -r '.lastRunVersion // empty' "$CONFIG_FILE" 2>/dev/null)
+            if [ -n "$READ_VERSION" ]; then
+              TARGET_VERSION="$READ_VERSION"
+              echo "Found lastRunVersion in config: $TARGET_VERSION"
+            else
+              echo "lastRunVersion not found in config, using fallback: $TARGET_VERSION"
+            fi
+          else
+            echo "Config file not found or empty, using fallback: $TARGET_VERSION"
+          fi
+
+          # 安装 OpenClaw lastRunVersion
+          npm i -g "openclaw@$TARGET_VERSION"
           
       - name: Configure OpenClaw
         run: |
