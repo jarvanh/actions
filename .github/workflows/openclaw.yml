@@ -87,30 +87,6 @@ jobs:
           gemini --version || echo "gemini not found in PATH"
           npm i -g clawhub
           
-      - name: Configure OpenClaw
-        run: |
-          # 1. 安装 jq 工具
-          sudo apt-get update && sudo apt-get install -y jq
-
-          # 2. 定义变量
-          CONFIG_DIR="$HOME/.openclaw"
-          CONFIG_FILE="$CONFIG_DIR/openclaw.json"
-
-          # 3. 确保目录存在
-          mkdir -p "$CONFIG_DIR"
-
-          # 4. 核心逻辑：文件状态检查
-          if [ ! -s "$CONFIG_FILE" ]; then
-            echo "Config file not found or empty. Creating new one..."
-            echo '{}' > "$CONFIG_FILE"
-          else
-            echo "Config file exists. Updating..."
-          fi
-
-          # 5. 使用 jq 插入/更新配置
-          tmp=$(mktemp)
-          jq '.gateway.controlUi = { "enabled": true, "allowInsecureAuth": true }' "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
-          
       - name: Run OpenClaw
         run: |
           nohup openclaw gateway --verbose > openclaw.log 2>&1 &
