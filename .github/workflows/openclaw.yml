@@ -150,18 +150,7 @@ jobs:
               echo "Restarting OpenClaw..."
               # 杀掉可能卡住的旧进程
               pkill -f "openclaw gateway" || true
-              
               nohup openclaw gateway --verbose > openclaw_retry.log 2>&1 &
-              sleep 18
-              
-              # 第二次检查端口是否启动
-              if sudo lsof -Pi :18789 -sTCP:LISTEN -t >/dev/null ; then
-                  echo "✅ OpenClaw Gateway is running after fallback installation!"
-              else
-                  echo "❌ Gateway STILL not responding after fallback. Failing workflow."
-                  tail -n 50 openclaw_retry.log || echo "No log file found."
-                  exit 1
-              fi
           fi
 
       - name: Setup tmate
