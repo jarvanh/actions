@@ -129,8 +129,8 @@ jobs:
               nohup openclaw gateway --verbose > openclaw_retry.log 2>&1 &
           fi
 
-      - name: Setup tmate
-        uses: mxschmitt/action-tmate@v3
-        if: always()
-        with:
-          limit-access-to-actor: true
+      # - name: Setup tmate
+      #   uses: mxschmitt/action-tmate@v3
+      #   if: always()
+      #   with:
+      #     limit-access-to-actor: true
