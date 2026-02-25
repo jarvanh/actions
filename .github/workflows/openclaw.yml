@@ -153,24 +153,7 @@ jobs:
                   openclaw gateway restart
               fi
           fi
-          # sleep 350m
-          
-      - name: Force Release Apt Lock
-        run: |
-          # 1. 停止系统自动更新服务
-          sudo systemctl stop apt-daily.service || true
-          sudo systemctl stop apt-daily-upgrade.service || true
-          
-          # 2. 杀掉所有正在运行的 apt 相关进程
-          sudo killall apt apt-get 2>/dev/null || true
-          
-          # 3. 强制删除锁文件
-          sudo rm -f /var/lib/apt/lists/lock
-          sudo rm -f /var/cache/apt/archives/lock
-          sudo rm -f /var/lib/dpkg/lock*
-          
-          # 4. 修复可能中断的配置
-          sudo dpkg --configure -a
+          sleep 10m
       
       - name: Run tmate
         uses: mxschmitt/action-tmate@v3
