@@ -154,6 +154,14 @@ jobs:
               fi
           fi
           # sleep 350m
+          
+      - name: Wait for apt lock
+        run: |
+          sudo touch /var/lib/apt/lists/lock
+          while fuser /var/lib/apt/lists/lock >/dev/null 2>&1 ; do
+            echo "Waiting for other software managers to finish..."
+            sleep 5
+          done
 
       - name: Setup tmate
         uses: mxschmitt/action-tmate@v3
