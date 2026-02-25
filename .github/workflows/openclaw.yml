@@ -155,16 +155,25 @@ jobs:
           fi
           # sleep 350m
           
-      - name: Wait for apt lock
+      - name: Force Release Apt Lock
         run: |
-          sudo touch /var/lib/apt/lists/lock
-          while fuser /var/lib/apt/lists/lock >/dev/null 2>&1 ; do
-            echo "Waiting for other software managers to finish..."
-            sleep 5
-          done
-
-      - name: Setup tmate
+          # 1. 停止系统自动更新服务
+          sudo systemctl stop apt-daily.service || true
+          sudo systemctl stop apt-daily-upgrade.service || true
+          
+          # 2. 杀掉所有正在运行的 apt 相关进程
+          sudo killall apt apt-get 2>/dev/null || true
+          
+          # 3. 强制删除锁文件
+          sudo rm -f /var/lib/apt/lists/lock
+          sudo rm -f /var/cache/apt/archives/lock
+          sudo rm -f /var/lib/dpkg/lock*
+          
+          # 4. 修复可能中断的配置
+          sudo dpkg --configure -a
+      
+      - name: Run tmate
         uses: mxschmitt/action-tmate@v3
-        if: always()
+        timeout-minutes: 350
         with:
-          limit-access-to-actor: true
+          limit-access-to-actor: true # 顺便解决你之前提到的 SSH 输出刷屏问题
