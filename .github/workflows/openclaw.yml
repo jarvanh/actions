@@ -117,7 +117,7 @@ jobs:
               openclaw gateway restart
               
               echo "Waiting for OpenClaw after doctor fix..."
-              sleep 15
+              sleep 30
               
               # 再次检查端口是否启动
               if sudo lsof -Pi :18789 -sTCP:LISTEN -t >/dev/null ; then
