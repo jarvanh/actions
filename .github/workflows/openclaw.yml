@@ -125,8 +125,6 @@ jobs:
               npm i -g "openclaw@$TARGET_VERSION"
               
               echo "Restarting OpenClaw..."
-              # 杀掉可能卡住的旧进程
-              pkill -f "openclaw gateway" || true
               # nohup openclaw gateway --verbose > openclaw_retry.log 2>&1 &
               openclaw doctor --fix
               openclaw gateway restart
