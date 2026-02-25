@@ -90,7 +90,6 @@ jobs:
       - name: Run OpenClaw
         run: |
           # nohup openclaw gateway --verbose > openclaw.log 2>&1 &
-          openclaw doctor --fix
           openclaw gateway restart
           
           echo "Waiting for OpenClaw ..."
