@@ -53,9 +53,8 @@ jobs:
           echo "Waiting for mount..."
           sleep 10
           
-          # 确保目录存在且权限开放
+          # 确保目录存在
           sudo mkdir -p /dropbox/self-hosted/openclaw
-          sudo chmod 777 /dropbox/self-hosted/openclaw
 
       - name: Install Cloudflared
         run: |
