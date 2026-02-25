@@ -128,7 +128,7 @@ jobs:
                   echo "🔄 Doctor fix failed. Attempting to fallback and reinstall specific OpenClaw version..."
                   
                   CONFIG_FILE="/dropbox/self-hosted/openclaw/openclaw.json"
-                  TARGET_VERSION="2026.2.6-3" 
+                  TARGET_VERSION="latest" 
                   
                   if [ -s "$CONFIG_FILE" ]; then
                     READ_VERSION=$(sudo jq -r '.wizard.lastRunVersion // empty' "$CONFIG_FILE" 2>/dev/null)
