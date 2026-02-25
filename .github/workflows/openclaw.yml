@@ -90,6 +90,7 @@ jobs:
       - name: Run OpenClaw
         run: |
           # nohup openclaw gateway --verbose > openclaw.log 2>&1 &
+          openclaw doctor --fix
           openclaw gateway restart
           
           echo "Waiting for OpenClaw ..."
@@ -128,6 +129,7 @@ jobs:
               # 杀掉可能卡住的旧进程
               pkill -f "openclaw gateway" || true
               # nohup openclaw gateway --verbose > openclaw_retry.log 2>&1 &
+              openclaw doctor --fix
               openclaw gateway restart
           fi
           # sleep 350m
