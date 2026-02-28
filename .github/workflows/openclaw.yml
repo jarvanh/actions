@@ -68,7 +68,7 @@ jobs:
           cloudflared tunnel route dns oc oc.'${{ secrets.VD }}'.eu.org
           nohup cloudflared tunnel run --url http://127.0.0.1:18789 oc &
      
-      - name: Run vaultwarden container
+      - name: Run antigravity-manager container
         run: |
           ${{ secrets.ANTIGRAVITY_MANAGER }}
           sleep 1m
