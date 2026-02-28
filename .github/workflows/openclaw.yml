@@ -106,53 +106,58 @@ jobs:
           echo "Waiting for OpenClaw ..."
           sleep 10
           
-          # 首次检查端口是否启动
-          if sudo lsof -Pi :18789 -sTCP:LISTEN -t >/dev/null ; then
-              echo "✅ OpenClaw Gateway is running!"
-          else
-              echo "⚠️ Gateway not responding yet. Checking logs:"
-              tail -n 20 openclaw.log || echo "No log file found."
+          # # 首次检查端口是否启动
+          # if sudo lsof -Pi :18789 -sTCP:LISTEN -t >/dev/null ; then
+          #     echo "✅ OpenClaw Gateway is running!"
+          # else
+          #     echo "⚠️ Gateway not responding yet. Checking logs:"
+          #     tail -n 20 openclaw.log || echo "No log file found."
               
-              echo "🛠️ Attempting to fix with 'openclaw doctor --fix'..."
-              openclaw doctor --fix
-              openclaw gateway install
-              openclaw gateway restart
+          #     echo "🛠️ Attempting to fix with 'openclaw doctor --fix'..."
+          #     openclaw doctor --fix
+          #     openclaw gateway install
+          #     openclaw gateway restart
               
-              echo "Waiting for OpenClaw after doctor fix..."
-              sleep 15
+          #     echo "Waiting for OpenClaw after doctor fix..."
+          #     sleep 15
               
-              # 再次检查端口是否启动
-              if sudo lsof -Pi :18789 -sTCP:LISTEN -t >/dev/null ; then
-                  echo "✅ OpenClaw Gateway is running after doctor fix!"
-              else
-                  echo "🔄 Doctor fix failed. Attempting to fallback and reinstall specific OpenClaw version..."
+          #     # 再次检查端口是否启动
+          #     if sudo lsof -Pi :18789 -sTCP:LISTEN -t >/dev/null ; then
+          #         echo "✅ OpenClaw Gateway is running after doctor fix!"
+          #     else
+          #         echo "🔄 Doctor fix failed. Attempting to fallback and reinstall specific OpenClaw version..."
                   
-                  CONFIG_FILE="/dropbox/self-hosted/openclaw/openclaw.json"
-                  TARGET_VERSION="latest" 
+          #         CONFIG_FILE="/dropbox/self-hosted/openclaw/openclaw.json"
+          #         TARGET_VERSION="latest" 
                   
-                  if [ -s "$CONFIG_FILE" ]; then
-                    READ_VERSION=$(sudo jq -r '.wizard.lastRunVersion // empty' "$CONFIG_FILE" 2>/dev/null)
-                    if [ -n "$READ_VERSION" ]; then
-                      TARGET_VERSION="$READ_VERSION"
-                      echo "✅ Found version in config: $TARGET_VERSION"
-                    else
-                      echo "⚠️ Version key not found in JSON, using fallback: $TARGET_VERSION"
-                    fi
-                  else
-                    echo "⚠️ Config file STILL not found or empty at $CONFIG_FILE. Using fallback: $TARGET_VERSION"
-                  fi
+          #         if [ -s "$CONFIG_FILE" ]; then
+          #           READ_VERSION=$(sudo jq -r '.wizard.lastRunVersion // empty' "$CONFIG_FILE" 2>/dev/null)
+          #           if [ -n "$READ_VERSION" ]; then
+          #             TARGET_VERSION="$READ_VERSION"
+          #             echo "✅ Found version in config: $TARGET_VERSION"
+          #           else
+          #             echo "⚠️ Version key not found in JSON, using fallback: $TARGET_VERSION"
+          #           fi
+          #         else
+          #           echo "⚠️ Config file STILL not found or empty at $CONFIG_FILE. Using fallback: $TARGET_VERSION"
+          #         fi
 
-                  echo "Installing openclaw@$TARGET_VERSION ..."
-                  npm i -g "openclaw@$TARGET_VERSION"
+          #         echo "Installing openclaw@$TARGET_VERSION ..."
+          #         npm i -g "openclaw@$TARGET_VERSION"
                   
-                  # 重新安装后再次修复权限（以防降级安装又重置了权限）
-                  sudo chmod -R o-w $(npm root -g)
+          #         # 重新安装后再次修复权限（以防降级安装又重置了权限）
+          #         sudo chmod -R o-w $(npm root -g)
                   
-                  echo "Restarting OpenClaw..."
-                  openclaw gateway install
-                  openclaw gateway restart
-              fi
-          fi
+          #         echo "Restarting OpenClaw..."
+          #         openclaw gateway install
+          #         openclaw gateway restart
+          #     fi
+          # fi
+          
+          npm i -g "openclaw@2026.2.6-3"
+          openclaw gateway install
+          openclaw gateway restart
+          
           sleep 10m
       
       - name: Run tmate
