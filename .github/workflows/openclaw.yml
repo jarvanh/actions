@@ -72,7 +72,7 @@ jobs:
         run: |
           ${{ secrets.ANTIGRAVITY_MANAGER }}
           sleep 1m
-          docker ps  
+          docker ps -a
           
           # 运行 8045 端口的临时隧道，并将输出保存到文件
           nohup cloudflared tunnel --url http://127.0.0.1:8045 > cf_tmp.log 2>&1 &
