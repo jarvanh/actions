@@ -173,10 +173,10 @@ jobs:
               fi
           fi
           
-          npm i -g "openclaw@2026.2.26"
-          sudo chmod -R o-w $(npm root -g)
-          openclaw gateway install --force
-          openclaw gateway restart
+          # npm i -g "openclaw@2026.2.26"
+          # sudo chmod -R o-w $(npm root -g)
+          # openclaw gateway install --force
+          # openclaw gateway restart
           
           sleep 10m
       
