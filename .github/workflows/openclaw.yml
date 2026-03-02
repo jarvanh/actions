@@ -173,7 +173,7 @@ jobs:
               fi
           fi
           
-          npm i -g "openclaw@$2026.2.26"
+          npm i -g "openclaw@2026.2.26"
           openclaw gateway install
           openclaw gateway restart
           
