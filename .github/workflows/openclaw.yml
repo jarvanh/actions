@@ -168,7 +168,7 @@ jobs:
                   sudo chmod -R o-w $(npm root -g)
                   
                   echo "Restarting OpenClaw..."
-                  openclaw gateway install
+                  openclaw gateway install --force
                   openclaw gateway restart
               fi
           fi
