@@ -107,7 +107,7 @@ jobs:
           
       - name: Run OpenClaw
         run: |
-          npm i -g "openclaw@2026.3.1
+          npm i -g "openclaw@2026.3.1"
           echo "🔧 Fixing file permissions to pass security checks..."
           # 1. 移除 npm 全局目录的 world-writable (其他人可写) 权限
           sudo chmod -R o-w $(npm root -g)
