@@ -119,6 +119,7 @@ jobs:
           fi
 
           echo "Restarting OpenClaw gateway..."
+          openclaw gateway install --force
           openclaw gateway restart
           
           echo "Waiting for OpenClaw ..."
