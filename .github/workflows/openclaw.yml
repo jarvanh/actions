@@ -71,7 +71,7 @@ jobs:
       - name: Run CLIProxyAPI container
         run: |
           docker run -d --rm -p 8317:8317 -v /dropbox/self-hosted/CLIProxyAPI/config.yaml:/CLIProxyAPI/config.yaml -v /dropbox/self-hosted/CLIProxyAPI/auth-dir:/root/.cli-proxy-api eceasy/cli-proxy-api:latest
-          sleep 1m
+          sleep 10
           docker ps -a
           
           # 运行 8317 端口的临时隧道，并将输出保存到文件
