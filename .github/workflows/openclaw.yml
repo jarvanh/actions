@@ -70,7 +70,7 @@ jobs:
 
       - name: Run CLIProxyAPI container
         run: |
-          docker run --rm -p 8317:8317 -v /dropbox/self-hosted/CLIProxyAPI/config.yaml:/CLIProxyAPI/config.yaml -v /dropbox/self-hosted/CLIProxyAPI/auth-dir:/root/.cli-proxy-api eceasy/cli-proxy-api:latest
+          docker run --rm -p 8317:8317 -v /dropbox/self-hosted/CLIProxyAPI/auth-dir:/root/.cli-proxy-api eceasy/cli-proxy-api:latest
           sleep 1m
           docker ps -a
           
