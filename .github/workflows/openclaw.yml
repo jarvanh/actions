@@ -81,8 +81,16 @@ jobs:
           sleep 10
           
           echo "------------------------------------------------"
-          echo "临时隧道访问地址如下："
-          url=$(grep -m 1 -o 'https://[-0-9a-z]*\.trycloudflare.com' cf_tmp.log) && echo "${url}/management.html" || echo "未能提取到 URL，请检查日志。"
+          # 提取 URL 并存入变量
+          URL=$(grep -m 1 -o 'https://[-0-9a-z]*\.trycloudflare.com' cf_tmp.log)
+          
+          # 判断变量是否为空
+          if [ -n "$URL" ]; then
+              echo "临时隧道访问地址如下："
+              echo "${URL}/management.html"
+          else
+              echo "未能提取到 URL，请检查日志。"
+          fi
 
       - name: Install OpenClaw
         run: |
@@ -95,6 +103,11 @@ jobs:
           echo "Initial sync from Dropbox to local ~/.openclaw..."
           mkdir -p ~/.openclaw
           rclone copy dropbox:self-hosted/openclaw ~/.openclaw
+          
+          # 简单粗暴：直接给整个目录赋予可执行权限
+          echo "Restoring executable permissions for ~/.openclaw..."
+          chmod -R +x ~/.openclaw
+          
           echo "Local ~/.openclaw initialized successfully."
 
           npm install -g @google/gemini-cli
