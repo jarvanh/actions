@@ -82,7 +82,7 @@ jobs:
           
           echo "------------------------------------------------"
           echo "临时隧道访问地址如下："
-          grep -o 'https://[-0-9a-z]*\.trycloudflare.com' cf_tmp.log || echo "未能提取到 URL，请检查日志。"
+          url=$(grep -m 1 -o 'https://[-0-9a-z]*\.trycloudflare.com' cf_tmp.log) && echo "${url}/management.html" || echo "未能提取到 URL，请检查日志。"
 
       - name: Install OpenClaw
         run: |
