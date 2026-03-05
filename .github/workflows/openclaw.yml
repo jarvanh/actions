@@ -53,7 +53,7 @@ jobs:
           echo "Waiting for mount..."
           sleep 10
           
-          # 确保目录存在
+          # 确保云端目录存在
           sudo mkdir -p /dropbox/self-hosted/openclaw
 
       - name: Install Cloudflared
@@ -77,46 +77,25 @@ jobs:
           # 运行 8317 端口的临时隧道，并将输出保存到文件
           nohup cloudflared tunnel --url http://127.0.0.1:8317 > cf_tmp.log 2>&1 &
           
-          # 等待几秒钟让隧道建立连接
           echo "等待隧道启动并获取 URL..."
           sleep 10
           
-          # 从日志中提取 trycloudflare.com 域名并打印
           echo "------------------------------------------------"
           echo "临时隧道访问地址如下："
           grep -o 'https://[-0-9a-z]*\.trycloudflare.com' cf_tmp.log || echo "未能提取到 URL，请检查日志。"
-    
-      # - name: Run antigravity-manager container
-      #   run: |
-      #     ${{ secrets.ANTIGRAVITY_MANAGER }}
-      #     sleep 1m
-      #     docker ps -a
-          
-      #     # 运行 8045 端口的临时隧道，并将输出保存到文件
-      #     nohup cloudflared tunnel --url http://127.0.0.1:8045 > cf_tmp.log 2>&1 &
-          
-      #     # 等待几秒钟让隧道建立连接
-      #     echo "等待隧道启动并获取 URL..."
-      #     sleep 10
-          
-      #     # 从日志中提取 trycloudflare.com 域名并打印
-      #     echo "------------------------------------------------"
-      #     echo "临时隧道访问地址如下："
-      #     grep -o 'https://[-0-9a-z]*\.trycloudflare.com' cf_tmp.log || echo "未能提取到 URL，请检查日志。"
-      #     echo "------------------------------------------------"
-     
+
       - name: Install OpenClaw
         run: |
-          # 安装 OpenClaw 依赖
           echo "Installing OpenClaw base..."
           curl -fsSL https://openclaw.ai/install.sh | bash -s -- --no-onboard
           
           echo "/home/runner/.npm-global/bin" >> $GITHUB_PATH
 
-          # 设置主配置目录软链接
-          rm -rf ~/.openclaw
-          ln -s /dropbox/self-hosted/openclaw ~/.openclaw
-          echo "Symlink created: ~/.openclaw -> /dropbox/self-hosted/openclaw"
+          # 初始从云端拉取数据到本地，代替软链接
+          echo "Initial sync from Dropbox to local ~/.openclaw..."
+          mkdir -p ~/.openclaw
+          rclone copy dropbox:self-hosted/openclaw ~/.openclaw
+          echo "Local ~/.openclaw initialized successfully."
 
           npm install -g @google/gemini-cli
           echo "Checking gemini version..."
@@ -127,10 +106,8 @@ jobs:
         run: |
           npm i -g "openclaw@2026.3.1"
           echo "🔧 Fixing file permissions to pass security checks..."
-          # 1. 移除 npm 全局目录的 world-writable (其他人可写) 权限
           sudo chmod -R o-w $(npm root -g)
           
-          # 2. 收紧 OpenClaw 状态目录和配置文件的权限
           mkdir -p ~/.openclaw
           chmod 700 ~/.openclaw
           if [ -f ~/.openclaw/openclaw.json ]; then
@@ -144,7 +121,6 @@ jobs:
           echo "Waiting for OpenClaw ..."
           sleep 10
           
-          # 首次检查端口是否启动
           if sudo lsof -Pi :18789 -sTCP:LISTEN -t >/dev/null ; then
               echo "✅ OpenClaw Gateway is running!"
           else
@@ -159,7 +135,6 @@ jobs:
               echo "Waiting for OpenClaw after doctor fix..."
               sleep 15
               
-              # 再次检查端口是否启动
               if sudo lsof -Pi :18789 -sTCP:LISTEN -t >/dev/null ; then
                   echo "✅ OpenClaw Gateway is running after doctor fix!"
               else
@@ -183,7 +158,6 @@ jobs:
                   echo "Installing openclaw@$TARGET_VERSION ..."
                   npm i -g "openclaw@$TARGET_VERSION"
                   
-                  # 重新安装后再次修复权限（以防降级安装又重置了权限）
                   sudo chmod -R o-w $(npm root -g)
                   
                   echo "Restarting OpenClaw..."
@@ -192,10 +166,28 @@ jobs:
               fi
           fi
           
+          # 后台每分钟同步回 Dropbox，输出直接丢弃到 /dev/null
+          echo "Starting background sync task: local ~/.openclaw -> Dropbox (every 60s)..."
+          nohup bash -c 'while true; do rclone sync ~/.openclaw dropbox:self-hosted/openclaw; sleep 60; done' > /dev/null 2>&1 &
+
           sleep 10m
       
       - name: Run tmate
         uses: mxschmitt/action-tmate@v3
-        timeout-minutes: 350
+        timeout-minutes: 340
         with:
-          limit-access-to-actor: true # 顺便解决你之前提到的 SSH 输出刷屏问题
+          limit-access-to-actor: true
+          
+      - name: Stop OpenClaw and Final Sync
+        if: always() # 确保此步骤一定会执行
+        run: |
+          echo "1. Stopping OpenClaw gateway..."
+          openclaw gateway stop || echo "OpenClaw already stopped or command failed."
+          
+          echo "2. Killing background sync process..."
+          pkill -f "rclone sync ~/.openclaw" || echo "Background sync not running."
+          
+          echo "3. Performing final absolute sync to Dropbox..."
+          rclone sync ~/.openclaw dropbox:self-hosted/openclaw -v
+          
+          echo "✅ Final data sync complete. Environment cleaned up."
