@@ -4,7 +4,7 @@ on:
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
-  
+
 jobs:
   build:
     concurrency: openclaw-singleton
@@ -99,12 +99,20 @@ jobs:
           
           echo "/home/runner/.npm-global/bin" >> $GITHUB_PATH
 
-          # 初始从云端拉取数据到本地，代替软链接
           echo "Initial sync from Dropbox to local ~/.openclaw..."
           mkdir -p ~/.openclaw
-          rclone copy dropbox:self-hosted/openclaw ~/.openclaw
           
-          # 简单粗暴：直接给整个目录赋予可执行权限
+          # 检查云端是否有压缩包
+          if rclone ls dropbox:self-hosted/openclaw.tar.gz > /dev/null 2>&1; then
+            echo "📦 Found openclaw.tar.gz! Downloading and extracting..."
+            rclone copyto dropbox:self-hosted/openclaw.tar.gz /tmp/openclaw.tar.gz
+            tar -xzf /tmp/openclaw.tar.gz -C ~/
+            rm /tmp/openclaw.tar.gz
+          else
+            echo "⚠️ No archive found. Falling back to old folder sync..."
+            rclone copy dropbox:self-hosted/openclaw ~/.openclaw
+          fi
+          
           echo "Restoring executable permissions for ~/.openclaw..."
           chmod -R +x ~/.openclaw
           
@@ -179,9 +187,13 @@ jobs:
               fi
           fi
           
-          # 后台每分钟同步回 Dropbox，输出直接丢弃到 /dev/null
-          echo "Starting background sync task: local ~/.openclaw -> Dropbox (every 60s)..."
-          nohup bash -c 'while true; do rclone sync ~/.openclaw dropbox:self-hosted/openclaw; sleep 60; done' > /dev/null 2>&1 &
+          # 后台每分钟打包并同步回 Dropbox，输出直接丢弃到 /dev/null
+          echo "Starting background sync task: archive local ~/.openclaw -> Dropbox (every 60s)..."
+          nohup bash -c 'while true; do 
+            tar -czf /tmp/openclaw.tar.gz -C ~/ .openclaw
+            rclone copyto /tmp/openclaw.tar.gz dropbox:self-hosted/openclaw.tar.gz
+            sleep 60
+          done' > /dev/null 2>&1 &
 
           sleep 10m
       
@@ -198,9 +210,12 @@ jobs:
           openclaw gateway stop || echo "OpenClaw already stopped or command failed."
           
           echo "2. Killing background sync process..."
-          pkill -f "rclone sync ~/.openclaw" || echo "Background sync not running."
+          pkill -f "openclaw.tar.gz" || echo "Background sync not running."
           
-          echo "3. Performing final absolute sync to Dropbox..."
-          rclone sync ~/.openclaw dropbox:self-hosted/openclaw -v
+          echo "3. Performing final archive and sync to Dropbox..."
+          # 最终打包
+          tar -czf /tmp/openclaw.tar.gz -C ~/ .openclaw
+          # 强制覆盖上传云端
+          rclone copyto /tmp/openclaw.tar.gz dropbox:self-hosted/openclaw.tar.gz -v
           
           echo "✅ Final data sync complete. Environment cleaned up."
