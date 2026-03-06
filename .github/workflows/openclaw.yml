@@ -53,7 +53,7 @@ jobs:
           echo "Waiting for mount..."
           sleep 10
           
-          # 确保云端目录存在
+          # 确保云端主目录存在
           sudo mkdir -p /dropbox/self-hosted/openclaw
 
       - name: Install Cloudflared
@@ -106,21 +106,23 @@ jobs:
           # 2. 建立本地临时高速目录，用于存放真实的 browser 数据
           mkdir -p /tmp/local_browser
           
-          # 3. 重点：使用 bind mount 将本地内存盘/磁盘挂载到云端目录上，阻断浏览器的高频 I/O 同步
+          # 3. 使用 bind mount 将本地内存盘/磁盘挂载到云端目录上，阻断浏览器的高频 I/O 同步
           sudo mount --bind /tmp/local_browser /dropbox/self-hosted/openclaw/browser
           
-          # 4. 创建 ~/.openclaw 软链接指向云端
+          # 4. 创建 ~/.openclaw 软链接指向云端主目录
           rm -rf ~/.openclaw
           ln -s /dropbox/self-hosted/openclaw ~/.openclaw
 
-          # 5. 仅从 Dropbox 拉取 browser 的压缩包并解压到本地高速目录
-          if rclone ls dropbox:self-hosted/browser.tar.gz > /dev/null 2>&1; then
+          # 5. 拉取逻辑：优先查找压缩包，找不到则从旧的云端文件夹拉取散落文件
+          if rclone ls dropbox:self-hosted/openclaw/browser.tar.gz > /dev/null 2>&1; then
             echo "📦 Found browser.tar.gz! Downloading and extracting..."
-            rclone copyto dropbox:self-hosted/browser.tar.gz /tmp/browser.tar.gz
+            rclone copyto dropbox:self-hosted/openclaw/browser.tar.gz /tmp/browser.tar.gz
             tar -xzf /tmp/browser.tar.gz -C /tmp/local_browser
             rm /tmp/browser.tar.gz
           else
-            echo "⚠️ No browser archive found. Starting fresh."
+            echo "⚠️ No browser archive found. Falling back to sync from raw directory..."
+            # 直接通过 rclone API 从云端拉取旧的散落文件到本地高速缓存目录
+            rclone copy dropbox:self-hosted/openclaw/browser /tmp/local_browser
           fi
           
           echo "Restoring executable permissions..."
@@ -198,7 +200,7 @@ jobs:
           echo "Starting background sync task: archive local browser -> Dropbox (every 60s)..."
           nohup bash -c 'while true; do 
             tar -czf /tmp/browser.tar.gz -C /tmp/local_browser .
-            rclone copyto /tmp/browser.tar.gz dropbox:self-hosted/browser.tar.gz
+            rclone copyto /tmp/browser.tar.gz dropbox:self-hosted/openclaw/browser.tar.gz
             sleep 60
           done' > /dev/null 2>&1 &
 
@@ -222,8 +224,8 @@ jobs:
           echo "3. Performing final browser archive and sync to Dropbox..."
           # 仅打包 browser
           tar -czf /tmp/browser.tar.gz -C /tmp/local_browser .
-          # 强制覆盖上传云端
-          rclone copyto /tmp/browser.tar.gz dropbox:self-hosted/browser.tar.gz -v
+          # 强制覆盖上传云端到新路径
+          rclone copyto /tmp/browser.tar.gz dropbox:self-hosted/openclaw/browser.tar.gz -v
           
           echo "4. Unmounting local browser directory..."
           sudo umount /dropbox/self-hosted/openclaw/browser || true
