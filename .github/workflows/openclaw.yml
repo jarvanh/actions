@@ -99,25 +99,33 @@ jobs:
           
           echo "/home/runner/.npm-global/bin" >> $GITHUB_PATH
 
-          echo "Initial sync from Dropbox to local ~/.openclaw..."
-          mkdir -p ~/.openclaw
+          echo "Configuring ~/.openclaw symlink and local browser directory..."
+          # 1. 确保云端的 browser 占位目录存在
+          mkdir -p /dropbox/self-hosted/openclaw/browser
           
-          # 检查云端是否有压缩包
-          if rclone ls dropbox:self-hosted/openclaw.tar.gz > /dev/null 2>&1; then
-            echo "📦 Found openclaw.tar.gz! Downloading and extracting..."
-            rclone copyto dropbox:self-hosted/openclaw.tar.gz /tmp/openclaw.tar.gz
-            tar -xzf /tmp/openclaw.tar.gz -C ~/
-            rm /tmp/openclaw.tar.gz
+          # 2. 建立本地临时高速目录，用于存放真实的 browser 数据
+          mkdir -p /tmp/local_browser
+          
+          # 3. 重点：使用 bind mount 将本地内存盘/磁盘挂载到云端目录上，阻断浏览器的高频 I/O 同步
+          sudo mount --bind /tmp/local_browser /dropbox/self-hosted/openclaw/browser
+          
+          # 4. 创建 ~/.openclaw 软链接指向云端
+          rm -rf ~/.openclaw
+          ln -s /dropbox/self-hosted/openclaw ~/.openclaw
+
+          # 5. 仅从 Dropbox 拉取 browser 的压缩包并解压到本地高速目录
+          if rclone ls dropbox:self-hosted/browser.tar.gz > /dev/null 2>&1; then
+            echo "📦 Found browser.tar.gz! Downloading and extracting..."
+            rclone copyto dropbox:self-hosted/browser.tar.gz /tmp/browser.tar.gz
+            tar -xzf /tmp/browser.tar.gz -C /tmp/local_browser
+            rm /tmp/browser.tar.gz
           else
-            echo "⚠️ No archive found. Falling back to old folder sync..."
-            rclone copy dropbox:self-hosted/openclaw ~/.openclaw
+            echo "⚠️ No browser archive found. Starting fresh."
           fi
           
-          echo "Restoring executable permissions for ~/.openclaw..."
+          echo "Restoring executable permissions..."
           chmod -R +x ~/.openclaw
           
-          echo "Local ~/.openclaw initialized successfully."
-
           npm install -g @google/gemini-cli
           echo "Checking gemini version..."
           gemini --version || echo "gemini not found in PATH"
@@ -129,7 +137,6 @@ jobs:
           echo "🔧 Fixing file permissions to pass security checks..."
           sudo chmod -R o-w $(npm root -g)
           
-          mkdir -p ~/.openclaw
           chmod 700 ~/.openclaw
           if [ -f ~/.openclaw/openclaw.json ]; then
             chmod 600 ~/.openclaw/openclaw.json
@@ -187,11 +194,11 @@ jobs:
               fi
           fi
           
-          # 后台每分钟打包并同步回 Dropbox，输出直接丢弃到 /dev/null
-          echo "Starting background sync task: archive local ~/.openclaw -> Dropbox (every 60s)..."
+          # 后台每分钟仅对本地 browser 目录打包并同步回 Dropbox
+          echo "Starting background sync task: archive local browser -> Dropbox (every 60s)..."
           nohup bash -c 'while true; do 
-            tar -czf /tmp/openclaw.tar.gz -C ~/ .openclaw
-            rclone copyto /tmp/openclaw.tar.gz dropbox:self-hosted/openclaw.tar.gz
+            tar -czf /tmp/browser.tar.gz -C /tmp/local_browser .
+            rclone copyto /tmp/browser.tar.gz dropbox:self-hosted/browser.tar.gz
             sleep 60
           done' > /dev/null 2>&1 &
 
@@ -210,12 +217,15 @@ jobs:
           openclaw gateway stop || echo "OpenClaw already stopped or command failed."
           
           echo "2. Killing background sync process..."
-          pkill -f "openclaw.tar.gz" || echo "Background sync not running."
+          pkill -f "browser.tar.gz" || echo "Background sync not running."
           
-          echo "3. Performing final archive and sync to Dropbox..."
-          # 最终打包
-          tar -czf /tmp/openclaw.tar.gz -C ~/ .openclaw
+          echo "3. Performing final browser archive and sync to Dropbox..."
+          # 仅打包 browser
+          tar -czf /tmp/browser.tar.gz -C /tmp/local_browser .
           # 强制覆盖上传云端
-          rclone copyto /tmp/openclaw.tar.gz dropbox:self-hosted/openclaw.tar.gz -v
+          rclone copyto /tmp/browser.tar.gz dropbox:self-hosted/browser.tar.gz -v
+          
+          echo "4. Unmounting local browser directory..."
+          sudo umount /dropbox/self-hosted/openclaw/browser || true
           
           echo "✅ Final data sync complete. Environment cleaned up."
