@@ -92,22 +92,6 @@ jobs:
               echo "未能提取到 URL，请检查日志。"
           fi
 
-          # Report static tunnel endpoint and credentials for CLI Proxy API management access.
-          # 在报告中输出 CLI Proxy API 的固定隧道地址与访问凭据。
-          echo "CLI Proxy API 访问信息："
-          echo "🚇 隧道： bore.pub:31029"
-          echo "👤 用户： runner"
-          echo "🔑 密码： dS18LIBp9xPOCcGhPK3fjJna"
-
-          # Report the current Cloudflare temporary tunnel management URL.
-          # 在报告中输出当前 Cloudflare 临时隧道管理地址。
-          echo "CLI Proxy API 管理地址："
-          if [ -n "$URL" ]; then
-              echo "${URL}/management.html"
-          else
-              echo "https://richmond-violin-tobacco-prix.trycloudflare.com/management.html"
-          fi
-
       - name: Install OpenClaw
         run: |
           echo "Installing OpenClaw base..."
