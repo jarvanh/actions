@@ -139,9 +139,9 @@ jobs:
           echo "🔧 Fixing file permissions to pass security checks..."
           sudo chmod -R o-w $(npm root -g)
           
-          chmod 700 ~/.openclaw
+          sudo chmod 700 ~/.openclaw
           if [ -f ~/.openclaw/openclaw.json ]; then
-            chmod 600 ~/.openclaw/openclaw.json
+            sudo chmod 600 ~/.openclaw/openclaw.json
           fi
 
           echo "Restarting OpenClaw gateway..."
