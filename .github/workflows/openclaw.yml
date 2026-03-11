@@ -138,7 +138,6 @@ jobs:
           # npm i -g "openclaw@2026.3.1"
           echo "🔧 Fixing file permissions to pass security checks..."
           sudo chmod -R o-w $(npm root -g)
-          
           sudo chmod 700 ~/.openclaw
           if [ -f ~/.openclaw/openclaw.json ]; then
             sudo chmod 600 ~/.openclaw/openclaw.json
@@ -189,6 +188,10 @@ jobs:
                   npm i -g "openclaw@$TARGET_VERSION"
                   
                   sudo chmod -R o-w $(npm root -g)
+                  sudo chmod 700 ~/.openclaw
+                  if [ -f ~/.openclaw/openclaw.json ]; then
+                    sudo chmod 600 ~/.openclaw/openclaw.json
+                  fi
                   
                   echo "Restarting OpenClaw..."
                   openclaw gateway install --force
