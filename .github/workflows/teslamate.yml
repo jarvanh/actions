@@ -106,10 +106,15 @@ jobs:
           echo "目录内容:"
           ls -la
           
-          sudo docker compose -p teslamate up
+          sudo docker compose -p teslamate up -d
           
       - name: Verify docker container is running
         run: docker ps 
+
+      - name: Run tmate
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: true
       
       - name: Upgrade PostgreSQL with full state checks
         run: |
