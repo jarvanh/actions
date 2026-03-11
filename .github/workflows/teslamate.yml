@@ -101,7 +101,7 @@ jobs:
           echo "目录内容:"
           ls -la
           
-          sudo docker compose -p teslamate up -d
+          sudo docker compose -p teslamate up
           
       - name: sleep
         run: |
