@@ -92,6 +92,11 @@ jobs:
             echo "The tunnel '$TUNNEL_NAME' is running with connections: $CONNECTIONS. Stopping actions."
             exit 31
           fi
+
+      - name: run cloudflared
+        run: |
+          cloudflared tunnel route dns t t.'${{ secrets.VD }}'.eu.org
+          nohup cloudflared tunnel run --url http://127.0.0.1:5900 t &
             
       - name: Run teslamate container
         run: |
@@ -102,18 +107,6 @@ jobs:
           ls -la
           
           sudo docker compose -p teslamate up
-          
-      - name: sleep
-        run: |
-          sudo sleep 1m    
-          
-      - name: Verify docker container is running
-        run: docker ps 
-        
-      - name: run cloudflared
-        run: |
-          cloudflared tunnel route dns t t.'${{ secrets.VD }}'.eu.org
-          nohup cloudflared tunnel run --url http://127.0.0.1:5900 t &
           
       - name: Verify docker container is running
         run: docker ps 
