@@ -209,11 +209,16 @@ jobs:
 
           sleep 10m
       
-      - name: Run tmate
-        uses: mxschmitt/action-tmate@v3
-        timeout-minutes: 340
+      # - name: Run tmate
+      #   uses: mxschmitt/action-tmate@v3
+      #   timeout-minutes: 340
+      #   with:
+      #     limit-access-to-actor: true
+
+      - name: Setup upterm session
+        uses: owenthereal/action-upterm@v1
         with:
-          limit-access-to-actor: true
+          limit-access-to-actor: true   # 只有您能连接，更安全
           
       - name: Stop OpenClaw and Final Sync
         if: always() # 确保此步骤一定会执行
