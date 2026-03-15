@@ -211,17 +211,20 @@ jobs:
       
       # - name: Run tmate
       #   uses: mxschmitt/action-tmate@v3
+      #   if: always()
       #   timeout-minutes: 340
       #   with:
       #     limit-access-to-actor: true
 
       - name: Setup upterm session
         uses: owenthereal/action-upterm@v1
+        if: always()
+        timeout-minutes: 340
         with:
           limit-access-to-actor: true   # 只有您能连接，更安全
           
       - name: Stop OpenClaw and Final Sync
-        if: always() # 确保此步骤一定会执行
+        if: always()
         run: |
           echo "1. Stopping OpenClaw gateway..."
           openclaw gateway stop || echo "OpenClaw already stopped or command failed."
