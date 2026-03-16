@@ -13,7 +13,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: 'current'
+          node-version: 'current' # 始终使用官方发布的最新版
 
       - name: Install Rclone
         run: |
@@ -55,7 +55,8 @@ jobs:
           
           # 确保云端主目录存在
           sudo mkdir -p /dropbox/self-hosted/openclaw
-          sudo mkdir -p /dropbox/self-hosted/CLIProxyAPI # 确保配置目录存在
+          # 确保存放数据的 CLIProxyAPI 目录存在
+          sudo mkdir -p /dropbox/self-hosted/CLIProxyAPI
 
       - name: Install Cloudflared
         run: |
@@ -72,25 +73,19 @@ jobs:
       - name: Run CLIProxyAPI container
         run: |
           docker run -d --rm -p 8317:8317 -v /dropbox/self-hosted/CLIProxyAPI/config.yaml:/CLIProxyAPI/config.yaml -v /dropbox/self-hosted/CLIProxyAPI/auth-dir:/root/.cli-proxy-api eceasy/cli-proxy-api:latest
-          
-          echo "等待 CLIProxyAPI 容器启动..."
           sleep 10
           docker ps -a
-
-          ### 启动后立即导入统计数据读档 ###
+          
           echo "📥 尝试导入 CLIProxyAPI 历史统计数据..."
           if [ -f /dropbox/self-hosted/CLIProxyAPI/stats.json ]; then
-              # 注意：请将 YOUR_ADMIN_TOKEN 替换为你的管理密钥，如果使用环境变量可写为 ${YOUR_SECRET}
-              # 这里的 API 路径 /api/stats/import 为通用示例，请根据实际文档调整
-              curl -s -X POST http://127.0.0.1:8317/api/stats/import \
+              curl -sS -X POST "http://127.0.0.1:8317/v0/management/usage/import" \
                    -H "Content-Type: application/json" \
-                   -H "Authorization: Bearer YOUR_ADMIN_TOKEN" \
-                   -d @/dropbox/self-hosted/CLIProxyAPI/stats.json || echo "⚠️ 导入请求失败，请检查 API 路径或 Token"
+                   -H "X-Management-Key: ${{ secrets.CLIPROXYAPIKEY }}" \
+                   -d @/dropbox/self-hosted/CLIProxyAPI/stats.json || echo "⚠️ 导入请求失败"
               echo "✅ 读档流程执行完毕。"
           else
               echo "ℹ️ 云端未找到 stats.json 存档文件，本次为全新统计。"
           fi
-          #######################################
           
           # 运行 8317 端口的临时隧道，并将输出保存到文件
           nohup cloudflared tunnel --url http://127.0.0.1:8317 > cf_tmp.log 2>&1 &
@@ -166,6 +161,7 @@ jobs:
           
       - name: Run OpenClaw
         run: |
+          # npm i -g "openclaw@2026.3.1"
           echo "🔧 Fixing file permissions to pass security checks..."
           sudo chmod -R o-w $(npm root -g)
           sudo chmod 700 ~/.openclaw
@@ -245,6 +241,13 @@ jobs:
 
           sleep 10m
       
+      # - name: Run tmate
+      #   uses: mxschmitt/action-tmate@v3
+      #   if: always()
+      #   timeout-minutes: 340
+      #   with:
+      #     limit-access-to-actor: true
+
       - name: Setup upterm session
         uses: owenthereal/action-upterm@v1
         if: always()
@@ -255,14 +258,11 @@ jobs:
       - name: Stop OpenClaw and Final Sync
         if: always()
         run: |
-          ### 关闭容器前导出统计数据存档 ###
           echo "💾 正在通过 API 导出 CLIProxyAPI 统计数据到 Dropbox..."
-          # 注意：同样需要替换 YOUR_ADMIN_TOKEN，以及确认导出 API 路径
-          curl -s -X GET http://127.0.0.1:8317/api/stats/export \
-               -H "Authorization: Bearer YOUR_ADMIN_TOKEN" \
+          curl -sS -X GET "http://127.0.0.1:8317/v0/management/usage/export" \
+               -H "X-Management-Key: ${{ secrets.CLIPROXYAPIKEY }}" \
                -o /dropbox/self-hosted/CLIProxyAPI/stats.json || echo "⚠️ 导出请求失败"
           echo "✅ 统计数据存档指令已执行。"
-          ########################################
 
           echo "1. Stopping OpenClaw gateway..."
           openclaw gateway stop || echo "OpenClaw already stopped or command failed."
