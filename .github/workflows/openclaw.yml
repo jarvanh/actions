@@ -74,37 +74,40 @@ jobs:
         run: |
           docker run -d --rm -p 8317:8317 -v /dropbox/self-hosted/CLIProxyAPI/config.yaml:/CLIProxyAPI/config.yaml -v /dropbox/self-hosted/CLIProxyAPI/auth-dir:/root/.cli-proxy-api eceasy/cli-proxy-api:latest
           
-          echo "等待 CLIProxyAPI 容器启动..."
+          echo "等待 CLIProxyAPI 容器初步启动..."
           sleep 10
           docker ps -a
           
-          echo "📥 尝试导入 CLIProxyAPI 历史统计数据..."
-          if [ -f /dropbox/self-hosted/CLIProxyAPI/stats.json ]; then
-              SUCCESS=false
-              # 增加重试机制：最多尝试 360 次，每次间隔 10 秒
-              for i in {1..360}; do
-                  echo "⏳ 第 $i 次尝试导入读档..."
-                  if curl -sS -X POST "http://127.0.0.1:8317/v0/management/usage/import" \
-                       -H "Content-Type: application/json" \
-                       -H "X-Management-Key: ${{ secrets.CLIPROXYAPIKEY }}" \
-                       -d @/dropbox/self-hosted/CLIProxyAPI/stats.json; then
-                      echo -e "\n✅ 读档流程执行完毕。"
-                      SUCCESS=true
-                      break
-                  else
-                      echo "⚠️ 接口尚未就绪或连接被重置，等待 10 秒后重试..."
-                      sleep 10
-                  fi
-              done
-              
-              # 如果彻底失败，打印出容器的内部报错日志
-              if [ "$SUCCESS" = false ]; then
-                  echo "❌ 读档彻底失败！正在提取 CLIProxyAPI 容器的运行日志："
-                  docker logs $(docker ps -q --filter ancestor=eceasy/cli-proxy-api:latest)
-              fi
-          else
-              echo "ℹ️ 云端未找到 stats.json 存档文件，本次为全新统计。"
-          fi
+          echo "📥 已将 CLIProxyAPI 历史统计数据导入任务放入后台执行..."
+          
+          # 将导入判断和循环包裹在 () 中，并用 & 放入后台
+          (
+            if [ -f /dropbox/self-hosted/CLIProxyAPI/stats.json ]; then
+                SUCCESS=false
+                # 增加重试机制：最多尝试 360 次，每次间隔 10 秒
+                for i in {1..360}; do
+                    if curl -sS -X POST "http://127.0.0.1:8317/v0/management/usage/import" \
+                        -H "Content-Type: application/json" \
+                        -H "X-Management-Key: ${{ secrets.CLIPROXYAPIKEY }}" \
+                        -d @/dropbox/self-hosted/CLIProxyAPI/stats.json > /dev/null 2>&1; then
+                        echo -e "\n✅ [后台任务] CLIProxyAPI 读档流程执行完毕。"
+                        SUCCESS=true
+                        break
+                    else
+                        # 静默等待，避免后台日志疯狂刷屏干扰主流程日志
+                        sleep 10
+                    fi
+                done
+                
+                # 如果彻底失败，打印出容器的内部报错日志
+                if [ "$SUCCESS" = false ]; then
+                    echo "❌ [后台任务] 读档彻底失败！正在提取 CLIProxyAPI 容器的运行日志："
+                    docker logs $(docker ps -q --filter ancestor=eceasy/cli-proxy-api:latest)
+                fi
+            else
+                echo "ℹ️ [后台任务] 云端未找到 stats.json 存档文件，本次为全新统计。"
+            fi
+          ) &
           
           # 运行 8317 端口的临时隧道，并将输出保存到文件
           nohup cloudflared tunnel --url http://127.0.0.1:8317 > cf_tmp.log 2>&1 &
