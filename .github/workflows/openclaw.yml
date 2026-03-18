@@ -172,7 +172,13 @@ jobs:
           if rclone ls dropbox:self-hosted/openclaw/browser.tar.gz > /dev/null 2>&1; then
             echo "📦 Found browser.tar.gz! Downloading and extracting..."
             rclone copyto dropbox:self-hosted/openclaw/browser.tar.gz /tmp/browser.tar.gz
-            tar -xzf /tmp/browser.tar.gz -C /tmp/local_browser
+            MIN_SIZE=$((10 * 1024 * 1024))
+            actual_size=$(stat -c%s /tmp/browser.tar.gz 2>/dev/null || echo 0)
+            if test -s /tmp/browser.tar.gz               && tar -tzf /tmp/browser.tar.gz >/dev/null               && [ "$actual_size" -ge "$MIN_SIZE" ]; then
+              tar -xzf /tmp/browser.tar.gz -C /tmp/local_browser
+            else
+              echo "⚠️ browser.tar.gz validation failed, skipping restore to avoid bad archive restore."
+            fi
             rm /tmp/browser.tar.gz
           else
             echo "⚠️ No browser archive found. Falling back to sync from raw directory..."
@@ -183,7 +189,13 @@ jobs:
           if rclone ls dropbox:self-hosted/openclaw/tmp_workspace.tar.gz > /dev/null 2>&1; then
             echo "📦 Found tmp_workspace.tar.gz! Downloading and extracting..."
             rclone copyto dropbox:self-hosted/openclaw/tmp_workspace.tar.gz /tmp/tmp_workspace.tar.gz
-            tar -xzf /tmp/tmp_workspace.tar.gz -C /tmp/tmp_workspace
+            MIN_SIZE=$((10 * 1024 * 1024))
+            actual_size=$(stat -c%s /tmp/tmp_workspace.tar.gz 2>/dev/null || echo 0)
+            if test -s /tmp/tmp_workspace.tar.gz               && tar -tzf /tmp/tmp_workspace.tar.gz >/dev/null               && [ "$actual_size" -ge "$MIN_SIZE" ]; then
+              tar -xzf /tmp/tmp_workspace.tar.gz -C /tmp/tmp_workspace
+            else
+              echo "⚠️ tmp_workspace.tar.gz validation failed, skipping restore to avoid bad archive restore."
+            fi
             rm /tmp/tmp_workspace.tar.gz
           else
             echo "⚠️ No tmp_workspace archive found. Falling back to sync from raw directory..."
@@ -267,12 +279,22 @@ jobs:
           # 后台每分钟打包 browser 和 tmp_workspace 并同步回 Dropbox
           echo "Starting background sync tasks: archive local directories -> Dropbox (every 60s)..."
           nohup bash -c 'while true; do 
+            MIN_SIZE=$((10 * 1024 * 1024))
+
             # 备份 browser
             tar -czf /tmp/browser.tar.gz -C /tmp/local_browser .
+            test -s /tmp/browser.tar.gz
+            tar -tzf /tmp/browser.tar.gz >/dev/null
+            actual_size=$(stat -c%s /tmp/browser.tar.gz)
+            [ "$actual_size" -ge "$MIN_SIZE" ]
             rclone copyto /tmp/browser.tar.gz dropbox:self-hosted/openclaw/browser.tar.gz
             
             # 备份 tmp_workspace
             tar -czf /tmp/tmp_workspace.tar.gz -C /tmp/tmp_workspace .
+            test -s /tmp/tmp_workspace.tar.gz
+            tar -tzf /tmp/tmp_workspace.tar.gz >/dev/null
+            actual_size=$(stat -c%s /tmp/tmp_workspace.tar.gz)
+            [ "$actual_size" -ge "$MIN_SIZE" ]
             rclone copyto /tmp/tmp_workspace.tar.gz dropbox:self-hosted/openclaw/tmp_workspace.tar.gz
             
             sleep 60
@@ -310,12 +332,22 @@ jobs:
           pkill -f "browser.tar.gz" || echo "Background sync not running."
           
           echo "3. Performing final archive and sync to Dropbox..."
+          MIN_SIZE=$((10 * 1024 * 1024))
+
           # 打包并上传 browser
           tar -czf /tmp/browser.tar.gz -C /tmp/local_browser .
+          test -s /tmp/browser.tar.gz
+          tar -tzf /tmp/browser.tar.gz >/dev/null
+          actual_size=$(stat -c%s /tmp/browser.tar.gz)
+          [ "$actual_size" -ge "$MIN_SIZE" ]
           rclone copyto /tmp/browser.tar.gz dropbox:self-hosted/openclaw/browser.tar.gz -v
           
           # 打包并上传 tmp_workspace
           tar -czf /tmp/tmp_workspace.tar.gz -C /tmp/tmp_workspace .
+          test -s /tmp/tmp_workspace.tar.gz
+          tar -tzf /tmp/tmp_workspace.tar.gz >/dev/null
+          actual_size=$(stat -c%s /tmp/tmp_workspace.tar.gz)
+          [ "$actual_size" -ge "$MIN_SIZE" ]
           rclone copyto /tmp/tmp_workspace.tar.gz dropbox:self-hosted/openclaw/tmp_workspace.tar.gz -v
           
           echo "4. Unmounting local directories..."
