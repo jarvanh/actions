@@ -4,7 +4,7 @@ name: openlist
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "5 19 * * *"
   watch:
     types: started
 
@@ -812,5 +812,5 @@ jobs:
           echo "所有同步任务完成！"
       - name: sleep
         run: |
-          sudo sleep 330m      
+          # sudo sleep 330m      
           sudo docker stop openlist
