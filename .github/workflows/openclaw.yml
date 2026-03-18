@@ -68,7 +68,16 @@ jobs:
       - name: Run Cloudflared Tunnel
         run: |
           cloudflared tunnel route dns oc oc.'${{ secrets.VD }}'.eu.org
-          nohup cloudflared tunnel run --url http://127.0.0.1:18789 oc &
+
+          # 启动隧道并记录 PID
+          # 使用 nohup 配合重定向，确保进程在后台稳健运行
+          nohup cloudflared tunnel run --url http://127.0.0.1:18789 oc \
+            > /home/runner/.openclaw/logs/cloudflared_oc.log 2>&1 &
+          
+          # 等待一小段时间确保进程启动成功并记录 PID
+          sleep 10
+          echo $! > /home/runner/.openclaw/logs/cloudflared_oc.pid
+          
 
       - name: Run CLIProxyAPI container
         run: |
@@ -110,14 +119,18 @@ jobs:
           ) &
           
           # 运行 8317 端口的临时隧道，并将输出保存到文件
-          nohup cloudflared tunnel --url http://127.0.0.1:8317 > cf_tmp.log 2>&1 &
+          nohup cloudflared tunnel --url http://127.0.0.1:8317 \
+            > /home/runner/.openclaw/logs/cloudflared_CLIProxyAPI.log 2>&1 &
+
+          sleep 10
+          echo $! > /home/runner/.openclaw/logs/cloudflared_CLIProxyAPI.pid
           
           echo "等待隧道启动并获取 URL..."
           sleep 10
           
           echo "------------------------------------------------"
           # 提取 URL 并存入变量
-          URL=$(grep -m 1 -o 'https://[-0-9a-z]*\.trycloudflare.com' cf_tmp.log)
+          URL=$(grep -m 1 -o 'https://[-0-9a-z]*\.trycloudflare.com' ~/.openclaw/logs/cloudflared_CLIProxyAPI.log)
           
           # 判断变量是否为空
           if [ -n "$URL" ]; then
