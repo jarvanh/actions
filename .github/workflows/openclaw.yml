@@ -85,6 +85,30 @@ jobs:
 
       - name: Run CLIProxyAPI container
         run: |
+          echo "Configuring local high-speed CLIProxyAPI directory..."
+          mkdir -p /dropbox/self-hosted/CLIProxyAPI
+          mkdir -p /tmp/local_CLIProxyAPI
+
+          # 优先从压缩包恢复；没有压缩包时再回退为目录同步
+          if rclone ls dropbox:self-hosted/CLIProxyAPI.tar.gz > /dev/null 2>&1; then
+            echo "📦 Found CLIProxyAPI.tar.gz! Downloading and extracting..."
+            rclone copyto dropbox:self-hosted/CLIProxyAPI.tar.gz /tmp/CLIProxyAPI.tar.gz
+            MIN_SIZE=$((10 * 1024 * 1024))
+            actual_size=$(stat -c%s /tmp/CLIProxyAPI.tar.gz 2>/dev/null || echo 0)
+            if [ "$actual_size" -ge "$MIN_SIZE" ]; then
+              tar -xzf /tmp/CLIProxyAPI.tar.gz -C /tmp/local_CLIProxyAPI
+            else
+              echo "⚠️ CLIProxyAPI.tar.gz is smaller than expected, skipping restore."
+            fi
+            rm -f /tmp/CLIProxyAPI.tar.gz
+          else
+            echo "⚠️ No CLIProxyAPI archive found. Falling back to sync from raw directory..."
+            rclone copy dropbox:self-hosted/CLIProxyAPI /tmp/local_CLIProxyAPI
+          fi
+
+          # 使用 bind mount 将高频 I/O 转到本地临时盘
+          sudo mount --bind /tmp/local_CLIProxyAPI /dropbox/self-hosted/CLIProxyAPI
+
           # 先清理同名旧容器，避免名称冲突
           docker rm -f cliproxyapi 2>/dev/null || true
 
@@ -101,28 +125,29 @@ jobs:
           sleep 10
           docker ps -a
           
-          echo "📥 立即执行 CLIProxyAPI 历史统计数据导入任务..."
+          echo "📥 开始执行 CLIProxyAPI 历史统计数据导入（前台立即执行）..."
 
           if [ -f /dropbox/self-hosted/CLIProxyAPI/stats.json ]; then
               SUCCESS=false
               # 增加重试机制：最多尝试 360 次，每次间隔 10 秒
               for i in {1..360}; do
-                  echo "🔁 CLIProxyAPI 历史统计导入重试第 ${i}/360 次..."
+                  echo "🔁 CLIProxyAPI 历史统计导入重试次数：${i}/360"
                   if curl -sS -X POST "http://127.0.0.1:8317/v0/management/usage/import" \
                       -H "Content-Type: application/json" \
                       -H "X-Management-Key: ${{ secrets.CLIPROXYAPIKEY }}" \
                       -d @/dropbox/self-hosted/CLIProxyAPI/stats.json > /dev/null 2>&1; then
-                      echo -e "\n✅ CLIProxyAPI 读档流程执行完毕。"
+                      echo -e "\n✅ CLIProxyAPI 历史统计导入执行完毕。"
                       SUCCESS=true
                       break
                   else
+                      echo "⚠️ CLIProxyAPI 历史统计导入失败，10 秒后重试。"
                       sleep 10
                   fi
               done
 
               # 如果彻底失败，打印出容器的内部报错日志
               if [ "$SUCCESS" = false ]; then
-                  echo "❌ CLIProxyAPI 读档彻底失败！正在提取 CLIProxyAPI 容器的运行日志："
+                  echo "❌ CLIProxyAPI 历史统计导入彻底失败！正在提取 CLIProxyAPI 容器的运行日志："
                   docker logs $(docker ps -q --filter ancestor=eceasy/cli-proxy-api:latest)
               fi
           else
@@ -199,12 +224,14 @@ jobs:
           echo "Restoring executable permissions..."
           chmod -R +x ~/.openclaw
 
-          # Backup browser/tmp_workspace archives with size + tar readability checks
-          # 备份 browser/tmp_workspace 压缩包时，执行体积 + tar 可读性校验
+          # Backup browser/tmp_workspace/CLIProxyAPI archives with size + tar readability checks
+          # 备份 browser/tmp_workspace/CLIProxyAPI 压缩包时，执行体积 + tar 可读性校验
           TMP_BROWSER_TAR="/tmp/browser-backup.tar.gz"
           FINAL_BROWSER_TAR="/dropbox/self-hosted/openclaw/browser.tar.gz"
           TMP_WORKSPACE_TAR="/tmp/tmp-workspace-backup.tar.gz"
           FINAL_WORKSPACE_TAR="/dropbox/self-hosted/openclaw/tmp_workspace.tar.gz"
+          TMP_CLIPROXYAPI_TAR="/tmp/CLIProxyAPI-backup.tar.gz"
+          FINAL_CLIPROXYAPI_TAR="/dropbox/self-hosted/CLIProxyAPI.tar.gz"
           MIN_ARCHIVE_SIZE=$((10 * 1024 * 1024))
 
           tar -czf "$TMP_BROWSER_TAR" -C /tmp local_browser
@@ -223,6 +250,15 @@ jobs:
           else
             echo "⚠️ tmp_workspace backup archive failed validation; skip promote."
             rm -f "$TMP_WORKSPACE_TAR"
+          fi
+
+          tar -czf "$TMP_CLIPROXYAPI_TAR" -C /tmp local_CLIProxyAPI
+          cliproxyapi_size=$(stat -c%s "$TMP_CLIPROXYAPI_TAR" 2>/dev/null || echo 0)
+          if [ "$cliproxyapi_size" -ge "$MIN_ARCHIVE_SIZE" ] && tar -tzf "$TMP_CLIPROXYAPI_TAR" >/dev/null 2>&1; then
+            mv -f "$TMP_CLIPROXYAPI_TAR" "$FINAL_CLIPROXYAPI_TAR"
+          else
+            echo "⚠️ CLIProxyAPI backup archive failed validation; skip promote."
+            rm -f "$TMP_CLIPROXYAPI_TAR"
           fi
           
           npm install -g @google/gemini-cli
@@ -296,7 +332,7 @@ jobs:
               fi
           fi
           
-          # 后台每 2 分钟导出 CLIProxyAPI 统计，并打包 browser/tmp_workspace 同步回 Dropbox
+          # 后台每 2 分钟导出 CLIProxyAPI 统计，并打包 browser/tmp_workspace/CLIProxyAPI 同步回 Dropbox
           echo "Starting background sync tasks: export CLIProxyAPI stats + archive local directories -> Dropbox (every 120s)..."
           nohup bash -c 'while true; do 
             MIN_SIZE=$((10 * 1024 * 1024))
@@ -321,6 +357,14 @@ jobs:
             actual_size=$(stat -c%s /tmp/tmp_workspace.tar.gz)
             [ "$actual_size" -ge "$MIN_SIZE" ]
             rclone copyto /tmp/tmp_workspace.tar.gz dropbox:self-hosted/openclaw/tmp_workspace.tar.gz
+
+            # 备份 CLIProxyAPI 目录
+            tar -czf /tmp/CLIProxyAPI.tar.gz -C /tmp/local_CLIProxyAPI .
+            test -s /tmp/CLIProxyAPI.tar.gz
+            tar -tzf /tmp/CLIProxyAPI.tar.gz >/dev/null
+            actual_size=$(stat -c%s /tmp/CLIProxyAPI.tar.gz)
+            [ "$actual_size" -ge "$MIN_SIZE" ]
+            rclone copyto /tmp/CLIProxyAPI.tar.gz dropbox:self-hosted/CLIProxyAPI.tar.gz
             
             sleep 120
           done' > /dev/null 2>&1 &
@@ -354,7 +398,7 @@ jobs:
           openclaw gateway stop || echo "OpenClaw already stopped or command failed."
           
           echo "2. Killing background sync process..."
-          pkill -f "browser.tar.gz" || echo "Background sync not running."
+          pkill -f "CLIProxyAPI.tar.gz\|browser.tar.gz\|tmp_workspace.tar.gz" || echo "Background sync not running."
           
           echo "3. Performing final archive and sync to Dropbox..."
           MIN_SIZE=$((10 * 1024 * 1024))
@@ -374,9 +418,18 @@ jobs:
           actual_size=$(stat -c%s /tmp/tmp_workspace.tar.gz)
           [ "$actual_size" -ge "$MIN_SIZE" ]
           rclone copyto /tmp/tmp_workspace.tar.gz dropbox:self-hosted/openclaw/tmp_workspace.tar.gz -v
+
+          # 打包并上传 CLIProxyAPI
+          tar -czf /tmp/CLIProxyAPI.tar.gz -C /tmp/local_CLIProxyAPI .
+          test -s /tmp/CLIProxyAPI.tar.gz
+          tar -tzf /tmp/CLIProxyAPI.tar.gz >/dev/null
+          actual_size=$(stat -c%s /tmp/CLIProxyAPI.tar.gz)
+          [ "$actual_size" -ge "$MIN_SIZE" ]
+          rclone copyto /tmp/CLIProxyAPI.tar.gz dropbox:self-hosted/CLIProxyAPI.tar.gz -v
           
           echo "4. Unmounting local directories..."
           sudo umount /dropbox/self-hosted/openclaw/browser || true
           sudo umount /dropbox/self-hosted/openclaw/tmp_workspace || true
+          sudo umount /dropbox/self-hosted/CLIProxyAPI || true
           
           echo "✅ Final data sync complete. Environment cleaned up."
