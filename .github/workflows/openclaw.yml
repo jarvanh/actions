@@ -198,7 +198,7 @@ jobs:
             else
               echo "⚠️ browser.tar.gz is smaller than expected, skipping restore."
             fi
-            rm /tmp/browser.tar.gz
+            sudo rm /tmp/browser.tar.gz
           else
             echo "⚠️ No browser archive found. Falling back to sync from raw directory..."
             rclone copy dropbox:self-hosted/openclaw/browser /tmp/local_browser
@@ -215,7 +215,7 @@ jobs:
             else
               echo "⚠️ tmp_workspace.tar.gz is smaller than expected, skipping restore."
             fi
-            rm /tmp/tmp_workspace.tar.gz
+            sudo rm /tmp/tmp_workspace.tar.gz
           else
             echo "⚠️ No tmp_workspace archive found. Falling back to sync from raw directory..."
             rclone copy dropbox:self-hosted/openclaw/tmp_workspace /tmp/tmp_workspace
@@ -240,7 +240,7 @@ jobs:
             mv -f "$TMP_BROWSER_TAR" "$FINAL_BROWSER_TAR"
           else
             echo "⚠️ browser backup archive failed validation; skip promote."
-            rm -f "$TMP_BROWSER_TAR"
+            sudo rm -f "$TMP_BROWSER_TAR"
           fi
 
           sudo tar -czf "$TMP_WORKSPACE_TAR" -C /tmp tmp_workspace
@@ -249,7 +249,7 @@ jobs:
             mv -f "$TMP_WORKSPACE_TAR" "$FINAL_WORKSPACE_TAR"
           else
             echo "⚠️ tmp_workspace backup archive failed validation; skip promote."
-            rm -f "$TMP_WORKSPACE_TAR"
+            sudo rm -f "$TMP_WORKSPACE_TAR"
           fi
 
           sudo tar -czf "$TMP_CLIPROXYAPI_TAR" -C /tmp local_CLIProxyAPI
@@ -258,7 +258,7 @@ jobs:
             mv -f "$TMP_CLIPROXYAPI_TAR" "$FINAL_CLIPROXYAPI_TAR"
           else
             echo "⚠️ CLIProxyAPI backup archive failed validation; skip promote."
-            rm -f "$TMP_CLIPROXYAPI_TAR"
+            sudo rm -f "$TMP_CLIPROXYAPI_TAR"
           fi
           
           npm install -g @google/gemini-cli
@@ -343,25 +343,25 @@ jobs:
               -o /dropbox/self-hosted/CLIProxyAPI/stats.json || echo "⚠️ 周期性导出 CLIProxyAPI 统计失败"
 
             # 备份 browser
-            tar -czf /tmp/browser.tar.gz -C /tmp/local_browser .
+            sudo tar -czf /tmp/browser.tar.gz -C /tmp/local_browser .
             test -s /tmp/browser.tar.gz
-            tar -tzf /tmp/browser.tar.gz >/dev/null
+            sudo tar -tzf /tmp/browser.tar.gz >/dev/null
             actual_size=$(stat -c%s /tmp/browser.tar.gz)
             [ "$actual_size" -ge "$MIN_SIZE" ]
             rclone copyto /tmp/browser.tar.gz dropbox:self-hosted/openclaw/browser.tar.gz
             
             # 备份 tmp_workspace
-            tar -czf /tmp/tmp_workspace.tar.gz -C /tmp/tmp_workspace .
+            sudo tar -czf /tmp/tmp_workspace.tar.gz -C /tmp/tmp_workspace .
             test -s /tmp/tmp_workspace.tar.gz
-            tar -tzf /tmp/tmp_workspace.tar.gz >/dev/null
+            sudo tar -tzf /tmp/tmp_workspace.tar.gz >/dev/null
             actual_size=$(stat -c%s /tmp/tmp_workspace.tar.gz)
             [ "$actual_size" -ge "$MIN_SIZE" ]
             rclone copyto /tmp/tmp_workspace.tar.gz dropbox:self-hosted/openclaw/tmp_workspace.tar.gz
 
             # 备份 CLIProxyAPI 目录
-            tar -czf /tmp/CLIProxyAPI.tar.gz -C /tmp/local_CLIProxyAPI .
+            sudo tar -czf /tmp/CLIProxyAPI.tar.gz -C /tmp/local_CLIProxyAPI .
             test -s /tmp/CLIProxyAPI.tar.gz
-            tar -tzf /tmp/CLIProxyAPI.tar.gz >/dev/null
+            sudo tar -tzf /tmp/CLIProxyAPI.tar.gz >/dev/null
             actual_size=$(stat -c%s /tmp/CLIProxyAPI.tar.gz)
             [ "$actual_size" -ge "$MIN_SIZE" ]
             rclone copyto /tmp/CLIProxyAPI.tar.gz dropbox:self-hosted/CLIProxyAPI.tar.gz
