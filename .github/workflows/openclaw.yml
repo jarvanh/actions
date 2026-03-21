@@ -234,7 +234,7 @@ jobs:
           FINAL_CLIPROXYAPI_TAR="/dropbox/self-hosted/CLIProxyAPI.tar.gz"
           MIN_ARCHIVE_SIZE=$((10 * 1024 * 1024))
 
-          tar -czf "$TMP_BROWSER_TAR" -C /tmp local_browser
+          sudo tar -czf "$TMP_BROWSER_TAR" -C /tmp local_browser
           browser_size=$(stat -c%s "$TMP_BROWSER_TAR" 2>/dev/null || echo 0)
           if [ "$browser_size" -ge "$MIN_ARCHIVE_SIZE" ] && tar -tzf "$TMP_BROWSER_TAR" >/dev/null 2>&1; then
             mv -f "$TMP_BROWSER_TAR" "$FINAL_BROWSER_TAR"
@@ -243,7 +243,7 @@ jobs:
             rm -f "$TMP_BROWSER_TAR"
           fi
 
-          tar -czf "$TMP_WORKSPACE_TAR" -C /tmp tmp_workspace
+          sudo tar -czf "$TMP_WORKSPACE_TAR" -C /tmp tmp_workspace
           workspace_size=$(stat -c%s "$TMP_WORKSPACE_TAR" 2>/dev/null || echo 0)
           if [ "$workspace_size" -ge "$MIN_ARCHIVE_SIZE" ] && tar -tzf "$TMP_WORKSPACE_TAR" >/dev/null 2>&1; then
             mv -f "$TMP_WORKSPACE_TAR" "$FINAL_WORKSPACE_TAR"
@@ -252,7 +252,7 @@ jobs:
             rm -f "$TMP_WORKSPACE_TAR"
           fi
 
-          tar -czf "$TMP_CLIPROXYAPI_TAR" -C /tmp local_CLIProxyAPI
+          sudo tar -czf "$TMP_CLIPROXYAPI_TAR" -C /tmp local_CLIProxyAPI
           cliproxyapi_size=$(stat -c%s "$TMP_CLIPROXYAPI_TAR" 2>/dev/null || echo 0)
           if [ "$cliproxyapi_size" -ge "$MIN_ARCHIVE_SIZE" ] && tar -tzf "$TMP_CLIPROXYAPI_TAR" >/dev/null 2>&1; then
             mv -f "$TMP_CLIPROXYAPI_TAR" "$FINAL_CLIPROXYAPI_TAR"
