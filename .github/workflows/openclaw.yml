@@ -150,7 +150,7 @@ jobs:
           openclaw gateway install --force
           openclaw gateway restart
 
-          sleep 10
+          sleep 340
 
       - name: Stop OpenClaw and Final Sync
         if: always()
