@@ -1,0 +1,382 @@
+name: openclaw
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  build:
+    concurrency: openclaw-singleton
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 'current' # 始终使用官方发布的最新版
+
+      - name: Install Rclone
+        run: |
+          curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
+          unzip rclone-*-amd64.zip
+          cd rclone-*-linux-amd64
+          sudo mv rclone /usr/bin
+          sudo chmod +x /usr/bin/rclone
+
+      - name: Configure Rclone
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE }}
+        run: |
+          mkdir -p ~/.config/rclone/
+          cat << EOF > ~/.config/rclone/rclone.conf
+          $RCLONE_CONFIG
+          EOF
+
+      - name: Mount Dropbox
+        run: |
+          sudo apt-get install fuse3
+          sudo mkdir -p /dropbox
+          
+          # 挂载 Dropbox
+          sudo nohup rclone mount dropbox: /dropbox \
+            --allow-non-empty \
+            --no-gzip-encoding \
+            --umask 000 \
+            --allow-other \
+            --attr-timeout 10m \
+            --vfs-cache-mode full \
+            --vfs-cache-max-age 5m \
+            --vfs-read-chunk-size-limit 10G \
+            --buffer-size 100M \
+            --vfs-cache-max-size 10G &
+          
+          echo "Waiting for mount..."
+          sleep 10
+          
+          # 确保云端主目录存在
+          sudo mkdir -p /dropbox/self-hosted/openclaw
+          # 确保存放数据的 CLIProxyAPI 目录存在
+          sudo mkdir -p /dropbox/self-hosted/CLIProxyAPI
+
+      - name: Install Cloudflared
+        run: |
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
+          sudo mkdir -p ~/.cloudflared/
+          sudo cp -r /dropbox/self-hosted/.cloudflared/* ~/.cloudflared/ 2>/dev/null || true
+
+      - name: Run Cloudflared Tunnel
+        run: |
+          # 提前在 Dropbox 挂载目录中创建 logs 文件夹并赋予权限
+          sudo mkdir -p /dropbox/self-hosted/openclaw/logs
+          sudo chmod 777 /dropbox/self-hosted/openclaw/logs
+          
+          cloudflared tunnel route dns oc oc.'${{ secrets.VD }}'.eu.org || true
+
+          # 启动隧道并记录 PID
+          # 使用 nohup 配合重定向，确保进程在后台稳健运行，日志直接写入 Dropbox
+          nohup cloudflared tunnel run --url http://127.0.0.1:18789 oc \
+            > /dropbox/self-hosted/openclaw/logs/cloudflared_oc.log 2>&1 &
+          
+          # 等待一小段时间确保进程启动成功并记录 PID
+          sleep 10
+          echo $! > /dropbox/self-hosted/openclaw/logs/cloudflared_oc.pid
+          
+
+      - name: Run CLIProxyAPI container
+        run: |
+          # 先清理同名旧容器，避免名称冲突
+          docker rm -f cliproxyapi 2>/dev/null || true
+
+          # 使用重启策略守护 CLIProxyAPI；注意 --restart 与 --rm 不能同时使用
+          docker run -d \
+            --name cliproxyapi \
+            --restart unless-stopped \
+            -p 8317:8317 \
+            -v /dropbox/self-hosted/CLIProxyAPI/config.yaml:/CLIProxyAPI/config.yaml \
+            -v /dropbox/self-hosted/CLIProxyAPI/auth-dir:/root/.cli-proxy-api \
+            eceasy/cli-proxy-api:latest
+          
+          echo "等待 CLIProxyAPI 容器初步启动..."
+          sleep 10
+          docker ps -a
+          
+          echo "📥 立即执行 CLIProxyAPI 历史统计数据导入任务..."
+
+          if [ -f /dropbox/self-hosted/CLIProxyAPI/stats.json ]; then
+              SUCCESS=false
+              # 增加重试机制：最多尝试 360 次，每次间隔 10 秒
+              for i in {1..360}; do
+                  echo "🔁 CLIProxyAPI 历史统计导入重试第 ${i}/360 次..."
+                  if curl -sS -X POST "http://127.0.0.1:8317/v0/management/usage/import" \
+                      -H "Content-Type: application/json" \
+                      -H "X-Management-Key: ${{ secrets.CLIPROXYAPIKEY }}" \
+                      -d @/dropbox/self-hosted/CLIProxyAPI/stats.json > /dev/null 2>&1; then
+                      echo -e "\n✅ CLIProxyAPI 读档流程执行完毕。"
+                      SUCCESS=true
+                      break
+                  else
+                      sleep 10
+                  fi
+              done
+
+              # 如果彻底失败，打印出容器的内部报错日志
+              if [ "$SUCCESS" = false ]; then
+                  echo "❌ CLIProxyAPI 读档彻底失败！正在提取 CLIProxyAPI 容器的运行日志："
+                  docker logs $(docker ps -q --filter ancestor=eceasy/cli-proxy-api:latest)
+              fi
+          else
+              echo "ℹ️ 云端未找到 stats.json 存档文件，本次为全新统计。"
+          fi
+          
+          # 运行 8317 端口的命名隧道，并将输出保存到 Dropbox
+          nohup cloudflared tunnel run --protocol http2 --url http://127.0.0.1:8317 ai-api \
+            > /dropbox/self-hosted/openclaw/logs/cloudflared_CLIProxyAPI.log 2>&1 &
+
+          sleep 10
+          echo $! > /dropbox/self-hosted/openclaw/logs/cloudflared_CLIProxyAPI.pid
+
+          echo "CLIProxyAPI 命名隧道已启动：ai-api（固定地址模式）"
+
+      - name: Install OpenClaw
+        run: |
+          echo "Installing OpenClaw base..."
+          curl -fsSL https://openclaw.ai/install.sh | bash -s -- --no-onboard
+          
+          echo "/home/runner/.npm-global/bin" >> $GITHUB_PATH
+
+          echo "Configuring ~/.openclaw symlink and local directories..."
+          # 1. 确保云端的占位目录存在
+          mkdir -p /dropbox/self-hosted/openclaw/browser
+          mkdir -p /dropbox/self-hosted/openclaw/tmp_workspace
+          
+          # 2. 建立本地临时高速目录，用于存放真实数据
+          mkdir -p /tmp/local_browser
+          mkdir -p /tmp/tmp_workspace
+          
+          # 3. 使用 bind mount 将本地目录挂载到云端目录上，阻断高频 I/O 同步
+          sudo mount --bind /tmp/local_browser /dropbox/self-hosted/openclaw/browser
+          sudo mount --bind /tmp/tmp_workspace /dropbox/self-hosted/openclaw/tmp_workspace
+          
+          # 4. 创建 ~/.openclaw 软链接指向云端主目录 (此时由于之前的修改，日志已被写入安全的挂载盘，不再受此删除影响)
+          rm -rf ~/.openclaw
+          ln -s /dropbox/self-hosted/openclaw ~/.openclaw
+
+          # 5. 拉取 browser 逻辑
+          if rclone ls dropbox:self-hosted/openclaw/browser.tar.gz > /dev/null 2>&1; then
+            echo "📦 Found browser.tar.gz! Downloading and extracting..."
+            rclone copyto dropbox:self-hosted/openclaw/browser.tar.gz /tmp/browser.tar.gz
+            MIN_SIZE=$((10 * 1024 * 1024))
+            actual_size=$(stat -c%s /tmp/browser.tar.gz 2>/dev/null || echo 0)
+            if [ "$actual_size" -ge "$MIN_SIZE" ]; then
+              tar -xzf /tmp/browser.tar.gz -C /tmp/local_browser
+            else
+              echo "⚠️ browser.tar.gz is smaller than expected, skipping restore."
+            fi
+            rm /tmp/browser.tar.gz
+          else
+            echo "⚠️ No browser archive found. Falling back to sync from raw directory..."
+            rclone copy dropbox:self-hosted/openclaw/browser /tmp/local_browser
+          fi
+
+          # 6. 拉取 tmp_workspace 逻辑
+          if rclone ls dropbox:self-hosted/openclaw/tmp_workspace.tar.gz > /dev/null 2>&1; then
+            echo "📦 Found tmp_workspace.tar.gz! Downloading and extracting..."
+            rclone copyto dropbox:self-hosted/openclaw/tmp_workspace.tar.gz /tmp/tmp_workspace.tar.gz
+            MIN_SIZE=$((10 * 1024 * 1024))
+            actual_size=$(stat -c%s /tmp/tmp_workspace.tar.gz 2>/dev/null || echo 0)
+            if [ "$actual_size" -ge "$MIN_SIZE" ]; then
+              tar -xzf /tmp/tmp_workspace.tar.gz -C /tmp/tmp_workspace
+            else
+              echo "⚠️ tmp_workspace.tar.gz is smaller than expected, skipping restore."
+            fi
+            rm /tmp/tmp_workspace.tar.gz
+          else
+            echo "⚠️ No tmp_workspace archive found. Falling back to sync from raw directory..."
+            rclone copy dropbox:self-hosted/openclaw/tmp_workspace /tmp/tmp_workspace
+          fi
+          
+          echo "Restoring executable permissions..."
+          chmod -R +x ~/.openclaw
+
+          # Backup browser/tmp_workspace archives with size + tar readability checks
+          # 备份 browser/tmp_workspace 压缩包时，执行体积 + tar 可读性校验
+          TMP_BROWSER_TAR="/tmp/browser-backup.tar.gz"
+          FINAL_BROWSER_TAR="/dropbox/self-hosted/openclaw/browser.tar.gz"
+          TMP_WORKSPACE_TAR="/tmp/tmp-workspace-backup.tar.gz"
+          FINAL_WORKSPACE_TAR="/dropbox/self-hosted/openclaw/tmp_workspace.tar.gz"
+          MIN_ARCHIVE_SIZE=$((10 * 1024 * 1024))
+
+          tar -czf "$TMP_BROWSER_TAR" -C /tmp local_browser
+          browser_size=$(stat -c%s "$TMP_BROWSER_TAR" 2>/dev/null || echo 0)
+          if [ "$browser_size" -ge "$MIN_ARCHIVE_SIZE" ] && tar -tzf "$TMP_BROWSER_TAR" >/dev/null 2>&1; then
+            mv -f "$TMP_BROWSER_TAR" "$FINAL_BROWSER_TAR"
+          else
+            echo "⚠️ browser backup archive failed validation; skip promote."
+            rm -f "$TMP_BROWSER_TAR"
+          fi
+
+          tar -czf "$TMP_WORKSPACE_TAR" -C /tmp tmp_workspace
+          workspace_size=$(stat -c%s "$TMP_WORKSPACE_TAR" 2>/dev/null || echo 0)
+          if [ "$workspace_size" -ge "$MIN_ARCHIVE_SIZE" ] && tar -tzf "$TMP_WORKSPACE_TAR" >/dev/null 2>&1; then
+            mv -f "$TMP_WORKSPACE_TAR" "$FINAL_WORKSPACE_TAR"
+          else
+            echo "⚠️ tmp_workspace backup archive failed validation; skip promote."
+            rm -f "$TMP_WORKSPACE_TAR"
+          fi
+          
+          npm install -g @google/gemini-cli
+          echo "Checking gemini version..."
+          gemini --version || echo "gemini not found in PATH"
+          npm i -g clawhub
+          
+      - name: Run OpenClaw
+        run: |
+          # npm i -g "openclaw@2026.3.1"
+          echo "🔧 Fixing file permissions to pass security checks..."
+          sudo chmod -R o-w $(npm root -g)
+          sudo chmod 700 ~/.openclaw
+          if [ -f ~/.openclaw/openclaw.json ]; then
+            sudo chmod 600 ~/.openclaw/openclaw.json
+          fi
+
+          echo "Restarting OpenClaw gateway..."
+          openclaw gateway install --force
+          openclaw gateway restart
+          
+          echo "Waiting for OpenClaw ..."
+          sleep 10
+          
+          if sudo lsof -Pi :18789 -sTCP:LISTEN -t >/dev/null ; then
+              echo "✅ OpenClaw Gateway is running!"
+          else
+              echo "⚠️ Gateway not responding yet. Checking logs:"
+              tail -n 20 openclaw.log || echo "No log file found."
+              
+              echo "🛠️ Attempting to fix with 'openclaw doctor --fix'..."
+              openclaw doctor --fix
+              openclaw gateway install
+              openclaw gateway restart
+              
+              echo "Waiting for OpenClaw after doctor fix..."
+              sleep 15
+              
+              if sudo lsof -Pi :18789 -sTCP:LISTEN -t >/dev/null ; then
+                  echo "✅ OpenClaw Gateway is running after doctor fix!"
+              else
+                  echo "🔄 Doctor fix failed. Attempting to fallback and reinstall specific OpenClaw version..."
+                  
+                  CONFIG_FILE="/dropbox/self-hosted/openclaw/openclaw.json"
+                  TARGET_VERSION="latest" 
+                  
+                  if [ -s "$CONFIG_FILE" ]; then
+                    READ_VERSION=$(sudo jq -r '.wizard.lastRunVersion // empty' "$CONFIG_FILE" 2>/dev/null)
+                    if [ -n "$READ_VERSION" ]; then
+                      TARGET_VERSION="$READ_VERSION"
+                      echo "✅ Found version in config: $TARGET_VERSION"
+                    else
+                      echo "⚠️ Version key not found in JSON, using fallback: $TARGET_VERSION"
+                    fi
+                  else
+                    echo "⚠️ Config file STILL not found or empty at $CONFIG_FILE. Using fallback: $TARGET_VERSION"
+                  fi
+
+                  echo "Installing openclaw@$TARGET_VERSION ..."
+                  npm i -g "openclaw@$TARGET_VERSION"
+                  
+                  sudo chmod -R o-w $(npm root -g)
+                  sudo chmod 700 ~/.openclaw
+                  if [ -f ~/.openclaw/openclaw.json ]; then
+                    sudo chmod 600 ~/.openclaw/openclaw.json
+                  fi
+                  
+                  echo "Restarting OpenClaw..."
+                  openclaw gateway install --force
+                  openclaw gateway restart
+              fi
+          fi
+          
+          # 后台每 2 分钟导出 CLIProxyAPI 统计，并打包 browser/tmp_workspace 同步回 Dropbox
+          echo "Starting background sync tasks: export CLIProxyAPI stats + archive local directories -> Dropbox (every 120s)..."
+          nohup bash -c 'while true; do 
+            MIN_SIZE=$((10 * 1024 * 1024))
+
+            # 导出 CLIProxyAPI 统计数据到 Dropbox
+            curl -sS -X GET "http://127.0.0.1:8317/v0/management/usage/export" \
+              -H "X-Management-Key: ${{ secrets.CLIPROXYAPIKEY }}" \
+              -o /dropbox/self-hosted/CLIProxyAPI/stats.json || echo "⚠️ 周期性导出 CLIProxyAPI 统计失败"
+
+            # 备份 browser
+            tar -czf /tmp/browser.tar.gz -C /tmp/local_browser .
+            test -s /tmp/browser.tar.gz
+            tar -tzf /tmp/browser.tar.gz >/dev/null
+            actual_size=$(stat -c%s /tmp/browser.tar.gz)
+            [ "$actual_size" -ge "$MIN_SIZE" ]
+            rclone copyto /tmp/browser.tar.gz dropbox:self-hosted/openclaw/browser.tar.gz
+            
+            # 备份 tmp_workspace
+            tar -czf /tmp/tmp_workspace.tar.gz -C /tmp/tmp_workspace .
+            test -s /tmp/tmp_workspace.tar.gz
+            tar -tzf /tmp/tmp_workspace.tar.gz >/dev/null
+            actual_size=$(stat -c%s /tmp/tmp_workspace.tar.gz)
+            [ "$actual_size" -ge "$MIN_SIZE" ]
+            rclone copyto /tmp/tmp_workspace.tar.gz dropbox:self-hosted/openclaw/tmp_workspace.tar.gz
+            
+            sleep 120
+          done' > /dev/null 2>&1 &
+
+          sleep 340m
+      
+      # - name: Run tmate
+      #   uses: mxschmitt/action-tmate@v3
+      #   if: always()
+      #   timeout-minutes: 340
+      #   with:
+      #     limit-access-to-actor: true
+
+      # - name: Setup upterm session
+      #   uses: owenthereal/action-upterm@v1
+      #   if: always()
+      #   timeout-minutes: 340
+      #   with:
+      #     limit-access-to-actor: true
+          
+      - name: Stop OpenClaw and Final Sync
+        if: always()
+        run: |
+          echo "💾 正在通过 API 导出 CLIProxyAPI 统计数据到 Dropbox..."
+          curl -sS -X GET "http://127.0.0.1:8317/v0/management/usage/export" \
+               -H "X-Management-Key: ${{ secrets.CLIPROXYAPIKEY }}" \
+               -o /dropbox/self-hosted/CLIProxyAPI/stats.json || echo "⚠️ 导出请求失败"
+          echo "✅ 统计数据存档指令已执行。"
+
+          echo "1. Stopping OpenClaw gateway..."
+          openclaw gateway stop || echo "OpenClaw already stopped or command failed."
+          
+          echo "2. Killing background sync process..."
+          pkill -f "browser.tar.gz" || echo "Background sync not running."
+          
+          echo "3. Performing final archive and sync to Dropbox..."
+          MIN_SIZE=$((10 * 1024 * 1024))
+
+          # 打包并上传 browser
+          tar -czf /tmp/browser.tar.gz -C /tmp/local_browser .
+          test -s /tmp/browser.tar.gz
+          tar -tzf /tmp/browser.tar.gz >/dev/null
+          actual_size=$(stat -c%s /tmp/browser.tar.gz)
+          [ "$actual_size" -ge "$MIN_SIZE" ]
+          rclone copyto /tmp/browser.tar.gz dropbox:self-hosted/openclaw/browser.tar.gz -v
+          
+          # 打包并上传 tmp_workspace
+          tar -czf /tmp/tmp_workspace.tar.gz -C /tmp/tmp_workspace .
+          test -s /tmp/tmp_workspace.tar.gz
+          tar -tzf /tmp/tmp_workspace.tar.gz >/dev/null
+          actual_size=$(stat -c%s /tmp/tmp_workspace.tar.gz)
+          [ "$actual_size" -ge "$MIN_SIZE" ]
+          rclone copyto /tmp/tmp_workspace.tar.gz dropbox:self-hosted/openclaw/tmp_workspace.tar.gz -v
+          
+          echo "4. Unmounting local directories..."
+          sudo umount /dropbox/self-hosted/openclaw/browser || true
+          sudo umount /dropbox/self-hosted/openclaw/tmp_workspace || true
+          
+          echo "✅ Final data sync complete. Environment cleaned up."

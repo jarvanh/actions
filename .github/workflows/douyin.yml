@@ -1,0 +1,115 @@
+name: douyin
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+  watch:
+    types: started
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: rclone-install
+        run: |
+          # 安装 rclone
+          # curl -O https:/./Downloads.rclone.org/rclone-current-linux-amd64.zip
+          # curl -O https://beta.rclone.org/rclone-beta-latest-linux-amd64.zip
+          # unzip rclone-*-amd64.zip
+          # cd rclone-*-linux-amd64
+          # sudo mv rclone /usr/bin
+          # sudo chmod +x /usr/bin/rclone
+          sudo apt-get install rclone
+      - name: rclone-config
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE }}
+        run: |
+          # 写配置文件
+          mkdir -p ~/.config/rclone/
+          cat << EOF > ~/.config/rclone/rclone.conf
+          $RCLONE_CONFIG
+          EOF
+      - name: rclone-run
+        run: |
+          sudo apt-get install fuse3
+          sudo mkdir /onedrive
+          sudo nohup rclone mount onedrive: /onedrive --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
+          echo "==========onedrive==========="
+          rclone lsf onedrive:
+          echo "==========dropbox==========="
+          rclone lsf dropbox:
+      - name: run douyin
+        run: |
+          sudo apt-get update
+          sudo timedatectl set-timezone Asia/Shanghai
+          timedatectl
+
+          cd /onedrive/backup/douyin
+          rm -rf /logs
+          pip install f2
+          # 初始化抖音配置文件
+          # f2 dy --init-config /onedrive/backup/douyin/douyin.yaml
+          # 下载的时候使用抖音配置文件提供cookie
+          # !f2 dy -c /onedrive/backup/douyin/douyin.yaml --url https://v.douyin.com/iL1rgUuG --mode post --path ./Download --music yes --cover yes --desc yes --folderize yes --interval all
+          # 或者 --cookie "your douyin cookie" 输入cookie
+          # !f2 dy --cookie "your douyin cookie" --url https://v.douyin.com/iL1rgUuG --mode post --path ./Download --music yes --cover yes --desc yes --folderize yes --interval all
+
+          # 用户主页(非视频链接)
+          # Awu
+          # https://v.douyin.com/iL1rgUuG
+          f2 dy -c /onedrive/backup/douyin/douyin.yaml --url https://v.douyin.com/iL1rgUuG --mode post --path ./Download --music yes --cover yes --desc yes --folderize yes --interval all || echo "失败"
+
+          # # Saber
+          # # uid = https://www.douyin.com/user/MS4wLjABAAAADdqSYeEX6BTn_jQ_THNEDECn2oH5jkfUq1bLTHF6gzA
+          # f2 dy -c /onedrive/backup/douyin/douyin.yaml --url https://www.douyin.com/user/MS4wLjABAAAADdqSYeEX6BTn_jQ_THNEDECn2oH5jkfUq1bLTHF6gzA --mode post --path ./Download --music yes --cover yes --desc yes --folderize yes --interval all || echo "失败"
+
+          # # 赵水莲
+          # # https://v.douyin.com/iL1rBxQN
+          # f2 dy -c /onedrive/backup/douyin/douyin.yaml --url https://v.douyin.com/iL1rBxQN --mode post --path ./Download --music yes --cover yes --desc yes --folderize yes --interval all || echo "失败"
+          # # https://v.douyin.com/iLJFU7pC
+          # f2 dy -c /onedrive/backup/douyin/douyin.yaml --url https://v.douyin.com/iLJFU7pC --mode post --path ./Download --music yes --cover yes --desc yes --folderize yes --interval all || echo "失败"
+
+          # # 何金玲
+          # # https://v.douyin.com/iL1rjFCd
+          # f2 dy -c /onedrive/backup/douyin/douyin.yaml --url https://v.douyin.com/iL1rjFCd --mode post --path ./Download --music yes --cover yes --desc yes --folderize yes --interval all || echo "失败"
+
+          # # Auto parts-Jessy 🚗
+          # # https://v.douyin.com/i8oTnRfK
+          # f2 dy -c /onedrive/backup/douyin/douyin.yaml --url https://v.douyin.com/i8oTnRfK --mode post --path ./Download --music yes --cover yes --desc yes --folderize yes --interval all || echo "失败"
+
+          # # 咩咩小i
+          # # uid = https://www.douyin.com/user/MS4wLjABAAAAwW6vDX_a-o7_I4pA1a01uctdLHVm_tjGoiIiDMSGHl7MeG_gc138NrNM_dJ7LRPK
+          # f2 dy -c /onedrive/backup/douyin/douyin.yaml --url https://www.douyin.com/user/MS4wLjABAAAAwW6vDX_a-o7_I4pA1a01uctdLHVm_tjGoiIiDMSGHl7MeG_gc138NrNM_dJ7LRPK --mode post --path ./Download --music yes --cover yes --desc yes --folderize yes --interval all || echo "失败"
+          # # uid = https://v.douyin.com/i8tohAuj
+          # f2 dy -c /onedrive/backup/douyin/douyin.yaml --url https://v.douyin.com/i8tohAuj --mode post --path ./Download --music yes --cover yes --desc yes --folderize yes --interval all || echo "失败"
+          
+          # # 程程Cc
+          # # uid = https://v.douyin.com/i8toAVY6
+          # f2 dy -c /onedrive/backup/douyin/douyin.yaml --url https://v.douyin.com/i8toAVY6 --mode post --path ./Download --music yes --cover yes --desc yes --folderize yes --interval all || echo "失败"
+          # # uid = https://v.douyin.com/i8to55Db
+          # f2 dy -c /onedrive/backup/douyin/douyin.yaml --url https://v.douyin.com/i8to55Db --mode post --path ./Download --music yes --cover yes --desc yes --folderize yes --interval all || echo "失败"
+          
+          # # 爆炸小脑袋
+          # # https://v.douyin.com/iL1hhtwy
+          # f2 dy -c /onedrive/backup/douyin/douyin.yaml --url https://v.douyin.com/iL1hhtwy --mode post --path ./Download --music yes --cover yes --desc yes --folderize yes --interval all || echo "失败"
+          # # https://v.douyin.com/iL1hLVud
+          # f2 dy -c /onedrive/backup/douyin/douyin.yaml --url https://v.douyin.com/iL1hLVud --mode post --path ./Download --music yes --cover yes --desc yes --folderize yes --interval all || echo "失败"
+
+          # # 乐怡leyi
+          # # https://www.douyin.com/user/MS4wLjABAAAAQlV4nWmUMeCBUAvFzlQlbDzhALDob7IyvOkgh6dZtXk
+          # f2 dy -c /onedrive/backup/douyin/douyin.yaml --url https://www.douyin.com/user/MS4wLjABAAAAQlV4nWmUMeCBUAvFzlQlbDzhALDob7IyvOkgh6dZtXk --mode post --path ./Download --music yes --cover yes --desc yes --folderize yes --interval all || echo "失败"
+
+          # # 惠州三栋中心｜方程豹汽车
+          # # https://www.douyin.com/user/MS4wLjABAAAAkLJitaneImKuy2DoaGbE1ut9oipJqntXJjAN5poypVRcmYJbdY6H7RiNl1EDUYEC
+          # f2 dy -c /onedrive/backup/douyin/douyin.yaml --url https://www.douyin.com/user/MS4wLjABAAAAkLJitaneImKuy2DoaGbE1ut9oipJqntXJjAN5poypVRcmYJbdY6H7RiNl1EDUYEC --mode post --path ./Download --music yes --cover yes --desc yes --folderize yes --interval all || echo "失败"
+
+          # # 比亚迪汽车王朝网（永嘉祥龙4S店）
+          # # https://www.douyin.com/user/MS4wLjABAAAAtEJce6ucILs8WFiGZtsoeXLE67irCYvBh9SuanB_J3QCqvRQNSNl5Dx7S8JPetHI
+          # f2 dy -c /onedrive/backup/douyin/douyin.yaml --url https://www.douyin.com/user/MS4wLjABAAAAtEJce6ucILs8WFiGZtsoeXLE67irCYvBh9SuanB_J3QCqvRQNSNl5Dx7S8JPetHI --mode post --path ./Download --music yes --cover yes --desc yes --folderize yes --interval all || echo "失败"
+
+          # # 海南奥创坦克汽车
+          # # https://www.douyin.com/user/MS4wLjABAAAAWShK_6twehp3yafhNAdl_y42DKAENamAXZkIRc1ymqs
+          # f2 dy -c /onedrive/backup/douyin/douyin.yaml --url https://www.douyin.com/user/MS4wLjABAAAAWShK_6twehp3yafhNAdl_y42DKAENamAXZkIRc1ymqs --mode post --path ./Download --music yes --cover yes --desc yes --folderize yes --interval all || echo "失败"
+     
+          echo "github douyin 任务执行结束"
+          curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github douyin 任务执行结束"
