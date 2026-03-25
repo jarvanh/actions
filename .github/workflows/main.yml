@@ -1,0 +1,14 @@
+name: Cancel Jellyfin Workflows
+
+on:
+  workflow_dispatch:
+
+jobs:
+  cancel_jellyfin_workflows:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cancel Jellyfin workflows
+        uses: navendu/cancel-workflow-action@v1
+        with:
+          workflow_name: jellyfin
+          token: ${{ secrets.PAT }}

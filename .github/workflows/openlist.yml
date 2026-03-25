@@ -1,0 +1,710 @@
+# 备份文件到openlist中的网盘
+name: openlist
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"
+    # - cron: "5 19 * * *"
+  watch:
+    types: started
+
+jobs:
+  build:
+    concurrency: openlist-singleton
+    runs-on: ubuntu-latest
+    steps:
+      - name: rclone-install
+        run: |
+          curl -O https://beta.rclone.org/rclone-beta-latest-linux-amd64.zip
+          unzip rclone-*-amd64.zip
+          cd rclone-*-linux-amd64
+          sudo mv rclone /usr/bin
+          sudo chmod +x /usr/bin/rclone
+
+      - name: rclone-config
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE }}
+        run: |
+          mkdir -p ~/.config/rclone/
+          cat << EOF > ~/.config/rclone/rclone.conf
+          $RCLONE_CONFIG
+          EOF
+
+      - name: rclone-run
+        run: |
+          echo "==========onedrive==========="
+          rclone lsf onedrive:
+          echo "==========dropbox==========="
+          rclone lsf dropbox:
+
+          sudo apt-get install -y fuse3
+          sudo mkdir -p /dropbox
+          sudo nohup rclone mount dropbox: /dropbox --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 10G &
+
+      - name: Run openlist container
+        run: sudo docker run -d --restart=unless-stopped -v /dropbox/self-hosted/openlist/data:/opt/openlist/data -p 5244:5244 -e PUID=0 -e PGID=0 -e UMASK=022 --name="openlist" openlistteam/openlist:latest
+
+      - name: sleep
+        run: |
+          sudo sleep 1m
+
+      - name: Verify docker container is running
+        run: docker ps
+
+      - name: install cloudflared
+        run: |
+          sudo mkdir ~/.cloudflared/
+          sudo rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
+
+      - name: Check if the tunnel is running
+        env:
+          TUNNEL_NAME: "openlist"
+        run: |
+          OUTPUT=$(cloudflared tunnel list)
+          TUNNEL_LINE=$(echo "$OUTPUT" | grep -w "$TUNNEL_NAME")
+          if [ -z "$TUNNEL_LINE" ]; then
+            echo "The tunnel '$TUNNEL_NAME' does not exist. Proceeding."
+            exit 31
+          fi
+
+          CONNECTIONS=$(echo "$TUNNEL_LINE" | awk '{if (NF>=4) print $4; else print "-"}')
+          if [ "$CONNECTIONS" == "-" ]; then
+            echo "The tunnel '$TUNNEL_NAME' exists but has no active connections. Proceeding."
+          else
+            echo "The tunnel '$TUNNEL_NAME' is running with connections: $CONNECTIONS. Stopping actions."
+            exit 0
+          fi
+
+      - name: run cloudflared
+        run: |
+          cloudflared tunnel route dns openlist openlist.'${{ secrets.VD }}'.eu.org
+          nohup cloudflared tunnel run --url http://127.0.0.1:5244 openlist &
+
+      # - name: config openlist
+      #   run: |
+      #     sleep 10m
+      #     sudo docker stop openlist
+      #     sleep 1m
+      #     exit 31
+          
+      - name: Install required tools
+        run: |
+          echo "Installing ffmpeg, jq, coreutils..."
+          sudo apt-get update && sudo apt-get install -y ffmpeg jq coreutils bc
+
+      - name: Setup helper functions - part 1
+        run: |
+          cat > /tmp/functions_part1.sh << 'EOF'
+          # Probe remote readability before sync.
+          # 同步前探测远端可读性与响应状态。
+          probe_remote() {
+            local remote_path="$1"
+            local probe_label="$2"
+            local probe_log="$3"
+
+            echo "[probe] 开始探测 ${probe_label}: ${remote_path}" | tee -a "$probe_log"
+
+            # 直接探测目标路径本身，避免无意义的上级回退探测。
+            # Probe the target path directly and avoid fallback probing on the parent remote.
+            if timeout 120s rclone lsf "$remote_path" --max-depth 1 --files-only --dirs-only --fast-list > /tmp/probe_ls_$$.txt 2>>"$probe_log"; then
+              echo "[probe] ${probe_label} 可读取，示例条目：" | tee -a "$probe_log"
+              head -n 20 /tmp/probe_ls_$$.txt | sed 's/^/[probe]   /' | tee -a "$probe_log"
+              rm -f /tmp/probe_ls_$$.txt
+              return 0
+            else
+              local probe_exit=$?
+              rm -f /tmp/probe_ls_$$.txt
+
+              # 目标路径不存在时允许继续，由 rclone 在同步时自动创建。
+              # Allow missing destination paths and let rclone create them during sync.
+              if [ "$probe_label" = "目标端" ] && [ "$probe_exit" -eq 3 ]; then
+                echo "[probe] 目标路径 ${remote_path} 不存在 (退出码 3)，允许继续同步，由 rclone 自动创建。" | tee -a "$probe_log"
+                return 0
+              fi
+
+              echo "[probe] ${probe_label} 最终探测失败，退出码: ${probe_exit}" | tee -a "$probe_log"
+              return $probe_exit
+            fi
+          }
+
+          # Send logs to Telegram.
+          # 发送日志到 Telegram。
+          send_log_to_telegram() {
+            local log_file="$1"
+            local task_name="$2"
+            local exit_code="$3"
+            local log_type="${4:-sync}"
+            local source_info="${5:-未知}"
+            local dest_info="${6:-未知}"
+            local remote_log_path="${7:-}"
+
+            local task_title="$task_name"
+            if [ "$task_name" = "backup" ]; then
+              task_title="backup"
+            fi
+
+            local source_size_human="未知"
+            if [ -n "$source_info" ] && [ "$source_info" != "未知" ]; then
+              local size_output=""
+              size_output=$(rclone size "$source_info" 2>/dev/null || true)
+              if [ -n "$size_output" ]; then
+                source_size_human=$(echo "$size_output" | sed -n 's/^Total size:[[:space:]]*//p' | head -n 1)
+                [ -z "$source_size_human" ] && source_size_human="未知"
+              fi
+            fi
+
+            if [ ! -f "$log_file" ] || [ ! -s "$log_file" ]; then
+              local fallback_message
+              printf -v fallback_message '%s\n%s\n%s\n\n%s\n%s\n%s\n───' \
+                "❌ ${task_title} 同步失败" \
+                '━━━━━━━━━━━━━━' \
+                '📁 任务信息' \
+                "• 任务：${task_title}" \
+                "• 源端：${source_info}" \
+                "• 目标：${dest_info}"
+              curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
+                -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
+                --data-urlencode text="$fallback_message" || true
+              return
+            fi
+
+            local file_size file_size_human
+            file_size=$(stat -c%s "$log_file" 2>/dev/null || stat -f%z "$log_file" 2>/dev/null || echo 0)
+            file_size_human=$(numfmt --to=iec-i --suffix=B "$file_size" 2>/dev/null || echo "${file_size}B")
+
+            local source_ok=false dest_ok=false nothing_to_transfer=false has_real_failure=false
+            grep -q '\[probe\] 源端 可读取' "$log_file" && source_ok=true || true
+            grep -q '\[probe\] 目标端 可读取' "$log_file" && dest_ok=true || true
+            grep -qi 'There was nothing to transfer' "$log_file" && nothing_to_transfer=true || true
+            grep -Eqi '(^|[^[:alpha:]])(ERROR|Error|Failed|failed|timeout|forbidden|unauthorized|permission denied|connection refused)([^[:alpha:]]|$)' "$log_file" && has_real_failure=true || true
+
+            local message=""
+            if [ "$nothing_to_transfer" = true ]; then
+              printf -v message '%s\n%s\n%s\n\n%s\n\n%s\n%s\n%s\n\n%s\n%s\n\n%s\n%s\n%s\n───' \
+                "✅ ${task_title} 同步完成" \
+                '━━━━━━━━━━━━━━' \
+                "源端大小：${source_size_human}" \
+                '📁 任务信息' \
+                "• 任务：${task_title}" \
+                "• 源端：${source_info}" \
+                "• 目标：${dest_info}" \
+                '📌 源端探测' \
+                "• 源端探测$([ "$source_ok" = true ] && echo '正常' || echo '失败')" \
+                "• 目标端探测$([ "$dest_ok" = true ] && echo '正常' || echo '失败')" \
+                '🧾 日志信息' \
+                "• 大小：${file_size_human}" \
+                "• 文件：${remote_log_path:-$log_file}"
+            elif [ "$exit_code" -ne 0 ] || [ "$has_real_failure" = true ]; then
+              if [ "$source_ok" = true ] && [ "$dest_ok" = true ]; then
+                printf -v message '%s\n%s\n%s\n%s\n\n%s\n\n%s\n%s\n%s\n\n%s\n%s\n%s\n\n%s\n%s\n%s\n───' \
+                  "⚠️ ${task_title} 同步告警" \
+                  '━━━━━━━━━━━━━━' \
+                  '状态：部份文件同步失败' \
+                  "源端大小：${source_size_human}" \
+                  '📁 任务信息' \
+                  "• 任务：${task_title}" \
+                  "• 源端：${source_info}" \
+                  "• 目标：${dest_info}" \
+                  '📌 源端探测' \
+                  '• 源端探测正常' \
+                  '• 目标端探测正常' \
+                  '🧾 日志信息' \
+                  "• 大小：${file_size_human}" \
+                  "• 文件：${remote_log_path:-$log_file}"
+              else
+                printf -v message '%s\n%s\n\n%s\n%s\n%s\n\n%s\n%s\n%s\n\n%s\n%s\n%s\n───' \
+                  "❌ ${task_title} 同步失败" \
+                  '━━━━━━━━━━━━━━' \
+                  '📁 任务信息' \
+                  "• 任务：${task_title}" \
+                  "• 源端：${source_info}" \
+                  '📌 源端探测' \
+                  "$([ "$source_ok" = true ] && echo '• 源端探测正常' || echo '• 源端探测失败')" \
+                  "$([ "$dest_ok" = true ] && echo '• 目标端探测正常' || echo '• 目标端探测失败')" \
+                  '🧾 日志信息' \
+                  "• 大小：${file_size_human}" \
+                  "• 文件：${remote_log_path:-$log_file}"
+              fi
+            else
+              printf -v message '%s\n%s\n%s\n\n%s\n\n%s\n%s\n%s\n───' \
+                "✅ ${task_title} 同步完成" \
+                '━━━━━━━━━━━━━━' \
+                "源端大小：${source_size_human}" \
+                '📁 任务信息' \
+                "• 任务：${task_title}" \
+                "• 源端：${source_info}" \
+                "• 目标：${dest_info}"
+            fi
+
+            curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
+              -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
+              --data-urlencode text="$message" || true
+
+            if [ "$file_size" -lt 50000000 ]; then
+              local caption="📁 OpenList ${task_title} 完整日志"
+              curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendDocument \
+                -F chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
+                -F document=@"$log_file" \
+                -F caption="$caption" || true
+            fi
+          }
+
+          # Check whether log has useful content.
+          # 检查日志是否有实际内容（不只是统计行）。
+          has_real_content() {
+            local log_file="$1"
+            if [ ! -f "$log_file" ] || [ ! -s "$log_file" ]; then
+              echo "empty"
+              return
+            fi
+
+            local log_content=$(grep -v "^Transferred:\|^Checks:\|^Elapsed time:\|^ *$" "$log_file" 2>/dev/null | head -20)
+            if [ -z "$log_content" ]; then
+              echo "transfer_only"
+            else
+              echo "has_content"
+            fi
+          }
+
+          # Append video split logs.
+          # 记录视频分割日志。
+          log_video_split() {
+            local log_file="$1"
+            local message="$2"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] $message" >> "$log_file"
+            echo "$message"
+          }
+          EOF
+
+      - name: Setup helper functions - part 2
+        run: |
+          cat > /tmp/functions_part2.sh << 'EOF'
+          # 发送视频分割通知到Telegram
+          send_video_split_notification() {
+            local file_path="$1"
+            local file_size="$2"
+            local parts_count="$3"
+            local result="$4"
+            local log_file="$5"
+
+            local file_size_human=$(numfmt --to=iec-i --suffix=B "$file_size" 2>/dev/null || echo "${file_size}B")
+
+            local message
+            if [ "$result" = "success" ]; then
+              printf -v message '%s\n%s\n%s\n%s\n%s\n%s' '✅ OpenList 视频分割通知' '━━━━━━━━━━' '状态：分割成功' "文件：$file_path" "原始大小：$file_size_human" "分割数量：$parts_count 个部分"
+            else
+              printf -v message '%s\n%s\n%s\n%s\n%s\n%s' '❌ OpenList 视频分割通知' '━━━━━━━━━━' '状态：分割失败' "文件：$file_path" "文件大小：$file_size_human" "失败原因：$result"
+            fi
+
+            if [ -f "$log_file" ]; then
+              local log_status=$(has_real_content "$log_file")
+              if [ "$log_status" = "has_content" ]; then
+                local log_summary=$(tail -c 1200 "$log_file" 2>/dev/null || echo "无法读取日志")
+                message+=$'\n\n日志摘要：\n'
+                message+="$log_summary"
+              fi
+            fi
+
+            curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
+              -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
+              --data-urlencode text="$message" || true
+          }
+
+          # 上传视频分割日志到OneDrive
+          upload_video_split_log() {
+            local log_file="$1"
+
+            if [ -f "$log_file" ] && [ -s "$log_file" ]; then
+              local log_status=$(has_real_content "$log_file")
+              if [ "$log_status" = "has_content" ]; then
+                local REMOTE_LOG_DIR="onedrive:/logs/video_split"
+                log_video_split "$log_file" "上传视频分割日志到OneDrive: $REMOTE_LOG_DIR"
+                rclone copyto "$log_file" "$REMOTE_LOG_DIR/$(basename "$log_file")" 2>/dev/null || echo "上传视频分割日志失败，继续执行"
+
+                rclone lsf "$REMOTE_LOG_DIR/" 2>/dev/null | \
+                  grep "^video_split_.*\.log$" | \
+                  sort | head -n -10 | while read -r old_file; do
+                    echo "删除旧视频分割日志: $old_file"
+                    rclone delete "$REMOTE_LOG_DIR/$old_file" 2>/dev/null || true
+                  done
+              else
+                log_video_split "$log_file" "跳过上传空日志文件"
+                echo "跳过上传空视频分割日志: $log_file"
+              fi
+            else
+              echo "视频分割日志为空或不存在，不上传"
+            fi
+          }
+          EOF
+
+      - name: Setup helper functions - part 3
+        run: |
+          cat > /tmp/functions_part3.sh << 'EOF'
+          # 视频文件分割函数
+          split_large_video() {
+            local remote_path="$1"
+            local remote_source="$2"
+            local local_file_path="$3"
+            local file_name="$4"
+            local video_split_log="$5"
+
+            log_video_split "$video_split_log" "开始分割视频文件: $file_name"
+            local base_name="${file_name%.*}"
+            local extension="${file_name##*.}"
+            local file_size=$(stat -c%s "$local_file_path" 2>/dev/null || stat -f%z "$local_file_path" 2>/dev/null)
+            log_video_split "$video_split_log" "文件大小: $(numfmt --to=iec-i --suffix=B "$file_size" 2>/dev/null || echo "${file_size}B")"
+            log_video_split "$video_split_log" "获取视频时长..."
+            local duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$local_file_path" 2>/dev/null || echo 0)
+
+            if [ "$(echo "$duration > 0" | bc 2>/dev/null || echo 0)" -eq 1 ]; then
+              local max_part_size=3900000000
+              local n=$(( (file_size + max_part_size - 1) / max_part_size ))
+              if [ $n -lt 1 ]; then n=1; fi
+              local segment_time=$(echo "scale=2; $duration / $n" | bc 2>/dev/null || echo 0)
+              local split_dir="split_${base_name}_$(date +%s)"
+              mkdir -p "$split_dir"
+              cd "$split_dir"
+              ffmpeg -i "../$local_file_path" -c copy -map 0 -segment_time "$segment_time" -f segment -reset_timestamps 1 "${base_name}_part%03d.${extension}" 2>&1 | \
+                while IFS= read -r line; do
+                  log_video_split "../$video_split_log" "ffmpeg: $line"
+                done
+              local ffmpeg_exit_code=${PIPESTATUS[0]}
+              cd ..
+
+              if [ $ffmpeg_exit_code -eq 0 ]; then
+                local part_count=0
+                for part in "$split_dir/${base_name}_part"*."${extension}"; do
+                  if [ -f "$part" ]; then
+                    part_count=$((part_count + 1))
+                    local part_name=$(basename "$part")
+                    rclone copyto "$part" "${remote_source}:${remote_path}/${part_name}" 2>&1 | \
+                      while IFS= read -r line; do
+                        log_video_split "$video_split_log" "rclone: $line"
+                      done
+                  fi
+                done
+                rclone deletefile "${remote_source}:${remote_path}/${file_name}" 2>&1 | \
+                  while IFS= read -r line; do
+                    log_video_split "$video_split_log" "rclone delete: $line"
+                  done
+                rm -f "$local_file_path"
+                rm -rf "$split_dir"
+                echo "$(date +%Y-%m-%d_%H:%M:%S) - ${remote_source}:${remote_path}/${file_name} - 分割成 $part_count 个部分" >> "$PROCESSED_FILES_LOG"
+                send_video_split_notification "${remote_source}:${remote_path}/${file_name}" "$file_size" "$part_count" "success" "$video_split_log"
+                return 0
+              fi
+            fi
+
+            rm -f "$local_file_path" 2>/dev/null || true
+            send_video_split_notification "${remote_source}:${remote_path}/${file_name}" "$file_size" "0" "分割失败" "$video_split_log"
+            return 1
+          }
+          EOF
+
+      - name: Setup helper functions - part 4
+        run: |
+          cat > /tmp/functions_part4.sh << 'EOF'
+          # 分析错误日志，查找失败的大视频文件
+          process_failed_videos() {
+            local log_file="$1"
+            local remote_source="$2"
+            local task_name="$3"
+
+            echo "分析错误日志，查找失败的视频文件..."
+            local log_status=$(has_real_content "$log_file")
+            if [ "$log_status" != "has_content" ]; then
+              echo "日志文件没有实际错误内容，跳过视频处理"
+              return
+            fi
+
+            local video_split_log="video_split_${task_name}_$(date +%Y%m%d_%H%M%S).log"
+            echo "=== 视频分割日志 - 开始于 $(date) ===" > "$video_split_log"
+            local failed_videos=$(grep -i "error\|failed\|too large\|size" "$log_file" | grep -E "\.(mp4|mkv|mov|avi|flv|webm|m4v|wmv|mpg|mpeg|3gp|mp3|wav|aac|flac|m4a)$" | head -20 || true)
+
+            if [ -n "$failed_videos" ]; then
+              local file_patterns=$(echo "$failed_videos" | grep -oE "[a-zA-Z09_\-./]+\.(mp4|mkv|mov|avi|flv|webm|m4v|wmv|mpg|mpeg|3gp|mp3|wav|aac|flac|m4a)" | sort -u)
+              local processed_count=0
+              local success_count=0
+
+              for file_pattern in $file_patterns; do
+                local cleaned_path=$(echo "$file_pattern" | sed 's/^.*\///')
+                local full_path=""
+                local file_size=0
+
+                case "$task_name" in
+                  "backup") search_paths=("backup") ;;
+                  "task0") search_paths=("0") ;;
+                  "task1") search_paths=("1") ;;
+                  "task2") search_paths=("2") ;;
+                  "task3") search_paths=("3") ;;
+                  *) search_paths=("backup" "0" "1" "2" "3") ;;
+                esac
+
+                for search_path in "${search_paths[@]}"; do
+                  local found_file=$(rclone lsf "${remote_source}:${search_path}" --include "*${cleaned_path}*" 2>/dev/null | head -1)
+                  if [ -n "$found_file" ]; then
+                    local file_info=$(rclone size "${remote_source}:${search_path}/${found_file}" 2>/dev/null || echo "0")
+                    file_size=$(echo "$file_info" | grep "Total size" | grep -oE '[0-9]+' || echo "0")
+                    if [ "$file_size" -gt 3900000000 ]; then
+                      full_path="${search_path}/${found_file}"
+                      break
+                    fi
+                  fi
+                done
+
+                if [ -n "$full_path" ] && [ "$file_size" -gt 3900000000 ]; then
+                  processed_count=$((processed_count + 1))
+                  local temp_dir="temp_video_split_$(date +%s)_${processed_count}"
+                  mkdir -p "$temp_dir"
+                  rclone copy "${remote_source}:${full_path}" "$temp_dir/" 2>&1 | while IFS= read -r line; do log_video_split "$video_split_log" "rclone copy: $line"; done
+                  local local_file="$temp_dir/$(basename "$full_path")"
+                  if [ -f "$local_file" ] && split_large_video "$(dirname "$full_path")" "$remote_source" "$local_file" "$(basename "$full_path")" "$video_split_log"; then
+                    success_count=$((success_count + 1))
+                  fi
+                  rm -rf "$temp_dir" 2>/dev/null || true
+                fi
+              done
+
+              upload_video_split_log "$video_split_log"
+              if [ $processed_count -gt 0 ]; then
+                local summary_message
+                printf -v summary_message '%s\n%s\n%s\n%s\n%s' '📊 OpenList 视频分割总结' '━━━━━━━━━━' "任务：$task_name" "尝试处理：$processed_count" "处理成功：$success_count"
+                curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
+                  -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
+                  --data-urlencode text="$summary_message" || true
+              fi
+            fi
+
+            rm -f "$video_split_log" 2>/dev/null || true
+          }
+          EOF
+
+      - name: Setup helper functions - part 5
+        run: |
+          cat > /tmp/functions_part5.sh << 'EOF'
+          # Sync with probes and detailed logs.
+          # 带探测和更清晰日志的同步函数。
+          sync_with_logging() {
+            local source_path="$1"
+            local dest_path="$2"
+            local task_name="$3"
+            local REMOTE_LOG_DIR="onedrive:/logs/sync_error"
+            local TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+            local LOG_FILENAME="${task_name}_sync_error_${TIMESTAMP}.log"
+
+            echo "开始同步: $source_path -> $dest_path" | tee -a "$LOG_FILENAME"
+            echo "同步日志将保存在: $LOG_FILENAME" | tee -a "$LOG_FILENAME"
+            echo "========== PROBE START: $task_name ==========" | tee -a "$LOG_FILENAME"
+
+            local SRC_PROBE_STATUS=0
+            probe_remote "$source_path" "源端" "$LOG_FILENAME" || SRC_PROBE_STATUS=$?
+            if [ "$SRC_PROBE_STATUS" -ne 0 ]; then
+              echo "源端探测失败，跳过同步" | tee -a "$LOG_FILENAME"
+              send_log_to_telegram "$LOG_FILENAME" "$task_name" "$SRC_PROBE_STATUS" "probe"
+              return 0
+            fi
+
+            local DST_PROBE_STATUS=0
+            probe_remote "$dest_path" "目标端" "$LOG_FILENAME" || DST_PROBE_STATUS=$?
+            if [ "$DST_PROBE_STATUS" -ne 0 ]; then
+              echo "目标端探测失败，跳过同步" | tee -a "$LOG_FILENAME"
+
+              if [ "$DST_PROBE_STATUS" -eq 3 ] && echo "$dest_path" | grep -q '^openlist:123panCrypt'; then
+                local alert_message
+                printf -v alert_message '%s\n%s\n%s\n%s\n%s\n%s\n\n%s\n%s\n%s' '❌ OpenList 目标端告警' '━━━━━━━━━━' '状态：123panCrypt 目标端不可用' '说明：目标端探测失败，疑似配置失效' '处理：当前同步已暂停，不会继续向下执行' '等待：工作流进入 sleep 10m，等待人工处理' "任务：$task_name" "目标：$dest_path" "probe 退出码：$DST_PROBE_STATUS"
+
+                echo "$alert_message" | tee -a "$LOG_FILENAME"
+                curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
+                  -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
+                  --data-urlencode text="$alert_message" || true
+
+                sleep 10m
+                return 0
+              fi
+
+              send_log_to_telegram "$LOG_FILENAME" "$task_name" "$DST_PROBE_STATUS" "probe"
+              return 0
+            fi
+
+            echo "========== PROBE END: $task_name ==========" | tee -a "$LOG_FILENAME"
+            echo "========== SYNC START: $task_name ==========" | tee -a "$LOG_FILENAME"
+
+            rclone sync "$source_path" "$dest_path" \
+              --progress \
+              --stats 15s \
+              --stats-one-line \
+              --ignore-errors \
+              --verbose \
+              --timeout 10m \
+              --contimeout 30s \
+              --retries 3 \
+              --low-level-retries 3 \
+              2>&1 | tee -a "$LOG_FILENAME"
+
+            local SYNC_STATUS=${PIPESTATUS[0]}
+            local SHOULD_UPLOAD=false
+
+            if [ "$SYNC_STATUS" -ne 0 ]; then
+              echo "同步退出码异常 ($SYNC_STATUS)，标记为需要上传日志" | tee -a "$LOG_FILENAME"
+              SHOULD_UPLOAD=true
+            elif grep -Eqi '(^|[^[:alpha:]])(ERROR|Error|Failed|failed|timeout|forbidden|unauthorized|permission denied|connection refused)([^[:alpha:]]|$)' "$LOG_FILENAME"; then
+              echo "同步日志中发现真实失败信号，标记为需要上传日志" | tee -a "$LOG_FILENAME"
+              SHOULD_UPLOAD=true
+            elif grep -qi 'There was nothing to transfer' "$LOG_FILENAME"; then
+              echo "同步成功，本次没有需要传输的文件，记录日志用于通知" | tee -a "$LOG_FILENAME"
+              SHOULD_UPLOAD=true
+            else
+              echo "同步成功且无明显错误，无需上传日志" | tee -a "$LOG_FILENAME"
+            fi
+
+            if [ "$SHOULD_UPLOAD" = true ]; then
+              local REMOTE_LOG_PATH=""
+              if [ -s "$LOG_FILENAME" ]; then
+                REMOTE_LOG_PATH="$REMOTE_LOG_DIR/$LOG_FILENAME"
+                echo "上传日志到: $REMOTE_LOG_PATH" | tee -a "$LOG_FILENAME"
+                rclone copyto "$LOG_FILENAME" "$REMOTE_LOG_PATH" || echo "上传日志文件失败，继续执行"
+              fi
+              send_log_to_telegram "$LOG_FILENAME" "$task_name" "$SYNC_STATUS" "sync" "$source_path" "$dest_path" "$REMOTE_LOG_PATH"
+              process_failed_videos "$LOG_FILENAME" "onedrive" "$task_name"
+            else
+              local ok_message source_size_human
+              source_size_human="未知"
+              local size_output=""
+              size_output=$(rclone size "$source_path" 2>/dev/null || true)
+              if [ -n "$size_output" ]; then
+                source_size_human=$(echo "$size_output" | sed -n 's/^Total size:[[:space:]]*//p' | head -n 1)
+                [ -z "$source_size_human" ] && source_size_human="未知"
+              fi
+              printf -v ok_message '%s\n%s\n%s\n\n%s\n\n%s\n%s\n%s\n───' \
+                "✅ ${task_name} 同步完成" \
+                '━━━━━━━━━━━━━━' \
+                "源端大小：${source_size_human}" \
+                '📁 任务信息' \
+                "• 任务：${task_name}" \
+                "• 源端：${source_path}" \
+                "• 目标：${dest_path}"
+              curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
+                -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
+                --data-urlencode text="$ok_message" || true
+              rm -f "$LOG_FILENAME" 2>/dev/null || true
+            fi
+
+            return 0
+          }
+          EOF
+
+      - name: Combine all functions
+        run: |
+          cat /tmp/functions_part1.sh /tmp/functions_part2.sh /tmp/functions_part3.sh /tmp/functions_part4.sh /tmp/functions_part5.sh > /tmp/functions.sh
+          rm -f /tmp/functions_part*.sh
+
+      - name: Initialize sync
+        run: |
+          source /tmp/functions.sh
+          PROCESSED_FILES_LOG="processed_videos.log"
+          echo "=== 初始化已处理文件日志 ===" > "$PROCESSED_FILES_LOG"
+          echo "开始时间: $(date)" >> "$PROCESSED_FILES_LOG"
+          echo "==========================" >> "$PROCESSED_FILES_LOG"
+
+      - name: List source files larger than 4G before sync
+        run: |
+          LARGE_FILE_THRESHOLD=4294967296
+
+          list_large_files() {
+            local remote_path="$1"
+            local label="$2"
+
+            echo "========================================"
+            echo "检查源目录：$label ($remote_path)"
+            echo "列出大于 4G 的文件："
+
+            local result
+            result=$(rclone lsf "$remote_path" \
+              --recursive \
+              --files-only \
+              --format "sp" 2>/dev/null | \
+              awk -v threshold="$LARGE_FILE_THRESHOLD" '
+                {
+                  size=$1
+                  $1=""
+                  sub(/^ /, "")
+                  if (size + 0 > threshold) {
+                    printf "- %s (%0.2f GiB)\n", $0, size / 1024 / 1024 / 1024
+                  }
+                }
+              ')
+
+            if [ -n "$result" ]; then
+              echo "$result"
+            else
+              echo "- 未发现大于 4G 的文件"
+            fi
+          }
+
+          list_large_files "onedrive:backup" "backup"
+          list_large_files "onedrive:0" "0"
+          list_large_files "onedrive:1" "1"
+          list_large_files "onedrive:2" "2"
+          list_large_files "onedrive:3" "3"
+
+      - name: Sync backup task
+        run: |
+          source /tmp/functions.sh
+          echo "=== 开始同步 backup 任务 ==="
+          sync_with_logging "onedrive:backup" "openlist:aliyundriveCrypt/backup" "backup"
+
+      - name: Sync task0
+        run: |
+          source /tmp/functions.sh
+          echo "=== 开始同步 0 任务 ==="
+          sync_with_logging "onedrive:0" "openlist:baidupanCrypt/0" "task0"
+
+      - name: Sync task1
+        run: |
+          source /tmp/functions.sh
+          echo "=== 开始同步 1 任务 ==="
+          sync_with_logging "onedrive:1" "openlist:baidupanCrypt/1" "task1"
+
+      - name: Sync task2
+        run: |
+          source /tmp/functions.sh
+          echo "=== 开始同步 2 任务 ==="
+          sync_with_logging "onedrive:2" "openlist:aliyundriveCrypt/2" "task2"
+
+      - name: Sync task3
+        run: |
+          source /tmp/functions.sh
+          echo "=== 开始同步 3 任务 ==="
+          sync_with_logging "onedrive:3" "openlist:aliyundriveCrypt/3" "task3"
+
+      - name: Finalize and cleanup
+        run: |
+          source /tmp/functions.sh
+          actual_entries=0
+          total_lines=0
+          DELETE_COUNT=0
+
+          if [ -f "processed_videos.log" ]; then
+            total_lines=$(wc -l < "processed_videos.log" 2>/dev/null || echo 0)
+            actual_entries=$((total_lines - 5))
+            echo "==========================" >> "processed_videos.log"
+            echo "结束时间: $(date)" >> "processed_videos.log"
+            echo "=== 所有同步任务完成 ===" >> "processed_videos.log"
+
+            if [ "$actual_entries" -gt 0 ]; then
+              REMOTE_PROC_LOG="onedrive:/logs/processed/processed_videos_$(date +%Y%m%d_%H%M%S).log"
+              rclone copyto "processed_videos.log" "$REMOTE_PROC_LOG" || true
+            fi
+
+            rm -f "processed_videos.log" 2>/dev/null || true
+          fi
+
+          rm -f /tmp/functions.sh 2>/dev/null || true
+          echo "所有同步任务完成！"
+
+      - name: sleep
+        run: |
+          sudo docker stop openlist
