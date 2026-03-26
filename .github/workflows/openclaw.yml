@@ -234,13 +234,27 @@ jobs:
             shopt -u dotglob nullglob
           fi
 
-          # 7. 微信插件：若缺失则执行一次安装
-          if [ -d /tmp/local_extensions/openclaw-weixin ]; then
-            echo "✅ Found restored openclaw-weixin extension in local_extensions; skip install."
-          else
-            echo "📦 openclaw-weixin missing after restore; installing plugin code..."
-            openclaw plugins install @tencent-weixin/openclaw-weixin@latest
-          fi
+          # 7. 微信插件：每次运行都在 bind mount 的本地 extensions 中幂等安装/修复，默认跳过扫码
+          REAL_OPENCLAW="$(readlink -f "$(command -v openclaw)")"
+          mkdir -p /tmp/openclaw-wrapper-bin
+          cat >/tmp/openclaw-wrapper-bin/openclaw <<EOF
+#!/usr/bin/env bash
+set -e
+REAL_OPENCLAW="$REAL_OPENCLAW"
+if [ "${1:-}" = "channels" ] && [ "${2:-}" = "login" ] && [ "${3:-}" = "--channel" ] && [ "${4:-}" = "openclaw-weixin" ]; then
+  if [ -s "$HOME/.openclaw/openclaw-weixin/accounts.json" ] || find "$HOME/.openclaw/openclaw-weixin/accounts" -type f -print -quit 2>/dev/null | grep -q .; then
+    echo "[openclaw-weixin] 检测到已持久化的微信登录态，跳过引导扫码。"
+  else
+    echo "[openclaw-weixin] 未发现已持久化登录态；当前 workflow 默认跳过交互式扫码连接。"
+  fi
+  exit 0
+fi
+exec "$REAL_OPENCLAW" "$@"
+EOF
+          chmod +x /tmp/openclaw-wrapper-bin/openclaw
+          export PATH="/tmp/openclaw-wrapper-bin:$PATH"
+          echo "📦 Running openclaw-weixin installer on bind-mounted local extensions (login step suppressed)..."
+          npx -y @tencent-weixin/openclaw-weixin-cli@latest install
 
           # 初步安装完备份校验逻辑
           TMP_BROWSER_TAR="/tmp/browser-backup.tar.gz"
