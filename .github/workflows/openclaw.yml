@@ -196,7 +196,7 @@ jobs:
           # 5. 插件文件改为存放在本地 ext4 目录；配置仍放在 ~/.openclaw/openclaw-weixin
           mkdir -p ~/.openclaw/extensions
           rm -rf ~/.openclaw/extensions/openclaw-weixin
-          ln -sfn "$HOME/local_extensions/openclaw-weixin" ~/.openclaw/extensions/openclaw-weixin
+          # ln -sfn "$HOME/local_extensions/openclaw-weixin" ~/.openclaw/extensions/openclaw-weixin
 
           # 统一的体积校验阈值
           MIN_SIZE=$((512 * 1024)) # 512KB
