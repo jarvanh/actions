@@ -173,32 +173,21 @@ jobs:
           export PATH="/home/runner/.npm-global/bin:$PATH"
 
           echo "Configuring ~/.openclaw symlink and local directories..."
-          # 1. 确保云端的持久化目录存在（配置与登录态继续保存在 ~/.openclaw）
+          # 1. 确保云端的持久化目录存在（配置继续保存在 ~/.openclaw）
           mkdir -p /dropbox/self-hosted/openclaw/browser
-          mkdir -p /dropbox/self-hosted/openclaw/extensions
           mkdir -p /dropbox/self-hosted/openclaw/tmp_workspace
-          mkdir -p /dropbox/self-hosted/openclaw/openclaw-weixin
 
           # 2. 建立本地临时高速目录，用于存放高频 I/O 数据
           mkdir -p /tmp/local_browser
           mkdir -p /tmp/tmp_workspace
-          mkdir -p "$HOME/local_extensions"
-          mkdir -p "$HOME/local_extensions/openclaw-weixin"
 
-          # 3. 使用 bind mount 将 browser/tmp_workspace/extensions 挂载到本地目录，阻断高频 I/O 同步
+          # 3. 使用 bind mount 将 browser/tmp_workspace 挂载到本地目录，阻断高频 I/O 同步
           sudo mount --bind /tmp/local_browser /dropbox/self-hosted/openclaw/browser
           sudo mount --bind /tmp/tmp_workspace /dropbox/self-hosted/openclaw/tmp_workspace
-          sudo mount --bind "$HOME/local_extensions" /dropbox/self-hosted/openclaw/extensions
 
           # 4. 创建 ~/.openclaw 软链接指向云端主目录
           rm -rf ~/.openclaw
           ln -s /dropbox/self-hosted/openclaw ~/.openclaw
-
-          # 5. extensions 整体已映射到本地 ext4，宿主看到的 ~/.openclaw/extensions/openclaw-weixin
-          #    将直接是本地真实目录，不再使用插件级软链。
-          mkdir -p ~/.openclaw/extensions
-          mkdir -p ~/.openclaw/extensions/openclaw-weixin
-          ls -ld ~/.openclaw/extensions ~/.openclaw/extensions/openclaw-weixin
 
           # 统一的体积校验阈值
           MIN_SIZE=$((512 * 1024)) # 512KB
@@ -243,37 +232,6 @@ jobs:
             rmdir /tmp/tmp_workspace/tmp_workspace || true
             shopt -u dotglob nullglob
           fi
-
-          # 7. 微信插件：插件实体直接落在本地 ext4 的 extensions 目录中，
-          #    配置/登录态继续保存在 ~/.openclaw/openclaw-weixin
-          REAL_OPENCLAW="$(readlink -f "$(command -v openclaw)")"
-          HOST_OPENCLAW_ROOT="$(dirname "$REAL_OPENCLAW")"
-          WEIXIN_PLUGIN_DIR="$HOME/local_extensions/openclaw-weixin"
-          WEIXIN_CONFIG_DIR="$HOME/.openclaw/openclaw-weixin"
-          WEIXIN_TARBALL_URL="$(npm view @tencent-weixin/openclaw-weixin dist.tarball --silent)"
-          mkdir -p "$WEIXIN_PLUGIN_DIR" "$WEIXIN_CONFIG_DIR"
-
-          echo "📦 Installing openclaw-weixin into $WEIXIN_PLUGIN_DIR ..."
-          TMP_WEIXIN_DIR="$(mktemp -d)"
-          curl -Lsf "$WEIXIN_TARBALL_URL" -o /tmp/openclaw-weixin.tgz
-          tar -xzf /tmp/openclaw-weixin.tgz -C "$TMP_WEIXIN_DIR"
-          find "$WEIXIN_PLUGIN_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
-          shopt -s dotglob nullglob
-          mv "$TMP_WEIXIN_DIR/package"/* "$WEIXIN_PLUGIN_DIR"/
-          shopt -u dotglob nullglob
-          rm -rf "$TMP_WEIXIN_DIR" /tmp/openclaw-weixin.tgz
-
-          ls -ld "$WEIXIN_PLUGIN_DIR"
-
-          echo "📦 Installing plugin runtime dependencies locally..."
-          cd "$WEIXIN_PLUGIN_DIR"
-          npm install --no-audit --no-fund --omit=dev
-
-          echo "🔗 Linking plugin node_modules/openclaw -> host openclaw package root"
-          mkdir -p "$WEIXIN_PLUGIN_DIR/node_modules"
-          rm -rf "$WEIXIN_PLUGIN_DIR/node_modules/openclaw"
-          ln -sfn "$HOST_OPENCLAW_ROOT" "$WEIXIN_PLUGIN_DIR/node_modules/openclaw"
-          ls -ld "$WEIXIN_PLUGIN_DIR/node_modules/openclaw"
 
           # 初步安装完备份校验逻辑
           TMP_BROWSER_TAR="/tmp/browser-backup.tar.gz"
@@ -492,4 +450,3 @@ jobs:
           echo "4. Unmounting local directories..."
           sudo umount /dropbox/self-hosted/openclaw/browser || true
           sudo umount /dropbox/self-hosted/openclaw/tmp_workspace || true
-          sudo umount /dropbox/self-hosted/openclaw/extensions || true
