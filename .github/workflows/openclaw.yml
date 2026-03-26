@@ -169,6 +169,8 @@ jobs:
           curl -fsSL https://openclaw.ai/install.sh | bash -s -- --no-onboard
           
           echo "/home/runner/.npm-global/bin" >> $GITHUB_PATH
+          # 显式在当前 step 导入 PATH，确保 command -v 能够找到命令
+          export PATH="/home/runner/.npm-global/bin:$PATH"
 
           echo "Configuring ~/.openclaw symlink and local directories..."
           # 1. 确保云端的占位目录存在
@@ -237,20 +239,25 @@ jobs:
           # 7. 微信插件：每次运行都在 bind mount 的本地 extensions 中幂等安装/修复，默认跳过扫码
           REAL_OPENCLAW="$(readlink -f "$(command -v openclaw)")"
           mkdir -p /tmp/openclaw-wrapper-bin
+          
+          # 注意：对 $1, $2, $HOME, $@ 增加了 \ 转义，保留其作为脚本运行期变量
           cat >/tmp/openclaw-wrapper-bin/openclaw <<EOF
           #!/usr/bin/env bash
           set -e
           REAL_OPENCLAW="$REAL_OPENCLAW"
-          if [ "${1:-}" = "channels" ] && [ "${2:-}" = "login" ] && [ "${3:-}" = "--channel" ] && [ "${4:-}" = "openclaw-weixin" ]; then
-            if [ -s "$HOME/.openclaw/openclaw-weixin/accounts.json" ] || find "$HOME/.openclaw/openclaw-weixin/accounts" -type f -print -quit 2>/dev/null | grep -q .; then
+          if [ "\${1:-}" = "channels" ] && [ "\${2:-}" = "login" ] && [ "\${3:-}" = "--channel" ] && [ "\${4:-}" = "openclaw-weixin" ]; then
+            if [ -s "\$HOME/.openclaw/openclaw-weixin/accounts.json" ] || find "\$HOME/.openclaw/openclaw-weixin/accounts" -type f -print -quit 2>/dev/null | grep -q .; then
               echo "[openclaw-weixin] 检测到已持久化的微信登录态，跳过引导扫码。"
             else
               echo "[openclaw-weixin] 未发现已持久化登录态；当前 workflow 默认跳过交互式扫码连接。"
             fi
             exit 0
           fi
-          exec "$REAL_OPENCLAW" "$@"
+          
+          # 这里的 \$@ 非常关键，确保它能透传 --version 等参数
+          exec "\$REAL_OPENCLAW" "\$@"
           EOF
+          
           chmod +x /tmp/openclaw-wrapper-bin/openclaw
           export PATH="/tmp/openclaw-wrapper-bin:$PATH"
           echo "📦 Running openclaw-weixin installer on bind-mounted local extensions (login step suppressed)..."
