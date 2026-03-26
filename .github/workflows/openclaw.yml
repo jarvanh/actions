@@ -261,7 +261,7 @@ jobs:
           chmod +x /tmp/openclaw-wrapper-bin/openclaw
           export PATH="/tmp/openclaw-wrapper-bin:$PATH"
           echo "📦 Running openclaw-weixin installer on bind-mounted local extensions (login step suppressed)..."
-          npx -y @tencent-weixin/openclaw-weixin-cli@latest install
+          # npx -y @tencent-weixin/openclaw-weixin-cli@latest install
 
           # 初步安装完备份校验逻辑
           TMP_BROWSER_TAR="/tmp/browser-backup.tar.gz"
