@@ -488,6 +488,3 @@ jobs:
           echo "4. Unmounting local directories..."
           sudo umount /dropbox/self-hosted/openclaw/browser || true
           sudo umount /dropbox/self-hosted/openclaw/tmp_workspace || true
-ln: failed to create symbolic link '/home/runner/.openclaw/extensions/openclaw-weixin': Input/output error
-
-Error: Process completed with exit code 1.
