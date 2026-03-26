@@ -209,23 +209,7 @@ jobs:
             rclone copy dropbox:self-hosted/openclaw/browser /tmp/local_browser
           fi
 
-          # 6. 拉取 extensions 逻辑
-          if rclone ls dropbox:self-hosted/openclaw/extensions.tar.gz > /dev/null 2>&1; then
-            echo "📦 Found extensions.tar.gz! Downloading and extracting..."
-            rclone copyto dropbox:self-hosted/openclaw/extensions.tar.gz /tmp/extensions.tar.gz
-            actual_size=$(stat -c%s /tmp/extensions.tar.gz 2>/dev/null || echo 0)
-            if [ "$actual_size" -ge "$MIN_SIZE" ]; then
-              tar -xzf /tmp/extensions.tar.gz -C /tmp/local_extensions
-            else
-              echo "⚠️ extensions.tar.gz is smaller than expected, skipping restore."
-            fi
-            sudo rm /tmp/extensions.tar.gz
-          else
-            echo "⚠️ No extensions archive found. Falling back to sync from raw directory..."
-            rclone copy dropbox:self-hosted/openclaw/extensions /tmp/local_extensions
-          fi
-
-          # 7. 拉取 tmp_workspace 逻辑
+          # 6. 拉取 tmp_workspace 逻辑
           if rclone ls dropbox:self-hosted/openclaw/tmp_workspace.tar.gz > /dev/null 2>&1; then
             echo "📦 Found tmp_workspace.tar.gz! Downloading and extracting..."
             rclone copyto dropbox:self-hosted/openclaw/tmp_workspace.tar.gz /tmp/tmp_workspace.tar.gz
@@ -250,7 +234,7 @@ jobs:
             shopt -u dotglob nullglob
           fi
 
-          # 8. 微信插件：优先复用已恢复的 extensions；只有缺失时才执行一次安装
+          # 7. 微信插件：若缺失则执行一次安装
           if [ -d /tmp/local_extensions/openclaw-weixin ]; then
             echo "✅ Found restored openclaw-weixin extension in local_extensions; skip install."
           else
@@ -261,8 +245,6 @@ jobs:
           # 初步安装完备份校验逻辑
           TMP_BROWSER_TAR="/tmp/browser-backup.tar.gz"
           FINAL_BROWSER_TAR="/dropbox/self-hosted/openclaw/browser.tar.gz"
-          TMP_EXTENSIONS_TAR="/tmp/extensions-backup.tar.gz"
-          FINAL_EXTENSIONS_TAR="/dropbox/self-hosted/openclaw/extensions.tar.gz"
           TMP_WORKSPACE_TAR="/tmp/tmp-workspace-backup.tar.gz"
           FINAL_WORKSPACE_TAR="/dropbox/self-hosted/openclaw/tmp_workspace.tar.gz"
           TMP_CLIPROXYAPI_TAR="/tmp/CLIProxyAPI-backup.tar.gz"
@@ -275,16 +257,6 @@ jobs:
           else
             echo "⚠️ browser backup archive failed validation; skip promote."
             sudo rm -f "$TMP_BROWSER_TAR"
-          fi
-
-          EXTENSIONS_MIN_SIZE=$((512 * 1024)) # 512KB；统一阈值
-          sudo tar -czf "$TMP_EXTENSIONS_TAR" -C /tmp local_extensions
-          extensions_size=$(stat -c%s "$TMP_EXTENSIONS_TAR" 2>/dev/null || echo 0)
-          if [ "$extensions_size" -ge "$EXTENSIONS_MIN_SIZE" ] && sudo tar -tzf "$TMP_EXTENSIONS_TAR" >/dev/null 2>&1; then
-            sudo mv -f "$TMP_EXTENSIONS_TAR" "$FINAL_EXTENSIONS_TAR"
-          else
-            echo "⚠️ extensions backup archive failed validation; skip promote."
-            sudo rm -f "$TMP_EXTENSIONS_TAR"
           fi
 
           sudo tar -czf "$TMP_WORKSPACE_TAR" -C /tmp/tmp_workspace .
@@ -377,7 +349,7 @@ jobs:
               fi
           fi
           
-          # 后台每 2 分钟导出 CLIProxyAPI 统计，并打包 browser/extensions/tmp_workspace/CLIProxyAPI 同步回 Dropbox
+          # 后台每 2 分钟导出 CLIProxyAPI 统计，并打包 browser/tmp_workspace/CLIProxyAPI 同步回 Dropbox
           echo "Starting background sync tasks: export CLIProxyAPI stats + archive local directories -> Dropbox (every 120s)..."
           nohup bash -c 'while true; do 
             MIN_SIZE=$((512 * 1024)) # 512KB
@@ -393,15 +365,6 @@ jobs:
               actual_size=$(stat -c%s /tmp/browser.tar.gz 2>/dev/null || echo 0)
               if [ "$actual_size" -ge "$MIN_SIZE" ]; then
                 rclone copyto /tmp/browser.tar.gz dropbox:self-hosted/openclaw/browser.tar.gz
-              fi
-            fi
-
-            # 备份 extensions
-            sudo tar -czf /tmp/extensions.tar.gz -C /tmp/local_extensions .
-            if sudo tar -tzf /tmp/extensions.tar.gz >/dev/null 2>&1; then
-              actual_size=$(stat -c%s /tmp/extensions.tar.gz 2>/dev/null || echo 0)
-              if [ "$actual_size" -ge $((512 * 1024)) ]; then
-                rclone copyto /tmp/extensions.tar.gz dropbox:self-hosted/openclaw/extensions.tar.gz
               fi
             fi
 
@@ -448,7 +411,7 @@ jobs:
           openclaw gateway stop || echo "OpenClaw already stopped or command failed."
           
           echo "2. Killing background sync process..."
-          pkill -f "CLIProxyAPI.tar.gz\|browser.tar.gz\|extensions.tar.gz\|tmp_workspace.tar.gz" || echo "Background sync not running."
+          pkill -f "CLIProxyAPI.tar.gz\|browser.tar.gz\|tmp_workspace.tar.gz" || echo "Background sync not running."
           
           echo "3. Performing final archive and sync to Dropbox..."
           MIN_SIZE=$((512 * 1024)) # 512KB
@@ -461,17 +424,6 @@ jobs:
               rclone copyto /tmp/browser.tar.gz dropbox:self-hosted/openclaw/browser.tar.gz -v
             else
               echo "⚠️ browser 压缩包小于 512KB，放弃覆盖云端数据"
-            fi
-          fi
-
-          # 打包并上传 extensions
-          sudo tar -czf /tmp/extensions.tar.gz -C /tmp/local_extensions .
-          if sudo tar -tzf /tmp/extensions.tar.gz >/dev/null 2>&1; then
-            actual_size=$(stat -c%s /tmp/extensions.tar.gz 2>/dev/null || echo 0)
-            if [ "$actual_size" -ge $((512 * 1024)) ]; then
-              rclone copyto /tmp/extensions.tar.gz dropbox:self-hosted/openclaw/extensions.tar.gz -v
-            else
-              echo "⚠️ extensions 压缩包小于 512KB，放弃覆盖云端数据"
             fi
           fi
 
