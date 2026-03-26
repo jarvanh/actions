@@ -36,7 +36,7 @@ jobs:
         run: |
           sudo apt-get install fuse3
           sudo mkdir -p /dropbox
-          
+
           # 挂载 Dropbox
           sudo nohup rclone mount dropbox: /dropbox \
             --allow-non-empty \
@@ -49,10 +49,10 @@ jobs:
             --vfs-read-chunk-size-limit 10G \
             --buffer-size 100M \
             --vfs-cache-max-size 10G &
-          
+
           echo "Waiting for mount..."
           sleep 10
-          
+
           # 确保云端主目录存在
           sudo mkdir -p /dropbox/self-hosted/openclaw
           # 确保存放数据的 CLIProxyAPI 目录存在
@@ -69,14 +69,14 @@ jobs:
         run: |
           # 提前在 Dropbox 挂载目录中创建 logs 文件夹并赋予权限
           sudo mkdir -p /dropbox/self-hosted/openclaw/logs
-          
+
           cloudflared tunnel route dns oc oc.'${{ secrets.VD }}'.eu.org || true
 
           # 启动隧道并记录 PID
           # 使用 nohup 配合重定向，确保进程在后台稳健运行，日志直接写入 Dropbox
           nohup cloudflared tunnel run --url http://127.0.0.1:18789 oc \
             > /dropbox/self-hosted/openclaw/logs/cloudflared_oc.log 2>&1 &
-          
+
           # 等待一小段时间确保进程启动成功并记录 PID
           sleep 10
           echo $! > /dropbox/self-hosted/openclaw/logs/cloudflared_oc.pid
@@ -119,11 +119,11 @@ jobs:
             -v /tmp/local_CLIProxyAPI/config.yaml:/CLIProxyAPI/config.yaml \
             -v /tmp/local_CLIProxyAPI/auth-dir:/root/.cli-proxy-api \
             eceasy/cli-proxy-api:latest
-          
+
           echo "等待 CLIProxyAPI 容器初步启动..."
           sleep 10
           docker ps -a
-          
+
           echo "📥 开始执行 CLIProxyAPI 历史统计数据导入（前台立即执行）..."
 
           # 从本地临时目录读取 stats.json
@@ -153,7 +153,7 @@ jobs:
           else
               echo "ℹ️ 云端未找到 stats.json 存档文件，本次为全新统计。"
           fi
-          
+
           # 运行 8317 端口的命名隧道，并将输出保存到 Dropbox
           nohup cloudflared tunnel run --protocol http2 --url http://127.0.0.1:8317 ai-api \
             > /dropbox/self-hosted/openclaw/logs/cloudflared_CLIProxyAPI.log 2>&1 &
@@ -167,30 +167,36 @@ jobs:
         run: |
           echo "Installing OpenClaw base..."
           curl -fsSL https://openclaw.ai/install.sh | bash -s -- --no-onboard
-          
+
           echo "/home/runner/.npm-global/bin" >> $GITHUB_PATH
           # 显式在当前 step 导入 PATH，确保 command -v 能够找到命令
           export PATH="/home/runner/.npm-global/bin:$PATH"
 
           echo "Configuring ~/.openclaw symlink and local directories..."
-          # 1. 确保云端的占位目录存在
+          # 1. 确保云端的持久化目录存在（配置与登录态继续保存在 ~/.openclaw）
           mkdir -p /dropbox/self-hosted/openclaw/browser
           mkdir -p /dropbox/self-hosted/openclaw/extensions
           mkdir -p /dropbox/self-hosted/openclaw/tmp_workspace
-          
-          # 2. 建立本地临时高速目录，用于存放真实数据
+          mkdir -p /dropbox/self-hosted/openclaw/openclaw-weixin
+
+          # 2. 建立本地临时高速目录，用于存放高频 I/O 数据
           mkdir -p /tmp/local_browser
-          mkdir -p /tmp/local_extensions
           mkdir -p /tmp/tmp_workspace
-          
-          # 3. 使用 bind mount 将本地目录挂载到云端目录上，阻断高频 I/O 同步
+          mkdir -p "$HOME/local_extensions"
+          mkdir -p "$HOME/local_extensions/openclaw-weixin"
+
+          # 3. 使用 bind mount 将 browser/tmp_workspace 挂载到本地目录，阻断高频 I/O 同步
           sudo mount --bind /tmp/local_browser /dropbox/self-hosted/openclaw/browser
-          sudo mount --bind /tmp/local_extensions /dropbox/self-hosted/openclaw/extensions
           sudo mount --bind /tmp/tmp_workspace /dropbox/self-hosted/openclaw/tmp_workspace
-          
+
           # 4. 创建 ~/.openclaw 软链接指向云端主目录
           rm -rf ~/.openclaw
           ln -s /dropbox/self-hosted/openclaw ~/.openclaw
+
+          # 5. 插件文件改为存放在本地 ext4 目录；配置仍放在 ~/.openclaw/openclaw-weixin
+          mkdir -p ~/.openclaw/extensions
+          rm -rf ~/.openclaw/extensions/openclaw-weixin
+          ln -sfn "$HOME/local_extensions/openclaw-weixin" ~/.openclaw/extensions/openclaw-weixin
 
           # 统一的体积校验阈值
           MIN_SIZE=$((512 * 1024)) # 512KB
@@ -236,11 +242,16 @@ jobs:
             shopt -u dotglob nullglob
           fi
 
-          # 7. 微信插件：每次运行都在 bind mount 的本地 extensions 中幂等安装/修复，默认跳过扫码
+          # 7. 微信插件：模拟 @tencent-weixin/openclaw-weixin-cli 的 resolvePluginExtDir()，
+          #    但将插件实体固定放在 ~/local_extensions/openclaw-weixin，
+          #    配置/登录态继续保存在 ~/.openclaw/openclaw-weixin
           REAL_OPENCLAW="$(readlink -f "$(command -v openclaw)")"
+          HOST_OPENCLAW_ROOT="$(dirname "$REAL_OPENCLAW")"
+          WEIXIN_PLUGIN_DIR="$HOME/local_extensions/openclaw-weixin"
+          WEIXIN_CONFIG_DIR="$HOME/.openclaw/openclaw-weixin"
+          mkdir -p "$WEIXIN_PLUGIN_DIR" "$WEIXIN_CONFIG_DIR"
+
           mkdir -p /tmp/openclaw-wrapper-bin
-          
-          # 注意：对 $1, $2, $HOME, $@ 增加了 \ 转义，保留其作为脚本运行期变量
           cat >/tmp/openclaw-wrapper-bin/openclaw <<EOF
           #!/usr/bin/env bash
           set -e
@@ -253,15 +264,30 @@ jobs:
             fi
             exit 0
           fi
-          
-          # 这里的 \$@ 非常关键，确保它能透传 --version 等参数
           exec "\$REAL_OPENCLAW" "\$@"
           EOF
-          
           chmod +x /tmp/openclaw-wrapper-bin/openclaw
           export PATH="/tmp/openclaw-wrapper-bin:$PATH"
-          echo "📦 Running openclaw-weixin installer on bind-mounted local extensions (login step suppressed)..."
-          # npx -y @tencent-weixin/openclaw-weixin-cli@latest install
+
+          echo "📦 Installing openclaw-weixin into ~/local_extensions/openclaw-weixin ..."
+          TMP_WEIXIN_DIR="$(mktemp -d)"
+          curl -Lsf https://registry.npmjs.org/@tencent-weixin/openclaw-weixin/-/openclaw-weixin-2.0.1.tgz -o /tmp/openclaw-weixin.tgz
+          tar -xzf /tmp/openclaw-weixin.tgz -C "$TMP_WEIXIN_DIR"
+          rm -rf "$WEIXIN_PLUGIN_DIR"/*
+          shopt -s dotglob nullglob
+          mv "$TMP_WEIXIN_DIR/package"/* "$WEIXIN_PLUGIN_DIR"/
+          shopt -u dotglob nullglob
+          rm -rf "$TMP_WEIXIN_DIR" /tmp/openclaw-weixin.tgz
+
+          echo "📦 Installing plugin runtime dependencies locally..."
+          cd "$WEIXIN_PLUGIN_DIR"
+          npm install --no-audit --no-fund --omit=dev
+
+          echo "🔗 Linking plugin node_modules/openclaw -> host openclaw package root"
+          mkdir -p "$WEIXIN_PLUGIN_DIR/node_modules"
+          rm -rf "$WEIXIN_PLUGIN_DIR/node_modules/openclaw"
+          ln -sfn "$HOST_OPENCLAW_ROOT" "$WEIXIN_PLUGIN_DIR/node_modules/openclaw"
+          ls -ld "$WEIXIN_PLUGIN_DIR/node_modules/openclaw"
 
           # 初步安装完备份校验逻辑
           TMP_BROWSER_TAR="/tmp/browser-backup.tar.gz"
@@ -297,14 +323,14 @@ jobs:
             echo "⚠️ CLIProxyAPI backup archive failed validation; skip promote."
             sudo rm -f "$TMP_CLIPROXYAPI_TAR"
           fi
-          
+
           mkdir -p ~/.gemini
           chmod 700 ~/.gemini
           npm install -g @google/gemini-cli
           echo "Checking gemini version..."
           gemini --version || echo "gemini not found in PATH"
           npm i -g clawhub
-          
+
       - name: Run OpenClaw
         run: |
           echo "🔧 Fixing file permissions to pass security checks..."
@@ -317,32 +343,32 @@ jobs:
           echo "Restarting OpenClaw gateway..."
           openclaw gateway install --force
           openclaw gateway restart
-          
+
           echo "Waiting for OpenClaw ..."
           sleep 10
-          
+
           if sudo lsof -Pi :18789 -sTCP:LISTEN -t >/dev/null ; then
               echo "✅ OpenClaw Gateway is running!"
           else
               echo "⚠️ Gateway not responding yet. Checking logs:"
               tail -n 20 openclaw.log || echo "No log file found."
-              
+
               echo "🛠️ Attempting to fix with 'openclaw doctor --fix'..."
               openclaw doctor --fix
               openclaw gateway install
               openclaw gateway restart
-              
+
               echo "Waiting for OpenClaw after doctor fix..."
               sleep 15
-              
+
               if sudo lsof -Pi :18789 -sTCP:LISTEN -t >/dev/null ; then
                   echo "✅ OpenClaw Gateway is running after doctor fix!"
               else
                   echo "🔄 Doctor fix failed. Attempting to fallback and reinstall specific OpenClaw version..."
-                  
+
                   CONFIG_FILE="/dropbox/self-hosted/openclaw/openclaw.json"
-                  TARGET_VERSION="latest" 
-                  
+                  TARGET_VERSION="latest"
+
                   if [ -s "$CONFIG_FILE" ]; then
                     READ_VERSION=$(sudo jq -r '.wizard.lastRunVersion // empty' "$CONFIG_FILE" 2>/dev/null)
                     if [ -n "$READ_VERSION" ]; then
@@ -357,22 +383,22 @@ jobs:
 
                   echo "Installing openclaw@$TARGET_VERSION ..."
                   npm i -g "openclaw@$TARGET_VERSION"
-                  
+
                   sudo chmod -R o-w $(npm root -g)
                   sudo chmod 700 ~/.openclaw
                   if [ -f ~/.openclaw/openclaw.json ]; then
                     sudo chmod 600 ~/.openclaw/openclaw.json
                   fi
-                  
+
                   echo "Restarting OpenClaw..."
                   openclaw gateway install --force
                   openclaw gateway restart
               fi
           fi
-          
+
           # 后台每 2 分钟导出 CLIProxyAPI 统计，并打包 browser/tmp_workspace/CLIProxyAPI 同步回 Dropbox
           echo "Starting background sync tasks: export CLIProxyAPI stats + archive local directories -> Dropbox (every 120s)..."
-          nohup bash -c 'while true; do 
+          nohup bash -c 'while true; do
             MIN_SIZE=$((512 * 1024)) # 512KB
 
             # 导出 CLIProxyAPI 统计数据到本地临时目录
@@ -413,12 +439,12 @@ jobs:
                 rclone copyto /tmp/CLIProxyAPI.tar.gz dropbox:self-hosted/CLIProxyAPI.tar.gz
               fi
             fi
-            
+
             sleep 120
           done' > /dev/null 2>&1 &
 
           sleep 340m
-          
+
       - name: Stop OpenClaw and Final Sync
         if: always()
         run: |
@@ -430,10 +456,10 @@ jobs:
 
           echo "1. Stopping OpenClaw gateway..."
           openclaw gateway stop || echo "OpenClaw already stopped or command failed."
-          
+
           echo "2. Killing background sync process..."
           pkill -f "CLIProxyAPI.tar.gz\|browser.tar.gz\|tmp_workspace.tar.gz" || echo "Background sync not running."
-          
+
           echo "3. Performing final archive and sync to Dropbox..."
           MIN_SIZE=$((512 * 1024)) # 512KB
 
@@ -476,11 +502,11 @@ jobs:
               echo "⚠️ CLIProxyAPI 压缩包小于 512KB，放弃覆盖云端数据"
             fi
           fi
-          
+
           echo "4. Unmounting local directories..."
           sudo umount /dropbox/self-hosted/openclaw/browser || true
-          sudo umount /dropbox/self-hosted/openclaw/extensions || true
           sudo umount /dropbox/self-hosted/openclaw/tmp_workspace || true
-          # 注：已不再对 CLIProxyAPI 进行 bind mount，所以不再需要对其 umount
-          
+          # 注：微信插件已改为 ~/local_extensions/openclaw-weixin + ~/.openclaw/extensions/openclaw-weixin 软链，
+          #     不再对 extensions 做 bind mount；CLIProxyAPI 也没有 bind mount
+
           echo "✅ Final data sync complete. Environment cleaned up."
