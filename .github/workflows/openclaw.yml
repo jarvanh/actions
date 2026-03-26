@@ -241,6 +241,15 @@ jobs:
             rclone copy dropbox:self-hosted/openclaw/tmp_workspace /tmp/tmp_workspace
           fi
 
+          # 自动修正历史错误打包导致的 tmp_workspace/tmp_workspace 嵌套
+          if [ -d /tmp/tmp_workspace/tmp_workspace ]; then
+            echo "⚠️ Detected nested tmp_workspace after restore, flattening..."
+            shopt -s dotglob nullglob
+            mv /tmp/tmp_workspace/tmp_workspace/* /tmp/tmp_workspace/
+            rmdir /tmp/tmp_workspace/tmp_workspace || true
+            shopt -u dotglob nullglob
+          fi
+
           # 8. 微信插件：优先复用已恢复的 extensions；只有缺失时才执行一次安装
           if [ -d /tmp/local_extensions/openclaw-weixin ]; then
             echo "✅ Found restored openclaw-weixin extension in local_extensions; skip install."
@@ -278,7 +287,7 @@ jobs:
             sudo rm -f "$TMP_EXTENSIONS_TAR"
           fi
 
-          sudo tar -czf "$TMP_WORKSPACE_TAR" -C /tmp tmp_workspace
+          sudo tar -czf "$TMP_WORKSPACE_TAR" -C /tmp/tmp_workspace .
           workspace_size=$(stat -c%s "$TMP_WORKSPACE_TAR" 2>/dev/null || echo 0)
           if [ "$workspace_size" -ge "$MIN_SIZE" ] && sudo tar -tzf "$TMP_WORKSPACE_TAR" >/dev/null 2>&1; then
             sudo mv -f "$TMP_WORKSPACE_TAR" "$FINAL_WORKSPACE_TAR"
@@ -397,6 +406,13 @@ jobs:
             fi
 
             # 备份 tmp_workspace
+            if [ -d /tmp/tmp_workspace/tmp_workspace ]; then
+              echo "⚠️ Detected nested tmp_workspace before periodic backup, flattening..."
+              shopt -s dotglob nullglob
+              mv /tmp/tmp_workspace/tmp_workspace/* /tmp/tmp_workspace/
+              rmdir /tmp/tmp_workspace/tmp_workspace || true
+              shopt -u dotglob nullglob
+            fi
             sudo tar -czf /tmp/tmp_workspace.tar.gz -C /tmp/tmp_workspace .
             if sudo tar -tzf /tmp/tmp_workspace.tar.gz >/dev/null 2>&1; then
               actual_size=$(stat -c%s /tmp/tmp_workspace.tar.gz 2>/dev/null || echo 0)
@@ -460,6 +476,13 @@ jobs:
           fi
 
           # 打包并上传 tmp_workspace
+          if [ -d /tmp/tmp_workspace/tmp_workspace ]; then
+            echo "⚠️ Detected nested tmp_workspace before final backup, flattening..."
+            shopt -s dotglob nullglob
+            mv /tmp/tmp_workspace/tmp_workspace/* /tmp/tmp_workspace/
+            rmdir /tmp/tmp_workspace/tmp_workspace || true
+            shopt -u dotglob nullglob
+          fi
           sudo tar -czf /tmp/tmp_workspace.tar.gz -C /tmp/tmp_workspace .
           if sudo tar -tzf /tmp/tmp_workspace.tar.gz >/dev/null 2>&1; then
             actual_size=$(stat -c%s /tmp/tmp_workspace.tar.gz 2>/dev/null || echo 0)
