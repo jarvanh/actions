@@ -268,7 +268,7 @@ jobs:
             sudo rm -f "$TMP_BROWSER_TAR"
           fi
 
-          EXTENSIONS_MIN_SIZE=$((128 * 1024)) # 128KB；避免仅装了少量插件时被阈值误杀
+          EXTENSIONS_MIN_SIZE=$((512 * 1024)) # 512KB；统一阈值
           sudo tar -czf "$TMP_EXTENSIONS_TAR" -C /tmp local_extensions
           extensions_size=$(stat -c%s "$TMP_EXTENSIONS_TAR" 2>/dev/null || echo 0)
           if [ "$extensions_size" -ge "$EXTENSIONS_MIN_SIZE" ] && sudo tar -tzf "$TMP_EXTENSIONS_TAR" >/dev/null 2>&1; then
@@ -391,7 +391,7 @@ jobs:
             sudo tar -czf /tmp/extensions.tar.gz -C /tmp/local_extensions .
             if sudo tar -tzf /tmp/extensions.tar.gz >/dev/null 2>&1; then
               actual_size=$(stat -c%s /tmp/extensions.tar.gz 2>/dev/null || echo 0)
-              if [ "$actual_size" -ge $((128 * 1024)) ]; then
+              if [ "$actual_size" -ge $((512 * 1024)) ]; then
                 rclone copyto /tmp/extensions.tar.gz dropbox:self-hosted/openclaw/extensions.tar.gz
               fi
             fi
@@ -452,10 +452,10 @@ jobs:
           sudo tar -czf /tmp/extensions.tar.gz -C /tmp/local_extensions .
           if sudo tar -tzf /tmp/extensions.tar.gz >/dev/null 2>&1; then
             actual_size=$(stat -c%s /tmp/extensions.tar.gz 2>/dev/null || echo 0)
-            if [ "$actual_size" -ge $((128 * 1024)) ]; then
+            if [ "$actual_size" -ge $((512 * 1024)) ]; then
               rclone copyto /tmp/extensions.tar.gz dropbox:self-hosted/openclaw/extensions.tar.gz -v
             else
-              echo "⚠️ extensions 压缩包小于 128KB，放弃覆盖云端数据"
+              echo "⚠️ extensions 压缩包小于 512KB，放弃覆盖云端数据"
             fi
           fi
 
