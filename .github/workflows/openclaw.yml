@@ -238,19 +238,19 @@ jobs:
           REAL_OPENCLAW="$(readlink -f "$(command -v openclaw)")"
           mkdir -p /tmp/openclaw-wrapper-bin
           cat >/tmp/openclaw-wrapper-bin/openclaw <<EOF
-#!/usr/bin/env bash
-set -e
-REAL_OPENCLAW="$REAL_OPENCLAW"
-if [ "${1:-}" = "channels" ] && [ "${2:-}" = "login" ] && [ "${3:-}" = "--channel" ] && [ "${4:-}" = "openclaw-weixin" ]; then
-  if [ -s "$HOME/.openclaw/openclaw-weixin/accounts.json" ] || find "$HOME/.openclaw/openclaw-weixin/accounts" -type f -print -quit 2>/dev/null | grep -q .; then
-    echo "[openclaw-weixin] 检测到已持久化的微信登录态，跳过引导扫码。"
-  else
-    echo "[openclaw-weixin] 未发现已持久化登录态；当前 workflow 默认跳过交互式扫码连接。"
-  fi
-  exit 0
-fi
-exec "$REAL_OPENCLAW" "$@"
-EOF
+          #!/usr/bin/env bash
+          set -e
+          REAL_OPENCLAW="$REAL_OPENCLAW"
+          if [ "${1:-}" = "channels" ] && [ "${2:-}" = "login" ] && [ "${3:-}" = "--channel" ] && [ "${4:-}" = "openclaw-weixin" ]; then
+            if [ -s "$HOME/.openclaw/openclaw-weixin/accounts.json" ] || find "$HOME/.openclaw/openclaw-weixin/accounts" -type f -print -quit 2>/dev/null | grep -q .; then
+              echo "[openclaw-weixin] 检测到已持久化的微信登录态，跳过引导扫码。"
+            else
+              echo "[openclaw-weixin] 未发现已持久化登录态；当前 workflow 默认跳过交互式扫码连接。"
+            fi
+            exit 0
+          fi
+          exec "$REAL_OPENCLAW" "$@"
+          EOF
           chmod +x /tmp/openclaw-wrapper-bin/openclaw
           export PATH="/tmp/openclaw-wrapper-bin:$PATH"
           echo "📦 Running openclaw-weixin installer on bind-mounted local extensions (login step suppressed)..."
