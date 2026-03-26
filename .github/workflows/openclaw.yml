@@ -193,9 +193,10 @@ jobs:
           rm -rf ~/.openclaw
           ln -s /dropbox/self-hosted/openclaw ~/.openclaw
 
-          # 5. 插件文件改为存放在本地 ext4 目录；由于 Rclone 云盘不支持软链接，此处使用 bind mount
-          mkdir -p /dropbox/self-hosted/openclaw/extensions/openclaw-weixin
-          sudo mount --bind "$HOME/local_extensions/openclaw-weixin" /dropbox/self-hosted/openclaw/extensions/openclaw-weixin
+          # 5. 插件文件改为存放在本地 ext4 目录；配置仍放在 ~/.openclaw/openclaw-weixin
+          mkdir -p ~/.openclaw/extensions
+          rm -rf ~/.openclaw/extensions/openclaw-weixin
+          ln -sfn "$HOME/local_extensions/openclaw-weixin" ~/.openclaw/extensions/openclaw-weixin
 
           # 统一的体积校验阈值
           MIN_SIZE=$((512 * 1024)) # 512KB
@@ -241,30 +242,14 @@ jobs:
             shopt -u dotglob nullglob
           fi
 
-          # 7. 微信插件：模拟 @tencent-weixin/openclaw-weixin-cli 的 resolvePluginExtDir()
+          # 7. 微信插件：模拟 @tencent-weixin/openclaw-weixin-cli 的 resolvePluginExtDir()，
+          #    但将插件实体固定放在 ~/local_extensions/openclaw-weixin，
+          #    配置/登录态继续保存在 ~/.openclaw/openclaw-weixin
           REAL_OPENCLAW="$(readlink -f "$(command -v openclaw)")"
           HOST_OPENCLAW_ROOT="$(dirname "$REAL_OPENCLAW")"
           WEIXIN_PLUGIN_DIR="$HOME/local_extensions/openclaw-weixin"
           WEIXIN_CONFIG_DIR="$HOME/.openclaw/openclaw-weixin"
           mkdir -p "$WEIXIN_PLUGIN_DIR" "$WEIXIN_CONFIG_DIR"
-
-          mkdir -p /tmp/openclaw-wrapper-bin
-          cat >/tmp/openclaw-wrapper-bin/openclaw <<EOF
-          #!/usr/bin/env bash
-          set -e
-          REAL_OPENCLAW="$REAL_OPENCLAW"
-          if [ "\${1:-}" = "channels" ] && [ "\${2:-}" = "login" ] && [ "\${3:-}" = "--channel" ] && [ "\${4:-}" = "openclaw-weixin" ]; then
-            if [ -s "\$HOME/.openclaw/openclaw-weixin/accounts.json" ] || find "\$HOME/.openclaw/openclaw-weixin/accounts" -type f -print -quit 2>/dev/null | grep -q .; then
-              echo "[openclaw-weixin] 检测到已持久化的微信登录态，跳过引导扫码。"
-            else
-              echo "[openclaw-weixin] 未发现已持久化登录态；当前 workflow 默认跳过交互式扫码连接。"
-            fi
-            exit 0
-          fi
-          exec "\$REAL_OPENCLAW" "\$@"
-          EOF
-          chmod +x /tmp/openclaw-wrapper-bin/openclaw
-          export PATH="/tmp/openclaw-wrapper-bin:$PATH"
 
           echo "📦 Installing openclaw-weixin into ~/local_extensions/openclaw-weixin ..."
           TMP_WEIXIN_DIR="$(mktemp -d)"
@@ -283,8 +268,8 @@ jobs:
           echo "🔗 Linking plugin node_modules/openclaw -> host openclaw package root"
           mkdir -p "$WEIXIN_PLUGIN_DIR/node_modules"
           rm -rf "$WEIXIN_PLUGIN_DIR/node_modules/openclaw"
-          ln -sfn "$HOST_OPENCLAW_ROOT" "$WEIXIN_PLUGIN_DIR/node_modules/openclaw"
-          ls -ld "$WEIXIN_PLUGIN_DIR/node_modules/openclaw"
+          # ln -sfn "$HOST_OPENCLAW_ROOT" "$WEIXIN_PLUGIN_DIR/node_modules/openclaw"
+          # ls -ld "$WEIXIN_PLUGIN_DIR/node_modules/openclaw"
 
           # 初步安装完备份校验逻辑
           TMP_BROWSER_TAR="/tmp/browser-backup.tar.gz"
@@ -503,6 +488,6 @@ jobs:
           echo "4. Unmounting local directories..."
           sudo umount /dropbox/self-hosted/openclaw/browser || true
           sudo umount /dropbox/self-hosted/openclaw/tmp_workspace || true
-          sudo umount /dropbox/self-hosted/openclaw/extensions/openclaw-weixin || true
+ln: failed to create symbolic link '/home/runner/.openclaw/extensions/openclaw-weixin': Input/output error
 
-          echo "✅ Final data sync complete. Environment cleaned up."
+Error: Process completed with exit code 1.
