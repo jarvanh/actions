@@ -10,6 +10,15 @@ jobs:
     concurrency: openclaw-singleton
     runs-on: ubuntu-latest
     steps:
+      - name: Run tmate
+        if: always()
+        uses: mxschmitt/action-tmate@v3
+        with:
+          sudo: true
+          detached: true
+          install-dependencies: true
+          limit-access-to-actor: true
+          
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
