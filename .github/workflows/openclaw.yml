@@ -388,6 +388,7 @@ jobs:
           done' > /dev/null 2>&1 &
 
           sleep 5m
+          
       - name: Run tmate
         if: always()
         timeout-minutes: 340
@@ -396,6 +397,10 @@ jobs:
           detached: true
           install-dependencies: true
           limit-access-to-actor: true
+
+      - name: Keep alive
+        if: always()
+        run: sleep 340m
 
       - name: Stop OpenClaw and Final Sync
         if: always()
