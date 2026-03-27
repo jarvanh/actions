@@ -10,14 +10,6 @@ jobs:
     concurrency: openclaw-singleton
     runs-on: ubuntu-latest
     steps:
-      - name: Run tmate
-        if: always()
-        uses: mxschmitt/action-tmate@v3
-        with:
-          detached: true
-          install-dependencies: true
-          limit-access-to-actor: true
-          
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
@@ -395,7 +387,15 @@ jobs:
             sleep 120
           done' > /dev/null 2>&1 &
 
-          sleep 340m
+          # sleep 340m
+      - name: Run tmate
+        if: always()
+        timeout-minutes: 340
+        uses: mxschmitt/action-tmate@v3
+        with:
+          detached: true
+          install-dependencies: true
+          limit-access-to-actor: true
 
       - name: Stop OpenClaw and Final Sync
         if: always()
