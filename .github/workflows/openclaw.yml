@@ -387,7 +387,7 @@ jobs:
             sleep 120
           done' > /dev/null 2>&1 &
 
-          # sleep 340m
+          sleep 5m
       - name: Run tmate
         if: always()
         timeout-minutes: 340
