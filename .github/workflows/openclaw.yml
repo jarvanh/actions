@@ -51,12 +51,28 @@ jobs:
             --vfs-cache-max-size 10G &
 
           echo "Waiting for mount..."
-          sleep 10
+          for i in {1..30}; do
+            if mount | grep -q " on /dropbox " && ls /dropbox >/dev/null 2>&1; then
+              echo "✅ Dropbox mounted"
+              break
+            fi
+            sleep 2
+          done
 
           # 确保云端主目录存在
           sudo mkdir -p /dropbox/self-hosted/openclaw
           # 确保存放数据的 CLIProxyAPI 目录存在
           sudo mkdir -p /dropbox/self-hosted/CLIProxyAPI
+          # 确保统计文件目录存在
+          rclone mkdir dropbox:self-hosted/CLIProxyAPI || true
+          rclone mkdir dropbox:self-hosted/openclaw || true
+
+          if ! mount | grep -q " on /dropbox "; then
+            echo "❌ Dropbox mount failed"
+            exit 1
+          fi
+
+          rclone lsd dropbox: >/dev/null
 
       - name: Install Cloudflared
         run: |
@@ -85,18 +101,22 @@ jobs:
         run: |
           echo "Configuring local high-speed CLIProxyAPI directory..."
           mkdir -p /dropbox/self-hosted/CLIProxyAPI
+          rm -rf /tmp/local_CLIProxyAPI
           mkdir -p /tmp/local_CLIProxyAPI
+
+          # 优先恢复独立 stats.json，降低大压缩包损坏对统计恢复的影响
+          rclone copyto dropbox:self-hosted/CLIProxyAPI/stats.json /tmp/local_CLIProxyAPI/stats.json 2>/dev/null || true
 
           # 优先从压缩包恢复；没有压缩包时再回退为目录同步
           if rclone ls dropbox:self-hosted/CLIProxyAPI.tar.gz > /dev/null 2>&1; then
             echo "📦 Found CLIProxyAPI.tar.gz! Downloading and extracting..."
             rclone copyto dropbox:self-hosted/CLIProxyAPI.tar.gz /tmp/CLIProxyAPI.tar.gz
-            MIN_SIZE=$((1 * 1024 * 1024)) # 调整为 1MB
+            MIN_SIZE=$((128 * 1024))
             actual_size=$(stat -c%s /tmp/CLIProxyAPI.tar.gz 2>/dev/null || echo 0)
-            if [ "$actual_size" -ge "$MIN_SIZE" ]; then
+            if [ "$actual_size" -ge "$MIN_SIZE" ] && tar -tzf /tmp/CLIProxyAPI.tar.gz >/dev/null 2>&1; then
               tar -xzf /tmp/CLIProxyAPI.tar.gz -C /tmp/local_CLIProxyAPI
             else
-              echo "⚠️ CLIProxyAPI.tar.gz is smaller than expected, skipping restore."
+              echo "⚠️ CLIProxyAPI.tar.gz validation failed, skipping archive restore."
             fi
             rm -f /tmp/CLIProxyAPI.tar.gz
           else
@@ -104,9 +124,24 @@ jobs:
             rclone copy dropbox:self-hosted/CLIProxyAPI /tmp/local_CLIProxyAPI
           fi
 
+          # 自动修正历史错误打包导致的 local_CLIProxyAPI/local_CLIProxyAPI 嵌套
+          if [ -d /tmp/local_CLIProxyAPI/local_CLIProxyAPI ]; then
+            echo "⚠️ Detected nested local_CLIProxyAPI after restore, flattening..."
+            shopt -s dotglob nullglob
+            mv /tmp/local_CLIProxyAPI/local_CLIProxyAPI/* /tmp/local_CLIProxyAPI/
+            rmdir /tmp/local_CLIProxyAPI/local_CLIProxyAPI || true
+            shopt -u dotglob nullglob
+          fi
+
+          # 再次覆盖 stats.json：单文件优先级高于压缩包内版本
+          rclone copyto dropbox:self-hosted/CLIProxyAPI/stats.json /tmp/local_CLIProxyAPI/stats.json 2>/dev/null || true
+
           # 【防崩溃机制】在宿主机提前创建好文件和目录，防止 Docker 误建文件夹
           mkdir -p /tmp/local_CLIProxyAPI/auth-dir
           touch /tmp/local_CLIProxyAPI/config.yaml
+
+          echo "=== restored CLIProxyAPI tree ==="
+          find /tmp/local_CLIProxyAPI -maxdepth 3 | sort || true
 
           # 先清理同名旧容器，避免名称冲突
           docker rm -f cliproxyapi 2>/dev/null || true
@@ -120,19 +155,33 @@ jobs:
             -v /tmp/local_CLIProxyAPI/auth-dir:/root/.cli-proxy-api \
             eceasy/cli-proxy-api:latest
 
-          echo "等待 CLIProxyAPI 容器初步启动..."
-          sleep 10
+          echo "等待 CLIProxyAPI API 就绪..."
+          READY=false
+          for i in {1..120}; do
+            if curl -fsS http://127.0.0.1:8317/ >/dev/null 2>&1; then
+              READY=true
+              echo "✅ CLIProxyAPI 已就绪"
+              break
+            fi
+            echo "⏳ 等待中... ${i}/120"
+            sleep 2
+          done
           docker ps -a
+
+          if [ "$READY" != true ]; then
+            echo "❌ CLIProxyAPI 未在预期时间内就绪"
+            docker logs cliproxyapi || true
+            exit 1
+          fi
 
           echo "📥 开始执行 CLIProxyAPI 历史统计数据导入（前台立即执行）..."
 
           # 从本地临时目录读取 stats.json
-          if [ -f /tmp/local_CLIProxyAPI/stats.json ]; then
+          if [ -s /tmp/local_CLIProxyAPI/stats.json ] && jq empty /tmp/local_CLIProxyAPI/stats.json >/dev/null 2>&1; then
               SUCCESS=false
-              # 增加重试机制：最多尝试 360 次，每次间隔 10 秒
-              for i in {1..360}; do
-                  echo "🔁 CLIProxyAPI 历史统计导入重试次数：${i}/360"
-                  if curl -sS -X POST "http://127.0.0.1:8317/v0/management/usage/import" \
+              for i in {1..60}; do
+                  echo "🔁 CLIProxyAPI 历史统计导入重试次数：${i}/60"
+                  if curl -fsS -X POST "http://127.0.0.1:8317/v0/management/usage/import" \
                       -H "Content-Type: application/json" \
                       -H "X-Management-Key: ${{ secrets.CLIPROXYAPIKEY }}" \
                       -d @/tmp/local_CLIProxyAPI/stats.json > /dev/null 2>&1; then
@@ -140,25 +189,27 @@ jobs:
                       SUCCESS=true
                       break
                   else
-                      echo "⚠️ CLIProxyAPI 历史统计导入失败，10 秒后重试。"
-                      sleep 10
+                      echo "⚠️ CLIProxyAPI 历史统计导入失败，5 秒后重试。"
+                      sleep 5
                   fi
               done
 
-              # 如果彻底失败，打印出容器的内部报错日志
               if [ "$SUCCESS" = false ]; then
                   echo "❌ CLIProxyAPI 历史统计导入彻底失败！正在提取 CLIProxyAPI 容器的运行日志："
-                  docker logs $(docker ps -q --filter ancestor=eceasy/cli-proxy-api:latest)
+                  docker logs cliproxyapi || true
               fi
           else
-              echo "ℹ️ 云端未找到 stats.json 存档文件，本次为全新统计。"
+              echo "ℹ️ 云端未找到有效 stats.json 存档文件，本次为全新统计。"
           fi
+
+          # 启动前清理可能残留的 ai-api 隧道进程
+          pkill -f "cloudflared tunnel run --protocol http2 --url http://127.0.0.1:8317 ai-api" || true
 
           # 运行 8317 端口的命名隧道，并将输出保存到 Dropbox
           nohup cloudflared tunnel run --protocol http2 --url http://127.0.0.1:8317 ai-api \
             > /dropbox/self-hosted/openclaw/logs/cloudflared_CLIProxyAPI.log 2>&1 &
 
-          sleep 10
+          sleep 5
           echo $! > /dropbox/self-hosted/openclaw/logs/cloudflared_CLIProxyAPI.pid
 
           echo "CLIProxyAPI 命名隧道已启动：ai-api（固定地址模式）"
@@ -259,13 +310,24 @@ jobs:
             sudo rm -f "$TMP_WORKSPACE_TAR"
           fi
 
-          sudo tar -czf "$TMP_CLIPROXYAPI_TAR" -C /tmp local_CLIProxyAPI
+          sudo tar -czf "$TMP_CLIPROXYAPI_TAR" -C /tmp/local_CLIProxyAPI .
           cliproxyapi_size=$(stat -c%s "$TMP_CLIPROXYAPI_TAR" 2>/dev/null || echo 0)
-          if [ "$cliproxyapi_size" -ge "$MIN_SIZE" ] && sudo tar -tzf "$TMP_CLIPROXYAPI_TAR" >/dev/null 2>&1; then
+          if sudo tar -tzf "$TMP_CLIPROXYAPI_TAR" >/dev/null 2>&1; then
+            mkdir -p /tmp/cliproxyapi_verify
+            rm -rf /tmp/cliproxyapi_verify/*
+            sudo tar -xzf "$TMP_CLIPROXYAPI_TAR" -C /tmp/cliproxyapi_verify
+          fi
+          if [ "$cliproxyapi_size" -ge $((128 * 1024)) ] \
+             && sudo tar -tzf "$TMP_CLIPROXYAPI_TAR" >/dev/null 2>&1 \
+             && { [ -f /tmp/cliproxyapi_verify/config.yaml ] || [ -d /tmp/cliproxyapi_verify/auth-dir ] || [ -f /tmp/cliproxyapi_verify/stats.json ]; }; then
             sudo mv -f "$TMP_CLIPROXYAPI_TAR" "$FINAL_CLIPROXYAPI_TAR"
           else
-            echo "⚠️ CLIProxyAPI backup archive failed validation; skip promote."
+            echo "⚠️ CLIProxyAPI backup archive failed structural validation; skip promote."
             sudo rm -f "$TMP_CLIPROXYAPI_TAR"
+          fi
+
+          if [ -s /tmp/local_CLIProxyAPI/stats.json ] && jq empty /tmp/local_CLIProxyAPI/stats.json >/dev/null 2>&1; then
+            rclone copyto /tmp/local_CLIProxyAPI/stats.json dropbox:self-hosted/CLIProxyAPI/stats.json || true
           fi
 
           mkdir -p ~/.gemini
@@ -345,10 +407,18 @@ jobs:
           nohup bash -c 'while true; do
             MIN_SIZE=$((512 * 1024)) # 512KB
 
-            # 导出 CLIProxyAPI 统计数据到本地临时目录
-            curl -sS -X GET "http://127.0.0.1:8317/v0/management/usage/export" \
+            # 高频导出并单独同步 stats.json，降低大压缩包失败时的状态丢失概率
+            if curl -fsS -X GET "http://127.0.0.1:8317/v0/management/usage/export" \
               -H "X-Management-Key: ${{ secrets.CLIPROXYAPIKEY }}" \
-              -o /tmp/local_CLIProxyAPI/stats.json || echo "⚠️ 周期性导出 CLIProxyAPI 统计失败"
+              -o /tmp/local_CLIProxyAPI/stats.json.tmp; then
+              mv -f /tmp/local_CLIProxyAPI/stats.json.tmp /tmp/local_CLIProxyAPI/stats.json
+              if [ -s /tmp/local_CLIProxyAPI/stats.json ] && jq empty /tmp/local_CLIProxyAPI/stats.json >/dev/null 2>&1; then
+                rclone copyto /tmp/local_CLIProxyAPI/stats.json dropbox:self-hosted/CLIProxyAPI/stats.json || true
+              fi
+            else
+              echo "⚠️ 周期性导出 CLIProxyAPI 统计失败"
+              rm -f /tmp/local_CLIProxyAPI/stats.json.tmp
+            fi
 
             # 备份 browser
             sudo tar -czf /tmp/browser.tar.gz -C /tmp/local_browser .
@@ -379,7 +449,7 @@ jobs:
             sudo tar -czf /tmp/CLIProxyAPI.tar.gz -C /tmp/local_CLIProxyAPI .
             if sudo tar -tzf /tmp/CLIProxyAPI.tar.gz >/dev/null 2>&1; then
               actual_size=$(stat -c%s /tmp/CLIProxyAPI.tar.gz 2>/dev/null || echo 0)
-              if [ "$actual_size" -ge "$MIN_SIZE" ]; then
+              if [ "$actual_size" -ge $((128 * 1024)) ]; then
                 rclone copyto /tmp/CLIProxyAPI.tar.gz dropbox:self-hosted/CLIProxyAPI.tar.gz
               fi
             fi
@@ -406,9 +476,17 @@ jobs:
         if: always()
         run: |
           echo "💾 正在通过 API 导出 CLIProxyAPI 统计数据到本地缓存..."
-          curl -sS -X GET "http://127.0.0.1:8317/v0/management/usage/export" \
+          if curl -fsS -X GET "http://127.0.0.1:8317/v0/management/usage/export" \
               -H "X-Management-Key: ${{ secrets.CLIPROXYAPIKEY }}" \
-              -o /tmp/local_CLIProxyAPI/stats.json || echo "⚠️ 导出请求失败"
+              -o /tmp/local_CLIProxyAPI/stats.json.tmp; then
+            mv -f /tmp/local_CLIProxyAPI/stats.json.tmp /tmp/local_CLIProxyAPI/stats.json
+            if [ -s /tmp/local_CLIProxyAPI/stats.json ] && jq empty /tmp/local_CLIProxyAPI/stats.json >/dev/null 2>&1; then
+              rclone copyto /tmp/local_CLIProxyAPI/stats.json dropbox:self-hosted/CLIProxyAPI/stats.json || true
+            fi
+          else
+            echo "⚠️ 导出请求失败"
+            rm -f /tmp/local_CLIProxyAPI/stats.json.tmp
+          fi
           echo "✅ 统计数据存档指令已执行。"
 
           echo "1. Stopping OpenClaw gateway..."
@@ -453,11 +531,15 @@ jobs:
           sudo tar -czf /tmp/CLIProxyAPI.tar.gz -C /tmp/local_CLIProxyAPI .
           if sudo tar -tzf /tmp/CLIProxyAPI.tar.gz >/dev/null 2>&1; then
             actual_size=$(stat -c%s /tmp/CLIProxyAPI.tar.gz 2>/dev/null || echo 0)
-            if [ "$actual_size" -ge "$MIN_SIZE" ]; then
+            if [ "$actual_size" -ge $((128 * 1024)) ]; then
               rclone copyto /tmp/CLIProxyAPI.tar.gz dropbox:self-hosted/CLIProxyAPI.tar.gz -v
             else
-              echo "⚠️ CLIProxyAPI 压缩包小于 512KB，放弃覆盖云端数据"
+              echo "⚠️ CLIProxyAPI 压缩包小于 128KB，放弃覆盖云端数据"
             fi
+          fi
+
+          if [ -s /tmp/local_CLIProxyAPI/stats.json ] && jq empty /tmp/local_CLIProxyAPI/stats.json >/dev/null 2>&1; then
+            rclone copyto /tmp/local_CLIProxyAPI/stats.json dropbox:self-hosted/CLIProxyAPI/stats.json -v || true
           fi
 
           echo "4. Unmounting local directories..."
