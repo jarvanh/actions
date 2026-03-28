@@ -231,6 +231,7 @@ jobs:
           # 2. 建立本地临时高速目录，用于存放高频 I/O 数据
           mkdir -p /tmp/local_browser
           mkdir -p /tmp/tmp_workspace
+          mkdir -p /home/runner/openclaw-safe-plugins
 
           # 3. 使用 bind mount 将 browser/tmp_workspace 挂载到本地目录，阻断高频 I/O 同步
           sudo mount --bind /tmp/local_browser /dropbox/self-hosted/openclaw/browser
@@ -284,11 +285,28 @@ jobs:
             shopt -u dotglob nullglob
           fi
 
+          # 7. 拉取 openclaw-safe-plugins 逻辑
+          if rclone ls dropbox:self-hosted/openclaw/openclaw-safe-plugins.tar.gz > /dev/null 2>&1; then
+            echo "📦 Found openclaw-safe-plugins.tar.gz! Downloading and extracting..."
+            rclone copyto dropbox:self-hosted/openclaw/openclaw-safe-plugins.tar.gz /tmp/openclaw-safe-plugins.tar.gz
+            actual_size=$(stat -c%s /tmp/openclaw-safe-plugins.tar.gz 2>/dev/null || echo 0)
+            if [ "$actual_size" -ge "$MIN_SIZE" ] && tar -tzf /tmp/openclaw-safe-plugins.tar.gz >/dev/null 2>&1; then
+              tar -xzf /tmp/openclaw-safe-plugins.tar.gz -C /home/runner/openclaw-safe-plugins
+            else
+              echo "⚠️ openclaw-safe-plugins.tar.gz validation failed, skipping restore."
+            fi
+            sudo rm -f /tmp/openclaw-safe-plugins.tar.gz
+          else
+            echo "⚠️ No openclaw-safe-plugins archive found. Skipping plugin restore."
+          fi
+
           # 初步安装完备份校验逻辑
           TMP_BROWSER_TAR="/tmp/browser-backup.tar.gz"
           FINAL_BROWSER_TAR="/dropbox/self-hosted/openclaw/browser.tar.gz"
           TMP_WORKSPACE_TAR="/tmp/tmp-workspace-backup.tar.gz"
           FINAL_WORKSPACE_TAR="/dropbox/self-hosted/openclaw/tmp_workspace.tar.gz"
+          TMP_SAFE_PLUGINS_TAR="/tmp/openclaw-safe-plugins-backup.tar.gz"
+          FINAL_SAFE_PLUGINS_TAR="/dropbox/self-hosted/openclaw/openclaw-safe-plugins.tar.gz"
           TMP_CLIPROXYAPI_TAR="/tmp/CLIProxyAPI-backup.tar.gz"
           FINAL_CLIPROXYAPI_TAR="/dropbox/self-hosted/CLIProxyAPI.tar.gz"
 
@@ -308,6 +326,15 @@ jobs:
           else
             echo "⚠️ tmp_workspace backup archive failed validation; skip promote."
             sudo rm -f "$TMP_WORKSPACE_TAR"
+          fi
+
+          sudo tar -czf "$TMP_SAFE_PLUGINS_TAR" -C /home/runner/openclaw-safe-plugins .
+          safe_plugins_size=$(stat -c%s "$TMP_SAFE_PLUGINS_TAR" 2>/dev/null || echo 0)
+          if [ "$safe_plugins_size" -ge "$MIN_SIZE" ] && sudo tar -tzf "$TMP_SAFE_PLUGINS_TAR" >/dev/null 2>&1; then
+            sudo mv -f "$TMP_SAFE_PLUGINS_TAR" "$FINAL_SAFE_PLUGINS_TAR"
+          else
+            echo "⚠️ openclaw-safe-plugins backup archive failed validation; skip promote."
+            sudo rm -f "$TMP_SAFE_PLUGINS_TAR"
           fi
 
           sudo tar -czf "$TMP_CLIPROXYAPI_TAR" -C /tmp/local_CLIProxyAPI .
@@ -402,7 +429,7 @@ jobs:
               fi
           fi
 
-          # 后台每 2 分钟导出 CLIProxyAPI 统计，并打包 browser/tmp_workspace/CLIProxyAPI 同步回 Dropbox
+          # 后台每 2 分钟导出 CLIProxyAPI 统计，并打包 browser/tmp_workspace/openclaw-safe-plugins/CLIProxyAPI 同步回 Dropbox
           echo "Starting background sync tasks: export CLIProxyAPI stats + archive local directories -> Dropbox (every 120s)..."
           nohup bash -c 'while true; do
             MIN_SIZE=$((512 * 1024)) # 512KB
@@ -442,6 +469,15 @@ jobs:
               actual_size=$(stat -c%s /tmp/tmp_workspace.tar.gz 2>/dev/null || echo 0)
               if [ "$actual_size" -ge "$MIN_SIZE" ]; then
                 rclone copyto /tmp/tmp_workspace.tar.gz dropbox:self-hosted/openclaw/tmp_workspace.tar.gz
+              fi
+            fi
+
+            # 备份 openclaw-safe-plugins 目录
+            sudo tar -czf /tmp/openclaw-safe-plugins.tar.gz -C /home/runner/openclaw-safe-plugins .
+            if sudo tar -tzf /tmp/openclaw-safe-plugins.tar.gz >/dev/null 2>&1; then
+              actual_size=$(stat -c%s /tmp/openclaw-safe-plugins.tar.gz 2>/dev/null || echo 0)
+              if [ "$actual_size" -ge "$MIN_SIZE" ]; then
+                rclone copyto /tmp/openclaw-safe-plugins.tar.gz dropbox:self-hosted/openclaw/openclaw-safe-plugins.tar.gz
               fi
             fi
 
@@ -493,7 +529,7 @@ jobs:
           openclaw gateway stop || echo "OpenClaw already stopped or command failed."
 
           echo "2. Killing background sync process..."
-          pkill -f "CLIProxyAPI.tar.gz\|browser.tar.gz\|tmp_workspace.tar.gz" || echo "Background sync not running."
+          pkill -f "CLIProxyAPI.tar.gz\|browser.tar.gz\|tmp_workspace.tar.gz\|openclaw-safe-plugins.tar.gz" || echo "Background sync not running."
 
           echo "3. Performing final archive and sync to Dropbox..."
           MIN_SIZE=$((512 * 1024)) # 512KB
@@ -524,6 +560,17 @@ jobs:
               rclone copyto /tmp/tmp_workspace.tar.gz dropbox:self-hosted/openclaw/tmp_workspace.tar.gz -v
             else
               echo "⚠️ tmp_workspace 压缩包小于 512KB，放弃覆盖云端数据"
+            fi
+          fi
+
+          # 打包并上传 openclaw-safe-plugins
+          sudo tar -czf /tmp/openclaw-safe-plugins.tar.gz -C /home/runner/openclaw-safe-plugins .
+          if sudo tar -tzf /tmp/openclaw-safe-plugins.tar.gz >/dev/null 2>&1; then
+            actual_size=$(stat -c%s /tmp/openclaw-safe-plugins.tar.gz 2>/dev/null || echo 0)
+            if [ "$actual_size" -ge "$MIN_SIZE" ]; then
+              rclone copyto /tmp/openclaw-safe-plugins.tar.gz dropbox:self-hosted/openclaw/openclaw-safe-plugins.tar.gz -v
+            else
+              echo "⚠️ openclaw-safe-plugins 压缩包小于 512KB，放弃覆盖云端数据"
             fi
           fi
 
