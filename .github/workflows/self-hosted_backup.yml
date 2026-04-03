@@ -60,7 +60,7 @@ jobs:
           
           echo "Uploading archive to Dropbox (Overwriting latest)..."
           # 💡 修改：使用 copy 命令上传同名文件，会自动覆盖 Dropbox 上的旧包
-          rclone copy "$ARCHIVE_NAME" "dropbox:self-hosted_backup/" -P --retries 3
+          rclone copy "$ARCHIVE_NAME" "dropbox:" -P --retries 3
           
       - name: Send Telegram Notification
         if: always()
