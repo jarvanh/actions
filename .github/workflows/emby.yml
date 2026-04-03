@@ -81,6 +81,9 @@ jobs:
           curl -L -o emby-server.deb $(curl -s https://api.github.com/repos/MediaBrowser/Emby.Releases/releases/latest | grep -oP '"browser_download_url": "\K(.*emby-server-deb.*amd64.deb)(?=")')
           sudo dpkg -i emby-server.deb
           
+          # dpkg -i 会自动启动 emby-server，需要先把它停掉，否则 /var/lib/emby 会被锁定无法删除
+          sudo systemctl stop emby-server || true
+
           # 尝试从备份恢复
           sudo mkdir -p /var/lib/emby
           sudo chown -R emby:emby /var/lib/emby
