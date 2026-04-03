@@ -37,13 +37,25 @@ jobs:
           
           for REPO in $REPOS; do
             REPO_NAME=$(basename $REPO .git)
-            echo "Cloning $REPO_NAME..."
+            echo "----------------------------------------"
+            echo "正在处理仓库: $REPO_NAME ..."
+            
             CLONE_URL=$(echo $REPO | sed -e "s/git@github.com:/https:\/\/$GH_TOKEN@github.com\//")
-            git clone --mirror "$CLONE_URL" "$BACKUP_DIR/$REPO_NAME.git"
+            
+            # 💡 核心修复：添加 || true 并在出错时继续，防止单个仓库被封禁导致整个备份任务失败
+            if git clone --mirror "$CLONE_URL" "$BACKUP_DIR/$REPO_NAME.git"; then
+              echo "✅ $REPO_NAME 备份成功。"
+            else
+              echo "❌ $REPO_NAME 备份失败（可能已被 GitHub 禁用或访问受限），跳过此仓库。"
+            fi
           done
           
+          echo "----------------------------------------"
+          echo "正在打包所有备份成功的仓库..."
           tar -czf "$BACKUP_DIR.tar.gz" "$BACKUP_DIR"
-          rclone copy "$BACKUP_DIR.tar.gz" "dropbox:github_backups/" -P
+          
+          echo "正在上传到 Dropbox..."
+          rclone copy "$BACKUP_DIR.tar.gz" "dropbox:github_backups/" -P --retries 3
           
       - name: Rotate old backups (Keep 14 days)
         run: |
@@ -56,16 +68,15 @@ jobs:
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           STATUS: ${{ job.status }}
         run: |
-          # 如果没有配置 TG_BOT_TOKEN 或 TG_CHAT_ID，则跳过通知
           if [ -z "$TG_BOT_TOKEN" ] || [ -z "$TG_CHAT_ID" ]; then
             echo "Telegram 凭证未配置，跳过发送通知。"
             exit 0
           fi
           
           if [ "$STATUS" == "success" ]; then
-            MSG="✅ <b>GitHub 仓库备份成功</b>%0A📅 日期: $(date +'%Y-%m-%d')%0A📦 目的地: Dropbox/github_backups"
+            MSG="✅ <b>GitHub 全仓库备份成功</b>%0A📅 日期: $(date +'%Y-%m-%d')%0A📦 目的地: Dropbox/github_backups"
           else
-            MSG="❌ <b>GitHub 仓库备份失败</b>%0A⚠️ 请前往 GitHub Actions 检查日志详情。"
+            MSG="❌ <b>GitHub 全仓库备份失败</b>%0A⚠️ 请前往 GitHub Actions 检查日志详情。"
           fi
           
           curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
