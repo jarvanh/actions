@@ -25,8 +25,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PAT }}
         run: |
-          DATE=$(date +'%Y-%m-%d')
-          BACKUP_DIR="github_backup_$DATE"
+          # 💡 修改：使用固定压缩包名，不再使用日期后缀
+          ARCHIVE_NAME="github_repos_latest.tar.gz"
+          BACKUP_DIR="github_backup_temp"
           mkdir -p $BACKUP_DIR
           
           # 获取用户所有的仓库 (包括 private 和 public)
@@ -44,25 +45,20 @@ jobs:
             
             CLONE_URL=$(echo $REPO | sed -e "s/git@github.com:/https:\/\/$GH_TOKEN@github.com\//")
             
-            # 💡 核心修复：添加 || true 并在出错时继续，防止单个仓库被封禁导致整个备份任务失败
-            if git clone --mirror "$CLONE_URL" "$BACKUP_DIR/$REPO_NAME.git"; then
-              echo "✅ $REPO_NAME 备份成功。"
-            else
+            git clone --mirror "$CLONE_URL" "$BACKUP_DIR/$REPO_NAME.git" || {
               echo "❌ $REPO_NAME 备份失败（可能已被 GitHub 禁用或访问受限），跳过此仓库。"
-            fi
+              rm -rf "$BACKUP_DIR/$REPO_NAME.git"
+            }
           done
           
           echo "----------------------------------------"
           echo "正在打包所有备份成功的仓库..."
-          tar -czf "$BACKUP_DIR.tar.gz" "$BACKUP_DIR"
+          tar -czf "$ARCHIVE_NAME" "$BACKUP_DIR"
           
-          echo "正在上传到 Dropbox..."
-          rclone copy "$BACKUP_DIR.tar.gz" "dropbox:github_backups/" -P --retries 3
+          echo "正在上传到 Dropbox (覆盖旧备份)..."
+          # 💡 修改：直接覆盖 Dropbox 上的最新备份包
+          rclone copy "$ARCHIVE_NAME" "dropbox:github_backups/" -P --retries 3
           
-      - name: Rotate old backups (Keep 14 days)
-        run: |
-          rclone delete "dropbox:github_backups/" --min-age 14d -v
-
       - name: Send Telegram Notification
         if: always()
         env:
@@ -76,7 +72,7 @@ jobs:
           fi
           
           if [ "$STATUS" == "success" ]; then
-            MSG="✅ <b>GitHub 全仓库备份成功</b>%0A📅 日期: $(date +'%Y-%m-%d')%0A📦 目的地: Dropbox/github_backups"
+            MSG="✅ <b>GitHub 全仓库备份成功 (已覆盖旧包)</b>%0A📅 日期: $(date +'%Y-%m-%d')%0A📦 文件: github_repos_latest.tar.gz"
           else
             MSG="❌ <b>GitHub 全仓库备份失败</b>%0A⚠️ 请前往 GitHub Actions 检查日志详情。"
           fi
