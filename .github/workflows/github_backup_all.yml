@@ -57,7 +57,7 @@ jobs:
           
           echo "正在上传到 Dropbox (覆盖旧备份)..."
           # 💡 修改：直接覆盖 Dropbox 上的最新备份包
-          rclone copy "$ARCHIVE_NAME" "dropbox:github_backups/" -P --retries 3
+          rclone copy "$ARCHIVE_NAME" "dropbox:" -P --retries 3
           
       - name: Send Telegram Notification
         if: always()
