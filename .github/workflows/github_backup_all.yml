@@ -1,0 +1,50 @@
+name: Backup All GitHub Repositories to Dropbox
+
+on:
+  schedule:
+    - cron: '0 3 * * *' # 每天凌晨3点运行
+  workflow_dispatch:
+
+concurrency:
+  group: backup-repos
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup rclone
+        run: |
+          sudo apt-get install -y rclone
+          mkdir -p ~/.config/rclone/
+          echo "${{ secrets.RCLONE }}" > ~/.config/rclone/rclone.conf
+
+      - name: Backup all repositories
+        env:
+          GH_TOKEN: ${{ secrets.PAT }}
+        run: |
+          DATE=$(date +'%Y-%m-%d')
+          BACKUP_DIR="github_backup_$DATE"
+          mkdir -p $BACKUP_DIR
+          
+          # 获取用户所有的仓库 (包括 private 和 public)
+          REPOS=$(curl -s -H "Authorization: token $GH_TOKEN" "https://api.github.com/user/repos?per_page=100&type=owner" | jq -r '.[].ssh_url')
+          
+          if [ -z "$REPOS" ]; then
+            echo "未找到任何仓库，请检查 PAT 权限。"
+            exit 1
+          fi
+          
+          for REPO in $REPOS; do
+            REPO_NAME=$(basename $REPO .git)
+            echo "Cloning $REPO_NAME..."
+            CLONE_URL=$(echo $REPO | sed -e "s/git@github.com:/https:\/\/$GH_TOKEN@github.com\//")
+            git clone --mirror "$CLONE_URL" "$BACKUP_DIR/$REPO_NAME.git"
+          done
+          
+          tar -czf "$BACKUP_DIR.tar.gz" "$BACKUP_DIR"
+          rclone copy "$BACKUP_DIR.tar.gz" "dropbox:github_backups/" -P
+          
+      - name: Rotate old backups (Keep 14 days)
+        run: |
+          rclone delete "dropbox:github_backups/" --min-age 14d -v
