@@ -117,6 +117,7 @@ jobs:
       - name: run emby
         run: |
           sudo nohup /opt/emby-server/bin/emby-server &
+          touch /tmp/EMBY_READY_FOR_BACKUP
       - name: run cloudflared
         run: |
           cloudflared tunnel route dns e e.'${{ secrets.VD }}'.eu.org
@@ -127,6 +128,11 @@ jobs:
       - name: backup emby data
         if: always()
         run: |
+          if [ ! -f /tmp/EMBY_READY_FOR_BACKUP ]; then
+              echo "⚠️ Emby 未能成功启动，跳过备份以防空数据覆盖云端。"
+              exit 0
+          fi
+
           # 优雅停机
           curl -X POST -H "X-Emby-Token: c33a66119cd94788882617a5bde7f962" http://127.0.0.1:8096/System/Shutdown || true
           sleep 15
