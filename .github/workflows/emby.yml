@@ -162,7 +162,7 @@ jobs:
         run: |
           STATUS="${{ job.status }}"
           MESSAGE="📺 *Emby Workflow* %0AStatus: ${STATUS} %0ATime: $(date '+%Y-%m-%d %H:%M:%S')"
-          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage" \
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             -d chat_id=83279194 \
             -d text="${MESSAGE}" \
             -d parse_mode=Markdown
