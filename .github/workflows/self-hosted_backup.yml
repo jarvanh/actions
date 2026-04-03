@@ -24,9 +24,28 @@ jobs:
           DATE=$(date +'%Y-%m-%d')
           ARCHIVE_NAME="self-hosted_$DATE.tar.gz"
           
-          echo "Downloading self-hosted data from Dropbox..."
-          # 从 Dropbox 下载数据到本地 actions 服务器，并排除常见垃圾/缓存文件
-          rclone copy "dropbox:self-hosted" "./self-hosted" -P --retries 3 \
+          echo "Phase 1: Initial full download..."
+          rclone sync "dropbox:self-hosted" "./self-hosted" -P --retries 3 \
+            --exclude "**/logs/**" \
+            --exclude "**/cache/**" \
+            --exclude "**/.cache/**" \
+            --exclude "**/tmp/**" \
+            --exclude "**/*.log" \
+            --exclude "**/*.tmp"
+            
+          echo "Phase 2: Catch-up sync 1 (Delta)..."
+          sleep 5
+          rclone sync "dropbox:self-hosted" "./self-hosted" -P --retries 3 \
+            --exclude "**/logs/**" \
+            --exclude "**/cache/**" \
+            --exclude "**/.cache/**" \
+            --exclude "**/tmp/**" \
+            --exclude "**/*.log" \
+            --exclude "**/*.tmp"
+            
+          echo "Phase 3: Catch-up sync 2 (Final Delta)..."
+          sleep 5
+          rclone sync "dropbox:self-hosted" "./self-hosted" -P --retries 3 \
             --exclude "**/logs/**" \
             --exclude "**/cache/**" \
             --exclude "**/.cache/**" \
