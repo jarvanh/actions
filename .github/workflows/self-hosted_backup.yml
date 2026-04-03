@@ -25,21 +25,24 @@ jobs:
           ARCHIVE_NAME="self-hosted_$DATE.tar.gz"
           
           echo "Downloading self-hosted data from Dropbox..."
-          # 从 Dropbox 下载数据到本地 actions 服务器
-          rclone copy "dropbox:self-hosted" "./self-hosted" -P --retries 3
+          # 从 Dropbox 下载数据到本地 actions 服务器，并排除常见垃圾/缓存文件
+          rclone copy "dropbox:self-hosted" "./self-hosted" -P --retries 3 \
+            --exclude "**/logs/**" \
+            --exclude "**/cache/**" \
+            --exclude "**/.cache/**" \
+            --exclude "**/tmp/**" \
+            --exclude "**/*.log" \
+            --exclude "**/*.tmp"
           
           echo "Compressing data..."
-          # 将下载的数据压缩打包
           tar -czf "$ARCHIVE_NAME" "./self-hosted"
           
           echo "Uploading archive to Dropbox..."
-          # 上传压缩包到 Dropbox 备份目录
           rclone copy "$ARCHIVE_NAME" "dropbox:self-hosted_backup/" -P --retries 3
           
       - name: Rotate old backups (Keep 14 days)
         run: |
           echo "Cleaning up old backups..."
-          # 清除 14 天前的历史备份包
           rclone delete "dropbox:self-hosted_backup/" --min-age 14d -v
 
       - name: Send Telegram Notification
