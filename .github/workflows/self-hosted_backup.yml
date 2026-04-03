@@ -23,8 +23,8 @@ jobs:
 
       - name: Download, Compress and Backup
         run: |
-          DATE=$(date +'%Y-%m-%d')
-          ARCHIVE_NAME="self-hosted_$DATE.tar.gz"
+          # 💡 修改：直接使用固定文件名 self-hosted_latest.tar.gz，从而覆盖旧文件
+          ARCHIVE_NAME="self-hosted_latest.tar.gz"
           
           echo "Phase 1: Initial full download..."
           rclone sync "dropbox:self-hosted" "./self-hosted" -P --retries 3 \
@@ -58,14 +58,10 @@ jobs:
           echo "Compressing data..."
           tar -czf "$ARCHIVE_NAME" "./self-hosted"
           
-          echo "Uploading archive to Dropbox..."
+          echo "Uploading archive to Dropbox (Overwriting latest)..."
+          # 💡 修改：使用 copy 命令上传同名文件，会自动覆盖 Dropbox 上的旧包
           rclone copy "$ARCHIVE_NAME" "dropbox:self-hosted_backup/" -P --retries 3
           
-      - name: Rotate old backups (Keep 14 days)
-        run: |
-          echo "Cleaning up old backups..."
-          rclone delete "dropbox:self-hosted_backup/" --min-age 14d -v
-
       - name: Send Telegram Notification
         if: always()
         env:
@@ -79,7 +75,7 @@ jobs:
           fi
           
           if [ "$STATUS" == "success" ]; then
-            MSG="✅ <b>Self-Hosted 数据备份成功</b>%0A📅 日期: $(date +'%Y-%m-%d')%0A📦 目的地: Dropbox/self-hosted_backup"
+            MSG="✅ <b>Self-Hosted 数据备份成功 (已覆盖旧包)</b>%0A📅 日期: $(date +'%Y-%m-%d')%0A📦 文件: self-hosted_latest.tar.gz"
           else
             MSG="❌ <b>Self-Hosted 数据备份失败</b>%0A⚠️ 请前往 GitHub Actions 检查日志详情。"
           fi
