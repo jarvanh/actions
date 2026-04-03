@@ -57,8 +57,9 @@ jobs:
           
           echo "正在上传到 Dropbox (覆盖旧备份)..."
           # 💡 修改：直接覆盖 Dropbox 上的最新备份包
-          rclone copy "$ARCHIVE_NAME" "dropbox:" -P --retries 3
+          rclone copy "$ARCHIVE_NAME" "dropbox:github_backups/" -P --retries 3
           
+
       - name: Send Telegram Notification
         if: always()
         env:
@@ -66,18 +67,11 @@ jobs:
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           STATUS: ${{ job.status }}
         run: |
-          if [ -z "$TG_BOT_TOKEN" ] || [ -z "$TG_CHAT_ID" ]; then
-            echo "Telegram 凭证未配置，跳过发送通知。"
-            exit 0
-          fi
-          
           if [ "$STATUS" == "success" ]; then
-            MSG="✅ <b>GitHub 全仓库备份成功 (已覆盖旧包)</b>%0A📅 日期: $(date +'%Y-%m-%d')%0A📦 文件: github_repos_latest.tar.gz"
+            MESSAGE="✅ 备份成功 (${{ github.workflow }})"
           else
-            MSG="❌ <b>GitHub 全仓库备份失败</b>%0A⚠️ 请前往 GitHub Actions 检查日志详情。"
+            MESSAGE="❌ 备份失败 (${{ github.workflow }})"
           fi
-          
           curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
             -d chat_id="${TG_CHAT_ID}" \
-            -d text="$(echo -e $MSG)" \
-            -d parse_mode="HTML"
+            -d text="${MESSAGE}"
