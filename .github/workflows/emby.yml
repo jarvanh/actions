@@ -145,14 +145,14 @@ jobs:
           # 只有在本地模式下才打包回传（避免覆盖云端的软链接源文件）
           if [ ! -L /var/lib/emby ]; then
               echo "🚀 本地模式运行结束，正在打包数据回传 Dropbox..."
-              sudo tar -I 'zstd -3 -T0' -cf /tmp/emby-backup.tar.zst \
+              sudo tar -I 'zstd -3 -T0' -cf $HOME/emby-backup.tar.zst \
                 --exclude='cache' \
                 --exclude='logs' \
                 --exclude='transcoding-temp' \
                 -C /var/lib/emby .
               
               echo "📤 上传备份到 Dropbox..."
-              rclone copy /tmp/emby-backup.tar.zst dropbox:self-hosted/ -vv
+              sudo chown runner:docker $HOME/emby-backup.tar.zst && rclone copy $HOME/emby-backup.tar.zst dropbox:self-hosted/ -vv
           else
               echo "😴 当前为软链接模式，跳过本地打包备份。"
           fi
