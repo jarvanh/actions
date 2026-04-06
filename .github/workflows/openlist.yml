@@ -109,18 +109,18 @@ jobs:
 
             # 直接探测目标路径本身，避免无意义的上级回退探测。
             # Probe the target path directly and avoid fallback probing on the parent remote.
-            if timeout 120s rclone lsf "$remote_path" --max-depth 1 --fast-list > /tmp/probe_ls_$$.txt 2>>"$probe_log"; then
-              if [ -s /tmp/probe_ls_$$.txt ]; then
+            if timeout 120s rclone lsf "$remote_path" --max-depth 1 --fast-list > /tmp/probe_output.txt 2>>"$probe_log"; then
+              if [ -s /tmp/probe_output.txt ]; then
                 echo "[probe] ${probe_label} 可读取，示例条目：" | tee -a "$probe_log"
-                head -n 20 /tmp/probe_ls_$$.txt | sed 's/^/[probe]   /' | tee -a "$probe_log"
+                head -n 20 /tmp/probe_output.txt | sed 's/^/[probe]   /' | tee -a "$probe_log"
               else
                 echo "[probe] ${probe_label} 探测成功，但目录为空或无匹配内容。" | tee -a "$probe_log"
               fi
-              rm -f /tmp/probe_ls_$$.txt
+              rm -f /tmp/probe_output.txt
               return 0
             else
               local probe_exit=$?
-              rm -f /tmp/probe_ls_$$.txt
+              rm -f /tmp/probe_output.txt
 
               # 目标路径不存在时允许继续，由 rclone 在同步时自动创建。
               # Allow missing destination paths and let rclone create them during sync.
@@ -143,7 +143,18 @@ jobs:
             local log_type="${4:-sync}"
             local source_info="${5:-未知}"
             local dest_info="${6:-未知}"
-            local remote_log_path="${7:-}"
+            
+            # 读取示例条目
+            local probe_examples="无"
+            if [ -f "/tmp/probe_output.txt" ]; then
+              probe_examples=$(head -n 5 /tmp/probe_output.txt | tr '\n' ',' | sed 's/,$//')
+            fi
+
+            # 提取关键错误日志 (最后5条错误相关行)
+            local critical_logs="无"
+            if [ -f "$log_file" ]; then
+              critical_logs=$(grep -Ei "error|failed|too large|timeout|permission denied|connection refused" "$log_file" | tail -n 5 || echo "无明显错误关键字")
+            fi
 
             local task_title="$task_name"
             if [ "$task_name" = "backup" ]; then
@@ -203,7 +214,27 @@ jobs:
                 "• 文件：${remote_log_path:-$log_file}"
             elif [ "$exit_code" -ne 0 ] || [ "$has_real_failure" = true ]; then
               if [ "$source_ok" = true ] && [ "$dest_ok" = true ]; then
-                printf -v message '%s\n%s\n%s\n%s\n\n%s\n\n%s\n%s\n%s\n\n%s\n%s\n%s\n\n%s\n%s\n%s\n───' \
+                printf -v message '%s
+%s
+%s
+%s
+
+%s
+
+%s
+%s
+%s
+
+%s
+%s
+%s
+%s
+
+%s
+%s
+%s
+%s
+───' \
                   "⚠️ ${task_title} 同步告警" \
                   '━━━━━━━━━━━━━━' \
                   '状态：部份文件同步失败' \
@@ -214,10 +245,12 @@ jobs:
                   "• 目标：${dest_info}" \
                   '📌 源端探测' \
                   '• 源端探测正常' \
+                  "  [示例]: ${probe_examples}" \
                   '• 目标端探测正常' \
                   '🧾 日志信息' \
                   "• 大小：${file_size_human}" \
-                  "• 文件：${remote_log_path:-$log_file}"
+                  "• 关键日志：
+${critical_logs}"
               else
                 printf -v message '%s\n%s\n\n%s\n%s\n%s\n\n%s\n%s\n%s\n\n%s\n%s\n%s\n───' \
                   "❌ ${task_title} 同步失败" \
@@ -570,14 +603,9 @@ jobs:
             fi
 
             if [ "$SHOULD_UPLOAD" = true ]; then
-              local REMOTE_LOG_PATH=""
-              if [ -s "$LOG_FILENAME" ]; then
-                REMOTE_LOG_PATH="$REMOTE_LOG_DIR/$LOG_FILENAME"
-                echo "上传日志到: $REMOTE_LOG_PATH" | tee -a "$LOG_FILENAME"
-                rclone copyto "$LOG_FILENAME" "$REMOTE_LOG_PATH" || echo "上传日志文件失败，继续执行"
-              fi
-              send_log_to_telegram "$LOG_FILENAME" "$task_name" "$SYNC_STATUS" "sync" "$source_path" "$dest_path" "$REMOTE_LOG_PATH"
+              send_log_to_telegram "$LOG_FILENAME" "$task_name" "$SYNC_STATUS" "sync" "$source_path" "$dest_path"
               process_failed_videos "$LOG_FILENAME" "onedrive" "$task_name"
+              rm -f "$LOG_FILENAME" 2>/dev/null || true
             else
               local ok_message source_size_human
               source_size_human="未知"
