@@ -491,12 +491,17 @@ jobs:
             local source_path="$1"
             local dest_path="$2"
             local task_name="$3"
+            shift 3
+            local extra_args=("$@")
             local REMOTE_LOG_DIR="onedrive:/logs/sync_error"
             local TIMESTAMP=$(date +%Y%m%d_%H%M%S)
             local LOG_FILENAME="${task_name}_sync_error_${TIMESTAMP}.log"
 
             echo "开始同步: $source_path -> $dest_path" | tee -a "$LOG_FILENAME"
             echo "同步日志将保存在: $LOG_FILENAME" | tee -a "$LOG_FILENAME"
+            if [ ${#extra_args[@]} -gt 0 ]; then
+              echo "附加参数: ${extra_args[*]}" | tee -a "$LOG_FILENAME"
+            fi
             echo "========== PROBE START: $task_name ==========" | tee -a "$LOG_FILENAME"
 
             local SRC_PROBE_STATUS=0
@@ -654,7 +659,7 @@ jobs:
         run: |
           source /tmp/functions.sh
           echo "=== 开始同步 backup 任务 ==="
-          sync_with_logging "onedrive:backup" "openlist:aliyundriveCrypt/backup" "backup"
+          sync_with_logging             "onedrive:backup"             "openlist:aliyundriveCrypt/backup"             "backup"             --exclude "notion/**"
 
       - name: Sync task0
         run: |
