@@ -104,12 +104,13 @@ jobs:
             local remote_path="$1"
             local probe_label="$2"
             local probe_log="$3"
+            local suffix="${4:-output}"
 
             echo "[probe] 开始探测 ${probe_label}: ${remote_path}" | tee -a "$probe_log"
 
             # 直接探测目标路径本身，避免无意义的上级回退探测。
             # Probe the target path directly and avoid fallback probing on the parent remote.
-            if timeout 120s rclone lsf "$remote_path" --max-depth 1 --fast-list > /tmp/probe_output.txt 2>>"$probe_log"; then
+            if timeout 120s rclone lsf "$remote_path" --max-depth 1 --fast-list > "/tmp/probe_${suffix}.txt" 2>>"$probe_log"; then
               if [ -s /tmp/probe_output.txt ]; then
                 echo "[probe] ${probe_label} 可读取，示例条目：" | tee -a "$probe_log"
                 head -n 20 /tmp/probe_output.txt | sed 's/^/[probe]   /' | tee -a "$probe_log"
@@ -146,8 +147,8 @@ jobs:
             
             # 读取示例条目
             local probe_examples="无"
-            if [ -f "/tmp/probe_output.txt" ]; then
-              probe_examples=$(head -n 5 /tmp/probe_output.txt | tr '\n' ',' | sed 's/,$//')
+            if [ -f "/tmp/probe_src.txt" ]; then
+              probe_examples=$(head -n 5 /tmp/probe_src.txt | tr '\n' ',' | sed 's/,$//')
             fi
 
             # 提取关键错误日志 (最后5条错误相关行)
@@ -521,7 +522,7 @@ jobs:
             echo "========== PROBE START: $task_name ==========" | tee -a "$LOG_FILENAME"
 
             local SRC_PROBE_STATUS=0
-            probe_remote "$source_path" "源端" "$LOG_FILENAME" || SRC_PROBE_STATUS=$?
+            probe_remote "$source_path" "源端" "$LOG_FILENAME" "src" || SRC_PROBE_STATUS=$?
             if [ "$SRC_PROBE_STATUS" -ne 0 ]; then
               echo "源端探测失败，跳过同步" | tee -a "$LOG_FILENAME"
               send_log_to_telegram "$LOG_FILENAME" "$task_name" "$SRC_PROBE_STATUS" "probe"
@@ -529,7 +530,7 @@ jobs:
             fi
 
             local DST_PROBE_STATUS=0
-            probe_remote "$dest_path" "目标端" "$LOG_FILENAME" || DST_PROBE_STATUS=$?
+            probe_remote "$dest_path" "目标端" "$LOG_FILENAME" "dst" || DST_PROBE_STATUS=$?
             if [ "$DST_PROBE_STATUS" -ne 0 ]; then
               echo "目标端探测失败，跳过同步" | tee -a "$LOG_FILENAME"
 
@@ -554,6 +555,7 @@ jobs:
             echo "========== SYNC START: $task_name ==========" | tee -a "$LOG_FILENAME"
 
             rclone sync "$source_path" "$dest_path" \
+              "${extra_args[@]}" \
               --progress \
               --stats 15s \
               --stats-one-line \
