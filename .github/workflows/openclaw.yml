@@ -374,7 +374,7 @@ jobs:
           fi
 
           echo "Restarting OpenClaw gateway..."
-          openclaw gateway install --force
+          env -u OPENCLAW_GATEWAY_TOKEN openclaw gateway install --force
           openclaw gateway restart
 
           echo "Waiting for OpenClaw ..."
@@ -388,7 +388,6 @@ jobs:
 
               echo "🛠️ Attempting to fix with 'openclaw doctor --fix'..."
               openclaw doctor --fix
-              openclaw gateway install
               openclaw gateway restart
 
               echo "Waiting for OpenClaw after doctor fix..."
@@ -424,7 +423,7 @@ jobs:
                   fi
 
                   echo "Restarting OpenClaw..."
-                  openclaw gateway install --force
+                  env -u OPENCLAW_GATEWAY_TOKEN openclaw gateway install --force
                   openclaw gateway restart
               fi
           fi
