@@ -243,7 +243,7 @@ jobs:
                   "$([ "$dest_ok" = true ] && echo '• 目标端探测正常' || echo '• 目标端探测失败')" \
                   '🧾 日志信息' \
                   "• 大小：${file_size_human}" \
-                  "• 文件：${remote_log_path:-$log_file}"
+                  "• 关键日志：\n${critical_logs}"
               fi
             else
               printf -v message '%s\n%s\n%s\n\n%s\n\n%s\n%s\n%s\n───' \
