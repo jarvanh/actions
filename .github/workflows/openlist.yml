@@ -683,21 +683,21 @@ jobs:
           source /tmp/functions.sh
           echo "=== 开始同步 0 任务 ==="
           # sync_with_logging "onedrive:0" "openlist:baidupanCrypt/0" "task0"
-          sync_with_logging "onedrive:0" "gd:0" "task0"
+          sync_with_logging "onedrive:0" "gd:0" "task0" --tpslimit 3 --tpslimit-burst 3 --drive-pacer-min-sleep 100ms
 
       - name: Sync task1
         run: |
           source /tmp/functions.sh
           echo "=== 开始同步 1 任务 ==="
           # sync_with_logging "onedrive:1" "openlist:baidupanCrypt/1" "task1"
-          sync_with_logging "onedrive:1" "gd:1" "task1"
+          sync_with_logging "onedrive:1" "gd:1" "task1" --tpslimit 3 --tpslimit-burst 3 --drive-pacer-min-sleep 100ms
 
       - name: Sync task2
         run: |
           source /tmp/functions.sh
           echo "=== 开始同步 2 任务 ==="
           sync_with_logging "onedrive:2" "openlist:aliyundriveCrypt/2" "task2"
-          sync_with_logging "onedrive:2" "gd:2" "task2"
+          sync_with_logging "onedrive:2" "gd:2" "task2" --tpslimit 3 --tpslimit-burst 3 --drive-pacer-min-sleep 100ms
 
       - name: Sync task3
         run: |
