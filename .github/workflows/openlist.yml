@@ -109,9 +109,13 @@ jobs:
 
             # 直接探测目标路径本身，避免无意义的上级回退探测。
             # Probe the target path directly and avoid fallback probing on the parent remote.
-            if timeout 120s rclone lsf "$remote_path" --max-depth 1 --files-only --dirs-only --fast-list > /tmp/probe_ls_$$.txt 2>>"$probe_log"; then
-              echo "[probe] ${probe_label} 可读取，示例条目：" | tee -a "$probe_log"
-              head -n 20 /tmp/probe_ls_$$.txt | sed 's/^/[probe]   /' | tee -a "$probe_log"
+            if timeout 120s rclone lsf "$remote_path" --max-depth 1 --fast-list > /tmp/probe_ls_$$.txt 2>>"$probe_log"; then
+              if [ -s /tmp/probe_ls_$$.txt ]; then
+                echo "[probe] ${probe_label} 可读取，示例条目：" | tee -a "$probe_log"
+                head -n 20 /tmp/probe_ls_$$.txt | sed 's/^/[probe]   /' | tee -a "$probe_log"
+              else
+                echo "[probe] ${probe_label} 探测成功，但目录为空或无匹配内容。" | tee -a "$probe_log"
+              fi
               rm -f /tmp/probe_ls_$$.txt
               return 0
             else
