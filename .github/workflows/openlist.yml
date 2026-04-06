@@ -98,84 +98,112 @@ jobs:
       - name: Setup helper functions - part 1
         run: |
           cat > /tmp/functions_part1.sh << 'EOF'
-          # Probe remote readability before sync.
-          # 同步前探测远端可读性与响应状态。
-          }
-
-          # Send logs to Telegram.
-          # 发送日志到 Telegram。
-          send_log_to_telegram() {
-            local log_file="$1"
-            local task_name="$2"
-            local exit_code="$3"
-            local log_type="${4:-sync}"
-            local source_info="${5:-未知}"
-            local dest_info="${6:-未知}"
-
-            local critical_logs="无"
-            if [ -f "$log_file" ]; then
-              critical_logs=$(grep -Ei "error|failed|too large|timeout|permission denied|connection refused" "$log_file" | tail -n 5 || echo "无明显错误关键字")
-            fi
-
-            local source_size_human="未知"
-            local size_output=$(rclone size "$source_info" 2>/dev/null || true)
-            if [ -n "$size_output" ]; then
-                source_size_human=$(echo "$size_output" | sed -n 's/^Total size:[[:space:]]*//p' | head -n 1)
-            fi
-
-            local file_size=$(stat -c%s "$log_file" 2>/dev/null || echo 0)
-            local file_size_human=$(numfmt --to=iec-i --suffix=B "$file_size" 2>/dev/null || echo "${file_size}B")
-
-            local message
-            printf -v message '%s\n%s\n%s\n\n%s\n%s\n%s\n%s\n\n%s\n%s\n%s' \
-                "⚠️ ${task_name} 同步告警" \
-                '━━━━━━━━━━━━━━' \
-                '状态：部份文件同步失败' \
-                '📁 任务信息' \
-                "• 任务：${task_name}" \
-                "• 源端：${source_info}" \
-                "• 目标：${dest_info}" \
-                '🧾 错误详情' \
-                "• 大小：${file_size_human}" \
-                "• 关键日志：\n${critical_logs}"
-
-            curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
-              -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
-              --data-urlencode text="$message" || true
-
-            if [ "$file_size" -gt 0 ] && [ "$file_size" -lt 50000000 ]; then
-              curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendDocument \
-                -F chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
-                -F document=@"$log_file" \
-                -F caption="📁 ${task_name} 错误日志" || true
-            fi
-          }
-
-          # Check whether log has useful content.
-          # 检查日志是否有实际内容（不只是统计行）。
-          has_real_content() {
-            local log_file="$1"
-            if [ ! -f "$log_file" ] || [ ! -s "$log_file" ]; then
-              echo "empty"
-              return
-            fi
-
-            local log_content=$(grep -v "^Transferred:\|^Checks:\|^Elapsed time:\|^ *$" "$log_file" 2>/dev/null | head -20)
-            if [ -z "$log_content" ]; then
-              echo "transfer_only"
-            else
-              echo "has_content"
-            fi
-          }
-
-          # Append video split logs.
-          # 记录视频分割日志。
-          log_video_split() {
-            local log_file="$1"
-            local message="$2"
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] $message" >> "$log_file"
-            echo "$message"
-          }
+                    send_log_to_telegram() {
+                      local log_file="$1"
+                      local task_name="$2"
+                      local exit_code="$3"
+                      local log_type="${4:-sync}"
+                      local source_info="${5:-未知}"
+                      local dest_info="${6:-未知}"
+                      local critical_logs="无"
+                      if [ -f "$log_file" ]; then
+                        critical_logs=$(grep -Ei "error|failed|too large|timeout|permission denied|connection refused" "$log_file" | tail -n 5 || echo "无明显错误关键字")
+                      fi
+                      local source_size_human="未知"
+                      local size_output=$(rclone size "$source_info" 2>/dev/null || true)
+                      if [ -n "$size_output" ]; then
+                          source_size_human=$(echo "$size_output" | sed -n 's/^Total size:[[:space:]]*//p' | head -n 1)
+                      fi
+                      local file_size=$(stat -c%s "$log_file" 2>/dev/null || echo 0)
+                      local file_size_human=$(numfmt --to=iec-i --suffix=B "$file_size" 2>/dev/null || echo "${file_size}B")
+                      local message
+                      printf -v message '%s\n%s\n%s\n\n%s\n%s\n%s\n%s\n\n%s\n%s\n%s' \
+                          "⚠️ ${task_name} 同步告警" \
+                          '━━━━━━━━━━━━━━' \
+                          '状态：部份文件同步失败' \
+                          '📁 任务信息' \
+                          "• 任务：${task_name}" \
+                          "• 源端：${source_info}" \
+                          "• 目标：${dest_info}" \
+                          '🧾 错误详情' \
+                          "• 大小：${file_size_human}" \
+                          "• 关键日志：\n${critical_logs}"
+                      curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
+                        -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
+                        --data-urlencode text="$message" || true
+                      if [ "$file_size" -gt 0 ] && [ "$file_size" -lt 50000000 ]; then
+                        curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendDocument \
+                          -F chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
+                          -F document=@"$log_file" \
+                          -F caption="📁 ${task_name} 错误日志" || true
+                      fi
+                    }
+                    has_real_content() {
+                      local log_file="$1"
+                      if [ ! -f "$log_file" ] || [ ! -s "$log_file" ]; then
+                        echo "empty"
+                        return
+                      fi
+                      local log_content=$(grep -v "^Transferred:\|^Checks:\|^Elapsed time:\|^ *$" "$log_file" 2>/dev/null | head -20)
+                      if [ -z "$log_content" ]; then
+                        echo "transfer_only"
+                      else
+                        echo "has_content"
+                      fi
+                    }
+                    log_video_split() {
+                      local log_file="$1"
+                      local message="$2"
+                      echo "[$(date '+%Y-%m-%d %H:%M:%S')] $message" >> "$log_file"
+                      echo "$message"
+                    }
+                    sync_with_logging() {
+                      local source_path="$1"
+                      local dest_path="$2"
+                      local task_name="$3"
+                      shift 3
+                      local extra_args=("$@")
+                      local TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+                      local LOG_FILENAME="${task_name}_sync_${TIMESTAMP}.log"
+                      echo "开始同步: $source_path -> $dest_path"
+                      rclone sync "$source_path" "$dest_path" \
+                        "${extra_args[@]}" \
+                        --progress \
+                        --stats 15s \
+                        --stats-one-line \
+                        --ignore-errors \
+                        --verbose \
+                        --timeout 10m \
+                        --contimeout 30s \
+                        --retries 3 \
+                        --low-level-retries 3 \
+                        2>&1 | tee "$LOG_FILENAME"
+                      local SYNC_STATUS=${PIPESTATUS[0]}
+                      if [ "$SYNC_STATUS" -ne 0 ] || grep -Eqi '(^|[^[:alpha:]])(ERROR|Error|Failed|failed|timeout|forbidden|unauthorized|permission denied|connection refused)([^[:alpha:]]|$)' "$LOG_FILENAME"; then
+                        send_log_to_telegram "$LOG_FILENAME" "$task_name" "$SYNC_STATUS" "sync" "$source_path" "$dest_path"
+                        process_failed_videos "$LOG_FILENAME" "onedrive" "$task_name"
+                      else
+                        local source_size_human="未知"
+                        local size_output=$(rclone size "$source_path" 2>/dev/null || true)
+                        if [ -n "$size_output" ]; then
+                          source_size_human=$(echo "$size_output" | sed -n 's/^Total size:[[:space:]]*//p' | head -n 1)
+                        fi
+                        local ok_message
+                        printf -v ok_message '%s\n%s\n%s\n\n%s\n%s\n%s\n%s' \
+                          "✅ ${task_name} 同步完成" \
+                          '━━━━━━━━━━━━━━' \
+                          "源端大小：${source_size_human}" \
+                          '📁 任务信息' \
+                          "• 任务：${task_name}" \
+                          "• 源端：${source_path}" \
+                          "• 目标：${dest_path}"
+                        curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
+                          -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
+                          --data-urlencode text="$ok_message" || true
+                      fi
+                      rm -f "$LOG_FILENAME" 2>/dev/null || true
+                      return 0
+                    }
           EOF
 
       - name: Setup helper functions - part 2
