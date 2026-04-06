@@ -214,27 +214,7 @@ jobs:
                 "• 文件：${remote_log_path:-$log_file}"
             elif [ "$exit_code" -ne 0 ] || [ "$has_real_failure" = true ]; then
               if [ "$source_ok" = true ] && [ "$dest_ok" = true ]; then
-                printf -v message '%s
-%s
-%s
-%s
-
-%s
-
-%s
-%s
-%s
-
-%s
-%s
-%s
-%s
-
-%s
-%s
-%s
-%s
-───' \
+                printf -v message '%s\n%s\n%s\n%s\n\n%s\n\n%s\n%s\n%s\n\n%s\n%s\n%s\n%s\n\n%s\n%s\n%s\n%s\n───' \
                   "⚠️ ${task_title} 同步告警" \
                   '━━━━━━━━━━━━━━' \
                   '状态：部份文件同步失败' \
@@ -249,8 +229,7 @@ jobs:
                   '• 目标端探测正常' \
                   '🧾 日志信息' \
                   "• 大小：${file_size_human}" \
-                  "• 关键日志：
-${critical_logs}"
+                  "• 关键日志：\n${critical_logs}"
               else
                 printf -v message '%s\n%s\n\n%s\n%s\n%s\n\n%s\n%s\n%s\n\n%s\n%s\n%s\n───' \
                   "❌ ${task_title} 同步失败" \
