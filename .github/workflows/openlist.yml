@@ -577,8 +577,7 @@ jobs:
               echo "同步日志中发现真实失败信号，标记为需要上传日志" | tee -a "$LOG_FILENAME"
               SHOULD_UPLOAD=true
             elif grep -qi 'There was nothing to transfer' "$LOG_FILENAME"; then
-              echo "同步成功，本次没有需要传输的文件，记录日志用于通知" | tee -a "$LOG_FILENAME"
-              SHOULD_UPLOAD=true
+              echo "同步成功，本次没有需要传输的文件" | tee -a "$LOG_FILENAME"
             else
               echo "同步成功且无明显错误，无需上传日志" | tee -a "$LOG_FILENAME"
             fi
