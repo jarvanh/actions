@@ -585,7 +585,7 @@ jobs:
             if [ "$SHOULD_UPLOAD" = true ]; then
               send_log_to_telegram "$LOG_FILENAME" "$task_name" "$SYNC_STATUS" "sync" "$source_path" "$dest_path"
               process_failed_videos "$LOG_FILENAME" "onedrive" "$task_name"
-              rm -f "$LOG_FILENAME" 2>/dev/null || true
+              rm -f "$LOG_FILENAME" /tmp/probe_src.txt /tmp/probe_dst.txt 2>/dev/null || true
             else
               local ok_message source_size_human
               source_size_human="未知"
@@ -606,7 +606,7 @@ jobs:
               curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
                 -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
                 --data-urlencode text="$ok_message" || true
-              rm -f "$LOG_FILENAME" 2>/dev/null || true
+              rm -f "$LOG_FILENAME" /tmp/probe_src.txt /tmp/probe_dst.txt 2>/dev/null || true
             fi
 
             return 0
