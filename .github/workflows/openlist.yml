@@ -659,7 +659,12 @@ jobs:
         run: |
           source /tmp/functions.sh
           echo "=== 开始同步 backup 任务 ==="
-          sync_with_logging             "onedrive:backup"             "openlist:aliyundriveCrypt/backup"             "backup"             --exclude "notion/**"
+                    sync_with_logging \
+            "onedrive:backup" \
+            "openlist:aliyundriveCrypt/backup" \
+            "backup" \
+            --exclude "/notion/**" \
+            --exclude "notion/**"
 
       - name: Sync task0
         run: |
