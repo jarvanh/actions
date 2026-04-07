@@ -240,15 +240,18 @@ jobs:
           # 1. 确保云端的持久化目录存在（配置继续保存在 ~/.openclaw）
           mkdir -p /dropbox/self-hosted/openclaw/browser
           mkdir -p /dropbox/self-hosted/openclaw/tmp_workspace
+          mkdir -p /dropbox/self-hosted/openclaw/tasks
 
           # 2. 建立本地临时高速目录，用于存放高频 I/O 数据
           mkdir -p /tmp/local_browser
           mkdir -p /tmp/tmp_workspace
+          mkdir -p /tmp/local_tasks
           mkdir -p /home/runner/openclaw-safe-plugins
 
-          # 3. 使用 bind mount 将 browser/tmp_workspace 挂载到本地目录，阻断高频 I/O 同步
+          # 3. 使用 bind mount 将 browser/tmp_workspace/tasks 挂载到本地目录，阻断高频 I/O 同步
           sudo mount --bind /tmp/local_browser /dropbox/self-hosted/openclaw/browser
           sudo mount --bind /tmp/tmp_workspace /dropbox/self-hosted/openclaw/tmp_workspace
+          sudo mount --bind /tmp/local_tasks /dropbox/self-hosted/openclaw/tasks
 
           # 4. 创建 ~/.openclaw 软链接指向云端主目录
           rm -rf ~/.openclaw
@@ -298,7 +301,23 @@ jobs:
             shopt -u dotglob nullglob
           fi
 
-          # 7. 拉取 openclaw-safe-plugins 逻辑
+          # 7. 拉取 tasks 逻辑
+          if rclone ls dropbox:self-hosted/openclaw/tasks.tar.gz > /dev/null 2>&1; then
+            echo "📦 Found tasks.tar.gz! Downloading and extracting..."
+            rclone copyto dropbox:self-hosted/openclaw/tasks.tar.gz /tmp/tasks.tar.gz
+            actual_size=$(stat -c%s /tmp/tasks.tar.gz 2>/dev/null || echo 0)
+            if [ "$actual_size" -ge "$MIN_SIZE" ] && tar -tzf /tmp/tasks.tar.gz >/dev/null 2>&1; then
+              tar -xzf /tmp/tasks.tar.gz -C /tmp/local_tasks
+            else
+              echo "⚠️ tasks.tar.gz validation failed, skipping restore."
+            fi
+            sudo rm -f /tmp/tasks.tar.gz
+          else
+            echo "⚠️ No tasks archive found. Falling back to sync from raw directory..."
+            rclone copy dropbox:self-hosted/openclaw/tasks /tmp/local_tasks
+          fi
+
+          # 8. 拉取 openclaw-safe-plugins 逻辑
           if rclone ls dropbox:self-hosted/openclaw/openclaw-safe-plugins.tar.gz > /dev/null 2>&1; then
             echo "📦 Found openclaw-safe-plugins.tar.gz! Downloading and extracting..."
             rclone copyto dropbox:self-hosted/openclaw/openclaw-safe-plugins.tar.gz /tmp/openclaw-safe-plugins.tar.gz
@@ -318,6 +337,8 @@ jobs:
           FINAL_BROWSER_TAR="/dropbox/self-hosted/openclaw/browser.tar.gz"
           TMP_WORKSPACE_TAR="/tmp/tmp-workspace-backup.tar.gz"
           FINAL_WORKSPACE_TAR="/dropbox/self-hosted/openclaw/tmp_workspace.tar.gz"
+          TMP_TASKS_TAR="/tmp/tasks-backup.tar.gz"
+          FINAL_TASKS_TAR="/dropbox/self-hosted/openclaw/tasks.tar.gz"
           TMP_SAFE_PLUGINS_TAR="/tmp/openclaw-safe-plugins-backup.tar.gz"
           FINAL_SAFE_PLUGINS_TAR="/dropbox/self-hosted/openclaw/openclaw-safe-plugins.tar.gz"
           TMP_CLIPROXYAPI_TAR="/tmp/CLIProxyAPI-backup.tar.gz"
@@ -339,6 +360,15 @@ jobs:
           else
             echo "⚠️ tmp_workspace backup archive failed validation; skip promote."
             sudo rm -f "$TMP_WORKSPACE_TAR"
+          fi
+
+          sudo tar -czf "$TMP_TASKS_TAR" -C /tmp/local_tasks .
+          tasks_size=$(stat -c%s "$TMP_TASKS_TAR" 2>/dev/null || echo 0)
+          if [ "$tasks_size" -ge "$MIN_SIZE" ] && sudo tar -tzf "$TMP_TASKS_TAR" >/dev/null 2>&1; then
+            sudo mv -f "$TMP_TASKS_TAR" "$FINAL_TASKS_TAR"
+          else
+            echo "⚠️ tasks backup archive failed validation; skip promote."
+            sudo rm -f "$TMP_TASKS_TAR"
           fi
 
           sudo tar -czf "$TMP_SAFE_PLUGINS_TAR" -C /home/runner/openclaw-safe-plugins .
@@ -441,7 +471,7 @@ jobs:
               fi
           fi
 
-          # 后台每 2 分钟导出 CLIProxyAPI 统计，并打包 browser/tmp_workspace/openclaw-safe-plugins/CLIProxyAPI 同步回 Dropbox
+          # 后台每 2 分钟导出 CLIProxyAPI 统计，并打包 browser/tmp_workspace/tasks/openclaw-safe-plugins/CLIProxyAPI 同步回 Dropbox
           echo "Starting background sync tasks: export CLIProxyAPI stats + archive local directories -> Dropbox (every 120s)..."
           nohup bash -c 'while true; do
             MIN_SIZE=$((512 * 1024)) # 512KB
@@ -481,6 +511,15 @@ jobs:
               actual_size=$(stat -c%s /tmp/tmp_workspace.tar.gz 2>/dev/null || echo 0)
               if [ "$actual_size" -ge "$MIN_SIZE" ]; then
                 rclone copyto /tmp/tmp_workspace.tar.gz dropbox:self-hosted/openclaw/tmp_workspace.tar.gz
+              fi
+            fi
+
+            # 备份 tasks
+            sudo tar -czf /tmp/tasks.tar.gz -C /tmp/local_tasks .
+            if sudo tar -tzf /tmp/tasks.tar.gz >/dev/null 2>&1; then
+              actual_size=$(stat -c%s /tmp/tasks.tar.gz 2>/dev/null || echo 0)
+              if [ "$actual_size" -ge "$MIN_SIZE" ]; then
+                rclone copyto /tmp/tasks.tar.gz dropbox:self-hosted/openclaw/tasks.tar.gz
               fi
             fi
 
@@ -542,7 +581,7 @@ jobs:
           sleep 3m
 
           echo "2. Killing background sync process..."
-          pkill -f "CLIProxyAPI.tar.gz\|browser.tar.gz\|tmp_workspace.tar.gz\|openclaw-safe-plugins.tar.gz" || echo "Background sync not running."
+          pkill -f "CLIProxyAPI.tar.gz\|browser.tar.gz\|tmp_workspace.tar.gz\|tasks.tar.gz\|openclaw-safe-plugins.tar.gz" || echo "Background sync not running."
 
           echo "3. Performing final archive and sync to Dropbox..."
           MIN_SIZE=$((512 * 1024)) # 512KB
@@ -576,6 +615,17 @@ jobs:
             fi
           fi
 
+          # 打包并上传 tasks
+          sudo tar -czf /tmp/tasks.tar.gz -C /tmp/local_tasks .
+          if sudo tar -tzf /tmp/tasks.tar.gz >/dev/null 2>&1; then
+            actual_size=$(stat -c%s /tmp/tasks.tar.gz 2>/dev/null || echo 0)
+            if [ "$actual_size" -ge "$MIN_SIZE" ]; then
+              rclone copyto /tmp/tasks.tar.gz dropbox:self-hosted/openclaw/tasks.tar.gz -v
+            else
+              echo "⚠️ tasks 压缩包小于 512KB，放弃覆盖云端数据"
+            fi
+          fi
+
           # 打包并上传 openclaw-safe-plugins
           sudo tar -czf /tmp/openclaw-safe-plugins.tar.gz -C /home/runner/openclaw-safe-plugins .
           if sudo tar -tzf /tmp/openclaw-safe-plugins.tar.gz >/dev/null 2>&1; then
@@ -605,3 +655,4 @@ jobs:
           echo "4. Unmounting local directories..."
           sudo umount /dropbox/self-hosted/openclaw/browser || true
           sudo umount /dropbox/self-hosted/openclaw/tmp_workspace || true
+          sudo umount /dropbox/self-hosted/openclaw/tasks || true
