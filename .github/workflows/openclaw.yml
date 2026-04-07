@@ -548,12 +548,20 @@ jobs:
           
       - name: Run tmate
         if: always()
-        timeout-minutes: 340
+        timeout-minutes: 360
         uses: mxschmitt/action-tmate@v3
         with:
           detached: true
           install-dependencies: true
           limit-access-to-actor: true
+          tmate-server-host: ssh.tmate.io
+          tmate-server-port: 22
+          # 在容器启动后自动注入鼠标和滚动支持配置
+          setup-tmate-config: |
+            set -g mouse on
+            set -g history-limit 50000
+            set -g status-keys vi
+            setw -g mode-keys vi
 
       - name: Keep alive
         if: always()
