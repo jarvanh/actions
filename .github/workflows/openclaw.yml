@@ -550,7 +550,7 @@ jobs:
             sleep 120
           done' > /dev/null 2>&1 &
 
-          sleep 5m
+          sleep 10m
           
       - name: Run tmate
         if: always()
@@ -562,7 +562,7 @@ jobs:
 
       - name: Keep alive
         if: always()
-        run: sleep 340m
+        run: sleep 330m
 
       - name: Stop OpenClaw and Final Sync
         if: always()
