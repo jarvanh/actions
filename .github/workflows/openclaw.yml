@@ -387,7 +387,7 @@ jobs:
           fi
 
           echo "Restarting OpenClaw gateway..."
-          env -u OPENCLAW_GATEWAY_TOKEN openclaw gateway install --force
+          openclaw gateway install --force
           openclaw gateway restart
 
           echo "Waiting for OpenClaw ..."
@@ -436,7 +436,7 @@ jobs:
                   fi
 
                   echo "Restarting OpenClaw..."
-                  env -u OPENCLAW_GATEWAY_TOKEN openclaw gateway install --force
+                  openclaw gateway install --force
                   openclaw gateway restart
               fi
           fi
