@@ -12,6 +12,11 @@ jobs:
     steps:
       - name: Setup Node.js
         uses: actions/setup-node@v6
+      - name: Force system Node to latest version
+        run: |
+          sudo ln -sf $(which node) /usr/local/bin/node
+          node -v
+          /usr/local/bin/node -v
         with:
           node-version: 'current' # 始终使用官方发布的最新版
 
