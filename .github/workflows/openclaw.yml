@@ -539,6 +539,7 @@ jobs:
 
           echo "1. Stopping OpenClaw gateway..."
           openclaw gateway stop || echo "OpenClaw already stopped or command failed."
+          sleep 3m
 
           echo "2. Killing background sync process..."
           pkill -f "CLIProxyAPI.tar.gz\|browser.tar.gz\|tmp_workspace.tar.gz\|openclaw-safe-plugins.tar.gz" || echo "Background sync not running."
