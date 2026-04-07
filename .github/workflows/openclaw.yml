@@ -97,6 +97,19 @@ jobs:
           sleep 10
           echo $! > /dropbox/self-hosted/openclaw/logs/cloudflared_oc.pid
 
+      - name: Run rss-to-telegram container
+        run: |
+          echo "Starting rss-to-telegram before CLIProxyAPI..."
+          mkdir -p /dropbox/self-hosted/rsstt
+          if [ -f /dropbox/self-hosted/rsstt/docker-compose.yml ] && [ -f /dropbox/self-hosted/openclaw/.env ]; then
+            cd /dropbox/self-hosted/rsstt
+            docker rm -f rss-to-telegram 2>/dev/null || true
+            docker compose --env-file /dropbox/self-hosted/openclaw/.env up -d rss-to-telegram
+            docker compose ps rss-to-telegram || true
+          else
+            echo "⚠️ rsstt compose or env file not found, skipping rss-to-telegram startup."
+          fi
+
       - name: Run CLIProxyAPI container
         run: |
           echo "Configuring local high-speed CLIProxyAPI directory..."
