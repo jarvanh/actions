@@ -415,7 +415,7 @@ jobs:
 
       - name: Run OpenClaw
         run: |
-          npm i -g "openclaw@2026.4.5"
+          # npm i -g "openclaw@2026.4.5"
           echo "🔧 Fixing file permissions to pass security checks..."
           sudo chmod -R o-w $(npm root -g)
           sudo chmod 700 ~/.openclaw
