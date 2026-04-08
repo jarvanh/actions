@@ -416,6 +416,13 @@ jobs:
       - name: Run OpenClaw
         run: |
           # npm i -g "openclaw@2026.4.5"
+          check_openclaw_health() {
+            if sudo lsof -Pi :18789 -sTCP:LISTEN -t >/dev/null                && [ "$(curl -fsS -o /dev/null -w "%{http_code}" --max-time 5 http://127.0.0.1:18789/health || true)" = "200" ]; then
+              return 0
+            fi
+            return 1
+          }
+
           echo "🔧 Fixing file permissions to pass security checks..."
           sudo chmod -R o-w $(npm root -g)
           sudo chmod 700 ~/.openclaw
@@ -430,10 +437,10 @@ jobs:
           echo "Waiting for OpenClaw ..."
           sleep 10
 
-          if sudo lsof -Pi :18789 -sTCP:LISTEN -t >/dev/null ; then
-              echo "✅ OpenClaw Gateway is running!"
+          if check_openclaw_health; then
+              echo "✅ OpenClaw Gateway is healthy!"
           else
-              echo "⚠️ Gateway not responding yet. Checking logs:"
+              echo "⚠️ Gateway not healthy yet. Checking logs:"
               tail -n 20 openclaw.log || echo "No log file found."
 
               echo "🛠️ Attempting to fix with 'openclaw doctor --fix'..."
@@ -443,24 +450,26 @@ jobs:
               echo "Waiting for OpenClaw after doctor fix..."
               sleep 15
 
-              if sudo lsof -Pi :18789 -sTCP:LISTEN -t >/dev/null ; then
-                  echo "✅ OpenClaw Gateway is running after doctor fix!"
+              if check_openclaw_health; then
+                  echo "✅ OpenClaw Gateway is healthy after doctor fix!"
               else
-                  echo "🔄 Doctor fix failed. Attempting to fallback and reinstall specific OpenClaw version..."
+                  echo "🔄 Doctor fix failed. Attempting to fallback and reinstall recorded OpenClaw version..."
 
                   CONFIG_FILE="/dropbox/self-hosted/openclaw/openclaw.json"
-                  TARGET_VERSION="latest"
+                  TARGET_VERSION=""
 
                   if [ -s "$CONFIG_FILE" ]; then
                     READ_VERSION=$(sudo jq -r '.wizard.lastRunVersion // empty' "$CONFIG_FILE" 2>/dev/null)
-                    if [ -n "$READ_VERSION" ]; then
+                    if [ -n "$READ_VERSION" ] && [ "$READ_VERSION" != "null" ]; then
                       TARGET_VERSION="$READ_VERSION"
-                      echo "✅ Found version in config: $TARGET_VERSION"
+                      echo "✅ Found recorded version in config: $TARGET_VERSION"
                     else
-                      echo "⚠️ Version key not found in JSON, using fallback: $TARGET_VERSION"
+                      echo "❌ .wizard.lastRunVersion not found in $CONFIG_FILE"
+                      exit 1
                     fi
                   else
-                    echo "⚠️ Config file STILL not found or empty at $CONFIG_FILE. Using fallback: $TARGET_VERSION"
+                    echo "❌ Config file missing or empty at $CONFIG_FILE"
+                    exit 1
                   fi
 
                   echo "Installing openclaw@$TARGET_VERSION ..."
@@ -475,6 +484,16 @@ jobs:
                   echo "Restarting OpenClaw..."
                   openclaw gateway install --force
                   openclaw gateway restart
+
+                  echo "Waiting for OpenClaw after fallback reinstall..."
+                  sleep 15
+
+                  if check_openclaw_health; then
+                    echo "✅ OpenClaw Gateway is healthy after fallback reinstall!"
+                  else
+                    echo "❌ OpenClaw is still unhealthy after fallback reinstall."
+                    exit 1
+                  fi
               fi
           fi
 
