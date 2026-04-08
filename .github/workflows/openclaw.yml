@@ -552,6 +552,10 @@ jobs:
 
           sleep 10m
           
+      - name: Configure tmate (Enable Mouse Mode)
+        if: always()
+        run: echo "set -g mouse on" > ~/.tmate.conf
+          
       - name: Run tmate
         if: always()
         uses: mxschmitt/action-tmate@v3
