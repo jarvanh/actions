@@ -582,8 +582,6 @@ jobs:
 
             sleep 120
           done' > /dev/null 2>&1 &
-
-          sleep 10m
           
       - name: Configure tmate (Enable Mouse Mode)
         if: always()
