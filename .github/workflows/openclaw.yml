@@ -123,9 +123,6 @@ jobs:
           rm -rf /tmp/local_CLIProxyAPI
           mkdir -p /tmp/local_CLIProxyAPI
 
-          # 优先恢复独立 stats.json，降低大压缩包损坏对统计恢复的影响
-          rclone copyto dropbox:self-hosted/CLIProxyAPI/stats.json /tmp/local_CLIProxyAPI/stats.json 2>/dev/null || true
-
           # 优先从压缩包恢复；没有压缩包时再回退为目录同步
           if rclone ls dropbox:self-hosted/CLIProxyAPI.tar.gz > /dev/null 2>&1; then
             echo "📦 Found CLIProxyAPI.tar.gz! Downloading and extracting..."
@@ -151,9 +148,6 @@ jobs:
             rmdir /tmp/local_CLIProxyAPI/local_CLIProxyAPI || true
             shopt -u dotglob nullglob
           fi
-
-          # 再次覆盖 stats.json：单文件优先级高于压缩包内版本
-          rclone copyto dropbox:self-hosted/CLIProxyAPI/stats.json /tmp/local_CLIProxyAPI/stats.json 2>/dev/null || true
 
           # 【防崩溃机制】在宿主机提前创建好文件和目录，防止 Docker 误建文件夹
           mkdir -p /tmp/local_CLIProxyAPI/auth-dir
@@ -298,10 +292,6 @@ jobs:
             rm -f "$tmp_config"
           fi
 
-          if [ -s /tmp/local_CLIProxyAPI/stats.json ] && jq empty /tmp/local_CLIProxyAPI/stats.json >/dev/null 2>&1; then
-            rclone copyto /tmp/local_CLIProxyAPI/stats.json dropbox:self-hosted/CLIProxyAPI/stats.json || true
-          fi
-
           mkdir -p ~/.gemini
           chmod 700 ~/.gemini
           npm install -g @google/gemini-cli
@@ -422,17 +412,6 @@ jobs:
           archive_openclaw() {
             rm -f "$TMP_OPENCLAW_TAR"
 
-            if curl -fsS -X GET "http://127.0.0.1:8317/v0/management/usage/export" \
-              -H "X-Management-Key: ${{ secrets.CLIPROXYAPIKEY }}" \
-              -o /tmp/local_CLIProxyAPI/stats.json.tmp; then
-              mv -f /tmp/local_CLIProxyAPI/stats.json.tmp /tmp/local_CLIProxyAPI/stats.json
-              if [ -s /tmp/local_CLIProxyAPI/stats.json ] && jq empty /tmp/local_CLIProxyAPI/stats.json >/dev/null 2>&1; then
-                rclone copyto /tmp/local_CLIProxyAPI/stats.json dropbox:self-hosted/CLIProxyAPI/stats.json || true
-              fi
-            else
-              rm -f /tmp/local_CLIProxyAPI/stats.json.tmp
-            fi
-
             tar -czf "$TMP_OPENCLAW_TAR" \
               -C /home/runner \
               --exclude='.openclaw/logs' \
@@ -489,20 +468,6 @@ jobs:
       - name: Stop OpenClaw and Final Archive
         if: always()
         run: |
-          echo "💾 正在通过 API 导出 CLIProxyAPI 统计数据到本地缓存..."
-          if curl -fsS -X GET "http://127.0.0.1:8317/v0/management/usage/export" \
-              -H "X-Management-Key: ${{ secrets.CLIPROXYAPIKEY }}" \
-              -o /tmp/local_CLIProxyAPI/stats.json.tmp; then
-            mv -f /tmp/local_CLIProxyAPI/stats.json.tmp /tmp/local_CLIProxyAPI/stats.json
-            if [ -s /tmp/local_CLIProxyAPI/stats.json ] && jq empty /tmp/local_CLIProxyAPI/stats.json >/dev/null 2>&1; then
-              rclone copyto /tmp/local_CLIProxyAPI/stats.json dropbox:self-hosted/CLIProxyAPI/stats.json || true
-            fi
-          else
-            echo "⚠️ 导出请求失败"
-            rm -f /tmp/local_CLIProxyAPI/stats.json.tmp
-          fi
-          echo "✅ 统计数据存档指令已执行。"
-
           echo "1. Stopping OpenClaw gateway..."
           openclaw gateway stop || echo "OpenClaw already stopped or command failed."
           sleep 3m
@@ -556,8 +521,4 @@ jobs:
             else
               echo "⚠️ CLIProxyAPI 压缩包小于 128KB，放弃覆盖云端数据"
             fi
-          fi
-
-          if [ -s /tmp/local_CLIProxyAPI/stats.json ] && jq empty /tmp/local_CLIProxyAPI/stats.json >/dev/null 2>&1; then
-            rclone copyto /tmp/local_CLIProxyAPI/stats.json dropbox:self-hosted/CLIProxyAPI/stats.json -v || true
           fi
