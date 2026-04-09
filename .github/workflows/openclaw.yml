@@ -65,21 +65,6 @@ jobs:
             sleep 2
           done
 
-          # 确保云端主目录存在
-          sudo mkdir -p /dropbox/self-hosted/openclaw
-          # 确保存放数据的 CLIProxyAPI 目录存在
-          sudo mkdir -p /dropbox/self-hosted/CLIProxyAPI
-          # 确保统计文件目录存在
-          rclone mkdir dropbox:self-hosted/CLIProxyAPI || true
-          rclone mkdir dropbox:self-hosted/openclaw || true
-
-          if ! mount | grep -q " on /dropbox "; then
-            echo "❌ Dropbox mount failed"
-            exit 1
-          fi
-
-          rclone lsd dropbox: >/dev/null
-
       - name: Install Cloudflared
         run: |
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
