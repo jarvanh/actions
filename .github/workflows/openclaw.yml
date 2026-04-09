@@ -252,8 +252,10 @@ jobs:
           rm -rf "$RESTORE_DIR"
           mkdir -p "$RESTORE_DIR"
 
-          echo "📦 Trying to restore ~/.openclaw from dropbox:self-hosted/openclaw.tar.gz ..."
-          if rclone copyto dropbox:self-hosted/openclaw.tar.gz "$TMP_OPENCLAW_TAR"; then
+          echo "📦 Restoring ~/.openclaw: prefer archive, fallback to raw directory sync..."
+          if rclone ls dropbox:self-hosted/openclaw.tar.gz > /dev/null 2>&1; then
+            echo "📦 Found openclaw.tar.gz! Downloading and extracting..."
+            rclone copyto dropbox:self-hosted/openclaw.tar.gz "$TMP_OPENCLAW_TAR"
             if [ -s "$TMP_OPENCLAW_TAR" ] && tar -tzf "$TMP_OPENCLAW_TAR" >/dev/null 2>&1; then
               tar -xzf "$TMP_OPENCLAW_TAR" -C "$RESTORE_DIR"
               if [ -d "$RESTORE_DIR/.openclaw" ]; then
@@ -261,13 +263,21 @@ jobs:
                 cp -a "$RESTORE_DIR/.openclaw/." /home/runner/.openclaw/
                 echo "✅ Restored ~/.openclaw from archive"
               else
-                echo "⚠️ Archive does not contain .openclaw root, skip restore."
+                echo "⚠️ Archive does not contain .openclaw root, skipping archive restore."
               fi
             else
-              echo "⚠️ openclaw.tar.gz validation failed, skip restore."
+              echo "⚠️ openclaw.tar.gz validation failed, skipping archive restore."
             fi
+            rm -f "$TMP_OPENCLAW_TAR"
           else
-            echo "ℹ️ No openclaw.tar.gz found, continuing with fresh local ~/.openclaw"
+            echo "⚠️ No openclaw archive found. Falling back to sync from raw directory..."
+            rclone copy dropbox:self-hosted/openclaw /home/runner/.openclaw \
+              --retries 10 \
+              --low-level-retries 20 \
+              --timeout 1m \
+              --contimeout 15s \
+              --exclude "logs/**" \
+              -P || true
           fi
 
           rm -f /home/runner/.openclaw/openclaw.json
