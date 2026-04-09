@@ -244,7 +244,7 @@ jobs:
           echo "Configuring local ~/.openclaw with Dropbox-linked config..."
           mkdir -p /dropbox/self-hosted/openclaw
           mkdir -p /home/runner/.openclaw
-          mkdir -p /home/runner/openclaw-safe-plugins
+          mkdir -p /home/runner/.openclaw/extensions
 
           TMP_OPENCLAW_TAR="/tmp/openclaw.tar.gz"
           RESTORE_DIR="/tmp/openclaw-restore"
@@ -276,18 +276,16 @@ jobs:
           rm -f /home/runner/.openclaw/.env
           ln -s /dropbox/self-hosted/openclaw/.env /home/runner/.openclaw/.env
 
-          if rclone ls dropbox:self-hosted/openclaw/openclaw-safe-plugins.tar.gz > /dev/null 2>&1; then
-            echo "📦 Found openclaw-safe-plugins.tar.gz! Downloading and extracting..."
-            rclone copyto dropbox:self-hosted/openclaw/openclaw-safe-plugins.tar.gz /tmp/openclaw-safe-plugins.tar.gz
-            actual_size=$(stat -c%s /tmp/openclaw-safe-plugins.tar.gz 2>/dev/null || echo 0)
-            if [ "$actual_size" -ge $((512 * 1024)) ] && tar -tzf /tmp/openclaw-safe-plugins.tar.gz >/dev/null 2>&1; then
-              tar -xzf /tmp/openclaw-safe-plugins.tar.gz -C /home/runner/openclaw-safe-plugins
+          if [ -f /home/runner/.openclaw/openclaw.json ]; then
+            tmp_config=$(mktemp)
+            if jq '.plugins.load.paths = ["/home/runner/.openclaw/extensions"]' /home/runner/.openclaw/openclaw.json > "$tmp_config"; then
+              cat "$tmp_config" > /home/runner/.openclaw/openclaw.json
+              chmod 600 /home/runner/.openclaw/openclaw.json || true
+              echo "✅ Updated plugin load path to /home/runner/.openclaw/extensions"
             else
-              echo "⚠️ openclaw-safe-plugins.tar.gz validation failed, skipping plugin restore."
+              echo "⚠️ Failed to patch plugin load path in openclaw.json"
             fi
-            rm -f /tmp/openclaw-safe-plugins.tar.gz
-          else
-            echo "⚠️ No openclaw-safe-plugins archive found. Skipping plugin restore."
+            rm -f "$tmp_config"
           fi
 
           if [ -s /tmp/local_CLIProxyAPI/stats.json ] && jq empty /tmp/local_CLIProxyAPI/stats.json >/dev/null 2>&1; then
@@ -432,6 +430,14 @@ jobs:
               --exclude='.openclaw/tmp' \
               --exclude='.openclaw/openclaw.json' \
               --exclude='.openclaw/.env' \
+              --exclude='.openclaw/browser/**/SingletonLock' \
+              --exclude='.openclaw/browser/**/SingletonSocket' \
+              --exclude='.openclaw/browser/**/SingletonCookie' \
+              --exclude='.openclaw/browser/**/Crashpad/**' \
+              --exclude='.openclaw/browser/**/GPUCache/**' \
+              --exclude='.openclaw/browser/**/Code Cache/**' \
+              --exclude='.openclaw/browser/**/GrShaderCache/**' \
+              --exclude='.openclaw/browser/**/GraphiteDawnCache/**' \
               --exclude='*.lock' \
               --exclude='*.pid' \
               --exclude='**/*.jsonl.lock' \
@@ -511,6 +517,14 @@ jobs:
             --exclude='.openclaw/tmp' \
             --exclude='.openclaw/openclaw.json' \
             --exclude='.openclaw/.env' \
+            --exclude='.openclaw/browser/**/SingletonLock' \
+            --exclude='.openclaw/browser/**/SingletonSocket' \
+            --exclude='.openclaw/browser/**/SingletonCookie' \
+            --exclude='.openclaw/browser/**/Crashpad/**' \
+            --exclude='.openclaw/browser/**/GPUCache/**' \
+            --exclude='.openclaw/browser/**/Code Cache/**' \
+            --exclude='.openclaw/browser/**/GrShaderCache/**' \
+            --exclude='.openclaw/browser/**/GraphiteDawnCache/**' \
             --exclude='*.lock' \
             --exclude='*.pid' \
             --exclude='**/*.jsonl.lock' \
@@ -523,18 +537,7 @@ jobs:
             echo "⚠️ final openclaw.tar.gz validation failed, skip upload"
           fi
 
-          echo "4. Archiving openclaw-safe-plugins..."
-          sudo tar -czf /tmp/openclaw-safe-plugins.tar.gz -C /home/runner/openclaw-safe-plugins .
-          if sudo tar -tzf /tmp/openclaw-safe-plugins.tar.gz >/dev/null 2>&1; then
-            actual_size=$(stat -c%s /tmp/openclaw-safe-plugins.tar.gz 2>/dev/null || echo 0)
-            if [ "$actual_size" -ge "$MIN_SIZE" ]; then
-              rclone copyto /tmp/openclaw-safe-plugins.tar.gz dropbox:self-hosted/openclaw/openclaw-safe-plugins.tar.gz -v
-            else
-              echo "⚠️ openclaw-safe-plugins 压缩包小于 512KB，放弃覆盖云端数据"
-            fi
-          fi
-
-          echo "5. Archiving CLIProxyAPI..."
+          echo "4. Archiving CLIProxyAPI..."
           sudo tar -czf /tmp/CLIProxyAPI.tar.gz -C /tmp/local_CLIProxyAPI .
           if sudo tar -tzf /tmp/CLIProxyAPI.tar.gz >/dev/null 2>&1; then
             actual_size=$(stat -c%s /tmp/CLIProxyAPI.tar.gz 2>/dev/null || echo 0)
