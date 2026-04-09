@@ -409,7 +409,7 @@ jobs:
           archive_openclaw() {
             rm -f "$TMP_OPENCLAW_TAR"
 
-            tar -czf "$TMP_OPENCLAW_TAR" \
+            tar \
               -C /home/runner \
               --exclude='.openclaw/logs' \
               --exclude='.openclaw/cache' \
@@ -428,18 +428,21 @@ jobs:
               --exclude='*.pid' \
               --exclude='**/*.jsonl.lock' \
               --exclude='**/sessions/*.lock' \
+              -czf "$TMP_OPENCLAW_TAR" \
               .openclaw
 
             if [ -s "$TMP_OPENCLAW_TAR" ] && [ "$(stat -c%s "$TMP_OPENCLAW_TAR" 2>/dev/null || echo 0)" -ge "$MIN_SIZE" ] && tar -tzf "$TMP_OPENCLAW_TAR" >/dev/null 2>&1; then
+              echo "[$(date '+%F %T')] archive ok, uploading..."
               rclone copyto "$TMP_OPENCLAW_TAR" dropbox:self-hosted/openclaw.tar.gz
+              echo "[$(date '+%F %T')] upload ok"
             else
-              echo "⚠️ openclaw.tar.gz validation failed in periodic archive"
+              echo "[$(date '+%F %T')] ⚠️ openclaw.tar.gz validation failed in periodic archive"
             fi
 
           }
 
           while true; do
-            flock -n "$LOCK_FILE" bash -c "$(declare -f archive_openclaw); archive_openclaw" || echo "⚠️ previous archive still running, skip this round"
+            flock -n "$LOCK_FILE" bash -c "$(declare -f archive_openclaw); archive_openclaw" || echo "[$(date '+%F %T')] ⚠️ previous archive still running, skip this round"
             sleep 1200
           done
           EOF
