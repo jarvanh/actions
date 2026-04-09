@@ -458,17 +458,6 @@ jobs:
               echo "⚠️ openclaw.tar.gz validation failed in periodic archive"
             fi
 
-            if [ -d /tmp/local_rsstt ]; then
-              sudo tar -czf /tmp/rsstt.tar.gz -C /tmp/local_rsstt --exclude='docker-compose.yml' .
-              if sudo tar -tzf /tmp/rsstt.tar.gz >/dev/null 2>&1; then
-                actual_size=$(stat -c%s /tmp/rsstt.tar.gz 2>/dev/null || echo 0)
-                if [ "$actual_size" -ge "$MIN_SIZE" ]; then
-                  rclone copyto /tmp/rsstt.tar.gz dropbox:self-hosted/rsstt.tar.gz
-                else
-                  echo "⚠️ rsstt.tar.gz validation failed in periodic archive"
-                fi
-              fi
-            fi
           }
 
           while true; do
