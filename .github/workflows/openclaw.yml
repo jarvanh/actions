@@ -140,15 +140,6 @@ jobs:
             rclone copy dropbox:self-hosted/CLIProxyAPI /tmp/local_CLIProxyAPI
           fi
 
-          # 自动修正历史错误打包导致的 local_CLIProxyAPI/local_CLIProxyAPI 嵌套
-          if [ -d /tmp/local_CLIProxyAPI/local_CLIProxyAPI ]; then
-            echo "⚠️ Detected nested local_CLIProxyAPI after restore, flattening..."
-            shopt -s dotglob nullglob
-            mv /tmp/local_CLIProxyAPI/local_CLIProxyAPI/* /tmp/local_CLIProxyAPI/
-            rmdir /tmp/local_CLIProxyAPI/local_CLIProxyAPI || true
-            shopt -u dotglob nullglob
-          fi
-
           # 【防崩溃机制】在宿主机提前创建好文件和目录，防止 Docker 误建文件夹
           mkdir -p /tmp/local_CLIProxyAPI/auth-dir
           touch /tmp/local_CLIProxyAPI/config.yaml
