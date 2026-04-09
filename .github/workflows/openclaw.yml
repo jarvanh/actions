@@ -509,7 +509,11 @@ jobs:
             kill "$(cat /tmp/openclaw-archive.pid)" 2>/dev/null || true
           fi
 
-          echo "3. Performing final archive to Dropbox..."
+          echo "3. Stopping rsstt and CLIProxyAPI before final archive..."
+          docker stop rss-to-telegram 2>/dev/null || echo "rss-to-telegram already stopped or missing."
+          docker stop cliproxyapi 2>/dev/null || echo "cliproxyapi already stopped or missing."
+
+          echo "4. Performing final archive to Dropbox..."
           TMP_OPENCLAW_TAR="/tmp/openclaw-final.tar.gz"
           MIN_SIZE=$((1024 * 1024))
           rm -f "$TMP_OPENCLAW_TAR"
@@ -541,7 +545,7 @@ jobs:
             echo "⚠️ final openclaw.tar.gz validation failed, skip upload"
           fi
 
-          echo "4. Archiving CLIProxyAPI..."
+          echo "5. Archiving CLIProxyAPI..."
           sudo tar -czf /tmp/CLIProxyAPI.tar.gz -C /tmp/local_CLIProxyAPI .
           if sudo tar -tzf /tmp/CLIProxyAPI.tar.gz >/dev/null 2>&1; then
             actual_size=$(stat -c%s /tmp/CLIProxyAPI.tar.gz 2>/dev/null || echo 0)
@@ -552,7 +556,7 @@ jobs:
             fi
           fi
 
-          echo "5. Archiving rss-to-telegram data..."
+          echo "6. Archiving rss-to-telegram data..."
           if [ -d /tmp/local_rsstt ]; then
             sudo tar -czf /tmp/rsstt.tar.gz -C /tmp/local_rsstt --exclude='docker-compose.yml' .
             if sudo tar -tzf /tmp/rsstt.tar.gz >/dev/null 2>&1; then
