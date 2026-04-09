@@ -107,8 +107,36 @@ jobs:
         run: |
           echo "Starting rss-to-telegram before CLIProxyAPI..."
           mkdir -p /dropbox/self-hosted/rsstt
+          rm -rf /tmp/local_rsstt
+          mkdir -p /tmp/local_rsstt
+
           if [ -f /dropbox/self-hosted/rsstt/docker-compose.yml ] && [ -f /dropbox/self-hosted/openclaw/.env ]; then
-            cd /dropbox/self-hosted/rsstt
+            if rclone ls dropbox:self-hosted/rsstt.tar.gz > /dev/null 2>&1; then
+              echo "📦 Found rsstt.tar.gz! Downloading and extracting..."
+              rclone copyto dropbox:self-hosted/rsstt.tar.gz /tmp/rsstt.tar.gz
+              MIN_SIZE=$((1024 * 1024))
+              actual_size=$(stat -c%s /tmp/rsstt.tar.gz 2>/dev/null || echo 0)
+              if [ "$actual_size" -ge "$MIN_SIZE" ] && tar -tzf /tmp/rsstt.tar.gz >/dev/null 2>&1; then
+                tar -xzf /tmp/rsstt.tar.gz -C /tmp/local_rsstt
+              else
+                echo "⚠️ rsstt.tar.gz validation failed, skipping archive restore."
+              fi
+              rm -f /tmp/rsstt.tar.gz
+            else
+              echo "⚠️ No rsstt archive found. Falling back to sync from raw directory..."
+              rclone copy dropbox:self-hosted/rsstt /tmp/local_rsstt \
+                --retries 10 \
+                --low-level-retries 20 \
+                --timeout 1m \
+                --contimeout 15s \
+                --exclude "docker-compose.yml" \
+                -P || true
+            fi
+
+            mkdir -p /tmp/local_rsstt/config
+            cp /dropbox/self-hosted/rsstt/docker-compose.yml /tmp/local_rsstt/docker-compose.yml
+
+            cd /tmp/local_rsstt
             docker rm -f rss-to-telegram 2>/dev/null || true
             docker compose --env-file /dropbox/self-hosted/openclaw/.env up -d rss-to-telegram
             docker compose ps rss-to-telegram || true
@@ -429,6 +457,18 @@ jobs:
             else
               echo "⚠️ openclaw.tar.gz validation failed in periodic archive"
             fi
+
+            if [ -d /tmp/local_rsstt ]; then
+              sudo tar -czf /tmp/rsstt.tar.gz -C /tmp/local_rsstt --exclude='docker-compose.yml' .
+              if sudo tar -tzf /tmp/rsstt.tar.gz >/dev/null 2>&1; then
+                actual_size=$(stat -c%s /tmp/rsstt.tar.gz 2>/dev/null || echo 0)
+                if [ "$actual_size" -ge "$MIN_SIZE" ]; then
+                  rclone copyto /tmp/rsstt.tar.gz dropbox:self-hosted/rsstt.tar.gz
+                else
+                  echo "⚠️ rsstt.tar.gz validation failed in periodic archive"
+                fi
+              fi
+            fi
           }
 
           while true; do
@@ -511,5 +551,18 @@ jobs:
               rclone copyto /tmp/CLIProxyAPI.tar.gz dropbox:self-hosted/CLIProxyAPI.tar.gz -v
             else
               echo "⚠️ CLIProxyAPI 压缩包小于 1MB，放弃覆盖云端数据"
+            fi
+          fi
+
+          echo "5. Archiving rss-to-telegram data..."
+          if [ -d /tmp/local_rsstt ]; then
+            sudo tar -czf /tmp/rsstt.tar.gz -C /tmp/local_rsstt --exclude='docker-compose.yml' .
+            if sudo tar -tzf /tmp/rsstt.tar.gz >/dev/null 2>&1; then
+              actual_size=$(stat -c%s /tmp/rsstt.tar.gz 2>/dev/null || echo 0)
+              if [ "$actual_size" -ge "$MIN_SIZE" ]; then
+                rclone copyto /tmp/rsstt.tar.gz dropbox:self-hosted/rsstt.tar.gz -v
+              else
+                echo "⚠️ rsstt 压缩包小于 1MB，放弃覆盖云端数据"
+              fi
             fi
           fi
