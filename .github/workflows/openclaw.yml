@@ -293,23 +293,7 @@ jobs:
           rm -f /home/runner/.openclaw/.env
           ln -s /dropbox/self-hosted/openclaw/.env /home/runner/.openclaw/.env
 
-          if [ -f /home/runner/.openclaw/openclaw.json ]; then
-            tmp_config=$(mktemp)
-            if jq '.plugins.load.paths = ["/home/runner/.openclaw/extensions"]' /home/runner/.openclaw/openclaw.json > "$tmp_config"; then
-              cat "$tmp_config" > /home/runner/.openclaw/openclaw.json
-              chmod 600 /home/runner/.openclaw/openclaw.json || true
-              echo "✅ Updated plugin load path to /home/runner/.openclaw/extensions"
-            else
-              echo "⚠️ Failed to patch plugin load path in openclaw.json"
-            fi
-            rm -f "$tmp_config"
-          fi
-
-          mkdir -p ~/.gemini
-          chmod 700 ~/.gemini
-          npm install -g @google/gemini-cli
-          echo "Checking gemini version..."
-          gemini --version || echo "gemini not found in PATH"
+          npm i -g @google/gemini-cli
           npm i -g clawhub
 
       - name: Run OpenClaw
