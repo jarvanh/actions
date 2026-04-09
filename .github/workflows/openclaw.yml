@@ -110,7 +110,7 @@ jobs:
           rm -rf /tmp/local_rsstt
           mkdir -p /tmp/local_rsstt
 
-          if [ -f /dropbox/self-hosted/rsstt/docker-compose.yml ] && [ -f /dropbox/self-hosted/openclaw/.env ]; then
+          if [ -f /dropbox/self-hosted/openclaw/.env ]; then
             if rclone ls dropbox:self-hosted/rsstt.tar.gz > /dev/null 2>&1; then
               echo "📦 Found rsstt.tar.gz! Downloading and extracting..."
               rclone copyto dropbox:self-hosted/rsstt.tar.gz /tmp/rsstt.tar.gz
@@ -134,14 +134,23 @@ jobs:
             fi
 
             mkdir -p /tmp/local_rsstt/config
-            cp /dropbox/self-hosted/rsstt/docker-compose.yml /tmp/local_rsstt/docker-compose.yml
+            set -a
+            source /dropbox/self-hosted/openclaw/.env
+            set +a
 
-            cd /tmp/local_rsstt
             docker rm -f rss-to-telegram 2>/dev/null || true
-            docker compose --env-file /dropbox/self-hosted/openclaw/.env up -d rss-to-telegram
-            docker compose ps rss-to-telegram || true
+            docker run -d \
+              --name rss-to-telegram \
+              --restart unless-stopped \
+              -v /tmp/local_rsstt/config:/app/config \
+              -e TOKEN="$TELEGRAM_BOT_TOKEN_RSS_SB_BOT" \
+              -e MANAGER="83279194" \
+              -e MULTIUSER="0" \
+              rongronggg9/rss-to-telegram:latest
+
+            docker ps --filter name=rss-to-telegram || true
           else
-            echo "⚠️ rsstt compose or env file not found, skipping rss-to-telegram startup."
+            echo "⚠️ openclaw .env not found, skipping rss-to-telegram startup."
           fi
 
       - name: Run CLIProxyAPI container
