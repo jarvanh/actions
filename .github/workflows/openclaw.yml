@@ -244,7 +244,10 @@ jobs:
           echo "Configuring local ~/.openclaw with Dropbox-linked config..."
           mkdir -p /dropbox/self-hosted/openclaw
           mkdir -p /home/runner/.openclaw
-          mkdir -p /home/runner/openclaw-safe-plugins
+          mkdir -p /home/runner/.openclaw/browser
+          mkdir -p /home/runner/.openclaw/tmp_workspace
+          mkdir -p /home/runner/.openclaw/tasks
+          mkdir -p /home/runner/.openclaw/extensions
 
           TMP_OPENCLAW_TAR="/tmp/openclaw.tar.gz"
           RESTORE_DIR="/tmp/openclaw-restore"
@@ -276,18 +279,70 @@ jobs:
           rm -f /home/runner/.openclaw/.env
           ln -s /dropbox/self-hosted/openclaw/.env /home/runner/.openclaw/.env
 
-          if rclone ls dropbox:self-hosted/openclaw/openclaw-safe-plugins.tar.gz > /dev/null 2>&1; then
-            echo "📦 Found openclaw-safe-plugins.tar.gz! Downloading and extracting..."
-            rclone copyto dropbox:self-hosted/openclaw/openclaw-safe-plugins.tar.gz /tmp/openclaw-safe-plugins.tar.gz
-            actual_size=$(stat -c%s /tmp/openclaw-safe-plugins.tar.gz 2>/dev/null || echo 0)
-            if [ "$actual_size" -ge $((512 * 1024)) ] && tar -tzf /tmp/openclaw-safe-plugins.tar.gz >/dev/null 2>&1; then
-              tar -xzf /tmp/openclaw-safe-plugins.tar.gz -C /home/runner/openclaw-safe-plugins
+          restore_legacy_archive() {
+            local remote_path="$1"
+            local tmp_tar="$2"
+            local dest_dir="$3"
+            local min_size="$4"
+            local scrub_mode="${5:-generic}"
+            local stage_dir
+            stage_dir=$(mktemp -d)
+
+            if rclone ls "$remote_path" > /dev/null 2>&1; then
+              echo "📦 Restoring legacy archive: $remote_path -> $dest_dir"
+              rclone copyto "$remote_path" "$tmp_tar"
+              local actual_size
+              actual_size=$(stat -c%s "$tmp_tar" 2>/dev/null || echo 0)
+              if [ "$actual_size" -ge "$min_size" ] && tar -tzf "$tmp_tar" >/dev/null 2>&1; then
+                tar -xzf "$tmp_tar" -C "$stage_dir"
+                if [ "$scrub_mode" = "browser" ]; then
+                  find "$stage_dir" \( \
+                    -name 'SingletonLock' -o \
+                    -name 'SingletonSocket' -o \
+                    -name 'SingletonCookie' -o \
+                    -name '*.lock' -o \
+                    -name '*.pid' -o \
+                    -name '*.tmp' -o \
+                    -name '*.tmp.*' \
+                  \) -delete 2>/dev/null || true
+                  find "$stage_dir" -type d \( \
+                    -name 'Crashpad' -o \
+                    -name 'GPUCache' -o \
+                    -name 'Code Cache' -o \
+                    -name 'GrShaderCache' -o \
+                    -name 'GraphiteDawnCache' \
+                  \) -prune -exec rm -rf {} + 2>/dev/null || true
+                else
+                  find "$stage_dir" \( -name '*.lock' -o -name '*.pid' -o -name '*.tmp' -o -name '*.tmp.*' \) -delete 2>/dev/null || true
+                fi
+                mkdir -p "$dest_dir"
+                rsync -a "$stage_dir"/ "$dest_dir"/
+              else
+                echo "⚠️ Legacy archive validation failed: $remote_path"
+              fi
+              rm -f "$tmp_tar"
             else
-              echo "⚠️ openclaw-safe-plugins.tar.gz validation failed, skipping plugin restore."
+              echo "ℹ️ Legacy archive not found: $remote_path"
             fi
-            rm -f /tmp/openclaw-safe-plugins.tar.gz
-          else
-            echo "⚠️ No openclaw-safe-plugins archive found. Skipping plugin restore."
+
+            rm -rf "$stage_dir"
+          }
+
+          restore_legacy_archive "dropbox:self-hosted/openclaw/browser.tar.gz" "/tmp/browser.tar.gz" "/home/runner/.openclaw/browser" $((512 * 1024)) browser
+          restore_legacy_archive "dropbox:self-hosted/openclaw/tmp_workspace.tar.gz" "/tmp/tmp_workspace.tar.gz" "/home/runner/.openclaw/tmp_workspace" $((512 * 1024)) generic
+          restore_legacy_archive "dropbox:self-hosted/openclaw/tasks.tar.gz" "/tmp/tasks.tar.gz" "/home/runner/.openclaw/tasks" $((512 * 1024)) generic
+          restore_legacy_archive "dropbox:self-hosted/openclaw/openclaw-safe-plugins.tar.gz" "/tmp/openclaw-safe-plugins.tar.gz" "/home/runner/.openclaw/extensions" $((512 * 1024)) generic
+
+          if [ -f /home/runner/.openclaw/openclaw.json ]; then
+            tmp_config=$(mktemp)
+            if jq '.plugins.load.paths = ["/home/runner/.openclaw/extensions"]' /home/runner/.openclaw/openclaw.json > "$tmp_config"; then
+              cat "$tmp_config" > /home/runner/.openclaw/openclaw.json
+              chmod 600 /home/runner/.openclaw/openclaw.json || true
+              echo "✅ Updated plugin load path to /home/runner/.openclaw/extensions"
+            else
+              echo "⚠️ Failed to patch plugin load path in openclaw.json"
+            fi
+            rm -f "$tmp_config"
           fi
 
           if [ -s /tmp/local_CLIProxyAPI/stats.json ] && jq empty /tmp/local_CLIProxyAPI/stats.json >/dev/null 2>&1; then
@@ -432,6 +487,14 @@ jobs:
               --exclude='.openclaw/tmp' \
               --exclude='.openclaw/openclaw.json' \
               --exclude='.openclaw/.env' \
+              --exclude='.openclaw/browser/**/SingletonLock' \
+              --exclude='.openclaw/browser/**/SingletonSocket' \
+              --exclude='.openclaw/browser/**/SingletonCookie' \
+              --exclude='.openclaw/browser/**/Crashpad/**' \
+              --exclude='.openclaw/browser/**/GPUCache/**' \
+              --exclude='.openclaw/browser/**/Code Cache/**' \
+              --exclude='.openclaw/browser/**/GrShaderCache/**' \
+              --exclude='.openclaw/browser/**/GraphiteDawnCache/**' \
               --exclude='*.lock' \
               --exclude='*.pid' \
               --exclude='**/*.jsonl.lock' \
@@ -511,6 +574,14 @@ jobs:
             --exclude='.openclaw/tmp' \
             --exclude='.openclaw/openclaw.json' \
             --exclude='.openclaw/.env' \
+            --exclude='.openclaw/browser/**/SingletonLock' \
+            --exclude='.openclaw/browser/**/SingletonSocket' \
+            --exclude='.openclaw/browser/**/SingletonCookie' \
+            --exclude='.openclaw/browser/**/Crashpad/**' \
+            --exclude='.openclaw/browser/**/GPUCache/**' \
+            --exclude='.openclaw/browser/**/Code Cache/**' \
+            --exclude='.openclaw/browser/**/GrShaderCache/**' \
+            --exclude='.openclaw/browser/**/GraphiteDawnCache/**' \
             --exclude='*.lock' \
             --exclude='*.pid' \
             --exclude='**/*.jsonl.lock' \
@@ -523,18 +594,7 @@ jobs:
             echo "⚠️ final openclaw.tar.gz validation failed, skip upload"
           fi
 
-          echo "4. Archiving openclaw-safe-plugins..."
-          sudo tar -czf /tmp/openclaw-safe-plugins.tar.gz -C /home/runner/openclaw-safe-plugins .
-          if sudo tar -tzf /tmp/openclaw-safe-plugins.tar.gz >/dev/null 2>&1; then
-            actual_size=$(stat -c%s /tmp/openclaw-safe-plugins.tar.gz 2>/dev/null || echo 0)
-            if [ "$actual_size" -ge "$MIN_SIZE" ]; then
-              rclone copyto /tmp/openclaw-safe-plugins.tar.gz dropbox:self-hosted/openclaw/openclaw-safe-plugins.tar.gz -v
-            else
-              echo "⚠️ openclaw-safe-plugins 压缩包小于 512KB，放弃覆盖云端数据"
-            fi
-          fi
-
-          echo "5. Archiving CLIProxyAPI..."
+          echo "4. Archiving CLIProxyAPI..."
           sudo tar -czf /tmp/CLIProxyAPI.tar.gz -C /tmp/local_CLIProxyAPI .
           if sudo tar -tzf /tmp/CLIProxyAPI.tar.gz >/dev/null 2>&1; then
             actual_size=$(stat -c%s /tmp/CLIProxyAPI.tar.gz 2>/dev/null || echo 0)
