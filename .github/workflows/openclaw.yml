@@ -239,167 +239,55 @@ jobs:
           curl -fsSL https://openclaw.ai/install.sh | bash -s -- --no-onboard
 
           echo "/home/runner/.npm-global/bin" >> $GITHUB_PATH
-          # 显式在当前 step 导入 PATH，确保 command -v 能够找到命令
           export PATH="/home/runner/.npm-global/bin:$PATH"
 
-          echo "Configuring ~/.openclaw symlink and local directories..."
-          # 1. 确保云端的持久化目录存在（配置继续保存在 ~/.openclaw）
-          mkdir -p /dropbox/self-hosted/openclaw/browser
-          mkdir -p /dropbox/self-hosted/openclaw/tmp_workspace
-          mkdir -p /dropbox/self-hosted/openclaw/tasks
-
-          # 2. 建立本地临时高速目录，用于存放高频 I/O 数据
-          mkdir -p /tmp/local_browser
-          mkdir -p /tmp/tmp_workspace
-          mkdir -p /tmp/local_tasks
+          echo "Configuring local ~/.openclaw with Dropbox-linked config..."
+          mkdir -p /dropbox/self-hosted/openclaw
+          mkdir -p /home/runner/.openclaw
           mkdir -p /home/runner/openclaw-safe-plugins
 
-          # 3. 使用 bind mount 将 browser/tmp_workspace/tasks 挂载到本地目录，阻断高频 I/O 同步
-          sudo mount --bind /tmp/local_browser /dropbox/self-hosted/openclaw/browser
-          sudo mount --bind /tmp/tmp_workspace /dropbox/self-hosted/openclaw/tmp_workspace
-          sudo mount --bind /tmp/local_tasks /dropbox/self-hosted/openclaw/tasks
+          TMP_OPENCLAW_TAR="/tmp/openclaw.tar.gz"
+          RESTORE_DIR="/tmp/openclaw-restore"
 
-          # 4. 创建 ~/.openclaw 软链接指向云端主目录
-          rm -rf ~/.openclaw
-          ln -s /dropbox/self-hosted/openclaw ~/.openclaw
+          rm -rf "$RESTORE_DIR"
+          mkdir -p "$RESTORE_DIR"
 
-          # 统一的体积校验阈值
-          MIN_SIZE=$((512 * 1024)) # 512KB
-
-          # 5. 拉取 browser 逻辑
-          if rclone ls dropbox:self-hosted/openclaw/browser.tar.gz > /dev/null 2>&1; then
-            echo "📦 Found browser.tar.gz! Downloading and extracting..."
-            rclone copyto dropbox:self-hosted/openclaw/browser.tar.gz /tmp/browser.tar.gz
-            actual_size=$(stat -c%s /tmp/browser.tar.gz 2>/dev/null || echo 0)
-            if [ "$actual_size" -ge "$MIN_SIZE" ]; then
-              tar -xzf /tmp/browser.tar.gz -C /tmp/local_browser
+          echo "📦 Trying to restore ~/.openclaw from dropbox:self-hosted/openclaw.tar.gz ..."
+          if rclone copyto dropbox:self-hosted/openclaw.tar.gz "$TMP_OPENCLAW_TAR"; then
+            if [ -s "$TMP_OPENCLAW_TAR" ] && tar -tzf "$TMP_OPENCLAW_TAR" >/dev/null 2>&1; then
+              tar -xzf "$TMP_OPENCLAW_TAR" -C "$RESTORE_DIR"
+              if [ -d "$RESTORE_DIR/.openclaw" ]; then
+                find /home/runner/.openclaw -mindepth 1 -maxdepth 1 ! -name openclaw.json ! -name .env -exec rm -rf {} +
+                cp -a "$RESTORE_DIR/.openclaw/." /home/runner/.openclaw/
+                echo "✅ Restored ~/.openclaw from archive"
+              else
+                echo "⚠️ Archive does not contain .openclaw root, skip restore."
+              fi
             else
-              echo "⚠️ browser.tar.gz is smaller than expected, skipping restore."
+              echo "⚠️ openclaw.tar.gz validation failed, skip restore."
             fi
-            sudo rm /tmp/browser.tar.gz
           else
-            echo "⚠️ No browser archive found. Falling back to sync from raw directory..."
-            rclone copy dropbox:self-hosted/openclaw/browser /tmp/local_browser
+            echo "ℹ️ No openclaw.tar.gz found, continuing with fresh local ~/.openclaw"
           fi
 
-          # 6. 拉取 tmp_workspace 逻辑
-          if rclone ls dropbox:self-hosted/openclaw/tmp_workspace.tar.gz > /dev/null 2>&1; then
-            echo "📦 Found tmp_workspace.tar.gz! Downloading and extracting..."
-            rclone copyto dropbox:self-hosted/openclaw/tmp_workspace.tar.gz /tmp/tmp_workspace.tar.gz
-            actual_size=$(stat -c%s /tmp/tmp_workspace.tar.gz 2>/dev/null || echo 0)
-            if [ "$actual_size" -ge "$MIN_SIZE" ]; then
-              tar -xzf /tmp/tmp_workspace.tar.gz -C /tmp/tmp_workspace
-            else
-              echo "⚠️ tmp_workspace.tar.gz is smaller than expected, skipping restore."
-            fi
-            sudo rm /tmp/tmp_workspace.tar.gz
-          else
-            echo "⚠️ No tmp_workspace archive found. Falling back to sync from raw directory..."
-            rclone copy dropbox:self-hosted/openclaw/tmp_workspace /tmp/tmp_workspace
-          fi
+          rm -f /home/runner/.openclaw/openclaw.json
+          ln -s /dropbox/self-hosted/openclaw/openclaw.json /home/runner/.openclaw/openclaw.json
 
-          # 自动修正历史错误打包导致的 tmp_workspace/tmp_workspace 嵌套
-          if [ -d /tmp/tmp_workspace/tmp_workspace ]; then
-            echo "⚠️ Detected nested tmp_workspace after restore, flattening..."
-            shopt -s dotglob nullglob
-            mv /tmp/tmp_workspace/tmp_workspace/* /tmp/tmp_workspace/
-            rmdir /tmp/tmp_workspace/tmp_workspace || true
-            shopt -u dotglob nullglob
-          fi
+          rm -f /home/runner/.openclaw/.env
+          ln -s /dropbox/self-hosted/openclaw/.env /home/runner/.openclaw/.env
 
-          # 7. 拉取 tasks 逻辑
-          if rclone ls dropbox:self-hosted/openclaw/tasks.tar.gz > /dev/null 2>&1; then
-            echo "📦 Found tasks.tar.gz! Downloading and extracting..."
-            rclone copyto dropbox:self-hosted/openclaw/tasks.tar.gz /tmp/tasks.tar.gz
-            actual_size=$(stat -c%s /tmp/tasks.tar.gz 2>/dev/null || echo 0)
-            if [ "$actual_size" -ge "$MIN_SIZE" ] && tar -tzf /tmp/tasks.tar.gz >/dev/null 2>&1; then
-              tar -xzf /tmp/tasks.tar.gz -C /tmp/local_tasks
-            else
-              echo "⚠️ tasks.tar.gz validation failed, skipping restore."
-            fi
-            sudo rm -f /tmp/tasks.tar.gz
-          else
-            echo "⚠️ No tasks archive found. Falling back to sync from raw directory..."
-            rclone copy dropbox:self-hosted/openclaw/tasks /tmp/local_tasks
-          fi
-
-          # 8. 拉取 openclaw-safe-plugins 逻辑
           if rclone ls dropbox:self-hosted/openclaw/openclaw-safe-plugins.tar.gz > /dev/null 2>&1; then
             echo "📦 Found openclaw-safe-plugins.tar.gz! Downloading and extracting..."
             rclone copyto dropbox:self-hosted/openclaw/openclaw-safe-plugins.tar.gz /tmp/openclaw-safe-plugins.tar.gz
             actual_size=$(stat -c%s /tmp/openclaw-safe-plugins.tar.gz 2>/dev/null || echo 0)
-            if [ "$actual_size" -ge "$MIN_SIZE" ] && tar -tzf /tmp/openclaw-safe-plugins.tar.gz >/dev/null 2>&1; then
+            if [ "$actual_size" -ge $((512 * 1024)) ] && tar -tzf /tmp/openclaw-safe-plugins.tar.gz >/dev/null 2>&1; then
               tar -xzf /tmp/openclaw-safe-plugins.tar.gz -C /home/runner/openclaw-safe-plugins
             else
-              echo "⚠️ openclaw-safe-plugins.tar.gz validation failed, skipping restore."
+              echo "⚠️ openclaw-safe-plugins.tar.gz validation failed, skipping plugin restore."
             fi
-            sudo rm -f /tmp/openclaw-safe-plugins.tar.gz
+            rm -f /tmp/openclaw-safe-plugins.tar.gz
           else
             echo "⚠️ No openclaw-safe-plugins archive found. Skipping plugin restore."
-          fi
-
-          # 初步安装完备份校验逻辑
-          TMP_BROWSER_TAR="/tmp/browser-backup.tar.gz"
-          FINAL_BROWSER_TAR="/dropbox/self-hosted/openclaw/browser.tar.gz"
-          TMP_WORKSPACE_TAR="/tmp/tmp-workspace-backup.tar.gz"
-          FINAL_WORKSPACE_TAR="/dropbox/self-hosted/openclaw/tmp_workspace.tar.gz"
-          TMP_TASKS_TAR="/tmp/tasks-backup.tar.gz"
-          FINAL_TASKS_TAR="/dropbox/self-hosted/openclaw/tasks.tar.gz"
-          TMP_SAFE_PLUGINS_TAR="/tmp/openclaw-safe-plugins-backup.tar.gz"
-          FINAL_SAFE_PLUGINS_TAR="/dropbox/self-hosted/openclaw/openclaw-safe-plugins.tar.gz"
-          TMP_CLIPROXYAPI_TAR="/tmp/CLIProxyAPI-backup.tar.gz"
-          FINAL_CLIPROXYAPI_TAR="/dropbox/self-hosted/CLIProxyAPI.tar.gz"
-
-          sudo tar -czf "$TMP_BROWSER_TAR" -C /tmp/local_browser .
-          browser_size=$(stat -c%s "$TMP_BROWSER_TAR" 2>/dev/null || echo 0)
-          if [ "$browser_size" -ge "$MIN_SIZE" ] && sudo tar -tzf "$TMP_BROWSER_TAR" >/dev/null 2>&1; then
-            sudo mv -f "$TMP_BROWSER_TAR" "$FINAL_BROWSER_TAR"
-          else
-            echo "⚠️ browser backup archive failed validation; skip promote."
-            sudo rm -f "$TMP_BROWSER_TAR"
-          fi
-
-          sudo tar -czf "$TMP_WORKSPACE_TAR" -C /tmp/tmp_workspace .
-          workspace_size=$(stat -c%s "$TMP_WORKSPACE_TAR" 2>/dev/null || echo 0)
-          if [ "$workspace_size" -ge "$MIN_SIZE" ] && sudo tar -tzf "$TMP_WORKSPACE_TAR" >/dev/null 2>&1; then
-            sudo mv -f "$TMP_WORKSPACE_TAR" "$FINAL_WORKSPACE_TAR"
-          else
-            echo "⚠️ tmp_workspace backup archive failed validation; skip promote."
-            sudo rm -f "$TMP_WORKSPACE_TAR"
-          fi
-
-          sudo tar -czf "$TMP_TASKS_TAR" -C /tmp/local_tasks .
-          tasks_size=$(stat -c%s "$TMP_TASKS_TAR" 2>/dev/null || echo 0)
-          if [ "$tasks_size" -ge "$MIN_SIZE" ] && sudo tar -tzf "$TMP_TASKS_TAR" >/dev/null 2>&1; then
-            sudo mv -f "$TMP_TASKS_TAR" "$FINAL_TASKS_TAR"
-          else
-            echo "⚠️ tasks backup archive failed validation; skip promote."
-            sudo rm -f "$TMP_TASKS_TAR"
-          fi
-
-          sudo tar -czf "$TMP_SAFE_PLUGINS_TAR" -C /home/runner/openclaw-safe-plugins .
-          safe_plugins_size=$(stat -c%s "$TMP_SAFE_PLUGINS_TAR" 2>/dev/null || echo 0)
-          if [ "$safe_plugins_size" -ge "$MIN_SIZE" ] && sudo tar -tzf "$TMP_SAFE_PLUGINS_TAR" >/dev/null 2>&1; then
-            sudo mv -f "$TMP_SAFE_PLUGINS_TAR" "$FINAL_SAFE_PLUGINS_TAR"
-          else
-            echo "⚠️ openclaw-safe-plugins backup archive failed validation; skip promote."
-            sudo rm -f "$TMP_SAFE_PLUGINS_TAR"
-          fi
-
-          sudo tar -czf "$TMP_CLIPROXYAPI_TAR" -C /tmp/local_CLIProxyAPI .
-          cliproxyapi_size=$(stat -c%s "$TMP_CLIPROXYAPI_TAR" 2>/dev/null || echo 0)
-          if sudo tar -tzf "$TMP_CLIPROXYAPI_TAR" >/dev/null 2>&1; then
-            mkdir -p /tmp/cliproxyapi_verify
-            rm -rf /tmp/cliproxyapi_verify/*
-            sudo tar -xzf "$TMP_CLIPROXYAPI_TAR" -C /tmp/cliproxyapi_verify
-          fi
-          if [ "$cliproxyapi_size" -ge $((128 * 1024)) ] \
-             && sudo tar -tzf "$TMP_CLIPROXYAPI_TAR" >/dev/null 2>&1 \
-             && { [ -f /tmp/cliproxyapi_verify/config.yaml ] || [ -d /tmp/cliproxyapi_verify/auth-dir ] || [ -f /tmp/cliproxyapi_verify/stats.json ]; }; then
-            sudo mv -f "$TMP_CLIPROXYAPI_TAR" "$FINAL_CLIPROXYAPI_TAR"
-          else
-            echo "⚠️ CLIProxyAPI backup archive failed structural validation; skip promote."
-            sudo rm -f "$TMP_CLIPROXYAPI_TAR"
           fi
 
           if [ -s /tmp/local_CLIProxyAPI/stats.json ] && jq empty /tmp/local_CLIProxyAPI/stats.json >/dev/null 2>&1; then
@@ -510,12 +398,22 @@ jobs:
               fi
           fi
 
-          # 后台每 2 分钟导出 CLIProxyAPI 统计，并打包 browser/tmp_workspace/tasks/openclaw-safe-plugins/CLIProxyAPI 同步回 Dropbox
-          echo "Starting background sync tasks: export CLIProxyAPI stats + archive local directories -> Dropbox (every 120s)..."
-          nohup bash -c 'while true; do
-            MIN_SIZE=$((512 * 1024)) # 512KB
+          echo "Starting background archive tasks: export CLIProxyAPI stats + archive ~/.openclaw every 20 minutes..."
+          cat > /tmp/openclaw-archive-loop.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
 
-            # 高频导出并单独同步 stats.json，降低大压缩包失败时的状态丢失概率
+          TMP_OPENCLAW_TAR="/tmp/openclaw.tar.gz"
+          LOCK_FILE="/tmp/openclaw-archive.lock"
+          PID_FILE="/tmp/openclaw-archive.pid"
+          MIN_SIZE=$((512 * 1024))
+
+          echo $$ > "$PID_FILE"
+          trap 'rm -f "$PID_FILE"' EXIT
+
+          archive_openclaw() {
+            rm -f "$TMP_OPENCLAW_TAR"
+
             if curl -fsS -X GET "http://127.0.0.1:8317/v0/management/usage/export" \
               -H "X-Management-Key: ${{ secrets.CLIPROXYAPIKEY }}" \
               -o /tmp/local_CLIProxyAPI/stats.json.tmp; then
@@ -524,64 +422,37 @@ jobs:
                 rclone copyto /tmp/local_CLIProxyAPI/stats.json dropbox:self-hosted/CLIProxyAPI/stats.json || true
               fi
             else
-              echo "⚠️ 周期性导出 CLIProxyAPI 统计失败"
               rm -f /tmp/local_CLIProxyAPI/stats.json.tmp
             fi
 
-            # 备份 browser
-            sudo tar -czf /tmp/browser.tar.gz -C /tmp/local_browser .
-            if sudo tar -tzf /tmp/browser.tar.gz >/dev/null 2>&1; then
-              actual_size=$(stat -c%s /tmp/browser.tar.gz 2>/dev/null || echo 0)
-              if [ "$actual_size" -ge "$MIN_SIZE" ]; then
-                rclone copyto /tmp/browser.tar.gz dropbox:self-hosted/openclaw/browser.tar.gz
-              fi
-            fi
+            tar -czf "$TMP_OPENCLAW_TAR" \
+              -C /home/runner \
+              --exclude='.openclaw/logs' \
+              --exclude='.openclaw/cache' \
+              --exclude='.openclaw/tmp' \
+              --exclude='.openclaw/openclaw.json' \
+              --exclude='.openclaw/.env' \
+              --exclude='*.lock' \
+              --exclude='*.pid' \
+              --exclude='**/*.jsonl.lock' \
+              --exclude='**/sessions/*.lock' \
+              .openclaw
 
-            # 备份 tmp_workspace
-            if [ -d /tmp/tmp_workspace/tmp_workspace ]; then
-              echo "⚠️ Detected nested tmp_workspace before periodic backup, flattening..."
-              shopt -s dotglob nullglob
-              mv /tmp/tmp_workspace/tmp_workspace/* /tmp/tmp_workspace/
-              rmdir /tmp/tmp_workspace/tmp_workspace || true
-              shopt -u dotglob nullglob
+            if [ -s "$TMP_OPENCLAW_TAR" ] && [ "$(stat -c%s "$TMP_OPENCLAW_TAR" 2>/dev/null || echo 0)" -ge "$MIN_SIZE" ] && tar -tzf "$TMP_OPENCLAW_TAR" >/dev/null 2>&1; then
+              rclone copyto "$TMP_OPENCLAW_TAR" dropbox:self-hosted/openclaw.tar.gz
+            else
+              echo "⚠️ openclaw.tar.gz validation failed in periodic archive"
             fi
-            sudo tar -czf /tmp/tmp_workspace.tar.gz -C /tmp/tmp_workspace .
-            if sudo tar -tzf /tmp/tmp_workspace.tar.gz >/dev/null 2>&1; then
-              actual_size=$(stat -c%s /tmp/tmp_workspace.tar.gz 2>/dev/null || echo 0)
-              if [ "$actual_size" -ge "$MIN_SIZE" ]; then
-                rclone copyto /tmp/tmp_workspace.tar.gz dropbox:self-hosted/openclaw/tmp_workspace.tar.gz
-              fi
-            fi
+          }
 
-            # 备份 tasks
-            sudo tar -czf /tmp/tasks.tar.gz -C /tmp/local_tasks .
-            if sudo tar -tzf /tmp/tasks.tar.gz >/dev/null 2>&1; then
-              actual_size=$(stat -c%s /tmp/tasks.tar.gz 2>/dev/null || echo 0)
-              if [ "$actual_size" -ge "$MIN_SIZE" ]; then
-                rclone copyto /tmp/tasks.tar.gz dropbox:self-hosted/openclaw/tasks.tar.gz
-              fi
-            fi
-
-            # 备份 openclaw-safe-plugins 目录
-            sudo tar -czf /tmp/openclaw-safe-plugins.tar.gz -C /home/runner/openclaw-safe-plugins .
-            if sudo tar -tzf /tmp/openclaw-safe-plugins.tar.gz >/dev/null 2>&1; then
-              actual_size=$(stat -c%s /tmp/openclaw-safe-plugins.tar.gz 2>/dev/null || echo 0)
-              if [ "$actual_size" -ge "$MIN_SIZE" ]; then
-                rclone copyto /tmp/openclaw-safe-plugins.tar.gz dropbox:self-hosted/openclaw/openclaw-safe-plugins.tar.gz
-              fi
-            fi
-
-            # 备份 CLIProxyAPI 目录
-            sudo tar -czf /tmp/CLIProxyAPI.tar.gz -C /tmp/local_CLIProxyAPI .
-            if sudo tar -tzf /tmp/CLIProxyAPI.tar.gz >/dev/null 2>&1; then
-              actual_size=$(stat -c%s /tmp/CLIProxyAPI.tar.gz 2>/dev/null || echo 0)
-              if [ "$actual_size" -ge $((128 * 1024)) ]; then
-                rclone copyto /tmp/CLIProxyAPI.tar.gz dropbox:self-hosted/CLIProxyAPI.tar.gz
-              fi
-            fi
-
-            sleep 120
-          done' > /dev/null 2>&1 &
+          while true; do
+            flock -n "$LOCK_FILE" bash -c "$(declare -f archive_openclaw); archive_openclaw" || echo "⚠️ previous archive still running, skip this round"
+            sleep 1200
+          done
+          EOF
+          chmod +x /tmp/openclaw-archive-loop.sh
+          nohup /tmp/openclaw-archive-loop.sh > /tmp/openclaw-archive-loop.log 2>&1 &
+          echo $! > /tmp/openclaw-archive-loop.launcher.pid
           
       - name: Configure tmate (Enable Mouse Mode)
         if: always()
@@ -599,7 +470,7 @@ jobs:
         if: always()
         run: sleep 330m
 
-      - name: Stop OpenClaw and Final Sync
+      - name: Stop OpenClaw and Final Archive
         if: always()
         run: |
           echo "💾 正在通过 API 导出 CLIProxyAPI 统计数据到本地缓存..."
@@ -620,53 +491,39 @@ jobs:
           openclaw gateway stop || echo "OpenClaw already stopped or command failed."
           sleep 3m
 
-          echo "2. Killing background sync process..."
-          pkill -f "CLIProxyAPI.tar.gz\|browser.tar.gz\|tmp_workspace.tar.gz\|tasks.tar.gz\|openclaw-safe-plugins.tar.gz" || echo "Background sync not running."
-
-          echo "3. Performing final archive and sync to Dropbox..."
-          MIN_SIZE=$((512 * 1024)) # 512KB
-
-          # 打包并上传 browser
-          sudo tar -czf /tmp/browser.tar.gz -C /tmp/local_browser .
-          if sudo tar -tzf /tmp/browser.tar.gz >/dev/null 2>&1; then
-            actual_size=$(stat -c%s /tmp/browser.tar.gz 2>/dev/null || echo 0)
-            if [ "$actual_size" -ge "$MIN_SIZE" ]; then
-              rclone copyto /tmp/browser.tar.gz dropbox:self-hosted/openclaw/browser.tar.gz -v
-            else
-              echo "⚠️ browser 压缩包小于 512KB，放弃覆盖云端数据"
-            fi
+          echo "2. Killing background archive process..."
+          if [ -f /tmp/openclaw-archive-loop.launcher.pid ]; then
+            kill "$(cat /tmp/openclaw-archive-loop.launcher.pid)" 2>/dev/null || true
+          fi
+          if [ -f /tmp/openclaw-archive.pid ]; then
+            kill "$(cat /tmp/openclaw-archive.pid)" 2>/dev/null || true
           fi
 
-          # 打包并上传 tmp_workspace
-          if [ -d /tmp/tmp_workspace/tmp_workspace ]; then
-            echo "⚠️ Detected nested tmp_workspace before final backup, flattening..."
-            shopt -s dotglob nullglob
-            mv /tmp/tmp_workspace/tmp_workspace/* /tmp/tmp_workspace/
-            rmdir /tmp/tmp_workspace/tmp_workspace || true
-            shopt -u dotglob nullglob
-          fi
-          sudo tar -czf /tmp/tmp_workspace.tar.gz -C /tmp/tmp_workspace .
-          if sudo tar -tzf /tmp/tmp_workspace.tar.gz >/dev/null 2>&1; then
-            actual_size=$(stat -c%s /tmp/tmp_workspace.tar.gz 2>/dev/null || echo 0)
-            if [ "$actual_size" -ge "$MIN_SIZE" ]; then
-              rclone copyto /tmp/tmp_workspace.tar.gz dropbox:self-hosted/openclaw/tmp_workspace.tar.gz -v
-            else
-              echo "⚠️ tmp_workspace 压缩包小于 512KB，放弃覆盖云端数据"
-            fi
+          echo "3. Performing final archive to Dropbox..."
+          TMP_OPENCLAW_TAR="/tmp/openclaw-final.tar.gz"
+          MIN_SIZE=$((512 * 1024))
+          rm -f "$TMP_OPENCLAW_TAR"
+
+          tar -czf "$TMP_OPENCLAW_TAR" \
+            -C /home/runner \
+            --exclude='.openclaw/logs' \
+            --exclude='.openclaw/cache' \
+            --exclude='.openclaw/tmp' \
+            --exclude='.openclaw/openclaw.json' \
+            --exclude='.openclaw/.env' \
+            --exclude='*.lock' \
+            --exclude='*.pid' \
+            --exclude='**/*.jsonl.lock' \
+            --exclude='**/sessions/*.lock' \
+            .openclaw
+
+          if [ -s "$TMP_OPENCLAW_TAR" ] && [ "$(stat -c%s "$TMP_OPENCLAW_TAR" 2>/dev/null || echo 0)" -ge "$MIN_SIZE" ] && tar -tzf "$TMP_OPENCLAW_TAR" >/dev/null 2>&1; then
+            rclone copyto "$TMP_OPENCLAW_TAR" dropbox:self-hosted/openclaw.tar.gz -v
+          else
+            echo "⚠️ final openclaw.tar.gz validation failed, skip upload"
           fi
 
-          # 打包并上传 tasks
-          sudo tar -czf /tmp/tasks.tar.gz -C /tmp/local_tasks .
-          if sudo tar -tzf /tmp/tasks.tar.gz >/dev/null 2>&1; then
-            actual_size=$(stat -c%s /tmp/tasks.tar.gz 2>/dev/null || echo 0)
-            if [ "$actual_size" -ge "$MIN_SIZE" ]; then
-              rclone copyto /tmp/tasks.tar.gz dropbox:self-hosted/openclaw/tasks.tar.gz -v
-            else
-              echo "⚠️ tasks 压缩包小于 512KB，放弃覆盖云端数据"
-            fi
-          fi
-
-          # 打包并上传 openclaw-safe-plugins
+          echo "4. Archiving openclaw-safe-plugins..."
           sudo tar -czf /tmp/openclaw-safe-plugins.tar.gz -C /home/runner/openclaw-safe-plugins .
           if sudo tar -tzf /tmp/openclaw-safe-plugins.tar.gz >/dev/null 2>&1; then
             actual_size=$(stat -c%s /tmp/openclaw-safe-plugins.tar.gz 2>/dev/null || echo 0)
@@ -677,7 +534,7 @@ jobs:
             fi
           fi
 
-          # 打包并上传 CLIProxyAPI
+          echo "5. Archiving CLIProxyAPI..."
           sudo tar -czf /tmp/CLIProxyAPI.tar.gz -C /tmp/local_CLIProxyAPI .
           if sudo tar -tzf /tmp/CLIProxyAPI.tar.gz >/dev/null 2>&1; then
             actual_size=$(stat -c%s /tmp/CLIProxyAPI.tar.gz 2>/dev/null || echo 0)
@@ -691,8 +548,3 @@ jobs:
           if [ -s /tmp/local_CLIProxyAPI/stats.json ] && jq empty /tmp/local_CLIProxyAPI/stats.json >/dev/null 2>&1; then
             rclone copyto /tmp/local_CLIProxyAPI/stats.json dropbox:self-hosted/CLIProxyAPI/stats.json -v || true
           fi
-
-          echo "4. Unmounting local directories..."
-          sudo umount /dropbox/self-hosted/openclaw/browser || true
-          sudo umount /dropbox/self-hosted/openclaw/tmp_workspace || true
-          sudo umount /dropbox/self-hosted/openclaw/tasks || true
