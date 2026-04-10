@@ -313,6 +313,7 @@ jobs:
           CURRENT_OPENCLAW_VERSION="$(openclaw --version 2>/dev/null | head -n 1 || true)"
           echo "CURRENT_OPENCLAW_VERSION=$CURRENT_OPENCLAW_VERSION" >> "$RUN_OPENCLAW_META"
           echo "FAIL_STAGE=initial_start" >> "$RUN_OPENCLAW_META"
+          INITIAL_START_BEGIN_TS=$(date +%s)
 
           # npm i -g "openclaw@2026.4.5"
           check_openclaw_health() {
@@ -345,10 +346,13 @@ jobs:
           if check_openclaw_health; then
               echo "✅ OpenClaw Gateway is healthy!"
           else
+              INITIAL_START_END_TS=$(date +%s)
+              echo "INITIAL_START_DURATION_SEC=$((INITIAL_START_END_TS - INITIAL_START_BEGIN_TS))" >> "$RUN_OPENCLAW_META"
               echo "⚠️ Gateway not healthy yet. Checking logs:"
               tail -n 20 openclaw.log || echo "No log file found."
 
               echo "FAIL_STAGE=doctor_fix" >> "$RUN_OPENCLAW_META"
+              DOCTOR_FIX_BEGIN_TS=$(date +%s)
               echo "🛠️ Attempting to fix with 'openclaw doctor --fix'..."
               openclaw doctor --fix
               openclaw gateway restart
@@ -357,8 +361,12 @@ jobs:
               sleep 15
 
               if check_openclaw_health; then
+                  DOCTOR_FIX_END_TS=$(date +%s)
+                  echo "DOCTOR_FIX_DURATION_SEC=$((DOCTOR_FIX_END_TS - DOCTOR_FIX_BEGIN_TS))" >> "$RUN_OPENCLAW_META"
                   echo "✅ OpenClaw Gateway is healthy after doctor fix!"
               else
+                  DOCTOR_FIX_END_TS=$(date +%s)
+                  echo "DOCTOR_FIX_DURATION_SEC=$((DOCTOR_FIX_END_TS - DOCTOR_FIX_BEGIN_TS))" >> "$RUN_OPENCLAW_META"
                   echo "FAIL_STAGE=fallback_reinstall" >> "$RUN_OPENCLAW_META"
                   echo "🔄 Doctor fix failed. Attempting to fallback and reinstall recorded OpenClaw version..."
 
@@ -379,6 +387,7 @@ jobs:
 
                   echo "Installing openclaw@$TARGET_VERSION ..."
                   echo "FALLBACK_TARGET_VERSION=$TARGET_VERSION" >> "$RUN_OPENCLAW_META"
+                  FALLBACK_REINSTALL_BEGIN_TS=$(date +%s)
                   npm i -g "openclaw@$TARGET_VERSION"
 
                   sudo chmod -R o-w $(npm root -g)
@@ -395,8 +404,12 @@ jobs:
                   sleep 15
 
                   if check_openclaw_health; then
+                    FALLBACK_REINSTALL_END_TS=$(date +%s)
+                    echo "FALLBACK_REINSTALL_DURATION_SEC=$((FALLBACK_REINSTALL_END_TS - FALLBACK_REINSTALL_BEGIN_TS))" >> "$RUN_OPENCLAW_META"
                     echo "✅ OpenClaw Gateway is healthy after fallback reinstall!"
                   else
+                    FALLBACK_REINSTALL_END_TS=$(date +%s)
+                    echo "FALLBACK_REINSTALL_DURATION_SEC=$((FALLBACK_REINSTALL_END_TS - FALLBACK_REINSTALL_BEGIN_TS))" >> "$RUN_OPENCLAW_META"
                     err="回退到最近记录版本后，OpenClaw 依然无法启动（健康检查失败）"
                     fail_startup "$err"
                   fi
@@ -453,10 +466,16 @@ jobs:
             current_version=""
             fallback_version=""
             fail_stage=""
+            initial_start_duration_sec=""
+            doctor_fix_duration_sec=""
+            fallback_reinstall_duration_sec=""
             if [ -f "$meta_file" ]; then
               current_version=$(grep '^CURRENT_OPENCLAW_VERSION=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
               fallback_version=$(grep '^FALLBACK_TARGET_VERSION=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
               fail_stage=$(grep '^FAIL_STAGE=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
+              initial_start_duration_sec=$(grep '^INITIAL_START_DURATION_SEC=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
+              doctor_fix_duration_sec=$(grep '^DOCTOR_FIX_DURATION_SEC=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
+              fallback_reinstall_duration_sec=$(grep '^FALLBACK_REINSTALL_DURATION_SEC=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
             fi
 
             export RUN_URL="$run_url"
@@ -465,14 +484,37 @@ jobs:
             export CURRENT_VERSION="$current_version"
             export FALLBACK_VERSION="$fallback_version"
             export FAIL_STAGE="$fail_stage"
+            export INITIAL_START_DURATION_SEC="$initial_start_duration_sec"
+            export DOCTOR_FIX_DURATION_SEC="$doctor_fix_duration_sec"
+            export FALLBACK_REINSTALL_DURATION_SEC="$fallback_reinstall_duration_sec"
             msg=$(python3 <<'PY'
 import html, os
+
+def fmt_duration(raw: str) -> str:
+    raw = (raw or '').strip()
+    if not raw:
+        return ''
+    try:
+        sec = int(raw)
+    except ValueError:
+        return raw
+    if sec < 60:
+        return f"{sec}s"
+    m, s = divmod(sec, 60)
+    if m < 60:
+        return f"{m}m {s}s"
+    h, m = divmod(m, 60)
+    return f"{h}h {m}m {s}s"
+
 run_url = os.environ.get('RUN_URL', '')
 tmate_url = os.environ.get('TMATE_URL', '')
 error_summary = os.environ.get('ERROR_SUMMARY', '')
 current_version = os.environ.get('CURRENT_VERSION', '').strip()
 fallback_version = os.environ.get('FALLBACK_VERSION', '').strip()
 fail_stage = os.environ.get('FAIL_STAGE', '').strip()
+initial_start_duration = fmt_duration(os.environ.get('INITIAL_START_DURATION_SEC', ''))
+doctor_fix_duration = fmt_duration(os.environ.get('DOCTOR_FIX_DURATION_SEC', ''))
+fallback_reinstall_duration = fmt_duration(os.environ.get('FALLBACK_REINSTALL_DURATION_SEC', ''))
 stage_map = {
     'initial_start': '首次启动后健康检查失败',
     'doctor_fix': '执行 openclaw doctor --fix 后仍失败',
@@ -485,6 +527,12 @@ if current_version:
     version_lines.append(f"<b>当前尝试版本：</b><code>{html.escape(current_version)}</code>")
 if fallback_version:
     version_lines.append(f"<b>Fallback 目标版本：</b><code>{html.escape(fallback_version)}</code>")
+if initial_start_duration:
+    version_lines.append(f"<b>首次启动耗时：</b>{html.escape(initial_start_duration)}")
+if doctor_fix_duration:
+    version_lines.append(f"<b>Doctor 修复阶段耗时：</b>{html.escape(doctor_fix_duration)}")
+if fallback_reinstall_duration:
+    version_lines.append(f"<b>Fallback 重装阶段耗时：</b>{html.escape(fallback_reinstall_duration)}")
 version_block = "\n".join(version_lines)
 if version_block:
     version_block += "\n"
