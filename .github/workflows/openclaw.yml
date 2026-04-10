@@ -299,6 +299,10 @@ jobs:
       - name: Run OpenClaw
         id: run_openclaw
         run: |
+          RUN_OPENCLAW_STEP_LOG="/tmp/run-openclaw-step.log"
+          : > "$RUN_OPENCLAW_STEP_LOG"
+          exec > >(tee -a "$RUN_OPENCLAW_STEP_LOG") 2>&1
+
           # npm i -g "openclaw@2026.4.5"
           check_openclaw_health() {
             if sudo lsof -Pi :18789 -sTCP:LISTEN -t >/dev/null && [ "$(curl -fsS -o /dev/null -w "%{http_code}" --max-time 5 http://127.0.0.1:18789/health || true)" = "200" ]; then
@@ -399,12 +403,29 @@ jobs:
           if [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] && [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ]; then
             run_url="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             tmate_log="$RUNNER_TEMP/tmate-connection.log"
+            step_log="/tmp/run-openclaw-step.log"
 
-            error_summary=$(perl -pe 's/\x1b\[[0-9;]*[A-Za-z]//g; s/\r//g' openclaw.log 2>/dev/null | grep -Ei 'error|fail|exception' | tail -n 20 || true)
-            if [ -z "$error_summary" ]; then
-              error_summary=$(tail -n 20 openclaw.log 2>/dev/null || echo "openclaw.log not found")
+            sanitize_log() {
+              perl -pe 's/\x1b\[[0-9;]*[A-Za-z]//g; s/\r//g'
+            }
+
+            error_summary=""
+            if [ -f openclaw.log ]; then
+              error_summary=$(sanitize_log < openclaw.log | grep -Ei 'error|fail|exception|unhealthy|timed out|cannot|denied|missing|invalid' | tail -n 20 || true)
+              if [ -z "$error_summary" ]; then
+                error_summary=$(sanitize_log < openclaw.log | tail -n 40 || true)
+              fi
             fi
-            error_summary=$(printf '%s' "$error_summary" | tail -c 2500)
+            if [ -z "$error_summary" ] && [ -f "$step_log" ]; then
+              error_summary=$(sanitize_log < "$step_log" | grep -Ei 'error|fail|exception|unhealthy|timed out|cannot|denied|missing|invalid|doctor|fallback|restart' | tail -n 30 || true)
+              if [ -z "$error_summary" ]; then
+                error_summary=$(sanitize_log < "$step_log" | tail -n 60 || true)
+              fi
+            fi
+            if [ -z "$error_summary" ]; then
+              error_summary="openclaw.log 与步骤日志均未找到可用摘要"
+            fi
+            error_summary=$(printf '%s' "$error_summary" | tail -c 2800)
 
             tmate_url=""
             if [ -f "$tmate_log" ]; then
@@ -414,19 +435,29 @@ jobs:
               tmate_url="（tmate 链接暂不可用，稍后查看 Actions 日志）"
             fi
 
-            msg=$(printf '%s\n' \
-              '⚠️ OpenClaw 启动失败报告' \
-              '' \
-              '步骤: Run OpenClaw' \
-              'Run ID: ${{ github.run_id }}' \
-              "链接: ${run_url}" \
-              "TMate: ${tmate_url}" \
-              '' \
-              '关键日志：' \
-              "$error_summary")
+            export RUN_URL="$run_url"
+            export TMATE_URL="$tmate_url"
+            export ERROR_SUMMARY="$error_summary"
+            msg=$(python3 <<'PY'
+import html, os
+run_url = os.environ.get('RUN_URL', '')
+tmate_url = os.environ.get('TMATE_URL', '')
+error_summary = os.environ.get('ERROR_SUMMARY', '')
+print(
+    "⚠️ <b>OpenClaw 启动失败</b>\n\n"
+    f"<b>步骤：</b>Run OpenClaw\n"
+    f"<b>Run ID：</b><code>${{ github.run_id }}</code>\n"
+    f"<b>链接：</b><a href=\"{html.escape(run_url, quote=True)}\">查看 Actions Run</a>\n"
+    f"<b>TMate：</b>{html.escape(tmate_url)}\n\n"
+    f"<b>关键日志：</b>\n<pre>{html.escape(error_summary)}</pre>"
+)
+PY
+)
             curl -fsS --retry 3 --retry-delay 2 --max-time 20 \
               -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
               -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+              -d parse_mode="HTML" \
+              -d disable_web_page_preview="true" \
               --data-urlencode text="$msg"
           else
             echo "⚠️ Telegram alert skipped: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is empty"
