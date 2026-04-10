@@ -386,6 +386,10 @@ jobs:
           fi
 
           echo "Starting background archive tasks: export CLIProxyAPI stats + archive ~/.openclaw every 20 minutes..."
+          # 这里拆成两个临时脚本，不是重复：
+          # 1) /tmp/create-openclaw-archive.sh 负责“单次归档”——筛选 ~/.openclaw、打包、校验 tar。
+          # 2) /tmp/openclaw-archive-loop.sh 负责“循环调度”——每 20 分钟调用一次上面的单次归档脚本并上传 Dropbox。
+          # 这样拆开后，后面的“最终收尾归档”也能直接复用 create-openclaw-archive.sh，避免重复维护两份打包逻辑。
           cat > /tmp/create-openclaw-archive.sh <<'EOF'
           #!/usr/bin/env bash
           set -euo pipefail
