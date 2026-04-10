@@ -312,6 +312,7 @@ jobs:
 
           CURRENT_OPENCLAW_VERSION="$(openclaw --version 2>/dev/null | head -n 1 || true)"
           echo "CURRENT_OPENCLAW_VERSION=$CURRENT_OPENCLAW_VERSION" >> "$RUN_OPENCLAW_META"
+          echo "FAIL_STAGE=initial_start" >> "$RUN_OPENCLAW_META"
 
           # npm i -g "openclaw@2026.4.5"
           check_openclaw_health() {
@@ -347,6 +348,7 @@ jobs:
               echo "⚠️ Gateway not healthy yet. Checking logs:"
               tail -n 20 openclaw.log || echo "No log file found."
 
+              echo "FAIL_STAGE=doctor_fix" >> "$RUN_OPENCLAW_META"
               echo "🛠️ Attempting to fix with 'openclaw doctor --fix'..."
               openclaw doctor --fix
               openclaw gateway restart
@@ -357,6 +359,7 @@ jobs:
               if check_openclaw_health; then
                   echo "✅ OpenClaw Gateway is healthy after doctor fix!"
               else
+                  echo "FAIL_STAGE=fallback_reinstall" >> "$RUN_OPENCLAW_META"
                   echo "🔄 Doctor fix failed. Attempting to fallback and reinstall recorded OpenClaw version..."
 
                   CONFIG_FILE="/dropbox/self-hosted/openclaw/openclaw.json"
@@ -449,9 +452,11 @@ jobs:
 
             current_version=""
             fallback_version=""
+            fail_stage=""
             if [ -f "$meta_file" ]; then
               current_version=$(grep '^CURRENT_OPENCLAW_VERSION=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
               fallback_version=$(grep '^FALLBACK_TARGET_VERSION=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
+              fail_stage=$(grep '^FAIL_STAGE=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
             fi
 
             export RUN_URL="$run_url"
@@ -459,6 +464,7 @@ jobs:
             export ERROR_SUMMARY="$error_summary"
             export CURRENT_VERSION="$current_version"
             export FALLBACK_VERSION="$fallback_version"
+            export FAIL_STAGE="$fail_stage"
             msg=$(python3 <<'PY'
 import html, os
 run_url = os.environ.get('RUN_URL', '')
@@ -466,7 +472,15 @@ tmate_url = os.environ.get('TMATE_URL', '')
 error_summary = os.environ.get('ERROR_SUMMARY', '')
 current_version = os.environ.get('CURRENT_VERSION', '').strip()
 fallback_version = os.environ.get('FALLBACK_VERSION', '').strip()
+fail_stage = os.environ.get('FAIL_STAGE', '').strip()
+stage_map = {
+    'initial_start': '首次启动后健康检查失败',
+    'doctor_fix': '执行 openclaw doctor --fix 后仍失败',
+    'fallback_reinstall': '回退重装记录版本后仍失败',
+}
 version_lines = []
+if fail_stage:
+    version_lines.append(f"<b>失败阶段：</b>{html.escape(stage_map.get(fail_stage, fail_stage))}")
 if current_version:
     version_lines.append(f"<b>当前尝试版本：</b><code>{html.escape(current_version)}</code>")
 if fallback_version:
