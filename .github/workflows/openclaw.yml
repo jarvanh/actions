@@ -492,23 +492,13 @@ jobs:
           if [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] && [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ]; then
             run_url="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             tmate_log="$RUNNER_TEMP/tmate-connection.log"
-            error_summary=$(python - <<'PY'
-from pathlib import Path
-import re
-p = Path("openclaw.log")
-text = p.read_text(errors="ignore") if p.exists() else "openclaw.log not found"
-text = re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', text)
-text = text.replace('\r', '')
-lines = text.splitlines()
-keywords = re.compile(r'(error|fail|exception)', re.I)
-matched = [line for line in lines if keywords.search(line)]
-if matched:
-    print('\n'.join(matched[-20:]))
-else:
-    print('\n'.join(lines[-20:]) if lines else 'openclaw.log empty')
-PY
-)
-            error_summary="${error_summary: -2500}"
+
+            error_summary=$(perl -pe 's/\x1b\[[0-9;]*[A-Za-z]//g; s/\r//g' openclaw.log 2>/dev/null | grep -Ei 'error|fail|exception' | tail -n 20 || true)
+            if [ -z "$error_summary" ]; then
+              error_summary=$(tail -n 20 openclaw.log 2>/dev/null || echo "openclaw.log not found")
+            fi
+            error_summary=$(printf '%s' "$error_summary" | tail -c 2500)
+
             tmate_url=""
             if [ -f "$tmate_log" ]; then
               tmate_url=$(grep -Eo 'https://tmate\.io/t/[A-Za-z0-9_-]+' "$tmate_log" | tail -n 1 || true)
@@ -516,15 +506,17 @@ PY
             if [ -z "$tmate_url" ]; then
               tmate_url="（tmate 链接暂不可用，稍后查看 Actions 日志）"
             fi
-            msg="⚠️ OpenClaw 启动失败报告
 
-步骤: Run OpenClaw
-Run ID: ${{ github.run_id }}
-链接: ${run_url}
-TMate: ${tmate_url}
-
-关键日志：
-${error_summary}"
+            msg=$(printf '%s\n' \
+              '⚠️ OpenClaw 启动失败报告' \
+              '' \
+              '步骤: Run OpenClaw' \
+              'Run ID: ${{ github.run_id }}' \
+              "链接: ${run_url}" \
+              "TMate: ${tmate_url}" \
+              '' \
+              '关键日志：' \
+              "$error_summary")
             curl -fsS --retry 3 --retry-delay 2 --max-time 20 \
               -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
               -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
