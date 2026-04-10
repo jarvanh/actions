@@ -480,6 +480,7 @@ jobs:
           if [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] && [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ]; then
             run_url="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             log_file="$RUNNER_TEMP/openclaw-startup.log"
+            tmate_log="$RUNNER_TEMP/tmate-connection.log"
             if [ -f openclaw.log ]; then
               cp openclaw.log "$log_file"
             else
@@ -492,15 +493,29 @@ p = Path("openclaw.log")
 text = p.read_text(errors="ignore") if p.exists() else "openclaw.log not found"
 text = re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', text)
 text = text.replace('\r', '')
-print(text.splitlines()[-40:] and '\n'.join(text.splitlines()[-40:]) or text)
+lines = text.splitlines()
+keywords = re.compile(r'(error|fail|exception)', re.I)
+matched = [line for line in lines if keywords.search(line)]
+if matched:
+    print('\n'.join(matched[-20:]))
+else:
+    print('\n'.join(lines[-20:]) if lines else 'openclaw.log empty')
 PY
 )
             error_summary="${error_summary: -2500}"
+            tmate_url=""
+            if [ -f "$tmate_log" ]; then
+              tmate_url=$(grep -Eo 'https://tmate\.io/t/[A-Za-z0-9_-]+' "$tmate_log" | tail -n 1 || true)
+            fi
+            if [ -z "$tmate_url" ]; then
+              tmate_url="（tmate 链接暂不可用，稍后查看 Actions 日志）"
+            fi
             msg="⚠️ OpenClaw 启动失败报告
 
 步骤: Run OpenClaw
 Run ID: ${{ github.run_id }}
 链接: ${run_url}
+TMate: ${tmate_url}
 
 关键日志：
 ${error_summary}"
