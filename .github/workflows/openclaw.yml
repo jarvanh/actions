@@ -74,19 +74,17 @@ jobs:
 
       - name: Run Cloudflared Tunnel
         run: |
-          # 提前在 Dropbox 挂载目录中创建 logs 文件夹并赋予权限
-          sudo mkdir -p /dropbox/self-hosted/openclaw/logs
+          mkdir -p ~/.openclaw/logs
 
           cloudflared tunnel route dns oc oc.'${{ secrets.VD }}'.eu.org || true
 
           # 启动隧道并记录 PID
-          # 使用 nohup 配合重定向，确保进程在后台稳健运行，日志直接写入 Dropbox
           nohup cloudflared tunnel run --url http://127.0.0.1:18789 oc \
-            > /dropbox/self-hosted/openclaw/logs/cloudflared_oc.log 2>&1 &
+            > ~/.openclaw/logs/cloudflared_oc.log 2>&1 &
 
           # 等待一小段时间确保进程启动成功并记录 PID
           sleep 10
-          echo $! > /dropbox/self-hosted/openclaw/logs/cloudflared_oc.pid
+          echo $! > ~/.openclaw/logs/cloudflared_oc.pid
 
       - name: Run rss-to-telegram container
         run: |
@@ -95,7 +93,7 @@ jobs:
           rm -rf /tmp/local_rsstt
           mkdir -p /tmp/local_rsstt
 
-          if [ -f /dropbox/self-hosted/openclaw/.env ]; then
+          if [ -f ~/.openclaw/.env ]; then
             if rclone ls dropbox:self-hosted/rsstt.tar.gz > /dev/null 2>&1; then
               echo "📦 Found rsstt.tar.gz! Downloading and extracting..."
               rclone copyto dropbox:self-hosted/rsstt.tar.gz /tmp/rsstt.tar.gz
@@ -120,7 +118,7 @@ jobs:
 
             mkdir -p /tmp/local_rsstt/config
             set -a
-            source /dropbox/self-hosted/openclaw/.env
+            source ~/.openclaw/.env
             set +a
 
             docker rm -f rss-to-telegram 2>/dev/null || true
@@ -231,12 +229,12 @@ jobs:
           # 启动前清理可能残留的 ai-api 隧道进程
           pkill -f "cloudflared tunnel run --protocol http2 --url http://127.0.0.1:8317 ai-api" || true
 
-          # 运行 8317 端口的命名隧道，并将输出保存到 Dropbox
+          # 运行 8317 端口的命名隧道，并将输出保存到 ~/.openclaw/logs
           nohup cloudflared tunnel run --protocol http2 --url http://127.0.0.1:8317 ai-api \
-            > /dropbox/self-hosted/openclaw/logs/cloudflared_CLIProxyAPI.log 2>&1 &
+            > ~/.openclaw/logs/cloudflared_CLIProxyAPI.log 2>&1 &
 
           sleep 5
-          echo $! > /dropbox/self-hosted/openclaw/logs/cloudflared_CLIProxyAPI.pid
+          echo $! > ~/.openclaw/logs/cloudflared_CLIProxyAPI.pid
 
           echo "CLIProxyAPI 命名隧道已启动：ai-api（固定地址模式）"
 
@@ -245,13 +243,13 @@ jobs:
           echo "Installing OpenClaw base..."
           curl -fsSL https://openclaw.ai/install.sh | bash -s -- --no-onboard
 
-          echo "/home/runner/.npm-global/bin" >> $GITHUB_PATH
-          export PATH="/home/runner/.npm-global/bin:$PATH"
+          echo "$HOME/.npm-global/bin" >> $GITHUB_PATH
+          export PATH="$HOME/.npm-global/bin:$PATH"
 
           echo "Configuring local ~/.openclaw with Dropbox-linked config..."
           mkdir -p /dropbox/self-hosted/openclaw
-          mkdir -p /home/runner/.openclaw
-          mkdir -p /home/runner/.openclaw/extensions
+          mkdir -p ~/.openclaw
+          mkdir -p ~/.openclaw/extensions
 
           TMP_OPENCLAW_TAR="/tmp/openclaw.tar.gz"
           RESTORE_DIR="/tmp/openclaw-restore"
@@ -266,8 +264,8 @@ jobs:
             if [ -s "$TMP_OPENCLAW_TAR" ] && tar -tzf "$TMP_OPENCLAW_TAR" >/dev/null 2>&1; then
               tar -xzf "$TMP_OPENCLAW_TAR" -C "$RESTORE_DIR"
               if [ -d "$RESTORE_DIR/.openclaw" ]; then
-                find /home/runner/.openclaw -mindepth 1 -maxdepth 1 -exec rm -rf {} +
-                cp -a "$RESTORE_DIR/.openclaw/." /home/runner/.openclaw/
+                find ~/.openclaw -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+                cp -a "$RESTORE_DIR/.openclaw/." ~/.openclaw/
                 echo "✅ Restored ~/.openclaw from archive"
               else
                 echo "⚠️ Archive does not contain .openclaw root, skipping archive restore."
@@ -278,7 +276,7 @@ jobs:
             rm -f "$TMP_OPENCLAW_TAR"
           else
             echo "⚠️ No openclaw archive found. Falling back to sync from raw directory..."
-            rclone copy dropbox:self-hosted/openclaw /home/runner/.openclaw \
+            rclone copy dropbox:self-hosted/openclaw ~/.openclaw \
               --retries 10 \
               --low-level-retries 20 \
               --timeout 1m \
@@ -290,13 +288,13 @@ jobs:
           echo "OPENCLAW_CONFIG_PATH=/dropbox/self-hosted/openclaw/openclaw.json" >> $GITHUB_ENV
           export OPENCLAW_CONFIG_PATH=/dropbox/self-hosted/openclaw/openclaw.json
 
-          rm -f /home/runner/.openclaw/openclaw.json
-          if [ -f /dropbox/self-hosted/openclaw/openclaw.json ]; then
-            cp -f /dropbox/self-hosted/openclaw/openclaw.json /home/runner/.openclaw/openclaw.json
+          rm -f ~/.openclaw/openclaw.json
+          if [ -f "$OPENCLAW_CONFIG_PATH" ]; then
+            cp -f "$OPENCLAW_CONFIG_PATH" ~/.openclaw/openclaw.json
           fi
 
-          rm -f /home/runner/.openclaw/.env
-          ln -s /dropbox/self-hosted/openclaw/.env /home/runner/.openclaw/.env
+          rm -f ~/.openclaw/.env
+          ln -s /dropbox/self-hosted/openclaw/.env ~/.openclaw/.env
 
           npm i -g @google/gemini-cli
           npm i -g clawhub
@@ -370,19 +368,18 @@ jobs:
                   echo "FAIL_STAGE=fallback_reinstall" >> "$RUN_OPENCLAW_META"
                   echo "🔄 Doctor fix failed. Attempting to fallback and reinstall recorded OpenClaw version..."
 
-                  CONFIG_FILE="/dropbox/self-hosted/openclaw/openclaw.json"
                   TARGET_VERSION=""
 
-                  if [ -s "$CONFIG_FILE" ]; then
-                    READ_VERSION=$(sudo jq -r '.wizard.lastRunVersion // empty' "$CONFIG_FILE" 2>/dev/null)
+                  if [ -s "$OPENCLAW_CONFIG_PATH" ]; then
+                    READ_VERSION=$(sudo jq -r '.wizard.lastRunVersion // empty' "$OPENCLAW_CONFIG_PATH" 2>/dev/null)
                     if [ -n "$READ_VERSION" ] && [ "$READ_VERSION" != "null" ]; then
                       TARGET_VERSION="$READ_VERSION"
                       echo "✅ Found recorded version in config: $TARGET_VERSION"
                     else
-                      fail_startup ".wizard.lastRunVersion not found in $CONFIG_FILE"
+                      fail_startup ".wizard.lastRunVersion not found in $OPENCLAW_CONFIG_PATH"
                     fi
                   else
-                    fail_startup "Config file missing or empty at $CONFIG_FILE"
+                    fail_startup "Config file missing or empty at $OPENCLAW_CONFIG_PATH"
                   fi
 
                   echo "Installing openclaw@$TARGET_VERSION ..."
@@ -583,7 +580,7 @@ jobs:
             rm -rf "$STAGE_DIR"
             mkdir -p "$STAGE_DIR/.openclaw"
 
-            cd /home/runner
+            cd "$HOME"
             find .openclaw \
               \( \
                 -path '.openclaw/logs' -o \
@@ -606,13 +603,13 @@ jobs:
               -print0 | tar \
                 --null \
                 --no-recursion \
-                -C /home/runner \
+                -C "$HOME" \
                 -cf - \
                 -T - | tar -C "$STAGE_DIR" -xf -
 
-            if [ -f /dropbox/self-hosted/openclaw/openclaw.json ]; then
-              cp -f /dropbox/self-hosted/openclaw/openclaw.json "$STAGE_DIR/.openclaw/openclaw.json"
-              cp -f /dropbox/self-hosted/openclaw/openclaw.json /home/runner/.openclaw/openclaw.json
+            if [ -f "$OPENCLAW_CONFIG_PATH" ]; then
+              cp -f "$OPENCLAW_CONFIG_PATH" "$STAGE_DIR/.openclaw/openclaw.json"
+              cp -f "$OPENCLAW_CONFIG_PATH" ~/.openclaw/openclaw.json
             fi
 
             if [ -f /dropbox/self-hosted/openclaw/.env ]; then
@@ -728,7 +725,7 @@ jobs:
         if: always()
         run: |
           echo "Syncing ~/.openclaw to Dropbox..."
-          rclone sync /home/runner/.openclaw dropbox:self-hosted/openclaw \
+          rclone sync ~/.openclaw dropbox:self-hosted/openclaw \
             --exclude "logs/**" \
             --exclude "cache/**" \
             --exclude "tmp/**" \
