@@ -309,11 +309,21 @@ jobs:
             local msg="$1"
             if [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] && [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ]; then
               local run_url="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-              local full_msg=$(printf "⚠️ OpenClaw 启动失败报告\n\n问题: %s\nRun ID: %s\n链接: %s" "$msg" "${{ github.run_id }}" "$run_url")
-              curl -fsS -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+              local full_msg
+              full_msg=$(printf "⚠️ OpenClaw 启动失败报告\n\n问题: %s\nRun ID: %s\n链接: %s" "$msg" "${{ github.run_id }}" "$run_url")
+              curl -fsS --retry 3 --retry-delay 2 --max-time 20 \
+                -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
                 -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
-                --data-urlencode text="$full_msg"
+                --data-urlencode text="$full_msg" || echo "⚠️ Telegram alert send failed"
+            else
+              echo "⚠️ Telegram alert skipped: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is empty"
             fi
+          }
+          fail_startup() {
+            local msg="$1"
+            echo "❌ $msg"
+            send_telegram_alert "$msg"
+            exit 1
           }
 
 
@@ -358,12 +368,10 @@ jobs:
                       TARGET_VERSION="$READ_VERSION"
                       echo "✅ Found recorded version in config: $TARGET_VERSION"
                     else
-                      echo "❌ .wizard.lastRunVersion not found in $CONFIG_FILE"
-                      exit 1
+                      fail_startup ".wizard.lastRunVersion not found in $CONFIG_FILE"
                     fi
                   else
-                    echo "❌ Config file missing or empty at $CONFIG_FILE"
-                    exit 1
+                    fail_startup "Config file missing or empty at $CONFIG_FILE"
                   fi
 
                   echo "Installing openclaw@$TARGET_VERSION ..."
@@ -385,10 +393,8 @@ jobs:
                   if check_openclaw_health; then
                     echo "✅ OpenClaw Gateway is healthy after fallback reinstall!"
                   else
-                    local err="回退到最近记录版本后，OpenClaw 依然无法启动（健康检查失败）"
-                    echo "❌ $err"
-                    send_telegram_alert "$err"
-                    exit 1
+                    err="回退到最近记录版本后，OpenClaw 依然无法启动（健康检查失败）"
+                    fail_startup "$err"
                   fi
               fi
           fi
