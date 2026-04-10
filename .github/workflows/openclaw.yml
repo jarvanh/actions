@@ -462,18 +462,14 @@ jobs:
           echo $$ > "$PID_FILE"
           trap 'rm -f "$PID_FILE"' EXIT
 
-          archive_openclaw() {
-            if /tmp/create-openclaw-archive.sh "$TMP_OPENCLAW_TAR" >/dev/null; then
+          while true; do
+            if flock -n "$LOCK_FILE" /tmp/create-openclaw-archive.sh "$TMP_OPENCLAW_TAR" >/dev/null; then
               echo "[$(date '+%F %T')] archive ok, uploading..."
               rclone copyto "$TMP_OPENCLAW_TAR" dropbox:self-hosted/openclaw.tar.gz
               echo "[$(date '+%F %T')] upload ok"
             else
               echo "[$(date '+%F %T')] ⚠️ openclaw.tar.gz validation failed in periodic archive"
             fi
-          }
-
-          while true; do
-            flock -n "$LOCK_FILE" bash -c "$(declare -f archive_openclaw); archive_openclaw" || echo "[$(date '+%F %T')] ⚠️ previous archive still running, skip this round"
             sleep 1200
           done
           EOF
