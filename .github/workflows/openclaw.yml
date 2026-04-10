@@ -266,7 +266,7 @@ jobs:
             if [ -s "$TMP_OPENCLAW_TAR" ] && tar -tzf "$TMP_OPENCLAW_TAR" >/dev/null 2>&1; then
               tar -xzf "$TMP_OPENCLAW_TAR" -C "$RESTORE_DIR"
               if [ -d "$RESTORE_DIR/.openclaw" ]; then
-                find /home/runner/.openclaw -mindepth 1 -maxdepth 1 ! -name openclaw.json ! -name .env -exec rm -rf {} +
+                find /home/runner/.openclaw -mindepth 1 -maxdepth 1 -exec rm -rf {} +
                 cp -a "$RESTORE_DIR/.openclaw/." /home/runner/.openclaw/
                 echo "✅ Restored ~/.openclaw from archive"
               else
@@ -287,8 +287,13 @@ jobs:
               -P || true
           fi
 
+          echo "OPENCLAW_CONFIG_PATH=/dropbox/self-hosted/openclaw/openclaw.json" >> $GITHUB_ENV
+          export OPENCLAW_CONFIG_PATH=/dropbox/self-hosted/openclaw/openclaw.json
+
           rm -f /home/runner/.openclaw/openclaw.json
-          ln -s /dropbox/self-hosted/openclaw/openclaw.json /home/runner/.openclaw/openclaw.json
+          if [ -f /dropbox/self-hosted/openclaw/openclaw.json ]; then
+            cp -f /dropbox/self-hosted/openclaw/openclaw.json /home/runner/.openclaw/openclaw.json
+          fi
 
           rm -f /home/runner/.openclaw/.env
           ln -s /dropbox/self-hosted/openclaw/.env /home/runner/.openclaw/.env
@@ -485,6 +490,10 @@ PY
           rm -f "$OUTPUT_TAR"
 
           build_openclaw_manifest() {
+            local STAGE_DIR="/tmp/openclaw-archive-stage"
+            rm -rf "$STAGE_DIR"
+            mkdir -p "$STAGE_DIR/.openclaw"
+
             cd /home/runner
             find .openclaw \
               \( \
@@ -498,8 +507,6 @@ PY
                 -path '.openclaw/browser/*/GraphiteDawnCache' \
               \) -prune -o \
               \( \
-                -path '.openclaw/openclaw.json' -o \
-                -path '.openclaw/.env' -o \
                 -name 'SingletonLock' -o \
                 -name 'SingletonSocket' -o \
                 -name 'SingletonCookie' -o \
@@ -507,15 +514,26 @@ PY
                 -name '*.pid' -o \
                 -name '*.jsonl.lock' \
               \) -prune -o \
-              -print0
+              -print0 | tar \
+                --null \
+                --no-recursion \
+                -C /home/runner \
+                -cf - \
+                -T - | tar -C "$STAGE_DIR" -xf -
+
+            if [ -f /dropbox/self-hosted/openclaw/openclaw.json ]; then
+              cp -f /dropbox/self-hosted/openclaw/openclaw.json "$STAGE_DIR/.openclaw/openclaw.json"
+              cp -f /dropbox/self-hosted/openclaw/openclaw.json /home/runner/.openclaw/openclaw.json
+            fi
+
+            if [ -f /dropbox/self-hosted/openclaw/.env ]; then
+              cp -f /dropbox/self-hosted/openclaw/.env "$STAGE_DIR/.openclaw/.env"
+            fi
+
+            tar -C "$STAGE_DIR" -czf "$OUTPUT_TAR" .openclaw
           }
 
-          build_openclaw_manifest | tar \
-            --null \
-            --no-recursion \
-            -C /home/runner \
-            -czf "$OUTPUT_TAR" \
-            -T -
+          build_openclaw_manifest
 
           if [ -s "$OUTPUT_TAR" ] \
             && [ "$(stat -c%s "$OUTPUT_TAR" 2>/dev/null || echo 0)" -ge "$MIN_SIZE" ] \
