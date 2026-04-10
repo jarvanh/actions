@@ -488,65 +488,65 @@ jobs:
             export DOCTOR_FIX_DURATION_SEC="$doctor_fix_duration_sec"
             export FALLBACK_REINSTALL_DURATION_SEC="$fallback_reinstall_duration_sec"
             msg=$(python3 <<'PY'
-import html, os
+            import html, os
 
-def fmt_duration(raw: str) -> str:
-    raw = (raw or '').strip()
-    if not raw:
-        return ''
-    try:
-        sec = int(raw)
-    except ValueError:
-        return raw
-    if sec < 60:
-        return f"{sec}s"
-    m, s = divmod(sec, 60)
-    if m < 60:
-        return f"{m}m {s}s"
-    h, m = divmod(m, 60)
-    return f"{h}h {m}m {s}s"
+            def fmt_duration(raw):
+                raw = (raw or '').strip()
+                if not raw:
+                    return ''
+                try:
+                    sec = int(raw)
+                except ValueError:
+                    return raw
+                if sec < 60:
+                    return f"{sec}s"
+                m, s = divmod(sec, 60)
+                if m < 60:
+                    return f"{m}m {s}s"
+                h, m = divmod(m, 60)
+                return f"{h}h {m}m {s}s"
 
-run_url = os.environ.get('RUN_URL', '')
-tmate_url = os.environ.get('TMATE_URL', '')
-error_summary = os.environ.get('ERROR_SUMMARY', '')
-current_version = os.environ.get('CURRENT_VERSION', '').strip()
-fallback_version = os.environ.get('FALLBACK_VERSION', '').strip()
-fail_stage = os.environ.get('FAIL_STAGE', '').strip()
-initial_start_duration = fmt_duration(os.environ.get('INITIAL_START_DURATION_SEC', ''))
-doctor_fix_duration = fmt_duration(os.environ.get('DOCTOR_FIX_DURATION_SEC', ''))
-fallback_reinstall_duration = fmt_duration(os.environ.get('FALLBACK_REINSTALL_DURATION_SEC', ''))
-stage_map = {
-    'initial_start': '首次启动后健康检查失败',
-    'doctor_fix': '执行 openclaw doctor --fix 后仍失败',
-    'fallback_reinstall': '回退重装记录版本后仍失败',
-}
-version_lines = []
-if fail_stage:
-    version_lines.append(f"<b>失败阶段：</b>{html.escape(stage_map.get(fail_stage, fail_stage))}")
-if current_version:
-    version_lines.append(f"<b>当前尝试版本：</b><code>{html.escape(current_version)}</code>")
-if fallback_version:
-    version_lines.append(f"<b>Fallback 目标版本：</b><code>{html.escape(fallback_version)}</code>")
-if initial_start_duration:
-    version_lines.append(f"<b>首次启动耗时：</b>{html.escape(initial_start_duration)}")
-if doctor_fix_duration:
-    version_lines.append(f"<b>Doctor 修复阶段耗时：</b>{html.escape(doctor_fix_duration)}")
-if fallback_reinstall_duration:
-    version_lines.append(f"<b>Fallback 重装阶段耗时：</b>{html.escape(fallback_reinstall_duration)}")
-version_block = "\n".join(version_lines)
-if version_block:
-    version_block += "\n"
-print(
-    "⚠️ <b>OpenClaw 启动失败</b>\n\n"
-    f"<b>步骤：</b>Run OpenClaw\n"
-    f"<b>Run ID：</b><code>${{ github.run_id }}</code>\n"
-    f"<b>链接：</b><a href=\"{html.escape(run_url, quote=True)}\">查看 Actions Run</a>\n"
-    f"{version_block}"
-    f"<b>TMate：</b>{html.escape(tmate_url)}\n\n"
-    f"<b>关键日志：</b>\n<pre>{html.escape(error_summary)}</pre>"
-)
-PY
-)
+            run_url = os.environ.get('RUN_URL', '')
+            tmate_url = os.environ.get('TMATE_URL', '')
+            error_summary = os.environ.get('ERROR_SUMMARY', '')
+            current_version = os.environ.get('CURRENT_VERSION', '').strip()
+            fallback_version = os.environ.get('FALLBACK_VERSION', '').strip()
+            fail_stage = os.environ.get('FAIL_STAGE', '').strip()
+            initial_start_duration = fmt_duration(os.environ.get('INITIAL_START_DURATION_SEC', ''))
+            doctor_fix_duration = fmt_duration(os.environ.get('DOCTOR_FIX_DURATION_SEC', ''))
+            fallback_reinstall_duration = fmt_duration(os.environ.get('FALLBACK_REINSTALL_DURATION_SEC', ''))
+            stage_map = {
+                'initial_start': '首次启动后健康检查失败',
+                'doctor_fix': '执行 openclaw doctor --fix 后仍失败',
+                'fallback_reinstall': '回退重装记录版本后仍失败',
+            }
+            version_lines = []
+            if fail_stage:
+                version_lines.append(f"<b>失败阶段：</b>{html.escape(stage_map.get(fail_stage, fail_stage))}")
+            if current_version:
+                version_lines.append(f"<b>当前尝试版本：</b><code>{html.escape(current_version)}</code>")
+            if fallback_version:
+                version_lines.append(f"<b>Fallback 目标版本：</b><code>{html.escape(fallback_version)}</code>")
+            if initial_start_duration:
+                version_lines.append(f"<b>首次启动耗时：</b>{html.escape(initial_start_duration)}")
+            if doctor_fix_duration:
+                version_lines.append(f"<b>Doctor 修复阶段耗时：</b>{html.escape(doctor_fix_duration)}")
+            if fallback_reinstall_duration:
+                version_lines.append(f"<b>Fallback 重装阶段耗时：</b>{html.escape(fallback_reinstall_duration)}")
+            version_block = "\n".join(version_lines)
+            if version_block:
+                version_block += "\n"
+            print(
+                "⚠️ <b>OpenClaw 启动失败</b>\n\n"
+                f"<b>步骤：</b>Run OpenClaw\n"
+                f"<b>Run ID：</b><code>${{ github.run_id }}</code>\n"
+                f"<b>链接：</b><a href=\"{html.escape(run_url, quote=True)}\">查看 Actions Run</a>\n"
+                f"{version_block}"
+                f"<b>TMate：</b>{html.escape(tmate_url)}\n\n"
+                f"<b>关键日志：</b>\n<pre>{html.escape(error_summary)}</pre>"
+            )
+            PY
+            )
             curl -fsS --retry 3 --retry-delay 2 --max-time 20 \
               -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
               -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
