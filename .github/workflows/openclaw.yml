@@ -414,6 +414,7 @@ jobs:
           fi
 
       - name: Run tmate
+        continue-on-error: true
         if: always()
         uses: mxschmitt/action-tmate@v3
         with:
