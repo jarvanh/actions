@@ -479,19 +479,26 @@ jobs:
         run: |
           if [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] && [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ]; then
             run_url="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            log_file="$RUNNER_TEMP/openclaw-startup.log"
+            if [ -f openclaw.log ]; then
+              cp openclaw.log "$log_file"
+            else
+              echo "openclaw.log not found" > "$log_file"
+            fi
+            error_summary=$(tail -n 40 "$log_file" | perl -pe 's/\e\[[0-9;]*[A-Za-z]//g' | tr -d '' | tail -c 2500)
             msg="⚠️ OpenClaw 启动失败报告
 
 步骤: Run OpenClaw
 Run ID: ${{ github.run_id }}
-链接: ${run_url}"
-            curl -fsS --retry 3 --retry-delay 2 --max-time 20 \
-              -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-              -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
-              --data-urlencode text="$msg"
+链接: ${run_url}
+
+关键日志：
+${error_summary}"
+            curl -fsS --retry 3 --retry-delay 2 --max-time 20               -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage"               -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}"               --data-urlencode text="$msg"
           else
             echo "⚠️ Telegram alert skipped: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is empty"
           fi
-          
+
       - name: Configure tmate (Enable Mouse Mode)
         if: always()
         run: echo "set -g mouse on" > ~/.tmate.conf
