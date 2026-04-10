@@ -485,7 +485,17 @@ jobs:
             else
               echo "openclaw.log not found" > "$log_file"
             fi
-            error_summary=$(tail -n 40 "$log_file" | perl -0pe 's/\e\[[0-9;]*[A-Za-z]//g; s///g' | tail -c 2500)
+            error_summary=$(python - <<'PY'
+from pathlib import Path
+import re
+p = Path("openclaw.log")
+text = p.read_text(errors="ignore") if p.exists() else "openclaw.log not found"
+text = re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', text)
+text = text.replace('\r', '')
+print(text.splitlines()[-40:] and '\n'.join(text.splitlines()[-40:]) or text)
+PY
+)
+            error_summary="${error_summary: -2500}"
             msg="⚠️ OpenClaw 启动失败报告
 
 步骤: Run OpenClaw
@@ -494,7 +504,10 @@ Run ID: ${{ github.run_id }}
 
 关键日志：
 ${error_summary}"
-            curl -fsS --retry 3 --retry-delay 2 --max-time 20               -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage"               -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}"               --data-urlencode text="$msg"
+            curl -fsS --retry 3 --retry-delay 2 --max-time 20 \
+              -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+              -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+              --data-urlencode text="$msg"
           else
             echo "⚠️ Telegram alert skipped: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is empty"
           fi
