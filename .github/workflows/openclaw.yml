@@ -385,6 +385,61 @@ jobs:
               fi
           fi
 
+
+      - name: Configure tmate (Enable Mouse Mode)
+        if: always()
+        run: echo "set -g mouse on" > ~/.tmate.conf
+
+      - name: Run tmate
+        if: always()
+        uses: mxschmitt/action-tmate@v3
+        with:
+          detached: true
+          install-dependencies: true
+          limit-access-to-actor: true
+
+      - name: Notify OpenClaw startup failure
+        if: ${{ steps.run_openclaw.outcome == 'failure' }}
+        run: |
+          if [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] && [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ]; then
+            run_url="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            tmate_log="$RUNNER_TEMP/tmate-connection.log"
+
+            error_summary=$(perl -pe 's/\x1b\[[0-9;]*[A-Za-z]//g; s/\r//g' openclaw.log 2>/dev/null | grep -Ei 'error|fail|exception' | tail -n 20 || true)
+            if [ -z "$error_summary" ]; then
+              error_summary=$(tail -n 20 openclaw.log 2>/dev/null || echo "openclaw.log not found")
+            fi
+            error_summary=$(printf '%s' "$error_summary" | tail -c 2500)
+
+            tmate_url=""
+            if [ -f "$tmate_log" ]; then
+              tmate_url=$(grep -Eo 'https://tmate\.io/t/[A-Za-z0-9_-]+' "$tmate_log" | tail -n 1 || true)
+            fi
+            if [ -z "$tmate_url" ]; then
+              tmate_url="（tmate 链接暂不可用，稍后查看 Actions 日志）"
+            fi
+
+            msg=$(printf '%s\n' \
+              '⚠️ OpenClaw 启动失败报告' \
+              '' \
+              '步骤: Run OpenClaw' \
+              'Run ID: ${{ github.run_id }}' \
+              "链接: ${run_url}" \
+              "TMate: ${tmate_url}" \
+              '' \
+              '关键日志：' \
+              "$error_summary")
+            curl -fsS --retry 3 --retry-delay 2 --max-time 20 \
+              -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+              -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+              --data-urlencode text="$msg"
+          else
+            echo "⚠️ Telegram alert skipped: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is empty"
+          fi
+
+      - name: Start background archive loop
+        if: always()
+        run: |
           echo "Starting background archive tasks: export CLIProxyAPI stats + archive ~/.openclaw every 20 minutes..."
           # 这里拆成两个临时脚本，不是重复：
           # 1) /tmp/create-openclaw-archive.sh 负责“单次归档”——筛选 ~/.openclaw、打包、校验 tar。
@@ -477,57 +532,6 @@ jobs:
           chmod +x /tmp/openclaw-archive-loop.sh
           nohup /tmp/openclaw-archive-loop.sh > /tmp/openclaw-archive-loop.log 2>&1 &
           echo $! > /tmp/openclaw-archive-loop.launcher.pid
-
-      - name: Configure tmate (Enable Mouse Mode)
-        if: always()
-        run: echo "set -g mouse on" > ~/.tmate.conf
-
-      - name: Run tmate
-        if: always()
-        uses: mxschmitt/action-tmate@v3
-        with:
-          detached: true
-          install-dependencies: true
-          limit-access-to-actor: true
-
-      - name: Notify OpenClaw startup failure
-        if: ${{ steps.run_openclaw.outcome == 'failure' }}
-        run: |
-          if [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] && [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ]; then
-            run_url="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-            tmate_log="$RUNNER_TEMP/tmate-connection.log"
-
-            error_summary=$(perl -pe 's/\x1b\[[0-9;]*[A-Za-z]//g; s/\r//g' openclaw.log 2>/dev/null | grep -Ei 'error|fail|exception' | tail -n 20 || true)
-            if [ -z "$error_summary" ]; then
-              error_summary=$(tail -n 20 openclaw.log 2>/dev/null || echo "openclaw.log not found")
-            fi
-            error_summary=$(printf '%s' "$error_summary" | tail -c 2500)
-
-            tmate_url=""
-            if [ -f "$tmate_log" ]; then
-              tmate_url=$(grep -Eo 'https://tmate\.io/t/[A-Za-z0-9_-]+' "$tmate_log" | tail -n 1 || true)
-            fi
-            if [ -z "$tmate_url" ]; then
-              tmate_url="（tmate 链接暂不可用，稍后查看 Actions 日志）"
-            fi
-
-            msg=$(printf '%s\n' \
-              '⚠️ OpenClaw 启动失败报告' \
-              '' \
-              '步骤: Run OpenClaw' \
-              'Run ID: ${{ github.run_id }}' \
-              "链接: ${run_url}" \
-              "TMate: ${tmate_url}" \
-              '' \
-              '关键日志：' \
-              "$error_summary")
-            curl -fsS --retry 3 --retry-delay 2 --max-time 20 \
-              -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-              -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
-              --data-urlencode text="$msg"
-          else
-            echo "⚠️ Telegram alert skipped: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is empty"
-          fi
 
       - name: Keep alive
         if: always()
