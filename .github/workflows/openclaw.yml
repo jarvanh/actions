@@ -394,6 +394,63 @@ jobs:
           fi
 
           echo "Starting background archive tasks: export CLIProxyAPI stats + archive ~/.openclaw every 20 minutes..."
+          cat > /tmp/create-openclaw-archive.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          OUTPUT_TAR="${1:-}"
+          if [ -z "$OUTPUT_TAR" ]; then
+            echo "Usage: $0 /path/to/output.tar.gz" >&2
+            exit 2
+          fi
+
+          MIN_SIZE=$((1024 * 1024))
+          rm -f "$OUTPUT_TAR"
+
+          build_openclaw_manifest() {
+            cd /home/runner
+            find .openclaw \
+              \( \
+                -path '.openclaw/logs' -o \
+                -path '.openclaw/cache' -o \
+                -path '.openclaw/tmp' -o \
+                -path '.openclaw/browser/*/Crashpad' -o \
+                -path '.openclaw/browser/*/GPUCache' -o \
+                -path '.openclaw/browser/*/Code Cache' -o \
+                -path '.openclaw/browser/*/GrShaderCache' -o \
+                -path '.openclaw/browser/*/GraphiteDawnCache' \
+              \) -prune -o \
+              \( \
+                -path '.openclaw/openclaw.json' -o \
+                -path '.openclaw/.env' -o \
+                -name 'SingletonLock' -o \
+                -name 'SingletonSocket' -o \
+                -name 'SingletonCookie' -o \
+                -name '*.lock' -o \
+                -name '*.pid' -o \
+                -name '*.jsonl.lock' \
+              \) -prune -o \
+              -print0
+          }
+
+          build_openclaw_manifest | tar \
+            --null \
+            --no-recursion \
+            -C /home/runner \
+            -czf "$OUTPUT_TAR" \
+            -T -
+
+          if [ -s "$OUTPUT_TAR" ] \
+            && [ "$(stat -c%s "$OUTPUT_TAR" 2>/dev/null || echo 0)" -ge "$MIN_SIZE" ] \
+            && tar -tzf "$OUTPUT_TAR" >/dev/null 2>&1; then
+            echo "archive_ready"
+          else
+            echo "archive_invalid"
+            exit 1
+          fi
+          EOF
+          chmod +x /tmp/create-openclaw-archive.sh
+
           cat > /tmp/openclaw-archive-loop.sh <<'EOF'
           #!/usr/bin/env bash
           set -euo pipefail
@@ -401,44 +458,18 @@ jobs:
           TMP_OPENCLAW_TAR="/tmp/openclaw.tar.gz"
           LOCK_FILE="/tmp/openclaw-archive.lock"
           PID_FILE="/tmp/openclaw-archive.pid"
-          MIN_SIZE=$((1024 * 1024))
 
           echo $$ > "$PID_FILE"
           trap 'rm -f "$PID_FILE"' EXIT
 
           archive_openclaw() {
-            rm -f "$TMP_OPENCLAW_TAR"
-
-            tar \
-              -C /home/runner \
-              --exclude='.openclaw/logs' \
-              --exclude='.openclaw/cache' \
-              --exclude='.openclaw/tmp' \
-              --exclude='.openclaw/openclaw.json' \
-              --exclude='.openclaw/.env' \
-              --exclude='.openclaw/browser/**/SingletonLock' \
-              --exclude='.openclaw/browser/**/SingletonSocket' \
-              --exclude='.openclaw/browser/**/SingletonCookie' \
-              --exclude='.openclaw/browser/**/Crashpad/**' \
-              --exclude='.openclaw/browser/**/GPUCache/**' \
-              --exclude='.openclaw/browser/**/Code Cache/**' \
-              --exclude='.openclaw/browser/**/GrShaderCache/**' \
-              --exclude='.openclaw/browser/**/GraphiteDawnCache/**' \
-              --exclude='*.lock' \
-              --exclude='*.pid' \
-              --exclude='**/*.jsonl.lock' \
-              --exclude='**/sessions/*.lock' \
-              -czf "$TMP_OPENCLAW_TAR" \
-              .openclaw
-
-            if [ -s "$TMP_OPENCLAW_TAR" ] && [ "$(stat -c%s "$TMP_OPENCLAW_TAR" 2>/dev/null || echo 0)" -ge "$MIN_SIZE" ] && tar -tzf "$TMP_OPENCLAW_TAR" >/dev/null 2>&1; then
+            if /tmp/create-openclaw-archive.sh "$TMP_OPENCLAW_TAR" >/dev/null; then
               echo "[$(date '+%F %T')] archive ok, uploading..."
               rclone copyto "$TMP_OPENCLAW_TAR" dropbox:self-hosted/openclaw.tar.gz
               echo "[$(date '+%F %T')] upload ok"
             else
               echo "[$(date '+%F %T')] ⚠️ openclaw.tar.gz validation failed in periodic archive"
             fi
-
           }
 
           while true; do
@@ -487,35 +518,14 @@ jobs:
 
           echo "4. Performing final archive to Dropbox..."
           TMP_OPENCLAW_TAR="/tmp/openclaw-final.tar.gz"
-          MIN_SIZE=$((1024 * 1024))
-          rm -f "$TMP_OPENCLAW_TAR"
 
-          tar -czf "$TMP_OPENCLAW_TAR" \
-            -C /home/runner \
-            --exclude='.openclaw/logs' \
-            --exclude='.openclaw/cache' \
-            --exclude='.openclaw/tmp' \
-            --exclude='.openclaw/openclaw.json' \
-            --exclude='.openclaw/.env' \
-            --exclude='.openclaw/browser/**/SingletonLock' \
-            --exclude='.openclaw/browser/**/SingletonSocket' \
-            --exclude='.openclaw/browser/**/SingletonCookie' \
-            --exclude='.openclaw/browser/**/Crashpad/**' \
-            --exclude='.openclaw/browser/**/GPUCache/**' \
-            --exclude='.openclaw/browser/**/Code Cache/**' \
-            --exclude='.openclaw/browser/**/GrShaderCache/**' \
-            --exclude='.openclaw/browser/**/GraphiteDawnCache/**' \
-            --exclude='*.lock' \
-            --exclude='*.pid' \
-            --exclude='**/*.jsonl.lock' \
-            --exclude='**/sessions/*.lock' \
-            .openclaw
-
-          if [ -s "$TMP_OPENCLAW_TAR" ] && [ "$(stat -c%s "$TMP_OPENCLAW_TAR" 2>/dev/null || echo 0)" -ge "$MIN_SIZE" ] && tar -tzf "$TMP_OPENCLAW_TAR" >/dev/null 2>&1; then
+          if /tmp/create-openclaw-archive.sh "$TMP_OPENCLAW_TAR" >/dev/null; then
             rclone copyto "$TMP_OPENCLAW_TAR" dropbox:self-hosted/openclaw.tar.gz -v
           else
             echo "⚠️ final openclaw.tar.gz validation failed, skip upload"
           fi
+
+          MIN_SIZE=$((1024 * 1024))
 
           echo "5. Archiving CLIProxyAPI..."
           sudo tar -czf /tmp/CLIProxyAPI.tar.gz -C /tmp/local_CLIProxyAPI .
