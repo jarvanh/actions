@@ -305,8 +305,13 @@ jobs:
         id: run_openclaw
         run: |
           RUN_OPENCLAW_STEP_LOG="/tmp/run-openclaw-step.log"
+          RUN_OPENCLAW_META="/tmp/run-openclaw-meta.env"
           : > "$RUN_OPENCLAW_STEP_LOG"
+          : > "$RUN_OPENCLAW_META"
           exec > >(tee -a "$RUN_OPENCLAW_STEP_LOG") 2>&1
+
+          CURRENT_OPENCLAW_VERSION="$(openclaw --version 2>/dev/null | head -n 1 || true)"
+          echo "CURRENT_OPENCLAW_VERSION=$CURRENT_OPENCLAW_VERSION" >> "$RUN_OPENCLAW_META"
 
           # npm i -g "openclaw@2026.4.5"
           check_openclaw_health() {
@@ -370,6 +375,7 @@ jobs:
                   fi
 
                   echo "Installing openclaw@$TARGET_VERSION ..."
+                  echo "FALLBACK_TARGET_VERSION=$TARGET_VERSION" >> "$RUN_OPENCLAW_META"
                   npm i -g "openclaw@$TARGET_VERSION"
 
                   sudo chmod -R o-w $(npm root -g)
@@ -409,6 +415,7 @@ jobs:
             run_url="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             tmate_log="$RUNNER_TEMP/tmate-connection.log"
             step_log="/tmp/run-openclaw-step.log"
+            meta_file="/tmp/run-openclaw-meta.env"
 
             sanitize_log() {
               perl -pe 's/\x1b\[[0-9;]*[A-Za-z]//g; s/\r//g'
@@ -440,19 +447,39 @@ jobs:
               tmate_url="（tmate 链接暂不可用，稍后查看 Actions 日志）"
             fi
 
+            current_version=""
+            fallback_version=""
+            if [ -f "$meta_file" ]; then
+              current_version=$(grep '^CURRENT_OPENCLAW_VERSION=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
+              fallback_version=$(grep '^FALLBACK_TARGET_VERSION=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
+            fi
+
             export RUN_URL="$run_url"
             export TMATE_URL="$tmate_url"
             export ERROR_SUMMARY="$error_summary"
+            export CURRENT_VERSION="$current_version"
+            export FALLBACK_VERSION="$fallback_version"
             msg=$(python3 <<'PY'
 import html, os
 run_url = os.environ.get('RUN_URL', '')
 tmate_url = os.environ.get('TMATE_URL', '')
 error_summary = os.environ.get('ERROR_SUMMARY', '')
+current_version = os.environ.get('CURRENT_VERSION', '').strip()
+fallback_version = os.environ.get('FALLBACK_VERSION', '').strip()
+version_lines = []
+if current_version:
+    version_lines.append(f"<b>当前尝试版本：</b><code>{html.escape(current_version)}</code>")
+if fallback_version:
+    version_lines.append(f"<b>Fallback 目标版本：</b><code>{html.escape(fallback_version)}</code>")
+version_block = "\n".join(version_lines)
+if version_block:
+    version_block += "\n"
 print(
     "⚠️ <b>OpenClaw 启动失败</b>\n\n"
     f"<b>步骤：</b>Run OpenClaw\n"
     f"<b>Run ID：</b><code>${{ github.run_id }}</code>\n"
     f"<b>链接：</b><a href=\"{html.escape(run_url, quote=True)}\">查看 Actions Run</a>\n"
+    f"{version_block}"
     f"<b>TMate：</b>{html.escape(tmate_url)}\n\n"
     f"<b>关键日志：</b>\n<pre>{html.escape(error_summary)}</pre>"
 )
