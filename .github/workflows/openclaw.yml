@@ -339,7 +339,7 @@ jobs:
           openclaw gateway restart
 
           echo "Waiting for OpenClaw ..."
-          sleep 10
+          sleep 60
 
           if check_openclaw_health; then
               echo "✅ OpenClaw Gateway is healthy!"
@@ -356,7 +356,7 @@ jobs:
               openclaw gateway restart
 
               echo "Waiting for OpenClaw after doctor fix..."
-              sleep 15
+              sleep 60
 
               if check_openclaw_health; then
                   DOCTOR_FIX_END_TS=$(date +%s)
@@ -398,7 +398,7 @@ jobs:
                   openclaw gateway restart
 
                   echo "Waiting for OpenClaw after fallback reinstall..."
-                  sleep 15
+                  sleep 60
 
                   if check_openclaw_health; then
                     FALLBACK_REINSTALL_END_TS=$(date +%s)
@@ -665,7 +665,7 @@ jobs:
 
       - name: Keep alive
         if: always()
-        run: sleep 330m
+        run: sleep 320m
 
       - name: Stop OpenClaw and Final Archive
         if: always()
