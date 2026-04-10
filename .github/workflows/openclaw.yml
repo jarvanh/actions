@@ -394,7 +394,7 @@ jobs:
           limit-access-to-actor: true
 
       - name: Notify OpenClaw startup failure
-        if: ${{ steps.run_openclaw.outcome == 'failure' }}
+        if: ${{ always() && steps.run_openclaw.outcome == 'failure' }}
         run: |
           if [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] && [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ]; then
             run_url="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
