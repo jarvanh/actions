@@ -575,15 +575,6 @@ jobs:
                 -cf - \
                 -T - | tar -C "$STAGE_DIR" -xf -
 
-            if [ -n "${OPENCLAW_CONFIG_PATH:-}" ] && [ -f "$OPENCLAW_CONFIG_PATH" ]; then
-              if [ ! -e "$STAGE_DIR/.openclaw/openclaw.json" ] || [ ! "$OPENCLAW_CONFIG_PATH" -ef "$STAGE_DIR/.openclaw/openclaw.json" ]; then
-                cp -f "$OPENCLAW_CONFIG_PATH" "$STAGE_DIR/.openclaw/openclaw.json"
-              fi
-              if [ ! -e /home/runner/.openclaw/openclaw.json ] || [ ! "$OPENCLAW_CONFIG_PATH" -ef /home/runner/.openclaw/openclaw.json ]; then
-                cp -f "$OPENCLAW_CONFIG_PATH" /home/runner/.openclaw/openclaw.json
-              fi
-            fi
-
             tar -C "$STAGE_DIR" -czf "$OUTPUT_TAR" .openclaw
           }
 
