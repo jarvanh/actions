@@ -285,8 +285,8 @@ jobs:
               -P || true
           fi
 
-          echo "OPENCLAW_CONFIG_PATH=/dropbox/self-hosted/openclaw/openclaw.json" >> $GITHUB_ENV
-          export OPENCLAW_CONFIG_PATH=/dropbox/self-hosted/openclaw/openclaw.json
+          echo "OPENCLAW_CONFIG_PATH=/dropbox/self-hosted/openclaw.json" >> $GITHUB_ENV
+          export OPENCLAW_CONFIG_PATH=/dropbox/self-hosted/openclaw.json
 
           rm -f ~/.openclaw/openclaw.json
           if [ -f "$OPENCLAW_CONFIG_PATH" ]; then
@@ -614,12 +614,6 @@ jobs:
               fi
               if [ ! -e /home/runner/.openclaw/openclaw.json ] || [ ! "$OPENCLAW_CONFIG_PATH" -ef /home/runner/.openclaw/openclaw.json ]; then
                 cp -f "$OPENCLAW_CONFIG_PATH" /home/runner/.openclaw/openclaw.json
-              fi
-            fi
-
-            if [ -f /dropbox/self-hosted/openclaw/.env ]; then
-              if [ ! -e "$STAGE_DIR/.openclaw/.env" ] || [ ! /dropbox/self-hosted/openclaw/.env -ef "$STAGE_DIR/.openclaw/.env" ]; then
-                cp -f /dropbox/self-hosted/openclaw/.env "$STAGE_DIR/.openclaw/.env"
               fi
             fi
 
