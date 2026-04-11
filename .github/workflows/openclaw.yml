@@ -581,7 +581,7 @@ jobs:
             rm -rf "$STAGE_DIR"
             mkdir -p "$STAGE_DIR/.openclaw"
 
-            cd "$HOME"
+            cd /home/runner
             find .openclaw \
               \( \
                 -path '.openclaw/logs' -o \
@@ -604,17 +604,23 @@ jobs:
               -print0 | tar \
                 --null \
                 --no-recursion \
-                -C "$HOME" \
+                -C /home/runner \
                 -cf - \
                 -T - | tar -C "$STAGE_DIR" -xf -
 
-            if [ -f "$OPENCLAW_CONFIG_PATH" ]; then
-              cp -f "$OPENCLAW_CONFIG_PATH" "$STAGE_DIR/.openclaw/openclaw.json"
-              cp -f "$OPENCLAW_CONFIG_PATH" ~/.openclaw/openclaw.json
+            if [ -n "${OPENCLAW_CONFIG_PATH:-}" ] && [ -f "$OPENCLAW_CONFIG_PATH" ]; then
+              if [ ! -e "$STAGE_DIR/.openclaw/openclaw.json" ] || [ ! "$OPENCLAW_CONFIG_PATH" -ef "$STAGE_DIR/.openclaw/openclaw.json" ]; then
+                cp -f "$OPENCLAW_CONFIG_PATH" "$STAGE_DIR/.openclaw/openclaw.json"
+              fi
+              if [ ! -e /home/runner/.openclaw/openclaw.json ] || [ ! "$OPENCLAW_CONFIG_PATH" -ef /home/runner/.openclaw/openclaw.json ]; then
+                cp -f "$OPENCLAW_CONFIG_PATH" /home/runner/.openclaw/openclaw.json
+              fi
             fi
 
             if [ -f /dropbox/self-hosted/openclaw/.env ]; then
-              cp -f /dropbox/self-hosted/openclaw/.env "$STAGE_DIR/.openclaw/.env"
+              if [ ! -e "$STAGE_DIR/.openclaw/.env" ] || [ ! /dropbox/self-hosted/openclaw/.env -ef "$STAGE_DIR/.openclaw/.env" ]; then
+                cp -f /dropbox/self-hosted/openclaw/.env "$STAGE_DIR/.openclaw/.env"
+              fi
             fi
 
             tar -C "$STAGE_DIR" -czf "$OUTPUT_TAR" .openclaw
@@ -641,20 +647,38 @@ jobs:
           LOCK_FILE="/tmp/openclaw-archive.lock"
           PID_FILE="/tmp/openclaw-archive.pid"
 
+          send_telegram_alert() {
+            local msg="$1"
+            if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+              local run_url="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+              local full_msg
+              full_msg=$(printf "⚠️ OpenClaw 归档告警\n\n问题: %s\nRun ID: %s\n链接: %s" "$msg" "${GITHUB_RUN_ID}" "$run_url")
+              curl -fsS --retry 3 --retry-delay 2 --max-time 20 \
+                -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                -d chat_id="${TELEGRAM_CHAT_ID}" \
+                --data-urlencode text="$full_msg" >/dev/null || true
+            fi
+          }
+
           echo $$ > "$PID_FILE"
           trap 'rm -f "$PID_FILE"' EXIT
 
           while true; do
             if flock -E 200 -n "$LOCK_FILE" /tmp/create-openclaw-archive.sh "$TMP_OPENCLAW_TAR" >/dev/null; then
               echo "[$(date '+%F %T')] archive ok, uploading..."
-              rclone copyto "$TMP_OPENCLAW_TAR" dropbox:self-hosted/openclaw.tar.gz
-              echo "[$(date '+%F %T')] upload ok"
+              if rclone copyto "$TMP_OPENCLAW_TAR" dropbox:self-hosted/openclaw.tar.gz; then
+                echo "[$(date '+%F %T')] upload ok"
+              else
+                echo "[$(date '+%F %T')] ⚠️ openclaw.tar.gz upload failed"
+                send_telegram_alert "openclaw.tar.gz 上传失败"
+              fi
             else
               rc=$?
               if [ "$rc" -eq 200 ]; then
                 echo "[$(date '+%F %T')] ⏭️ previous archive still running, skip this round"
               else
                 echo "[$(date '+%F %T')] ⚠️ openclaw.tar.gz validation failed in periodic archive (rc=$rc)"
+                send_telegram_alert "openclaw.tar.gz 归档校验失败（rc=$rc）"
               fi
             fi
             sleep 1200
