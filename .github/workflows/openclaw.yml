@@ -357,18 +357,13 @@ jobs:
                   echo "FAIL_STAGE=fallback_reinstall" >> "$RUN_OPENCLAW_META"
                   echo "🔄 Doctor fix failed. Attempting to fallback and reinstall recorded OpenClaw version..."
 
-                  TARGET_VERSION=""
+                  TARGET_VERSION="${CURRENT_OPENCLAW_VERSION#OpenClaw }"
+                  TARGET_VERSION="${TARGET_VERSION%% *}"
 
-                  if [ -s "$HOME/.openclaw/openclaw.json" ]; then
-                    READ_VERSION=$(sudo jq -r '.wizard.lastRunVersion // empty' "$HOME/.openclaw/openclaw.json" 2>/dev/null)
-                    if [ -n "$READ_VERSION" ] && [ "$READ_VERSION" != "null" ]; then
-                      TARGET_VERSION="$READ_VERSION"
-                      echo "✅ Found recorded version in config: $TARGET_VERSION"
-                    else
-                      fail_startup ".wizard.lastRunVersion not found in $HOME/.openclaw/openclaw.json"
-                    fi
+                  if [ -n "$TARGET_VERSION" ]; then
+                    echo "✅ Found current OpenClaw version: $TARGET_VERSION"
                   else
-                    fail_startup "Config file missing or empty at $HOME/.openclaw/openclaw.json"
+                    fail_startup "Current OpenClaw version is empty; cannot determine fallback version"
                   fi
 
                   echo "Installing openclaw@$TARGET_VERSION ..."
