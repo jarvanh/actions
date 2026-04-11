@@ -112,17 +112,6 @@ jobs:
               -P || true
           fi
 
-          echo "OPENCLAW_CONFIG_PATH=/dropbox/self-hosted/openclaw.json" >> $GITHUB_ENV
-          export OPENCLAW_CONFIG_PATH=/dropbox/self-hosted/openclaw.json
-
-          rm -f ~/.openclaw/openclaw.json
-          if [ -f "$OPENCLAW_CONFIG_PATH" ]; then
-            cp -f "$OPENCLAW_CONFIG_PATH" ~/.openclaw/openclaw.json
-          fi
-
-          rm -f ~/.openclaw/.env
-          ln -s /dropbox/self-hosted/openclaw/.env ~/.openclaw/.env
-
           npm i -g @google/gemini-cli
           npm i -g clawhub
 
