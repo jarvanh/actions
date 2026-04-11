@@ -65,6 +65,67 @@ jobs:
             sleep 2
           done
 
+      - name: Install OpenClaw
+        run: |
+          echo "Installing OpenClaw base..."
+          curl -fsSL https://openclaw.ai/install.sh | bash -s -- --no-onboard
+
+          echo "$HOME/.npm-global/bin" >> $GITHUB_PATH
+          export PATH="$HOME/.npm-global/bin:$PATH"
+
+          echo "Configuring local ~/.openclaw with Dropbox-linked config..."
+          mkdir -p /dropbox/self-hosted/openclaw
+          mkdir -p ~/.openclaw
+          mkdir -p ~/.openclaw/extensions
+
+          TMP_OPENCLAW_TAR="/tmp/openclaw.tar.gz"
+          RESTORE_DIR="/tmp/openclaw-restore"
+
+          rm -rf "$RESTORE_DIR"
+          mkdir -p "$RESTORE_DIR"
+
+          echo "📦 Restoring ~/.openclaw: prefer archive, fallback to raw directory sync..."
+          if rclone ls dropbox:self-hosted/openclaw.tar.gz > /dev/null 2>&1; then
+            echo "📦 Found openclaw.tar.gz! Downloading and extracting..."
+            rclone copyto dropbox:self-hosted/openclaw.tar.gz "$TMP_OPENCLAW_TAR"
+            if [ -s "$TMP_OPENCLAW_TAR" ] && tar -tzf "$TMP_OPENCLAW_TAR" >/dev/null 2>&1; then
+              tar -xzf "$TMP_OPENCLAW_TAR" -C "$RESTORE_DIR"
+              if [ -d "$RESTORE_DIR/.openclaw" ]; then
+                find ~/.openclaw -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+                cp -a "$RESTORE_DIR/.openclaw/." ~/.openclaw/
+                echo "✅ Restored ~/.openclaw from archive"
+              else
+                echo "⚠️ Archive does not contain .openclaw root, skipping archive restore."
+              fi
+            else
+              echo "⚠️ openclaw.tar.gz validation failed, skipping archive restore."
+            fi
+            rm -f "$TMP_OPENCLAW_TAR"
+          else
+            echo "⚠️ No openclaw archive found. Falling back to sync from raw directory..."
+            rclone copy dropbox:self-hosted/openclaw ~/.openclaw \
+              --retries 10 \
+              --low-level-retries 20 \
+              --timeout 1m \
+              --contimeout 15s \
+              --exclude "logs/**" \
+              -P || true
+          fi
+
+          echo "OPENCLAW_CONFIG_PATH=/dropbox/self-hosted/openclaw.json" >> $GITHUB_ENV
+          export OPENCLAW_CONFIG_PATH=/dropbox/self-hosted/openclaw.json
+
+          rm -f ~/.openclaw/openclaw.json
+          if [ -f "$OPENCLAW_CONFIG_PATH" ]; then
+            cp -f "$OPENCLAW_CONFIG_PATH" ~/.openclaw/openclaw.json
+          fi
+
+          rm -f ~/.openclaw/.env
+          ln -s /dropbox/self-hosted/openclaw/.env ~/.openclaw/.env
+
+          npm i -g @google/gemini-cli
+          npm i -g clawhub
+
       - name: Install Cloudflared
         run: |
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
@@ -72,6 +133,20 @@ jobs:
           sudo mkdir -p ~/.cloudflared/
           sudo cp -r /dropbox/self-hosted/.cloudflared/* ~/.cloudflared/ 2>/dev/null || true
 
+      - name: Run Cloudflared Tunnel
+        run: |
+          mkdir -p ~/.openclaw/logs
+
+          cloudflared tunnel route dns oc oc.'${{ secrets.VD }}'.eu.org || true
+
+          # 启动隧道并记录 PID
+          nohup cloudflared tunnel run --url http://127.0.0.1:18789 oc \
+            > ~/.openclaw/logs/cloudflared_oc.log 2>&1 &
+
+          # 等待一小段时间确保进程启动成功并记录 PID
+          sleep 10
+          echo $! > ~/.openclaw/logs/cloudflared_oc.pid
+          
       - name: Run rss-to-telegram container
         run: |
           echo "Starting rss-to-telegram before CLIProxyAPI..."
@@ -224,67 +299,6 @@ jobs:
 
           echo "CLIProxyAPI 命名隧道已启动：ai-api（固定地址模式）"
 
-      - name: Install OpenClaw
-        run: |
-          echo "Installing OpenClaw base..."
-          curl -fsSL https://openclaw.ai/install.sh | bash -s -- --no-onboard
-
-          echo "$HOME/.npm-global/bin" >> $GITHUB_PATH
-          export PATH="$HOME/.npm-global/bin:$PATH"
-
-          echo "Configuring local ~/.openclaw with Dropbox-linked config..."
-          mkdir -p /dropbox/self-hosted/openclaw
-          mkdir -p ~/.openclaw
-          mkdir -p ~/.openclaw/extensions
-
-          TMP_OPENCLAW_TAR="/tmp/openclaw.tar.gz"
-          RESTORE_DIR="/tmp/openclaw-restore"
-
-          rm -rf "$RESTORE_DIR"
-          mkdir -p "$RESTORE_DIR"
-
-          echo "📦 Restoring ~/.openclaw: prefer archive, fallback to raw directory sync..."
-          if rclone ls dropbox:self-hosted/openclaw.tar.gz > /dev/null 2>&1; then
-            echo "📦 Found openclaw.tar.gz! Downloading and extracting..."
-            rclone copyto dropbox:self-hosted/openclaw.tar.gz "$TMP_OPENCLAW_TAR"
-            if [ -s "$TMP_OPENCLAW_TAR" ] && tar -tzf "$TMP_OPENCLAW_TAR" >/dev/null 2>&1; then
-              tar -xzf "$TMP_OPENCLAW_TAR" -C "$RESTORE_DIR"
-              if [ -d "$RESTORE_DIR/.openclaw" ]; then
-                find ~/.openclaw -mindepth 1 -maxdepth 1 -exec rm -rf {} +
-                cp -a "$RESTORE_DIR/.openclaw/." ~/.openclaw/
-                echo "✅ Restored ~/.openclaw from archive"
-              else
-                echo "⚠️ Archive does not contain .openclaw root, skipping archive restore."
-              fi
-            else
-              echo "⚠️ openclaw.tar.gz validation failed, skipping archive restore."
-            fi
-            rm -f "$TMP_OPENCLAW_TAR"
-          else
-            echo "⚠️ No openclaw archive found. Falling back to sync from raw directory..."
-            rclone copy dropbox:self-hosted/openclaw ~/.openclaw \
-              --retries 10 \
-              --low-level-retries 20 \
-              --timeout 1m \
-              --contimeout 15s \
-              --exclude "logs/**" \
-              -P || true
-          fi
-
-          echo "OPENCLAW_CONFIG_PATH=/dropbox/self-hosted/openclaw.json" >> $GITHUB_ENV
-          export OPENCLAW_CONFIG_PATH=/dropbox/self-hosted/openclaw.json
-
-          rm -f ~/.openclaw/openclaw.json
-          if [ -f "$OPENCLAW_CONFIG_PATH" ]; then
-            cp -f "$OPENCLAW_CONFIG_PATH" ~/.openclaw/openclaw.json
-          fi
-
-          rm -f ~/.openclaw/.env
-          ln -s /dropbox/self-hosted/openclaw/.env ~/.openclaw/.env
-
-          npm i -g @google/gemini-cli
-          npm i -g clawhub
-
       - name: Run OpenClaw
         id: run_openclaw
         run: |
@@ -398,20 +412,6 @@ jobs:
                   fi
               fi
           fi
-
-      - name: Run Cloudflared Tunnel
-        run: |
-          mkdir -p ~/.openclaw/logs
-
-          cloudflared tunnel route dns oc oc.'${{ secrets.VD }}'.eu.org || true
-
-          # 启动隧道并记录 PID
-          nohup cloudflared tunnel run --url http://127.0.0.1:18789 oc \
-            > ~/.openclaw/logs/cloudflared_oc.log 2>&1 &
-
-          # 等待一小段时间确保进程启动成功并记录 PID
-          sleep 10
-          echo $! > ~/.openclaw/logs/cloudflared_oc.pid
           
       - name: Run tmate
         continue-on-error: true
