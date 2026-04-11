@@ -214,7 +214,7 @@ jobs:
           if rclone ls dropbox:self-hosted/CLIProxyAPI.tar.gz > /dev/null 2>&1; then
             echo "📦 Found CLIProxyAPI.tar.gz! Downloading and extracting..."
             rclone copyto dropbox:self-hosted/CLIProxyAPI.tar.gz /tmp/CLIProxyAPI.tar.gz
-            MIN_SIZE=$((1024 * 1024))
+            MIN_SIZE=$((10 * 1024))
             actual_size=$(stat -c%s /tmp/CLIProxyAPI.tar.gz 2>/dev/null || echo 0)
             if [ "$actual_size" -ge "$MIN_SIZE" ] && tar -tzf /tmp/CLIProxyAPI.tar.gz >/dev/null 2>&1; then
               tar -xzf /tmp/CLIProxyAPI.tar.gz -C /tmp/local_CLIProxyAPI
@@ -536,7 +536,7 @@ jobs:
             exit 2
           fi
 
-          MIN_SIZE=$((1024 * 1024))
+          MIN_SIZE=$((10 * 1024))
           rm -f "$OUTPUT_TAR"
 
           build_openclaw_manifest() {
@@ -669,7 +669,7 @@ jobs:
             echo "⚠️ final openclaw.tar.gz validation failed, skip upload"
           fi
 
-          MIN_SIZE=$((1024 * 1024))
+          MIN_SIZE=$((10 * 1024))
 
           echo "5. Archiving CLIProxyAPI..."
           sudo tar -czf /tmp/CLIProxyAPI.tar.gz -C /tmp/local_CLIProxyAPI .
@@ -678,7 +678,7 @@ jobs:
             if [ "$actual_size" -ge "$MIN_SIZE" ]; then
               rclone copyto /tmp/CLIProxyAPI.tar.gz dropbox:self-hosted/CLIProxyAPI.tar.gz -v
             else
-              echo "⚠️ CLIProxyAPI 压缩包小于 1MB，放弃覆盖云端数据"
+              echo "⚠️ CLIProxyAPI 压缩包小于 10KB，放弃覆盖云端数据"
             fi
           fi
 
@@ -690,10 +690,10 @@ jobs:
             if sudo tar -tzf /tmp/rsstt.tar.gz >/dev/null 2>&1; then
               actual_size=$(stat -c%s /tmp/rsstt.tar.gz 2>/dev/null || echo 0)
               echo "rsstt archive size: ${actual_size} bytes"
-              if [ "$actual_size" -gt 1024 ]; then
+              if [ "$actual_size" -ge "$MIN_SIZE" ]; then
                 rclone copyto /tmp/rsstt.tar.gz dropbox:self-hosted/rsstt.tar.gz -v
               else
-                echo "⚠️ rsstt 压缩包过小（<=1KB），放弃覆盖云端数据"
+                echo "⚠️ rsstt 压缩包小于 10KB，放弃覆盖云端数据"
               fi
             else
               echo "⚠️ rsstt.tar.gz validation failed, skip upload"
