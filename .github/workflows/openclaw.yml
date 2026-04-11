@@ -136,29 +136,27 @@ jobs:
 
           cloudflared tunnel route dns oc oc.'${{ secrets.VD }}'.eu.org || true
 
-          # 启动隧道并记录 PID
           nohup cloudflared tunnel run --url http://127.0.0.1:18789 oc \
             > ~/.openclaw/logs/cloudflared_oc.log 2>&1 &
 
-          # 等待一小段时间确保进程启动成功并记录 PID
           sleep 10
           echo $! > ~/.openclaw/logs/cloudflared_oc.pid
           
       - name: Run rss-to-telegram container
         run: |
+          set -euo pipefail
           echo "Starting rss-to-telegram before CLIProxyAPI..."
           mkdir -p /dropbox/self-hosted/rsstt
-          rm -rf /tmp/local_rsstt
-          mkdir -p /tmp/local_rsstt
+          rm -rf /tmp/local_rsstt /tmp/rsstt-restore
+          mkdir -p /tmp/local_rsstt /tmp/rsstt-restore
 
           if [ -f ~/.openclaw/.env ]; then
             if rclone ls dropbox:self-hosted/rsstt.tar.gz > /dev/null 2>&1; then
               echo "📦 Found rsstt.tar.gz! Downloading and extracting..."
               rclone copyto dropbox:self-hosted/rsstt.tar.gz /tmp/rsstt.tar.gz
-              MIN_SIZE=$((1024 * 1024))
-              actual_size=$(stat -c%s /tmp/rsstt.tar.gz 2>/dev/null || echo 0)
-              if [ "$actual_size" -ge "$MIN_SIZE" ] && tar -tzf /tmp/rsstt.tar.gz >/dev/null 2>&1; then
-                tar -xzf /tmp/rsstt.tar.gz -C /tmp/local_rsstt
+              if [ -s /tmp/rsstt.tar.gz ] && tar -tzf /tmp/rsstt.tar.gz >/dev/null 2>&1; then
+                tar -xzf /tmp/rsstt.tar.gz -C /tmp/rsstt-restore
+                cp -a /tmp/rsstt-restore/. /tmp/local_rsstt/ || true
               else
                 echo "⚠️ rsstt.tar.gz validation failed, skipping archive restore."
               fi
@@ -174,7 +172,12 @@ jobs:
                 -P || true
             fi
 
-            mkdir -p /tmp/local_rsstt/config
+            mkdir -p /tmp/local_rsstt/config /tmp/local_rsstt/data
+            touch /tmp/local_rsstt/config/.keep /tmp/local_rsstt/data/.keep
+
+            echo "=== restored rss-to-telegram tree ==="
+            find /tmp/local_rsstt -maxdepth 3 | sort || true
+
             set -a
             source ~/.openclaw/.env
             set +a
@@ -184,12 +187,19 @@ jobs:
               --name rss-to-telegram \
               --restart unless-stopped \
               -v /tmp/local_rsstt/config:/app/config \
+              -v /tmp/local_rsstt/data:/app/data \
               -e TOKEN="$TELEGRAM_BOT_TOKEN_RSS_SB_BOT" \
               -e MANAGER="83279194" \
               -e MULTIUSER="0" \
               rongronggg9/rss-to-telegram:latest
 
-            docker ps --filter name=rss-to-telegram || true
+            echo "Waiting for rss-to-telegram container to stabilize..."
+            sleep 8
+            docker ps -a --filter name=rss-to-telegram || true
+            echo "=== rss-to-telegram /app tree (for persistence verification) ==="
+            docker exec rss-to-telegram sh -lc 'find /app -maxdepth 3 \( -type f -o -type d \) | sort | sed -n "1,200p"' || true
+            echo "=== rss-to-telegram local bind tree after startup ==="
+            find /tmp/local_rsstt -maxdepth 3 | sort || true
           else
             echo "⚠️ openclaw .env not found, skipping rss-to-telegram startup."
           fi
@@ -201,7 +211,6 @@ jobs:
           rm -rf /tmp/local_CLIProxyAPI
           mkdir -p /tmp/local_CLIProxyAPI
 
-          # 优先从压缩包恢复；没有压缩包时再回退为目录同步
           if rclone ls dropbox:self-hosted/CLIProxyAPI.tar.gz > /dev/null 2>&1; then
             echo "📦 Found CLIProxyAPI.tar.gz! Downloading and extracting..."
             rclone copyto dropbox:self-hosted/CLIProxyAPI.tar.gz /tmp/CLIProxyAPI.tar.gz
@@ -218,17 +227,14 @@ jobs:
             rclone copy dropbox:self-hosted/CLIProxyAPI /tmp/local_CLIProxyAPI
           fi
 
-          # 【防崩溃机制】在宿主机提前创建好文件和目录，防止 Docker 误建文件夹
           mkdir -p /tmp/local_CLIProxyAPI/auth-dir
           touch /tmp/local_CLIProxyAPI/config.yaml
 
           echo "=== restored CLIProxyAPI tree ==="
           find /tmp/local_CLIProxyAPI -maxdepth 3 | sort || true
 
-          # 先清理同名旧容器，避免名称冲突
           docker rm -f cliproxyapi 2>/dev/null || true
 
-          # 使用重启策略守护 CLIProxyAPI；直接挂载本地 /tmp/local_CLIProxyAPI 目录
           docker run -d \
             --name cliproxyapi \
             --restart unless-stopped \
@@ -258,7 +264,6 @@ jobs:
 
           echo "📥 开始执行 CLIProxyAPI 历史统计数据导入（前台立即执行）..."
 
-          # 从本地临时目录读取 stats.json
           if [ -s /tmp/local_CLIProxyAPI/stats.json ] && jq empty /tmp/local_CLIProxyAPI/stats.json >/dev/null 2>&1; then
               SUCCESS=false
               for i in {1..60}; do
@@ -284,10 +289,8 @@ jobs:
               echo "ℹ️ 云端未找到有效 stats.json 存档文件，本次为全新统计。"
           fi
 
-          # 启动前清理可能残留的 ai-api 隧道进程
           pkill -f "cloudflared tunnel run --protocol http2 --url http://127.0.0.1:8317 ai-api" || true
 
-          # 运行 8317 端口的命名隧道，并将输出保存到 ~/.openclaw/logs
           nohup cloudflared tunnel run --protocol http2 --url http://127.0.0.1:8317 ai-api \
             > ~/.openclaw/logs/cloudflared_CLIProxyAPI.log 2>&1 &
 
@@ -310,7 +313,6 @@ jobs:
           echo "FAIL_STAGE=initial_start" >> "$RUN_OPENCLAW_META"
           INITIAL_START_BEGIN_TS=$(date +%s)
 
-          # npm i -g "openclaw@2026.4.5"
           check_openclaw_health() {
             if sudo lsof -Pi :18789 -sTCP:LISTEN -t >/dev/null && [ "$(curl -fsS -o /dev/null -w "%{http_code}" --max-time 5 http://127.0.0.1:18789/health || true)" = "200" ]; then
               return 0
@@ -322,7 +324,6 @@ jobs:
             echo "❌ $msg"
             exit 1
           }
-
 
           echo "🔧 Fixing file permissions to pass security checks..."
           sudo chmod -R o-w $(npm root -g)
@@ -409,7 +410,7 @@ jobs:
                   fi
               fi
           fi
-        
+
       - name: Notify OpenClaw startup failure
         if: ${{ always() && steps.run_openclaw.outcome == 'failure' }}
         run: |
@@ -525,10 +526,6 @@ jobs:
         if: always()
         run: |
           echo "Starting background archive tasks: export CLIProxyAPI stats + archive ~/.openclaw every 20 minutes..."
-          # 这里拆成两个临时脚本，不是重复：
-          # 1) /tmp/create-openclaw-archive.sh 负责“单次归档”——筛选 ~/.openclaw、打包、校验 tar。
-          # 2) /tmp/openclaw-archive-loop.sh 负责“循环调度”——每 20 分钟调用一次上面的单次归档脚本并上传 Dropbox。
-          # 这样拆开后，后面的“最终收尾归档”也能直接复用 create-openclaw-archive.sh，避免重复维护两份打包逻辑。
           cat > /tmp/create-openclaw-archive.sh <<'EOF'
           #!/usr/bin/env bash
           set -euo pipefail
@@ -646,6 +643,7 @@ jobs:
       - name: Stop OpenClaw and Final Archive
         if: always()
         run: |
+          set -euo pipefail
           echo "1. Stopping OpenClaw gateway..."
           openclaw gateway stop || echo "OpenClaw already stopped or command failed."
           sleep 3m
@@ -686,14 +684,19 @@ jobs:
 
           echo "6. Archiving rss-to-telegram data..."
           if [ -d /tmp/local_rsstt ]; then
-            sudo tar -czf /tmp/rsstt.tar.gz -C /tmp/local_rsstt --exclude='docker-compose.yml' .
+            echo "=== local rss-to-telegram tree before archive ==="
+            find /tmp/local_rsstt -maxdepth 4 | sort || true
+            sudo tar -czf /tmp/rsstt.tar.gz -C /tmp/local_rsstt .
             if sudo tar -tzf /tmp/rsstt.tar.gz >/dev/null 2>&1; then
               actual_size=$(stat -c%s /tmp/rsstt.tar.gz 2>/dev/null || echo 0)
-              if [ "$actual_size" -ge "$MIN_SIZE" ]; then
+              echo "rsstt archive size: ${actual_size} bytes"
+              if [ "$actual_size" -gt 1024 ]; then
                 rclone copyto /tmp/rsstt.tar.gz dropbox:self-hosted/rsstt.tar.gz -v
               else
-                echo "⚠️ rsstt 压缩包小于 1MB，放弃覆盖云端数据"
+                echo "⚠️ rsstt 压缩包过小（<=1KB），放弃覆盖云端数据"
               fi
+            else
+              echo "⚠️ rsstt.tar.gz validation failed, skip upload"
             fi
           fi
 
