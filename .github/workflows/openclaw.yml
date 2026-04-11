@@ -72,20 +72,6 @@ jobs:
           sudo mkdir -p ~/.cloudflared/
           sudo cp -r /dropbox/self-hosted/.cloudflared/* ~/.cloudflared/ 2>/dev/null || true
 
-      - name: Run Cloudflared Tunnel
-        run: |
-          mkdir -p ~/.openclaw/logs
-
-          cloudflared tunnel route dns oc oc.'${{ secrets.VD }}'.eu.org || true
-
-          # 启动隧道并记录 PID
-          nohup cloudflared tunnel run --url http://127.0.0.1:18789 oc \
-            > ~/.openclaw/logs/cloudflared_oc.log 2>&1 &
-
-          # 等待一小段时间确保进程启动成功并记录 PID
-          sleep 10
-          echo $! > ~/.openclaw/logs/cloudflared_oc.pid
-
       - name: Run rss-to-telegram container
         run: |
           echo "Starting rss-to-telegram before CLIProxyAPI..."
@@ -413,6 +399,20 @@ jobs:
               fi
           fi
 
+      - name: Run Cloudflared Tunnel
+        run: |
+          mkdir -p ~/.openclaw/logs
+
+          cloudflared tunnel route dns oc oc.'${{ secrets.VD }}'.eu.org || true
+
+          # 启动隧道并记录 PID
+          nohup cloudflared tunnel run --url http://127.0.0.1:18789 oc \
+            > ~/.openclaw/logs/cloudflared_oc.log 2>&1 &
+
+          # 等待一小段时间确保进程启动成功并记录 PID
+          sleep 10
+          echo $! > ~/.openclaw/logs/cloudflared_oc.pid
+          
       - name: Run tmate
         continue-on-error: true
         if: always()
