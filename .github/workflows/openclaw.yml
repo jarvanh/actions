@@ -10,6 +10,14 @@ jobs:
     concurrency: openclaw-singleton
     runs-on: ubuntu-latest
     steps:
+      - name: Run tmate
+        continue-on-error: true
+        if: always()
+        uses: mxschmitt/action-tmate@v3
+        with:
+          detached: true
+          install-dependencies: true
+          limit-access-to-actor: true
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
@@ -401,16 +409,7 @@ jobs:
                   fi
               fi
           fi
-          
-      - name: Run tmate
-        continue-on-error: true
-        if: always()
-        uses: mxschmitt/action-tmate@v3
-        with:
-          detached: true
-          install-dependencies: true
-          limit-access-to-actor: true
-
+        
       - name: Notify OpenClaw startup failure
         if: ${{ always() && steps.run_openclaw.outcome == 'failure' }}
         run: |
