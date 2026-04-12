@@ -38,22 +38,25 @@ jobs:
         with:
           node-version: 'current' # 始终使用官方发布的最新版
           
-      - name: Normalize Node toolchain PATH
+      - name: Prepare runtime env for later steps
         run: |
           set -euo pipefail
-          NODE_BIN_DIR="$(dirname "$(which node)")"
+          mkdir -p "$HOME/.openclaw/runtime"
 
+          NODE_BIN_DIR="$(dirname "$(command -v node)")"
           echo "$NODE_BIN_DIR" >> "$GITHUB_PATH"
-          export PATH="$NODE_BIN_DIR:$PATH"
+          echo "$HOME/.npm-global/bin" >> "$GITHUB_PATH"
 
-          sudo ln -sf "$(which node)" /usr/local/bin/node
+          cat > "$HOME/.openclaw/runtime/ci-env.sh" <<'EOF'
+          if [ -f "$HOME/.openclaw/.env" ]; then
+            set -a
+            source "$HOME/.openclaw/.env"
+            set +a
+          fi
+          EOF
 
-          echo "NODE_BIN_DIR=$NODE_BIN_DIR"
-          command -v node
-          command -v npm
-          command -v npx || true
-          node -v
-          /usr/local/bin/node -v
+          chmod +x "$HOME/.openclaw/runtime/ci-env.sh"
+          echo "BASH_ENV=$HOME/.openclaw/runtime/ci-env.sh" >> "$GITHUB_ENV"
 
       - name: Install Rclone
         run: |
@@ -103,9 +106,6 @@ jobs:
         run: |
           echo "Installing OpenClaw base..."
           curl -fsSL https://openclaw.ai/install.sh | bash -s -- --no-onboard
-
-          echo "$HOME/.npm-global/bin" >> $GITHUB_PATH
-          export PATH="$HOME/.npm-global/bin:$PATH"
 
           echo "Configuring local ~/.openclaw with Dropbox-linked config..."
           mkdir -p /dropbox/self-hosted/openclaw
@@ -203,10 +203,6 @@ jobs:
 
             echo "=== restored rss-to-telegram tree ==="
             find /tmp/local_rsstt -maxdepth 3 | sort || true
-
-            set -a
-            source ~/.openclaw/.env
-            set +a
 
             docker rm -f rss-to-telegram 2>/dev/null || true
             docker run -d \
