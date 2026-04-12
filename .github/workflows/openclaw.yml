@@ -41,13 +41,12 @@ jobs:
       - name: Prepare runtime env for later steps
         run: |
           set -euo pipefail
-          mkdir -p "$HOME/.openclaw/runtime"
 
           NODE_BIN_DIR="$(dirname "$(command -v node)")"
           echo "$NODE_BIN_DIR" >> "$GITHUB_PATH"
           echo "$HOME/.npm-global/bin" >> "$GITHUB_PATH"
 
-          cat > "$HOME/.openclaw/runtime/ci-env.sh" <<'EOF'
+          cat > "$HOME/ci-env.sh" <<'EOF'
           if [ -f "$HOME/.openclaw/.env" ]; then
             set -a
             source "$HOME/.openclaw/.env"
@@ -55,8 +54,8 @@ jobs:
           fi
           EOF
 
-          chmod +x "$HOME/.openclaw/runtime/ci-env.sh"
-          echo "BASH_ENV=$HOME/.openclaw/runtime/ci-env.sh" >> "$GITHUB_ENV"
+          chmod +x "$HOME/ci-env.sh"
+          echo "BASH_ENV=$HOME/ci-env.sh" >> "$GITHUB_ENV"
 
       - name: Install Rclone
         run: |
