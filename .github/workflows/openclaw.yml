@@ -40,9 +40,20 @@ jobs:
         run: |
           set -euo pipefail
 
-          NODE_BIN_DIR="$(dirname "$(command -v node)")"
+          NODE_PATH_ACTUAL="$(command -v node)"
+          NODE_BIN_DIR="$(dirname "$NODE_PATH_ACTUAL")"
+          NPM_PREFIX="$(npm config get prefix)"
+          NPM_GLOBAL_BIN="$NPM_PREFIX/bin"
+
           echo "$NODE_BIN_DIR" >> "$GITHUB_PATH"
-          echo "$HOME/.npm-global/bin" >> "$GITHUB_PATH"
+          if [ -d "$NPM_GLOBAL_BIN" ]; then
+            echo "$NPM_GLOBAL_BIN" >> "$GITHUB_PATH"
+          fi
+
+          echo "node path: $NODE_PATH_ACTUAL"
+          echo "node bin dir: $NODE_BIN_DIR"
+          echo "npm prefix: $NPM_PREFIX"
+          echo "npm global bin: $NPM_GLOBAL_BIN"
 
           cat > "$HOME/ci-env.sh" <<'EOF'
           if [ -f "$HOME/.openclaw/.env" ]; then
