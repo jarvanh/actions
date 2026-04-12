@@ -37,10 +37,8 @@ jobs:
           command -v node
           command -v npm
           command -v npx || true
-          command -v openclaw
           node -v
           /usr/local/bin/node -v
-          openclaw --version
 
       - name: Install Rclone
         run: |
