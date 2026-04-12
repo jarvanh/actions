@@ -432,6 +432,48 @@ jobs:
               fi
           fi
 
+      - name: Run tmate
+        id: tmate
+        continue-on-error: true
+        if: always()
+        uses: mxschmitt/action-tmate@v3
+        with:
+          detached: true
+          install-dependencies: true
+          limit-access-to-actor: true
+
+      - name: Persist tmate connection info
+        if: always()
+        run: |
+          set -euo pipefail
+
+          TMATE_SSH='${{ steps.tmate.outputs.ssh-command }}'
+          TMATE_SSH_ADDRESS='${{ steps.tmate.outputs.ssh-address }}'
+          TMATE_WEB='${{ steps.tmate.outputs.web-url }}'
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          fallback_tmate_log="${RUNNER_TEMP:-/tmp}/tmate-connection.log"
+          if [ -z "$TMATE_SSH" ] && [ -f "$fallback_tmate_log" ]; then
+            TMATE_SSH="$(grep -Eo 'ssh [^[:space:]]+@[^[:space:]]+' "$fallback_tmate_log" | tail -n 1 || true)"
+          fi
+          if [ -z "$TMATE_WEB" ] && [ -f "$fallback_tmate_log" ]; then
+            TMATE_WEB="$(grep -Eo 'https://tmate\.io/t/[A-Za-z0-9_-]+' "$fallback_tmate_log" | tail -n 1 || true)"
+          fi
+          if [ -z "$TMATE_SSH_ADDRESS" ] && [ -n "$TMATE_SSH" ]; then
+            TMATE_SSH_ADDRESS="$(printf '%s\n' "$TMATE_SSH" | sed -E 's/^ssh ([^@]+@[^[:space:]]+)$/\1/' || true)"
+          fi
+
+          {
+            printf 'TMATE_SSH=%s\n' "$TMATE_SSH"
+            printf 'TMATE_SSH_ADDRESS=%s\n' "$TMATE_SSH_ADDRESS"
+            printf 'TMATE_WEB=%s\n' "$TMATE_WEB"
+            printf 'RUN_URL=%s\n' "$RUN_URL"
+          } > "$HOME/tmate.env"
+
+          echo "tmate env persisted to $HOME/tmate.env"
+          echo "tmate outputs: ssh_present=$([ -n "$TMATE_SSH" ] && echo yes || echo no), web_present=$([ -n "$TMATE_WEB" ] && echo yes || echo no), fallback_log_exists=$([ -f "$fallback_tmate_log" ] && echo yes || echo no)"
+          sed -n '1,20p' "$HOME/tmate.env"
+
       - name: Notify OpenClaw startup failure
         if: ${{ always() && steps.run_openclaw.outcome == 'failure' }}
         run: |
