@@ -23,36 +23,13 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
-
-          TMATE_SSH='${{ steps.tmate.outputs.ssh-command }}'
-          TMATE_SSH_ADDRESS='${{ steps.tmate.outputs.ssh-address }}'
-          TMATE_WEB='${{ steps.tmate.outputs.web-url }}'
-          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-
-          fallback_tmate_log="${RUNNER_TEMP:-/tmp}/tmate-connection.log"
-          if [ -z "$TMATE_SSH" ] && [ -f "$fallback_tmate_log" ]; then
-            TMATE_SSH="$(grep -Eo 'ssh [^[:space:]]+@[^[:space:]]+' "$fallback_tmate_log" | tail -n 1 || true)"
-          fi
-          if [ -z "$TMATE_WEB" ] && [ -f "$fallback_tmate_log" ]; then
-            TMATE_WEB="$(grep -Eo 'https://tmate\.io/t/[A-Za-z0-9_-]+' "$fallback_tmate_log" | tail -n 1 || true)"
-          fi
-          if [ -z "$TMATE_SSH_ADDRESS" ] && [ -n "$TMATE_SSH" ]; then
-            TMATE_SSH_ADDRESS="$(printf '%s\n' "$TMATE_SSH" | sed -E 's/^ssh ([^@]+@[^[:space:]]+)$/\1/' || true)"
-          fi
-
           {
-            printf 'TMATE_SSH=%s\n' "$TMATE_SSH"
-            printf 'TMATE_SSH_ADDRESS=%s\n' "$TMATE_SSH_ADDRESS"
-            printf 'TMATE_WEB=%s\n' "$TMATE_WEB"
-            printf 'RUN_URL=%s\n' "$RUN_URL"
+            printf 'TMATE_SSH=%s\n' '${{ steps.tmate.outputs.ssh-command }}'
+            printf 'TMATE_SSH_ADDRESS=%s\n' '${{ steps.tmate.outputs.ssh-address }}'
+            printf 'TMATE_WEB=%s\n' '${{ steps.tmate.outputs.web-url }}'
+            printf 'RUN_URL=%s\n' "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           } > "$HOME/tmate.env"
-
           echo "tmate env persisted to $HOME/tmate.env"
-          printf 'tmate outputs: ssh_present=%s web_present=%s fallback_log_exists=%s\n' \
-            "$([ -n "$TMATE_SSH" ] && echo yes || echo no)" \
-            "$([ -n "$TMATE_WEB" ] && echo yes || echo no)" \
-            "$([ -f "$fallback_tmate_log" ] && echo yes || echo no)"
-          sed -n '1,20p' "$HOME/tmate.env"
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
