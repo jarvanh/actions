@@ -48,12 +48,12 @@ jobs:
           } > "$HOME/tmate.env"
 
           echo "tmate env persisted to $HOME/tmate.env"
-          printf 'tmate outputs: ssh_present=%s web_present=%s fallback_log_exists=%s\n'             "$([ -n "$TMATE_SSH" ] && echo yes || echo no)"             "$([ -n "$TMATE_WEB" ] && echo yes || echo no)"             "$([ -f "$fallback_tmate_log" ] && echo yes || echo no)"
+          printf 'tmate outputs: ssh_present=%s web_present=%s fallback_log_exists=%s\n' \
+            "$([ -n "$TMATE_SSH" ] && echo yes || echo no)" \
+            "$([ -n "$TMATE_WEB" ] && echo yes || echo no)" \
+            "$([ -f "$fallback_tmate_log" ] && echo yes || echo no)"
           sed -n '1,20p' "$HOME/tmate.env"
-            printf 'RUN_URL=%s\n' "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          } > "$HOME/.openclaw/runtime/tmate.env"
-          echo "tmate env persisted to $HOME/.openclaw/runtime/tmate.env"   
-          
+
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
@@ -453,6 +453,7 @@ jobs:
               fi
           fi
 
+      - name: Notify OpenClaw startup failure
         if: ${{ always() && steps.run_openclaw.outcome == 'failure' }}
         run: |
           if [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] && [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ]; then
