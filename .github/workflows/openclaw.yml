@@ -411,26 +411,25 @@ jobs:
               fi
           fi
 
+      - name: Run tmate
+        id: tmate
+        continue-on-error: true
+        if: always()
+        uses: mxschmitt/action-tmate@v3
+        with:
+          detached: true
+          install-dependencies: true
+          limit-access-to-actor: true
+
       - name: Persist tmate connection info
         if: always()
         run: |
           set -euo pipefail
-          tmate_ssh=""
-          tmate_web=""
-          if command -v tmate >/dev/null 2>&1; then
-            tmate_ssh="$(tmate display -p '#{tmate_ssh}' 2>/dev/null || true)"
-            tmate_web="$(tmate display -p '#{tmate_web}' 2>/dev/null || true)"
-          fi
-          if [ -z "$tmate_ssh" ] && [ -f "$RUNNER_TEMP/tmate-connection.log" ]; then
-            tmate_ssh="$(grep -Eo 'ssh [A-Za-z0-9._-]+@[A-Za-z0-9._-]+' "$RUNNER_TEMP/tmate-connection.log" | tail -n 1 || true)"
-          fi
-          if [ -z "$tmate_web" ] && [ -f "$RUNNER_TEMP/tmate-connection.log" ]; then
-            tmate_web="$(grep -Eo 'https://tmate\.io/t/[A-Za-z0-9_-]+' "$RUNNER_TEMP/tmate-connection.log" | tail -n 1 || true)"
-          fi
           mkdir -p "$HOME/.openclaw/runtime"
           {
-            printf 'TMATE_SSH=%s\n' "$tmate_ssh"
-            printf 'TMATE_WEB=%s\n' "$tmate_web"
+            printf 'TMATE_SSH=%s\n' '${{ steps.tmate.outputs.ssh-command }}'
+            printf 'TMATE_SSH_ADDRESS=%s\n' '${{ steps.tmate.outputs.ssh-address }}'
+            printf 'TMATE_WEB=%s\n' '${{ steps.tmate.outputs.web-url }}'
             printf 'RUN_URL=%s\n' "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           } > "$HOME/.openclaw/runtime/tmate.env"
           echo "tmate env persisted to $HOME/.openclaw/runtime/tmate.env"
