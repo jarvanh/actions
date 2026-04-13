@@ -704,7 +704,7 @@ jobs:
 
       - name: Keep alive
         if: always()
-        run: sleep 320m
+        run: sleep 340m
 
       - name: Stop OpenClaw and Final Archive
         if: always()
