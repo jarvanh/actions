@@ -55,11 +55,47 @@ jobs:
           echo "npm prefix: $NPM_PREFIX"
           echo "npm global bin: $NPM_GLOBAL_BIN"
 
-          cat > "$HOME/ci-env.sh" <<'EOF'
+          cat > "$HOME/runtime-env.sh" <<'EOF'
+          #!/usr/bin/env bash
+
+          # Load OpenClaw env vars
           if [ -f "$HOME/.openclaw/.env" ]; then
             set -a
-            source "$HOME/.openclaw/.env"
+            . "$HOME/.openclaw/.env"
             set +a
+          fi
+
+          # Import GitHub Actions add_path entries so shells inherit setup-node/toolcache PATH
+          if [ -d "$HOME/work/_temp/_runner_file_commands" ]; then
+            _openclaw_add_path_file=""
+            _openclaw_added_path=""
+            for _openclaw_add_path_file in "$HOME"/work/_temp/_runner_file_commands/add_path_*; do
+              [ -f "$_openclaw_add_path_file" ] || continue
+              while IFS= read -r _openclaw_added_path || [ -n "$_openclaw_added_path" ]; do
+                [ -n "$_openclaw_added_path" ] || continue
+                case ":$PATH:" in
+                  *":$_openclaw_added_path:"*) ;;
+                  *) PATH="$_openclaw_added_path:$PATH" ;;
+                esac
+              done < "$_openclaw_add_path_file"
+            done
+            : "${_openclaw_add_path_file:=}"
+            : "${_openclaw_added_path:=}"
+          fi
+
+          # Login GitHub CLI when GH_TOKEN is available and gh is not authenticated yet
+          if command -v gh >/dev/null 2>&1; then
+            if [ -n "${GH_TOKEN:-}" ] && ! gh auth status >/dev/null 2>&1; then
+              printf '%s' "$GH_TOKEN" | gh auth login --with-token >/dev/null 2>&1 || true
+            fi
+          fi
+          EOF
+
+          chmod +x "$HOME/runtime-env.sh"
+
+          cat > "$HOME/ci-env.sh" <<'EOF'
+          if [ -f "$HOME/runtime-env.sh" ]; then
+            . "$HOME/runtime-env.sh"
           fi
           EOF
 
