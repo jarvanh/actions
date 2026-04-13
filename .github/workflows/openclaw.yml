@@ -10,98 +10,11 @@ jobs:
     concurrency: openclaw-singleton
     runs-on: ubuntu-latest
     steps:
-      - name: Run tmate
-        id: tmate
-        if: always()
-        continue-on-error: true
-        uses: mxschmitt/action-tmate@v3
-        with:
-          detached: true
-          install-dependencies: true
-          limit-access-to-actor: true
-      - name: Persist tmate connection info
-        if: always()
-        run: |
-          set -euo pipefail
-          {
-            printf 'TMATE_SSH=%s\n' '${{ steps.tmate.outputs.ssh-command }}'
-            printf 'TMATE_SSH_ADDRESS=%s\n' '${{ steps.tmate.outputs.ssh-address }}'
-            printf 'TMATE_WEB=%s\n' '${{ steps.tmate.outputs.web-url }}'
-            printf 'RUN_URL=%s\n' "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          } > "$HOME/tmate.env"
-          echo "tmate env persisted to $HOME/tmate.env"
-
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
           node-version: 'current' # 始终使用官方发布的最新版
           
-      - name: Prepare runtime env for later steps
-        run: |
-          set -euo pipefail
-
-          NODE_PATH_ACTUAL="$(command -v node)"
-          NODE_BIN_DIR="$(dirname "$NODE_PATH_ACTUAL")"
-          NPM_PREFIX="$(npm config get prefix)"
-          NPM_GLOBAL_BIN="$NPM_PREFIX/bin"
-
-          echo "$NODE_BIN_DIR" >> "$GITHUB_PATH"
-          if [ -d "$NPM_GLOBAL_BIN" ]; then
-            echo "$NPM_GLOBAL_BIN" >> "$GITHUB_PATH"
-          fi
-
-          echo "node path: $NODE_PATH_ACTUAL"
-          echo "node bin dir: $NODE_BIN_DIR"
-          echo "npm prefix: $NPM_PREFIX"
-          echo "npm global bin: $NPM_GLOBAL_BIN"
-
-          cat > "$HOME/runtime-env.sh" <<'EOF'
-          #!/usr/bin/env bash
-
-          # Load OpenClaw env vars
-          if [ -f "$HOME/.openclaw/.env" ]; then
-            set -a
-            . "$HOME/.openclaw/.env"
-            set +a
-          fi
-
-          # Import GitHub Actions add_path entries so shells inherit setup-node/toolcache PATH
-          if [ -d "$HOME/work/_temp/_runner_file_commands" ]; then
-            _openclaw_add_path_file=""
-            _openclaw_added_path=""
-            for _openclaw_add_path_file in "$HOME"/work/_temp/_runner_file_commands/add_path_*; do
-              [ -f "$_openclaw_add_path_file" ] || continue
-              while IFS= read -r _openclaw_added_path || [ -n "$_openclaw_added_path" ]; do
-                [ -n "$_openclaw_added_path" ] || continue
-                case ":$PATH:" in
-                  *":$_openclaw_added_path:"*) ;;
-                  *) PATH="$_openclaw_added_path:$PATH" ;;
-                esac
-              done < "$_openclaw_add_path_file"
-            done
-            : "${_openclaw_add_path_file:=}"
-            : "${_openclaw_added_path:=}"
-          fi
-
-          # Login GitHub CLI when GH_TOKEN is available and gh is not authenticated yet
-          if command -v gh >/dev/null 2>&1; then
-            if [ -n "${GH_TOKEN:-}" ] && ! gh auth status >/dev/null 2>&1; then
-              printf '%s' "$GH_TOKEN" | gh auth login --with-token >/dev/null 2>&1 || true
-            fi
-          fi
-          EOF
-
-          chmod +x "$HOME/runtime-env.sh"
-
-          cat > "$HOME/ci-env.sh" <<'EOF'
-          if [ -f "$HOME/runtime-env.sh" ]; then
-            . "$HOME/runtime-env.sh"
-          fi
-          EOF
-
-          chmod +x "$HOME/ci-env.sh"
-          echo "BASH_ENV=$HOME/ci-env.sh" >> "$GITHUB_ENV"
-
       - name: Install Rclone
         run: |
           curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
@@ -193,6 +106,94 @@ jobs:
           npm i -g @google/gemini-cli
           npm i -g clawhub
 
+      - name: Run tmate
+        id: tmate
+        if: always()
+        continue-on-error: true
+        uses: mxschmitt/action-tmate@v3
+        with:
+          detached: true
+          install-dependencies: true
+          limit-access-to-actor: true
+          
+      - name: Persist tmate connection info
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            printf 'TMATE_SSH=%s\n' '${{ steps.tmate.outputs.ssh-command }}'
+            printf 'TMATE_SSH_ADDRESS=%s\n' '${{ steps.tmate.outputs.ssh-address }}'
+            printf 'TMATE_WEB=%s\n' '${{ steps.tmate.outputs.web-url }}'
+            printf 'RUN_URL=%s\n' "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          } > "$HOME/tmate.env"
+          echo "tmate env persisted to $HOME/tmate.env"
+
+      - name: Prepare runtime env for later steps
+        run: |
+          set -euo pipefail
+
+          NODE_PATH_ACTUAL="$(command -v node)"
+          NODE_BIN_DIR="$(dirname "$NODE_PATH_ACTUAL")"
+          NPM_PREFIX="$(npm config get prefix)"
+          NPM_GLOBAL_BIN="$NPM_PREFIX/bin"
+
+          echo "$NODE_BIN_DIR" >> "$GITHUB_PATH"
+          if [ -d "$NPM_GLOBAL_BIN" ]; then
+            echo "$NPM_GLOBAL_BIN" >> "$GITHUB_PATH"
+          fi
+
+          echo "node path: $NODE_PATH_ACTUAL"
+          echo "node bin dir: $NODE_BIN_DIR"
+          echo "npm prefix: $NPM_PREFIX"
+          echo "npm global bin: $NPM_GLOBAL_BIN"
+
+          cat > "$HOME/runtime-env.sh" <<'EOF'
+          #!/usr/bin/env bash
+
+          # Load OpenClaw env vars
+          if [ -f "$HOME/.openclaw/.env" ]; then
+            set -a
+            . "$HOME/.openclaw/.env"
+            set +a
+          fi
+
+          # Import GitHub Actions add_path entries so shells inherit setup-node/toolcache PATH
+          if [ -d "$HOME/work/_temp/_runner_file_commands" ]; then
+            _openclaw_add_path_file=""
+            _openclaw_added_path=""
+            for _openclaw_add_path_file in "$HOME"/work/_temp/_runner_file_commands/add_path_*; do
+              [ -f "$_openclaw_add_path_file" ] || continue
+              while IFS= read -r _openclaw_added_path || [ -n "$_openclaw_added_path" ]; do
+                [ -n "$_openclaw_added_path" ] || continue
+                case ":$PATH:" in
+                  *":$_openclaw_added_path:"*) ;;
+                  *) PATH="$_openclaw_added_path:$PATH" ;;
+                esac
+              done < "$_openclaw_add_path_file"
+            done
+            : "${_openclaw_add_path_file:=}"
+            : "${_openclaw_added_path:=}"
+          fi
+
+          # Login GitHub CLI when GH_TOKEN is available and gh is not authenticated yet
+          if command -v gh >/dev/null 2>&1; then
+            if [ -n "${GH_TOKEN:-}" ] && ! gh auth status >/dev/null 2>&1; then
+              printf '%s' "$GH_TOKEN" | gh auth login --with-token >/dev/null 2>&1 || true
+            fi
+          fi
+          EOF
+
+          chmod +x "$HOME/runtime-env.sh"
+
+          cat > "$HOME/ci-env.sh" <<'EOF'
+          if [ -f "$HOME/runtime-env.sh" ]; then
+            . "$HOME/runtime-env.sh"
+          fi
+          EOF
+
+          chmod +x "$HOME/ci-env.sh"
+          echo "BASH_ENV=$HOME/ci-env.sh" >> "$GITHUB_ENV"
+          
       - name: Install Cloudflared
         run: |
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
