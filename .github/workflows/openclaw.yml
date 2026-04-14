@@ -184,15 +184,7 @@ jobs:
           EOF
 
           chmod +x "$HOME/runtime-env.sh"
-
-          cat > "$HOME/ci-env.sh" <<'EOF'
-          if [ -f "$HOME/runtime-env.sh" ]; then
-            . "$HOME/runtime-env.sh"
-          fi
-          EOF
-
-          chmod +x "$HOME/ci-env.sh"
-          echo "BASH_ENV=$HOME/ci-env.sh" >> "$GITHUB_ENV"
+          echo "BASH_ENV=$HOME/runtime-env.sh" >> "$GITHUB_ENV"
           
       - name: Install Cloudflared
         run: |
