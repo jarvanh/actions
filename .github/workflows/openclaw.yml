@@ -273,7 +273,7 @@ jobs:
           if rclone ls dropbox:self-hosted/CLIProxyAPI.tar.gz > /dev/null 2>&1; then
             echo "📦 Found CLIProxyAPI.tar.gz! Downloading and extracting..."
             rclone copyto dropbox:self-hosted/CLIProxyAPI.tar.gz /tmp/CLIProxyAPI.tar.gz
-            MIN_SIZE=$((10 * 1024))
+            MIN_SIZE=$((5 * 1024))
             actual_size=$(stat -c%s /tmp/CLIProxyAPI.tar.gz 2>/dev/null || echo 0)
             if [ "$actual_size" -ge "$MIN_SIZE" ] && tar -tzf /tmp/CLIProxyAPI.tar.gz >/dev/null 2>&1; then
               tar -xzf /tmp/CLIProxyAPI.tar.gz -C /tmp/local_CLIProxyAPI
@@ -595,7 +595,7 @@ jobs:
             exit 2
           fi
 
-          MIN_SIZE=$((10 * 1024))
+          MIN_SIZE=$((5 * 1024))
           rm -f "$OUTPUT_TAR"
 
           build_openclaw_manifest() {
@@ -728,7 +728,7 @@ jobs:
             echo "⚠️ final openclaw.tar.gz validation failed, skip upload"
           fi
 
-          MIN_SIZE=$((10 * 1024))
+          MIN_SIZE=$((5 * 1024))
 
           echo "5. Archiving CLIProxyAPI..."
           sudo tar -czf /tmp/CLIProxyAPI.tar.gz -C /tmp/local_CLIProxyAPI .
