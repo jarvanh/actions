@@ -176,6 +176,7 @@ jobs:
           fi
 
           # Persist GitHub CLI auth locally from GH_TOKEN, so shells without the env can still use gh.
+          # Also connect Git HTTPS auth to gh, so plain `git push` can reuse the authenticated flow.
           if command -v gh >/dev/null 2>&1; then
             GH_TOKEN_VALUE="${GH_TOKEN:-}"
             GH_CONFIG_HOME_LOCAL="$HOME/.config/gh"
@@ -209,6 +210,9 @@ jobs:
 
               [ -f "$GH_HOSTS_FILE_LOCAL" ] && chmod 600 "$GH_HOSTS_FILE_LOCAL" 2>/dev/null || true
             fi
+
+            # Wire Git HTTPS auth through gh so `git push` can reuse gh auth without embedding tokens in remotes.
+            gh auth setup-git >/dev/null 2>&1 || true
           fi
           EOF
 
