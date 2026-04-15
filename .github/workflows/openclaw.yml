@@ -175,10 +175,39 @@ jobs:
             : "${_openclaw_added_path:=}"
           fi
 
-          # Login GitHub CLI when GH_TOKEN is available and gh is not authenticated yet
+          # Persist GitHub CLI auth locally from GH_TOKEN, so shells without the env can still use gh.
           if command -v gh >/dev/null 2>&1; then
-            if [ -n "${GH_TOKEN:-}" ] && ! gh auth status >/dev/null 2>&1; then
-              printf '%s' "$GH_TOKEN" | gh auth login --with-token >/dev/null 2>&1 || true
+            GH_TOKEN_VALUE="${GH_TOKEN:-}"
+            GH_CONFIG_HOME_LOCAL="$HOME/.config/gh"
+            GH_HOSTS_FILE_LOCAL="$GH_CONFIG_HOME_LOCAL/hosts.yml"
+
+            if [ -n "$GH_TOKEN_VALUE" ]; then
+              mkdir -p "$GH_CONFIG_HOME_LOCAL"
+              chmod 700 "$HOME/.config" "$GH_CONFIG_HOME_LOCAL" 2>/dev/null || true
+
+              if ! env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN -u BASH_ENV gh auth status >/dev/null 2>&1; then
+                GH_USER_LOGIN="$(gh api user --jq .login 2>/dev/null || true)"
+                if [ -n "$GH_USER_LOGIN" ]; then
+                  GH_TMP_DIR="$(mktemp -d)"
+                  GH_TMP_HOSTS_FILE="$GH_TMP_DIR/hosts.yml"
+                  cat > "$GH_TMP_HOSTS_FILE" <<EOF_HOSTS
+          github.com:
+              user: ${GH_USER_LOGIN}
+              oauth_token: ${GH_TOKEN_VALUE}
+              git_protocol: https
+          EOF_HOSTS
+                  chmod 600 "$GH_TMP_HOSTS_FILE" 2>/dev/null || true
+
+                  if GH_CONFIG_DIR="$GH_TMP_DIR" env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN -u BASH_ENV gh auth status >/dev/null 2>&1; then
+                    mv "$GH_TMP_HOSTS_FILE" "$GH_HOSTS_FILE_LOCAL"
+                    chmod 600 "$GH_HOSTS_FILE_LOCAL" 2>/dev/null || true
+                  fi
+
+                  rm -rf "$GH_TMP_DIR" 2>/dev/null || true
+                fi
+              fi
+
+              [ -f "$GH_HOSTS_FILE_LOCAL" ] && chmod 600 "$GH_HOSTS_FILE_LOCAL" 2>/dev/null || true
             fi
           fi
           EOF
