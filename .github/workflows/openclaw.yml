@@ -792,20 +792,20 @@ jobs:
             fi
           fi
 
-      - name: Sync ~/.openclaw to Dropbox
-        if: always()
-        run: |
-          echo "Syncing ~/.openclaw to Dropbox..."
-          rclone sync ~/.openclaw dropbox:self-hosted/openclaw \
-            --exclude "logs/**" \
-            --exclude "cache/**" \
-            --exclude "tmp/**" \
-            --exclude "browser/**/Crashpad/**" \
-            --exclude "browser/**/GPUCache/**" \
-            --exclude "browser/**/Code Cache/**" \
-            --exclude "browser/**/GrShaderCache/**" \
-            --exclude "browser/**/GraphiteDawnCache/**" \
-            --exclude "**/*.lock" \
-            --exclude "**/*.pid" \
-            --exclude "**/*.jsonl.lock" \
-            -v
+      # - name: Sync ~/.openclaw to Dropbox
+      #   if: always()
+      #   run: |
+      #     echo "Syncing ~/.openclaw to Dropbox..."
+      #     rclone sync ~/.openclaw dropbox:self-hosted/openclaw \
+      #       --exclude "logs/**" \
+      #       --exclude "cache/**" \
+      #       --exclude "tmp/**" \
+      #       --exclude "browser/**/Crashpad/**" \
+      #       --exclude "browser/**/GPUCache/**" \
+      #       --exclude "browser/**/Code Cache/**" \
+      #       --exclude "browser/**/GrShaderCache/**" \
+      #       --exclude "browser/**/GraphiteDawnCache/**" \
+      #       --exclude "**/*.lock" \
+      #       --exclude "**/*.pid" \
+      #       --exclude "**/*.jsonl.lock" \
+      #       -v
