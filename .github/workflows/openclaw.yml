@@ -461,12 +461,12 @@ jobs:
                   TARGET_VERSION=""
 
                   if [ -s "$HOME/.openclaw/openclaw.json" ]; then
-                    READ_VERSION=$(sudo jq -r '.wizard.lastTouchedVersion // empty' "$HOME/.openclaw/openclaw.json" 2>/dev/null)
+                    READ_VERSION=$(sudo jq -r '.meta.lastTouchedVersion // empty' "$HOME/.openclaw/openclaw.json" 2>/dev/null)
                     if [ -n "$READ_VERSION" ] && [ "$READ_VERSION" != "null" ]; then
                       TARGET_VERSION="$READ_VERSION"
                       echo "✅ Found recorded version in config: $TARGET_VERSION"
                     else
-                      fail_startup ".wizard.lastTouchedVersion not found in $HOME/.openclaw/openclaw.json"
+                      fail_startup ".meta.lastTouchedVersion not found in $HOME/.openclaw/openclaw.json"
                     fi
                   else
                     fail_startup "Config file missing or empty at $HOME/.openclaw/openclaw.json"
