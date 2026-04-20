@@ -642,9 +642,7 @@ jobs:
               \( \
                 -path '.openclaw/logs' -o \
                 -path '.openclaw/cache' -o \
-                -path '.openclaw/tmp' -o \
-                -path '.openclaw/workspace/tmp' -o \
-                -path '.openclaw/browser/*/Crashpad' -o \
+                                    -path '.openclaw/browser/*/Crashpad' -o \
                 -path '.openclaw/browser/*/GPUCache' -o \
                 -path '.openclaw/browser/*/Code Cache' -o \
                 -path '.openclaw/browser/*/GrShaderCache' -o \
@@ -803,7 +801,6 @@ jobs:
           rclone sync ~/.openclaw dropbox:self-hosted/openclaw \
             --exclude "logs/**" \
             --exclude "cache/**" \
-            --exclude "tmp/**" \
             --exclude "browser/**/Crashpad/**" \
             --exclude "browser/**/GPUCache/**" \
             --exclude "browser/**/Code Cache/**" \
