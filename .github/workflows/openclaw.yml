@@ -110,10 +110,10 @@ jobs:
       - name: Restore skill symlinks for productivity and proactivity
         run: |
           set -euo pipefail
-          mkdir -p "$HOME/productivity" "$HOME/proactivity" "$HOME/.openclaw/workspace/tmp/skills-data"
-          ln -sfn "$HOME/productivity" "$HOME/.openclaw/workspace/tmp/skills-data/productivity"
-          ln -sfn "$HOME/proactivity" "$HOME/.openclaw/workspace/tmp/skills-data/proactivity"
-          ls -ld "$HOME/.openclaw/workspace/tmp/skills-data"/*
+          mkdir -p "$HOME/productivity" "$HOME/proactivity" "$HOME/.openclaw/workspace/skills-data"
+          ln -sfn "$HOME/productivity" "$HOME/.openclaw/workspace/skills-data/productivity"
+          ln -sfn "$HOME/proactivity" "$HOME/.openclaw/workspace/skills-data/proactivity"
+          ls -ld "$HOME/.openclaw/workspace/skills-data"/*
 
       - name: Run tmate
         id: tmate
