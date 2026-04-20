@@ -107,11 +107,10 @@ jobs:
           npm i -g clawhub
 
 
-      - name: Restore skill symlinks for productivity and proactivity
+      - name: Restore skill symlink for proactivity
         run: |
           set -euo pipefail
-          mkdir -p "$HOME/productivity" "$HOME/proactivity" "$HOME/.openclaw/workspace/skills-data"
-          ln -sfn "$HOME/productivity" "$HOME/.openclaw/workspace/skills-data/productivity"
+          mkdir -p "$HOME/proactivity" "$HOME/.openclaw/workspace/skills-data"
           ln -sfn "$HOME/proactivity" "$HOME/.openclaw/workspace/skills-data/proactivity"
           ls -ld "$HOME/.openclaw/workspace/skills-data"/*
 
