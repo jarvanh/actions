@@ -106,6 +106,15 @@ jobs:
           npm i -g @google/gemini-cli
           npm i -g clawhub
 
+
+      - name: Restore skill symlinks for productivity and proactivity
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/productivity" "$HOME/proactivity" "$HOME/.openclaw/workspace/tmp/skills-data"
+          ln -sfn "$HOME/productivity" "$HOME/.openclaw/workspace/tmp/skills-data/productivity"
+          ln -sfn "$HOME/proactivity" "$HOME/.openclaw/workspace/tmp/skills-data/proactivity"
+          ls -ld "$HOME/.openclaw/workspace/tmp/skills-data"/*
+
       - name: Run tmate
         id: tmate
         if: always()
