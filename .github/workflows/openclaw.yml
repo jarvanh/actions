@@ -402,6 +402,8 @@ jobs:
       - name: Run OpenClaw
         id: run_openclaw
         run: |
+          set -euo pipefail
+
           RUN_OPENCLAW_STEP_LOG="/tmp/run-openclaw-step.log"
           RUN_OPENCLAW_META="/tmp/run-openclaw-meta.env"
           : > "$RUN_OPENCLAW_STEP_LOG"
@@ -410,104 +412,152 @@ jobs:
 
           CURRENT_OPENCLAW_VERSION="$(openclaw --version 2>/dev/null | head -n 1 || true)"
           echo "CURRENT_OPENCLAW_VERSION=$CURRENT_OPENCLAW_VERSION" >> "$RUN_OPENCLAW_META"
-          echo "FAIL_STAGE=initial_start" >> "$RUN_OPENCLAW_META"
-          INITIAL_START_BEGIN_TS=$(date +%s)
+          echo "FAIL_STAGE=preflight_doctor" >> "$RUN_OPENCLAW_META"
+          PREFLIGHT_BEGIN_TS=$(date +%s)
 
-          check_openclaw_health() {
-            if sudo lsof -Pi :18789 -sTCP:LISTEN -t >/dev/null && [ "$(curl -fsS -o /dev/null -w "%{http_code}" --max-time 5 http://127.0.0.1:18789/health || true)" = "200" ]; then
-              return 0
-            fi
-            return 1
-          }
           fail_startup() {
             local msg="$1"
             echo "❌ $msg"
             exit 1
           }
 
-          echo "🔧 Fixing file permissions to pass security checks..."
-          sudo chmod -R o-w $(npm root -g)
-          sudo chmod 700 ~/.openclaw
-          if [ -f ~/.openclaw/openclaw.json ]; then
-            sudo chmod 600 ~/.openclaw/openclaw.json
-          fi
+          fix_openclaw_permissions() {
+            echo "🔧 Fixing file permissions to pass security checks..."
+            sudo chmod -R o-w "$(npm root -g)"
+            sudo chmod 700 ~/.openclaw
+            if [ -f ~/.openclaw/openclaw.json ]; then
+              sudo chmod 600 ~/.openclaw/openclaw.json
+            fi
+          }
 
+          openclaw_port_listening() {
+            sudo lsof -Pi :18789 -sTCP:LISTEN -t >/dev/null
+          }
+
+          openclaw_log_ready() {
+            journalctl --user -u openclaw-gateway.service --since "5 minutes ago" --no-pager 2>/dev/null \
+              | grep -q "\[gateway\] ready"
+          }
+
+          openclaw_health_http_ok() {
+            [ "$(curl -fsS -o /dev/null -w "%{http_code}" --connect-timeout 3 --max-time 15 http://127.0.0.1:18789/health || true)" = "200" ]
+          }
+
+          wait_for_openclaw_health() {
+            local label="$1"
+            local timeout_sec="${2:-180}"
+            local interval_sec="${3:-5}"
+            local start_ts now_ts elapsed
+            start_ts=$(date +%s)
+
+            echo "Waiting for OpenClaw health (${label}, timeout=${timeout_sec}s)..."
+            while true; do
+              now_ts=$(date +%s)
+              elapsed=$((now_ts - start_ts))
+
+              if openclaw_port_listening; then
+                if openclaw_health_http_ok; then
+                  echo "✅ OpenClaw Gateway health is OK after ${elapsed}s (${label})."
+                  return 0
+                fi
+
+                if openclaw_log_ready; then
+                  echo "⏳ Gateway is listening and logged ready, but /health is still slow after ${elapsed}s (${label}); continuing grace wait."
+                else
+                  echo "⏳ Gateway port is listening, waiting for ready/health... ${elapsed}/${timeout_sec}s (${label})"
+                fi
+              else
+                echo "⏳ Gateway port is not listening yet... ${elapsed}/${timeout_sec}s (${label})"
+              fi
+
+              if [ "$elapsed" -ge "$timeout_sec" ]; then
+                echo "❌ OpenClaw Gateway health did not become OK within ${timeout_sec}s (${label})."
+                return 1
+              fi
+              sleep "$interval_sec"
+            done
+          }
+
+          dump_openclaw_diagnostics() {
+            echo "⚠️ Gateway not healthy yet. Diagnostics:"
+            echo "--- systemd status ---"
+            systemctl --user --no-pager --full status openclaw-gateway.service || true
+            echo "--- recent journal ---"
+            journalctl --user -u openclaw-gateway.service --since "10 minutes ago" --no-pager | tail -n 120 || true
+            echo "--- /tmp/openclaw logs ---"
+            find /tmp/openclaw -maxdepth 1 -type f -name 'openclaw-*.log' -printf '%T@ %p\n' 2>/dev/null \
+              | sort -nr \
+              | head -2 \
+              | cut -d' ' -f2- \
+              | while IFS= read -r log_file; do
+                  echo "--- tail $log_file ---"
+                  tail -n 80 "$log_file" || true
+                done
+          }
+
+          fix_openclaw_permissions
+
+          echo "🛠️ Running preflight 'openclaw doctor --fix' before gateway restart..."
+          openclaw doctor --fix || true
+          PREFLIGHT_END_TS=$(date +%s)
+          echo "PREFLIGHT_DOCTOR_DURATION_SEC=$((PREFLIGHT_END_TS - PREFLIGHT_BEGIN_TS))" >> "$RUN_OPENCLAW_META"
+
+          echo "FAIL_STAGE=initial_start" >> "$RUN_OPENCLAW_META"
+          INITIAL_START_BEGIN_TS=$(date +%s)
           echo "Restarting OpenClaw gateway..."
           openclaw gateway install --force
           openclaw gateway restart
 
-          echo "Waiting for OpenClaw ..."
-          sleep 60
-
-          if check_openclaw_health; then
+          if wait_for_openclaw_health "initial_start" 180 5; then
+              INITIAL_START_END_TS=$(date +%s)
+              echo "INITIAL_START_DURATION_SEC=$((INITIAL_START_END_TS - INITIAL_START_BEGIN_TS))" >> "$RUN_OPENCLAW_META"
               echo "✅ OpenClaw Gateway is healthy!"
           else
               INITIAL_START_END_TS=$(date +%s)
               echo "INITIAL_START_DURATION_SEC=$((INITIAL_START_END_TS - INITIAL_START_BEGIN_TS))" >> "$RUN_OPENCLAW_META"
-              echo "⚠️ Gateway not healthy yet. Checking logs:"
-              tail -n 20 openclaw.log || echo "No log file found."
+              dump_openclaw_diagnostics
 
-              echo "FAIL_STAGE=doctor_fix" >> "$RUN_OPENCLAW_META"
-              DOCTOR_FIX_BEGIN_TS=$(date +%s)
-              echo "🛠️ Attempting to fix with 'openclaw doctor --fix'..."
-              openclaw doctor --fix
+              echo "FAIL_STAGE=fallback_reinstall" >> "$RUN_OPENCLAW_META"
+              echo "🔄 Initial start failed after preflight doctor. Attempting to fallback and reinstall recorded OpenClaw version..."
+
+              TARGET_VERSION=""
+
+              if [ -s "$HOME/.openclaw/openclaw.json" ]; then
+                READ_VERSION=$(sudo jq -r '.meta.lastTouchedVersion // empty' "$HOME/.openclaw/openclaw.json" 2>/dev/null)
+                if [ -n "$READ_VERSION" ] && [ "$READ_VERSION" != "null" ]; then
+                  TARGET_VERSION="$READ_VERSION"
+                  echo "✅ Found recorded version in config: $TARGET_VERSION"
+                else
+                  fail_startup ".meta.lastTouchedVersion not found in $HOME/.openclaw/openclaw.json"
+                fi
+              else
+                fail_startup "Config file missing or empty at $HOME/.openclaw/openclaw.json"
+              fi
+
+              echo "Installing openclaw@$TARGET_VERSION ..."
+              echo "FALLBACK_TARGET_VERSION=$TARGET_VERSION" >> "$RUN_OPENCLAW_META"
+              FALLBACK_REINSTALL_BEGIN_TS=$(date +%s)
+              npm i -g "openclaw@$TARGET_VERSION"
+
+              fix_openclaw_permissions
+
+              echo "🛠️ Running 'openclaw doctor --fix' after fallback reinstall..."
+              openclaw doctor --fix || true
+
+              echo "Restarting OpenClaw after fallback reinstall..."
+              openclaw gateway install --force
               openclaw gateway restart
 
-              echo "Waiting for OpenClaw after doctor fix..."
-              sleep 60
-
-              if check_openclaw_health; then
-                  DOCTOR_FIX_END_TS=$(date +%s)
-                  echo "DOCTOR_FIX_DURATION_SEC=$((DOCTOR_FIX_END_TS - DOCTOR_FIX_BEGIN_TS))" >> "$RUN_OPENCLAW_META"
-                  echo "✅ OpenClaw Gateway is healthy after doctor fix!"
+              if wait_for_openclaw_health "fallback_reinstall" 180 5; then
+                FALLBACK_REINSTALL_END_TS=$(date +%s)
+                echo "FALLBACK_REINSTALL_DURATION_SEC=$((FALLBACK_REINSTALL_END_TS - FALLBACK_REINSTALL_BEGIN_TS))" >> "$RUN_OPENCLAW_META"
+                echo "✅ OpenClaw Gateway is healthy after fallback reinstall!"
               else
-                  DOCTOR_FIX_END_TS=$(date +%s)
-                  echo "DOCTOR_FIX_DURATION_SEC=$((DOCTOR_FIX_END_TS - DOCTOR_FIX_BEGIN_TS))" >> "$RUN_OPENCLAW_META"
-                  echo "FAIL_STAGE=fallback_reinstall" >> "$RUN_OPENCLAW_META"
-                  echo "🔄 Doctor fix failed. Attempting to fallback and reinstall recorded OpenClaw version..."
-
-                  TARGET_VERSION=""
-
-                  if [ -s "$HOME/.openclaw/openclaw.json" ]; then
-                    READ_VERSION=$(sudo jq -r '.meta.lastTouchedVersion // empty' "$HOME/.openclaw/openclaw.json" 2>/dev/null)
-                    if [ -n "$READ_VERSION" ] && [ "$READ_VERSION" != "null" ]; then
-                      TARGET_VERSION="$READ_VERSION"
-                      echo "✅ Found recorded version in config: $TARGET_VERSION"
-                    else
-                      fail_startup ".meta.lastTouchedVersion not found in $HOME/.openclaw/openclaw.json"
-                    fi
-                  else
-                    fail_startup "Config file missing or empty at $HOME/.openclaw/openclaw.json"
-                  fi
-
-                  echo "Installing openclaw@$TARGET_VERSION ..."
-                  echo "FALLBACK_TARGET_VERSION=$TARGET_VERSION" >> "$RUN_OPENCLAW_META"
-                  FALLBACK_REINSTALL_BEGIN_TS=$(date +%s)
-                  npm i -g "openclaw@$TARGET_VERSION"
-
-                  sudo chmod -R o-w $(npm root -g)
-                  sudo chmod 700 ~/.openclaw
-                  if [ -f ~/.openclaw/openclaw.json ]; then
-                    sudo chmod 600 ~/.openclaw/openclaw.json
-                  fi
-
-                  echo "Restarting OpenClaw..."
-                  openclaw gateway install --force
-                  openclaw gateway restart
-
-                  echo "Waiting for OpenClaw after fallback reinstall..."
-                  sleep 60
-
-                  if check_openclaw_health; then
-                    FALLBACK_REINSTALL_END_TS=$(date +%s)
-                    echo "FALLBACK_REINSTALL_DURATION_SEC=$((FALLBACK_REINSTALL_END_TS - FALLBACK_REINSTALL_BEGIN_TS))" >> "$RUN_OPENCLAW_META"
-                    echo "✅ OpenClaw Gateway is healthy after fallback reinstall!"
-                  else
-                    FALLBACK_REINSTALL_END_TS=$(date +%s)
-                    echo "FALLBACK_REINSTALL_DURATION_SEC=$((FALLBACK_REINSTALL_END_TS - FALLBACK_REINSTALL_BEGIN_TS))" >> "$RUN_OPENCLAW_META"
-                    err="回退到最近记录版本后，OpenClaw 依然无法启动（健康检查失败）"
-                    fail_startup "$err"
-                  fi
+                FALLBACK_REINSTALL_END_TS=$(date +%s)
+                echo "FALLBACK_REINSTALL_DURATION_SEC=$((FALLBACK_REINSTALL_END_TS - FALLBACK_REINSTALL_BEGIN_TS))" >> "$RUN_OPENCLAW_META"
+                dump_openclaw_diagnostics
+                err="回退到最近记录版本后，OpenClaw 依然无法启动（健康检查失败）"
+                fail_startup "$err"
               fi
           fi
 
