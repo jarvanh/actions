@@ -413,7 +413,6 @@ jobs:
           CURRENT_OPENCLAW_VERSION="$(openclaw --version 2>/dev/null | head -n 1 || true)"
           CURRENT_OPENCLAW_SEMVER="$(printf '%s\n' "$CURRENT_OPENCLAW_VERSION" | grep -oE '[0-9]{4}\.[0-9]+\.[0-9]+' | head -n 1 || true)"
           KNOWN_GOOD_VERSION_FILE="$HOME/.openclaw/openclaw-known-good-version"
-          LAST_SUCCESSFUL_VERSION_FILE="$HOME/.openclaw/openclaw-last-successful-version"
           echo "CURRENT_OPENCLAW_VERSION=$CURRENT_OPENCLAW_VERSION" >> "$RUN_OPENCLAW_META"
           echo "CURRENT_OPENCLAW_SEMVER=$CURRENT_OPENCLAW_SEMVER" >> "$RUN_OPENCLAW_META"
           echo "FAIL_STAGE=preflight_doctor" >> "$RUN_OPENCLAW_META"
@@ -445,7 +444,6 @@ jobs:
             fi
             mkdir -p "$HOME/.openclaw"
             printf '%s\n' "$version" > "$KNOWN_GOOD_VERSION_FILE"
-            printf '%s\n' "$version" > "$LAST_SUCCESSFUL_VERSION_FILE"
             echo "RECORDED_SUCCESSFUL_OPENCLAW_VERSION=$version" >> "$RUN_OPENCLAW_META"
             echo "✅ Recorded successful OpenClaw version: $version"
           }
@@ -456,13 +454,6 @@ jobs:
             version="$(read_openclaw_version_file "$KNOWN_GOOD_VERSION_FILE")"
             if [ -n "$version" ]; then
               echo "FALLBACK_VERSION_SOURCE=known_good_file" >> "$RUN_OPENCLAW_META"
-              echo "$version"
-              return 0
-            fi
-
-            version="$(read_openclaw_version_file "$LAST_SUCCESSFUL_VERSION_FILE")"
-            if [ -n "$version" ]; then
-              echo "FALLBACK_VERSION_SOURCE=last_successful_file" >> "$RUN_OPENCLAW_META"
               echo "$version"
               return 0
             fi
@@ -589,7 +580,7 @@ jobs:
 
               TARGET_VERSION="$(resolve_fallback_openclaw_version || true)"
               if [ -z "$TARGET_VERSION" ]; then
-                fail_startup "No fallback OpenClaw version found. Checked $KNOWN_GOOD_VERSION_FILE, $LAST_SUCCESSFUL_VERSION_FILE, and .meta.lastTouchedVersion."
+                fail_startup "No fallback OpenClaw version found. Checked $KNOWN_GOOD_VERSION_FILE and .meta.lastTouchedVersion."
               fi
               echo "✅ Selected fallback OpenClaw version: $TARGET_VERSION"
 
