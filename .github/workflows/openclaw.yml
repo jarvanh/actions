@@ -411,7 +411,11 @@ jobs:
           exec > >(tee -a "$RUN_OPENCLAW_STEP_LOG") 2>&1
 
           CURRENT_OPENCLAW_VERSION="$(openclaw --version 2>/dev/null | head -n 1 || true)"
+          CURRENT_OPENCLAW_SEMVER="$(printf '%s\n' "$CURRENT_OPENCLAW_VERSION" | grep -oE '[0-9]{4}\.[0-9]+\.[0-9]+' | head -n 1 || true)"
+          KNOWN_GOOD_VERSION_FILE="$HOME/.openclaw/openclaw-known-good-version"
+          LAST_SUCCESSFUL_VERSION_FILE="$HOME/.openclaw/openclaw-last-successful-version"
           echo "CURRENT_OPENCLAW_VERSION=$CURRENT_OPENCLAW_VERSION" >> "$RUN_OPENCLAW_META"
+          echo "CURRENT_OPENCLAW_SEMVER=$CURRENT_OPENCLAW_SEMVER" >> "$RUN_OPENCLAW_META"
           echo "FAIL_STAGE=preflight_doctor" >> "$RUN_OPENCLAW_META"
           PREFLIGHT_BEGIN_TS=$(date +%s)
 
@@ -419,6 +423,62 @@ jobs:
             local msg="$1"
             echo "❌ $msg"
             exit 1
+          }
+
+          normalize_openclaw_version() {
+            printf '%s\n' "${1:-}" | tr -d '[:space:]' | grep -oE '^[0-9]{4}\.[0-9]+\.[0-9]+$' || true
+          }
+
+          read_openclaw_version_file() {
+            local file="$1"
+            if [ -s "$file" ]; then
+              normalize_openclaw_version "$(head -n 1 "$file" 2>/dev/null || true)"
+            fi
+          }
+
+          record_successful_openclaw_version() {
+            local version="$1"
+            version="$(normalize_openclaw_version "$version")"
+            if [ -z "$version" ]; then
+              echo "⚠️ Cannot record successful OpenClaw version: current version is empty or invalid."
+              return 0
+            fi
+            mkdir -p "$HOME/.openclaw"
+            printf '%s\n' "$version" > "$KNOWN_GOOD_VERSION_FILE"
+            printf '%s\n' "$version" > "$LAST_SUCCESSFUL_VERSION_FILE"
+            echo "RECORDED_SUCCESSFUL_OPENCLAW_VERSION=$version" >> "$RUN_OPENCLAW_META"
+            echo "✅ Recorded successful OpenClaw version: $version"
+          }
+
+          resolve_fallback_openclaw_version() {
+            local version=""
+
+            version="$(read_openclaw_version_file "$KNOWN_GOOD_VERSION_FILE")"
+            if [ -n "$version" ]; then
+              echo "FALLBACK_VERSION_SOURCE=known_good_file" >> "$RUN_OPENCLAW_META"
+              echo "$version"
+              return 0
+            fi
+
+            version="$(read_openclaw_version_file "$LAST_SUCCESSFUL_VERSION_FILE")"
+            if [ -n "$version" ]; then
+              echo "FALLBACK_VERSION_SOURCE=last_successful_file" >> "$RUN_OPENCLAW_META"
+              echo "$version"
+              return 0
+            fi
+
+            if [ -s "$HOME/.openclaw/openclaw.json" ]; then
+              version="$(sudo jq -r '.meta.lastTouchedVersion // empty' "$HOME/.openclaw/openclaw.json" 2>/dev/null | head -n 1 || true)"
+              version="$(normalize_openclaw_version "$version")"
+              if [ -n "$version" ]; then
+                echo "FALLBACK_VERSION_SOURCE=meta_lastTouchedVersion" >> "$RUN_OPENCLAW_META"
+                echo "$version"
+                return 0
+              fi
+            fi
+
+            echo ""
+            return 1
           }
 
           fix_openclaw_permissions() {
@@ -517,6 +577,7 @@ jobs:
           if [ "$INITIAL_START_RESTART_OK" = "1" ] && wait_for_openclaw_health "initial_start" 180 5; then
               INITIAL_START_END_TS=$(date +%s)
               echo "INITIAL_START_DURATION_SEC=$((INITIAL_START_END_TS - INITIAL_START_BEGIN_TS))" >> "$RUN_OPENCLAW_META"
+              record_successful_openclaw_version "$CURRENT_OPENCLAW_SEMVER"
               echo "✅ OpenClaw Gateway is healthy!"
           else
               INITIAL_START_END_TS=$(date +%s)
@@ -526,19 +587,11 @@ jobs:
               echo "FAIL_STAGE=fallback_reinstall" >> "$RUN_OPENCLAW_META"
               echo "🔄 Initial start failed after preflight doctor. Attempting to fallback and reinstall recorded OpenClaw version..."
 
-              TARGET_VERSION=""
-
-              if [ -s "$HOME/.openclaw/openclaw.json" ]; then
-                READ_VERSION=$(sudo jq -r '.meta.lastTouchedVersion // empty' "$HOME/.openclaw/openclaw.json" 2>/dev/null)
-                if [ -n "$READ_VERSION" ] && [ "$READ_VERSION" != "null" ]; then
-                  TARGET_VERSION="$READ_VERSION"
-                  echo "✅ Found recorded version in config: $TARGET_VERSION"
-                else
-                  fail_startup ".meta.lastTouchedVersion not found in $HOME/.openclaw/openclaw.json"
-                fi
-              else
-                fail_startup "Config file missing or empty at $HOME/.openclaw/openclaw.json"
+              TARGET_VERSION="$(resolve_fallback_openclaw_version || true)"
+              if [ -z "$TARGET_VERSION" ]; then
+                fail_startup "No fallback OpenClaw version found. Checked $KNOWN_GOOD_VERSION_FILE, $LAST_SUCCESSFUL_VERSION_FILE, and .meta.lastTouchedVersion."
               fi
+              echo "✅ Selected fallback OpenClaw version: $TARGET_VERSION"
 
               echo "Installing openclaw@$TARGET_VERSION ..."
               echo "FALLBACK_TARGET_VERSION=$TARGET_VERSION" >> "$RUN_OPENCLAW_META"
@@ -563,6 +616,7 @@ jobs:
               if [ "$FALLBACK_RESTART_OK" = "1" ] && wait_for_openclaw_health "fallback_reinstall" 180 5; then
                 FALLBACK_REINSTALL_END_TS=$(date +%s)
                 echo "FALLBACK_REINSTALL_DURATION_SEC=$((FALLBACK_REINSTALL_END_TS - FALLBACK_REINSTALL_BEGIN_TS))" >> "$RUN_OPENCLAW_META"
+                record_successful_openclaw_version "$TARGET_VERSION"
                 echo "✅ OpenClaw Gateway is healthy after fallback reinstall!"
               else
                 FALLBACK_REINSTALL_END_TS=$(date +%s)
@@ -614,6 +668,8 @@ jobs:
 
             current_version=""
             fallback_version=""
+            fallback_version_source=""
+            recorded_successful_version=""
             fail_stage=""
             initial_start_duration_sec=""
             doctor_fix_duration_sec=""
@@ -621,6 +677,8 @@ jobs:
             if [ -f "$meta_file" ]; then
               current_version=$(grep '^CURRENT_OPENCLAW_VERSION=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
               fallback_version=$(grep '^FALLBACK_TARGET_VERSION=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
+              fallback_version_source=$(grep '^FALLBACK_VERSION_SOURCE=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
+              recorded_successful_version=$(grep '^RECORDED_SUCCESSFUL_OPENCLAW_VERSION=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
               fail_stage=$(grep '^FAIL_STAGE=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
               initial_start_duration_sec=$(grep '^INITIAL_START_DURATION_SEC=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
               doctor_fix_duration_sec=$(grep '^DOCTOR_FIX_DURATION_SEC=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
@@ -632,6 +690,8 @@ jobs:
             export ERROR_SUMMARY="$error_summary"
             export CURRENT_VERSION="$current_version"
             export FALLBACK_VERSION="$fallback_version"
+            export FALLBACK_VERSION_SOURCE="$fallback_version_source"
+            export RECORDED_SUCCESSFUL_VERSION="$recorded_successful_version"
             export FAIL_STAGE="$fail_stage"
             export INITIAL_START_DURATION_SEC="$initial_start_duration_sec"
             export DOCTOR_FIX_DURATION_SEC="$doctor_fix_duration_sec"
@@ -655,6 +715,14 @@ jobs:
             if [ -n "$fallback_version" ]; then
               msg+=$'\n'
               msg+="Fallback 目标版本: ${fallback_version}"
+            fi
+            if [ -n "$fallback_version_source" ]; then
+              msg+=$'\n'
+              msg+="Fallback 版本来源: ${fallback_version_source}"
+            fi
+            if [ -n "$recorded_successful_version" ]; then
+              msg+=$'\n'
+              msg+="记录的成功版本: ${recorded_successful_version}"
             fi
             if [ -n "$initial_start_duration_sec" ]; then
               msg+=$'\n'
