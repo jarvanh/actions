@@ -505,10 +505,16 @@ jobs:
           echo "FAIL_STAGE=initial_start" >> "$RUN_OPENCLAW_META"
           INITIAL_START_BEGIN_TS=$(date +%s)
           echo "Restarting OpenClaw gateway..."
-          openclaw gateway install --force
-          openclaw gateway restart
+          INITIAL_START_RESTART_OK=1
+          if ! openclaw gateway install --force; then
+            echo "⚠️ Initial gateway install failed; will attempt fallback reinstall."
+            INITIAL_START_RESTART_OK=0
+          elif ! openclaw gateway restart; then
+            echo "⚠️ Initial gateway restart failed; will attempt fallback reinstall."
+            INITIAL_START_RESTART_OK=0
+          fi
 
-          if wait_for_openclaw_health "initial_start" 180 5; then
+          if [ "$INITIAL_START_RESTART_OK" = "1" ] && wait_for_openclaw_health "initial_start" 180 5; then
               INITIAL_START_END_TS=$(date +%s)
               echo "INITIAL_START_DURATION_SEC=$((INITIAL_START_END_TS - INITIAL_START_BEGIN_TS))" >> "$RUN_OPENCLAW_META"
               echo "✅ OpenClaw Gateway is healthy!"
@@ -545,10 +551,16 @@ jobs:
               openclaw doctor --fix || true
 
               echo "Restarting OpenClaw after fallback reinstall..."
-              openclaw gateway install --force
-              openclaw gateway restart
+              FALLBACK_RESTART_OK=1
+              if ! openclaw gateway install --force; then
+                echo "⚠️ Fallback gateway install failed."
+                FALLBACK_RESTART_OK=0
+              elif ! openclaw gateway restart; then
+                echo "⚠️ Fallback gateway restart failed."
+                FALLBACK_RESTART_OK=0
+              fi
 
-              if wait_for_openclaw_health "fallback_reinstall" 180 5; then
+              if [ "$FALLBACK_RESTART_OK" = "1" ] && wait_for_openclaw_health "fallback_reinstall" 180 5; then
                 FALLBACK_REINSTALL_END_TS=$(date +%s)
                 echo "FALLBACK_REINSTALL_DURATION_SEC=$((FALLBACK_REINSTALL_END_TS - FALLBACK_REINSTALL_BEGIN_TS))" >> "$RUN_OPENCLAW_META"
                 echo "✅ OpenClaw Gateway is healthy after fallback reinstall!"
