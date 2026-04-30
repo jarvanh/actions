@@ -304,51 +304,75 @@ jobs:
             echo "⚠️ openclaw .env not found, skipping rss-to-telegram startup."
           fi
 
-      - name: Run CLIProxyAPI container
+      - name: Run CliRelay container
         run: |
-          echo "Configuring local high-speed CLIProxyAPI directory..."
-          mkdir -p /dropbox/self-hosted/CLIProxyAPI
-          rm -rf /tmp/local_CLIProxyAPI
-          mkdir -p /tmp/local_CLIProxyAPI
+          set -euo pipefail
 
-          if rclone ls dropbox:self-hosted/CLIProxyAPI.tar.gz > /dev/null 2>&1; then
-            echo "📦 Found CLIProxyAPI.tar.gz! Downloading and extracting..."
+          echo "Configuring local high-speed CliRelay directory with persistent data..."
+          mkdir -p /dropbox/self-hosted/CliRelay
+          rm -rf /tmp/local_CliRelay
+          mkdir -p /tmp/local_CliRelay
+
+          # Prefer the new CliRelay archive. If this is the first migrated run,
+          # bootstrap from the old CLIProxyAPI archive/raw directory so existing
+          # config.yaml, auth-dir, and stats.json are preserved.
+          if rclone ls dropbox:self-hosted/CliRelay.tar.gz > /dev/null 2>&1; then
+            echo "📦 Found CliRelay.tar.gz! Downloading and extracting..."
+            rclone copyto dropbox:self-hosted/CliRelay.tar.gz /tmp/CliRelay.tar.gz
+            MIN_SIZE=$((5 * 1024))
+            actual_size=$(stat -c%s /tmp/CliRelay.tar.gz 2>/dev/null || echo 0)
+            if [ "$actual_size" -ge "$MIN_SIZE" ] && tar -tzf /tmp/CliRelay.tar.gz >/dev/null 2>&1; then
+              tar -xzf /tmp/CliRelay.tar.gz -C /tmp/local_CliRelay
+            else
+              echo "⚠️ CliRelay.tar.gz validation failed, skipping archive restore."
+            fi
+            rm -f /tmp/CliRelay.tar.gz
+          elif rclone ls dropbox:self-hosted/CLIProxyAPI.tar.gz > /dev/null 2>&1; then
+            echo "📦 No CliRelay archive yet. Bootstrapping from CLIProxyAPI.tar.gz..."
             rclone copyto dropbox:self-hosted/CLIProxyAPI.tar.gz /tmp/CLIProxyAPI.tar.gz
             MIN_SIZE=$((5 * 1024))
             actual_size=$(stat -c%s /tmp/CLIProxyAPI.tar.gz 2>/dev/null || echo 0)
             if [ "$actual_size" -ge "$MIN_SIZE" ] && tar -tzf /tmp/CLIProxyAPI.tar.gz >/dev/null 2>&1; then
-              tar -xzf /tmp/CLIProxyAPI.tar.gz -C /tmp/local_CLIProxyAPI
+              tar -xzf /tmp/CLIProxyAPI.tar.gz -C /tmp/local_CliRelay
             else
-              echo "⚠️ CLIProxyAPI.tar.gz validation failed, skipping archive restore."
+              echo "⚠️ CLIProxyAPI.tar.gz validation failed, skipping bootstrap restore."
             fi
             rm -f /tmp/CLIProxyAPI.tar.gz
+          elif rclone ls dropbox:self-hosted/CliRelay > /dev/null 2>&1; then
+            echo "⚠️ No CliRelay archive found. Falling back to sync from CliRelay raw directory..."
+            rclone copy dropbox:self-hosted/CliRelay /tmp/local_CliRelay
           else
-            echo "⚠️ No CLIProxyAPI archive found. Falling back to sync from raw directory..."
-            rclone copy dropbox:self-hosted/CLIProxyAPI /tmp/local_CLIProxyAPI
+            echo "⚠️ No CliRelay data found. Falling back to old CLIProxyAPI raw directory..."
+            rclone copy dropbox:self-hosted/CLIProxyAPI /tmp/local_CliRelay || true
           fi
 
-          mkdir -p /tmp/local_CLIProxyAPI/auth-dir
-          touch /tmp/local_CLIProxyAPI/config.yaml
+          # CliRelay keeps config/auth compatible with CLIProxyAPI, and persists
+          # new request logs / SQLite data under /CLIProxyAPI/logs and /CLIProxyAPI/data.
+          mkdir -p /tmp/local_CliRelay/auth-dir /tmp/local_CliRelay/logs /tmp/local_CliRelay/data
+          touch /tmp/local_CliRelay/config.yaml
 
-          echo "=== restored CLIProxyAPI tree ==="
-          find /tmp/local_CLIProxyAPI -maxdepth 3 | sort || true
+          echo "=== restored CliRelay tree ==="
+          find /tmp/local_CliRelay -maxdepth 3 | sort || true
 
-          docker rm -f cliproxyapi 2>/dev/null || true
+          docker rm -f clirelay cliproxyapi 2>/dev/null || true
 
           docker run -d \
-            --name cliproxyapi \
+            --name clirelay \
             --restart unless-stopped \
             -p 8317:8317 \
-            -v /tmp/local_CLIProxyAPI/config.yaml:/CLIProxyAPI/config.yaml \
-            -v /tmp/local_CLIProxyAPI/auth-dir:/root/.cli-proxy-api \
-            eceasy/cli-proxy-api:latest
+            -e CLIRELAY_LOCALE=zh \
+            -v /tmp/local_CliRelay/config.yaml:/CLIProxyAPI/config.yaml \
+            -v /tmp/local_CliRelay/auth-dir:/root/.cli-proxy-api \
+            -v /tmp/local_CliRelay/logs:/CLIProxyAPI/logs \
+            -v /tmp/local_CliRelay/data:/CLIProxyAPI/data \
+            ghcr.io/kittors/clirelay:latest
 
-          echo "等待 CLIProxyAPI API 就绪..."
+          echo "等待 CliRelay API 就绪..."
           READY=false
           for i in {1..120}; do
             if curl -fsS http://127.0.0.1:8317/ >/dev/null 2>&1; then
               READY=true
-              echo "✅ CLIProxyAPI 已就绪"
+              echo "✅ CliRelay 已就绪"
               break
             fi
             echo "⏳ 等待中... ${i}/120"
@@ -357,47 +381,47 @@ jobs:
           docker ps -a
 
           if [ "$READY" != true ]; then
-            echo "❌ CLIProxyAPI 未在预期时间内就绪"
-            docker logs cliproxyapi || true
+            echo "❌ CliRelay 未在预期时间内就绪"
+            docker logs clirelay || true
             exit 1
           fi
 
-          echo "📥 开始执行 CLIProxyAPI 历史统计数据导入（前台立即执行）..."
+          echo "📥 尝试导入旧 CLIProxyAPI 历史统计数据（兼容接口，失败不阻塞启动）..."
 
-          if [ -s /tmp/local_CLIProxyAPI/stats.json ] && jq empty /tmp/local_CLIProxyAPI/stats.json >/dev/null 2>&1; then
+          if [ -s /tmp/local_CliRelay/stats.json ] && jq empty /tmp/local_CliRelay/stats.json >/dev/null 2>&1; then
               SUCCESS=false
-              for i in {1..60}; do
-                  echo "🔁 CLIProxyAPI 历史统计导入重试次数：${i}/60"
+              for i in {1..12}; do
+                  echo "🔁 旧历史统计导入重试次数：${i}/12"
                   if curl -fsS -X POST "http://127.0.0.1:8317/v0/management/usage/import" \
                       -H "Content-Type: application/json" \
                       -H "X-Management-Key: ${{ secrets.CLIPROXYAPIKEY }}" \
-                      -d @/tmp/local_CLIProxyAPI/stats.json > /dev/null 2>&1; then
-                      echo -e "\n✅ CLIProxyAPI 历史统计导入执行完毕。"
+                      -d @/tmp/local_CliRelay/stats.json > /dev/null 2>&1; then
+                      echo -e "\n✅ 旧历史统计导入执行完毕。"
                       SUCCESS=true
                       break
                   else
-                      echo "⚠️ CLIProxyAPI 历史统计导入失败，5 秒后重试。"
+                      echo "⚠️ 旧历史统计导入失败，5 秒后重试。"
                       sleep 5
                   fi
               done
 
               if [ "$SUCCESS" = false ]; then
-                  echo "❌ CLIProxyAPI 历史统计导入彻底失败！正在提取 CLIProxyAPI 容器的运行日志："
-                  docker logs cliproxyapi || true
+                  echo "⚠️ 旧历史统计导入失败；保留 stats.json，CliRelay 新日志会持久化到 data/。"
+                  docker logs clirelay || true
               fi
           else
-              echo "ℹ️ 云端未找到有效 stats.json 存档文件，本次为全新统计。"
+              echo "ℹ️ 未找到有效 stats.json 存档文件；CliRelay 将从当前运行开始记录 SQLite 数据。"
           fi
 
           pkill -f "cloudflared tunnel run --protocol http2 --url http://127.0.0.1:8317 ai-api" || true
 
           nohup cloudflared tunnel run --protocol http2 --url http://127.0.0.1:8317 ai-api \
-            > ~/.openclaw/logs/cloudflared_CLIProxyAPI.log 2>&1 &
+            > ~/.openclaw/logs/cloudflared_CliRelay.log 2>&1 &
 
           sleep 5
-          echo $! > ~/.openclaw/logs/cloudflared_CLIProxyAPI.pid
+          echo $! > ~/.openclaw/logs/cloudflared_CliRelay.pid
 
-          echo "CLIProxyAPI 命名隧道已启动：ai-api（固定地址模式）"
+          echo "CliRelay 命名隧道已启动：ai-api（固定地址模式）"
 
       - name: Run OpenClaw
         id: run_openclaw
@@ -746,7 +770,7 @@ jobs:
       - name: Start background archive loop
         if: always()
         run: |
-          echo "Starting background archive tasks: export CLIProxyAPI stats + archive ~/.openclaw every 20 minutes..."
+          echo "Starting background archive tasks: archive ~/.openclaw every 20 minutes; CliRelay data is archived at final shutdown..."
           cat > /tmp/create-openclaw-archive.sh <<'EOF'
           #!/usr/bin/env bash
           set -euo pipefail
@@ -808,11 +832,42 @@ jobs:
           EOF
           chmod +x /tmp/create-openclaw-archive.sh
 
+          cat > /tmp/create-clirelay-archive.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          OUTPUT_TAR="${1:-}"
+          if [ -z "$OUTPUT_TAR" ]; then
+            echo "Usage: $0 /path/to/output.tar.gz" >&2
+            exit 2
+          fi
+
+          MIN_SIZE=$((5 * 1024))
+          rm -f "$OUTPUT_TAR"
+
+          if [ ! -d /tmp/local_CliRelay ]; then
+            echo "clirelay_dir_missing"
+            exit 1
+          fi
+
+          sudo tar -czf "$OUTPUT_TAR" -C /tmp/local_CliRelay .
+          if [ -s "$OUTPUT_TAR" ] \
+            && [ "$(stat -c%s "$OUTPUT_TAR" 2>/dev/null || echo 0)" -ge "$MIN_SIZE" ] \
+            && sudo tar -tzf "$OUTPUT_TAR" >/dev/null 2>&1; then
+            echo "archive_ready"
+          else
+            echo "archive_invalid"
+            exit 1
+          fi
+          EOF
+          chmod +x /tmp/create-clirelay-archive.sh
+
           cat > /tmp/openclaw-archive-loop.sh <<'EOF'
           #!/usr/bin/env bash
           set -euo pipefail
 
           TMP_OPENCLAW_TAR="/tmp/openclaw.tar.gz"
+          TMP_CLIRELAY_TAR="/tmp/CliRelay.tar.gz"
           LOCK_FILE="/tmp/openclaw-archive.lock"
           PID_FILE="/tmp/openclaw-archive.pid"
 
@@ -836,9 +891,9 @@ jobs:
 
           while true; do
             if flock -E 200 -n "$LOCK_FILE" /tmp/create-openclaw-archive.sh "$TMP_OPENCLAW_TAR" >/dev/null; then
-              echo "[$(date '+%F %T')] archive ok, uploading..."
+              echo "[$(date '+%F %T')] openclaw archive ok, uploading..."
               if rclone copyto "$TMP_OPENCLAW_TAR" dropbox:self-hosted/openclaw.tar.gz; then
-                echo "[$(date '+%F %T')] upload ok"
+                echo "[$(date '+%F %T')] openclaw upload ok"
               else
                 echo "[$(date '+%F %T')] ⚠️ openclaw.tar.gz upload failed"
                 send_telegram_alert "openclaw.tar.gz 上传失败"
@@ -847,9 +902,29 @@ jobs:
               rc=$?
               if [ "$rc" -eq 200 ]; then
                 echo "[$(date '+%F %T')] ⏭️ previous archive still running, skip this round"
+                sleep 1200
+                continue
               else
                 echo "[$(date '+%F %T')] ⚠️ openclaw.tar.gz validation failed in periodic archive (rc=$rc)"
                 send_telegram_alert "openclaw.tar.gz 归档校验失败（rc=$rc）"
+              fi
+            fi
+
+            if flock -E 200 -n "$LOCK_FILE" /tmp/create-clirelay-archive.sh "$TMP_CLIRELAY_TAR" >/dev/null; then
+              echo "[$(date '+%F %T')] CliRelay archive ok, uploading..."
+              if rclone copyto "$TMP_CLIRELAY_TAR" dropbox:self-hosted/CliRelay.tar.gz; then
+                echo "[$(date '+%F %T')] CliRelay upload ok"
+              else
+                echo "[$(date '+%F %T')] ⚠️ CliRelay.tar.gz upload failed"
+                send_telegram_alert "CliRelay.tar.gz 上传失败"
+              fi
+            else
+              rc=$?
+              if [ "$rc" -eq 200 ]; then
+                echo "[$(date '+%F %T')] ⏭️ previous archive still running, skip CliRelay archive"
+              else
+                echo "[$(date '+%F %T')] ⚠️ CliRelay.tar.gz validation failed in periodic archive (rc=$rc)"
+                send_telegram_alert "CliRelay.tar.gz 归档校验失败（rc=$rc）"
               fi
             fi
             sleep 1200
@@ -879,8 +954,9 @@ jobs:
             kill "$(cat /tmp/openclaw-archive.pid)" 2>/dev/null || true
           fi
 
-          echo "3. Stopping rsstt and CLIProxyAPI before final archive..."
+          echo "3. Stopping rsstt and CliRelay before final archive..."
           docker stop rss-to-telegram 2>/dev/null || echo "rss-to-telegram already stopped or missing."
+          docker stop clirelay 2>/dev/null || echo "clirelay already stopped or missing."
           docker stop cliproxyapi 2>/dev/null || echo "cliproxyapi already stopped or missing."
 
           echo "4. Performing final archive to Dropbox..."
@@ -894,15 +970,23 @@ jobs:
 
           MIN_SIZE=$((5 * 1024))
 
-          echo "5. Archiving CLIProxyAPI..."
-          sudo tar -czf /tmp/CLIProxyAPI.tar.gz -C /tmp/local_CLIProxyAPI .
-          if sudo tar -tzf /tmp/CLIProxyAPI.tar.gz >/dev/null 2>&1; then
-            actual_size=$(stat -c%s /tmp/CLIProxyAPI.tar.gz 2>/dev/null || echo 0)
-            if [ "$actual_size" -ge "$MIN_SIZE" ]; then
-              rclone copyto /tmp/CLIProxyAPI.tar.gz dropbox:self-hosted/CLIProxyAPI.tar.gz -v
+          echo "5. Archiving CliRelay persistent data..."
+          if [ -d /tmp/local_CliRelay ]; then
+            echo "=== local CliRelay tree before archive ==="
+            find /tmp/local_CliRelay -maxdepth 4 | sort || true
+            sudo tar -czf /tmp/CliRelay.tar.gz -C /tmp/local_CliRelay .
+            if sudo tar -tzf /tmp/CliRelay.tar.gz >/dev/null 2>&1; then
+              actual_size=$(stat -c%s /tmp/CliRelay.tar.gz 2>/dev/null || echo 0)
+              if [ "$actual_size" -ge "$MIN_SIZE" ]; then
+                rclone copyto /tmp/CliRelay.tar.gz dropbox:self-hosted/CliRelay.tar.gz -v
+              else
+                echo "⚠️ CliRelay 压缩包小于 10KB，放弃覆盖云端数据"
+              fi
             else
-              echo "⚠️ CLIProxyAPI 压缩包小于 10KB，放弃覆盖云端数据"
+              echo "⚠️ CliRelay.tar.gz validation failed, skip upload"
             fi
+          else
+            echo "⚠️ /tmp/local_CliRelay 不存在，跳过 CliRelay 归档"
           fi
 
           echo "6. Archiving rss-to-telegram data..."
