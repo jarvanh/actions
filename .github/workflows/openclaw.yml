@@ -386,32 +386,7 @@ jobs:
             exit 1
           fi
 
-          echo "📥 尝试导入旧 CLIProxyAPI 历史统计数据（兼容接口，失败不阻塞启动）..."
-
-          if [ -s /tmp/local_CliRelay/stats.json ] && jq empty /tmp/local_CliRelay/stats.json >/dev/null 2>&1; then
-              SUCCESS=false
-              for i in {1..12}; do
-                  echo "🔁 旧历史统计导入重试次数：${i}/12"
-                  if curl -fsS -X POST "http://127.0.0.1:8317/v0/management/usage/import" \
-                      -H "Content-Type: application/json" \
-                      -H "X-Management-Key: ${{ secrets.CLIPROXYAPIKEY }}" \
-                      -d @/tmp/local_CliRelay/stats.json > /dev/null 2>&1; then
-                      echo -e "\n✅ 旧历史统计导入执行完毕。"
-                      SUCCESS=true
-                      break
-                  else
-                      echo "⚠️ 旧历史统计导入失败，5 秒后重试。"
-                      sleep 5
-                  fi
-              done
-
-              if [ "$SUCCESS" = false ]; then
-                  echo "⚠️ 旧历史统计导入失败；保留 stats.json，CliRelay 新日志会持久化到 data/。"
-                  docker logs clirelay || true
-              fi
-          else
-              echo "ℹ️ 未找到有效 stats.json 存档文件；CliRelay 将从当前运行开始记录 SQLite 数据。"
-          fi
+          echo "ℹ️ 旧 stats.json 已完成一次性迁移；后续使用 CliRelay data/usage.db 持久化，不再导入 stats.json。"
 
           pkill -f "cloudflared tunnel run --protocol http2 --url http://127.0.0.1:8317 ai-api" || true
 
