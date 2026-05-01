@@ -818,14 +818,51 @@ jobs:
           fi
 
           MIN_SIZE=$((5 * 1024))
+          SRC_DIR="/tmp/local_CliRelay"
+          STAGE_DIR=""
+
+          cleanup() {
+            if [ -n "${STAGE_DIR:-}" ] && [ -d "$STAGE_DIR" ]; then
+              sudo rm -rf "$STAGE_DIR"
+            fi
+          }
+          trap cleanup EXIT
+
           sudo rm -f "$OUTPUT_TAR"
 
-          if [ ! -d /tmp/local_CliRelay ]; then
+          if [ ! -d "$SRC_DIR" ]; then
             echo "clirelay_dir_missing"
             exit 1
           fi
 
-          sudo tar -czf "$OUTPUT_TAR" -C /tmp/local_CliRelay .
+          STAGE_DIR=$(mktemp -d /tmp/clirelay-archive-stage.XXXXXX)
+          sudo mkdir -p "$STAGE_DIR"
+
+          # Copy a stable snapshot first. Exclude volatile request logs/caches; persist
+          # config, auth, and data. SQLite DB is snapshotted with sqlite3 backup when
+          # available so tar does not race a live writer.
+          sudo rsync -a --delete \
+            --exclude 'logs/**' \
+            --exclude 'cache/**' \
+            --exclude 'tmp/**' \
+            --exclude 'temp/**' \
+            --exclude '*.lock' \
+            --exclude '*.pid' \
+            --exclude '*.jsonl.lock' \
+            --exclude 'data/usage.db' \
+            "$SRC_DIR"/ "$STAGE_DIR"/
+
+          if [ -f "$SRC_DIR/data/usage.db" ]; then
+            sudo mkdir -p "$STAGE_DIR/data"
+            if command -v sqlite3 >/dev/null 2>&1; then
+              sudo sqlite3 "$SRC_DIR/data/usage.db" ".backup '$STAGE_DIR/data/usage.db'"
+            else
+              sudo cp -a "$SRC_DIR/data/usage.db" "$STAGE_DIR/data/usage.db"
+            fi
+          fi
+
+          sudo tar -C "$STAGE_DIR" -czf "$OUTPUT_TAR" .
+
           if [ -s "$OUTPUT_TAR" ] \
             && [ "$(stat -c%s "$OUTPUT_TAR" 2>/dev/null || echo 0)" -ge "$MIN_SIZE" ] \
             && sudo tar -tzf "$OUTPUT_TAR" >/dev/null 2>&1; then
@@ -949,8 +986,7 @@ jobs:
           if [ -d /tmp/local_CliRelay ]; then
             echo "=== local CliRelay tree before archive ==="
             find /tmp/local_CliRelay -maxdepth 4 | sort || true
-            sudo tar -czf /tmp/CliRelay.tar.gz -C /tmp/local_CliRelay .
-            if sudo tar -tzf /tmp/CliRelay.tar.gz >/dev/null 2>&1; then
+            if /tmp/create-clirelay-archive.sh /tmp/CliRelay.tar.gz >/dev/null; then
               actual_size=$(stat -c%s /tmp/CliRelay.tar.gz 2>/dev/null || echo 0)
               if [ "$actual_size" -ge "$MIN_SIZE" ]; then
                 rclone copyto /tmp/CliRelay.tar.gz dropbox:self-hosted/CliRelay.tar.gz -v
