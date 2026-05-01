@@ -818,7 +818,7 @@ jobs:
           fi
 
           MIN_SIZE=$((5 * 1024))
-          rm -f "$OUTPUT_TAR"
+          sudo rm -f "$OUTPUT_TAR"
 
           if [ ! -d /tmp/local_CliRelay ]; then
             echo "clirelay_dir_missing"
