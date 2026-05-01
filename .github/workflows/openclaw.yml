@@ -757,44 +757,58 @@ jobs:
           fi
 
           MIN_SIZE=$((5 * 1024))
+          SRC_DIR="/home/runner/.openclaw"
+          STAGE_DIR=""
+
+          cleanup() {
+            if [ -n "${STAGE_DIR:-}" ] && [ -d "$STAGE_DIR" ]; then
+              rm -rf "$STAGE_DIR"
+            fi
+          }
+          trap cleanup EXIT
+
           rm -f "$OUTPUT_TAR"
 
-          build_openclaw_manifest() {
-            local STAGE_DIR
-            STAGE_DIR=$(mktemp -d /tmp/openclaw-archive-stage.XXXXXX)
-            trap 'rm -rf "$STAGE_DIR"' RETURN
-            mkdir -p "$STAGE_DIR/.openclaw"
+          if [ ! -d "$SRC_DIR" ]; then
+            echo "openclaw_dir_missing"
+            exit 1
+          fi
 
-            cd /home/runner
-            find .openclaw \
-              \( \
-                -path '.openclaw/logs' -o \
-                -path '.openclaw/cache' -o \
-                                    -path '.openclaw/browser/*/Crashpad' -o \
-                -path '.openclaw/browser/*/GPUCache' -o \
-                -path '.openclaw/browser/*/Code Cache' -o \
-                -path '.openclaw/browser/*/GrShaderCache' -o \
-                -path '.openclaw/browser/*/GraphiteDawnCache' \
-              \) -prune -o \
-              \( \
-                -name 'SingletonLock' -o \
-                -name 'SingletonSocket' -o \
-                -name 'SingletonCookie' -o \
-                -name '*.lock' -o \
-                -name '*.pid' -o \
-                -name '*.jsonl.lock' \
-              \) -prune -o \
-              -print0 | tar \
-                --null \
-                --no-recursion \
-                -C /home/runner \
-                -cf - \
-                -T - | tar -C "$STAGE_DIR" -xf -
+          STAGE_DIR=$(mktemp -d /tmp/openclaw-archive-stage.XXXXXX)
+          mkdir -p "$STAGE_DIR/.openclaw"
 
-            tar -C "$STAGE_DIR" -czf "$OUTPUT_TAR" .openclaw
-          }
+          # Copy a stable snapshot first. rsync may return 24 when live files vanish
+          # during copy; that is expected for active OpenClaw session/lock files, so
+          # accept 24 and still validate the final tarball.
+          set +e
+          rsync -a --delete \
+            --exclude 'logs/**' \
+            --exclude 'cache/**' \
+            --exclude 'browser/*/Crashpad/**' \
+            --exclude 'browser/*/GPUCache/**' \
+            --exclude 'browser/*/Code Cache/**' \
+            --exclude 'browser/*/GrShaderCache/**' \
+            --exclude 'browser/*/GraphiteDawnCache/**' \
+            --exclude 'SingletonLock' \
+            --exclude 'SingletonSocket' \
+            --exclude 'SingletonCookie' \
+            --exclude '*.lock' \
+            --exclude '*.pid' \
+            --exclude '*.jsonl.lock' \
+            "$SRC_DIR"/ "$STAGE_DIR/.openclaw"/
+          rsync_rc=$?
+          set -e
 
-          build_openclaw_manifest
+          if [ "$rsync_rc" -ne 0 ] && [ "$rsync_rc" -ne 24 ]; then
+            echo "openclaw_snapshot_failed rc=$rsync_rc" >&2
+            exit "$rsync_rc"
+          fi
+
+          if [ "$rsync_rc" -eq 24 ]; then
+            echo "openclaw_snapshot_partial_live_changes"
+          fi
+
+          tar -C "$STAGE_DIR" -czf "$OUTPUT_TAR" .openclaw
 
           if [ -s "$OUTPUT_TAR" ] \
             && [ "$(stat -c%s "$OUTPUT_TAR" 2>/dev/null || echo 0)" -ge "$MIN_SIZE" ] \
