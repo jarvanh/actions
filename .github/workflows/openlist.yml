@@ -593,3 +593,4 @@ jobs:
       - name: sleep
         run: |
           sudo docker stop openlist
+          sleep 3m
