@@ -58,9 +58,9 @@ jobs:
           echo "Compressing data..."
           tar -czf "$ARCHIVE_NAME" "./self-hosted"
           
-          echo "Uploading archive to Dropbox (Overwriting latest)..."
-          # 💡 修改：使用 copy 命令上传同名文件，会自动覆盖 Dropbox 上的旧包
-          rclone copy "$ARCHIVE_NAME" "dropbox:" -P --retries 3
+          echo "Uploading archive to OneDrive backup/ (Overwriting latest)..."
+          # 💡 修改：使用 copy 命令上传同名文件，会自动覆盖 OneDrive backup/ 下的旧包
+          rclone copy "$ARCHIVE_NAME" "onedrive:backup/" -P --retries 3
           
       - name: Send Telegram Notification
         if: always()

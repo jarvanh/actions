@@ -1,4 +1,4 @@
-name: Backup All GitHub Repositories to Dropbox
+name: Backup All GitHub Repositories to OneDrive
 
 on:
   schedule:
@@ -55,9 +55,9 @@ jobs:
           echo "正在打包所有备份成功的仓库..."
           tar -czf "$ARCHIVE_NAME" "$BACKUP_DIR"
           
-          echo "正在上传到 Dropbox (覆盖旧备份)..."
-          # 💡 修改：直接覆盖 Dropbox 上的最新备份包
-          rclone copy "$ARCHIVE_NAME" "dropbox:" -P --retries 3
+          echo "正在上传到 OneDrive backup/ (覆盖旧备份)..."
+          # 💡 修改：直接覆盖 OneDrive backup/ 下的最新备份包
+          rclone copy "$ARCHIVE_NAME" "onedrive:backup/" -P --retries 3
           
       - name: Send Telegram Notification
         if: always()
