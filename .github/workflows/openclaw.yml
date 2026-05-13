@@ -962,7 +962,7 @@ jobs:
 
       - name: Keep alive
         if: always()
-        run: sleep 340m
+        run: sleep 350m
 
       - name: Stop OpenClaw and Final Archive
         if: always()
@@ -970,7 +970,7 @@ jobs:
           set -euo pipefail
           echo "1. Stopping OpenClaw gateway..."
           openclaw gateway stop || echo "OpenClaw already stopped or command failed."
-          sleep 3m
+          sleep 1m
 
           echo "2. Killing background archive process..."
           if [ -f /tmp/openclaw-archive-loop.launcher.pid ]; then
