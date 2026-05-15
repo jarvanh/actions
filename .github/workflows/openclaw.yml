@@ -36,9 +36,9 @@ jobs:
           if [ -n "$active_other_runs" ]; then
             echo "Another OpenClaw run is already active or queued; this run is not needed."
             printf '%s\n' "$active_other_runs"
+            echo "duplicate=true" >> "$GITHUB_ENV"
             echo "Cancelling this duplicate run: ${current_run_id}"
             gh run cancel "${current_run_id}" --repo "${GITHUB_REPOSITORY}" || true
-            sleep 30
             exit 0
           fi
 
@@ -150,7 +150,7 @@ jobs:
 
       - name: Run tmate
         id: tmate
-        if: always()
+        if: ${{ always() && env.duplicate != 'true' }}
         continue-on-error: true
         uses: mxschmitt/action-tmate@v3
         with:
@@ -159,7 +159,7 @@ jobs:
           limit-access-to-actor: true
           
       - name: Persist tmate connection info
-        if: always()
+        if: ${{ always() && env.duplicate != 'true' }}
         run: |
           set -euo pipefail
           {
@@ -652,7 +652,7 @@ jobs:
           fi
 
       - name: Notify OpenClaw startup failure
-        if: ${{ always() && steps.run_openclaw.outcome == 'failure' }}
+        if: ${{ always() && env.duplicate != 'true' && steps.run_openclaw.outcome == 'failure' }}
         run: |
           if [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] && [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ]; then
             run_url="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
@@ -777,7 +777,7 @@ jobs:
           fi
 
       - name: Start background archive loop
-        if: always()
+        if: ${{ always() && env.duplicate != 'true' }}
         run: |
           echo "Starting background archive tasks: archive ~/.openclaw every 20 minutes; CliRelay data is archived at final shutdown..."
           cat > /tmp/create-openclaw-archive.sh <<'EOF'
@@ -995,11 +995,11 @@ jobs:
           echo $! > /tmp/openclaw-archive-loop.launcher.pid
 
       - name: Keep alive
-        if: always()
+        if: ${{ always() && env.duplicate != 'true' }}
         run: sleep 350m
 
       - name: Stop OpenClaw and Final Archive
-        if: always()
+        if: ${{ always() && env.duplicate != 'true' }}
         run: |
           set -euo pipefail
           echo "1. Stopping OpenClaw gateway..."
@@ -1067,7 +1067,7 @@ jobs:
           fi
 
       - name: Trigger next OpenClaw run
-        if: ${{ always() && !cancelled() }}
+        if: ${{ always() && env.duplicate != 'true' && !cancelled() }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
