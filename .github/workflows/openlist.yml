@@ -524,6 +524,51 @@ jobs:
           list_large_files "onedrive:2" "2"
           list_large_files "onedrive:3" "3"
 
+      - name: Backup Dropbox archive to OneDrive
+        run: |
+          set -o pipefail
+
+          BACKUP_DATE=$(date +%F)
+          BACKUP_DIR="onedrive:backup/dropbox"
+          BACKUP_FILE="dropbox_latest.tar.gz"
+          BACKUP_PATH="${BACKUP_DIR}/${BACKUP_FILE}"
+          BACKUP_LOG="dropbox_backup_$(date +%Y%m%d_%H%M%S).log"
+
+          echo "=== 开始打包备份 dropbox: 到 ${BACKUP_PATH} ==="
+          rclone mkdir "$BACKUP_DIR"
+
+          if tar -C / -czf - dropbox 2> >(tee "$BACKUP_LOG" >&2) | rclone rcat "$BACKUP_PATH" --retries 3 --low-level-retries 3 --timeout 30m --contimeout 30s; then
+            FILE_SIZE_BYTES=$(rclone lsf "$BACKUP_DIR" --files-only --format "sp" 2>/dev/null | awk -v file="$BACKUP_FILE" '$2 == file {print $1; exit}')
+            FILE_SIZE_BYTES=${FILE_SIZE_BYTES:-0}
+            FILE_SIZE_HUMAN=$(numfmt --to=iec-i --suffix=B "$FILE_SIZE_BYTES" 2>/dev/null || echo "${FILE_SIZE_BYTES}B")
+
+            printf -v message '%s\n%s\n%s\n%s' \
+              '✅ Dropbox 数据备份成功 (已覆盖旧包)' \
+              "📅 日期: ${BACKUP_DATE}" \
+              "📦 文件: ${BACKUP_FILE}" \
+              "📏 文件大小: ${FILE_SIZE_HUMAN}"
+
+            curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
+              -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
+              --data-urlencode text="$message" || true
+          else
+            exit_code=$?
+            log_summary=$(tail -c 1200 "$BACKUP_LOG" 2>/dev/null || echo "无法读取日志")
+            printf -v message '%s\n%s\n%s\n%s\n\n%s' \
+              '❌ Dropbox 数据备份失败' \
+              "📅 日期: ${BACKUP_DATE}" \
+              "📦 文件: ${BACKUP_FILE}" \
+              "退出码: ${exit_code}" \
+              "日志摘要:\n${log_summary}"
+
+            curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
+              -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
+              --data-urlencode text="$message" || true
+            exit "$exit_code"
+          fi
+
+          rm -f "$BACKUP_LOG" 2>/dev/null || true
+
       - name: Sync backup task
         run: |
           source /tmp/functions.sh
