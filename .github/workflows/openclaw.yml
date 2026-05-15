@@ -5,9 +5,12 @@ on:
     - cron: "*/5 * * * *"
   workflow_dispatch:
 
+permissions:
+  contents: read
+  actions: write
+
 jobs:
   build:
-    concurrency: openclaw-singleton
     runs-on: ubuntu-latest
     steps:
       - name: Setup Node.js
@@ -1031,6 +1034,17 @@ jobs:
               echo "⚠️ rsstt.tar.gz validation failed, skip upload"
             fi
           fi
+
+      - name: Trigger next OpenClaw run
+        if: ${{ always() && !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          echo "Triggering next openclaw.yml run immediately after final archive..."
+          gh workflow run openclaw.yml \
+            --repo "${{ github.repository }}" \
+            --ref "${{ github.ref_name }}"
 
       # - name: Sync ~/.openclaw to Dropbox
       #   if: always()
