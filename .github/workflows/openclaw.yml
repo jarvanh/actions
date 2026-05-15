@@ -22,6 +22,7 @@ jobs:
 
           echo "Schedule run is fallback-only. Checking for active handoff/run..."
           current_run_id="${GITHUB_RUN_ID}"
+          export current_run_id
           active_other_runs="$(
             {
               gh run list --repo "${GITHUB_REPOSITORY}" --workflow openclaw.yml --status queued --limit 50 \
@@ -1074,6 +1075,7 @@ jobs:
           set -euo pipefail
 
           current_run_id="${GITHUB_RUN_ID}"
+          export current_run_id
           active_other_runs="$(
             {
               gh run list --repo "${GITHUB_REPOSITORY}" --workflow openclaw.yml --status queued --limit 50 \
