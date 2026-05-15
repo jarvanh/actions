@@ -1072,6 +1072,25 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+
+          current_run_id="${GITHUB_RUN_ID}"
+          active_other_runs="$(
+            {
+              gh run list --repo "${GITHUB_REPOSITORY}" --workflow openclaw.yml --status queued --limit 50 \
+                --json databaseId,event,status,url \
+                --jq '.[] | select(.databaseId != (env.current_run_id | tonumber)) | "\(.databaseId) \(.event) \(.status) \(.url)"'
+              gh run list --repo "${GITHUB_REPOSITORY}" --workflow openclaw.yml --status in_progress --limit 50 \
+                --json databaseId,event,status,url \
+                --jq '.[] | select(.databaseId != (env.current_run_id | tonumber)) | "\(.databaseId) \(.event) \(.status) \(.url)"'
+            } | sort -u
+          )"
+
+          if [ -n "$active_other_runs" ]; then
+            echo "Another OpenClaw run is already active or queued; skip chained trigger."
+            printf '%s\n' "$active_other_runs"
+            exit 0
+          fi
+
           echo "Triggering next openclaw.yml run immediately after final archive..."
           gh workflow run openclaw.yml \
             --repo "${{ github.repository }}" \
