@@ -72,7 +72,10 @@ jobs:
           fi
           
           if [ "$STATUS" == "success" ]; then
-            MSG="✅ <b>GitHub 全仓库备份成功 (已覆盖旧包)</b>%0A📅 日期: $(date +'%Y-%m-%d')%0A📦 文件: github_repos_latest.tar.gz"
+            ARCHIVE_NAME="github_repos_latest.tar.gz"
+            FILE_SIZE_BYTES=$(stat -c%s "$ARCHIVE_NAME" 2>/dev/null || echo 0)
+            FILE_SIZE_HUMAN=$(numfmt --to=iec-i --suffix=B "$FILE_SIZE_BYTES" 2>/dev/null || echo "${FILE_SIZE_BYTES}B")
+            MSG="✅ <b>GitHub 全仓库备份成功 (已覆盖旧包)</b>%0A📅 日期: $(date +'%Y-%m-%d')%0A📦 文件: ${ARCHIVE_NAME}%0A📏 文件大小: ${FILE_SIZE_HUMAN}"
           else
             MSG="❌ <b>GitHub 全仓库备份失败</b>%0A⚠️ 请前往 GitHub Actions 检查日志详情。"
           fi
