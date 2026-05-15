@@ -13,6 +13,37 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      - name: Schedule fallback guard
+        if: ${{ github.event_name == 'schedule' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          echo "Schedule run is fallback-only. Checking for active handoff/run..."
+          current_run_id="${GITHUB_RUN_ID}"
+          active_other_runs="$(
+            {
+              gh run list --repo "${GITHUB_REPOSITORY}" --workflow openclaw.yml --status queued --limit 50 \
+                --json databaseId,event,status,url \
+                --jq '.[] | select(.databaseId != (env.current_run_id | tonumber)) | "\(.databaseId) \(.event) \(.status) \(.url)"'
+              gh run list --repo "${GITHUB_REPOSITORY}" --workflow openclaw.yml --status in_progress --limit 50 \
+                --json databaseId,event,status,url \
+                --jq '.[] | select(.databaseId != (env.current_run_id | tonumber)) | "\(.databaseId) \(.event) \(.status) \(.url)"'
+            } | sort -u
+          )"
+
+          if [ -n "$active_other_runs" ]; then
+            echo "Another OpenClaw run is already active or queued; scheduled run is not needed."
+            printf '%s\n' "$active_other_runs"
+            echo "Cancelling this fallback schedule run: ${current_run_id}"
+            gh run cancel "${current_run_id}" --repo "${GITHUB_REPOSITORY}" || true
+            sleep 30
+            exit 0
+          fi
+
+          echo "No active OpenClaw run found. Continuing scheduled fallback startup."
+
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
