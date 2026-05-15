@@ -13,14 +13,13 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Schedule fallback guard
-        if: ${{ github.event_name == 'schedule' }}
+      - name: Duplicate run guard
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
-          echo "Schedule run is fallback-only. Checking for active handoff/run..."
+          echo "Checking for existing active OpenClaw runs before startup..."
           current_run_id="${GITHUB_RUN_ID}"
           export current_run_id
           active_other_runs="$(
@@ -35,15 +34,15 @@ jobs:
           )"
 
           if [ -n "$active_other_runs" ]; then
-            echo "Another OpenClaw run is already active or queued; scheduled run is not needed."
+            echo "Another OpenClaw run is already active or queued; this run is not needed."
             printf '%s\n' "$active_other_runs"
-            echo "Cancelling this fallback schedule run: ${current_run_id}"
+            echo "Cancelling this duplicate run: ${current_run_id}"
             gh run cancel "${current_run_id}" --repo "${GITHUB_REPOSITORY}" || true
             sleep 30
             exit 0
           fi
 
-          echo "No active OpenClaw run found. Continuing scheduled fallback startup."
+          echo "No other active OpenClaw run found. Continuing startup."
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
