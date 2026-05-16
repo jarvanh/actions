@@ -526,20 +526,44 @@ jobs:
 
       - name: Backup Dropbox archive to OneDrive
         run: |
-          set -o pipefail
+          set -euo pipefail
 
           BACKUP_DATE=$(date +%F)
           BACKUP_DIR="onedrive:backup/dropbox"
           BACKUP_FILE="dropbox_latest.tar.gz"
           BACKUP_PATH="${BACKUP_DIR}/${BACKUP_FILE}"
           BACKUP_LOG="dropbox_backup_$(date +%Y%m%d_%H%M%S).log"
+          LOCAL_ARCHIVE="/tmp/${BACKUP_FILE}"
+          MIN_ARCHIVE_SIZE_BYTES=1048576
+
+          send_dropbox_backup_message() {
+            local text="$1"
+            curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
+              -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
+              --data-urlencode text="$text" || true
+          }
 
           echo "=== 开始打包备份 dropbox: 到 ${BACKUP_PATH} ==="
           rclone mkdir "$BACKUP_DIR"
+          rm -f "$LOCAL_ARCHIVE" "$BACKUP_LOG"
 
-          if tar -C / -czf - dropbox 2> >(tee "$BACKUP_LOG" >&2) | rclone rcat "$BACKUP_PATH" --retries 3 --low-level-retries 3 --timeout 30m --contimeout 30s; then
-            FILE_SIZE_BYTES=$(rclone lsf "$BACKUP_DIR" --files-only --format "sp" 2>/dev/null | awk -v file="$BACKUP_FILE" '$2 == file {print $1; exit}')
-            FILE_SIZE_BYTES=${FILE_SIZE_BYTES:-0}
+          # 先校验挂载目录确实有内容，避免 rclone mount 尚未就绪时打出空包。
+          if ! timeout 60 bash -c 'until find /dropbox -mindepth 1 -maxdepth 2 -print -quit | grep -q .; do sleep 5; done'; then
+            echo "Dropbox mount is empty or not ready" | tee -a "$BACKUP_LOG"
+            exit 31
+          fi
+
+          if tar -C / -czf "$LOCAL_ARCHIVE" dropbox 2> >(tee "$BACKUP_LOG" >&2); then
+            FILE_SIZE_BYTES=$(stat -c%s "$LOCAL_ARCHIVE" 2>/dev/null || echo 0)
+            if [ "$FILE_SIZE_BYTES" -lt "$MIN_ARCHIVE_SIZE_BYTES" ]; then
+              echo "Archive is suspiciously small: ${FILE_SIZE_BYTES} bytes" | tee -a "$BACKUP_LOG"
+              exit 32
+            fi
+
+            rclone copyto "$LOCAL_ARCHIVE" "$BACKUP_PATH" --retries 3 --low-level-retries 3 --timeout 30m --contimeout 30s -P
+
+            REMOTE_SIZE_BYTES=$(rclone lsjson "$BACKUP_PATH" 2>/dev/null | jq -r '.[0].Size // empty' || true)
+            FILE_SIZE_BYTES=${REMOTE_SIZE_BYTES:-$FILE_SIZE_BYTES}
             FILE_SIZE_HUMAN=$(numfmt --to=iec-i --suffix=B "$FILE_SIZE_BYTES" 2>/dev/null || echo "${FILE_SIZE_BYTES}B")
 
             printf -v message '%s\n%s\n%s\n%s' \
@@ -548,9 +572,7 @@ jobs:
               "📦 文件: ${BACKUP_FILE}" \
               "📏 文件大小: ${FILE_SIZE_HUMAN}"
 
-            curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
-              -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
-              --data-urlencode text="$message" || true
+            send_dropbox_backup_message "$message"
           else
             exit_code=$?
             log_summary=$(tail -c 1200 "$BACKUP_LOG" 2>/dev/null || echo "无法读取日志")
@@ -561,13 +583,11 @@ jobs:
               "退出码: ${exit_code}" \
               "日志摘要:\n${log_summary}"
 
-            curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
-              -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
-              --data-urlencode text="$message" || true
+            send_dropbox_backup_message "$message"
             exit "$exit_code"
           fi
 
-          rm -f "$BACKUP_LOG" 2>/dev/null || true
+          rm -f "$LOCAL_ARCHIVE" "$BACKUP_LOG" 2>/dev/null || true
 
       - name: Sync backup task
         run: |
