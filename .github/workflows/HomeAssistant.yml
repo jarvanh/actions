@@ -1,0 +1,175 @@
+name: HomeAssistant
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+  watch:
+    # types: started
+
+jobs:
+  deploy:
+    concurrency: HomeAssistant-singleton
+    runs-on: ubuntu-latest
+    steps:
+      # -----------------------------------------------------------
+      # 1. 配置并挂载 Rclone (Dropbox)
+      # -----------------------------------------------------------
+      - name: Install and Config Rclone
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE }}
+        run: |
+          # 安装 rclone
+          sudo -v ; curl https://rclone.org/install.sh | sudo bash
+          
+          # 写入配置文件
+          mkdir -p ~/.config/rclone/
+          cat << EOF > ~/.config/rclone/rclone.conf
+          $RCLONE_CONFIG
+          EOF
+
+      - name: Mount Dropbox
+        run: |
+          sudo apt-get update && sudo apt-get install -y fuse3
+          sudo mkdir -p /dropbox
+          
+          # 挂载 Dropbox 到 /dropbox 目录
+          # --daemon 让它在后台运行，--allow-other 允许 docker 访问
+          sudo rclone mount dropbox: /dropbox \
+            --vfs-cache-mode full \
+            --allow-other \
+            --daemon
+          
+          # 等待挂载完成
+          sleep 5
+          
+          # 验证挂载 (可选)
+          if [ -d "/dropbox/self-hosted/HomeAssistant" ]; then
+            echo "Mount successful, config directory found."
+          else
+            echo "Directory not found, creating it..."
+            sudo mkdir -p /dropbox/self-hosted/HomeAssistant
+          fi
+          
+      # -----------------------------------------------------------
+      # 插入修正步骤：解决 400 Bad Request 问题
+      # -----------------------------------------------------------
+      - name: Configure HA for Reverse Proxy
+        run: |
+          CONFIG_FILE="/dropbox/self-hosted/HomeAssistant/configuration.yaml"
+          
+          # 检查 configuration.yaml 是否存在，如果不存在则创建
+          if [ ! -f "$CONFIG_FILE" ]; then
+            touch "$CONFIG_FILE"
+            echo "default_config:" >> "$CONFIG_FILE"
+          fi
+          
+          # 检查是否已经配置了 http 组件，如果没有则追加配置
+          if ! grep -q "trusted_proxies" "$CONFIG_FILE"; then
+            echo "" >> "$CONFIG_FILE"
+            echo "http:" >> "$CONFIG_FILE"
+            echo "  use_x_forwarded_for: true" >> "$CONFIG_FILE"
+            echo "  trusted_proxies:" >> "$CONFIG_FILE"
+            echo "    - 127.0.0.1" >> "$CONFIG_FILE"
+            echo "    - ::1" >> "$CONFIG_FILE"
+            echo "Config injected: Trusted proxies added."
+          else
+            echo "Config already contains trusted_proxies. Skipping."
+          fi
+          
+      # -----------------------------------------------------------
+      # 2. 安装 Cloudflared 并检查隧道状态
+      # -----------------------------------------------------------
+      - name: Install cloudflared
+        run: |
+          sudo mkdir -p ~/.cloudflared/
+          # 尝试从网盘恢复 cloudflared 证书 (如果需要)
+          sudo rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
+          
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
+
+      - name: Check if tunnel is running
+        env:
+          TUNNEL_NAME: "home"
+        run: |
+          # 登录/认证部分需要你自己处理，通常需要 ~/.cloudflared/cert.pem 存在
+          # 这里假设你已经通过某种方式(如上面的 rclone copy) 恢复了凭证
+          
+          OUTPUT=$(cloudflared tunnel list)
+          TUNNEL_LINE=$(echo "$OUTPUT" | grep -w "$TUNNEL_NAME")
+          
+          if [ -z "$TUNNEL_LINE" ]; then
+             echo "Tunnel '$TUNNEL_NAME' not found in list. Proceeding to create/run."
+          else
+             # 提取 CONNECTIONS 列 (通常是第4列)
+             CONNECTIONS=$(echo "$TUNNEL_LINE" | awk '{if (NF>=4) print $4; else print "-"}')
+             if [ "$CONNECTIONS" == "-" ] || [ -z "$CONNECTIONS" ]; then
+                echo "Tunnel exists but no active connections. Proceeding."
+             else
+                echo "Tunnel is active (Connections: $CONNECTIONS). Stopping workflow."
+                exit 0
+             fi
+          fi
+
+      # -----------------------------------------------------------
+      # 3. 运行 Home Assistant (Docker)
+      # -----------------------------------------------------------
+      - name: Run Home Assistant Docker
+        run: |
+          docker run -d \
+            --name homeassistant \
+            --privileged \
+            --restart=unless-stopped \
+            -e TZ=Asia/Shanghai \
+            -v /dropbox/self-hosted/HomeAssistant:/config \
+            -v /run/dbus:/run/dbus:ro \
+            --network=host \
+            ghcr.io/home-assistant/home-assistant:stable
+          
+          echo "Waiting for Home Assistant to boot..."
+          # 等待 HA 生成初始文件，确保 API 可用
+          timeout 180s bash -c 'until curl -s http://localhost:8123 > /dev/null; do sleep 5; done'
+          echo "Home Assistant is up!"
+
+      # -----------------------------------------------------------
+      # 4. 安装 HACS (仅在不存在时安装)
+      # -----------------------------------------------------------
+      - name: Install HACS (Conditional)
+        run: |
+          # 定义 HACS 在宿主机上的挂载路径
+          HACS_DIR="/dropbox/self-hosted/HomeAssistant/custom_components/hacs"
+          
+          if [ -d "$HACS_DIR" ]; then
+            echo "✅ HACS directory found. Skipping installation."
+          else
+            echo "🚀 HACS not found. Installing..."
+            
+            # 进入容器下载并运行 HACS 安装脚本
+            docker exec homeassistant bash -c "wget -O - https://get.hacs.xyz | bash"
+            
+            echo "HACS installed. Restarting Home Assistant to apply changes..."
+            docker restart homeassistant
+            
+            # 只有在安装了 HACS 后才需要等待重启
+            timeout 180s bash -c 'until curl -s http://localhost:8123 > /dev/null; do sleep 5; done'
+          fi
+
+      # -----------------------------------------------------------
+      # 5. 启动 Cloudflared 隧道 (保持运行)
+      # -----------------------------------------------------------
+      - name: Run Cloudflared Tunnel
+        env:
+          TUNNEL_NAME: "home"
+          DOMAIN_PREFIX: ${{ secrets.VD }}
+        run: |
+          # 设置 DNS 路由
+          cloudflared tunnel route dns $TUNNEL_NAME home.${DOMAIN_PREFIX}.eu.org
+          
+          echo "Starting tunnel to expose http://127.0.0.1:8123"
+          nohup cloudflared tunnel run --url http://127.0.0.1:8123 $TUNNEL_NAME &
+      - name: sleep
+        run: |
+          sudo sleep 340m      
+          sudo docker stop homeassistant 
+          sudo sleep 1m   

@@ -1,0 +1,173 @@
+name: pornhub-dl
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+  watch:
+    types: started
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: rclone-install
+        run: |
+          # 安装 rclone
+          curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
+          unzip rclone-current-linux-amd64.zip
+          cd rclone-*-linux-amd64
+          sudo mv rclone /usr/bin
+          sudo chmod +x /usr/bin/rclone
+      - name: rclone-config
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE }}
+        run: |
+          # 写配置文件
+          mkdir -p ~/.config/rclone/
+          cat << EOF > ~/.config/rclone/rclone.conf
+          $RCLONE_CONFIG
+          EOF
+      - name: rclone-run
+        run: |
+          sudo apt-get install fuse3
+          mkdir ~/onedrive
+          nohup rclone --vfs-cache-mode full mount onedrive: ~/onedrive &
+          echo "~/onedrive 文件列表"
+          cd ~/onedrive
+          ls
+      - name: run pornhub-dl favorites
+        run: |
+          sudo apt-get update
+          sudo apt-get install python3 -y
+          sudo apt-get install ffmpeg -y
+          pip3 install --upgrade yt-dlp
+          cd ~
+          cd ~/onedrive/0/j-1024j-视频-pornhub-favorites
+          echo "favorites文件列表"
+          ls
+          echo "favorites文件夹 下载前大小"
+          du -sh ~/onedrive/0/j-1024j-视频-pornhub-favorites
+          BEFORE_COUNT=$(wc -l < archive.txt 2>/dev/null || echo 0)
+          # yt-dlp -f bestvideo+bestaudio/best --force-overwrites --no-part -i https://www.pornhub.com/users/'${{ secrets. PORNHUBNAME }}'/videos/favorites || echo "url不存在"
+          yt-dlp -f bestvideo+bestaudio/best --force-overwrites --no-part --download-archive archive.txt -i https://www.pornhub.com/users/'${{ secrets. PORNHUBNAME }}'/videos/favorites || echo "url不存在"
+          AFTER_COUNT=$(wc -l < archive.txt 2>/dev/null || echo 0)
+          DOWNLOAD_COUNT=$((AFTER_COUNT - BEFORE_COUNT))
+          if [ "$DOWNLOAD_COUNT" -lt 0 ]; then
+            DOWNLOAD_COUNT=0
+          fi
+          echo "本次新增下载数量: ${DOWNLOAD_COUNT}"
+          echo "favorites文件夹 下载后大小"
+          du -sh ~/onedrive/0/j-1024j-视频-pornhub-favorites
+          curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
+            -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
+            -d text="github p站下载任务执行完毕 favorites，本次下载 ${DOWNLOAD_COUNT} 个视频"
+      # - name: run pornhub-dl
+      #   run: |
+      #     # Install runtime dependencies.
+      #     # 安装运行时依赖。
+      #     sudo apt-get update
+      #     sudo apt-get install python3 -y
+      #     sudo apt-get install ffmpeg -y
+      #     pip3 install --upgrade yt-dlp
+
+      #     # Define channel name and source URL pairs.
+      #     # 定义频道名称与源 URL 的映射。
+      #     channels=(
+      #       "rustudio|https://www.pornhub.com/users/rustudio"
+      #       "june-liu|https://www.pornhub.com/pornstar/june-liu"
+      #       "teacher-of-magic|https://www.pornhub.com/model/teacher-of-magic/videos/upload"
+      #       "lunaxjames|https://www.pornhub.com/pornstar/lunaxjames"
+      #       "closeup_couple|https://www.pornhub.com/model/closeup_couple/videos/upload"
+      #       "asianstreetmeat|https://www.pornhub.com/channels/asianstreetmeat"
+      #       "maominvshen|https://www.pornhub.com/model/maominvshen/videos/upload"
+      #       "sladkislivki|https://www.pornhub.com/model/sladkislivki/videos/upload"
+      #       "spicyxchan|https://www.pornhub.com/model/spicyxchan/videos/upload"
+      #       "love-her-feet|https://www.pornhub.com/channels/love-her-feet"
+      #       "pepe-world|https://www.pornhub.com/model/pepe-world/videos/upload"
+      #       "purple-vayda|https://www.pornhub.com/model/purple-vayda/videos/upload"
+      #       "reislin|https://www.pornhub.com/model/reislin/videos/upload"
+      #       "cherry-grace|https://cn.pornhub.com/model/cherry-grace/videos/upload"
+      #       "lana-emotional|https://www.pornhub.com/model/lana-emotional/videos/upload"
+      #       "rolakiki|https://www.pornhub.com/model/rolakiki/videos/upload"
+      #       "little-liliana|https://www.pornhub.com/model/little-liliana/videos/upload"
+      #       "college-girls-ass|https://www.pornhub.com/model/college-girls-ass/videos/upload"
+      #       "petite-princesses-femdom|https://www.pornhub.com/model/petite-princesses-femdom/videos/upload"
+      #       "evilkitties|https://www.pornhub.com/model/evilkitties/videos/upload"
+      #       "enola-fischer|https://www.pornhub.com/model/enola-fischer/videos/upload"
+      #       "aeon-marks|https://www.pornhub.com/model/aeon-marks/videos/upload"
+      #       "savage-foot-goddess|https://www.pornhub.com/model/savage-foot-goddess/videos/upload"
+      #       "japanese_couple|https://www.pornhub.com/model/japanese_couple/videos/upload"
+      #       "poly-amory|https://www.pornhub.com/model/poly-amory/videos/upload"
+      #       "loricandy|https://www.pornhub.com/model/loricandy/videos/upload"
+      #       "chilibomba|https://www.pornhub.com/model/chilibomba/videos/upload"
+      #       "czech-soles|https://www.pornhub.com/channels/czech-soles"
+      #       "kyle-smith|https://www.pornhub.com/model/kyle-smith"
+      #       "lena-rica|https://www.pornhub.com/model/lena-rica"
+      #       "girlfriends-feet|https://www.pornhub.com/channels/girlfriends-feet"
+      #       "rikki-rus|https://www.pornhub.com/model/rikki-rus"
+      #       "kenneth-play|https://www.pornhub.com/pornstar/kenneth-play"
+      #       "angel|https://www.pornhub.com/model/angel"
+      #       "xxximmy|https://www.pornhub.com/model/xxximmy"
+      #       "little-foot-princess|https://www.pornhub.com/model/little-foot-princess"
+      #       "sakurasfeet|https://www.pornhub.com/model/sakurasfeet"
+      #       "twinfeets|https://www.pornhub.com/model/twinfeets"
+      #       "cosplayhands|https://www.pornhub.com/model/cosplayhands"
+      #       "slrabbit|https://www.pornhub.com/model/slrabbit"
+      #       "lama-grey|https://www.pornhub.com/model/lama-grey"
+      #       "flamehel|https://www.pornhub.com/model/flamehel"
+      #     )
+
+      #     # Collect all possible parent directories under OneDrive.
+      #     # 收集 OneDrive 下所有可能的父目录。
+      #     mapfile -t channel_roots < <(find ~/onedrive -type d -name '1024j-视频-pornhub-channel' 2>/dev/null | sort)
+      #     if [ ${#channel_roots[@]} -eq 0 ]; then
+      #       echo "未找到任何 1024j-视频-pornhub-channel 目录，跳过频道下载。"
+      #       exit 0
+      #     fi
+
+      #     for channel in "${channels[@]}"; do
+      #       IFS='|' read -r dir url <<< "$channel"
+
+      #       # Resolve the matched existing channel directory from multiple roots.
+      #       # 从多个根目录中解析并匹配已存在的频道目录。
+      #       target_dir=""
+      #       for root in "${channel_roots[@]}"; do
+      #         if [ -d "$root/$dir" ]; then
+      #           target_dir="$root/$dir"
+      #           break
+      #         fi
+      #       done
+
+      #       # Skip channels that do not have a corresponding directory.
+      #       # 若未找到对应子目录，则跳过该频道。
+      #       if [ -z "$target_dir" ]; then
+      #         echo "未找到频道目录: $dir"
+      #         continue
+      #       fi
+
+      #       mkdir -p "$target_dir"
+      #       cd "$target_dir"
+      #       touch archive.txt
+
+      #       echo "$dir 文件列表"
+      #       ls
+      #       echo "$dir 文件夹 下载前大小"
+      #       du -sh "$target_dir"
+
+      #       BEFORE_COUNT=$(wc -l < archive.txt 2>/dev/null || echo 0)
+      #       yt-dlp -f bestvideo+bestaudio/best --force-overwrites --no-part --download-archive archive.txt -i "$url" || echo "url不存在"
+      #       AFTER_COUNT=$(wc -l < archive.txt 2>/dev/null || echo 0)
+      #       DOWNLOAD_COUNT=$((AFTER_COUNT - BEFORE_COUNT))
+      #       if [ "$DOWNLOAD_COUNT" -lt 0 ]; then
+      #         DOWNLOAD_COUNT=0
+      #       fi
+
+      #       echo "本次新增下载数量: ${DOWNLOAD_COUNT}"
+      #       echo "$dir 文件夹 下载后大小"
+      #       du -sh "$target_dir"
+
+      #       curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
+      #         -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
+      #         -d text="github p站下载任务执行完毕 ${dir}，本次下载 ${DOWNLOAD_COUNT} 个视频"
+      #     done

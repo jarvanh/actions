@@ -1,0 +1,90 @@
+name: self-hosted_backup
+
+on:
+  schedule:
+    - cron: '0 2 * * *' # 每天凌晨2点运行
+  workflow_dispatch:
+
+concurrency:
+  group: self-hosted-backup
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup rclone
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rclone
+          mkdir -p ~/.config/rclone/
+          printf "%s" "$RCLONE_CONFIG" > ~/.config/rclone/rclone.conf
+
+      - name: Download, Compress and Backup
+        run: |
+          # 💡 修改：直接使用固定文件名 self-hosted_latest.tar.gz，从而覆盖旧文件
+          ARCHIVE_NAME="self-hosted_latest.tar.gz"
+          
+          echo "Phase 1: Initial full download..."
+          rclone sync "dropbox:self-hosted" "./self-hosted" -P --retries 3 \
+            --exclude "**/logs/**" \
+            --exclude "**/cache/**" \
+            --exclude "**/.cache/**" \
+            --exclude "**/tmp/**" \
+            --exclude "**/*.log" \
+            --exclude "**/*.tmp"
+            
+          echo "Phase 2: Catch-up sync 1 (Delta)..."
+          sleep 5
+          rclone sync "dropbox:self-hosted" "./self-hosted" -P --retries 3 \
+            --exclude "**/logs/**" \
+            --exclude "**/cache/**" \
+            --exclude "**/.cache/**" \
+            --exclude "**/tmp/**" \
+            --exclude "**/*.log" \
+            --exclude "**/*.tmp"
+            
+          echo "Phase 3: Catch-up sync 2 (Final Delta)..."
+          sleep 5
+          rclone sync "dropbox:self-hosted" "./self-hosted" -P --retries 3 \
+            --exclude "**/logs/**" \
+            --exclude "**/cache/**" \
+            --exclude "**/.cache/**" \
+            --exclude "**/tmp/**" \
+            --exclude "**/*.log" \
+            --exclude "**/*.tmp"
+          
+          echo "Compressing data..."
+          tar -czf "$ARCHIVE_NAME" "./self-hosted"
+          
+          echo "Uploading archive to OneDrive backup/ (Overwriting latest)..."
+          # 💡 修改：使用 copy 命令上传同名文件，会自动覆盖 OneDrive backup/ 下的旧包
+          rclone copy "$ARCHIVE_NAME" "onedrive:backup/" -P --retries 3
+          
+      - name: Send Telegram Notification
+        if: always()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          STATUS: ${{ job.status }}
+        run: |
+          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "Telegram 凭证未配置，跳过发送通知。"
+            exit 0
+          fi
+          
+          if [ "$STATUS" == "success" ]; then
+            ARCHIVE_NAME="self-hosted_latest.tar.gz"
+            FILE_SIZE_BYTES=$(stat -c%s "$ARCHIVE_NAME" 2>/dev/null || echo 0)
+            FILE_SIZE_HUMAN=$(numfmt --to=iec-i --suffix=B "$FILE_SIZE_BYTES" 2>/dev/null || echo "${FILE_SIZE_BYTES}B")
+            MSG="✅ <b>Self-Hosted 数据备份成功 (已覆盖旧包)</b>%0A📅 日期: $(date +'%Y-%m-%d')%0A📦 文件: ${ARCHIVE_NAME}%0A📏 文件大小: ${FILE_SIZE_HUMAN}"
+          else
+            MSG="❌ <b>Self-Hosted 数据备份失败</b>%0A⚠️ 请前往 GitHub Actions 检查日志详情。"
+          fi
+          
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d text="$(echo -e $MSG)" \
+            -d parse_mode="HTML"

@@ -1,0 +1,168 @@
+name: emby
+
+on:
+  schedule:
+    # - cron: "0 2,8,14,20 * * *"
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+  watch:
+    # types: started
+
+jobs:
+  build:
+    concurrency: emby-singleton
+    runs-on: ubuntu-latest
+    steps:
+      - name: rclone-install
+        run: |
+          sudo apt-get update && sudo apt-get install -y zstd
+          # 安装 rclone
+          curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
+          unzip rclone-*-amd64.zip
+          cd rclone-*-linux-amd64
+          sudo mv rclone /usr/bin
+          sudo chmod +x /usr/bin/rclone
+      - name: rclone-config
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE }}
+        run: |
+          # 写配置文件
+          mkdir -p ~/.config/rclone/
+          cat << IN_EOF > ~/.config/rclone/rclone.conf
+          $RCLONE_CONFIG
+          IN_EOF
+      - name: rclone-run
+        run: |
+          sudo apt-get install fuse3
+          
+          if rclone lsf gd:self-hosted/emby/config/ --files-only | grep -q "system.xml"; then
+            if ! rclone delete gd:self-hosted/emby/config/system.xml -vv; then
+              echo "[WARNING] Failed to delete system.xml, skipping" >&2
+            fi
+          fi
+          sudo rclone copy gd:self-hosted/emby/system.xml gd:self-hosted/emby/config/ --ignore-errors -vv
+
+          sudo mkdir /onedrive
+          sudo nohup rclone mount onedrive: /onedrive --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
+          sudo mkdir /dropbox
+          sudo nohup rclone mount dropbox: /dropbox --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
+          sudo mkdir /gd
+          sudo nohup rclone mount gd: /gd --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
+
+          echo "==========onedrive==========="
+          rclone lsf onedrive:
+          echo "==========dropbox==========="
+          rclone lsf dropbox:
+      - name: install cloudflared
+        run: |
+          sudo mkdir ~/.cloudflared/
+          sudo rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
+      - name: Check if the tunnel is running
+        env:
+          TUNNEL_NAME: "e"
+        run: |
+          OUTPUT=$(cloudflared tunnel list)
+          TUNNEL_LINE=$(echo "$OUTPUT" | grep -w "$TUNNEL_NAME")
+          if [ -z "$TUNNEL_LINE" ]; then
+            echo "The tunnel '$TUNNEL_NAME' does not exist. Proceeding."
+            exit 31
+          fi
+          CONNECTIONS=$(echo "$TUNNEL_LINE" | awk '{if (NF>=4) print $4; else print "-"}')
+          if [ "$CONNECTIONS" == "-" ]; then
+            echo "The tunnel '$TUNNEL_NAME' exists but has no active connections. Proceeding."
+          else
+            echo "The tunnel '$TUNNEL_NAME' is running with connections: $CONNECTIONS. Stopping actions."
+            exit 0
+          fi
+      - name: install emby
+        run: |
+          curl -L -o emby-server.deb $(curl -s https://api.github.com/repos/MediaBrowser/Emby.Releases/releases/latest | grep -oP '"browser_download_url": "\K(.*emby-server-deb.*amd64.deb)(?=")')
+          sudo dpkg -i emby-server.deb
+          
+          # dpkg -i 会自动启动 emby-server，需要先把它停掉，否则 /var/lib/emby 会被锁定无法删除
+          sudo systemctl stop emby-server || true
+
+          # 尝试从备份恢复
+          sudo mkdir -p /var/lib/emby
+          sudo chown -R emby:emby /var/lib/emby
+          BACKUP_NAME="emby-backup.tar.zst"
+
+          echo "🔍 正在检查 Dropbox 上的备份..."
+          if rclone copy dropbox:self-hosted/$BACKUP_NAME /tmp/ -vv; then
+              echo "✅ 发现备份压缩包，正在极速解压..."
+              if sudo tar -I zstd -xf /tmp/$BACKUP_NAME -C /var/lib/emby/; then
+                  echo "🎉 备份恢复成功，将以本地模式运行（高速）"
+                  sudo chown -R emby:emby /var/lib/emby
+                  IS_LOCAL_MODE=true
+              else
+                  echo "❌ 解压失败，可能备份损坏。"
+                  IS_LOCAL_MODE=false
+              fi
+          else
+              echo "⚠️ 未发现备份压缩包，这可能是全新环境部署或首次迁移。"
+              echo "🔄 尝试从旧的 /gd/self-hosted/emby 迁移核心配置和数据..."
+              sudo cp -r /gd/self-hosted/emby/config /var/lib/emby/ 2>/dev/null || true
+              sudo cp -r /gd/self-hosted/emby/plugins /var/lib/emby/ 2>/dev/null || true
+              sudo cp -r /gd/self-hosted/emby/data /var/lib/emby/ 2>/dev/null || true
+              sudo chown -R emby:emby /var/lib/emby
+              IS_LOCAL_MODE=true
+          fi
+
+          # 回退机制：如果是软链接模式
+          if [ "$IS_LOCAL_MODE" = false ]; then
+              echo "🔗 切换到软链接模式（指向 /gd/self-hosted/emby）..."
+              sudo rm -rf /var/lib/emby
+              sudo ln -s /gd/self-hosted/emby /var/lib/emby
+          fi
+          
+          echo "==========/var/lib/emby==========="
+          sudo ls -la /var/lib/emby
+      - name: run emby
+        run: |
+          sudo nohup /opt/emby-server/bin/emby-server &
+          touch /tmp/EMBY_READY_FOR_BACKUP
+      - name: run cloudflared
+        run: |
+          cloudflared tunnel route dns e e.'${{ secrets.VD }}'.eu.org
+          nohup cloudflared tunnel run --url http://127.0.0.1:8096 e &
+      - name: sleep
+        run: |
+          sudo sleep 340m
+      - name: backup emby data
+        if: always()
+        run: |
+          if [ ! -f /tmp/EMBY_READY_FOR_BACKUP ]; then
+              echo "⚠️ Emby 未能成功启动，跳过备份以防空数据覆盖云端。"
+              exit 0
+          fi
+
+          # 优雅停机
+          curl -X POST -H "X-Emby-Token: c33a66119cd94788882617a5bde7f962" http://127.0.0.1:8096/System/Shutdown || true
+          sleep 15
+
+          # 只有在本地模式下才打包回传（避免覆盖云端的软链接源文件）
+          if [ ! -L /var/lib/emby ]; then
+              echo "🚀 本地模式运行结束，正在打包数据回传 Dropbox..."
+              sudo tar -I 'zstd -3 -T0' -cf $HOME/emby-backup.tar.zst \
+                --exclude='cache' \
+                --exclude='logs' \
+                --exclude='transcoding-temp' \
+                -C /var/lib/emby .
+              
+              echo "📤 上传备份到 Dropbox..."
+              sudo chown runner:docker $HOME/emby-backup.tar.zst && rclone copy $HOME/emby-backup.tar.zst dropbox:self-hosted/ -vv
+          else
+              echo "😴 当前为软链接模式，跳过本地打包备份。"
+          fi
+
+      - name: send telegram notification
+        if: always()
+        run: |
+          STATUS="${{ job.status }}"
+          MESSAGE="📺 *Emby Workflow* %0AStatus: ${STATUS} %0ATime: $(date '+%Y-%m-%d %H:%M:%S')"
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d chat_id=83279194 \
+            -d text="${MESSAGE}" \
+            -d parse_mode=Markdown
