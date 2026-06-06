@@ -984,10 +984,6 @@ jobs:
                 --stats-one-line \
                 --ignore-errors \
                 --verbose \
-                --timeout 10m \
-                --contimeout 30s \
-                --retries 3 \
-                --low-level-retries 3 \
                 "${extra_args[@]}" \
                 2>&1 | tee "$LAST_ATTEMPT_LOG"
               local attempt_status=${PIPESTATUS[0]}
@@ -1061,17 +1057,7 @@ jobs:
             local task_name="$3"
             shift 3
             local extra_args=("$@")
-            local openlist_sync_args=(
-              --transfers 2
-              --checkers 4
-              --tpslimit 4
-              --tpslimit-burst 4
-              --timeout 30m
-              --contimeout 60s
-              --retries 8
-              --low-level-retries 20
-              --retries-sleep 45s
-            )
+            local openlist_sync_args=()
 
             if sync_with_logging "$source_path" "$dest_path" "$task_name" "${openlist_sync_args[@]}" "${extra_args[@]}"; then
               return 0
@@ -1132,40 +1118,10 @@ jobs:
       - name: Configure Google Drive sync limits
         run: |
           cat >> /tmp/functions.sh << 'EOF'
-          # Balanced Google Drive settings. Keep normal sync reasonably fast.
-          # Do not set --tpslimit in the default profile: it creates a hard
-          # transaction limiter and can make large syncs look stuck. Rclone's
-          # Drive pacer will still back off automatically when Google returns
-          # rate-limit responses. Use the safe retry profile below only after
-          # chunk/rate-limit instability is detected.
-          GD_SYNC_ARGS=(
-            --drive-pacer-min-sleep 500ms
-            --drive-pacer-burst 20
-            --drive-chunk-size 32M
-            --checkers 8
-            --transfers 2
-            --onedrive-chunk-size 10M
-            --retries 8
-            --low-level-retries 20
-            --retries-sleep 30s
-          )
-
-          # Fallback profile for OneDrive chunk stalls or Google Drive rate-limit
-          # bursts. This is slower, but avoids failing the whole task on a
-          # transient chunk timeout.
-          GD_SYNC_SAFE_RETRY_ARGS=(
-            --drive-pacer-min-sleep 2s
-            --drive-pacer-burst 5
-            --drive-chunk-size 8M
-            --tpslimit 0.5
-            --tpslimit-burst 1
-            --checkers 1
-            --transfers 1
-            --onedrive-chunk-size 5M
-            --retries 12
-            --low-level-retries 40
-            --retries-sleep 60s
-          )
+          # Let rclone use its provider defaults for sync concurrency,
+          # chunking, pacing, retries and timeouts. Keep this array so task
+          # calls can still pass explicit overrides when needed.
+          GD_SYNC_ARGS=()
 
           GD_SYNC_STATE_DIR="onedrive:/logs/gd_sync_state"
           GD_SYNC_SKIP_SECONDS=$((7 * 24 * 60 * 60))
@@ -1278,8 +1234,6 @@ jobs:
                 --stats-one-line \
                 --ignore-errors \
                 --verbose \
-                --timeout 30m \
-                --contimeout 60s \
                 2>&1 | tee "$LAST_GD_ATTEMPT_LOG"
               local status=${PIPESTATUS[0]}
               set -e
@@ -1291,15 +1245,6 @@ jobs:
             : > "$LOG_FILENAME"
             run_gd_sync_once "initial sync" "${extra_args[@]}"
             local SYNC_STATUS=$?
-
-            # OneDrive occasionally reports stalled upload/download chunks while
-            # feeding Google Drive. Retry once with a smaller OneDrive chunk and
-            # stricter pacing; already uploaded files are skipped by rclone.
-            if [ "$SYNC_STATUS" -ne 0 ] || grep -Eqi 'upload chunks may be taking too long|reducing --onedrive-chunk-size|rateLimitExceeded|userRateLimitExceeded|dailyLimitExceeded|403|forbidden|timeout' "$LAST_GD_ATTEMPT_LOG"; then
-              echo "检测到 GD 同步不稳定信号，使用安全参数重试一次。" | tee -a "$LOG_FILENAME"
-              run_gd_sync_once "safe retry" "${GD_SYNC_SAFE_RETRY_ARGS[@]}"
-              SYNC_STATUS=$?
-            fi
 
             if [ "$SYNC_STATUS" -ne 0 ] || grep -Eqi '403|forbidden|rateLimitExceeded|userRateLimitExceeded|dailyLimitExceeded|ERROR|Failed|timeout|unauthorized|permission denied|connection refused|upload chunks may be taking too long' "$LAST_GD_ATTEMPT_LOG"; then
               send_log_to_telegram "$LOG_FILENAME" "$task_name" "$SYNC_STATUS" "gd-sync" "$source_path" "$dest_path"
