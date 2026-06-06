@@ -1104,7 +1104,7 @@ jobs:
           done
           EOF
           chmod +x /tmp/openclaw-archive-loop.sh
-          nohup /tmp/openclaw-archive-loop.sh > /tmp/openclaw-archive-loop.log 2>&1 &
+          nohup bash /tmp/openclaw-archive-loop.sh > /tmp/openclaw-archive-loop.log 2>&1 &
           echo $! > /tmp/openclaw-archive-loop.launcher.pid
 
       - name: Keep alive
