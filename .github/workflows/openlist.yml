@@ -1062,10 +1062,10 @@ jobs:
             shift 3
             local extra_args=("$@")
             local openlist_sync_args=(
-              --transfers 1
-              --checkers 4
-              --tpslimit 2
-              --tpslimit-burst 2
+              --transfers 2
+              --checkers 8
+              --tpslimit 4
+              --tpslimit-burst 4
               --retries 8
               --low-level-retries 20
               --retries-sleep 60s
