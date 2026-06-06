@@ -1139,6 +1139,7 @@ jobs:
             --tpslimit-burst 1
             --checkers 1
             --transfers 1
+            --onedrive-chunk-size 5M
             --retries 8
             --low-level-retries 20
             --retries-sleep 30s
