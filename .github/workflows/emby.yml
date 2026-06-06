@@ -78,6 +78,22 @@ jobs:
           fi
       - name: install emby
         run: |
+          set -euo pipefail
+          cleanup_archive_workdir() {
+            sudo rm -f /tmp/emby-backup.tar.zst "$HOME/emby-backup.tar.zst" 2>/dev/null || true
+          }
+          free_kb() { df -Pk "${1:-/tmp}" | awk 'NR==2 {print $4}'; }
+          require_free_kb() {
+            local path="$1" min_kb="$2" label="$3"
+            local avail
+            avail=$(free_kb "$path")
+            if [ "${avail:-0}" -lt "$min_kb" ]; then
+              echo "❌ ${label}: insufficient free space at ${path}. available=${avail}KB required=${min_kb}KB" >&2
+              exit 1
+            fi
+            echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
+          }
+          require_free_kb /tmp $((2 * 1024 * 1024)) "emby restore preflight"
           curl -L -o emby-server.deb $(curl -s https://api.github.com/repos/MediaBrowser/Emby.Releases/releases/latest | grep -oP '"browser_download_url": "\K(.*emby-server-deb.*amd64.deb)(?=")')
           sudo dpkg -i emby-server.deb
           
@@ -90,7 +106,11 @@ jobs:
           BACKUP_NAME="emby-backup.tar.zst"
 
           echo "🔍 正在检查 Dropbox 上的备份..."
+          cleanup_archive_workdir
           if rclone copy dropbox:self-hosted/$BACKUP_NAME /tmp/ -vv; then
+              backup_kb=$(du -sk "/tmp/$BACKUP_NAME" 2>/dev/null | awk '{print $1}')
+              backup_kb=${backup_kb:-0}
+              require_free_kb /var/lib/emby $((backup_kb * 3 + 1024 * 1024)) "emby extract preflight"
               echo "✅ 发现备份压缩包，正在极速解压..."
               if sudo tar -I zstd -xf /tmp/$BACKUP_NAME -C /var/lib/emby/; then
                   echo "🎉 备份恢复成功，将以本地模式运行（高速）"
@@ -100,7 +120,9 @@ jobs:
                   echo "❌ 解压失败，可能备份损坏。"
                   IS_LOCAL_MODE=false
               fi
+              cleanup_archive_workdir
           else
+              cleanup_archive_workdir
               echo "⚠️ 未发现备份压缩包，这可能是全新环境部署或首次迁移。"
               echo "🔄 尝试从旧的 /gd/self-hosted/emby 迁移核心配置和数据..."
               sudo cp -r /gd/self-hosted/emby/config /var/lib/emby/ 2>/dev/null || true
@@ -133,6 +155,21 @@ jobs:
       - name: backup emby data
         if: always()
         run: |
+          set -euo pipefail
+          cleanup_archive_workdir() {
+            sudo rm -f "$HOME/emby-backup.tar.zst" /tmp/emby-backup.tar.zst 2>/dev/null || true
+          }
+          free_kb() { df -Pk "${1:-$HOME}" | awk 'NR==2 {print $4}'; }
+          require_free_kb() {
+            local path="$1" min_kb="$2" label="$3"
+            local avail
+            avail=$(free_kb "$path")
+            if [ "${avail:-0}" -lt "$min_kb" ]; then
+              echo "❌ ${label}: insufficient free space at ${path}. available=${avail}KB required=${min_kb}KB" >&2
+              exit 1
+            fi
+            echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
+          }
           if [ ! -f /tmp/EMBY_READY_FOR_BACKUP ]; then
               echo "⚠️ Emby 未能成功启动，跳过备份以防空数据覆盖云端。"
               exit 0
@@ -145,6 +182,10 @@ jobs:
           # 只有在本地模式下才打包回传（避免覆盖云端的软链接源文件）
           if [ ! -L /var/lib/emby ]; then
               echo "🚀 本地模式运行结束，正在打包数据回传 Dropbox..."
+              src_kb=$(sudo du -sk /var/lib/emby 2>/dev/null | awk '{print $1}')
+              src_kb=${src_kb:-0}
+              require_free_kb "$HOME" $((src_kb + 1024 * 1024)) "emby archive preflight"
+              sudo rm -f "$HOME/emby-backup.tar.zst"
               sudo tar -I 'zstd -3 -T0' -cf $HOME/emby-backup.tar.zst \
                 --exclude='cache' \
                 --exclude='logs' \
@@ -153,6 +194,7 @@ jobs:
               
               echo "📤 上传备份到 Dropbox..."
               sudo chown runner:docker $HOME/emby-backup.tar.zst && rclone copy $HOME/emby-backup.tar.zst dropbox:self-hosted/ -vv
+              cleanup_archive_workdir
           else
               echo "😴 当前为软链接模式，跳过本地打包备份。"
           fi

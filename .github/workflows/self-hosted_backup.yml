@@ -24,6 +24,24 @@ jobs:
 
       - name: Download, Compress and Backup
         run: |
+          set -euo pipefail
+          cleanup_backup_workdir() {
+            rm -f self-hosted_latest.tar.gz 2>/dev/null || true
+            rm -rf self-hosted.tmp 2>/dev/null || true
+          }
+          free_kb() { df -Pk "${1:-.}" | awk 'NR==2 {print $4}'; }
+          require_free_kb() {
+            local path="$1" min_kb="$2" label="$3"
+            local avail
+            avail=$(free_kb "$path")
+            if [ "${avail:-0}" -lt "$min_kb" ]; then
+              echo "❌ ${label}: insufficient free space at ${path}. available=${avail}KB required=${min_kb}KB" >&2
+              exit 1
+            fi
+            echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
+          }
+          require_free_kb "." $((5 * 1024 * 1024)) "self-hosted backup initial preflight"
+          trap cleanup_backup_workdir EXIT
           # 💡 修改：直接使用固定文件名 self-hosted_latest.tar.gz，从而覆盖旧文件
           ARCHIVE_NAME="self-hosted_latest.tar.gz"
           
@@ -57,11 +75,16 @@ jobs:
             --exclude "**/*.tmp"
           
           echo "Compressing data..."
+          src_kb=$(du -sk ./self-hosted 2>/dev/null | awk '{print $1}')
+          src_kb=${src_kb:-0}
+          require_free_kb "." $((src_kb + 1024 * 1024)) "self-hosted archive preflight"
+          rm -f "$ARCHIVE_NAME"
           tar -czf "$ARCHIVE_NAME" "./self-hosted"
           
           echo "Uploading archive to OneDrive backup/ (Overwriting latest)..."
           # 💡 修改：使用 copy 命令上传同名文件，会自动覆盖 OneDrive backup/ 下的旧包
           rclone copy "$ARCHIVE_NAME" "onedrive:backup/" -P --retries 3
+          rm -f "$ARCHIVE_NAME"
           
       - name: Send Telegram Notification
         if: always()

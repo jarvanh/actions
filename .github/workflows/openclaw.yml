@@ -76,13 +76,33 @@ jobs:
           TMP_OPENCLAW_TAR="/tmp/openclaw.tar.gz"
           RESTORE_DIR="/tmp/openclaw-restore"
 
-          rm -rf "$RESTORE_DIR"
+          cleanup_archive_workdir() {
+            rm -f "$TMP_OPENCLAW_TAR" 2>/dev/null || true
+            rm -rf "$RESTORE_DIR" 2>/dev/null || true
+          }
+          free_kb() { df -Pk "${1:-/tmp}" | awk 'NR==2 {print $4}'; }
+          require_free_kb() {
+            local path="$1" min_kb="$2" label="$3"
+            local avail
+            avail=$(free_kb "$path")
+            if [ "${avail:-0}" -lt "$min_kb" ]; then
+              echo "❌ ${label}: insufficient free space at ${path}. available=${avail}KB required=${min_kb}KB" >&2
+              exit 1
+            fi
+            echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
+          }
+          require_free_kb /tmp $((2 * 1024 * 1024)) "openclaw restore preflight"
+
+          cleanup_archive_workdir
           mkdir -p "$RESTORE_DIR"
 
           echo "📦 Restoring ~/.openclaw: prefer archive, fallback to raw directory sync..."
           if rclone ls dropbox:self-hosted/openclaw.tar.gz > /dev/null 2>&1; then
             echo "📦 Found openclaw.tar.gz! Downloading and extracting..."
             rclone copyto dropbox:self-hosted/openclaw.tar.gz "$TMP_OPENCLAW_TAR"
+            archive_kb=$(du -sk "$TMP_OPENCLAW_TAR" 2>/dev/null | awk '{print $1}')
+            archive_kb=${archive_kb:-0}
+            require_free_kb /tmp $((archive_kb * 3 + 1024 * 1024)) "openclaw extract preflight"
             if [ -s "$TMP_OPENCLAW_TAR" ] && tar -tzf "$TMP_OPENCLAW_TAR" >/dev/null 2>&1; then
               tar -xzf "$TMP_OPENCLAW_TAR" -C "$RESTORE_DIR"
               if [ -d "$RESTORE_DIR/.openclaw" ]; then
@@ -95,7 +115,7 @@ jobs:
             else
               echo "⚠️ openclaw.tar.gz validation failed, skipping archive restore."
             fi
-            rm -f "$TMP_OPENCLAW_TAR"
+            cleanup_archive_workdir
           else
             echo "⚠️ No openclaw archive found. Falling back to sync from raw directory..."
             rclone copy dropbox:self-hosted/openclaw ~/.openclaw \
@@ -309,20 +329,40 @@ jobs:
           set -euo pipefail
           echo "Starting rss-to-telegram before CLIProxyAPI..."
           mkdir -p /dropbox/self-hosted/rsstt
-          rm -rf /tmp/local_rsstt /tmp/rsstt-restore
+          cleanup_archive_workdir() {
+            rm -f /tmp/rsstt.tar.gz 2>/dev/null || true
+            rm -rf /tmp/rsstt-restore 2>/dev/null || true
+          }
+          free_kb() { df -Pk "${1:-/tmp}" | awk 'NR==2 {print $4}'; }
+          require_free_kb() {
+            local path="$1" min_kb="$2" label="$3"
+            local avail
+            avail=$(free_kb "$path")
+            if [ "${avail:-0}" -lt "$min_kb" ]; then
+              echo "❌ ${label}: insufficient free space at ${path}. available=${avail}KB required=${min_kb}KB" >&2
+              exit 1
+            fi
+            echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
+          }
+          require_free_kb /tmp $((1024 * 1024)) "rsstt restore preflight"
+          rm -rf /tmp/local_rsstt
+          cleanup_archive_workdir
           mkdir -p /tmp/local_rsstt /tmp/rsstt-restore
 
           if [ -f ~/.openclaw/.env ]; then
             if rclone ls dropbox:self-hosted/rsstt.tar.gz > /dev/null 2>&1; then
               echo "📦 Found rsstt.tar.gz! Downloading and extracting..."
               rclone copyto dropbox:self-hosted/rsstt.tar.gz /tmp/rsstt.tar.gz
+              archive_kb=$(du -sk /tmp/rsstt.tar.gz 2>/dev/null | awk '{print $1}')
+              archive_kb=${archive_kb:-0}
+              require_free_kb /tmp $((archive_kb * 3 + 512 * 1024)) "rsstt extract preflight"
               if [ -s /tmp/rsstt.tar.gz ] && tar -tzf /tmp/rsstt.tar.gz >/dev/null 2>&1; then
                 tar -xzf /tmp/rsstt.tar.gz -C /tmp/rsstt-restore
                 cp -a /tmp/rsstt-restore/. /tmp/local_rsstt/ || true
               else
                 echo "⚠️ rsstt.tar.gz validation failed, skipping archive restore."
               fi
-              rm -f /tmp/rsstt.tar.gz
+              cleanup_archive_workdir
             else
               echo "⚠️ No rsstt archive found. Falling back to sync from raw directory..."
               rclone copy dropbox:self-hosted/rsstt /tmp/local_rsstt \
@@ -368,7 +408,23 @@ jobs:
 
           echo "Configuring local high-speed CliRelay directory with persistent data..."
           mkdir -p /dropbox/self-hosted/CliRelay
+          cleanup_archive_workdir() {
+            rm -f /tmp/CliRelay.tar.gz /tmp/CLIProxyAPI.tar.gz 2>/dev/null || true
+          }
+          free_kb() { df -Pk "${1:-/tmp}" | awk 'NR==2 {print $4}'; }
+          require_free_kb() {
+            local path="$1" min_kb="$2" label="$3"
+            local avail
+            avail=$(free_kb "$path")
+            if [ "${avail:-0}" -lt "$min_kb" ]; then
+              echo "❌ ${label}: insufficient free space at ${path}. available=${avail}KB required=${min_kb}KB" >&2
+              exit 1
+            fi
+            echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
+          }
+          require_free_kb /tmp $((2 * 1024 * 1024)) "CliRelay restore preflight"
           rm -rf /tmp/local_CliRelay
+          cleanup_archive_workdir
           mkdir -p /tmp/local_CliRelay
 
           # Prefer the new CliRelay archive. If this is the first migrated run,
@@ -377,6 +433,9 @@ jobs:
           if rclone ls dropbox:self-hosted/CliRelay.tar.gz > /dev/null 2>&1; then
             echo "📦 Found CliRelay.tar.gz! Downloading and extracting..."
             rclone copyto dropbox:self-hosted/CliRelay.tar.gz /tmp/CliRelay.tar.gz
+            archive_kb=$(du -sk /tmp/CliRelay.tar.gz 2>/dev/null | awk '{print $1}')
+            archive_kb=${archive_kb:-0}
+            require_free_kb /tmp $((archive_kb * 3 + 512 * 1024)) "CliRelay extract preflight"
             MIN_SIZE=$((5 * 1024))
             actual_size=$(stat -c%s /tmp/CliRelay.tar.gz 2>/dev/null || echo 0)
             if [ "$actual_size" -ge "$MIN_SIZE" ] && tar -tzf /tmp/CliRelay.tar.gz >/dev/null 2>&1; then
@@ -384,10 +443,13 @@ jobs:
             else
               echo "⚠️ CliRelay.tar.gz validation failed, skipping archive restore."
             fi
-            rm -f /tmp/CliRelay.tar.gz
+            cleanup_archive_workdir
           elif rclone ls dropbox:self-hosted/CLIProxyAPI.tar.gz > /dev/null 2>&1; then
             echo "📦 No CliRelay archive yet. Bootstrapping from CLIProxyAPI.tar.gz..."
             rclone copyto dropbox:self-hosted/CLIProxyAPI.tar.gz /tmp/CLIProxyAPI.tar.gz
+            archive_kb=$(du -sk /tmp/CLIProxyAPI.tar.gz 2>/dev/null | awk '{print $1}')
+            archive_kb=${archive_kb:-0}
+            require_free_kb /tmp $((archive_kb * 3 + 512 * 1024)) "CLIProxyAPI extract preflight"
             MIN_SIZE=$((5 * 1024))
             actual_size=$(stat -c%s /tmp/CLIProxyAPI.tar.gz 2>/dev/null || echo 0)
             if [ "$actual_size" -ge "$MIN_SIZE" ] && tar -tzf /tmp/CLIProxyAPI.tar.gz >/dev/null 2>&1; then
@@ -395,7 +457,7 @@ jobs:
             else
               echo "⚠️ CLIProxyAPI.tar.gz validation failed, skipping bootstrap restore."
             fi
-            rm -f /tmp/CLIProxyAPI.tar.gz
+            cleanup_archive_workdir
           elif rclone ls dropbox:self-hosted/CliRelay > /dev/null 2>&1; then
             echo "⚠️ No CliRelay archive found. Falling back to sync from CliRelay raw directory..."
             rclone copy dropbox:self-hosted/CliRelay /tmp/local_CliRelay
@@ -963,6 +1025,12 @@ jobs:
           TMP_OPENCLAW_TAR="/tmp/openclaw.tar.gz"
           TMP_CLIRELAY_TAR="/tmp/CliRelay.tar.gz"
           LOCK_FILE="/tmp/openclaw-archive.lock"
+
+          cleanup_archive_outputs() {
+            rm -f "$TMP_OPENCLAW_TAR" "$TMP_CLIRELAY_TAR" 2>/dev/null || true
+            rm -rf /tmp/openclaw-archive-stage.* /tmp/clirelay-archive-stage.* 2>/dev/null || true
+          }
+          cleanup_archive_outputs
           PID_FILE="/tmp/openclaw-archive.pid"
 
           send_telegram_alert() {
@@ -990,6 +1058,7 @@ jobs:
               openclaw_upload_output=""
               if openclaw_upload_output=$(rclone copyto "$TMP_OPENCLAW_TAR" dropbox:self-hosted/openclaw.tar.gz 2>&1); then
                 echo "[$(date '+%F %T')] openclaw upload ok"
+                rm -f "$TMP_OPENCLAW_TAR"
               else
                 rc=$?
                 echo "[$(date '+%F %T')] ⚠️ openclaw.tar.gz upload failed (rc=$rc): ${openclaw_upload_output}"
@@ -1013,6 +1082,7 @@ jobs:
               clirelay_upload_output=""
               if clirelay_upload_output=$(rclone copyto "$TMP_CLIRELAY_TAR" dropbox:self-hosted/CliRelay.tar.gz 2>&1); then
                 echo "[$(date '+%F %T')] CliRelay upload ok"
+                rm -f "$TMP_CLIRELAY_TAR"
               else
                 rc=$?
                 echo "[$(date '+%F %T')] ⚠️ CliRelay.tar.gz upload failed (rc=$rc): ${clirelay_upload_output}"
@@ -1080,13 +1150,33 @@ jobs:
           }
 
           echo "4. Performing final archive to Dropbox..."
+          cleanup_archive_outputs() {
+            rm -f /tmp/openclaw-final.tar.gz /tmp/CliRelay.tar.gz /tmp/rsstt.tar.gz 2>/dev/null || true
+            rm -rf /tmp/openclaw-archive-stage.* /tmp/clirelay-archive-stage.* 2>/dev/null || true
+          }
+          free_kb() { df -Pk "${1:-/tmp}" | awk 'NR==2 {print $4}'; }
+          require_free_kb() {
+            local path="$1" min_kb="$2" label="$3"
+            local avail
+            avail=$(free_kb "$path")
+            if [ "${avail:-0}" -lt "$min_kb" ]; then
+              echo "❌ ${label}: insufficient free space at ${path}. available=${avail}KB required=${min_kb}KB" >&2
+              exit 1
+            fi
+            echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
+          }
+          cleanup_archive_outputs
           TMP_OPENCLAW_TAR="/tmp/openclaw-final.tar.gz"
 
+          openclaw_src_kb=$(du -sk "$HOME/.openclaw" 2>/dev/null | awk '{print $1}')
+          openclaw_src_kb=${openclaw_src_kb:-0}
+          require_free_kb /tmp $((openclaw_src_kb + 1024 * 1024)) "final openclaw archive preflight"
           openclaw_final_output=""
           if openclaw_final_output=$(/tmp/create-openclaw-archive.sh "$TMP_OPENCLAW_TAR" 2>&1); then
             openclaw_final_upload_output=""
             if openclaw_final_upload_output=$(rclone copyto "$TMP_OPENCLAW_TAR" dropbox:self-hosted/openclaw.tar.gz -v 2>&1); then
               echo "final openclaw archive/upload ok: ${openclaw_final_output}"
+              rm -f "$TMP_OPENCLAW_TAR"
             else
               rc=$?
               echo "⚠️ final openclaw.tar.gz upload failed (rc=$rc): ${openclaw_final_upload_output}"
@@ -1104,6 +1194,9 @@ jobs:
           if [ -d /tmp/local_CliRelay ]; then
             echo "=== local CliRelay tree before archive ==="
             find /tmp/local_CliRelay -maxdepth 4 | sort || true
+            clirelay_src_kb=$(du -sk /tmp/local_CliRelay 2>/dev/null | awk '{print $1}')
+            clirelay_src_kb=${clirelay_src_kb:-0}
+            require_free_kb /tmp $((clirelay_src_kb + 512 * 1024)) "final CliRelay archive preflight"
             clirelay_final_output=""
             if clirelay_final_output=$(/tmp/create-clirelay-archive.sh /tmp/CliRelay.tar.gz 2>&1); then
               actual_size=$(stat -c%s /tmp/CliRelay.tar.gz 2>/dev/null || echo 0)
@@ -1111,6 +1204,7 @@ jobs:
                 clirelay_final_upload_output=""
                 if clirelay_final_upload_output=$(rclone copyto /tmp/CliRelay.tar.gz dropbox:self-hosted/CliRelay.tar.gz -v 2>&1); then
                   echo "final CliRelay archive/upload ok: ${clirelay_final_output}"
+                  rm -f /tmp/CliRelay.tar.gz
                 else
                   rc=$?
                   echo "⚠️ final CliRelay.tar.gz upload failed (rc=$rc): ${clirelay_final_upload_output}"
@@ -1134,6 +1228,10 @@ jobs:
           if [ -d /tmp/local_rsstt ]; then
             echo "=== local rss-to-telegram tree before archive ==="
             find /tmp/local_rsstt -maxdepth 4 | sort || true
+            rsstt_src_kb=$(du -sk /tmp/local_rsstt 2>/dev/null | awk '{print $1}')
+            rsstt_src_kb=${rsstt_src_kb:-0}
+            require_free_kb /tmp $((rsstt_src_kb + 512 * 1024)) "final rsstt archive preflight"
+            sudo rm -f /tmp/rsstt.tar.gz
             rsstt_tar_output=""
             if rsstt_tar_output=$(sudo tar -czf /tmp/rsstt.tar.gz -C /tmp/local_rsstt . 2>&1); then
               rsstt_validate_output=""
@@ -1144,6 +1242,7 @@ jobs:
                   rsstt_upload_output=""
                   if rsstt_upload_output=$(rclone copyto /tmp/rsstt.tar.gz dropbox:self-hosted/rsstt.tar.gz -v 2>&1); then
                     echo "final rsstt archive/upload ok"
+                    sudo rm -f /tmp/rsstt.tar.gz
                   else
                     rc=$?
                     echo "⚠️ final rsstt.tar.gz upload failed (rc=$rc): ${rsstt_upload_output}"

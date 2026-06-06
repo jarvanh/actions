@@ -49,6 +49,22 @@ jobs:
           EOF
       - name: rclone-run
         run: |
+          set -euo pipefail
+          cleanup_archive_workdir() {
+            rm -f ~/ql.tar.gz 2>/dev/null || true
+          }
+          free_kb() { df -Pk "${1:-$HOME}" | awk 'NR==2 {print $4}'; }
+          require_free_kb() {
+            local path="$1" min_kb="$2" label="$3"
+            local avail
+            avail=$(free_kb "$path")
+            if [ "${avail:-0}" -lt "$min_kb" ]; then
+              echo "❌ ${label}: insufficient free space at ${path}. available=${avail}KB required=${min_kb}KB" >&2
+              exit 1
+            fi
+            echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
+          }
+          require_free_kb "$HOME" $((2 * 1024 * 1024)) "ql restore preflight"
           sudo apt-get install fuse3
           # sudo mkdir /dropbox
           # sudo nohup rclone mount dropbox: /dropbox --vfs-cache-mode full &
@@ -63,7 +79,9 @@ jobs:
           #   echo "目录不存在，无需删除"
           # fi
           # rclone sync dropbox:self-hosted/ql ~/ql -vv
+          cleanup_archive_workdir
           rclone sync dropbox:self-hosted/ql/ql.tar.gz ~/ -vv && mkdir -p ~/ql && tar -xzvf ~/ql.tar.gz -C ~/ql
+          cleanup_archive_workdir
       # - name: Check if the tunnel is running
       #   env:
       #     TUNNEL_NAME: "ql" # 替换为你的隧道名称
@@ -120,8 +138,26 @@ jobs:
           sudo sleep 340m          
       - name: Stop
         run: |
+          set -euo pipefail
+          cleanup_archive_workdir() {
+            rm -f ~/ql.tar.gz 2>/dev/null || true
+          }
+          free_kb() { df -Pk "${1:-$HOME}" | awk 'NR==2 {print $4}'; }
+          require_free_kb() {
+            local path="$1" min_kb="$2" label="$3"
+            local avail
+            avail=$(free_kb "$path")
+            if [ "${avail:-0}" -lt "$min_kb" ]; then
+              echo "❌ ${label}: insufficient free space at ${path}. available=${avail}KB required=${min_kb}KB" >&2
+              exit 1
+            fi
+            echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
+          }
           docker stop qinglong
           sleep 1m
+          src_kb=$(du -sk ~/ql 2>/dev/null | awk '{print $1}')
+          src_kb=${src_kb:-0}
+          require_free_kb "$HOME" $((src_kb + 1024 * 1024)) "ql archive preflight"
           tar -czvf ~/ql.tar.gz --exclude="*.tmp" --exclude="*.log" --exclude="./dep_cache" -C ~/ql .
       - name: sync
         run: |
@@ -130,5 +166,6 @@ jobs:
           # rclone delete onedrive:self-hosted/ql/ql.tar.gz
           # sleep 1m
           rclone sync ~/ql.tar.gz dropbox:self-hosted/ql/ -vv
+          rm -f ~/ql.tar.gz
           sleep 1m
           echo "Stopping GitHub Actions"
