@@ -979,7 +979,6 @@ jobs:
               local heartbeat_pid=$!
 
               rclone sync "$source_path" "$dest_path" \
-                "${extra_args[@]}" \
                 --progress \
                 --stats 15s \
                 --stats-one-line \
@@ -989,6 +988,7 @@ jobs:
                 --contimeout 30s \
                 --retries 3 \
                 --low-level-retries 3 \
+                "${extra_args[@]}" \
                 2>&1 | tee "$LAST_ATTEMPT_LOG"
               local attempt_status=${PIPESTATUS[0]}
 
@@ -1062,12 +1062,14 @@ jobs:
             shift 3
             local extra_args=("$@")
             local openlist_sync_args=(
-              --transfers 2
-              --checkers 8
-              --tpslimit 4
-              --tpslimit-burst 4
-              --retries 8
-              --low-level-retries 20
+              --transfers 1
+              --checkers 4
+              --tpslimit 2
+              --tpslimit-burst 2
+              --timeout 30m
+              --contimeout 60s
+              --retries 10
+              --low-level-retries 30
               --retries-sleep 60s
             )
 
@@ -1131,18 +1133,38 @@ jobs:
         run: |
           cat >> /tmp/functions.sh << 'EOF'
           # Conservative Google Drive settings to avoid drive.googleapis.com
-          # per-minute query quota errors (403 RATE_LIMIT_EXCEEDED).
+          # per-minute query quota errors (403 RATE_LIMIT_EXCEEDED), while also
+          # keeping OneDrive read chunks small enough for unstable large-file
+          # transfers. GD sync may retry with an even safer profile below.
           GD_SYNC_ARGS=(
-            --drive-pacer-min-sleep 500ms
-            --drive-pacer-burst 20
+            --drive-pacer-min-sleep 1s
+            --drive-pacer-burst 10
+            --drive-chunk-size 8M
             --tpslimit 1
+            --tpslimit-burst 1
+            --checkers 2
+            --transfers 1
+            --onedrive-chunk-size 5120K
+            --retries 10
+            --low-level-retries 30
+            --retries-sleep 45s
+          )
+
+          # Fallback profile for OneDrive chunk stalls or Google Drive rate-limit
+          # bursts. This is slower, but avoids failing the whole task on a
+          # transient chunk timeout.
+          GD_SYNC_SAFE_RETRY_ARGS=(
+            --drive-pacer-min-sleep 2s
+            --drive-pacer-burst 5
+            --drive-chunk-size 8M
+            --tpslimit 0.5
             --tpslimit-burst 1
             --checkers 1
             --transfers 1
-            --onedrive-chunk-size 5M
-            --retries 8
-            --low-level-retries 20
-            --retries-sleep 30s
+            --onedrive-chunk-size 2560K
+            --retries 12
+            --low-level-retries 40
+            --retries-sleep 60s
           )
 
           GD_SYNC_STATE_DIR="onedrive:/logs/gd_sync_state"
@@ -1237,22 +1259,49 @@ jobs:
             local LOG_FILENAME
             TIMESTAMP=$(date +%Y%m%d_%H%M%S)
             LOG_FILENAME="${task_name}_gd_sync_${TIMESTAMP}.log"
+            LAST_GD_ATTEMPT_LOG="${LOG_FILENAME}.last"
 
-            set +e
-            rclone sync "$source_path" "$dest_path" \
-              "${extra_args[@]}" \
-              --progress \
-              --stats 15s \
-              --stats-one-line \
-              --ignore-errors \
-              --verbose \
-              --timeout 10m \
-              --contimeout 30s \
-              2>&1 | tee "$LOG_FILENAME"
-            local SYNC_STATUS=${PIPESTATUS[0]}
-            set -e
+            run_gd_sync_once() {
+              local attempt_label="$1"
+              shift
+              local attempt_args=("$@")
 
-            if [ "$SYNC_STATUS" -ne 0 ] || grep -Eqi '403|forbidden|rateLimitExceeded|userRateLimitExceeded|dailyLimitExceeded|ERROR|Failed|timeout|unauthorized|permission denied|connection refused' "$LOG_FILENAME"; then
+              echo "=== ${task_name} ${attempt_label} ===" | tee -a "$LOG_FILENAME"
+              echo "GD sync args: ${attempt_args[*]}" | tee -a "$LOG_FILENAME"
+              : > "$LAST_GD_ATTEMPT_LOG"
+
+              set +e
+              rclone sync "$source_path" "$dest_path" \
+                "${attempt_args[@]}" \
+                --progress \
+                --stats 15s \
+                --stats-one-line \
+                --ignore-errors \
+                --verbose \
+                --timeout 30m \
+                --contimeout 60s \
+                2>&1 | tee "$LAST_GD_ATTEMPT_LOG"
+              local status=${PIPESTATUS[0]}
+              set -e
+
+              cat "$LAST_GD_ATTEMPT_LOG" >> "$LOG_FILENAME"
+              return "$status"
+            }
+
+            : > "$LOG_FILENAME"
+            run_gd_sync_once "initial sync" "${extra_args[@]}"
+            local SYNC_STATUS=$?
+
+            # OneDrive occasionally reports stalled upload/download chunks while
+            # feeding Google Drive. Retry once with a smaller OneDrive chunk and
+            # stricter pacing; already uploaded files are skipped by rclone.
+            if [ "$SYNC_STATUS" -ne 0 ] || grep -Eqi 'upload chunks may be taking too long|reducing --onedrive-chunk-size|rateLimitExceeded|userRateLimitExceeded|dailyLimitExceeded|403|forbidden|timeout' "$LAST_GD_ATTEMPT_LOG"; then
+              echo "检测到 GD 同步不稳定信号，使用安全参数重试一次。" | tee -a "$LOG_FILENAME"
+              run_gd_sync_once "safe retry" "${GD_SYNC_SAFE_RETRY_ARGS[@]}"
+              SYNC_STATUS=$?
+            fi
+
+            if [ "$SYNC_STATUS" -ne 0 ] || grep -Eqi '403|forbidden|rateLimitExceeded|userRateLimitExceeded|dailyLimitExceeded|ERROR|Failed|timeout|unauthorized|permission denied|connection refused|upload chunks may be taking too long' "$LAST_GD_ATTEMPT_LOG"; then
               send_log_to_telegram "$LOG_FILENAME" "$task_name" "$SYNC_STATUS" "gd-sync" "$source_path" "$dest_path"
               process_failed_videos "$LOG_FILENAME" "onedrive" "$task_name"
             else
@@ -1271,7 +1320,7 @@ jobs:
                 --data-urlencode text="$ok_message" || true
             fi
 
-            rm -f "$LOG_FILENAME" 2>/dev/null || true
+            rm -f "$LOG_FILENAME" "${LOG_FILENAME}.last" 2>/dev/null || true
             return 0
           }
           EOF
