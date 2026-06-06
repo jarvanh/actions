@@ -1094,41 +1094,38 @@ jobs:
           echo "开始时间: $(date)" >> "$PROCESSED_FILES_LOG"
           echo "==========================" >> "$PROCESSED_FILES_LOG"
 
-      - name: List source files larger than OpenList threshold before sync
-        run: |
-          LARGE_FILE_THRESHOLD=4000000000
-          LARGE_FILE_THRESHOLD_HUMAN="$(numfmt --to=iec-i --suffix=B "$LARGE_FILE_THRESHOLD" 2>/dev/null || echo "${LARGE_FILE_THRESHOLD}B")"
+      # - name: List source files larger than OpenList threshold before sync
+      #   run: |
+      #     LARGE_FILE_THRESHOLD=4000000000
+      #     LARGE_FILE_THRESHOLD_HUMAN="$(numfmt --to=iec-i --suffix=B "$LARGE_FILE_THRESHOLD" 2>/dev/null || echo "${LARGE_FILE_THRESHOLD}B")"
 
-          list_large_files() {
-            local remote_path="$1"
-            local label="$2"
+      #     list_large_files() {
+      #       local remote_path="$1"
+      #       local label="$2"
 
-            echo "========================================"
-            echo "检查源目录：$label ($remote_path)"
-            echo "列出大于 OpenList 预处理阈值的文件：${LARGE_FILE_THRESHOLD_HUMAN}"
+      #       echo "========================================"
+      #       echo "检查源目录：$label ($remote_path)"
+      #       echo "列出大于 OpenList 预处理阈值的文件：${LARGE_FILE_THRESHOLD_HUMAN}"
 
-            local result
-            result=$(rclone lsjson "$remote_path"               --recursive               --files-only 2>/dev/null |               jq -r --argjson threshold "$LARGE_FILE_THRESHOLD" '
-                .[]
-                | select((.Size // 0) > $threshold)
-                | "- \(.Path) (\((.Size / 1024 / 1024 / 1024 * 100 | round) / 100) GiB)"
-              ')
+      #       local result
+      #       result=$(rclone lsjson "$remote_path"               --recursive               --files-only 2>/dev/null |               jq -r --argjson threshold "$LARGE_FILE_THRESHOLD" '
+      #           .[]
+      #           | select((.Size // 0) > $threshold)
+      #           | "- \(.Path) (\((.Size / 1024 / 1024 / 1024 * 100 | round) / 100) GiB)"
+      #         ')
 
-            if [ -n "$result" ]; then
-              echo "$result"
-            else
-              echo "- 未发现大于预处理阈值的文件"
-            fi
-          }
+      #       if [ -n "$result" ]; then
+      #         echo "$result"
+      #       else
+      #         echo "- 未发现大于预处理阈值的文件"
+      #       fi
+      #     }
 
-          list_large_files "onedrive:backup" "backup"
-          list_large_files "onedrive:0" "0"
-          list_large_files "onedrive:1" "1"
-          list_large_files "onedrive:2" "2"
-          list_large_files "onedrive:3" "3"
-
-
-      # Dropbox archive backup is currently disabled on origin/main.
+      #     list_large_files "onedrive:backup" "backup"
+      #     list_large_files "onedrive:0" "0"
+      #     list_large_files "onedrive:1" "1"
+      #     list_large_files "onedrive:2" "2"
+      #     list_large_files "onedrive:3" "3"
 
       - name: Configure Google Drive sync limits
         run: |
