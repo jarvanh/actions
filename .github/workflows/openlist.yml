@@ -1132,16 +1132,17 @@ jobs:
       - name: Configure Google Drive sync limits
         run: |
           cat >> /tmp/functions.sh << 'EOF'
-          # Balanced Google Drive settings. Keep normal sync reasonably fast,
-          # and use the safe retry profile below only after chunk/rate-limit
-          # instability is detected.
+          # Balanced Google Drive settings. Keep normal sync reasonably fast.
+          # Do not set --tpslimit in the default profile: it creates a hard
+          # transaction limiter and can make large syncs look stuck. Rclone's
+          # Drive pacer will still back off automatically when Google returns
+          # rate-limit responses. Use the safe retry profile below only after
+          # chunk/rate-limit instability is detected.
           GD_SYNC_ARGS=(
             --drive-pacer-min-sleep 500ms
             --drive-pacer-burst 20
-            --drive-chunk-size 16M
-            --tpslimit 2
-            --tpslimit-burst 4
-            --checkers 4
+            --drive-chunk-size 32M
+            --checkers 8
             --transfers 2
             --onedrive-chunk-size 10M
             --retries 8
