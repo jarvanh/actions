@@ -962,7 +962,22 @@ jobs:
             run_rclone_sync_once() {
               local attempt_label="$1"
               echo "=== ${task_name} ${attempt_label} ===" | tee -a "$LOG_FILENAME"
+              echo "OpenList sync args: ${extra_args[*]}" | tee -a "$LOG_FILENAME"
               : > "$LAST_ATTEMPT_LOG"
+
+              # Emit a simple heartbeat while rclone is busy scanning/checking.
+              # rclone progress output can be sparse or carriage-return based,
+              # which makes GitHub's live log look blank during long WebDAV waits.
+              # rclone 扫描/检查阶段可能长时间没有换行输出；这里每分钟输出一次心跳，
+              # 避免 GitHub Actions 页面看起来像没有日志或卡死。
+              (
+                while true; do
+                  sleep 60
+                  echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] ${task_name} ${attempt_label} still running..."
+                done
+              ) &
+              local heartbeat_pid=$!
+
               rclone sync "$source_path" "$dest_path" \
                 "${extra_args[@]}" \
                 --progress \
@@ -976,6 +991,10 @@ jobs:
                 --low-level-retries 3 \
                 2>&1 | tee "$LAST_ATTEMPT_LOG"
               local attempt_status=${PIPESTATUS[0]}
+
+              kill "$heartbeat_pid" 2>/dev/null || true
+              wait "$heartbeat_pid" 2>/dev/null || true
+
               cat "$LAST_ATTEMPT_LOG" >> "$LOG_FILENAME"
               return "$attempt_status"
             }
