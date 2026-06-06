@@ -1306,14 +1306,14 @@ jobs:
         run: |
           source /tmp/functions.sh
           echo "=== 开始同步 2 任务 ==="
-          openlist_sync_with_failure_split "onedrive:2" "openlist:aliyundriveCrypt/2" "task2"
+          # openlist_sync_with_failure_split "onedrive:2" "openlist:aliyundriveCrypt/2" "task2"
           gd_sync_with_7d_skip "onedrive:2" "gd:2" "task2" "${GD_SYNC_ARGS[@]}"
 
       - name: Sync task3
         run: |
           source /tmp/functions.sh
           echo "=== 开始同步 3 任务 ==="
-          openlist_sync_with_failure_split "onedrive:3" "openlist:aliyundriveCrypt/3" "task3"
+          # openlist_sync_with_failure_split "onedrive:3" "openlist:aliyundriveCrypt/3" "task3"
           gd_sync_with_7d_skip "onedrive:3" "gd:3" "task3" "${GD_SYNC_ARGS[@]}"
 
       - name: Finalize and cleanup
