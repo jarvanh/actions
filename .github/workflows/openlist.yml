@@ -957,23 +957,57 @@ jobs:
 
             echo "开始同步: $source_path -> $dest_path"
 
-            rclone sync "$source_path" "$dest_path" \
-              "${extra_args[@]}" \
-              --progress \
-              --stats 15s \
-              --stats-one-line \
-              --ignore-errors \
-              --verbose \
-              --timeout 10m \
-              --contimeout 30s \
-              --retries 3 \
-              --low-level-retries 3 \
-              2>&1 | tee "$LOG_FILENAME"
+            local LAST_ATTEMPT_LOG="${LOG_FILENAME}.last"
 
-            local SYNC_STATUS=${PIPESTATUS[0]}
+            run_rclone_sync_once() {
+              local attempt_label="$1"
+              echo "=== ${task_name} ${attempt_label} ===" | tee -a "$LOG_FILENAME"
+              : > "$LAST_ATTEMPT_LOG"
+              rclone sync "$source_path" "$dest_path" \
+                "${extra_args[@]}" \
+                --progress \
+                --stats 15s \
+                --stats-one-line \
+                --ignore-errors \
+                --verbose \
+                --timeout 10m \
+                --contimeout 30s \
+                --retries 3 \
+                --low-level-retries 3 \
+                2>&1 | tee "$LAST_ATTEMPT_LOG"
+              local attempt_status=${PIPESTATUS[0]}
+              cat "$LAST_ATTEMPT_LOG" >> "$LOG_FILENAME"
+              return "$attempt_status"
+            }
+
+            : > "$LOG_FILENAME"
+            run_rclone_sync_once "initial sync"
+            local SYNC_STATUS=$?
+
+            # OpenList / WebDAV may temporarily lock target objects and return
+            # HTTP 423. Retry the whole sync after a delay; already copied files
+            # will be skipped by rclone, so this mainly retries locked leftovers.
+            # OpenList / WebDAV 可能临时锁定目标对象并返回 HTTP 423。
+            # 延迟后重跑整次 sync；已完成文件会被 rclone 跳过，主要补偿锁定残留文件。
+            if [[ "$dest_path" == openlist:* ]] && grep -Eqi 'Locked:[[:space:]]*423|423[[:space:]]+Locked' "$LAST_ATTEMPT_LOG"; then
+              local lock_retry_attempts="${OPENLIST_423_RETRY_ATTEMPTS:-3}"
+              local lock_retry_sleep="${OPENLIST_423_RETRY_SLEEP_SECONDS:-300}"
+              local lock_retry_index
+
+              for ((lock_retry_index = 1; lock_retry_index <= lock_retry_attempts; lock_retry_index++)); do
+                echo "检测到 OpenList 423 Locked，等待 ${lock_retry_sleep}s 后重试 ${lock_retry_index}/${lock_retry_attempts}。" | tee -a "$LOG_FILENAME"
+                sleep "$lock_retry_sleep"
+                run_rclone_sync_once "423 retry ${lock_retry_index}/${lock_retry_attempts}"
+                SYNC_STATUS=$?
+
+                if ! grep -Eqi 'Locked:[[:space:]]*423|423[[:space:]]+Locked' "$LAST_ATTEMPT_LOG"; then
+                  break
+                fi
+              done
+            fi
 
             local SYNC_FAILED=0
-            if [ "$SYNC_STATUS" -ne 0 ] || grep -Eqi '(^|[^[:alpha:]])(ERROR|Error|Failed|failed|timeout|forbidden|unauthorized|permission denied|connection refused)([^[:alpha:]]|$)' "$LOG_FILENAME"; then
+            if [ "$SYNC_STATUS" -ne 0 ] || grep -Eqi '(^|[^[:alpha:]])(ERROR|Error|Failed|failed|timeout|forbidden|unauthorized|permission denied|connection refused)([^[:alpha:]]|$)' "$LAST_ATTEMPT_LOG"; then
               SYNC_FAILED=1
               send_log_to_telegram "$LOG_FILENAME" "$task_name" "$SYNC_STATUS" "sync" "$source_path" "$dest_path"
             else
@@ -998,7 +1032,7 @@ jobs:
                 --data-urlencode text="$ok_message" || true
             fi
 
-            rm -f "$LOG_FILENAME" /tmp/probe_src.txt /tmp/probe_dst.txt 2>/dev/null || true
+            rm -f "$LOG_FILENAME" "$LAST_ATTEMPT_LOG" /tmp/probe_src.txt /tmp/probe_dst.txt 2>/dev/null || true
             return "$SYNC_FAILED"
           }
 
@@ -1008,8 +1042,17 @@ jobs:
             local task_name="$3"
             shift 3
             local extra_args=("$@")
+            local openlist_sync_args=(
+              --transfers 1
+              --checkers 1
+              --tpslimit 1
+              --tpslimit-burst 1
+              --retries 8
+              --low-level-retries 20
+              --retries-sleep 60s
+            )
 
-            if sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"; then
+            if sync_with_logging "$source_path" "$dest_path" "$task_name" "${openlist_sync_args[@]}" "${extra_args[@]}"; then
               return 0
             fi
 
