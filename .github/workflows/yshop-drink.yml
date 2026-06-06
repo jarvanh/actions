@@ -234,7 +234,10 @@ jobs:
       - name: Build backend
         shell: bash
         working-directory: ${{ env.BACKEND_DIR }}
-        run: mvn -B -DskipTests clean package
+        timeout-minutes: 25
+        run: |
+          set -euo pipefail
+          mvn -B -DskipTests -DskipITs -Dmaven.test.skip=true -pl yshop-server -am package
 
       - name: Build business admin frontend
         shell: bash
