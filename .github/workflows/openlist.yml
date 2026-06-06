@@ -1062,15 +1062,15 @@ jobs:
             shift 3
             local extra_args=("$@")
             local openlist_sync_args=(
-              --transfers 1
+              --transfers 2
               --checkers 4
-              --tpslimit 2
-              --tpslimit-burst 2
+              --tpslimit 4
+              --tpslimit-burst 4
               --timeout 30m
               --contimeout 60s
-              --retries 10
-              --low-level-retries 30
-              --retries-sleep 60s
+              --retries 8
+              --low-level-retries 20
+              --retries-sleep 45s
             )
 
             if sync_with_logging "$source_path" "$dest_path" "$task_name" "${openlist_sync_args[@]}" "${extra_args[@]}"; then
@@ -1132,22 +1132,21 @@ jobs:
       - name: Configure Google Drive sync limits
         run: |
           cat >> /tmp/functions.sh << 'EOF'
-          # Conservative Google Drive settings to avoid drive.googleapis.com
-          # per-minute query quota errors (403 RATE_LIMIT_EXCEEDED), while also
-          # keeping OneDrive read chunks small enough for unstable large-file
-          # transfers. GD sync may retry with an even safer profile below.
+          # Balanced Google Drive settings. Keep normal sync reasonably fast,
+          # and use the safe retry profile below only after chunk/rate-limit
+          # instability is detected.
           GD_SYNC_ARGS=(
-            --drive-pacer-min-sleep 1s
-            --drive-pacer-burst 10
-            --drive-chunk-size 8M
-            --tpslimit 1
-            --tpslimit-burst 1
-            --checkers 2
-            --transfers 1
-            --onedrive-chunk-size 5120K
-            --retries 10
-            --low-level-retries 30
-            --retries-sleep 45s
+            --drive-pacer-min-sleep 500ms
+            --drive-pacer-burst 20
+            --drive-chunk-size 16M
+            --tpslimit 2
+            --tpslimit-burst 4
+            --checkers 4
+            --transfers 2
+            --onedrive-chunk-size 10M
+            --retries 8
+            --low-level-retries 20
+            --retries-sleep 30s
           )
 
           # Fallback profile for OneDrive chunk stalls or Google Drive rate-limit
@@ -1161,7 +1160,7 @@ jobs:
             --tpslimit-burst 1
             --checkers 1
             --transfers 1
-            --onedrive-chunk-size 2560K
+            --onedrive-chunk-size 5M
             --retries 12
             --low-level-retries 40
             --retries-sleep 60s
