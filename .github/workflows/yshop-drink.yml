@@ -127,6 +127,7 @@ jobs:
           chmod 600 "$HOME/.config/rclone/rclone.conf"
           rclone copy dropbox:self-hosted/.cloudflared "$HOME/.cloudflared" -vv
           chmod 600 "$HOME/.cloudflared"/* 2>/dev/null || true
+          test -s "$HOME/.cloudflared/dc.json"
 
       - name: Import database
         shell: bash
@@ -327,7 +328,7 @@ jobs:
         run: |
           set -euo pipefail
           cloudflared tunnel route dns dc "$PUBLIC_HOST" || true
-          nohup cloudflared tunnel run --protocol http2 --url "http://127.0.0.1:${WEB_PORT}" dc > "$RUNNER_TEMP/yshop-cloudflared.log" 2>&1 &
+          nohup cloudflared tunnel --credentials-file "$HOME/.cloudflared/dc.json" run --protocol http2 --url "http://127.0.0.1:${WEB_PORT}" dc > "$RUNNER_TEMP/yshop-cloudflared.log" 2>&1 &
           echo $! > "$RUNNER_TEMP/yshop-cloudflared.pid"
 
           echo "Checking local nginx gateway..."
