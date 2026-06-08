@@ -325,8 +325,15 @@ jobs:
           }
           # 从正确位置压缩整个目录
           echo "正在压缩目录..."
-          src_kb=$(du -sk ./teslamate 2>/dev/null | awk '{print $1}')
-          src_kb=${src_kb:-0}
+          # teslamate-db 在前面会被 chown 为 postgres 容器用户(999:999)，
+          # 普通 runner 用户可能无法遍历数据库目录；这里必须用 sudo 统计，
+          # 否则 set -euo pipefail 会让打包阶段在 du 处直接失败。
+          src_kb=$(sudo du -sk ./teslamate | awk '{print $1}')
+          if [ -z "${src_kb:-}" ] || [ "$src_kb" -le 0 ]; then
+            echo "❌ teslamate archive preflight: unable to calculate source size" >&2
+            exit 1
+          fi
+          echo "待压缩目录大小: ${src_kb}KB"
           require_free_kb "." $((src_kb + 1024 * 1024)) "teslamate archive preflight"
           sudo tar -czf teslamate.tar.gz ./teslamate
           
