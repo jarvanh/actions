@@ -84,6 +84,19 @@ jobs:
           require_free_kb "." $((src_kb + 1024 * 1024)) "self-hosted archive preflight"
           rm -f "$ARCHIVE_NAME"
           tar -czf "$ARCHIVE_NAME" "./self-hosted"
+          archive_bytes=$(stat -c%s "$ARCHIVE_NAME")
+          if [ -z "${archive_bytes:-}" ] || [ "$archive_bytes" -le 0 ]; then
+            echo "❌ self-hosted archive validation: archive is empty" >&2
+            exit 1
+          fi
+          tar -tzf "$ARCHIVE_NAME" >/dev/null
+          archive_human=$(numfmt --to=iec-i --suffix=B "$archive_bytes" 2>/dev/null || echo "${archive_bytes}B")
+          {
+            echo "SELF_HOSTED_ARCHIVE_NAME=$ARCHIVE_NAME"
+            echo "SELF_HOSTED_ARCHIVE_BYTES=$archive_bytes"
+            echo "SELF_HOSTED_ARCHIVE_HUMAN=$archive_human"
+          } >> "$GITHUB_ENV"
+          echo "✅ 压缩包校验通过: ${ARCHIVE_NAME} (${archive_human})"
           
           echo "Uploading archive to OneDrive backup/ (Overwriting latest)..."
           # 💡 修改：使用 copy 命令上传同名文件，会自动覆盖 OneDrive backup/ 下的旧包
@@ -103,10 +116,14 @@ jobs:
           fi
           
           if [ "$STATUS" == "success" ]; then
-            ARCHIVE_NAME="self-hosted_latest.tar.gz"
-            FILE_SIZE_BYTES=$(stat -c%s "$ARCHIVE_NAME" 2>/dev/null || echo 0)
+            ARCHIVE_NAME="${SELF_HOSTED_ARCHIVE_NAME:-self-hosted_latest.tar.gz}"
+            FILE_SIZE_BYTES="${SELF_HOSTED_ARCHIVE_BYTES:-0}"
             FILE_SIZE_HUMAN=$(numfmt --to=iec-i --suffix=B "$FILE_SIZE_BYTES" 2>/dev/null || echo "${FILE_SIZE_BYTES}B")
+            if [ "$FILE_SIZE_BYTES" -le 0 ]; then
+              MSG="⚠️ <b>Self-Hosted 数据备份状态异常</b>%0A📅 日期: $(date +'%Y-%m-%d')%0A📦 文件: ${ARCHIVE_NAME}%0A📏 文件大小: ${FILE_SIZE_HUMAN}%0A⚠️ 备份任务成功但未记录到有效压缩包大小，请检查 GitHub Actions 日志。"
+            else
             MSG="✅ <b>Self-Hosted 数据备份成功 (已覆盖旧包)</b>%0A📅 日期: $(date +'%Y-%m-%d')%0A📦 文件: ${ARCHIVE_NAME}%0A📏 文件大小: ${FILE_SIZE_HUMAN}"
+            fi
           else
             MSG="❌ <b>Self-Hosted 数据备份失败</b>%0A⚠️ 请前往 GitHub Actions 检查日志详情。"
           fi
