@@ -35,13 +35,12 @@ jobs:
         run: |
           sudo apt-get install fuse3
           
-          # system.xml 必须落在 Dropbox 的 Emby config 下，避免 runner 重建后配置回退。
-          # 旧来源仍在 Google Drive：每次启动先尝试拉取最新 system.xml 到 Dropbox。
-          if rclone copy gd:self-hosted/emby/system.xml dropbox:self-hosted/emby/config/ --ignore-times -vv; then
-            echo "✅ system.xml 已从 GD 同步到 Dropbox config。"
-          else
-            echo "⚠️ 从 GD 同步 system.xml 到 Dropbox 失败，继续使用 Dropbox 现有 config/system.xml。" >&2
+          if rclone lsf gd:self-hosted/emby/config/ --files-only | grep -q "system.xml"; then
+            if ! rclone delete gd:self-hosted/emby/config/system.xml -vv; then
+              echo "[WARNING] Failed to delete system.xml, skipping" >&2
+            fi
           fi
+          sudo rclone copy gd:self-hosted/emby/system.xml gd:self-hosted/emby/config/ --ignore-errors -vv
 
           sudo mkdir /onedrive
           sudo nohup rclone mount onedrive: /onedrive --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
