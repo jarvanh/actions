@@ -81,6 +81,19 @@ jobs:
           require_free_kb "." $((src_kb + 1024 * 1024)) "github repos archive preflight"
           rm -f "$ARCHIVE_NAME"
           tar -czf "$ARCHIVE_NAME" "$BACKUP_DIR"
+          archive_bytes=$(stat -c%s "$ARCHIVE_NAME")
+          if [ -z "${archive_bytes:-}" ] || [ "$archive_bytes" -le 0 ]; then
+            echo "❌ github repos archive validation: archive is empty" >&2
+            exit 1
+          fi
+          tar -tzf "$ARCHIVE_NAME" >/dev/null
+          archive_human=$(numfmt --to=iec-i --suffix=B "$archive_bytes" 2>/dev/null || echo "${archive_bytes}B")
+          {
+            echo "GITHUB_REPOS_ARCHIVE_NAME=$ARCHIVE_NAME"
+            echo "GITHUB_REPOS_ARCHIVE_BYTES=$archive_bytes"
+            echo "GITHUB_REPOS_ARCHIVE_HUMAN=$archive_human"
+          } >> "$GITHUB_ENV"
+          echo "✅ 压缩包校验通过: ${ARCHIVE_NAME} (${archive_human})"
           
           echo "正在上传到 OneDrive backup/ (覆盖旧备份)..."
           # 💡 修改：直接覆盖 OneDrive backup/ 下的最新备份包
@@ -100,10 +113,14 @@ jobs:
           fi
           
           if [ "$STATUS" == "success" ]; then
-            ARCHIVE_NAME="github_repos_latest.tar.gz"
-            FILE_SIZE_BYTES=$(stat -c%s "$ARCHIVE_NAME" 2>/dev/null || echo 0)
+            ARCHIVE_NAME="${GITHUB_REPOS_ARCHIVE_NAME:-github_repos_latest.tar.gz}"
+            FILE_SIZE_BYTES="${GITHUB_REPOS_ARCHIVE_BYTES:-0}"
             FILE_SIZE_HUMAN=$(numfmt --to=iec-i --suffix=B "$FILE_SIZE_BYTES" 2>/dev/null || echo "${FILE_SIZE_BYTES}B")
+            if [ "$FILE_SIZE_BYTES" -le 0 ]; then
+              MSG="⚠️ <b>GitHub 全仓库备份状态异常</b>%0A📅 日期: $(date +'%Y-%m-%d')%0A📦 文件: ${ARCHIVE_NAME}%0A📏 文件大小: ${FILE_SIZE_HUMAN}%0A⚠️ 备份任务成功但未记录到有效压缩包大小，请检查 GitHub Actions 日志。"
+            else
             MSG="✅ <b>GitHub 全仓库备份成功 (已覆盖旧包)</b>%0A📅 日期: $(date +'%Y-%m-%d')%0A📦 文件: ${ARCHIVE_NAME}%0A📏 文件大小: ${FILE_SIZE_HUMAN}"
+            fi
           else
             MSG="❌ <b>GitHub 全仓库备份失败</b>%0A⚠️ 请前往 GitHub Actions 检查日志详情。"
           fi

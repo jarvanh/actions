@@ -80,7 +80,13 @@ jobs:
           # fi
           # rclone sync dropbox:self-hosted/ql ~/ql -vv
           cleanup_archive_workdir
-          rclone sync dropbox:self-hosted/ql/ql.tar.gz ~/ -vv && mkdir -p ~/ql && tar -xzvf ~/ql.tar.gz -C ~/ql
+          rclone sync dropbox:self-hosted/ql/ql.tar.gz ~/ -vv
+          if [ ! -s ~/ql.tar.gz ] || ! tar -tzf ~/ql.tar.gz >/dev/null; then
+            echo "❌ ql restore validation: ql.tar.gz is empty or unreadable" >&2
+            exit 1
+          fi
+          mkdir -p ~/ql
+          tar -xzvf ~/ql.tar.gz -C ~/ql
           cleanup_archive_workdir
       # - name: Check if the tunnel is running
       #   env:
@@ -165,8 +171,15 @@ jobs:
           echo "待压缩目录大小: ${src_kb}KB"
           require_free_kb "$HOME" $((src_kb + 1024 * 1024)) "ql archive preflight"
           sudo tar -czvf ~/ql.tar.gz --exclude="*.tmp" --exclude="*.log" --exclude="./dep_cache" -C ~/ql .
+          archive_bytes=$(stat -c%s ~/ql.tar.gz 2>/dev/null || echo 0)
+          if [ "$archive_bytes" -le 0 ] || ! tar -tzf ~/ql.tar.gz >/dev/null; then
+            echo "❌ ql archive validation: ql.tar.gz is empty or unreadable" >&2
+            exit 1
+          fi
+          echo "✅ ql.tar.gz 校验通过: $(numfmt --to=iec-i --suffix=B "$archive_bytes" 2>/dev/null || echo "${archive_bytes}B")"
       - name: sync
         run: |
+          set -euo pipefail
           rclone sync ~/ql.tar.gz dropbox:self-hosted/ql/ -vv
           sleep 1m
           # rclone delete onedrive:self-hosted/ql/ql.tar.gz

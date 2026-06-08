@@ -62,6 +62,10 @@ jobs:
             fi
             echo "teslamate.tar.gz 大小: ${archive_kb}KB"
             require_free_kb "." $((archive_kb * 3 + 1024 * 1024)) "teslamate extract preflight"
+            if [ ! -s teslamate.tar.gz ] || ! tar -tzf teslamate.tar.gz >/dev/null; then
+              echo "❌ teslamate restore validation: teslamate.tar.gz is empty or unreadable" >&2
+              exit 1
+            fi
             
             echo "解压缩..."
             # 关键修改：解压到当前目录并保留原始结构
@@ -340,6 +344,12 @@ jobs:
           echo "待压缩目录大小: ${src_kb}KB"
           require_free_kb "." $((src_kb + 1024 * 1024)) "teslamate archive preflight"
           sudo tar -czf teslamate.tar.gz ./teslamate
+          archive_bytes=$(stat -c%s teslamate.tar.gz 2>/dev/null || echo 0)
+          if [ "$archive_bytes" -le 0 ] || ! sudo tar -tzf teslamate.tar.gz >/dev/null; then
+            echo "❌ teslamate archive validation: teslamate.tar.gz is empty or unreadable" >&2
+            exit 1
+          fi
+          echo "✅ teslamate.tar.gz 校验通过: $(numfmt --to=iec-i --suffix=B "$archive_bytes" 2>/dev/null || echo "${archive_bytes}B")"
           
           echo "上传到dropbox..."
           rclone sync -v teslamate.tar.gz dropbox:self-hosted/
