@@ -1126,7 +1126,35 @@ jobs:
       - name: Keep alive
         id: keepalive
         if: ${{ always() }}
-        run: sleep 340m
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -euo pipefail
+          KEEPALIVE_MINUTES=340
+          FINAL_ARCHIVE_WARNING_BEFORE_MINUTES=15
+          WARNING_DELAY_MINUTES=$((KEEPALIVE_MINUTES - FINAL_ARCHIVE_WARNING_BEFORE_MINUTES))
+
+          send_final_archive_warning() {
+            sleep "${WARNING_DELAY_MINUTES}m"
+            if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+              repo="${GITHUB_REPOSITORY:-unknown-repo}"
+              run_id="${GITHUB_RUN_ID:-manual}"
+              run_url="https://github.com/${repo}/actions/runs/${run_id}"
+              msg=$(printf '⚠️ OpenClaw 即将进入最终归档\n\n预计约 %s 分钟后开始执行：Stop OpenClaw and Final Archive\n请及时保存状态或完成当前操作。\n\nRun ID: %s\n链接: %s' "$FINAL_ARCHIVE_WARNING_BEFORE_MINUTES" "$run_id" "$run_url")
+              curl -fsS --retry 3 --retry-delay 2 --max-time 20 \
+                -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                -d chat_id="${TELEGRAM_CHAT_ID}" \
+                --data-urlencode text="$msg" >/dev/null || true
+            else
+              echo "⚠️ Telegram secrets missing, skip final archive warning."
+            fi
+          }
+
+          send_final_archive_warning &
+          echo $! > /tmp/openclaw-final-archive-warning.pid
+
+          sleep "${KEEPALIVE_MINUTES}m"
 
       - name: Stop OpenClaw and Final Archive
         if: ${{ always() }}
