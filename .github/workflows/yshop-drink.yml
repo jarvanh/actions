@@ -26,6 +26,8 @@ env:
   REDIS_PORT: "6379"
   BACKEND_PORT: "48080"
   WEB_PORT: "8080"
+  YSHOP_DATA_REMOTE_DIR: dropbox:self-hosted/yshop-drink/data
+  YSHOP_DB_SNAPSHOT_NAME: yixiang-drink-open.sql.gz
 
 jobs:
   run:
@@ -137,7 +139,16 @@ jobs:
             echo "Waiting for MySQL..."
             sleep 2
           done
-          mysql -h 127.0.0.1 -uroot -proot "$MYSQL_DATABASE" < "$BACKEND_DIR/sql/yixiang-drink-open.sql"
+
+          snapshot="$RUNNER_TEMP/$YSHOP_DB_SNAPSHOT_NAME"
+          if rclone copyto "$YSHOP_DATA_REMOTE_DIR/$YSHOP_DB_SNAPSHOT_NAME" "$snapshot" --ignore-times --stats=0 2>/dev/null && [ -s "$snapshot" ]; then
+            echo "✅ Found persisted database snapshot in Dropbox; importing fixed data..."
+            gzip -dc "$snapshot" | mysql -h 127.0.0.1 -uroot -proot "$MYSQL_DATABASE"
+          else
+            echo "ℹ️ No persisted database snapshot found in Dropbox; importing default project SQL..."
+            mysql -h 127.0.0.1 -uroot -proot "$MYSQL_DATABASE" < "$BACKEND_DIR/sql/yixiang-drink-open.sql"
+          fi
+
           mysql -h 127.0.0.1 -uroot -proot -e "ALTER USER '$MYSQL_USER'@'%' IDENTIFIED BY '$MYSQL_PASSWORD'; FLUSH PRIVILEGES;"
 
       - name: Patch backend config without leaking secrets
@@ -375,6 +386,38 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          persist_database() {
+            set +e
+            echo "Persisting YShop Drink database to Dropbox..."
+            if ! mysqladmin ping -h 127.0.0.1 -uroot -proot --silent; then
+              echo "::warning::MySQL is not reachable; skip database persistence."
+              return 0
+            fi
+
+            snapshot="$RUNNER_TEMP/$YSHOP_DB_SNAPSHOT_NAME"
+            backup_name="${MYSQL_DATABASE}-${GITHUB_RUN_ID:-manual}-${GITHUB_RUN_ATTEMPT:-0}-$(date -u +%Y%m%dT%H%M%SZ).sql.gz"
+
+            if mysqldump \
+              -h 127.0.0.1 \
+              -uroot \
+              -proot \
+              --single-transaction \
+              --routines \
+              --triggers \
+              --events \
+              --hex-blob \
+              "$MYSQL_DATABASE" | gzip -9 > "$snapshot"; then
+              rclone mkdir "$YSHOP_DATA_REMOTE_DIR"
+              rclone copyto "$snapshot" "$YSHOP_DATA_REMOTE_DIR/$YSHOP_DB_SNAPSHOT_NAME" --stats=0
+              rclone copyto "$snapshot" "$YSHOP_DATA_REMOTE_DIR/backups/$backup_name" --stats=0
+              echo "✅ Database persisted to Dropbox: $YSHOP_DATA_REMOTE_DIR/$YSHOP_DB_SNAPSHOT_NAME"
+            else
+              echo "::warning::Failed to dump database; skip Dropbox persistence."
+            fi
+          }
+
+          trap persist_database EXIT INT TERM
+
           echo "YShop Drink is running. Keeping job alive for remote access..."
           while true; do
             curl -fsS "http://127.0.0.1:${BACKEND_PORT}/actuator/health" >/dev/null || {
@@ -389,3 +432,32 @@ jobs:
             fi
             sleep 300
           done
+
+      - name: Persist database to Dropbox
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! mysqladmin ping -h 127.0.0.1 -uroot -proot --silent; then
+            echo "::warning::MySQL is not reachable; skip database persistence."
+            exit 0
+          fi
+
+          snapshot="$RUNNER_TEMP/$YSHOP_DB_SNAPSHOT_NAME"
+          backup_name="${MYSQL_DATABASE}-${GITHUB_RUN_ID:-manual}-${GITHUB_RUN_ATTEMPT:-0}-$(date -u +%Y%m%dT%H%M%SZ).sql.gz"
+
+          mysqldump \
+            -h 127.0.0.1 \
+            -uroot \
+            -proot \
+            --single-transaction \
+            --routines \
+            --triggers \
+            --events \
+            --hex-blob \
+            "$MYSQL_DATABASE" | gzip -9 > "$snapshot"
+
+          rclone mkdir "$YSHOP_DATA_REMOTE_DIR"
+          rclone copyto "$snapshot" "$YSHOP_DATA_REMOTE_DIR/$YSHOP_DB_SNAPSHOT_NAME" --stats=0
+          rclone copyto "$snapshot" "$YSHOP_DATA_REMOTE_DIR/backups/$backup_name" --stats=0
+          echo "✅ Database persisted to Dropbox: $YSHOP_DATA_REMOTE_DIR/$YSHOP_DB_SNAPSHOT_NAME"
