@@ -1274,10 +1274,17 @@ jobs:
         run: |
           source /tmp/functions.sh
           echo "=== 开始同步 backup 任务 ==="
+
+          # OpenList/WebDAV backed by aliyundriveCrypt rejects overwriting some
+          # large existing files with HTTP 405. Upload backup snapshots into a
+          # fresh timestamped directory so rclone creates new objects instead of
+          # updating fixed *_latest files in place.
+          OPENLIST_BACKUP_SNAPSHOT="openlist:aliyundriveCrypt/backup/_snapshots/$(date -u +%Y%m%d_%H%M%S)"
+          echo "OpenList backup snapshot destination: ${OPENLIST_BACKUP_SNAPSHOT}"
           sync_with_logging \
             "onedrive:backup" \
-            "openlist:aliyundriveCrypt/backup" \
-            "backup" \
+            "${OPENLIST_BACKUP_SNAPSHOT}" \
+            "backup-openlist-snapshot" \
             --exclude "/notion/**" \
             --exclude "notion/**"
 
