@@ -126,17 +126,49 @@ jobs:
           
           library = sqlite3.connect(f"file:{library_db}?mode=ro", uri=True)
           media_items = library.execute("select count(*) from MediaItems").fetchone()[0]
+          root_rows = {
+              row[0]: (row[1], row[2])
+              for row in library.execute("select Id, Name, type from MediaItems where Id in (1, 2)")
+          }
+          library_folders = [
+              row[0]
+              for row in library.execute(
+                  "select Name from MediaItems where ParentId = 1 and type = 4 order by Name"
+              )
+          ]
+          media_paths = [
+              row[0]
+              for row in library.execute(
+                  """
+                  select Path
+                  from MediaItems
+                  where ParentId = 2
+                    and type = 3
+                    and Path is not null
+                    and Path like '/onedrive/%'
+                  order by Path
+                  """
+              )
+          ]
           library.close()
           
-          print(f"Emby guard: users={names} media_items={media_items}")
+          print(
+              "Emby guard: "
+              f"users={names} media_items={media_items} "
+              f"library_folders={library_folders} media_paths={media_paths}"
+          )
           if "Derrick" not in names:
               raise SystemExit("❌ Emby guard failed: Derrick user is missing")
-          if media_items < 100000:
-              raise SystemExit(f"❌ Emby guard failed: MediaItems too low: {media_items}")
+          if root_rows.get(1) != ("Media Folders", 2) or root_rows.get(2) != ("root", 1):
+              raise SystemExit(f"❌ Emby guard failed: invalid root structure: {root_rows}")
+          if not library_folders:
+              raise SystemExit("❌ Emby guard failed: no media library folders under Media Folders")
+          if not media_paths:
+              raise SystemExit("❌ Emby guard failed: no real /onedrive media paths under root")
           PY_GUARD
           }
 
-          # 尝试从备份恢复。恢复必须通过 Derrick + 媒体库数量校验，否则直接失败，禁止启动空库。
+          # 尝试从备份恢复。恢复必须通过 Derrick + 媒体库结构 + 真实媒体路径校验，否则直接失败，禁止启动空库。
           sudo rm -rf /var/lib/emby
           sudo mkdir -p /var/lib/emby
           sudo chown -R emby:emby /var/lib/emby
@@ -241,13 +273,45 @@ jobs:
           
           library = sqlite3.connect(f"file:{library_db}?mode=ro", uri=True)
           media_items = library.execute("select count(*) from MediaItems").fetchone()[0]
+          root_rows = {
+              row[0]: (row[1], row[2])
+              for row in library.execute("select Id, Name, type from MediaItems where Id in (1, 2)")
+          }
+          library_folders = [
+              row[0]
+              for row in library.execute(
+                  "select Name from MediaItems where ParentId = 1 and type = 4 order by Name"
+              )
+          ]
+          media_paths = [
+              row[0]
+              for row in library.execute(
+                  """
+                  select Path
+                  from MediaItems
+                  where ParentId = 2
+                    and type = 3
+                    and Path is not null
+                    and Path like '/onedrive/%'
+                  order by Path
+                  """
+              )
+          ]
           library.close()
           
-          print(f"Emby guard: users={names} media_items={media_items}")
+          print(
+              "Emby guard: "
+              f"users={names} media_items={media_items} "
+              f"library_folders={library_folders} media_paths={media_paths}"
+          )
           if "Derrick" not in names:
               raise SystemExit("❌ Emby guard failed: Derrick user is missing")
-          if media_items < 100000:
-              raise SystemExit(f"❌ Emby guard failed: MediaItems too low: {media_items}")
+          if root_rows.get(1) != ("Media Folders", 2) or root_rows.get(2) != ("root", 1):
+              raise SystemExit(f"❌ Emby guard failed: invalid root structure: {root_rows}")
+          if not library_folders:
+              raise SystemExit("❌ Emby guard failed: no media library folders under Media Folders")
+          if not media_paths:
+              raise SystemExit("❌ Emby guard failed: no real /onedrive media paths under root")
           PY_GUARD
           }
 
