@@ -175,6 +175,22 @@ jobs:
               echo "🎉 Dropbox 目录备份恢复并校验成功"
           fi
           
+          # 无论是从备份包恢复、Dropbox 目录迁移，还是软链接回退，
+          # 最终都以 Dropbox config/system.xml 为准，避免归档里的旧配置覆盖最新配置。
+          if [ -f /dropbox/self-hosted/emby/config/system.xml ]; then
+              echo "🔁 强制应用 Dropbox 最新 system.xml 到 Emby config..."
+              if [ -L /var/lib/emby ]; then
+                  echo "✅ /var/lib/emby 已指向 Dropbox，system.xml 已在 Dropbox config 中。"
+              else
+                  sudo mkdir -p /var/lib/emby/config
+                  sudo cp -f /dropbox/self-hosted/emby/config/system.xml /var/lib/emby/config/system.xml
+                  sudo chown emby:emby /var/lib/emby/config/system.xml
+              fi
+          else
+              echo "❌ Dropbox config/system.xml 不存在，停止以避免 Emby 使用错误配置。" >&2
+              exit 1
+          fi
+
           echo "==========/var/lib/emby==========="
           sudo ls -la /var/lib/emby
       - name: run emby
