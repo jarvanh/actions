@@ -80,7 +80,7 @@ jobs:
           # fi
           # rclone sync dropbox:self-hosted/ql ~/ql -vv
           cleanup_archive_workdir
-          rclone sync dropbox:self-hosted/ql/ql.tar.gz ~/ -vv
+          rclone copyto dropbox:self-hosted/ql.tar.gz ~/ql.tar.gz -vv
           if [ ! -s ~/ql.tar.gz ] || ! tar -tzf ~/ql.tar.gz >/dev/null; then
             echo "❌ ql restore validation: ql.tar.gz is empty or unreadable" >&2
             exit 1
@@ -180,11 +180,11 @@ jobs:
       - name: sync
         run: |
           set -euo pipefail
-          rclone sync ~/ql.tar.gz dropbox:self-hosted/ql/ -vv
+          rclone copyto ~/ql.tar.gz dropbox:self-hosted/ql.tar.gz -vv
           sleep 1m
-          # rclone delete onedrive:self-hosted/ql/ql.tar.gz
+          # rclone delete onedrive:self-hosted/ql.tar.gz
           # sleep 1m
-          rclone sync ~/ql.tar.gz dropbox:self-hosted/ql/ -vv
+          rclone copyto ~/ql.tar.gz dropbox:self-hosted/ql.tar.gz -vv
           rm -f ~/ql.tar.gz
           sleep 1m
           echo "Stopping GitHub Actions"
