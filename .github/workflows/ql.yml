@@ -155,10 +155,16 @@ jobs:
           }
           docker stop qinglong
           sleep 1m
-          src_kb=$(du -sk ~/ql 2>/dev/null | awk '{print $1}')
-          src_kb=${src_kb:-0}
+          # qinglong 数据目录由容器写入，可能存在非 runner 可读文件；
+          # 使用 sudo 统计和打包，避免 preflight/tar 因权限直接失败。
+          src_kb=$(sudo du -sk ~/ql | awk '{print $1}')
+          if [ -z "${src_kb:-}" ] || [ "$src_kb" -le 0 ]; then
+            echo "❌ ql archive preflight: unable to calculate source size" >&2
+            exit 1
+          fi
+          echo "待压缩目录大小: ${src_kb}KB"
           require_free_kb "$HOME" $((src_kb + 1024 * 1024)) "ql archive preflight"
-          tar -czvf ~/ql.tar.gz --exclude="*.tmp" --exclude="*.log" --exclude="./dep_cache" -C ~/ql .
+          sudo tar -czvf ~/ql.tar.gz --exclude="*.tmp" --exclude="*.log" --exclude="./dep_cache" -C ~/ql .
       - name: sync
         run: |
           rclone sync ~/ql.tar.gz dropbox:self-hosted/ql/ -vv

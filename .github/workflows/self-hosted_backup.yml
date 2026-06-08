@@ -75,8 +75,12 @@ jobs:
             --exclude "**/*.tmp"
           
           echo "Compressing data..."
-          src_kb=$(du -sk ./self-hosted 2>/dev/null | awk '{print $1}')
-          src_kb=${src_kb:-0}
+          src_kb=$(du -sk ./self-hosted | awk '{print $1}')
+          if [ -z "${src_kb:-}" ] || [ "$src_kb" -le 0 ]; then
+            echo "❌ self-hosted archive preflight: unable to calculate source size" >&2
+            exit 1
+          fi
+          echo "待压缩目录大小: ${src_kb}KB"
           require_free_kb "." $((src_kb + 1024 * 1024)) "self-hosted archive preflight"
           rm -f "$ARCHIVE_NAME"
           tar -czf "$ARCHIVE_NAME" "./self-hosted"

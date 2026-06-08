@@ -55,8 +55,12 @@ jobs:
             echo "找到 teslamate.tar.gz，正在下载..."
             cleanup_archive_workdir
             rclone copy dropbox:self-hosted/teslamate.tar.gz ./
-            archive_kb=$(du -sk teslamate.tar.gz 2>/dev/null | awk '{print $1}')
-            archive_kb=${archive_kb:-0}
+            archive_kb=$(du -sk teslamate.tar.gz | awk '{print $1}')
+            if [ -z "${archive_kb:-}" ] || [ "$archive_kb" -le 0 ]; then
+              echo "❌ teslamate extract preflight: unable to calculate archive size" >&2
+              exit 1
+            fi
+            echo "teslamate.tar.gz 大小: ${archive_kb}KB"
             require_free_kb "." $((archive_kb * 3 + 1024 * 1024)) "teslamate extract preflight"
             
             echo "解压缩..."

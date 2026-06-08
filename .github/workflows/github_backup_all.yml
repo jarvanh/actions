@@ -72,8 +72,12 @@ jobs:
           
           echo "----------------------------------------"
           echo "正在打包所有备份成功的仓库..."
-          src_kb=$(du -sk "$BACKUP_DIR" 2>/dev/null | awk '{print $1}')
-          src_kb=${src_kb:-0}
+          src_kb=$(du -sk "$BACKUP_DIR" | awk '{print $1}')
+          if [ -z "${src_kb:-}" ] || [ "$src_kb" -le 0 ]; then
+            echo "❌ github repos archive preflight: unable to calculate source size" >&2
+            exit 1
+          fi
+          echo "待压缩目录大小: ${src_kb}KB"
           require_free_kb "." $((src_kb + 1024 * 1024)) "github repos archive preflight"
           rm -f "$ARCHIVE_NAME"
           tar -czf "$ARCHIVE_NAME" "$BACKUP_DIR"

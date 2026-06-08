@@ -100,8 +100,12 @@ jobs:
           if rclone ls dropbox:self-hosted/openclaw.tar.gz > /dev/null 2>&1; then
             echo "📦 Found openclaw.tar.gz! Downloading and extracting..."
             rclone copyto dropbox:self-hosted/openclaw.tar.gz "$TMP_OPENCLAW_TAR"
-            archive_kb=$(du -sk "$TMP_OPENCLAW_TAR" 2>/dev/null | awk '{print $1}')
-            archive_kb=${archive_kb:-0}
+            archive_kb=$(du -sk "$TMP_OPENCLAW_TAR" | awk '{print $1}')
+            if [ -z "${archive_kb:-}" ] || [ "$archive_kb" -le 0 ]; then
+              echo "❌ openclaw extract preflight: unable to calculate archive size" >&2
+              exit 1
+            fi
+            echo "openclaw.tar.gz 大小: ${archive_kb}KB"
             require_free_kb /tmp $((archive_kb * 3 + 1024 * 1024)) "openclaw extract preflight"
             if [ -s "$TMP_OPENCLAW_TAR" ] && tar -tzf "$TMP_OPENCLAW_TAR" >/dev/null 2>&1; then
               tar -xzf "$TMP_OPENCLAW_TAR" -C "$RESTORE_DIR"
@@ -353,8 +357,12 @@ jobs:
             if rclone ls dropbox:self-hosted/rsstt.tar.gz > /dev/null 2>&1; then
               echo "📦 Found rsstt.tar.gz! Downloading and extracting..."
               rclone copyto dropbox:self-hosted/rsstt.tar.gz /tmp/rsstt.tar.gz
-              archive_kb=$(du -sk /tmp/rsstt.tar.gz 2>/dev/null | awk '{print $1}')
-              archive_kb=${archive_kb:-0}
+              archive_kb=$(du -sk /tmp/rsstt.tar.gz | awk '{print $1}')
+              if [ -z "${archive_kb:-}" ] || [ "$archive_kb" -le 0 ]; then
+                echo "❌ rsstt extract preflight: unable to calculate archive size" >&2
+                exit 1
+              fi
+              echo "rsstt.tar.gz 大小: ${archive_kb}KB"
               require_free_kb /tmp $((archive_kb * 3 + 512 * 1024)) "rsstt extract preflight"
               if [ -s /tmp/rsstt.tar.gz ] && tar -tzf /tmp/rsstt.tar.gz >/dev/null 2>&1; then
                 tar -xzf /tmp/rsstt.tar.gz -C /tmp/rsstt-restore
@@ -433,8 +441,12 @@ jobs:
           if rclone ls dropbox:self-hosted/CliRelay.tar.gz > /dev/null 2>&1; then
             echo "📦 Found CliRelay.tar.gz! Downloading and extracting..."
             rclone copyto dropbox:self-hosted/CliRelay.tar.gz /tmp/CliRelay.tar.gz
-            archive_kb=$(du -sk /tmp/CliRelay.tar.gz 2>/dev/null | awk '{print $1}')
-            archive_kb=${archive_kb:-0}
+            archive_kb=$(du -sk /tmp/CliRelay.tar.gz | awk '{print $1}')
+            if [ -z "${archive_kb:-}" ] || [ "$archive_kb" -le 0 ]; then
+              echo "❌ CliRelay extract preflight: unable to calculate archive size" >&2
+              exit 1
+            fi
+            echo "CliRelay.tar.gz 大小: ${archive_kb}KB"
             require_free_kb /tmp $((archive_kb * 3 + 512 * 1024)) "CliRelay extract preflight"
             MIN_SIZE=$((5 * 1024))
             actual_size=$(stat -c%s /tmp/CliRelay.tar.gz 2>/dev/null || echo 0)
@@ -447,8 +459,12 @@ jobs:
           elif rclone ls dropbox:self-hosted/CLIProxyAPI.tar.gz > /dev/null 2>&1; then
             echo "📦 No CliRelay archive yet. Bootstrapping from CLIProxyAPI.tar.gz..."
             rclone copyto dropbox:self-hosted/CLIProxyAPI.tar.gz /tmp/CLIProxyAPI.tar.gz
-            archive_kb=$(du -sk /tmp/CLIProxyAPI.tar.gz 2>/dev/null | awk '{print $1}')
-            archive_kb=${archive_kb:-0}
+            archive_kb=$(du -sk /tmp/CLIProxyAPI.tar.gz | awk '{print $1}')
+            if [ -z "${archive_kb:-}" ] || [ "$archive_kb" -le 0 ]; then
+              echo "❌ CLIProxyAPI extract preflight: unable to calculate archive size" >&2
+              exit 1
+            fi
+            echo "CLIProxyAPI.tar.gz 大小: ${archive_kb}KB"
             require_free_kb /tmp $((archive_kb * 3 + 512 * 1024)) "CLIProxyAPI extract preflight"
             MIN_SIZE=$((5 * 1024))
             actual_size=$(stat -c%s /tmp/CLIProxyAPI.tar.gz 2>/dev/null || echo 0)
@@ -1168,8 +1184,12 @@ jobs:
           cleanup_archive_outputs
           TMP_OPENCLAW_TAR="/tmp/openclaw-final.tar.gz"
 
-          openclaw_src_kb=$(du -sk "$HOME/.openclaw" 2>/dev/null | awk '{print $1}')
-          openclaw_src_kb=${openclaw_src_kb:-0}
+          openclaw_src_kb=$(du -sk "$HOME/.openclaw" | awk '{print $1}')
+          if [ -z "${openclaw_src_kb:-}" ] || [ "$openclaw_src_kb" -le 0 ]; then
+            echo "❌ final openclaw archive preflight: unable to calculate source size" >&2
+            exit 1
+          fi
+          echo "OpenClaw 待归档目录大小: ${openclaw_src_kb}KB"
           require_free_kb /tmp $((openclaw_src_kb + 1024 * 1024)) "final openclaw archive preflight"
           openclaw_final_output=""
           if openclaw_final_output=$(bash /tmp/create-openclaw-archive.sh "$TMP_OPENCLAW_TAR" 2>&1); then
@@ -1194,8 +1214,12 @@ jobs:
           if [ -d /tmp/local_CliRelay ]; then
             echo "=== local CliRelay tree before archive ==="
             find /tmp/local_CliRelay -maxdepth 4 | sort || true
-            clirelay_src_kb=$(du -sk /tmp/local_CliRelay 2>/dev/null | awk '{print $1}')
-            clirelay_src_kb=${clirelay_src_kb:-0}
+            clirelay_src_kb=$(sudo du -sk /tmp/local_CliRelay | awk '{print $1}')
+            if [ -z "${clirelay_src_kb:-}" ] || [ "$clirelay_src_kb" -le 0 ]; then
+              echo "❌ final CliRelay archive preflight: unable to calculate source size" >&2
+              exit 1
+            fi
+            echo "CliRelay 待归档目录大小: ${clirelay_src_kb}KB"
             require_free_kb /tmp $((clirelay_src_kb + 512 * 1024)) "final CliRelay archive preflight"
             clirelay_final_output=""
             if clirelay_final_output=$(bash /tmp/create-clirelay-archive.sh /tmp/CliRelay.tar.gz 2>&1); then
@@ -1228,8 +1252,12 @@ jobs:
           if [ -d /tmp/local_rsstt ]; then
             echo "=== local rss-to-telegram tree before archive ==="
             find /tmp/local_rsstt -maxdepth 4 | sort || true
-            rsstt_src_kb=$(du -sk /tmp/local_rsstt 2>/dev/null | awk '{print $1}')
-            rsstt_src_kb=${rsstt_src_kb:-0}
+            rsstt_src_kb=$(sudo du -sk /tmp/local_rsstt | awk '{print $1}')
+            if [ -z "${rsstt_src_kb:-}" ] || [ "$rsstt_src_kb" -le 0 ]; then
+              echo "❌ final rsstt archive preflight: unable to calculate source size" >&2
+              exit 1
+            fi
+            echo "rsstt 待归档目录大小: ${rsstt_src_kb}KB"
             require_free_kb /tmp $((rsstt_src_kb + 512 * 1024)) "final rsstt archive preflight"
             sudo rm -f /tmp/rsstt.tar.gz
             rsstt_tar_output=""

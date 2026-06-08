@@ -108,8 +108,12 @@ jobs:
           echo "🔍 正在检查 Dropbox 上的备份..."
           cleanup_archive_workdir
           if rclone copy dropbox:self-hosted/$BACKUP_NAME /tmp/ -vv; then
-              backup_kb=$(du -sk "/tmp/$BACKUP_NAME" 2>/dev/null | awk '{print $1}')
-              backup_kb=${backup_kb:-0}
+              backup_kb=$(du -sk "/tmp/$BACKUP_NAME" | awk '{print $1}')
+              if [ -z "${backup_kb:-}" ] || [ "$backup_kb" -le 0 ]; then
+                  echo "❌ emby extract preflight: unable to calculate archive size" >&2
+                  exit 1
+              fi
+              echo "$BACKUP_NAME 大小: ${backup_kb}KB"
               require_free_kb /var/lib/emby $((backup_kb * 3 + 1024 * 1024)) "emby extract preflight"
               echo "✅ 发现备份压缩包，正在极速解压..."
               if sudo tar -I zstd -xf /tmp/$BACKUP_NAME -C /var/lib/emby/; then
@@ -182,8 +186,12 @@ jobs:
           # 只有在本地模式下才打包回传（避免覆盖云端的软链接源文件）
           if [ ! -L /var/lib/emby ]; then
               echo "🚀 本地模式运行结束，正在打包数据回传 Dropbox..."
-              src_kb=$(sudo du -sk /var/lib/emby 2>/dev/null | awk '{print $1}')
-              src_kb=${src_kb:-0}
+              src_kb=$(sudo du -sk /var/lib/emby | awk '{print $1}')
+              if [ -z "${src_kb:-}" ] || [ "$src_kb" -le 0 ]; then
+                echo "❌ emby archive preflight: unable to calculate source size" >&2
+                exit 1
+              fi
+              echo "待压缩目录大小: ${src_kb}KB"
               require_free_kb "$HOME" $((src_kb + 1024 * 1024)) "emby archive preflight"
               sudo rm -f "$HOME/emby-backup.tar.zst"
               sudo tar -I 'zstd -3 -T0' -cf $HOME/emby-backup.tar.zst \
