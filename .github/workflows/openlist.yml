@@ -1291,14 +1291,14 @@ jobs:
         run: |
           source /tmp/functions.sh
           echo "=== 开始同步 0 任务 ==="
-          # sync_with_logging "onedrive:0" "openlist:baidupanCrypt/0" "task0"
+          sync_with_logging "onedrive:0" "openlist:baidupanCrypt/0" "task0"
           gd_sync_with_1d_skip "onedrive:0" "gd:0" "task0" "${GD_SYNC_ARGS[@]}"
 
       - name: Sync task1
         run: |
           source /tmp/functions.sh
           echo "=== 开始同步 1 任务 ==="
-          # sync_with_logging "onedrive:1" "openlist:baidupanCrypt/1" "task1"
+          sync_with_logging "onedrive:1" "openlist:baidupanCrypt/1" "task1"
           gd_sync_with_1d_skip "onedrive:1" "gd:1" "task1" "${GD_SYNC_ARGS[@]}"
 
       - name: Sync task2
