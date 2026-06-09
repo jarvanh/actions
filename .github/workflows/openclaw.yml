@@ -1043,8 +1043,10 @@ jobs:
           LOCK_FILE="/tmp/openclaw-archive.lock"
 
           cleanup_archive_outputs() {
-            rm -f "$TMP_OPENCLAW_TAR" "$TMP_CLIRELAY_TAR" 2>/dev/null || true
-            rm -rf /tmp/openclaw-archive-stage.* /tmp/clirelay-archive-stage.* 2>/dev/null || true
+            rm -f "$TMP_OPENCLAW_TAR" 2>/dev/null || true
+            sudo rm -f "$TMP_CLIRELAY_TAR" 2>/dev/null || true
+            rm -rf /tmp/openclaw-archive-stage.* 2>/dev/null || true
+            sudo rm -rf /tmp/clirelay-archive-stage.* 2>/dev/null || true
           }
           cleanup_archive_outputs
           PID_FILE="/tmp/openclaw-archive.pid"
@@ -1098,7 +1100,7 @@ jobs:
               clirelay_upload_output=""
               if clirelay_upload_output=$(rclone copyto "$TMP_CLIRELAY_TAR" dropbox:self-hosted/CliRelay.tar.gz 2>&1); then
                 echo "[$(date '+%F %T')] CliRelay upload ok"
-                rm -f "$TMP_CLIRELAY_TAR"
+                sudo rm -f "$TMP_CLIRELAY_TAR"
               else
                 rc=$?
                 echo "[$(date '+%F %T')] ⚠️ CliRelay.tar.gz upload failed (rc=$rc): ${clirelay_upload_output}"
@@ -1195,8 +1197,10 @@ jobs:
 
           echo "4. Performing final archive to Dropbox..."
           cleanup_archive_outputs() {
-            rm -f /tmp/openclaw-final.tar.gz /tmp/CliRelay.tar.gz /tmp/rsstt.tar.gz 2>/dev/null || true
-            rm -rf /tmp/openclaw-archive-stage.* /tmp/clirelay-archive-stage.* 2>/dev/null || true
+            rm -f /tmp/openclaw-final.tar.gz /tmp/rsstt.tar.gz 2>/dev/null || true
+            sudo rm -f /tmp/CliRelay.tar.gz 2>/dev/null || true
+            rm -rf /tmp/openclaw-archive-stage.* 2>/dev/null || true
+            sudo rm -rf /tmp/clirelay-archive-stage.* 2>/dev/null || true
           }
           free_kb() { df -Pk "${1:-/tmp}" | awk 'NR==2 {print $4}'; }
           require_free_kb() {
@@ -1256,7 +1260,7 @@ jobs:
                 clirelay_final_upload_output=""
                 if clirelay_final_upload_output=$(rclone copyto /tmp/CliRelay.tar.gz dropbox:self-hosted/CliRelay.tar.gz -v 2>&1); then
                   echo "final CliRelay archive/upload ok: ${clirelay_final_output}"
-                  rm -f /tmp/CliRelay.tar.gz
+                  sudo rm -f /tmp/CliRelay.tar.gz
                 else
                   rc=$?
                   echo "⚠️ final CliRelay.tar.gz upload failed (rc=$rc): ${clirelay_final_upload_output}"
