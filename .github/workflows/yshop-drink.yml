@@ -1,0 +1,463 @@
+name: yshop-drink
+
+on:
+  workflow_dispatch:
+  # schedule:
+    # - cron: "17 */6 * * *"
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: yshop-drink-singleton
+  cancel-in-progress: false
+
+env:
+  PROJECT_DIR: ${{ github.workspace }}/yshop-drink
+  BACKEND_DIR: ${{ github.workspace }}/yshop-drink/yshop-drink-boot3
+  ADMIN_DIR: ${{ github.workspace }}/yshop-drink/yshop-drink-vue3
+  MINIAPP_DIR: ${{ github.workspace }}/yshop-drink/yshop-drink-uniapp-vue3
+  PUBLIC_HOST: dc.${{ secrets.VD }}.eu.org
+  PUBLIC_ORIGIN: https://dc.${{ secrets.VD }}.eu.org
+  MYSQL_DATABASE: yixiang-drink-open
+  MYSQL_USER: yshop
+  MYSQL_PASSWORD: yshop_runner_password
+  REDIS_PORT: "6379"
+  BACKEND_PORT: "48080"
+  WEB_PORT: "8080"
+  YSHOP_DATA_REMOTE_DIR: dropbox:self-hosted/yshop-drink/data
+  YSHOP_DB_SNAPSHOT_NAME: yixiang-drink-open.sql.gz
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: yixiang-drink-open
+          MYSQL_USER: yshop
+          MYSQL_PASSWORD: yshop_runner_password
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot --silent"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=30
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=30
+
+    steps:
+      - name: Validate required secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in RCLONE VD YSHOP_WX_MINIAPP_APPID YSHOP_WX_MINIAPP_SECRET; do
+            value="${!name:-}"
+            if [ -z "$value" ]; then
+              echo "::error::Missing required secret: $name"
+              missing=1
+            fi
+          done
+          exit "$missing"
+        env:
+          RCLONE: ${{ secrets.RCLONE }}
+          VD: ${{ secrets.VD }}
+          YSHOP_WX_MINIAPP_APPID: ${{ secrets.YSHOP_WX_MINIAPP_APPID }}
+          YSHOP_WX_MINIAPP_SECRET: ${{ secrets.YSHOP_WX_MINIAPP_SECRET }}
+
+      - name: Checkout yshop-drink into runner home-compatible path
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/jarvanh/yshop-drink.git "$PROJECT_DIR"
+          rm -rf "$HOME/yshop-drink"
+          ln -s "$PROJECT_DIR" "$HOME/yshop-drink"
+          echo "✅ yshop-drink is available at $HOME/yshop-drink"
+
+      - name: Setup Java and Node
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+
+      - name: Install pnpm
+        shell: bash
+        run: corepack enable && corepack prepare pnpm@8.15.9 --activate
+
+      - name: Install cloudflared and rclone
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y nginx mysql-client unzip
+
+          curl -fsSLO https://downloads.rclone.org/rclone-current-linux-amd64.zip
+          unzip -q rclone-current-linux-amd64.zip
+          sudo install -m 0755 rclone-*-linux-amd64/rclone /usr/bin/rclone
+
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
+
+      - name: Configure rclone and cloudflared credentials
+        shell: bash
+        env:
+          RCLONE_CONFIG_CONTENT: ${{ secrets.RCLONE }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.config/rclone" "$HOME/.cloudflared"
+          printf '%s\n' "$RCLONE_CONFIG_CONTENT" > "$HOME/.config/rclone/rclone.conf"
+          chmod 600 "$HOME/.config/rclone/rclone.conf"
+          rclone copy dropbox:self-hosted/.cloudflared "$HOME/.cloudflared" -vv
+          chmod 600 "$HOME/.cloudflared"/* 2>/dev/null || true
+          test -s "$HOME/.cloudflared/dc.json"
+
+      - name: Import database
+        shell: bash
+        run: |
+          set -euo pipefail
+          until mysqladmin ping -h 127.0.0.1 -uroot -proot --silent; do
+            echo "Waiting for MySQL..."
+            sleep 2
+          done
+
+          snapshot="$RUNNER_TEMP/$YSHOP_DB_SNAPSHOT_NAME"
+          if rclone copyto "$YSHOP_DATA_REMOTE_DIR/$YSHOP_DB_SNAPSHOT_NAME" "$snapshot" --ignore-times --stats=0 2>/dev/null && [ -s "$snapshot" ]; then
+            echo "✅ Found persisted database snapshot in Dropbox; importing fixed data..."
+            gzip -dc "$snapshot" | mysql -h 127.0.0.1 -uroot -proot "$MYSQL_DATABASE"
+          else
+            echo "ℹ️ No persisted database snapshot found in Dropbox; importing default project SQL..."
+            mysql -h 127.0.0.1 -uroot -proot "$MYSQL_DATABASE" < "$BACKEND_DIR/sql/yixiang-drink-open.sql"
+          fi
+
+          mysql -h 127.0.0.1 -uroot -proot -e "ALTER USER '$MYSQL_USER'@'%' IDENTIFIED BY '$MYSQL_PASSWORD'; FLUSH PRIVILEGES;"
+
+      - name: Patch backend config without leaking secrets
+        shell: bash
+        env:
+          YSHOP_WX_MINIAPP_APPID: ${{ secrets.YSHOP_WX_MINIAPP_APPID }}
+          YSHOP_WX_MINIAPP_SECRET: ${{ secrets.YSHOP_WX_MINIAPP_SECRET }}
+        run: |
+          set -euo pipefail
+          cat > "$BACKEND_DIR/yshop-server/src/main/resources/application-runner.yaml" <<EOF
+          server:
+            port: ${BACKEND_PORT}
+
+          spring:
+            datasource:
+              dynamic:
+                datasource:
+                  master:
+                    url: jdbc:mysql://127.0.0.1:3306/${MYSQL_DATABASE}?useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&nullCatalogMeansCurrent=true
+                    username: ${MYSQL_USER}
+                    password: ${MYSQL_PASSWORD}
+                  slave:
+                    lazy: true
+                    url: jdbc:mysql://127.0.0.1:3306/${MYSQL_DATABASE}?useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&nullCatalogMeansCurrent=true
+                    username: ${MYSQL_USER}
+                    password: ${MYSQL_PASSWORD}
+            data:
+              redis:
+                host: 127.0.0.1
+                port: ${REDIS_PORT}
+                database: 1
+            quartz:
+              auto-startup: false
+
+          wx:
+            miniapp:
+              appid: ${YSHOP_WX_MINIAPP_APPID}
+              secret: ${YSHOP_WX_MINIAPP_SECRET}
+
+          yshop:
+            web:
+              admin-ui:
+                url: ${PUBLIC_ORIGIN}
+            pay:
+              order-notify-url: ${PUBLIC_ORIGIN}/admin-api/pay/notify/order
+              refund-notify-url: ${PUBLIC_ORIGIN}/admin-api/pay/notify/refund
+            demo: false
+            h5: ${PUBLIC_ORIGIN}/h5
+          EOF
+
+      - name: Patch frontend and miniapp endpoints
+        shell: bash
+        env:
+          YSHOP_WX_MINIAPP_APPID: ${{ secrets.YSHOP_WX_MINIAPP_APPID }}
+        run: |
+          set -euo pipefail
+          cat > "$ADMIN_DIR/.env.prod" <<EOF
+          NODE_ENV=production
+          VITE_DEV=false
+          VITE_BASE_URL='${PUBLIC_ORIGIN}'
+          VITE_UPLOAD_TYPE=server
+          VITE_UPLOAD_URL='${PUBLIC_ORIGIN}/admin-api/infra/file/upload'
+          VITE_API_URL=/admin-api
+          VITE_DROP_DEBUGGER=true
+          VITE_DROP_CONSOLE=true
+          VITE_SOURCEMAP=false
+          VITE_BASE_PATH=/
+          VITE_OUT_DIR=dist-prod
+          VITE_MALL_H5_DOMAIN='${PUBLIC_ORIGIN}/h5'
+          EOF
+
+          python3 - <<'PY'
+          import json, os, pathlib, re
+          root = pathlib.Path(os.environ['MINIAPP_DIR'])
+          public_origin = os.environ['PUBLIC_ORIGIN']
+          appid = os.environ['YSHOP_WX_MINIAPP_APPID']
+          config = root / 'config' / 'index.js'
+          text = config.read_text()
+          text = text.replace("export const VUE_APP_API_URL = 'http://localhost:48081/app-api'", f"export const VUE_APP_API_URL = '{public_origin}/app-api'")
+          text = text.replace("export const APP_ID = 'wxdbdbc123c8c30b45'", f"export const APP_ID = '{appid}'")
+          config.write_text(text)
+
+          manifest_path = root / 'manifest.json'
+          manifest_text = manifest_path.read_text()
+          manifest_text = re.sub(
+              r'("mp-weixin"\s*:\s*\{[\s\S]*?"appid"\s*:\s*)"[^"]*"',
+              lambda m: m.group(1) + json.dumps(appid),
+              manifest_text,
+              count=1,
+          )
+          manifest_path.write_text(manifest_text)
+          PY
+
+      - name: Build backend
+        shell: bash
+        working-directory: ${{ env.BACKEND_DIR }}
+        timeout-minutes: 25
+        run: |
+          set -euo pipefail
+          mvn -B -DskipTests -DskipITs -Dmaven.test.skip=true -pl yshop-server -am package
+
+      - name: Build business admin frontend
+        shell: bash
+        working-directory: ${{ env.ADMIN_DIR }}
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build:prod
+
+      - name: Prepare web gateway
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo rm -rf /var/www/yshop
+          sudo mkdir -p /var/www/yshop/admin /var/www/yshop/h5
+          sudo cp -a "$ADMIN_DIR/dist-prod/." /var/www/yshop/admin/
+          sudo cp -a "$MINIAPP_DIR/." /var/www/yshop/h5/
+
+          sudo tee /etc/nginx/sites-available/yshop-drink >/dev/null <<EOF
+          server {
+            listen ${WEB_PORT};
+            server_name _;
+            client_max_body_size 64m;
+
+            location /admin-api/ {
+              proxy_pass http://127.0.0.1:${BACKEND_PORT}/admin-api/;
+              proxy_set_header Host \$host;
+              proxy_set_header X-Real-IP \$remote_addr;
+              proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto https;
+            }
+
+            location /app-api/ {
+              proxy_pass http://127.0.0.1:${BACKEND_PORT}/app-api/;
+              proxy_set_header Host \$host;
+              proxy_set_header X-Real-IP \$remote_addr;
+              proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto https;
+            }
+
+            location /infra/ws {
+              proxy_pass http://127.0.0.1:${BACKEND_PORT}/infra/ws;
+              proxy_http_version 1.1;
+              proxy_set_header Upgrade \$http_upgrade;
+              proxy_set_header Connection "upgrade";
+              proxy_set_header Host \$host;
+            }
+
+            location /h5/ {
+              alias /var/www/yshop/h5/;
+              try_files \$uri \$uri/ /h5/index.html;
+            }
+
+            location /store/ {
+              alias /var/www/yshop/admin/;
+              try_files \$uri \$uri/ /store/index.html;
+            }
+
+            location / {
+              root /var/www/yshop/admin;
+              try_files \$uri \$uri/ /index.html;
+            }
+          }
+          EOF
+          sudo ln -sfn /etc/nginx/sites-available/yshop-drink /etc/nginx/sites-enabled/yshop-drink
+          sudo rm -f /etc/nginx/sites-enabled/default
+          sudo nginx -t
+          sudo systemctl restart nginx
+
+      - name: Start backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          JAR_PATH=$(find "$BACKEND_DIR/yshop-server/target" -maxdepth 1 -type f -name '*.jar' | head -1)
+          nohup java -jar "$JAR_PATH" --spring.profiles.active=dev,runner > "$RUNNER_TEMP/yshop-backend.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/yshop-backend.pid"
+
+          for i in {1..120}; do
+            if curl -fsS "http://127.0.0.1:${BACKEND_PORT}/actuator/health" >/dev/null; then
+              echo "✅ Backend is healthy"
+              exit 0
+            fi
+            tail -n 20 "$RUNNER_TEMP/yshop-backend.log" || true
+            sleep 5
+          done
+          echo "::error::Backend failed to become healthy"
+          tail -n 200 "$RUNNER_TEMP/yshop-backend.log" || true
+          exit 1
+
+      - name: Start public tunnel
+        shell: bash
+        run: |
+          set -euo pipefail
+          cloudflared tunnel route dns dc "$PUBLIC_HOST" || true
+          nohup cloudflared tunnel --credentials-file "$HOME/.cloudflared/dc.json" run --protocol http2 --url "http://127.0.0.1:${WEB_PORT}" dc > "$RUNNER_TEMP/yshop-cloudflared.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/yshop-cloudflared.pid"
+
+          echo "Checking local nginx gateway..."
+          curl -fsSI "http://127.0.0.1:${WEB_PORT}/" | head
+
+          echo "Checking cloudflared process..."
+          for i in {1..30}; do
+            if kill -0 "$(cat "$RUNNER_TEMP/yshop-cloudflared.pid")" 2>/dev/null; then
+              if grep -E "Registered tunnel connection|Connection.*registered|Initial protocol" "$RUNNER_TEMP/yshop-cloudflared.log" >/dev/null 2>&1; then
+                echo "✅ cloudflared connector registered"
+                break
+              fi
+            else
+              echo "::error::cloudflared exited early"
+              cat "$RUNNER_TEMP/yshop-cloudflared.log" || true
+              exit 1
+            fi
+            sleep 2
+          done
+
+          echo "Checking public endpoint..."
+          status=$(curl -k -sS -o "$RUNNER_TEMP/yshop-public-check.html" -w '%{http_code}' --max-time 15 "${PUBLIC_ORIGIN}/" || true)
+          if [ "$status" = "200" ]; then
+            echo "✅ Public endpoint returned HTTP 200"
+          elif grep -qiE 'cloudflare challenge|just a moment|cf-mitigated' "$RUNNER_TEMP/yshop-public-check.html" 2>/dev/null; then
+            echo "::warning::Public endpoint is reachable through the tunnel, but Cloudflare is applying a challenge. Keeping service alive; adjust Cloudflare security rules for API/miniapp access."
+          elif grep -qiE 'error 1033|cloudflare tunnel error' "$RUNNER_TEMP/yshop-public-check.html" 2>/dev/null; then
+            echo "::error::Public endpoint returned Cloudflare Tunnel error 1033"
+            echo "--- cloudflared log ---"
+            tail -n 200 "$RUNNER_TEMP/yshop-cloudflared.log" || true
+            echo "--- public response sample ---"
+            head -80 "$RUNNER_TEMP/yshop-public-check.html" || true
+            exit 1
+          else
+            echo "::warning::Public endpoint status=$status. Tunnel is connected, keeping service alive."
+          fi
+          echo "✅ Public tunnel connector is running"
+          echo "✅ Business admin, store admin, and H5/miniapp routes are served by the configured public host"
+
+      - name: Keep runner alive
+        shell: bash
+        run: |
+          set -euo pipefail
+          persist_database() {
+            set +e
+            echo "Persisting YShop Drink database to Dropbox..."
+            if ! mysqladmin ping -h 127.0.0.1 -uroot -proot --silent; then
+              echo "::warning::MySQL is not reachable; skip database persistence."
+              return 0
+            fi
+
+            snapshot="$RUNNER_TEMP/$YSHOP_DB_SNAPSHOT_NAME"
+            backup_name="${MYSQL_DATABASE}-${GITHUB_RUN_ID:-manual}-${GITHUB_RUN_ATTEMPT:-0}-$(date -u +%Y%m%dT%H%M%SZ).sql.gz"
+
+            if mysqldump \
+              -h 127.0.0.1 \
+              -uroot \
+              -proot \
+              --single-transaction \
+              --routines \
+              --triggers \
+              --events \
+              --hex-blob \
+              "$MYSQL_DATABASE" | gzip -9 > "$snapshot"; then
+              rclone mkdir "$YSHOP_DATA_REMOTE_DIR"
+              rclone copyto "$snapshot" "$YSHOP_DATA_REMOTE_DIR/$YSHOP_DB_SNAPSHOT_NAME" --stats=0
+              rclone copyto "$snapshot" "$YSHOP_DATA_REMOTE_DIR/backups/$backup_name" --stats=0
+              echo "✅ Database persisted to Dropbox: $YSHOP_DATA_REMOTE_DIR/$YSHOP_DB_SNAPSHOT_NAME"
+            else
+              echo "::warning::Failed to dump database; skip Dropbox persistence."
+            fi
+          }
+
+          trap persist_database EXIT INT TERM
+
+          echo "YShop Drink is running. Keeping job alive for remote access..."
+          while true; do
+            curl -fsS "http://127.0.0.1:${BACKEND_PORT}/actuator/health" >/dev/null || {
+              echo "Backend health check failed"
+              tail -n 200 "$RUNNER_TEMP/yshop-backend.log" || true
+              exit 1
+            }
+            if ! kill -0 "$(cat "$RUNNER_TEMP/yshop-cloudflared.pid")" 2>/dev/null; then
+              echo "cloudflared process exited"
+              tail -n 200 "$RUNNER_TEMP/yshop-cloudflared.log" || true
+              exit 1
+            fi
+            sleep 300
+          done
+
+      - name: Persist database to Dropbox
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! mysqladmin ping -h 127.0.0.1 -uroot -proot --silent; then
+            echo "::warning::MySQL is not reachable; skip database persistence."
+            exit 0
+          fi
+
+          snapshot="$RUNNER_TEMP/$YSHOP_DB_SNAPSHOT_NAME"
+          backup_name="${MYSQL_DATABASE}-${GITHUB_RUN_ID:-manual}-${GITHUB_RUN_ATTEMPT:-0}-$(date -u +%Y%m%dT%H%M%SZ).sql.gz"
+
+          mysqldump \
+            -h 127.0.0.1 \
+            -uroot \
+            -proot \
+            --single-transaction \
+            --routines \
+            --triggers \
+            --events \
+            --hex-blob \
+            "$MYSQL_DATABASE" | gzip -9 > "$snapshot"
+
+          rclone mkdir "$YSHOP_DATA_REMOTE_DIR"
+          rclone copyto "$snapshot" "$YSHOP_DATA_REMOTE_DIR/$YSHOP_DB_SNAPSHOT_NAME" --stats=0
+          rclone copyto "$snapshot" "$YSHOP_DATA_REMOTE_DIR/backups/$backup_name" --stats=0
+          echo "✅ Database persisted to Dropbox: $YSHOP_DATA_REMOTE_DIR/$YSHOP_DB_SNAPSHOT_NAME"

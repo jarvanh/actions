@@ -1,0 +1,1356 @@
+name: openclaw
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  build:
+    concurrency: openclaw-singleton
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 'current' # 始终使用官方发布的最新版
+          
+      - name: Install Rclone
+        run: |
+          curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
+          unzip rclone-*-amd64.zip
+          cd rclone-*-linux-amd64
+          sudo mv rclone /usr/bin
+          sudo chmod +x /usr/bin/rclone
+
+      - name: Configure Rclone
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE }}
+        run: |
+          mkdir -p ~/.config/rclone/
+          cat << EOF > ~/.config/rclone/rclone.conf
+          $RCLONE_CONFIG
+          EOF
+
+      - name: Mount Dropbox
+        run: |
+          sudo apt-get install fuse3
+          sudo mkdir -p /dropbox
+
+          # 挂载 Dropbox
+          sudo nohup rclone mount dropbox: /dropbox \
+            --allow-non-empty \
+            --no-gzip-encoding \
+            --umask 000 \
+            --allow-other \
+            --attr-timeout 10m \
+            --vfs-cache-mode full \
+            --vfs-cache-max-age 5m \
+            --vfs-read-chunk-size-limit 10G \
+            --buffer-size 100M \
+            --vfs-cache-max-size 10G &
+
+          echo "Waiting for mount..."
+          for i in {1..30}; do
+            if mount | grep -q " on /dropbox " && ls /dropbox >/dev/null 2>&1; then
+              echo "✅ Dropbox mounted"
+              break
+            fi
+            sleep 2
+          done
+
+      - name: Install OpenClaw
+        run: |
+          echo "Installing OpenClaw base..."
+          curl -fsSL https://openclaw.ai/install.sh | bash -s -- --no-onboard
+
+          echo "Configuring local ~/.openclaw with Dropbox-linked config..."
+          mkdir -p /dropbox/self-hosted/openclaw
+          mkdir -p ~/.openclaw
+          mkdir -p ~/.openclaw/extensions
+
+          TMP_OPENCLAW_TAR="/tmp/openclaw.tar.gz"
+          RESTORE_DIR="/tmp/openclaw-restore"
+
+          cleanup_archive_workdir() {
+            rm -f "$TMP_OPENCLAW_TAR" 2>/dev/null || true
+            rm -rf "$RESTORE_DIR" 2>/dev/null || true
+          }
+          free_kb() { df -Pk "${1:-/tmp}" | awk 'NR==2 {print $4}'; }
+          require_free_kb() {
+            local path="$1" min_kb="$2" label="$3"
+            local avail
+            avail=$(free_kb "$path")
+            if [ "${avail:-0}" -lt "$min_kb" ]; then
+              echo "❌ ${label}: insufficient free space at ${path}. available=${avail}KB required=${min_kb}KB" >&2
+              exit 1
+            fi
+            echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
+          }
+          require_free_kb /tmp $((2 * 1024 * 1024)) "openclaw restore preflight"
+
+          cleanup_archive_workdir
+          mkdir -p "$RESTORE_DIR"
+
+          echo "📦 Restoring ~/.openclaw: prefer archive, fallback to raw directory sync..."
+          if rclone ls dropbox:self-hosted/openclaw.tar.gz > /dev/null 2>&1; then
+            echo "📦 Found openclaw.tar.gz! Downloading and extracting..."
+            rclone copyto dropbox:self-hosted/openclaw.tar.gz "$TMP_OPENCLAW_TAR"
+            archive_kb=$(du -sk "$TMP_OPENCLAW_TAR" | awk '{print $1}')
+            if [ -z "${archive_kb:-}" ] || [ "$archive_kb" -le 0 ]; then
+              echo "❌ openclaw extract preflight: unable to calculate archive size" >&2
+              exit 1
+            fi
+            echo "openclaw.tar.gz 大小: ${archive_kb}KB"
+            require_free_kb /tmp $((archive_kb * 3 + 1024 * 1024)) "openclaw extract preflight"
+            if [ -s "$TMP_OPENCLAW_TAR" ] && tar -tzf "$TMP_OPENCLAW_TAR" >/dev/null 2>&1; then
+              tar -xzf "$TMP_OPENCLAW_TAR" -C "$RESTORE_DIR"
+              if [ -d "$RESTORE_DIR/.openclaw" ]; then
+                find ~/.openclaw -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+                cp -a "$RESTORE_DIR/.openclaw/." ~/.openclaw/
+                echo "✅ Restored ~/.openclaw from archive"
+              else
+                echo "⚠️ Archive does not contain .openclaw root, skipping archive restore."
+              fi
+            else
+              echo "⚠️ openclaw.tar.gz validation failed, skipping archive restore."
+            fi
+            cleanup_archive_workdir
+          else
+            echo "⚠️ No openclaw archive found. Falling back to sync from raw directory..."
+            rclone copy dropbox:self-hosted/openclaw ~/.openclaw \
+              --retries 10 \
+              --low-level-retries 20 \
+              --timeout 1m \
+              --contimeout 15s \
+              --exclude "logs/**" \
+              -P || true
+          fi
+
+          npm i -g @google/gemini-cli
+          npm i -g clawhub
+
+
+      - name: Restore skill symlink for proactivity
+        run: |
+          set -euo pipefail
+          # Persist real Proactivity state under ~/.openclaw, keep ~/proactivity as compatibility symlink.
+          mkdir -p "$HOME/.openclaw/workspace/skills-data/proactivity"
+          if [ -e "$HOME/proactivity" ] && [ ! -L "$HOME/proactivity" ]; then
+            cp -a "$HOME/proactivity/." "$HOME/.openclaw/workspace/skills-data/proactivity/" 2>/dev/null || true
+            mv "$HOME/proactivity" "$HOME/proactivity.migrated.$(date -u +%Y%m%dT%H%M%SZ)"
+          elif [ -L "$HOME/proactivity" ]; then
+            rm "$HOME/proactivity"
+          fi
+          ln -sfn "$HOME/.openclaw/workspace/skills-data/proactivity" "$HOME/proactivity"
+          chmod 700 "$HOME/.openclaw/workspace/skills-data/proactivity" || true
+          find "$HOME/.openclaw/workspace/skills-data/proactivity" -type d -exec chmod 700 {} + 2>/dev/null || true
+          find "$HOME/.openclaw/workspace/skills-data/proactivity" -type f -exec chmod 600 {} + 2>/dev/null || true
+          ls -ld "$HOME/proactivity" "$HOME/.openclaw/workspace/skills-data/proactivity"
+
+      - name: Run tmate
+        id: tmate
+        if: ${{ always() }}
+        continue-on-error: true
+        uses: mxschmitt/action-tmate@v3
+        with:
+          detached: true
+          install-dependencies: true
+          limit-access-to-actor: true
+          
+      - name: Persist tmate connection info
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          {
+            printf 'TMATE_SSH=%s\n' '${{ steps.tmate.outputs.ssh-command }}'
+            printf 'TMATE_SSH_ADDRESS=%s\n' '${{ steps.tmate.outputs.ssh-address }}'
+            printf 'TMATE_WEB=%s\n' '${{ steps.tmate.outputs.web-url }}'
+            printf 'RUN_URL=%s\n' "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          } > "$HOME/tmate.env"
+          echo "tmate env persisted to $HOME/tmate.env"
+
+      - name: Prepare runtime env for later steps
+        run: |
+          set -euo pipefail
+
+          NODE_PATH_ACTUAL="$(command -v node)"
+          NODE_BIN_DIR="$(dirname "$NODE_PATH_ACTUAL")"
+          NPM_PREFIX="$(npm config get prefix)"
+          NPM_GLOBAL_BIN="$NPM_PREFIX/bin"
+
+          echo "$NODE_BIN_DIR" >> "$GITHUB_PATH"
+          if [ -d "$NPM_GLOBAL_BIN" ]; then
+            echo "$NPM_GLOBAL_BIN" >> "$GITHUB_PATH"
+          fi
+
+          echo "node path: $NODE_PATH_ACTUAL"
+          echo "node bin dir: $NODE_BIN_DIR"
+          echo "npm prefix: $NPM_PREFIX"
+          echo "npm global bin: $NPM_GLOBAL_BIN"
+
+          cat > "$HOME/runtime-env.sh" <<'EOF'
+          #!/usr/bin/env bash
+
+          # Load OpenClaw env vars
+          if [ -f "$HOME/.openclaw/.env" ]; then
+            set -a
+            . "$HOME/.openclaw/.env"
+            set +a
+          fi
+
+          # Import GitHub Actions add_path entries so shells inherit setup-node/toolcache PATH
+          if [ -d "$HOME/work/_temp/_runner_file_commands" ]; then
+            _openclaw_add_path_file=""
+            _openclaw_added_path=""
+            for _openclaw_add_path_file in "$HOME"/work/_temp/_runner_file_commands/add_path_*; do
+              [ -f "$_openclaw_add_path_file" ] || continue
+              while IFS= read -r _openclaw_added_path || [ -n "$_openclaw_added_path" ]; do
+                [ -n "$_openclaw_added_path" ] || continue
+                case ":$PATH:" in
+                  *":$_openclaw_added_path:"*) ;;
+                  *) PATH="$_openclaw_added_path:$PATH" ;;
+                esac
+              done < "$_openclaw_add_path_file"
+            done
+            : "${_openclaw_add_path_file:=}"
+            : "${_openclaw_added_path:=}"
+          fi
+
+          # Persist GitHub CLI auth locally from GH_TOKEN, so shells without the env can still use gh.
+          # Also connect Git HTTPS auth to gh, so plain `git push` can reuse the authenticated flow.
+          if command -v gh >/dev/null 2>&1; then
+            GH_TOKEN_VALUE="${GH_TOKEN:-}"
+            GH_CONFIG_HOME_LOCAL="$HOME/.config/gh"
+            GH_HOSTS_FILE_LOCAL="$GH_CONFIG_HOME_LOCAL/hosts.yml"
+
+            if [ -n "$GH_TOKEN_VALUE" ]; then
+              mkdir -p "$GH_CONFIG_HOME_LOCAL"
+              chmod 700 "$HOME/.config" "$GH_CONFIG_HOME_LOCAL" 2>/dev/null || true
+
+              if ! env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN -u BASH_ENV gh auth status >/dev/null 2>&1; then
+                GH_USER_LOGIN="$(gh api user --jq .login 2>/dev/null || true)"
+                if [ -n "$GH_USER_LOGIN" ]; then
+                  GH_TMP_DIR="$(mktemp -d)"
+                  GH_TMP_HOSTS_FILE="$GH_TMP_DIR/hosts.yml"
+                  cat > "$GH_TMP_HOSTS_FILE" <<EOF_HOSTS
+          github.com:
+              user: ${GH_USER_LOGIN}
+              oauth_token: ${GH_TOKEN_VALUE}
+              git_protocol: https
+          EOF_HOSTS
+                  chmod 600 "$GH_TMP_HOSTS_FILE" 2>/dev/null || true
+
+                  if GH_CONFIG_DIR="$GH_TMP_DIR" env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN -u BASH_ENV gh auth status >/dev/null 2>&1; then
+                    mv "$GH_TMP_HOSTS_FILE" "$GH_HOSTS_FILE_LOCAL"
+                    chmod 600 "$GH_HOSTS_FILE_LOCAL" 2>/dev/null || true
+                  fi
+
+                  rm -rf "$GH_TMP_DIR" 2>/dev/null || true
+                fi
+              fi
+
+              [ -f "$GH_HOSTS_FILE_LOCAL" ] && chmod 600 "$GH_HOSTS_FILE_LOCAL" 2>/dev/null || true
+            fi
+
+            # Wire Git HTTPS auth through gh so `git push` can reuse gh auth without embedding tokens in remotes.
+            gh auth setup-git >/dev/null 2>&1 || true
+          fi
+          EOF
+
+          chmod +x "$HOME/runtime-env.sh"
+          echo "BASH_ENV=$HOME/runtime-env.sh" >> "$GITHUB_ENV"
+          
+      - name: Install Cloudflared
+        run: |
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
+          sudo mkdir -p ~/.cloudflared/
+          sudo cp -r /dropbox/self-hosted/.cloudflared/* ~/.cloudflared/ 2>/dev/null || true
+
+      - name: Run Cloudflared Tunnel
+        run: |
+          mkdir -p ~/.openclaw/logs
+
+          cloudflared tunnel route dns oc oc.'${{ secrets.VD }}'.eu.org || true
+
+          nohup cloudflared tunnel run --url http://127.0.0.1:18789 oc \
+            > ~/.openclaw/logs/cloudflared_oc.log 2>&1 &
+          echo $! > ~/.openclaw/logs/cloudflared_oc.pid
+
+          cloudflared tunnel route dns sub-store sub-store.'${{ secrets.VD }}'.eu.org || true
+
+          nohup cloudflared tunnel run --url http://127.0.0.1:3001 sub-store \
+            > ~/.openclaw/logs/cloudflared_sub_store.log 2>&1 &
+          echo $! > ~/.openclaw/logs/cloudflared_sub_store.pid
+
+          sleep 10
+          echo "OpenClaw and Sub-Store tunnels started."
+          
+      - name: Run sub-store container
+        run: |
+          set -euo pipefail
+
+          echo "Starting Sub-Store container from Dropbox persistent data..."
+          mkdir -p /dropbox/self-hosted/sub-store ~/.openclaw/logs
+
+          docker rm -f sub-store 2>/dev/null || true
+          docker run -d \
+            --restart=always \
+            -e "SUB_STORE_BACKEND_SYNC_CRON=50 * * * *" \
+            -e SUB_STORE_FRONTEND_BACKEND_PATH=/65jwaf2357gsnret4uods \
+            -p 9876:9876 \
+            -p 127.0.0.1:3001:3001 \
+            -v /dropbox/self-hosted/sub-store:/opt/app/data \
+            --name sub-store \
+            xream/sub-store:http-meta
+
+          echo "Waiting for Sub-Store backend/frontend to become reachable..."
+          ready=false
+          for i in {1..60}; do
+            if curl -fsS http://127.0.0.1:3001/ >/dev/null 2>&1 || curl -fsS http://127.0.0.1:9876/ >/dev/null 2>&1; then
+              ready=true
+              echo "✅ Sub-Store is reachable"
+              break
+            fi
+            echo "⏳ Waiting for Sub-Store... ${i}/60"
+            sleep 2
+          done
+
+          docker ps -a --filter name=sub-store
+          if [ "$ready" != true ]; then
+            echo "❌ Sub-Store did not become reachable in time"
+            docker logs sub-store || true
+            exit 1
+          fi
+
+      - name: Run rss-to-telegram container
+        run: |
+          set -euo pipefail
+          echo "Starting rss-to-telegram before CLIProxyAPI..."
+          mkdir -p /dropbox/self-hosted/rsstt
+          cleanup_archive_workdir() {
+            rm -f /tmp/rsstt.tar.gz 2>/dev/null || true
+            rm -rf /tmp/rsstt-restore 2>/dev/null || true
+          }
+          free_kb() { df -Pk "${1:-/tmp}" | awk 'NR==2 {print $4}'; }
+          require_free_kb() {
+            local path="$1" min_kb="$2" label="$3"
+            local avail
+            avail=$(free_kb "$path")
+            if [ "${avail:-0}" -lt "$min_kb" ]; then
+              echo "❌ ${label}: insufficient free space at ${path}. available=${avail}KB required=${min_kb}KB" >&2
+              exit 1
+            fi
+            echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
+          }
+          require_free_kb /tmp $((1024 * 1024)) "rsstt restore preflight"
+          rm -rf /tmp/local_rsstt
+          cleanup_archive_workdir
+          mkdir -p /tmp/local_rsstt /tmp/rsstt-restore
+
+          if [ -f ~/.openclaw/.env ]; then
+            if rclone ls dropbox:self-hosted/rsstt.tar.gz > /dev/null 2>&1; then
+              echo "📦 Found rsstt.tar.gz! Downloading and extracting..."
+              rclone copyto dropbox:self-hosted/rsstt.tar.gz /tmp/rsstt.tar.gz
+              archive_kb=$(du -sk /tmp/rsstt.tar.gz | awk '{print $1}')
+              if [ -z "${archive_kb:-}" ] || [ "$archive_kb" -le 0 ]; then
+                echo "❌ rsstt extract preflight: unable to calculate archive size" >&2
+                exit 1
+              fi
+              echo "rsstt.tar.gz 大小: ${archive_kb}KB"
+              require_free_kb /tmp $((archive_kb * 3 + 512 * 1024)) "rsstt extract preflight"
+              if [ -s /tmp/rsstt.tar.gz ] && tar -tzf /tmp/rsstt.tar.gz >/dev/null 2>&1; then
+                tar -xzf /tmp/rsstt.tar.gz -C /tmp/rsstt-restore
+                cp -a /tmp/rsstt-restore/. /tmp/local_rsstt/ || true
+              else
+                echo "⚠️ rsstt.tar.gz validation failed, skipping archive restore."
+              fi
+              cleanup_archive_workdir
+            else
+              echo "⚠️ No rsstt archive found. Falling back to sync from raw directory..."
+              rclone copy dropbox:self-hosted/rsstt /tmp/local_rsstt \
+                --retries 10 \
+                --low-level-retries 20 \
+                --timeout 1m \
+                --contimeout 15s \
+                --exclude "docker-compose.yml" \
+                -P || true
+            fi
+
+            mkdir -p /tmp/local_rsstt/config /tmp/local_rsstt/data
+            touch /tmp/local_rsstt/config/.keep /tmp/local_rsstt/data/.keep
+
+            echo "=== restored rss-to-telegram tree ==="
+            find /tmp/local_rsstt -maxdepth 3 | sort || true
+
+            docker rm -f rss-to-telegram 2>/dev/null || true
+            docker run -d \
+              --name rss-to-telegram \
+              --restart unless-stopped \
+              -v /tmp/local_rsstt/config:/app/config \
+              -v /tmp/local_rsstt/data:/app/data \
+              -e TOKEN="$TELEGRAM_BOT_TOKEN_RSS_SB_BOT" \
+              -e MANAGER="83279194" \
+              -e MULTIUSER="0" \
+              rongronggg9/rss-to-telegram:latest
+
+            echo "Waiting for rss-to-telegram container to stabilize..."
+            sleep 8
+            docker ps -a --filter name=rss-to-telegram || true
+            echo "=== rss-to-telegram /app tree (for persistence verification) ==="
+            docker exec rss-to-telegram sh -lc 'find /app -maxdepth 3 \( -type f -o -type d \) | sort | sed -n "1,200p"' || true
+            echo "=== rss-to-telegram local bind tree after startup ==="
+            find /tmp/local_rsstt -maxdepth 3 | sort || true
+          else
+            echo "⚠️ openclaw .env not found, skipping rss-to-telegram startup."
+          fi
+
+      - name: Run CliRelay container
+        run: |
+          set -euo pipefail
+
+          echo "Configuring local high-speed CliRelay directory with persistent data..."
+          mkdir -p /dropbox/self-hosted/CliRelay
+          cleanup_archive_workdir() {
+            rm -f /tmp/CliRelay.tar.gz /tmp/CLIProxyAPI.tar.gz 2>/dev/null || true
+          }
+          free_kb() { df -Pk "${1:-/tmp}" | awk 'NR==2 {print $4}'; }
+          require_free_kb() {
+            local path="$1" min_kb="$2" label="$3"
+            local avail
+            avail=$(free_kb "$path")
+            if [ "${avail:-0}" -lt "$min_kb" ]; then
+              echo "❌ ${label}: insufficient free space at ${path}. available=${avail}KB required=${min_kb}KB" >&2
+              exit 1
+            fi
+            echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
+          }
+          require_free_kb /tmp $((2 * 1024 * 1024)) "CliRelay restore preflight"
+          rm -rf /tmp/local_CliRelay
+          cleanup_archive_workdir
+          mkdir -p /tmp/local_CliRelay
+
+          # Prefer the new CliRelay archive. If this is the first migrated run,
+          # bootstrap from the old CLIProxyAPI archive/raw directory so existing
+          # config.yaml, auth-dir, and stats.json are preserved.
+          if rclone ls dropbox:self-hosted/CliRelay.tar.gz > /dev/null 2>&1; then
+            echo "📦 Found CliRelay.tar.gz! Downloading and extracting..."
+            rclone copyto dropbox:self-hosted/CliRelay.tar.gz /tmp/CliRelay.tar.gz
+            archive_kb=$(du -sk /tmp/CliRelay.tar.gz | awk '{print $1}')
+            if [ -z "${archive_kb:-}" ] || [ "$archive_kb" -le 0 ]; then
+              echo "❌ CliRelay extract preflight: unable to calculate archive size" >&2
+              exit 1
+            fi
+            echo "CliRelay.tar.gz 大小: ${archive_kb}KB"
+            require_free_kb /tmp $((archive_kb * 3 + 512 * 1024)) "CliRelay extract preflight"
+            MIN_SIZE=$((5 * 1024))
+            actual_size=$(stat -c%s /tmp/CliRelay.tar.gz 2>/dev/null || echo 0)
+            if [ "$actual_size" -ge "$MIN_SIZE" ] && tar -tzf /tmp/CliRelay.tar.gz >/dev/null 2>&1; then
+              tar -xzf /tmp/CliRelay.tar.gz -C /tmp/local_CliRelay
+            else
+              echo "⚠️ CliRelay.tar.gz validation failed, skipping archive restore."
+            fi
+            cleanup_archive_workdir
+          elif rclone ls dropbox:self-hosted/CLIProxyAPI.tar.gz > /dev/null 2>&1; then
+            echo "📦 No CliRelay archive yet. Bootstrapping from CLIProxyAPI.tar.gz..."
+            rclone copyto dropbox:self-hosted/CLIProxyAPI.tar.gz /tmp/CLIProxyAPI.tar.gz
+            archive_kb=$(du -sk /tmp/CLIProxyAPI.tar.gz | awk '{print $1}')
+            if [ -z "${archive_kb:-}" ] || [ "$archive_kb" -le 0 ]; then
+              echo "❌ CLIProxyAPI extract preflight: unable to calculate archive size" >&2
+              exit 1
+            fi
+            echo "CLIProxyAPI.tar.gz 大小: ${archive_kb}KB"
+            require_free_kb /tmp $((archive_kb * 3 + 512 * 1024)) "CLIProxyAPI extract preflight"
+            MIN_SIZE=$((5 * 1024))
+            actual_size=$(stat -c%s /tmp/CLIProxyAPI.tar.gz 2>/dev/null || echo 0)
+            if [ "$actual_size" -ge "$MIN_SIZE" ] && tar -tzf /tmp/CLIProxyAPI.tar.gz >/dev/null 2>&1; then
+              tar -xzf /tmp/CLIProxyAPI.tar.gz -C /tmp/local_CliRelay
+            else
+              echo "⚠️ CLIProxyAPI.tar.gz validation failed, skipping bootstrap restore."
+            fi
+            cleanup_archive_workdir
+          elif rclone ls dropbox:self-hosted/CliRelay > /dev/null 2>&1; then
+            echo "⚠️ No CliRelay archive found. Falling back to sync from CliRelay raw directory..."
+            rclone copy dropbox:self-hosted/CliRelay /tmp/local_CliRelay
+          else
+            echo "⚠️ No CliRelay data found. Falling back to old CLIProxyAPI raw directory..."
+            rclone copy dropbox:self-hosted/CLIProxyAPI /tmp/local_CliRelay || true
+          fi
+
+          # CliRelay keeps config/auth compatible with CLIProxyAPI, and persists
+          # new request logs / SQLite data under /CLIProxyAPI/logs and /CLIProxyAPI/data.
+          mkdir -p /tmp/local_CliRelay/auth-dir /tmp/local_CliRelay/logs /tmp/local_CliRelay/data
+          touch /tmp/local_CliRelay/config.yaml
+
+          echo "=== restored CliRelay tree ==="
+          find /tmp/local_CliRelay -maxdepth 3 | sort || true
+
+          docker rm -f clirelay cliproxyapi 2>/dev/null || true
+
+          docker run -d \
+            --name clirelay \
+            --restart unless-stopped \
+            -p 8317:8317 \
+            -e CLIRELAY_LOCALE=zh \
+            -v /tmp/local_CliRelay/config.yaml:/CLIProxyAPI/config.yaml \
+            -v /tmp/local_CliRelay/auth-dir:/root/.cli-proxy-api \
+            -v /tmp/local_CliRelay/logs:/CLIProxyAPI/logs \
+            -v /tmp/local_CliRelay/data:/CLIProxyAPI/data \
+            ghcr.io/kittors/clirelay:latest
+
+          echo "等待 CliRelay API 就绪..."
+          READY=false
+          for i in {1..120}; do
+            if curl -fsS http://127.0.0.1:8317/ >/dev/null 2>&1; then
+              READY=true
+              echo "✅ CliRelay 已就绪"
+              break
+            fi
+            echo "⏳ 等待中... ${i}/120"
+            sleep 2
+          done
+          docker ps -a
+
+          if [ "$READY" != true ]; then
+            echo "❌ CliRelay 未在预期时间内就绪"
+            docker logs clirelay || true
+            exit 1
+          fi
+
+          echo "ℹ️ 旧 stats.json 已完成一次性迁移；后续使用 CliRelay data/usage.db 持久化，不再导入 stats.json。"
+
+          pkill -f "cloudflared tunnel run --protocol http2 --url http://127.0.0.1:8317 ai-api" || true
+
+          nohup cloudflared tunnel run --protocol http2 --url http://127.0.0.1:8317 ai-api \
+            > ~/.openclaw/logs/cloudflared_CliRelay.log 2>&1 &
+
+          sleep 5
+          echo $! > ~/.openclaw/logs/cloudflared_CliRelay.pid
+
+          echo "CliRelay 命名隧道已启动：ai-api（固定地址模式）"
+
+      - name: Run OpenClaw
+        id: run_openclaw
+        run: |
+          set -euo pipefail
+
+          RUN_OPENCLAW_STEP_LOG="/tmp/run-openclaw-step.log"
+          RUN_OPENCLAW_META="/tmp/run-openclaw-meta.env"
+          : > "$RUN_OPENCLAW_STEP_LOG"
+          : > "$RUN_OPENCLAW_META"
+          exec > >(tee -a "$RUN_OPENCLAW_STEP_LOG") 2>&1
+
+          CURRENT_OPENCLAW_VERSION="$(openclaw --version 2>/dev/null | head -n 1 || true)"
+          CURRENT_OPENCLAW_SEMVER="$(printf '%s\n' "$CURRENT_OPENCLAW_VERSION" | grep -oE '[0-9]{4}\.[0-9]+\.[0-9]+' | head -n 1 || true)"
+          KNOWN_GOOD_VERSION_FILE="$HOME/.openclaw/openclaw-known-good-version"
+          echo "CURRENT_OPENCLAW_VERSION=$CURRENT_OPENCLAW_VERSION" >> "$RUN_OPENCLAW_META"
+          echo "CURRENT_OPENCLAW_SEMVER=$CURRENT_OPENCLAW_SEMVER" >> "$RUN_OPENCLAW_META"
+          echo "FAIL_STAGE=preflight_doctor" >> "$RUN_OPENCLAW_META"
+          PREFLIGHT_BEGIN_TS=$(date +%s)
+
+          fail_startup() {
+            local msg="$1"
+            echo "❌ $msg"
+            exit 1
+          }
+
+          normalize_openclaw_version() {
+            printf '%s\n' "${1:-}" | tr -d '[:space:]' | grep -oE '^[0-9]{4}\.[0-9]+\.[0-9]+$' || true
+          }
+
+          read_openclaw_version_file() {
+            local file="$1"
+            if [ -s "$file" ]; then
+              normalize_openclaw_version "$(head -n 1 "$file" 2>/dev/null || true)"
+            fi
+          }
+
+          record_successful_openclaw_version() {
+            local version="$1"
+            version="$(normalize_openclaw_version "$version")"
+            if [ -z "$version" ]; then
+              echo "⚠️ Cannot record successful OpenClaw version: current version is empty or invalid."
+              return 0
+            fi
+            mkdir -p "$HOME/.openclaw"
+            printf '%s\n' "$version" > "$KNOWN_GOOD_VERSION_FILE"
+            echo "RECORDED_SUCCESSFUL_OPENCLAW_VERSION=$version" >> "$RUN_OPENCLAW_META"
+            echo "✅ Recorded successful OpenClaw version: $version"
+          }
+
+          resolve_fallback_openclaw_version() {
+            local version=""
+
+            version="$(read_openclaw_version_file "$KNOWN_GOOD_VERSION_FILE")"
+            if [ -n "$version" ]; then
+              echo "FALLBACK_VERSION_SOURCE=known_good_file" >> "$RUN_OPENCLAW_META"
+              echo "$version"
+              return 0
+            fi
+
+            if [ -s "$HOME/.openclaw/openclaw.json" ]; then
+              version="$(sudo jq -r '.meta.lastTouchedVersion // empty' "$HOME/.openclaw/openclaw.json" 2>/dev/null | head -n 1 || true)"
+              version="$(normalize_openclaw_version "$version")"
+              if [ -n "$version" ]; then
+                echo "FALLBACK_VERSION_SOURCE=meta_lastTouchedVersion" >> "$RUN_OPENCLAW_META"
+                echo "$version"
+                return 0
+              fi
+            fi
+
+            echo ""
+            return 1
+          }
+
+          fix_openclaw_permissions() {
+            echo "🔧 Fixing file permissions to pass security checks..."
+            sudo chmod -R o-w "$(npm root -g)"
+            sudo chmod 700 ~/.openclaw
+            if [ -f ~/.openclaw/openclaw.json ]; then
+              sudo chmod 600 ~/.openclaw/openclaw.json
+            fi
+          }
+
+          openclaw_port_listening() {
+            sudo lsof -Pi :18789 -sTCP:LISTEN -t >/dev/null
+          }
+
+          openclaw_log_ready() {
+            journalctl --user -u openclaw-gateway.service --since "5 minutes ago" --no-pager 2>/dev/null \
+              | grep -q "\[gateway\] ready"
+          }
+
+          openclaw_health_http_ok() {
+            [ "$(curl -fsS -o /dev/null -w "%{http_code}" --connect-timeout 3 --max-time 15 http://127.0.0.1:18789/health || true)" = "200" ]
+          }
+
+          wait_for_openclaw_health() {
+            local label="$1"
+            local timeout_sec="${2:-180}"
+            local interval_sec="${3:-5}"
+            local start_ts now_ts elapsed
+            start_ts=$(date +%s)
+
+            echo "Waiting for OpenClaw health (${label}, timeout=${timeout_sec}s)..."
+            while true; do
+              now_ts=$(date +%s)
+              elapsed=$((now_ts - start_ts))
+
+              if openclaw_port_listening; then
+                if openclaw_health_http_ok; then
+                  echo "✅ OpenClaw Gateway health is OK after ${elapsed}s (${label})."
+                  return 0
+                fi
+
+                if openclaw_log_ready; then
+                  echo "⏳ Gateway is listening and logged ready, but /health is still slow after ${elapsed}s (${label}); continuing grace wait."
+                else
+                  echo "⏳ Gateway port is listening, waiting for ready/health... ${elapsed}/${timeout_sec}s (${label})"
+                fi
+              else
+                echo "⏳ Gateway port is not listening yet... ${elapsed}/${timeout_sec}s (${label})"
+              fi
+
+              if [ "$elapsed" -ge "$timeout_sec" ]; then
+                echo "❌ OpenClaw Gateway health did not become OK within ${timeout_sec}s (${label})."
+                return 1
+              fi
+              sleep "$interval_sec"
+            done
+          }
+
+          dump_openclaw_diagnostics() {
+            echo "⚠️ Gateway not healthy yet. Diagnostics:"
+            echo "--- systemd status ---"
+            systemctl --user --no-pager --full status openclaw-gateway.service || true
+            echo "--- recent journal ---"
+            journalctl --user -u openclaw-gateway.service --since "10 minutes ago" --no-pager | tail -n 120 || true
+            echo "--- /tmp/openclaw logs ---"
+            find /tmp/openclaw -maxdepth 1 -type f -name 'openclaw-*.log' -printf '%T@ %p\n' 2>/dev/null \
+              | sort -nr \
+              | head -2 \
+              | cut -d' ' -f2- \
+              | while IFS= read -r log_file; do
+                  echo "--- tail $log_file ---"
+                  tail -n 80 "$log_file" || true
+                done
+          }
+
+          fix_openclaw_permissions
+
+          echo "🛠️ Running preflight 'openclaw doctor --fix' before gateway restart..."
+          openclaw doctor --fix || true
+          PREFLIGHT_END_TS=$(date +%s)
+          echo "PREFLIGHT_DOCTOR_DURATION_SEC=$((PREFLIGHT_END_TS - PREFLIGHT_BEGIN_TS))" >> "$RUN_OPENCLAW_META"
+
+          echo "FAIL_STAGE=initial_start" >> "$RUN_OPENCLAW_META"
+          INITIAL_START_BEGIN_TS=$(date +%s)
+          echo "Restarting OpenClaw gateway..."
+          INITIAL_START_RESTART_OK=1
+          if ! openclaw gateway install --force; then
+            echo "⚠️ Initial gateway install failed; will attempt fallback reinstall."
+            INITIAL_START_RESTART_OK=0
+          elif ! openclaw gateway restart; then
+            echo "⚠️ Initial gateway restart failed; will attempt fallback reinstall."
+            INITIAL_START_RESTART_OK=0
+          fi
+
+          if [ "$INITIAL_START_RESTART_OK" = "1" ] && wait_for_openclaw_health "initial_start" 180 5; then
+              INITIAL_START_END_TS=$(date +%s)
+              echo "INITIAL_START_DURATION_SEC=$((INITIAL_START_END_TS - INITIAL_START_BEGIN_TS))" >> "$RUN_OPENCLAW_META"
+              record_successful_openclaw_version "$CURRENT_OPENCLAW_SEMVER"
+              echo "✅ OpenClaw Gateway is healthy!"
+          else
+              INITIAL_START_END_TS=$(date +%s)
+              echo "INITIAL_START_DURATION_SEC=$((INITIAL_START_END_TS - INITIAL_START_BEGIN_TS))" >> "$RUN_OPENCLAW_META"
+              dump_openclaw_diagnostics
+
+              echo "FAIL_STAGE=fallback_reinstall" >> "$RUN_OPENCLAW_META"
+              echo "🔄 Initial start failed after preflight doctor. Attempting to fallback and reinstall recorded OpenClaw version..."
+
+              TARGET_VERSION="$(resolve_fallback_openclaw_version || true)"
+              if [ -z "$TARGET_VERSION" ]; then
+                fail_startup "No fallback OpenClaw version found. Checked $KNOWN_GOOD_VERSION_FILE and .meta.lastTouchedVersion."
+              fi
+              echo "✅ Selected fallback OpenClaw version: $TARGET_VERSION"
+
+              echo "Installing openclaw@$TARGET_VERSION ..."
+              echo "FALLBACK_TARGET_VERSION=$TARGET_VERSION" >> "$RUN_OPENCLAW_META"
+              FALLBACK_REINSTALL_BEGIN_TS=$(date +%s)
+              npm i -g "openclaw@$TARGET_VERSION"
+
+              fix_openclaw_permissions
+
+              echo "🛠️ Running 'openclaw doctor --fix' after fallback reinstall..."
+              openclaw doctor --fix || true
+
+              echo "Restarting OpenClaw after fallback reinstall..."
+              FALLBACK_RESTART_OK=1
+              if ! openclaw gateway install --force; then
+                echo "⚠️ Fallback gateway install failed."
+                FALLBACK_RESTART_OK=0
+              elif ! openclaw gateway restart; then
+                echo "⚠️ Fallback gateway restart failed."
+                FALLBACK_RESTART_OK=0
+              fi
+
+              if [ "$FALLBACK_RESTART_OK" = "1" ] && wait_for_openclaw_health "fallback_reinstall" 180 5; then
+                FALLBACK_REINSTALL_END_TS=$(date +%s)
+                echo "FALLBACK_REINSTALL_DURATION_SEC=$((FALLBACK_REINSTALL_END_TS - FALLBACK_REINSTALL_BEGIN_TS))" >> "$RUN_OPENCLAW_META"
+                record_successful_openclaw_version "$TARGET_VERSION"
+                echo "✅ OpenClaw Gateway is healthy after fallback reinstall!"
+              else
+                FALLBACK_REINSTALL_END_TS=$(date +%s)
+                echo "FALLBACK_REINSTALL_DURATION_SEC=$((FALLBACK_REINSTALL_END_TS - FALLBACK_REINSTALL_BEGIN_TS))" >> "$RUN_OPENCLAW_META"
+                dump_openclaw_diagnostics
+                err="回退到最近记录版本后，OpenClaw 依然无法启动（健康检查失败）"
+                fail_startup "$err"
+              fi
+          fi
+
+      - name: Notify OpenClaw startup failure
+        if: ${{ always() && steps.run_openclaw.outcome == 'failure' }}
+        run: |
+          if [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] && [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ]; then
+            run_url="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            tmate_log="$RUNNER_TEMP/tmate-connection.log"
+            step_log="/tmp/run-openclaw-step.log"
+            meta_file="/tmp/run-openclaw-meta.env"
+
+            sanitize_log() {
+              perl -pe 's/\x1b\[[0-9;]*[A-Za-z]//g; s/\r//g'
+            }
+
+            error_summary=""
+            if [ -f openclaw.log ]; then
+              error_summary=$(sanitize_log < openclaw.log | grep -Ei 'error|fail|exception|unhealthy|timed out|cannot|denied|missing|invalid' | tail -n 20 || true)
+              if [ -z "$error_summary" ]; then
+                error_summary=$(sanitize_log < openclaw.log | tail -n 40 || true)
+              fi
+            fi
+            if [ -z "$error_summary" ] && [ -f "$step_log" ]; then
+              error_summary=$(sanitize_log < "$step_log" | grep -Ei 'error|fail|exception|unhealthy|timed out|cannot|denied|missing|invalid|doctor|fallback|restart' | tail -n 30 || true)
+              if [ -z "$error_summary" ]; then
+                error_summary=$(sanitize_log < "$step_log" | tail -n 60 || true)
+              fi
+            fi
+            if [ -z "$error_summary" ]; then
+              error_summary="openclaw.log 与步骤日志均未找到可用摘要"
+            fi
+            error_summary=$(printf '%s' "$error_summary" | tail -c 2800)
+
+            tmate_url=""
+            if [ -f "$tmate_log" ]; then
+              tmate_url=$(grep -Eo 'https://tmate\.io/t/[A-Za-z0-9_-]+' "$tmate_log" | tail -n 1 || true)
+            fi
+            if [ -z "$tmate_url" ]; then
+              tmate_url="（tmate 链接暂不可用，稍后查看 Actions 日志）"
+            fi
+
+            current_version=""
+            fallback_version=""
+            fallback_version_source=""
+            recorded_successful_version=""
+            fail_stage=""
+            initial_start_duration_sec=""
+            doctor_fix_duration_sec=""
+            fallback_reinstall_duration_sec=""
+            if [ -f "$meta_file" ]; then
+              current_version=$(grep '^CURRENT_OPENCLAW_VERSION=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
+              fallback_version=$(grep '^FALLBACK_TARGET_VERSION=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
+              fallback_version_source=$(grep '^FALLBACK_VERSION_SOURCE=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
+              recorded_successful_version=$(grep '^RECORDED_SUCCESSFUL_OPENCLAW_VERSION=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
+              fail_stage=$(grep '^FAIL_STAGE=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
+              initial_start_duration_sec=$(grep '^INITIAL_START_DURATION_SEC=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
+              doctor_fix_duration_sec=$(grep '^DOCTOR_FIX_DURATION_SEC=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
+              fallback_reinstall_duration_sec=$(grep '^FALLBACK_REINSTALL_DURATION_SEC=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
+            fi
+
+            export RUN_URL="$run_url"
+            export TMATE_URL="$tmate_url"
+            export ERROR_SUMMARY="$error_summary"
+            export CURRENT_VERSION="$current_version"
+            export FALLBACK_VERSION="$fallback_version"
+            export FALLBACK_VERSION_SOURCE="$fallback_version_source"
+            export RECORDED_SUCCESSFUL_VERSION="$recorded_successful_version"
+            export FAIL_STAGE="$fail_stage"
+            export INITIAL_START_DURATION_SEC="$initial_start_duration_sec"
+            export DOCTOR_FIX_DURATION_SEC="$doctor_fix_duration_sec"
+            export FALLBACK_REINSTALL_DURATION_SEC="$fallback_reinstall_duration_sec"
+            msg="⚠️ OpenClaw 启动失败"
+            msg+=$'\n\n'
+            msg+="步骤: Run OpenClaw"
+            msg+=$'\n'
+            msg+="Run ID: ${{ github.run_id }}"
+            msg+=$'\n'
+            msg+="链接: ${run_url}"
+
+            if [ -n "$fail_stage" ]; then
+              msg+=$'\n'
+              msg+="失败阶段: ${fail_stage}"
+            fi
+            if [ -n "$current_version" ]; then
+              msg+=$'\n'
+              msg+="当前尝试版本: ${current_version}"
+            fi
+            if [ -n "$fallback_version" ]; then
+              msg+=$'\n'
+              msg+="Fallback 目标版本: ${fallback_version}"
+            fi
+            if [ -n "$fallback_version_source" ]; then
+              msg+=$'\n'
+              msg+="Fallback 版本来源: ${fallback_version_source}"
+            fi
+            if [ -n "$recorded_successful_version" ]; then
+              msg+=$'\n'
+              msg+="记录的成功版本: ${recorded_successful_version}"
+            fi
+            if [ -n "$initial_start_duration_sec" ]; then
+              msg+=$'\n'
+              msg+="首次启动耗时(秒): ${initial_start_duration_sec}"
+            fi
+            if [ -n "$doctor_fix_duration_sec" ]; then
+              msg+=$'\n'
+              msg+="Doctor 修复阶段耗时(秒): ${doctor_fix_duration_sec}"
+            fi
+            if [ -n "$fallback_reinstall_duration_sec" ]; then
+              msg+=$'\n'
+              msg+="Fallback 重装阶段耗时(秒): ${fallback_reinstall_duration_sec}"
+            fi
+            msg+=$'\n\n'
+            msg+="TMate: ${tmate_url}"
+            msg+=$'\n\n'
+            msg+="关键日志:"
+            msg+=$'\n'
+            msg+="$error_summary"
+            curl -fsS --retry 3 --retry-delay 2 --max-time 20 \
+              -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+              -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+              -d parse_mode="HTML" \
+              -d disable_web_page_preview="true" \
+              --data-urlencode text="$msg"
+          else
+            echo "⚠️ Telegram alert skipped: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is empty"
+          fi
+
+      - name: Start background archive loop
+        if: ${{ always() }}
+        run: |
+          echo "Starting background archive tasks: archive ~/.openclaw every 20 minutes; CliRelay data is archived at final shutdown..."
+          cat > /tmp/create-openclaw-archive.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          OUTPUT_TAR="${1:-}"
+          if [ -z "$OUTPUT_TAR" ]; then
+            echo "Usage: $0 /path/to/output.tar.gz" >&2
+            exit 2
+          fi
+
+          MIN_SIZE=$((5 * 1024))
+          SRC_DIR="/home/runner/.openclaw"
+          STAGE_DIR=""
+
+          cleanup() {
+            if [ -n "${STAGE_DIR:-}" ] && [ -d "$STAGE_DIR" ]; then
+              rm -rf "$STAGE_DIR"
+            fi
+          }
+          trap cleanup EXIT
+
+          rm -f "$OUTPUT_TAR"
+
+          if [ ! -d "$SRC_DIR" ]; then
+            echo "openclaw_dir_missing"
+            exit 1
+          fi
+
+          STAGE_DIR=$(mktemp -d /tmp/openclaw-archive-stage.XXXXXX)
+          mkdir -p "$STAGE_DIR/.openclaw"
+
+          # Copy a stable snapshot first. rsync may return 24 when live files vanish
+          # during copy; that is expected for active OpenClaw session/lock files, so
+          # accept 24 and still validate the final tarball.
+          set +e
+          rsync -a --delete \
+            --exclude 'logs/**' \
+            --exclude 'cache/**' \
+            --exclude 'browser/*/Crashpad/**' \
+            --exclude 'browser/*/GPUCache/**' \
+            --exclude 'browser/*/Code Cache/**' \
+            --exclude 'browser/*/GrShaderCache/**' \
+            --exclude 'browser/*/GraphiteDawnCache/**' \
+            --exclude 'SingletonLock' \
+            --exclude 'SingletonSocket' \
+            --exclude 'SingletonCookie' \
+            --exclude '*.lock' \
+            --exclude '*.pid' \
+            --exclude '*.jsonl.lock' \
+            "$SRC_DIR"/ "$STAGE_DIR/.openclaw"/
+          rsync_rc=$?
+          set -e
+
+          if [ "$rsync_rc" -ne 0 ] && [ "$rsync_rc" -ne 24 ]; then
+            echo "openclaw_snapshot_failed rc=$rsync_rc" >&2
+            exit "$rsync_rc"
+          fi
+
+          if [ "$rsync_rc" -eq 24 ]; then
+            echo "openclaw_snapshot_partial_live_changes"
+          fi
+
+          tar -C "$STAGE_DIR" -czf "$OUTPUT_TAR" .openclaw
+
+          actual_size=$(stat -c%s "$OUTPUT_TAR" 2>/dev/null || echo 0)
+          if [ ! -s "$OUTPUT_TAR" ]; then
+            echo "openclaw_archive_empty output=$OUTPUT_TAR"
+            exit 1
+          elif [ "$actual_size" -lt "$MIN_SIZE" ]; then
+            echo "openclaw_archive_too_small size=${actual_size} min=${MIN_SIZE} output=$OUTPUT_TAR"
+            exit 1
+          elif ! tar -tzf "$OUTPUT_TAR" >/dev/null 2>&1; then
+            echo "openclaw_archive_tar_validation_failed output=$OUTPUT_TAR"
+            exit 1
+          else
+            echo "archive_ready size=${actual_size} output=$OUTPUT_TAR"
+          fi
+          EOF
+          chmod +x /tmp/create-openclaw-archive.sh
+
+          cat > /tmp/create-clirelay-archive.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          OUTPUT_TAR="${1:-}"
+          if [ -z "$OUTPUT_TAR" ]; then
+            echo "Usage: $0 /path/to/output.tar.gz" >&2
+            exit 2
+          fi
+
+          MIN_SIZE=$((5 * 1024))
+          SRC_DIR="/tmp/local_CliRelay"
+          STAGE_DIR=""
+
+          cleanup() {
+            if [ -n "${STAGE_DIR:-}" ] && [ -d "$STAGE_DIR" ]; then
+              sudo rm -rf "$STAGE_DIR"
+            fi
+          }
+          trap cleanup EXIT
+
+          sudo rm -f "$OUTPUT_TAR"
+
+          if [ ! -d "$SRC_DIR" ]; then
+            echo "clirelay_dir_missing"
+            exit 3
+          fi
+
+          STAGE_DIR=$(mktemp -d /tmp/clirelay-archive-stage.XXXXXX)
+          sudo mkdir -p "$STAGE_DIR"
+
+          # Copy a stable snapshot first. Exclude volatile request logs/caches; persist
+          # config, auth, and data. SQLite DB is snapshotted with sqlite3 backup when
+          # available so tar does not race a live writer.
+          sudo rsync -a --delete \
+            --exclude 'logs/**' \
+            --exclude 'cache/**' \
+            --exclude 'tmp/**' \
+            --exclude 'temp/**' \
+            --exclude '*.lock' \
+            --exclude '*.pid' \
+            --exclude '*.jsonl.lock' \
+            --exclude 'data/usage.db' \
+            "$SRC_DIR"/ "$STAGE_DIR"/
+
+          if [ -f "$SRC_DIR/data/usage.db" ]; then
+            sudo mkdir -p "$STAGE_DIR/data"
+            if command -v sqlite3 >/dev/null 2>&1; then
+              sudo sqlite3 "$SRC_DIR/data/usage.db" ".backup '$STAGE_DIR/data/usage.db'"
+            else
+              sudo cp -a "$SRC_DIR/data/usage.db" "$STAGE_DIR/data/usage.db"
+            fi
+          fi
+
+          sudo tar -C "$STAGE_DIR" -czf "$OUTPUT_TAR" .
+
+          actual_size=$(stat -c%s "$OUTPUT_TAR" 2>/dev/null || echo 0)
+          if [ ! -s "$OUTPUT_TAR" ]; then
+            echo "clirelay_archive_empty output=$OUTPUT_TAR"
+            exit 1
+          elif [ "$actual_size" -lt "$MIN_SIZE" ]; then
+            echo "clirelay_archive_too_small size=${actual_size} min=${MIN_SIZE} output=$OUTPUT_TAR"
+            exit 1
+          elif ! sudo tar -tzf "$OUTPUT_TAR" >/dev/null 2>&1; then
+            echo "clirelay_archive_tar_validation_failed output=$OUTPUT_TAR"
+            exit 1
+          else
+            echo "archive_ready size=${actual_size} output=$OUTPUT_TAR"
+          fi
+          EOF
+          chmod +x /tmp/create-clirelay-archive.sh
+
+          cat > /tmp/openclaw-archive-loop.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          TMP_OPENCLAW_TAR="/tmp/openclaw.tar.gz"
+          TMP_CLIRELAY_TAR="/tmp/CliRelay.tar.gz"
+          LOCK_FILE="/tmp/openclaw-archive.lock"
+
+          cleanup_archive_outputs() {
+            rm -f "$TMP_OPENCLAW_TAR" 2>/dev/null || true
+            sudo rm -f "$TMP_CLIRELAY_TAR" 2>/dev/null || true
+            rm -rf /tmp/openclaw-archive-stage.* 2>/dev/null || true
+            sudo rm -rf /tmp/clirelay-archive-stage.* 2>/dev/null || true
+          }
+          cleanup_archive_outputs
+          PID_FILE="/tmp/openclaw-archive.pid"
+
+          send_telegram_alert() {
+            local msg="$1"
+            if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+              local repo="${GITHUB_REPOSITORY:-unknown-repo}"
+              local run_id="${GITHUB_RUN_ID:-manual}"
+              local run_url="https://github.com/${repo}/actions/runs/${run_id}"
+              local full_msg
+              full_msg=$(printf "⚠️ OpenClaw 归档告警\n\n问题: %s\nRun ID: %s\n链接: %s" "$msg" "$run_id" "$run_url")
+              curl -fsS --retry 3 --retry-delay 2 --max-time 20 \
+                -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                -d chat_id="${TELEGRAM_CHAT_ID}" \
+                --data-urlencode text="$full_msg" >/dev/null || true
+            fi
+          }
+
+          echo $$ > "$PID_FILE"
+          trap 'rm -f "$PID_FILE"' EXIT
+
+          while true; do
+            openclaw_archive_output=""
+            if openclaw_archive_output=$(flock -E 200 -n "$LOCK_FILE" bash /tmp/create-openclaw-archive.sh "$TMP_OPENCLAW_TAR" 2>&1); then
+              echo "[$(date '+%F %T')] openclaw archive ok, uploading... ${openclaw_archive_output}"
+              openclaw_upload_output=""
+              if openclaw_upload_output=$(rclone copyto "$TMP_OPENCLAW_TAR" dropbox:self-hosted/openclaw.tar.gz 2>&1); then
+                echo "[$(date '+%F %T')] openclaw upload ok"
+                rm -f "$TMP_OPENCLAW_TAR"
+              else
+                rc=$?
+                echo "[$(date '+%F %T')] ⚠️ openclaw.tar.gz upload failed (rc=$rc): ${openclaw_upload_output}"
+                send_telegram_alert "$(printf 'openclaw.tar.gz 上传失败（rc=%s)\n原因: rclone 上传失败\n详情: %s' "$rc" "${openclaw_upload_output:-无输出}")"
+              fi
+            else
+              rc=$?
+              if [ "$rc" -eq 200 ]; then
+                echo "[$(date '+%F %T')] ⏭️ previous archive still running, skip this round"
+                sleep 1200
+                continue
+              else
+                echo "[$(date '+%F %T')] ⚠️ openclaw.tar.gz archive failed in periodic archive (rc=$rc): ${openclaw_archive_output}"
+                send_telegram_alert "$(printf 'openclaw.tar.gz 归档失败（rc=%s)\n原因: %s' "$rc" "${openclaw_archive_output:-归档脚本无输出}")"
+              fi
+            fi
+
+            clirelay_archive_output=""
+            if clirelay_archive_output=$(flock -E 200 -n "$LOCK_FILE" bash /tmp/create-clirelay-archive.sh "$TMP_CLIRELAY_TAR" 2>&1); then
+              echo "[$(date '+%F %T')] CliRelay archive ok, uploading... ${clirelay_archive_output}"
+              clirelay_upload_output=""
+              if clirelay_upload_output=$(rclone copyto "$TMP_CLIRELAY_TAR" dropbox:self-hosted/CliRelay.tar.gz 2>&1); then
+                echo "[$(date '+%F %T')] CliRelay upload ok"
+                sudo rm -f "$TMP_CLIRELAY_TAR"
+              else
+                rc=$?
+                echo "[$(date '+%F %T')] ⚠️ CliRelay.tar.gz upload failed (rc=$rc): ${clirelay_upload_output}"
+                send_telegram_alert "$(printf 'CliRelay.tar.gz 上传失败（rc=%s)\n原因: rclone 上传失败\n详情: %s' "$rc" "${clirelay_upload_output:-无输出}")"
+              fi
+            else
+              rc=$?
+              if [ "$rc" -eq 200 ]; then
+                echo "[$(date '+%F %T')] ⏭️ previous archive still running, skip CliRelay archive"
+              elif [ "$rc" -eq 3 ]; then
+                echo "[$(date '+%F %T')] ⚠️ CliRelay.tar.gz archive skipped because data directory is missing (rc=$rc): ${clirelay_archive_output}"
+                send_telegram_alert "$(printf 'CliRelay.tar.gz 归档失败（rc=%s)\n原因: CliRelay 本地数据目录未初始化（/tmp/local_CliRelay 不存在），通常表示 CliRelay 容器启动步骤被跳过或失败。\n详情: %s' "$rc" "${clirelay_archive_output:-clirelay_dir_missing}")"
+              else
+                echo "[$(date '+%F %T')] ⚠️ CliRelay.tar.gz archive failed in periodic archive (rc=$rc): ${clirelay_archive_output}"
+                send_telegram_alert "$(printf 'CliRelay.tar.gz 归档失败（rc=%s)\n原因: %s' "$rc" "${clirelay_archive_output:-归档脚本无输出}")"
+              fi
+            fi
+            sleep 1200
+          done
+          EOF
+          chmod +x /tmp/openclaw-archive-loop.sh
+          nohup bash /tmp/openclaw-archive-loop.sh > /tmp/openclaw-archive-loop.log 2>&1 &
+          echo $! > /tmp/openclaw-archive-loop.launcher.pid
+
+      - name: Keep alive
+        id: keepalive
+        if: ${{ always() }}
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -euo pipefail
+          KEEPALIVE_MINUTES=340
+          FINAL_ARCHIVE_WARNING_BEFORE_MINUTES=15
+          WARNING_DELAY_MINUTES=$((KEEPALIVE_MINUTES - FINAL_ARCHIVE_WARNING_BEFORE_MINUTES))
+
+          send_final_archive_warning() {
+            sleep "${WARNING_DELAY_MINUTES}m"
+            if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+              repo="${GITHUB_REPOSITORY:-unknown-repo}"
+              run_id="${GITHUB_RUN_ID:-manual}"
+              run_url="https://github.com/${repo}/actions/runs/${run_id}"
+              msg=$(printf '⚠️ OpenClaw 即将进入最终归档\n\n预计约 %s 分钟后开始执行：Stop OpenClaw and Final Archive\n请及时保存状态或完成当前操作。\n\nRun ID: %s\n链接: %s' "$FINAL_ARCHIVE_WARNING_BEFORE_MINUTES" "$run_id" "$run_url")
+              curl -fsS --retry 3 --retry-delay 2 --max-time 20 \
+                -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                -d chat_id="${TELEGRAM_CHAT_ID}" \
+                --data-urlencode text="$msg" >/dev/null || true
+            else
+              echo "⚠️ Telegram secrets missing, skip final archive warning."
+            fi
+          }
+
+          send_final_archive_warning &
+          echo $! > /tmp/openclaw-final-archive-warning.pid
+
+          sleep "${KEEPALIVE_MINUTES}m"
+
+      - name: Stop OpenClaw and Final Archive
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          echo "1. Stopping OpenClaw gateway..."
+          openclaw gateway stop || echo "OpenClaw already stopped or command failed."
+          sleep 1m
+
+          echo "2. Killing background archive process..."
+          if [ -f /tmp/openclaw-archive-loop.launcher.pid ]; then
+            kill "$(cat /tmp/openclaw-archive-loop.launcher.pid)" 2>/dev/null || true
+          fi
+          if [ -f /tmp/openclaw-archive.pid ]; then
+            kill "$(cat /tmp/openclaw-archive.pid)" 2>/dev/null || true
+          fi
+
+          echo "3. Stopping service containers before final archive..."
+          docker stop rss-to-telegram 2>/dev/null || echo "rss-to-telegram already stopped or missing."
+          docker stop sub-store 2>/dev/null || echo "sub-store already stopped or missing."
+          docker stop clirelay 2>/dev/null || echo "clirelay already stopped or missing."
+          docker stop cliproxyapi 2>/dev/null || echo "cliproxyapi already stopped or missing."
+
+          send_archive_alert() {
+            local msg="$1"
+            if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+              local repo="${GITHUB_REPOSITORY:-unknown-repo}"
+              local run_id="${GITHUB_RUN_ID:-manual}"
+              local run_url="https://github.com/${repo}/actions/runs/${run_id}"
+              local full_msg
+              full_msg=$(printf '⚠️ OpenClaw 归档告警\n\n问题: %s\nRun ID: %s\n链接: %s' "$msg" "$run_id" "$run_url")
+              curl -fsS --retry 3 --retry-delay 2 --max-time 20 \
+                -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                -d chat_id="${TELEGRAM_CHAT_ID}" \
+                --data-urlencode text="$full_msg" >/dev/null || true
+            fi
+          }
+
+          echo "4. Performing final archive to Dropbox..."
+          cleanup_archive_outputs() {
+            rm -f /tmp/openclaw-final.tar.gz /tmp/rsstt.tar.gz 2>/dev/null || true
+            sudo rm -f /tmp/CliRelay.tar.gz 2>/dev/null || true
+            rm -rf /tmp/openclaw-archive-stage.* 2>/dev/null || true
+            sudo rm -rf /tmp/clirelay-archive-stage.* 2>/dev/null || true
+          }
+          free_kb() { df -Pk "${1:-/tmp}" | awk 'NR==2 {print $4}'; }
+          require_free_kb() {
+            local path="$1" min_kb="$2" label="$3"
+            local avail
+            avail=$(free_kb "$path")
+            if [ "${avail:-0}" -lt "$min_kb" ]; then
+              echo "❌ ${label}: insufficient free space at ${path}. available=${avail}KB required=${min_kb}KB" >&2
+              exit 1
+            fi
+            echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
+          }
+          cleanup_archive_outputs
+          TMP_OPENCLAW_TAR="/tmp/openclaw-final.tar.gz"
+
+          openclaw_src_kb=$(du -sk "$HOME/.openclaw" | awk '{print $1}')
+          if [ -z "${openclaw_src_kb:-}" ] || [ "$openclaw_src_kb" -le 0 ]; then
+            echo "❌ final openclaw archive preflight: unable to calculate source size" >&2
+            exit 1
+          fi
+          echo "OpenClaw 待归档目录大小: ${openclaw_src_kb}KB"
+          require_free_kb /tmp $((openclaw_src_kb + 1024 * 1024)) "final openclaw archive preflight"
+          openclaw_final_output=""
+          if openclaw_final_output=$(bash /tmp/create-openclaw-archive.sh "$TMP_OPENCLAW_TAR" 2>&1); then
+            openclaw_final_upload_output=""
+            if openclaw_final_upload_output=$(rclone copyto "$TMP_OPENCLAW_TAR" dropbox:self-hosted/openclaw.tar.gz -v 2>&1); then
+              echo "final openclaw archive/upload ok: ${openclaw_final_output}"
+              rm -f "$TMP_OPENCLAW_TAR"
+            else
+              rc=$?
+              echo "⚠️ final openclaw.tar.gz upload failed (rc=$rc): ${openclaw_final_upload_output}"
+              send_archive_alert "$(printf 'final openclaw.tar.gz 上传失败（rc=%s)\n原因: rclone 上传失败\n详情: %s' "$rc" "${openclaw_final_upload_output:-无输出}")"
+            fi
+          else
+            rc=$?
+            echo "⚠️ final openclaw.tar.gz archive failed (rc=$rc): ${openclaw_final_output}"
+            send_archive_alert "$(printf 'final openclaw.tar.gz 归档失败（rc=%s)\n原因: %s' "$rc" "${openclaw_final_output:-归档脚本无输出}")"
+          fi
+
+          MIN_SIZE=$((5 * 1024))
+
+          echo "5. Archiving CliRelay persistent data..."
+          if [ -d /tmp/local_CliRelay ]; then
+            echo "=== local CliRelay tree before archive ==="
+            find /tmp/local_CliRelay -maxdepth 4 | sort || true
+            clirelay_src_kb=$(sudo du -sk /tmp/local_CliRelay | awk '{print $1}')
+            if [ -z "${clirelay_src_kb:-}" ] || [ "$clirelay_src_kb" -le 0 ]; then
+              echo "❌ final CliRelay archive preflight: unable to calculate source size" >&2
+              exit 1
+            fi
+            echo "CliRelay 待归档目录大小: ${clirelay_src_kb}KB"
+            require_free_kb /tmp $((clirelay_src_kb + 512 * 1024)) "final CliRelay archive preflight"
+            clirelay_final_output=""
+            if clirelay_final_output=$(bash /tmp/create-clirelay-archive.sh /tmp/CliRelay.tar.gz 2>&1); then
+              actual_size=$(stat -c%s /tmp/CliRelay.tar.gz 2>/dev/null || echo 0)
+              if [ "$actual_size" -ge "$MIN_SIZE" ]; then
+                clirelay_final_upload_output=""
+                if clirelay_final_upload_output=$(rclone copyto /tmp/CliRelay.tar.gz dropbox:self-hosted/CliRelay.tar.gz -v 2>&1); then
+                  echo "final CliRelay archive/upload ok: ${clirelay_final_output}"
+                  sudo rm -f /tmp/CliRelay.tar.gz
+                else
+                  rc=$?
+                  echo "⚠️ final CliRelay.tar.gz upload failed (rc=$rc): ${clirelay_final_upload_output}"
+                  send_archive_alert "$(printf 'final CliRelay.tar.gz 上传失败（rc=%s)\n原因: rclone 上传失败\n详情: %s' "$rc" "${clirelay_final_upload_output:-无输出}")"
+                fi
+              else
+                echo "⚠️ CliRelay 压缩包小于 10KB，放弃覆盖云端数据: size=${actual_size} min=${MIN_SIZE}"
+                send_archive_alert "$(printf 'final CliRelay.tar.gz 归档失败\n原因: 压缩包小于最小阈值，放弃覆盖云端数据\n详情: size=%s min=%s output=/tmp/CliRelay.tar.gz' "$actual_size" "$MIN_SIZE")"
+              fi
+            else
+              rc=$?
+              echo "⚠️ final CliRelay.tar.gz archive failed (rc=$rc): ${clirelay_final_output}"
+              send_archive_alert "$(printf 'final CliRelay.tar.gz 归档失败（rc=%s)\n原因: %s' "$rc" "${clirelay_final_output:-归档脚本无输出}")"
+            fi
+          else
+            echo "⚠️ /tmp/local_CliRelay 不存在，跳过 CliRelay 归档"
+            send_archive_alert "$(printf 'final CliRelay.tar.gz 归档失败（rc=3）\n原因: CliRelay 本地数据目录未初始化（/tmp/local_CliRelay 不存在），通常表示 CliRelay 容器启动步骤被跳过或失败。\n详情: clirelay_dir_missing')"
+          fi
+
+          echo "6. Archiving rss-to-telegram data..."
+          if [ -d /tmp/local_rsstt ]; then
+            echo "=== local rss-to-telegram tree before archive ==="
+            find /tmp/local_rsstt -maxdepth 4 | sort || true
+            rsstt_src_kb=$(sudo du -sk /tmp/local_rsstt | awk '{print $1}')
+            if [ -z "${rsstt_src_kb:-}" ] || [ "$rsstt_src_kb" -le 0 ]; then
+              echo "❌ final rsstt archive preflight: unable to calculate source size" >&2
+              exit 1
+            fi
+            echo "rsstt 待归档目录大小: ${rsstt_src_kb}KB"
+            require_free_kb /tmp $((rsstt_src_kb + 512 * 1024)) "final rsstt archive preflight"
+            sudo rm -f /tmp/rsstt.tar.gz
+            rsstt_tar_output=""
+            if rsstt_tar_output=$(sudo tar -czf /tmp/rsstt.tar.gz -C /tmp/local_rsstt . 2>&1); then
+              rsstt_validate_output=""
+              if rsstt_validate_output=$(sudo tar -tzf /tmp/rsstt.tar.gz 2>&1); then
+                actual_size=$(stat -c%s /tmp/rsstt.tar.gz 2>/dev/null || echo 0)
+                echo "rsstt archive size: ${actual_size} bytes"
+                if [ "$actual_size" -ge "$MIN_SIZE" ]; then
+                  rsstt_upload_output=""
+                  if rsstt_upload_output=$(rclone copyto /tmp/rsstt.tar.gz dropbox:self-hosted/rsstt.tar.gz -v 2>&1); then
+                    echo "final rsstt archive/upload ok"
+                    sudo rm -f /tmp/rsstt.tar.gz
+                  else
+                    rc=$?
+                    echo "⚠️ final rsstt.tar.gz upload failed (rc=$rc): ${rsstt_upload_output}"
+                    send_archive_alert "$(printf 'final rsstt.tar.gz 上传失败（rc=%s)\n原因: rclone 上传失败\n详情: %s' "$rc" "${rsstt_upload_output:-无输出}")"
+                  fi
+                else
+                  echo "⚠️ rsstt 压缩包小于 10KB，放弃覆盖云端数据: size=${actual_size} min=${MIN_SIZE}"
+                  send_archive_alert "$(printf 'final rsstt.tar.gz 归档失败\n原因: 压缩包小于最小阈值，放弃覆盖云端数据\n详情: size=%s min=%s output=/tmp/rsstt.tar.gz' "$actual_size" "$MIN_SIZE")"
+                fi
+              else
+                rc=$?
+                echo "⚠️ final rsstt.tar.gz validation failed (rc=$rc): ${rsstt_validate_output}"
+                send_archive_alert "$(printf 'final rsstt.tar.gz 归档校验失败（rc=%s)\n原因: tar 列表校验失败\n详情: %s' "$rc" "${rsstt_validate_output:-无输出}")"
+              fi
+            else
+              rc=$?
+              echo "⚠️ final rsstt.tar.gz archive failed (rc=$rc): ${rsstt_tar_output}"
+              send_archive_alert "$(printf 'final rsstt.tar.gz 归档失败（rc=%s)\n原因: tar 创建失败\n详情: %s' "$rc" "${rsstt_tar_output:-无输出}")"
+            fi
+          else
+            echo "⚠️ /tmp/local_rsstt 不存在，跳过 rss-to-telegram 归档"
+            send_archive_alert "$(printf 'final rsstt.tar.gz 归档失败（rc=3）\n原因: rss-to-telegram 本地数据目录未初始化（/tmp/local_rsstt 不存在），通常表示 rss-to-telegram 容器启动步骤被跳过或失败。\n详情: rsstt_dir_missing')"
+          fi
+
+      - name: Trigger next OpenClaw run
+        if: ${{ always() && steps.keepalive.conclusion == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          echo "Triggering next openclaw.yml run. GitHub Actions concurrency will keep it singleton."
+          gh workflow run openclaw.yml \
+            --repo "${{ github.repository }}" \
+            --ref "${{ github.ref_name }}"
+
+      # - name: Sync ~/.openclaw to Dropbox
+      #   if: always()
+      #   run: |
+      #     echo "Syncing ~/.openclaw to Dropbox..."
+      #     rclone sync ~/.openclaw dropbox:self-hosted/openclaw \
+      #       --exclude "logs/**" \
+      #       --exclude "cache/**" \
+      #       --exclude "browser/**/Crashpad/**" \
+      #       --exclude "browser/**/GPUCache/**" \
+      #       --exclude "browser/**/Code Cache/**" \
+      #       --exclude "browser/**/GrShaderCache/**" \
+      #       --exclude "browser/**/GraphiteDawnCache/**" \
+      #       --exclude "**/*.lock" \
+      #       --exclude "**/*.pid" \
+      #       --exclude "**/*.jsonl.lock" \
+      #       -v

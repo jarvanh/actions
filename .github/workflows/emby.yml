@@ -1,0 +1,356 @@
+name: emby
+
+on:
+  schedule:
+    - cron: "0 2,8,14,20 * * *"
+    # - cron: "*/5 * * * *"
+  workflow_dispatch:
+  watch:
+    # types: started
+
+jobs:
+  build:
+    concurrency: emby-singleton
+    runs-on: ubuntu-latest
+    steps:
+      - name: rclone-install
+        run: |
+          sudo apt-get update && sudo apt-get install -y zstd
+          # 安装 rclone
+          curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
+          unzip rclone-*-amd64.zip
+          cd rclone-*-linux-amd64
+          sudo mv rclone /usr/bin
+          sudo chmod +x /usr/bin/rclone
+      - name: rclone-config
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE }}
+        run: |
+          # 写配置文件
+          mkdir -p ~/.config/rclone/
+          cat << IN_EOF > ~/.config/rclone/rclone.conf
+          $RCLONE_CONFIG
+          IN_EOF
+      - name: rclone-run
+        run: |
+          sudo apt-get install fuse3
+          
+          if rclone lsf dropbox:self-hosted/emby/config/ --files-only | grep -q "system.xml"; then
+            if ! rclone delete dropbox:self-hosted/emby/config/system.xml -vv; then
+              echo "[WARNING] Failed to delete system.xml, skipping" >&2
+            fi
+          fi
+          sudo rclone copy dropbox:self-hosted/emby/system.xml dropbox:self-hosted/emby/config/ --ignore-errors -vv
+
+          sudo mkdir /onedrive
+          sudo nohup rclone mount onedrive: /onedrive --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
+          sudo mkdir /dropbox
+          sudo nohup rclone mount dropbox: /dropbox --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
+          sudo mkdir /gd
+          sudo nohup rclone mount gd: /gd --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
+
+          echo "==========onedrive==========="
+          rclone lsf onedrive:
+          echo "==========dropbox==========="
+          rclone lsf dropbox:
+      - name: install cloudflared
+        run: |
+          sudo mkdir ~/.cloudflared/
+          sudo rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
+      - name: Check if the tunnel is running
+        env:
+          TUNNEL_NAME: "e"
+        run: |
+          OUTPUT=$(cloudflared tunnel list)
+          TUNNEL_LINE=$(echo "$OUTPUT" | grep -w "$TUNNEL_NAME")
+          if [ -z "$TUNNEL_LINE" ]; then
+            echo "The tunnel '$TUNNEL_NAME' does not exist. Proceeding."
+            exit 31
+          fi
+          CONNECTIONS=$(echo "$TUNNEL_LINE" | awk '{if (NF>=4) print $4; else print "-"}')
+          if [ "$CONNECTIONS" == "-" ]; then
+            echo "The tunnel '$TUNNEL_NAME' exists but has no active connections. Proceeding."
+          else
+            echo "The tunnel '$TUNNEL_NAME' is running with connections: $CONNECTIONS. Stopping actions."
+            exit 0
+          fi
+      - name: install emby
+        run: |
+          set -euo pipefail
+          cleanup_archive_workdir() {
+            sudo rm -f /tmp/emby-backup.tar.zst "$HOME/emby-backup.tar.zst" 2>/dev/null || true
+          }
+          free_kb() { df -Pk "${1:-/tmp}" | awk 'NR==2 {print $4}'; }
+          require_free_kb() {
+            local path="$1" min_kb="$2" label="$3"
+            local avail
+            avail=$(free_kb "$path")
+            if [ "${avail:-0}" -lt "$min_kb" ]; then
+              echo "❌ ${label}: insufficient free space at ${path}. available=${avail}KB required=${min_kb}KB" >&2
+              exit 1
+            fi
+            echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
+          }
+          require_free_kb /tmp $((2 * 1024 * 1024)) "emby restore preflight"
+          curl -L -o emby-server.deb $(curl -s https://api.github.com/repos/MediaBrowser/Emby.Releases/releases/latest | grep -oP '"browser_download_url": "\K(.*emby-server-deb.*amd64.deb)(?=")')
+          sudo dpkg -i emby-server.deb
+          
+          # dpkg -i 会自动启动 emby-server，需要先把它停掉，否则 /var/lib/emby 会被锁定无法删除
+          sudo systemctl stop emby-server || true
+
+          validate_emby_data() {
+            local root="$1"
+            sudo test -f "$root/data/users.db"
+            sudo test -f "$root/data/library.db"
+            sudo python3 - "$root" <<'PY_GUARD'
+          import json
+          import sqlite3
+          import sys
+          from pathlib import Path
+          
+          root = Path(sys.argv[1])
+          users_db = root / "data/users.db"
+          library_db = root / "data/library.db"
+          
+          users = sqlite3.connect(f"file:{users_db}?mode=ro", uri=True)
+          users.row_factory = sqlite3.Row
+          names = []
+          for row in users.execute("select data from LocalUsersv2"):
+              raw = row["data"]
+              if isinstance(raw, bytes):
+                  raw = raw.decode("utf-8", "ignore")
+              names.append(json.loads(raw).get("Name"))
+          users.close()
+          
+          library = sqlite3.connect(f"file:{library_db}?mode=ro", uri=True)
+          media_items = library.execute("select count(*) from MediaItems").fetchone()[0]
+          root_rows = {
+              row[0]: (row[1], row[2])
+              for row in library.execute("select Id, Name, type from MediaItems where Id in (1, 2)")
+          }
+          library_folders = [
+              row[0]
+              for row in library.execute(
+                  "select Name from MediaItems where ParentId = 1 and type = 4 order by Name"
+              )
+          ]
+          media_paths = [
+              row[0]
+              for row in library.execute(
+                  """
+                  select Path
+                  from MediaItems
+                  where ParentId = 2
+                    and type = 3
+                    and Path is not null
+                    and Path like '/onedrive/%'
+                  order by Path
+                  """
+              )
+          ]
+          library.close()
+          
+          print(
+              "Emby guard: "
+              f"users={names} media_items={media_items} "
+              f"library_folders={library_folders} media_paths={media_paths}"
+          )
+          if "Derrick" not in names:
+              raise SystemExit("❌ Emby guard failed: Derrick user is missing")
+          if root_rows.get(1) != ("Media Folders", 2) or root_rows.get(2) != ("root", 1):
+              raise SystemExit(f"❌ Emby guard failed: invalid root structure: {root_rows}")
+          if not library_folders:
+              raise SystemExit("❌ Emby guard failed: no media library folders under Media Folders")
+          if not media_paths:
+              raise SystemExit("❌ Emby guard failed: no real /onedrive media paths under root")
+          PY_GUARD
+          }
+
+          # 尝试从备份恢复。恢复必须通过 Derrick + 媒体库结构 + 真实媒体路径校验，否则直接失败，禁止启动空库。
+          sudo rm -rf /var/lib/emby
+          sudo mkdir -p /var/lib/emby
+          sudo chown -R emby:emby /var/lib/emby
+          BACKUP_NAME="emby-backup.tar.zst"
+          IS_LOCAL_MODE=true
+
+          echo "🔍 正在检查 Dropbox 上的压缩备份..."
+          cleanup_archive_workdir
+          if rclone copy dropbox:self-hosted/$BACKUP_NAME /tmp/ -vv; then
+              backup_kb=$(du -sk "/tmp/$BACKUP_NAME" | awk '{print $1}')
+              if [ -z "${backup_kb:-}" ] || [ "$backup_kb" -le 0 ]; then
+                  echo "❌ emby extract preflight: unable to calculate archive size" >&2
+                  exit 1
+              fi
+              echo "$BACKUP_NAME 大小: ${backup_kb}KB"
+              require_free_kb /var/lib/emby $((backup_kb * 3 + 1024 * 1024)) "emby extract preflight"
+              echo "✅ 发现备份压缩包，正在解压..."
+              sudo tar -I zstd -xf /tmp/$BACKUP_NAME -C /var/lib/emby/
+              sudo chown -R emby:emby /var/lib/emby
+              validate_emby_data /var/lib/emby
+              echo "🎉 压缩备份恢复并校验成功"
+              cleanup_archive_workdir
+          else
+              cleanup_archive_workdir
+              echo "⚠️ 未发现压缩备份，尝试从 Dropbox 目录备份恢复..."
+              RESTORE_DIR=/tmp/emby-dir-restore
+              rm -rf "$RESTORE_DIR"
+              mkdir -p "$RESTORE_DIR"
+              rclone copy dropbox:self-hosted/emby "$RESTORE_DIR" -vv
+              sudo rm -rf /var/lib/emby/*
+              sudo cp -a "$RESTORE_DIR"/. /var/lib/emby/
+              sudo chown -R emby:emby /var/lib/emby
+              rm -rf "$RESTORE_DIR"
+              validate_emby_data /var/lib/emby
+              echo "🎉 Dropbox 目录备份恢复并校验成功"
+          fi
+          
+          echo "==========/var/lib/emby==========="
+          sudo ls -la /var/lib/emby
+      - name: run emby
+        run: |
+          sudo nohup /opt/emby-server/bin/emby-server &
+          # 只有 install emby 阶段完成了数据完整性校验，才允许后续备份步骤执行。
+          touch /tmp/EMBY_READY_FOR_BACKUP
+      - name: run cloudflared
+        run: |
+          cloudflared tunnel route dns e e.'${{ secrets.VD }}'.eu.org
+          nohup cloudflared tunnel run --url http://127.0.0.1:8096 e &
+      - name: sleep
+        run: |
+          sudo sleep 340m
+      - name: backup emby data
+        if: always()
+        run: |
+          set -euo pipefail
+          cleanup_archive_workdir() {
+            sudo rm -f "$HOME/emby-backup.tar.zst" /tmp/emby-backup.tar.zst 2>/dev/null || true
+          }
+          free_kb() { df -Pk "${1:-$HOME}" | awk 'NR==2 {print $4}'; }
+          require_free_kb() {
+            local path="$1" min_kb="$2" label="$3"
+            local avail
+            avail=$(free_kb "$path")
+            if [ "${avail:-0}" -lt "$min_kb" ]; then
+              echo "❌ ${label}: insufficient free space at ${path}. available=${avail}KB required=${min_kb}KB" >&2
+              exit 1
+            fi
+            echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
+          }
+          if [ ! -f /tmp/EMBY_READY_FOR_BACKUP ]; then
+              echo "⚠️ Emby 未能成功启动，跳过备份以防空数据覆盖云端。"
+              exit 0
+          fi
+
+          # 优雅停机
+          curl -X POST -H "X-Emby-Token: c33a66119cd94788882617a5bde7f962" http://127.0.0.1:8096/System/Shutdown || true
+          sleep 15
+
+          validate_emby_data() {
+            local root="$1"
+            sudo test -f "$root/data/users.db"
+            sudo test -f "$root/data/library.db"
+            sudo python3 - "$root" <<'PY_GUARD'
+          import json
+          import sqlite3
+          import sys
+          from pathlib import Path
+          
+          root = Path(sys.argv[1])
+          users_db = root / "data/users.db"
+          library_db = root / "data/library.db"
+          
+          users = sqlite3.connect(f"file:{users_db}?mode=ro", uri=True)
+          users.row_factory = sqlite3.Row
+          names = []
+          for row in users.execute("select data from LocalUsersv2"):
+              raw = row["data"]
+              if isinstance(raw, bytes):
+                  raw = raw.decode("utf-8", "ignore")
+              names.append(json.loads(raw).get("Name"))
+          users.close()
+          
+          library = sqlite3.connect(f"file:{library_db}?mode=ro", uri=True)
+          media_items = library.execute("select count(*) from MediaItems").fetchone()[0]
+          root_rows = {
+              row[0]: (row[1], row[2])
+              for row in library.execute("select Id, Name, type from MediaItems where Id in (1, 2)")
+          }
+          library_folders = [
+              row[0]
+              for row in library.execute(
+                  "select Name from MediaItems where ParentId = 1 and type = 4 order by Name"
+              )
+          ]
+          media_paths = [
+              row[0]
+              for row in library.execute(
+                  """
+                  select Path
+                  from MediaItems
+                  where ParentId = 2
+                    and type = 3
+                    and Path is not null
+                    and Path like '/onedrive/%'
+                  order by Path
+                  """
+              )
+          ]
+          library.close()
+          
+          print(
+              "Emby guard: "
+              f"users={names} media_items={media_items} "
+              f"library_folders={library_folders} media_paths={media_paths}"
+          )
+          if "Derrick" not in names:
+              raise SystemExit("❌ Emby guard failed: Derrick user is missing")
+          if root_rows.get(1) != ("Media Folders", 2) or root_rows.get(2) != ("root", 1):
+              raise SystemExit(f"❌ Emby guard failed: invalid root structure: {root_rows}")
+          if not library_folders:
+              raise SystemExit("❌ Emby guard failed: no media library folders under Media Folders")
+          if not media_paths:
+              raise SystemExit("❌ Emby guard failed: no real /onedrive media paths under root")
+          PY_GUARD
+          }
+
+          # 只有在本地模式下才打包回传（避免覆盖云端的软链接源文件）
+          if [ ! -L /var/lib/emby ]; then
+              validate_emby_data /var/lib/emby
+              echo "🚀 本地模式运行结束，正在打包数据回传 Dropbox..."
+              src_kb=$(sudo du -sk /var/lib/emby | awk '{print $1}')
+              if [ -z "${src_kb:-}" ] || [ "$src_kb" -le 0 ]; then
+                echo "❌ emby archive preflight: unable to calculate source size" >&2
+                exit 1
+              fi
+              echo "待压缩目录大小: ${src_kb}KB"
+              require_free_kb "$HOME" $((src_kb + 1024 * 1024)) "emby archive preflight"
+              sudo rm -f "$HOME/emby-backup.tar.zst"
+              sudo tar -I 'zstd -3 -T0' -cf $HOME/emby-backup.tar.zst \
+                --exclude='cache' \
+                --exclude='logs' \
+                --exclude='transcoding-temp' \
+                -C /var/lib/emby .
+              sudo chown runner:docker $HOME/emby-backup.tar.zst
+              mkdir -p /tmp/emby-archive-verify
+              rm -rf /tmp/emby-archive-verify/*
+              tar -I zstd -xf $HOME/emby-backup.tar.zst -C /tmp/emby-archive-verify ./data/users.db ./data/library.db
+              validate_emby_data /tmp/emby-archive-verify
+              
+              echo "📤 上传备份到 Dropbox..."
+              rclone copyto $HOME/emby-backup.tar.zst dropbox:self-hosted/emby-backup.tar.zst -vv
+              cleanup_archive_workdir
+          else
+              echo "😴 当前为软链接模式，跳过本地打包备份。"
+          fi
+
+      - name: send telegram notification
+        if: always()
+        run: |
+          STATUS="${{ job.status }}"
+          MESSAGE="📺 *Emby Workflow* %0AStatus: ${STATUS} %0ATime: $(date '+%Y-%m-%d %H:%M:%S')"
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d chat_id=83279194 \
+            -d text="${MESSAGE}" \
+            -d parse_mode=Markdown

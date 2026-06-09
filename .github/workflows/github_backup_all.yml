@@ -1,0 +1,131 @@
+name: Backup All GitHub Repositories to OneDrive
+
+on:
+  schedule:
+    - cron: '0 3 * * *' # 每天凌晨3点运行
+  workflow_dispatch:
+
+concurrency:
+  group: backup-repos
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup rclone
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE }}
+        run: |
+          sudo apt-get install -y rclone
+          mkdir -p ~/.config/rclone/
+          printf "%s" "$RCLONE_CONFIG" > ~/.config/rclone/rclone.conf
+
+      - name: Backup all repositories
+        env:
+          GH_TOKEN: ${{ secrets.PAT }}
+        run: |
+          set -euo pipefail
+          cleanup_backup_workdir() {
+            rm -f github_repos_latest.tar.gz 2>/dev/null || true
+            rm -rf github_backup_temp.tmp 2>/dev/null || true
+          }
+          free_kb() { df -Pk "${1:-.}" | awk 'NR==2 {print $4}'; }
+          require_free_kb() {
+            local path="$1" min_kb="$2" label="$3"
+            local avail
+            avail=$(free_kb "$path")
+            if [ "${avail:-0}" -lt "$min_kb" ]; then
+              echo "❌ ${label}: insufficient free space at ${path}. available=${avail}KB required=${min_kb}KB" >&2
+              exit 1
+            fi
+            echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
+          }
+          require_free_kb "." $((5 * 1024 * 1024)) "github repos backup initial preflight"
+          trap cleanup_backup_workdir EXIT
+          # 💡 修改：使用固定压缩包名，不再使用日期后缀
+          ARCHIVE_NAME="github_repos_latest.tar.gz"
+          BACKUP_DIR="github_backup_temp"
+          rm -rf "$BACKUP_DIR"
+          mkdir -p "$BACKUP_DIR"
+          
+          # 获取用户所有的仓库 (包括 private 和 public)
+          REPOS=$(curl -s -H "Authorization: token $GH_TOKEN" "https://api.github.com/user/repos?per_page=100&type=owner" | jq -r '.[].ssh_url')
+          
+          if [ -z "$REPOS" ]; then
+            echo "未找到任何仓库，请检查 PAT 权限。"
+            exit 1
+          fi
+          
+          for REPO in $REPOS; do
+            REPO_NAME=$(basename $REPO .git)
+            echo "----------------------------------------"
+            echo "正在处理仓库: $REPO_NAME ..."
+            
+            CLONE_URL=$(echo $REPO | sed -e "s/git@github.com:/https:\/\/$GH_TOKEN@github.com\//")
+            
+            git clone --mirror "$CLONE_URL" "$BACKUP_DIR/$REPO_NAME.git" || {
+              echo "❌ $REPO_NAME 备份失败（可能已被 GitHub 禁用或访问受限），跳过此仓库。"
+              rm -rf "$BACKUP_DIR/$REPO_NAME.git"
+            }
+          done
+          
+          echo "----------------------------------------"
+          echo "正在打包所有备份成功的仓库..."
+          src_kb=$(du -sk "$BACKUP_DIR" | awk '{print $1}')
+          if [ -z "${src_kb:-}" ] || [ "$src_kb" -le 0 ]; then
+            echo "❌ github repos archive preflight: unable to calculate source size" >&2
+            exit 1
+          fi
+          echo "待压缩目录大小: ${src_kb}KB"
+          require_free_kb "." $((src_kb + 1024 * 1024)) "github repos archive preflight"
+          rm -f "$ARCHIVE_NAME"
+          tar -czf "$ARCHIVE_NAME" "$BACKUP_DIR"
+          archive_bytes=$(stat -c%s "$ARCHIVE_NAME")
+          if [ -z "${archive_bytes:-}" ] || [ "$archive_bytes" -le 0 ]; then
+            echo "❌ github repos archive validation: archive is empty" >&2
+            exit 1
+          fi
+          tar -tzf "$ARCHIVE_NAME" >/dev/null
+          archive_human=$(numfmt --to=iec-i --suffix=B "$archive_bytes" 2>/dev/null || echo "${archive_bytes}B")
+          {
+            echo "GITHUB_REPOS_ARCHIVE_NAME=$ARCHIVE_NAME"
+            echo "GITHUB_REPOS_ARCHIVE_BYTES=$archive_bytes"
+            echo "GITHUB_REPOS_ARCHIVE_HUMAN=$archive_human"
+          } >> "$GITHUB_ENV"
+          echo "✅ 压缩包校验通过: ${ARCHIVE_NAME} (${archive_human})"
+          
+          echo "正在上传到 OneDrive backup/ (覆盖旧备份)..."
+          # 💡 修改：直接覆盖 OneDrive backup/ 下的最新备份包
+          rclone copy "$ARCHIVE_NAME" "onedrive:backup/" -P --retries 3
+          rm -f "$ARCHIVE_NAME"
+          
+      - name: Send Telegram Notification
+        if: always()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          STATUS: ${{ job.status }}
+        run: |
+          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "Telegram 凭证未配置，跳过发送通知。"
+            exit 0
+          fi
+          
+          if [ "$STATUS" == "success" ]; then
+            ARCHIVE_NAME="${GITHUB_REPOS_ARCHIVE_NAME:-github_repos_latest.tar.gz}"
+            FILE_SIZE_BYTES="${GITHUB_REPOS_ARCHIVE_BYTES:-0}"
+            FILE_SIZE_HUMAN=$(numfmt --to=iec-i --suffix=B "$FILE_SIZE_BYTES" 2>/dev/null || echo "${FILE_SIZE_BYTES}B")
+            if [ "$FILE_SIZE_BYTES" -le 0 ]; then
+              MSG="⚠️ <b>GitHub 全仓库备份状态异常</b>%0A📅 日期: $(date +'%Y-%m-%d')%0A📦 文件: ${ARCHIVE_NAME}%0A📏 文件大小: ${FILE_SIZE_HUMAN}%0A⚠️ 备份任务成功但未记录到有效压缩包大小，请检查 GitHub Actions 日志。"
+            else
+            MSG="✅ <b>GitHub 全仓库备份成功 (已覆盖旧包)</b>%0A📅 日期: $(date +'%Y-%m-%d')%0A📦 文件: ${ARCHIVE_NAME}%0A📏 文件大小: ${FILE_SIZE_HUMAN}"
+            fi
+          else
+            MSG="❌ <b>GitHub 全仓库备份失败</b>%0A⚠️ 请前往 GitHub Actions 检查日志详情。"
+          fi
+          
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d text="$(echo -e $MSG)" \
+            -d parse_mode="HTML"
