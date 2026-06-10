@@ -98,29 +98,29 @@ jobs:
               echo "警告: teslamate-db 目录不存在，跳过权限修改"
           fi
           
-      # - name: Check if the tunnel is running
-      #   env:
-      #     TUNNEL_NAME: "t"
-      #   run: |
-      #     wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-      #     sudo dpkg -i cloudflared-linux-amd64.deb
-      #     sudo mkdir ~/.cloudflared/
-      #     sudo rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
+      - name: Check if the tunnel is running
+        env:
+          TUNNEL_NAME: "t"
+        run: |
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
+          sudo mkdir ~/.cloudflared/
+          sudo rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
 
-      #     OUTPUT=$(cloudflared tunnel list)
-      #     TUNNEL_LINE=$(echo "$OUTPUT" | grep -w "$TUNNEL_NAME")
-      #     if [ -z "$TUNNEL_LINE" ]; then
-      #       echo "The tunnel '$TUNNEL_NAME' does not exist. Proceeding."
-      #       exit 0
-      #     fi
+          OUTPUT=$(cloudflared tunnel list)
+          TUNNEL_LINE=$(echo "$OUTPUT" | grep -w "$TUNNEL_NAME")
+          if [ -z "$TUNNEL_LINE" ]; then
+            echo "The tunnel '$TUNNEL_NAME' does not exist. Proceeding."
+            exit 0
+          fi
   
-      #     CONNECTIONS=$(echo "$TUNNEL_LINE" | awk '{if (NF>=4) print $4; else print "-"}')
-      #     if [ "$CONNECTIONS" == "-" ]; then
-      #       echo "The tunnel '$TUNNEL_NAME' exists but has no active connections. Proceeding."
-      #     else
-      #       echo "The tunnel '$TUNNEL_NAME' is running with connections: $CONNECTIONS. Stopping actions."
-      #       exit 31
-      #     fi
+          CONNECTIONS=$(echo "$TUNNEL_LINE" | awk '{if (NF>=4) print $4; else print "-"}')
+          if [ "$CONNECTIONS" == "-" ]; then
+            echo "The tunnel '$TUNNEL_NAME' exists but has no active connections. Proceeding."
+          else
+            echo "The tunnel '$TUNNEL_NAME' is running with connections: $CONNECTIONS. Stopping actions."
+            exit 31
+          fi
 
       - name: run cloudflared
         run: |
