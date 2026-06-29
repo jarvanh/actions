@@ -1285,20 +1285,35 @@ jobs:
             --exclude "/github_repos_latest.tar.gz" \
             --exclude "github_repos_latest.tar.gz"
 
+          sync_with_logging \
+            "onedrive:backup" \
+            "openlist:wopan176Crypt/backup" \
+            "backup" \
+            --exclude "/notion/**" \
+            --exclude "notion/**" \
+            --exclude "/self-hosted_latest.tar.gz" \
+            --exclude "self-hosted_latest.tar.gz" \
+            --exclude "/github_repos_latest.tar.gz" \
+            --exclude "github_repos_latest.tar.gz"
+
           gd_sync_with_1d_skip "onedrive:backup" "gd:backup" "backup" "${GD_SYNC_ARGS[@]}"
 
       - name: Sync task0
         run: |
           source /tmp/functions.sh
           echo "=== 开始同步 0 任务 ==="
-          sync_with_logging "onedrive:0" "openlist:baidupanCrypt/0" "task0"
+          # sync_with_logging "onedrive:0" "openlist:baidupanCrypt/0" "task0"
+          sync_with_logging "onedrive:0" "openlist:wopan176Crypt/0" "task0"
+          sync_with_logging "onedrive:0/j-1024j-视频-pornhub-favorites" "openlist:wopan175/0/j-1024j-视频-pornhub-favorites" "task0"
           gd_sync_with_1d_skip "onedrive:0" "gd:0" "task0" "${GD_SYNC_ARGS[@]}"
 
       - name: Sync task1
         run: |
           source /tmp/functions.sh
           echo "=== 开始同步 1 任务 ==="
-          sync_with_logging "onedrive:1" "openlist:baidupanCrypt/1" "task1"
+          # sync_with_logging "onedrive:1" "openlist:baidupanCrypt/1" "task1"
+          sync_with_logging "onedrive:1" "openlist:wopan176Crypt/1" "task1"
+          sync_with_logging "onedrive:1" "openlist:wopan175/1" "task1"
           gd_sync_with_1d_skip "onedrive:1" "gd:1" "task1" "${GD_SYNC_ARGS[@]}"
 
       - name: Sync task2
@@ -1306,6 +1321,8 @@ jobs:
           source /tmp/functions.sh
           echo "=== 开始同步 2 任务 ==="
           # openlist_sync_with_failure_split "onedrive:2" "openlist:aliyundriveCrypt/2" "task2"
+          sync_with_logging "onedrive:2" "openlist:wopan176Crypt/2" "task2"
+          sync_with_logging "onedrive:2" "openlist:wopan175/2" "task2"
           gd_sync_with_1d_skip "onedrive:2" "gd:2" "task2" "${GD_SYNC_ARGS[@]}"
 
       - name: Sync task3
@@ -1313,8 +1330,24 @@ jobs:
           source /tmp/functions.sh
           echo "=== 开始同步 3 任务 ==="
           # openlist_sync_with_failure_split "onedrive:3" "openlist:aliyundriveCrypt/3" "task3"
+          sync_with_logging "onedrive:3" "openlist:wopan176Crypt/3" "task3"
+          sync_with_logging "onedrive:3" "openlist:wopan175/3" "task3"
           gd_sync_with_1d_skip "onedrive:3" "gd:3" "task3" "${GD_SYNC_ARGS[@]}"
 
+      - name: Sync task4
+        run: |
+          source /tmp/functions.sh
+          echo "=== 开始同步 4 任务 ==="
+          sync_with_logging "onedrive:4" "openlist:wopan176Crypt/4" "task4"
+          sync_with_logging "onedrive:4" "openlist:wopan175/4" "task4"
+
+      - name: Sync task5
+        run: |
+          source /tmp/functions.sh
+          echo "=== 开始同步 5 任务 ==="
+          sync_with_logging "onedrive:5" "openlist:wopan176Crypt/5" "task5"
+          sync_with_logging "onedrive:5" "openlist:wopan175/5" "task5"
+         
       - name: Finalize and cleanup
         run: |
           source /tmp/functions.sh
