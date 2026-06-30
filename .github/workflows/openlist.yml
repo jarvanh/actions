@@ -1288,13 +1288,7 @@ jobs:
           sync_with_logging \
             "onedrive:backup" \
             "openlist:wopan176Crypt/backup" \
-            "backup" \
-            --exclude "/notion/**" \
-            --exclude "notion/**" \
-            --exclude "/self-hosted_latest.tar.gz" \
-            --exclude "self-hosted_latest.tar.gz" \
-            --exclude "/github_repos_latest.tar.gz" \
-            --exclude "github_repos_latest.tar.gz"
+            "backup"
 
           gd_sync_with_1d_skip "onedrive:backup" "gd:backup" "backup" "${GD_SYNC_ARGS[@]}"
 
