@@ -1270,27 +1270,27 @@ jobs:
           }
           EOF
 
-      - name: Sync backup task
-        run: |
-          source /tmp/functions.sh
-          echo "=== 开始同步 backup 任务 ==="
-          sync_with_logging \
-            "onedrive:backup" \
-            "openlist:aliyundriveCrypt/backup" \
-            "backup" \
-            --exclude "/notion/**" \
-            --exclude "notion/**" \
-            --exclude "/self-hosted_latest.tar.gz" \
-            --exclude "self-hosted_latest.tar.gz" \
-            --exclude "/github_repos_latest.tar.gz" \
-            --exclude "github_repos_latest.tar.gz"
+      # - name: Sync backup task
+      #   run: |
+      #     source /tmp/functions.sh
+      #     echo "=== 开始同步 backup 任务 ==="
+      #     sync_with_logging \
+      #       "onedrive:backup" \
+      #       "openlist:aliyundriveCrypt/backup" \
+      #       "backup" \
+      #       --exclude "/notion/**" \
+      #       --exclude "notion/**" \
+      #       --exclude "/self-hosted_latest.tar.gz" \
+      #       --exclude "self-hosted_latest.tar.gz" \
+      #       --exclude "/github_repos_latest.tar.gz" \
+      #       --exclude "github_repos_latest.tar.gz"
 
-          sync_with_logging \
-            "onedrive:backup" \
-            "openlist:wopan176Crypt/backup" \
-            "backup"
+      #     sync_with_logging \
+      #       "onedrive:backup" \
+      #       "openlist:wopan176Crypt/backup" \
+      #       "backup"
 
-          gd_sync_with_1d_skip "onedrive:backup" "gd:backup" "backup" "${GD_SYNC_ARGS[@]}"
+      #     gd_sync_with_1d_skip "onedrive:backup" "gd:backup" "backup" "${GD_SYNC_ARGS[@]}"
 
       - name: Sync task0
         run: |
