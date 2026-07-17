@@ -328,211 +328,211 @@ jobs:
             exit 1
           fi
 
-      # - name: Run rss-to-telegram container
-      #   run: |
-      #     set -euo pipefail
-      #     echo "Starting rss-to-telegram before CLIProxyAPI..."
-      #     mkdir -p /dropbox/self-hosted/rsstt
-      #     cleanup_archive_workdir() {
-      #       rm -f /tmp/rsstt.tar.gz 2>/dev/null || true
-      #       rm -rf /tmp/rsstt-restore 2>/dev/null || true
-      #     }
-      #     free_kb() { df -Pk "${1:-/tmp}" | awk 'NR==2 {print $4}'; }
-      #     require_free_kb() {
-      #       local path="$1" min_kb="$2" label="$3"
-      #       local avail
-      #       avail=$(free_kb "$path")
-      #       if [ "${avail:-0}" -lt "$min_kb" ]; then
-      #         echo "❌ ${label}: insufficient free space at ${path}. available=${avail}KB required=${min_kb}KB" >&2
-      #         exit 1
-      #       fi
-      #       echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
-      #     }
-      #     require_free_kb /tmp $((1024 * 1024)) "rsstt restore preflight"
-      #     rm -rf /tmp/local_rsstt
-      #     cleanup_archive_workdir
-      #     mkdir -p /tmp/local_rsstt /tmp/rsstt-restore
+      - name: Run rss-to-telegram container
+        run: |
+          set -euo pipefail
+          echo "Starting rss-to-telegram before CLIProxyAPI..."
+          mkdir -p /dropbox/self-hosted/rsstt
+          cleanup_archive_workdir() {
+            rm -f /tmp/rsstt.tar.gz 2>/dev/null || true
+            rm -rf /tmp/rsstt-restore 2>/dev/null || true
+          }
+          free_kb() { df -Pk "${1:-/tmp}" | awk 'NR==2 {print $4}'; }
+          require_free_kb() {
+            local path="$1" min_kb="$2" label="$3"
+            local avail
+            avail=$(free_kb "$path")
+            if [ "${avail:-0}" -lt "$min_kb" ]; then
+              echo "❌ ${label}: insufficient free space at ${path}. available=${avail}KB required=${min_kb}KB" >&2
+              exit 1
+            fi
+            echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
+          }
+          require_free_kb /tmp $((1024 * 1024)) "rsstt restore preflight"
+          rm -rf /tmp/local_rsstt
+          cleanup_archive_workdir
+          mkdir -p /tmp/local_rsstt /tmp/rsstt-restore
 
-      #     if [ -f ~/.openclaw/.env ]; then
-      #       if rclone ls dropbox:self-hosted/rsstt.tar.gz > /dev/null 2>&1; then
-      #         echo "📦 Found rsstt.tar.gz! Downloading and extracting..."
-      #         rclone copyto dropbox:self-hosted/rsstt.tar.gz /tmp/rsstt.tar.gz
-      #         archive_kb=$(du -sk /tmp/rsstt.tar.gz | awk '{print $1}')
-      #         if [ -z "${archive_kb:-}" ] || [ "$archive_kb" -le 0 ]; then
-      #           echo "❌ rsstt extract preflight: unable to calculate archive size" >&2
-      #           exit 1
-      #         fi
-      #         echo "rsstt.tar.gz 大小: ${archive_kb}KB"
-      #         require_free_kb /tmp $((archive_kb * 3 + 512 * 1024)) "rsstt extract preflight"
-      #         if [ -s /tmp/rsstt.tar.gz ] && tar -tzf /tmp/rsstt.tar.gz >/dev/null 2>&1; then
-      #           tar -xzf /tmp/rsstt.tar.gz -C /tmp/rsstt-restore
-      #           cp -a /tmp/rsstt-restore/. /tmp/local_rsstt/ || true
-      #         else
-      #           echo "⚠️ rsstt.tar.gz validation failed, skipping archive restore."
-      #         fi
-      #         cleanup_archive_workdir
-      #       else
-      #         echo "⚠️ No rsstt archive found. Falling back to sync from raw directory..."
-      #         rclone copy dropbox:self-hosted/rsstt /tmp/local_rsstt \
-      #           --retries 10 \
-      #           --low-level-retries 20 \
-      #           --timeout 1m \
-      #           --contimeout 15s \
-      #           --exclude "docker-compose.yml" \
-      #           -P || true
-      #       fi
+          if [ -f ~/.openclaw/.env ]; then
+            if rclone ls dropbox:self-hosted/rsstt.tar.gz > /dev/null 2>&1; then
+              echo "📦 Found rsstt.tar.gz! Downloading and extracting..."
+              rclone copyto dropbox:self-hosted/rsstt.tar.gz /tmp/rsstt.tar.gz
+              archive_kb=$(du -sk /tmp/rsstt.tar.gz | awk '{print $1}')
+              if [ -z "${archive_kb:-}" ] || [ "$archive_kb" -le 0 ]; then
+                echo "❌ rsstt extract preflight: unable to calculate archive size" >&2
+                exit 1
+              fi
+              echo "rsstt.tar.gz 大小: ${archive_kb}KB"
+              require_free_kb /tmp $((archive_kb * 3 + 512 * 1024)) "rsstt extract preflight"
+              if [ -s /tmp/rsstt.tar.gz ] && tar -tzf /tmp/rsstt.tar.gz >/dev/null 2>&1; then
+                tar -xzf /tmp/rsstt.tar.gz -C /tmp/rsstt-restore
+                cp -a /tmp/rsstt-restore/. /tmp/local_rsstt/ || true
+              else
+                echo "⚠️ rsstt.tar.gz validation failed, skipping archive restore."
+              fi
+              cleanup_archive_workdir
+            else
+              echo "⚠️ No rsstt archive found. Falling back to sync from raw directory..."
+              rclone copy dropbox:self-hosted/rsstt /tmp/local_rsstt \
+                --retries 10 \
+                --low-level-retries 20 \
+                --timeout 1m \
+                --contimeout 15s \
+                --exclude "docker-compose.yml" \
+                -P || true
+            fi
 
-      #       mkdir -p /tmp/local_rsstt/config /tmp/local_rsstt/data
-      #       touch /tmp/local_rsstt/config/.keep /tmp/local_rsstt/data/.keep
+            mkdir -p /tmp/local_rsstt/config /tmp/local_rsstt/data
+            touch /tmp/local_rsstt/config/.keep /tmp/local_rsstt/data/.keep
 
-      #       echo "=== restored rss-to-telegram tree ==="
-      #       find /tmp/local_rsstt -maxdepth 3 | sort || true
+            echo "=== restored rss-to-telegram tree ==="
+            find /tmp/local_rsstt -maxdepth 3 | sort || true
 
-      #       docker rm -f rss-to-telegram 2>/dev/null || true
-      #       docker run -d \
-      #         --name rss-to-telegram \
-      #         --restart unless-stopped \
-      #         -v /tmp/local_rsstt/config:/app/config \
-      #         -v /tmp/local_rsstt/data:/app/data \
-      #         -e TOKEN="$TELEGRAM_BOT_TOKEN_RSS_SB_BOT" \
-      #         -e MANAGER="83279194" \
-      #         -e MULTIUSER="0" \
-      #         rongronggg9/rss-to-telegram:latest
+            docker rm -f rss-to-telegram 2>/dev/null || true
+            docker run -d \
+              --name rss-to-telegram \
+              --restart unless-stopped \
+              -v /tmp/local_rsstt/config:/app/config \
+              -v /tmp/local_rsstt/data:/app/data \
+              -e TOKEN="$TELEGRAM_BOT_TOKEN_RSS_SB_BOT" \
+              -e MANAGER="83279194" \
+              -e MULTIUSER="0" \
+              rongronggg9/rss-to-telegram:latest
 
-      #       echo "Waiting for rss-to-telegram container to stabilize..."
-      #       sleep 8
-      #       docker ps -a --filter name=rss-to-telegram || true
-      #       echo "=== rss-to-telegram /app tree (for persistence verification) ==="
-      #       docker exec rss-to-telegram sh -lc 'find /app -maxdepth 3 \( -type f -o -type d \) | sort | sed -n "1,200p"' || true
-      #       echo "=== rss-to-telegram local bind tree after startup ==="
-      #       find /tmp/local_rsstt -maxdepth 3 | sort || true
-      #     else
-      #       echo "⚠️ openclaw .env not found, skipping rss-to-telegram startup."
-      #     fi
+            echo "Waiting for rss-to-telegram container to stabilize..."
+            sleep 8
+            docker ps -a --filter name=rss-to-telegram || true
+            echo "=== rss-to-telegram /app tree (for persistence verification) ==="
+            docker exec rss-to-telegram sh -lc 'find /app -maxdepth 3 \( -type f -o -type d \) | sort | sed -n "1,200p"' || true
+            echo "=== rss-to-telegram local bind tree after startup ==="
+            find /tmp/local_rsstt -maxdepth 3 | sort || true
+          else
+            echo "⚠️ openclaw .env not found, skipping rss-to-telegram startup."
+          fi
 
-      # - name: Run CliRelay container
-      #   run: |
-      #     set -euo pipefail
+      - name: Run CliRelay container
+        run: |
+          set -euo pipefail
 
-      #     echo "Configuring local high-speed CliRelay directory with persistent data..."
-      #     mkdir -p /dropbox/self-hosted/CliRelay
-      #     cleanup_archive_workdir() {
-      #       rm -f /tmp/CliRelay.tar.gz /tmp/CLIProxyAPI.tar.gz 2>/dev/null || true
-      #     }
-      #     free_kb() { df -Pk "${1:-/tmp}" | awk 'NR==2 {print $4}'; }
-      #     require_free_kb() {
-      #       local path="$1" min_kb="$2" label="$3"
-      #       local avail
-      #       avail=$(free_kb "$path")
-      #       if [ "${avail:-0}" -lt "$min_kb" ]; then
-      #         echo "❌ ${label}: insufficient free space at ${path}. available=${avail}KB required=${min_kb}KB" >&2
-      #         exit 1
-      #       fi
-      #       echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
-      #     }
-      #     require_free_kb /tmp $((2 * 1024 * 1024)) "CliRelay restore preflight"
-      #     rm -rf /tmp/local_CliRelay
-      #     cleanup_archive_workdir
-      #     mkdir -p /tmp/local_CliRelay
+          echo "Configuring local high-speed CliRelay directory with persistent data..."
+          mkdir -p /dropbox/self-hosted/CliRelay
+          cleanup_archive_workdir() {
+            rm -f /tmp/CliRelay.tar.gz /tmp/CLIProxyAPI.tar.gz 2>/dev/null || true
+          }
+          free_kb() { df -Pk "${1:-/tmp}" | awk 'NR==2 {print $4}'; }
+          require_free_kb() {
+            local path="$1" min_kb="$2" label="$3"
+            local avail
+            avail=$(free_kb "$path")
+            if [ "${avail:-0}" -lt "$min_kb" ]; then
+              echo "❌ ${label}: insufficient free space at ${path}. available=${avail}KB required=${min_kb}KB" >&2
+              exit 1
+            fi
+            echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
+          }
+          require_free_kb /tmp $((2 * 1024 * 1024)) "CliRelay restore preflight"
+          rm -rf /tmp/local_CliRelay
+          cleanup_archive_workdir
+          mkdir -p /tmp/local_CliRelay
 
-      #     # Prefer the new CliRelay archive. If this is the first migrated run,
-      #     # bootstrap from the old CLIProxyAPI archive/raw directory so existing
-      #     # config.yaml, auth-dir, and stats.json are preserved.
-      #     if rclone ls dropbox:self-hosted/CliRelay.tar.gz > /dev/null 2>&1; then
-      #       echo "📦 Found CliRelay.tar.gz! Downloading and extracting..."
-      #       rclone copyto dropbox:self-hosted/CliRelay.tar.gz /tmp/CliRelay.tar.gz
-      #       archive_kb=$(du -sk /tmp/CliRelay.tar.gz | awk '{print $1}')
-      #       if [ -z "${archive_kb:-}" ] || [ "$archive_kb" -le 0 ]; then
-      #         echo "❌ CliRelay extract preflight: unable to calculate archive size" >&2
-      #         exit 1
-      #       fi
-      #       echo "CliRelay.tar.gz 大小: ${archive_kb}KB"
-      #       require_free_kb /tmp $((archive_kb * 3 + 512 * 1024)) "CliRelay extract preflight"
-      #       MIN_SIZE=$((5 * 1024))
-      #       actual_size=$(stat -c%s /tmp/CliRelay.tar.gz 2>/dev/null || echo 0)
-      #       if [ "$actual_size" -ge "$MIN_SIZE" ] && tar -tzf /tmp/CliRelay.tar.gz >/dev/null 2>&1; then
-      #         tar -xzf /tmp/CliRelay.tar.gz -C /tmp/local_CliRelay
-      #       else
-      #         echo "⚠️ CliRelay.tar.gz validation failed, skipping archive restore."
-      #       fi
-      #       cleanup_archive_workdir
-      #     elif rclone ls dropbox:self-hosted/CLIProxyAPI.tar.gz > /dev/null 2>&1; then
-      #       echo "📦 No CliRelay archive yet. Bootstrapping from CLIProxyAPI.tar.gz..."
-      #       rclone copyto dropbox:self-hosted/CLIProxyAPI.tar.gz /tmp/CLIProxyAPI.tar.gz
-      #       archive_kb=$(du -sk /tmp/CLIProxyAPI.tar.gz | awk '{print $1}')
-      #       if [ -z "${archive_kb:-}" ] || [ "$archive_kb" -le 0 ]; then
-      #         echo "❌ CLIProxyAPI extract preflight: unable to calculate archive size" >&2
-      #         exit 1
-      #       fi
-      #       echo "CLIProxyAPI.tar.gz 大小: ${archive_kb}KB"
-      #       require_free_kb /tmp $((archive_kb * 3 + 512 * 1024)) "CLIProxyAPI extract preflight"
-      #       MIN_SIZE=$((5 * 1024))
-      #       actual_size=$(stat -c%s /tmp/CLIProxyAPI.tar.gz 2>/dev/null || echo 0)
-      #       if [ "$actual_size" -ge "$MIN_SIZE" ] && tar -tzf /tmp/CLIProxyAPI.tar.gz >/dev/null 2>&1; then
-      #         tar -xzf /tmp/CLIProxyAPI.tar.gz -C /tmp/local_CliRelay
-      #       else
-      #         echo "⚠️ CLIProxyAPI.tar.gz validation failed, skipping bootstrap restore."
-      #       fi
-      #       cleanup_archive_workdir
-      #     elif rclone ls dropbox:self-hosted/CliRelay > /dev/null 2>&1; then
-      #       echo "⚠️ No CliRelay archive found. Falling back to sync from CliRelay raw directory..."
-      #       rclone copy dropbox:self-hosted/CliRelay /tmp/local_CliRelay
-      #     else
-      #       echo "⚠️ No CliRelay data found. Falling back to old CLIProxyAPI raw directory..."
-      #       rclone copy dropbox:self-hosted/CLIProxyAPI /tmp/local_CliRelay || true
-      #     fi
+          # Prefer the new CliRelay archive. If this is the first migrated run,
+          # bootstrap from the old CLIProxyAPI archive/raw directory so existing
+          # config.yaml, auth-dir, and stats.json are preserved.
+          if rclone ls dropbox:self-hosted/CliRelay.tar.gz > /dev/null 2>&1; then
+            echo "📦 Found CliRelay.tar.gz! Downloading and extracting..."
+            rclone copyto dropbox:self-hosted/CliRelay.tar.gz /tmp/CliRelay.tar.gz
+            archive_kb=$(du -sk /tmp/CliRelay.tar.gz | awk '{print $1}')
+            if [ -z "${archive_kb:-}" ] || [ "$archive_kb" -le 0 ]; then
+              echo "❌ CliRelay extract preflight: unable to calculate archive size" >&2
+              exit 1
+            fi
+            echo "CliRelay.tar.gz 大小: ${archive_kb}KB"
+            require_free_kb /tmp $((archive_kb * 3 + 512 * 1024)) "CliRelay extract preflight"
+            MIN_SIZE=$((5 * 1024))
+            actual_size=$(stat -c%s /tmp/CliRelay.tar.gz 2>/dev/null || echo 0)
+            if [ "$actual_size" -ge "$MIN_SIZE" ] && tar -tzf /tmp/CliRelay.tar.gz >/dev/null 2>&1; then
+              tar -xzf /tmp/CliRelay.tar.gz -C /tmp/local_CliRelay
+            else
+              echo "⚠️ CliRelay.tar.gz validation failed, skipping archive restore."
+            fi
+            cleanup_archive_workdir
+          elif rclone ls dropbox:self-hosted/CLIProxyAPI.tar.gz > /dev/null 2>&1; then
+            echo "📦 No CliRelay archive yet. Bootstrapping from CLIProxyAPI.tar.gz..."
+            rclone copyto dropbox:self-hosted/CLIProxyAPI.tar.gz /tmp/CLIProxyAPI.tar.gz
+            archive_kb=$(du -sk /tmp/CLIProxyAPI.tar.gz | awk '{print $1}')
+            if [ -z "${archive_kb:-}" ] || [ "$archive_kb" -le 0 ]; then
+              echo "❌ CLIProxyAPI extract preflight: unable to calculate archive size" >&2
+              exit 1
+            fi
+            echo "CLIProxyAPI.tar.gz 大小: ${archive_kb}KB"
+            require_free_kb /tmp $((archive_kb * 3 + 512 * 1024)) "CLIProxyAPI extract preflight"
+            MIN_SIZE=$((5 * 1024))
+            actual_size=$(stat -c%s /tmp/CLIProxyAPI.tar.gz 2>/dev/null || echo 0)
+            if [ "$actual_size" -ge "$MIN_SIZE" ] && tar -tzf /tmp/CLIProxyAPI.tar.gz >/dev/null 2>&1; then
+              tar -xzf /tmp/CLIProxyAPI.tar.gz -C /tmp/local_CliRelay
+            else
+              echo "⚠️ CLIProxyAPI.tar.gz validation failed, skipping bootstrap restore."
+            fi
+            cleanup_archive_workdir
+          elif rclone ls dropbox:self-hosted/CliRelay > /dev/null 2>&1; then
+            echo "⚠️ No CliRelay archive found. Falling back to sync from CliRelay raw directory..."
+            rclone copy dropbox:self-hosted/CliRelay /tmp/local_CliRelay
+          else
+            echo "⚠️ No CliRelay data found. Falling back to old CLIProxyAPI raw directory..."
+            rclone copy dropbox:self-hosted/CLIProxyAPI /tmp/local_CliRelay || true
+          fi
 
-      #     # CliRelay keeps config/auth compatible with CLIProxyAPI, and persists
-      #     # new request logs / SQLite data under /CLIProxyAPI/logs and /CLIProxyAPI/data.
-      #     mkdir -p /tmp/local_CliRelay/auth-dir /tmp/local_CliRelay/logs /tmp/local_CliRelay/data
-      #     touch /tmp/local_CliRelay/config.yaml
+          # CliRelay keeps config/auth compatible with CLIProxyAPI, and persists
+          # new request logs / SQLite data under /CLIProxyAPI/logs and /CLIProxyAPI/data.
+          mkdir -p /tmp/local_CliRelay/auth-dir /tmp/local_CliRelay/logs /tmp/local_CliRelay/data
+          touch /tmp/local_CliRelay/config.yaml
 
-      #     echo "=== restored CliRelay tree ==="
-      #     find /tmp/local_CliRelay -maxdepth 3 | sort || true
+          echo "=== restored CliRelay tree ==="
+          find /tmp/local_CliRelay -maxdepth 3 | sort || true
 
-      #     docker rm -f clirelay cliproxyapi 2>/dev/null || true
+          docker rm -f clirelay cliproxyapi 2>/dev/null || true
 
-      #     docker run -d \
-      #       --name clirelay \
-      #       --restart unless-stopped \
-      #       -p 8317:8317 \
-      #       -e CLIRELAY_LOCALE=zh \
-      #       -v /tmp/local_CliRelay/config.yaml:/CLIProxyAPI/config.yaml \
-      #       -v /tmp/local_CliRelay/auth-dir:/root/.cli-proxy-api \
-      #       -v /tmp/local_CliRelay/logs:/CLIProxyAPI/logs \
-      #       -v /tmp/local_CliRelay/data:/CLIProxyAPI/data \
-      #       ghcr.io/kittors/clirelay:latest
+          docker run -d \
+            --name clirelay \
+            --restart unless-stopped \
+            -p 8317:8317 \
+            -e CLIRELAY_LOCALE=zh \
+            -v /tmp/local_CliRelay/config.yaml:/CLIProxyAPI/config.yaml \
+            -v /tmp/local_CliRelay/auth-dir:/root/.cli-proxy-api \
+            -v /tmp/local_CliRelay/logs:/CLIProxyAPI/logs \
+            -v /tmp/local_CliRelay/data:/CLIProxyAPI/data \
+            ghcr.io/kittors/clirelay:latest
 
-      #     echo "等待 CliRelay API 就绪..."
-      #     READY=false
-      #     for i in {1..120}; do
-      #       if curl -fsS http://127.0.0.1:8317/ >/dev/null 2>&1; then
-      #         READY=true
-      #         echo "✅ CliRelay 已就绪"
-      #         break
-      #       fi
-      #       echo "⏳ 等待中... ${i}/120"
-      #       sleep 2
-      #     done
-      #     docker ps -a
+          echo "等待 CliRelay API 就绪..."
+          READY=false
+          for i in {1..120}; do
+            if curl -fsS http://127.0.0.1:8317/ >/dev/null 2>&1; then
+              READY=true
+              echo "✅ CliRelay 已就绪"
+              break
+            fi
+            echo "⏳ 等待中... ${i}/120"
+            sleep 2
+          done
+          docker ps -a
 
-      #     if [ "$READY" != true ]; then
-      #       echo "❌ CliRelay 未在预期时间内就绪"
-      #       docker logs clirelay || true
-      #       exit 1
-      #     fi
+          if [ "$READY" != true ]; then
+            echo "❌ CliRelay 未在预期时间内就绪"
+            docker logs clirelay || true
+            exit 1
+          fi
 
-      #     echo "ℹ️ 旧 stats.json 已完成一次性迁移；后续使用 CliRelay data/usage.db 持久化，不再导入 stats.json。"
+          echo "ℹ️ 旧 stats.json 已完成一次性迁移；后续使用 CliRelay data/usage.db 持久化，不再导入 stats.json。"
 
-      #     pkill -f "cloudflared tunnel run --protocol http2 --url http://127.0.0.1:8317 ai-api" || true
+          pkill -f "cloudflared tunnel run --protocol http2 --url http://127.0.0.1:8317 ai-api" || true
 
-      #     nohup cloudflared tunnel run --protocol http2 --url http://127.0.0.1:8317 ai-api \
-      #       > ~/.openclaw/logs/cloudflared_CliRelay.log 2>&1 &
+          nohup cloudflared tunnel run --protocol http2 --url http://127.0.0.1:8317 ai-api \
+            > ~/.openclaw/logs/cloudflared_CliRelay.log 2>&1 &
 
-      #     sleep 5
-      #     echo $! > ~/.openclaw/logs/cloudflared_CliRelay.pid
+          sleep 5
+          echo $! > ~/.openclaw/logs/cloudflared_CliRelay.pid
 
-      #     echo "CliRelay 命名隧道已启动：ai-api（固定地址模式）"
+          echo "CliRelay 命名隧道已启动：ai-api（固定地址模式）"
 
       - name: Run OpenClaw
         id: run_openclaw
