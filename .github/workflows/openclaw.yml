@@ -487,21 +487,12 @@ jobs:
           mkdir -p /tmp/local_CliRelay/auth-dir /tmp/local_CliRelay/logs /tmp/local_CliRelay/data
           touch /tmp/local_CliRelay/config.yaml
 
-          echo "=== restored CliRelay tree ==="
-          find /tmp/local_CliRelay -maxdepth 3 | sort || true
-
-          docker rm -f clirelay cliproxyapi 2>/dev/null || true
-
-          docker run -d \
-            --name clirelay \
-            --restart unless-stopped \
-            -p 8317:8317 \
-            -e CLIRELAY_LOCALE=zh \
-            -v /tmp/local_CliRelay/config.yaml:/CLIProxyAPI/config.yaml \
-            -v /tmp/local_CliRelay/auth-dir:/root/.cli-proxy-api \
-            -v /tmp/local_CliRelay/logs:/CLIProxyAPI/logs \
-            -v /tmp/local_CliRelay/data:/CLIProxyAPI/data \
-            ghcr.io/kittors/clirelay:latest
+          # Use official docker-compose to spin up PostgreSQL, Redis, and CliRelay
+          cd /tmp/local_CliRelay
+          curl -fsSL https://raw.githubusercontent.com/kittors/CliRelay/main/docker-compose.yml -o docker-compose.yml
+          touch .env
+          docker compose pull
+          docker compose up -d
 
           echo "等待 CliRelay API 就绪..."
           READY=false
@@ -518,7 +509,7 @@ jobs:
 
           if [ "$READY" != true ]; then
             echo "❌ CliRelay 未在预期时间内就绪"
-            docker logs clirelay || true
+            cd /tmp/local_CliRelay && docker compose logs || true
             exit 1
           fi
 
@@ -1177,7 +1168,7 @@ jobs:
           echo "3. Stopping service containers before final archive..."
           docker stop rss-to-telegram 2>/dev/null || echo "rss-to-telegram already stopped or missing."
           docker stop sub-store 2>/dev/null || echo "sub-store already stopped or missing."
-          docker stop clirelay 2>/dev/null || echo "clirelay already stopped or missing."
+          (cd /tmp/local_CliRelay && docker compose down 2>/dev/null) || docker stop clirelay 2>/dev/null || true
           docker stop cliproxyapi 2>/dev/null || echo "cliproxyapi already stopped or missing."
 
           send_archive_alert() {
