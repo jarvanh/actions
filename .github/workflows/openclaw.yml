@@ -482,17 +482,23 @@ jobs:
             rclone copy dropbox:self-hosted/CLIProxyAPI /tmp/local_CliRelay || true
           fi
 
-          # CliRelay keeps config/auth compatible with CLIProxyAPI, and persists
-          # new request logs / SQLite data under /CLIProxyAPI/logs and /CLIProxyAPI/data.
-          mkdir -p /tmp/local_CliRelay/auth-dir /tmp/local_CliRelay/logs /tmp/local_CliRelay/data
+          # CliRelay v2: create all required directories
+          mkdir -p /tmp/local_CliRelay/auth-dir /tmp/local_CliRelay/auths \
+                   /tmp/local_CliRelay/logs /tmp/local_CliRelay/data \
+                   /tmp/local_CliRelay/postgres-data
           touch /tmp/local_CliRelay/config.yaml
 
           # Use official docker-compose to spin up PostgreSQL, Redis, and CliRelay
+          export CLIRELAY_PROJECT_DIR=/tmp/local_CliRelay
           cd /tmp/local_CliRelay
           curl -fsSL https://raw.githubusercontent.com/kittors/CliRelay/main/docker-compose.yml -o docker-compose.yml
-          touch .env
+
+          # Step 1: run clirelay-init to auto-generate .env with DB credentials
           docker compose pull
-          docker compose up -d
+          docker compose run --rm clirelay-init || true
+
+          # Step 2: start all services (postgres, redis, cli-proxy-api)
+          docker compose up -d --remove-orphans
 
           echo "等待 CliRelay API 就绪..."
           READY=false
