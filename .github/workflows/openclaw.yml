@@ -497,7 +497,21 @@ jobs:
           docker compose pull
           docker compose run --rm clirelay-init || true
 
-          # Step 2: start all services (postgres, redis, cli-proxy-api)
+          # Step 2: ensure admin password meets 12-char minimum (generate if missing/short)
+          ENV_FILE="/tmp/local_CliRelay/.env"
+          touch "$ENV_FILE"
+          existing_pw=$(grep -oP '(?<=CLIRELAY_ADMIN_PASSWORD=).*' "$ENV_FILE" 2>/dev/null | head -1 || true)
+          if [ -z "$existing_pw" ] || [ "${#existing_pw}" -lt 12 ]; then
+            new_pw=$(openssl rand -base64 16 | tr -d '=+/' | head -c 20)
+            # Remove any old entry and append the new one
+            sed -i '/^CLIRELAY_ADMIN_PASSWORD=/d' "$ENV_FILE"
+            echo "CLIRELAY_ADMIN_PASSWORD=${new_pw}" >> "$ENV_FILE"
+            echo "✅ Admin password set (${#new_pw} chars)"
+          else
+            echo "✅ Admin password already set (${#existing_pw} chars)"
+          fi
+
+          # Step 3: start all services (postgres, redis, cli-proxy-api)
           docker compose up -d --remove-orphans
 
           echo "等待 CliRelay API 就绪..."
