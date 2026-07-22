@@ -511,6 +511,36 @@ jobs:
             echo "✅ Admin password already set (${#existing_pw} chars)"
           fi
 
+          # Step 2.5: CliRelay PostgreSQL schema compatibility migration
+          # Older CLIProxyAPI/CliRelay databases may have api_keys.end_user_id as uuid.
+          # Newer CliRelay queries treat it as text and call trim(), which fails on uuid.
+          # Convert only when the column is still uuid; keep existing installations safe.
+          echo "🔧 Checking CliRelay PostgreSQL schema compatibility..."
+          docker compose up -d postgres
+          sleep 5
+
+          docker compose exec -T postgres psql \
+            -U "${POSTGRES_USER:-postgres}" \
+            -d "${POSTGRES_DB:-postgres}" \
+            -c "DO \\$\\$
+            BEGIN
+              IF EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_name='api_keys'
+                  AND column_name='end_user_id'
+                  AND udt_name='uuid'
+              ) THEN
+                ALTER TABLE api_keys
+                ALTER COLUMN end_user_id TYPE text
+                USING end_user_id::text;
+                RAISE NOTICE 'Converted api_keys.end_user_id uuid -> text';
+              ELSE
+                RAISE NOTICE 'No api_keys.end_user_id migration needed';
+              END IF;
+            END
+            \\$\\$;" || true
+
           # Step 3: start all services (postgres, redis, cli-proxy-api)
           docker compose up -d --remove-orphans
 
