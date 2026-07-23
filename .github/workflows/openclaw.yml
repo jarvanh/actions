@@ -511,35 +511,51 @@ jobs:
             echo "✅ Admin password already set (${#existing_pw} chars)"
           fi
 
-          # Step 2.5: CliRelay PostgreSQL schema compatibility migration
-          # Older CLIProxyAPI/CliRelay databases may have api_keys.end_user_id as uuid.
-          # Newer CliRelay queries treat it as text and call trim(), which fails on uuid.
-          # Convert only when the column is still uuid; keep existing installations safe.
+          # Step 2.5: Fix CliRelay PostgreSQL schema compatibility
+          # Some older CliRelay databases have api_keys.end_user_id as uuid.
+          # Newer CliRelay queries trim(end_user_id), which requires text.
           echo "🔧 Checking CliRelay PostgreSQL schema compatibility..."
-          docker compose up -d postgres
-          sleep 5
 
-          docker compose exec -T postgres psql \
-            -U "${POSTGRES_USER:-postgres}" \
-            -d "${POSTGRES_DB:-postgres}" \
-            -c "DO \\$\\$
-            BEGIN
-              IF EXISTS (
-                SELECT 1
-                FROM information_schema.columns
-                WHERE table_name='api_keys'
-                  AND column_name='end_user_id'
-                  AND udt_name='uuid'
-              ) THEN
-                ALTER TABLE api_keys
-                ALTER COLUMN end_user_id TYPE text
-                USING end_user_id::text;
-                RAISE NOTICE 'Converted api_keys.end_user_id uuid -> text';
-              ELSE
-                RAISE NOTICE 'No api_keys.end_user_id migration needed';
-              END IF;
-            END
-            \\$\\$;" || true
+          docker compose up -d postgres
+
+          echo "⏳ Waiting PostgreSQL before migration..."
+          sleep 8
+
+          DB_USER=$(docker compose exec -T postgres printenv POSTGRES_USER | tr -d '\\r')
+          DB_NAME=$(docker compose exec -T postgres printenv POSTGRES_DB | tr -d '\\r')
+
+          if [ -n "${DB_USER}" ] && [ -n "${DB_NAME}" ]; then
+            echo "Using PostgreSQL user: ${DB_USER}"
+            echo "Using PostgreSQL database: ${DB_NAME}"
+
+            docker compose exec -T postgres \
+              psql -U "${DB_USER}" -d "${DB_NAME}" <<'SQL'
+          DO $$
+          BEGIN
+            IF EXISTS (
+              SELECT 1
+              FROM information_schema.columns
+              WHERE table_name='api_keys'
+                AND column_name='end_user_id'
+                AND data_type='uuid'
+            )
+            THEN
+              ALTER TABLE api_keys
+              ALTER COLUMN end_user_id TYPE text
+              USING end_user_id::text;
+
+              RAISE NOTICE 'Migrated api_keys.end_user_id uuid -> text';
+            ELSE
+              RAISE NOTICE 'No migration required';
+            END IF;
+          END $$;
+          SQL
+          else
+            echo "⚠️ PostgreSQL credentials not detected, skip migration"
+          fi
+
+          # Enable Redis memory overcommit when possible
+          sudo sysctl -w vm.overcommit_memory=1 || true
 
           # Step 3: start all services (postgres, redis, cli-proxy-api)
           docker compose up -d --remove-orphans
