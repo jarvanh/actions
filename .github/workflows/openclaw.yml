@@ -518,18 +518,41 @@ jobs:
 
           docker compose up -d postgres
 
-          echo "⏳ Waiting PostgreSQL before migration..."
-          sleep 8
+          echo "⏳ Waiting PostgreSQL ready..."
+          DB_READY=0
 
-          DB_USER=$(docker compose exec -T postgres printenv POSTGRES_USER | tr -d '\\r')
-          DB_NAME=$(docker compose exec -T postgres printenv POSTGRES_DB | tr -d '\\r')
+          for i in {1..60}; do
+            if docker compose exec -T postgres pg_isready >/dev/null 2>&1; then
+              DB_READY=1
+              break
+            fi
+            echo "Waiting PostgreSQL... ($i/60)"
+            sleep 2
+          done
 
-          if [ -n "${DB_USER}" ] && [ -n "${DB_NAME}" ]; then
-            echo "Using PostgreSQL user: ${DB_USER}"
-            echo "Using PostgreSQL database: ${DB_NAME}"
+          if [ "$DB_READY" != "1" ]; then
+            echo "❌ PostgreSQL did not become ready"
+            docker compose logs postgres --tail=100
+            exit 1
+          fi
 
-            docker compose exec -T postgres \
-              psql -U "${DB_USER}" -d "${DB_NAME}" <<'SQL'
+          echo "✅ PostgreSQL ready"
+
+          DB_USER=$(docker compose exec -T postgres sh -c 'echo $POSTGRES_USER' | tr -d '
+')
+          DB_NAME=$(docker compose exec -T postgres sh -c 'echo $POSTGRES_DB' | tr -d '
+')
+
+          echo "Using PostgreSQL user: ${DB_USER}"
+          echo "Using PostgreSQL database: ${DB_NAME}"
+
+          if [ -z "${DB_USER}" ] || [ -z "${DB_NAME}" ]; then
+            echo "❌ Cannot detect PostgreSQL credentials"
+            exit 1
+          fi
+
+          docker compose exec -T postgres \
+            psql -U "${DB_USER}" -d "${DB_NAME}" <<'SQL'
           DO $$
           BEGIN
             IF EXISTS (
@@ -550,9 +573,6 @@ jobs:
             END IF;
           END $$;
           SQL
-          else
-            echo "⚠️ PostgreSQL credentials not detected, skip migration"
-          fi
 
           # Enable Redis memory overcommit when possible
           sudo sysctl -w vm.overcommit_memory=1 || true
