@@ -984,6 +984,7 @@ jobs:
                 --stats-one-line \
                 --ignore-errors \
                 --verbose \
+                --size-only \
                 "${extra_args[@]}" \
                 2>&1 | tee "$LAST_ATTEMPT_LOG"
               local attempt_status=${PIPESTATUS[0]}
