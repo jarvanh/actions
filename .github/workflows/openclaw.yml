@@ -410,14 +410,14 @@ jobs:
             echo "⚠️ openclaw .env not found, skipping rss-to-telegram startup."
           fi
 
-      - name: Run CliRelay container
+      - name: Run CLIProxyAPI container
         run: |
           set -euo pipefail
 
-          echo "Configuring local high-speed CliRelay directory with persistent data..."
-          mkdir -p /dropbox/self-hosted/CliRelay
+          echo "Configuring local CLIProxyAPI directory with persistent data..."
+          mkdir -p /dropbox/self-hosted/CLIProxyAPI
           cleanup_archive_workdir() {
-            rm -f /tmp/CliRelay.tar.gz /tmp/CLIProxyAPI.tar.gz 2>/dev/null || true
+            rm -f /tmp/CLIProxyAPI.tar.gz 2>/dev/null || true
           }
           free_kb() { df -Pk "${1:-/tmp}" | awk 'NR==2 {print $4}'; }
           require_free_kb() {
@@ -430,34 +430,13 @@ jobs:
             fi
             echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
           }
-          require_free_kb /tmp $((2 * 1024 * 1024)) "CliRelay restore preflight"
-          rm -rf /tmp/local_CliRelay
+          require_free_kb /tmp $((2 * 1024 * 1024)) "CLIProxyAPI restore preflight"
+          rm -rf /tmp/local_CLIPProxyAPI
           cleanup_archive_workdir
-          mkdir -p /tmp/local_CliRelay
+          mkdir -p /tmp/local_CLIPProxyAPI
 
-          # Prefer the new CliRelay archive. If this is the first migrated run,
-          # bootstrap from the old CLIProxyAPI archive/raw directory so existing
-          # config.yaml, auth-dir, and stats.json are preserved.
-          if rclone ls dropbox:self-hosted/CliRelay.tar.gz > /dev/null 2>&1; then
-            echo "📦 Found CliRelay.tar.gz! Downloading and extracting..."
-            rclone copyto dropbox:self-hosted/CliRelay.tar.gz /tmp/CliRelay.tar.gz
-            archive_kb=$(du -sk /tmp/CliRelay.tar.gz | awk '{print $1}')
-            if [ -z "${archive_kb:-}" ] || [ "$archive_kb" -le 0 ]; then
-              echo "❌ CliRelay extract preflight: unable to calculate archive size" >&2
-              exit 1
-            fi
-            echo "CliRelay.tar.gz 大小: ${archive_kb}KB"
-            require_free_kb /tmp $((archive_kb * 3 + 512 * 1024)) "CliRelay extract preflight"
-            MIN_SIZE=$((5 * 1024))
-            actual_size=$(stat -c%s /tmp/CliRelay.tar.gz 2>/dev/null || echo 0)
-            if [ "$actual_size" -ge "$MIN_SIZE" ] && tar -tzf /tmp/CliRelay.tar.gz >/dev/null 2>&1; then
-              tar -xzf /tmp/CliRelay.tar.gz -C /tmp/local_CliRelay
-            else
-              echo "⚠️ CliRelay.tar.gz validation failed, skipping archive restore."
-            fi
-            cleanup_archive_workdir
-          elif rclone ls dropbox:self-hosted/CLIProxyAPI.tar.gz > /dev/null 2>&1; then
-            echo "📦 No CliRelay archive yet. Bootstrapping from CLIProxyAPI.tar.gz..."
+          if rclone ls dropbox:self-hosted/CLIProxyAPI.tar.gz > /dev/null 2>&1; then
+            echo "📦 Found CLIProxyAPI.tar.gz! Downloading and extracting..."
             rclone copyto dropbox:self-hosted/CLIProxyAPI.tar.gz /tmp/CLIProxyAPI.tar.gz
             archive_kb=$(du -sk /tmp/CLIProxyAPI.tar.gz | awk '{print $1}')
             if [ -z "${archive_kb:-}" ] || [ "$archive_kb" -le 0 ]; then
@@ -469,46 +448,48 @@ jobs:
             MIN_SIZE=$((5 * 1024))
             actual_size=$(stat -c%s /tmp/CLIProxyAPI.tar.gz 2>/dev/null || echo 0)
             if [ "$actual_size" -ge "$MIN_SIZE" ] && tar -tzf /tmp/CLIProxyAPI.tar.gz >/dev/null 2>&1; then
-              tar -xzf /tmp/CLIProxyAPI.tar.gz -C /tmp/local_CliRelay
+              tar -xzf /tmp/CLIProxyAPI.tar.gz -C /tmp/local_CLIPProxyAPI
             else
-              echo "⚠️ CLIProxyAPI.tar.gz validation failed, skipping bootstrap restore."
+              echo "⚠️ CLIProxyAPI.tar.gz validation failed, skipping archive restore."
             fi
             cleanup_archive_workdir
-          elif rclone ls dropbox:self-hosted/CliRelay > /dev/null 2>&1; then
-            echo "⚠️ No CliRelay archive found. Falling back to sync from CliRelay raw directory..."
-            rclone copy dropbox:self-hosted/CliRelay /tmp/local_CliRelay
           else
-            echo "⚠️ No CliRelay data found. Falling back to old CLIProxyAPI raw directory..."
-            rclone copy dropbox:self-hosted/CLIProxyAPI /tmp/local_CliRelay || true
+            echo "⚠️ No CLIProxyAPI archive found. Falling back to sync from raw directory..."
+            rclone copy dropbox:self-hosted/CLIProxyAPI /tmp/local_CLIPProxyAPI \
+              --retries 10 \
+              --low-level-retries 20 \
+              --timeout 1m \
+              --contimeout 15s \
+              -P || true
           fi
 
-          # CliRelay keeps config/auth compatible with CLIProxyAPI, and persists
-          # new request logs / SQLite data under /CLIProxyAPI/logs and /CLIProxyAPI/data.
-          mkdir -p /tmp/local_CliRelay/auth-dir /tmp/local_CliRelay/logs /tmp/local_CliRelay/data
-          touch /tmp/local_CliRelay/config.yaml
+          mkdir -p /tmp/local_CLIPProxyAPI/auth-dir /tmp/local_CLIPProxyAPI/logs
+          touch /tmp/local_CLIPProxyAPI/config.yaml
+          touch /tmp/local_CLIPProxyAPI/stats.json
 
-          echo "=== restored CliRelay tree ==="
-          find /tmp/local_CliRelay -maxdepth 3 | sort || true
+          echo "=== restored CLIProxyAPI tree ==="
+          find /tmp/local_CLIPProxyAPI -maxdepth 3 | sort || true
 
           docker rm -f clirelay cliproxyapi 2>/dev/null || true
 
           docker run -d \
-            --name clirelay \
+            --name cliproxyapi \
             --restart unless-stopped \
             -p 8317:8317 \
-            -e CLIRELAY_LOCALE=zh \
-            -v /tmp/local_CliRelay/config.yaml:/CLIProxyAPI/config.yaml \
-            -v /tmp/local_CliRelay/auth-dir:/root/.cli-proxy-api \
-            -v /tmp/local_CliRelay/logs:/CLIProxyAPI/logs \
-            -v /tmp/local_CliRelay/data:/CLIProxyAPI/data \
-            ghcr.io/kittors/clirelay:latest
+            -e TZ=Asia/Shanghai \
+            -v /tmp/local_CLIPProxyAPI/config.yaml:/CLIProxyAPI/config.yaml \
+            -v /tmp/local_CLIPProxyAPI/auth-dir:/root/.cli-proxy-api \
+            -v /tmp/local_CLIPProxyAPI/logs:/CLIProxyAPI/logs \
+            -v /tmp/local_CLIPProxyAPI/stats.json:/CLIProxyAPI/stats.json \
+            eceasy/cli-proxy-api:latest
 
-          echo "等待 CliRelay API 就绪..."
+          echo "等待 CLIProxyAPI 就绪..."
           READY=false
           for i in {1..120}; do
-            if curl -fsS http://127.0.0.1:8317/ >/dev/null 2>&1; then
+            code=$(curl -s --connect-timeout 2 -o /dev/null -w "%{http_code}" http://127.0.0.1:8317/ || true)
+            if [ -n "$code" ] && [ "$code" -ge 100 ] && [ "$code" -lt 600 ]; then
               READY=true
-              echo "✅ CliRelay 已就绪"
+              echo "✅ CLIProxyAPI 已就绪 (HTTP ${code})"
               break
             fi
             echo "⏳ 等待中... ${i}/120"
@@ -517,22 +498,20 @@ jobs:
           docker ps -a
 
           if [ "$READY" != true ]; then
-            echo "❌ CliRelay 未在预期时间内就绪"
-            docker logs clirelay || true
+            echo "❌ CLIProxyAPI 未在预期时间内就绪"
+            docker logs cliproxyapi || true
             exit 1
           fi
-
-          echo "ℹ️ 旧 stats.json 已完成一次性迁移；后续使用 CliRelay data/usage.db 持久化，不再导入 stats.json。"
 
           pkill -f "cloudflared tunnel run --protocol http2 --url http://127.0.0.1:8317 ai-api" || true
 
           nohup cloudflared tunnel run --protocol http2 --url http://127.0.0.1:8317 ai-api \
-            > ~/.openclaw/logs/cloudflared_CliRelay.log 2>&1 &
+            > ~/.openclaw/logs/cloudflared_CLIPProxyAPI.log 2>&1 &
 
           sleep 5
-          echo $! > ~/.openclaw/logs/cloudflared_CliRelay.pid
+          echo $! > ~/.openclaw/logs/cloudflared_CLIPProxyAPI.pid
 
-          echo "CliRelay 命名隧道已启动：ai-api（固定地址模式）"
+          echo "CLIProxyAPI 命名隧道已启动：ai-api（固定地址模式）"
 
       - name: Run OpenClaw
         id: run_openclaw
@@ -881,7 +860,7 @@ jobs:
       - name: Start background archive loop
         if: ${{ always() }}
         run: |
-          echo "Starting background archive tasks: archive ~/.openclaw every 20 minutes; CliRelay data is archived at final shutdown..."
+          echo "Starting background archive tasks: archive ~/.openclaw every 20 minutes; CLIProxyAPI data is archived at final shutdown..."
           cat > /tmp/create-openclaw-archive.sh <<'EOF'
           #!/usr/bin/env bash
           set -euo pipefail
@@ -962,7 +941,7 @@ jobs:
           EOF
           chmod +x /tmp/create-openclaw-archive.sh
 
-          cat > /tmp/create-clirelay-archive.sh <<'EOF'
+          cat > /tmp/create-cliproxyapi-archive.sh <<'EOF'
           #!/usr/bin/env bash
           set -euo pipefail
 
@@ -973,7 +952,7 @@ jobs:
           fi
 
           MIN_SIZE=$((5 * 1024))
-          SRC_DIR="/tmp/local_CliRelay"
+          SRC_DIR="/tmp/local_CLIPProxyAPI"
           STAGE_DIR=""
 
           cleanup() {
@@ -986,16 +965,15 @@ jobs:
           sudo rm -f "$OUTPUT_TAR"
 
           if [ ! -d "$SRC_DIR" ]; then
-            echo "clirelay_dir_missing"
+            echo "cliproxyapi_dir_missing"
             exit 3
           fi
 
-          STAGE_DIR=$(mktemp -d /tmp/clirelay-archive-stage.XXXXXX)
+          STAGE_DIR=$(mktemp -d /tmp/cliproxyapi-archive-stage.XXXXXX)
           sudo mkdir -p "$STAGE_DIR"
 
           # Copy a stable snapshot first. Exclude volatile request logs/caches; persist
-          # config, auth, and data. SQLite DB is snapshotted with sqlite3 backup when
-          # available so tar does not race a live writer.
+          # config, auth, and stats.
           sudo rsync -a --delete \
             --exclude 'logs/**' \
             --exclude 'cache/**' \
@@ -1004,49 +982,39 @@ jobs:
             --exclude '*.lock' \
             --exclude '*.pid' \
             --exclude '*.jsonl.lock' \
-            --exclude 'data/usage.db' \
             "$SRC_DIR"/ "$STAGE_DIR"/
-
-          if [ -f "$SRC_DIR/data/usage.db" ]; then
-            sudo mkdir -p "$STAGE_DIR/data"
-            if command -v sqlite3 >/dev/null 2>&1; then
-              sudo sqlite3 "$SRC_DIR/data/usage.db" ".backup '$STAGE_DIR/data/usage.db'"
-            else
-              sudo cp -a "$SRC_DIR/data/usage.db" "$STAGE_DIR/data/usage.db"
-            fi
-          fi
 
           sudo tar -C "$STAGE_DIR" -czf "$OUTPUT_TAR" .
 
           actual_size=$(stat -c%s "$OUTPUT_TAR" 2>/dev/null || echo 0)
           if [ ! -s "$OUTPUT_TAR" ]; then
-            echo "clirelay_archive_empty output=$OUTPUT_TAR"
+            echo "cliproxyapi_archive_empty output=$OUTPUT_TAR"
             exit 1
           elif [ "$actual_size" -lt "$MIN_SIZE" ]; then
-            echo "clirelay_archive_too_small size=${actual_size} min=${MIN_SIZE} output=$OUTPUT_TAR"
+            echo "cliproxyapi_archive_too_small size=${actual_size} min=${MIN_SIZE} output=$OUTPUT_TAR"
             exit 1
           elif ! sudo tar -tzf "$OUTPUT_TAR" >/dev/null 2>&1; then
-            echo "clirelay_archive_tar_validation_failed output=$OUTPUT_TAR"
+            echo "cliproxyapi_archive_tar_validation_failed output=$OUTPUT_TAR"
             exit 1
           else
             echo "archive_ready size=${actual_size} output=$OUTPUT_TAR"
           fi
           EOF
-          chmod +x /tmp/create-clirelay-archive.sh
+          chmod +x /tmp/create-cliproxyapi-archive.sh
 
           cat > /tmp/openclaw-archive-loop.sh <<'EOF'
           #!/usr/bin/env bash
           set -euo pipefail
 
           TMP_OPENCLAW_TAR="/tmp/openclaw.tar.gz"
-          TMP_CLIRELAY_TAR="/tmp/CliRelay.tar.gz"
+          TMP_CLIPROXYAPI_TAR="/tmp/CLIProxyAPI.tar.gz"
           LOCK_FILE="/tmp/openclaw-archive.lock"
 
           cleanup_archive_outputs() {
             rm -f "$TMP_OPENCLAW_TAR" 2>/dev/null || true
-            sudo rm -f "$TMP_CLIRELAY_TAR" 2>/dev/null || true
+            sudo rm -f "$TMP_CLIPROXYAPI_TAR" 2>/dev/null || true
             rm -rf /tmp/openclaw-archive-stage.* 2>/dev/null || true
-            sudo rm -rf /tmp/clirelay-archive-stage.* 2>/dev/null || true
+            sudo rm -rf /tmp/cliproxyapi-archive-stage.* 2>/dev/null || true
           }
           cleanup_archive_outputs
           PID_FILE="/tmp/openclaw-archive.pid"
@@ -1094,28 +1062,28 @@ jobs:
               fi
             fi
 
-            clirelay_archive_output=""
-            if clirelay_archive_output=$(flock -E 200 -n "$LOCK_FILE" bash /tmp/create-clirelay-archive.sh "$TMP_CLIRELAY_TAR" 2>&1); then
-              echo "[$(date '+%F %T')] CliRelay archive ok, uploading... ${clirelay_archive_output}"
-              clirelay_upload_output=""
-              if clirelay_upload_output=$(rclone copyto "$TMP_CLIRELAY_TAR" dropbox:self-hosted/CliRelay.tar.gz 2>&1); then
-                echo "[$(date '+%F %T')] CliRelay upload ok"
-                sudo rm -f "$TMP_CLIRELAY_TAR"
+            cliproxyapi_archive_output=""
+            if cliproxyapi_archive_output=$(flock -E 200 -n "$LOCK_FILE" bash /tmp/create-cliproxyapi-archive.sh "$TMP_CLIPROXYAPI_TAR" 2>&1); then
+              echo "[$(date '+%F %T')] CLIProxyAPI archive ok, uploading... ${cliproxyapi_archive_output}"
+              cliproxyapi_upload_output=""
+              if cliproxyapi_upload_output=$(rclone copyto "$TMP_CLIPROXYAPI_TAR" dropbox:self-hosted/CLIProxyAPI.tar.gz 2>&1); then
+                echo "[$(date '+%F %T')] CLIProxyAPI upload ok"
+                sudo rm -f "$TMP_CLIPROXYAPI_TAR"
               else
                 rc=$?
-                echo "[$(date '+%F %T')] ⚠️ CliRelay.tar.gz upload failed (rc=$rc): ${clirelay_upload_output}"
-                send_telegram_alert "$(printf 'CliRelay.tar.gz 上传失败（rc=%s)\n原因: rclone 上传失败\n详情: %s' "$rc" "${clirelay_upload_output:-无输出}")"
+                echo "[$(date '+%F %T')] ⚠️ CLIProxyAPI.tar.gz upload failed (rc=$rc): ${cliproxyapi_upload_output}"
+                send_telegram_alert "$(printf 'CLIProxyAPI.tar.gz 上传失败（rc=%s)\n原因: rclone 上传失败\n详情: %s' "$rc" "${cliproxyapi_upload_output:-无输出}")"
               fi
             else
               rc=$?
               if [ "$rc" -eq 200 ]; then
-                echo "[$(date '+%F %T')] ⏭️ previous archive still running, skip CliRelay archive"
+                echo "[$(date '+%F %T')] ⏭️ previous archive still running, skip CLIProxyAPI archive"
               elif [ "$rc" -eq 3 ]; then
-                echo "[$(date '+%F %T')] ⚠️ CliRelay.tar.gz archive skipped because data directory is missing (rc=$rc): ${clirelay_archive_output}"
-                send_telegram_alert "$(printf 'CliRelay.tar.gz 归档失败（rc=%s)\n原因: CliRelay 本地数据目录未初始化（/tmp/local_CliRelay 不存在），通常表示 CliRelay 容器启动步骤被跳过或失败。\n详情: %s' "$rc" "${clirelay_archive_output:-clirelay_dir_missing}")"
+                echo "[$(date '+%F %T')] ⚠️ CLIProxyAPI.tar.gz archive skipped because data directory is missing (rc=$rc): ${cliproxyapi_archive_output}"
+                send_telegram_alert "$(printf 'CLIProxyAPI.tar.gz 归档失败（rc=%s)\n原因: CLIProxyAPI 本地数据目录未初始化（/tmp/local_CLIPProxyAPI 不存在），通常表示 CLIProxyAPI 容器启动步骤被跳过或失败。\n详情: %s' "$rc" "${cliproxyapi_archive_output:-cliproxyapi_dir_missing}")"
               else
-                echo "[$(date '+%F %T')] ⚠️ CliRelay.tar.gz archive failed in periodic archive (rc=$rc): ${clirelay_archive_output}"
-                send_telegram_alert "$(printf 'CliRelay.tar.gz 归档失败（rc=%s)\n原因: %s' "$rc" "${clirelay_archive_output:-归档脚本无输出}")"
+                echo "[$(date '+%F %T')] ⚠️ CLIProxyAPI.tar.gz archive failed in periodic archive (rc=$rc): ${cliproxyapi_archive_output}"
+                send_telegram_alert "$(printf 'CLIProxyAPI.tar.gz 归档失败（rc=%s)\n原因: %s' "$rc" "${cliproxyapi_archive_output:-归档脚本无输出}")"
               fi
             fi
             sleep 1200
@@ -1198,9 +1166,9 @@ jobs:
           echo "4. Performing final archive to Dropbox..."
           cleanup_archive_outputs() {
             rm -f /tmp/openclaw-final.tar.gz /tmp/rsstt.tar.gz 2>/dev/null || true
-            sudo rm -f /tmp/CliRelay.tar.gz 2>/dev/null || true
+            sudo rm -f /tmp/CLIProxyAPI.tar.gz 2>/dev/null || true
             rm -rf /tmp/openclaw-archive-stage.* 2>/dev/null || true
-            sudo rm -rf /tmp/clirelay-archive-stage.* 2>/dev/null || true
+            sudo rm -rf /tmp/cliproxyapi-archive-stage.* 2>/dev/null || true
           }
           free_kb() { df -Pk "${1:-/tmp}" | awk 'NR==2 {print $4}'; }
           require_free_kb() {
@@ -1242,42 +1210,42 @@ jobs:
 
           MIN_SIZE=$((5 * 1024))
 
-          echo "5. Archiving CliRelay persistent data..."
-          if [ -d /tmp/local_CliRelay ]; then
-            echo "=== local CliRelay tree before archive ==="
-            find /tmp/local_CliRelay -maxdepth 4 | sort || true
-            clirelay_src_kb=$(sudo du -sk /tmp/local_CliRelay | awk '{print $1}')
-            if [ -z "${clirelay_src_kb:-}" ] || [ "$clirelay_src_kb" -le 0 ]; then
-              echo "❌ final CliRelay archive preflight: unable to calculate source size" >&2
+          echo "5. Archiving CLIProxyAPI persistent data..."
+          if [ -d /tmp/local_CLIPProxyAPI ]; then
+            echo "=== local CLIProxyAPI tree before archive ==="
+            find /tmp/local_CLIPProxyAPI -maxdepth 4 | sort || true
+            cliproxyapi_src_kb=$(sudo du -sk /tmp/local_CLIPProxyAPI | awk '{print $1}')
+            if [ -z "${cliproxyapi_src_kb:-}" ] || [ "$cliproxyapi_src_kb" -le 0 ]; then
+              echo "❌ final CLIProxyAPI archive preflight: unable to calculate source size" >&2
               exit 1
             fi
-            echo "CliRelay 待归档目录大小: ${clirelay_src_kb}KB"
-            require_free_kb /tmp $((clirelay_src_kb + 512 * 1024)) "final CliRelay archive preflight"
-            clirelay_final_output=""
-            if clirelay_final_output=$(bash /tmp/create-clirelay-archive.sh /tmp/CliRelay.tar.gz 2>&1); then
-              actual_size=$(stat -c%s /tmp/CliRelay.tar.gz 2>/dev/null || echo 0)
+            echo "CLIProxyAPI 待归档目录大小: ${cliproxyapi_src_kb}KB"
+            require_free_kb /tmp $((cliproxyapi_src_kb + 512 * 1024)) "final CLIProxyAPI archive preflight"
+            cliproxyapi_final_output=""
+            if cliproxyapi_final_output=$(bash /tmp/create-cliproxyapi-archive.sh /tmp/CLIProxyAPI.tar.gz 2>&1); then
+              actual_size=$(stat -c%s /tmp/CLIProxyAPI.tar.gz 2>/dev/null || echo 0)
               if [ "$actual_size" -ge "$MIN_SIZE" ]; then
-                clirelay_final_upload_output=""
-                if clirelay_final_upload_output=$(rclone copyto /tmp/CliRelay.tar.gz dropbox:self-hosted/CliRelay.tar.gz -v 2>&1); then
-                  echo "final CliRelay archive/upload ok: ${clirelay_final_output}"
-                  sudo rm -f /tmp/CliRelay.tar.gz
+                cliproxyapi_final_upload_output=""
+                if cliproxyapi_final_upload_output=$(rclone copyto /tmp/CLIProxyAPI.tar.gz dropbox:self-hosted/CLIProxyAPI.tar.gz -v 2>&1); then
+                  echo "final CLIProxyAPI archive/upload ok: ${cliproxyapi_final_output}"
+                  sudo rm -f /tmp/CLIProxyAPI.tar.gz
                 else
                   rc=$?
-                  echo "⚠️ final CliRelay.tar.gz upload failed (rc=$rc): ${clirelay_final_upload_output}"
-                  send_archive_alert "$(printf 'final CliRelay.tar.gz 上传失败（rc=%s)\n原因: rclone 上传失败\n详情: %s' "$rc" "${clirelay_final_upload_output:-无输出}")"
+                  echo "⚠️ final CLIProxyAPI.tar.gz upload failed (rc=$rc): ${cliproxyapi_final_upload_output}"
+                  send_archive_alert "$(printf 'final CLIProxyAPI.tar.gz 上传失败（rc=%s)\n原因: rclone 上传失败\n详情: %s' "$rc" "${cliproxyapi_final_upload_output:-无输出}")"
                 fi
               else
-                echo "⚠️ CliRelay 压缩包小于 10KB，放弃覆盖云端数据: size=${actual_size} min=${MIN_SIZE}"
-                send_archive_alert "$(printf 'final CliRelay.tar.gz 归档失败\n原因: 压缩包小于最小阈值，放弃覆盖云端数据\n详情: size=%s min=%s output=/tmp/CliRelay.tar.gz' "$actual_size" "$MIN_SIZE")"
+                echo "⚠️ CLIProxyAPI 压缩包小于 10KB，放弃覆盖云端数据: size=${actual_size} min=${MIN_SIZE}"
+                send_archive_alert "$(printf 'final CLIProxyAPI.tar.gz 归档失败\n原因: 压缩包小于最小阈值，放弃覆盖云端数据\n详情: size=%s min=%s output=/tmp/CLIProxyAPI.tar.gz' "$actual_size" "$MIN_SIZE")"
               fi
             else
               rc=$?
-              echo "⚠️ final CliRelay.tar.gz archive failed (rc=$rc): ${clirelay_final_output}"
-              send_archive_alert "$(printf 'final CliRelay.tar.gz 归档失败（rc=%s)\n原因: %s' "$rc" "${clirelay_final_output:-归档脚本无输出}")"
+              echo "⚠️ final CLIProxyAPI.tar.gz archive failed (rc=$rc): ${cliproxyapi_final_output}"
+              send_archive_alert "$(printf 'final CLIProxyAPI.tar.gz 归档失败（rc=%s)\n原因: %s' "$rc" "${cliproxyapi_final_output:-归档脚本无输出}")"
             fi
           else
-            echo "⚠️ /tmp/local_CliRelay 不存在，跳过 CliRelay 归档"
-            send_archive_alert "$(printf 'final CliRelay.tar.gz 归档失败（rc=3）\n原因: CliRelay 本地数据目录未初始化（/tmp/local_CliRelay 不存在），通常表示 CliRelay 容器启动步骤被跳过或失败。\n详情: clirelay_dir_missing')"
+            echo "⚠️ /tmp/local_CLIPProxyAPI 不存在，跳过 CLIProxyAPI 归档"
+            send_archive_alert "$(printf 'final CLIProxyAPI.tar.gz 归档失败（rc=3）\n原因: CLIProxyAPI 本地数据目录未初始化（/tmp/local_CLIPProxyAPI 不存在），通常表示 CLIProxyAPI 容器启动步骤被跳过或失败。\n详情: cliproxyapi_dir_missing')"
           fi
 
           echo "6. Archiving rss-to-telegram data..."
