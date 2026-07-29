@@ -388,36 +388,82 @@ jobs:
             echo "=== restored rss-to-telegram tree ==="
             find /tmp/local_rsstt -maxdepth 3 | sort || true
 
-            docker rm -f rss-to-telegram 2>/dev/null || true
-            docker run -d \
-              --name rss-to-telegram \
-              --restart unless-stopped \
-              -v /tmp/local_rsstt/config:/app/config \
-              -v /tmp/local_rsstt/data:/app/data \
-              -e TOKEN="$TELEGRAM_BOT_TOKEN_RSS_SB_BOT" \
-              -e MANAGER="83279194" \
-              -e MULTIUSER="0" \
-              rongronggg9/rss-to-telegram:latest
+            start_rsstt_container() {
+              docker rm -f rss-to-telegram 2>/dev/null || true
+              docker run -d \
+                --name rss-to-telegram \
+                --restart unless-stopped \
+                -v /tmp/local_rsstt/config:/app/config \
+                -v /tmp/local_rsstt/data:/app/data \
+                -e TOKEN="$TELEGRAM_BOT_TOKEN_RSS_SB_BOT" \
+                -e MANAGER="83279194" \
+                -e MULTIUSER="0" \
+                rongronggg9/rss-to-telegram:latest
+            }
+
+            print_rsstt_status() {
+              echo "=== rss-to-telegram status ==="
+              docker ps -a --filter name=rss-to-telegram
+              container_status="$(docker inspect --format '{{.State.Status}}' rss-to-telegram)"
+              health_status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' rss-to-telegram)"
+              restart_count="$(docker inspect --format '{{.RestartCount}}' rss-to-telegram)"
+              echo "rss-to-telegram status=${container_status} health=${health_status} restarts=${restart_count}"
+            }
+
+            validate_rsstt_container() {
+              print_rsstt_status
+
+              if [ "$container_status" != "running" ] || [ "$health_status" = "unhealthy" ]; then
+                echo "❌ rss-to-telegram failed to become healthy"
+                docker logs --tail 200 rss-to-telegram || true
+                return 1
+              fi
+
+              if docker logs --tail 200 rss-to-telegram 2>&1 | grep -Eqi 'LOGIN FAILED|Unknown error occurred during login'; then
+                echo "❌ rss-to-telegram encountered a Telegram login failure"
+                docker logs --tail 200 rss-to-telegram || true
+                return 1
+              fi
+            }
+
+            archive_rsstt_state() {
+              local min_size=$((5 * 1024))
+              local actual_size
+
+              echo "📦 Archiving repaired rss-to-telegram state immediately..."
+              rm -f /tmp/rsstt.tar.gz
+              tar -czf /tmp/rsstt.tar.gz -C /tmp/local_rsstt .
+              tar -tzf /tmp/rsstt.tar.gz >/dev/null
+              actual_size="$(stat -c%s /tmp/rsstt.tar.gz 2>/dev/null || echo 0)"
+              if [ "$actual_size" -lt "$min_size" ]; then
+                echo "❌ repaired rsstt archive is too small: size=${actual_size} min=${min_size}"
+                exit 1
+              fi
+              rclone copyto /tmp/rsstt.tar.gz dropbox:self-hosted/rsstt.tar.gz -v
+              rm -f /tmp/rsstt.tar.gz
+              echo "✅ Repaired rss-to-telegram state uploaded"
+            }
 
             echo "Waiting for rss-to-telegram container to stabilize..."
+            start_rsstt_container
             sleep 12
-            echo "=== rss-to-telegram status ==="
-            docker ps -a --filter name=rss-to-telegram
-            container_status="$(docker inspect --format '{{.State.Status}}' rss-to-telegram)"
-            health_status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' rss-to-telegram)"
-            restart_count="$(docker inspect --format '{{.RestartCount}}' rss-to-telegram)"
-            echo "rss-to-telegram status=${container_status} health=${health_status} restarts=${restart_count}"
 
-            if [ "$container_status" != "running" ] || [ "$health_status" = "unhealthy" ]; then
-              echo "❌ rss-to-telegram failed to become healthy"
-              docker logs --tail 200 rss-to-telegram || true
-              exit 1
-            fi
-
-            if docker logs --tail 200 rss-to-telegram 2>&1 | grep -Eqi 'LOGIN FAILED|AuthKeyDuplicatedError|Unknown error occurred during login'; then
-              echo "❌ rss-to-telegram encountered a Telegram login failure"
-              docker logs --tail 200 rss-to-telegram || true
-              exit 1
+            if ! validate_rsstt_container; then
+              if docker logs --tail 200 rss-to-telegram 2>&1 | grep -qi 'AuthKeyDuplicatedError'; then
+                echo "⚠️ rss-to-telegram session was invalidated by AuthKeyDuplicatedError; deleting session and retrying once."
+                docker rm -f rss-to-telegram 2>/dev/null || true
+                rm -f \
+                  /tmp/local_rsstt/config/bot.session \
+                  /tmp/local_rsstt/config/bot.session-journal \
+                  /tmp/local_rsstt/config/bot.session-shm \
+                  /tmp/local_rsstt/config/bot.session-wal
+                start_rsstt_container
+                sleep 12
+                validate_rsstt_container
+                archive_rsstt_state
+              else
+                exit 1
+              fi
             fi
 
             echo "=== rss-to-telegram /app tree (for persistence verification) ==="
