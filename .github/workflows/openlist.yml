@@ -1042,6 +1042,10 @@ jobs:
                 --verbose \
                 --size-only \
                 --delete-before \
+                --timeout 5m \
+                --contimeout 30s \
+                --retries 1 \
+                --low-level-retries 3 \
                 "${extra_args[@]}" \
                 2>&1 | tee "$LAST_ATTEMPT_LOG"
               local attempt_status=${PIPESTATUS[0]}
