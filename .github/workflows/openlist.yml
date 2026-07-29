@@ -944,6 +944,62 @@ jobs:
       - name: Setup helper functions - part 5
         run: |
           cat > /tmp/functions_part5.sh << 'EOF'
+          # OpenList 后端（联通云盘/阿里云盘等）不允许 PUT 覆盖已存在文件，
+          # rclone sync 在覆盖已存在文件时会收到 405 Method Not Allowed。
+          # 本函数在 sync 前先用 rclone check 找出"两边都有但大小不同"的文件，
+          # 逐个 deletefile 目标端，让随后的 sync 走"新建"路径而非"覆盖"路径。
+          predelete_openlist_overwrites() {
+            local source_path="$1"
+            local dest_path="$2"
+            local task_name="$3"
+
+            # 仅对 openlist: 目标生效
+            if [[ "$dest_path" != openlist:* ]]; then
+              return 0
+            fi
+
+            echo "=== OpenList 预删除覆盖文件: $source_path -> $dest_path ===" | tee -a "$LOG_FILENAME"
+
+            local check_log
+            check_log="/tmp/${task_name}_predelete_$(date +%s).log"
+
+            # 使用与 sync 一致的 --size-only 比较策略，找出"两边都有但不同"的文件
+            rclone check "$source_path" "$dest_path" \
+              --size-only \
+              --combined "$check_log" \
+              --ignore-errors \
+              >/dev/null 2>&1 || true
+
+            if [ ! -f "$check_log" ] || [ ! -s "$check_log" ]; then
+              echo "无差异文件，跳过预删除" | tee -a "$LOG_FILENAME"
+              rm -f "$check_log" 2>/dev/null || true
+              return 0
+            fi
+
+            local predelete_count=0
+            local fail_count=0
+            while IFS= read -r line; do
+              # 仅处理 "* path" 行（两边都有但不同的文件）
+              [[ "$line" != \** ]] && continue
+              local rel_path="${line:2}"
+              [ -z "$rel_path" ] && continue
+              echo "预删除目标端: ${dest_path}/${rel_path}" | tee -a "$LOG_FILENAME"
+              if rclone deletefile "${dest_path}/${rel_path}" \
+                   --retries 1 \
+                   --low-level-retries 1 \
+                   >/dev/null 2>&1; then
+                predelete_count=$((predelete_count + 1))
+              else
+                fail_count=$((fail_count + 1))
+                echo "  预删除失败: ${rel_path}" | tee -a "$LOG_FILENAME"
+              fi
+            done < "$check_log"
+
+            echo "预删除完成: 成功 $predelete_count 个, 失败 $fail_count 个" | tee -a "$LOG_FILENAME"
+            rm -f "$check_log" 2>/dev/null || true
+            return 0
+          }
+
           # Sync with probes and detailed logs.
           # 带探测和更清晰日志的同步函数。
           sync_with_logging() {
@@ -985,6 +1041,7 @@ jobs:
                 --ignore-errors \
                 --verbose \
                 --size-only \
+                --delete-before \
                 "${extra_args[@]}" \
                 2>&1 | tee "$LAST_ATTEMPT_LOG"
               local attempt_status=${PIPESTATUS[0]}
@@ -997,6 +1054,7 @@ jobs:
             }
 
             : > "$LOG_FILENAME"
+            predelete_openlist_overwrites "$source_path" "$dest_path" "$task_name"
             run_rclone_sync_once "initial sync"
             local SYNC_STATUS=$?
 
