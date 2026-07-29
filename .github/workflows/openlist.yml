@@ -1109,27 +1109,28 @@ jobs:
                 local local_file="${tmp_dir}/${basename_file}"
                 local zip_file="${local_file}.405zip"
 
-                if rclone copyto "${source_path}/${failed_line}" "$local_file" \
+                local step_out
+                step_out=$(rclone copyto "${source_path}/${failed_line}" "$local_file" \
                      --retries 1 --low-level-retries 1 --timeout 2m --contimeout 30s \
-                     >/dev/null 2>&1; then
-                  if (cd "$tmp_dir" && zip -q "${basename_file}.405zip" "$basename_file" 2>/dev/null); then
-                    if rclone copyto "$zip_file" "${dest_path}/${failed_line}.405zip" \
+                     2>&1) && {
+                  if (cd "$tmp_dir" && zip -q "${basename_file}.405zip" "$basename_file" 2>&1); then
+                    step_out=$(rclone copyto "$zip_file" "${dest_path}/${failed_line}.405zip" \
                          --retries 1 --low-level-retries 1 --timeout 5m --contimeout 30s \
-                         >/dev/null 2>&1; then
+                         2>&1) && {
                       echo "405 压缩: 成功上传 ${failed_line}.405zip" | tee -a "$LOG_FILENAME"
                       echo "${failed_line}|${file_size}" >> "$success_list"
-                    else
-                      echo "405 压缩: 上传失败 ${failed_line} (${file_size})" | tee -a "$LOG_FILENAME"
+                    } || {
+                      echo "405 压缩: 上传失败 ${failed_line} (${file_size}): $step_out" | tee -a "$LOG_FILENAME"
                       echo "${failed_line}|${file_size}" >> "$fail_list"
-                    fi
+                    }
                   else
                     echo "405 压缩: 压缩失败 ${failed_line} (${file_size})" | tee -a "$LOG_FILENAME"
                     echo "${failed_line}|${file_size}" >> "$fail_list"
                   fi
-                else
-                  echo "405 压缩: 下载源文件失败 ${failed_line} (${file_size})" | tee -a "$LOG_FILENAME"
+                } || {
+                  echo "405 压缩: 下载源文件失败 ${failed_line} (${file_size}): $step_out" | tee -a "$LOG_FILENAME"
                   echo "${failed_line}|${file_size}" >> "$fail_list"
-                fi
+                }
 
                 rm -rf "$tmp_dir"
               done < <(
