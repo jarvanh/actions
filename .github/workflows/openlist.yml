@@ -1083,7 +1083,9 @@ jobs:
             # 405 补救 3 次重试均失败后，尝试压缩上传绕过幽灵文件
             # 下载源端文件 → 本地 zip → 上传 .405zip 到目标端（不修改源端）
             local fail_list="/tmp/${task_name}_405_failures.txt"
+            local success_list="/tmp/${task_name}_405_successes.txt"
             : > "$fail_list"
+            : > "$success_list"
             if [[ "$dest_path" == openlist:* ]] && grep -Eqi 'Method Not Allowed: 405|405 Method Not Allowed' "$LAST_ATTEMPT_LOG"; then
               echo "=== ${task_name} 405 压缩上传 ===" | tee -a "$LOG_FILENAME"
 
@@ -1115,6 +1117,7 @@ jobs:
                          --retries 1 --low-level-retries 1 --timeout 5m --contimeout 30s \
                          >/dev/null 2>&1; then
                       echo "405 压缩: 成功上传 ${failed_line}.405zip" | tee -a "$LOG_FILENAME"
+                      echo "${failed_line}|${file_size}" >> "$success_list"
                     else
                       echo "405 压缩: 上传失败 ${failed_line} (${file_size})" | tee -a "$LOG_FILENAME"
                       echo "${failed_line}|${file_size}" >> "$fail_list"
@@ -1144,8 +1147,17 @@ jobs:
                 fail_summary+="• ${fpath} (${fsize})"$'\n'
               done < "$fail_list"
 
+              local success_summary=""
+              if [ -s "$success_list" ]; then
+                success_summary=$'\n\n📦 压缩上传成功\n'
+                while IFS='|' read -r spath ssize; do
+                  [ -z "$spath" ] && continue
+                  success_summary+="• ${spath}.405zip (${ssize})"$'\n'
+                done < "$success_list"
+              fi
+
               local partial_msg
-              printf -v partial_msg '%s\n%s\n%s\n\n%s\n%s\n%s\n%s\n\n%s\n%s' \
+              printf -v partial_msg '%s\n%s\n%s\n\n%s\n%s\n%s\n%s\n\n%s\n%s%s' \
                 "⚠️ ${task_name} 部分文件同步失败" \
                 '━━━━━━━━━━━━━━' \
                 "状态：405 压缩上传后仍有失败文件" \
@@ -1154,11 +1166,36 @@ jobs:
                 "• 源端：${source_path}" \
                 "• 目标：${dest_path}" \
                 '❌ 失败文件列表' \
-                "$fail_summary"
+                "$fail_summary" \
+                "$success_summary"
 
               curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
                 -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
                 --data-urlencode text="$partial_msg" || true
+
+            elif [ -s "$success_list" ]; then
+              # 405 文件全部压缩上传成功，发送含压缩列表的完成通知
+              local success_summary=""
+              while IFS='|' read -r spath ssize; do
+                [ -z "$spath" ] && continue
+                success_summary+="• ${spath}.405zip (${ssize})"$'\n'
+              done < "$success_list"
+
+              local ok_msg
+              printf -v ok_msg '%s\n%s\n%s\n\n%s\n%s\n%s\n%s\n\n%s\n%s' \
+                "✅ ${task_name} 同步完成（含压缩上传）" \
+                '━━━━━━━━━━━━━━' \
+                "状态：部分文件通过 405 压缩上传绕过" \
+                '📁 任务信息' \
+                "• 任务：${task_name}" \
+                "• 源端：${source_path}" \
+                "• 目标：${dest_path}" \
+                '📦 压缩上传成功' \
+                "$success_summary"
+
+              curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
+                -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
+                --data-urlencode text="$ok_msg" || true
 
             elif [ "$SYNC_STATUS" -ne 0 ] || grep -Eqi '(^|[^[:alpha:]])(ERROR|Error|Failed|failed|timeout|forbidden|unauthorized|permission denied|connection refused)([^[:alpha:]]|$)' "$LAST_ATTEMPT_LOG"; then
               SYNC_FAILED=1
@@ -1185,7 +1222,7 @@ jobs:
                 --data-urlencode text="$ok_message" || true
             fi
 
-            rm -f "$LOG_FILENAME" "$LAST_ATTEMPT_LOG" "$fail_list" /tmp/probe_src.txt /tmp/probe_dst.txt 2>/dev/null || true
+            rm -f "$LOG_FILENAME" "$LAST_ATTEMPT_LOG" "$fail_list" "$success_list" /tmp/probe_src.txt /tmp/probe_dst.txt 2>/dev/null || true
             return "$SYNC_FAILED"
           }
 
