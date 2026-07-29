@@ -1084,6 +1084,41 @@ jobs:
               done
             fi
 
+            # OpenList 后端不允许 PUT 覆盖已存在文件，返回 405 Method Not Allowed。
+            # rclone check 预删除可能因 WebDAV PROPFIND 不完整而漏掉部分文件，
+            # 这里在 sync 失败后从日志解析 405 失败的文件，逐个 deletefile 后重试。
+            if [[ "$dest_path" == openlist:* ]] && grep -Eqi 'Method Not Allowed: 405|405 Method Not Allowed' "$LAST_ATTEMPT_LOG"; then
+              local retry_405_attempts="${OPENLIST_405_RETRY_ATTEMPTS:-3}"
+              local retry_405_index
+
+              for ((retry_405_index = 1; retry_405_index <= retry_405_attempts; retry_405_index++)); do
+                echo "检测到 OpenList 405 Method Not Allowed，解析失败文件并预删除后重试 ${retry_405_index}/${retry_405_attempts}。" | tee -a "$LOG_FILENAME"
+
+                local retry_405_deleted=0
+                while IFS= read -r failed_line; do
+                  [ -z "$failed_line" ] && continue
+                  echo "405 补救: 预删除 ${dest_path}/${failed_line}" | tee -a "$LOG_FILENAME"
+                  if rclone deletefile "${dest_path}/${failed_line}" \
+                       --retries 1 --low-level-retries 1 \
+                       --timeout 2m --contimeout 30s \
+                       >/dev/null 2>&1; then
+                    retry_405_deleted=$((retry_405_deleted + 1))
+                  fi
+                done < <(
+                  grep -E 'ERROR : .+: Failed to copy.*405 Method Not Allowed' "$LAST_ATTEMPT_LOG" 2>/dev/null | \
+                    sed -E 's/^.*ERROR : //; s/: Failed to copy.*$//' | sort -u
+                )
+
+                echo "405 补救: 已预删除 $retry_405_deleted 个文件，重新 sync" | tee -a "$LOG_FILENAME"
+                run_rclone_sync_once "405 retry ${retry_405_index}/${retry_405_attempts}"
+                SYNC_STATUS=$?
+
+                if ! grep -Eqi 'Method Not Allowed: 405|405 Method Not Allowed' "$LAST_ATTEMPT_LOG"; then
+                  break
+                fi
+              done
+            fi
+
             local SYNC_FAILED=0
             if [ "$SYNC_STATUS" -ne 0 ] || grep -Eqi '(^|[^[:alpha:]])(ERROR|Error|Failed|failed|timeout|forbidden|unauthorized|permission denied|connection refused)([^[:alpha:]]|$)' "$LAST_ATTEMPT_LOG"; then
               SYNC_FAILED=1
