@@ -1040,12 +1040,12 @@ jobs:
                 while IFS= read -r failed_line; do
                   [ -z "$failed_line" ] && continue
                   echo "405 补救: 预删除 ${dest_path}/${failed_line}" | tee -a "$LOG_FILENAME"
-                  if rclone deletefile "${dest_path}/${failed_line}" \
+                  local delete_out
+                  delete_out=$(rclone deletefile "${dest_path}/${failed_line}" \
                        --retries 1 --low-level-retries 1 \
                        --timeout 2m --contimeout 30s \
-                       >/dev/null 2>&1; then
-                    retry_405_deleted=$((retry_405_deleted + 1))
-                  fi
+                       2>&1) && retry_405_deleted=$((retry_405_deleted + 1)) || \
+                       echo "405 补救: deletefile 失败: $delete_out" | tee -a "$LOG_FILENAME"
                 done < <(
                   grep -E 'ERROR : .+: Failed to copy.*405 Method Not Allowed' "$LAST_ATTEMPT_LOG" 2>/dev/null | \
                     sed -E 's/^.*ERROR : //; s/: Failed to copy.*$//' | sort -u
