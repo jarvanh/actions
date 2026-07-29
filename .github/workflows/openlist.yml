@@ -1002,8 +1002,8 @@ jobs:
             }
 
             : > "$LOG_FILENAME"
-            run_rclone_sync_once "initial sync"
-            local SYNC_STATUS=$?
+            local SYNC_STATUS=0
+            run_rclone_sync_once "initial sync" || SYNC_STATUS=$?
 
             # OpenList / WebDAV may temporarily lock target objects and return
             # HTTP 423. Retry the whole sync after a delay; already copied files
@@ -1018,8 +1018,7 @@ jobs:
               for ((lock_retry_index = 1; lock_retry_index <= lock_retry_attempts; lock_retry_index++)); do
                 echo "检测到 OpenList 423 Locked，等待 ${lock_retry_sleep}s 后重试 ${lock_retry_index}/${lock_retry_attempts}。" | tee -a "$LOG_FILENAME"
                 sleep "$lock_retry_sleep"
-                run_rclone_sync_once "423 retry ${lock_retry_index}/${lock_retry_attempts}"
-                SYNC_STATUS=$?
+                run_rclone_sync_once "423 retry ${lock_retry_index}/${lock_retry_attempts}" || SYNC_STATUS=$?
 
                 if ! grep -Eqi 'Locked:[[:space:]]*423|423[[:space:]]+Locked' "$LAST_ATTEMPT_LOG"; then
                   break
@@ -1053,8 +1052,7 @@ jobs:
                 )
 
                 echo "405 补救: 已预删除 $retry_405_deleted 个文件，重新 sync" | tee -a "$LOG_FILENAME"
-                run_rclone_sync_once "405 retry ${retry_405_index}/${retry_405_attempts}"
-                SYNC_STATUS=$?
+                run_rclone_sync_once "405 retry ${retry_405_index}/${retry_405_attempts}" || SYNC_STATUS=$?
 
                 if ! grep -Eqi 'Method Not Allowed: 405|405 Method Not Allowed' "$LAST_ATTEMPT_LOG"; then
                   break
