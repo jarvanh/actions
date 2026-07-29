@@ -1002,6 +1002,10 @@ jobs:
             }
 
             : > "$LOG_FILENAME"
+            # 对 OpenList 目标，排除 .405zip 文件（405 压缩备份），防止 sync 删除
+            if [[ "$dest_path" == openlist:* ]]; then
+              extra_args+=("--exclude" "*.405zip")
+            fi
             local SYNC_STATUS=0
             run_rclone_sync_once "initial sync" || SYNC_STATUS=$?
 
@@ -1076,8 +1080,87 @@ jobs:
               done
             fi
 
+            # 405 补救 3 次重试均失败后，尝试压缩上传绕过幽灵文件
+            # 下载源端文件 → 本地 zip → 上传 .405zip 到目标端（不修改源端）
+            local fail_list="/tmp/${task_name}_405_failures.txt"
+            : > "$fail_list"
+            if [[ "$dest_path" == openlist:* ]] && grep -Eqi 'Method Not Allowed: 405|405 Method Not Allowed' "$LAST_ATTEMPT_LOG"; then
+              echo "=== ${task_name} 405 压缩上传 ===" | tee -a "$LOG_FILENAME"
+
+              while IFS= read -r failed_line; do
+                [ -z "$failed_line" ] && continue
+
+                # 获取文件大小
+                local file_size="未知"
+                local size_out
+                size_out=$(rclone size "${source_path}/${failed_line}" 2>/dev/null || true)
+                if [ -n "$size_out" ]; then
+                  file_size=$(echo "$size_out" | sed -n 's/^Total size:[[:space:]]*//p' | head -n 1)
+                fi
+
+                echo "405 压缩: ${failed_line} (${file_size})" | tee -a "$LOG_FILENAME"
+
+                local tmp_dir
+                tmp_dir=$(mktemp -d "/tmp/405_compress_XXXXXX")
+                local basename_file
+                basename_file=$(basename "$failed_line")
+                local local_file="${tmp_dir}/${basename_file}"
+                local zip_file="${local_file}.405zip"
+
+                if rclone copyto "${source_path}/${failed_line}" "$local_file" \
+                     --retries 1 --low-level-retries 1 --timeout 2m --contimeout 30s \
+                     >/dev/null 2>&1; then
+                  if (cd "$tmp_dir" && zip -q "${basename_file}.405zip" "$basename_file" 2>/dev/null); then
+                    if rclone copyto "$zip_file" "${dest_path}/${failed_line}.405zip" \
+                         --retries 1 --low-level-retries 1 --timeout 5m --contimeout 30s \
+                         >/dev/null 2>&1; then
+                      echo "405 压缩: 成功上传 ${failed_line}.405zip" | tee -a "$LOG_FILENAME"
+                    else
+                      echo "405 压缩: 上传失败 ${failed_line} (${file_size})" | tee -a "$LOG_FILENAME"
+                      echo "${failed_line}|${file_size}" >> "$fail_list"
+                    fi
+                  else
+                    echo "405 压缩: 压缩失败 ${failed_line} (${file_size})" | tee -a "$LOG_FILENAME"
+                    echo "${failed_line}|${file_size}" >> "$fail_list"
+                  fi
+                else
+                  echo "405 压缩: 下载源文件失败 ${failed_line} (${file_size})" | tee -a "$LOG_FILENAME"
+                  echo "${failed_line}|${file_size}" >> "$fail_list"
+                fi
+
+                rm -rf "$tmp_dir"
+              done < <(
+                grep -E 'ERROR : .+: Failed to copy.*405 Method Not Allowed' "$LAST_ATTEMPT_LOG" 2>/dev/null | \
+                  sed -E 's/^.*ERROR : //; s/: Failed to copy.*$//' | sort -u
+              )
+            fi
+
             local SYNC_FAILED=0
-            if [ "$SYNC_STATUS" -ne 0 ] || grep -Eqi '(^|[^[:alpha:]])(ERROR|Error|Failed|failed|timeout|forbidden|unauthorized|permission denied|connection refused)([^[:alpha:]]|$)' "$LAST_ATTEMPT_LOG"; then
+            if [ -s "$fail_list" ]; then
+              # 405 压缩上传后仍有失败文件，发送部分失败通知（不阻止后续 task）
+              local fail_summary=""
+              while IFS='|' read -r fpath fsize; do
+                [ -z "$fpath" ] && continue
+                fail_summary+="• ${fpath} (${fsize})"$'\n'
+              done < "$fail_list"
+
+              local partial_msg
+              printf -v partial_msg '%s\n%s\n%s\n\n%s\n%s\n%s\n%s\n\n%s\n%s' \
+                "⚠️ ${task_name} 部分文件同步失败" \
+                '━━━━━━━━━━━━━━' \
+                "状态：405 压缩上传后仍有失败文件" \
+                '📁 任务信息' \
+                "• 任务：${task_name}" \
+                "• 源端：${source_path}" \
+                "• 目标：${dest_path}" \
+                '❌ 失败文件列表' \
+                "$fail_summary"
+
+              curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
+                -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
+                --data-urlencode text="$partial_msg" || true
+
+            elif [ "$SYNC_STATUS" -ne 0 ] || grep -Eqi '(^|[^[:alpha:]])(ERROR|Error|Failed|failed|timeout|forbidden|unauthorized|permission denied|connection refused)([^[:alpha:]]|$)' "$LAST_ATTEMPT_LOG"; then
               SYNC_FAILED=1
               send_log_to_telegram "$LOG_FILENAME" "$task_name" "$SYNC_STATUS" "sync" "$source_path" "$dest_path"
             else
@@ -1102,7 +1185,7 @@ jobs:
                 --data-urlencode text="$ok_message" || true
             fi
 
-            rm -f "$LOG_FILENAME" "$LAST_ATTEMPT_LOG" /tmp/probe_src.txt /tmp/probe_dst.txt 2>/dev/null || true
+            rm -f "$LOG_FILENAME" "$LAST_ATTEMPT_LOG" "$fail_list" /tmp/probe_src.txt /tmp/probe_dst.txt 2>/dev/null || true
             return "$SYNC_FAILED"
           }
 
