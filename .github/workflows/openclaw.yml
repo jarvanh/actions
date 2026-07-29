@@ -400,10 +400,28 @@ jobs:
               rongronggg9/rss-to-telegram:latest
 
             echo "Waiting for rss-to-telegram container to stabilize..."
-            sleep 8
-            docker ps -a --filter name=rss-to-telegram || true
+            sleep 12
+            echo "=== rss-to-telegram status ==="
+            docker ps -a --filter name=rss-to-telegram
+            container_status="$(docker inspect --format '{{.State.Status}}' rss-to-telegram)"
+            health_status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' rss-to-telegram)"
+            restart_count="$(docker inspect --format '{{.RestartCount}}' rss-to-telegram)"
+            echo "rss-to-telegram status=${container_status} health=${health_status} restarts=${restart_count}"
+
+            if [ "$container_status" != "running" ] || [ "$health_status" = "unhealthy" ]; then
+              echo "❌ rss-to-telegram failed to become healthy"
+              docker logs --tail 200 rss-to-telegram || true
+              exit 1
+            fi
+
+            if docker logs --tail 200 rss-to-telegram 2>&1 | grep -Eqi 'LOGIN FAILED|AuthKeyDuplicatedError|Unknown error occurred during login'; then
+              echo "❌ rss-to-telegram encountered a Telegram login failure"
+              docker logs --tail 200 rss-to-telegram || true
+              exit 1
+            fi
+
             echo "=== rss-to-telegram /app tree (for persistence verification) ==="
-            docker exec rss-to-telegram sh -lc 'find /app -maxdepth 3 \( -type f -o -type d \) | sort | sed -n "1,200p"' || true
+            docker exec rss-to-telegram sh -lc 'find /app -maxdepth 3 \( -type f -o -type d \) | sort | sed -n "1,200p"'
             echo "=== rss-to-telegram local bind tree after startup ==="
             find /tmp/local_rsstt -maxdepth 3 | sort || true
           else
