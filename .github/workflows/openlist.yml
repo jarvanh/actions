@@ -1045,13 +1045,29 @@ jobs:
                        --retries 1 --low-level-retries 1 \
                        --timeout 2m --contimeout 30s \
                        2>&1) && retry_405_deleted=$((retry_405_deleted + 1)) || \
-                       echo "405 补救: deletefile 失败: $delete_out" | tee -a "$LOG_FILENAME"
+                       echo "405 补救: deletefile 结果: $delete_out" | tee -a "$LOG_FILENAME"
                 done < <(
                   grep -E 'ERROR : .+: Failed to copy.*405 Method Not Allowed' "$LAST_ATTEMPT_LOG" 2>/dev/null | \
                     sed -E 's/^.*ERROR : //; s/: Failed to copy.*$//' | sort -u
                 )
 
-                echo "405 补救: 已预删除 $retry_405_deleted 个文件，重新 sync" | tee -a "$LOG_FILENAME"
+                # 刷新 OpenList 服务端目录缓存，清除"幽灵文件"
+                # （PROPFIND 返回缓存中已不存在的文件 → rclone 尝试覆盖 → 405）
+                local ol_path="${dest_path#openlist:}"
+                ol_path="/${ol_path}"
+                local ol_token
+                ol_token=$(jq -r '.token' /dropbox/self-hosted/openlist/data/config.json 2>/dev/null || echo "")
+                if [ -n "$ol_token" ] && [ "$ol_token" != "null" ]; then
+                  echo "405 补救: 刷新 OpenList 缓存 $ol_path" | tee -a "$LOG_FILENAME"
+                  curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh" \
+                    -H "Authorization: $ol_token" \
+                    -H "Content-Type: application/json" \
+                    -d "{\"path\":\"$ol_path\",\"recursive\":true}" \
+                    >/dev/null 2>&1 || true
+                  sleep 3
+                fi
+
+                echo "405 补救: 已预删除 $retry_405_deleted 个文件，已刷新缓存，重新 sync" | tee -a "$LOG_FILENAME"
                 run_rclone_sync_once "405 retry ${retry_405_index}/${retry_405_attempts}" || SYNC_STATUS=$?
 
                 if ! grep -Eqi 'Method Not Allowed: 405|405 Method Not Allowed' "$LAST_ATTEMPT_LOG"; then
