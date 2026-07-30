@@ -1104,29 +1104,44 @@ jobs:
 
             local SYNC_FAILED=0
 
-            # 获取源端和目标端大小及文件数量（保留 Byte 信息）
+            # 获取源端和目标端大小及文件数量（用 --json 获取文件数，更可靠）
             local source_size_human="未知"
             local dest_size_human="未知"
             local source_count="未知"
             local dest_count="未知"
-            local count_diff=""
-            local size_output
+            local count_info=""
+            local size_output size_json
+
             size_output=$(rclone size "$source_path" 2>/dev/null || true)
             if [ -n "$size_output" ]; then
               source_size_human=$(echo "$size_output" | sed -n 's/^Total size:[[:space:]]*//p')
-              source_count=$(echo "$size_output" | sed -n 's/^Total objects:[[:space:]]*//p')
             fi
+            size_json=$(rclone size "$source_path" --json 2>/dev/null || true)
+            if [ -n "$size_json" ]; then
+              source_count=$(echo "$size_json" | jq -r '.count // empty' 2>/dev/null || echo "")
+              [ -z "$source_count" ] && source_count="未知"
+            fi
+
             size_output=$(rclone size "$dest_path" 2>/dev/null || true)
             if [ -n "$size_output" ]; then
               dest_size_human=$(echo "$size_output" | sed -n 's/^Total size:[[:space:]]*//p')
-              dest_count=$(echo "$size_output" | sed -n 's/^Total objects:[[:space:]]*//p')
             fi
-            # 计算文件数差异
+            size_json=$(rclone size "$dest_path" --json 2>/dev/null || true)
+            if [ -n "$size_json" ]; then
+              dest_count=$(echo "$size_json" | jq -r '.count // empty' 2>/dev/null || echo "")
+              [ -z "$dest_count" ] && dest_count="未知"
+            fi
+
+            # 始终显示文件数信息
             if [[ "$source_count" =~ ^[0-9]+$ ]] && [[ "$dest_count" =~ ^[0-9]+$ ]]; then
               local diff=$((source_count - dest_count))
               if [ "$diff" -ne 0 ]; then
-                count_diff=$'\n'"文件数差异：${diff} (源端 ${source_count} / 目标 ${dest_count})"
+                count_info="文件数差异：${diff} (源端 ${source_count} / 目标 ${dest_count})"
+              else
+                count_info="文件数：${source_count} (一致)"
               fi
+            else
+              count_info="文件数：源端 ${source_count} / 目标 ${dest_count}"
             fi
 
             if [ -s "$fail_list" ]; then
@@ -1144,7 +1159,7 @@ jobs:
                 "源端大小：${source_size_human}" \
                 "目标大小：${dest_size_human}" \
                 "状态：OpenList 405/409 错误，部分文件无法同步" \
-                "${count_diff}" \
+                "$count_info" \
                 '📁 任务信息' \
                 "• 任务：${task_name}" \
                 "• 源端：${source_path}" \
@@ -1166,7 +1181,7 @@ jobs:
                 '━━━━━━━━━━━━━━' \
                 "源端大小：${source_size_human}" \
                 "目标大小：${dest_size_human}" \
-                "${count_diff}" \
+                "$count_info" \
                 '📁 任务信息' \
                 "• 任务：${task_name}" \
                 "• 源端：${source_path}" \
@@ -1382,23 +1397,38 @@ jobs:
             local gd_dst_size="未知"
             local gd_src_count="未知"
             local gd_dst_count="未知"
-            local gd_count_diff=""
-            local gd_size_out
+            local gd_count_info=""
+            local gd_size_out gd_size_json
+
             gd_size_out=$(rclone size "$source_path" 2>/dev/null || true)
             if [ -n "$gd_size_out" ]; then
               gd_src_size=$(echo "$gd_size_out" | sed -n 's/^Total size:[[:space:]]*//p')
-              gd_src_count=$(echo "$gd_size_out" | sed -n 's/^Total objects:[[:space:]]*//p')
             fi
+            gd_size_json=$(rclone size "$source_path" --json 2>/dev/null || true)
+            if [ -n "$gd_size_json" ]; then
+              gd_src_count=$(echo "$gd_size_json" | jq -r '.count // empty' 2>/dev/null || echo "")
+              [ -z "$gd_src_count" ] && gd_src_count="未知"
+            fi
+
             gd_size_out=$(rclone size "$dest_path" 2>/dev/null || true)
             if [ -n "$gd_size_out" ]; then
               gd_dst_size=$(echo "$gd_size_out" | sed -n 's/^Total size:[[:space:]]*//p')
-              gd_dst_count=$(echo "$gd_size_out" | sed -n 's/^Total objects:[[:space:]]*//p')
             fi
+            gd_size_json=$(rclone size "$dest_path" --json 2>/dev/null || true)
+            if [ -n "$gd_size_json" ]; then
+              gd_dst_count=$(echo "$gd_size_json" | jq -r '.count // empty' 2>/dev/null || echo "")
+              [ -z "$gd_dst_count" ] && gd_dst_count="未知"
+            fi
+
             if [[ "$gd_src_count" =~ ^[0-9]+$ ]] && [[ "$gd_dst_count" =~ ^[0-9]+$ ]]; then
               local gd_diff=$((gd_src_count - gd_dst_count))
               if [ "$gd_diff" -ne 0 ]; then
-                gd_count_diff=$'\n'"文件数差异：${gd_diff} (源端 ${gd_src_count} / 目标 ${gd_dst_count})"
+                gd_count_info="文件数差异：${gd_diff} (源端 ${gd_src_count} / 目标 ${gd_dst_count})"
+              else
+                gd_count_info="文件数：${gd_src_count} (一致)"
               fi
+            else
+              gd_count_info="文件数：源端 ${gd_src_count} / 目标 ${gd_dst_count}"
             fi
 
             if grep -Eqi 'storageQuotaExceeded|storage quota has been exceeded' "$LAST_GD_ATTEMPT_LOG"; then
@@ -1410,7 +1440,7 @@ jobs:
                 "源端大小：${gd_src_size}" \
                 "目标大小：${gd_dst_size}" \
                 "状态：配额超限，跳过本次同步" \
-                "${gd_count_diff}" \
+                "$gd_count_info" \
                 '📁 任务信息' \
                 "• 任务：${task_name}" \
                 "• 源端：${source_path}" \
@@ -1432,7 +1462,7 @@ jobs:
                 "源端大小：${gd_src_size}" \
                 "目标大小：${gd_dst_size}" \
                 "状态：已记录成功时间，未来 1 天内会跳过" \
-                "${gd_count_diff}" \
+                "$gd_count_info" \
                 '📁 任务信息' \
                 "• 任务：${task_name}" \
                 "• 源端：${source_path}" \
