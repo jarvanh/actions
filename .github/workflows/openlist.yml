@@ -1104,17 +1104,17 @@ jobs:
 
             local SYNC_FAILED=0
 
-            # 获取源端和目标端大小
+            # 获取源端和目标端大小（保留 Byte 信息，如 48.575 GiB (52157349639 Byte)）
             local source_size_human="未知"
             local dest_size_human="未知"
             local size_output
             size_output=$(rclone size "$source_path" 2>/dev/null || true)
             if [ -n "$size_output" ]; then
-              source_size_human=$(echo "$size_output" | sed -n 's/^Total size:[[:space:]]*//p' | head -n 1)
+              source_size_human=$(echo "$size_output" | sed -n 's/^Total size:[[:space:]]*//p')
             fi
             size_output=$(rclone size "$dest_path" 2>/dev/null || true)
             if [ -n "$size_output" ]; then
-              dest_size_human=$(echo "$size_output" | sed -n 's/^Total size:[[:space:]]*//p' | head -n 1)
+              dest_size_human=$(echo "$size_output" | sed -n 's/^Total size:[[:space:]]*//p')
             fi
 
             if [ -s "$fail_list" ]; then
