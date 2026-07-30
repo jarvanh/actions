@@ -1358,8 +1358,8 @@ jobs:
             }
 
             : > "$LOG_FILENAME"
-            run_gd_sync_once "initial sync" "${extra_args[@]}"
-            local SYNC_STATUS=$?
+            local SYNC_STATUS=0
+            run_gd_sync_once "initial sync" "${extra_args[@]}" || SYNC_STATUS=$?
 
             if grep -Eqi 'storageQuotaExceeded|storage quota has been exceeded' "$LAST_GD_ATTEMPT_LOG"; then
               # Google Drive 存储配额超限，跳过同步，发送通知，不阻止后续 task
