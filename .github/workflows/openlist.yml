@@ -944,152 +944,6 @@ jobs:
       - name: Setup helper functions - part 5
         run: |
           cat > /tmp/functions_part5.sh << 'EOF'
-          # 尝试多种策略修复 OpenList 405 错误
-          try_fix_405_file() {
-            local src="$1"
-            local dst="$2"
-            local file_path="$3"
-
-            local full_src="${src}/${file_path}"
-            local full_dst="${dst}/${file_path}"
-            local dst_dir
-            dst_dir=$(dirname "$file_path")
-            local basename_file
-            basename_file=$(basename "$file_path")
-
-            echo "尝试修复 405: ${file_path}"
-
-            # 从 dest_path 解析 OpenList 路径（去掉 openlist: 前缀）
-            local ol_base
-            ol_base="${dst#openlist:}"
-            local ol_full_path="${ol_base}/${file_path}"
-
-            # 读取 OpenList token
-            local ol_token=""
-            if [ -f /dropbox/self-hosted/openlist/data/config.json ]; then
-              ol_token=$(jq -r '.token // empty' /dropbox/self-hosted/openlist/data/config.json 2>/dev/null || echo "")
-            fi
-
-            # 策略 1：通过 OpenList API 删除目标端幽灵文件后上传
-            if [ -n "$ol_token" ]; then
-              echo "策略 1: OpenList API 删除幽灵文件"
-              local api_result
-              api_result=$(curl -s -X POST "http://127.0.0.1:5244/api/fs/remove" \
-                -H "Authorization: ${ol_token}" \
-                -H "Content-Type: application/json" \
-                -d "{\"path\":\"${ol_full_path}\"}" 2>/dev/null || echo "")
-              echo "  API 删除响应: ${api_result}"
-
-              local up_out
-              up_out=$(rclone copyto "$full_src" "$full_dst" \
-                --retries 1 --low-level-retries 1 --timeout 2m --contimeout 30s 2>&1) && {
-                echo "策略 1 成功: API 删除后上传成功"
-                return 0
-              }
-              echo "策略 1 失败: ${up_out}"
-            fi
-
-            # 策略 2：上传到临时文件名，然后 moveto
-            echo "策略 2: 临时文件名 + moveto"
-            local tmp_name=".tmp_$(date +%s)_${basename_file}"
-            local tmp_dst="${dst%/}/${dst_dir}/${tmp_name}"
-
-            local tmp_out
-            tmp_out=$(rclone copyto "$full_src" "$tmp_dst" \
-              --retries 1 --low-level-retries 1 --timeout 2m --contimeout 30s 2>&1) && {
-              local move_out
-              move_out=$(rclone moveto "$tmp_dst" "$full_dst" \
-                --retries 1 --low-level-retries 1 --timeout 2m --contimeout 30s 2>&1) && {
-                echo "策略 2 成功: 临时上传 + moveto 成功"
-                return 0
-              }
-              echo "策略 2 moveto 失败: ${move_out}"
-              rclone deletefile "$tmp_dst" 2>/dev/null || true
-            } || {
-              echo "策略 2 上传失败: ${tmp_out}"
-            }
-
-            # 策略 3：通过 OpenList API 直接上传（绕过 WebDAV）
-            if [ -n "$ol_token" ]; then
-              echo "策略 3: OpenList API 直接上传"
-              local tmp_local
-              tmp_local=$(mktemp "/tmp/405_fix_XXXXXX")
-
-              local dl_out
-              dl_out=$(rclone copyto "$full_src" "$tmp_local" \
-                --retries 1 --low-level-retries 1 --timeout 2m --contimeout 30s 2>&1) && {
-                # URL 编码路径
-                local encoded_path
-                encoded_path=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "$ol_full_path" 2>/dev/null || echo "$ol_full_path")
-
-                local api_up
-                api_up=$(curl -s -X PUT "http://127.0.0.1:5244/api/fs/put" \
-                  -H "Authorization: ${ol_token}" \
-                  -H "File-Path: ${encoded_path}" \
-                  -H "Content-Type: application/octet-stream" \
-                  --data-binary @"${tmp_local}" 2>/dev/null || echo "")
-                echo "  API 上传响应: ${api_up}"
-
-                if echo "$api_up" | jq -e '.code == 200' >/dev/null 2>&1; then
-                  echo "策略 3 成功: API 直接上传成功"
-                  rm -f "$tmp_local"
-                  return 0
-                fi
-                echo "策略 3 失败: API 返回非 200"
-              } || {
-                echo "策略 3 下载失败: ${dl_out}"
-              }
-              rm -f "$tmp_local"
-            fi
-
-            # 策略 4：压缩后上传 .zip
-            echo "策略 4: 压缩上传 .zip"
-            local tmp_dir
-            tmp_dir=$(mktemp -d "/tmp/405_fix_XXXXXX")
-            local local_file="${tmp_dir}/${basename_file}"
-
-            local dl2_out
-            dl2_out=$(rclone copyto "$full_src" "$local_file" \
-              --retries 1 --low-level-retries 1 --timeout 2m --contimeout 30s 2>&1) && {
-              if (cd "$tmp_dir" && zip -q "${basename_file}.zip" "$basename_file" 2>&1); then
-                local zip_dst="${full_dst}.zip"
-                local zip_out
-                zip_out=$(rclone copyto "${local_file}.zip" "$zip_dst" \
-                  --retries 1 --low-level-retries 1 --timeout 5m --contimeout 30s 2>&1) && {
-                  echo "策略 4 成功: 压缩上传 .zip 成功 -> ${file_path}.zip"
-                  rm -rf "$tmp_dir"
-                  return 0
-                }
-                echo "策略 4 上传失败: ${zip_out}"
-              else
-                echo "策略 4 压缩失败"
-              fi
-            } || {
-              echo "策略 4 下载失败: ${dl2_out}"
-            }
-            rm -rf "$tmp_dir"
-
-            # 策略 5：上传到简化文件名（去掉特殊字符）
-            echo "策略 5: 简化文件名上传"
-            local simple_name
-            simple_name=$(echo "$basename_file" | sed 's/[^a-zA-Z0-9._-]/_/g')
-            if [ "$simple_name" != "$basename_file" ] && [ -n "$simple_name" ]; then
-              local simple_dst="${dst%/}/${dst_dir}/${simple_name}"
-              local simple_out
-              simple_out=$(rclone copyto "$full_src" "$simple_dst" \
-                --retries 1 --low-level-retries 1 --timeout 2m --contimeout 30s 2>&1) && {
-                echo "策略 5 成功: 简化文件名上传成功 -> ${simple_name}"
-                return 0
-              }
-              echo "策略 5 失败: ${simple_out}"
-            else
-              echo "策略 5 跳过: 文件名无特殊字符或为空"
-            fi
-
-            echo "所有策略均失败: ${file_path}"
-            return 1
-          }
-
           # Sync with probes and detailed logs.
           # 带探测和更清晰日志的同步函数。
           sync_with_logging() {
@@ -1406,9 +1260,159 @@ jobs:
           }
           EOF
 
+      - name: Setup helper functions - part 6 (405 fix)
+        run: |
+          cat > /tmp/functions_part6.sh << 'EOF'
+          # 尝试多种策略修复 OpenList 405 错误
+          try_fix_405_file() {
+            local src="$1"
+            local dst="$2"
+            local file_path="$3"
+
+            local full_src="${src}/${file_path}"
+            local full_dst="${dst}/${file_path}"
+            local dst_dir
+            dst_dir=$(dirname "$file_path")
+            local basename_file
+            basename_file=$(basename "$file_path")
+
+            echo "尝试修复 405: ${file_path}"
+
+            # 从 dest_path 解析 OpenList 路径（去掉 openlist: 前缀）
+            local ol_base
+            ol_base="${dst#openlist:}"
+            local ol_full_path="${ol_base}/${file_path}"
+
+            # 读取 OpenList token
+            local ol_token=""
+            if [ -f /dropbox/self-hosted/openlist/data/config.json ]; then
+              ol_token=$(jq -r '.token // empty' /dropbox/self-hosted/openlist/data/config.json 2>/dev/null || echo "")
+            fi
+
+            # 策略 1：通过 OpenList API 删除目标端幽灵文件后上传
+            if [ -n "$ol_token" ]; then
+              echo "策略 1: OpenList API 删除幽灵文件"
+              local api_result
+              api_result=$(curl -s -X POST "http://127.0.0.1:5244/api/fs/remove" \
+                -H "Authorization: ${ol_token}" \
+                -H "Content-Type: application/json" \
+                -d "{\"path\":\"${ol_full_path}\"}" 2>/dev/null || echo "")
+              echo "  API 删除响应: ${api_result}"
+
+              local up_out
+              up_out=$(rclone copyto "$full_src" "$full_dst" \
+                --retries 1 --low-level-retries 1 --timeout 2m --contimeout 30s 2>&1) && {
+                echo "策略 1 成功: API 删除后上传成功"
+                return 0
+              }
+              echo "策略 1 失败: ${up_out}"
+            fi
+
+            # 策略 2：上传到临时文件名，然后 moveto
+            echo "策略 2: 临时文件名 + moveto"
+            local tmp_name=".tmp_$(date +%s)_${basename_file}"
+            local tmp_dst="${dst%/}/${dst_dir}/${tmp_name}"
+
+            local tmp_out
+            tmp_out=$(rclone copyto "$full_src" "$tmp_dst" \
+              --retries 1 --low-level-retries 1 --timeout 2m --contimeout 30s 2>&1) && {
+              local move_out
+              move_out=$(rclone moveto "$tmp_dst" "$full_dst" \
+                --retries 1 --low-level-retries 1 --timeout 2m --contimeout 30s 2>&1) && {
+                echo "策略 2 成功: 临时上传 + moveto 成功"
+                return 0
+              }
+              echo "策略 2 moveto 失败: ${move_out}"
+              rclone deletefile "$tmp_dst" 2>/dev/null || true
+            } || {
+              echo "策略 2 上传失败: ${tmp_out}"
+            }
+
+            # 策略 3：通过 OpenList API 直接上传（绕过 WebDAV）
+            if [ -n "$ol_token" ]; then
+              echo "策略 3: OpenList API 直接上传"
+              local tmp_local
+              tmp_local=$(mktemp "/tmp/405_fix_XXXXXX")
+
+              local dl_out
+              dl_out=$(rclone copyto "$full_src" "$tmp_local" \
+                --retries 1 --low-level-retries 1 --timeout 2m --contimeout 30s 2>&1) && {
+                # URL 编码路径
+                local encoded_path
+                encoded_path=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "$ol_full_path" 2>/dev/null || echo "$ol_full_path")
+
+                local api_up
+                api_up=$(curl -s -X PUT "http://127.0.0.1:5244/api/fs/put" \
+                  -H "Authorization: ${ol_token}" \
+                  -H "File-Path: ${encoded_path}" \
+                  -H "Content-Type: application/octet-stream" \
+                  --data-binary @"${tmp_local}" 2>/dev/null || echo "")
+                echo "  API 上传响应: ${api_up}"
+
+                if echo "$api_up" | jq -e '.code == 200' >/dev/null 2>&1; then
+                  echo "策略 3 成功: API 直接上传成功"
+                  rm -f "$tmp_local"
+                  return 0
+                fi
+                echo "策略 3 失败: API 返回非 200"
+              } || {
+                echo "策略 3 下载失败: ${dl_out}"
+              }
+              rm -f "$tmp_local"
+            fi
+
+            # 策略 4：压缩后上传 .zip
+            echo "策略 4: 压缩上传 .zip"
+            local tmp_dir
+            tmp_dir=$(mktemp -d "/tmp/405_fix_XXXXXX")
+            local local_file="${tmp_dir}/${basename_file}"
+
+            local dl2_out
+            dl2_out=$(rclone copyto "$full_src" "$local_file" \
+              --retries 1 --low-level-retries 1 --timeout 2m --contimeout 30s 2>&1) && {
+              if (cd "$tmp_dir" && zip -q "${basename_file}.zip" "$basename_file" 2>&1); then
+                local zip_dst="${full_dst}.zip"
+                local zip_out
+                zip_out=$(rclone copyto "${local_file}.zip" "$zip_dst" \
+                  --retries 1 --low-level-retries 1 --timeout 5m --contimeout 30s 2>&1) && {
+                  echo "策略 4 成功: 压缩上传 .zip 成功 -> ${file_path}.zip"
+                  rm -rf "$tmp_dir"
+                  return 0
+                }
+                echo "策略 4 上传失败: ${zip_out}"
+              else
+                echo "策略 4 压缩失败"
+              fi
+            } || {
+              echo "策略 4 下载失败: ${dl2_out}"
+            }
+            rm -rf "$tmp_dir"
+
+            # 策略 5：上传到简化文件名（去掉特殊字符）
+            echo "策略 5: 简化文件名上传"
+            local simple_name
+            simple_name=$(echo "$basename_file" | sed 's/[^a-zA-Z0-9._-]/_/g')
+            if [ "$simple_name" != "$basename_file" ] && [ -n "$simple_name" ]; then
+              local simple_dst="${dst%/}/${dst_dir}/${simple_name}"
+              local simple_out
+              simple_out=$(rclone copyto "$full_src" "$simple_dst" \
+                --retries 1 --low-level-retries 1 --timeout 2m --contimeout 30s 2>&1) && {
+                echo "策略 5 成功: 简化文件名上传成功 -> ${simple_name}"
+                return 0
+              }
+              echo "策略 5 失败: ${simple_out}"
+            else
+              echo "策略 5 跳过: 文件名无特殊字符或为空"
+            fi
+
+            echo "所有策略均失败: ${file_path}"
+            return 1
+          }
+          EOF
+
       - name: Combine all functions
         run: |
-          cat /tmp/functions_part1.sh /tmp/functions_part2.sh /tmp/functions_part3.sh /tmp/functions_part4.sh /tmp/functions_part5.sh > /tmp/functions.sh
+          cat /tmp/functions_part1.sh /tmp/functions_part2.sh /tmp/functions_part3.sh /tmp/functions_part4.sh /tmp/functions_part5.sh /tmp/functions_part6.sh > /tmp/functions.sh
           rm -f /tmp/functions_part*.sh
 
       - name: Initialize sync
