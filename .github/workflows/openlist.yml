@@ -1103,6 +1103,20 @@ jobs:
             fi
 
             local SYNC_FAILED=0
+
+            # 获取源端和目标端大小
+            local source_size_human="未知"
+            local dest_size_human="未知"
+            local size_output
+            size_output=$(rclone size "$source_path" 2>/dev/null || true)
+            if [ -n "$size_output" ]; then
+              source_size_human=$(echo "$size_output" | sed -n 's/^Total size:[[:space:]]*//p' | head -n 1)
+            fi
+            size_output=$(rclone size "$dest_path" 2>/dev/null || true)
+            if [ -n "$size_output" ]; then
+              dest_size_human=$(echo "$size_output" | sed -n 's/^Total size:[[:space:]]*//p' | head -n 1)
+            fi
+
             if [ -s "$fail_list" ]; then
               # 405/409 失败文件，发送部分失败通知（不阻止后续 task）
               local fail_summary=""
@@ -1112,14 +1126,14 @@ jobs:
               done < "$fail_list"
 
               local partial_msg
-              printf -v partial_msg '%s\n%s\n%s\n\n%s\n%s\n%s\n%s\n\n%s\n%s' \
+              printf -v partial_msg '%s\n%s\n%s\n\n%s\n%s\n%s\n%s\n%s\n%s\n\n%s\n%s' \
                 "⚠️ ${task_name} 部分文件同步失败" \
                 '━━━━━━━━━━━━━━' \
                 "状态：OpenList 405/409 错误，部分文件无法同步" \
                 '📁 任务信息' \
                 "• 任务：${task_name}" \
-                "• 源端：${source_path}" \
-                "• 目标：${dest_path}" \
+                "• 源端：${source_path} (${source_size_human})" \
+                "• 目标：${dest_path} (${dest_size_human})" \
                 '❌ 失败文件列表' \
                 "$fail_summary"
 
@@ -1131,17 +1145,12 @@ jobs:
               SYNC_FAILED=1
               send_log_to_telegram "$LOG_FILENAME" "$task_name" "$SYNC_STATUS" "sync" "$source_path" "$dest_path"
             else
-              local source_size_human="未知"
-              local size_output=$(rclone size "$source_path" 2>/dev/null || true)
-              if [ -n "$size_output" ]; then
-                source_size_human=$(echo "$size_output" | sed -n 's/^Total size:[[:space:]]*//p' | head -n 1)
-              fi
-
               local ok_message
-              printf -v ok_message '%s\n%s\n%s\n\n%s\n%s\n%s\n%s' \
+              printf -v ok_message '%s\n%s\n%s\n%s\n\n%s\n%s\n%s\n%s' \
                 "✅ ${task_name} 同步完成" \
                 '━━━━━━━━━━━━━━' \
                 "源端大小：${source_size_human}" \
+                "目标大小：${dest_size_human}" \
                 '📁 任务信息' \
                 "• 任务：${task_name}" \
                 "• 源端：${source_path}" \
