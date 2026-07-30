@@ -1126,14 +1126,16 @@ jobs:
               done < "$fail_list"
 
               local partial_msg
-              printf -v partial_msg '%s\n%s\n%s\n\n%s\n%s\n%s\n%s\n%s\n%s\n\n%s\n%s' \
+              printf -v partial_msg '%s\n%s\n%s\n%s\n%s\n\n%s\n%s\n%s\n%s\n\n%s\n%s' \
                 "⚠️ ${task_name} 部分文件同步失败" \
                 '━━━━━━━━━━━━━━' \
+                "源端大小：${source_size_human}" \
+                "目标大小：${dest_size_human}" \
                 "状态：OpenList 405/409 错误，部分文件无法同步" \
                 '📁 任务信息' \
                 "• 任务：${task_name}" \
-                "• 源端：${source_path} (${source_size_human})" \
-                "• 目标：${dest_path} (${dest_size_human})" \
+                "• 源端：${source_path}" \
+                "• 目标：${dest_path}" \
                 '❌ 失败文件列表' \
                 "$fail_summary"
 
@@ -1363,10 +1365,24 @@ jobs:
 
             if grep -Eqi 'storageQuotaExceeded|storage quota has been exceeded' "$LAST_GD_ATTEMPT_LOG"; then
               # Google Drive 存储配额超限，跳过同步，发送通知，不阻止后续 task
+              local gd_src_size="未知"
+              local gd_dst_size="未知"
+              local gd_size_out
+              gd_size_out=$(rclone size "$source_path" 2>/dev/null || true)
+              if [ -n "$gd_size_out" ]; then
+                gd_src_size=$(echo "$gd_size_out" | sed -n 's/^Total size:[[:space:]]*//p')
+              fi
+              gd_size_out=$(rclone size "$dest_path" 2>/dev/null || true)
+              if [ -n "$gd_size_out" ]; then
+                gd_dst_size=$(echo "$gd_size_out" | sed -n 's/^Total size:[[:space:]]*//p')
+              fi
+
               local quota_msg
-              printf -v quota_msg '%s\n%s\n%s\n\n%s\n%s\n%s\n%s' \
+              printf -v quota_msg '%s\n%s\n%s\n%s\n%s\n\n%s\n%s\n%s\n%s' \
                 "⚠️ ${task_name} Google Drive 存储配额超限" \
                 '━━━━━━━━━━━━━━' \
+                "源端大小：${gd_src_size}" \
+                "目标大小：${gd_dst_size}" \
                 "状态：配额超限，跳过本次同步" \
                 '📁 任务信息' \
                 "• 任务：${task_name}" \
@@ -1382,13 +1398,29 @@ jobs:
             else
               mark_remote_success "$task_name" "$source_path" "$dest_path"
 
+              local gd_src_size="未知"
+              local gd_dst_size="未知"
+              local gd_size_out
+              gd_size_out=$(rclone size "$source_path" 2>/dev/null || true)
+              if [ -n "$gd_size_out" ]; then
+                gd_src_size=$(echo "$gd_size_out" | sed -n 's/^Total size:[[:space:]]*//p')
+              fi
+              gd_size_out=$(rclone size "$dest_path" 2>/dev/null || true)
+              if [ -n "$gd_size_out" ]; then
+                gd_dst_size=$(echo "$gd_size_out" | sed -n 's/^Total size:[[:space:]]*//p')
+              fi
+
               local ok_message
-              printf -v ok_message '%s\n%s\n%s\n%s\n%s' \
+              printf -v ok_message '%s\n%s\n%s\n%s\n%s\n\n%s\n%s\n%s\n%s' \
                 "✅ ${task_name} Google Drive sync 完成" \
                 '━━━━━━━━━━━━━━' \
-                "源端：${source_path}" \
-                "目标：${dest_path}" \
-                "状态：已记录成功时间，未来 1 天内会跳过"
+                "源端大小：${gd_src_size}" \
+                "目标大小：${gd_dst_size}" \
+                "状态：已记录成功时间，未来 1 天内会跳过" \
+                '📁 任务信息' \
+                "• 任务：${task_name}" \
+                "• 源端：${source_path}" \
+                "• 目标：${dest_path}"
 
               curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
                 -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
