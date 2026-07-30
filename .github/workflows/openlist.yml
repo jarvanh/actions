@@ -941,9 +941,9 @@ jobs:
           }
           EOF
 
-      - name: Setup helper functions - part 5
+      - name: Setup sync_with_logging function
         run: |
-          cat > /tmp/functions_part5.sh << 'EOF'
+          cat > /tmp/functions_sync.sh << 'EOF'
           # Sync with probes and detailed logs.
           # 带探测和更清晰日志的同步函数。
           sync_with_logging() {
@@ -1260,9 +1260,9 @@ jobs:
           }
           EOF
 
-      - name: Setup helper functions - part 6 (405 fix)
+      - name: Setup 405 fix function
         run: |
-          cat > /tmp/functions_part6.sh << 'EOF'
+          cat > /tmp/functions_405_fix.sh << 'EOF'
           # 尝试多种策略修复 OpenList 405 错误
           try_fix_405_file() {
             local src="$1"
@@ -1412,8 +1412,8 @@ jobs:
 
       - name: Combine all functions
         run: |
-          cat /tmp/functions_part1.sh /tmp/functions_part2.sh /tmp/functions_part3.sh /tmp/functions_part4.sh /tmp/functions_part5.sh /tmp/functions_part6.sh > /tmp/functions.sh
-          rm -f /tmp/functions_part*.sh
+          cat /tmp/functions_part1.sh /tmp/functions_part2.sh /tmp/functions_part3.sh /tmp/functions_part4.sh /tmp/functions_sync.sh /tmp/functions_405_fix.sh > /tmp/functions.sh
+          rm -f /tmp/functions_part*.sh /tmp/functions_sync.sh /tmp/functions_405_fix.sh
 
       - name: Initialize sync
         run: |
