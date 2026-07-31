@@ -1133,10 +1133,29 @@ jobs:
             fi
 
             # 始终显示文件数信息
+            local diff_files_list=""
             if [[ "$source_count" =~ ^[0-9]+$ ]] && [[ "$dest_count" =~ ^[0-9]+$ ]]; then
               local diff=$((source_count - dest_count))
               if [ "$diff" -ne 0 ]; then
                 count_info="文件数差异：${diff} (源端 ${source_count} / 目标 ${dest_count})"
+                # 文件数不一致时，运行 rclone check 找出差异文件
+                local check_combined
+                check_combined=$(timeout 300 rclone check "$source_path" "$dest_path" --size-only --combined - 2>/dev/null || true)
+                local diff_count=0
+                while IFS= read -r line; do
+                  local marker="${line:0:1}"
+                  local fpath="${line:2}"
+                  case "$marker" in
+                    -) diff_files_list+="• [缺失] ${fpath}"$'\n' ;;
+                    +) diff_files_list+="• [多余] ${fpath}"$'\n' ;;
+                    '*') diff_files_list+="• [不同] ${fpath}"$'\n' ;;
+                  esac
+                  diff_count=$((diff_count + 1))
+                  if [ "$diff_count" -ge 20 ]; then
+                    diff_files_list+="... (更多差异文件省略)"$'\n'
+                    break
+                  fi
+                done <<< "$(echo "$check_combined" | grep -E '^[-+*] ')"
               else
                 count_info="文件数：${source_count} (一致)"
               fi
@@ -1153,19 +1172,37 @@ jobs:
               done < "$fail_list"
 
               local partial_msg
-              printf -v partial_msg '%s\n%s\n%s\n%s\n%s\n%s\n\n%s\n%s\n%s\n%s\n\n%s\n%s' \
-                "⚠️ ${task_name} 部分文件同步失败" \
-                '━━━━━━━━━━━━━━' \
-                "源端大小：${source_size_human}" \
-                "目标大小：${dest_size_human}" \
-                "状态：OpenList 405/409 错误，部分文件无法同步" \
-                "$count_info" \
-                '📁 任务信息' \
-                "• 任务：${task_name}" \
-                "• 源端：${source_path}" \
-                "• 目标：${dest_path}" \
-                '❌ 失败文件列表' \
-                "$fail_summary"
+              if [ -n "$diff_files_list" ]; then
+                printf -v partial_msg '%s\n%s\n%s\n%s\n%s\n%s\n\n%s\n%s\n%s\n%s\n\n%s\n%s\n\n%s\n%s' \
+                  "⚠️ ${task_name} 部分文件同步失败" \
+                  '━━━━━━━━━━━━━━' \
+                  "源端大小：${source_size_human}" \
+                  "目标大小：${dest_size_human}" \
+                  "状态：OpenList 405/409 错误，部分文件无法同步" \
+                  "$count_info" \
+                  '📁 任务信息' \
+                  "• 任务：${task_name}" \
+                  "• 源端：${source_path}" \
+                  "• 目标：${dest_path}" \
+                  '❌ 失败文件列表' \
+                  "$fail_summary" \
+                  '📋 差异文件列表' \
+                  "$diff_files_list"
+              else
+                printf -v partial_msg '%s\n%s\n%s\n%s\n%s\n%s\n\n%s\n%s\n%s\n%s\n\n%s\n%s' \
+                  "⚠️ ${task_name} 部分文件同步失败" \
+                  '━━━━━━━━━━━━━━' \
+                  "源端大小：${source_size_human}" \
+                  "目标大小：${dest_size_human}" \
+                  "状态：OpenList 405/409 错误，部分文件无法同步" \
+                  "$count_info" \
+                  '📁 任务信息' \
+                  "• 任务：${task_name}" \
+                  "• 源端：${source_path}" \
+                  "• 目标：${dest_path}" \
+                  '❌ 失败文件列表' \
+                  "$fail_summary"
+              fi
 
               curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
                 -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
@@ -1176,16 +1213,31 @@ jobs:
               send_log_to_telegram "$LOG_FILENAME" "$task_name" "$SYNC_STATUS" "sync" "$source_path" "$dest_path"
             else
               local ok_message
-              printf -v ok_message '%s\n%s\n%s\n%s\n%s\n\n%s\n%s\n%s\n%s' \
-                "✅ ${task_name} 同步完成" \
-                '━━━━━━━━━━━━━━' \
-                "源端大小：${source_size_human}" \
-                "目标大小：${dest_size_human}" \
-                "$count_info" \
-                '📁 任务信息' \
-                "• 任务：${task_name}" \
-                "• 源端：${source_path}" \
-                "• 目标：${dest_path}"
+              if [ -n "$diff_files_list" ]; then
+                printf -v ok_message '%s\n%s\n%s\n%s\n%s\n\n%s\n%s\n%s\n%s\n\n%s\n%s' \
+                  "✅ ${task_name} 同步完成" \
+                  '━━━━━━━━━━━━━━' \
+                  "源端大小：${source_size_human}" \
+                  "目标大小：${dest_size_human}" \
+                  "$count_info" \
+                  '📁 任务信息' \
+                  "• 任务：${task_name}" \
+                  "• 源端：${source_path}" \
+                  "• 目标：${dest_path}" \
+                  '📋 差异文件列表' \
+                  "$diff_files_list"
+              else
+                printf -v ok_message '%s\n%s\n%s\n%s\n%s\n\n%s\n%s\n%s\n%s' \
+                  "✅ ${task_name} 同步完成" \
+                  '━━━━━━━━━━━━━━' \
+                  "源端大小：${source_size_human}" \
+                  "目标大小：${dest_size_human}" \
+                  "$count_info" \
+                  '📁 任务信息' \
+                  "• 任务：${task_name}" \
+                  "• 源端：${source_path}" \
+                  "• 目标：${dest_path}"
+              fi
 
               curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
                 -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
@@ -1398,6 +1450,7 @@ jobs:
             local gd_src_count="未知"
             local gd_dst_count="未知"
             local gd_count_info=""
+            local gd_diff_files_list=""
             local gd_size_out gd_size_json
 
             gd_size_out=$(rclone size "$source_path" 2>/dev/null || true)
@@ -1424,6 +1477,24 @@ jobs:
               local gd_diff=$((gd_src_count - gd_dst_count))
               if [ "$gd_diff" -ne 0 ]; then
                 gd_count_info="文件数差异：${gd_diff} (源端 ${gd_src_count} / 目标 ${gd_dst_count})"
+                # 文件数不一致时，运行 rclone check 找出差异文件
+                local gd_check_combined
+                gd_check_combined=$(timeout 300 rclone check "$source_path" "$dest_path" --size-only --combined - 2>/dev/null || true)
+                local gd_diff_count=0
+                while IFS= read -r line; do
+                  local marker="${line:0:1}"
+                  local fpath="${line:2}"
+                  case "$marker" in
+                    -) gd_diff_files_list+="• [缺失] ${fpath}"$'\n' ;;
+                    +) gd_diff_files_list+="• [多余] ${fpath}"$'\n' ;;
+                    '*') gd_diff_files_list+="• [不同] ${fpath}"$'\n' ;;
+                  esac
+                  gd_diff_count=$((gd_diff_count + 1))
+                  if [ "$gd_diff_count" -ge 20 ]; then
+                    gd_diff_files_list+="... (更多差异文件省略)"$'\n'
+                    break
+                  fi
+                done <<< "$(echo "$gd_check_combined" | grep -E '^[-+*] ')"
               else
                 gd_count_info="文件数：${gd_src_count} (一致)"
               fi
@@ -1456,17 +1527,33 @@ jobs:
               mark_remote_success "$task_name" "$source_path" "$dest_path"
 
               local ok_message
-              printf -v ok_message '%s\n%s\n%s\n%s\n%s\n%s\n\n%s\n%s\n%s\n%s' \
-                "✅ ${task_name} Google Drive sync 完成" \
-                '━━━━━━━━━━━━━━' \
-                "源端大小：${gd_src_size}" \
-                "目标大小：${gd_dst_size}" \
-                "状态：已记录成功时间，未来 1 天内会跳过" \
-                "$gd_count_info" \
-                '📁 任务信息' \
-                "• 任务：${task_name}" \
-                "• 源端：${source_path}" \
-                "• 目标：${dest_path}"
+              if [ -n "$gd_diff_files_list" ]; then
+                printf -v ok_message '%s\n%s\n%s\n%s\n%s\n%s\n\n%s\n%s\n%s\n%s\n\n%s\n%s' \
+                  "✅ ${task_name} Google Drive sync 完成" \
+                  '━━━━━━━━━━━━━━' \
+                  "源端大小：${gd_src_size}" \
+                  "目标大小：${gd_dst_size}" \
+                  "状态：已记录成功时间，未来 1 天内会跳过" \
+                  "$gd_count_info" \
+                  '📁 任务信息' \
+                  "• 任务：${task_name}" \
+                  "• 源端：${source_path}" \
+                  "• 目标：${dest_path}" \
+                  '📋 差异文件列表' \
+                  "$gd_diff_files_list"
+              else
+                printf -v ok_message '%s\n%s\n%s\n%s\n%s\n%s\n\n%s\n%s\n%s\n%s' \
+                  "✅ ${task_name} Google Drive sync 完成" \
+                  '━━━━━━━━━━━━━━' \
+                  "源端大小：${gd_src_size}" \
+                  "目标大小：${gd_dst_size}" \
+                  "状态：已记录成功时间，未来 1 天内会跳过" \
+                  "$gd_count_info" \
+                  '📁 任务信息' \
+                  "• 任务：${task_name}" \
+                  "• 源端：${source_path}" \
+                  "• 目标：${dest_path}"
+              fi
 
               curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
                 -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
