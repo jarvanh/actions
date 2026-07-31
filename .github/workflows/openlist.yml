@@ -1463,7 +1463,7 @@ jobs:
                   fi
                 done <<< "$(echo "$check_combined" | grep -E '^[-+*] ')"
               else
-                count_info="文件数：${source_count} (一致)"
+                count_info="文件数：${source_count} (一致，源端 ${source_count} / 目标 ${dest_count})"
               fi
             else
               count_info="文件数：源端 ${source_count} / 目标 ${dest_count}"
@@ -1856,7 +1856,7 @@ jobs:
                   fi
                 done <<< "$(echo "$gd_check_combined" | grep -E '^[-+*] ')"
               else
-                gd_count_info="文件数：${gd_src_count} (一致)"
+                gd_count_info="文件数：${gd_src_count} (一致，源端 ${gd_src_count} / 目标 ${gd_dst_count})"
               fi
             else
               gd_count_info="文件数：源端 ${gd_src_count} / 目标 ${gd_dst_count}"
