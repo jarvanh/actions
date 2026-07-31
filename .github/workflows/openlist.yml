@@ -1375,7 +1375,7 @@ jobs:
             if [[ "$dest_path" == openlist:* ]] && grep -Eqi 'Method Not Allowed: 405|405 Method Not Allowed|409 Conflict' "$LAST_ATTEMPT_LOG"; then
               echo "=== ${task_name} 尝试修复 405/409 失败文件 ===" | tee -a "$LOG_FILENAME"
 
-              local fix_log="video_split_fix_${task_name}_$(date +%Y%m%d_%H%M%S).log"
+              local fix_log="fix_405_409_${task_name}_$(date +%Y%m%d_%H%M%S).log"
               echo "=== 405/409 修复日志 - $(date) ===" > "$fix_log"
 
               while IFS= read -r failed_line; do
@@ -1404,7 +1404,15 @@ jobs:
                   sed -E 's/^.*ERROR : //; s/: Failed to copy.*$//' | sort -u
               )
 
-              upload_video_split_log "$fix_log" 2>/dev/null || true
+              if [ -f "$fix_log" ] && [ -s "$fix_log" ]; then
+                local FIX_LOG_DIR="onedrive:/logs/fix_405_409"
+                echo "上传 405/409 修复日志到 OneDrive: $FIX_LOG_DIR"
+                rclone copyto "$fix_log" "$FIX_LOG_DIR/$(basename "$fix_log")" 2>/dev/null || echo "上传修复日志失败，继续执行"
+                rclone lsf "$FIX_LOG_DIR/" 2>/dev/null | \
+                  grep "^fix_405_409_.*\.log$" | sort | head -n -10 | while read -r old_file; do
+                    rclone delete "$FIX_LOG_DIR/$old_file" 2>/dev/null || true
+                  done
+              fi
               rm -f "$fix_log" 2>/dev/null || true
             fi
 
