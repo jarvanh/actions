@@ -1146,9 +1146,9 @@ jobs:
                   local marker="${line:0:1}"
                   local fpath="${line:2}"
                   case "$marker" in
-                    -) diff_files_list+="• [缺失] ${fpath}"$'\n' ;;
-                    +) diff_files_list+="• [多余] ${fpath}"$'\n' ;;
-                    '*') diff_files_list+="• [不同] ${fpath}"$'\n' ;;
+                    -) diff_files_list+="• [源端有/目标缺失] ${fpath}"$'\n' ;;
+                    +) diff_files_list+="• [目标多余/仅目标存在] ${fpath}"$'\n' ;;
+                    '*') diff_files_list+="• [大小/内容不一致] ${fpath}"$'\n' ;;
                   esac
                   diff_count=$((diff_count + 1))
                   if [ "$diff_count" -ge 20 ]; then
@@ -1485,9 +1485,9 @@ jobs:
                   local marker="${line:0:1}"
                   local fpath="${line:2}"
                   case "$marker" in
-                    -) gd_diff_files_list+="• [缺失] ${fpath}"$'\n' ;;
-                    +) gd_diff_files_list+="• [多余] ${fpath}"$'\n' ;;
-                    '*') gd_diff_files_list+="• [不同] ${fpath}"$'\n' ;;
+                    -) gd_diff_files_list+="• [源端有/目标缺失] ${fpath}"$'\n' ;;
+                    +) gd_diff_files_list+="• [目标多余/仅目标存在] ${fpath}"$'\n' ;;
+                    '*') gd_diff_files_list+="• [大小/内容不一致] ${fpath}"$'\n' ;;
                   esac
                   gd_diff_count=$((gd_diff_count + 1))
                   if [ "$gd_diff_count" -ge 20 ]; then
@@ -1575,6 +1575,8 @@ jobs:
           DST_BASE="openlist:aliyundriveCrypt/backup"
           SRC_FILE="${SRC_BASE}/${PROBLEM_FILE_REL}"
           DST_FILE="${DST_BASE}/${PROBLEM_FILE_REL}"
+          DST_DIR="${DST_BASE}/$(dirname -- "$PROBLEM_FILE_REL")"
+          OL_DST_DIR="/aliyundriveCrypt/backup/$(dirname -- "$PROBLEM_FILE_REL")"
 
           TEMP_DIR="temp_problem_file_test_$(date +%s)_$$"
           mkdir -p "$TEMP_DIR"
@@ -1588,16 +1590,20 @@ jobs:
           send_test_result() {
             local status="$1"
             local detail="$2"
+            local synced_files="$3"
             local message
-            printf -v message '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s' \
+            printf -v message '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s' \
               '🔧 问题文件同步测试' \
               '━━━━━━━━━━━━━━' \
-              "文件：${PROBLEM_FILE_REL}" \
+              "原始文件：${PROBLEM_FILE_REL}" \
+              "原始目标：${DST_FILE}" \
               "源端：${SRC_FILE}" \
-              "目标：${DST_FILE}" \
+              "目标目录：${DST_DIR}" \
               "总体状态：${status}" \
               '' \
-              "详细结果：${detail}"
+              "详细结果：${detail}" \
+              '' \
+              "实际同步的文件：${synced_files}"
             curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
               -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
               --data-urlencode text="$message" || true
@@ -1618,41 +1624,47 @@ jobs:
           log_test "源文件已下载，大小：${local_size_human}"
 
           results=""
+          synced_files_list=""
 
-          # 方法 1：直接 rclone copyto
+          # 方法 1：直接 rclone copyto 到原始目标位置
           log_test "方法 1：直接 rclone copyto"
           rclone copyto "$SRC_FILE" "$DST_FILE" --retries 1 --low-level-retries 3 --timeout 5m --contimeout 30s 2>&1 | tee -a "$TEST_LOG"
           m1_status=${PIPESTATUS[0]}
           if [ "$m1_status" -eq 0 ]; then
             results+="方法1 直接 copyto：✅ 成功"$'\n'
+            synced_files_list+="• ${DST_FILE}"$'\n'
             log_test "方法 1 成功"
           else
             results+="方法1 直接 copyto：❌ 失败 (exit=${m1_status})"$'\n'
             log_test "方法 1 失败，exit=${m1_status}"
           fi
 
-          # 方法 2：改名为简单文件名后上传
-          log_test "方法 2：改名后上传"
-          rclone copyto "$TEMP_DIR/options.xml" "${DST_BASE}/Emby_Backup_options_renamed.xml" --retries 1 --low-level-retries 3 --timeout 5m --contimeout 30s 2>&1 | tee -a "$TEST_LOG"
+          # 方法 2：改名为简单文件名后上传到原始目标目录
+          log_test "方法 2：改名后上传到原始目标目录"
+          m2_dst="${DST_DIR}/options_renamed.xml"
+          rclone copyto "$TEMP_DIR/options.xml" "$m2_dst" --retries 1 --low-level-retries 3 --timeout 5m --contimeout 30s 2>&1 | tee -a "$TEST_LOG"
           m2_status=${PIPESTATUS[0]}
           if [ "$m2_status" -eq 0 ]; then
             results+="方法2 改名上传：✅ 成功"$'\n'
+            synced_files_list+="• ${m2_dst}"$'\n'
             log_test "方法 2 成功"
           else
             results+="方法2 改名上传：❌ 失败 (exit=${m2_status})"$'\n'
             log_test "方法 2 失败，exit=${m2_status}"
           fi
 
-          # 方法 3：zip 压缩后上传（用 7z 生成 zip，避免依赖 zip 命令）
-          log_test "方法 3：zip 压缩后上传"
+          # 方法 3：zip 压缩后上传到原始目标目录
+          log_test "方法 3：zip 压缩后上传到原始目标目录"
           (cd "$TEMP_DIR" && 7z a -tzip -mx=0 "options.xml.zip" "options.xml") 2>&1 | tee -a "$TEST_LOG"
           if [ -f "$TEMP_DIR/options.xml.zip" ]; then
             zip_size=$(stat -c%s "$TEMP_DIR/options.xml.zip" 2>/dev/null || stat -f%z "$TEMP_DIR/options.xml.zip" 2>/dev/null || echo 0)
             log_test "zip 大小：$(numfmt --to=iec-i --suffix=B "$zip_size" 2>/dev/null || echo "${zip_size}B")"
-            rclone copyto "$TEMP_DIR/options.xml.zip" "${DST_BASE}/Emby_Backup_options.xml.zip" --retries 1 --low-level-retries 3 --timeout 5m --contimeout 30s 2>&1 | tee -a "$TEST_LOG"
+            m3_dst="${DST_DIR}/options.xml.zip"
+            rclone copyto "$TEMP_DIR/options.xml.zip" "$m3_dst" --retries 1 --low-level-retries 3 --timeout 5m --contimeout 30s 2>&1 | tee -a "$TEST_LOG"
             m3_status=${PIPESTATUS[0]}
             if [ "$m3_status" -eq 0 ]; then
               results+="方法3 zip 上传：✅ 成功"$'\n'
+              synced_files_list+="• ${m3_dst}"$'\n'
               log_test "方法 3 成功"
             else
               results+="方法3 zip 上传：❌ 失败 (exit=${m3_status})"$'\n'
@@ -1663,16 +1675,18 @@ jobs:
             log_test "方法 3 zip 未生成"
           fi
 
-          # 方法 4：7z 压缩后上传
-          log_test "方法 4：7z 压缩后上传"
+          # 方法 4：7z 压缩后上传到原始目标目录
+          log_test "方法 4：7z 压缩后上传到原始目标目录"
           (cd "$TEMP_DIR" && 7z a -t7z -mx=0 "options.xml.7z" "options.xml") 2>&1 | tee -a "$TEST_LOG"
           if [ -f "$TEMP_DIR/options.xml.7z" ]; then
             seven_size=$(stat -c%s "$TEMP_DIR/options.xml.7z" 2>/dev/null || stat -f%z "$TEMP_DIR/options.xml.7z" 2>/dev/null || echo 0)
             log_test "7z 大小：$(numfmt --to=iec-i --suffix=B "$seven_size" 2>/dev/null || echo "${seven_size}B")"
-            rclone copyto "$TEMP_DIR/options.xml.7z" "${DST_BASE}/Emby_Backup_options.xml.7z" --retries 1 --low-level-retries 3 --timeout 5m --contimeout 30s 2>&1 | tee -a "$TEST_LOG"
+            m4_dst="${DST_DIR}/options.xml.7z"
+            rclone copyto "$TEMP_DIR/options.xml.7z" "$m4_dst" --retries 1 --low-level-retries 3 --timeout 5m --contimeout 30s 2>&1 | tee -a "$TEST_LOG"
             m4_status=${PIPESTATUS[0]}
             if [ "$m4_status" -eq 0 ]; then
               results+="方法4 7z 上传：✅ 成功"$'\n'
+              synced_files_list+="• ${m4_dst}"$'\n'
               log_test "方法 4 成功"
             else
               results+="方法4 7z 上传：❌ 失败 (exit=${m4_status})"$'\n'
@@ -1683,22 +1697,23 @@ jobs:
             log_test "方法 4 7z 未生成"
           fi
 
-          # 方法 5：OpenList API 直传（尝试无覆盖的简单 PUT 上传）
-          log_test "方法 5：OpenList API 直传"
+          # 方法 5：OpenList API 直传到原始目标目录
+          log_test "方法 5：OpenList API 直传到原始目标目录"
           ol_token=$(jq -r '.token' /dropbox/self-hosted/openlist/data/config.json 2>/dev/null || echo "")
           if [ -n "$ol_token" ] && [ "$ol_token" != "null" ]; then
             # 先刷新目标目录缓存
             curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh" \
               -H "Authorization: $ol_token" \
               -H "Content-Type: application/json" \
-              -d '{"path":"/aliyundriveCrypt/backup","recursive":true}' >/dev/null 2>&1 || true
+              -d "{\"path\":\"$OL_DST_DIR\",\"recursive\":true}" >/dev/null 2>&1 || true
             sleep 3
 
             # 尝试 OpenList /api/fs/form 上传（form-data，file 字段）
+            m5_dst="${DST_DIR}/options_openlist_api.xml"
             upload_resp=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST "http://127.0.0.1:5244/api/fs/form" \
               -H "Authorization: $ol_token" \
               -F "file=@$TEMP_DIR/options.xml" \
-              -F "path=/aliyundriveCrypt/backup" \
+              -F "path=$OL_DST_DIR" \
               -F "name=options_openlist_api.xml" 2>&1)
             upload_http=$(echo "$upload_resp" | tail -n 1)
             upload_body=$(echo "$upload_resp" | sed '$d')
@@ -1706,6 +1721,7 @@ jobs:
             echo "$upload_body" >> "$TEST_LOG"
             if echo "$upload_http" | grep -qE 'HTTP_CODE:(200|201|204)'; then
               results+="方法5 OpenList API 直传：✅ 成功"$'\n'
+              synced_files_list+="• ${m5_dst}"$'\n'
               log_test "方法 5 成功"
             else
               results+="方法5 OpenList API 直传：❌ 失败 (${upload_http})"$'\n'
@@ -1723,7 +1739,8 @@ jobs:
             overall="所有方法均失败"
           fi
 
-          send_test_result "$overall" "$results"
+          [ -z "$synced_files_list" ] && synced_files_list="无"
+          send_test_result "$overall" "$results" "$synced_files_list"
 
           # 上传测试日志到 onedrive 方便排查
           rclone copyto "$TEST_LOG" "onedrive:/logs/problem_file_test_$(date +%Y%m%d_%H%M%S).log" >/dev/null 2>&1 || true
