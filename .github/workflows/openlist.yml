@@ -1140,7 +1140,7 @@ jobs:
                 count_info="文件数差异：${diff} (源端 ${source_count} / 目标 ${dest_count})"
                 # 文件数不一致时，运行 rclone check 找出差异文件
                 local check_combined
-                check_combined=$(timeout 300 rclone check "$source_path" "$dest_path" --size-only --combined - 2>/dev/null || true)
+                check_combined=$(timeout 300 rclone check "$source_path" "$dest_path" --size-only "${extra_args[@]}" --combined - 2>/dev/null || true)
                 local diff_count=0
                 while IFS= read -r line; do
                   local marker="${line:0:1}"
@@ -1479,7 +1479,7 @@ jobs:
                 gd_count_info="文件数差异：${gd_diff} (源端 ${gd_src_count} / 目标 ${gd_dst_count})"
                 # 文件数不一致时，运行 rclone check 找出差异文件
                 local gd_check_combined
-                gd_check_combined=$(timeout 300 rclone check "$source_path" "$dest_path" --size-only --combined - 2>/dev/null || true)
+                gd_check_combined=$(timeout 300 rclone check "$source_path" "$dest_path" --size-only "${extra_args[@]}" --combined - 2>/dev/null || true)
                 local gd_diff_count=0
                 while IFS= read -r line; do
                   local marker="${line:0:1}"
