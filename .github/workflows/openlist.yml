@@ -1577,6 +1577,8 @@ jobs:
           DST_FILE="${DST_BASE}/${PROBLEM_FILE_REL}"
           DST_DIR="${DST_BASE}/$(dirname -- "$PROBLEM_FILE_REL")"
           OL_DST_DIR="/aliyundriveCrypt/backup/$(dirname -- "$PROBLEM_FILE_REL")"
+          FALLBACK_DIR="${DST_BASE}/problem_test_fallback"
+          OL_FALLBACK_DIR="/aliyundriveCrypt/backup/problem_test_fallback"
 
           TEMP_DIR="temp_problem_file_test_$(date +%s)_$$"
           mkdir -p "$TEMP_DIR"
@@ -1591,14 +1593,18 @@ jobs:
             local status="$1"
             local detail="$2"
             local synced_files="$3"
+            local dir_creation="$4"
+            local test_target_dir="$5"
             local message
-            printf -v message '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s' \
+            printf -v message '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s' \
               '🔧 问题文件同步测试' \
               '━━━━━━━━━━━━━━' \
               "原始文件：${PROBLEM_FILE_REL}" \
               "原始目标：${DST_FILE}" \
               "源端：${SRC_FILE}" \
-              "目标目录：${DST_DIR}" \
+              "原始目标目录：${DST_DIR}" \
+              "实际测试目录：${test_target_dir}" \
+              "目录创建：${dir_creation}" \
               "总体状态：${status}" \
               '' \
               "详细结果：${detail}" \
@@ -1623,6 +1629,50 @@ jobs:
           local_size_human=$(numfmt --to=iec-i --suffix=B "$local_size" 2>/dev/null || echo "${local_size}B")
           log_test "源文件已下载，大小：${local_size_human}"
 
+          # 目录创建探测
+          log_test "探测原始目标目录创建能力: $DST_DIR"
+          rclone mkdir "$DST_DIR" --retries 1 --low-level-retries 3 --timeout 2m --contimeout 30s 2>&1 | tee -a "$TEST_LOG"
+          mkdir_status=${PIPESTATUS[0]}
+          dir_creation_result=""
+          TEST_DST_DIR="$DST_DIR"
+          TEST_OL_DST_DIR="$OL_DST_DIR"
+
+          if [ "$mkdir_status" -eq 0 ]; then
+            dir_creation_result="rclone mkdir 原始目录：✅ 成功"
+            log_test "原始目录 rclone mkdir 成功"
+          else
+            dir_creation_result="rclone mkdir 原始目录：❌ 失败 (exit=${mkdir_status})"
+            log_test "原始目录 rclone mkdir 失败，尝试 OpenList API mkdir..."
+
+            ol_token=$(jq -r '.token' /dropbox/self-hosted/openlist/data/config.json 2>/dev/null || echo "")
+            if [ -n "$ol_token" ] && [ "$ol_token" != "null" ]; then
+              mkdir_resp=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST "http://127.0.0.1:5244/api/fs/mkdir" \
+                -H "Authorization: $ol_token" \
+                -H "Content-Type: application/json" \
+                -d "$(jq -n --arg path "$OL_DST_DIR" '{path:$path}')" 2>&1)
+              mkdir_http=$(echo "$mkdir_resp" | tail -n 1)
+              mkdir_body=$(echo "$mkdir_resp" | sed '$d')
+              log_test "OpenList API mkdir 响应：${mkdir_http}"
+              echo "$mkdir_body" >> "$TEST_LOG"
+              if echo "$mkdir_http" | grep -qE 'HTTP_CODE:(200|201|204)'; then
+                dir_creation_result+=$'\n'"OpenList API mkdir 原始目录：✅ 成功"
+                log_test "OpenList API mkdir 成功"
+              else
+                dir_creation_result+=$'\n'"OpenList API mkdir 原始目录：❌ 失败 (${mkdir_http})"
+                log_test "OpenList API mkdir 失败，切换到 fallback 简单目录"
+                TEST_DST_DIR="$FALLBACK_DIR"
+                TEST_OL_DST_DIR="$OL_FALLBACK_DIR"
+                rclone mkdir "$TEST_DST_DIR" --retries 1 --low-level-retries 3 --timeout 2m --contimeout 30s 2>&1 | tee -a "$TEST_LOG" || true
+              fi
+            else
+              dir_creation_result+=$'\n'"OpenList API mkdir 原始目录：❌ 跳过 (无法读取 token)"
+              log_test "无法读取 OpenList token，切换到 fallback 简单目录"
+              TEST_DST_DIR="$FALLBACK_DIR"
+              TEST_OL_DST_DIR="$OL_FALLBACK_DIR"
+              rclone mkdir "$TEST_DST_DIR" --retries 1 --low-level-retries 3 --timeout 2m --contimeout 30s 2>&1 | tee -a "$TEST_LOG" || true
+            fi
+          fi
+
           results=""
           synced_files_list=""
 
@@ -1639,9 +1689,9 @@ jobs:
             log_test "方法 1 失败，exit=${m1_status}"
           fi
 
-          # 方法 2：改名为简单文件名后上传到原始目标目录
-          log_test "方法 2：改名后上传到原始目标目录"
-          m2_dst="${DST_DIR}/options_renamed.xml"
+          # 方法 2：改名为简单文件名后上传到实际测试目录
+          log_test "方法 2：改名后上传到实际测试目录"
+          m2_dst="${TEST_DST_DIR}/options_renamed.xml"
           rclone copyto "$TEMP_DIR/options.xml" "$m2_dst" --retries 1 --low-level-retries 3 --timeout 5m --contimeout 30s 2>&1 | tee -a "$TEST_LOG"
           m2_status=${PIPESTATUS[0]}
           if [ "$m2_status" -eq 0 ]; then
@@ -1653,13 +1703,13 @@ jobs:
             log_test "方法 2 失败，exit=${m2_status}"
           fi
 
-          # 方法 3：zip 压缩后上传到原始目标目录
-          log_test "方法 3：zip 压缩后上传到原始目标目录"
+          # 方法 3：zip 压缩后上传到实际测试目录
+          log_test "方法 3：zip 压缩后上传到实际测试目录"
           (cd "$TEMP_DIR" && 7z a -tzip -mx=0 "options.xml.zip" "options.xml") 2>&1 | tee -a "$TEST_LOG"
           if [ -f "$TEMP_DIR/options.xml.zip" ]; then
             zip_size=$(stat -c%s "$TEMP_DIR/options.xml.zip" 2>/dev/null || stat -f%z "$TEMP_DIR/options.xml.zip" 2>/dev/null || echo 0)
             log_test "zip 大小：$(numfmt --to=iec-i --suffix=B "$zip_size" 2>/dev/null || echo "${zip_size}B")"
-            m3_dst="${DST_DIR}/options.xml.zip"
+            m3_dst="${TEST_DST_DIR}/options.xml.zip"
             rclone copyto "$TEMP_DIR/options.xml.zip" "$m3_dst" --retries 1 --low-level-retries 3 --timeout 5m --contimeout 30s 2>&1 | tee -a "$TEST_LOG"
             m3_status=${PIPESTATUS[0]}
             if [ "$m3_status" -eq 0 ]; then
@@ -1675,13 +1725,13 @@ jobs:
             log_test "方法 3 zip 未生成"
           fi
 
-          # 方法 4：7z 压缩后上传到原始目标目录
-          log_test "方法 4：7z 压缩后上传到原始目标目录"
+          # 方法 4：7z 压缩后上传到实际测试目录
+          log_test "方法 4：7z 压缩后上传到实际测试目录"
           (cd "$TEMP_DIR" && 7z a -t7z -mx=0 "options.xml.7z" "options.xml") 2>&1 | tee -a "$TEST_LOG"
           if [ -f "$TEMP_DIR/options.xml.7z" ]; then
             seven_size=$(stat -c%s "$TEMP_DIR/options.xml.7z" 2>/dev/null || stat -f%z "$TEMP_DIR/options.xml.7z" 2>/dev/null || echo 0)
             log_test "7z 大小：$(numfmt --to=iec-i --suffix=B "$seven_size" 2>/dev/null || echo "${seven_size}B")"
-            m4_dst="${DST_DIR}/options.xml.7z"
+            m4_dst="${TEST_DST_DIR}/options.xml.7z"
             rclone copyto "$TEMP_DIR/options.xml.7z" "$m4_dst" --retries 1 --low-level-retries 3 --timeout 5m --contimeout 30s 2>&1 | tee -a "$TEST_LOG"
             m4_status=${PIPESTATUS[0]}
             if [ "$m4_status" -eq 0 ]; then
@@ -1697,23 +1747,23 @@ jobs:
             log_test "方法 4 7z 未生成"
           fi
 
-          # 方法 5：OpenList API 直传到原始目标目录
-          log_test "方法 5：OpenList API 直传到原始目标目录"
+          # 方法 5：OpenList API 直传到实际测试目录
+          log_test "方法 5：OpenList API 直传到实际测试目录"
           ol_token=$(jq -r '.token' /dropbox/self-hosted/openlist/data/config.json 2>/dev/null || echo "")
           if [ -n "$ol_token" ] && [ "$ol_token" != "null" ]; then
             # 先刷新目标目录缓存
             curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh" \
               -H "Authorization: $ol_token" \
               -H "Content-Type: application/json" \
-              -d "{\"path\":\"$OL_DST_DIR\",\"recursive\":true}" >/dev/null 2>&1 || true
+              -d "$(jq -n --arg path "$TEST_OL_DST_DIR" '{path:$path,recursive:true}')" >/dev/null 2>&1 || true
             sleep 3
 
             # 尝试 OpenList /api/fs/form 上传（form-data，file 字段）
-            m5_dst="${DST_DIR}/options_openlist_api.xml"
+            m5_dst="${TEST_DST_DIR}/options_openlist_api.xml"
             upload_resp=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST "http://127.0.0.1:5244/api/fs/form" \
               -H "Authorization: $ol_token" \
               -F "file=@$TEMP_DIR/options.xml" \
-              -F "path=$OL_DST_DIR" \
+              -F "path=$TEST_OL_DST_DIR" \
               -F "name=options_openlist_api.xml" 2>&1)
             upload_http=$(echo "$upload_resp" | tail -n 1)
             upload_body=$(echo "$upload_resp" | sed '$d')
@@ -1740,7 +1790,7 @@ jobs:
           fi
 
           [ -z "$synced_files_list" ] && synced_files_list="无"
-          send_test_result "$overall" "$results" "$synced_files_list"
+          send_test_result "$overall" "$results" "$synced_files_list" "$dir_creation_result" "$TEST_DST_DIR"
 
           # 上传测试日志到 onedrive 方便排查
           rclone copyto "$TEST_LOG" "onedrive:/logs/problem_file_test_$(date +%Y%m%d_%H%M%S).log" >/dev/null 2>&1 || true
