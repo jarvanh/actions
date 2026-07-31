@@ -1675,6 +1675,13 @@ jobs:
           }
           EOF
 
+      - name: Test fix 405 options.xml
+        run: |
+          source /tmp/functions.sh
+          echo "=== 测试修复 405: options.xml ==="
+          try_fix_405_file "onedrive:backup" "openlist:wopan176Crypt/backup" "Emby Backup - 2021-11-18 08.40.36 - Auto/library/gd - j - 社交/options.xml"
+          echo "=== 测试结束，退出码: $? ==="
+
       - name: Sync backup task
         run: |
           source /tmp/functions.sh
