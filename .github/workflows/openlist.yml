@@ -1390,7 +1390,7 @@ jobs:
 
                 echo "修复中: ${failed_line} (${file_size})" | tee -a "$LOG_FILENAME"
 
-                try_fix_failed_file "$source_path" "$dest_path" "$task_name" "$failed_line" "$fix_log"
+                try_fix_failed_file "$source_path" "$dest_path" "$task_name" "$failed_line" "$fix_log" || true
 
                 if [ "$TRY_FIX_STATUS" = "success" ]; then
                   echo "修复成功: ${failed_line} -> 方法: ${TRY_FIX_METHOD}" | tee -a "$LOG_FILENAME"
