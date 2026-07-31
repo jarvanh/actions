@@ -939,6 +939,293 @@ jobs:
 
             rm -f "$video_split_log" 2>/dev/null || true
           }
+
+          # 尝试修复 405/409 等无法同步的文件
+          # 1. 如果目录创建失败，将最底层文件夹名 base64 编码后重新创建目录
+          # 2. 目录就绪后，尝试多种方式同步文件到目标路径（原始路径或 base64 目录）
+          # 结果写入全局变量：
+          #   TRY_FIX_STATUS / TRY_FIX_ORIGINAL / TRY_FIX_ALTERNATIVE / TRY_FIX_METHOD / TRY_FIX_MESSAGE
+          try_fix_failed_file() {
+            local source_path="$1"
+            local dest_path="$2"
+            local task_name="$3"
+            local failed_file_rel="$4"
+            local fix_log="$5"
+
+            local src_file="${source_path}/${failed_file_rel}"
+            local dst_file="${dest_path}/${failed_file_rel}"
+
+            local file_name
+            file_name="$(basename -- "$failed_file_rel")"
+            local file_dir_rel
+            file_dir_rel="$(dirname -- "$failed_file_rel")"
+            local dst_dir="${dest_path}/${file_dir_rel}"
+
+            # OpenList 内部路径（去掉 openlist: 前缀）
+            local ol_dst_base="${dest_path#openlist:}"
+            ol_dst_base="${ol_dst_base#/}"
+
+            TRY_FIX_STATUS="failed"
+            TRY_FIX_ORIGINAL="$failed_file_rel"
+            TRY_FIX_ALTERNATIVE=""
+            TRY_FIX_METHOD=""
+            TRY_FIX_MESSAGE=""
+
+            log_video_split "$fix_log" "=== 尝试修复失败文件: $failed_file_rel ==="
+            log_video_split "$fix_log" "源文件: $src_file"
+            log_video_split "$fix_log" "原始目标: $dst_file"
+
+            # 下载源文件到本地临时目录
+            local temp_dir="temp_fix_$(date +%s)_$$"
+            mkdir -p "$temp_dir"
+            local local_file="$temp_dir/$file_name"
+
+            log_video_split "$fix_log" "下载源文件到本地..."
+            rclone copyto "$src_file" "$local_file" --retries 1 --low-level-retries 3 --timeout 5m --contimeout 30s 2>&1 | \
+              while IFS= read -r line; do log_video_split "$fix_log" "rclone copy: $line"; done
+            local copy_status=${PIPESTATUS[0]}
+
+            if [ "$copy_status" -ne 0 ] || [ ! -f "$local_file" ]; then
+              log_video_split "$fix_log" "下载源文件失败，跳过修复"
+              TRY_FIX_MESSAGE="无法从源端下载文件"
+              rm -rf "$temp_dir" 2>/dev/null || true
+              return 1
+            fi
+
+            local file_size
+            file_size=$(stat -c%s "$local_file" 2>/dev/null || stat -f%z "$local_file" 2>/dev/null || echo 0)
+            log_video_split "$fix_log" "源文件已下载，大小: $(numfmt --to=iec-i --suffix=B "$file_size" 2>/dev/null || echo "${file_size}B")"
+
+            # Step 1: 尝试创建/确认目标目录
+            local dir_ok=0
+            local used_base64_dir=0
+            local actual_dst_dir="$dst_dir"
+            local actual_ol_dir="/${ol_dst_base}/${file_dir_rel}"
+
+            log_video_split "$fix_log" "尝试创建目标目录: $dst_dir"
+            rclone mkdir "$dst_dir" --retries 1 --low-level-retries 3 --timeout 2m --contimeout 30s 2>&1 | \
+              while IFS= read -r line; do log_video_split "$fix_log" "rclone mkdir: $line"; done
+            local mkdir_status=${PIPESTATUS[0]}
+
+            if [ "$mkdir_status" -eq 0 ]; then
+              dir_ok=1
+              log_video_split "$fix_log" "rclone mkdir 成功"
+            else
+              log_video_split "$fix_log" "rclone mkdir 失败 (exit=$mkdir_status)，尝试 OpenList API mkdir..."
+              local ol_token
+              ol_token=$(jq -r '.token' /dropbox/self-hosted/openlist/data/config.json 2>/dev/null || echo "")
+              if [ -n "$ol_token" ] && [ "$ol_token" != "null" ]; then
+                local mkdir_resp mkdir_http
+                mkdir_resp=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST "http://127.0.0.1:5244/api/fs/mkdir" \
+                  -H "Authorization: $ol_token" \
+                  -H "Content-Type: application/json" \
+                  -d "$(jq -n --arg path "$actual_ol_dir" '{path:$path}')" 2>&1)
+                mkdir_http=$(echo "$mkdir_resp" | tail -n 1)
+                log_video_split "$fix_log" "OpenList API mkdir 响应: ${mkdir_http}"
+                if echo "$mkdir_http" | grep -qE 'HTTP_CODE:(200|201|204)'; then
+                  dir_ok=1
+                  log_video_split "$fix_log" "OpenList API mkdir 成功"
+                fi
+              fi
+
+              # 目录创建仍失败 → base64 编码最底层文件夹名后重试
+              if [ "$dir_ok" -ne 1 ] && [ "$file_dir_rel" != "." ] && [ -n "$file_dir_rel" ]; then
+                log_video_split "$fix_log" "目录创建失败，尝试 base64 编码文件夹名..."
+
+                local parent_dir leaf_dir encoded_leaf new_file_dir_rel
+                parent_dir="$(dirname -- "$file_dir_rel")"
+                leaf_dir="$(basename -- "$file_dir_rel")"
+                encoded_leaf=$(printf '%s' "$leaf_dir" | base64 | tr '+/' '-_' | tr -d '=')
+
+                if [ "$parent_dir" = "." ]; then
+                  new_file_dir_rel="$encoded_leaf"
+                else
+                  new_file_dir_rel="${parent_dir}/${encoded_leaf}"
+                fi
+
+                actual_dst_dir="${dest_path}/${new_file_dir_rel}"
+                actual_ol_dir="/${ol_dst_base}/${new_file_dir_rel}"
+
+                log_video_split "$fix_log" "原始目录: $file_dir_rel"
+                log_video_split "$fix_log" "base64 编码目录: $new_file_dir_rel"
+
+                rclone mkdir "$actual_dst_dir" --retries 1 --low-level-retries 3 --timeout 2m --contimeout 30s 2>&1 | \
+                  while IFS= read -r line; do log_video_split "$fix_log" "rclone mkdir (base64): $line"; done
+                mkdir_status=${PIPESTATUS[0]}
+
+                if [ "$mkdir_status" -eq 0 ]; then
+                  dir_ok=1
+                  used_base64_dir=1
+                  dst_file="${actual_dst_dir}/${file_name}"
+                  log_video_split "$fix_log" "base64 目录创建成功 (rclone)"
+                else
+                  if [ -n "$ol_token" ] && [ "$ol_token" != "null" ]; then
+                    mkdir_resp=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST "http://127.0.0.1:5244/api/fs/mkdir" \
+                      -H "Authorization: $ol_token" \
+                      -H "Content-Type: application/json" \
+                      -d "$(jq -n --arg path "$actual_ol_dir" '{path:$path}')" 2>&1)
+                    mkdir_http=$(echo "$mkdir_resp" | tail -n 1)
+                    log_video_split "$fix_log" "OpenList API mkdir (base64) 响应: ${mkdir_http}"
+                    if echo "$mkdir_http" | grep -qE 'HTTP_CODE:(200|201|204)'; then
+                      dir_ok=1
+                      used_base64_dir=1
+                      dst_file="${actual_dst_dir}/${file_name}"
+                      log_video_split "$fix_log" "base64 目录创建成功 (API)"
+                    fi
+                  fi
+                fi
+              fi
+            fi
+
+            if [ "$dir_ok" -ne 1 ]; then
+              log_video_split "$fix_log" "目录创建最终失败（含 base64 编码后），无法修复文件"
+              TRY_FIX_MESSAGE="目录创建失败，base64 编码后仍失败"
+              rm -rf "$temp_dir" 2>/dev/null || true
+              return 1
+            fi
+
+            # Step 2: 目录已就绪，尝试多种方式同步文件
+            log_video_split "$fix_log" "目录已就绪，开始尝试多种方式同步到: $dst_file"
+
+            local ol_dst_dir
+            ol_dst_dir="${dst_file#openlist:}"
+            ol_dst_dir="/$(dirname -- "$ol_dst_dir")"
+
+            local ol_token
+            ol_token=$(jq -r '.token' /dropbox/self-hosted/openlist/data/config.json 2>/dev/null || echo "")
+
+            # 方法 1：直接 rclone copyto
+            log_video_split "$fix_log" "方法 1: 直接 rclone copyto"
+            rclone copyto "$src_file" "$dst_file" --retries 1 --low-level-retries 3 --timeout 5m --contimeout 30s 2>&1 | \
+              while IFS= read -r line; do log_video_split "$fix_log" "m1: $line"; done
+            local m1_status=${PIPESTATUS[0]}
+            if [ "$m1_status" -eq 0 ]; then
+              log_video_split "$fix_log" "方法 1 成功"
+              TRY_FIX_STATUS="success"
+              TRY_FIX_METHOD="直接 copyto"
+              if [ "$used_base64_dir" -eq 1 ]; then
+                TRY_FIX_ALTERNATIVE="${dst_file#${dest_path}/}"
+              else
+                TRY_FIX_ALTERNATIVE="$failed_file_rel"
+              fi
+              rm -rf "$temp_dir" 2>/dev/null || true
+              return 0
+            fi
+            log_video_split "$fix_log" "方法 1 失败 (exit=$m1_status)"
+
+            # 方法 2：文件名 base64 编码后上传
+            log_video_split "$fix_log" "方法 2: 文件名 base64 编码后上传"
+            local encoded_name m2_dst m2_status
+            if [[ "$file_name" == *.* ]]; then
+              local name_base="${file_name%.*}"
+              local name_ext="${file_name##*.}"
+              encoded_name="$(printf '%s' "$name_base" | base64 | tr '+/' '-_' | tr -d '=').${name_ext}"
+            else
+              encoded_name="$(printf '%s' "$file_name" | base64 | tr '+/' '-_' | tr -d '=')"
+            fi
+            m2_dst="${actual_dst_dir}/${encoded_name}"
+            rclone copyto "$local_file" "$m2_dst" --retries 1 --low-level-retries 3 --timeout 5m --contimeout 30s 2>&1 | \
+              while IFS= read -r line; do log_video_split "$fix_log" "m2: $line"; done
+            m2_status=${PIPESTATUS[0]}
+            if [ "$m2_status" -eq 0 ]; then
+              log_video_split "$fix_log" "方法 2 成功"
+              TRY_FIX_STATUS="success"
+              TRY_FIX_METHOD="base64 改名上传"
+              TRY_FIX_ALTERNATIVE="${m2_dst#${dest_path}/}"
+              rm -rf "$temp_dir" 2>/dev/null || true
+              return 0
+            fi
+            log_video_split "$fix_log" "方法 2 失败 (exit=$m2_status)"
+
+            # 方法 3：zip 压缩后上传
+            log_video_split "$fix_log" "方法 3: zip 压缩后上传"
+            (cd "$temp_dir" && 7z a -tzip -mx=0 "${file_name}.zip" "$file_name") 2>&1 | \
+              while IFS= read -r line; do log_video_split "$fix_log" "m3 7z: $line"; done
+            if [ -f "$temp_dir/${file_name}.zip" ]; then
+              local m3_dst m3_status
+              m3_dst="${actual_dst_dir}/${file_name}.zip"
+              rclone copyto "$temp_dir/${file_name}.zip" "$m3_dst" --retries 1 --low-level-retries 3 --timeout 5m --contimeout 30s 2>&1 | \
+                while IFS= read -r line; do log_video_split "$fix_log" "m3: $line"; done
+              m3_status=${PIPESTATUS[0]}
+              if [ "$m3_status" -eq 0 ]; then
+                log_video_split "$fix_log" "方法 3 成功"
+                TRY_FIX_STATUS="success"
+                TRY_FIX_METHOD="zip 压缩"
+                TRY_FIX_ALTERNATIVE="${m3_dst#${dest_path}/}"
+                rm -rf "$temp_dir" 2>/dev/null || true
+                return 0
+              fi
+              log_video_split "$fix_log" "方法 3 失败 (exit=$m3_status)"
+            else
+              log_video_split "$fix_log" "方法 3 zip 未生成"
+            fi
+
+            # 方法 4：7z 压缩后上传
+            log_video_split "$fix_log" "方法 4: 7z 压缩后上传"
+            (cd "$temp_dir" && 7z a -t7z -mx=0 "${file_name}.7z" "$file_name") 2>&1 | \
+              while IFS= read -r line; do log_video_split "$fix_log" "m4 7z: $line"; done
+            if [ -f "$temp_dir/${file_name}.7z" ]; then
+              local m4_dst m4_status
+              m4_dst="${actual_dst_dir}/${file_name}.7z"
+              rclone copyto "$temp_dir/${file_name}.7z" "$m4_dst" --retries 1 --low-level-retries 3 --timeout 5m --contimeout 30s 2>&1 | \
+                while IFS= read -r line; do log_video_split "$fix_log" "m4: $line"; done
+              m4_status=${PIPESTATUS[0]}
+              if [ "$m4_status" -eq 0 ]; then
+                log_video_split "$fix_log" "方法 4 成功"
+                TRY_FIX_STATUS="success"
+                TRY_FIX_METHOD="7z 压缩"
+                TRY_FIX_ALTERNATIVE="${m4_dst#${dest_path}/}"
+                rm -rf "$temp_dir" 2>/dev/null || true
+                return 0
+              fi
+              log_video_split "$fix_log" "方法 4 失败 (exit=$m4_status)"
+            else
+              log_video_split "$fix_log" "方法 4 7z 未生成"
+            fi
+
+            # 方法 5：OpenList API 直传
+            log_video_split "$fix_log" "方法 5: OpenList API 直传"
+            if [ -n "$ol_token" ] && [ "$ol_token" != "null" ]; then
+              curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh" \
+                -H "Authorization: $ol_token" \
+                -H "Content-Type: application/json" \
+                -d "$(jq -n --arg path "$ol_dst_dir" '{path:$path,recursive:true}')" >/dev/null 2>&1 || true
+              sleep 3
+
+              local api_name upload_resp upload_http
+              if [[ "$file_name" == *.* ]]; then
+                api_name="file_$(date +%s)_$$_api.${file_name##*.}"
+              else
+                api_name="file_$(date +%s)_$$_api"
+              fi
+              upload_resp=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST "http://127.0.0.1:5244/api/fs/form" \
+                -H "Authorization: $ol_token" \
+                -F "file=@$local_file" \
+                -F "path=$ol_dst_dir" \
+                -F "name=$api_name" 2>&1)
+              upload_http=$(echo "$upload_resp" | tail -n 1)
+              log_video_split "$fix_log" "OpenList API 上传响应: ${upload_http}"
+              if echo "$upload_http" | grep -qE 'HTTP_CODE:(200|201|204)'; then
+                log_video_split "$fix_log" "方法 5 成功"
+                TRY_FIX_STATUS="success"
+                TRY_FIX_METHOD="OpenList API 直传"
+                local alt_rel_base
+                alt_rel_base="${actual_dst_dir#${dest_path}/}"
+                TRY_FIX_ALTERNATIVE="${alt_rel_base}/${api_name}"
+                rm -rf "$temp_dir" 2>/dev/null || true
+                return 0
+              fi
+              log_video_split "$fix_log" "方法 5 失败 (${upload_http})"
+            else
+              log_video_split "$fix_log" "方法 5 跳过（无法读取 OpenList token）"
+            fi
+
+            # 所有方法均失败
+            log_video_split "$fix_log" "所有修复方法均失败"
+            TRY_FIX_MESSAGE="所有修复方法均失败"
+            rm -rf "$temp_dir" 2>/dev/null || true
+            return 1
+          }
           EOF
 
       - name: Setup helper functions - part 5
@@ -1076,17 +1363,20 @@ jobs:
               done
             fi
 
-            # 405/409 失败文件直接记录，不阻止后续 task
-            # OpenList 联通云盘后端对某些路径拒绝 PUT（405）或 MKCOL（409），无法绕过
+            # 405/409 失败文件尝试修复（目录创建→base64编码→多种方式同步），不阻止后续 task
             local fail_list="/tmp/${task_name}_sync_failures.txt"
+            local fix_list="/tmp/${task_name}_sync_fixes.txt"
             : > "$fail_list"
+            : > "$fix_list"
             if [[ "$dest_path" == openlist:* ]] && grep -Eqi 'Method Not Allowed: 405|405 Method Not Allowed|409 Conflict' "$LAST_ATTEMPT_LOG"; then
-              echo "=== ${task_name} 无法同步的文件 (405/409) ===" | tee -a "$LOG_FILENAME"
+              echo "=== ${task_name} 尝试修复 405/409 失败文件 ===" | tee -a "$LOG_FILENAME"
+
+              local fix_log="video_split_fix_${task_name}_$(date +%Y%m%d_%H%M%S).log"
+              echo "=== 405/409 修复日志 - $(date) ===" > "$fix_log"
 
               while IFS= read -r failed_line; do
                 [ -z "$failed_line" ] && continue
 
-                # 获取文件大小
                 local file_size="未知"
                 local size_out
                 size_out=$(rclone size "${source_path}/${failed_line}" 2>/dev/null || true)
@@ -1094,12 +1384,24 @@ jobs:
                   file_size=$(echo "$size_out" | sed -n 's/^Total size:[[:space:]]*//p' | head -n 1)
                 fi
 
-                echo "跳过: ${failed_line} (${file_size})" | tee -a "$LOG_FILENAME"
-                echo "${failed_line}|${file_size}" >> "$fail_list"
+                echo "修复中: ${failed_line} (${file_size})" | tee -a "$LOG_FILENAME"
+
+                try_fix_failed_file "$source_path" "$dest_path" "$task_name" "$failed_line" "$fix_log"
+
+                if [ "$TRY_FIX_STATUS" = "success" ]; then
+                  echo "修复成功: ${failed_line} -> 方法: ${TRY_FIX_METHOD}" | tee -a "$LOG_FILENAME"
+                  echo "${TRY_FIX_ORIGINAL}|${TRY_FIX_ALTERNATIVE}|${TRY_FIX_METHOD}|${file_size}" >> "$fix_list"
+                else
+                  echo "修复失败: ${failed_line} - ${TRY_FIX_MESSAGE}" | tee -a "$LOG_FILENAME"
+                  echo "${failed_line}|${file_size}|${TRY_FIX_MESSAGE}" >> "$fail_list"
+                fi
               done < <(
                 grep -E 'ERROR : .+: Failed to copy.*(405 Method Not Allowed|409 Conflict)' "$LAST_ATTEMPT_LOG" 2>/dev/null | \
                   sed -E 's/^.*ERROR : //; s/: Failed to copy.*$//' | sort -u
               )
+
+              upload_video_split_log "$fix_log" 2>/dev/null || true
+              rm -f "$fix_log" 2>/dev/null || true
             fi
 
             local SYNC_FAILED=0
@@ -1146,8 +1448,8 @@ jobs:
                   local marker="${line:0:1}"
                   local fpath="${line:2}"
                   case "$marker" in
-                    -) diff_files_list+="• [源端有/目标缺失] ${fpath}"$'\n' ;;
-                    +) diff_files_list+="• [目标多余/仅目标存在] ${fpath}"$'\n' ;;
+                    +) diff_files_list+="• [源端有/目标缺失] ${fpath}"$'\n' ;;
+                    -) diff_files_list+="• [目标多余/仅目标存在] ${fpath}"$'\n' ;;
                     '*') diff_files_list+="• [大小/内容不一致] ${fpath}"$'\n' ;;
                   esac
                   diff_count=$((diff_count + 1))
@@ -1173,49 +1475,85 @@ jobs:
             done
             [ -z "$exclude_list" ] && exclude_list="无"
 
-            if [ -s "$fail_list" ]; then
-              # 405/409 失败文件，发送部分失败通知（不阻止后续 task）
-              local fail_summary=""
-              while IFS='|' read -r fpath fsize; do
-                [ -z "$fpath" ] && continue
-                fail_summary+="• ${fpath} (${fsize})"$'\n'
-              done < "$fail_list"
+            # 构建 fix_summary（已修复文件：原始文件名 → 实际文件名）
+            local fix_summary=""
+            if [ -s "$fix_list" ]; then
+              while IFS='|' read -r f_original f_alternative f_method f_size; do
+                [ -z "$f_original" ] && continue
+                if [ "$f_original" = "$f_alternative" ]; then
+                  fix_summary+="• ${f_original} (${f_size}) — ${f_method}"$'\n'
+                else
+                  fix_summary+="• ${f_original} → ${f_alternative} (${f_size}, ${f_method})"$'\n'
+                fi
+              done < "$fix_list"
+            fi
+            [ -z "$fix_summary" ] && fix_summary="无"
 
-              local partial_msg
+            # 构建 fail_summary（无法修复的文件）
+            local fail_summary=""
+            if [ -s "$fail_list" ]; then
+              while IFS='|' read -r fpath fsize fmsg; do
+                [ -z "$fpath" ] && continue
+                fail_summary+="• ${fpath} (${fsize}) — ${fmsg}"$'\n'
+              done < "$fail_list"
+            fi
+            [ -z "$fail_summary" ] && fail_summary="无"
+
+            if [ -s "$fail_list" ]; then
+              # 有无法修复的 405/409 文件
+              local partial_msg=""
+              partial_msg+="⚠️ ${task_name} 部分文件同步失败"$'\n'
+              partial_msg+='━━━━━━━━━━━━━━'$'\n'
+              partial_msg+="源端大小：${source_size_human}"$'\n'
+              partial_msg+="目标大小：${dest_size_human}"$'\n'
+              partial_msg+="状态：OpenList 405/409 错误，部分文件无法同步"$'\n'
+              partial_msg+="${count_info}"$'\n'
+              partial_msg+=$'\n'
+              partial_msg+='📁 任务信息'$'\n'
+              partial_msg+="• 任务：${task_name}"$'\n'
+              partial_msg+="• 源端：${source_path}"$'\n'
+              partial_msg+="• 目标：${dest_path}"$'\n'
+              partial_msg+=$'\n'
+              partial_msg+='🚫 排除规则'$'\n'
+              partial_msg+="${exclude_list}"$'\n'
+              partial_msg+=$'\n'
+              partial_msg+='✅ 已通过其他方式同步（原始文件名 → 实际文件名）：'$'\n'
+              partial_msg+="${fix_summary}"$'\n'
+              partial_msg+=$'\n'
+              partial_msg+='❌ 无法同步文件：'$'\n'
+              partial_msg+="${fail_summary}"
               if [ -n "$diff_files_list" ]; then
-                printf -v partial_msg '%s\n%s\n%s\n%s\n%s\n%s\n\n%s\n%s\n%s\n%s\n\n%s\n%s\n\n%s\n%s\n\n%s\n%s' \
-                  "⚠️ ${task_name} 部分文件同步失败" \
-                  '━━━━━━━━━━━━━━' \
-                  "源端大小：${source_size_human}" \
-                  "目标大小：${dest_size_human}" \
-                  "状态：OpenList 405/409 错误，部分文件无法同步" \
-                  "$count_info" \
-                  '📁 任务信息' \
-                  "• 任务：${task_name}" \
-                  "• 源端：${source_path}" \
-                  "• 目标：${dest_path}" \
-                  '🚫 排除规则' \
-                  "$exclude_list" \
-                  '❌ 失败文件列表' \
-                  "$fail_summary" \
-                  '📋 差异文件列表' \
-                  "$diff_files_list"
-              else
-                printf -v partial_msg '%s\n%s\n%s\n%s\n%s\n%s\n\n%s\n%s\n%s\n%s\n\n%s\n%s\n\n%s\n%s' \
-                  "⚠️ ${task_name} 部分文件同步失败" \
-                  '━━━━━━━━━━━━━━' \
-                  "源端大小：${source_size_human}" \
-                  "目标大小：${dest_size_human}" \
-                  "状态：OpenList 405/409 错误，部分文件无法同步" \
-                  "$count_info" \
-                  '📁 任务信息' \
-                  "• 任务：${task_name}" \
-                  "• 源端：${source_path}" \
-                  "• 目标：${dest_path}" \
-                  '🚫 排除规则' \
-                  "$exclude_list" \
-                  '❌ 失败文件列表' \
-                  "$fail_summary"
+                partial_msg+=$'\n\n'"📋 差异文件列表："$'\n'
+                partial_msg+="$diff_files_list"
+              fi
+
+              curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
+                -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
+                --data-urlencode text="$partial_msg" || true
+
+            elif [ -s "$fix_list" ]; then
+              # 所有 405/409 文件都已通过其他方式同步
+              local partial_msg=""
+              partial_msg+="⚠️ ${task_name} 部分文件已通过其他方式同步"$'\n'
+              partial_msg+='━━━━━━━━━━━━━━'$'\n'
+              partial_msg+="源端大小：${source_size_human}"$'\n'
+              partial_msg+="目标大小：${dest_size_human}"$'\n'
+              partial_msg+="状态：405/409 文件已修复，但部分文件使用了其他方式同步"$'\n'
+              partial_msg+="${count_info}"$'\n'
+              partial_msg+=$'\n'
+              partial_msg+='📁 任务信息'$'\n'
+              partial_msg+="• 任务：${task_name}"$'\n'
+              partial_msg+="• 源端：${source_path}"$'\n'
+              partial_msg+="• 目标：${dest_path}"$'\n'
+              partial_msg+=$'\n'
+              partial_msg+='🚫 排除规则'$'\n'
+              partial_msg+="${exclude_list}"$'\n'
+              partial_msg+=$'\n'
+              partial_msg+='✅ 已通过其他方式同步（原始文件名 → 实际文件名）：'$'\n'
+              partial_msg+="${fix_summary}"
+              if [ -n "$diff_files_list" ]; then
+                partial_msg+=$'\n\n'"📋 差异文件列表："$'\n'
+                partial_msg+="$diff_files_list"
               fi
 
               curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
@@ -1262,7 +1600,7 @@ jobs:
                 --data-urlencode text="$ok_message" || true
             fi
 
-            rm -f "$LOG_FILENAME" "$LAST_ATTEMPT_LOG" "$fail_list" /tmp/probe_src.txt /tmp/probe_dst.txt 2>/dev/null || true
+            rm -f "$LOG_FILENAME" "$LAST_ATTEMPT_LOG" "$fail_list" "$fix_list" /tmp/probe_src.txt /tmp/probe_dst.txt 2>/dev/null || true
             return "$SYNC_FAILED"
           }
 
@@ -1503,8 +1841,8 @@ jobs:
                   local marker="${line:0:1}"
                   local fpath="${line:2}"
                   case "$marker" in
-                    -) gd_diff_files_list+="• [源端有/目标缺失] ${fpath}"$'\n' ;;
-                    +) gd_diff_files_list+="• [目标多余/仅目标存在] ${fpath}"$'\n' ;;
+                    +) gd_diff_files_list+="• [源端有/目标缺失] ${fpath}"$'\n' ;;
+                    -) gd_diff_files_list+="• [目标多余/仅目标存在] ${fpath}"$'\n' ;;
                     '*') gd_diff_files_list+="• [大小/内容不一致] ${fpath}"$'\n' ;;
                   esac
                   gd_diff_count=$((gd_diff_count + 1))
@@ -1598,239 +1936,6 @@ jobs:
             return 0
           }
           EOF
-
-      - name: Temporary test for problematic file
-        run: |
-          source /tmp/functions.sh
-          echo "=== 临时测试：尝试多种方式同步问题文件 ==="
-
-          PROBLEM_FILE_REL="Emby Backup - 2021-11-18 08.40.36 - Auto/library/gd - j - 社交/options.xml"
-          SRC_BASE="onedrive:backup"
-          DST_BASE="openlist:aliyundriveCrypt/backup"
-          SRC_FILE="${SRC_BASE}/${PROBLEM_FILE_REL}"
-          DST_FILE="${DST_BASE}/${PROBLEM_FILE_REL}"
-          DST_DIR="${DST_BASE}/$(dirname -- "$PROBLEM_FILE_REL")"
-          OL_DST_DIR="/aliyundriveCrypt/backup/$(dirname -- "$PROBLEM_FILE_REL")"
-          FALLBACK_DIR="${DST_BASE}/problem_test_fallback"
-          OL_FALLBACK_DIR="/aliyundriveCrypt/backup/problem_test_fallback"
-
-          TEMP_DIR="temp_problem_file_test_$(date +%s)_$$"
-          mkdir -p "$TEMP_DIR"
-          TEST_LOG="${TEMP_DIR}/problem_file_test.log"
-          : > "$TEST_LOG"
-
-          log_test() {
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$TEST_LOG"
-          }
-
-          send_test_result() {
-            local status="$1"
-            local detail="$2"
-            local synced_files="$3"
-            local dir_creation="$4"
-            local test_target_dir="$5"
-            local message
-            printf -v message '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s' \
-              '🔧 问题文件同步测试' \
-              '━━━━━━━━━━━━━━' \
-              "原始文件：${PROBLEM_FILE_REL}" \
-              "原始目标：${DST_FILE}" \
-              "源端：${SRC_FILE}" \
-              "原始目标目录：${DST_DIR}" \
-              "实际测试目录：${test_target_dir}" \
-              "目录创建：${dir_creation}" \
-              "总体状态：${status}" \
-              '' \
-              "详细结果：${detail}" \
-              '' \
-              "实际同步的文件：${synced_files}"
-            curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
-              -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
-              --data-urlencode text="$message" || true
-          }
-
-          # 下载源文件到本地
-          log_test "下载源文件到本地..."
-          rclone copyto "$SRC_FILE" "$TEMP_DIR/options.xml" --retries 3 --low-level-retries 3 --timeout 5m --contimeout 30s 2>&1 | tee -a "$TEST_LOG"
-          local_copy_status=${PIPESTATUS[0]}
-          if [ "$local_copy_status" -ne 0 ] || [ ! -f "$TEMP_DIR/options.xml" ]; then
-            log_test "无法从 onedrive 下载源文件，退出测试"
-            send_test_result "❌ 失败" "无法从源端下载文件到本地，请检查源路径或网络"
-            rm -rf "$TEMP_DIR" 2>/dev/null || true
-            exit 0
-          fi
-          local_size=$(stat -c%s "$TEMP_DIR/options.xml" 2>/dev/null || stat -f%z "$TEMP_DIR/options.xml" 2>/dev/null || echo 0)
-          local_size_human=$(numfmt --to=iec-i --suffix=B "$local_size" 2>/dev/null || echo "${local_size}B")
-          log_test "源文件已下载，大小：${local_size_human}"
-
-          # 目录创建探测
-          log_test "探测原始目标目录创建能力: $DST_DIR"
-          rclone mkdir "$DST_DIR" --retries 1 --low-level-retries 3 --timeout 2m --contimeout 30s 2>&1 | tee -a "$TEST_LOG"
-          mkdir_status=${PIPESTATUS[0]}
-          dir_creation_result=""
-          TEST_DST_DIR="$DST_DIR"
-          TEST_OL_DST_DIR="$OL_DST_DIR"
-
-          if [ "$mkdir_status" -eq 0 ]; then
-            dir_creation_result="rclone mkdir 原始目录：✅ 成功"
-            log_test "原始目录 rclone mkdir 成功"
-          else
-            dir_creation_result="rclone mkdir 原始目录：❌ 失败 (exit=${mkdir_status})"
-            log_test "原始目录 rclone mkdir 失败，尝试 OpenList API mkdir..."
-
-            ol_token=$(jq -r '.token' /dropbox/self-hosted/openlist/data/config.json 2>/dev/null || echo "")
-            if [ -n "$ol_token" ] && [ "$ol_token" != "null" ]; then
-              mkdir_resp=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST "http://127.0.0.1:5244/api/fs/mkdir" \
-                -H "Authorization: $ol_token" \
-                -H "Content-Type: application/json" \
-                -d "$(jq -n --arg path "$OL_DST_DIR" '{path:$path}')" 2>&1)
-              mkdir_http=$(echo "$mkdir_resp" | tail -n 1)
-              mkdir_body=$(echo "$mkdir_resp" | sed '$d')
-              log_test "OpenList API mkdir 响应：${mkdir_http}"
-              echo "$mkdir_body" >> "$TEST_LOG"
-              if echo "$mkdir_http" | grep -qE 'HTTP_CODE:(200|201|204)'; then
-                dir_creation_result+=$'\n'"OpenList API mkdir 原始目录：✅ 成功"
-                log_test "OpenList API mkdir 成功"
-              else
-                dir_creation_result+=$'\n'"OpenList API mkdir 原始目录：❌ 失败 (${mkdir_http})"
-                log_test "OpenList API mkdir 失败，切换到 fallback 简单目录"
-                TEST_DST_DIR="$FALLBACK_DIR"
-                TEST_OL_DST_DIR="$OL_FALLBACK_DIR"
-                rclone mkdir "$TEST_DST_DIR" --retries 1 --low-level-retries 3 --timeout 2m --contimeout 30s 2>&1 | tee -a "$TEST_LOG" || true
-              fi
-            else
-              dir_creation_result+=$'\n'"OpenList API mkdir 原始目录：❌ 跳过 (无法读取 token)"
-              log_test "无法读取 OpenList token，切换到 fallback 简单目录"
-              TEST_DST_DIR="$FALLBACK_DIR"
-              TEST_OL_DST_DIR="$OL_FALLBACK_DIR"
-              rclone mkdir "$TEST_DST_DIR" --retries 1 --low-level-retries 3 --timeout 2m --contimeout 30s 2>&1 | tee -a "$TEST_LOG" || true
-            fi
-          fi
-
-          results=""
-          synced_files_list=""
-
-          # 方法 1：直接 rclone copyto 到原始目标位置
-          log_test "方法 1：直接 rclone copyto"
-          rclone copyto "$SRC_FILE" "$DST_FILE" --retries 1 --low-level-retries 3 --timeout 5m --contimeout 30s 2>&1 | tee -a "$TEST_LOG"
-          m1_status=${PIPESTATUS[0]}
-          if [ "$m1_status" -eq 0 ]; then
-            results+="方法1 直接 copyto：✅ 成功"$'\n'
-            synced_files_list+="• ${DST_FILE}"$'\n'
-            log_test "方法 1 成功"
-          else
-            results+="方法1 直接 copyto：❌ 失败 (exit=${m1_status})"$'\n'
-            log_test "方法 1 失败，exit=${m1_status}"
-          fi
-
-          # 方法 2：改名为简单文件名后上传到实际测试目录
-          log_test "方法 2：改名后上传到实际测试目录"
-          m2_dst="${TEST_DST_DIR}/options_renamed.xml"
-          rclone copyto "$TEMP_DIR/options.xml" "$m2_dst" --retries 1 --low-level-retries 3 --timeout 5m --contimeout 30s 2>&1 | tee -a "$TEST_LOG"
-          m2_status=${PIPESTATUS[0]}
-          if [ "$m2_status" -eq 0 ]; then
-            results+="方法2 改名上传：✅ 成功"$'\n'
-            synced_files_list+="• ${m2_dst}"$'\n'
-            log_test "方法 2 成功"
-          else
-            results+="方法2 改名上传：❌ 失败 (exit=${m2_status})"$'\n'
-            log_test "方法 2 失败，exit=${m2_status}"
-          fi
-
-          # 方法 3：zip 压缩后上传到实际测试目录
-          log_test "方法 3：zip 压缩后上传到实际测试目录"
-          (cd "$TEMP_DIR" && 7z a -tzip -mx=0 "options.xml.zip" "options.xml") 2>&1 | tee -a "$TEST_LOG"
-          if [ -f "$TEMP_DIR/options.xml.zip" ]; then
-            zip_size=$(stat -c%s "$TEMP_DIR/options.xml.zip" 2>/dev/null || stat -f%z "$TEMP_DIR/options.xml.zip" 2>/dev/null || echo 0)
-            log_test "zip 大小：$(numfmt --to=iec-i --suffix=B "$zip_size" 2>/dev/null || echo "${zip_size}B")"
-            m3_dst="${TEST_DST_DIR}/options.xml.zip"
-            rclone copyto "$TEMP_DIR/options.xml.zip" "$m3_dst" --retries 1 --low-level-retries 3 --timeout 5m --contimeout 30s 2>&1 | tee -a "$TEST_LOG"
-            m3_status=${PIPESTATUS[0]}
-            if [ "$m3_status" -eq 0 ]; then
-              results+="方法3 zip 上传：✅ 成功"$'\n'
-              synced_files_list+="• ${m3_dst}"$'\n'
-              log_test "方法 3 成功"
-            else
-              results+="方法3 zip 上传：❌ 失败 (exit=${m3_status})"$'\n'
-              log_test "方法 3 失败，exit=${m3_status}"
-            fi
-          else
-            results+="方法3 zip 上传：❌ 失败 (zip 未生成)"$'\n'
-            log_test "方法 3 zip 未生成"
-          fi
-
-          # 方法 4：7z 压缩后上传到实际测试目录
-          log_test "方法 4：7z 压缩后上传到实际测试目录"
-          (cd "$TEMP_DIR" && 7z a -t7z -mx=0 "options.xml.7z" "options.xml") 2>&1 | tee -a "$TEST_LOG"
-          if [ -f "$TEMP_DIR/options.xml.7z" ]; then
-            seven_size=$(stat -c%s "$TEMP_DIR/options.xml.7z" 2>/dev/null || stat -f%z "$TEMP_DIR/options.xml.7z" 2>/dev/null || echo 0)
-            log_test "7z 大小：$(numfmt --to=iec-i --suffix=B "$seven_size" 2>/dev/null || echo "${seven_size}B")"
-            m4_dst="${TEST_DST_DIR}/options.xml.7z"
-            rclone copyto "$TEMP_DIR/options.xml.7z" "$m4_dst" --retries 1 --low-level-retries 3 --timeout 5m --contimeout 30s 2>&1 | tee -a "$TEST_LOG"
-            m4_status=${PIPESTATUS[0]}
-            if [ "$m4_status" -eq 0 ]; then
-              results+="方法4 7z 上传：✅ 成功"$'\n'
-              synced_files_list+="• ${m4_dst}"$'\n'
-              log_test "方法 4 成功"
-            else
-              results+="方法4 7z 上传：❌ 失败 (exit=${m4_status})"$'\n'
-              log_test "方法 4 失败，exit=${m4_status}"
-            fi
-          else
-            results+="方法4 7z 上传：❌ 失败 (7z 未生成)"$'\n'
-            log_test "方法 4 7z 未生成"
-          fi
-
-          # 方法 5：OpenList API 直传到实际测试目录
-          log_test "方法 5：OpenList API 直传到实际测试目录"
-          ol_token=$(jq -r '.token' /dropbox/self-hosted/openlist/data/config.json 2>/dev/null || echo "")
-          if [ -n "$ol_token" ] && [ "$ol_token" != "null" ]; then
-            # 先刷新目标目录缓存
-            curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh" \
-              -H "Authorization: $ol_token" \
-              -H "Content-Type: application/json" \
-              -d "$(jq -n --arg path "$TEST_OL_DST_DIR" '{path:$path,recursive:true}')" >/dev/null 2>&1 || true
-            sleep 3
-
-            # 尝试 OpenList /api/fs/form 上传（form-data，file 字段）
-            m5_dst="${TEST_DST_DIR}/options_openlist_api.xml"
-            upload_resp=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST "http://127.0.0.1:5244/api/fs/form" \
-              -H "Authorization: $ol_token" \
-              -F "file=@$TEMP_DIR/options.xml" \
-              -F "path=$TEST_OL_DST_DIR" \
-              -F "name=options_openlist_api.xml" 2>&1)
-            upload_http=$(echo "$upload_resp" | tail -n 1)
-            upload_body=$(echo "$upload_resp" | sed '$d')
-            log_test "OpenList API 上传响应：${upload_http}"
-            echo "$upload_body" >> "$TEST_LOG"
-            if echo "$upload_http" | grep -qE 'HTTP_CODE:(200|201|204)'; then
-              results+="方法5 OpenList API 直传：✅ 成功"$'\n'
-              synced_files_list+="• ${m5_dst}"$'\n'
-              log_test "方法 5 成功"
-            else
-              results+="方法5 OpenList API 直传：❌ 失败 (${upload_http})"$'\n'
-              log_test "方法 5 失败，${upload_http}"
-            fi
-          else
-            results+="方法5 OpenList API 直传：❌ 跳过 (无法读取 token)"$'\n'
-            log_test "方法 5 跳过，无法读取 OpenList token"
-          fi
-
-          overall="完成（查看详细结果）"
-          if echo "$results" | grep -q "✅ 成功"; then
-            overall="至少一种方法成功"
-          else
-            overall="所有方法均失败"
-          fi
-
-          [ -z "$synced_files_list" ] && synced_files_list="无"
-          send_test_result "$overall" "$results" "$synced_files_list" "$dir_creation_result" "$TEST_DST_DIR"
-
-          # 上传测试日志到 onedrive 方便排查
-          rclone copyto "$TEST_LOG" "onedrive:/logs/problem_file_test_$(date +%Y%m%d_%H%M%S).log" >/dev/null 2>&1 || true
-
-          rm -rf "$TEMP_DIR" 2>/dev/null || true
-          echo "=== 临时测试结束 ==="
 
       - name: Sync backup task
         run: |
