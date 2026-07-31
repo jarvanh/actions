@@ -1418,21 +1418,21 @@ jobs:
             local count_info=""
             local size_output size_json
 
-            size_output=$(rclone size "$source_path" "${extra_args[@]}" 2>/dev/null || true)
+            size_output=$(rclone size "$source_path" 2>/dev/null || true)
             if [ -n "$size_output" ]; then
               source_size_human=$(echo "$size_output" | sed -n 's/^Total size:[[:space:]]*//p')
             fi
-            size_json=$(rclone size "$source_path" --json "${extra_args[@]}" 2>/dev/null || true)
+            size_json=$(rclone size "$source_path" --json 2>/dev/null || true)
             if [ -n "$size_json" ]; then
               source_count=$(echo "$size_json" | jq -r '.count // empty' 2>/dev/null || echo "")
               [ -z "$source_count" ] && source_count="未知"
             fi
 
-            size_output=$(rclone size "$dest_path" "${extra_args[@]}" 2>/dev/null || true)
+            size_output=$(rclone size "$dest_path" 2>/dev/null || true)
             if [ -n "$size_output" ]; then
               dest_size_human=$(echo "$size_output" | sed -n 's/^Total size:[[:space:]]*//p')
             fi
-            size_json=$(rclone size "$dest_path" --json "${extra_args[@]}" 2>/dev/null || true)
+            size_json=$(rclone size "$dest_path" --json 2>/dev/null || true)
             if [ -n "$size_json" ]; then
               dest_count=$(echo "$size_json" | jq -r '.count // empty' 2>/dev/null || echo "")
               [ -z "$dest_count" ] && dest_count="未知"
@@ -1463,7 +1463,7 @@ jobs:
                   fi
                 done <<< "$(echo "$check_combined" | grep -E '^[-+*] ')"
               else
-                count_info="文件数：${source_count} (一致，源端 ${source_count} / 目标 ${dest_count})"
+                count_info="文件数：${source_count} (一致)"
               fi
             else
               count_info="文件数：源端 ${source_count} / 目标 ${dest_count}"
@@ -1813,21 +1813,21 @@ jobs:
             local gd_diff_files_list=""
             local gd_size_out gd_size_json
 
-            gd_size_out=$(rclone size "$source_path" "${extra_args[@]}" 2>/dev/null || true)
+            gd_size_out=$(rclone size "$source_path" 2>/dev/null || true)
             if [ -n "$gd_size_out" ]; then
               gd_src_size=$(echo "$gd_size_out" | sed -n 's/^Total size:[[:space:]]*//p')
             fi
-            gd_size_json=$(rclone size "$source_path" --json "${extra_args[@]}" 2>/dev/null || true)
+            gd_size_json=$(rclone size "$source_path" --json 2>/dev/null || true)
             if [ -n "$gd_size_json" ]; then
               gd_src_count=$(echo "$gd_size_json" | jq -r '.count // empty' 2>/dev/null || echo "")
               [ -z "$gd_src_count" ] && gd_src_count="未知"
             fi
 
-            gd_size_out=$(rclone size "$dest_path" "${extra_args[@]}" 2>/dev/null || true)
+            gd_size_out=$(rclone size "$dest_path" 2>/dev/null || true)
             if [ -n "$gd_size_out" ]; then
               gd_dst_size=$(echo "$gd_size_out" | sed -n 's/^Total size:[[:space:]]*//p')
             fi
-            gd_size_json=$(rclone size "$dest_path" --json "${extra_args[@]}" 2>/dev/null || true)
+            gd_size_json=$(rclone size "$dest_path" --json 2>/dev/null || true)
             if [ -n "$gd_size_json" ]; then
               gd_dst_count=$(echo "$gd_size_json" | jq -r '.count // empty' 2>/dev/null || echo "")
               [ -z "$gd_dst_count" ] && gd_dst_count="未知"
@@ -1856,7 +1856,7 @@ jobs:
                   fi
                 done <<< "$(echo "$gd_check_combined" | grep -E '^[-+*] ')"
               else
-                gd_count_info="文件数：${gd_src_count} (一致，源端 ${gd_src_count} / 目标 ${gd_dst_count})"
+                gd_count_info="文件数：${gd_src_count} (一致)"
               fi
             else
               gd_count_info="文件数：源端 ${gd_src_count} / 目标 ${gd_dst_count}"
