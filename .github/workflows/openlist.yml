@@ -1685,7 +1685,6 @@ jobs:
 
           # 方法 5：OpenList API 直传（尝试无覆盖的简单 PUT 上传）
           log_test "方法 5：OpenList API 直传"
-          local ol_token
           ol_token=$(jq -r '.token' /dropbox/self-hosted/openlist/data/config.json 2>/dev/null || echo "")
           if [ -n "$ol_token" ] && [ "$ol_token" != "null" ]; then
             # 先刷新目标目录缓存
