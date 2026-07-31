@@ -1510,6 +1510,15 @@ jobs:
             fi
             [ -z "$fail_summary" ] && fail_summary="无"
 
+            # 子目录拆分模式下，如果没有文件变更且无错误，跳过通知
+            if [ "$SYNC_SKIP_QUIET" = "1" ] && [ ! -s "$fail_list" ] && [ ! -s "$fix_list" ]; then
+              if ! grep -Eqi 'Copied|Deleted|Renamed|Moved' "$LOG_FILENAME" 2>/dev/null; then
+                echo "无文件变更，跳过通知 (SYNC_SKIP_QUIET=1, task=${task_name})"
+                rm -f "$LOG_FILENAME" 2>/dev/null || true
+                return 0
+              fi
+            fi
+
             if [ -s "$fail_list" ]; then
               # 有无法修复的 405/409 文件
               local partial_msg=""
@@ -1630,6 +1639,56 @@ jobs:
             split_large_files_after_sync_failure "$source_path" "$task_name"
             return 0
           }
+
+          # 自动拆分同步：源端 > 50GB 时按一级子目录拆分，最后再完整同步一次
+          sync_task_with_auto_split() {
+            local source_path="$1"
+            local dest_path="$2"
+            local task_name="$3"
+            shift 3
+            local extra_args=("$@")
+
+            # 50GB 阈值
+            local threshold=50000000000
+
+            # 检查源端大小
+            local source_size_bytes=0
+            local size_json
+            size_json=$(rclone size "$source_path" --json 2>/dev/null || true)
+            if [ -n "$size_json" ]; then
+              source_size_bytes=$(echo "$size_json" | jq -r '.bytes // 0' 2>/dev/null || echo 0)
+            fi
+
+            if [ "$source_size_bytes" -le "$threshold" ]; then
+              echo "源端大小 $(numfmt --to=iec-i --suffix=B "$source_size_bytes" 2>/dev/null || echo "${source_size_bytes}B") 未超过 50GB 阈值，直接同步"
+              sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
+              return $?
+            fi
+
+            echo "源端大小 $(numfmt --to=iec-i --suffix=B "$source_size_bytes" 2>/dev/null || echo "${source_size_bytes}B") 超过 50GB 阈值，按子目录拆分同步"
+
+            # 列出一级子目录
+            local subdirs
+            subdirs=$(rclone lsd "$source_path" 2>/dev/null | sed 's/^[[:space:]]*- //' | awk '{print $1}')
+            if [ -z "$subdirs" ]; then
+              echo "无子目录，直接同步"
+              sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
+              return $?
+            fi
+
+            # 按子目录逐个同步（静默模式：无文件变更时跳过通知）
+            SYNC_SKIP_QUIET=1
+            while IFS= read -r subdir; do
+              [ -z "$subdir" ] && continue
+              echo "=== 子目录同步: ${task_name}/${subdir} ==="
+              sync_with_logging "${source_path}/${subdir}" "${dest_path}/${subdir}" "${task_name}/${subdir}" "${extra_args[@]}" || true
+            done <<< "$subdirs"
+            SYNC_SKIP_QUIET=0
+
+            # 最终完整同步（正常通知）
+            echo "=== 最终完整同步: ${task_name} ==="
+            sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
+          }
           EOF
 
       - name: Combine all functions
@@ -1641,6 +1700,7 @@ jobs:
         run: |
           source /tmp/functions.sh
           PROCESSED_FILES_LOG="processed_videos.log"
+          SYNC_SKIP_QUIET=0
           echo "PROCESSED_FILES_LOG=$PROCESSED_FILES_LOG" >> "$GITHUB_ENV"
           echo "=== 初始化已处理文件日志 ===" > "$PROCESSED_FILES_LOG"
           echo "开始时间: $(date)" >> "$PROCESSED_FILES_LOG"
@@ -1952,7 +2012,7 @@ jobs:
         run: |
           source /tmp/functions.sh
           echo "=== 开始同步 backup 任务 ==="
-          sync_with_logging \
+          sync_task_with_auto_split \
             "onedrive:backup" \
             "openlist:aliyundriveCrypt/backup" \
             "backup" \
@@ -1963,7 +2023,7 @@ jobs:
             --exclude "/github_repos_latest.tar.gz" \
             --exclude "github_repos_latest.tar.gz"
 
-          sync_with_logging \
+          sync_task_with_auto_split \
             "onedrive:backup" \
             "openlist:wopan176Crypt/backup" \
             "backup"
@@ -1974,18 +2034,18 @@ jobs:
         run: |
           source /tmp/functions.sh
           echo "=== 开始同步 0 任务 ==="
-          # sync_with_logging "onedrive:0" "openlist:baidupanCrypt/0" "task0"
-          sync_with_logging "onedrive:0" "openlist:wopan176Crypt/0" "task0"
-          sync_with_logging "onedrive:0/j-1024j-视频-pornhub-favorites" "openlist:wopan175/0/j-1024j-视频-pornhub-favorites" "task0"
+          # sync_task_with_auto_split "onedrive:0" "openlist:baidupanCrypt/0" "task0"
+          sync_task_with_auto_split "onedrive:0" "openlist:wopan176Crypt/0" "task0"
+          sync_task_with_auto_split "onedrive:0/j-1024j-视频-pornhub-favorites" "openlist:wopan175/0/j-1024j-视频-pornhub-favorites" "task0"
           gd_sync_with_1d_skip "onedrive:0" "gd:0" "task0" "${GD_SYNC_ARGS[@]}"
 
       - name: Sync task1
         run: |
           source /tmp/functions.sh
           echo "=== 开始同步 1 任务 ==="
-          # sync_with_logging "onedrive:1" "openlist:baidupanCrypt/1" "task1"
-          sync_with_logging "onedrive:1" "openlist:wopan176Crypt/1" "task1"
-          sync_with_logging "onedrive:1" "openlist:wopan175/1" "task1"
+          # sync_task_with_auto_split "onedrive:1" "openlist:baidupanCrypt/1" "task1"
+          sync_task_with_auto_split "onedrive:1" "openlist:wopan176Crypt/1" "task1"
+          sync_task_with_auto_split "onedrive:1" "openlist:wopan175/1" "task1"
           gd_sync_with_1d_skip "onedrive:1" "gd:1" "task1" "${GD_SYNC_ARGS[@]}"
 
       - name: Sync task2
@@ -1993,8 +2053,8 @@ jobs:
           source /tmp/functions.sh
           echo "=== 开始同步 2 任务 ==="
           # openlist_sync_with_failure_split "onedrive:2" "openlist:aliyundriveCrypt/2" "task2"
-          sync_with_logging "onedrive:2" "openlist:wopan176Crypt/2" "task2"
-          sync_with_logging "onedrive:2" "openlist:wopan175/2" "task2"
+          sync_task_with_auto_split "onedrive:2" "openlist:wopan176Crypt/2" "task2"
+          sync_task_with_auto_split "onedrive:2" "openlist:wopan175/2" "task2"
           gd_sync_with_1d_skip "onedrive:2" "gd:2" "task2" "${GD_SYNC_ARGS[@]}"
 
       - name: Sync task3
@@ -2002,23 +2062,23 @@ jobs:
           source /tmp/functions.sh
           echo "=== 开始同步 3 任务 ==="
           # openlist_sync_with_failure_split "onedrive:3" "openlist:aliyundriveCrypt/3" "task3"
-          sync_with_logging "onedrive:3" "openlist:wopan176Crypt/3" "task3"
-          sync_with_logging "onedrive:3" "openlist:wopan175/3" "task3"
+          sync_task_with_auto_split "onedrive:3" "openlist:wopan176Crypt/3" "task3"
+          sync_task_with_auto_split "onedrive:3" "openlist:wopan175/3" "task3"
           gd_sync_with_1d_skip "onedrive:3" "gd:3" "task3" "${GD_SYNC_ARGS[@]}"
 
       - name: Sync task4
         run: |
           source /tmp/functions.sh
           echo "=== 开始同步 4 任务 ==="
-          sync_with_logging "onedrive:4" "openlist:wopan176Crypt/4" "task4"
-          sync_with_logging "onedrive:4" "openlist:wopan175/4" "task4"
+          sync_task_with_auto_split "onedrive:4" "openlist:wopan176Crypt/4" "task4"
+          sync_task_with_auto_split "onedrive:4" "openlist:wopan175/4" "task4"
 
       - name: Sync task5
         run: |
           source /tmp/functions.sh
           echo "=== 开始同步 5 任务 ==="
-          sync_with_logging "onedrive:5" "openlist:wopan176Crypt/5" "task5"
-          sync_with_logging "onedrive:5" "openlist:wopan175/5" "task5"
+          sync_task_with_auto_split "onedrive:5" "openlist:wopan176Crypt/5" "task5"
+          sync_task_with_auto_split "onedrive:5" "openlist:wopan175/5" "task5"
          
       - name: Finalize and cleanup
         run: |
