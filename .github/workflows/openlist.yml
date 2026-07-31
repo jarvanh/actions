@@ -952,31 +952,6 @@ jobs:
             echo "$message"
           }
 
-          # 上传修复日志到 OneDrive
-          upload_fix_log() {
-            local log_file="$1"
-
-            if [ -f "$log_file" ] && [ -s "$log_file" ]; then
-              local log_status=$(has_real_content "$log_file")
-              if [ "$log_status" = "has_content" ]; then
-                local REMOTE_LOG_DIR="onedrive:/logs/file_fix"
-                log_fix_attempt "$log_file" "上传修复日志到OneDrive: $REMOTE_LOG_DIR"
-                rclone copyto "$log_file" "$REMOTE_LOG_DIR/$(basename "$log_file")" 2>/dev/null || echo "上传修复日志失败，继续执行"
-
-                rclone lsf "$REMOTE_LOG_DIR/" 2>/dev/null | \
-                  grep "^file_fix_.*\.log$" | \
-                  sort | head -n -10 | while read -r old_file; do
-                    echo "删除旧修复日志: $old_file"
-                    rclone delete "$REMOTE_LOG_DIR/$old_file" 2>/dev/null || true
-                  done
-              else
-                echo "跳过上传空修复日志: $log_file"
-              fi
-            else
-              echo "修复日志为空或不存在，不上传"
-            fi
-          }
-
           # 尝试修复 405/409 等无法同步的文件
           # 1. 如果目录创建失败，将最底层文件夹名 base64 编码后重新创建目录
           # 2. 目录就绪后，尝试多种方式同步文件到目标路径（原始路径或 base64 目录）
@@ -1437,7 +1412,6 @@ jobs:
                   sed -E 's/^.*ERROR : //; s/: Failed to copy.*$//' | sort -u
               )
 
-              upload_fix_log "$fix_log" 2>/dev/null || true
               rm -f "$fix_log" 2>/dev/null || true
             fi
 
