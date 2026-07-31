@@ -1680,8 +1680,9 @@ jobs:
             SYNC_SKIP_QUIET=1
             while IFS= read -r subdir; do
               [ -z "$subdir" ] && continue
-              echo "=== 子目录同步: ${task_name}/${subdir} ==="
-              sync_with_logging "${source_path}/${subdir}" "${dest_path}/${subdir}" "${task_name}/${subdir}" "${extra_args[@]}" || true
+              local safe_subtask="${task_name}_${subdir//\//_}"
+              echo "=== 子目录同步: ${safe_subtask} ==="
+              sync_with_logging "${source_path}/${subdir}" "${dest_path}/${subdir}" "${safe_subtask}" "${extra_args[@]}" || true
             done <<< "$subdirs"
             SYNC_SKIP_QUIET=0
 
