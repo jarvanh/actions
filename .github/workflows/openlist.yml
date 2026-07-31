@@ -1163,6 +1163,16 @@ jobs:
               count_info="文件数：源端 ${source_count} / 目标 ${dest_count}"
             fi
 
+            # 提取 --exclude 规则，方便在通知中说明
+            local exclude_list=""
+            local i
+            for ((i=0; i<${#extra_args[@]}; i++)); do
+              if [ "${extra_args[$i]}" == "--exclude" ] && [ $((i+1)) -lt ${#extra_args[@]} ]; then
+                exclude_list+="• ${extra_args[$((i+1))]}"$'\n'
+              fi
+            done
+            [ -z "$exclude_list" ] && exclude_list="无"
+
             if [ -s "$fail_list" ]; then
               # 405/409 失败文件，发送部分失败通知（不阻止后续 task）
               local fail_summary=""
@@ -1173,6 +1183,24 @@ jobs:
 
               local partial_msg
               if [ -n "$diff_files_list" ]; then
+                printf -v partial_msg '%s\n%s\n%s\n%s\n%s\n%s\n\n%s\n%s\n%s\n%s\n\n%s\n%s\n\n%s\n%s\n\n%s\n%s' \
+                  "⚠️ ${task_name} 部分文件同步失败" \
+                  '━━━━━━━━━━━━━━' \
+                  "源端大小：${source_size_human}" \
+                  "目标大小：${dest_size_human}" \
+                  "状态：OpenList 405/409 错误，部分文件无法同步" \
+                  "$count_info" \
+                  '📁 任务信息' \
+                  "• 任务：${task_name}" \
+                  "• 源端：${source_path}" \
+                  "• 目标：${dest_path}" \
+                  '🚫 排除规则' \
+                  "$exclude_list" \
+                  '❌ 失败文件列表' \
+                  "$fail_summary" \
+                  '📋 差异文件列表' \
+                  "$diff_files_list"
+              else
                 printf -v partial_msg '%s\n%s\n%s\n%s\n%s\n%s\n\n%s\n%s\n%s\n%s\n\n%s\n%s\n\n%s\n%s' \
                   "⚠️ ${task_name} 部分文件同步失败" \
                   '━━━━━━━━━━━━━━' \
@@ -1184,22 +1212,8 @@ jobs:
                   "• 任务：${task_name}" \
                   "• 源端：${source_path}" \
                   "• 目标：${dest_path}" \
-                  '❌ 失败文件列表' \
-                  "$fail_summary" \
-                  '📋 差异文件列表' \
-                  "$diff_files_list"
-              else
-                printf -v partial_msg '%s\n%s\n%s\n%s\n%s\n%s\n\n%s\n%s\n%s\n%s\n\n%s\n%s' \
-                  "⚠️ ${task_name} 部分文件同步失败" \
-                  '━━━━━━━━━━━━━━' \
-                  "源端大小：${source_size_human}" \
-                  "目标大小：${dest_size_human}" \
-                  "状态：OpenList 405/409 错误，部分文件无法同步" \
-                  "$count_info" \
-                  '📁 任务信息' \
-                  "• 任务：${task_name}" \
-                  "• 源端：${source_path}" \
-                  "• 目标：${dest_path}" \
+                  '🚫 排除规则' \
+                  "$exclude_list" \
                   '❌ 失败文件列表' \
                   "$fail_summary"
               fi
@@ -1214,6 +1228,21 @@ jobs:
             else
               local ok_message
               if [ -n "$diff_files_list" ]; then
+                printf -v ok_message '%s\n%s\n%s\n%s\n%s\n\n%s\n%s\n%s\n%s\n\n%s\n%s\n\n%s\n%s' \
+                  "✅ ${task_name} 同步完成" \
+                  '━━━━━━━━━━━━━━' \
+                  "源端大小：${source_size_human}" \
+                  "目标大小：${dest_size_human}" \
+                  "$count_info" \
+                  '📁 任务信息' \
+                  "• 任务：${task_name}" \
+                  "• 源端：${source_path}" \
+                  "• 目标：${dest_path}" \
+                  '🚫 排除规则' \
+                  "$exclude_list" \
+                  '📋 差异文件列表' \
+                  "$diff_files_list"
+              else
                 printf -v ok_message '%s\n%s\n%s\n%s\n%s\n\n%s\n%s\n%s\n%s\n\n%s\n%s' \
                   "✅ ${task_name} 同步完成" \
                   '━━━━━━━━━━━━━━' \
@@ -1224,19 +1253,8 @@ jobs:
                   "• 任务：${task_name}" \
                   "• 源端：${source_path}" \
                   "• 目标：${dest_path}" \
-                  '📋 差异文件列表' \
-                  "$diff_files_list"
-              else
-                printf -v ok_message '%s\n%s\n%s\n%s\n%s\n\n%s\n%s\n%s\n%s' \
-                  "✅ ${task_name} 同步完成" \
-                  '━━━━━━━━━━━━━━' \
-                  "源端大小：${source_size_human}" \
-                  "目标大小：${dest_size_human}" \
-                  "$count_info" \
-                  '📁 任务信息' \
-                  "• 任务：${task_name}" \
-                  "• 源端：${source_path}" \
-                  "• 目标：${dest_path}"
+                  '🚫 排除规则' \
+                  "$exclude_list"
               fi
 
               curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
@@ -1502,10 +1520,20 @@ jobs:
               gd_count_info="文件数：源端 ${gd_src_count} / 目标 ${gd_dst_count}"
             fi
 
+            # 提取 --exclude 规则，方便在通知中说明
+            local gd_exclude_list=""
+            local i
+            for ((i=0; i<${#extra_args[@]}; i++)); do
+              if [ "${extra_args[$i]}" == "--exclude" ] && [ $((i+1)) -lt ${#extra_args[@]} ]; then
+                gd_exclude_list+="• ${extra_args[$((i+1))]}"$'\n'
+              fi
+            done
+            [ -z "$gd_exclude_list" ] && gd_exclude_list="无"
+
             if grep -Eqi 'storageQuotaExceeded|storage quota has been exceeded' "$LAST_GD_ATTEMPT_LOG"; then
               # Google Drive 存储配额超限，跳过同步，发送通知，不阻止后续 task
               local quota_msg
-              printf -v quota_msg '%s\n%s\n%s\n%s\n%s\n%s\n\n%s\n%s\n%s\n%s' \
+              printf -v quota_msg '%s\n%s\n%s\n%s\n%s\n%s\n\n%s\n%s\n%s\n%s\n%s\n%s' \
                 "⚠️ ${task_name} Google Drive 存储配额超限" \
                 '━━━━━━━━━━━━━━' \
                 "源端大小：${gd_src_size}" \
@@ -1515,7 +1543,9 @@ jobs:
                 '📁 任务信息' \
                 "• 任务：${task_name}" \
                 "• 源端：${source_path}" \
-                "• 目标：${dest_path}"
+                "• 目标：${dest_path}" \
+                '🚫 排除规则' \
+                "$gd_exclude_list"
 
               curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
                 -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
@@ -1528,6 +1558,22 @@ jobs:
 
               local ok_message
               if [ -n "$gd_diff_files_list" ]; then
+                printf -v ok_message '%s\n%s\n%s\n%s\n%s\n%s\n\n%s\n%s\n%s\n%s\n\n%s\n%s\n\n%s\n%s' \
+                  "✅ ${task_name} Google Drive sync 完成" \
+                  '━━━━━━━━━━━━━━' \
+                  "源端大小：${gd_src_size}" \
+                  "目标大小：${gd_dst_size}" \
+                  "状态：已记录成功时间，未来 1 天内会跳过" \
+                  "$gd_count_info" \
+                  '📁 任务信息' \
+                  "• 任务：${task_name}" \
+                  "• 源端：${source_path}" \
+                  "• 目标：${dest_path}" \
+                  '🚫 排除规则' \
+                  "$gd_exclude_list" \
+                  '📋 差异文件列表' \
+                  "$gd_diff_files_list"
+              else
                 printf -v ok_message '%s\n%s\n%s\n%s\n%s\n%s\n\n%s\n%s\n%s\n%s\n\n%s\n%s' \
                   "✅ ${task_name} Google Drive sync 完成" \
                   '━━━━━━━━━━━━━━' \
@@ -1539,20 +1585,8 @@ jobs:
                   "• 任务：${task_name}" \
                   "• 源端：${source_path}" \
                   "• 目标：${dest_path}" \
-                  '📋 差异文件列表' \
-                  "$gd_diff_files_list"
-              else
-                printf -v ok_message '%s\n%s\n%s\n%s\n%s\n%s\n\n%s\n%s\n%s\n%s' \
-                  "✅ ${task_name} Google Drive sync 完成" \
-                  '━━━━━━━━━━━━━━' \
-                  "源端大小：${gd_src_size}" \
-                  "目标大小：${gd_dst_size}" \
-                  "状态：已记录成功时间，未来 1 天内会跳过" \
-                  "$gd_count_info" \
-                  '📁 任务信息' \
-                  "• 任务：${task_name}" \
-                  "• 源端：${source_path}" \
-                  "• 目标：${dest_path}"
+                  '🚫 排除规则' \
+                  "$gd_exclude_list"
               fi
 
               curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
