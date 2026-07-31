@@ -941,9 +941,9 @@ jobs:
           }
           EOF
 
-      - name: Setup helper functions - part 4b
+      - name: Setup helper functions - part 5
         run: |
-          cat > /tmp/functions_part4b.sh << 'EOF'
+          cat > /tmp/functions_part5.sh << 'EOF'
           # 尝试修复 405/409 等无法同步的文件
           # 1. 如果目录创建失败，将最底层文件夹名 base64 编码后重新创建目录
           # 2. 目录就绪后，尝试多种方式同步文件到目标路径（原始路径或 base64 目录）
@@ -1232,9 +1232,9 @@ jobs:
           }
           EOF
 
-      - name: Setup helper functions - part 5
+      - name: Setup helper functions - part 6
         run: |
-          cat > /tmp/functions_part5.sh << 'EOF'
+          cat > /tmp/functions_part6.sh << 'EOF'
           # Sync with probes and detailed logs.
           # 带探测和更清晰日志的同步函数。
           sync_with_logging() {
@@ -1627,7 +1627,7 @@ jobs:
 
       - name: Combine all functions
         run: |
-          cat /tmp/functions_part1.sh /tmp/functions_part2.sh /tmp/functions_part3.sh /tmp/functions_part4.sh /tmp/functions_part4b.sh /tmp/functions_part5.sh > /tmp/functions.sh
+          cat /tmp/functions_part1.sh /tmp/functions_part2.sh /tmp/functions_part3.sh /tmp/functions_part4.sh /tmp/functions_part5.sh /tmp/functions_part6.sh > /tmp/functions.sh
           rm -f /tmp/functions_part*.sh
 
       - name: Initialize sync
