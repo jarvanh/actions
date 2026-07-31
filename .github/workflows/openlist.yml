@@ -941,9 +941,9 @@ jobs:
           }
           EOF
 
-      - name: Setup sync_with_logging function
+      - name: Setup helper functions - part 5
         run: |
-          cat > /tmp/functions_sync.sh << 'EOF'
+          cat > /tmp/functions_part5.sh << 'EOF'
           # Sync with probes and detailed logs.
           # 带探测和更清晰日志的同步函数。
           sync_with_logging() {
@@ -1076,13 +1076,12 @@ jobs:
               done
             fi
 
-            # 405/409 失败文件尝试修复，修复失败的记录到 fail_list
+            # 405/409 失败文件直接记录，不阻止后续 task
+            # OpenList 联通云盘后端对某些路径拒绝 PUT（405）或 MKCOL（409），无法绕过
             local fail_list="/tmp/${task_name}_sync_failures.txt"
-            local fixed_list="/tmp/${task_name}_405_fixed.txt"
             : > "$fail_list"
-            : > "$fixed_list"
             if [[ "$dest_path" == openlist:* ]] && grep -Eqi 'Method Not Allowed: 405|405 Method Not Allowed|409 Conflict' "$LAST_ATTEMPT_LOG"; then
-              echo "=== ${task_name} 405/409 修复尝试 ===" | tee -a "$LOG_FILENAME"
+              echo "=== ${task_name} 无法同步的文件 (405/409) ===" | tee -a "$LOG_FILENAME"
 
               while IFS= read -r failed_line; do
                 [ -z "$failed_line" ] && continue
@@ -1090,23 +1089,13 @@ jobs:
                 # 获取文件大小
                 local file_size="未知"
                 local size_out
-                size_out=$(rclone size "${source_path}/${failed_line}" --json 2>/dev/null || true)
+                size_out=$(rclone size "${source_path}/${failed_line}" 2>/dev/null || true)
                 if [ -n "$size_out" ]; then
-                  local f_bytes
-                  f_bytes=$(echo "$size_out" | jq -r '.bytes // 0' 2>/dev/null || echo "0")
-                  if [ "$f_bytes" != "0" ] && [ "$f_bytes" != "null" ] && [ -n "$f_bytes" ]; then
-                    file_size="${f_bytes} Byte"
-                  fi
+                  file_size=$(echo "$size_out" | sed -n 's/^Total size:[[:space:]]*//p' | head -n 1)
                 fi
 
-                # 尝试修复
-                if try_fix_405_file "$source_path" "$dest_path" "$failed_line" 2>&1 | tee -a "$LOG_FILENAME"; then
-                  echo "✅ 修复成功: ${failed_line} (${file_size})" | tee -a "$LOG_FILENAME"
-                  echo "${failed_line}|${file_size}" >> "$fixed_list"
-                else
-                  echo "❌ 修复失败: ${failed_line} (${file_size})" | tee -a "$LOG_FILENAME"
-                  echo "${failed_line}|${file_size}" >> "$fail_list"
-                fi
+                echo "跳过: ${failed_line} (${file_size})" | tee -a "$LOG_FILENAME"
+                echo "${failed_line}|${file_size}" >> "$fail_list"
               done < <(
                 grep -E 'ERROR : .+: Failed to copy.*(405 Method Not Allowed|409 Conflict)' "$LAST_ATTEMPT_LOG" 2>/dev/null | \
                   sed -E 's/^.*ERROR : //; s/: Failed to copy.*$//' | sort -u
@@ -1156,67 +1145,31 @@ jobs:
             fi
 
             if [ -s "$fail_list" ]; then
-              # 405/409 修复后仍有失败文件，发送部分失败通知
+              # 405/409 失败文件，发送部分失败通知（不阻止后续 task）
               local fail_summary=""
               while IFS='|' read -r fpath fsize; do
                 [ -z "$fpath" ] && continue
                 fail_summary+="• ${fpath} (${fsize})"$'\n'
               done < "$fail_list"
 
-              local fixed_summary=""
-              if [ -s "$fixed_list" ]; then
-                fixed_summary=$'\n\n🔧 修复成功\n'
-                while IFS='|' read -r fpath fsize; do
-                  [ -z "$fpath" ] && continue
-                  fixed_summary+="• ${fpath} (${fsize})"$'\n'
-                done < "$fixed_list"
-              fi
-
               local partial_msg
-              printf -v partial_msg '%s\n%s\n%s\n%s\n%s\n%s\n\n%s\n%s\n%s\n%s\n\n%s\n%s%s' \
+              printf -v partial_msg '%s\n%s\n%s\n%s\n%s\n%s\n\n%s\n%s\n%s\n%s\n\n%s\n%s' \
                 "⚠️ ${task_name} 部分文件同步失败" \
                 '━━━━━━━━━━━━━━' \
                 "源端大小：${source_size_human}" \
                 "目标大小：${dest_size_human}" \
-                "状态：OpenList 405/409 错误，部分文件修复后仍无法同步" \
+                "状态：OpenList 405/409 错误，部分文件无法同步" \
                 "$count_info" \
                 '📁 任务信息' \
                 "• 任务：${task_name}" \
                 "• 源端：${source_path}" \
                 "• 目标：${dest_path}" \
                 '❌ 失败文件列表' \
-                "$fail_summary" \
-                "$fixed_summary"
+                "$fail_summary"
 
               curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
                 -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
                 --data-urlencode text="$partial_msg" || true
-
-            elif [ -s "$fixed_list" ]; then
-              # 405/409 文件全部修复成功
-              local fixed_summary=""
-              while IFS='|' read -r fpath fsize; do
-                [ -z "$fpath" ] && continue
-                fixed_summary+="• ${fpath} (${fsize})"$'\n'
-              done < "$fixed_list"
-
-              local ok_msg
-              printf -v ok_msg '%s\n%s\n%s\n%s\n%s\n\n%s\n%s\n%s\n%s\n\n%s\n%s' \
-                "✅ ${task_name} 同步完成（含 405 修复）" \
-                '━━━━━━━━━━━━━━' \
-                "源端大小：${source_size_human}" \
-                "目标大小：${dest_size_human}" \
-                "$count_info" \
-                '📁 任务信息' \
-                "• 任务：${task_name}" \
-                "• 源端：${source_path}" \
-                "• 目标：${dest_path}" \
-                '🔧 405 修复成功' \
-                "$fixed_summary"
-
-              curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
-                -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
-                --data-urlencode text="$ok_msg" || true
 
             elif [ "$SYNC_STATUS" -ne 0 ] || grep -Eqi '(^|[^[:alpha:]])(ERROR|Error|Failed|failed|timeout|forbidden|unauthorized|permission denied|connection refused)([^[:alpha:]]|$)' "$LAST_ATTEMPT_LOG"; then
               SYNC_FAILED=1
@@ -1239,7 +1192,7 @@ jobs:
                 --data-urlencode text="$ok_message" || true
             fi
 
-            rm -f "$LOG_FILENAME" "$LAST_ATTEMPT_LOG" "$fail_list" "$fixed_list" /tmp/probe_src.txt /tmp/probe_dst.txt 2>/dev/null || true
+            rm -f "$LOG_FILENAME" "$LAST_ATTEMPT_LOG" "$fail_list" /tmp/probe_src.txt /tmp/probe_dst.txt 2>/dev/null || true
             return "$SYNC_FAILED"
           }
 
@@ -1260,160 +1213,10 @@ jobs:
           }
           EOF
 
-      - name: Setup 405 fix function
-        run: |
-          cat > /tmp/functions_405_fix.sh << 'EOF'
-          # 尝试多种策略修复 OpenList 405 错误
-          try_fix_405_file() {
-            local src="$1"
-            local dst="$2"
-            local file_path="$3"
-
-            local full_src="${src}/${file_path}"
-            local full_dst="${dst}/${file_path}"
-            local dst_dir
-            dst_dir=$(dirname "$file_path")
-            local basename_file
-            basename_file=$(basename "$file_path")
-
-            echo "尝试修复 405: ${file_path}"
-
-            # 从 dest_path 解析 OpenList 路径（去掉 openlist: 前缀）
-            local ol_base
-            ol_base="${dst#openlist:}"
-            local ol_full_path="${ol_base}/${file_path}"
-
-            # 读取 OpenList token
-            local ol_token=""
-            if [ -f /dropbox/self-hosted/openlist/data/config.json ]; then
-              ol_token=$(jq -r '.token // empty' /dropbox/self-hosted/openlist/data/config.json 2>/dev/null || echo "")
-            fi
-
-            # 策略 1：通过 OpenList API 删除目标端幽灵文件后上传
-            if [ -n "$ol_token" ]; then
-              echo "策略 1: OpenList API 删除幽灵文件"
-              local api_result
-              api_result=$(curl -s -X POST "http://127.0.0.1:5244/api/fs/remove" \
-                -H "Authorization: ${ol_token}" \
-                -H "Content-Type: application/json" \
-                -d "{\"path\":\"${ol_full_path}\"}" 2>/dev/null || echo "")
-              echo "  API 删除响应: ${api_result}"
-
-              local up_out
-              up_out=$(rclone copyto "$full_src" "$full_dst" \
-                --retries 1 --low-level-retries 1 --timeout 2m --contimeout 30s 2>&1) && {
-                echo "策略 1 成功: API 删除后上传成功"
-                return 0
-              }
-              echo "策略 1 失败: ${up_out}"
-            fi
-
-            # 策略 2：上传到临时文件名，然后 moveto
-            echo "策略 2: 临时文件名 + moveto"
-            local tmp_name=".tmp_$(date +%s)_${basename_file}"
-            local tmp_dst="${dst%/}/${dst_dir}/${tmp_name}"
-
-            local tmp_out
-            tmp_out=$(rclone copyto "$full_src" "$tmp_dst" \
-              --retries 1 --low-level-retries 1 --timeout 2m --contimeout 30s 2>&1) && {
-              local move_out
-              move_out=$(rclone moveto "$tmp_dst" "$full_dst" \
-                --retries 1 --low-level-retries 1 --timeout 2m --contimeout 30s 2>&1) && {
-                echo "策略 2 成功: 临时上传 + moveto 成功"
-                return 0
-              }
-              echo "策略 2 moveto 失败: ${move_out}"
-              rclone deletefile "$tmp_dst" 2>/dev/null || true
-            } || {
-              echo "策略 2 上传失败: ${tmp_out}"
-            }
-
-            # 策略 3：通过 OpenList API 直接上传（绕过 WebDAV）
-            if [ -n "$ol_token" ]; then
-              echo "策略 3: OpenList API 直接上传"
-              local tmp_local
-              tmp_local=$(mktemp "/tmp/405_fix_XXXXXX")
-
-              local dl_out
-              dl_out=$(rclone copyto "$full_src" "$tmp_local" \
-                --retries 1 --low-level-retries 1 --timeout 2m --contimeout 30s 2>&1) && {
-                # URL 编码路径
-                local encoded_path
-                encoded_path=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "$ol_full_path" 2>/dev/null || echo "$ol_full_path")
-
-                local api_up
-                api_up=$(curl -s -X PUT "http://127.0.0.1:5244/api/fs/put" \
-                  -H "Authorization: ${ol_token}" \
-                  -H "File-Path: ${encoded_path}" \
-                  -H "Content-Type: application/octet-stream" \
-                  --data-binary @"${tmp_local}" 2>/dev/null || echo "")
-                echo "  API 上传响应: ${api_up}"
-
-                if echo "$api_up" | jq -e '.code == 200' >/dev/null 2>&1; then
-                  echo "策略 3 成功: API 直接上传成功"
-                  rm -f "$tmp_local"
-                  return 0
-                fi
-                echo "策略 3 失败: API 返回非 200"
-              } || {
-                echo "策略 3 下载失败: ${dl_out}"
-              }
-              rm -f "$tmp_local"
-            fi
-
-            # 策略 4：压缩后上传 .zip
-            echo "策略 4: 压缩上传 .zip"
-            local tmp_dir
-            tmp_dir=$(mktemp -d "/tmp/405_fix_XXXXXX")
-            local local_file="${tmp_dir}/${basename_file}"
-
-            local dl2_out
-            dl2_out=$(rclone copyto "$full_src" "$local_file" \
-              --retries 1 --low-level-retries 1 --timeout 2m --contimeout 30s 2>&1) && {
-              if (cd "$tmp_dir" && zip -q "${basename_file}.zip" "$basename_file" 2>&1); then
-                local zip_dst="${full_dst}.zip"
-                local zip_out
-                zip_out=$(rclone copyto "${local_file}.zip" "$zip_dst" \
-                  --retries 1 --low-level-retries 1 --timeout 5m --contimeout 30s 2>&1) && {
-                  echo "策略 4 成功: 压缩上传 .zip 成功 -> ${file_path}.zip"
-                  rm -rf "$tmp_dir"
-                  return 0
-                }
-                echo "策略 4 上传失败: ${zip_out}"
-              else
-                echo "策略 4 压缩失败"
-              fi
-            } || {
-              echo "策略 4 下载失败: ${dl2_out}"
-            }
-            rm -rf "$tmp_dir"
-
-            # 策略 5：上传到简化文件名（去掉特殊字符）
-            echo "策略 5: 简化文件名上传"
-            local simple_name
-            simple_name=$(echo "$basename_file" | sed 's/[^a-zA-Z0-9._-]/_/g')
-            if [ "$simple_name" != "$basename_file" ] && [ -n "$simple_name" ]; then
-              local simple_dst="${dst%/}/${dst_dir}/${simple_name}"
-              local simple_out
-              simple_out=$(rclone copyto "$full_src" "$simple_dst" \
-                --retries 1 --low-level-retries 1 --timeout 2m --contimeout 30s 2>&1) && {
-                echo "策略 5 成功: 简化文件名上传成功 -> ${simple_name}"
-                return 0
-              }
-              echo "策略 5 失败: ${simple_out}"
-            else
-              echo "策略 5 跳过: 文件名无特殊字符或为空"
-            fi
-
-            echo "所有策略均失败: ${file_path}"
-            return 1
-          }
-          EOF
-
       - name: Combine all functions
         run: |
-          cat /tmp/functions_part1.sh /tmp/functions_part2.sh /tmp/functions_part3.sh /tmp/functions_part4.sh /tmp/functions_sync.sh /tmp/functions_405_fix.sh > /tmp/functions.sh
-          rm -f /tmp/functions_part*.sh /tmp/functions_sync.sh /tmp/functions_405_fix.sh
+          cat /tmp/functions_part1.sh /tmp/functions_part2.sh /tmp/functions_part3.sh /tmp/functions_part4.sh /tmp/functions_part5.sh > /tmp/functions.sh
+          rm -f /tmp/functions_part*.sh
 
       - name: Initialize sync
         run: |
@@ -1674,13 +1477,6 @@ jobs:
             return 0
           }
           EOF
-
-      - name: Test fix 405 options.xml
-        run: |
-          source /tmp/functions.sh
-          echo "=== 测试修复 405: options.xml ==="
-          try_fix_405_file "onedrive:backup" "openlist:wopan176Crypt/backup" "Emby Backup - 2021-11-18 08.40.36 - Auto/library/gd - j - 社交/options.xml"
-          echo "=== 测试结束，退出码: $? ==="
 
       - name: Sync backup task
         run: |
