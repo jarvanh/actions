@@ -1669,7 +1669,7 @@ jobs:
 
             # 列出一级子目录
             local subdirs
-            subdirs=$(rclone lsd "$source_path" 2>/dev/null | sed 's/^[[:space:]]*- //' | awk '{print $1}')
+            subdirs=$(rclone lsf --dirs-only "$source_path" 2>/dev/null | sed 's|/$||')
             if [ -z "$subdirs" ]; then
               echo "无子目录，直接同步"
               sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
