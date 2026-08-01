@@ -1719,12 +1719,24 @@ jobs:
             fi
 
             # 按子目录逐个同步（静默模式：无文件变更时跳过通知）
+            # 子任务不带 --exclude：目录级已通过过滤子目录处理，文件级只适用于根目录
+            local subtask_args=()
+            local i=0
+            while [ $i -lt ${#extra_args[@]} ]; do
+              if [ "${extra_args[$i]}" = "--exclude" ] && [ $((i+1)) -lt ${#extra_args[@]} ]; then
+                i=$((i+2))
+              else
+                subtask_args+=("${extra_args[$i]}")
+                i=$((i+1))
+              fi
+            done
+
             SYNC_SKIP_QUIET=1
             while IFS= read -r subdir; do
               [ -z "$subdir" ] && continue
               local safe_subtask="${task_name}_${subdir//\//_}"
               echo "=== 子目录同步: ${safe_subtask} ==="
-              sync_with_logging "${source_path}/${subdir}" "${dest_path}/${subdir}" "${safe_subtask}" "${extra_args[@]}" || true
+              sync_with_logging "${source_path}/${subdir}" "${dest_path}/${subdir}" "${safe_subtask}" "${subtask_args[@]}" || true
             done <<< "$subdirs"
             SYNC_SKIP_QUIET=0
 
