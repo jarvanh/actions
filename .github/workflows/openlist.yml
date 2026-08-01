@@ -1782,7 +1782,10 @@ jobs:
             SYNC_SKIP_QUIET=1
             local total_subtasks=0
             local completed_subtasks=0
+            local skipped_subtasks=0
             local total_transferred=0
+            local changed_list=""
+            local skipped_list=""
             while IFS= read -r subdir; do
               [ -z "$subdir" ] && continue
               total_subtasks=$((total_subtasks + 1))
@@ -1792,12 +1795,25 @@ jobs:
               if [ "$SYNC_SKIPPED" = "0" ]; then
                 completed_subtasks=$((completed_subtasks + 1))
                 total_transferred=$((total_transferred + SYNC_TRANSFERRED_BYTES))
+                changed_list+="• ${subdir} ($(format_bytes "$SYNC_TRANSFERRED_BYTES"))"$'\n'
+              else
+                skipped_subtasks=$((skipped_subtasks + 1))
+                skipped_list+="• ${subdir}"$'\n'
               fi
             done <<< "$subdirs"
             SYNC_SKIP_QUIET=0
 
             # 设置拆分信息供最终通知使用
-            AUTO_SPLIT_INFO="🔀 子任务拆分：${completed_subtasks}/${total_subtasks} 个子目录有变更，子任务传输：$(format_bytes "$total_transferred")"
+            AUTO_SPLIT_INFO="🔀 子任务拆分统计"$'\n'
+            AUTO_SPLIT_INFO+="• 总子目录数：${total_subtasks}"$'\n'
+            AUTO_SPLIT_INFO+="• 有变更：${completed_subtasks} 个，无变更：${skipped_subtasks} 个"$'\n'
+            AUTO_SPLIT_INFO+="• 子任务传输总量：$(format_bytes "$total_transferred")"
+            if [ -n "$changed_list" ]; then
+              AUTO_SPLIT_INFO+=$'\n\n'"有变更的子目录："$'\n'"${changed_list%"$'\n'"}"
+            fi
+            if [ -n "$skipped_list" ]; then
+              AUTO_SPLIT_INFO+=$'\n\n'"无变更的子目录："$'\n'"${skipped_list%"$'\n'"}"
+            fi
 
             # 最终完整同步（正常通知）
             echo "=== 最终完整同步: ${task_name} ==="
