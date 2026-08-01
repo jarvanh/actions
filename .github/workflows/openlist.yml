@@ -1850,6 +1850,20 @@ jobs:
               fi
             fi
 
+            # 按子目录大小从小到大排序
+            echo "按子目录大小排序..."
+            local sorted_subdirs=""
+            while IFS= read -r subdir; do
+              [ -z "$subdir" ] && continue
+              local subdir_bytes=0
+              local subdir_json
+              subdir_json=$(rclone size "${source_path}/${subdir}" --json 2>/dev/null || true)
+              [ -n "$subdir_json" ] && subdir_bytes=$(echo "$subdir_json" | jq -r '.bytes // 0' 2>/dev/null || echo 0)
+              echo "  ${subdir}: $(format_bytes "$subdir_bytes")"
+              sorted_subdirs+="${subdir_bytes} ${subdir}"$'\n'
+            done <<< "$subdirs"
+            subdirs=$(echo "$sorted_subdirs" | sort -n | cut -d' ' -f2-)
+
             # 按子目录逐个同步（静默模式：无文件变更时跳过通知）
             SYNC_SKIP_QUIET=1
             local total_subtasks=0
