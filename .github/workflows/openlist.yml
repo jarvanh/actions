@@ -1699,7 +1699,11 @@ jobs:
             split_large_files_after_sync_failure "$source_path" "$task_name"
             return 0
           }
+          EOF
 
+      - name: Setup helper functions - part 7
+        run: |
+          cat > /tmp/functions_part7.sh << 'EOF'
           # 自动拆分同步：源端 > 50GB 时按一级子目录拆分，最后再完整同步一次
           sync_task_with_auto_split() {
             local source_path="$1"
@@ -1833,7 +1837,7 @@ jobs:
 
       - name: Combine all functions
         run: |
-          cat /tmp/functions_part1.sh /tmp/functions_part2.sh /tmp/functions_part3.sh /tmp/functions_part4.sh /tmp/functions_part5.sh /tmp/functions_part6.sh > /tmp/functions.sh
+          cat /tmp/functions_part1.sh /tmp/functions_part2.sh /tmp/functions_part3.sh /tmp/functions_part4.sh /tmp/functions_part5.sh /tmp/functions_part6.sh /tmp/functions_part7.sh > /tmp/functions.sh
           rm -f /tmp/functions_part*.sh
 
       - name: Initialize sync
