@@ -1243,6 +1243,57 @@ jobs:
       - name: Setup helper functions - part 6
         run: |
           cat > /tmp/functions_part6.sh << 'EOF'
+          # 从 rclone 日志中解析传输字节数
+          get_transferred_bytes_from_log() {
+            local log_file="$1"
+            local line
+            line=$(grep 'Transferred:' "$log_file" 2>/dev/null | tail -1)
+            if [ -z "$line" ]; then
+              echo 0
+              return
+            fi
+            # 提取第一个大小值，如 "1.234 GiB" 或 "0 B"
+            local size_str
+            size_str=$(echo "$line" | sed -n 's/.*Transferred:[[:space:]]*\([0-9.]*[[:space:]]*[KMGTPEZY]iB\).*/\1/p')
+            if [ -z "$size_str" ]; then
+              size_str=$(echo "$line" | sed -n 's/.*Transferred:[[:space:]]*\([0-9.]*[[:space:]]*B\).*/\1/p')
+            fi
+            if [ -z "$size_str" ]; then
+              echo 0
+              return
+            fi
+            local num unit
+            num=$(echo "$size_str" | awk '{print $1}')
+            unit=$(echo "$size_str" | awk '{print $2}')
+            case "$unit" in
+              KiB) awk "BEGIN {printf \"%d\", $num * 1024}" ;;
+              MiB) awk "BEGIN {printf \"%d\", $num * 1048576}" ;;
+              GiB) awk "BEGIN {printf \"%d\", $num * 1073741824}" ;;
+              TiB) awk "BEGIN {printf \"%d\", $num * 1099511627776}" ;;
+              PiB) awk "BEGIN {printf \"%d\", $num * 1125899906842624}" ;;
+              B)   awk "BEGIN {printf \"%d\", $num}" ;;
+              *) echo 0 ;;
+            esac
+          }
+
+          # 格式化字节数为人类可读
+          format_bytes() {
+            local bytes="$1"
+            if [ "$bytes" -ge 1125899906842624 ]; then
+              awk "BEGIN {printf \"%.3f PiB\", $bytes / 1125899906842624}"
+            elif [ "$bytes" -ge 1099511627776 ]; then
+              awk "BEGIN {printf \"%.3f TiB\", $bytes / 1099511627776}"
+            elif [ "$bytes" -ge 1073741824 ]; then
+              awk "BEGIN {printf \"%.3f GiB\", $bytes / 1073741824}"
+            elif [ "$bytes" -ge 1048576 ]; then
+              awk "BEGIN {printf \"%.3f MiB\", $bytes / 1048576}"
+            elif [ "$bytes" -ge 1024 ]; then
+              awk "BEGIN {printf \"%.3f KiB\", $bytes / 1024}"
+            else
+              echo "${bytes} B"
+            fi
+          }
+
           # Sync with probes and detailed logs.
           # 带探测和更清晰日志的同步函数。
           sync_with_logging() {
@@ -1510,9 +1561,14 @@ jobs:
             fi
             [ -z "$fail_summary" ] && fail_summary="无"
 
+            # 解析本次同步传输的字节数
+            SYNC_TRANSFERRED_BYTES=$(get_transferred_bytes_from_log "$LOG_FILENAME")
+            SYNC_SKIPPED=0
+
             # 子目录拆分模式下，如果没有文件变更且无错误，跳过通知
             if [ "$SYNC_SKIP_QUIET" = "1" ] && [ ! -s "$fail_list" ] && [ ! -s "$fix_list" ]; then
               if ! grep -Eqi 'Copied|Deleted|Renamed|Moved' "$LOG_FILENAME" 2>/dev/null; then
+                SYNC_SKIPPED=1
                 echo "无文件变更，跳过通知 (SYNC_SKIP_QUIET=1, task=${task_name})"
                 rm -f "$LOG_FILENAME" 2>/dev/null || true
                 return 0
@@ -1528,6 +1584,7 @@ jobs:
               partial_msg+="目标大小：${dest_size_human}"$'\n'
               partial_msg+="状态：OpenList 405/409 错误，部分文件无法同步"$'\n'
               partial_msg+="${count_info}"$'\n'
+              [ -n "$AUTO_SPLIT_INFO" ] && partial_msg+="${AUTO_SPLIT_INFO}"$'\n'
               partial_msg+=$'\n'
               partial_msg+='📁 任务信息'$'\n'
               partial_msg+="• 任务：${task_name}"$'\n'
@@ -1560,6 +1617,7 @@ jobs:
               partial_msg+="目标大小：${dest_size_human}"$'\n'
               partial_msg+="状态：405/409 文件已修复，但部分文件使用了其他方式同步"$'\n'
               partial_msg+="${count_info}"$'\n'
+              [ -n "$AUTO_SPLIT_INFO" ] && partial_msg+="${AUTO_SPLIT_INFO}"$'\n'
               partial_msg+=$'\n'
               partial_msg+='📁 任务信息'$'\n'
               partial_msg+="• 任务：${task_name}"$'\n'
@@ -1614,6 +1672,8 @@ jobs:
                   '🚫 排除规则' \
                   "$exclude_list"
               fi
+
+              [ -n "$AUTO_SPLIT_INFO" ] && ok_message="${ok_message}"$'\n'"${AUTO_SPLIT_INFO}"
 
               curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
                 -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
@@ -1719,30 +1779,30 @@ jobs:
             fi
 
             # 按子目录逐个同步（静默模式：无文件变更时跳过通知）
-            # 子任务不带 --exclude：目录级已通过过滤子目录处理，文件级只适用于根目录
-            local subtask_args=()
-            local i=0
-            while [ $i -lt ${#extra_args[@]} ]; do
-              if [ "${extra_args[$i]}" = "--exclude" ] && [ $((i+1)) -lt ${#extra_args[@]} ]; then
-                i=$((i+2))
-              else
-                subtask_args+=("${extra_args[$i]}")
-                i=$((i+1))
-              fi
-            done
-
             SYNC_SKIP_QUIET=1
+            local total_subtasks=0
+            local completed_subtasks=0
+            local total_transferred=0
             while IFS= read -r subdir; do
               [ -z "$subdir" ] && continue
+              total_subtasks=$((total_subtasks + 1))
               local safe_subtask="${task_name}_${subdir//\//_}"
               echo "=== 子目录同步: ${safe_subtask} ==="
-              sync_with_logging "${source_path}/${subdir}" "${dest_path}/${subdir}" "${safe_subtask}" "${subtask_args[@]}" || true
+              sync_with_logging "${source_path}/${subdir}" "${dest_path}/${subdir}" "${safe_subtask}" "${extra_args[@]}" || true
+              if [ "$SYNC_SKIPPED" = "0" ]; then
+                completed_subtasks=$((completed_subtasks + 1))
+                total_transferred=$((total_transferred + SYNC_TRANSFERRED_BYTES))
+              fi
             done <<< "$subdirs"
             SYNC_SKIP_QUIET=0
+
+            # 设置拆分信息供最终通知使用
+            AUTO_SPLIT_INFO="🔀 子任务拆分：${completed_subtasks}/${total_subtasks} 个子目录有变更，子任务传输：$(format_bytes "$total_transferred")"
 
             # 最终完整同步（正常通知）
             echo "=== 最终完整同步: ${task_name} ==="
             sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
+            AUTO_SPLIT_INFO=""
           }
           EOF
 
@@ -1756,6 +1816,9 @@ jobs:
           source /tmp/functions.sh
           PROCESSED_FILES_LOG="processed_videos.log"
           SYNC_SKIP_QUIET=0
+          SYNC_SKIPPED=0
+          SYNC_TRANSFERRED_BYTES=0
+          AUTO_SPLIT_INFO=""
           echo "PROCESSED_FILES_LOG=$PROCESSED_FILES_LOG" >> "$GITHUB_ENV"
           echo "=== 初始化已处理文件日志 ===" > "$PROCESSED_FILES_LOG"
           echo "开始时间: $(date)" >> "$PROCESSED_FILES_LOG"
