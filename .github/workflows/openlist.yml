@@ -1466,7 +1466,7 @@ jobs:
               rm -f "$fix_log" 2>/dev/null || true
             fi
 
-            local SYNC_FAILED=0
+            SYNC_FAILED=0
 
             # 获取源端和目标端大小及文件数量（用 --json 获取文件数，更可靠）
             local source_size_human="未知"
@@ -1781,10 +1781,12 @@ jobs:
             # 按子目录逐个同步（静默模式：无文件变更时跳过通知）
             SYNC_SKIP_QUIET=1
             local total_subtasks=0
-            local completed_subtasks=0
+            local synced_subtasks=0
+            local failed_subtasks=0
             local skipped_subtasks=0
             local total_transferred=0
-            local changed_list=""
+            local synced_list=""
+            local failed_list=""
             local skipped_list=""
             while IFS= read -r subdir; do
               [ -z "$subdir" ] && continue
@@ -1792,13 +1794,17 @@ jobs:
               local safe_subtask="${task_name}_${subdir//\//_}"
               echo "=== 子目录同步: ${safe_subtask} ==="
               sync_with_logging "${source_path}/${subdir}" "${dest_path}/${subdir}" "${safe_subtask}" "${extra_args[@]}" || true
-              if [ "$SYNC_SKIPPED" = "0" ]; then
-                completed_subtasks=$((completed_subtasks + 1))
-                total_transferred=$((total_transferred + SYNC_TRANSFERRED_BYTES))
-                changed_list+="• ${subdir} ($(format_bytes "$SYNC_TRANSFERRED_BYTES"))"$'\n'
-              else
+              if [ "$SYNC_SKIPPED" = "1" ]; then
                 skipped_subtasks=$((skipped_subtasks + 1))
                 skipped_list+="• ${subdir}"$'\n'
+              elif [ "$SYNC_FAILED" = "0" ]; then
+                synced_subtasks=$((synced_subtasks + 1))
+                total_transferred=$((total_transferred + SYNC_TRANSFERRED_BYTES))
+                synced_list+="• ${subdir} ($(format_bytes "$SYNC_TRANSFERRED_BYTES"))"$'\n'
+              else
+                failed_subtasks=$((failed_subtasks + 1))
+                total_transferred=$((total_transferred + SYNC_TRANSFERRED_BYTES))
+                failed_list+="• ${subdir} ($(format_bytes "$SYNC_TRANSFERRED_BYTES"))"$'\n'
               fi
             done <<< "$subdirs"
             SYNC_SKIP_QUIET=0
@@ -1806,13 +1812,16 @@ jobs:
             # 设置拆分信息供最终通知使用
             AUTO_SPLIT_INFO="🔀 子任务拆分统计"$'\n'
             AUTO_SPLIT_INFO+="• 总子目录数：${total_subtasks}"$'\n'
-            AUTO_SPLIT_INFO+="• 已传输：${completed_subtasks} 个，已跳过：${skipped_subtasks} 个"$'\n'
+            AUTO_SPLIT_INFO+="• 已同步：${synced_subtasks}，未同步：${failed_subtasks}，已跳过：${skipped_subtasks}"$'\n'
             AUTO_SPLIT_INFO+="• 子任务传输总量：$(format_bytes "$total_transferred")"
-            if [ -n "$changed_list" ]; then
-              AUTO_SPLIT_INFO+=$'\n\n'"已传输的子目录："$'\n'"${changed_list%"$'\n'"}"
+            if [ -n "$synced_list" ]; then
+              AUTO_SPLIT_INFO+=$'\n\n'"✅ 已同步的子目录："$'\n'"${synced_list%"$'\n'"}"
+            fi
+            if [ -n "$failed_list" ]; then
+              AUTO_SPLIT_INFO+=$'\n\n'"❌ 未同步的子目录："$'\n'"${failed_list%"$'\n'"}"
             fi
             if [ -n "$skipped_list" ]; then
-              AUTO_SPLIT_INFO+=$'\n\n'"已跳过的子目录（无文件变动）："$'\n'"${skipped_list%"$'\n'"}"
+              AUTO_SPLIT_INFO+=$'\n\n'"⏭️ 已跳过的子目录（无文件变动）："$'\n'"${skipped_list%"$'\n'"}"
             fi
 
             # 最终完整同步（正常通知）
@@ -1833,6 +1842,7 @@ jobs:
           PROCESSED_FILES_LOG="processed_videos.log"
           SYNC_SKIP_QUIET=0
           SYNC_SKIPPED=0
+          SYNC_FAILED=0
           SYNC_TRANSFERRED_BYTES=0
           AUTO_SPLIT_INFO=""
           echo "PROCESSED_FILES_LOG=$PROCESSED_FILES_LOG" >> "$GITHUB_ENV"
