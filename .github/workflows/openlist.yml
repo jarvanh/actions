@@ -1904,13 +1904,28 @@ jobs:
 
             echo "=== 按文件批次拆分: ${task_name} ==="
 
-            # 递归列出所有文件（JSON 格式，含大小）
+            # 递归列出所有文件（使用 lsjson，比 lsf --json 更可靠）
             local file_list_file="${batch_dir}/all_files.jsonl"
-            rclone lsf --json --files-only --recursive "$source_path" 2>/dev/null > "$file_list_file"
+            echo "正在列出文件..."
+            rclone lsjson --recursive --files-only --no-modtime --no-mimetype "$source_path" 2>&1 | jq -c '.[]' > "$file_list_file" 2>/dev/null
 
             local total_files
             total_files=$(wc -l < "$file_list_file" | tr -d ' ')
             echo "总文件数: ${total_files}"
+
+            if [ "$total_files" -eq 0 ]; then
+              echo "⚠️ 无文件列出，尝试 rclone lsf 备选方案..."
+              # 备选：用 rclone lsf -l 获取文件列表和大小
+              rclone lsf -l --files-only --recursive "$source_path" 2>&1 | \
+                awk '{
+                  size=$1
+                  # 文件名是第5个字段之后的所有内容（文件名可能含空格）
+                  for(i=5;i<=NF;i++) name = (i==5 ? $i : name " " $i)
+                  if (name != "") printf "{\"size\":%s,\"path\":\"%s\"}\n", size, name
+                }' > "$file_list_file" 2>/dev/null
+              total_files=$(wc -l < "$file_list_file" | tr -d ' ')
+              echo "备选方案文件数: ${total_files}"
+            fi
 
             if [ "$total_files" -eq 0 ]; then
               echo "无文件可同步"
@@ -1929,8 +1944,9 @@ jobs:
 
             while IFS= read -r line; do
               local size fpath
-              size=$(echo "$line" | jq -r '.Size // 0')
-              fpath=$(echo "$line" | jq -r '.Path')
+              # lsjson 用 .size 和 .path (小写)，lsf --json 用 .Size 和 .Path (大写)
+              size=$(echo "$line" | jq -r '(.size // .Size // 0)')
+              fpath=$(echo "$line" | jq -r '(.path // .Path // empty)')
               [ -z "$fpath" ] && continue
 
               # 当前批次加此文件超阈值则开新批次
