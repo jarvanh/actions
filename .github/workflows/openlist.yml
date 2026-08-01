@@ -1726,13 +1726,16 @@ jobs:
               source_size_bytes=$(echo "$size_json" | jq -r '.bytes // 0' 2>/dev/null || echo 0)
             fi
 
-            if [ "$source_size_bytes" -le "$threshold" ] || [ "$current_depth" -ge "$max_depth" ]; then
-              if [ "$current_depth" -ge "$max_depth" ]; then
-                echo "已达最大拆分深度 ${max_depth}，直接同步 (depth=${current_depth}, size=$(numfmt --to=iec-i --suffix=B "$source_size_bytes" 2>/dev/null || echo "${source_size_bytes}B"))"
-              else
-                echo "源端大小 $(numfmt --to=iec-i --suffix=B "$source_size_bytes" 2>/dev/null || echo "${source_size_bytes}B") 未超过 50GB 阈值，直接同步"
-              fi
+            if [ "$source_size_bytes" -le "$threshold" ]; then
+              echo "源端大小 $(numfmt --to=iec-i --suffix=B "$source_size_bytes" 2>/dev/null || echo "${source_size_bytes}B") 未超过 50GB 阈值，直接同步"
               sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
+              return $?
+            fi
+
+            # 超过 50GB，需要拆分
+            if [ "$current_depth" -ge "$max_depth" ]; then
+              echo "已达最大拆分深度 ${max_depth}，按文件批次拆分 (depth=${current_depth}, size=$(numfmt --to=iec-i --suffix=B "$source_size_bytes" 2>/dev/null || echo "${source_size_bytes}B"))"
+              sync_dir_by_file_batches "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
               return $?
             fi
 
@@ -1742,8 +1745,8 @@ jobs:
             local subdirs
             subdirs=$(rclone lsf --dirs-only "$source_path" 2>/dev/null | sed 's|/$||')
             if [ -z "$subdirs" ]; then
-              echo "无子目录，直接同步"
-              sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
+              echo "无子目录，按文件批次拆分同步"
+              sync_dir_by_file_batches "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
               return $?
             fi
 
@@ -1850,9 +1853,111 @@ jobs:
           }
           EOF
 
+      - name: Setup helper functions - part 8
+        run: |
+          cat > /tmp/functions_part8.sh << 'EOF'
+          # 按文件批次拆分同步（用于无子目录的大文件夹）
+          sync_dir_by_file_batches() {
+            local source_path="$1"
+            local dest_path="$2"
+            local task_name="$3"
+            shift 3
+            local extra_args=("$@")
+
+            local threshold=50000000000  # 50GB
+            local batch_dir="/tmp/file_batches_${task_name}"
+            mkdir -p "$batch_dir"
+
+            echo "=== 按文件批次拆分: ${task_name} ==="
+
+            # 递归列出所有文件（JSON 格式，含大小）
+            local file_list_file="${batch_dir}/all_files.jsonl"
+            rclone lsf --json --files-only --recursive "$source_path" 2>/dev/null > "$file_list_file"
+
+            local total_files
+            total_files=$(wc -l < "$file_list_file" | tr -d ' ')
+            echo "总文件数: ${total_files}"
+
+            if [ "$total_files" -eq 0 ]; then
+              echo "无文件可同步"
+              SYNC_SKIPPED=1
+              SYNC_FAILED=0
+              SYNC_TRANSFERRED_BYTES=0
+              rm -rf "$batch_dir"
+              return 0
+            fi
+
+            # 按大小拆分为 ~50GB 的批次
+            local batch_num=0
+            local batch_size=0
+            local batch_file="${batch_dir}/batch_${batch_num}.txt"
+            > "$batch_file"
+
+            while IFS= read -r line; do
+              local size fpath
+              size=$(echo "$line" | jq -r '.Size // 0')
+              fpath=$(echo "$line" | jq -r '.Path')
+              [ -z "$fpath" ] && continue
+
+              # 当前批次加此文件超阈值则开新批次
+              if [ "$batch_size" -gt 0 ] && [ $((batch_size + size)) -gt "$threshold" ]; then
+                batch_num=$((batch_num + 1))
+                batch_file="${batch_dir}/batch_${batch_num}.txt"
+                > "$batch_file"
+                batch_size=0
+              fi
+
+              echo "$fpath" >> "$batch_file"
+              batch_size=$((batch_size + size))
+            done < "$file_list_file"
+
+            local total_batches=$((batch_num + 1))
+            echo "拆分为 ${total_batches} 个批次"
+
+            # 逐批同步（rclone copy + --files-from）
+            local synced_batches=0
+            local failed_batches=0
+
+            for i in $(seq 0 $batch_num); do
+              local bf="${batch_dir}/batch_${i}.txt"
+              if [ -s "$bf" ]; then
+                local batch_file_count
+                batch_file_count=$(wc -l < "$bf" | tr -d ' ')
+                echo "=== 批次 $((i+1))/${total_batches}: ${batch_file_count} 个文件 ==="
+
+                rclone copy "$source_path" "$dest_path" \
+                  --files-from "$bf" \
+                  --size-only \
+                  --retries 1 \
+                  --low-level-retries 3 \
+                  --timeout 5m \
+                  --ignore-errors \
+                  "${extra_args[@]}" \
+                  2>&1 | tee "${task_name}_batch_${i}.log"
+
+                local rc=${PIPESTATUS[0]}
+                if [ "$rc" -eq 0 ]; then
+                  synced_batches=$((synced_batches + 1))
+                else
+                  failed_batches=$((failed_batches + 1))
+                  echo "批次 $((i+1)) 失败 (exit=${rc})"
+                fi
+              fi
+            done
+
+            # 清理批次文件
+            rm -rf "$batch_dir"
+
+            echo "=== 批次传输完成 (成功 ${synced_batches}/${total_batches}, 失败 ${failed_batches})，执行最终同步检查 ==="
+
+            # 最终用 sync_with_logging 做完整同步检查（处理 405/409、通知等）
+            sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
+          }
+          EOF
+
       - name: Combine all functions
         run: |
-          cat /tmp/functions_part1.sh /tmp/functions_part2.sh /tmp/functions_part3.sh /tmp/functions_part4.sh /tmp/functions_part5.sh /tmp/functions_part6.sh /tmp/functions_part7.sh > /tmp/functions.sh
+          cat /tmp/functions_part1.sh /tmp/functions_part2.sh /tmp/functions_part3.sh /tmp/functions_part4.sh /tmp/functions_part5.sh /tmp/functions_part6.sh /tmp/functions_part7.sh /tmp/functions_part8.sh > /tmp/functions.sh
           rm -f /tmp/functions_part*.sh
 
       - name: Initialize sync
