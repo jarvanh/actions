@@ -1676,6 +1676,48 @@ jobs:
               return $?
             fi
 
+            # 从 extra_args 中提取排除的目录名（模式如 notion/** 或 /notion/**）
+            local exclude_dir_list=""
+            local i=0
+            while [ $i -lt ${#extra_args[@]} ]; do
+              if [ "${extra_args[$i]}" = "--exclude" ] && [ $((i+1)) -lt ${#extra_args[@]} ]; then
+                local pattern="${extra_args[$((i+1))]}"
+                if [[ "$pattern" == */** ]]; then
+                  local dirname="${pattern#/}"
+                  dirname="${dirname%/**}"
+                  if [ -n "$dirname" ]; then
+                    exclude_dir_list="${exclude_dir_list}${dirname}"$'\n'
+                  fi
+                fi
+                i=$((i+2))
+              else
+                i=$((i+1))
+              fi
+            done
+
+            # 过滤掉匹配排除规则的子目录
+            if [ -n "$exclude_dir_list" ]; then
+              local filtered_subdirs=""
+              while IFS= read -r subdir; do
+                [ -z "$subdir" ] && continue
+                if echo "$exclude_dir_list" | grep -qxF "$subdir"; then
+                  echo "跳过排除的子目录: ${subdir}"
+                  continue
+                fi
+                if [ -z "$filtered_subdirs" ]; then
+                  filtered_subdirs="$subdir"
+                else
+                  filtered_subdirs="${filtered_subdirs}"$'\n'"${subdir}"
+                fi
+              done <<< "$subdirs"
+              subdirs="$filtered_subdirs"
+              if [ -z "$subdirs" ]; then
+                echo "所有子目录均被排除，直接执行完整同步"
+                sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
+                return $?
+              fi
+            fi
+
             # 按子目录逐个同步（静默模式：无文件变更时跳过通知）
             SYNC_SKIP_QUIET=1
             while IFS= read -r subdir; do
