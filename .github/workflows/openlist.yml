@@ -9,6 +9,11 @@ on:
         required: false
         type: boolean
         default: false
+      force_sync:
+        description: "强制同步（忽略 1 天跳过和源端大小减小警告）"
+        required: false
+        type: boolean
+        default: false
   schedule:
     # - cron: "10 1 * * *"
     - cron: "*/5 * * * *"
@@ -19,6 +24,7 @@ jobs:
   build:
     env:
       OPENLIST_SPLIT_ON_SYNC_FAILURE: ${{ inputs.split_on_sync_failure || 'false' }}
+      FORCE_SYNC: ${{ inputs.force_sync || 'false' }}
     concurrency: openlist-singleton
     runs-on: ubuntu-latest
     steps:
@@ -1715,6 +1721,26 @@ jobs:
             local current_depth=${SYNC_AUTO_SPLIT_DEPTH:-0}
             local max_depth=3
 
+            # 仅在顶层检查同步标记
+            if [ "$current_depth" -eq 0 ]; then
+              check_sync_marker "$source_path" "$dest_path" "$task_name"
+              case "$MARKER_ACTION" in
+                skip)
+                  SYNC_SKIPPED=1
+                  SYNC_FAILED=0
+                  SYNC_TRANSFERRED_BYTES=0
+                  return 0
+                  ;;
+                warning)
+                  send_sync_warning "$task_name" "$source_path" "$dest_path"
+                  SYNC_SKIPPED=1
+                  SYNC_FAILED=1
+                  SYNC_TRANSFERRED_BYTES=0
+                  return 1
+                  ;;
+              esac
+            fi
+
             # 50GB 阈值
             local threshold=50000000000
 
@@ -1729,6 +1755,10 @@ jobs:
             if [ "$source_size_bytes" -le "$threshold" ]; then
               echo "源端大小 $(numfmt --to=iec-i --suffix=B "$source_size_bytes" 2>/dev/null || echo "${source_size_bytes}B") 未超过 50GB 阈值，直接同步"
               sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
+              # 顶层同步成功后保存标记
+              if [ "$current_depth" -eq 0 ] && [ "$SYNC_FAILED" = "0" ]; then
+                save_sync_marker "$source_path" "$dest_path" "$task_name"
+              fi
               return $?
             fi
 
@@ -1845,6 +1875,10 @@ jobs:
               echo "=== 最终完整同步: ${task_name} ==="
               sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
               AUTO_SPLIT_INFO=""
+              # 顶层同步成功后保存标记
+              if [ "$SYNC_FAILED" = "0" ]; then
+                save_sync_marker "$source_path" "$dest_path" "$task_name"
+              fi
             else
               SYNC_SKIPPED=0
               SYNC_FAILED=0
@@ -1955,9 +1989,199 @@ jobs:
           }
           EOF
 
+      - name: Setup helper functions - part 9
+        run: |
+          cat > /tmp/functions_part9.sh << 'EOF'
+          # ===== 同步标记系统 =====
+          # 标记存储路径: onedrive:/logs/sync_state/
+          SYNC_STATE_DIR="onedrive:/logs/sync_state"
+          SYNC_SKIP_SECONDS=$((24 * 60 * 60))
+
+          # 生成标记文件路径（每个 task+dest 唯一）
+          get_marker_path() {
+            local task_name="$1"
+            local dest_path="$2"
+            local dest_hash
+            dest_hash=$(echo -n "${task_name}_${dest_path}" | md5sum | cut -c1-8)
+            echo "${SYNC_STATE_DIR}/${task_name}_${dest_hash}.json"
+          }
+
+          # 保存同步标记（同步成功后调用）
+          save_sync_marker() {
+            local source_path="$1"
+            local dest_path="$2"
+            local task_name="$3"
+
+            local marker_path
+            marker_path=$(get_marker_path "$task_name" "$dest_path")
+
+            # 获取源端大小和文件数
+            local size_json source_bytes source_count
+            size_json=$(rclone size "$source_path" --json 2>/dev/null || true)
+            source_bytes=$(echo "$size_json" | jq -r '.bytes // 0' 2>/dev/null || echo 0)
+            source_count=$(echo "$size_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
+
+            # 获取顶层目录列表
+            local top_dirs
+            top_dirs=$(rclone lsf --dirs-only "$source_path" 2>/dev/null | sed 's|/$||' | sort)
+
+            # 构建 JSON 标记
+            local marker_json
+            marker_json=$(jq -n \
+              --arg last_success "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              --arg source_path "$source_path" \
+              --arg dest_path "$dest_path" \
+              --argjson source_bytes "$source_bytes" \
+              --argjson source_count "$source_count" \
+              --arg top_dirs "$top_dirs" \
+              '{last_success: $last_success, source_path: $source_path, dest_path: $dest_path, source_bytes: $source_bytes, source_count: $source_count, top_dirs: $top_dirs}')
+
+            # 上传标记到 OneDrive
+            rclone mkdir "$SYNC_STATE_DIR" >/dev/null 2>&1 || true
+            echo "$marker_json" | rclone rcat "$marker_path" 2>/dev/null
+            echo "已保存同步标记: $marker_path (源端 $(format_bytes "$source_bytes"), $source_count 文件)"
+          }
+
+          # 检查同步标记（同步前调用）
+          # 设置全局变量: MARKER_ACTION ("skip" | "warning" | "proceed")
+          # MARKER_JSON, MARKER_CURRENT_BYTES, MARKER_CURRENT_COUNT, MARKER_CURRENT_DIRS
+          check_sync_marker() {
+            local source_path="$1"
+            local dest_path="$2"
+            local task_name="$3"
+
+            MARKER_ACTION="proceed"
+            MARKER_JSON=""
+            MARKER_CURRENT_BYTES=0
+            MARKER_CURRENT_COUNT=0
+            MARKER_CURRENT_DIRS=""
+
+            # 强制同步跳过所有检查
+            if [ "$FORCE_SYNC" = "true" ]; then
+              echo "强制同步模式，跳过标记检查"
+              return 0
+            fi
+
+            local marker_path
+            marker_path=$(get_marker_path "$task_name" "$dest_path")
+
+            # 下载标记
+            local marker_json
+            marker_json=$(rclone cat "$marker_path" 2>/dev/null) || true
+
+            if [ -z "$marker_json" ]; then
+              echo "无同步标记，继续同步"
+              return 0
+            fi
+
+            MARKER_JSON="$marker_json"
+
+            # 解析上次成功时间
+            local last_success
+            last_success=$(echo "$marker_json" | jq -r '.last_success // ""')
+
+            if [ -z "$last_success" ]; then
+              echo "标记无时间戳，继续同步"
+              return 0
+            fi
+
+            # 检查是否 < 24h
+            local now_epoch last_epoch diff
+            now_epoch=$(date +%s)
+            last_epoch=$(date -d "$last_success" +%s 2>/dev/null || echo 0)
+
+            if [ "$last_epoch" -gt 0 ]; then
+              diff=$((now_epoch - last_epoch))
+              if [ "$diff" -lt "$SYNC_SKIP_SECONDS" ]; then
+                echo "1天内已成功同步（距今 $((diff / 3600)) 小时），跳过"
+                MARKER_ACTION="skip"
+                return 0
+              fi
+            fi
+
+            # 检查源端大小是否减小
+            local marker_bytes
+            marker_bytes=$(echo "$marker_json" | jq -r '.source_bytes // 0')
+
+            local current_size_json
+            current_size_json=$(rclone size "$source_path" --json 2>/dev/null || true)
+            MARKER_CURRENT_BYTES=$(echo "$current_size_json" | jq -r '.bytes // 0' 2>/dev/null || echo 0)
+            MARKER_CURRENT_COUNT=$(echo "$current_size_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
+            MARKER_CURRENT_DIRS=$(rclone lsf --dirs-only "$source_path" 2>/dev/null | sed 's|/$||' | sort)
+
+            if [ "$MARKER_CURRENT_BYTES" -lt "$marker_bytes" ]; then
+              echo "⚠️ 源端大小减小: $(format_bytes "$marker_bytes") → $(format_bytes "$MARKER_CURRENT_BYTES")"
+              MARKER_ACTION="warning"
+              return 0
+            fi
+
+            echo "标记检查通过，继续同步"
+            MARKER_ACTION="proceed"
+            return 0
+          }
+
+          # 发送源端大小减小的警告通知
+          send_sync_warning() {
+            local task_name="$1"
+            local source_path="$2"
+            local dest_path="$3"
+
+            local marker_bytes marker_count marker_dirs
+            marker_bytes=$(echo "$MARKER_JSON" | jq -r '.source_bytes // 0')
+            marker_count=$(echo "$MARKER_JSON" | jq -r '.source_count // 0')
+            marker_dirs=$(echo "$MARKER_JSON" | jq -r '.top_dirs // ""')
+
+            local diff_bytes=$((marker_bytes - MARKER_CURRENT_BYTES))
+            local diff_count=$((marker_count - MARKER_CURRENT_COUNT))
+            local pct=0
+            if [ "$marker_bytes" -gt 0 ]; then
+              pct=$((diff_bytes * 100 / marker_bytes))
+            fi
+
+            # 找出缺失和新增的目录
+            local missing_dirs="" new_dirs=""
+            if [ -n "$marker_dirs" ] && [ -n "$MARKER_CURRENT_DIRS" ]; then
+              missing_dirs=$(comm -23 <(echo "$marker_dirs") <(echo "$MARKER_CURRENT_DIRS") 2>/dev/null || true)
+              new_dirs=$(comm -13 <(echo "$marker_dirs") <(echo "$MARKER_CURRENT_DIRS") 2>/dev/null || true)
+            fi
+
+            local msg="⚠️ ${task_name} 源端大小异常减小"$'\n'
+            msg+="━━━━━━━━━━━━━━"$'\n'
+            msg+="任务：${task_name}"$'\n'
+            msg+="源端：${source_path}"$'\n'
+            msg+="目标：${dest_path}"$'\n'
+            msg+=$'\n'"📊 大小对比"$'\n'
+            msg+="• 上次记录：$(format_bytes "$marker_bytes") (${marker_count} 文件)"$'\n'
+            msg+="• 当前大小：$(format_bytes "$MARKER_CURRENT_BYTES") (${MARKER_CURRENT_COUNT} 文件)"$'\n'
+            msg+="• 减少：$(format_bytes "$diff_bytes") (-${pct}%)"$'\n'
+            if [ "$diff_count" -ne 0 ]; then
+              msg+="• 文件减少：${diff_count} 个"$'\n'
+            fi
+
+            if [ -n "$missing_dirs" ]; then
+              msg+=$'\n'"📁 缺失的目录（可能被删除）"$'\n'
+              while IFS= read -r d; do
+                [ -n "$d" ] && msg+="• ${d}"$'\n'
+              done <<< "$missing_dirs"
+            fi
+
+            if [ -n "$new_dirs" ]; then
+              msg+=$'\n'"📁 新增的目录"$'\n'
+              while IFS= read -r d; do
+                [ -n "$d" ] && msg+="• ${d}"$'\n'
+              done <<< "$new_dirs"
+            fi
+
+            msg+=$'\n'"⏸️ 已跳过同步（源端大小减小）"$'\n'
+            msg+="如确认无误，请手动触发 force_sync=true"
+
+            send_telegram "$msg"
+          }
+          EOF
+
       - name: Combine all functions
         run: |
-          cat /tmp/functions_part1.sh /tmp/functions_part2.sh /tmp/functions_part3.sh /tmp/functions_part4.sh /tmp/functions_part5.sh /tmp/functions_part6.sh /tmp/functions_part7.sh /tmp/functions_part8.sh > /tmp/functions.sh
+          cat /tmp/functions_part1.sh /tmp/functions_part2.sh /tmp/functions_part3.sh /tmp/functions_part4.sh /tmp/functions_part5.sh /tmp/functions_part6.sh /tmp/functions_part7.sh /tmp/functions_part8.sh /tmp/functions_part9.sh > /tmp/functions.sh
           rm -f /tmp/functions_part*.sh
 
       - name: Initialize sync
@@ -2016,71 +2240,6 @@ jobs:
           # calls can still pass explicit overrides when needed.
           GD_SYNC_ARGS=()
 
-          GD_SYNC_STATE_DIR="onedrive:/logs/gd_sync_state"
-          GD_SYNC_SKIP_SECONDS=$((1 * 24 * 60 * 60))
-
-          get_remote_success_epoch() {
-            local task_name="$1"
-            local state_file="${GD_SYNC_STATE_DIR}/${task_name}.last_success"
-
-            rclone cat "$state_file" 2>/dev/null | \
-              awk -F= '/^success_epoch=/{print $2; exit}'
-          }
-
-          mark_remote_success() {
-            local task_name="$1"
-            local source_path="$2"
-            local dest_path="$3"
-            local now_epoch
-            local now_iso
-            local state_local
-
-            now_epoch=$(date -u +%s)
-            now_iso=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-            state_local="/tmp/${task_name}.last_success"
-
-            cat > "$state_local" << STATE_EOF
-          task=${task_name}
-          source=${source_path}
-          dest=${dest_path}
-          success_at=${now_iso}
-          success_epoch=${now_epoch}
-          STATE_EOF
-
-            rclone mkdir "$GD_SYNC_STATE_DIR" >/dev/null 2>&1 || true
-            rclone copyto "$state_local" "${GD_SYNC_STATE_DIR}/${task_name}.last_success" \
-              --retries 3 \
-              --low-level-retries 3 \
-              --timeout 2m \
-              --contimeout 30s \
-              >/dev/null 2>&1 || true
-
-            rm -f "$state_local" 2>/dev/null || true
-          }
-
-          should_skip_recent_gd_sync() {
-            local task_name="$1"
-            local last_epoch
-            local now_epoch
-            local age
-
-            last_epoch=$(get_remote_success_epoch "$task_name" || true)
-            now_epoch=$(date -u +%s)
-
-            if ! [[ "$last_epoch" =~ ^[0-9]+$ ]]; then
-              echo "false"
-              return
-            fi
-
-            age=$((now_epoch - last_epoch))
-
-            if [ "$age" -ge 0 ] && [ "$age" -lt "$GD_SYNC_SKIP_SECONDS" ]; then
-              echo "true"
-            else
-              echo "false"
-            fi
-          }
-
           gd_sync_with_1d_skip() {
             local source_path="$1"
             local dest_path="$2"
@@ -2088,21 +2247,21 @@ jobs:
             shift 3
             local extra_args=("$@")
 
-            local skip
-            skip=$(should_skip_recent_gd_sync "$task_name")
+            # 使用统一标记系统检查
+            check_sync_marker "$source_path" "$dest_path" "${task_name}_gd"
 
-            if [ "$skip" = "true" ]; then
-              local last_epoch
-              local last_human
-              last_epoch=$(get_remote_success_epoch "$task_name" || true)
-              last_human=$(date -u -d "@$last_epoch" +"%Y-%m-%d %H:%M:%S UTC" 2>/dev/null || echo "$last_epoch")
+            case "$MARKER_ACTION" in
+              skip)
+                echo "跳过 ${task_name} GD: 1天内已成功同步"
+                return 0
+                ;;
+              warning)
+                send_sync_warning "${task_name} GD" "$source_path" "$dest_path"
+                return 1
+                ;;
+            esac
 
-              echo "跳过 ${task_name}: 最近 1 天内已经成功 sync 过。"
-              echo "上次成功时间: ${last_human}"
-              return 0
-            fi
-
-            echo "执行 ${task_name}: 最近 1 天内没有成功 sync 记录。"
+            echo "执行 ${task_name} GD 同步"
 
             local TIMESTAMP
             local LOG_FILENAME
@@ -2232,7 +2391,7 @@ jobs:
               send_log_to_telegram "$LOG_FILENAME" "$task_name" "$SYNC_STATUS" "gd-sync" "$source_path" "$dest_path"
               process_failed_videos "$LOG_FILENAME" "onedrive" "$task_name" || true
             else
-              mark_remote_success "$task_name" "$source_path" "$dest_path"
+              save_sync_marker "$source_path" "$dest_path" "${task_name}_gd"
 
               local ok_message
               if [ -n "$gd_diff_files_list" ]; then
@@ -2241,7 +2400,7 @@ jobs:
                   '━━━━━━━━━━━━━━' \
                   "源端大小：${gd_src_size}" \
                   "目标大小：${gd_dst_size}" \
-                  "状态：已记录成功时间，未来 1 天内会跳过" \
+                  "状态：已保存同步标记，未来 1 天内会跳过" \
                   "$gd_count_info" \
                   '📁 任务信息' \
                   "• 任务：${task_name}" \
@@ -2257,7 +2416,7 @@ jobs:
                   '━━━━━━━━━━━━━━' \
                   "源端大小：${gd_src_size}" \
                   "目标大小：${gd_dst_size}" \
-                  "状态：已记录成功时间，未来 1 天内会跳过" \
+                  "状态：已保存同步标记，未来 1 天内会跳过" \
                   "$gd_count_info" \
                   '📁 任务信息' \
                   "• 任务：${task_name}" \
