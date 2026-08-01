@@ -148,29 +148,57 @@ jobs:
                       local log_type="${4:-sync}"
                       local source_info="${5:-未知}"
                       local dest_info="${6:-未知}"
+
                       local critical_logs="无"
                       if [ -f "$log_file" ]; then
                         critical_logs=$(grep -Ei "error|failed|too large|timeout|permission denied|connection refused" "$log_file" | tail -n 5 || echo "无明显错误关键字")
                       fi
-                      local source_size_human="未知"
-                      local size_output=$(rclone size "$source_info" 2>/dev/null || true)
-                      if [ -n "$size_output" ]; then
-                          source_size_human=$(echo "$size_output" | sed -n 's/^Total size:[[:space:]]*//p' | head -n 1)
+
+                      # 获取源端和目标端大小及文件数
+                      local src_size="未知" dst_size="未知"
+                      local src_count="" dst_count="" count_info=""
+                      local size_out size_json
+
+                      size_out=$(rclone size "$source_info" 2>/dev/null || true)
+                      [ -n "$size_out" ] && src_size=$(echo "$size_out" | sed -n 's/^Total size:[[:space:]]*//p' | head -n 1)
+                      size_json=$(rclone size "$source_info" --json 2>/dev/null || true)
+                      [ -n "$size_json" ] && src_count=$(echo "$size_json" | jq -r '.count // empty' 2>/dev/null)
+
+                      size_out=$(rclone size "$dest_info" 2>/dev/null || true)
+                      [ -n "$size_out" ] && dst_size=$(echo "$size_out" | sed -n 's/^Total size:[[:space:]]*//p' | head -n 1)
+                      size_json=$(rclone size "$dest_info" --json 2>/dev/null || true)
+                      [ -n "$size_json" ] && dst_count=$(echo "$size_json" | jq -r '.count // empty' 2>/dev/null)
+
+                      if [[ "$src_count" =~ ^[0-9]+$ ]] && [[ "$dst_count" =~ ^[0-9]+$ ]]; then
+                        local diff=$((src_count - dst_count))
+                        if [ "$diff" -ne 0 ]; then
+                          count_info="文件数差异：${diff} (源端 ${src_count} / 目标 ${dst_count})"
+                        else
+                          count_info="文件数：${src_count} (一致)"
+                        fi
+                      elif [ -n "$src_count" ] || [ -n "$dst_count" ]; then
+                        count_info="文件数：源端 ${src_count:-未知} / 目标 ${dst_count:-未知}"
                       fi
+
                       local file_size=$(stat -c%s "$log_file" 2>/dev/null || echo 0)
-                      local file_size_human=$(numfmt --to=iec-i --suffix=B "$file_size" 2>/dev/null || echo "${file_size}B")
+
                       local message
-                      printf -v message '%s\n%s\n%s\n\n%s\n%s\n%s\n%s\n\n%s\n%s\n%s' \
-                          "⚠️ ${task_name} 同步告警" \
-                          '━━━━━━━━━━━━━━' \
-                          '状态：部份文件同步失败' \
-                          '📁 任务信息' \
-                          "• 任务：${task_name}" \
-                          "• 源端：${source_info}" \
-                          "• 目标：${dest_info}" \
-                          '🧾 错误详情' \
-                          "• 大小：${file_size_human}" \
-                          "• 关键日志：\n${critical_logs}"
+                      message="⚠️ ${task_name} 同步告警"$'\n'
+                      message+='━━━━━━━━━━━━━━'$'\n'
+                      message+="源端大小：${src_size}"$'\n'
+                      message+="目标大小：${dst_size}"$'\n'
+                      message+="状态：部份文件同步失败"$'\n'
+                      [ -n "$count_info" ] && message+="${count_info}"$'\n'
+                      message+=$'\n'"📁 任务信息"$'\n'
+                      message+="• 任务：${task_name}"$'\n'
+                      message+="• 源端：${source_info}"$'\n'
+                      message+="• 目标：${dest_info}"$'\n'
+                      message+=$'\n'"🧾 错误详情"$'\n'
+                      message+="• 关键日志："$'\n'
+                      while IFS= read -r line; do
+                        [ -n "$line" ] && message+="  ${line}"$'\n'
+                      done <<< "$critical_logs"
+
                       curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
                         -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
                         --data-urlencode text="$message" || true
