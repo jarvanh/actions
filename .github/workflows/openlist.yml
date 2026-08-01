@@ -1712,6 +1712,9 @@ jobs:
             shift 3
             local extra_args=("$@")
 
+            local current_depth=${SYNC_AUTO_SPLIT_DEPTH:-0}
+            local max_depth=3
+
             # 50GB 阈值
             local threshold=50000000000
 
@@ -1723,13 +1726,17 @@ jobs:
               source_size_bytes=$(echo "$size_json" | jq -r '.bytes // 0' 2>/dev/null || echo 0)
             fi
 
-            if [ "$source_size_bytes" -le "$threshold" ]; then
-              echo "源端大小 $(numfmt --to=iec-i --suffix=B "$source_size_bytes" 2>/dev/null || echo "${source_size_bytes}B") 未超过 50GB 阈值，直接同步"
+            if [ "$source_size_bytes" -le "$threshold" ] || [ "$current_depth" -ge "$max_depth" ]; then
+              if [ "$current_depth" -ge "$max_depth" ]; then
+                echo "已达最大拆分深度 ${max_depth}，直接同步 (depth=${current_depth}, size=$(numfmt --to=iec-i --suffix=B "$source_size_bytes" 2>/dev/null || echo "${source_size_bytes}B"))"
+              else
+                echo "源端大小 $(numfmt --to=iec-i --suffix=B "$source_size_bytes" 2>/dev/null || echo "${source_size_bytes}B") 未超过 50GB 阈值，直接同步"
+              fi
               sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
               return $?
             fi
 
-            echo "源端大小 $(numfmt --to=iec-i --suffix=B "$source_size_bytes" 2>/dev/null || echo "${source_size_bytes}B") 超过 50GB 阈值，按子目录拆分同步"
+            echo "源端大小 $(numfmt --to=iec-i --suffix=B "$source_size_bytes" 2>/dev/null || echo "${source_size_bytes}B") 超过 50GB 阈值，按子目录拆分同步 (depth=${current_depth})"
 
             # 列出一级子目录
             local subdirs
@@ -1797,7 +1804,9 @@ jobs:
               total_subtasks=$((total_subtasks + 1))
               local safe_subtask="${task_name}_${subdir//\//_}"
               echo "=== 子目录同步: ${safe_subtask} ==="
-              sync_with_logging "${source_path}/${subdir}" "${dest_path}/${subdir}" "${safe_subtask}" "${extra_args[@]}" || true
+              SYNC_AUTO_SPLIT_DEPTH=$((current_depth + 1))
+              sync_task_with_auto_split "${source_path}/${subdir}" "${dest_path}/${subdir}" "${safe_subtask}" "${extra_args[@]}" || true
+              SYNC_AUTO_SPLIT_DEPTH=$current_depth
               if [ "$SYNC_SKIPPED" = "1" ]; then
                 skipped_subtasks=$((skipped_subtasks + 1))
                 skipped_list+="• ${subdir}"$'\n'
@@ -1828,10 +1837,16 @@ jobs:
               AUTO_SPLIT_INFO+=$'\n\n'"⏭️ 已跳过的子目录（无文件变动）："$'\n'"${skipped_list%"$'\n'"}"
             fi
 
-            # 最终完整同步（正常通知）
-            echo "=== 最终完整同步: ${task_name} ==="
-            sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
-            AUTO_SPLIT_INFO=""
+            # 最终完整同步（仅在顶层执行，正常通知）
+            if [ "$current_depth" -eq 0 ]; then
+              echo "=== 最终完整同步: ${task_name} ==="
+              sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
+              AUTO_SPLIT_INFO=""
+            else
+              SYNC_SKIPPED=0
+              SYNC_FAILED=0
+              SYNC_TRANSFERRED_BYTES=$total_transferred
+            fi
           }
           EOF
 
@@ -1849,6 +1864,7 @@ jobs:
           SYNC_FAILED=0
           SYNC_TRANSFERRED_BYTES=0
           AUTO_SPLIT_INFO=""
+          SYNC_AUTO_SPLIT_DEPTH=0
           echo "PROCESSED_FILES_LOG=$PROCESSED_FILES_LOG" >> "$GITHUB_ENV"
           echo "=== 初始化已处理文件日志 ===" > "$PROCESSED_FILES_LOG"
           echo "开始时间: $(date)" >> "$PROCESSED_FILES_LOG"
