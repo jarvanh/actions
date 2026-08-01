@@ -959,8 +959,8 @@ jobs:
           }
 
           # 尝试修复 405/409 等无法同步的文件
-          # 1. 如果目录创建失败，将最底层文件夹名 base64 编码后重新创建目录
-          # 2. 目录就绪后，尝试多种方式同步文件到目标路径（原始路径或 base64 目录）
+          # 1. 如果目录创建失败，将最底层文件夹名 base64URL 编码后重新创建目录
+          # 2. 目录就绪后，尝试多种方式同步文件到目标路径（原始路径或 base64URL 目录）
           # 结果写入全局变量：
           #   TRY_FIX_STATUS / TRY_FIX_ORIGINAL / TRY_FIX_ALTERNATIVE / TRY_FIX_METHOD / TRY_FIX_MESSAGE
           try_fix_failed_file() {
@@ -1046,9 +1046,9 @@ jobs:
                 fi
               fi
 
-              # 目录创建仍失败 → base64 编码最底层文件夹名后重试
+              # 目录创建仍失败 → base64URL 编码最底层文件夹名后重试
               if [ "$dir_ok" -ne 1 ] && [ "$file_dir_rel" != "." ] && [ -n "$file_dir_rel" ]; then
-                log_fix_attempt "$fix_log" "目录创建失败，尝试 base64 编码文件夹名..."
+                log_fix_attempt "$fix_log" "目录创建失败，尝试 base64URL 编码文件夹名..."
 
                 local parent_dir leaf_dir encoded_leaf new_file_dir_rel
                 parent_dir="$(dirname -- "$file_dir_rel")"
@@ -1065,17 +1065,17 @@ jobs:
                 actual_ol_dir="/${ol_dst_base}/${new_file_dir_rel}"
 
                 log_fix_attempt "$fix_log" "原始目录: $file_dir_rel"
-                log_fix_attempt "$fix_log" "base64 编码目录: $new_file_dir_rel"
+                log_fix_attempt "$fix_log" "base64URL 编码目录: $new_file_dir_rel"
 
                 rclone mkdir "$actual_dst_dir" --retries 1 --low-level-retries 3 --timeout 2m --contimeout 30s 2>&1 | \
-                  while IFS= read -r line; do log_fix_attempt "$fix_log" "rclone mkdir (base64): $line"; done
+                  while IFS= read -r line; do log_fix_attempt "$fix_log" "rclone mkdir (base64URL): $line"; done
                 mkdir_status=${PIPESTATUS[0]}
 
                 if [ "$mkdir_status" -eq 0 ]; then
                   dir_ok=1
                   used_base64_dir=1
                   dst_file="${actual_dst_dir}/${file_name}"
-                  log_fix_attempt "$fix_log" "base64 目录创建成功 (rclone)"
+                  log_fix_attempt "$fix_log" "base64URL 目录创建成功 (rclone)"
                 else
                   if [ -n "$ol_token" ] && [ "$ol_token" != "null" ]; then
                     mkdir_resp=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST "http://127.0.0.1:5244/api/fs/mkdir" \
@@ -1083,12 +1083,12 @@ jobs:
                       -H "Content-Type: application/json" \
                       -d "$(jq -n --arg path "$actual_ol_dir" '{path:$path}')" 2>&1)
                     mkdir_http=$(echo "$mkdir_resp" | tail -n 1)
-                    log_fix_attempt "$fix_log" "OpenList API mkdir (base64) 响应: ${mkdir_http}"
+                    log_fix_attempt "$fix_log" "OpenList API mkdir (base64URL) 响应: ${mkdir_http}"
                     if echo "$mkdir_http" | grep -qE 'HTTP_CODE:(200|201|204)'; then
                       dir_ok=1
                       used_base64_dir=1
                       dst_file="${actual_dst_dir}/${file_name}"
-                      log_fix_attempt "$fix_log" "base64 目录创建成功 (API)"
+                      log_fix_attempt "$fix_log" "base64URL 目录创建成功 (API)"
                     fi
                   fi
                 fi
@@ -1096,8 +1096,8 @@ jobs:
             fi
 
             if [ "$dir_ok" -ne 1 ]; then
-              log_fix_attempt "$fix_log" "目录创建最终失败（含 base64 编码后），无法修复文件"
-              TRY_FIX_MESSAGE="目录创建失败，base64 编码后仍失败"
+              log_fix_attempt "$fix_log" "目录创建最终失败（含 base64URL 编码后），无法修复文件"
+              TRY_FIX_MESSAGE="目录创建失败，base64URL 编码后仍失败"
               rm -rf "$temp_dir" 2>/dev/null || true
               return 1
             fi
@@ -1131,8 +1131,8 @@ jobs:
             fi
             log_fix_attempt "$fix_log" "方法 1 失败 (exit=$m1_status)"
 
-            # 方法 2：文件名 base64 编码后上传
-            log_fix_attempt "$fix_log" "方法 2: 文件名 base64 编码后上传"
+            # 方法 2：文件名 base64URL 编码后上传
+            log_fix_attempt "$fix_log" "方法 2: 文件名 base64URL 编码后上传"
             local encoded_name m2_dst m2_status
             if [[ "$file_name" == *.* ]]; then
               local name_base="${file_name%.*}"
@@ -1148,7 +1148,7 @@ jobs:
             if [ "$m2_status" -eq 0 ]; then
               log_fix_attempt "$fix_log" "方法 2 成功"
               TRY_FIX_STATUS="success"
-              TRY_FIX_METHOD="base64 改名上传"
+              TRY_FIX_METHOD="base64URL 改名上传"
               TRY_FIX_ALTERNATIVE="${m2_dst#${dest_path}/}"
               rm -rf "$temp_dir" 2>/dev/null || true
               return 0
@@ -1432,7 +1432,7 @@ jobs:
               done
             fi
 
-            # 405/409 失败文件尝试修复（目录创建→base64编码→多种方式同步），不阻止后续 task
+            # 405/409 失败文件尝试修复（目录创建→base64URL编码→多种方式同步），不阻止后续 task
             local fail_list="/tmp/${task_name}_sync_failures.txt"
             local fix_list="/tmp/${task_name}_sync_fixes.txt"
             : > "$fail_list"
