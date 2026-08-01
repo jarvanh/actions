@@ -1806,13 +1806,13 @@ jobs:
             # 设置拆分信息供最终通知使用
             AUTO_SPLIT_INFO="🔀 子任务拆分统计"$'\n'
             AUTO_SPLIT_INFO+="• 总子目录数：${total_subtasks}"$'\n'
-            AUTO_SPLIT_INFO+="• 有变更：${completed_subtasks} 个，无变更：${skipped_subtasks} 个"$'\n'
+            AUTO_SPLIT_INFO+="• 已传输：${completed_subtasks} 个，已跳过：${skipped_subtasks} 个"$'\n'
             AUTO_SPLIT_INFO+="• 子任务传输总量：$(format_bytes "$total_transferred")"
             if [ -n "$changed_list" ]; then
-              AUTO_SPLIT_INFO+=$'\n\n'"有变更的子目录："$'\n'"${changed_list%"$'\n'"}"
+              AUTO_SPLIT_INFO+=$'\n\n'"已传输的子目录："$'\n'"${changed_list%"$'\n'"}"
             fi
             if [ -n "$skipped_list" ]; then
-              AUTO_SPLIT_INFO+=$'\n\n'"无变更的子目录："$'\n'"${skipped_list%"$'\n'"}"
+              AUTO_SPLIT_INFO+=$'\n\n'"已跳过的子目录（无文件变动）："$'\n'"${skipped_list%"$'\n'"}"
             fi
 
             # 最终完整同步（正常通知）
