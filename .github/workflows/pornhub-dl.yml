@@ -30,7 +30,8 @@ jobs:
           EOF
       - name: rclone-run
         run: |
-          sudo apt-get install fuse3
+          sudo apt-get update
+          sudo apt-get install -y fuse3
           mkdir ~/onedrive
           nohup rclone --vfs-cache-mode full mount onedrive: ~/onedrive &
           echo "~/onedrive 文件列表"

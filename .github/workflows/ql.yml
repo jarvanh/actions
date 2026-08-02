@@ -65,7 +65,8 @@ jobs:
             echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
           }
           require_free_kb "$HOME" $((2 * 1024 * 1024)) "ql restore preflight"
-          sudo apt-get install fuse3
+          sudo apt-get update
+          sudo apt-get install -y fuse3
           # sudo mkdir /dropbox
           # sudo nohup rclone mount dropbox: /dropbox --vfs-cache-mode full &
           echo "==========onedrive==========="
