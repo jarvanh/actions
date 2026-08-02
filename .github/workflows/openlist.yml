@@ -2042,7 +2042,7 @@ jobs:
                   local err_count
                   err_count=$(grep -c 'ERROR.*object not found' "${task_name}_batch_${i}.log" 2>/dev/null || echo 0)
                   echo "批次 $((i+1)) 部分成功 (exit=4, ${err_count} 个文件 object not found)"
-                  grep 'ERROR.*object not found' "${task_name}_batch_${i}.log" 2>/dev/null | head -5 | while IFS= read -r line; do
+                  grep 'ERROR.*object not found' "${task_name}_batch_${i}.log" 2>/dev/null | head -50 | while IFS= read -r line; do
                     echo "  ${line}"
                   done
                 else
