@@ -30,11 +30,7 @@ jobs:
     steps:
       - name: rclone-install
         run: |
-          curl -O https://beta.rclone.org/rclone-beta-latest-linux-amd64.zip
-          unzip rclone-*-amd64.zip
-          cd rclone-*-linux-amd64
-          sudo mv rclone /usr/bin
-          sudo chmod +x /usr/bin/rclone
+          curl -fsSL https://rclone.org/install.sh | sudo bash
 
       - name: rclone-config
         env:
@@ -124,7 +120,12 @@ jobs:
 
       - name: run cloudflared
         run: |
-          cloudflared tunnel route dns openlist openlist.'${{ secrets.VD }}'.eu.org
+          # DNS 路由只需创建一次；检查是否已解析到该隧道，避免重复 API 调用
+          if ! dig +short openlist.'${{ secrets.VD }}'.eu.org | grep -q .; then
+            cloudflared tunnel route dns openlist openlist.'${{ secrets.VD }}'.eu.org
+          else
+            echo "DNS 路由已存在，跳过 cloudflared tunnel route dns"
+          fi
           nohup cloudflared tunnel run --url http://127.0.0.1:5244 openlist &
 
       # - name: config openlist
@@ -142,6 +143,14 @@ jobs:
       - name: Setup helper functions - part 1
         run: |
           cat > /tmp/functions_part1.sh << 'EOF'
+                    # 通用 Telegram 消息发送（替代多处重复的内联 curl）
+                    send_telegram_message() {
+                      local message="$1"
+                      curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
+                        -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
+                        --data-urlencode text="$message" || true
+                    }
+
                     send_log_to_telegram() {
                       local log_file="$1"
                       local task_name="$2"
@@ -155,20 +164,18 @@ jobs:
                         critical_logs=$(grep -Ei "error|failed|too large|timeout|permission denied|connection refused" "$log_file" | tail -n 5 || echo "无明显错误关键字")
                       fi
 
-                      # 获取源端和目标端大小及文件数
-                      local src_size="未知" dst_size="未知"
-                      local src_count="" dst_count="" count_info=""
-                      local size_out size_json
-
-                      size_out=$(rclone size "$source_info" 2>/dev/null || true)
-                      [ -n "$size_out" ] && src_size=$(echo "$size_out" | sed -n 's/^Total size:[[:space:]]*//p' | head -n 1)
-                      size_json=$(rclone size "$source_info" --json 2>/dev/null || true)
-                      [ -n "$size_json" ] && src_count=$(echo "$size_json" | jq -r '.count // empty' 2>/dev/null)
-
-                      size_out=$(rclone size "$dest_info" 2>/dev/null || true)
-                      [ -n "$size_out" ] && dst_size=$(echo "$size_out" | sed -n 's/^Total size:[[:space:]]*//p' | head -n 1)
-                      size_json=$(rclone size "$dest_info" --json 2>/dev/null || true)
-                      [ -n "$size_json" ] && dst_count=$(echo "$size_json" | jq -r '.count // empty' 2>/dev/null)
+                      # 获取源端和目标端大小及文件数（各只调一次 --json）
+                      local src_stats dst_stats
+                      local src_bytes src_count dst_bytes dst_count
+                      local src_size="未知" dst_size="未知" count_info=""
+                      src_stats=$(_get_path_stats "$source_info")
+                      src_bytes=$(echo "$src_stats" | awk '{print $1}')
+                      src_count=$(echo "$src_stats" | awk '{print $2}')
+                      src_size=$(echo "$src_stats" | awk '{print $3}')
+                      dst_stats=$(_get_path_stats "$dest_info")
+                      dst_bytes=$(echo "$dst_stats" | awk '{print $1}')
+                      dst_count=$(echo "$dst_stats" | awk '{print $2}')
+                      dst_size=$(echo "$dst_stats" | awk '{print $3}')
 
                       if [[ "$src_count" =~ ^[0-9]+$ ]] && [[ "$dst_count" =~ ^[0-9]+$ ]]; then
                         local diff=$((src_count - dst_count))
@@ -183,12 +190,17 @@ jobs:
 
                       local file_size=$(stat -c%s "$log_file" 2>/dev/null || echo 0)
 
+                      local status_text="同步失败 (exit=${exit_code})"
+                      if [ "$log_type" = "gd-sync" ]; then
+                        status_text="Google Drive 同步失败 (exit=${exit_code})"
+                      fi
+
                       local message
                       message="⚠️ ${task_name} 同步告警"$'\n'
                       message+='━━━━━━━━━━━━━━'$'\n'
                       message+="源端大小：${src_size}"$'\n'
                       message+="目标大小：${dst_size}"$'\n'
-                      message+="状态：部份文件同步失败"$'\n'
+                      message+="状态：${status_text}"$'\n'
                       [ -n "$count_info" ] && message+="${count_info}"$'\n'
                       message+=$'\n'"📁 任务信息"$'\n'
                       message+="• 任务：${task_name}"$'\n'
@@ -200,9 +212,7 @@ jobs:
                         [ -n "$line" ] && message+="  ${line}"$'\n'
                       done <<< "$critical_logs"
 
-                      curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
-                        -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
-                        --data-urlencode text="$message" || true
+                      send_telegram_message "$message"
                       if [ "$file_size" -gt 0 ] && [ "$file_size" -lt 50000000 ]; then
                         curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendDocument \
                           -F chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
@@ -228,53 +238,6 @@ jobs:
                       local message="$2"
                       echo "[$(date '+%Y-%m-%d %H:%M:%S')] $message" >> "$log_file"
                       echo "$message"
-                    }
-                    sync_with_logging() {
-                      local source_path="$1"
-                      local dest_path="$2"
-                      local task_name="$3"
-                      shift 3
-                      local extra_args=("$@")
-                      local TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-                      local LOG_FILENAME="${task_name}_sync_${TIMESTAMP}.log"
-                      echo "开始同步: $source_path -> $dest_path"
-                      rclone sync "$source_path" "$dest_path" \
-                        "${extra_args[@]}" \
-                        --progress \
-                        --stats 15s \
-                        --stats-one-line \
-                        --ignore-errors \
-                        --verbose \
-                        --timeout 10m \
-                        --contimeout 30s \
-                        --retries 3 \
-                        --low-level-retries 3 \
-                        2>&1 | tee "$LOG_FILENAME"
-                      local SYNC_STATUS=${PIPESTATUS[0]}
-                      if [ "$SYNC_STATUS" -ne 0 ] || grep -Eqi '(^|[^[:alpha:]])(ERROR|Error|Failed|failed|timeout|forbidden|unauthorized|permission denied|connection refused)([^[:alpha:]]|$)' "$LOG_FILENAME"; then
-                        send_log_to_telegram "$LOG_FILENAME" "$task_name" "$SYNC_STATUS" "sync" "$source_path" "$dest_path"
-                        process_failed_videos "$LOG_FILENAME" "onedrive" "$task_name"
-                      else
-                        local source_size_human="未知"
-                        local size_output=$(rclone size "$source_path" 2>/dev/null || true)
-                        if [ -n "$size_output" ]; then
-                          source_size_human=$(echo "$size_output" | sed -n 's/^Total size:[[:space:]]*//p' | head -n 1)
-                        fi
-                        local ok_message
-                        printf -v ok_message '%s\n%s\n%s\n\n%s\n%s\n%s\n%s' \
-                          "✅ ${task_name} 同步完成" \
-                          '━━━━━━━━━━━━━━' \
-                          "源端大小：${source_size_human}" \
-                          '📁 任务信息' \
-                          "• 任务：${task_name}" \
-                          "• 源端：${source_path}" \
-                          "• 目标：${dest_path}"
-                        curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
-                          -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
-                          --data-urlencode text="$ok_message" || true
-                      fi
-                      rm -f "$LOG_FILENAME" 2>/dev/null || true
-                      return 0
                     }
           EOF
 
@@ -326,9 +289,7 @@ jobs:
               fi
             fi
 
-            curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
-              -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
-              --data-urlencode text="$message" || true
+            send_telegram_message "$message"
           }
 
           # 上传视频分割日志到OneDrive
@@ -373,7 +334,7 @@ jobs:
             local base_name="${file_name%.*}"
             local extension="${file_name##*.}"
             local file_size
-            file_size=$(stat -c%s "$local_file_path" 2>/dev/null || stat -f%z "$local_file_path" 2>/dev/null || echo 0)
+            file_size=$(stat -c%s "$local_file_path" 2>/dev/null || echo 0)
             # OpenList/阿里云盘大文件阈值按 4,000,000,000 bytes 处理。
             # 分片目标略低于 4G，尽量贴近上限，同时给封装开销和关键帧边界留余量。
             local max_part_size="${OPENLIST_MAX_PART_SIZE:-4000000000}"
@@ -490,7 +451,7 @@ jobs:
               for part in "$split_dir/${base_name} - part"*."${extension}"; do
                 [ -f "$part" ] || continue
                 generated_count=$((generated_count + 1))
-                part_size=$(stat -c%s "$part" 2>/dev/null || stat -f%z "$part" 2>/dev/null || echo 0)
+                part_size=$(stat -c%s "$part" 2>/dev/null || echo 0)
                 part_name=$(basename -- "$part")
                 log_video_split "$video_split_log" "生成分片: $part_name ($(numfmt --to=iec-i --suffix=B "$part_size" 2>/dev/null || echo "${part_size}B"))"
                 if [ "$part_size" -gt "$max_part_size" ]; then
@@ -607,7 +568,7 @@ jobs:
             local video_split_log="$5"
 
             local file_size
-            file_size=$(stat -c%s "$local_file_path" 2>/dev/null || stat -f%z "$local_file_path" 2>/dev/null || echo 0)
+            file_size=$(stat -c%s "$local_file_path" 2>/dev/null || echo 0)
             local max_part_size="${OPENLIST_MAX_PART_SIZE:-4000000000}"
             local volume_size="${OPENLIST_7Z_VOLUME_SIZE:-3810m}"
             local split_dir="binary_split_$(printf '%s' "$file_name" | tr '/\\' '__')_$(date +%s)_$$"
@@ -762,9 +723,7 @@ jobs:
               message+=$'\n\n日志摘要：\n'
               message+="$log_summary"
             fi
-            curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
-              -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
-              --data-urlencode text="$message" || true
+            send_telegram_message "$message"
           }
 
           # 对指定源目录中的超阈值大文件进行切割。
@@ -772,7 +731,7 @@ jobs:
           preprocess_large_files_for_openlist() {
             local source_path="$1"
             local task_name="$2"
-            local large_file_threshold="${LARGE_FILE_THRESHOLD:-4000000000}"
+            local large_file_threshold="${LARGE_FILE_THRESHOLD_BYTES:-4000000000}"
 
             local remote_source="${source_path%%:*}"
             local remote_path="${source_path#*:}"
@@ -875,9 +834,7 @@ jobs:
                 summary_message+=$'\n⚠️ 处理失败文件：\n'
                 summary_message+="$failed_files"
               fi
-              curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
-                -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
-                --data-urlencode text="$summary_message" || true
+              send_telegram_message "$summary_message"
             fi
 
             rm -f "$video_split_log" 2>/dev/null || true
@@ -901,79 +858,6 @@ jobs:
           }
 
 
-          # 分析错误日志，查找失败的大视频文件
-          process_failed_videos() {
-            local log_file="$1"
-            local remote_source="$2"
-            local task_name="$3"
-
-            echo "分析错误日志，查找失败的视频文件..."
-            local log_status=$(has_real_content "$log_file")
-            if [ "$log_status" != "has_content" ]; then
-              echo "日志文件没有实际错误内容，跳过视频处理"
-              return
-            fi
-
-            local video_split_log="video_split_${task_name}_$(date +%Y%m%d_%H%M%S).log"
-            echo "=== 视频分割日志 - 开始于 $(date) ===" > "$video_split_log"
-            local failed_videos=$(grep -i "error\|failed\|too large\|size" "$log_file" | grep -E "\.(mp4|mkv|mov|avi|flv|webm|m4v|wmv|mpg|mpeg|3gp|mp3|wav|aac|flac|m4a)$" | head -20 || true)
-
-            if [ -n "$failed_videos" ]; then
-              local file_patterns=$(echo "$failed_videos" | grep -oE "[a-zA-Z09_\-./]+\.(mp4|mkv|mov|avi|flv|webm|m4v|wmv|mpg|mpeg|3gp|mp3|wav|aac|flac|m4a)" | sort -u)
-              local processed_count=0
-              local success_count=0
-
-              for file_pattern in $file_patterns; do
-                local cleaned_path=$(echo "$file_pattern" | sed 's/^.*\///')
-                local full_path=""
-                local file_size=0
-
-                case "$task_name" in
-                  "backup") search_paths=("backup") ;;
-                  "task0") search_paths=("0") ;;
-                  "task1") search_paths=("1") ;;
-                  "task2") search_paths=("2") ;;
-                  "task3") search_paths=("3") ;;
-                  *) search_paths=("backup" "0" "1" "2" "3") ;;
-                esac
-
-                for search_path in "${search_paths[@]}"; do
-                  local found_file=$(rclone lsf "${remote_source}:${search_path}" --include "*${cleaned_path}*" 2>/dev/null | head -1)
-                  if [ -n "$found_file" ]; then
-                    local file_info=$(rclone size "${remote_source}:${search_path}/${found_file}" 2>/dev/null || echo "0")
-                    file_size=$(echo "$file_info" | grep "Total size" | grep -oE '[0-9]+' || echo "0")
-                    if [ "$file_size" -gt 4000000000 ]; then
-                      full_path="${search_path}/${found_file}"
-                      break
-                    fi
-                  fi
-                done
-
-                if [ -n "$full_path" ] && [ "$file_size" -gt 4000000000 ]; then
-                  processed_count=$((processed_count + 1))
-                  local temp_dir="temp_video_split_$(date +%s)_${processed_count}"
-                  mkdir -p "$temp_dir"
-                  rclone copy "${remote_source}:${full_path}" "$temp_dir/" 2>&1 | while IFS= read -r line; do log_video_split "$video_split_log" "rclone copy: $line"; done
-                  local local_file="$temp_dir/$(basename "$full_path")"
-                  if [ -f "$local_file" ] && split_large_video "$(dirname "$full_path")" "$remote_source" "$local_file" "$(basename "$full_path")" "$video_split_log"; then
-                    success_count=$((success_count + 1))
-                  fi
-                  rm -rf "$temp_dir" 2>/dev/null || true
-                fi
-              done
-
-              upload_video_split_log "$video_split_log"
-              if [ $processed_count -gt 0 ]; then
-                local summary_message
-                printf -v summary_message '%s\n%s\n%s\n%s\n%s' '📊 OpenList 视频分割总结' '━━━━━━━━━━' "任务：$task_name" "尝试处理：$processed_count" "处理成功：$success_count"
-                curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
-                  -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
-                  --data-urlencode text="$summary_message" || true
-              fi
-            fi
-
-            rm -f "$video_split_log" 2>/dev/null || true
-          }
           EOF
 
       - name: Setup helper functions - part 5
@@ -1040,7 +924,7 @@ jobs:
             fi
 
             local file_size
-            file_size=$(stat -c%s "$local_file" 2>/dev/null || stat -f%z "$local_file" 2>/dev/null || echo 0)
+            file_size=$(stat -c%s "$local_file" 2>/dev/null || echo 0)
             log_fix_attempt "$fix_log" "源文件已下载，大小: $(numfmt --to=iec-i --suffix=B "$file_size" 2>/dev/null || echo "${file_size}B")"
 
             # Step 1: 尝试创建/确认目标目录
@@ -1329,6 +1213,65 @@ jobs:
             fi
           }
 
+          # 一次性获取远端路径的 bytes/count/human_size（只调一次 rclone size --json）
+          _get_path_stats() {
+            local path="$1"
+            shift
+            local size_json
+            if [ $# -gt 0 ]; then
+              size_json=$(rclone size "$path" --json "$@" 2>/dev/null || true)
+            else
+              size_json=$(rclone size "$path" --json 2>/dev/null || true)
+            fi
+            if [ -z "$size_json" ]; then
+              echo "0 0 未知"
+              return
+            fi
+            local bytes count
+            bytes=$(echo "$size_json" | jq -r '.bytes // 0' 2>/dev/null || echo 0)
+            count=$(echo "$size_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
+            echo "${bytes} ${count} $(format_bytes "$bytes")"
+          }
+
+          # 运行 rclone check 并构建差异文件列表（最多 20 条）
+          _build_diff_files_list() {
+            local source_path="$1"
+            local dest_path="$2"
+            shift 2
+            local -a extra_args=("$@")
+            local check_combined
+            check_combined=$(timeout 300 rclone check "$source_path" "$dest_path" --size-only "${extra_args[@]}" --combined - 2>/dev/null || true)
+            local result="" diff_count=0
+            while IFS= read -r line; do
+              local marker="${line:0:1}"
+              local fpath="${line:2}"
+              case "$marker" in
+                +) result+="• [源端有/目标缺失] ${fpath}"$'\n' ;;
+                -) result+="• [目标多余/仅目标存在] ${fpath}"$'\n' ;;
+                '*') result+="• [大小/内容不一致] ${fpath}"$'\n' ;;
+              esac
+              diff_count=$((diff_count + 1))
+              if [ "$diff_count" -ge 20 ]; then
+                result+="... (更多差异文件省略)"$'\n'
+                break
+              fi
+            done <<< "$(echo "$check_combined" | grep -E '^[-+*] ')"
+            echo "$result"
+          }
+
+          # 从 extra_args 中提取 --exclude 规则，构建带 bullet 的列表
+          _build_exclude_bullets() {
+            local -a extra_args=("$@")
+            local result="" i
+            for ((i=0; i<${#extra_args[@]}; i++)); do
+              if [ "${extra_args[$i]}" == "--exclude" ] && [ $((i+1)) -lt ${#extra_args[@]} ]; then
+                result+="• ${extra_args[$((i+1))]}"$'\n'
+              fi
+            done
+            [ -z "$result" ] && result="无"
+            echo "$result"
+          }
+
           # Sync with probes and detailed logs.
           # 带探测和更清晰日志的同步函数。
           sync_with_logging() {
@@ -1503,33 +1446,23 @@ jobs:
 
             SYNC_FAILED=0
 
-            # 获取源端和目标端大小及文件数量（用 --json 获取文件数，更可靠）
+            # 获取源端和目标端大小及文件数量（各只调一次 --json）
             local source_size_human="未知"
             local dest_size_human="未知"
             local source_count="未知"
             local dest_count="未知"
             local count_info=""
-            local size_output size_json
+            local src_stats dst_stats
 
-            size_output=$(rclone size "$source_path" 2>/dev/null || true)
-            if [ -n "$size_output" ]; then
-              source_size_human=$(echo "$size_output" | sed -n 's/^Total size:[[:space:]]*//p')
-            fi
-            size_json=$(rclone size "$source_path" --json 2>/dev/null || true)
-            if [ -n "$size_json" ]; then
-              source_count=$(echo "$size_json" | jq -r '.count // empty' 2>/dev/null || echo "")
-              [ -z "$source_count" ] && source_count="未知"
-            fi
+            src_stats=$(_get_path_stats "$source_path")
+            source_count=$(echo "$src_stats" | awk '{print $2}')
+            source_size_human=$(echo "$src_stats" | awk '{print $3}')
+            [ "$source_count" = "0" ] && source_count="未知"
 
-            size_output=$(rclone size "$dest_path" 2>/dev/null || true)
-            if [ -n "$size_output" ]; then
-              dest_size_human=$(echo "$size_output" | sed -n 's/^Total size:[[:space:]]*//p')
-            fi
-            size_json=$(rclone size "$dest_path" --json 2>/dev/null || true)
-            if [ -n "$size_json" ]; then
-              dest_count=$(echo "$size_json" | jq -r '.count // empty' 2>/dev/null || echo "")
-              [ -z "$dest_count" ] && dest_count="未知"
-            fi
+            dst_stats=$(_get_path_stats "$dest_path")
+            dest_count=$(echo "$dst_stats" | awk '{print $2}')
+            dest_size_human=$(echo "$dst_stats" | awk '{print $3}')
+            [ "$dest_count" = "0" ] && dest_count="未知"
 
             # 始终显示文件数信息
             local diff_files_list=""
@@ -1537,24 +1470,7 @@ jobs:
               local diff=$((source_count - dest_count))
               if [ "$diff" -ne 0 ]; then
                 count_info="文件数差异：${diff} (源端 ${source_count} / 目标 ${dest_count})"
-                # 文件数不一致时，运行 rclone check 找出差异文件
-                local check_combined
-                check_combined=$(timeout 300 rclone check "$source_path" "$dest_path" --size-only "${extra_args[@]}" --combined - 2>/dev/null || true)
-                local diff_count=0
-                while IFS= read -r line; do
-                  local marker="${line:0:1}"
-                  local fpath="${line:2}"
-                  case "$marker" in
-                    +) diff_files_list+="• [源端有/目标缺失] ${fpath}"$'\n' ;;
-                    -) diff_files_list+="• [目标多余/仅目标存在] ${fpath}"$'\n' ;;
-                    '*') diff_files_list+="• [大小/内容不一致] ${fpath}"$'\n' ;;
-                  esac
-                  diff_count=$((diff_count + 1))
-                  if [ "$diff_count" -ge 20 ]; then
-                    diff_files_list+="... (更多差异文件省略)"$'\n'
-                    break
-                  fi
-                done <<< "$(echo "$check_combined" | grep -E '^[-+*] ')"
+                diff_files_list=$(_build_diff_files_list "$source_path" "$dest_path" "${extra_args[@]}")
               else
                 count_info="文件数：${source_count} (一致)"
               fi
@@ -1564,13 +1480,7 @@ jobs:
 
             # 提取 --exclude 规则，方便在通知中说明
             local exclude_list=""
-            local i
-            for ((i=0; i<${#extra_args[@]}; i++)); do
-              if [ "${extra_args[$i]}" == "--exclude" ] && [ $((i+1)) -lt ${#extra_args[@]} ]; then
-                exclude_list+="• ${extra_args[$((i+1))]}"$'\n'
-              fi
-            done
-            [ -z "$exclude_list" ] && exclude_list="无"
+            exclude_list=$(_build_exclude_bullets "${extra_args[@]}")
 
             # 构建 fix_summary（已修复文件：原始文件名 → 实际文件名）
             local fix_summary=""
@@ -1611,7 +1521,8 @@ jobs:
             fi
 
             if [ -s "$fail_list" ]; then
-              # 有无法修复的 405/409 文件
+              # 有无法修复的 405/409 文件，标记失败以便上层触发大文件切割
+              SYNC_FAILED=1
               local partial_msg=""
               partial_msg+="⚠️ ${task_name} 部分文件同步失败"$'\n'
               partial_msg+='━━━━━━━━━━━━━━'$'\n'
@@ -1639,9 +1550,7 @@ jobs:
                 partial_msg+="$diff_files_list"
               fi
 
-              curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
-                -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
-                --data-urlencode text="$partial_msg" || true
+              send_telegram_message "$partial_msg"
 
             elif [ -s "$fix_list" ]; then
               # 所有 405/409 文件都已通过其他方式同步
@@ -1669,9 +1578,7 @@ jobs:
                 partial_msg+="$diff_files_list"
               fi
 
-              curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
-                -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
-                --data-urlencode text="$partial_msg" || true
+              send_telegram_message "$partial_msg"
 
             elif [ "$SYNC_STATUS" -ne 0 ] || grep -Eqi '(^|[^[:alpha:]])(ERROR|Error|Failed|failed|timeout|forbidden|unauthorized|permission denied|connection refused)([^[:alpha:]]|$)' "$LAST_ATTEMPT_LOG"; then
               SYNC_FAILED=1
@@ -1710,29 +1617,11 @@ jobs:
 
               [ -n "$AUTO_SPLIT_INFO" ] && ok_message="${ok_message}"$'\n'"${AUTO_SPLIT_INFO}"
 
-              curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
-                -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
-                --data-urlencode text="$ok_message" || true
+              send_telegram_message "$ok_message"
             fi
 
             rm -f "$LOG_FILENAME" "$LAST_ATTEMPT_LOG" "$fail_list" "$fix_list" /tmp/probe_src.txt /tmp/probe_dst.txt 2>/dev/null || true
             return "$SYNC_FAILED"
-          }
-
-          openlist_sync_with_failure_split() {
-            local source_path="$1"
-            local dest_path="$2"
-            local task_name="$3"
-            shift 3
-            local extra_args=("$@")
-            local openlist_sync_args=()
-
-            if sync_with_logging "$source_path" "$dest_path" "$task_name" "${openlist_sync_args[@]}" "${extra_args[@]}"; then
-              return 0
-            fi
-
-            split_large_files_after_sync_failure "$source_path" "$task_name"
-            return 0
           }
           EOF
 
@@ -1771,7 +1660,7 @@ jobs:
             fi
 
             # 50GB 阈值
-            local threshold=50000000000
+            local threshold="$SYNC_SPLIT_THRESHOLD_BYTES"
 
             # 检查源端大小
             local source_size_bytes=0
@@ -1784,9 +1673,13 @@ jobs:
             if [ "$source_size_bytes" -le "$threshold" ]; then
               echo "源端大小 $(numfmt --to=iec-i --suffix=B "$source_size_bytes" 2>/dev/null || echo "${source_size_bytes}B") 未超过 50GB 阈值，直接同步"
               sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
-              # 顶层同步成功后保存标记
-              if [ "$current_depth" -eq 0 ] && [ "$SYNC_FAILED" = "0" ]; then
-                save_sync_marker "$source_path" "$dest_path" "$task_name"
+              # 顶层同步成功后保存标记；失败则按开关对源目录超阈值大文件执行切割
+              if [ "$current_depth" -eq 0 ]; then
+                if [ "$SYNC_FAILED" = "0" ]; then
+                  save_sync_marker "$source_path" "$dest_path" "$task_name"
+                else
+                  split_large_files_after_sync_failure "$source_path" "$task_name"
+                fi
               fi
               return $?
             fi
@@ -1795,7 +1688,11 @@ jobs:
             if [ "$current_depth" -ge "$max_depth" ]; then
               echo "已达最大拆分深度 ${max_depth}，按文件批次拆分 (depth=${current_depth}, size=$(numfmt --to=iec-i --suffix=B "$source_size_bytes" 2>/dev/null || echo "${source_size_bytes}B"))"
               sync_dir_by_file_batches "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
-              return $?
+              local _rc=$?
+              if [ "$_rc" -ne 0 ] && [ "$current_depth" -eq 0 ]; then
+                split_large_files_after_sync_failure "$source_path" "$task_name"
+              fi
+              return $_rc
             fi
 
             echo "源端大小 $(numfmt --to=iec-i --suffix=B "$source_size_bytes" 2>/dev/null || echo "${source_size_bytes}B") 超过 50GB 阈值，按子目录拆分同步 (depth=${current_depth})"
@@ -1806,7 +1703,11 @@ jobs:
             if [ -z "$subdirs" ]; then
               echo "无子目录，按文件批次拆分同步"
               sync_dir_by_file_batches "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
-              return $?
+              local _rc=$?
+              if [ "$_rc" -ne 0 ] && [ "$current_depth" -eq 0 ]; then
+                split_large_files_after_sync_failure "$source_path" "$task_name"
+              fi
+              return $_rc
             fi
 
             # 从 extra_args 中提取排除的目录名（模式如 notion/** 或 /notion/**）
@@ -1921,6 +1822,9 @@ jobs:
               # 顶层同步成功后保存标记
               if [ "$SYNC_FAILED" = "0" ]; then
                 save_sync_marker "$source_path" "$dest_path" "$task_name"
+              else
+                # 顶层最终同步失败后，按开关对源目录超阈值大文件执行切割
+                split_large_files_after_sync_failure "$source_path" "$task_name"
               fi
             else
               SYNC_SKIPPED=0
@@ -1941,7 +1845,7 @@ jobs:
             shift 3
             local extra_args=("$@")
 
-            local threshold=50000000000  # 50GB
+            local threshold="$SYNC_SPLIT_THRESHOLD_BYTES"  # 50GB
             local batch_dir="/tmp/file_batches_${task_name}"
             mkdir -p "$batch_dir"
 
@@ -2254,7 +2158,7 @@ jobs:
             msg+=$'\n'"⏸️ 已跳过同步（源端大小减小）"$'\n'
             msg+="如确认无误，请手动触发 force_sync=true"
 
-            send_telegram "$msg"
+            send_telegram_message "$msg"
           }
           EOF
 
@@ -2438,9 +2342,7 @@ jobs:
             msg+=$'\n'$'\n'"  📦 合计预估待同步: $(format_bytes "$PREVIEW_TOTAL_SYNC_BYTES") / ${PREVIEW_TOTAL_SYNC_COUNT} 文件"$'\n'
             msg+=$'\n'"⏳ 同步即将开始..."
 
-            curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
-              -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
-              --data-urlencode text="$msg" || true
+            send_telegram_message "$msg"
             echo "  已发送 ${PREVIEW_TASK_NAME} 预览通知"
           }
           EOF
@@ -2460,6 +2362,9 @@ jobs:
           SYNC_TRANSFERRED_BYTES=0
           AUTO_SPLIT_INFO=""
           SYNC_AUTO_SPLIT_DEPTH=0
+          # 集中定义阈值，避免魔数散落各处
+          LARGE_FILE_THRESHOLD_BYTES="${LARGE_FILE_THRESHOLD:-4000000000}"
+          SYNC_SPLIT_THRESHOLD_BYTES="${SYNC_SPLIT_THRESHOLD:-50000000000}"
           echo "PROCESSED_FILES_LOG=$PROCESSED_FILES_LOG" >> "$GITHUB_ENV"
           echo "=== 初始化已处理文件日志 ===" > "$PROCESSED_FILES_LOG"
           echo "开始时间: $(date)" >> "$PROCESSED_FILES_LOG"
@@ -2572,50 +2477,23 @@ jobs:
             local gd_dst_count="未知"
             local gd_count_info=""
             local gd_diff_files_list=""
-            local gd_size_out gd_size_json
+            local gd_src_stats gd_dst_stats
 
-            gd_size_out=$(rclone size "$source_path" 2>/dev/null || true)
-            if [ -n "$gd_size_out" ]; then
-              gd_src_size=$(echo "$gd_size_out" | sed -n 's/^Total size:[[:space:]]*//p')
-            fi
-            gd_size_json=$(rclone size "$source_path" --json 2>/dev/null || true)
-            if [ -n "$gd_size_json" ]; then
-              gd_src_count=$(echo "$gd_size_json" | jq -r '.count // empty' 2>/dev/null || echo "")
-              [ -z "$gd_src_count" ] && gd_src_count="未知"
-            fi
+            gd_src_stats=$(_get_path_stats "$source_path")
+            gd_src_count=$(echo "$gd_src_stats" | awk '{print $2}')
+            gd_src_size=$(echo "$gd_src_stats" | awk '{print $3}')
+            [ "$gd_src_count" = "0" ] && gd_src_count="未知"
 
-            gd_size_out=$(rclone size "$dest_path" 2>/dev/null || true)
-            if [ -n "$gd_size_out" ]; then
-              gd_dst_size=$(echo "$gd_size_out" | sed -n 's/^Total size:[[:space:]]*//p')
-            fi
-            gd_size_json=$(rclone size "$dest_path" --json 2>/dev/null || true)
-            if [ -n "$gd_size_json" ]; then
-              gd_dst_count=$(echo "$gd_size_json" | jq -r '.count // empty' 2>/dev/null || echo "")
-              [ -z "$gd_dst_count" ] && gd_dst_count="未知"
-            fi
+            gd_dst_stats=$(_get_path_stats "$dest_path")
+            gd_dst_count=$(echo "$gd_dst_stats" | awk '{print $2}')
+            gd_dst_size=$(echo "$gd_dst_stats" | awk '{print $3}')
+            [ "$gd_dst_count" = "0" ] && gd_dst_count="未知"
 
             if [[ "$gd_src_count" =~ ^[0-9]+$ ]] && [[ "$gd_dst_count" =~ ^[0-9]+$ ]]; then
               local gd_diff=$((gd_src_count - gd_dst_count))
               if [ "$gd_diff" -ne 0 ]; then
                 gd_count_info="文件数差异：${gd_diff} (源端 ${gd_src_count} / 目标 ${gd_dst_count})"
-                # 文件数不一致时，运行 rclone check 找出差异文件
-                local gd_check_combined
-                gd_check_combined=$(timeout 300 rclone check "$source_path" "$dest_path" --size-only "${extra_args[@]}" --combined - 2>/dev/null || true)
-                local gd_diff_count=0
-                while IFS= read -r line; do
-                  local marker="${line:0:1}"
-                  local fpath="${line:2}"
-                  case "$marker" in
-                    +) gd_diff_files_list+="• [源端有/目标缺失] ${fpath}"$'\n' ;;
-                    -) gd_diff_files_list+="• [目标多余/仅目标存在] ${fpath}"$'\n' ;;
-                    '*') gd_diff_files_list+="• [大小/内容不一致] ${fpath}"$'\n' ;;
-                  esac
-                  gd_diff_count=$((gd_diff_count + 1))
-                  if [ "$gd_diff_count" -ge 20 ]; then
-                    gd_diff_files_list+="... (更多差异文件省略)"$'\n'
-                    break
-                  fi
-                done <<< "$(echo "$gd_check_combined" | grep -E '^[-+*] ')"
+                gd_diff_files_list=$(_build_diff_files_list "$source_path" "$dest_path" "${extra_args[@]}")
               else
                 gd_count_info="文件数：${gd_src_count} (一致)"
               fi
@@ -2625,13 +2503,7 @@ jobs:
 
             # 提取 --exclude 规则，方便在通知中说明
             local gd_exclude_list=""
-            local i
-            for ((i=0; i<${#extra_args[@]}; i++)); do
-              if [ "${extra_args[$i]}" == "--exclude" ] && [ $((i+1)) -lt ${#extra_args[@]} ]; then
-                gd_exclude_list+="• ${extra_args[$((i+1))]}"$'\n'
-              fi
-            done
-            [ -z "$gd_exclude_list" ] && gd_exclude_list="无"
+            gd_exclude_list=$(_build_exclude_bullets "${extra_args[@]}")
 
             if grep -Eqi 'storageQuotaExceeded|storage quota has been exceeded' "$LAST_GD_ATTEMPT_LOG"; then
               # Google Drive 存储配额超限，跳过同步，发送通知，不阻止后续 task
@@ -2650,12 +2522,9 @@ jobs:
                 '🚫 排除规则' \
                 "$gd_exclude_list"
 
-              curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
-                -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
-                --data-urlencode text="$quota_msg" || true
+              send_telegram_message "$quota_msg"
             elif [ "$SYNC_STATUS" -ne 0 ] || grep -Eqi '403|forbidden|rateLimitExceeded|userRateLimitExceeded|dailyLimitExceeded|ERROR|Failed|timeout|unauthorized|permission denied|connection refused|upload chunks may be taking too long' "$LAST_GD_ATTEMPT_LOG"; then
               send_log_to_telegram "$LOG_FILENAME" "$task_name" "$SYNC_STATUS" "gd-sync" "$source_path" "$dest_path"
-              process_failed_videos "$LOG_FILENAME" "onedrive" "$task_name" || true
             else
               save_sync_marker "$source_path" "$dest_path" "${task_name}_gd"
 
@@ -2692,9 +2561,7 @@ jobs:
                   "$gd_exclude_list"
               fi
 
-              curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
-                -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
-                --data-urlencode text="$ok_message" || true
+              send_telegram_message "$ok_message"
             fi
 
             rm -f "$LOG_FILENAME" "${LOG_FILENAME}.last" 2>/dev/null || true
@@ -2799,7 +2666,6 @@ jobs:
         run: |
           source /tmp/functions.sh
           echo "=== 开始同步 2 任务 ==="
-          # openlist_sync_with_failure_split "onedrive:2" "openlist:aliyundriveCrypt/2" "task2"
           sync_task_with_auto_split "onedrive:2" "openlist:wopan176Crypt/2" "task2"
           sync_task_with_auto_split "onedrive:2" "openlist:wopan175/2" "task2"
           gd_sync_with_1d_skip "onedrive:2" "gd:2" "task2" "${GD_SYNC_ARGS[@]}"
@@ -2808,7 +2674,6 @@ jobs:
         run: |
           source /tmp/functions.sh
           echo "=== 开始同步 3 任务 ==="
-          # openlist_sync_with_failure_split "onedrive:3" "openlist:aliyundriveCrypt/3" "task3"
           sync_task_with_auto_split "onedrive:3" "openlist:wopan176Crypt/3" "task3"
           sync_task_with_auto_split "onedrive:3" "openlist:wopan175/3" "task3"
           gd_sync_with_1d_skip "onedrive:3" "gd:3" "task3" "${GD_SYNC_ARGS[@]}"
