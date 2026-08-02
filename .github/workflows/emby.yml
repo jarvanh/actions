@@ -33,7 +33,8 @@ jobs:
           IN_EOF
       - name: rclone-run
         run: |
-          sudo apt-get install fuse3
+          sudo apt-get update
+          sudo apt-get install -y fuse3
           
           if rclone lsf dropbox:self-hosted/emby/config/ --files-only | grep -q "system.xml"; then
             if ! rclone delete dropbox:self-hosted/emby/config/system.xml -vv; then

@@ -36,7 +36,8 @@ jobs:
           # cd rclone-*-linux-amd64
           # sudo mv rclone /usr/bin
           # sudo chmod +x /usr/bin/rclone
-          sudo apt-get install rclone
+          sudo apt-get update
+          sudo apt-get install -y rclone
       - name: rclone-config
         env:
           RCLONE_CONFIG: ${{ secrets.RCLONE }}
@@ -48,7 +49,8 @@ jobs:
           EOF
       - name: rclone-run
         run: |
-          sudo apt-get install fuse3
+          sudo apt-get update
+          sudo apt-get install -y fuse3
           sudo mkdir /content/
           sudo mkdir /content/drive/
           sudo mkdir /content/drive/MyDrive/

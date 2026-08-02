@@ -81,6 +81,7 @@ jobs:
           echo "==========dropbox==========="
           rclone lsf dropbox:
 
+          sudo apt-get update
           sudo apt-get install -y fuse3
           sudo mkdir -p /dropbox
           sudo nohup rclone mount dropbox: /dropbox --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 10G &
@@ -2058,7 +2059,12 @@ jobs:
             echo "=== 批次传输完成 (成功 ${synced_batches}/${total_batches}, 失败 ${failed_batches})，执行最终同步检查 ==="
 
             # 最终用 sync_with_logging 做完整同步检查（处理 405/409、通知等）
+            # 文件批次阶段已完成实质传输，最终 sync 即使无新增 Copied 记录也必须发通知；
+            # 此处可能被子目录递归调用（SYNC_SKIP_QUIET=1），需临时关闭静默模式，避免通知被吞。
+            local _saved_skip_quiet="${SYNC_SKIP_QUIET:-0}"
+            SYNC_SKIP_QUIET=0
             sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
+            SYNC_SKIP_QUIET="$_saved_skip_quiet"
           }
           EOF
 
@@ -2252,9 +2258,124 @@ jobs:
           }
           EOF
 
+      - name: Setup helper functions - part 10
+        run: |
+          cat > /tmp/functions_part10.sh << 'EOF'
+          # 获取远端大小和文件数（返回 "bytes count" 或 "0 0"）
+          _get_remote_size_count() {
+            local remote_path="$1"
+            local size_json
+            size_json=$(rclone size "$remote_path" --json 2>/dev/null || true)
+            if [ -z "$size_json" ]; then
+              echo "0 0"
+              return
+            fi
+            local bytes count
+            bytes=$(echo "$size_json" | jq -r '.bytes // 0' 2>/dev/null || echo 0)
+            count=$(echo "$size_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
+            echo "${bytes} ${count}"
+          }
+
+          # 截断过长的路径用于流量图显示
+          _shorten_path() {
+            local p="$1"
+            local max_len="${2:-50}"
+            if [ ${#p} -gt "$max_len" ]; then
+              echo "...${p: -$((max_len - 3))}"
+            else
+              echo "$p"
+            fi
+          }
+
+          # 发送单个主任务的预览通知
+          # 用法: send_task_preview <task_name> <source_path> <dest1> [dest2] [dest3] ...
+          send_task_preview() {
+            local task_name="$1"
+            local source_path="$2"
+            shift 2
+            local dests=("$@")
+            local num_dests=${#dests[@]}
+
+            echo "=== 预览任务: ${task_name} (源端 ${source_path}, ${num_dests} 个目标) ==="
+
+            # 获取源端大小和文件数
+            local src_data src_bytes src_count
+            src_data=$(_get_remote_size_count "$source_path")
+            src_bytes=$(echo "$src_data" | awk '{print $1}')
+            src_count=$(echo "$src_data" | awk '{print $2}')
+
+            local msg=""
+            msg="📋 任务预览: ${task_name}"$'\n'
+            msg+="━━━━━━━━━━━━━━"$'\n'
+            msg+=$'\n'"📊 源端"$'\n'
+            msg+="• 路径: ${source_path}"$'\n'
+            msg+="• 大小: $(format_bytes "$src_bytes")"$'\n'
+            msg+="• 文件: ${src_count} 个"$'\n'
+
+            # 收集每个目标的信息
+            local total_sync_bytes=0
+            local total_sync_count=0
+            local dest_section=""
+            local flow_section=""
+            local i=0
+            for dest in "${dests[@]}"; do
+              i=$((i + 1))
+              echo "  获取目标大小: ${dest}"
+              local dst_data dst_bytes dst_count sync_bytes sync_count
+              dst_data=$(_get_remote_size_count "$dest")
+              dst_bytes=$(echo "$dst_data" | awk '{print $1}')
+              dst_count=$(echo "$dst_data" | awk '{print $2}')
+
+              if [ "$src_bytes" -gt "$dst_bytes" ]; then
+                sync_bytes=$((src_bytes - dst_bytes))
+              else
+                sync_bytes=0
+              fi
+              if [ "$src_count" -gt "$dst_count" ]; then
+                sync_count=$((src_count - dst_count))
+              else
+                sync_count=0
+              fi
+              total_sync_bytes=$((total_sync_bytes + sync_bytes))
+              total_sync_count=$((total_sync_count + sync_count))
+
+              dest_section+=$'\n'"${i}. ${dest}"$'\n'
+              dest_section+="   • 大小: $(format_bytes "$dst_bytes") | 文件: ${dst_count}"$'\n'
+              dest_section+="   • 预估待同步: +$(format_bytes "$sync_bytes") | +${sync_count} 文件"$'\n'
+
+              # 流量图行
+              local short_dest
+              short_dest=$(_shorten_path "$dest" 48)
+              local arrow="├──►"
+              if [ "$i" -eq "$num_dests" ]; then
+                arrow="└──►"
+              fi
+              flow_section+="   ${arrow} ${short_dest}"$'\n'
+              flow_section+="         [+$(format_bytes "$sync_bytes") / +${sync_count} 文件]"$'\n'
+            done
+
+            msg+=$'\n'"📊 目标端 (${num_dests} 个)"$'\n'
+            msg+="${dest_section}"
+
+            msg+=$'\n'"🔀 文件同步流量图"$'\n'
+            msg+=$'\n'
+            msg+="  $(format_bytes "$src_bytes") / ${src_count} 文件"$'\n'
+            msg+="  ${source_path}"$'\n'
+            msg+="       │"$'\n'
+            msg+="${flow_section}"
+            msg+=$'\n'"  📦 合计预估待同步: $(format_bytes "$total_sync_bytes") / ${total_sync_count} 文件"$'\n'
+            msg+=$'\n'"⏳ 同步即将开始..."
+
+            curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
+              -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
+              --data-urlencode text="$msg" || true
+            echo "  已发送 ${task_name} 预览通知"
+          }
+          EOF
+
       - name: Combine all functions
         run: |
-          cat /tmp/functions_part1.sh /tmp/functions_part2.sh /tmp/functions_part3.sh /tmp/functions_part4.sh /tmp/functions_part5.sh /tmp/functions_part6.sh /tmp/functions_part7.sh /tmp/functions_part8.sh /tmp/functions_part9.sh > /tmp/functions.sh
+          cat /tmp/functions_part1.sh /tmp/functions_part2.sh /tmp/functions_part3.sh /tmp/functions_part4.sh /tmp/functions_part5.sh /tmp/functions_part6.sh /tmp/functions_part7.sh /tmp/functions_part8.sh /tmp/functions_part9.sh /tmp/functions_part10.sh > /tmp/functions.sh
           rm -f /tmp/functions_part*.sh
 
       - name: Initialize sync
@@ -2508,6 +2629,56 @@ jobs:
             return 0
           }
           EOF
+
+      - name: Preview sync tasks
+        run: |
+          source /tmp/functions.sh
+          echo "=== 发送任务预览通知 ==="
+
+          send_task_preview "backup" \
+            "onedrive:backup" \
+            "openlist:aliyundriveCrypt/backup" \
+            "openlist:wopan176Crypt/backup" \
+            "gd:backup"
+
+          send_task_preview "task0" \
+            "onedrive:0" \
+            "openlist:wopan176Crypt/0" \
+            "gd:0"
+
+          send_task_preview "task0 (pornhub-favorites)" \
+            "onedrive:0/j-1024j-视频-pornhub-favorites" \
+            "openlist:wopan175/0/j-1024j-视频-pornhub-favorites"
+
+          send_task_preview "task1" \
+            "onedrive:1" \
+            "openlist:wopan176Crypt/1" \
+            "openlist:wopan175/1" \
+            "gd:1"
+
+          send_task_preview "task2" \
+            "onedrive:2" \
+            "openlist:wopan176Crypt/2" \
+            "openlist:wopan175/2" \
+            "gd:2"
+
+          send_task_preview "task3" \
+            "onedrive:3" \
+            "openlist:wopan176Crypt/3" \
+            "openlist:wopan175/3" \
+            "gd:3"
+
+          send_task_preview "task4" \
+            "onedrive:4" \
+            "openlist:wopan176Crypt/4" \
+            "openlist:wopan175/4"
+
+          send_task_preview "task5" \
+            "onedrive:5" \
+            "openlist:wopan176Crypt/5" \
+            "openlist:wopan175/5"
+
+          echo "=== 所有任务预览通知已发送 ==="
 
       - name: Sync backup task
         run: |
