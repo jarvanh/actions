@@ -2020,10 +2020,16 @@ jobs:
                 rclone copy "$source_path" "$dest_path" \
                   --files-from "$bf" \
                   --size-only \
+                  --no-traverse \
                   --retries 1 \
                   --low-level-retries 3 \
                   --timeout 5m \
+                  --contimeout 30s \
                   --ignore-errors \
+                  --progress \
+                  --stats 15s \
+                  --stats-one-line \
+                  --verbose \
                   "${extra_args[@]}" \
                   2>&1 | tee "${task_name}_batch_${i}.log"
 
