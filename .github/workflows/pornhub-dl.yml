@@ -51,7 +51,7 @@ jobs:
           du -sh ~/onedrive/0/j-1024j-视频-pornhub-favorites
           BEFORE_COUNT=$(wc -l < archive.txt 2>/dev/null || echo 0)
           # yt-dlp -f bestvideo+bestaudio/best --force-overwrites --no-part -i https://www.pornhub.com/users/'${{ secrets. PORNHUBNAME }}'/videos/favorites || echo "url不存在"
-          yt-dlp -f bestvideo+bestaudio/best --force-overwrites --no-part --download-archive archive.txt -i https://www.pornhub.com/users/'${{ secrets. PORNHUBNAME }}'/videos/favorites || echo "url不存在"
+          yt-dlp -f bestvideo+bestaudio/best --force-overwrites --no-part --download-archive archive.txt --playlist-end 50 -i https://www.pornhub.com/users/'${{ secrets. PORNHUBNAME }}'/videos/favorites || echo "url不存在"
           AFTER_COUNT=$(wc -l < archive.txt 2>/dev/null || echo 0)
           DOWNLOAD_COUNT=$((AFTER_COUNT - BEFORE_COUNT))
           if [ "$DOWNLOAD_COUNT" -lt 0 ]; then
