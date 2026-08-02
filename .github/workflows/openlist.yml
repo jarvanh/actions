@@ -171,11 +171,11 @@ jobs:
                       src_stats=$(_get_path_stats "$source_info")
                       src_bytes=$(echo "$src_stats" | awk '{print $1}')
                       src_count=$(echo "$src_stats" | awk '{print $2}')
-                      src_size=$(echo "$src_stats" | awk '{print $3}')
+                      src_size=$(echo "$src_stats" | awk '{print $3 ($4? " "$4 : "")}')
                       dst_stats=$(_get_path_stats "$dest_info")
                       dst_bytes=$(echo "$dst_stats" | awk '{print $1}')
                       dst_count=$(echo "$dst_stats" | awk '{print $2}')
-                      dst_size=$(echo "$dst_stats" | awk '{print $3}')
+                      dst_size=$(echo "$dst_stats" | awk '{print $3 ($4? " "$4 : "")}')
 
                       if [[ "$src_count" =~ ^[0-9]+$ ]] && [[ "$dst_count" =~ ^[0-9]+$ ]]; then
                         local diff=$((src_count - dst_count))
@@ -1456,12 +1456,12 @@ jobs:
 
             src_stats=$(_get_path_stats "$source_path")
             source_count=$(echo "$src_stats" | awk '{print $2}')
-            source_size_human=$(echo "$src_stats" | awk '{print $3}')
+            source_size_human=$(echo "$src_stats" | awk '{print $3 ($4? " "$4 : "")}')
             [ "$source_count" = "0" ] && source_count="未知"
 
             dst_stats=$(_get_path_stats "$dest_path")
             dest_count=$(echo "$dst_stats" | awk '{print $2}')
-            dest_size_human=$(echo "$dst_stats" | awk '{print $3}')
+            dest_size_human=$(echo "$dst_stats" | awk '{print $3 ($4? " "$4 : "")}')
             [ "$dest_count" = "0" ] && dest_count="未知"
 
             # 始终显示文件数信息
@@ -1530,7 +1530,7 @@ jobs:
               partial_msg+="目标大小：${dest_size_human}"$'\n'
               partial_msg+="状态：OpenList 405/409 错误，部分文件无法同步"$'\n'
               partial_msg+="${count_info}"$'\n'
-              [ -n "$AUTO_SPLIT_INFO" ] && partial_msg+="${AUTO_SPLIT_INFO}"$'\n'
+              [ -n "$AUTO_SPLIT_INFO" ] && partial_msg+=$'\n'"${AUTO_SPLIT_INFO}"$'\n'
               partial_msg+=$'\n'
               partial_msg+='📁 任务信息'$'\n'
               partial_msg+="• 任务：${task_name}"$'\n'
@@ -1561,7 +1561,7 @@ jobs:
               partial_msg+="目标大小：${dest_size_human}"$'\n'
               partial_msg+="状态：405/409 文件已修复，但部分文件使用了其他方式同步"$'\n'
               partial_msg+="${count_info}"$'\n'
-              [ -n "$AUTO_SPLIT_INFO" ] && partial_msg+="${AUTO_SPLIT_INFO}"$'\n'
+              [ -n "$AUTO_SPLIT_INFO" ] && partial_msg+=$'\n'"${AUTO_SPLIT_INFO}"$'\n'
               partial_msg+=$'\n'
               partial_msg+='📁 任务信息'$'\n'
               partial_msg+="• 任务：${task_name}"$'\n'
@@ -1615,7 +1615,7 @@ jobs:
                   "$exclude_list"
               fi
 
-              [ -n "$AUTO_SPLIT_INFO" ] && ok_message="${ok_message}"$'\n'"${AUTO_SPLIT_INFO}"
+              [ -n "$AUTO_SPLIT_INFO" ] && ok_message="${ok_message}"$'\n\n'"${AUTO_SPLIT_INFO}"
 
               send_telegram_message "$ok_message"
             fi
@@ -1638,6 +1638,7 @@ jobs:
 
             local current_depth=${SYNC_AUTO_SPLIT_DEPTH:-0}
             local max_depth=3
+            local subdir
 
             # 仅在顶层检查同步标记
             if [ "$current_depth" -eq 0 ]; then
@@ -1755,12 +1756,14 @@ jobs:
             # 按子目录大小从小到大排序
             echo "按子目录大小排序..."
             local sorted_subdirs=""
+            declare -A subdir_size_map=()
             while IFS= read -r subdir; do
               [ -z "$subdir" ] && continue
               local subdir_bytes=0
               local subdir_json
               subdir_json=$(rclone size "${source_path}/${subdir}" --json 2>/dev/null || true)
               [ -n "$subdir_json" ] && subdir_bytes=$(echo "$subdir_json" | jq -r '.bytes // 0' 2>/dev/null || echo 0)
+              subdir_size_map["$subdir"]=$subdir_bytes
               echo "  ${subdir}: $(format_bytes "$subdir_bytes")"
               sorted_subdirs+="${subdir_bytes} ${subdir}"$'\n'
             done <<< "$subdirs"
@@ -1786,15 +1789,15 @@ jobs:
               SYNC_AUTO_SPLIT_DEPTH=$current_depth
               if [ "$SYNC_SKIPPED" = "1" ]; then
                 skipped_subtasks=$((skipped_subtasks + 1))
-                skipped_list+="• ${subdir}"$'\n'
+                skipped_list+="• ${subdir} ($(format_bytes "${subdir_size_map[$subdir]:-0}"))"$'\n'
               elif [ "$SYNC_FAILED" = "0" ]; then
                 synced_subtasks=$((synced_subtasks + 1))
                 total_transferred=$((total_transferred + SYNC_TRANSFERRED_BYTES))
-                synced_list+="• ${subdir} ($(format_bytes "$SYNC_TRANSFERRED_BYTES"))"$'\n'
+                synced_list+="• ${subdir} ($(format_bytes "${subdir_size_map[$subdir]:-0}"))"$'\n'
               else
                 failed_subtasks=$((failed_subtasks + 1))
                 total_transferred=$((total_transferred + SYNC_TRANSFERRED_BYTES))
-                failed_list+="• ${subdir} ($(format_bytes "$SYNC_TRANSFERRED_BYTES"))"$'\n'
+                failed_list+="• ${subdir} ($(format_bytes "${subdir_size_map[$subdir]:-0}"))"$'\n'
               fi
             done <<< "$subdirs"
             SYNC_SKIP_QUIET=0
@@ -2481,12 +2484,12 @@ jobs:
 
             gd_src_stats=$(_get_path_stats "$source_path")
             gd_src_count=$(echo "$gd_src_stats" | awk '{print $2}')
-            gd_src_size=$(echo "$gd_src_stats" | awk '{print $3}')
+            gd_src_size=$(echo "$gd_src_stats" | awk '{print $3 ($4? " "$4 : "")}')
             [ "$gd_src_count" = "0" ] && gd_src_count="未知"
 
             gd_dst_stats=$(_get_path_stats "$dest_path")
             gd_dst_count=$(echo "$gd_dst_stats" | awk '{print $2}')
-            gd_dst_size=$(echo "$gd_dst_stats" | awk '{print $3}')
+            gd_dst_size=$(echo "$gd_dst_stats" | awk '{print $3 ($4? " "$4 : "")}')
             [ "$gd_dst_count" = "0" ] && gd_dst_count="未知"
 
             if [[ "$gd_src_count" =~ ^[0-9]+$ ]] && [[ "$gd_dst_count" =~ ^[0-9]+$ ]]; then
