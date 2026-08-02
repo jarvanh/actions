@@ -34,7 +34,8 @@ jobs:
           EOF
       - name: rclone-run
         run: |
-          sudo apt-get install fuse3
+          sudo apt-get update
+          sudo apt-get install -y fuse3
           sudo mkdir /dropbox
           sudo nohup rclone mount dropbox: /dropbox --vfs-cache-mode full &
           # mkdir -p ~/sub-store

@@ -36,7 +36,8 @@ jobs:
           # cd rclone-*-linux-amd64
           # sudo mv rclone /usr/bin
           # sudo chmod +x /usr/bin/rclone
-          sudo apt-get install rclone
+          sudo apt-get update
+          sudo apt-get install -y rclone
       - name: rclone-config
         env:
           RCLONE_CONFIG: ${{ secrets.RCLONE }}
@@ -50,7 +51,8 @@ jobs:
         run: |
           sudo rclone delete onedrive:self-hosted/emby2/config/system.xml --ignore-errors -vv
           sudo rclone copy onedrive:self-hosted/emby2/system.xml onedrive:0/j/emby2/config/ --ignore-errors -vv
-          sudo apt-get install fuse3
+          sudo apt-get update
+          sudo apt-get install -y fuse3
           sudo mkdir /onedrive
           sudo nohup rclone mount onedrive: /onedrive --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
           echo "==========i==========="
