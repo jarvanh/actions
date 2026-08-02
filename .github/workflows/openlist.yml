@@ -2276,6 +2276,39 @@ jobs:
             echo "${bytes} ${count}"
           }
 
+          # 源端大小缓存（按 source_path + excludes 组合做 key）
+          declare -A PREVIEW_SRC_CACHE
+
+          # 获取源端大小（带 --exclude 参数，带缓存）
+          # 用法: _get_source_size_with_excludes <source_path> [--exclude pat] ...
+          _get_source_size_with_excludes() {
+            local source_path="$1"
+            shift
+            local extra_args=("$@")
+            local cache_key="${source_path} ${extra_args[*]}"
+
+            if [ -n "${PREVIEW_SRC_CACHE[$cache_key]:-}" ]; then
+              echo "${PREVIEW_SRC_CACHE[$cache_key]}"
+              return
+            fi
+
+            local result="0 0"
+            local size_json
+            if [ ${#extra_args[@]} -gt 0 ]; then
+              size_json=$(rclone size "$source_path" --json "${extra_args[@]}" 2>/dev/null || true)
+            else
+              size_json=$(rclone size "$source_path" --json 2>/dev/null || true)
+            fi
+            if [ -n "$size_json" ]; then
+              local bytes count
+              bytes=$(echo "$size_json" | jq -r '.bytes // 0' 2>/dev/null || echo 0)
+              count=$(echo "$size_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
+              result="${bytes} ${count}"
+            fi
+            PREVIEW_SRC_CACHE[$cache_key]="$result"
+            echo "$result"
+          }
+
           # 截断过长的路径用于流量图显示
           _shorten_path() {
             local p="$1"
@@ -2287,89 +2320,128 @@ jobs:
             fi
           }
 
-          # 发送单个主任务的预览通知
-          # 用法: send_task_preview <task_name> <source_path> <dest1> [dest2] [dest3] ...
-          send_task_preview() {
+          # 提取 --exclude 摘要（用于显示）
+          _extract_exclude_summary() {
+            local extra_args=("$@")
+            local summary=""
+            local j=0
+            while [ $j -lt ${#extra_args[@]} ]; do
+              if [ "${extra_args[$j]}" = "--exclude" ] && [ $((j+1)) -lt ${#extra_args[@]} ]; then
+                if [ -n "$summary" ]; then
+                  summary+=", "
+                fi
+                summary+="${extra_args[$((j+1))]}"
+              fi
+              j=$((j+1))
+            done
+            echo "$summary"
+          }
+
+          # ===== 任务预览：开始一个主任务的预览 =====
+          start_task_preview() {
             local task_name="$1"
-            local source_path="$2"
+            PREVIEW_TASK_NAME="$task_name"
+            PREVIEW_PAIR_COUNT=0
+            PREVIEW_TOTAL_SYNC_BYTES=0
+            PREVIEW_TOTAL_SYNC_COUNT=0
+            PREVIEW_PAIRS_DETAIL=""
+            PREVIEW_FLOW=""
+            PREVIEW_CUR_GROUP=""
+            echo "=== 预览任务: ${task_name} ==="
+          }
+
+          # ===== 任务预览：添加一个同步对 =====
+          # 用法: add_preview_pair <source_path> <dest_path> [--exclude pat] ...
+          add_preview_pair() {
+            local source_path="$1"
+            local dest_path="$2"
             shift 2
-            local dests=("$@")
-            local num_dests=${#dests[@]}
+            local extra_args=("$@")
 
-            echo "=== 预览任务: ${task_name} (源端 ${source_path}, ${num_dests} 个目标) ==="
+            PREVIEW_PAIR_COUNT=$((PREVIEW_PAIR_COUNT + 1))
+            echo "  同步对 ${PREVIEW_PAIR_COUNT}: ${source_path} → ${dest_path}"
 
-            # 获取源端大小和文件数
+            # 获取源端大小（带 exclude，带缓存）
             local src_data src_bytes src_count
-            src_data=$(_get_remote_size_count "$source_path")
+            src_data=$(_get_source_size_with_excludes "$source_path" "${extra_args[@]}")
             src_bytes=$(echo "$src_data" | awk '{print $1}')
             src_count=$(echo "$src_data" | awk '{print $2}')
 
+            # 获取目标大小
+            local dst_data dst_bytes dst_count
+            dst_data=$(_get_remote_size_count "$dest_path")
+            dst_bytes=$(echo "$dst_data" | awk '{print $1}')
+            dst_count=$(echo "$dst_data" | awk '{print $2}')
+
+            # 计算预估待同步
+            local sync_bytes sync_count
+            if [ "$src_bytes" -gt "$dst_bytes" ]; then
+              sync_bytes=$((src_bytes - dst_bytes))
+            else
+              sync_bytes=0
+            fi
+            if [ "$src_count" -gt "$dst_count" ]; then
+              sync_count=$((src_count - dst_count))
+            else
+              sync_count=0
+            fi
+            PREVIEW_TOTAL_SYNC_BYTES=$((PREVIEW_TOTAL_SYNC_BYTES + sync_bytes))
+            PREVIEW_TOTAL_SYNC_COUNT=$((PREVIEW_TOTAL_SYNC_COUNT + sync_count))
+
+            # exclude 摘要
+            local exclude_summary
+            exclude_summary=$(_extract_exclude_summary "${extra_args[@]}")
+
+            # 同步对详情
+            PREVIEW_PAIRS_DETAIL+=$'\n'"${PREVIEW_PAIR_COUNT}. ${source_path}"$'\n'
+            PREVIEW_PAIRS_DETAIL+="   → ${dest_path}"$'\n'
+            if [ -n "$exclude_summary" ]; then
+              PREVIEW_PAIRS_DETAIL+="   • 排除: ${exclude_summary}"$'\n'
+            fi
+            PREVIEW_PAIRS_DETAIL+="   • 源端: $(format_bytes "$src_bytes") / ${src_count} 文件"$'\n'
+            PREVIEW_PAIRS_DETAIL+="   • 目标: $(format_bytes "$dst_bytes") / ${dst_count} 文件"$'\n'
+            PREVIEW_PAIRS_DETAIL+="   • 预估待同步: +$(format_bytes "$sync_bytes") / +${sync_count} 文件"$'\n'
+
+            # 流量图分组（按 source + excludes 组合分组，相同分组的 dest 共享一个源端节点）
+            local group_key="${source_path}|${exclude_summary}"
+            if [ "$group_key" != "$PREVIEW_CUR_GROUP" ]; then
+              # 新分组前空一行
+              if [ -n "$PREVIEW_CUR_GROUP" ]; then
+                PREVIEW_FLOW+=$'\n'
+              fi
+              PREVIEW_CUR_GROUP="$group_key"
+              if [ -n "$exclude_summary" ]; then
+                PREVIEW_FLOW+="  ${source_path} (excl: ${exclude_summary})"$'\n'
+              else
+                PREVIEW_FLOW+="  ${source_path}"$'\n'
+              fi
+              PREVIEW_FLOW+="  $(format_bytes "$src_bytes") / ${src_count} 文件"$'\n'
+              PREVIEW_FLOW+="       │"$'\n'
+            fi
+
+            local short_dest
+            short_dest=$(_shorten_path "$dest_path" 48)
+            PREVIEW_FLOW+="   ├──► ${short_dest}"$'\n'
+            PREVIEW_FLOW+="         [+$(format_bytes "$sync_bytes") / +${sync_count} 文件]"$'\n'
+          }
+
+          # ===== 任务预览：发送通知 =====
+          flush_task_preview() {
             local msg=""
-            msg="📋 任务预览: ${task_name}"$'\n'
+            msg="📋 任务预览: ${PREVIEW_TASK_NAME}"$'\n'
             msg+="━━━━━━━━━━━━━━"$'\n'
-            msg+=$'\n'"📊 源端"$'\n'
-            msg+="• 路径: ${source_path}"$'\n'
-            msg+="• 大小: $(format_bytes "$src_bytes")"$'\n'
-            msg+="• 文件: ${src_count} 个"$'\n'
-
-            # 收集每个目标的信息
-            local total_sync_bytes=0
-            local total_sync_count=0
-            local dest_section=""
-            local flow_section=""
-            local i=0
-            for dest in "${dests[@]}"; do
-              i=$((i + 1))
-              echo "  获取目标大小: ${dest}"
-              local dst_data dst_bytes dst_count sync_bytes sync_count
-              dst_data=$(_get_remote_size_count "$dest")
-              dst_bytes=$(echo "$dst_data" | awk '{print $1}')
-              dst_count=$(echo "$dst_data" | awk '{print $2}')
-
-              if [ "$src_bytes" -gt "$dst_bytes" ]; then
-                sync_bytes=$((src_bytes - dst_bytes))
-              else
-                sync_bytes=0
-              fi
-              if [ "$src_count" -gt "$dst_count" ]; then
-                sync_count=$((src_count - dst_count))
-              else
-                sync_count=0
-              fi
-              total_sync_bytes=$((total_sync_bytes + sync_bytes))
-              total_sync_count=$((total_sync_count + sync_count))
-
-              dest_section+=$'\n'"${i}. ${dest}"$'\n'
-              dest_section+="   • 大小: $(format_bytes "$dst_bytes") | 文件: ${dst_count}"$'\n'
-              dest_section+="   • 预估待同步: +$(format_bytes "$sync_bytes") | +${sync_count} 文件"$'\n'
-
-              # 流量图行
-              local short_dest
-              short_dest=$(_shorten_path "$dest" 48)
-              local arrow="├──►"
-              if [ "$i" -eq "$num_dests" ]; then
-                arrow="└──►"
-              fi
-              flow_section+="   ${arrow} ${short_dest}"$'\n'
-              flow_section+="         [+$(format_bytes "$sync_bytes") / +${sync_count} 文件]"$'\n'
-            done
-
-            msg+=$'\n'"📊 目标端 (${num_dests} 个)"$'\n'
-            msg+="${dest_section}"
-
+            msg+=$'\n'"📊 同步对 (${PREVIEW_PAIR_COUNT} 组)"$'\n'
+            msg+="${PREVIEW_PAIRS_DETAIL}"
             msg+=$'\n'"🔀 文件同步流量图"$'\n'
             msg+=$'\n'
-            msg+="  $(format_bytes "$src_bytes") / ${src_count} 文件"$'\n'
-            msg+="  ${source_path}"$'\n'
-            msg+="       │"$'\n'
-            msg+="${flow_section}"
-            msg+=$'\n'"  📦 合计预估待同步: $(format_bytes "$total_sync_bytes") / ${total_sync_count} 文件"$'\n'
+            msg+="${PREVIEW_FLOW}"
+            msg+=$'\n'$'\n'"  📦 合计预估待同步: $(format_bytes "$PREVIEW_TOTAL_SYNC_BYTES") / ${PREVIEW_TOTAL_SYNC_COUNT} 文件"$'\n'
             msg+=$'\n'"⏳ 同步即将开始..."
 
             curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
               -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
               --data-urlencode text="$msg" || true
-            echo "  已发送 ${task_name} 预览通知"
+            echo "  已发送 ${PREVIEW_TASK_NAME} 预览通知"
           }
           EOF
 
@@ -2635,48 +2707,51 @@ jobs:
           source /tmp/functions.sh
           echo "=== 发送任务预览通知 ==="
 
-          send_task_preview "backup" \
-            "onedrive:backup" \
-            "openlist:aliyundriveCrypt/backup" \
-            "openlist:wopan176Crypt/backup" \
-            "gd:backup"
+          start_task_preview "backup"
+          add_preview_pair "onedrive:backup" "openlist:aliyundriveCrypt/backup" \
+            --exclude "/notion/**" \
+            --exclude "notion/**" \
+            --exclude "/self-hosted_latest.tar.gz" \
+            --exclude "self-hosted_latest.tar.gz" \
+            --exclude "/github_repos_latest.tar.gz" \
+            --exclude "github_repos_latest.tar.gz"
+          add_preview_pair "onedrive:backup" "openlist:wopan176Crypt/backup"
+          add_preview_pair "onedrive:backup" "gd:backup"
+          flush_task_preview
 
-          send_task_preview "task0" \
-            "onedrive:0" \
-            "openlist:wopan176Crypt/0" \
-            "gd:0"
+          start_task_preview "task0"
+          add_preview_pair "onedrive:0" "openlist:wopan176Crypt/0"
+          add_preview_pair "onedrive:0/j-1024j-视频-pornhub-favorites" "openlist:wopan175/0/j-1024j-视频-pornhub-favorites"
+          add_preview_pair "onedrive:0" "gd:0"
+          flush_task_preview
 
-          send_task_preview "task0 (pornhub-favorites)" \
-            "onedrive:0/j-1024j-视频-pornhub-favorites" \
-            "openlist:wopan175/0/j-1024j-视频-pornhub-favorites"
+          start_task_preview "task1"
+          add_preview_pair "onedrive:1" "openlist:wopan176Crypt/1"
+          add_preview_pair "onedrive:1" "openlist:wopan175/1"
+          add_preview_pair "onedrive:1" "gd:1"
+          flush_task_preview
 
-          send_task_preview "task1" \
-            "onedrive:1" \
-            "openlist:wopan176Crypt/1" \
-            "openlist:wopan175/1" \
-            "gd:1"
+          start_task_preview "task2"
+          add_preview_pair "onedrive:2" "openlist:wopan176Crypt/2"
+          add_preview_pair "onedrive:2" "openlist:wopan175/2"
+          add_preview_pair "onedrive:2" "gd:2"
+          flush_task_preview
 
-          send_task_preview "task2" \
-            "onedrive:2" \
-            "openlist:wopan176Crypt/2" \
-            "openlist:wopan175/2" \
-            "gd:2"
+          start_task_preview "task3"
+          add_preview_pair "onedrive:3" "openlist:wopan176Crypt/3"
+          add_preview_pair "onedrive:3" "openlist:wopan175/3"
+          add_preview_pair "onedrive:3" "gd:3"
+          flush_task_preview
 
-          send_task_preview "task3" \
-            "onedrive:3" \
-            "openlist:wopan176Crypt/3" \
-            "openlist:wopan175/3" \
-            "gd:3"
+          start_task_preview "task4"
+          add_preview_pair "onedrive:4" "openlist:wopan176Crypt/4"
+          add_preview_pair "onedrive:4" "openlist:wopan175/4"
+          flush_task_preview
 
-          send_task_preview "task4" \
-            "onedrive:4" \
-            "openlist:wopan176Crypt/4" \
-            "openlist:wopan175/4"
-
-          send_task_preview "task5" \
-            "onedrive:5" \
-            "openlist:wopan176Crypt/5" \
-            "openlist:wopan175/5"
+          start_task_preview "task5"
+          add_preview_pair "onedrive:5" "openlist:wopan176Crypt/5"
+          add_preview_pair "onedrive:5" "openlist:wopan175/5"
+          flush_task_preview
 
           echo "=== 所有任务预览通知已发送 ==="
 
