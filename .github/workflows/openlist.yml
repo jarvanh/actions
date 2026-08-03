@@ -1637,7 +1637,7 @@ jobs:
             local extra_args=("$@")
 
             local current_depth=${SYNC_AUTO_SPLIT_DEPTH:-0}
-            local max_depth=3
+            local max_depth=10
             local subdir
 
             # 仅在顶层检查同步标记
@@ -1660,8 +1660,8 @@ jobs:
               esac
             fi
 
-            # 50GB 阈值
-            local threshold="$SYNC_SPLIT_THRESHOLD_BYTES"
+            # 50GB 阈值（带默认值，防止跨 step 环境变量丢失时为空）
+            local threshold="${SYNC_SPLIT_THRESHOLD_BYTES:-50000000000}"
 
             # 检查源端大小
             local source_size_bytes=0
@@ -1670,6 +1670,8 @@ jobs:
             if [ -n "$size_json" ]; then
               source_size_bytes=$(echo "$size_json" | jq -r '.bytes // 0' 2>/dev/null || echo 0)
             fi
+            # 确保 source_size_bytes 是有效整数，否则置 0
+            [[ "$source_size_bytes" =~ ^[0-9]+$ ]] || source_size_bytes=0
 
             if [ "$source_size_bytes" -le "$threshold" ]; then
               echo "源端大小 $(numfmt --to=iec-i --suffix=B "$source_size_bytes" 2>/dev/null || echo "${source_size_bytes}B") 未超过 50GB 阈值，直接同步"
@@ -1848,7 +1850,7 @@ jobs:
             shift 3
             local extra_args=("$@")
 
-            local threshold="$SYNC_SPLIT_THRESHOLD_BYTES"  # 50GB
+            local threshold="${SYNC_SPLIT_THRESHOLD_BYTES:-50000000000}"  # 50GB
             local batch_dir="/tmp/file_batches_${task_name}"
             mkdir -p "$batch_dir"
 
@@ -1895,9 +1897,11 @@ jobs:
             while IFS= read -r line; do
               local size fpath
               # lsjson 用 .size 和 .path (小写)，lsf --json 用 .Size 和 .Path (大写)
-              size=$(echo "$line" | jq -r '(.size // .Size // 0)')
-              fpath=$(echo "$line" | jq -r '(.path // .Path // empty)')
+              size=$(echo "$line" | jq -r '(.size // .Size // 0)' 2>/dev/null || echo 0)
+              fpath=$(echo "$line" | jq -r '(.path // .Path // empty)' 2>/dev/null)
               [ -z "$fpath" ] && continue
+              # 确保 size 是有效整数，否则置 0（避免 $(( )) 语法错误和 [: : integer expression expected）
+              [[ "$size" =~ ^[0-9]+$ ]] || size=0
 
               # 当前批次加此文件超阈值则开新批次
               if [ "$batch_size" -gt 0 ] && [ $((batch_size + size)) -gt "$threshold" ]; then
@@ -2368,7 +2372,12 @@ jobs:
           # 集中定义阈值，避免魔数散落各处
           LARGE_FILE_THRESHOLD_BYTES="${LARGE_FILE_THRESHOLD:-4000000000}"
           SYNC_SPLIT_THRESHOLD_BYTES="${SYNC_SPLIT_THRESHOLD:-50000000000}"
+          # 同步任务在独立的 Actions step 中执行（每个 step 是独立 shell），
+          # 必须写入 GITHUB_ENV 才能在后续 step 中保留；否则 threshold 为空，
+          # 触发 `[: : integer expression expected` 错误。
           echo "PROCESSED_FILES_LOG=$PROCESSED_FILES_LOG" >> "$GITHUB_ENV"
+          echo "LARGE_FILE_THRESHOLD_BYTES=$LARGE_FILE_THRESHOLD_BYTES" >> "$GITHUB_ENV"
+          echo "SYNC_SPLIT_THRESHOLD_BYTES=$SYNC_SPLIT_THRESHOLD_BYTES" >> "$GITHUB_ENV"
           echo "=== 初始化已处理文件日志 ===" > "$PROCESSED_FILES_LOG"
           echo "开始时间: $(date)" >> "$PROCESSED_FILES_LOG"
           echo "==========================" >> "$PROCESSED_FILES_LOG"
