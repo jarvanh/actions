@@ -42,8 +42,8 @@ jobs:
         env:
           TG_API_ID: ${{ secrets.TG_API_ID }}
           TG_API_HASH: ${{ secrets.TG_API_HASH }}
-          TG_SESSION_STRING: ${{ secrets.TG_SESSION_STRING }}
-          TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+          TG_SESSION_STRING: ${{ secrets.TG_SESSION }}
+          TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID_PH }}
         run: |
           pip3 install telethon
           cd ~/onedrive/0/j-1024j-视频-pornhub-favorites 2>/dev/null || exit 0
@@ -57,10 +57,10 @@ jobs:
       - name: run pornhub-dl favorites
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+          TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID_PH }}
           TG_API_ID: ${{ secrets.TG_API_ID }}
           TG_API_HASH: ${{ secrets.TG_API_HASH }}
-          TG_SESSION_STRING: ${{ secrets.TG_SESSION_STRING }}
+          TG_SESSION_STRING: ${{ secrets.TG_SESSION }}
         run: |
           sudo apt-get update
           sudo apt-get install python3 -y
