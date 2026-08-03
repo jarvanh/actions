@@ -38,7 +38,7 @@ jobs:
           echo "~/onedrive 文件列表"
           cd ~/onedrive
           ls
-      - name: check duplicate videos by ID
+      - name: check duplicate videos by ID and dedupe by hash
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -63,17 +63,51 @@ jobs:
 
           DUP_DETAILS=""
           DUP_COUNT=0
+          REMOVED_COUNT=0
+          REMOVED_LIST=""
+          DIFFERENT_LIST=""
           for id in "${!ID_FILES[@]}"; do
             files="${ID_FILES[$id]}"
             count=$(echo "$files" | wc -l)
             if [ "$count" -gt 1 ]; then
               DUP_COUNT=$((DUP_COUNT + 1))
-              DUP_DETAILS+="🔖 ID ${id} （${count} 个）"$'\n'"${files}"$'\n\n'
+              # 按修改时间从新到旧排序，保留最晚下载的文件作为基准
+              sorted_files=$(echo "$files" | xargs -d '\n' ls -t 2>/dev/null)
+              kept=$(echo "$sorted_files" | head -n1)
+              kept_hash=$(sha1sum "$kept" | cut -d' ' -f1)
+              group_removed=""
+              group_kept=""
+              while IFS= read -r f; do
+                [ "$f" = "$kept" ] && continue
+                f_hash=$(sha1sum "$f" | cut -d' ' -f1)
+                if [ "$f_hash" = "$kept_hash" ]; then
+                  # 哈希一致，删除重复文件
+                  rm -f "$f"
+                  REMOVED_COUNT=$((REMOVED_COUNT + 1))
+                  REMOVED_LIST+="- ${f}（与 ${kept} 哈希一致: ${kept_hash:0:12}）"$'\n'
+                  group_removed+="${f}"$'\n'
+                else
+                  # 哈希不同，保留并标记
+                  DIFFERENT_LIST+="- ${f}（哈希 ${f_hash:0:12} ≠ 保留 ${kept_hash:0:12}）"$'\n'
+                  group_kept+="${f}"$'\n'
+                fi
+              done <<< "$sorted_files"
+              DUP_DETAILS+="🔖 ID ${id}（${count} 个，保留: ${kept}）"$'\n'"${group_removed}${group_kept}"$'\n'
             fi
           done
 
+          # 去重日志输出到 Actions 日志，便于追溯
+          echo "=== ph-dl 去重日志 ==="
+          echo "重复 ID 数量: ${DUP_COUNT}"
+          echo "删除重复文件数量: ${REMOVED_COUNT}"
+          echo "[删除的重复文件（哈希一致）]"
+          echo "${REMOVED_LIST}"
+          echo "[哈希不同已保留]"
+          echo "${DIFFERENT_LIST}"
+
+          # 发送通知
           if [ "$DUP_COUNT" -gt 0 ]; then
-            MSG="🔍 ph-dl 重复视频检测"$'\n\n'"📁 目录: j-1024j-视频-pornhub-favorites"$'\n'"🔢 重复 ID 数量: ${DUP_COUNT}"$'\n\n'"📋 重复详情:"$'\n'"${DUP_DETAILS}"$'\n'"🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            MSG="🔍 ph-dl 重复视频检测与去重"$'\n\n'"📁 目录: j-1024j-视频-pornhub-favorites"$'\n'"🔢 重复 ID 数量: ${DUP_COUNT}"$'\n'"🗑️ 删除重复: ${REMOVED_COUNT}"$'\n\n'"📋 详情:"$'\n'"${DUP_DETAILS}"$'\n'"🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
               --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
               --data-urlencode text="${MSG}"
@@ -116,7 +150,7 @@ jobs:
             --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
             --data-urlencode text="${MSG}"
 
-      - name: temp send old videos to telegram channel
+      - name: send old videos to telegram channel
         env:
           TG_API_ID: ${{ secrets.TG_API_ID }}
           TG_API_HASH: ${{ secrets.TG_API_HASH }}
@@ -194,10 +228,13 @@ jobs:
           URL="$2"
           FILENAME=$(basename "$FILEPATH")
           FILESIZE_HUMAN=$(du -h "$FILEPATH" | cut -f1)
-          
+
           echo "- ${FILENAME} (${FILESIZE_HUMAN}) [链接](${URL})" >> new_downloads_list.txt
-          
-          python3 ${GITHUB_WORKSPACE}/.github/scripts/upload_video.py "${FILEPATH}" "${TELEGRAM_CHANNEL_ID}" "Downloaded: ${FILENAME} (${FILESIZE_HUMAN})"
+
+          # 上传成功后记录到 uploaded_old_videos.txt，避免 temp send old videos 步骤重复上传
+          if python3 ${GITHUB_WORKSPACE}/.github/scripts/upload_video.py "${FILEPATH}" "${TELEGRAM_CHANNEL_ID}" "Downloaded: ${FILENAME} (${FILESIZE_HUMAN})"; then
+            echo "${FILENAME}" >> uploaded_old_videos.txt
+          fi
           EOF
           chmod +x post_process.sh
           
