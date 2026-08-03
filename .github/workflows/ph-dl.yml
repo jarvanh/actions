@@ -68,12 +68,12 @@ jobs:
             count=$(echo "$files" | wc -l)
             if [ "$count" -gt 1 ]; then
               DUP_COUNT=$((DUP_COUNT + 1))
-              DUP_DETAILS+="ID ${id} (${count} 个):"$'\n'"${files}"$'\n\n'
+              DUP_DETAILS+="🔖 ID ${id} （${count} 个）"$'\n'"${files}"$'\n\n'
             fi
           done
 
           if [ "$DUP_COUNT" -gt 0 ]; then
-            MSG="ph-dl 发现重复视频（按文件名中的 ID）"$'\n'"目录: j-1024j-视频-pornhub-favorites"$'\n'"重复 ID 数量: ${DUP_COUNT}"$'\n\n'"${DUP_DETAILS}"$'\n'"任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            MSG="🔍 ph-dl 重复视频检测"$'\n\n'"📁 目录: j-1024j-视频-pornhub-favorites"$'\n'"🔢 重复 ID 数量: ${DUP_COUNT}"$'\n\n'"📋 重复详情:"$'\n'"${DUP_DETAILS}"$'\n'"🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
               --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
               --data-urlencode text="${MSG}"
@@ -104,14 +104,14 @@ jobs:
           for f in "${FRAG_FILES[@]}"; do
             fname=$(basename "$f")
             fsize=$(du -h "$f" | cut -f1)
-            FILE_DETAILS="${FILE_DETAILS}- ${fname} (${fsize})
+            FILE_DETAILS="${FILE_DETAILS}🗑 ${fname} (${fsize})
           "
           done
           # 清理
           find . -maxdepth 1 -type f \( -name '*.mp4-Frag*' -o -name '*.part-Frag*' \) -delete
           echo "Cleaned up ${FRAG_COUNT} fragment files."
           # 发送通知
-          MSG="ph-dl 清理 yt-dlp 分片文件"$'\n'"目录: j-1024j-视频-pornhub-favorites"$'\n'"清理数量: ${FRAG_COUNT}"$'\n'"文件列表:"$'\n'"${FILE_DETAILS}"$'\n'"任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          MSG="🧹 ph-dl 清理 yt-dlp 分片文件"$'\n\n'"📁 目录: j-1024j-视频-pornhub-favorites"$'\n'"🗑️ 清理数量: ${FRAG_COUNT}"$'\n\n'"📋 文件列表:"$'\n'"${FILE_DETAILS}"$'\n'"🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
             --data-urlencode text="${MSG}"
