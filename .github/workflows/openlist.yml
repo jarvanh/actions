@@ -1428,6 +1428,11 @@ jobs:
                   sed -E 's/^.*ERROR : //; s/: Failed to copy.*$//' | sort -u
               )
             fi
+          EOF
+
+      - name: Setup helper functions - part 6b
+        run: |
+          cat >> /tmp/functions_part6.sh << 'EOF'
 
             SYNC_FAILED=0
 
