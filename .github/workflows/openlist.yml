@@ -1430,9 +1430,9 @@ jobs:
             fi
           EOF
 
-      - name: Setup helper functions - part 6b
+      - name: Setup helper functions - part 7
         run: |
-          cat >> /tmp/functions_part6.sh << 'EOF'
+          cat > /tmp/functions_part7.sh << 'EOF'
 
             SYNC_FAILED=0
 
@@ -1683,9 +1683,9 @@ jobs:
           }
           EOF
 
-      - name: Setup helper functions - part 7
+      - name: Setup helper functions - part 8
         run: |
-          cat > /tmp/functions_part7.sh << 'EOF'
+          cat > /tmp/functions_part8.sh << 'EOF'
           # 自动拆分同步：源端 > 50GB 时按一级子目录拆分，最后再完整同步一次
           sync_task_with_auto_split() {
             local source_path="$1"
@@ -1915,9 +1915,9 @@ jobs:
           }
           EOF
 
-      - name: Setup helper functions - part 8
+      - name: Setup helper functions - part 9
         run: |
-          cat > /tmp/functions_part8.sh << 'EOF'
+          cat > /tmp/functions_part9.sh << 'EOF'
           # 按文件批次拆分同步（用于无子目录的大文件夹）
           sync_dir_by_file_batches() {
             local source_path="$1"
@@ -2055,9 +2055,9 @@ jobs:
           }
           EOF
 
-      - name: Setup helper functions - part 9
+      - name: Setup helper functions - part 10
         run: |
-          cat > /tmp/functions_part9.sh << 'EOF'
+          cat > /tmp/functions_part10.sh << 'EOF'
           # ===== 同步标记系统 =====
           # 标记存储路径: onedrive:/logs/sync_state/
           SYNC_STATE_DIR="onedrive:/logs/sync_state"
@@ -2245,9 +2245,9 @@ jobs:
           }
           EOF
 
-      - name: Setup helper functions - part 10
+      - name: Setup helper functions - part 11
         run: |
-          cat > /tmp/functions_part10.sh << 'EOF'
+          cat > /tmp/functions_part11.sh << 'EOF'
           # 获取远端大小和文件数（返回 "bytes count" 或 "0 0"）
           _get_remote_size_count() {
             local remote_path="$1"
@@ -2432,7 +2432,7 @@ jobs:
 
       - name: Combine all functions
         run: |
-          cat /tmp/functions_part1.sh /tmp/functions_part2.sh /tmp/functions_part3.sh /tmp/functions_part4.sh /tmp/functions_part5.sh /tmp/functions_part6.sh /tmp/functions_part7.sh /tmp/functions_part8.sh /tmp/functions_part9.sh /tmp/functions_part10.sh > /tmp/functions.sh
+          cat /tmp/functions_part1.sh /tmp/functions_part2.sh /tmp/functions_part3.sh /tmp/functions_part4.sh /tmp/functions_part5.sh /tmp/functions_part6.sh /tmp/functions_part7.sh /tmp/functions_part8.sh /tmp/functions_part9.sh /tmp/functions_part10.sh /tmp/functions_part11.sh > /tmp/functions.sh
           rm -f /tmp/functions_part*.sh
 
       - name: Initialize sync
