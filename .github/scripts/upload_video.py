@@ -51,17 +51,30 @@ async def main():
         sys.exit(1)
 
     print(f"\nUploading {file_path} to {chat_id}...")
+    MAX_RETRIES = 3
+    INITIAL_BACKOFF = 5
+    last_error = None
     try:
-        await client.send_file(
-            entity=chat_id,
-            file=file_path,
-            caption=caption,
-            force_document=False,
-            progress_callback=progress_callback
-        )
-        print("\nUpload successful!")
-    except Exception as e:
-        print(f"\nFailed to upload: {e}")
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                await client.send_file(
+                    entity=chat_id,
+                    file=file_path,
+                    caption=caption,
+                    force_document=False,
+                    supports_streaming=True,
+                    progress_callback=progress_callback
+                )
+                print("\nUpload successful!")
+                return
+            except Exception as e:
+                last_error = e
+                print(f"\nAttempt {attempt}/{MAX_RETRIES} failed: {e}", file=sys.stderr)
+                if attempt < MAX_RETRIES:
+                    backoff = INITIAL_BACKOFF * (2 ** (attempt - 1))
+                    print(f"Retrying in {backoff}s...", file=sys.stderr)
+                    await asyncio.sleep(backoff)
+        print(f"\nAll {MAX_RETRIES} attempts failed. Last error: {last_error}", file=sys.stderr)
         sys.exit(1)
     finally:
         await client.disconnect()
