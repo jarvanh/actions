@@ -55,8 +55,7 @@ jobs:
             id=$(echo "$file" | grep -oE '\[[a-f0-9]+\]' | tail -n1)
             [ -n "$id" ] || continue
             if [ -n "${ID_FILES[$id]}" ]; then
-              ID_FILES[$id]="${ID_FILES[$id]}
-$file"
+              ID_FILES[$id]+=$'\n'"$file"
             else
               ID_FILES[$id]="$file"
             fi
@@ -69,20 +68,12 @@ $file"
             count=$(echo "$files" | wc -l)
             if [ "$count" -gt 1 ]; then
               DUP_COUNT=$((DUP_COUNT + 1))
-              DUP_DETAILS="${DUP_DETAILS}ID ${id} (${count} 个):
-${files}
-
-"
+              DUP_DETAILS+="ID ${id} (${count} 个):"$'\n'"${files}"$'\n\n'"
             fi
           done
 
           if [ "$DUP_COUNT" -gt 0 ]; then
-            MSG="ph-dl 发现重复视频（按文件名中的 ID）
-目录: j-1024j-视频-pornhub-favorites
-重复 ID 数量: ${DUP_COUNT}
-
-${DUP_DETAILS}
-任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            MSG="ph-dl 发现重复视频（按文件名中的 ID）"$'\n'"目录: j-1024j-视频-pornhub-favorites"$'\n'"重复 ID 数量: ${DUP_COUNT}"$'\n\n'"${DUP_DETAILS}"$'\n'"任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
               --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
               --data-urlencode text="${MSG}"
@@ -120,12 +111,7 @@ ${DUP_DETAILS}
           find . -maxdepth 1 -type f \( -name '*.mp4-Frag*' -o -name '*.part-Frag*' \) -delete
           echo "Cleaned up ${FRAG_COUNT} fragment files."
           # 发送通知
-          MSG="ph-dl 清理 yt-dlp 分片文件
-目录: j-1024j-视频-pornhub-favorites
-清理数量: ${FRAG_COUNT}
-文件列表:
-${FILE_DETAILS}
-任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          MSG="ph-dl 清理 yt-dlp 分片文件"$'\n'"目录: j-1024j-视频-pornhub-favorites"$'\n'"清理数量: ${FRAG_COUNT}"$'\n'"文件列表:"$'\n'"${FILE_DETAILS}"$'\n'"任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
             --data-urlencode text="${MSG}"
@@ -174,11 +160,7 @@ ${FILE_DETAILS}
 
           # 失败汇总通知
           if [ "$FAILED" -gt 0 ]; then
-            MSG="ph-dl 旧视频上传失败汇总
-总计: ${TOTAL}，跳过: ${SKIPPED}，成功: ${SUCCESS}，失败: ${FAILED}
-失败文件:
-${FAILED_FILES}
-任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            MSG="ph-dl 旧视频上传失败汇总"$'\n'"总计: ${TOTAL}，跳过: ${SKIPPED}，成功: ${SUCCESS}，失败: ${FAILED}"$'\n'"失败文件:"$'\n'"${FAILED_FILES}"$'\n'"任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
               --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
               --data-urlencode text="${MSG}"
