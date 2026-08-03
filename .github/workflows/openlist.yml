@@ -151,75 +151,6 @@ jobs:
                         --data-urlencode text="$message" || true
                     }
 
-                    send_log_to_telegram() {
-                      local log_file="$1"
-                      local task_name="$2"
-                      local exit_code="$3"
-                      local log_type="${4:-sync}"
-                      local source_info="${5:-未知}"
-                      local dest_info="${6:-未知}"
-
-                      local critical_logs="无"
-                      if [ -f "$log_file" ]; then
-                        critical_logs=$(grep -Ei "error|failed|too large|timeout|permission denied|connection refused" "$log_file" | tail -n 5 || echo "无明显错误关键字")
-                      fi
-
-                      # 获取源端和目标端大小及文件数（各只调一次 --json）
-                      local src_stats dst_stats
-                      local src_bytes src_count dst_bytes dst_count
-                      local src_size="未知" dst_size="未知" count_info=""
-                      src_stats=$(_get_path_stats "$source_info")
-                      src_bytes=$(echo "$src_stats" | awk '{print $1}')
-                      src_count=$(echo "$src_stats" | awk '{print $2}')
-                      src_size=$(echo "$src_stats" | awk '{print $3 ($4? " "$4 : "")}')
-                      dst_stats=$(_get_path_stats "$dest_info")
-                      dst_bytes=$(echo "$dst_stats" | awk '{print $1}')
-                      dst_count=$(echo "$dst_stats" | awk '{print $2}')
-                      dst_size=$(echo "$dst_stats" | awk '{print $3 ($4? " "$4 : "")}')
-
-                      if [[ "$src_count" =~ ^[0-9]+$ ]] && [[ "$dst_count" =~ ^[0-9]+$ ]]; then
-                        local diff=$((src_count - dst_count))
-                        if [ "$diff" -ne 0 ]; then
-                          count_info="文件数差异：${diff} (源端 ${src_count} / 目标 ${dst_count})"
-                        else
-                          count_info="文件数：${src_count} (一致)"
-                        fi
-                      elif [ -n "$src_count" ] || [ -n "$dst_count" ]; then
-                        count_info="文件数：源端 ${src_count:-未知} / 目标 ${dst_count:-未知}"
-                      fi
-
-                      local file_size=$(stat -c%s "$log_file" 2>/dev/null || echo 0)
-
-                      local status_text="同步失败 (exit=${exit_code})"
-                      if [ "$log_type" = "gd-sync" ]; then
-                        status_text="Google Drive 同步失败 (exit=${exit_code})"
-                      fi
-
-                      local message
-                      message="⚠️ ${task_name} 同步告警"$'\n'
-                      message+='━━━━━━━━━━━━━━'$'\n'
-                      message+="源端大小：${src_size}"$'\n'
-                      message+="目标大小：${dst_size}"$'\n'
-                      message+="状态：${status_text}"$'\n'
-                      [ -n "$count_info" ] && message+="${count_info}"$'\n'
-                      message+=$'\n'"📁 任务信息"$'\n'
-                      message+="• 任务：${task_name}"$'\n'
-                      message+="• 源端：${source_info}"$'\n'
-                      message+="• 目标：${dest_info}"$'\n'
-                      message+=$'\n'"🧾 错误详情"$'\n'
-                      message+="• 关键日志："$'\n'
-                      while IFS= read -r line; do
-                        [ -n "$line" ] && message+="  ${line}"$'\n'
-                      done <<< "$critical_logs"
-
-                      send_telegram_message "$message"
-                      if [ "$file_size" -gt 0 ] && [ "$file_size" -lt 50000000 ]; then
-                        curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendDocument \
-                          -F chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
-                          -F document=@"$log_file" \
-                          -F caption="📁 ${task_name} 错误日志" || true
-                      fi
-                    }
                     has_real_content() {
                       local log_file="$1"
                       if [ ! -f "$log_file" ] || [ ! -s "$log_file" ]; then
@@ -1668,7 +1599,43 @@ jobs:
 
             elif [ "$SYNC_STATUS" -ne 0 ] || grep -Eqi '(^|[^[:alpha:]])(ERROR|Error|Failed|failed|timeout|forbidden|unauthorized|permission denied|connection refused)([^[:alpha:]]|$)' "$LAST_ATTEMPT_LOG"; then
               SYNC_FAILED=1
-              send_log_to_telegram "$LOG_FILENAME" "$task_name" "$SYNC_STATUS" "sync" "$source_path" "$dest_path"
+              # 提取关键错误日志
+              local critical_logs="无明显错误关键字"
+              if [ -f "$LOG_FILENAME" ]; then
+                critical_logs=$(grep -Ei "error|failed|too large|timeout|permission denied|connection refused" "$LOG_FILENAME" | tail -n 5 || echo "无明显错误关键字")
+              fi
+              local err_msg=""
+              err_msg+="⚠️ ${task_name} 同步失败"$'\n'
+              err_msg+='━━━━━━━━━━━━━━'$'\n'
+              err_msg+="源端大小：${source_size_human}"$'\n'
+              err_msg+="目标大小：${dest_size_human}"$'\n'
+              err_msg+="状态：同步失败 (exit=${SYNC_STATUS})"$'\n'
+              err_msg+="${count_info}"$'\n'
+              [ -n "$AUTO_SPLIT_INFO" ] && err_msg+=$'\n'"${AUTO_SPLIT_INFO}"$'\n'
+              err_msg+=$'\n''📁 任务信息'$'\n'
+              err_msg+="• 任务：${task_name}"$'\n'
+              err_msg+="• 源端：${source_path}"$'\n'
+              err_msg+="• 目标：${dest_path}"$'\n'
+              err_msg+=$'\n''🚫 排除规则'$'\n'
+              err_msg+="${exclude_list}"$'\n'
+              err_msg+=$'\n''🧾 错误详情'$'\n'
+              err_msg+="• 关键日志："$'\n'
+              while IFS= read -r line; do
+                [ -n "$line" ] && err_msg+="  ${line}"$'\n'
+              done <<< "$critical_logs"
+              if [ -n "$diff_files_list" ]; then
+                err_msg+=$'\n'"📋 差异文件列表："$'\n'
+                err_msg+="$diff_files_list"
+              fi
+              send_telegram_message "$err_msg"
+              # 发送完整日志文件
+              local err_log_size=$(stat -c%s "$LOG_FILENAME" 2>/dev/null || echo 0)
+              if [ "$err_log_size" -gt 0 ] && [ "$err_log_size" -lt 50000000 ]; then
+                curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendDocument \
+                  -F chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
+                  -F document=@"$LOG_FILENAME" \
+                  -F caption="📁 ${task_name} 错误日志" || true
+              fi
             else
               local ok_message
               if [ -n "$diff_files_list" ]; then
@@ -2682,7 +2649,42 @@ jobs:
                   -F caption="📁 ${task_name} GD 错误日志" || true
               fi
             elif [ "$SYNC_STATUS" -ne 0 ] || grep -Eqi '403|forbidden|rateLimitExceeded|userRateLimitExceeded|dailyLimitExceeded|ERROR|Failed|timeout|unauthorized|permission denied|connection refused|upload chunks may be taking too long' "$LAST_GD_ATTEMPT_LOG"; then
-              send_log_to_telegram "$LOG_FILENAME" "$task_name" "$SYNC_STATUS" "gd-sync" "$source_path" "$dest_path"
+              # 提取关键错误日志
+              local gd_critical_logs="无明显错误关键字"
+              if [ -f "$LOG_FILENAME" ]; then
+                gd_critical_logs=$(grep -Ei "error|failed|too large|timeout|permission denied|connection refused" "$LOG_FILENAME" | tail -n 5 || echo "无明显错误关键字")
+              fi
+              local gd_err_msg=""
+              gd_err_msg+="⚠️ ${task_name} Google Drive 同步失败"$'\n'
+              gd_err_msg+='━━━━━━━━━━━━━━'$'\n'
+              gd_err_msg+="源端大小：${gd_src_size}"$'\n'
+              gd_err_msg+="目标大小：${gd_dst_size}"$'\n'
+              gd_err_msg+="状态：Google Drive 同步失败 (exit=${SYNC_STATUS})"$'\n'
+              gd_err_msg+="${gd_count_info}"$'\n'
+              gd_err_msg+=$'\n''📁 任务信息'$'\n'
+              gd_err_msg+="• 任务：${task_name}"$'\n'
+              gd_err_msg+="• 源端：${source_path}"$'\n'
+              gd_err_msg+="• 目标：${dest_path}"$'\n'
+              gd_err_msg+=$'\n''🚫 排除规则'$'\n'
+              gd_err_msg+="${gd_exclude_list}"$'\n'
+              gd_err_msg+=$'\n''🧾 错误详情'$'\n'
+              gd_err_msg+="• 关键日志："$'\n'
+              while IFS= read -r line; do
+                [ -n "$line" ] && gd_err_msg+="  ${line}"$'\n'
+              done <<< "$gd_critical_logs"
+              if [ -n "$gd_diff_files_list" ]; then
+                gd_err_msg+=$'\n'"📋 差异文件列表："$'\n'
+                gd_err_msg+="$gd_diff_files_list"
+              fi
+              send_telegram_message "$gd_err_msg"
+              # 发送完整日志文件
+              local gd_err_log_size=$(stat -c%s "$LOG_FILENAME" 2>/dev/null || echo 0)
+              if [ "$gd_err_log_size" -gt 0 ] && [ "$gd_err_log_size" -lt 50000000 ]; then
+                curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendDocument \
+                  -F chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
+                  -F document=@"$LOG_FILENAME" \
+                  -F caption="📁 ${task_name} GD 错误日志" || true
+              fi
             else
               save_sync_marker "$source_path" "$dest_path" "${task_name}_gd"
 
