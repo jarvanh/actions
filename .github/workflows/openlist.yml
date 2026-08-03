@@ -1444,7 +1444,11 @@ jobs:
             local fix_list="/tmp/${task_name}_sync_fixes.txt"
             : > "$fail_list"
             : > "$fix_list"
+            local fix_log=""
+            local HAS_405_409=0
+            local HAS_OBJECT_NOT_FOUND=0
             if [[ "$dest_path" == openlist:* ]] && grep -Eqi 'Method Not Allowed: 405|405 Method Not Allowed|409 Conflict' "$LAST_ATTEMPT_LOG"; then
+              HAS_405_409=1
               echo "=== ${task_name} 尝试修复 405/409 失败文件 ===" | tee -a "$LOG_FILENAME"
 
               local fix_log="file_fix_${task_name}_$(date +%Y%m%d_%H%M%S).log"
@@ -1476,6 +1480,22 @@ jobs:
                   sed -E 's/^.*ERROR : //; s/: Failed to copy.*$//' | sort -u
               )
 
+            fi
+
+            # object not found 错误解析（源文件不存在），加入 fail_list 以使用结构化通知
+            if grep -Eqi 'ERROR : .+: Failed to copy.*object not found' "$LAST_ATTEMPT_LOG" 2>/dev/null; then
+              HAS_OBJECT_NOT_FOUND=1
+              echo "=== ${task_name} 检测到 object not found 错误（源文件不存在）===" | tee -a "$LOG_FILENAME"
+              while IFS= read -r failed_line; do
+                [ -z "$failed_line" ] && continue
+                # 跳过已在 405/409 修复中处理的文件
+                grep -qF "${failed_line}|" "$fail_list" 2>/dev/null && continue
+                echo "源文件不存在: ${failed_line}" | tee -a "$LOG_FILENAME"
+                echo "${failed_line}|未知|源文件不存在 (object not found)" >> "$fail_list"
+              done < <(
+                grep -E 'ERROR : .+: Failed to copy.*object not found' "$LAST_ATTEMPT_LOG" 2>/dev/null | \
+                  sed -E 's/^.*ERROR : //; s/: Failed to copy.*$//' | sort -u
+              )
             fi
 
             SYNC_FAILED=0
@@ -1554,6 +1574,8 @@ jobs:
                     [ -z "$log_line" ] && continue
                     fail_summary+="    ${log_line}"$'\n'
                   done <<< "$fix_section"
+                elif echo "$fmsg" | grep -qi 'object not found'; then
+                  fail_summary+="  修复过程：源文件不存在，无需修复"$'\n'
                 else
                   fail_summary+="  修复过程：无记录"$'\n'
                 fi
@@ -1576,14 +1598,23 @@ jobs:
             fi
 
             if [ -s "$fail_list" ]; then
-              # 有无法修复的 405/409 文件，标记失败以便上层触发大文件切割
+              # 有无法同步的文件，标记失败以便上层触发大文件切割
               SYNC_FAILED=1
+              # 根据错误类型构建状态消息
+              local fail_status_msg="部分文件无法同步"
+              if [ "$HAS_405_409" -eq 1 ] && [ "$HAS_OBJECT_NOT_FOUND" -eq 1 ]; then
+                fail_status_msg="OpenList 405/409 错误及源文件不存在，部分文件无法同步"
+              elif [ "$HAS_405_409" -eq 1 ]; then
+                fail_status_msg="OpenList 405/409 错误，部分文件无法同步"
+              elif [ "$HAS_OBJECT_NOT_FOUND" -eq 1 ]; then
+                fail_status_msg="源文件不存在 (object not found)，部分文件无法同步"
+              fi
               local partial_msg=""
               partial_msg+="⚠️ ${task_name} 部分文件同步失败"$'\n'
               partial_msg+='━━━━━━━━━━━━━━'$'\n'
               partial_msg+="源端大小：${source_size_human}"$'\n'
               partial_msg+="目标大小：${dest_size_human}"$'\n'
-              partial_msg+="状态：OpenList 405/409 错误，部分文件无法同步"$'\n'
+              partial_msg+="状态：${fail_status_msg}"$'\n'
               partial_msg+="${count_info}"$'\n'
               [ -n "$AUTO_SPLIT_INFO" ] && partial_msg+=$'\n'"${AUTO_SPLIT_INFO}"$'\n'
               partial_msg+=$'\n'
@@ -2608,6 +2639,48 @@ jobs:
                 "$gd_exclude_list"
 
               send_telegram_message "$quota_msg"
+            elif grep -Eqi 'ERROR : .+: Failed to copy.*object not found' "$LAST_GD_ATTEMPT_LOG" 2>/dev/null; then
+              # object not found（源文件不存在），使用结构化通知
+              local gd_fail_summary=""
+              while IFS= read -r failed_line; do
+                [ -z "$failed_line" ] && continue
+                gd_fail_summary+="• 源文件：${source_path}/${failed_line}"$'\n'
+                gd_fail_summary+="  目标文件：${dest_path}/${failed_line}"$'\n'
+                gd_fail_summary+="  失败原因：源文件不存在 (object not found)"$'\n\n'
+              done < <(
+                grep -E 'ERROR : .+: Failed to copy.*object not found' "$LAST_GD_ATTEMPT_LOG" 2>/dev/null | \
+                  sed -E 's/^.*ERROR : //; s/: Failed to copy.*$//' | sort -u
+              )
+              [ -z "$gd_fail_summary" ] && gd_fail_summary="无"
+
+              local onf_msg=""
+              onf_msg+="⚠️ ${task_name} Google Drive 同步部分文件失败"$'\n'
+              onf_msg+='━━━━━━━━━━━━━━'$'\n'
+              onf_msg+="源端大小：${gd_src_size}"$'\n'
+              onf_msg+="目标大小：${gd_dst_size}"$'\n'
+              onf_msg+="状态：源文件不存在 (object not found)，部分文件无法同步"$'\n'
+              onf_msg+="${gd_count_info}"$'\n'
+              onf_msg+=$'\n''📁 任务信息'$'\n'
+              onf_msg+="• 任务：${task_name}"$'\n'
+              onf_msg+="• 源端：${source_path}"$'\n'
+              onf_msg+="• 目标：${dest_path}"$'\n'
+              onf_msg+=$'\n''🚫 排除规则'$'\n'
+              onf_msg+="${gd_exclude_list}"$'\n'
+              onf_msg+=$'\n''❌ 无法同步文件：'$'\n'
+              onf_msg+="${gd_fail_summary}"
+              if [ -n "$gd_diff_files_list" ]; then
+                onf_msg+=$'\n\n'"📋 差异文件列表："$'\n'
+                onf_msg+="$gd_diff_files_list"
+              fi
+              send_telegram_message "$onf_msg"
+              # 同时发送完整日志文件
+              local gd_log_size=$(stat -c%s "$LOG_FILENAME" 2>/dev/null || echo 0)
+              if [ "$gd_log_size" -gt 0 ] && [ "$gd_log_size" -lt 50000000 ]; then
+                curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendDocument \
+                  -F chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
+                  -F document=@"$LOG_FILENAME" \
+                  -F caption="📁 ${task_name} GD 错误日志" || true
+              fi
             elif [ "$SYNC_STATUS" -ne 0 ] || grep -Eqi '403|forbidden|rateLimitExceeded|userRateLimitExceeded|dailyLimitExceeded|ERROR|Failed|timeout|unauthorized|permission denied|connection refused|upload chunks may be taking too long' "$LAST_GD_ATTEMPT_LOG"; then
               send_log_to_telegram "$LOG_FILENAME" "$task_name" "$SYNC_STATUS" "gd-sync" "$source_path" "$dest_path"
             else
