@@ -11,6 +11,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v3
       - name: rclone-install
         run: |
           # 安装 rclone
@@ -39,36 +40,32 @@ jobs:
           ls
       - name: temp send old videos to telegram channel
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          TG_SESSION_STRING: ${{ secrets.TG_SESSION_STRING }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
         run: |
+          pip3 install telethon
           cd ~/onedrive/0/j-1024j-视频-pornhub-favorites 2>/dev/null || exit 0
           for file in *.mp4; do
             [ -e "$file" ] || continue
-            FILESIZE=$(stat -c%s "$file")
             FILESIZE_HUMAN=$(du -h "$file" | cut -f1)
-            if [ "$FILESIZE" -lt 50000000 ]; then
-              curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendVideo" \
-                -F chat_id="${TELEGRAM_CHANNEL_ID}" \
-                -F caption="Old video: ${file}" \
-                -F video=@"${file}"
-            else
-              curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-                -d chat_id="${TELEGRAM_CHANNEL_ID}" \
-                -d text="旧文件太大无法发送视频: ${file} (${FILESIZE_HUMAN})"
-            fi
-            sleep 2 # 防止触发速率限制
+            python3 ${GITHUB_WORKSPACE}/.github/scripts/upload_video.py "$file" "${TELEGRAM_CHANNEL_ID}" "Old video: ${file} (${FILESIZE_HUMAN})"
+            sleep 5 # 防止触发速率限制
           done
 
       - name: run pornhub-dl favorites
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          TG_SESSION_STRING: ${{ secrets.TG_SESSION_STRING }}
         run: |
           sudo apt-get update
           sudo apt-get install python3 -y
           sudo apt-get install ffmpeg -y
-          pip3 install --upgrade yt-dlp
+          pip3 install --upgrade yt-dlp telethon
           cd ~
           cd ~/onedrive/0/j-1024j-视频-pornhub-favorites
           echo "favorites文件列表"
@@ -83,21 +80,11 @@ jobs:
           FILEPATH="$1"
           URL="$2"
           FILENAME=$(basename "$FILEPATH")
-          FILESIZE=$(stat -c%s "$FILEPATH")
           FILESIZE_HUMAN=$(du -h "$FILEPATH" | cut -f1)
           
           echo "- ${FILENAME} (${FILESIZE_HUMAN}) [链接](${URL})" >> new_downloads_list.txt
           
-          if [ "$FILESIZE" -lt 50000000 ]; then
-            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendVideo" \
-              -F chat_id="${TELEGRAM_CHANNEL_ID}" \
-              -F caption="Downloaded: ${FILENAME}" \
-              -F video=@"${FILEPATH}"
-          else
-            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-              -d chat_id="${TELEGRAM_CHANNEL_ID}" \
-              -d text="新文件太大无法发送视频: ${FILENAME} (${FILESIZE_HUMAN})"
-          fi
+          python3 ${GITHUB_WORKSPACE}/.github/scripts/upload_video.py "${FILEPATH}" "${TELEGRAM_CHANNEL_ID}" "Downloaded: ${FILENAME} (${FILESIZE_HUMAN})"
           EOF
           chmod +x post_process.sh
           
