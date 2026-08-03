@@ -939,10 +939,21 @@ jobs:
             local mkdir_status=${PIPESTATUS[0]}
 
             if [ "$mkdir_status" -eq 0 ]; then
-              dir_ok=1
-              log_fix_attempt "$fix_log" "rclone mkdir 成功"
+              log_fix_attempt "$fix_log" "rclone mkdir 退出码 0，用 rclone lsd 验证目录是否实际存在..."
+              rclone lsd "$dst_dir" --retries 1 --low-level-retries 3 --timeout 2m --contimeout 30s >/dev/null 2>&1
+              local verify_status=$?
+              if [ "$verify_status" -eq 0 ]; then
+                dir_ok=1
+                log_fix_attempt "$fix_log" "rclone lsd 验证成功，目录已确认存在"
+              else
+                log_fix_attempt "$fix_log" "rclone lsd 验证失败 (exit=$verify_status)，目录未实际创建，降级处理"
+              fi
             else
               log_fix_attempt "$fix_log" "rclone mkdir 失败 (exit=$mkdir_status)，尝试 OpenList API mkdir..."
+            fi
+
+            # 降级处理：mkdir 失败或 lsd 验证失败时执行（OpenList API + base64URL）
+            if [ "$dir_ok" -ne 1 ]; then
               local ol_token
               ol_token=$(jq -r '.token' /dropbox/self-hosted/openlist/data/config.json 2>/dev/null || echo "")
               if [ -n "$ol_token" ] && [ "$ol_token" != "null" ]; then
@@ -985,24 +996,31 @@ jobs:
                 mkdir_status=${PIPESTATUS[0]}
 
                 if [ "$mkdir_status" -eq 0 ]; then
-                  dir_ok=1
-                  used_base64_dir=1
-                  dst_file="${actual_dst_dir}/${file_name}"
-                  log_fix_attempt "$fix_log" "base64URL 目录创建成功 (rclone)"
-                else
-                  if [ -n "$ol_token" ] && [ "$ol_token" != "null" ]; then
-                    mkdir_resp=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST "http://127.0.0.1:5244/api/fs/mkdir" \
-                      -H "Authorization: $ol_token" \
-                      -H "Content-Type: application/json" \
-                      -d "$(jq -n --arg path "$actual_ol_dir" '{path:$path}')" 2>&1)
-                    mkdir_http=$(echo "$mkdir_resp" | tail -n 1)
-                    log_fix_attempt "$fix_log" "OpenList API mkdir (base64URL) 响应: ${mkdir_http}"
-                    if echo "$mkdir_http" | grep -qE 'HTTP_CODE:(200|201|204)'; then
-                      dir_ok=1
-                      used_base64_dir=1
-                      dst_file="${actual_dst_dir}/${file_name}"
-                      log_fix_attempt "$fix_log" "base64URL 目录创建成功 (API)"
-                    fi
+                  log_fix_attempt "$fix_log" "rclone mkdir (base64URL) 退出码 0，用 rclone lsd 验证目录..."
+                  rclone lsd "$actual_dst_dir" --retries 1 --low-level-retries 3 --timeout 2m --contimeout 30s >/dev/null 2>&1
+                  local b64_verify_status=$?
+                  if [ "$b64_verify_status" -eq 0 ]; then
+                    dir_ok=1
+                    used_base64_dir=1
+                    dst_file="${actual_dst_dir}/${file_name}"
+                    log_fix_attempt "$fix_log" "rclone lsd 验证成功 (base64URL)，目录已确认存在"
+                  else
+                    log_fix_attempt "$fix_log" "rclone lsd 验证失败 (base64URL, exit=$b64_verify_status)"
+                  fi
+                fi
+
+                if [ "$dir_ok" -ne 1 ] && [ -n "$ol_token" ] && [ "$ol_token" != "null" ]; then
+                  mkdir_resp=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST "http://127.0.0.1:5244/api/fs/mkdir" \
+                    -H "Authorization: $ol_token" \
+                    -H "Content-Type: application/json" \
+                    -d "$(jq -n --arg path "$actual_ol_dir" '{path:$path}')" 2>&1)
+                  mkdir_http=$(echo "$mkdir_resp" | tail -n 1)
+                  log_fix_attempt "$fix_log" "OpenList API mkdir (base64URL) 响应: ${mkdir_http}"
+                  if echo "$mkdir_http" | grep -qE 'HTTP_CODE:(200|201|204)'; then
+                    dir_ok=1
+                    used_base64_dir=1
+                    dst_file="${actual_dst_dir}/${file_name}"
+                    log_fix_attempt "$fix_log" "base64URL 目录创建成功 (API)"
                   fi
                 fi
               fi
@@ -1712,8 +1730,13 @@ jobs:
               echo "已达最大拆分深度 ${max_depth}，按文件批次拆分 (depth=${current_depth}, size=$(numfmt --to=iec-i --suffix=B "$source_size_bytes" 2>/dev/null || echo "${source_size_bytes}B"))"
               sync_dir_by_file_batches "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
               local _rc=$?
-              if [ "$_rc" -ne 0 ] && [ "$current_depth" -eq 0 ]; then
-                split_large_files_after_sync_failure "$source_path" "$task_name"
+              # 顶层同步成功后保存标记；失败则按开关对源目录超阈值大文件执行切割
+              if [ "$current_depth" -eq 0 ]; then
+                if [ "$SYNC_FAILED" = "0" ]; then
+                  save_sync_marker "$source_path" "$dest_path" "$task_name"
+                else
+                  split_large_files_after_sync_failure "$source_path" "$task_name"
+                fi
               fi
               return $_rc
             fi
@@ -1727,8 +1750,13 @@ jobs:
               echo "无子目录，按文件批次拆分同步"
               sync_dir_by_file_batches "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
               local _rc=$?
-              if [ "$_rc" -ne 0 ] && [ "$current_depth" -eq 0 ]; then
-                split_large_files_after_sync_failure "$source_path" "$task_name"
+              # 顶层同步成功后保存标记；失败则按开关对源目录超阈值大文件执行切割
+              if [ "$current_depth" -eq 0 ]; then
+                if [ "$SYNC_FAILED" = "0" ]; then
+                  save_sync_marker "$source_path" "$dest_path" "$task_name"
+                else
+                  split_large_files_after_sync_failure "$source_path" "$task_name"
+                fi
               fi
               return $_rc
             fi
@@ -1771,6 +1799,14 @@ jobs:
               if [ -z "$subdirs" ]; then
                 echo "所有子目录均被排除，直接执行完整同步"
                 sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
+                # 顶层同步成功后保存标记；失败则按开关对源目录超阈值大文件执行切割
+                if [ "$current_depth" -eq 0 ]; then
+                  if [ "$SYNC_FAILED" = "0" ]; then
+                    save_sync_marker "$source_path" "$dest_path" "$task_name"
+                  else
+                    split_large_files_after_sync_failure "$source_path" "$task_name"
+                  fi
+                fi
                 return $?
               fi
             fi
