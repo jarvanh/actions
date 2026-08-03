@@ -145,12 +145,30 @@ jobs:
       - name: Setup helper functions - part 1
         run: |
           cat > /tmp/functions_part1.sh << 'EOF'
+          # HTML 实体转义（用于 HTML parse_mode 消息）
+          escape_html() {
+            local s="$1"
+            s="${s//&/&amp;}"
+            s="${s//</&lt;}"
+            s="${s//>/&gt;}"
+            echo "$s"
+          }
+
           # 通用 Telegram 消息发送（替代多处重复的内联 curl）
+          # 用法: send_telegram_message <message> [parse_mode]
           send_telegram_message() {
             local message="$1"
-            curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
-              -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
-              --data-urlencode text="$message" || true
+            local parse_mode="${2:-}"
+            if [ -n "$parse_mode" ]; then
+              curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
+                -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
+                -d parse_mode="$parse_mode" \
+                --data-urlencode text="$message" || true
+            else
+              curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
+                -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
+                --data-urlencode text="$message" || true
+            fi
           }
 
           has_real_content() {
@@ -1794,9 +1812,9 @@ jobs:
                 warning)
                   send_sync_warning "$task_name" "$source_path" "$dest_path"
                   SYNC_SKIPPED=1
-                  SYNC_FAILED=1
+                  SYNC_FAILED=0
                   SYNC_TRANSFERRED_BYTES=0
-                  return 1
+                  return 0
                   ;;
               esac
             fi
@@ -2297,37 +2315,44 @@ jobs:
               new_dirs=$(comm -13 <(echo "$marker_dirs") <(echo "$MARKER_CURRENT_DIRS") 2>/dev/null || true)
             fi
 
-            local msg="⚠️ ${task_name} 源端大小异常减小"$'\n'
-            msg+="━━━━━━━━━━━━━━"$'\n'
-            msg+="任务：${task_name}"$'\n'
-            msg+="源端：${source_path}"$'\n'
-            msg+="目标：${dest_path}"$'\n'
-            msg+=$'\n'"📊 大小对比"$'\n'
-            msg+="• 上次记录：$(format_bytes "$marker_bytes") (${marker_count} 文件)"$'\n'
-            msg+="• 当前大小：$(format_bytes "$MARKER_CURRENT_BYTES") (${MARKER_CURRENT_COUNT} 文件)"$'\n'
-            msg+="• 减少：$(format_bytes "$diff_bytes") (-${pct}%)"$'\n'
+            # HTML 转义动态内容
+            local e_task e_source e_dest
+            e_task=$(escape_html "$task_name")
+            e_source=$(escape_html "$source_path")
+            e_dest=$(escape_html "$dest_path")
+
+            local msg=""
+            msg+="🚨🚨🚨 <b>源端大小异常减小</b> 🚨🚨🚨"$'\n'
+            msg+="━━━━━━━━━━━━━━━━━━"$'\n'
+            msg+="任务：<b>${e_task}</b>"$'\n'
+            msg+="源端：<code>${e_source}</code>"$'\n'
+            msg+="目标：<code>${e_dest}</code>"$'\n'
+            msg+=$'\n'"📊 <b>大小对比</b>"$'\n'
+            msg+="• 上次记录：<b>$(format_bytes "$marker_bytes")</b> (${marker_count} 文件)"$'\n'
+            msg+="• 当前大小：<b>$(format_bytes "$MARKER_CURRENT_BYTES")</b> (${MARKER_CURRENT_COUNT} 文件)"$'\n'
+            msg+="• 减少：<b>$(format_bytes "$diff_bytes")</b> (-${pct}%)"$'\n'
             if [ "$diff_count" -ne 0 ]; then
-              msg+="• 文件减少：${diff_count} 个"$'\n'
+              msg+="• 文件减少：<b>${diff_count}</b> 个"$'\n'
             fi
 
             if [ -n "$missing_dirs" ]; then
-              msg+=$'\n'"📁 缺失的目录（可能被删除）"$'\n'
+              msg+=$'\n'"📁 <b>缺失的目录（可能被删除）</b>"$'\n'
               while IFS= read -r d; do
-                [ -n "$d" ] && msg+="• ${d}"$'\n'
+                [ -n "$d" ] && msg+="• <code>$(escape_html "$d")</code>"$'\n'
               done <<< "$missing_dirs"
             fi
 
             if [ -n "$new_dirs" ]; then
-              msg+=$'\n'"📁 新增的目录"$'\n'
+              msg+=$'\n'"📁 <b>新增的目录</b>"$'\n'
               while IFS= read -r d; do
-                [ -n "$d" ] && msg+="• ${d}"$'\n'
+                [ -n "$d" ] && msg+="• <code>$(escape_html "$d")</code>"$'\n'
               done <<< "$new_dirs"
             fi
 
-            msg+=$'\n'"⏸️ 已跳过同步（源端大小减小）"$'\n'
+            msg+=$'\n'"⏸️ <b>已跳过此同步，继续执行其他任务</b>"$'\n'
             msg+="如确认无误，请手动触发 force_sync=true"
 
-            send_telegram_message "$msg"
+            send_telegram_message "$msg" "HTML"
           }
           EOF
 
@@ -2602,7 +2627,7 @@ jobs:
                 ;;
               warning)
                 send_sync_warning "${task_name} GD" "$source_path" "$dest_path"
-                return 1
+                return 0
                 ;;
             esac
 
