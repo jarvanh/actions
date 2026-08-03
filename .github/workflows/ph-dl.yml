@@ -1,4 +1,4 @@
-name: pornhub-dl
+name: ph-dl
 
 on:
   schedule:
@@ -38,26 +38,157 @@ jobs:
           echo "~/onedrive 文件列表"
           cd ~/onedrive
           ls
+      - name: check duplicate videos by ID
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          TARGET_DIR=~/onedrive/0/j-1024j-视频-pornhub-favorites
+          if [ ! -d "$TARGET_DIR" ]; then
+            echo "Directory not found: $TARGET_DIR"
+            exit 0
+          fi
+          cd "$TARGET_DIR"
+          # 提取文件名中 [...] 内的 ID，统计重复项
+          declare -A ID_FILES
+          while IFS= read -r file; do
+            id=$(echo "$file" | grep -oE '\[[a-f0-9]+\]' | tail -n1)
+            [ -n "$id" ] || continue
+            if [ -n "${ID_FILES[$id]}" ]; then
+              ID_FILES[$id]="${ID_FILES[$id]}
+$file"
+            else
+              ID_FILES[$id]="$file"
+            fi
+          done < <(find . -maxdepth 1 -type f -name '*.mp4' -print | sed 's|^\./||' | sort)
+
+          DUP_DETAILS=""
+          DUP_COUNT=0
+          for id in "${!ID_FILES[@]}"; do
+            files="${ID_FILES[$id]}"
+            count=$(echo "$files" | wc -l)
+            if [ "$count" -gt 1 ]; then
+              DUP_COUNT=$((DUP_COUNT + 1))
+              DUP_DETAILS="${DUP_DETAILS}ID ${id} (${count} 个):
+${files}
+
+"
+            fi
+          done
+
+          if [ "$DUP_COUNT" -gt 0 ]; then
+            MSG="ph-dl 发现重复视频（按文件名中的 ID）
+目录: j-1024j-视频-pornhub-favorites
+重复 ID 数量: ${DUP_COUNT}
+
+${DUP_DETAILS}
+任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
+              --data-urlencode text="${MSG}"
+          else
+            echo "No duplicate video IDs found."
+          fi
+
+      - name: cleanup yt-dlp fragment files
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          TARGET_DIR=~/onedrive/0/j-1024j-视频-pornhub-favorites
+          if [ ! -d "$TARGET_DIR" ]; then
+            echo "Directory not found: $TARGET_DIR"
+            exit 0
+          fi
+          cd "$TARGET_DIR"
+          # 查找 yt-dlp 残留的分片文件：*.mp4-Frag* 和 *.part-Frag*
+          mapfile -t FRAG_FILES < <(find . -maxdepth 1 -type f \( -name '*.mp4-Frag*' -o -name '*.part-Frag*' \) -print)
+          FRAG_COUNT=${#FRAG_FILES[@]}
+          if [ "$FRAG_COUNT" -eq 0 ]; then
+            echo "No fragment files found."
+            exit 0
+          fi
+          # 收集文件名与大小
+          FILE_DETAILS=""
+          for f in "${FRAG_FILES[@]}"; do
+            fname=$(basename "$f")
+            fsize=$(du -h "$f" | cut -f1)
+            FILE_DETAILS="${FILE_DETAILS}- ${fname} (${fsize})
+          "
+          done
+          # 清理
+          find . -maxdepth 1 -type f \( -name '*.mp4-Frag*' -o -name '*.part-Frag*' \) -delete
+          echo "Cleaned up ${FRAG_COUNT} fragment files."
+          # 发送通知
+          MSG="ph-dl 清理 yt-dlp 分片文件
+目录: j-1024j-视频-pornhub-favorites
+清理数量: ${FRAG_COUNT}
+文件列表:
+${FILE_DETAILS}
+任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
+            --data-urlencode text="${MSG}"
+
       - name: temp send old videos to telegram channel
         env:
           TG_API_ID: ${{ secrets.TG_API_ID }}
           TG_API_HASH: ${{ secrets.TG_API_HASH }}
           TG_SESSION_STRING: ${{ secrets.TG_SESSION }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID_PH }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           pip3 install telethon
           cd ~/onedrive/0/j-1024j-视频-pornhub-favorites 2>/dev/null || exit 0
-          for file in *.mp4; do
+          ARCHIVE_FILE="uploaded_old_videos.txt"
+          touch "$ARCHIVE_FILE"
+          FAILED_FILES=""
+          TOTAL=0
+          SKIPPED=0
+          SUCCESS=0
+          FAILED=0
+          # 按文件更新时间从旧到新排序上传（使用进程替换以便 while 循环内变量可持久化）
+          while IFS= read -r file; do
             [ -e "$file" ] || continue
+            TOTAL=$((TOTAL + 1))
+            # 跳过已成功上传的文件
+            if grep -Fxq "$file" "$ARCHIVE_FILE" 2>/dev/null; then
+              echo "Skip (already uploaded): $file"
+              SKIPPED=$((SKIPPED + 1))
+              continue
+            fi
             FILESIZE_HUMAN=$(du -h "$file" | cut -f1)
-            python3 ${GITHUB_WORKSPACE}/.github/scripts/upload_video.py "$file" "${TELEGRAM_CHANNEL_ID}" "Old video: ${file} (${FILESIZE_HUMAN})"
+            if python3 ${GITHUB_WORKSPACE}/.github/scripts/upload_video.py "$file" "${TELEGRAM_CHANNEL_ID}" "Old video: ${file} (${FILESIZE_HUMAN})"; then
+              echo "$file" >> "$ARCHIVE_FILE"
+              SUCCESS=$((SUCCESS + 1))
+            else
+              FAILED=$((FAILED + 1))
+              FAILED_FILES="${FAILED_FILES}- ${file} (${FILESIZE_HUMAN})
+          "
+            fi
             sleep 5 # 防止触发速率限制
-          done
+          done < <(ls -tr *.mp4 2>/dev/null)
 
-      - name: run pornhub-dl favorites
+          echo "总计: ${TOTAL}，跳过: ${SKIPPED}，成功: ${SUCCESS}，失败: ${FAILED}"
+
+          # 失败汇总通知
+          if [ "$FAILED" -gt 0 ]; then
+            MSG="ph-dl 旧视频上传失败汇总
+总计: ${TOTAL}，跳过: ${SKIPPED}，成功: ${SUCCESS}，失败: ${FAILED}
+失败文件:
+${FAILED_FILES}
+任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
+              --data-urlencode text="${MSG}"
+          fi
+
+      - name: run ph-dl favorites
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID_PH }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TG_API_ID: ${{ secrets.TG_API_ID }}
           TG_API_HASH: ${{ secrets.TG_API_HASH }}
           TG_SESSION_STRING: ${{ secrets.TG_SESSION }}
