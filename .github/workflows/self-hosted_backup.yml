@@ -46,7 +46,7 @@ jobs:
           ARCHIVE_NAME="self-hosted_latest.tar.gz"
           
           echo "Phase 1: Initial full download..."
-          rclone sync "dropbox:self-hosted" "./self-hosted" -P --retries 3 \
+          rclone sync "dropbox:self-hosted" "./self-hosted" -P --retries 5 --retries-sleep 10s --low-level-retries 20 \
             --exclude "**/logs/**" \
             --exclude "**/cache/**" \
             --exclude "**/.cache/**" \
@@ -56,7 +56,7 @@ jobs:
             
           echo "Phase 2: Catch-up sync 1 (Delta)..."
           sleep 5
-          rclone sync "dropbox:self-hosted" "./self-hosted" -P --retries 3 \
+          rclone sync "dropbox:self-hosted" "./self-hosted" -P --retries 5 --retries-sleep 10s --low-level-retries 20 \
             --exclude "**/logs/**" \
             --exclude "**/cache/**" \
             --exclude "**/.cache/**" \
@@ -66,7 +66,7 @@ jobs:
             
           echo "Phase 3: Catch-up sync 2 (Final Delta)..."
           sleep 5
-          rclone sync "dropbox:self-hosted" "./self-hosted" -P --retries 3 \
+          rclone sync "dropbox:self-hosted" "./self-hosted" -P --retries 5 --retries-sleep 10s --low-level-retries 20 \
             --exclude "**/logs/**" \
             --exclude "**/cache/**" \
             --exclude "**/.cache/**" \
