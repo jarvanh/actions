@@ -68,7 +68,7 @@ jobs:
             count=$(echo "$files" | wc -l)
             if [ "$count" -gt 1 ]; then
               DUP_COUNT=$((DUP_COUNT + 1))
-              DUP_DETAILS+="ID ${id} (${count} 个):"$'\n'"${files}"$'\n\n'"
+              DUP_DETAILS+="ID ${id} (${count} 个):"$'\n'"${files}"$'\n\n'
             fi
           done
 
