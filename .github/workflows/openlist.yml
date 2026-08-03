@@ -1051,10 +1051,11 @@ jobs:
             if [ "$m1_status" -eq 0 ]; then
               log_fix_attempt "$fix_log" "方法 1 成功"
               TRY_FIX_STATUS="success"
-              TRY_FIX_METHOD="直接 copyto"
               if [ "$used_base64_dir" -eq 1 ]; then
+                TRY_FIX_METHOD="rclone copyto（base64URL 编码目录 + 原文件名）"
                 TRY_FIX_ALTERNATIVE="${dst_file#${dest_path}/}"
               else
+                TRY_FIX_METHOD="rclone copyto（原路径 + 原文件名）"
                 TRY_FIX_ALTERNATIVE="$failed_file_rel"
               fi
               rm -rf "$temp_dir" 2>/dev/null || true
@@ -1079,7 +1080,11 @@ jobs:
             if [ "$m2_status" -eq 0 ]; then
               log_fix_attempt "$fix_log" "方法 2 成功"
               TRY_FIX_STATUS="success"
-              TRY_FIX_METHOD="base64URL 改名上传"
+              if [ "$used_base64_dir" -eq 1 ]; then
+                TRY_FIX_METHOD="rclone copyto（base64URL 编码目录 + base64URL 编码文件名）"
+              else
+                TRY_FIX_METHOD="rclone copyto（原路径 + base64URL 编码文件名）"
+              fi
               TRY_FIX_ALTERNATIVE="${m2_dst#${dest_path}/}"
               rm -rf "$temp_dir" 2>/dev/null || true
               return 0
@@ -1099,7 +1104,11 @@ jobs:
               if [ "$m3_status" -eq 0 ]; then
                 log_fix_attempt "$fix_log" "方法 3 成功"
                 TRY_FIX_STATUS="success"
-                TRY_FIX_METHOD="zip 压缩"
+                if [ "$used_base64_dir" -eq 1 ]; then
+                  TRY_FIX_METHOD="rclone copyto（base64URL 编码目录 + zip 压缩包）"
+                else
+                  TRY_FIX_METHOD="rclone copyto（原路径 + zip 压缩包）"
+                fi
                 TRY_FIX_ALTERNATIVE="${m3_dst#${dest_path}/}"
                 rm -rf "$temp_dir" 2>/dev/null || true
                 return 0
@@ -1122,7 +1131,11 @@ jobs:
               if [ "$m4_status" -eq 0 ]; then
                 log_fix_attempt "$fix_log" "方法 4 成功"
                 TRY_FIX_STATUS="success"
-                TRY_FIX_METHOD="7z 压缩"
+                if [ "$used_base64_dir" -eq 1 ]; then
+                  TRY_FIX_METHOD="rclone copyto（base64URL 编码目录 + 7z 压缩包）"
+                else
+                  TRY_FIX_METHOD="rclone copyto（原路径 + 7z 压缩包）"
+                fi
                 TRY_FIX_ALTERNATIVE="${m4_dst#${dest_path}/}"
                 rm -rf "$temp_dir" 2>/dev/null || true
                 return 0
@@ -1157,7 +1170,11 @@ jobs:
               if echo "$upload_http" | grep -qE 'HTTP_CODE:(200|201|204)'; then
                 log_fix_attempt "$fix_log" "方法 5 成功"
                 TRY_FIX_STATUS="success"
-                TRY_FIX_METHOD="OpenList API 直传"
+                if [ "$used_base64_dir" -eq 1 ]; then
+                  TRY_FIX_METHOD="OpenList API /fs/form（base64URL 编码目录 + API 自动生成文件名）"
+                else
+                  TRY_FIX_METHOD="OpenList API /fs/form（原路径 + API 自动生成文件名）"
+                fi
                 local alt_rel_base
                 alt_rel_base="${actual_dst_dir#${dest_path}/}"
                 TRY_FIX_ALTERNATIVE="${alt_rel_base}/${api_name}"
