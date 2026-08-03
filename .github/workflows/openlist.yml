@@ -1441,7 +1441,6 @@ jobs:
                   sed -E 's/^.*ERROR : //; s/: Failed to copy.*$//' | sort -u
               )
 
-              rm -f "$fix_log" 2>/dev/null || true
             fi
 
             SYNC_FAILED=0
@@ -1496,12 +1495,33 @@ jobs:
             fi
             [ -z "$fix_summary" ] && fix_summary="无"
 
-            # 构建 fail_summary（无法修复的文件）
+            # 构建 fail_summary（无法修复的文件，含源/目标完整路径与修复过程）
             local fail_summary=""
             if [ -s "$fail_list" ]; then
               while IFS='|' read -r fpath fsize fmsg; do
                 [ -z "$fpath" ] && continue
-                fail_summary+="• ${fpath} (${fsize}) — ${fmsg}"$'\n'
+                fail_summary+="• 源文件：${source_path}/${fpath}"$'\n'
+                fail_summary+="  目标文件：${dest_path}/${fpath}"$'\n'
+                fail_summary+="  文件大小：${fsize}"$'\n'
+                fail_summary+="  失败原因：${fmsg}"$'\n'
+                # 从 fix_log 中按文件名分隔提取该文件对应的修复过程
+                local fix_section=""
+                if [ -f "$fix_log" ]; then
+                  fix_section=$(awk -v rel="$fpath" '
+                    index($0, "=== 尝试修复失败文件: " rel " ===") > 0 { capture=1; next }
+                    /=== 尝试修复失败文件: / && capture { capture=0 }
+                    capture { sub(/^\[[^]]*\] /, ""); print }
+                  ' "$fix_log" 2>/dev/null)
+                fi
+                if [ -n "$fix_section" ]; then
+                  fail_summary+="  修复过程："$'\n'
+                  while IFS= read -r log_line; do
+                    [ -z "$log_line" ] && continue
+                    fail_summary+="    ${log_line}"$'\n'
+                  done <<< "$fix_section"
+                else
+                  fail_summary+="  修复过程：无记录"$'\n'
+                fi
               done < "$fail_list"
             fi
             [ -z "$fail_summary" ] && fail_summary="无"
@@ -1620,7 +1640,7 @@ jobs:
               send_telegram_message "$ok_message"
             fi
 
-            rm -f "$LOG_FILENAME" "$LAST_ATTEMPT_LOG" "$fail_list" "$fix_list" /tmp/probe_src.txt /tmp/probe_dst.txt 2>/dev/null || true
+            rm -f "$LOG_FILENAME" "$LAST_ATTEMPT_LOG" "$fail_list" "$fix_list" "$fix_log" /tmp/probe_src.txt /tmp/probe_dst.txt 2>/dev/null || true
             return "$SYNC_FAILED"
           }
           EOF
