@@ -198,8 +198,8 @@ jobs:
           # 关闭 set -e，文件处理中的错误由脚本自行处理，避免单个文件失败导致整个步骤中断
           set +e
 
-          # rclone 挂载的随机 seek 不稳定，ffprobe 读取 moov atom（常在文件尾部）容易失败。
-          # 将文件复制到本地临时目录后再用 ffprobe/ffmpeg 处理，完成后再复制回去。
+          # rclone 挂载的随机 seek 不稳定，cp 产生的副本可能损坏，导致 ffprobe 无法读取 codec。
+          # 直接用 rclone copy 从远程下载到本地临时目录，绕过 mount，再用 ffprobe/ffmpeg 处理。
           TMP_DIR="/tmp/ph-dl-transcode"
           mkdir -p "$TMP_DIR"
 
@@ -222,34 +222,40 @@ jobs:
             [ -e "$file" ] || continue
             TOTAL=$((TOTAL + 1))
             LOCAL_FILE="$TMP_DIR/$file"
-            if ! cp "$file" "$LOCAL_FILE" 2>/dev/null; then
-              echo "Skip (cannot copy to local): $file"
+            REMOTE_PATH="$REMOTE_BASE/$file"
+            src_size=$(stat -c%s "$file" 2>/dev/null || echo 0)
+
+            # 直接用 rclone copy 从 OneDrive 下载到本地（绕过 mount，避免随机 seek 不稳定导致副本损坏）
+            rm -f "$LOCAL_FILE"
+            RCLONE_OUT=$(rclone copy "$REMOTE_PATH" "$TMP_DIR/" 2>&1)
+            RCLONE_RC=$?
+            if [ $RCLONE_RC -ne 0 ] || [ ! -f "$LOCAL_FILE" ]; then
+              echo "Skip (rclone copy failed, rc=$RCLONE_RC): $file"
+              echo "  remote path: $REMOTE_PATH"
+              echo "  rclone output: $RCLONE_OUT"
               SKIPPED=$((SKIPPED + 1))
               continue
             fi
+            dst_size=$(stat -c%s "$LOCAL_FILE" 2>/dev/null || echo 0)
+
             # 读取视频和音频编码（ffprobe 失败时返回空字符串，不中断脚本）
             vcodec=$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$LOCAL_FILE" 2>/dev/null) || vcodec=""
             acodec=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 "$LOCAL_FILE" 2>/dev/null) || acodec=""
 
             if [ -z "$vcodec" ]; then
-              echo "Warn (ffprobe failed on cp copy, retrying with rclone copy): $file"
-              # rclone mount 的随机 seek 不稳定可能导致 cp 副本损坏，尝试用 rclone copy 绕过 mount 重新获取
-              rm -f "$LOCAL_FILE"
-              if rclone copy "$REMOTE_BASE/$file" "$TMP_DIR/" 2>/dev/null && [ -f "$LOCAL_FILE" ]; then
-                vcodec=$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$LOCAL_FILE" 2>/dev/null) || vcodec=""
-                acodec=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 "$LOCAL_FILE" 2>/dev/null) || acodec=""
-              fi
-            fi
-
-            if [ -z "$vcodec" ]; then
               echo "Skip (cannot read codec): $file"
-              ls -la "$LOCAL_FILE" 2>/dev/null
-              file "$LOCAL_FILE" 2>/dev/null
-              ffprobe -v error -show_format -show_streams "$LOCAL_FILE" 2>&1 | tail -n 10
+              echo "  size: mount=$src_size local=$dst_size"
+              echo "  file type: $(file "$LOCAL_FILE" 2>/dev/null)"
+              echo "  --- ffprobe output ---"
+              ffprobe -v error -show_format -show_streams "$LOCAL_FILE" 2>&1
+              echo "  --- file header (od) ---"
+              od -A x -t x1z "$LOCAL_FILE" 2>/dev/null | head -n 5
               SKIPPED=$((SKIPPED + 1))
               rm -f "$LOCAL_FILE"
               continue
             fi
+
+            echo "OK: $file (size=$dst_size, vcodec=$vcodec, acodec=$acodec)"
 
             if [ "$vcodec" = "h264" ] && [ "$acodec" = "aac" ]; then
               # 已是 H.264+AAC，仅添加 faststart（重排 moov atom 到文件头部，秒级完成）
