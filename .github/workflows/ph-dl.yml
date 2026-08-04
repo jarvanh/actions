@@ -425,8 +425,9 @@ jobs:
           
           BEFORE_COUNT=$(wc -l < archive.txt 2>/dev/null || echo 0)
           
-          # 优先选择 H.264+AAC 流，合并/转码为 MP4 并添加 faststart（moov atom 前置），确保 Telegram 可直接流式播放
-          yt-dlp -f "bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/best[ext=mp4]/best" --merge-output-format mp4 --recode-video mp4 --postprocessor-args "ffmpeg:-c:v libx264 -c:a aac -movflags +faststart" --force-overwrites --no-part --download-archive archive.txt --playlist-end 50 --exec "./post_process.sh {} %(webpage_url)q" -i https://www.pornhub.com/users/'${{ secrets. PORNHUBNAME }}'/videos/favorites || echo "url不存在"
+          # 优先选择 H.264+AAC 流并合并为 MP4。仅 remux（不重编码），避免 ffmpeg 转码被中断导致 moov atom 缺失。
+          # faststart 和非 H.264 视频的重编码由独立的"transcode"步骤处理，该步骤先下载到本地再处理，不会损坏原文件。
+          yt-dlp -f "bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/best[ext=mp4]/best" --merge-output-format mp4 --remux-video mp4 --force-overwrites --download-archive archive.txt --playlist-end 50 --exec "./post_process.sh {} %(webpage_url)q" -i https://www.pornhub.com/users/'${{ secrets. PORNHUBNAME }}'/videos/favorites || echo "url不存在"
           
           AFTER_COUNT=$(wc -l < archive.txt 2>/dev/null || echo 0)
           DOWNLOAD_COUNT=$((AFTER_COUNT - BEFORE_COUNT))
