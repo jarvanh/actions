@@ -221,103 +221,107 @@ jobs:
           CORRUPTED_LIST=""
 
           touch transcoded.txt
+          # 创建单文件处理脚本，供 xargs -P 并行调用
+          cat << 'SCRIPT' > transcode_one.sh
+          #!/bin/bash
+          set +e
+          file="$1"
+          TMP_DIR="/tmp/ph-dl-transcode"
+          WORK_DIR="$TMP_DIR/$$"
+          REMOTE_BASE="onedrive:0/j-1024j-视频-pornhub-favorites"
+          REMOTE_PATH="$REMOTE_BASE/$file"
+          LOCAL_FILE="$WORK_DIR/$file"
+          mkdir -p "$WORK_DIR"
+
+          # 下载
+          rm -f "$LOCAL_FILE"
+          if ! rclone copy "$REMOTE_PATH" "$WORK_DIR/" 2>/dev/null || [ ! -f "$LOCAL_FILE" ]; then
+            echo "Skip (rclone copy failed): $file" >&2
+            echo "RESULT|SKIP|rclone copy failed|$file"
+            rm -rf "$WORK_DIR"
+            exit 0
+          fi
+          dst_size=$(stat -c%s "$LOCAL_FILE" 2>/dev/null || echo 0)
+
+          # 检测编码
+          vcodec=$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$LOCAL_FILE" 2>/dev/null) || vcodec=""
+          acodec=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 "$LOCAL_FILE" 2>/dev/null) || acodec=""
+
+          if [ -z "$vcodec" ]; then
+            FFPROBE_ERR=$(ffprobe -v error -show_format -show_streams "$LOCAL_FILE" 2>&1)
+            echo "Skip (cannot read codec): $file (size=$dst_size)" >&2
+            if echo "$FFPROBE_ERR" | grep -q "moov atom not found"; then
+              echo "  → 文件损坏（moov atom 缺失），删除远程文件并从 archive.txt 移除" >&2
+              rclone delete "$REMOTE_PATH" 2>/dev/null
+              id="${file%.*}"
+              id="${id##*-}"
+              if [ -n "$id" ] && [ -f archive.txt ]; then
+                ( flock -x 200; grep -v "$id" archive.txt > archive.txt.tmp 2>/dev/null && mv archive.txt.tmp archive.txt; ) 200>archive.txt.lock
+              fi
+              echo "RESULT|CORRUPTED||$file"
+            else
+              echo "RESULT|SKIP|cannot read codec|$file"
+            fi
+            rm -rf "$WORK_DIR"
+            exit 0
+          fi
+
+          echo "OK: $file (size=$dst_size, vcodec=$vcodec, acodec=$acodec)" >&2
+
+          if [ "$vcodec" = "h264" ] && [ "$acodec" = "aac" ]; then
+            echo "Faststart: $file" >&2
+            if ffmpeg -y -i "$LOCAL_FILE" -c copy -movflags +faststart "${LOCAL_FILE}.tmp" 2>/dev/null && mv "${LOCAL_FILE}.tmp" "$LOCAL_FILE" 2>/dev/null; then
+              if rclone copyto "$LOCAL_FILE" "$REMOTE_PATH" 2>/dev/null; then
+                echo "$file" >> transcoded.txt
+                echo "RESULT|FASTSTART||$file"
+              else
+                echo "RESULT|FAILED|复制回 OneDrive 失败|$file"
+              fi
+            else
+              rm -f "${LOCAL_FILE}.tmp"
+              echo "RESULT|FAILED|faststart 失败|$file"
+            fi
+          else
+            echo "Convert: $file (${vcodec}/${acodec} → h264/aac)" >&2
+            if ffmpeg -y -i "$LOCAL_FILE" -c:v libx264 -preset fast -c:a aac -movflags +faststart "${LOCAL_FILE}.tmp" 2>/dev/null && mv "${LOCAL_FILE}.tmp" "$LOCAL_FILE" 2>/dev/null; then
+              if rclone copyto "$LOCAL_FILE" "$REMOTE_PATH" 2>/dev/null; then
+                echo "$file" >> transcoded.txt
+                echo "RESULT|CONVERTED|${vcodec}/${acodec}|$file"
+              else
+                echo "RESULT|FAILED|复制回 OneDrive 失败|$file"
+              fi
+            else
+              rm -f "${LOCAL_FILE}.tmp"
+              echo "RESULT|FAILED|转码失败|$file"
+            fi
+          fi
+          rm -rf "$WORK_DIR"
+          SCRIPT
+          chmod +x transcode_one.sh
+
+          # 收集待处理文件（跳过已处理），并行处理（nproc 个进程同时运行）
+          RESULTS_FILE="$TMP_DIR/results.txt"
+          : > "$RESULTS_FILE"
           for file in *.mp4; do
             [ -e "$file" ] || continue
-            # 跳过已处理过的文件（大幅加速：无需下载+ffprobe+ffmpeg+上传）
             if grep -Fxq "$file" transcoded.txt 2>/dev/null; then
               continue
             fi
             TOTAL=$((TOTAL + 1))
-            LOCAL_FILE="$TMP_DIR/$file"
-            REMOTE_PATH="$REMOTE_BASE/$file"
-            src_size=$(stat -c%s "$file" 2>/dev/null || echo 0)
+            echo "$file"
+          done | xargs -P "$(nproc)" -I {} ./transcode_one.sh "{}" > "$RESULTS_FILE"
 
-            # 直接用 rclone copy 从 OneDrive 下载到本地（绕过 mount，避免随机 seek 不稳定导致副本损坏）
-            rm -f "$LOCAL_FILE"
-            RCLONE_OUT=$(rclone copy "$REMOTE_PATH" "$TMP_DIR/" 2>&1)
-            RCLONE_RC=$?
-            if [ $RCLONE_RC -ne 0 ] || [ ! -f "$LOCAL_FILE" ]; then
-              echo "Skip (rclone copy failed, rc=$RCLONE_RC): $file"
-              echo "  remote path: $REMOTE_PATH"
-              echo "  rclone output: $RCLONE_OUT"
-              SKIPPED=$((SKIPPED + 1))
-              continue
-            fi
-            dst_size=$(stat -c%s "$LOCAL_FILE" 2>/dev/null || echo 0)
-
-            # 读取视频和音频编码（ffprobe 失败时返回空字符串，不中断脚本）
-            vcodec=$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$LOCAL_FILE" 2>/dev/null) || vcodec=""
-            acodec=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 "$LOCAL_FILE" 2>/dev/null) || acodec=""
-
-            if [ -z "$vcodec" ]; then
-              FFPROBE_ERR=$(ffprobe -v error -show_format -show_streams "$LOCAL_FILE" 2>&1)
-              echo "Skip (cannot read codec): $file"
-              echo "  size: mount=$src_size local=$dst_size"
-              echo "  file type: $(file "$LOCAL_FILE" 2>/dev/null)"
-              echo "  --- ffprobe output ---"
-              echo "$FFPROBE_ERR"
-              echo "  --- file header (od) ---"
-              od -A x -t x1z "$LOCAL_FILE" 2>/dev/null | head -n 5
-
-              # moov atom 缺失 = 文件损坏（通常是 yt-dlp 转码被中断导致），
-              # 删除远程文件并从 archive.txt 移除，以便下次运行时重新下载
-              if echo "$FFPROBE_ERR" | grep -q "moov atom not found"; then
-                echo "  → 文件损坏（moov atom 缺失），删除远程文件并从 archive.txt 移除"
-                rclone delete "$REMOTE_PATH" 2>/dev/null
-                # 从 archive.txt 移除视频 ID（archive 存的是 ID 如 ph5fdf9f06b965d，不是文件名）
-                # 文件名格式: title-ph5fdf9f06b965d.mp4 → ID = 最后一个 - 之后、扩展名之前的部分
-                id="${file%.*}"
-                id="${id##*-}"
-                if [ -n "$id" ] && [ -f archive.txt ]; then
-                  grep -v "$id" archive.txt > archive.txt.tmp 2>/dev/null && mv archive.txt.tmp archive.txt
-                fi
-                CORRUPTED=$((CORRUPTED + 1))
-                CORRUPTED_LIST+="- ${file}"$'\n'
-              fi
-
-              SKIPPED=$((SKIPPED + 1))
-              rm -f "$LOCAL_FILE"
-              continue
-            fi
-
-            echo "OK: $file (size=$dst_size, vcodec=$vcodec, acodec=$acodec)"
-
-            if [ "$vcodec" = "h264" ] && [ "$acodec" = "aac" ]; then
-              # 已是 H.264+AAC，仅添加 faststart（重排 moov atom 到文件头部，秒级完成）
-              echo "Faststart: $file (vcodec=$vcodec, acodec=$acodec)"
-              if ffmpeg -y -i "$LOCAL_FILE" -c copy -movflags +faststart "${LOCAL_FILE}.tmp" 2>/dev/null && mv "${LOCAL_FILE}.tmp" "$LOCAL_FILE" 2>/dev/null; then
-                if rclone copyto "$LOCAL_FILE" "$REMOTE_PATH" 2>/dev/null; then
-                  FASTSTART=$((FASTSTART + 1))
-                  echo "$file" >> transcoded.txt
-                else
-                  FAILED=$((FAILED + 1))
-                  FAILED_LIST+="- ${file}（复制回 OneDrive 失败）"$'\n'
-                fi
-              else
-                rm -f "${LOCAL_FILE}.tmp"
-                FAILED=$((FAILED + 1))
-                FAILED_LIST+="- ${file}（faststart 失败）"$'\n'
-              fi
-            else
-              # 非 H.264+AAC，需重编码（如 VP9/Opus 等）
-              echo "Convert: $file (vcodec=$vcodec, acodec=$acodec) → h264/aac"
-              if ffmpeg -y -i "$LOCAL_FILE" -c:v libx264 -preset veryfast -c:a aac -movflags +faststart "${LOCAL_FILE}.tmp" 2>/dev/null && mv "${LOCAL_FILE}.tmp" "$LOCAL_FILE" 2>/dev/null; then
-                if rclone copyto "$LOCAL_FILE" "$REMOTE_PATH" 2>/dev/null; then
-                  CONVERTED=$((CONVERTED + 1))
-                  CONVERTED_LIST+="- ${file}（${vcodec}/${acodec} → h264/aac）"$'\n'
-                  echo "$file" >> transcoded.txt
-                else
-                  FAILED=$((FAILED + 1))
-                  FAILED_LIST+="- ${file}（复制回 OneDrive 失败）"$'\n'
-                fi
-              else
-                rm -f "${LOCAL_FILE}.tmp"
-                FAILED=$((FAILED + 1))
-                FAILED_LIST+="- ${file}（转码失败）"$'\n'
-              fi
-            fi
-            rm -f "$LOCAL_FILE"
-          done
+          # 汇总结果
+          while IFS='|' read -r prefix status detail file; do
+            [ "$prefix" = "RESULT" ] || continue
+            case "$status" in
+              CONVERTED) CONVERTED=$((CONVERTED + 1)); CONVERTED_LIST+="- ${file}（${detail} → h264/aac）"$'\n' ;;
+              FASTSTART) FASTSTART=$((FASTSTART + 1)) ;;
+              CORRUPTED) CORRUPTED=$((CORRUPTED + 1)); CORRUPTED_LIST+="- ${file}"$'\n' ;;
+              SKIP) SKIPPED=$((SKIPPED + 1)) ;;
+              FAILED) FAILED=$((FAILED + 1)); FAILED_LIST+="- ${file}（${detail}）"$'\n' ;;
+            esac
+          done < "$RESULTS_FILE"
           rm -rf "$TMP_DIR"
 
           echo "=== 转码统计 ==="
