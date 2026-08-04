@@ -195,6 +195,9 @@ jobs:
           fi
           cd "$TARGET_DIR"
 
+          # 关闭 set -e，文件处理中的错误由脚本自行处理，避免单个文件失败导致整个步骤中断
+          set +e
+
           CONVERTED=0
           FASTSTART=0
           SKIPPED=0
@@ -206,9 +209,9 @@ jobs:
           for file in *.mp4; do
             [ -e "$file" ] || continue
             TOTAL=$((TOTAL + 1))
-            # 读取视频和音频编码
-            vcodec=$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$file" 2>/dev/null)
-            acodec=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 "$file" 2>/dev/null)
+            # 读取视频和音频编码（ffprobe 失败时返回空字符串，不中断脚本）
+            vcodec=$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$file" 2>/dev/null) || vcodec=""
+            acodec=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 "$file" 2>/dev/null) || acodec=""
 
             if [ -z "$vcodec" ]; then
               echo "Skip (cannot read codec): $file"
@@ -219,8 +222,7 @@ jobs:
             if [ "$vcodec" = "h264" ] && [ "$acodec" = "aac" ]; then
               # 已是 H.264+AAC，仅添加 faststart（重排 moov atom 到文件头部，秒级完成）
               echo "Faststart: $file (vcodec=$vcodec, acodec=$acodec)"
-              if ffmpeg -y -i "$file" -c copy -movflags +faststart "${file}.tmp" 2>/dev/null; then
-                mv "${file}.tmp" "$file"
+              if ffmpeg -y -i "$file" -c copy -movflags +faststart "${file}.tmp" 2>/dev/null && mv "${file}.tmp" "$file" 2>/dev/null; then
                 FASTSTART=$((FASTSTART + 1))
               else
                 rm -f "${file}.tmp"
@@ -230,8 +232,7 @@ jobs:
             else
               # 非 H.264+AAC，需重编码（如 VP9/Opus 等）
               echo "Convert: $file (vcodec=$vcodec, acodec=$acodec) → h264/aac"
-              if ffmpeg -y -i "$file" -c:v libx264 -preset fast -c:a aac -movflags +faststart "${file}.tmp" 2>/dev/null; then
-                mv "${file}.tmp" "$file"
+              if ffmpeg -y -i "$file" -c:v libx264 -preset fast -c:a aac -movflags +faststart "${file}.tmp" 2>/dev/null && mv "${file}.tmp" "$file" 2>/dev/null; then
                 CONVERTED=$((CONVERTED + 1))
                 CONVERTED_LIST+="- ${file}（${vcodec}/${acodec} → h264/aac）"$'\n'
               else
@@ -257,8 +258,9 @@ jobs:
             MSG+=$'\n'"🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
               --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
-              --data-urlencode text="${MSG}"
+              --data-urlencode text="${MSG}" || true
           fi
+          exit 0
 
       - name: send old videos to telegram channel
         env:
