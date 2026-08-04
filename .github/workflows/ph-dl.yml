@@ -150,6 +150,85 @@ jobs:
             --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
             --data-urlencode text="${MSG}"
 
+      - name: transcode existing videos for Telegram compatibility
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          TARGET_DIR=~/onedrive/0/j-1024j-视频-pornhub-favorites
+          if [ ! -d "$TARGET_DIR" ]; then
+            echo "Directory not found: $TARGET_DIR"
+            exit 0
+          fi
+          cd "$TARGET_DIR"
+
+          CONVERTED=0
+          FASTSTART=0
+          SKIPPED=0
+          FAILED=0
+          TOTAL=0
+          CONVERTED_LIST=""
+          FAILED_LIST=""
+
+          for file in *.mp4; do
+            [ -e "$file" ] || continue
+            TOTAL=$((TOTAL + 1))
+            # 读取视频和音频编码
+            vcodec=$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$file" 2>/dev/null)
+            acodec=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 "$file" 2>/dev/null)
+
+            if [ -z "$vcodec" ]; then
+              echo "Skip (cannot read codec): $file"
+              SKIPPED=$((SKIPPED + 1))
+              continue
+            fi
+
+            if [ "$vcodec" = "h264" ] && [ "$acodec" = "aac" ]; then
+              # 已是 H.264+AAC，仅添加 faststart（重排 moov atom 到文件头部，秒级完成）
+              echo "Faststart: $file (vcodec=$vcodec, acodec=$acodec)"
+              if ffmpeg -y -i "$file" -c copy -movflags +faststart "${file}.tmp" 2>/dev/null; then
+                mv "${file}.tmp" "$file"
+                FASTSTART=$((FASTSTART + 1))
+              else
+                rm -f "${file}.tmp"
+                FAILED=$((FAILED + 1))
+                FAILED_LIST+="- ${file}（faststart 失败）"$'\n'
+              fi
+            else
+              # 非 H.264+AAC，需重编码（如 VP9/Opus 等）
+              echo "Convert: $file (vcodec=$vcodec, acodec=$acodec) → h264/aac"
+              if ffmpeg -y -i "$file" -c:v libx264 -preset fast -c:a aac -movflags +faststart "${file}.tmp" 2>/dev/null; then
+                mv "${file}.tmp" "$file"
+                CONVERTED=$((CONVERTED + 1))
+                CONVERTED_LIST+="- ${file}（${vcodec}/${acodec} → h264/aac）"$'\n'
+              else
+                rm -f "${file}.tmp"
+                FAILED=$((FAILED + 1))
+                FAILED_LIST+="- ${file}（转码失败）"$'\n'
+              fi
+            fi
+          done
+
+          echo "=== 转码统计 ==="
+          echo "总计: ${TOTAL}，重编码: ${CONVERTED}，仅 faststart: ${FASTSTART}，跳过: ${SKIPPED}，失败: ${FAILED}"
+
+          # 发送通知
+          if [ "$TOTAL" -gt 0 ] && { [ "$CONVERTED" -gt 0 ] || [ "$FAILED" -gt 0 ] || [ "$FASTSTART" -gt 0 ]; }; then
+            MSG="🔄 ph-dl 旧视频转码完成"$'\n\n'"📁 目录: j-1024j-视频-pornhub-favorites"$'\n'"📊 总计: ${TOTAL}"$'\n'"🎬 重编码: ${CONVERTED}"$'\n'"⚡ 仅 faststart: ${FASTSTART}"$'\n'"⏭️ 跳过: ${SKIPPED}"$'\n'"❌ 失败: ${FAILED}"
+            if [ -n "$CONVERTED_LIST" ]; then
+              MSG+=$'\n\n'"📋 重编码列表:"$'\n'"${CONVERTED_LIST}"
+            fi
+            if [ -n "$FAILED_LIST" ]; then
+              MSG+=$'\n\n'"❌ 失败列表:"$'\n'"${FAILED_LIST}"
+            fi
+            MSG+=$'\n'"🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
+              --data-urlencode text="${MSG}"
+          fi
+
       - name: send old videos to telegram channel
         env:
           TG_API_ID: ${{ secrets.TG_API_ID }}
@@ -240,7 +319,8 @@ jobs:
           
           BEFORE_COUNT=$(wc -l < archive.txt 2>/dev/null || echo 0)
           
-          yt-dlp -f bestvideo+bestaudio/best --force-overwrites --no-part --download-archive archive.txt --playlist-end 50 --exec "./post_process.sh {} %(webpage_url)q" -i https://www.pornhub.com/users/'${{ secrets. PORNHUBNAME }}'/videos/favorites || echo "url不存在"
+          # 优先选择 H.264+AAC 流，合并/转码为 MP4 并添加 faststart（moov atom 前置），确保 Telegram 可直接流式播放
+          yt-dlp -f "bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/best[ext=mp4]/best" --merge-output-format mp4 --recode-video mp4 --postprocessor-args "ffmpeg:-c:v libx264 -c:a aac -movflags +faststart" --force-overwrites --no-part --download-archive archive.txt --playlist-end 50 --exec "./post_process.sh {} %(webpage_url)q" -i https://www.pornhub.com/users/'${{ secrets. PORNHUBNAME }}'/videos/favorites || echo "url不存在"
           
           AFTER_COUNT=$(wc -l < archive.txt 2>/dev/null || echo 0)
           DOWNLOAD_COUNT=$((AFTER_COUNT - BEFORE_COUNT))
