@@ -220,8 +220,13 @@ jobs:
           FAILED_LIST=""
           CORRUPTED_LIST=""
 
+          touch transcoded.txt
           for file in *.mp4; do
             [ -e "$file" ] || continue
+            # 跳过已处理过的文件（大幅加速：无需下载+ffprobe+ffmpeg+上传）
+            if grep -Fxq "$file" transcoded.txt 2>/dev/null; then
+              continue
+            fi
             TOTAL=$((TOTAL + 1))
             LOCAL_FILE="$TMP_DIR/$file"
             REMOTE_PATH="$REMOTE_BASE/$file"
@@ -283,6 +288,7 @@ jobs:
               if ffmpeg -y -i "$LOCAL_FILE" -c copy -movflags +faststart "${LOCAL_FILE}.tmp" 2>/dev/null && mv "${LOCAL_FILE}.tmp" "$LOCAL_FILE" 2>/dev/null; then
                 if rclone copyto "$LOCAL_FILE" "$REMOTE_PATH" 2>/dev/null; then
                   FASTSTART=$((FASTSTART + 1))
+                  echo "$file" >> transcoded.txt
                 else
                   FAILED=$((FAILED + 1))
                   FAILED_LIST+="- ${file}（复制回 OneDrive 失败）"$'\n'
@@ -295,10 +301,11 @@ jobs:
             else
               # 非 H.264+AAC，需重编码（如 VP9/Opus 等）
               echo "Convert: $file (vcodec=$vcodec, acodec=$acodec) → h264/aac"
-              if ffmpeg -y -i "$LOCAL_FILE" -c:v libx264 -preset fast -c:a aac -movflags +faststart "${LOCAL_FILE}.tmp" 2>/dev/null && mv "${LOCAL_FILE}.tmp" "$LOCAL_FILE" 2>/dev/null; then
+              if ffmpeg -y -i "$LOCAL_FILE" -c:v libx264 -preset veryfast -c:a aac -movflags +faststart "${LOCAL_FILE}.tmp" 2>/dev/null && mv "${LOCAL_FILE}.tmp" "$LOCAL_FILE" 2>/dev/null; then
                 if rclone copyto "$LOCAL_FILE" "$REMOTE_PATH" 2>/dev/null; then
                   CONVERTED=$((CONVERTED + 1))
                   CONVERTED_LIST+="- ${file}（${vcodec}/${acodec} → h264/aac）"$'\n'
+                  echo "$file" >> transcoded.txt
                 else
                   FAILED=$((FAILED + 1))
                   FAILED_LIST+="- ${file}（复制回 OneDrive 失败）"$'\n'
@@ -406,6 +413,10 @@ jobs:
           BEFORE_SIZE=$(du -sh . | cut -f1)
           echo "$BEFORE_SIZE"
           
+          # 下载到临时目录，验证完整性后再上传到 OneDrive
+          DOWNLOAD_TMP="/tmp/ph-dl-downloads"
+          mkdir -p "$DOWNLOAD_TMP"
+
           # 创建处理脚本供 yt-dlp 调用
           cat << 'EOF' > post_process.sh
           #!/bin/bash
@@ -413,12 +424,36 @@ jobs:
           URL="$2"
           FILENAME=$(basename "$FILEPATH")
           FILESIZE_HUMAN=$(du -h "$FILEPATH" | cut -f1)
+          TARGET_DIR="$HOME/onedrive/0/j-1024j-视频-pornhub-favorites"
+          REMOTE_BASE="onedrive:0/j-1024j-视频-pornhub-favorites"
+          ARCHIVE_FILE="$TARGET_DIR/archive.txt"
+          CORRUPTED_LOG="/tmp/ph-dl-downloads/corrupted.txt"
 
+          # 验证文件完整性（moov atom 存在）
+          if ! ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$FILEPATH" 2>/dev/null | grep -q .; then
+            echo "Corrupted (no moov atom): $FILENAME"
+            rm -f "$FILEPATH"
+            # 从 archive.txt 移除视频 ID，以便下次重新下载
+            id="${FILENAME%.*}"
+            id="${id##*-}"
+            if [ -n "$id" ] && [ -f "$ARCHIVE_FILE" ]; then
+              grep -v "$id" "$ARCHIVE_FILE" > "${ARCHIVE_FILE}.tmp" 2>/dev/null && mv "${ARCHIVE_FILE}.tmp" "$ARCHIVE_FILE"
+            fi
+            echo "$FILENAME" >> "$CORRUPTED_LOG"
+            exit 0
+          fi
+
+          # 文件完好，先上传到 Telegram（从临时文件直接上传）
           echo "- ${FILENAME} (${FILESIZE_HUMAN}) [链接](${URL})" >> new_downloads_list.txt
-
-          # 上传成功后记录到 uploaded_old_videos.txt，避免 temp send old videos 步骤重复上传
           if python3 ${GITHUB_WORKSPACE}/.github/scripts/upload_video.py "${FILEPATH}" "${TELEGRAM_CHANNEL_ID}" "Downloaded: ${FILENAME} (${FILESIZE_HUMAN})"; then
             echo "${FILENAME}" >> uploaded_old_videos.txt
+          fi
+
+          # 上传到 OneDrive（覆盖已有文件），完成后删除临时文件
+          if rclone copyto "${FILEPATH}" "${REMOTE_BASE}/${FILENAME}" 2>/dev/null; then
+            rm -f "$FILEPATH"
+          else
+            echo "WARN: rclone copyto failed, keeping temp file: $FILENAME"
           fi
           EOF
           chmod +x post_process.sh
@@ -427,7 +462,18 @@ jobs:
           
           # 优先选择 H.264+AAC 流并合并为 MP4。仅 remux（不重编码），避免 ffmpeg 转码被中断导致 moov atom 缺失。
           # faststart 和非 H.264 视频的重编码由独立的"transcode"步骤处理，该步骤先下载到本地再处理，不会损坏原文件。
-          yt-dlp -f "bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/best[ext=mp4]/best" --merge-output-format mp4 --remux-video mp4 --force-overwrites --download-archive archive.txt --playlist-end 50 --exec "./post_process.sh {} %(webpage_url)q" -i https://www.pornhub.com/users/'${{ secrets. PORNHUBNAME }}'/videos/favorites || echo "url不存在"
+          yt-dlp -f "bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/best[ext=mp4]/best" --merge-output-format mp4 --remux-video mp4 --force-overwrites --download-archive archive.txt --playlist-end 50 -o "$DOWNLOAD_TMP/%(title)s-%(id)s.%(ext)s" --exec "./post_process.sh {} %(webpage_url)q" -i https://www.pornhub.com/users/'${{ secrets. PORNHUBNAME }}'/videos/favorites || echo "url不存在"
+          
+          # 损坏文件通知（post_process.sh 验证失败并丢弃的文件）
+          if [ -f "$DOWNLOAD_TMP/corrupted.txt" ]; then
+            CORRUPTED_COUNT=$(wc -l < "$DOWNLOAD_TMP/corrupted.txt")
+            CORRUPTED_LIST=$(cat "$DOWNLOAD_TMP/corrupted.txt")
+            CORRUPT_MSG="🗑 ph-dl 下载阶段检测到损坏视频并已丢弃"$'\n\n'"📊 数量: ${CORRUPTED_COUNT}"$'\n'"📋 文件列表:"$'\n'"${CORRUPTED_LIST}"$'\n\n'"🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
+              --data-urlencode text="${CORRUPT_MSG}"
+          fi
+          rm -rf "$DOWNLOAD_TMP"
           
           AFTER_COUNT=$(wc -l < archive.txt 2>/dev/null || echo 0)
           DOWNLOAD_COUNT=$((AFTER_COUNT - BEFORE_COUNT))
