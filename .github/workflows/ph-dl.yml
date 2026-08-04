@@ -256,7 +256,7 @@ jobs:
               id="${file%.*}"
               id="${id##*-}"
               if [ -n "$id" ] && [ -f archive.txt ]; then
-                ( flock -x 200; grep -v "$id" archive.txt > archive.txt.tmp 2>/dev/null && mv archive.txt.tmp archive.txt; ) 200>archive.txt.lock
+                ( flock -x 200; grep -v "^${id}|" archive.txt > archive.txt.tmp 2>/dev/null && mv archive.txt.tmp archive.txt; ) 200>archive.txt.lock
               fi
               echo "RESULT|CORRUPTED||$file"
             else
@@ -437,11 +437,11 @@ jobs:
           if ! ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$FILEPATH" 2>/dev/null | grep -q .; then
             echo "Corrupted (no moov atom): $FILENAME"
             rm -f "$FILEPATH"
-            # 从 archive.txt 移除视频 ID，以便下次重新下载
+            # 从 archive.txt 移除视频 ID（格式: id|filename|url），以便下次重新下载
             id="${FILENAME%.*}"
             id="${id##*-}"
             if [ -n "$id" ] && [ -f "$ARCHIVE_FILE" ]; then
-              grep -v "$id" "$ARCHIVE_FILE" > "${ARCHIVE_FILE}.tmp" 2>/dev/null && mv "${ARCHIVE_FILE}.tmp" "$ARCHIVE_FILE"
+              grep -v "^${id}|" "$ARCHIVE_FILE" > "${ARCHIVE_FILE}.tmp" 2>/dev/null && mv "${ARCHIVE_FILE}.tmp" "$ARCHIVE_FILE"
             fi
             echo "$FILENAME" >> "$CORRUPTED_LOG"
             exit 0
@@ -456,6 +456,10 @@ jobs:
           # 上传到 OneDrive（覆盖已有文件），完成后删除临时文件
           if rclone copyto "${FILEPATH}" "${REMOTE_BASE}/${FILENAME}" 2>/dev/null; then
             rm -f "$FILEPATH"
+            # 写入 archive.txt（格式: id|filename|url）
+            id="${FILENAME%.*}"
+            id="${id##*-}"
+            echo "${id}|${FILENAME}|${URL}" >> "$ARCHIVE_FILE"
           else
             echo "WARN: rclone copyto failed, keeping temp file: $FILENAME"
           fi
@@ -463,10 +467,27 @@ jobs:
           chmod +x post_process.sh
           
           BEFORE_COUNT=$(wc -l < archive.txt 2>/dev/null || echo 0)
+
+          # 迁移 archive.txt 到新格式（id|filename|url），兼容旧格式（Pornhub id）
+          if [ -f archive.txt ]; then
+            awk -F'|' '{
+              if (NF >= 2) { print }                              # 新格式: id|filename|url
+              else if ($1 ~ /^[Pp]ornhub[[:space:]].+/) {         # 旧格式: Pornhub ph5fdf9f06b965d
+                id=$1; sub(/^[Pp]ornhub[[:space:]]+/, "", id); print id "||"
+              } else if ($1 != "") { print $1 "||" }              # 仅 ID
+            }' archive.txt > archive.txt.migrated
+            mv archive.txt.migrated archive.txt
+          fi
+          # 生成 yt-dlp 用的临时 archive（格式: Pornhub id），post_process.sh 写入真正的 archive.txt
+          YT_DLP_ARCHIVE="/tmp/yt-dlp-archive.txt"
+          grep -v '^$' archive.txt 2>/dev/null | while IFS='|' read -r id _ _; do
+            [ -n "$id" ] && echo "Pornhub $id"
+          done > "$YT_DLP_ARCHIVE"
           
           # 优先选择 H.264+AAC 流并合并为 MP4。仅 remux（不重编码），避免 ffmpeg 转码被中断导致 moov atom 缺失。
-          # faststart 和非 H.264 视频的重编码由独立的"transcode"步骤处理，该步骤先下载到本地再处理，不会损坏原文件。
-          yt-dlp -f "bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/best[ext=mp4]/best" --merge-output-format mp4 --remux-video mp4 --force-overwrites --download-archive archive.txt --playlist-end 50 -o "$DOWNLOAD_TMP/%(title)s-%(id)s.%(ext)s" --exec "./post_process.sh {} %(webpage_url)q" -i https://www.pornhub.com/users/'${{ secrets. PORNHUBNAME }}'/videos/favorites || echo "url不存在"
+          # 下载到临时目录，post_process.sh 验证完整性后写入 archive.txt（id|filename|url）并上传到 OneDrive。
+          yt-dlp -f "bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/best[ext=mp4]/best" --merge-output-format mp4 --remux-video mp4 --force-overwrites --download-archive "$YT_DLP_ARCHIVE" --playlist-end 50 -o "$DOWNLOAD_TMP/%(title)s-%(id)s.%(ext)s" --exec "./post_process.sh {} %(webpage_url)q" -i https://www.pornhub.com/users/'${{ secrets. PORNHUBNAME }}'/videos/favorites || echo "url不存在"
+          rm -f "$YT_DLP_ARCHIVE"
           
           # 损坏文件通知（post_process.sh 验证失败并丢弃的文件）
           if [ -f "$DOWNLOAD_TMP/corrupted.txt" ]; then
