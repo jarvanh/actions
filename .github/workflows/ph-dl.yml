@@ -70,8 +70,7 @@ jobs:
           DUP_DETAILS=""
           DUP_COUNT=0
           REMOVED_COUNT=0
-          REMOVED_LIST=""
-          DIFFERENT_LIST=""
+          DIFFERENT_COUNT=0
           for id in "${!ID_FILES[@]}"; do
             files="${ID_FILES[$id]}"
             count=$(echo "$files" | wc -l)
@@ -81,8 +80,7 @@ jobs:
               sorted_files=$(echo "$files" | xargs -d '\n' ls -t 2>/dev/null)
               kept=$(echo "$sorted_files" | head -n1)
               kept_hash=$(sha1sum "$kept" | cut -d' ' -f1)
-              group_removed=""
-              group_kept=""
+              group_details=""
               while IFS= read -r f; do
                 [ "$f" = "$kept" ] && continue
                 f_hash=$(sha1sum "$f" | cut -d' ' -f1)
@@ -90,15 +88,14 @@ jobs:
                   # 哈希一致，删除重复文件
                   rm -f "$f"
                   REMOVED_COUNT=$((REMOVED_COUNT + 1))
-                  REMOVED_LIST+="- ${f}（与 ${kept} 哈希一致: ${kept_hash:0:12}）"$'\n'
-                  group_removed+="${f}"$'\n'
+                  group_details+=$'  🗑 删除 '"${f}"$'（哈希一致 '"${kept_hash:0:12}"$'）\n'
                 else
                   # 哈希不同，保留并标记
-                  DIFFERENT_LIST+="- ${f}（哈希 ${f_hash:0:12} ≠ 保留 ${kept_hash:0:12}）"$'\n'
-                  group_kept+="${f}"$'\n'
+                  DIFFERENT_COUNT=$((DIFFERENT_COUNT + 1))
+                  group_details+=$'  ⚠ 保留 '"${f}"$'（哈希 '"${f_hash:0:12}"$' ≠ '"${kept_hash:0:12}"$'）\n'
                 fi
               done <<< "$sorted_files"
-              DUP_DETAILS+="🔖 ID ${id}（${count} 个，保留: ${kept}）"$'\n'"${group_removed}${group_kept}"$'\n'
+              DUP_DETAILS+=$'🔖 ID '"${id}"$'（'"${count}"$' 个，保留: '"${kept}"$'）\n'"${group_details}"
             fi
           done
 
@@ -106,14 +103,17 @@ jobs:
           echo "=== ph-dl 去重日志 ==="
           echo "重复 ID 数量: ${DUP_COUNT}"
           echo "删除重复文件数量: ${REMOVED_COUNT}"
-          echo "[删除的重复文件（哈希一致）]"
-          echo "${REMOVED_LIST}"
-          echo "[哈希不同已保留]"
-          echo "${DIFFERENT_LIST}"
+          echo "哈希不同保留数量: ${DIFFERENT_COUNT}"
+          echo "--- 详情 ---"
+          echo "${DUP_DETAILS}"
 
           # 发送通知
           if [ "$DUP_COUNT" -gt 0 ]; then
-            MSG="🔍 ph-dl 重复视频检测与去重"$'\n\n'"📁 目录: j-1024j-视频-pornhub-favorites"$'\n'"🔢 重复 ID 数量: ${DUP_COUNT}"$'\n'"🗑️ 删除重复: ${REMOVED_COUNT}"$'\n\n'"📋 详情:"$'\n'"${DUP_DETAILS}"$'\n'"🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            MSG="🔍 ph-dl 重复视频检测与去重"$'\n\n'"📁 目录: j-1024j-视频-pornhub-favorites"$'\n'"🔢 重复 ID 数量: ${DUP_COUNT}"$'\n'"🗑 删除重复: ${REMOVED_COUNT}"$'\n'"⚠ 哈希不同保留: ${DIFFERENT_COUNT}"
+            if [ "$REMOVED_COUNT" -eq 0 ] && [ "$DIFFERENT_COUNT" -gt 0 ]; then
+              MSG+=$'\n'"ℹ 重复文件哈希各不相同，未自动删除"
+            fi
+            MSG+=$'\n\n'"📋 详情:"$'\n'"${DUP_DETAILS}"$'\n'"🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
               --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
               --data-urlencode text="${MSG}"
@@ -198,6 +198,11 @@ jobs:
           # 关闭 set -e，文件处理中的错误由脚本自行处理，避免单个文件失败导致整个步骤中断
           set +e
 
+          # rclone 挂载的随机 seek 不稳定，ffprobe 读取 moov atom（常在文件尾部）容易失败。
+          # 将文件复制到本地临时目录后再用 ffprobe/ffmpeg 处理，完成后再复制回去。
+          TMP_DIR="/tmp/ph-dl-transcode"
+          mkdir -p "$TMP_DIR"
+
           CONVERTED=0
           FASTSTART=0
           SKIPPED=0
@@ -209,39 +214,59 @@ jobs:
           for file in *.mp4; do
             [ -e "$file" ] || continue
             TOTAL=$((TOTAL + 1))
+            LOCAL_FILE="$TMP_DIR/$file"
+            if ! cp "$file" "$LOCAL_FILE" 2>/dev/null; then
+              echo "Skip (cannot copy to local): $file"
+              SKIPPED=$((SKIPPED + 1))
+              continue
+            fi
             # 读取视频和音频编码（ffprobe 失败时返回空字符串，不中断脚本）
-            vcodec=$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$file" 2>/dev/null) || vcodec=""
-            acodec=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 "$file" 2>/dev/null) || acodec=""
+            vcodec=$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$LOCAL_FILE" 2>/dev/null) || vcodec=""
+            acodec=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 "$LOCAL_FILE" 2>/dev/null) || acodec=""
 
             if [ -z "$vcodec" ]; then
               echo "Skip (cannot read codec): $file"
+              ffprobe -v error -show_format -show_streams "$LOCAL_FILE" 2>&1 | tail -n 5
               SKIPPED=$((SKIPPED + 1))
+              rm -f "$LOCAL_FILE"
               continue
             fi
 
             if [ "$vcodec" = "h264" ] && [ "$acodec" = "aac" ]; then
               # 已是 H.264+AAC，仅添加 faststart（重排 moov atom 到文件头部，秒级完成）
               echo "Faststart: $file (vcodec=$vcodec, acodec=$acodec)"
-              if ffmpeg -y -i "$file" -c copy -movflags +faststart "${file}.tmp" 2>/dev/null && mv "${file}.tmp" "$file" 2>/dev/null; then
-                FASTSTART=$((FASTSTART + 1))
+              if ffmpeg -y -i "$LOCAL_FILE" -c copy -movflags +faststart "${LOCAL_FILE}.tmp" 2>/dev/null && mv "${LOCAL_FILE}.tmp" "$LOCAL_FILE" 2>/dev/null; then
+                if cp "$LOCAL_FILE" "$file" 2>/dev/null; then
+                  FASTSTART=$((FASTSTART + 1))
+                else
+                  FAILED=$((FAILED + 1))
+                  FAILED_LIST+="- ${file}（复制回 OneDrive 失败）"$'\n'
+                fi
               else
-                rm -f "${file}.tmp"
+                rm -f "${LOCAL_FILE}.tmp"
                 FAILED=$((FAILED + 1))
                 FAILED_LIST+="- ${file}（faststart 失败）"$'\n'
               fi
             else
               # 非 H.264+AAC，需重编码（如 VP9/Opus 等）
               echo "Convert: $file (vcodec=$vcodec, acodec=$acodec) → h264/aac"
-              if ffmpeg -y -i "$file" -c:v libx264 -preset fast -c:a aac -movflags +faststart "${file}.tmp" 2>/dev/null && mv "${file}.tmp" "$file" 2>/dev/null; then
-                CONVERTED=$((CONVERTED + 1))
-                CONVERTED_LIST+="- ${file}（${vcodec}/${acodec} → h264/aac）"$'\n'
+              if ffmpeg -y -i "$LOCAL_FILE" -c:v libx264 -preset fast -c:a aac -movflags +faststart "${LOCAL_FILE}.tmp" 2>/dev/null && mv "${LOCAL_FILE}.tmp" "$LOCAL_FILE" 2>/dev/null; then
+                if cp "$LOCAL_FILE" "$file" 2>/dev/null; then
+                  CONVERTED=$((CONVERTED + 1))
+                  CONVERTED_LIST+="- ${file}（${vcodec}/${acodec} → h264/aac）"$'\n'
+                else
+                  FAILED=$((FAILED + 1))
+                  FAILED_LIST+="- ${file}（复制回 OneDrive 失败）"$'\n'
+                fi
               else
-                rm -f "${file}.tmp"
+                rm -f "${LOCAL_FILE}.tmp"
                 FAILED=$((FAILED + 1))
                 FAILED_LIST+="- ${file}（转码失败）"$'\n'
               fi
             fi
+            rm -f "$LOCAL_FILE"
           done
+          rm -rf "$TMP_DIR"
 
           echo "=== 转码统计 ==="
           echo "总计: ${TOTAL}，重编码: ${CONVERTED}，仅 faststart: ${FASTSTART}，跳过: ${SKIPPED}，失败: ${FAILED}"
