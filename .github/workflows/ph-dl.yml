@@ -300,6 +300,7 @@ jobs:
           chmod +x transcode_one.sh
 
           # 收集待处理文件（跳过已处理），并行处理（nproc 个进程同时运行）
+          # 使用 -0 / NUL 分隔，避免文件名中的单引号/空格/特殊字符导致 xargs 报错
           RESULTS_FILE="$TMP_DIR/results.txt"
           : > "$RESULTS_FILE"
           for file in *.mp4; do
@@ -308,8 +309,12 @@ jobs:
               continue
             fi
             TOTAL=$((TOTAL + 1))
-            echo "$file"
-          done | xargs -P "$(nproc)" -I {} ./transcode_one.sh "{}" > "$RESULTS_FILE"
+            printf '%s\0' "$file"
+          done | xargs -0 -P "$(nproc)" -I {} ./transcode_one.sh "{}" > "$RESULTS_FILE"
+          # 捕获 xargs 退出码（PIPESTATUS[1] 为管道中 xargs 的状态）
+          # 若 xargs 自身失败（例如参数解析错误、脚本不可执行），必须让本步骤失败，
+          # 否则后续 upload 步骤会把未转码的视频直接上传到 Telegram。
+          XARGS_EXIT=${PIPESTATUS[1]}
 
           # 汇总结果
           while IFS='|' read -r prefix status detail file; do
@@ -326,6 +331,15 @@ jobs:
 
           echo "=== 转码统计 ==="
           echo "总计: ${TOTAL}，重编码: ${CONVERTED}，仅 faststart: ${FASTSTART}，跳过: ${SKIPPED}（其中损坏已删除: ${CORRUPTED}），失败: ${FAILED}"
+
+          # xargs 管道自身失败（非单文件转码失败）→ 阻断后续上传步骤，避免未转码视频被上传
+          if [ "$XARGS_EXIT" -ne 0 ]; then
+            MSG="❌ ph-dl 转码步骤执行失败（xargs exit=${XARGS_EXIT}）"$'\n\n'"📁 目录: j-1024j-视频-pornhub-favorites"$'\n'"📊 待处理: ${TOTAL}"$'\n'"🎬 已重编码: ${CONVERTED}"$'\n'"⏭️ 跳过: ${SKIPPED}"$'\n'"❌ 失败: ${FAILED}"$'\n\n'"🚫 已阻断上传步骤，请检查 Actions 日志后重试"$'\n'"🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
+              --data-urlencode text="${MSG}" || true
+            exit 1
+          fi
 
           # 发送通知
           if [ "$TOTAL" -gt 0 ] && { [ "$CONVERTED" -gt 0 ] || [ "$FAILED" -gt 0 ] || [ "$FASTSTART" -gt 0 ] || [ "$CORRUPTED" -gt 0 ]; }; then
@@ -360,10 +374,12 @@ jobs:
           ARCHIVE_FILE="uploaded_old_videos.txt"
           touch "$ARCHIVE_FILE"
           FAILED_FILES=""
+          SKIPPED_CODEC_LIST=""
           TOTAL=0
           SKIPPED=0
           SUCCESS=0
           FAILED=0
+          SKIPPED_CODEC=0
           # 按文件更新时间从旧到新排序上传（使用进程替换以便 while 循环内变量可持久化）
           while IFS= read -r file; do
             [ -e "$file" ] || continue
@@ -372,6 +388,16 @@ jobs:
             if grep -Fxq "$file" "$ARCHIVE_FILE" 2>/dev/null; then
               echo "Skip (already uploaded): $file"
               SKIPPED=$((SKIPPED + 1))
+              continue
+            fi
+            # 校验编码：仅上传已转码为 h264/aac 的视频，避免上传未处理视频到 Telegram
+            # ffprobe 读 moov atom，转码后的文件已 +faststart（moov 在头部），读取很快
+            vcodec=$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$file" 2>/dev/null)
+            acodec=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 "$file" 2>/dev/null)
+            if [ "$vcodec" != "h264" ] || [ "$acodec" != "aac" ]; then
+              echo "Skip (not h264/aac: v=${vcodec:-?} a=${acodec:-?}): $file"
+              SKIPPED_CODEC=$((SKIPPED_CODEC + 1))
+              SKIPPED_CODEC_LIST+="- ${file} (v=${vcodec:-?} a=${acodec:-?})"$'\n'
               continue
             fi
             FILESIZE_HUMAN=$(du -h "$file" | cut -f1)
@@ -386,11 +412,19 @@ jobs:
             sleep 5 # 防止触发速率限制
           done < <(ls -tr *.mp4 2>/dev/null)
 
-          echo "总计: ${TOTAL}，跳过: ${SKIPPED}，成功: ${SUCCESS}，失败: ${FAILED}"
+          echo "总计: ${TOTAL}，跳过(已上传): ${SKIPPED}，跳过(编码不符): ${SKIPPED_CODEC}，成功: ${SUCCESS}，失败: ${FAILED}"
+
+          # 编码不符汇总通知（这些文件未转码完成，不会上传）
+          if [ "$SKIPPED_CODEC" -gt 0 ]; then
+            MSG="⚠ ph-dl 旧视频上传跳过（编码不是 h264/aac）"$'\n\n'"📊 跳过数量: ${SKIPPED_CODEC}"$'\n\n'"📋 文件列表:"$'\n'"${SKIPPED_CODEC_LIST}"$'\n'"🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
+              --data-urlencode text="${MSG}" || true
+          fi
 
           # 失败汇总通知
           if [ "$FAILED" -gt 0 ]; then
-            MSG="ph-dl 旧视频上传失败汇总"$'\n'"总计: ${TOTAL}，跳过: ${SKIPPED}，成功: ${SUCCESS}，失败: ${FAILED}"$'\n'"失败文件:"$'\n'"${FAILED_FILES}"$'\n'"任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            MSG="ph-dl 旧视频上传失败汇总"$'\n'"总计: ${TOTAL}，跳过(已上传): ${SKIPPED}，跳过(编码不符): ${SKIPPED_CODEC}，成功: ${SUCCESS}，失败: ${FAILED}"$'\n'"失败文件:"$'\n'"${FAILED_FILES}"$'\n'"任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
               --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
               --data-urlencode text="${MSG}"
