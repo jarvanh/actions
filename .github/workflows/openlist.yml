@@ -1473,7 +1473,10 @@ jobs:
               "${extra_args[@]}"
 
             rm -f "$LOG_FILENAME" "$LAST_ATTEMPT_LOG" "$fail_list" "$fix_list" "$fix_log" /tmp/probe_src.txt /tmp/probe_dst.txt 2>/dev/null || true
-            return "$SYNC_FAILED"
+            # 始终返回 0：失败状态已通过 SYNC_FAILED 全局变量传递，
+            # 在 set -e 下返回非零会导致整个 step 立即退出，后续同步与
+            # split_large_files_after_sync_failure 均无法执行。
+            return 0
           }
           EOF
 
