@@ -1240,14 +1240,15 @@ jobs:
             local -a extra_args=("$@")
             local check_combined
             check_combined=$(timeout 300 rclone check "$source_path" "$dest_path" --size-only "${extra_args[@]}" --combined - 2>/dev/null || true)
-            local result="" diff_count=0
+            local result="" diff_count=0 idx=0
             while IFS= read -r line; do
               local marker="${line:0:1}"
               local fpath="${line:2}"
+              idx=$((idx + 1))
               case "$marker" in
-                +) result+="• [源端有/目标缺失] ${fpath}"$'\n' ;;
-                -) result+="• [目标多余/仅目标存在] ${fpath}"$'\n' ;;
-                '*') result+="• [大小/内容不一致] ${fpath}"$'\n' ;;
+                +) result+="[${idx}] [源端有/目标缺失] ${fpath}"$'\n' ;;
+                -) result+="[${idx}] [目标多余/仅目标存在] ${fpath}"$'\n' ;;
+                '*') result+="[${idx}] [大小/内容不一致] ${fpath}"$'\n' ;;
               esac
               diff_count=$((diff_count + 1))
               if [ "$diff_count" -ge 20 ]; then
@@ -1554,13 +1555,16 @@ jobs:
 
             # 构建 fail_summary（无法修复的文件，含源/目标完整路径与修复过程）
             local fail_summary=""
+            local fail_idx=0
             if [ -s "$fail_list" ]; then
               while IFS='|' read -r fpath fsize fmsg; do
                 [ -z "$fpath" ] && continue
-                fail_summary+="• 源文件：${source_path}/${fpath}"$'\n'
-                fail_summary+="  目标文件：${dest_path}/${fpath}"$'\n'
-                fail_summary+="  文件大小：${fsize}"$'\n'
-                fail_summary+="  失败原因：${fmsg}"$'\n'
+                fail_idx=$((fail_idx + 1))
+                [ -n "$fail_summary" ] && fail_summary+=$'\n'
+                fail_summary+="[${fail_idx}] 源文件：${source_path}/${fpath}"$'\n'
+                fail_summary+="    目标文件：${dest_path}/${fpath}"$'\n'
+                fail_summary+="    文件大小：${fsize}"$'\n'
+                fail_summary+="    失败原因：${fmsg}"$'\n'
                 # 从 fix_log 中按文件名分隔提取该文件对应的修复过程
                 local fix_section=""
                 if [ -f "$fix_log" ]; then
@@ -1571,15 +1575,15 @@ jobs:
                   ' "$fix_log" 2>/dev/null)
                 fi
                 if [ -n "$fix_section" ]; then
-                  fail_summary+="  修复过程："$'\n'
+                  fail_summary+="    修复过程："$'\n'
                   while IFS= read -r log_line; do
                     [ -z "$log_line" ] && continue
-                    fail_summary+="    ${log_line}"$'\n'
+                    fail_summary+="      ${log_line}"$'\n'
                   done <<< "$fix_section"
                 elif echo "$fmsg" | grep -qi 'object not found'; then
-                  fail_summary+="  修复过程：源文件不存在，无需修复"$'\n'
+                  fail_summary+="    修复过程：源文件不存在，无需修复"$'\n'
                 else
-                  fail_summary+="  修复过程：无记录"$'\n'
+                  fail_summary+="    修复过程：无记录"$'\n'
                 fi
               done < "$fail_list"
             fi
@@ -2728,11 +2732,14 @@ jobs:
             elif grep -Eqi 'ERROR : .+: Failed to copy.*object not found' "$LAST_GD_ATTEMPT_LOG" 2>/dev/null; then
               # object not found（源文件不存在），使用结构化通知
               local gd_fail_summary=""
+              local gd_fail_idx=0
               while IFS= read -r failed_line; do
                 [ -z "$failed_line" ] && continue
-                gd_fail_summary+="• 源文件：${source_path}/${failed_line}"$'\n'
-                gd_fail_summary+="  目标文件：${dest_path}/${failed_line}"$'\n'
-                gd_fail_summary+="  失败原因：源文件不存在 (object not found)"$'\n\n'
+                gd_fail_idx=$((gd_fail_idx + 1))
+                [ -n "$gd_fail_summary" ] && gd_fail_summary+=$'\n'
+                gd_fail_summary+="[${gd_fail_idx}] 源文件：${source_path}/${failed_line}"$'\n'
+                gd_fail_summary+="    目标文件：${dest_path}/${failed_line}"$'\n'
+                gd_fail_summary+="    失败原因：源文件不存在 (object not found)"$'\n'
               done < <(
                 grep -E 'ERROR : .+: Failed to copy.*object not found' "$LAST_GD_ATTEMPT_LOG" 2>/dev/null | \
                   sed -E 's/^.*ERROR : //; s/: Failed to copy.*$//' | sort -u
