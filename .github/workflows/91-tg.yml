@@ -146,9 +146,13 @@ jobs:
           chmod +x process_one.sh
 
           # 并行处理（nproc 个进程同时运行）
+          # 使用 -d '\n' 指定换行为分隔符，禁用 xargs 对引号/反斜杠的特殊解释，
+          # 避免文件名含单引号时报 "unmatched single quote" 错误
           RESULTS_FILE="$TMP_DIR/results.txt"
           : > "$RESULTS_FILE"
-          cat "$TMP_DIR/pending.txt" | xargs -P "$(nproc)" -I {} ./process_one.sh "{}" > "$RESULTS_FILE"
+          xargs -d '\n' -P "$(nproc)" -I {} ./process_one.sh "{}" < "$TMP_DIR/pending.txt" > "$RESULTS_FILE"
+          # 捕获 xargs 退出码（PIPESTATUS 在无管道时不可用，直接用 $?）
+          XARGS_EXIT=$?
 
           # 合并各进程的 sent 文件到本地 sent.txt
           cat "$TMP_DIR"/sent_*.txt >> "$TMP_DIR/sent.txt" 2>/dev/null || true
@@ -168,6 +172,15 @@ jobs:
               FAILED) FAILED=$((FAILED + 1)); FAILED_LIST+="- ${file}（${detail}）"$'\n' ;;
             esac
           done < "$RESULTS_FILE"
+
+          # xargs 自身失败（非单文件处理失败）→ 发送告警并退出
+          if [ "$XARGS_EXIT" -ne 0 ]; then
+            MSG="❌ 91-tg 处理管道失败（xargs exit=${XARGS_EXIT}）"$'\n\n'"📊 待处理: ${PENDING_COUNT}"$'\n'"✅ 成功: ${SENT}"$'\n'"❌ 失败: ${FAILED}"$'\n\n'"⚠ xargs 可能因文件名特殊字符或脚本错误而中断，请检查 Actions 日志"$'\n'"🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
+              --data-urlencode text="${MSG}" || true
+            exit 1
+          fi
 
           echo "上传完成: 成功 $SENT, 失败 $FAILED"
 
