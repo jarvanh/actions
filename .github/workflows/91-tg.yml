@@ -1,0 +1,187 @@
+name: 91-tg
+
+on:
+  schedule:
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: rclone-install
+        run: |
+          curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
+          unzip rclone-current-linux-amd64.zip
+          cd rclone-*-linux-amd64
+          sudo mv rclone /usr/bin
+          sudo chmod +x /usr/bin/rclone
+      - name: rclone-config
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE }}
+        run: |
+          mkdir -p ~/.config/rclone/
+          cat << EOF > ~/.config/rclone/rclone.conf
+          $RCLONE_CONFIG
+          EOF
+      - name: rclone-run
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fuse3
+          mkdir ~/onedrive
+          nohup rclone --vfs-cache-mode full mount onedrive: ~/onedrive &
+          sleep 3
+      - name: send videos to telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          TG_SESSION_STRING: ${{ secrets.TG_SESSION }}
+        run: |
+          sudo apt-get install -y ffmpeg
+          pip3 install telethon
+
+          SOURCE_REMOTE="onedrive:1/1024j/视频/91"
+          TMP_DIR="/tmp/91-tg"
+          mkdir -p "$TMP_DIR"
+
+          # 读取 sent.txt（记录已上传的文件名），rclone cat 绕过 mount
+          rclone cat "$SOURCE_REMOTE/sent.txt" 2>/dev/null > "$TMP_DIR/sent.txt" || touch "$TMP_DIR/sent.txt"
+
+          # 列出源目录所有视频文件
+          rclone lsf "$SOURCE_REMOTE/" --files-only 2>/dev/null | grep -iE '\.(mp4|mkv|avi|mov|flv|wmv|webm|m4v|ts)$' > "$TMP_DIR/all_videos.txt" || true
+          TOTAL_VIDEOS=$(wc -l < "$TMP_DIR/all_videos.txt")
+          echo "源目录视频总数: $TOTAL_VIDEOS"
+
+          # 过滤掉已上传的视频
+          grep -Fxvf "$TMP_DIR/sent.txt" "$TMP_DIR/all_videos.txt" > "$TMP_DIR/pending.txt" 2>/dev/null || true
+          PENDING_COUNT=$(wc -l < "$TMP_DIR/pending.txt" 2>/dev/null || echo 0)
+          echo "待上传: $PENDING_COUNT"
+
+          if [ "$PENDING_COUNT" -eq 0 ] || [ ! -s "$TMP_DIR/pending.txt" ]; then
+            echo "没有新视频需要上传"
+            MSG="📺 91-tg"$'\n'"📊 源目录: ${TOTAL_VIDEOS} 个视频"$'\n'"✅ 已上传: ${TOTAL_VIDEOS}"$'\n'"⏳ 待上传: 0"$'\n\n'"没有新视频需要上传"
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
+              --data-urlencode text="${MSG}"
+            exit 0
+          fi
+
+          # 创建单文件处理脚本，供 xargs -P 并行调用
+          cat << 'SCRIPT' > process_one.sh
+          #!/bin/bash
+          set +e
+          file="$1"
+          SOURCE_REMOTE="onedrive:1/1024j/视频/91"
+          TMP_DIR="/tmp/91-tg"
+          WORK_DIR="$TMP_DIR/$$"
+          LOCAL_FILE="$WORK_DIR/$file"
+          CHANNEL_ID="-1004369945681"
+          SENT_LOCAL="$TMP_DIR/sent.txt"
+          SENT_PID="$TMP_DIR/sent_$$.txt"
+
+          mkdir -p "$WORK_DIR"
+
+          # 从 OneDrive 下载到本地（不修改原文件）
+          if ! rclone copy "$SOURCE_REMOTE/$file" "$WORK_DIR/" 2>/dev/null || [ ! -f "$LOCAL_FILE" ]; then
+            echo "RESULT|FAILED|rclone copy failed|$file" >&2
+            echo "RESULT|FAILED|rclone copy failed|$file"
+            rm -rf "$WORK_DIR"
+            exit 0
+          fi
+          dst_size=$(stat -c%s "$LOCAL_FILE" 2>/dev/null || echo 0)
+
+          # 检测编码
+          vcodec=$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$LOCAL_FILE" 2>/dev/null) || vcodec=""
+          acodec=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 "$LOCAL_FILE" 2>/dev/null) || acodec=""
+
+          if [ -z "$vcodec" ]; then
+            echo "Skip (cannot read codec): $file" >&2
+            echo "RESULT|FAILED|cannot read codec|$file"
+            rm -rf "$WORK_DIR"
+            exit 0
+          fi
+
+          echo "OK: $file (size=$dst_size, vcodec=$vcodec, acodec=$acodec)" >&2
+
+          # 确保 Telegram 兼容（H.264+AAC+faststart）
+          if [ "$vcodec" = "h264" ] && [ "$acodec" = "aac" ]; then
+            # 已是 H.264+AAC，仅添加 faststart（秒级完成）
+            echo "Faststart: $file" >&2
+            if ffmpeg -y -i "$LOCAL_FILE" -c copy -movflags +faststart "${LOCAL_FILE}.tmp" 2>/dev/null && mv "${LOCAL_FILE}.tmp" "$LOCAL_FILE" 2>/dev/null; then
+              : # 成功
+            else
+              rm -f "${LOCAL_FILE}.tmp"
+              echo "WARN: faststart failed, using original: $file" >&2
+            fi
+          else
+            # 非 H.264+AAC，需重编码
+            echo "Convert: $file (${vcodec}/${acodec} → h264/aac)" >&2
+            if ffmpeg -y -i "$LOCAL_FILE" -c:v libx264 -preset fast -c:a aac -movflags +faststart "${LOCAL_FILE}.tmp" 2>/dev/null && mv "${LOCAL_FILE}.tmp" "$LOCAL_FILE" 2>/dev/null; then
+              : # 成功
+            else
+              rm -f "${LOCAL_FILE}.tmp"
+              echo "RESULT|FAILED|transcode failed|$file" >&2
+              echo "RESULT|FAILED|transcode failed|$file"
+              rm -rf "$WORK_DIR"
+              exit 0
+            fi
+          fi
+
+          # 上传到 Telegram 频道
+          FILESIZE_HUMAN=$(du -h "$LOCAL_FILE" | cut -f1)
+          if python3 ${GITHUB_WORKSPACE}/.github/scripts/upload_video.py "$LOCAL_FILE" "$CHANNEL_ID" "91: $file ($FILESIZE_HUMAN)"; then
+            echo "$file" >> "$SENT_PID"
+            echo "RESULT|SENT||$file" >&2
+            echo "RESULT|SENT||$file"
+          else
+            echo "RESULT|FAILED|telegram upload failed|$file" >&2
+            echo "RESULT|FAILED|telegram upload failed|$file"
+          fi
+
+          rm -rf "$WORK_DIR"
+          SCRIPT
+          chmod +x process_one.sh
+
+          # 并行处理（nproc 个进程同时运行）
+          RESULTS_FILE="$TMP_DIR/results.txt"
+          : > "$RESULTS_FILE"
+          cat "$TMP_DIR/pending.txt" | xargs -P "$(nproc)" -I {} ./process_one.sh "{}" > "$RESULTS_FILE"
+
+          # 合并各进程的 sent 文件到本地 sent.txt
+          cat "$TMP_DIR"/sent_*.txt >> "$TMP_DIR/sent.txt" 2>/dev/null || true
+
+          # 上传更新后的 sent.txt 到 OneDrive
+          rclone copyto "$TMP_DIR/sent.txt" "$SOURCE_REMOTE/sent.txt" 2>/dev/null
+
+          # 汇总结果
+          SENT=0
+          FAILED=0
+          SENT_LIST=""
+          FAILED_LIST=""
+          while IFS='|' read -r prefix status detail file; do
+            [ "$prefix" = "RESULT" ] || continue
+            case "$status" in
+              SENT) SENT=$((SENT + 1)); SENT_LIST+="- ${file}"$'\n' ;;
+              FAILED) FAILED=$((FAILED + 1)); FAILED_LIST+="- ${file}（${detail}）"$'\n' ;;
+            esac
+          done < "$RESULTS_FILE"
+
+          echo "上传完成: 成功 $SENT, 失败 $FAILED"
+
+          # 发送通知
+          MSG="📺 91-tg 上传完成"$'\n\n'"📊 总计: ${PENDING_COUNT}"$'\n'"✅ 成功: ${SENT}"$'\n'"❌ 失败: ${FAILED}"
+          if [ -n "$SENT_LIST" ]; then
+            MSG+=$'\n\n'"✅ 已上传:"$'\n'"${SENT_LIST}"
+          fi
+          if [ -n "$FAILED_LIST" ]; then
+            MSG+=$'\n\n'"❌ 失败:"$'\n'"${FAILED_LIST}"
+          fi
+          MSG+=$'\n\n'"🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
+            --data-urlencode text="${MSG}"
+
+          rm -rf "$TMP_DIR"
