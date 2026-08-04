@@ -1510,12 +1510,12 @@ jobs:
             local count_info=""
             local src_stats dst_stats
 
-            src_stats=$(_get_path_stats "$source_path")
+            src_stats=$(_get_path_stats "$source_path" "${extra_args[@]}")
             source_count=$(echo "$src_stats" | awk '{print $2}')
             source_size_human=$(echo "$src_stats" | awk '{print $3 ($4? " "$4 : "")}')
             [ "$source_count" = "0" ] && source_count="未知"
 
-            dst_stats=$(_get_path_stats "$dest_path")
+            dst_stats=$(_get_path_stats "$dest_path" "${extra_args[@]}")
             dest_count=$(echo "$dst_stats" | awk '{print $2}')
             dest_size_human=$(echo "$dst_stats" | awk '{print $3 ($4? " "$4 : "")}')
             [ "$dest_count" = "0" ] && dest_count="未知"
@@ -2681,12 +2681,12 @@ jobs:
             local gd_diff_files_list=""
             local gd_src_stats gd_dst_stats
 
-            gd_src_stats=$(_get_path_stats "$source_path")
+            gd_src_stats=$(_get_path_stats "$source_path" "${extra_args[@]}")
             gd_src_count=$(echo "$gd_src_stats" | awk '{print $2}')
             gd_src_size=$(echo "$gd_src_stats" | awk '{print $3 ($4? " "$4 : "")}')
             [ "$gd_src_count" = "0" ] && gd_src_count="未知"
 
-            gd_dst_stats=$(_get_path_stats "$dest_path")
+            gd_dst_stats=$(_get_path_stats "$dest_path" "${extra_args[@]}")
             gd_dst_count=$(echo "$gd_dst_stats" | awk '{print $2}')
             gd_dst_size=$(echo "$gd_dst_stats" | awk '{print $3 ($4? " "$4 : "")}')
             [ "$gd_dst_count" = "0" ] && gd_dst_count="未知"
