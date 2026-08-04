@@ -214,9 +214,11 @@ jobs:
           FASTSTART=0
           SKIPPED=0
           FAILED=0
+          CORRUPTED=0
           TOTAL=0
           CONVERTED_LIST=""
           FAILED_LIST=""
+          CORRUPTED_LIST=""
 
           for file in *.mp4; do
             [ -e "$file" ] || continue
@@ -243,13 +245,31 @@ jobs:
             acodec=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 "$LOCAL_FILE" 2>/dev/null) || acodec=""
 
             if [ -z "$vcodec" ]; then
+              FFPROBE_ERR=$(ffprobe -v error -show_format -show_streams "$LOCAL_FILE" 2>&1)
               echo "Skip (cannot read codec): $file"
               echo "  size: mount=$src_size local=$dst_size"
               echo "  file type: $(file "$LOCAL_FILE" 2>/dev/null)"
               echo "  --- ffprobe output ---"
-              ffprobe -v error -show_format -show_streams "$LOCAL_FILE" 2>&1
+              echo "$FFPROBE_ERR"
               echo "  --- file header (od) ---"
               od -A x -t x1z "$LOCAL_FILE" 2>/dev/null | head -n 5
+
+              # moov atom 缺失 = 文件损坏（通常是 yt-dlp 转码被中断导致），
+              # 删除远程文件并从 archive.txt 移除，以便下次运行时重新下载
+              if echo "$FFPROBE_ERR" | grep -q "moov atom not found"; then
+                echo "  → 文件损坏（moov atom 缺失），删除远程文件并从 archive.txt 移除"
+                rclone delete "$REMOTE_PATH" 2>/dev/null
+                # 从 archive.txt 移除视频 ID（archive 存的是 ID 如 ph5fdf9f06b965d，不是文件名）
+                # 文件名格式: title-ph5fdf9f06b965d.mp4 → ID = 最后一个 - 之后、扩展名之前的部分
+                id="${file%.*}"
+                id="${id##*-}"
+                if [ -n "$id" ] && [ -f archive.txt ]; then
+                  grep -v "$id" archive.txt > archive.txt.tmp 2>/dev/null && mv archive.txt.tmp archive.txt
+                fi
+                CORRUPTED=$((CORRUPTED + 1))
+                CORRUPTED_LIST+="- ${file}"$'\n'
+              fi
+
               SKIPPED=$((SKIPPED + 1))
               rm -f "$LOCAL_FILE"
               continue
@@ -261,7 +281,7 @@ jobs:
               # 已是 H.264+AAC，仅添加 faststart（重排 moov atom 到文件头部，秒级完成）
               echo "Faststart: $file (vcodec=$vcodec, acodec=$acodec)"
               if ffmpeg -y -i "$LOCAL_FILE" -c copy -movflags +faststart "${LOCAL_FILE}.tmp" 2>/dev/null && mv "${LOCAL_FILE}.tmp" "$LOCAL_FILE" 2>/dev/null; then
-                if cp "$LOCAL_FILE" "$file" 2>/dev/null; then
+                if rclone copyto "$LOCAL_FILE" "$REMOTE_PATH" 2>/dev/null; then
                   FASTSTART=$((FASTSTART + 1))
                 else
                   FAILED=$((FAILED + 1))
@@ -276,7 +296,7 @@ jobs:
               # 非 H.264+AAC，需重编码（如 VP9/Opus 等）
               echo "Convert: $file (vcodec=$vcodec, acodec=$acodec) → h264/aac"
               if ffmpeg -y -i "$LOCAL_FILE" -c:v libx264 -preset fast -c:a aac -movflags +faststart "${LOCAL_FILE}.tmp" 2>/dev/null && mv "${LOCAL_FILE}.tmp" "$LOCAL_FILE" 2>/dev/null; then
-                if cp "$LOCAL_FILE" "$file" 2>/dev/null; then
+                if rclone copyto "$LOCAL_FILE" "$REMOTE_PATH" 2>/dev/null; then
                   CONVERTED=$((CONVERTED + 1))
                   CONVERTED_LIST+="- ${file}（${vcodec}/${acodec} → h264/aac）"$'\n'
                 else
@@ -294,16 +314,19 @@ jobs:
           rm -rf "$TMP_DIR"
 
           echo "=== 转码统计 ==="
-          echo "总计: ${TOTAL}，重编码: ${CONVERTED}，仅 faststart: ${FASTSTART}，跳过: ${SKIPPED}，失败: ${FAILED}"
+          echo "总计: ${TOTAL}，重编码: ${CONVERTED}，仅 faststart: ${FASTSTART}，跳过: ${SKIPPED}（其中损坏已删除: ${CORRUPTED}），失败: ${FAILED}"
 
           # 发送通知
-          if [ "$TOTAL" -gt 0 ] && { [ "$CONVERTED" -gt 0 ] || [ "$FAILED" -gt 0 ] || [ "$FASTSTART" -gt 0 ]; }; then
-            MSG="🔄 ph-dl 旧视频转码完成"$'\n\n'"📁 目录: j-1024j-视频-pornhub-favorites"$'\n'"📊 总计: ${TOTAL}"$'\n'"🎬 重编码: ${CONVERTED}"$'\n'"⚡ 仅 faststart: ${FASTSTART}"$'\n'"⏭️ 跳过: ${SKIPPED}"$'\n'"❌ 失败: ${FAILED}"
+          if [ "$TOTAL" -gt 0 ] && { [ "$CONVERTED" -gt 0 ] || [ "$FAILED" -gt 0 ] || [ "$FASTSTART" -gt 0 ] || [ "$CORRUPTED" -gt 0 ]; }; then
+            MSG="🔄 ph-dl 旧视频转码完成"$'\n\n'"📁 目录: j-1024j-视频-pornhub-favorites"$'\n'"📊 总计: ${TOTAL}"$'\n'"🎬 重编码: ${CONVERTED}"$'\n'"⚡ 仅 faststart: ${FASTSTART}"$'\n'"⏭️ 跳过: ${SKIPPED}"$'\n'"🗑 损坏已删除: ${CORRUPTED}"$'\n'"❌ 失败: ${FAILED}"
             if [ -n "$CONVERTED_LIST" ]; then
               MSG+=$'\n\n'"📋 重编码列表:"$'\n'"${CONVERTED_LIST}"
             fi
             if [ -n "$FAILED_LIST" ]; then
               MSG+=$'\n\n'"❌ 失败列表:"$'\n'"${FAILED_LIST}"
+            fi
+            if [ -n "$CORRUPTED_LIST" ]; then
+              MSG+=$'\n\n'"🗑 损坏已删除（下次运行将重新下载）:"$'\n'"${CORRUPTED_LIST}"
             fi
             MSG+=$'\n'"🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
