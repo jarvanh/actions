@@ -222,7 +222,8 @@ jobs:
 
           touch transcoded.txt
           # 创建单文件处理脚本，供 xargs -P 并行调用
-          cat << 'SCRIPT' > transcode_one.sh
+          # 脚本写到本地 $TMP_DIR（rclone 挂载不支持 execute 权限）
+          cat << 'SCRIPT' > "$TMP_DIR/transcode_one.sh"
           #!/bin/bash
           set +e
           file="$1"
@@ -297,7 +298,7 @@ jobs:
           fi
           rm -rf "$WORK_DIR"
           SCRIPT
-          chmod +x transcode_one.sh
+          # 用 bash 调用，无需 execute 权限（rclone 挂载不支持 chmod +x）
 
           # 收集待处理文件（跳过已处理），并行处理（nproc 个进程同时运行）
           # 使用 -0 / NUL 分隔，避免文件名中的单引号/空格/特殊字符导致 xargs 报错
@@ -310,7 +311,7 @@ jobs:
             fi
             TOTAL=$((TOTAL + 1))
             printf '%s\0' "$file"
-          done | xargs -0 -P "$(nproc)" -I {} ./transcode_one.sh "{}" > "$RESULTS_FILE"
+          done | xargs -0 -P "$(nproc)" -I {} bash "$TMP_DIR/transcode_one.sh" "{}" > "$RESULTS_FILE"
           # 捕获 xargs 退出码（PIPESTATUS[1] 为管道中 xargs 的状态）
           # 若 xargs 自身失败（例如参数解析错误、脚本不可执行），必须让本步骤失败，
           # 否则后续 upload 步骤会把未转码的视频直接上传到 Telegram。
