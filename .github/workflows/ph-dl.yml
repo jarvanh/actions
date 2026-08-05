@@ -246,9 +246,9 @@ jobs:
             exit 0
           fi
 
-          # 文件完好，先上传到 Telegram（从临时文件直接上传）
+          # 文件完好，预处理（转码/faststart）并上传到 Telegram
           echo "- ${FILENAME} (${FILESIZE_HUMAN}) [链接](${URL})" >> new_downloads_list.txt
-          if python3 ${GITHUB_WORKSPACE}/.github/scripts/upload_video.py "${FILEPATH}" "${TELEGRAM_CHANNEL_ID}" "Downloaded: ${FILENAME} (${FILESIZE_HUMAN})"; then
+          if bash ${GITHUB_WORKSPACE}/.github/scripts/process_one_file.sh "${FILEPATH}" "${TELEGRAM_CHANNEL_ID}" "ph"; then
             echo "${FILENAME}" >> uploaded_videos.txt
           fi
 
