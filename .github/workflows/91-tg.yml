@@ -152,6 +152,22 @@ jobs:
             NEED_REENCODE=1; REASON="odd dims ${width}x${height}"
           fi
 
+          # 检测旋转元数据和非标准 SAR：
+          # stream copy（-c copy）会原样保留 rotation 和 SAR，Telegram 播放器可能不尊重
+          # rotation 导致画面只显示一部分；非标准 SAR 导致画面比例错误。
+          # 重编码时 ffmpeg 会自动应用旋转（autorotate）并通过 setsar=1 归一化像素比例。
+          if [ "$NEED_REENCODE" -eq 0 ]; then
+            side_data=$(ffprobe -v error -select_streams v:0 -show_entries stream=side_data -of csv=p=0 "$LOCAL_FILE" 2>/dev/null)
+            if echo "$side_data" | grep -qi 'rotation'; then
+              NEED_REENCODE=1; REASON="has rotation (stream copy would preserve it)"
+            else
+              sar=$(ffprobe -v error -select_streams v:0 -show_entries stream=sample_aspect_ratio -of csv=p=0 "$LOCAL_FILE" 2>/dev/null)
+              if [ -n "$sar" ] && [ "$sar" != "1:1" ] && [ "$sar" != "0:1" ]; then
+                NEED_REENCODE=1; REASON="sar=$sar (stream copy would preserve it)"
+              fi
+            fi
+          fi
+
           if [ "$NEED_REENCODE" -eq 1 ]; then
             # 重编码为 Telegram 兼容格式（yuv420p + 偶数维度 + faststart）
             # -map 0:a? 处理无音频流的视频；setsar=1 确保方形像素
