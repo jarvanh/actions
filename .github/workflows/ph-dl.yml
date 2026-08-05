@@ -13,10 +13,6 @@ on:
   watch:
     types: started
 
-concurrency:
-  group: telegram-session
-  cancel-in-progress: false
-
 jobs:
   build:
     runs-on: ubuntu-latest
