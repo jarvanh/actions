@@ -1,0 +1,94 @@
+#!/bin/bash
+# 共享脚本：预处理单个视频文件并上传到 Telegram
+# 用法: process_one_file.sh <local_file> <channel_id> <caption_prefix>
+# 环境变量: GITHUB_WORKSPACE
+# 返回: 0=成功（已上传）, 1=失败
+
+set +e
+
+LOCAL_FILE="$1"
+CHANNEL_ID="$2"
+CAPTION_PREFIX="$3"
+
+FILENAME="$(basename "$LOCAL_FILE")"
+WORK_DIR="$(dirname "$LOCAL_FILE")"
+OUTPUT_FILE="$WORK_DIR/output.mp4"
+
+# 检测编码
+vcodec=$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$LOCAL_FILE" 2>/dev/null) || vcodec=""
+acodec=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 "$LOCAL_FILE" 2>/dev/null) || acodec=""
+pix_fmt=$(ffprobe -v error -select_streams v:0 -show_entries stream=pix_fmt -of csv=p=0 "$LOCAL_FILE" 2>/dev/null) || pix_fmt=""
+width=$(ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 "$LOCAL_FILE" 2>/dev/null) || width=0
+height=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "$LOCAL_FILE" 2>/dev/null) || height=0
+
+if [ -z "$vcodec" ]; then
+  echo "FAILED: cannot read codec: $FILENAME"
+  exit 1
+fi
+
+echo "OK: $FILENAME (${width}x${height}, vcodec=$vcodec, acodec=$acodec, pix_fmt=$pix_fmt)"
+
+# Telegram 流式播放要求：H.264 + AAC + yuv420p + 偶数维度 + faststart
+NEED_REENCODE=0
+REASON=""
+if [ "$vcodec" != "h264" ]; then
+  NEED_REENCODE=1; REASON="vcodec=$vcodec"
+elif [ "$acodec" != "aac" ]; then
+  NEED_REENCODE=1; REASON="acodec=$acodec"
+elif [ "$pix_fmt" != "yuv420p" ]; then
+  NEED_REENCODE=1; REASON="pix_fmt=$pix_fmt"
+elif [ $((width % 2)) -ne 0 ] || [ $((height % 2)) -ne 0 ]; then
+  NEED_REENCODE=1; REASON="odd dims ${width}x${height}"
+fi
+
+# 检测旋转元数据和非标准 SAR
+if [ "$NEED_REENCODE" -eq 0 ]; then
+  side_data=$(ffprobe -v error -select_streams v:0 -show_entries stream=side_data -of csv=p=0 "$LOCAL_FILE" 2>/dev/null)
+  if echo "$side_data" | grep -qi 'rotation'; then
+    NEED_REENCODE=1; REASON="has rotation"
+  else
+    sar=$(ffprobe -v error -select_streams v:0 -show_entries stream=sample_aspect_ratio -of csv=p=0 "$LOCAL_FILE" 2>/dev/null)
+    if [ -n "$sar" ] && [ "$sar" != "1:1" ] && [ "$sar" != "0:1" ]; then
+      NEED_REENCODE=1; REASON="sar=$sar"
+    fi
+  fi
+fi
+
+if [ "$NEED_REENCODE" -eq 1 ]; then
+  # 重编码为 Telegram 兼容格式
+  echo "Convert: $FILENAME ($REASON → h264/yuv420p/aac)"
+  if ffmpeg -y -i "$LOCAL_FILE" -map 0:v:0 -map 0:a? -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1" -c:a aac -movflags +faststart "$OUTPUT_FILE" 2>/dev/null && mv "$OUTPUT_FILE" "$LOCAL_FILE"; then
+    : # 成功
+  else
+    rm -f "$OUTPUT_FILE"
+    echo "FAILED: transcode failed ($REASON): $FILENAME"
+    exit 1
+  fi
+else
+  # 已是兼容格式，仅添加 faststart
+  echo "Faststart: $FILENAME"
+  if ffmpeg -y -i "$LOCAL_FILE" -c copy -movflags +faststart "$OUTPUT_FILE" 2>/dev/null && mv "$OUTPUT_FILE" "$LOCAL_FILE"; then
+    : # 成功
+  else
+    # faststart 失败 → 重编码兜底
+    rm -f "$OUTPUT_FILE"
+    echo "WARN: faststart failed, re-encoding: $FILENAME"
+    if ffmpeg -y -i "$LOCAL_FILE" -map 0:v:0 -map 0:a? -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1" -c:a aac -movflags +faststart "$OUTPUT_FILE" 2>/dev/null && mv "$OUTPUT_FILE" "$LOCAL_FILE"; then
+      : # 成功
+    else
+      rm -f "$OUTPUT_FILE"
+      echo "FAILED: faststart + transcode both failed: $FILENAME"
+      exit 1
+    fi
+  fi
+fi
+
+# 上传到 Telegram
+FILESIZE_HUMAN=$(du -h "$LOCAL_FILE" | cut -f1)
+if python3 "${GITHUB_WORKSPACE}/.github/scripts/upload_video.py" "$LOCAL_FILE" "$CHANNEL_ID" "${CAPTION_PREFIX}: $FILENAME ($FILESIZE_HUMAN)"; then
+  echo "SENT: $FILENAME"
+  exit 0
+else
+  echo "FAILED: telegram upload failed: $FILENAME"
+  exit 1
+fi
