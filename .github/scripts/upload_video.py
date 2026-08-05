@@ -1,13 +1,48 @@
 import os
 import sys
 import asyncio
+import subprocess
+import json
 
 try:
     from telethon import TelegramClient
     from telethon.sessions import StringSession
+    from telethon.tl.types import DocumentAttributeVideo
 except ImportError:
     print("Telethon library not found. Please install it first.")
     sys.exit(1)
+
+
+def get_video_attributes(file_path):
+    """用 ffprobe 读取视频元数据，返回 DocumentAttributeVideo。
+    显式提供 duration/width/height 确保 Telegram 以视频（可流式播放）而非文档方式接收。"""
+    try:
+        result = subprocess.run(
+            ['ffprobe', '-v', 'quiet', '-print_format', 'json',
+             '-show_format', '-show_streams', file_path],
+            capture_output=True, text=True, timeout=30
+        )
+        data = json.loads(result.stdout)
+        width = 0
+        height = 0
+        duration = 0
+        for stream in data.get('streams', []):
+            if stream.get('codec_type') == 'video':
+                width = int(stream.get('width', 0) or 0)
+                height = int(stream.get('height', 0) or 0)
+                break
+        fmt = data.get('format', {})
+        duration = int(float(fmt.get('duration', 0) or 0))
+        if width > 0 and height > 0:
+            return DocumentAttributeVideo(
+                duration=duration,
+                w=width,
+                h=height,
+                supports_streaming=True
+            )
+    except Exception as e:
+        print(f"Warning: Could not detect video metadata: {e}", file=sys.stderr)
+    return None
 
 api_id = os.environ.get('TG_API_ID')
 api_hash = os.environ.get('TG_API_HASH')
@@ -51,20 +86,29 @@ async def main():
         sys.exit(1)
 
     print(f"\nUploading {file_path} to {chat_id}...")
+    video_attributes = get_video_attributes(file_path)
+    if video_attributes:
+        print(f"Video attributes: {video_attributes.w}x{video_attributes.h}, duration={video_attributes.duration}s")
+    else:
+        print("Warning: No video attributes detected, uploading may be sent as document", file=sys.stderr)
+
     MAX_RETRIES = 3
     INITIAL_BACKOFF = 5
     last_error = None
     try:
         for attempt in range(1, MAX_RETRIES + 1):
             try:
-                await client.send_file(
-                    entity=chat_id,
-                    file=file_path,
-                    caption=caption,
-                    force_document=False,
-                    supports_streaming=True,
-                    progress_callback=progress_callback
-                )
+                send_kwargs = {
+                    'entity': chat_id,
+                    'file': file_path,
+                    'caption': caption,
+                    'force_document': False,
+                    'supports_streaming': True,
+                    'progress_callback': progress_callback,
+                }
+                if video_attributes:
+                    send_kwargs['attributes'] = [video_attributes]
+                await client.send_file(**send_kwargs)
                 print("\nUpload successful!")
                 return
             except Exception as e:
