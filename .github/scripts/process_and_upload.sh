@@ -16,8 +16,8 @@ mkdir -p "$TMP_DIR"
 rclone cat "$SOURCE_REMOTE/uploaded_videos.txt" 2>/dev/null > "$TMP_DIR/uploaded_videos.txt" || touch "$TMP_DIR/uploaded_videos.txt"
 
 # 列出源目录所有视频文件（按修改时间从旧到新排序）
-# 使用 --format "tp" 输出 TIME\tPATH，sort 按时间排序，cut 提取文件名
-rclone lsf "$SOURCE_REMOTE/" --files-only --format "tp" 2>/dev/null | sort | cut -f2- | grep -iE '\.(mp4|mkv|avi|mov|flv|wmv|webm|m4v|ts)$' > "$TMP_DIR/all_videos.txt" || true
+# --format "tp" 输出 TIME;PATH（分隔符为 ;），sort 按时间排序，cut 提取文件名
+rclone lsf "$SOURCE_REMOTE/" --files-only --format "tp" 2>/dev/null | sort | cut -d';' -f2- | grep -iE '\.(mp4|mkv|avi|mov|flv|wmv|webm|m4v|ts)$' > "$TMP_DIR/all_videos.txt" || true
 TOTAL_VIDEOS=$(wc -l < "$TMP_DIR/all_videos.txt")
 if [ "$TOTAL_VIDEOS" -eq 0 ]; then
   echo "WARN: 0 videos found, trying rclone lsf without --format..."
