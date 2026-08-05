@@ -1806,25 +1806,23 @@ jobs:
             local max_depth=10
             local subdir
 
-            # 仅在顶层检查同步标记
-            if [ "$current_depth" -eq 0 ]; then
-              check_sync_marker "$source_path" "$dest_path" "$task_name"
-              case "$MARKER_ACTION" in
-                skip)
-                  SYNC_SKIPPED=1
-                  SYNC_FAILED=0
-                  SYNC_TRANSFERRED_BYTES=0
-                  return 0
-                  ;;
-                warning)
-                  send_sync_warning "$task_name" "$source_path" "$dest_path"
-                  SYNC_SKIPPED=1
-                  SYNC_FAILED=0
-                  SYNC_TRANSFERRED_BYTES=0
-                  return 0
-                  ;;
-              esac
-            fi
+            # 所有层级都检查同步标记（子任务独立跟踪）
+            check_sync_marker "$source_path" "$dest_path" "$task_name"
+            case "$MARKER_ACTION" in
+              skip)
+                SYNC_SKIPPED=1
+                SYNC_FAILED=0
+                SYNC_TRANSFERRED_BYTES=0
+                return 0
+                ;;
+              warning)
+                send_sync_warning "$task_name" "$source_path" "$dest_path"
+                SYNC_SKIPPED=1
+                SYNC_FAILED=0
+                SYNC_TRANSFERRED_BYTES=0
+                return 0
+                ;;
+            esac
 
             # 50GB 阈值（带默认值，防止跨 step 环境变量丢失时为空）
             local threshold="${SYNC_SPLIT_THRESHOLD_BYTES:-50000000000}"
@@ -1843,13 +1841,11 @@ jobs:
               echo "源端大小 $(numfmt --to=iec-i --suffix=B "$source_size_bytes" 2>/dev/null || echo "${source_size_bytes}B") 未超过 50GB 阈值，直接同步"
               sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
               local _rc=$?
-              # 顶层同步成功后保存标记；失败则按开关对源目录超阈值大文件执行切割
-              if [ "$current_depth" -eq 0 ]; then
-                if [ "$SYNC_FAILED" = "0" ]; then
-                  save_sync_marker "$source_path" "$dest_path" "$task_name"
-                else
-                  split_large_files_after_sync_failure "$source_path" "$task_name"
-                fi
+              # 同步成功后保存标记；失败则按开关对源目录超阈值大文件执行切割
+              if [ "$SYNC_FAILED" = "0" ]; then
+                save_sync_marker "$source_path" "$dest_path" "$task_name"
+              elif [ "$current_depth" -eq 0 ]; then
+                split_large_files_after_sync_failure "$source_path" "$task_name"
               fi
               return $_rc
             fi
@@ -1859,13 +1855,11 @@ jobs:
               echo "已达最大拆分深度 ${max_depth}，按文件批次拆分 (depth=${current_depth}, size=$(numfmt --to=iec-i --suffix=B "$source_size_bytes" 2>/dev/null || echo "${source_size_bytes}B"))"
               sync_dir_by_file_batches "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
               local _rc=$?
-              # 顶层同步成功后保存标记；失败则按开关对源目录超阈值大文件执行切割
-              if [ "$current_depth" -eq 0 ]; then
-                if [ "$SYNC_FAILED" = "0" ]; then
-                  save_sync_marker "$source_path" "$dest_path" "$task_name"
-                else
-                  split_large_files_after_sync_failure "$source_path" "$task_name"
-                fi
+              # 同步成功后保存标记；失败则按开关对源目录超阈值大文件执行切割
+              if [ "$SYNC_FAILED" = "0" ]; then
+                save_sync_marker "$source_path" "$dest_path" "$task_name"
+              elif [ "$current_depth" -eq 0 ]; then
+                split_large_files_after_sync_failure "$source_path" "$task_name"
               fi
               return $_rc
             fi
@@ -1879,13 +1873,11 @@ jobs:
               echo "无子目录，按文件批次拆分同步"
               sync_dir_by_file_batches "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
               local _rc=$?
-              # 顶层同步成功后保存标记；失败则按开关对源目录超阈值大文件执行切割
-              if [ "$current_depth" -eq 0 ]; then
-                if [ "$SYNC_FAILED" = "0" ]; then
-                  save_sync_marker "$source_path" "$dest_path" "$task_name"
-                else
-                  split_large_files_after_sync_failure "$source_path" "$task_name"
-                fi
+              # 同步成功后保存标记；失败则按开关对源目录超阈值大文件执行切割
+              if [ "$SYNC_FAILED" = "0" ]; then
+                save_sync_marker "$source_path" "$dest_path" "$task_name"
+              elif [ "$current_depth" -eq 0 ]; then
+                split_large_files_after_sync_failure "$source_path" "$task_name"
               fi
               return $_rc
             fi
@@ -2021,6 +2013,10 @@ jobs:
               SYNC_SKIPPED=0
               SYNC_FAILED=0
               SYNC_TRANSFERRED_BYTES=$total_transferred
+              # 子任务全部成功后保存独立标记
+              if [ "$SYNC_FAILED" = "0" ] && [ "$failed_subtasks" -eq 0 ]; then
+                save_sync_marker "$source_path" "$dest_path" "$task_name"
+              fi
             fi
           }
           EOF
@@ -2035,6 +2031,25 @@ jobs:
             local task_name="$3"
             shift 3
             local extra_args=("$@")
+
+            # 检查同步标记（1天内已成功则跳过）
+            check_sync_marker "$source_path" "$dest_path" "$task_name"
+            case "$MARKER_ACTION" in
+              skip)
+                echo "跳过 ${task_name} 文件批次同步: 1天内已成功同步"
+                SYNC_SKIPPED=1
+                SYNC_FAILED=0
+                SYNC_TRANSFERRED_BYTES=0
+                return 0
+                ;;
+              warning)
+                send_sync_warning "$task_name" "$source_path" "$dest_path"
+                SYNC_SKIPPED=1
+                SYNC_FAILED=0
+                SYNC_TRANSFERRED_BYTES=0
+                return 0
+                ;;
+            esac
 
             local threshold="${SYNC_SPLIT_THRESHOLD_BYTES:-50000000000}"  # 50GB
             local batch_dir="/tmp/file_batches_${task_name}"
@@ -2163,6 +2178,11 @@ jobs:
             SYNC_SKIP_QUIET=0
             sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
             SYNC_SKIP_QUIET="$_saved_skip_quiet"
+
+            # 文件批次同步成功后保存标记
+            if [ "$SYNC_FAILED" = "0" ]; then
+              save_sync_marker "$source_path" "$dest_path" "$task_name"
+            fi
           }
           EOF
 
