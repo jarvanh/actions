@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       clean_all:
-        description: '清理 Telegram 频道所有视频并重置 uploaded_old_videos.txt + transcoded.txt'
+        description: '清理 Telegram 频道所有视频并重置 uploaded_videos.txt'
         type: boolean
         default: false
         required: false
@@ -169,78 +169,73 @@ jobs:
           pip3 install telethon
           # 删除 Telegram 频道所有消息
           python3 ${GITHUB_WORKSPACE}/.github/scripts/clean_channel.py "${TELEGRAM_CHANNEL_ID}"
-          # 清空 uploaded_old_videos.txt 和 transcoded.txt，使旧视频重新转码并上传
-          TARGET_DIR=~/onedrive/0/j-1024j-视频-pornhub-favorites
-          if [ -d "$TARGET_DIR" ]; then
-            : > "$TARGET_DIR/uploaded_old_videos.txt"
-            : > "$TARGET_DIR/transcoded.txt"
-            echo "Cleared uploaded_old_videos.txt and transcoded.txt"
-          fi
+          # 删除 uploaded_videos.txt，下次运行会重新处理所有视频
+          SOURCE_REMOTE="onedrive:0/j-1024j-视频-pornhub-favorites"
+          rclone delete "$SOURCE_REMOTE/uploaded_videos.txt" 2>/dev/null || true
+          echo "Deleted uploaded_videos.txt"
           # 发送通知
-          MSG="🧹 ph-dl 频道清理完成"$'\n\n'"📁 已清空 Telegram 频道所有视频"$'\n'"📄 已重置 uploaded_old_videos.txt + transcoded.txt"$'\n'"🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          MSG="🧹 ph-dl 频道清理完成"$'\n\n'"📁 已清空 Telegram 频道所有视频"$'\n'"📄 已删除 uploaded_videos.txt（下次运行重新处理全部视频）"$'\n'"🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
             --data-urlencode text="${MSG}"
 
-      - name: transcode existing videos for Telegram compatibility
+      - name: transcode and send videos to telegram
         env:
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          TG_SESSION_STRING: ${{ secrets.TG_SESSION }}
+          TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID_PH }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          sudo apt-get update
           sudo apt-get install -y ffmpeg
-          TARGET_DIR=~/onedrive/0/j-1024j-视频-pornhub-favorites
-          if [ ! -d "$TARGET_DIR" ]; then
-            echo "Directory not found: $TARGET_DIR"
-            exit 0
-          fi
-          cd "$TARGET_DIR"
+          pip3 install telethon
 
-          # 关闭 set -e，文件处理中的错误由脚本自行处理，避免单个文件失败导致整个步骤中断
-          set +e
-
-          # rclone 挂载的随机 seek 不稳定，cp 产生的副本可能损坏，导致 ffprobe 无法读取 codec。
-          # 直接用 rclone copy 从远程下载到本地临时目录，绕过 mount，再用 ffprobe/ffmpeg 处理。
-          TMP_DIR="/tmp/ph-dl-transcode"
+          SOURCE_REMOTE="onedrive:0/j-1024j-视频-pornhub-favorites"
+          TMP_DIR="/tmp/ph-dl-tg"
           mkdir -p "$TMP_DIR"
 
-          # 确认 ffprobe 可用
-          if ! command -v ffprobe &>/dev/null; then
-            echo "ERROR: ffprobe 不可用，跳过转码步骤"
+          # 读取 uploaded_videos.txt（记录已上传的文件名），rclone cat 绕过 mount
+          rclone cat "$SOURCE_REMOTE/uploaded_videos.txt" 2>/dev/null > "$TMP_DIR/uploaded_videos.txt" || touch "$TMP_DIR/uploaded_videos.txt"
+
+          # 列出源目录所有视频文件（按修改时间从旧到新排序）
+          rclone lsf "$SOURCE_REMOTE/" --files-only --sort-by modtime 2>/dev/null | grep -iE '\.mp4$' > "$TMP_DIR/all_videos.txt" || true
+          TOTAL_VIDEOS=$(wc -l < "$TMP_DIR/all_videos.txt")
+          echo "源目录视频总数: $TOTAL_VIDEOS"
+
+          # 过滤掉已上传的视频
+          grep -Fxvf "$TMP_DIR/uploaded_videos.txt" "$TMP_DIR/all_videos.txt" > "$TMP_DIR/pending.txt" 2>/dev/null || true
+          PENDING_COUNT=$(wc -l < "$TMP_DIR/pending.txt" 2>/dev/null || echo 0)
+          echo "待上传: $PENDING_COUNT"
+
+          if [ "$PENDING_COUNT" -eq 0 ] || [ ! -s "$TMP_DIR/pending.txt" ]; then
+            echo "没有新视频需要上传"
+            MSG="📺 ph-dl"$'\n'"📊 源目录: ${TOTAL_VIDEOS} 个视频"$'\n'"✅ 已上传: ${TOTAL_VIDEOS}"$'\n'"⏳ 待上传: 0"$'\n\n'"没有新视频需要上传"
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
+              --data-urlencode text="${MSG}"
             exit 0
           fi
-          REMOTE_BASE="onedrive:0/j-1024j-视频-pornhub-favorites"
 
-          CONVERTED=0
-          FASTSTART=0
-          SKIPPED=0
-          FAILED=0
-          CORRUPTED=0
-          TOTAL=0
-          CONVERTED_LIST=""
-          FAILED_LIST=""
-          CORRUPTED_LIST=""
-
-          touch transcoded.txt
           # 创建单文件处理脚本，供 xargs -P 并行调用
-          # 脚本写到本地 $TMP_DIR（rclone 挂载不支持 execute 权限）
-          cat << 'SCRIPT' > "$TMP_DIR/transcode_one.sh"
+          cat << 'SCRIPT' > process_one.sh
           #!/bin/bash
           set +e
           file="$1"
-          TMP_DIR="/tmp/ph-dl-transcode"
+          SOURCE_REMOTE="onedrive:0/j-1024j-视频-pornhub-favorites"
+          TMP_DIR="/tmp/ph-dl-tg"
           WORK_DIR="$TMP_DIR/$$"
-          REMOTE_BASE="onedrive:0/j-1024j-视频-pornhub-favorites"
-          REMOTE_PATH="$REMOTE_BASE/$file"
           LOCAL_FILE="$WORK_DIR/$file"
           OUTPUT_FILE="$WORK_DIR/output.mp4"
+          UPLOADED_PID="$TMP_DIR/uploaded_$$.txt"
+          ARCHIVE_FILE="$HOME/onedrive/0/j-1024j-视频-pornhub-favorites/archive.txt"
+
           mkdir -p "$WORK_DIR"
 
-          # 下载
-          rm -f "$LOCAL_FILE"
-          if ! rclone copy "$REMOTE_PATH" "$WORK_DIR/" 2>/dev/null || [ ! -f "$LOCAL_FILE" ]; then
-            echo "Skip (rclone copy failed): $file" >&2
-            echo "RESULT|SKIP|rclone copy failed|$file"
+          # 从 OneDrive 下载到本地（不修改原文件）
+          if ! rclone copy "$SOURCE_REMOTE/$file" "$WORK_DIR/" 2>/dev/null || [ ! -f "$LOCAL_FILE" ]; then
+            echo "RESULT|FAILED|rclone copy failed|$file" >&2
+            echo "RESULT|FAILED|rclone copy failed|$file"
             rm -rf "$WORK_DIR"
             exit 0
           fi
@@ -258,15 +253,15 @@ jobs:
             echo "Skip (cannot read codec): $file (size=$dst_size)" >&2
             if echo "$FFPROBE_ERR" | grep -q "moov atom not found"; then
               echo "  → 文件损坏（moov atom 缺失），删除远程文件并从 archive.txt 移除" >&2
-              rclone delete "$REMOTE_PATH" 2>/dev/null
+              rclone delete "$SOURCE_REMOTE/$file" 2>/dev/null
               id="${file%.*}"
               id="${id##*-}"
-              if [ -n "$id" ] && [ -f archive.txt ]; then
-                ( flock -x 200; grep -v "^${id}|" archive.txt > archive.txt.tmp 2>/dev/null && mv archive.txt.tmp archive.txt; ) 200>archive.txt.lock
+              if [ -n "$id" ] && [ -f "$ARCHIVE_FILE" ]; then
+                ( flock -x 200; grep -v "^${id}|" "$ARCHIVE_FILE" > "${ARCHIVE_FILE}.tmp" 2>/dev/null && mv "${ARCHIVE_FILE}.tmp" "$ARCHIVE_FILE"; ) 200>"${ARCHIVE_FILE}.lock"
               fi
               echo "RESULT|CORRUPTED||$file"
             else
-              echo "RESULT|SKIP|cannot read codec|$file"
+              echo "RESULT|FAILED|cannot read codec|$file"
             fi
             rm -rf "$WORK_DIR"
             exit 0
@@ -304,182 +299,120 @@ jobs:
           fi
 
           if [ "$NEED_REENCODE" -eq 1 ]; then
+            # 重编码为 Telegram 兼容格式（yuv420p + 偶数维度 + faststart）
             # -map 0:a? 处理无音频流的视频；setsar=1 确保方形像素
             echo "Convert: $file ($REASON → h264/yuv420p/aac)" >&2
             if ffmpeg -y -i "$LOCAL_FILE" -map 0:v:0 -map 0:a? -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1" -c:a aac -movflags +faststart "$OUTPUT_FILE" 2>"$WORK_DIR/ffmpeg.err" && mv "$OUTPUT_FILE" "$LOCAL_FILE" 2>/dev/null; then
-              if rclone copyto "$LOCAL_FILE" "$REMOTE_PATH" 2>/dev/null; then
-                echo "$file" >> transcoded.txt
-                echo "RESULT|CONVERTED|${REASON}|$file"
-              else
-                echo "RESULT|FAILED|复制回 OneDrive 失败|$file"
-              fi
+              : # 成功
             else
               rm -f "$OUTPUT_FILE"
               ERR=$(tail -3 "$WORK_DIR/ffmpeg.err" 2>/dev/null | tr '\n|' '  ' | cut -c1-200)
-              echo "RESULT|FAILED|转码失败 ($REASON): ${ERR}|$file"
+              echo "RESULT|FAILED|transcode failed ($REASON): ${ERR}|$file" >&2
+              echo "RESULT|FAILED|transcode failed ($REASON): ${ERR}|$file"
+              rm -rf "$WORK_DIR"
+              exit 0
             fi
           else
+            # 已是 H.264+AAC+yuv420p+偶数维度，仅添加 faststart
             echo "Faststart: $file" >&2
             if ffmpeg -y -i "$LOCAL_FILE" -c copy -movflags +faststart "$OUTPUT_FILE" 2>"$WORK_DIR/ffmpeg.err" && mv "$OUTPUT_FILE" "$LOCAL_FILE" 2>/dev/null; then
-              if rclone copyto "$LOCAL_FILE" "$REMOTE_PATH" 2>/dev/null; then
-                echo "$file" >> transcoded.txt
-                echo "RESULT|FASTSTART||$file"
-              else
-                echo "RESULT|FAILED|复制回 OneDrive 失败|$file"
-              fi
+              : # 成功
             else
-              # faststart 失败 → 重编码兜底
+              # faststart 失败 → 重编码兜底，不再上传无 faststart 的原文件
               rm -f "$OUTPUT_FILE"
               ERR1=$(tail -3 "$WORK_DIR/ffmpeg.err" 2>/dev/null | tr '\n|' '  ' | cut -c1-200)
               echo "WARN: faststart failed (${ERR1}), re-encoding: $file" >&2
               if ffmpeg -y -i "$LOCAL_FILE" -map 0:v:0 -map 0:a? -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1" -c:a aac -movflags +faststart "$OUTPUT_FILE" 2>"$WORK_DIR/ffmpeg.err" && mv "$OUTPUT_FILE" "$LOCAL_FILE" 2>/dev/null; then
-                if rclone copyto "$LOCAL_FILE" "$REMOTE_PATH" 2>/dev/null; then
-                  echo "$file" >> transcoded.txt
-                  echo "RESULT|CONVERTED|faststart fallback|$file"
-                else
-                  echo "RESULT|FAILED|复制回 OneDrive 失败|$file"
-                fi
+                : # 成功
               else
                 rm -f "$OUTPUT_FILE"
                 ERR2=$(tail -3 "$WORK_DIR/ffmpeg.err" 2>/dev/null | tr '\n|' '  ' | cut -c1-200)
+                echo "RESULT|FAILED|faststart(${ERR1}) + transcode(${ERR2}) both failed|$file" >&2
                 echo "RESULT|FAILED|faststart(${ERR1}) + transcode(${ERR2}) both failed|$file"
+                rm -rf "$WORK_DIR"
+                exit 0
               fi
             fi
           fi
+
+          # 上传到 Telegram 频道（CHANNEL_ID 从环境变量获取）
+          FILESIZE_HUMAN=$(du -h "$LOCAL_FILE" | cut -f1)
+          if python3 ${GITHUB_WORKSPACE}/.github/scripts/upload_video.py "$LOCAL_FILE" "$CHANNEL_ID" "ph: $file ($FILESIZE_HUMAN)"; then
+            echo "$file" >> "$UPLOADED_PID"
+            echo "RESULT|SENT||$file" >&2
+            echo "RESULT|SENT||$file"
+          else
+            echo "RESULT|FAILED|telegram upload failed|$file" >&2
+            echo "RESULT|FAILED|telegram upload failed|$file"
+          fi
+
           rm -rf "$WORK_DIR"
           SCRIPT
-          # 用 bash 调用，无需 execute 权限（rclone 挂载不支持 chmod +x）
+          chmod +x process_one.sh
 
-          # 收集待处理文件（跳过已处理），并行处理（nproc 个进程同时运行）
-          # 使用 -0 / NUL 分隔，避免文件名中的单引号/空格/特殊字符导致 xargs 报错
+          # 导出 CHANNEL_ID 供 process_one.sh 使用
+          export CHANNEL_ID="${TELEGRAM_CHANNEL_ID}"
+
+          # 并行处理（nproc 个进程同时运行）
+          # 使用 -d '\n' 指定换行为分隔符，禁用 xargs 对引号/反斜杠的特殊解释
           RESULTS_FILE="$TMP_DIR/results.txt"
           : > "$RESULTS_FILE"
-          for file in *.mp4; do
-            [ -e "$file" ] || continue
-            if grep -Fxq "$file" transcoded.txt 2>/dev/null; then
-              continue
-            fi
-            TOTAL=$((TOTAL + 1))
-            printf '%s\0' "$file"
-          done | xargs -0 -P "$(nproc)" -I {} bash "$TMP_DIR/transcode_one.sh" "{}" > "$RESULTS_FILE"
-          # 捕获 xargs 退出码（PIPESTATUS[1] 为管道中 xargs 的状态）
-          # 若 xargs 自身失败（例如参数解析错误、脚本不可执行），必须让本步骤失败，
-          # 否则后续 upload 步骤会把未转码的视频直接上传到 Telegram。
-          XARGS_EXIT=${PIPESTATUS[1]}
+          xargs -d '\n' -P "$(nproc)" -I {} ./process_one.sh "{}" < "$TMP_DIR/pending.txt" > "$RESULTS_FILE"
+          XARGS_EXIT=$?
+
+          # 合并各进程的 uploaded 文件到本地 uploaded_videos.txt
+          cat "$TMP_DIR"/uploaded_*.txt >> "$TMP_DIR/uploaded_videos.txt" 2>/dev/null || true
+
+          # 上传更新后的 uploaded_videos.txt 到 OneDrive
+          rclone copyto "$TMP_DIR/uploaded_videos.txt" "$SOURCE_REMOTE/uploaded_videos.txt" 2>/dev/null
 
           # 汇总结果
+          SENT=0
+          FAILED=0
+          CORRUPTED=0
+          SENT_LIST=""
+          FAILED_LIST=""
+          CORRUPTED_LIST=""
           while IFS='|' read -r prefix status detail file; do
             [ "$prefix" = "RESULT" ] || continue
             case "$status" in
-              CONVERTED) CONVERTED=$((CONVERTED + 1)); CONVERTED_LIST+="- ${file}（${detail} → h264/aac）"$'\n' ;;
-              FASTSTART) FASTSTART=$((FASTSTART + 1)) ;;
-              CORRUPTED) CORRUPTED=$((CORRUPTED + 1)); CORRUPTED_LIST+="- ${file}"$'\n' ;;
-              SKIP) SKIPPED=$((SKIPPED + 1)) ;;
+              SENT) SENT=$((SENT + 1)); SENT_LIST+="- ${file}"$'\n' ;;
               FAILED) FAILED=$((FAILED + 1)); FAILED_LIST+="- ${file}（${detail}）"$'\n' ;;
+              CORRUPTED) CORRUPTED=$((CORRUPTED + 1)); CORRUPTED_LIST+="- ${file}"$'\n' ;;
             esac
           done < "$RESULTS_FILE"
-          rm -rf "$TMP_DIR"
 
-          echo "=== 转码统计 ==="
-          echo "总计: ${TOTAL}，重编码: ${CONVERTED}，仅 faststart: ${FASTSTART}，跳过: ${SKIPPED}（其中损坏已删除: ${CORRUPTED}），失败: ${FAILED}"
-
-          # xargs 管道自身失败（非单文件转码失败）→ 阻断后续上传步骤，避免未转码视频被上传
+          # xargs 自身失败 → 发送告警并退出
           if [ "$XARGS_EXIT" -ne 0 ]; then
-            MSG="❌ ph-dl 转码步骤执行失败（xargs exit=${XARGS_EXIT}）"$'\n\n'"📁 目录: j-1024j-视频-pornhub-favorites"$'\n'"📊 待处理: ${TOTAL}"$'\n'"🎬 已重编码: ${CONVERTED}"$'\n'"⏭️ 跳过: ${SKIPPED}"$'\n'"❌ 失败: ${FAILED}"$'\n\n'"🚫 已阻断上传步骤，请检查 Actions 日志后重试"$'\n'"🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            MSG="❌ ph-dl 处理管道失败（xargs exit=${XARGS_EXIT}）"$'\n\n'"📊 待处理: ${PENDING_COUNT}"$'\n'"✅ 成功: ${SENT}"$'\n'"❌ 失败: ${FAILED}"$'\n\n'"⚠ xargs 可能因文件名特殊字符或脚本错误而中断，请检查 Actions 日志"$'\n'"🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
               --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
               --data-urlencode text="${MSG}" || true
             exit 1
           fi
 
+          echo "上传完成: 成功 $SENT, 失败 $FAILED, 损坏 $CORRUPTED"
+
           # 发送通知
-          if [ "$TOTAL" -gt 0 ] && { [ "$CONVERTED" -gt 0 ] || [ "$FAILED" -gt 0 ] || [ "$FASTSTART" -gt 0 ] || [ "$CORRUPTED" -gt 0 ]; }; then
-            MSG="🔄 ph-dl 旧视频转码完成"$'\n\n'"📁 目录: j-1024j-视频-pornhub-favorites"$'\n'"📊 总计: ${TOTAL}"$'\n'"🎬 重编码: ${CONVERTED}"$'\n'"⚡ 仅 faststart: ${FASTSTART}"$'\n'"⏭️ 跳过: ${SKIPPED}"$'\n'"🗑 损坏已删除: ${CORRUPTED}"$'\n'"❌ 失败: ${FAILED}"
-            if [ -n "$CONVERTED_LIST" ]; then
-              MSG+=$'\n\n'"📋 重编码列表:"$'\n'"${CONVERTED_LIST}"
-            fi
-            if [ -n "$FAILED_LIST" ]; then
-              MSG+=$'\n\n'"❌ 失败列表:"$'\n'"${FAILED_LIST}"
-            fi
-            if [ -n "$CORRUPTED_LIST" ]; then
-              MSG+=$'\n\n'"🗑 损坏已删除（下次运行将重新下载）:"$'\n'"${CORRUPTED_LIST}"
-            fi
-            MSG+=$'\n'"🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-              --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
-              --data-urlencode text="${MSG}" || true
+          MSG="📺 ph-dl 上传完成"$'\n\n'"📊 总计: ${PENDING_COUNT}"$'\n'"✅ 成功: ${SENT}"$'\n'"❌ 失败: ${FAILED}"
+          if [ "$CORRUPTED" -gt 0 ]; then
+            MSG+=$'\n'"🗑 损坏已删除: ${CORRUPTED}"
           fi
-          exit 0
-
-      - name: send old videos to telegram channel
-        env:
-          TG_API_ID: ${{ secrets.TG_API_ID }}
-          TG_API_HASH: ${{ secrets.TG_API_HASH }}
-          TG_SESSION_STRING: ${{ secrets.TG_SESSION }}
-          TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID_PH }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          pip3 install telethon
-          cd ~/onedrive/0/j-1024j-视频-pornhub-favorites 2>/dev/null || exit 0
-          ARCHIVE_FILE="uploaded_old_videos.txt"
-          touch "$ARCHIVE_FILE"
-          FAILED_FILES=""
-          SKIPPED_CODEC_LIST=""
-          TOTAL=0
-          SKIPPED=0
-          SUCCESS=0
-          FAILED=0
-          SKIPPED_CODEC=0
-          # 按文件更新时间从旧到新排序上传（使用进程替换以便 while 循环内变量可持久化）
-          while IFS= read -r file; do
-            [ -e "$file" ] || continue
-            TOTAL=$((TOTAL + 1))
-            # 跳过已成功上传的文件
-            if grep -Fxq "$file" "$ARCHIVE_FILE" 2>/dev/null; then
-              echo "Skip (already uploaded): $file"
-              SKIPPED=$((SKIPPED + 1))
-              continue
-            fi
-            # 校验编码：仅上传已转码为 h264/aac 的视频，避免上传未处理视频到 Telegram
-            # ffprobe 读 moov atom，转码后的文件已 +faststart（moov 在头部），读取很快
-            vcodec=$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$file" 2>/dev/null)
-            acodec=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 "$file" 2>/dev/null)
-            if [ "$vcodec" != "h264" ] || [ "$acodec" != "aac" ]; then
-              echo "Skip (not h264/aac: v=${vcodec:-?} a=${acodec:-?}): $file"
-              SKIPPED_CODEC=$((SKIPPED_CODEC + 1))
-              SKIPPED_CODEC_LIST+="- ${file} (v=${vcodec:-?} a=${acodec:-?})"$'\n'
-              continue
-            fi
-            FILESIZE_HUMAN=$(du -h "$file" | cut -f1)
-            if python3 ${GITHUB_WORKSPACE}/.github/scripts/upload_video.py "$file" "${TELEGRAM_CHANNEL_ID}" "Old video: ${file} (${FILESIZE_HUMAN})"; then
-              echo "$file" >> "$ARCHIVE_FILE"
-              SUCCESS=$((SUCCESS + 1))
-            else
-              FAILED=$((FAILED + 1))
-              FAILED_FILES="${FAILED_FILES}- ${file} (${FILESIZE_HUMAN})
-          "
-            fi
-            sleep 5 # 防止触发速率限制
-          done < <(ls -tr *.mp4 2>/dev/null)
-
-          echo "总计: ${TOTAL}，跳过(已上传): ${SKIPPED}，跳过(编码不符): ${SKIPPED_CODEC}，成功: ${SUCCESS}，失败: ${FAILED}"
-
-          # 编码不符汇总通知（这些文件未转码完成，不会上传）
-          if [ "$SKIPPED_CODEC" -gt 0 ]; then
-            MSG="⚠ ph-dl 旧视频上传跳过（编码不是 h264/aac）"$'\n\n'"📊 跳过数量: ${SKIPPED_CODEC}"$'\n\n'"📋 文件列表:"$'\n'"${SKIPPED_CODEC_LIST}"$'\n'"🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-              --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
-              --data-urlencode text="${MSG}" || true
+          if [ -n "$SENT_LIST" ]; then
+            MSG+=$'\n\n'"✅ 已上传:"$'\n'"${SENT_LIST}"
           fi
-
-          # 失败汇总通知
-          if [ "$FAILED" -gt 0 ]; then
-            MSG="ph-dl 旧视频上传失败汇总"$'\n'"总计: ${TOTAL}，跳过(已上传): ${SKIPPED}，跳过(编码不符): ${SKIPPED_CODEC}，成功: ${SUCCESS}，失败: ${FAILED}"$'\n'"失败文件:"$'\n'"${FAILED_FILES}"$'\n'"任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-              --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
-              --data-urlencode text="${MSG}"
+          if [ -n "$FAILED_LIST" ]; then
+            MSG+=$'\n\n'"❌ 失败:"$'\n'"${FAILED_LIST}"
           fi
+          if [ -n "$CORRUPTED_LIST" ]; then
+            MSG+=$'\n\n'"🗑 损坏已删除（下次运行将重新下载）:"$'\n'"${CORRUPTED_LIST}"
+          fi
+          MSG+=$'\n\n'"🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
+            --data-urlencode text="${MSG}"
+
+          rm -rf "$TMP_DIR"
 
       - name: run ph-dl favorites
         env:
@@ -535,7 +468,7 @@ jobs:
           # 文件完好，先上传到 Telegram（从临时文件直接上传）
           echo "- ${FILENAME} (${FILESIZE_HUMAN}) [链接](${URL})" >> new_downloads_list.txt
           if python3 ${GITHUB_WORKSPACE}/.github/scripts/upload_video.py "${FILEPATH}" "${TELEGRAM_CHANNEL_ID}" "Downloaded: ${FILENAME} (${FILESIZE_HUMAN})"; then
-            echo "${FILENAME}" >> uploaded_old_videos.txt
+            echo "${FILENAME}" >> uploaded_videos.txt
           fi
 
           # 上传到 OneDrive（覆盖已有文件），完成后删除临时文件
