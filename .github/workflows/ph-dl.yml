@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       clean_all:
-        description: '清理 Telegram 频道所有视频并重置 uploaded_old_videos.txt'
+        description: '清理 Telegram 频道所有视频并重置 uploaded_old_videos.txt + transcoded.txt'
         type: boolean
         default: false
         required: false
@@ -169,14 +169,15 @@ jobs:
           pip3 install telethon
           # 删除 Telegram 频道所有消息
           python3 ${GITHUB_WORKSPACE}/.github/scripts/clean_channel.py "${TELEGRAM_CHANNEL_ID}"
-          # 清空 uploaded_old_videos.txt，使旧视频重新上传
+          # 清空 uploaded_old_videos.txt 和 transcoded.txt，使旧视频重新转码并上传
           TARGET_DIR=~/onedrive/0/j-1024j-视频-pornhub-favorites
           if [ -d "$TARGET_DIR" ]; then
             : > "$TARGET_DIR/uploaded_old_videos.txt"
-            echo "Cleared uploaded_old_videos.txt"
+            : > "$TARGET_DIR/transcoded.txt"
+            echo "Cleared uploaded_old_videos.txt and transcoded.txt"
           fi
           # 发送通知
-          MSG="🧹 ph-dl 频道清理完成"$'\n\n'"📁 已清空 Telegram 频道所有视频"$'\n'"📄 已重置 uploaded_old_videos.txt"$'\n'"🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          MSG="🧹 ph-dl 频道清理完成"$'\n\n'"📁 已清空 Telegram 频道所有视频"$'\n'"📄 已重置 uploaded_old_videos.txt + transcoded.txt"$'\n'"🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
             --data-urlencode text="${MSG}"
