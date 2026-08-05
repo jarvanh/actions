@@ -4,6 +4,12 @@ on:
   schedule:
     - cron: '0 7 * * *'
   workflow_dispatch:
+    inputs:
+      clean_all:
+        description: '清理 Telegram 频道所有视频并重置 sent.txt'
+        type: boolean
+        default: false
+        required: false
 
 jobs:
   build:
@@ -32,6 +38,28 @@ jobs:
           mkdir ~/onedrive
           nohup rclone --vfs-cache-mode full mount onedrive: ~/onedrive &
           sleep 3
+      - name: clean telegram channel and reset sent.txt
+        if: github.event.inputs.clean_all == 'true'
+        env:
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          TG_SESSION_STRING: ${{ secrets.TG_SESSION }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          pip3 install telethon
+          CHANNEL_ID="-1004369945681"
+          SOURCE_REMOTE="onedrive:1/1024j/视频/91"
+          # 删除 Telegram 频道所有消息
+          python3 ${GITHUB_WORKSPACE}/.github/scripts/clean_channel.py "$CHANNEL_ID"
+          # 删除 sent.txt，下次运行会重新处理所有视频
+          rclone delete "$SOURCE_REMOTE/sent.txt" 2>/dev/null || true
+          echo "Deleted sent.txt"
+          # 发送通知
+          MSG="🧹 91-tg 频道清理完成"$'\n\n'"📁 已清空 Telegram 频道所有视频"$'\n'"📄 已删除 sent.txt（下次运行重新处理全部视频）"$'\n'"🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
+            --data-urlencode text="${MSG}"
       - name: send videos to telegram
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
