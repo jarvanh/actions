@@ -233,6 +233,7 @@ jobs:
           REMOTE_BASE="onedrive:0/j-1024j-视频-pornhub-favorites"
           REMOTE_PATH="$REMOTE_BASE/$file"
           LOCAL_FILE="$WORK_DIR/$file"
+          OUTPUT_FILE="$WORK_DIR/output.mp4"
           mkdir -p "$WORK_DIR"
 
           # 下载
@@ -289,7 +290,7 @@ jobs:
           if [ "$NEED_REENCODE" -eq 1 ]; then
             # -map 0:a? 处理无音频流的视频；setsar=1 确保方形像素
             echo "Convert: $file ($REASON → h264/yuv420p/aac)" >&2
-            if ffmpeg -y -i "$LOCAL_FILE" -map 0:v:0 -map 0:a? -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1" -c:a aac -movflags +faststart "${LOCAL_FILE}.tmp" 2>"$WORK_DIR/ffmpeg.err" && mv "${LOCAL_FILE}.tmp" "$LOCAL_FILE" 2>/dev/null; then
+            if ffmpeg -y -i "$LOCAL_FILE" -map 0:v:0 -map 0:a? -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1" -c:a aac -movflags +faststart "$OUTPUT_FILE" 2>"$WORK_DIR/ffmpeg.err" && mv "$OUTPUT_FILE" "$LOCAL_FILE" 2>/dev/null; then
               if rclone copyto "$LOCAL_FILE" "$REMOTE_PATH" 2>/dev/null; then
                 echo "$file" >> transcoded.txt
                 echo "RESULT|CONVERTED|${REASON}|$file"
@@ -297,13 +298,13 @@ jobs:
                 echo "RESULT|FAILED|复制回 OneDrive 失败|$file"
               fi
             else
-              rm -f "${LOCAL_FILE}.tmp"
+              rm -f "$OUTPUT_FILE"
               ERR=$(tail -3 "$WORK_DIR/ffmpeg.err" 2>/dev/null | tr '\n|' '  ' | cut -c1-200)
               echo "RESULT|FAILED|转码失败 ($REASON): ${ERR}|$file"
             fi
           else
             echo "Faststart: $file" >&2
-            if ffmpeg -y -i "$LOCAL_FILE" -c copy -movflags +faststart "${LOCAL_FILE}.tmp" 2>"$WORK_DIR/ffmpeg.err" && mv "${LOCAL_FILE}.tmp" "$LOCAL_FILE" 2>/dev/null; then
+            if ffmpeg -y -i "$LOCAL_FILE" -c copy -movflags +faststart "$OUTPUT_FILE" 2>"$WORK_DIR/ffmpeg.err" && mv "$OUTPUT_FILE" "$LOCAL_FILE" 2>/dev/null; then
               if rclone copyto "$LOCAL_FILE" "$REMOTE_PATH" 2>/dev/null; then
                 echo "$file" >> transcoded.txt
                 echo "RESULT|FASTSTART||$file"
@@ -312,10 +313,10 @@ jobs:
               fi
             else
               # faststart 失败 → 重编码兜底
-              rm -f "${LOCAL_FILE}.tmp"
+              rm -f "$OUTPUT_FILE"
               ERR1=$(tail -3 "$WORK_DIR/ffmpeg.err" 2>/dev/null | tr '\n|' '  ' | cut -c1-200)
               echo "WARN: faststart failed (${ERR1}), re-encoding: $file" >&2
-              if ffmpeg -y -i "$LOCAL_FILE" -map 0:v:0 -map 0:a? -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1" -c:a aac -movflags +faststart "${LOCAL_FILE}.tmp" 2>"$WORK_DIR/ffmpeg.err" && mv "${LOCAL_FILE}.tmp" "$LOCAL_FILE" 2>/dev/null; then
+              if ffmpeg -y -i "$LOCAL_FILE" -map 0:v:0 -map 0:a? -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1" -c:a aac -movflags +faststart "$OUTPUT_FILE" 2>"$WORK_DIR/ffmpeg.err" && mv "$OUTPUT_FILE" "$LOCAL_FILE" 2>/dev/null; then
                 if rclone copyto "$LOCAL_FILE" "$REMOTE_PATH" 2>/dev/null; then
                   echo "$file" >> transcoded.txt
                   echo "RESULT|CONVERTED|faststart fallback|$file"
@@ -323,7 +324,7 @@ jobs:
                   echo "RESULT|FAILED|复制回 OneDrive 失败|$file"
                 fi
               else
-                rm -f "${LOCAL_FILE}.tmp"
+                rm -f "$OUTPUT_FILE"
                 ERR2=$(tail -3 "$WORK_DIR/ffmpeg.err" 2>/dev/null | tr '\n|' '  ' | cut -c1-200)
                 echo "RESULT|FAILED|faststart(${ERR1}) + transcode(${ERR2}) both failed|$file"
               fi
