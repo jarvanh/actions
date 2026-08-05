@@ -96,6 +96,9 @@ jobs:
           # 检测编码
           vcodec=$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$LOCAL_FILE" 2>/dev/null) || vcodec=""
           acodec=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 "$LOCAL_FILE" 2>/dev/null) || acodec=""
+          pix_fmt=$(ffprobe -v error -select_streams v:0 -show_entries stream=pix_fmt -of csv=p=0 "$LOCAL_FILE" 2>/dev/null) || pix_fmt=""
+          width=$(ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 "$LOCAL_FILE" 2>/dev/null) || width=0
+          height=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "$LOCAL_FILE" 2>/dev/null) || height=0
 
           if [ -z "$vcodec" ]; then
             echo "Skip (cannot read codec): $file" >&2
@@ -104,29 +107,52 @@ jobs:
             exit 0
           fi
 
-          echo "OK: $file (size=$dst_size, vcodec=$vcodec, acodec=$acodec)" >&2
+          echo "OK: $file (size=$dst_size, ${width}x${height}, vcodec=$vcodec, acodec=$acodec, pix_fmt=$pix_fmt)" >&2
 
-          # 确保 Telegram 兼容（H.264+AAC+faststart）
-          if [ "$vcodec" = "h264" ] && [ "$acodec" = "aac" ]; then
-            # 已是 H.264+AAC，仅添加 faststart（秒级完成）
+          # Telegram 流式播放要求：H.264 + AAC + yuv420p + 偶数维度 + faststart
+          # 不满足任一条件就重编码，否则仅加 faststart
+          NEED_REENCODE=0
+          REASON=""
+          if [ "$vcodec" != "h264" ]; then
+            NEED_REENCODE=1; REASON="vcodec=$vcodec"
+          elif [ "$acodec" != "aac" ]; then
+            NEED_REENCODE=1; REASON="acodec=$acodec"
+          elif [ "$pix_fmt" != "yuv420p" ]; then
+            NEED_REENCODE=1; REASON="pix_fmt=$pix_fmt"
+          elif [ $((width % 2)) -ne 0 ] || [ $((height % 2)) -ne 0 ]; then
+            NEED_REENCODE=1; REASON="odd dims ${width}x${height}"
+          fi
+
+          if [ "$NEED_REENCODE" -eq 1 ]; then
+            # 重编码为 Telegram 兼容格式（yuv420p + 偶数维度 + faststart）
+            echo "Convert: $file ($REASON → h264/yuv420p/aac)" >&2
+            if ffmpeg -y -i "$LOCAL_FILE" -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -movflags +faststart "${LOCAL_FILE}.tmp" 2>/dev/null && mv "${LOCAL_FILE}.tmp" "$LOCAL_FILE" 2>/dev/null; then
+              : # 成功
+            else
+              rm -f "${LOCAL_FILE}.tmp"
+              echo "RESULT|FAILED|transcode failed ($REASON)|$file" >&2
+              echo "RESULT|FAILED|transcode failed ($REASON)|$file"
+              rm -rf "$WORK_DIR"
+              exit 0
+            fi
+          else
+            # 已是 H.264+AAC+yuv420p+偶数维度，仅添加 faststart
             echo "Faststart: $file" >&2
             if ffmpeg -y -i "$LOCAL_FILE" -c copy -movflags +faststart "${LOCAL_FILE}.tmp" 2>/dev/null && mv "${LOCAL_FILE}.tmp" "$LOCAL_FILE" 2>/dev/null; then
               : # 成功
             else
+              # faststart 失败 → 重编码兜底，不再上传无 faststart 的原文件
               rm -f "${LOCAL_FILE}.tmp"
-              echo "WARN: faststart failed, using original: $file" >&2
-            fi
-          else
-            # 非 H.264+AAC，需重编码
-            echo "Convert: $file (${vcodec}/${acodec} → h264/aac)" >&2
-            if ffmpeg -y -i "$LOCAL_FILE" -c:v libx264 -preset fast -c:a aac -movflags +faststart "${LOCAL_FILE}.tmp" 2>/dev/null && mv "${LOCAL_FILE}.tmp" "$LOCAL_FILE" 2>/dev/null; then
-              : # 成功
-            else
-              rm -f "${LOCAL_FILE}.tmp"
-              echo "RESULT|FAILED|transcode failed|$file" >&2
-              echo "RESULT|FAILED|transcode failed|$file"
-              rm -rf "$WORK_DIR"
-              exit 0
+              echo "WARN: faststart failed, re-encoding: $file" >&2
+              if ffmpeg -y -i "$LOCAL_FILE" -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p -c:a aac -movflags +faststart "${LOCAL_FILE}.tmp" 2>/dev/null && mv "${LOCAL_FILE}.tmp" "$LOCAL_FILE" 2>/dev/null; then
+                : # 成功
+              else
+                rm -f "${LOCAL_FILE}.tmp"
+                echo "RESULT|FAILED|faststart and transcode both failed|$file" >&2
+                echo "RESULT|FAILED|faststart and transcode both failed|$file"
+                rm -rf "$WORK_DIR"
+                exit 0
+              fi
             fi
           fi
 
