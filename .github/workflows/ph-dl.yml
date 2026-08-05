@@ -5,7 +5,7 @@ on:
     - cron: '0 3 * * *'
   workflow_dispatch:
     inputs:
-      clean_all:
+      clean_tg_uploaded_videos:
         description: '清理 Telegram 频道所有视频并重置 uploaded_videos.txt'
         type: boolean
         default: false
@@ -157,7 +157,7 @@ jobs:
             --data-urlencode text="${MSG}"
 
       - name: clean telegram channel and reset upload archive
-        if: github.event.inputs.clean_all == 'true'
+        if: github.event.inputs.clean_tg_uploaded_videos == 'true'
         env:
           TG_API_ID: ${{ secrets.TG_API_ID }}
           TG_API_HASH: ${{ secrets.TG_API_HASH }}
