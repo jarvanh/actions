@@ -46,7 +46,6 @@ while IFS= read -r file; do
 
   WORK_DIR="$TMP_DIR/work"
   LOCAL_FILE="$WORK_DIR/$file"
-  OUTPUT_FILE="$WORK_DIR/output.mp4"
 
   rm -rf "$WORK_DIR"
   mkdir -p "$WORK_DIR"
@@ -60,97 +59,14 @@ while IFS= read -r file; do
     continue
   fi
 
-  # 检测编码
-  vcodec=$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$LOCAL_FILE" 2>/dev/null) || vcodec=""
-  acodec=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 "$LOCAL_FILE" 2>/dev/null) || acodec=""
-  pix_fmt=$(ffprobe -v error -select_streams v:0 -show_entries stream=pix_fmt -of csv=p=0 "$LOCAL_FILE" 2>/dev/null) || pix_fmt=""
-  width=$(ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 "$LOCAL_FILE" 2>/dev/null) || width=0
-  height=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "$LOCAL_FILE" 2>/dev/null) || height=0
-
-  if [ -z "$vcodec" ]; then
-    echo "FAILED: cannot read codec: $file"
-    FAILED=$((FAILED + 1))
-    FAILED_LIST+="- ${file}（cannot read codec）"$'\n'
-    rm -rf "$WORK_DIR"
-    continue
-  fi
-
-  echo "OK: $file (${width}x${height}, vcodec=$vcodec, acodec=$acodec, pix_fmt=$pix_fmt)"
-
-  # Telegram 流式播放要求：H.264 + AAC + yuv420p + 偶数维度 + faststart
-  NEED_REENCODE=0
-  REASON=""
-  if [ "$vcodec" != "h264" ]; then
-    NEED_REENCODE=1; REASON="vcodec=$vcodec"
-  elif [ "$acodec" != "aac" ]; then
-    NEED_REENCODE=1; REASON="acodec=$acodec"
-  elif [ "$pix_fmt" != "yuv420p" ]; then
-    NEED_REENCODE=1; REASON="pix_fmt=$pix_fmt"
-  elif [ $((width % 2)) -ne 0 ] || [ $((height % 2)) -ne 0 ]; then
-    NEED_REENCODE=1; REASON="odd dims ${width}x${height}"
-  fi
-
-  # 检测旋转元数据和非标准 SAR：
-  # stream copy 会原样保留 rotation 和 SAR，Telegram 播放器可能不尊重这些元数据。
-  # 重编码时 ffmpeg 会自动应用旋转（autorotate）并通过 setsar=1 归一化像素比例。
-  if [ "$NEED_REENCODE" -eq 0 ]; then
-    side_data=$(ffprobe -v error -select_streams v:0 -show_entries stream=side_data -of csv=p=0 "$LOCAL_FILE" 2>/dev/null)
-    if echo "$side_data" | grep -qi 'rotation'; then
-      NEED_REENCODE=1; REASON="has rotation"
-    else
-      sar=$(ffprobe -v error -select_streams v:0 -show_entries stream=sample_aspect_ratio -of csv=p=0 "$LOCAL_FILE" 2>/dev/null)
-      if [ -n "$sar" ] && [ "$sar" != "1:1" ] && [ "$sar" != "0:1" ]; then
-        NEED_REENCODE=1; REASON="sar=$sar"
-      fi
-    fi
-  fi
-
-  if [ "$NEED_REENCODE" -eq 1 ]; then
-    # 重编码为 Telegram 兼容格式（yuv420p + 偶数维度 + faststart）
-    echo "Convert: $file ($REASON → h264/yuv420p/aac)"
-    if ffmpeg -y -i "$LOCAL_FILE" -map 0:v:0 -map 0:a? -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1" -c:a aac -movflags +faststart "$OUTPUT_FILE" 2>/dev/null && mv "$OUTPUT_FILE" "$LOCAL_FILE"; then
-      : # 成功
-    else
-      rm -f "$OUTPUT_FILE"
-      echo "FAILED: transcode failed ($REASON): $file"
-      FAILED=$((FAILED + 1))
-      FAILED_LIST+="- ${file}（transcode failed: ${REASON}）"$'\n'
-      rm -rf "$WORK_DIR"
-      continue
-    fi
-  else
-    # 已是兼容格式，仅添加 faststart
-    echo "Faststart: $file"
-    if ffmpeg -y -i "$LOCAL_FILE" -c copy -movflags +faststart "$OUTPUT_FILE" 2>/dev/null && mv "$OUTPUT_FILE" "$LOCAL_FILE"; then
-      : # 成功
-    else
-      # faststart 失败 → 重编码兜底
-      rm -f "$OUTPUT_FILE"
-      echo "WARN: faststart failed, re-encoding: $file"
-      if ffmpeg -y -i "$LOCAL_FILE" -map 0:v:0 -map 0:a? -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1" -c:a aac -movflags +faststart "$OUTPUT_FILE" 2>/dev/null && mv "$OUTPUT_FILE" "$LOCAL_FILE"; then
-        : # 成功
-      else
-        rm -f "$OUTPUT_FILE"
-        echo "FAILED: faststart + transcode both failed: $file"
-        FAILED=$((FAILED + 1))
-        FAILED_LIST+="- ${file}（faststart + transcode failed）"$'\n'
-        rm -rf "$WORK_DIR"
-        continue
-      fi
-    fi
-  fi
-
-  # 上传到 Telegram 频道
-  FILESIZE_HUMAN=$(du -h "$LOCAL_FILE" | cut -f1)
-  if python3 "${GITHUB_WORKSPACE}/.github/scripts/upload_video.py" "$LOCAL_FILE" "$CHANNEL_ID" "${CAPTION_PREFIX}: $file ($FILESIZE_HUMAN)"; then
+  # 预处理（转码/faststart）并上传到 Telegram
+  if bash "${GITHUB_WORKSPACE}/.github/scripts/process_one_file.sh" "$LOCAL_FILE" "$CHANNEL_ID" "$CAPTION_PREFIX"; then
     echo "$file" >> "$TMP_DIR/uploaded_videos.txt"
     SENT=$((SENT + 1))
     SENT_LIST+="- ${file}"$'\n'
-    echo "SENT: $file"
   else
-    echo "FAILED: telegram upload failed: $file"
     FAILED=$((FAILED + 1))
-    FAILED_LIST+="- ${file}（telegram upload failed）"$'\n'
+    FAILED_LIST+="- ${file}"$'\n'
   fi
 
   rm -rf "$WORK_DIR"
