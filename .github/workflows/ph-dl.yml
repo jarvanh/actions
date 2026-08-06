@@ -60,7 +60,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           AUTO_DELETE: ${{ github.event.inputs.auto_delete_corrupted == 'true' }}
         run: |
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg fuse
           SOURCE_REMOTE="onedrive:0/j-1024j-视频-pornhub-favorites"
           mapfile -t ALL_FILES < <(rclone lsf "$SOURCE_REMOTE/" --files-only 2>/dev/null | grep -iE '\.mp4$')
           TOTAL=${#ALL_FILES[@]}
@@ -75,7 +75,7 @@ jobs:
           # 仅通过 range request 下载所需字节范围（1-2MB），无需从头流式传输整个文件
           mkdir -p /tmp/od-fast
           nohup rclone --vfs-cache-mode minimal --read-only \
-            --attr-timeout 30s --dir-cache-time 30s mount onedrive: /tmp/od-fast >/dev/null 2>&1 &
+            --attr-timeout 30s --dir-cache-time 30s mount onedrive: /tmp/od-fast >/tmp/rclone_mount.log 2>&1 &
           MOUNT_PID=$!
           for i in $(seq 1 15); do
             ls /tmp/od-fast/ >/dev/null 2>&1 && break
@@ -84,6 +84,8 @@ jobs:
           FAST_DIR="/tmp/od-fast/0/j-1024j-视频-pornhub-favorites"
           if [ ! -d "$FAST_DIR" ]; then
             echo "❌ minimal-cache mount 启动失败，回退到 rclone cat 模式"
+            echo "--- mount 错误日志 ---"
+            tail -n 5 /tmp/rclone_mount.log 2>/dev/null || true
             kill $MOUNT_PID 2>/dev/null || true
             FAST_DIR=""
           fi
@@ -106,7 +108,8 @@ jobs:
               fi
             else
               # 模式2（回退）: rclone cat 流式传输，head 限制 10MB 下载量
-              if ! rclone cat "$SOURCE_REMOTE/$FILE" 2>/dev/null | head -c 10485760 | \
+              # head 2>/dev/null 抑制 ffprobe 提前退出导致的 Broken pipe 噪音
+              if ! rclone cat "$SOURCE_REMOTE/$FILE" 2>/dev/null | head -c 10485760 2>/dev/null | \
                    timeout 30 ffprobe -probesize 10485760 -analyzeduration 2000000 -v error \
                    -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 - 2>/dev/null | grep -q .; then
                 echo "$FILE"
