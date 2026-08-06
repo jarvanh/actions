@@ -244,7 +244,6 @@ jobs:
         run: |
           sudo apt-get install -y ffmpeg
           SOURCE_REMOTE="onedrive:0/j-1024j-视频-pornhub-favorites"
-          # 列出所有 mp4 文件（不经过 mount，避免修改文件元数据）
           mapfile -t ALL_FILES < <(rclone lsf "$SOURCE_REMOTE/" --files-only 2>/dev/null | grep -iE '\.mp4$')
           TOTAL=${#ALL_FILES[@]}
           if [ "$TOTAL" -eq 0 ]; then
@@ -252,35 +251,97 @@ jobs:
             exit 0
           fi
 
-          CORRUPTED_LIST=""
-          CORRUPTED_COUNT=0
-          CHECKED=0
-          for file in "${ALL_FILES[@]}"; do
-            CHECKED=$((CHECKED + 1))
-            echo "[$CHECKED/$TOTAL] 检测: $file"
-            # 用 rclone cat 流式传输给 ffprobe 检测（不经过 mount，不修改元数据）
-            # probesize 限制分析 50MB，timeout 限制单文件 60 秒；faststart 文件几秒内即可判定
-            if ! rclone cat "$SOURCE_REMOTE/$file" 2>/dev/null | \
-                 timeout 60 ffprobe -probesize 52428800 -analyzeduration 10000000 -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 - 2>/dev/null | grep -q .; then
-              CORRUPTED_COUNT=$((CORRUPTED_COUNT + 1))
-              CORRUPTED_LIST+=$'- '"${file}"$'\n'
-              if [ "$AUTO_DELETE" = "true" ]; then
-                if rclone deletefile "$SOURCE_REMOTE/$file" 2>/tmp/rclone_err.log; then
-                  echo "  🗑 已删除"
-                else
-                  echo "  ❌ 删除失败: $(tail -n 3 /tmp/rclone_err.log)"
-                fi
-              else
-                echo "  ⚠ 可能无效（已跳过删除）"
-              fi
-            fi
+          echo "📊 共 $TOTAL 个 mp4 文件，开始并行检测（8 并发）..."
+
+          # 启动 minimal-cache 只读 mount：ffprobe 可 seek 查找 moov atom
+          # 仅通过 range request 下载所需字节范围（1-2MB），无需从头流式传输整个文件
+          mkdir -p /tmp/od-fast
+          nohup rclone --vfs-cache-mode minimal --read-only \
+            --attr-timeout 30s --dir-cache-time 30s mount onedrive: /tmp/od-fast >/dev/null 2>&1 &
+          MOUNT_PID=$!
+          for i in $(seq 1 15); do
+            ls /tmp/od-fast/ >/dev/null 2>&1 && break
+            sleep 1
           done
+          FAST_DIR="/tmp/od-fast/0/j-1024j-视频-pornhub-favorites"
+          if [ ! -d "$FAST_DIR" ]; then
+            echo "❌ minimal-cache mount 启动失败，回退到 rclone cat 模式"
+            kill $MOUNT_PID 2>/dev/null || true
+            FAST_DIR=""
+          fi
+
+          # 检测脚本（文件名作为参数传入，避免特殊字符问题；进度输出到 stderr）
+          cat > /tmp/check_corrupted.sh << 'SCRIPT'
+#!/bin/bash
+SOURCE_REMOTE="$1"
+FILE="$2"
+TOTAL="$3"
+FAST_DIR="$4"
+PROGRESS_FILE="/tmp/check_progress"
+
+# 原子计数器 + 进度输出到 stderr（不干扰 stdout 结果收集）
+{
+  flock 9
+  CUR=$(cat "$PROGRESS_FILE" 2>/dev/null || echo 0)
+  CUR=$((CUR + 1))
+  echo $CUR > "$PROGRESS_FILE"
+  echo "[$CUR/$TOTAL] 检测: $FILE" >&2
+} 9>"${PROGRESS_FILE}.lock"
+
+if [ -n "$FAST_DIR" ]; then
+  # 模式1: minimal-cache mount，ffprobe 可 seek，仅下载 moov atom 所在字节范围
+  if ! timeout 30 ffprobe -v error -select_streams v:0 -show_entries stream=codec_name \
+       -of csv=p=0 "${FAST_DIR}/${FILE}" 2>/dev/null | grep -q .; then
+    echo "$FILE"
+  fi
+else
+  # 模式2（回退）: rclone cat 流式传输，head 限制 10MB 下载量
+  if ! rclone cat "$SOURCE_REMOTE/$FILE" 2>/dev/null | head -c 10485760 | \
+       timeout 30 ffprobe -probesize 10485760 -analyzeduration 2000000 -v error \
+       -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 - 2>/dev/null | grep -q .; then
+    echo "$FILE"
+  fi
+fi
+SCRIPT
+          chmod +x /tmp/check_corrupted.sh
+
+          echo 0 > /tmp/check_progress
+
+          # 并行检测（8 并发），stdout 仅输出 corrupted 文件名
+          CORRUPTED_LIST=$(printf '%s\n' "${ALL_FILES[@]}" \
+            | xargs -P 8 -I {} /tmp/check_corrupted.sh "$SOURCE_REMOTE" {} "$TOTAL" "$FAST_DIR")
+
+          # 清理 minimal-cache mount
+          if [ -n "$FAST_DIR" ]; then
+            sudo fusermount -uz /tmp/od-fast 2>/dev/null || true
+            kill $MOUNT_PID 2>/dev/null || true
+          fi
+
+          CORRUPTED_COUNT=0
+          if [ -n "$CORRUPTED_LIST" ]; then
+            CORRUPTED_COUNT=$(echo "$CORRUPTED_LIST" | wc -l)
+          fi
 
           echo "=== 无效视频检测日志 ==="
           echo "检测总数: ${TOTAL}"
           echo "无效视频: ${CORRUPTED_COUNT}"
 
           if [ "$CORRUPTED_COUNT" -gt 0 ]; then
+            if [ "$AUTO_DELETE" = "true" ]; then
+              echo "$CORRUPTED_LIST" | while IFS= read -r file; do
+                [ -z "$file" ] && continue
+                if rclone deletefile "$SOURCE_REMOTE/$file" 2>/tmp/rclone_err.log; then
+                  echo "  🗑 已删除: $file"
+                else
+                  echo "  ❌ 删除失败: $file: $(tail -n 3 /tmp/rclone_err.log)"
+                fi
+              done
+            else
+              echo "$CORRUPTED_LIST" | while IFS= read -r file; do
+                echo "  ⚠ 可能无效: $file"
+              done
+            fi
+
             source "${GITHUB_WORKSPACE}/.github/scripts/tg_notify.sh"
             HEADER="🗑 ph-dl 无效视频检测"$'\n\n'"📁 目录: j-1024j-视频-pornhub-favorites"$'\n'"📊 检测总数: ${TOTAL}"$'\n'"⚠ 无效视频: ${CORRUPTED_COUNT}"
             if [ "$AUTO_DELETE" = "true" ]; then
@@ -289,7 +350,7 @@ jobs:
               HEADER+=$'\n'"⚙️ 模式: 仅通知未删除（手动触发可开启 auto_delete_corrupted）"
             fi
             send_tg "$HEADER"
-            send_tg_chunked "📋 无效文件列表:"$'\n\n'"${CORRUPTED_LIST}"
+            send_tg_chunked "📋 无效文件列表:"$'\n\n'"$(echo "$CORRUPTED_LIST" | sed 's/^/- /')"
             send_tg "🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           else
             echo "No corrupted videos found."
