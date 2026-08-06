@@ -230,46 +230,39 @@ jobs:
             FAST_DIR=""
           fi
 
-          # 检测脚本（文件名作为参数传入，避免特殊字符问题；进度输出到 stderr）
-          cat > /tmp/check_corrupted.sh << 'SCRIPT'
-#!/bin/bash
-SOURCE_REMOTE="$1"
-FILE="$2"
-TOTAL="$3"
-FAST_DIR="$4"
-PROGRESS_FILE="/tmp/check_progress"
-
-# 原子计数器 + 进度输出到 stderr（不干扰 stdout 结果收集）
-{
-  flock 9
-  CUR=$(cat "$PROGRESS_FILE" 2>/dev/null || echo 0)
-  CUR=$((CUR + 1))
-  echo $CUR > "$PROGRESS_FILE"
-  echo "[$CUR/$TOTAL] 检测: $FILE" >&2
-} 9>"${PROGRESS_FILE}.lock"
-
-if [ -n "$FAST_DIR" ]; then
-  # 模式1: minimal-cache mount，ffprobe 可 seek，仅下载 moov atom 所在字节范围
-  if ! timeout 30 ffprobe -v error -select_streams v:0 -show_entries stream=codec_name \
-       -of csv=p=0 "${FAST_DIR}/${FILE}" 2>/dev/null | grep -q .; then
-    echo "$FILE"
-  fi
-else
-  # 模式2（回退）: rclone cat 流式传输，head 限制 10MB 下载量
-  if ! rclone cat "$SOURCE_REMOTE/$FILE" 2>/dev/null | head -c 10485760 | \
-       timeout 30 ffprobe -probesize 10485760 -analyzeduration 2000000 -v error \
-       -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 - 2>/dev/null | grep -q .; then
-    echo "$FILE"
-  fi
-fi
-SCRIPT
-          chmod +x /tmp/check_corrupted.sh
+          # 检测函数（export 后供 xargs 子进程调用，避免 heredoc 在 YAML 中的缩进问题）
+          check_one() {
+            local FILE="$1"
+            {
+              flock 9
+              CUR=$(cat /tmp/check_progress 2>/dev/null || echo 0)
+              CUR=$((CUR + 1))
+              echo $CUR > /tmp/check_progress
+              echo "[$CUR/$TOTAL] 检测: $FILE" >&2
+            } 9>/tmp/check_progress.lock
+            if [ -n "$FAST_DIR" ]; then
+              # 模式1: minimal-cache mount，ffprobe 可 seek，仅下载 moov atom 所在字节范围
+              if ! timeout 30 ffprobe -v error -select_streams v:0 -show_entries stream=codec_name \
+                   -of csv=p=0 "${FAST_DIR}/${FILE}" 2>/dev/null | grep -q .; then
+                echo "$FILE"
+              fi
+            else
+              # 模式2（回退）: rclone cat 流式传输，head 限制 10MB 下载量
+              if ! rclone cat "$SOURCE_REMOTE/$FILE" 2>/dev/null | head -c 10485760 | \
+                   timeout 30 ffprobe -probesize 10485760 -analyzeduration 2000000 -v error \
+                   -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 - 2>/dev/null | grep -q .; then
+                echo "$FILE"
+              fi
+            fi
+          }
+          export -f check_one
+          export SOURCE_REMOTE TOTAL FAST_DIR
 
           echo 0 > /tmp/check_progress
 
-          # 并行检测（8 并发），stdout 仅输出 corrupted 文件名
+          # 并行检测（8 并发），文件名通过参数传递（安全处理特殊字符）
           CORRUPTED_LIST=$(printf '%s\n' "${ALL_FILES[@]}" \
-            | xargs -P 8 -I {} /tmp/check_corrupted.sh "$SOURCE_REMOTE" {} "$TOTAL" "$FAST_DIR")
+            | xargs -P 8 -I {} bash -c 'check_one "$@"' _ {})
 
           # 清理 minimal-cache mount
           if [ -n "$FAST_DIR" ]; then
