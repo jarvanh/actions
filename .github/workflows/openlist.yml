@@ -175,6 +175,7 @@ jobs:
           # 进度状态全局变量
           PROGRESS_MSG_ID=""
           PROGRESS_TASK_NAME=""
+          PROGRESS_TASK_DETAIL=""
           PROGRESS_START_TIME=0
           PROGRESS_CURRENT=""
           PROGRESS_STATS=""
@@ -205,6 +206,23 @@ jobs:
               --data-urlencode text="$message" 2>/dev/null || true
           }
 
+          # 删除旧消息并以新消息形式重新发送（确保进度通知始终位于聊天最底部）
+          # 用法: _tg_resend_as_latest <old_message_id> <message> [parse_mode]
+          # 输出: 新消息的 message_id
+          _tg_resend_as_latest() {
+            local old_message_id="$1"
+            local message="$2"
+            local parse_mode="${3:-HTML}"
+            # 删除旧消息（失败不阻塞）
+            if [ -n "$old_message_id" ]; then
+              curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/deleteMessage \
+                -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
+                -d message_id="$old_message_id" 2>/dev/null || true
+            fi
+            # 发送新消息并返回新 message_id
+            _tg_send_get_id "$message" "$parse_mode"
+          }
+
           # 渲染当前进度为 HTML 消息
           _progress_render() {
             local elapsed=$(( $(date +%s) - PROGRESS_START_TIME ))
@@ -223,6 +241,7 @@ jobs:
             msg+="🔄 <b>同步进度</b>"$'\n'
             msg+="━━━━━━━━━━━━━━━━━━"$'\n'
             msg+="任务：<b>$(escape_html "$PROGRESS_TASK_NAME")</b>"$'\n'
+            [ -n "$PROGRESS_TASK_DETAIL" ] && msg+="<b>详情</b>：$(escape_html "$PROGRESS_TASK_DETAIL")"$'\n'
             [ -n "$PROGRESS_STATS" ] && msg+="${PROGRESS_STATS}"$'\n'
             msg+=$'\n'"📍 <b>当前</b>"$'\n'"$(escape_html "$PROGRESS_CURRENT")"$'\n'
             msg+=$'\n'"⏱️ 已用：<b>${time_str}</b>"
@@ -230,11 +249,13 @@ jobs:
           }
 
           # 启动进度通知（发送初始消息）
-          # 用法: progress_start <task_name> [stats]
+          # 用法: progress_start <task_name> [stats] [detail]
           progress_start() {
             local task_name="$1"
             local stats="${2:-}"
+            local detail="${3:-}"
             PROGRESS_TASK_NAME="$task_name"
+            PROGRESS_TASK_DETAIL="$detail"
             PROGRESS_START_TIME=$(date +%s)
             PROGRESS_CURRENT="初始化..."
             PROGRESS_STATS="$stats"
@@ -242,7 +263,13 @@ jobs:
             PROGRESS_MSG_ID=$(_tg_send_get_id "$(_progress_render)")
           }
 
-          # 更新进度（编辑消息，带 3 秒节流）
+          # 更新任务详情（同步源/目标等），不重置已用时间
+          # 用法: progress_set_detail <detail>
+          progress_set_detail() {
+            PROGRESS_TASK_DETAIL="$1"
+          }
+
+          # 更新进度（删除旧消息+发送新消息，带 3 秒节流，始终位于聊天最底部）
           # 用法: progress_update <current> [stats]
           progress_update() {
             [ -z "$PROGRESS_MSG_ID" ] && return 0
@@ -254,7 +281,9 @@ jobs:
               return 0
             fi
             PROGRESS_LAST_UPDATE=$now
-            _tg_edit "$PROGRESS_MSG_ID" "$(_progress_render)"
+            local new_id
+            new_id=$(_tg_resend_as_latest "$PROGRESS_MSG_ID" "$(_progress_render)")
+            [ -n "$new_id" ] && PROGRESS_MSG_ID="$new_id"
           }
 
           # 强制更新（忽略节流）
@@ -264,7 +293,9 @@ jobs:
             PROGRESS_CURRENT="$1"
             [ -n "$2" ] && PROGRESS_STATS="$2"
             PROGRESS_LAST_UPDATE=$(date +%s)
-            _tg_edit "$PROGRESS_MSG_ID" "$(_progress_render)"
+            local new_id
+            new_id=$(_tg_resend_as_latest "$PROGRESS_MSG_ID" "$(_progress_render)")
+            [ -n "$new_id" ] && PROGRESS_MSG_ID="$new_id"
           }
 
           # 结束进度通知（最终更新）
@@ -274,8 +305,10 @@ jobs:
             PROGRESS_CURRENT="✅ 完成"
             [ -n "$1" ] && PROGRESS_STATS="$1"
             PROGRESS_LAST_UPDATE=0
-            _tg_edit "$PROGRESS_MSG_ID" "$(_progress_render)"
+            local new_id
+            new_id=$(_tg_resend_as_latest "$PROGRESS_MSG_ID" "$(_progress_render)")
             PROGRESS_MSG_ID=""
+            PROGRESS_TASK_DETAIL=""
           }
 
           has_real_content() {
@@ -1935,7 +1968,7 @@ jobs:
 
             # 顶层任务启动进度通知
             if [ "$current_depth" -eq 0 ]; then
-              progress_start "$task_name"
+              progress_start "$task_name" "" "${source_path} → ${dest_path}"
             fi
 
             # 50GB 阈值（带默认值，防止跨 step 环境变量丢失时为空）
@@ -2865,6 +2898,10 @@ jobs:
             LOG_FILENAME="${task_name}_gd_sync_${TIMESTAMP}.log"
             LAST_GD_ATTEMPT_LOG="${LOG_FILENAME}.last"
 
+            # 启动 GD 同步进度通知（独立消息，详情显示源/目标）
+            progress_start "${task_name}_GD" "" "${source_path} → ${dest_path} (Google Drive)"
+            progress_update "GD 同步中（rclone sync 运行中）"
+
             run_gd_sync_once() {
               local attempt_label="$1"
               shift
@@ -3114,6 +3151,7 @@ jobs:
             fi
 
             rm -f "$LOG_FILENAME" "${LOG_FILENAME}.last" 2>/dev/null || true
+            progress_finish
             return 0
           }
           EOF
