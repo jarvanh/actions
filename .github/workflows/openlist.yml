@@ -181,6 +181,32 @@ jobs:
           PROGRESS_STATS=""
           PROGRESS_LAST_UPDATE=0
 
+          # 跨 step 持久化状态文件（每个 step 是独立 shell，变量不共享）
+          PROGRESS_STATE_FILE="/tmp/progress_msg_id.txt"
+          SYNC_COMPLETED_FILE="/tmp/sync_completed.txt"
+          SYNC_SKIPPED_FILE="/tmp/sync_skipped.txt"
+
+          _progress_load_msg_id() {
+            if [ -f "$PROGRESS_STATE_FILE" ]; then
+              PROGRESS_MSG_ID=$(head -1 "$PROGRESS_STATE_FILE" 2>/dev/null)
+            fi
+          }
+          _progress_save_msg_id() {
+            echo "$PROGRESS_MSG_ID" > "$PROGRESS_STATE_FILE" 2>/dev/null || true
+          }
+          _progress_add_completed() {
+            [ -n "$1" ] && echo "$1" >> "$SYNC_COMPLETED_FILE" 2>/dev/null || true
+          }
+          _progress_add_skipped() {
+            [ -n "$1" ] && echo "$1" >> "$SYNC_SKIPPED_FILE" 2>/dev/null || true
+          }
+          _progress_get_completed() {
+            [ -f "$SYNC_COMPLETED_FILE" ] && sort -u "$SYNC_COMPLETED_FILE" 2>/dev/null | grep -v '^$' || true
+          }
+          _progress_get_skipped() {
+            [ -f "$SYNC_SKIPPED_FILE" ] && sort -u "$SYNC_SKIPPED_FILE" 2>/dev/null | grep -v '^$' || true
+          }
+
           # 发送消息并返回 message_id
           _tg_send_get_id() {
             local message="$1"
@@ -244,11 +270,29 @@ jobs:
             [ -n "$PROGRESS_TASK_DETAIL" ] && msg+="<b>详情</b>：$(escape_html "$PROGRESS_TASK_DETAIL")"$'\n'
             [ -n "$PROGRESS_STATS" ] && msg+="${PROGRESS_STATS}"$'\n'
             msg+=$'\n'"📍 <b>当前</b>"$'\n'"$(escape_html "$PROGRESS_CURRENT")"$'\n'
+            # 已完成任务
+            local completed_list
+            completed_list=$(_progress_get_completed)
+            if [ -n "$completed_list" ]; then
+              msg+=$'\n'"✅ <b>结束</b>"$'\n'
+              while IFS= read -r t; do
+                [ -n "$t" ] && msg+="• $(escape_html "$t")"$'\n'
+              done <<< "$completed_list"
+            fi
+            # 跳过任务
+            local skipped_list
+            skipped_list=$(_progress_get_skipped)
+            if [ -n "$skipped_list" ]; then
+              msg+=$'\n'"⏭️ <b>跳过</b>"$'\n'
+              while IFS= read -r t; do
+                [ -n "$t" ] && msg+="• $(escape_html "$t")"$'\n'
+              done <<< "$skipped_list"
+            fi
             msg+=$'\n'"⏱️ 已用：<b>${time_str}</b>"
             echo "$msg"
           }
 
-          # 启动进度通知（发送初始消息）
+          # 启动进度通知（删除上一步的旧消息后发送新消息，确保始终位于聊天最底部）
           # 用法: progress_start <task_name> [stats] [detail]
           progress_start() {
             local task_name="$1"
@@ -260,7 +304,10 @@ jobs:
             PROGRESS_CURRENT="初始化..."
             PROGRESS_STATS="$stats"
             PROGRESS_LAST_UPDATE=0
-            PROGRESS_MSG_ID=$(_tg_send_get_id "$(_progress_render)")
+            # 加载上一步的 message_id，删除旧消息后发送新消息
+            _progress_load_msg_id
+            PROGRESS_MSG_ID=$(_tg_resend_as_latest "$PROGRESS_MSG_ID" "$(_progress_render)")
+            _progress_save_msg_id
           }
 
           # 更新任务详情（同步源/目标等），不重置已用时间
@@ -284,6 +331,7 @@ jobs:
             local new_id
             new_id=$(_tg_resend_as_latest "$PROGRESS_MSG_ID" "$(_progress_render)")
             [ -n "$new_id" ] && PROGRESS_MSG_ID="$new_id"
+            _progress_save_msg_id
           }
 
           # 强制更新（忽略节流）
@@ -296,18 +344,21 @@ jobs:
             local new_id
             new_id=$(_tg_resend_as_latest "$PROGRESS_MSG_ID" "$(_progress_render)")
             [ -n "$new_id" ] && PROGRESS_MSG_ID="$new_id"
+            _progress_save_msg_id
           }
 
-          # 结束进度通知（最终更新）
+          # 结束进度通知（最终更新，记录已完成任务）
           # 用法: progress_finish [final_stats]
           progress_finish() {
             [ -z "$PROGRESS_MSG_ID" ] && return 0
             PROGRESS_CURRENT="✅ 完成"
             [ -n "$1" ] && PROGRESS_STATS="$1"
             PROGRESS_LAST_UPDATE=0
+            _progress_add_completed "$PROGRESS_TASK_NAME"
             local new_id
             new_id=$(_tg_resend_as_latest "$PROGRESS_MSG_ID" "$(_progress_render)")
-            PROGRESS_MSG_ID=""
+            [ -n "$new_id" ] && PROGRESS_MSG_ID="$new_id"
+            _progress_save_msg_id
             PROGRESS_TASK_DETAIL=""
           }
 
@@ -2521,6 +2572,9 @@ jobs:
             local source_path="$2"
             local dest_path="$3"
 
+            # 记录到跳过列表（警告也意味着跳过）
+            _progress_add_skipped "$task_name"
+
             local marker_bytes marker_count marker_dirs
             marker_bytes=$(echo "$MARKER_JSON" | jq -r '.source_bytes // 0')
             marker_count=$(echo "$MARKER_JSON" | jq -r '.source_count // 0')
@@ -2586,6 +2640,9 @@ jobs:
             local task_name="$1"
             local source_path="$2"
             local dest_path="$3"
+
+            # 记录到跳过列表（供进度通知显示）
+            _progress_add_skipped "$task_name"
 
             local marker_bytes marker_count
             marker_bytes=$(echo "$MARKER_JSON" | jq -r '.source_bytes // 0' 2>/dev/null || echo 0)
@@ -2814,6 +2871,10 @@ jobs:
           SYNC_TRANSFERRED_BYTES=0
           AUTO_SPLIT_INFO=""
           SYNC_AUTO_SPLIT_DEPTH=0
+          # 初始化进度通知状态文件（跨 step 持久化）
+          : > /tmp/progress_msg_id.txt
+          : > /tmp/sync_completed.txt
+          : > /tmp/sync_skipped.txt
           # 集中定义阈值，避免魔数散落各处
           LARGE_FILE_THRESHOLD_BYTES="${LARGE_FILE_THRESHOLD:-4000000000}"
           SYNC_SPLIT_THRESHOLD_BYTES="${SYNC_SPLIT_THRESHOLD:-50000000000}"
