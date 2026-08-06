@@ -119,11 +119,11 @@ jobs:
             DUP_COUNT=$((DUP_COUNT + 1))
             echo "[$IDX/$DUP_TOTAL] 处理哈希 ${hash:0:12}（$count 个文件）"
 
-            # 判断文件名（不含扩展名）是否完全相同
+            # 判断文件名（不含扩展名）是否完全相同（NFC 归一化，避免 OneDrive/macOS NFD 编码差异误判）
             name_count=$(echo "$entries" | while IFS=';' read -r t s p; do
               [ -z "$p" ] && continue
               echo "${p%.*}"
-            done | sort -u | wc -l)
+            done | python3 -c "import sys,unicodedata; [print(unicodedata.normalize('NFC', l.rstrip('\n'))) for l in sys.stdin]" | sort -u | wc -l)
 
             if [ "$name_count" -eq 1 ]; then
               # 文件名相同（不含扩展名）→ 优先删除文件小的，其次删除修改时间旧的
