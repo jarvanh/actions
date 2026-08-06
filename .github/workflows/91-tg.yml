@@ -2,7 +2,7 @@ name: 91-tg
 
 on:
   schedule:
-    - cron: '0 7 * * *'
+    - cron: '0 9 * * *'
   workflow_dispatch:
     inputs:
       clean_tg_uploaded_videos:
@@ -63,8 +63,14 @@ jobs:
           rclone lsf "$SOURCE_REMOTE/" --files-only --format "tsp" 2>/dev/null \
             | grep -iE '\.mp4$' > /tmp/91_videos_tsp.txt || true
           TOTAL=$(wc -l < /tmp/91_videos_tsp.txt)
+          HASH_COUNT=$(wc -l < /tmp/91_hashes.txt)
+          echo "📊 数据采集: $TOTAL 个 mp4 文件, $HASH_COUNT 个哈希"
           if [ "$TOTAL" -eq 0 ]; then
             echo "No mp4 files found in $SOURCE_REMOTE"
+            exit 0
+          fi
+          if [ "$HASH_COUNT" -eq 0 ]; then
+            echo "⚠️ 哈希采集失败（rclone hashsum 返回空），跳过去重"
             exit 0
           fi
 
@@ -91,16 +97,27 @@ jobs:
             fi
           done < /tmp/91_hashes.txt
 
+          # 预统计重复组数量（哈希出现 >1 次）
+          DUP_TOTAL=0
+          for h in "${!HASH_ENTRIES[@]}"; do
+            c=$(echo "${HASH_ENTRIES[$h]}" | wc -l)
+            [ "$c" -gt 1 ] && DUP_TOTAL=$((DUP_TOTAL + 1))
+          done
+          echo "🔍 发现 $DUP_TOTAL 个重复哈希组，开始处理..."
+
           DUP_DETAILS=""
           DUP_COUNT=0
           REMOVED_COUNT=0
+          IDX=0
           for hash in "${!HASH_ENTRIES[@]}"; do
             entries="${HASH_ENTRIES[$hash]}"
             count=$(echo "$entries" | wc -l)
             if [ "$count" -le 1 ]; then
               continue
             fi
+            IDX=$((IDX + 1))
             DUP_COUNT=$((DUP_COUNT + 1))
+            echo "[$IDX/$DUP_TOTAL] 处理哈希 ${hash:0:12}（$count 个文件）"
 
             # 判断文件名（不含扩展名）是否完全相同
             name_count=$(echo "$entries" | while IFS=';' read -r t s p; do
@@ -118,9 +135,13 @@ jobs:
                 [ "$p" = "$kept_path" ] && continue
                 [ -z "$p" ] && continue
                 if [ "$AUTO_DELETE" = "true" ]; then
-                  rclone deletefile "$SOURCE_REMOTE/$p" 2>/dev/null
-                  REMOVED_COUNT=$((REMOVED_COUNT + 1))
-                  group_details+=$'  🗑 删除 '"${p}"$'（'"${s}"$' 字节，'"${t}"$'）\n'
+                  if rclone deletefile "$SOURCE_REMOTE/$p" 2>/tmp/rclone_err.log; then
+                    REMOVED_COUNT=$((REMOVED_COUNT + 1))
+                    group_details+=$'  🗑 删除 '"${p}"$'（'"${s}"$' 字节，'"${t}"$'）\n'
+                  else
+                    group_details+=$'  ❌ 删除失败 '"${p}"$'\n'
+                    echo "  ❌ 删除失败: $(tail -n 3 /tmp/rclone_err.log)"
+                  fi
                 else
                   group_details+=$'  ⚠ 待删除（已跳过） '"${p}"$'（'"${s}"$' 字节，'"${t}"$'）\n'
                 fi
@@ -135,9 +156,13 @@ jobs:
                 [ "$p" = "$kept_path" ] && continue
                 [ -z "$p" ] && continue
                 if [ "$AUTO_DELETE" = "true" ]; then
-                  rclone deletefile "$SOURCE_REMOTE/$p" 2>/dev/null
-                  REMOVED_COUNT=$((REMOVED_COUNT + 1))
-                  group_details+=$'  🗑 删除 '"${p}"$'（哈希一致，旧文件）\n'
+                  if rclone deletefile "$SOURCE_REMOTE/$p" 2>/tmp/rclone_err.log; then
+                    REMOVED_COUNT=$((REMOVED_COUNT + 1))
+                    group_details+=$'  🗑 删除 '"${p}"$'（哈希一致，旧文件）\n'
+                  else
+                    group_details+=$'  ❌ 删除失败 '"${p}"$'\n'
+                    echo "  ❌ 删除失败: $(tail -n 3 /tmp/rclone_err.log)"
+                  fi
                 else
                   group_details+=$'  ⚠ 待删除（已跳过） '"${p}"$'（哈希一致，旧文件）\n'
                 fi
@@ -198,8 +223,11 @@ jobs:
               CORRUPTED_COUNT=$((CORRUPTED_COUNT + 1))
               CORRUPTED_LIST+=$'- '"${file}"$'\n'
               if [ "$AUTO_DELETE" = "true" ]; then
-                rclone deletefile "$SOURCE_REMOTE/$file" 2>/dev/null
-                echo "  🗑 已删除"
+                if rclone deletefile "$SOURCE_REMOTE/$file" 2>/tmp/rclone_err.log; then
+                  echo "  🗑 已删除"
+                else
+                  echo "  ❌ 删除失败: $(tail -n 3 /tmp/rclone_err.log)"
+                fi
               else
                 echo "  ⚠ 可能无效（已跳过删除）"
               fi
