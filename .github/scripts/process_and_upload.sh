@@ -45,24 +45,39 @@ FAILED=0
 SENT_LIST=""
 FAILED_LIST=""
 
-# 顺序处理每个视频（不并行）
+# 顺序处理每个视频（不并行，避免 OneDrive 限速和 Telegram API 并发限制）
+# 使用 IFS= 和 -r 选项保证读取时保留行首尾空格、不解析转义字符，正确处理含特殊字符的文件名
 while IFS= read -r file; do
+  # 跳过空行（pending.txt 末尾可能存在空行）
   [ -z "$file" ] && continue
 
+  # 当前视频的工作目录与本地文件路径
+  # 每次处理都使用全新的 work 目录，避免上次残留文件干扰
   WORK_DIR="$TMP_DIR/work"
   LOCAL_FILE="$WORK_DIR/$file"
 
+  # 清理并重建工作目录
   rm -rf "$WORK_DIR"
   mkdir -p "$WORK_DIR"
 
-  # 从 OneDrive 下载到本地（不修改原文件）
-  if ! rclone copy "$SOURCE_REMOTE/$file" "$WORK_DIR/" 2>/dev/null || [ ! -f "$LOCAL_FILE" ]; then
-    echo "FAILED: rclone copy failed: $file"
+  # ===== 第一步：从 OneDrive 下载视频到本地 =====
+  # 使用 rclone copy 下载单个文件（不修改远端原文件）
+  # 错误输出重定向到独立日志文件，避免 rclone 正常进度信息刷屏，
+  # 但在失败时仍可通过日志查看真实错误原因（如文件不存在、限速、网络错误等）
+  echo "⬇️  正在下载: $file"
+  RCLONE_ERR="$TMP_DIR/rclone_err.log"
+  # 双重校验：rclone 命令返回值 + 本地文件是否实际生成
+  if ! rclone copy "$SOURCE_REMOTE/$file" "$WORK_DIR/" 2>"$RCLONE_ERR" || [ ! -f "$LOCAL_FILE" ]; then
+    echo "❌ FAILED: rclone copy failed: $file"
+    echo "--- rclone 错误输出（最近 20 行）---"
+    tail -n 20 "$RCLONE_ERR"
+    echo "-----------------------------------"
     FAILED=$((FAILED + 1))
     FAILED_LIST+="- ${file}（rclone copy failed）"$'\n'
     rm -rf "$WORK_DIR"
     continue
   fi
+  echo "✅ 下载完成: $file"
 
   # 预处理（转码/faststart）并上传到 Telegram
   if bash "${GITHUB_WORKSPACE}/.github/scripts/process_one_file.sh" "$LOCAL_FILE" "$CHANNEL_ID" "$CAPTION_PREFIX"; then
