@@ -85,8 +85,8 @@ jobs:
             fi
           done < /tmp/videos_tsp.txt
 
-          # 计算规范化标题：去扩展名 + 去掉所有位置的 ph ID + 方括号 + 压缩分隔符并 trim
-          # 让 "-phxxx" / " [phxxx]" / "[phxxx]" 等变体归一，避免误入哈希分支
+          # 计算规范化标题：去扩展名 + 去掉所有位置的 ph ID + 方括号 + 压缩分隔符并 trim + NFC 归一化
+          # NFC 归一化解决 OneDrive/macOS(NFD) 与其他系统(NFC) 对同一字符（如 й）编码不同导致的误判
           get_title() {
             local p="$1"
             local base="${p%.*}"
@@ -94,7 +94,8 @@ jobs:
               | sed -E 's/ph[a-f0-9]{6,}//g' \
               | sed -E 's/[][]//g' \
               | sed -E 's/[-_ ]+/ /g' \
-              | sed -E 's/^ //; s/ $//'
+              | sed -E 's/^ //; s/ $//' \
+              | python3 -c "import sys,unicodedata; print(unicodedata.normalize('NFC', sys.stdin.read().rstrip('\n')))"
           }
 
           # 预统计重复 ID 组数量（出现 >1 次的 ID）
