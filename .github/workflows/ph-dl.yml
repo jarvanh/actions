@@ -214,21 +214,24 @@ jobs:
           echo "--- 详情 ---"
           echo "${DUP_DETAILS}"
 
-          # 发送通知
+          # 发送通知（按 4000 字符分片，避免超过 Telegram 4096 字符限制）
+          source "${GITHUB_WORKSPACE}/.github/scripts/tg_notify.sh"
+
           if [ "$DUP_COUNT" -gt 0 ]; then
-            MSG="🔍 ph-dl 重复视频检测与去重"$'\n\n'"📁 目录: j-1024j-视频-pornhub-favorites"$'\n'"🔢 重复 ID 数量: ${DUP_COUNT}"$'\n'"🗑 删除重复: ${REMOVED_COUNT}"$'\n'"⚠ 仅通知未删除: ${NOTIFY_ONLY_COUNT}"
+            HEADER="🔍 ph-dl 重复视频检测与去重"$'\n\n'"📁 目录: j-1024j-视频-pornhub-favorites"$'\n'"🔢 重复 ID 数量: ${DUP_COUNT}"$'\n'"🗑 删除重复: ${REMOVED_COUNT}"$'\n'"⚠ 仅通知未删除: ${NOTIFY_ONLY_COUNT}"
             if [ "$AUTO_DELETE" = "true" ]; then
-              MSG+=$'\n'"⚙️ 模式: 自动删除已开启"
+              HEADER+=$'\n'"⚙️ 模式: 自动删除已开启"
             else
-              MSG+=$'\n'"⚙️ 模式: 仅通知未删除（手动触发可开启 auto_delete_duplicates）"
+              HEADER+=$'\n'"⚙️ 模式: 仅通知未删除（手动触发可开启 auto_delete_duplicates）"
             fi
             if [ "$REMOVED_COUNT" -eq 0 ] && [ "$NOTIFY_ONLY_COUNT" -gt 0 ]; then
-              MSG+=$'\n'"ℹ 重复文件标题不同且哈希各不相同，未自动删除"
+              HEADER+=$'\n'"ℹ 重复文件标题不同且哈希各不相同，未自动删除"
             fi
-            MSG+=$'\n\n'"📋 详情:"$'\n'"${DUP_DETAILS}"$'\n'"🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-              --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
-              --data-urlencode text="${MSG}"
+            send_tg "$HEADER"
+            if [ -n "$DUP_DETAILS" ]; then
+              send_tg_chunked "📋 详情:"$'\n\n'"${DUP_DETAILS}"
+            fi
+            send_tg "🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           else
             echo "No duplicate video IDs found."
           fi
@@ -278,16 +281,16 @@ jobs:
           echo "无效视频: ${CORRUPTED_COUNT}"
 
           if [ "$CORRUPTED_COUNT" -gt 0 ]; then
-            MSG="🗑 ph-dl 无效视频检测"$'\n\n'"📁 目录: j-1024j-视频-pornhub-favorites"$'\n'"📊 检测总数: ${TOTAL}"$'\n'"⚠ 无效视频: ${CORRUPTED_COUNT}"
+            source "${GITHUB_WORKSPACE}/.github/scripts/tg_notify.sh"
+            HEADER="🗑 ph-dl 无效视频检测"$'\n\n'"📁 目录: j-1024j-视频-pornhub-favorites"$'\n'"📊 检测总数: ${TOTAL}"$'\n'"⚠ 无效视频: ${CORRUPTED_COUNT}"
             if [ "$AUTO_DELETE" = "true" ]; then
-              MSG+=$'\n'"⚙️ 模式: 自动删除已开启"
+              HEADER+=$'\n'"⚙️ 模式: 自动删除已开启"
             else
-              MSG+=$'\n'"⚙️ 模式: 仅通知未删除（手动触发可开启 auto_delete_corrupted）"
+              HEADER+=$'\n'"⚙️ 模式: 仅通知未删除（手动触发可开启 auto_delete_corrupted）"
             fi
-            MSG+=$'\n\n'"📋 无效文件列表:"$'\n'"${CORRUPTED_LIST}"$'\n'"🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-              --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
-              --data-urlencode text="${MSG}"
+            send_tg "$HEADER"
+            send_tg_chunked "📋 无效文件列表:"$'\n\n'"${CORRUPTED_LIST}"
+            send_tg "🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           else
             echo "No corrupted videos found."
           fi
@@ -322,10 +325,11 @@ jobs:
           find . -maxdepth 1 -type f \( -name '*.mp4-Frag*' -o -name '*.part-Frag*' \) -delete
           echo "Cleaned up ${FRAG_COUNT} fragment files."
           # 发送通知
-          MSG="🧹 ph-dl 清理 yt-dlp 分片文件"$'\n\n'"📁 目录: j-1024j-视频-pornhub-favorites"$'\n'"🗑️ 清理数量: ${FRAG_COUNT}"$'\n\n'"📋 文件列表:"$'\n'"${FILE_DETAILS}"$'\n'"🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
-            --data-urlencode text="${MSG}"
+          source "${GITHUB_WORKSPACE}/.github/scripts/tg_notify.sh"
+          HEADER="🧹 ph-dl 清理 yt-dlp 分片文件"$'\n\n'"📁 目录: j-1024j-视频-pornhub-favorites"$'\n'"🗑️ 清理数量: ${FRAG_COUNT}"
+          send_tg "$HEADER"
+          send_tg_chunked "📋 文件列表:"$'\n\n'"${FILE_DETAILS}"
+          send_tg "🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
       - name: clean telegram channel and reset upload archive
         if: github.event.inputs.clean_tg_uploaded_videos == 'true'
@@ -462,12 +466,13 @@ jobs:
           
           # 损坏文件通知（post_process.sh 验证失败并丢弃的文件）
           if [ -f "$DOWNLOAD_TMP/corrupted.txt" ]; then
+            source "${GITHUB_WORKSPACE}/.github/scripts/tg_notify.sh"
             CORRUPTED_COUNT=$(wc -l < "$DOWNLOAD_TMP/corrupted.txt")
             CORRUPTED_LIST=$(cat "$DOWNLOAD_TMP/corrupted.txt")
-            CORRUPT_MSG="🗑 ph-dl 下载阶段检测到损坏视频并已丢弃"$'\n\n'"📊 数量: ${CORRUPTED_COUNT}"$'\n'"📋 文件列表:"$'\n'"${CORRUPTED_LIST}"$'\n\n'"🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-              --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
-              --data-urlencode text="${CORRUPT_MSG}"
+            HEADER="🗑 ph-dl 下载阶段检测到损坏视频并已丢弃"$'\n\n'"📊 数量: ${CORRUPTED_COUNT}"
+            send_tg "$HEADER"
+            send_tg_chunked "📋 文件列表:"$'\n\n'"${CORRUPTED_LIST}"
+            send_tg "🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           fi
           rm -rf "$DOWNLOAD_TMP"
           
@@ -486,19 +491,14 @@ jobs:
           else
             FILE_LIST="无"
           fi
-          
-          MSG="github p站下载任务执行完毕 favorites
-          本次下载: ${DOWNLOAD_COUNT} 个视频
-          下载前大小: ${BEFORE_SIZE}
-          下载后大小: ${AFTER_SIZE}
-          任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          
-          文件列表:
-          ${FILE_LIST}"
-          
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            --data-urlencode chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
-            --data-urlencode text="${MSG}"
+
+          source "${GITHUB_WORKSPACE}/.github/scripts/tg_notify.sh"
+          HEADER="github p站下载任务执行完毕 favorites"$'\n\n'"本次下载: ${DOWNLOAD_COUNT} 个视频"$'\n'"下载前大小: ${BEFORE_SIZE}"$'\n'"下载后大小: ${AFTER_SIZE}"
+          send_tg "$HEADER"
+          if [ "$FILE_LIST" != "无" ]; then
+            send_tg_chunked "📋 文件列表:"$'\n\n'"${FILE_LIST}"
+          fi
+          send_tg "🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
       # - name: run pornhub-dl
       #   run: |
       #     # Install runtime dependencies.

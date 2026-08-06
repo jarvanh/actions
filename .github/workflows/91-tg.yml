@@ -178,18 +178,20 @@ jobs:
           echo "--- 详情 ---"
           echo "${DUP_DETAILS}"
 
-          # 发送通知
+          # 发送通知（按 4000 字符分片，避免超过 Telegram 4096 字符限制）
+          source "${GITHUB_WORKSPACE}/.github/scripts/tg_notify.sh"
           if [ "$DUP_COUNT" -gt 0 ]; then
-            MSG="🔍 91-tg 重复视频检测与去重"$'\n\n'"📁 目录: 91"$'\n'"🔢 重复哈希数量: ${DUP_COUNT}"$'\n'"🗑 删除重复: ${REMOVED_COUNT}"
+            HEADER="🔍 91-tg 重复视频检测与去重"$'\n\n'"📁 目录: 91"$'\n'"🔢 重复哈希数量: ${DUP_COUNT}"$'\n'"🗑 删除重复: ${REMOVED_COUNT}"
             if [ "$AUTO_DELETE" = "true" ]; then
-              MSG+=$'\n'"⚙️ 模式: 自动删除已开启"
+              HEADER+=$'\n'"⚙️ 模式: 自动删除已开启"
             else
-              MSG+=$'\n'"⚙️ 模式: 仅通知未删除（手动触发可开启 auto_delete_duplicates）"
+              HEADER+=$'\n'"⚙️ 模式: 仅通知未删除（手动触发可开启 auto_delete_duplicates）"
             fi
-            MSG+=$'\n\n'"📋 详情:"$'\n'"${DUP_DETAILS}"$'\n'"🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-              --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
-              --data-urlencode text="${MSG}"
+            send_tg "$HEADER"
+            if [ -n "$DUP_DETAILS" ]; then
+              send_tg_chunked "📋 详情:"$'\n\n'"${DUP_DETAILS}"
+            fi
+            send_tg "🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           else
             echo "No duplicate videos found."
           fi
@@ -239,16 +241,16 @@ jobs:
           echo "无效视频: ${CORRUPTED_COUNT}"
 
           if [ "$CORRUPTED_COUNT" -gt 0 ]; then
-            MSG="🗑 91-tg 无效视频检测"$'\n\n'"📁 目录: 91"$'\n'"📊 检测总数: ${TOTAL}"$'\n'"⚠ 无效视频: ${CORRUPTED_COUNT}"
+            source "${GITHUB_WORKSPACE}/.github/scripts/tg_notify.sh"
+            HEADER="🗑 91-tg 无效视频检测"$'\n\n'"📁 目录: 91"$'\n'"📊 检测总数: ${TOTAL}"$'\n'"⚠ 无效视频: ${CORRUPTED_COUNT}"
             if [ "$AUTO_DELETE" = "true" ]; then
-              MSG+=$'\n'"⚙️ 模式: 自动删除已开启"
+              HEADER+=$'\n'"⚙️ 模式: 自动删除已开启"
             else
-              MSG+=$'\n'"⚙️ 模式: 仅通知未删除（手动触发可开启 auto_delete_corrupted）"
+              HEADER+=$'\n'"⚙️ 模式: 仅通知未删除（手动触发可开启 auto_delete_corrupted）"
             fi
-            MSG+=$'\n\n'"📋 无效文件列表:"$'\n'"${CORRUPTED_LIST}"$'\n'"🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-              --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
-              --data-urlencode text="${MSG}"
+            send_tg "$HEADER"
+            send_tg_chunked "📋 无效文件列表:"$'\n\n'"${CORRUPTED_LIST}"
+            send_tg "🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           else
             echo "No corrupted videos found."
           fi
