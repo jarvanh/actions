@@ -301,9 +301,9 @@ jobs:
 
           echo 0 > /tmp/check_progress
 
-          # 并行检测（8 并发），文件名通过参数传递（安全处理特殊字符）
-          CORRUPTED_LIST=$(printf '%s\n' "${ALL_FILES[@]}" \
-            | xargs -P 8 -I {} bash -c 'check_one "$@"' _ {})
+          # 并行检测（8 并发），文件名通过 null 分隔传递（安全处理单引号/双引号/换行等特殊字符）
+          CORRUPTED_LIST=$(printf '%s\0' "${ALL_FILES[@]}" \
+            | xargs -0 -P 8 -I {} bash -c 'check_one "$@"' _ {})
 
           # 清理 minimal-cache mount
           if [ -n "$FAST_DIR" ]; then
