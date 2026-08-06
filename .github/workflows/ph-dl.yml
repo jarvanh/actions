@@ -148,7 +148,7 @@ jobs:
                   group_details+=$'  ⚠ 待删除（已跳过） '"${p}"$'（'"${s}"$' 字节，'"${t}"$'）\n'
                 fi
               done <<< "$sorted"
-              DUP_DETAILS+=$'🔖 ID '"${id}"$'（'"${count}"$' 个，标题相同，保留: '"${kept_path}"$'）\n'"${group_details}"
+              DUP_DETAILS+=$'\n'"🔖 [${IDX}/${DUP_TOTAL}] ID ${id}"$'（'"${count}"$' 个，标题相同，保留: '"${kept_path}"$'）\n'"${group_details}"
             else
               # 规则2：title 不同 → 对比哈希
               # 打印各文件规范化 title，便于排查为何被判不同（如不可见字符）
@@ -193,14 +193,14 @@ jobs:
                     fi
                   done <<< "$hsorted"
                 done <<< "$DUP_HASHES"
-                DUP_DETAILS+=$'🔖 ID '"${id}"$'（'"${count}"$' 个，标题不同，删除哈希一致的旧文件）\n'"${group_details}"
+                DUP_DETAILS+=$'\n'"🔖 [${IDX}/${DUP_TOTAL}] ID ${id}"$'（'"${count}"$' 个，标题不同，删除哈希一致的旧文件）\n'"${group_details}"
               else
                 # 所有哈希各不相同 → 仅通知不删除
                 NOTIFY_ONLY_COUNT=$((NOTIFY_ONLY_COUNT + 1))
                 while IFS=';' read -r h t s p; do
                   group_details+=$'  ⚠ 保留 '"${p}"$'（哈希 '"${h:0:12}"$'）\n'
                 done < "$HASH_LIST"
-                DUP_DETAILS+=$'🔖 ID '"${id}"$'（'"${count}"$' 个，标题不同且哈希各不相同，仅通知）\n'"${group_details}"
+                DUP_DETAILS+=$'\n'"🔖 [${IDX}/${DUP_TOTAL}] ID ${id}"$'（'"${count}"$' 个，标题不同且哈希各不相同，仅通知）\n'"${group_details}"
               fi
               rm -f "$HASH_LIST"
             fi
@@ -218,18 +218,19 @@ jobs:
           source "${GITHUB_WORKSPACE}/.github/scripts/tg_notify.sh"
 
           if [ "$DUP_COUNT" -gt 0 ]; then
-            HEADER="🔍 ph-dl 重复视频检测与去重"$'\n\n'"📁 目录: j-1024j-视频-pornhub-favorites"$'\n'"🔢 重复 ID 数量: ${DUP_COUNT}"$'\n'"🗑 删除重复: ${REMOVED_COUNT}"$'\n'"⚠ 仅通知未删除: ${NOTIFY_ONLY_COUNT}"
+            HEADER="🔍 ph-dl 重复视频检测与去重"$'\n'"━━━━━━━━━━━━━━━━━━"$'\n'"📁 目录: j-1024j-视频-pornhub-favorites"$'\n'
+            HEADER+=$'\n'"� 统计"$'\n'"• 重复 ID: ${DUP_COUNT}"$'\n'"• 已删除: ${REMOVED_COUNT}"$'\n'"• 仅通知: ${NOTIFY_ONLY_COUNT}"
             if [ "$AUTO_DELETE" = "true" ]; then
-              HEADER+=$'\n'"⚙️ 模式: 自动删除已开启"
+              HEADER+=$'\n'$'\n'"⚙️ 模式: 自动删除已开启"
             else
-              HEADER+=$'\n'"⚙️ 模式: 仅通知未删除（手动触发可开启 auto_delete_duplicates）"
+              HEADER+=$'\n'$'\n'"⚙️ 模式: 仅通知（手动触发可开启 auto_delete_duplicates）"
             fi
             if [ "$REMOVED_COUNT" -eq 0 ] && [ "$NOTIFY_ONLY_COUNT" -gt 0 ]; then
-              HEADER+=$'\n'"ℹ 重复文件标题不同且哈希各不相同，未自动删除"
+              HEADER+=$'\n'"ℹ 标题不同且哈希各不相同，未自动删除"
             fi
             send_tg "$HEADER"
             if [ -n "$DUP_DETAILS" ]; then
-              send_tg_chunked "📋 详情:"$'\n\n'"${DUP_DETAILS}"
+              send_tg_chunked "📋 详情"$'\n'"━━━━━━━━━━━━━━━━━━"$'\n\n'"${DUP_DETAILS}"
             fi
             send_tg "🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           else
@@ -336,14 +337,15 @@ jobs:
             fi
 
             source "${GITHUB_WORKSPACE}/.github/scripts/tg_notify.sh"
-            HEADER="🗑 ph-dl 无效视频检测"$'\n\n'"📁 目录: j-1024j-视频-pornhub-favorites"$'\n'"📊 检测总数: ${TOTAL}"$'\n'"⚠ 无效视频: ${CORRUPTED_COUNT}"
+            HEADER="🗑 ph-dl 无效视频检测"$'\n'"━━━━━━━━━━━━━━━━━━"$'\n'"📁 目录: j-1024j-视频-pornhub-favorites"$'\n'
+            HEADER+=$'\n'"📊 统计"$'\n'"• 检测总数: ${TOTAL}"$'\n'"• 无效视频: ${CORRUPTED_COUNT}"
             if [ "$AUTO_DELETE" = "true" ]; then
-              HEADER+=$'\n'"⚙️ 模式: 自动删除已开启"
+              HEADER+=$'\n'$'\n'"⚙️ 模式: 自动删除已开启"
             else
-              HEADER+=$'\n'"⚙️ 模式: 仅通知未删除（手动触发可开启 auto_delete_corrupted）"
+              HEADER+=$'\n'$'\n'"⚙️ 模式: 仅通知（手动触发可开启 auto_delete_corrupted）"
             fi
             send_tg "$HEADER"
-            send_tg_chunked "📋 无效文件列表:"$'\n\n'"$(echo "$CORRUPTED_LIST" | sed 's/^/- /')"
+            send_tg_chunked "📋 无效文件列表"$'\n'"━━━━━━━━━━━━━━━━━━"$'\n\n'"$(echo "$CORRUPTED_LIST" | sed 's/^/- /')"
             send_tg "🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           else
             echo "No corrupted videos found."
@@ -380,9 +382,9 @@ jobs:
           echo "Cleaned up ${FRAG_COUNT} fragment files."
           # 发送通知
           source "${GITHUB_WORKSPACE}/.github/scripts/tg_notify.sh"
-          HEADER="🧹 ph-dl 清理 yt-dlp 分片文件"$'\n\n'"📁 目录: j-1024j-视频-pornhub-favorites"$'\n'"🗑️ 清理数量: ${FRAG_COUNT}"
+          HEADER="🧹 ph-dl 清理 yt-dlp 分片文件"$'\n'"━━━━━━━━━━━━━━━━━━"$'\n'"📁 目录: j-1024j-视频-pornhub-favorites"$'\n'$'\n'"🗑️ 清理数量: ${FRAG_COUNT}"
           send_tg "$HEADER"
-          send_tg_chunked "📋 文件列表:"$'\n\n'"${FILE_DETAILS}"
+          send_tg_chunked "📋 文件列表"$'\n'"━━━━━━━━━━━━━━━━━━"$'\n\n'"${FILE_DETAILS}"
           send_tg "🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
       - name: clean telegram channel and reset upload archive
@@ -523,9 +525,9 @@ jobs:
             source "${GITHUB_WORKSPACE}/.github/scripts/tg_notify.sh"
             CORRUPTED_COUNT=$(wc -l < "$DOWNLOAD_TMP/corrupted.txt")
             CORRUPTED_LIST=$(cat "$DOWNLOAD_TMP/corrupted.txt")
-            HEADER="🗑 ph-dl 下载阶段检测到损坏视频并已丢弃"$'\n\n'"📊 数量: ${CORRUPTED_COUNT}"
+            HEADER="🗑 ph-dl 下载阶段损坏视频"$'\n'"━━━━━━━━━━━━━━━━━━"$'\n'$'\n'"📊 数量: ${CORRUPTED_COUNT}"
             send_tg "$HEADER"
-            send_tg_chunked "📋 文件列表:"$'\n\n'"${CORRUPTED_LIST}"
+            send_tg_chunked "📋 文件列表"$'\n'"━━━━━━━━━━━━━━━━━━"$'\n\n'"${CORRUPTED_LIST}"
             send_tg "🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           fi
           rm -rf "$DOWNLOAD_TMP"
@@ -547,10 +549,10 @@ jobs:
           fi
 
           source "${GITHUB_WORKSPACE}/.github/scripts/tg_notify.sh"
-          HEADER="github p站下载任务执行完毕 favorites"$'\n\n'"本次下载: ${DOWNLOAD_COUNT} 个视频"$'\n'"下载前大小: ${BEFORE_SIZE}"$'\n'"下载后大小: ${AFTER_SIZE}"
+          HEADER="✅ ph-dl 下载任务完成"$'\n'"━━━━━━━━━━━━━━━━━━"$'\n'$'\n'"📊 本次下载: ${DOWNLOAD_COUNT} 个视频"$'\n'"💾 下载前: ${BEFORE_SIZE}"$'\n'"💾 下载后: ${AFTER_SIZE}"
           send_tg "$HEADER"
           if [ "$FILE_LIST" != "无" ]; then
-            send_tg_chunked "📋 文件列表:"$'\n\n'"${FILE_LIST}"
+            send_tg_chunked "📋 文件列表"$'\n'"━━━━━━━━━━━━━━━━━━"$'\n\n'"${FILE_LIST}"
           fi
           send_tg "🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
       # - name: run pornhub-dl
