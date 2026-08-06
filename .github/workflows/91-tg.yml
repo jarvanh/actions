@@ -146,7 +146,7 @@ jobs:
                   group_details+=$'  ⚠ 待删除（已跳过） '"${p}"$'（'"${s}"$' 字节，'"${t}"$'）\n'
                 fi
               done <<< "$sorted"
-              DUP_DETAILS+=$'🔖 哈希 '"${hash:0:12}"$'（'"${count}"$' 个，文件名相同，保留: '"${kept_path}"$'）\n'"${group_details}"
+              DUP_DETAILS+=$'\n'"🔖 [${IDX}/${DUP_TOTAL}] 哈希 ${hash:0:12}"$'（'"${count}"$' 个，文件名相同，保留: '"${kept_path}"$'）\n'"${group_details}"
             else
               # 文件名不同但内容相同 → 删除修改时间旧的，保留最新
               sorted=$(echo "$entries" | sort -t';' -k1,1)
@@ -167,7 +167,7 @@ jobs:
                   group_details+=$'  ⚠ 待删除（已跳过） '"${p}"$'（哈希一致，旧文件）\n'
                 fi
               done <<< "$sorted"
-              DUP_DETAILS+=$'🔖 哈希 '"${hash:0:12}"$'（'"${count}"$' 个，文件名不同，保留: '"${kept_path}"$'）\n'"${group_details}"
+              DUP_DETAILS+=$'\n'"🔖 [${IDX}/${DUP_TOTAL}] 哈希 ${hash:0:12}"$'（'"${count}"$' 个，文件名不同，保留: '"${kept_path}"$'）\n'"${group_details}"
             fi
           done
 
@@ -181,15 +181,16 @@ jobs:
           # 发送通知（按 4000 字符分片，避免超过 Telegram 4096 字符限制）
           source "${GITHUB_WORKSPACE}/.github/scripts/tg_notify.sh"
           if [ "$DUP_COUNT" -gt 0 ]; then
-            HEADER="🔍 91-tg 重复视频检测与去重"$'\n\n'"📁 目录: 91"$'\n'"🔢 重复哈希数量: ${DUP_COUNT}"$'\n'"🗑 删除重复: ${REMOVED_COUNT}"
+            HEADER="🔍 91-tg 重复视频检测与去重"$'\n'"━━━━━━━━━━━━━━━━━━"$'\n'"📁 目录: 91"$'\n'
+            HEADER+=$'\n'"📊 统计"$'\n'"• 重复哈希: ${DUP_COUNT}"$'\n'"• 已删除: ${REMOVED_COUNT}"
             if [ "$AUTO_DELETE" = "true" ]; then
-              HEADER+=$'\n'"⚙️ 模式: 自动删除已开启"
+              HEADER+=$'\n'$'\n'"⚙️ 模式: 自动删除已开启"
             else
-              HEADER+=$'\n'"⚙️ 模式: 仅通知未删除（手动触发可开启 auto_delete_duplicates）"
+              HEADER+=$'\n'$'\n'"⚙️ 模式: 仅通知（手动触发可开启 auto_delete_duplicates）"
             fi
             send_tg "$HEADER"
             if [ -n "$DUP_DETAILS" ]; then
-              send_tg_chunked "📋 详情:"$'\n\n'"${DUP_DETAILS}"
+              send_tg_chunked "📋 详情"$'\n'"━━━━━━━━━━━━━━━━━━"$'\n\n'"${DUP_DETAILS}"
             fi
             send_tg "🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           else
@@ -296,14 +297,15 @@ jobs:
             fi
 
             source "${GITHUB_WORKSPACE}/.github/scripts/tg_notify.sh"
-            HEADER="🗑 91-tg 无效视频检测"$'\n\n'"📁 目录: 91"$'\n'"📊 检测总数: ${TOTAL}"$'\n'"⚠ 无效视频: ${CORRUPTED_COUNT}"
+            HEADER="🗑 91-tg 无效视频检测"$'\n'"━━━━━━━━━━━━━━━━━━"$'\n'"📁 目录: 91"$'\n'
+            HEADER+=$'\n'"📊 统计"$'\n'"• 检测总数: ${TOTAL}"$'\n'"• 无效视频: ${CORRUPTED_COUNT}"
             if [ "$AUTO_DELETE" = "true" ]; then
-              HEADER+=$'\n'"⚙️ 模式: 自动删除已开启"
+              HEADER+=$'\n'$'\n'"⚙️ 模式: 自动删除已开启"
             else
-              HEADER+=$'\n'"⚙️ 模式: 仅通知未删除（手动触发可开启 auto_delete_corrupted）"
+              HEADER+=$'\n'$'\n'"⚙️ 模式: 仅通知（手动触发可开启 auto_delete_corrupted）"
             fi
             send_tg "$HEADER"
-            send_tg_chunked "📋 无效文件列表:"$'\n\n'"$(echo "$CORRUPTED_LIST" | sed 's/^/- /')"
+            send_tg_chunked "📋 无效文件列表"$'\n'"━━━━━━━━━━━━━━━━━━"$'\n\n'"$(echo "$CORRUPTED_LIST" | sed 's/^/- /')"
             send_tg "🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           else
             echo "No corrupted videos found."
