@@ -171,6 +171,113 @@ jobs:
             fi
           }
 
+          # ===== 实时进度通知（单条消息编辑更新）=====
+          # 进度状态全局变量
+          PROGRESS_MSG_ID=""
+          PROGRESS_TASK_NAME=""
+          PROGRESS_START_TIME=0
+          PROGRESS_CURRENT=""
+          PROGRESS_STATS=""
+          PROGRESS_LAST_UPDATE=0
+
+          # 发送消息并返回 message_id
+          _tg_send_get_id() {
+            local message="$1"
+            local parse_mode="${2:-HTML}"
+            local response
+            response=$(curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
+              -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
+              -d parse_mode="$parse_mode" \
+              --data-urlencode text="$message" 2>/dev/null) || true
+            echo "$response" | jq -r '.result.message_id // empty' 2>/dev/null
+          }
+
+          # 编辑已有消息
+          _tg_edit() {
+            local message_id="$1"
+            local message="$2"
+            local parse_mode="${3:-HTML}"
+            [ -z "$message_id" ] && return 0
+            curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/editMessageText \
+              -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
+              -d message_id="$message_id" \
+              -d parse_mode="$parse_mode" \
+              --data-urlencode text="$message" 2>/dev/null || true
+          }
+
+          # 渲染当前进度为 HTML 消息
+          _progress_render() {
+            local elapsed=$(( $(date +%s) - PROGRESS_START_TIME ))
+            local hrs=$((elapsed / 3600))
+            local mins=$(((elapsed % 3600) / 60))
+            local secs=$((elapsed % 60))
+            local time_str
+            if [ "$hrs" -gt 0 ]; then
+              time_str="${hrs}h ${mins}m"
+            elif [ "$mins" -gt 0 ]; then
+              time_str="${mins}m ${secs}s"
+            else
+              time_str="${secs}s"
+            fi
+            local msg=""
+            msg+="🔄 <b>同步进度</b>"$'\n'
+            msg+="━━━━━━━━━━━━━━━━━━"$'\n'
+            msg+="任务：<b>$(escape_html "$PROGRESS_TASK_NAME")</b>"$'\n'
+            [ -n "$PROGRESS_STATS" ] && msg+="${PROGRESS_STATS}"$'\n'
+            msg+=$'\n'"📍 <b>当前</b>"$'\n'"$(escape_html "$PROGRESS_CURRENT")"$'\n'
+            msg+=$'\n'"⏱️ 已用：<b>${time_str}</b>"
+            echo "$msg"
+          }
+
+          # 启动进度通知（发送初始消息）
+          # 用法: progress_start <task_name> [stats]
+          progress_start() {
+            local task_name="$1"
+            local stats="${2:-}"
+            PROGRESS_TASK_NAME="$task_name"
+            PROGRESS_START_TIME=$(date +%s)
+            PROGRESS_CURRENT="初始化..."
+            PROGRESS_STATS="$stats"
+            PROGRESS_LAST_UPDATE=0
+            PROGRESS_MSG_ID=$(_tg_send_get_id "$(_progress_render)")
+          }
+
+          # 更新进度（编辑消息，带 3 秒节流）
+          # 用法: progress_update <current> [stats]
+          progress_update() {
+            [ -z "$PROGRESS_MSG_ID" ] && return 0
+            PROGRESS_CURRENT="$1"
+            [ -n "$2" ] && PROGRESS_STATS="$2"
+            local now
+            now=$(date +%s)
+            if [ $((now - PROGRESS_LAST_UPDATE)) -lt 3 ]; then
+              return 0
+            fi
+            PROGRESS_LAST_UPDATE=$now
+            _tg_edit "$PROGRESS_MSG_ID" "$(_progress_render)"
+          }
+
+          # 强制更新（忽略节流）
+          # 用法: progress_update_force <current> [stats]
+          progress_update_force() {
+            [ -z "$PROGRESS_MSG_ID" ] && return 0
+            PROGRESS_CURRENT="$1"
+            [ -n "$2" ] && PROGRESS_STATS="$2"
+            PROGRESS_LAST_UPDATE=$(date +%s)
+            _tg_edit "$PROGRESS_MSG_ID" "$(_progress_render)"
+          }
+
+          # 结束进度通知（最终更新）
+          # 用法: progress_finish [final_stats]
+          progress_finish() {
+            [ -z "$PROGRESS_MSG_ID" ] && return 0
+            PROGRESS_CURRENT="✅ 完成"
+            [ -n "$1" ] && PROGRESS_STATS="$1"
+            PROGRESS_LAST_UPDATE=0
+            _tg_edit "$PROGRESS_MSG_ID" "$(_progress_render)"
+            PROGRESS_MSG_ID=""
+          }
+
           has_real_content() {
             local log_file="$1"
             if [ ! -f "$log_file" ] || [ ! -s "$log_file" ]; then
@@ -1810,6 +1917,8 @@ jobs:
             check_sync_marker "$source_path" "$dest_path" "$task_name"
             case "$MARKER_ACTION" in
               skip)
+                # 所有层级（含递归子任务）均发送跳过通知
+                send_sync_skipped "$task_name" "$source_path" "$dest_path"
                 SYNC_SKIPPED=1
                 SYNC_FAILED=0
                 SYNC_TRANSFERRED_BYTES=0
@@ -1823,6 +1932,11 @@ jobs:
                 return 0
                 ;;
             esac
+
+            # 顶层任务启动进度通知
+            if [ "$current_depth" -eq 0 ]; then
+              progress_start "$task_name"
+            fi
 
             # 50GB 阈值（带默认值，防止跨 step 环境变量丢失时为空）
             local threshold="${SYNC_SPLIT_THRESHOLD_BYTES:-50000000000}"
@@ -1839,6 +1953,7 @@ jobs:
 
             if [ "$source_size_bytes" -le "$threshold" ]; then
               echo "源端大小 $(numfmt --to=iec-i --suffix=B "$source_size_bytes" 2>/dev/null || echo "${source_size_bytes}B") 未超过 50GB 阈值，直接同步"
+              progress_update "直接同步中（源端 $(format_bytes "$source_size_bytes")）"
               sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
               local _rc=$?
               # 同步成功后保存标记；失败则按开关对源目录超阈值大文件执行切割
@@ -1847,12 +1962,14 @@ jobs:
               elif [ "$current_depth" -eq 0 ]; then
                 split_large_files_after_sync_failure "$source_path" "$task_name"
               fi
+              if [ "$current_depth" -eq 0 ]; then progress_finish; fi
               return $_rc
             fi
 
             # 超过 50GB，需要拆分
             if [ "$current_depth" -ge "$max_depth" ]; then
               echo "已达最大拆分深度 ${max_depth}，按文件批次拆分 (depth=${current_depth}, size=$(numfmt --to=iec-i --suffix=B "$source_size_bytes" 2>/dev/null || echo "${source_size_bytes}B"))"
+              progress_update "文件批次拆分（已达最大深度 ${current_depth}）"
               sync_dir_by_file_batches "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
               local _rc=$?
               # 同步成功后保存标记；失败则按开关对源目录超阈值大文件执行切割
@@ -1861,6 +1978,7 @@ jobs:
               elif [ "$current_depth" -eq 0 ]; then
                 split_large_files_after_sync_failure "$source_path" "$task_name"
               fi
+              if [ "$current_depth" -eq 0 ]; then progress_finish; fi
               return $_rc
             fi
 
@@ -1871,6 +1989,7 @@ jobs:
             subdirs=$(rclone lsf --dirs-only "$source_path" 2>/dev/null | sed 's|/$||')
             if [ -z "$subdirs" ]; then
               echo "无子目录，按文件批次拆分同步"
+              progress_update "无子目录，按文件批次拆分"
               sync_dir_by_file_batches "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
               local _rc=$?
               # 同步成功后保存标记；失败则按开关对源目录超阈值大文件执行切割
@@ -1879,6 +1998,7 @@ jobs:
               elif [ "$current_depth" -eq 0 ]; then
                 split_large_files_after_sync_failure "$source_path" "$task_name"
               fi
+              if [ "$current_depth" -eq 0 ]; then progress_finish; fi
               return $_rc
             fi
 
@@ -1919,6 +2039,7 @@ jobs:
               subdirs="$filtered_subdirs"
               if [ -z "$subdirs" ]; then
                 echo "所有子目录均被排除，直接执行完整同步"
+                progress_update "所有子目录被排除，直接完整同步"
                 sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
                 local _rc=$?
                 # 顶层同步成功后保存标记；失败则按开关对源目录超阈值大文件执行切割
@@ -1929,12 +2050,14 @@ jobs:
                     split_large_files_after_sync_failure "$source_path" "$task_name"
                   fi
                 fi
+                if [ "$current_depth" -eq 0 ]; then progress_finish; fi
                 return $_rc
               fi
             fi
 
             # 按子目录大小从小到大排序
             echo "按子目录大小排序..."
+            progress_update "正在按子目录大小排序..."
             local sorted_subdirs=""
             declare -A subdir_size_map=()
             while IFS= read -r subdir; do
@@ -1949,6 +2072,10 @@ jobs:
             done <<< "$subdirs"
             subdirs=$(echo "$sorted_subdirs" | sort -n | cut -d' ' -f2-)
 
+            # 预统计子目录总数（用于进度展示）
+            local total_subdirs_count
+            total_subdirs_count=$(echo "$subdirs" | grep -c . 2>/dev/null || echo 0)
+
             # 按子目录逐个同步（静默模式：无文件变更时跳过通知）
             SYNC_SKIP_QUIET=1
             local total_subtasks=0
@@ -1959,11 +2086,14 @@ jobs:
             local synced_list=""
             local failed_list=""
             local skipped_list=""
+            local subtask_idx=0
             while IFS= read -r subdir; do
               [ -z "$subdir" ] && continue
               total_subtasks=$((total_subtasks + 1))
+              subtask_idx=$((subtask_idx + 1))
               local safe_subtask="${task_name}_${subdir//\//_}"
               echo "=== 子目录同步: ${safe_subtask} ==="
+              progress_update "子目录 ${subtask_idx}/${total_subdirs_count}: ${subdir}" "📊 子目录: ${subtask_idx}/${total_subdirs_count} | ✅${synced_subtasks} ⏭️${skipped_subtasks} ❌${failed_subtasks}"
               SYNC_AUTO_SPLIT_DEPTH=$((current_depth + 1))
               sync_task_with_auto_split "${source_path}/${subdir}" "${dest_path}/${subdir}" "${safe_subtask}" "${extra_args[@]}" || true
               SYNC_AUTO_SPLIT_DEPTH=$current_depth
@@ -1979,6 +2109,7 @@ jobs:
                 total_transferred=$((total_transferred + SYNC_TRANSFERRED_BYTES))
                 failed_list+="• ${subdir} ($(format_bytes "${subdir_size_map[$subdir]:-0}"))"$'\n'
               fi
+              progress_update_force "子目录 ${subtask_idx}/${total_subdirs_count} 完成: ${subdir}" "📊 子目录: ${subtask_idx}/${total_subdirs_count} | ✅${synced_subtasks} ⏭️${skipped_subtasks} ❌${failed_subtasks}"
             done <<< "$subdirs"
             SYNC_SKIP_QUIET=0
 
@@ -2000,6 +2131,7 @@ jobs:
             # 最终完整同步（仅在顶层执行，正常通知）
             if [ "$current_depth" -eq 0 ]; then
               echo "=== 最终完整同步: ${task_name} ==="
+              progress_update_force "最终完整同步中" "📊 子目录: ${total_subtasks}/${total_subtasks} | ✅${synced_subtasks} ⏭️${skipped_subtasks} ❌${failed_subtasks}"
               sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
               AUTO_SPLIT_INFO=""
               # 顶层同步成功后保存标记
@@ -2009,6 +2141,7 @@ jobs:
                 # 顶层最终同步失败后，按开关对源目录超阈值大文件执行切割
                 split_large_files_after_sync_failure "$source_path" "$task_name"
               fi
+              progress_finish
             else
               SYNC_SKIPPED=0
               SYNC_FAILED=0
@@ -2037,6 +2170,7 @@ jobs:
             case "$MARKER_ACTION" in
               skip)
                 echo "跳过 ${task_name} 文件批次同步: 1天内已成功同步"
+                send_sync_skipped "$task_name" "$source_path" "$dest_path"
                 SYNC_SKIPPED=1
                 SYNC_FAILED=0
                 SYNC_TRANSFERRED_BYTES=0
@@ -2060,6 +2194,7 @@ jobs:
             # 递归列出所有文件（使用 lsjson，比 lsf --json 更可靠）
             local file_list_file="${batch_dir}/all_files.jsonl"
             echo "正在列出文件..."
+            progress_update "正在列出文件..."
             # 注意：GitHub Actions 默认 set -e -o pipefail，rclone lsjson 失败时管道会非零退出，
             # 此处只需文件列表（失败时 total_files=0 触发下方 lsf 备选），用 || true 避免 step 直接退出。
             rclone lsjson --recursive --files-only --no-modtime --no-mimetype "$source_path" 2>&1 | jq -c '.[]' > "$file_list_file" 2>/dev/null || true
@@ -2067,6 +2202,7 @@ jobs:
             local total_files
             total_files=$(wc -l < "$file_list_file" | tr -d ' ')
             echo "总文件数: ${total_files}"
+            progress_update "总文件数: ${total_files}，正在拆分批次..."
 
             if [ "$total_files" -eq 0 ]; then
               echo "⚠️ 无文件列出，尝试 rclone lsf 备选方案..."
@@ -2121,20 +2257,24 @@ jobs:
 
             local total_batches=$((batch_num + 1))
             echo "拆分为 ${total_batches} 个批次"
+            progress_update_force "拆分为 ${total_batches} 个批次" "📊 批次: 0/${total_batches}"
 
             # 逐批同步（rclone copy + --files-from）
             local synced_batches=0
             local failed_batches=0
             local failed_batch_list=""
             local batch_total_files=0
+            local batch_idx=0
 
             for i in $(seq 0 $batch_num); do
               local bf="${batch_dir}/batch_${i}.txt"
               if [ -s "$bf" ]; then
+                batch_idx=$((batch_idx + 1))
                 local batch_file_count
                 batch_file_count=$(wc -l < "$bf" | tr -d ' ')
                 batch_total_files=$((batch_total_files + batch_file_count))
                 echo "=== 批次 $((i+1))/${total_batches}: ${batch_file_count} 个文件 ==="
+                progress_update "批次 ${batch_idx}/${total_batches}: ${batch_file_count} 个文件" "📊 批次: ${batch_idx}/${total_batches} | ✅${synced_batches} ❌${failed_batches}"
 
                 # set -e 下 rclone 非零退出（如 exit 4 部分失败）会直接终止 step，
                 # 导致后续 sync_with_logging 通知无法发出。此处需捕获退出码，临时关闭 set -e。
@@ -2173,6 +2313,7 @@ jobs:
                   failed_batch_list+="• 批次 $((i+1))/${total_batches} (exit=${rc}, ${batch_file_count} 文件)"$'\n'
                   echo "批次 $((i+1)) 失败 (exit=${rc})"
                 fi
+                progress_update_force "批次 ${batch_idx}/${total_batches} 完成" "📊 批次: ${batch_idx}/${total_batches} | ✅${synced_batches} ❌${failed_batches}"
               fi
             done
 
@@ -2180,6 +2321,7 @@ jobs:
             rm -rf "$batch_dir"
 
             echo "=== 批次传输完成 (成功 ${synced_batches}/${total_batches}, 失败 ${failed_batches})，执行最终同步检查 ==="
+            progress_update_force "批次传输完成，最终同步检查中" "📊 批次: ${total_batches}/${total_batches} | ✅${synced_batches} ❌${failed_batches}"
 
             # 设置批次统计信息，供最终通知展示（与子目录拆分的 AUTO_SPLIT_INFO 对齐）
             AUTO_SPLIT_INFO="🔀 文件批次拆分统计"$'\n'
@@ -2271,6 +2413,8 @@ jobs:
             MARKER_CURRENT_BYTES=0
             MARKER_CURRENT_COUNT=0
             MARKER_CURRENT_DIRS=""
+            MARKER_LAST_SUCCESS=""
+            MARKER_SINCE_HOURS=0
 
             # 强制同步跳过所有检查
             if [ "$FORCE_SYNC" = "true" ]; then
@@ -2311,6 +2455,8 @@ jobs:
               if [ "$diff" -lt "$SYNC_SKIP_SECONDS" ]; then
                 echo "1天内已成功同步（距今 $((diff / 3600)) 小时），跳过"
                 MARKER_ACTION="skip"
+                MARKER_LAST_SUCCESS="$last_success"
+                MARKER_SINCE_HOURS=$((diff / 3600))
                 return 0
               fi
             fi
@@ -2397,6 +2543,40 @@ jobs:
 
             msg+=$'\n'"⏸️ <b>已跳过此同步，继续执行其他任务</b>"$'\n'
             msg+="如确认无误，请手动触发 force_sync=true"
+
+            send_telegram_message "$msg" "HTML"
+          }
+
+          # 发送“1天内已成功同步，本次跳过”的通知
+          # 依赖全局变量: MARKER_LAST_SUCCESS, MARKER_SINCE_HOURS, MARKER_JSON
+          send_sync_skipped() {
+            local task_name="$1"
+            local source_path="$2"
+            local dest_path="$3"
+
+            local marker_bytes marker_count
+            marker_bytes=$(echo "$MARKER_JSON" | jq -r '.source_bytes // 0' 2>/dev/null || echo 0)
+            marker_count=$(echo "$MARKER_JSON" | jq -r '.source_count // 0' 2>/dev/null || echo 0)
+
+            # HTML 转义动态内容
+            local e_task e_source e_dest e_last
+            e_task=$(escape_html "$task_name")
+            e_source=$(escape_html "$source_path")
+            e_dest=$(escape_html "$dest_path")
+            e_last=$(escape_html "$MARKER_LAST_SUCCESS")
+
+            local msg=""
+            msg+="⏭️ <b>同步任务跳过（1 天内已成功）</b>"$'\n'
+            msg+="━━━━━━━━━━━━━━━━━━"$'\n'
+            msg+="任务：<b>${e_task}</b>"$'\n'
+            msg+="源端：<code>${e_source}</code>"$'\n'
+            msg+="目标：<code>${e_dest}</code>"$'\n'
+            msg+=$'\n'"🕒 <b>上次同步</b>"$'\n'
+            msg+="• 时间：<code>${e_last}</code>"$'\n'
+            msg+="• 距今：<b>${MARKER_SINCE_HOURS}</b> 小时"$'\n'
+            msg+="• 记录大小：$(format_bytes "$marker_bytes") (${marker_count} 文件)"$'\n'
+            msg+=$'\n'"⏸️ <b>本次跳过同步，继续执行其他任务</b>"$'\n'
+            msg+="如需强制同步，请手动触发 force_sync=true"
 
             send_telegram_message "$msg" "HTML"
           }
@@ -2579,8 +2759,7 @@ jobs:
             msg+=$'\n'"🔀 文件同步流量图"$'\n'
             msg+=$'\n'
             msg+="${PREVIEW_FLOW}"
-            msg+=$'\n'$'\n'"  📦 合计预估待同步: $(format_bytes "$PREVIEW_TOTAL_SYNC_BYTES") / ${PREVIEW_TOTAL_SYNC_COUNT} 文件"$'\n'
-            msg+=$'\n'"⏳ 同步即将开始..."
+            msg+=$'\n'$'\n'"  📦 合计预估待同步: $(format_bytes "$PREVIEW_TOTAL_SYNC_BYTES") / ${PREVIEW_TOTAL_SYNC_COUNT} 文件"
 
             send_telegram_message "$msg"
             echo "  已发送 ${PREVIEW_TASK_NAME} 预览通知"
@@ -2669,6 +2848,7 @@ jobs:
             case "$MARKER_ACTION" in
               skip)
                 echo "跳过 ${task_name} GD: 1天内已成功同步"
+                send_sync_skipped "${task_name} GD" "$source_path" "$dest_path"
                 return 0
                 ;;
               warning)
