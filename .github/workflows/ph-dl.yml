@@ -85,11 +85,16 @@ jobs:
             fi
           done < /tmp/videos_tsp.txt
 
-          # 计算不包含 ID 后缀的标题：去掉扩展名 + 末尾的分隔符/方括号 + ID
+          # 计算规范化标题：去扩展名 + 去掉所有位置的 ph ID + 方括号 + 压缩分隔符并 trim
+          # 让 "-phxxx" / " [phxxx]" / "[phxxx]" 等变体归一，避免误入哈希分支
           get_title() {
             local p="$1"
             local base="${p%.*}"
-            echo "$base" | sed -E 's/[- ]?\[?ph[a-f0-9]+\]?$//'
+            echo "$base" \
+              | sed -E 's/ph[a-f0-9]{6,}//g' \
+              | sed -E 's/[][]//g' \
+              | sed -E 's/[-_ ]+/ /g' \
+              | sed -E 's/^ //; s/ $//'
           }
 
           # 预统计重复 ID 组数量（出现 >1 次的 ID）
@@ -145,6 +150,12 @@ jobs:
               DUP_DETAILS+=$'🔖 ID '"${id}"$'（'"${count}"$' 个，标题相同，保留: '"${kept_path}"$'）\n'"${group_details}"
             else
               # 规则2：title 不同 → 对比哈希
+              # 打印各文件规范化 title，便于排查为何被判不同（如不可见字符）
+              echo "  ⚠ 标题不同，需哈希确认："
+              while IFS=';' read -r t s p; do
+                [ -z "$p" ] && continue
+                printf '    title=[%s] file=%s\n' "$(get_title "$p")" "$p"
+              done <<< "$entries"
               # 计算每个文件哈希，写入: hash;time;size;path
               HASH_LIST="/tmp/hash_list_${id}.txt"
               > "$HASH_LIST"
