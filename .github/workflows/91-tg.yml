@@ -10,6 +10,16 @@ on:
         type: boolean
         default: false
         required: false
+      auto_delete_duplicates:
+        description: '自动删除重复视频（默认仅通知不删除）'
+        type: boolean
+        default: false
+        required: false
+      auto_delete_corrupted:
+        description: '自动删除无效视频（默认仅通知不删除）'
+        type: boolean
+        default: false
+        required: false
 
 jobs:
   build:
@@ -38,6 +48,183 @@ jobs:
           mkdir ~/onedrive
           nohup rclone --vfs-cache-mode full mount onedrive: ~/onedrive &
           sleep 3
+      - name: check duplicate videos by ID and dedupe by hash
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          AUTO_DELETE: ${{ github.event.inputs.auto_delete_duplicates == 'true' }}
+        run: |
+          SOURCE_REMOTE="onedrive:1/1024j/视频/91"
+          # 一次性获取所有文件的 SHA1（OneDrive 服务端哈希，不下载文件，不修改元数据）
+          # 用 python 解析 rclone hashsum 输出（hash 和 path 之间是空白分隔），生成 hash;path 格式
+          rclone hashsum sha1 "$SOURCE_REMOTE/" 2>/dev/null | python3 -c "import sys;[print(f'{p[0]};{p[1]}') for line in sys.stdin if len(p:=line.strip().split(None,1))==2]" > /tmp/91_hashes.txt || true
+
+          # 获取文件列表（time;size;path），path 放最后，文件名含 ; 时最后一个字段获取剩余全部，安全
+          rclone lsf "$SOURCE_REMOTE/" --files-only --format "tsp" 2>/dev/null \
+            | grep -iE '\.mp4$' > /tmp/91_videos_tsp.txt || true
+          TOTAL=$(wc -l < /tmp/91_videos_tsp.txt)
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "No mp4 files found in $SOURCE_REMOTE"
+            exit 0
+          fi
+
+          # 构建 path → time;size 映射
+          declare -A PATH_META
+          while IFS=';' read -r time size path; do
+            [ -z "$path" ] && continue
+            PATH_META["$path"]="${time};${size}"
+          done < /tmp/91_videos_tsp.txt
+
+          # 按哈希分组: hash → entries(time;size;path)
+          declare -A HASH_ENTRIES
+          while IFS=';' read -r hash path; do
+            [ -z "$path" ] && continue
+            echo "$path" | grep -qiE '\.mp4$' || continue
+            meta="${PATH_META[$path]:-}"
+            [ -z "$meta" ] && continue
+            IFS=';' read -r time size <<< "$meta"
+            entry="${time};${size};${path}"
+            if [ -n "${HASH_ENTRIES[$hash]}" ]; then
+              HASH_ENTRIES[$hash]+=$'\n'"${entry}"
+            else
+              HASH_ENTRIES[$hash]="${entry}"
+            fi
+          done < /tmp/91_hashes.txt
+
+          DUP_DETAILS=""
+          DUP_COUNT=0
+          REMOVED_COUNT=0
+          for hash in "${!HASH_ENTRIES[@]}"; do
+            entries="${HASH_ENTRIES[$hash]}"
+            count=$(echo "$entries" | wc -l)
+            if [ "$count" -le 1 ]; then
+              continue
+            fi
+            DUP_COUNT=$((DUP_COUNT + 1))
+
+            # 判断文件名（不含扩展名）是否完全相同
+            name_count=$(echo "$entries" | while IFS=';' read -r t s p; do
+              [ -z "$p" ] && continue
+              echo "${p%.*}"
+            done | sort -u | wc -l)
+
+            if [ "$name_count" -eq 1 ]; then
+              # 文件名相同（不含扩展名）→ 优先删除文件小的，其次删除修改时间旧的
+              # 排序：size 升序（小的先删），size 相同则 time 旧者优先删；保留最后一个（最大/最新）
+              sorted=$(echo "$entries" | sort -t';' -k2,2n -k1,1)
+              kept_path=$(echo "$sorted" | tail -n1 | cut -d';' -f3-)
+              group_details=""
+              while IFS=';' read -r t s p; do
+                [ "$p" = "$kept_path" ] && continue
+                [ -z "$p" ] && continue
+                if [ "$AUTO_DELETE" = "true" ]; then
+                  rclone deletefile "$SOURCE_REMOTE/$p" 2>/dev/null
+                  REMOVED_COUNT=$((REMOVED_COUNT + 1))
+                  group_details+=$'  🗑 删除 '"${p}"$'（'"${s}"$' 字节，'"${t}"$'）\n'
+                else
+                  group_details+=$'  ⚠ 待删除（已跳过） '"${p}"$'（'"${s}"$' 字节，'"${t}"$'）\n'
+                fi
+              done <<< "$sorted"
+              DUP_DETAILS+=$'🔖 哈希 '"${hash:0:12}"$'（'"${count}"$' 个，文件名相同，保留: '"${kept_path}"$'）\n'"${group_details}"
+            else
+              # 文件名不同但内容相同 → 删除修改时间旧的，保留最新
+              sorted=$(echo "$entries" | sort -t';' -k1,1)
+              kept_path=$(echo "$sorted" | tail -n1 | cut -d';' -f3-)
+              group_details=""
+              while IFS=';' read -r t s p; do
+                [ "$p" = "$kept_path" ] && continue
+                [ -z "$p" ] && continue
+                if [ "$AUTO_DELETE" = "true" ]; then
+                  rclone deletefile "$SOURCE_REMOTE/$p" 2>/dev/null
+                  REMOVED_COUNT=$((REMOVED_COUNT + 1))
+                  group_details+=$'  🗑 删除 '"${p}"$'（哈希一致，旧文件）\n'
+                else
+                  group_details+=$'  ⚠ 待删除（已跳过） '"${p}"$'（哈希一致，旧文件）\n'
+                fi
+              done <<< "$sorted"
+              DUP_DETAILS+=$'🔖 哈希 '"${hash:0:12}"$'（'"${count}"$' 个，文件名不同，保留: '"${kept_path}"$'）\n'"${group_details}"
+            fi
+          done
+
+          # 去重日志输出到 Actions 日志，便于追溯
+          echo "=== 91-tg 去重日志 ==="
+          echo "重复哈希数量: ${DUP_COUNT}"
+          echo "删除重复文件数量: ${REMOVED_COUNT}"
+          echo "--- 详情 ---"
+          echo "${DUP_DETAILS}"
+
+          # 发送通知
+          if [ "$DUP_COUNT" -gt 0 ]; then
+            MSG="🔍 91-tg 重复视频检测与去重"$'\n\n'"📁 目录: 91"$'\n'"🔢 重复哈希数量: ${DUP_COUNT}"$'\n'"🗑 删除重复: ${REMOVED_COUNT}"
+            if [ "$AUTO_DELETE" = "true" ]; then
+              MSG+=$'\n'"⚙️ 模式: 自动删除已开启"
+            else
+              MSG+=$'\n'"⚙️ 模式: 仅通知未删除（手动触发可开启 auto_delete_duplicates）"
+            fi
+            MSG+=$'\n\n'"📋 详情:"$'\n'"${DUP_DETAILS}"$'\n'"🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
+              --data-urlencode text="${MSG}"
+          else
+            echo "No duplicate videos found."
+          fi
+
+      - name: check corrupted videos
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          AUTO_DELETE: ${{ github.event.inputs.auto_delete_corrupted == 'true' }}
+        run: |
+          sudo apt-get install -y ffmpeg
+          SOURCE_REMOTE="onedrive:1/1024j/视频/91"
+          # 列出所有 mp4 文件（不经过 mount，避免修改文件元数据）
+          mapfile -t ALL_FILES < <(rclone lsf "$SOURCE_REMOTE/" --files-only 2>/dev/null | grep -iE '\.mp4$')
+          TOTAL=${#ALL_FILES[@]}
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "No mp4 files found in $SOURCE_REMOTE"
+            exit 0
+          fi
+
+          CORRUPTED_LIST=""
+          CORRUPTED_COUNT=0
+          CHECKED=0
+          for file in "${ALL_FILES[@]}"; do
+            CHECKED=$((CHECKED + 1))
+            echo "[$CHECKED/$TOTAL] 检测: $file"
+            # 用 rclone cat 流式传输给 ffprobe 检测（不经过 mount，不修改元数据）
+            # probesize 限制分析 50MB，timeout 限制单文件 60 秒；faststart 文件几秒内即可判定
+            if ! rclone cat "$SOURCE_REMOTE/$file" 2>/dev/null | \
+                 timeout 60 ffprobe -probesize 52428800 -analyzeduration 10000000 -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 - 2>/dev/null | grep -q .; then
+              CORRUPTED_COUNT=$((CORRUPTED_COUNT + 1))
+              CORRUPTED_LIST+=$'- '"${file}"$'\n'
+              if [ "$AUTO_DELETE" = "true" ]; then
+                rclone deletefile "$SOURCE_REMOTE/$file" 2>/dev/null
+                echo "  🗑 已删除"
+              else
+                echo "  ⚠ 可能无效（已跳过删除）"
+              fi
+            fi
+          done
+
+          echo "=== 91-tg 无效视频检测日志 ==="
+          echo "检测总数: ${TOTAL}"
+          echo "无效视频: ${CORRUPTED_COUNT}"
+
+          if [ "$CORRUPTED_COUNT" -gt 0 ]; then
+            MSG="🗑 91-tg 无效视频检测"$'\n\n'"📁 目录: 91"$'\n'"📊 检测总数: ${TOTAL}"$'\n'"⚠ 无效视频: ${CORRUPTED_COUNT}"
+            if [ "$AUTO_DELETE" = "true" ]; then
+              MSG+=$'\n'"⚙️ 模式: 自动删除已开启"
+            else
+              MSG+=$'\n'"⚙️ 模式: 仅通知未删除（手动触发可开启 auto_delete_corrupted）"
+            fi
+            MSG+=$'\n\n'"📋 无效文件列表:"$'\n'"${CORRUPTED_LIST}"$'\n'"🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
+              --data-urlencode text="${MSG}"
+          else
+            echo "No corrupted videos found."
+          fi
+
       - name: clean telegram channel and reset uploaded_videos.txt
         if: github.event.inputs.clean_tg_uploaded_videos == 'true'
         env:

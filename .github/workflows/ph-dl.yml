@@ -10,6 +10,16 @@ on:
         type: boolean
         default: false
         required: false
+      auto_delete_duplicates:
+        description: '自动删除重复视频（默认仅通知不删除）'
+        type: boolean
+        default: false
+        required: false
+      auto_delete_corrupted:
+        description: '自动删除无效视频（默认仅通知不删除）'
+        type: boolean
+        default: false
+        required: false
   watch:
     types: started
 
@@ -48,54 +58,116 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          AUTO_DELETE: ${{ github.event.inputs.auto_delete_duplicates == 'true' }}
         run: |
-          TARGET_DIR=~/onedrive/0/j-1024j-视频-pornhub-favorites
-          if [ ! -d "$TARGET_DIR" ]; then
-            echo "Directory not found: $TARGET_DIR"
+          SOURCE_REMOTE="onedrive:0/j-1024j-视频-pornhub-favorites"
+          # rclone lsf 列出文件（time;size;path），path 放最后，文件名含 ; 时最后一个字段获取剩余全部，安全
+          rclone lsf "$SOURCE_REMOTE/" --files-only --format "tsp" 2>/dev/null \
+            | grep -iE '\.mp4$' > /tmp/videos_tsp.txt || true
+          TOTAL=$(wc -l < /tmp/videos_tsp.txt)
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "No mp4 files found in $SOURCE_REMOTE"
             exit 0
           fi
-          cd "$TARGET_DIR"
-          # 提取文件名中 [...] 内的 ID，统计重复项
-          declare -A ID_FILES
-          while IFS= read -r file; do
-            id=$(echo "$file" | grep -oE '\[[a-f0-9]+\]' | tail -n1)
+
+          # 按 ID 分组，entry 格式: time;size;path（path 在最后，含 ; 安全）
+          declare -A ID_ENTRIES
+          while IFS=';' read -r time size path; do
+            [ -z "$path" ] && continue
+            id=$(echo "$path" | grep -oE 'ph[a-f0-9]+' | tail -n1)
             [ -n "$id" ] || continue
-            if [ -n "${ID_FILES[$id]}" ]; then
-              ID_FILES[$id]+=$'\n'"$file"
+            entry="${time};${size};${path}"
+            if [ -n "${ID_ENTRIES[$id]}" ]; then
+              ID_ENTRIES[$id]+=$'\n'"${entry}"
             else
-              ID_FILES[$id]="$file"
+              ID_ENTRIES[$id]="${entry}"
             fi
-          done < <(find . -maxdepth 1 -type f -name '*.mp4' -print | sed 's|^\./||' | sort)
+          done < /tmp/videos_tsp.txt
+
+          # 计算不包含 ID 后缀的标题：去掉扩展名 + 末尾的分隔符/方括号 + ID
+          get_title() {
+            local p="$1"
+            local base="${p%.*}"
+            echo "$base" | sed -E 's/[- ]?\[?ph[a-f0-9]+\]?$//'
+          }
 
           DUP_DETAILS=""
           DUP_COUNT=0
           REMOVED_COUNT=0
-          DIFFERENT_COUNT=0
-          for id in "${!ID_FILES[@]}"; do
-            files="${ID_FILES[$id]}"
-            count=$(echo "$files" | wc -l)
-            if [ "$count" -gt 1 ]; then
-              DUP_COUNT=$((DUP_COUNT + 1))
-              # 按修改时间从新到旧排序，保留最晚下载的文件作为基准
-              sorted_files=$(echo "$files" | xargs -d '\n' ls -t 2>/dev/null)
-              kept=$(echo "$sorted_files" | head -n1)
-              kept_hash=$(sha1sum "$kept" | cut -d' ' -f1)
+          NOTIFY_ONLY_COUNT=0
+          for id in "${!ID_ENTRIES[@]}"; do
+            entries="${ID_ENTRIES[$id]}"
+            count=$(echo "$entries" | wc -l)
+            if [ "$count" -le 1 ]; then
+              continue
+            fi
+            DUP_COUNT=$((DUP_COUNT + 1))
+
+            # 判断所有文件的 title 是否完全相同
+            title_count=$(while IFS=';' read -r t s p; do
+              [ -z "$p" ] && continue
+              get_title "$p"
+            done <<< "$entries" | sort -u | wc -l)
+
+            if [ "$title_count" -eq 1 ]; then
+              # 规则1：ID 和 title 都相同 → 优先删除文件小的，其次删除修改时间旧的
+              # 排序：size 升序（小的先删），size 相同则 time 旧者优先删；保留最后一个（最大/最新）
+              sorted=$(echo "$entries" | sort -t';' -k2,2n -k1,1)
+              kept_path=$(echo "$sorted" | tail -n1 | cut -d';' -f3-)
               group_details=""
-              while IFS= read -r f; do
-                [ "$f" = "$kept" ] && continue
-                f_hash=$(sha1sum "$f" | cut -d' ' -f1)
-                if [ "$f_hash" = "$kept_hash" ]; then
-                  # 哈希一致，删除重复文件
-                  rm -f "$f"
+              while IFS=';' read -r t s p; do
+                [ "$p" = "$kept_path" ] && continue
+                [ -z "$p" ] && continue
+                if [ "$AUTO_DELETE" = "true" ]; then
+                  rclone deletefile "$SOURCE_REMOTE/$p" 2>/dev/null
                   REMOVED_COUNT=$((REMOVED_COUNT + 1))
-                  group_details+=$'  🗑 删除 '"${f}"$'（哈希一致 '"${kept_hash:0:12}"$'）\n'
+                  group_details+=$'  🗑 删除 '"${p}"$'（'"${s}"$' 字节，'"${t}"$'）\n'
                 else
-                  # 哈希不同，保留并标记
-                  DIFFERENT_COUNT=$((DIFFERENT_COUNT + 1))
-                  group_details+=$'  ⚠ 保留 '"${f}"$'（哈希 '"${f_hash:0:12}"$' ≠ '"${kept_hash:0:12}"$'）\n'
+                  group_details+=$'  ⚠ 待删除（已跳过） '"${p}"$'（'"${s}"$' 字节，'"${t}"$'）\n'
                 fi
-              done <<< "$sorted_files"
-              DUP_DETAILS+=$'🔖 ID '"${id}"$'（'"${count}"$' 个，保留: '"${kept}"$'）\n'"${group_details}"
+              done <<< "$sorted"
+              DUP_DETAILS+=$'🔖 ID '"${id}"$'（'"${count}"$' 个，标题相同，保留: '"${kept_path}"$'）\n'"${group_details}"
+            else
+              # 规则2：title 不同 → 对比哈希
+              # 计算每个文件哈希，写入: hash;time;size;path
+              HASH_LIST="/tmp/hash_list_${id}.txt"
+              > "$HASH_LIST"
+              while IFS=';' read -r t s p; do
+                [ -z "$p" ] && continue
+                hash=$(rclone hashsum sha1 "$SOURCE_REMOTE/$p" 2>/dev/null | awk '{print $1}')
+                echo "${hash};${t};${s};${p}" >> "$HASH_LIST"
+              done <<< "$entries"
+              # 找出重复哈希（出现 >1 次的哈希）
+              DUP_HASHES=$(awk -F';' '{print $1}' "$HASH_LIST" | sort | uniq -d)
+              group_details=""
+              if [ -n "$DUP_HASHES" ]; then
+                # 哈希一致的组：每组删除修改时间旧的，保留最新
+                while IFS= read -r hash; do
+                  [ -z "$hash" ] && continue
+                  hsorted=$(grep "^${hash};" "$HASH_LIST" | sort -t';' -k2)
+                  hkept_path=$(echo "$hsorted" | tail -n1 | cut -d';' -f4-)
+                  while IFS=';' read -r h t s p; do
+                    [ "$p" = "$hkept_path" ] && continue
+                    [ -z "$p" ] && continue
+                    if [ "$AUTO_DELETE" = "true" ]; then
+                      rclone deletefile "$SOURCE_REMOTE/$p" 2>/dev/null
+                      REMOVED_COUNT=$((REMOVED_COUNT + 1))
+                      group_details+=$'  🗑 删除 '"${p}"$'（哈希一致 '"${hash:0:12}"$'，旧文件）\n'
+                    else
+                      group_details+=$'  ⚠ 待删除（已跳过） '"${p}"$'（哈希一致 '"${hash:0:12}"$'，旧文件）\n'
+                    fi
+                  done <<< "$hsorted"
+                done <<< "$DUP_HASHES"
+                DUP_DETAILS+=$'🔖 ID '"${id}"$'（'"${count}"$' 个，标题不同，删除哈希一致的旧文件）\n'"${group_details}"
+              else
+                # 所有哈希各不相同 → 仅通知不删除
+                NOTIFY_ONLY_COUNT=$((NOTIFY_ONLY_COUNT + 1))
+                while IFS=';' read -r h t s p; do
+                  group_details+=$'  ⚠ 保留 '"${p}"$'（哈希 '"${h:0:12}"$'）\n'
+                done < "$HASH_LIST"
+                DUP_DETAILS+=$'🔖 ID '"${id}"$'（'"${count}"$' 个，标题不同且哈希各不相同，仅通知）\n'"${group_details}"
+              fi
+              rm -f "$HASH_LIST"
             fi
           done
 
@@ -103,15 +175,20 @@ jobs:
           echo "=== ph-dl 去重日志 ==="
           echo "重复 ID 数量: ${DUP_COUNT}"
           echo "删除重复文件数量: ${REMOVED_COUNT}"
-          echo "哈希不同保留数量: ${DIFFERENT_COUNT}"
+          echo "仅通知未删除数量: ${NOTIFY_ONLY_COUNT}"
           echo "--- 详情 ---"
           echo "${DUP_DETAILS}"
 
           # 发送通知
           if [ "$DUP_COUNT" -gt 0 ]; then
-            MSG="🔍 ph-dl 重复视频检测与去重"$'\n\n'"📁 目录: j-1024j-视频-pornhub-favorites"$'\n'"🔢 重复 ID 数量: ${DUP_COUNT}"$'\n'"🗑 删除重复: ${REMOVED_COUNT}"$'\n'"⚠ 哈希不同保留: ${DIFFERENT_COUNT}"
-            if [ "$REMOVED_COUNT" -eq 0 ] && [ "$DIFFERENT_COUNT" -gt 0 ]; then
-              MSG+=$'\n'"ℹ 重复文件哈希各不相同，未自动删除"
+            MSG="🔍 ph-dl 重复视频检测与去重"$'\n\n'"📁 目录: j-1024j-视频-pornhub-favorites"$'\n'"🔢 重复 ID 数量: ${DUP_COUNT}"$'\n'"🗑 删除重复: ${REMOVED_COUNT}"$'\n'"⚠ 仅通知未删除: ${NOTIFY_ONLY_COUNT}"
+            if [ "$AUTO_DELETE" = "true" ]; then
+              MSG+=$'\n'"⚙️ 模式: 自动删除已开启"
+            else
+              MSG+=$'\n'"⚙️ 模式: 仅通知未删除（手动触发可开启 auto_delete_duplicates）"
+            fi
+            if [ "$REMOVED_COUNT" -eq 0 ] && [ "$NOTIFY_ONLY_COUNT" -gt 0 ]; then
+              MSG+=$'\n'"ℹ 重复文件标题不同且哈希各不相同，未自动删除"
             fi
             MSG+=$'\n\n'"📋 详情:"$'\n'"${DUP_DETAILS}"$'\n'"🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
@@ -119,6 +196,62 @@ jobs:
               --data-urlencode text="${MSG}"
           else
             echo "No duplicate video IDs found."
+          fi
+
+      - name: check corrupted videos
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          AUTO_DELETE: ${{ github.event.inputs.auto_delete_corrupted == 'true' }}
+        run: |
+          sudo apt-get install -y ffmpeg
+          SOURCE_REMOTE="onedrive:0/j-1024j-视频-pornhub-favorites"
+          # 列出所有 mp4 文件（不经过 mount，避免修改文件元数据）
+          mapfile -t ALL_FILES < <(rclone lsf "$SOURCE_REMOTE/" --files-only 2>/dev/null | grep -iE '\.mp4$')
+          TOTAL=${#ALL_FILES[@]}
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "No mp4 files found in $SOURCE_REMOTE"
+            exit 0
+          fi
+
+          CORRUPTED_LIST=""
+          CORRUPTED_COUNT=0
+          CHECKED=0
+          for file in "${ALL_FILES[@]}"; do
+            CHECKED=$((CHECKED + 1))
+            echo "[$CHECKED/$TOTAL] 检测: $file"
+            # 用 rclone cat 流式传输给 ffprobe 检测（不经过 mount，不修改元数据）
+            # probesize 限制分析 50MB，timeout 限制单文件 60 秒；faststart 文件几秒内即可判定
+            if ! rclone cat "$SOURCE_REMOTE/$file" 2>/dev/null | \
+                 timeout 60 ffprobe -probesize 52428800 -analyzeduration 10000000 -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 - 2>/dev/null | grep -q .; then
+              CORRUPTED_COUNT=$((CORRUPTED_COUNT + 1))
+              CORRUPTED_LIST+=$'- '"${file}"$'\n'
+              if [ "$AUTO_DELETE" = "true" ]; then
+                rclone deletefile "$SOURCE_REMOTE/$file" 2>/dev/null
+                echo "  🗑 已删除"
+              else
+                echo "  ⚠ 可能无效（已跳过删除）"
+              fi
+            fi
+          done
+
+          echo "=== 无效视频检测日志 ==="
+          echo "检测总数: ${TOTAL}"
+          echo "无效视频: ${CORRUPTED_COUNT}"
+
+          if [ "$CORRUPTED_COUNT" -gt 0 ]; then
+            MSG="🗑 ph-dl 无效视频检测"$'\n\n'"📁 目录: j-1024j-视频-pornhub-favorites"$'\n'"📊 检测总数: ${TOTAL}"$'\n'"⚠ 无效视频: ${CORRUPTED_COUNT}"
+            if [ "$AUTO_DELETE" = "true" ]; then
+              MSG+=$'\n'"⚙️ 模式: 自动删除已开启"
+            else
+              MSG+=$'\n'"⚙️ 模式: 仅通知未删除（手动触发可开启 auto_delete_corrupted）"
+            fi
+            MSG+=$'\n\n'"📋 无效文件列表:"$'\n'"${CORRUPTED_LIST}"$'\n'"🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
+              --data-urlencode text="${MSG}"
+          else
+            echo "No corrupted videos found."
           fi
 
       - name: cleanup yt-dlp fragment files
@@ -247,7 +380,8 @@ jobs:
           fi
 
           # 文件完好，预处理（转码/faststart）并上传到 Telegram
-          echo "- ${FILENAME} (${FILESIZE_HUMAN}) [链接](${URL})" >> new_downloads_list.txt
+          # 直接输出原始 URL，Telegram 自动识别为可点击链接（无需 parse_mode）
+          echo "- ${FILENAME} (${FILESIZE_HUMAN}) ${URL}" >> new_downloads_list.txt
           if bash ${GITHUB_WORKSPACE}/.github/scripts/process_one_file.sh "${FILEPATH}" "${TELEGRAM_CHANNEL_ID}" "ph"; then
             echo "${FILENAME}" >> uploaded_videos.txt
           fi
