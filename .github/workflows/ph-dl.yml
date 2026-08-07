@@ -361,7 +361,7 @@ jobs:
           mkdir -p "$DOWNLOAD_TMP"
 
           # 创建处理脚本供 yt-dlp 调用
-          cat << 'EOF' > post_process.sh
+          cat << 'POSTEOF' > post_process.sh
           #!/bin/bash
           FILEPATH="$1"
           URL="$2"
@@ -372,32 +372,9 @@ jobs:
           ARCHIVE_FILE="$TARGET_DIR/archive.txt"
           CORRUPTED_LOG="/tmp/ph-dl-downloads/corrupted.txt"
 
-          # ========== 文件名清理：移除控制字符，处理空文件名 ==========
-          # 用 Python 安全清理文件名（移除控制字符、BOM，NFC 归一化）
-          CLEANED_FILENAME=$(printf '%s' "$FILENAME" | python3 -c "
-import sys, re, unicodedata, os
-s = sys.stdin.buffer.read().decode('utf-8', errors='replace')
-s = s.lstrip('\ufeff')
-s = re.sub(r'[\x00-\x1f\x7f]', '', s)
-s = s.strip(' ')
-s = unicodedata.normalize('NFC', s)
-# 如果清理后主名为空（纯扩展名），从 URL 或 ID 生成保底文件名
-base, ext = os.path.splitext(s)
-if not base or len(base) < 3:
-    # 尝试从文件名中提取 ph ID
-    import re as _re
-    m = _re.search(r'ph[a-f0-9]+', s)
-    if m:
-        s = f'video-{m.group(0)}{ext}'
-    else:
-        # 用时间戳做保底
-        import time
-        s = f'video-{int(time.time())}{ext}'
-print(s)
-" 2>/dev/null)
-          # 如果 Python 清理失败，用原始文件名
+          # 如果 FILENAME 包含控制字符或清理后为空，用 URL/ID 生成安全文件名
+          CLEANED_FILENAME=$(python3 "${GITHUB_WORKSPACE}/.github/scripts/clean_ytdlp_filename.py" "$FILENAME" "$URL" 2>/dev/null)
           [ -z "$CLEANED_FILENAME" ] && CLEANED_FILENAME="$FILENAME"
-          # 如果重命名了，移动文件
           if [ "$CLEANED_FILENAME" != "$FILENAME" ]; then
             echo "NOTE: cleaned filename '$FILENAME' -> '$CLEANED_FILENAME'"
             CLEANED_FILEPATH="$(dirname "$FILEPATH")/$CLEANED_FILENAME"
@@ -437,7 +414,7 @@ print(s)
           else
             echo "WARN: rclone copyto failed, keeping temp file: $FILENAME"
           fi
-          EOF
+          POSTEOF
           chmod +x post_process.sh
           
           BEFORE_COUNT=$(wc -l < archive.txt 2>/dev/null || echo 0)
