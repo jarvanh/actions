@@ -1654,6 +1654,30 @@ jobs:
             echo "$result"
           }
 
+          # 同步前刷新 OpenList 服务端目录缓存，避免 PROPFIND 返回 stale listing
+          # 导致 rclone 看不到已存在文件而重复上传。
+          _refresh_openlist_cache() {
+            local dest_path="$1"
+            [[ "$dest_path" == openlist:* ]] || return 0
+
+            local ol_path="${dest_path#openlist:}"
+            ol_path="/${ol_path}"
+            local ol_token
+            ol_token=$(jq -r '.token' /dropbox/self-hosted/openlist/data/config.json 2>/dev/null || echo "")
+            if [ -z "$ol_token" ] || [ "$ol_token" = "null" ]; then
+              echo "OpenList token 不可用，跳过缓存刷新"
+              return 0
+            fi
+
+            echo "刷新 OpenList 缓存: $ol_path"
+            curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh" \
+              -H "Authorization: $ol_token" \
+              -H "Content-Type: application/json" \
+              -d "{\"path\":\"$ol_path\",\"recursive\":true}" \
+              >/dev/null 2>&1 || true
+            sleep 3
+          }
+
           # Sync with probes and detailed logs.
           # 带探测和更清晰日志的同步函数。
           sync_with_logging() {
@@ -1667,6 +1691,9 @@ jobs:
             local LOG_FILENAME="${task_name}_sync_${TIMESTAMP}.log"
 
             echo "开始同步: $source_path -> $dest_path"
+
+            # OpenList 目标端在同步前刷新缓存，减少重复上传
+            _refresh_openlist_cache "$dest_path"
 
             local LAST_ATTEMPT_LOG="${LOG_FILENAME}.last"
 
@@ -1896,17 +1923,19 @@ jobs:
             src_stats=$(_get_path_stats "$source_path" "${extra_args[@]}")
             source_count=$(echo "$src_stats" | awk '{print $2}')
             source_size_human=$(echo "$src_stats" | awk '{print $3 ($4? " "$4 : "")}')
+            local source_count_raw="$source_count"
             [ "$source_count" = "0" ] && source_count="未知"
 
             dst_stats=$(_get_path_stats "$dest_path" "${extra_args[@]}")
             dest_count=$(echo "$dst_stats" | awk '{print $2}')
             dest_size_human=$(echo "$dst_stats" | awk '{print $3 ($4? " "$4 : "")}')
+            local dest_count_raw="$dest_count"
             [ "$dest_count" = "0" ] && dest_count="未知"
 
             # 始终显示文件数信息
             local diff_files_list=""
-            if [[ "$source_count" =~ ^[0-9]+$ ]] && [[ "$dest_count" =~ ^[0-9]+$ ]]; then
-              local diff=$((source_count - dest_count))
+            if [[ "$source_count_raw" =~ ^[0-9]+$ ]] && [[ "$dest_count_raw" =~ ^[0-9]+$ ]]; then
+              local diff=$((source_count_raw - dest_count_raw))
               if [ "$diff" -ne 0 ]; then
                 count_info="文件数差异：${diff} (源端 ${source_count} / 目标 ${dest_count})"
                 diff_files_list=$(_build_diff_files_list "$source_path" "$dest_path" "${extra_args[@]}")
@@ -2058,8 +2087,8 @@ jobs:
               SYNC_FAILED=1
               # 检测是否为部分失败：目标已有部分文件但少于源端
               local is_partial_failure=0
-              if [[ "$source_count" =~ ^[0-9]+$ ]] && [[ "$dest_count" =~ ^[0-9]+$ ]] && \
-                 [ "$dest_count" -gt 0 ] && [ "$dest_count" -lt "$source_count" ]; then
+              if [[ "$source_count_raw" =~ ^[0-9]+$ ]] && [[ "$dest_count_raw" =~ ^[0-9]+$ ]] && \
+               [ "$dest_count_raw" -gt 0 ] && [ "$dest_count_raw" -lt "$source_count_raw" ]; then
                 is_partial_failure=1
               fi
               # 提取关键错误日志
@@ -2111,8 +2140,8 @@ jobs:
             else
               # 同步返回成功，检查是否有文件缺失（部分失败）
               local is_partial_success=0
-              if [[ "$source_count" =~ ^[0-9]+$ ]] && [[ "$dest_count" =~ ^[0-9]+$ ]] && \
-                 [ "$dest_count" -gt 0 ] && [ "$dest_count" -lt "$source_count" ]; then
+              if [[ "$source_count_raw" =~ ^[0-9]+$ ]] && [[ "$dest_count_raw" =~ ^[0-9]+$ ]] && \
+                 [ "$dest_count_raw" -lt "$source_count_raw" ]; then
                 is_partial_success=1
                 SYNC_FAILED=1
               fi
@@ -3582,6 +3611,91 @@ jobs:
           else
             task_done "completed"
           fi
+
+      - name: Diagnostic - task0 OpenList listing
+        run: |
+          source /tmp/functions.sh
+          echo "=== 诊断 task0 OpenList listing 问题 ==="
+
+          src_path="onedrive:0"
+          dst_path="openlist:wopan176Crypt/0"
+
+          # 1. 源端统计
+          echo "--- 源端 $src_path ---"
+          rclone size "$src_path" --json 2>&1 | tee /tmp/diag_src_size.json
+
+          # 2. 目标端统计（刷新缓存前）
+          echo "--- 目标端 $dst_path (刷新缓存前) ---"
+          rclone size "$dst_path" --json 2>&1 | tee /tmp/diag_dst_size_before.json
+          rclone lsjson -R --files-only "$dst_path" 2>/dev/null | jq 'length' > /tmp/diag_dst_count_before.txt
+          echo "lsjson 文件数: $(cat /tmp/diag_dst_count_before.txt)"
+          echo "目标端前 10 个文件:"
+          rclone lsjson -R --files-only "$dst_path" 2>/dev/null | jq -r '.[].Path' | head -10
+
+          # 3. 刷新 OpenList 缓存
+          echo "--- 刷新 OpenList 缓存 ---"
+          ol_path="/${dst_path#openlist:}"
+          ol_token=$(jq -r '.token' /dropbox/self-hosted/openlist/data/config.json 2>/dev/null || echo "")
+          if [ -n "$ol_token" ] && [ "$ol_token" != "null" ]; then
+            curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh" \
+              -H "Authorization: $ol_token" \
+              -H "Content-Type: application/json" \
+              -d "{\"path\":\"$ol_path\",\"recursive\":true}"
+            echo ""
+            sleep 5
+          else
+            echo "OpenList token 不可用，跳过缓存刷新"
+          fi
+
+          # 4. 目标端统计（刷新缓存后）
+          echo "--- 目标端 $dst_path (刷新缓存后) ---"
+          rclone size "$dst_path" --json 2>&1 | tee /tmp/diag_dst_size_after.json
+          rclone lsjson -R --files-only "$dst_path" 2>/dev/null | jq 'length' > /tmp/diag_dst_count_after.txt
+          echo "lsjson 文件数: $(cat /tmp/diag_dst_count_after.txt)"
+
+          # 5. rclone check 差异（size-only，限制前 50 条）
+          echo "--- rclone check --size-only (前 50 条差异) ---"
+          timeout 600 rclone check "$src_path" "$dst_path" --size-only --combined - 2>/dev/null | head -50 | tee /tmp/diag_check.txt
+
+          # 6. 汇总
+          before_count=$(cat /tmp/diag_dst_count_before.txt 2>/dev/null || echo 0)
+          after_count=$(cat /tmp/diag_dst_count_after.txt 2>/dev/null || echo 0)
+          before_bytes=$(jq -r '.bytes // 0' /tmp/diag_dst_size_before.json 2>/dev/null || echo 0)
+          after_bytes=$(jq -r '.bytes // 0' /tmp/diag_dst_size_after.json 2>/dev/null || echo 0)
+          src_count=$(jq -r '.count // 0' /tmp/diag_src_size.json 2>/dev/null || echo 0)
+          src_bytes=$(jq -r '.bytes // 0' /tmp/diag_src_size.json 2>/dev/null || echo 0)
+          diff_count=$(grep -cE '^[-+*] ' /tmp/diag_check.txt 2>/dev/null || echo 0)
+
+          echo "--- 诊断摘要 ---"
+          echo "源端: $src_count 文件 / $(format_bytes "$src_bytes")"
+          echo "目标端刷新前: $before_count 文件 / $(format_bytes "$before_bytes")"
+          echo "目标端刷新后: $after_count 文件 / $(format_bytes "$after_bytes")"
+          echo "check --size-only 差异条目: $diff_count"
+
+          msg="🔍 task0 诊断结果"$'\n'
+          msg+="━━━━━━━━━━━━━━"$'\n'
+          msg+="源端 onedrive:0"$'\n'
+          msg+="• $src_count 文件 / $(format_bytes "$src_bytes")"$'\n\n'
+          msg+="目标 openlist:wopan176Crypt/0"$'\n'
+          msg+="• 刷新前: $before_count 文件 / $(format_bytes "$before_bytes")"$'\n'
+          msg+="• 刷新后: $after_count 文件 / $(format_bytes "$after_bytes")"$'\n\n'
+          msg+="rclone check --size-only"$'\n'
+          msg+="• 差异条目数: $diff_count"$'\n\n'
+          if [ "$before_count" != "$after_count" ] || [ "$before_bytes" != "$after_bytes" ]; then
+            msg+="结论: OpenList 缓存刷新改变了 listing 结果"$'\n'
+            msg+="说明 listing 不稳定，刷新有效。"
+          else
+            msg+="结论: 缓存刷新未改变 listing"$'\n'
+            if [ "$after_count" -lt "$src_count" ]; then
+              msg+="目标端实际文件数少于源端，rclone 可能看不到部分文件。"
+            elif [ "$diff_count" -gt 0 ]; then
+              msg+="listing 一致，但文件大小/内容不匹配，导致重复同步。"
+            else
+              msg+="listing 和大小都一致，未发现明显问题。"
+            fi
+          fi
+
+          send_telegram_message "$msg"
 
       - name: Sync task0
         run: |
