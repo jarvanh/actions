@@ -154,7 +154,17 @@ jobs:
             echo "$s"
           }
 
-          # 通用 Telegram 消息发送（替代多处重复的内联 curl）
+          # ===== 全局进度通知系统（单条消息，任务队列管理）=====
+          # 状态文件（跨 step 持久化，每个 step 是独立 shell）
+          PROGRESS_MSG_ID_FILE="/tmp/progress_msg_id.txt"
+          PROGRESS_TASKS_FILE="/tmp/progress_tasks.tsv"
+          PROGRESS_CURRENT_FILE="/tmp/progress_current.txt"
+          PROGRESS_START_FILE="/tmp/progress_start.txt"
+          PROGRESS_PHASE_FILE="/tmp/progress_phase.txt"
+          PROGRESS_STATS_FILE="/tmp/progress_stats.txt"
+          PROGRESS_FINALIZED_FILE="/tmp/progress_finalized.txt"
+
+          # 通用 Telegram 消息发送
           # 用法: send_telegram_message <message> [parse_mode]
           send_telegram_message() {
             local message="$1"
@@ -163,73 +173,12 @@ jobs:
               curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
                 -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
                 -d parse_mode="$parse_mode" \
-                --data-urlencode text="$message" || true
+                --data-urlencode text="$message" >/dev/null 2>&1 || true
             else
               curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage \
                 -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
-                --data-urlencode text="$message" || true
+                --data-urlencode text="$message" >/dev/null 2>&1 || true
             fi
-            # 标记进度通知已过时（有新消息发出，进度通知不再位于聊天底部，
-            # 下次进度更新时需删除旧消息重发到底部）
-            echo "1" > /tmp/progress_stale.txt 2>/dev/null || true
-          }
-
-          # ===== 实时进度通知（单条消息编辑更新）=====
-          # 进度状态全局变量
-          PROGRESS_MSG_ID=""
-          PROGRESS_TASK_NAME=""
-          PROGRESS_TASK_DETAIL=""
-          PROGRESS_START_TIME=0
-          PROGRESS_CURRENT=""
-          PROGRESS_STATS=""
-          PROGRESS_LAST_UPDATE=0
-          # 阶段详情（子目录大小列表 / 批次拆分信息），HTML 片段，渲染时原样输出
-          PROGRESS_PHASE_INFO=""
-
-          # 跨 step 持久化状态文件（每个 step 是独立 shell，变量不共享）
-          PROGRESS_STATE_FILE="/tmp/progress_msg_id.txt"
-          SYNC_COMPLETED_FILE="/tmp/sync_completed.txt"
-          SYNC_SKIPPED_FILE="/tmp/sync_skipped.txt"
-
-          _progress_load_msg_id() {
-            if [ -f "$PROGRESS_STATE_FILE" ]; then
-              PROGRESS_MSG_ID=$(head -1 "$PROGRESS_STATE_FILE" 2>/dev/null)
-            fi
-          }
-          _progress_save_msg_id() {
-            echo "$PROGRESS_MSG_ID" > "$PROGRESS_STATE_FILE" 2>/dev/null || true
-          }
-          _progress_add_completed() {
-            [ -n "$1" ] && echo "$1" >> "$SYNC_COMPLETED_FILE" 2>/dev/null || true
-          }
-          _progress_add_skipped() {
-            [ -n "$1" ] && echo "$1" >> "$SYNC_SKIPPED_FILE" 2>/dev/null || true
-          }
-          _progress_get_completed() {
-            [ -f "$SYNC_COMPLETED_FILE" ] && sort -u "$SYNC_COMPLETED_FILE" 2>/dev/null | grep -v '^$' || true
-          }
-          _progress_get_skipped() {
-            [ -f "$SYNC_SKIPPED_FILE" ] && sort -u "$SYNC_SKIPPED_FILE" 2>/dev/null | grep -v '^$' || true
-          }
-          # 从已完成列表移除指定任务（同名任务再次启动时避免误显示为已结束）
-          _progress_remove_completed() {
-            local task="$1"
-            [ -z "$task" ] && return
-            [ -f "$SYNC_COMPLETED_FILE" ] || return
-            local tmp
-            tmp=$(mktemp)
-            grep -v -F -x -- "$task" "$SYNC_COMPLETED_FILE" 2>/dev/null > "$tmp" || true
-            mv "$tmp" "$SYNC_COMPLETED_FILE" 2>/dev/null || true
-          }
-          # 从跳过列表移除指定任务（同名任务再次启动时避免误显示为跳过）
-          _progress_remove_skipped() {
-            local task="$1"
-            [ -z "$task" ] && return
-            [ -f "$SYNC_SKIPPED_FILE" ] || return
-            local tmp
-            tmp=$(mktemp)
-            grep -v -F -x -- "$task" "$SYNC_SKIPPED_FILE" 2>/dev/null > "$tmp" || true
-            mv "$tmp" "$SYNC_SKIPPED_FILE" 2>/dev/null || true
           }
 
           # 发送消息并返回 message_id
@@ -244,71 +193,130 @@ jobs:
             echo "$response" | jq -r '.result.message_id // empty' 2>/dev/null
           }
 
-          # 编辑已有消息
-          _tg_edit() {
+          # 编辑已有消息，返回 ok/failed
+          _tg_edit_message() {
             local message_id="$1"
             local message="$2"
             local parse_mode="${3:-HTML}"
-            [ -z "$message_id" ] && return 0
-            curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/editMessageText \
+            [ -z "$message_id" ] && echo "failed" && return
+            local edit_resp
+            edit_resp=$(curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/editMessageText \
               -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
               -d message_id="$message_id" \
               -d parse_mode="$parse_mode" \
-              --data-urlencode text="$message" 2>/dev/null || true
+              --data-urlencode text="$message" 2>/dev/null) || true
+            local edit_ok edit_desc
+            edit_ok=$(echo "$edit_resp" | jq -r '.ok // false' 2>/dev/null)
+            edit_desc=$(echo "$edit_resp" | jq -r '.description // ""' 2>/dev/null)
+            if [ "$edit_ok" = "true" ] || [[ "$edit_desc" == *"not modified"* ]]; then
+              echo "ok"
+            else
+              echo "failed"
+            fi
           }
 
-          # 编辑现有进度消息；若进度通知不在聊天底部（有新消息插队）或编辑失败，
-          # 则删除旧消息重发到底部。确保始终只有一条 🔄 同步进度 通知且位于最新位置。
-          # 用法: _tg_edit_or_resend <message_id> <message> [parse_mode]
-          # 输出: 消息的 message_id（编辑成功返回原 ID，重发返回新 ID，失败返回空）
-          _tg_edit_or_resend() {
+          # 删除消息
+          _tg_delete_message() {
             local message_id="$1"
-            local message="$2"
-            local parse_mode="${3:-HTML}"
-            local skip_edit="0"
-            # 若有其他消息在进度通知之后发出（进度通知不在聊天底部），
-            # 跳过编辑，直接重发到底部（删除旧消息 + 发送新消息）
-            if [ -f /tmp/progress_stale.txt ] && [ "$(cat /tmp/progress_stale.txt 2>/dev/null)" = "1" ]; then
-              skip_edit="1"
+            [ -z "$message_id" ] && return
+            curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/deleteMessage \
+              -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
+              -d message_id="$message_id" >/dev/null 2>&1 || true
+          }
+
+          # 确保消息在底部：始终删除旧消息并重新发送，保证进度消息始终是 bot 最后一条
+          # 输出: 当前有效的 message_id
+          _tg_ensure_bottom_message() {
+            local message="$1"
+            local parse_mode="${2:-HTML}"
+            local old_id=""
+            [ -f "$PROGRESS_MSG_ID_FILE" ] && old_id=$(head -1 "$PROGRESS_MSG_ID_FILE" 2>/dev/null)
+
+            # 先删除旧消息（如果存在）
+            if [ -n "$old_id" ]; then
+              _tg_delete_message "$old_id"
             fi
-            # 清除过时标记（本次处理后进度通知即为最新）
-            : > /tmp/progress_stale.txt 2>/dev/null || true
-            # 未过时：优先编辑现有消息（不产生新消息，避免通知堆叠）
-            if [ "$skip_edit" = "0" ] && [ -n "$message_id" ]; then
-              local edit_resp
-              edit_resp=$(curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/editMessageText \
-                -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
-                -d message_id="$message_id" \
-                -d parse_mode="$parse_mode" \
-                --data-urlencode text="$message" 2>/dev/null) || true
-              local edit_ok edit_desc
-              edit_ok=$(echo "$edit_resp" | jq -r '.ok // false' 2>/dev/null)
-              edit_desc=$(echo "$edit_resp" | jq -r '.description // ""' 2>/dev/null)
-              # 编辑成功，或内容未变化（视为成功），直接返回原 message_id
-              if [ "$edit_ok" = "true" ] || [[ "$edit_desc" == *"not modified"* ]]; then
-                echo "$message_id"
-                return 0
-              fi
-              # 编辑失败（消息不存在/被删/权限丢失），回退到 发送新消息+删除旧消息
-            fi
-            # 重发：发送新消息，成功后删除旧消息（确保进度通知位于聊天底部）
+
+            # 发送新消息（一定是最后一条）
             local new_id
             new_id=$(_tg_send_get_id "$message" "$parse_mode")
-            if [ -n "$new_id" ] && [ -n "$message_id" ] && [ "$new_id" != "$message_id" ]; then
-              curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/deleteMessage \
-                -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
-                -d message_id="$message_id" 2>/dev/null || true
+            if [ -n "$new_id" ]; then
+              echo "$new_id" > "$PROGRESS_MSG_ID_FILE"
+              echo "$new_id"
             fi
-            echo "$new_id"
           }
 
-          # 渲染当前进度为 HTML 消息
+          # 注册任务（初始化时调用）
+          # 用法: progress_register_task <task_id> <display_name>
+          progress_register_task() {
+            local task_id="$1"
+            local display_name="$2"
+            [ -z "$task_id" ] && return
+            # TSV 格式: task_id \t display_name \t status(pending/running/completed/skipped/failed) \t detail
+            echo -e "${task_id}\t${display_name}\tpending\t" >> "$PROGRESS_TASKS_FILE"
+          }
+
+          # 从任务列表中按 task_id 查找
+          _progress_get_task_row() {
+            local task_id="$1"
+            [ -f "$PROGRESS_TASKS_FILE" ] || return
+            grep -P "^\Q${task_id}\E\t" "$PROGRESS_TASKS_FILE" 2>/dev/null | head -1
+          }
+
+          # 更新任务状态
+          _progress_set_task_status() {
+            local task_id="$1"
+            local status="$2"
+            local detail="${3:-}"
+            [ -z "$task_id" ] || [ -z "$status" ] && return
+            [ -f "$PROGRESS_TASKS_FILE" ] || return
+            local tmp
+            tmp=$(mktemp)
+            while IFS=$'\t' read -r tid tname tstatus tdetail; do
+              if [ "$tid" = "$task_id" ]; then
+                echo -e "${tid}\t${tname}\t${status}\t${detail}" >> "$tmp"
+              else
+                echo -e "${tid}\t${tname}\t${tstatus}\t${tdetail}" >> "$tmp"
+              fi
+            done < "$PROGRESS_TASKS_FILE"
+            mv "$tmp" "$PROGRESS_TASKS_FILE"
+          }
+
+          # 加载开始时间
+          _progress_get_start_time() {
+            if [ -f "$PROGRESS_START_FILE" ]; then
+              cat "$PROGRESS_START_FILE" 2>/dev/null
+            else
+              date +%s
+            fi
+          }
+
+          # 获取当前任务
+          _progress_get_current_task() {
+            [ -f "$PROGRESS_CURRENT_FILE" ] && head -1 "$PROGRESS_CURRENT_FILE" 2>/dev/null || echo ""
+          }
+
+          # 获取阶段信息
+          _progress_get_phase() {
+            [ -f "$PROGRESS_PHASE_FILE" ] && cat "$PROGRESS_PHASE_FILE" 2>/dev/null || echo ""
+          }
+
+          # 获取统计信息
+          _progress_get_stats() {
+            [ -f "$PROGRESS_STATS_FILE" ] && cat "$PROGRESS_STATS_FILE" 2>/dev/null || echo ""
+          }
+
+          # 渲染进度消息为 HTML
           _progress_render() {
-            local elapsed=$(( $(date +%s) - PROGRESS_START_TIME ))
+            local finalized=0
+            [ -f "$PROGRESS_FINALIZED_FILE" ] && finalized=1
+
+            local start_time elapsed time_str
+            start_time=$(_progress_get_start_time)
+            elapsed=$(( $(date +%s) - start_time ))
             local hrs=$((elapsed / 3600))
             local mins=$(((elapsed % 3600) / 60))
             local secs=$((elapsed % 60))
-            local time_str
             if [ "$hrs" -gt 0 ]; then
               time_str="${hrs}h ${mins}m"
             elif [ "$mins" -gt 0 ]; then
@@ -316,111 +324,234 @@ jobs:
             else
               time_str="${secs}s"
             fi
+
+            # 统计各状态任务数
+            local total=0 pending=0 running=0 completed=0 skipped=0 failed=0
+            local pending_list="" running_list="" completed_list="" skipped_list="" failed_list=""
+
+            if [ -f "$PROGRESS_TASKS_FILE" ]; then
+              while IFS=$'\t' read -r tid tname tstatus tdetail; do
+                [ -z "$tid" ] && continue
+                total=$((total + 1))
+                local display="• $(escape_html "$tname")"
+                [ -n "$tdetail" ] && display+=" — <i>$(escape_html "$tdetail")</i>"
+                case "$tstatus" in
+                  pending)
+                    pending=$((pending + 1))
+                    pending_list+="${display}"$'\n'
+                    ;;
+                  running)
+                    running=$((running + 1))
+                    running_list+="${display}"$'\n'
+                    ;;
+                  completed)
+                    completed=$((completed + 1))
+                    completed_list+="${display}"$'\n'
+                    ;;
+                  skipped)
+                    skipped=$((skipped + 1))
+                    skipped_list+="${display}"$'\n'
+                    ;;
+                  failed)
+                    failed=$((failed + 1))
+                    failed_list+="${display}"$'\n'
+                    ;;
+                esac
+              done < "$PROGRESS_TASKS_FILE"
+            fi
+
             local msg=""
-            msg+="🔄 <b>同步进度</b>"$'\n'
+            if [ "$finalized" -eq 1 ]; then
+              if [ "$failed" -gt 0 ]; then
+                msg+="⚠️ <b>同步完成（有失败）</b>"$'\n'
+              else
+                msg+="✅ <b>同步全部完成</b>"$'\n'
+              fi
+            else
+              msg+="🔄 <b>同步进度</b>"$'\n'
+            fi
             msg+="━━━━━━━━━━━━━━━━━━"$'\n'
-            msg+="任务：<b>$(escape_html "$PROGRESS_TASK_NAME")</b>"$'\n'
-            [ -n "$PROGRESS_TASK_DETAIL" ] && msg+="<b>详情</b>：$(escape_html "$PROGRESS_TASK_DETAIL")"$'\n'
-            [ -n "$PROGRESS_STATS" ] && msg+="${PROGRESS_STATS}"$'\n'
-            [ -n "$PROGRESS_PHASE_INFO" ] && msg+="${PROGRESS_PHASE_INFO}"$'\n'
-            msg+=$'\n'"📍 <b>当前</b>"$'\n'"$(escape_html "$PROGRESS_CURRENT")"$'\n'
-            # 已完成任务
-            local completed_list
-            completed_list=$(_progress_get_completed)
-            if [ -n "$completed_list" ]; then
-              msg+=$'\n'"✅ <b>结束</b>"$'\n'
-              while IFS= read -r t; do
-                [ -n "$t" ] && msg+="• $(escape_html "$t")"$'\n'
-              done <<< "$completed_list"
+            msg+="📊 总任务：<b>${total}</b> | 待处理：${pending} | 进行中：${running} | 完成：${completed} | 跳过：${skipped} | 失败：${failed}"$'\n'
+
+            local phase
+            phase=$(_progress_get_phase)
+            [ -n "$phase" ] && msg+=$'\n'"${phase}"$'\n'
+
+            local stats
+            stats=$(_progress_get_stats)
+            [ -n "$stats" ] && msg+=$'\n'"${stats}"$'\n'
+
+            if [ "$finalized" -ne 1 ] && [ "$running" -gt 0 ]; then
+              msg+=$'\n'"📍 <b>进行中</b>"$'\n'"${running_list}"
             fi
-            # 跳过任务
-            local skipped_list
-            skipped_list=$(_progress_get_skipped)
-            if [ -n "$skipped_list" ]; then
-              msg+=$'\n'"⏭️ <b>跳过</b>"$'\n'
-              while IFS= read -r t; do
-                [ -n "$t" ] && msg+="• $(escape_html "$t")"$'\n'
-              done <<< "$skipped_list"
+
+            if [ "$pending" -gt 0 ]; then
+              msg+=$'\n'"⏳ <b>待处理</b>"$'\n'"${pending_list}"
             fi
+
+            if [ "$completed" -gt 0 ]; then
+              msg+=$'\n'"✅ <b>已完成</b>"$'\n'"${completed_list}"
+            fi
+
+            if [ "$skipped" -gt 0 ]; then
+              msg+=$'\n'"⏭️ <b>已跳过</b>"$'\n'"${skipped_list}"
+            fi
+
+            if [ "$failed" -gt 0 ]; then
+              msg+=$'\n'"❌ <b>失败</b>"$'\n'"${failed_list}"
+            fi
+
             msg+=$'\n'"⏱️ 已用：<b>${time_str}</b>"
             echo "$msg"
           }
 
-          # 启动进度通知（优先编辑现有消息，保持只有一条通知且为最新）
-          # 用法: progress_start <task_name> [stats] [detail]
-          progress_start() {
-            local task_name="$1"
-            local stats="${2:-}"
-            local detail="${3:-}"
-            PROGRESS_TASK_NAME="$task_name"
-            PROGRESS_TASK_DETAIL="$detail"
-            PROGRESS_START_TIME=$(date +%s)
-            PROGRESS_CURRENT="初始化..."
-            PROGRESS_STATS="$stats"
-            PROGRESS_LAST_UPDATE=0
-            PROGRESS_PHASE_INFO=""
-            # 同名任务再次启动时，先从已完成/跳过列表移除，避免误显示为已结束/跳过
-            _progress_remove_completed "$task_name"
-            _progress_remove_skipped "$task_name"
-            # 加载上一步的 message_id，优先编辑现有消息（保持只有一条通知）；
-            # 仅当编辑失败（消息被删/不存在）时才回退到发送新消息
-            _progress_load_msg_id
-            PROGRESS_MSG_ID=$(_tg_edit_or_resend "$PROGRESS_MSG_ID" "$(_progress_render)")
-            _progress_save_msg_id
+          # 刷新进度消息（编辑或重发）
+          _progress_refresh() {
+            local msg
+            msg=$(_progress_render)
+            local new_id
+            new_id=$(_tg_ensure_bottom_message "$msg")
+            [ -n "$new_id" ] && echo "$new_id" > "$PROGRESS_MSG_ID_FILE"
           }
 
-          # 更新任务详情（同步源/目标等），不重置已用时间
-          # 用法: progress_set_detail <detail>
-          progress_set_detail() {
-            PROGRESS_TASK_DETAIL="$1"
+          # 初始化进度通知系统（在第一个任务开始前调用一次）
+          # 用法: progress_init <task_id1>:<display1> [task_id2:display2 ...]
+          progress_init() {
+            # 清理旧状态
+            : > "$PROGRESS_TASKS_FILE"
+            : > "$PROGRESS_MSG_ID_FILE"
+            : > "$PROGRESS_CURRENT_FILE"
+            : > "$PROGRESS_PHASE_FILE"
+            : > "$PROGRESS_STATS_FILE"
+            rm -f "$PROGRESS_FINALIZED_FILE" 2>/dev/null || true
+            date +%s > "$PROGRESS_START_FILE"
+
+            # 注册所有任务
+            for task_def in "$@"; do
+              local tid="${task_def%%:*}"
+              local tname="${task_def#*:}"
+              progress_register_task "$tid" "$tname"
+            done
+
+            _progress_refresh
           }
 
-          # 更新进度（编辑现有消息，带 3 秒节流，确保只有一条进度通知）
-          # 用法: progress_update <current> [stats]
-          progress_update() {
-            [ -z "$PROGRESS_MSG_ID" ] && return 0
-            PROGRESS_CURRENT="$1"
-            [ -n "$2" ] && PROGRESS_STATS="$2"
-            local now
+          # 标记任务开始
+          # 用法: task_begin <task_id> [detail]
+          task_begin() {
+            local task_id="$1"
+            local detail="${2:-}"
+            echo "$task_id" > "$PROGRESS_CURRENT_FILE"
+            _progress_set_task_status "$task_id" "running" "$detail"
+            _progress_refresh
+          }
+
+          # 更新当前任务的详细信息和阶段/统计（带节流）
+          # 用法: task_update <detail> [phase_html] [stats_html]
+          task_update() {
+            local detail="$1"
+            local phase="${2:-}"
+            local stats="${3:-}"
+            local current
+            current=$(_progress_get_current_task)
+            [ -z "$current" ] && return
+
+            _progress_set_task_status "$current" "running" "$detail"
+            [ -n "$phase" ] && echo "$phase" > "$PROGRESS_PHASE_FILE"
+            [ -n "$stats" ] && echo "$stats" > "$PROGRESS_STATS_FILE"
+
+            # 简单节流：2秒内不重复刷新
+            local now last=0
             now=$(date +%s)
-            if [ $((now - PROGRESS_LAST_UPDATE)) -lt 3 ]; then
+            [ -f /tmp/progress_last_update.txt ] && last=$(cat /tmp/progress_last_update.txt 2>/dev/null || echo 0)
+            if [ $((now - last)) -lt 2 ]; then
               return 0
             fi
-            PROGRESS_LAST_UPDATE=$now
-            local new_id
-            new_id=$(_tg_edit_or_resend "$PROGRESS_MSG_ID" "$(_progress_render)")
-            [ -n "$new_id" ] && PROGRESS_MSG_ID="$new_id"
-            _progress_save_msg_id
+            echo "$now" > /tmp/progress_last_update.txt
+            _progress_refresh
           }
 
           # 强制更新（忽略节流）
-          # 用法: progress_update_force <current> [stats]
-          progress_update_force() {
-            [ -z "$PROGRESS_MSG_ID" ] && return 0
-            PROGRESS_CURRENT="$1"
-            [ -n "$2" ] && PROGRESS_STATS="$2"
-            PROGRESS_LAST_UPDATE=$(date +%s)
-            local new_id
-            new_id=$(_tg_edit_or_resend "$PROGRESS_MSG_ID" "$(_progress_render)")
-            [ -n "$new_id" ] && PROGRESS_MSG_ID="$new_id"
-            _progress_save_msg_id
+          task_update_force() {
+            local detail="$1"
+            local phase="${2:-}"
+            local stats="${3:-}"
+            local current
+            current=$(_progress_get_current_task)
+            [ -z "$current" ] && return
+
+            _progress_set_task_status "$current" "running" "$detail"
+            [ -n "$phase" ] && echo "$phase" > "$PROGRESS_PHASE_FILE"
+            [ -n "$stats" ] && echo "$stats" > "$PROGRESS_STATS_FILE"
+            date +%s > /tmp/progress_last_update.txt
+            _progress_refresh
           }
 
-          # 结束进度通知（编辑现有消息显示最终状态，记录已完成任务）
-          # 用法: progress_finish [final_stats]
-          progress_finish() {
-            [ -z "$PROGRESS_MSG_ID" ] && return 0
-            PROGRESS_CURRENT="✅ 完成"
-            [ -n "$1" ] && PROGRESS_STATS="$1"
-            PROGRESS_LAST_UPDATE=0
-            PROGRESS_PHASE_INFO=""
-            _progress_add_completed "$PROGRESS_TASK_NAME"
-            local new_id
-            new_id=$(_tg_edit_or_resend "$PROGRESS_MSG_ID" "$(_progress_render)")
-            [ -n "$new_id" ] && PROGRESS_MSG_ID="$new_id"
-            _progress_save_msg_id
-            PROGRESS_TASK_DETAIL=""
+          # 设置阶段信息（子目录/批次信息）
+          progress_set_phase() {
+            echo "$1" > "$PROGRESS_PHASE_FILE"
+            _progress_refresh
           }
+
+          # 设置统计信息
+          progress_set_stats() {
+            echo "$1" > "$PROGRESS_STATS_FILE"
+            _progress_refresh
+          }
+
+          # 标记任务完成
+          # 用法: task_done <status: completed|skipped|failed> [detail]
+          task_done() {
+            local status="$1"
+            local detail="${2:-}"
+            local current
+            current=$(_progress_get_current_task)
+            [ -z "$current" ] && return
+
+            case "$status" in
+              completed|skipped|failed) ;;
+              *) status="completed" ;;
+            esac
+
+            _progress_set_task_status "$current" "$status" "$detail"
+            : > "$PROGRESS_CURRENT_FILE"
+            _progress_refresh
+          }
+
+          # 最终完成所有任务（在最后调用）
+          progress_finalize() {
+            echo "1" > "$PROGRESS_FINALIZED_FILE"
+            : > "$PROGRESS_CURRENT_FILE"
+            : > "$PROGRESS_PHASE_FILE"
+            : > "$PROGRESS_STATS_FILE"
+            _progress_refresh
+          }
+
+          # 兼容旧函数名（避免内部调用报错，但不再自动管理任务状态）
+          # 注意：旧代码直接修改 PROGRESS_PHASE_INFO 和 PROGRESS_STATS 全局变量，
+          # 兼容层会自动读取这些变量并通过新 API 更新
+          progress_start() { :; }
+          progress_set_detail() { :; }
+          progress_update() {
+            local detail="$1"
+            local stats="${2:-}"
+            # 如果调用方传了 stats 参数，使用它；否则用全局变量
+            [ -z "$stats" ] && [ -n "$PROGRESS_STATS" ] && stats="$PROGRESS_STATS"
+            local phase="${PROGRESS_PHASE_INFO:-}"
+            task_update "$detail" "$phase" "$stats"
+          }
+          progress_update_force() {
+            local detail="$1"
+            local stats="${2:-}"
+            [ -z "$stats" ] && [ -n "$PROGRESS_STATS" ] && stats="$PROGRESS_STATS"
+            local phase="${PROGRESS_PHASE_INFO:-}"
+            task_update_force "$detail" "$phase" "$stats"
+          }
+          progress_finish() { :; }
+          _progress_add_completed() { :; }
+          _progress_add_skipped() { :; }
+          _progress_remove_completed() { :; }
+          _progress_remove_skipped() { :; }
 
           has_real_content() {
             local log_file="$1"
@@ -2054,6 +2185,13 @@ jobs:
             local extra_args=("$@")
 
             local current_depth=${SYNC_AUTO_SPLIT_DEPTH:-0}
+
+            # 只在顶级调用（非递归）时重置状态标志，避免递归子任务覆盖父任务状态
+            if [ "$current_depth" -eq 0 ]; then
+              SYNC_SKIPPED=0
+              SYNC_FAILED=0
+            fi
+
             local max_depth=10
             local subdir
 
@@ -2077,10 +2215,11 @@ jobs:
                 ;;
             esac
 
-            # 顶层任务启动进度通知
-            if [ "$current_depth" -eq 0 ]; then
-              progress_start "$task_name" "" "${source_path} → ${dest_path}"
-            fi
+            # 初始化 phase/stats（递归子任务在同一 shell 中继承/修改，返回后由调用方恢复）
+            local _old_phase="${PROGRESS_PHASE_INFO:-}"
+            local _old_stats="${PROGRESS_STATS:-}"
+            PROGRESS_PHASE_INFO=""
+            PROGRESS_STATS=""
 
             # 50GB 阈值（带默认值，防止跨 step 环境变量丢失时为空）
             local threshold="${SYNC_SPLIT_THRESHOLD_BYTES:-50000000000}"
@@ -2106,7 +2245,8 @@ jobs:
               elif [ "$current_depth" -eq 0 ]; then
                 split_large_files_after_sync_failure "$source_path" "$task_name"
               fi
-              if [ "$current_depth" -eq 0 ]; then progress_finish; fi
+              PROGRESS_PHASE_INFO="$_old_phase"
+              PROGRESS_STATS="$_old_stats"
               return $_rc
             fi
 
@@ -2122,7 +2262,8 @@ jobs:
               elif [ "$current_depth" -eq 0 ]; then
                 split_large_files_after_sync_failure "$source_path" "$task_name"
               fi
-              if [ "$current_depth" -eq 0 ]; then progress_finish; fi
+              PROGRESS_PHASE_INFO="$_old_phase"
+              PROGRESS_STATS="$_old_stats"
               return $_rc
             fi
 
@@ -2142,7 +2283,8 @@ jobs:
               elif [ "$current_depth" -eq 0 ]; then
                 split_large_files_after_sync_failure "$source_path" "$task_name"
               fi
-              if [ "$current_depth" -eq 0 ]; then progress_finish; fi
+              PROGRESS_PHASE_INFO="$_old_phase"
+              PROGRESS_STATS="$_old_stats"
               return $_rc
             fi
 
@@ -2194,7 +2336,8 @@ jobs:
                     split_large_files_after_sync_failure "$source_path" "$task_name"
                   fi
                 fi
-                if [ "$current_depth" -eq 0 ]; then progress_finish; fi
+                PROGRESS_PHASE_INFO="$_old_phase"
+                PROGRESS_STATS="$_old_stats"
                 return $_rc
               fi
             fi
@@ -2303,7 +2446,6 @@ jobs:
                 # 顶层最终同步失败后，按开关对源目录超阈值大文件执行切割
                 split_large_files_after_sync_failure "$source_path" "$task_name"
               fi
-              progress_finish
             else
               SYNC_SKIPPED=0
               SYNC_FAILED=0
@@ -2313,6 +2455,8 @@ jobs:
                 save_sync_marker "$source_path" "$dest_path" "$task_name"
               fi
             fi
+            PROGRESS_PHASE_INFO="$_old_phase"
+            PROGRESS_STATS="$_old_stats"
           }
           EOF
 
@@ -2957,11 +3101,6 @@ jobs:
           SYNC_TRANSFERRED_BYTES=0
           AUTO_SPLIT_INFO=""
           SYNC_AUTO_SPLIT_DEPTH=0
-          # 初始化进度通知状态文件（跨 step 持久化）
-          : > /tmp/progress_msg_id.txt
-          : > /tmp/sync_completed.txt
-          : > /tmp/sync_skipped.txt
-          : > /tmp/progress_stale.txt
           # 集中定义阈值，避免魔数散落各处
           LARGE_FILE_THRESHOLD_BYTES="${LARGE_FILE_THRESHOLD:-4000000000}"
           SYNC_SPLIT_THRESHOLD_BYTES="${SYNC_SPLIT_THRESHOLD:-50000000000}"
@@ -2974,6 +3113,28 @@ jobs:
           echo "=== 初始化已处理文件日志 ===" > "$PROCESSED_FILES_LOG"
           echo "开始时间: $(date)" >> "$PROCESSED_FILES_LOG"
           echo "==========================" >> "$PROCESSED_FILES_LOG"
+
+          # 初始化全局进度通知，注册所有任务
+          progress_init \
+            "backup_aliyun:backup → aliyundriveCrypt" \
+            "backup_wopan:backup → wopan176Crypt" \
+            "backup_gd:backup → Google Drive" \
+            "task0_wopan176:task0 → wopan176Crypt/0" \
+            "task0_phub:task0 pornhub-favorites → wopan175" \
+            "task0_gd:task0 → Google Drive" \
+            "task1_wopan176:task1 → wopan176Crypt/1" \
+            "task1_wopan175:task1 → wopan175/1" \
+            "task1_gd:task1 → Google Drive" \
+            "task2_wopan176:task2 → wopan176Crypt/2" \
+            "task2_wopan175:task2 → wopan175/2" \
+            "task2_gd:task2 → Google Drive" \
+            "task3_wopan176:task3 → wopan176Crypt/3" \
+            "task3_wopan175:task3 → wopan175/3" \
+            "task3_gd:task3 → Google Drive" \
+            "task4_wopan176:task4 → wopan176Crypt/4" \
+            "task4_wopan175:task4 → wopan175/4" \
+            "task5_wopan176:task5 → wopan176Crypt/5" \
+            "task5_wopan175:task5 → wopan175/5"
 
       # - name: List source files larger than OpenList threshold before sync
       #   run: |
@@ -3023,6 +3184,17 @@ jobs:
             shift 3
             local extra_args=("$@")
 
+            # 初始化全局状态变量
+            SYNC_SKIPPED=0
+            SYNC_FAILED=0
+            SYNC_TRANSFERRED_BYTES=0
+
+            # 保存/恢复 phase/stats
+            local _old_phase="${PROGRESS_PHASE_INFO:-}"
+            local _old_stats="${PROGRESS_STATS:-}"
+            PROGRESS_PHASE_INFO=""
+            PROGRESS_STATS=""
+
             # 使用统一标记系统检查
             check_sync_marker "$source_path" "$dest_path" "${task_name}_gd"
 
@@ -3030,25 +3202,28 @@ jobs:
               skip)
                 echo "跳过 ${task_name} GD: 1天内已成功同步"
                 send_sync_skipped "${task_name} GD" "$source_path" "$dest_path"
+                SYNC_SKIPPED=1
+                PROGRESS_PHASE_INFO="$_old_phase"
+                PROGRESS_STATS="$_old_stats"
                 return 0
                 ;;
               warning)
                 send_sync_warning "${task_name} GD" "$source_path" "$dest_path"
+                SYNC_SKIPPED=1
+                PROGRESS_PHASE_INFO="$_old_phase"
+                PROGRESS_STATS="$_old_stats"
                 return 0
                 ;;
             esac
 
             echo "执行 ${task_name} GD 同步"
+            progress_update "Google Drive 同步中..."
 
             local TIMESTAMP
             local LOG_FILENAME
             TIMESTAMP=$(date +%Y%m%d_%H%M%S)
             LOG_FILENAME="${task_name}_gd_sync_${TIMESTAMP}.log"
             LAST_GD_ATTEMPT_LOG="${LOG_FILENAME}.last"
-
-            # 启动 GD 同步进度通知（独立消息，详情显示源/目标）
-            progress_start "${task_name}_GD" "" "${source_path} → ${dest_path} (Google Drive)"
-            progress_update "GD 同步中（rclone sync 运行中）"
 
             run_gd_sync_once() {
               local attempt_label="$1"
@@ -3117,6 +3292,7 @@ jobs:
 
             if grep -Eqi 'storageQuotaExceeded|storage quota has been exceeded' "$LAST_GD_ATTEMPT_LOG"; then
               # Google Drive 存储配额超限，跳过同步，发送通知，不阻止后续 task
+              SYNC_FAILED=1
               local quota_msg
               printf -v quota_msg '%s\n%s\n%s\n%s\n%s\n%s\n\n%s\n%s\n%s\n%s\n\n%s\n%s' \
                 "⚠️ ${task_name} Google Drive 存储配额超限" \
@@ -3135,6 +3311,7 @@ jobs:
               send_telegram_message "$quota_msg"
             elif grep -Eqi 'ERROR : .+: Failed to copy.*object not found' "$LAST_GD_ATTEMPT_LOG" 2>/dev/null; then
               # object not found（源文件不存在），使用结构化通知
+              SYNC_FAILED=1
               local gd_fail_summary=""
               local gd_fail_idx=0
               while IFS= read -r failed_line; do
@@ -3181,6 +3358,7 @@ jobs:
               fi
             elif [ "$SYNC_STATUS" -ne 0 ] || grep -Eqi 'forbidden|rateLimitExceeded|userRateLimitExceeded|dailyLimitExceeded|ERROR|Failed|timeout|unauthorized|permission denied|connection refused|upload chunks may be taking too long' "$LAST_GD_ATTEMPT_LOG"; then
               # 检测是否为部分失败：目标已有部分文件但少于源端
+              SYNC_FAILED=1
               local gd_is_partial_failure=0
               if [[ "$gd_src_count" =~ ^[0-9]+$ ]] && [[ "$gd_dst_count" =~ ^[0-9]+$ ]] && \
                  [ "$gd_dst_count" -gt 0 ] && [ "$gd_dst_count" -lt "$gd_src_count" ]; then
@@ -3299,7 +3477,8 @@ jobs:
             fi
 
             rm -f "$LOG_FILENAME" "${LOG_FILENAME}.last" 2>/dev/null || true
-            progress_finish
+            PROGRESS_PHASE_INFO="$_old_phase"
+            PROGRESS_STATS="$_old_stats"
             return 0
           }
           EOF
@@ -3361,6 +3540,8 @@ jobs:
         run: |
           source /tmp/functions.sh
           echo "=== 开始同步 backup 任务 ==="
+
+          task_begin "backup_aliyun" "onedrive:backup → openlist:aliyundriveCrypt/backup"
           sync_task_with_auto_split \
             "onedrive:backup" \
             "openlist:aliyundriveCrypt/backup" \
@@ -3371,61 +3552,228 @@ jobs:
             --exclude "self-hosted_latest.tar.gz" \
             --exclude "/github_repos_latest.tar.gz" \
             --exclude "github_repos_latest.tar.gz"
+          if [ "$SYNC_SKIPPED" = "1" ]; then
+            task_done "skipped"
+          elif [ "$SYNC_FAILED" = "1" ]; then
+            task_done "failed"
+          else
+            task_done "completed"
+          fi
 
+          task_begin "backup_wopan" "onedrive:backup → openlist:wopan176Crypt/backup"
           sync_task_with_auto_split \
             "onedrive:backup" \
             "openlist:wopan176Crypt/backup" \
             "backup"
+          if [ "$SYNC_SKIPPED" = "1" ]; then
+            task_done "skipped"
+          elif [ "$SYNC_FAILED" = "1" ]; then
+            task_done "failed"
+          else
+            task_done "completed"
+          fi
 
+          task_begin "backup_gd" "onedrive:backup → gd:backup"
           gd_sync_with_1d_skip "onedrive:backup" "gd:backup" "backup" "${GD_SYNC_ARGS[@]}"
+          if [ "$SYNC_SKIPPED" = "1" ]; then
+            task_done "skipped"
+          elif [ "$SYNC_FAILED" = "1" ]; then
+            task_done "failed"
+          else
+            task_done "completed"
+          fi
 
       - name: Sync task0
         run: |
           source /tmp/functions.sh
           echo "=== 开始同步 0 任务 ==="
           # sync_task_with_auto_split "onedrive:0" "openlist:baidupanCrypt/0" "task0"
+
+          task_begin "task0_wopan176" "onedrive:0 → openlist:wopan176Crypt/0"
           sync_task_with_auto_split "onedrive:0" "openlist:wopan176Crypt/0" "task0"
+          if [ "$SYNC_SKIPPED" = "1" ]; then
+            task_done "skipped"
+          elif [ "$SYNC_FAILED" = "1" ]; then
+            task_done "failed"
+          else
+            task_done "completed"
+          fi
+
+          task_begin "task0_phub" "onedrive:0/pornhub-favorites → openlist:wopan175"
           sync_task_with_auto_split "onedrive:0/j-1024j-视频-pornhub-favorites" "openlist:wopan175/0/j-1024j-视频-pornhub-favorites" "task0"
+          if [ "$SYNC_SKIPPED" = "1" ]; then
+            task_done "skipped"
+          elif [ "$SYNC_FAILED" = "1" ]; then
+            task_done "failed"
+          else
+            task_done "completed"
+          fi
+
+          task_begin "task0_gd" "onedrive:0 → gd:0"
           gd_sync_with_1d_skip "onedrive:0" "gd:0" "task0" "${GD_SYNC_ARGS[@]}"
+          if [ "$SYNC_SKIPPED" = "1" ]; then
+            task_done "skipped"
+          elif [ "$SYNC_FAILED" = "1" ]; then
+            task_done "failed"
+          else
+            task_done "completed"
+          fi
 
       - name: Sync task1
         run: |
           source /tmp/functions.sh
           echo "=== 开始同步 1 任务 ==="
           # sync_task_with_auto_split "onedrive:1" "openlist:baidupanCrypt/1" "task1"
+
+          task_begin "task1_wopan176" "onedrive:1 → openlist:wopan176Crypt/1"
           sync_task_with_auto_split "onedrive:1" "openlist:wopan176Crypt/1" "task1"
+          if [ "$SYNC_SKIPPED" = "1" ]; then
+            task_done "skipped"
+          elif [ "$SYNC_FAILED" = "1" ]; then
+            task_done "failed"
+          else
+            task_done "completed"
+          fi
+
+          task_begin "task1_wopan175" "onedrive:1 → openlist:wopan175/1"
           sync_task_with_auto_split "onedrive:1" "openlist:wopan175/1" "task1"
+          if [ "$SYNC_SKIPPED" = "1" ]; then
+            task_done "skipped"
+          elif [ "$SYNC_FAILED" = "1" ]; then
+            task_done "failed"
+          else
+            task_done "completed"
+          fi
+
+          task_begin "task1_gd" "onedrive:1 → gd:1"
           gd_sync_with_1d_skip "onedrive:1" "gd:1" "task1" "${GD_SYNC_ARGS[@]}"
+          if [ "$SYNC_SKIPPED" = "1" ]; then
+            task_done "skipped"
+          elif [ "$SYNC_FAILED" = "1" ]; then
+            task_done "failed"
+          else
+            task_done "completed"
+          fi
 
       - name: Sync task2
         run: |
           source /tmp/functions.sh
           echo "=== 开始同步 2 任务 ==="
+
+          task_begin "task2_wopan176" "onedrive:2 → openlist:wopan176Crypt/2"
           sync_task_with_auto_split "onedrive:2" "openlist:wopan176Crypt/2" "task2"
+          if [ "$SYNC_SKIPPED" = "1" ]; then
+            task_done "skipped"
+          elif [ "$SYNC_FAILED" = "1" ]; then
+            task_done "failed"
+          else
+            task_done "completed"
+          fi
+
+          task_begin "task2_wopan175" "onedrive:2 → openlist:wopan175/2"
           sync_task_with_auto_split "onedrive:2" "openlist:wopan175/2" "task2"
+          if [ "$SYNC_SKIPPED" = "1" ]; then
+            task_done "skipped"
+          elif [ "$SYNC_FAILED" = "1" ]; then
+            task_done "failed"
+          else
+            task_done "completed"
+          fi
+
+          task_begin "task2_gd" "onedrive:2 → gd:2"
           gd_sync_with_1d_skip "onedrive:2" "gd:2" "task2" "${GD_SYNC_ARGS[@]}"
+          if [ "$SYNC_SKIPPED" = "1" ]; then
+            task_done "skipped"
+          elif [ "$SYNC_FAILED" = "1" ]; then
+            task_done "failed"
+          else
+            task_done "completed"
+          fi
 
       - name: Sync task3
         run: |
           source /tmp/functions.sh
           echo "=== 开始同步 3 任务 ==="
+
+          task_begin "task3_wopan176" "onedrive:3 → openlist:wopan176Crypt/3"
           sync_task_with_auto_split "onedrive:3" "openlist:wopan176Crypt/3" "task3"
+          if [ "$SYNC_SKIPPED" = "1" ]; then
+            task_done "skipped"
+          elif [ "$SYNC_FAILED" = "1" ]; then
+            task_done "failed"
+          else
+            task_done "completed"
+          fi
+
+          task_begin "task3_wopan175" "onedrive:3 → openlist:wopan175/3"
           sync_task_with_auto_split "onedrive:3" "openlist:wopan175/3" "task3"
+          if [ "$SYNC_SKIPPED" = "1" ]; then
+            task_done "skipped"
+          elif [ "$SYNC_FAILED" = "1" ]; then
+            task_done "failed"
+          else
+            task_done "completed"
+          fi
+
+          task_begin "task3_gd" "onedrive:3 → gd:3"
           gd_sync_with_1d_skip "onedrive:3" "gd:3" "task3" "${GD_SYNC_ARGS[@]}"
+          if [ "$SYNC_SKIPPED" = "1" ]; then
+            task_done "skipped"
+          elif [ "$SYNC_FAILED" = "1" ]; then
+            task_done "failed"
+          else
+            task_done "completed"
+          fi
 
       - name: Sync task4
         run: |
           source /tmp/functions.sh
           echo "=== 开始同步 4 任务 ==="
+
+          task_begin "task4_wopan176" "onedrive:4 → openlist:wopan176Crypt/4"
           sync_task_with_auto_split "onedrive:4" "openlist:wopan176Crypt/4" "task4"
+          if [ "$SYNC_SKIPPED" = "1" ]; then
+            task_done "skipped"
+          elif [ "$SYNC_FAILED" = "1" ]; then
+            task_done "failed"
+          else
+            task_done "completed"
+          fi
+
+          task_begin "task4_wopan175" "onedrive:4 → openlist:wopan175/4"
           sync_task_with_auto_split "onedrive:4" "openlist:wopan175/4" "task4"
+          if [ "$SYNC_SKIPPED" = "1" ]; then
+            task_done "skipped"
+          elif [ "$SYNC_FAILED" = "1" ]; then
+            task_done "failed"
+          else
+            task_done "completed"
+          fi
 
       - name: Sync task5
         run: |
           source /tmp/functions.sh
           echo "=== 开始同步 5 任务 ==="
+
+          task_begin "task5_wopan176" "onedrive:5 → openlist:wopan176Crypt/5"
           sync_task_with_auto_split "onedrive:5" "openlist:wopan176Crypt/5" "task5"
+          if [ "$SYNC_SKIPPED" = "1" ]; then
+            task_done "skipped"
+          elif [ "$SYNC_FAILED" = "1" ]; then
+            task_done "failed"
+          else
+            task_done "completed"
+          fi
+
+          task_begin "task5_wopan175" "onedrive:5 → openlist:wopan175/5"
           sync_task_with_auto_split "onedrive:5" "openlist:wopan175/5" "task5"
+          if [ "$SYNC_SKIPPED" = "1" ]; then
+            task_done "skipped"
+          elif [ "$SYNC_FAILED" = "1" ]; then
+            task_done "failed"
+          else
+            task_done "completed"
+          fi
 
       - name: Finalize and cleanup
         run: |
@@ -3433,6 +3781,9 @@ jobs:
           actual_entries=0
           total_lines=0
           DELETE_COUNT=0
+
+          # 标记全局进度通知为最终完成状态
+          progress_finalize "所有同步任务完成"
 
           if [ -f "processed_videos.log" ]; then
             total_lines=$(wc -l < "processed_videos.log" 2>/dev/null || echo 0)
