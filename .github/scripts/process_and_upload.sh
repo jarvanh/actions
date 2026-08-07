@@ -48,7 +48,7 @@ WORK_DIR = os.path.join(TMP, "work")
 
 def run(cmd, **kwargs):
     """执行命令，返回 CompletedProcess，不抛异常。"""
-    return subprocess.run(cmd, shell=isinstance(cmd, str), capture_output=True, text=True, **kwargs)
+    return subprocess.run(cmd, shell=isinstance(cmd, str), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **kwargs)
 
 
 def is_video(path: str) -> bool:
@@ -98,7 +98,7 @@ def get_video_list():
     """通过 rclone lsjson 获取远端视频文件列表，返回 [(modtime, filename)]。"""
     lsjson_path = os.path.join(TMP, "ls.json")
     err_path = os.path.join(TMP, "lsjson.err")
-    result = run(f"rclone lsjson {SOURCE_REMOTE}/", stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    result = run(f"rclone lsjson {SOURCE_REMOTE}/")
     with open(lsjson_path, "wb") as f:
         f.write(result.stdout.encode("utf-8", errors="replace") if isinstance(result.stdout, str) else result.stdout)
     with open(err_path, "wb") as f:
