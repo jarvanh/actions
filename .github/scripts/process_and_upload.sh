@@ -61,13 +61,13 @@ while IFS= read -r file; do
   mkdir -p "$WORK_DIR"
 
   # ===== 第一步：从 OneDrive 下载视频到本地 =====
-  # 使用 rclone copy 下载单个文件（不修改远端原文件）
+  # 使用 rclone copyto 下载单个文件（copy 用于目录，copyto 用于单文件，避免被当作目录读取）
   # 错误输出重定向到独立日志文件，避免 rclone 正常进度信息刷屏，
   # 但在失败时仍可通过日志查看真实错误原因（如文件不存在、限速、网络错误等）
   echo "⬇️  正在下载: $file"
   RCLONE_ERR="$TMP_DIR/rclone_err.log"
   # 双重校验：rclone 命令返回值 + 本地文件是否实际生成
-  if ! rclone copy "$SOURCE_REMOTE/$file" "$WORK_DIR/" 2>"$RCLONE_ERR" || [ ! -f "$LOCAL_FILE" ]; then
+  if ! rclone copyto "$SOURCE_REMOTE/$file" "$LOCAL_FILE" 2>"$RCLONE_ERR" || [ ! -f "$LOCAL_FILE" ]; then
     echo "❌ FAILED: rclone copy failed: $file"
     echo "--- rclone 错误输出（最近 20 行）---"
     tail -n 20 "$RCLONE_ERR"
