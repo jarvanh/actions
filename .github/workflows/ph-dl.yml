@@ -276,7 +276,7 @@ jobs:
 
           if [ "$DUP_COUNT" -gt 0 ]; then
             HEADER="🔍 ph-dl 重复视频检测与去重"$'\n'"━━━━━━━━━━━━━━━━━━"$'\n'"📁 目录: j-1024j-视频-pornhub-favorites"$'\n'
-            HEADER+=$'\n'"� 统计"$'\n'"• 重复 ID: ${DUP_COUNT}"$'\n'"• 已删除: ${REMOVED_COUNT}"$'\n'"• 仅通知: ${NOTIFY_ONLY_COUNT}"
+            HEADER+=$'\n'"📊 统计"$'\n'"• 重复 ID: ${DUP_COUNT}"$'\n'"• 已删除: ${REMOVED_COUNT}"$'\n'"• 仅通知: ${NOTIFY_ONLY_COUNT}"
             if [ "$DEDUPE_BY_ID_ONLY" = "true" ]; then
               HEADER+=$'\n'$'\n'"⚙️ 模式: 仅按 ID 自动删除（跳过标题/哈希校验）"
             elif [ "$AUTO_DELETE" = "true" ]; then
@@ -371,6 +371,40 @@ jobs:
           REMOTE_BASE="onedrive:0/j-1024j-视频-pornhub-favorites"
           ARCHIVE_FILE="$TARGET_DIR/archive.txt"
           CORRUPTED_LOG="/tmp/ph-dl-downloads/corrupted.txt"
+
+          # ========== 文件名清理：移除控制字符，处理空文件名 ==========
+          # 用 Python 安全清理文件名（移除控制字符、BOM，NFC 归一化）
+          CLEANED_FILENAME=$(printf '%s' "$FILENAME" | python3 -c "
+import sys, re, unicodedata, os
+s = sys.stdin.buffer.read().decode('utf-8', errors='replace')
+s = s.lstrip('\ufeff')
+s = re.sub(r'[\x00-\x1f\x7f]', '', s)
+s = s.strip(' ')
+s = unicodedata.normalize('NFC', s)
+# 如果清理后主名为空（纯扩展名），从 URL 或 ID 生成保底文件名
+base, ext = os.path.splitext(s)
+if not base or len(base) < 3:
+    # 尝试从文件名中提取 ph ID
+    import re as _re
+    m = _re.search(r'ph[a-f0-9]+', s)
+    if m:
+        s = f'video-{m.group(0)}{ext}'
+    else:
+        # 用时间戳做保底
+        import time
+        s = f'video-{int(time.time())}{ext}'
+print(s)
+" 2>/dev/null)
+          # 如果 Python 清理失败，用原始文件名
+          [ -z "$CLEANED_FILENAME" ] && CLEANED_FILENAME="$FILENAME"
+          # 如果重命名了，移动文件
+          if [ "$CLEANED_FILENAME" != "$FILENAME" ]; then
+            echo "NOTE: cleaned filename '$FILENAME' -> '$CLEANED_FILENAME'"
+            CLEANED_FILEPATH="$(dirname "$FILEPATH")/$CLEANED_FILENAME"
+            mv "$FILEPATH" "$CLEANED_FILEPATH" 2>/dev/null || true
+            FILEPATH="$CLEANED_FILEPATH"
+            FILENAME="$CLEANED_FILENAME"
+          fi
 
           # 验证文件完整性（moov atom 存在）
           if ! ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$FILEPATH" 2>/dev/null | grep -q .; then
