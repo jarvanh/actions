@@ -6,12 +6,12 @@ on:
   workflow_dispatch:
     inputs:
       clean_tg_uploaded_videos:
-        description: '清理 Telegram 频道所有视频并重置 uploaded_videos.txt'
+        description: '清空 Telegram 频道所有消息并删除 uploaded_videos.txt，下次运行会重新处理全部视频'
         type: boolean
         default: false
         required: false
       auto_delete_duplicates:
-        description: '自动删除重复视频（默认仅通知不删除）'
+        description: '对哈希一致的重复视频执行实际删除（文件名相同或不同均处理），保留最大/最新文件。关闭时仅标记"待删除"不实际删除'
         type: boolean
         default: false
         required: false
