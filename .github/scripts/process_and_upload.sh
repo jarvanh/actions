@@ -45,20 +45,42 @@ PENDING   = os.path.join(TMP, "pending.txt")
 UPLOADED  = os.path.join(TMP, "uploaded_videos.txt")
 
 def nfc(s: str) -> str:
-    """统一 Unicode 归一化（解决 macOS NFD 与其他系统 NFC 对同一字符编码字节不同的问题）。"""
+    """统一 Unicode 归一化（解决 macOS NFD 与其他系统 NFC 对同一字符编码字节不同的问题）。
+    仅用于字符串比较（去重、判断是否已上传），不要用于修改实际访问 rclone 的文件名。"""
     return unicodedata.normalize("NFC", s)
 
-def clean_name(raw: str) -> str:
-    """剥离 BOM、控制字符、首尾空白/回车。保留合法文件名内部字符（包括 ; 和中文）。"""
-    # 去掉 BOM (U+FEFF)
-    s = raw.lstrip("\ufeff")
-    # 去掉首尾 C0 控制字符 (\x00-\x1f)、\x7f、空白
-    s = s.strip("\x00\x01\x02\x03\x04\x05\x06\x07\x08\t\n\x0b\x0c\r\x0e\x0f"
-                "\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f\x7f ")
-    return s
+# 非法字符合集：C0 控制字符 (\x00-\x1f)、DEL (\x7f)、BOM (\ufeff)
+# 这些字符在文件名中会导致：路径解析错误、终端显示截断、rclone 无法定位文件
+_BAD_FILENAME_CHARS_RE = re.compile(r'[\x00-\x1f\x7f\ufeff]')
+
+def is_valid_filename(path: str) -> tuple:
+    """验证文件名是否合法可访问。返回 (is_valid: bool, reason: str)。"""
+    if not path:
+        return False, "empty name"
+    # 检查非法字符（控制字符、BOM、DEL）
+    if _BAD_FILENAME_CHARS_RE.search(path):
+        return False, "contains illegal control chars/BOM"
+    # 扩展名检查
+    ext = os.path.splitext(path)[1].lower()
+    if ext not in VIDEO_EXTS:
+        return False, f"not a video (ext={ext})"
+    # 空主名（如 ".mp4"）
+    basename = os.path.splitext(path)[0]
+    if not basename:
+        return False, "empty basename (extension only)"
+    # 主名过短（临时文件、垃圾文件常见特征）
+    if len(basename) < 3:
+        return False, f"basename too short ({len(basename)} chars)"
+    # 包含路径分隔符或跨目录
+    if "/" in path or "\\" in path or ".." in PurePosixPath(path).parts:
+        return False, "contains path separator"
+    return True, ""
 
 # ------- 3a. 解析 lsjson，产出 all_videos 列表（按 ModTime 从旧到新排序） -------
-all_entries = []   # list of (modtime_str, original_path, cleaned_path)
+# 重要原则：保留 rclone lsjson 返回的原始文件名用于实际访问 rclone！
+# 任何对文件名的修改（移除字符、trim、编码归一化）都可能导致与 OneDrive 上的实际文件名不匹配。
+# 我们只做：1) 过滤非法文件名  2) 字符串比较时用 NFC 归一化
+all_entries = []   # list of (modtime_str, original_path) - 使用原始路径！
 raw_count = 0
 suspicious = []
 
@@ -92,24 +114,13 @@ if isinstance(items, list):
         if not path:
             continue
         raw_count += 1
-        cleaned = clean_name(path)
-        # 扩展名判断（对 cleaned 做，并且用 NFC 归一化但 ext 是 ASCII 其实无所谓）
-        ext = os.path.splitext(cleaned)[1].lower()
-        if ext not in VIDEO_EXTS:
+        # 验证文件名是否合法（不修改原始文件名！）
+        valid, reason = is_valid_filename(path)
+        if not valid:
+            suspicious.append(f"SKIP {reason}: {path!r}")
             continue
-        # 空主名（纯扩展名 ".mp4" 这种）跳过
-        if not cleaned or os.path.splitext(cleaned)[0] == "":
-            suspicious.append(f"empty basename: {path!r}")
-            continue
-        # 安全检查：不允许路径分隔符（跨目录攻击）
-        if "/" in cleaned or "\\" in cleaned or ".." in PurePosixPath(cleaned).parts:
-            suspicious.append(f"path separator detected: {path!r}")
-            continue
-        # 原始 BOM / 控制字符被清理过，记日志
-        if cleaned != path:
-            suspicious.append(f"normalized name: {path!r} -> {cleaned!r}")
         modtime = it.get("ModTime") or ""
-        all_entries.append((modtime, cleaned))
+        all_entries.append((modtime, path))  # 使用原始 path！
 
 # 按修改时间升序排（旧的先处理）
 all_entries.sort(key=lambda x: x[0])
@@ -131,9 +142,10 @@ with open(ALL_VIDEOS, "wb") as f:
     for p in all_videos:
         f.write(p.encode("utf-8") + b"\n")
 
-# ------- 3b. 读取 uploaded_videos.txt，构建已上传集合（NFC 归一化） -------
+# ------- 3b. 读取 uploaded_videos.txt，构建已上传集合（NFC 归一化做比较） -------
 uploaded_raw_path = os.path.join(TMP, "uploaded_videos.raw")
 uploaded_set = set()
+uploaded_names_nfc = []  # 用于回写文件的规范名称列表
 if os.path.exists(uploaded_raw_path):
     with open(uploaded_raw_path, "rb") as f:
         raw = f.read()
@@ -142,30 +154,41 @@ if os.path.exists(uploaded_raw_path):
     for line in raw.split(b"\n"):
         if not line:
             continue
+        # 去掉行尾的 \r
+        line = line.rstrip(b"\r")
+        if not line:
+            continue
         try:
             s = line.decode("utf-8", errors="replace")
         except Exception:
             continue
-        s = clean_name(s)
         if not s:
             continue
-        uploaded_set.add(nfc(s))
+        # 检查非法字符（旧文件中如果有控制字符，跳过并清理）
+        if _BAD_FILENAME_CHARS_RE.search(s):
+            suspicious.append(f"SKIP invalid name in uploaded list: {s!r}")
+            continue
+        s_nfc = nfc(s)
+        uploaded_set.add(s_nfc)
+        uploaded_names_nfc.append(s_nfc)
 
-# 再把 cleaned + 归一化后的 uploaded 写回 uploaded_videos.txt，供后面追加用
+# 去重并排序后写回 uploaded_videos.txt，供后面追加用（统一用 NFC 形式存储）
+uploaded_names_nfc = sorted(set(uploaded_names_nfc), key=lambda x: x.lower())
 with open(UPLOADED, "wb") as f:
-    for name in sorted(uploaded_set, key=lambda x: x.lower()):
+    for name in uploaded_names_nfc:
         f.write(name.encode("utf-8") + b"\n")
 
 # ------- 3c. 计算 pending = all_videos - uploaded（保留 all_videos 的 ModTime 顺序） -------
+# 比较时用 nfc(原始路径)，但保留原始路径用于后续访问 rclone
 pending = [p for p in all_videos if nfc(p) not in uploaded_set]
 with open(PENDING, "wb") as f:
     for p in pending:
         f.write(p.encode("utf-8") + b"\n")
 
 # ------- 3d. 打印统计（shell 侧读数字用） -------
-print(f"rclone lsjson 返回 {raw_count} 条条目，视频过滤后 {len(all_videos)} 条，已上传 {len(uploaded_set)} 条，待上传 {len(pending)} 条")
+print(f"rclone lsjson 返回 {raw_count} 条条目，过滤后合法视频 {len(all_videos)} 条，已上传 {len(uploaded_set)} 条，待上传 {len(pending)} 条")
 if suspicious:
-    print(f"⚠️  文件名规范化条目数: {len(suspicious)}")
+    print(f"⚠️  跳过/过滤文件数: {len(suspicious)}")
     for s in suspicious[:20]:
         print(f"   - {s}")
     if len(suspicious) > 20:
@@ -209,21 +232,60 @@ SENT_LIST=""
 FAILED_LIST=""
 
 # 顺序处理每个视频（不并行，避免 OneDrive 限速和 Telegram API 并发限制）
-# pending.txt 由 Python 生成，已是规范 UTF-8，每行一个文件名且不含 BOM/控制字符。
-# 这里仍保留 IFS= + -r，并加一层轻量防御性归一化（万一后续有人手工改了 pending.txt）
+# pending.txt 由 Python 生成，包含从 rclone lsjson 获取的原始文件名（已验证合法性）。
+# 这里加一层防御性验证（防止文件被手工修改等情况），但不修改文件名。
 while IFS= read -r file || [ -n "$file" ]; do
-  # 防御性再清理一次
-  file=$(printf '%s' "$file" | python3 -c "import sys,unicodedata; s=sys.stdin.buffer.read(); s=s.lstrip(b'\xef\xbb\xbf').rstrip(b'\r\n\x00\x01\x02\x03\x04\x05\x06\x07\x08\x0b\x0c\x0e\x0f\t '); sys.stdout.buffer.write(s)" 2>/dev/null || printf '%s' "$file")
-  # 跳过空
-  [ -z "$file" ] && continue
-  # 纯扩展名跳过
-  case "$file" in
-    .*) [ -z "${file%.*}" ] && { echo "SKIP suspicious: '$file'"; continue; } ;;
+  # 防御性验证：检查文件名是否合法（不修改！）
+  file_valid=$(printf '%s' "$file" | python3 -c "
+import sys, re, os
+s = sys.stdin.buffer.read()
+# 去掉行尾 \r\n
+s = s.rstrip(b'\r\n')
+text = s.decode('utf-8', errors='replace')
+# 验证规则与 Python 阶段一致
+if not text:
+    print('INVALID:empty')
+    sys.exit(0)
+if re.search(r'[\x00-\x1f\x7f\ufeff]', text):
+    print('INVALID:control chars')
+    sys.exit(0)
+ext = os.path.splitext(text)[1].lower()
+if ext not in {'.mp4', '.mkv', '.avi', '.mov', '.flv', '.wmv', '.webm', '.m4v', '.ts'}:
+    print(f'INVALID:bad ext {ext}')
+    sys.exit(0)
+base = os.path.splitext(text)[0]
+if not base or len(base) < 3:
+    print('INVALID:bad basename')
+    sys.exit(0)
+if '/' in text or '\\\\' in text:
+    print('INVALID:path separator')
+    sys.exit(0)
+print('OK')
+sys.stdout.buffer.write(s + b'\n')
+" 2>/dev/null)
+  # 检查验证结果
+  validity=$(printf '%s' "$file_valid" | head -n1)
+  case "$validity" in
+    OK*)
+      # 验证通过，获取原始文件名（跳过第一行 OK）
+      file=$(printf '%s' "$file_valid" | tail -n +2)
+      ;;
+    INVALID*)
+      echo "SKIP invalid filename ($validity): $(printf '%s' "$file" | head -c 100)"
+      continue
+      ;;
+    *)
+      # Python 脚本执行失败，保守起见跳过
+      echo "SKIP validation failed for: $(printf '%s' "$file" | head -c 100)"
+      continue
+      ;;
   esac
+  # 再次确认文件非空
+  [ -z "$file" ] && continue
 
-  # 安全的本地文件名
+  # 本地临时文件名使用原始文件名（已验证合法，Linux 支持 UTF-8）
   safe_local_name=$(basename "$file")
-  [ -z "$safe_local_name" ] && { echo "SKIP empty basename: '$file'"; continue; }
+  [ -z "$safe_local_name" ] && { echo "SKIP basename failed: '$file'"; continue; }
 
   WORK_DIR="$TMP_DIR/work"
   LOCAL_FILE="$WORK_DIR/$safe_local_name"
@@ -231,8 +293,7 @@ while IFS= read -r file || [ -n "$file" ]; do
   mkdir -p "$WORK_DIR"
 
   # ===== 第一步：从 OneDrive 下载视频到本地 =====
-  # rclone copyto 用于单文件：远程路径必须严格与 OneDrive 实际文件名匹配
-  # （我们已经在 Python 阶段做了 NFC 归一化 + BOM 清理，确保路径一致）
+  # 重要：远程路径使用原始文件名，不做任何修改，确保与 OneDrive 上的实际文件名精确匹配！
   echo "⬇️  正在下载: $file"
   RCLONE_ERR="$TMP_DIR/rclone_err.log"
   if ! rclone copyto "$SOURCE_REMOTE/$file" "$LOCAL_FILE" 2>"$RCLONE_ERR" || [ ! -f "$LOCAL_FILE" ]; then
@@ -249,8 +310,12 @@ while IFS= read -r file || [ -n "$file" ]; do
 
   # ===== 第二步：预处理 + 上传到 Telegram =====
   if bash "${GITHUB_WORKSPACE}/.github/scripts/process_one_file.sh" "$LOCAL_FILE" "$CHANNEL_ID" "$CAPTION_PREFIX"; then
-    # 成功后记录到 uploaded（用规范化后的文件名）
-    echo "$file" >> "$TMP_DIR/uploaded_videos.txt"
+    # 成功后记录到 uploaded（使用 NFC 归一化，保证比较一致性）
+    printf '%s' "$file" | python3 -c "
+import sys, unicodedata
+s = sys.stdin.read().rstrip('\r\n')
+print(unicodedata.normalize('NFC', s))
+" >> "$TMP_DIR/uploaded_videos.txt"
     SENT=$((SENT + 1))
     SENT_LIST+="- ${file}"$'\n'
   else
@@ -265,35 +330,43 @@ done < "$TMP_DIR/pending.txt"
 # 阶段三：回写 uploaded_videos.txt + 汇总通知
 ###############################################################################
 
-# 回写前用 Python 归一化 + 去重排序，保证下次 grep/NFC 对比零歧义
+# 回写前用 Python 验证、去重、NFC 归一化，保证文件名一致性
 python3 - "$TMP_DIR/uploaded_videos.txt" <<'PYEOF'
-import sys, os, unicodedata
+import sys, os, re, unicodedata
 
 path = sys.argv[1]
 if not os.path.exists(path):
     sys.exit(0)
 
-def clean(s: str) -> str:
-    s = s.lstrip("\ufeff")
-    s = s.strip("\x00\x01\x02\x03\x04\x05\x06\x07\x08\t\n\x0b\x0c\r\x0e\x0f"
-                "\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f\x7f ")
-    return unicodedata.normalize("NFC", s)
+_BAD_CHARS = re.compile(r'[\x00-\x1f\x7f\ufeff]')
+VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".flv", ".wmv", ".webm", ".m4v", ".ts"}
 
 with open(path, "rb") as f:
     raw = f.read()
 if raw.startswith(b"\xef\xbb\xbf"):
     raw = raw[3:]
+
 names = set()
 for line in raw.split(b"\n"):
+    if not line:
+        continue
+    line = line.rstrip(b"\r")
     if not line:
         continue
     try:
         s = line.decode("utf-8", errors="replace")
     except Exception:
         continue
-    s = clean(s)
-    if s:
-        names.add(s)
+    # 验证基本合法性（控制字符、BOM 等直接跳过）
+    if _BAD_CHARS.search(s):
+        continue
+    s_nfc = unicodedata.normalize("NFC", s)
+    # 验证扩展名和主名
+    ext = os.path.splitext(s_nfc)[1].lower()
+    base = os.path.splitext(s_nfc)[0]
+    if ext not in VIDEO_EXTS or not base or len(base) < 3:
+        continue
+    names.add(s_nfc)
 
 lines = sorted(names, key=lambda x: x.lower())
 with open(path, "wb") as f:
