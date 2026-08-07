@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       clean_tg_uploaded_videos:
-        description: '清空 Telegram 频道所有消息并删除 uploaded_videos.txt，下次运行会重新处理全部视频'
+        description: '清空 Telegram 频道所有消息并删除 uploaded_videos.txt，会重新上传全部视频到 Telegram 频道'
         type: boolean
         default: false
         required: false
