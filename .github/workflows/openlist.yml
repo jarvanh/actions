@@ -169,6 +169,9 @@ jobs:
                 -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
                 --data-urlencode text="$message" || true
             fi
+            # 标记进度通知已过时（有新消息发出，进度通知不再位于聊天底部，
+            # 下次进度更新时需删除旧消息重发到底部）
+            echo "1" > /tmp/progress_stale.txt 2>/dev/null || true
           }
 
           # ===== 实时进度通知（单条消息编辑更新）=====
@@ -208,6 +211,26 @@ jobs:
           _progress_get_skipped() {
             [ -f "$SYNC_SKIPPED_FILE" ] && sort -u "$SYNC_SKIPPED_FILE" 2>/dev/null | grep -v '^$' || true
           }
+          # 从已完成列表移除指定任务（同名任务再次启动时避免误显示为已结束）
+          _progress_remove_completed() {
+            local task="$1"
+            [ -z "$task" ] && return
+            [ -f "$SYNC_COMPLETED_FILE" ] || return
+            local tmp
+            tmp=$(mktemp)
+            grep -v -F -x -- "$task" "$SYNC_COMPLETED_FILE" 2>/dev/null > "$tmp" || true
+            mv "$tmp" "$SYNC_COMPLETED_FILE" 2>/dev/null || true
+          }
+          # 从跳过列表移除指定任务（同名任务再次启动时避免误显示为跳过）
+          _progress_remove_skipped() {
+            local task="$1"
+            [ -z "$task" ] && return
+            [ -f "$SYNC_SKIPPED_FILE" ] || return
+            local tmp
+            tmp=$(mktemp)
+            grep -v -F -x -- "$task" "$SYNC_SKIPPED_FILE" 2>/dev/null > "$tmp" || true
+            mv "$tmp" "$SYNC_SKIPPED_FILE" 2>/dev/null || true
+          }
 
           # 发送消息并返回 message_id
           _tg_send_get_id() {
@@ -234,39 +257,24 @@ jobs:
               --data-urlencode text="$message" 2>/dev/null || true
           }
 
-          # 重新发送进度通知：先发送新消息，成功后再删除旧消息
-          # 顺序说明：若先删除再发送，一旦 sendMessage 失败（网络抖动/jq 解析失败），
-          # 旧消息已删除而新消息未捕获 ID，下次 update 会基于过期的 old_message_id
-          # 调 deleteMessage（无效）再 sendMessage，导致"孤儿消息"堆积。
-          # 改为"先发送再删除"可确保：发送失败时旧消息仍在；发送成功才删除旧消息。
-          # 用法: _tg_resend_as_latest <old_message_id> <message> [parse_mode]
-          # 输出: 新消息的 message_id（失败时输出空，调用方应保留旧 ID）
-          _tg_resend_as_latest() {
-            local old_message_id="$1"
-            local message="$2"
-            local parse_mode="${3:-HTML}"
-            # 先发送新消息，确保获得新 message_id
-            local new_id
-            new_id=$(_tg_send_get_id "$message" "$parse_mode")
-            # 新消息发送成功后才删除旧消息（避免出现"无消息可见"或"孤儿消息"）
-            if [ -n "$new_id" ] && [ -n "$old_message_id" ] && [ "$new_id" != "$old_message_id" ]; then
-              curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/deleteMessage \
-                -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
-                -d message_id="$old_message_id" 2>/dev/null || true
-            fi
-            echo "$new_id"
-          }
-
-          # 编辑现有进度消息；若编辑失败（消息被删/不存在/权限丢失）则回退到 发送新消息+删除旧消息
-          # 优先编辑可避免每次更新都产生新消息，确保始终只有一条 🔄 同步进度 通知。
+          # 编辑现有进度消息；若进度通知不在聊天底部（有新消息插队）或编辑失败，
+          # 则删除旧消息重发到底部。确保始终只有一条 🔄 同步进度 通知且位于最新位置。
           # 用法: _tg_edit_or_resend <message_id> <message> [parse_mode]
-          # 输出: 消息的 message_id（编辑成功返回原 ID，回退发送返回新 ID，失败返回空）
+          # 输出: 消息的 message_id（编辑成功返回原 ID，重发返回新 ID，失败返回空）
           _tg_edit_or_resend() {
             local message_id="$1"
             local message="$2"
             local parse_mode="${3:-HTML}"
-            # 优先编辑现有消息（不产生新消息，避免通知堆叠）
-            if [ -n "$message_id" ]; then
+            local skip_edit="0"
+            # 若有其他消息在进度通知之后发出（进度通知不在聊天底部），
+            # 跳过编辑，直接重发到底部（删除旧消息 + 发送新消息）
+            if [ -f /tmp/progress_stale.txt ] && [ "$(cat /tmp/progress_stale.txt 2>/dev/null)" = "1" ]; then
+              skip_edit="1"
+            fi
+            # 清除过时标记（本次处理后进度通知即为最新）
+            : > /tmp/progress_stale.txt 2>/dev/null || true
+            # 未过时：优先编辑现有消息（不产生新消息，避免通知堆叠）
+            if [ "$skip_edit" = "0" ] && [ -n "$message_id" ]; then
               local edit_resp
               edit_resp=$(curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/editMessageText \
                 -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
@@ -283,7 +291,7 @@ jobs:
               fi
               # 编辑失败（消息不存在/被删/权限丢失），回退到 发送新消息+删除旧消息
             fi
-            # 回退：发送新消息，成功后删除旧消息
+            # 重发：发送新消息，成功后删除旧消息（确保进度通知位于聊天底部）
             local new_id
             new_id=$(_tg_send_get_id "$message" "$parse_mode")
             if [ -n "$new_id" ] && [ -n "$message_id" ] && [ "$new_id" != "$message_id" ]; then
@@ -338,7 +346,7 @@ jobs:
             echo "$msg"
           }
 
-          # 启动进度通知（删除上一步的旧消息后发送新消息，确保始终位于聊天最底部）
+          # 启动进度通知（优先编辑现有消息，保持只有一条通知且为最新）
           # 用法: progress_start <task_name> [stats] [detail]
           progress_start() {
             local task_name="$1"
@@ -351,9 +359,13 @@ jobs:
             PROGRESS_STATS="$stats"
             PROGRESS_LAST_UPDATE=0
             PROGRESS_PHASE_INFO=""
-            # 加载上一步的 message_id，删除旧消息后发送新消息
+            # 同名任务再次启动时，先从已完成/跳过列表移除，避免误显示为已结束/跳过
+            _progress_remove_completed "$task_name"
+            _progress_remove_skipped "$task_name"
+            # 加载上一步的 message_id，优先编辑现有消息（保持只有一条通知）；
+            # 仅当编辑失败（消息被删/不存在）时才回退到发送新消息
             _progress_load_msg_id
-            PROGRESS_MSG_ID=$(_tg_resend_as_latest "$PROGRESS_MSG_ID" "$(_progress_render)")
+            PROGRESS_MSG_ID=$(_tg_edit_or_resend "$PROGRESS_MSG_ID" "$(_progress_render)")
             _progress_save_msg_id
           }
 
@@ -2949,6 +2961,7 @@ jobs:
           : > /tmp/progress_msg_id.txt
           : > /tmp/sync_completed.txt
           : > /tmp/sync_skipped.txt
+          : > /tmp/progress_stale.txt
           # 集中定义阈值，避免魔数散落各处
           LARGE_FILE_THRESHOLD_BYTES="${LARGE_FILE_THRESHOLD:-4000000000}"
           SYNC_SPLIT_THRESHOLD_BYTES="${SYNC_SPLIT_THRESHOLD:-50000000000}"
