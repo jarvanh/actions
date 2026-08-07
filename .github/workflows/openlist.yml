@@ -257,6 +257,43 @@ jobs:
             echo "$new_id"
           }
 
+          # 编辑现有进度消息；若编辑失败（消息被删/不存在/权限丢失）则回退到 发送新消息+删除旧消息
+          # 优先编辑可避免每次更新都产生新消息，确保始终只有一条 🔄 同步进度 通知。
+          # 用法: _tg_edit_or_resend <message_id> <message> [parse_mode]
+          # 输出: 消息的 message_id（编辑成功返回原 ID，回退发送返回新 ID，失败返回空）
+          _tg_edit_or_resend() {
+            local message_id="$1"
+            local message="$2"
+            local parse_mode="${3:-HTML}"
+            # 优先编辑现有消息（不产生新消息，避免通知堆叠）
+            if [ -n "$message_id" ]; then
+              local edit_resp
+              edit_resp=$(curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/editMessageText \
+                -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
+                -d message_id="$message_id" \
+                -d parse_mode="$parse_mode" \
+                --data-urlencode text="$message" 2>/dev/null) || true
+              local edit_ok edit_desc
+              edit_ok=$(echo "$edit_resp" | jq -r '.ok // false' 2>/dev/null)
+              edit_desc=$(echo "$edit_resp" | jq -r '.description // ""' 2>/dev/null)
+              # 编辑成功，或内容未变化（视为成功），直接返回原 message_id
+              if [ "$edit_ok" = "true" ] || [[ "$edit_desc" == *"not modified"* ]]; then
+                echo "$message_id"
+                return 0
+              fi
+              # 编辑失败（消息不存在/被删/权限丢失），回退到 发送新消息+删除旧消息
+            fi
+            # 回退：发送新消息，成功后删除旧消息
+            local new_id
+            new_id=$(_tg_send_get_id "$message" "$parse_mode")
+            if [ -n "$new_id" ] && [ -n "$message_id" ] && [ "$new_id" != "$message_id" ]; then
+              curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/deleteMessage \
+                -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' \
+                -d message_id="$message_id" 2>/dev/null || true
+            fi
+            echo "$new_id"
+          }
+
           # 渲染当前进度为 HTML 消息
           _progress_render() {
             local elapsed=$(( $(date +%s) - PROGRESS_START_TIME ))
@@ -326,7 +363,7 @@ jobs:
             PROGRESS_TASK_DETAIL="$1"
           }
 
-          # 更新进度（删除旧消息+发送新消息，带 3 秒节流，始终位于聊天最底部）
+          # 更新进度（编辑现有消息，带 3 秒节流，确保只有一条进度通知）
           # 用法: progress_update <current> [stats]
           progress_update() {
             [ -z "$PROGRESS_MSG_ID" ] && return 0
@@ -339,7 +376,7 @@ jobs:
             fi
             PROGRESS_LAST_UPDATE=$now
             local new_id
-            new_id=$(_tg_resend_as_latest "$PROGRESS_MSG_ID" "$(_progress_render)")
+            new_id=$(_tg_edit_or_resend "$PROGRESS_MSG_ID" "$(_progress_render)")
             [ -n "$new_id" ] && PROGRESS_MSG_ID="$new_id"
             _progress_save_msg_id
           }
@@ -352,12 +389,12 @@ jobs:
             [ -n "$2" ] && PROGRESS_STATS="$2"
             PROGRESS_LAST_UPDATE=$(date +%s)
             local new_id
-            new_id=$(_tg_resend_as_latest "$PROGRESS_MSG_ID" "$(_progress_render)")
+            new_id=$(_tg_edit_or_resend "$PROGRESS_MSG_ID" "$(_progress_render)")
             [ -n "$new_id" ] && PROGRESS_MSG_ID="$new_id"
             _progress_save_msg_id
           }
 
-          # 结束进度通知（最终更新，记录已完成任务）
+          # 结束进度通知（编辑现有消息显示最终状态，记录已完成任务）
           # 用法: progress_finish [final_stats]
           progress_finish() {
             [ -z "$PROGRESS_MSG_ID" ] && return 0
@@ -367,7 +404,7 @@ jobs:
             PROGRESS_PHASE_INFO=""
             _progress_add_completed "$PROGRESS_TASK_NAME"
             local new_id
-            new_id=$(_tg_resend_as_latest "$PROGRESS_MSG_ID" "$(_progress_render)")
+            new_id=$(_tg_edit_or_resend "$PROGRESS_MSG_ID" "$(_progress_render)")
             [ -n "$new_id" ] && PROGRESS_MSG_ID="$new_id"
             _progress_save_msg_id
             PROGRESS_TASK_DETAIL=""
@@ -2307,6 +2344,9 @@ jobs:
             # 递归列出所有文件（使用 lsjson，比 lsf --json 更可靠）
             local file_list_file="${batch_dir}/all_files.jsonl"
             echo "正在列出文件..."
+            # 进入文件批次阶段：清空父级子目录阶段的 stats，避免在批次阶段
+            # 仍显示 "📊 子目录: x/y 完成" 这类与当前阶段无关的旧数据。
+            PROGRESS_STATS=""
             PROGRESS_PHASE_INFO="📦 <b>文件批次拆分</b>（depth=${SYNC_AUTO_SPLIT_DEPTH:-0}，正在列出文件...）"
             progress_update "正在列出文件..."
             # 注意：GitHub Actions 默认 set -e -o pipefail，rclone lsjson 失败时管道会非零退出，
