@@ -15,6 +15,11 @@ on:
         type: boolean
         default: false
         required: false
+      dedupe_by_id_only:
+        description: '仅按 ID 自动删除重复视频（跳过标题/哈希校验，保留最大/最新文件）'
+        type: boolean
+        default: false
+        required: false
   watch:
     types: started
 
@@ -90,6 +95,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           AUTO_DELETE: ${{ github.event.inputs.auto_delete_duplicates == 'true' }}
+          DEDUPE_BY_ID_ONLY: ${{ github.event.inputs.dedupe_by_id_only == 'true' }}
         run: |
           SOURCE_REMOTE="onedrive:0/j-1024j-视频-pornhub-favorites"
           # rclone lsf 列出文件（time;size;path），path 放最后，文件名含 ; 时最后一个字段获取剩余全部，安全
@@ -151,6 +157,26 @@ jobs:
             IDX=$((IDX + 1))
             DUP_COUNT=$((DUP_COUNT + 1))
             echo "[$IDX/$DUP_TOTAL] 处理 ID $id（$count 个文件）"
+
+            # 仅按 ID 去重模式：跳过标题/哈希校验，直接保留最大/最新文件并自动删除其余
+            if [ "$DEDUPE_BY_ID_ONLY" = "true" ]; then
+              sorted=$(echo "$entries" | sort -t';' -k2,2n -k1,1)
+              kept_path=$(echo "$sorted" | tail -n1 | cut -d';' -f3-)
+              group_details=""
+              while IFS=';' read -r t s p; do
+                [ "$p" = "$kept_path" ] && continue
+                [ -z "$p" ] && continue
+                if rclone deletefile "$SOURCE_REMOTE/$p" 2>/tmp/rclone_err.log; then
+                  REMOVED_COUNT=$((REMOVED_COUNT + 1))
+                  group_details+=$'  🗑 删除 '"${p}"$'（'"${s}"$' 字节，'"${t}"$'）\n'
+                else
+                  group_details+=$'  ❌ 删除失败 '"${p}"$'\n'
+                  echo "  ❌ 删除失败: $(tail -n 3 /tmp/rclone_err.log)"
+                fi
+              done <<< "$sorted"
+              DUP_DETAILS+=$'\n'"🔖 [${IDX}/${DUP_TOTAL}] ID ${id}"$'（'"${count}"$' 个，仅按 ID 去重，保留: '"${kept_path}"$'）\n'"${group_details}"
+              continue
+            fi
 
             # 判断所有文件的 title 是否完全相同
             title_count=$(while IFS=';' read -r t s p; do
@@ -251,7 +277,9 @@ jobs:
           if [ "$DUP_COUNT" -gt 0 ]; then
             HEADER="🔍 ph-dl 重复视频检测与去重"$'\n'"━━━━━━━━━━━━━━━━━━"$'\n'"📁 目录: j-1024j-视频-pornhub-favorites"$'\n'
             HEADER+=$'\n'"� 统计"$'\n'"• 重复 ID: ${DUP_COUNT}"$'\n'"• 已删除: ${REMOVED_COUNT}"$'\n'"• 仅通知: ${NOTIFY_ONLY_COUNT}"
-            if [ "$AUTO_DELETE" = "true" ]; then
+            if [ "$DEDUPE_BY_ID_ONLY" = "true" ]; then
+              HEADER+=$'\n'$'\n'"⚙️ 模式: 仅按 ID 自动删除（跳过标题/哈希校验）"
+            elif [ "$AUTO_DELETE" = "true" ]; then
               HEADER+=$'\n'$'\n'"⚙️ 模式: 自动删除已开启"
             else
               HEADER+=$'\n'$'\n'"⚙️ 模式: 仅通知（手动触发可开启 auto_delete_duplicates）"
