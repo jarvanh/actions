@@ -29,15 +29,20 @@ rclone cat "$SOURCE_REMOTE/uploaded_videos.txt" 2>/dev/null > "$TMP_DIR/uploaded
 python3 - "$SOURCE_REMOTE" "$CHANNEL_ID" "$CAPTION_PREFIX" "$TMP_DIR" <<'PYEOF'
 import json
 import os
+import shlex
 import subprocess
 import sys
-from pathlib import PurePosixPath
+import time
+from datetime import datetime
+
 
 SOURCE_REMOTE = sys.argv[1]
 CHANNEL_ID = sys.argv[2]
 CAPTION_PREFIX = sys.argv[3]
 TMP = sys.argv[4]
 GITHUB_WORKSPACE = os.environ.get("GITHUB_WORKSPACE", "")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".flv", ".wmv", ".webm", ".m4v", ".ts"}
 UPLOADED_RAW = os.path.join(TMP, "uploaded_videos.raw")
@@ -51,47 +56,87 @@ def run(cmd, **kwargs):
     return subprocess.run(cmd, shell=isinstance(cmd, str), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **kwargs)
 
 
+def notify(message):
+    """立即发送 Telegram 通知。失败只打印日志，不中断主流程。"""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print(f"[notify] 跳过：缺少 TELEGRAM_BOT_TOKEN 或 TELEGRAM_CHAT_ID，消息: {message}")
+        return
+    tg_script = os.path.join(GITHUB_WORKSPACE, ".github", "scripts", "tg_notify.sh")
+    if not os.path.exists(tg_script):
+        print(f"[notify] 跳过：通知脚本不存在: {tg_script}")
+        return
+    print(f"[notify] 发送即时通知: {message[:200]}")
+    result = run(["bash", "-c", f"source {shlex.quote(tg_script)} && send_tg {shlex.quote(message)}"])
+    if result.returncode != 0:
+        print(f"[notify] 发送通知失败 (code {result.returncode}): {result.stderr}")
+
+
 def is_video(path: str) -> bool:
     return os.path.splitext(path)[1].lower() in VIDEO_EXTS
 
 
-def is_safe(path: str) -> bool:
-    return "/" not in path and "\\" not in path and ".." not in PurePosixPath(path).parts
-
-
 def read_uploaded() -> set:
-    """读取已上传名单，兼容旧版 \n 分隔和新版 \0 分隔。"""
+    """读取已上传名单（JSON 数组格式）。"""
     uploaded = set()
-    if not os.path.exists(UPLOADED_RAW) or os.path.getsize(UPLOADED_RAW) == 0:
+    if not os.path.exists(UPLOADED_RAW):
+        print(f"[read_uploaded] 文件不存在，视为空列表: {UPLOADED_RAW}")
         return uploaded
-    with open(UPLOADED_RAW, "rb") as f:
-        raw = f.read()
-    if raw.startswith(b"\xef\xbb\xbf"):
-        raw = raw[3:]
-    # 自动判断分隔符
-    if b"\0" not in raw and b"\n" in raw:
-        parts = raw.split(b"\n")
-    else:
-        parts = raw.split(b"\0")
-    for part in parts:
-        part = part.rstrip(b"\r\n")
-        if not part:
-            continue
+    size = os.path.getsize(UPLOADED_RAW)
+    if size == 0:
+        print(f"[read_uploaded] 文件为空: {UPLOADED_RAW}")
+        return uploaded
+
+    print(f"[read_uploaded] 开始读取，文件大小: {size} bytes, 路径: {UPLOADED_RAW}")
+    try:
+        with open(UPLOADED_RAW, "rb") as f:
+            raw = f.read()
+        # 记录前 500 字节用于排查编码/格式问题
+        preview = raw[:500]
+        print(f"[read_uploaded] 原始内容前 500 bytes (repr): {preview!r}")
+
+        with open(UPLOADED_RAW, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        if isinstance(data, list):
+            for idx, item in enumerate(data):
+                if isinstance(item, str) and item:
+                    uploaded.add(item)
+                else:
+                    print(f"[read_uploaded] 跳过无效条目 #{idx}: type={type(item).__name__}, value={item!r}")
+            print(f"[read_uploaded] 解析成功，有效条目数: {len(uploaded)}, 总条目数: {len(data)}")
+        else:
+            print(f"[read_uploaded] WARN: JSON 根节点不是数组，实际类型: {type(data).__name__}, 值: {data!r}")
+    except json.JSONDecodeError as e:
+        print(f"[read_uploaded] ERROR: JSON 解析失败: {e}")
+        # 输出失败位置附近的内容，方便定位
         try:
-            s = part.decode("utf-8", errors="replace")
-        except Exception:
-            continue
-        if s:
-            uploaded.add(s)
+            with open(UPLOADED_RAW, "rb") as f:
+                raw = f.read()
+            err_pos = getattr(e, "pos", 0)
+            start = max(0, err_pos - 100)
+            end = min(len(raw), err_pos + 100)
+            print(f"[read_uploaded] ERROR: 出错位置附近 bytes (pos={err_pos}): {raw[start:end]!r}")
+        except Exception as ex:
+            print(f"[read_uploaded] ERROR: 无法读取出错位置详情: {ex}")
+    except Exception as e:
+        print(f"[read_uploaded] ERROR: 读取失败: {type(e).__name__}: {e}")
     return uploaded
 
 
 def write_uploaded(uploaded: set):
-    """写回 uploaded_videos.txt，使用 NUL 分隔以支持含换行符的文件名。"""
+    """写回 uploaded_videos.txt（JSON 数组格式）。"""
     lines = sorted(uploaded, key=lambda x: x.lower())
-    with open(UPLOADED_OUT, "wb") as f:
-        for name in lines:
-            f.write(name.encode("utf-8") + b"\0")
+    print(f"[write_uploaded] 开始写入，条目数: {len(lines)}, 路径: {UPLOADED_OUT}")
+    if lines:
+        print(f"[write_uploaded] 前 5 条示例: {lines[:5]!r}")
+    try:
+        with open(UPLOADED_OUT, "w", encoding="utf-8") as f:
+            json.dump(lines, f, ensure_ascii=False, indent=2)
+        size = os.path.getsize(UPLOADED_OUT)
+        print(f"[write_uploaded] 写入完成，文件大小: {size} bytes")
+    except Exception as e:
+        print(f"[write_uploaded] ERROR: 写入失败: {type(e).__name__}: {e}")
+        raise
 
 
 def get_video_list():
@@ -105,7 +150,10 @@ def get_video_list():
         f.write(result.stderr.encode("utf-8", errors="replace") if isinstance(result.stderr, str) else result.stderr)
 
     if result.returncode != 0:
-        print(f"WARN: rclone lsjson 失败 (code {result.returncode})")
+        err_msg = f"❌ rclone lsjson 失败 (code {result.returncode})"
+        print(err_msg)
+        print(f"[get_video_list] stderr: {result.stderr[-2000:] if result.stderr else '(无)'}")
+        notify(f"{err_msg}\n{CAPTION_PREFIX}\nstderr 见 Actions 日志")
         return [], []
 
     try:
@@ -117,7 +165,9 @@ def get_video_list():
         else:
             items = json.loads(data)
     except Exception as e:
-        print(f"WARN: rclone lsjson 解析失败: {e}")
+        err_msg = f"❌ rclone lsjson 解析失败: {e}"
+        print(err_msg)
+        notify(f"{err_msg}\n{CAPTION_PREFIX}\n请检查 rclone lsjson 输出格式")
         return [], []
 
     if not isinstance(items, list):
@@ -134,14 +184,11 @@ def get_video_list():
         if not is_video(path):
             skipped.append(("not_video", path))
             continue
-        if not is_safe(path):
-            skipped.append(("unsafe_path", path))
-            continue
         videos.append((it.get("ModTime") or "", path))
 
     # 旧的先处理
     videos.sort(key=lambda x: x[0])
-    return [p for _, p in videos], skipped
+    return videos, skipped
 
 
 def main():
@@ -151,15 +198,15 @@ def main():
     # 去重：保留原始值，不 NFC 归一化
     seen = set()
     deduped = []
-    for p in all_videos:
+    for modtime, p in all_videos:
         if p in seen:
             skipped.append(("duplicate", p))
             continue
         seen.add(p)
-        deduped.append(p)
+        deduped.append((modtime, p))
     all_videos = deduped
 
-    pending = [p for p in all_videos if p not in uploaded]
+    pending = [(m, p) for m, p in all_videos if p not in uploaded]
 
     total = len(all_videos)
     pending_count = len(pending)
@@ -176,7 +223,16 @@ def main():
     sent_list = []
     failed_list = []
 
-    for file in pending:
+    for modtime, file in pending:
+        # 将 ISO 8601 modtime 格式化为更易读的本地样式
+        modtime_display = modtime
+        if modtime:
+            try:
+                dt = datetime.fromisoformat(modtime.replace("Z", "+00:00"))
+                modtime_display = dt.strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                pass
+
         # 本地临时文件名直接使用原始文件名
         local_file = os.path.join(WORK_DIR, os.path.basename(file))
         if os.path.exists(WORK_DIR):
@@ -184,28 +240,44 @@ def main():
             shutil.rmtree(WORK_DIR)
         os.makedirs(WORK_DIR, exist_ok=True)
 
-        print(f"⬇️  正在下载: {file}")
+        print(f"⬇️  正在下载: {file} (modtime={modtime_display})")
+        dl_start = time.time()
         result = run(["rclone", "copyto", f"{SOURCE_REMOTE}/{file}", local_file])
+        dl_elapsed = time.time() - dl_start
         if result.returncode != 0 or not os.path.isfile(local_file):
-            print(f"❌ FAILED: rclone copy failed: {file}")
+            err_msg = f"❌ FAILED: rclone copy failed: {file} (耗时 {dl_elapsed:.2f}s)"
+            print(err_msg)
             print("--- rclone 错误输出 ---")
             print(result.stderr[-2000:] if result.stderr else "(无错误输出)")
             print("------------------------")
             failed += 1
-            failed_list.append(f"- {file}（rclone copy failed）")
+            failed_list.append(f"- {file}（rclone copy failed, {dl_elapsed:.2f}s）")
+            notify(f"{err_msg}\n{CAPTION_PREFIX}\nrclone stderr 见 Actions 日志")
             continue
-        print(f"✅ 下载完成: {file}")
+        file_size = os.path.getsize(local_file)
+        print(f"✅ 下载完成: {file} (大小 {file_size} bytes, 耗时 {dl_elapsed:.2f}s)")
 
         # 预处理 + 上传到 Telegram
         proc_one = os.path.join(GITHUB_WORKSPACE, ".github", "scripts", "process_one_file.sh")
-        up_result = run(["bash", proc_one, local_file, CHANNEL_ID, CAPTION_PREFIX])
+        print(f"🎬 开始处理/上传: {file}")
+        up_start = time.time()
+        up_result = run(["bash", proc_one, local_file, CHANNEL_ID, modtime_display])
+        up_elapsed = time.time() - up_start
         if up_result.returncode == 0:
             uploaded.add(file)
             sent += 1
-            sent_list.append(f"- {file}")
+            sent_list.append(f"- {file} (上传耗时 {up_elapsed:.2f}s)")
+            print(f"✅ 上传完成: {file} (总处理耗时 {up_elapsed:.2f}s)")
         else:
+            err_msg = f"❌ FAILED: 处理/上传失败: {file} (耗时 {up_elapsed:.2f}s)"
+            print(err_msg)
+            print("--- process_one_file 输出 ---")
+            print(up_result.stdout[-3000:] if up_result.stdout else "")
+            print(up_result.stderr[-3000:] if up_result.stderr else "(无错误输出)")
+            print("-----------------------------")
             failed += 1
-            failed_list.append(f"- {file}（Telegram 上传失败）")
+            failed_list.append(f"- {file}（处理/上传失败, {up_elapsed:.2f}s）")
+            notify(f"{err_msg}\n{CAPTION_PREFIX}\nprocess_one_file 输出见 Actions 日志")
 
         # 清理工作目录
         if os.path.exists(WORK_DIR):
