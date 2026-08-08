@@ -3321,7 +3321,8 @@ jobs:
 
             if grep -Eqi 'storageQuotaExceeded|storage quota has been exceeded' "$LAST_GD_ATTEMPT_LOG"; then
               # Google Drive 存储配额超限，跳过同步，发送通知，不阻止后续 task
-              SYNC_FAILED=1
+              SYNC_SKIPPED=1
+              SYNC_FAILED=0
               local quota_msg
               printf -v quota_msg '%s\n%s\n%s\n%s\n%s\n%s\n\n%s\n%s\n%s\n%s\n\n%s\n%s' \
                 "⚠️ ${task_name} Google Drive 存储配额超限" \
