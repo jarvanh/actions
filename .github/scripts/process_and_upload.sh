@@ -51,9 +51,14 @@ STATS_FILE = os.path.join(TMP, "stats.json")
 WORK_DIR = os.path.join(TMP, "work")
 
 
-def run(cmd, **kwargs):
-    """执行命令，返回 CompletedProcess，不抛异常。"""
-    return subprocess.run(cmd, shell=isinstance(cmd, str), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **kwargs)
+def run(cmd, capture=True, **kwargs):
+    """执行命令，返回 CompletedProcess，不抛异常。
+    capture=True 时用 PIPE 捕获输出供解析（如 lsjson）；
+    capture=False 时直接透传到当前 stdout/stderr，长任务（下载/转码/上传）可实时看到进度。
+    """
+    if capture:
+        return subprocess.run(cmd, shell=isinstance(cmd, str), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **kwargs)
+    return subprocess.run(cmd, shell=isinstance(cmd, str), text=True, **kwargs)
 
 
 def notify(message):
@@ -242,17 +247,16 @@ def main():
 
         print(f"⬇️  正在下载: {file} (modtime={modtime_display})")
         dl_start = time.time()
-        result = run(["rclone", "copyto", f"{SOURCE_REMOTE}/{file}", local_file])
+        # 透传输出：rclone --progress 的进度实时进 Actions 日志，避免长时间静默
+        result = run(["rclone", "copyto", f"{SOURCE_REMOTE}/{file}", local_file, "--progress"], capture=False)
         dl_elapsed = time.time() - dl_start
         if result.returncode != 0 or not os.path.isfile(local_file):
             err_msg = f"❌ FAILED: rclone copy failed: {file} (耗时 {dl_elapsed:.2f}s)"
             print(err_msg)
-            print("--- rclone 错误输出 ---")
-            print(result.stderr[-2000:] if result.stderr else "(无错误输出)")
-            print("------------------------")
+            print("(rclone 进度/错误已实时输出到上方日志)")
             failed += 1
             failed_list.append(f"- {file}（rclone copy failed, {dl_elapsed:.2f}s）")
-            notify(f"{err_msg}\n{CAPTION_PREFIX}\nrclone stderr 见 Actions 日志")
+            notify(f"{err_msg}\n{CAPTION_PREFIX}\nrclone 进度见 Actions 日志")
             continue
         file_size = os.path.getsize(local_file)
         print(f"✅ 下载完成: {file} (大小 {file_size} bytes, 耗时 {dl_elapsed:.2f}s)")
@@ -261,7 +265,8 @@ def main():
         proc_one = os.path.join(GITHUB_WORKSPACE, ".github", "scripts", "process_one_file.sh")
         print(f"🎬 开始处理/上传: {file}")
         up_start = time.time()
-        up_result = run(["bash", proc_one, local_file, CHANNEL_ID, modtime_display])
+        # 透传输出：转码/上传进度实时进 Actions 日志，避免长时间静默
+        up_result = run(["bash", proc_one, local_file, CHANNEL_ID, modtime_display], capture=False)
         up_elapsed = time.time() - up_start
         if up_result.returncode == 0:
             uploaded.add(file)
@@ -271,13 +276,10 @@ def main():
         else:
             err_msg = f"❌ FAILED: 处理/上传失败: {file} (耗时 {up_elapsed:.2f}s)"
             print(err_msg)
-            print("--- process_one_file 输出 ---")
-            print(up_result.stdout[-3000:] if up_result.stdout else "")
-            print(up_result.stderr[-3000:] if up_result.stderr else "(无错误输出)")
-            print("-----------------------------")
+            print("(处理/上传过程已实时输出到上方日志)")
             failed += 1
             failed_list.append(f"- {file}（处理/上传失败, {up_elapsed:.2f}s）")
-            notify(f"{err_msg}\n{CAPTION_PREFIX}\nprocess_one_file 输出见 Actions 日志")
+            notify(f"{err_msg}\n{CAPTION_PREFIX}\n详细输出见 Actions 日志")
 
         # 清理工作目录
         if os.path.exists(WORK_DIR):

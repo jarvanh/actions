@@ -58,7 +58,7 @@ TRANSCODE_START=$SECONDS
 if [ "$NEED_REENCODE" -eq 1 ]; then
   # 重编码为 Telegram 兼容格式
   echo "[transcode] 需要转码: $FILENAME ($REASON → h264/yuv420p/aac)"
-  if ffmpeg -y -i "$LOCAL_FILE" -map 0:v:0 -map 0:a? -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1" -c:a aac -movflags +faststart "$OUTPUT_FILE" 2>/dev/null && mv "$OUTPUT_FILE" "$LOCAL_FILE"; then
+  if ffmpeg -y -i "$LOCAL_FILE" -map 0:v:0 -map 0:a? -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1" -c:a aac -movflags +faststart "$OUTPUT_FILE" && mv "$OUTPUT_FILE" "$LOCAL_FILE"; then
     TRANSCODE_ELAPSED=$((SECONDS - TRANSCODE_START))
     echo "[transcode] 转码成功: $FILENAME (耗时 ${TRANSCODE_ELAPSED}s)"
   else
@@ -70,14 +70,14 @@ if [ "$NEED_REENCODE" -eq 1 ]; then
 else
   # 已是兼容格式，仅添加 faststart
   echo "[transcode] 无需转码，仅添加 faststart: $FILENAME"
-  if ffmpeg -y -i "$LOCAL_FILE" -c copy -movflags +faststart "$OUTPUT_FILE" 2>/dev/null && mv "$OUTPUT_FILE" "$LOCAL_FILE"; then
+  if ffmpeg -y -i "$LOCAL_FILE" -c copy -movflags +faststart "$OUTPUT_FILE" && mv "$OUTPUT_FILE" "$LOCAL_FILE"; then
     TRANSCODE_ELAPSED=$((SECONDS - TRANSCODE_START))
     echo "[transcode] faststart 成功: $FILENAME (耗时 ${TRANSCODE_ELAPSED}s)"
   else
     # faststart 失败 → 重编码兜底
     rm -f "$OUTPUT_FILE"
     echo "WARN: faststart failed, re-encoding: $FILENAME"
-    if ffmpeg -y -i "$LOCAL_FILE" -map 0:v:0 -map 0:a? -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1" -c:a aac -movflags +faststart "$OUTPUT_FILE" 2>/dev/null && mv "$OUTPUT_FILE" "$LOCAL_FILE"; then
+    if ffmpeg -y -i "$LOCAL_FILE" -map 0:v:0 -map 0:a? -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1" -c:a aac -movflags +faststart "$OUTPUT_FILE" && mv "$OUTPUT_FILE" "$LOCAL_FILE"; then
       TRANSCODE_ELAPSED=$((SECONDS - TRANSCODE_START))
       echo "[transcode] faststart 失败后重编码成功: $FILENAME (总耗时 ${TRANSCODE_ELAPSED}s)"
     else
