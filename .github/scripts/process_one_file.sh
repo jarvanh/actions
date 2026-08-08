@@ -94,7 +94,7 @@ FILESIZE_HUMAN=$(du -h "$LOCAL_FILE" | cut -f1)
 FILESIZE_BYTES=$(stat -c%s "$LOCAL_FILE" 2>/dev/null || stat -f%z "$LOCAL_FILE" 2>/dev/null || echo "unknown")
 # Caption 分三行：文件名、大小、修改时间
 CAPTION="${FILENAME}"$'\n'"${FILESIZE_HUMAN}"$'\n'"${MODTIME}"
-echo "[upload] 开始上传 Telegram: $FILENAME (大小 ${FILESIZE_HUMAN} / ${FILESIZE_BYTES} bytes, modtime=$MODTIME)"
+echo "[upload] 开始上传 Telegram: $FILENAME (大小 ${FILESIZE_HUMAN} / ${FILESIZE_BYTES} bytes, 修改时间 $MODTIME)"
 UPLOAD_START=$SECONDS
 # upload_video.py 的进度/属性输出属于噪音，重定向到日志文件；仅失败时打印尾部便于排查
 UPLOAD_LOG="$WORK_DIR/upload.log"

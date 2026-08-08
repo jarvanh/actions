@@ -144,8 +144,18 @@ def write_uploaded(uploaded: set):
         raise
 
 
+def human_size(num):
+    """与 du -h 风格一致：1024 进制、四舍五入取整，单位 B/K/M/G/T。"""
+    num = float(num)
+    for unit in ("B", "K", "M", "G", "T"):
+        if num < 1024 or unit == "T":
+            return f"{round(num)}{unit}"
+        num /= 1024
+    return f"{round(num)}T"
+
+
 def get_video_list():
-    """通过 rclone lsjson 获取远端视频文件列表，返回 [(modtime, filename)]。"""
+    """通过 rclone lsjson 获取远端视频文件列表，返回 [(modtime, filename, size_bytes)]。"""
     lsjson_path = os.path.join(TMP, "ls.json")
     err_path = os.path.join(TMP, "lsjson.err")
     result = run(f"rclone lsjson {SOURCE_REMOTE}/")
@@ -189,7 +199,7 @@ def get_video_list():
         if not is_video(path):
             skipped.append(("not_video", path))
             continue
-        videos.append((it.get("ModTime") or "", path))
+        videos.append((it.get("ModTime") or "", path, it.get("Size") or 0))
 
     # 旧的先处理
     videos.sort(key=lambda x: x[0])
@@ -203,15 +213,15 @@ def main():
     # 去重：保留原始值，不 NFC 归一化
     seen = set()
     deduped = []
-    for modtime, p in all_videos:
+    for modtime, p, sz in all_videos:
         if p in seen:
             skipped.append(("duplicate", p))
             continue
         seen.add(p)
-        deduped.append((modtime, p))
+        deduped.append((modtime, p, sz))
     all_videos = deduped
 
-    pending = [(m, p) for m, p in all_videos if p not in uploaded]
+    pending = [(m, p, sz) for m, p, sz in all_videos if p not in uploaded]
 
     total = len(all_videos)
     pending_count = len(pending)
@@ -228,7 +238,7 @@ def main():
     sent_list = []
     failed_list = []
 
-    for modtime, file in pending:
+    for modtime, file, size in pending:
         # 将 ISO 8601 modtime 格式化为更易读的本地样式
         modtime_display = modtime
         if modtime:
@@ -245,7 +255,7 @@ def main():
             shutil.rmtree(WORK_DIR)
         os.makedirs(WORK_DIR, exist_ok=True)
 
-        print(f"⬇️  正在下载: {file} (modtime={modtime_display})")
+        print(f"⬇️  正在下载: {file} (大小 {human_size(size)} / {size} bytes, 修改时间 {modtime_display})")
         dl_start = time.time()
         # 捕获输出：rclone 原始进度属于噪音，靠 ✅ 标记即可；失败时再打印 stderr 便于排查
         result = run(["rclone", "copyto", f"{SOURCE_REMOTE}/{file}", local_file])
@@ -261,7 +271,7 @@ def main():
             notify(f"{err_msg}\n{CAPTION_PREFIX}\nrclone stderr 见 Actions 日志")
             continue
         file_size = os.path.getsize(local_file)
-        print(f"✅ 下载完成: {file} (大小 {file_size} bytes, 耗时 {dl_elapsed:.2f}s)")
+        print(f"✅ 下载完成: {file} (大小 {human_size(file_size)} / {file_size} bytes, 耗时 {dl_elapsed:.2f}s)")
 
         # 预处理 + 上传到 Telegram
         proc_one = os.path.join(GITHUB_WORKSPACE, ".github", "scripts", "process_one_file.sh")
