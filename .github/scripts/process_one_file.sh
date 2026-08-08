@@ -1,6 +1,6 @@
 #!/bin/bash
 # 共享脚本：预处理单个视频文件并上传到 Telegram
-# 用法: process_one_file.sh <local_file> <channel_id> <caption_prefix>
+# 用法: process_one_file.sh <local_file> <channel_id> <modtime>
 # 环境变量: GITHUB_WORKSPACE
 # 返回: 0=成功（已上传）, 1=失败
 
@@ -8,7 +8,7 @@ set +e
 
 LOCAL_FILE="$1"
 CHANNEL_ID="$2"
-CAPTION_PREFIX="$3"
+MODTIME="$3"
 
 FILENAME="$(basename "$LOCAL_FILE")"
 WORK_DIR="$(dirname "$LOCAL_FILE")"
@@ -54,30 +54,36 @@ if [ "$NEED_REENCODE" -eq 0 ]; then
   fi
 fi
 
+TRANSCODE_START=$SECONDS
 if [ "$NEED_REENCODE" -eq 1 ]; then
   # 重编码为 Telegram 兼容格式
-  echo "Convert: $FILENAME ($REASON → h264/yuv420p/aac)"
+  echo "[transcode] 需要转码: $FILENAME ($REASON → h264/yuv420p/aac)"
   if ffmpeg -y -i "$LOCAL_FILE" -map 0:v:0 -map 0:a? -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1" -c:a aac -movflags +faststart "$OUTPUT_FILE" 2>/dev/null && mv "$OUTPUT_FILE" "$LOCAL_FILE"; then
-    : # 成功
+    TRANSCODE_ELAPSED=$((SECONDS - TRANSCODE_START))
+    echo "[transcode] 转码成功: $FILENAME (耗时 ${TRANSCODE_ELAPSED}s)"
   else
     rm -f "$OUTPUT_FILE"
-    echo "FAILED: transcode failed ($REASON): $FILENAME"
+    TRANSCODE_ELAPSED=$((SECONDS - TRANSCODE_START))
+    echo "FAILED: transcode failed ($REASON) after ${TRANSCODE_ELAPSED}s: $FILENAME"
     exit 1
   fi
 else
   # 已是兼容格式，仅添加 faststart
-  echo "Faststart: $FILENAME"
+  echo "[transcode] 无需转码，仅添加 faststart: $FILENAME"
   if ffmpeg -y -i "$LOCAL_FILE" -c copy -movflags +faststart "$OUTPUT_FILE" 2>/dev/null && mv "$OUTPUT_FILE" "$LOCAL_FILE"; then
-    : # 成功
+    TRANSCODE_ELAPSED=$((SECONDS - TRANSCODE_START))
+    echo "[transcode] faststart 成功: $FILENAME (耗时 ${TRANSCODE_ELAPSED}s)"
   else
     # faststart 失败 → 重编码兜底
     rm -f "$OUTPUT_FILE"
     echo "WARN: faststart failed, re-encoding: $FILENAME"
     if ffmpeg -y -i "$LOCAL_FILE" -map 0:v:0 -map 0:a? -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1" -c:a aac -movflags +faststart "$OUTPUT_FILE" 2>/dev/null && mv "$OUTPUT_FILE" "$LOCAL_FILE"; then
-      : # 成功
+      TRANSCODE_ELAPSED=$((SECONDS - TRANSCODE_START))
+      echo "[transcode] faststart 失败后重编码成功: $FILENAME (总耗时 ${TRANSCODE_ELAPSED}s)"
     else
       rm -f "$OUTPUT_FILE"
-      echo "FAILED: faststart + transcode both failed: $FILENAME"
+      TRANSCODE_ELAPSED=$((SECONDS - TRANSCODE_START))
+      echo "FAILED: faststart + transcode both failed after ${TRANSCODE_ELAPSED}s: $FILENAME"
       exit 1
     fi
   fi
@@ -85,10 +91,17 @@ fi
 
 # 上传到 Telegram
 FILESIZE_HUMAN=$(du -h "$LOCAL_FILE" | cut -f1)
-if python3 "${GITHUB_WORKSPACE}/.github/scripts/upload_video.py" "$LOCAL_FILE" "$CHANNEL_ID" "${CAPTION_PREFIX}: $FILENAME ($FILESIZE_HUMAN)"; then
-  echo "SENT: $FILENAME"
+FILESIZE_BYTES=$(stat -c%s "$LOCAL_FILE" 2>/dev/null || stat -f%z "$LOCAL_FILE" 2>/dev/null || echo "unknown")
+# Caption 分三行：文件名、大小、修改时间
+CAPTION="${FILENAME}"$'\n'"${FILESIZE_HUMAN}"$'\n'"${MODTIME}"
+echo "[upload] 开始上传 Telegram: $FILENAME (大小 ${FILESIZE_HUMAN} / ${FILESIZE_BYTES} bytes, modtime=$MODTIME)"
+UPLOAD_START=$SECONDS
+if python3 "${GITHUB_WORKSPACE}/.github/scripts/upload_video.py" "$LOCAL_FILE" "$CHANNEL_ID" "$CAPTION"; then
+  UPLOAD_ELAPSED=$((SECONDS - UPLOAD_START))
+  echo "SENT: $FILENAME (上传耗时 ${UPLOAD_ELAPSED}s)"
   exit 0
 else
-  echo "FAILED: telegram upload failed: $FILENAME"
+  UPLOAD_ELAPSED=$((SECONDS - UPLOAD_START))
+  echo "FAILED: telegram upload failed after ${UPLOAD_ELAPSED}s: $FILENAME"
   exit 1
 fi
