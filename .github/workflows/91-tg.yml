@@ -221,6 +221,7 @@ jobs:
           TG_API_ID: ${{ secrets.TG_API_ID }}
           TG_API_HASH: ${{ secrets.TG_API_HASH }}
           TG_SESSION_STRING: ${{ secrets.TG_SESSION }}
+          PYTHONUNBUFFERED: "1"
         run: |
           sudo apt-get install -y ffmpeg
           pip3 install telethon
