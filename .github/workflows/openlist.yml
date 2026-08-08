@@ -1669,13 +1669,33 @@ jobs:
               return 0
             fi
 
-            echo "刷新 OpenList 缓存: $ol_path"
+            # 刷新前获取文件数，用于校验缓存是否已过期
+            local before_count=0 before_json
+            before_json=$(timeout 120 rclone size "$dest_path" --json 2>/dev/null || true)
+            before_count=$(echo "$before_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
+            echo "刷新 OpenList 缓存: $ol_path (刷新前文件数: $before_count)"
+
             curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh" \
               -H "Authorization: $ol_token" \
               -H "Content-Type: application/json" \
               -d "{\"path\":\"$ol_path\",\"recursive\":true}" \
               >/dev/null 2>&1 || true
-            sleep 3
+
+            # 等待缓存刷新完成（60s，确保递归刷新大目录完成）
+            echo "等待缓存刷新完成 (60s)..."
+            sleep 60
+
+            # 刷新后获取文件数，校验缓存是否已更新
+            local after_count=0 after_json
+            after_json=$(timeout 120 rclone size "$dest_path" --json 2>/dev/null || true)
+            after_count=$(echo "$after_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
+            echo "缓存刷新后文件数: $after_count"
+
+            if [ "$before_count" != "$after_count" ]; then
+              echo "⚠️ 缓存刷新改变了 listing: $before_count → $after_count 个文件（刷新前缓存已过期）"
+            else
+              echo "缓存刷新前后文件数一致 ($after_count)，listing 稳定"
+            fi
           }
 
           # Sync with probes and detailed logs.
@@ -1716,18 +1736,33 @@ jobs:
               ) &
               local heartbeat_pid=$!
 
-              rclone sync "$source_path" "$dest_path" \
-                --progress \
-                --stats 15s \
-                --stats-one-line \
-                --ignore-errors \
-                --verbose \
-                --size-only \
-                --delete-before \
-                --timeout 5m \
-                --contimeout 30s \
-                --retries 1 \
-                --low-level-retries 3 \
+              # 加密存储目标端使用 copy --no-traverse，避免 WebDAV listing
+              # 不完整导致 rclone 看不到已存在文件而重复上传。
+              # --no-traverse 不依赖整目录 listing，改为逐文件检查存在性。
+              # 注意：copy 模式不删除目标端多余文件，牺牲自动清理换取 listing 可靠性。
+              local rclone_cmd="sync"
+              local -a rclone_base_flags=(
+                --progress
+                --stats 15s
+                --stats-one-line
+                --ignore-errors
+                --verbose
+                --size-only
+                --timeout 5m
+                --contimeout 30s
+                --retries 1
+                --low-level-retries 3
+              )
+              if [[ "$dest_path" == *Crypt* ]]; then
+                rclone_cmd="copy"
+                rclone_base_flags+=(--no-traverse)
+                echo "加密存储目标端，使用 copy --no-traverse 模式" | tee -a "$LOG_FILENAME"
+              else
+                rclone_base_flags+=(--delete-before)
+              fi
+
+              rclone "$rclone_cmd" "$source_path" "$dest_path" \
+                "${rclone_base_flags[@]}" \
                 "${extra_args[@]}" \
                 2>&1 | tee "$LAST_ATTEMPT_LOG"
               local attempt_status=${PIPESTATUS[0]}
