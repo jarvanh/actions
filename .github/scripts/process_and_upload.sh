@@ -247,16 +247,18 @@ def main():
 
         print(f"⬇️  正在下载: {file} (modtime={modtime_display})")
         dl_start = time.time()
-        # 透传输出：rclone --progress 的进度实时进 Actions 日志，避免长时间静默
-        result = run(["rclone", "copyto", f"{SOURCE_REMOTE}/{file}", local_file, "--progress"], capture=False)
+        # 捕获输出：rclone 原始进度属于噪音，靠 ✅ 标记即可；失败时再打印 stderr 便于排查
+        result = run(["rclone", "copyto", f"{SOURCE_REMOTE}/{file}", local_file])
         dl_elapsed = time.time() - dl_start
         if result.returncode != 0 or not os.path.isfile(local_file):
             err_msg = f"❌ FAILED: rclone copy failed: {file} (耗时 {dl_elapsed:.2f}s)"
             print(err_msg)
-            print("(rclone 进度/错误已实时输出到上方日志)")
+            print("--- rclone 错误输出 ---")
+            print(result.stderr[-2000:] if result.stderr else "(无错误输出)")
+            print("------------------------")
             failed += 1
             failed_list.append(f"- {file}（rclone copy failed, {dl_elapsed:.2f}s）")
-            notify(f"{err_msg}\n{CAPTION_PREFIX}\nrclone 进度见 Actions 日志")
+            notify(f"{err_msg}\n{CAPTION_PREFIX}\nrclone stderr 见 Actions 日志")
             continue
         file_size = os.path.getsize(local_file)
         print(f"✅ 下载完成: {file} (大小 {file_size} bytes, 耗时 {dl_elapsed:.2f}s)")
