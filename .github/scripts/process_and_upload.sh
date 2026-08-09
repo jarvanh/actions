@@ -158,7 +158,7 @@ def get_video_list():
     """通过 rclone lsjson 获取远端视频文件列表，返回 [(modtime, filename, size_bytes)]。"""
     lsjson_path = os.path.join(TMP, "ls.json")
     err_path = os.path.join(TMP, "lsjson.err")
-    result = run(f"rclone lsjson {SOURCE_REMOTE}/")
+    result = run(f"rclone lsjson --recursive {SOURCE_REMOTE}/")
     with open(lsjson_path, "wb") as f:
         f.write(result.stdout.encode("utf-8", errors="replace") if isinstance(result.stdout, str) else result.stdout)
     with open(err_path, "wb") as f:

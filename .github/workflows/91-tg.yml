@@ -52,10 +52,12 @@ jobs:
           SOURCE_REMOTE="onedrive:1/1024j/视频/91"
           # 一次性获取所有文件的 SHA1（OneDrive 服务端哈希，不下载文件，不修改元数据）
           # 用 python 解析 rclone hashsum 输出（hash 和 path 之间是空白分隔），生成 hash;path 格式
-          rclone hashsum sha1 "$SOURCE_REMOTE/" 2>/dev/null | python3 -c "import sys;[print(f'{p[0]};{p[1]}') for line in sys.stdin if len(p:=line.strip().split(None,1))==2]" > /tmp/91_hashes.txt || true
+          # -R 递归子目录，path 包含子目录前缀
+          rclone hashsum sha1 "$SOURCE_REMOTE/" -R 2>/dev/null | python3 -c "import sys;[print(f'{p[0]};{p[1]}') for line in sys.stdin if len(p:=line.strip().split(None,1))==2]" > /tmp/91_hashes.txt || true
 
           # 获取文件列表（time;size;path），path 放最后，文件名含 ; 时最后一个字段获取剩余全部，安全
-          rclone lsf "$SOURCE_REMOTE/" --files-only --format "tsp" 2>/dev/null \
+          # -R 递归子目录，path 包含子目录前缀
+          rclone lsf "$SOURCE_REMOTE/" --files-only --format "tsp" -R 2>/dev/null \
             | grep -iE '\.mp4$' > /tmp/91_videos_tsp.txt || true
           TOTAL=$(wc -l < /tmp/91_videos_tsp.txt)
           HASH_COUNT=$(wc -l < /tmp/91_hashes.txt)
