@@ -99,8 +99,8 @@ jobs:
         run: |
           # SOURCE_REMOTE="onedrive:0/j-1024j-视频-pornhub-favorites"
           # SOURCE_REMOTE="onedrive:3/1024j-视频-pornhub-channel"
-          SOURCE_REMOTE="onedrive:4/1024j-视频-pornhub-channel"
-          # SOURCE_REMOTE="onedrive:5/1024j-视频-pornhub-channel"
+          # SOURCE_REMOTE="onedrive:4/1024j-视频-pornhub-channel"
+          SOURCE_REMOTE="onedrive:5/1024j-视频-pornhub-channel"
           # rclone lsf 列出文件（time;size;path），path 放最后，文件名含 ; 时最后一个字段获取剩余全部，安全
           # -R 递归子目录，path 包含子目录前缀
           rclone lsf "$SOURCE_REMOTE/" --files-only --format "tsp" -R 2>/dev/null \
