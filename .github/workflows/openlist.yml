@@ -415,7 +415,7 @@ jobs:
           }
 
           # 初始化进度通知系统（在第一个任务开始前调用一次）
-          # 用法: progress_init <task_id1>:<display1> [task_id2:display2 ...]
+          # 任务通过 task_begin 或预览阶段的 _preview_register 自动注册
           progress_init() {
             # 清理旧状态
             : > "$PROGRESS_TASKS_FILE"
@@ -426,13 +426,6 @@ jobs:
             rm -f "$PROGRESS_FINALIZED_FILE" 2>/dev/null || true
             date +%s > "$PROGRESS_START_FILE"
 
-            # 注册所有任务
-            for task_def in "$@"; do
-              local tid="${task_def%%:*}"
-              local tname="${task_def#*:}"
-              progress_register_task "$tid" "$tname"
-            done
-
             _progress_refresh
           }
 
@@ -441,6 +434,10 @@ jobs:
           task_begin() {
             local task_id="$1"
             local detail="${2:-}"
+            # 自动注册未注册的任务
+            if ! grep -qP "^\Q${task_id}\E\t" "$PROGRESS_TASKS_FILE" 2>/dev/null; then
+              progress_register_task "$task_id" "$detail"
+            fi
             echo "$task_id" > "$PROGRESS_CURRENT_FILE"
             _progress_set_task_status "$task_id" "running" "$detail"
             _progress_refresh
@@ -1736,10 +1733,8 @@ jobs:
               ) &
               local heartbeat_pid=$!
 
-              # 加密存储目标端使用 copy --no-traverse，避免 WebDAV listing
-              # 不完整导致 rclone 看不到已存在文件而重复上传。
-              # --no-traverse 不依赖整目录 listing，改为逐文件检查存在性。
-              # 注意：copy 模式不删除目标端多余文件，牺牲自动清理换取 listing 可靠性。
+              # _SYNC_MODE=copy 时用 rclone copy（不删除目标端多余文件），否则 rclone sync
+              # --delete-before / --no-traverse 等参数由任务定义显式传入
               local rclone_cmd="sync"
               local -a rclone_base_flags=(
                 --progress
@@ -1753,12 +1748,8 @@ jobs:
                 --retries 1
                 --low-level-retries 3
               )
-              if [[ "$dest_path" == *Crypt* ]]; then
+              if [ "${_SYNC_MODE:-sync}" = "copy" ]; then
                 rclone_cmd="copy"
-                rclone_base_flags+=(--no-traverse)
-                echo "加密存储目标端，使用 copy --no-traverse 模式" | tee -a "$LOG_FILENAME"
-              else
-                rclone_base_flags+=(--delete-before)
               fi
 
               rclone "$rclone_cmd" "$source_path" "$dest_path" \
@@ -2240,8 +2231,44 @@ jobs:
       - name: Setup helper functions - part 8
         run: |
           cat > /tmp/functions_part8.sh << 'EOF'
+          # 从 task_name 和 dest_path 派生唯一 task_id（用于进度跟踪）
+          # 例: _derive_task_id "task0" "openlist:wopan176Crypt/0" → "task0_wopan176Crypt"
+          _derive_task_id() {
+            local task_name="$1"
+            local dest_path="$2"
+            local dest_clean="${dest_path#*:}"
+            local first_component="${dest_clean%%/*}"
+            [ -z "$first_component" ] && first_component="${dest_clean}"
+            [ -z "$first_component" ] && first_component="dest"
+            echo "${task_name}_${first_component}"
+          }
+
+          # 预览模式：注册任务到进度系统并添加预览对（不实际同步）
+          _preview_register() {
+            local task_name="$1"
+            local source_path="$2"
+            local dest_path="$3"
+            shift 3
+            local extra_args=("$@")
+
+            # task_name 变化时刷新上一个预览组
+            if [ "$_PREVIEW_CUR_TASK" != "$task_name" ]; then
+              if [ -n "$_PREVIEW_CUR_TASK" ]; then
+                flush_task_preview
+              fi
+              start_task_preview "$task_name"
+              _PREVIEW_CUR_TASK="$task_name"
+            fi
+            add_preview_pair "$source_path" "$dest_path" "${extra_args[@]}"
+
+            # 同时注册到进度系统（pending 状态）
+            local _task_id
+            _task_id=$(_derive_task_id "$task_name" "$dest_path")
+            progress_register_task "$_task_id" "${source_path} → ${dest_path}"
+          }
+
           # 自动拆分同步：源端 > 50GB 时按一级子目录拆分，最后再完整同步一次
-          sync_task_with_auto_split() {
+          _sync_task_impl() {
             local source_path="$1"
             local dest_path="$2"
             local task_name="$3"
@@ -2259,31 +2286,48 @@ jobs:
             local max_depth=10
             local subdir
 
-            # 所有层级都检查同步标记（子任务独立跟踪）
-            check_sync_marker "$source_path" "$dest_path" "$task_name"
-            case "$MARKER_ACTION" in
-              skip)
-                # 所有层级（含递归子任务）均发送跳过通知
-                send_sync_skipped "$task_name" "$source_path" "$dest_path"
-                SYNC_SKIPPED=1
-                SYNC_FAILED=0
-                SYNC_TRANSFERRED_BYTES=0
-                return 0
-                ;;
-              warning)
-                send_sync_warning "$task_name" "$source_path" "$dest_path"
-                SYNC_SKIPPED=1
-                SYNC_FAILED=0
-                SYNC_TRANSFERRED_BYTES=0
-                return 0
-                ;;
-            esac
+            # skip 标记检查（需 --1d-skip / --2d-skip 等开启）
+            MARKER_ACTION="proceed"
+            if [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
+              check_sync_marker "$source_path" "$dest_path" "$task_name"
+              case "$MARKER_ACTION" in
+                skip)
+                  send_sync_skipped "$task_name" "$source_path" "$dest_path"
+                  SYNC_SKIPPED=1
+                  SYNC_FAILED=0
+                  SYNC_TRANSFERRED_BYTES=0
+                  return 0
+                  ;;
+                warning)
+                  send_sync_warning "$task_name" "$source_path" "$dest_path"
+                  SYNC_SKIPPED=1
+                  SYNC_FAILED=0
+                  SYNC_TRANSFERRED_BYTES=0
+                  return 0
+                  ;;
+              esac
+            fi
 
             # 初始化 phase/stats（递归子任务在同一 shell 中继承/修改，返回后由调用方恢复）
             local _old_phase="${PROGRESS_PHASE_INFO:-}"
             local _old_stats="${PROGRESS_STATS:-}"
             PROGRESS_PHASE_INFO=""
             PROGRESS_STATS=""
+
+            # 未开启 --auto-split 时跳过大小检查和子目录拆分，直接同步
+            if [ "${_TASK_AUTO_SPLIT:-0}" = "0" ]; then
+              progress_update "直接同步中"
+              sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
+              local _rc=$?
+              if [ "$SYNC_FAILED" = "0" ] && [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
+                save_sync_marker "$source_path" "$dest_path" "$task_name"
+              elif [ "$current_depth" -eq 0 ]; then
+                split_large_files_after_sync_failure "$source_path" "$task_name"
+              fi
+              PROGRESS_PHASE_INFO="$_old_phase"
+              PROGRESS_STATS="$_old_stats"
+              return $_rc
+            fi
 
             # 50GB 阈值（带默认值，防止跨 step 环境变量丢失时为空）
             local threshold="${SYNC_SPLIT_THRESHOLD_BYTES:-50000000000}"
@@ -2304,7 +2348,7 @@ jobs:
               sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
               local _rc=$?
               # 同步成功后保存标记；失败则按开关对源目录超阈值大文件执行切割
-              if [ "$SYNC_FAILED" = "0" ]; then
+              if [ "$SYNC_FAILED" = "0" ] && [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
                 save_sync_marker "$source_path" "$dest_path" "$task_name"
               elif [ "$current_depth" -eq 0 ]; then
                 split_large_files_after_sync_failure "$source_path" "$task_name"
@@ -2321,7 +2365,7 @@ jobs:
               sync_dir_by_file_batches "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
               local _rc=$?
               # 同步成功后保存标记；失败则按开关对源目录超阈值大文件执行切割
-              if [ "$SYNC_FAILED" = "0" ]; then
+              if [ "$SYNC_FAILED" = "0" ] && [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
                 save_sync_marker "$source_path" "$dest_path" "$task_name"
               elif [ "$current_depth" -eq 0 ]; then
                 split_large_files_after_sync_failure "$source_path" "$task_name"
@@ -2342,7 +2386,7 @@ jobs:
               sync_dir_by_file_batches "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
               local _rc=$?
               # 同步成功后保存标记；失败则按开关对源目录超阈值大文件执行切割
-              if [ "$SYNC_FAILED" = "0" ]; then
+              if [ "$SYNC_FAILED" = "0" ] && [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
                 save_sync_marker "$source_path" "$dest_path" "$task_name"
               elif [ "$current_depth" -eq 0 ]; then
                 split_large_files_after_sync_failure "$source_path" "$task_name"
@@ -2394,7 +2438,7 @@ jobs:
                 local _rc=$?
                 # 顶层同步成功后保存标记；失败则按开关对源目录超阈值大文件执行切割
                 if [ "$current_depth" -eq 0 ]; then
-                  if [ "$SYNC_FAILED" = "0" ]; then
+                  if [ "$SYNC_FAILED" = "0" ] && [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
                     save_sync_marker "$source_path" "$dest_path" "$task_name"
                   else
                     split_large_files_after_sync_failure "$source_path" "$task_name"
@@ -2460,7 +2504,7 @@ jobs:
               local _in_progress=$((subtask_idx - _completed_before))
               progress_update "子目录 ${subtask_idx}/${total_subdirs_count}: ${subdir}" "📊 子目录: ${_completed_before}/${total_subdirs_count} 完成$([ "$_in_progress" -gt 0 ] && echo " (${_in_progress} 进行中)") | ✅${synced_subtasks} ⏭️${skipped_subtasks} ❌${failed_subtasks}"
               SYNC_AUTO_SPLIT_DEPTH=$((current_depth + 1))
-              sync_task_with_auto_split "${source_path}/${subdir}" "${dest_path}/${subdir}" "${safe_subtask}" "${extra_args[@]}" || true
+              _sync_task_impl "${source_path}/${subdir}" "${dest_path}/${subdir}" "${safe_subtask}" "${extra_args[@]}" || true
               SYNC_AUTO_SPLIT_DEPTH=$current_depth
               if [ "$SYNC_SKIPPED" = "1" ]; then
                 skipped_subtasks=$((skipped_subtasks + 1))
@@ -2504,7 +2548,7 @@ jobs:
               sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
               AUTO_SPLIT_INFO=""
               # 顶层同步成功后保存标记
-              if [ "$SYNC_FAILED" = "0" ]; then
+              if [ "$SYNC_FAILED" = "0" ] && [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
                 save_sync_marker "$source_path" "$dest_path" "$task_name"
               else
                 # 顶层最终同步失败后，按开关对源目录超阈值大文件执行切割
@@ -2515,12 +2559,80 @@ jobs:
               SYNC_FAILED=0
               SYNC_TRANSFERRED_BYTES=$total_transferred
               # 子任务全部成功后保存独立标记
-              if [ "$SYNC_FAILED" = "0" ] && [ "$failed_subtasks" -eq 0 ]; then
+              if [ "$SYNC_FAILED" = "0" ] && [ "$failed_subtasks" -eq 0 ] && [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
                 save_sync_marker "$source_path" "$dest_path" "$task_name"
               fi
             fi
             PROGRESS_PHASE_INFO="$_old_phase"
             PROGRESS_STATS="$_old_stats"
+          }
+
+          # sync_task: sync --delete-before 模式（删除目标端多余文件）
+          # copy_task: copy --no-traverse 模式（不删除，逐文件检查，适用于 listing 不稳定的加密存储）
+          # 可选参数（默认均关闭，按需开启）:
+          #   --auto-split   开启 50GB 子目录自动拆分
+          #   --1d-skip      开启 1 天跳过（--2d-skip / --3d-skip 等可自定义天数）
+          #   其余参数（如 --exclude）原样传给 rclone
+          sync_task() {
+            local source_path="$1"
+            local dest_path="$2"
+            local task_name="$3"
+            shift 3
+
+            # 解析任务级开关，剩余参数作为 extra_args 传给 rclone
+            local _auto_split=0
+            local _skip_days=0
+            local extra_args=()
+            while [ $# -gt 0 ]; do
+              case "$1" in
+                --auto-split) _auto_split=1; shift ;;
+                --*d-skip)
+                  _skip_days="${1#--}"
+                  _skip_days="${_skip_days%d-skip}"
+                  [[ "$_skip_days" =~ ^[0-9]+$ ]] || _skip_days=0
+                  shift ;;
+                *) extra_args+=("$1"); shift ;;
+              esac
+            done
+
+            # 根据 skip 天数设置 SYNC_SKIP_SECONDS
+            if [ "$_skip_days" -gt 0 ]; then
+              SYNC_SKIP_SECONDS=$((_skip_days * 24 * 60 * 60))
+            fi
+
+            local current_depth=${SYNC_AUTO_SPLIT_DEPTH:-0}
+
+            # 预览模式：只注册，不实际同步
+            if [ "$current_depth" -eq 0 ] && [ -n "$TASK_PREVIEW_ONLY" ]; then
+              _preview_register "$task_name" "$source_path" "$dest_path" "${extra_args[@]}"
+              return 0
+            fi
+
+            # 顶级调用时自动 task_begin/task_done
+            if [ "$current_depth" -eq 0 ]; then
+              local _task_id
+              _task_id=$(_derive_task_id "$task_name" "$dest_path")
+              task_begin "$_task_id" "${source_path} → ${dest_path}"
+            fi
+
+            _TASK_AUTO_SPLIT=$_auto_split _TASK_SKIP_DAYS=$_skip_days _sync_task_impl "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
+            local _rc=$?
+
+            if [ "$current_depth" -eq 0 ]; then
+              if [ "$SYNC_SKIPPED" = "1" ]; then
+                task_done "skipped"
+              elif [ "$SYNC_FAILED" = "1" ]; then
+                task_done "failed"
+              else
+                task_done "completed"
+              fi
+            fi
+            return $_rc
+          }
+
+          # copy_task: 使用 copy --no-traverse 模式（不删除目标端多余文件）
+          copy_task() {
+            _SYNC_MODE="copy" sync_task "$@"
           }
           EOF
 
@@ -2535,25 +2647,28 @@ jobs:
             shift 3
             local extra_args=("$@")
 
-            # 检查同步标记（1天内已成功则跳过）
-            check_sync_marker "$source_path" "$dest_path" "$task_name"
-            case "$MARKER_ACTION" in
-              skip)
-                echo "跳过 ${task_name} 文件批次同步: 1天内已成功同步"
-                send_sync_skipped "$task_name" "$source_path" "$dest_path"
-                SYNC_SKIPPED=1
-                SYNC_FAILED=0
-                SYNC_TRANSFERRED_BYTES=0
-                return 0
-                ;;
-              warning)
-                send_sync_warning "$task_name" "$source_path" "$dest_path"
-                SYNC_SKIPPED=1
-                SYNC_FAILED=0
-                SYNC_TRANSFERRED_BYTES=0
-                return 0
-                ;;
-            esac
+            # skip 标记检查（需 --1d-skip / --2d-skip 等开启）
+            MARKER_ACTION="proceed"
+            if [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
+              check_sync_marker "$source_path" "$dest_path" "$task_name"
+              case "$MARKER_ACTION" in
+                skip)
+                  echo "跳过 ${task_name} 文件批次同步: $((SYNC_SKIP_SECONDS / 3600))小时内已成功同步"
+                  send_sync_skipped "$task_name" "$source_path" "$dest_path"
+                  SYNC_SKIPPED=1
+                  SYNC_FAILED=0
+                  SYNC_TRANSFERRED_BYTES=0
+                  return 0
+                  ;;
+                warning)
+                  send_sync_warning "$task_name" "$source_path" "$dest_path"
+                  SYNC_SKIPPED=1
+                  SYNC_FAILED=0
+                  SYNC_TRANSFERRED_BYTES=0
+                  return 0
+                  ;;
+              esac
+            fi
 
             local threshold="${SYNC_SPLIT_THRESHOLD_BYTES:-50000000000}"  # 50GB
             local batch_dir="/tmp/file_batches_${task_name}"
@@ -2719,7 +2834,7 @@ jobs:
             SYNC_SKIP_QUIET="$_saved_skip_quiet"
 
             # 文件批次同步成功后保存标记
-            if [ "$SYNC_FAILED" = "0" ]; then
+            if [ "$SYNC_FAILED" = "0" ] && [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
               save_sync_marker "$source_path" "$dest_path" "$task_name"
             fi
           }
@@ -2831,7 +2946,7 @@ jobs:
             if [ "$last_epoch" -gt 0 ]; then
               diff=$((now_epoch - last_epoch))
               if [ "$diff" -lt "$SYNC_SKIP_SECONDS" ]; then
-                echo "1天内已成功同步（距今 $((diff / 3600)) 小时），跳过"
+                echo "$((SYNC_SKIP_SECONDS / 3600))小时内已成功同步（距今 $((diff / 3600)) 小时），跳过"
                 MARKER_ACTION="skip"
                 MARKER_LAST_SUCCESS="$last_success"
                 MARKER_SINCE_HOURS=$((diff / 3600))
@@ -3178,27 +3293,8 @@ jobs:
           echo "开始时间: $(date)" >> "$PROCESSED_FILES_LOG"
           echo "==========================" >> "$PROCESSED_FILES_LOG"
 
-          # 初始化全局进度通知，注册所有任务
-          progress_init \
-            "backup_aliyun:backup → aliyundriveCrypt" \
-            "backup_wopan:backup → wopan176Crypt" \
-            "backup_gd:backup → Google Drive" \
-            "task0_wopan176:task0 → wopan176Crypt/0" \
-            "task0_phub:task0 pornhub-favorites → wopan175" \
-            "task0_gd:task0 → Google Drive" \
-            "task1_wopan176:task1 → wopan176Crypt/1" \
-            "task1_wopan175:task1 → wopan175/1" \
-            "task1_gd:task1 → Google Drive" \
-            "task2_wopan176:task2 → wopan176Crypt/2" \
-            "task2_wopan175:task2 → wopan175/2" \
-            "task2_gd:task2 → Google Drive" \
-            "task3_wopan176:task3 → wopan176Crypt/3" \
-            "task3_wopan175:task3 → wopan175/3" \
-            "task3_gd:task3 → Google Drive" \
-            "task4_wopan176:task4 → wopan176Crypt/4" \
-            "task4_wopan175:task4 → wopan175/4" \
-            "task5_wopan176:task5 → wopan176Crypt/5" \
-            "task5_wopan175:task5 → wopan175/5"
+          # 初始化全局进度通知（任务在预览阶段自动注册）
+          progress_init
 
       # - name: List source files larger than OpenList threshold before sync
       #   run: |
@@ -3236,12 +3332,8 @@ jobs:
       - name: Configure Google Drive sync limits
         run: |
           cat >> /tmp/functions.sh << 'EOF'
-          # Let rclone use its provider defaults for sync concurrency,
-          # chunking, pacing, retries and timeouts. Keep this array so task
-          # calls can still pass explicit overrides when needed.
-          GD_SYNC_ARGS=()
 
-          gd_sync_with_1d_skip() {
+          _gd_sync_impl() {
             local source_path="$1"
             local dest_path="$2"
             local task_name="$3"
@@ -3259,26 +3351,29 @@ jobs:
             PROGRESS_PHASE_INFO=""
             PROGRESS_STATS=""
 
-            # 使用统一标记系统检查
-            check_sync_marker "$source_path" "$dest_path" "${task_name}_gd"
+            # skip 标记检查（需 --1d-skip / --2d-skip 等开启）
+            MARKER_ACTION="proceed"
+            if [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
+              check_sync_marker "$source_path" "$dest_path" "${task_name}_gd"
 
-            case "$MARKER_ACTION" in
-              skip)
-                echo "跳过 ${task_name} GD: 1天内已成功同步"
-                send_sync_skipped "${task_name} GD" "$source_path" "$dest_path"
-                SYNC_SKIPPED=1
-                PROGRESS_PHASE_INFO="$_old_phase"
-                PROGRESS_STATS="$_old_stats"
-                return 0
-                ;;
-              warning)
-                send_sync_warning "${task_name} GD" "$source_path" "$dest_path"
-                SYNC_SKIPPED=1
-                PROGRESS_PHASE_INFO="$_old_phase"
-                PROGRESS_STATS="$_old_stats"
-                return 0
-                ;;
-            esac
+              case "$MARKER_ACTION" in
+                skip)
+                  echo "跳过 ${task_name} GD: $((SYNC_SKIP_SECONDS / 3600))小时内已成功同步"
+                  send_sync_skipped "${task_name} GD" "$source_path" "$dest_path"
+                  SYNC_SKIPPED=1
+                  PROGRESS_PHASE_INFO="$_old_phase"
+                  PROGRESS_STATS="$_old_stats"
+                  return 0
+                  ;;
+                warning)
+                  send_sync_warning "${task_name} GD" "$source_path" "$dest_path"
+                  SYNC_SKIPPED=1
+                  PROGRESS_PHASE_INFO="$_old_phase"
+                  PROGRESS_STATS="$_old_stats"
+                  return 0
+                  ;;
+              esac
+            fi
 
             echo "执行 ${task_name} GD 同步"
             progress_update "Google Drive 同步中..."
@@ -3503,7 +3598,9 @@ jobs:
                   ok_message+="$gd_diff_files_list"
                 fi
               else
-                save_sync_marker "$source_path" "$dest_path" "${task_name}_gd"
+                if [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
+                  save_sync_marker "$source_path" "$dest_path" "${task_name}_gd"
+                fi
 
                 if [ -n "$gd_diff_files_list" ]; then
                   printf -v ok_message '%s\n%s\n%s\n%s\n%s\n%s\n\n%s\n%s\n%s\n%s\n\n%s\n%s\n\n%s\n%s' \
@@ -3546,384 +3643,57 @@ jobs:
             PROGRESS_STATS="$_old_stats"
             return 0
           }
+
+          # ===== 所有同步任务定义（增减任务只需在此添加/删除一行）=====
+          # sync_task  = rclone sync（删除目标端多余文件需加 --delete-before）
+          # copy_task  = rclone copy（不删除目标端多余文件）
+          # 可选参数: --auto-split  --1d-skip (或 --2d-skip / --3d-skip 自定义天数)
+          # rclone 参数（如 --delete-before --no-traverse --exclude）直接追加在后面
+          run_all_tasks() {
+            sync_task "onedrive:backup" "openlist:aliyundriveCrypt/backup" "backup" --auto-split --1d-skip --delete-before --exclude "/notion/**" --exclude "notion/**" --exclude "/self-hosted_latest.tar.gz" --exclude "self-hosted_latest.tar.gz" --exclude "/github_repos_latest.tar.gz" --exclude "github_repos_latest.tar.gz"
+            sync_task "onedrive:backup" "openlist:wopan176Crypt/backup" "backup" --auto-split --1d-skip --delete-before
+            sync_task "onedrive:backup" "gd:backup" "backup" --1d-skip --delete-before
+
+            sync_task "onedrive:0" "openlist:wopan176Crypt/0" "task0" --auto-split --1d-skip --delete-before
+            # sync_task "onedrive:0" "openlist:baidupanCrypt/0" "task0" --auto-split --1d-skip --delete-before
+            sync_task "onedrive:0/j-1024j-视频-pornhub-favorites" "openlist:wopan175/0/j-1024j-视频-pornhub-favorites" "task0" --auto-split --1d-skip --delete-before
+            sync_task "onedrive:0" "gd:0" "task0" --1d-skip --delete-before
+
+            sync_task "onedrive:1" "openlist:wopan176Crypt/1" "task1" --auto-split --1d-skip --delete-before
+            # sync_task "onedrive:1" "openlist:baidupanCrypt/1" "task1" --auto-split --1d-skip --delete-before
+            sync_task "onedrive:1" "openlist:wopan175/1" "task1" --auto-split --1d-skip --delete-before
+            sync_task "onedrive:1" "gd:1" "task1" --1d-skip --delete-before
+
+            sync_task "onedrive:2" "openlist:wopan176Crypt/2" "task2" --auto-split --1d-skip --delete-before
+            sync_task "onedrive:2" "openlist:wopan175/2" "task2" --auto-split --1d-skip --delete-before
+            sync_task "onedrive:2" "gd:2" "task2" --1d-skip --delete-before
+
+            sync_task "onedrive:3" "openlist:wopan176Crypt/3" "task3" --auto-split --1d-skip --delete-before
+            sync_task "onedrive:3" "openlist:wopan175/3" "task3" --auto-split --1d-skip --delete-before
+            sync_task "onedrive:3" "gd:3" "task3" --1d-skip --delete-before
+
+            sync_task "onedrive:4" "openlist:wopan176Crypt/4" "task4" --auto-split --1d-skip --delete-before
+            sync_task "onedrive:4" "openlist:wopan175/4" "task4" --auto-split --1d-skip --delete-before
+
+            sync_task "onedrive:5" "openlist:wopan176Crypt/5" "task5" --auto-split --1d-skip --delete-before
+            sync_task "onedrive:5" "openlist:wopan175/5" "task5" --auto-split --1d-skip --delete-before
+          }
           EOF
 
       - name: Preview sync tasks
         run: |
           source /tmp/functions.sh
           echo "=== 发送任务预览通知 ==="
-
-          start_task_preview "backup"
-          add_preview_pair "onedrive:backup" "openlist:aliyundriveCrypt/backup" \
-            --exclude "/notion/**" \
-            --exclude "notion/**" \
-            --exclude "/self-hosted_latest.tar.gz" \
-            --exclude "self-hosted_latest.tar.gz" \
-            --exclude "/github_repos_latest.tar.gz" \
-            --exclude "github_repos_latest.tar.gz"
-          add_preview_pair "onedrive:backup" "openlist:wopan176Crypt/backup"
-          add_preview_pair "onedrive:backup" "gd:backup"
+          TASK_PREVIEW_ONLY=1 run_all_tasks
           flush_task_preview
-
-          start_task_preview "task0"
-          add_preview_pair "onedrive:0" "openlist:wopan176Crypt/0"
-          add_preview_pair "onedrive:0/j-1024j-视频-pornhub-favorites" "openlist:wopan175/0/j-1024j-视频-pornhub-favorites"
-          add_preview_pair "onedrive:0" "gd:0"
-          flush_task_preview
-
-          start_task_preview "task1"
-          add_preview_pair "onedrive:1" "openlist:wopan176Crypt/1"
-          add_preview_pair "onedrive:1" "openlist:wopan175/1"
-          add_preview_pair "onedrive:1" "gd:1"
-          flush_task_preview
-
-          start_task_preview "task2"
-          add_preview_pair "onedrive:2" "openlist:wopan176Crypt/2"
-          add_preview_pair "onedrive:2" "openlist:wopan175/2"
-          add_preview_pair "onedrive:2" "gd:2"
-          flush_task_preview
-
-          start_task_preview "task3"
-          add_preview_pair "onedrive:3" "openlist:wopan176Crypt/3"
-          add_preview_pair "onedrive:3" "openlist:wopan175/3"
-          add_preview_pair "onedrive:3" "gd:3"
-          flush_task_preview
-
-          start_task_preview "task4"
-          add_preview_pair "onedrive:4" "openlist:wopan176Crypt/4"
-          add_preview_pair "onedrive:4" "openlist:wopan175/4"
-          flush_task_preview
-
-          start_task_preview "task5"
-          add_preview_pair "onedrive:5" "openlist:wopan176Crypt/5"
-          add_preview_pair "onedrive:5" "openlist:wopan175/5"
-          flush_task_preview
-
           echo "=== 所有任务预览通知已发送 ==="
 
-      - name: Sync backup task
+      - name: Sync all tasks
         run: |
           source /tmp/functions.sh
-          echo "=== 开始同步 backup 任务 ==="
-
-          task_begin "backup_aliyun" "onedrive:backup → openlist:aliyundriveCrypt/backup"
-          sync_task_with_auto_split \
-            "onedrive:backup" \
-            "openlist:aliyundriveCrypt/backup" \
-            "backup" \
-            --exclude "/notion/**" \
-            --exclude "notion/**" \
-            --exclude "/self-hosted_latest.tar.gz" \
-            --exclude "self-hosted_latest.tar.gz" \
-            --exclude "/github_repos_latest.tar.gz" \
-            --exclude "github_repos_latest.tar.gz"
-          if [ "$SYNC_SKIPPED" = "1" ]; then
-            task_done "skipped"
-          elif [ "$SYNC_FAILED" = "1" ]; then
-            task_done "failed"
-          else
-            task_done "completed"
-          fi
-
-          task_begin "backup_wopan" "onedrive:backup → openlist:wopan176Crypt/backup"
-          sync_task_with_auto_split \
-            "onedrive:backup" \
-            "openlist:wopan176Crypt/backup" \
-            "backup"
-          if [ "$SYNC_SKIPPED" = "1" ]; then
-            task_done "skipped"
-          elif [ "$SYNC_FAILED" = "1" ]; then
-            task_done "failed"
-          else
-            task_done "completed"
-          fi
-
-          task_begin "backup_gd" "onedrive:backup → gd:backup"
-          gd_sync_with_1d_skip "onedrive:backup" "gd:backup" "backup" "${GD_SYNC_ARGS[@]}"
-          if [ "$SYNC_SKIPPED" = "1" ]; then
-            task_done "skipped"
-          elif [ "$SYNC_FAILED" = "1" ]; then
-            task_done "failed"
-          else
-            task_done "completed"
-          fi
-
-      - name: Diagnostic - task0 OpenList listing
-        run: |
-          source /tmp/functions.sh
-          echo "=== 诊断 task0 OpenList listing 问题 ==="
-
-          src_path="onedrive:0"
-          dst_path="openlist:wopan176Crypt/0"
-
-          # 1. 源端统计
-          echo "--- 源端 $src_path ---"
-          rclone size "$src_path" --json 2>&1 | tee /tmp/diag_src_size.json
-
-          # 2. 目标端统计（刷新缓存前）
-          echo "--- 目标端 $dst_path (刷新缓存前) ---"
-          rclone size "$dst_path" --json 2>&1 | tee /tmp/diag_dst_size_before.json
-          rclone lsjson -R --files-only "$dst_path" 2>/dev/null | jq 'length' > /tmp/diag_dst_count_before.txt
-          echo "lsjson 文件数: $(cat /tmp/diag_dst_count_before.txt)"
-          echo "目标端前 10 个文件:"
-          rclone lsjson -R --files-only "$dst_path" 2>/dev/null | jq -r '.[].Path' | head -10
-
-          # 3. 刷新 OpenList 缓存
-          echo "--- 刷新 OpenList 缓存 ---"
-          ol_path="/${dst_path#openlist:}"
-          ol_token=$(jq -r '.token' /dropbox/self-hosted/openlist/data/config.json 2>/dev/null || echo "")
-          if [ -n "$ol_token" ] && [ "$ol_token" != "null" ]; then
-            curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh" \
-              -H "Authorization: $ol_token" \
-              -H "Content-Type: application/json" \
-              -d "{\"path\":\"$ol_path\",\"recursive\":true}"
-            echo ""
-            sleep 5
-          else
-            echo "OpenList token 不可用，跳过缓存刷新"
-          fi
-
-          # 4. 目标端统计（刷新缓存后）
-          echo "--- 目标端 $dst_path (刷新缓存后) ---"
-          rclone size "$dst_path" --json 2>&1 | tee /tmp/diag_dst_size_after.json
-          rclone lsjson -R --files-only "$dst_path" 2>/dev/null | jq 'length' > /tmp/diag_dst_count_after.txt
-          echo "lsjson 文件数: $(cat /tmp/diag_dst_count_after.txt)"
-
-          # 5. rclone check 差异（size-only，限制前 50 条）
-          echo "--- rclone check --size-only (前 50 条差异) ---"
-          timeout 600 rclone check "$src_path" "$dst_path" --size-only --combined - 2>/dev/null | head -50 | tee /tmp/diag_check.txt
-
-          # 6. 汇总
-          before_count=$(cat /tmp/diag_dst_count_before.txt 2>/dev/null || echo 0)
-          after_count=$(cat /tmp/diag_dst_count_after.txt 2>/dev/null || echo 0)
-          before_bytes=$(jq -r '.bytes // 0' /tmp/diag_dst_size_before.json 2>/dev/null || echo 0)
-          after_bytes=$(jq -r '.bytes // 0' /tmp/diag_dst_size_after.json 2>/dev/null || echo 0)
-          src_count=$(jq -r '.count // 0' /tmp/diag_src_size.json 2>/dev/null || echo 0)
-          src_bytes=$(jq -r '.bytes // 0' /tmp/diag_src_size.json 2>/dev/null || echo 0)
-          diff_count=$(grep -cE '^[-+*] ' /tmp/diag_check.txt 2>/dev/null || echo 0)
-
-          echo "--- 诊断摘要 ---"
-          echo "源端: $src_count 文件 / $(format_bytes "$src_bytes")"
-          echo "目标端刷新前: $before_count 文件 / $(format_bytes "$before_bytes")"
-          echo "目标端刷新后: $after_count 文件 / $(format_bytes "$after_bytes")"
-          echo "check --size-only 差异条目: $diff_count"
-
-          msg="🔍 task0 诊断结果"$'\n'
-          msg+="━━━━━━━━━━━━━━"$'\n'
-          msg+="源端 onedrive:0"$'\n'
-          msg+="• $src_count 文件 / $(format_bytes "$src_bytes")"$'\n\n'
-          msg+="目标 openlist:wopan176Crypt/0"$'\n'
-          msg+="• 刷新前: $before_count 文件 / $(format_bytes "$before_bytes")"$'\n'
-          msg+="• 刷新后: $after_count 文件 / $(format_bytes "$after_bytes")"$'\n\n'
-          msg+="rclone check --size-only"$'\n'
-          msg+="• 差异条目数: $diff_count"$'\n\n'
-          if [ "$before_count" != "$after_count" ] || [ "$before_bytes" != "$after_bytes" ]; then
-            msg+="结论: OpenList 缓存刷新改变了 listing 结果"$'\n'
-            msg+="说明 listing 不稳定，刷新有效。"
-          else
-            msg+="结论: 缓存刷新未改变 listing"$'\n'
-            if [ "$after_count" -lt "$src_count" ]; then
-              msg+="目标端实际文件数少于源端，rclone 可能看不到部分文件。"
-            elif [ "$diff_count" -gt 0 ]; then
-              msg+="listing 一致，但文件大小/内容不匹配，导致重复同步。"
-            else
-              msg+="listing 和大小都一致，未发现明显问题。"
-            fi
-          fi
-
-          send_telegram_message "$msg"
-
-      - name: Sync task0
-        run: |
-          source /tmp/functions.sh
-          echo "=== 开始同步 0 任务 ==="
-          # sync_task_with_auto_split "onedrive:0" "openlist:baidupanCrypt/0" "task0"
-
-          task_begin "task0_wopan176" "onedrive:0 → openlist:wopan176Crypt/0"
-          sync_task_with_auto_split "onedrive:0" "openlist:wopan176Crypt/0" "task0"
-          if [ "$SYNC_SKIPPED" = "1" ]; then
-            task_done "skipped"
-          elif [ "$SYNC_FAILED" = "1" ]; then
-            task_done "failed"
-          else
-            task_done "completed"
-          fi
-
-          task_begin "task0_phub" "onedrive:0/pornhub-favorites → openlist:wopan175"
-          sync_task_with_auto_split "onedrive:0/j-1024j-视频-pornhub-favorites" "openlist:wopan175/0/j-1024j-视频-pornhub-favorites" "task0"
-          if [ "$SYNC_SKIPPED" = "1" ]; then
-            task_done "skipped"
-          elif [ "$SYNC_FAILED" = "1" ]; then
-            task_done "failed"
-          else
-            task_done "completed"
-          fi
-
-          task_begin "task0_gd" "onedrive:0 → gd:0"
-          gd_sync_with_1d_skip "onedrive:0" "gd:0" "task0" "${GD_SYNC_ARGS[@]}"
-          if [ "$SYNC_SKIPPED" = "1" ]; then
-            task_done "skipped"
-          elif [ "$SYNC_FAILED" = "1" ]; then
-            task_done "failed"
-          else
-            task_done "completed"
-          fi
-
-      - name: Sync task1
-        run: |
-          source /tmp/functions.sh
-          echo "=== 开始同步 1 任务 ==="
-          # sync_task_with_auto_split "onedrive:1" "openlist:baidupanCrypt/1" "task1"
-
-          task_begin "task1_wopan176" "onedrive:1 → openlist:wopan176Crypt/1"
-          sync_task_with_auto_split "onedrive:1" "openlist:wopan176Crypt/1" "task1"
-          if [ "$SYNC_SKIPPED" = "1" ]; then
-            task_done "skipped"
-          elif [ "$SYNC_FAILED" = "1" ]; then
-            task_done "failed"
-          else
-            task_done "completed"
-          fi
-
-          task_begin "task1_wopan175" "onedrive:1 → openlist:wopan175/1"
-          sync_task_with_auto_split "onedrive:1" "openlist:wopan175/1" "task1"
-          if [ "$SYNC_SKIPPED" = "1" ]; then
-            task_done "skipped"
-          elif [ "$SYNC_FAILED" = "1" ]; then
-            task_done "failed"
-          else
-            task_done "completed"
-          fi
-
-          task_begin "task1_gd" "onedrive:1 → gd:1"
-          gd_sync_with_1d_skip "onedrive:1" "gd:1" "task1" "${GD_SYNC_ARGS[@]}"
-          if [ "$SYNC_SKIPPED" = "1" ]; then
-            task_done "skipped"
-          elif [ "$SYNC_FAILED" = "1" ]; then
-            task_done "failed"
-          else
-            task_done "completed"
-          fi
-
-      - name: Sync task2
-        run: |
-          source /tmp/functions.sh
-          echo "=== 开始同步 2 任务 ==="
-
-          task_begin "task2_wopan176" "onedrive:2 → openlist:wopan176Crypt/2"
-          sync_task_with_auto_split "onedrive:2" "openlist:wopan176Crypt/2" "task2"
-          if [ "$SYNC_SKIPPED" = "1" ]; then
-            task_done "skipped"
-          elif [ "$SYNC_FAILED" = "1" ]; then
-            task_done "failed"
-          else
-            task_done "completed"
-          fi
-
-          task_begin "task2_wopan175" "onedrive:2 → openlist:wopan175/2"
-          sync_task_with_auto_split "onedrive:2" "openlist:wopan175/2" "task2"
-          if [ "$SYNC_SKIPPED" = "1" ]; then
-            task_done "skipped"
-          elif [ "$SYNC_FAILED" = "1" ]; then
-            task_done "failed"
-          else
-            task_done "completed"
-          fi
-
-          task_begin "task2_gd" "onedrive:2 → gd:2"
-          gd_sync_with_1d_skip "onedrive:2" "gd:2" "task2" "${GD_SYNC_ARGS[@]}"
-          if [ "$SYNC_SKIPPED" = "1" ]; then
-            task_done "skipped"
-          elif [ "$SYNC_FAILED" = "1" ]; then
-            task_done "failed"
-          else
-            task_done "completed"
-          fi
-
-      - name: Sync task3
-        run: |
-          source /tmp/functions.sh
-          echo "=== 开始同步 3 任务 ==="
-
-          task_begin "task3_wopan176" "onedrive:3 → openlist:wopan176Crypt/3"
-          sync_task_with_auto_split "onedrive:3" "openlist:wopan176Crypt/3" "task3"
-          if [ "$SYNC_SKIPPED" = "1" ]; then
-            task_done "skipped"
-          elif [ "$SYNC_FAILED" = "1" ]; then
-            task_done "failed"
-          else
-            task_done "completed"
-          fi
-
-          task_begin "task3_wopan175" "onedrive:3 → openlist:wopan175/3"
-          sync_task_with_auto_split "onedrive:3" "openlist:wopan175/3" "task3"
-          if [ "$SYNC_SKIPPED" = "1" ]; then
-            task_done "skipped"
-          elif [ "$SYNC_FAILED" = "1" ]; then
-            task_done "failed"
-          else
-            task_done "completed"
-          fi
-
-          task_begin "task3_gd" "onedrive:3 → gd:3"
-          gd_sync_with_1d_skip "onedrive:3" "gd:3" "task3" "${GD_SYNC_ARGS[@]}"
-          if [ "$SYNC_SKIPPED" = "1" ]; then
-            task_done "skipped"
-          elif [ "$SYNC_FAILED" = "1" ]; then
-            task_done "failed"
-          else
-            task_done "completed"
-          fi
-
-      - name: Sync task4
-        run: |
-          source /tmp/functions.sh
-          echo "=== 开始同步 4 任务 ==="
-
-          task_begin "task4_wopan176" "onedrive:4 → openlist:wopan176Crypt/4"
-          sync_task_with_auto_split "onedrive:4" "openlist:wopan176Crypt/4" "task4"
-          if [ "$SYNC_SKIPPED" = "1" ]; then
-            task_done "skipped"
-          elif [ "$SYNC_FAILED" = "1" ]; then
-            task_done "failed"
-          else
-            task_done "completed"
-          fi
-
-          task_begin "task4_wopan175" "onedrive:4 → openlist:wopan175/4"
-          sync_task_with_auto_split "onedrive:4" "openlist:wopan175/4" "task4"
-          if [ "$SYNC_SKIPPED" = "1" ]; then
-            task_done "skipped"
-          elif [ "$SYNC_FAILED" = "1" ]; then
-            task_done "failed"
-          else
-            task_done "completed"
-          fi
-
-      - name: Sync task5
-        run: |
-          source /tmp/functions.sh
-          echo "=== 开始同步 5 任务 ==="
-
-          task_begin "task5_wopan176" "onedrive:5 → openlist:wopan176Crypt/5"
-          sync_task_with_auto_split "onedrive:5" "openlist:wopan176Crypt/5" "task5"
-          if [ "$SYNC_SKIPPED" = "1" ]; then
-            task_done "skipped"
-          elif [ "$SYNC_FAILED" = "1" ]; then
-            task_done "failed"
-          else
-            task_done "completed"
-          fi
-
-          task_begin "task5_wopan175" "onedrive:5 → openlist:wopan175/5"
-          sync_task_with_auto_split "onedrive:5" "openlist:wopan175/5" "task5"
-          if [ "$SYNC_SKIPPED" = "1" ]; then
-            task_done "skipped"
-          elif [ "$SYNC_FAILED" = "1" ]; then
-            task_done "failed"
-          else
-            task_done "completed"
-          fi
+          echo "=== 开始同步所有任务 ==="
+          run_all_tasks
+          echo "=== 所有任务同步完成 ==="
 
       - name: Finalize and cleanup
         run: |
