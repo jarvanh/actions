@@ -3655,12 +3655,12 @@ jobs:
             sync_task "onedrive:backup" "gd:backup" "backup" --1d-skip --delete-before
 
             sync_task "onedrive:0" "openlist:wopan176Crypt/0" "task0" --auto-split --1d-skip --delete-before
-            # sync_task "onedrive:0" "openlist:baidupanCrypt/0" "task0" --auto-split --1d-skip --delete-before
+            sync_task "onedrive:0" "openlist:baidupanCrypt/0" "task0" --auto-split --1d-skip --delete-before
             sync_task "onedrive:0/j-1024j-视频-pornhub-favorites" "openlist:wopan175/0/j-1024j-视频-pornhub-favorites" "task0" --auto-split --1d-skip --delete-before
             sync_task "onedrive:0" "gd:0" "task0" --1d-skip --delete-before
 
             sync_task "onedrive:1" "openlist:wopan176Crypt/1" "task1" --auto-split --1d-skip --delete-before
-            # sync_task "onedrive:1" "openlist:baidupanCrypt/1" "task1" --auto-split --1d-skip --delete-before
+            sync_task "onedrive:1" "openlist:baidupanCrypt/1" "task1" --auto-split --1d-skip --delete-before
             sync_task "onedrive:1" "openlist:wopan175/1" "task1" --auto-split --1d-skip --delete-before
             sync_task "onedrive:1" "gd:1" "task1" --1d-skip --delete-before
 
