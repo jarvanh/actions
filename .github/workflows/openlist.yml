@@ -10,7 +10,7 @@ on:
         type: boolean
         default: false
       force_sync:
-        description: "强制同步（忽略 1 天跳过和源端大小减小警告）"
+        description: "强制同步（忽略跳过天数与源端缩小警告，始终执行）"
         required: false
         type: boolean
         default: false
