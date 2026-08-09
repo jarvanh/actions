@@ -54,7 +54,7 @@ jobs:
           echo "~/onedrive 文件列表"
           cd ~/onedrive
           ls
-      - name: cleanup yt-dlp fragment files
+      - name: cleanup yt-dlp residual files
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -65,11 +65,11 @@ jobs:
             exit 0
           fi
           cd "$TARGET_DIR"
-          # 查找 yt-dlp 残留的分片文件：*.mp4-Frag* 和 *.part-Frag*
-          mapfile -t FRAG_FILES < <(find . -maxdepth 1 -type f \( -name '*.mp4-Frag*' -o -name '*.part-Frag*' \) -print)
+          # 查找 yt-dlp 残留文件：*.mp4-Frag*、*.part-Frag*、*.ytdl、*.m3u8（递归子目录）
+          mapfile -t FRAG_FILES < <(find . -type f \( -name '*.mp4-Frag*' -o -name '*.part-Frag*' -o -name '*.ytdl' -o -name '*.m3u8' \) -print)
           FRAG_COUNT=${#FRAG_FILES[@]}
           if [ "$FRAG_COUNT" -eq 0 ]; then
-            echo "No fragment files found."
+            echo "No residual files found."
             exit 0
           fi
           # 收集文件名与大小
@@ -81,11 +81,11 @@ jobs:
           "
           done
           # 清理
-          find . -maxdepth 1 -type f \( -name '*.mp4-Frag*' -o -name '*.part-Frag*' \) -delete
-          echo "Cleaned up ${FRAG_COUNT} fragment files."
+          find . -type f \( -name '*.mp4-Frag*' -o -name '*.part-Frag*' -o -name '*.ytdl' -o -name '*.m3u8' \) -delete
+          echo "Cleaned up ${FRAG_COUNT} residual files."
           # 发送通知
           source "${GITHUB_WORKSPACE}/.github/scripts/tg_notify.sh"
-          HEADER="🧹 ph-dl 清理 yt-dlp 分片文件"$'\n'"━━━━━━━━━━━━━━━━━━"$'\n'"📁 目录: j-1024j-视频-pornhub-favorites"$'\n'$'\n'"🗑️ 清理数量: ${FRAG_COUNT}"
+          HEADER="🧹 ph-dl 清理 yt-dlp 残留文件"$'\n'"━━━━━━━━━━━━━━━━━━"$'\n'"📁 目录: j-1024j-视频-pornhub-favorites"$'\n'$'\n'"🗑️ 清理数量: ${FRAG_COUNT}"
           send_tg "$HEADER"
           send_tg_chunked "📋 文件列表"$'\n'"━━━━━━━━━━━━━━━━━━"$'\n\n'"${FILE_DETAILS}"
           send_tg "🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
@@ -99,7 +99,8 @@ jobs:
         run: |
           SOURCE_REMOTE="onedrive:0/j-1024j-视频-pornhub-favorites"
           # rclone lsf 列出文件（time;size;path），path 放最后，文件名含 ; 时最后一个字段获取剩余全部，安全
-          rclone lsf "$SOURCE_REMOTE/" --files-only --format "tsp" 2>/dev/null \
+          # -R 递归子目录，path 包含子目录前缀
+          rclone lsf "$SOURCE_REMOTE/" --files-only --format "tsp" -R 2>/dev/null \
             | grep -iE '\.mp4$' > /tmp/videos_tsp.txt || true
           TOTAL=$(wc -l < /tmp/videos_tsp.txt)
           echo "📊 数据采集: $TOTAL 个 mp4 文件"
