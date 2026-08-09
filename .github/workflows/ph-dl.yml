@@ -26,6 +26,11 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      SOURCE_REMOTE: "onedrive:0/j-1024j-视频-pornhub-favorites"
+      # SOURCE_REMOTE: "onedrive:3/1024j-视频-pornhub-channel"
+      # SOURCE_REMOTE: "onedrive:4/1024j-视频-pornhub-channel"
+      # SOURCE_REMOTE: "onedrive:5/1024j-视频-pornhub-channel"
     steps:
       - uses: actions/checkout@v3
       - name: rclone-install
@@ -97,10 +102,6 @@ jobs:
           AUTO_DELETE: ${{ github.event.inputs.auto_delete_duplicates == 'true' }}
           DEDUPE_BY_ID_ONLY: ${{ github.event.inputs.dedupe_by_id_only == 'true' }}
         run: |
-          SOURCE_REMOTE="onedrive:0/j-1024j-视频-pornhub-favorites"
-          # SOURCE_REMOTE="onedrive:3/1024j-视频-pornhub-channel"
-          # SOURCE_REMOTE="onedrive:4/1024j-视频-pornhub-channel"
-          # SOURCE_REMOTE="onedrive:5/1024j-视频-pornhub-channel"
           # rclone lsf 列出文件（time;size;path），path 放最后，文件名含 ; 时最后一个字段获取剩余全部，安全
           # -R 递归子目录，path 包含子目录前缀
           rclone lsf "$SOURCE_REMOTE/" --files-only --format "tsp" -R 2>/dev/null \
@@ -314,7 +315,6 @@ jobs:
           # 删除 Telegram 频道所有消息
           python3 ${GITHUB_WORKSPACE}/.github/scripts/clean_channel.py "${TELEGRAM_CHANNEL_ID}"
           # 删除 uploaded_videos.txt，下次运行会重新处理所有视频
-          SOURCE_REMOTE="onedrive:0/j-1024j-视频-pornhub-favorites"
           rclone delete "$SOURCE_REMOTE/uploaded_videos.txt" 2>/dev/null || true
           echo "Deleted uploaded_videos.txt"
           # 发送通知
@@ -336,7 +336,7 @@ jobs:
           sudo apt-get install -y ffmpeg
           pip3 install telethon
           bash ${GITHUB_WORKSPACE}/.github/scripts/process_and_upload.sh \
-            "onedrive:0/j-1024j-视频-pornhub-favorites" \
+            "$SOURCE_REMOTE" \
             "${TELEGRAM_CHANNEL_ID}" \
             "ph"
 
@@ -373,7 +373,7 @@ jobs:
           FILENAME=$(basename "$FILEPATH")
           FILESIZE_HUMAN=$(du -h "$FILEPATH" | cut -f1)
           TARGET_DIR="$HOME/onedrive/0/j-1024j-视频-pornhub-favorites"
-          REMOTE_BASE="onedrive:0/j-1024j-视频-pornhub-favorites"
+          REMOTE_BASE="$SOURCE_REMOTE"
           ARCHIVE_FILE="$TARGET_DIR/archive.txt"
           CORRUPTED_LOG="/tmp/ph-dl-downloads/corrupted.txt"
 

@@ -1,4 +1,4 @@
-name: 91-tg
+name: upload video to tg
 
 on:
   schedule:
@@ -19,6 +19,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      SOURCE_REMOTE: "onedrive:1/1024j/视频/91"
     steps:
       - uses: actions/checkout@v3
       - name: rclone-install
@@ -49,7 +51,6 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           AUTO_DELETE: ${{ github.event.inputs.auto_delete_duplicates == 'true' }}
         run: |
-          SOURCE_REMOTE="onedrive:1/1024j/视频/91"
           # 一次性获取所有文件的 SHA1（OneDrive 服务端哈希，不下载文件，不修改元数据）
           # 用 python 解析 rclone hashsum 输出（hash 和 path 之间是空白分隔），生成 hash;path 格式
           # -R 递归子目录，path 包含子目录前缀
@@ -205,7 +206,6 @@ jobs:
         run: |
           pip3 install telethon
           CHANNEL_ID="-1004369945681"
-          SOURCE_REMOTE="onedrive:1/1024j/视频/91"
           # 删除 Telegram 频道所有消息
           python3 ${GITHUB_WORKSPACE}/.github/scripts/clean_channel.py "$CHANNEL_ID"
           # 删除 uploaded_videos.txt，下次运行会重新处理所有视频
@@ -228,6 +228,6 @@ jobs:
           sudo apt-get install -y ffmpeg
           pip3 install telethon
           bash ${GITHUB_WORKSPACE}/.github/scripts/process_and_upload.sh \
-            "onedrive:1/1024j/视频/91" \
+            "$SOURCE_REMOTE" \
             "-1004369945681" \
             "91"
