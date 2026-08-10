@@ -43,7 +43,7 @@ if len(_decoded) < 261:
     sys.exit(1)
 
 if len(sys.argv) < 2:
-    print("Usage: python clean_channel.py <channel_id>")
+    print("Usage: python clean_tg_channel.py <channel_id>")
     sys.exit(1)
 
 channel_id = sys.argv[1]
