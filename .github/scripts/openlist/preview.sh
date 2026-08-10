@@ -12,12 +12,19 @@
 # 返回: "bytes count" 或 "0 0"
 _get_remote_size_count() {
   local remote_path="$1"
+  local err_file="/tmp/_rclone_size_err_$$"
   local size_json
-  size_json=$(rclone size "$remote_path" --json 2>/dev/null || true)
+  size_json=$(rclone size "$remote_path" --json 2>"$err_file" || true)
   if [ -z "$size_json" ]; then
+    echo "⚠️ _get_remote_size_count: rclone size 失败 (${remote_path})" >&2
+    if [ -s "$err_file" ]; then
+      echo "   $(head -3 "$err_file" | tr '\n' ' ')" >&2
+    fi
+    rm -f "$err_file"
     echo "0 0"
     return
   fi
+  rm -f "$err_file"
   local bytes count
   bytes=$(echo "$size_json" | jq -r '.bytes // 0' 2>/dev/null || echo 0)
   count=$(echo "$size_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
