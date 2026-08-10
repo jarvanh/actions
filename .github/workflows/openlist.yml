@@ -157,58 +157,121 @@ jobs:
           echo "  验证 OpenList crypt 大小报告"
           echo "=========================================="
 
-          # 等待 OpenList 就绪
+          # ===== OpenList 就绪探测 =====
           # 注意：不能用 rclone lsd 反复探测，会触发后端 429 Too Many Requests
-          # 改用 OpenList /ping 端点（纯本地，不调用任何存储后端）
-          echo "等待 OpenList 进程就绪..."
-          _wait_openlist_ready() {
-            local i
-            # 阶段1: 等待 HTTP 服务响应（快速轮询，不触发后端）
-            for i in $(seq 1 30); do
-              local code
-              code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5244/ping 2>/dev/null || echo "000")
-              if [ "$code" = "200" ]; then
-                echo "OpenList HTTP 就绪 (第 ${i} 次, code=${code})"
-                break
+          # 策略：/ping 等 HTTP 起来 → 诊断 config/token → 用 /api 探测存储驱动 →
+          #       充足等待驱动初始化 → 最后 rclone 验证
+          echo "等待 OpenList 就绪..."
+
+          # 阶段1: 等 HTTP /ping（纯本地，不触发任何后端存储）
+          for i in $(seq 1 40); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5244/ping 2>/dev/null || echo "000")
+            [ "$code" = "200" ] && { echo "HTTP 就绪 (${i}次, code=${code})"; break; }
+            sleep 2
+          done
+          if [ "$code" != "200" ]; then
+            echo "⚠️ HTTP 未就绪 (code=${code})，放弃等待"
+          else
+            # 阶段2: 诊断 OpenList 配置和 token
+            CONFIG_CANDIDATES=(
+              "/dropbox/self-hosted/openlist/data/config.json"
+              "/dropbox/self-hosted/openlist/data/conf/config.json"
+              "/data/openlist/data/config.json"
+              "/tmp/openlist_data/config.json"
+            )
+            OL_TOKEN=""
+            OL_CONFIG=""
+            for c in "${CONFIG_CANDIDATES[@]}"; do
+              if [ -f "$c" ]; then
+                t=$(jq -r '.token // .jwt_secret // empty' "$c" 2>/dev/null || echo "")
+                if [ -n "$t" ] && [ "$t" != "null" ]; then
+                  OL_TOKEN="$t"
+                  OL_CONFIG="$c"
+                  echo "找到配置: ${OL_CONFIG}，token 长度: ${#OL_TOKEN}"
+                  break
+                else
+                  echo "配置文件 ${c} 存在但 token/jwt_secret 为空或不存在"
+                  echo "  顶层 keys: $(jq -r 'keys | join(", ")' "$c" 2>/dev/null || echo '无法解析')"
+                fi
               fi
-              sleep 2
             done
-            if [ "$code" != "200" ]; then
-              echo "⚠️ OpenList HTTP 未就绪 (最后 code=${code})"
-              return 1
+            if [ -z "$OL_CONFIG" ]; then
+              echo "⚠️ 未找到可用的 OpenList 配置文件。列出候选路径:"
+              for c in "${CONFIG_CANDIDATES[@]}"; do
+                [ -f "$c" ] && echo "  存在: $c (size $(wc -c < $c))" || echo "  不存在: $c"
+              done
+              # 尝试从挂载目录结构找
+              echo "  查找 openlist 相关文件..."
+              find /dropbox /data -maxdepth 5 -name "config.json" -path "*openlist*" 2>/dev/null | head -5
             fi
-            # 阶段2: 给驱动初始化时间（crypt 驱动需要从存储读取配置/挂载）
-            echo "等待 OpenList 驱动初始化 (40s)..."
-            sleep 40
-            # 阶段3: 单次 rclone 验证（不反复探测，避免 429）
-            if rclone lsd openlist: >/dev/null 2>&1; then
-              echo "OpenList WebDAV 验证通过"
-              return 0
-            else
-              echo "⚠️ OpenList WebDAV 仍未就绪，再等 30s..."
-              sleep 30
-              if rclone lsd openlist: >/dev/null 2>&1; then
-                echo "OpenList WebDAV 验证通过（第二次）"
-                return 0
+
+            # 阶段3: 通过 HTTP API /api/storage/list 看存储驱动是否加载（不用 WebDAV，不触发 401）
+            echo "检测存储驱动加载情况..."
+            _check_storage() {
+              local t_out="/tmp/_ol_storage_$$"
+              local hdrs=(-H "Content-Type: application/json")
+              [ -n "$OL_TOKEN" ] && hdrs+=(-H "Authorization: ${OL_TOKEN}")
+              # /api/auth/getstatus 能返回会话状态，不用鉴权
+              local code
+              code=$(curl -s -o "$t_out" -w "%{http_code}" "${hdrs[@]}" \
+                "http://127.0.0.1:5244/api/auth/getstatus" 2>/dev/null || echo "000")
+              if [ "$code" = "200" ] && [ -s "$t_out" ]; then
+                echo "  /api/auth/getstatus 200: $(head -c 200 "$t_out")..."
               fi
-              echo "⚠️ OpenList WebDAV 仍未就绪，继续执行（可能出现 429 错误）"
-              return 1
+              # /api/storage/list 查看存储列表
+              code=$(curl -s -o "$t_out" -w "%{http_code}" "${hdrs[@]}" \
+                "http://127.0.0.1:5244/api/storage/list" 2>/dev/null || echo "000")
+              echo "  /api/storage/list code=${code}"
+              if [ "$code" = "200" ] && [ -s "$t_out" ]; then
+                local count
+                count=$(jq -r '.data // . | if type=="array" then length else 0 end' "$t_out" 2>/dev/null || echo 0)
+                echo "    存储驱动数: ${count}"
+                if [ "${count}" -gt 0 ] 2>/dev/null; then
+                  echo "    驱动名: $(jq -r '[.data // .[] | .mount_path // .name // .driver] | join(", ")' "$t_out" 2>/dev/null || echo 'N/A')"
+                fi
+              else
+                echo "    响应: $(head -c 200 "$t_out" 2>/dev/null)"
+              fi
+              rm -f "$t_out"
+            }
+            _check_storage
+
+            # 阶段4: 充足等待 crypt 驱动初始化 + ali 网盘拉元数据
+            echo "等待驱动初始化 (120s) ..."
+            sleep 120
+            _check_storage
+
+            # 阶段5: 用 rclone 验证 WebDAV
+            if rclone lsd openlist: >/dev/null 2>&1; then
+              echo "WebDAV(rclone) 验证通过"
+            else
+              echo "WebDAV 未通过，再等 90s ..."
+              sleep 90
+              if rclone lsd openlist: >/dev/null 2>&1; then
+                echo "WebDAV(rclone) 验证通过（第二次）"
+              else
+                echo "⚠️ WebDAV 仍未通过，最后一次尝试前再等 60s ..."
+                sleep 60
+                rclone lsd openlist: >/dev/null 2>&1 \
+                  && echo "WebDAV(rclone) 验证通过（第三次）" \
+                  || echo "⚠️ WebDAV 仍未就绪，继续执行（可能出现 401/429 错误）"
+              fi
             fi
-          }
-          _wait_openlist_ready || true
-          unset -f _wait_openlist_ready
+          fi
 
           # 刷新 OpenList 缓存，避免 stale listing 影响判断
-          OL_TOKEN=$(jq -r '.token' /dropbox/self-hosted/openlist/data/config.json 2>/dev/null || echo "")
           if [ -n "$OL_TOKEN" ] && [ "$OL_TOKEN" != "null" ]; then
             echo "刷新 OpenList 缓存 /aliyundriveCrypt/backup ..."
-            curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh" \
-              -H "Authorization: $OL_TOKEN" \
+            rcode=$(curl -s -o /tmp/_ol_refresh -w "%{http_code}" -X POST \
+              -H "Authorization: ${OL_TOKEN}" \
               -H "Content-Type: application/json" \
-              -d '{"path":"/aliyundriveCrypt/backup","recursive":true}' >/dev/null 2>&1 || true
+              -d '{"path":"/aliyundriveCrypt/backup","recursive":true}' \
+              "http://127.0.0.1:5244/api/fs/refresh" 2>/dev/null || echo "000")
+            echo "  refresh code=${rcode}  $(head -c 200 /tmp/_ol_refresh 2>/dev/null)"
+            rm -f /tmp/_ol_refresh
             sleep 15
           else
-            echo "⚠️ OpenList token 不可用，跳过缓存刷新"
+            echo "跳过缓存刷新 (token 不可用)"
           fi
 
           # 检查目录结构（诊断目标端是否可访问）
@@ -388,14 +451,13 @@ jobs:
         run: |
           source /tmp/load_all.sh
 
-          # 等待 OpenList 就绪（容器刚启动时可能 401 Unauthorized 或 429 Too Many Requests，
-          # 会导致预览目标端显示 0 B/0 文件，以及 sync/copy 不必要地重传）
-          # 注意：不能用 rclone lsd 反复探测，会触发后端 429
+          # 等待 OpenList 就绪（容器刚启动时 401/429 会导致预览 0 B/0 文件、同步无谓重传）
+          # 注意：不能用 rclone lsd 反复探测，会触发后端 429 Too Many Requests
           echo "等待 OpenList 就绪..."
           _wait_openlist_ready() {
-            local i code
-            # 阶段1: 等待 HTTP 服务响应（/ping 纯本地，不触发后端）
-            for i in $(seq 1 30); do
+            local i code c t
+            # 阶段1: HTTP /ping 起来
+            for i in $(seq 1 40); do
               code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5244/ping 2>/dev/null || echo "000")
               [ "$code" = "200" ] && break
               sleep 2
@@ -404,17 +466,39 @@ jobs:
               echo "⚠️ OpenList HTTP 未就绪 (code=${code})"
               return 1
             fi
-            echo "OpenList HTTP 就绪，等待驱动初始化 (40s)..."
-            sleep 40
-            # 阶段2: 单次 rclone 验证（不反复探测，避免 429）
+            echo "HTTP 就绪，尝试获取 token..."
+            # 阶段2: 获取 token 用于 API 探测（多个候选路径）
+            local OL_TOKEN=""
+            for c in \
+              "/dropbox/self-hosted/openlist/data/config.json" \
+              "/dropbox/self-hosted/openlist/data/conf/config.json" \
+              "/data/openlist/data/config.json"; do
+              [ -f "$c" ] || continue
+              t=$(jq -r '.token // .jwt_secret // empty' "$c" 2>/dev/null || echo "")
+              if [ -n "$t" ] && [ "$t" != "null" ]; then
+                OL_TOKEN="$t"
+                echo "  token: OK (来自 ${c}, 长度 ${#OL_TOKEN})"
+                break
+              fi
+            done
+            # 阶段3: 等驱动初始化（长等待 120s，给 ali + crypt 拉元数据）
+            echo "等待驱动初始化 (120s) ..."
+            sleep 120
+            # 阶段4: 单次 rclone 验证（最多 2 次，避免 429）
             if rclone lsd openlist: >/dev/null 2>&1; then
-              echo "OpenList WebDAV 验证通过"
+              echo "WebDAV(rclone) 验证通过"
               return 0
             fi
-            echo "⚠️ WebDAV 未就绪，再等 30s..."
-            sleep 30
-            rclone lsd openlist: >/dev/null 2>&1 && { echo "OpenList WebDAV 验证通过（第二次）"; return 0; }
-            echo "⚠️ OpenList WebDAV 仍未就绪，继续执行"
+            echo "再等 90s ..."
+            sleep 90
+            if rclone lsd openlist: >/dev/null 2>&1; then
+              echo "WebDAV(rclone) 验证通过（第二次）"
+              return 0
+            fi
+            sleep 60
+            rclone lsd openlist: >/dev/null 2>&1 \
+              && { echo "WebDAV(rclone) 验证通过（第三次）"; return 0; } \
+              || echo "⚠️ WebDAV 仍未就绪，继续执行"
             return 1
           }
           _wait_openlist_ready || true
