@@ -168,51 +168,67 @@ jobs:
             sleep 15
           fi
 
+          # 检查目录结构（诊断目标端是否可访问）
+          echo "=== 目标端目录结构 (openlist:aliyundriveCrypt/) ==="
+          rclone lsd openlist:aliyundriveCrypt/ 2>&1 | head -10
           echo ""
-          echo "获取源端文件列表 (onedrive:backup, max-depth=3)..."
-          timeout 120 rclone lsf onedrive:backup --files-only -l --recursive --max-depth 3 2>/dev/null > /tmp/src_listing.txt || true
-          echo "源端文件数: $(wc -l < /tmp/src_listing.txt | tr -d ' ')"
-
-          echo "获取目标端文件列表 (openlist:aliyundriveCrypt/backup, max-depth=3)..."
-          timeout 120 rclone lsf openlist:aliyundriveCrypt/backup --files-only -l --recursive --max-depth 3 2>/dev/null > /tmp/dst_listing.txt || true
-          echo "目标端文件数: $(wc -l < /tmp/dst_listing.txt | tr -d ' ')"
-
-          echo ""
-          echo "=== 源端前5个文件 ==="
-          head -5 /tmp/src_listing.txt
-          echo ""
-          echo "=== 目标端前5个文件 ==="
-          head -5 /tmp/dst_listing.txt
+          echo "=== 目标端 backup 子目录 (openlist:aliyundriveCrypt/backup) ==="
+          rclone lsd openlist:aliyundriveCrypt/backup 2>&1 | head -10
           echo ""
 
+          # 用 lsjson 获取文件列表和大小（比 lsf -l 更可靠）
+          echo "=== 获取源端文件列表 (onedrive:backup, 非递归根目录) ==="
+          timeout 60 rclone lsjson onedrive:backup --no-modtime --no-mimetype 2>/tmp/src_err.txt > /tmp/src_listing.json || true
+          echo "源端文件数: $(jq '[.[] | select(.IsDir == false)] | length' /tmp/src_listing.json 2>/dev/null || echo '解析失败')"
+          if [ -s /tmp/src_err.txt ]; then echo "源端错误:"; cat /tmp/src_err.txt; fi
+
+          echo ""
+          echo "=== 获取目标端文件列表 (openlist:aliyundriveCrypt/backup, 非递归根目录) ==="
+          timeout 60 rclone lsjson openlist:aliyundriveCrypt/backup --no-modtime --no-mimetype 2>/tmp/dst_err.txt > /tmp/dst_listing.json || true
+          echo "目标端文件数: $(jq '[.[] | select(.IsDir == false)] | length' /tmp/dst_listing.json 2>/dev/null || echo '解析失败')"
+          if [ -s /tmp/dst_err.txt ]; then echo "目标端错误:"; cat /tmp/dst_err.txt; fi
+
+          # 如果根目录无共同文件，取第一个子目录递归列出
+          FIRST_SUBDIR=$(jq -r '[.[] | select(.IsDir == true)] | .[0].Path // empty' /tmp/src_listing.json 2>/dev/null)
+          if [ -n "$FIRST_SUBDIR" ]; then
+            echo ""
+            echo "=== 子目录比较: ${FIRST_SUBDIR} ==="
+            echo "源端子目录..."
+            timeout 90 rclone lsjson "onedrive:backup/${FIRST_SUBDIR}" --recursive --no-modtime --no-mimetype 2>/tmp/src_sub_err.txt > /tmp/src_sub.json || true
+            echo "源端子目录文件数: $(jq '[.[] | select(.IsDir == false)] | length' /tmp/src_sub.json 2>/dev/null || echo '解析失败')"
+            [ -s /tmp/src_sub_err.txt ] && echo "源端子目录错误:" && cat /tmp/src_sub_err.txt
+
+            echo "目标端子目录..."
+            timeout 90 rclone lsjson "openlist:aliyundriveCrypt/backup/${FIRST_SUBDIR}" --recursive --no-modtime --no-mimetype 2>/tmp/dst_sub_err.txt > /tmp/dst_sub.json || true
+            echo "目标端子目录文件数: $(jq '[.[] | select(.IsDir == false)] | length' /tmp/dst_sub.json 2>/dev/null || echo '解析失败')"
+            [ -s /tmp/dst_sub_err.txt ] && echo "目标端子目录错误:" && cat /tmp/dst_sub_err.txt
+          fi
+
+          echo ""
           echo "=== 大小对比分析 ==="
           python3 << 'PYEOF'
-          import math
-          import sys
+          import json, math, os
 
-          def parse_listing(path):
-              """解析 rclone lsf -l 输出: 'size date time filename'"""
-              files = {}
+          def load_listing(path):
               try:
                   with open(path) as f:
-                      for line in f:
-                          line = line.strip()
-                          if not line:
-                              continue
-                          parts = line.split(None, 3)
-                          if len(parts) >= 4:
-                              try:
-                                  size = int(parts[0])
-                              except ValueError:
-                                  continue
-                              name = parts[3].strip()
-                              files[name] = size
-              except FileNotFoundError:
-                  print(f"警告: {path} 不存在")
-              return files
+                      data = json.load(f)
+                  return {item['Path']: item['Size'] for item in data if not item.get('IsDir', False)}
+              except Exception:
+                  return {}
 
-          src = parse_listing('/tmp/src_listing.txt')
-          dst = parse_listing('/tmp/dst_listing.txt')
+          # 先用根目录数据，若为空则用子目录数据
+          src = load_listing('/tmp/src_listing.json')
+          dst = load_listing('/tmp/dst_listing.json')
+          src_sub = load_listing('/tmp/src_sub.json') if os.path.exists('/tmp/src_sub.json') else {}
+          dst_sub = load_listing('/tmp/dst_sub.json') if os.path.exists('/tmp/dst_sub.json') else {}
+
+          if (not src or not dst) and (src_sub and dst_sub):
+              src, dst = src_sub, dst_sub
+              print("(使用子目录数据)")
+          elif src_sub and not dst and not dst_sub:
+              # 合并根目录和子目录数据
+              src = {**src, **src_sub}
 
           common = sorted(set(src.keys()) & set(dst.keys()))
 
@@ -222,60 +238,61 @@ jobs:
           print()
 
           if not common:
-              print("⚠️ 无共同文件。可能原因:")
-              print("  - 目标端为空（首次同步）")
-              print("  - 文件名不匹配（crypt 加密了文件名）")
-              print("  - max-depth 不够，子目录文件未列出")
+              print("⚠️ 无共同文件")
               if src:
-                  print(f"\n  源端文件名样本:")
-                  for name in list(src.keys())[:3]:
-                      print(f"    {name}  ({src[name]:,} bytes)")
+                  print("源端文件名样本:")
+                  for name in list(src.keys())[:5]:
+                      print(f"  {name}  ({src[name]:,} bytes)")
               if dst:
-                  print(f"\n  目标端文件名样本:")
-                  for name in list(dst.keys())[:3]:
-                      print(f"    {name}  ({dst[name]:,} bytes)")
-              sys.exit(0)
-
-          match_count = 0
-          crypt_count = 0
-          other_count = 0
-
-          for name in common[:10]:
-              s = src[name]
-              d = dst[name]
-              expected_crypt = 32 + 16 * math.ceil(s / 64)
-              if s == d:
-                  status = "✅ 一致 (明文大小)"
-                  match_count += 1
-              elif d == expected_crypt:
-                  status = f"🔴 加密后大小 (差异 {d-s} = 32 + 16*ceil({s}/64))"
-                  crypt_count += 1
-              else:
-                  status = f"⚠️ 不一致 (差异 {d-s}, 预期 crypt 开销 {expected_crypt-s})"
-                  other_count += 1
-              print(f"  {name}")
-              print(f"    源端: {s:,} bytes")
-              print(f"    目标: {d:,} bytes")
-              print(f"    {status}")
-              print()
-
-          print("=" * 50)
-          if crypt_count > 0 and match_count == 0:
-              print("🔴 结论: OpenList WebDAV 报告的是加密后大小")
-              print("   --size-only 永远不匹配 → 每次都会重传")
-              print("   建议: copy_task 加 --ignore-size --update，或改用 rclone crypt remote")
-          elif match_count > 0 and crypt_count == 0:
-              print("✅ 结论: OpenList WebDAV 报告的是明文大小")
-              print("   --size-only 应正常工作")
-              print("   'Copied (replaced existing)' 的原因可能是:")
-              print("   - OpenList 缓存过期 (stale listing)")
-              print("   - 之前上传中断导致文件不完整")
-              print("   - 源端文件确实发生了变化")
-          elif other_count > 0:
-              print("⚠️ 结论: 大小不一致但不符合 crypt 开销规律")
-              print("   需进一步调查 (可能是缓存问题或上传不完整)")
+                  print("目标端文件名样本:")
+                  for name in list(dst.keys())[:5]:
+                      print(f"  {name}  ({dst[name]:,} bytes)")
+              if not dst:
+                  print("\n目标端为空 — 可能原因:")
+                  print("  - OpenList 缓存未刷新")
+                  print("  - crypt 路径不正确（检查上方目录结构）")
+                  print("  - OpenList crypt 驱动未配置")
           else:
-              print("⚠️ 混合结果，请查看上方详细对比")
+              match_count = 0
+              crypt_count = 0
+              other_count = 0
+
+              for name in common[:10]:
+                  s = src[name]
+                  d = dst[name]
+                  expected_crypt = 32 + 16 * math.ceil(s / 64)
+                  if s == d:
+                      status = "✅ 一致 (明文大小)"
+                      match_count += 1
+                  elif d == expected_crypt:
+                      status = f"🔴 加密后大小 (差异 {d-s} = 32 + 16*ceil({s}/64))"
+                      crypt_count += 1
+                  else:
+                      status = f"⚠️ 不一致 (差异 {d-s}, 预期 crypt 开销 {expected_crypt-s})"
+                      other_count += 1
+                  print(f"  {name}")
+                  print(f"    源端: {s:,} bytes")
+                  print(f"    目标: {d:,} bytes")
+                  print(f"    {status}")
+                  print()
+
+              print("=" * 50)
+              if crypt_count > 0 and match_count == 0:
+                  print("🔴 结论: OpenList WebDAV 报告的是加密后大小")
+                  print("   --size-only 永远不匹配 → 每次都会重传")
+                  print("   建议: copy_task 加 --ignore-size --update，或改用 rclone crypt remote")
+              elif match_count > 0 and crypt_count == 0:
+                  print("✅ 结论: OpenList WebDAV 报告的是明文大小")
+                  print("   --size-only 应正常工作")
+                  print("   'Copied (replaced existing)' 的原因可能是:")
+                  print("   - OpenList 缓存过期 (stale listing)")
+                  print("   - 之前上传中断导致文件不完整")
+                  print("   - 源端文件确实发生了变化")
+              elif other_count > 0:
+                  print("⚠️ 结论: 大小不一致但不符合 crypt 开销规律")
+                  print("   需进一步调查 (可能是缓存问题或上传不完整)")
+              else:
+                  print("⚠️ 混合结果，请查看上方详细对比")
           PYEOF
 
           echo ""
