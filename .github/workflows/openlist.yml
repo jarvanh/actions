@@ -218,31 +218,31 @@ jobs:
           # 共有/特有 rclone 参数请在上方 RCLONE_*_FLAGS 数组中集中修改
           run_all_tasks() {
             sync_task "onedrive:backup" "openlist:aliyundriveCrypt/backup" "backup" --auto-split --1d-skip --exclude "/notion/**" --exclude "notion/**" --exclude "/self-hosted_latest.tar.gz" --exclude "self-hosted_latest.tar.gz" --exclude "/github_repos_latest.tar.gz" --exclude "github_repos_latest.tar.gz"
-            sync_task "onedrive:backup" "openlist:wopan176Crypt/backup" "backup" --auto-split --1d-skip
+            copy_task "onedrive:backup" "openlist:wopan176Crypt/backup" "backup" --auto-split --1d-skip
             gd_task "onedrive:backup" "gd:backup" "backup" --1d-skip
 
-            sync_task "onedrive:0" "openlist:wopan176Crypt/0" "task0" --auto-split --1d-skip
+            copy_task "onedrive:0" "openlist:wopan176Crypt/0" "task0" --auto-split --1d-skip
             sync_task "onedrive:0" "openlist:baidupanCrypt/0" "task0" --auto-split --1d-skip
             sync_task "onedrive:0/j-1024j-视频-pornhub-favorites" "openlist:wopan175/0/j-1024j-视频-pornhub-favorites" "task0" --auto-split --1d-skip
             gd_task "onedrive:0" "gd:0" "task0" --1d-skip
 
-            sync_task "onedrive:1" "openlist:wopan176Crypt/1" "task1" --auto-split --1d-skip
+            copy_task "onedrive:1" "openlist:wopan176Crypt/1" "task1" --auto-split --1d-skip
             sync_task "onedrive:1" "openlist:baidupanCrypt/1" "task1" --auto-split --1d-skip
             sync_task "onedrive:1" "openlist:wopan175/1" "task1" --auto-split --1d-skip
             gd_task "onedrive:1" "gd:1" "task1" --1d-skip
 
-            sync_task "onedrive:2" "openlist:wopan176Crypt/2" "task2" --auto-split --1d-skip
+            copy_task "onedrive:2" "openlist:wopan176Crypt/2" "task2" --auto-split --1d-skip
             sync_task "onedrive:2" "openlist:wopan175/2" "task2" --auto-split --1d-skip
             gd_task "onedrive:2" "gd:2" "task2" --1d-skip
 
-            sync_task "onedrive:3" "openlist:wopan176Crypt/3" "task3" --auto-split --1d-skip
+            copy_task "onedrive:3" "openlist:wopan176Crypt/3" "task3" --auto-split --1d-skip
             sync_task "onedrive:3" "openlist:wopan175/3" "task3" --auto-split --1d-skip
             gd_task "onedrive:3" "gd:3" "task3" --1d-skip
 
-            sync_task "onedrive:4" "openlist:wopan176Crypt/4" "task4" --auto-split --1d-skip
+            copy_task "onedrive:4" "openlist:wopan176Crypt/4" "task4" --auto-split --1d-skip
             sync_task "onedrive:4" "openlist:wopan175/4" "task4" --auto-split --1d-skip
 
-            sync_task "onedrive:5" "openlist:wopan176Crypt/5" "task5" --auto-split --1d-skip
+            copy_task "onedrive:5" "openlist:wopan176Crypt/5" "task5" --auto-split --1d-skip
             sync_task "onedrive:5" "openlist:wopan175/5" "task5" --auto-split --1d-skip
           }
 
