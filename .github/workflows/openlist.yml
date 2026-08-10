@@ -106,6 +106,7 @@ jobs:
         run: docker ps --filter name=openlist --filter status=running | grep -q openlist
 
       - name: install cloudflared
+        if: ${{ inputs.debug_crypt_size != true }}
         run: |
           sudo mkdir ~/.cloudflared/
           sudo rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
@@ -113,6 +114,7 @@ jobs:
           sudo dpkg -i cloudflared-linux-amd64.deb
 
       - name: Check if the tunnel is running
+        if: ${{ inputs.debug_crypt_size != true }}
         env:
           TUNNEL_NAME: "openlist"
         run: |
@@ -132,6 +134,7 @@ jobs:
           fi
 
       - name: run cloudflared
+        if: ${{ inputs.debug_crypt_size != true }}
         run: |
           # DNS 路由只需创建一次；检查是否已解析到该隧道，避免重复 API 调用
           if ! dig +short openlist.'${{ secrets.VD }}'.eu.org | grep -q .; then
