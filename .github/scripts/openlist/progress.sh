@@ -18,6 +18,7 @@
 PROGRESS_MSG_ID_FILE="/tmp/progress_msg_id.txt"
 PROGRESS_TASKS_FILE="/tmp/progress_tasks.tsv"
 PROGRESS_CURRENT_FILE="/tmp/progress_current.txt"
+PROGRESS_START_FILE="/tmp/progress_start.txt"
 PROGRESS_PHASE_FILE="/tmp/progress_phase.txt"
 PROGRESS_STATS_FILE="/tmp/progress_stats.txt"
 PROGRESS_FINALIZED_FILE="/tmp/progress_finalized.txt"
