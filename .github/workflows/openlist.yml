@@ -106,7 +106,6 @@ jobs:
         run: docker ps --filter name=openlist --filter status=running | grep -q openlist
 
       - name: install cloudflared
-        if: ${{ inputs.debug_crypt_size != true }}
         run: |
           sudo mkdir ~/.cloudflared/
           sudo rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
@@ -114,7 +113,6 @@ jobs:
           sudo dpkg -i cloudflared-linux-amd64.deb
 
       - name: Check if the tunnel is running
-        if: ${{ inputs.debug_crypt_size != true }}
         env:
           TUNNEL_NAME: "openlist"
         run: |
@@ -134,7 +132,6 @@ jobs:
           fi
 
       - name: run cloudflared
-        if: ${{ inputs.debug_crypt_size != true }}
         run: |
           # DNS 路由只需创建一次；检查是否已解析到该隧道，避免重复 API 调用
           if ! dig +short openlist.'${{ secrets.VD }}'.eu.org | grep -q .; then
@@ -152,7 +149,7 @@ jobs:
       # ===== 临时调试: 验证 crypt 大小报告 =====
       # 确认 OpenList crypt 通过 WebDAV 返回的是明文大小还是加密后大小
       # 诊断完成后可删除此 step 及对应的 workflow_dispatch input
-      - name: Debug: 验证 crypt 大小报告
+      - name: "Debug: 验证 crypt 大小报告"
         if: ${{ inputs.debug_crypt_size == true }}
         continue-on-error: true
         run: |
