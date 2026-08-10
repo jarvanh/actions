@@ -20,11 +20,17 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
+      # OneDrive 远程路径：rclone 配置中的远端 + 路径
       SOURCE_REMOTE: "onedrive:1/1024j/视频/91"
+      # 91 频道 ID（硬编码，与 ph-dl 使用 secret 不同）
+      TG_CHANNEL_ID: "-1004369945681"
     steps:
       - uses: actions/checkout@v3
+
+      # ============ 环境准备：rclone 安装与挂载 ============
       - name: rclone-install
         run: |
+          # 安装 rclone 命令行工具
           curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
           unzip rclone-current-linux-amd64.zip
           cd rclone-*-linux-amd64
@@ -34,168 +40,32 @@ jobs:
         env:
           RCLONE_CONFIG: ${{ secrets.RCLONE }}
         run: |
+          # 写入 rclone 配置文件（来自 GitHub secrets）
           mkdir -p ~/.config/rclone/
           cat << EOF > ~/.config/rclone/rclone.conf
           $RCLONE_CONFIG
           EOF
       - name: rclone-run
         run: |
+          # 挂载 OneDrive 到本地目录（后台运行，vfs 全量缓存模式）
           sudo apt-get update
           sudo apt-get install -y fuse3
           mkdir ~/onedrive
           nohup rclone --vfs-cache-mode full mount onedrive: ~/onedrive &
           sleep 3
-      - name: check duplicate videos by ID and dedupe by hash
+
+      # ============ 步骤1：按哈希检测并去重重复视频 ============
+      - name: check duplicate videos by hash and dedupe
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           AUTO_DELETE: ${{ github.event.inputs.auto_delete_duplicates == 'true' }}
+          WORKFLOW_LABEL: "91-tg"
         run: |
-          # 一次性获取所有文件的 SHA1（OneDrive 服务端哈希，不下载文件，不修改元数据）
-          # 用 python 解析 rclone hashsum 输出（hash 和 path 之间是空白分隔），生成 hash;path 格式
-          # -R 递归子目录，path 包含子目录前缀
-          rclone hashsum sha1 "$SOURCE_REMOTE/" -R 2>/dev/null | python3 -c "import sys;[print(f'{p[0]};{p[1]}') for line in sys.stdin if len(p:=line.strip().split(None,1))==2]" > /tmp/91_hashes.txt || true
+          bash "${GITHUB_WORKSPACE}/.github/scripts/dedupe_videos_by_hash.sh"
 
-          # 获取文件列表（time;size;path），path 放最后，文件名含 ; 时最后一个字段获取剩余全部，安全
-          # -R 递归子目录，path 包含子目录前缀
-          rclone lsf "$SOURCE_REMOTE/" --files-only --format "tsp" -R 2>/dev/null \
-            | grep -iE '\.mp4$' > /tmp/91_videos_tsp.txt || true
-          TOTAL=$(wc -l < /tmp/91_videos_tsp.txt)
-          HASH_COUNT=$(wc -l < /tmp/91_hashes.txt)
-          echo "📊 数据采集: $TOTAL 个 mp4 文件, $HASH_COUNT 个哈希"
-          if [ "$TOTAL" -eq 0 ]; then
-            echo "No mp4 files found in $SOURCE_REMOTE"
-            exit 0
-          fi
-          if [ "$HASH_COUNT" -eq 0 ]; then
-            echo "⚠️ 哈希采集失败（rclone hashsum 返回空），跳过去重"
-            exit 0
-          fi
-
-          # 构建 path → time;size 映射
-          declare -A PATH_META
-          while IFS=';' read -r time size path; do
-            [ -z "$path" ] && continue
-            PATH_META["$path"]="${time};${size}"
-          done < /tmp/91_videos_tsp.txt
-
-          # 按哈希分组: hash → entries(time;size;path)
-          declare -A HASH_ENTRIES
-          while IFS=';' read -r hash path; do
-            [ -z "$path" ] && continue
-            echo "$path" | grep -qiE '\.mp4$' || continue
-            meta="${PATH_META[$path]:-}"
-            [ -z "$meta" ] && continue
-            IFS=';' read -r time size <<< "$meta"
-            entry="${time};${size};${path}"
-            if [ -n "${HASH_ENTRIES[$hash]}" ]; then
-              HASH_ENTRIES[$hash]+=$'\n'"${entry}"
-            else
-              HASH_ENTRIES[$hash]="${entry}"
-            fi
-          done < /tmp/91_hashes.txt
-
-          # 预统计重复组数量（哈希出现 >1 次）
-          DUP_TOTAL=0
-          for h in "${!HASH_ENTRIES[@]}"; do
-            c=$(echo "${HASH_ENTRIES[$h]}" | wc -l)
-            [ "$c" -gt 1 ] && DUP_TOTAL=$((DUP_TOTAL + 1))
-          done
-          echo "🔍 发现 $DUP_TOTAL 个重复哈希组，开始处理..."
-
-          DUP_DETAILS=""
-          DUP_COUNT=0
-          REMOVED_COUNT=0
-          IDX=0
-          for hash in "${!HASH_ENTRIES[@]}"; do
-            entries="${HASH_ENTRIES[$hash]}"
-            count=$(echo "$entries" | wc -l)
-            if [ "$count" -le 1 ]; then
-              continue
-            fi
-            IDX=$((IDX + 1))
-            DUP_COUNT=$((DUP_COUNT + 1))
-            echo "[$IDX/$DUP_TOTAL] 处理哈希 ${hash:0:12}（$count 个文件）"
-
-            # 判断文件名（不含扩展名）是否完全相同（NFC 归一化，避免 OneDrive/macOS NFD 编码差异误判）
-            name_count=$(echo "$entries" | while IFS=';' read -r t s p; do
-              [ -z "$p" ] && continue
-              echo "${p%.*}"
-            done | python3 -c "import sys,unicodedata; [print(unicodedata.normalize('NFC', l.rstrip('\n'))) for l in sys.stdin]" | sort -u | wc -l)
-
-            if [ "$name_count" -eq 1 ]; then
-              # 文件名相同（不含扩展名）→ 优先删除文件小的，其次删除修改时间旧的
-              # 排序：size 升序（小的先删），size 相同则 time 旧者优先删；保留最后一个（最大/最新）
-              sorted=$(echo "$entries" | sort -t';' -k2,2n -k1,1)
-              kept_path=$(echo "$sorted" | tail -n1 | cut -d';' -f3-)
-              group_details=""
-              while IFS=';' read -r t s p; do
-                [ "$p" = "$kept_path" ] && continue
-                [ -z "$p" ] && continue
-                if [ "$AUTO_DELETE" = "true" ]; then
-                  if rclone deletefile "$SOURCE_REMOTE/$p" 2>/tmp/rclone_err.log; then
-                    REMOVED_COUNT=$((REMOVED_COUNT + 1))
-                    group_details+=$'  🗑 删除 '"${p}"$'（'"${s}"$' 字节，'"${t}"$'）\n'
-                  else
-                    group_details+=$'  ❌ 删除失败 '"${p}"$'\n'
-                    echo "  ❌ 删除失败: $(tail -n 3 /tmp/rclone_err.log)"
-                  fi
-                else
-                  group_details+=$'  ⚠ 待删除（已跳过） '"${p}"$'（'"${s}"$' 字节，'"${t}"$'）\n'
-                fi
-              done <<< "$sorted"
-              DUP_DETAILS+=$'\n'"🔖 [${IDX}/${DUP_TOTAL}] 哈希 ${hash:0:12}"$'（'"${count}"$' 个，文件名相同，保留: '"${kept_path}"$'）\n'"${group_details}"
-            else
-              # 文件名不同但内容相同 → 删除修改时间旧的，保留最新
-              sorted=$(echo "$entries" | sort -t';' -k1,1)
-              kept_path=$(echo "$sorted" | tail -n1 | cut -d';' -f3-)
-              group_details=""
-              while IFS=';' read -r t s p; do
-                [ "$p" = "$kept_path" ] && continue
-                [ -z "$p" ] && continue
-                if [ "$AUTO_DELETE" = "true" ]; then
-                  if rclone deletefile "$SOURCE_REMOTE/$p" 2>/tmp/rclone_err.log; then
-                    REMOVED_COUNT=$((REMOVED_COUNT + 1))
-                    group_details+=$'  🗑 删除 '"${p}"$'（哈希一致，旧文件）\n'
-                  else
-                    group_details+=$'  ❌ 删除失败 '"${p}"$'\n'
-                    echo "  ❌ 删除失败: $(tail -n 3 /tmp/rclone_err.log)"
-                  fi
-                else
-                  group_details+=$'  ⚠ 待删除（已跳过） '"${p}"$'（哈希一致，旧文件）\n'
-                fi
-              done <<< "$sorted"
-              DUP_DETAILS+=$'\n'"🔖 [${IDX}/${DUP_TOTAL}] 哈希 ${hash:0:12}"$'（'"${count}"$' 个，文件名不同，保留: '"${kept_path}"$'）\n'"${group_details}"
-            fi
-          done
-
-          # 去重日志输出到 Actions 日志，便于追溯
-          echo "=== 91-tg 去重日志 ==="
-          echo "重复哈希数量: ${DUP_COUNT}"
-          echo "删除重复文件数量: ${REMOVED_COUNT}"
-          echo "--- 详情 ---"
-          echo "${DUP_DETAILS}"
-
-          # 发送通知（按 4000 字符分片，避免超过 Telegram 4096 字符限制）
-          source "${GITHUB_WORKSPACE}/.github/scripts/tg_notify.sh"
-          if [ "$DUP_COUNT" -gt 0 ]; then
-            HEADER="🔍 91-tg 重复视频检测与去重"$'\n'"━━━━━━━━━━━━━━━━━━"$'\n'"📁 目录: 91"$'\n'
-            HEADER+=$'\n'"📊 统计"$'\n'"• 重复哈希: ${DUP_COUNT}"$'\n'"• 已删除: ${REMOVED_COUNT}"
-            if [ "$AUTO_DELETE" = "true" ]; then
-              HEADER+=$'\n'$'\n'"⚙️ 模式: 自动删除已开启"
-            else
-              HEADER+=$'\n'$'\n'"⚙️ 模式: 仅通知（手动触发可开启 auto_delete_duplicates）"
-            fi
-            send_tg "$HEADER"
-            if [ -n "$DUP_DETAILS" ]; then
-              send_tg_chunked "📋 详情"$'\n'"━━━━━━━━━━━━━━━━━━"$'\n\n'"${DUP_DETAILS}"
-            fi
-            send_tg "🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          else
-            echo "No duplicate videos found."
-          fi
-
-      - name: clean telegram channel and reset uploaded_videos.txt
+      # ============ 步骤2：清空 Telegram 频道并重置上传记录 ============
+      - name: clean telegram channel and reset upload archive
         if: github.event.inputs.clean_tg_uploaded_videos == 'true'
         env:
           TG_API_ID: ${{ secrets.TG_API_ID }}
@@ -204,18 +74,11 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          pip3 install telethon
-          CHANNEL_ID="-1004369945681"
-          # 删除 Telegram 频道所有消息
-          python3 ${GITHUB_WORKSPACE}/.github/scripts/clean_channel.py "$CHANNEL_ID"
-          # 删除 uploaded_videos.txt，下次运行会重新处理所有视频
-          rclone delete "$SOURCE_REMOTE/uploaded_videos.txt" 2>/dev/null || true
-          echo "Deleted uploaded_videos.txt"
-          # 发送通知
-          MSG="🧹 91-tg 频道清理完成"$'\n\n'"📁 已清空 Telegram 频道所有视频"$'\n'"📄 已删除 uploaded_videos.txt（下次运行重新处理全部视频）"$'\n'"🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
-            --data-urlencode text="${MSG}"
+          bash "${GITHUB_WORKSPACE}/.github/scripts/reset_tg_channel.sh" \
+            "${TG_CHANNEL_ID}" \
+            "91-tg"
+
+      # ============ 步骤3：将 OneDrive 中尚未上传的视频补传到 Telegram 频道 ============
       - name: send videos to telegram
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -227,7 +90,7 @@ jobs:
         run: |
           sudo apt-get install -y ffmpeg
           pip3 install telethon
-          bash ${GITHUB_WORKSPACE}/.github/scripts/process_and_upload.sh \
+          bash "${GITHUB_WORKSPACE}/.github/scripts/sync_to_tg.sh" \
             "$SOURCE_REMOTE" \
-            "-1004369945681" \
+            "${TG_CHANNEL_ID}" \
             "91"

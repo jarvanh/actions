@@ -1,6 +1,6 @@
 #!/bin/bash
-# 共享脚本：从 OneDrive 下载视频并上传到 Telegram 频道
-# 用法: process_and_upload.sh <SOURCE_REMOTE> <CHANNEL_ID> <CAPTION_PREFIX>
+# 共享脚本：从远端存储（如 OneDrive）下载视频并批量上传到 Telegram 频道
+# 用法: sync_to_tg.sh <SOURCE_REMOTE> <CHANNEL_ID> <CAPTION_PREFIX>
 # 环境变量: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, GITHUB_WORKSPACE, GITHUB_REPOSITORY, GITHUB_RUN_ID
 
 set +e
@@ -274,7 +274,7 @@ def main():
         print(f"✅ 下载完成: {file} (大小 {human_size(file_size)} / {file_size} bytes, 耗时 {dl_elapsed:.2f}s)")
 
         # 预处理 + 上传到 Telegram
-        proc_one = os.path.join(GITHUB_WORKSPACE, ".github", "scripts", "process_one_file.sh")
+        proc_one = os.path.join(GITHUB_WORKSPACE, ".github", "scripts", "transcode_and_send.sh")
         print(f"🎬 开始处理/上传: {file}")
         up_start = time.time()
         # 透传输出：转码/上传进度实时进 Actions 日志，避免长时间静默

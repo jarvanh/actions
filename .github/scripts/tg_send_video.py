@@ -84,7 +84,7 @@ except ValueError:
     sys.exit(1)
 
 if len(sys.argv) < 3:
-    print("Usage: python upload_video.py <file_path> <chat_id> [caption]")
+    print("Usage: python tg_send_video.py <file_path> <chat_id> [caption]")
     sys.exit(1)
 
 file_path = sys.argv[1]
