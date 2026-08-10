@@ -33,7 +33,7 @@ jobs:
       # SOURCE_REMOTE: "onedrive:4/1024j-视频-pornhub-channel"
       # SOURCE_REMOTE: "onedrive:5/1024j-视频-pornhub-channel"
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       # ============ 环境准备：rclone 安装与挂载 ============
       - name: rclone-install
