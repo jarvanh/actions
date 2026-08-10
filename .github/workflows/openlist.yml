@@ -157,19 +157,46 @@ jobs:
           echo "  验证 OpenList crypt 大小报告"
           echo "=========================================="
 
-          # 等待 OpenList WebDAV 就绪（容器刚启动时可能 401）
-          echo "等待 OpenList WebDAV 就绪..."
-          for i in $(seq 1 18); do
-            if rclone lsd openlist: >/dev/null 2>&1; then
-              echo "OpenList WebDAV 就绪 (第 ${i} 次尝试)"
-              break
+          # 等待 OpenList 就绪
+          # 注意：不能用 rclone lsd 反复探测，会触发后端 429 Too Many Requests
+          # 改用 OpenList /ping 端点（纯本地，不调用任何存储后端）
+          echo "等待 OpenList 进程就绪..."
+          _wait_openlist_ready() {
+            local i
+            # 阶段1: 等待 HTTP 服务响应（快速轮询，不触发后端）
+            for i in $(seq 1 30); do
+              local code
+              code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5244/ping 2>/dev/null || echo "000")
+              if [ "$code" = "200" ]; then
+                echo "OpenList HTTP 就绪 (第 ${i} 次, code=${code})"
+                break
+              fi
+              sleep 2
+            done
+            if [ "$code" != "200" ]; then
+              echo "⚠️ OpenList HTTP 未就绪 (最后 code=${code})"
+              return 1
             fi
-            echo "  等待中... (${i}/18)"
-            sleep 10
-          done
-          if ! rclone lsd openlist: >/dev/null 2>&1; then
-            echo "⚠️ OpenList WebDAV 仍未就绪，继续尝试（可能输出错误信息）"
-          fi
+            # 阶段2: 给驱动初始化时间（crypt 驱动需要从存储读取配置/挂载）
+            echo "等待 OpenList 驱动初始化 (40s)..."
+            sleep 40
+            # 阶段3: 单次 rclone 验证（不反复探测，避免 429）
+            if rclone lsd openlist: >/dev/null 2>&1; then
+              echo "OpenList WebDAV 验证通过"
+              return 0
+            else
+              echo "⚠️ OpenList WebDAV 仍未就绪，再等 30s..."
+              sleep 30
+              if rclone lsd openlist: >/dev/null 2>&1; then
+                echo "OpenList WebDAV 验证通过（第二次）"
+                return 0
+              fi
+              echo "⚠️ OpenList WebDAV 仍未就绪，继续执行（可能出现 429 错误）"
+              return 1
+            fi
+          }
+          _wait_openlist_ready || true
+          unset -f _wait_openlist_ready
 
           # 刷新 OpenList 缓存，避免 stale listing 影响判断
           OL_TOKEN=$(jq -r '.token' /dropbox/self-hosted/openlist/data/config.json 2>/dev/null || echo "")
@@ -360,6 +387,38 @@ jobs:
         if: ${{ inputs.debug_crypt_size != true }}
         run: |
           source /tmp/load_all.sh
+
+          # 等待 OpenList 就绪（容器刚启动时可能 401 Unauthorized 或 429 Too Many Requests，
+          # 会导致预览目标端显示 0 B/0 文件，以及 sync/copy 不必要地重传）
+          # 注意：不能用 rclone lsd 反复探测，会触发后端 429
+          echo "等待 OpenList 就绪..."
+          _wait_openlist_ready() {
+            local i code
+            # 阶段1: 等待 HTTP 服务响应（/ping 纯本地，不触发后端）
+            for i in $(seq 1 30); do
+              code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5244/ping 2>/dev/null || echo "000")
+              [ "$code" = "200" ] && break
+              sleep 2
+            done
+            if [ "$code" != "200" ]; then
+              echo "⚠️ OpenList HTTP 未就绪 (code=${code})"
+              return 1
+            fi
+            echo "OpenList HTTP 就绪，等待驱动初始化 (40s)..."
+            sleep 40
+            # 阶段2: 单次 rclone 验证（不反复探测，避免 429）
+            if rclone lsd openlist: >/dev/null 2>&1; then
+              echo "OpenList WebDAV 验证通过"
+              return 0
+            fi
+            echo "⚠️ WebDAV 未就绪，再等 30s..."
+            sleep 30
+            rclone lsd openlist: >/dev/null 2>&1 && { echo "OpenList WebDAV 验证通过（第二次）"; return 0; }
+            echo "⚠️ OpenList WebDAV 仍未就绪，继续执行"
+            return 1
+          }
+          _wait_openlist_ready || true
+          unset -f _wait_openlist_ready
 
           # ===== rclone 参数集中配置（修改参数只需编辑此处）=====
           # sync_task / copy_task 共用的默认 rclone 参数
