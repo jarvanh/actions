@@ -1734,26 +1734,16 @@ jobs:
               local heartbeat_pid=$!
 
               # _SYNC_MODE=copy 时用 rclone copy（不删除目标端多余文件），否则 rclone sync
-              # --delete-before / --no-traverse 等参数由任务定义显式传入
+              # 共有默认参数来自 RCLONE_DEFAULT_FLAGS（见 "Configure rclone flags" step）
+              # sync_task 特有参数（--delete-before 等）由 sync_task 自动追加到 extra_args
+              # copy_task 特有参数（--no-traverse 等）由 copy_task 自动追加到 extra_args
               local rclone_cmd="sync"
-              local -a rclone_base_flags=(
-                --progress
-                --stats 15s
-                --stats-one-line
-                --ignore-errors
-                --verbose
-                --size-only
-                --timeout 5m
-                --contimeout 30s
-                --retries 1
-                --low-level-retries 3
-              )
               if [ "${_SYNC_MODE:-sync}" = "copy" ]; then
                 rclone_cmd="copy"
               fi
 
               rclone "$rclone_cmd" "$source_path" "$dest_path" \
-                "${rclone_base_flags[@]}" \
+                "${RCLONE_DEFAULT_FLAGS[@]}" \
                 "${extra_args[@]}" \
                 2>&1 | tee "$LAST_ATTEMPT_LOG"
               local attempt_status=${PIPESTATUS[0]}
@@ -2567,12 +2557,15 @@ jobs:
             PROGRESS_STATS="$_old_stats"
           }
 
-          # sync_task: sync --delete-before 模式（删除目标端多余文件）
-          # copy_task: copy --no-traverse 模式（不删除，逐文件检查，适用于 listing 不稳定的加密存储）
+          # sync_task: rclone sync 模式（删除目标端多余文件）
+          # copy_task: rclone copy 模式（不删除，逐文件检查，适用于 listing 不稳定的加密存储）
           # 可选参数（默认均关闭，按需开启）:
           #   --auto-split   开启 50GB 子目录自动拆分
           #   --1d-skip      开启 1 天跳过（--2d-skip / --3d-skip 等可自定义天数）
           #   其余参数（如 --exclude）原样传给 rclone
+          # sync_task 特有参数（--delete-before 等）由 RCLONE_SYNC_TASK_FLAGS 自动追加
+          # copy_task 特有参数（--no-traverse 等）由 RCLONE_COPY_TASK_FLAGS 自动追加
+          # 上述两组参数及共有默认参数均在 "Configure rclone flags" step 中集中定义
           sync_task() {
             local source_path="$1"
             local dest_path="$2"
@@ -2594,6 +2587,12 @@ jobs:
                 *) extra_args+=("$1"); shift ;;
               esac
             done
+
+            # 追加 sync_task 特有 rclone 参数（如 --delete-before）
+            # copy_task 调用时 _SYNC_MODE=copy，跳过 sync 特有参数（copy 不删除）
+            if [ "${_SYNC_MODE:-sync}" != "copy" ]; then
+              extra_args=("${RCLONE_SYNC_TASK_FLAGS[@]}" "${extra_args[@]}")
+            fi
 
             # 根据 skip 天数设置 SYNC_SKIP_SECONDS
             if [ "$_skip_days" -gt 0 ]; then
@@ -2630,9 +2629,10 @@ jobs:
             return $_rc
           }
 
-          # copy_task: 使用 copy --no-traverse 模式（不删除目标端多余文件）
+          # copy_task: 使用 rclone copy 模式（不删除目标端多余文件）
+          # 特有参数（--no-traverse 等）由 RCLONE_COPY_TASK_FLAGS 自动追加
           copy_task() {
-            _SYNC_MODE="copy" sync_task "$@"
+            _SYNC_MODE="copy" sync_task "$@" "${RCLONE_COPY_TASK_FLAGS[@]}"
           }
           EOF
 
@@ -3265,10 +3265,46 @@ jobs:
           }
           EOF
 
+      # ===== rclone 参数集中配置 =====
+      # 修改 rclone 参数只需编辑此 step，无需改动函数体或任务定义。
+      #   RCLONE_DEFAULT_FLAGS   — sync_task / copy_task 共用的默认参数
+      #   RCLONE_SYNC_TASK_FLAGS — sync_task 特有参数（自动追加，无需在任务定义中写）
+      #   RCLONE_COPY_TASK_FLAGS — copy_task 特有参数（自动追加，无需在任务定义中写）
+      - name: Configure rclone flags
+        run: |
+          cat > /tmp/rclone_flags.conf << 'EOF'
+          # sync_task / copy_task 共用的默认 rclone 参数
+          RCLONE_DEFAULT_FLAGS=(
+            --progress
+            --stats 15s
+            --stats-one-line
+            --ignore-errors
+            --verbose
+            --size-only
+            --timeout 5m
+            --contimeout 30s
+            --retries 1
+            --low-level-retries 3
+          )
+
+          # sync_task 特有参数（rclone sync 模式，删除目标端多余文件）
+          RCLONE_SYNC_TASK_FLAGS=(
+            --delete-before
+          )
+
+          # copy_task 特有参数（rclone copy 模式，不删除，逐文件检查）
+          RCLONE_COPY_TASK_FLAGS=(
+            --no-traverse
+          )
+          EOF
+
       - name: Combine all functions
         run: |
           cat /tmp/functions_part1.sh /tmp/functions_part2.sh /tmp/functions_part3.sh /tmp/functions_part4.sh /tmp/functions_part5.sh /tmp/functions_part6.sh /tmp/functions_part7.sh /tmp/functions_part8.sh /tmp/functions_part9.sh /tmp/functions_part10.sh /tmp/functions_part11.sh > /tmp/functions.sh
           rm -f /tmp/functions_part*.sh
+          # 将 rclone 参数配置追加到 functions.sh，后续 source /tmp/functions.sh 时自动加载
+          echo '' >> /tmp/functions.sh
+          cat /tmp/rclone_flags.conf >> /tmp/functions.sh
 
       - name: Initialize sync
         run: |
@@ -3643,54 +3679,55 @@ jobs:
             PROGRESS_STATS="$_old_stats"
             return 0
           }
-
-          # ===== 所有同步任务定义（增减任务只需在此添加/删除一行）=====
-          # sync_task  = rclone sync（删除目标端多余文件需加 --delete-before）
-          # copy_task  = rclone copy（不删除目标端多余文件）
-          # 可选参数: --auto-split  --1d-skip (或 --2d-skip / --3d-skip 自定义天数)
-          # rclone 参数（如 --delete-before --no-traverse --exclude）直接追加在后面
-          run_all_tasks() {
-            sync_task "onedrive:backup" "openlist:aliyundriveCrypt/backup" "backup" --auto-split --1d-skip --delete-before --exclude "/notion/**" --exclude "notion/**" --exclude "/self-hosted_latest.tar.gz" --exclude "self-hosted_latest.tar.gz" --exclude "/github_repos_latest.tar.gz" --exclude "github_repos_latest.tar.gz"
-            sync_task "onedrive:backup" "openlist:wopan176Crypt/backup" "backup" --auto-split --1d-skip --delete-before
-            sync_task "onedrive:backup" "gd:backup" "backup" --1d-skip --delete-before
-
-            sync_task "onedrive:0" "openlist:wopan176Crypt/0" "task0" --auto-split --1d-skip --delete-before
-            sync_task "onedrive:0" "openlist:baidupanCrypt/0" "task0" --auto-split --1d-skip --delete-before
-            sync_task "onedrive:0/j-1024j-视频-pornhub-favorites" "openlist:wopan175/0/j-1024j-视频-pornhub-favorites" "task0" --auto-split --1d-skip --delete-before
-            sync_task "onedrive:0" "gd:0" "task0" --1d-skip --delete-before
-
-            sync_task "onedrive:1" "openlist:wopan176Crypt/1" "task1" --auto-split --1d-skip --delete-before
-            sync_task "onedrive:1" "openlist:baidupanCrypt/1" "task1" --auto-split --1d-skip --delete-before
-            sync_task "onedrive:1" "openlist:wopan175/1" "task1" --auto-split --1d-skip --delete-before
-            sync_task "onedrive:1" "gd:1" "task1" --1d-skip --delete-before
-
-            sync_task "onedrive:2" "openlist:wopan176Crypt/2" "task2" --auto-split --1d-skip --delete-before
-            sync_task "onedrive:2" "openlist:wopan175/2" "task2" --auto-split --1d-skip --delete-before
-            sync_task "onedrive:2" "gd:2" "task2" --1d-skip --delete-before
-
-            sync_task "onedrive:3" "openlist:wopan176Crypt/3" "task3" --auto-split --1d-skip --delete-before
-            sync_task "onedrive:3" "openlist:wopan175/3" "task3" --auto-split --1d-skip --delete-before
-            sync_task "onedrive:3" "gd:3" "task3" --1d-skip --delete-before
-
-            sync_task "onedrive:4" "openlist:wopan176Crypt/4" "task4" --auto-split --1d-skip --delete-before
-            sync_task "onedrive:4" "openlist:wopan175/4" "task4" --auto-split --1d-skip --delete-before
-
-            sync_task "onedrive:5" "openlist:wopan176Crypt/5" "task5" --auto-split --1d-skip --delete-before
-            sync_task "onedrive:5" "openlist:wopan175/5" "task5" --auto-split --1d-skip --delete-before
-          }
           EOF
 
-      - name: Preview sync tasks
+      # ===== 所有同步任务定义 + 预览 + 执行 =====
+      # 增减任务只需编辑下方 run_all_tasks 函数体。
+      - name: Preview and sync all tasks
         run: |
           source /tmp/functions.sh
+
+          # ===== 所有同步任务定义（增减任务只需在此添加/删除一行）=====
+          # sync_task  = rclone sync（删除目标端多余文件，--delete-before 等由函数自动追加）
+          # copy_task  = rclone copy（不删除，--no-traverse 等由函数自动追加）
+          # 可选参数: --auto-split  --1d-skip (或 --2d-skip / --3d-skip 自定义天数)
+          # 其余 rclone 参数（如 --exclude）直接追加在后面
+          # 特有/共有 rclone 参数请在 "Configure rclone flags" step 中集中修改
+          run_all_tasks() {
+            sync_task "onedrive:backup" "openlist:aliyundriveCrypt/backup" "backup" --auto-split --1d-skip --exclude "/notion/**" --exclude "notion/**" --exclude "/self-hosted_latest.tar.gz" --exclude "self-hosted_latest.tar.gz" --exclude "/github_repos_latest.tar.gz" --exclude "github_repos_latest.tar.gz"
+            sync_task "onedrive:backup" "openlist:wopan176Crypt/backup" "backup" --auto-split --1d-skip
+            sync_task "onedrive:backup" "gd:backup" "backup" --1d-skip
+
+            sync_task "onedrive:0" "openlist:wopan176Crypt/0" "task0" --auto-split --1d-skip
+            sync_task "onedrive:0" "openlist:baidupanCrypt/0" "task0" --auto-split --1d-skip
+            sync_task "onedrive:0/j-1024j-视频-pornhub-favorites" "openlist:wopan175/0/j-1024j-视频-pornhub-favorites" "task0" --auto-split --1d-skip
+            sync_task "onedrive:0" "gd:0" "task0" --1d-skip
+
+            sync_task "onedrive:1" "openlist:wopan176Crypt/1" "task1" --auto-split --1d-skip
+            sync_task "onedrive:1" "openlist:baidupanCrypt/1" "task1" --auto-split --1d-skip
+            sync_task "onedrive:1" "openlist:wopan175/1" "task1" --auto-split --1d-skip
+            sync_task "onedrive:1" "gd:1" "task1" --1d-skip
+
+            sync_task "onedrive:2" "openlist:wopan176Crypt/2" "task2" --auto-split --1d-skip
+            sync_task "onedrive:2" "openlist:wopan175/2" "task2" --auto-split --1d-skip
+            sync_task "onedrive:2" "gd:2" "task2" --1d-skip
+
+            sync_task "onedrive:3" "openlist:wopan176Crypt/3" "task3" --auto-split --1d-skip
+            sync_task "onedrive:3" "openlist:wopan175/3" "task3" --auto-split --1d-skip
+            sync_task "onedrive:3" "gd:3" "task3" --1d-skip
+
+            sync_task "onedrive:4" "openlist:wopan176Crypt/4" "task4" --auto-split --1d-skip
+            sync_task "onedrive:4" "openlist:wopan175/4" "task4" --auto-split --1d-skip
+
+            sync_task "onedrive:5" "openlist:wopan176Crypt/5" "task5" --auto-split --1d-skip
+            sync_task "onedrive:5" "openlist:wopan175/5" "task5" --auto-split --1d-skip
+          }
+
           echo "=== 发送任务预览通知 ==="
           TASK_PREVIEW_ONLY=1 run_all_tasks
           flush_task_preview
           echo "=== 所有任务预览通知已发送 ==="
 
-      - name: Sync all tasks
-        run: |
-          source /tmp/functions.sh
           echo "=== 开始同步所有任务 ==="
           run_all_tasks
           echo "=== 所有任务同步完成 ==="
