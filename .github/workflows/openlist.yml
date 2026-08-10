@@ -14,6 +14,11 @@ on:
         required: false
         type: boolean
         default: false
+      debug_crypt_size:
+        description: "调试: 验证 OpenList crypt 大小报告（不执行同步）"
+        required: false
+        type: boolean
+        default: false
   schedule:
     # - cron: "10 1 * * *"
     - cron: "*/5 * * * *"
@@ -141,6 +146,143 @@ jobs:
           echo "Installing ffmpeg, jq, coreutils..."
           sudo apt-get install -y ffmpeg jq coreutils bc p7zip-full
 
+      # ===== 临时调试: 验证 crypt 大小报告 =====
+      # 确认 OpenList crypt 通过 WebDAV 返回的是明文大小还是加密后大小
+      # 诊断完成后可删除此 step 及对应的 workflow_dispatch input
+      - name: Debug: 验证 crypt 大小报告
+        if: ${{ inputs.debug_crypt_size == true }}
+        continue-on-error: true
+        run: |
+          echo "=========================================="
+          echo "  验证 OpenList crypt 大小报告"
+          echo "=========================================="
+
+          # 刷新 OpenList 缓存，避免 stale listing 影响判断
+          OL_TOKEN=$(jq -r '.token' /dropbox/self-hosted/openlist/data/config.json 2>/dev/null || echo "")
+          if [ -n "$OL_TOKEN" ] && [ "$OL_TOKEN" != "null" ]; then
+            echo "刷新 OpenList 缓存 /aliyundriveCrypt/backup ..."
+            curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh" \
+              -H "Authorization: $OL_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d '{"path":"/aliyundriveCrypt/backup","recursive":true}' >/dev/null 2>&1 || true
+            sleep 15
+          fi
+
+          echo ""
+          echo "获取源端文件列表 (onedrive:backup, max-depth=3)..."
+          timeout 120 rclone lsf onedrive:backup --files-only -l --recursive --max-depth 3 2>/dev/null > /tmp/src_listing.txt || true
+          echo "源端文件数: $(wc -l < /tmp/src_listing.txt | tr -d ' ')"
+
+          echo "获取目标端文件列表 (openlist:aliyundriveCrypt/backup, max-depth=3)..."
+          timeout 120 rclone lsf openlist:aliyundriveCrypt/backup --files-only -l --recursive --max-depth 3 2>/dev/null > /tmp/dst_listing.txt || true
+          echo "目标端文件数: $(wc -l < /tmp/dst_listing.txt | tr -d ' ')"
+
+          echo ""
+          echo "=== 源端前5个文件 ==="
+          head -5 /tmp/src_listing.txt
+          echo ""
+          echo "=== 目标端前5个文件 ==="
+          head -5 /tmp/dst_listing.txt
+          echo ""
+
+          echo "=== 大小对比分析 ==="
+          python3 << 'PYEOF'
+          import math
+          import sys
+
+          def parse_listing(path):
+              """解析 rclone lsf -l 输出: 'size date time filename'"""
+              files = {}
+              try:
+                  with open(path) as f:
+                      for line in f:
+                          line = line.strip()
+                          if not line:
+                              continue
+                          parts = line.split(None, 3)
+                          if len(parts) >= 4:
+                              try:
+                                  size = int(parts[0])
+                              except ValueError:
+                                  continue
+                              name = parts[3].strip()
+                              files[name] = size
+              except FileNotFoundError:
+                  print(f"警告: {path} 不存在")
+              return files
+
+          src = parse_listing('/tmp/src_listing.txt')
+          dst = parse_listing('/tmp/dst_listing.txt')
+
+          common = sorted(set(src.keys()) & set(dst.keys()))
+
+          print(f"源端文件数: {len(src)}")
+          print(f"目标端文件数: {len(dst)}")
+          print(f"共同文件数: {len(common)}")
+          print()
+
+          if not common:
+              print("⚠️ 无共同文件。可能原因:")
+              print("  - 目标端为空（首次同步）")
+              print("  - 文件名不匹配（crypt 加密了文件名）")
+              print("  - max-depth 不够，子目录文件未列出")
+              if src:
+                  print(f"\n  源端文件名样本:")
+                  for name in list(src.keys())[:3]:
+                      print(f"    {name}  ({src[name]:,} bytes)")
+              if dst:
+                  print(f"\n  目标端文件名样本:")
+                  for name in list(dst.keys())[:3]:
+                      print(f"    {name}  ({dst[name]:,} bytes)")
+              sys.exit(0)
+
+          match_count = 0
+          crypt_count = 0
+          other_count = 0
+
+          for name in common[:10]:
+              s = src[name]
+              d = dst[name]
+              expected_crypt = 32 + 16 * math.ceil(s / 64)
+              if s == d:
+                  status = "✅ 一致 (明文大小)"
+                  match_count += 1
+              elif d == expected_crypt:
+                  status = f"🔴 加密后大小 (差异 {d-s} = 32 + 16*ceil({s}/64))"
+                  crypt_count += 1
+              else:
+                  status = f"⚠️ 不一致 (差异 {d-s}, 预期 crypt 开销 {expected_crypt-s})"
+                  other_count += 1
+              print(f"  {name}")
+              print(f"    源端: {s:,} bytes")
+              print(f"    目标: {d:,} bytes")
+              print(f"    {status}")
+              print()
+
+          print("=" * 50)
+          if crypt_count > 0 and match_count == 0:
+              print("🔴 结论: OpenList WebDAV 报告的是加密后大小")
+              print("   --size-only 永远不匹配 → 每次都会重传")
+              print("   建议: copy_task 加 --ignore-size --update，或改用 rclone crypt remote")
+          elif match_count > 0 and crypt_count == 0:
+              print("✅ 结论: OpenList WebDAV 报告的是明文大小")
+              print("   --size-only 应正常工作")
+              print("   'Copied (replaced existing)' 的原因可能是:")
+              print("   - OpenList 缓存过期 (stale listing)")
+              print("   - 之前上传中断导致文件不完整")
+              print("   - 源端文件确实发生了变化")
+          elif other_count > 0:
+              print("⚠️ 结论: 大小不一致但不符合 crypt 开销规律")
+              print("   需进一步调查 (可能是缓存问题或上传不完整)")
+          else:
+              print("⚠️ 混合结果，请查看上方详细对比")
+          PYEOF
+
+          echo ""
+          echo "=========================================="
+          echo "  验证完成"
+          echo "=========================================="
+
       # ===== 加载函数库 =====
       # 所有同步相关函数已提取到 .github/scripts/openlist/ 目录下的脚本文件中。
       # 修改函数逻辑请编辑对应脚本文件；修改任务定义和 rclone 参数请编辑下方 "Preview and sync all tasks" step。
@@ -153,6 +295,7 @@ jobs:
           echo "函数库加载完成"
 
       - name: Initialize sync
+        if: ${{ inputs.debug_crypt_size != true }}
         run: |
           source /tmp/load_all.sh
           PROCESSED_FILES_LOG="processed_videos.log"
@@ -181,6 +324,7 @@ jobs:
       # ===== 所有同步任务定义 + 预览 + 执行 =====
       # 增减任务只需编辑下方 run_all_tasks 函数体；rclone 参数编辑下方 RCLONE_*_FLAGS 数组。
       - name: Preview and sync all tasks
+        if: ${{ inputs.debug_crypt_size != true }}
         run: |
           source /tmp/load_all.sh
 
@@ -256,6 +400,7 @@ jobs:
           echo "=== 所有任务同步完成 ==="
 
       - name: Finalize and cleanup
+        if: ${{ inputs.debug_crypt_size != true }}
         run: |
           source /tmp/load_all.sh
           actual_entries=0
@@ -284,6 +429,7 @@ jobs:
           echo "所有同步任务完成！"
 
       - name: sleep
+        if: ${{ inputs.debug_crypt_size != true }}
         run: |
           sleep 300m
           sudo docker stop openlist
