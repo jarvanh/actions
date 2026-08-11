@@ -366,13 +366,21 @@ jobs:
           src_sub = load_listing(src_sub_path) if os.path.exists(src_sub_path) else {}
           dst_sub = load_listing(dst_sub_path) if os.path.exists(dst_sub_path) else {}
 
+          using_sub = False
           if (not src or not dst) and (src_sub and dst_sub):
               src, dst = src_sub, dst_sub
+              using_sub = True
               print("(使用子目录数据)")
           elif src_sub and not dst and not dst_sub:
               src = {**src, **src_sub}
 
           common = sorted(set(src.keys()) & set(dst.keys()))
+
+          # 写入 copy 测试用的文件信息（取最小的匹配文件，加快测试速度）
+          if common:
+              smallest = min(common, key=lambda n: src[n])
+              with open('/tmp/_test_file.txt', 'w') as f:
+                  f.write(f"{smallest}\n{'sub' if using_sub else 'root'}\n")
 
           print(f"源端文件数: {len(src)}")
           print(f"目标端文件数: {len(dst)}")
@@ -443,6 +451,38 @@ jobs:
                   with open('/tmp/_verify_result.txt', 'a') as f:
                       f.write(f"{dst_remote}|MIXED\n")
           PYEOF
+
+            # ===== Copy 测试: 用刚比对过、大小一致的文件实测 rclone --size-only 是否生效 =====
+            # 使用与 copy_task 相同的 flag (--size-only --no-traverse)，对单个文件执行实际 copy
+            if [ -f /tmp/_test_file.txt ]; then
+              TEST_FILE=$(sed -n '1p' /tmp/_test_file.txt)
+              TEST_LOC=$(sed -n '2p' /tmp/_test_file.txt)
+              # 若文件来自子目录，需拼接子目录前缀作为 --include 路径
+              if [ "$TEST_LOC" = "sub" ] && [ -n "$FIRST_SUBDIR" ]; then
+                TEST_INCLUDE="${FIRST_SUBDIR}/${TEST_FILE}"
+              else
+                TEST_INCLUDE="${TEST_FILE}"
+              fi
+              echo ""
+              echo "--- Copy 测试: rclone copy --size-only --no-traverse ---"
+              echo "  测试文件: ${TEST_INCLUDE}"
+              echo "  源端: ${src_remote}"
+              echo "  目标: ${dst_remote}"
+              echo ""
+              # 实际 copy（文件已存在且大小一致，rclone 应 Skipped 而非 Copied）
+              rclone copy "${src_remote}" "${dst_remote}" \
+                --include "${TEST_INCLUDE}" \
+                --size-only --no-traverse \
+                --verbose --stats-one-line --stats 0 \
+                --timeout 2m --contimeout 30s --retries 1 --low-level-retries 3 \
+                2>&1 | head -30
+              echo ""
+              echo "  判读: 'Skipped' = --size-only 正常（文件一致跳过）"
+              echo "        'Copied (replaced existing)' = --size-only 未生效或目标端文件实际不一致"
+              rm -f /tmp/_test_file.txt
+            else
+              echo "  (无匹配文件，跳过 copy 测试)"
+            fi
 
             # 清理本对临时文件
             rm -f "/tmp/src_${$}.json" "/tmp/dst_${$}.json" "/tmp/src_sub_${$}.json" "/tmp/dst_sub_${$}.json"
