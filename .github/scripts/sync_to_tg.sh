@@ -22,10 +22,10 @@ TMP_DIR="/tmp/tg-upload"
 mkdir -p "$TMP_DIR"
 
 # 拉取已上传名单到本地（不要修改远程文件，工作结束后再写回）
-rclone cat "$SOURCE_REMOTE/uploaded_videos.txt" 2>/dev/null > "$TMP_DIR/uploaded_videos.raw" || true
+rclone cat "$SOURCE_REMOTE/uploaded_videos.json" 2>/dev/null > "$TMP_DIR/uploaded_videos.raw" || true
 
 # 所有核心逻辑交给 Python：列出、比较、下载、上传、记录
-# 只需要一个持久化文件 uploaded_videos.txt，不再需要 all_videos.txt / pending.txt / skipped.txt 等中间文件
+# 只需要一个持久化文件 uploaded_videos.json（versioned JSON 对象，可扩展元数据），不再需要中间文件
 python3 - "$SOURCE_REMOTE" "$CHANNEL_ID" "$CAPTION_PREFIX" "$TMP_DIR" <<'PYEOF'
 import json
 import os
@@ -33,7 +33,7 @@ import shlex
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 SOURCE_REMOTE = sys.argv[1]
@@ -46,7 +46,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".flv", ".wmv", ".webm", ".m4v", ".ts"}
 UPLOADED_RAW = os.path.join(TMP, "uploaded_videos.raw")
-UPLOADED_OUT = os.path.join(TMP, "uploaded_videos.txt")
+UPLOADED_OUT = os.path.join(TMP, "uploaded_videos.json")
 STATS_FILE = os.path.join(TMP, "stats.json")
 WORK_DIR = os.path.join(TMP, "work")
 
@@ -80,63 +80,68 @@ def is_video(path: str) -> bool:
     return os.path.splitext(path)[1].lower() in VIDEO_EXTS
 
 
-def read_uploaded() -> set:
-    """读取已上传名单（JSON 数组格式）。"""
-    uploaded = set()
+def read_uploaded() -> dict:
+    """读取已上传名单（纯 JSON 对象格式，不再兼容旧格式）。
+    返回 dict: filename -> {uploaded_at: str, size_bytes: int, ...}（O(1) 键查找）
+    """
+    empty = {}
     if not os.path.exists(UPLOADED_RAW):
-        print(f"[read_uploaded] 文件不存在，视为空列表: {UPLOADED_RAW}")
-        return uploaded
+        print(f"[read_uploaded] 文件不存在，视为空: {UPLOADED_RAW}")
+        return empty
     size = os.path.getsize(UPLOADED_RAW)
     if size == 0:
         print(f"[read_uploaded] 文件为空: {UPLOADED_RAW}")
-        return uploaded
+        return empty
 
     print(f"[read_uploaded] 开始读取，文件大小: {size} bytes, 路径: {UPLOADED_RAW}")
     try:
-        with open(UPLOADED_RAW, "rb") as f:
-            raw = f.read()
-        # 记录前 500 字节用于排查编码/格式问题
-        preview = raw[:500]
-        print(f"[read_uploaded] 原始内容前 500 bytes (repr): {preview!r}")
-
         with open(UPLOADED_RAW, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        if isinstance(data, list):
-            for idx, item in enumerate(data):
-                if isinstance(item, str) and item:
-                    uploaded.add(item)
-                else:
-                    print(f"[read_uploaded] 跳过无效条目 #{idx}: type={type(item).__name__}, value={item!r}")
-            print(f"[read_uploaded] 解析成功，有效条目数: {len(uploaded)}, 总条目数: {len(data)}")
-        else:
-            print(f"[read_uploaded] WARN: JSON 根节点不是数组，实际类型: {type(data).__name__}, 值: {data!r}")
+        # v1 格式: {"version": 1, "uploaded": {"file.mp4": {meta}}}
+        if isinstance(data, dict) and isinstance(data.get("uploaded"), dict):
+            filtered = {}
+            for fn, meta in data["uploaded"].items():
+                if isinstance(fn, str) and fn and isinstance(meta, dict):
+                    filtered[fn] = meta
+                elif isinstance(fn, str) and fn:
+                    filtered[fn] = {}
+            print(f"[read_uploaded] v1 JSON 对象格式解析成功，有效条目数: {len(filtered)}")
+            return filtered
+
+        # 兼容简写格式（直接一个对象就是 uploaded）
+        if isinstance(data, dict):
+            filtered = {}
+            for fn, meta in data.items():
+                if isinstance(fn, str) and fn and isinstance(meta, dict):
+                    filtered[fn] = meta
+                elif isinstance(fn, str) and fn and meta is None:
+                    filtered[fn] = {}
+            if filtered:
+                print(f"[read_uploaded] 简写对象格式解析成功，有效条目数: {len(filtered)}")
+                return filtered
+
+        print(f"[read_uploaded] WARN: JSON 结构不匹配，返回空。根节点类型: {type(data).__name__}")
     except json.JSONDecodeError as e:
-        print(f"[read_uploaded] ERROR: JSON 解析失败: {e}")
-        # 输出失败位置附近的内容，方便定位
-        try:
-            with open(UPLOADED_RAW, "rb") as f:
-                raw = f.read()
-            err_pos = getattr(e, "pos", 0)
-            start = max(0, err_pos - 100)
-            end = min(len(raw), err_pos + 100)
-            print(f"[read_uploaded] ERROR: 出错位置附近 bytes (pos={err_pos}): {raw[start:end]!r}")
-        except Exception as ex:
-            print(f"[read_uploaded] ERROR: 无法读取出错位置详情: {ex}")
+        print(f"[read_uploaded] ERROR: JSON 解析失败（旧格式已不再兼容，按空处理）: {e}")
     except Exception as e:
         print(f"[read_uploaded] ERROR: 读取失败: {type(e).__name__}: {e}")
-    return uploaded
+    return empty
 
 
-def write_uploaded(uploaded: set):
-    """写回 uploaded_videos.txt（JSON 数组格式）。"""
-    lines = sorted(uploaded, key=lambda x: x.lower())
-    print(f"[write_uploaded] 开始写入，条目数: {len(lines)}, 路径: {UPLOADED_OUT}")
-    if lines:
-        print(f"[write_uploaded] 前 5 条示例: {lines[:5]!r}")
+def write_uploaded(uploaded: dict):
+    """写回 uploaded_videos.json（v1 JSON 对象格式，保留扩展字段）。"""
+    print(f"[write_uploaded] 开始写入（v1 JSON 对象），条目数: {len(uploaded)}, 路径: {UPLOADED_OUT}")
+    if uploaded:
+        sample = sorted(uploaded.keys(), key=lambda x: x.lower())[:5]
+        print(f"[write_uploaded] 前 5 条示例: {sample!r}")
+    payload = {
+        "version": 1,
+        "uploaded": {k: (v if isinstance(v, dict) else {}) for k, v in uploaded.items()},
+    }
     try:
         with open(UPLOADED_OUT, "w", encoding="utf-8") as f:
-            json.dump(lines, f, ensure_ascii=False, indent=2)
+            json.dump(payload, f, ensure_ascii=False, indent=2)
         size = os.path.getsize(UPLOADED_OUT)
         print(f"[write_uploaded] 写入完成，文件大小: {size} bytes")
     except Exception as e:
@@ -225,7 +230,10 @@ def main():
 
     total = len(all_videos)
     pending_count = len(pending)
-    print(f"rclone lsjson 返回 {total + len(skipped)} 条条目，视频文件 {total} 条，已上传 {len(uploaded)} 条，待上传 {pending_count} 条")
+    uploaded_before = len(uploaded)
+    # 保持原 rclone lsjson 日志（含所有条目数），下一行按用户要求输出统一的统计格式
+    print(f"rclone lsjson 返回 {total + len(skipped)} 条条目，视频文件 {total} 条，已上传 {uploaded_before} 条，待上传 {pending_count} 条，失败上传 0 条")
+    print(f"视频文件 {total} 条，已上传 {uploaded_before} 条，待上传 {pending_count} 条，失败上传 0 条")
     if skipped:
         from collections import Counter
         c = Counter(reason for reason, _ in skipped)
@@ -281,7 +289,30 @@ def main():
         up_result = run(["bash", proc_one, local_file, CHANNEL_ID, modtime_display], capture=False)
         up_elapsed = time.time() - up_start
         if up_result.returncode == 0:
-            uploaded.add(file)
+            uploaded_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            # source_modified_at: 将 rclone lsjson 返回的 ISO 时间标准化为带 Z 后缀的 UTC 格式
+            source_modified_at = modtime
+            if modtime:
+                try:
+                    dt_src = datetime.fromisoformat(modtime.replace("Z", "+00:00"))
+                    source_modified_at = dt_src.strftime("%Y-%m-%dT%H:%M:%SZ")
+                except Exception:
+                    pass
+            # source_created_at: 从本地下载的文件获取创建时间（macOS st_birthtime / Linux st_ctime）
+            source_created_at = ""
+            try:
+                st = os.stat(local_file)
+                ct = getattr(st, 'st_birthtime', None) or st.st_ctime
+                source_created_at = datetime.fromtimestamp(ct, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            except OSError:
+                pass
+            uploaded[file] = {
+                "uploaded_at": uploaded_at,
+                "size_bytes": file_size,
+                "size": human_size(file_size),
+                "source_created_at": source_created_at,
+                "source_modified_at": source_modified_at or "",
+            }
             sent += 1
             sent_list.append(f"- {file} (上传耗时 {up_elapsed:.2f}s)")
             print(f"✅ 上传完成: {file} (总处理耗时 {up_elapsed:.2f}s)")
@@ -302,7 +333,10 @@ def main():
 
     stats = {
         "total": total,
+        "uploaded_before": uploaded_before,
+        "uploaded_total": len(uploaded),
         "pending": pending_count,
+        "remaining": total - len(uploaded),
         "sent": sent,
         "failed": failed,
         "skipped_count": len(skipped),
@@ -313,6 +347,8 @@ def main():
     with open(STATS_FILE, "w", encoding="utf-8") as f:
         json.dump(stats, f, ensure_ascii=False, indent=2)
 
+    summary_line = f"视频文件 {total} 条，已上传 {len(uploaded)} 条，待上传 {total - len(uploaded)} 条，失败上传 {failed} 条"
+    print(summary_line)
     print(f"上传完成: 成功 {sent}, 失败 {failed}")
 
 
@@ -326,12 +362,14 @@ if [ $PYTHON_EXIT -ne 0 ]; then
   exit $PYTHON_EXIT
 fi
 
-# 上传更新后的 uploaded_videos.txt 回 OneDrive
-rclone copyto "$TMP_DIR/uploaded_videos.txt" "$SOURCE_REMOTE/uploaded_videos.txt" 2>/dev/null
+# 上传更新后的 uploaded_videos.json 回 OneDrive
+rclone copyto "$TMP_DIR/uploaded_videos.json" "$SOURCE_REMOTE/uploaded_videos.json" 2>/dev/null
 
 # 读取 Python 输出的统计
 STATS_FILE="$TMP_DIR/stats.json"
 TOTAL_VIDEOS=$(python3 -c "import json,sys; d=json.load(open('$STATS_FILE')); print(d.get('total',0))" 2>/dev/null || echo 0)
+UPLOADED_TOTAL=$(python3 -c "import json,sys; d=json.load(open('$STATS_FILE')); print(d.get('uploaded_total',0))" 2>/dev/null || echo 0)
+REMAINING=$(python3 -c "import json,sys; d=json.load(open('$STATS_FILE')); print(d.get('remaining',0))" 2>/dev/null || echo 0)
 PENDING_COUNT=$(python3 -c "import json,sys; d=json.load(open('$STATS_FILE')); print(d.get('pending',0))" 2>/dev/null || echo 0)
 SENT=$(python3 -c "import json,sys; d=json.load(open('$STATS_FILE')); print(d.get('sent',0))" 2>/dev/null || echo 0)
 FAILED=$(python3 -c "import json,sys; d=json.load(open('$STATS_FILE')); print(d.get('failed',0))" 2>/dev/null || echo 0)
@@ -343,7 +381,8 @@ SKIPPED_DETAILS=$(python3 -c "import json,sys; d=json.load(open('$STATS_FILE'));
 # 发送通知
 source "${GITHUB_WORKSPACE}/.github/scripts/tg_notify.sh"
 
-HEADER="📺 ${CAPTION_PREFIX}"$'\n'"📊 总计: ${PENDING_COUNT}"$'\n'"✅ 成功: ${SENT}"$'\n'"❌ 失败: ${FAILED}"
+SUMMARY_LINE="视频文件 ${TOTAL_VIDEOS} 条，已上传 ${UPLOADED_TOTAL} 条，待上传 ${REMAINING} 条，失败上传 ${FAILED} 条"
+HEADER="📺 ${CAPTION_PREFIX}"$'\n'"${SUMMARY_LINE}"$'\n'"📊 本次处理: ${PENDING_COUNT}"$'\n'"✅ 成功: ${SENT}"$'\n'"❌ 失败: ${FAILED}"
 if [ "$SKIPPED_COUNT" -gt 0 ]; then
   HEADER+=$'\n'"⚠️ 跳过/过滤: ${SKIPPED_COUNT}"
 fi

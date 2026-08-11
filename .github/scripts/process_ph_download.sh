@@ -53,8 +53,33 @@ fi
 # 文件完好，预处理（转码/faststart）并上传到 Telegram
 # 直接输出原始 URL，Telegram 自动识别为可点击链接（无需 parse_mode）
 echo "- ${FILENAME} (${FILESIZE_HUMAN}) ${URL}" >> new_downloads_list.txt
+# 上传成功后，通过独立 Python 脚本原子追加到 uploaded_videos.json（保持 JSON v1 结构，避免 shell >> 破坏格式）
+FILESIZE_BYTES=$(stat -c%s "$FILEPATH" 2>/dev/null || stat -f%z "$FILEPATH" 2>/dev/null || echo "")
+# 本地文件 mtime 作为 source_modified_at（yt-dlp 下载时间，最接近原始视频修改时间）
+SOFTWARE_MODIFIED_AT=$(stat -c%Y "$FILEPATH" 2>/dev/null || stat -f%m "$FILEPATH" 2>/dev/null || echo "")
+# 本地文件 birth time 作为 source_created_at（Linux 不支持时 fallback 到 ctime）
+SOFTWARE_CREATED_AT=$(stat -c%W "$FILEPATH" 2>/dev/null || echo "0")
+if [ "$SOFTWARE_CREATED_AT" = "0" ]; then
+  SOFTWARE_CREATED_AT=$(stat -c%Z "$FILEPATH" 2>/dev/null || echo "0")
+fi
+# 转换为 ISO 8601 UTC
+if [ -n "$SOFTWARE_MODIFIED_AT" ] && [ "$SOFTWARE_MODIFIED_AT" != "0" ]; then
+  SOURCE_MODIFIED_ISO=$(python3 -c "from datetime import datetime, timezone; print(datetime.fromtimestamp($SOFTWARE_MODIFIED_AT, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))" 2>/dev/null || echo "")
+else
+  SOURCE_MODIFIED_ISO=""
+fi
+if [ -n "$SOFTWARE_CREATED_AT" ] && [ "$SOFTWARE_CREATED_AT" != "0" ]; then
+  SOURCE_CREATED_ISO=$(python3 -c "from datetime import datetime, timezone; print(datetime.fromtimestamp($SOFTWARE_CREATED_AT, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))" 2>/dev/null || echo "")
+else
+  SOURCE_CREATED_ISO=""
+fi
 if bash ${GITHUB_WORKSPACE}/.github/scripts/transcode_and_send.sh "${FILEPATH}" "${TELEGRAM_CHANNEL_ID}" "ph"; then
-  echo "${FILENAME}" >> uploaded_videos.txt
+  python3 "${GITHUB_WORKSPACE}/.github/scripts/add_uploaded_video.py" \
+    "${TARGET_DIR}/uploaded_videos.json" \
+    "${FILENAME}" \
+    ${FILESIZE_BYTES:-0} \
+    "${SOURCE_MODIFIED_ISO}" \
+    "${SOURCE_CREATED_ISO}"
 fi
 
 # 上传到 OneDrive（覆盖已有文件），完成后删除临时文件
