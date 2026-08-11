@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       clean_tg_uploaded_videos:
-        description: '清空 Telegram 频道所有消息并删除 uploaded_videos.txt，会重新上传全部视频到 Telegram 频道'
+        description: '清空 Telegram 频道所有消息并删除 uploaded_videos.json，会重新上传全部视频到 Telegram 频道'
         type: boolean
         default: false
         required: false
@@ -129,6 +129,19 @@ jobs:
           sudo apt-get install python3 -y
           sudo apt-get install ffmpeg -y
           pip3 install --upgrade yt-dlp telethon
+
+          # 同步远端最新的 uploaded_videos.json 到挂载目录（刷新 VFS 缓存）
+          # step4 通过 rclone copyto 直接写远端，挂载目录可能读到旧缓存；否则 process_ph_download.sh 可能在旧文件基础上 >> 追加导致丢项
+          TARGET_DIR="$HOME/onedrive/0/j-1024j-视频-pornhub-favorites"
+          mkdir -p "$TARGET_DIR"
+          if rclone cat "$SOURCE_REMOTE/uploaded_videos.json" > "$TARGET_DIR/uploaded_videos.json.remote" 2>/dev/null && [ -s "$TARGET_DIR/uploaded_videos.json.remote" ]; then
+            mv "$TARGET_DIR/uploaded_videos.json.remote" "$TARGET_DIR/uploaded_videos.json"
+            echo "已同步 uploaded_videos.json 从远端到挂载目录 (size: $(wc -c < "$TARGET_DIR/uploaded_videos.json"))"
+          else
+            rm -f "$TARGET_DIR/uploaded_videos.json.remote"
+            echo "uploaded_videos.json 在远端为空或不存在，跳过同步"
+          fi
+
           cd ~/onedrive/0/j-1024j-视频-pornhub-favorites
           echo "favorites 文件列表"
           ls
@@ -190,6 +203,29 @@ jobs:
           AFTER_SIZE=$(du -sh . | cut -f1)
           echo "$AFTER_SIZE"
 
+          # 计算视频文件统计（总数 / 已上传 / 待上传 / 失败上传）
+          # 使用外部 Python 脚本避免内联 heredoc 与 YAML 的歧义
+          TARGET_DIR="$HOME/onedrive/0/j-1024j-视频-pornhub-favorites"
+          VIDEO_STATS=$(python3 "${GITHUB_WORKSPACE}/.github/scripts/compute_video_stats.py" "$TARGET_DIR" || echo "0|0|0|0")
+          TOTAL_VIDEOS=$(echo "$VIDEO_STATS" | cut -d'|' -f1)
+          UPLOADED_VIDEOS=$(echo "$VIDEO_STATS" | cut -d'|' -f2)
+          PENDING_VIDEOS=$(echo "$VIDEO_STATS" | cut -d'|' -f3)
+          FAILED_VIDEOS=$(echo "$VIDEO_STATS" | cut -d'|' -f4)
+          VIDEO_SUMMARY="视频文件 ${TOTAL_VIDEOS} 条，已上传 ${UPLOADED_VIDEOS} 条，待上传 ${PENDING_VIDEOS} 条，失败上传 ${FAILED_VIDEOS} 条"
+          echo "$VIDEO_SUMMARY"
+
+          # 强制将挂载目录中 appended 的 uploaded_videos.json 写回远端（VFS full 模式写回是后台异步，避免 VM 销毁前丢数据）
+          TARGET_DIR="$HOME/onedrive/0/j-1024j-视频-pornhub-favorites"
+          if [ -f "$TARGET_DIR/uploaded_videos.json" ] && [ -s "$TARGET_DIR/uploaded_videos.json" ]; then
+            cp "$TARGET_DIR/uploaded_videos.json" /tmp/uploaded_videos.final.txt
+            if rclone copyto /tmp/uploaded_videos.final.txt "$SOURCE_REMOTE/uploaded_videos.json" 2>/dev/null; then
+              echo "uploaded_videos.json 已同步回远端 (size: $(wc -c < /tmp/uploaded_videos.final.txt))"
+            else
+              echo "WARN: uploaded_videos.json 回写远端失败，下次运行时可能重复上传部分视频"
+            fi
+            rm -f /tmp/uploaded_videos.final.txt
+          fi
+
           if [ -f new_downloads_list.txt ]; then
             FILE_LIST=$(cat new_downloads_list.txt)
           else
@@ -197,7 +233,7 @@ jobs:
           fi
 
           source "${GITHUB_WORKSPACE}/.github/scripts/tg_notify.sh"
-          HEADER="✅ ph-dl 下载任务完成"$'\n'"━━━━━━━━━━━━━━━━━━"$'\n'$'\n'"📊 本次下载: ${DOWNLOAD_COUNT} 个视频"$'\n'"💾 下载前: ${BEFORE_SIZE}"$'\n'"💾 下载后: ${AFTER_SIZE}"
+          HEADER="✅ ph-dl 下载任务完成"$'\n'"━━━━━━━━━━━━━━━━━━"$'\n'$'\n'"${VIDEO_SUMMARY}"$'\n'"📊 本次下载: ${DOWNLOAD_COUNT} 个视频"$'\n'"💾 下载前: ${BEFORE_SIZE}"$'\n'"💾 下载后: ${AFTER_SIZE}"
           send_tg "$HEADER"
           if [ "$FILE_LIST" != "无" ]; then
             send_tg_chunked "📋 文件列表"$'\n'"━━━━━━━━━━━━━━━━━━"$'\n\n'"${FILE_LIST}"
