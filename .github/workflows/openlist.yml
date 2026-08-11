@@ -376,27 +376,19 @@ jobs:
 
           common = sorted(set(src.keys()) & set(dst.keys()))
 
-          # 挑选 copy 测试用文件:
-          #   优先选大小在 10 MB - 200 MB 之间的（大文件但又不会卡死）
-          #   没有就退而求其次: 1MB-10MB → 100KB-1MB → 最大的
+          # 挑选 copy 测试用文件（大文件优先，上限 4 GB）
           TEST_CANDIDATE = None
           TEST_SIZE = 0
+          MAX_BYTES = 4 * 1024 * 1024 * 1024  # 4 GB
           if common:
-              buckets = {
-                  1: (10 * 1024 * 1024, 200 * 1024 * 1024),   # 10-200 MB (最优)
-                  2: (1  * 1024 * 1024, 200 * 1024 * 1024),   # 1-200 MB
-                  3: (100 * 1024,         200 * 1024 * 1024), # 100KB-200MB
-                  4: (0, 2**62),                               # 兜底: 最大的
-              }
-              for _, (lo, hi) in sorted(buckets.items()):
-                  picks = sorted(
-                      [n for n in common if lo <= src[n] <= hi],
-                      key=lambda n: src[n], reverse=True
-                  )
-                  if picks:
-                      TEST_CANDIDATE = picks[0]
-                      TEST_SIZE = src[TEST_CANDIDATE]
-                      break
+              # 档位按大小降序取，优先最大的那个（但不超过 4 GB）
+              eligible = sorted(
+                  [n for n in common if 0 < src[n] <= MAX_BYTES],
+                  key=lambda n: src[n], reverse=True
+              )
+              if eligible:
+                  TEST_CANDIDATE = eligible[0]
+                  TEST_SIZE = src[TEST_CANDIDATE]
 
           if TEST_CANDIDATE:
               with open('/tmp/_test_file.txt', 'w') as f:
@@ -485,42 +477,73 @@ jobs:
                 TEST_INCLUDE="${TEST_FILE}"
               fi
               # 按大小设定 rclone 超时 (大文件给足时间，但又不至于卡死 workflow)
-              # 按 10 MB/s 估计上传速度计算超时，再乘 3 倍余量
               TEST_SIZE_MB=$(( (TEST_SIZE + 1048575) / 1048576 ))
-              TIMEOUT_SEC=$(( TEST_SIZE_MB / 10 * 3 + 60 ))
+              # 按 20 MB/s 估计速度 * 3 倍余量 + 基础 90s；上限 1800s 下限 120s
+              TIMEOUT_SEC=$(( TEST_SIZE_MB / 20 * 3 + 90 ))
               [ "$TIMEOUT_SEC" -lt 120 ] && TIMEOUT_SEC=120
-              [ "$TIMEOUT_SEC" -gt 900 ] && TIMEOUT_SEC=900
+              [ "$TIMEOUT_SEC" -gt 1800 ] && TIMEOUT_SEC=1800
 
               echo ""
               echo "--- Copy 测试: rclone copy --size-only --no-traverse ---"
-              echo "  测试文件: ${TEST_INCLUDE}  (约 ${TEST_SIZE_MB} MB)"
+              echo "  测试文件: ${TEST_INCLUDE}  (约 ${TEST_SIZE_MB} MB / ${TEST_SIZE} bytes)"
               echo "  源端: ${src_remote}"
               echo "  目标: ${dst_remote}"
-              echo "  预估 rclone timeout: ${TIMEOUT_SEC}s"
+              echo "  预估实拷 timeout: ${TIMEOUT_SEC}s (若需要执行)"
               echo ""
 
-              # 阶段 1: 先 dry-run，看 rclone 的计划（不需要真的传）
-              echo "[1/2] Dry-run — 预览 rclone 的决策:"
+              # 阶段 1: Dry-run — 看 rclone 对大小一致的文件会做什么
+              echo "[1/2] Dry-run (不会真的传数据):"
+              DRY_LOG="/tmp/_dry_$$.log"
               rclone copy "${src_remote}" "${dst_remote}" \
                 --include "${TEST_INCLUDE}" \
                 --size-only --no-traverse --dry-run \
                 --verbose --stats-one-line --stats 0 \
-                --timeout 2m --contimeout 30s --retries 1 --low-level-retries 3 \
-                2>&1 | head -20
+                --timeout 5m --contimeout 30s --retries 1 --low-level-retries 3 \
+                > "$DRY_LOG" 2>&1
+              cat "$DRY_LOG" | head -20
+              echo ""
+              echo "  → Dry-run 结论判读:"
+              if grep -qiE 'Skipped|: \(SKIPPED\)|INFO.*0 (transferred|Bytes)' "$DRY_LOG" \
+                 && ! grep -qiE 'Copied.*replaced|NOTICE.*Copied|would copy|Transferred:\s+[1-9]' "$DRY_LOG"; then
+                echo "    ✅ Dry-run: 大小一致，计划 SKIP（不重传）"
+                DRY_SKIP=1
+              elif grep -qiE 'Copied.*replaced|NOTICE.*Copied|would copy|Transferred:\s+[1-9]' "$DRY_LOG"; then
+                echo "    🔴 Dry-run: 计划 RE-COPY（会重传，存在问题！）"
+                DRY_SKIP=0
+              else
+                echo "    ⚠️ Dry-run: 无法确定，请查看上方详细日志"
+                # 日志里看不清楚时保守执行（对 >500MB 文件还是跳过，怕卡太久）
+                if [ "$TEST_SIZE_MB" -gt 500 ]; then
+                  echo "    文件太大，跳过实拷以免卡死 step。"
+                  DRY_SKIP=1
+                else
+                  DRY_SKIP=0
+                fi
+              fi
               echo ""
 
-              # 阶段 2: 实际 copy 确认行为
-              echo "[2/2] 实拷 — 确认实际 rclone 行为 (timeout ${TIMEOUT_SEC}s):"
-              timeout "${TIMEOUT_SEC}" rclone copy "${src_remote}" "${dst_remote}" \
-                --include "${TEST_INCLUDE}" \
-                --size-only --no-traverse \
-                --verbose --stats-one-line --stats 0 \
-                --timeout 5m --contimeout 30s --retries 1 --low-level-retries 3 \
-                2>&1 | head -40
+              # 阶段 2: 实拷（仅当 dry-run 显示要重传或文件较小时执行，避免白等几十分钟）
+              if [ "$DRY_SKIP" = "1" ]; then
+                echo "[2/2] 实拷 — 跳过（dry-run 已确认 SKIP，实拷无意义，不消耗时间）"
+              else
+                echo "[2/2] 实拷 — 确认实际行为 (timeout ${TIMEOUT_SEC}s):"
+                timeout "${TIMEOUT_SEC}" rclone copy "${src_remote}" "${dst_remote}" \
+                  --include "${TEST_INCLUDE}" \
+                  --size-only --no-traverse \
+                  --verbose --stats 15s --stats-one-line \
+                  --timeout 10m --contimeout 30s --retries 1 --low-level-retries 3 \
+                  2>&1 | tail -60
+                COPY_RC=${PIPESTATUS[0]}
+                echo ""
+                echo "  → 实拷结论:"
+                echo "    rclone exit code: ${COPY_RC}"
+                echo "    判读关键字: 'Skipped'=正常  |  'Copied (replaced existing)'=存在问题  |  无特殊 INFO=空跑/跳过"
+              fi
+              rm -f "$DRY_LOG"
               echo ""
-              echo "  判读: 包含 'Skipped' 字样 = --size-only 正常（大小一致跳过）"
-              echo "        包含 'Copied (replaced existing)' 字样 = 虽大小一致但仍被重传（存在问题）"
-              echo "        包含 'Copied (new)' 或仅 INFO 0 传输 = 第一次上传或空跑"
+              echo "  总判读:"
+              echo "    Dry-run SKIP → --size-only 正常，rclone 比较结果与 WebDAV 报告一致"
+              echo "    Dry-run RECOPY + 实拷也显示 Copied → 虽大小相同但 rclone 仍上传（bug场景）"
               rm -f /tmp/_test_file.txt
             else
               echo "  (无匹配文件，跳过 copy 测试)"
