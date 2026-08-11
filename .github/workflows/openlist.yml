@@ -376,11 +376,31 @@ jobs:
 
           common = sorted(set(src.keys()) & set(dst.keys()))
 
-          # 写入 copy 测试用的文件信息（取最小的匹配文件，加快测试速度）
+          # 挑选 copy 测试用文件:
+          #   优先选大小在 10 MB - 200 MB 之间的（大文件但又不会卡死）
+          #   没有就退而求其次: 1MB-10MB → 100KB-1MB → 最大的
+          TEST_CANDIDATE = None
+          TEST_SIZE = 0
           if common:
-              smallest = min(common, key=lambda n: src[n])
+              buckets = {
+                  1: (10 * 1024 * 1024, 200 * 1024 * 1024),   # 10-200 MB (最优)
+                  2: (1  * 1024 * 1024, 200 * 1024 * 1024),   # 1-200 MB
+                  3: (100 * 1024,         200 * 1024 * 1024), # 100KB-200MB
+                  4: (0, 2**62),                               # 兜底: 最大的
+              }
+              for _, (lo, hi) in sorted(buckets.items()):
+                  picks = sorted(
+                      [n for n in common if lo <= src[n] <= hi],
+                      key=lambda n: src[n], reverse=True
+                  )
+                  if picks:
+                      TEST_CANDIDATE = picks[0]
+                      TEST_SIZE = src[TEST_CANDIDATE]
+                      break
+
+          if TEST_CANDIDATE:
               with open('/tmp/_test_file.txt', 'w') as f:
-                  f.write(f"{smallest}\n{'sub' if using_sub else 'root'}\n")
+                  f.write(f"{TEST_CANDIDATE}\n{'sub' if using_sub else 'root'}\n{TEST_SIZE}\n")
 
           print(f"源端文件数: {len(src)}")
           print(f"目标端文件数: {len(dst)}")
@@ -457,28 +477,50 @@ jobs:
             if [ -f /tmp/_test_file.txt ]; then
               TEST_FILE=$(sed -n '1p' /tmp/_test_file.txt)
               TEST_LOC=$(sed -n '2p' /tmp/_test_file.txt)
+              TEST_SIZE=$(sed -n '3p' /tmp/_test_file.txt)
               # 若文件来自子目录，需拼接子目录前缀作为 --include 路径
               if [ "$TEST_LOC" = "sub" ] && [ -n "$FIRST_SUBDIR" ]; then
                 TEST_INCLUDE="${FIRST_SUBDIR}/${TEST_FILE}"
               else
                 TEST_INCLUDE="${TEST_FILE}"
               fi
+              # 按大小设定 rclone 超时 (大文件给足时间，但又不至于卡死 workflow)
+              # 按 10 MB/s 估计上传速度计算超时，再乘 3 倍余量
+              TEST_SIZE_MB=$(( (TEST_SIZE + 1048575) / 1048576 ))
+              TIMEOUT_SEC=$(( TEST_SIZE_MB / 10 * 3 + 60 ))
+              [ "$TIMEOUT_SEC" -lt 120 ] && TIMEOUT_SEC=120
+              [ "$TIMEOUT_SEC" -gt 900 ] && TIMEOUT_SEC=900
+
               echo ""
               echo "--- Copy 测试: rclone copy --size-only --no-traverse ---"
-              echo "  测试文件: ${TEST_INCLUDE}"
+              echo "  测试文件: ${TEST_INCLUDE}  (约 ${TEST_SIZE_MB} MB)"
               echo "  源端: ${src_remote}"
               echo "  目标: ${dst_remote}"
+              echo "  预估 rclone timeout: ${TIMEOUT_SEC}s"
               echo ""
-              # 实际 copy（文件已存在且大小一致，rclone 应 Skipped 而非 Copied）
+
+              # 阶段 1: 先 dry-run，看 rclone 的计划（不需要真的传）
+              echo "[1/2] Dry-run — 预览 rclone 的决策:"
               rclone copy "${src_remote}" "${dst_remote}" \
+                --include "${TEST_INCLUDE}" \
+                --size-only --no-traverse --dry-run \
+                --verbose --stats-one-line --stats 0 \
+                --timeout 2m --contimeout 30s --retries 1 --low-level-retries 3 \
+                2>&1 | head -20
+              echo ""
+
+              # 阶段 2: 实际 copy 确认行为
+              echo "[2/2] 实拷 — 确认实际 rclone 行为 (timeout ${TIMEOUT_SEC}s):"
+              timeout "${TIMEOUT_SEC}" rclone copy "${src_remote}" "${dst_remote}" \
                 --include "${TEST_INCLUDE}" \
                 --size-only --no-traverse \
                 --verbose --stats-one-line --stats 0 \
-                --timeout 2m --contimeout 30s --retries 1 --low-level-retries 3 \
-                2>&1 | head -30
+                --timeout 5m --contimeout 30s --retries 1 --low-level-retries 3 \
+                2>&1 | head -40
               echo ""
-              echo "  判读: 'Skipped' = --size-only 正常（文件一致跳过）"
-              echo "        'Copied (replaced existing)' = --size-only 未生效或目标端文件实际不一致"
+              echo "  判读: 包含 'Skipped' 字样 = --size-only 正常（大小一致跳过）"
+              echo "        包含 'Copied (replaced existing)' 字样 = 虽大小一致但仍被重传（存在问题）"
+              echo "        包含 'Copied (new)' 或仅 INFO 0 传输 = 第一次上传或空跑"
               rm -f /tmp/_test_file.txt
             else
               echo "  (无匹配文件，跳过 copy 测试)"
