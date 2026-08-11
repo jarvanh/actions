@@ -259,61 +259,99 @@ jobs:
             fi
           fi
 
-          # 刷新 OpenList 缓存，避免 stale listing 影响判断
+          # 刷新所有 Crypt 远程的缓存（避免 stale listing 影响判断）
+          # 验证范围: 覆盖 workflow 中所有 *Crypt 目标端
+          #   aliyundriveCrypt  ← onedrive:backup
+          #   wopan176Crypt     ← onedrive:backup
+          #   baidupanCrypt     ← onedrive:0
+          VERIFY_PAIRS=(
+            "onedrive:backup|openlist:aliyundriveCrypt/backup"
+            "onedrive:backup|openlist:wopan176Crypt/backup"
+            "onedrive:0|openlist:baidupanCrypt/0"
+          )
+          # 去重提取需要刷新缓存的 OpenList 路径
+          UNIQUE_OL_PATHS=()
+          for pair in "${VERIFY_PAIRS[@]}"; do
+            dst="${pair#*|}"
+            ol_path="/${dst#openlist:}"
+            seen=0
+            for p in "${UNIQUE_OL_PATHS[@]}"; do [ "$p" = "$ol_path" ] && { seen=1; break; }; done
+            [ "$seen" = "0" ] && UNIQUE_OL_PATHS+=("$ol_path")
+          done
+
           if [ -n "$OL_TOKEN" ] && [ "$OL_TOKEN" != "null" ]; then
-            echo "刷新 OpenList 缓存 /aliyundriveCrypt/backup ..."
-            rcode=$(curl -s -o /tmp/_ol_refresh -w "%{http_code}" -X POST \
-              -H "Authorization: ${OL_TOKEN}" \
-              -H "Content-Type: application/json" \
-              -d '{"path":"/aliyundriveCrypt/backup","recursive":true}' \
-              "http://127.0.0.1:5244/api/fs/refresh" 2>/dev/null || echo "000")
-            echo "  refresh code=${rcode}  $(head -c 200 /tmp/_ol_refresh 2>/dev/null)"
-            rm -f /tmp/_ol_refresh
+            for ol_path in "${UNIQUE_OL_PATHS[@]}"; do
+              echo "刷新 OpenList 缓存 ${ol_path} ..."
+              rcode=$(curl -s -o /tmp/_ol_refresh -w "%{http_code}" -X POST \
+                -H "Authorization: ${OL_TOKEN}" \
+                -H "Content-Type: application/json" \
+                -d "{\"path\":\"${ol_path}\",\"recursive\":true}" \
+                "http://127.0.0.1:5244/api/fs/refresh" 2>/dev/null || echo "000")
+              echo "  refresh ${ol_path} code=${rcode}  $(head -c 200 /tmp/_ol_refresh 2>/dev/null)"
+              rm -f /tmp/_ol_refresh
+            done
             sleep 15
           else
             echo "跳过缓存刷新 (token 不可用)"
           fi
 
-          # 检查目录结构（诊断目标端是否可访问）
-          echo "=== 目标端目录结构 (openlist:aliyundriveCrypt/) ==="
-          rclone lsd openlist:aliyundriveCrypt/ 2>&1 | head -10
-          echo ""
-          echo "=== 目标端 backup 子目录 (openlist:aliyundriveCrypt/backup) ==="
-          rclone lsd openlist:aliyundriveCrypt/backup 2>&1 | head -10
-          echo ""
+          # ===== 对每个 Crypt 远程逐一验证 =====
+          # 汇总结果用于最后输出总结论
+          OVERALL_MATCH=0
+          OVERALL_CRYPT=0
+          OVERALL_OTHER=0
+          OVERALL_NO_COMMON=0
+          rm -f /tmp/_verify_result.txt
 
-          # 用 lsjson 获取文件列表和大小（比 lsf -l 更可靠）
-          echo "=== 获取源端文件列表 (onedrive:backup, 非递归根目录) ==="
-          timeout 60 rclone lsjson onedrive:backup --no-modtime --no-mimetype 2>/tmp/src_err.txt > /tmp/src_listing.json || true
-          echo "源端文件数: $(jq '[.[] | select(.IsDir == false)] | length' /tmp/src_listing.json 2>/dev/null || echo '解析失败')"
-          if [ -s /tmp/src_err.txt ]; then echo "源端错误:"; cat /tmp/src_err.txt; fi
+          for pair in "${VERIFY_PAIRS[@]}"; do
+            src_remote="${pair%|*}"
+            dst_remote="${pair#*|}"
 
-          echo ""
-          echo "=== 获取目标端文件列表 (openlist:aliyundriveCrypt/backup, 非递归根目录) ==="
-          timeout 60 rclone lsjson openlist:aliyundriveCrypt/backup --no-modtime --no-mimetype 2>/tmp/dst_err.txt > /tmp/dst_listing.json || true
-          echo "目标端文件数: $(jq '[.[] | select(.IsDir == false)] | length' /tmp/dst_listing.json 2>/dev/null || echo '解析失败')"
-          if [ -s /tmp/dst_err.txt ]; then echo "目标端错误:"; cat /tmp/dst_err.txt; fi
-
-          # 如果根目录无共同文件，取第一个子目录递归列出
-          FIRST_SUBDIR=$(jq -r '[.[] | select(.IsDir == true)] | .[0].Path // empty' /tmp/src_listing.json 2>/dev/null)
-          if [ -n "$FIRST_SUBDIR" ]; then
             echo ""
-            echo "=== 子目录比较: ${FIRST_SUBDIR} ==="
-            echo "源端子目录..."
-            timeout 90 rclone lsjson "onedrive:backup/${FIRST_SUBDIR}" --recursive --no-modtime --no-mimetype 2>/tmp/src_sub_err.txt > /tmp/src_sub.json || true
-            echo "源端子目录文件数: $(jq '[.[] | select(.IsDir == false)] | length' /tmp/src_sub.json 2>/dev/null || echo '解析失败')"
-            [ -s /tmp/src_sub_err.txt ] && echo "源端子目录错误:" && cat /tmp/src_sub_err.txt
+            echo "######################################################"
+            echo "# 对比: ${src_remote}  →  ${dst_remote}"
+            echo "######################################################"
 
-            echo "目标端子目录..."
-            timeout 90 rclone lsjson "openlist:aliyundriveCrypt/backup/${FIRST_SUBDIR}" --recursive --no-modtime --no-mimetype 2>/tmp/dst_sub_err.txt > /tmp/dst_sub.json || true
-            echo "目标端子目录文件数: $(jq '[.[] | select(.IsDir == false)] | length' /tmp/dst_sub.json 2>/dev/null || echo '解析失败')"
-            [ -s /tmp/dst_sub_err.txt ] && echo "目标端子目录错误:" && cat /tmp/dst_sub_err.txt
-          fi
+            # 目录结构诊断
+            echo "--- 目标端目录结构 (${dst_remote}) ---"
+            rclone lsd "${dst_remote}" 2>&1 | head -10
+            echo ""
 
-          echo ""
-          echo "=== 大小对比分析 ==="
-          python3 << 'PYEOF'
-          import json, math, os
+            # 获取源端列表（非递归根目录）
+            echo "--- 获取源端文件列表 (${src_remote}) ---"
+            timeout 60 rclone lsjson "${src_remote}" --no-modtime --no-mimetype 2>/tmp/src_err.txt > "/tmp/src_${$}.json" || true
+            src_count=$(jq '[.[] | select(.IsDir == false)] | length' "/tmp/src_${$}.json" 2>/dev/null || echo 0)
+            echo "源端根目录文件数: ${src_count}"
+            [ -s /tmp/src_err.txt ] && echo "源端错误:" && cat /tmp/src_err.txt
+
+            # 获取目标端列表
+            echo "--- 获取目标端文件列表 (${dst_remote}) ---"
+            timeout 60 rclone lsjson "${dst_remote}" --no-modtime --no-mimetype 2>/tmp/dst_err.txt > "/tmp/dst_${$}.json" || true
+            dst_count=$(jq '[.[] | select(.IsDir == false)] | length' "/tmp/dst_${$}.json" 2>/dev/null || echo 0)
+            echo "目标端根目录文件数: ${dst_count}"
+            [ -s /tmp/dst_err.txt ] && echo "目标端错误:" && cat /tmp/dst_err.txt
+
+            # 如果根目录无共同文件，取第一个共同子目录递归列出
+            FIRST_SUBDIR=$(jq -r '[.[] | select(.IsDir == true)] | .[0].Path // empty' "/tmp/src_${$}.json" 2>/dev/null)
+            if [ -n "$FIRST_SUBDIR" ]; then
+              echo "--- 子目录比较: ${FIRST_SUBDIR} ---"
+              timeout 90 rclone lsjson "${src_remote}/${FIRST_SUBDIR}" --recursive --no-modtime --no-mimetype 2>/tmp/src_sub_err.txt > "/tmp/src_sub_${$}.json" || true
+              src_sub_count=$(jq '[.[] | select(.IsDir == false)] | length' "/tmp/src_sub_${$}.json" 2>/dev/null || echo 0)
+              echo "源端子目录文件数: ${src_sub_count}"
+              [ -s /tmp/src_sub_err.txt ] && echo "源端子目录错误:" && cat /tmp/src_sub_err.txt
+
+              timeout 90 rclone lsjson "${dst_remote}/${FIRST_SUBDIR}" --recursive --no-modtime --no-mimetype 2>/tmp/dst_sub_err.txt > "/tmp/dst_sub_${$}.json" || true
+              dst_sub_count=$(jq '[.[] | select(.IsDir == false)] | length' "/tmp/dst_sub_${$}.json" 2>/dev/null || echo 0)
+              echo "目标端子目录文件数: ${dst_sub_count}"
+              [ -s /tmp/dst_sub_err.txt ] && echo "目标端子目录错误:" && cat /tmp/dst_sub_err.txt
+            fi
+
+            echo ""
+            echo "--- 大小对比分析 ---"
+            python3 - "$src_remote" "$dst_remote" "/tmp/src_${$}.json" "/tmp/dst_${$}.json" "/tmp/src_sub_${$}.json" "/tmp/dst_sub_${$}.json" << 'PYEOF'
+          import json, math, os, sys
+
+          src_remote, dst_remote, src_path, dst_path, src_sub_path, dst_sub_path = sys.argv[1:7]
 
           def load_listing(path):
               try:
@@ -323,17 +361,15 @@ jobs:
               except Exception:
                   return {}
 
-          # 先用根目录数据，若为空则用子目录数据
-          src = load_listing('/tmp/src_listing.json')
-          dst = load_listing('/tmp/dst_listing.json')
-          src_sub = load_listing('/tmp/src_sub.json') if os.path.exists('/tmp/src_sub.json') else {}
-          dst_sub = load_listing('/tmp/dst_sub.json') if os.path.exists('/tmp/dst_sub.json') else {}
+          src = load_listing(src_path)
+          dst = load_listing(dst_path)
+          src_sub = load_listing(src_sub_path) if os.path.exists(src_sub_path) else {}
+          dst_sub = load_listing(dst_sub_path) if os.path.exists(dst_sub_path) else {}
 
           if (not src or not dst) and (src_sub and dst_sub):
               src, dst = src_sub, dst_sub
               print("(使用子目录数据)")
           elif src_sub and not dst and not dst_sub:
-              # 合并根目录和子目录数据
               src = {**src, **src_sub}
 
           common = sorted(set(src.keys()) & set(dst.keys()))
@@ -347,23 +383,26 @@ jobs:
               print("⚠️ 无共同文件")
               if src:
                   print("源端文件名样本:")
-                  for name in list(src.keys())[:5]:
+                  for name in list(src.keys())[:3]:
                       print(f"  {name}  ({src[name]:,} bytes)")
               if dst:
                   print("目标端文件名样本:")
-                  for name in list(dst.keys())[:5]:
+                  for name in list(dst.keys())[:3]:
                       print(f"  {name}  ({dst[name]:,} bytes)")
               if not dst:
                   print("\n目标端为空 — 可能原因:")
-                  print("  - OpenList 缓存未刷新")
+                  print("  - OpenList 缓存未刷新 / 驱动未就绪")
                   print("  - crypt 路径不正确（检查上方目录结构）")
                   print("  - OpenList crypt 驱动未配置")
+              # 写入汇总标记
+              with open('/tmp/_verify_result.txt', 'a') as f:
+                  f.write(f"{dst_remote}|NO_COMMON\n")
           else:
               match_count = 0
               crypt_count = 0
               other_count = 0
 
-              for name in common[:10]:
+              for name in common[:5]:
                   s = src[name]
                   d = dst[name]
                   expected_crypt = 32 + 16 * math.ceil(s / 64)
@@ -387,19 +426,49 @@ jobs:
                   print("🔴 结论: OpenList WebDAV 报告的是加密后大小")
                   print("   --size-only 永远不匹配 → 每次都会重传")
                   print("   建议: copy_task 加 --ignore-size --update，或改用 rclone crypt remote")
+                  with open('/tmp/_verify_result.txt', 'a') as f:
+                      f.write(f"{dst_remote}|CRYPT\n")
               elif match_count > 0 and crypt_count == 0:
                   print("✅ 结论: OpenList WebDAV 报告的是明文大小")
                   print("   --size-only 应正常工作")
-                  print("   'Copied (replaced existing)' 的原因可能是:")
-                  print("   - OpenList 缓存过期 (stale listing)")
-                  print("   - 之前上传中断导致文件不完整")
-                  print("   - 源端文件确实发生了变化")
+                  with open('/tmp/_verify_result.txt', 'a') as f:
+                      f.write(f"{dst_remote}|PLAIN\n")
               elif other_count > 0:
                   print("⚠️ 结论: 大小不一致但不符合 crypt 开销规律")
                   print("   需进一步调查 (可能是缓存问题或上传不完整)")
+                  with open('/tmp/_verify_result.txt', 'a') as f:
+                      f.write(f"{dst_remote}|OTHER\n")
               else:
                   print("⚠️ 混合结果，请查看上方详细对比")
+                  with open('/tmp/_verify_result.txt', 'a') as f:
+                      f.write(f"{dst_remote}|MIXED\n")
           PYEOF
+
+            # 清理本对临时文件
+            rm -f "/tmp/src_${$}.json" "/tmp/dst_${$}.json" "/tmp/src_sub_${$}.json" "/tmp/dst_sub_${$}.json"
+          done
+
+          # ===== 输出总结论 =====
+          echo ""
+          echo "======================================================"
+          echo "  总结论 (全部 Crypt 远程)"
+          echo "======================================================"
+          # Python 子进程将每个远程的结论写入 /tmp/_verify_result.txt
+          if [ -f /tmp/_verify_result.txt ]; then
+            while IFS='|' read -r remote result; do
+              case "$result" in
+                CRYPT)     echo "🔴 ${remote}: 报告加密后大小（--size-only 失效）" ;;
+                PLAIN)     echo "✅ ${remote}: 报告明文大小（--size-only 正常）" ;;
+                OTHER)     echo "⚠️ ${remote}: 大小不一致但非 crypt 开销" ;;
+                MIXED)     echo "⚠️ ${remote}: 混合结果" ;;
+                NO_COMMON) echo "⚠️ ${remote}: 无共同文件（驱动未就绪或路径不对）" ;;
+                *)         echo "?  ${remote}: ${result}" ;;
+              esac
+            done < /tmp/_verify_result.txt
+          else
+            echo "(未收集到结果，请查看上方每个 Crypt 远程的详细输出)"
+          fi
+          rm -f /tmp/_verify_result.txt
 
           echo ""
           echo "=========================================="
