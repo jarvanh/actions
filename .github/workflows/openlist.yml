@@ -260,14 +260,21 @@ jobs:
           fi
 
           # 刷新所有 Crypt 远程的缓存（避免 stale listing 影响判断）
-          # 验证范围: 覆盖 workflow 中所有 *Crypt 目标端
-          #   aliyundriveCrypt  ← onedrive:backup
-          #   wopan176Crypt     ← onedrive:backup
-          #   baidupanCrypt     ← onedrive:0
+          # 验证范围: 覆盖 workflow 中 run_all_tasks() 里所有 *Crypt 目标端（wopan175/GoogleDrive 非 Crypt 不测）
           VERIFY_PAIRS=(
+            # aliyundriveCrypt (sync)
             "onedrive:backup|openlist:aliyundriveCrypt/backup"
+            # wopan176Crypt (copy, 7 条不同路径)
             "onedrive:backup|openlist:wopan176Crypt/backup"
+            "onedrive:0|openlist:wopan176Crypt/0"
+            "onedrive:1|openlist:wopan176Crypt/1"
+            "onedrive:2|openlist:wopan176Crypt/2"
+            "onedrive:3|openlist:wopan176Crypt/3"
+            "onedrive:4|openlist:wopan176Crypt/4"
+            "onedrive:5|openlist:wopan176Crypt/5"
+            # baidupanCrypt (sync, 2 条不同路径)
             "onedrive:0|openlist:baidupanCrypt/0"
+            "onedrive:1|openlist:baidupanCrypt/1"
           )
           # 去重提取需要刷新缓存的 OpenList 路径
           UNIQUE_OL_PATHS=()
