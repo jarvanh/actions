@@ -27,7 +27,9 @@ get_marker_path() {
 }
 
 # 保存同步标记（同步成功后调用）
-# 记录: 时间戳、源端路径、目标路径、源端大小/文件数、顶层目录列表
+# 记录: 时间戳、源端路径、目标路径、源端大小/文件数、顶层目录列表、已修复文件列表
+# 已修复文件列表 (fixed_files): 通过 405/409 修复机制以非原名上传的文件
+#   预览时从差异中扣减这部分，避免显示"虚假缺失"
 # 用法: save_sync_marker <source_path> <dest_path> <task_name>
 save_sync_marker() {
   local source_path="$1"
@@ -47,6 +49,13 @@ save_sync_marker() {
   local top_dirs
   top_dirs=$(rclone lsf --dirs-only "$source_path" 2>/dev/null | sed 's|/$||' | sort)
 
+  # 读取本任务（含 auto-split 子目录）累计的修复文件列表
+  # sync_with_logging 每次执行后会把 fix_list 累计到 GLOBAL_FIXED_FILES_JSON
+  local fixed_files_json="${GLOBAL_FIXED_FILES_JSON:-[]}"
+  local fixed_count fixed_bytes
+  fixed_count=$(echo "$fixed_files_json" | jq 'length' 2>/dev/null || echo 0)
+  fixed_bytes=$(echo "$fixed_files_json" | jq '[.[].size_bytes] | add // 0' 2>/dev/null || echo 0)
+
   # 构建 JSON 标记
   local marker_json
   marker_json=$(jq -n \
@@ -56,12 +65,15 @@ save_sync_marker() {
     --argjson source_bytes "$source_bytes" \
     --argjson source_count "$source_count" \
     --arg top_dirs "$top_dirs" \
-    '{last_success: $last_success, source_path: $source_path, dest_path: $dest_path, source_bytes: $source_bytes, source_count: $source_count, top_dirs: $top_dirs}')
+    --argjson fixed_files "$fixed_files_json" \
+    --argjson fixed_count "$fixed_count" \
+    --argjson fixed_bytes "$fixed_bytes" \
+    '{last_success: $last_success, source_path: $source_path, dest_path: $dest_path, source_bytes: $source_bytes, source_count: $source_count, top_dirs: $top_dirs, fixed_files: $fixed_files, fixed_count: $fixed_count, fixed_bytes: $fixed_bytes}')
 
   # 上传标记到 OneDrive
   rclone mkdir "$SYNC_STATE_DIR" >/dev/null 2>&1 || true
   echo "$marker_json" | rclone rcat "$marker_path" 2>/dev/null
-  echo "已保存同步标记: $marker_path (源端 $(format_bytes "$source_bytes"), $source_count 文件)"
+  echo "已保存同步标记: $marker_path (源端 $(format_bytes "$source_bytes"), $source_count 文件, $fixed_count 个修复文件)"
 }
 
 # 检查同步标记（同步前调用）
@@ -73,6 +85,9 @@ save_sync_marker() {
 #   MARKER_CURRENT_DIRS  — 当前源端顶层目录列表
 #   MARKER_LAST_SUCCESS  — 上次成功时间（ISO 8601）
 #   MARKER_SINCE_HOURS   — 距上次同步的小时数
+#   MARKER_FIXED_COUNT   — 已修复文件数（以非原名存在于目标端）
+#   MARKER_FIXED_BYTES   — 已修复文件总字节数
+#   MARKER_FIXED_FILES   — 已修复文件列表 JSON
 # 用法: check_sync_marker <source_path> <dest_path> <task_name>
 check_sync_marker() {
   local source_path="$1"
@@ -86,6 +101,9 @@ check_sync_marker() {
   MARKER_CURRENT_DIRS=""
   MARKER_LAST_SUCCESS=""
   MARKER_SINCE_HOURS=0
+  MARKER_FIXED_COUNT=0
+  MARKER_FIXED_BYTES=0
+  MARKER_FIXED_FILES="[]"
 
   # 强制同步跳过所有检查
   if [ "$FORCE_SYNC" = "true" ]; then
@@ -106,6 +124,11 @@ check_sync_marker() {
   fi
 
   MARKER_JSON="$marker_json"
+
+  # 解析已修复文件信息（用于预览扣减和跳过通知）
+  MARKER_FIXED_COUNT=$(echo "$marker_json" | jq -r '.fixed_count // 0' 2>/dev/null || echo 0)
+  MARKER_FIXED_BYTES=$(echo "$marker_json" | jq -r '.fixed_bytes // 0' 2>/dev/null || echo 0)
+  MARKER_FIXED_FILES=$(echo "$marker_json" | jq -c '.fixed_files // []' 2>/dev/null || echo "[]")
 
   # 解析上次成功时间
   local last_success
@@ -151,6 +174,31 @@ check_sync_marker() {
   echo "标记检查通过，继续同步"
   MARKER_ACTION="proceed"
   return 0
+}
+
+# 仅加载 marker 的 fixed_files 信息（不做跳过判断，供预览使用）
+# 设置全局变量: MARKER_FIXED_COUNT, MARKER_FIXED_BYTES, MARKER_FIXED_FILES
+# 用法: _load_marker_fixed_files <source_path> <dest_path> <task_name>
+_load_marker_fixed_files() {
+  local source_path="$1"
+  local dest_path="$2"
+  local task_name="$3"
+
+  MARKER_FIXED_COUNT=0
+  MARKER_FIXED_BYTES=0
+  MARKER_FIXED_FILES="[]"
+
+  local marker_path
+  marker_path=$(get_marker_path "$task_name" "$dest_path")
+
+  local marker_json
+  marker_json=$(rclone cat "$marker_path" 2>/dev/null) || true
+
+  [ -z "$marker_json" ] && return 0
+
+  MARKER_FIXED_COUNT=$(echo "$marker_json" | jq -r '.fixed_count // 0' 2>/dev/null || echo 0)
+  MARKER_FIXED_BYTES=$(echo "$marker_json" | jq -r '.fixed_bytes // 0' 2>/dev/null || echo 0)
+  MARKER_FIXED_FILES=$(echo "$marker_json" | jq -c '.fixed_files // []' 2>/dev/null || echo "[]")
 }
 
 # 发送源端大小减小的警告通知（同时跳过本次同步）
@@ -232,6 +280,11 @@ send_sync_skipped() {
   marker_bytes=$(echo "$MARKER_JSON" | jq -r '.source_bytes // 0' 2>/dev/null || echo 0)
   marker_count=$(echo "$MARKER_JSON" | jq -r '.source_count // 0' 2>/dev/null || echo 0)
 
+  # 已修复文件信息（通过 405/409 修复机制以非原名上传的文件）
+  local fixed_count fixed_bytes
+  fixed_count=$(echo "$MARKER_JSON" | jq -r '.fixed_count // 0' 2>/dev/null || echo 0)
+  fixed_bytes=$(echo "$MARKER_JSON" | jq -r '.fixed_bytes // 0' 2>/dev/null || echo 0)
+
   # HTML 转义动态内容
   local e_task e_source e_dest e_last
   e_task=$(escape_html "$task_name")
@@ -249,6 +302,25 @@ send_sync_skipped() {
   msg+="• 时间：<code>${e_last}</code>"$'\n'
   msg+="• 距今：<b>${MARKER_SINCE_HOURS}</b> 小时"$'\n'
   msg+="• 记录大小：$(format_bytes "$marker_bytes") (${marker_count} 文件)"$'\n'
+  if [ "${fixed_count:-0}" -gt 0 ]; then
+    msg+="• 已修复文件：<b>${fixed_count}</b> 个 ($(format_bytes "$fixed_bytes"))，以非原名存在于目标端"$'\n'
+    # 修复方式汇总（按 restore.kind 分组统计）
+    local method_summary
+    method_summary=$(echo "$MARKER_JSON" | jq -r '
+      (.fixed_files // []) | group_by(.restore.kind // "unknown")
+        | map({kind: .[0].restore.kind // "unknown",
+               summary: .[0].restore.summary // "",
+               count: length,
+               bytes: ([.[].size_bytes] | add // 0)})
+        | sort_by(-.bytes)
+        | map("    · " + .kind + " (" + (.count|tostring) + " 个/"
+            + (.bytes | tostring | if tonumber>0 then tonumber|tostring else "0" end) + "B) "
+            + .summary)
+        | join("\n")
+    ' 2>/dev/null || echo "")
+    [ -n "$method_summary" ] && msg+=$'\n'"🔧 <b>修复方式构成</b>"$'\n'"${method_summary}"$'\n'
+    msg+="🔗 完整还原脚本保存在 OneDrive marker: <code>$(get_marker_path "$task_name" "$dest_path")</code> 的 fixed_files[].restore.script 字段"$'\n'
+  fi
   msg+=$'\n'"⏸️ <b>本次跳过同步，继续执行其他任务</b>"$'\n'
   msg+="如需强制同步，请手动触发 force_sync=true"
 
