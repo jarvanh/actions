@@ -1,11 +1,13 @@
 #!/bin/bash
 # 视频按哈希去重脚本（适用于无统一 ID 的视频集合，如 91-tg 工作流）
 #
-# 按 SHA1 哈希分组检测重复视频，并按以下规则处理：
+# 按服务端哈希分组检测重复视频，并按以下规则处理：
 #   规则1（文件名相同）：同哈希同文件名 → 删除文件小/旧的，保留最大/最新
 #   规则2（文件名不同）：同哈希不同文件名 → 删除旧文件，保留最新
 #
-# 哈希来源：rclone hashsum sha1（OneDrive 服务端哈希，不下载文件）
+# 哈希来源：rclone hashsum（OneDrive 服务端哈希，不下载文件）
+#   自动按优先级尝试 SHA1 → SHA256 → MD5 → QuickXorHash，
+#   个人版 OneDrive 仅支持 QuickXorHash，企业版/SharePoint 支持 SHA1/SHA256
 #
 # 用法: dedupe_videos_by_hash.sh
 # 环境变量:
@@ -21,12 +23,23 @@ WORKFLOW_LABEL="${WORKFLOW_LABEL:-91-tg}"
 # 从 SOURCE_REMOTE 提取目录名作为通知中的目录标识（如 onedrive:1/1024j/视频/91 → 91）
 DIR_LABEL=$(basename "${SOURCE_REMOTE#*:}")
 
-# 一次性获取所有文件的 SHA1（OneDrive 服务端哈希，不下载文件，不修改元数据）
+# 一次性获取所有文件的服务端哈希（不下载文件，不修改元数据）
+# OneDrive 个人版仅支持 QuickXorHash，企业版/SharePoint 支持 SHA1/SHA256
+# 按优先级尝试：SHA1 → SHA256 → MD5 → QuickXorHash，使用第一个返回结果的哈希类型
 # 用 python 解析 rclone hashsum 输出（hash 和 path 之间是空白分隔），生成 hash;path 格式
 # -R 递归子目录，path 包含子目录前缀
-rclone hashsum sha1 "$SOURCE_REMOTE/" -R 2>/dev/null \
-  | python3 -c "import sys;[print(f'{p[0]};{p[1]}') for line in sys.stdin if len(p:=line.strip().split(None,1))==2]" \
-  > /tmp/91_hashes.txt || true
+HASH_TYPE=""
+for h in sha1 sha256 md5 QuickXorHash; do
+  # 同时捕获 stdout 到解析管道、stderr 到错误日志文件
+  if rclone hashsum "$h" "$SOURCE_REMOTE/" -R 2>/tmp/rclone_hash_err.log \
+    | python3 -c "import sys;[print(f'{p[0]};{p[1]}') for line in sys.stdin if len(p:=line.strip().split(None,1))==2]" \
+    > /tmp/91_hashes.txt; then
+    if [ -s /tmp/91_hashes.txt ]; then
+      HASH_TYPE="$h"
+      break
+    fi
+  fi
+done
 
 # 获取文件列表（time;size;path），path 放最后，文件名含 ; 时最后一个字段获取剩余全部，安全
 # -R 递归子目录，path 包含子目录前缀
@@ -35,13 +48,15 @@ rclone lsf "$SOURCE_REMOTE/" --files-only --format "tsp" -R 2>/dev/null \
 
 TOTAL=$(wc -l < /tmp/91_videos_tsp.txt)
 HASH_COUNT=$(wc -l < /tmp/91_hashes.txt)
-echo "📊 数据采集: $TOTAL 个 mp4 文件, $HASH_COUNT 个哈希"
+echo "📊 数据采集: $TOTAL 个 mp4 文件, $HASH_COUNT 个哈希${HASH_TYPE:+（哈希类型: $HASH_TYPE）}"
 if [ "$TOTAL" -eq 0 ]; then
   echo "未在 $SOURCE_REMOTE 中找到 mp4 文件"
   exit 0
 fi
 if [ "$HASH_COUNT" -eq 0 ]; then
-  echo "⚠️ 哈希采集失败（rclone hashsum 返回空），跳过去重"
+  echo "⚠️ 哈希采集失败（已尝试 sha1/sha256/md5/QuickXorHash 均返回空），跳过去重"
+  echo "  最后一次 rclone 错误（如有）:"
+  tail -n 5 /tmp/rclone_hash_err.log 2>/dev/null | sed 's/^/    /' || echo "    无错误输出"
   exit 0
 fi
 
