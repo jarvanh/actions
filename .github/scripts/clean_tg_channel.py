@@ -6,6 +6,7 @@ import asyncio
 try:
     from telethon import TelegramClient
     from telethon.sessions import StringSession
+    from telethon.errors import FloodWaitError
 except ImportError:
     print("Telethon library not found. Please install it first.")
     sys.exit(1)
@@ -60,25 +61,63 @@ except ValueError:
 
 BATCH_SIZE = 100
 SLEEP_BETWEEN_BATCHES = 1
+# 单次 API 请求超时（秒），避免 FLOOD_WAIT 时无提示静默等待数小时
+REQUEST_TIMEOUT = 60
+# 整个脚本最长运行时间（秒），避免 GitHub Actions 6 小时挂死
+SCRIPT_TIMEOUT = 10 * 60
+
+
+async def _with_timeout(coro, label):
+    """统一给每个 Telegram API 调用加超时，并显式报告 FLOOD_WAIT。"""
+    try:
+        return await asyncio.wait_for(coro, timeout=REQUEST_TIMEOUT)
+    except asyncio.TimeoutError:
+        print(f"Error: {label} timed out after {REQUEST_TIMEOUT}s "
+              f"(likely network issue or silent FLOOD_WAIT).")
+        raise
+    except FloodWaitError as e:
+        print(f"Error: Telegram FLOOD_WAIT on {label}: must wait {e.seconds}s.")
+        raise
 
 
 async def main():
-    client = TelegramClient(StringSession(session_string), api_id, api_hash)
+    # connection_timeout: 连接建立超时
+    # request_retries: 单次请求失败重试次数（避免无限重试）
+    # flood_sleep_threshold: 小于该秒数的 FLOOD_WAIT 自动 sleep，大于则抛异常
+    client = TelegramClient(
+        StringSession(session_string), api_id, api_hash,
+        connection_timeout=30,
+        request_retries=2,
+        flood_sleep_threshold=10,
+    )
     await client.connect()
 
     if not await client.is_user_authorized():
         print("Error: Session string is invalid or expired.")
         sys.exit(1)
 
-    print(f"Fetching messages from channel {channel_id}...")
-    entity = await client.get_entity(channel_id)
+    print(f"Resolving entity for channel {channel_id}...")
+    entity = await _with_timeout(client.get_entity(channel_id), "get_entity")
 
+    # 先用 limit=0 探测频道消息总数，避免空频道仍走完整 iter 流程
+    print(f"Counting messages in channel {channel_id} (limit=0 probe)...")
+    probe = await _with_timeout(client.get_messages(entity, limit=0), "get_messages(limit=0)")
+    total = getattr(probe, 'total', None) if probe is not None else None
+    print(f"Channel {channel_id} reports total={total} messages.")
+
+    if total == 0:
+        print("Channel is already empty, nothing to delete.")
+        await client.disconnect()
+        return
+
+    print(f"Fetching messages from channel {channel_id}...")
     batch = []
     deleted = 0
     async for msg in client.iter_messages(entity, limit=None):
         batch.append(msg.id)
         if len(batch) >= BATCH_SIZE:
-            await client.delete_messages(entity, batch)
+            await _with_timeout(
+                client.delete_messages(entity, batch), "delete_messages(batch)")
             deleted += len(batch)
             print(f"Deleted {deleted} messages...")
             batch = []
@@ -86,7 +125,8 @@ async def main():
 
     # Delete remaining messages
     if batch:
-        await client.delete_messages(entity, batch)
+        await _with_timeout(
+            client.delete_messages(entity, batch), "delete_messages(remainder)")
         deleted += len(batch)
 
     print(f"Total deleted: {deleted} messages.")
@@ -94,4 +134,10 @@ async def main():
 
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    # 全局脚本超时保护：避免任何一步静默挂死导致 GitHub Actions 撑到 6h 默认超时
+    try:
+        asyncio.run(asyncio.wait_for(main(), timeout=SCRIPT_TIMEOUT))
+    except asyncio.TimeoutError:
+        print(f"Error: Script exceeded overall timeout of {SCRIPT_TIMEOUT}s, aborting.")
+        sys.exit(2)
+
