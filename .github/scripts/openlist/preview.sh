@@ -9,12 +9,21 @@
 # 依赖: telegram.sh (send_telegram_message)
 
 # 获取远端大小和文件数
+# 用法: _get_remote_size_count <remote_path> [--exclude pat] ...
+# 与源端 _get_source_size_with_excludes 保持同样的过滤口径，避免因 exclude 规则
+# 仅作用于源端而导致目标端统计包含历史残留文件，使预览文件数/大小永远对不上。
 # 返回: "bytes count" 或 "0 0"
 _get_remote_size_count() {
   local remote_path="$1"
+  shift
+  local -a extra_args=("$@")
   local err_file="/tmp/_rclone_size_err_$$"
   local size_json
-  size_json=$(rclone size "$remote_path" --json 2>"$err_file" || true)
+  if [ ${#extra_args[@]} -gt 0 ]; then
+    size_json=$(rclone size "$remote_path" --json "${extra_args[@]}" 2>"$err_file" || true)
+  else
+    size_json=$(rclone size "$remote_path" --json 2>"$err_file" || true)
+  fi
   if [ -z "$size_json" ]; then
     echo "⚠️ _get_remote_size_count: rclone size 失败 (${remote_path})" >&2
     if [ -s "$err_file" ]; then
@@ -96,9 +105,10 @@ add_preview_pair() {
   src_bytes=$(echo "$src_data" | awk '{print $1}')
   src_count=$(echo "$src_data" | awk '{print $2}')
 
-  # 获取目标大小
+  # 获取目标大小（与源端使用相同的 --exclude 口径，避免目标端历史残留文件
+  # 被计入统计而使文件数/大小与源端对不上）
   local dst_data dst_bytes dst_count
-  dst_data=$(_get_remote_size_count "$dest_path")
+  dst_data=$(_get_remote_size_count "$dest_path" "${extra_args[@]}")
   dst_bytes=$(echo "$dst_data" | awk '{print $1}')
   dst_count=$(echo "$dst_data" | awk '{print $2}')
 
