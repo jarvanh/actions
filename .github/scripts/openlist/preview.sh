@@ -112,7 +112,7 @@ add_preview_pair() {
   dst_bytes=$(echo "$dst_data" | awk '{print $1}')
   dst_count=$(echo "$dst_data" | awk '{print $2}')
 
-  # 计算预估待同步
+  # 计算预估待同步（原始差值）
   local sync_bytes sync_count
   if [ "$src_bytes" -gt "$dst_bytes" ]; then
     sync_bytes=$((src_bytes - dst_bytes))
@@ -124,6 +124,22 @@ add_preview_pair() {
   else
     sync_count=0
   fi
+
+  # 扣减已通过修复方式同步的文件（这些文件在目标端以不同路径/文件名存在）
+  # 避免 405/409 修复文件导致预览显示"虚假缺失"
+  _load_marker_fixed_files "$source_path" "$dest_path" "${PREVIEW_TASK_NAME:-}"
+  local raw_sync_bytes="$sync_bytes" raw_sync_count="$sync_count"
+  local fixed_note=""
+  if [ "${MARKER_FIXED_COUNT:-0}" -gt 0 ]; then
+    local adjusted_count=$((sync_count - MARKER_FIXED_COUNT))
+    [ "$adjusted_count" -lt 0 ] && adjusted_count=0
+    local adjusted_bytes=$((sync_bytes - MARKER_FIXED_BYTES))
+    [ "$adjusted_bytes" -lt 0 ] && adjusted_bytes=0
+    fixed_note=" (已扣减 ${MARKER_FIXED_COUNT} 个修复文件 / $(format_bytes "$MARKER_FIXED_BYTES"))"
+    sync_count=$adjusted_count
+    sync_bytes=$adjusted_bytes
+  fi
+
   PREVIEW_TOTAL_SYNC_BYTES=$((PREVIEW_TOTAL_SYNC_BYTES + sync_bytes))
   PREVIEW_TOTAL_SYNC_COUNT=$((PREVIEW_TOTAL_SYNC_COUNT + sync_count))
 
@@ -139,7 +155,7 @@ add_preview_pair() {
   fi
   PREVIEW_PAIRS_DETAIL+="   • 源端: $(format_bytes "$src_bytes") / ${src_count} 文件"$'\n'
   PREVIEW_PAIRS_DETAIL+="   • 目标: $(format_bytes "$dst_bytes") / ${dst_count} 文件"$'\n'
-  PREVIEW_PAIRS_DETAIL+="   • 预估待同步: +$(format_bytes "$sync_bytes") / +${sync_count} 文件"$'\n'
+  PREVIEW_PAIRS_DETAIL+="   • 预估待同步: +$(format_bytes "$sync_bytes") / +${sync_count} 文件${fixed_note}"$'\n'
 
   # 流量图分组（按 source + excludes 组合分组，相同分组的 dest 共享一个源端节点）
   local group_key="${source_path}|${exclude_summary}"

@@ -62,6 +62,9 @@ _sync_task_impl() {
   if [ "$current_depth" -eq 0 ]; then
     SYNC_SKIPPED=0
     SYNC_FAILED=0
+    # 初始化修复文件累计器（sync_with_logging 每次执行后会累加到此变量）
+    # auto-split 子目录的修复也会累计到这里，最终由 save_sync_marker 写入 marker
+    GLOBAL_FIXED_FILES_JSON="[]"
   fi
 
   local max_depth=10

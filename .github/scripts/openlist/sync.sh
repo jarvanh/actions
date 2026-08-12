@@ -213,10 +213,13 @@ sync_with_logging() {
       [ -z "$failed_line" ] && continue
 
       local file_size="未知"
-      local size_out
-      size_out=$(rclone size "${source_path}/${failed_line}" 2>/dev/null || true)
-      if [ -n "$size_out" ]; then
-        file_size=$(echo "$size_out" | sed -n 's/^Total size:[[:space:]]*//p' | head -n 1)
+      local file_size_bytes=0
+      local size_json
+      size_json=$(rclone size "${source_path}/${failed_line}" --json 2>/dev/null || echo '{}')
+      if [ -n "$size_json" ] && [ "$size_json" != "{}" ]; then
+        file_size_bytes=$(echo "$size_json" | jq -r '.bytes // 0' 2>/dev/null || echo 0)
+        [[ "$file_size_bytes" =~ ^[0-9]+$ ]] || file_size_bytes=0
+        file_size=$(format_bytes "$file_size_bytes")
       fi
 
       echo "修复中: ${failed_line} (${file_size})" | tee -a "$LOG_FILENAME"
@@ -225,7 +228,7 @@ sync_with_logging() {
 
       if [ "$TRY_FIX_STATUS" = "success" ]; then
         echo "修复成功: ${failed_line} -> 方法: ${TRY_FIX_METHOD}" | tee -a "$LOG_FILENAME"
-        echo "${TRY_FIX_ORIGINAL}|${TRY_FIX_ALTERNATIVE}|${TRY_FIX_METHOD}|${file_size}" >> "$fix_list"
+        echo "${TRY_FIX_ORIGINAL}|${TRY_FIX_ALTERNATIVE}|${TRY_FIX_METHOD}|${file_size}|${file_size_bytes}" >> "$fix_list"
       else
         echo "修复失败: ${failed_line} - ${TRY_FIX_MESSAGE}" | tee -a "$LOG_FILENAME"
         echo "${failed_line}|${file_size}|${TRY_FIX_MESSAGE}" >> "$fail_list"
@@ -260,6 +263,86 @@ sync_with_logging() {
     "$fail_list" "$fix_list" "$fix_log" \
     "$HAS_405_409" "$HAS_OBJECT_NOT_FOUND" \
     "${extra_args[@]}"
+
+  # 把 fix_list 序列化为 JSON 供 save_sync_marker 使用
+  # 格式: [{original, alternative, method, size_human, size_bytes, restore: {kind, summary, steps, script}}]
+  # restore 字段记录还原方式，便于日后从目标端恢复原始文件
+  LAST_SYNC_FIXED_FILES_JSON="[]"
+  if [ -s "$fix_list" ]; then
+    LAST_SYNC_FIXED_FILES_JSON=$(jq -R -s '
+      def restore_info($orig; $alt; $method; $src; $dst):
+        # 10 种修复方式精确识别：
+        #   "base64URL 编码目录 + 原文件名"                → 仅 b64 目录
+        #   "原路径 + 原文件名"                             → 原样 copy
+        #   "base64URL 编码目录 + base64URL 编码文件名"    → b64 目录+文件名
+        #   "原路径 + base64URL 编码文件名"                → 仅 b64 文件名
+        #   "base64URL 编码目录 + zip 压缩包"              → zip(+b64dir)
+        #   "原路径 + zip 压缩包"                          → zip
+        #   "base64URL 编码目录 + 7z 压缩包"               → 7z(+b64dir)
+        #   "原路径 + 7z 压缩包"                           → 7z
+        #   "base64URL 编码目录 + API 自动生成文件名"      → api rename(+b64dir)
+        #   "原路径 + API 自动生成文件名"                  → api rename
+        # 注: 不能用 ".*文件名" 模糊匹配，"原文件名" 里也有 "文件名" 3 个字，会误判
+        ($method | test("base64URL 编码目录 ")) as $has_b64_dir
+        | ($method | test("base64URL 编码文件名")) as $has_b64_name
+        | ($method | test("zip 压缩包")) as $has_zip
+        | ($method | test("7z 压缩包")) as $has_7z
+        | ($method | test("API 自动生成文件名")) as $has_api
+        # 原目录部分（去掉文件名）和文件名
+        | ([$orig | split("/") | .[0:-1] | join("/"), $orig | split("/") | .[-1]]) as [$orig_dir, $orig_name]
+        | ([$alt  | split("/") | .[0:-1] | join("/"), $alt  | split("/") | .[-1]]) as [$alt_dir,  $alt_name]
+        | if   $has_zip      then {kind:"zip",
+            summary: "文件被打包为 .zip（存储模式 mx=0）",
+            steps:   ["下载目标端 " + $alt, "执行: 7z x <alt_zip> -o<output_dir>（或 unzip）", "解压后得到 " + $orig_name],
+            script:  "set -euo pipefail\nSRC=\"" + $src + "\"\nDST=\"" + $dst + "\"\nORIG=\"" + $orig + "\"\nALT=\"" + $alt + "\"\nTMP=$(mktemp -d)\nrclone copyto \"${DST}/${ALT}\" \"$TMP/package.zip\" --progress\n7z x \"$TMP/package.zip\" -o\"$TMP/out\" -y\n# 还原后的源文件在: $TMP/out/" + $orig_name + "\n# 如需回传源端: rclone copyto \"$TMP/out/" + $orig_name + "\" \"${SRC}/${ORIG}\"\nrm -rf \"$TMP\""}
+          elif $has_7z       then {kind:"seven_zip",
+            summary: "文件被打包为 .7z（存储模式 mx=0）",
+            steps:   ["下载目标端 " + $alt, "执行: 7z x <alt_7z> -o<output_dir>", "解压后得到 " + $orig_name],
+            script:  "set -euo pipefail\nSRC=\"" + $src + "\"\nDST=\"" + $dst + "\"\nORIG=\"" + $orig + "\"\nALT=\"" + $alt + "\"\nTMP=$(mktemp -d)\nrclone copyto \"${DST}/${ALT}\" \"$TMP/package.7z\" --progress\n7z x \"$TMP/package.7z\" -o\"$TMP/out\" -y\n# 还原后的源文件在: $TMP/out/" + $orig_name + "\n# 如需回传源端: rclone copyto \"$TMP/out/" + $orig_name + "\" \"${SRC}/${ORIG}\"\nrm -rf \"$TMP\""}
+          elif $has_api      then {kind:"api_rename",
+            summary: "文件名被 OpenList API 自动改写（前缀 file_<ts>_<pid>_api，扩展名保留）",
+            steps:   ["下载目标端 " + $alt, "根据内容哈希对比或直接重命名为: " + $orig_name],
+            script:  "set -euo pipefail\nSRC=\"" + $src + "\"\nDST=\"" + $dst + "\"\nORIG=\"" + $orig + "\"\nALT=\"" + $alt + "\"\nTMP=$(mktemp -d)\nALT_FNAME=\"" + $alt_name + "\"\nORIG_FNAME=\"" + $orig_name + "\"\nrclone copyto \"${DST}/${ALT}\" \"$TMP/${ORIG_FNAME}\" --progress\n# 已直接保存为原始文件名。内容校验可用: rclone hashsum SHA1 \"${SRC}/${ORIG}\" 与 sha1sum \"$TMP/${ORIG_FNAME}\" 对比\n# 如需回传源端: rclone copyto \"$TMP/${ORIG_FNAME}\" \"${SRC}/${ORIG}\"\nrm -rf \"$TMP\""}
+          elif ($has_b64_dir and $has_b64_name) then {kind:"base64url_both",
+            summary: "目录最末一层和文件名均做了 base64URL 编码",
+            steps:   ["取目录最末层路径段 → base64URL 解码得到原目录名", "取文件名（扩展名前部分） → base64URL 解码得到原文件名"],
+            script:  "set -euo pipefail\n# base64URL 解码工具: base64 -d 时要把 -_ 替换为 +/ 并补齐 = 填充\nb64url_decode() {\n  local s=\"$1\"; s=\"${s//-/+}\"; s=\"${s//_/}\"\n  local pad=$(( (4 - ${#s} % 4) % 4 )); while [ $pad -gt 0 ]; do s=\"$s=\"; pad=$((pad-1)); done\n  printf \"%s\" \"$s\" | base64 -d\n}\nSRC=\"" + $src + "\"\nDST=\"" + $dst + "\"\nORIG=\"" + $orig + "\"\nALT=\"" + $alt + "\"\n# 把 ALT 路径按 / 分段，dir 末段和文件名做 base64URL 解码即可还原 ORIG 路径\n# 脚本给出示例：下载后按原名保存\nTMP=$(mktemp -d)\nORIG_FNAME=\"" + $orig_name + "\"\nrclone copyto \"${DST}/${ALT}\" \"$TMP/${ORIG_FNAME}\" --progress\n# 如需回传源端: rclone copyto \"$TMP/${ORIG_FNAME}\" \"${SRC}/${ORIG}\"\nrm -rf \"$TMP\""}
+          elif $has_b64_dir then {kind:"base64url_dir",
+            summary: "最末一层目录名做了 base64URL 编码，文件名保持原样",
+            steps:   ["取目录最末层路径段 → base64URL 解码即得原目录名", "文件名无需改动"],
+            script:  "set -euo pipefail\nb64url_decode() {\n  local s=\"$1\"; s=\"${s//-/+}\"; s=\"${s//_/}\"\n  local pad=$(( (4 - ${#s} % 4) % 4 )); while [ $pad -gt 0 ]; do s=\"$s=\"; pad=$((pad-1)); done\n  printf \"%s\" \"$s\" | base64 -d\n}\nSRC=\"" + $src + "\"\nDST=\"" + $dst + "\"\nORIG=\"" + $orig + "\"\nALT=\"" + $alt + "\"\nTMP=$(mktemp -d)\nORIG_FNAME=\"" + $orig_name + "\"\nrclone copyto \"${DST}/${ALT}\" \"$TMP/${ORIG_FNAME}\" --progress\n# 如需回传源端: rclone copyto \"$TMP/${ORIG_FNAME}\" \"${SRC}/${ORIG}\"\nrm -rf \"$TMP\""}
+          elif $has_b64_name then {kind:"base64url_name",
+            summary: "文件名（不含扩展名部分）做了 base64URL 编码，目录保持原样",
+            steps:   ["取文件名扩展名前部分 → base64URL 解码得到原文件名", "目录名无需改动"],
+            script:  "set -euo pipefail\nb64url_decode() {\n  local s=\"$1\"; s=\"${s//-/+}\"; s=\"${s//_/}\"\n  local pad=$(( (4 - ${#s} % 4) % 4 )); while [ $pad -gt 0 ]; do s=\"$s=\"; pad=$((pad-1)); done\n  printf \"%s\" \"$s\" | base64 -d\n}\nSRC=\"" + $src + "\"\nDST=\"" + $dst + "\"\nORIG=\"" + $orig + "\"\nALT=\"" + $alt + "\"\nTMP=$(mktemp -d)\nORIG_FNAME=\"" + $orig_name + "\"\nrclone copyto \"${DST}/${ALT}\" \"$TMP/${ORIG_FNAME}\" --progress\n# 如需回传源端: rclone copyto \"$TMP/${ORIG_FNAME}\" \"${SRC}/${ORIG}\"\nrm -rf \"$TMP\""}
+          else {kind:"copy",
+            summary: "文件按原路径原文件名直接 copyto，无需还原处理",
+            steps:   ["目标端路径与源端相同，直接使用即可"],
+            script:  "# 路径未变化，无需还原\nSRC=\"" + $src + "\"\nDST=\"" + $dst + "\"\nORIG=\"" + $orig + "\"\nALT=\"" + $alt + "\"\n# 如需取回: rclone copyto \"${DST}/${ALT}\" ./local_copy"}
+          end;
+      split("\n") | map(select(length > 0)) | map(
+        split("|") as $f
+        | {
+            original:    $f[0],
+            alternative: $f[1],
+            method:      $f[2],
+            size_human:  $f[3],
+            size_bytes:  ($f[4] // "0" | tonumber)
+          }
+        | . + {restore: (restore_info(.original; .alternative; .method; "'"$source_path"'"; "'"$dest_path"'"))}
+      )
+    ' "$fix_list" 2>/dev/null || echo "[]")
+  fi
+
+  # 累计到全局变量（供 auto-split 拆分模式下顶级 save_sync_marker 收集所有子目录的修复）
+  # _sync_task_impl 在 current_depth=0 时初始化 GLOBAL_FIXED_FILES_JSON="[]"
+  if [ -z "${GLOBAL_FIXED_FILES_JSON:-}" ]; then
+    GLOBAL_FIXED_FILES_JSON="[]"
+  fi
+  if [ "$LAST_SYNC_FIXED_FILES_JSON" != "[]" ]; then
+    GLOBAL_FIXED_FILES_JSON=$(jq -sc --argjson acc "$GLOBAL_FIXED_FILES_JSON" --argjson cur "$LAST_SYNC_FIXED_FILES_JSON" \
+      '($acc + $cur) | unique_by(.original)' 2>/dev/null || echo "$GLOBAL_FIXED_FILES_JSON")
+  fi
 
   rm -f "$LOG_FILENAME" "$LAST_ATTEMPT_LOG" "$fail_list" "$fix_list" "$fix_log" /tmp/probe_src.txt /tmp/probe_dst.txt 2>/dev/null || true
   # 始终返回 0：失败状态已通过 SYNC_FAILED 全局变量传递，
