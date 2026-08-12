@@ -27,11 +27,11 @@ DIR_LABEL=$(basename "${SOURCE_REMOTE#*:}")
 # OneDrive 个人版仅支持 QuickXorHash，企业版/SharePoint 支持 SHA1/SHA256
 # 按优先级尝试：SHA1 → SHA256 → MD5 → QuickXorHash，使用第一个返回结果的哈希类型
 # 用 python 解析 rclone hashsum 输出（hash 和 path 之间是空白分隔），生成 hash;path 格式
-# -R 递归子目录，path 包含子目录前缀
+# 注意：rclone hashsum 递归子目录是默认行为，不支持 -R 标志（与 lsf/ls 不同）
 HASH_TYPE=""
 for h in sha1 sha256 md5 QuickXorHash; do
   # 同时捕获 stdout 到解析管道、stderr 到错误日志文件
-  if rclone hashsum "$h" "$SOURCE_REMOTE/" -R 2>/tmp/rclone_hash_err.log \
+  if rclone hashsum "$h" "$SOURCE_REMOTE/" 2>/tmp/rclone_hash_err.log \
     | python3 -c "import sys;[print(f'{p[0]};{p[1]}') for line in sys.stdin if len(p:=line.strip().split(None,1))==2]" \
     > /tmp/91_hashes.txt; then
     if [ -s /tmp/91_hashes.txt ]; then
