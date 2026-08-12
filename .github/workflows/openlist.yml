@@ -701,8 +701,12 @@ jobs:
           )
 
           # sync_task 特有参数（rclone sync 模式，删除目标端多余文件，自动追加）
+          # --delete-excluded: 同时删除目标端匹配 --exclude 模式的历史文件
+          #   （否则 sync 只会忽略 exclude 文件而不删除，导致目标端残留历史文件，
+          #    预览文件数/大小永远对不上源端）
           RCLONE_SYNC_TASK_FLAGS=(
             --delete-before
+            --delete-excluded
           )
 
           # copy_task 特有参数（rclone copy 模式，不删除，逐文件检查，自动追加）
