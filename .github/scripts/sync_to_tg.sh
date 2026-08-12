@@ -149,6 +149,19 @@ def write_uploaded(uploaded: dict):
         raise
 
 
+def flush_uploaded_to_remote(uploaded: dict):
+    """写本地 JSON 并立即同步到远端，确保上传进度持久化。
+
+    每次成功上传一个视频后调用，避免 Action 超时被 kill 时丢失全部进度。
+    """
+    write_uploaded(uploaded)
+    result = run(["rclone", "copyto", UPLOADED_OUT, f"{SOURCE_REMOTE}/uploaded_videos.json"])
+    if result.returncode != 0:
+        print(f"[flush] WARN: rclone copyto 失败 (code {result.returncode}): {result.stderr[-500:] if result.stderr else '(无)'}")
+    else:
+        print(f"[flush] uploaded_videos.json 已同步到远端 (条目数: {len(uploaded)})")
+
+
 def human_size(num):
     """与 du -h 风格一致：1024 进制、四舍五入取整，单位 B/K/M/G/T。"""
     num = float(num)
@@ -313,6 +326,8 @@ def main():
                 "source_created_at": source_created_at,
                 "source_modified_at": source_modified_at or "",
             }
+            # 立即持久化到远端，避免 Action 超时被 kill 时丢失全部进度
+            flush_uploaded_to_remote(uploaded)
             sent += 1
             sent_list.append(f"- {file} (上传耗时 {up_elapsed:.2f}s)")
             print(f"✅ 上传完成: {file} (总处理耗时 {up_elapsed:.2f}s)")
@@ -362,8 +377,8 @@ if [ $PYTHON_EXIT -ne 0 ]; then
   exit $PYTHON_EXIT
 fi
 
-# 上传更新后的 uploaded_videos.json 回 OneDrive
-rclone copyto "$TMP_DIR/uploaded_videos.json" "$SOURCE_REMOTE/uploaded_videos.json" 2>/dev/null
+# 上传更新后的 uploaded_videos.json 回 OneDrive（最终同步，增量同步已在每次上传后执行）
+rclone copyto "$TMP_DIR/uploaded_videos.json" "$SOURCE_REMOTE/uploaded_videos.json" || echo "WARN: 最终 rclone copyto 失败，但增量同步已在每次上传后执行"
 
 # 读取 Python 输出的统计
 STATS_FILE="$TMP_DIR/stats.json"
