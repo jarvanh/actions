@@ -45,6 +45,27 @@ save_sync_marker() {
   source_bytes=$(echo "$size_json" | jq -r '.bytes // 0' 2>/dev/null || echo 0)
   source_count=$(echo "$size_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
 
+  # 双重保险：校验目标端真实文件数
+  # 即使 _send_sync_result_notification 已做了同步后缓存刷新 + is_partial_success 检测，
+  # 这里再校验一次，防止 SYNC_FAILED=0 但 dest_count 仍小于 source_count 的情况
+  # （比如 auto-split 子目录各自通过检测，但汇总后总数不一致）
+  local dest_size_json dest_bytes dest_count
+  dest_size_json=$(rclone size "$dest_path" --json 2>/dev/null || true)
+  dest_bytes=$(echo "$dest_size_json" | jq -r '.bytes // 0' 2>/dev/null || echo 0)
+  dest_count=$(echo "$dest_size_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
+
+  # 阈值: 容许少量差异（正在上传/删除的临时状态），超过 5 个文件缺失则拒绝写 marker
+  local missing_count=$((source_count - dest_count))
+  if [ "$missing_count" -gt 5 ]; then
+    echo "⚠️ 拒绝写入同步标记: 目标端文件数 ${dest_count} < 源端 ${source_count}（缺失 ${missing_count} 个）"
+    echo "  可能原因: OpenList stale 缓存导致 rclone 跳过上传，或部分文件上传失败但未被检测到"
+    echo "  本次不写 marker，下次运行将重新同步"
+    return 1
+  fi
+  if [ "$missing_count" -gt 0 ]; then
+    echo "ℹ️ 目标端文件数 ${dest_count} < 源端 ${source_count}（缺失 ${missing_count} 个，在容差范围内）"
+  fi
+
   # 获取顶层目录列表（用于检测目录变化）
   # top_dirs_json: JSON 数组格式，写入 marker
   # top_dirs_lines: 行排序文本格式，兼容旧 marker 读取和对比逻辑
