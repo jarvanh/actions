@@ -887,29 +887,41 @@ jobs:
             sleep 60
           fi
 
-          # 获取两端文件列表
+          # 获取两端文件列表（用显式分隔符 | 避免默认 ; 或 tab 在 YAML/shell 中被误解析）
           echo "获取源端文件列表..."
-          rclone lsf -R --files-only --format "ps" "$SRC/" 2>/dev/null | sort > /tmp/_sfs_src.txt
+          rclone lsf -R --files-only --format "ps" --separator '|' "$SRC/" 2>/dev/null | sort > /tmp/_sfs_src.txt
           echo "源端: $(wc -l < /tmp/_sfs_src.txt) 文件"
 
           echo "获取目标端文件列表..."
-          rclone lsf -R --files-only --format "ps" "$DST/" 2>/dev/null | sort > /tmp/_sfs_dst.txt
+          rclone lsf -R --files-only --format "ps" --separator '|' "$DST/" 2>/dev/null | sort > /tmp/_sfs_dst.txt
           echo "目标端: $(wc -l < /tmp/_sfs_dst.txt) 文件"
+
+          # 打印前 3 行原始输出用于调试
+          echo "源端前 3 行原始格式:"
+          head -3 /tmp/_sfs_src.txt | cat -A
+          echo "目标端前 3 行原始格式:"
+          head -3 /tmp/_sfs_dst.txt | cat -A
 
           # Python 做差集，挑最小 5 个
           python3 << 'PYEOF' > /tmp/_sfs_test.txt
+          import sys
+
           def parse_listing(path):
               files = {}
               with open(path) as f:
                   for line in f:
-                      line = line.strip()
+                      line = line.rstrip('\n\r')
                       if not line: continue
-                      parts = line.rsplit('\t', 1)
-                      if len(parts) == 2:
-                          fpath, fsize = parts
-                          try: files[fpath] = int(fsize)
-                          except ValueError: files[fpath] = 0
-                      else: files[line] = 0
+                      # 用 | 分隔符解析（与 rclone --separator '|' 对应）
+                      if '|' in line:
+                          fpath, fsize = line.rsplit('|', 1)
+                      else:
+                          files[line] = 0
+                          continue
+                      try:
+                          files[fpath] = int(fsize)
+                      except ValueError:
+                          files[fpath] = 0
               return files
 
           src = parse_listing('/tmp/_sfs_src.txt')
@@ -917,9 +929,11 @@ jobs:
           missing = {p: s for p, s in src.items() if p not in dst}
           sorted_missing = sorted(missing.items(), key=lambda x: x[1])
           print(f"# 缺失文件总数: {len(missing)}")
+          print(f"# 源端总文件数: {len(src)}")
+          print(f"# 目标端总文件数: {len(dst)}")
           print(f"# 挑最小 5 个测试:")
           for path, size in sorted_missing[:5]:
-              print(f"{size}\t{path}")
+              print(f"{size}|{path}")
           PYEOF
 
           echo ""
@@ -932,7 +946,7 @@ jobs:
 
           # 对每个文件测试
           TEST_NUM=0
-          while IFS=$'\t' read -r size path; do
+          while IFS='|' read -r size path; do
             [[ "$path" == \#* ]] && continue
             [ -z "$path" ] && continue
             TEST_NUM=$((TEST_NUM + 1))
