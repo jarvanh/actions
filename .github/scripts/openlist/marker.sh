@@ -46,8 +46,11 @@ save_sync_marker() {
   source_count=$(echo "$size_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
 
   # 获取顶层目录列表（用于检测目录变化）
-  local top_dirs
-  top_dirs=$(rclone lsf --dirs-only "$source_path" 2>/dev/null | sed 's|/$||' | sort)
+  # top_dirs_json: JSON 数组格式，写入 marker
+  # top_dirs_lines: 行排序文本格式，兼容旧 marker 读取和对比逻辑
+  local top_dirs_lines top_dirs_json
+  top_dirs_lines=$(rclone lsf --dirs-only "$source_path" 2>/dev/null | sed 's|/$||' | sort)
+  top_dirs_json=$(printf '%s\n' "$top_dirs_lines" | jq -R -s 'split("\n") | map(select(length>0))')
 
   # 读取本任务（含 auto-split 子目录）累计的修复文件列表
   # sync_with_logging 每次执行后会把 fix_list 累计到 GLOBAL_FIXED_FILES_JSON
@@ -378,7 +381,7 @@ PYEOF
     --arg dest_path "$dest_path" \
     --argjson source_bytes "$source_bytes" \
     --argjson source_count "$source_count" \
-    --arg top_dirs "$top_dirs" \
+    --argjson top_dirs "$top_dirs_json" \
     --argjson fixed_files "$merged_fixed_json" \
     --argjson fixed_count "$fixed_count" \
     --argjson fixed_bytes "$fixed_bytes" \
@@ -522,6 +525,21 @@ _load_marker_fixed_files() {
   MARKER_FIXED_FILES=$(echo "$marker_json" | jq -c '.fixed_files // []' 2>/dev/null || echo "[]")
 }
 
+# 把 marker JSON 里的 top_dirs 统一转成"每行一个目录名、已排序"的文本格式
+# 兼容: 新格式 JSON 数组 (["Apple","CloudMusic",...]) 和旧格式换行分隔字符串 ("Apple\nCloudMusic\n...")
+# 用法: _top_dirs_to_lines <marker_json_text>
+_top_dirs_to_lines() {
+  local json="$1"
+  # 先判断 top_dirs 是不是数组：如果是就 sort .[]；否则按字符串 split("\n") 处理
+  local is_array
+  is_array=$(echo "$json" | jq -r 'if (.top_dirs // null) | type == "array" then "1" else "0" end' 2>/dev/null || echo 0)
+  if [ "$is_array" = "1" ]; then
+    echo "$json" | jq -r '.top_dirs[]' 2>/dev/null | sort
+  else
+    echo "$json" | jq -r '.top_dirs // ""' 2>/dev/null | tr '\n' '\012' | sort
+  fi
+}
+
 # 发送源端大小减小的警告通知（同时跳过本次同步）
 # 依赖全局变量: MARKER_JSON, MARKER_CURRENT_BYTES, MARKER_CURRENT_COUNT, MARKER_CURRENT_DIRS
 # 用法: send_sync_warning <task_name> <source_path> <dest_path>
@@ -533,7 +551,7 @@ send_sync_warning() {
   local marker_bytes marker_count marker_dirs
   marker_bytes=$(echo "$MARKER_JSON" | jq -r '.source_bytes // 0')
   marker_count=$(echo "$MARKER_JSON" | jq -r '.source_count // 0')
-  marker_dirs=$(echo "$MARKER_JSON" | jq -r '.top_dirs // ""')
+  marker_dirs=$(_top_dirs_to_lines "$MARKER_JSON")
 
   local diff_bytes=$((marker_bytes - MARKER_CURRENT_BYTES))
   local diff_count=$((marker_count - MARKER_CURRENT_COUNT))
