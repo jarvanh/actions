@@ -385,6 +385,13 @@ _send_sync_result_notification() {
   local source_count_raw="$source_count"
   [ "$source_count" = "0" ] && source_count="未知"
 
+  # 同步后刷新 OpenList 缓存，确保 _get_path_stats 拿到真实文件数
+  # 避免 stale 缓存里残留"幽灵文件"导致 dest_count 虚高，误报同步成功
+  if [[ "$dest_path" == openlist:* ]]; then
+    echo "同步后刷新 OpenList 缓存以获取真实文件数..." | tee -a "$LOG_FILENAME"
+    _refresh_openlist_cache "$dest_path"
+  fi
+
   dst_stats=$(_get_path_stats "$dest_path" "${extra_args[@]}")
   dest_count=$(echo "$dst_stats" | awk '{print $2}')
   dest_size_human=$(echo "$dst_stats" | awk '{print $3 ($4? " "$4 : "")}')
