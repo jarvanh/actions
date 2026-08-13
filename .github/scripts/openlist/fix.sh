@@ -99,8 +99,8 @@ try_fix_failed_file() {
   # 降级处理：mkdir 失败或 lsd 验证失败时执行（OpenList API + base64URL）
   if [ "$dir_ok" -ne 1 ]; then
     local ol_token
-    ol_token=$(jq -r '.token' /dropbox/self-hosted/openlist/data/config.json 2>/dev/null || echo "")
-    if [ -n "$ol_token" ] && [ "$ol_token" != "null" ]; then
+    ol_token=$(_get_openlist_token)
+    if [ -n "$ol_token" ]; then
       local mkdir_resp mkdir_http
       mkdir_resp=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST "http://127.0.0.1:5244/api/fs/mkdir" \
         -H "Authorization: $ol_token" \
@@ -185,7 +185,7 @@ try_fix_failed_file() {
   ol_dst_dir="/$(dirname -- "$ol_dst_dir")"
 
   local ol_token
-  ol_token=$(jq -r '.token' /dropbox/self-hosted/openlist/data/config.json 2>/dev/null || echo "")
+  ol_token=$(_get_openlist_token)
 
   # 方法 1：直接 rclone copyto
   log_fix "$fix_log" "方法 1: 直接 rclone copyto"

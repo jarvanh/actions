@@ -189,3 +189,23 @@ _extract_exclude_summary() {
   done
   echo "$summary"
 }
+
+# 获取 OpenList token（多路径 + 双字段查找）
+# 与 workflow 里的候选路径保持一致
+# 返回: token 字符串（找到时）或空字符串（未找到时）
+_get_openlist_token() {
+  local c t
+  for c in \
+    "/dropbox/self-hosted/openlist/data/config.json" \
+    "/dropbox/self-hosted/openlist/data/conf/config.json" \
+    "/data/openlist/data/config.json" \
+    "/tmp/openlist_data/config.json"; do
+    [ -f "$c" ] || continue
+    t=$(jq -r '.token // .jwt_secret // empty' "$c" 2>/dev/null || echo "")
+    if [ -n "$t" ] && [ "$t" != "null" ]; then
+      echo "$t"
+      return 0
+    fi
+  done
+  return 1
+}

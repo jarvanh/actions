@@ -24,8 +24,8 @@ _refresh_openlist_cache() {
   local ol_path="${dest_path#openlist:}"
   ol_path="/${ol_path}"
   local ol_token
-  ol_token=$(jq -r '.token' /dropbox/self-hosted/openlist/data/config.json 2>/dev/null || echo "")
-  if [ -z "$ol_token" ] || [ "$ol_token" = "null" ]; then
+  ol_token=$(_get_openlist_token)
+  if [ -z "$ol_token" ]; then
     echo "OpenList token 不可用，跳过缓存刷新"
     return 0
   fi
@@ -172,8 +172,8 @@ sync_with_logging() {
       local ol_path="${dest_path#openlist:}"
       ol_path="/${ol_path}"
       local ol_token
-      ol_token=$(jq -r '.token' /dropbox/self-hosted/openlist/data/config.json 2>/dev/null || echo "")
-      if [ -n "$ol_token" ] && [ "$ol_token" != "null" ]; then
+      ol_token=$(_get_openlist_token)
+      if [ -n "$ol_token" ]; then
         echo "405 补救: 刷新 OpenList 缓存 $ol_path" | tee -a "$LOG_FILENAME"
         curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh" \
           -H "Authorization: $ol_token" \
