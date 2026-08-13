@@ -24,6 +24,11 @@ on:
         required: false
         type: boolean
         default: false
+      debug_small_file_sync:
+        description: "调试: 挑缺失文件中的小文件测试同步（找出无法上传的根因）"
+        required: false
+        type: boolean
+        default: false
   schedule:
     # - cron: "10 1 * * *"
     - cron: "*/5 * * * *"
@@ -827,6 +832,257 @@ jobs:
           echo "  诊断完成"
           echo "=========================================="
 
+      # ===== Debug: 小文件同步测试 =====
+      # 挑缺失文件中最小的几个，用不同 rclone 参数尝试上传
+      # 找出哪种方式能成功，定位"文件一直同步不成功"的根因
+      - name: "Debug: 小文件同步测试"
+        if: ${{ inputs.debug_small_file_sync == true }}
+        continue-on-error: true
+        run: |
+          echo "=========================================="
+          echo "  小文件同步测试 — 定位无法上传的根因"
+          echo "=========================================="
+
+          # ===== OpenList 就绪探测 =====
+          echo "等待 OpenList 就绪..."
+          for i in $(seq 1 40); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5244/ping 2>/dev/null || echo "000")
+            [ "$code" = "200" ] && { echo "HTTP 就绪 (${i}次)"; break; }
+            sleep 2
+          done
+
+          # 获取 token
+          OL_TOKEN=""
+          for c in \
+            "/dropbox/self-hosted/openlist/data/config.json" \
+            "/dropbox/self-hosted/openlist/data/conf/config.json" \
+            "/data/openlist/data/config.json"; do
+            [ -f "$c" ] || continue
+            t=$(jq -r '.token // .jwt_secret // empty' "$c" 2>/dev/null || echo "")
+            if [ -n "$t" ] && [ "$t" != "null" ]; then
+              OL_TOKEN="$t"
+              echo "token: OK (来自 ${c})"
+              break
+            fi
+          done
+          [ -z "$OL_TOKEN" ] && echo "⚠️ token 不可用"
+
+          # 等驱动初始化
+          echo "等待驱动初始化 (120s) ..."
+          sleep 120
+          rclone lsd openlist: >/dev/null 2>&1 && echo "WebDAV 就绪" || echo "⚠️ WebDAV 未就绪"
+
+          SRC="onedrive:backup"
+          DST="openlist:wopan176Crypt/backup"
+
+          # 刷新目标端缓存
+          echo "刷新目标端缓存..."
+          ol_path="/${DST#openlist:}"
+          if [ -n "$OL_TOKEN" ]; then
+            curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh" \
+              -H "Authorization: $OL_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{\"path\":\"$ol_path\",\"recursive\":true}" >/dev/null 2>&1 || true
+            echo "等待缓存刷新 (60s)..."
+            sleep 60
+          fi
+
+          # 获取两端文件列表
+          echo "获取源端文件列表..."
+          rclone lsf -R --files-only --format "ps" "$SRC/" 2>/dev/null | sort > /tmp/_sfs_src.txt
+          echo "源端: $(wc -l < /tmp/_sfs_src.txt) 文件"
+
+          echo "获取目标端文件列表..."
+          rclone lsf -R --files-only --format "ps" "$DST/" 2>/dev/null | sort > /tmp/_sfs_dst.txt
+          echo "目标端: $(wc -l < /tmp/_sfs_dst.txt) 文件"
+
+          # Python 做差集，挑最小 5 个
+          python3 << 'PYEOF' > /tmp/_sfs_test.txt
+          def parse_listing(path):
+              files = {}
+              with open(path) as f:
+                  for line in f:
+                      line = line.strip()
+                      if not line: continue
+                      parts = line.rsplit('\t', 1)
+                      if len(parts) == 2:
+                          fpath, fsize = parts
+                          try: files[fpath] = int(fsize)
+                          except ValueError: files[fpath] = 0
+                      else: files[line] = 0
+              return files
+
+          src = parse_listing('/tmp/_sfs_src.txt')
+          dst = parse_listing('/tmp/_sfs_dst.txt')
+          missing = {p: s for p, s in src.items() if p not in dst}
+          sorted_missing = sorted(missing.items(), key=lambda x: x[1])
+          print(f"# 缺失文件总数: {len(missing)}")
+          print(f"# 挑最小 5 个测试:")
+          for path, size in sorted_missing[:5]:
+              print(f"{size}\t{path}")
+          PYEOF
+
+          echo ""
+          cat /tmp/_sfs_test.txt
+          echo ""
+
+          # 测试结果统计
+          RESULTS_FILE="/tmp/_sfs_results.txt"
+          : > "$RESULTS_FILE"
+
+          # 对每个文件测试
+          TEST_NUM=0
+          while IFS=$'\t' read -r size path; do
+            [[ "$path" == \#* ]] && continue
+            [ -z "$path" ] && continue
+            TEST_NUM=$((TEST_NUM + 1))
+
+            echo ""
+            echo "=========================================="
+            echo "测试 $TEST_NUM: $path"
+            echo "大小: $size bytes ($(awk "BEGIN {printf \"%.2f KiB\", $size/1024}"))"
+            echo "=========================================="
+
+            # 确认目标端不存在
+            echo -n "[确认] 目标端: "
+            if rclone lsf "$DST/$path" 2>/dev/null | head -1; then
+              echo "⚠️ 目标端已存在！跳过"
+              echo "$path|已存在|跳过" >> "$RESULTS_FILE"
+              continue
+            else
+              echo "确认不存在"
+            fi
+
+            # 检查源端文件是否存在
+            echo -n "[确认] 源端: "
+            if rclone lsf "$SRC/$path" 2>/dev/null | head -1; then
+              echo "存在"
+            else
+              echo "⚠️ 源端不存在！跳过"
+              echo "$path|源端不存在|跳过" >> "$RESULTS_FILE"
+              continue
+            fi
+
+            # 方法 1: rclone copyto -v（默认参数）
+            echo ""
+            echo "--- 方法 1: rclone copyto -v（默认）---"
+            rclone copyto "$SRC/$path" "$DST/$path" -v --retries 1 --low-level-retries 3 2>&1 | tail -30
+            RC=$?
+            echo "退出码: $RC"
+            echo -n "[检查] "
+            if rclone lsf "$DST/$path" 2>/dev/null | head -1; then
+              echo "✓ 方法 1 成功！"
+              echo "$path|方法1成功|退出码=$RC" >> "$RESULTS_FILE"
+              continue
+            else
+              echo "✗ 方法 1 失败"
+            fi
+
+            # 方法 2: rclone copyto -v --no-check-dest（不检查目标端）
+            echo ""
+            echo "--- 方法 2: rclone copyto -v --no-check-dest ---"
+            rclone copyto "$SRC/$path" "$DST/$path" -v --no-check-dest --retries 1 --low-level-retries 3 2>&1 | tail -30
+            RC=$?
+            echo "退出码: $RC"
+            echo -n "[检查] "
+            if rclone lsf "$DST/$path" 2>/dev/null | head -1; then
+              echo "✓ 方法 2 成功！"
+              echo "$path|方法2成功|退出码=$RC" >> "$RESULTS_FILE"
+              continue
+            else
+              echo "✗ 方法 2 失败"
+            fi
+
+            # 方法 3: rclone copyto -v --ignore-size（忽略大小检查）
+            echo ""
+            echo "--- 方法 3: rclone copyto -v --ignore-size ---"
+            rclone copyto "$SRC/$path" "$DST/$path" -v --ignore-size --retries 1 --low-level-retries 3 2>&1 | tail -30
+            RC=$?
+            echo "退出码: $RC"
+            echo -n "[检查] "
+            if rclone lsf "$DST/$path" 2>/dev/null | head -1; then
+              echo "✓ 方法 3 成功！"
+              echo "$path|方法3成功|退出码=$RC" >> "$RESULTS_FILE"
+              continue
+            else
+              echo "✗ 方法 3 失败"
+            fi
+
+            # 方法 4: 下载到本地再上传（排除 rclone 远程到远程的问题）
+            echo ""
+            echo "--- 方法 4: 下载到本地再上传 ---"
+            TMP_FILE="/tmp/_sfs_test_file"
+            echo "下载源文件到本地..."
+            rclone copyto "$SRC/$path" "$TMP_FILE" -v --retries 1 2>&1 | tail -10
+            echo "下载退出码: $?"
+            echo "本地文件大小: $(wc -c < "$TMP_FILE" 2>/dev/null || echo 0) bytes"
+
+            echo "上传到目标端..."
+            rclone copyto "$TMP_FILE" "$DST/$path" -v --retries 1 --low-level-retries 3 2>&1 | tail -30
+            RC=$?
+            echo "上传退出码: $RC"
+            rm -f "$TMP_FILE"
+
+            echo -n "[检查] "
+            if rclone lsf "$DST/$path" 2>/dev/null | head -1; then
+              echo "✓ 方法 4 成功！"
+              echo "$path|方法4成功|退出码=$RC" >> "$RESULTS_FILE"
+              continue
+            else
+              echo "✗ 方法 4 失败"
+            fi
+
+            # 方法 5: 刷新目标端父目录缓存后重试
+            echo ""
+            echo "--- 方法 5: 刷新父目录缓存后 rclone copyto ---"
+            parent_dir=$(dirname "$path")
+            ol_parent="/${DST#openlist:}/$parent_dir"
+            if [ -n "$OL_TOKEN" ]; then
+              echo "刷新目录: $ol_parent"
+              curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh" \
+                -H "Authorization: $OL_TOKEN" \
+                -H "Content-Type: application/json" \
+                -d "{\"path\":\"$ol_parent\",\"recursive\":false}" >/dev/null 2>&1 || true
+              sleep 5
+            fi
+            rclone copyto "$SRC/$path" "$DST/$path" -v --retries 1 --low-level-retries 3 2>&1 | tail -30
+            RC=$?
+            echo "退出码: $RC"
+            echo -n "[检查] "
+            if rclone lsf "$DST/$path" 2>/dev/null | head -1; then
+              echo "✓ 方法 5 成功！"
+              echo "$path|方法5成功|退出码=$RC" >> "$RESULTS_FILE"
+              continue
+            else
+              echo "✗ 方法 5 失败"
+            fi
+
+            echo ""
+            echo "❌ 所有方法均失败"
+            echo "$path|全部失败|—" >> "$RESULTS_FILE"
+          done < /tmp/_sfs_test.txt
+
+          # 总结
+          echo ""
+          echo "=========================================="
+          echo "  测试总结"
+          echo "=========================================="
+          echo "文件 | 结果 | 详情"
+          echo "-----|------|------"
+          while IFS='|' read -r f result detail; do
+            echo "$f | $result | $detail"
+          done < "$RESULTS_FILE"
+          echo ""
+          echo "结论判断:"
+          echo "  - 方法 1 成功 → 问题是 rclone sync 用 --size-only 时基于 stale 缓存跳过了上传"
+          echo "  - 方法 1 失败但方法 4 成功 → 问题是 rclone 远程到远程 (server-side copy) 的协议问题"
+          echo "  - 方法 1-4 都失败但方法 5 成功 → 问题是父目录缓存未刷新"
+          echo "  - 全部失败 → 问题在 OpenList/wopan176 后端，需检查后端日志"
+          echo ""
+          echo "=========================================="
+          echo "  测试完成"
+          echo "=========================================="
+
       # ===== 加载函数库 =====
       # 所有同步相关函数已提取到 .github/scripts/openlist/ 目录下的脚本文件中。
       # 修改函数逻辑请编辑对应脚本文件；修改任务定义和 rclone 参数请编辑下方 "Preview and sync all tasks" step。
@@ -839,7 +1095,7 @@ jobs:
           echo "函数库加载完成"
 
       - name: Initialize sync
-        if: ${{ inputs.debug_crypt_size != true && inputs.debug_sync_diff != true }}
+        if: ${{ inputs.debug_crypt_size != true && inputs.debug_sync_diff != true && inputs.debug_small_file_sync != true }}
         run: |
           source /tmp/load_all.sh
           PROCESSED_FILES_LOG="processed_videos.log"
@@ -868,7 +1124,7 @@ jobs:
       # ===== 所有同步任务定义 + 预览 + 执行 =====
       # 增减任务只需编辑下方 run_all_tasks 函数体；rclone 参数编辑下方 RCLONE_*_FLAGS 数组。
       - name: Preview and sync all tasks
-        if: ${{ inputs.debug_crypt_size != true && inputs.debug_sync_diff != true }}
+        if: ${{ inputs.debug_crypt_size != true && inputs.debug_sync_diff != true && inputs.debug_small_file_sync != true }}
         run: |
           source /tmp/load_all.sh
 
@@ -1001,7 +1257,7 @@ jobs:
           echo "=== 所有任务同步完成 ==="
 
       - name: Finalize and cleanup
-        if: ${{ inputs.debug_crypt_size != true && inputs.debug_sync_diff != true }}
+        if: ${{ inputs.debug_crypt_size != true && inputs.debug_sync_diff != true && inputs.debug_small_file_sync != true }}
         run: |
           source /tmp/load_all.sh
           actual_entries=0
@@ -1030,7 +1286,7 @@ jobs:
           echo "所有同步任务完成！"
 
       - name: sleep
-        if: ${{ inputs.debug_crypt_size != true && inputs.debug_sync_diff != true }}
+        if: ${{ inputs.debug_crypt_size != true && inputs.debug_sync_diff != true && inputs.debug_small_file_sync != true }}
         run: |
           sleep 300m
           sudo docker stop openlist
