@@ -1,8 +1,12 @@
 name: upload video to tg
 
+concurrency:
+  group: video-processing
+  cancel-in-progress: false
+
 on:
   schedule:
-    - cron: '0 9 * * *'
+    - cron: '0 10 * * *'
   workflow_dispatch:
     inputs:
       clean_tg_uploaded_videos:

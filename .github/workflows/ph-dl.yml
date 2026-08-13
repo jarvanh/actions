@@ -1,5 +1,9 @@
 name: ph-dl
 
+concurrency:
+  group: video-processing
+  cancel-in-progress: false
+
 on:
   schedule:
     - cron: '0 3 * * *'
