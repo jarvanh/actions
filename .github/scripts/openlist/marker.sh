@@ -331,7 +331,7 @@ PYEOF
                        summary:"从目标端特征扫描反推（非修复时直接记录的精确信息）",
                        steps:["下载目标端 alternative 路径文件",
                               "根据 method 字段对应方式还原：base64URL 解码目录名/文件名、unzip/7z x 解压、重命名 API 文件"],
-                       script: "# " + $scr}}')")
+                       script: ("# " + $scr)}}')")
         done < "$_tmp_out"
         if [ "${#fb_entries[@]}" -gt 0 ]; then
           local _tmp_json
