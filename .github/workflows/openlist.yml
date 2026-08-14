@@ -1083,6 +1083,82 @@ jobs:
                     fi
                   fi
 
+                  if [ -z "$OK_WAY" ]; then
+                    # ===== 方式 F: 调用 try_fix_failed_file 完整修复管线（14 种方法 + 含方法 5/6 分卷压缩）=====
+                    echo "--- 方式 F: try_fix_file 完整修复管线（方法1-14，含方法5/6 100MB分卷）---"
+                    echo "  载入 utils.sh + fix.sh ..."
+                    SCRIPT_DIR="${GITHUB_WORKSPACE:-$HOME}/actions/.github/scripts/openlist"
+                    [ -d "$SCRIPT_DIR" ] || SCRIPT_DIR="$(pwd)/actions/.github/scripts/openlist"
+                    [ -d "$SCRIPT_DIR" ] || SCRIPT_DIR="./.github/scripts/openlist"
+                    FIX_LOG="/tmp/_fix_log_$$_$(date +%s).log"
+                    : > "$FIX_LOG"
+                    if [ -f "$SCRIPT_DIR/utils.sh" ] && [ -f "$SCRIPT_DIR/fix.sh" ]; then
+                      # shellcheck disable=SC1090
+                      . "$SCRIPT_DIR/utils.sh"
+                      # shellcheck disable=SC1090
+                      . "$SCRIPT_DIR/fix.sh"
+                      echo "  执行 try_fix_failed_file(src=$pair_src, dst=$pair_dst, rel=$sample_rel) ..."
+                      try_fix_failed_file "$pair_src" "$pair_dst" "diag_${pair_token}" "$sample_rel" "$FIX_LOG"
+                      echo "  try_fix 状态: $TRY_FIX_STATUS"
+                      [ -n "$TRY_FIX_MESSAGE" ] && echo "  try_fix 信息: $TRY_FIX_MESSAGE"
+                      [ -f "$FIX_LOG" ] && echo "  === try_fix 日志末尾 40 行 ===" && tail -40 "$FIX_LOG"
+                      if [ "$TRY_FIX_STATUS" = "success" ] && [ -n "$TRY_FIX_ALTERNATIVE" ]; then
+                        # 方法 5/6 为分卷文件：TRY_FIX_ALTERNATIVE 是首个分卷的相对路径
+                        # 对分卷做整体校验：所有分卷大小之和与源文件大小量级一致（分卷>=源，有压缩头+分卷表开销）
+                        f_dst="${pair_dst}/${TRY_FIX_ALTERNATIVE}"
+                        if echo "$TRY_FIX_METHOD" | grep -q "100MB 分卷"; then
+                          # 分卷模式：统计同目录下同名前缀 .7z* 的所有分卷的总字节数（作为近似校验）
+                          f_dir=$(dirname "$f_dst")
+                          # 从 alternative 取 .7z 文件名前缀（不含分卷后缀）
+                          prefix_7z=$(basename "$TRY_FIX_ALTERNATIVE" | sed -E 's/\.7z\.[0-9]+$/.7z/')
+                          echo "  分卷校验: 搜索 $f_dir 下 $prefix_7z* ..."
+                          total_vol_bytes=0
+                          vol_count=0
+                          while IFS= read -r vol_line; do
+                            [ -z "$vol_line" ] && continue
+                            vname=$(echo "$vol_line" | cut -d';' -f1)
+                            vbytes=$(echo "$vol_line" | cut -d';' -f2)
+                            # glob-prefix 匹配（分卷文件名以 $prefix_7z 开头）
+                            case "$vname" in
+                              "${prefix_7z}"*)
+                                total_vol_bytes=$((total_vol_bytes + vbytes))
+                                vol_count=$((vol_count + 1))
+                                ;;
+                            esac
+                          done < <(rclone lsf "$f_dir" --files-only --format "ps" --separator ";" 2>/dev/null)
+                          echo "  分卷数: $vol_count / 分卷总字节: $total_vol_bytes / 源文件: $src_size"
+                          if [ "$vol_count" -gt 0 ] && [ "$total_vol_bytes" -ge "$src_size" ]; then
+                            # 以首个分卷的 dst 路径 + 分卷总字节作为记录，便于后续复验
+                            OK_WAY="F"
+                            # 目标端保存为分卷目录的"标记"：以首分卷为记录，但复验时记录的字节用分卷总字节
+                            OK_DST="$f_dst"
+                            src_size="$total_vol_bytes"
+                            echo ">>> 方式 F（分卷修复）: ✅ 成功（$vol_count 卷, 修复方式: $TRY_FIX_METHOD）"
+                          else
+                            echo ">>> 方式 F: ❌ 分卷校验失败（卷=$vol_count, 总字节=$total_vol_bytes < 源=$src_size）"
+                            # 不清理：保留文件供排查
+                          fi
+                        else
+                          # 非分卷修复：按目标文件大小校验
+                          f_size=$(rclone size --json "$f_dst" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null || echo 0)
+                          if [ "$f_size" -gt 0 ]; then
+                            OK_WAY="F"
+                            OK_DST="$f_dst"
+                            src_size="$f_size"
+                            echo ">>> 方式 F: ✅ 成功（修复方式: $TRY_FIX_METHOD）"
+                          else
+                            echo ">>> 方式 F: ❌ 修复返回 success，但目标端 $f_dst 大小异常 ($f_size)"
+                          fi
+                        fi
+                      else
+                        echo ">>> 方式 F: ❌ 修复失败（status=$TRY_FIX_STATUS）"
+                      fi
+                    else
+                      echo ">>> 方式 F: ⚠️ 脚本未找到（$SCRIPT_DIR/utils.sh 或 fix.sh），跳过"
+                    fi
+                    rm -f "$FIX_LOG"
+                  fi
+
                   # ===== 写结果 =====
                   if [ -n "$OK_WAY" ]; then
                     printf '%s\t%s\t%s\t%s\n' "$sample_rel" "$OK_WAY" "$OK_DST" "$src_size" >> "$SYNC_TEST_OK"
