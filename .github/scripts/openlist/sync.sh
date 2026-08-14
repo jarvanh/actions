@@ -391,6 +391,185 @@ sync_with_logging() {
 
   fi
 
+  # ===== 修复文件持久化验证：重启 OpenList 容器后检查修复的文件是否仍存在 =====
+  # 目的：确认通过 try_fix_failed_file 同步到 wopan176 的文件真正被后端持久化，
+  # 而不仅仅存在于 OpenList 内存缓存中（重启容器后即消失）
+  # 仅在：有修复成功的文件、目标是 OpenList 远程、能找到 docker 命令的情况下执行
+  if [[ "$dest_path" == openlist:* ]] && [ -s "$fix_list" ] && command -v docker >/dev/null 2>&1; then
+    echo "=== ${task_name} 修复持久化验证：重启 OpenList 容器后复核修复文件 ===" | tee -a "$LOG_FILENAME"
+
+    # 1. 先过滤出"修复成功且路径仍在该 dest_path 下"的条目，保存待验证清单
+    local PERSIST_VERIFY_LIST="/tmp/${task_name}_persist_verify_$$.txt"
+    : > "$PERSIST_VERIFY_LIST"
+    while IFS='|' read -r f_orig f_alt f_method f_restore f_size f_bytes; do
+      [ -z "$f_alt" ] && continue
+      # ALT 路径相对于 dest_path 已经记录在 fix_list，直接用
+      echo "${f_alt}|${f_bytes}|${f_orig}|${f_method}" >> "$PERSIST_VERIFY_LIST"
+    done < "$fix_list"
+    local verify_total=$(wc -l < "$PERSIST_VERIFY_LIST" | tr -d ' ' || echo 0)
+    echo "  待验证修复条目: ${verify_total} 个" | tee -a "$LOG_FILENAME"
+
+    if [ "$verify_total" -gt 0 ] && sudo docker ps --format '{{.Names}}' 2>/dev/null | grep -qw openlist; then
+      # 2. 刷新 OpenList 缓存（重启前的"最后检查"快照）
+      local persist_ol_token
+      persist_ol_token=$(_get_openlist_token)
+      local persist_ol_path="${dest_path#openlist:}"
+      persist_ol_path="/${persist_ol_path}"
+      if [ -n "$persist_ol_token" ]; then
+        curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh"           -H "Authorization: $persist_ol_token"           -H "Content-Type: application/json"           -d "{"path":"$persist_ol_path","recursive":true}" >/dev/null 2>&1 || true
+        sleep 10
+      fi
+
+      # 3. 保存重启前的大小快照（用于对比）
+      local PERSIST_BEFORE="/tmp/${task_name}_persist_before_$$.txt"
+      : > "$PERSIST_BEFORE"
+      while IFS='|' read -r alt_path bytes orig_path f_method; do
+        [ -z "$alt_path" ] && continue
+        local full_alt="${dest_path}/${alt_path}"
+        local sz
+        sz=$(rclone size --json "$full_alt" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null || echo 0)
+        echo "${alt_path}|${bytes}|${sz}" >> "$PERSIST_BEFORE"
+        echo "  重启前大小检查: $alt_path (expected=$bytes, actual=$sz)" | tee -a "$LOG_FILENAME"
+      done < "$PERSIST_VERIFY_LIST"
+
+      # 4. 重启 OpenList 容器
+      echo "  重启 OpenList 容器..." | tee -a "$LOG_FILENAME"
+      sudo docker restart openlist 2>&1 | tee -a "$LOG_FILENAME"
+
+      # 5. 等待 HTTP 就绪 + 驱动重新初始化
+      local persist_http_ok=0
+      for i in $(seq 1 30); do
+        if curl -sf http://127.0.0.1:5244/ping >/dev/null 2>&1; then
+          persist_http_ok=1
+          echo "  OpenList HTTP 就绪 (${i}次)" | tee -a "$LOG_FILENAME"
+          break
+        fi
+        sleep 2
+      done
+      if [ "$persist_http_ok" -eq 1 ]; then
+        echo "  等待驱动重新初始化 (60s) ..." | tee -a "$LOG_FILENAME"
+        sleep 60
+        # 重新刷新缓存（驱动重启后强制从后端拉列表）
+        persist_ol_token=$(_get_openlist_token)
+        if [ -n "$persist_ol_token" ]; then
+          curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh"             -H "Authorization: $persist_ol_token"             -H "Content-Type: application/json"             -d "{"path":"$persist_ol_path","recursive":true}" >/dev/null 2>&1 || true
+          sleep 20
+        fi
+
+        # 6. 逐个复核修复文件（最多抽取前 6 条，避免耗时过长）
+        # 判定规则：
+        #   - 原样 copy/重命名 类：alt 文件大小必须 == 原始 bytes（精确匹配）
+        #   - 压缩 / 分卷 / 编码 类（zip / 7z / 分卷 / base64内容 / 加密zip）：
+        #       非分卷 → 只检查文件存在且 size > 0（压缩后大小不等于原文件）
+        #       分卷   → 检查全部 .zip.0* 分卷都存在且各自 size > 0
+        local persist_ok=0
+        local persist_fail=0
+        local persist_idx=0
+        local persist_fail_details=""
+        while IFS='|' read -r alt_path bytes orig_path f_method; do
+          [ -z "$alt_path" ] && continue
+          persist_idx=$((persist_idx + 1))
+          [ "$persist_idx" -gt 6 ] && break
+
+          local full_alt="${dest_path}/${alt_path}"
+          local after_sz after_lsf_sz
+          after_sz=$(rclone size --json "$full_alt" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null || echo 0)
+          after_lsf_sz=$(rclone lsf "$(dirname "$full_alt")" --files-only --format "ps" --separator ";" 2>/dev/null |             awk -v FS=';' -v bn="$(basename "$full_alt")" '$1==bn{print $2; exit}')
+          [ -z "$after_lsf_sz" ] && after_lsf_sz=0
+
+          # 判断方法类型
+          local is_transformed=0
+          local is_split=0
+          case "$f_method" in
+            *zip*|*7z*|*分卷*|*base64*|*编码*|*加密*|*压缩*|*.enc.*|*.b64*|*enc_zip*)
+              is_transformed=1 ;;
+          esac
+          if echo "$alt_path" | grep -qE '\.zip\.[0-9]{3}$'; then
+            is_split=1
+          fi
+
+          local verified=0
+          if [ "$is_split" -eq 1 ]; then
+            # 分卷：检查同目录下所有编号分卷
+            local alt_dir_alt=$(dirname "$alt_path")
+            local alt_prefix=$(basename "$alt_path")
+            alt_prefix="${alt_prefix%.*}"        # strip ".001"
+            alt_prefix="${alt_prefix%.zip}"      # also strip ".zip" if leftover
+            # 列当前存在的所有同前缀编号分卷
+            local existing_parts
+            existing_parts=$(rclone lsf "${dest_path}/${alt_dir_alt}" --files-only 2>/dev/null | grep -E "${alt_prefix}\.zip\.[0-9]{3}" | sort)
+            local part_count=$(echo -n "$existing_parts" | grep -c . || echo 0)
+            # 至少有 1 个分卷，且分卷大小都 > 0
+            local parts_ok=0
+            if [ "$part_count" -gt 0 ]; then
+              parts_ok=1
+              while IFS= read -r pn; do
+                [ -z "$pn" ] && continue
+                local p_sz
+                p_sz=$(rclone lsf "${dest_path}/${alt_dir_alt}" --files-only --format "ps" --separator ";" 2>/dev/null |                   awk -v FS=';' -v bn="$pn" '$1==bn{print $2; exit}')
+                if [ -z "$p_sz" ] || [ "$p_sz" = "" ] || [ "$p_sz" -le 0 ] 2>/dev/null; then
+                  parts_ok=0
+                  break
+                fi
+              done <<< "$existing_parts"
+            fi
+            if [ "$parts_ok" -eq 1 ]; then
+              verified=1
+              echo "  ✅ 持久化通过: $orig_path (${f_method}, 分卷 $part_count 个存在且大小合法)" | tee -a "$LOG_FILENAME"
+            else
+              echo "  ❌ 持久化失败: $orig_path (${f_method}, 分卷缺失或大小异常)" | tee -a "$LOG_FILENAME"
+              echo "    → 当前目录分卷: $(echo "$existing_parts" | tr '\n' ' ')" | tee -a "$LOG_FILENAME"
+              persist_fail_details="${persist_fail_details}• ${orig_path} (${f_method})：分卷缺失或大小异常，当前分卷=${existing_parts}
+"
+            fi
+          elif [ "$is_transformed" -eq 1 ]; then
+            # 压缩/编码类：只检查 size > 0（压缩包大小与原文件不同）
+            if [ "$after_sz" -gt 0 ] 2>/dev/null && [ "$after_lsf_sz" -gt 0 ] 2>/dev/null; then
+              verified=1
+              echo "  ✅ 持久化通过: $orig_path (${f_method}, transformed_size=$after_sz bytes)" | tee -a "$LOG_FILENAME"
+            else
+              echo "  ❌ 持久化失败: $orig_path (${f_method}, 上传文件为空或不存在, size=$after_sz, lsf=$after_lsf_sz)" | tee -a "$LOG_FILENAME"
+              persist_fail_details="${persist_fail_details}• ${orig_path} (${f_method})：上传文件为空或不存在, size=${after_sz}
+"
+            fi
+          else
+            # 原样 copy / rename 类：精确匹配大小
+            if [ "$after_sz" = "$bytes" ] && [ "$after_lsf_sz" = "$bytes" ] && [ "$after_sz" -gt 0 ]; then
+              verified=1
+              persist_ok=$((persist_ok + 0))
+              echo "  ✅ 持久化通过: $orig_path (${f_method}, $bytes bytes)" | tee -a "$LOG_FILENAME"
+            else
+              echo "  ❌ 持久化失败: $orig_path (${f_method}, expected=$bytes, size=$after_sz, lsf=$after_lsf_sz)" | tee -a "$LOG_FILENAME"
+              persist_fail_details="${persist_fail_details}• ${orig_path} (${f_method})：expected=${bytes}, actual=${after_sz}
+"
+            fi
+          fi
+          if [ "$verified" -eq 1 ]; then
+            persist_ok=$((persist_ok + 1))
+          else
+            persist_fail=$((persist_fail + 1))
+          fi
+        done < "$PERSIST_VERIFY_LIST"
+        echo "  持久化验证汇总: 抽样 ${persist_idx} / 通过 ${persist_ok} / 失败 ${persist_fail}" | tee -a "$LOG_FILENAME"
+        if [ "$persist_fail" -gt 0 ] && [ "$persist_ok" -eq 0 ]; then
+          echo "  🔴 结论：所有抽样修复文件在容器重启后均消失 → OpenList PUT 返回成功但 wopan176 后端未真正持久化（写入内存缓存后未刷盘/未提交）" | tee -a "$LOG_FILENAME"
+          # 标记为持久化失败（影响通知但不阻止后续 task）
+          SYNC_PERSIST_FAIL=1
+        elif [ "$persist_fail" -gt 0 ]; then
+          echo "  🟡 结论：部分修复文件在容器重启后消失 → 存在间歇性持久化失败" | tee -a "$LOG_FILENAME"
+          SYNC_PERSIST_FAIL=1
+        else
+          echo "  🟢 结论：抽样修复文件均已被后端持久化（重启后仍然存在）" | tee -a "$LOG_FILENAME"
+        fi
+      else
+        echo "  ⚠️ OpenList 容器重启后 HTTP 60s 内未就绪，跳过持久化验证" | tee -a "$LOG_FILENAME"
+      fi
+      rm -f "$PERSIST_VERIFY_LIST" "$PERSIST_BEFORE"
+    else
+      echo "  跳过持久化验证（无修复成功条目或 openlist 容器不存在）" | tee -a "$LOG_FILENAME"
+    fi
+  fi
+
   # ===== object not found 错误解析（源文件不存在）=====
   if grep -Eqi 'ERROR : .+: Failed to copy.*object not found' "$LAST_ATTEMPT_LOG" 2>/dev/null; then
     HAS_OBJECT_NOT_FOUND=1
@@ -422,23 +601,27 @@ sync_with_logging() {
   if [ -s "$fix_list" ]; then
     LAST_SYNC_FIXED_FILES_JSON=$(jq -R -s '
       def restore_info($orig; $alt; $method; $src; $dst):
-        # 12 种修复方式精确识别（方法 1-12）：
-        #   "base64URL 编码目录 + 原文件名"                → 仅 b64 目录
-        #   "原路径 + 原文件名"                             → 原样 copy
-        #   "base64URL 编码目录 + base64URL 编码文件名"    → b64 目录+文件名
-        #   "原路径 + base64URL 编码文件名"                → 仅 b64 文件名
-        #   "base64URL 编码目录 + zip 压缩包"              → zip(+b64dir)
-        #   "原路径 + zip 压缩包"                          → zip
-        #   "base64URL 编码目录 + 7z 压缩包"               → 7z(+b64dir)
-        #   "原路径 + 7z 压缩包"                           → 7z
-        #   "base64URL 编码目录 + API 自动生成文件名"      → api rename(+b64dir)
-        #   "原路径 + API 自动生成文件名"                  → api rename
-        #   "重命名 .bak"                                 → rename .bak
-        #   "父目录 + 编码原始目录名的文件名"              → parent dir
-        #   "上传到根 backup 目录 + 编码文件名"            → root backup
-        #   "base64 编码文件内容 + .b64 扩展名"            → base64 content
-        #   "AES256 加密 zip + .enc.zip 扩展名"             → encrypted zip
-        #   "临时目录上传 + OpenList API move"             → tmp + move
+        # 14 种修复方式精确识别（方法 1-14）：
+        #   "原路径 + 原文件名"                             → 原样 copy (方法1)
+        #   "base64URL 编码目录 + 原文件名"                → 仅 b64 目录 (方法1变体)
+        #   "原路径 + base64URL 编码文件名"                → 仅 b64 文件名 (方法2)
+        #   "base64URL 编码目录 + base64URL 编码文件名"    → b64 目录+文件名 (方法2变体)
+        #   "原路径 + zip 压缩包"                          → zip (方法3)
+        #   "base64URL 编码目录 + zip 压缩包"              → zip(+b64dir) (方法3变体)
+        #   "原路径 + 7z 压缩包"                           → 7z (方法4)
+        #   "base64URL 编码目录 + 7z 压缩包"               → 7z(+b64dir) (方法4变体)
+        #   "原路径 + 100MB 分卷切割"                      → split zip (方法5)
+        #   "base64URL 编码目录 + 100MB 分卷切割"          → split zip(+b64dir) (方法5变体)
+        #   "原路径 + base64URL 编码文件名 + 100MB 分卷切割" → split zip + b64name (方法6)
+        #   "base64URL 编码目录 + base64URL 编码文件名 + 100MB 分卷切割" → split zip(+b64dir+b64name) (方法6变体)
+        #   "原路径 + API 自动生成文件名"                  → api rename (方法7)
+        #   "base64URL 编码目录 + API 自动生成文件名"      → api rename(+b64dir) (方法7变体)
+        #   "重命名 .bak"                                 → rename .bak (方法8)
+        #   "父目录 + 编码原始目录名的文件名"              → parent dir (方法9)
+        #   "上传到根 backup 目录 + 编码文件名"            → root backup (方法10/11)
+        #   "base64 编码文件内容 + .b64 扩展名"            → base64 content (方法12)
+        #   "AES256 加密 zip + .enc.zip 扩展名"             → encrypted zip (方法13)
+        #   "临时目录上传 + OpenList API move"             → tmp + move (方法14)
         # 注: 不能用 ".*文件名" 模糊匹配，"原文件名" 里也有 "文件名" 3 个字，会误判
         ($method | test("base64URL 编码目录 ")) as $has_b64_dir
         | ($method | test("base64URL 编码文件名")) as $has_b64_name
@@ -450,6 +633,8 @@ sync_with_logging() {
         | ($method | test("base64 编码文件内容")) as $has_b64_content
         | ($method | test("AES256 加密 zip")) as $has_enc_zip
         | ($method | test("临时目录上传")) as $has_tmp_move
+        | ($method | test("100MB 分卷切割") and ($method | test("base64URL 编码文件名") | not)) as $has_split_zip
+        | ($method | test("100MB 分卷切割") and ($method | test("base64URL 编码文件名"))) as $has_split_zip_b64name
         # 原目录部分（去掉文件名）和文件名
         | ([$orig | split("/") | .[0:-1] | join("/"), $orig | split("/") | .[-1]]) as [$orig_dir, $orig_name]
         | ([$alt  | split("/") | .[0:-1] | join("/"), $alt  | split("/") | .[-1]]) as [$alt_dir,  $alt_name]
@@ -493,7 +678,15 @@ sync_with_logging() {
             summary: "文件上传到父目录（跳过有问题的子目录），文件名编码了原始目录信息",
             steps:   ["下载目标端 " + $alt, "从文件名 __fixed__<base64>__<filename> 中解码原始目录名", "移动到正确的目录路径"],
             script:  "set -euo pipefail\nSRC=\"" + $src + "\"\nDST=\"" + $dst + "\"\nORIG=\"" + $orig + "\"\nALT=\"" + $alt + "\"\nTMP=$(mktemp -d)\nORIG_FNAME=\"" + $orig_name + "\"\nrclone copyto \"${DST}/${ALT}\" \"$TMP/${ORIG_FNAME}\" --progress\n# 如需回传源端: rclone copyto \"$TMP/${ORIG_FNAME}\" \"${SRC}/${ORIG}\"\nrm -rf \"$TMP\""}
-          elif $has_tmp_move  then {kind:"tmp_move",
+          elif $has_split_zip then {kind:"split_zip",
+            summary: "文件被打包为 zip（存储模式 mx=0）并切割为 100MB 分卷上传，分卷命名 <name>.zip.001/.002/...",
+            steps:   ["下载所有 .zip.0* 分卷到同一目录", "按顺序合并: cat *.zip.0* > merged.zip", "执行: 7z x merged.zip -o<output_dir>（或 unzip merged.zip）"],
+            script:  "set -euo pipefail\nSRC=\"" + $src + "\"\nDST=\"" + $dst + "\"\nORIG=\"" + $orig + "\"\nALT=\"" + $alt + "\"\nTMP=$(mktemp -d)\nALT_DIR=$(dirname \"$ALT\")\nALT_FNAME=$(basename \"$ALT\")\nSPLIT_PREFIX=\"${ALT_FNAME%.*}\"\necho \"分卷前缀: $SPLIT_PREFIX\"\nrclone copy \"${DST}/${ALT_DIR}\" \"$TMP\" --include \"${SPLIT_PREFIX}.zip.*\" --progress 2>&1 | tail -5\ncd \"$TMP\"\ncat ${SPLIT_PREFIX}.zip.0* > merged.zip\necho \"合并后 zip 大小: $(stat -c%s merged.zip 2>/dev/null || stat -f%z merged.zip 2>/dev/null) bytes\"\n7z x merged.zip -o\"$TMP/out\" -y || unzip merged.zip -d \"$TMP/out\"\n# 还原后的源文件在: $TMP/out/" + $orig_name + "\nrm -rf \"$TMP\""}
+          elif $has_split_zip_b64name then {kind:"split_zip_b64name",
+            summary: "文件名 base64URL 编码后，zip 打包并切割为 100MB 分卷上传（分卷命名 <encoded>.zip.001/.002/...）",
+            steps:   ["下载所有 .zip.0* 分卷到同一目录", "按顺序合并: cat *.zip.0* > merged.zip", "解压 merged.zip 得到原始内容文件", "文件名还原：对编码文件名的 base64URL 前缀部分解码"],
+            script:  "set -euo pipefail\nb64url_decode() {\n  local s=\"$1\"; s=\"${s//-/+}\"; s=\"${s//_/}\"\n  local pad=$(( (4 - ${#s} % 4) % 4 )); while [ $pad -gt 0 ]; do s=\"$s=\"; pad=$((pad-1)); done\n  printf \"%s\" \"$s\" | base64 -d\n}\nSRC=\"" + $src + "\"\nDST=\"" + $dst + "\"\nORIG=\"" + $orig + "\"\nALT=\"" + $alt + "\"\nTMP=$(mktemp -d)\nALT_DIR=$(dirname \"$ALT\")\nALT_FNAME=$(basename \"$ALT\")\nSPLIT_FULL_PREFIX=\"${ALT_FNAME%.*}\"\nENCODED_BASE=\"${SPLIT_FULL_PREFIX%.zip}\"\n[ -z \"$ENCODED_BASE\" ] && ENCODED_BASE=\"${SPLIT_FULL_PREFIX}\"\nif [[ \"$ENCODED_BASE\" == *.* ]]; then\n  NAME_EXT=\"${ENCODED_BASE##*.}\"\n  NAME_NOEXT=\"${ENCODED_BASE%.*}\"\n  DECODED_NOEXT=$(b64url_decode \"$NAME_NOEXT\")\n  DECODED_FNAME=\"${DECODED_NOEXT}.${NAME_EXT}\"\nelse\n  DECODED_FNAME=$(b64url_decode \"$ENCODED_BASE\")\nfi\necho \"还原文件名: $ENCODED_BASE -> $DECODED_FNAME\"\nrclone copy \"${DST}/${ALT_DIR}\" \"$TMP\" --include \"${SPLIT_FULL_PREFIX}.*\" --progress 2>&1 | tail -5\ncd \"$TMP\"\ncat ${SPLIT_FULL_PREFIX}.0* > merged.zip 2>/dev/null || ( ls *.zip.0* >/dev/null 2>&1 && cat *.zip.0* > merged.zip )\necho \"合并后 zip 大小: $(stat -c%s merged.zip 2>/dev/null || stat -f%z merged.zip 2>/dev/null) bytes\"\n7z x merged.zip -o\"$TMP/out\" -y || unzip merged.zip -d \"$TMP/out\"\nls -la \"$TMP/out/\"\nrm -rf \"$TMP\""}
+                    elif $has_tmp_move  then {kind:"tmp_move",
             summary: "文件上传到临时目录后用 OpenList API move 移动（可能已移动或保留在临时目录）",
             steps:   ["检查目标路径是否已有原文件", "如未移动，用 OpenList API move 从临时目录移动"],
             script:  "set -euo pipefail\n# 检查目标是否已存在\nrclone lsjson '" + $dst + "/" + $orig + "' --max-depth 1 2>/dev/null | jq 'length'\n# 如不存在，用 OpenList API move\n# curl -X POST http://127.0.0.1:5244/api/fs/move -H 'Authorization: <token>' -d '{\"src_dir\":\"/wopan176Crypt/backup/" + $alt + "\",\"dst_dir\":\"/wopan176Crypt/backup/" + $orig + "\"}'"}
