@@ -1081,6 +1081,165 @@ jobs:
                     fi
                     rm -rf "$tmp_dir"
                     fi
+                  if [ -z "$OK_WAY" ]; then
+                    # ===== 方式 F: 压缩并切割为 100MB 以下分卷上传（对应修复方法5）=====
+                    echo "--- 方式 F: zip (mx=0) + 100MB 分卷切割上传 ---"
+                    tmp_f="/tmp/_sync_test_F_$(date +%s)_$$"
+                    rm -rf "$tmp_f" && mkdir -p "$tmp_f"
+                    # 复制源文件到本地，打 zip (存储模式 mx=0)
+                    sample_base="$(basename "$sample_rel")"
+                    if [ -f "$local_src" ]; then
+                      cp -f "$local_src" "$tmp_f/$sample_base" 2>/dev/null
+                    else
+                      rclone copyto "$local_src" "$tmp_f/$sample_base" --retries 1 --timeout 5m 2>&1 | tail -3 || true
+                    fi
+                    zip_f="$tmp_f/${sample_base}.zip"
+                    if [ -f "$tmp_f/$sample_base" ]; then
+                      (cd "$tmp_f" && 7z a -tzip -mx=0 "${sample_base}.zip" "$sample_base" >/dev/null 2>&1)
+                      zip_sz=$(stat -c%s "$zip_f" 2>/dev/null || stat -f%z "$zip_f" 2>/dev/null || echo 0)
+                      SPLIT_LIMIT_FG=$((100 * 1024 * 1024))
+                      if [ "$zip_sz" -gt "$SPLIT_LIMIT_FG" ]; then
+                          echo "  zip 大小 ${zip_sz} bytes >100MB，切割为分卷..."
+                          # split into 100MB parts: xxx.zip.001, xxx.zip.002, ...
+                          split -b "$SPLIT_LIMIT_FG" -d -a 3 "$zip_f" "$tmp_f/${sample_base}.zip."
+                          # Rename: .000 → .001 to be consistent with 7z parts
+                          for p in "$tmp_f"/${sample_base}.zip.0*; do
+                              [ -e "$p" ] || continue
+                              suff="${p##*.}"
+                              num=$((10#$suff + 1))
+                              new_suff=$(printf '%03d' "$num")
+                              mv "$p" "$tmp_f/${sample_base}.zip.${new_suff}" 2>/dev/null || true
+                          done
+                          rm -f "$zip_f"
+                      else
+                          echo "  zip 大小 ${zip_sz} bytes <=100MB，无需切割"
+                          # 保留单份 zip（也兼容单卷逻辑）
+                      fi
+                        # 上传所有分卷（或单 zip）
+                        dst_dir_f=$(dirname "$local_dst")
+                        uploaded_count_f=0
+                        expected_parts_f=0
+                        first_part_dst_f=""
+                        # 列分卷（按字母/数字顺序）
+                        parts_total_f=$(ls "$tmp_f"/${sample_base}.zip* 2>/dev/null | wc -l | tr -d ' ')
+                        echo "  待上传分卷/文件数: $parts_total_f"
+                        for part_f in $(ls "$tmp_f"/${sample_base}.zip* 2>/dev/null | sort); do
+                            [ -f "$part_f" ] || continue
+                            expected_parts_f=$((expected_parts_f + 1))
+                            part_name_f=$(basename "$part_f")
+                            part_dst_f="${dst_dir_f}/${part_name_f}"
+                            [ -z "$first_part_dst_f" ] && first_part_dst_f="$part_dst_f"
+                            # rclone copyto each part
+                            echo "  上传第 ${expected_parts_f}/$parts_total_f 卷: $part_name_f"
+                            rclone copyto "$part_f" "$part_dst_f" "${RCLONE_TEST_FLAGS[@]}" 2>&1 | tail -3
+                            rc_f_part=$?
+                            part_exp_size=$(stat -c%s "$part_f" 2>/dev/null || stat -f%z "$part_f" 2>/dev/null || echo 0)
+                            part_act_size=$(rclone size --json "$part_dst_f" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null || echo 0)
+                            if [ "$rc_f_part" -eq 0 ] && [ "$part_act_size" = "$part_exp_size" ] && [ "$part_act_size" -gt 0 ]; then
+                                uploaded_count_f=$((uploaded_count_f + 1))
+                            else
+                                echo "    ❌ 分卷上传失败 rc=${rc_f_part} size=${part_act_size}/${part_exp_size}"
+                                # 后续分卷也继续尝试
+                            fi
+                        done
+                        if [ "$expected_parts_f" -gt 0 ] && [ "$uploaded_count_f" -eq "$expected_parts_f" ]; then
+                            echo ">>> 方式 F: ✅ 成功（${uploaded_count_f} 个分卷）"
+                            OK_WAY="F"; OK_DST="$first_part_dst_f"
+                        else
+                            echo ">>> 方式 F: ❌ 失败（成功 ${uploaded_count_f}/${expected_parts_f}）"
+                            # 清理上传的残差分卷
+                            for part_f in $(ls "$tmp_f"/${sample_base}.zip* 2>/dev/null | sort); do
+                                [ -f "$part_f" ] || continue
+                                part_name_f=$(basename "$part_f")
+                                rclone deletefile "${dst_dir_f}/${part_name_f}" 2>/dev/null || true
+                            done
+                        fi
+                    else
+                        echo ">>> 方式 F: ❌ 源文件无法获取到本地临时目录"
+                    fi
+                    rm -rf "$tmp_f"
+                  fi
+
+                  if [ -z "$OK_WAY" ]; then
+                    # ===== 方式 G: 压缩 + base64URL 编码文件名 + 100MB 分卷切割上传（对应修复方法6）=====
+                    echo "--- 方式 G: zip (mx=0) + base64URL 文件名 + 100MB 分卷切割上传 ---"
+                    tmp_g="/tmp/_sync_test_G_$(date +%s)_$$"
+                    rm -rf "$tmp_g" && mkdir -p "$tmp_g"
+                    sample_base="$(basename "$sample_rel")"
+                    # base64URL 编码文件名
+                    if [[ "$sample_base" == *.* ]]; then
+                        g_name_base="${sample_base%.*}"
+                        g_name_ext="${sample_base##*.}"
+                        g_encoded_base="$(printf '%s' "$g_name_base" | base64 | tr '+/' '-_' | tr -d '=').${g_name_ext}"
+                    else
+                        g_encoded_base="$(printf '%s' "$sample_base" | base64 | tr '+/' '-_' | tr -d '=')"
+                    fi
+                    echo "  文件名编码: $sample_base -> $g_encoded_base"
+                    # 复制或下载源文件到临时目录，命名为编码后文件名
+                    if [ -f "$local_src" ]; then
+                        cp -f "$local_src" "$tmp_g/$g_encoded_base" 2>/dev/null
+                    else
+                        rclone copyto "$local_src" "$tmp_g/$g_encoded_base" --retries 1 --timeout 5m 2>&1 | tail -3 || true
+                    fi
+                    zip_g="$tmp_g/${g_encoded_base}.zip"
+                    if [ -f "$tmp_g/$g_encoded_base" ]; then
+                        (cd "$tmp_g" && 7z a -tzip -mx=0 "${g_encoded_base}.zip" "$g_encoded_base" >/dev/null 2>&1)
+                        zip_sz_g=$(stat -c%s "$zip_g" 2>/dev/null || stat -f%z "$zip_g" 2>/dev/null || echo 0)
+                        SPLIT_LIMIT_FG=$((100 * 1024 * 1024))
+                        if [ "$zip_sz_g" -gt "$SPLIT_LIMIT_FG" ]; then
+                            echo "  zip 大小 ${zip_sz_g} bytes >100MB，切割分卷..."
+                            split -b "$SPLIT_LIMIT_FG" -d -a 3 "$zip_g" "$tmp_g/${g_encoded_base}.zip."
+                            for p in "$tmp_g"/${g_encoded_base}.zip.0*; do
+                                [ -e "$p" ] || continue
+                                suff="${p##*.}"
+                                num=$((10#$suff + 1))
+                                new_suff=$(printf '%03d' "$num")
+                                mv "$p" "$tmp_g/${g_encoded_base}.zip.${new_suff}" 2>/dev/null || true
+                            done
+                            rm -f "$zip_g"
+                        else
+                            echo "  zip 大小 ${zip_sz_g} bytes <=100MB，无需切割"
+                        fi
+                        dst_dir_g=$(dirname "$local_dst")
+                        uploaded_count_g=0
+                        expected_parts_g=0
+                        first_part_dst_g=""
+                        parts_total_g=$(ls "$tmp_g"/${g_encoded_base}.zip* 2>/dev/null | wc -l | tr -d ' ')
+                        echo "  待上传分卷/文件数: $parts_total_g"
+                        for part_g in $(ls "$tmp_g"/${g_encoded_base}.zip* 2>/dev/null | sort); do
+                            [ -f "$part_g" ] || continue
+                            expected_parts_g=$((expected_parts_g + 1))
+                            part_name_g=$(basename "$part_g")
+                            part_dst_g="${dst_dir_g}/${part_name_g}"
+                            [ -z "$first_part_dst_g" ] && first_part_dst_g="$part_dst_g"
+                            echo "  上传第 ${expected_parts_g}/$parts_total_g 卷: $part_name_g"
+                            rclone copyto "$part_g" "$part_dst_g" "${RCLONE_TEST_FLAGS[@]}" 2>&1 | tail -3
+                            rc_g_part=$?
+                            part_exp_size_g=$(stat -c%s "$part_g" 2>/dev/null || stat -f%z "$part_g" 2>/dev/null || echo 0)
+                            part_act_size_g=$(rclone size --json "$part_dst_g" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null || echo 0)
+                            if [ "$rc_g_part" -eq 0 ] && [ "$part_act_size_g" = "$part_exp_size_g" ] && [ "$part_act_size_g" -gt 0 ]; then
+                                uploaded_count_g=$((uploaded_count_g + 1))
+                            else
+                                echo "    ❌ 分卷上传失败 rc=${rc_g_part} size=${part_act_size_g}/${part_exp_size_g}"
+                            fi
+                        done
+                        if [ "$expected_parts_g" -gt 0 ] && [ "$uploaded_count_g" -eq "$expected_parts_g" ]; then
+                            echo ">>> 方式 G: ✅ 成功（${uploaded_count_g} 个分卷）"
+                            OK_WAY="G"; OK_DST="$first_part_dst_g"
+                        else
+                            echo ">>> 方式 G: ❌ 失败（成功 ${uploaded_count_g}/${expected_parts_g}）"
+                            for part_g in $(ls "$tmp_g"/${g_encoded_base}.zip* 2>/dev/null | sort); do
+                                [ -f "$part_g" ] || continue
+                                part_name_g=$(basename "$part_g")
+                                rclone deletefile "${dst_dir_g}/${part_name_g}" 2>/dev/null || true
+                            done
+                        fi
+                    else
+                        echo ">>> 方式 G: ❌ 源文件无法获取到本地临时目录"
+                    fi
+                    rm -rf "$tmp_g"
+                  fi
+
                   fi
 
                   # ===== 写结果 =====
