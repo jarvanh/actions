@@ -1182,12 +1182,51 @@ jobs:
                 if [ -z "$RESTART_RECHECK_DONE" ] && [ "${delay_ok:-0}" -gt 0 ]; then
                   echo ""
                   echo "=== OpenList 容器日志（上传相关）==="
-                  echo "  抓取最近 200 行日志，过滤上传/PUT/错误关键字..."
-                  sudo docker logs openlist --tail 200 2>&1 | \
-                    grep -iE 'error|fail|warn|put|upload|405|409|429|500|502|503|exception|panic|wopan' || \
-                    echo "  （未匹配到错误关键字，显示最近 50 行原始日志）"
-                  echo "--- 最近 50 行原始日志 ---"
-                  sudo docker logs openlist --tail 50 2>&1 | tail -50
+
+                  # 1. docker stdout 日志
+                  echo "--- docker logs (stdout, 最近 500 行, 过滤关键字) ---"
+                  sudo docker logs openlist --tail 500 2>&1 | \
+                    grep -iE 'error|fail|warn|put|upload|405|409|429|500|502|503|exception|panic|wopan|crypt' || \
+                    echo "  （stdout 无匹配）"
+
+                  # 2. OpenList 日志文件（AList/OpenList 默认写到 data/log/ 目录）
+                  echo "--- OpenList 日志文件 ---"
+                  for logdir in \
+                    "/dropbox/self-hosted/openlist/data/log" \
+                    "/dropbox/self-hosted/openlist/data/logs" \
+                    "/opt/openlist/data/log"; do
+                    if [ -d "$logdir" ]; then
+                      echo "  日志目录: $logdir"
+                      ls -lt "$logdir" | head -10
+                      # 取最新的日志文件，过滤上传/错误关键字
+                      latest_log=$(ls -t "$logdir"/*.log 2>/dev/null | head -1)
+                      if [ -n "$latest_log" ]; then
+                        echo "  最新日志文件: $latest_log"
+                        echo "  --- 过滤上传/错误关键字 (最近 200 行) ---"
+                        tail -200 "$latest_log" | \
+                          grep -iE 'error|fail|warn|put|upload|405|409|429|500|502|503|exception|panic|wopan|crypt' || \
+                          echo "  （日志文件无匹配，显示最近 30 行）"
+                        echo "  --- 最近 30 行原始日志 ---"
+                        tail -30 "$latest_log"
+                      fi
+                      break
+                    fi
+                  done
+
+                  # 3. OpenList 存储配置（查看 wopan176 驱动配置）
+                  echo "--- OpenList 存储配置 (wopan176 相关) ---"
+                  for cfg in \
+                    "/dropbox/self-hosted/openlist/data/config.json" \
+                    "/dropbox/self-hosted/openlist/data/conf/config.json"; do
+                    if [ -f "$cfg" ]; then
+                      echo "  配置文件: $cfg"
+                      # 提取存储列表中 wopan176 相关的配置
+                      jq -r '.storage // [] | .[] | select(.mount_path | test("wopan|176"; "i")) | {mount_path, driver, addition}' "$cfg" 2>/dev/null || \
+                        echo "  （无法解析存储配置）"
+                      break
+                    fi
+                  done
+
                   echo "=== 日志抓取完毕 ==="
                 fi
 
