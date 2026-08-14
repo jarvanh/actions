@@ -1220,14 +1220,161 @@ jobs:
                     "/dropbox/self-hosted/openlist/data/conf/config.json"; do
                     if [ -f "$cfg" ]; then
                       echo "  配置文件: $cfg"
-                      # 提取存储列表中 wopan176 相关的配置
-                      jq -r '.storage // [] | .[] | select(.mount_path | test("wopan|176"; "i")) | {mount_path, driver, addition}' "$cfg" 2>/dev/null || \
-                        echo "  （无法解析存储配置）"
+                      # 提取存储列表中 wopan176 相关的配置（完整字段）
+                      wopan_cfg=$(jq -r '.storage // [] | .[] | select(.mount_path | test("wopan|176"; "i"))' "$cfg" 2>/dev/null)
+                      if [ -n "$wopan_cfg" ] && [ "$wopan_cfg" != "null" ]; then
+                        echo "$wopan_cfg" | jq .
+                        # 重点检查：上传模式、API 地址、配额等
+                        echo "$wopan_cfg" | jq -r '{mount_path, driver, addition: (.addition | fromjson? // .)}' 2>/dev/null || \
+                          echo "$wopan_cfg" | jq .
+                        # 检查 addition 字段中的上传/API 配置
+                        addition=$(echo "$wopan_cfg" | jq -r '.addition // ""' 2>/dev/null)
+                        if [ -n "$addition" ] && [ "$addition" != "null" ]; then
+                          echo "  --- addition 字段解析 ---"
+                          echo "$addition" | jq -r '
+                            to_entries
+                            | map(select(.key | test("pass|key|secret|token|auth"; "i")) | not)
+                            | from_entries
+                            | to_entries[]
+                            | "    \(.key): \(.value)"
+                          ' 2>/dev/null || echo "    (无法解析为 JSON)"
+                        fi
+                      else
+                        echo "  （未找到 wopan176 存储配置）"
+                      fi
                       break
                     fi
                   done
 
-                  echo "=== 日志抓取完毕 ==="
+                  # 4. 日志中搜索 wopan176 相关的错误/警告（更全面）
+                  echo "--- 搜索日志中 wopan176 相关错误 ---"
+                  for logdir in \
+                    "/dropbox/self-hosted/openlist/data/log" \
+                    "/dropbox/self-hosted/openlist/data/logs"; do
+                    if [ -d "$logdir" ]; then
+                      latest_log=$(ls -t "$logdir"/*.log 2>/dev/null | head -1)
+                      if [ -n "$latest_log" ]; then
+                        echo "  日志文件: $latest_log"
+                        echo "  --- 全量搜索 wopan176 / crypt 驱动错误 ---"
+                        grep -iE 'wopan|crypt\.|failed to get|failed to put|object not found|storage.*full|quota|429|rate.limit|PUT.*(400|401|403|404|405|409|413|429|500|502|503|504)|timeout|context deadline' "$latest_log" 2>/dev/null | tail -80 || \
+                          echo "  （无 wopan176 / crypt 相关错误）"
+
+                        echo "  --- Crypt.Get / failed to get obj 上下文 (前后 5 行) ---"
+                        grep -n -B 3 -A 5 'failed to get obj\|object not found\|drivers/crypt' "$latest_log" 2>/dev/null | tail -120 || \
+                          echo "  （无 Crypt.Get 失败记录）"
+
+                        echo "  --- 统计 HTTP 状态码分布 (最近 2000 行) ---"
+                        tail -2000 "$latest_log" 2>/dev/null | awk '
+                          match($0, /\| ([0-9]{3}) \|/, m) { codes[m[1]]++ }
+                          END { for (c in codes) printf("    HTTP %s: %d\n", c, codes[c]) }
+                        ' | sort -k2 -rn | head -20
+
+                        echo "  --- PUT 请求耗时分布 (识别慢/失败上传) ---"
+                        grep -E '\| [0-9]+ \.[0-9]+ms .*PUT' "$latest_log" 2>/dev/null | \
+                          awk -F'|' '{
+                            gsub(/^ +/, "", $2)
+                            gsub(/ms.*/, "", $2)
+                            split($2, t, "."); ms=t[1]+0
+                            code=$3; gsub(/^ +/, "", code)
+                            if (ms >= 500) slow[code]++
+                            total[code]++
+                          }
+                          END {
+                            for (c in total) printf("    PUT %s: total=%d, slow(>=500ms)=%d\n", c, total[c], slow[c]+0)
+                          }' | sort
+
+                        echo "  --- PROPFIND 404 比例 (判断后端列表缓存健康度) ---"
+                        total_pf=$(grep -c 'PROPFIND' "$latest_log" 2>/dev/null || echo 0)
+                        pf_404=$(grep -c 'PROPFIND.*404' "$latest_log" 2>/dev/null || echo 0)
+                        pf_207=$(grep -c 'PROPFIND.*207' "$latest_log" 2>/dev/null || echo 0)
+                        echo "    PROPFIND 总数: $total_pf"
+                        echo "    PROPFIND 404:  $pf_404"
+                        echo "    PROPFIND 207:  $pf_207"
+                        if [ "$total_pf" -gt 0 ] && [ "$pf_404" -gt 0 ]; then
+                          echo "    404 比例: $(awk -v a=$pf_404 -v b=$total_pf 'BEGIN{printf("%.1f%%", a/b*100)}')"
+                        fi
+
+                        echo "  --- 容器级诊断 (OpenList) ---"
+                        sudo docker inspect openlist --format '状态: {{.State.Status}} | 启动: {{.State.StartedAt}} | 重启次数: {{.RestartCount}} | OOMKilled: {{.State.OOMKilled}}' 2>/dev/null || true
+                        sudo docker stats openlist --no-stream --format 'CPU={{.CPUPerc}} MEM={{.MemUsage}} NET={{.NetIO}} BLOCK={{.BlockIO}}' 2>/dev/null || true
+                        echo "  --- OpenList 最近 10s 内存/CPU 峰值 ---"
+                        sudo docker exec openlist sh -c 'uptime; free -m 2>/dev/null || echo "(no free)"; df -h / 2>/dev/null || echo "(no df)"' 2>/dev/null || true
+                      fi
+                      break
+                    fi
+                  done
+
+                  # ===== 上传完整日志到 OneDrive（避免 GitHub Actions 输出截断） =====
+                  echo ""
+                  echo "=== 上传完整日志到 OneDrive ==="
+                  OL_LOG_REMOTE_DIR="onedrive:/logs/openlist"
+                  OL_LOG_TS=$(date -u +%Y%m%d_%H%M%S)
+                  OL_LOG_BASE="openlist_${OL_LOG_TS}"
+
+                  # 1. OpenList 完整日志文件（原始，不截断）
+                  for logdir in \
+                    "/dropbox/self-hosted/openlist/data/log" \
+                    "/dropbox/self-hosted/openlist/data/logs" \
+                    "/opt/openlist/data/log"; do
+                    if [ -d "$logdir" ]; then
+                      latest_log=$(ls -t "$logdir"/*.log 2>/dev/null | head -1)
+                      if [ -n "$latest_log" ]; then
+                        log_size=$(stat -c %s "$latest_log" 2>/dev/null || stat -f %z "$latest_log" 2>/dev/null || echo 0)
+                        echo "  上传日志文件: $latest_log ($((log_size / 1024)) KB)"
+                        rclone mkdir "$OL_LOG_REMOTE_DIR" >/dev/null 2>&1 || true
+                        rclone copyto "$latest_log" "${OL_LOG_REMOTE_DIR}/${OL_LOG_BASE}.log" 2>&1 | tail -3 || true
+                        echo "  → 已保存: ${OL_LOG_REMOTE_DIR}/${OL_LOG_BASE}.log"
+                      fi
+                      break
+                    fi
+                  done
+
+                  # 2. docker stdout 日志（完整，不截断）
+                  STDOUT_FILE="/tmp/openlist_stdout_${OL_LOG_TS}.log"
+                  sudo docker logs openlist > "$STDOUT_FILE" 2>&1 || true
+                  stdout_size=$(stat -c %s "$STDOUT_FILE" 2>/dev/null || stat -f %z "$STDOUT_FILE" 2>/dev/null || echo 0)
+                  echo "  上传 docker stdout: $((stdout_size / 1024)) KB"
+                  rclone copyto "$STDOUT_FILE" "${OL_LOG_REMOTE_DIR}/${OL_LOG_BASE}_stdout.log" 2>&1 | tail -3 || true
+                  rm -f "$STDOUT_FILE"
+                  echo "  → 已保存: ${OL_LOG_REMOTE_DIR}/${OL_LOG_BASE}_stdout.log"
+
+                  # 3. wopan176 驱动配置（脱敏后）
+                  for cfg in \
+                    "/dropbox/self-hosted/openlist/data/config.json" \
+                    "/dropbox/self-hosted/openlist/data/conf/config.json"; do
+                    if [ -f "$cfg" ]; then
+                      CFG_SAFE_FILE="/tmp/openlist_cfg_${OL_LOG_TS}.json"
+                      # 提取 wopan/crypt 相关 storage 条目，再 sed 脱敏敏感字段
+                      jq '.storage // [] | map(select(.mount_path | test("wopan|176|crypt"; "i")))' \
+                        "$cfg" > "$CFG_SAFE_FILE" 2>/dev/null || cp "$cfg" "$CFG_SAFE_FILE"
+                      sed -i.bak \
+                        -e 's/"access_token"[[:space:]]*:[[:space:]]*"[^"]*"/"access_token":"<redacted>"/g' \
+                        -e 's/"refresh_token"[[:space:]]*:[[:space:]]*"[^"]*"/"refresh_token":"<redacted>"/g' \
+                        -e 's/"password"[[:space:]]*:[[:space:]]*"[^"]*"/"password":"<redacted>"/g' \
+                        -e 's/"client_secret"[[:space:]]*:[[:space:]]*"[^"]*"/"client_secret":"<redacted>"/g' \
+                        -e 's/"token"[[:space:]]*:[[:space:]]*"[^"]*"/"token":"<redacted>"/g' \
+                        "$CFG_SAFE_FILE" 2>/dev/null || true
+                      rm -f "${CFG_SAFE_FILE}.bak"
+                      rclone copyto "$CFG_SAFE_FILE" "${OL_LOG_REMOTE_DIR}/${OL_LOG_BASE}_wopan_cfg.json" 2>&1 | tail -3 || true
+                      rm -f "$CFG_SAFE_FILE"
+                      echo "  → 已保存: ${OL_LOG_REMOTE_DIR}/${OL_LOG_BASE}_wopan_cfg.json"
+                      break
+                    fi
+                  done
+
+                  # 4. 同步测试结果 + 复验记录（如有）
+                  if [ -f "$SYNC_TEST_OK" ]; then
+                    rclone copyto "$SYNC_TEST_OK" "${OL_LOG_REMOTE_DIR}/${OL_LOG_BASE}_synctest.tsv" 2>&1 | tail -3 || true
+                    echo "  → 已保存: ${OL_LOG_REMOTE_DIR}/${OL_LOG_BASE}_synctest.tsv"
+                  fi
+
+                  # 5. 清理 30 天前的旧日志
+                  echo "  清理 30 天前的旧日志..."
+                  rclone delete "$OL_LOG_REMOTE_DIR" --min-age 30d 2>/dev/null || true
+
+                  echo "=== 日志上传完毕 ==="
+                  echo "  完整日志目录: $OL_LOG_REMOTE_DIR"
+                  echo "  本次时间戳: $OL_LOG_TS"
                 fi
 
                 # ===== 容器重启复验：重启 OpenList 容器后检查文件是否真的被后端持久化 =====
