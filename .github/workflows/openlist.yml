@@ -663,6 +663,7 @@ jobs:
 
           # 全局汇总
           rm -f /tmp/_diff_summary.txt
+          DELAY_RECHECK_DONE=""
 
           for pair in "${DIFF_PAIRS[@]}"; do
             # pair 格式: "src|dst|excludes_csv"
@@ -1127,6 +1128,54 @@ jobs:
                   fi
                 done < "$SYNC_TEST_OK"
                 echo "  复验汇总: 抽样 $recheck_count / 通过 $ok_recheck / 失败 $fail_recheck"
+
+                # ===== 延迟复验：等 3 分钟让 wopan176 后端缓存过期后再查 =====
+                # 目的：区分"上传未持久化"vs"缓存刷新导致列表丢失"
+                # 只对第一个有成功样本的 pair 执行一次，避免每对都等 3 分钟
+                if [ -z "$DELAY_RECHECK_DONE" ] && [ "$ok_recheck" -gt 0 ]; then
+                  DELAY_RECHECK_DONE=1
+                  echo ""
+                  echo "=== 延迟复验（等 180s 让后端缓存过期后重新检查）==="
+                  echo "  等待 180s ..."
+                  sleep 180
+                  # 再次刷新缓存
+                  if [[ "$pair_dst" == openlist:* ]] && [ -n "$OL_TOKEN" ]; then
+                    rel_ol_root="${pair_dst#openlist:}"
+                    ol_root_path="/${rel_ol_root%/}"
+                    echo "  刷新缓存 $ol_root_path ..."
+                    curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh" \
+                      -H "Authorization: $OL_TOKEN" \
+                      -H "Content-Type: application/json" \
+                      -d "$(jq -n --arg p "$ol_root_path" '{path:$p, recursive:true}')" >/dev/null 2>&1 || true
+                    sleep 15
+                  fi
+                  # 对即时复验通过的样本再次检查
+                  delay_ok=0
+                  delay_fail=0
+                  delay_count=0
+                  while IFS=$'\t' read -r srel sway sdst sbytes; do
+                    [ -z "$srel" ] && continue
+                    delay_count=$((delay_count + 1))
+                    [ "$delay_count" -gt 3 ] && break
+                    delay_size=$(rclone size --json "$sdst" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null || echo 0)
+                    delay_listed=$(rclone lsf "$(dirname "$sdst")" --files-only --format "ps" --separator ";" 2>/dev/null | awk -v FS=';' -v bn="$(basename "$sdst")" '$1==bn{print $2; exit}')
+                    if [ "$delay_size" = "$sbytes" ] && [ "$delay_listed" = "$sbytes" ]; then
+                      echo "  ✅ 延迟复验通过: $srel (方式$sway, $sbytes bytes)"
+                      delay_ok=$((delay_ok + 1))
+                    else
+                      echo "  ❌ 延迟复验失败: $srel (预期=$sbytes, size=$delay_size, lsf=$delay_listed)"
+                      echo "     → 文件可能未被后端持久化（列表缓存未更新或上传丢失）"
+                      delay_fail=$((delay_fail + 1))
+                    fi
+                  done < "$SYNC_TEST_OK"
+                  echo "  延迟复验汇总: 抽样 $delay_count / 通过 $delay_ok / 失败 $delay_fail"
+                  if [ "$delay_fail" -gt 0 ] && [ "$delay_ok" -eq 0 ]; then
+                    echo "  ⚠️ 所有延迟复验均失败 → 后端列表缓存未更新，上传的文件在缓存刷新后不可见"
+                    echo "     这解释了为什么'永远同步不完'：上传成功但缓存刷新后文件从列表中消失"
+                  elif [ "$delay_fail" -gt 0 ]; then
+                    echo "  ⚠️ 部分延迟复验失败 → 某些文件可能未被后端持久化"
+                  fi
+                fi
 
                 if [ -s "$SYNC_TEST_FAILED" ]; then
                   echo ""
