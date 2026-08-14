@@ -422,7 +422,7 @@ sync_with_logging() {
   if [ -s "$fix_list" ]; then
     LAST_SYNC_FIXED_FILES_JSON=$(jq -R -s '
       def restore_info($orig; $alt; $method; $src; $dst):
-        # 14 种修复方式精确识别（方法 1-14）：
+        # 12 种修复方式精确识别（方法 1-12）：
         #   "base64URL 编码目录 + 原文件名"                → 仅 b64 目录
         #   "原路径 + 原文件名"                             → 原样 copy
         #   "base64URL 编码目录 + base64URL 编码文件名"    → b64 目录+文件名
@@ -431,8 +431,6 @@ sync_with_logging() {
         #   "原路径 + zip 压缩包"                          → zip
         #   "base64URL 编码目录 + 7z 压缩包"               → 7z(+b64dir)
         #   "原路径 + 7z 压缩包"                           → 7z
-        #   "原路径 + 100MB 分卷 7z"                        → 7z 多卷（方法 5）
-        #   "b64dir + b64name + 100MB 分卷 7z"              → 7z 多卷 + b64 目录/文件名（方法 6）
         #   "base64URL 编码目录 + API 自动生成文件名"      → api rename(+b64dir)
         #   "原路径 + API 自动生成文件名"                  → api rename
         #   "重命名 .bak"                                 → rename .bak
@@ -446,9 +444,6 @@ sync_with_logging() {
         | ($method | test("base64URL 编码文件名")) as $has_b64_name
         | ($method | test("zip 压缩包")) as $has_zip
         | ($method | test("7z 压缩包")) as $has_7z
-        | ($method | test("100MB 分卷 7z")) as $has_split_7z
-        | ($method | test("b64dir")) as $has_m6_b64_dir
-        | ($method | test("b64name")) as $has_m6_b64_name
         | ($method | test("API 自动生成文件名")) as $has_api
         | ($method | test("重命名 .bak")) as $has_bak
         | ($method | test("父目录")) as $has_parent
@@ -458,20 +453,7 @@ sync_with_logging() {
         # 原目录部分（去掉文件名）和文件名
         | ([$orig | split("/") | .[0:-1] | join("/"), $orig | split("/") | .[-1]]) as [$orig_dir, $orig_name]
         | ([$alt  | split("/") | .[0:-1] | join("/"), $alt  | split("/") | .[-1]]) as [$alt_dir,  $alt_name]
-        | if   $has_split_7z and ($has_m6_b64_dir or $has_m6_b64_name) then {kind:"seven_zip_split_b64",
-            summary: "文件被切割为 100MB 分卷 7z（文件名和目录均 base64URL 编码），需下载全部分卷后解压",
-            steps:   ["下载目标端目录 " + $alt_dir + " 下所有 " + ($alt | split("/") | .[-1] | split(".") | .[0:-2] | join(".")) + ".7z.001 ~ .7z.NNN 分卷（使用 glob 匹配 *.7z*）",
-                      "取目录最末层路径段 → base64URL 解码得原目录名；取每个分卷文件名的前 6 位 → base64URL 解码得原文件名",
-                      "执行: 7z x <first_volume.7z.001> -o<output_dir> （指定第一个分卷，7z 自动合卷）",
-                      "解压后得到 " + $orig_name],
-            script:  "set -euo pipefail\nb64url_decode() {\n  local s=\"$1\"; s=\"${s//-/+}\"; s=\"${s//_/}\"\n  local pad=$(( (4 - ${#s} % 4) % 4 )); while [ $pad -gt 0 ]; do s=\"$s=\"; pad=$((pad-1)); done\n  printf \"%s\" \"$s\" | base64 -d\n}\nSRC=\"" + $src + "\"\nDST=\"" + $dst + "\"\nORIG=\"" + $orig + "\"\nALT=\"" + $alt + "\"\nTMP=$(mktemp -d)\nOUT=$(mktemp -d)\n# 注意：ALT 仅为第一个分卷路径，需用 glob 取同目录下全部 *.7z* 分卷\nALT_DIR=$(dirname \"${DST}/${ALT}\")\n# 下载全部分卷（glob 匹配 .7z*）\nrclone copy \"${ALT_DIR}\" \"$TMP/\" --include '*.7z*' --progress\n# 排序获取首分卷（.7z.001）\nFIRST_VOL=$(ls -1 \"$TMP\"/*.7z.001 | head -n 1)\n7z x \"$FIRST_VOL\" -o\"$OUT\" -y\n# 还原后的源文件在: $OUT/" + $orig_name + "\n# 如需回传源端: rclone copyto \"$OUT/" + $orig_name + "\" \"${SRC}/${ORIG}\"\nrm -rf \"$TMP\" \"$OUT\""}
-          elif $has_split_7z then {kind:"seven_zip_split",
-            summary: "文件被切割为 100MB 分卷 7z，需下载全部分卷后合并解压",
-            steps:   ["下载目标端目录 " + $alt_dir + " 下所有 " + $orig_name + ".7z.001 ~ .7z.NNN 分卷（使用 glob 匹配 *.7z*）",
-                      "执行: 7z x <" + $orig_name + ".7z.001> -o<output_dir> （指定第一个分卷，7z 自动续合卷）",
-                      "解压后得到 " + $orig_name],
-            script:  "set -euo pipefail\nSRC=\"" + $src + "\"\nDST=\"" + $dst + "\"\nORIG=\"" + $orig + "\"\nALT=\"" + $alt + "\"\nTMP=$(mktemp -d)\nOUT=$(mktemp -d)\n# ALT 仅为第一个分卷路径，需用 glob 取同目录下全部 *.7z* 分卷\nALT_DIR=$(dirname \"${DST}/${ALT}\")\n# 下载全部分卷\nrclone copy \"${ALT_DIR}\" \"$TMP/\" --include '" + $orig_name + ".7z*' --progress\n# 取首分卷（.7z.001）\nFIRST_VOL=$(ls -1 \"$TMP\"/" + $orig_name + ".7z.001 | head -n 1)\n7z x \"$FIRST_VOL\" -o\"$OUT\" -y\n# 还原后的源文件在: $OUT/" + $orig_name + "\n# 如需回传源端: rclone copyto \"$OUT/" + $orig_name + "\" \"${SRC}/${ORIG}\"\nrm -rf \"$TMP\" \"$OUT\""}
-          elif $has_zip      then {kind:"zip",
+        | if   $has_zip      then {kind:"zip",
             summary: "文件被打包为 .zip（存储模式 mx=0）",
             steps:   ["下载目标端 " + $alt, "执行: 7z x <alt_zip> -o<output_dir>（或 unzip）", "解压后得到 " + $orig_name],
             script:  "set -euo pipefail\nSRC=\"" + $src + "\"\nDST=\"" + $dst + "\"\nORIG=\"" + $orig + "\"\nALT=\"" + $alt + "\"\nTMP=$(mktemp -d)\nrclone copyto \"${DST}/${ALT}\" \"$TMP/package.zip\" --progress\n7z x \"$TMP/package.zip\" -o\"$TMP/out\" -y\n# 还原后的源文件在: $TMP/out/" + $orig_name + "\n# 如需回传源端: rclone copyto \"$TMP/out/" + $orig_name + "\" \"${SRC}/${ORIG}\"\nrm -rf \"$TMP\""}
