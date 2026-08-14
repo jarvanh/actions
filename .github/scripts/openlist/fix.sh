@@ -7,14 +7,14 @@
 #      方法2: 文件名 base64URL 编码后上传
 #      方法3: zip 压缩后上传
 #      方法4: 7z 压缩后上传
-#      方法5: 压缩并切割为 100MB 以下的分卷再同步
-#      方法6: 压缩并 base64URL 编码文件名，切割为 100MB 以下的分卷再同步
-#      方法7: OpenList API /fs/form 直传
-#      方法8: 重命名文件后上传（避开敏感文件名）
-#      方法9: 上传到父目录（跳过有问题的目录层级）
-#      方法10: OpenList API /fs/put 流式上传（绕过 WebDAV）
-#      方法11: 上传到 backup 根目录（最后手段）
-#      方法12: base64 编码文件内容后上传（改变文件 hash 和内容特征）
+#      方法5: OpenList API /fs/form 直传
+#      方法6: 重命名文件后上传（避开敏感文件名）
+#      方法7: 上传到父目录（跳过有问题的目录层级）
+#      方法8: OpenList API /fs/put 流式上传（绕过 WebDAV）
+#      方法9: 上传到 backup 根目录（最后手段）
+#      方法10: base64 编码文件内容后上传（改变文件 hash 和内容特征）
+#      方法11: 加密 zip 后上传（改变二进制特征）
+#      方法12: 上传到临时目录后用 OpenList API move 移动
 #
 # 依赖: utils.sh (log_fix), telegram.sh (间接)
 # 结果写入全局变量:
@@ -303,113 +303,8 @@ try_fix_failed_file() {
     log_fix "$fix_log" "方法 4 7z 未生成"
   fi
 
-  # 方法 5：压缩并切割为 100MB 以下的分卷再同步
-  # 大文件上传时 wopan176 后端可能因超时/分片处理失败，切割为 100MB 分卷绕过
-  log_fix "$fix_log" "方法 5: 压缩并切割为 100MB 分卷（7z multi-volume）"
-  local m5_vol_prefix="${file_name}.7z"
-  (cd "$temp_dir" && 7z a -t7z -mx=0 -v100m "$m5_vol_prefix" "$file_name") 2>&1 | \
-    while IFS= read -r line; do log_fix "$fix_log" "m5 7z: $line"; done
-  # 找到所有分卷文件
-  local m5_vol_files=()
-  while IFS= read -r line; do
-    [ -n "$line" ] && m5_vol_files+=("$line")
-  done < <(ls -1 "$temp_dir"/"${file_name}".7z* 2>/dev/null | sort)
-  if [ "${#m5_vol_files[@]}" -gt 0 ]; then
-    log_fix "$fix_log" "分卷数量: ${#m5_vol_files[@]}"
-    local m5_all_ok=1
-    local m5_first_alt=""
-    local m5_vol_idx=0
-    for m5_vol in "${m5_vol_files[@]}"; do
-      m5_vol_idx=$((m5_vol_idx + 1))
-      local m5_vol_name
-      m5_vol_name=$(basename -- "$m5_vol")
-      local m5_vol_dst="${actual_dst_dir}/${m5_vol_name}"
-      log_fix "$fix_log" "  上传分卷 ${m5_vol_idx}/${#m5_vol_files[@]}: ${m5_vol_name}"
-      rclone copyto "$m5_vol" "$m5_vol_dst" --retries 1 --low-level-retries 3 --timeout 10m --contimeout 30s 2>&1 | \
-        while IFS= read -r line; do log_fix "$fix_log" "m5 v${m5_vol_idx}: $line"; done
-      local m5_vol_status=${PIPESTATUS[0]}
-      if [ "$m5_vol_status" -ne 0 ]; then
-        log_fix "$fix_log" "  分卷 ${m5_vol_name} 失败 (exit=$m5_vol_status)"
-        m5_all_ok=0
-        break
-      fi
-      if [ "$m5_vol_idx" -eq 1 ]; then
-        m5_first_alt="${m5_vol_dst#${dest_path}/}"
-      fi
-    done
-    if [ "$m5_all_ok" -eq 1 ]; then
-      log_fix "$fix_log" "方法 5 成功（${#m5_vol_files[@]} 个分卷）"
-      TRY_FIX_STATUS="success"
-      if [ "$used_base64_dir" -eq 1 ]; then
-        TRY_FIX_METHOD="b64dir + 原文件名 + 100MB 分卷 7z 压缩包（共 ${#m5_vol_files[@]} 个分卷）"
-      else
-        TRY_FIX_METHOD="原路径 + 100MB 分卷 7z 压缩包（共 ${#m5_vol_files[@]} 个分卷）"
-      fi
-      TRY_FIX_ALTERNATIVE="$m5_first_alt"
-      TRY_FIX_RESTORE="下载所有 ${file_name}.7z.* 分卷（共 ${#m5_vol_files[@]} 个）到同一目录后执行: 7z x ${file_name}.7z.001"
-      rm -rf "$temp_dir" 2>/dev/null || true
-      return 0
-    fi
-    log_fix "$fix_log" "方法 5 失败（分卷上传不完整）"
-  else
-    log_fix "$fix_log" "方法 5 7z 分卷未生成"
-  fi
-
-  # 方法 6：压缩并 base64URL 编码文件名，切割为 100MB 以下的分卷再同步
-  # 同时避开原始文件名问题 + 大文件分卷
-  log_fix "$fix_log" "方法 6: 压缩 + base64URL 编码文件名 + 切割 100MB 分卷"
-  local m6_orig_encoded
-  m6_orig_encoded=$(printf '%s' "$file_name" | base64 | tr '+/' '-_' | tr -d '=')
-  local m6_vol_prefix="${m6_orig_encoded}.7z"
-  (cd "$temp_dir" && 7z a -t7z -mx=0 -v100m "$m6_vol_prefix" "$file_name") 2>&1 | \
-    while IFS= read -r line; do log_fix "$fix_log" "m6 7z: $line"; done
-  local m6_vol_files=()
-  while IFS= read -r line; do
-    [ -n "$line" ] && m6_vol_files+=("$line")
-  done < <(ls -1 "$temp_dir"/"${m6_vol_prefix}"* 2>/dev/null | sort)
-  if [ "${#m6_vol_files[@]}" -gt 0 ]; then
-    log_fix "$fix_log" "分卷数量: ${#m6_vol_files[@]}"
-    local m6_all_ok=1
-    local m6_first_alt=""
-    local m6_vol_idx=0
-    for m6_vol in "${m6_vol_files[@]}"; do
-      m6_vol_idx=$((m6_vol_idx + 1))
-      local m6_vol_name
-      m6_vol_name=$(basename -- "$m6_vol")
-      local m6_vol_dst="${actual_dst_dir}/${m6_vol_name}"
-      log_fix "$fix_log" "  上传分卷 ${m6_vol_idx}/${#m6_vol_files[@]}: ${m6_vol_name}"
-      rclone copyto "$m6_vol" "$m6_vol_dst" --retries 1 --low-level-retries 3 --timeout 10m --contimeout 30s 2>&1 | \
-        while IFS= read -r line; do log_fix "$fix_log" "m6 v${m6_vol_idx}: $line"; done
-      local m6_vol_status=${PIPESTATUS[0]}
-      if [ "$m6_vol_status" -ne 0 ]; then
-        log_fix "$fix_log" "  分卷 ${m6_vol_name} 失败 (exit=$m6_vol_status)"
-        m6_all_ok=0
-        break
-      fi
-      if [ "$m6_vol_idx" -eq 1 ]; then
-        m6_first_alt="${m6_vol_dst#${dest_path}/}"
-      fi
-    done
-    if [ "$m6_all_ok" -eq 1 ]; then
-      log_fix "$fix_log" "方法 6 成功（${#m6_vol_files[@]} 个分卷）"
-      TRY_FIX_STATUS="success"
-      if [ "$used_base64_dir" -eq 1 ]; then
-        TRY_FIX_METHOD="b64dir + b64name + 100MB 分卷 7z 压缩包（共 ${#m6_vol_files[@]} 个分卷）"
-      else
-        TRY_FIX_METHOD="b64name + 100MB 分卷 7z 压缩包（共 ${#m6_vol_files[@]} 个分卷）"
-      fi
-      TRY_FIX_ALTERNATIVE="$m6_first_alt"
-      TRY_FIX_RESTORE="文件名 b64: ${m6_orig_encoded} → ${file_name}。下载所有 ${m6_vol_prefix}.* 分卷（共 ${#m6_vol_files[@]} 个）到同一目录后执行: 7z x ${m6_vol_prefix}.001"
-      rm -rf "$temp_dir" 2>/dev/null || true
-      return 0
-    fi
-    log_fix "$fix_log" "方法 6 失败（分卷上传不完整）"
-  else
-    log_fix "$fix_log" "方法 6 7z 分卷未生成"
-  fi
-
-  # 方法 7：OpenList API 直传
-  log_fix "$fix_log" "方法 7: OpenList API 直传"
+  # 方法 5：OpenList API 直传
+  log_fix "$fix_log" "方法 5: OpenList API 直传"
   if [ -n "$ol_token" ] && [ "$ol_token" != "null" ]; then
     curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh" \
       -H "Authorization: $ol_token" \
@@ -430,7 +325,7 @@ try_fix_failed_file() {
     upload_http=$(echo "$upload_resp" | tail -n 1)
     log_fix "$fix_log" "OpenList API 上传响应: ${upload_http}"
     if echo "$upload_http" | grep -qE 'HTTP_CODE:(200|201|204)'; then
-      log_fix "$fix_log" "方法 7 成功"
+      log_fix "$fix_log" "方法 5 成功"
       TRY_FIX_STATUS="success"
       if [ "$used_base64_dir" -eq 1 ]; then
         TRY_FIX_METHOD="OpenList API /fs/form（base64URL 编码目录 + API 自动生成文件名）"
@@ -444,14 +339,14 @@ try_fix_failed_file() {
       rm -rf "$temp_dir" 2>/dev/null || true
       return 0
     fi
-    log_fix "$fix_log" "方法 7 失败 (${upload_http})"
+    log_fix "$fix_log" "方法 5 失败 (${upload_http})"
   else
-    log_fix "$fix_log" "方法 7 跳过（无法读取 OpenList token）"
+    log_fix "$fix_log" "方法 5 跳过（无法读取 OpenList token）"
   fi
 
-  # 方法 8：重命名文件后上传（避开敏感文件名）
+  # 方法 6：重命名文件后上传（避开敏感文件名）
   # wopan176 后端可能对某些文件名（如 options.xml）有安全策略
-  log_fix "$fix_log" "方法 8: 重命名文件后上传（避开可能的敏感文件名）"
+  log_fix "$fix_log" "方法 6: 重命名文件后上传（避开可能的敏感文件名）"
   local renamed_file="${file_name}.bak"
   local m6_dst="${actual_dst_dir}/${renamed_file}"
   log_fix "$fix_log" "  重命名为: $renamed_file"
@@ -459,7 +354,7 @@ try_fix_failed_file() {
     while IFS= read -r line; do log_fix "$fix_log" "m6: $line"; done
   local m6_status=${PIPESTATUS[0]}
   if [ "$m6_status" -eq 0 ]; then
-    log_fix "$fix_log" "方法 8 成功"
+    log_fix "$fix_log" "方法 6 成功"
     TRY_FIX_STATUS="success"
     if [ "$used_base64_dir" -eq 1 ]; then
       TRY_FIX_METHOD="rclone copyto（base64URL 编码目录 + 重命名 .bak）"
@@ -471,13 +366,13 @@ try_fix_failed_file() {
     rm -rf "$temp_dir" 2>/dev/null || true
     return 0
   fi
-  log_fix "$fix_log" "方法 8 失败 (exit=$m6_status)"
+  log_fix "$fix_log" "方法 6 失败 (exit=$m6_status)"
 
-  # 方法 9：上传到父目录（跳过有问题的目录层级）
+  # 方法 7：上传到父目录（跳过有问题的目录层级）
   # 如果当前目录写操作被 wopan176 拒绝，尝试上传到上级目录
   # 文件名编码原始目录信息，便于后续还原
   if [ "$file_dir_rel" != "." ] && [ "$file_dir_rel" != "" ]; then
-    log_fix "$fix_log" "方法 9: 上传到父目录（跳过有问题的目录层级）"
+    log_fix "$fix_log" "方法 7: 上传到父目录（跳过有问题的目录层级）"
     local parent_dst_dir
     parent_dst_dir="$(dirname -- "$actual_dst_dir")"
     local parent_ol_dir
@@ -500,7 +395,7 @@ try_fix_failed_file() {
       while IFS= read -r line; do log_fix "$fix_log" "m7: $line"; done
     local m7_status=${PIPESTATUS[0]}
     if [ "$m7_status" -eq 0 ]; then
-      log_fix "$fix_log" "方法 9 成功"
+      log_fix "$fix_log" "方法 7 成功"
       TRY_FIX_STATUS="success"
       TRY_FIX_METHOD="rclone copyto（父目录 + 编码原始目录名的文件名）"
       TRY_FIX_ALTERNATIVE="${m7_dst#${dest_path}/}"
@@ -508,13 +403,13 @@ try_fix_failed_file() {
       rm -rf "$temp_dir" 2>/dev/null || true
       return 0
     fi
-    log_fix "$fix_log" "方法 9 失败 (exit=$m7_status)"
+    log_fix "$fix_log" "方法 7 失败 (exit=$m7_status)"
   fi
 
-  # 方法 10：通过 OpenList API /fs/put 流式上传（绕过 WebDAV）
+  # 方法 8：通过 OpenList API /fs/put 流式上传（绕过 WebDAV）
   # /fs/put 接口直接以流的方式写入，不走 WebDAV 的 MKCOL+PUT 流程
   if [ -n "$ol_token" ] && [ "$ol_token" != "null" ]; then
-    log_fix "$fix_log" "方法 10: OpenList API /fs/put 流式上传（绕过 WebDAV）"
+    log_fix "$fix_log" "方法 8: OpenList API /fs/put 流式上传（绕过 WebDAV）"
     local put_name="put_$(date +%s)_$$_${file_name}"
     local put_target="${actual_ol_dir}/${put_name}"
     local put_resp put_http
@@ -539,7 +434,7 @@ try_fix_failed_file() {
     form_http=$(echo "$form_resp" | tail -n 1)
     log_fix "$fix_log" "  /fs/form 到根目录响应: ${form_http}"
     if echo "$form_http" | grep -qE 'HTTP_CODE:(200|201|204)'; then
-      log_fix "$fix_log" "方法 10 成功"
+      log_fix "$fix_log" "方法 8 成功"
       TRY_FIX_STATUS="success"
       TRY_FIX_METHOD="OpenList API /fs/form（上传到根 backup 目录 + 编码文件名）"
       TRY_FIX_ALTERNATIVE="${put_name}"
@@ -548,13 +443,13 @@ try_fix_failed_file() {
       rm -rf "$temp_dir" 2>/dev/null || true
       return 0
     fi
-    log_fix "$fix_log" "方法 10 失败 (${form_http})"
+    log_fix "$fix_log" "方法 8 失败 (${form_http})"
   fi
 
-  # 方法 11：上传到完全不同的路径（backup 根目录 + 时间戳文件名）
+  # 方法 9：上传到完全不同的路径（backup 根目录 + 时间戳文件名）
   # 最后手段：把文件上传到一个全新的简单路径，文件名包含原始路径的 hash
   if [ -n "$ol_token" ] && [ "$ol_token" != "null" ]; then
-    log_fix "$fix_log" "方法 11: 上传到 backup 根目录（最后手段）"
+    log_fix "$fix_log" "方法 9: 上传到 backup 根目录（最后手段）"
     local path_hash
     path_hash=$(printf '%s' "$failed_file_rel" | md5sum | cut -c1-8)
     local fallback_name="fixed_${path_hash}_${file_name}"
@@ -570,7 +465,7 @@ try_fix_failed_file() {
     fb_http=$(echo "$fb_resp" | tail -n 1)
     log_fix "$fix_log" "  响应: ${fb_http}"
     if echo "$fb_http" | grep -qE 'HTTP_CODE:(200|201|204)'; then
-      log_fix "$fix_log" "方法 11 成功"
+      log_fix "$fix_log" "方法 9 成功"
       TRY_FIX_STATUS="success"
       TRY_FIX_METHOD="OpenList API /fs/form（backup 根目录 + hash 文件名）"
       TRY_FIX_ALTERNATIVE="$fallback_name"
@@ -578,12 +473,12 @@ try_fix_failed_file() {
       rm -rf "$temp_dir" 2>/dev/null || true
       return 0
     fi
-    log_fix "$fix_log" "方法 11 失败 (${fb_http})"
+    log_fix "$fix_log" "方法 9 失败 (${fb_http})"
   fi
 
-  # 方法 12：base64 编码文件内容后上传（完全改变文件 hash 和内容特征）
+  # 方法 10：base64 编码文件内容后上传（完全改变文件 hash 和内容特征）
   # 适用于 wopan176 后端可能基于文件内容或 hash 做安全检测的情况
-  log_fix "$fix_log" "方法 12: base64 编码文件内容后上传（改变文件 hash）"
+  log_fix "$fix_log" "方法 10: base64 编码文件内容后上传（改变文件 hash）"
   local b64_content_file="${temp_dir}/${file_name}.b64"
   base64 "$local_file" > "$b64_content_file" 2>/dev/null
   if [ -f "$b64_content_file" ]; then
@@ -592,7 +487,7 @@ try_fix_failed_file() {
       while IFS= read -r line; do log_fix "$fix_log" "m10: $line"; done
     local m10_status=${PIPESTATUS[0]}
     if [ "$m10_status" -eq 0 ]; then
-      log_fix "$fix_log" "方法 12 成功"
+      log_fix "$fix_log" "方法 10 成功"
       TRY_FIX_STATUS="success"
       TRY_FIX_METHOD="rclone copyto（base64 编码文件内容 + .b64 扩展名）"
       TRY_FIX_ALTERNATIVE="${m10_dst#${dest_path}/}"
@@ -600,13 +495,13 @@ try_fix_failed_file() {
       rm -rf "$temp_dir" 2>/dev/null || true
       return 0
     fi
-    log_fix "$fix_log" "方法 12 失败 (exit=$m10_status)"
+    log_fix "$fix_log" "方法 10 失败 (exit=$m10_status)"
   else
-    log_fix "$fix_log" "方法 12 base64 编码失败"
+    log_fix "$fix_log" "方法 10 base64 编码失败"
   fi
 
-  # 方法 13：加密 zip 后上传（改变二进制特征 + 密码保护）
-  log_fix "$fix_log" "方法 13: 加密 zip 后上传（改变二进制特征）"
+  # 方法 11：加密 zip 后上传（改变二进制特征 + 密码保护）
+  log_fix "$fix_log" "方法 11: 加密 zip 后上传（改变二进制特征）"
   local zip_password="OpenList$(date +%s)"
   (cd "$temp_dir" && 7z a -tzip -p"$zip_password" -mem=AES256 "${file_name}.enc.zip" "$file_name") 2>&1 | \
     while IFS= read -r line; do log_fix "$fix_log" "m11 7z: $line"; done
@@ -616,7 +511,7 @@ try_fix_failed_file() {
       while IFS= read -r line; do log_fix "$fix_log" "m11: $line"; done
     local m11_status=${PIPESTATUS[0]}
     if [ "$m11_status" -eq 0 ]; then
-      log_fix "$fix_log" "方法 13 成功"
+      log_fix "$fix_log" "方法 11 成功"
       TRY_FIX_STATUS="success"
       TRY_FIX_METHOD="rclone copyto（AES256 加密 zip + .enc.zip 扩展名）"
       TRY_FIX_ALTERNATIVE="${m11_dst#${dest_path}/}"
@@ -624,15 +519,15 @@ try_fix_failed_file() {
       rm -rf "$temp_dir" 2>/dev/null || true
       return 0
     fi
-    log_fix "$fix_log" "方法 13 失败 (exit=$m11_status)"
+    log_fix "$fix_log" "方法 11 失败 (exit=$m11_status)"
   else
-    log_fix "$fix_log" "方法 13 加密 zip 未生成"
+    log_fix "$fix_log" "方法 11 加密 zip 未生成"
   fi
 
-  # 方法 14：上传到临时目录后用 OpenList API move 移动
+  # 方法 12：上传到临时目录后用 OpenList API move 移动
   # 在 backup 根目录创建临时目录，上传文件，然后用 API move 到目标路径
   if [ -n "$ol_token" ] && [ "$ol_token" != "null" ]; then
-    log_fix "$fix_log" "方法 14: 上传到临时目录后用 OpenList API move 移动"
+    log_fix "$fix_log" "方法 12: 上传到临时目录后用 OpenList API move 移动"
     local tmp_dir_name="_tmp_fix_$(date +%s)_$$"
     local tmp_ol_dir="/${ol_dst_base}/${tmp_dir_name}"
     # 通过 API 创建临时目录
@@ -653,7 +548,7 @@ try_fix_failed_file() {
     m12_upload_http=$(echo "$m12_upload_resp" | tail -n 1)
     log_fix "$fix_log" "  临时目录上传响应: ${m12_upload_http}"
     if echo "$m12_upload_http" | grep -qE 'HTTP_CODE:(200|201|204)'; then
-      log_fix "$fix_log" "方法 14 临时目录上传成功，尝试 move 到目标路径..."
+      log_fix "$fix_log" "方法 12 临时目录上传成功，尝试 move 到目标路径..."
       # 确保目标目录存在
       local target_ol_dir="/${ol_dst_base}/${file_dir_rel}"
       curl -s -X POST "http://127.0.0.1:5244/api/fs/mkdir" \
@@ -672,7 +567,7 @@ try_fix_failed_file() {
       move_http=$(echo "$move_resp" | tail -n 1)
       log_fix "$fix_log" "  API move 响应: ${move_http}"
       if echo "$move_resp" | grep -q '"code":200'; then
-        log_fix "$fix_log" "方法 14 move 成功"
+        log_fix "$fix_log" "方法 12 move 成功"
         TRY_FIX_STATUS="success"
         TRY_FIX_METHOD="临时目录上传 + OpenList API move（原路径 + 原文件名）"
         TRY_FIX_ALTERNATIVE="$failed_file_rel"
@@ -680,7 +575,7 @@ try_fix_failed_file() {
         rm -rf "$temp_dir" 2>/dev/null || true
         return 0
       else
-        log_fix "$fix_log" "方法 14 move 失败，文件保留在临时目录: ${tmp_ol_dir}/${file_name}"
+        log_fix "$fix_log" "方法 12 move 失败，文件保留在临时目录: ${tmp_ol_dir}/${file_name}"
         TRY_FIX_STATUS="success"
         TRY_FIX_METHOD="临时目录上传（move 失败，文件保留在 ${tmp_dir_name}/）"
         TRY_FIX_ALTERNATIVE="${tmp_dir_name}/${file_name}"
@@ -689,7 +584,7 @@ try_fix_failed_file() {
         return 0
       fi
     fi
-    log_fix "$fix_log" "方法 14 临时目录上传失败 (${m12_upload_http})"
+    log_fix "$fix_log" "方法 12 临时目录上传失败 (${m12_upload_http})"
   fi
 
   # 所有方法均失败
