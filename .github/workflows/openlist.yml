@@ -779,6 +779,14 @@ jobs:
                               return True
               return False
 
+          def human(b):
+              b = float(b)
+              for unit in ['B','KB','MB','GB','TB']:
+                  if abs(b) < 1024:
+                      return f"{b:.2f} {unit}"
+                  b /= 1024
+              return f"{b:.2f} PB"
+
           def load(path):
               items = {}
               if not os.path.exists(path):
@@ -823,14 +831,6 @@ jobs:
           only_dst = sorted(dst_keys - src_keys)         # 残留（源端没）
           common = sorted(src_keys & dst_keys)
           mismatch = [p for p in common if src[p] != dst[p]]  # 大小不一致
-
-          def human(b):
-              b = float(b)
-              for unit in ['B','KB','MB','GB','TB']:
-                  if abs(b) < 1024:
-                      return f"{b:.2f} {unit}"
-                  b /= 1024
-              return f"{b:.2f} PB"
 
           only_src_bytes = sum(src[p] for p in only_src)
           only_dst_bytes = sum(dst[p] for p in only_dst)
