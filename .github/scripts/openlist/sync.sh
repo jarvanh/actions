@@ -63,14 +63,47 @@ _refresh_wopan_token() {
   return 1
 }
 
-# 检测 rclone 日志中的 wopan176 登录失败（8005）
-# 用法: _has_wopan_login_failure <log_file>
+# 检测 wopan176 登录失败（8005）
+# OpenList 把 8005 包装成 HTTP 405 返回给 rclone，rclone 日志里只有 "405 Method Not Allowed"
+# 因此需要同时检查 OpenList 容器日志中的 rsp_code: 8005
+# 用法: _has_wopan_login_failure <rclone_log_file> [openlist_log_file]
 # 返回: 0=检测到 8005 错误, 1=未检测到
 _has_wopan_login_failure() {
-  local log_file="$1"
-  if grep -q 'rsp_code.*8005\|登录失败' "$log_file" 2>/dev/null; then
-    return 0
+  local rclone_log="$1"
+  local ol_log="${2:-}"
+
+  # 检查 OpenList 容器日志（包含真实的 8005 错误）
+  if [ -n "$ol_log" ] && [ -f "$ol_log" ]; then
+    # 只检查最近 5 分钟的日志，避免匹配到历史错误
+    local recent_ol_log
+    recent_ol_log=$(tail -500 "$ol_log" 2>/dev/null)
+    if echo "$recent_ol_log" | grep -q 'rsp_code.*8005\|rep_desc.*登录失败'; then
+      return 0
+    fi
   fi
+
+  # 兜底：也检查 rclone 日志（虽然 rclone 日志里通常只有 405，不含 8005）
+  if [ -n "$rclone_log" ] && [ -f "$rclone_log" ]; then
+    if grep -q 'rsp_code.*8005\|登录失败' "$rclone_log" 2>/dev/null; then
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+# 查找 OpenList 最新日志文件
+_find_openlist_log() {
+  for logdir in \
+    "/dropbox/self-hosted/openlist/data/log" \
+    "/dropbox/self-hosted/openlist/data/logs" \
+    "/opt/openlist/data/log"; do
+    if [ -d "$logdir" ]; then
+      local latest
+      latest=$(ls -t "$logdir"/*.log 2>/dev/null | head -1)
+      [ -n "$latest" ] && echo "$latest" && return 0
+    fi
+  done
   return 1
 }
 
@@ -201,9 +234,12 @@ sync_with_logging() {
   run_rclone_sync_once "initial sync" || SYNC_STATUS=$?
 
   # ===== 8005 登录失败重试 =====
-  # wopan176 OAuth access token 有效期约 5 分钟，同步中途过期后所有请求返回 8005
-  # 检测到 8005 错误时，刷新 token 并重试
-  if [[ "$dest_path" == openlist:* ]] && _has_wopan_login_failure "$LAST_ATTEMPT_LOG"; then
+  # wopan176 后端写操作可能返回 8005（OpenList 包装为 HTTP 405 返回给 rclone）
+  # 需要检查 OpenList 容器日志中的真实 8005 错误，刷新 token 并重试
+  local OL_LOG_FILE=""
+  OL_LOG_FILE=$(_find_openlist_log) || true
+
+  if [[ "$dest_path" == openlist:* ]] && _has_wopan_login_failure "$LAST_ATTEMPT_LOG" "$OL_LOG_FILE"; then
     local wopan_retry_attempts="${OPENLIST_8005_RETRY_ATTEMPTS:-3}"
     local wopan_retry_index
 
@@ -211,6 +247,7 @@ sync_with_logging() {
       echo ""
       echo "============================================"
       echo "检测到 wopan176 登录失败 (8005)，刷新 token 并重试 ${wopan_retry_index}/${wopan_retry_attempts}" | tee -a "$LOG_FILENAME"
+      echo "  OpenList 日志: ${OL_LOG_FILE:-未找到}" | tee -a "$LOG_FILENAME"
       echo "============================================"
 
       _refresh_wopan_token "$LOG_FILENAME"
@@ -220,10 +257,13 @@ sync_with_logging() {
       # 刷新 OpenList 缓存
       _refresh_openlist_cache "$dest_path"
 
+      # 重新查找日志文件（可能轮转了）
+      OL_LOG_FILE=$(_find_openlist_log) || true
+
       SYNC_STATUS=0
       run_rclone_sync_once "8005 retry ${wopan_retry_index}/${wopan_retry_attempts}" || SYNC_STATUS=$?
 
-      if ! _has_wopan_login_failure "$LAST_ATTEMPT_LOG"; then
+      if ! _has_wopan_login_failure "$LAST_ATTEMPT_LOG" "$OL_LOG_FILE"; then
         echo "  wopan176 8005 错误已消除，重试成功" | tee -a "$LOG_FILENAME"
         break
       fi
@@ -338,7 +378,8 @@ sync_with_logging() {
 
       if [ "$TRY_FIX_STATUS" = "success" ]; then
         echo "修复成功: ${failed_line} -> 方法: ${TRY_FIX_METHOD}" | tee -a "$LOG_FILENAME"
-        echo "${TRY_FIX_ORIGINAL}|${TRY_FIX_ALTERNATIVE}|${TRY_FIX_METHOD}|${file_size}|${file_size_bytes}" >> "$fix_list"
+        echo "  还原方法: ${TRY_FIX_RESTORE}" | tee -a "$LOG_FILENAME"
+        echo "${TRY_FIX_ORIGINAL}|${TRY_FIX_ALTERNATIVE}|${TRY_FIX_METHOD}|${TRY_FIX_RESTORE}|${file_size}|${file_size_bytes}" >> "$fix_list"
       else
         echo "修复失败: ${failed_line} - ${TRY_FIX_MESSAGE}" | tee -a "$LOG_FILENAME"
         echo "${failed_line}|${file_size}|${TRY_FIX_MESSAGE}" >> "$fail_list"
@@ -381,7 +422,7 @@ sync_with_logging() {
   if [ -s "$fix_list" ]; then
     LAST_SYNC_FIXED_FILES_JSON=$(jq -R -s '
       def restore_info($orig; $alt; $method; $src; $dst):
-        # 10 种修复方式精确识别：
+        # 12 种修复方式精确识别（方法 1-12）：
         #   "base64URL 编码目录 + 原文件名"                → 仅 b64 目录
         #   "原路径 + 原文件名"                             → 原样 copy
         #   "base64URL 编码目录 + base64URL 编码文件名"    → b64 目录+文件名
@@ -392,12 +433,23 @@ sync_with_logging() {
         #   "原路径 + 7z 压缩包"                           → 7z
         #   "base64URL 编码目录 + API 自动生成文件名"      → api rename(+b64dir)
         #   "原路径 + API 自动生成文件名"                  → api rename
+        #   "重命名 .bak"                                 → rename .bak
+        #   "父目录 + 编码原始目录名的文件名"              → parent dir
+        #   "上传到根 backup 目录 + 编码文件名"            → root backup
+        #   "base64 编码文件内容 + .b64 扩展名"            → base64 content
+        #   "AES256 加密 zip + .enc.zip 扩展名"             → encrypted zip
+        #   "临时目录上传 + OpenList API move"             → tmp + move
         # 注: 不能用 ".*文件名" 模糊匹配，"原文件名" 里也有 "文件名" 3 个字，会误判
         ($method | test("base64URL 编码目录 ")) as $has_b64_dir
         | ($method | test("base64URL 编码文件名")) as $has_b64_name
         | ($method | test("zip 压缩包")) as $has_zip
         | ($method | test("7z 压缩包")) as $has_7z
         | ($method | test("API 自动生成文件名")) as $has_api
+        | ($method | test("重命名 .bak")) as $has_bak
+        | ($method | test("父目录")) as $has_parent
+        | ($method | test("base64 编码文件内容")) as $has_b64_content
+        | ($method | test("AES256 加密 zip")) as $has_enc_zip
+        | ($method | test("临时目录上传")) as $has_tmp_move
         # 原目录部分（去掉文件名）和文件名
         | ([$orig | split("/") | .[0:-1] | join("/"), $orig | split("/") | .[-1]]) as [$orig_dir, $orig_name]
         | ([$alt  | split("/") | .[0:-1] | join("/"), $alt  | split("/") | .[-1]]) as [$alt_dir,  $alt_name]
@@ -425,6 +477,26 @@ sync_with_logging() {
             summary: "文件名（不含扩展名部分）做了 base64URL 编码，目录保持原样",
             steps:   ["取文件名扩展名前部分 → base64URL 解码得到原文件名", "目录名无需改动"],
             script:  "set -euo pipefail\nb64url_decode() {\n  local s=\"$1\"; s=\"${s//-/+}\"; s=\"${s//_/}\"\n  local pad=$(( (4 - ${#s} % 4) % 4 )); while [ $pad -gt 0 ]; do s=\"$s=\"; pad=$((pad-1)); done\n  printf \"%s\" \"$s\" | base64 -d\n}\nSRC=\"" + $src + "\"\nDST=\"" + $dst + "\"\nORIG=\"" + $orig + "\"\nALT=\"" + $alt + "\"\nTMP=$(mktemp -d)\nORIG_FNAME=\"" + $orig_name + "\"\nrclone copyto \"${DST}/${ALT}\" \"$TMP/${ORIG_FNAME}\" --progress\n# 如需回传源端: rclone copyto \"$TMP/${ORIG_FNAME}\" \"${SRC}/${ORIG}\"\nrm -rf \"$TMP\""}
+          elif $has_b64_content then {kind:"base64_content",
+            summary: "文件内容被 base64 编码后上传，完全改变了 hash 和内容特征",
+            steps:   ["下载目标端 " + $alt, "执行: base64 -d <alt_file> > <orig_file>", "解码后得到原始文件 " + $orig_name],
+            script:  "set -euo pipefail\nSRC=\"" + $src + "\"\nDST=\"" + $dst + "\"\nORIG=\"" + $orig + "\"\nALT=\"" + $alt + "\"\nTMP=$(mktemp -d)\nrclone copyto \"${DST}/${ALT}\" \"$TMP/encoded.b64\" --progress\nbase64 -d \"$TMP/encoded.b64\" > \"$TMP/" + $orig_name + "\"\n# 还原后的源文件在: $TMP/" + $orig_name + "\n# 如需回传源端: rclone copyto \"$TMP/" + $orig_name + "\" \"${SRC}/${ORIG}\"\nrm -rf \"$TMP\""}
+          elif $has_enc_zip   then {kind:"encrypted_zip",
+            summary: "文件被 AES256 加密 zip 打包后上传，改变了二进制特征",
+            steps:   ["下载目标端 " + $alt, "执行: 7z x -p<password> <enc_zip> -o<output_dir>", "解压后得到 " + $orig_name],
+            script:  "set -euo pipefail\n# 密码在修复时的 restore_hint 中记录\nSRC=\"" + $src + "\"\nDST=\"" + $dst + "\"\nORIG=\"" + $orig + "\"\nALT=\"" + $alt + "\"\nTMP=$(mktemp -d)\nrclone copyto \"${DST}/${ALT}\" \"$TMP/package.enc.zip\" --progress\n# 密码格式: OpenList<timestamp>，从 restore_hint 中获取\n7z x -p\"OpenList<password>\" \"$TMP/package.enc.zip\" -o\"$TMP/out\" -y\n# 还原后的源文件在: $TMP/out/" + $orig_name + "\nrm -rf \"$TMP\""}
+          elif $has_bak       then {kind:"rename_bak",
+            summary: "文件被重命名为 .bak 后缀后上传",
+            steps:   ["下载目标端 " + $alt, "重命名为原始文件名: " + $orig_name],
+            script:  "set -euo pipefail\nSRC=\"" + $src + "\"\nDST=\"" + $dst + "\"\nORIG=\"" + $orig + "\"\nALT=\"" + $alt + "\"\nTMP=$(mktemp -d)\nORIG_FNAME=\"" + $orig_name + "\"\nrclone copyto \"${DST}/${ALT}\" \"$TMP/${ORIG_FNAME}\" --progress\n# 文件已恢复原始文件名\n# 如需回传源端: rclone copyto \"$TMP/${ORIG_FNAME}\" \"${SRC}/${ORIG}\"\nrm -rf \"$TMP\""}
+          elif $has_parent    then {kind:"parent_dir",
+            summary: "文件上传到父目录（跳过有问题的子目录），文件名编码了原始目录信息",
+            steps:   ["下载目标端 " + $alt, "从文件名 __fixed__<base64>__<filename> 中解码原始目录名", "移动到正确的目录路径"],
+            script:  "set -euo pipefail\nSRC=\"" + $src + "\"\nDST=\"" + $dst + "\"\nORIG=\"" + $orig + "\"\nALT=\"" + $alt + "\"\nTMP=$(mktemp -d)\nORIG_FNAME=\"" + $orig_name + "\"\nrclone copyto \"${DST}/${ALT}\" \"$TMP/${ORIG_FNAME}\" --progress\n# 如需回传源端: rclone copyto \"$TMP/${ORIG_FNAME}\" \"${SRC}/${ORIG}\"\nrm -rf \"$TMP\""}
+          elif $has_tmp_move  then {kind:"tmp_move",
+            summary: "文件上传到临时目录后用 OpenList API move 移动（可能已移动或保留在临时目录）",
+            steps:   ["检查目标路径是否已有原文件", "如未移动，用 OpenList API move 从临时目录移动"],
+            script:  "set -euo pipefail\n# 检查目标是否已存在\nrclone lsjson '" + $dst + "/" + $orig + "' --max-depth 1 2>/dev/null | jq 'length'\n# 如不存在，用 OpenList API move\n# curl -X POST http://127.0.0.1:5244/api/fs/move -H 'Authorization: <token>' -d '{\"src_dir\":\"/wopan176Crypt/backup/" + $alt + "\",\"dst_dir\":\"/wopan176Crypt/backup/" + $orig + "\"}'"}
           else {kind:"copy",
             summary: "文件按原路径原文件名直接 copyto，无需还原处理",
             steps:   ["目标端路径与源端相同，直接使用即可"],
@@ -436,10 +508,11 @@ sync_with_logging() {
             original:    $f[0],
             alternative: $f[1],
             method:      $f[2],
-            size_human:  $f[3],
-            size_bytes:  ($f[4] // "0" | tonumber)
+            restore_hint: $f[3],
+            size_human:  $f[4],
+            size_bytes:  ($f[5] // "0" | tonumber)
           }
-        | . + {restore: (restore_info(.original; .alternative; .method; "'"$source_path"'"; "'"$dest_path"'"))}
+        | . + {restore: (restore_info(.original; .alternative; .method; "'"$source_path"'"; "'"$dest_path"'") + {hint: .restore_hint})}
       )
     ' "$fix_list" 2>/dev/null || echo "[]")
   fi
