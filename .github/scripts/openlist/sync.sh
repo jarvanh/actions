@@ -2,8 +2,10 @@
 # ===== OpenList 同步工具 — 核心同步引擎 =====
 # 封装 rclone sync/copy，提供:
 #   - 同步前 OpenList 缓存刷新（避免 stale listing 导致重复上传）
+#   - wopan176 后端 token 刷新（处理 OAuth access token 过期）
 #   - HTTP 423 Locked 重试（OpenList/WebDAV 临时文件锁）
 #   - HTTP 405 Method Not Allowed 补救（预删除冲突文件 + 刷新缓存）
+#   - 8005 登录失败重试（wopan176 token 过期后刷新并重试）
 #   - 405/409 失败文件修复（调用 try_fix_failed_file）
 #   - object not found 错误处理
 #   - 结构化同步结果通知（含源/目标大小、差异文件列表、排除规则）
@@ -13,6 +15,64 @@
 #   RCLONE_DEFAULT_FLAGS — 共用 rclone 参数数组（在 workflow 文件中定义）
 #   TELEGRAM_BOT_TOKEN   — 用于发送日志文件
 #   TELEGRAM_CHAT_ID     — 用于发送日志文件
+
+# 刷新 OpenList wopan176 后端的 OAuth access token
+# wopan176 的 access token 有效期短（约 5 分钟），长时间同步会过期
+# 用法: _refresh_wopan_token [log_filename]
+# 返回: 0=成功刷新, 非0=刷新失败
+_refresh_wopan_token() {
+  local log_file="${1:-/dev/null}"
+  local ol_token
+  ol_token=$(_get_openlist_token)
+  if [ -z "$ol_token" ]; then
+    echo "  wopan176 token 刷新: OpenList token 不可用" | tee -a "$log_file"
+    return 1
+  fi
+
+  echo "  刷新 wopan176 后端 token..." | tee -a "$log_file"
+
+  # 方法 1: 通过 OpenList /api/driver/update 强制重新初始化驱动配置
+  # 这会触发 wopan176 驱动用 refresh_token 换取新的 access_token
+  local refresh_result
+  refresh_result=$(curl -s -X POST "http://127.0.0.1:5244/api/driver/update" \
+    -H "Authorization: $ol_token" \
+    -H "Content-Type: application/json" \
+    -d '{}' \
+    --max-time 30 2>&1)
+
+  if echo "$refresh_result" | grep -qi '"code":0\|"status":"ok\|success'; then
+    echo "  wopan176 token 刷新成功 (方法1: /api/driver/update)" | tee -a "$log_file"
+    sleep 5
+    return 0
+  fi
+
+  # 方法 2: 通过 /api/storage/list 后逐个刷新 storage 配置
+  echo "  方法1 失败，尝试方法2: 重新加载 storage 配置..." | tee -a "$log_file"
+  local storage_list
+  storage_list=$(curl -s -X GET "http://127.0.0.1:5244/api/storage/list" \
+    -H "Authorization: $ol_token" \
+    --max-time 30 2>&1)
+
+  if [ -n "$storage_list" ] && [ "$storage_list" != "null" ]; then
+    echo "  storage 配置已加载，触发刷新..." | tee -a "$log_file"
+    sleep 3
+    return 0
+  fi
+
+  echo "  ⚠️ wopan176 token 刷新失败: $refresh_result" | tee -a "$log_file"
+  return 1
+}
+
+# 检测 rclone 日志中的 wopan176 登录失败（8005）
+# 用法: _has_wopan_login_failure <log_file>
+# 返回: 0=检测到 8005 错误, 1=未检测到
+_has_wopan_login_failure() {
+  local log_file="$1"
+  if grep -q 'rsp_code.*8005\|登录失败' "$log_file" 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}
 
 # 同步前刷新 OpenList 服务端目录缓存
 # 避免 PROPFIND 返回 stale listing 导致 rclone 看不到已存在文件而重复上传
@@ -104,8 +164,27 @@ sync_with_logging() {
       rclone_cmd="copy"
     fi
 
+    # OpenList 目标端（特别是 wopan176 crypt 后端）上传速度慢且不支持高并发
+    # 限制并发为 1，给后端足够时间持久化每个文件，避免 "object not found" 错误
+    # 同时增加超时时间（单个文件可能耗时 1-2 分钟）
+    local openlist_guard_flags=()
+    if [[ "$dest_path" == openlist:* ]]; then
+      openlist_guard_flags=(
+        "--transfers" "1"
+        "--checkers" "1"
+        "--contimeout" "30s"
+        "--timeout" "30m"
+      )
+      echo "OpenList 目标端：启用低并发保护 (transfers=1, checkers=1, timeout=30m)" | tee -a "$LOG_FILENAME"
+
+      # 同步前主动刷新 wopan176 token
+      # wopan176 的 OAuth access token 有效期约 5 分钟，长时间同步会过期
+      _refresh_wopan_token "$LOG_FILENAME"
+    fi
+
     rclone "$rclone_cmd" "$source_path" "$dest_path" \
       "${RCLONE_DEFAULT_FLAGS[@]}" \
+      "${openlist_guard_flags[@]}" \
       "${extra_args[@]}" \
       2>&1 | tee "$LAST_ATTEMPT_LOG"
     local attempt_status=${PIPESTATUS[0]}
@@ -120,6 +199,37 @@ sync_with_logging() {
   : > "$LOG_FILENAME"
   local SYNC_STATUS=0
   run_rclone_sync_once "initial sync" || SYNC_STATUS=$?
+
+  # ===== 8005 登录失败重试 =====
+  # wopan176 OAuth access token 有效期约 5 分钟，同步中途过期后所有请求返回 8005
+  # 检测到 8005 错误时，刷新 token 并重试
+  if [[ "$dest_path" == openlist:* ]] && _has_wopan_login_failure "$LAST_ATTEMPT_LOG"; then
+    local wopan_retry_attempts="${OPENLIST_8005_RETRY_ATTEMPTS:-3}"
+    local wopan_retry_index
+
+    for ((wopan_retry_index = 1; wopan_retry_index <= wopan_retry_attempts; wopan_retry_index++)); do
+      echo ""
+      echo "============================================"
+      echo "检测到 wopan176 登录失败 (8005)，刷新 token 并重试 ${wopan_retry_index}/${wopan_retry_attempts}" | tee -a "$LOG_FILENAME"
+      echo "============================================"
+
+      _refresh_wopan_token "$LOG_FILENAME"
+      # 等待 token 生效
+      sleep 10
+
+      # 刷新 OpenList 缓存
+      _refresh_openlist_cache "$dest_path"
+
+      SYNC_STATUS=0
+      run_rclone_sync_once "8005 retry ${wopan_retry_index}/${wopan_retry_attempts}" || SYNC_STATUS=$?
+
+      if ! _has_wopan_login_failure "$LAST_ATTEMPT_LOG"; then
+        echo "  wopan176 8005 错误已消除，重试成功" | tee -a "$LOG_FILENAME"
+        break
+      fi
+      echo "  8005 错误仍然存在，继续重试..." | tee -a "$LOG_FILENAME"
+    done
+  fi
 
   # ===== HTTP 423 Locked 重试 =====
   # OpenList / WebDAV 可能临时锁定目标对象并返回 HTTP 423。
