@@ -646,31 +646,41 @@ jobs:
           fi
 
           # ===== 要诊断的同步对清单 =====
-          # 格式: "src|dst"（与 run_all_tasks 中 copy_task/sync_task 的路径一致；
-          # 仅列无 --exclude 的对，避免口径不一致；aliyundriveCrypt/backup 有 --exclude 暂不列入）
+          # 格式: "src|dst|excludes_csv"（与 run_all_tasks 中 copy_task/sync_task 的路径一致）
+          # excludes_csv: 逗号分隔的 glob；aliyundriveCrypt/backup 有 --exclude 需在 Python 侧用 fnmatch 过滤
           DIFF_PAIRS=(
-            "onedrive:backup|openlist:wopan176Crypt/backup"
-            "onedrive:0|openlist:wopan176Crypt/0"
-            "onedrive:1|openlist:wopan176Crypt/1"
-            "onedrive:2|openlist:wopan176Crypt/2"
-            "onedrive:3|openlist:wopan176Crypt/3"
-            "onedrive:4|openlist:wopan176Crypt/4"
-            "onedrive:5|openlist:wopan176Crypt/5"
-            "onedrive:0|openlist:baidupanCrypt/0"
-            "onedrive:1|openlist:baidupanCrypt/1"
+            "onedrive:backup|openlist:aliyundriveCrypt/backup|/notion/**,notion/**,/self-hosted_latest.tar.gz,self-hosted_latest.tar.gz,/github_repos_latest.tar.gz,github_repos_latest.tar.gz"
+            "onedrive:backup|openlist:wopan176Crypt/backup|"
+            "onedrive:0|openlist:wopan176Crypt/0|"
+            "onedrive:1|openlist:wopan176Crypt/1|"
+            "onedrive:2|openlist:wopan176Crypt/2|"
+            "onedrive:3|openlist:wopan176Crypt/3|"
+            "onedrive:4|openlist:wopan176Crypt/4|"
+            "onedrive:5|openlist:wopan176Crypt/5|"
+            "onedrive:0|openlist:baidupanCrypt/0|"
+            "onedrive:1|openlist:baidupanCrypt/1|"
           )
 
           # 全局汇总
           rm -f /tmp/_diff_summary.txt
 
           for pair in "${DIFF_PAIRS[@]}"; do
-            src_remote="${pair%|*}"
-            dst_remote="${pair#*|}"
+            # pair 格式: "src|dst|excludes_csv"
+            pair_src="${pair%%|*}"
+            pair_rest="${pair#*|}"
+            dst_remote="${pair_rest%%|*}"
+            excludes_csv="${pair_rest#*|}"
+            # dst_remote 不含 '|' 的情况下，#*| 会返回原值，所以如果 excludes_csv == dst_remote 说明没有 excludes
+            if [ "$excludes_csv" = "$dst_remote" ]; then
+              excludes_csv=""
+            fi
+            src_remote="$pair_src"
 
             echo ""
             echo "######################################################"
             echo "# 对比: ${src_remote}  →  ${dst_remote}"
             echo "######################################################"
+            [ -n "$excludes_csv" ] && echo "  源端排除: ${excludes_csv}"
 
             # 刷新 OpenList 缓存（避免 stale listing 把已删除文件还报出来）
             if [ -n "$OL_TOKEN" ] && [ "$OL_TOKEN" != "null" ]; then
@@ -713,10 +723,61 @@ jobs:
             [ -s /tmp/_diff_dst_err.txt ] && { echo "目标端 lsf 错误:"; cat /tmp/_diff_dst_err.txt; }
 
             # Python 做差集分析
-            python3 - "$src_remote" "$dst_remote" "$SRC_LIST" "$DST_LIST" << 'PYEOF'
-          import sys, os
+            python3 - "$src_remote" "$dst_remote" "$SRC_LIST" "$DST_LIST" "$excludes_csv" << 'PYEOF'
+          import sys, os, fnmatch
 
-          src_remote, dst_remote, src_list, dst_list = sys.argv[1:5]
+          args = sys.argv[1:]
+          src_remote = args[0]
+          dst_remote = args[1]
+          src_list   = args[2]
+          dst_list   = args[3]
+          excludes_csv = args[4] if len(args) > 4 else ""
+          excludes = [p.strip() for p in excludes_csv.split(",") if p.strip()]
+
+          def is_excluded(rel_path: str, patterns) -> bool:
+              """与 rclone --exclude 语义尽量对齐：匹配任一 glob 就算命中
+              - 路径带或不带前导 '/' 都要匹配
+              - fnmatch 处理 ** 需要自定义：fnmatch 的 * 不跨 /；手动转换 **
+              """
+              if not patterns:
+                  return False
+              candidates = [rel_path, rel_path.lstrip("/")]
+              if rel_path.startswith("/"):
+                  pass
+              else:
+                  candidates.append("/" + rel_path)
+              for pat in patterns:
+                  p_clean = pat.strip()
+                  if not p_clean:
+                      continue
+                  for cand in candidates:
+                      # 简化版 ** 匹配：把 ** 转换为允许跨 '/' 的 glob
+                      if "**" in p_clean:
+                          # 转成正则：** -> '.*' ，* -> '[^/]*'，? -> '.'，其他 fnmatch_escape
+                          import re
+                          regex_parts = []
+                          i = 0
+                          while i < len(p_clean):
+                              ch = p_clean[i]
+                              if ch == '*' and i + 1 < len(p_clean) and p_clean[i+1] == '*':
+                                  regex_parts.append('.*')
+                                  i += 2
+                              elif ch == '*':
+                                  regex_parts.append('[^/]*')
+                                  i += 1
+                              elif ch == '?':
+                                  regex_parts.append('.')
+                                  i += 1
+                              else:
+                                  regex_parts.append(re.escape(ch))
+                                  i += 1
+                          rx = re.compile('^' + ''.join(regex_parts) + '$')
+                          if rx.match(cand):
+                              return True
+                      else:
+                          if fnmatch.fnmatch(cand, p_clean):
+                              return True
+              return False
 
           def load(path):
               items = {}
@@ -736,8 +797,25 @@ jobs:
                       items[p] = size
               return items
 
-          src = load(src_list)
+          src_raw = load(src_list)
           dst = load(dst_list)
+
+          # aliyundriveCrypt/backup 有 --exclude，从源端文件列表中剔除排除项，
+          # 保证 only_src 计算口径与 sync_task 中实际使用 --exclude 的 rclone sync 一致
+          if excludes:
+              excluded_count = 0
+              excluded_bytes = 0
+              src = {}
+              for p, s in src_raw.items():
+                  if is_excluded(p, excludes):
+                      excluded_count += 1
+                      excluded_bytes += s
+                      continue
+                  src[p] = s
+              if excluded_count:
+                  print(f"  [debug] 源端按 excludes 过滤: 剔除 {excluded_count} 个文件 / {human(excluded_bytes)}")
+          else:
+              src = src_raw
 
           src_keys = set(src.keys())
           dst_keys = set(dst.keys())
@@ -806,7 +884,259 @@ jobs:
               f.write(f"  missing={len(only_src)} files / {human(only_src_bytes)}\n")
               f.write(f"  orphan ={len(only_dst)} files / {human(only_dst_bytes)}\n")
               f.write(f"  mismatch={len(mismatch)} files\n")
+
+          # 把缺失文件按大小降序写入磁盘（path<tab>size_bytes），供后续同步测试使用
+          pair_token = (src_remote.replace(":", "_").replace("/", "_") + "__" +
+                        dst_remote.replace(":", "_").replace("/", "_").replace("*", "_"))
+          missing_path = f"/tmp/_missing_{pair_token}.txt"
+          with open(missing_path, "w") as mf:
+              for p in sorted(only_src, key=lambda x: src[x], reverse=True):
+                  mf.write(f"{p}\t{src[p]}\n")
+          # 写入 pair 元数据（shell 侧要用 src_remote/dst_remote）
+          meta_path = f"/tmp/_missing_{pair_token}_meta.txt"
+          with open(meta_path, "w") as m:
+              m.write(f"{src_remote}\n{dst_remote}\n{missing_path}\n")
+          print(f"[debug] 缺失列表写入: {missing_path} ({len(only_src)} 条)")
           PYEOF
+
+            # 对当前 pair 立刻执行差异文件同步测试（样本取自 just-written missing 文件）
+            # 规则：
+            #   - 样本：缺失列表按大小降序取前 6 个大文件 + 末尾 3 个小文件（共 9 个）
+            #   - 每种同步方式成功后：保留上传文件（不删除），记录到成功列表，跳到下一样本
+            #   - 全部样本跑完：再做一次 lsf 差异，打印"同步测试后还缺失 XX 文件"
+            pair_token="${src_remote//[:\/]/_}__${dst_remote//[:\/\*]/_}"
+            meta_file="/tmp/_missing_${pair_token}_meta.txt"
+            if [ -f "$meta_file" ]; then
+              pair_src=$(sed -n '1p' "$meta_file")
+              pair_dst=$(sed -n '2p' "$meta_file")
+              missing_file=$(sed -n '3p' "$meta_file")
+              total_missing=$(wc -l < "$missing_file" 2>/dev/null | tr -d ' ' || echo 0)
+              if [ "$total_missing" -gt 0 ]; then
+
+                echo ""
+                echo "=========================================="
+                echo "  差异文件同步测试 ($pair_src -> $pair_dst)"
+                echo "=========================================="
+
+                # 获取 OpenList token（每对开始时取一次，避免中途过期）
+                OL_TOKEN_T=""
+                for c in \
+                  "/dropbox/self-hosted/openlist/data/config.json" \
+                  "/dropbox/self-hosted/openlist/data/conf/config.json" \
+                  "/data/openlist/data/config.json"; do
+                  [ -f "$c" ] || continue
+                  t=$(jq -r '.token // .jwt_secret // empty' "$c" 2>/dev/null || echo "")
+                  if [ -n "$t" ] && [ "$t" != "null" ]; then
+                    OL_TOKEN_T="$t"
+                    break
+                  fi
+                done
+
+                # 样本选取
+                SAMPLE_FILE="/tmp/_samples_${pair_token}.txt"
+                { head -n 6 "$missing_file"; tail -n 3 "$missing_file"; } | awk '!seen[$0]++' > "$SAMPLE_FILE"
+                SAMPLE_COUNT=$(wc -l < "$SAMPLE_FILE" | tr -d ' ')
+                echo "样本数: $SAMPLE_COUNT / $total_missing"
+
+                RCLONE_TEST_FLAGS=(--retries 1 --low-level-retries 3 --timeout 5m --contimeout 30s --size-only)
+
+                b64url_encode() {
+                  printf '%s' "$1" | base64 | tr -d '=' | tr '+/' '-_'
+                }
+
+                # 成功清单（样本路径<TAB>方式名<TAB>目标路径<TAB>字节数）
+                SYNC_TEST_OK="/tmp/_sync_test_ok_$$.txt"
+                : > "$SYNC_TEST_OK"
+                SYNC_TEST_FAILED="/tmp/_sync_test_fail_$$.txt"
+                : > "$SYNC_TEST_FAILED"
+
+                while IFS=$'\t' read -r sample_rel src_size; do
+                  [ -z "$sample_rel" ] && continue
+
+                  echo ""
+                  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                  echo "样本: $sample_rel"
+                  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                  echo "源文件大小: $src_size bytes"
+
+                  local_src="${pair_src}/${sample_rel}"
+                  local_dst="${pair_dst}/${sample_rel}"
+                  sample_dir=$(dirname "$sample_rel")
+                  sample_fname=$(basename "$sample_rel")
+                  OK_WAY=""
+                  OK_DST=""
+
+                  # ===== 方式 A: 直接 rclone copyto =====
+                  echo "--- 方式 A: rclone copyto（原路径+原名）---"
+                  rclone deletefile "$local_dst" 2>/dev/null || true
+                  sleep 1
+                  rclone copyto "$local_src" "$local_dst" "${RCLONE_TEST_FLAGS[@]}" 2>&1 | head -15
+                  rc_a=$?
+                  dst_size_a=$(rclone size --json "$local_dst" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null || echo 0)
+                  if [ "$dst_size_a" = "$src_size" ] && [ "$dst_size_a" -gt 0 ]; then
+                    echo ">>> 方式 A: ✅ 成功 (dst_size=$dst_size_a / rc=$rc_a)，保留文件，继续下一样本"
+                    OK_WAY="A"; OK_DST="$local_dst"
+                  else
+                    echo ">>> 方式 A: ❌ 失败 (rc=$rc_a, dst_size=$dst_size_a, expected=$src_size)"
+                    rclone deletefile "$local_dst" 2>/dev/null || true
+                    sleep 1
+                  fi
+
+                  if [ -z "$OK_WAY" ]; then
+                    # ===== 方式 B: 刷新缓存后 copyto =====
+                    echo "--- 方式 B: 刷新缓存 + rclone copyto ---"
+                    if [ -n "$OL_TOKEN_T" ] && [[ "$pair_dst" == openlist:* ]]; then
+                      rel_ol_path="${pair_dst#openlist:}"
+                      ol_path="/${rel_ol_path%/}/${sample_dir}"
+                      curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh" \
+                        -H "Authorization: $OL_TOKEN_T" \
+                        -H "Content-Type: application/json" \
+                        -d "$(jq -n --arg p "$ol_path" '{path:$p, recursive:false}')" >/dev/null 2>&1 || true
+                      sleep 3
+                    fi
+                    rclone copyto "$local_src" "$local_dst" "${RCLONE_TEST_FLAGS[@]}" 2>&1 | head -15
+                    rc_b=$?
+                    dst_size_b=$(rclone size --json "$local_dst" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null || echo 0)
+                    if [ "$dst_size_b" = "$src_size" ] && [ "$dst_size_b" -gt 0 ]; then
+                      echo ">>> 方式 B: ✅ 成功 (dst_size=$dst_size_b / rc=$rc_b)"
+                      OK_WAY="B"; OK_DST="$local_dst"
+                    else
+                      echo ">>> 方式 B: ❌ 失败 (rc=$rc_b, dst_size=$dst_size_b)"
+                      rclone deletefile "$local_dst" 2>/dev/null || true
+                      sleep 1
+                    fi
+                  fi
+
+                  if [ -z "$OK_WAY" ]; then
+                    # ===== 方式 C: base64URL 编码目录名 + copyto =====
+                    echo "--- 方式 C: base64URL 编码目录名 ---"
+                    b64_dir=$(b64url_encode "$sample_dir")
+                    alt_c="${pair_dst}/${b64_dir}/${sample_fname}"
+                    echo "  编码目录: $sample_dir → $b64_dir"
+                    rclone copyto "$local_src" "$alt_c" "${RCLONE_TEST_FLAGS[@]}" 2>&1 | head -15
+                    rc_c=$?
+                    dst_size_c=$(rclone size --json "$alt_c" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null || echo 0)
+                    if [ "$dst_size_c" = "$src_size" ] && [ "$dst_size_c" -gt 0 ]; then
+                      echo ">>> 方式 C: ✅ 成功 (dst_size=$dst_size_c / rc=$rc_c)"
+                      OK_WAY="C"; OK_DST="$alt_c"
+                    else
+                      echo ">>> 方式 C: ❌ 失败 (rc=$rc_c, dst_size=$dst_size_c)"
+                      rclone deletefile "$alt_c" 2>/dev/null || true
+                      sleep 1
+                    fi
+                  fi
+
+                  if [ -z "$OK_WAY" ]; then
+                    # ===== 方式 D: base64URL 编码文件名 + copyto =====
+                    echo "--- 方式 D: base64URL 编码文件名 ---"
+                    fname_noext="${sample_fname%.*}"
+                    fext="${sample_fname##*.}"
+                    [ "$fname_noext" = "$sample_fname" ] && fext=""
+                    b64_fn=$(b64url_encode "$fname_noext")
+                    alt_fname="$b64_fn"
+                    [ -n "$fext" ] && alt_fname="$alt_fname.$fext"
+                    alt_d="${pair_dst}/${sample_dir}/${alt_fname}"
+                    echo "  编码文件名: $sample_fname → $alt_fname"
+                    rclone copyto "$local_src" "$alt_d" "${RCLONE_TEST_FLAGS[@]}" 2>&1 | head -15
+                    rc_d=$?
+                    dst_size_d=$(rclone size --json "$alt_d" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null || echo 0)
+                    if [ "$dst_size_d" = "$src_size" ] && [ "$dst_size_d" -gt 0 ]; then
+                      echo ">>> 方式 D: ✅ 成功 (dst_size=$dst_size_d / rc=$rc_d)"
+                      OK_WAY="D"; OK_DST="$alt_d"
+                    else
+                      echo ">>> 方式 D: ❌ 失败 (rc=$rc_d, dst_size=$dst_size_d)"
+                      rclone deletefile "$alt_d" 2>/dev/null || true
+                      sleep 1
+                    fi
+                  fi
+
+                  if [ -z "$OK_WAY" ]; then
+                    # ===== 方式 E: 下载到本地再上传 =====
+                    echo "--- 方式 E: 下载到本地再上传 ---"
+                    tmp_dir="/tmp/_sync_test_$(date +%s)_$$"
+                    mkdir -p "$tmp_dir"
+                    dl_ok=0
+                    rclone copyto "$local_src" "$tmp_dir/$sample_fname" --retries 1 --timeout 5m 2>&1 | tail -5
+                    if [ -f "$tmp_dir/$sample_fname" ]; then
+                      local_sz=$(wc -c < "$tmp_dir/$sample_fname" | tr -d ' ')
+                      echo "  下载成功: $local_sz bytes (期望 $src_size)"
+                      if [ "$local_sz" = "$src_size" ] || [ "$local_sz" -gt 0 ]; then
+                        dl_ok=1
+                        rclone copyto "$tmp_dir/$sample_fname" "$local_dst" "${RCLONE_TEST_FLAGS[@]}" 2>&1 | head -15
+                        rc_e2=$?
+                        dst_size_e=$(rclone size --json "$local_dst" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null || echo 0)
+                        if [ "$dst_size_e" = "$src_size" ] && [ "$dst_size_e" -gt 0 ]; then
+                          echo ">>> 方式 E: ✅ 上传成功 (dst_size=$dst_size_e / rc=$rc_e2)"
+                          OK_WAY="E"; OK_DST="$local_dst"
+                        else
+                          echo ">>> 方式 E: ❌ 上传失败 (rc=$rc_e2, dst_size=$dst_size_e)"
+                          rclone deletefile "$local_dst" 2>/dev/null || true
+                        fi
+                      else
+                        echo ">>> 方式 E: ❌ 下载大小不符 ($local_sz != $src_size)"
+                      fi
+                    else
+                      echo ">>> 方式 E: ❌ 下载失败（文件不存在于本地临时目录）"
+                    fi
+                    rm -rf "$tmp_dir"
+                  fi
+
+                  # ===== 写结果 =====
+                  if [ -n "$OK_WAY" ]; then
+                    printf '%s\t%s\t%s\t%s\n' "$sample_rel" "$OK_WAY" "$OK_DST" "$src_size" >> "$SYNC_TEST_OK"
+                  else
+                    printf '%s\t0\t\t%s\n' "$sample_rel" "$src_size" >> "$SYNC_TEST_FAILED"
+                  fi
+
+                done < "$SAMPLE_FILE"
+
+                # ===== 二次校验：刷新 OpenList 缓存 + 再查目标端真实文件数 =====
+                echo ""
+                echo "=== 同步测试后二次校验 ==="
+                if [[ "$pair_dst" == openlist:* ]] && [ -n "$OL_TOKEN_T" ]; then
+                  rel_ol_root="${pair_dst#openlist:}"
+                  ol_root_path="/${rel_ol_root%/}"
+                  echo "刷新目标端缓存 $ol_root_path (recursive=true)..."
+                  curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh" \
+                    -H "Authorization: $OL_TOKEN_T" \
+                    -H "Content-Type: application/json" \
+                    -d "$(jq -n --arg p "$ol_root_path" '{path:$p, recursive:true}')" >/dev/null 2>&1 || true
+                  echo "等待缓存刷新 (40s) ..."
+                  sleep 40
+                fi
+
+                # 对每个成功样本，复验：大小一致 且 rclone lsf 能看到
+                while IFS=$'\t' read -r srel sway sdst sbytes; do
+                  [ -z "$srel" ] && continue
+                  recheck_size=$(rclone size --json "$sdst" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null || echo 0)
+                  # 用 lsf 单独看一下（确保文件真的列在目标端 listing 里，而不是 size 的局部缓存）
+                  listed=$(rclone lsf "$(dirname "$sdst")" --files-only --format "ps" --separator ";" 2>/dev/null | awk -v FS=';' -v bn="$(basename "$sdst")" '$1==bn{print $2; exit}')
+                  if [ "$recheck_size" = "$sbytes" ] && [ "$listed" = "$sbytes" ]; then
+                    echo "  ✅ 持久化校验通过: $srel (方式$sway, $sbytes bytes, at $sdst)"
+                  else
+                    echo "  ❌ 持久化校验失败: $srel (预期=$sbytes, recheck=$recheck_size, lsf_size=$listed)"
+                  fi
+                done < "$SYNC_TEST_OK"
+
+                if [ -s "$SYNC_TEST_FAILED" ]; then
+                  echo ""
+                  echo "  ⚠️ 下列样本所有方式均失败："
+                  cat "$SYNC_TEST_FAILED" | while IFS=$'\t' read -r srel _x _y sbytes; do
+                    [ -z "$srel" ] && continue
+                    echo "    - $srel ($sbytes bytes)"
+                  done
+                fi
+
+                ok_count=$(wc -l < "$SYNC_TEST_OK" | tr -d ' ' || echo 0)
+                fail_count=$(wc -l < "$SYNC_TEST_FAILED" | tr -d ' ' || echo 0)
+                ok_bytes=$(awk -F '\t' '{s+=$4} END {print s+0}' "$SYNC_TEST_OK" 2>/dev/null || echo 0)
+                echo ""
+                echo "  同步测试汇总: OK=$ok_count  FAIL=$fail_count  OK_BYTES=$ok_bytes"
+
+                rm -f "$SAMPLE_FILE" "$SYNC_TEST_OK" "$SYNC_TEST_FAILED"
+              fi
+              rm -f "$meta_file" "$missing_file"
+            fi
 
             rm -f "$SRC_LIST" "$DST_LIST" /tmp/_diff_src_err.txt /tmp/_diff_dst_err.txt
           done
@@ -825,272 +1155,6 @@ jobs:
           echo ""
           echo "=========================================="
           echo "  诊断完成"
-          echo "=========================================="
-
-          # ============================================================
-          # 差异文件同步测试：对样本缺失文件依次尝试多种同步方式
-          # 目的：定位哪种方式能成功上传，找出 rclone sync 跳过的根因
-          # ============================================================
-          echo ""
-          echo "=========================================="
-          echo "  差异文件同步测试"
-          echo "=========================================="
-
-          # 获取 OpenList token
-          OL_TOKEN=""
-          for c in \
-            "/dropbox/self-hosted/openlist/data/config.json" \
-            "/dropbox/self-hosted/openlist/data/conf/config.json" \
-            "/data/openlist/data/config.json"; do
-            [ -f "$c" ] || continue
-            t=$(jq -r '.token // .jwt_secret // empty' "$c" 2>/dev/null || echo "")
-            if [ -n "$t" ] && [ "$t" != "null" ]; then
-              OL_TOKEN="$t"
-              break
-            fi
-          done
-
-          # 从缺失文件列表中选取样本（按大小降序取前 5 + 随机取 3 个小文件）
-          # 重新获取缺失文件列表
-          SAMPLE_FILE="/tmp/_sync_test_samples.txt"
-          python3 - <<'PYEOF' > "$SAMPLE_FILE"
-          import json, sys
-          # 从之前的分析中读取缺失文件列表
-          # 重新从 /tmp 读取源端列表
-          import subprocess
-          src_remote = "onedrive:backup"
-          dst_remote = "openlist:wopan176Crypt/backup"
-
-          def get_lsf(remote):
-              try:
-                  out = subprocess.run(
-                      ["rclone", "lsf", "-R", "--files-only", "--format", "ps", remote],
-                      capture_output=True, text=True, timeout=120
-                  )
-                  files = {}
-                  for line in out.stdout.strip().split("\n"):
-                      if not line:
-                          continue
-                      parts = line.rsplit(";", 1)
-                      if len(parts) == 2:
-                          path = parts[0]
-                          try:
-                              size = int(parts[1])
-                          except ValueError:
-                              size = 0
-                          files[path] = size
-                  return files
-              except Exception:
-                  return {}
-
-          src = get_lsf(src_remote)
-          dst = get_lsf(dst_remote)
-          only_src = {p: s for p, s in src.items() if p not in dst}
-
-          # 按大小降序排列
-          sorted_missing = sorted(only_src.items(), key=lambda x: x[1], reverse=True)
-
-          # 取前 5 个大文件 + 3 个小文件（从末尾取）
-          samples = []
-          for p, s in sorted_missing[:5]:
-              samples.append(p)
-          for p, s in sorted_missing[-3:]:
-              samples.append(p)
-
-          for p in samples:
-              print(p)
-          PYEOF
-
-          SAMPLE_COUNT=$(wc -l < "$SAMPLE_FILE" | tr -d ' ')
-          echo "选取 $SAMPLE_COUNT 个样本文件进行同步测试"
-          echo ""
-
-          # 定义测试用的 rclone 公共参数
-          RCLONE_TEST_FLAGS=(--retries 1 --low-level-retries 3 --timeout 5m --contimeout 30s --size-only)
-
-          # base64URL 编码函数
-          b64url_encode() {
-            local input="$1"
-            printf '%s' "$input" | base64 | tr -d '=' | tr '+/' '-_'
-          }
-
-          # 逐个样本测试
-          while IFS= read -r sample_rel; do
-            [ -z "$sample_rel" ] && continue
-
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            echo "样本: $sample_rel"
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-            local_src="onedrive:backup/${sample_rel}"
-            local_dst="openlist:wopan176Crypt/backup/${sample_rel}"
-            src_size=$(rclone size --json "onedrive:backup/${sample_rel}" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null || echo 0)
-            echo "源文件大小: $src_size bytes"
-
-            # 方式 A: 直接 rclone copyto（原路径 + 原名）
-            echo "--- 方式 A: rclone copyto（原路径+原名）---"
-            # 先删除目标端可能存在的残留
-            rclone deletefile "$local_dst" 2>/dev/null || true
-            sleep 1
-            rclone copyto "$local_src" "$local_dst" "${RCLONE_TEST_FLAGS[@]}" 2>&1 | head -20
-            rc_a=$?
-            # 验证
-            dst_size_a=$(rclone size --json "$local_dst" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null || echo 0)
-            if [ "$dst_size_a" -gt 0 ] && [ "$dst_size_a" = "$src_size" ]; then
-              echo ">>> 方式 A: ✅ 成功 (dst_size=$dst_size_a)"
-              rclone deletefile "$local_dst" 2>/dev/null || true
-              continue
-            else
-              echo ">>> 方式 A: ❌ 失败 (rc=$rc_a, dst_size=$dst_size_a, expected=$src_size)"
-            fi
-            rclone deletefile "$local_dst" 2>/dev/null || true
-            sleep 1
-
-            # 方式 B: rclone copy（目录级别，非 copyto）
-            echo "--- 方式 B: rclone copy（目录级别）---"
-            src_dir=$(dirname "$local_src")
-            dst_dir=$(dirname "$local_dst")
-            src_fname=$(basename "$sample_rel")
-            rclone copy "$src_dir" "$dst_dir" --include "$src_fname" "${RCLONE_TEST_FLAGS[@]}" 2>&1 | head -20
-            rc_b=$?
-            dst_size_b=$(rclone size --json "$local_dst" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null || echo 0)
-            if [ "$dst_size_b" -gt 0 ] && [ "$dst_size_b" = "$src_size" ]; then
-              echo ">>> 方式 B: ✅ 成功 (dst_size=$dst_size_b)"
-              rclone deletefile "$local_dst" 2>/dev/null || true
-              continue
-            else
-              echo ">>> 方式 B: ❌ 失败 (rc=$rc_b, dst_size=$dst_size_b)"
-            fi
-            rclone deletefile "$local_dst" 2>/dev/null || true
-            sleep 1
-
-            # 方式 C: 刷新缓存后再 rclone copyto
-            echo "--- 方式 C: 刷新 OpenList 缓存后 rclone copyto ---"
-            if [ -n "$OL_TOKEN" ]; then
-              ol_path="/wopan176Crypt/backup/$(dirname "$sample_rel")"
-              curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh" \
-                -H "Authorization: $OL_TOKEN" \
-                -H "Content-Type: application/json" \
-                -d "{\"path\":\"$ol_path\",\"recursive\":false}" >/dev/null 2>&1 || true
-              sleep 5
-            fi
-            rclone copyto "$local_src" "$local_dst" "${RCLONE_TEST_FLAGS[@]}" 2>&1 | head -20
-            rc_c=$?
-            dst_size_c=$(rclone size --json "$local_dst" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null || echo 0)
-            if [ "$dst_size_c" -gt 0 ] && [ "$dst_size_c" = "$src_size" ]; then
-              echo ">>> 方式 C: ✅ 成功 (dst_size=$dst_size_c)"
-              rclone deletefile "$local_dst" 2>/dev/null || true
-              continue
-            else
-              echo ">>> 方式 C: ❌ 失败 (rc=$rc_c, dst_size=$dst_size_c)"
-            fi
-            rclone deletefile "$local_dst" 2>/dev/null || true
-            sleep 1
-
-            # 方式 D: OpenList API 预创建目录 + rclone copyto
-            echo "--- 方式 D: OpenList API 预创建目录 + rclone copyto ---"
-            if [ -n "$OL_TOKEN" ]; then
-              ol_dst_dir="/wopan176Crypt/backup/$(dirname "$sample_rel")"
-              curl -s -X POST "http://127.0.0.1:5244/api/fs/mkdir" \
-                -H "Authorization: $OL_TOKEN" \
-                -H "Content-Type: application/json" \
-                -d "$(jq -n --arg p "$ol_dst_dir" '{path:$p}')" >/dev/null 2>&1 || true
-              sleep 2
-            fi
-            rclone copyto "$local_src" "$local_dst" "${RCLONE_TEST_FLAGS[@]}" 2>&1 | head -20
-            rc_d=$?
-            dst_size_d=$(rclone size --json "$local_dst" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null || echo 0)
-            if [ "$dst_size_d" -gt 0 ] && [ "$dst_size_d" = "$src_size" ]; then
-              echo ">>> 方式 D: ✅ 成功 (dst_size=$dst_size_d)"
-              rclone deletefile "$local_dst" 2>/dev/null || true
-              continue
-            else
-              echo ">>> 方式 D: ❌ 失败 (rc=$rc_d, dst_size=$dst_size_d)"
-            fi
-            rclone deletefile "$local_dst" 2>/dev/null || true
-            sleep 1
-
-            # 方式 E: base64URL 编码目录名 + rclone copyto
-            echo "--- 方式 E: base64URL 编码目录名 + rclone copyto ---"
-            sample_dir=$(dirname "$sample_rel")
-            sample_fname=$(basename "$sample_rel")
-            b64_dir=$(b64url_encode "$sample_dir")
-            alt_dst_e="openlist:wopan176Crypt/backup/${b64_dir}/${sample_fname}"
-            echo "  编码目录: $sample_dir → $b64_dir"
-            rclone copyto "$local_src" "$alt_dst_e" "${RCLONE_TEST_FLAGS[@]}" 2>&1 | head -20
-            rc_e=$?
-            dst_size_e=$(rclone size --json "$alt_dst_e" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null || echo 0)
-            if [ "$dst_size_e" -gt 0 ] && [ "$dst_size_e" = "$src_size" ]; then
-              echo ">>> 方式 E: ✅ 成功 (dst_size=$dst_size_e)"
-              rclone deletefile "$alt_dst_e" 2>/dev/null || true
-              continue
-            else
-              echo ">>> 方式 E: ❌ 失败 (rc=$rc_e, dst_size=$dst_size_e)"
-            fi
-            rclone deletefile "$alt_dst_e" 2>/dev/null || true
-            sleep 1
-
-            # 方式 F: base64URL 编码文件名 + rclone copyto
-            echo "--- 方式 F: base64URL 编码文件名 + rclone copyto ---"
-            sample_fname_noext="${sample_fname%.*}"
-            sample_ext="${sample_fname##*.}"
-            [ "$sample_fname_noext" = "$sample_fname" ] && sample_ext=""
-            b64_fname=$(b64url_encode "$sample_fname_noext")
-            if [ -n "$sample_ext" ]; then
-              alt_fname="${b64_fname}.${sample_ext}"
-            else
-              alt_fname="${b64_fname}"
-            fi
-            alt_dst_f="openlist:wopan176Crypt/backup/${sample_dir}/${alt_fname}"
-            echo "  编码文件名: $sample_fname → $alt_fname"
-            rclone copyto "$local_src" "$alt_dst_f" "${RCLONE_TEST_FLAGS[@]}" 2>&1 | head -20
-            rc_f=$?
-            dst_size_f=$(rclone size --json "$alt_dst_f" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null || echo 0)
-            if [ "$dst_size_f" -gt 0 ] && [ "$dst_size_f" = "$src_size" ]; then
-              echo ">>> 方式 F: ✅ 成功 (dst_size=$dst_size_f)"
-              rclone deletefile "$alt_dst_f" 2>/dev/null || true
-              continue
-            else
-              echo ">>> 方式 F: ❌ 失败 (rc=$rc_f, dst_size=$dst_size_f)"
-            fi
-            rclone deletefile "$alt_dst_f" 2>/dev/null || true
-            sleep 1
-
-            # 方式 G: 下载到本地再上传
-            echo "--- 方式 G: 下载到本地再上传 ---"
-            tmp_local="/tmp/_sync_test_$(date +%s)_$$"
-            mkdir -p "$tmp_local"
-            rclone copyto "$local_src" "$tmp_local/$sample_fname" --retries 1 --timeout 5m 2>&1 | head -10
-            rc_g1=$?
-            if [ "$rc_g1" -eq 0 ] && [ -f "$tmp_local/$sample_fname" ]; then
-              local_size=$(wc -c < "$tmp_local/$sample_fname" | tr -d ' ')
-              echo "  本地下载成功: $local_size bytes"
-              rclone copyto "$tmp_local/$sample_fname" "$local_dst" "${RCLONE_TEST_FLAGS[@]}" 2>&1 | head -20
-              rc_g2=$?
-              dst_size_g=$(rclone size --json "$local_dst" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null || echo 0)
-              if [ "$dst_size_g" -gt 0 ] && [ "$dst_size_g" = "$src_size" ]; then
-                echo ">>> 方式 G: ✅ 成功 (dst_size=$dst_size_g)"
-                rclone deletefile "$local_dst" 2>/dev/null || true
-              else
-                echo ">>> 方式 G: ❌ 上传失败 (rc=$rc_g2, dst_size=$dst_size_g)"
-                rclone deletefile "$local_dst" 2>/dev/null || true
-              fi
-            else
-              echo ">>> 方式 G: ❌ 下载失败 (rc=$rc_g1)"
-            fi
-            rm -rf "$tmp_local"
-            sleep 1
-
-            echo ""
-            echo "  ⚠️ 所有方式均失败，文件可能需要特殊处理"
-            echo ""
-
-          done < "$SAMPLE_FILE"
-          rm -f "$SAMPLE_FILE"
-
-          echo ""
-          echo "=========================================="
-          echo "  同步测试完成"
           echo "=========================================="
 
       # ===== 加载函数库 =====
