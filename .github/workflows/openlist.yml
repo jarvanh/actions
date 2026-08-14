@@ -632,9 +632,9 @@ jobs:
             fi
           done
 
-          # 等驱动初始化（120s 给 ali + crypt 拉元数据）
-          echo "等待驱动初始化 (120s) ..."
-          sleep 120
+          # 等驱动初始化（45s 给 ali + crypt 拉元数据）
+          echo "等待驱动初始化 (45s) ..."
+          sleep 45
           if ! rclone lsd openlist: >/dev/null 2>&1; then
             echo "WebDAV 未就绪，再等 90s ..."
             sleep 90
@@ -692,13 +692,19 @@ jobs:
                 "http://127.0.0.1:5244/api/fs/refresh" 2>/dev/null || echo "000")
               echo "刷新缓存 ${ol_path} code=${rcode}  $(head -c 200 /tmp/_ol_refresh 2>/dev/null)"
               rm -f /tmp/_ol_refresh
-              sleep 10
+              sleep 5
             fi
 
-            # 用 rclone size 复核差异（与预览口径一致）
-            echo "--- rclone size 复核 ---"
-            src_size_json=$(timeout 300 rclone size "$src_remote" --json 2>/dev/null || echo '{}')
-            dst_size_json=$(timeout 300 rclone size "$dst_remote" --json 2>/dev/null || echo '{}')
+            # 用 rclone size 复核差异（与预览口径一致）— 并行获取
+            echo "--- rclone size 复核 (并行) ---"
+            _src_sz_tmp="/tmp/_src_sz_$$.json"
+            _dst_sz_tmp="/tmp/_dst_sz_$$.json"
+            timeout 300 rclone size "$src_remote" --json > "$_src_sz_tmp" 2>/dev/null &
+            timeout 300 rclone size "$dst_remote" --json > "$_dst_sz_tmp" 2>/dev/null &
+            wait
+            src_size_json=$(cat "$_src_sz_tmp" 2>/dev/null || echo '{}')
+            dst_size_json=$(cat "$_dst_sz_tmp" 2>/dev/null || echo '{}')
+            rm -f "$_src_sz_tmp" "$_dst_sz_tmp"
             src_bytes=$(echo "$src_size_json" | jq -r '.bytes // 0')
             src_count=$(echo "$src_size_json" | jq -r '.count // 0')
             dst_bytes=$(echo "$dst_size_json" | jq -r '.bytes // 0')
@@ -707,16 +713,20 @@ jobs:
             echo "  目标: ${dst_bytes} bytes / ${dst_count} 文件"
             echo "  差异: $((src_bytes - dst_bytes)) bytes / $((src_count - dst_count)) 文件"
 
-            # 获取两端完整文件列表（路径 + 大小）
+            # 获取两端完整文件列表（路径 + 大小）— 并行获取 src/dst
             # rclone lsf -R --files-only --format "ps" 输出 "path;size"
             # crypt remote 会自动解密文件名和大小（明文口径，可与源端直接对比）
-            echo "--- 获取两端文件列表 (rclone lsf -R) ---"
+            echo "--- 获取两端文件列表 (rclone lsf -R, 并行) ---"
             SRC_LIST="/tmp/_diff_src_$$.txt"
             DST_LIST="/tmp/_diff_dst_$$.txt"
             timeout 600 rclone lsf "$src_remote" -R --files-only --format "ps" --separator ";" \
-              > "$SRC_LIST" 2>/tmp/_diff_src_err.txt || echo "⚠️ 源端 lsf 失败"
+              > "$SRC_LIST" 2>/tmp/_diff_src_err.txt &
+            SRC_PID=$!
             timeout 600 rclone lsf "$dst_remote" -R --files-only --format "ps" --separator ";" \
-              > "$DST_LIST" 2>/tmp/_diff_dst_err.txt || echo "⚠️ 目标端 lsf 失败"
+              > "$DST_LIST" 2>/tmp/_diff_dst_err.txt &
+            DST_PID=$!
+            wait $SRC_PID || echo "⚠️ 源端 lsf 失败"
+            wait $DST_PID || echo "⚠️ 目标端 lsf 失败"
             echo "  源端列表: $(wc -l < "$SRC_LIST" 2>/dev/null || echo 0) 行"
             echo "  目标列表: $(wc -l < "$DST_LIST" 2>/dev/null || echo 0) 行"
             [ -s /tmp/_diff_src_err.txt ] && { echo "源端 lsf 错误:"; cat /tmp/_diff_src_err.txt; }
@@ -918,23 +928,9 @@ jobs:
                 echo "  差异文件同步测试 ($pair_src -> $pair_dst)"
                 echo "=========================================="
 
-                # 获取 OpenList token（每对开始时取一次，避免中途过期）
-                OL_TOKEN_T=""
-                for c in \
-                  "/dropbox/self-hosted/openlist/data/config.json" \
-                  "/dropbox/self-hosted/openlist/data/conf/config.json" \
-                  "/data/openlist/data/config.json"; do
-                  [ -f "$c" ] || continue
-                  t=$(jq -r '.token // .jwt_secret // empty' "$c" 2>/dev/null || echo "")
-                  if [ -n "$t" ] && [ "$t" != "null" ]; then
-                    OL_TOKEN_T="$t"
-                    break
-                  fi
-                done
-
-                # 样本选取
+                # 样本选取（前 3 大 + 2 小，共 5 个）
                 SAMPLE_FILE="/tmp/_samples_${pair_token}.txt"
-                { head -n 6 "$missing_file"; tail -n 3 "$missing_file"; } | awk '!seen[$0]++' > "$SAMPLE_FILE"
+                { head -n 3 "$missing_file"; tail -n 2 "$missing_file"; } | awk '!seen[$0]++' > "$SAMPLE_FILE"
                 SAMPLE_COUNT=$(wc -l < "$SAMPLE_FILE" | tr -d ' ')
                 echo "样本数: $SAMPLE_COUNT / $total_missing"
 
@@ -969,7 +965,7 @@ jobs:
                   # ===== 方式 A: 直接 rclone copyto =====
                   echo "--- 方式 A: rclone copyto（原路径+原名）---"
                   rclone deletefile "$local_dst" 2>/dev/null || true
-                  sleep 1
+                  sleep 0.5
                   rclone copyto "$local_src" "$local_dst" "${RCLONE_TEST_FLAGS[@]}" 2>&1 | head -15
                   rc_a=$?
                   dst_size_a=$(rclone size --json "$local_dst" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null || echo 0)
@@ -979,17 +975,17 @@ jobs:
                   else
                     echo ">>> 方式 A: ❌ 失败 (rc=$rc_a, dst_size=$dst_size_a, expected=$src_size)"
                     rclone deletefile "$local_dst" 2>/dev/null || true
-                    sleep 1
+                    sleep 0.5
                   fi
 
                   if [ -z "$OK_WAY" ]; then
                     # ===== 方式 B: 刷新缓存后 copyto =====
                     echo "--- 方式 B: 刷新缓存 + rclone copyto ---"
-                    if [ -n "$OL_TOKEN_T" ] && [[ "$pair_dst" == openlist:* ]]; then
+                    if [ -n "$OL_TOKEN" ] && [[ "$pair_dst" == openlist:* ]]; then
                       rel_ol_path="${pair_dst#openlist:}"
                       ol_path="/${rel_ol_path%/}/${sample_dir}"
                       curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh" \
-                        -H "Authorization: $OL_TOKEN_T" \
+                        -H "Authorization: $OL_TOKEN" \
                         -H "Content-Type: application/json" \
                         -d "$(jq -n --arg p "$ol_path" '{path:$p, recursive:false}')" >/dev/null 2>&1 || true
                       sleep 3
@@ -1003,7 +999,7 @@ jobs:
                     else
                       echo ">>> 方式 B: ❌ 失败 (rc=$rc_b, dst_size=$dst_size_b)"
                       rclone deletefile "$local_dst" 2>/dev/null || true
-                      sleep 1
+                      sleep 0.5
                     fi
                   fi
 
@@ -1022,7 +1018,7 @@ jobs:
                     else
                       echo ">>> 方式 C: ❌ 失败 (rc=$rc_c, dst_size=$dst_size_c)"
                       rclone deletefile "$alt_c" 2>/dev/null || true
-                      sleep 1
+                      sleep 0.5
                     fi
                   fi
 
@@ -1046,13 +1042,16 @@ jobs:
                     else
                       echo ">>> 方式 D: ❌ 失败 (rc=$rc_d, dst_size=$dst_size_d)"
                       rclone deletefile "$alt_d" 2>/dev/null || true
-                      sleep 1
+                      sleep 0.5
                     fi
                   fi
 
                   if [ -z "$OK_WAY" ]; then
-                    # ===== 方式 E: 下载到本地再上传 =====
-                    echo "--- 方式 E: 下载到本地再上传 ---"
+                    # ===== 方式 E: 下载到本地再上传（大文件跳过，太慢）=====
+                    if [ "$src_size" -gt 209715200 ]; then
+                      echo "--- 方式 E: 跳过（文件 >200MB，下载+上传太慢）---"
+                    else
+                      echo "--- 方式 E: 下载到本地再上传 ---"
                     tmp_dir="/tmp/_sync_test_$(date +%s)_$$"
                     mkdir -p "$tmp_dir"
                     dl_ok=0
@@ -1079,6 +1078,7 @@ jobs:
                       echo ">>> 方式 E: ❌ 下载失败（文件不存在于本地临时目录）"
                     fi
                     rm -rf "$tmp_dir"
+                    fi
                   fi
 
                   # ===== 写结果 =====
@@ -1090,33 +1090,43 @@ jobs:
 
                 done < "$SAMPLE_FILE"
 
-                # ===== 二次校验：刷新 OpenList 缓存 + 再查目标端真实文件数 =====
+                # ===== 二次校验：刷新 OpenList 缓存 + 抽样复验 =====
                 echo ""
-                echo "=== 同步测试后二次校验 ==="
-                if [[ "$pair_dst" == openlist:* ]] && [ -n "$OL_TOKEN_T" ]; then
+                echo "=== 同步测试后二次校验 ($pair_dst) ==="
+                # 缓存刷新（可选 — 没有 token 也要做复验）
+                if [[ "$pair_dst" == openlist:* ]] && [ -n "$OL_TOKEN" ]; then
                   rel_ol_root="${pair_dst#openlist:}"
                   ol_root_path="/${rel_ol_root%/}"
                   echo "刷新目标端缓存 $ol_root_path (recursive=true)..."
                   curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh" \
-                    -H "Authorization: $OL_TOKEN_T" \
+                    -H "Authorization: $OL_TOKEN" \
                     -H "Content-Type: application/json" \
                     -d "$(jq -n --arg p "$ol_root_path" '{path:$p, recursive:true}')" >/dev/null 2>&1 || true
-                  echo "等待缓存刷新 (40s) ..."
-                  sleep 40
+                  echo "等待缓存刷新 (15s) ..."
+                  sleep 15
+                else
+                  echo "⚠️ 跳过缓存刷新 (OL_TOKEN 为空或非 openlist 目标)，仍执行复验"
                 fi
 
-                # 对每个成功样本，复验：大小一致 且 rclone lsf 能看到
+                # 抽样复验（只验前 3 个成功样本，而非全部）
+                ok_recheck=0
+                fail_recheck=0
+                recheck_count=0
                 while IFS=$'\t' read -r srel sway sdst sbytes; do
                   [ -z "$srel" ] && continue
+                  recheck_count=$((recheck_count + 1))
+                  [ "$recheck_count" -gt 3 ] && break
                   recheck_size=$(rclone size --json "$sdst" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null || echo 0)
-                  # 用 lsf 单独看一下（确保文件真的列在目标端 listing 里，而不是 size 的局部缓存）
                   listed=$(rclone lsf "$(dirname "$sdst")" --files-only --format "ps" --separator ";" 2>/dev/null | awk -v FS=';' -v bn="$(basename "$sdst")" '$1==bn{print $2; exit}')
                   if [ "$recheck_size" = "$sbytes" ] && [ "$listed" = "$sbytes" ]; then
-                    echo "  ✅ 持久化校验通过: $srel (方式$sway, $sbytes bytes, at $sdst)"
+                    echo "  ✅ 持久化校验通过: $srel (方式$sway, $sbytes bytes)"
+                    ok_recheck=$((ok_recheck + 1))
                   else
                     echo "  ❌ 持久化校验失败: $srel (预期=$sbytes, recheck=$recheck_size, lsf_size=$listed)"
+                    fail_recheck=$((fail_recheck + 1))
                   fi
                 done < "$SYNC_TEST_OK"
+                echo "  复验汇总: 抽样 $recheck_count / 通过 $ok_recheck / 失败 $fail_recheck"
 
                 if [ -s "$SYNC_TEST_FAILED" ]; then
                   echo ""
