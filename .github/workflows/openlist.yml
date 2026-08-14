@@ -664,6 +664,7 @@ jobs:
           # 全局汇总
           rm -f /tmp/_diff_summary.txt
           DELAY_RECHECK_DONE=""
+          RESTART_RECHECK_DONE=""
 
           for pair in "${DIFF_PAIRS[@]}"; do
             # pair 格式: "src|dst|excludes_csv"
@@ -1175,6 +1176,106 @@ jobs:
                   elif [ "$delay_fail" -gt 0 ]; then
                     echo "  ⚠️ 部分延迟复验失败 → 某些文件可能未被后端持久化"
                   fi
+                fi
+
+                # ===== 容器重启复验：重启 OpenList 容器后检查文件是否真的被后端持久化 =====
+                # 这是确定性验证：如果重启后文件消失，说明 OpenList PUT 返回成功但后端未持久化
+                # 只在延迟复验有通过的情况下执行一次
+                if [ -z "$RESTART_RECHECK_DONE" ] && [ "${delay_ok:-0}" -gt 0 ]; then
+                  RESTART_RECHECK_DONE=1
+                  RECHECK_LIST="/tmp/_restart_recheck_${pair_token}.txt"
+                  cp "$SYNC_TEST_OK" "$RECHECK_LIST"
+
+                  echo ""
+                  echo "=== 容器重启复验（重启 OpenList 后重新检查）==="
+                  echo "  目的：验证文件是否被 wopan176 后端真正持久化"
+                  echo "  重启 OpenList 容器..."
+                  sudo docker restart openlist 2>&1 | head -3
+
+                  # 等待 HTTP 就绪
+                  echo "  等待 OpenList HTTP 就绪..."
+                  http_ok=0
+                  for i in $(seq 1 30); do
+                    if curl -sf http://127.0.0.1:5244 >/dev/null 2>&1; then
+                      http_ok=1
+                      echo "  HTTP 就绪 (${i}次)"
+                      break
+                    fi
+                    sleep 2
+                  done
+
+                  if [ "$http_ok" -eq 0 ]; then
+                    echo "  ❌ OpenList HTTP 60s 内未就绪，跳过容器重启复验"
+                  else
+                    # 重新获取 token（容器重启后可能变化）
+                    OL_TOKEN=""
+                    for c in \
+                      "/dropbox/self-hosted/openlist/data/config.json" \
+                      "/dropbox/self-hosted/openlist/data/conf/config.json" \
+                      "/data/openlist/data/config.json"; do
+                      [ -f "$c" ] || continue
+                      t=$(jq -r '.token // .jwt_secret // empty' "$c" 2>/dev/null || echo "")
+                      if [ -n "$t" ] && [ "$t" != "null" ]; then
+                        OL_TOKEN="$t"
+                        echo "  token: OK (来自 $c)"
+                        break
+                      fi
+                    done
+
+                    # 等待驱动初始化
+                    echo "  等待驱动初始化 (45s) ..."
+                    sleep 45
+
+                    # 刷新缓存
+                    if [[ "$pair_dst" == openlist:* ]] && [ -n "$OL_TOKEN" ]; then
+                      rel_ol_root="${pair_dst#openlist:}"
+                      ol_root_path="/${rel_ol_root%/}"
+                      echo "  刷新缓存 $ol_root_path ..."
+                      curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh" \
+                        -H "Authorization: $OL_TOKEN" \
+                        -H "Content-Type: application/json" \
+                        -d "$(jq -n --arg p "$ol_root_path" '{path:$p, recursive:true}')" >/dev/null 2>&1 || true
+                      sleep 15
+                    fi
+
+                    # 对延迟复验通过的样本再次检查
+                    restart_ok=0
+                    restart_fail=0
+                    restart_count=0
+                    while IFS=$'\t' read -r srel sway sdst sbytes; do
+                      [ -z "$srel" ] && continue
+                      restart_count=$((restart_count + 1))
+                      [ "$restart_count" -gt 3 ] && break
+                      restart_size=$(rclone size --json "$sdst" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null || echo 0)
+                      restart_listed=$(rclone lsf "$(dirname "$sdst")" --files-only --format "ps" --separator ";" 2>/dev/null | awk -v FS=';' -v bn="$(basename "$sdst")" '$1==bn{print $2; exit}')
+                      if [ "$restart_size" = "$sbytes" ] && [ "$restart_listed" = "$sbytes" ]; then
+                        echo "  ✅ 重启复验通过: $srel (方式$sway, $sbytes bytes)"
+                        restart_ok=$((restart_ok + 1))
+                      else
+                        echo "  ❌ 重启复验失败: $srel (预期=$sbytes, size=$restart_size, lsf=$restart_listed)"
+                        echo "     → 文件未被后端持久化：PUT 返回成功但文件不在 wopan176 后端"
+                        restart_fail=$((restart_fail + 1))
+                      fi
+                    done < "$RECHECK_LIST"
+                    echo "  重启复验汇总: 抽样 $restart_count / 通过 $restart_ok / 失败 $restart_fail"
+
+                    echo ""
+                    echo "  ===== 最终诊断结论 ====="
+                    if [ "$restart_fail" -gt 0 ] && [ "$restart_ok" -eq 0 ]; then
+                      echo "  🔴 即时复验 ✅ → 延迟复验 ✅ → 重启复验 ❌（全部失败）"
+                      echo "     根因：OpenList PUT 返回成功，但文件未被 wopan176 后端持久化"
+                      echo "     OpenList 的 /api/fs/refresh 在同一容器生命周期内不会真正从后端重新拉列表"
+                      echo "     只有容器重启后才暴露真实状态：文件从未写入后端"
+                      echo "     这就是'永远同步不完'的根本原因"
+                    elif [ "$restart_fail" -gt 0 ]; then
+                      echo "  🟡 即时复验 ✅ → 延迟复验 ✅ → 重启复验 部分失败"
+                      echo "     部分文件未被后端持久化"
+                    else
+                      echo "  🟢 即时复验 ✅ → 延迟复验 ✅ → 重启复验 ✅（全部通过）"
+                      echo "     文件已被后端持久化，'永远同步不完'的原因在别处（可能是 rclone --size-only 缓存问题）"
+                    fi
+                  fi
+                  rm -f "$RECHECK_LIST"
                 fi
 
                 if [ -s "$SYNC_TEST_FAILED" ]; then
