@@ -556,6 +556,20 @@ sync_with_logging() {
       fi
     fi
 
+    # ===== 名长诊断初始化（wopan176Crypt）=====
+    # 验证"密文文件名超长"假设: cryptencode 本地计算缺失文件的密文名长（无网络
+    # 写操作），与后端实际已接受的最长密文名（裸路径 lsf 统计 basename）对比。
+    # 文件名加密一直开启 → 后端只见 base32 密文名（≈(原名+40)×1.6），
+    # 中文名约 40 字即顶到 255B —— 正好解释"固定一批长名文件永远传不上"
+    local _NAMELEN_RAW_MAX=0
+    local _NAMELEN_OVER_255=0
+    local _NAMELEN_OVER_RAWMAX=0
+    if [[ "$dest_path" == openlist:wopan176Crypt/* ]] && [ -s "$missing_list" ] && _ensure_crypt_config "$dest_path"; then
+      _NAMELEN_RAW_MAX=$(timeout 600 rclone lsf "${dest_path/wopan176Crypt/wopan176}" -R --files-only 2>/dev/null \
+        | awk -F/ '{ n=length($NF); if (n>m) m=n } END { print m+0 }')
+      echo "名长诊断已启用: crypt=${_CRYPT_REMOTE}, 后端已接受最长密文名 ${_NAMELEN_RAW_MAX} 字节" | tee -a "$LOG_FILENAME"
+    fi
+
     if [ -s "$missing_list" ]; then
       # 单次修复数量上限（防止首次部署时积压大量缺失文件导致单次运行过久）
       local fix_max="${OPENLIST_MISSING_FIX_MAX:-200}"
@@ -598,6 +612,26 @@ sync_with_logging() {
 
         echo "修复中: ${failed_line} (${file_size})" | tee -a "$LOG_FILENAME"
 
+        # 名长诊断: cryptencode 本地计算该文件密文名长（纯本地，不上传）
+        if [ -n "${_CRYPT_ONTHEFLY:-}" ]; then
+          local _nl_fn _nl_enc _nl_enc_len _nl_orig_len _nl_flag=""
+          _nl_fn="$(basename -- "$failed_line")"
+          _nl_enc=$(rclone cryptencode -- "$_CRYPT_ONTHEFLY" "$_nl_fn" 2>/dev/null || true)
+          if [ -n "$_nl_enc" ]; then
+            _nl_enc_len=$(printf '%s' "$_nl_enc" | wc -c | tr -d ' ')
+            _nl_orig_len=$(printf '%s' "$_nl_fn" | wc -c | tr -d ' ')
+            if [ "$_nl_enc_len" -gt 255 ] 2>/dev/null; then
+              _nl_flag=" 🔴 >255B"
+              _NAMELEN_OVER_255=$((_NAMELEN_OVER_255 + 1))
+            fi
+            if [ "${_NAMELEN_RAW_MAX:-0}" -gt 0 ] && [ "$_nl_enc_len" -gt "$_NAMELEN_RAW_MAX" ] 2>/dev/null; then
+              _nl_flag="${_nl_flag} 🔴 >后端已接受最长(${_NAMELEN_RAW_MAX}B)"
+              _NAMELEN_OVER_RAWMAX=$((_NAMELEN_OVER_RAWMAX + 1))
+            fi
+            echo "  📏 名长: 原名 ${_nl_orig_len}B → 密文名 ${_nl_enc_len}B${_nl_flag}" | tee -a "$LOG_FILENAME"
+          fi
+        fi
+
         try_fix_failed_file "$source_path" "$dest_path" "$task_name" "$failed_line" "$fix_log" || true
 
         if [ "$TRY_FIX_STATUS" = "success" ]; then
@@ -614,6 +648,16 @@ sync_with_logging() {
           echo "${failed_line}|${file_size}|${TRY_FIX_MESSAGE}" >> "$fail_list"
         fi
       done < "$missing_list"
+
+      # 名长诊断汇总（证实/证伪"密文文件名超长"假设的关键数据）
+      if [ -n "${_CRYPT_ONTHEFLY:-}" ]; then
+        echo "名长诊断汇总: 密文名>255B 共 ${_NAMELEN_OVER_255} 个 / 超后端已接受最长(${_NAMELEN_RAW_MAX}B) 共 ${_NAMELEN_OVER_RAWMAX} 个" | tee -a "$LOG_FILENAME"
+        if [ "${_NAMELEN_OVER_RAWMAX:-0}" -gt 0 ]; then
+          echo "  → 长度假设成立: 缺失文件密文名超过后端实际接受上限，将由 m16 短哈希名兜底落盘" | tee -a "$LOG_FILENAME"
+        elif [ "${_NAMELEN_OVER_255:-0}" -eq 0 ]; then
+          echo "  → 长度假设不成立: 缺失文件密文名均未超限，根因另有其因（看 m15 直写的真实报错）" | tee -a "$LOG_FILENAME"
+        fi
+      fi
     fi
     rm -f "$missing_list"
   fi

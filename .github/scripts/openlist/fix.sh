@@ -77,6 +77,38 @@ _get_crypt_config() {
   echo "${pass} ${fne} ${dne} ${underlying}"
 }
 
+# 确保 crypt 配置已缓存到全局（m15 直写与名长诊断共用，每任务只拉取一次）
+# 设置全局: _CRYPT_MOUNT/_CRYPT_PASS/_CRYPT_FNE/_CRYPT_DNE/_CRYPT_REMOTE/_CRYPT_ONTHEFLY
+# _CRYPT_ONTHEFLY 形如 ":crypt,remote=\"openlist:wopan176\",...password=\"...\":"
+# 用法: _ensure_crypt_config <dest_path 如 openlist:wopan176Crypt/backup>
+# 返回: 0=配置就绪, 1=非 Crypt 目标或获取失败（失败时 _CRYPT_ONTHEFLY 置空）
+_ensure_crypt_config() {
+  local dest_path="$1"
+  [[ "$dest_path" == openlist:*Crypt/* ]] || return 1
+  local rel="${dest_path#openlist:}"
+  local mount="/${rel%%/*}"
+  # 缓存按挂载点键控: 多个 Crypt 目标（wopan176/baidupan/aliyundrive）并存时
+  # 不能复用彼此的配置（否则 m15 会把密文写进错误的后端）
+  if [ -n "${_CRYPT_ONTHEFLY:-}" ] && [ "${_CRYPT_MOUNT:-}" = "$mount" ]; then
+    return 0
+  fi
+  local conf
+  conf=$(_get_crypt_config "$mount") || { _CRYPT_ONTHEFLY=""; return 1; }
+  local pass fne dne remote
+  read -r pass fne dne remote <<< "$conf"
+  if [ -z "$pass" ] || [ -z "$remote" ]; then
+    _CRYPT_ONTHEFLY=""
+    return 1
+  fi
+  _CRYPT_MOUNT="$mount"
+  _CRYPT_PASS="$pass"
+  _CRYPT_FNE="$fne"
+  _CRYPT_DNE="$dne"
+  _CRYPT_REMOTE="$remote"
+  _CRYPT_ONTHEFLY=":crypt,remote=\"${remote}\",filename_encryption=${fne:-standard},directory_name_encryption=${dne:-true},password=\"${pass}\":"
+  return 0
+}
+
 # 方法假成功黑名单: <文件相对路径> -> "m1 m3"（空格分隔的方法 ID 集合）
 # 由 sync.sh 修复管线每轮从 marker 加载/重建，并在轮内即时检测时追加
 declare -A FIX_METHOD_BLACKLIST=()
@@ -363,20 +395,13 @@ try_fix_failed_file() {
     log_fix "$fix_log" "方法 15: 跳过（上一轮已判定该方法假成功）"
   else
   log_fix "$fix_log" "方法 15: rclone crypt 直写裸存储"
+  local _c_rel_root="" _c_rel _c_dst
   local _c_mount_rel="${dest_path#openlist:}"
-  local _c_mount="/${_c_mount_rel%%/*}"
-  local _c_rel_root=""
   [[ "$_c_mount_rel" == */* ]] && _c_rel_root="${_c_mount_rel#*/}"
-  local _c_pass="" _c_fne="standard" _c_dne="true" _c_remote=""
-  local _cconf
-  _cconf=$(_get_crypt_config "$_c_mount") || true
-  if [ -n "$_cconf" ]; then
-    read -r _c_pass _c_fne _c_dne _c_remote <<< "$_cconf"
-  fi
-  if [ -n "$_c_pass" ] && [ -n "$_c_remote" ]; then
-    local _c_rel="${_c_rel_root:+${_c_rel_root}/}${failed_file_rel}"
-    local _c_dst=":crypt,remote=\"${_c_remote}\",filename_encryption=${_c_fne:-standard},directory_name_encryption=${_c_dne:-true},password=\"${_c_pass}\":${_c_rel}"
-    log_fix "$fix_log" "  crypt 直写: ${_c_remote} ← ${_c_rel}（加密名由 rclone 本地生成）"
+  if _ensure_crypt_config "$dest_path"; then
+    _c_rel="${_c_rel_root:+${_c_rel_root}/}${failed_file_rel}"
+    _c_dst="${_CRYPT_ONTHEFLY}${_c_rel}"
+    log_fix "$fix_log" "  crypt 直写: ${_CRYPT_REMOTE} ← ${_c_rel}（加密名由 rclone 本地生成）"
     rclone copyto "$local_file" "$_c_dst" --retries 1 --low-level-retries 3 --timeout 15m --contimeout 30s 2>&1 | \
       while IFS= read -r line; do log_fix "$fix_log" "m15: $line"; done
     local m15_status=${PIPESTATUS[0]}
@@ -384,7 +409,7 @@ try_fix_failed_file() {
       log_fix "$fix_log" "方法 15 成功"
       TRY_FIX_METHOD_ID="m15"
       TRY_FIX_STATUS="success"
-      TRY_FIX_METHOD="rclone crypt 直写（:crypt: → ${_c_remote}，原名原路径）"
+      TRY_FIX_METHOD="rclone crypt 直写（:crypt: → ${_CRYPT_REMOTE}，原名原路径）"
       TRY_FIX_ALTERNATIVE="$failed_file_rel"
       TRY_FIX_RESTORE="无需还原（文件已以原名原路径存在，经 rclone crypt 直写裸存储）"
       rm -rf "$temp_dir" 2>/dev/null || true
