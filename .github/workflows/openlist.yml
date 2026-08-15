@@ -39,6 +39,11 @@ on:
         required: false
         type: string
         default: "all"
+      restore_to_source:
+        description: "灾难恢复: 目标端 → 源端（普通文件批量拷回 + 修复文件从替代形态解码回源端原路径，目标端不动）"
+        required: false
+        type: boolean
+        default: false
       skip_preview:
         description: "跳过任务预览通知（直接开始同步）"
         required: false
@@ -188,11 +193,28 @@ jobs:
       #   原后回传原路径；成功后清理目标端替代文件并从 marker 移除条目。
       # 完成后发送 Telegram 汇总。restore_task 指定任务名（backup/task0-5）或 all。
       - name: "Restore: 一键还原修复文件"
-        if: ${{ inputs.restore_fixed == true }}
+        if: ${{ inputs.restore_fixed == true && inputs.restore_to_source != true }}
         timeout-minutes: 240
         run: |
           source /tmp/load_all.sh
           restore_fixed_files "${{ inputs.restore_task || 'all' }}"
+
+      # ===== 灾难恢复: 目标端 → 源端 =====
+      # 修复文件以替代形态存在正是因为原形态无法在该后端持久化，因此恢复
+      # 不经过"目标端改回原名"，一步直达源端:
+      #   1. 普通文件（crypt 层透明）rclone copy 目标 → 源端，--size-only 幂等
+      #   2. 修复文件: 排除出批量拷贝，逐条下载替代形态 → 本地解码（解压/
+      #      合卷/解 base64/改名类直传）→ 以原路径原文件名上传源端，
+      #      按 marker size_bytes 校验
+      # 全程不删改目标端，可重复执行补齐失败条目。
+      # 依赖 marker（与源端同在 OneDrive；极端情况 OneDrive 整体丢失时
+      # 需外置的 marker 备份才能映射修复条目）。
+      - name: "Restore: 灾难恢复 目标端→源端"
+        if: ${{ inputs.restore_to_source == true }}
+        timeout-minutes: 240
+        run: |
+          source /tmp/load_all.sh
+          restore_source_from_target "${{ inputs.restore_task || 'all' }}"
 
       # ===== 调试: 单任务测试修复管线 =====
       # 用真实生产代码路径（copy_task → sync_with_logging）跑单个 wopan176Crypt 任务，
@@ -200,7 +222,7 @@ jobs:
       # 与正式流程的区别: 只跑单任务、跳过任务预览、不检查 --1d-skip 标记、
       # 跳过结尾 5h sleep，并用 OPENLIST_MISSING_FIX_MAX 限制修复数量快速得到结果。
       - name: "Debug: 单任务测试修复管线"
-        if: ${{ inputs.fix_test_mode == true && inputs.restore_fixed != true }}
+        if: ${{ inputs.fix_test_mode == true && inputs.restore_fixed != true && inputs.restore_to_source != true }}
         timeout-minutes: 120
         run: |
           source /tmp/load_all.sh
@@ -268,7 +290,7 @@ jobs:
           echo "=== 修复管线测试完成 (SYNC_FAILED=${SYNC_FAILED}) ==="
 
       - name: Initialize sync
-        if: ${{ inputs.fix_test_mode != true && inputs.restore_fixed != true }}
+        if: ${{ inputs.fix_test_mode != true && inputs.restore_fixed != true && inputs.restore_to_source != true }}
         run: |
           source /tmp/load_all.sh
           PROCESSED_FILES_LOG="processed_videos.log"
@@ -297,7 +319,7 @@ jobs:
       # ===== 所有同步任务定义 + 预览 + 执行 =====
       # 增减任务只需编辑下方 run_all_tasks 函数体；rclone 参数编辑下方 RCLONE_*_FLAGS 数组。
       - name: Preview and sync all tasks
-        if: ${{ inputs.fix_test_mode != true && inputs.restore_fixed != true }}
+        if: ${{ inputs.fix_test_mode != true && inputs.restore_fixed != true && inputs.restore_to_source != true }}
         run: |
           source /tmp/load_all.sh
 
@@ -434,7 +456,7 @@ jobs:
           echo "=== 所有任务同步完成 ==="
 
       - name: Finalize and cleanup
-        if: ${{ inputs.fix_test_mode != true && inputs.restore_fixed != true }}
+        if: ${{ inputs.fix_test_mode != true && inputs.restore_fixed != true && inputs.restore_to_source != true }}
         run: |
           source /tmp/load_all.sh
           actual_entries=0
@@ -463,7 +485,7 @@ jobs:
           echo "所有同步任务完成！"
 
       - name: sleep
-        if: ${{ inputs.fix_test_mode != true && inputs.restore_fixed != true }}
+        if: ${{ inputs.fix_test_mode != true && inputs.restore_fixed != true && inputs.restore_to_source != true }}
         run: |
           sleep 300m
           sudo docker stop openlist
