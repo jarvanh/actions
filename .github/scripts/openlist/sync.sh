@@ -9,6 +9,12 @@
 #     检测"上传成功但未持久化"的幽灵文件，重启容器还原真实列表）
 #   - 缺失文件修复（同步后 diff 源端/目标端，缺失文件送 try_fix_failed_file，
 #     不依赖任何错误码——假成功文件没有 ERROR 日志、退出码为 0，只能靠 diff 发现）
+#   - 假成功两层防护:
+#     A. 即时检测（_confirm_raw_persist）— 方法返回成功后对比 wopan176 裸路径
+#        密文计数，未增长即假成功，当场拉黑该方法并尝试下一种方式
+#     B. 失败记忆（FIX_METHOD_BLACKLIST + marker fix_blacklist）— 跨轮持久化
+#        每文件已判定假成功的方法，下一轮修复直接跳过；上轮已真实持久化的
+#        修复（替代路径仍存在）直接沿用，不再重复上传
 #   - object not found 错误处理
 #   - 结构化同步结果通知（含源/目标大小、差异文件列表、排除规则）
 #
@@ -431,6 +437,81 @@ sync_with_logging() {
     rm -f "$src_ls" "$dst_ls"
     sort -u "$missing_list" -o "$missing_list"
 
+    # ===== B: 失败记忆 — 比对上一轮修复记录（marker fixed_files）=====
+    # 缺失清单中曾在上一轮"修复成功"的文件:
+    #   - 替代路径在目标端仍存在 → 上轮修复真实持久化，直接沿用（跳过重复修复）
+    #   - 替代路径已消失（本轮容器为全新实例，crypt 列表真实）→ 上轮方法为
+    #     假成功，加入方法黑名单 FIX_METHOD_BLACKLIST，本轮修复直接跳过该方法
+    FIX_METHOD_BLACKLIST=()
+    if [ -s "$missing_list" ]; then
+      _load_marker_fixed_files "$source_path" "$dest_path" "$task_name"
+      # 直接加载 marker 中持久化的方法黑名单（仅保留本次缺失清单中的文件；
+      # 覆盖"上轮全部方法失败、无 fixed_files 记录"的场景）
+      if [ -n "${MARKER_FIX_BLACKLIST:-}" ] && [ "$MARKER_FIX_BLACKLIST" != "{}" ]; then
+        while IFS=$'\t' read -r bl_f bl_m; do
+          [ -z "$bl_f" ] && continue
+          grep -qxF "$bl_f" "$missing_list" || continue
+          FIX_METHOD_BLACKLIST["$bl_f"]="$bl_m"
+        done < <(echo "$MARKER_FIX_BLACKLIST" | jq -r 'to_entries[] | [.key, .value] | @tsv' 2>/dev/null)
+      fi
+      if [ "${MARKER_FIXED_COUNT:-0}" -gt 0 ] && [ "$MARKER_FIXED_FILES" != "[]" ]; then
+        local keep_list="/tmp/${task_name}_missing_keep_$$.txt"
+        : > "$keep_list"
+        while IFS= read -r mf; do
+          [ -z "$mf" ] && continue
+          # 同一轮内已修复过的文件（auto-split 子任务 → 最终完整同步），直接沿用
+          if [ -n "${FIXED_THIS_RUN[$mf]:-}" ]; then
+            echo "本轮已修复，跳过重复修复: ${mf} → ${FIXED_THIS_RUN[$mf]}" | tee -a "$LOG_FILENAME"
+            continue
+          fi
+          local prev_entry prev_alt prev_mid prev_method prev_restore prev_shuman prev_sbytes
+          prev_entry=$(echo "$MARKER_FIXED_FILES" | jq -c --arg f "$mf" '[.[] | select(.original == $f)] | .[0] // empty' 2>/dev/null)
+          if [ -n "$prev_entry" ]; then
+            prev_alt=$(echo "$prev_entry" | jq -r '.alternative // empty')
+            prev_mid=$(echo "$prev_entry" | jq -r '.method_id // empty')
+            if [ -n "$prev_alt" ] && rclone lsf "${dest_path}/$(dirname -- "$prev_alt")" --files-only 2>/dev/null | grep -qxF "$(basename -- "$prev_alt")"; then
+              # 替代路径仍存在 → 沿用上轮修复，不重复上传
+              prev_method=$(echo "$prev_entry" | jq -r '.method // "沿用上轮修复"')
+              prev_restore=$(echo "$prev_entry" | jq -r '.restore_hint // ""')
+              prev_shuman=$(echo "$prev_entry" | jq -r '.size_human // "未知"')
+              prev_sbytes=$(echo "$prev_entry" | jq -r '.size_bytes // 0')
+              echo "沿用上轮修复: ${mf} → ${prev_alt}（替代路径仍存在）" | tee -a "$LOG_FILENAME"
+              echo "${mf}|${prev_alt}|${prev_method}|${prev_restore}|${prev_shuman}|${prev_sbytes}|${prev_mid}" >> "$fix_list"
+              FIXED_THIS_RUN["$mf"]="$prev_alt"
+              continue
+            fi
+            if [ -n "$prev_mid" ]; then
+              echo "上轮方法 ${prev_mid} 判定假成功（替代路径已消失）: ${mf}" | tee -a "$LOG_FILENAME"
+              FIX_METHOD_BLACKLIST["$mf"]="$prev_mid"
+            fi
+          fi
+          echo "$mf" >> "$keep_list"
+        done < "$missing_list"
+        mv "$keep_list" "$missing_list"
+      fi
+    fi
+
+    # ===== A: 假成功即时检测初始化（仅 wopan176Crypt，方案 A）=====
+    # 每个方法返回成功后用 _confirm_raw_persist 对比 wopan176 裸路径密文数；
+    # _RAW_VERIFY_LAST 为运行基准（随真实落盘递增），budget 限制全量计数次数
+    _RAW_VERIFY_DEST=""
+    _RAW_VERIFY_DIR=""
+    _RAW_VERIFY_LAST=-1
+    _RAW_VERIFY_BUDGET=0
+    if [[ "$dest_path" == openlist:wopan176Crypt/* ]] && [ -s "$missing_list" ]; then
+      _RAW_VERIFY_DEST="$dest_path"
+      _RAW_VERIFY_DIR="${dest_path/wopan176Crypt/wopan176}"
+      _RAW_VERIFY_BUDGET="${OPENLIST_RAW_CHECK_BUDGET:-40}"
+      local _raw_base=0
+      if _raw_base=$(_raw_dir_count "$_RAW_VERIFY_DIR"); then
+        _RAW_VERIFY_LAST=$_raw_base
+        echo "raw 假成功即时检测已启用（基准密文数 ${_raw_base}，本轮校验预算 ${_RAW_VERIFY_BUDGET}）" | tee -a "$LOG_FILENAME"
+      else
+        _RAW_VERIFY_BUDGET=0
+        echo "⚠️ raw 基准计数失败，本轮禁用即时检测（退化为信任 rc，跨轮黑名单仍生效）" | tee -a "$LOG_FILENAME"
+      fi
+    fi
+
     if [ -s "$missing_list" ]; then
       # 单次修复数量上限（防止首次部署时积压大量缺失文件导致单次运行过久）
       local fix_max="${OPENLIST_MISSING_FIX_MAX:-200}"
@@ -467,7 +548,8 @@ sync_with_logging() {
         if [ "$TRY_FIX_STATUS" = "success" ]; then
           echo "修复成功: ${failed_line} -> 方法: ${TRY_FIX_METHOD}" | tee -a "$LOG_FILENAME"
           echo "  还原方法: ${TRY_FIX_RESTORE}" | tee -a "$LOG_FILENAME"
-          echo "${TRY_FIX_ORIGINAL}|${TRY_FIX_ALTERNATIVE}|${TRY_FIX_METHOD}|${TRY_FIX_RESTORE}|${file_size}|${file_size_bytes}" >> "$fix_list"
+          echo "${TRY_FIX_ORIGINAL}|${TRY_FIX_ALTERNATIVE}|${TRY_FIX_METHOD}|${TRY_FIX_RESTORE}|${file_size}|${file_size_bytes}|${TRY_FIX_METHOD_ID}" >> "$fix_list"
+          FIXED_THIS_RUN["$TRY_FIX_ORIGINAL"]="$TRY_FIX_ALTERNATIVE"
         else
           echo "修复失败: ${failed_line} - ${TRY_FIX_MESSAGE}" | tee -a "$LOG_FILENAME"
           echo "${failed_line}|${file_size}|${TRY_FIX_MESSAGE}" >> "$fail_list"
@@ -487,10 +569,10 @@ sync_with_logging() {
     # 1. 先过滤出"修复成功且路径仍在该 dest_path 下"的条目，保存待验证清单
     local PERSIST_VERIFY_LIST="/tmp/${task_name}_persist_verify_$$.txt"
     : > "$PERSIST_VERIFY_LIST"
-    while IFS='|' read -r f_orig f_alt f_method f_restore f_size f_bytes; do
+    while IFS='|' read -r f_orig f_alt f_method f_restore f_size f_bytes f_mid; do
       [ -z "$f_alt" ] && continue
       # ALT 路径相对于 dest_path 已经记录在 fix_list，直接用
-      echo "${f_alt}|${f_bytes}|${f_orig}|${f_method}" >> "$PERSIST_VERIFY_LIST"
+      echo "${f_alt}|${f_bytes}|${f_orig}|${f_method}|${f_mid}" >> "$PERSIST_VERIFY_LIST"
     done < "$fix_list"
     local verify_total=$(wc -l < "$PERSIST_VERIFY_LIST" | tr -d ' ' || echo 0)
     echo "  待验证修复条目: ${verify_total} 个" | tee -a "$LOG_FILENAME"
@@ -509,7 +591,7 @@ sync_with_logging() {
       # 3. 保存重启前的大小快照（用于对比）
       local PERSIST_BEFORE="/tmp/${task_name}_persist_before_$$.txt"
       : > "$PERSIST_BEFORE"
-      while IFS='|' read -r alt_path bytes orig_path f_method; do
+      while IFS='|' read -r alt_path bytes orig_path f_method f_mid; do
         [ -z "$alt_path" ] && continue
         local full_alt="${dest_path}/${alt_path}"
         local sz
@@ -552,7 +634,7 @@ sync_with_logging() {
         local persist_fail=0
         local persist_idx=0
         local persist_fail_details=""
-        while IFS='|' read -r alt_path bytes orig_path f_method; do
+        while IFS='|' read -r alt_path bytes orig_path f_method f_mid; do
           [ -z "$alt_path" ] && continue
           persist_idx=$((persist_idx + 1))
           [ "$persist_idx" -gt 6 ] && break
@@ -634,6 +716,11 @@ sync_with_logging() {
             persist_ok=$((persist_ok + 1))
           else
             persist_fail=$((persist_fail + 1))
+            # B: 复核失败 = 修复方法假成功 → 下一轮跳过该方法
+            if [ -n "$f_mid" ]; then
+              _blacklist_add "$orig_path" "$f_mid"
+              echo "  → 方法 ${f_mid} 已加入 ${orig_path} 的假成功黑名单（下一轮跳过）" | tee -a "$LOG_FILENAME"
+            fi
           fi
         done < "$PERSIST_VERIFY_LIST"
         echo "  持久化验证汇总: 抽样 ${persist_idx} / 通过 ${persist_ok} / 失败 ${persist_fail}" | tee -a "$LOG_FILENAME"
@@ -789,7 +876,8 @@ sync_with_logging() {
             method:      $f[2],
             restore_hint: $f[3],
             size_human:  $f[4],
-            size_bytes:  ($f[5] // "0" | tonumber)
+            size_bytes:  ($f[5] // "0" | tonumber),
+            method_id:   ($f[6] // "")
           }
         | . + {restore: (restore_info(.original; .alternative; .method; "'"$source_path"'"; "'"$dest_path"'") + {hint: .restore_hint})}
       )
@@ -805,6 +893,22 @@ sync_with_logging() {
     GLOBAL_FIXED_FILES_JSON=$(jq -sc --argjson acc "$GLOBAL_FIXED_FILES_JSON" --argjson cur "$LAST_SYNC_FIXED_FILES_JSON" \
       '($acc + $cur) | unique_by(.original)' 2>/dev/null || echo "$GLOBAL_FIXED_FILES_JSON")
   fi
+
+  # 累计方法假成功黑名单到全局变量（B: 失败记忆，供 save_sync_marker 写入 marker
+  # 的 fix_blacklist 字段，下一轮修复时跳过对应方法）
+  local _task_bl_json="{}"
+  if [ "${#FIX_METHOD_BLACKLIST[@]}" -gt 0 ]; then
+    local _bl_f
+    for _bl_f in "${!FIX_METHOD_BLACKLIST[@]}"; do
+      _task_bl_json=$(jq -cn --argjson j "$_task_bl_json" --arg k "$_bl_f" --arg v "${FIX_METHOD_BLACKLIST[$_bl_f]}" \
+        '$j + {($k): $v}' 2>/dev/null || echo "{}")
+    done
+  fi
+  if [ -z "${GLOBAL_FIX_BLACKLIST_JSON:-}" ] || ! echo "${GLOBAL_FIX_BLACKLIST_JSON:-}" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    GLOBAL_FIX_BLACKLIST_JSON="{}"
+  fi
+  GLOBAL_FIX_BLACKLIST_JSON=$(jq -cn --argjson a "$GLOBAL_FIX_BLACKLIST_JSON" --argjson b "$_task_bl_json" \
+    '$a * $b' 2>/dev/null || echo "$GLOBAL_FIX_BLACKLIST_JSON")
 
   rm -f "$LOG_FILENAME" "$LAST_ATTEMPT_LOG" "$fail_list" "$fix_list" "$fix_log" /tmp/probe_src.txt /tmp/probe_dst.txt 2>/dev/null || true
   # 始终返回 0：失败状态已通过 SYNC_FAILED 全局变量传递，
@@ -885,7 +989,7 @@ _send_sync_result_notification() {
   # 构建 fix_summary（已修复文件：原始文件名 → 实际文件名）
   local fix_summary=""
   if [ -s "$fix_list" ]; then
-    while IFS='|' read -r f_original f_alternative f_method f_size; do
+    while IFS='|' read -r f_original f_alternative f_method f_restore f_size f_bytes f_mid; do
       [ -z "$f_original" ] && continue
       if [ "$f_original" = "$f_alternative" ]; then
         fix_summary+="• ${f_original} (${f_size}) — ${f_method}"$'\n'

@@ -65,6 +65,9 @@ _sync_task_impl() {
     # 初始化修复文件累计器（sync_with_logging 每次执行后会累加到此变量）
     # auto-split 子目录的修复也会累计到这里，最终由 save_sync_marker 写入 marker
     GLOBAL_FIXED_FILES_JSON="[]"
+    # 方法假成功黑名单累计器（B: 失败记忆）与本轮已修复文件表
+    GLOBAL_FIX_BLACKLIST_JSON="{}"
+    FIXED_THIS_RUN=()
   fi
 
   local max_depth=10
