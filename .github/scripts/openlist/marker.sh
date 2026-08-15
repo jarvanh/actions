@@ -30,6 +30,8 @@ get_marker_path() {
 # 记录: 时间戳、源端路径、目标路径、源端大小/文件数、顶层目录列表、已修复文件列表
 # 已修复文件列表 (fixed_files): 通过缺失文件修复机制以非原名上传的文件
 #   预览时从差异中扣减这部分，避免显示"虚假缺失"
+# 方法假成功黑名单 (fix_blacklist): {文件: "m1 m3"}，跨轮失败记忆，
+#   下一轮修复时跳过已判定假成功的方法
 # 用法: save_sync_marker <source_path> <dest_path> <task_name>
 save_sync_marker() {
   local source_path="$1"
@@ -394,6 +396,17 @@ PYEOF
   fixed_count=$(echo "$merged_fixed_json" | jq 'length' 2>/dev/null || echo 0)
   fixed_bytes=$(echo "$merged_fixed_json" | jq '[.[].size_bytes] | add // 0' 2>/dev/null || echo 0)
 
+  # ===== 方法假成功黑名单（B: 失败记忆）=====
+  # merge: 旧 marker 的 fix_blacklist ∪ 本轮新增（GLOBAL_FIX_BLACKLIST_JSON，
+  # 由 sync_with_logging 累计），本轮结果优先。下一轮修复时 try_fix_failed_file
+  # 跳过这些方法，避免已判定假成功的方式每轮重复白跑。
+  local merged_blacklist_json="{}"
+  if [ -n "$old_marker" ]; then
+    merged_blacklist_json=$(echo "$old_marker" | jq -c 'if (.fix_blacklist // null) | type == "object" then .fix_blacklist else {} end' 2>/dev/null || echo "{}")
+  fi
+  merged_blacklist_json=$(jq -cn --argjson a "$merged_blacklist_json" --argjson b "${GLOBAL_FIX_BLACKLIST_JSON:-{}}" \
+    '($a // {}) * ($b // {})' 2>/dev/null || echo "{}")
+
   # 构建 JSON 标记
   local marker_json
   marker_json=$(jq -n \
@@ -406,7 +419,8 @@ PYEOF
     --argjson fixed_files "$merged_fixed_json" \
     --argjson fixed_count "$fixed_count" \
     --argjson fixed_bytes "$fixed_bytes" \
-    '{last_success: $last_success, source_path: $source_path, dest_path: $dest_path, source_bytes: $source_bytes, source_count: $source_count, top_dirs: $top_dirs, fixed_files: $fixed_files, fixed_count: $fixed_count, fixed_bytes: $fixed_bytes}')
+    --argjson fix_blacklist "$merged_blacklist_json" \
+    '{last_success: $last_success, source_path: $source_path, dest_path: $dest_path, source_bytes: $source_bytes, source_count: $source_count, top_dirs: $top_dirs, fixed_files: $fixed_files, fixed_count: $fixed_count, fixed_bytes: $fixed_bytes, fix_blacklist: $fix_blacklist}')
 
   # 上传标记到 OneDrive
   rclone mkdir "$SYNC_STATE_DIR" >/dev/null 2>&1 || true
@@ -522,7 +536,8 @@ check_sync_marker() {
 }
 
 # 仅加载 marker 的 fixed_files 信息（不做跳过判断，供预览使用）
-# 设置全局变量: MARKER_FIXED_COUNT, MARKER_FIXED_BYTES, MARKER_FIXED_FILES
+# 设置全局变量: MARKER_FIXED_COUNT, MARKER_FIXED_BYTES, MARKER_FIXED_FILES,
+#               MARKER_FIX_BLACKLIST（方法假成功黑名单 JSON 对象）
 # 用法: _load_marker_fixed_files <source_path> <dest_path> <task_name>
 _load_marker_fixed_files() {
   local source_path="$1"
@@ -532,6 +547,7 @@ _load_marker_fixed_files() {
   MARKER_FIXED_COUNT=0
   MARKER_FIXED_BYTES=0
   MARKER_FIXED_FILES="[]"
+  MARKER_FIX_BLACKLIST="{}"
 
   local marker_path
   marker_path=$(get_marker_path "$task_name" "$dest_path")
@@ -544,6 +560,7 @@ _load_marker_fixed_files() {
   MARKER_FIXED_COUNT=$(echo "$marker_json" | jq -r '.fixed_count // 0' 2>/dev/null || echo 0)
   MARKER_FIXED_BYTES=$(echo "$marker_json" | jq -r '.fixed_bytes // 0' 2>/dev/null || echo 0)
   MARKER_FIXED_FILES=$(echo "$marker_json" | jq -c '.fixed_files // []' 2>/dev/null || echo "[]")
+  MARKER_FIX_BLACKLIST=$(echo "$marker_json" | jq -c 'if (.fix_blacklist // null) | type == "object" then .fix_blacklist else {} end' 2>/dev/null || echo "{}")
 }
 
 # 把 marker JSON 里的 top_dirs 统一转成"每行一个目录名、已排序"的文本格式
