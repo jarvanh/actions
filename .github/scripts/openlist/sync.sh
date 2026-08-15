@@ -251,6 +251,50 @@ _wopan_raw_verify() {
   return 1
 }
 
+# 增量持久化单个修复条目到 marker（修复循环内每成功一个立即调用）
+# 目的: step 超时/手动取消/runner 回收等中断发生时，已完成的修复不丢失，
+#       下一轮 B 前置可直接"沿用上轮修复"，避免重复下载/打包/上传
+# state_file 是修复循环开始时对当前 marker 的快照，每次调用在快照上合并后整体写回
+# （保留 last_success 等其他字段；同 original 的新条目覆盖旧条目）
+# 用法: _persist_fix_entry_now <marker_path> <state_file> <source_path> <dest_path> \
+#         <orig> <alt> <method> <restore_hint> <size_human> <size_bytes> <method_id>
+_persist_fix_entry_now() {
+  local marker_path="$1" state_file="$2" source_path="$3" dest_path="$4"
+  local orig="$5" alt="$6" method="$7" restore_hint="$8" size_human="$9"
+  local size_bytes="${10}" method_id="${11}"
+  [ -f "$state_file" ] || return 1
+
+  local entry_json
+  entry_json=$(jq -cn --arg o "$orig" --arg a "$alt" --arg m "$method" --arg rh "$restore_hint" \
+    --arg sh "$size_human" --argjson sb "${size_bytes:-0}" --arg mid "${method_id:-}" \
+    '{original:$o, alternative:$a, method:$m, restore_hint:$rh, size_human:$sh, size_bytes:$sb, method_id:$mid}') || return 1
+
+  # 方法黑名单快照（本轮已判假成功的方法一并写入，中断后下轮仍生效）
+  local bl_json="{}" f
+  for f in "${!FIX_METHOD_BLACKLIST[@]}"; do
+    bl_json=$(jq -cn --argjson j "$bl_json" --arg k "$f" --arg v "${FIX_METHOD_BLACKLIST[$f]}" \
+      '$j + {($k): $v}' 2>/dev/null) || bl_json="{}"
+  done
+
+  local merged
+  merged=$(jq -c --argjson e "$entry_json" --argjson bl "$bl_json" '
+    . as $m
+    | ($m.fixed_files // []) as $ff
+    | ($ff | map(select(.original != $e.original)) + [$e]) as $nff
+    | $m + {fixed_files: $nff,
+            fixed_count: ($nff | length),
+            fixed_bytes: ([$nff[].size_bytes] | add // 0),
+            fix_blacklist: (($m.fix_blacklist // {}) * $bl)}
+  ' "$state_file" 2>/dev/null) || return 1
+
+  echo "$merged" > "$state_file"
+  if echo "$merged" | rclone rcat "$marker_path" >/dev/null 2>&1; then
+    echo "    ↳ 已即时记录到修复清单 (marker 合计 $(echo "$merged" | jq -r '.fixed_count') 个)"
+  else
+    echo "    ↳ ⚠️ 即时写入 marker 失败（任务结束的统一保存会兜底）"
+  fi
+}
+
 # 带探测、重试和详细日志的同步函数
 # 用法: sync_with_logging <source_path> <dest_path> <task_name> [rclone_extra_args...]
 # 设置全局变量: SYNC_FAILED, SYNC_SKIPPED, SYNC_TRANSFERRED_BYTES, RAW_CRYPT_GHOST_COUNT
@@ -528,6 +572,17 @@ sync_with_logging() {
       fix_log="file_fix_${task_name}_$(date +%Y%m%d_%H%M%S).log"
       echo "=== 缺失文件修复日志 - $(date) ===" > "$fix_log"
 
+      # 增量持久化: 快照当前 marker 作为状态文件，每修复成功一个立即合并写回
+      # （中断时已完成的修复不丢失；沿用上轮修复的条目本就来自 marker，无需重写）
+      local incr_marker_path incr_state incr_base
+      incr_marker_path=$(get_marker_path "$task_name" "$dest_path")
+      incr_state="/tmp/${task_name}_fixstate_$$.json"
+      incr_base=$(rclone cat "$incr_marker_path" 2>/dev/null) || true
+      if ! echo "$incr_base" | jq -e 'type == "object"' >/dev/null 2>&1; then
+        incr_base=$(jq -cn --arg sp "$source_path" --arg dp "$dest_path" '{source_path:$sp, dest_path:$dp}')
+      fi
+      echo "$incr_base" > "$incr_state"
+
       while IFS= read -r failed_line; do
         [ -z "$failed_line" ] && continue
 
@@ -550,6 +605,10 @@ sync_with_logging() {
           echo "  还原方法: ${TRY_FIX_RESTORE}" | tee -a "$LOG_FILENAME"
           echo "${TRY_FIX_ORIGINAL}|${TRY_FIX_ALTERNATIVE}|${TRY_FIX_METHOD}|${TRY_FIX_RESTORE}|${file_size}|${file_size_bytes}|${TRY_FIX_METHOD_ID}" >> "$fix_list"
           FIXED_THIS_RUN["$TRY_FIX_ORIGINAL"]="$TRY_FIX_ALTERNATIVE"
+          # 立即记录到修复文件清单（增量持久化，防中断丢失）
+          _persist_fix_entry_now "$incr_marker_path" "$incr_state" "$source_path" "$dest_path" \
+            "$TRY_FIX_ORIGINAL" "$TRY_FIX_ALTERNATIVE" "$TRY_FIX_METHOD" "$TRY_FIX_RESTORE" \
+            "$file_size" "$file_size_bytes" "${TRY_FIX_METHOD_ID:-}" 2>&1 | tee -a "$LOG_FILENAME" || true
         else
           echo "修复失败: ${failed_line} - ${TRY_FIX_MESSAGE}" | tee -a "$LOG_FILENAME"
           echo "${failed_line}|${file_size}|${TRY_FIX_MESSAGE}" >> "$fail_list"
@@ -910,6 +969,7 @@ sync_with_logging() {
   GLOBAL_FIX_BLACKLIST_JSON=$(jq -cn --argjson a "$GLOBAL_FIX_BLACKLIST_JSON" --argjson b "$_task_bl_json" \
     '$a * $b' 2>/dev/null || echo "$GLOBAL_FIX_BLACKLIST_JSON")
 
+  [ -n "${incr_state:-}" ] && rm -f "$incr_state" 2>/dev/null || true
   rm -f "$LOG_FILENAME" "$LAST_ATTEMPT_LOG" "$fail_list" "$fix_list" "$fix_log" /tmp/probe_src.txt /tmp/probe_dst.txt 2>/dev/null || true
   # 始终返回 0：失败状态已通过 SYNC_FAILED 全局变量传递，
   # 在 set -e 下返回非零会导致整个 step 立即退出，后续同步与
