@@ -1,6 +1,6 @@
 #!/bin/bash
 # ===== OpenList 同步工具 — 失败文件修复函数 =====
-# 处理 OpenList/WebDAV 405/409/8005 等无法同步的文件，尝试多种修复方式：
+# 处理 OpenList/WebDAV 无法同步的文件（同步报错、diff 缺失、假成功未持久化等），尝试多种修复方式：
 #   1. 创建目标目录（rclone mkdir → OpenList API mkdir → base64URL 编码目录名）
 #   2. 多种方式同步文件：
 #      方法1: 直接 rclone copyto

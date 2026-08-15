@@ -38,7 +38,7 @@ log_split() {
   echo "$message"
 }
 
-# 修复日志记录函数（独立于分割日志，用于 405/409 文件修复过程）
+# 修复日志记录函数（独立于分割日志，用于缺失文件修复过程）
 log_fix() {
   local log_file="$1"
   local message="$2"
@@ -159,6 +159,27 @@ _build_exclude_bullets() {
   done
   [ -z "$result" ] && result="无"
   echo "$result"
+}
+
+# 从 rclone 参数中提取过滤类参数（--exclude/--include 及其值）
+# 供 lsf 等不接受 sync/copy 特有参数（--delete-before/--no-traverse 等）的命令使用，
+# 保证 lsf diff 的过滤口径与实际 sync 一致
+# 结果写入全局数组: FILTER_ARGS
+_extract_filter_args() {
+  FILTER_ARGS=()
+  local i nxt flag
+  for ((i=1; i<=$#; i++)); do
+    flag="${!i}"
+    case "$flag" in
+      --exclude|--include)
+        nxt=$((i+1))
+        if [ "$nxt" -le $# ]; then
+          FILTER_ARGS+=("$flag" "${!nxt}")
+          i=$nxt
+        fi
+        ;;
+    esac
+  done
 }
 
 # 截断过长的路径用于流量图显示

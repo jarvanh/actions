@@ -13,7 +13,7 @@ source "$_OPENLIST_SCRIPT_DIR/utils.sh"         # 通用工具函数（escape_ht
 source "$_OPENLIST_SCRIPT_DIR/telegram.sh"       # Telegram 消息发送/编辑/删除
 source "$_OPENLIST_SCRIPT_DIR/progress.sh"       # 全局进度通知系统
 source "$_OPENLIST_SCRIPT_DIR/split.sh"          # 大文件分割（视频 ffmpeg + 非视频 7z）
-source "$_OPENLIST_SCRIPT_DIR/fix.sh"            # 405/409 失败文件修复
+source "$_OPENLIST_SCRIPT_DIR/fix.sh"            # 缺失文件修复（try_fix_failed_file）
 source "$_OPENLIST_SCRIPT_DIR/sync.sh"           # 核心同步引擎（sync_with_logging）
 source "$_OPENLIST_SCRIPT_DIR/marker.sh"         # 同步标记系统（跳过/警告/保存）
 source "$_OPENLIST_SCRIPT_DIR/preview.sh"        # 任务预览（大小估算 + 流量图）

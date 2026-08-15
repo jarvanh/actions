@@ -28,7 +28,7 @@ get_marker_path() {
 
 # 保存同步标记（同步成功后调用）
 # 记录: 时间戳、源端路径、目标路径、源端大小/文件数、顶层目录列表、已修复文件列表
-# 已修复文件列表 (fixed_files): 通过 405/409 修复机制以非原名上传的文件
+# 已修复文件列表 (fixed_files): 通过缺失文件修复机制以非原名上传的文件
 #   预览时从差异中扣减这部分，避免显示"虚假缺失"
 # 用法: save_sync_marker <source_path> <dest_path> <task_name>
 save_sync_marker() {
@@ -78,7 +78,7 @@ save_sync_marker() {
   local new_fixed_json="${GLOBAL_FIXED_FILES_JSON:-[]}"
 
   # ===== Carry-Forward 机制 =====
-  # 重新同步如果没触发 405/409，new_fixed_json 会是空数组，但旧 marker 里的修复记录
+  # 重新同步如果没触发修复，new_fixed_json 会是空数组，但旧 marker 里的修复记录
   # 仍然有效（目标端以替代名存在、源端原名路径仍未对齐）。这里从旧 marker 继承：
   #   - 目标端 <dest_path>/<original> 仍不存在的修复记录 → 保留
   #   - 目标端已经出现原名文件 → 说明这次同步已正常对齐，不再继承
@@ -640,7 +640,7 @@ send_sync_skipped() {
   marker_bytes=$(echo "$MARKER_JSON" | jq -r '.source_bytes // 0' 2>/dev/null || echo 0)
   marker_count=$(echo "$MARKER_JSON" | jq -r '.source_count // 0' 2>/dev/null || echo 0)
 
-  # 已修复文件信息（通过 405/409 修复机制以非原名上传的文件）
+  # 已修复文件信息（通过缺失文件修复机制以非原名上传的文件）
   local fixed_count fixed_bytes
   fixed_count=$(echo "$MARKER_JSON" | jq -r '.fixed_count // 0' 2>/dev/null || echo 0)
   fixed_bytes=$(echo "$MARKER_JSON" | jq -r '.fixed_bytes // 0' 2>/dev/null || echo 0)
