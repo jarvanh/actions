@@ -865,8 +865,9 @@ sync_with_logging() {
         | ($method | test("base64 编码文件内容")) as $has_b64_content
         | ($method | test("AES256 加密 zip")) as $has_enc_zip
         | ($method | test("临时目录上传")) as $has_tmp_move
-        | ($method | test("100MB 分卷切割") and ($method | test("base64URL 编码文件名") | not)) as $has_split_zip
-        | ($method | test("100MB 分卷切割") and ($method | test("base64URL 编码文件名"))) as $has_split_zip_b64name
+        | ($method | test("短哈希文件名")) as $has_short_hash
+        | ($method | test("分卷切割") and ($method | test("base64URL 编码文件名") | not)) as $has_split_zip
+        | ($method | test("分卷切割") and ($method | test("base64URL 编码文件名"))) as $has_split_zip_b64name
         # 原目录部分（去掉文件名）和文件名
         | ([$orig | split("/") | .[0:-1] | join("/"), $orig | split("/") | .[-1]]) as [$orig_dir, $orig_name]
         | ([$alt  | split("/") | .[0:-1] | join("/"), $alt  | split("/") | .[-1]]) as [$alt_dir,  $alt_name]
@@ -878,6 +879,10 @@ sync_with_logging() {
             summary: "文件被打包为 .7z（存储模式 mx=0）",
             steps:   ["下载目标端 " + $alt, "执行: 7z x <alt_7z> -o<output_dir>", "解压后得到 " + $orig_name],
             script:  "set -euo pipefail\nSRC=\"" + $src + "\"\nDST=\"" + $dst + "\"\nORIG=\"" + $orig + "\"\nALT=\"" + $alt + "\"\nTMP=$(mktemp -d)\nrclone copyto \"${DST}/${ALT}\" \"$TMP/package.7z\" --progress\n7z x \"$TMP/package.7z\" -o\"$TMP/out\" -y\n# 还原后的源文件在: $TMP/out/" + $orig_name + "\n# 如需回传源端: rclone copyto \"$TMP/out/" + $orig_name + "\" \"${SRC}/${ORIG}\"\nrm -rf \"$TMP\""}
+          elif $has_short_hash then {kind:"short_hash_rename",
+            summary: "文件名替换为 8 位 md5 前缀（规避密文名超长），内容未变",
+            steps:   ["下载目标端 " + $alt, "重命名为原文件名: " + $orig_name],
+            script:  "set -euo pipefail\nSRC=\"" + $src + "\"\nDST=\"" + $dst + "\"\nORIG=\"" + $orig + "\"\nALT=\"" + $alt + "\"\nTMP=$(mktemp -d)\nORIG_FNAME=\"" + $orig_name + "\"\nrclone copyto \"${DST}/${ALT}\" \"$TMP/${ORIG_FNAME}\" --progress\n# 如需回传源端: rclone copyto \"$TMP/${ORIG_FNAME}\" \"${SRC}/${ORIG}\"\nrm -rf \"$TMP\""}
           elif $has_api      then {kind:"api_rename",
             summary: "文件名被 OpenList API 自动改写（前缀 file_<ts>_<pid>_api，扩展名保留）",
             steps:   ["下载目标端 " + $alt, "根据内容哈希对比或直接重命名为: " + $orig_name],
