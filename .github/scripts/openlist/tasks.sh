@@ -655,7 +655,7 @@ sync_by_file_batches() {
     AUTO_SPLIT_INFO+=$'\n\n'"❌ 失败的批次："$'\n'"${failed_batch_list%"$'\n'"}"
   fi
 
-  # 最终用 sync_with_logging 做完整同步检查（处理 405/409、通知等）
+  # 最终用 sync_with_logging 做完整同步检查（处理缺失文件修复、通知等）
   # 文件批次阶段已完成实质传输，最终 sync 即使无新增 Copied 记录也必须发通知；
   # 此处可能被子目录递归调用（SYNC_SKIP_QUIET=1），需临时关闭静默模式，避免通知被吞。
   local _saved_skip_quiet="${SYNC_SKIP_QUIET:-0}"

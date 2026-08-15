@@ -126,7 +126,7 @@ add_preview_pair() {
   fi
 
   # 扣减已通过修复方式同步的文件（这些文件在目标端以不同路径/文件名存在）
-  # 避免 405/409 修复文件导致预览显示"虚假缺失"
+  # 避免修复文件导致预览显示"虚假缺失"
   _load_marker_fixed_files "$source_path" "$dest_path" "${PREVIEW_TASK_NAME:-}"
   local raw_sync_bytes="$sync_bytes" raw_sync_count="$sync_count"
   local fixed_note=""

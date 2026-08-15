@@ -4,9 +4,11 @@
 #   - 同步前 OpenList 缓存刷新（避免 stale listing 导致重复上传）
 #   - wopan176 后端 token 刷新（处理 OAuth access token 过期）
 #   - HTTP 423 Locked 重试（OpenList/WebDAV 临时文件锁）
-#   - HTTP 405 Method Not Allowed 补救（预删除冲突文件 + 刷新缓存）
 #   - 8005 登录失败重试（wopan176 token 过期后刷新并重试）
-#   - 405/409 失败文件修复（调用 try_fix_failed_file）
+#   - raw-vs-crypt 校验（wopan176Crypt 目标：对比 wopan176 裸路径密文数，
+#     检测"上传成功但未持久化"的幽灵文件，重启容器还原真实列表）
+#   - 缺失文件修复（同步后 diff 源端/目标端，缺失文件送 try_fix_failed_file，
+#     不依赖任何错误码——假成功文件没有 ERROR 日志、退出码为 0，只能靠 diff 发现）
 #   - object not found 错误处理
 #   - 结构化同步结果通知（含源/目标大小、差异文件列表、排除规则）
 #
@@ -152,9 +154,100 @@ _refresh_openlist_cache() {
   fi
 }
 
+# 轻量刷新 OpenList 单个路径缓存（无长等待，供校验流程使用）
+# 用法: _refresh_ol_cache_fast <ol_path（不带 openlist: 前缀）>
+_refresh_ol_cache_fast() {
+  local ol_path="/${1#/}"
+  local ol_token
+  ol_token=$(_get_openlist_token) || true
+  [ -z "$ol_token" ] && return 0
+  curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh" \
+    -H "Authorization: $ol_token" \
+    -H "Content-Type: application/json" \
+    -d "{\"path\":\"$ol_path\",\"recursive\":true}" \
+    >/dev/null 2>&1 || true
+  sleep 5
+}
+
+# raw-vs-crypt 校验（仅 wopan176Crypt 目标端）
+# wopan176Crypt 的每个文件在 wopan176 裸存储中必须有对应密文。
+# 裸路径密文数 < crypt 文件数 → 存在"幽灵文件"：OpenList PUT 返回成功、
+# crypt 列表里可见，但密文从未写入联通云后端（仅存在于 OpenList 内存缓存，
+# 容器重启后消失）。
+# 检测到幽灵文件时重启 OpenList 容器，清空被污染的内存缓存，使后续
+# 源端 vs crypt 的 lsf diff 能把这些假成功文件暴露出来交给修复管线。
+# 用法: _wopan_raw_verify <dest_path> [log_file]
+# 设置全局: RAW_CRYPT_GHOST_COUNT — 幽灵文件数（供通知展示）
+# 返回: 0=无幽灵文件（或非 wopan176Crypt 目标），1=检测到幽灵文件
+_wopan_raw_verify() {
+  RAW_CRYPT_GHOST_COUNT=0
+  local dest_path="$1"
+  local log_file="${2:-/dev/null}"
+  [[ "$dest_path" == openlist:wopan176Crypt/* ]] || return 0
+
+  local raw_dest="${dest_path/wopan176Crypt/wopan176}"
+  echo "=== raw-vs-crypt 校验: ${dest_path} vs ${raw_dest} ===" | tee -a "$log_file"
+
+  _refresh_ol_cache_fast "${dest_path#openlist:}"
+  _refresh_ol_cache_fast "${raw_dest#openlist:}"
+
+  local crypt_count=0 raw_count=0 crypt_json raw_json
+  crypt_json=$(timeout 900 rclone size "$dest_path" --json 2>/dev/null || true)
+  crypt_count=$(echo "$crypt_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
+  raw_json=$(timeout 900 rclone size "$raw_dest" --json 2>/dev/null || true)
+  raw_count=$(echo "$raw_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
+  [[ "$crypt_count" =~ ^[0-9]+$ ]] || crypt_count=0
+  [[ "$raw_count" =~ ^[0-9]+$ ]] || raw_count=0
+  echo "  crypt 文件数: ${crypt_count} / 裸路径密文数: ${raw_count}" | tee -a "$log_file"
+
+  # 裸路径列表为空但 crypt 非空 → wopan176 驱动大概率未就绪，无法判定，跳过
+  if [ "$raw_count" -eq 0 ] && [ "$crypt_count" -gt 0 ]; then
+    echo "  ⚠️ 裸路径列表为空（wopan176 驱动可能未就绪），跳过幽灵文件判定" | tee -a "$log_file"
+    return 0
+  fi
+
+  # 裸路径密文数 >= crypt 文件数 → 无幽灵文件
+  if [ "$raw_count" -ge "$crypt_count" ]; then
+    echo "  ✅ 未检测到幽灵文件（每个 crypt 文件在裸路径都有对应密文）" | tee -a "$log_file"
+    return 0
+  fi
+
+  RAW_CRYPT_GHOST_COUNT=$((crypt_count - raw_count))
+  echo "  ⚠️ 检测到 ${RAW_CRYPT_GHOST_COUNT} 个幽灵文件（crypt 列表可见但裸路径密文缺失 → 上传未持久化）" | tee -a "$log_file"
+
+  # 重启 OpenList 容器，清掉被污染的内存缓存，让列表回到后端真实状态
+  if ! command -v docker >/dev/null 2>&1 || ! sudo docker ps --format '{{.Names}}' 2>/dev/null | grep -qw openlist; then
+    echo "  ⚠️ docker/openlist 容器不可用，无法重启清缓存，保留当前列表继续" | tee -a "$log_file"
+    return 1
+  fi
+
+  echo "  重启 OpenList 容器还原真实列表..." | tee -a "$log_file"
+  sudo docker restart openlist >> "$log_file" 2>&1 || true
+
+  local i http_ok=0
+  for i in $(seq 1 30); do
+    if curl -sf http://127.0.0.1:5244/ping >/dev/null 2>&1; then
+      http_ok=1
+      echo "  OpenList HTTP 就绪 (${i}次)" | tee -a "$log_file"
+      break
+    fi
+    sleep 2
+  done
+  if [ "$http_ok" -ne 1 ]; then
+    echo "  ⚠️ OpenList 重启后 HTTP 未就绪，缓存状态未知" | tee -a "$log_file"
+    return 1
+  fi
+
+  echo "  等待驱动重新初始化 (60s)..." | tee -a "$log_file"
+  sleep 60
+  _refresh_ol_cache_fast "${dest_path#openlist:}"
+  echo "  容器已重启，crypt 列表已还原为后端真实状态（幽灵文件已从列表消失，将进入修复管线）" | tee -a "$log_file"
+  return 1
+}
+
 # 带探测、重试和详细日志的同步函数
 # 用法: sync_with_logging <source_path> <dest_path> <task_name> [rclone_extra_args...]
-# 设置全局变量: SYNC_FAILED, SYNC_SKIPPED, SYNC_TRANSFERRED_BYTES
+# 设置全局变量: SYNC_FAILED, SYNC_SKIPPED, SYNC_TRANSFERRED_BYTES, RAW_CRYPT_GHOST_COUNT
 # 注意: 始终返回 0，失败状态通过 SYNC_FAILED 传递（避免 set -e 下 step 直接退出）
 sync_with_logging() {
   local source_path="$1"
@@ -291,104 +384,97 @@ sync_with_logging() {
     done
   fi
 
-  # ===== HTTP 405 Method Not Allowed 补救 =====
-  # OpenList 后端不允许 PUT 覆盖已存在文件，返回 405。
-  # rclone check 预删除可能因 WebDAV PROPFIND 不完整而漏掉部分文件，
-  # 这里在 sync 失败后从日志解析 405 失败的文件，逐个 deletefile 后重试。
-  if [[ "$dest_path" == openlist:* ]] && grep -Eqi 'Method Not Allowed: 405|405 Method Not Allowed' "$LAST_ATTEMPT_LOG"; then
-    local retry_405_attempts="${OPENLIST_405_RETRY_ATTEMPTS:-3}"
-    local retry_405_index
+  # ===== raw-vs-crypt 校验（仅 wopan176Crypt 目标端）=====
+  # 放在缺失文件 diff 之前：若存在幽灵文件（OpenList 报告上传成功但裸路径
+  # 无对应密文），先重启 OpenList 容器还原真实列表，diff 才能把这批
+  # "假成功"文件识别为缺失文件并送修复管线。
+  _wopan_raw_verify "$dest_path" "$LOG_FILENAME" || true
 
-    for ((retry_405_index = 1; retry_405_index <= retry_405_attempts; retry_405_index++)); do
-      echo "检测到 OpenList 405 Method Not Allowed，解析失败文件并预删除后重试 ${retry_405_index}/${retry_405_attempts}。" | tee -a "$LOG_FILENAME"
-
-      local retry_405_deleted=0
-      while IFS= read -r failed_line; do
-        [ -z "$failed_line" ] && continue
-        echo "405 补救: 预删除 ${dest_path}/${failed_line}" | tee -a "$LOG_FILENAME"
-        local delete_out
-        delete_out=$(rclone deletefile "${dest_path}/${failed_line}" \
-             --retries 1 --low-level-retries 1 \
-             --timeout 2m --contimeout 30s \
-             2>&1) && retry_405_deleted=$((retry_405_deleted + 1)) || \
-             echo "405 补救: deletefile 结果: $delete_out" | tee -a "$LOG_FILENAME"
-      done < <(
-        grep -E 'ERROR : .+: Failed to copy.*405 Method Not Allowed' "$LAST_ATTEMPT_LOG" 2>/dev/null | \
-          sed -E 's/^.*ERROR : //; s/: Failed to copy.*$//' | sort -u
-      )
-
-      # 刷新 OpenList 服务端目录缓存，清除"幽灵文件"
-      # （PROPFIND 返回缓存中已不存在的文件 → rclone 尝试覆盖 → 405）
-      local ol_path="${dest_path#openlist:}"
-      ol_path="/${ol_path}"
-      local ol_token
-      ol_token=$(_get_openlist_token)
-      if [ -n "$ol_token" ]; then
-        echo "405 补救: 刷新 OpenList 缓存 $ol_path" | tee -a "$LOG_FILENAME"
-        curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh" \
-          -H "Authorization: $ol_token" \
-          -H "Content-Type: application/json" \
-          -d "{\"path\":\"$ol_path\",\"recursive\":true}" \
-          >/dev/null 2>&1 || true
-        sleep 3
-      fi
-
-      echo "405 补救: 已预删除 $retry_405_deleted 个文件，已刷新缓存，重新 sync" | tee -a "$LOG_FILENAME"
-      SYNC_STATUS=0
-      run_rclone_sync_once "405 retry ${retry_405_index}/${retry_405_attempts}" || SYNC_STATUS=$?
-
-      if ! grep -Eqi 'Method Not Allowed: 405|405 Method Not Allowed' "$LAST_ATTEMPT_LOG"; then
-        break
-      fi
-    done
-  fi
-
-  # ===== 405/409 失败文件修复 =====
-  # 尝试修复 405/409 失败的文件（目录创建→base64URL编码→多种方式同步），不阻止后续 task
+  # ===== 缺失文件修复管线 =====
+  # 不依赖任何错误码：同步后只要源端有、目标端没有的文件（含 rclone 报告
+  # "成功"但未持久化的假成功文件），一律送 try_fix_failed_file 修复
+  # （目录创建 → base64URL 编码 → zip/7z/分卷/API 多种方式），不阻止后续 task
   local fail_list="/tmp/${task_name}_sync_failures.txt"
   local fix_list="/tmp/${task_name}_sync_fixes.txt"
   : > "$fail_list"
   : > "$fix_list"
   local fix_log=""
-  local HAS_405_409=0
   local HAS_OBJECT_NOT_FOUND=0
-  if [[ "$dest_path" == openlist:* ]] && grep -Eqi 'Method Not Allowed: 405|405 Method Not Allowed|409 Conflict' "$LAST_ATTEMPT_LOG"; then
-    HAS_405_409=1
-    echo "=== ${task_name} 尝试修复 405/409 失败文件 ===" | tee -a "$LOG_FILENAME"
 
-    local fix_log="file_fix_${task_name}_$(date +%Y%m%d_%H%M%S).log"
-    echo "=== 405/409 修复日志 - $(date) ===" > "$fix_log"
+  if [[ "$dest_path" == openlist:* ]]; then
+    # 收集缺失文件：
+    #   1) 最后一次尝试日志中 Failed to copy 的文件（object not found 属于
+    #      源文件不存在，由后面专门章节记录，这里排除）
+    #   2) 源端 vs 目标端 lsf 递归 diff 出的缺失文件（假成功文件没有 ERROR
+    #      日志、退出码为 0，只能靠 diff 发现）
+    local missing_list="/tmp/${task_name}_missing_$$.txt"
+    : > "$missing_list"
+    grep -E 'ERROR : .+: Failed to copy' "$LAST_ATTEMPT_LOG" 2>/dev/null | \
+      grep -Ev 'object not found' | \
+      sed -E 's/^.*ERROR : //; s/: Failed to copy.*$//' >> "$missing_list"
 
-    while IFS= read -r failed_line; do
-      [ -z "$failed_line" ] && continue
+    # lsf 递归列出两端（源端带上 --exclude/--include 过滤，口径与 sync 一致；
+    # 只传纯 filter 参数，避免把 --delete-before/--no-traverse 等 sync/copy
+    # 特有参数传给 lsf）
+    _extract_filter_args "${extra_args[@]}"
+    local src_ls="/tmp/${task_name}_src_ls_$$.txt"
+    local dst_ls="/tmp/${task_name}_dst_ls_$$.txt"
+    local src_ls_ok=0 dst_ls_ok=0
+    timeout 900 rclone lsf "$source_path" -R --files-only "${FILTER_ARGS[@]}" > "$src_ls" 2>/dev/null && src_ls_ok=1 || true
+    timeout 900 rclone lsf "$dest_path" -R --files-only > "$dst_ls" 2>/dev/null && dst_ls_ok=1 || true
+    if [ "$src_ls_ok" -eq 1 ] && [ "$dst_ls_ok" -eq 1 ]; then
+      # 仅当两端列表都完整获取时才做 diff，避免半截列表产生误报触发无谓修复
+      comm -23 <(sort -u "$src_ls") <(sort -u "$dst_ls") >> "$missing_list"
+    else
+      echo "⚠️ 源/目标文件列表获取不完整（src=${src_ls_ok}, dst=${dst_ls_ok}），跳过 lsf diff，仅用日志错误修复" | tee -a "$LOG_FILENAME"
+    fi
+    rm -f "$src_ls" "$dst_ls"
+    sort -u "$missing_list" -o "$missing_list"
 
-      local file_size="未知"
-      local file_size_bytes=0
-      local size_json
-      size_json=$(rclone size "${source_path}/${failed_line}" --json 2>/dev/null || echo '{}')
-      if [ -n "$size_json" ] && [ "$size_json" != "{}" ]; then
-        file_size_bytes=$(echo "$size_json" | jq -r '.bytes // 0' 2>/dev/null || echo 0)
-        [[ "$file_size_bytes" =~ ^[0-9]+$ ]] || file_size_bytes=0
-        file_size=$(format_bytes "$file_size_bytes")
+    if [ -s "$missing_list" ]; then
+      # 单次修复数量上限（防止首次部署时积压大量缺失文件导致单次运行过久）
+      local fix_max="${OPENLIST_MISSING_FIX_MAX:-200}"
+      local missing_total
+      missing_total=$(wc -l < "$missing_list" | tr -d ' ')
+      if [ "$missing_total" -gt "$fix_max" ]; then
+        echo "⚠️ 缺失文件 ${missing_total} 个超过单次上限 ${fix_max}（可用 OPENLIST_MISSING_FIX_MAX 调整），本次只修复前 ${fix_max} 个" | tee -a "$LOG_FILENAME"
+        head -n "$fix_max" "$missing_list" > "${missing_list}.cut"
+        mv "${missing_list}.cut" "$missing_list"
       fi
 
-      echo "修复中: ${failed_line} (${file_size})" | tee -a "$LOG_FILENAME"
+      echo "=== ${task_name} 缺失文件修复（共 $(wc -l < "$missing_list" | tr -d ' ') 个）===" | tee -a "$LOG_FILENAME"
 
-      try_fix_failed_file "$source_path" "$dest_path" "$task_name" "$failed_line" "$fix_log" || true
+      fix_log="file_fix_${task_name}_$(date +%Y%m%d_%H%M%S).log"
+      echo "=== 缺失文件修复日志 - $(date) ===" > "$fix_log"
 
-      if [ "$TRY_FIX_STATUS" = "success" ]; then
-        echo "修复成功: ${failed_line} -> 方法: ${TRY_FIX_METHOD}" | tee -a "$LOG_FILENAME"
-        echo "  还原方法: ${TRY_FIX_RESTORE}" | tee -a "$LOG_FILENAME"
-        echo "${TRY_FIX_ORIGINAL}|${TRY_FIX_ALTERNATIVE}|${TRY_FIX_METHOD}|${TRY_FIX_RESTORE}|${file_size}|${file_size_bytes}" >> "$fix_list"
-      else
-        echo "修复失败: ${failed_line} - ${TRY_FIX_MESSAGE}" | tee -a "$LOG_FILENAME"
-        echo "${failed_line}|${file_size}|${TRY_FIX_MESSAGE}" >> "$fail_list"
-      fi
-    done < <(
-      grep -E 'ERROR : .+: Failed to copy.*(405 Method Not Allowed|409 Conflict)' "$LAST_ATTEMPT_LOG" 2>/dev/null | \
-        sed -E 's/^.*ERROR : //; s/: Failed to copy.*$//' | sort -u
-    )
+      while IFS= read -r failed_line; do
+        [ -z "$failed_line" ] && continue
 
+        local file_size="未知"
+        local file_size_bytes=0
+        local size_json
+        size_json=$(rclone size "${source_path}/${failed_line}" --json 2>/dev/null || echo '{}')
+        if [ -n "$size_json" ] && [ "$size_json" != "{}" ]; then
+          file_size_bytes=$(echo "$size_json" | jq -r '.bytes // 0' 2>/dev/null || echo 0)
+          [[ "$file_size_bytes" =~ ^[0-9]+$ ]] || file_size_bytes=0
+          file_size=$(format_bytes "$file_size_bytes")
+        fi
+
+        echo "修复中: ${failed_line} (${file_size})" | tee -a "$LOG_FILENAME"
+
+        try_fix_failed_file "$source_path" "$dest_path" "$task_name" "$failed_line" "$fix_log" || true
+
+        if [ "$TRY_FIX_STATUS" = "success" ]; then
+          echo "修复成功: ${failed_line} -> 方法: ${TRY_FIX_METHOD}" | tee -a "$LOG_FILENAME"
+          echo "  还原方法: ${TRY_FIX_RESTORE}" | tee -a "$LOG_FILENAME"
+          echo "${TRY_FIX_ORIGINAL}|${TRY_FIX_ALTERNATIVE}|${TRY_FIX_METHOD}|${TRY_FIX_RESTORE}|${file_size}|${file_size_bytes}" >> "$fix_list"
+        else
+          echo "修复失败: ${failed_line} - ${TRY_FIX_MESSAGE}" | tee -a "$LOG_FILENAME"
+          echo "${failed_line}|${file_size}|${TRY_FIX_MESSAGE}" >> "$fail_list"
+        fi
+      done < "$missing_list"
+    fi
+    rm -f "$missing_list"
   fi
 
   # ===== 修复文件持久化验证：重启 OpenList 容器后检查修复的文件是否仍存在 =====
@@ -576,7 +662,7 @@ sync_with_logging() {
     echo "=== ${task_name} 检测到 object not found 错误（源文件不存在）===" | tee -a "$LOG_FILENAME"
     while IFS= read -r failed_line; do
       [ -z "$failed_line" ] && continue
-      # 跳过已在 405/409 修复中处理的文件
+      # 跳过已在缺失文件修复中处理的文件
       grep -qF "${failed_line}|" "$fail_list" 2>/dev/null && continue
       echo "源文件不存在: ${failed_line}" | tee -a "$LOG_FILENAME"
       echo "${failed_line}|未知|源文件不存在 (object not found)" >> "$fail_list"
@@ -591,7 +677,7 @@ sync_with_logging() {
     "$source_path" "$dest_path" "$task_name" "$SYNC_STATUS" \
     "$LOG_FILENAME" "$LAST_ATTEMPT_LOG" \
     "$fail_list" "$fix_list" "$fix_log" \
-    "$HAS_405_409" "$HAS_OBJECT_NOT_FOUND" \
+    "$HAS_OBJECT_NOT_FOUND" \
     "${extra_args[@]}"
 
   # 把 fix_list 序列化为 JSON 供 save_sync_marker 使用
@@ -740,9 +826,8 @@ _send_sync_result_notification() {
   local fail_list="$7"
   local fix_list="$8"
   local fix_log="$9"
-  local has_405_409="${10}"
-  local has_object_not_found="${11}"
-  shift 11
+  local has_object_not_found="${10}"
+  shift 10
   local extra_args=("$@")
 
   SYNC_FAILED=0
@@ -786,6 +871,11 @@ _send_sync_result_notification() {
     fi
   else
     count_info="文件数：源端 ${source_count} / 目标 ${dest_count}"
+  fi
+
+  # raw-vs-crypt 幽灵文件提示（仅 wopan176Crypt 目标且检测到时展示）
+  if [ "${RAW_CRYPT_GHOST_COUNT:-0}" -gt 0 ] 2>/dev/null; then
+    count_info+=$'\n'"⚠️ raw-vs-crypt 幽灵文件：${RAW_CRYPT_GHOST_COUNT} 个（密文未落盘，已重启 OpenList 后重新修复）"
   fi
 
   # 提取 --exclude 规则，方便在通知中说明
@@ -863,11 +953,7 @@ _send_sync_result_notification() {
     SYNC_FAILED=1
     # 根据错误类型构建状态消息
     local fail_status_msg="部分文件无法同步"
-    if [ "$has_405_409" -eq 1 ] && [ "$has_object_not_found" -eq 1 ]; then
-      fail_status_msg="OpenList 405/409 错误及源文件不存在，部分文件无法同步"
-    elif [ "$has_405_409" -eq 1 ]; then
-      fail_status_msg="OpenList 405/409 错误，部分文件无法同步"
-    elif [ "$has_object_not_found" -eq 1 ]; then
+    if [ "$has_object_not_found" -eq 1 ]; then
       fail_status_msg="源文件不存在 (object not found)，部分文件无法同步"
     fi
     local partial_msg=""
@@ -900,13 +986,13 @@ _send_sync_result_notification() {
     send_telegram_message "$partial_msg"
 
   elif [ -s "$fix_list" ]; then
-    # 所有 405/409 文件都已通过其他方式同步
+    # 所有缺失文件都已通过其他方式同步
     local partial_msg=""
     partial_msg+="⚠️ ${task_name} 部分文件已通过其他方式同步"$'\n'
     partial_msg+='━━━━━━━━━━━━━━'$'\n'
     partial_msg+="源端大小：${source_size_human}"$'\n'
     partial_msg+="目标大小：${dest_size_human}"$'\n'
-    partial_msg+="状态：405/409 文件已修复，但部分文件使用了其他方式同步"$'\n'
+    partial_msg+="状态：缺失文件已全部通过替代方式同步"$'\n'
     partial_msg+="${count_info}"$'\n'
     [ -n "$AUTO_SPLIT_INFO" ] && partial_msg+=$'\n'"${AUTO_SPLIT_INFO}"$'\n'
     partial_msg+=$'\n'
