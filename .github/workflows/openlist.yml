@@ -24,6 +24,26 @@ on:
         required: false
         type: boolean
         default: false
+      fix_test_mode:
+        description: "调试: 单任务测试修复管线（raw-vs-crypt 校验 + 缺失文件修复，跳过预览与 5h 等待）"
+        required: false
+        type: boolean
+        default: false
+      fix_test_task:
+        description: "调试: 要测试的任务 (backup/task0-task5)"
+        required: false
+        type: string
+        default: "backup"
+      fix_test_max:
+        description: "调试: 单次修复数量上限（快速验证用）"
+        required: false
+        type: number
+        default: 5
+      skip_preview:
+        description: "跳过任务预览通知（直接开始同步）"
+        required: false
+        type: boolean
+        default: false
   schedule:
     # - cron: "10 1 * * *"
     - cron: "*/5 * * * *"
@@ -1686,8 +1706,81 @@ jobs:
           cp "$GITHUB_WORKSPACE/.github/scripts/openlist/"*.sh /tmp/
           echo "函数库加载完成"
 
+      # ===== 调试: 单任务测试修复管线 =====
+      # 用真实生产代码路径（copy_task → sync_with_logging）跑单个 wopan176Crypt 任务，
+      # 验证 raw-vs-crypt 校验 + 缺失文件修复的实际效果。
+      # 与正式流程的区别: 只跑单任务、跳过任务预览、不检查 --1d-skip 标记、
+      # 跳过结尾 5h sleep，并用 OPENLIST_MISSING_FIX_MAX 限制修复数量快速得到结果。
+      - name: "Debug: 单任务测试修复管线"
+        if: ${{ inputs.fix_test_mode == true }}
+        timeout-minutes: 120
+        run: |
+          source /tmp/load_all.sh
+
+          # ===== 等待 OpenList 就绪（与正式流程相同的探测策略）=====
+          echo "等待 OpenList 就绪..."
+          code="000"
+          for i in $(seq 1 40); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5244/ping 2>/dev/null || echo "000")
+            [ "$code" = "200" ] && { echo "HTTP 就绪 (${i}次)"; break; }
+            sleep 2
+          done
+          echo "等待驱动初始化 (120s) ..."
+          sleep 120
+          if rclone lsd openlist: >/dev/null 2>&1; then
+            echo "WebDAV(rclone) 验证通过"
+          else
+            echo "再等 90s ..."
+            sleep 90
+            rclone lsd openlist: >/dev/null 2>&1 && echo "WebDAV(rclone) 验证通过" || echo "⚠️ WebDAV 未就绪，继续执行"
+          fi
+
+          # ===== 初始化（与 Initialize sync 对齐的最小集）=====
+          SYNC_SKIP_QUIET=0
+          SYNC_SKIPPED=0
+          SYNC_FAILED=0
+          SYNC_TRANSFERRED_BYTES=0
+          AUTO_SPLIT_INFO=""
+          SYNC_AUTO_SPLIT_DEPTH=0
+          progress_init
+
+          # 单次修复数量上限（快速验证用）
+          export OPENLIST_MISSING_FIX_MAX="${{ inputs.fix_test_max || 5 }}"
+
+          # ===== rclone 参数（与 "Preview and sync all tasks" step 保持一致）=====
+          RCLONE_DEFAULT_FLAGS=(
+            --progress
+            --stats 15s
+            --stats-one-line
+            --ignore-errors
+            --verbose
+            --size-only
+            --timeout 5m
+            --contimeout 30s
+            --retries 1
+            --low-level-retries 3
+          )
+          RCLONE_COPY_TASK_FLAGS=(
+            --no-traverse
+          )
+
+          # ===== 按 input 选择要测试的任务（与 run_all_tasks 中 copy_task 定义一致）=====
+          FIX_TASK="${{ inputs.fix_test_task || 'backup' }}"
+          echo "=== 修复管线测试任务: ${FIX_TASK} (修复上限 ${OPENLIST_MISSING_FIX_MAX}) ==="
+          case "$FIX_TASK" in
+            backup) copy_task "onedrive:backup" "openlist:wopan176Crypt/backup" "backup" ;;
+            task0)  copy_task "onedrive:0" "openlist:wopan176Crypt/0" "task0" ;;
+            task1)  copy_task "onedrive:1" "openlist:wopan176Crypt/1" "task1" ;;
+            task2)  copy_task "onedrive:2" "openlist:wopan176Crypt/2" "task2" ;;
+            task3)  copy_task "onedrive:3" "openlist:wopan176Crypt/3" "task3" ;;
+            task4)  copy_task "onedrive:4" "openlist:wopan176Crypt/4" "task4" ;;
+            task5)  copy_task "onedrive:5" "openlist:wopan176Crypt/5" "task5" ;;
+            *) echo "未知任务: ${FIX_TASK}（可选: backup/task0-task5）"; exit 1 ;;
+          esac
+          echo "=== 修复管线测试完成 (SYNC_FAILED=${SYNC_FAILED}) ==="
+
       - name: Initialize sync
-        if: ${{ inputs.debug_crypt_size != true && inputs.debug_sync_diff != true }}
+        if: ${{ inputs.debug_crypt_size != true && inputs.debug_sync_diff != true && inputs.fix_test_mode != true }}
         run: |
           source /tmp/load_all.sh
           PROCESSED_FILES_LOG="processed_videos.log"
@@ -1716,7 +1809,7 @@ jobs:
       # ===== 所有同步任务定义 + 预览 + 执行 =====
       # 增减任务只需编辑下方 run_all_tasks 函数体；rclone 参数编辑下方 RCLONE_*_FLAGS 数组。
       - name: Preview and sync all tasks
-        if: ${{ inputs.debug_crypt_size != true && inputs.debug_sync_diff != true }}
+        if: ${{ inputs.debug_crypt_size != true && inputs.debug_sync_diff != true && inputs.fix_test_mode != true }}
         run: |
           source /tmp/load_all.sh
 
@@ -1839,17 +1932,21 @@ jobs:
             sync_task "onedrive:5" "openlist:wopan175/5" "task5" --auto-split --1d-skip
           }
 
-          echo "=== 发送任务预览通知 ==="
-          TASK_PREVIEW_ONLY=1 run_all_tasks
-          flush_task_preview
-          echo "=== 所有任务预览通知已发送 ==="
+          if [ "${{ inputs.skip_preview }}" = "true" ]; then
+            echo "=== 跳过任务预览（skip_preview=true，直接开始同步）==="
+          else
+            echo "=== 发送任务预览通知 ==="
+            TASK_PREVIEW_ONLY=1 run_all_tasks
+            flush_task_preview
+            echo "=== 所有任务预览通知已发送 ==="
+          fi
 
           echo "=== 开始同步所有任务 ==="
           run_all_tasks
           echo "=== 所有任务同步完成 ==="
 
       - name: Finalize and cleanup
-        if: ${{ inputs.debug_crypt_size != true && inputs.debug_sync_diff != true }}
+        if: ${{ inputs.debug_crypt_size != true && inputs.debug_sync_diff != true && inputs.fix_test_mode != true }}
         run: |
           source /tmp/load_all.sh
           actual_entries=0
@@ -1878,7 +1975,7 @@ jobs:
           echo "所有同步任务完成！"
 
       - name: sleep
-        if: ${{ inputs.debug_crypt_size != true && inputs.debug_sync_diff != true }}
+        if: ${{ inputs.debug_crypt_size != true && inputs.debug_sync_diff != true && inputs.fix_test_mode != true }}
         run: |
           sleep 300m
           sudo docker stop openlist
