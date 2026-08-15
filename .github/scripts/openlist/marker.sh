@@ -26,6 +26,136 @@ get_marker_path() {
   echo "${SYNC_STATE_DIR}/${task_name}_${dest_hash}.json"
 }
 
+# 从旧 marker 继承仍有效的修复条目（original 在目标端仍不存在 = 未对齐，保留；
+# original 已出现 = 本轮已正常同步对齐，剔除）。输出 carried JSON 数组到 stdout。
+# 用法: _carry_forward_fixed <dest_path> <old_marker_json>
+_carry_forward_fixed() {
+  local dest_path="$1"
+  local old_marker="$2"
+  local carried_json="[]"
+
+  local old_fixed_count
+  old_fixed_count=$(echo "$old_marker" | jq -r '(.fixed_files // []) | length' 2>/dev/null || echo 0)
+  if [ "${old_fixed_count:-0}" -eq 0 ]; then
+    echo "[]"
+    return 0
+  fi
+
+  local carried_entries=()
+  local idx orig _dummy size_bytes
+  local tsv
+  tsv=$(echo "$old_marker" | jq -r '
+    (.fixed_files // []) | to_entries[]
+    | [.key, (.value.original // ""), (.value.alternative // ""), (.value.size_bytes // 0)]
+    | @tsv' 2>/dev/null || echo "")
+  local old_fixed_json
+  old_fixed_json=$(echo "$old_marker" | jq -c '.fixed_files // []' 2>/dev/null || echo "[]")
+
+  while IFS=$'\t' read -r idx orig _dummy size_bytes; do
+    [ -z "$orig" ] && continue
+    # 探测目标端是否已出现原名文件（已存在则无需继承）
+    local probe exists
+    probe=$(timeout 20 rclone lsjson "${dest_path}/${orig}" --max-depth 1 2>/dev/null || echo "[]")
+    exists=$(echo "$probe" | jq -r 'length // 0' 2>/dev/null || echo 0)
+    if [ "${exists:-0}" -eq 0 ]; then
+      carried_entries+=("$idx")
+    fi
+  done <<< "$tsv"
+
+  if [ "${#carried_entries[@]}" -gt 0 ]; then
+    local idx_args
+    idx_args=$(printf ', .[%s]' "${carried_entries[@]}")
+    idx_args=${idx_args#, }
+    carried_json=$(echo "$old_fixed_json" | jq -c "[ $idx_args ]" 2>/dev/null || echo "[]")
+  fi
+  echo "$carried_json"
+}
+
+# 持久化修复状态（fixed_files + fix_blacklist）— 无论本轮成败都写入
+# 与 save_sync_marker 的区别:
+#   - 部分失败轮（SYNC_FAILED=1）也要保存修复成果。否则下一轮看不到上轮
+#     已持久化的替代文件，会重复下载/打包/上传；跨轮方法黑名单也会丢失
+#   - 合并写入：仅替换修复相关字段，保留旧 marker 的 last_success 等字段；
+#     无旧 marker 时创建不含 last_success 的修复状态（不会触发 24h 跳过）
+#   - 不做 missing_count>5 拒绝（本函数就是为存在缺失的场景设计的）
+# 依赖全局变量: GLOBAL_FIXED_FILES_JSON, GLOBAL_FIX_BLACKLIST_JSON（tasks.sh 顶级初始化）
+# 用法: save_fix_state_marker <source_path> <dest_path> <task_name>
+save_fix_state_marker() {
+  local source_path="$1"
+  local dest_path="$2"
+  local task_name="$3"
+
+  local marker_path
+  marker_path=$(get_marker_path "$task_name" "$dest_path")
+
+  local new_fixed_json="${GLOBAL_FIXED_FILES_JSON:-[]}"
+  local new_bl_json="${GLOBAL_FIX_BLACKLIST_JSON:-{}}"
+  local new_count new_bl_count
+  new_count=$(echo "$new_fixed_json" | jq 'length' 2>/dev/null || echo 0)
+  new_bl_count=$(echo "$new_bl_json" | jq 'length' 2>/dev/null || echo 0)
+
+  # 读取现有 marker（可能不存在）
+  local old_marker=""
+  old_marker=$(rclone cat "$marker_path" 2>/dev/null) || true
+  local old_fixed_count=0
+  [ -n "$old_marker" ] && old_fixed_count=$(echo "$old_marker" | jq -r '(.fixed_files // []) | length' 2>/dev/null || echo 0)
+
+  # 无新修复、无新黑名单、旧 marker 也无修复记录 → 无事可做
+  if [ "$new_count" -eq 0 ] && [ "$new_bl_count" -eq 0 ] && [ "$old_fixed_count" -eq 0 ]; then
+    return 0
+  fi
+
+  # carry-forward: 继承旧记录中 original 仍未对齐的条目，与本轮新修复合并（新优先）
+  local carried_json="[]"
+  [ "$old_fixed_count" -gt 0 ] && carried_json=$(_carry_forward_fixed "$dest_path" "$old_marker")
+  local carried_count
+  carried_count=$(echo "$carried_json" | jq 'length' 2>/dev/null || echo 0)
+
+  local merged_fixed_json
+  merged_fixed_json=$(jq -sc --argjson new "$new_fixed_json" --argjson carried "$carried_json" '
+    $new + ([$carried[] | select((.original as $o | $new | map(.original == $o) | any) | not)])
+  ' 2>/dev/null || echo "[]")
+
+  # 黑名单合并: 旧 ∪ 新（新优先）；对已对齐文件的黑名单条目一并清理
+  local merged_bl_json="{}"
+  if [ -n "$old_marker" ]; then
+    merged_bl_json=$(echo "$old_marker" | jq -c 'if (.fix_blacklist // null) | type == "object" then .fix_blacklist else {} end' 2>/dev/null || echo "{}")
+  fi
+  merged_bl_json=$(jq -cn --argjson a "$merged_bl_json" --argjson b "$new_bl_json" \
+    '($a // {}) * ($b // {})' 2>/dev/null || echo "{}")
+
+  local fixed_count fixed_bytes
+  fixed_count=$(echo "$merged_fixed_json" | jq 'length' 2>/dev/null || echo 0)
+  fixed_bytes=$(echo "$merged_fixed_json" | jq '[.[].size_bytes] | add // 0' 2>/dev/null || echo 0)
+
+  # 合并写入: 有旧 marker 时仅替换修复字段（保留 last_success 等）；
+  # 无旧 marker 时创建仅含修复状态的对象（无 last_success → 不影响跳过判断）
+  local marker_json
+  if [ -n "$old_marker" ] && echo "$old_marker" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    marker_json=$(echo "$old_marker" | jq -c \
+      --argjson fixed_files "$merged_fixed_json" \
+      --argjson fixed_count "$fixed_count" \
+      --argjson fixed_bytes "$fixed_bytes" \
+      --argjson fix_blacklist "$merged_bl_json" \
+      '. + {fixed_files: $fixed_files, fixed_count: $fixed_count, fixed_bytes: $fixed_bytes, fix_blacklist: $fix_blacklist}')
+  else
+    marker_json=$(jq -cn \
+      --arg source_path "$source_path" \
+      --arg dest_path "$dest_path" \
+      --argjson fixed_files "$merged_fixed_json" \
+      --argjson fixed_count "$fixed_count" \
+      --argjson fixed_bytes "$fixed_bytes" \
+      --argjson fix_blacklist "$merged_bl_json" \
+      '{source_path: $source_path, dest_path: $dest_path, fixed_files: $fixed_files, fixed_count: $fixed_count, fixed_bytes: $fixed_bytes, fix_blacklist: $fix_blacklist}')
+  fi
+
+  rclone mkdir "$SYNC_STATE_DIR" >/dev/null 2>&1 || true
+  echo "$marker_json" | rclone rcat "$marker_path" 2>/dev/null
+  local bl_total
+  bl_total=$(echo "$merged_bl_json" | jq 'length' 2>/dev/null || echo 0)
+  echo "已保存修复状态: $marker_path (本轮修复 ${new_count} 个, 继承 ${carried_count} 个, 合计 ${fixed_count} 个; 方法黑名单 ${bl_total} 条)"
+}
+
 # 保存同步标记（同步成功后调用）
 # 记录: 时间戳、源端路径、目标路径、源端大小/文件数、顶层目录列表、已修复文件列表
 # 已修复文件列表 (fixed_files): 通过缺失文件修复机制以非原名上传的文件
@@ -92,42 +222,8 @@ save_sync_marker() {
     local old_fixed_count
     old_fixed_count=$(echo "$old_marker" | jq -r '(.fixed_files // []) | length' 2>/dev/null || echo 0)
     if [ "${old_fixed_count:-0}" -gt 0 ]; then
-      # 取每条旧修复记录，检查目标端是否已出现原名文件
-      local carried_entries=()
-      local idx total carried_flag orig_size
-      total=$old_fixed_count
-      # 用 jq 一次把所有 original / alternative 拉成 tsv 便于 shell 逐行处理
-      local tsv
-      tsv=$(echo "$old_marker" | jq -r '
-        (.fixed_files // []) | to_entries[]
-        | [.key, (.value.original // ""), (.value.alternative // ""), (.value.size_bytes // 0)]
-        | @tsv' 2>/dev/null || echo "")
-
-      local old_fixed_json
-      old_fixed_json=$(echo "$old_marker" | jq -c '.fixed_files // []' 2>/dev/null || echo "[]")
-
-      while IFS=$'\t' read -r idx orig _dummy size_bytes; do
-        [ -z "$orig" ] && continue
-        # 检查目标端是否已存在原名文件（已存在则无需再继承，本次同步已正常完成）
-        # rclone lsjson 快速探测，取第一个条目即可
-        local probe
-        probe=$(timeout 20 rclone lsjson "${dest_path}/${orig}" --max-depth 1 2>/dev/null || echo "[]")
-        local exists
-        exists=$(echo "$probe" | jq -r 'length // 0' 2>/dev/null || echo 0)
-        if [ "${exists:-0}" -eq 0 ]; then
-          # 原名仍不存在 → 此修复记录仍有效，继承
-          carried_entries+=("$idx")
-          carried_count=$((carried_count + 1))
-        fi
-      done <<< "$tsv"
-
-      if [ "${#carried_entries[@]}" -gt 0 ]; then
-        # 按 idx 把 carried 的条目从 old_fixed_json 里抽出来
-        local idx_args
-        idx_args=$(printf ', .[%s]' "${carried_entries[@]}")
-        idx_args=${idx_args#, }  # 去掉第一个逗号
-        carried_json=$(echo "$old_fixed_json" | jq -c "[ $idx_args ]" 2>/dev/null || echo "[]")
-      fi
+      carried_json=$(_carry_forward_fixed "$dest_path" "$old_marker")
+      carried_count=$(echo "$carried_json" | jq 'length' 2>/dev/null || echo 0)
       echo "旧标记修复记录: ${old_fixed_count} 条，继承有效 ${carried_count} 条，已对齐自动剔除 $((old_fixed_count - carried_count)) 条"
     fi
   fi

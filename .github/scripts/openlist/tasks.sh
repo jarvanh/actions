@@ -401,6 +401,14 @@ sync_task() {
   _TASK_AUTO_SPLIT=$_auto_split _TASK_SKIP_DAYS=$_skip_days _sync_task_impl "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
   local _rc=$?
 
+  # 无论本轮成败，持久化修复状态（fixed_files + fix_blacklist）
+  # 部分失败轮（SYNC_FAILED=1）不写跳过 marker，但修复成果必须记录：
+  # 否则下一轮会重复下载/打包/上传已持久化的替代文件，跨轮方法黑名单也会丢失。
+  # 任务被跳过时（SYNC_SKIPPED=1）本轮无修复活动，不写。
+  if [ "$SYNC_SKIPPED" != "1" ]; then
+    save_fix_state_marker "$source_path" "$dest_path" "$task_name" || true
+  fi
+
   if [ "$current_depth" -eq 0 ]; then
     if [ "$SYNC_SKIPPED" = "1" ]; then
       task_done "skipped"
