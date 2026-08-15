@@ -29,6 +29,16 @@ on:
         required: false
         type: number
         default: 5
+      restore_fixed:
+        description: "一键还原: 把修复文件还原为原路径原文件名（改名类 move / 压缩类解压回传，成功后清理替代文件）"
+        required: false
+        type: boolean
+        default: false
+      restore_task:
+        description: "还原的任务名 (backup/task0-task5/all)"
+        required: false
+        type: string
+        default: "all"
       skip_preview:
         description: "跳过任务预览通知（直接开始同步）"
         required: false
@@ -172,13 +182,25 @@ jobs:
           cp "$GITHUB_WORKSPACE/.github/scripts/openlist/"*.sh /tmp/
           echo "函数库加载完成"
 
+      # ===== 一键还原修复文件 =====
+      # 把 marker fixed_files 中的替代文件还原为原路径原文件名:
+      #   改名类 → rclone move 服务端移动；压缩/分卷/base64 内容类 → 下载还
+      #   原后回传原路径；成功后清理目标端替代文件并从 marker 移除条目。
+      # 完成后发送 Telegram 汇总。restore_task 指定任务名（backup/task0-5）或 all。
+      - name: "Restore: 一键还原修复文件"
+        if: ${{ inputs.restore_fixed == true }}
+        timeout-minutes: 240
+        run: |
+          source /tmp/load_all.sh
+          restore_fixed_files "${{ inputs.restore_task || 'all' }}"
+
       # ===== 调试: 单任务测试修复管线 =====
       # 用真实生产代码路径（copy_task → sync_with_logging）跑单个 wopan176Crypt 任务，
       # 验证 raw-vs-crypt 校验 + 缺失文件修复的实际效果。
       # 与正式流程的区别: 只跑单任务、跳过任务预览、不检查 --1d-skip 标记、
       # 跳过结尾 5h sleep，并用 OPENLIST_MISSING_FIX_MAX 限制修复数量快速得到结果。
       - name: "Debug: 单任务测试修复管线"
-        if: ${{ inputs.fix_test_mode == true }}
+        if: ${{ inputs.fix_test_mode == true && inputs.restore_fixed != true }}
         timeout-minutes: 120
         run: |
           source /tmp/load_all.sh
@@ -246,7 +268,7 @@ jobs:
           echo "=== 修复管线测试完成 (SYNC_FAILED=${SYNC_FAILED}) ==="
 
       - name: Initialize sync
-        if: ${{ inputs.fix_test_mode != true }}
+        if: ${{ inputs.fix_test_mode != true && inputs.restore_fixed != true }}
         run: |
           source /tmp/load_all.sh
           PROCESSED_FILES_LOG="processed_videos.log"
@@ -275,7 +297,7 @@ jobs:
       # ===== 所有同步任务定义 + 预览 + 执行 =====
       # 增减任务只需编辑下方 run_all_tasks 函数体；rclone 参数编辑下方 RCLONE_*_FLAGS 数组。
       - name: Preview and sync all tasks
-        if: ${{ inputs.fix_test_mode != true }}
+        if: ${{ inputs.fix_test_mode != true && inputs.restore_fixed != true }}
         run: |
           source /tmp/load_all.sh
 
@@ -412,7 +434,7 @@ jobs:
           echo "=== 所有任务同步完成 ==="
 
       - name: Finalize and cleanup
-        if: ${{ inputs.fix_test_mode != true }}
+        if: ${{ inputs.fix_test_mode != true && inputs.restore_fixed != true }}
         run: |
           source /tmp/load_all.sh
           actual_entries=0
@@ -441,7 +463,7 @@ jobs:
           echo "所有同步任务完成！"
 
       - name: sleep
-        if: ${{ inputs.fix_test_mode != true }}
+        if: ${{ inputs.fix_test_mode != true && inputs.restore_fixed != true }}
         run: |
           sleep 300m
           sudo docker stop openlist
