@@ -14,6 +14,15 @@ MODTIME="$3"
 FILENAME="$(basename "$LOCAL_FILE")"
 WORK_DIR="$(dirname "$LOCAL_FILE")"
 OUTPUT_FILE="$WORK_DIR/output.mp4"
+# ffmpeg stderr 写入日志文件（成功时静默，失败时打印尾部，避免错误细节丢失）
+FFMPEG_LOG="$WORK_DIR/ffmpeg.err"
+
+# 打印 ffmpeg 日志尾部（失败排查用）
+print_ffmpeg_tail() {
+  echo "--- ffmpeg 错误输出(尾部) ---"
+  tail -n 30 "$FFMPEG_LOG" 2>/dev/null || echo "(无错误输出)"
+  echo "------------------------------"
+}
 
 # 检测编码
 vcodec=$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$LOCAL_FILE" 2>/dev/null) || vcodec=""
@@ -24,6 +33,9 @@ height=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of cs
 
 if [ -z "$vcodec" ]; then
   echo "FAILED: cannot read codec: $FILENAME"
+  echo "--- ffprobe 错误输出 ---"
+  ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$LOCAL_FILE" 2>&1 | tail -n 20
+  echo "------------------------"
   exit 1
 fi
 
@@ -59,32 +71,35 @@ TRANSCODE_START=$SECONDS
 if [ "$NEED_REENCODE" -eq 1 ]; then
   # 重编码为 Telegram 兼容格式
   echo "[transcode] 需要转码: $FILENAME ($REASON → h264/yuv420p/aac)"
-  if ffmpeg -y -i "$LOCAL_FILE" -map 0:v:0 -map 0:a? -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1" -c:a aac -movflags +faststart "$OUTPUT_FILE" 2>/dev/null && mv "$OUTPUT_FILE" "$LOCAL_FILE"; then
+  if ffmpeg -y -i "$LOCAL_FILE" -map 0:v:0 -map 0:a? -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1" -c:a aac -movflags +faststart "$OUTPUT_FILE" 2> "$FFMPEG_LOG" && mv "$OUTPUT_FILE" "$LOCAL_FILE"; then
     TRANSCODE_ELAPSED=$((SECONDS - TRANSCODE_START))
     echo "[transcode] 转码成功: $FILENAME (耗时 ${TRANSCODE_ELAPSED}s)"
   else
     rm -f "$OUTPUT_FILE"
     TRANSCODE_ELAPSED=$((SECONDS - TRANSCODE_START))
     echo "FAILED: transcode failed ($REASON) after ${TRANSCODE_ELAPSED}s: $FILENAME"
+    print_ffmpeg_tail
     exit 1
   fi
 else
   # 已是兼容格式，仅添加 faststart
   echo "[transcode] 无需转码，仅添加 faststart: $FILENAME"
-  if ffmpeg -y -i "$LOCAL_FILE" -c copy -movflags +faststart "$OUTPUT_FILE" 2>/dev/null && mv "$OUTPUT_FILE" "$LOCAL_FILE"; then
+  if ffmpeg -y -i "$LOCAL_FILE" -c copy -movflags +faststart "$OUTPUT_FILE" 2> "$FFMPEG_LOG" && mv "$OUTPUT_FILE" "$LOCAL_FILE"; then
     TRANSCODE_ELAPSED=$((SECONDS - TRANSCODE_START))
     echo "[transcode] faststart 成功: $FILENAME (耗时 ${TRANSCODE_ELAPSED}s)"
   else
     # faststart 失败 → 重编码兜底
     rm -f "$OUTPUT_FILE"
     echo "WARN: faststart failed, re-encoding: $FILENAME"
-    if ffmpeg -y -i "$LOCAL_FILE" -map 0:v:0 -map 0:a? -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1" -c:a aac -movflags +faststart "$OUTPUT_FILE" 2>/dev/null && mv "$OUTPUT_FILE" "$LOCAL_FILE"; then
+    tail -n 10 "$FFMPEG_LOG" 2>/dev/null
+    if ffmpeg -y -i "$LOCAL_FILE" -map 0:v:0 -map 0:a? -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1" -c:a aac -movflags +faststart "$OUTPUT_FILE" 2> "$FFMPEG_LOG" && mv "$OUTPUT_FILE" "$LOCAL_FILE"; then
       TRANSCODE_ELAPSED=$((SECONDS - TRANSCODE_START))
       echo "[transcode] faststart 失败后重编码成功: $FILENAME (总耗时 ${TRANSCODE_ELAPSED}s)"
     else
       rm -f "$OUTPUT_FILE"
       TRANSCODE_ELAPSED=$((SECONDS - TRANSCODE_START))
       echo "FAILED: faststart + transcode both failed after ${TRANSCODE_ELAPSED}s: $FILENAME"
+      print_ffmpeg_tail
       exit 1
     fi
   fi

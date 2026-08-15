@@ -162,6 +162,16 @@ def flush_uploaded_to_remote(uploaded: dict):
         print(f"[flush] uploaded_videos.json 已同步到远端 (条目数: {len(uploaded)})")
 
 
+def tail_file(path: str, n: int = 15) -> str:
+    """读取文件最后 n 行，用于失败时输出/附带错误尾部。"""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+        return "".join(lines[-n:]).strip()
+    except OSError:
+        return ""
+
+
 def human_size(num):
     """与 du -h 风格一致：1024 进制、四舍五入取整，单位 B/K/M/G/T。"""
     num = float(num)
@@ -298,8 +308,16 @@ def main():
         proc_one = os.path.join(GITHUB_WORKSPACE, ".github", "scripts", "transcode_and_send.sh")
         print(f"🎬 开始处理/上传: {file}")
         up_start = time.time()
-        # 透传输出：转码/上传进度实时进 Actions 日志，避免长时间静默
-        up_result = run(["bash", proc_one, local_file, CHANNEL_ID, modtime_display], capture=False)
+        # 透传输出：转码/上传进度实时进 Actions 日志；同时 tee 到日志文件，失败时把尾部附进通知
+        proc_log = os.path.join(WORK_DIR, "proc.log")
+        up_result = run(
+            [
+                "bash", "-c",
+                "set -o pipefail; "
+                f"bash {shlex.quote(proc_one)} {shlex.quote(local_file)} {shlex.quote(CHANNEL_ID)} {shlex.quote(modtime_display)} 2>&1 | tee {shlex.quote(proc_log)}",
+            ],
+            capture=False,
+        )
         up_elapsed = time.time() - up_start
         if up_result.returncode == 0:
             uploaded_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -332,12 +350,18 @@ def main():
             sent_list.append(f"- {file} (上传耗时 {up_elapsed:.2f}s)")
             print(f"✅ 上传完成: {file} (总处理耗时 {up_elapsed:.2f}s)")
         else:
+            err_tail = tail_file(proc_log, 15)
             err_msg = f"❌ FAILED: 处理/上传失败: {file} (耗时 {up_elapsed:.2f}s)"
             print(err_msg)
-            print("(处理/上传过程已实时输出到上方日志)")
+            if err_tail:
+                print("--- 处理/上传输出(尾部) ---")
+                print(err_tail)
+                print("----------------------------")
+            else:
+                print("(处理/上传过程已实时输出到上方日志)")
             failed += 1
             failed_list.append(f"- {file}（处理/上传失败, {up_elapsed:.2f}s）")
-            notify(f"{err_msg}\n{CAPTION_PREFIX}\n详细输出见 Actions 日志")
+            notify(f"{err_msg}\n{CAPTION_PREFIX}\n{err_tail if err_tail else '（无详细输出，见 Actions 日志）'}")
 
         # 清理工作目录
         if os.path.exists(WORK_DIR):
