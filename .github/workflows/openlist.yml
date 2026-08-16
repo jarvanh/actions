@@ -15,7 +15,7 @@ on:
         type: boolean
         default: false
       fix_test_mode:
-        description: "调试: 单任务测试修复管线（raw-vs-crypt 校验 + 缺失文件修复，跳过预览与 5h 等待）"
+        description: "调试: 单任务测试修复管线（跳过实际传输，直接 diff + 修复 + 持久化复核）"
         required: false
         type: boolean
         default: false
@@ -256,6 +256,8 @@ jobs:
 
           # 单次修复数量上限（快速验证用）
           export OPENLIST_MISSING_FIX_MAX="${{ inputs.fix_test_max || 5 }}"
+          # 跳过 initial sync 实际传输（debug 只验证修复方法: diff → 修复 → 持久化复核）
+          export OPENLIST_FIX_TEST_MODE=1
 
           # ===== rclone 参数（与 "Preview and sync all tasks" step 保持一致）=====
           RCLONE_DEFAULT_FLAGS=(

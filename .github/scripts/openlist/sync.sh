@@ -360,6 +360,15 @@ sync_with_logging() {
   run_rclone_sync_once() {
     local attempt_label="$1"
     echo "=== ${task_name} ${attempt_label} ===" | tee -a "$LOG_FILENAME"
+    # fix_test 模式: 跳过实际 rclone 传输（调试目的是快速验证修复方法，
+    # 全量 copy 动辄 GB 级/十分钟，与快速迭代背道而驰）。日志置空后
+    # 8005/423/错误解析全部空匹配自动跳过，raw 校验 + lsf diff +
+    # 修复管线 + 持久化验证照常执行
+    if [ "${OPENLIST_FIX_TEST_MODE:-0}" = "1" ]; then
+      echo "fix_test 模式: 跳过 ${attempt_label} 实际传输（直接 diff + 修复）" | tee -a "$LOG_FILENAME"
+      : > "$LAST_ATTEMPT_LOG"
+      return 0
+    fi
     echo "OpenList sync args: ${extra_args[*]}" | tee -a "$LOG_FILENAME"
     : > "$LAST_ATTEMPT_LOG"
 
