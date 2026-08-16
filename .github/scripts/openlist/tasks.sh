@@ -285,7 +285,11 @@ _sync_task_impl() {
     local _in_progress=$((subtask_idx - _completed_before))
     progress_update "子目录 ${subtask_idx}/${total_subdirs_count}: ${subdir}" "📊 子目录: ${_completed_before}/${total_subdirs_count} 完成$([ "$_in_progress" -gt 0 ] && echo " (${_in_progress} 进行中)") | ✅${synced_subtasks} ⏭️${skipped_subtasks} ❌${failed_subtasks}"
     SYNC_AUTO_SPLIT_DEPTH=$((current_depth + 1))
-    _sync_task_impl "${source_path}/${subdir}" "${dest_path}/${subdir}" "${safe_subtask}" "${extra_args[@]}" || true
+    # < /dev/null: 子任务全链路（sync/fix/marker）不读 stdin；不隔离的话
+    # 链路里任何误读 stdin 的命令（jq/rclone rcat 等）会把本循环的子目录
+    # 列表吃掉，剩余子任务被静默跳过（run 31954162437 实锤: 只同步了
+    # archive 就跳去最终完整同步，照片/j-1024j 两个子任务丢失）
+    _sync_task_impl "${source_path}/${subdir}" "${dest_path}/${subdir}" "${safe_subtask}" "${extra_args[@]}" < /dev/null || true
     SYNC_AUTO_SPLIT_DEPTH=$current_depth
     if [ "$SYNC_SKIPPED" = "1" ]; then
       skipped_subtasks=$((skipped_subtasks + 1))

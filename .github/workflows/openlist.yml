@@ -473,7 +473,10 @@ jobs:
           echo "=== 所有任务同步完成 ==="
 
       - name: Finalize and cleanup
-        if: ${{ inputs.run_mode == '' || inputs.run_mode == '同步' }}
+        # always(): 大任务（如 task0 的 226GiB）常态撞 6h job 上限被取消，
+        # 本 run 已完成的 marker/processed log 收尾不能丢——run 31954162437
+        # 实测取消后 always() step（Persist）仍会执行，此处同理
+        if: ${{ always() && (inputs.run_mode == '' || inputs.run_mode == '同步') }}
         run: |
           source /tmp/load_all.sh
           actual_entries=0

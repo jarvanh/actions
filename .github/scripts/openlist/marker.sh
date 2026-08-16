@@ -135,7 +135,9 @@ save_fix_state_marker() {
   [[ "$carried_count" =~ ^[0-9]+$ ]] || carried_count=0
 
   local merged_fixed_json
-  merged_fixed_json=$(jq -sc --argjson new "$new_fixed_json" --argjson carried "$carried_json" '
+  # -n: 程序只用 --argjson 变量、不读输入；无 -n 时 jq 会吞掉调用方
+  # while read 循环的 stdin（auto-split 子目录列表被吃 → 后续子任务静默跳过）
+  merged_fixed_json=$(jq -scn --argjson new "$new_fixed_json" --argjson carried "$carried_json" '
     $new + ([$carried[] | select((.original as $o | $new | map(.original == $o) | any) | not)])
   ' 2>/dev/null || echo "[]")
 
@@ -504,7 +506,8 @@ PYEOF
   # 合并: 本轮新修复 ∪ 继承修复 ∪ fallback 扫描修复，以 original 为 key 去重
   # 优先级: 新修复 > 继承 > fallback（新修复信息更精确）
   local merged_fixed_json
-  merged_fixed_json=$(jq -sc --argjson new "$new_fixed_json" \
+  # -n 必须保留: jq 不读 stdin（否则吞掉调用方 while read 循环的列表，见 138 行注释）
+  merged_fixed_json=$(jq -scn --argjson new "$new_fixed_json" \
                            --argjson carried "$carried_json" \
                            --argjson fb "$fallback_json" '
     def without_originals($arr; $orig_set):
@@ -516,7 +519,7 @@ PYEOF
   ' 2>/dev/null)
   # 上面 jq 写法较复杂容易错，失败时降级为 new ∪ carried
   if [ -z "$merged_fixed_json" ]; then
-    merged_fixed_json=$(jq -sc --argjson new "$new_fixed_json" --argjson carried "$carried_json" '
+    merged_fixed_json=$(jq -scn --argjson new "$new_fixed_json" --argjson carried "$carried_json" '
       $new + ([$carried[] | select((.original as $o | $new | map(.original == $o) | any) | not)])
     ' 2>/dev/null || echo "[]")
   fi
