@@ -4,52 +4,48 @@ name: openlist
 on:
   workflow_dispatch:
     inputs:
-      run_mode:
-        description: |
-          运行模式（互斥，四选一）:
-          - `sync` — 正常同步（预览 + 全部任务 + 结尾 5h 等待）
-          - `fix_test` — 调试: 单任务测试修复管线（raw-vs-crypt 校验 + 缺失文件修复，跳过预览与 5h 等待）
-          - `restore` — 一键还原: 修复文件还原为原路径原文件名（改名类 move / 压缩类解压回传，成功后清理替代文件）
-          - `restore_source` — 灾难恢复: 目标端 → 源端（普通文件批量拷回 + 修复文件解码回源端原路径，目标端不动）
-        required: true
-        type: choice
-        default: "sync"
-        options:
-          - "sync"
-          - "fix_test"
-          - "restore"
-          - "restore_source"
-      task:
-        description: "fix_test / restore 模式要处理的任务（restore 可选 all = 全部；fix_test 不支持 all）"
+      split_on_sync_failure:
+        description: "Sync task 失败后，对该 task 源目录中的超阈值大文件执行切割"
         required: false
-        type: choice
+        type: boolean
+        default: false
+      force_sync:
+        description: "强制同步（忽略跳过天数与源端缩小警告，始终执行）"
+        required: false
+        type: boolean
+        default: false
+      fix_test_mode:
+        description: "调试: 单任务测试修复管线（raw-vs-crypt 校验 + 缺失文件修复，跳过预览与 5h 等待）"
+        required: false
+        type: boolean
+        default: false
+      fix_test_task:
+        description: "调试: 要测试的任务 (backup/task0-task5)"
+        required: false
+        type: string
         default: "backup"
-        options:
-          - "backup"
-          - "task0"
-          - "task1"
-          - "task2"
-          - "task3"
-          - "task4"
-          - "task5"
-          - "all"
-      fix_max:
-        description: "fix_test 模式: 单次修复数量上限（快速验证用）"
+      fix_test_max:
+        description: "调试: 单次修复数量上限（快速验证用）"
         required: false
         type: number
         default: 5
-      force_sync:
-        description: "sync 模式: 强制同步（忽略跳过天数与源端缩小警告，始终执行）"
+      restore_fixed:
+        description: "一键还原: 把修复文件还原为原路径原文件名（改名类 move / 压缩类解压回传，成功后清理替代文件）"
+        required: false
+        type: boolean
+        default: false
+      restore_task:
+        description: "还原的任务名 (backup/task0-task5/all)"
+        required: false
+        type: string
+        default: "all"
+      restore_to_source:
+        description: "灾难恢复: 目标端 → 源端（普通文件批量拷回 + 修复文件从替代形态解码回源端原路径，目标端不动）"
         required: false
         type: boolean
         default: false
       skip_preview:
-        description: "sync 模式: 跳过任务预览通知（直接开始同步）"
-        required: false
-        type: boolean
-        default: false
-      split_on_sync_failure:
-        description: "sync 模式: 同步失败后对该 task 源目录中的超阈值大文件执行切割"
+        description: "跳过任务预览通知（直接开始同步）"
         required: false
         type: boolean
         default: false
@@ -132,7 +128,7 @@ jobs:
           sudo docker rm -f openlist 2>/dev/null || true
           sudo docker run -d --restart=unless-stopped -v /dropbox/self-hosted/openlist/data:/opt/openlist/data -p 5244:5244 -e PUID=0 -e PGID=0 -e UMASK=022 --name="openlist" openlistteam/openlist:latest
 
-      - name: Wait for OpenList drivers
+      - name: sleep
         run: |
           sudo sleep 1m
 
@@ -195,13 +191,13 @@ jobs:
       # 把 marker fixed_files 中的替代文件还原为原路径原文件名:
       #   改名类 → rclone move 服务端移动；压缩/分卷/base64 内容类 → 下载还
       #   原后回传原路径；成功后清理目标端替代文件并从 marker 移除条目。
-      # 完成后发送 Telegram 汇总。task 指定任务名（backup/task0-5）或 all。
+      # 完成后发送 Telegram 汇总。restore_task 指定任务名（backup/task0-5）或 all。
       - name: "Restore: 一键还原修复文件"
-        if: ${{ inputs.run_mode == 'restore' }}
+        if: ${{ inputs.restore_fixed == true && inputs.restore_to_source != true }}
         timeout-minutes: 240
         run: |
           source /tmp/load_all.sh
-          restore_fixed_files "${{ inputs.task || 'all' }}"
+          restore_fixed_files "${{ inputs.restore_task || 'all' }}"
 
       # ===== 灾难恢复: 目标端 → 源端 =====
       # 修复文件以替代形态存在正是因为原形态无法在该后端持久化，因此恢复
@@ -214,11 +210,11 @@ jobs:
       # 依赖 marker（与源端同在 OneDrive；极端情况 OneDrive 整体丢失时
       # 需外置的 marker 备份才能映射修复条目）。
       - name: "Restore: 灾难恢复 目标端→源端"
-        if: ${{ inputs.run_mode == 'restore_source' }}
+        if: ${{ inputs.restore_to_source == true }}
         timeout-minutes: 240
         run: |
           source /tmp/load_all.sh
-          restore_source_from_target "${{ inputs.task || 'all' }}"
+          restore_source_from_target "${{ inputs.restore_task || 'all' }}"
 
       # ===== 调试: 单任务测试修复管线 =====
       # 用真实生产代码路径（copy_task → sync_with_logging）跑单个 wopan176Crypt 任务，
@@ -226,7 +222,7 @@ jobs:
       # 与正式流程的区别: 只跑单任务、跳过任务预览、不检查 --1d-skip 标记、
       # 跳过结尾 5h sleep，并用 OPENLIST_MISSING_FIX_MAX 限制修复数量快速得到结果。
       - name: "Debug: 单任务测试修复管线"
-        if: ${{ inputs.run_mode == 'fix_test' }}
+        if: ${{ inputs.fix_test_mode == true && inputs.restore_fixed != true && inputs.restore_to_source != true }}
         timeout-minutes: 120
         run: |
           source /tmp/load_all.sh
@@ -259,7 +255,7 @@ jobs:
           progress_init
 
           # 单次修复数量上限（快速验证用）
-          export OPENLIST_MISSING_FIX_MAX="${{ inputs.fix_max || 5 }}"
+          export OPENLIST_MISSING_FIX_MAX="${{ inputs.fix_test_max || 5 }}"
 
           # ===== rclone 参数（与 "Preview and sync all tasks" step 保持一致）=====
           RCLONE_DEFAULT_FLAGS=(
@@ -279,7 +275,7 @@ jobs:
           )
 
           # ===== 按 input 选择要测试的任务（与 run_all_tasks 中 copy_task 定义一致）=====
-          FIX_TASK="${{ inputs.task || 'backup' }}"
+          FIX_TASK="${{ inputs.fix_test_task || 'backup' }}"
           echo "=== 修复管线测试任务: ${FIX_TASK} (修复上限 ${OPENLIST_MISSING_FIX_MAX}) ==="
           case "$FIX_TASK" in
             backup) copy_task "onedrive:backup" "openlist:wopan176Crypt/backup" "backup" ;;
@@ -289,12 +285,12 @@ jobs:
             task3)  copy_task "onedrive:3" "openlist:wopan176Crypt/3" "task3" ;;
             task4)  copy_task "onedrive:4" "openlist:wopan176Crypt/4" "task4" ;;
             task5)  copy_task "onedrive:5" "openlist:wopan176Crypt/5" "task5" ;;
-            *) echo "fix_test 模式不支持任务: ${FIX_TASK}（可选: backup/task0-task5；restore 模式才支持 all）"; exit 1 ;;
+            *) echo "未知任务: ${FIX_TASK}（可选: backup/task0-task5）"; exit 1 ;;
           esac
           echo "=== 修复管线测试完成 (SYNC_FAILED=${SYNC_FAILED}) ==="
 
       - name: Initialize sync
-        if: ${{ inputs.run_mode == 'sync' || inputs.run_mode == '' }}
+        if: ${{ inputs.fix_test_mode != true && inputs.restore_fixed != true && inputs.restore_to_source != true }}
         run: |
           source /tmp/load_all.sh
           PROCESSED_FILES_LOG="processed_videos.log"
@@ -323,7 +319,7 @@ jobs:
       # ===== 所有同步任务定义 + 预览 + 执行 =====
       # 增减任务只需编辑下方 run_all_tasks 函数体；rclone 参数编辑下方 RCLONE_*_FLAGS 数组。
       - name: Preview and sync all tasks
-        if: ${{ inputs.run_mode == 'sync' || inputs.run_mode == '' }}
+        if: ${{ inputs.fix_test_mode != true && inputs.restore_fixed != true && inputs.restore_to_source != true }}
         run: |
           source /tmp/load_all.sh
 
@@ -460,7 +456,7 @@ jobs:
           echo "=== 所有任务同步完成 ==="
 
       - name: Finalize and cleanup
-        if: ${{ inputs.run_mode == 'sync' || inputs.run_mode == '' }}
+        if: ${{ inputs.fix_test_mode != true && inputs.restore_fixed != true && inputs.restore_to_source != true }}
         run: |
           source /tmp/load_all.sh
           actual_entries=0
@@ -494,8 +490,8 @@ jobs:
           rm -f /tmp/*.sh 2>/dev/null || true
           echo "所有同步任务完成！"
 
-      - name: Idle 5h (keep-alive, then stop container)
-        if: ${{ inputs.run_mode == 'sync' || inputs.run_mode == '' }}
+      - name: sleep
+        if: ${{ inputs.fix_test_mode != true && inputs.restore_fixed != true && inputs.restore_to_source != true }}
         run: |
           sleep 300m
           sudo docker stop openlist
