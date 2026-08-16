@@ -76,7 +76,7 @@ _sync_task_impl() {
   # skip 标记检查（需 --1d-skip / --2d-skip 等开启）
   MARKER_ACTION="proceed"
   if [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
-    check_sync_marker "$source_path" "$dest_path" "$task_name"
+    check_sync_marker "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
     case "$MARKER_ACTION" in
       skip)
         send_sync_skipped "$task_name" "$source_path" "$dest_path"
@@ -107,7 +107,7 @@ _sync_task_impl() {
     sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
     local _rc=$?
     if [ "$SYNC_FAILED" = "0" ] && [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
-      save_sync_marker "$source_path" "$dest_path" "$task_name"
+      save_sync_marker "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
     elif [ "$current_depth" -eq 0 ]; then
       split_on_sync_failure "$source_path" "$task_name"
     fi
@@ -135,7 +135,7 @@ _sync_task_impl() {
     sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
     local _rc=$?
     if [ "$SYNC_FAILED" = "0" ] && [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
-      save_sync_marker "$source_path" "$dest_path" "$task_name"
+      save_sync_marker "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
     elif [ "$current_depth" -eq 0 ]; then
       split_on_sync_failure "$source_path" "$task_name"
     fi
@@ -151,7 +151,7 @@ _sync_task_impl() {
     sync_by_file_batches "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
     local _rc=$?
     if [ "$SYNC_FAILED" = "0" ] && [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
-      save_sync_marker "$source_path" "$dest_path" "$task_name"
+      save_sync_marker "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
     elif [ "$current_depth" -eq 0 ]; then
       split_on_sync_failure "$source_path" "$task_name"
     fi
@@ -171,7 +171,7 @@ _sync_task_impl() {
     sync_by_file_batches "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
     local _rc=$?
     if [ "$SYNC_FAILED" = "0" ] && [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
-      save_sync_marker "$source_path" "$dest_path" "$task_name"
+      save_sync_marker "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
     elif [ "$current_depth" -eq 0 ]; then
       split_on_sync_failure "$source_path" "$task_name"
     fi
@@ -222,7 +222,7 @@ _sync_task_impl() {
       local _rc=$?
       if [ "$current_depth" -eq 0 ]; then
         if [ "$SYNC_FAILED" = "0" ] && [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
-          save_sync_marker "$source_path" "$dest_path" "$task_name"
+          save_sync_marker "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
         else
           split_on_sync_failure "$source_path" "$task_name"
         fi
@@ -328,7 +328,7 @@ _sync_task_impl() {
     sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
     AUTO_SPLIT_INFO=""
     if [ "$SYNC_FAILED" = "0" ] && [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
-      save_sync_marker "$source_path" "$dest_path" "$task_name"
+      save_sync_marker "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
     else
       split_on_sync_failure "$source_path" "$task_name"
     fi
@@ -337,7 +337,7 @@ _sync_task_impl() {
     SYNC_FAILED=0
     SYNC_TRANSFERRED_BYTES=$total_transferred
     if [ "$SYNC_FAILED" = "0" ] && [ "$failed_subtasks" -eq 0 ] && [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
-      save_sync_marker "$source_path" "$dest_path" "$task_name"
+      save_sync_marker "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
     fi
   fi
   PROGRESS_PHASE_INFO="$_old_phase"
@@ -492,7 +492,7 @@ sync_by_file_batches() {
   # skip 标记检查（需 --1d-skip / --2d-skip 等开启）
   MARKER_ACTION="proceed"
   if [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
-    check_sync_marker "$source_path" "$dest_path" "$task_name"
+    check_sync_marker "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
     case "$MARKER_ACTION" in
       skip)
         echo "跳过 ${task_name} 文件批次同步: $((SYNC_SKIP_SECONDS / 3600))小时内已成功同步"
@@ -677,6 +677,6 @@ sync_by_file_batches() {
 
   # 文件批次同步成功后保存标记
   if [ "$SYNC_FAILED" = "0" ] && [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
-    save_sync_marker "$source_path" "$dest_path" "$task_name"
+    save_sync_marker "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
   fi
 }
