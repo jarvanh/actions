@@ -363,6 +363,8 @@ _remove_fix_entry_from_state() {
 # 逐条检查修复条目是否被后端真正持久化；失败条目当场加入方法黑名单，
 # 供本轮"立即换方法重试"直接跳过失效方法（不再等下一轮）
 # 输入清单格式: <alt_path>|<bytes>|<orig_path>|<method>|<method_id> 每行一条
+# max_sample: 0 = 复核全部条目（默认语义，修复条目本来就有限，
+#             OPENLIST_MISSING_FIX_MAX 封顶）；>0 = 仅复核前 N 条（限流逃生阀）
 # 结果写入全局: PERSIST_OK / PERSIST_FAIL / PERSIST_IDX /
 #               PERSIST_FAILED_ORIGS（失败条目 original 数组）/ PERSIST_FAIL_DETAILS
 # 用法: _persist_verify_entries <dest_path> <list_file> <max_sample> <log_file>
@@ -377,7 +379,7 @@ _persist_verify_entries() {
   while IFS='|' read -r alt_path bytes orig_path f_method f_mid; do
     [ -z "$alt_path" ] && continue
     PERSIST_IDX=$((PERSIST_IDX + 1))
-    [ "$PERSIST_IDX" -gt "$max_sample" ] && break
+    [ "$max_sample" -gt 0 ] && [ "$PERSIST_IDX" -gt "$max_sample" ] && break
 
     local full_alt="${dest_path}/${alt_path}"
     local after_sz after_lsf_sz
@@ -956,24 +958,28 @@ sync_with_logging() {
           sleep 20
         fi
 
-        # 6. 逐个复核修复文件（最多抽取前 6 条，避免耗时过长）
+        # 6. 逐个复核全部修复文件（不再抽样——假成功文件只有重启后才能暴露，
+        # 抽前 6 条会漏掉其余假成功条目；复核是纯列表操作，代价可控。
+        # 如需限流可用 OPENLIST_PERSIST_VERIFY_MAX 设上限，0/空 = 复核全部）
         # 判定规则见 _persist_verify_entries（原样 copy 精确匹配大小；
         # 压缩/分卷/编码类只检查存在且非空）；失败条目当场拉黑并收集，
         # 供第 7 步本轮立即换方法重试
-        _persist_verify_entries "$dest_path" "$PERSIST_VERIFY_LIST" 6 "$LOG_FILENAME"
+        local persist_verify_max="${OPENLIST_PERSIST_VERIFY_MAX:-0}"
+        [[ "$persist_verify_max" =~ ^[0-9]+$ ]] || persist_verify_max=0
+        _persist_verify_entries "$dest_path" "$PERSIST_VERIFY_LIST" "$persist_verify_max" "$LOG_FILENAME"
         local persist_ok=$PERSIST_OK
         local persist_fail=$PERSIST_FAIL
         local persist_idx=$PERSIST_IDX
-        echo "  持久化验证汇总: 抽样 ${persist_idx} / 通过 ${persist_ok} / 失败 ${persist_fail}" | tee -a "$LOG_FILENAME"
+        echo "  持久化验证汇总: 复核 ${persist_idx}/${verify_total} / 通过 ${persist_ok} / 失败 ${persist_fail}" | tee -a "$LOG_FILENAME"
         if [ "$persist_fail" -gt 0 ] && [ "$persist_ok" -eq 0 ]; then
-          echo "  🔴 结论：所有抽样修复文件在容器重启后均消失 → OpenList PUT 返回成功但 wopan176 后端未真正持久化（写入内存缓存后未刷盘/未提交）" | tee -a "$LOG_FILENAME"
+          echo "  🔴 结论：所有复核的修复文件在容器重启后均消失 → OpenList PUT 返回成功但 wopan176 后端未真正持久化（写入内存缓存后未刷盘/未提交）" | tee -a "$LOG_FILENAME"
           # 标记为持久化失败（影响通知但不阻止后续 task）
           SYNC_PERSIST_FAIL=1
         elif [ "$persist_fail" -gt 0 ]; then
           echo "  🟡 结论：部分修复文件在容器重启后消失 → 存在间歇性持久化失败" | tee -a "$LOG_FILENAME"
           SYNC_PERSIST_FAIL=1
         else
-          echo "  🟢 结论：抽样修复文件均已被后端持久化（重启后仍然存在）" | tee -a "$LOG_FILENAME"
+          echo "  🟢 结论：全部复核的修复文件均已被后端持久化（重启后仍然存在）" | tee -a "$LOG_FILENAME"
         fi
         # B: 复核拉黑的方法立即落盘 marker（不等任务结束统一保存——
         # run 31917285452 实测拉黑 5 条最终保存 0 条，黑名单在进程内丢失）
@@ -1070,8 +1076,8 @@ sync_with_logging() {
                 curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh" -H "Authorization: $persist_ol_token" -H "Content-Type: application/json" -d "{\"path\":\"$persist_ol_path\",\"recursive\":true}" >/dev/null 2>&1 || true
                 sleep 20
               fi
-              _persist_verify_entries "$dest_path" "$PERSIST_RETRY_LIST" 999 "$LOG_FILENAME"
-              echo "  重试持久化验证汇总: 抽样 ${PERSIST_IDX} / 通过 ${PERSIST_OK} / 失败 ${PERSIST_FAIL}" | tee -a "$LOG_FILENAME"
+              _persist_verify_entries "$dest_path" "$PERSIST_RETRY_LIST" 0 "$LOG_FILENAME"
+              echo "  重试持久化验证汇总: 复核 ${PERSIST_IDX}/${retry_fixed} / 通过 ${PERSIST_OK} / 失败 ${PERSIST_FAIL}" | tee -a "$LOG_FILENAME"
               # 二次复核仍失败的条目: 移出 fix_list、清理 marker、记入 fail_list
               local r2_orig
               for r2_orig in "${PERSIST_FAILED_ORIGS[@]}"; do
