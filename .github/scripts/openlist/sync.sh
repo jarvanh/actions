@@ -5,8 +5,8 @@
 #   - wopan176 后端 token 刷新（处理 OAuth access token 过期）
 #   - HTTP 423 Locked 重试（OpenList/WebDAV 临时文件锁）
 #   - 8005 登录失败重试（wopan176 token 过期后刷新并重试）
-#   - raw-vs-crypt 校验（wopan176Crypt 目标：对比 wopan176 裸路径密文数，
-#     检测"上传成功但未持久化"的幽灵文件，重启容器还原真实列表）
+#   - truth-check（wopan176Crypt 目标：本轮有传输则重启 OpenList 容器取
+#     后端真值列表，暴露"上传成功但未持久化"的假成功文件给 diff）
 #   - 缺失文件修复（同步后 diff 源端/目标端，缺失文件送 try_fix_failed_file，
 #     不依赖任何错误码——假成功文件没有 ERROR 日志、退出码为 0，只能靠 diff 发现）
 #   - 假成功两层防护:
@@ -214,178 +214,71 @@ _restart_openlist_for_truth() {
   return 0
 }
 
-# raw-vs-crypt 校验（仅 wopan176Crypt 目标端）
-# wopan176Crypt 的每个文件在 wopan176 裸存储中必须有对应密文。
-# 裸路径密文数 < crypt 文件数 → 存在"幽灵文件"：OpenList PUT 返回成功、
-# crypt 列表里可见，但密文从未写入联通云后端（仅存在于 OpenList 内存缓存，
-# 容器重启后消失）。
-# 检测到幽灵文件时重启 OpenList 容器，清空被污染的内存缓存，使后续
-# 源端 vs crypt 的 lsf diff 能把这些假成功文件暴露出来交给修复管线。
-# 用法: _wopan_raw_verify <dest_path> [log_file]
-# 设置全局: RAW_CRYPT_GHOST_COUNT — 幽灵文件数（供通知展示）
-# 返回: 0=无幽灵文件（或非 wopan176Crypt 目标），1=检测到幽灵文件
-_wopan_raw_verify() {
+# truth-check: 传输后重启 OpenList 取后端真值（仅 wopan176Crypt 目标端）
+# 背景: OpenList PUT 假成功条目只存在于内存缓存——crypt 视图与裸视图最终
+# 落到同一个 OpenList 驱动缓存，计数对比恒等、检测力为零（run 31951008332
+# 实锤: 同步后 crypt=raw=1413 判"无幽灵"，重启后真值 1394，19 个假成功
+# 当轮漏网）。历史 crypt-vs-raw 计数对比分支已因此移除。
+# 唯一可靠口径 = 本轮有传输则重启容器、从后端重拉列表，让紧随其后的
+# lsf diff 把假成功文件识别为缺失、当轮送进修复管线。
+# 用法: _wopan_truth_check <dest_path> [log_file]
+# 设置全局: RAW_CRYPT_GHOST_COUNT — 假成功文件数（供通知展示）
+# 返回: 0=列表可信（或非 wopan176Crypt 目标），1=重启失败（列表可能被污染）
+_wopan_truth_check() {
   RAW_CRYPT_GHOST_COUNT=0
   local dest_path="$1"
   local log_file="${2:-/dev/null}"
   [[ "$dest_path" == openlist:wopan176Crypt/* ]] || return 0
 
-  # 必须在父 shell 先行获取配置: 下方 _raw_count_view_for 是命令替换（子
-  # shell），_CRYPT_* 全局在子 shell 里设置回不到父 shell——run 31945907528
-  # 实测配置实际获取成功（诊断日志为空=无失败），父 shell 却因变量丢失
-  # 误判"配置不可用"跳过幽灵判定 → 21 个假成功文件当轮漏网，直到容器重启
-  # 后才被 marker 计数检查发现，整轮 exit 1
-  _ensure_crypt_config "$dest_path" || true
-
-  # 裸路径取 API 权威推导（crypt addition.path），失败退化为字符串替换
-  # raw_dest 可能是含密码的 crypt 即时远程（仅用于计数，绝不能进日志）
-  local raw_dest raw_display
-  raw_dest=$(_raw_count_view_for "$dest_path")
+  local raw_display
   raw_display=$(_raw_remote_for "${dest_path%%/*}" 2>/dev/null || echo "${dest_path/Crypt/}")
-  # 仅 crypt 配置可用（dne 已知）时才展示子路径; 配置不可用时字面子路径
-  # （如 /backup）在裸存储是密文名，展示出来只会误导
-  local _sub=""
-  [ -n "${_CRYPT_ONTHEFLY:-}" ] && [[ "${dest_path#openlist:}" == */* ]] && _sub="/${dest_path#openlist:*/}"
-  echo "=== raw-vs-crypt 校验: ${dest_path} vs ${raw_display}${_sub}（${_CRYPT_DNE:-?} dne, 解密口径计数）===" | tee -a "$log_file"
+  echo "=== truth-check: ${dest_path}（对照 ${raw_display}，重启后后端真值口径）===" | tee -a "$log_file"
 
-  # crypt 配置不可用 → dne 未知: 字面裸路径没有该子目录（目录名也是密文），
-  # 裸根计数口径与 crypt 子树不可比，幽灵判定无意义 → 跳过
-  # （增量类检测 _rebuild_raw_baseline 仍可用裸根退化计数）
-  if [ -z "${_CRYPT_ONTHEFLY:-}" ]; then
-    echo "  ⚠️ crypt 配置不可用（dne 未知，无法构建解密口径计数视图），跳过幽灵文件判定" | tee -a "$log_file"
-    if [ -s /tmp/openlist_crypt_diag.log ]; then
-      tail -n 2 /tmp/openlist_crypt_diag.log | tee -a "$log_file"
-    fi
-    return 0
-  fi
-
-  # 缓存刷新: crypt 挂载 + 裸挂载根（dne=true 时裸存储无字面子路径，只能刷根）
+  # 缓存刷新: crypt 挂载（dne=true 时裸存储无字面子路径——目录名也是密文，只刷 crypt 侧）
   _refresh_ol_cache_fast "${dest_path#openlist:}"
-  _refresh_ol_cache_fast "${raw_display#openlist:}"
 
-  # ===== 传输后强制重启取真值 =====
-  # 本轮 rclone 有实际传输 → OpenList 列表可能含"PUT 假成功"条目，且 crypt
-  # 视图与裸视图共享同一被污染列表，计数对比必然相等、发现不了假成功
-  # （run 31951008332 实测: 同步后 crypt=raw=1413 判"无幽灵"，重启后真实
-  # 计数 1394，19 个假成功全部漏网，直到末尾 marker 计数检查才暴露 exit 1，
-  # 18 个缺失要等下一整轮才被修复）。唯一可靠口径 = 重启容器后端重拉列表，
-  # 让紧随其后的 lsf diff 当轮就把假成功文件识别为缺失送进修复管线。
-  # 无传输则列表可信（没有新写入就没有新污染），走原有计数对比即可。
+  # 本轮 rclone 实际传输数（Copied 行）
   # 注意 grep -c 无匹配时输出 0 且退出码 1，`|| echo 0` 会拼成 "0\n0" 双行，
   # [ -gt ] 直接报 integer expression expected —— 用正则防护归零
-  local uploaded=0 pre_count=0
+  local uploaded=0
   if [ -n "${LAST_ATTEMPT_LOG:-}" ] && [ -f "$LAST_ATTEMPT_LOG" ]; then
     uploaded=$(grep -cE 'Copied \((new|replaced existing)\)' "$LAST_ATTEMPT_LOG" 2>/dev/null || true)
     [[ "$uploaded" =~ ^[0-9]+$ ]] || uploaded=0
   fi
-  if [ "$uploaded" -gt 0 ]; then
-    crypt_json=$(timeout 900 rclone size "$dest_path" --json 2>/dev/null || true)
-    pre_count=$(echo "$crypt_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
-    [[ "$pre_count" =~ ^[0-9]+$ ]] || pre_count=0
-    echo "  本轮传输 ${uploaded} 个文件，crypt 视图 ${pre_count} —— 列表可能含假成功条目，重启容器取后端真值" | tee -a "$log_file"
-    if _restart_openlist_for_truth "${dest_path#openlist:}" "$log_file"; then
-      # 重启后重新计数（此即后端真值）; pre-post 差 = 假成功文件数（供通知）
-      local post_json post_count
-      post_json=$(timeout 900 rclone size "$dest_path" --json 2>/dev/null || true)
-      post_count=$(echo "$post_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
-      [[ "$post_count" =~ ^[0-9]+$ ]] || post_count=0
-      echo "  重启后 crypt 视图: ${pre_count} → ${post_count}" | tee -a "$log_file"
-      if [ "$pre_count" -gt "$post_count" ]; then
-        RAW_CRYPT_GHOST_COUNT=$((pre_count - post_count))
-        echo "  ⚠️ 检测到 ${RAW_CRYPT_GHOST_COUNT} 个假成功文件（重启后从列表消失 → 未持久化），已暴露为缺失，将由下方 diff 送修复管线" | tee -a "$log_file"
-      else
-        echo "  ✅ 重启前后列表一致，无假成功污染" | tee -a "$log_file"
-      fi
-      # 列表已是后端真值，后续计数对比无信息量，直接放行给 diff
-      return 0
-    fi
-    echo "  ⚠️ 容器重启失败，保留当前列表继续（计数对比口径可能被污染）" | tee -a "$log_file"
+
+  # 无传输 → 无新写入即无新污染，缓存列表可信，直接放行给 diff
+  # （上轮遗留污染会带进 diff，但下一轮有传输即重启暴露，一天内自愈）
+  if [ "$uploaded" -eq 0 ]; then
+    echo "  本轮无传输，无新污染，直接放行给 diff" | tee -a "$log_file"
+    return 0
   fi
 
-  local crypt_count=0 raw_count=0 crypt_json raw_json raw_rc=0
+  # 有传输 → 列表可能含"PUT 假成功"条目，重启容器取后端真值
+  local pre_count=0 crypt_json
   crypt_json=$(timeout 900 rclone size "$dest_path" --json 2>/dev/null || true)
-  crypt_count=$(echo "$crypt_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
-  raw_json=$(timeout 900 rclone size "$raw_dest" --json 2>/dev/null) || raw_rc=$?
-  raw_count=$(echo "$raw_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
-  [[ "$crypt_count" =~ ^[0-9]+$ ]] || crypt_count=0
-  [[ "$raw_count" =~ ^[0-9]+$ ]] || raw_count=0
-  echo "  crypt 文件数: ${crypt_count} / 裸路径密文数: ${raw_count}" | tee -a "$log_file"
+  pre_count=$(echo "$crypt_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
+  [[ "$pre_count" =~ ^[0-9]+$ ]] || pre_count=0
+  echo "  本轮传输 ${uploaded} 个文件，crypt 视图 ${pre_count}（缓存口径）—— 重启容器取后端真值" | tee -a "$log_file"
 
-  # 裸路径列表获取失败（路径不存在/驱动错误）→ 无法判定，跳过并提示
-  if [ "$raw_rc" -ne 0 ]; then
-    echo "  ⚠️ 裸路径计数失败 (rc=${raw_rc}, ${raw_display}${_sub} 视角无法列出)，跳过幽灵文件判定" | tee -a "$log_file"
-    # 诊断: 列出 OpenList 根挂载，确认裸存储是否真的挂载（raw 校验/A 层检测/方法2 crypt 直写全依赖它）
-    local root_mounts
-    root_mounts=$(timeout 60 rclone lsf openlist: --dirs-only 2>/dev/null | sed 's|/$||' | head -20)
-    if [ -n "$root_mounts" ]; then
-      echo "  🔍 OpenList 根挂载(WebDAV 可见): $(echo "$root_mounts" | tr '\n' ' ')" | tee -a "$log_file"
-      if ! echo "$root_mounts" | grep -qx "wopan176"; then
-        echo "  🔴 WebDAV 根挂载中无 wopan176 —— 裸存储未挂载或被隐藏，raw 校验/A 层即时检测/方法2 crypt 直写均不可用" | tee -a "$log_file"
-      fi
-    else
-      echo "  🔍 OpenList 根挂载列表获取失败（WebDAV 未就绪?）" | tee -a "$log_file"
-    fi
-    # 诊断: admin API 列出全部存储配置（含响应码——run 31918439043 此表为空，需看 code 定位）
-    local ol_token storage_table api_resp api_code
-    ol_token=$(_get_openlist_token) || ol_token=""
-    if [ -n "$ol_token" ]; then
-      api_resp=$(curl -s "http://127.0.0.1:5244/api/admin/storage/list" \
-        -H "Authorization: $ol_token" --max-time 15 2>/dev/null || echo "")
-      api_code=$(echo "$api_resp" | jq -r '.code // "无响应"' 2>/dev/null)
-      storage_table=$(echo "$api_resp" | \
-        jq -r '(.data.content // .data // [])[] | "  · \(.mount_path) [driver=\(.driver) disabled=\(.disabled // false)]"' 2>/dev/null | head -30)
-      if [ -n "$storage_table" ]; then
-        echo "  🔍 OpenList 存储配置(admin API, code=${api_code}):" | tee -a "$log_file"
-        echo "$storage_table" | tee -a "$log_file"
-      else
-        echo "  🔍 admin API 无存储数据 (code=${api_code}, message=$(echo "$api_resp" | jq -r '.message // "?"' 2>/dev/null))——crypt 配置已自动走 data.db 兜底" | tee -a "$log_file"
-      fi
-    fi
-    return 0
-  fi
-  # 裸路径列表为空但 crypt 非空 → wopan176 驱动大概率未就绪，无法判定，跳过
-  if [ "$raw_count" -eq 0 ] && [ "$crypt_count" -gt 0 ]; then
-    echo "  ⚠️ 裸路径列表为空（wopan176 驱动可能未就绪），跳过幽灵文件判定" | tee -a "$log_file"
-    return 0
-  fi
-
-  # 裸路径密文数 >= crypt 文件数 → 无幽灵文件
-  if [ "$raw_count" -ge "$crypt_count" ]; then
-    echo "  ✅ 未检测到幽灵文件（每个 crypt 文件在裸路径都有对应密文）" | tee -a "$log_file"
-    return 0
-  fi
-
-  RAW_CRYPT_GHOST_COUNT=$((crypt_count - raw_count))
-  echo "  ⚠️ 检测到 ${RAW_CRYPT_GHOST_COUNT} 个幽灵文件（crypt 列表可见但裸路径密文缺失 → 上传未持久化）" | tee -a "$log_file"
-
-  # 重启 OpenList 容器，清掉被污染的内存缓存，让列表回到后端真实状态
-  if ! command -v docker >/dev/null 2>&1 || ! sudo docker ps --format '{{.Names}}' 2>/dev/null | grep -qw openlist; then
-    echo "  ⚠️ docker/openlist 容器不可用，无法重启清缓存，保留当前列表继续" | tee -a "$log_file"
+  if ! _restart_openlist_for_truth "${dest_path#openlist:}" "$log_file"; then
+    echo "  ⚠️ 容器重启失败，保留当前列表继续（可能含假成功条目，diff 口径被污染）" | tee -a "$log_file"
     return 1
   fi
 
-  echo "  重启 OpenList 容器还原真实列表..." | tee -a "$log_file"
-  sudo docker restart openlist >> "$log_file" 2>&1 || true
-
-  local i http_ok=0
-  for i in $(seq 1 30); do
-    if curl -sf http://127.0.0.1:5244/ping >/dev/null 2>&1; then
-      http_ok=1
-      echo "  OpenList HTTP 就绪 (${i}次)" | tee -a "$log_file"
-      break
-    fi
-    sleep 2
-  done
-  if [ "$http_ok" -ne 1 ]; then
-    echo "  ⚠️ OpenList 重启后 HTTP 未就绪，缓存状态未知" | tee -a "$log_file"
-    return 1
+  # 重启后重新计数（此即后端真值）; pre-post 差 = 假成功文件数（供通知）
+  local post_json post_count
+  post_json=$(timeout 900 rclone size "$dest_path" --json 2>/dev/null || true)
+  post_count=$(echo "$post_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
+  [[ "$post_count" =~ ^[0-9]+$ ]] || post_count=0
+  echo "  重启后 crypt 视图: ${pre_count} → ${post_count}" | tee -a "$log_file"
+  if [ "$pre_count" -gt "$post_count" ]; then
+    RAW_CRYPT_GHOST_COUNT=$((pre_count - post_count))
+    echo "  ⚠️ 检测到 ${RAW_CRYPT_GHOST_COUNT} 个假成功文件（重启后从列表消失 → 未持久化），已暴露为缺失，将由下方 diff 送修复管线" | tee -a "$log_file"
+  else
+    echo "  ✅ 重启前后列表一致，无假成功污染" | tee -a "$log_file"
   fi
-
-  echo "  等待驱动重新初始化 (60s)..." | tee -a "$log_file"
-  sleep 60
-  _refresh_ol_cache_fast "${dest_path#openlist:}"
-  echo "  容器已重启，crypt 列表已还原为后端真实状态（幽灵文件已从列表消失，将进入修复管线）" | tee -a "$log_file"
-  return 1
+  # 列表已是后端真值，直接放行给 diff
+  return 0
 }
 
 # 增量持久化单个修复条目到 marker（修复循环内每成功一个立即调用）
@@ -782,11 +675,10 @@ sync_with_logging() {
     done
   fi
 
-  # ===== raw-vs-crypt 校验（仅 wopan176Crypt 目标端）=====
-  # 放在缺失文件 diff 之前：若存在幽灵文件（OpenList 报告上传成功但裸路径
-  # 无对应密文），先重启 OpenList 容器还原真实列表，diff 才能把这批
-  # "假成功"文件识别为缺失文件并送修复管线。
-  _wopan_raw_verify "$dest_path" "$LOG_FILENAME" || true
+  # ===== truth-check（仅 wopan176Crypt 目标端）=====
+  # 放在缺失文件 diff 之前：本轮有传输则重启 OpenList 容器取后端真值列表，
+  # diff 才能把"PUT 假成功"文件（仅存在于缓存）识别为缺失并送修复管线。
+  _wopan_truth_check "$dest_path" "$LOG_FILENAME" || true
 
   # ===== 缺失文件修复管线 =====
   # 不依赖任何错误码：同步后只要源端有、目标端没有的文件（含 rclone 报告
@@ -1507,9 +1399,9 @@ _send_sync_result_notification() {
     count_info="文件数：源端 ${source_count} / 目标 ${dest_count}"
   fi
 
-  # raw-vs-crypt 幽灵文件提示（仅 wopan176Crypt 目标且检测到时展示）
+  # 假成功文件提示（仅 wopan176Crypt 目标且检测到时展示）
   if [ "${RAW_CRYPT_GHOST_COUNT:-0}" -gt 0 ] 2>/dev/null; then
-    count_info+=$'\n'"⚠️ raw-vs-crypt 幽灵文件：${RAW_CRYPT_GHOST_COUNT} 个（密文未落盘，已重启 OpenList 后重新修复）"
+    count_info+=$'\n'"⚠️ 假成功文件：${RAW_CRYPT_GHOST_COUNT} 个（密文未落盘，已重启 OpenList 暴露并当轮修复）"
   fi
 
   # 提取 --exclude 规则，方便在通知中说明

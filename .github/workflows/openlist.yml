@@ -235,7 +235,7 @@ jobs:
 
       # ===== 调试: 单任务测试修复管线 =====
       # 用真实生产代码路径（sync_task → sync_with_logging）跑单个 wopan176Crypt 任务，
-      # 验证 raw-vs-crypt 校验 + 缺失文件修复的实际效果。
+      # 验证 truth-check（重启取真值） + 缺失文件修复的实际效果。
       # 与正式流程的区别: 只跑单任务、跳过任务预览、不检查 --1d-skip 标记、
       # 跳过结尾 5h sleep，并用 OPENLIST_MISSING_FIX_MAX 限制修复数量快速得到结果。
       - name: "Debug: 单任务测试修复管线"

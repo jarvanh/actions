@@ -92,7 +92,7 @@ PY
 
 # crypt 配置获取失败诊断: 原因写入 /tmp/openlist_crypt_diag.log 并打到 stderr
 # （不含任何密钥值，只含状态码/字段名/挂载名表）; 同一挂载每进程只记一次。
-# _wopan_raw_verify 跳过幽灵判定时会把该文件尾部带进任务日志
+# _wopan_truth_check 及修复管线诊断配置问题时会参考该文件
 _crypt_diag() {
   local mount="$1" msg="$2"
   [ -n "${_CRYPT_DIAG_MOUNT:-}" ] && [ "$_CRYPT_DIAG_MOUNT" = "$mount" ] && return 0
@@ -306,7 +306,7 @@ _raw_remote_for() {
   echo "openlist:${base}${sub}"
 }
 
-# raw 计数视图（供 raw-vs-crypt 校验 / A 层即时检测的文件数对比）
+# raw 计数视图（供 A 层即时检测 / raw 基准重建的文件数对比）
 # dne=true（目录名加密）时裸路径没有字面子目录（run 31918439043 实测
 # openlist:wopan176/backup rc=3 not found——"backup" 在裸存储是密文名），
 # 字面路径计数必然失败。改用 crypt 即时远程：rclone 按配置逐段加密路径
