@@ -196,6 +196,13 @@ _wopan_raw_verify() {
   local log_file="${2:-/dev/null}"
   [[ "$dest_path" == openlist:wopan176Crypt/* ]] || return 0
 
+  # 必须在父 shell 先行获取配置: 下方 _raw_count_view_for 是命令替换（子
+  # shell），_CRYPT_* 全局在子 shell 里设置回不到父 shell——run 31945907528
+  # 实测配置实际获取成功（诊断日志为空=无失败），父 shell 却因变量丢失
+  # 误判"配置不可用"跳过幽灵判定 → 21 个假成功文件当轮漏网，直到容器重启
+  # 后才被 marker 计数检查发现，整轮 exit 1
+  _ensure_crypt_config "$dest_path" || true
+
   # 裸路径取 API 权威推导（crypt addition.path），失败退化为字符串替换
   # raw_dest 可能是含密码的 crypt 即时远程（仅用于计数，绝不能进日志）
   local raw_dest raw_display
