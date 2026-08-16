@@ -36,7 +36,9 @@ _carry_forward_fixed() {
 
   local old_fixed_count
   old_fixed_count=$(echo "$old_marker" | jq -r '(.fixed_files // []) | length' 2>/dev/null || echo 0)
-  if [ "${old_fixed_count:-0}" -eq 0 ]; then
+  # 数值防护: jq 可能输出空/null（旧 marker 非法 JSON 等），非数字一律按 0
+  [[ "$old_fixed_count" =~ ^[0-9]+$ ]] || old_fixed_count=0
+  if [ "$old_fixed_count" -eq 0 ]; then
     echo "[]"
     return 0
   fi
@@ -57,7 +59,8 @@ _carry_forward_fixed() {
     local probe exists
     probe=$(timeout 20 rclone lsjson "${dest_path}/${orig}" --max-depth 1 2>/dev/null || echo "[]")
     exists=$(echo "$probe" | jq -r 'length // 0' 2>/dev/null || echo 0)
-    if [ "${exists:-0}" -eq 0 ]; then
+    [[ "$exists" =~ ^[0-9]+$ ]] || exists=0
+    if [ "$exists" -eq 0 ]; then
       carried_entries+=("$idx")
     fi
   done <<< "$tsv"
@@ -93,12 +96,15 @@ save_fix_state_marker() {
   local new_count new_bl_count
   new_count=$(echo "$new_fixed_json" | jq 'length' 2>/dev/null || echo 0)
   new_bl_count=$(echo "$new_bl_json" | jq 'length' 2>/dev/null || echo 0)
+  [[ "$new_count" =~ ^[0-9]+$ ]] || new_count=0
+  [[ "$new_bl_count" =~ ^[0-9]+$ ]] || new_bl_count=0
 
   # 读取现有 marker（可能不存在）
   local old_marker=""
   old_marker=$(rclone cat "$marker_path" 2>/dev/null) || true
   local old_fixed_count=0
   [ -n "$old_marker" ] && old_fixed_count=$(echo "$old_marker" | jq -r '(.fixed_files // []) | length' 2>/dev/null || echo 0)
+  [[ "$old_fixed_count" =~ ^[0-9]+$ ]] || old_fixed_count=0
 
   # 无新修复、无新黑名单、旧 marker 也无修复记录 → 无事可做
   if [ "$new_count" -eq 0 ] && [ "$new_bl_count" -eq 0 ] && [ "$old_fixed_count" -eq 0 ]; then
@@ -110,6 +116,7 @@ save_fix_state_marker() {
   [ "$old_fixed_count" -gt 0 ] && carried_json=$(_carry_forward_fixed "$dest_path" "$old_marker")
   local carried_count
   carried_count=$(echo "$carried_json" | jq 'length' 2>/dev/null || echo 0)
+  [[ "$carried_count" =~ ^[0-9]+$ ]] || carried_count=0
 
   local merged_fixed_json
   merged_fixed_json=$(jq -sc --argjson new "$new_fixed_json" --argjson carried "$carried_json" '
@@ -127,6 +134,8 @@ save_fix_state_marker() {
   local fixed_count fixed_bytes
   fixed_count=$(echo "$merged_fixed_json" | jq 'length' 2>/dev/null || echo 0)
   fixed_bytes=$(echo "$merged_fixed_json" | jq '[.[].size_bytes] | add // 0' 2>/dev/null || echo 0)
+  [[ "$fixed_count" =~ ^[0-9]+$ ]] || fixed_count=0
+  [[ "$fixed_bytes" =~ ^[0-9]+$ ]] || fixed_bytes=0
 
   # 合并写入: 有旧 marker 时仅替换修复字段（保留 last_success 等）；
   # 无旧 marker 时创建仅含修复状态的对象（无 last_success → 不影响跳过判断）
@@ -153,6 +162,7 @@ save_fix_state_marker() {
   echo "$marker_json" | rclone rcat "$marker_path" 2>/dev/null
   local bl_total
   bl_total=$(echo "$merged_bl_json" | jq 'length' 2>/dev/null || echo 0)
+  [[ "$bl_total" =~ ^[0-9]+$ ]] || bl_total=0
   echo "已保存修复状态: $marker_path (本轮修复 ${new_count} 个, 继承 ${carried_count} 个, 合计 ${fixed_count} 个; 方法黑名单 ${bl_total} 条)"
 }
 
@@ -221,9 +231,11 @@ save_sync_marker() {
   if [ -n "$old_marker" ]; then
     local old_fixed_count
     old_fixed_count=$(echo "$old_marker" | jq -r '(.fixed_files // []) | length' 2>/dev/null || echo 0)
-    if [ "${old_fixed_count:-0}" -gt 0 ]; then
+    [[ "$old_fixed_count" =~ ^[0-9]+$ ]] || old_fixed_count=0
+    if [ "$old_fixed_count" -gt 0 ]; then
       carried_json=$(_carry_forward_fixed "$dest_path" "$old_marker")
       carried_count=$(echo "$carried_json" | jq 'length' 2>/dev/null || echo 0)
+      [[ "$carried_count" =~ ^[0-9]+$ ]] || carried_count=0
       echo "旧标记修复记录: ${old_fixed_count} 条，继承有效 ${carried_count} 条，已对齐自动剔除 $((old_fixed_count - carried_count)) 条"
     fi
   fi
@@ -491,6 +503,8 @@ PYEOF
   local fixed_count fixed_bytes
   fixed_count=$(echo "$merged_fixed_json" | jq 'length' 2>/dev/null || echo 0)
   fixed_bytes=$(echo "$merged_fixed_json" | jq '[.[].size_bytes] | add // 0' 2>/dev/null || echo 0)
+  [[ "$fixed_count" =~ ^[0-9]+$ ]] || fixed_count=0
+  [[ "$fixed_bytes" =~ ^[0-9]+$ ]] || fixed_bytes=0
 
   # ===== 方法假成功黑名单（B: 失败记忆）=====
   # merge: 旧 marker 的 fix_blacklist ∪ 本轮新增（GLOBAL_FIX_BLACKLIST_JSON，
@@ -525,6 +539,8 @@ PYEOF
   local new_count fb_count
   new_count=$(echo "$new_fixed_json" | jq 'length' 2>/dev/null || echo 0)
   fb_count=$(echo "$fallback_json" | jq 'length' 2>/dev/null || echo 0)
+  [[ "$new_count" =~ ^[0-9]+$ ]] || new_count=0
+  [[ "$fb_count" =~ ^[0-9]+$ ]] || fb_count=0
   [ "$new_count" -gt 0 ] && summary+=" 本次修复 ${new_count} 个;"
   [ "$carried_count" -gt 0 ] && summary+=" 继承上轮 ${carried_count} 个;"
   [ "${fb_count:-0}" -gt 0 ] && summary+=" fallback扫描反推 ${fb_count} 个;"

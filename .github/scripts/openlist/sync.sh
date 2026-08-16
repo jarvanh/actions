@@ -191,21 +191,28 @@ _wopan_raw_verify() {
   local log_file="${2:-/dev/null}"
   [[ "$dest_path" == openlist:wopan176Crypt/* ]] || return 0
 
-  local raw_dest="${dest_path/wopan176Crypt/wopan176}"
+  # 裸路径取 API 权威推导（crypt addition.path），失败退化为字符串替换
+  local raw_dest
+  raw_dest=$(_raw_remote_for "$dest_path")
   echo "=== raw-vs-crypt 校验: ${dest_path} vs ${raw_dest} ===" | tee -a "$log_file"
 
   _refresh_ol_cache_fast "${dest_path#openlist:}"
   _refresh_ol_cache_fast "${raw_dest#openlist:}"
 
-  local crypt_count=0 raw_count=0 crypt_json raw_json
+  local crypt_count=0 raw_count=0 crypt_json raw_json raw_rc=0
   crypt_json=$(timeout 900 rclone size "$dest_path" --json 2>/dev/null || true)
   crypt_count=$(echo "$crypt_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
-  raw_json=$(timeout 900 rclone size "$raw_dest" --json 2>/dev/null || true)
+  raw_json=$(timeout 900 rclone size "$raw_dest" --json 2>/dev/null) || raw_rc=$?
   raw_count=$(echo "$raw_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
   [[ "$crypt_count" =~ ^[0-9]+$ ]] || crypt_count=0
   [[ "$raw_count" =~ ^[0-9]+$ ]] || raw_count=0
   echo "  crypt 文件数: ${crypt_count} / 裸路径密文数: ${raw_count}" | tee -a "$log_file"
 
+  # 裸路径列表获取失败（路径不存在/驱动错误）→ 无法判定，跳过并提示
+  if [ "$raw_rc" -ne 0 ]; then
+    echo "  ⚠️ 裸路径列表获取失败 (rc=${raw_rc}, ${raw_dest} 可能不是有效挂载)，跳过幽灵文件判定" | tee -a "$log_file"
+    return 0
+  fi
   # 裸路径列表为空但 crypt 非空 → wopan176 驱动大概率未就绪，无法判定，跳过
   if [ "$raw_count" -eq 0 ] && [ "$crypt_count" -gt 0 ]; then
     echo "  ⚠️ 裸路径列表为空（wopan176 驱动可能未就绪），跳过幽灵文件判定" | tee -a "$log_file"
@@ -341,17 +348,18 @@ sync_with_logging() {
     fi
 
     # OpenList 目标端（特别是 wopan176 crypt 后端）上传速度慢且不支持高并发
-    # 限制并发为 1，给后端足够时间持久化每个文件，避免 "object not found" 错误
+    # 上传保持串行（transfers=1，给后端足够时间持久化每个文件，避免 "object not found"）；
+    # 检查阶段只读列表，可提高并发大幅缩短 diff/比对耗时（上传仍逐个进行）
     # 同时增加超时时间（单个文件可能耗时 1-2 分钟）
     local openlist_guard_flags=()
     if [[ "$dest_path" == openlist:* ]]; then
       openlist_guard_flags=(
         "--transfers" "1"
-        "--checkers" "1"
+        "--checkers" "8"
         "--contimeout" "30s"
         "--timeout" "30m"
       )
-      echo "OpenList 目标端：启用低并发保护 (transfers=1, checkers=1, timeout=30m)" | tee -a "$LOG_FILENAME"
+      echo "OpenList 目标端：启用低并发保护 (transfers=1, checkers=8, timeout=30m)" | tee -a "$LOG_FILENAME"
 
       # 同步前主动刷新 wopan176 token
       # wopan176 的 OAuth access token 有效期约 5 分钟，长时间同步会过期
@@ -544,7 +552,7 @@ sync_with_logging() {
     _RAW_VERIFY_BUDGET=0
     if [[ "$dest_path" == openlist:wopan176Crypt/* ]] && [ -s "$missing_list" ]; then
       _RAW_VERIFY_DEST="$dest_path"
-      _RAW_VERIFY_DIR="${dest_path/wopan176Crypt/wopan176}"
+      _RAW_VERIFY_DIR=$(_raw_remote_for "$dest_path")
       _RAW_VERIFY_BUDGET="${OPENLIST_RAW_CHECK_BUDGET:-40}"
       local _raw_base=0
       if _raw_base=$(_raw_dir_count "$_RAW_VERIFY_DIR"); then
@@ -565,7 +573,7 @@ sync_with_logging() {
     local _NAMELEN_OVER_255=0
     local _NAMELEN_OVER_RAWMAX=0
     if [[ "$dest_path" == openlist:wopan176Crypt/* ]] && [ -s "$missing_list" ] && _ensure_crypt_config "$dest_path"; then
-      _NAMELEN_RAW_MAX=$(timeout 600 rclone lsf "${dest_path/wopan176Crypt/wopan176}" -R --files-only 2>/dev/null \
+      _NAMELEN_RAW_MAX=$(timeout 600 rclone lsf "$(_raw_remote_for "$dest_path")" -R --files-only 2>/dev/null \
         | awk -F/ '{ n=length($NF); if (n>m) m=n } END { print m+0 }')
       echo "名长诊断已启用: crypt=${_CRYPT_REMOTE}, 后端已接受最长密文名 ${_NAMELEN_RAW_MAX} 字节" | tee -a "$LOG_FILENAME"
     fi
@@ -970,7 +978,7 @@ sync_with_logging() {
                     elif $has_tmp_move  then {kind:"tmp_move",
             summary: "文件上传到临时目录后用 OpenList API move 移动（可能已移动或保留在临时目录）",
             steps:   ["检查目标路径是否已有原文件", "如未移动，用 OpenList API move 从临时目录移动"],
-            script:  "set -euo pipefail\n# 检查目标是否已存在\nrclone lsjson '" + $dst + "/" + $orig + "' --max-depth 1 2>/dev/null | jq 'length'\n# 如不存在，用 OpenList API move\n# curl -X POST http://127.0.0.1:5244/api/fs/move -H 'Authorization: <token>' -d '{\"src_dir\":\"/wopan176Crypt/backup/" + $alt + "\",\"dst_dir\":\"/wopan176Crypt/backup/" + $orig + "\"}'"}
+            script:  "set -euo pipefail\n# 检查目标是否已存在\nrclone lsjson \u0027" + $dst + "/" + $orig + "\u0027 --max-depth 1 2>/dev/null | jq \u0027length\u0027\n# 如不存在，用 OpenList API move\n# curl -X POST http://127.0.0.1:5244/api/fs/move -H \u0027Authorization: <token>\u0027 -d \u0027{\"src_dir\":\"/wopan176Crypt/backup/" + $alt + "\",\"dst_dir\":\"/wopan176Crypt/backup/" + $orig + "\"}\u0027"}
           else {kind:"copy",
             summary: "文件按原路径原文件名直接 copyto，无需还原处理",
             steps:   ["目标端路径与源端相同，直接使用即可"],

@@ -109,6 +109,24 @@ _ensure_crypt_config() {
   return 0
 }
 
+# 由 Crypt dest_path 推导裸存储远程路径（供 raw 校验/A 检测/名长诊断共用）
+# API 权威优先（crypt addition.path 指向的真实存储），失败时退化为字符串替换
+# （wopan176Crypt→wopan176——实测可能拿不到列表，调用方日志会暴露）
+# 用法: _raw_remote_for <dest_path>  → stdout: openlist:wopan176[/子路径]
+_raw_remote_for() {
+  local dest_path="$1"
+  local rel="${dest_path#openlist:}"
+  local sub=""
+  [[ "$rel" == */* ]] && sub="/${rel#*/}"
+  if _ensure_crypt_config "$dest_path" 2>/dev/null; then
+    echo "${_CRYPT_REMOTE}${sub}"
+    return 0
+  fi
+  local base="${rel%%/*}"
+  base="${base%Crypt}"
+  echo "openlist:${base}${sub}"
+}
+
 # 方法假成功黑名单: <文件相对路径> -> "m1 m3"（空格分隔的方法 ID 集合）
 # 由 sync.sh 修复管线每轮从 marker 加载/重建，并在轮内即时检测时追加
 declare -A FIX_METHOD_BLACKLIST=()
