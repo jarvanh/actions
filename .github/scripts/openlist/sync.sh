@@ -345,7 +345,7 @@ _persist_fix_entry_now() {
   ' "$state_file" 2>/dev/null) || return 1
 
   echo "$merged" > "$state_file"
-  if echo "$merged" | rclone rcat "$marker_path" >/dev/null 2>&1; then
+  if _marker_write "$merged" "$marker_path" >/dev/null 2>&1; then
     echo "    ↳ 已即时记录到修复清单 (marker 合计 $(echo "$merged" | jq -r '.fixed_count') 个)"
   else
     echo "    ↳ ⚠️ 即时写入 marker 失败（任务结束的统一保存会兜底）"
@@ -366,7 +366,7 @@ _remove_fix_entry_from_state() {
     | .fixed_bytes = ([.fixed_files[].size_bytes] | add // 0)
   ' "$state_file" 2>/dev/null) || return 1
   echo "$merged" > "$state_file"
-  if echo "$merged" | rclone rcat "$marker_path" >/dev/null 2>&1; then
+  if _marker_write "$merged" "$marker_path" >/dev/null 2>&1; then
     echo "    ↳ 假成功条目已从修复清单移除 (marker 合计 $(echo "$merged" | jq -r '.fixed_count') 个)"
   else
     echo "    ↳ ⚠️ 移除条目写回 marker 失败（任务结束的统一保存会兜底）"

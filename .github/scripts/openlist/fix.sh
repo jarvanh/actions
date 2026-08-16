@@ -392,7 +392,7 @@ _flush_blacklist_to_marker() {
     merged=$(jq -cn --arg sp "" --arg dp "$dest_path" --argjson bl "$bl_json" \
       '{dest_path: $dp, fix_blacklist: $bl}')
   fi
-  if echo "$merged" | rclone rcat "$marker_path" >/dev/null 2>&1; then
+  if _marker_write "$merged" "$marker_path" >/dev/null 2>&1; then
     echo "  ↳ 黑名单已即时写入 marker ($(echo "$bl_json" | jq 'length') 条)" | tee -a "$log_file"
   else
     echo "  ↳ ⚠️ 黑名单即时写入 marker 失败（任务结束的统一保存会兜底）" | tee -a "$log_file"
