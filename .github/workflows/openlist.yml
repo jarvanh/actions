@@ -481,6 +481,12 @@ jobs:
             rm -f "processed_videos.log" 2>/dev/null || true
           fi
 
+          # 镜像同步状态标记到 Dropbox（marker 是修复文件还原链路的唯一索引，
+          # 与源端同在 OneDrive —— OneDrive 整体故障时灾难恢复需要外置副本）
+          echo "镜像 sync_state → dropbox..."
+          rclone sync onedrive:/logs/sync_state dropbox:sync_state_mirror --create-empty-src-dirs 2>&1 | tail -2 || true
+          echo "sync_state 镜像完成: $(rclone lsf dropbox:sync_state_mirror 2>/dev/null | wc -l | tr -d ' ') 个文件"
+
           rm -f /tmp/*.sh 2>/dev/null || true
           echo "所有同步任务完成！"
 
