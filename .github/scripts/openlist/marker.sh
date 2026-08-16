@@ -170,7 +170,8 @@ save_fix_state_marker() {
 # 记录: 时间戳、源端路径、目标路径、源端大小/文件数、顶层目录列表、已修复文件列表
 # 已修复文件列表 (fixed_files): 通过缺失文件修复机制以非原名上传的文件
 #   预览时从差异中扣减这部分，避免显示"虚假缺失"
-# 方法假成功黑名单 (fix_blacklist): {文件: "m1 m3"}，跨轮失败记忆，
+# 方法假成功黑名单 (fix_blacklist): {文件: "方法1: ...|方法3: ..."}（方法全名，|
+# 分隔），跨轮失败记忆，
 #   下一轮修复时跳过已判定假成功的方法
 # 用法: save_sync_marker <source_path> <dest_path> <task_name>
 save_sync_marker() {

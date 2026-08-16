@@ -216,13 +216,13 @@ _wopan_raw_verify() {
   # 裸路径列表获取失败（路径不存在/驱动错误）→ 无法判定，跳过并提示
   if [ "$raw_rc" -ne 0 ]; then
     echo "  ⚠️ 裸路径计数失败 (rc=${raw_rc}, ${raw_display}${_sub} 视角无法列出)，跳过幽灵文件判定" | tee -a "$log_file"
-    # 诊断: 列出 OpenList 根挂载，确认裸存储是否真的挂载（raw 校验/A 层检测/m15 直写全依赖它）
+    # 诊断: 列出 OpenList 根挂载，确认裸存储是否真的挂载（raw 校验/A 层检测/方法2 crypt 直写全依赖它）
     local root_mounts
     root_mounts=$(timeout 60 rclone lsf openlist: --dirs-only 2>/dev/null | sed 's|/$||' | head -20)
     if [ -n "$root_mounts" ]; then
       echo "  🔍 OpenList 根挂载(WebDAV 可见): $(echo "$root_mounts" | tr '\n' ' ')" | tee -a "$log_file"
       if ! echo "$root_mounts" | grep -qx "wopan176"; then
-        echo "  🔴 WebDAV 根挂载中无 wopan176 —— 裸存储未挂载或被隐藏，raw 校验/A 层即时检测/m15 crypt 直写均不可用" | tee -a "$log_file"
+        echo "  🔴 WebDAV 根挂载中无 wopan176 —— 裸存储未挂载或被隐藏，raw 校验/A 层即时检测/方法2 crypt 直写均不可用" | tee -a "$log_file"
       fi
     else
       echo "  🔍 OpenList 根挂载列表获取失败（WebDAV 未就绪?）" | tee -a "$log_file"
@@ -726,9 +726,9 @@ sync_with_logging() {
       if [ -n "${_CRYPT_ONTHEFLY:-}" ]; then
         echo "名长诊断汇总: 密文名>255B 共 ${_NAMELEN_OVER_255} 个 / 超后端已接受最长(${_NAMELEN_RAW_MAX}B) 共 ${_NAMELEN_OVER_RAWMAX} 个" | tee -a "$LOG_FILENAME"
         if [ "${_NAMELEN_OVER_RAWMAX:-0}" -gt 0 ]; then
-          echo "  → 长度假设成立: 缺失文件密文名超过后端实际接受上限，将由 $(_method_desc m16) 兜底落盘" | tee -a "$LOG_FILENAME"
+          echo "  → 长度假设成立: 缺失文件密文名超过后端实际接受上限，将由 $(_method_desc m3) 兜底落盘" | tee -a "$LOG_FILENAME"
         elif [ "${_NAMELEN_OVER_255:-0}" -eq 0 ]; then
-          echo "  → 长度假设不成立: 缺失文件密文名均未超限，根因另有其因（看 $(_method_desc m15) 的真实报错）" | tee -a "$LOG_FILENAME"
+          echo "  → 长度假设不成立: 缺失文件密文名均未超限，根因另有其因（看 $(_method_desc m2) 的真实报错）" | tee -a "$LOG_FILENAME"
         fi
       fi
     fi
