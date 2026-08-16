@@ -6,7 +6,7 @@
 #   - 检测源端大小异常减小（可能数据丢失），发送警告并跳过
 #
 # 标记存储路径: onedrive:/logs/sync_state/<task_name>_<dest_hash>.json
-# JSON 字段: last_success, source_path, dest_path, source_bytes, source_count, top_dirs
+# JSON 字段: last_success, source_path, dest_path, source_bytes, source_count, top_dirs, stats_filtered
 #
 # 依赖: utils.sh (escape_html, format_bytes), telegram.sh (send_telegram_message)
 # 依赖环境变量: FORCE_SYNC — 为 "true" 时跳过所有标记检查
@@ -173,18 +173,23 @@ save_fix_state_marker() {
 # 方法假成功黑名单 (fix_blacklist): {文件: "方法1: ...|方法3: ..."}（方法全名，|
 # 分隔），跨轮失败记忆，
 #   下一轮修复时跳过已判定假成功的方法
-# 用法: save_sync_marker <source_path> <dest_path> <task_name>
+# 用法: save_sync_marker <source_path> <dest_path> <task_name> [rclone_extra_args...]
+# 额外参数用于统一源端统计口径: 应用任务的 --exclude/--include 过滤规则，
+# 否则被排除路径（如 notion/）计入源端却不计入目标端，会造成永久性假缺失
 save_sync_marker() {
   local source_path="$1"
   local dest_path="$2"
   local task_name="$3"
+  shift 3
+  local extra_args=("$@")
 
   local marker_path
   marker_path=$(get_marker_path "$task_name" "$dest_path")
 
-  # 获取源端大小和文件数
+  # 获取源端大小和文件数（与 sync 相同的过滤口径）
+  _extract_filter_args "${extra_args[@]}"
   local size_json source_bytes source_count
-  size_json=$(rclone size "$source_path" --json 2>/dev/null || true)
+  size_json=$(rclone size "$source_path" --json "${FILTER_ARGS[@]}" 2>/dev/null || true)
   source_bytes=$(echo "$size_json" | jq -r '.bytes // 0' 2>/dev/null || echo 0)
   source_count=$(echo "$size_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
 
@@ -192,28 +197,27 @@ save_sync_marker() {
   # 即使 _send_sync_result_notification 已做了同步后缓存刷新 + is_partial_success 检测，
   # 这里再校验一次，防止 SYNC_FAILED=0 但 dest_count 仍小于 source_count 的情况
   # （比如 auto-split 子目录各自通过检测，但汇总后总数不一致）
+  # 目标端不加过滤: 替代文件/分卷/历史残留只会让 dest_count 偏大（对缺失判定是安全方向）
   local dest_size_json dest_bytes dest_count
   dest_size_json=$(rclone size "$dest_path" --json 2>/dev/null || true)
   dest_bytes=$(echo "$dest_size_json" | jq -r '.bytes // 0' 2>/dev/null || echo 0)
   dest_count=$(echo "$dest_size_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
 
-  # 阈值: 容许少量差异（正在上传/删除的临时状态），超过 5 个文件缺失则拒绝写 marker
+  # 严格校验: 源端（过滤口径）与目标端文件数完全一致才写 marker。
+  # 有任何缺失即拒绝 → 下次运行重新同步（rclone --size-only 幂等，已对齐文件直接跳过，无副作用）
   local missing_count=$((source_count - dest_count))
-  if [ "$missing_count" -gt 5 ]; then
+  if [ "$missing_count" -gt 0 ]; then
     echo "⚠️ 拒绝写入同步标记: 目标端文件数 ${dest_count} < 源端 ${source_count}（缺失 ${missing_count} 个）"
     echo "  可能原因: OpenList stale 缓存导致 rclone 跳过上传，或部分文件上传失败但未被检测到"
     echo "  本次不写 marker，下次运行将重新同步"
     return 1
-  fi
-  if [ "$missing_count" -gt 0 ]; then
-    echo "ℹ️ 目标端文件数 ${dest_count} < 源端 ${source_count}（缺失 ${missing_count} 个，在容差范围内）"
   fi
 
   # 获取顶层目录列表（用于检测目录变化）
   # top_dirs_json: JSON 数组格式，写入 marker
   # top_dirs_lines: 行排序文本格式，兼容旧 marker 读取和对比逻辑
   local top_dirs_lines top_dirs_json
-  top_dirs_lines=$(rclone lsf --dirs-only "$source_path" 2>/dev/null | sed 's|/$||' | sort)
+  top_dirs_lines=$(rclone lsf --dirs-only "$source_path" "${FILTER_ARGS[@]}" 2>/dev/null | sed 's|/$||' | sort)
   top_dirs_json=$(printf '%s\n' "$top_dirs_lines" | jq -R -s 'split("\n") | map(select(length>0))')
 
   # 读取本任务（含 auto-split 子目录）累计的修复文件列表
@@ -531,7 +535,8 @@ PYEOF
     --argjson fixed_count "$fixed_count" \
     --argjson fixed_bytes "$fixed_bytes" \
     --argjson fix_blacklist "$merged_blacklist_json" \
-    '{last_success: $last_success, source_path: $source_path, dest_path: $dest_path, source_bytes: $source_bytes, source_count: $source_count, top_dirs: $top_dirs, fixed_files: $fixed_files, fixed_count: $fixed_count, fixed_bytes: $fixed_bytes, fix_blacklist: $fix_blacklist}')
+    --argjson stats_filtered true \
+    '{last_success: $last_success, source_path: $source_path, dest_path: $dest_path, source_bytes: $source_bytes, source_count: $source_count, top_dirs: $top_dirs, fixed_files: $fixed_files, fixed_count: $fixed_count, fixed_bytes: $fixed_bytes, fix_blacklist: $fix_blacklist, stats_filtered: $stats_filtered}')
 
   # 上传标记到 OneDrive
   rclone mkdir "$SYNC_STATE_DIR" >/dev/null 2>&1 || true
@@ -560,11 +565,13 @@ PYEOF
 #   MARKER_FIXED_COUNT   — 已修复文件数（以非原名存在于目标端）
 #   MARKER_FIXED_BYTES   — 已修复文件总字节数
 #   MARKER_FIXED_FILES   — 已修复文件列表 JSON
-# 用法: check_sync_marker <source_path> <dest_path> <task_name>
+# 用法: check_sync_marker <source_path> <dest_path> <task_name> [rclone_extra_args...]
 check_sync_marker() {
   local source_path="$1"
   local dest_path="$2"
   local task_name="$3"
+  shift 3
+  local extra_args=("$@")
 
   MARKER_ACTION="proceed"
   MARKER_JSON=""
@@ -628,19 +635,29 @@ check_sync_marker() {
   fi
 
   # 检查源端大小是否减小（可能数据丢失）
+  # 源端统计与 save_sync_marker 保持相同的过滤口径（应用 --exclude/--include）
   local marker_bytes
   marker_bytes=$(echo "$marker_json" | jq -r '.source_bytes // 0')
 
+  _extract_filter_args "${extra_args[@]}"
   local current_size_json
-  current_size_json=$(rclone size "$source_path" --json 2>/dev/null || true)
+  current_size_json=$(rclone size "$source_path" --json "${FILTER_ARGS[@]}" 2>/dev/null || true)
   MARKER_CURRENT_BYTES=$(echo "$current_size_json" | jq -r '.bytes // 0' 2>/dev/null || echo 0)
   MARKER_CURRENT_COUNT=$(echo "$current_size_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
-  MARKER_CURRENT_DIRS=$(rclone lsf --dirs-only "$source_path" 2>/dev/null | sed 's|/$||' | sort)
+  MARKER_CURRENT_DIRS=$(rclone lsf --dirs-only "$source_path" "${FILTER_ARGS[@]}" 2>/dev/null | sed 's|/$||' | sort)
 
   if [ "$MARKER_CURRENT_BYTES" -lt "$marker_bytes" ]; then
-    echo "⚠️ 源端大小减小: $(format_bytes "$marker_bytes") → $(format_bytes "$MARKER_CURRENT_BYTES")"
-    MARKER_ACTION="warning"
-    return 0
+    # 旧 marker（无 stats_filtered 标记）记录的是未过滤口径，与当前过滤口径不可比:
+    # 视为口径迁移，跳过本轮缩小检测，同步成功后 marker 会按新口径重写
+    local stats_filtered
+    stats_filtered=$(echo "$marker_json" | jq -r '.stats_filtered // false')
+    if [ "$stats_filtered" != "true" ]; then
+      echo "旧 marker 为未过滤统计口径（无 stats_filtered），跳过源端缩小检测，本轮成功后将按新口径重写"
+    else
+      echo "⚠️ 源端大小减小: $(format_bytes "$marker_bytes") → $(format_bytes "$MARKER_CURRENT_BYTES")"
+      MARKER_ACTION="warning"
+      return 0
+    fi
   fi
 
   echo "标记检查通过，继续同步"

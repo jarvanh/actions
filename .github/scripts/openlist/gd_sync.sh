@@ -35,7 +35,7 @@ _gd_sync() {
   # skip 标记检查（需 --1d-skip / --2d-skip 等开启）
   MARKER_ACTION="proceed"
   if [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
-    check_sync_marker "$source_path" "$dest_path" "${task_name}_gd"
+    check_sync_marker "$source_path" "$dest_path" "${task_name}_gd" "${extra_args[@]}"
 
     case "$MARKER_ACTION" in
       skip)
@@ -286,7 +286,7 @@ _gd_sync() {
     else
       # 同步成功，保存标记
       if [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
-        save_sync_marker "$source_path" "$dest_path" "${task_name}_gd"
+        save_sync_marker "$source_path" "$dest_path" "${task_name}_gd" "${extra_args[@]}"
       fi
 
       if [ -n "$gd_diff_files_list" ]; then
