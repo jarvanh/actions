@@ -382,6 +382,33 @@ sync_with_logging() {
 
   : > "$LOG_FILENAME"
   local SYNC_STATUS=0
+
+  # ===== 已修复文件排除（破解 405→8005 重试死循环）=====
+  # marker fixed_files 里的 original 当初就是原路径传不上（405/超长/假成功）
+  # 才修复到 alternative 的；替代文件仍在时原路径重传必然再 405，
+  # 还会被 OpenList 包装成 8005 触发 3 轮全量重试（每轮白白重查全目录）。
+  # 这里把 fixed_files 的 original 排除出 rclone 传输清单：
+  #   - rclone 不再碰这些路径 → 无 405 → 不进 8005/423 重试循环
+  #   - 排除仅作用于传输；lsf diff 不带 filter-from，缺失文件照常进
+  #     修复管线 → 沿用逻辑每轮复核替代路径（丢了自动拉黑换方法重修）
+  #   - copy 模式无删除风险；文件名 glob 特殊字符 [ ] * ? { } 转成字符类
+  if [[ "$dest_path" == openlist:* ]]; then
+    _load_marker_fixed_files "$source_path" "$dest_path" "$task_name"
+    local fixed_exclude_file="/tmp/${task_name}_fixed_exclude_$$.txt"
+    : > "$fixed_exclude_file"
+    local _fx_orig
+    while IFS= read -r _fx_orig; do
+      [ -z "$_fx_orig" ] && continue
+      printf -- "- /%s\n" \
+        "$(printf '%s' "$_fx_orig" | sed -e 's/[][*?{}]/[&]/g')" >> "$fixed_exclude_file"
+    done < <(echo "$MARKER_FIXED_FILES" | jq -r '.[].original // empty' 2>/dev/null)
+    if [ -s "$fixed_exclude_file" ]; then
+      extra_args+=("--filter-from" "$fixed_exclude_file")
+      echo "已排除 $(wc -l < "$fixed_exclude_file" | tr -d ' ') 个上轮修复文件的源路径（替代文件在目标端，原路径重传必 405）" | tee -a "$LOG_FILENAME"
+      sed 's/^/  exclude: /' "$fixed_exclude_file" | tee -a "$LOG_FILENAME"
+    fi
+  fi
+
   run_rclone_sync_once "initial sync" || SYNC_STATUS=$?
 
   # ===== 8005 登录失败重试 =====
