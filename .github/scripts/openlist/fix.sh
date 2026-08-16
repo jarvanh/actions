@@ -84,18 +84,23 @@ PY
 # 用法: _get_crypt_config <mount_path 如 /wopan176Crypt>
 _get_crypt_config() {
   local mount="$1"
-  local ol_token
-  ol_token=$(_get_openlist_token) || return 1
-  local resp
-  resp=$(curl -s "http://127.0.0.1:5244/api/admin/storage/list" \
-    -H "Authorization: $ol_token" --max-time 15 2>/dev/null) || return 1
+  local ol_token="" resp="" addition
 
-  local addition
-  addition=$(echo "$resp" | jq -r --arg m "$mount" \
-    '(.data.content // .data // [])[]? | select(.mount_path == $m or .mount_path == ($m + "/")) | .addition // empty' 2>/dev/null | head -1)
+  # admin API 优先; token 不可用 / curl 失败不能直接判死——
+  # data.db 兜底不依赖 token，必须继续尝试（run 31931752797 实测:
+  # 此处早退导致 _ensure_crypt_config 全程失败 → raw 计数退化为字面裸路径）
+  ol_token=$(_get_openlist_token) || ol_token=""
+  if [ -n "$ol_token" ]; then
+    resp=$(curl -s "http://127.0.0.1:5244/api/admin/storage/list" \
+      -H "Authorization: $ol_token" --max-time 15 2>/dev/null) || resp=""
+  fi
+  if [ -n "$resp" ]; then
+    addition=$(echo "$resp" | jq -r --arg m "$mount" \
+      '(.data.content // .data // [])[]? | select(.mount_path == $m or .mount_path == ($m + "/")) | .addition // empty' 2>/dev/null | head -1)
+  fi
 
-  # API 拿不到（401 无数据/挂载名不匹配等）→ 本地 data.db 兜底
-  if [ -z "$addition" ] || [ "$addition" = "null" ]; then
+  # API 拿不到（401 无数据/挂载名不匹配/curl 失败等）→ 本地 data.db 兜底
+  if [ -z "${addition:-}" ] || [ "$addition" = "null" ]; then
     addition=$(_get_addition_from_db "$mount") || addition=""
   fi
   [ -n "$addition" ] && [ "$addition" != "null" ] || return 1
@@ -179,7 +184,10 @@ _raw_remote_for() {
 # openlist:wopan176/backup rc=3 not found——"backup" 在裸存储是密文名），
 # 字面路径计数必然失败。改用 crypt 即时远程：rclone 按配置逐段加密路径
 # 后在裸存储查找，列出再解密，计数口径与 crypt 视图完全一致。
-# 配置不可用时退化为字面裸路径（dne=false 场景仍正确）。
+# 配置不可用时退化为裸挂载根（绝不能拼字面子路径: dne 未知时子目录名
+# 是密文，openlist:wopan176/backup 这类字面路径必然列空 → 计数恒 0，
+# run 31931752797 实测。裸根计数口径偏大但增量检测——比较计数是否增长
+# ——仍然成立）。
 # 用法: _raw_count_view_for <dest_path>  → stdout: 计数用远程路径
 _raw_count_view_for() {
   local dest_path="$1"
@@ -191,7 +199,7 @@ _raw_count_view_for() {
   else
     local base="${rel%%/*}"
     base="${base%Crypt}"
-    echo "openlist:${base}${sub:+/${sub}}"
+    echo "openlist:${base}"
   fi
 }
 
