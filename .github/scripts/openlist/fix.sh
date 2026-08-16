@@ -165,24 +165,40 @@ _get_crypt_config() {
     return 1
   fi
 
-  # OpenList v4+ 原生 Crypt 驱动（字段 remote_path/salt/encrypted_suffix/filename_encoding）
-  # 是自研格式（明文密码、.bin 后缀、base32768 文件名编码），与 rclone crypt 不兼容，
-  # 无法用 :crypt: 即时远程构建解密计数视图 —— 明确拒绝而不是静默退化成错误口径
-  if printf '%s' "$addition" | jq -e 'has("remote_path") or has("encrypted_suffix") or has("filename_encoding") or has("salt")' >/dev/null 2>&1; then
-    _crypt_diag "$mount" "检测到 OpenList v4 原生 Crypt（字段集 remote_path/salt/encrypted_suffix），格式与 rclone crypt 不兼容，无法构建解密口径计数视图"
-    return 1
-  fi
-
-  local pass fne dne upath
+  # OpenList v4 Crypt 驱动（字段 remote_path/salt/filename_encoding/encrypted_suffix）
+  # 底层就是 rclone crypt 库（driver.go 直接 rcCrypt.NewCipher，字段一一映射:
+  # password→password, salt→password2, filename_encryption/directory_name_encryption
+  # 同名, filename_encoding→filename_encoding, encrypted_suffix→suffix），
+  # 与 v3（AList 风格 path/password）都按 rclone 兼容格式处理，字段名双兼容
+  local pass pass2 fne dne enc suf upath
   pass=$(printf '%s' "$addition" | jq -r '.password // empty' 2>/dev/null)
   if [ -z "$pass" ]; then
     _crypt_diag "$mount" "addition 无 password 字段（现有字段: $(printf '%s' "$addition" | jq -r 'keys | join(",")' 2>/dev/null)）; ${why}"
     return 1
   fi
-  # v3 驱动字段名两种拼写都接受（filename_encryption / file_name_encryption）
+  # v4 存的是 ___Obfuscated___<obscure>（Init 时 updateObfusParm 回写）——剥前缀后
+  # 正是 rclone 要的 obscure 格式; 无前缀则可能是明文，用 rclone reveal 探测，
+  # 非 obscure 时本地 obscure 转换（rclone 连接串 password 只认 obscure 格式）
+  pass="${pass#___Obfuscated___}"
+  if ! rclone reveal "$pass" >/dev/null 2>&1; then
+    local obscured
+    obscured=$(rclone obscure "$pass" 2>/dev/null) && [ -n "$obscured" ] && pass="$obscured"
+  fi
+  pass2=$(printf '%s' "$addition" | jq -r '.salt // empty' 2>/dev/null)
+  if [ -n "$pass2" ] && [ "$pass2" != "null" ]; then
+    pass2="${pass2#___Obfuscated___}"
+    rclone reveal "$pass2" >/dev/null 2>&1 || { local o2; o2=$(rclone obscure "$pass2" 2>/dev/null) && [ -n "$o2" ] && pass2="$o2"; }
+  else
+    pass2=""
+  fi
+  # v3 字段名两种拼写都接受（filename_encryption / file_name_encryption）
   fne=$(printf '%s' "$addition" | jq -r '.filename_encryption // .file_name_encryption // "standard"' 2>/dev/null)
   dne=$(printf '%s' "$addition" | jq -r 'if (.directory_name_encryption // .dir_name_encryption // null) == null then "true" else ((.directory_name_encryption // .dir_name_encryption) | tostring) end' 2>/dev/null)
-  upath=$(printf '%s' "$addition" | jq -r '.path // empty' 2>/dev/null)
+  enc=$(printf '%s' "$addition" | jq -r '.filename_encoding // empty' 2>/dev/null)
+  [ "$enc" = "null" ] && enc=""
+  suf=$(printf '%s' "$addition" | jq -r '.encrypted_suffix // empty' 2>/dev/null)
+  [ "$suf" = "null" ] && suf=""
+  upath=$(printf '%s' "$addition" | jq -r '.path // .remote_path // empty' 2>/dev/null)
 
   local underlying
   if [ -n "$upath" ] && [ "$upath" != "null" ]; then
@@ -193,7 +209,8 @@ _get_crypt_config() {
     base="${base%Crypt}"
     underlying="openlist:${base}"
   fi
-  echo "${pass} ${fne} ${dne} ${underlying}"
+  # 7 字段定长输出（pass pass2 fne dne enc suffix remote），空值用 "-" 占位
+  echo "${pass} ${pass2:--} ${fne} ${dne} ${enc:--} ${suf:--} ${underlying}"
 }
 
 # 确保 crypt 配置已缓存到全局（方法2 直写与名长诊断共用，每任务只拉取一次）
@@ -213,18 +230,28 @@ _ensure_crypt_config() {
   fi
   local conf
   conf=$(_get_crypt_config "$mount") || { _CRYPT_ONTHEFLY=""; return 1; }
-  local pass fne dne remote
-  read -r pass fne dne remote <<< "$conf"
+  local pass pass2 fne dne enc suf remote
+  read -r pass pass2 fne dne enc suf remote <<< "$conf"
   if [ -z "$pass" ] || [ -z "$remote" ]; then
     _CRYPT_ONTHEFLY=""
     return 1
   fi
+  # "-" 占位归一为空
+  [ "$pass2" = "-" ] && pass2=""
+  [ "$enc" = "-" ] && enc=""
+  [ "$suf" = "-" ] && suf=""
   _CRYPT_MOUNT="$mount"
   _CRYPT_PASS="$pass"
   _CRYPT_FNE="$fne"
   _CRYPT_DNE="$dne"
   _CRYPT_REMOTE="$remote"
-  _CRYPT_ONTHEFLY=":crypt,remote=\"${remote}\",filename_encryption=${fne:-standard},directory_name_encryption=${dne:-true},password=\"${pass}\":"
+  # 可选参数仅非空时附加（password2/filename_encoding/suffix 为 v4 字段;
+  # rclone 老版本不认的 key 在连接串里会报错，故不能盲传）
+  _CRYPT_ONTHEFLY=":crypt,remote=\"${remote}\",filename_encryption=${fne:-standard},directory_name_encryption=${dne:-true},password=\"${pass}\""
+  [ -n "$pass2" ] && _CRYPT_ONTHEFLY="${_CRYPT_ONTHEFLY},password2=\"${pass2}\""
+  [ -n "$enc" ] && _CRYPT_ONTHEFLY="${_CRYPT_ONTHEFLY},filename_encoding=${enc}"
+  [ -n "$suf" ] && _CRYPT_ONTHEFLY="${_CRYPT_ONTHEFLY},suffix=\"${suf}\""
+  _CRYPT_ONTHEFLY="${_CRYPT_ONTHEFLY}:"
   return 0
 }
 
