@@ -211,6 +211,26 @@ _wopan_raw_verify() {
   # 裸路径列表获取失败（路径不存在/驱动错误）→ 无法判定，跳过并提示
   if [ "$raw_rc" -ne 0 ]; then
     echo "  ⚠️ 裸路径列表获取失败 (rc=${raw_rc}, ${raw_dest} 可能不是有效挂载)，跳过幽灵文件判定" | tee -a "$log_file"
+    # 诊断: 列出 OpenList 根挂载，确认裸存储是否真的挂载（raw 校验/A 层检测/m15 直写全依赖它）
+    local root_mounts
+    root_mounts=$(timeout 60 rclone lsf openlist: --dirs-only 2>/dev/null | sed 's|/$||' | head -20)
+    if [ -n "$root_mounts" ]; then
+      echo "  🔍 OpenList 根挂载(WebDAV 可见): $(echo "$root_mounts" | tr '\n' ' ')" | tee -a "$log_file"
+      if ! echo "$root_mounts" | grep -qx "wopan176"; then
+        echo "  🔴 WebDAV 根挂载中无 wopan176 —— 裸存储未挂载或被隐藏，raw 校验/A 层即时检测/m15 crypt 直写均不可用" | tee -a "$log_file"
+      fi
+    else
+      echo "  🔍 OpenList 根挂载列表获取失败（WebDAV 未就绪?）" | tee -a "$log_file"
+    fi
+    # 诊断: admin API 列出全部存储配置（含隐藏/禁用状态，比 WebDAV 列表权威）
+    local ol_token storage_table
+    ol_token=$(_get_openlist_token) || ol_token=""
+    if [ -n "$ol_token" ]; then
+      storage_table=$(curl -s "http://127.0.0.1:5244/api/admin/storage/list" \
+        -H "Authorization: $ol_token" --max-time 15 2>/dev/null | \
+        jq -r '(.data.content // .data // [])[] | "  · \(.mount_path) [driver=\(.driver) disabled=\(.disabled // false)]"' 2>/dev/null | head -30)
+      [ -n "$storage_table" ] && { echo "  🔍 OpenList 存储配置(admin API):" | tee -a "$log_file"; echo "$storage_table" | tee -a "$log_file"; }
+    fi
     return 0
   fi
   # 裸路径列表为空但 crypt 非空 → wopan176 驱动大概率未就绪，无法判定，跳过
@@ -567,6 +587,8 @@ sync_with_logging() {
           echo "$mf" >> "$keep_list"
         done < "$missing_list"
         mv "$keep_list" "$missing_list"
+        # B: 沿用/拉黑判定完成后立即落盘（防异常路径丢失，与即时修复记录同哲学）
+        _flush_blacklist_to_marker "$task_name" "$dest_path" "$LOG_FILENAME"
       fi
     fi
 
@@ -872,6 +894,9 @@ sync_with_logging() {
         else
           echo "  🟢 结论：抽样修复文件均已被后端持久化（重启后仍然存在）" | tee -a "$LOG_FILENAME"
         fi
+        # B: 复核拉黑的方法立即落盘 marker（不等任务结束统一保存——
+        # run 31917285452 实测拉黑 5 条最终保存 0 条，黑名单在进程内丢失）
+        _flush_blacklist_to_marker "$task_name" "$dest_path" "$LOG_FILENAME"
       else
         echo "  ⚠️ OpenList 容器重启后 HTTP 60s 内未就绪，跳过持久化验证" | tee -a "$LOG_FILENAME"
       fi
@@ -1052,6 +1077,10 @@ sync_with_logging() {
   fi
   GLOBAL_FIX_BLACKLIST_JSON=$(jq -cn --argjson a "$GLOBAL_FIX_BLACKLIST_JSON" --argjson b "$_task_bl_json" \
     '$a * $b' 2>/dev/null || echo "$GLOBAL_FIX_BLACKLIST_JSON")
+  # 面包屑: 定位黑名单在链路（数组→GLOBAL→save）中的实际流转（排查 31917285452 丢失问题）
+  if [ "${#FIX_METHOD_BLACKLIST[@]}" -gt 0 ] || echo "${GLOBAL_FIX_BLACKLIST_JSON:-{}}" | jq -e 'length > 0' >/dev/null 2>&1; then
+    echo "黑名单累计: 数组 ${#FIX_METHOD_BLACKLIST[@]} 条 → GLOBAL $(echo "${GLOBAL_FIX_BLACKLIST_JSON:-{}}" | jq 'length' 2>/dev/null || echo '?') 条" | tee -a "$LOG_FILENAME"
+  fi
 
   [ -n "${incr_state:-}" ] && rm -f "$incr_state" 2>/dev/null || true
   rm -f "$LOG_FILENAME" "$LAST_ATTEMPT_LOG" "$fail_list" "$fix_list" "$fix_log" /tmp/probe_src.txt /tmp/probe_dst.txt 2>/dev/null || true
