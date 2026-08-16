@@ -49,29 +49,56 @@ _get_addition_from_db() {
   local mount="$1"
   local db_src="/opt/openlist-data/data.db"
   [ -f "$db_src" ] || db_src="/dropbox/self-hosted/openlist/data/data.db"
-  [ -f "$db_src" ] || return 1
+  [ -f "$db_src" ] || { echo "db 文件不存在: /opt/openlist-data/data.db 与 /dropbox/.../data.db 均缺失" >&2; return 1; }
   local db_local="/tmp/ol_data_$$.db"
-  cp "$db_src" "$db_local" 2>/dev/null || return 1
+  cp "$db_src" "$db_local" || return 1
   cp "${db_src}-wal" "${db_local}-wal" 2>/dev/null || true
   cp "${db_src}-shm" "${db_local}-shm" 2>/dev/null || true
 
-  python3 - "$db_local" "$mount" <<'PY' 2>/dev/null
+  # 失败原因打到 stderr（由 _get_crypt_config 捕获进诊断日志）;
+  # 常规 mode=ro 打不开（WAL/-shm 锁等）时用 immutable=1 重试（私有副本，安全）
+  python3 - "$db_local" "$mount" <<'PY'
 import sqlite3, sys
 db, mount = sys.argv[1], sys.argv[2]
-con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-try:
+def norm(p):
+    return (p or "").strip().strip("/")
+def dump(con):
     rows = con.execute("SELECT mount_path, addition FROM x_storages").fetchall()
-finally:
-    con.close()
-for mp, add in rows:
-    if mp and mp.rstrip('/') == mount.rstrip('/'):
-        if add:
-            print(add)
-        break
+    for mp, add in rows:
+        if norm(mp) == norm(mount):
+            if add:
+                print(add)
+                sys.exit(0)
+            print(f"目标 {mount} 的 addition 为空", file=sys.stderr)
+            sys.exit(3)
+    names = ", ".join(norm(mp) or "?" for mp, _ in rows) or "(空表)"
+    print(f"x_storages 中无 {mount}; 现有: {names}", file=sys.stderr)
+    sys.exit(4)
+try:
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    dump(con)
+except sqlite3.Error as e:
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro&immutable=1", uri=True)
+        dump(con)
+    except sqlite3.Error as e2:
+        print(f"sqlite 读取失败: {e}; immutable 重试: {e2}", file=sys.stderr)
+        sys.exit(5)
 PY
   local rc=$?
   rm -f "$db_local" "${db_local}-wal" "${db_local}-shm" 2>/dev/null || true
   return $rc
+}
+
+# crypt 配置获取失败诊断: 原因写入 /tmp/openlist_crypt_diag.log 并打到 stderr
+# （不含任何密钥值，只含状态码/字段名/挂载名表）; 同一挂载每进程只记一次。
+# _wopan_raw_verify 跳过幽灵判定时会把该文件尾部带进任务日志
+_crypt_diag() {
+  local mount="$1" msg="$2"
+  [ -n "${_CRYPT_DIAG_MOUNT:-}" ] && [ "$_CRYPT_DIAG_MOUNT" = "$mount" ] && return 0
+  _CRYPT_DIAG_MOUNT="$mount"
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] crypt 配置获取失败 (${mount}): ${msg}" >> /tmp/openlist_crypt_diag.log 2>/dev/null || true
+  echo "  ↳ crypt 配置获取失败 (${mount}): ${msg}" >&2
 }
 
 # 从 OpenList API 提取 crypt 存储配置（供方法2 rclone crypt 直写使用）
@@ -84,39 +111,78 @@ PY
 # 用法: _get_crypt_config <mount_path 如 /wopan176Crypt>
 _get_crypt_config() {
   local mount="$1"
-  local ol_token="" resp="" addition
+  local ol_token="" resp="" addition="" why=""
+  local db_err="/tmp/ol_db_err_$$.log"
 
   # admin API 优先; token 不可用 / curl 失败不能直接判死——
   # data.db 兜底不依赖 token，必须继续尝试（run 31931752797 实测:
   # 此处早退导致 _ensure_crypt_config 全程失败 → raw 计数退化为字面裸路径）
   ol_token=$(_get_openlist_token) || ol_token=""
-  if [ -n "$ol_token" ]; then
-    resp=$(curl -s "http://127.0.0.1:5244/api/admin/storage/list" \
+  local http_code="" api_code="" api_msg=""
+  if [ -z "$ol_token" ]; then
+    why="token 不可用（config.json 无 token/jwt_secret）"
+  else
+    resp=$(curl -s -w '\n%{http_code}' "http://127.0.0.1:5244/api/admin/storage/list" \
       -H "Authorization: $ol_token" --max-time 15 2>/dev/null) || resp=""
-  fi
-  if [ -n "$resp" ]; then
-    addition=$(echo "$resp" | jq -r --arg m "$mount" \
-      '(.data.content // .data // [])[]? | select(.mount_path == $m or .mount_path == ($m + "/")) | .addition // empty' 2>/dev/null | head -1)
+    if [ -n "$resp" ]; then
+      http_code=$(printf '%s\n' "$resp" | tail -n1)
+      resp=$(printf '%s\n' "$resp" | sed '$d')
+    fi
+    if [ -z "$http_code" ] || [ "$http_code" = "000" ]; then
+      why="API 请求失败（curl 无响应/超时）"
+    else
+      api_code=$(printf '%s' "$resp" | jq -r '.code // empty' 2>/dev/null)
+      api_msg=$(printf '%s' "$resp" | jq -r '.message // empty' 2>/dev/null)
+      if [ "$http_code" = "200" ] && [ "$api_code" = "200" ]; then
+        # 匹配容忍有无前导斜杠两种存法
+        addition=$(printf '%s' "$resp" | jq -r --arg m "${mount#/}" \
+          '(.data.content // .data // [])[]? | select(((.mount_path // "") | ltrimstr("/")) == $m) | .addition // empty' 2>/dev/null | head -1)
+        if [ -z "$addition" ] || [ "$addition" = "null" ]; then
+          why="API 200 但无 ${mount} 条目; 现有挂载: $(printf '%s' "$resp" | jq -r '(.data.content // .data // [])[]? | "\(.mount_path)[\(.driver)]"' 2>/dev/null | tr '\n' ' ')"
+        fi
+      else
+        why="API http=${http_code} code=${api_code:-?} msg=${api_msg:-?}"
+      fi
+    fi
   fi
 
   # API 拿不到（401 无数据/挂载名不匹配/curl 失败等）→ 本地 data.db 兜底
   if [ -z "${addition:-}" ] || [ "$addition" = "null" ]; then
-    addition=$(_get_addition_from_db "$mount") || addition=""
+    addition=$(_get_addition_from_db "$mount" 2>"$db_err") || addition=""
+    if [ -z "$addition" ]; then
+      why="${why:+$why; }db 兜底失败: $(tail -n 1 "$db_err" 2>/dev/null | head -c 300)"
+    fi
   fi
-  [ -n "$addition" ] && [ "$addition" != "null" ] || return 1
+  rm -f "$db_err"
+  [ -n "$addition" ] && [ "$addition" != "null" ] || { _crypt_diag "$mount" "${why:-addition 为空}"; return 1; }
 
   # addition 可能是 JSON 编码字符串 → 解码为对象后再取字段
   if printf '%s' "$addition" | jq -e 'type == "string"' >/dev/null 2>&1; then
     addition=$(printf '%s' "$addition" | jq -c 'fromjson' 2>/dev/null)
   fi
-  echo "$addition" | jq -e 'type == "object"' >/dev/null 2>&1 || return 1
+  if ! printf '%s' "$addition" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    _crypt_diag "$mount" "addition 解析后非 JSON 对象; ${why}"
+    return 1
+  fi
+
+  # OpenList v4+ 原生 Crypt 驱动（字段 remote_path/salt/encrypted_suffix/filename_encoding）
+  # 是自研格式（明文密码、.bin 后缀、base32768 文件名编码），与 rclone crypt 不兼容，
+  # 无法用 :crypt: 即时远程构建解密计数视图 —— 明确拒绝而不是静默退化成错误口径
+  if printf '%s' "$addition" | jq -e 'has("remote_path") or has("encrypted_suffix") or has("filename_encoding") or has("salt")' >/dev/null 2>&1; then
+    _crypt_diag "$mount" "检测到 OpenList v4 原生 Crypt（字段集 remote_path/salt/encrypted_suffix），格式与 rclone crypt 不兼容，无法构建解密口径计数视图"
+    return 1
+  fi
 
   local pass fne dne upath
-  pass=$(echo "$addition" | jq -r '.password // empty' 2>/dev/null)
-  [ -n "$pass" ] || return 1
-  fne=$(echo "$addition" | jq -r '.filename_encryption // "standard"' 2>/dev/null)
-  dne=$(echo "$addition" | jq -r 'if (.directory_name_encryption // null) == null then "true" else (.directory_name_encryption | tostring) end' 2>/dev/null)
-  upath=$(echo "$addition" | jq -r '.path // empty' 2>/dev/null)
+  pass=$(printf '%s' "$addition" | jq -r '.password // empty' 2>/dev/null)
+  if [ -z "$pass" ]; then
+    _crypt_diag "$mount" "addition 无 password 字段（现有字段: $(printf '%s' "$addition" | jq -r 'keys | join(",")' 2>/dev/null)）; ${why}"
+    return 1
+  fi
+  # v3 驱动字段名两种拼写都接受（filename_encryption / file_name_encryption）
+  fne=$(printf '%s' "$addition" | jq -r '.filename_encryption // .file_name_encryption // "standard"' 2>/dev/null)
+  dne=$(printf '%s' "$addition" | jq -r 'if (.directory_name_encryption // .dir_name_encryption // null) == null then "true" else ((.directory_name_encryption // .dir_name_encryption) | tostring) end' 2>/dev/null)
+  upath=$(printf '%s' "$addition" | jq -r '.path // empty' 2>/dev/null)
 
   local underlying
   if [ -n "$upath" ] && [ "$upath" != "null" ]; then
@@ -170,7 +236,8 @@ _raw_remote_for() {
   local rel="${dest_path#openlist:}"
   local sub=""
   [[ "$rel" == */* ]] && sub="/${rel#*/}"
-  if _ensure_crypt_config "$dest_path" 2>/dev/null; then
+  # 不吞 stderr: _crypt_diag 的失败原因要能在 Actions 日志里看到
+  if _ensure_crypt_config "$dest_path"; then
     echo "${_CRYPT_REMOTE}${sub}"
     return 0
   fi
@@ -194,7 +261,8 @@ _raw_count_view_for() {
   local rel="${dest_path#openlist:}"
   local sub=""
   [[ "$rel" == */* ]] && sub="${rel#*/}"
-  if _ensure_crypt_config "$dest_path" 2>/dev/null; then
+  # 不吞 stderr: _crypt_diag 的失败原因要能在 Actions 日志里看到
+  if _ensure_crypt_config "$dest_path"; then
     echo "${_CRYPT_ONTHEFLY}${sub}"
   else
     local base="${rel%%/*}"

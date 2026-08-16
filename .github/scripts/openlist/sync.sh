@@ -212,6 +212,9 @@ _wopan_raw_verify() {
   # （增量类检测 _rebuild_raw_baseline 仍可用裸根退化计数）
   if [ -z "${_CRYPT_ONTHEFLY:-}" ]; then
     echo "  ⚠️ crypt 配置不可用（dne 未知，无法构建解密口径计数视图），跳过幽灵文件判定" | tee -a "$log_file"
+    if [ -s /tmp/openlist_crypt_diag.log ]; then
+      tail -n 2 /tmp/openlist_crypt_diag.log | tee -a "$log_file"
+    fi
     return 0
   fi
 
