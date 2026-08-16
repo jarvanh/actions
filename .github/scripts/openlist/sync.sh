@@ -426,10 +426,9 @@ _persist_verify_entries() {
       fi
       if [ "$parts_ok" -eq 1 ]; then
         verified=1
-        echo "  ✅ 持久化通过: $orig_path (${f_method}, 分卷 $part_count 个存在且大小合法)" | tee -a "$log_file"
+        echo "  ✅ 通过 · $(_method_short "$f_mid") · 分卷${part_count} · $(_short_path "$orig_path")" | tee -a "$log_file"
       else
-        echo "  ❌ 持久化失败: $orig_path (${f_method}, 分卷缺失或大小异常)" | tee -a "$log_file"
-        echo "    → 当前目录分卷: $(echo "$existing_parts" | tr '\n' ' ')" | tee -a "$log_file"
+        echo "  ❌ 未持久化 · $(_method_short "$f_mid") · 分卷缺失 · $(_short_path "$orig_path")" | tee -a "$log_file"
         PERSIST_FAIL_DETAILS="${PERSIST_FAIL_DETAILS}• ${orig_path} (${f_method})：分卷缺失或大小异常，当前分卷=${existing_parts}
 "
       fi
@@ -437,9 +436,9 @@ _persist_verify_entries() {
       # 压缩/编码类：只检查 size > 0（压缩包大小与原文件不同）
       if [ "$after_sz" -gt 0 ] 2>/dev/null && [ "$after_lsf_sz" -gt 0 ] 2>/dev/null; then
         verified=1
-        echo "  ✅ 持久化通过: $orig_path (${f_method}, transformed_size=$after_sz bytes)" | tee -a "$log_file"
+        echo "  ✅ 通过 · $(_method_short "$f_mid") · $(_short_path "$orig_path") · ${after_sz}B" | tee -a "$log_file"
       else
-        echo "  ❌ 持久化失败: $orig_path (${f_method}, 上传文件为空或不存在, size=$after_sz, lsf=$after_lsf_sz)" | tee -a "$log_file"
+        echo "  ❌ 未持久化 · $(_method_short "$f_mid") · 空或不存在 sz=${after_sz} · $(_short_path "$orig_path")" | tee -a "$log_file"
         PERSIST_FAIL_DETAILS="${PERSIST_FAIL_DETAILS}• ${orig_path} (${f_method})：上传文件为空或不存在, size=${after_sz}
 "
       fi
@@ -447,9 +446,9 @@ _persist_verify_entries() {
       # 原样 copy / rename 类：精确匹配大小
       if [ "$after_sz" = "$bytes" ] && [ "$after_lsf_sz" = "$bytes" ] && [ "$after_sz" -gt 0 ]; then
         verified=1
-        echo "  ✅ 持久化通过: $orig_path (${f_method}, $bytes bytes)" | tee -a "$log_file"
+        echo "  ✅ 通过 · $(_method_short "$f_mid") · $(_short_path "$orig_path") · ${bytes}B" | tee -a "$log_file"
       else
-        echo "  ❌ 持久化失败: $orig_path (${f_method}, expected=$bytes, size=$after_sz, lsf=$after_lsf_sz)" | tee -a "$log_file"
+        echo "  ❌ 未持久化 · $(_method_short "$f_mid") · 期望${bytes} 实际${after_sz} · $(_short_path "$orig_path")" | tee -a "$log_file"
         PERSIST_FAIL_DETAILS="${PERSIST_FAIL_DETAILS}• ${orig_path} (${f_method})：expected=${bytes}, actual=${after_sz}
 "
       fi
@@ -461,7 +460,7 @@ _persist_verify_entries() {
       # B: 复核失败 = 修复方法假成功 → 当场拉黑，本轮立即换方法重试
       if [ -n "$f_mid" ]; then
         _blacklist_add "$orig_path" "$f_mid"
-        echo "  → $(_method_desc "$f_mid") 已加入 ${orig_path} 的假成功黑名单（本轮立即换方法重试）" | tee -a "$log_file"
+        echo "  ⛔ 拉黑 $(_method_short "$f_mid")，本轮换方法: $(_short_path "$orig_path")" | tee -a "$log_file"
       fi
       PERSIST_FAILED_ORIGS+=("$orig_path")
     fi
@@ -761,7 +760,7 @@ sync_with_logging() {
           [ -z "$mf" ] && continue
           # 同一轮内已修复过的文件（auto-split 子任务 → 最终完整同步），直接沿用
           if [ -n "${FIXED_THIS_RUN[$mf]:-}" ]; then
-            echo "本轮已修复，跳过重复修复: ${mf} → ${FIXED_THIS_RUN[$mf]}" | tee -a "$LOG_FILENAME"
+            echo "⏭ 本轮已修复，跳过重复修复 · $(_short_path "$mf")" | tee -a "$LOG_FILENAME"
             continue
           fi
           local prev_entry prev_alt prev_mid prev_method prev_restore prev_shuman prev_sbytes
@@ -775,13 +774,13 @@ sync_with_logging() {
               prev_restore=$(echo "$prev_entry" | jq -r '.restore_hint // ""')
               prev_shuman=$(echo "$prev_entry" | jq -r '.size_human // "未知"')
               prev_sbytes=$(echo "$prev_entry" | jq -r '.size_bytes // 0')
-              echo "沿用上轮修复: ${mf} → ${prev_alt}（替代路径仍存在）" | tee -a "$LOG_FILENAME"
+              echo "♻ 沿用上轮修复 · $(_method_short "$prev_mid") · $(_short_path "$mf")" | tee -a "$LOG_FILENAME"
               echo "${mf}|${prev_alt}|${prev_method}|${prev_restore}|${prev_shuman}|${prev_sbytes}|${prev_mid}" >> "$fix_list"
               FIXED_THIS_RUN["$mf"]="$prev_alt"
               continue
             fi
             if [ -n "$prev_mid" ]; then
-              echo "上轮 $(_method_desc "$prev_mid") 判定假成功（替代路径已消失）: ${mf}" | tee -a "$LOG_FILENAME"
+              echo "⛔ 上轮假成功（替代路径已消失），拉黑 $(_method_short "$prev_mid") · $(_short_path "$mf")" | tee -a "$LOG_FILENAME"
               FIX_METHOD_BLACKLIST["$mf"]="$prev_mid"
             fi
           fi
@@ -837,7 +836,7 @@ sync_with_logging() {
         mv "${missing_list}.cut" "$missing_list"
       fi
 
-      echo "=== ${task_name} 缺失文件修复（共 $(wc -l < "$missing_list" | tr -d ' ') 个）===" | tee -a "$LOG_FILENAME"
+      _sec "$LOG_FILENAME" "${task_name} 缺失文件修复 · 共 $(wc -l < "$missing_list" | tr -d ' ') 个"
 
       fix_log="file_fix_${task_name}_$(date +%Y%m%d_%H%M%S).log"
       echo "=== 缺失文件修复日志 - $(date) ===" > "$fix_log"
@@ -866,7 +865,7 @@ sync_with_logging() {
           file_size=$(format_bytes "$file_size_bytes")
         fi
 
-        echo "修复中: ${failed_line} (${file_size})" | tee -a "$LOG_FILENAME"
+        echo "▶ 修复 $(_short_path "$failed_line") (${file_size})" | tee -a "$LOG_FILENAME"
 
         # 名长诊断: cryptencode 本地计算该文件密文名长（纯本地，不上传）
         if [ -n "${_CRYPT_ONTHEFLY:-}" ]; then
@@ -891,8 +890,8 @@ sync_with_logging() {
         try_fix_failed_file "$source_path" "$dest_path" "$task_name" "$failed_line" "$fix_log" || true
 
         if [ "$TRY_FIX_STATUS" = "success" ]; then
-          echo "修复成功: ${failed_line} -> 方法: ${TRY_FIX_METHOD}" | tee -a "$LOG_FILENAME"
-          echo "  还原方法: ${TRY_FIX_RESTORE}" | tee -a "$LOG_FILENAME"
+          echo "✅ 修复成功 · $(_method_short "${TRY_FIX_METHOD_ID:-}") · $(_short_path "$failed_line")" | tee -a "$LOG_FILENAME"
+          echo "  ↳ 还原: ${TRY_FIX_RESTORE}" | tee -a "$LOG_FILENAME"
           echo "${TRY_FIX_ORIGINAL}|${TRY_FIX_ALTERNATIVE}|${TRY_FIX_METHOD}|${TRY_FIX_RESTORE}|${file_size}|${file_size_bytes}|${TRY_FIX_METHOD_ID}" >> "$fix_list"
           FIXED_THIS_RUN["$TRY_FIX_ORIGINAL"]="$TRY_FIX_ALTERNATIVE"
           # 立即记录到修复文件清单（增量持久化，防中断丢失）
@@ -900,7 +899,7 @@ sync_with_logging() {
             "$TRY_FIX_ORIGINAL" "$TRY_FIX_ALTERNATIVE" "$TRY_FIX_METHOD" "$TRY_FIX_RESTORE" \
             "$file_size" "$file_size_bytes" "${TRY_FIX_METHOD_ID:-}" 2>&1 | tee -a "$LOG_FILENAME" || true
         else
-          echo "修复失败: ${failed_line} - ${TRY_FIX_MESSAGE}" | tee -a "$LOG_FILENAME"
+          echo "❌ 修复失败 · $(_short_path "$failed_line") · ${TRY_FIX_MESSAGE}" | tee -a "$LOG_FILENAME"
           echo "${failed_line}|${file_size}|${TRY_FIX_MESSAGE}" >> "$fail_list"
         fi
       done < "$missing_list"
@@ -923,7 +922,7 @@ sync_with_logging() {
   # 而不仅仅存在于 OpenList 内存缓存中（重启容器后即消失）
   # 仅在：有修复成功的文件、目标是 OpenList 远程、能找到 docker 命令的情况下执行
   if [[ "$dest_path" == openlist:* ]] && [ -s "$fix_list" ] && command -v docker >/dev/null 2>&1; then
-    echo "=== ${task_name} 修复持久化验证：重启 OpenList 容器后复核修复文件 ===" | tee -a "$LOG_FILENAME"
+    _sec "$LOG_FILENAME" "${task_name} 修复持久化验证（重启容器复核）"
 
     # 1. 先过滤出"修复成功且路径仍在该 dest_path 下"的条目，保存待验证清单
     local PERSIST_VERIFY_LIST="/tmp/${task_name}_persist_verify_$$.txt"
@@ -1042,7 +1041,7 @@ sync_with_logging() {
 
           while [ "${#retry_pending[@]}" -gt 0 ] && [ "$retry_round" -lt "$retry_rounds_max" ]; do
             retry_round=$((retry_round + 1))
-            echo "=== ${task_name} 假成功重试第 ${retry_round}/${retry_rounds_max} 轮（换方法，待重试 ${#retry_pending[@]} 个）===" | tee -a "$LOG_FILENAME"
+            _sec "$LOG_FILENAME" "假成功重试 ${retry_round}/${retry_rounds_max} · 待重试 ${#retry_pending[@]} 个"
 
             # A 层即时检测基线重建: 上一轮容器重启后幽灵文件已从计数中
             # 消失，旧基线偏高会把本轮真实落盘误判为假成功；重建时轮询
@@ -1057,7 +1056,7 @@ sync_with_logging() {
             local retry_orig retry_fixed=0
             for retry_orig in "${retry_pending[@]}"; do
               [ -z "$retry_orig" ] && continue
-              echo "重试修复（换方法）: ${retry_orig}" | tee -a "$LOG_FILENAME"
+              echo "↻ 重试（换方法）· $(_short_path "$retry_orig")" | tee -a "$LOG_FILENAME"
 
               # 先从 fix_list 移除旧假成功条目（无论重试成败都不保留）
               RO="$retry_orig" awk 'BEGIN{FS="|"} $1 != ENVIRON["RO"]' "$fix_list" > "${fix_list}.tmp" && mv "${fix_list}.tmp" "$fix_list"
@@ -1066,8 +1065,8 @@ sync_with_logging() {
 
               if [ "$TRY_FIX_STATUS" = "success" ]; then
                 retry_fixed=$((retry_fixed + 1))
-                echo "重试修复成功: ${retry_orig} -> 方法: ${TRY_FIX_METHOD}" | tee -a "$LOG_FILENAME"
-                echo "  还原方法: ${TRY_FIX_RESTORE}" | tee -a "$LOG_FILENAME"
+                echo "✅ 重试成功 · $(_method_short "${TRY_FIX_METHOD_ID:-}") · $(_short_path "$retry_orig")" | tee -a "$LOG_FILENAME"
+                echo "  ↳ 还原: ${TRY_FIX_RESTORE}" | tee -a "$LOG_FILENAME"
                 local retry_size_json retry_size_bytes retry_size_human
                 retry_size_json=$(rclone size "${source_path}/${retry_orig}" --json 2>/dev/null || echo '{}')
                 retry_size_bytes=$(echo "$retry_size_json" | jq -r '.bytes // 0' 2>/dev/null || echo 0)
@@ -1081,7 +1080,7 @@ sync_with_logging() {
                   "$retry_size_human" "$retry_size_bytes" "${TRY_FIX_METHOD_ID:-}" 2>&1 | tee -a "$LOG_FILENAME" || true
                 echo "${TRY_FIX_ALTERNATIVE}|${retry_size_bytes}|${TRY_FIX_ORIGINAL}|${TRY_FIX_METHOD}|${TRY_FIX_METHOD_ID}" >> "$round_list"
               else
-                echo "重试修复失败（剩余方法已耗尽）: ${retry_orig} - ${TRY_FIX_MESSAGE}" | tee -a "$LOG_FILENAME"
+                echo "❌ 重试失败（方法耗尽）· $(_short_path "$retry_orig") · ${TRY_FIX_MESSAGE}" | tee -a "$LOG_FILENAME"
                 echo "${retry_orig}|未知|重试修复失败: ${TRY_FIX_MESSAGE:-所有修复方法均失败}" >> "$fail_list"
                 unset "FIXED_THIS_RUN[$retry_orig]" 2>/dev/null || true
                 # 从 marker 移除假成功条目，避免下一轮作为"沿用上轮修复"空转
@@ -1135,7 +1134,7 @@ sync_with_logging() {
           local leftover_orig
           for leftover_orig in "${retry_pending[@]}"; do
             [ -z "$leftover_orig" ] && continue
-            echo "  重试轮数耗尽，转入失败清单: ${leftover_orig}" | tee -a "$LOG_FILENAME"
+            echo "  ⚠️ 轮数耗尽 → 失败清单 · $(_short_path "$leftover_orig")" | tee -a "$LOG_FILENAME"
             RO="$leftover_orig" awk 'BEGIN{FS="|"} $1 != ENVIRON["RO"]' "$fix_list" > "${fix_list}.tmp" && mv "${fix_list}.tmp" "$fix_list"
             echo "${leftover_orig}|未知|重试轮数耗尽仍未持久化（黑名单已记录，下一轮从剩余方法继续）" >> "$fail_list"
             unset "FIXED_THIS_RUN[$leftover_orig]" 2>/dev/null || true
