@@ -14,8 +14,9 @@
 #        密文计数，未增长即假成功，当场拉黑该方法并尝试下一种方式
 #     B. 失败记忆（FIX_METHOD_BLACKLIST + marker fix_blacklist）— 持久化
 #        每文件已判定假成功的方法；持久化验证（重启容器复核）发现假成功后
-#        本轮立即换方法重试并二次复核，跨轮修复同样跳过已拉黑方法；
-#        上轮已真实持久化的修复（替代路径仍存在）直接沿用，不再重复上传
+#        本轮循环"换方法 → 重启复核"直到全部通过或所有方法耗尽（方法1-11
+#        都会轮到），跨轮修复同样跳过已拉黑方法；上轮已真实持久化的修复
+#        （替代路径仍存在）直接沿用，不再重复上传
 #   - object not found 错误处理
 #   - 结构化同步结果通知（含源/目标大小、差异文件列表、排除规则）
 #
@@ -985,12 +986,12 @@ sync_with_logging() {
         # run 31917285452 实测拉黑 5 条最终保存 0 条，黑名单在进程内丢失）
         _flush_blacklist_to_marker "$task_name" "$dest_path" "$LOG_FILENAME"
 
-        # 7. 假成功条目本轮立即换方法重试（不再等下一轮）
+        # 7. 假成功条目本轮逐方法重试（换方法 → 重启复核 → 仍未通过再换方法，
+        #    循环直到全部通过持久化验证或所有方法耗尽；不再等下一轮）
         # 黑名单已含刚才判定的假成功方法，try_fix_failed_file 会直接跳过
-        # 失效方法、从下一个方法继续尝试；重试成功后再重启容器二次复核
+        # 失效方法、从下一个方法继续尝试；每轮全部重试条目共享一次容器
+        # 重启复核（不同文件推进速度不同，未通过的自动进入下一轮）
         if [ "$persist_fail" -gt 0 ] && [ "${#PERSIST_FAILED_ORIGS[@]}" -gt 0 ]; then
-          echo "=== ${task_name} 假成功条目本轮立即换方法重试（${#PERSIST_FAILED_ORIGS[@]} 个）===" | tee -a "$LOG_FILENAME"
-
           # fix_log 可能为空（缺失清单为空、条目全部沿用上轮修复的场景）
           if [ -z "$fix_log" ]; then
             fix_log="file_fix_${task_name}_$(date +%Y%m%d_%H%M%S).log"
@@ -1007,57 +1008,76 @@ sync_with_logging() {
           fi
           echo "$incr_base" > "$incr_state"
 
-          # A 层即时检测基线重建: 容器重启后幽灵文件已从计数中消失，
-          # 旧基线偏高会把重试的真实落盘误判为假成功
-          if [ -n "${_RAW_VERIFY_DEST:-}" ]; then
-            _RAW_VERIFY_BUDGET="${OPENLIST_RAW_CHECK_BUDGET:-40}"
-            local _retry_raw_base
-            if _retry_raw_base=$(_raw_dir_count "$_RAW_VERIFY_DIR" "${_RAW_VERIFY_REFRESH:-}"); then
-              _RAW_VERIFY_LAST=$_retry_raw_base
-              echo "  重试前 raw 基准已重建: ${_retry_raw_base}" | tee -a "$LOG_FILENAME"
+          # 轮数上限 = 方法数（每轮每文件至少拉黑一个失效方法，必然收敛；
+          # OPENLIST_PERSIST_RETRY_ROUNDS 可调）
+          local retry_rounds_max="${OPENLIST_PERSIST_RETRY_ROUNDS:-11}"
+          [[ "$retry_rounds_max" =~ ^[0-9]+$ ]] || retry_rounds_max=11
+          local retry_round=0
+          local retry_perm_fail=0
+          local retry_pending=("${PERSIST_FAILED_ORIGS[@]}")
+
+          while [ "${#retry_pending[@]}" -gt 0 ] && [ "$retry_round" -lt "$retry_rounds_max" ]; do
+            retry_round=$((retry_round + 1))
+            echo "=== ${task_name} 假成功重试第 ${retry_round}/${retry_rounds_max} 轮（换方法，待重试 ${#retry_pending[@]} 个）===" | tee -a "$LOG_FILENAME"
+
+            # A 层即时检测基线重建: 上一轮容器重启后幽灵文件已从计数中
+            # 消失，旧基线偏高会把本轮真实落盘误判为假成功
+            if [ -n "${_RAW_VERIFY_DEST:-}" ]; then
+              _RAW_VERIFY_BUDGET="${OPENLIST_RAW_CHECK_BUDGET:-40}"
+              local _retry_raw_base
+              if _retry_raw_base=$(_raw_dir_count "$_RAW_VERIFY_DIR" "${_RAW_VERIFY_REFRESH:-}"); then
+                _RAW_VERIFY_LAST=$_retry_raw_base
+                echo "  本轮 raw 基准已重建: ${_retry_raw_base}" | tee -a "$LOG_FILENAME"
+              fi
             fi
-          fi
 
-          local retry_orig retry_fixed=0
-          local PERSIST_RETRY_LIST="/tmp/${task_name}_persist_retry_$$.txt"
-          : > "$PERSIST_RETRY_LIST"
-          for retry_orig in "${PERSIST_FAILED_ORIGS[@]}"; do
-            [ -z "$retry_orig" ] && continue
-            echo "重试修复（换方法）: ${retry_orig}" | tee -a "$LOG_FILENAME"
+            local round_list="/tmp/${task_name}_persist_retry_r${retry_round}_$$.txt"
+            : > "$round_list"
+            local retry_orig retry_fixed=0
+            for retry_orig in "${retry_pending[@]}"; do
+              [ -z "$retry_orig" ] && continue
+              echo "重试修复（换方法）: ${retry_orig}" | tee -a "$LOG_FILENAME"
 
-            # 先从 fix_list 移除旧假成功条目（无论重试成败都不保留）
-            RO="$retry_orig" awk 'BEGIN{FS="|"} $1 != ENVIRON["RO"]' "$fix_list" > "${fix_list}.tmp" && mv "${fix_list}.tmp" "$fix_list"
+              # 先从 fix_list 移除旧假成功条目（无论重试成败都不保留）
+              RO="$retry_orig" awk 'BEGIN{FS="|"} $1 != ENVIRON["RO"]' "$fix_list" > "${fix_list}.tmp" && mv "${fix_list}.tmp" "$fix_list"
 
-            try_fix_failed_file "$source_path" "$dest_path" "$task_name" "$retry_orig" "$fix_log" || true
+              try_fix_failed_file "$source_path" "$dest_path" "$task_name" "$retry_orig" "$fix_log" || true
 
-            if [ "$TRY_FIX_STATUS" = "success" ]; then
-              retry_fixed=$((retry_fixed + 1))
-              echo "重试修复成功: ${retry_orig} -> 方法: ${TRY_FIX_METHOD}" | tee -a "$LOG_FILENAME"
-              echo "  还原方法: ${TRY_FIX_RESTORE}" | tee -a "$LOG_FILENAME"
-              local retry_size_json retry_size_bytes retry_size_human
-              retry_size_json=$(rclone size "${source_path}/${retry_orig}" --json 2>/dev/null || echo '{}')
-              retry_size_bytes=$(echo "$retry_size_json" | jq -r '.bytes // 0' 2>/dev/null || echo 0)
-              [[ "$retry_size_bytes" =~ ^[0-9]+$ ]] || retry_size_bytes=0
-              retry_size_human=$(format_bytes "$retry_size_bytes")
-              echo "${TRY_FIX_ORIGINAL}|${TRY_FIX_ALTERNATIVE}|${TRY_FIX_METHOD}|${TRY_FIX_RESTORE}|${retry_size_human}|${retry_size_bytes}|${TRY_FIX_METHOD_ID}" >> "$fix_list"
-              FIXED_THIS_RUN["$TRY_FIX_ORIGINAL"]="$TRY_FIX_ALTERNATIVE"
-              # 覆盖 marker 里的假成功条目（同 original 新条目替换旧条目）
-              _persist_fix_entry_now "$incr_marker_path" "$incr_state" "$source_path" "$dest_path" \
-                "$TRY_FIX_ORIGINAL" "$TRY_FIX_ALTERNATIVE" "$TRY_FIX_METHOD" "$TRY_FIX_RESTORE" \
-                "$retry_size_human" "$retry_size_bytes" "${TRY_FIX_METHOD_ID:-}" 2>&1 | tee -a "$LOG_FILENAME" || true
-              echo "${TRY_FIX_ALTERNATIVE}|${retry_size_bytes}|${TRY_FIX_ORIGINAL}|${TRY_FIX_METHOD}|${TRY_FIX_METHOD_ID}" >> "$PERSIST_RETRY_LIST"
-            else
-              echo "重试修复失败: ${retry_orig} - ${TRY_FIX_MESSAGE}" | tee -a "$LOG_FILENAME"
-              echo "${retry_orig}|未知|重试修复失败: ${TRY_FIX_MESSAGE:-所有修复方法均失败}" >> "$fail_list"
-              unset "FIXED_THIS_RUN[$retry_orig]" 2>/dev/null || true
-              # 从 marker 移除假成功条目，避免下一轮作为"沿用上轮修复"空转
-              _remove_fix_entry_from_state "$incr_state" "$incr_marker_path" "$retry_orig" 2>&1 | tee -a "$LOG_FILENAME" || true
+              if [ "$TRY_FIX_STATUS" = "success" ]; then
+                retry_fixed=$((retry_fixed + 1))
+                echo "重试修复成功: ${retry_orig} -> 方法: ${TRY_FIX_METHOD}" | tee -a "$LOG_FILENAME"
+                echo "  还原方法: ${TRY_FIX_RESTORE}" | tee -a "$LOG_FILENAME"
+                local retry_size_json retry_size_bytes retry_size_human
+                retry_size_json=$(rclone size "${source_path}/${retry_orig}" --json 2>/dev/null || echo '{}')
+                retry_size_bytes=$(echo "$retry_size_json" | jq -r '.bytes // 0' 2>/dev/null || echo 0)
+                [[ "$retry_size_bytes" =~ ^[0-9]+$ ]] || retry_size_bytes=0
+                retry_size_human=$(format_bytes "$retry_size_bytes")
+                echo "${TRY_FIX_ORIGINAL}|${TRY_FIX_ALTERNATIVE}|${TRY_FIX_METHOD}|${TRY_FIX_RESTORE}|${retry_size_human}|${retry_size_bytes}|${TRY_FIX_METHOD_ID}" >> "$fix_list"
+                FIXED_THIS_RUN["$TRY_FIX_ORIGINAL"]="$TRY_FIX_ALTERNATIVE"
+                # 覆盖 marker 里的假成功条目（同 original 新条目替换旧条目）
+                _persist_fix_entry_now "$incr_marker_path" "$incr_state" "$source_path" "$dest_path" \
+                  "$TRY_FIX_ORIGINAL" "$TRY_FIX_ALTERNATIVE" "$TRY_FIX_METHOD" "$TRY_FIX_RESTORE" \
+                  "$retry_size_human" "$retry_size_bytes" "${TRY_FIX_METHOD_ID:-}" 2>&1 | tee -a "$LOG_FILENAME" || true
+                echo "${TRY_FIX_ALTERNATIVE}|${retry_size_bytes}|${TRY_FIX_ORIGINAL}|${TRY_FIX_METHOD}|${TRY_FIX_METHOD_ID}" >> "$round_list"
+              else
+                echo "重试修复失败（剩余方法已耗尽）: ${retry_orig} - ${TRY_FIX_MESSAGE}" | tee -a "$LOG_FILENAME"
+                echo "${retry_orig}|未知|重试修复失败: ${TRY_FIX_MESSAGE:-所有修复方法均失败}" >> "$fail_list"
+                unset "FIXED_THIS_RUN[$retry_orig]" 2>/dev/null || true
+                # 从 marker 移除假成功条目，避免下一轮作为"沿用上轮修复"空转
+                _remove_fix_entry_from_state "$incr_state" "$incr_marker_path" "$retry_orig" 2>&1 | tee -a "$LOG_FILENAME" || true
+                retry_perm_fail=$((retry_perm_fail + 1))
+              fi
+            done
+
+            # 本轮无任何新"成功"条目 → 待重试文件的方法已全部耗尽，终止
+            if [ "$retry_fixed" -eq 0 ]; then
+              echo "  第 ${retry_round} 轮无新成功条目（所有方法已耗尽），结束重试" | tee -a "$LOG_FILENAME"
+              retry_pending=()
+              break
             fi
-          done
 
-          # 8. 二次复核: 重启容器验证换方法后的重试结果是否真正持久化
-          if [ "$retry_fixed" -gt 0 ]; then
-            echo "  重启 OpenList 容器二次复核重试结果（${retry_fixed} 个）..." | tee -a "$LOG_FILENAME"
+            # 重启容器复核本轮全部重试条目（一次重启覆盖所有文件）
+            echo "  重启 OpenList 容器复核第 ${retry_round} 轮重试结果（${retry_fixed} 个）..." | tee -a "$LOG_FILENAME"
             sudo docker restart openlist >/dev/null 2>&1 || true
             local retry_http_ok=0 retry_i
             for retry_i in $(seq 1 30); do
@@ -1068,41 +1088,49 @@ sync_with_logging() {
               fi
               sleep 2
             done
-            if [ "$retry_http_ok" -eq 1 ]; then
-              echo "  等待驱动重新初始化 (60s) ..." | tee -a "$LOG_FILENAME"
-              sleep 60
-              persist_ol_token=$(_get_openlist_token)
-              if [ -n "$persist_ol_token" ]; then
-                curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh" -H "Authorization: $persist_ol_token" -H "Content-Type: application/json" -d "{\"path\":\"$persist_ol_path\",\"recursive\":true}" >/dev/null 2>&1 || true
-                sleep 20
-              fi
-              _persist_verify_entries "$dest_path" "$PERSIST_RETRY_LIST" 0 "$LOG_FILENAME"
-              echo "  重试持久化验证汇总: 复核 ${PERSIST_IDX}/${retry_fixed} / 通过 ${PERSIST_OK} / 失败 ${PERSIST_FAIL}" | tee -a "$LOG_FILENAME"
-              # 二次复核仍失败的条目: 移出 fix_list、清理 marker、记入 fail_list
-              local r2_orig
-              for r2_orig in "${PERSIST_FAILED_ORIGS[@]}"; do
-                [ -z "$r2_orig" ] && continue
-                echo "  二次复核失败，转入失败清单: ${r2_orig}" | tee -a "$LOG_FILENAME"
-                RO="$r2_orig" awk 'BEGIN{FS="|"} $1 != ENVIRON["RO"]' "$fix_list" > "${fix_list}.tmp" && mv "${fix_list}.tmp" "$fix_list"
-                echo "${r2_orig}|未知|换方法重试后仍未持久化（黑名单已记录，下一轮从剩余方法继续）" >> "$fail_list"
-                unset "FIXED_THIS_RUN[$r2_orig]" 2>/dev/null || true
-                _remove_fix_entry_from_state "$incr_state" "$incr_marker_path" "$r2_orig" 2>&1 | tee -a "$LOG_FILENAME" || true
-              done
-              if [ "$PERSIST_FAIL" -gt 0 ]; then
-                echo "  🔴 重试结论：换方法后仍有 ${PERSIST_FAIL} 个文件未持久化（黑名单已更新，下一轮从剩余方法继续）" | tee -a "$LOG_FILENAME"
-                SYNC_PERSIST_FAIL=1
-              else
-                echo "  🟢 重试结论：换方法后全部通过持久化验证，清除持久化失败标记" | tee -a "$LOG_FILENAME"
-                SYNC_PERSIST_FAIL=0
-              fi
-              _flush_blacklist_to_marker "$task_name" "$dest_path" "$LOG_FILENAME"
-            else
-              echo "  ⚠️ 二次复核重启后 HTTP 未就绪，跳过重试结果验证（本轮以即时校验为准）" | tee -a "$LOG_FILENAME"
+            if [ "$retry_http_ok" -ne 1 ]; then
+              echo "  ⚠️ 重启后 HTTP 未就绪，结束重试（本轮条目以即时校验为准，其余下一轮继续）" | tee -a "$LOG_FILENAME"
+              retry_pending=()
+              break
             fi
+            echo "  等待驱动重新初始化 (60s) ..." | tee -a "$LOG_FILENAME"
+            sleep 60
+            persist_ol_token=$(_get_openlist_token)
+            if [ -n "$persist_ol_token" ]; then
+              curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh" -H "Authorization: $persist_ol_token" -H "Content-Type: application/json" -d "{\"path\":\"$persist_ol_path\",\"recursive\":true}" >/dev/null 2>&1 || true
+              sleep 20
+            fi
+            _persist_verify_entries "$dest_path" "$round_list" 0 "$LOG_FILENAME"
+            echo "  第 ${retry_round} 轮复核汇总: 复核 ${PERSIST_IDX}/${retry_fixed} / 通过 ${PERSIST_OK} / 失败 ${PERSIST_FAIL}" | tee -a "$LOG_FILENAME"
+
+            # 仍未通过的条目进入下一轮（其条目在下轮重试前统一清理）；
+            # 通过的条目已真实持久化，就此出局
+            retry_pending=("${PERSIST_FAILED_ORIGS[@]}")
+            _flush_blacklist_to_marker "$task_name" "$dest_path" "$LOG_FILENAME"
+            rm -f "$round_list"
+          done
+
+          # 循环终止后仍待重试（轮数耗尽）→ 清理最后的假成功条目并转失败清单
+          local leftover_orig
+          for leftover_orig in "${retry_pending[@]}"; do
+            [ -z "$leftover_orig" ] && continue
+            echo "  重试轮数耗尽，转入失败清单: ${leftover_orig}" | tee -a "$LOG_FILENAME"
+            RO="$leftover_orig" awk 'BEGIN{FS="|"} $1 != ENVIRON["RO"]' "$fix_list" > "${fix_list}.tmp" && mv "${fix_list}.tmp" "$fix_list"
+            echo "${leftover_orig}|未知|重试轮数耗尽仍未持久化（黑名单已记录，下一轮从剩余方法继续）" >> "$fail_list"
+            unset "FIXED_THIS_RUN[$leftover_orig]" 2>/dev/null || true
+            _remove_fix_entry_from_state "$incr_state" "$incr_marker_path" "$leftover_orig" 2>&1 | tee -a "$LOG_FILENAME" || true
+            retry_perm_fail=$((retry_perm_fail + 1))
+          done
+
+          # 重试总结论
+          if [ "$retry_perm_fail" -gt 0 ]; then
+            echo "  🔴 重试结论：${retry_perm_fail} 个文件用尽所有方法仍未持久化（黑名单已记录）" | tee -a "$LOG_FILENAME"
+            SYNC_PERSIST_FAIL=1
           else
-            echo "  重试全部失败（所有方法均不可用），黑名单已保留（下一轮从剩余方法继续）" | tee -a "$LOG_FILENAME"
+            echo "  🟢 重试结论：换方法后全部通过持久化验证，清除持久化失败标记" | tee -a "$LOG_FILENAME"
+            SYNC_PERSIST_FAIL=0
           fi
-          rm -f "$PERSIST_RETRY_LIST"
+          _flush_blacklist_to_marker "$task_name" "$dest_path" "$LOG_FILENAME"
         fi
       else
         echo "  ⚠️ OpenList 容器重启后 HTTP 60s 内未就绪，跳过持久化验证" | tee -a "$LOG_FILENAME"
