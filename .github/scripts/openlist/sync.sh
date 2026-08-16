@@ -1328,7 +1328,9 @@ sync_with_logging() {
     GLOBAL_FIXED_FILES_JSON="[]"
   fi
   if [ "$LAST_SYNC_FIXED_FILES_JSON" != "[]" ]; then
-    GLOBAL_FIXED_FILES_JSON=$(jq -sc --argjson acc "$GLOBAL_FIXED_FILES_JSON" --argjson cur "$LAST_SYNC_FIXED_FILES_JSON" \
+    # -n: 程序只用 --argjson 变量；无 -n 时 jq 读 stdin，会吞掉调用方
+    # （auto-split 子目录 while read 循环）的剩余列表，后续子任务被静默跳过
+    GLOBAL_FIXED_FILES_JSON=$(jq -scn --argjson acc "$GLOBAL_FIXED_FILES_JSON" --argjson cur "$LAST_SYNC_FIXED_FILES_JSON" \
       '($acc + $cur) | unique_by(.original)' 2>/dev/null || echo "$GLOBAL_FIXED_FILES_JSON")
   fi
 
