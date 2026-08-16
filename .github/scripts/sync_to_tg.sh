@@ -162,8 +162,12 @@ def write_uploaded(uploaded: dict):
     """写回 uploaded_videos.json（v1 JSON 对象格式，保留扩展字段）。"""
     print(f"[write_uploaded] 开始写入（v1 JSON 对象），条目数: {len(uploaded)}, 路径: {UPLOADED_OUT}")
     if uploaded:
-        sample = sorted(uploaded.keys(), key=lambda x: x.lower())[:5]
-        print(f"[write_uploaded] 前 5 条示例: {sample!r}")
+        def _at(meta):
+            return (meta.get("uploaded_at") or "") if isinstance(meta, dict) else ""
+
+        latest = sorted(uploaded.items(), key=lambda kv: _at(kv[1]), reverse=True)[:5]
+        sample = [f"{fn} @ {_at(meta) or '未知时间'}" for fn, meta in latest]
+        print(f"[write_uploaded] 最近上传的 5 条: {sample!r}")
     payload = {
         "version": 1,
         "uploaded": {k: (v if isinstance(v, dict) else {}) for k, v in uploaded.items()},
