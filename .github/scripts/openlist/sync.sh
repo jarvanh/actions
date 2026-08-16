@@ -367,9 +367,7 @@ _remove_fix_entry_from_state() {
 # max_sample: 0 = 复核全部条目（默认语义，修复条目本来就有限，
 #             OPENLIST_MISSING_FIX_MAX 封顶）；>0 = 仅复核前 N 条（限流逃生阀）
 # 结果写入全局: PERSIST_OK / PERSIST_FAIL / PERSIST_IDX /
-#               PERSIST_FAILED_ORIGS（失败条目 original 数组，与 ALTS 同序配对）/
-#               PERSIST_FAILED_ALTS（失败条目 alternative 数组）/
-#               PERSIST_FAIL_DETAILS
+#               PERSIST_FAILED_ORIGS（失败条目 original 数组）/ PERSIST_FAIL_DETAILS
 # 用法: _persist_verify_entries <dest_path> <list_file> <max_sample> <log_file>
 _persist_verify_entries() {
   local dest_path="$1" list_file="$2" max_sample="$3" log_file="$4"
@@ -377,7 +375,6 @@ _persist_verify_entries() {
   PERSIST_FAIL=0
   PERSIST_IDX=0
   PERSIST_FAILED_ORIGS=()
-  PERSIST_FAILED_ALTS=()
   PERSIST_FAIL_DETAILS=""
   local alt_path bytes orig_path f_method f_mid
   while IFS='|' read -r alt_path bytes orig_path f_method f_mid; do
@@ -467,9 +464,38 @@ _persist_verify_entries() {
         echo "  → $(_method_desc "$f_mid") 已加入 ${orig_path} 的假成功黑名单（本轮立即换方法重试）" | tee -a "$log_file"
       fi
       PERSIST_FAILED_ORIGS+=("$orig_path")
-      PERSIST_FAILED_ALTS+=("$alt_path")
     fi
   done < "$list_file"
+}
+
+# 重建 A 层即时检测的 raw 基准（修复循环初始化与假成功重试每轮共用）
+# 容器重启后 wopan176 驱动重新初始化期间，列目录可能短暂返回空列表
+# （rclone size 计数 = 0 但 rc = 0，"成功的空"）。若把 0 当真基准，之后
+# 每个真实落盘的方法都会被判"计数未增长 → 假成功"，引发换方法级联误判、
+# 同一文件被重复上传多份（run 31928671112 实测一轮内同文件连传 9 个方法，
+# 全部真实落盘又全部被误判）。因此:
+#   - 轮询直到计数 > 0（列表就绪），最多 3 次、间隔 20s
+#   - 仍为 0 → 本轮禁用即时检测（信任 rc，重启复核兜底），绝不用 0 当基准
+# 前置: _RAW_VERIFY_DIR / _RAW_VERIFY_REFRESH 已设置
+# 用法: _rebuild_raw_baseline <log_file>  返回 0=基准就绪(>0)，1=已禁用
+_rebuild_raw_baseline() {
+  local log_file="$1"
+  _RAW_VERIFY_BUDGET="${OPENLIST_RAW_CHECK_BUDGET:-40}"
+  local base=0 attempt
+  for attempt in 1 2 3; do
+    if base=$(_raw_dir_count "$_RAW_VERIFY_DIR" "${_RAW_VERIFY_REFRESH:-}"); then
+      [ "$base" -gt 0 ] && break
+    fi
+    [ "$attempt" -lt 3 ] && sleep 20
+  done
+  if [ "$base" -gt 0 ]; then
+    _RAW_VERIFY_LAST=$base
+    echo "raw 假成功即时检测已启用（基准 ${base}，dne=${_CRYPT_DNE:-?}，预算 ${_RAW_VERIFY_BUDGET}）" | tee -a "$log_file"
+    return 0
+  fi
+  _RAW_VERIFY_BUDGET=0
+  echo "⚠️ raw 计数持续为 0（容器重启后列表未就绪），本轮禁用即时检测（信任 rc，重启复核兜底）——避免把真实落盘误判为假成功" | tee -a "$log_file"
+  return 1
 }
 
 # 带探测、重试和详细日志的同步函数
@@ -769,7 +795,9 @@ sync_with_logging() {
 
     # ===== A: 假成功即时检测初始化（仅 wopan176Crypt，方案 A）=====
     # 每个方法返回成功后用 _confirm_raw_persist 对比 wopan176 裸路径密文数；
-    # _RAW_VERIFY_LAST 为运行基准（随真实落盘递增），budget 限制全量计数次数
+    # _RAW_VERIFY_LAST 为运行基准（随真实落盘递增），budget 限制全量计数次数。
+    # 基准重建走 _rebuild_raw_baseline: 轮询直到计数 > 0，仍为 0 则禁用
+    # 即时检测（0 基准会把真实落盘全部误判为假成功，引发级联换方法重传）
     _RAW_VERIFY_DEST=""
     _RAW_VERIFY_DIR=""
     _RAW_VERIFY_LAST=-1
@@ -781,15 +809,7 @@ sync_with_logging() {
       _RAW_VERIFY_DIR=$(_raw_count_view_for "$dest_path")
       _RAW_VERIFY_REFRESH=$(_raw_remote_for "${dest_path%%/*}" 2>/dev/null || echo "${dest_path/Crypt/}")
       _RAW_VERIFY_REFRESH="${_RAW_VERIFY_REFRESH#openlist:}"
-      _RAW_VERIFY_BUDGET="${OPENLIST_RAW_CHECK_BUDGET:-40}"
-      local _raw_base=0
-      if _raw_base=$(_raw_dir_count "$_RAW_VERIFY_DIR" "$_RAW_VERIFY_REFRESH"); then
-        _RAW_VERIFY_LAST=$_raw_base
-        echo "raw 假成功即时检测已启用（基准 ${_raw_base}，dne=${_CRYPT_DNE:-?}，预算 ${_RAW_VERIFY_BUDGET}）" | tee -a "$LOG_FILENAME"
-      else
-        _RAW_VERIFY_BUDGET=0
-        echo "⚠️ raw 基准计数失败，本轮禁用即时检测（退化为信任 rc，跨轮黑名单仍生效）" | tee -a "$LOG_FILENAME"
-      fi
+      _rebuild_raw_baseline "$LOG_FILENAME"
     fi
 
     # ===== 名长诊断初始化（wopan176Crypt）=====
@@ -1025,14 +1045,11 @@ sync_with_logging() {
             echo "=== ${task_name} 假成功重试第 ${retry_round}/${retry_rounds_max} 轮（换方法，待重试 ${#retry_pending[@]} 个）===" | tee -a "$LOG_FILENAME"
 
             # A 层即时检测基线重建: 上一轮容器重启后幽灵文件已从计数中
-            # 消失，旧基线偏高会把本轮真实落盘误判为假成功
+            # 消失，旧基线偏高会把本轮真实落盘误判为假成功；重建时轮询
+            # 直到计数 > 0（驱动就绪），仍为 0 则本轮禁用即时检测
+            # （0 基准会把真实落盘级联误判为假成功 → 同文件重复上传多份）
             if [ -n "${_RAW_VERIFY_DEST:-}" ]; then
-              _RAW_VERIFY_BUDGET="${OPENLIST_RAW_CHECK_BUDGET:-40}"
-              local _retry_raw_base
-              if _retry_raw_base=$(_raw_dir_count "$_RAW_VERIFY_DIR" "${_RAW_VERIFY_REFRESH:-}"); then
-                _RAW_VERIFY_LAST=$_retry_raw_base
-                echo "  本轮 raw 基准已重建: ${_retry_raw_base}" | tee -a "$LOG_FILENAME"
-              fi
+              _rebuild_raw_baseline "$LOG_FILENAME"
             fi
 
             local round_list="/tmp/${task_name}_persist_retry_r${retry_round}_$$.txt"
@@ -1042,14 +1059,8 @@ sync_with_logging() {
               [ -z "$retry_orig" ] && continue
               echo "重试修复（换方法）: ${retry_orig}" | tee -a "$LOG_FILENAME"
 
-              # 先从 fix_list 移除旧假成功条目（无论重试成败都不保留），
-              # 并清理其在目标端留下的未持久化工件（避免同一文件累积多个修复文件）
-              local old_alt=""
-              old_alt=$(awk -F'|' -v o="$retry_orig" '$1==o{print $2; exit}' "$fix_list")
+              # 先从 fix_list 移除旧假成功条目（无论重试成败都不保留）
               RO="$retry_orig" awk 'BEGIN{FS="|"} $1 != ENVIRON["RO"]' "$fix_list" > "${fix_list}.tmp" && mv "${fix_list}.tmp" "$fix_list"
-              if [ -n "$old_alt" ]; then
-                _cleanup_fix_artifact "$dest_path" "$old_alt" "$LOG_FILENAME"
-              fi
 
               try_fix_failed_file "$source_path" "$dest_path" "$task_name" "$retry_orig" "$fix_log" || true
 
@@ -1113,28 +1124,21 @@ sync_with_logging() {
             _persist_verify_entries "$dest_path" "$round_list" 0 "$LOG_FILENAME"
             echo "  第 ${retry_round} 轮复核汇总: 复核 ${PERSIST_IDX}/${retry_fixed} / 通过 ${PERSIST_OK} / 失败 ${PERSIST_FAIL}" | tee -a "$LOG_FILENAME"
 
-            # 仍未通过的条目: 先清理其未持久化的替代工件（防同一文件累积
-            # 多个修复文件），再进入下一轮换方法；通过的条目已真实持久化，出局
-            local rvi
-            for rvi in "${!PERSIST_FAILED_ORIGS[@]}"; do
-              _cleanup_fix_artifact "$dest_path" "${PERSIST_FAILED_ALTS[$rvi]:-}" "$LOG_FILENAME"
-            done
+            # 仍未通过的条目进入下一轮（其条目在下轮重试前统一清理）；
+            # 通过的条目已真实持久化，就此出局
             retry_pending=("${PERSIST_FAILED_ORIGS[@]}")
             _flush_blacklist_to_marker "$task_name" "$dest_path" "$LOG_FILENAME"
             rm -f "$round_list"
           done
 
           # 循环终止后仍待重试（轮数耗尽）→ 清理最后的假成功条目并转失败清单
-          # （retry_pending 与最后一轮 PERSIST_FAILED_ALTS 同序，按索引配对清理工件）
-          local leftover_orig leftover_i
-          for leftover_i in "${!retry_pending[@]}"; do
-            leftover_orig="${retry_pending[$leftover_i]}"
+          local leftover_orig
+          for leftover_orig in "${retry_pending[@]}"; do
             [ -z "$leftover_orig" ] && continue
             echo "  重试轮数耗尽，转入失败清单: ${leftover_orig}" | tee -a "$LOG_FILENAME"
             RO="$leftover_orig" awk 'BEGIN{FS="|"} $1 != ENVIRON["RO"]' "$fix_list" > "${fix_list}.tmp" && mv "${fix_list}.tmp" "$fix_list"
             echo "${leftover_orig}|未知|重试轮数耗尽仍未持久化（黑名单已记录，下一轮从剩余方法继续）" >> "$fail_list"
             unset "FIXED_THIS_RUN[$leftover_orig]" 2>/dev/null || true
-            _cleanup_fix_artifact "$dest_path" "${PERSIST_FAILED_ALTS[$leftover_i]:-}" "$LOG_FILENAME"
             _remove_fix_entry_from_state "$incr_state" "$incr_marker_path" "$leftover_orig" 2>&1 | tee -a "$LOG_FILENAME" || true
             retry_perm_fail=$((retry_perm_fail + 1))
           done
