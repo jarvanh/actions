@@ -28,8 +28,17 @@
 
 # 刷新 OpenList wopan176 后端的 OAuth access token
 # wopan176 的 access token 有效期短（约 5 分钟），长时间同步会过期
+#
+# /api/driver/update 失败 = wopan176 驱动状态可疑的实锤信号:
+# run 31945907528 / 31951008332 两轮实测，该 API 失败后仅做 storage 配置
+# 重载就放行同步 → 窗口期内所有经 OpenList→wopan 的 PUT 全部假成功
+# （rclone 报 Copied (new)，密文从未落盘，容器重启后消失），同样 19 个
+# 文件白传 ~1.3 GiB 两遍。因此方法1 失败时先重启容器（驱动完整重初始
+# 化 + 换新 token，一次 ~2 分钟），重启不可用才退回 storage 重载。
+# 每轮（进程生命周期）最多重启一次，用 _WOPAN_TOKEN_RESTART_DONE 标记。
 # 用法: _refresh_wopan_token [log_filename]
 # 返回: 0=成功刷新, 非0=刷新失败
+_WOPAN_TOKEN_RESTART_DONE=0
 _refresh_wopan_token() {
   local log_file="${1:-/dev/null}"
   local ol_token
@@ -56,8 +65,22 @@ _refresh_wopan_token() {
     return 0
   fi
 
-  # 方法 2: 通过 /api/storage/list 后逐个刷新 storage 配置
-  echo "  方法1 失败，尝试方法2: 重新加载 storage 配置..." | tee -a "$log_file"
+  # 方法 2: 重启容器（driver/update 失败 = 驱动坏状态窗口，见函数头注释）
+  if [ "$_WOPAN_TOKEN_RESTART_DONE" -eq 0 ]; then
+    echo "  方法1 (/api/driver/update) 失败 → wopan176 驱动状态可疑，重启容器重建驱动..." | tee -a "$log_file"
+    if _restart_openlist_for_truth "" "$log_file"; then
+      _WOPAN_TOKEN_RESTART_DONE=1
+      echo "  wopan176 token 刷新成功 (方法2: 容器重启，驱动已完整重初始化)" | tee -a "$log_file"
+      return 0
+    fi
+    echo "  ⚠️ 方法2 容器重启失败，退回方法3: storage 配置重载..." | tee -a "$log_file"
+  else
+    echo "  方法1 失败（本轮已重启过容器，跳过重复重启），退回方法3: storage 配置重载..." | tee -a "$log_file"
+  fi
+
+  # 方法 3（兜底）: 通过 /api/storage/list 后逐个刷新 storage 配置
+  # 仅在容器不可重启/本轮已重启过仍失败时使用——该方法不重建驱动，
+  # 若驱动真处坏状态则放行同步会重演假成功窗口
   local storage_list
   storage_list=$(curl -s -X GET "http://127.0.0.1:5244/api/storage/list" \
     -H "Authorization: $ol_token" \
@@ -183,10 +206,12 @@ _refresh_ol_cache_fast() {
 # 重启 OpenList 容器并等待驱动就绪——为拿到"后端真实列表"
 # （PUT 假成功条目只存在于 OpenList 缓存/后端可见列表，容器重启即消失；
 #   持久化验证/假成功重试一直在用这个口径，此处抽出复用）
-# 用法: _restart_openlist_for_truth <ol_path 不带 openlist: 前缀> [log_file]
+# 用法: _restart_openlist_for_truth [ol_path 不带 openlist: 前缀] [log_file]
+#   ol_path 为空时跳过路径级缓存刷新（重启后列表本就是后端新拉的，
+#   且对根路径 recursive 刷新代价大）
 # 返回: 0=重启且驱动就绪（列表已从后端重拉），1=不可重启/未就绪
 _restart_openlist_for_truth() {
-  local ol_path="/${1#/}"
+  local ol_path="${1#/}"
   local log_file="${2:-/dev/null}"
   command -v docker >/dev/null 2>&1 || return 1
   sudo docker ps --format '{{.Names}}' 2>/dev/null | grep -qw openlist || return 1
@@ -203,14 +228,16 @@ _restart_openlist_for_truth() {
   }
   echo "  等待驱动重新初始化 (60s)..." | tee -a "$log_file"
   sleep 60
-  local t
-  t=$(_get_openlist_token) || true
-  if [ -n "$t" ]; then
-    curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh" \
-      -H "Authorization: $t" -H "Content-Type: application/json" \
-      -d "{\"path\":\"$ol_path\",\"recursive\":true}" >/dev/null 2>&1 || true
+  if [ -n "$ol_path" ]; then
+    local t
+    t=$(_get_openlist_token) || true
+    if [ -n "$t" ]; then
+      curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh" \
+        -H "Authorization: $t" -H "Content-Type: application/json" \
+        -d "{\"path\":\"/${ol_path#/}\",\"recursive\":true}" >/dev/null 2>&1 || true
+    fi
+    sleep 10
   fi
-  sleep 10
   return 0
 }
 
