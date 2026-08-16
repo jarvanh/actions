@@ -192,12 +192,17 @@ _wopan_raw_verify() {
   [[ "$dest_path" == openlist:wopan176Crypt/* ]] || return 0
 
   # 裸路径取 API 权威推导（crypt addition.path），失败退化为字符串替换
-  local raw_dest
-  raw_dest=$(_raw_remote_for "$dest_path")
-  echo "=== raw-vs-crypt 校验: ${dest_path} vs ${raw_dest} ===" | tee -a "$log_file"
+  # raw_dest 可能是含密码的 crypt 即时远程（仅用于计数，绝不能进日志）
+  local raw_dest raw_display
+  raw_dest=$(_raw_count_view_for "$dest_path")
+  raw_display=$(_raw_remote_for "${dest_path%%/*}" 2>/dev/null || echo "${dest_path/Crypt/}")
+  local _sub=""
+  [[ "${dest_path#openlist:}" == */* ]] && _sub="/${dest_path#openlist:*/}"
+  echo "=== raw-vs-crypt 校验: ${dest_path} vs ${raw_display}${_sub}（${_CRYPT_DNE:-?} dne, 解密口径计数）===" | tee -a "$log_file"
 
+  # 缓存刷新: crypt 挂载 + 裸挂载根（dne=true 时裸存储无字面子路径，只能刷根）
   _refresh_ol_cache_fast "${dest_path#openlist:}"
-  _refresh_ol_cache_fast "${raw_dest#openlist:}"
+  _refresh_ol_cache_fast "${raw_display#openlist:}"
 
   local crypt_count=0 raw_count=0 crypt_json raw_json raw_rc=0
   crypt_json=$(timeout 900 rclone size "$dest_path" --json 2>/dev/null || true)
@@ -210,7 +215,7 @@ _wopan_raw_verify() {
 
   # 裸路径列表获取失败（路径不存在/驱动错误）→ 无法判定，跳过并提示
   if [ "$raw_rc" -ne 0 ]; then
-    echo "  ⚠️ 裸路径列表获取失败 (rc=${raw_rc}, ${raw_dest} 可能不是有效挂载)，跳过幽灵文件判定" | tee -a "$log_file"
+    echo "  ⚠️ 裸路径计数失败 (rc=${raw_rc}, ${raw_display}${_sub} 视角无法列出)，跳过幽灵文件判定" | tee -a "$log_file"
     # 诊断: 列出 OpenList 根挂载，确认裸存储是否真的挂载（raw 校验/A 层检测/m15 直写全依赖它）
     local root_mounts
     root_mounts=$(timeout 60 rclone lsf openlist: --dirs-only 2>/dev/null | sed 's|/$||' | head -20)
@@ -222,14 +227,21 @@ _wopan_raw_verify() {
     else
       echo "  🔍 OpenList 根挂载列表获取失败（WebDAV 未就绪?）" | tee -a "$log_file"
     fi
-    # 诊断: admin API 列出全部存储配置（含隐藏/禁用状态，比 WebDAV 列表权威）
-    local ol_token storage_table
+    # 诊断: admin API 列出全部存储配置（含响应码——run 31918439043 此表为空，需看 code 定位）
+    local ol_token storage_table api_resp api_code
     ol_token=$(_get_openlist_token) || ol_token=""
     if [ -n "$ol_token" ]; then
-      storage_table=$(curl -s "http://127.0.0.1:5244/api/admin/storage/list" \
-        -H "Authorization: $ol_token" --max-time 15 2>/dev/null | \
+      api_resp=$(curl -s "http://127.0.0.1:5244/api/admin/storage/list" \
+        -H "Authorization: $ol_token" --max-time 15 2>/dev/null || echo "")
+      api_code=$(echo "$api_resp" | jq -r '.code // "无响应"' 2>/dev/null)
+      storage_table=$(echo "$api_resp" | \
         jq -r '(.data.content // .data // [])[] | "  · \(.mount_path) [driver=\(.driver) disabled=\(.disabled // false)]"' 2>/dev/null | head -30)
-      [ -n "$storage_table" ] && { echo "  🔍 OpenList 存储配置(admin API):" | tee -a "$log_file"; echo "$storage_table" | tee -a "$log_file"; }
+      if [ -n "$storage_table" ]; then
+        echo "  🔍 OpenList 存储配置(admin API, code=${api_code}):" | tee -a "$log_file"
+        echo "$storage_table" | tee -a "$log_file"
+      else
+        echo "  🔍 admin API 无存储数据 (code=${api_code}, message=$(echo "$api_resp" | jq -r '.message // "?"' 2>/dev/null))——crypt 配置已自动走 data.db 兜底" | tee -a "$log_file"
+      fi
     fi
     return 0
   fi
@@ -601,12 +613,16 @@ sync_with_logging() {
     _RAW_VERIFY_BUDGET=0
     if [[ "$dest_path" == openlist:wopan176Crypt/* ]] && [ -s "$missing_list" ]; then
       _RAW_VERIFY_DEST="$dest_path"
-      _RAW_VERIFY_DIR=$(_raw_remote_for "$dest_path")
+      # 计数视图: 配置可用时为 crypt 即时远程（dne=true 唯一正确口径），
+      # 否则退化为字面裸路径；刷新路径始终为裸挂载根（dne 下无字面子路径）
+      _RAW_VERIFY_DIR=$(_raw_count_view_for "$dest_path")
+      _RAW_VERIFY_REFRESH=$(_raw_remote_for "${dest_path%%/*}" 2>/dev/null || echo "${dest_path/Crypt/}")
+      _RAW_VERIFY_REFRESH="${_RAW_VERIFY_REFRESH#openlist:}"
       _RAW_VERIFY_BUDGET="${OPENLIST_RAW_CHECK_BUDGET:-40}"
       local _raw_base=0
-      if _raw_base=$(_raw_dir_count "$_RAW_VERIFY_DIR"); then
+      if _raw_base=$(_raw_dir_count "$_RAW_VERIFY_DIR" "$_RAW_VERIFY_REFRESH"); then
         _RAW_VERIFY_LAST=$_raw_base
-        echo "raw 假成功即时检测已启用（基准密文数 ${_raw_base}，本轮校验预算 ${_RAW_VERIFY_BUDGET}）" | tee -a "$LOG_FILENAME"
+        echo "raw 假成功即时检测已启用（基准 ${_raw_base}，dne=${_CRYPT_DNE:-?}，预算 ${_RAW_VERIFY_BUDGET}）" | tee -a "$LOG_FILENAME"
       else
         _RAW_VERIFY_BUDGET=0
         echo "⚠️ raw 基准计数失败，本轮禁用即时检测（退化为信任 rc，跨轮黑名单仍生效）" | tee -a "$LOG_FILENAME"
@@ -616,13 +632,13 @@ sync_with_logging() {
     # ===== 名长诊断初始化（wopan176Crypt）=====
     # 验证"密文文件名超长"假设: cryptencode 本地计算缺失文件的密文名长（无网络
     # 写操作），与后端实际已接受的最长密文名（裸路径 lsf 统计 basename）对比。
-    # 文件名加密一直开启 → 后端只见 base32 密文名（≈(原名+40)×1.6），
-    # 中文名约 40 字即顶到 255B —— 正好解释"固定一批长名文件永远传不上"
+    # 注意用裸挂载根而非 /backup 子路径: dne=true 时子路径在裸存储是密文名，
+    # 字面子路径列不出任何东西；根的 -R 递归列出覆盖全部密文名
     local _NAMELEN_RAW_MAX=0
     local _NAMELEN_OVER_255=0
     local _NAMELEN_OVER_RAWMAX=0
     if [[ "$dest_path" == openlist:wopan176Crypt/* ]] && [ -s "$missing_list" ] && _ensure_crypt_config "$dest_path"; then
-      _NAMELEN_RAW_MAX=$(timeout 600 rclone lsf "$(_raw_remote_for "$dest_path")" -R --files-only 2>/dev/null \
+      _NAMELEN_RAW_MAX=$(timeout 600 rclone lsf "${_CRYPT_REMOTE}" -R --files-only 2>/dev/null \
         | awk -F/ '{ n=length($NF); if (n>m) m=n } END { print m+0 }')
       echo "名长诊断已启用: crypt=${_CRYPT_REMOTE}, 后端已接受最长密文名 ${_NAMELEN_RAW_MAX} 字节" | tee -a "$LOG_FILENAME"
     fi
