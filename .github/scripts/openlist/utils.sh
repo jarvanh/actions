@@ -213,10 +213,12 @@ _extract_exclude_summary() {
 
 # 获取 OpenList token（多路径 + 双字段查找）
 # 与 workflow 里的候选路径保持一致
+# （数据库本地化后 config.json 在 /opt/openlist-data，旧路径保留兜底）
 # 返回: token 字符串（找到时）或空字符串（未找到时）
 _get_openlist_token() {
   local c t
   for c in \
+    "/opt/openlist-data/config.json" \
     "/dropbox/self-hosted/openlist/data/config.json" \
     "/dropbox/self-hosted/openlist/data/conf/config.json" \
     "/data/openlist/data/config.json" \
