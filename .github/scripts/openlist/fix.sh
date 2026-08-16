@@ -26,8 +26,10 @@
 #      密文计数是否增长（裸存储缓存独立，不受 crypt 幽灵文件污染）。
 #      未增长 = 假成功 → 该方法加入黑名单，立即尝试下一种方式。
 #   B. 失败记忆（FIX_METHOD_BLACKLIST + marker fix_blacklist 字段）:
-#      跨轮持久化每文件已判定假成功的方法（marker 存方法全名，| 分隔），
-#      下一轮修复直接跳过，避免方法1 每轮都白白"成功"一次再被发现。
+#      持久化每文件已判定假成功的方法（marker 存方法全名，| 分隔）。
+#      sync.sh 持久化验证发现假成功后，本轮立即换方法重试（黑名单让
+#      try_fix_failed_file 直接跳过失效方法）；跨轮修复同样跳过，避免
+#      方法1 每轮都白白"成功"一次再被发现。
 #
 # 依赖: utils.sh (log_fix, _get_openlist_token), telegram.sh (间接)
 # 结果写入全局变量:
@@ -518,7 +520,7 @@ try_fix_failed_file() {
 
   # 方法 1：直接 rclone copyto
   if _method_blocked m1; then
-    log_fix "$fix_log" "$(_method_desc m1) — 跳过（上一轮已判定该方法假成功）"
+    log_fix "$fix_log" "$(_method_desc m1) — 跳过（已判定该方法假成功，黑名单生效）"
   else
   log_fix "$fix_log" "方法 1: 直接 rclone copyto"
   rclone copyto "$src_file" "$dst_file" --retries 1 --low-level-retries 3 --timeout 5m --contimeout 30s 2>&1 | \
@@ -548,7 +550,7 @@ try_fix_failed_file() {
   # 裸存储 → 文件以原名原路径出现在 wopan176Crypt，绕过 OpenList crypt→后端
   # 驱动链路（假成功最可疑环节），无需替代名/还原映射
   if _method_blocked m2; then
-    log_fix "$fix_log" "$(_method_desc m2) — 跳过（上一轮已判定该方法假成功）"
+    log_fix "$fix_log" "$(_method_desc m2) — 跳过（已判定该方法假成功，黑名单生效）"
   else
   log_fix "$fix_log" "方法 2: rclone crypt 直写裸存储"
   local _c_rel_root="" _c_rel _c_dst
@@ -581,7 +583,7 @@ try_fix_failed_file() {
   # <md5前8位>.<扩展名> — 密文名必然远低于 255 字节上限，对症"加密后文件名超长"
   # 根因（base64URL 编码反而让名字更长）；内容不变，还原仅需改名
   if _method_blocked m3; then
-    log_fix "$fix_log" "$(_method_desc m3) — 跳过（上一轮已判定该方法假成功）"
+    log_fix "$fix_log" "$(_method_desc m3) — 跳过（已判定该方法假成功，黑名单生效）"
   else
   log_fix "$fix_log" "方法 3: 短哈希文件名直传"
   local sh_hash sh_name m3sh_dst m3sh_status
@@ -615,7 +617,7 @@ try_fix_failed_file() {
 
   # 方法 4：zip 压缩后上传
   if _method_blocked m4; then
-    log_fix "$fix_log" "$(_method_desc m4) — 跳过（上一轮已判定该方法假成功）"
+    log_fix "$fix_log" "$(_method_desc m4) — 跳过（已判定该方法假成功，黑名单生效）"
   else
   log_fix "$fix_log" "方法 4: zip 压缩后上传"
   (cd "$temp_dir" && 7z a -tzip -mx=0 "${file_name}.zip" "$file_name") 2>&1 | \
@@ -648,7 +650,7 @@ try_fix_failed_file() {
 
   # 方法 5：7z 压缩后上传
   if _method_blocked m5; then
-    log_fix "$fix_log" "$(_method_desc m5) — 跳过（上一轮已判定该方法假成功）"
+    log_fix "$fix_log" "$(_method_desc m5) — 跳过（已判定该方法假成功，黑名单生效）"
   else
   log_fix "$fix_log" "方法 5: 7z 压缩后上传"
   (cd "$temp_dir" && 7z a -t7z -mx=0 "${file_name}.7z" "$file_name") 2>&1 | \
@@ -686,7 +688,7 @@ try_fix_failed_file() {
   local SPLIT_PART_HUMAN
   SPLIT_PART_HUMAN=$(numfmt --to=iec-i --suffix=B "$SPLIT_LIMIT_BYTES" 2>/dev/null || echo "${SPLIT_LIMIT_BYTES}B")
   if _method_blocked m6; then
-    log_fix "$fix_log" "$(_method_desc m6) — 跳过（上一轮已判定该方法假成功）"
+    log_fix "$fix_log" "$(_method_desc m6) — 跳过（已判定该方法假成功，黑名单生效）"
   else
   log_fix "$fix_log" "方法 6: 压缩并分卷上传（粒度 ${SPLIT_PART_HUMAN}）"
   local m6_split_dir="${temp_dir}/split_m6"
@@ -781,7 +783,7 @@ try_fix_failed_file() {
   # 方法 7：压缩并 base64URL 编码文件名，切割为 100MB 以下的分卷再进行同步
   # ============================================================
   if _method_blocked m7; then
-    log_fix "$fix_log" "$(_method_desc m7) — 跳过（上一轮已判定该方法假成功）"
+    log_fix "$fix_log" "$(_method_desc m7) — 跳过（已判定该方法假成功，黑名单生效）"
   else
   log_fix "$fix_log" "方法 7: 压缩+base64URL编码文件名+分卷切割上传"
   local m7_encoded_name
@@ -882,7 +884,7 @@ try_fix_failed_file() {
 
   # 方法 8：OpenList API 直传
   if _method_blocked m8; then
-    log_fix "$fix_log" "$(_method_desc m8) — 跳过（上一轮已判定该方法假成功）"
+    log_fix "$fix_log" "$(_method_desc m8) — 跳过（已判定该方法假成功，黑名单生效）"
   else
   log_fix "$fix_log" "方法 8: OpenList API 直传"
   if [ -n "$ol_token" ] && [ "$ol_token" != "null" ]; then
@@ -931,7 +933,7 @@ try_fix_failed_file() {
   # 如果当前目录写操作被 wopan176 拒绝，尝试上传到上级目录
   # 文件名编码原始目录信息，便于后续还原
   if _method_blocked m9; then
-    log_fix "$fix_log" "$(_method_desc m9) — 跳过（上一轮已判定该方法假成功）"
+    log_fix "$fix_log" "$(_method_desc m9) — 跳过（已判定该方法假成功，黑名单生效）"
   else
   if [ "$file_dir_rel" != "." ] && [ "$file_dir_rel" != "" ]; then
     log_fix "$fix_log" "方法 9: 上传到父目录（跳过有问题的目录层级）"
@@ -975,7 +977,7 @@ try_fix_failed_file() {
 
   # 方法 10：加密 zip 后上传（改变二进制特征 + 密码保护）
   if _method_blocked m10; then
-    log_fix "$fix_log" "$(_method_desc m10) — 跳过（上一轮已判定该方法假成功）"
+    log_fix "$fix_log" "$(_method_desc m10) — 跳过（已判定该方法假成功，黑名单生效）"
   else
   log_fix "$fix_log" "方法 10: 加密 zip 后上传（改变二进制特征）"
   local zip_password="OpenList$(date +%s)"
@@ -1006,7 +1008,7 @@ try_fix_failed_file() {
   # 在 backup 根目录创建临时目录，上传文件，然后用 API move 到目标路径
   if [ -n "$ol_token" ] && [ "$ol_token" != "null" ]; then
     if _method_blocked m11; then
-      log_fix "$fix_log" "$(_method_desc m11) — 跳过（上一轮已判定该方法假成功）"
+      log_fix "$fix_log" "$(_method_desc m11) — 跳过（已判定该方法假成功，黑名单生效）"
     else
     log_fix "$fix_log" "方法 11: 上传到临时目录后用 OpenList API move 移动"
     local tmp_dir_name="_tmp_fix_$(date +%s)_$$"
