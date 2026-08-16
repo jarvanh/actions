@@ -26,6 +26,19 @@ get_marker_path() {
   echo "${SYNC_STATE_DIR}/${task_name}_${dest_hash}.json"
 }
 
+# 统一 marker 落盘: pretty-print（缩进格式化）后再 rcat 上传
+# 中间变量一律 jq -c 紧凑格式（构建/合并省事），只有落盘这一步格式化，
+# 保证 onedrive 上的 marker 始终是人可读的结构化 JSON
+# （历史缺陷: 多数写入点直接 rcat 紧凑 JSON，marker 被"修复管线"重写后
+#  变成不可读的一大坨单行）。
+# jq 解析失败（调用方刚构建的 JSON 理论上不会）时原样写入，保数据不丢。
+# 用法: _marker_write <json_text> <marker_path>  返回 rclone 的退出码
+_marker_write() {
+  local json="$1" marker_path="$2" pretty
+  pretty=$(printf '%s' "$json" | jq . 2>/dev/null) || pretty=""
+  printf '%s\n' "${pretty:-$json}" | rclone rcat "$marker_path"
+}
+
 # 从旧 marker 继承仍有效的修复条目（original 在目标端仍不存在 = 未对齐，保留；
 # original 已出现 = 本轮已正常同步对齐，剔除）。输出 carried JSON 数组到 stdout。
 # 用法: _carry_forward_fixed <dest_path> <old_marker_json>
@@ -162,7 +175,7 @@ save_fix_state_marker() {
   fi
 
   rclone mkdir "$SYNC_STATE_DIR" >/dev/null 2>&1 || true
-  echo "$marker_json" | rclone rcat "$marker_path" 2>/dev/null
+  _marker_write "$marker_json" "$marker_path" 2>/dev/null
   local bl_total
   bl_total=$(echo "$merged_bl_json" | jq 'length' 2>/dev/null || echo 0)
   [[ "$bl_total" =~ ^[0-9]+$ ]] || bl_total=0
@@ -547,7 +560,7 @@ PYEOF
 
   # 上传标记到 OneDrive
   rclone mkdir "$SYNC_STATE_DIR" >/dev/null 2>&1 || true
-  echo "$marker_json" | rclone rcat "$marker_path" 2>/dev/null
+  _marker_write "$marker_json" "$marker_path" 2>/dev/null
   local summary=""
   local new_count fb_count
   new_count=$(echo "$new_fixed_json" | jq 'length' 2>/dev/null || echo 0)

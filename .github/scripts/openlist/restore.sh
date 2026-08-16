@@ -214,7 +214,7 @@ restore_fixed_files() {
           | .fixed_count = (.fixed_files | length)
           | .fixed_bytes = ([.fixed_files[].size_bytes] | add // 0)
         ' 2>/dev/null) || true
-        echo "$json" | rclone rcat "$marker_path" >/dev/null 2>&1 || true
+        _marker_write "$json" "$marker_path" >/dev/null 2>&1 || true
       else
         total_fail=$((total_fail + 1))
         fail_list+="• ${orig} — ${status#FAIL: }"$'\n'
