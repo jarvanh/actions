@@ -23,6 +23,8 @@ mkdir -p "$TMP_DIR"
 
 # 拉取已上传名单到本地（不要修改远程文件，工作结束后再写回）
 rclone cat "$SOURCE_REMOTE/uploaded_videos.json" 2>/dev/null > "$TMP_DIR/uploaded_videos.raw" || true
+# 拉取损坏文件名单（源文件本身损坏、无法解析的，持久标记避免每天重复下载/失败）
+rclone cat "$SOURCE_REMOTE/failed_videos.json" 2>/dev/null > "$TMP_DIR/failed_videos.raw" || true
 
 # 所有核心逻辑交给 Python：列出、比较、下载、上传、记录
 # 只需要一个持久化文件 uploaded_videos.json（versioned JSON 对象，可扩展元数据），不再需要中间文件
@@ -47,8 +49,13 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".flv", ".wmv", ".webm", ".m4v", ".ts"}
 UPLOADED_RAW = os.path.join(TMP, "uploaded_videos.raw")
 UPLOADED_OUT = os.path.join(TMP, "uploaded_videos.json")
+FAILED_RAW = os.path.join(TMP, "failed_videos.raw")
+FAILED_OUT = os.path.join(TMP, "failed_videos.json")
 STATS_FILE = os.path.join(TMP, "stats.json")
 WORK_DIR = os.path.join(TMP, "work")
+
+# transcode_and_send.sh 约定的退出码：10 = 源文件损坏/无法解析（如 moov atom 缺失）
+EXIT_CORRUPT = 10
 
 
 def run(cmd, capture=True, **kwargs):
@@ -162,6 +169,48 @@ def flush_uploaded_to_remote(uploaded: dict):
         print(f"[flush] uploaded_videos.json 已同步到远端 (条目数: {len(uploaded)})")
 
 
+def read_failed() -> dict:
+    """读取损坏文件名单（v1 格式: {"version": 1, "failed": {filename: meta}}）。
+    记录 size_bytes + source_modified_at 指纹：远端文件未变化时跳过重试，
+    文件被替换（重新下载覆盖）后指纹不匹配会自动重新尝试。
+    """
+    empty = {}
+    if not os.path.exists(FAILED_RAW) or os.path.getsize(FAILED_RAW) == 0:
+        return empty
+    try:
+        with open(FAILED_RAW, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        failed = data.get("failed") if isinstance(data, dict) else None
+        if not isinstance(failed, dict):
+            failed = data if isinstance(data, dict) else {}
+        result = {fn: (meta if isinstance(meta, dict) else {}) for fn, meta in failed.items() if isinstance(fn, str) and fn}
+        print(f"[read_failed] 损坏文件名单解析成功，条目数: {len(result)}")
+        return result
+    except Exception as e:
+        print(f"[read_failed] WARN: 解析失败，按空处理: {type(e).__name__}: {e}")
+        return empty
+
+
+def write_failed(failed: dict):
+    """写回 failed_videos.json（v1 JSON 对象格式）。"""
+    payload = {
+        "version": 1,
+        "failed": {k: (v if isinstance(v, dict) else {}) for k, v in failed.items()},
+    }
+    with open(FAILED_OUT, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def flush_failed_to_remote(failed: dict):
+    """损坏名单立即同步到远端，避免 Action 中断后重复下载/重复失败通知。"""
+    write_failed(failed)
+    result = run(["rclone", "copyto", FAILED_OUT, f"{SOURCE_REMOTE}/failed_videos.json"])
+    if result.returncode != 0:
+        print(f"[flush-failed] WARN: rclone copyto 失败 (code {result.returncode}): {result.stderr[-500:] if result.stderr else '(无)'}")
+    else:
+        print(f"[flush-failed] failed_videos.json 已同步到远端 (条目数: {len(failed)})")
+
+
 def tail_file(path: str, n: int = 15) -> str:
     """读取文件最后 n 行，用于失败时输出/附带错误尾部。"""
     try:
@@ -236,6 +285,7 @@ def get_video_list():
 
 def main():
     uploaded = read_uploaded()
+    failed_map = read_failed()
     all_videos, skipped = get_video_list()
 
     # 去重：保留原始值，不 NFC 归一化
@@ -249,7 +299,17 @@ def main():
         deduped.append((modtime, p, sz))
     all_videos = deduped
 
-    pending = [(m, p, sz) for m, p, sz in all_videos if p not in uploaded]
+    # 已知损坏的文件（size + modtime 指纹匹配）跳过，不再每天重复下载/失败；
+    # 远端文件被替换后指纹不匹配，自动重新进入待上传
+    pending = []
+    for m, p, sz in all_videos:
+        if p in uploaded:
+            continue
+        meta = failed_map.get(p)
+        if meta and meta.get("size_bytes") == sz and meta.get("source_modified_at") == m:
+            skipped.append(("corrupt", p))
+            continue
+        pending.append((m, p, sz))
 
     total = len(all_videos)
     pending_count = len(pending)
@@ -360,8 +420,20 @@ def main():
             else:
                 print("(处理/上传过程已实时输出到上方日志)")
             failed += 1
-            failed_list.append(f"- {file}（处理/上传失败, {up_elapsed:.2f}s）")
-            notify(f"{err_msg}\n{CAPTION_PREFIX}\n{err_tail if err_tail else '（无详细输出，见 Actions 日志）'}")
+            if up_result.returncode == EXIT_CORRUPT:
+                # 源文件损坏（如 moov atom 缺失）：记录指纹并持久化，后续运行跳过
+                failed_map[file] = {
+                    "size_bytes": size,
+                    "source_modified_at": modtime or "",
+                    "reason": "corrupt/no-moov",
+                    "failed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                }
+                flush_failed_to_remote(failed_map)
+                failed_list.append(f"- {file}（源文件损坏已标记跳过, {up_elapsed:.2f}s）")
+                notify(f"{err_msg}\n{CAPTION_PREFIX}\n源文件损坏（无法解析编码信息），已标记跳过，远端文件更新后自动重试\n{err_tail if err_tail else ''}")
+            else:
+                failed_list.append(f"- {file}（处理/上传失败, {up_elapsed:.2f}s）")
+                notify(f"{err_msg}\n{CAPTION_PREFIX}\n{err_tail if err_tail else '（无详细输出，见 Actions 日志）'}")
 
         # 清理工作目录
         if os.path.exists(WORK_DIR):
@@ -403,6 +475,11 @@ fi
 
 # 上传更新后的 uploaded_videos.json 回 OneDrive（最终同步，增量同步已在每次上传后执行）
 rclone copyto "$TMP_DIR/uploaded_videos.json" "$SOURCE_REMOTE/uploaded_videos.json" || echo "WARN: 最终 rclone copyto 失败，但增量同步已在每次上传后执行"
+
+# 同步损坏文件名单（最终同步，增量同步已在每次标记后执行；本次无损坏标记时本地文件不存在）
+if [ -f "$TMP_DIR/failed_videos.json" ]; then
+  rclone copyto "$TMP_DIR/failed_videos.json" "$SOURCE_REMOTE/failed_videos.json" || echo "WARN: failed_videos.json 最终同步失败，增量同步已在每次标记后执行"
+fi
 
 # 读取 Python 输出的统计
 STATS_FILE="$TMP_DIR/stats.json"

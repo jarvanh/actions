@@ -3,7 +3,7 @@
 # Telegram 流式播放要求：H.264 + AAC + yuv420p + 偶数维度 + faststart
 # 用法: transcode_and_send.sh <local_file> <channel_id> <modtime>
 # 环境变量: GITHUB_WORKSPACE
-# 返回: 0=成功（已上传）, 1=失败
+# 返回: 0=成功（已上传）, 1=失败, 10=源文件损坏（无法读取编码信息，如 moov atom 缺失）
 
 set +e
 
@@ -36,7 +36,8 @@ if [ -z "$vcodec" ]; then
   echo "--- ffprobe 错误输出 ---"
   ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$LOCAL_FILE" 2>&1 | tail -n 20
   echo "------------------------"
-  exit 1
+  # 退出码 10 = 源文件损坏/无法解析（如 moov atom 缺失），供 sync_to_tg.sh 识别并持久标记跳过
+  exit 10
 fi
 
 echo "OK: $FILENAME (${width}x${height}, vcodec=$vcodec, acodec=$acodec, pix_fmt=$pix_fmt)"
