@@ -201,9 +201,19 @@ _wopan_raw_verify() {
   local raw_dest raw_display
   raw_dest=$(_raw_count_view_for "$dest_path")
   raw_display=$(_raw_remote_for "${dest_path%%/*}" 2>/dev/null || echo "${dest_path/Crypt/}")
+  # 仅 crypt 配置可用（dne 已知）时才展示子路径; 配置不可用时字面子路径
+  # （如 /backup）在裸存储是密文名，展示出来只会误导
   local _sub=""
-  [[ "${dest_path#openlist:}" == */* ]] && _sub="/${dest_path#openlist:*/}"
+  [ -n "${_CRYPT_ONTHEFLY:-}" ] && [[ "${dest_path#openlist:}" == */* ]] && _sub="/${dest_path#openlist:*/}"
   echo "=== raw-vs-crypt 校验: ${dest_path} vs ${raw_display}${_sub}（${_CRYPT_DNE:-?} dne, 解密口径计数）===" | tee -a "$log_file"
+
+  # crypt 配置不可用 → dne 未知: 字面裸路径没有该子目录（目录名也是密文），
+  # 裸根计数口径与 crypt 子树不可比，幽灵判定无意义 → 跳过
+  # （增量类检测 _rebuild_raw_baseline 仍可用裸根退化计数）
+  if [ -z "${_CRYPT_ONTHEFLY:-}" ]; then
+    echo "  ⚠️ crypt 配置不可用（dne 未知，无法构建解密口径计数视图），跳过幽灵文件判定" | tee -a "$log_file"
+    return 0
+  fi
 
   # 缓存刷新: crypt 挂载 + 裸挂载根（dne=true 时裸存储无字面子路径，只能刷根）
   _refresh_ol_cache_fast "${dest_path#openlist:}"
@@ -804,11 +814,14 @@ sync_with_logging() {
     if [[ "$dest_path" == openlist:wopan176Crypt/* ]] && [ -s "$missing_list" ]; then
       _RAW_VERIFY_DEST="$dest_path"
       # 计数视图: 配置可用时为 crypt 即时远程（dne=true 唯一正确口径），
-      # 否则退化为字面裸路径；刷新路径始终为裸挂载根（dne 下无字面子路径）
+      # 否则退化为裸挂载根（字面子路径在 dne 下是密文名，必然列空）；
+      # 刷新路径始终为裸挂载根（dne 下无字面子路径）
       _RAW_VERIFY_DIR=$(_raw_count_view_for "$dest_path")
       _RAW_VERIFY_REFRESH=$(_raw_remote_for "${dest_path%%/*}" 2>/dev/null || echo "${dest_path/Crypt/}")
       _RAW_VERIFY_REFRESH="${_RAW_VERIFY_REFRESH#openlist:}"
-      _rebuild_raw_baseline "$LOG_FILENAME"
+      # 返回 1 = 基准不可用已禁用即时检测（已处理状态，非错误）; bash -e 下
+      # 不守卫会直接杀掉整个 step（run 31931752797 exit 1 实测）
+      _rebuild_raw_baseline "$LOG_FILENAME" || true
     fi
 
     # ===== 名长诊断初始化（wopan176Crypt）=====
@@ -1048,7 +1061,7 @@ sync_with_logging() {
             # 直到计数 > 0（驱动就绪），仍为 0 则本轮禁用即时检测
             # （0 基准会把真实落盘级联误判为假成功 → 同文件重复上传多份）
             if [ -n "${_RAW_VERIFY_DEST:-}" ]; then
-              _rebuild_raw_baseline "$LOG_FILENAME"
+              _rebuild_raw_baseline "$LOG_FILENAME" || true
             fi
 
             local round_list="/tmp/${task_name}_persist_retry_r${retry_round}_$$.txt"
