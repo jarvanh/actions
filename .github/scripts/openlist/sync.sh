@@ -367,7 +367,9 @@ _remove_fix_entry_from_state() {
 # max_sample: 0 = 复核全部条目（默认语义，修复条目本来就有限，
 #             OPENLIST_MISSING_FIX_MAX 封顶）；>0 = 仅复核前 N 条（限流逃生阀）
 # 结果写入全局: PERSIST_OK / PERSIST_FAIL / PERSIST_IDX /
-#               PERSIST_FAILED_ORIGS（失败条目 original 数组）/ PERSIST_FAIL_DETAILS
+#               PERSIST_FAILED_ORIGS（失败条目 original 数组，与 ALTS 同序配对）/
+#               PERSIST_FAILED_ALTS（失败条目 alternative 数组）/
+#               PERSIST_FAIL_DETAILS
 # 用法: _persist_verify_entries <dest_path> <list_file> <max_sample> <log_file>
 _persist_verify_entries() {
   local dest_path="$1" list_file="$2" max_sample="$3" log_file="$4"
@@ -375,6 +377,7 @@ _persist_verify_entries() {
   PERSIST_FAIL=0
   PERSIST_IDX=0
   PERSIST_FAILED_ORIGS=()
+  PERSIST_FAILED_ALTS=()
   PERSIST_FAIL_DETAILS=""
   local alt_path bytes orig_path f_method f_mid
   while IFS='|' read -r alt_path bytes orig_path f_method f_mid; do
@@ -464,6 +467,7 @@ _persist_verify_entries() {
         echo "  → $(_method_desc "$f_mid") 已加入 ${orig_path} 的假成功黑名单（本轮立即换方法重试）" | tee -a "$log_file"
       fi
       PERSIST_FAILED_ORIGS+=("$orig_path")
+      PERSIST_FAILED_ALTS+=("$alt_path")
     fi
   done < "$list_file"
 }
@@ -1038,8 +1042,14 @@ sync_with_logging() {
               [ -z "$retry_orig" ] && continue
               echo "重试修复（换方法）: ${retry_orig}" | tee -a "$LOG_FILENAME"
 
-              # 先从 fix_list 移除旧假成功条目（无论重试成败都不保留）
+              # 先从 fix_list 移除旧假成功条目（无论重试成败都不保留），
+              # 并清理其在目标端留下的未持久化工件（避免同一文件累积多个修复文件）
+              local old_alt=""
+              old_alt=$(awk -F'|' -v o="$retry_orig" '$1==o{print $2; exit}' "$fix_list")
               RO="$retry_orig" awk 'BEGIN{FS="|"} $1 != ENVIRON["RO"]' "$fix_list" > "${fix_list}.tmp" && mv "${fix_list}.tmp" "$fix_list"
+              if [ -n "$old_alt" ]; then
+                _cleanup_fix_artifact "$dest_path" "$old_alt" "$LOG_FILENAME"
+              fi
 
               try_fix_failed_file "$source_path" "$dest_path" "$task_name" "$retry_orig" "$fix_log" || true
 
@@ -1103,21 +1113,28 @@ sync_with_logging() {
             _persist_verify_entries "$dest_path" "$round_list" 0 "$LOG_FILENAME"
             echo "  第 ${retry_round} 轮复核汇总: 复核 ${PERSIST_IDX}/${retry_fixed} / 通过 ${PERSIST_OK} / 失败 ${PERSIST_FAIL}" | tee -a "$LOG_FILENAME"
 
-            # 仍未通过的条目进入下一轮（其条目在下轮重试前统一清理）；
-            # 通过的条目已真实持久化，就此出局
+            # 仍未通过的条目: 先清理其未持久化的替代工件（防同一文件累积
+            # 多个修复文件），再进入下一轮换方法；通过的条目已真实持久化，出局
+            local rvi
+            for rvi in "${!PERSIST_FAILED_ORIGS[@]}"; do
+              _cleanup_fix_artifact "$dest_path" "${PERSIST_FAILED_ALTS[$rvi]:-}" "$LOG_FILENAME"
+            done
             retry_pending=("${PERSIST_FAILED_ORIGS[@]}")
             _flush_blacklist_to_marker "$task_name" "$dest_path" "$LOG_FILENAME"
             rm -f "$round_list"
           done
 
           # 循环终止后仍待重试（轮数耗尽）→ 清理最后的假成功条目并转失败清单
-          local leftover_orig
-          for leftover_orig in "${retry_pending[@]}"; do
+          # （retry_pending 与最后一轮 PERSIST_FAILED_ALTS 同序，按索引配对清理工件）
+          local leftover_orig leftover_i
+          for leftover_i in "${!retry_pending[@]}"; do
+            leftover_orig="${retry_pending[$leftover_i]}"
             [ -z "$leftover_orig" ] && continue
             echo "  重试轮数耗尽，转入失败清单: ${leftover_orig}" | tee -a "$LOG_FILENAME"
             RO="$leftover_orig" awk 'BEGIN{FS="|"} $1 != ENVIRON["RO"]' "$fix_list" > "${fix_list}.tmp" && mv "${fix_list}.tmp" "$fix_list"
             echo "${leftover_orig}|未知|重试轮数耗尽仍未持久化（黑名单已记录，下一轮从剩余方法继续）" >> "$fail_list"
             unset "FIXED_THIS_RUN[$leftover_orig]" 2>/dev/null || true
+            _cleanup_fix_artifact "$dest_path" "${PERSIST_FAILED_ALTS[$leftover_i]:-}" "$LOG_FILENAME"
             _remove_fix_entry_from_state "$incr_state" "$incr_marker_path" "$leftover_orig" 2>&1 | tee -a "$LOG_FILENAME" || true
             retry_perm_fail=$((retry_perm_fail + 1))
           done
