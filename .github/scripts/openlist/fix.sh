@@ -40,10 +40,45 @@
 #   TRY_FIX_RESTORE      — 还原方法描述（如何从 ALTERNATIVE 还原到 ORIGINAL）
 #   TRY_FIX_MESSAGE      — 失败原因（仅 status=failed 时）
 
+# 从 OpenList 数据库（sqlite）读取指定挂载的 addition JSON（API 失败时的兜底）
+# data.db 在 runner 本地挂载路径 /dropbox/self-hosted/openlist/data/ 下
+# 先拷贝到 /tmp 避免与运行中容器的文件锁冲突（WAL 一并拷贝）
+# 用法: _get_addition_from_db <mount_path 如 /wopan176Crypt>
+_get_addition_from_db() {
+  local mount="$1"
+  local db_src="/dropbox/self-hosted/openlist/data/data.db"
+  [ -f "$db_src" ] || return 1
+  local db_local="/tmp/ol_data_$$.db"
+  cp "$db_src" "$db_local" 2>/dev/null || return 1
+  cp "${db_src}-wal" "${db_local}-wal" 2>/dev/null || true
+  cp "${db_src}-shm" "${db_local}-shm" 2>/dev/null || true
+
+  python3 - "$db_local" "$mount" <<'PY' 2>/dev/null
+import sqlite3, sys
+db, mount = sys.argv[1], sys.argv[2]
+con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+try:
+    rows = con.execute("SELECT mount_path, addition FROM x_storages").fetchall()
+finally:
+    con.close()
+for mp, add in rows:
+    if mp and mp.rstrip('/') == mount.rstrip('/'):
+        if add:
+            print(add)
+        break
+PY
+  local rc=$?
+  rm -f "$db_local" "${db_local}-wal" "${db_local}-shm" 2>/dev/null || true
+  return $rc
+}
+
 # 从 OpenList API 提取 crypt 存储配置（供方法 15 rclone crypt 直写使用）
 # OpenList crypt 驱动与 rclone crypt 格式兼容，addition.password 即 rclone obscure 格式
 # 输出: "<obscured_password> <filename_encryption> <directory_name_encryption> <underlying_remote>"
 # underlying_remote 形如 openlist:wopan176（addition.path 优先，缺失时按 Crypt 后缀名推导）
+# 注意: admin API 的 addition 是 JSON 编码字符串（run 31918439043 实测 .password 直接
+#       取值为空 → m15 一直被跳过），必须 fromjson 解码；API 401/无数据时从本地
+#       data.db 兜底
 # 用法: _get_crypt_config <mount_path 如 /wopan176Crypt>
 _get_crypt_config() {
   local mount="$1"
@@ -55,8 +90,19 @@ _get_crypt_config() {
 
   local addition
   addition=$(echo "$resp" | jq -r --arg m "$mount" \
-    '(.data.content // .data // [])[]? | select(.mount_path == $m) | .addition // empty' 2>/dev/null | head -1)
+    '(.data.content // .data // [])[]? | select(.mount_path == $m or .mount_path == ($m + "/")) | .addition // empty' 2>/dev/null | head -1)
+
+  # API 拿不到（401 无数据/挂载名不匹配等）→ 本地 data.db 兜底
+  if [ -z "$addition" ] || [ "$addition" = "null" ]; then
+    addition=$(_get_addition_from_db "$mount") || addition=""
+  fi
   [ -n "$addition" ] && [ "$addition" != "null" ] || return 1
+
+  # addition 可能是 JSON 编码字符串 → 解码为对象后再取字段
+  if printf '%s' "$addition" | jq -e 'type == "string"' >/dev/null 2>&1; then
+    addition=$(printf '%s' "$addition" | jq -c 'fromjson' 2>/dev/null)
+  fi
+  echo "$addition" | jq -e 'type == "object"' >/dev/null 2>&1 || return 1
 
   local pass fne dne upath
   pass=$(echo "$addition" | jq -r '.password // empty' 2>/dev/null)
@@ -109,9 +155,8 @@ _ensure_crypt_config() {
   return 0
 }
 
-# 由 Crypt dest_path 推导裸存储远程路径（供 raw 校验/A 检测/名长诊断共用）
+# 由 Crypt dest_path 推导裸存储远程路径（供名长诊断等需要"真实密文名"的场景）
 # API 权威优先（crypt addition.path 指向的真实存储），失败时退化为字符串替换
-# （wopan176Crypt→wopan176——实测可能拿不到列表，调用方日志会暴露）
 # 用法: _raw_remote_for <dest_path>  → stdout: openlist:wopan176[/子路径]
 _raw_remote_for() {
   local dest_path="$1"
@@ -125,6 +170,27 @@ _raw_remote_for() {
   local base="${rel%%/*}"
   base="${base%Crypt}"
   echo "openlist:${base}${sub}"
+}
+
+# raw 计数视图（供 raw-vs-crypt 校验 / A 层即时检测的文件数对比）
+# dne=true（目录名加密）时裸路径没有字面子目录（run 31918439043 实测
+# openlist:wopan176/backup rc=3 not found——"backup" 在裸存储是密文名），
+# 字面路径计数必然失败。改用 crypt 即时远程：rclone 按配置逐段加密路径
+# 后在裸存储查找，列出再解密，计数口径与 crypt 视图完全一致。
+# 配置不可用时退化为字面裸路径（dne=false 场景仍正确）。
+# 用法: _raw_count_view_for <dest_path>  → stdout: 计数用远程路径
+_raw_count_view_for() {
+  local dest_path="$1"
+  local rel="${dest_path#openlist:}"
+  local sub=""
+  [[ "$rel" == */* ]] && sub="${rel#*/}"
+  if _ensure_crypt_config "$dest_path" 2>/dev/null; then
+    echo "${_CRYPT_ONTHEFLY}${sub}"
+  else
+    local base="${rel%%/*}"
+    base="${base%Crypt}"
+    echo "openlist:${base}${sub:+/${sub}}"
+  fi
 }
 
 # 方法假成功黑名单: <文件相对路径> -> "m1 m3"（空格分隔的方法 ID 集合）
@@ -190,17 +256,26 @@ _flush_blacklist_to_marker() {
 }
 
 # wopan176 裸路径密文计数（刷新缓存后统计）
-# 用法: _raw_dir_count <raw_dest>  → stdout 输出计数；失败返回非零（无副作用输出）
+# count_dest 两种形态:
+#   openlist:wopan176/...     —— 字面裸路径（dne=false 时有效）
+#   :crypt,remote=...,...:sub —— crypt 即时远程（dne=true 时唯一正确口径，rclone
+#                               自动按段加密路径查找并解密列出）
+# refresh_path 为 OpenList 内部路径（如 /wopan176），用于计数前刷新后端缓存；
+# 对 :crypt 形态必须传（无法从规格推导），对 openlist: 形态可省略（自动取）
+# 用法: _raw_dir_count <count_dest> [refresh_ol_path]  → stdout 计数；失败返回非零
 _raw_dir_count() {
   local raw_dest="$1"
-  local ol_path="${raw_dest#openlist:}"
+  local refresh_path="${2:-}"
+  if [[ "$raw_dest" == openlist:* ]]; then
+    refresh_path="${refresh_path:-${raw_dest#openlist:}}"
+  fi
   local ol_token
   ol_token=$(_get_openlist_token) || true
-  if [ -n "$ol_token" ]; then
+  if [ -n "$ol_token" ] && [ -n "$refresh_path" ]; then
     curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh" \
       -H "Authorization: $ol_token" \
       -H "Content-Type: application/json" \
-      -d "{\"path\":\"/${ol_path#/}\",\"recursive\":true}" \
+      -d "{\"path\":\"/${refresh_path#/}\",\"recursive\":true}" \
       >/dev/null 2>&1 || true
     sleep 5
   fi
@@ -228,7 +303,7 @@ _confirm_raw_persist() {
   fi
   _RAW_VERIFY_BUDGET=$((_RAW_VERIFY_BUDGET - 1))
   local count=0
-  count=$(_raw_dir_count "$_RAW_VERIFY_DIR") || {
+  count=$(_raw_dir_count "$_RAW_VERIFY_DIR" "${_RAW_VERIFY_REFRESH:-}") || {
     log_fix "$log_file" "  ⚠️ raw 计数失败，无法判定落盘，信任方法 ${method_id} 的返回结果"
     return 0
   }
