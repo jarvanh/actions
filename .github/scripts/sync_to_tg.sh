@@ -83,6 +83,28 @@ def notify(message):
         print(f"[notify] 发送通知失败 (code {result.returncode}): {result.stderr}")
 
 
+def shorten_name(name: str, max_len: int = 60) -> str:
+    """超长文件名截中间，保留头尾（头部标题 + 尾部视频 ID）。"""
+    if len(name) <= max_len:
+        return name
+    keep = (max_len - 3) // 2
+    return f"{name[:keep]}...{name[-keep:]}"
+
+
+def build_fail_notify(title: str, file: str, elapsed: float, lines: list):
+    """构建统一格式的失败通知：标题 + 分隔线 + 📁文件 + ⏱耗时 + 附加行。"""
+    parts = [
+        f"{title}",
+        "━━━━━━━━━━━━━━━━━━",
+        "",
+        f"📁 {shorten_name(os.path.basename(file))}",
+        f"📦 分组: {CAPTION_PREFIX}",
+        f"⏱ 耗时: {elapsed:.2f}s",
+    ]
+    parts.extend(lines)
+    return "\n".join(parts)
+
+
 def is_video(path: str) -> bool:
     return os.path.splitext(path)[1].lower() in VIDEO_EXTS
 
@@ -245,7 +267,14 @@ def get_video_list():
         err_msg = f"❌ rclone lsjson 失败 (code {result.returncode})"
         print(err_msg)
         print(f"[get_video_list] stderr: {result.stderr[-2000:] if result.stderr else '(无)'}")
-        notify(f"{err_msg}\n{CAPTION_PREFIX}\nstderr 见 Actions 日志")
+        notify("\n".join([
+            "❌ 获取远端文件列表失败",
+            "━━━━━━━━━━━━━━━━━━",
+            "",
+            f"📦 分组: {CAPTION_PREFIX}",
+            f"⚠️ 原因: rclone lsjson 退出码 {result.returncode}",
+            "📄 stderr 见 Actions 日志",
+        ]))
         return [], []
 
     try:
@@ -259,7 +288,13 @@ def get_video_list():
     except Exception as e:
         err_msg = f"❌ rclone lsjson 解析失败: {e}"
         print(err_msg)
-        notify(f"{err_msg}\n{CAPTION_PREFIX}\n请检查 rclone lsjson 输出格式")
+        notify("\n".join([
+            "❌ 获取远端文件列表失败",
+            "━━━━━━━━━━━━━━━━━━",
+            "",
+            f"📦 分组: {CAPTION_PREFIX}",
+            f"⚠️ 原因: lsjson 输出解析失败: {e}",
+        ]))
         return [], []
 
     if not isinstance(items, list):
@@ -358,8 +393,15 @@ def main():
             print(result.stderr[-2000:] if result.stderr else "(无错误输出)")
             print("------------------------")
             failed += 1
-            failed_list.append(f"- {file}（rclone copy failed, {dl_elapsed:.2f}s）")
-            notify(f"{err_msg}\n{CAPTION_PREFIX}\nrclone stderr 见 Actions 日志")
+            failed_list.append(f"- {file}（下载失败, {dl_elapsed:.2f}s）")
+            notify(build_fail_notify(
+                "❌ 下载失败",
+                file, dl_elapsed,
+                [
+                    f"📦 大小: {human_size(size)}",
+                    "📄 rclone stderr:\n" + (result.stderr[-500:].strip() if result.stderr else "(无错误输出)"),
+                ],
+            ))
             continue
         file_size = os.path.getsize(local_file)
         print(f"✅ 下载完成: {file} (大小 {human_size(file_size)} / {file_size} bytes, 耗时 {dl_elapsed:.2f}s)")
@@ -430,10 +472,21 @@ def main():
                 }
                 flush_failed_to_remote(failed_map)
                 failed_list.append(f"- {file}（源文件损坏已标记跳过, {up_elapsed:.2f}s）")
-                notify(f"{err_msg}\n{CAPTION_PREFIX}\n源文件损坏（无法解析编码信息），已标记跳过，远端文件更新后自动重试\n{err_tail if err_tail else ''}")
+                notify(build_fail_notify(
+                    "🗑 损坏视频已标记跳过",
+                    file, up_elapsed,
+                    [
+                        "⚠️ 原因: 源文件损坏，无法读取视频信息（moov atom 缺失）",
+                        "🔄 后续: 不再重复尝试，远端文件被替换后自动重试",
+                    ],
+                ))
             else:
                 failed_list.append(f"- {file}（处理/上传失败, {up_elapsed:.2f}s）")
-                notify(f"{err_msg}\n{CAPTION_PREFIX}\n{err_tail if err_tail else '（无详细输出，见 Actions 日志）'}")
+                notify(build_fail_notify(
+                    "❌ 处理/上传失败",
+                    file, up_elapsed,
+                    [f"📄 输出尾部:\n{err_tail}"] if err_tail else ["📄 无详细输出，见 Actions 日志"],
+                ))
 
         # 清理工作目录
         if os.path.exists(WORK_DIR):
