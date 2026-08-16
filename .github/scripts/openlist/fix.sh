@@ -242,8 +242,11 @@ _ensure_crypt_config() {
   [ "$suf" = "-" ] && suf=""
   _CRYPT_MOUNT="$mount"
   _CRYPT_PASS="$pass"
+  _CRYPT_PASS2="$pass2"
   _CRYPT_FNE="$fne"
   _CRYPT_DNE="$dne"
+  _CRYPT_ENC="$enc"
+  _CRYPT_SUFFIX="$suf"
   _CRYPT_REMOTE="$remote"
   # 可选参数仅非空时附加（password2/filename_encoding/suffix 为 v4 字段;
   # rclone 老版本不认的 key 在连接串里会报错，故不能盲传）
@@ -253,6 +256,36 @@ _ensure_crypt_config() {
   [ -n "$suf" ] && _CRYPT_ONTHEFLY="${_CRYPT_ONTHEFLY},suffix=\"${suf}\""
   _CRYPT_ONTHEFLY="${_CRYPT_ONTHEFLY}:"
   return 0
+}
+
+# 实测单个文件名的 crypt 密文名长度（字节）——纯本地探针，不碰真实后端
+# rclone 没有 cryptencode 命令（sync.sh 旧代码调用它一直静默失败，名长诊断
+# 从未生效过）。权威替代: 用相同加密参数构建 remote 指向本地临时目录的
+# :crypt: 远程，copyto 空文件后读底层真实密文名。密文名只由加密参数+原文名
+# 决定，与 remote 指向无关 → 本地探针结果与真实后端密文名完全等长
+# （rclone ≥1.71 文件名加密为 AES-EME 确定性: PKCS7 填充到 16B 块 → EME →
+#  base64/base32 定长展开; OpenList 内置 rclone 1.74.4 与 runner 最新版
+#  格式一致，同名恒等密文; 注意 suffix 仅 filename_encryption=off 时追加）
+# 依赖: _ensure_crypt_config 已成功（_CRYPT_* 全局就绪）
+# 用法: _crypt_name_len_probe <filename>  → stdout: 密文名字节数（失败无输出）
+_crypt_name_len_probe() {
+  local fn="$1"
+  [ -n "${_CRYPT_ONTHEFLY:-}" ] || return 1
+  local srcdir dstdir
+  srcdir=$(mktemp -d 2>/dev/null) || return 1
+  dstdir=$(mktemp -d 2>/dev/null) || { rm -rf "$srcdir"; return 1; }
+  : > "${srcdir}/${fn}" 2>/dev/null || { rm -rf "$srcdir" "$dstdir"; return 1; }
+  local probe=":crypt,remote=\"${dstdir}\",filename_encryption=${_CRYPT_FNE:-standard},directory_name_encryption=${_CRYPT_DNE:-true},password=\"${_CRYPT_PASS}\""
+  [ -n "${_CRYPT_PASS2:-}" ] && probe="${probe},password2=\"${_CRYPT_PASS2}\""
+  [ -n "${_CRYPT_ENC:-}" ] && probe="${probe},filename_encoding=${_CRYPT_ENC}"
+  [ -n "${_CRYPT_SUFFIX:-}" ] && probe="${probe},suffix=\"${_CRYPT_SUFFIX}\""
+  probe="${probe}:"
+  rclone copyto "${srcdir}/${fn}" "${probe}/${fn}" >/dev/null 2>&1 || { rm -rf "$srcdir" "$dstdir"; return 1; }
+  local enc
+  enc=$(find "$dstdir" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' 2>/dev/null | head -1)
+  rm -rf "$srcdir" "$dstdir"
+  [ -n "$enc" ] || return 1
+  printf '%s' "$enc" | wc -c | tr -d ' '
 }
 
 # 由 Crypt dest_path 推导裸存储远程路径（供名长诊断等需要"真实密文名"的场景）
