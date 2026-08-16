@@ -12,9 +12,10 @@
 #   - 假成功两层防护:
 #     A. 即时检测（_confirm_raw_persist）— 方法返回成功后对比 wopan176 裸路径
 #        密文计数，未增长即假成功，当场拉黑该方法并尝试下一种方式
-#     B. 失败记忆（FIX_METHOD_BLACKLIST + marker fix_blacklist）— 跨轮持久化
-#        每文件已判定假成功的方法，下一轮修复直接跳过；上轮已真实持久化的
-#        修复（替代路径仍存在）直接沿用，不再重复上传
+#     B. 失败记忆（FIX_METHOD_BLACKLIST + marker fix_blacklist）— 持久化
+#        每文件已判定假成功的方法；持久化验证（重启容器复核）发现假成功后
+#        本轮立即换方法重试并二次复核，跨轮修复同样跳过已拉黑方法；
+#        上轮已真实持久化的修复（替代路径仍存在）直接沿用，不再重复上传
 #   - object not found 错误处理
 #   - 结构化同步结果通知（含源/目标大小、差异文件列表、排除规则）
 #
@@ -335,6 +336,133 @@ _persist_fix_entry_now() {
   else
     echo "    ↳ ⚠️ 即时写入 marker 失败（任务结束的统一保存会兜底）"
   fi
+}
+
+# 从修复状态快照移除单个条目（按 original 精确匹配），并整体写回 marker
+# 用于假成功条目重试失败后清理 marker 里的幽灵 fixed_files 记录
+# 用法: _remove_fix_entry_from_state <state_file> <marker_path> <orig>
+_remove_fix_entry_from_state() {
+  local state_file="$1" marker_path="$2" orig="$3"
+  [ -f "$state_file" ] || return 1
+  local merged
+  merged=$(jq -c --arg o "$orig" '
+    .fixed_files //= []
+    | .fixed_files |= map(select(.original != $o))
+    | .fixed_count = (.fixed_files | length)
+    | .fixed_bytes = ([.fixed_files[].size_bytes] | add // 0)
+  ' "$state_file" 2>/dev/null) || return 1
+  echo "$merged" > "$state_file"
+  if echo "$merged" | rclone rcat "$marker_path" >/dev/null 2>&1; then
+    echo "    ↳ 假成功条目已从修复清单移除 (marker 合计 $(echo "$merged" | jq -r '.fixed_count') 个)"
+  else
+    echo "    ↳ ⚠️ 移除条目写回 marker 失败（任务结束的统一保存会兜底）"
+  fi
+}
+
+# 持久化验证单轮复核（在 OpenList 容器重启、缓存刷新之后调用）
+# 逐条检查修复条目是否被后端真正持久化；失败条目当场加入方法黑名单，
+# 供本轮"立即换方法重试"直接跳过失效方法（不再等下一轮）
+# 输入清单格式: <alt_path>|<bytes>|<orig_path>|<method>|<method_id> 每行一条
+# 结果写入全局: PERSIST_OK / PERSIST_FAIL / PERSIST_IDX /
+#               PERSIST_FAILED_ORIGS（失败条目 original 数组）/ PERSIST_FAIL_DETAILS
+# 用法: _persist_verify_entries <dest_path> <list_file> <max_sample> <log_file>
+_persist_verify_entries() {
+  local dest_path="$1" list_file="$2" max_sample="$3" log_file="$4"
+  PERSIST_OK=0
+  PERSIST_FAIL=0
+  PERSIST_IDX=0
+  PERSIST_FAILED_ORIGS=()
+  PERSIST_FAIL_DETAILS=""
+  local alt_path bytes orig_path f_method f_mid
+  while IFS='|' read -r alt_path bytes orig_path f_method f_mid; do
+    [ -z "$alt_path" ] && continue
+    PERSIST_IDX=$((PERSIST_IDX + 1))
+    [ "$PERSIST_IDX" -gt "$max_sample" ] && break
+
+    local full_alt="${dest_path}/${alt_path}"
+    local after_sz after_lsf_sz
+    after_sz=$(rclone size --json "$full_alt" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null || echo 0)
+    after_lsf_sz=$(rclone lsf "$(dirname "$full_alt")" --files-only --format "ps" --separator ";" 2>/dev/null | awk -v FS=';' -v bn="$(basename "$full_alt")" '$1==bn{print $2; exit}')
+    [ -z "$after_lsf_sz" ] && after_lsf_sz=0
+
+    # 判断方法类型
+    local is_transformed=0
+    local is_split=0
+    case "$f_method" in
+      *zip*|*7z*|*分卷*|*base64*|*编码*|*加密*|*压缩*|*.enc.*|*.b64*|*enc_zip*)
+        is_transformed=1 ;;
+    esac
+    if echo "$alt_path" | grep -qE '\.zip\.[0-9]{3}$'; then
+      is_split=1
+    fi
+
+    local verified=0
+    if [ "$is_split" -eq 1 ]; then
+      # 分卷：检查同目录下所有编号分卷
+      local alt_dir_alt=$(dirname "$alt_path")
+      local alt_prefix=$(basename "$alt_path")
+      alt_prefix="${alt_prefix%.*}"        # strip ".001"
+      alt_prefix="${alt_prefix%.zip}"      # also strip ".zip" if leftover
+      # 列当前存在的所有同前缀编号分卷
+      local existing_parts
+      existing_parts=$(rclone lsf "${dest_path}/${alt_dir_alt}" --files-only 2>/dev/null | grep -E "${alt_prefix}\.zip\.[0-9]{3}" | sort)
+      local part_count=$(echo -n "$existing_parts" | grep -c . || echo 0)
+      # 至少有 1 个分卷，且分卷大小都 > 0
+      local parts_ok=0
+      if [ "$part_count" -gt 0 ]; then
+        parts_ok=1
+        while IFS= read -r pn; do
+          [ -z "$pn" ] && continue
+          local p_sz
+          p_sz=$(rclone lsf "${dest_path}/${alt_dir_alt}" --files-only --format "ps" --separator ";" 2>/dev/null | awk -v FS=';' -v bn="$pn" '$1==bn{print $2; exit}')
+          if [ -z "$p_sz" ] || [ "$p_sz" = "" ] || [ "$p_sz" -le 0 ] 2>/dev/null; then
+            parts_ok=0
+            break
+          fi
+        done <<< "$existing_parts"
+      fi
+      if [ "$parts_ok" -eq 1 ]; then
+        verified=1
+        echo "  ✅ 持久化通过: $orig_path (${f_method}, 分卷 $part_count 个存在且大小合法)" | tee -a "$log_file"
+      else
+        echo "  ❌ 持久化失败: $orig_path (${f_method}, 分卷缺失或大小异常)" | tee -a "$log_file"
+        echo "    → 当前目录分卷: $(echo "$existing_parts" | tr '\n' ' ')" | tee -a "$log_file"
+        PERSIST_FAIL_DETAILS="${PERSIST_FAIL_DETAILS}• ${orig_path} (${f_method})：分卷缺失或大小异常，当前分卷=${existing_parts}
+"
+      fi
+    elif [ "$is_transformed" -eq 1 ]; then
+      # 压缩/编码类：只检查 size > 0（压缩包大小与原文件不同）
+      if [ "$after_sz" -gt 0 ] 2>/dev/null && [ "$after_lsf_sz" -gt 0 ] 2>/dev/null; then
+        verified=1
+        echo "  ✅ 持久化通过: $orig_path (${f_method}, transformed_size=$after_sz bytes)" | tee -a "$log_file"
+      else
+        echo "  ❌ 持久化失败: $orig_path (${f_method}, 上传文件为空或不存在, size=$after_sz, lsf=$after_lsf_sz)" | tee -a "$log_file"
+        PERSIST_FAIL_DETAILS="${PERSIST_FAIL_DETAILS}• ${orig_path} (${f_method})：上传文件为空或不存在, size=${after_sz}
+"
+      fi
+    else
+      # 原样 copy / rename 类：精确匹配大小
+      if [ "$after_sz" = "$bytes" ] && [ "$after_lsf_sz" = "$bytes" ] && [ "$after_sz" -gt 0 ]; then
+        verified=1
+        echo "  ✅ 持久化通过: $orig_path (${f_method}, $bytes bytes)" | tee -a "$log_file"
+      else
+        echo "  ❌ 持久化失败: $orig_path (${f_method}, expected=$bytes, size=$after_sz, lsf=$after_lsf_sz)" | tee -a "$log_file"
+        PERSIST_FAIL_DETAILS="${PERSIST_FAIL_DETAILS}• ${orig_path} (${f_method})：expected=${bytes}, actual=${after_sz}
+"
+      fi
+    fi
+    if [ "$verified" -eq 1 ]; then
+      PERSIST_OK=$((PERSIST_OK + 1))
+    else
+      PERSIST_FAIL=$((PERSIST_FAIL + 1))
+      # B: 复核失败 = 修复方法假成功 → 当场拉黑，本轮立即换方法重试
+      if [ -n "$f_mid" ]; then
+        _blacklist_add "$orig_path" "$f_mid"
+        echo "  → $(_method_desc "$f_mid") 已加入 ${orig_path} 的假成功黑名单（本轮立即换方法重试）" | tee -a "$log_file"
+      fi
+      PERSIST_FAILED_ORIGS+=("$orig_path")
+    fi
+  done < "$list_file"
 }
 
 # 带探测、重试和详细日志的同步函数
@@ -829,104 +957,13 @@ sync_with_logging() {
         fi
 
         # 6. 逐个复核修复文件（最多抽取前 6 条，避免耗时过长）
-        # 判定规则：
-        #   - 原样 copy/重命名 类：alt 文件大小必须 == 原始 bytes（精确匹配）
-        #   - 压缩 / 分卷 / 编码 类（zip / 7z / 分卷 / base64内容 / 加密zip）：
-        #       非分卷 → 只检查文件存在且 size > 0（压缩后大小不等于原文件）
-        #       分卷   → 检查全部 .zip.0* 分卷都存在且各自 size > 0
-        local persist_ok=0
-        local persist_fail=0
-        local persist_idx=0
-        local persist_fail_details=""
-        while IFS='|' read -r alt_path bytes orig_path f_method f_mid; do
-          [ -z "$alt_path" ] && continue
-          persist_idx=$((persist_idx + 1))
-          [ "$persist_idx" -gt 6 ] && break
-
-          local full_alt="${dest_path}/${alt_path}"
-          local after_sz after_lsf_sz
-          after_sz=$(rclone size --json "$full_alt" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null || echo 0)
-          after_lsf_sz=$(rclone lsf "$(dirname "$full_alt")" --files-only --format "ps" --separator ";" 2>/dev/null |             awk -v FS=';' -v bn="$(basename "$full_alt")" '$1==bn{print $2; exit}')
-          [ -z "$after_lsf_sz" ] && after_lsf_sz=0
-
-          # 判断方法类型
-          local is_transformed=0
-          local is_split=0
-          case "$f_method" in
-            *zip*|*7z*|*分卷*|*base64*|*编码*|*加密*|*压缩*|*.enc.*|*.b64*|*enc_zip*)
-              is_transformed=1 ;;
-          esac
-          if echo "$alt_path" | grep -qE '\.zip\.[0-9]{3}$'; then
-            is_split=1
-          fi
-
-          local verified=0
-          if [ "$is_split" -eq 1 ]; then
-            # 分卷：检查同目录下所有编号分卷
-            local alt_dir_alt=$(dirname "$alt_path")
-            local alt_prefix=$(basename "$alt_path")
-            alt_prefix="${alt_prefix%.*}"        # strip ".001"
-            alt_prefix="${alt_prefix%.zip}"      # also strip ".zip" if leftover
-            # 列当前存在的所有同前缀编号分卷
-            local existing_parts
-            existing_parts=$(rclone lsf "${dest_path}/${alt_dir_alt}" --files-only 2>/dev/null | grep -E "${alt_prefix}\.zip\.[0-9]{3}" | sort)
-            local part_count=$(echo -n "$existing_parts" | grep -c . || echo 0)
-            # 至少有 1 个分卷，且分卷大小都 > 0
-            local parts_ok=0
-            if [ "$part_count" -gt 0 ]; then
-              parts_ok=1
-              while IFS= read -r pn; do
-                [ -z "$pn" ] && continue
-                local p_sz
-                p_sz=$(rclone lsf "${dest_path}/${alt_dir_alt}" --files-only --format "ps" --separator ";" 2>/dev/null |                   awk -v FS=';' -v bn="$pn" '$1==bn{print $2; exit}')
-                if [ -z "$p_sz" ] || [ "$p_sz" = "" ] || [ "$p_sz" -le 0 ] 2>/dev/null; then
-                  parts_ok=0
-                  break
-                fi
-              done <<< "$existing_parts"
-            fi
-            if [ "$parts_ok" -eq 1 ]; then
-              verified=1
-              echo "  ✅ 持久化通过: $orig_path (${f_method}, 分卷 $part_count 个存在且大小合法)" | tee -a "$LOG_FILENAME"
-            else
-              echo "  ❌ 持久化失败: $orig_path (${f_method}, 分卷缺失或大小异常)" | tee -a "$LOG_FILENAME"
-              echo "    → 当前目录分卷: $(echo "$existing_parts" | tr '\n' ' ')" | tee -a "$LOG_FILENAME"
-              persist_fail_details="${persist_fail_details}• ${orig_path} (${f_method})：分卷缺失或大小异常，当前分卷=${existing_parts}
-"
-            fi
-          elif [ "$is_transformed" -eq 1 ]; then
-            # 压缩/编码类：只检查 size > 0（压缩包大小与原文件不同）
-            if [ "$after_sz" -gt 0 ] 2>/dev/null && [ "$after_lsf_sz" -gt 0 ] 2>/dev/null; then
-              verified=1
-              echo "  ✅ 持久化通过: $orig_path (${f_method}, transformed_size=$after_sz bytes)" | tee -a "$LOG_FILENAME"
-            else
-              echo "  ❌ 持久化失败: $orig_path (${f_method}, 上传文件为空或不存在, size=$after_sz, lsf=$after_lsf_sz)" | tee -a "$LOG_FILENAME"
-              persist_fail_details="${persist_fail_details}• ${orig_path} (${f_method})：上传文件为空或不存在, size=${after_sz}
-"
-            fi
-          else
-            # 原样 copy / rename 类：精确匹配大小
-            if [ "$after_sz" = "$bytes" ] && [ "$after_lsf_sz" = "$bytes" ] && [ "$after_sz" -gt 0 ]; then
-              verified=1
-              persist_ok=$((persist_ok + 0))
-              echo "  ✅ 持久化通过: $orig_path (${f_method}, $bytes bytes)" | tee -a "$LOG_FILENAME"
-            else
-              echo "  ❌ 持久化失败: $orig_path (${f_method}, expected=$bytes, size=$after_sz, lsf=$after_lsf_sz)" | tee -a "$LOG_FILENAME"
-              persist_fail_details="${persist_fail_details}• ${orig_path} (${f_method})：expected=${bytes}, actual=${after_sz}
-"
-            fi
-          fi
-          if [ "$verified" -eq 1 ]; then
-            persist_ok=$((persist_ok + 1))
-          else
-            persist_fail=$((persist_fail + 1))
-            # B: 复核失败 = 修复方法假成功 → 下一轮跳过该方法
-            if [ -n "$f_mid" ]; then
-              _blacklist_add "$orig_path" "$f_mid"
-              echo "  → $(_method_desc "$f_mid") 已加入 ${orig_path} 的假成功黑名单（下一轮跳过）" | tee -a "$LOG_FILENAME"
-            fi
-          fi
-        done < "$PERSIST_VERIFY_LIST"
+        # 判定规则见 _persist_verify_entries（原样 copy 精确匹配大小；
+        # 压缩/分卷/编码类只检查存在且非空）；失败条目当场拉黑并收集，
+        # 供第 7 步本轮立即换方法重试
+        _persist_verify_entries "$dest_path" "$PERSIST_VERIFY_LIST" 6 "$LOG_FILENAME"
+        local persist_ok=$PERSIST_OK
+        local persist_fail=$PERSIST_FAIL
+        local persist_idx=$PERSIST_IDX
         echo "  持久化验证汇总: 抽样 ${persist_idx} / 通过 ${persist_ok} / 失败 ${persist_fail}" | tee -a "$LOG_FILENAME"
         if [ "$persist_fail" -gt 0 ] && [ "$persist_ok" -eq 0 ]; then
           echo "  🔴 结论：所有抽样修复文件在容器重启后均消失 → OpenList PUT 返回成功但 wopan176 后端未真正持久化（写入内存缓存后未刷盘/未提交）" | tee -a "$LOG_FILENAME"
@@ -941,6 +978,126 @@ sync_with_logging() {
         # B: 复核拉黑的方法立即落盘 marker（不等任务结束统一保存——
         # run 31917285452 实测拉黑 5 条最终保存 0 条，黑名单在进程内丢失）
         _flush_blacklist_to_marker "$task_name" "$dest_path" "$LOG_FILENAME"
+
+        # 7. 假成功条目本轮立即换方法重试（不再等下一轮）
+        # 黑名单已含刚才判定的假成功方法，try_fix_failed_file 会直接跳过
+        # 失效方法、从下一个方法继续尝试；重试成功后再重启容器二次复核
+        if [ "$persist_fail" -gt 0 ] && [ "${#PERSIST_FAILED_ORIGS[@]}" -gt 0 ]; then
+          echo "=== ${task_name} 假成功条目本轮立即换方法重试（${#PERSIST_FAILED_ORIGS[@]} 个）===" | tee -a "$LOG_FILENAME"
+
+          # fix_log 可能为空（缺失清单为空、条目全部沿用上轮修复的场景）
+          if [ -z "$fix_log" ]; then
+            fix_log="file_fix_${task_name}_$(date +%Y%m%d_%H%M%S).log"
+            echo "=== 缺失文件修复日志 - $(date) ===" > "$fix_log"
+          fi
+
+          # 重试状态快照: 从当前 marker 重建（成功条目按 original 覆盖假成功条目）
+          local incr_marker_path incr_state incr_base
+          incr_marker_path=$(get_marker_path "$task_name" "$dest_path")
+          incr_state="/tmp/${task_name}_fixstate_retry_$$.json"
+          incr_base=$(rclone cat "$incr_marker_path" 2>/dev/null) || true
+          if ! echo "$incr_base" | jq -e 'type == "object"' >/dev/null 2>&1; then
+            incr_base=$(jq -cn --arg sp "$source_path" --arg dp "$dest_path" '{source_path:$sp, dest_path:$dp}')
+          fi
+          echo "$incr_base" > "$incr_state"
+
+          # A 层即时检测基线重建: 容器重启后幽灵文件已从计数中消失，
+          # 旧基线偏高会把重试的真实落盘误判为假成功
+          if [ -n "${_RAW_VERIFY_DEST:-}" ]; then
+            _RAW_VERIFY_BUDGET="${OPENLIST_RAW_CHECK_BUDGET:-40}"
+            local _retry_raw_base
+            if _retry_raw_base=$(_raw_dir_count "$_RAW_VERIFY_DIR" "${_RAW_VERIFY_REFRESH:-}"); then
+              _RAW_VERIFY_LAST=$_retry_raw_base
+              echo "  重试前 raw 基准已重建: ${_retry_raw_base}" | tee -a "$LOG_FILENAME"
+            fi
+          fi
+
+          local retry_orig retry_fixed=0
+          local PERSIST_RETRY_LIST="/tmp/${task_name}_persist_retry_$$.txt"
+          : > "$PERSIST_RETRY_LIST"
+          for retry_orig in "${PERSIST_FAILED_ORIGS[@]}"; do
+            [ -z "$retry_orig" ] && continue
+            echo "重试修复（换方法）: ${retry_orig}" | tee -a "$LOG_FILENAME"
+
+            # 先从 fix_list 移除旧假成功条目（无论重试成败都不保留）
+            RO="$retry_orig" awk 'BEGIN{FS="|"} $1 != ENVIRON["RO"]' "$fix_list" > "${fix_list}.tmp" && mv "${fix_list}.tmp" "$fix_list"
+
+            try_fix_failed_file "$source_path" "$dest_path" "$task_name" "$retry_orig" "$fix_log" || true
+
+            if [ "$TRY_FIX_STATUS" = "success" ]; then
+              retry_fixed=$((retry_fixed + 1))
+              echo "重试修复成功: ${retry_orig} -> 方法: ${TRY_FIX_METHOD}" | tee -a "$LOG_FILENAME"
+              echo "  还原方法: ${TRY_FIX_RESTORE}" | tee -a "$LOG_FILENAME"
+              local retry_size_json retry_size_bytes retry_size_human
+              retry_size_json=$(rclone size "${source_path}/${retry_orig}" --json 2>/dev/null || echo '{}')
+              retry_size_bytes=$(echo "$retry_size_json" | jq -r '.bytes // 0' 2>/dev/null || echo 0)
+              [[ "$retry_size_bytes" =~ ^[0-9]+$ ]] || retry_size_bytes=0
+              retry_size_human=$(format_bytes "$retry_size_bytes")
+              echo "${TRY_FIX_ORIGINAL}|${TRY_FIX_ALTERNATIVE}|${TRY_FIX_METHOD}|${TRY_FIX_RESTORE}|${retry_size_human}|${retry_size_bytes}|${TRY_FIX_METHOD_ID}" >> "$fix_list"
+              FIXED_THIS_RUN["$TRY_FIX_ORIGINAL"]="$TRY_FIX_ALTERNATIVE"
+              # 覆盖 marker 里的假成功条目（同 original 新条目替换旧条目）
+              _persist_fix_entry_now "$incr_marker_path" "$incr_state" "$source_path" "$dest_path" \
+                "$TRY_FIX_ORIGINAL" "$TRY_FIX_ALTERNATIVE" "$TRY_FIX_METHOD" "$TRY_FIX_RESTORE" \
+                "$retry_size_human" "$retry_size_bytes" "${TRY_FIX_METHOD_ID:-}" 2>&1 | tee -a "$LOG_FILENAME" || true
+              echo "${TRY_FIX_ALTERNATIVE}|${retry_size_bytes}|${TRY_FIX_ORIGINAL}|${TRY_FIX_METHOD}|${TRY_FIX_METHOD_ID}" >> "$PERSIST_RETRY_LIST"
+            else
+              echo "重试修复失败: ${retry_orig} - ${TRY_FIX_MESSAGE}" | tee -a "$LOG_FILENAME"
+              echo "${retry_orig}|未知|重试修复失败: ${TRY_FIX_MESSAGE:-所有修复方法均失败}" >> "$fail_list"
+              unset "FIXED_THIS_RUN[$retry_orig]" 2>/dev/null || true
+              # 从 marker 移除假成功条目，避免下一轮作为"沿用上轮修复"空转
+              _remove_fix_entry_from_state "$incr_state" "$incr_marker_path" "$retry_orig" 2>&1 | tee -a "$LOG_FILENAME" || true
+            fi
+          done
+
+          # 8. 二次复核: 重启容器验证换方法后的重试结果是否真正持久化
+          if [ "$retry_fixed" -gt 0 ]; then
+            echo "  重启 OpenList 容器二次复核重试结果（${retry_fixed} 个）..." | tee -a "$LOG_FILENAME"
+            sudo docker restart openlist >/dev/null 2>&1 || true
+            local retry_http_ok=0 retry_i
+            for retry_i in $(seq 1 30); do
+              if curl -sf http://127.0.0.1:5244/ping >/dev/null 2>&1; then
+                retry_http_ok=1
+                echo "  OpenList HTTP 就绪 (${retry_i}次)" | tee -a "$LOG_FILENAME"
+                break
+              fi
+              sleep 2
+            done
+            if [ "$retry_http_ok" -eq 1 ]; then
+              echo "  等待驱动重新初始化 (60s) ..." | tee -a "$LOG_FILENAME"
+              sleep 60
+              persist_ol_token=$(_get_openlist_token)
+              if [ -n "$persist_ol_token" ]; then
+                curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh" -H "Authorization: $persist_ol_token" -H "Content-Type: application/json" -d "{\"path\":\"$persist_ol_path\",\"recursive\":true}" >/dev/null 2>&1 || true
+                sleep 20
+              fi
+              _persist_verify_entries "$dest_path" "$PERSIST_RETRY_LIST" 999 "$LOG_FILENAME"
+              echo "  重试持久化验证汇总: 抽样 ${PERSIST_IDX} / 通过 ${PERSIST_OK} / 失败 ${PERSIST_FAIL}" | tee -a "$LOG_FILENAME"
+              # 二次复核仍失败的条目: 移出 fix_list、清理 marker、记入 fail_list
+              local r2_orig
+              for r2_orig in "${PERSIST_FAILED_ORIGS[@]}"; do
+                [ -z "$r2_orig" ] && continue
+                echo "  二次复核失败，转入失败清单: ${r2_orig}" | tee -a "$LOG_FILENAME"
+                RO="$r2_orig" awk 'BEGIN{FS="|"} $1 != ENVIRON["RO"]' "$fix_list" > "${fix_list}.tmp" && mv "${fix_list}.tmp" "$fix_list"
+                echo "${r2_orig}|未知|换方法重试后仍未持久化（黑名单已记录，下一轮从剩余方法继续）" >> "$fail_list"
+                unset "FIXED_THIS_RUN[$r2_orig]" 2>/dev/null || true
+                _remove_fix_entry_from_state "$incr_state" "$incr_marker_path" "$r2_orig" 2>&1 | tee -a "$LOG_FILENAME" || true
+              done
+              if [ "$PERSIST_FAIL" -gt 0 ]; then
+                echo "  🔴 重试结论：换方法后仍有 ${PERSIST_FAIL} 个文件未持久化（黑名单已更新，下一轮从剩余方法继续）" | tee -a "$LOG_FILENAME"
+                SYNC_PERSIST_FAIL=1
+              else
+                echo "  🟢 重试结论：换方法后全部通过持久化验证，清除持久化失败标记" | tee -a "$LOG_FILENAME"
+                SYNC_PERSIST_FAIL=0
+              fi
+              _flush_blacklist_to_marker "$task_name" "$dest_path" "$LOG_FILENAME"
+            else
+              echo "  ⚠️ 二次复核重启后 HTTP 未就绪，跳过重试结果验证（本轮以即时校验为准）" | tee -a "$LOG_FILENAME"
+            fi
+          else
+            echo "  重试全部失败（所有方法均不可用），黑名单已保留（下一轮从剩余方法继续）" | tee -a "$LOG_FILENAME"
+          fi
+          rm -f "$PERSIST_RETRY_LIST"
+        fi
       else
         echo "  ⚠️ OpenList 容器重启后 HTTP 60s 内未就绪，跳过持久化验证" | tee -a "$LOG_FILENAME"
       fi
@@ -1122,8 +1279,14 @@ sync_with_logging() {
   GLOBAL_FIX_BLACKLIST_JSON=$(jq -cn --argjson a "$GLOBAL_FIX_BLACKLIST_JSON" --argjson b "$_task_bl_json" \
     '$a * $b' 2>/dev/null || echo "$GLOBAL_FIX_BLACKLIST_JSON")
   # 面包屑: 定位黑名单在链路（数组→GLOBAL→save）中的实际流转（排查 31917285452 丢失问题）
-  if [ "${#FIX_METHOD_BLACKLIST[@]}" -gt 0 ] || echo "${GLOBAL_FIX_BLACKLIST_JSON:-{}}" | jq -e 'length > 0' >/dev/null 2>&1; then
-    echo "黑名单累计: 数组 ${#FIX_METHOD_BLACKLIST[@]} 条 → GLOBAL $(echo "${GLOBAL_FIX_BLACKLIST_JSON:-{}}" | jq 'length' 2>/dev/null || echo '?') 条" | tee -a "$LOG_FILENAME"
+  # 注意: 不能写 ${VAR:-{}} —— bash 把默认词的 } 当作展开结束符，会给已赋值变量
+  # 追加一个字面 }（"{...5条...}}"），jq 解析失败后面包屑拆成 "GLOBAL 5 / ? 条"
+  # 两行矛盾日志，marker 侧同因把黑名单清零（详见 marker.sh save_fix_state_marker）
+  local _global_bl_len="?"
+  _global_bl_len=$(printf '%s' "$GLOBAL_FIX_BLACKLIST_JSON" | jq -r 'length' 2>/dev/null) || _global_bl_len="?"
+  [[ "$_global_bl_len" =~ ^[0-9]+$ ]] || _global_bl_len="?"
+  if [ "${#FIX_METHOD_BLACKLIST[@]}" -gt 0 ] || [ "$_global_bl_len" != "0" ]; then
+    echo "黑名单累计: 数组 ${#FIX_METHOD_BLACKLIST[@]} 条 → GLOBAL ${_global_bl_len} 条" | tee -a "$LOG_FILENAME"
   fi
 
   [ -n "${incr_state:-}" ] && rm -f "$incr_state" 2>/dev/null || true

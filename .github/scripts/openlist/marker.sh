@@ -92,7 +92,10 @@ save_fix_state_marker() {
   marker_path=$(get_marker_path "$task_name" "$dest_path")
 
   local new_fixed_json="${GLOBAL_FIXED_FILES_JSON:-[]}"
-  local new_bl_json="${GLOBAL_FIX_BLACKLIST_JSON:-{}}"
+  # 不能写 ${VAR:-{}} —— bash 会给已赋值变量追加字面 }，产生非法 JSON，
+  # 导致 new_bl_count=0、下方合并回退成 {}（实测把已落盘的黑名单清零）
+  local new_bl_json="${GLOBAL_FIX_BLACKLIST_JSON:-}"
+  [ -z "$new_bl_json" ] && new_bl_json="{}"
   local new_count new_bl_count
   new_count=$(echo "$new_fixed_json" | jq 'length' 2>/dev/null || echo 0)
   new_bl_count=$(echo "$new_bl_json" | jq 'length' 2>/dev/null || echo 0)
@@ -129,7 +132,7 @@ save_fix_state_marker() {
     merged_bl_json=$(echo "$old_marker" | jq -c 'if (.fix_blacklist // null) | type == "object" then .fix_blacklist else {} end' 2>/dev/null || echo "{}")
   fi
   merged_bl_json=$(jq -cn --argjson a "$merged_bl_json" --argjson b "$new_bl_json" \
-    '($a // {}) * ($b // {})' 2>/dev/null || echo "{}")
+    '($a // {}) * ($b // {})' 2>/dev/null || echo "$merged_bl_json")
 
   local fixed_count fixed_bytes
   fixed_count=$(echo "$merged_fixed_json" | jq 'length' 2>/dev/null || echo 0)
@@ -519,8 +522,12 @@ PYEOF
   if [ -n "$old_marker" ]; then
     merged_blacklist_json=$(echo "$old_marker" | jq -c 'if (.fix_blacklist // null) | type == "object" then .fix_blacklist else {} end' 2>/dev/null || echo "{}")
   fi
-  merged_blacklist_json=$(jq -cn --argjson a "$merged_blacklist_json" --argjson b "${GLOBAL_FIX_BLACKLIST_JSON:-{}}" \
-    '($a // {}) * ($b // {})' 2>/dev/null || echo "{}")
+  # 不能写 ${VAR:-{}} —— bash 会给已赋值变量追加字面 }，产生非法 JSON，
+  # 合并失败回退成 {} 会把旧 marker 已落盘的黑名单整体清零
+  local _new_bl_json="${GLOBAL_FIX_BLACKLIST_JSON:-}"
+  [ -z "$_new_bl_json" ] && _new_bl_json="{}"
+  merged_blacklist_json=$(jq -cn --argjson a "$merged_blacklist_json" --argjson b "$_new_bl_json" \
+    '($a // {}) * ($b // {})' 2>/dev/null || echo "$merged_blacklist_json")
 
   # 构建 JSON 标记
   local marker_json
