@@ -39,11 +39,49 @@ log_split() {
 }
 
 # 修复日志记录函数（独立于分割日志，用于缺失文件修复过程）
+# 文件落时间戳；控制台不再重复前缀时间戳（GitHub Actions 每行自带），
+# 行首越短越可读
 log_fix() {
   local log_file="$1"
   local message="$2"
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $message" >> "$log_file"
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $message" >> "$log_file" 2>/dev/null || true
   echo "$message"
+}
+
+# 分节横幅（控制台+文件同写）: 视觉切分长日志的不同阶段
+# 用法: _sec <log_file> <标题>
+_sec() {
+  local log_file="$1" title="$2"
+  local line n
+  n=$((72 - ${#title} - 5))
+  [ "$n" -lt 1 ] && n=1
+  line="$(printf '─── %s ' "$title"; printf '─%.0s' $(seq 1 "$n"))"
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $line" >> "$log_file" 2>/dev/null || true
+  echo "$line"
+}
+
+# 长路径缩短显示: 保留目录前缀 + 文件名，超长时目录中间省略
+# 仅用于日志展示（决策信息保留 basename），marker/黑名单仍存全路径
+# 用法: _short_path <path> [max_len=56]
+_short_path() {
+  local p="${1:-}" max="${2:-56}"
+  [ -z "$p" ] && echo "?" && return 0
+  if [ "${#p}" -le "$max" ]; then echo "$p"; return 0; fi
+  local base dir keep
+  base="$(basename -- "$p")"
+  dir="$(dirname -- "$p")"
+  keep=$(( max - ${#base} - 2 ))
+  if [ "$keep" -lt 6 ]; then
+    # 文件名自身太长: 目录 + … + 文件名尾部（保留目录上下文）
+    local tail_len=$(( max - ${#dir} - 3 ))
+    if [ "$dir" = "." ] || [ "$tail_len" -lt 8 ]; then
+      echo "…${base: -$((max - 1))}"
+    else
+      echo "${dir}/…${base: -$tail_len}"
+    fi
+    return 0
+  fi
+  echo "${dir:0:$keep}…/$base"
 }
 
 # 从 rclone 日志中解析传输字节数
