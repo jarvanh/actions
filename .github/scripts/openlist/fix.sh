@@ -153,6 +153,42 @@ _method_blocked() {
   esac
 }
 
+# 把当前 FIX_METHOD_BLACKLIST 数组即时合并写回 marker 的 fix_blacklist 字段
+# 为什么不等任务结束统一保存: 持久化验证（重启容器复核）在修复循环之后执行，
+# 其拉黑结论若只存于进程内变量，异常路径（子 shell/中断/变量丢失）下会丢——
+# 实测 run 31917285452 拉黑 5 条最终保存 0 条。在事实发生的点位直接落盘。
+# 用法: _flush_blacklist_to_marker <task_name> <dest_path> [log_file]
+_flush_blacklist_to_marker() {
+  local task_name="$1"
+  local dest_path="$2"
+  local log_file="${3:-/dev/null}"
+  [ "${#FIX_METHOD_BLACKLIST[@]}" -gt 0 ] || return 0
+
+  local marker_path bl_json
+  marker_path=$(get_marker_path "$task_name" "$dest_path")
+  bl_json="{}"
+  local f
+  for f in "${!FIX_METHOD_BLACKLIST[@]}"; do
+    bl_json=$(jq -cn --argjson j "$bl_json" --arg k "$f" --arg v "${FIX_METHOD_BLACKLIST[$f]}" \
+      '$j + {($k): $v}' 2>/dev/null) || bl_json="{}"
+  done
+
+  local old_marker merged
+  old_marker=$(rclone cat "$marker_path" 2>/dev/null) || true
+  if [ -n "$old_marker" ] && echo "$old_marker" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    merged=$(echo "$old_marker" | jq -c --argjson bl "$bl_json" \
+      '. + {fix_blacklist: ((.fix_blacklist // {}) * $bl)}' 2>/dev/null) || return 1
+  else
+    merged=$(jq -cn --arg sp "" --arg dp "$dest_path" --argjson bl "$bl_json" \
+      '{dest_path: $dp, fix_blacklist: $bl}')
+  fi
+  if echo "$merged" | rclone rcat "$marker_path" >/dev/null 2>&1; then
+    echo "  ↳ 黑名单已即时写入 marker ($(echo "$bl_json" | jq 'length') 条)" | tee -a "$log_file"
+  else
+    echo "  ↳ ⚠️ 黑名单即时写入 marker 失败（任务结束的统一保存会兜底）" | tee -a "$log_file"
+  fi
+}
+
 # wopan176 裸路径密文计数（刷新缓存后统计）
 # 用法: _raw_dir_count <raw_dest>  → stdout 输出计数；失败返回非零（无副作用输出）
 _raw_dir_count() {
