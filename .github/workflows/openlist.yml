@@ -4,51 +4,52 @@ name: openlist
 on:
   workflow_dispatch:
     inputs:
-      split_on_sync_failure:
-        description: "Sync task 失败后，对该 task 源目录中的超阈值大文件执行切割"
-        required: false
-        type: boolean
-        default: false
+      # ===== 运行模式（单选下拉，互斥）=====
+      # 取代旧的 3 个 boolean（fix_test_mode / restore_fixed / restore_to_source），
+      # 从 UI 上杜绝多开关误组合; ⚠️ 开头的两项为还原类危险操作，排在末尾
+      run_mode:
+        description: "▶️ 运行模式（单选互斥）。⚠️ 标记的两项为危险操作: 会改写目标端或回传源端，运行前请核对下方 restore_task 任务名"
+        required: true
+        type: choice
+        default: "同步"
+        options:
+          - "同步"
+          - "调试 · 修复管线测试"
+          - "⚠️ 还原 · 修复文件还原为原路径"
+          - "⚠️ 灾难恢复 · 目标端→源端"
+      # ===== 同步模式选项 =====
       force_sync:
-        description: "强制同步（忽略跳过天数与源端缩小警告，始终执行）"
+        description: "同步模式: 强制同步（忽略跳过天数与源端缩小警告，始终执行）"
         required: false
         type: boolean
         default: false
-      fix_test_mode:
-        description: "调试: 单任务测试修复管线（跳过实际传输，直接 diff + 修复 + 持久化复核）"
-        required: false
-        type: boolean
-        default: false
-      fix_test_task:
-        description: "调试: 要测试的任务 (backup/task0-task5)"
-        required: false
-        type: string
-        default: "backup"
-      fix_test_max:
-        description: "调试: 单次修复数量上限（快速验证用）"
-        required: false
-        type: number
-        default: 5
-      restore_fixed:
-        description: "一键还原: 把修复文件还原为原路径原文件名（改名类 move / 压缩类解压回传，成功后清理替代文件）"
-        required: false
-        type: boolean
-        default: false
-      restore_task:
-        description: "还原的任务名 (backup/task0-task5/all)"
-        required: false
-        type: string
-        default: "all"
-      restore_to_source:
-        description: "灾难恢复: 目标端 → 源端（普通文件批量拷回 + 修复文件从替代形态解码回源端原路径，目标端不动）"
+      split_on_sync_failure:
+        description: "同步模式: 失败后切割超阈值大文件（默认关闭; 关闭时日志的『跳过切割』提示仅为开关状态通知，不代表同步失败）"
         required: false
         type: boolean
         default: false
       skip_preview:
-        description: "跳过任务预览通知（直接开始同步）"
+        description: "同步模式: 跳过任务预览通知（直接开始同步）"
         required: false
         type: boolean
         default: false
+      # ===== 调试模式选项 =====
+      fix_test_task:
+        description: "调试模式: 要测试的任务 (backup/task0-task5)"
+        required: false
+        type: string
+        default: "backup"
+      fix_test_max:
+        description: "调试模式: 单次修复数量上限（快速验证用）"
+        required: false
+        type: number
+        default: 5
+      # ===== 还原类模式选项（危险）=====
+      restore_task:
+        description: "⚠️ 还原/灾难恢复模式专用: 任务名 (backup/task0-task5/all)"
+        required: false
+        type: string
+        default: "all"
   schedule:
     # - cron: "10 1 * * *"
     - cron: "*/5 * * * *"
@@ -126,7 +127,23 @@ jobs:
       - name: Run openlist container
         run: |
           sudo docker rm -f openlist 2>/dev/null || true
-          sudo docker run -d --restart=unless-stopped -v /dropbox/self-hosted/openlist/data:/opt/openlist/data -p 5244:5244 -e PUID=0 -e PGID=0 -e UMASK=022 --name="openlist" openlistteam/openlist:latest
+          # ===== 数据库本地化 =====
+          # SQLite 不能跑在 rclone FUSE 挂载上（无 POSIX 锁/fsync、runner 销毁无
+          # clean unmount、-wal 与主库异步上传会造成撕裂快照）→ 配置每次重启丢失。
+          # 改为: 启动拉取到 runner 本地 /opt/openlist-data，容器挂本地目录，
+          # 会话期间周期热备 + 结束时整目录 sync 回传（见末尾两个 step）。
+          # 拉取排除 -wal/-shm/-journal: 撕裂快照的源头，宁可不带也不能带错
+          sudo mkdir -p /opt/openlist-data
+          sudo chmod 0777 /opt/openlist-data
+          rclone copy dropbox:self-hosted/openlist/data /opt/openlist-data \
+            --exclude "data.db-wal" --exclude "data.db-shm" --exclude "data.db-journal"
+          echo "拉取完成: $(ls -la /opt/openlist-data/ | tail -n +2 | wc -l) 个条目"
+          # 记录拉取时 db 指纹（回传前对比: 未变化则跳过回传，
+          # 避免极端并发场景下用过期副本覆盖远端新配置）
+          OPENLIST_DB_MD5_PULL=$(md5sum /opt/openlist-data/data.db 2>/dev/null | awk '{print $1}' || echo "none")
+          echo "OPENLIST_DB_MD5_PULL=$OPENLIST_DB_MD5_PULL" >> "$GITHUB_ENV"
+          echo "db 拉取指纹: $OPENLIST_DB_MD5_PULL"
+          sudo docker run -d --restart=unless-stopped -v /opt/openlist-data:/opt/openlist/data -p 5244:5244 -e PUID=0 -e PGID=0 -e UMASK=022 --name="openlist" openlistteam/openlist:latest
 
       - name: sleep
         run: |
@@ -192,8 +209,8 @@ jobs:
       #   改名类 → rclone move 服务端移动；压缩/分卷/base64 内容类 → 下载还
       #   原后回传原路径；成功后清理目标端替代文件并从 marker 移除条目。
       # 完成后发送 Telegram 汇总。restore_task 指定任务名（backup/task0-5）或 all。
-      - name: "Restore: 一键还原修复文件"
-        if: ${{ inputs.restore_fixed == true && inputs.restore_to_source != true }}
+      - name: "⚠️ Restore: 一键还原修复文件"
+        if: ${{ inputs.run_mode == '⚠️ 还原 · 修复文件还原为原路径' }}
         timeout-minutes: 240
         run: |
           source /tmp/load_all.sh
@@ -209,20 +226,20 @@ jobs:
       # 全程不删改目标端，可重复执行补齐失败条目。
       # 依赖 marker（与源端同在 OneDrive；极端情况 OneDrive 整体丢失时
       # 需外置的 marker 备份才能映射修复条目）。
-      - name: "Restore: 灾难恢复 目标端→源端"
-        if: ${{ inputs.restore_to_source == true }}
+      - name: "⚠️ Restore: 灾难恢复 目标端→源端"
+        if: ${{ inputs.run_mode == '⚠️ 灾难恢复 · 目标端→源端' }}
         timeout-minutes: 240
         run: |
           source /tmp/load_all.sh
           restore_source_from_target "${{ inputs.restore_task || 'all' }}"
 
       # ===== 调试: 单任务测试修复管线 =====
-      # 用真实生产代码路径（copy_task → sync_with_logging）跑单个 wopan176Crypt 任务，
+      # 用真实生产代码路径（sync_task → sync_with_logging）跑单个 wopan176Crypt 任务，
       # 验证 raw-vs-crypt 校验 + 缺失文件修复的实际效果。
       # 与正式流程的区别: 只跑单任务、跳过任务预览、不检查 --1d-skip 标记、
       # 跳过结尾 5h sleep，并用 OPENLIST_MISSING_FIX_MAX 限制修复数量快速得到结果。
       - name: "Debug: 单任务测试修复管线"
-        if: ${{ inputs.fix_test_mode == true && inputs.restore_fixed != true && inputs.restore_to_source != true }}
+        if: ${{ inputs.run_mode == '调试 · 修复管线测试' }}
         timeout-minutes: 120
         run: |
           source /tmp/load_all.sh
@@ -272,27 +289,27 @@ jobs:
             --retries 1
             --low-level-retries 3
           )
-          RCLONE_COPY_TASK_FLAGS=(
-            --no-traverse
+          RCLONE_SYNC_TASK_FLAGS=(
+            --delete-before
           )
 
-          # ===== 按 input 选择要测试的任务（与 run_all_tasks 中 copy_task 定义一致）=====
+          # ===== 按 input 选择要测试的任务（与 run_all_tasks 中 sync_task 定义一致）=====
           FIX_TASK="${{ inputs.fix_test_task || 'backup' }}"
           echo "=== 修复管线测试任务: ${FIX_TASK} (修复上限 ${OPENLIST_MISSING_FIX_MAX}) ==="
           case "$FIX_TASK" in
-            backup) copy_task "onedrive:backup" "openlist:wopan176Crypt/backup" "backup" ;;
-            task0)  copy_task "onedrive:0" "openlist:wopan176Crypt/0" "task0" ;;
-            task1)  copy_task "onedrive:1" "openlist:wopan176Crypt/1" "task1" ;;
-            task2)  copy_task "onedrive:2" "openlist:wopan176Crypt/2" "task2" ;;
-            task3)  copy_task "onedrive:3" "openlist:wopan176Crypt/3" "task3" ;;
-            task4)  copy_task "onedrive:4" "openlist:wopan176Crypt/4" "task4" ;;
-            task5)  copy_task "onedrive:5" "openlist:wopan176Crypt/5" "task5" ;;
+            backup) sync_task "onedrive:backup" "openlist:wopan176Crypt/backup" "backup" ;;
+            task0)  sync_task "onedrive:0" "openlist:wopan176Crypt/0" "task0" ;;
+            task1)  sync_task "onedrive:1" "openlist:wopan176Crypt/1" "task1" ;;
+            task2)  sync_task "onedrive:2" "openlist:wopan176Crypt/2" "task2" ;;
+            task3)  sync_task "onedrive:3" "openlist:wopan176Crypt/3" "task3" ;;
+            task4)  sync_task "onedrive:4" "openlist:wopan176Crypt/4" "task4" ;;
+            task5)  sync_task "onedrive:5" "openlist:wopan176Crypt/5" "task5" ;;
             *) echo "未知任务: ${FIX_TASK}（可选: backup/task0-task5）"; exit 1 ;;
           esac
           echo "=== 修复管线测试完成 (SYNC_FAILED=${SYNC_FAILED}) ==="
 
       - name: Initialize sync
-        if: ${{ inputs.fix_test_mode != true && inputs.restore_fixed != true && inputs.restore_to_source != true }}
+        if: ${{ inputs.run_mode == '' || inputs.run_mode == '同步' }}
         run: |
           source /tmp/load_all.sh
           PROCESSED_FILES_LOG="processed_videos.log"
@@ -321,7 +338,7 @@ jobs:
       # ===== 所有同步任务定义 + 预览 + 执行 =====
       # 增减任务只需编辑下方 run_all_tasks 函数体；rclone 参数编辑下方 RCLONE_*_FLAGS 数组。
       - name: Preview and sync all tasks
-        if: ${{ inputs.fix_test_mode != true && inputs.restore_fixed != true && inputs.restore_to_source != true }}
+        if: ${{ inputs.run_mode == '' || inputs.run_mode == '同步' }}
         run: |
           source /tmp/load_all.sh
 
@@ -344,6 +361,7 @@ jobs:
             # 阶段2: 获取 token 用于 API 探测（多个候选路径）
             local OL_TOKEN=""
             for c in \
+              "/opt/openlist-data/config.json" \
               "/dropbox/self-hosted/openlist/data/config.json" \
               "/dropbox/self-hosted/openlist/data/conf/config.json" \
               "/data/openlist/data/config.json"; do
@@ -394,53 +412,50 @@ jobs:
           )
 
           # sync_task 特有参数（rclone sync 模式，删除目标端多余文件，自动追加）
-          # --delete-excluded: 同时删除目标端匹配 --exclude 模式的历史文件
-          #   （否则 sync 只会忽略 exclude 文件而不删除，导致目标端残留历史文件，
-          #    预览文件数/大小永远对不上源端）
+          # 禁止加 --delete-excluded: rclone 语义下 filter 排除的文件"不传输也不删除"，
+          #   这是已修复文件（original/alternative）在 sync 模式下唯一的删除保护；
+          #   --delete-excluded 会连排除项一起删掉，直接毁掉修复成果。
+          #   代价: --exclude 匹配的历史文件（如 notion/）会在目标端残留，可接受。
           RCLONE_SYNC_TASK_FLAGS=(
             --delete-before
-            --delete-excluded
-          )
-
-          # copy_task 特有参数（rclone copy 模式，不删除，逐文件检查，自动追加）
-          RCLONE_COPY_TASK_FLAGS=(
-            --no-traverse
           )
 
           # ===== 所有同步任务定义（增减任务只需在此添加/删除一行）=====
-          # sync_task  = rclone sync（删除目标端多余文件，--delete-before 等由 RCLONE_SYNC_TASK_FLAGS 自动追加）
-          # copy_task  = rclone copy（不删除，--no-traverse 等由 RCLONE_COPY_TASK_FLAGS 自动追加）
+          # 所有任务统一 sync_task（rclone sync，删除目标端多余文件）:
+          #   - --delete-before 等由 RCLONE_SYNC_TASK_FLAGS 自动追加
+          #   - 已修复文件（original/alternative）由 sync.sh 的 filter-from 排除，
+          #     排除 = 不传输 + 不删除，sync 模式下不会被误删
           # gd_task    = Google Drive 专用同步（处理配额超限、API 限流等 GD 特有错误）
           # 可选参数: --auto-split  --1d-skip (或 --2d-skip / --3d-skip 自定义天数)
           # 其余 rclone 参数（如 --exclude）直接追加在后面
           # 共有/特有 rclone 参数请在上方 RCLONE_*_FLAGS 数组中集中修改
           run_all_tasks() {
             sync_task "onedrive:backup" "openlist:aliyundriveCrypt/backup" "backup" --auto-split --1d-skip --exclude "/notion/**" --exclude "notion/**" --exclude "/self-hosted_latest.tar.gz" --exclude "self-hosted_latest.tar.gz" --exclude "/github_repos_latest.tar.gz" --exclude "github_repos_latest.tar.gz"
-            copy_task "onedrive:backup" "openlist:wopan176Crypt/backup" "backup" --auto-split --1d-skip
+            sync_task "onedrive:backup" "openlist:wopan176Crypt/backup" "backup" --auto-split --1d-skip
             # gd_task "onedrive:backup" "gd:backup" "backup" --1d-skip
 
-            copy_task "onedrive:0" "openlist:wopan176Crypt/0" "task0" --auto-split --1d-skip
+            sync_task "onedrive:0" "openlist:wopan176Crypt/0" "task0" --auto-split --1d-skip
             sync_task "onedrive:0" "openlist:baidupanCrypt/0" "task0" --auto-split --1d-skip
             sync_task "onedrive:0/j-1024j-视频-pornhub-favorites" "openlist:wopan175/0/j-1024j-视频-pornhub-favorites" "task0" --auto-split --1d-skip
             # gd_task "onedrive:0" "gd:0" "task0" --1d-skip
 
-            copy_task "onedrive:1" "openlist:wopan176Crypt/1" "task1" --auto-split --1d-skip
+            sync_task "onedrive:1" "openlist:wopan176Crypt/1" "task1" --auto-split --1d-skip
             sync_task "onedrive:1" "openlist:baidupanCrypt/1" "task1" --auto-split --1d-skip
             sync_task "onedrive:1" "openlist:wopan175/1" "task1" --auto-split --1d-skip
             # gd_task "onedrive:1" "gd:1" "task1" --1d-skip
 
-            copy_task "onedrive:2" "openlist:wopan176Crypt/2" "task2" --auto-split --1d-skip
+            sync_task "onedrive:2" "openlist:wopan176Crypt/2" "task2" --auto-split --1d-skip
             sync_task "onedrive:2" "openlist:wopan175/2" "task2" --auto-split --1d-skip
             # gd_task "onedrive:2" "gd:2" "task2" --1d-skip
 
-            copy_task "onedrive:3" "openlist:wopan176Crypt/3" "task3" --auto-split --1d-skip
+            sync_task "onedrive:3" "openlist:wopan176Crypt/3" "task3" --auto-split --1d-skip
             sync_task "onedrive:3" "openlist:wopan175/3" "task3" --auto-split --1d-skip
             # gd_task "onedrive:3" "gd:3" "task3" --1d-skip
 
-            copy_task "onedrive:4" "openlist:wopan176Crypt/4" "task4" --auto-split --1d-skip
+            sync_task "onedrive:4" "openlist:wopan176Crypt/4" "task4" --auto-split --1d-skip
             sync_task "onedrive:4" "openlist:wopan175/4" "task4" --auto-split --1d-skip
 
-            copy_task "onedrive:5" "openlist:wopan176Crypt/5" "task5" --auto-split --1d-skip
+            sync_task "onedrive:5" "openlist:wopan176Crypt/5" "task5" --auto-split --1d-skip
             sync_task "onedrive:5" "openlist:wopan175/5" "task5" --auto-split --1d-skip
           }
 
@@ -458,7 +473,7 @@ jobs:
           echo "=== 所有任务同步完成 ==="
 
       - name: Finalize and cleanup
-        if: ${{ inputs.fix_test_mode != true && inputs.restore_fixed != true && inputs.restore_to_source != true }}
+        if: ${{ inputs.run_mode == '' || inputs.run_mode == '同步' }}
         run: |
           source /tmp/load_all.sh
           actual_entries=0
@@ -492,8 +507,52 @@ jobs:
           rm -f /tmp/*.sh 2>/dev/null || true
           echo "所有同步任务完成！"
 
+      # ===== 会话保持 + 数据库周期热备回传 =====
+      # 原为纯 sleep 300m；runner 被强杀（VM 销毁/取消超时）时 Finalize 的
+      # 回传来不及执行，改为每 5 分钟做一次一致性快照并回传变化的 db，
+      # 强杀丢失窗口从 5 小时压缩到 ≤5 分钟。
+      # 快照用 SQLite backup API（在线、逻辑一致），不直接拷 data.db 文件
+      # （容器运行中直接拷可能捕获到撕裂状态）。
       - name: sleep
-        if: ${{ inputs.fix_test_mode != true && inputs.restore_fixed != true && inputs.restore_to_source != true }}
+        if: ${{ inputs.run_mode == '' || inputs.run_mode == '同步' }}
         run: |
-          sleep 300m
+          LAST_MD5="${OPENLIST_DB_MD5_PULL:-none}"
+          for i in $(seq 1 60); do
+            sleep 300
+            # 容器运行中的在线一致性快照（root 属主，用 sudo 读）
+            if sudo python3 -c "import sqlite3; src=sqlite3.connect('file:/opt/openlist-data/data.db?mode=ro', uri=True); dst=sqlite3.connect('/tmp/data.db.snapshot'); src.backup(dst); dst.close(); src.close()" 2>/dev/null; then
+              NEW_MD5=$(md5sum /tmp/data.db.snapshot 2>/dev/null | awk '{print $1}' || echo "")
+              if [ -n "$NEW_MD5" ] && [ "$NEW_MD5" != "$LAST_MD5" ]; then
+                if rclone copyto /tmp/data.db.snapshot dropbox:self-hosted/openlist/data/data.db; then
+                  LAST_MD5="$NEW_MD5"
+                  echo "[$(date -u +'%H:%M:%SZ')] db 已变化，热备回传完成 ($NEW_MD5)"
+                else
+                  echo "[$(date -u +'%H:%M:%SZ')] ⚠️ 热备回传失败，下轮重试"
+                fi
+              fi
+            fi
+          done
           sudo docker stop openlist
+
+      # ===== 数据库回传（所有模式 + 失败/取消也执行）=====
+      # 停容器（幂等）→ SQLite 干净关闭、-wal/-shm 由 SQLite 自行清理/合并
+      # → 整目录 rclone sync 镜像回传（未变化的 db 跳过，防止并发场景覆盖）。
+      # if: always() 保证同步步骤失败/手动取消时，会话内的配置变更也能回传
+      # （runner 被强杀除外——该场景由上一步的周期热备兜底）。
+      - name: "Persist: openlist 数据库回传"
+        if: ${{ always() }}
+        run: |
+          sudo docker stop openlist 2>/dev/null || true
+          CUR_MD5=$(md5sum /opt/openlist-data/data.db 2>/dev/null | awk '{print $1}' || echo "none")
+          if [ "$CUR_MD5" = "${OPENLIST_DB_MD5_PULL:-none}" ]; then
+            echo "db 未变化（${CUR_MD5}），跳过回传"
+          else
+            echo "db 已变化（${OPENLIST_DB_MD5_PULL:-none} → ${CUR_MD5}），sync 回传..."
+            # 排除 -wal/-shm/-journal 后 sync 镜像（本地为权威副本）
+            rclone sync /opt/openlist-data dropbox:self-hosted/openlist/data \
+              --exclude "data.db-wal" --exclude "data.db-shm" --exclude "data.db-journal"
+            # sync 的 exclude 不会删远端对应文件，显式清理可能残留的撕裂源
+            rclone delete dropbox:self-hosted/openlist/data \
+              --include "data.db-wal" --include "data.db-shm" --include "data.db-journal" 2>/dev/null || true
+            echo "回传完成: $(rclone lsl dropbox:self-hosted/openlist/data 2>/dev/null | grep -c .) 个文件"
+          fi

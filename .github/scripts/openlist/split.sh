@@ -636,8 +636,10 @@ preprocess_large_files() {
   return 0
 }
 
-# Sync task 失败后对源目录中的超阈值大文件执行切割
-# 受 OPENLIST_SPLIT_ON_SYNC_FAILURE 环境变量开关控制
+# 同步失败后的补救措施: 对源目录中的超阈值大文件执行切割
+# 受 OPENLIST_SPLIT_ON_SYNC_FAILURE 环境变量开关控制（默认关闭）
+# 注意: 任务结束时无论成败都会走到这里检查一次开关，
+#       关闭时的"跳过"提示只是开关状态通知，不代表同步失败
 # 用法: split_on_sync_failure <source_path> <task_name>
 split_on_sync_failure() {
   local source_path="$1"
@@ -646,11 +648,11 @@ split_on_sync_failure() {
   case "$switch_value" in
     true|TRUE|1|yes|YES|on|ON) ;;
     *)
-      echo "OpenList 大文件失败后切割开关关闭，跳过: task=${task_name} source=${source_path}"
+      echo "大文件切割开关关闭 (split_on_sync_failure=false)，跳过切割处理: task=${task_name} source=${source_path}（仅开关状态通知，不代表同步失败）"
       return 0
       ;;
   esac
 
-  echo "OpenList 大文件失败后切割开关已开启，开始处理: task=${task_name} source=${source_path}"
+  echo "大文件切割开关已开启 (split_on_sync_failure=true)，开始检查超阈值大文件: task=${task_name} source=${source_path}"
   preprocess_large_files "$source_path" "$task_name"
 }

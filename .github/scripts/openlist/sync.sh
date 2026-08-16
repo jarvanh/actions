@@ -101,8 +101,11 @@ _has_wopan_login_failure() {
 }
 
 # 查找 OpenList 最新日志文件
+# （数据库本地化后日志在 /opt/openlist-data/log，旧路径保留兜底）
 _find_openlist_log() {
   for logdir in \
+    "/opt/openlist-data/log" \
+    "/opt/openlist-data/logs" \
     "/dropbox/self-hosted/openlist/data/log" \
     "/dropbox/self-hosted/openlist/data/logs" \
     "/opt/openlist/data/log"; do
@@ -424,28 +427,44 @@ sync_with_logging() {
   : > "$LOG_FILENAME"
   local SYNC_STATUS=0
 
-  # ===== 已修复文件排除（破解 405→8005 重试死循环）=====
+  # ===== 已修复文件排除（405 防护 + sync 模式删除保护）=====
   # marker fixed_files 里的 original 当初就是原路径传不上（405/超长/假成功）
   # 才修复到 alternative 的；替代文件仍在时原路径重传必然再 405，
   # 还会被 OpenList 包装成 8005 触发 3 轮全量重试（每轮白白重查全目录）。
-  # 这里把 fixed_files 的 original 排除出 rclone 传输清单：
-  #   - rclone 不再碰这些路径 → 无 405 → 不进 8005/423 重试循环
-  #   - 排除仅作用于传输；lsf diff 不带 filter-from，缺失文件照常进
-  #     修复管线 → 沿用逻辑每轮复核替代路径（丢了自动拉黑换方法重修）
-  #   - copy 模式无删除风险；文件名 glob 特殊字符 [ ] * ? { } 转成字符类
+  # sync 模式下排除同时承担"删除保护"——rclone 语义: filter 排除的文件
+  # 不传输也不删除（前提: 不能加 --delete-excluded，否则排除保护失效）:
+  #   - original:   排除 → 不重传（无 405）、即使目标端有也不被删
+  #   - alternative: 只存在于目标端、源端没有 → 不排除必被 sync 当多余删除
+  #   - 分卷类:     alternative 只记录第一卷，.002/.003... 用前缀通配一并保护
+  #   - auto-split 最终全量同步用 GLOBAL_FIXED_FILES_JSON 合并本轮子任务修复
+  #   - lsf diff 不带 filter-from，缺失文件照常进修复管线复核
+  #   - 文件名 glob 特殊字符 [ ] * ? { } 转成字符类
   if [[ "$dest_path" == openlist:* ]]; then
     _load_marker_fixed_files "$source_path" "$dest_path" "$task_name"
     local fixed_exclude_file="/tmp/${task_name}_fixed_exclude_$$.txt"
     : > "$fixed_exclude_file"
-    local _fx_orig
-    while IFS= read -r _fx_orig; do
-      [ -z "$_fx_orig" ] && continue
-      printf -- "- /%s\n" \
-        "$(printf '%s' "$_fx_orig" | sed -e 's/[][*?{}]/[&]/g')" >> "$fixed_exclude_file"
-    done < <(echo "$MARKER_FIXED_FILES" | jq -r '.[].original // empty' 2>/dev/null)
+    local _fx_orig _fx_alt _fx_method
+    _fx_escape() { printf '%s' "$1" | sed -e 's/[][*?{}]/[&]/g'; }
+    while IFS=$'\t' read -r _fx_orig _fx_alt _fx_method; do
+      [ -z "$_fx_orig" ] && [ -z "$_fx_alt" ] && continue
+      if [ -n "$_fx_orig" ]; then
+        printf -- "- /%s\n" "$(_fx_escape "$_fx_orig")" >> "$fixed_exclude_file"
+      fi
+      if [ -n "$_fx_alt" ]; then
+        printf -- "- /%s\n" "$(_fx_escape "$_fx_alt")" >> "$fixed_exclude_file"
+        if [[ "$_fx_method" == *分卷* ]]; then
+          local _fx_prefix="${_fx_alt%.[0-9]*}"
+          if [ "$_fx_prefix" != "$_fx_alt" ]; then
+            printf -- "- /%s*\n" "$(_fx_escape "$_fx_prefix")" >> "$fixed_exclude_file"
+          fi
+        fi
+      fi
+    done < <(jq -rs 'add | unique_by(.original // "") | .[] | [(.original // ""), (.alternative // ""), (.method // "")] | @tsv' \
+      <(echo "${MARKER_FIXED_FILES:-[]}") <(echo "${GLOBAL_FIXED_FILES_JSON:-[]}") 2>/dev/null)
     if [ -s "$fixed_exclude_file" ]; then
+      sort -u "$fixed_exclude_file" -o "$fixed_exclude_file"
       extra_args+=("--filter-from" "$fixed_exclude_file")
-      echo "已排除 $(wc -l < "$fixed_exclude_file" | tr -d ' ') 个上轮修复文件的源路径（替代文件在目标端，原路径重传必 405）" | tee -a "$LOG_FILENAME"
+      echo "已排除 $(wc -l < "$fixed_exclude_file" | tr -d ' ') 条修复文件路径（original+alternative；排除 = 不传输 + 不删除）" | tee -a "$LOG_FILENAME"
       sed 's/^/  exclude: /' "$fixed_exclude_file" | tee -a "$LOG_FILENAME"
     fi
   fi

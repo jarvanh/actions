@@ -9,6 +9,9 @@ on:
 
 jobs:
   build:
+    # 与 openlist 工作流共用并发组: 两个工作流都会启动 OpenList 容器，
+    # 数据库本地化后各 runner 持有独立副本，并发运行会互相覆盖配置（脑裂）
+    concurrency: openlist-singleton
     runs-on: ubuntu-latest
     steps:
       - name: rclone-install
@@ -43,8 +46,17 @@ jobs:
           rclone lsf dropbox:
       - name: Run openlist container
         run: |
-          docker run -d --restart=unless-stopped -v /dropbox/self-hosted/openlist/data:/opt/openlist/data -p 5244:5244 -e PUID=0 -e PGID=0 -e UMASK=022 --name="openlist" openlistteam/openlist:latest
-          sudo sleep 1m     
+          # ===== 数据库本地化（与 openlist 工作流同模式）=====
+          # SQLite 不能跑在 rclone FUSE 挂载上 → 启动拉取本地、结束回传
+          # （见末尾 "Persist" step；撕裂快照源头 -wal/-shm/-journal 拉取时排除）
+          sudo mkdir -p /opt/openlist-data
+          sudo chmod 0777 /opt/openlist-data
+          rclone copy dropbox:self-hosted/openlist/data /opt/openlist-data \
+            --exclude "data.db-wal" --exclude "data.db-shm" --exclude "data.db-journal"
+          OPENLIST_DB_MD5_PULL=$(md5sum /opt/openlist-data/data.db 2>/dev/null | awk '{print $1}' || echo "none")
+          echo "OPENLIST_DB_MD5_PULL=$OPENLIST_DB_MD5_PULL" >> "$GITHUB_ENV"
+          docker run -d --restart=unless-stopped -v /opt/openlist-data:/opt/openlist/data -p 5244:5244 -e PUID=0 -e PGID=0 -e UMASK=022 --name="openlist" openlistteam/openlist:latest
+          sudo sleep 1m
           docker ps
           sudo mkdir -p /openlist
           sudo nohup rclone mount openlist: /openlist --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 10G &
@@ -57,3 +69,22 @@ jobs:
           icloudpd --library PrimarySync --directory /openlist/123panCrypt1/iCloudPhotosPersonal --cookie-directory /dropbox/self-hosted/iCloudPhotosCookie --username ${{ secrets.APPLEID }} --password ${{ secrets.APPLEPASSWORD }} --auto-delete  
           echo "github icloud-photos-downloader 任务执行结束"
           curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github icloud-photos-downloader 任务执行结束"
+
+      # ===== 数据库回传（失败/取消也执行）=====
+      # 停容器 → SQLite 干净关闭 → 整目录 sync 镜像回传（db 未变化则跳过）
+      - name: "Persist: openlist 数据库回传"
+        if: ${{ always() }}
+        run: |
+          sudo fusermount -uz /openlist 2>/dev/null || true
+          sudo docker stop openlist 2>/dev/null || true
+          CUR_MD5=$(md5sum /opt/openlist-data/data.db 2>/dev/null | awk '{print $1}' || echo "none")
+          if [ "$CUR_MD5" = "${OPENLIST_DB_MD5_PULL:-none}" ]; then
+            echo "db 未变化（${CUR_MD5}），跳过回传"
+          else
+            echo "db 已变化（${OPENLIST_DB_MD5_PULL:-none} → ${CUR_MD5}），sync 回传..."
+            rclone sync /opt/openlist-data dropbox:self-hosted/openlist/data \
+              --exclude "data.db-wal" --exclude "data.db-shm" --exclude "data.db-journal"
+            rclone delete dropbox:self-hosted/openlist/data \
+              --include "data.db-wal" --include "data.db-shm" --include "data.db-journal" 2>/dev/null || true
+            echo "回传完成"
+          fi

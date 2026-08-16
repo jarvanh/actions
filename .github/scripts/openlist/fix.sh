@@ -40,12 +40,13 @@
 #   TRY_FIX_MESSAGE      — 失败原因（仅 status=failed 时）
 
 # 从 OpenList 数据库（sqlite）读取指定挂载的 addition JSON（API 失败时的兜底）
-# data.db 在 runner 本地挂载路径 /dropbox/self-hosted/openlist/data/ 下
+# 数据库本地化后 data.db 在 runner 本地 /opt/openlist-data/ 下（旧路径保留兜底）
 # 先拷贝到 /tmp 避免与运行中容器的文件锁冲突（WAL 一并拷贝）
 # 用法: _get_addition_from_db <mount_path 如 /wopan176Crypt>
 _get_addition_from_db() {
   local mount="$1"
-  local db_src="/dropbox/self-hosted/openlist/data/data.db"
+  local db_src="/opt/openlist-data/data.db"
+  [ -f "$db_src" ] || db_src="/dropbox/self-hosted/openlist/data/data.db"
   [ -f "$db_src" ] || return 1
   local db_local="/tmp/ol_data_$$.db"
   cp "$db_src" "$db_local" 2>/dev/null || return 1
