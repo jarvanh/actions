@@ -592,7 +592,7 @@ sync_with_logging() {
               continue
             fi
             if [ -n "$prev_mid" ]; then
-              echo "上轮方法 ${prev_mid} 判定假成功（替代路径已消失）: ${mf}" | tee -a "$LOG_FILENAME"
+              echo "上轮 $(_method_desc "$prev_mid") 判定假成功（替代路径已消失）: ${mf}" | tee -a "$LOG_FILENAME"
               FIX_METHOD_BLACKLIST["$mf"]="$prev_mid"
             fi
           fi
@@ -726,9 +726,9 @@ sync_with_logging() {
       if [ -n "${_CRYPT_ONTHEFLY:-}" ]; then
         echo "名长诊断汇总: 密文名>255B 共 ${_NAMELEN_OVER_255} 个 / 超后端已接受最长(${_NAMELEN_RAW_MAX}B) 共 ${_NAMELEN_OVER_RAWMAX} 个" | tee -a "$LOG_FILENAME"
         if [ "${_NAMELEN_OVER_RAWMAX:-0}" -gt 0 ]; then
-          echo "  → 长度假设成立: 缺失文件密文名超过后端实际接受上限，将由 m16 短哈希名兜底落盘" | tee -a "$LOG_FILENAME"
+          echo "  → 长度假设成立: 缺失文件密文名超过后端实际接受上限，将由 $(_method_desc m16) 兜底落盘" | tee -a "$LOG_FILENAME"
         elif [ "${_NAMELEN_OVER_255:-0}" -eq 0 ]; then
-          echo "  → 长度假设不成立: 缺失文件密文名均未超限，根因另有其因（看 m15 直写的真实报错）" | tee -a "$LOG_FILENAME"
+          echo "  → 长度假设不成立: 缺失文件密文名均未超限，根因另有其因（看 $(_method_desc m15) 的真实报错）" | tee -a "$LOG_FILENAME"
         fi
       fi
     fi
@@ -895,7 +895,7 @@ sync_with_logging() {
             # B: 复核失败 = 修复方法假成功 → 下一轮跳过该方法
             if [ -n "$f_mid" ]; then
               _blacklist_add "$orig_path" "$f_mid"
-              echo "  → 方法 ${f_mid} 已加入 ${orig_path} 的假成功黑名单（下一轮跳过）" | tee -a "$LOG_FILENAME"
+              echo "  → $(_method_desc "$f_mid") 已加入 ${orig_path} 的假成功黑名单（下一轮跳过）" | tee -a "$LOG_FILENAME"
             fi
           fi
         done < "$PERSIST_VERIFY_LIST"
