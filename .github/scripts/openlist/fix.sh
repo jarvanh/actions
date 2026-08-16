@@ -31,6 +31,11 @@
 #      try_fix_failed_file 直接跳过失效方法）；跨轮修复同样跳过，避免
 #      方法1 每轮都白白"成功"一次再被发现。
 #
+# 工件清理（TRY_FIX_ARTIFACTS）: 每个方法尝试失败（rc≠0 或假成功）后，
+# 立即删除该方法已上传到目标端的文件（含分卷前缀展开），只保留最终
+# 胜出方法的工件——否则换方法会让同一源文件在目标端累积多个垃圾
+# "修复文件"（run 31928671112 实测一个文件留下 ~10 个候选）。
+#
 # 依赖: utils.sh (log_fix, _get_openlist_token), telegram.sh (间接)
 # 结果写入全局变量:
 #   TRY_FIX_STATUS       — "success" 或 "failed"
@@ -246,6 +251,58 @@ _method_blocked() {
   esac
 }
 
+# 清理目标端单个修复工件（尽力而为）: 单文件 deletefile；
+# 分卷类（.zip.NNN 结尾）按前缀列出全部编号分卷逐个删除。
+# ghost 文件（仅存在于 OpenList 缓存）删除会失败——忽略即可，容器重启后自然消失。
+# 用法: _cleanup_remote_artifact <full_remote_path>
+_cleanup_remote_artifact() {
+  local full="$1"
+  [ -n "$full" ] || return 0
+  if echo "$full" | grep -qE '\.zip\.[0-9]{3}$'; then
+    local dir base prefix p
+    dir="$(dirname -- "$full")"
+    base="$(basename -- "$full")"
+    prefix="${base%.[0-9]*}"   # foo.zip.001 → foo.zip（前缀已含 .zip）
+    while IFS= read -r p; do
+      [ -z "$p" ] && continue
+      rclone deletefile "${dir}/${p}" >/dev/null 2>&1 || true
+    done < <(rclone lsf "$dir" --files-only 2>/dev/null | grep -F "${prefix}." || true)
+  else
+    rclone deletefile "$full" >/dev/null 2>&1 || true
+  fi
+}
+
+# 清理目标端替代路径工件（相对 dest_path），带日志
+# 用法: _cleanup_fix_artifact <dest_path> <alt_rel> <log_file>
+_cleanup_fix_artifact() {
+  local dest_path="$1" alt_rel="$2" log_file="${3:-/dev/null}"
+  [ -n "$alt_rel" ] || return 0
+  _cleanup_remote_artifact "${dest_path}/${alt_rel}"
+  log_fix "$log_file" "  🧹 已清理未持久化的修复工件: ${alt_rel}"
+}
+
+# 本次 try_fix_failed_file 调用已上传的工件（目标端完整远程路径）
+# 每个方法尝试失败（rc≠0 或假成功）后立即清理，避免换方法时同一个
+# 源文件在目标端累积多个垃圾"修复文件"（run 31928671112 实测一文件留 ~10 个）
+declare -a TRY_FIX_ARTIFACTS=()
+
+_artifact_add() {
+  [ -n "$1" ] && TRY_FIX_ARTIFACTS+=("$1")
+}
+
+# 尽力清理全部已记录工件并清空清单（成功方法的不调用——胜者工件保留）
+# 用法: _artifacts_cleanup <log_file>
+_artifacts_cleanup() {
+  local log_file="${1:-/dev/null}" a
+  for a in "${TRY_FIX_ARTIFACTS[@]}"; do
+    _cleanup_remote_artifact "$a"
+  done
+  if [ "${#TRY_FIX_ARTIFACTS[@]}" -gt 0 ]; then
+    log_fix "$log_file" "  🧹 已清理 ${#TRY_FIX_ARTIFACTS[@]} 个未持久化候选工件（防止同一文件累积多个修复文件）"
+  fi
+  TRY_FIX_ARTIFACTS=()
+}
+
 # 把当前 FIX_METHOD_BLACKLIST 数组即时合并写回 marker 的 fix_blacklist 字段
 # 为什么不等任务结束统一保存: 持久化验证（重启容器复核）在修复循环之后执行，
 # 其拉黑结论若只存于进程内变量，异常路径（子 shell/中断/变量丢失）下会丢——
@@ -374,6 +431,7 @@ try_fix_failed_file() {
   TRY_FIX_METHOD_ID=""
   TRY_FIX_RESTORE=""
   TRY_FIX_MESSAGE=""
+  TRY_FIX_ARTIFACTS=()
 
   log_fix "$fix_log" "=== 尝试修复失败文件: $failed_file_rel ==="
   log_fix "$fix_log" "源文件: $src_file"
@@ -523,6 +581,7 @@ try_fix_failed_file() {
     log_fix "$fix_log" "$(_method_desc m1) — 跳过（已判定该方法假成功，黑名单生效）"
   else
   log_fix "$fix_log" "方法 1: 直接 rclone copyto"
+  _artifact_add "$dst_file"
   rclone copyto "$src_file" "$dst_file" --retries 1 --low-level-retries 3 --timeout 5m --contimeout 30s 2>&1 | \
     while IFS= read -r line; do log_fix "$fix_log" "m1: $line"; done
   local m1_status=${PIPESTATUS[0]}
@@ -543,6 +602,7 @@ try_fix_failed_file() {
     return 0
   fi
   log_fix "$fix_log" "方法 1 失败 (exit=$m1_status)"
+  _artifacts_cleanup "$fix_log"
   fi
 
   # 方法 2（第 2 顺位）：rclone crypt 直写裸存储
@@ -560,6 +620,7 @@ try_fix_failed_file() {
     _c_rel="${_c_rel_root:+${_c_rel_root}/}${failed_file_rel}"
     _c_dst="${_CRYPT_ONTHEFLY}${_c_rel}"
     log_fix "$fix_log" "  crypt 直写: ${_CRYPT_REMOTE} ← ${_c_rel}（加密名由 rclone 本地生成）"
+    _artifact_add "$_c_dst"
     rclone copyto "$local_file" "$_c_dst" --retries 1 --low-level-retries 3 --timeout 15m --contimeout 30s 2>&1 | \
       while IFS= read -r line; do log_fix "$fix_log" "m2: $line"; done
     local m2_status=${PIPESTATUS[0]}
@@ -574,6 +635,7 @@ try_fix_failed_file() {
       return 0
     fi
     log_fix "$fix_log" "方法 2 失败 (exit=$m2_status)"
+    _artifacts_cleanup "$fix_log"
   else
     log_fix "$fix_log" "方法 2 跳过（未能从 OpenList API 获取 crypt 配置/密码）"
   fi
@@ -595,6 +657,7 @@ try_fix_failed_file() {
   fi
   m3sh_dst="${actual_dst_dir}/${sh_name}"
   log_fix "$fix_log" "  文件名: ${file_name} → ${sh_name}"
+  _artifact_add "$m3sh_dst"
   rclone copyto "$local_file" "$m3sh_dst" --retries 1 --low-level-retries 3 --timeout 5m --contimeout 30s 2>&1 | \
     while IFS= read -r line; do log_fix "$fix_log" "m3: $line"; done
   m3sh_status=${PIPESTATUS[0]}
@@ -613,6 +676,7 @@ try_fix_failed_file() {
     return 0
   fi
   log_fix "$fix_log" "方法 3 失败 (exit=$m3sh_status)"
+  _artifacts_cleanup "$fix_log"
   fi
 
   # 方法 4：zip 压缩后上传
@@ -625,6 +689,7 @@ try_fix_failed_file() {
   if [ -f "$temp_dir/${file_name}.zip" ]; then
     local m4z_dst m4z_status
     m4z_dst="${actual_dst_dir}/${file_name}.zip"
+    _artifact_add "$m4z_dst"
     rclone copyto "$temp_dir/${file_name}.zip" "$m4z_dst" --retries 1 --low-level-retries 3 --timeout 5m --contimeout 30s 2>&1 | \
       while IFS= read -r line; do log_fix "$fix_log" "m4: $line"; done
     m4z_status=${PIPESTATUS[0]}
@@ -643,6 +708,7 @@ try_fix_failed_file() {
       return 0
     fi
     log_fix "$fix_log" "方法 4 失败 (exit=$m4z_status)"
+    _artifacts_cleanup "$fix_log"
   else
     log_fix "$fix_log" "方法 4 zip 未生成"
   fi
@@ -658,6 +724,7 @@ try_fix_failed_file() {
   if [ -f "$temp_dir/${file_name}.7z" ]; then
     local m5z_dst m5z_status
     m5z_dst="${actual_dst_dir}/${file_name}.7z"
+    _artifact_add "$m5z_dst"
     rclone copyto "$temp_dir/${file_name}.7z" "$m5z_dst" --retries 1 --low-level-retries 3 --timeout 5m --contimeout 30s 2>&1 | \
       while IFS= read -r line; do log_fix "$fix_log" "m5: $line"; done
     m5z_status=${PIPESTATUS[0]}
@@ -676,6 +743,7 @@ try_fix_failed_file() {
       return 0
     fi
     log_fix "$fix_log" "方法 5 失败 (exit=$m5z_status)"
+    _artifacts_cleanup "$fix_log"
   else
     log_fix "$fix_log" "方法 5 7z 未生成"
   fi
@@ -745,6 +813,7 @@ try_fix_failed_file() {
         m6_uploaded_count=$((m6_uploaded_count + 1))
         local m6_alt_rel="${m6_dst_part#${dest_path}/}"
         m6_alt_files+=("$m6_alt_rel")
+        _artifact_add "$m6_dst_part"
         log_fix "$fix_log" "  m6 分卷 ${m6_total_parts} 上传成功 (${m6_part_bname}, ${m6_part_expected} bytes)"
       else
         log_fix "$fix_log" "  m6 分卷 ${m6_total_parts} 上传失败 (rc=$m6_part_rc, size=$m6_part_dst_size, expected=$m6_part_expected)"
@@ -773,6 +842,7 @@ try_fix_failed_file() {
       return 0
     fi
     log_fix "$fix_log" "方法 6 失败（全部分卷上传未成功）"
+    _artifacts_cleanup "$fix_log"
     rm -rf "$m6_split_dir" 2>/dev/null || true
   else
     log_fix "$fix_log" "方法 6 zip 未生成，跳过"
@@ -848,6 +918,7 @@ try_fix_failed_file() {
         m7_uploaded_count=$((m7_uploaded_count + 1))
         local m7_alt_rel="${m7_dst_part#${dest_path}/}"
         m7_alt_files+=("$m7_alt_rel")
+        _artifact_add "$m7_dst_part"
         log_fix "$fix_log" "  m7 分卷 ${m7_total_parts} 上传成功 (${m7_part_bname}, ${m7_part_expected} bytes)"
       else
         log_fix "$fix_log" "  m7 分卷 ${m7_total_parts} 上传失败 (rc=$m7_part_rc, size=$m7_part_dst_size, expected=$m7_part_expected)"
@@ -876,6 +947,7 @@ try_fix_failed_file() {
       return 0
     fi
     log_fix "$fix_log" "方法 7 失败（全部分卷上传未成功）"
+    _artifacts_cleanup "$fix_log"
     rm -rf "$m7_split_dir" 2>/dev/null || true
   else
     log_fix "$fix_log" "方法 7 zip 未生成，跳过"
@@ -906,6 +978,7 @@ try_fix_failed_file() {
       -F "name=$api_name" 2>&1)
     upload_http=$(echo "$upload_resp" | tail -n 1)
     log_fix "$fix_log" "OpenList API 上传响应: ${upload_http}"
+    _artifact_add "${actual_dst_dir}/${api_name}"
     if echo "$upload_http" | grep -qE 'HTTP_CODE:(200|201|204)' && _confirm_raw_persist "$(_method_desc m8)" "$failed_file_rel" "$fix_log"; then
       log_fix "$fix_log" "方法 8 成功"
       TRY_FIX_METHOD_ID="方法8: OpenList API /fs/form 直传（API 自动生成文件名）"
@@ -923,6 +996,7 @@ try_fix_failed_file() {
       return 0
     fi
     log_fix "$fix_log" "方法 8 失败 (${upload_http})"
+    _artifacts_cleanup "$fix_log"
   else
     log_fix "$fix_log" "方法 8 跳过（无法读取 OpenList token）"
   fi
@@ -958,6 +1032,7 @@ try_fix_failed_file() {
     rclone copyto "$local_file" "$m9_dst" --retries 1 --low-level-retries 3 --timeout 5m --contimeout 30s 2>&1 | \
       while IFS= read -r line; do log_fix "$fix_log" "m9: $line"; done
     local m9_status=${PIPESTATUS[0]}
+    _artifact_add "$m9_dst"
     if [ "$m9_status" -eq 0 ] && _confirm_raw_persist "$(_method_desc m9)" "$failed_file_rel" "$fix_log"; then
       log_fix "$fix_log" "方法 9 成功"
       TRY_FIX_METHOD_ID="方法9: 上传到父目录（跳过有问题的目录层级）"
@@ -969,6 +1044,7 @@ try_fix_failed_file() {
       return 0
     fi
     log_fix "$fix_log" "方法 9 失败 (exit=$m9_status)"
+    _artifacts_cleanup "$fix_log"
   fi
   fi
 
@@ -985,6 +1061,7 @@ try_fix_failed_file() {
     while IFS= read -r line; do log_fix "$fix_log" "m10 7z: $line"; done
   if [ -f "$temp_dir/${file_name}.enc.zip" ]; then
     local m10_dst="${actual_dst_dir}/${file_name}.enc.zip"
+    _artifact_add "$m10_dst"
     rclone copyto "$temp_dir/${file_name}.enc.zip" "$m10_dst" --retries 1 --low-level-retries 3 --timeout 5m --contimeout 30s 2>&1 | \
       while IFS= read -r line; do log_fix "$fix_log" "m10: $line"; done
     local m10_status=${PIPESTATUS[0]}
@@ -999,6 +1076,7 @@ try_fix_failed_file() {
       return 0
     fi
     log_fix "$fix_log" "方法 10 失败 (exit=$m10_status)"
+    _artifacts_cleanup "$fix_log"
   else
     log_fix "$fix_log" "方法 10 加密 zip 未生成"
   fi
@@ -1030,6 +1108,7 @@ try_fix_failed_file() {
       --max-time 300 2>&1)
     m11_upload_http=$(echo "$m11_upload_resp" | tail -n 1)
     log_fix "$fix_log" "  临时目录上传响应: ${m11_upload_http}"
+    _artifact_add "${dest_path}/${tmp_dir_name}/${file_name}"
     if echo "$m11_upload_http" | grep -qE 'HTTP_CODE:(200|201|204)' && _confirm_raw_persist "$(_method_desc m11)" "$failed_file_rel" "$fix_log"; then
       log_fix "$fix_log" "方法 11 临时目录上传成功，尝试 move 到目标路径..."
       TRY_FIX_METHOD_ID="方法11: 临时目录上传 + OpenList API move 移动"
@@ -1069,11 +1148,14 @@ try_fix_failed_file() {
       fi
     fi
     log_fix "$fix_log" "方法 11 临时目录上传失败 (${m11_upload_http})"
+    _artifacts_cleanup "$fix_log"
+    rclone rmdir "${dest_path}/${tmp_dir_name}" >/dev/null 2>&1 || true
   fi
   fi
 
-  # 所有方法均失败
+  # 所有方法均失败 — 清理本次调用遗留的全部未持久化工件
   log_fix "$fix_log" "所有修复方法均失败"
+  _artifacts_cleanup "$fix_log"
   TRY_FIX_MESSAGE="所有修复方法均失败"
   rm -rf "$temp_dir" 2>/dev/null || true
   return 1
