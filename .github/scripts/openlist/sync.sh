@@ -883,13 +883,13 @@ sync_with_logging() {
 
         echo "▶ 修复 $(_short_path "$failed_line") (${file_size})" | tee -a "$LOG_FILENAME"
 
-        # 名长诊断: cryptencode 本地计算该文件密文名长（纯本地，不上传）
+        # 名长诊断: 本地探针实测该文件密文名长（rclone 无 cryptencode 命令，
+        # 旧代码调用不存在的命令一直静默失败——诊断从未真正生效过）
         if [ -n "${_CRYPT_ONTHEFLY:-}" ]; then
-          local _nl_fn _nl_enc _nl_enc_len _nl_orig_len _nl_flag=""
+          local _nl_fn _nl_enc_len _nl_orig_len _nl_flag=""
           _nl_fn="$(basename -- "$failed_line")"
-          _nl_enc=$(rclone cryptencode -- "$_CRYPT_ONTHEFLY" "$_nl_fn" 2>/dev/null || true)
-          if [ -n "$_nl_enc" ]; then
-            _nl_enc_len=$(printf '%s' "$_nl_enc" | wc -c | tr -d ' ')
+          _nl_enc_len=$(_crypt_name_len_probe "$_nl_fn" 2>/dev/null || true)
+          if [ -n "$_nl_enc_len" ]; then
             _nl_orig_len=$(printf '%s' "$_nl_fn" | wc -c | tr -d ' ')
             if [ "$_nl_enc_len" -gt 255 ] 2>/dev/null; then
               _nl_flag=" 🔴 >255B"
