@@ -33,7 +33,7 @@ jobs:
           PROXY_SPEEDTEST_LATENCY_TARGETS: 'https://www.gstatic.com/generate_204,https://www.baidu.com'
           PROXY_SPEEDTEST_LATENCY_SAMPLES: '4'
           PROXY_SPEEDTEST_LATENCY_TIMEOUT: '8'
-          PROXY_SPEEDTEST_DOWNLOAD_URLS: 'https://mirrors.cloud.tencent.com/archlinux/iso/latest/sha256sums.txt,https://download.geonode.com/test/10mb.bin'
+          PROXY_SPEEDTEST_DOWNLOAD_URLS: 'https://speed.cloudflare.com/__down?bytes=104857600,https://mirrors.cloud.tencent.com/centos/8.5.2111/isos/x86_64/CentOS-8.5.2111-x86_64-boot.iso'
           PROXY_SPEEDTEST_SIZE_MIB: '10'
           PROXY_SPEEDTEST_DOWNLOAD_TIMEOUT: '30'
           PROXY_SPEEDTEST_CONNECTIONS: '1'
@@ -45,9 +45,24 @@ jobs:
           PROXY_SPEEDTEST_GITEE_OWNER: ${{ secrets.PROXY_SPEEDTEST_GITEE_OWNER }}
           PROXY_SPEEDTEST_GITEE_REPO: proxy-speedtest-temp
           PROXY_SPEEDTEST_PUSH_TIMEOUT: '30'
+          # 报告写入仓库内的 proxy-speedtest-reports/ 目录（默认回退即此路径，显式指定以防歧义）
+          PROXY_SPEEDTEST_OUTPUT_DIR: ${{ github.workspace }}/proxy-speedtest-reports
         run: python .github/scripts/proxy-speedtest/speedtest.py
 
-      - name: Upload speedtest report
+      - name: Commit report to repository
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add proxy-speedtest-reports/
+          if git diff --cached --quiet; then
+            echo "no report changes"
+          else
+            git commit -m "chore(proxy-speedtest): 更新可视化测速报告 [skip ci]"
+            git push
+          fi
+
+      - name: Upload speedtest report (artifact backup)
         if: always()
         uses: actions/upload-artifact@v4
         with:
