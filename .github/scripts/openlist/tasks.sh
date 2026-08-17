@@ -41,10 +41,60 @@ _preview_register() {
   fi
   add_preview_pair "$source_path" "$dest_path" "${extra_args[@]}"
 
-  # 同时注册到进度系统（pending 状态）
-  local _task_id
+  # 同时注册到进度系统（pending 状态），并附带源端大小作为 detail
+  local _task_id _src_size_bytes _src_json
   _task_id=$(_derive_task_id "$task_name" "$dest_path")
-  progress_register_task "$_task_id" "${source_path} → ${dest_path}"
+  # 预览阶段计算源端大小（带缓存由调用方保证不过度调用），失败则 detail 留空
+  _src_json=$(rclone size "$source_path" --json 2>/dev/null || true)
+  _src_size_bytes=$(echo "$_src_json" | jq -r '.bytes // 0' 2>/dev/null || echo 0)
+  progress_register_task "$_task_id" "${source_path} → ${dest_path}" "$(format_bytes "${_src_size_bytes:-0}")"
+}
+
+# 渲染子目录 phase 片段（进行中任务的元数据行 + 树状列表，带状态图标）
+# 依赖调用方局部变量: subdirs(排序后nl) subdir_size_map(assoc) subdir_state_map(assoc)
+#   exclude_dir_list(nl,被排除名) source_size_bytes
+# 用法: _ol_render_subdir_phase <mode: loop|final> [current_subdir]
+#   loop : 未处理子目录标 ⚪ 待同步；current_subdir 标 🔄 同步中
+#   final: 子目录单独同步阶段已全部过一遍，未 synced 的（正在被最终完整同步覆盖）标 🔄
+_ol_render_subdir_phase() {
+  local mode="${1:-loop}"
+  local cur_sd="${2:-}"
+  local total_subdirs excluded_count
+  total_subdirs=$(echo "$subdirs" | grep -c . 2>/dev/null || echo 0)
+  excluded_count=$(echo "$exclude_dir_list" | grep -c . 2>/dev/null || echo 0)
+  local grand_total=$((total_subdirs + excluded_count))
+  local ph="▸ 源端 $(format_bytes "$source_size_bytes") · 子目录 ${grand_total} 个（参与 ${total_subdirs}，排除 ${excluded_count}）"
+  local _idx=0 _sd
+  while IFS= read -r _sd; do
+    [ -z "$_sd" ] && continue
+    _idx=$((_idx + 1))
+    local _st="${subdir_state_map[$_sd]:-}"
+    local _icon="⚪" _desc="待同步"
+    case "$_st" in
+      synced)   _icon="✅"; _desc="已同步" ;;
+      skipped)  _icon="⏭️"; _desc="已跳过" ;;
+      failed)   _icon="❌"; _desc="失败" ;;
+      "")
+        if [ "$mode" = "final" ]; then _icon="🔄"; _desc="同步中"; else _icon="⚪"; _desc="待同步"; fi
+        ;;
+    esac
+    if [ "$mode" = "loop" ] && [ "$_sd" = "$cur_sd" ]; then
+      _icon="🔄"; _desc="同步中"
+    fi
+    local _prefix="├─"
+    [ "$_idx" -eq "$grand_total" ] && _prefix="└─"
+    ph+=$'\n'"${_prefix} ${_icon} $(escape_html "$_sd")：$(format_bytes "${subdir_size_map[$_sd]:-0}")（${_desc}）"
+  done <<< "$subdirs"
+  # 被 --exclude 排除的子目录（纳入同一棵树，统一序号）
+  local _ex
+  while IFS= read -r _ex; do
+    [ -z "$_ex" ] && continue
+    _idx=$((_idx + 1))
+    local _prefix="├─"
+    [ "$_idx" -eq "$grand_total" ] && _prefix="└─"
+    ph+=$'\n'"${_prefix} 🚫 $(escape_html "$_ex")：已排除"
+  done <<< "$exclude_dir_list"
+  echo "$ph"
 }
 
 # 自动拆分同步实现：源端 > 50GB 时按一级子目录拆分，最后再完整同步一次
@@ -239,6 +289,8 @@ _sync_task_impl() {
   progress_update "正在按子目录大小排序..."
   local sorted_subdirs=""
   declare -A subdir_size_map=()
+  # 记录每个子目录的同步状态（synced/skipped/failed），供 phase 渲染带状态图标
+  declare -A subdir_state_map=()
   while IFS= read -r subdir; do
     [ -z "$subdir" ] && continue
     local subdir_bytes=0
@@ -256,12 +308,9 @@ _sync_task_impl() {
   total_subdirs_count=$(echo "$subdirs" | grep -c . 2>/dev/null || echo 0)
 
   # 构建子目录大小信息（HTML 片段，供进度通知展示）
+  # 改用树状 + 状态图标的渲染函数（loop 模式：未处理标 ⚪ 待同步）
   local subdir_phase_info=""
-  subdir_phase_info="📂 <b>子目录大小</b>（共 ${total_subdirs_count} 个，源端 $(format_bytes "$source_size_bytes")）"
-  while IFS= read -r _info_subdir; do
-    [ -z "$_info_subdir" ] && continue
-    subdir_phase_info+=$'\n'"• $(escape_html "$_info_subdir"): $(format_bytes "${subdir_size_map[$_info_subdir]:-0}")"
-  done <<< "$subdirs"
+  subdir_phase_info=$(_ol_render_subdir_phase loop)
 
   # 按子目录逐个同步（静默模式：无文件变更时跳过通知）
   SYNC_SKIP_QUIET=1
@@ -280,6 +329,8 @@ _sync_task_impl() {
     subtask_idx=$((subtask_idx + 1))
     local safe_subtask="${task_name}_${subdir//\//_}"
     echo "=== 子目录同步: ${safe_subtask} ==="
+    # 进入当前子目录前，重建 phase（当前子目录标 🔄 同步中，已处理标对应状态）
+    subdir_phase_info=$(_ol_render_subdir_phase loop "$subdir")
     PROGRESS_PHASE_INFO="$subdir_phase_info"
     local _completed_before=$((synced_subtasks + skipped_subtasks + failed_subtasks))
     local _in_progress=$((subtask_idx - _completed_before))
@@ -293,16 +344,21 @@ _sync_task_impl() {
     SYNC_AUTO_SPLIT_DEPTH=$current_depth
     if [ "$SYNC_SKIPPED" = "1" ]; then
       skipped_subtasks=$((skipped_subtasks + 1))
+      subdir_state_map["$subdir"]="skipped"
       skipped_list+="• ${subdir} ($(format_bytes "${subdir_size_map[$subdir]:-0}"))"$'\n'
     elif [ "$SYNC_FAILED" = "0" ]; then
       synced_subtasks=$((synced_subtasks + 1))
+      subdir_state_map["$subdir"]="synced"
       total_transferred=$((total_transferred + SYNC_TRANSFERRED_BYTES))
       synced_list+="• ${subdir} ($(format_bytes "${subdir_size_map[$subdir]:-0}"))"$'\n'
     else
       failed_subtasks=$((failed_subtasks + 1))
+      subdir_state_map["$subdir"]="failed"
       total_transferred=$((total_transferred + SYNC_TRANSFERRED_BYTES))
       failed_list+="• ${subdir} ($(format_bytes "${subdir_size_map[$subdir]:-0}"))"$'\n'
     fi
+    # 处理后重建 phase（反映最新状态），当前子目录不再标 🔄（已处理完）
+    subdir_phase_info=$(_ol_render_subdir_phase loop)
     PROGRESS_PHASE_INFO="$subdir_phase_info"
     local _completed_after=$((synced_subtasks + skipped_subtasks + failed_subtasks))
     progress_update_force "子目录 ${subtask_idx}/${total_subdirs_count} 完成: ${subdir}" "📊 子目录: ${_completed_after}/${total_subdirs_count} 完成 | ✅${synced_subtasks} ⏭️${skipped_subtasks} ❌${failed_subtasks}"
@@ -327,6 +383,9 @@ _sync_task_impl() {
   # 最终完整同步（仅在顶层执行，正常通知）
   if [ "$current_depth" -eq 0 ]; then
     echo "=== 最终完整同步: ${task_name} ==="
+    # 最终完整同步阶段：所有子目录单独同步阶段已过一遍，未 synced 的（正在被
+    # 最终完整同步覆盖）标 🔄 同步中，已完成标 ✅，已跳过/失败各自保留
+    subdir_phase_info=$(_ol_render_subdir_phase final)
     PROGRESS_PHASE_INFO="$subdir_phase_info"
     progress_update_force "最终完整同步中" "📊 子目录: ${total_subtasks}/${total_subtasks} 完成 | ✅${synced_subtasks} ⏭️${skipped_subtasks} ❌${failed_subtasks}"
     sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
