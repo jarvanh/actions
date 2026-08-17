@@ -47,8 +47,12 @@ jobs:
           PROXY_SPEEDTEST_CONNECTIONS: '1'
           PROXY_SPEEDTEST_SWITCH_SETTLE_SECONDS: '1.5'
           PROXY_SPEEDTEST_MAX_NODES: '0'
-          # 可选：开启 Gitee 上行测速（需配置 GITEE 相关 secret）
-          PROXY_SPEEDTEST_ENABLE_PUSH: '0'
+          # 上行测速：默认开启，且经 mihomo 代理上传到 Gitee（反映代理节点上行带宽）。
+          # 需先在仓库 Secrets 配置 GITEE_PRIVATE_TOKEN 与 PROXY_SPEEDTEST_GITEE_OWNER，
+          # 并准备可写的私有仓库（默认 proxy-speedtest-temp）。设 ENABLE_PUSH=0 可关闭。
+          PROXY_SPEEDTEST_ENABLE_PUSH: '1'
+          # 上行是否经代理：1=经代理（代理节点上行质量）；0=直连 Gitee（家庭宽带上行）
+          PROXY_SPEEDTEST_UPLOAD_VIA_PROXY: '1'
           GITEE_PRIVATE_TOKEN: ${{ secrets.GITEE_PRIVATE_TOKEN }}
           PROXY_SPEEDTEST_GITEE_OWNER: ${{ secrets.PROXY_SPEEDTEST_GITEE_OWNER }}
           PROXY_SPEEDTEST_GITEE_REPO: proxy-speedtest-temp
