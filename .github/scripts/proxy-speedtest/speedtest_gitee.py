@@ -1509,6 +1509,7 @@ def format_duration(seconds: float):
 
 
 # 敏感字段名（小写匹配），值会被自动脱敏
+# 注意：仅对「子串匹配会产生误伤」的字段放这里做模糊匹配
 _SENSITIVE_KEYS = frozenset({
     'server', 'share_link', 'source_url', 'url', 'password', 'uuid',
     'cipher', 'subscription', 'subscription_url', 'proxy_url',
@@ -1516,14 +1517,31 @@ _SENSITIVE_KEYS = frozenset({
     'paths', 'path',
 })
 
+# 精确匹配的敏感 key（节点身份 / 订阅来源 / 代理原始配置 / 仓库属主等，
+# 用精确匹配避免误伤 provider_count、hostname 等无害字段）
+_SENSITIVE_EXACT_KEYS = frozenset({
+    'name', 'provider', 'type', 'node_type', 'owner',
+    'proxy_obj', 'source_entry', 'source_id', 'share_link_match',
+    'id', 'raw_url', 'html_url',
+})
+
+# 带 userinfo 凭据的 URL（如 https://owner:TOKEN@gitee.com/...），
+# 常出现在 git 报错回显中，统一替换为 https://***@
+_CRED_URL_RE = re.compile(r'https?://[^/@\s:]+:[^/@\s]+@')
+
 _REDACTED = '***'
 
 
+def _scrub_cred_urls(text: str) -> str:
+    """清除字符串中带凭据的 URL（git 报错会回显 remote_with_token）。"""
+    return _CRED_URL_RE.sub('https://***@', text)
+
+
 def _redact_value(key: str, value):
-    """对敏感字段的值进行脱敏，递归处理嵌套 dict/list。"""
+    """对敏感字段的值进行脱敏，递归处理嵌套 dict/list；普通字符串清除凭据 URL。"""
     kl = key.lower()
     # 精确匹配敏感 key
-    if kl in _SENSITIVE_KEYS:
+    if kl in _SENSITIVE_KEYS or kl in _SENSITIVE_EXACT_KEYS:
         return _REDACTED
     # 模糊匹配
     for sk in _SENSITIVE_KEYS:
@@ -1532,7 +1550,9 @@ def _redact_value(key: str, value):
     if isinstance(value, dict):
         return {k: _redact_value(k, v) for k, v in value.items()}
     if isinstance(value, list):
-        return [_redact_value(key, v) if isinstance(v, (dict, list)) else v for v in value]
+        return [_redact_value(key, v) for v in value]
+    if isinstance(value, str):
+        return _scrub_cred_urls(value)
     return value
 
 
@@ -1705,9 +1725,10 @@ def finalize_gist_and_notify(env, summary, summary_lines, subscription_text):
     except Exception as e:
         tg_res = {'ok': False, 'reason': str(e)}
     log_progress('telegram_send_finished', sent=bool(tg_res.get('sent')), reason=tg_res.get('reason', ''))
-    print(json.dumps({
-        'gist': gist_res,
-        'telegram': tg_res,
+    # 日志收尾输出走统一脱敏：gist 链接/ID 属于凭据级敏感信息，不进 Actions 日志
+    print(json.dumps(_redact_value('final', {
+        'gist': {k: gist_res.get(k) for k in ('ok', 'created', 'reason')},
+        'telegram': {k: tg_res.get(k) for k in ('sent', 'reason')},
         'probe_total_count': summary.get('probe_total_count', 0),
         'probe_alive_count': summary.get('probe_alive_count', 0),
         'speedtest_attempted_count': summary.get('speedtest_attempted_count', 0),
@@ -1717,7 +1738,7 @@ def finalize_gist_and_notify(env, summary, summary_lines, subscription_text):
         'result_json': str(RESULT_JSON),
         'result_txt': str(RESULT_TXT),
         'result_subscription': str(RESULT_SUBSCRIPTION),
-    }, ensure_ascii=False))
+    }), ensure_ascii=False))
 
 
 def main():
@@ -1839,7 +1860,8 @@ def main():
                 runtime_abort_reason = err_text
         speed_results.append(result)
         log_progress('node_done', index=index, total=len(alive_items), name=item['name'], ok=bool(result.get('ok')), error=result.get('error', ''), upload_mibs=result.get('upload_mibs'), download_mibs=result.get('download_mibs'))
-        print(json.dumps(result, ensure_ascii=False), flush=True)
+        # 日志只输出脱敏摘要：节点名/分享链接/原始代理配置/订阅来源一律打码，防止 Actions 日志泄漏
+        print(json.dumps(_redact_value('result', result), ensure_ascii=False), flush=True)
         if aborted_due_to_runtime:
             log_progress('runtime_abort', index=index, total=len(alive_items), reason=runtime_abort_reason)
             break
@@ -1913,11 +1935,30 @@ def main():
     run_stage('Gist 更新/回拉验证/通知', finalize_gist_and_notify, env, summary, summary_lines, subscription_text)
 
 
+def scrub_secrets(text: str, env=None) -> str:
+    """从任意文本中清除已知凭据：带凭据的 URL、订阅地址、各类 Token。"""
+    scrubbed = _scrub_cred_urls(text)
+    try:
+        if env is None:
+            env = merged_env()
+        candidates = []
+        for key in ('PROXY_SPEEDTEST_SUB_URLS', 'GITEE_PRIVATE_TOKEN', 'GH_TOKEN',
+                    'TELEGRAM_BOT_TOKEN', 'PROXY_SPEEDTEST_GIST_ID'):
+            raw = str(env.get(key, '') or '').strip()
+            if raw:
+                candidates.extend(x.strip() for x in raw.split(',') if x.strip())
+        for secret in candidates:
+            scrubbed = scrubbed.replace(secret, '***')
+    except Exception:
+        pass
+    return scrubbed
+
+
 if __name__ == '__main__':
     try:
         main()
     except Exception as e:
-        err_text = str(e)
+        err_text = scrub_secrets(str(e))
         stage = e.stage if isinstance(e, StageError) else '未标记阶段'
         print(json.dumps({'ok': False, 'stage': stage, 'error': err_text}, ensure_ascii=False))
         try:

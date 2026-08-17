@@ -127,13 +127,6 @@ CONFIG = {
 RESULT_JSON = HOME_RUNTIME / 'speedtest_result.json'
 RESULT_HTML = HOME_RUNTIME / 'speedtest_report.html'
 
-# 报告同时写入仓库（便于版本化与 GitHub 直接查看）。默认落到仓库内的
-# proxy-speedtest-reports/ 目录；可通过 PROXY_SPEEDTEST_OUTPUT_DIR 覆盖为绝对路径。
-REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]  # .github/scripts/proxy-speedtest -> repo root
-OUTPUT_DIR = pathlib.Path(
-    os.environ.get('PROXY_SPEEDTEST_OUTPUT_DIR', '') or str(REPO_ROOT / 'proxy-speedtest-reports')
-).expanduser().resolve()
-
 
 # ----------------------------------------------------------------------------
 # 延迟测量：经代理对目标做 HTTP GET，记录分段耗时，取 min/median
@@ -869,21 +862,8 @@ def main():
     except Exception as e:
         log_progress('report_write_failed', error=str(e))
 
-    # 额外写入仓库（版本化 + GitHub 直接预览）。日期命名保留历史，latest 便于固定链接。
-    try:
-        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        day = started_at[:10]
-        out_json = OUTPUT_DIR / f'speedtest_{day}.json'
-        out_html = OUTPUT_DIR / f'speedtest_{day}.html'
-        out_json.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding='utf-8')
-        out_html.write_text(build_html_report(results, meta), encoding='utf-8')
-        (OUTPUT_DIR / 'speedtest_latest.json').write_text(
-            json.dumps(summary, ensure_ascii=False, indent=2), encoding='utf-8')
-        (OUTPUT_DIR / 'speedtest_latest.html').write_text(
-            build_html_report(results, meta), encoding='utf-8')
-        log_progress('repo_report_written', dir=str(OUTPUT_DIR))
-    except Exception as e:
-        log_progress('repo_report_write_failed', error=str(e))
+    # 隐私防护：报告含节点完整凭据（server/uuid/订阅地址），仅写入运行机本地临时目录，
+    # 不再写入仓库（仓库为公开仓库，历史提交曾泄漏敏感信息，已彻底清除）。
 
     # ----------------------------------------------------------------------
     # 订阅导出 + 上传 Gist：复用 speedtest_gitee 的 build_subscription_yaml_text /
@@ -908,19 +888,13 @@ def main():
             gist_res = update_gist(env, yaml_text)
             raw_url = gist_res.get('raw_url') or ''
             html_url = gist_res.get('html_url') or ''
-            # 把订阅链接醒目打印到标准输出，方便直接从日志复制使用
+            # 隐私防护：gist 链接/ID 属于凭据级敏感信息（secret gist 可凭 URL 直接访问），
+            # 不打印到 Actions 日志；链接仅写入本地报告文件与 Gist 本身。
             action = '新建' if gist_res.get('reason') == 'created' else '更新'
             print('\n================ 订阅已上传 Gist（%s）================' % action)
-            if raw_url:
-                print('订阅链接 (raw, 可直接作为客户端订阅源): %s' % raw_url)
-            if html_url:
-                print('Gist 页面 (html): %s' % html_url)
-            if gist_res.get('id'):
-                print('Gist ID: %s  （请回填到仓库 Secrets: PROXY_SPEEDTEST_GIST_ID 以便后续更新而非新建）'
-                      % gist_res.get('id'))
+            print('订阅链接已写入测速报告（subscription_gist 字段），为防隐私泄漏不在日志中输出')
             print('========================================================\n')
             log_progress('gist_uploaded', ok=gist_res.get('ok'), action=action,
-                         id=gist_res.get('id'), raw_url=raw_url, html_url=html_url,
                          reason=gist_res.get('reason', ''))
             # 把订阅链接写入报告 meta，供 HTML 报告展示
             report_data.setdefault('meta', {})['subscription_gist'] = {
