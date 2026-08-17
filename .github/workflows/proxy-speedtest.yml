@@ -30,10 +30,10 @@ jobs:
           PROXY_SPEEDTEST_DETACH: '0'
           PROXY_SPEEDTEST_SUB_URLS: ${{ secrets.PROXY_SPEEDTEST_SUB_URLS }}
           # 自定义测试参数（可按需修改）
-          PROXY_SPEEDTEST_LATENCY_TARGETS: 'https://www.gstatic.com/generate_204,https://www.baidu.com'
+          PROXY_SPEEDTEST_LATENCY_TARGETS: 'https://www.baidu.com,https://www.taobao.com'
           PROXY_SPEEDTEST_LATENCY_SAMPLES: '4'
           PROXY_SPEEDTEST_LATENCY_TIMEOUT: '8'
-          PROXY_SPEEDTEST_DOWNLOAD_URLS: 'https://speed.cloudflare.com/__down?bytes=104857600,https://mirrors.cloud.tencent.com/centos/8.5.2111/isos/x86_64/CentOS-8.5.2111-x86_64-boot.iso'
+          PROXY_SPEEDTEST_DOWNLOAD_URLS: 'https://mirrors.cloud.tencent.com/centos/8.5.2111/isos/x86_64/CentOS-8.5.2111-x86_64-boot.iso,https://mirrors.aliyun.com/centos/8.5.2111/isos/x86_64/CentOS-8.5.2111-x86_64-boot.iso'
           PROXY_SPEEDTEST_SIZE_MIB: '10'
           PROXY_SPEEDTEST_DOWNLOAD_TIMEOUT: '30'
           PROXY_SPEEDTEST_CONNECTIONS: '1'
