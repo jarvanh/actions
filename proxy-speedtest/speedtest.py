@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """独立代理节点测速脚本（延迟 + 下载速度 + 可选 Gitee 上行）。
 
-复用 scheduler.py 的 mihomo 内核启动 / 节点快照 / 节点切换能力，新增：
+复用 speedtest_gitee.py 的 mihomo 内核启动 / 节点快照 / 节点切换能力，新增：
   - latency_probe   : 经代理对目标 URL 做 TCP/HTTP 计时（延迟）
   - download_speedtest: 经 mixed-port 代理 curl 拉取测速点，换算 MiB/s
   - optional gitee push: 可选上行测速（复用 gitee 思路，独立实现）
   - build_html_report: 生成自包含、可交互 HTML 可视化报告
 
 设计原则：
-  - 不修改 scheduler.py，仅以 `from scheduler import ...` 复用已验证的纯函数/低副作用函数。
+  - 不修改 speedtest_gitee.py，仅以 `from speedtest_gitee import ...` 复用已验证的纯函数/低副作用函数。
   - 节点逐节点**串行**测试（共享同一 mihomo 内核，切换后等待 settle）。
   - 自定义参数全部通过环境变量控制（见 CONFIG 区块）。
 """
@@ -25,9 +25,9 @@ from datetime import datetime
 import yaml
 
 # ----------------------------------------------------------------------------
-# 复用 scheduler.py 的已验证能力（import 期仅会创建 ~/proxy-speedtest 目录）
+# 复用 speedtest_gitee.py 的已验证能力（import 期仅会创建 ~/proxy-speedtest 目录）
 # ----------------------------------------------------------------------------
-from scheduler import (
+from speedtest_gitee import (
     MIHOMO_MIXED_PORT,
     MIHOMO_API,
     HOME_RUNTIME,
@@ -191,7 +191,7 @@ def download_speedtest(urls, proxy_env, timeout=30.0, size_hint_mib=10, connecti
 
 
 # ----------------------------------------------------------------------------
-# 可选 Gitee 上行测速（独立实现，避免耦合 scheduler 的 git 细节）
+# 可选 Gitee 上行测速（独立实现，避免耦合 speedtest_gitee 的 git 细节）
 # ----------------------------------------------------------------------------
 def gitee_push_speedtest(env, size_mib, push_timeout, branch):
     """向 Gitee 私有仓库 push 一个固定大小文件，按耗时换算上行 MiB/s。"""
