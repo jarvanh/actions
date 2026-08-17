@@ -345,7 +345,10 @@ def gitee_push_speedtest(env, size_mib, push_timeout, branch, via_proxy=True):
     except Exception as e:
         return {'ok': False, 'mibps': None, 'error': f'prepare gitee/ test file failed: {e}'}
 
-    local_env = build_proxy_env(env)
+    # 注意：env 实为 CONFIG（含 PROXY_SPEEDTEST_DOWNLOAD_URLS 等 list 字段），
+    # 直接作为 subprocess 的 env 会因非 str 值触发异常。构造干净环境：仅保留 str
+    # 值并覆盖代理变量，确保 git 经 mihomo 代理上行。
+    local_env = {k: v for k, v in build_proxy_env(env).items() if isinstance(v, str)}
     local_env['GIT_TERMINAL_PROMPT'] = '0'
     repo_dir = HOME_RUNTIME / 'speedtest-upload-repo'
     total = test_file.stat().st_size
