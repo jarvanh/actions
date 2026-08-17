@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""独立代理节点测速脚本（延迟 + 下载速度 + 可选 Gitee 上行）。
+"""独立代理节点测速脚本（延迟 + 下载速度 + 经代理上行速度）。
 
 复用 speedtest_gitee.py 的 mihomo 内核启动 / 节点快照 / 节点切换能力，新增：
-  - latency_probe   : 经代理对目标 URL 做 TCP/HTTP 计时（延迟）
-  - download_speedtest: 经 mixed-port 代理 curl 拉取测速点，换算 MiB/s
-  - optional gitee push: 可选上行测速（复用 gitee 思路，独立实现）
-  - build_html_report: 生成自包含、可交互 HTML 可视化报告
+  - latency_probe      : 经代理对目标 URL 做 HTTP 计时（延迟）
+  - resolve_download_urls: 运行时自动发现国内测速点（滚动 ISO 软链 + npmmirror 最新版），规避写死版本号失效
+  - download_speedtest : 经 mixed-port 代理 curl Range 拉取测速点，换算 MiB/s
+  - gitee_push_speedtest: 经代理 git push 到 Gitee 测上行（复用 speedtest_gitee.git_force_push_testfile）
+  - build_html_report  : 生成自包含、可交互 HTML 可视化报告
 
 设计原则：
   - 不修改 speedtest_gitee.py，仅以 `from speedtest_gitee import ...` 复用已验证的纯函数/低副作用函数。
@@ -15,6 +16,7 @@
 import json
 import os
 import pathlib
+import re
 import statistics
 import subprocess
 import tempfile
@@ -29,20 +31,16 @@ import yaml
 # ----------------------------------------------------------------------------
 from speedtest_gitee import (
     MIHOMO_MIXED_PORT,
-    MIHOMO_API,
     HOME_RUNTIME,
     collect_provider_snapshot,
     switch_proxy,
     build_proxy_env,
     ensure_mihomo_running,
     log_progress,
-    _redact_value,
     merged_env,
-    parse_sub_urls,
     ensure_gitee_remote,
     ensure_test_file,
     git_force_push_testfile,
-    TEST_BRANCH,
     TEST_FILE_NAME,
 )
 
@@ -92,13 +90,14 @@ CONFIG = {
         float(os.environ.get('PROXY_SPEEDTEST_DOWNLOAD_TIMEOUT', '30')),
     'PROXY_SPEEDTEST_DOWNLOAD_DURATION':
         float(os.environ.get('PROXY_SPEEDTEST_DOWNLOAD_DURATION', '0')),  # 0=用 SIZE_MIB/timeout 约束
-    'PROXY_SPEEDTEST_CONNECTIONS':
-        int(os.environ.get('PROXY_SPEEDTEST_CONNECTIONS', '1')),  # curl 单节点内并行连接数（默认串行单连接）
     # 节点切换
     'PROXY_SPEEDTEST_SWITCH_SETTLE_SECONDS':
         float(os.environ.get('PROXY_SPEEDTEST_SWITCH_SETTLE_SECONDS', '1.5')),
     'PROXY_SPEEDTEST_MAX_NODES':
         int(os.environ.get('PROXY_SPEEDTEST_MAX_NODES', '0')),  # 0=不限
+    # 下载测速点：是否经 npmmirror 自动发现最新版 node 直链（与滚动 ISO 合并）
+    'PROXY_SPEEDTEST_NPMMIRROR_ENABLED':
+        (os.environ.get('PROXY_SPEEDTEST_NPMMIRROR_ENABLED', '1').strip().lower() not in ('0', 'false', 'no', 'off')),
     # 可选 Gitee 上行
     'PROXY_SPEEDTEST_ENABLE_PUSH':
         (os.environ.get('PROXY_SPEEDTEST_ENABLE_PUSH', '0').strip().lower() in ('1', 'true', 'yes', 'on')),
@@ -168,8 +167,6 @@ def latency_probe(targets, proxy_env, samples=4, timeout=8.0):
 # ----------------------------------------------------------------------------
 # 下载测速点自动发现（方案 A：国内滚动目录，避免写死版本号 ISO 失效）
 # ----------------------------------------------------------------------------
-import re
-
 _ISO_RE = re.compile(r'href="([^"]+\.iso)"', re.IGNORECASE)
 
 
@@ -250,12 +247,12 @@ def resolve_download_urls(proxy_env, catalogs, fallback_urls, enable_npmmirror=T
 # ----------------------------------------------------------------------------
 # 下载测速：curl 经 mixed-port 代理拉取测速点，按耗时换算 MiB/s
 # ----------------------------------------------------------------------------
-def download_speedtest(urls, proxy_env, timeout=30.0, size_hint_mib=10, connections=1, max_duration=0.0):
+def download_speedtest(urls, proxy_env, timeout=30.0, size_hint_mib=10, max_duration=0.0):
     """经代理 curl 拉取测速点，返回 {ok, mibps, bytes, seconds, error}。
 
     对每个测速 URL 优先用 HTTP Range 单次精确拉取 size_hint_mib 字节（避免重复连接
     开销、速度读数更准）；若目标不支持 Range（返回整文件），则按实际下载字节与耗时
-    换算速度。若指定 max_duration>0 则限制单节点总时长。
+    换算速度。若指定 max_duration>0 则限制单节点总时长（多个 URL 串行取最优）。
     """
     proxy = f'http://127.0.0.1:{MIHOMO_MIXED_PORT}'
     target_bytes = int(size_hint_mib * 1024 * 1024)
@@ -378,7 +375,10 @@ def gitee_push_speedtest(env, size_mib, push_timeout, branch, via_proxy=True):
 
 
 def _gitee_push_direct(env, token, owner, repo, size_mib, push_timeout, branch):
-    """原实现：直连 Gitee 用 git push（反映家庭宽带直连上行，已剥离代理变量）。"""
+    """直连分支（via_proxy=False）：直连 Gitee 用 git push（反映家庭宽带直连上行）。
+
+    已剥离代理变量，且同样过滤非 str 的环境值，避免 subprocess 因 list 值报错。
+    """
     remote_with_token = f'https://oauth2:{token}@gitee.com/{owner}/{repo}.git'
     work = HOME_RUNTIME / 'speedtest-upload-tmp'
     work.mkdir(parents=True, exist_ok=True)
@@ -394,7 +394,7 @@ def _gitee_push_direct(env, token, owner, repo, size_mib, push_timeout, branch):
                 remaining -= chunk
     except Exception as e:
         return {'ok': False, 'mibps': None, 'error': f'create test file failed: {e}'}
-    local_env = dict(env)
+    local_env = {k: v for k, v in env.items() if isinstance(v, str)}
     for k in ['ALL_PROXY', 'all_proxy', 'HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY', 'https_proxy']:
         local_env.pop(k, None)
     local_env['GIT_TERMINAL_PROMPT'] = '0'
@@ -439,10 +439,10 @@ def speedtest_single_node(item, proxy_env, cfg):
                                  cfg['PROXY_SPEEDTEST_LATENCY_SAMPLES'], cfg['PROXY_SPEEDTEST_LATENCY_TIMEOUT']),
         'download': download_speedtest(cfg['PROXY_SPEEDTEST_DOWNLOAD_URLS'], proxy_env,
                                        cfg['PROXY_SPEEDTEST_DOWNLOAD_TIMEOUT'], cfg['PROXY_SPEEDTEST_SIZE_MIB'],
-                                       cfg['PROXY_SPEEDTEST_CONNECTIONS'], cfg['PROXY_SPEEDTEST_DOWNLOAD_DURATION']),
+                                       cfg['PROXY_SPEEDTEST_DOWNLOAD_DURATION']),
     }
     if cfg['PROXY_SPEEDTEST_ENABLE_PUSH']:
-        via_proxy = cfg.get('PROXY_SPEEDTEST_UPLOAD_VIA_PROXY', True)
+        via_proxy = cfg['PROXY_SPEEDTEST_UPLOAD_VIA_PROXY']
         result['upload'] = gitee_push_speedtest(cfg, cfg['PROXY_SPEEDTEST_SIZE_MIB'],
                                                 cfg['PROXY_SPEEDTEST_PUSH_TIMEOUT'],
                                                 cfg['PROXY_SPEEDTEST_GITEE_BRANCH'],
@@ -450,8 +450,9 @@ def speedtest_single_node(item, proxy_env, cfg):
     else:
         result['upload'] = {'ok': False, 'mibps': None, 'error': 'disabled'}
     result['ok'] = bool(result['latency']['ok'] or result['download']['ok'])
+    # 注：upload 字段一并输出，便于从日志直接排查上行测速结果（无需解析最终报告）
     log_progress('node_test_done', name=name, latency_ms=result['latency'].get('median_ms'),
-                 download_mibps=result['download'].get('mibps'))
+                 download_mibps=result['download'].get('mibps'), upload_mibps=result['upload'].get('mibps'))
     return result
 
 
@@ -753,9 +754,9 @@ def main():
         download_urls = CONFIG['PROXY_SPEEDTEST_DOWNLOAD_URLS']
         download_source = 'explicit env'
     else:
-        enable_npm = os.environ.get('PROXY_SPEEDTEST_NPMMIRROR_ENABLED', '1').strip().lower() not in ('0', 'false', 'no', 'off')
         download_urls, download_source = resolve_download_urls(
-            proxy_env, DEFAULT_DOWNLOAD_CATALOGS, DEFAULT_DOWNLOAD_URLS, enable_npmmirror=enable_npm)
+            proxy_env, DEFAULT_DOWNLOAD_CATALOGS, DEFAULT_DOWNLOAD_URLS,
+            enable_npmmirror=CONFIG['PROXY_SPEEDTEST_NPMMIRROR_ENABLED'])
     log_progress('download_targets_resolved', count=len(download_urls), source=download_source,
                  urls=download_urls[:4])
     CONFIG['PROXY_SPEEDTEST_DOWNLOAD_URLS'] = download_urls
