@@ -48,9 +48,20 @@ DEFAULT_LATENCY_TARGETS = [
     'https://www.baidu.com',
     'https://www.taobao.com',
 ]
+# 方案 A：不写死带版本号的具体 ISO（容易随镜像清理而失效），改为：
+#  1) 默认从下列「滚动 ISO 索引目录」自动发现当前存在的 *-latest-*.iso 软链；
+#  2) 仅当用户显式设置 PROXY_SPEEDTEST_DOWNLOAD_URLS 时才使用指定 URL（向后兼容）。
+# 这些目录长期稳定，内部 ISO 版本会轮换，但 *-latest-* 软链始终指向最新可用文件，
+# 脚本每次运行自动取该软链，彻底规避版本号失效问题。
+DEFAULT_DOWNLOAD_CATALOGS = [
+    'https://mirrors.cloud.tencent.com/centos/8-stream/isos/x86_64/',
+    'https://mirrors.cloud.tencent.com/centos/9-stream/isos/x86_64/',
+    'https://mirrors.tuna.tsinghua.edu.cn/centos/8-stream/isos/x86_64/',
+]
+# 兜底写死 URL（仅在自动发现全部失败时使用），同样选用滚动 latest 软链。
 DEFAULT_DOWNLOAD_URLS = [
-    'https://mirrors.cloud.tencent.com/centos/8.5.2111/isos/x86_64/CentOS-8.5.2111-x86_64-boot.iso',
-    'https://mirrors.aliyun.com/centos/8.5.2111/isos/x86_64/CentOS-8.5.2111-x86_64-boot.iso',
+    'https://mirrors.cloud.tencent.com/centos/8-stream/isos/x86_64/CentOS-Stream-8-x86_64-latest-boot.iso',
+    'https://mirrors.cloud.tencent.com/centos/9-stream/isos/x86_64/CentOS-Stream-9-x86_64-latest-boot.iso',
 ]
 DEFAULT_GITEE_BRANCH = 'master'
 
@@ -139,6 +150,60 @@ def latency_probe(targets, proxy_env, samples=4, timeout=8.0):
         'samples': len(measurements),
         'error': None,
     }
+
+
+# ----------------------------------------------------------------------------
+# 下载测速点自动发现（方案 A：国内滚动目录，避免写死版本号 ISO 失效）
+# ----------------------------------------------------------------------------
+import re
+
+_ISO_RE = re.compile(r'href="([^"]+\.iso)"', re.IGNORECASE)
+
+
+def resolve_download_urls(proxy_env, catalogs, fallback_urls):
+    """从镜像站目录索引页自动发现当前可用的最大 ISO 作为测速点。
+
+    - 用户若显式设置 PROXY_SPEEDTEST_DOWNLOAD_URLS，则直接返回该列表（main 已处理）。
+    - 否则逐个抓取 catalogs 的索引页，正则提取 .iso 链接，按文件名推测的版本新鲜度
+      取每个目录最新的一个（优先含 'latest'/'stream' 或版本号最大的），拼接为测速点。
+    - 全部发现失败则回退 fallback_urls。
+    返回 (urls, source_description)。
+    """
+    proxy = proxy_env.get('HTTP_PROXY') or proxy_env.get('HTTPS_PROXY')
+    handlers = [urllib.request.ProxyHandler({'http': proxy, 'https': proxy})] if proxy else []
+    opener = urllib.request.build_opener(*handlers)
+    found = []
+    for base in catalogs:
+        base = base.strip()
+        if not base:
+            continue
+        # 目录索引页通常就是 base 本身（镜像站返回 HTML 列表）
+        index_url = base if base.endswith('/') else base + '/'
+        try:
+            req = urllib.request.Request(
+                index_url,
+                headers={'User-Agent': 'Mozilla/5.0', 'Accept': 'text/html,*/*'},
+            )
+            with opener.open(req, timeout=15) as r:
+                html = r.read().decode('utf-8', 'ignore')
+        except Exception:
+            continue
+        links = ['/'.join([base.rstrip('/'), m.group(1)]) for m in _ISO_RE.finditer(html)]
+        if not links:
+            continue
+        # 优先选含 latest/stream 的（滚动软链），否则按文件名中数字版本号排序取最大
+        latest = [l for l in links if 'latest' in l.lower() or 'stream' in l.lower()]
+        if latest:
+            chosen = sorted(latest)[-1]
+        else:
+            def ver_key(u):
+                nums = re.findall(r'(\d+)', u)
+                return [int(n) for n in nums] + [0] * 4
+            chosen = sorted(links, key=ver_key)[-1]
+        found.append(chosen)
+    if found:
+        return found, 'auto-discovered from rolling catalogs'
+    return list(fallback_urls), 'fallback (auto-discovery failed)'
 
 
 # ----------------------------------------------------------------------------
@@ -580,6 +645,18 @@ def main():
         return 1
 
     proxy_env = build_proxy_env(env)
+
+    # 方案 A：下载测速点解析。仅当用户未显式设置 PROXY_SPEEDTEST_DOWNLOAD_URLS 时，
+    # 才从国内滚动目录自动发现当前可用的最大 ISO，避免写死版本号文件失效。
+    if os.environ.get('PROXY_SPEEDTEST_DOWNLOAD_URLS', '').strip():
+        download_urls = CONFIG['PROXY_SPEEDTEST_DOWNLOAD_URLS']
+        download_source = 'explicit env'
+    else:
+        download_urls, download_source = resolve_download_urls(
+            proxy_env, DEFAULT_DOWNLOAD_CATALOGS, DEFAULT_DOWNLOAD_URLS)
+    log_progress('download_targets_resolved', count=len(download_urls), source=download_source,
+                 urls=download_urls[:4])
+    CONFIG['PROXY_SPEEDTEST_DOWNLOAD_URLS'] = download_urls
 
     try:
         _, alive_items = collect_provider_snapshot()

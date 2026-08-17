@@ -33,7 +33,11 @@ jobs:
           PROXY_SPEEDTEST_LATENCY_TARGETS: 'https://www.baidu.com,https://www.taobao.com'
           PROXY_SPEEDTEST_LATENCY_SAMPLES: '4'
           PROXY_SPEEDTEST_LATENCY_TIMEOUT: '8'
-          PROXY_SPEEDTEST_DOWNLOAD_URLS: 'https://mirrors.cloud.tencent.com/centos/8.5.2111/isos/x86_64/CentOS-8.5.2111-x86_64-boot.iso,https://mirrors.aliyun.com/centos/8.5.2111/isos/x86_64/CentOS-8.5.2111-x86_64-boot.iso'
+          # 下载测速点不写死版本号：留空时脚本从国内滚动 ISO 索引目录
+          # （腾讯云 8/9-stream、清华 TUNA 等）自动发现 *-latest-*.iso 软链；
+          # 该软链始终指向最新可用文件，规避版本号失效。如需固定测速点，
+          # 可在此显式设置该变量为逗号分隔的 URL 列表。
+          # PROXY_SPEEDTEST_DOWNLOAD_URLS: ''
           PROXY_SPEEDTEST_SIZE_MIB: '10'
           PROXY_SPEEDTEST_DOWNLOAD_TIMEOUT: '30'
           PROXY_SPEEDTEST_CONNECTIONS: '1'
