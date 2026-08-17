@@ -63,6 +63,11 @@ DEFAULT_DOWNLOAD_URLS = [
     'https://mirrors.cloud.tencent.com/centos/8-stream/isos/x86_64/CentOS-Stream-8-x86_64-latest-boot.iso',
     'https://mirrors.cloud.tencent.com/centos/9-stream/isos/x86_64/CentOS-Stream-9-x86_64-latest-boot.iso',
 ]
+# 国内厂商 CDN 固定软件测速点：npmmirror（淘宝 npm 镜像）不提供 latest 软链，但可通过
+# registry 的 dist-tags 实时拿到最新版本号，拼出「最新版」固定直链（几乎不删旧版本，长期可用）。
+# 这样既不写死版本号、又保证是软件最新版，作为镜像站 ISO 之外的日常软件下载带宽代表。
+NPMMIRROR_LATEST_API = 'https://registry.npmmirror.com/node'
+NPMMIRROR_NODE_ZIP_TPL = 'https://registry.npmmirror.com/-/binary/node/{version}/node-{version}-win-x64.zip'
 DEFAULT_GITEE_BRANCH = 'master'
 
 CONFIG = {
@@ -160,24 +165,44 @@ import re
 _ISO_RE = re.compile(r'href="([^"]+\.iso)"', re.IGNORECASE)
 
 
-def resolve_download_urls(proxy_env, catalogs, fallback_urls):
-    """从镜像站目录索引页自动发现当前可用的最大 ISO 作为测速点。
+def _resolve_npmmirror_node_zip(opener):
+    """经代理查询 npmmirror 最新 node 版本，拼出最新版 win-x64 zip 直链。
 
-    - 用户若显式设置 PROXY_SPEEDTEST_DOWNLOAD_URLS，则直接返回该列表（main 已处理）。
-    - 否则逐个抓取 catalogs 的索引页，正则提取 .iso 链接，按文件名推测的版本新鲜度
-      取每个目录最新的一个（优先含 'latest'/'stream' 或版本号最大的），拼接为测速点。
-    - 全部发现失败则回退 fallback_urls。
+    返回 URL 字符串；失败返回 None（不影响主测速点）。
+    """
+    try:
+        req = urllib.request.Request(
+            NPMMIRROR_LATEST_API,
+            headers={'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json'},
+        )
+        with opener.open(req, timeout=15) as r:
+            data = json.loads(r.read().decode('utf-8', 'ignore'))
+        version = data.get('dist-tags', {}).get('latest')
+        if not version:
+            return None
+        return NPMMIRROR_NODE_ZIP_TPL.format(version=version)
+    except Exception:
+        return None
+
+
+def resolve_download_urls(proxy_env, catalogs, fallback_urls, enable_npmmirror=True):
+    """组合两类国内测速点，全部「不写死版本号、运行时自动取最新」：
+
+    1. 滚动 ISO：逐个抓取 catalogs 索引页，正则提取 .iso，优先选 *-latest-*/stream 软链；
+    2. 国内厂商 CDN 固定软件：npmmirror 最新版 node 安装包（通过 dist-tags 实时解析版本号）。
+    - 用户若显式设置 PROXY_SPEEDTEST_DOWNLOAD_URLS，main 会跳过本函数（向后兼容）。
+    - ISO 全部发现失败则回退 fallback_urls；npmmirror 失败仅跳过该项，不阻断。
     返回 (urls, source_description)。
     """
     proxy = proxy_env.get('HTTP_PROXY') or proxy_env.get('HTTPS_PROXY')
     handlers = [urllib.request.ProxyHandler({'http': proxy, 'https': proxy})] if proxy else []
     opener = urllib.request.build_opener(*handlers)
     found = []
+    sources = []
     for base in catalogs:
         base = base.strip()
         if not base:
             continue
-        # 目录索引页通常就是 base 本身（镜像站返回 HTML 列表）
         index_url = base if base.endswith('/') else base + '/'
         try:
             req = urllib.request.Request(
@@ -191,7 +216,6 @@ def resolve_download_urls(proxy_env, catalogs, fallback_urls):
         links = ['/'.join([base.rstrip('/'), m.group(1)]) for m in _ISO_RE.finditer(html)]
         if not links:
             continue
-        # 优先选含 latest/stream 的（滚动软链），否则按文件名中数字版本号排序取最大
         latest = [l for l in links if 'latest' in l.lower() or 'stream' in l.lower()]
         if latest:
             chosen = sorted(latest)[-1]
@@ -202,8 +226,17 @@ def resolve_download_urls(proxy_env, catalogs, fallback_urls):
             chosen = sorted(links, key=ver_key)[-1]
         found.append(chosen)
     if found:
-        return found, 'auto-discovered from rolling catalogs'
-    return list(fallback_urls), 'fallback (auto-discovery failed)'
+        sources.append('rolling ISO catalogs')
+    else:
+        found = list(fallback_urls)
+        sources.append('fallback ISO')
+
+    if enable_npmmirror:
+        npm_url = _resolve_npmmirror_node_zip(opener)
+        if npm_url:
+            found.append(npm_url)
+            sources.append('npmmirror latest node')
+    return found, ' + '.join(sources)
 
 
 # ----------------------------------------------------------------------------
@@ -647,13 +680,15 @@ def main():
     proxy_env = build_proxy_env(env)
 
     # 方案 A：下载测速点解析。仅当用户未显式设置 PROXY_SPEEDTEST_DOWNLOAD_URLS 时，
-    # 才从国内滚动目录自动发现当前可用的最大 ISO，避免写死版本号文件失效。
+    # 才从国内滚动目录自动发现 *-latest-*.iso，并合并 npmmirror 最新版 node 直链，
+    # 两者均不写死版本号、运行时自动取最新，规避失效。
     if os.environ.get('PROXY_SPEEDTEST_DOWNLOAD_URLS', '').strip():
         download_urls = CONFIG['PROXY_SPEEDTEST_DOWNLOAD_URLS']
         download_source = 'explicit env'
     else:
+        enable_npm = os.environ.get('PROXY_SPEEDTEST_NPMMIRROR_ENABLED', '1').strip().lower() not in ('0', 'false', 'no', 'off')
         download_urls, download_source = resolve_download_urls(
-            proxy_env, DEFAULT_DOWNLOAD_CATALOGS, DEFAULT_DOWNLOAD_URLS)
+            proxy_env, DEFAULT_DOWNLOAD_CATALOGS, DEFAULT_DOWNLOAD_URLS, enable_npmmirror=enable_npm)
     log_progress('download_targets_resolved', count=len(download_urls), source=download_source,
                  urls=download_urls[:4])
     CONFIG['PROXY_SPEEDTEST_DOWNLOAD_URLS'] = download_urls

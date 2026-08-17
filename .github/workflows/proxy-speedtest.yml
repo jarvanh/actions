@@ -33,11 +33,15 @@ jobs:
           PROXY_SPEEDTEST_LATENCY_TARGETS: 'https://www.baidu.com,https://www.taobao.com'
           PROXY_SPEEDTEST_LATENCY_SAMPLES: '4'
           PROXY_SPEEDTEST_LATENCY_TIMEOUT: '8'
-          # 下载测速点不写死版本号：留空时脚本从国内滚动 ISO 索引目录
-          # （腾讯云 8/9-stream、清华 TUNA 等）自动发现 *-latest-*.iso 软链；
-          # 该软链始终指向最新可用文件，规避版本号失效。如需固定测速点，
-          # 可在此显式设置该变量为逗号分隔的 URL 列表。
+          # 下载测速点不写死版本号：留空时脚本自动组合两类国内测速点——
+          #  1) 国内滚动 ISO 索引目录（腾讯云 8/9-stream、清华 TUNA 等）自动发现
+          #     *-latest-*.iso 软链，始终指向最新可用文件；
+          #  2) 国内厂商 CDN（npmmirror 淘宝镜像）最新版 node 安装包，经 dist-tags
+          #     实时解析版本号拼出「最新版」固定直链，代表日常软件下载带宽。
+          # 两者均运行时自动取最新，规避版本号失效。如需固定测速点，可显式设置
+          # 该变量为逗号分隔的 URL 列表；设 PROXY_SPEEDTEST_NPMMIRROR_ENABLED=0 可关闭第 2 类。
           # PROXY_SPEEDTEST_DOWNLOAD_URLS: ''
+          # PROXY_SPEEDTEST_NPMMIRROR_ENABLED: '1'
           PROXY_SPEEDTEST_SIZE_MIB: '10'
           PROXY_SPEEDTEST_DOWNLOAD_TIMEOUT: '30'
           PROXY_SPEEDTEST_CONNECTIONS: '1'
