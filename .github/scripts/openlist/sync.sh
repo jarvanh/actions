@@ -5,18 +5,18 @@
 #   - wopan176 后端 token 刷新（处理 OAuth access token 过期）
 #   - HTTP 423 Locked 重试（OpenList/WebDAV 临时文件锁）
 #   - 8005 登录失败重试（wopan176 token 过期后刷新并重试）
-#   - truth-check（wopan176Crypt 目标：本轮有传输则重启 OpenList 容器取
+#   - truth-check（openlist: 目标通用：本轮有传输则重启 OpenList 容器取
 #     后端真值列表，暴露"上传成功但未持久化"的假成功文件给 diff）
 #   - 缺失文件修复（同步后 diff 源端/目标端，缺失文件送 try_fix_failed_file，
 #     不依赖任何错误码——假成功文件没有 ERROR 日志、退出码为 0，只能靠 diff 发现）
 #   - 假成功两层防护:
-#     A. 即时检测（_confirm_raw_persist）— 方法返回成功后对比 wopan176 裸路径
-#        密文计数，未增长即假成功，当场拉黑该方法并尝试下一种方式
-#     B. 失败记忆（FIX_METHOD_BLACKLIST + marker fix_blacklist）— 持久化
-#        每文件已判定假成功的方法；持久化验证（重启容器复核）发现假成功后
-#        本轮循环"换方法 → 重启复核"直到全部通过或所有方法耗尽（方法1-11
-#        都会轮到），跨轮修复同样跳过已拉黑方法；上轮已真实持久化的修复
-#        （替代路径仍存在）直接沿用，不再重复上传
+#     1. 落盘即时校验（_confirm_persist_by_count）— 修复方法返回成功后对比
+#        目标侧计数视图是否增长，未增长即假成功，当场拉黑该方法并换下一种方式
+#     2. 失败记忆（FIX_METHOD_BLACKLIST + marker fix_blacklist）— 持久化
+#        每文件已判定假成功的方法；持久化验证（_persist_verify_entries，
+#        重启容器复核）发现假成功后本轮循环"换方法 → 重启复核"直到全部
+#        通过或所有方法耗尽（方法1-11 都会轮到），跨轮修复同样跳过已拉黑
+#        方法；上轮已真实持久化的修复（替代路径仍存在）直接沿用，不再重复上传
 #   - object not found 错误处理
 #   - 结构化同步结果通知（含源/目标大小、差异文件列表、排除规则）
 #
@@ -241,27 +241,50 @@ _restart_openlist_for_truth() {
   return 0
 }
 
-# truth-check: 传输后重启 OpenList 取后端真值（仅 wopan176Crypt 目标端）
-# 背景: OpenList PUT 假成功条目只存在于内存缓存——crypt 视图与裸视图最终
-# 落到同一个 OpenList 驱动缓存，计数对比恒等、检测力为零（run 31951008332
-# 实锤: 同步后 crypt=raw=1413 判"无幽灵"，重启后真值 1394，19 个假成功
-# 当轮漏网）。历史 crypt-vs-raw 计数对比分支已因此移除。
-# 唯一可靠口径 = 本轮有传输则重启容器、从后端重拉列表，让紧随其后的
-# lsf diff 把假成功文件识别为缺失、当轮送进修复管线。
-# 用法: _wopan_truth_check <dest_path> [log_file]
-# 设置全局: RAW_CRYPT_GHOST_COUNT — 假成功文件数（供通知展示）
-# 返回: 0=列表可信（或非 wopan176Crypt 目标），1=重启失败（列表可能被污染）
-_wopan_truth_check() {
-  RAW_CRYPT_GHOST_COUNT=0
+# OpenList 目标列表真值校验（任意 openlist: 挂载目标通用）
+#
+# 功能: 同步主流程结束后、缺失文件 diff 之前校验目标端列表可信度。
+#       OpenList PUT 假成功文件（rclone 报 Copied、退出码 0，但数据从未
+#       写入后端，仅存在于 OpenList 内存缓存）在缓存列表里与真实文件
+#       无异，diff 无法识别。本函数在有传输的轮次重启 OpenList 容器、
+#       清空缓存、从后端重拉列表，让紧随其后的 diff 把假成功文件识别
+#       为缺失文件、当轮送进修复管线，而不是等容器偶然重启才暴露。
+#
+# 原理: 假成功条目只存在于驱动内存缓存，任何不重启的读取——缓存刷新、
+#       crypt/裸双视图计数对比——最终都可能读到同一份被污染的缓存
+#       （run 31951008332 实锤: 同步后 crypt=raw=1413 判"无幽灵"，重启后
+#       真值 1394，19 个假成功当轮漏网；历史 crypt-vs-raw 计数对比分支
+#       因此移除）。唯一可靠口径 = 重启容器后从后端重拉。重启代价约
+#       2 分钟，仅在"本轮有实际传输"时支付：无传输即无新写入，无新
+#       写入即无新污染，缓存列表可信直接放行（上轮遗留污染会带进 diff，
+#       但下一轮有传输即被重启暴露，一天内自愈）。
+#       重启前后目标视图计数差 = 假成功文件数（仅供通知展示；真正的
+#       暴露与修复靠重启后的 diff，不靠该差值本身）。
+#
+# 用法: _openlist_truth_check <dest_path> [log_file]
+# 设置全局: FAKE_SUCCESS_COUNT — 假成功文件数（供通知展示）
+# 返回: 0=列表可信（非 openlist 目标 / 无传输 / 已重启取到后端真值）
+#       1=重启失败（列表可能仍被污染，diff 口径不可信）
+# 示例:
+#   _openlist_truth_check "openlist:wopan176Crypt/backup" "$LOG"  # Crypt 目标（展示裸存储对照）
+#   _openlist_truth_check "openlist:wopan175/1" "$LOG"            # 普通挂载目标
+#   _openlist_truth_check "remote:bucket/path" "$LOG"             # 非 openlist 目标，直接返回 0
+_openlist_truth_check() {
+  FAKE_SUCCESS_COUNT=0
   local dest_path="$1"
   local log_file="${2:-/dev/null}"
-  [[ "$dest_path" == openlist:wopan176Crypt/* ]] || return 0
+  [[ "$dest_path" == openlist:* ]] || return 0
 
-  local raw_display
-  raw_display=$(_raw_remote_for "${dest_path%%/*}" 2>/dev/null || echo "${dest_path/Crypt/}")
-  echo "=== truth-check: ${dest_path}（对照 ${raw_display}，重启后后端真值口径）===" | tee -a "$log_file"
+  # Crypt 目标展示裸存储对照路径（dne=true 时裸存储无字面子路径，仅作展示用）
+  local header="=== truth-check: ${dest_path}（重启后后端真值口径）==="
+  if [[ "$dest_path" == openlist:*Crypt/* ]]; then
+    local raw_display
+    raw_display=$(_raw_remote_for "${dest_path%%/*}" 2>/dev/null || echo "${dest_path/Crypt/}")
+    header="=== truth-check: ${dest_path}（对照 ${raw_display}，重启后后端真值口径）==="
+  fi
+  echo "$header" | tee -a "$log_file"
 
-  # 缓存刷新: crypt 挂载（dne=true 时裸存储无字面子路径——目录名也是密文，只刷 crypt 侧）
+  # 缓存刷新: 目标挂载（dne=true 的 Crypt 目标裸存储无字面子路径——目录名也是密文，只刷 crypt 侧）
   _refresh_ol_cache_fast "${dest_path#openlist:}"
 
   # 本轮 rclone 实际传输数（Copied 行）
@@ -281,11 +304,11 @@ _wopan_truth_check() {
   fi
 
   # 有传输 → 列表可能含"PUT 假成功"条目，重启容器取后端真值
-  local pre_count=0 crypt_json
-  crypt_json=$(timeout 900 rclone size "$dest_path" --json 2>/dev/null || true)
-  pre_count=$(echo "$crypt_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
+  local pre_count=0 dest_json
+  dest_json=$(timeout 900 rclone size "$dest_path" --json 2>/dev/null || true)
+  pre_count=$(echo "$dest_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
   [[ "$pre_count" =~ ^[0-9]+$ ]] || pre_count=0
-  echo "  本轮传输 ${uploaded} 个文件，crypt 视图 ${pre_count}（缓存口径）—— 重启容器取后端真值" | tee -a "$log_file"
+  echo "  本轮传输 ${uploaded} 个文件，目标视图 ${pre_count}（缓存口径）—— 重启容器取后端真值" | tee -a "$log_file"
 
   if ! _restart_openlist_for_truth "${dest_path#openlist:}" "$log_file"; then
     echo "  ⚠️ 容器重启失败，保留当前列表继续（可能含假成功条目，diff 口径被污染）" | tee -a "$log_file"
@@ -297,10 +320,10 @@ _wopan_truth_check() {
   post_json=$(timeout 900 rclone size "$dest_path" --json 2>/dev/null || true)
   post_count=$(echo "$post_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
   [[ "$post_count" =~ ^[0-9]+$ ]] || post_count=0
-  echo "  重启后 crypt 视图: ${pre_count} → ${post_count}" | tee -a "$log_file"
+  echo "  重启后目标视图: ${pre_count} → ${post_count}" | tee -a "$log_file"
   if [ "$pre_count" -gt "$post_count" ]; then
-    RAW_CRYPT_GHOST_COUNT=$((pre_count - post_count))
-    echo "  ⚠️ 检测到 ${RAW_CRYPT_GHOST_COUNT} 个假成功文件（重启后从列表消失 → 未持久化），已暴露为缺失，将由下方 diff 送修复管线" | tee -a "$log_file"
+    FAKE_SUCCESS_COUNT=$((pre_count - post_count))
+    echo "  ⚠️ 检测到 ${FAKE_SUCCESS_COUNT} 个假成功文件（重启后从列表消失 → 未持久化），已暴露为缺失，将由下方 diff 送修复管线" | tee -a "$log_file"
   else
     echo "  ✅ 重启前后列表一致，无假成功污染" | tee -a "$log_file"
   fi
@@ -310,7 +333,7 @@ _wopan_truth_check() {
 
 # 增量持久化单个修复条目到 marker（修复循环内每成功一个立即调用）
 # 目的: step 超时/手动取消/runner 回收等中断发生时，已完成的修复不丢失，
-#       下一轮 B 前置可直接"沿用上轮修复"，避免重复下载/打包/上传
+#       下一轮"沿用上轮修复"检查可直接复用，避免重复下载/打包/上传
 # state_file 是修复循环开始时对当前 marker 的快照，每次调用在快照上合并后整体写回
 # （保留 last_success 等其他字段；同 original 的新条目覆盖旧条目）
 # 用法: _persist_fix_entry_now <marker_path> <state_file> <source_path> <dest_path> \
@@ -480,7 +503,8 @@ _persist_verify_entries() {
   done < "$list_file"
 }
 
-# 重建 A 层即时检测的 raw 基准（修复循环初始化与假成功重试每轮共用）
+# 重建落盘即时校验（_confirm_persist_by_count）的 raw 计数基准
+# （修复循环初始化与假成功重试每轮共用）
 # 容器重启后 wopan176 驱动重新初始化期间，列目录可能短暂返回空列表
 # （rclone size 计数 = 0 但 rc = 0，"成功的空"）。若把 0 当真基准，之后
 # 每个真实落盘的方法都会被判"计数未增长 → 假成功"，引发换方法级联误判、
@@ -502,17 +526,17 @@ _rebuild_raw_baseline() {
   done
   if [ "$base" -gt 0 ]; then
     _RAW_VERIFY_LAST=$base
-    echo "raw 假成功即时检测已启用（基准 ${base}，dne=${_CRYPT_DNE:-?}，预算 ${_RAW_VERIFY_BUDGET}）" | tee -a "$log_file"
+    echo "落盘即时校验已启用（计数基准 ${base}，dne=${_CRYPT_DNE:-?}，预算 ${_RAW_VERIFY_BUDGET}）" | tee -a "$log_file"
     return 0
   fi
   _RAW_VERIFY_BUDGET=0
-  echo "⚠️ raw 计数持续为 0（容器重启后列表未就绪），本轮禁用即时检测（信任 rc，重启复核兜底）——避免把真实落盘误判为假成功" | tee -a "$log_file"
+  echo "⚠️ raw 计数持续为 0（容器重启后列表未就绪），本轮禁用落盘即时校验（信任 rc，重启复核兜底）——避免把真实落盘误判为假成功" | tee -a "$log_file"
   return 1
 }
 
 # 带探测、重试和详细日志的同步函数
 # 用法: sync_with_logging <source_path> <dest_path> <task_name> [rclone_extra_args...]
-# 设置全局变量: SYNC_FAILED, SYNC_SKIPPED, SYNC_TRANSFERRED_BYTES, RAW_CRYPT_GHOST_COUNT
+# 设置全局变量: SYNC_FAILED, SYNC_SKIPPED, SYNC_TRANSFERRED_BYTES, FAKE_SUCCESS_COUNT
 # 注意: 始终返回 0，失败状态通过 SYNC_FAILED 传递（避免 set -e 下 step 直接退出）
 sync_with_logging() {
   local source_path="$1"
@@ -538,7 +562,7 @@ sync_with_logging() {
     echo "=== ${task_name} ${attempt_label} ===" | tee -a "$LOG_FILENAME"
     # fix_test 模式: 跳过实际 rclone 传输（调试目的是快速验证修复方法，
     # 全量 copy 动辄 GB 级/十分钟，与快速迭代背道而驰）。日志置空后
-    # 8005/423/错误解析全部空匹配自动跳过，raw 校验 + lsf diff +
+    # 8005/423/错误解析全部空匹配自动跳过，truth-check + lsf diff +
     # 修复管线 + 持久化验证照常执行
     if [ "${OPENLIST_FIX_TEST_MODE:-0}" = "1" ]; then
       echo "fix_test 模式: 跳过 ${attempt_label} 实际传输（直接 diff + 修复）" | tee -a "$LOG_FILENAME"
@@ -702,10 +726,10 @@ sync_with_logging() {
     done
   fi
 
-  # ===== truth-check（仅 wopan176Crypt 目标端）=====
+  # ===== truth-check（任意 openlist: 目标端通用）=====
   # 放在缺失文件 diff 之前：本轮有传输则重启 OpenList 容器取后端真值列表，
   # diff 才能把"PUT 假成功"文件（仅存在于缓存）识别为缺失并送修复管线。
-  _wopan_truth_check "$dest_path" "$LOG_FILENAME" || true
+  _openlist_truth_check "$dest_path" "$LOG_FILENAME" || true
 
   # ===== 缺失文件修复管线 =====
   # 不依赖任何错误码：同步后只要源端有、目标端没有的文件（含 rclone 报告
@@ -804,24 +828,31 @@ sync_with_logging() {
       fi
     fi
 
-    # ===== A: 假成功即时检测初始化（仅 wopan176Crypt，方案 A）=====
-    # 每个方法返回成功后用 _confirm_raw_persist 对比 wopan176 裸路径密文数；
-    # _RAW_VERIFY_LAST 为运行基准（随真实落盘递增），budget 限制全量计数次数。
-    # 基准重建走 _rebuild_raw_baseline: 轮询直到计数 > 0，仍为 0 则禁用
-    # 即时检测（0 基准会把真实落盘全部误判为假成功，引发级联换方法重传）
+    # ===== 落盘即时校验初始化（任意 openlist: 目标通用）=====
+    # 每个修复方法返回成功后用 _confirm_persist_by_count 对比目标侧计数视图
+    # 是否增长；_RAW_VERIFY_LAST 为运行基准（随确认通过递增），budget 限制
+    # 全量计数次数。基准重建走 _rebuild_raw_baseline: 轮询直到计数 > 0，
+    # 仍为 0 则禁用即时校验（0 基准会把真实落盘全部误判为假成功，引发
+    # 级联换方法重传）
     _RAW_VERIFY_DEST=""
     _RAW_VERIFY_DIR=""
     _RAW_VERIFY_LAST=-1
     _RAW_VERIFY_BUDGET=0
-    if [[ "$dest_path" == openlist:wopan176Crypt/* ]] && [ -s "$missing_list" ]; then
+    if [[ "$dest_path" == openlist:* ]] && [ -s "$missing_list" ]; then
       _RAW_VERIFY_DEST="$dest_path"
-      # 计数视图: 配置可用时为 crypt 即时远程（dne=true 唯一正确口径），
-      # 否则退化为裸挂载根（字面子路径在 dne 下是密文名，必然列空）；
-      # 刷新路径始终为裸挂载根（dne 下无字面子路径）
-      _RAW_VERIFY_DIR=$(_raw_count_view_for "$dest_path")
-      _RAW_VERIFY_REFRESH=$(_raw_remote_for "${dest_path%%/*}" 2>/dev/null || echo "${dest_path/Crypt/}")
-      _RAW_VERIFY_REFRESH="${_RAW_VERIFY_REFRESH#openlist:}"
-      # 返回 1 = 基准不可用已禁用即时检测（已处理状态，非错误）; bash -e 下
+      if [[ "$dest_path" == openlist:*Crypt/* ]]; then
+        # Crypt 目标计数视图: 配置可用时为 crypt 即时远程（dne=true 唯一
+        # 正确口径），否则退化为裸挂载根（字面子路径在 dne 下是密文名，
+        # 必然列空）；刷新路径始终为裸挂载根（dne 下无字面子路径）
+        _RAW_VERIFY_DIR=$(_raw_count_view_for "$dest_path")
+        _RAW_VERIFY_REFRESH=$(_raw_remote_for "${dest_path%%/*}" 2>/dev/null || echo "${dest_path/Crypt/}")
+        _RAW_VERIFY_REFRESH="${_RAW_VERIFY_REFRESH#openlist:}"
+      else
+        # 普通挂载目标: 计数视图即目标路径自身，刷新路径为对应 OpenList 内部路径
+        _RAW_VERIFY_DIR="$dest_path"
+        _RAW_VERIFY_REFRESH="${dest_path#openlist:}"
+      fi
+      # 返回 1 = 基准不可用已禁用即时校验（已处理状态，非错误）; bash -e 下
       # 不守卫会直接杀掉整个 step（run 31931752797 exit 1 实测）
       _rebuild_raw_baseline "$LOG_FILENAME" || true
     fi
@@ -1058,9 +1089,9 @@ sync_with_logging() {
             retry_round=$((retry_round + 1))
             _sec "$LOG_FILENAME" "假成功重试 ${retry_round}/${retry_rounds_max} · 待重试 ${#retry_pending[@]} 个"
 
-            # A 层即时检测基线重建: 上一轮容器重启后幽灵文件已从计数中
+            # 落盘即时校验基线重建: 上一轮容器重启后假成功条目已从计数中
             # 消失，旧基线偏高会把本轮真实落盘误判为假成功；重建时轮询
-            # 直到计数 > 0（驱动就绪），仍为 0 则本轮禁用即时检测
+            # 直到计数 > 0（驱动就绪），仍为 0 则本轮禁用即时校验
             # （0 基准会把真实落盘级联误判为假成功 → 同文件重复上传多份）
             if [ -n "${_RAW_VERIFY_DEST:-}" ]; then
               _rebuild_raw_baseline "$LOG_FILENAME" || true
@@ -1428,9 +1459,9 @@ _send_sync_result_notification() {
     count_info="文件数：源端 ${source_count} / 目标 ${dest_count}"
   fi
 
-  # 假成功文件提示（仅 wopan176Crypt 目标且检测到时展示）
-  if [ "${RAW_CRYPT_GHOST_COUNT:-0}" -gt 0 ] 2>/dev/null; then
-    count_info+=$'\n'"⚠️ 假成功文件：${RAW_CRYPT_GHOST_COUNT} 个（密文未落盘，已重启 OpenList 暴露并当轮修复）"
+  # 假成功文件提示（truth-check 重启前后目标计数差，检测到时展示）
+  if [ "${FAKE_SUCCESS_COUNT:-0}" -gt 0 ] 2>/dev/null; then
+    count_info+=$'\n'"⚠️ 假成功文件：${FAKE_SUCCESS_COUNT} 个（数据未落盘，已重启 OpenList 暴露并当轮修复）"
   fi
 
   # 提取 --exclude 规则，方便在通知中说明

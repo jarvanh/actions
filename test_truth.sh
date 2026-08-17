@@ -4,7 +4,7 @@
 # 缓存，对比恒等、检测力为零（run 31951008332 实锤），本测试同步改为验证:
 #   1. 有传输 → 重启容器 → 假成功数 = 重启前后计数差 → 放行给 diff
 #   2. 无传输 → 不重启、不计数，直接放行
-#   3. 非 wopan176Crypt 目标 → 直接跳过
+#   3. 非 openlist: 目标 → 直接跳过（openlist: 挂载通用，不再限定 wopan176Crypt）
 set -u
 PASS=0; FAIL=0
 ok()  { PASS=$((PASS+1)); echo "PASS: $1"; }
@@ -14,7 +14,11 @@ LOGF=/tmp/test_truth_log.txt; : > "$LOGF"
 
 # --- 先 source 被测代码（sed 截取含全部被测函数的区段）---
 source /workspace/.github/scripts/openlist/utils.sh 2>/dev/null
-source <(sed -n '1,400p' /workspace/.github/scripts/openlist/sync.sh) 2>/dev/null || true
+# 注意: macOS 自带 bash 3.2 的 source <(...（进程替换）不生效，先落临时文件
+_SYNC_EXCERPT=$(mktemp /tmp/test_truth_sync.XXXXXX)
+sed -n '1,400p' /workspace/.github/scripts/openlist/sync.sh > "$_SYNC_EXCERPT"
+source "$_SYNC_EXCERPT" 2>/dev/null || true
+rm -f "$_SYNC_EXCERPT"
 
 # --- mocks（必须在 source 之后定义，否则被脚本内同名函数覆盖）---
 docker() {
@@ -62,11 +66,11 @@ echo 0 > /tmp/size_calls
 LAST_ATTEMPT_LOG=/tmp/test_last_attempt.log
 printf 'INFO : a.mp3: Copied (new)\nINFO : b.mp3: Copied (new)\n' > "$LAST_ATTEMPT_LOG"
 rm -f /tmp/docker_restarted
-RAW_CRYPT_GHOST_COUNT=0
-_wopan_truth_check "openlist:wopan176Crypt/backup" "$LOGF"
+FAKE_SUCCESS_COUNT=0
+_openlist_truth_check "openlist:wopan176Crypt/backup" "$LOGF"
 rc=$?
 [ -f /tmp/docker_restarted ] && ok "1a 有传输 → 容器被重启" || bad "1a: 容器未重启"
-[ "$RAW_CRYPT_GHOST_COUNT" = "19" ] && ok "1b 假成功数 = 1413-1394 = 19" || bad "1b: [$RAW_CRYPT_GHOST_COUNT]"
+[ "$FAKE_SUCCESS_COUNT" = "19" ] && ok "1b 假成功数 = 1413-1394 = 19" || bad "1b: [$FAKE_SUCCESS_COUNT]"
 [ "$rc" = "0" ] && ok "1c 返回 0（放行给 diff）" || bad "1c: rc=$rc"
 grep -q "已暴露为缺失" "$LOGF" && ok "1d 日志提示已暴露为缺失" || bad "1d"
 
@@ -74,15 +78,15 @@ grep -q "已暴露为缺失" "$LOGF" && ok "1d 日志提示已暴露为缺失" |
 : > "$LAST_ATTEMPT_LOG"
 rm -f /tmp/docker_restarted
 echo 10 > /tmp/size_calls
-_wopan_truth_check "openlist:wopan176Crypt/backup" "$LOGF"
+_openlist_truth_check "openlist:wopan176Crypt/backup" "$LOGF"
 rc=$?
 [ ! -f /tmp/docker_restarted ] && ok "2a 无传输 → 不重启" || bad "2a: 不该重启却重启了"
 grep -q "本轮无传输" "$LOGF" && ok "2b 走了无传输放行路径" || bad "2b: $(tail -3 "$LOGF")"
 [ "$rc" = "0" ] && ok "2c 返回 0" || bad "2c: rc=$rc"
 [ "$(cat /tmp/size_calls)" = "10" ] && ok "2d 未调用 rclone size（不计数）" || bad "2d: size 被调用 $(cat /tmp/size_calls) 次"
 
-# --- 场景3: 非 wopan176Crypt 目标 → 直接返回 ---
-_wopan_truth_check "openlist:aliyundriveCrypt/backup" "$LOGF" && ok "3 非 wopan 目标跳过" || bad "3"
+# --- 场景3: 非 openlist: 目标 → 直接返回（openlist: 挂载通用后的跳过口径）---
+_openlist_truth_check "onedrive:backup" "$LOGF" && ok "3 非 openlist: 目标跳过" || bad "3"
 
 # --- 场景4: _refresh_wopan_token — driver/update 失败 → 重启容器 ---
 #   4a 首次: 重启容器、置全局标记、返回 0
