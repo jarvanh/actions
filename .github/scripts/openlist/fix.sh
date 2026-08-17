@@ -22,14 +22,16 @@
 #      base64 编码内容 — crypt 目标内容本就是密文，33% 膨胀纯浪费
 #
 # 假成功防护（两层）:
-#   A. 即时校验（_confirm_raw_persist）: 方法返回成功后，对比 wopan176 裸路径
-#      密文计数是否增长（裸存储缓存独立，不受 crypt 幽灵文件污染）。
-#      未增长 = 假成功 → 该方法加入黑名单，立即尝试下一种方式。
-#   B. 失败记忆（FIX_METHOD_BLACKLIST + marker fix_blacklist 字段）:
+#   1. 落盘即时校验（_confirm_persist_by_count）: 修复方法返回成功后，对比
+#      目标侧（裸存储计数视图）文件计数是否增长。未增长 = 假成功 → 该方法
+#      加入黑名单，立即尝试下一种方式。属于快速筛查层；"缓存有条目但后端
+#      无数据"的深层假成功可能漏检，由第 2 层重启复核兜底。
+#   2. 失败记忆（FIX_METHOD_BLACKLIST + marker fix_blacklist 字段）:
 #      持久化每文件已判定假成功的方法（marker 存方法全名，| 分隔）。
-#      sync.sh 持久化验证发现假成功后，本轮立即换方法重试（黑名单让
-#      try_fix_failed_file 直接跳过失效方法）；跨轮修复同样跳过，避免
-#      方法1 每轮都白白"成功"一次再被发现。
+#      sync.sh 持久化验证（_persist_verify_entries，重启容器后逐文件复核）
+#      发现假成功后，本轮立即换方法重试（黑名单让 try_fix_failed_file
+#      直接跳过失效方法）；跨轮修复同样跳过，避免方法1 每轮都白白"成功"
+#      一次再被发现。
 #
 # 依赖: utils.sh (log_fix, _get_openlist_token), telegram.sh (间接)
 # 结果写入全局变量:
@@ -92,7 +94,7 @@ PY
 
 # crypt 配置获取失败诊断: 原因写入 /tmp/openlist_crypt_diag.log 并打到 stderr
 # （不含任何密钥值，只含状态码/字段名/挂载名表）; 同一挂载每进程只记一次。
-# _wopan_truth_check 及修复管线诊断配置问题时会参考该文件
+# _openlist_truth_check 及修复管线诊断配置问题时会参考该文件
 _crypt_diag() {
   local mount="$1" msg="$2"
   [ -n "${_CRYPT_DIAG_MOUNT:-}" ] && [ "$_CRYPT_DIAG_MOUNT" = "$mount" ] && return 0
@@ -306,7 +308,7 @@ _raw_remote_for() {
   echo "openlist:${base}${sub}"
 }
 
-# raw 计数视图（供 A 层即时检测 / raw 基准重建的文件数对比）
+# raw 计数视图（供落盘即时校验 _confirm_persist_by_count / raw 基准重建的文件数对比）
 # dne=true（目录名加密）时裸路径没有字面子目录（run 31918439043 实测
 # openlist:wopan176/backup rc=3 not found——"backup" 在裸存储是密文名），
 # 字面路径计数必然失败。改用 crypt 即时远程：rclone 按配置逐段加密路径
@@ -490,20 +492,40 @@ _raw_dir_count() {
   echo "$count"
 }
 
-# 假成功即时校验（方案 A，仅 wopan176Crypt 目标启用）
-# 在方法返回成功（rc=0 / HTTP 2xx）后调用：刷新并统计 wopan176 裸路径密文数，
-# 与运行基准（_RAW_VERIFY_LAST，由 sync.sh 修复管线初始化并随真实落盘递增）比较。
+# 落盘即时校验（裸存储计数增量口径，openlist: 目标通用）
+# 由 sync.sh 修复管线初始化 _RAW_VERIFY_* 全局后启用（未初始化 = 未启用，
+# 每次 return 0 纯直通）；Crypt 目标计数视图为裸存储解密口径（见
+# _raw_count_view_for），普通挂载目标即目标路径自身。
+#
+# 功能: 修复方法返回成功（rc=0 / HTTP 2xx）后，立即确认数据是否真实落盘:
 #   计数增长   → 真实持久化，返回 0
-#   计数未增长 → 假成功：记日志、加入黑名单，返回 1（调用方落到下一种方式）
-#   预算耗尽/计数失败 → 无法判定，信任原结果返回 0（不误伤）
+#   计数未增长 → 假成功：记日志、加入方法黑名单，返回 1（调用方落到
+#               下一种修复方式，同轮不再复用失效方法）
+#   预算耗尽 / 计数失败 → 无法判定，信任原结果返回 0（不误伤）
 #   计数异常为 0（基准却 > 0）→ 列表未就绪（容器重启后驱动初始化中），
 #     同样信任返回 0——绝不能据此判假成功，否则真实落盘的方法会被级联
-#     误判、同一文件被换方法重复上传多份（run 31928671112 实测）
-# 用法: _confirm_raw_persist <method_id> <file_rel> <log_file>
-_confirm_raw_persist() {
+#     误判、同一文件被换方法重复上传多份（run 31928671112 实测一轮内
+#     同文件连传 9 个方法，全部真实落盘又全部被误判）
+#
+# 原理: 写入真实落盘 → 计数视图文件数必然 +1；计数不增长可断定数据
+#   未进后端。基准 _RAW_VERIFY_LAST 由 _rebuild_raw_baseline 初始化、
+#   随每次确认通过递增；_RAW_VERIFY_BUDGET 限制全量计数次数（大目录
+#   rclone size 代价高，耗尽后退化为信任 rc，OPENLIST_RAW_CHECK_BUDGET
+#   可调）。本层是当轮快速筛查，对"缓存有条目、后端无数据"的深层假
+#   成功可能漏检（计数随缓存条目一起增长）——权威兜底是 sync.sh 持久化
+#   验证 _persist_verify_entries（重启容器后逐文件复核大小）。
+#
+# 用法: _confirm_persist_by_count <method_id> <file_rel> <log_file>
+# 示例:
+#   if [ "$m1_status" -eq 0 ] && _confirm_persist_by_count "$(_method_desc m1)" "$rel" "$log"; then
+#     echo "方法1 真实落盘"      # 计数增长（或计数不可用已信任放行）
+#   else
+#     echo "换下一方法"          # 假成功（方法1 已拉黑）或校验未启用
+#   fi
+_confirm_persist_by_count() {
   local method_id="$1" rel_path="$2" log_file="$3"
-  # 仅 wopan176Crypt 目标启用（由 sync.sh 修复管线初始化）
-  [[ "${_RAW_VERIFY_DEST:-}" == openlist:wopan176Crypt/* ]] || return 0
+  # 未初始化即未启用（sync.sh 修复管线仅对 openlist: 目标初始化）
+  [[ -n "${_RAW_VERIFY_DEST:-}" ]] || return 0
   # 校验预算耗尽 → 退化为信任 rc（避免大目录反复全量计数拖垮同步）
   if [ "${_RAW_VERIFY_BUDGET:-0}" -le 0 ]; then
     return 0
@@ -710,7 +732,7 @@ try_fix_failed_file() {
   rclone copyto "$src_file" "$dst_file" --retries 1 --low-level-retries 3 --timeout 5m --contimeout 30s 2>&1 | \
     _cmd_log m1 "$fix_log"
   local m1_status=${PIPESTATUS[0]}
-  if [ "$m1_status" -eq 0 ] && _confirm_raw_persist "$(_method_desc m1)" "$failed_file_rel" "$fix_log"; then
+  if [ "$m1_status" -eq 0 ] && _confirm_persist_by_count "$(_method_desc m1)" "$failed_file_rel" "$fix_log"; then
     log_fix "$fix_log" "  ✅ 方法1 成功"
     TRY_FIX_METHOD_ID="方法1: 直接 rclone copyto（原路径 + 原文件名）"
     TRY_FIX_STATUS="success"
@@ -747,7 +769,7 @@ try_fix_failed_file() {
     rclone copyto "$local_file" "$_c_dst" --retries 1 --low-level-retries 3 --timeout 15m --contimeout 30s 2>&1 | \
       _cmd_log m2 "$fix_log"
     local m2_status=${PIPESTATUS[0]}
-    if [ "$m2_status" -eq 0 ] && _confirm_raw_persist "$(_method_desc m2)" "$failed_file_rel" "$fix_log"; then
+    if [ "$m2_status" -eq 0 ] && _confirm_persist_by_count "$(_method_desc m2)" "$failed_file_rel" "$fix_log"; then
       log_fix "$fix_log" "  ✅ 方法2 成功"
       TRY_FIX_METHOD_ID="方法2: rclone crypt 直写裸存储（原名原路径，绕过 OpenList crypt 驱动）"
       TRY_FIX_STATUS="success"
@@ -782,7 +804,7 @@ try_fix_failed_file() {
   rclone copyto "$local_file" "$m3sh_dst" --retries 1 --low-level-retries 3 --timeout 5m --contimeout 30s 2>&1 | \
     _cmd_log m3 "$fix_log"
   m3sh_status=${PIPESTATUS[0]}
-  if [ "$m3sh_status" -eq 0 ] && _confirm_raw_persist "$(_method_desc m3)" "$failed_file_rel" "$fix_log"; then
+  if [ "$m3sh_status" -eq 0 ] && _confirm_persist_by_count "$(_method_desc m3)" "$failed_file_rel" "$fix_log"; then
     log_fix "$fix_log" "  ✅ 方法3 成功"
     TRY_FIX_METHOD_ID="方法3: 短哈希文件名直传（<md5前8位>.<扩展名>）"
     TRY_FIX_STATUS="success"
@@ -812,7 +834,7 @@ try_fix_failed_file() {
     rclone copyto "$temp_dir/${file_name}.zip" "$m4z_dst" --retries 1 --low-level-retries 3 --timeout 5m --contimeout 30s 2>&1 | \
       _cmd_log m4 "$fix_log"
     m4z_status=${PIPESTATUS[0]}
-    if [ "$m4z_status" -eq 0 ] && _confirm_raw_persist "$(_method_desc m4)" "$failed_file_rel" "$fix_log"; then
+    if [ "$m4z_status" -eq 0 ] && _confirm_persist_by_count "$(_method_desc m4)" "$failed_file_rel" "$fix_log"; then
       log_fix "$fix_log" "  ✅ 方法4 成功"
       TRY_FIX_METHOD_ID="方法4: zip 压缩后上传（存储模式）"
       TRY_FIX_STATUS="success"
@@ -845,7 +867,7 @@ try_fix_failed_file() {
     rclone copyto "$temp_dir/${file_name}.7z" "$m5z_dst" --retries 1 --low-level-retries 3 --timeout 5m --contimeout 30s 2>&1 | \
       _cmd_log m5 "$fix_log"
     m5z_status=${PIPESTATUS[0]}
-    if [ "$m5z_status" -eq 0 ] && _confirm_raw_persist "$(_method_desc m5)" "$failed_file_rel" "$fix_log"; then
+    if [ "$m5z_status" -eq 0 ] && _confirm_persist_by_count "$(_method_desc m5)" "$failed_file_rel" "$fix_log"; then
       log_fix "$fix_log" "  ✅ 方法5 成功"
       TRY_FIX_METHOD_ID="方法5: 7z 压缩后上传（存储模式）"
       TRY_FIX_STATUS="success"
@@ -941,7 +963,7 @@ try_fix_failed_file() {
       fi
     done
     log_fix "$fix_log" "  m6 分卷上传汇总: $m6_uploaded_count / $m6_total_parts"
-    if [ "$m6_all_uploaded" -eq 1 ] && [ "$m6_uploaded_count" -gt 0 ] && _confirm_raw_persist "$(_method_desc m6)" "$failed_file_rel" "$fix_log"; then
+    if [ "$m6_all_uploaded" -eq 1 ] && [ "$m6_uploaded_count" -gt 0 ] && _confirm_persist_by_count "$(_method_desc m6)" "$failed_file_rel" "$fix_log"; then
       log_fix "$fix_log" "  ✅ 方法6 成功（${m6_uploaded_count} 分卷）"
       TRY_FIX_METHOD_ID="方法6: zip 压缩 + 分卷上传（默认 1GB 分卷）"
       TRY_FIX_STATUS="success"
@@ -1044,7 +1066,7 @@ try_fix_failed_file() {
       fi
     done
     log_fix "$fix_log" "  m7 分卷上传汇总: $m7_uploaded_count / $m7_total_parts"
-    if [ "$m7_all_uploaded" -eq 1 ] && [ "$m7_uploaded_count" -gt 0 ] && _confirm_raw_persist "$(_method_desc m7)" "$failed_file_rel" "$fix_log"; then
+    if [ "$m7_all_uploaded" -eq 1 ] && [ "$m7_uploaded_count" -gt 0 ] && _confirm_persist_by_count "$(_method_desc m7)" "$failed_file_rel" "$fix_log"; then
       log_fix "$fix_log" "  ✅ 方法7 成功（${m7_uploaded_count} 分卷）"
       TRY_FIX_METHOD_ID="方法7: zip 压缩 + base64URL 文件名 + 分卷上传"
       TRY_FIX_STATUS="success"
@@ -1090,7 +1112,7 @@ try_fix_failed_file() {
       -F "name=$api_name" 2>&1)
     upload_http=$(echo "$upload_resp" | tail -n 1)
     log_fix "$fix_log" "OpenList API 上传响应: ${upload_http}"
-    if echo "$upload_http" | grep -qE 'HTTP_CODE:(200|201|204)' && _confirm_raw_persist "$(_method_desc m8)" "$failed_file_rel" "$fix_log"; then
+    if echo "$upload_http" | grep -qE 'HTTP_CODE:(200|201|204)' && _confirm_persist_by_count "$(_method_desc m8)" "$failed_file_rel" "$fix_log"; then
       log_fix "$fix_log" "  ✅ 方法8 成功"
       TRY_FIX_METHOD_ID="方法8: OpenList API /fs/form 直传（API 自动生成文件名）"
       TRY_FIX_STATUS="success"
@@ -1142,7 +1164,7 @@ try_fix_failed_file() {
     rclone copyto "$local_file" "$m9_dst" --retries 1 --low-level-retries 3 --timeout 5m --contimeout 30s 2>&1 | \
       _cmd_log m9 "$fix_log"
     local m9_status=${PIPESTATUS[0]}
-    if [ "$m9_status" -eq 0 ] && _confirm_raw_persist "$(_method_desc m9)" "$failed_file_rel" "$fix_log"; then
+    if [ "$m9_status" -eq 0 ] && _confirm_persist_by_count "$(_method_desc m9)" "$failed_file_rel" "$fix_log"; then
       log_fix "$fix_log" "  ✅ 方法9 成功"
       TRY_FIX_METHOD_ID="方法9: 上传到父目录（跳过有问题的目录层级）"
       TRY_FIX_STATUS="success"
@@ -1172,7 +1194,7 @@ try_fix_failed_file() {
     rclone copyto "$temp_dir/${file_name}.enc.zip" "$m10_dst" --retries 1 --low-level-retries 3 --timeout 5m --contimeout 30s 2>&1 | \
       _cmd_log m10 "$fix_log"
     local m10_status=${PIPESTATUS[0]}
-    if [ "$m10_status" -eq 0 ] && _confirm_raw_persist "$(_method_desc m10)" "$failed_file_rel" "$fix_log"; then
+    if [ "$m10_status" -eq 0 ] && _confirm_persist_by_count "$(_method_desc m10)" "$failed_file_rel" "$fix_log"; then
       log_fix "$fix_log" "  ✅ 方法10 成功"
       TRY_FIX_METHOD_ID="方法10: AES256 加密 zip 后上传（改变二进制特征）"
       TRY_FIX_STATUS="success"
@@ -1214,7 +1236,7 @@ try_fix_failed_file() {
       --max-time 300 2>&1)
     m11_upload_http=$(echo "$m11_upload_resp" | tail -n 1)
     log_fix "$fix_log" "  临时目录上传响应: ${m11_upload_http}"
-    if echo "$m11_upload_http" | grep -qE 'HTTP_CODE:(200|201|204)' && _confirm_raw_persist "$(_method_desc m11)" "$failed_file_rel" "$fix_log"; then
+    if echo "$m11_upload_http" | grep -qE 'HTTP_CODE:(200|201|204)' && _confirm_persist_by_count "$(_method_desc m11)" "$failed_file_rel" "$fix_log"; then
       log_fix "$fix_log" "  ⬆ 方法11 临时目录上传成功，move 到目标路径..."
       TRY_FIX_METHOD_ID="方法11: 临时目录上传 + OpenList API move 移动"
       # 确保目标目录存在
