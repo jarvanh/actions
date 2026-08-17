@@ -7,6 +7,8 @@
   - download_speedtest : 经 mixed-port 代理 curl Range 拉取测速点，换算 MiB/s
   - gitee_push_speedtest: 经代理 git push 到 Gitee 测上行（复用 speedtest_gitee.git_force_push_testfile）
   - build_html_report  : 生成自包含、可交互 HTML 可视化报告
+  - 订阅导出 + Gist 上传: 复用 speedtest_gitee.build_source_mapping / build_subscription_yaml_text /
+    update_gist，把达标节点的原始配置整理成订阅并发布到 GitHub 私有 Gist
 
 设计原则：
   - 不修改 speedtest_gitee.py，仅以 `from speedtest_gitee import ...` 复用已验证的纯函数/低副作用函数。
@@ -42,6 +44,12 @@ from speedtest_gitee import (
     ensure_test_file,
     git_force_push_testfile,
     TEST_FILE_NAME,
+    # 订阅导出 + Gist 上传（复刻 speedtest_gitee 的订阅发布能力）
+    build_source_mapping,
+    build_subscription_yaml_text,
+    update_gist,
+    get_item_megabits,
+    DEFAULT_MIN_MEGABIT,
 )
 
 # ----------------------------------------------------------------------------
@@ -428,7 +436,7 @@ def _gitee_push_direct(env, token, owner, repo, size_mib, push_timeout, branch):
 # ----------------------------------------------------------------------------
 # 单节点测试编排
 # ----------------------------------------------------------------------------
-def speedtest_single_node(item, proxy_env, cfg):
+def speedtest_single_node(item, proxy_env, cfg, download_urls):
     name = item.get('name', '')
     log_progress('node_test_start', name=name, type=item.get('type', ''))
     result = {
@@ -437,7 +445,7 @@ def speedtest_single_node(item, proxy_env, cfg):
         'provider': item.get('provider', ''),
         'latency': latency_probe(cfg['PROXY_SPEEDTEST_LATENCY_TARGETS'], proxy_env,
                                  cfg['PROXY_SPEEDTEST_LATENCY_SAMPLES'], cfg['PROXY_SPEEDTEST_LATENCY_TIMEOUT']),
-        'download': download_speedtest(cfg['PROXY_SPEEDTEST_DOWNLOAD_URLS'], proxy_env,
+        'download': download_speedtest(download_urls, proxy_env,
                                        cfg['PROXY_SPEEDTEST_DOWNLOAD_TIMEOUT'], cfg['PROXY_SPEEDTEST_SIZE_MIB'],
                                        cfg['PROXY_SPEEDTEST_DOWNLOAD_DURATION']),
     }
@@ -533,6 +541,11 @@ code{background:#0e1530;padding:1px 6px;border-radius:5px;color:#cbd5e1;}
 
 <div class="cards" id="cards"></div>
 
+<div class="section" id="gist-section" style="display:none;">
+  <h2>可用节点订阅（GitHub Gist）</h2>
+  <div id="gist-box"></div>
+</div>
+
 <div class="section">
   <h2>TOP 5 最快节点</h2>
   <div class="top5" id="top5"></div>
@@ -618,6 +631,30 @@ const top5=RESULTS.filter(r=>get(r,'download.mibps')!=null)
 document.getElementById('top5').innerHTML=top5.length?top5.map(r=>
   '<div class="chip">'+escapeHtml(r.name)+' <b>'+get(r,'download.mibps')+'</b> MiB/s</div>').join('')
   :'<span class="tip">无可用的下载测速结果</span>';
+
+// 订阅链接（Gist）
+const gist=META.subscription_gist;
+if(gist && (gist.raw_url||gist.html_url)){
+  const box=document.getElementById('gist-box');
+  const action=gist.action==='新建'?'（首次新建）':'（已更新）';
+  let html='<p class="tip">以下订阅为本次达标节点的可用配置，可直接作为客户端订阅源'+action+'</p>';
+  if(gist.raw_url){
+    html+='<div style="margin:10px 0;"><b>订阅链接</b><br/>'+
+      '<code style="display:inline-block;max-width:100%;overflow:auto;padding:8px;background:#0e1530;'+
+      'border-radius:8px;border:1px solid rgba(255,255,255,.1);">'+escapeHtml(gist.raw_url)+'</code> '+
+      '<a href="'+escapeHtml(gist.raw_url)+'" style="color:var(--primary);">打开</a></div>';
+  }
+  if(gist.html_url){
+    html+='<div style="margin:6px 0;"><b>Gist 页面</b>：<a href="'+escapeHtml(gist.html_url)+
+      '" style="color:var(--primary);">'+escapeHtml(gist.html_url)+'</a></div>';
+  }
+  if(gist.id){
+    html+='<div class="tip">Gist ID：<code>'+escapeHtml(gist.id)+
+      '</code> —— 回填仓库 Secrets 的 PROXY_SPEEDTEST_GIST_ID 可使后续运行更新同一 Gist 而非新建。</div>';
+  }
+  box.innerHTML=html;
+  document.getElementById('gist-section').style.display='block';
+}
 
 // 筛选下拉填充
 const provs=[...new Set(RESULTS.map(r=>r.provider).filter(Boolean))].sort();
@@ -747,6 +784,18 @@ def main():
 
     proxy_env = build_proxy_env(env)
 
+    # 构建订阅源映射：抓取 PROXY_SPEEDTEST_SUBSCRIPTION_URLS 指向的订阅，解析出每个节点的
+    # 原始配置（share_link / proxy YAML），供后续导出 gist 订阅使用。无订阅源时跳过（gist
+    # 上传会产出空订阅，仍安全返回）。
+    try:
+        source_mapping = build_source_mapping(env)
+        log_progress('source_mapping_built',
+                     entries=len(source_mapping.get('exact_proxy') or {}) +
+                             len(source_mapping.get('exact_raw') or {}))
+    except Exception as e:
+        log_progress('source_mapping_failed', error=str(e))
+        source_mapping = {}
+
     # 方案 A：下载测速点解析。仅当用户未显式设置 PROXY_SPEEDTEST_DOWNLOAD_URLS 时，
     # 才从国内滚动目录自动发现 *-latest-*.iso，并合并 npmmirror 最新版 node 直链，
     # 两者均不写死版本号、运行时自动取最新，规避失效。
@@ -759,10 +808,12 @@ def main():
             enable_npmmirror=CONFIG['PROXY_SPEEDTEST_NPMMIRROR_ENABLED'])
     log_progress('download_targets_resolved', count=len(download_urls), source=download_source,
                  urls=download_urls[:4])
-    CONFIG['PROXY_SPEEDTEST_DOWNLOAD_URLS'] = download_urls
+    # 注意：仅用独立变量保存 list 型 URL，切勿写回 CONFIG——CONFIG 后续会作为
+    # subprocess 的 env 基底（经 build_proxy_env 处理），若混入 list 值会在 git
+    # push 时触发 "expected str ... not list"。保持 CONFIG 字段类型稳定。
 
     try:
-        _, alive_items = collect_provider_snapshot()
+        _, alive_items = collect_provider_snapshot(source_mapping)
     except Exception as e:
         log_progress('snapshot_failed', error=str(e))
         write_termination(started_at, f'节点快照失败: {e}')
@@ -784,9 +835,15 @@ def main():
             results.append({'name': name, 'type': item.get('type', ''), 'provider': item.get('provider', ''),
                             'ok': False, 'latency': {'ok': False, 'error': f'switch failed: {e}'},
                             'download': {'ok': False, 'error': 'switch failed'},
-                            'upload': {'ok': False, 'error': 'disabled'}})
+                            'upload': {'ok': False, 'error': 'disabled'},
+                            'source_entry': {}, 'mode': 'download'})
             continue
-        results.append(speedtest_single_node(item, proxy_env, CONFIG))
+        node_result = speedtest_single_node(item, proxy_env, CONFIG, download_urls)
+        # 挂载该节点的原始订阅配置，供后续导出 gist 订阅；mode 决定 gist 排序度量
+        # （开启上行测速时用 upload_mibs，否则用 download_mibs）。
+        node_result['source_entry'] = item.get('source_entry', {}) or {}
+        node_result['mode'] = 'push-only' if CONFIG['PROXY_SPEEDTEST_ENABLE_PUSH'] else 'download'
+        results.append(node_result)
 
     ended_at = datetime.now().isoformat()
     meta = {
@@ -827,6 +884,54 @@ def main():
         log_progress('repo_report_written', dir=str(OUTPUT_DIR))
     except Exception as e:
         log_progress('repo_report_write_failed', error=str(e))
+
+    # ----------------------------------------------------------------------
+    # 订阅导出 + 上传 Gist：复用 speedtest_gitee 的 build_subscription_yaml_text /
+    # update_gist，把达标节点整理成可用订阅并发布到 GitHub Gist（私有）。
+    # build_subscription_yaml_text 以 download_mibs / upload_mibs（MiB/s）作为
+    # 度量、以 source_entry 提供节点原始配置，这里做一次字段适配。
+    # ----------------------------------------------------------------------
+    try:
+        gist_results = []
+        for r in results:
+            dl = (r.get('download') or {}).get('mibps')
+            ul = (r.get('upload') or {}).get('mibps')
+            gist_results.append({
+                'name': r.get('name', ''),
+                'source_entry': r.get('source_entry') or {},
+                'mode': r.get('mode', 'download'),
+                'download_mibs': dl if isinstance(dl, (int, float)) else 0,
+                'upload_mibs': ul if isinstance(ul, (int, float)) else 0,
+            })
+        yaml_text = build_subscription_yaml_text(gist_results, DEFAULT_MIN_MEGABIT)
+        if (yaml_text or '').strip():
+            gist_res = update_gist(env, yaml_text)
+            raw_url = gist_res.get('raw_url') or ''
+            html_url = gist_res.get('html_url') or ''
+            # 把订阅链接醒目打印到标准输出，方便直接从日志复制使用
+            action = '新建' if gist_res.get('reason') == 'created' else '更新'
+            print('\n================ 订阅已上传 Gist（%s）================' % action)
+            if raw_url:
+                print('订阅链接 (raw, 可直接作为客户端订阅源): %s' % raw_url)
+            if html_url:
+                print('Gist 页面 (html): %s' % html_url)
+            if gist_res.get('id'):
+                print('Gist ID: %s  （请回填到仓库 Secrets: PROXY_SPEEDTEST_GIST_ID 以便后续更新而非新建）'
+                      % gist_res.get('id'))
+            print('========================================================\n')
+            log_progress('gist_uploaded', ok=gist_res.get('ok'), action=action,
+                         id=gist_res.get('id'), raw_url=raw_url, html_url=html_url,
+                         reason=gist_res.get('reason', ''))
+            # 把订阅链接写入报告 meta，供 HTML 报告展示
+            report_data.setdefault('meta', {})['subscription_gist'] = {
+                'raw_url': raw_url, 'html_url': html_url, 'id': gist_res.get('id'),
+                'action': action,
+            }
+        else:
+            log_progress('gist_skipped', reason='empty subscription (no node met min speed)')
+    except Exception as e:
+        # gist 上传失败不应中断主流程（报告已生成并 commit）
+        log_progress('gist_upload_failed', error=str(e))
 
     log_progress('speedtest_done', node_count=len(results),
                  json_path=str(RESULT_JSON), html_path=str(RESULT_HTML))
