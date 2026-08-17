@@ -60,10 +60,11 @@ jobs:
           # 订阅导出 + 上传 Gist：脚本复用 speedtest_gitee 的 build_subscription_yaml_text /
           # update_gist，把达标节点整理成可用订阅并发布到 GitHub 私有 Gist。
           #   PROXY_SPEEDTEST_SUB_URLS : 见上方（第 28 行）原始订阅源定义，用于解析节点原始配置；留空则不上传 gist
-          #   GH_TOKEN                 : 具备 gist 写入权限的 GitHub Token（Secrets）
+          #   GH_TOKEN                 : 具备 gist 写入权限的 Personal Access Token（Secrets: PROXY_SPEEDTEST_GH_TOKEN）；
+          #                             注意：默认 GITHUB_TOKEN 无 gist 作用域，会导致 403，须用 PAT
           #   PROXY_SPEEDTEST_GIST_ID  : 已存在的 Gist id；首次留空会自动新建，拿到 id 后回填此处
           #                             即可让后续运行「更新」同一 Gist 而非反复新建
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.PROXY_SPEEDTEST_GH_TOKEN }}
           PROXY_SPEEDTEST_GIST_ID: ${{ secrets.PROXY_SPEEDTEST_GIST_ID }}
           # 报告写入仓库内的 proxy-speedtest-reports/ 目录（默认回退即此路径，显式指定以防歧义）
           PROXY_SPEEDTEST_OUTPUT_DIR: ${{ github.workspace }}/proxy-speedtest-reports
