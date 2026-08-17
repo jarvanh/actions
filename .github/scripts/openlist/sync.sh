@@ -1459,11 +1459,6 @@ _send_sync_result_notification() {
     count_info="文件数：源端 ${source_count} / 目标 ${dest_count}"
   fi
 
-  # 假成功文件提示（truth-check 重启前后目标计数差，检测到时展示）
-  if [ "${FAKE_SUCCESS_COUNT:-0}" -gt 0 ] 2>/dev/null; then
-    count_info+=$'\n'"⚠️ 假成功文件：${FAKE_SUCCESS_COUNT} 个（数据未落盘，已重启 OpenList 暴露并当轮修复）"
-  fi
-
   # 提取 --exclude 规则，方便在通知中说明
   local exclude_list=""
   exclude_list=$(_build_exclude_bullets "${extra_args[@]}")
@@ -1594,7 +1589,7 @@ _send_sync_result_notification() {
     partial_msg+='━━━━━━━━━━━━━━'$'\n'
     partial_msg+="源端大小：${source_size_human}"$'\n'
     partial_msg+="目标大小：${dest_size_human}"$'\n'
-    partial_msg+="状态：缺失文件已全部通过替代方式同步"$'\n'
+    partial_msg+="状态：${fix_total} 个缺失文件已全部通过替代方式同步"$'\n'
     partial_msg+="${count_info}"$'\n'
     [ -n "$AUTO_SPLIT_INFO" ] && partial_msg+=$'\n'"${AUTO_SPLIT_INFO}"$'\n'
     partial_msg+=$'\n'
