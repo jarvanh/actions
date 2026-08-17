@@ -96,6 +96,13 @@ CONFIG = {
 RESULT_JSON = HOME_RUNTIME / 'speedtest_result.json'
 RESULT_HTML = HOME_RUNTIME / 'speedtest_report.html'
 
+# 报告同时写入仓库（便于版本化与 GitHub 直接查看）。默认落到仓库内的
+# proxy-speedtest-reports/ 目录；可通过 PROXY_SPEEDTEST_OUTPUT_DIR 覆盖为绝对路径。
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]  # .github/scripts/proxy-speedtest -> repo root
+OUTPUT_DIR = pathlib.Path(
+    os.environ.get('PROXY_SPEEDTEST_OUTPUT_DIR', '') or str(REPO_ROOT / 'proxy-speedtest-reports')
+).expanduser().resolve()
+
 
 # ----------------------------------------------------------------------------
 # 延迟测量：经代理对目标做 HTTP GET，记录分段耗时，取 min/median
@@ -104,6 +111,9 @@ def latency_probe(targets, proxy_env, samples=4, timeout=8.0):
     """经代理测量一组目标的延迟，返回 {ok, min_ms, median_ms, samples, error}。"""
     measurements = []
     last_error = ''
+    proxy = proxy_env.get('HTTP_PROXY') or proxy_env.get('HTTPS_PROXY')
+    handlers = [urllib.request.ProxyHandler({'http': proxy, 'https': proxy})] if proxy else []
+    opener = urllib.request.build_opener(*handlers)
     for t in targets:
         t = t.strip()
         if not t:
@@ -112,8 +122,7 @@ def latency_probe(targets, proxy_env, samples=4, timeout=8.0):
             try:
                 req = urllib.request.Request(t, headers={'User-Agent': 'Mozilla/5.0', 'Cache-Control': 'no-cache'})
                 t0 = time.perf_counter()
-                with urllib.request.urlopen(req, timeout=timeout, proxies={'http': proxy_env.get('HTTP_PROXY'),
-                                                                           'https': proxy_env.get('HTTPS_PROXY')}) as r:
+                with opener.open(req, timeout=timeout) as r:
                     r.read(1)
                 elapsed_ms = (time.perf_counter() - t0) * 1000.0
                 measurements.append(round(elapsed_ms, 1))
@@ -138,53 +147,59 @@ def latency_probe(targets, proxy_env, samples=4, timeout=8.0):
 def download_speedtest(urls, proxy_env, timeout=30.0, size_hint_mib=10, connections=1, max_duration=0.0):
     """经代理 curl 拉取测速点，返回 {ok, mibps, bytes, seconds, error}。
 
-    优先使用足够大的固定文件以满足 size_hint_mib；若 max_duration>0，则限制单节点
-    下载时长（用 --max-time 结合 --range 实现近似持续窗口）。
+    单个测速文件可能很小（不足以体现真实速度），因此累计多次 GET 直到下载字节
+    达到 size_hint_mib 阈值或超时，从而得到稳定的速度读数；若指定 max_duration>0
+    则限制单节点总时长。
     """
     proxy = f'http://127.0.0.1:{MIHOMO_MIXED_PORT}'
+    target_bytes = int(size_hint_mib * 1024 * 1024)
+    wall_deadline = time.monotonic() + (max_duration if max_duration and max_duration > 0 else timeout)
     best = None
     last_error = ''
     for u in urls:
         u = u.strip()
         if not u:
             continue
-        # 若指定了持续时长，按 range 分块拉取，模拟持续下载窗口
-        curl_range = None
-        curl_max_time = timeout
-        if max_duration and max_duration > 0:
-            # 10 MiB 窗口近似（保守估算，避免单次拉取过早结束）
-            range_end = int(max_duration * 1.5 * max(size_hint_mib, 1) * 1024 * 1024)
-            curl_range = f'0-{range_end}'
-            curl_max_time = max_duration + 5
-        cmd = [
-            'curl', '-sS', '-x', proxy, '-o', '/dev/null',
-            '-w', '%{time_total},%{size_download}',
-            '--connect-timeout', str(int(timeout)),
-            '--max-time', str(int(curl_max_time)),
-        ]
-        if curl_range:
-            cmd += ['-r', curl_range]
-        if connections and connections > 1:
-            cmd += ['--parallel', '-Z']
-        cmd += ['-A', 'Mozilla/5.0', u]
-        try:
-            out = subprocess.run(cmd, capture_output=True, text=True, timeout=int(curl_max_time) + 10)
-            if out.returncode != 0:
-                last_error = out.stderr.strip() or f'curl exit {out.returncode}'
-                continue
-            total_s_str, size_str = (out.stdout.strip().split(',') + ['0', '0'])[:2]
-            total_s = float(total_s_str or '0')
-            size_bytes = int(size_str or '0')
-            if total_s <= 0 or size_bytes <= 0:
-                last_error = 'empty download'
-                continue
-            mibps = size_bytes / 1024 / 1024 / total_s
-            cand = {'ok': True, 'mibps': round(mibps, 2), 'bytes': size_bytes,
+        total_bytes = 0
+        total_s = 0.0
+        timed_out = False
+        while total_bytes < target_bytes:
+            remaining = int(wall_deadline - time.monotonic())
+            if remaining <= 0:
+                timed_out = True
+                break
+            cmd = [
+                'curl', '-sS', '-x', proxy, '-o', '/dev/null',
+                '-w', '%{time_total},%{size_download}',
+                '--connect-timeout', '10',
+                '--max-time', str(min(remaining, timeout)),
+                '-A', 'Mozilla/5.0', u,
+            ]
+            try:
+                out = subprocess.run(cmd, capture_output=True, text=True, timeout=min(remaining, timeout) + 10)
+                if out.returncode != 0:
+                    last_error = out.stderr.strip() or f'curl exit {out.returncode}'
+                    break
+                parts = (out.stdout.strip().split(',') + ['0', '0'])[:2]
+                dur = float(parts[0] or '0')
+                sz = int(parts[1] or '0')
+                if dur <= 0 or sz <= 0:
+                    last_error = 'empty download'
+                    break
+                total_bytes += sz
+                total_s += dur
+            except Exception as e:
+                last_error = str(e)
+                break
+        if total_bytes > 0 and total_s > 0:
+            mibps = total_bytes / 1024 / 1024 / total_s
+            cand = {'ok': True, 'mibps': round(mibps, 2), 'bytes': total_bytes,
                     'seconds': round(total_s, 2), 'error': None}
             if best is None or cand['mibps'] > best['mibps']:
                 best = cand
-        except Exception as e:
-            last_error = str(e)
+        if best is not None and not timed_out:
+            # 已找到可用测速点且满足阈值，缩短后续节点等待：继续评估下一个 url 取最优
+            pass
     if best is None:
         return {'ok': False, 'mibps': None, 'bytes': 0, 'seconds': None, 'error': last_error}
     return best
@@ -626,6 +641,22 @@ def main():
         RESULT_HTML.write_text(build_html_report(results, meta), encoding='utf-8')
     except Exception as e:
         log_progress('report_write_failed', error=str(e))
+
+    # 额外写入仓库（版本化 + GitHub 直接预览）。日期命名保留历史，latest 便于固定链接。
+    try:
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        day = started_at[:10]
+        out_json = OUTPUT_DIR / f'speedtest_{day}.json'
+        out_html = OUTPUT_DIR / f'speedtest_{day}.html'
+        out_json.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding='utf-8')
+        out_html.write_text(build_html_report(results, meta), encoding='utf-8')
+        (OUTPUT_DIR / 'speedtest_latest.json').write_text(
+            json.dumps(summary, ensure_ascii=False, indent=2), encoding='utf-8')
+        (OUTPUT_DIR / 'speedtest_latest.html').write_text(
+            build_html_report(results, meta), encoding='utf-8')
+        log_progress('repo_report_written', dir=str(OUTPUT_DIR))
+    except Exception as e:
+        log_progress('repo_report_write_failed', error=str(e))
 
     log_progress('speedtest_done', node_count=len(results),
                  json_path=str(RESULT_JSON), html_path=str(RESULT_HTML))
