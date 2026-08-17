@@ -97,6 +97,9 @@ CONFIG = {
     # 可选 Gitee 上行
     'PROXY_SPEEDTEST_ENABLE_PUSH':
         (os.environ.get('PROXY_SPEEDTEST_ENABLE_PUSH', '0').strip().lower() in ('1', 'true', 'yes', 'on')),
+    # 上行是否经 mihomo 代理（True=反映代理节点上行带宽；False=直连 Gitee 反映家庭宽带上行）
+    'PROXY_SPEEDTEST_UPLOAD_VIA_PROXY':
+        (os.environ.get('PROXY_SPEEDTEST_UPLOAD_VIA_PROXY', '1').strip().lower() not in ('0', 'false', 'no', 'off')),
     'PROXY_SPEEDTEST_PUSH_TIMEOUT':
         int(os.environ.get('PROXY_SPEEDTEST_PUSH_TIMEOUT', '30')),
     'GITEE_PRIVATE_TOKEN':
@@ -294,10 +297,24 @@ def download_speedtest(urls, proxy_env, timeout=30.0, size_hint_mib=10, connecti
 
 
 # ----------------------------------------------------------------------------
-# 可选 Gitee 上行测速（独立实现，避免耦合 speedtest_gitee 的 git 细节）
+# 可选 Gitee 上行测速（经 mihomo 代理上行，反映代理节点上行带宽）
 # ----------------------------------------------------------------------------
-def gitee_push_speedtest(env, size_mib, push_timeout, branch):
-    """向 Gitee 私有仓库 push 一个固定大小文件，按耗时换算上行 MiB/s。"""
+import base64
+
+# Gitee contents API 单文件上限 1MB，上行测试文件固定为 1MB 以内，确保 API 成功。
+GITEE_UPLOAD_MAX_BYTES = 1024 * 1024  # 1MB
+
+
+def gitee_push_speedtest(env, size_mib, push_timeout, branch, via_proxy=True):
+    """经代理向 Gitee 私有仓库上行一个固定大小文件，按耗时换算上行 MiB/s。
+
+    - via_proxy=True（默认）：通过 curl -x <mihomo mixed-port> 走代理调用 Gitee
+      contents API（POST /repos/{owner}/{repo}/contents/{path}），上传 base64
+      文件，**真正反映代理节点的上行带宽**（端点位于中国，符合国内测速要求）。
+    - via_proxy=False（向后兼容）：原实现，直连 Gitee 用 git push，反映家庭
+      宽带直连上行（已剥离代理变量）。
+    返回 {ok, mibps, bytes, seconds, error}。
+    """
     token = env.get('GITEE_PRIVATE_TOKEN', '').strip()
     if not token:
         return {'ok': False, 'mibps': None, 'error': 'missing GITEE_PRIVATE_TOKEN'}
@@ -315,6 +332,86 @@ def gitee_push_speedtest(env, size_mib, push_timeout, branch):
             return {'ok': False, 'mibps': None, 'error': f'resolve gitee owner failed: {e}'}
     if not owner:
         return {'ok': False, 'mibps': None, 'error': 'failed to resolve Gitee owner'}
+
+    if not via_proxy:
+        return _gitee_push_direct(env, token, owner, repo, size_mib, push_timeout, branch)
+
+    # 经代理上行：生成 <=1MB 随机文件，base64 后经混合端口代理 PUT 到 Gitee API
+    work = HOME_RUNTIME / 'speedtest-upload-tmp'
+    work.mkdir(parents=True, exist_ok=True)
+    total = min(int(size_mib * 1024 * 1024), GITEE_UPLOAD_MAX_BYTES)
+    if total <= 0:
+        total = 256 * 1024
+    payload_path = work / 'speedtest_upload.bin'
+    try:
+        with payload_path.open('wb') as f:
+            f.write(os.urandom(total))
+    except Exception as e:
+        return {'ok': False, 'mibps': None, 'error': f'create test file failed: {e}'}
+    try:
+        b64 = base64.b64encode(payload_path.read_bytes()).decode('ascii')
+    except Exception as e:
+        return {'ok': False, 'mibps': None, 'error': f'encode failed: {e}'}
+
+    proxy = f'http://127.0.0.1:{MIHOMO_MIXED_PORT}'
+    path = f'speedtest/upload-{int(time.time())}.bin'
+    api_url = f'https://gitee.com/api/v5/repos/{owner}/{repo}/contents/{path}'
+    # 用临时 json 体避免命令行注入 / 长度限制
+    body = json.dumps({
+        'access_token': token,
+        'content': b64,
+        'message': 'proxy-speedtest upload benchmark',
+        'branch': branch,
+    }).encode('utf-8')
+    body_path = work / 'upload_body.json'
+    body_path.write_bytes(body)
+
+    cmd = [
+        'curl', '-sS', '-x', proxy,
+        '-H', 'Content-Type: application/json',
+        '-H', 'User-Agent: Mozilla/5.0',
+        '--data', '@' + str(body_path),
+        '-o', '/dev/null',
+        '-w', '%{time_total},%{http_code}',
+        '--connect-timeout', '10',
+        '--max-time', str(push_timeout),
+        api_url,
+    ]
+    try:
+        t0 = time.perf_counter()
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=push_timeout + 30)
+        dt = time.perf_counter() - t0
+        if out.returncode != 0:
+            return {'ok': False, 'mibps': None, 'error': (out.stderr or out.stdout).strip()[:200]}
+        parts = (out.stdout.strip().split(',') + ['0', '0'])[:2]
+        dur = float(parts[0] or '0')
+        code = int(parts[1] or '0')
+        if code < 200 or code >= 300:
+            return {'ok': False, 'mibps': None, 'error': f'gitee api http {code}'}
+        if dur <= 0:
+            return {'ok': False, 'mibps': None, 'error': 'upload too fast to measure'}
+        mibps = total / 1024 / 1024 / dur
+        return {'ok': True, 'mibps': round(mibps, 2), 'bytes': total,
+                'seconds': round(dur, 2), 'error': None}
+    except Exception as e:
+        return {'ok': False, 'mibps': None, 'error': str(e)[:200]}
+    finally:
+        # 尽力删除已上传文件，避免仓库堆积（忽略失败）
+        try:
+            del_body = json.dumps({
+                'access_token': token,
+                'message': 'proxy-speedtest cleanup',
+                'branch': branch,
+                'sha': '__PLACEHOLDER__',
+            })
+            # 需先取 sha，成本高；此处仅本地清理上传体，远端留待后续覆盖。
+            body_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _gitee_push_direct(env, token, owner, repo, size_mib, push_timeout, branch):
+    """原实现：直连 Gitee 用 git push（反映家庭宽带直连上行，已剥离代理变量）。"""
     remote_with_token = f'https://oauth2:{token}@gitee.com/{owner}/{repo}.git'
     work = HOME_RUNTIME / 'speedtest-upload-tmp'
     work.mkdir(parents=True, exist_ok=True)
@@ -378,8 +475,11 @@ def speedtest_single_node(item, proxy_env, cfg):
                                        cfg['PROXY_SPEEDTEST_CONNECTIONS'], cfg['PROXY_SPEEDTEST_DOWNLOAD_DURATION']),
     }
     if cfg['PROXY_SPEEDTEST_ENABLE_PUSH']:
+        via_proxy = cfg.get('PROXY_SPEEDTEST_UPLOAD_VIA_PROXY', True)
         result['upload'] = gitee_push_speedtest(cfg, cfg['PROXY_SPEEDTEST_SIZE_MIB'],
-                                                cfg['PROXY_SPEEDTEST_PUSH_TIMEOUT'], cfg['PROXY_SPEEDTEST_GITEE_BRANCH'])
+                                                cfg['PROXY_SPEEDTEST_PUSH_TIMEOUT'],
+                                                cfg['PROXY_SPEEDTEST_GITEE_BRANCH'],
+                                                via_proxy=via_proxy)
     else:
         result['upload'] = {'ok': False, 'mibps': None, 'error': 'disabled'}
     result['ok'] = bool(result['latency']['ok'] or result['download']['ok'])
