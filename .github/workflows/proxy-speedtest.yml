@@ -75,13 +75,3 @@ jobs:
             git commit -m "chore(proxy-speedtest): 更新可视化测速报告 [skip ci]"
             git push
           fi
-
-      - name: Upload speedtest report (artifact backup)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: proxy-speedtest-report
-          path: |
-            ~/proxy-speedtest/speedtest_report.html
-            ~/proxy-speedtest/speedtest_result.json
-          retention-days: 30
