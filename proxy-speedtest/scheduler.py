@@ -1508,13 +1508,42 @@ def format_duration(seconds: float):
     return f'{s}s'
 
 
+# 敏感字段名（小写匹配），值会被自动脱敏
+_SENSITIVE_KEYS = frozenset({
+    'server', 'share_link', 'source_url', 'url', 'password', 'uuid',
+    'cipher', 'subscription', 'subscription_url', 'proxy_url',
+    'host', 'address', 'remote_public', 'ip', 'ip_city_text',
+    'paths', 'path',
+})
+
+_REDACTED = '***'
+
+
+def _redact_value(key: str, value):
+    """对敏感字段的值进行脱敏，递归处理嵌套 dict/list。"""
+    kl = key.lower()
+    # 精确匹配敏感 key
+    if kl in _SENSITIVE_KEYS:
+        return _REDACTED
+    # 模糊匹配
+    for sk in _SENSITIVE_KEYS:
+        if sk in kl:
+            return _REDACTED
+    if isinstance(value, dict):
+        return {k: _redact_value(k, v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_value(key, v) if isinstance(v, (dict, list)) else v for v in value]
+    return value
+
+
 def log_progress(stage: str, **kwargs):
     payload = {
         'kind': 'progress',
         'stage': stage,
         'time': datetime.now().isoformat(),
     }
-    payload.update(kwargs)
+    for k, v in kwargs.items():
+        payload[k] = _redact_value(k, v)
     print(json.dumps(payload, ensure_ascii=False), flush=True)
 
 
