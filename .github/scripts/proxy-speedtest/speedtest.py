@@ -45,12 +45,12 @@ from speedtest_gitee import (
 # 配置（全部可通过环境变量覆盖）
 # ----------------------------------------------------------------------------
 DEFAULT_LATENCY_TARGETS = [
-    'https://www.gstatic.com/generate_204',
     'https://www.baidu.com',
+    'https://www.taobao.com',
 ]
 DEFAULT_DOWNLOAD_URLS = [
-    'https://mirrors.cloud.tencent.com/archlinux/iso/latest/sha256sums.txt',
-    'https://download.geonode.com/test/10mb.bin',
+    'https://mirrors.cloud.tencent.com/centos/8.5.2111/isos/x86_64/CentOS-8.5.2111-x86_64-boot.iso',
+    'https://mirrors.aliyun.com/centos/8.5.2111/isos/x86_64/CentOS-8.5.2111-x86_64-boot.iso',
 ]
 DEFAULT_GITEE_BRANCH = 'master'
 
@@ -147,9 +147,9 @@ def latency_probe(targets, proxy_env, samples=4, timeout=8.0):
 def download_speedtest(urls, proxy_env, timeout=30.0, size_hint_mib=10, connections=1, max_duration=0.0):
     """经代理 curl 拉取测速点，返回 {ok, mibps, bytes, seconds, error}。
 
-    单个测速文件可能很小（不足以体现真实速度），因此累计多次 GET 直到下载字节
-    达到 size_hint_mib 阈值或超时，从而得到稳定的速度读数；若指定 max_duration>0
-    则限制单节点总时长。
+    对每个测速 URL 优先用 HTTP Range 单次精确拉取 size_hint_mib 字节（避免重复连接
+    开销、速度读数更准）；若目标不支持 Range（返回整文件），则按实际下载字节与耗时
+    换算速度。若指定 max_duration>0 则限制单节点总时长。
     """
     proxy = f'http://127.0.0.1:{MIHOMO_MIXED_PORT}'
     target_bytes = int(size_hint_mib * 1024 * 1024)
@@ -160,46 +160,36 @@ def download_speedtest(urls, proxy_env, timeout=30.0, size_hint_mib=10, connecti
         u = u.strip()
         if not u:
             continue
-        total_bytes = 0
-        total_s = 0.0
-        timed_out = False
-        while total_bytes < target_bytes:
-            remaining = int(wall_deadline - time.monotonic())
-            if remaining <= 0:
-                timed_out = True
-                break
-            cmd = [
-                'curl', '-sS', '-x', proxy, '-o', '/dev/null',
-                '-w', '%{time_total},%{size_download}',
-                '--connect-timeout', '10',
-                '--max-time', str(min(remaining, timeout)),
-                '-A', 'Mozilla/5.0', u,
-            ]
-            try:
-                out = subprocess.run(cmd, capture_output=True, text=True, timeout=min(remaining, timeout) + 10)
-                if out.returncode != 0:
-                    last_error = out.stderr.strip() or f'curl exit {out.returncode}'
-                    break
-                parts = (out.stdout.strip().split(',') + ['0', '0'])[:2]
-                dur = float(parts[0] or '0')
-                sz = int(parts[1] or '0')
-                if dur <= 0 or sz <= 0:
-                    last_error = 'empty download'
-                    break
-                total_bytes += sz
-                total_s += dur
-            except Exception as e:
-                last_error = str(e)
-                break
-        if total_bytes > 0 and total_s > 0:
-            mibps = total_bytes / 1024 / 1024 / total_s
-            cand = {'ok': True, 'mibps': round(mibps, 2), 'bytes': total_bytes,
-                    'seconds': round(total_s, 2), 'error': None}
+        remaining = int(wall_deadline - time.monotonic())
+        if remaining <= 0:
+            break
+        range_arg = f'0-{target_bytes - 1}'
+        cmd = [
+            'curl', '-sS', '-x', proxy, '-o', '/dev/null',
+            '-w', '%{time_total},%{size_download}',
+            '--connect-timeout', '10',
+            '--max-time', str(min(remaining, timeout)),
+            '-r', range_arg,
+            '-A', 'Mozilla/5.0', u,
+        ]
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=min(remaining, timeout) + 10)
+            if out.returncode != 0:
+                last_error = out.stderr.strip() or f'curl exit {out.returncode}'
+                continue
+            parts = (out.stdout.strip().split(',') + ['0', '0'])[:2]
+            dur = float(parts[0] or '0')
+            sz = int(parts[1] or '0')
+            if dur <= 0 or sz <= 0:
+                last_error = 'empty download'
+                continue
+            mibps = sz / 1024 / 1024 / dur
+            cand = {'ok': True, 'mibps': round(mibps, 2), 'bytes': sz,
+                    'seconds': round(dur, 2), 'error': None}
             if best is None or cand['mibps'] > best['mibps']:
                 best = cand
-        if best is not None and not timed_out:
-            # 已找到可用测速点且满足阈值，缩短后续节点等待：继续评估下一个 url 取最优
-            pass
+        except Exception as e:
+            last_error = str(e)
     if best is None:
         return {'ok': False, 'mibps': None, 'bytes': 0, 'seconds': None, 'error': last_error}
     return best
