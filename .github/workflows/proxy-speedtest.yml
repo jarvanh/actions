@@ -1,7 +1,7 @@
 name: proxy-speedtest
 
-# 独立的可视化测速任务：测量节点延迟 + 下载速度，生成可交互 HTML 报告。
-# 与 proxy-speedtest.yml（Gitee 上行测速）解耦，可单独触发，互不依赖。
+# 可视化测速任务：测量节点延迟 + 下载速度 + 经代理上行速度，生成可交互 HTML 报告。
+# 上行测速复用 speedtest_gitee 的「经 mihomo 代理 git push」方案向 Gitee 私有仓库推送测速文件。
 on:
   schedule:
     # 每 6 小时测一次：UTC 03:00, 09:00, 15:00, 21:00（北京 11:00, 17:00, 23:00, 05:00），与 Gitee 任务错峰
