@@ -19,13 +19,13 @@ from datetime import datetime
 
 import yaml
 
-WORKSPACE = pathlib.Path(os.path.expanduser('~/.openclaw/workspace'))
+WORKSPACE = pathlib.Path(os.environ.get('PROXY_SPEEDTEST_WORKSPACE', os.path.expanduser('~/.openclaw/workspace')))
 SCRIPTS = WORKSPACE / 'scripts'
 HOME_RUNTIME = pathlib.Path(os.path.expanduser('~/proxy-speedtest'))
 HOME_RUNTIME.mkdir(parents=True, exist_ok=True)
 PROVIDERS_DIR = HOME_RUNTIME / 'providers'
 PROVIDERS_DIR.mkdir(parents=True, exist_ok=True)
-ENV_PATH = pathlib.Path(os.path.expanduser('~/.openclaw/.env'))
+ENV_PATH = pathlib.Path(os.environ.get('PROXY_SPEEDTEST_ENV_PATH', os.path.expanduser('~/.openclaw/.env')))
 RESULT_JSON = HOME_RUNTIME / 'proxy_speedtest_last_result.json'
 RESULT_TXT = HOME_RUNTIME / 'proxy_speedtest_last_result.txt'
 RESULT_SUBSCRIPTION = HOME_RUNTIME / 'proxy_speedtest_subscription.yaml'
@@ -142,7 +142,7 @@ def maybe_detach_self():
             stdin=subprocess.DEVNULL,
             stdout=lf,
             stderr=subprocess.STDOUT,
-            cwd=str(WORKSPACE),
+            cwd=str(HOME_RUNTIME),
             env=env,
             start_new_session=True,
             close_fds=True,
