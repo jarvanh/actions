@@ -12,7 +12,6 @@ jobs:
   speedtest:
     concurrency: proxy-speedtest-singleton
     runs-on: ubuntu-latest
-    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -42,7 +41,6 @@ jobs:
           # PROXY_SPEEDTEST_NPMMIRROR_ENABLED: '1'
           PROXY_SPEEDTEST_SIZE_MIB: '10'
           PROXY_SPEEDTEST_DOWNLOAD_TIMEOUT: '30'
-          PROXY_SPEEDTEST_CONNECTIONS: '1'
           PROXY_SPEEDTEST_SWITCH_SETTLE_SECONDS: '1.5'
           PROXY_SPEEDTEST_MAX_NODES: '0'
           # 上行测速：默认开启，复用 speedtest_gitee 的「经 mihomo 代理 git push」方案，
