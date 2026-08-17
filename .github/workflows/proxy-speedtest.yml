@@ -23,7 +23,7 @@ jobs:
       - name: Install dependencies
         run: pip install pyyaml
 
-      - name: Run node speedtest (latency + download)
+      - name: Run node speedtest (latency + download + upload)
         env:
           PROXY_SPEEDTEST_DETACH: '0'
           PROXY_SPEEDTEST_SUB_URLS: ${{ secrets.PROXY_SPEEDTEST_SUB_URLS }}
