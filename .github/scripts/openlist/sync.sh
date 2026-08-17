@@ -1464,23 +1464,21 @@ _send_sync_result_notification() {
         # 目录有变（如方法9 上传到父目录）: 双方完整相对路径
         fix_summary+="• 原路径：${f_original}"$'\n'"  实际路径：${f_alternative}"$'\n'
       fi
-      fix_summary+="  大小：${f_size}（${f_method_tag}）"$'\n'
+      fix_summary+="  大小：${f_size}"$'\n'"  方式：${f_method_tag}"$'\n'
     done < "$fix_list"
   fi
   [ -z "$fix_summary" ] && fix_summary="无"
 
-  # 构建 fail_summary（无法修复的文件，含源/目标完整路径与修复过程）
+  # 构建 fail_summary（无法修复的文件；风格与 fix_summary 一致：• 相对路径 + 2 空格标签行）
   local fail_summary=""
-  local fail_idx=0
+  local fail_total=0
   if [ -s "$fail_list" ]; then
+    fail_total=$(grep -c . "$fail_list" 2>/dev/null || true)
     while IFS='|' read -r fpath fsize fmsg; do
       [ -z "$fpath" ] && continue
-      fail_idx=$((fail_idx + 1))
-      [ -n "$fail_summary" ] && fail_summary+=$'\n'
-      fail_summary+="[${fail_idx}] 源文件：${source_path}/${fpath}"$'\n'
-      fail_summary+="    目标文件：${dest_path}/${fpath}"$'\n'
-      fail_summary+="    文件大小：${fsize}"$'\n'
-      fail_summary+="    失败原因：${fmsg}"$'\n'
+      fail_summary+="• ${fpath}"$'\n'
+      fail_summary+="  大小：${fsize}"$'\n'
+      fail_summary+="  原因：${fmsg}"$'\n'
       # 从 fix_log 中按文件名分隔提取该文件对应的修复过程
       local fix_section=""
       if [ -f "$fix_log" ]; then
@@ -1491,15 +1489,15 @@ _send_sync_result_notification() {
         ' "$fix_log" 2>/dev/null)
       fi
       if [ -n "$fix_section" ]; then
-        fail_summary+="    修复过程："$'\n'
+        fail_summary+="  修复过程："$'\n'
         while IFS= read -r log_line; do
           [ -z "$log_line" ] && continue
-          fail_summary+="      ${log_line}"$'\n'
+          fail_summary+="    ${log_line}"$'\n'
         done <<< "$fix_section"
       elif echo "$fmsg" | grep -qi 'object not found'; then
-        fail_summary+="    修复过程：源文件不存在，无需修复"$'\n'
+        fail_summary+="  修复过程：源文件不存在，无需修复"$'\n'
       else
-        fail_summary+="    修复过程：无记录"$'\n'
+        fail_summary+="  修复过程：无记录"$'\n'
       fi
     done < "$fail_list"
   fi
@@ -1549,7 +1547,7 @@ _send_sync_result_notification() {
     partial_msg+="✅ 已通过其他方式同步（${fix_total} 个文件）："$'\n'
     partial_msg+="${fix_summary}"$'\n'
     partial_msg+=$'\n'
-    partial_msg+='❌ 无法同步文件：'$'\n'
+    partial_msg+="❌ 无法同步文件（${fail_total} 个）："$'\n'
     partial_msg+="${fail_summary}"
     if [ -n "$diff_files_list" ]; then
       partial_msg+=$'\n\n'"📋 差异文件列表："$'\n'
