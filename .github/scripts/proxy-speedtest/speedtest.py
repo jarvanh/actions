@@ -39,6 +39,11 @@ from speedtest_gitee import (
     _redact_value,
     merged_env,
     parse_sub_urls,
+    ensure_gitee_remote,
+    ensure_test_file,
+    git_force_push_testfile,
+    TEST_BRANCH,
+    TEST_FILE_NAME,
 )
 
 # ----------------------------------------------------------------------------
@@ -297,22 +302,18 @@ def download_speedtest(urls, proxy_env, timeout=30.0, size_hint_mib=10, connecti
 
 
 # ----------------------------------------------------------------------------
-# 可选 Gitee 上行测速（经 mihomo 代理上行，反映代理节点上行带宽）
+# 可选 Gitee 上行测速（经 mihomo 代理 git push，反映代理节点上行带宽）
 # ----------------------------------------------------------------------------
-import base64
-
-# Gitee contents API 单文件上限 1MB，上行测试文件固定为 1MB 以内，确保 API 成功。
-GITEE_UPLOAD_MAX_BYTES = 1024 * 1024  # 1MB
 
 
 def gitee_push_speedtest(env, size_mib, push_timeout, branch, via_proxy=True):
-    """经代理向 Gitee 私有仓库上行一个固定大小文件，按耗时换算上行 MiB/s。
+    """向 Gitee 私有仓库上行一个固定大小文件，按耗时换算上行 MiB/s。
 
-    - via_proxy=True（默认）：通过 curl -x <mihomo mixed-port> 走代理调用 Gitee
-      contents API（POST /repos/{owner}/{repo}/contents/{path}），上传 base64
-      文件，**真正反映代理节点的上行带宽**（端点位于中国，符合国内测速要求）。
-    - via_proxy=False（向后兼容）：原实现，直连 Gitee 用 git push，反映家庭
-      宽带直连上行（已剥离代理变量）。
+    - via_proxy=True（默认）：复用 speedtest_gitee 的「经代理 git push」方案，
+      携带 mihomo 混合端口代理环境变量调用 git push，**真正反映代理节点的
+      上行带宽**（端点位于中国，符合国内测速要求）。
+    - via_proxy=False（向后兼容）：直连 Gitee 用 git push（已剥离代理变量），
+      反映家庭宽带直连上行。
     返回 {ok, mibps, bytes, seconds, error}。
     """
     token = env.get('GITEE_PRIVATE_TOKEN', '').strip()
@@ -336,78 +337,41 @@ def gitee_push_speedtest(env, size_mib, push_timeout, branch, via_proxy=True):
     if not via_proxy:
         return _gitee_push_direct(env, token, owner, repo, size_mib, push_timeout, branch)
 
-    # 经代理上行：生成 <=1MB 随机文件，base64 后经混合端口代理 PUT 到 Gitee API
-    work = HOME_RUNTIME / 'speedtest-upload-tmp'
-    work.mkdir(parents=True, exist_ok=True)
-    total = min(int(size_mib * 1024 * 1024), GITEE_UPLOAD_MAX_BYTES)
-    if total <= 0:
-        total = 256 * 1024
-    payload_path = work / 'speedtest_upload.bin'
+    # 经代理上行：复用 speedtest_gitee 的「经代理 git push」方案——
+    # 携带 mihomo 代理环境变量调用 git push，真正反映代理节点的上行带宽。
     try:
-        with payload_path.open('wb') as f:
-            f.write(os.urandom(total))
+        gitee = ensure_gitee_remote(env)
+        test_file = ensure_test_file(int(size_mib))
     except Exception as e:
-        return {'ok': False, 'mibps': None, 'error': f'create test file failed: {e}'}
-    try:
-        b64 = base64.b64encode(payload_path.read_bytes()).decode('ascii')
-    except Exception as e:
-        return {'ok': False, 'mibps': None, 'error': f'encode failed: {e}'}
+        return {'ok': False, 'mibps': None, 'error': f'prepare gitee/ test file failed: {e}'}
 
-    proxy = f'http://127.0.0.1:{MIHOMO_MIXED_PORT}'
-    path = f'speedtest/upload-{int(time.time())}.bin'
-    api_url = f'https://gitee.com/api/v5/repos/{owner}/{repo}/contents/{path}'
-    # 用临时 json 体避免命令行注入 / 长度限制
-    body = json.dumps({
-        'access_token': token,
-        'content': b64,
-        'message': 'proxy-speedtest upload benchmark',
-        'branch': branch,
-    }).encode('utf-8')
-    body_path = work / 'upload_body.json'
-    body_path.write_bytes(body)
-
-    cmd = [
-        'curl', '-sS', '-x', proxy,
-        '-H', 'Content-Type: application/json',
-        '-H', 'User-Agent: Mozilla/5.0',
-        '--data', '@' + str(body_path),
-        '-o', '/dev/null',
-        '-w', '%{time_total},%{http_code}',
-        '--connect-timeout', '10',
-        '--max-time', str(push_timeout),
-        api_url,
-    ]
+    local_env = build_proxy_env(env)
+    local_env['GIT_TERMINAL_PROMPT'] = '0'
+    repo_dir = HOME_RUNTIME / 'speedtest-upload-repo'
+    total = test_file.stat().st_size
     try:
         t0 = time.perf_counter()
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=push_timeout + 30)
+        dur = git_force_push_testfile(
+            repo_dir=repo_dir,
+            remote=gitee['remote_with_token'],
+            env=local_env,
+            file_path=test_file,
+            commit_message='proxy-speedtest upload benchmark',
+            push_timeout=push_timeout,
+            branch_name=branch,
+            target_filename=TEST_FILE_NAME,
+            gitee=gitee,
+        )
         dt = time.perf_counter() - t0
-        if out.returncode != 0:
-            return {'ok': False, 'mibps': None, 'error': (out.stderr or out.stdout).strip()[:200]}
-        parts = (out.stdout.strip().split(',') + ['0', '0'])[:2]
-        dur = float(parts[0] or '0')
-        code = int(parts[1] or '0')
-        if code < 200 or code >= 300:
-            return {'ok': False, 'mibps': None, 'error': f'gitee api http {code}'}
-        if dur <= 0:
+        # git_force_push_testfile 返回其内置 time.time() 计时，取两者中较稳者
+        measured = dur if dur and dur > 0 else dt
+        if measured <= 0:
             return {'ok': False, 'mibps': None, 'error': 'upload too fast to measure'}
-        mibps = total / 1024 / 1024 / dur
+        mibps = total / 1024 / 1024 / measured
         return {'ok': True, 'mibps': round(mibps, 2), 'bytes': total,
-                'seconds': round(dur, 2), 'error': None}
+                'seconds': round(measured, 2), 'error': None}
     except Exception as e:
         return {'ok': False, 'mibps': None, 'error': str(e)[:200]}
-    finally:
-        # 尽力删除已上传文件，避免仓库堆积（忽略失败）
-        try:
-            del_body = json.dumps({
-                'access_token': token,
-                'message': 'proxy-speedtest cleanup',
-                'branch': branch,
-                'sha': '__PLACEHOLDER__',
-            })
-            # 需先取 sha，成本高；此处仅本地清理上传体，远端留待后续覆盖。
-            body_path.unlink(missing_ok=True)
-        except Exception:
-            pass
 
 
 def _gitee_push_direct(env, token, owner, repo, size_mib, push_timeout, branch):
