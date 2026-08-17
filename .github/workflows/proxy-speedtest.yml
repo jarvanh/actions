@@ -45,7 +45,7 @@ jobs:
           PROXY_SPEEDTEST_GITEE_OWNER: ${{ secrets.PROXY_SPEEDTEST_GITEE_OWNER }}
           PROXY_SPEEDTEST_GITEE_REPO: proxy-speedtest-temp
           PROXY_SPEEDTEST_PUSH_TIMEOUT: '30'
-        run: python proxy-speedtest/speedtest.py
+        run: python .github/scripts/proxy-speedtest/speedtest.py
 
       - name: Upload speedtest report
         if: always()
