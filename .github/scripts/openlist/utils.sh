@@ -158,7 +158,7 @@ _get_path_stats() {
 }
 
 # 运行 rclone check 并构建差异文件列表（最多 20 条）
-# 返回多行文本，每条格式: "[序号] [差异类型] 文件路径"
+# 返回多行文本，每条格式: "• [差异类型] 文件路径"（与通知 bullet 风格一致）
 _build_diff_files_list() {
   local source_path="$1"
   local dest_path="$2"
@@ -166,15 +166,14 @@ _build_diff_files_list() {
   local -a extra_args=("$@")
   local check_combined
   check_combined=$(timeout 300 rclone check "$source_path" "$dest_path" --size-only "${extra_args[@]}" --combined - 2>/dev/null || true)
-  local result="" diff_count=0 idx=0
+  local result="" diff_count=0
   while IFS= read -r line; do
     local marker="${line:0:1}"
     local fpath="${line:2}"
-    idx=$((idx + 1))
     case "$marker" in
-      +) result+="[${idx}] [源端有/目标缺失] ${fpath}"$'\n' ;;
-      -) result+="[${idx}] [目标多余/仅目标存在] ${fpath}"$'\n' ;;
-      '*') result+="[${idx}] [大小/内容不一致] ${fpath}"$'\n' ;;
+      +) result+="• [源端有/目标缺失] ${fpath}"$'\n' ;;
+      -) result+="• [目标多余/仅目标存在] ${fpath}"$'\n' ;;
+      '*') result+="• [大小/内容不一致] ${fpath}"$'\n' ;;
     esac
     diff_count=$((diff_count + 1))
     if [ "$diff_count" -ge 20 ]; then

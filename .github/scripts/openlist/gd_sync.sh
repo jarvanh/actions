@@ -158,14 +158,12 @@ _gd_sync() {
     # object not found（源文件不存在），使用结构化通知
     SYNC_FAILED=1
     local gd_fail_summary=""
-    local gd_fail_idx=0
+    local gd_fail_total=0
     while IFS= read -r failed_line; do
       [ -z "$failed_line" ] && continue
-      gd_fail_idx=$((gd_fail_idx + 1))
-      [ -n "$gd_fail_summary" ] && gd_fail_summary+=$'\n'
-      gd_fail_summary+="[${gd_fail_idx}] 源文件：${source_path}/${failed_line}"$'\n'
-      gd_fail_summary+="    目标文件：${dest_path}/${failed_line}"$'\n'
-      gd_fail_summary+="    失败原因：源文件不存在 (object not found)"$'\n'
+      gd_fail_total=$((gd_fail_total + 1))
+      gd_fail_summary+="• ${failed_line}"$'\n'
+      gd_fail_summary+="  原因：源文件不存在 (object not found)"$'\n'
     done < <(
       grep -E 'ERROR : .+: Failed to copy.*object not found' "$LAST_GD_ATTEMPT_LOG" 2>/dev/null | \
         sed -E 's/^.*ERROR : //; s/: Failed to copy.*$//' | sort -u
@@ -185,7 +183,7 @@ _gd_sync() {
     onf_msg+="• 目标：${dest_path}"$'\n'
     onf_msg+=$'\n''🚫 排除规则'$'\n'
     onf_msg+="${gd_exclude_list}"$'\n'
-    onf_msg+=$'\n''❌ 无法同步文件：'$'\n'
+    onf_msg+=$'\n'"❌ 无法同步文件（${gd_fail_total} 个）："$'\n'
     onf_msg+="${gd_fail_summary}"
     if [ -n "$gd_diff_files_list" ]; then
       onf_msg+=$'\n\n'"📋 差异文件列表："$'\n'
