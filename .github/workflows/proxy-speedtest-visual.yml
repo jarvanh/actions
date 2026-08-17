@@ -1,0 +1,58 @@
+name: proxy-speedtest-visual
+
+# 独立的可视化测速任务：测量节点延迟 + 下载速度，生成可交互 HTML 报告。
+# 与 proxy-speedtest.yml（Gitee 上行测速）解耦，可单独触发，互不依赖。
+on:
+  schedule:
+    # 每 6 小时测一次：UTC 03:00, 09:00, 15:00, 21:00（北京 11:00, 17:00, 23:00, 05:00），与 Gitee 任务错峰
+    - cron: "0 3,9,15,21 * * *"
+  workflow_dispatch:
+
+jobs:
+  speedtest-visual:
+    concurrency: proxy-speedtest-visual-singleton
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install pyyaml curl
+
+      - name: Run node speedtest (latency + download)
+        env:
+          PROXY_SPEEDTEST_DETACH: '0'
+          PROXY_SPEEDTEST_SUB_URLS: ${{ secrets.PROXY_SPEEDTEST_SUB_URLS }}
+          # 自定义测试参数（可按需修改）
+          PROXY_SPEEDTEST_LATENCY_TARGETS: 'https://www.gstatic.com/generate_204,https://www.baidu.com'
+          PROXY_SPEEDTEST_LATENCY_SAMPLES: '4'
+          PROXY_SPEEDTEST_LATENCY_TIMEOUT: '8'
+          PROXY_SPEEDTEST_DOWNLOAD_URLS: 'https://mirrors.cloud.tencent.com/archlinux/iso/latest/sha256sums.txt,https://download.geonode.com/test/10mb.bin'
+          PROXY_SPEEDTEST_SIZE_MIB: '10'
+          PROXY_SPEEDTEST_DOWNLOAD_TIMEOUT: '30'
+          PROXY_SPEEDTEST_CONNECTIONS: '1'
+          PROXY_SPEEDTEST_SWITCH_SETTLE_SECONDS: '1.5'
+          PROXY_SPEEDTEST_MAX_NODES: '0'
+          # 可选：开启 Gitee 上行测速（需配置 GITEE 相关 secret）
+          PROXY_SPEEDTEST_ENABLE_PUSH: '0'
+          GITEE_PRIVATE_TOKEN: ${{ secrets.GITEE_PRIVATE_TOKEN }}
+          PROXY_SPEEDTEST_GITEE_OWNER: ${{ secrets.PROXY_SPEEDTEST_GITEE_OWNER }}
+          PROXY_SPEEDTEST_GITEE_REPO: proxy-speedtest-temp
+          PROXY_SPEEDTEST_PUSH_TIMEOUT: '30'
+        run: python proxy-speedtest/speedtest.py
+
+      - name: Upload speedtest report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: proxy-speedtest-report
+          path: |
+            ~/proxy-speedtest/speedtest_report.html
+            ~/proxy-speedtest/speedtest_result.json
+          retention-days: 30
