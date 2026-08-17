@@ -66,19 +66,4 @@ jobs:
           #                             即可让后续运行「更新」同一 Gist 而非反复新建
           GH_TOKEN: ${{ secrets.PAT }}
           PROXY_SPEEDTEST_GIST_ID: ${{ secrets.PROXY_SPEEDTEST_GIST_ID }}
-          # 报告写入仓库内的 proxy-speedtest-reports/ 目录（默认回退即此路径，显式指定以防歧义）
-          PROXY_SPEEDTEST_OUTPUT_DIR: ${{ github.workspace }}/proxy-speedtest-reports
         run: python .github/scripts/proxy-speedtest/speedtest.py
-
-      - name: Commit report to repository
-        if: always()
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add proxy-speedtest-reports/
-          if git diff --cached --quiet; then
-            echo "no report changes"
-          else
-            git commit -m "chore(proxy-speedtest): 更新可视化测速报告 [skip ci]"
-            git push
-          fi
