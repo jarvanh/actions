@@ -25,6 +25,7 @@ jobs:
 
       - name: Run proxy speedtest
         env:
+          PROXY_SPEEDTEST_DETACH: '0'
           GITEE_PRIVATE_TOKEN: ${{ secrets.GITEE_PRIVATE_TOKEN }}
           PROXY_SPEEDTEST_SUB_URLS: ${{ secrets.PROXY_SPEEDTEST_SUB_URLS }}
           PROXY_SPEEDTEST_GITEE_OWNER: ${{ secrets.PROXY_SPEEDTEST_GITEE_OWNER }}
