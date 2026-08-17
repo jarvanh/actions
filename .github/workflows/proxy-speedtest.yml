@@ -9,8 +9,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  speedtest-visual:
-    concurrency: proxy-speedtest-visual-singleton
+  speedtest:
+    concurrency: proxy-speedtest-singleton
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
