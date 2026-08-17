@@ -1437,16 +1437,34 @@ _send_sync_result_notification() {
   local exclude_list=""
   exclude_list=$(_build_exclude_bullets "${extra_args[@]}")
 
-  # 构建 fix_summary（已修复文件：原始文件名 → 实际文件名）
+  # 构建 fix_summary（已修复文件：目录只展示一次，原名/实际名/大小分行，方法用短标签）
   local fix_summary=""
+  local fix_total=0
   if [ -s "$fix_list" ]; then
+    fix_total=$(grep -c . "$fix_list" 2>/dev/null || true)
     while IFS='|' read -r f_original f_alternative f_method f_restore f_size f_bytes f_mid; do
       [ -z "$f_original" ] && continue
+      local f_dir f_orig_base f_alt_base f_method_tag
+      f_dir=$(dirname -- "$f_original")
+      f_orig_base=$(basename -- "$f_original")
+      f_alt_base=$(basename -- "$f_alternative")
+      f_method_tag=$(_method_short "$f_mid")
       if [ "$f_original" = "$f_alternative" ]; then
-        fix_summary+="• ${f_original} (${f_size}) — ${f_method}"$'\n'
+        # 同名修复: 一行完整路径
+        fix_summary+="• ${f_original}"$'\n'
+      elif [ "$f_dir" = "$(dirname -- "$f_alternative")" ]; then
+        # 同目录改名: 目录只展示一次，避免长路径重复两遍
+        if [ "$f_dir" = "." ]; then
+          fix_summary+="• 原名：${f_orig_base}"$'\n'
+        else
+          fix_summary+="• 目录：${f_dir}/"$'\n'"  原名：${f_orig_base}"$'\n'
+        fi
+        fix_summary+="  实际：${f_alt_base}"$'\n'
       else
-        fix_summary+="• ${f_original} → ${f_alternative} (${f_size}, ${f_method})"$'\n'
+        # 目录有变（如方法9 上传到父目录）: 双方完整相对路径
+        fix_summary+="• 原路径：${f_original}"$'\n'"  实际路径：${f_alternative}"$'\n'
       fi
+      fix_summary+="  大小：${f_size}（${f_method_tag}）"$'\n'
     done < "$fix_list"
   fi
   [ -z "$fix_summary" ] && fix_summary="无"
@@ -1528,7 +1546,7 @@ _send_sync_result_notification() {
     partial_msg+='🚫 排除规则'$'\n'
     partial_msg+="${exclude_list}"$'\n'
     partial_msg+=$'\n'
-    partial_msg+='✅ 已通过其他方式同步（原始文件名 → 实际文件名）：'$'\n'
+    partial_msg+="✅ 已通过其他方式同步（${fix_total} 个文件）："$'\n'
     partial_msg+="${fix_summary}"$'\n'
     partial_msg+=$'\n'
     partial_msg+='❌ 无法同步文件：'$'\n'
@@ -1559,7 +1577,7 @@ _send_sync_result_notification() {
     partial_msg+='🚫 排除规则'$'\n'
     partial_msg+="${exclude_list}"$'\n'
     partial_msg+=$'\n'
-    partial_msg+='✅ 已通过其他方式同步（原始文件名 → 实际文件名）：'$'\n'
+    partial_msg+="✅ 已通过其他方式同步（${fix_total} 个文件）："$'\n'
     partial_msg+="${fix_summary}"
     if [ -n "$diff_files_list" ]; then
       partial_msg+=$'\n\n'"📋 差异文件列表："$'\n'
