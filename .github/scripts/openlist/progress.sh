@@ -27,7 +27,7 @@ PROGRESS_LAST_UPDATE_FILE="/tmp/progress_last_update.txt"
 
 # 注册任务到队列（初始化时调用）
 # 用法: progress_register_task <task_id> <display_name> [size_hint]
-#   size_hint — 源端大小（如 "3.100 GiB"），非运行态任务展示为 "• 名称：大小"
+#   size_hint — 源端大小（如 "3.100 GiB"），非运行态任务展示为 "• 名称 — 大小"
 # TSV 格式: task_id \t display_name \t status(pending/running/completed/skipped/failed) \t detail \t size_hint
 progress_register_task() {
   local task_id="$1"
@@ -115,7 +115,7 @@ _progress_render() {
   fi
 
   # 统计各状态任务数
-  # 进行中: "• 名称 — 动态详情"；其余状态: "• 名称：源端大小"（size_hint 存在时）
+  # 列表项统一语法: "• 名称 — <i>备注</i>"（进行中为动态详情，其余为源端大小）
   local total=0 pending=0 running=0 completed=0 skipped=0 failed=0
   local pending_list="" running_list="" completed_list="" skipped_list="" failed_list=""
 
@@ -130,7 +130,7 @@ _progress_render() {
         pending)
           pending=$((pending + 1))
           pending_list+="• $(escape_html "$tname")"
-          [ -n "$tsize" ] && pending_list+="：${tsize}"
+          [ -n "$tsize" ] && pending_list+=" — <i>${tsize}</i>"
           pending_list+=$'\n'
           ;;
         running)
@@ -142,19 +142,19 @@ _progress_render() {
         completed)
           completed=$((completed + 1))
           completed_list+="• $(escape_html "$tname")"
-          [ -n "$tsize" ] && completed_list+="：${tsize}"
+          [ -n "$tsize" ] && completed_list+=" — <i>${tsize}</i>"
           completed_list+=$'\n'
           ;;
         skipped)
           skipped=$((skipped + 1))
           skipped_list+="• $(escape_html "$tname")"
-          [ -n "$tsize" ] && skipped_list+="：${tsize}"
+          [ -n "$tsize" ] && skipped_list+=" — <i>${tsize}</i>"
           skipped_list+=$'\n'
           ;;
         failed)
           failed=$((failed + 1))
           failed_list+="• $(escape_html "$tname")"
-          [ -n "$tsize" ] && failed_list+="：${tsize}"
+          [ -n "$tsize" ] && failed_list+=" — <i>${tsize}</i>"
           failed_list+=$'\n'
           ;;
       esac
@@ -201,19 +201,19 @@ _progress_render() {
   fi
 
   if [ "$pending" -gt 0 ]; then
-    msg+=$'\n'"⏳ <b>待处理</b>"$'\n'"${pending_list}"
+    msg+=$'\n'"⏳ <b>待处理 · ${pending}</b>"$'\n'"${pending_list}"
   fi
 
   if [ "$completed" -gt 0 ]; then
-    msg+=$'\n'"✅ <b>已完成</b>"$'\n'"${completed_list}"
+    msg+=$'\n'"✅ <b>已完成 · ${completed}</b>"$'\n'"${completed_list}"
   fi
 
   if [ "$skipped" -gt 0 ]; then
-    msg+=$'\n'"⏭️ <b>已跳过</b>"$'\n'"${skipped_list}"
+    msg+=$'\n'"⏭️ <b>已跳过 · ${skipped}</b>"$'\n'"${skipped_list}"
   fi
 
   if [ "$failed" -gt 0 ]; then
-    msg+=$'\n'"❌ <b>失败</b>"$'\n'"${failed_list}"
+    msg+=$'\n'"❌ <b>失败 · ${failed}</b>"$'\n'"${failed_list}"
   fi
 
   msg+=$'\n'"⏱️ 已用：<b>${time_str}</b>"
@@ -317,6 +317,12 @@ progress_set_phase() {
 # 用法: progress_set_stats <stats_html>
 progress_set_stats() {
   echo "$1" > "$PROGRESS_STATS_FILE"
+  _progress_refresh
+}
+
+# 手动刷新进度消息（无节流）
+# 用法: 任务队列注册完成后调用，让"总任务"在首个任务开始前就是全量
+progress_reload() {
   _progress_refresh
 }
 

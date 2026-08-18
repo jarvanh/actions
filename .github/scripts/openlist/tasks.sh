@@ -43,7 +43,10 @@ _short_dest_head() {
   esac
 }
 
-# 预览模式：注册任务到进度系统并添加预览对（不实际同步）
+# 预览/仅注册模式：注册任务到进度系统（不实际同步）
+#   TASK_PREVIEW_ONLY=1  — 注册 + 发送预览通知
+#   TASK_REGISTER_ONLY=1 — 仅注册（skip_preview=true 时使用，保证进度消息
+#                          "总任务"从一开始就是全量，而非随 task_begin 逐个增长）
 _preview_register() {
   local task_name="$1"
   local source_path="$2"
@@ -51,17 +54,20 @@ _preview_register() {
   shift 3
   local extra_args=("$@")
 
-  # task_name 变化时刷新上一个预览组
-  if [ "$_PREVIEW_CUR_TASK" != "$task_name" ]; then
-    if [ -n "$_PREVIEW_CUR_TASK" ]; then
-      flush_task_preview
+  # 仅注册模式跳过预览通知，只算源端大小并注册
+  if [ "${TASK_REGISTER_ONLY:-0}" != "1" ]; then
+    # task_name 变化时刷新上一个预览组
+    if [ "$_PREVIEW_CUR_TASK" != "$task_name" ]; then
+      if [ -n "$_PREVIEW_CUR_TASK" ]; then
+        flush_task_preview
+      fi
+      start_task_preview "$task_name"
+      _PREVIEW_CUR_TASK="$task_name"
     fi
-    start_task_preview "$task_name"
-    _PREVIEW_CUR_TASK="$task_name"
+    add_preview_pair "$source_path" "$dest_path" "${extra_args[@]}"
   fi
-  add_preview_pair "$source_path" "$dest_path" "${extra_args[@]}"
 
-  # 同时注册到进度系统（pending 状态）
+  # 注册到进度系统（pending 状态）
   # 显示名: 目标端过长时截断；附源端大小提示（add_preview_pair 刚算过，缓存命中）
   local _task_id _src_bytes _size_hint
   _task_id=$(_derive_task_id "$task_name" "$dest_path")
@@ -440,8 +446,8 @@ sync_task() {
 
   local current_depth=${SYNC_AUTO_SPLIT_DEPTH:-0}
 
-  # 预览模式：只注册，不实际同步
-  if [ "$current_depth" -eq 0 ] && [ -n "$TASK_PREVIEW_ONLY" ]; then
+  # 预览/仅注册模式：只注册，不实际同步
+  if [ "$current_depth" -eq 0 ] && { [ -n "$TASK_PREVIEW_ONLY" ] || [ "${TASK_REGISTER_ONLY:-0}" = "1" ]; }; then
     _preview_register "$task_name" "$source_path" "$dest_path" "${extra_args[@]}"
     return 0
   fi
@@ -510,8 +516,8 @@ gd_task() {
     SYNC_SKIP_SECONDS=$((_skip_days * 24 * 60 * 60))
   fi
 
-  # 预览模式：只注册，不实际同步
-  if [ -n "$TASK_PREVIEW_ONLY" ]; then
+  # 预览/仅注册模式：只注册，不实际同步
+  if [ -n "$TASK_PREVIEW_ONLY" ] || [ "${TASK_REGISTER_ONLY:-0}" = "1" ]; then
     _preview_register "$task_name" "$source_path" "$dest_path" "${extra_args[@]}"
     return 0
   fi
