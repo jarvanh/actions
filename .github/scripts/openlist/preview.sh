@@ -35,8 +35,8 @@ _get_remote_size_count() {
   fi
   rm -f "$err_file"
   local bytes count
-  bytes=$(echo "$size_json" | jq -r '.bytes // 0' 2>/dev/null || echo 0)
-  count=$(echo "$size_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
+  bytes=$(_size_json_field "$size_json" bytes)
+  count=$(_size_json_field "$size_json" count)
   echo "${bytes} ${count}"
 }
 
@@ -59,16 +59,9 @@ _get_source_size_with_excludes() {
 
   local result="0 0"
   local size_json
-  if [ ${#extra_args[@]} -gt 0 ]; then
-    size_json=$(rclone size "$source_path" --json "${extra_args[@]}" 2>/dev/null || true)
-  else
-    size_json=$(rclone size "$source_path" --json 2>/dev/null || true)
-  fi
+  size_json=$(_rclone_size_json "$source_path" "${extra_args[@]}")
   if [ -n "$size_json" ]; then
-    local bytes count
-    bytes=$(echo "$size_json" | jq -r '.bytes // 0' 2>/dev/null || echo 0)
-    count=$(echo "$size_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
-    result="${bytes} ${count}"
+    result="$(_size_json_field "$size_json" bytes) $(_size_json_field "$size_json" count)"
   fi
   PREVIEW_SRC_CACHE[$cache_key]="$result"
   echo "$result"

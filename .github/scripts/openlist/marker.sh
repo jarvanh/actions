@@ -87,6 +87,78 @@ _carry_forward_fixed() {
   echo "$carried_json"
 }
 
+# ===== marker 修复字段读写统一接口 =====
+# 所有对 marker JSON 的修复字段（fixed_files / fix_blacklist）读写必须经由
+# 以下函数，禁止在业务脚本内散落 jq 副本（历史上有 4 份实现，曾互相漂移）。
+
+# 把全局关联数组 FIX_METHOD_BLACKLIST 序列化为 JSON 对象（空数组输出 {}）
+fix_blacklist_to_json() {
+  local bl_json="{}" f
+  for f in "${!FIX_METHOD_BLACKLIST[@]}"; do
+    bl_json=$(jq -cn --argjson j "$bl_json" --arg k "$f" --arg v "${FIX_METHOD_BLACKLIST[$f]}" \
+      '$j + {($k): $v}' 2>/dev/null) || bl_json="{}"
+  done
+  echo "$bl_json"
+}
+
+# 合并两个 JSON 对象（b 并入 a，b 优先）；失败时回退为 a
+# 注意: 调用方禁止写 ${VAR:-{}} —— bash 会给已赋值变量追加字面 }，产生非法 JSON
+_marker_merge_json() {
+  local a="$1" b="$2"
+  jq -cn --argjson a "$a" --argjson b "$b" '($a // {}) * ($b // {})' 2>/dev/null || echo "$a"
+}
+
+# 从 marker JSON 安全提取 fix_blacklist 对象（缺失/非对象时输出 {}）
+_marker_read_blacklist() {
+  echo "${1:-}" | jq -c 'if (.fix_blacklist // null) | type == "object" then .fix_blacklist else {} end' 2>/dev/null || echo "{}"
+}
+
+# 在 marker JSON 上合并黑名单字段（旧 ∪ 新，新优先），stdin → stdout
+# 用法: echo "$marker_json" | marker_merge_blacklist "$bl_json"
+marker_merge_blacklist() {
+  local bl_json="$1"
+  jq -c --argjson bl "$bl_json" \
+    '. + {fix_blacklist: ((.fix_blacklist // {}) * $bl)}' 2>/dev/null
+}
+
+# 在 marker JSON 上追加/覆盖一个修复条目（同 original 新覆盖旧）并合并黑名单，
+# stdin → stdout；fixed_count/fixed_bytes 自动重算
+# 用法: marker_add_fix_entry "$entry_json" "$bl_json" < "$state_file"
+marker_add_fix_entry() {
+  local entry_json="$1" bl_json="$2"
+  jq -c --argjson e "$entry_json" --argjson bl "$bl_json" '
+    . as $m
+    | ($m.fixed_files // []) as $ff
+    | ($ff | map(select(.original != $e.original)) + [$e]) as $nff
+    | $m + {fixed_files: $nff,
+            fixed_count: ($nff | length),
+            fixed_bytes: ([$nff[].size_bytes] | add // 0),
+            fix_blacklist: (($m.fix_blacklist // {}) * $bl)}
+  ' 2>/dev/null
+}
+
+# 从 marker JSON 移除指定 original 的修复条目，stdin → stdout
+# also_blacklist=1 时同时删除该文件的 fix_blacklist 条目（还原成功场景）
+# 用法: echo "$marker_json" | marker_remove_fix_entry "$orig" [also_blacklist]
+marker_remove_fix_entry() {
+  local orig="$1" also_bl="${2:-0}"
+  if [ "$also_bl" = "1" ]; then
+    jq -c --arg o "$orig" '
+      del(.fix_blacklist[$o])
+      | .fixed_files = ((.fixed_files // []) | map(select(.original != $o)))
+      | .fixed_count = (.fixed_files | length)
+      | .fixed_bytes = ([.fixed_files[].size_bytes] | add // 0)
+    ' 2>/dev/null
+  else
+    jq -c --arg o "$orig" '
+      .fixed_files //= []
+      | .fixed_files |= map(select(.original != $o))
+      | .fixed_count = (.fixed_files | length)
+      | .fixed_bytes = ([.fixed_files[].size_bytes] | add // 0)
+    ' 2>/dev/null
+  fi
+}
+
 # 持久化修复状态（fixed_files + fix_blacklist）— 无论本轮成败都写入
 # 与 save_sync_marker 的区别:
 #   - 部分失败轮（SYNC_FAILED=1）也要保存修复成果。否则下一轮看不到上轮
@@ -144,10 +216,9 @@ save_fix_state_marker() {
   # 黑名单合并: 旧 ∪ 新（新优先）；对已对齐文件的黑名单条目一并清理
   local merged_bl_json="{}"
   if [ -n "$old_marker" ]; then
-    merged_bl_json=$(echo "$old_marker" | jq -c 'if (.fix_blacklist // null) | type == "object" then .fix_blacklist else {} end' 2>/dev/null || echo "{}")
+    merged_bl_json=$(_marker_read_blacklist "$old_marker")
   fi
-  merged_bl_json=$(jq -cn --argjson a "$merged_bl_json" --argjson b "$new_bl_json" \
-    '($a // {}) * ($b // {})' 2>/dev/null || echo "$merged_bl_json")
+  merged_bl_json=$(_marker_merge_json "$merged_bl_json" "$new_bl_json")
 
   local fixed_count fixed_bytes
   fixed_count=$(echo "$merged_fixed_json" | jq 'length' 2>/dev/null || echo 0)
@@ -207,9 +278,9 @@ save_sync_marker() {
   # 获取源端大小和文件数（与 sync 相同的过滤口径）
   _extract_filter_args "${extra_args[@]}"
   local size_json source_bytes source_count
-  size_json=$(rclone size "$source_path" --json "${FILTER_ARGS[@]}" 2>/dev/null || true)
-  source_bytes=$(echo "$size_json" | jq -r '.bytes // 0' 2>/dev/null || echo 0)
-  source_count=$(echo "$size_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
+  size_json=$(_rclone_size_json "$source_path" "${FILTER_ARGS[@]}")
+  source_bytes=$(_size_json_field "$size_json" bytes)
+  source_count=$(_size_json_field "$size_json" count)
 
   # 双重保险：校验目标端真实文件数
   # 即使 _send_sync_result_notification 已做了同步后缓存刷新 + is_partial_success 检测，
@@ -217,9 +288,9 @@ save_sync_marker() {
   # （比如 auto-split 子目录各自通过检测，但汇总后总数不一致）
   # 目标端不加过滤: 替代文件/分卷/历史残留只会让 dest_count 偏大（对缺失判定是安全方向）
   local dest_size_json dest_bytes dest_count
-  dest_size_json=$(rclone size "$dest_path" --json 2>/dev/null || true)
-  dest_bytes=$(echo "$dest_size_json" | jq -r '.bytes // 0' 2>/dev/null || echo 0)
-  dest_count=$(echo "$dest_size_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
+  dest_size_json=$(_rclone_size_json "$dest_path")
+  dest_bytes=$(_size_json_field "$dest_size_json" bytes)
+  dest_count=$(_size_json_field "$dest_size_json" count)
 
   # 严格校验: 源端（过滤口径）与目标端文件数完全一致才写 marker。
   # 有任何缺失即拒绝 → 下次运行重新同步（rclone --size-only 幂等，已对齐文件直接跳过，无副作用）
@@ -241,6 +312,14 @@ save_sync_marker() {
   # 读取本任务（含 auto-split 子目录）累计的修复文件列表
   # sync_with_logging 每次执行后会把 fix_list 累计到 GLOBAL_FIXED_FILES_JSON
   local new_fixed_json="${GLOBAL_FIXED_FILES_JSON:-[]}"
+
+  # fallback 扫描脚本路径（/tmp 与仓库目录双候选：workflow 会把 *.py 一并拷到 /tmp）
+  local _scan_py
+  for _scan_py in \
+    "/tmp/scan_fix_signatures.py" \
+    "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scan_fix_signatures.py"; do
+    [ -f "$_scan_py" ] && break
+  done
 
   # ===== Carry-Forward 机制 =====
   # 重新同步如果没触发修复，new_fixed_json 会是空数组，但旧 marker 里的修复记录
@@ -273,194 +352,13 @@ save_sync_marker() {
   if [ "${total_new:-0}" -eq 0 ] && [ "${total_carried:-0}" -eq 0 ] && [ "${depth:-0}" -eq 0 ]; then
     echo "未发现修复记录（marker 可能被删），尝试从目标端扫描特征文件反推..."
 
-    local _tmp_out _tmp_py
+    local _tmp_out
     _tmp_out=$(mktemp)
-    _tmp_py=$(mktemp).py
-    # 把扫描脚本写进临时文件（Python 内用 subprocess.run(list) 传参，安全）
-    cat > "$_tmp_py" << 'PYEOF'
-import sys, os, re, base64, subprocess
-
-def main():
-    if len(sys.argv) < 4:
-        return
-    src_remote = sys.argv[1]
-    dst_remote = sys.argv[2]
-    out_path   = sys.argv[3]
-    timeout_s  = int(sys.argv[4]) if len(sys.argv) > 4 else 300
-
-    def b64url_decode(s):
-        s = s.replace('-', '+').replace('_', '/')
-        pad = (-len(s)) % 4
-        try:
-            return base64.b64decode(s + '=' * pad).decode('utf-8', errors='replace')
-        except Exception:
-            return None
-
-    def rclone_lsf(remote, files_only=False, with_size=False, timeout_s=timeout_s):
-        args = ["rclone", "lsf", remote, "-R"]
-        if files_only:
-            args.append("--files-only")
-        if with_size:
-            args += ["--format", "ps", "--separator", ";"]
-        try:
-            r = subprocess.run(args, capture_output=True, text=True, timeout=timeout_s)
-            return r.stdout
-        except Exception:
-            return ""
-
-    src_listing = rclone_lsf(src_remote)
-    src_by_basename = {}
-    src_full_set = set()
-    src_dir_leaf_set = set()
-    for line in src_listing.splitlines():
-        line = line.rstrip('/').strip()
-        if not line:
-            continue
-        src_full_set.add(line)
-        parts = line.split('/')
-        for i, p in enumerate(parts):
-            if i == len(parts) - 1:
-                src_by_basename.setdefault(p, []).append(line)
-            else:
-                src_dir_leaf_set.add(p)
-
-    dst_listing = rclone_lsf(dst_remote, files_only=True, with_size=True)
-
-    results = []
-    API_RE = re.compile(r'^file_(\d+)_(\d+)_api(\..+)?$')
-
-    for line in dst_listing.splitlines():
-        if ';' not in line:
-            continue
-        path, _, s = line.rpartition(';')
-        try:
-            size_bytes = int(s)
-        except ValueError:
-            size_bytes = 0
-        if not path:
-            continue
-        parts = path.split('/')
-        fname = parts[-1]
-        dir_parts = parts[:-1]
-        matched = False
-
-        # === 特征 1: .zip / .7z 包，去掉后缀文件名在源端存在 ===
-        if fname.lower().endswith('.zip') or fname.lower().endswith('.7z'):
-            ext_len = 4 if fname.lower().endswith('.zip') else 3
-            orig_fname = fname[:-ext_len]
-            if orig_fname in src_by_basename:
-                used_b64_dir = False
-                matched_dir_rel = '/'.join(dir_parts)
-                if dir_parts:
-                    dl = b64url_decode(dir_parts[-1])
-                    if dl and dl in src_dir_leaf_set:
-                        used_b64_dir = True
-                        nd = dir_parts[:-1] + [dl]
-                        cand = '/'.join(nd + [orig_fname])
-                        if cand in src_full_set:
-                            matched_dir_rel = '/'.join(nd)
-                zip_tag = "zip" if fname.lower().endswith('.zip') else "7z"
-                dp = "base64URL 编码目录 + " if used_b64_dir else "原路径 + "
-                method = f"rclone copyto（{dp}{zip_tag} 压缩包）"
-                original = f"{matched_dir_rel}/{orig_fname}" if matched_dir_rel else orig_fname
-                if original in src_full_set:
-                    results.append((original, path, method, size_bytes))
-                    matched = True
-
-        # === 特征 2: API 自动生成文件名 file_<ts>_<pid>_api.<ext> ===
-        if not matched:
-            m = API_RE.match(fname)
-            if m:
-                ext = m.group(3) or ''
-                candidates = []
-                if dir_parts:
-                    dl = b64url_decode(dir_parts[-1]) if dir_parts else None
-                    probe_dirs = ['/'.join(dir_parts)]
-                    if dl and dl in src_dir_leaf_set:
-                        probe_dirs.append('/'.join(dir_parts[:-1] + [dl]))
-                    for d in probe_dirs:
-                        for _, fulls in src_by_basename.items():
-                            for full in fulls:
-                                if full.startswith(d + '/') and full.endswith(ext):
-                                    candidates.append(full)
-                    if not candidates and ext:
-                        for _, fulls in src_by_basename.items():
-                            for full in fulls:
-                                if full.endswith(ext):
-                                    candidates.append(full)
-                if candidates:
-                    original = sorted(set(candidates))[0]
-                    used_b64_dir = False
-                    if dir_parts:
-                        dl = b64url_decode(dir_parts[-1])
-                        if dl and dl in src_dir_leaf_set:
-                            used_b64_dir = True
-                    dp = "base64URL 编码目录 + " if used_b64_dir else "原路径 + "
-                    method = f"OpenList API /fs/form（{dp}API 自动生成文件名）"
-                    results.append((original, path, method, size_bytes))
-                    matched = True
-
-        # === 特征 3: 文件名是 base64URL，解码后出现在源端同目录同扩展名 ===
-        if not matched:
-            if '.' in fname:
-                nb, ext = fname.rsplit('.', 1)
-                decoded = b64url_decode(nb)
-                if decoded:
-                    orig_name = decoded + '.' + ext
-                    pp = list(dir_parts)
-                    used_b64_dir = False
-                    if pp:
-                        dl = b64url_decode(pp[-1])
-                        if dl and dl in src_dir_leaf_set:
-                            used_b64_dir = True
-                            pp[-1] = dl
-                    cand = '/'.join(pp + [orig_name]) if pp else orig_name
-                    if cand in src_full_set:
-                        dp = "base64URL 编码目录 + " if used_b64_dir else "原路径 + "
-                        method = f"rclone copyto（{dp}base64URL 编码文件名）"
-                        results.append((cand, path, method, size_bytes))
-                        matched = True
-            else:
-                decoded = b64url_decode(fname)
-                if decoded:
-                    pp = list(dir_parts)
-                    used_b64_dir = False
-                    if pp:
-                        dl = b64url_decode(pp[-1])
-                        if dl and dl in src_dir_leaf_set:
-                            used_b64_dir = True
-                            pp[-1] = dl
-                    cand = '/'.join(pp + [decoded]) if pp else decoded
-                    if cand in src_full_set:
-                        dp = "base64URL 编码目录 + " if used_b64_dir else "原路径 + "
-                        method = f"rclone copyto（{dp}base64URL 编码文件名）"
-                        results.append((cand, path, method, size_bytes))
-                        matched = True
-
-        # === 特征 4: 只有目录最末段是 base64URL，文件名和源端相同 ===
-        if not matched and dir_parts:
-            dl = b64url_decode(dir_parts[-1])
-            if dl and dl in src_dir_leaf_set:
-                nd = dir_parts[:-1] + [dl]
-                cand = '/'.join(nd + [fname])
-                if cand in src_full_set:
-                    method = "rclone copyto（base64URL 编码目录 + 原文件名）"
-                    results.append((cand, path, method, size_bytes))
-
-    # 去重：按 original，保留 size 更大条目
-    seen = {}
-    for orig, alt, method, sz in results:
-        if orig not in seen or sz > seen[orig][3]:
-            seen[orig] = (orig, alt, method, sz)
-    with open(out_path, 'w', encoding='utf-8') as f:
-        for orig, (_, alt, method, sz) in seen.items():
-            esc_tab = lambda s: s.replace('\t', ' ').replace('\n', ' ')
-            f.write(f"{esc_tab(orig)}\t{esc_tab(alt)}\t{esc_tab(method)}\t{sz}\n")
-
-main()
-PYEOF
-
-    if timeout 600 python3 "$_tmp_py" "$source_path" "$dest_path" "$_tmp_out" 300 </dev/null 2>/dev/null; then
+    # 扫描逻辑在 scan_fix_signatures.py（随 *.py 拷到 /tmp，见 Load helper functions）
+    if [ ! -f "$_scan_py" ]; then
+      echo "⚠️ 未找到 scan_fix_signatures.py，跳过 fallback 扫描"
+      : > "$_tmp_out"
+    elif timeout 600 python3 "$_scan_py" "$source_path" "$dest_path" "$_tmp_out" 300 </dev/null 2>/dev/null; then
       :
     else
       echo "扫描超时或出错（忽略 fallback）"
@@ -500,7 +398,7 @@ PYEOF
         fi
       fi
     fi
-    rm -f "$_tmp_out" "$_tmp_py"
+    rm -f "$_tmp_out"
   fi
 
   # 合并: 本轮新修复 ∪ 继承修复 ∪ fallback 扫描修复，以 original 为 key 去重
@@ -536,14 +434,13 @@ PYEOF
   # 跳过这些方法，避免已判定假成功的方式每轮重复白跑。
   local merged_blacklist_json="{}"
   if [ -n "$old_marker" ]; then
-    merged_blacklist_json=$(echo "$old_marker" | jq -c 'if (.fix_blacklist // null) | type == "object" then .fix_blacklist else {} end' 2>/dev/null || echo "{}")
+    merged_blacklist_json=$(_marker_read_blacklist "$old_marker")
   fi
   # 不能写 ${VAR:-{}} —— bash 会给已赋值变量追加字面 }，产生非法 JSON，
   # 合并失败回退成 {} 会把旧 marker 已落盘的黑名单整体清零
   local _new_bl_json="${GLOBAL_FIX_BLACKLIST_JSON:-}"
   [ -z "$_new_bl_json" ] && _new_bl_json="{}"
-  merged_blacklist_json=$(jq -cn --argjson a "$merged_blacklist_json" --argjson b "$_new_bl_json" \
-    '($a // {}) * ($b // {})' 2>/dev/null || echo "$merged_blacklist_json")
+  merged_blacklist_json=$(_marker_merge_json "$merged_blacklist_json" "$_new_bl_json")
 
   # 构建 JSON 标记
   local marker_json
@@ -664,9 +561,9 @@ check_sync_marker() {
 
   _extract_filter_args "${extra_args[@]}"
   local current_size_json
-  current_size_json=$(rclone size "$source_path" --json "${FILTER_ARGS[@]}" 2>/dev/null || true)
-  MARKER_CURRENT_BYTES=$(echo "$current_size_json" | jq -r '.bytes // 0' 2>/dev/null || echo 0)
-  MARKER_CURRENT_COUNT=$(echo "$current_size_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
+  current_size_json=$(_rclone_size_json "$source_path" "${FILTER_ARGS[@]}")
+  MARKER_CURRENT_BYTES=$(_size_json_field "$current_size_json" bytes)
+  MARKER_CURRENT_COUNT=$(_size_json_field "$current_size_json" count)
   MARKER_CURRENT_DIRS=$(rclone lsf --dirs-only "$source_path" "${FILTER_ARGS[@]}" 2>/dev/null | sed 's|/$||' | sort)
 
   if [ "$MARKER_CURRENT_BYTES" -lt "$marker_bytes" ]; then
@@ -713,7 +610,7 @@ _load_marker_fixed_files() {
   MARKER_FIXED_COUNT=$(echo "$marker_json" | jq -r '.fixed_count // 0' 2>/dev/null || echo 0)
   MARKER_FIXED_BYTES=$(echo "$marker_json" | jq -r '.fixed_bytes // 0' 2>/dev/null || echo 0)
   MARKER_FIXED_FILES=$(echo "$marker_json" | jq -c '.fixed_files // []' 2>/dev/null || echo "[]")
-  MARKER_FIX_BLACKLIST=$(echo "$marker_json" | jq -c 'if (.fix_blacklist // null) | type == "object" then .fix_blacklist else {} end' 2>/dev/null || echo "{}")
+  MARKER_FIX_BLACKLIST=$(_marker_read_blacklist "$marker_json")
 }
 
 # 把 marker JSON 里的 top_dirs 统一转成"每行一个目录名、已排序"的文本格式
