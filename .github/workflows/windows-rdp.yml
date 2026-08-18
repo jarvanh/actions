@@ -85,40 +85,36 @@ jobs:
           $ngrok = "$env:RUNNER_TEMP\ngrok\ngrok.exe"
           # 配置 authtoken
           & $ngrok authtoken "${{ secrets.NGROK_AUTH_TOKEN }}"
-          # 后台启动 TCP 隧道暴露 3389
-          Start-Process -FilePath $ngrok -ArgumentList "tcp","3389" -WindowStyle Hidden -PassThru
-          # 等待 ngrok 的 4040 Web API 端口真正开始监听
-          $waited = 0
-          while ($waited -lt 30) {
-            try {
-              $conn = Test-NetConnection -ComputerName 127.0.0.1 -Port 4040 -WarningAction SilentlyContinue
-              if ($conn.TcpTestSucceeded) { break }
-            } catch {}
-            Start-Sleep -Seconds 2
-            $waited += 2
-          }
-          if ($waited -ge 30) {
-            echo "::error::ngrok 未启动，Web API 4040 未监听"
-            Get-Content "$env:RUNNER_TEMP\ngrok.log" -ErrorAction SilentlyContinue
-            exit 1
-          }
-          # 从 ngrok API 获取公网转发地址
+          # 后台启动 TCP 隧道暴露 3389，stdout 写入日志
+          $ngrokLog = "$env:RUNNER_TEMP\ngrok.log"
+          Start-Process -FilePath $ngrok -ArgumentList "tcp","3389" -RedirectStandardOutput $ngrokLog -RedirectStandardError "$env:RUNNER_TEMP\ngrok.err" -WindowStyle Hidden -PassThru
+          # 轮询日志文件，抓取转发地址（不依赖 4040 Web API）
+          $RDPAddr = $null
           $tries = 0
           do {
-            try {
-              $api = Invoke-RestMethod -Uri "http://127.0.0.1:4040/api/tunnels" -ErrorAction Stop
-              $tcp = $api.tunnels | Where-Object { $_.proto -eq "tcp" } | Select-Object -First 1
-              if ($tcp) { break }
-            } catch {}
             Start-Sleep -Seconds 3
             $tries++
-          } while ($tries -lt 20)
-          if (-not $tcp) {
-            echo "::error::无法获取 ngrok 隧道地址"
-            Get-Content "$env:RUNNER_TEMP\ngrok.log" -ErrorAction SilentlyContinue
+            if (Test-Path $ngrokLog) {
+              $line = Get-Content $ngrokLog -ErrorAction SilentlyContinue | Where-Object { $_ -match "Forwarding\s+tcp://" } | Select-Object -First 1
+              if ($line) {
+                $RDPAddr = ($line -split "tcp://")[1].Trim()
+                break
+              }
+              # 检测常见错误
+              $err = Get-Content $ngrokLog -ErrorAction SilentlyContinue | Where-Object { $_ -match "err|error|failed|invalid" } | Select-Object -First 1
+              if ($err) {
+                echo "::error::ngrok 报错: $err"
+                Get-Content $ngrokLog
+                exit 1
+              }
+            }
+          } while ($tries -lt 40)
+          if (-not $RDPAddr) {
+            echo "::error::无法获取 ngrok 转发地址"
+            Get-Content $ngrokLog -ErrorAction SilentlyContinue
+            Get-Content "$env:RUNNER_TEMP\ngrok.err" -ErrorAction SilentlyContinue
             exit 1
           }
-          $RDPAddr = $tcp.public_url -replace "^tcp://", ""
           echo "RDP_PUBLIC=$RDPAddr" >> $env:GITHUB_ENV
           echo "Public RDP address: $RDPAddr"
 
