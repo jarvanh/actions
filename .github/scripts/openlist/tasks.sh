@@ -23,6 +23,26 @@ _derive_task_id() {
   echo "${task_name}_${first_component}"
 }
 
+# 目标端路径过长时截断为 "remote:挂载/一级目录/..."（保留头部上下文）
+# 用于进度通知的任务显示名（如 openlist:wopan175/0/xxx → openlist:wopan175/0/...）
+_short_dest_head() {
+  local p="${1:-}" max_len=40
+  [ ${#p} -le "$max_len" ] && { echo "$p"; return; }
+  case "$p" in
+    *:*)
+      local remote="${p%%:*}" rest="${p#*:}"
+      local first="${rest%%/*}" rest2="${rest#*/}"
+      case "$rest2" in
+        */*) echo "${remote}:${first}/${rest2%%/*}/..." ;;
+        *)   echo "$p" ;;
+      esac
+      ;;
+    *)
+      echo "...${p: -$((max_len - 3))}"
+      ;;
+  esac
+}
+
 # 预览模式：注册任务到进度系统并添加预览对（不实际同步）
 _preview_register() {
   local task_name="$1"
@@ -42,9 +62,40 @@ _preview_register() {
   add_preview_pair "$source_path" "$dest_path" "${extra_args[@]}"
 
   # 同时注册到进度系统（pending 状态）
-  local _task_id
+  # 显示名: 目标端过长时截断；附源端大小提示（add_preview_pair 刚算过，缓存命中）
+  local _task_id _src_bytes _size_hint
   _task_id=$(_derive_task_id "$task_name" "$dest_path")
-  progress_register_task "$_task_id" "${source_path} → ${dest_path}"
+  _src_bytes=$(_get_source_size_with_excludes "$source_path" "${extra_args[@]}" | awk '{print $1}')
+  _size_hint=""
+  [[ "$_src_bytes" =~ ^[0-9]+$ ]] && [ "$_src_bytes" -gt 0 ] && _size_hint=$(format_bytes "$_src_bytes")
+  progress_register_task "$_task_id" "${source_path} → $(_short_dest_head "$dest_path")" "$_size_hint"
+}
+
+# 渲染子目录阶段树（供 PROGRESS_PHASE_INFO，多行）
+# 依赖调用方（_sync_task_impl）作用域内的变量（bash 动态作用域可见）:
+#   subdirs（排序后的子目录列表）/ subdir_size_map / subdir_status_map /
+#   total_subdirs_count / source_size_bytes
+# 输出格式:
+#   ▸ 源端 28 GiB · 子目录 3 个
+#   ├─ ✅ a：4 GiB（已同步）
+#   └─ 🔄 b：17 GiB（同步中）
+_render_subdir_phase_tree() {
+  local _tree="▸ 源端 $(format_bytes "$source_size_bytes") · 子目录 ${total_subdirs_count} 个"
+  local _name _mark _state _conn _i=0
+  while IFS= read -r _name; do
+    [ -z "$_name" ] && continue
+    _i=$((_i + 1))
+    case "${subdir_status_map[$_name]:-pending}" in
+      synced)  _mark="✅"; _state="已同步" ;;
+      skipped) _mark="⏭️"; _state="已跳过" ;;
+      failed)  _mark="❌"; _state="失败" ;;
+      syncing) _mark="🔄"; _state="同步中" ;;
+      *)       _mark="⏳"; _state="待同步" ;;
+    esac
+    _conn="├─"; [ "$_i" -eq "$total_subdirs_count" ] && _conn="└─"
+    _tree+=$'\n'"${_conn} ${_mark} $(escape_html "$_name")：$(format_bytes "${subdir_size_map[$_name]:-0}")（${_state}）"
+  done <<< "$subdirs"
+  echo "$_tree"
 }
 
 # 自动拆分同步实现：源端 > 50GB 时按一级子目录拆分，最后再完整同步一次
@@ -235,10 +286,11 @@ _sync_task_impl() {
 
   # 按子目录大小从小到大排序
   echo "按子目录大小排序..."
-  PROGRESS_PHASE_INFO="📂 <b>子目录拆分</b>（depth=${current_depth}，源端 $(format_bytes "$source_size_bytes")，正在统计大小...）"
+  PROGRESS_PHASE_INFO="▸ 📂 子目录拆分（depth=${current_depth}，源端 $(format_bytes "$source_size_bytes")，正在统计大小...）"
   progress_update "正在按子目录大小排序..."
   local sorted_subdirs=""
   declare -A subdir_size_map=()
+  declare -A subdir_status_map=()
   while IFS= read -r subdir; do
     [ -z "$subdir" ] && continue
     local subdir_bytes=0
@@ -254,14 +306,6 @@ _sync_task_impl() {
   # 预统计子目录总数（用于进度展示）
   local total_subdirs_count
   total_subdirs_count=$(echo "$subdirs" | grep -c . 2>/dev/null || echo 0)
-
-  # 构建子目录大小信息（HTML 片段，供进度通知展示）
-  local subdir_phase_info=""
-  subdir_phase_info="📂 <b>子目录大小</b>（共 ${total_subdirs_count} 个，源端 $(format_bytes "$source_size_bytes")）"
-  while IFS= read -r _info_subdir; do
-    [ -z "$_info_subdir" ] && continue
-    subdir_phase_info+=$'\n'"• $(escape_html "$_info_subdir"): $(format_bytes "${subdir_size_map[$_info_subdir]:-0}")"
-  done <<< "$subdirs"
 
   # 按子目录逐个同步（静默模式：无文件变更时跳过通知）
   SYNC_SKIP_QUIET=1
@@ -280,32 +324,39 @@ _sync_task_impl() {
     subtask_idx=$((subtask_idx + 1))
     local safe_subtask="${task_name}_${subdir//\//_}"
     echo "=== 子目录同步: ${safe_subtask} ==="
-    PROGRESS_PHASE_INFO="$subdir_phase_info"
+    subdir_status_map["$subdir"]="syncing"
+    PROGRESS_PHASE_INFO="$(_render_subdir_phase_tree)"
     local _completed_before=$((synced_subtasks + skipped_subtasks + failed_subtasks))
-    local _in_progress=$((subtask_idx - _completed_before))
-    progress_update "子目录 ${subtask_idx}/${total_subdirs_count}: ${subdir}" "📊 子目录: ${_completed_before}/${total_subdirs_count} 完成$([ "$_in_progress" -gt 0 ] && echo " (${_in_progress} 进行中)") | ✅${synced_subtasks} ⏭️${skipped_subtasks} ❌${failed_subtasks}"
+    progress_update "子目录 ${subtask_idx}/${total_subdirs_count}：${subdir}" "▸ 📊 子目录：${_completed_before}/${total_subdirs_count} 完成 | ✅${synced_subtasks} ⏭️${skipped_subtasks} ❌${failed_subtasks}"
     SYNC_AUTO_SPLIT_DEPTH=$((current_depth + 1))
+    # PROGRESS_SUPPRESS=1: 子任务内部的 progress_update 不覆盖父任务的
+    # 阶段树（当前子目录已由上方标记为 🔄 同步中）
+    PROGRESS_SUPPRESS=1
     # < /dev/null: 子任务全链路（sync/fix/marker）不读 stdin；不隔离的话
     # 链路里任何误读 stdin 的命令（jq/rclone rcat 等）会把本循环的子目录
     # 列表吃掉，剩余子任务被静默跳过（run 31954162437 实锤: 只同步了
     # archive 就跳去最终完整同步，照片/j-1024j 两个子任务丢失）
     _sync_task_impl "${source_path}/${subdir}" "${dest_path}/${subdir}" "${safe_subtask}" "${extra_args[@]}" < /dev/null || true
+    PROGRESS_SUPPRESS=0
     SYNC_AUTO_SPLIT_DEPTH=$current_depth
     if [ "$SYNC_SKIPPED" = "1" ]; then
       skipped_subtasks=$((skipped_subtasks + 1))
+      subdir_status_map["$subdir"]="skipped"
       skipped_list+="• ${subdir} ($(format_bytes "${subdir_size_map[$subdir]:-0}"))"$'\n'
     elif [ "$SYNC_FAILED" = "0" ]; then
       synced_subtasks=$((synced_subtasks + 1))
+      subdir_status_map["$subdir"]="synced"
       total_transferred=$((total_transferred + SYNC_TRANSFERRED_BYTES))
       synced_list+="• ${subdir} ($(format_bytes "${subdir_size_map[$subdir]:-0}"))"$'\n'
     else
       failed_subtasks=$((failed_subtasks + 1))
+      subdir_status_map["$subdir"]="failed"
       total_transferred=$((total_transferred + SYNC_TRANSFERRED_BYTES))
       failed_list+="• ${subdir} ($(format_bytes "${subdir_size_map[$subdir]:-0}"))"$'\n'
     fi
-    PROGRESS_PHASE_INFO="$subdir_phase_info"
+    PROGRESS_PHASE_INFO="$(_render_subdir_phase_tree)"
     local _completed_after=$((synced_subtasks + skipped_subtasks + failed_subtasks))
-    progress_update_force "子目录 ${subtask_idx}/${total_subdirs_count} 完成: ${subdir}" "📊 子目录: ${_completed_after}/${total_subdirs_count} 完成 | ✅${synced_subtasks} ⏭️${skipped_subtasks} ❌${failed_subtasks}"
+    progress_update_force "子目录 ${subtask_idx}/${total_subdirs_count} 完成：${subdir}" "▸ 📊 子目录：${_completed_after}/${total_subdirs_count} 完成 | ✅${synced_subtasks} ⏭️${skipped_subtasks} ❌${failed_subtasks}"
   done <<< "$subdirs"
   SYNC_SKIP_QUIET=0
 
@@ -327,8 +378,8 @@ _sync_task_impl() {
   # 最终完整同步（仅在顶层执行，正常通知）
   if [ "$current_depth" -eq 0 ]; then
     echo "=== 最终完整同步: ${task_name} ==="
-    PROGRESS_PHASE_INFO="$subdir_phase_info"
-    progress_update_force "最终完整同步中" "📊 子目录: ${total_subtasks}/${total_subtasks} 完成 | ✅${synced_subtasks} ⏭️${skipped_subtasks} ❌${failed_subtasks}"
+    PROGRESS_PHASE_INFO="$(_render_subdir_phase_tree)"
+    progress_update_force "最终完整同步中" "▸ 📊 子目录：${total_subtasks}/${total_subtasks} 完成 | ✅${synced_subtasks} ⏭️${skipped_subtasks} ❌${failed_subtasks}"
     sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
     AUTO_SPLIT_INFO=""
     if [ "$SYNC_FAILED" = "0" ] && [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
@@ -528,7 +579,7 @@ sync_by_file_batches() {
   # 进入文件批次阶段：清空父级子目录阶段的 stats，避免在批次阶段
   # 仍显示 "📊 子目录: x/y 完成" 这类与当前阶段无关的旧数据。
   PROGRESS_STATS=""
-  PROGRESS_PHASE_INFO="📦 <b>文件批次拆分</b>（depth=${SYNC_AUTO_SPLIT_DEPTH:-0}，正在列出文件...）"
+  PROGRESS_PHASE_INFO="▸ 📦 文件批次拆分（depth=${SYNC_AUTO_SPLIT_DEPTH:-0}，正在列出文件...）"
   progress_update "正在列出文件..."
   # 注意：GitHub Actions 默认 set -e -o pipefail，rclone lsjson 失败时管道会非零退出，
   # 此处只需文件列表（失败时 total_files=0 触发下方 lsf 备选），用 || true 避免 step 直接退出。
@@ -537,7 +588,7 @@ sync_by_file_batches() {
   local total_files
   total_files=$(wc -l < "$file_list_file" | tr -d ' ')
   echo "总文件数: ${total_files}"
-  PROGRESS_PHASE_INFO="📦 <b>文件批次拆分</b>（${total_files} 文件，正在拆分批次...）"
+  PROGRESS_PHASE_INFO="▸ 📦 文件批次拆分（${total_files} 文件，正在拆分批次...）"
   progress_update "总文件数: ${total_files}，正在拆分批次..."
 
   if [ "$total_files" -eq 0 ]; then
@@ -593,8 +644,8 @@ sync_by_file_batches() {
 
   local total_batches=$((batch_num + 1))
   echo "拆分为 ${total_batches} 个批次"
-  PROGRESS_PHASE_INFO="📦 <b>文件批次拆分</b>：${total_batches} 批 / ${total_files} 文件（每批 ≤ $(format_bytes "$threshold")）"
-  progress_update_force "拆分为 ${total_batches} 个批次" "📊 批次: 0/${total_batches}"
+  PROGRESS_PHASE_INFO="▸ 📦 文件批次拆分：${total_batches} 批 / ${total_files} 文件（每批 ≤ $(format_bytes "$threshold")）"
+  progress_update_force "拆分为 ${total_batches} 个批次" "▸ 📊 批次：0/${total_batches}"
 
   # 逐批同步（rclone copy + --files-from）
   local synced_batches=0
@@ -611,8 +662,8 @@ sync_by_file_batches() {
       batch_file_count=$(wc -l < "$bf" | tr -d ' ')
       batch_total_files=$((batch_total_files + batch_file_count))
       echo "=== 批次 $((i+1))/${total_batches}: ${batch_file_count} 个文件 ==="
-      PROGRESS_PHASE_INFO="📦 <b>文件批次拆分</b>：${total_batches} 批 / ${total_files} 文件（当前批次 ${batch_idx}: ${batch_file_count} 文件）"
-      progress_update "批次 ${batch_idx}/${total_batches}: ${batch_file_count} 个文件" "📊 批次: ${batch_idx}/${total_batches} | ✅${synced_batches} ❌${failed_batches}"
+      PROGRESS_PHASE_INFO="▸ 📦 文件批次拆分：${total_batches} 批 / ${total_files} 文件（当前批次 ${batch_idx}：${batch_file_count} 文件）"
+      progress_update "批次 ${batch_idx}/${total_batches}：${batch_file_count} 个文件" "▸ 📊 批次：${batch_idx}/${total_batches} | ✅${synced_batches} ❌${failed_batches}"
 
       # set -e 下 rclone 非零退出（如 exit 4 部分失败）会直接终止 step，
       # 导致后续 sync_with_logging 通知无法发出。此处需捕获退出码，临时关闭 set -e。
@@ -651,7 +702,7 @@ sync_by_file_batches() {
         failed_batch_list+="• 批次 $((i+1))/${total_batches} (exit=${rc}, ${batch_file_count} 文件)"$'\n'
         echo "批次 $((i+1)) 失败 (exit=${rc})"
       fi
-      progress_update_force "批次 ${batch_idx}/${total_batches} 完成" "📊 批次: ${batch_idx}/${total_batches} | ✅${synced_batches} ❌${failed_batches}"
+      progress_update_force "批次 ${batch_idx}/${total_batches} 完成" "▸ 📊 批次：${batch_idx}/${total_batches} | ✅${synced_batches} ❌${failed_batches}"
     fi
   done
 
@@ -659,8 +710,8 @@ sync_by_file_batches() {
   rm -rf "$batch_dir"
 
   echo "=== 批次传输完成 (成功 ${synced_batches}/${total_batches}, 失败 ${failed_batches})，执行最终同步检查 ==="
-  PROGRESS_PHASE_INFO="📦 <b>文件批次拆分</b>：${total_batches} 批 / ${total_files} 文件（✅${synced_batches} ❌${failed_batches}）"
-  progress_update_force "批次传输完成，最终同步检查中" "📊 批次: ${total_batches}/${total_batches} | ✅${synced_batches} ❌${failed_batches}"
+  PROGRESS_PHASE_INFO="▸ 📦 文件批次拆分：${total_batches} 批 / ${total_files} 文件（✅${synced_batches} ❌${failed_batches}）"
+  progress_update_force "批次传输完成，最终同步检查中" "▸ 📊 批次：${total_batches}/${total_batches} | ✅${synced_batches} ❌${failed_batches}"
 
   # 设置批次统计信息，供最终通知展示（与子目录拆分的 AUTO_SPLIT_INFO 对齐）
   AUTO_SPLIT_INFO="🔀 文件批次拆分统计"$'\n'
