@@ -163,8 +163,13 @@ _progress_render() {
 
   local msg=""
   if [ "$finalized" -eq 1 ]; then
+    # 中断检测: 任务被取消/step 提前失败时，Finalize(always() 执行) 会把消息
+    # 标记为最终态；若仍有 pending/running 任务却只看 failed 数，会把
+    # "7 个任务全待处理" 误报成 "✅ 同步全部完成"
     if [ "$failed" -gt 0 ]; then
       msg+="⚠️ <b>同步完成（有失败）</b>"$'\n'
+    elif [ $((pending + running)) -gt 0 ]; then
+      msg+="⛔ <b>同步中断（${pending} 个待处理、${running} 个进行中未执行完）</b>"$'\n'
     else
       msg+="✅ <b>同步全部完成</b>"$'\n'
     fi
