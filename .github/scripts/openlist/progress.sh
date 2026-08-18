@@ -86,6 +86,51 @@ _progress_get_stats() {
   [ -f "$PROGRESS_STATS_FILE" ] && cat "$PROGRESS_STATS_FILE" 2>/dev/null || echo ""
 }
 
+# 任务列表分组渲染（进度通知专用）
+# 任务显示名为 "src → dst"，按源端分组展示，避免长单行在手机上换行成一坨:
+#   <b>src</b> · <i>源端大小</i>
+#     → dst · <i>详情</i>
+#   同源端多目标只展示一次大小; 目标端 openlist: 前缀冗余（所有目标均为
+#   openlist 远端），统一裁剪缩短行宽。
+# 无 " → " 结构的显示名（调试任务等）退化为普通 "• 名称" 条目。
+# 输入: 每行 "display_name\tsize\tdetail"（size/detail 可空）
+_progress_render_task_list() {
+  local lines="$1"
+  declare -A _grp=() _grp_size=()
+  local -a _order=()
+  local _plain=""
+  while IFS=$'\t' read -r _tname _tsize _tdetail; do
+    [ -z "$_tname" ] && continue
+    local _src="$_tname" _dst=""
+    if [[ "$_tname" == *" → "* ]]; then
+      _src="${_tname% → *}"
+      _dst="${_tname#* → }"
+      _dst="${_dst#openlist:}"
+    fi
+    if [ -z "$_dst" ]; then
+      _plain+="• $(escape_html "$_src")"
+      [ -n "$_tsize" ] && _plain+=" · <i>$_tsize</i>"
+      _plain+=$'\n'
+      continue
+    fi
+    if [ -z "${_grp[$_src]+x}" ]; then
+      _grp[$_src]=""
+      _order+=("$_src")
+      [ -n "$_tsize" ] && _grp_size[$_src]="$_tsize"
+    fi
+    _grp[$_src]+="  → $(escape_html "$_dst")"
+    [ -n "$_tdetail" ] && _grp[$_src]+=" · <i>$(escape_html "$_tdetail")</i>"
+    _grp[$_src]+=$'\n'
+  done <<< "$lines"
+  local _out="" _src
+  for _src in "${_order[@]}"; do
+    _out+="<b>$(escape_html "$_src")</b>"
+    [ -n "${_grp_size[$_src]:-}" ] && _out+=" · <i>${_grp_size[$_src]}</i>"
+    _out+=$'\n'"${_grp[$_src]}"
+  done
+  printf '%s' "${_out}${_plain}"
+}
+
 # 渲染进度消息为 HTML
 # 包含: 标题、总任务统计、阶段信息、统计信息、各状态任务列表、已用时间
 _progress_render() {
@@ -106,10 +151,11 @@ _progress_render() {
     time_str="${secs}s"
   fi
 
-  # 统计各状态任务数
-  # 列表项统一语法: "• 名称 — <i>备注</i>"（进行中为动态详情，其余为源端大小）
+  # 统计各状态任务数；条目按 "名\t大小\t详情" 暂存，
+  # 渲染时经 _progress_render_task_list 按源端分组（大小为源端大小，
+  # 详情仅 running/failed 任务携带）
   local total=0 pending=0 running=0 completed=0 skipped=0 failed=0
-  local pending_list="" running_list="" completed_list="" skipped_list="" failed_list=""
+  local pending_lines="" running_lines="" completed_lines="" skipped_lines="" failed_lines=""
 
   if [ -f "$PROGRESS_TASKS_FILE" ]; then
     while IFS=$'\t' read -r tid tname tstatus tdetail tsize; do
@@ -121,33 +167,23 @@ _progress_render() {
       case "$tstatus" in
         pending)
           pending=$((pending + 1))
-          pending_list+="• $(escape_html "$tname")"
-          [ -n "$tsize" ] && pending_list+=" — <i>${tsize}</i>"
-          pending_list+=$'\n'
+          pending_lines+="${tname}"$'\t'"${tsize}"$'\t'$'\n'
           ;;
         running)
           running=$((running + 1))
-          running_list+="• $(escape_html "$tname")"
-          [ -n "$tdetail" ] && running_list+=" — <i>$(escape_html "$tdetail")</i>"
-          running_list+=$'\n'
+          running_lines+="${tname}"$'\t'"${tsize}"$'\t'"${tdetail}"$'\n'
           ;;
         completed)
           completed=$((completed + 1))
-          completed_list+="• $(escape_html "$tname")"
-          [ -n "$tsize" ] && completed_list+=" — <i>${tsize}</i>"
-          completed_list+=$'\n'
+          completed_lines+="${tname}"$'\t'"${tsize}"$'\t'$'\n'
           ;;
         skipped)
           skipped=$((skipped + 1))
-          skipped_list+="• $(escape_html "$tname")"
-          [ -n "$tsize" ] && skipped_list+=" — <i>${tsize}</i>"
-          skipped_list+=$'\n'
+          skipped_lines+="${tname}"$'\t'"${tsize}"$'\t'$'\n'
           ;;
         failed)
           failed=$((failed + 1))
-          failed_list+="• $(escape_html "$tname")"
-          [ -n "$tsize" ] && failed_list+=" — <i>${tsize}</i>"
-          failed_list+=$'\n'
+          failed_lines+="${tname}"$'\t'"${tsize}"$'\t'"${tdetail}"$'\n'
           ;;
       esac
     done < "$PROGRESS_TASKS_FILE"
@@ -175,11 +211,11 @@ _progress_render() {
   tg_add_title msg "$title"
   tg_append msg "📊 总任务：<b>${total}</b> | 待处理：${pending} | 进行中：${running} | 完成：${completed} | 跳过：${skipped} | 失败：${failed}"$'\n'
 
-  # 进行中任务块: 任务行 + 缩进两格的阶段/统计信息
+  # 进行中任务块: 任务条目（分组渲染）+ 缩进两格的阶段/统计信息
   #   阶段首行（▸ 摘要）→ 统计行（▸ 📊 ...）→ 阶段剩余行（├─/└─ 树形子项）
   if [ "$finalized" -ne 1 ] && [ "$running" -gt 0 ]; then
-    tg_add_section msg "📍 进行中"
-    tg_append msg "${running_list}"
+    tg_add_section msg "📍 进行中 · ${running}"
+    tg_add_block msg "$(_progress_render_task_list "$running_lines")"
 
     local phase phase_first="" phase_rest=""
     phase=$(_progress_get_phase)
@@ -204,22 +240,22 @@ _progress_render() {
 
   if [ "$pending" -gt 0 ]; then
     tg_add_section msg "⏳ 待处理 · ${pending}"
-    tg_append msg "${pending_list}"
+    tg_add_block msg "$(_progress_render_task_list "$pending_lines")"
   fi
 
   if [ "$completed" -gt 0 ]; then
     tg_add_section msg "✅ 已完成 · ${completed}"
-    tg_append msg "${completed_list}"
+    tg_add_block msg "$(_progress_render_task_list "$completed_lines")"
   fi
 
   if [ "$skipped" -gt 0 ]; then
     tg_add_section msg "⏭️ 已跳过 · ${skipped}"
-    tg_append msg "${skipped_list}"
+    tg_add_block msg "$(_progress_render_task_list "$skipped_lines")"
   fi
 
   if [ "$failed" -gt 0 ]; then
     tg_add_section msg "❌ 失败 · ${failed}"
-    tg_append msg "${failed_list}"
+    tg_add_block msg "$(_progress_render_task_list "$failed_lines")"
   fi
 
   tg_append msg $'\n'"⏱️ 已用：<b>${time_str}</b>"

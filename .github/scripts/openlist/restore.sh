@@ -235,7 +235,7 @@ restore_fixed_files() {
         _marker_write "$json" "$marker_path" >/dev/null 2>&1 || true
       else
         total_fail=$((total_fail + 1))
-        fail_list+="• <code>$(escape_html "$orig")</code> — $(escape_html "${status#FAIL: }")"$'\n'
+        fail_list+="• <code>$(escape_html "$orig")</code> · <i>$(escape_html "${status#FAIL: }")</i>"$'\n'
       fi
     done < <(echo "$json" | jq -r '(.fixed_files // [])[] | [.original, .alternative, .method, (.restore_hint // "")] | @tsv' 2>/dev/null)
   done
@@ -415,7 +415,7 @@ restore_source_from_target() {
         case "$status" in
           OK) total_ok=$((total_ok + 1)) ;;
           SKIP) total_skip=$((total_skip + 1)) ;;
-          *) total_fail=$((total_fail + 1)); fail_list+="• <code>$(escape_html "$line_orig")</code> — $(escape_html "${status#FAIL: }")"$'\n' ;;
+          *) total_fail=$((total_fail + 1)); fail_list+="• <code>$(escape_html "$line_orig")</code> · <i>$(escape_html "${status#FAIL: }")</i>"$'\n' ;;
         esac
       done <<< "$alt_lines"
     fi

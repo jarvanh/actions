@@ -210,18 +210,17 @@ _build_diff_files_list() {
   echo "$result"
 }
 
-# 从 extra_args 中提取 --exclude 规则，构建带 bullet 的列表
-# 返回多行文本，每条格式: "• 排除模式"；无排除规则时返回 "无"
-_build_exclude_bullets() {
+# 从 extra_args 中提取 --exclude 规则（每行一条 glob 模式，无规则时输出空）
+# 模式原样输出（不含 HTML），由调用方决定展示格式与转义
+_build_exclude_patterns() {
   local -a extra_args=("$@")
   local result="" i
   for ((i=0; i<${#extra_args[@]}; i++)); do
     if [ "${extra_args[$i]}" == "--exclude" ] && [ $((i+1)) -lt ${#extra_args[@]} ]; then
-      result+="• ${extra_args[$((i+1))]}"$'\n'
+      result+="${extra_args[$((i+1))]}"$'\n'
     fi
   done
-  [ -z "$result" ] && result="无"
-  echo "$result"
+  printf '%s' "$result"
 }
 
 # 从 rclone 参数中提取过滤类参数（--exclude/--include 及其值）
