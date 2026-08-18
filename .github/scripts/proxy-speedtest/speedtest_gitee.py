@@ -1186,6 +1186,45 @@ def speedtest_single_item(env, gitee, item: dict, test_file: pathlib.Path, push_
     return result
 
 
+def _mibs_to_megabits(mibs):
+    if isinstance(mibs, (int, float)) and float(mibs) > 0:
+        return max(1, int(round(float(mibs) * 8)))
+    return 0
+
+
+def build_node_metric_prefix(item: dict, speedtest_mode: str):
+    """生成节点名前的简短指标前缀：主速度（兆）+ 附加指标（另一方向 ↓/↑ 兆、延迟 ms）。
+
+    附加字段缺失时自动省略——如 gitee push-only 模式无下载/延迟数据，保持原「42兆 |」不变；
+    出现两项及以上指标时主速度补方向箭头，便于区分上传/下载；主指标缺失时退化为仅展示可用指标。
+    """
+    push_mode = speedtest_mode == 'push-only'
+    upload_mbps = _mibs_to_megabits(item.get('upload_mibs'))
+    download_mbps = _mibs_to_megabits(item.get('download_mibs'))
+    primary = get_item_megabits(item, speedtest_mode)
+    latency_ms = item.get('latency_ms')
+    has_latency = isinstance(latency_ms, (int, float)) and latency_ms > 0
+    parts = []
+    if primary > 0:
+        secondary = download_mbps if push_mode else upload_mbps
+        labeled = secondary > 0 or has_latency
+        if push_mode:
+            parts.append(f'↑{primary}兆' if labeled else f'{primary}兆')
+            if download_mbps > 0:
+                parts.append(f'↓{download_mbps}兆')
+        else:
+            parts.append(f'↓{primary}兆' if labeled else f'{primary}兆')
+            if upload_mbps > 0:
+                parts.append(f'↑{upload_mbps}兆')
+    elif push_mode and download_mbps > 0:
+        parts.append(f'↓{download_mbps}兆')
+    elif not push_mode and upload_mbps > 0:
+        parts.append(f'↑{upload_mbps}兆')
+    if has_latency:
+        parts.append(f'{latency_ms:.0f}ms')
+    return ' '.join(parts)
+
+
 def build_mihomo_yaml_text(results: list, speedtest_mode: str, min_megabit: int = DEFAULT_MIN_MEGABIT):
     proxies = []
     for item in results:
@@ -1197,9 +1236,9 @@ def build_mihomo_yaml_text(results: list, speedtest_mode: str, min_megabit: int 
             log_progress('subscription_yaml_source_missing', name=item.get('name', ''), share_link_match=item.get('share_link_match', ''), source_id=item.get('source_id', ''))
             continue
         name = str(proxy.get('name') or item.get('name') or '').strip()
-        mbps = get_item_megabits(item, speedtest_mode)
-        if mbps > 0:
-            name = f"{mbps}兆 | {name}"
+        prefix = build_node_metric_prefix(item, speedtest_mode)
+        if prefix:
+            name = f"{prefix} | {name}"
         proxy['name'] = name
         proxies.append(proxy)
     if not proxies:
