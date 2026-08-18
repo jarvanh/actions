@@ -101,15 +101,7 @@ jobs:
         run: |
           $token = "${{ secrets.TELEGRAM_BOT_TOKEN }}"
           $chat  = "${{ secrets.TELEGRAM_CHAT_ID }}"
-          $msg = @"
-Windows RDP 已就绪 🚀
-主机: ${{ env.RDP_PUBLIC }}
-用户: ${{ env.RDP_USER }}
-密码: ${{ env.RDP_PASSWORD }}
-
-本地 IP (备用): ${{ env.RDP_LOCAL_IP }}:3389
-⏳ 将持续运行约 ${{ github.event.inputs.duration_hours }} 小时
-"@
+          $msg = "Windows RDP is ready`nHost: ${{ env.RDP_PUBLIC }}`nUser: ${{ env.RDP_USER }}`nPassword: ${{ env.RDP_PASSWORD }}`n`nLocal IP (backup): ${{ env.RDP_LOCAL_IP }}:3389`nDuration: ${{ github.event.inputs.duration_hours }} hours"
           $body = @{ chat_id = $chat; text = $msg; parse_mode = "Markdown" } | ConvertTo-Json
           Invoke-RestMethod -Uri "https://api.telegram.org/bot$token/sendMessage" -Method Post -ContentType "application/json" -Body $body
           echo "Telegram 通知已发送"
@@ -125,13 +117,7 @@ Windows RDP 已就绪 🚀
           # 结束前 Telegram 提醒（不重发密码，避免日志暴露）
           $token = "${{ secrets.TELEGRAM_BOT_TOKEN }}"
           $chat  = "${{ secrets.TELEGRAM_CHAT_ID }}"
-          $msg = @"
-⏹️ Windows RDP 即将关闭
-主机: ${{ env.RDP_PUBLIC }}
-运行时长: $hours 小时
-
-如需继续使用，请重新运行 Workflow。
-"@
+          $msg = "Windows RDP is shutting down`nHost: ${{ env.RDP_PUBLIC }}`nDuration: $hours hours`n`nTo use again, re-run the workflow."
           $body = @{ chat_id = $chat; text = $msg; parse_mode = "Markdown" } | ConvertTo-Json
           Invoke-RestMethod -Uri "https://api.telegram.org/bot$token/sendMessage" -Method Post -ContentType "application/json" -Body $body
           echo "运行结束，即将关闭"
