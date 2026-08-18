@@ -1186,6 +1186,45 @@ def speedtest_single_item(env, gitee, item: dict, test_file: pathlib.Path, push_
     return result
 
 
+def _mibs_to_megabits(mibs):
+    if isinstance(mibs, (int, float)) and float(mibs) > 0:
+        return max(1, int(round(float(mibs) * 8)))
+    return 0
+
+
+def build_node_metric_prefix(item: dict, speedtest_mode: str):
+    """生成节点名前的简短指标前缀：主速度（兆）+ 附加指标（另一方向 ↓/↑ 兆、延迟 ms）。
+
+    附加字段缺失时自动省略——如 gitee push-only 模式无下载/延迟数据，保持原「42兆 |」不变；
+    出现两项及以上指标时主速度补方向箭头，便于区分上传/下载；主指标缺失时退化为仅展示可用指标。
+    """
+    push_mode = speedtest_mode == 'push-only'
+    upload_mbps = _mibs_to_megabits(item.get('upload_mibs'))
+    download_mbps = _mibs_to_megabits(item.get('download_mibs'))
+    primary = get_item_megabits(item, speedtest_mode)
+    latency_ms = item.get('latency_ms')
+    has_latency = isinstance(latency_ms, (int, float)) and latency_ms > 0
+    parts = []
+    if primary > 0:
+        secondary = download_mbps if push_mode else upload_mbps
+        labeled = secondary > 0 or has_latency
+        if push_mode:
+            parts.append(f'↑{primary}兆' if labeled else f'{primary}兆')
+            if download_mbps > 0:
+                parts.append(f'↓{download_mbps}兆')
+        else:
+            parts.append(f'↓{primary}兆' if labeled else f'{primary}兆')
+            if upload_mbps > 0:
+                parts.append(f'↑{upload_mbps}兆')
+    elif push_mode and download_mbps > 0:
+        parts.append(f'↓{download_mbps}兆')
+    elif not push_mode and upload_mbps > 0:
+        parts.append(f'↑{upload_mbps}兆')
+    if has_latency:
+        parts.append(f'{latency_ms:.0f}ms')
+    return ' '.join(parts)
+
+
 def build_mihomo_yaml_text(results: list, speedtest_mode: str, min_megabit: int = DEFAULT_MIN_MEGABIT):
     proxies = []
     for item in results:
@@ -1197,9 +1236,9 @@ def build_mihomo_yaml_text(results: list, speedtest_mode: str, min_megabit: int 
             log_progress('subscription_yaml_source_missing', name=item.get('name', ''), share_link_match=item.get('share_link_match', ''), source_id=item.get('source_id', ''))
             continue
         name = str(proxy.get('name') or item.get('name') or '').strip()
-        mbps = get_item_megabits(item, speedtest_mode)
-        if mbps > 0:
-            name = f"{mbps}兆 | {name}"
+        prefix = build_node_metric_prefix(item, speedtest_mode)
+        if prefix:
+            name = f"{prefix} | {name}"
         proxy['name'] = name
         proxies.append(proxy)
     if not proxies:
@@ -1608,47 +1647,30 @@ def build_run_summary(*, started_at, ended_at, elapsed_seconds, duration_text, a
     }
 
 
-def build_summary_lines(*, started_at, push_target_info, push_target_city_text, gitee, total_probe_count, alive_probe_count, ok_results, speed_results, direct_baseline, speedtest_mode, aborted_due_to_runtime, runtime_abort_reason, ok_results_by_download, duration_text):
+def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_count, ok_results, speed_results, speedtest_mode, aborted_due_to_runtime, runtime_abort_reason, ok_results_by_download):
+    """生成人性化 Telegram 通知，版式对齐 speedtest.build_telegram_lines。
+
+    差异点：gitee 版 TOP 节点指标依旧只显示主速度单指标（如「42兆」），
+    不采用 speedtest 版的三项指标（↑上传 ↓下载 延迟ms）格式。
+    Push 目标 / 直连基线等诊断信息保留在 RESULT_JSON，不再进通知。
+    """
+    started_text = str(started_at)[:19].replace('T', ' ')
+    ended_text = str(ended_at)[:19].replace('T', ' ')
     summary_lines = [
         '代理测速完成',
         '',
-        f'🕒 测速开始时间: {started_at}',
-        '',
-        f'🎯 Push 目标域名: {push_target_info["host"]}',
-        f'🌐 Push 目标 IP: {", ".join(push_target_info["addresses"][:8]) if push_target_info["addresses"] else "解析失败"}',
-        f'🏙️ Push IP 城市: {push_target_city_text or "查询失败"}',
-        f'🔌 Push 目标端口: {push_target_info["port"]}',
-        f'🛰️ Push 协议: {push_target_info["scheme"].upper()} / Git over HTTP(S)',
-        f'📦 Push 仓库: {gitee["owner"]}/{gitee["repo"]}',
-        '',
-        f'📊 Provider 节点总数: {total_probe_count}',
-        f'✅ Provider 可用数量: {alive_probe_count}',
-        f'🚀 正式测速成功: {len(ok_results)} / {len(speed_results)}',
+        f'🕒 {started_text} ~ {ended_text}（耗时 {duration_text}）',
+        f'📊 节点: 共 {len(speed_results)} 个，可用 {len(ok_results)} 个',
         '',
     ]
-    if direct_baseline and direct_baseline.get('ok'):
-        summary_lines.append('🧪 本机直连基线测速:')
-        if speedtest_mode == 'push-only':
-            summary_lines.append(f"   └─ Push {get_item_megabits(direct_baseline, 'push-only')}兆 / {direct_baseline.get('upload_seconds', 0):.3f}s")
-        else:
-            summary_lines.append(f"   ├─ Clone {get_item_megabits(direct_baseline, speedtest_mode)}兆 / {direct_baseline.get('download_seconds', 0):.3f}s")
-            summary_lines.append(f"   └─ Push {get_item_megabits(direct_baseline, 'push-only')}兆 / {direct_baseline.get('upload_seconds', 0):.3f}s")
-        summary_lines.append('')
-    elif direct_baseline:
-        summary_lines.append(f"⚠️ 本机直连基线测速失败: {direct_baseline.get('reason', '')}")
-        summary_lines.append('')
     if aborted_due_to_runtime:
         summary_lines.append(f'⚠️ 本轮已中止: {runtime_abort_reason}')
         summary_lines.append('')
     if ok_results_by_download:
-        top = ok_results_by_download[0]
-        if speedtest_mode == 'push-only':
-            summary_lines.append(f"🏆 最高上传: {get_item_megabits(top, 'push-only')}兆")
-        else:
-            summary_lines.append(f"🏆 最高下载: {get_item_megabits(top, speedtest_mode)}兆")
-            summary_lines.append(f"📤 最佳节点上传: {get_item_megabits(top, 'push-only')}兆")
+        best = ok_results_by_download[0]
+        summary_lines.append(f"🏆 最快节点: {best.get('name', '')}")
         summary_lines.append('')
-        summary_lines.append('🥇 最快节点 TOP 5:')
+        summary_lines.append('🥇 TOP 5:')
         for idx, item in enumerate(ok_results_by_download[:5], 1):
             if speedtest_mode == 'push-only':
                 speed_text = f"{get_item_megabits(item, 'push-only')}兆"
@@ -1658,19 +1680,12 @@ def build_summary_lines(*, started_at, push_target_info, push_target_city_text, 
             summary_lines.append(f"   └─ {speed_text}")
         summary_lines.append('')
     elif alive_probe_count > 0:
-        summary_lines.append('⚠️ 正式测速全部失败')
+        summary_lines.append('⚠️ 没有节点测速成功')
         summary_lines.append('   └─ 有节点通过 provider 健康检查，但正式 Gitee 推送/拉取测速全部失败')
         summary_lines.append('')
     else:
         summary_lines.append('⚠️ 没有节点通过 provider 健康检查')
         summary_lines.append('')
-
-    summary_lines.extend([
-        f'⏱️ 执行时长: {duration_text}',
-        f'📁 运行目录: {HOME_RUNTIME}',
-    ])
-    if push_target_info.get('error'):
-        summary_lines.append(f"⚠️ Push 目标解析异常: {push_target_info['error']}")
     return summary_lines
 
 
@@ -1679,7 +1694,7 @@ def update_summary_artifacts(summary):
     log_progress('result_json_written', path=str(RESULT_JSON))
 
 
-def finalize_gist_and_notify(env, summary, summary_lines, subscription_text):
+def finalize_gist_and_notify(env, summary, summary_lines, subscription_text, qualified_count, min_megabit):
     RESULT_TXT.write_text('\n'.join(summary_lines) + '\n', encoding='utf-8')
     log_progress('result_txt_written', path=str(RESULT_TXT))
     log_progress('gist_update_started')
@@ -1703,17 +1718,21 @@ def finalize_gist_and_notify(env, summary, summary_lines, subscription_text):
             gist_verify_res = {'ok': False, 'reason': str(e)}
     log_progress('gist_verify_finished', ok=bool(gist_verify_res.get('ok')), sample_ok_count=gist_verify_res.get('sample_ok_count', 0), sample_count=gist_verify_res.get('sample_count', 0), reason=gist_verify_res.get('reason', ''))
     summary['gist_verify'] = gist_verify_res
+    summary_lines.append('📦 订阅（Gist）:')
     if gist_res.get('ok'):
-        if gist_res.get('created'):
-            summary_lines.append(f"🆕 已自动创建 Gist: {gist_res.get('html_url', '')}")
-        if yaml_raw_url:
-            summary_lines.append(f"🔗 Raw 订阅: {yaml_raw_url}")
+        action = '新建' if gist_res.get('created') else '更新'
+        html_url = gist_res.get('html_url') or ''
+        summary_lines.append(f'   └─ ✅ 已{action}，达标 {qualified_count} 个节点（≥{min_megabit}兆）')
+        if html_url:
+            summary_lines.append(f'   └─ 🔗 {html_url}')
         if gist_verify_res.get('ok'):
-            summary_lines.append(f"✅ Gist 回拉验证通过: {gist_verify_res.get('sample_ok_count', 0)}/{gist_verify_res.get('sample_count', 0)} 个抽检节点可用")
+            summary_lines.append(f"   └─ ✅ 回拉验证通过: {gist_verify_res.get('sample_ok_count', 0)}/{gist_verify_res.get('sample_count', 0)} 个抽检节点可用")
         else:
-            summary_lines.append(f"⚠️ Gist 回拉验证失败: {gist_verify_res.get('sample_ok_count', 0)}/{gist_verify_res.get('sample_count', 0)} 个抽检节点可用；{gist_verify_res.get('reason', '')}")
+            summary_lines.append(f"   └─ ⚠️ 回拉验证失败: {gist_verify_res.get('sample_ok_count', 0)}/{gist_verify_res.get('sample_count', 0)} 个抽检节点可用；{gist_verify_res.get('reason', '')}")
+    elif (gist_res.get('reason') or '').startswith('empty subscription'):
+        summary_lines.append(f'   └─ ⚠️ 无达标节点（阈值 ≥{min_megabit}兆），未更新订阅')
     else:
-        summary_lines.append(f"⚠️ Gist 上传失败: {gist_res.get('reason', '')}")
+        summary_lines.append(f"   └─ ⚠️ 上传失败: {gist_res.get('reason', '')}")
     try:
         RESULT_TXT.write_text('\n'.join(summary_lines) + '\n', encoding='utf-8')
     except Exception as e:
@@ -1918,21 +1937,22 @@ def main():
     run_stage('结果落盘', update_summary_artifacts, summary)
     summary_lines = build_summary_lines(
         started_at=started_at,
-        push_target_info=push_target_info,
-        push_target_city_text=push_target_city_text,
-        gitee=gitee,
-        total_probe_count=total_probe_count,
+        ended_at=ended_at,
+        duration_text=duration_text,
         alive_probe_count=alive_probe_count,
         ok_results=ok_results,
         speed_results=speed_results,
-        direct_baseline=direct_baseline,
         speedtest_mode=speedtest_mode,
         aborted_due_to_runtime=aborted_due_to_runtime,
         runtime_abort_reason=runtime_abort_reason,
         ok_results_by_download=ok_results_by_download,
-        duration_text=duration_text,
     )
-    run_stage('Gist 更新/回拉验证/通知', finalize_gist_and_notify, env, summary, summary_lines, subscription_text)
+    # 达标节点数（与订阅导出同一阈值、同一判定口径，供通知展示）
+    qualified_count = sum(
+        1 for item in ok_results_by_download
+        if get_item_megabits(item, speedtest_mode) >= min_megabit and (item.get('source_entry') or {}).get('proxy')
+    )
+    run_stage('Gist 更新/回拉验证/通知', finalize_gist_and_notify, env, summary, summary_lines, subscription_text, qualified_count, min_megabit)
 
 
 def scrub_secrets(text: str, env=None) -> str:
