@@ -4,7 +4,8 @@
 #   - 视频文件：使用 ffmpeg 按关键帧分割（无损，-c copy）
 #   - 非视频文件：使用 7z 分卷存储模式（可恢复）
 #
-# 依赖: utils.sh (log_split, check_log_has_content), telegram.sh (send_telegram_message)
+# 依赖: utils.sh (log_split, check_log_has_content, escape_html, format_bytes_iec),
+#       telegram.sh (send_telegram_message, tg_add_title/tg_add_kv/tg_add_path/tg_add_section/tg_add_block)
 
 # 发送视频分割通知到 Telegram
 # 用法: send_video_split_notification <file_path> <file_size> <parts_count> <result> <log_file> [validation_summary]
@@ -19,16 +20,27 @@ send_video_split_notification() {
   local file_size_human
   file_size_human=$(format_bytes_iec "$file_size")
 
-  local message
+  local message=""
   if [ "$result" = "success" ]; then
-    printf -v message '%s\n%s\n%s\n%s\n%s\n%s' '✅ OpenList 视频分割通知' '━━━━━━━━━━' '状态：分割成功' "文件：$file_path" "原始大小：$file_size_human" "分割数量：$parts_count 个部分"
+    tg_add_title message "✅ 视频分割成功"
+    tg_add_kv message "状态" "分割成功"
+    tg_add_path message "文件" "$file_path"
+    tg_add_kv message "原始大小" "$file_size_human"
+    tg_add_kv message "分割数量" "${parts_count} 个部分"
   else
-    printf -v message '%s\n%s\n%s\n%s\n%s\n%s' '❌ OpenList 视频分割通知' '━━━━━━━━━━' '状态：分割失败' "文件：$file_path" "文件大小：$file_size_human" "失败原因：$result"
+    tg_add_title message "❌ 视频分割失败"
+    tg_add_kv message "状态" "分割失败"
+    tg_add_path message "文件" "$file_path"
+    tg_add_kv message "文件大小" "$file_size_human"
+    tg_add_kv message "失败原因" "$result"
   fi
 
   if [ -n "$validation_summary" ]; then
-    message+=$'\n\n安全检查：\n'
-    message+="$validation_summary"
+    tg_add_section message "🛡️ 安全检查"
+    # 逐行转义（行内含 duration=/exit= 等动态值）
+    while IFS= read -r line; do
+      [ -n "$line" ] && tg_append message "$(escape_html "$line")"$'\n'
+    done <<< "$validation_summary"
   fi
 
   if [ -f "$log_file" ]; then
@@ -49,8 +61,9 @@ send_video_split_notification() {
       else
         log_summary=$(tail -c 1200 "$log_file" 2>/dev/null || echo "无法读取日志")
       fi
-      message+=$'\n\n日志摘要（当前文件）：\n'
-      message+="$log_summary"
+      tg_add_section message "🧾 日志摘要（当前文件）"
+      # 日志为原始输出，转义后 <pre> 等宽展示
+      tg_add_block message "<pre>$(escape_html "$log_summary")</pre>"
     fi
   fi
 
@@ -67,30 +80,28 @@ send_binary_split_notification() {
   local log_file="$5"
   local file_size_human
   file_size_human=$(format_bytes_iec "$file_size")
-  local message
+  local message=""
   if [ "$result" = "success" ]; then
-    printf -v message '%s\n%s\n%s\n%s\n%s\n%s\n%s' \
-      '✅ OpenList 非视频 7z 分卷通知' \
-      '━━━━━━━━━━' \
-      '状态：分卷成功' \
-      "文件：$file_path" \
-      "原始大小：$file_size_human" \
-      "分卷数量：$parts_count 个 .7z.00x" \
-      '恢复：下载全部分卷后，双击 .7z.001 或运行 7z x 文件名.7z.001'
+    tg_add_title message "✅ 7z 分卷成功"
+    tg_add_kv message "状态" "分卷成功"
+    tg_add_path message "文件" "$file_path"
+    tg_add_kv message "原始大小" "$file_size_human"
+    tg_add_kv message "分卷数量" "${parts_count} 个 .7z.00x"
+    tg_add_section message "📦 恢复方法"
+    tg_add_block message "• 下载全部分卷后，双击 <code>.7z.001</code> 或运行 <code>7z x 文件名.7z.001</code>"
   else
-    printf -v message '%s\n%s\n%s\n%s\n%s\n%s' \
-      '❌ OpenList 非视频 7z 分卷通知' \
-      '━━━━━━━━━━' \
-      '状态：分卷失败' \
-      "文件：$file_path" \
-      "文件大小：$file_size_human" \
-      "失败原因：$result"
+    tg_add_title message "❌ 7z 分卷失败"
+    tg_add_kv message "状态" "分卷失败"
+    tg_add_path message "文件" "$file_path"
+    tg_add_kv message "文件大小" "$file_size_human"
+    tg_add_kv message "失败原因" "$result"
   fi
   if [ -f "$log_file" ]; then
     local log_summary
     log_summary=$(tail -c 1200 "$log_file" 2>/dev/null || echo "无法读取日志")
-    message+=$'\n\n日志摘要：\n'
-    message+="$log_summary"
+    tg_add_section message "🧾 日志摘要"
+    # 日志为原始输出，转义后 <pre> 等宽展示
+    tg_add_block message "<pre>$(escape_html "$log_summary")</pre>"
   fi
   send_telegram_message "$message"
 }
@@ -582,12 +593,12 @@ preprocess_large_files() {
 
     if [ "$split_success" -eq 1 ]; then
       success_count=$((success_count + 1))
-      processed_files+="• ${remote_source}:${full_path} ($(format_bytes_iec "$file_size"), ${split_kind})"$'\n'
-      deleted_files+="• ${remote_source}:${full_path}"$'\n'
+      processed_files+="• <code>$(escape_html "${remote_source}:${full_path}")</code>（$(format_bytes_iec "$file_size")，${split_kind}）"$'\n'
+      deleted_files+="• <code>$(escape_html "${remote_source}:${full_path}")</code>"$'\n'
       echo "$(date +%Y-%m-%d_%H:%M:%S) - ${remote_source}:${full_path} - OpenList 前置分割成功(${split_kind})，已删除原始大文件" >> "$PROCESSED_FILES_LOG"
     else
       failed_count=$((failed_count + 1))
-      failed_files+="• ${remote_source}:${full_path}"$'\n'
+      failed_files+="• <code>$(escape_html "${remote_source}:${full_path}")</code>"$'\n'
       log_split "$video_split_log" "OpenList 前置分割失败: ${remote_source}:${full_path}"
     fi
 
@@ -602,25 +613,23 @@ preprocess_large_files() {
 
   # 发送处理总结通知
   if [ "$processed_count" -gt 0 ]; then
-    local summary_message
-    printf -v summary_message '%s\n%s\n%s\n%s\n%s\n%s' \
-      '📊 OpenList 前置大文件处理总结' \
-      '━━━━━━━━━━' \
-      "任务：$task_name" \
-      "尝试处理：$processed_count" \
-      "处理成功：$success_count" \
-      "处理失败：$failed_count"
+    local summary_message=""
+    tg_add_title summary_message "📊 前置大文件处理总结"
+    tg_add_kv summary_message "任务" "$task_name"
+    tg_add_kv summary_message "尝试处理" "$processed_count"
+    tg_add_kv summary_message "处理成功" "$success_count"
+    tg_add_kv summary_message "处理失败" "$failed_count"
     if [ -n "$processed_files" ]; then
-      summary_message+=$'\n\n✂️ 已切割文件：\n'
-      summary_message+="$processed_files"
+      tg_add_section summary_message "✂️ 已切割文件（${success_count} 个）"
+      tg_add_block summary_message "$processed_files"
     fi
     if [ -n "$deleted_files" ]; then
-      summary_message+=$'\n🗑️ 已删除 OneDrive 原始大文件：\n'
-      summary_message+="$deleted_files"
+      tg_add_section summary_message "🗑️ 已删除原始大文件（${success_count} 个）"
+      tg_add_block summary_message "$deleted_files"
     fi
     if [ -n "$failed_files" ]; then
-      summary_message+=$'\n⚠️ 处理失败文件：\n'
-      summary_message+="$failed_files"
+      tg_add_section summary_message "⚠️ 处理失败文件（${failed_count} 个）"
+      tg_add_block summary_message "$failed_files"
     fi
     send_telegram_message "$summary_message"
   fi

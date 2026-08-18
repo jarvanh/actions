@@ -657,44 +657,37 @@ send_sync_warning() {
     new_dirs=$(comm -13 <(echo "$marker_dirs") <(echo "$MARKER_CURRENT_DIRS") 2>/dev/null || true)
   fi
 
-  # HTML 转义动态内容
-  local e_task e_source e_dest
-  e_task=$(escape_html "$task_name")
-  e_source=$(escape_html "$source_path")
-  e_dest=$(escape_html "$dest_path")
-
   local msg=""
-  msg+="🚨🚨🚨 <b>源端大小异常减小</b> 🚨🚨🚨"$'\n'
-  msg+="━━━━━━━━━━━━━━━━━━"$'\n'
-  msg+="任务：<b>${e_task}</b>"$'\n'
-  msg+="源端：<code>${e_source}</code>"$'\n'
-  msg+="目标：<code>${e_dest}</code>"$'\n'
-  msg+=$'\n'"📊 <b>大小对比</b>"$'\n'
-  msg+="• 上次记录：<b>$(format_bytes "$marker_bytes")</b> (${marker_count} 文件)"$'\n'
-  msg+="• 当前大小：<b>$(format_bytes "$MARKER_CURRENT_BYTES")</b> (${MARKER_CURRENT_COUNT} 文件)"$'\n'
-  msg+="• 减少：<b>$(format_bytes "$diff_bytes")</b> (-${pct}%)"$'\n'
+  tg_add_title msg "🚨 源端大小异常减小"
+  tg_add_kv msg "任务" "$task_name"
+  tg_add_path msg "源端" "$source_path"
+  tg_add_path msg "目标" "$dest_path"
+  tg_add_section msg "📊 大小对比"
+  tg_append msg "• 上次记录：<b>$(format_bytes "$marker_bytes")</b>（${marker_count} 文件）"$'\n'
+  tg_append msg "• 当前大小：<b>$(format_bytes "$MARKER_CURRENT_BYTES")</b>（${MARKER_CURRENT_COUNT} 文件）"$'\n'
+  tg_append msg "• 减少：<b>$(format_bytes "$diff_bytes")</b>（-${pct}%）"$'\n'
   if [ "$diff_count" -ne 0 ]; then
-    msg+="• 文件减少：<b>${diff_count}</b> 个"$'\n'
+    tg_append msg "• 文件减少：<b>${diff_count}</b> 个"$'\n'
   fi
 
   if [ -n "$missing_dirs" ]; then
-    msg+=$'\n'"📁 <b>缺失的目录（可能被删除）</b>"$'\n'
+    tg_add_section msg "📁 缺失的目录（可能被删除）"
     while IFS= read -r d; do
-      [ -n "$d" ] && msg+="• <code>$(escape_html "$d")</code>"$'\n'
+      [ -n "$d" ] && tg_append msg "• <code>$(escape_html "$d")</code>"$'\n'
     done <<< "$missing_dirs"
   fi
 
   if [ -n "$new_dirs" ]; then
-    msg+=$'\n'"📁 <b>新增的目录</b>"$'\n'
+    tg_add_section msg "📁 新增的目录"
     while IFS= read -r d; do
-      [ -n "$d" ] && msg+="• <code>$(escape_html "$d")</code>"$'\n'
+      [ -n "$d" ] && tg_append msg "• <code>$(escape_html "$d")</code>"$'\n'
     done <<< "$new_dirs"
   fi
 
-  msg+=$'\n'"⏸️ <b>已跳过此同步，继续执行其他任务</b>"$'\n'
-  msg+="如确认无误，请手动触发 force_sync=true"
+  tg_add_section msg "⏸️ 已跳过此同步，继续执行其他任务"
+  tg_add_note msg "如确认无误，请手动触发 force_sync=true"
 
-  send_telegram_message "$msg" "HTML"
+  send_telegram_message "$msg"
 }
 
 # 发送"近期已成功同步，本次跳过"的通知
@@ -714,26 +707,19 @@ send_sync_skipped() {
   fixed_count=$(echo "$MARKER_JSON" | jq -r '.fixed_count // 0' 2>/dev/null || echo 0)
   fixed_bytes=$(echo "$MARKER_JSON" | jq -r '.fixed_bytes // 0' 2>/dev/null || echo 0)
 
-  # HTML 转义动态内容
-  local e_task e_source e_dest e_last
-  e_task=$(escape_html "$task_name")
-  e_source=$(escape_html "$source_path")
-  e_dest=$(escape_html "$dest_path")
-  e_last=$(escape_html "$MARKER_LAST_SUCCESS")
-
   local msg=""
-  msg+="⏭️ <b>同步任务跳过（1 天内已成功）</b>"$'\n'
-  msg+="━━━━━━━━━━━━━━━━━━"$'\n'
-  msg+="任务：<b>${e_task}</b>"$'\n'
-  msg+="源端：<code>${e_source}</code>"$'\n'
-  msg+="目标：<code>${e_dest}</code>"$'\n'
-  msg+=$'\n'"🕒 <b>上次同步</b>"$'\n'
-  msg+="• 时间：<code>${e_last}</code>"$'\n'
-  msg+="• 距今：<b>${MARKER_SINCE_HOURS}</b> 小时"$'\n'
-  msg+="• 记录大小：$(format_bytes "$marker_bytes") (${marker_count} 文件)"$'\n'
+  tg_add_title msg "⏭️ 同步任务跳过（1 天内已成功）"
+  tg_add_kv msg "任务" "$task_name"
+  tg_add_path msg "源端" "$source_path"
+  tg_add_path msg "目标" "$dest_path"
+  tg_add_section msg "🕒 上次同步"
+  tg_append msg "• 时间：<code>$(escape_html "$MARKER_LAST_SUCCESS")</code>"$'\n'
+  tg_append msg "• 距今：<b>${MARKER_SINCE_HOURS}</b> 小时"$'\n'
+  tg_append msg "• 记录大小：<b>$(format_bytes "$marker_bytes")</b>（${marker_count} 文件）"$'\n'
   if [ "${fixed_count:-0}" -gt 0 ]; then
-    msg+="• 已修复文件：<b>${fixed_count}</b> 个 ($(format_bytes "$fixed_bytes"))，以非原名存在于目标端"$'\n'
-    # 修复方式汇总（按 restore.kind 分组统计）
+    tg_append msg "• 已修复文件：<b>${fixed_count}</b> 个（<b>$(format_bytes "$fixed_bytes")</b>），以非原名存在于目标端"$'\n'
+    # 修复方式汇总（按 restore.kind 分组统计；TSV 交给 bash 格式化，
+    # 字节数走 format_bytes 人类可读单位，summary 缩进为说明行）
     local method_summary
     method_summary=$(echo "$MARKER_JSON" | jq -r '
       (.fixed_files // []) | group_by(.restore.kind // "unknown")
@@ -742,16 +728,21 @@ send_sync_skipped() {
                count: length,
                bytes: ([.[].size_bytes] | add // 0)})
         | sort_by(-.bytes)
-        | map("    · " + .kind + " (" + (.count|tostring) + " 个/"
-            + (.bytes | tostring | if tonumber>0 then tonumber|tostring else "0" end) + "B) "
-            + .summary)
+        | map([.kind, (.count|tostring), (.bytes|tostring), .summary] | @tsv)
         | join("\n")
     ' 2>/dev/null || echo "")
-    [ -n "$method_summary" ] && msg+=$'\n'"🔧 <b>修复方式构成</b>"$'\n'"${method_summary}"$'\n'
-    msg+="🔗 完整还原脚本保存在 OneDrive marker: <code>$(get_marker_path "$task_name" "$dest_path")</code> 的 fixed_files[].restore.script 字段"$'\n'
+    if [ -n "$method_summary" ]; then
+      tg_add_section msg "🔧 修复方式构成"
+      while IFS=$'\t' read -r m_kind m_count m_bytes m_summary; do
+        [ -z "$m_kind" ] && continue
+        tg_append msg "• <b>$(escape_html "$m_kind")</b> × ${m_count}（$(format_bytes "$m_bytes")）"$'\n'
+        [ -n "$m_summary" ] && tg_append msg "  $(escape_html "$m_summary")"$'\n'
+      done <<< "$method_summary"
+    fi
+    tg_append msg "🔗 完整还原脚本保存在 OneDrive marker <code>$(escape_html "$(get_marker_path "$task_name" "$dest_path")")</code> 的 fixed_files[].restore.script 字段"$'\n'
   fi
-  msg+=$'\n'"⏸️ <b>本次跳过同步，继续执行其他任务</b>"$'\n'
-  msg+="如需强制同步，请手动触发 force_sync=true"
+  tg_add_section msg "⏸️ 本次跳过同步，继续执行其他任务"
+  tg_add_note msg "如需强制同步，请手动触发 force_sync=true"
 
-  send_telegram_message "$msg" "HTML"
+  send_telegram_message "$msg"
 }

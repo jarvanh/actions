@@ -229,13 +229,13 @@ restore_fixed_files() {
 
       if [ "${status%%:*}" = "OK" ]; then
         total_ok=$((total_ok + 1))
-        ok_list+="• ${orig}"$'\n'
+        ok_list+="• <code>$(escape_html "$orig")</code>"$'\n'
         # 从 marker 移除该条目（fixed_files + fix_blacklist），即时写回
         json=$(echo "$json" | marker_remove_fix_entry "$orig" 1) || true
         _marker_write "$json" "$marker_path" >/dev/null 2>&1 || true
       else
         total_fail=$((total_fail + 1))
-        fail_list+="• ${orig} — ${status#FAIL: }"$'\n'
+        fail_list+="• <code>$(escape_html "$orig")</code> — $(escape_html "${status#FAIL: }")"$'\n'
       fi
     done < <(echo "$json" | jq -r '(.fixed_files // [])[] | [.original, .alternative, .method, (.restore_hint // "")] | @tsv' 2>/dev/null)
   done
@@ -244,28 +244,20 @@ restore_fixed_files() {
 
   # 汇总通知
   local msg=""
-  msg+="🔧 <b>修复文件一键还原完成</b>"$'\n'
-  msg+="━━━━━━━━━━━━━━━━━━"$'\n'
-  msg+="• 还原成功：<b>${total_ok}</b> 个"$'\n'
-  msg+="• 还原失败：<b>${total_fail}</b> 个"$'\n'
+  tg_add_title msg "🔧 修复文件一键还原完成"
+  tg_add_kv msg "还原成功" "${total_ok} 个"
+  tg_add_kv msg "还原失败" "${total_fail} 个"
   if [ -n "$ok_list" ]; then
-    msg+=$'\n'"✅ <b>已还原（原路径原文件名）</b>"$'\n'"$(escape_html_list "$ok_list")"
+    tg_add_section msg "✅ 已还原（原路径原文件名）"
+    tg_add_block msg "$ok_list"
   fi
   if [ -n "$fail_list" ]; then
-    msg+=$'\n'"❌ <b>失败清单</b>"$'\n'"$(escape_html_list "$fail_list")"
+    tg_add_section msg "❌ 失败清单"
+    tg_add_block msg "$fail_list"
   fi
-  msg+=$'\n'"成功条目已从 marker 修复清单移除；失败条目保留，可重试。"
-  send_telegram_message "$msg" "HTML"
+  tg_add_note msg "成功条目已从 marker 修复清单移除；失败条目保留，可重试。"
+  send_telegram_message "$msg"
   echo "=== 还原完成: OK=${total_ok} FAIL=${total_fail} ==="
-}
-
-# 简易 HTML 转义（逐行处理 bullet 列表）
-escape_html_list() {
-  local line
-  while IFS= read -r line; do
-    [ -z "$line" ] && continue
-    printf '%s\n' "$(printf '%s' "$line" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')"
-  done <<< "$1"
 }
 
 # rclone --exclude-from 行转义: 文件名里的 glob 字符（[ ] * ?）按字面匹配
@@ -423,7 +415,7 @@ restore_source_from_target() {
         case "$status" in
           OK) total_ok=$((total_ok + 1)) ;;
           SKIP) total_skip=$((total_skip + 1)) ;;
-          *) total_fail=$((total_fail + 1)); fail_list+="• ${line_orig} — ${status#FAIL: }"$'\n' ;;
+          *) total_fail=$((total_fail + 1)); fail_list+="• <code>$(escape_html "$line_orig")</code> — $(escape_html "${status#FAIL: }")"$'\n' ;;
         esac
       done <<< "$alt_lines"
     fi
@@ -432,16 +424,16 @@ restore_source_from_target() {
   rm -rf "$tmp_base"
 
   local msg=""
-  msg+="🆘 <b>灾难恢复完成（目标端 → 源端）</b>"$'\n'
-  msg+="━━━━━━━━━━━━━━━━━━"$'\n'
-  msg+="• 批量拷回普通文件：<b>${total_bulk}</b> 个"$'\n'
-  msg+="• 修复文件恢复成功：<b>${total_ok}</b> 个"$'\n'
-  msg+="• 源端已存在跳过：<b>${total_skip}</b> 个"$'\n'
-  msg+="• 失败：<b>${total_fail}</b> 个"$'\n'
+  tg_add_title msg "🆘 灾难恢复完成（目标端 → 源端）"
+  tg_add_kv msg "批量拷回普通文件" "${total_bulk} 个"
+  tg_add_kv msg "修复文件恢复成功" "${total_ok} 个"
+  tg_add_kv msg "源端已存在跳过" "${total_skip} 个"
+  tg_add_kv msg "失败" "${total_fail} 个"
   if [ -n "$fail_list" ]; then
-    msg+=$'\n'"❌ <b>失败清单</b>"$'\n'"$(escape_html_list "$fail_list")"
+    tg_add_section msg "❌ 失败清单"
+    tg_add_block msg "$fail_list"
   fi
-  msg+=$'\n'"目标端未做任何删改，可重复执行补齐失败条目。"
-  send_telegram_message "$msg" "HTML"
+  tg_add_note msg "目标端未做任何删改，可重复执行补齐失败条目。"
+  send_telegram_message "$msg"
   echo "=== 恢复完成: bulk=${total_bulk} ok=${total_ok} skip=${total_skip} fail=${total_fail} ==="
 }
