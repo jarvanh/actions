@@ -5,26 +5,89 @@
 #   TELEGRAM_CHAT_ID   — 目标 Chat ID（由 workflow secrets 注入）
 # 依赖全局变量:
 #   PROGRESS_MSG_ID_FILE — 进度消息 ID 存储文件路径
+# 依赖函数: utils.sh (escape_html)
+
+# ===== 通知排版助手（统一所有 Telegram 通知的结构与风格）=====
+# 统一模板（一律 HTML parse_mode，动态内容必须转义——助手函数已内置）:
+#
+#   {emoji} <b>标题</b>            ← tg_add_title
+#   ━━━━━━━━━━━━━━━━━━             ← TG_SEP（单点定义，勿手写分隔线）
+#   标签：值                        ← 头部键值区（数值 tg_add_kv / 路径 tg_add_path）
+#
+#   {emoji} <b>分节标题</b>         ← tg_add_section（段前自动空一行）
+#   • 条目                         ← 列表项统一 "• " 前缀，子行缩进两空格
+#   <pre>块</pre>                  ← 日志/流量图等需对齐的多行内容
+#
+#   {emoji} <b>结尾提示</b>         ← 收尾状态（如"已跳过此同步"）
+#   斜体说明                        ← tg_add_note
+#
+# 状态 emoji 语义（全库统一）:
+#   ✅ 成功 / ⚠️ 部分失败 / ❌ 失败 / ⏭️ 跳过 / 🔄 进行中 / ⛔ 中断 / 🚨 危险警告
+
+# 统一分隔线（18 个全角横线）
+TG_SEP='━━━━━━━━━━━━━━━━━━'
+
+# 追加原始文本到消息变量（不做任何转义/格式化）
+# 用法: tg_append <var> <text>
+tg_append() {
+  printf -v "$1" '%s%s' "${!1}" "$2"
+}
+
+# 追加多行文本块并保证段尾换行（"无" 等单行内容无自带换行时补齐，
+# 保证后续 tg_add_section 的段前空行生效）
+# 用法: tg_add_block <var> <文本块>
+tg_add_block() {
+  tg_append "$1" "$2"
+  case "$2" in
+    *$'\n') ;;
+    *) tg_append "$1" $'\n' ;;
+  esac
+}
+
+# 标题块: "{标题（含 emoji）加粗}\n分隔线\n"
+# 用法: tg_add_title <var> "⚠️ 标题文本"
+tg_add_title() {
+  tg_append "$1" "<b>$(escape_html "$2")</b>"$'\n'"${TG_SEP}"$'\n'
+}
+
+# 键值行（关键值加粗）: "标签：<b>值</b>\n"
+# 用法: tg_add_kv <var> <标签> <值>
+tg_add_kv() {
+  tg_append "$1" "$2：<b>$(escape_html "$3")</b>"$'\n'
+}
+
+# 键值行（路径等宽展示）: "标签：<code>值</code>\n"
+# 用法: tg_add_path <var> <标签> <值>
+tg_add_path() {
+  tg_append "$1" "$2：<code>$(escape_html "$3")</code>"$'\n'
+}
+
+# 分节标题（段前空一行）: "\n{标题（含 emoji）加粗}\n"
+# 用法: tg_add_section <var> "📁 分节标题"
+tg_add_section() {
+  tg_append "$1" $'\n'"<b>$(escape_html "$2")</b>"$'\n'
+}
+
+# 斜体说明（段前空一行，常用于收尾备注）: "\n<i>说明</i>\n"
+# 用法: tg_add_note <var> "说明文字"
+tg_add_note() {
+  tg_append "$1" $'\n'"<i>$(escape_html "$2")</i>"$'\n'
+}
 
 # 通用 Telegram 消息发送（静默，不返回 message_id）
-# 用法: send_telegram_message <message> [parse_mode]
+# 用法: send_telegram_message <message> [parse_mode=HTML]
+# 消息内容必须已按 HTML 规则转义（推荐用上方 tg_* 助手构建）
 send_telegram_message() {
   local message="$1"
-  local parse_mode="${2:-}"
-  if [ -n "$parse_mode" ]; then
-    curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-      -d chat_id="${TELEGRAM_CHAT_ID}" \
-      -d parse_mode="$parse_mode" \
-      --data-urlencode text="$message" >/dev/null 2>&1 || true
-  else
-    curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-      -d chat_id="${TELEGRAM_CHAT_ID}" \
-      --data-urlencode text="$message" >/dev/null 2>&1 || true
-  fi
+  local parse_mode="${2:-HTML}"
+  curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+    -d chat_id="${TELEGRAM_CHAT_ID}" \
+    -d parse_mode="$parse_mode" \
+    --data-urlencode text="$message" >/dev/null 2>&1 || true
 }
 
 # 发送 Telegram 消息并返回 message_id
-# 用法: _tg_send_get_id <message> [parse_mode]
+# 用法: _tg_send_get_id <message> [parse_mode=HTML]
 # 输出: message_id（失败时为空）
 _tg_send_get_id() {
   local message="$1"
@@ -49,7 +112,7 @@ _tg_delete_message() {
 
 # 确保进度消息始终是 bot 最后一条消息
 # 策略：始终删除旧消息并重新发送，保证进度消息在聊天底部
-# 用法: _tg_ensure_bottom_message <message> [parse_mode]
+# 用法: _tg_ensure_bottom_message <message> [parse_mode=HTML]
 # 输出: 当前有效的 message_id
 _tg_ensure_bottom_message() {
   local message="$1"

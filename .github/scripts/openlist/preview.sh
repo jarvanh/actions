@@ -6,7 +6,7 @@
 #   - 文件同步流量图（ASCII 树形图）
 #
 # 依赖: utils.sh (format_bytes, _shorten_path, _extract_exclude_summary, escape_html)
-# 依赖: telegram.sh (send_telegram_message)
+# 依赖: telegram.sh (send_telegram_message, tg_add_title/tg_add_section/tg_add_block 等)
 
 # 获取远端大小和文件数
 # 用法: _get_remote_size_count <remote_path> [--exclude pat] ...
@@ -140,15 +140,17 @@ add_preview_pair() {
   local exclude_summary
   exclude_summary=$(_extract_exclude_summary "${extra_args[@]}")
 
-  # 同步对详情
-  PREVIEW_PAIRS_DETAIL+=$'\n'"${PREVIEW_PAIR_COUNT}. ${source_path}"$'\n'
-  PREVIEW_PAIRS_DETAIL+="   → ${dest_path}"$'\n'
+  # 同步对详情（HTML：路径 code 等宽、预估量加粗；
+  # 组与组之间空一行分隔，首组前不加空行——tg_add_section 已带段前空行）
+  [ -n "$PREVIEW_PAIRS_DETAIL" ] && PREVIEW_PAIRS_DETAIL+=$'\n'
+  PREVIEW_PAIRS_DETAIL+="${PREVIEW_PAIR_COUNT}. <code>$(escape_html "$source_path")</code>"$'\n'
+  PREVIEW_PAIRS_DETAIL+="   → <code>$(escape_html "$dest_path")</code>"$'\n'
   if [ -n "$exclude_summary" ]; then
-    PREVIEW_PAIRS_DETAIL+="   • 排除: ${exclude_summary}"$'\n'
+    PREVIEW_PAIRS_DETAIL+="   • 排除：<code>$(escape_html "$exclude_summary")</code>"$'\n'
   fi
-  PREVIEW_PAIRS_DETAIL+="   • 源端: $(format_bytes "$src_bytes") / ${src_count} 文件"$'\n'
-  PREVIEW_PAIRS_DETAIL+="   • 目标: $(format_bytes "$dst_bytes") / ${dst_count} 文件"$'\n'
-  PREVIEW_PAIRS_DETAIL+="   • 预估待同步: +$(format_bytes "$sync_bytes") / +${sync_count} 文件${fixed_note}"$'\n'
+  PREVIEW_PAIRS_DETAIL+="   • 源端：$(format_bytes "$src_bytes") / ${src_count} 文件"$'\n'
+  PREVIEW_PAIRS_DETAIL+="   • 目标：$(format_bytes "$dst_bytes") / ${dst_count} 文件"$'\n'
+  PREVIEW_PAIRS_DETAIL+="   • 预估待同步：<b>+$(format_bytes "$sync_bytes") / +${sync_count} 文件</b>${fixed_note}"$'\n'
 
   # 流量图分组（按 source + excludes 组合分组，相同分组的 dest 共享一个源端节点）
   local group_key="${source_path}|${exclude_summary}"
@@ -159,9 +161,9 @@ add_preview_pair() {
     fi
     PREVIEW_CUR_GROUP="$group_key"
     if [ -n "$exclude_summary" ]; then
-      PREVIEW_FLOW+="  ${source_path} (excl: ${exclude_summary})"$'\n'
+      PREVIEW_FLOW+="  $(escape_html "$source_path")（排除 $(escape_html "$exclude_summary")）"$'\n'
     else
-      PREVIEW_FLOW+="  ${source_path}"$'\n'
+      PREVIEW_FLOW+="  $(escape_html "$source_path")"$'\n'
     fi
     PREVIEW_FLOW+="  $(format_bytes "$src_bytes") / ${src_count} 文件"$'\n'
     PREVIEW_FLOW+="       │"$'\n'
@@ -169,7 +171,7 @@ add_preview_pair() {
 
   local short_dest
   short_dest=$(_shorten_path "$dest_path" 48)
-  PREVIEW_FLOW+="   ├──► ${short_dest}"$'\n'
+  PREVIEW_FLOW+="   ├──► $(escape_html "$short_dest")"$'\n'
   PREVIEW_FLOW+="         [+$(format_bytes "$sync_bytes") / +${sync_count} 文件]"$'\n'
 }
 
@@ -177,14 +179,13 @@ add_preview_pair() {
 # 用法: flush_task_preview
 flush_task_preview() {
   local msg=""
-  msg="📋 任务预览: ${PREVIEW_TASK_NAME}"$'\n'
-  msg+="━━━━━━━━━━━━━━"$'\n'
-  msg+=$'\n'"📊 同步对 (${PREVIEW_PAIR_COUNT} 组)"$'\n'
-  msg+="${PREVIEW_PAIRS_DETAIL}"
-  msg+=$'\n'"🔀 文件同步流量图"$'\n'
-  msg+=$'\n'
-  msg+="${PREVIEW_FLOW}"
-  msg+=$'\n'$'\n'"  📦 合计预估待同步: $(format_bytes "$PREVIEW_TOTAL_SYNC_BYTES") / ${PREVIEW_TOTAL_SYNC_COUNT} 文件"
+  tg_add_title msg "📋 任务预览 · ${PREVIEW_TASK_NAME}"
+  tg_add_section msg "📊 同步对（${PREVIEW_PAIR_COUNT} 组）"
+  tg_append msg "${PREVIEW_PAIRS_DETAIL}"
+  tg_add_section msg "🔀 文件同步流量图"
+  # 流量图用 <pre> 等宽渲染，保证 │/├──► 树形对齐（内容构建时已逐行转义）
+  tg_add_block msg "<pre>${PREVIEW_FLOW%$'\n'}</pre>"
+  tg_append msg $'\n'"📦 合计预估待同步：<b>$(format_bytes "$PREVIEW_TOTAL_SYNC_BYTES")</b> / <b>${PREVIEW_TOTAL_SYNC_COUNT}</b> 文件"
 
   send_telegram_message "$msg"
   echo "  已发送 ${PREVIEW_TASK_NAME} 预览通知"

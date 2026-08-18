@@ -154,30 +154,32 @@ _progress_render() {
   fi
 
   local msg=""
+  local title
   if [ "$finalized" -eq 1 ]; then
     # 中断检测: 任务被取消/step 提前失败时，Finalize(always() 执行) 会把消息
     # 标记为最终态；若仍有 pending/running 任务却只看 failed 数，会把
     # "7 个任务全待处理" 误报成 "✅ 同步全部完成"
     if [ "$failed" -gt 0 ]; then
-      msg+="⚠️ <b>同步完成（有失败）</b>"$'\n'
+      title="⚠️ 同步完成（有失败）"
     elif [ $((pending + running)) -gt 0 ]; then
-      msg+="⛔ <b>同步中断（${pending} 个待处理、${running} 个进行中未执行完）</b>"$'\n'
+      title="⛔ 同步中断（${pending} 个待处理、${running} 个进行中未执行完）"
     elif [ "$total" -eq 0 ]; then
       # 一个任务都没注册就到了收尾（注册前被取消/失败），绝非"全部完成"
-      msg+="⛔ <b>同步中断（未注册任何任务）</b>"$'\n'
+      title="⛔ 同步中断（未注册任何任务）"
     else
-      msg+="✅ <b>同步全部完成</b>"$'\n'
+      title="✅ 同步全部完成"
     fi
   else
-    msg+="🔄 <b>同步进度</b>"$'\n'
+    title="🔄 同步进度"
   fi
-  msg+="━━━━━━━━━━━━━━━━━━"$'\n'
-  msg+="📊 总任务：<b>${total}</b> | 待处理：${pending} | 进行中：${running} | 完成：${completed} | 跳过：${skipped} | 失败：${failed}"$'\n'
+  tg_add_title msg "$title"
+  tg_append msg "📊 总任务：<b>${total}</b> | 待处理：${pending} | 进行中：${running} | 完成：${completed} | 跳过：${skipped} | 失败：${failed}"$'\n'
 
   # 进行中任务块: 任务行 + 缩进两格的阶段/统计信息
   #   阶段首行（▸ 摘要）→ 统计行（▸ 📊 ...）→ 阶段剩余行（├─/└─ 树形子项）
   if [ "$finalized" -ne 1 ] && [ "$running" -gt 0 ]; then
-    msg+=$'\n'"📍 <b>进行中</b>"$'\n'"${running_list}"
+    tg_add_section msg "📍 进行中"
+    tg_append msg "${running_list}"
 
     local phase phase_first="" phase_rest=""
     phase=$(_progress_get_phase)
@@ -201,22 +203,26 @@ _progress_render() {
   fi
 
   if [ "$pending" -gt 0 ]; then
-    msg+=$'\n'"⏳ <b>待处理 · ${pending}</b>"$'\n'"${pending_list}"
+    tg_add_section msg "⏳ 待处理 · ${pending}"
+    tg_append msg "${pending_list}"
   fi
 
   if [ "$completed" -gt 0 ]; then
-    msg+=$'\n'"✅ <b>已完成 · ${completed}</b>"$'\n'"${completed_list}"
+    tg_add_section msg "✅ 已完成 · ${completed}"
+    tg_append msg "${completed_list}"
   fi
 
   if [ "$skipped" -gt 0 ]; then
-    msg+=$'\n'"⏭️ <b>已跳过 · ${skipped}</b>"$'\n'"${skipped_list}"
+    tg_add_section msg "⏭️ 已跳过 · ${skipped}"
+    tg_append msg "${skipped_list}"
   fi
 
   if [ "$failed" -gt 0 ]; then
-    msg+=$'\n'"❌ <b>失败 · ${failed}</b>"$'\n'"${failed_list}"
+    tg_add_section msg "❌ 失败 · ${failed}"
+    tg_append msg "${failed_list}"
   fi
 
-  msg+=$'\n'"⏱️ 已用：<b>${time_str}</b>"
+  tg_append msg $'\n'"⏱️ 已用：<b>${time_str}</b>"
   echo "$msg"
 }
 

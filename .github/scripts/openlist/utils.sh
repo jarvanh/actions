@@ -3,6 +3,12 @@
 # 本文件提供基础工具函数，被其他脚本文件依赖。
 # 所有函数通过 load_all.sh 统一加载。
 
+# bash 5.2+ 默认开启 patsub_replacement: ${var//pat/rep} 的 rep 中 "&" 表示
+# 匹配文本，会让下方 escape_html 把 "<" 替换成 "<lt;"（实体里的 & 被吃掉），
+# Telegram HTML 渲染随之损坏。关闭该选项恢复 bash 5.1 及更早的字面量语义；
+# 旧 bash/zsh 无此选项，shopt 报错被吞，不影响加载。
+shopt -u patsub_replacement 2>/dev/null || true
+
 # HTML 实体转义（用于 HTML parse_mode 消息）
 escape_html() {
   local s="$1"

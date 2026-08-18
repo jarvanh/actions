@@ -401,12 +401,12 @@ _sync_task_impl() {
     if [ "$SYNC_SKIPPED" = "1" ]; then
       skipped_subtasks=$((skipped_subtasks + 1))
       subdir_status_map["$subdir"]="skipped"
-      skipped_list+="• ${subdir} ($(format_bytes "${subdir_size_map[$subdir]:-0}"))"$'\n'
+      skipped_list+="• <code>$(escape_html "$subdir")</code> ($(format_bytes "${subdir_size_map[$subdir]:-0}"))"$'\n'
     elif [ "$SYNC_FAILED" = "0" ]; then
       synced_subtasks=$((synced_subtasks + 1))
       subdir_status_map["$subdir"]="synced"
       total_transferred=$((total_transferred + SYNC_TRANSFERRED_BYTES))
-      synced_list+="• ${subdir} ($(format_bytes "${subdir_size_map[$subdir]:-0}"))"$'\n'
+      synced_list+="• <code>$(escape_html "$subdir")</code> ($(format_bytes "${subdir_size_map[$subdir]:-0}"))"$'\n'
     else
       failed_subtasks=$((failed_subtasks + 1))
       if [ "${SYNC_PARTIAL:-0}" = "1" ]; then
@@ -417,7 +417,7 @@ _sync_task_impl() {
         subdir_status_map["$subdir"]="failed"
       fi
       total_transferred=$((total_transferred + SYNC_TRANSFERRED_BYTES))
-      failed_list+="• ${subdir} ($(format_bytes "${subdir_size_map[$subdir]:-0}")$([ "${subdir_status_map[$subdir]}" = partial ] && echo ' · 部分失败'))"$'\n'
+      failed_list+="• <code>$(escape_html "$subdir")</code> ($(format_bytes "${subdir_size_map[$subdir]:-0}")$([ "${subdir_status_map[$subdir]}" = partial ] && echo ' · 部分失败'))"$'\n'
     fi
     PROGRESS_PHASE_INFO="$(_render_subdir_phase_tree)"
     local _completed_after=$((synced_subtasks + skipped_subtasks + failed_subtasks))
@@ -425,19 +425,19 @@ _sync_task_impl() {
   done <<< "$subdirs"
   SYNC_SKIP_QUIET=0
 
-  # 设置拆分信息供最终通知使用
-  AUTO_SPLIT_INFO="🔀 子任务拆分统计"$'\n'
-  AUTO_SPLIT_INFO+="• 总子目录数：${total_subtasks}"$'\n'
-  AUTO_SPLIT_INFO+="• 已同步：${synced_subtasks}，未同步：${failed_subtasks}$([ "$partial_subtasks" -gt 0 ] && printf '（其中部分失败 %d）' "$partial_subtasks")，已跳过：${skipped_subtasks}"$'\n'
-  AUTO_SPLIT_INFO+="• 子任务传输总量：$(format_bytes "$total_transferred")"
+  # 设置拆分信息供最终通知使用（HTML 片段，由 sync.sh 通知按分节插入）
+  AUTO_SPLIT_INFO="<b>🔀 子任务拆分统计</b>"$'\n'
+  AUTO_SPLIT_INFO+="• 总子目录数：<b>${total_subtasks}</b>"$'\n'
+  AUTO_SPLIT_INFO+="• 已同步：<b>${synced_subtasks}</b>，未同步：<b>${failed_subtasks}</b>$([ "$partial_subtasks" -gt 0 ] && printf '（其中部分失败 %d）' "$partial_subtasks")，已跳过：<b>${skipped_subtasks}</b>"$'\n'
+  AUTO_SPLIT_INFO+="• 子任务传输总量：<b>$(format_bytes "$total_transferred")</b>"
   if [ -n "$synced_list" ]; then
-    AUTO_SPLIT_INFO+=$'\n\n'"✅ 已同步的子目录："$'\n'"${synced_list%"$'\n'"}"
+    AUTO_SPLIT_INFO+=$'\n\n'"<b>✅ 已同步的子目录</b>"$'\n'"${synced_list%$'\n'}"
   fi
   if [ -n "$failed_list" ]; then
-    AUTO_SPLIT_INFO+=$'\n\n'"❌ 未同步的子目录："$'\n'"${failed_list%"$'\n'"}"
+    AUTO_SPLIT_INFO+=$'\n\n'"<b>❌ 未同步的子目录</b>"$'\n'"${failed_list%$'\n'}"
   fi
   if [ -n "$skipped_list" ]; then
-    AUTO_SPLIT_INFO+=$'\n\n'"⏭️ 已跳过的子目录（无文件变动）："$'\n'"${skipped_list%"$'\n'"}"
+    AUTO_SPLIT_INFO+=$'\n\n'"<b>⏭️ 已跳过的子目录（无文件变动）</b>"$'\n'"${skipped_list%$'\n'}"
   fi
 
   # 最终完整同步（仅在顶层执行，正常通知）
@@ -719,11 +719,11 @@ sync_by_file_batches() {
   progress_update_force "批次传输完成，最终同步检查中" "▸ 📊 批次：${total_batches}/${total_batches} | ✅${synced_batches} ❌${failed_batches}"
 
   # 设置批次统计信息，供最终通知展示（与子目录拆分的 AUTO_SPLIT_INFO 对齐）
-  AUTO_SPLIT_INFO="🔀 文件批次拆分统计"$'\n'
-  AUTO_SPLIT_INFO+="• 总批次数：${total_batches}（共 ${batch_total_files} 文件）"$'\n'
-  AUTO_SPLIT_INFO+="• 成功：${synced_batches}，失败：${failed_batches}"
+  AUTO_SPLIT_INFO="<b>🔀 文件批次拆分统计</b>"$'\n'
+  AUTO_SPLIT_INFO+="• 总批次数：<b>${total_batches}</b>（共 ${batch_total_files} 文件）"$'\n'
+  AUTO_SPLIT_INFO+="• 成功：<b>${synced_batches}</b>，失败：<b>${failed_batches}</b>"
   if [ -n "$failed_batch_list" ]; then
-    AUTO_SPLIT_INFO+=$'\n\n'"❌ 失败的批次："$'\n'"${failed_batch_list%"$'\n'"}"
+    AUTO_SPLIT_INFO+=$'\n\n'"<b>❌ 失败的批次</b>"$'\n'"${failed_batch_list%$'\n'}"
   fi
 
   # 最终用 sync_with_logging 做完整同步检查（处理缺失文件修复、通知等）

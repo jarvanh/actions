@@ -1327,61 +1327,48 @@ sync_with_logging() {
 
 # ===== 通知消息公共段落构建 =====
 # 4 个通知分支共享的头部/任务信息/排除规则/差异列表段落。
-# 通过 printf -v 间接追加到调用方变量（无需 nameref）；
+# 统一走 telegram.sh 的 tg_* 排版助手（HTML）；
 # 读取调用方（_send_sync_result_notification）作用域:
 #   source_size_human / dest_size_human / count_info / task_name /
 #   source_path / dest_path / exclude_list / AUTO_SPLIT_INFO / diff_files_list
 
-# 变量追加（$1=变量名, $2=追加内容）
-_notify_append() {
-  printf -v "$1" '%s%s' "${!1}" "$2"
-}
-
 # 头部: 标题 + 分隔线 + 源端/目标大小 + 可选状态行 + 文件数信息
-# 用法: _notify_add_header <var> <标题> [状态行文本]
+# 用法: _notify_add_header <var> <标题（含 emoji）> [状态行文本]
 _notify_add_header() {
-  _notify_append "$1" "$2"$'\n'
-  _notify_append "$1" '━━━━━━━━━━━━━━'$'\n'
-  _notify_append "$1" "源端大小：${source_size_human}"$'\n'
-  _notify_append "$1" "目标大小：${dest_size_human}"$'\n'
-  [ -n "${3:-}" ] && _notify_append "$1" "状态：$3"$'\n'
-  _notify_append "$1" "${count_info}"$'\n'
+  tg_add_title "$1" "$2"
+  tg_add_kv "$1" "源端大小" "$source_size_human"
+  tg_add_kv "$1" "目标大小" "$dest_size_human"
+  if [ -n "${3:-}" ]; then
+    tg_add_kv "$1" "状态" "$3"
+  fi
+  tg_append "$1" "文件数：${count_info}"$'\n'
 }
 
-# AUTO_SPLIT_INFO 段（仅非空时插入）
+# AUTO_SPLIT_INFO 段（仅非空时插入；内容为 tasks.sh 构建的 HTML 分节片段）
 _notify_add_autosplit() {
-  [ -n "$AUTO_SPLIT_INFO" ] && _notify_append "$1" $'\n'"${AUTO_SPLIT_INFO}"$'\n'
+  [ -n "$AUTO_SPLIT_INFO" ] && tg_append "$1" $'\n'"${AUTO_SPLIT_INFO}"$'\n'
   return 0
 }
 
-# 任务信息 + 排除规则段（段前各空一行）
-# 用法: _notify_add_task_and_excludes <var> [trail_nl=1：exclude 列表后补换行]
+# 任务信息 + 排除规则段
+# 用法: _notify_add_task_and_excludes <var>
 _notify_add_task_and_excludes() {
-  _notify_append "$1" $'\n''📁 任务信息'$'\n'
-  _notify_append "$1" "• 任务：${task_name}"$'\n'
-  _notify_append "$1" "• 源端：${source_path}"$'\n'
-  _notify_append "$1" "• 目标：${dest_path}"$'\n'
-  _notify_append "$1" $'\n''🚫 排除规则'$'\n'
-  _notify_append "$1" "${exclude_list}"
-  [ "${2:-1}" = "1" ] && _notify_append "$1" $'\n'
+  tg_add_section "$1" "📁 任务信息"
+  tg_append "$1" "• 任务：<b>$(escape_html "$task_name")</b>"$'\n'
+  tg_append "$1" "• 源端：<code>$(escape_html "$source_path")</code>"$'\n'
+  tg_append "$1" "• 目标：<code>$(escape_html "$dest_path")</code>"$'\n'
+  tg_add_section "$1" "🚫 排除规则"
+  tg_add_block "$1" "$(escape_html "$exclude_list")"
   return 0
 }
 
 # 差异文件列表段（仅非空时插入）
-# 用法: _notify_add_diff_list <var> <前导空行数:1|2> [标题带全角冒号:1|0]
+# 用法: _notify_add_diff_list <var>
 _notify_add_diff_list() {
   [ -z "$diff_files_list" ] && return 0
-  if [ "${2:-2}" = "1" ]; then
-    _notify_append "$1" $'\n'
-  else
-    _notify_append "$1" $'\n\n'
-  fi
-  if [ "${3:-1}" = "1" ]; then
-    _notify_append "$1" "📋 差异文件列表："$'\n'
-  else
-    _notify_append "$1" "📋 差异文件列表"$'\n'
-  fi
-  _notify_append "$1" "$diff_files_list"
+  tg_add_section "$1" "📋 差异文件列表"
+  tg_add_block "$1" "$(escape_html "$diff_files_list")"
+  return 0
 }
 
 # 发送同步结果通知（从 sync_with_logging 拆分出来）
@@ -1438,20 +1425,21 @@ _send_sync_result_notification() {
   if [[ "$source_count_raw" =~ ^[0-9]+$ ]] && [[ "$dest_count_raw" =~ ^[0-9]+$ ]]; then
     local diff=$((source_count_raw - dest_count_raw))
     if [ "$diff" -ne 0 ]; then
-      count_info="文件数差异：${diff} (源端 ${source_count} / 目标 ${dest_count})"
+      count_info="<b>差异 ${diff}</b>（源端 ${source_count} / 目标 ${dest_count}）"
       diff_files_list=$(_build_diff_files_list "$source_path" "$dest_path" "${extra_args[@]}")
     else
-      count_info="文件数：${source_count} (一致)"
+      count_info="${source_count}（一致）"
     fi
   else
-    count_info="文件数：源端 ${source_count} / 目标 ${dest_count}"
+    count_info="源端 ${source_count} / 目标 ${dest_count}"
   fi
 
   # 提取 --exclude 规则，方便在通知中说明
   local exclude_list=""
   exclude_list=$(_build_exclude_bullets "${extra_args[@]}")
 
-  # 构建 fix_summary（已修复文件：目录只展示一次，原名/实际名/大小分行，方法用短标签）
+  # 构建 fix_summary（已修复文件：目录只展示一次，原名/实际名/大小分行，方法用短标签；
+  # HTML 格式，路径 code 等宽，动态内容经 escape_html 转义）
   local fix_summary=""
   local fix_total=0
   if [ -s "$fix_list" ]; then
@@ -1465,23 +1453,26 @@ _send_sync_result_notification() {
       f_method_tag=$(_method_short "$f_mid")
       if [ "$f_original" = "$f_alternative" ]; then
         # 同名修复: 一行完整路径
-        fix_summary+="• ${f_original}"$'\n'
+        fix_summary+="• <code>$(escape_html "$f_original")</code>"$'\n'
       elif [ "$f_dir" = "$(dirname -- "$f_alternative")" ]; then
         # 同目录改名: 目录只展示一次，避免长路径重复两遍
         if [ "$f_dir" = "." ]; then
-          fix_summary+="• 原名：${f_orig_base}"$'\n'
+          fix_summary+="• 原名：<code>$(escape_html "$f_orig_base")</code>"$'\n'
         else
-          fix_summary+="• 目录：${f_dir}/"$'\n'"  原名：${f_orig_base}"$'\n'
+          fix_summary+="• 目录：<code>$(escape_html "$f_dir")/</code>"$'\n'
+          fix_summary+="  原名：<code>$(escape_html "$f_orig_base")</code>"$'\n'
         fi
-        fix_summary+="  实际：${f_alt_base}"$'\n'
+        fix_summary+="  实际：<code>$(escape_html "$f_alt_base")</code>"$'\n'
       else
         # 目录有变（如方法9 上传到父目录）: 双方完整相对路径
-        fix_summary+="• 原路径：${f_original}"$'\n'"  实际路径：${f_alternative}"$'\n'
+        fix_summary+="• 原路径：<code>$(escape_html "$f_original")</code>"$'\n'
+        fix_summary+="  实际路径：<code>$(escape_html "$f_alternative")</code>"$'\n'
       fi
-      fix_summary+="  大小：${f_size}"$'\n'"  方式：${f_method_tag}"$'\n'
+      fix_summary+="  大小：$(escape_html "$f_size")"$'\n'
+      fix_summary+="  方式：$(escape_html "$f_method_tag")"$'\n'
     done < "$fix_list"
   fi
-  [ -z "$fix_summary" ] && fix_summary="无"
+  [ -z "$fix_summary" ] && fix_summary="无"$'\n'
 
   # 构建 fail_summary（无法修复的文件；风格与 fix_summary 一致：• 相对路径 + 2 空格标签行）
   local fail_summary=""
@@ -1490,9 +1481,9 @@ _send_sync_result_notification() {
     fail_total=$(grep -c . "$fail_list" 2>/dev/null || true)
     while IFS='|' read -r fpath fsize fmsg; do
       [ -z "$fpath" ] && continue
-      fail_summary+="• ${fpath}"$'\n'
-      fail_summary+="  大小：${fsize}"$'\n'
-      fail_summary+="  原因：${fmsg}"$'\n'
+      fail_summary+="• <code>$(escape_html "$fpath")</code>"$'\n'
+      fail_summary+="  大小：$(escape_html "$fsize")"$'\n'
+      fail_summary+="  原因：$(escape_html "$fmsg")"$'\n'
       # 从 fix_log 中按文件名分隔提取该文件对应的修复过程
       local fix_section=""
       if [ -f "$fix_log" ]; then
@@ -1506,7 +1497,7 @@ _send_sync_result_notification() {
         fail_summary+="  修复过程："$'\n'
         while IFS= read -r log_line; do
           [ -z "$log_line" ] && continue
-          fail_summary+="    ${log_line}"$'\n'
+          fail_summary+="    $(escape_html "$log_line")"$'\n'
         done <<< "$fix_section"
       elif echo "$fmsg" | grep -qi 'object not found'; then
         fail_summary+="  修复过程：源文件不存在，无需修复"$'\n'
@@ -1515,7 +1506,7 @@ _send_sync_result_notification() {
       fi
     done < "$fail_list"
   fi
-  [ -z "$fail_summary" ] && fail_summary="无"
+  [ -z "$fail_summary" ] && fail_summary="无"$'\n'
 
   # 解析本次同步传输的字节数
   SYNC_TRANSFERRED_BYTES=$(get_transferred_bytes_from_log "$log_filename")
@@ -1541,19 +1532,17 @@ _send_sync_result_notification() {
     # 根据错误类型构建状态消息
     local fail_status_msg="部分文件无法同步"
     if [ "$has_object_not_found" -eq 1 ]; then
-      fail_status_msg="源文件不存在 (object not found)，部分文件无法同步"
+      fail_status_msg="源文件不存在（object not found），部分文件无法同步"
     fi
     local partial_msg=""
     _notify_add_header partial_msg "⚠️ ${task_name} 部分文件同步失败" "$fail_status_msg"
     _notify_add_autosplit partial_msg
     _notify_add_task_and_excludes partial_msg
-    partial_msg+=$'\n'
-    partial_msg+="✅ 已通过其他方式同步（${fix_total} 个文件）："$'\n'
-    partial_msg+="${fix_summary}"$'\n'
-    partial_msg+=$'\n'
-    partial_msg+="❌ 无法同步文件（${fail_total} 个）："$'\n'
-    partial_msg+="${fail_summary}"
-    _notify_add_diff_list partial_msg 2
+    tg_add_section partial_msg "✅ 已通过其他方式同步（${fix_total} 个文件）"
+    tg_append partial_msg "${fix_summary}"
+    tg_add_section partial_msg "❌ 无法同步文件（${fail_total} 个）"
+    tg_append partial_msg "${fail_summary}"
+    _notify_add_diff_list partial_msg
 
     send_telegram_message "$partial_msg"
 
@@ -1563,10 +1552,9 @@ _send_sync_result_notification() {
     _notify_add_header partial_msg "⚠️ ${task_name} 部分文件已通过其他方式同步" "${fix_total} 个缺失文件已全部通过替代方式同步"
     _notify_add_autosplit partial_msg
     _notify_add_task_and_excludes partial_msg
-    partial_msg+=$'\n'
-    partial_msg+="✅ 已通过其他方式同步（${fix_total} 个文件）："$'\n'
-    partial_msg+="${fix_summary}"
-    _notify_add_diff_list partial_msg 2
+    tg_add_section partial_msg "✅ 已通过其他方式同步（${fix_total} 个文件）"
+    tg_append partial_msg "${fix_summary}"
+    _notify_add_diff_list partial_msg
 
     send_telegram_message "$partial_msg"
 
@@ -1588,21 +1576,27 @@ _send_sync_result_notification() {
     local err_title err_status
     if [ "$is_partial_failure" -eq 1 ]; then
       err_title="⚠️ ${task_name} 部分文件同步失败"
-      err_status="部分文件同步失败 (exit=${sync_status})"
+      err_status="部分文件同步失败（exit=${sync_status}）"
     else
       err_title="⚠️ ${task_name} 同步失败"
-      err_status="同步失败 (exit=${sync_status})"
+      err_status="同步失败（exit=${sync_status}）"
     fi
     local err_msg=""
     _notify_add_header err_msg "$err_title" "$err_status"
     _notify_add_autosplit err_msg
     _notify_add_task_and_excludes err_msg
-    err_msg+=$'\n''🧾 错误详情'$'\n'
-    err_msg+="• 关键日志："$'\n'
-    while IFS= read -r line; do
-      [ -n "$line" ] && err_msg+="  ${line}"$'\n'
-    done <<< "$critical_logs"
-    _notify_add_diff_list err_msg 1
+    tg_add_section err_msg "🧾 错误详情 · 关键日志"
+    if [ -n "$critical_logs" ] && [ "$critical_logs" != "无明显错误关键字" ]; then
+      # 日志为原始输出（可能含 <>& 字符），逐行转义后 <pre> 等宽展示
+      local err_log_lines=""
+      while IFS= read -r line; do
+        [ -n "$line" ] && err_log_lines+="${line}"$'\n'
+      done <<< "$critical_logs"
+      tg_add_block err_msg "<pre>$(escape_html "${err_log_lines%$'\n'}")</pre>"
+    else
+      tg_add_block err_msg "• 无明显错误关键字"
+    fi
+    _notify_add_diff_list err_msg
     send_telegram_message "$err_msg"
     # 发送完整日志文件
     local err_log_size
@@ -1611,7 +1605,8 @@ _send_sync_result_notification() {
       curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
         -F chat_id="${TELEGRAM_CHAT_ID}" \
         -F document=@"$log_filename" \
-        -F caption="📁 ${task_name} 错误日志" || true
+        -F parse_mode="HTML" \
+        -F caption="📁 <b>$(escape_html "$task_name")</b> 错误日志" || true
     fi
   else
     # 同步返回成功，检查是否有文件缺失（部分失败）
@@ -1625,16 +1620,16 @@ _send_sync_result_notification() {
     local ok_message=""
     if [ "$is_partial_success" -eq 1 ]; then
       # 同步"成功"但目标文件数少于源端，视为部分失败
-      _notify_add_header ok_message "⚠️ ${task_name} 部分文件同步失败" "部分文件同步失败 (exit=0，文件数不一致)"
+      _notify_add_header ok_message "⚠️ ${task_name} 部分文件同步失败" "部分文件同步失败（exit=0，文件数不一致）"
       _notify_add_task_and_excludes ok_message
-      _notify_add_diff_list ok_message 1
+      _notify_add_diff_list ok_message
     else
       _notify_add_header ok_message "✅ ${task_name} 同步完成"
-      _notify_add_task_and_excludes ok_message 0
-      _notify_add_diff_list ok_message 2 0
+      _notify_add_task_and_excludes ok_message
+      _notify_add_diff_list ok_message
     fi
 
-    [ -n "$AUTO_SPLIT_INFO" ] && ok_message="${ok_message}"$'\n\n'"${AUTO_SPLIT_INFO}"
+    _notify_add_autosplit ok_message
 
     send_telegram_message "$ok_message"
   fi
