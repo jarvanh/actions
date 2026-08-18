@@ -60,8 +60,8 @@ _ol_render_subdir_phase() {
   local mode="${1:-loop}"
   local cur_sd="${2:-}"
   local total_subdirs excluded_count
-  total_subdirs=$(echo "$subdirs" | grep -c . 2>/dev/null || echo 0)
-  excluded_count=$(echo "$exclude_dir_list" | grep -c . 2>/dev/null || echo 0)
+  total_subdirs=$(echo "$subdirs" | grep -c . 2>/dev/null); total_subdirs=${total_subdirs:-0}
+  excluded_count=$(echo "$exclude_dir_list" | grep -c . 2>/dev/null); excluded_count=${excluded_count:-0}
   local grand_total=$((total_subdirs + excluded_count))
   local ph="▸ 源端 $(format_bytes "$source_size_bytes") · 子目录 ${grand_total} 个（参与 ${total_subdirs}，排除 ${excluded_count}）"
   local _idx=0 _sd
