@@ -460,13 +460,18 @@ jobs:
           }
 
           if [ "${{ inputs.skip_preview }}" = "true" ]; then
-            echo "=== 跳过任务预览（skip_preview=true，直接开始同步）==="
+            echo "=== 跳过预览通知（skip_preview=true，仅注册任务队列）==="
+            # 仅注册模式: 不发预览通知，但把全部任务（含源端大小）注册进进度队列，
+            # 否则任务随 task_begin 逐个注册，进度消息的"总任务"会从 3 之类的小数字慢慢涨
+            TASK_REGISTER_ONLY=1 run_all_tasks
           else
             echo "=== 发送任务预览通知 ==="
             TASK_PREVIEW_ONLY=1 run_all_tasks
             flush_task_preview
             echo "=== 所有任务预览通知已发送 ==="
           fi
+          # 注册完成后立即刷新，让"总任务"在同步开始前就是全量
+          progress_reload
 
           echo "=== 开始同步所有任务 ==="
           run_all_tasks
