@@ -26,15 +26,13 @@ PROGRESS_FINALIZED_FILE="/tmp/progress_finalized.txt"
 PROGRESS_LAST_UPDATE_FILE="/tmp/progress_last_update.txt"
 
 # 注册任务到队列（初始化时调用）
-# 用法: progress_register_task <task_id> <display_name> [detail]
+# 用法: progress_register_task <task_id> <display_name>
 # TSV 格式: task_id \t display_name \t status(pending/running/completed/skipped/failed) \t detail
-# detail 可携带源端大小等信息（如 "12.345 GiB"），供待处理/已跳过任务显示
 progress_register_task() {
   local task_id="$1"
   local display_name="$2"
-  local detail="${3:-}"
   [ -z "$task_id" ] && return
-  echo -e "${task_id}\t${display_name}\tpending\t${detail}" >> "$PROGRESS_TASKS_FILE"
+  echo -e "${task_id}\t${display_name}\tpending\t" >> "$PROGRESS_TASKS_FILE"
 }
 
 # 从任务队列中按 task_id 查找
@@ -157,32 +155,16 @@ _progress_render() {
   msg+="━━━━━━━━━━━━━━━━━━"$'\n'
   msg+="📊 总任务：<b>${total}</b> | 待处理：${pending} | 进行中：${running} | 完成：${completed} | 跳过：${skipped} | 失败：${failed}"$'\n'
 
+  local phase
+  phase=$(_progress_get_phase)
+  [ -n "$phase" ] && msg+=$'\n'"${phase}"$'\n'
+
+  local stats
+  stats=$(_progress_get_stats)
+  [ -n "$stats" ] && msg+=$'\n'"${stats}"$'\n'
+
   if [ "$finalized" -ne 1 ] && [ "$running" -gt 0 ]; then
-    msg+=$'\n'"📍 <b>进行中</b>"$'\n'
-    # phase/stats 属于「当前正在执行的任务」的局部上下文（如子目录大小/进度树），
-    # 不再顶格出现在全局区，而是缩进挂到对应 running 任务行下，层级清晰。
-    local cur_task phase stats
-    cur_task=$(_progress_get_current_task)
-    phase=$(_progress_get_phase)
-    stats=$(_progress_get_stats)
-    while IFS=$'\t' read -r tid tname tstatus tdetail; do
-      [ "$tstatus" = running ] || continue
-      local display="• $(escape_html "$tname")"
-      [ -n "$tdetail" ] && display+=" — <i>$(escape_html "$tdetail")</i>"
-      msg+="${display}"$'\n'
-      if [ "$tid" = "$cur_task" ]; then
-        if [ -n "$phase" ]; then
-          local _pline
-          while IFS= read -r _pline; do
-            [ -z "$_pline" ] && continue
-            msg+="  ${_pline}"$'\n'
-          done <<< "$phase"
-        fi
-        if [ -n "$stats" ]; then
-          msg+="  ▸ ${stats}"$'\n'
-        fi
-      fi
-    done < "$PROGRESS_TASKS_FILE"
+    msg+=$'\n'"📍 <b>进行中</b>"$'\n'"${running_list}"
   fi
 
   if [ "$pending" -gt 0 ]; then
