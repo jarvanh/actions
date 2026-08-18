@@ -49,6 +49,7 @@ from speedtest_gitee import (
     # 订阅导出 + Gist 上传（复刻 speedtest_gitee 的订阅发布能力）
     build_source_mapping,
     build_subscription_yaml_text,
+    build_node_metric_prefix,
     update_gist,
     get_item_megabits,
     DEFAULT_MIN_MEGABIT,
@@ -878,12 +879,14 @@ def main():
         for r in results:
             dl = (r.get('download') or {}).get('mibps')
             ul = (r.get('upload') or {}).get('mibps')
+            lat = (r.get('latency') or {}).get('median_ms')
             gist_results.append({
                 'name': r.get('name', ''),
                 'source_entry': r.get('source_entry') or {},
                 'mode': r.get('mode', 'download'),
                 'download_mibs': dl if isinstance(dl, (int, float)) else 0,
                 'upload_mibs': ul if isinstance(ul, (int, float)) else 0,
+                'latency_ms': lat if isinstance(lat, (int, float)) else 0,
             })
         yaml_text = build_subscription_yaml_text(gist_results, DEFAULT_MIN_MEGABIT)
         gist_res = None
@@ -928,16 +931,19 @@ def main():
     return 0
 
 
-def _fmt_mbps(mibps):
-    """MiB/s 转 Mbps（兆）显示，None 显示 '-'。"""
-    if isinstance(mibps, (int, float)) and mibps > 0:
-        return f'{mibps * 8:.0f}兆'
-    return '-'
+def _result_metric_item(r):
+    """把测速结果 r 适配为 build_node_metric_prefix 可用的指标 dict。"""
+    return {
+        'upload_mibs': (r.get('upload') or {}).get('mibps'),
+        'download_mibs': (r.get('download') or {}).get('mibps'),
+        'latency_ms': (r.get('latency') or {}).get('median_ms'),
+    }
 
 
 def build_telegram_lines(results, *, meta, gist_res, qualified_count):
-    """生成人性化 Telegram 通知：测速概览 + TOP 节点（延迟/下载/上传）+ 订阅状态。"""
+    """生成人性化 Telegram 通知：测速概览 + TOP 节点（与订阅节点名一致的指标格式）+ 订阅状态。"""
     push_enabled = bool(meta.get('push'))
+    mode = 'push-only' if push_enabled else 'download'
     sort_key = (lambda r: (r.get('upload') or {}).get('mibps') or 0) if push_enabled \
         else (lambda r: (r.get('download') or {}).get('mibps') or 0)
     ok_results = [r for r in results if r.get('ok')]
@@ -962,15 +968,11 @@ def build_telegram_lines(results, *, meta, gist_res, qualified_count):
         best = top_results[0]
         lines.append(f"🏆 最快节点: {best.get('name', '')}")
         lines.append('')
-        lines.append('🥇 TOP 5（⏳延迟 ⬇️下载 ⬆️上传）:')
+        lines.append('🥇 TOP 5（↑上传 ↓下载 延迟ms）:')
         for idx, r in enumerate(top_results[:5], 1):
-            lat = (r.get('latency') or {}).get('median_ms')
-            lat_text = f'{lat:.0f}ms' if isinstance(lat, (int, float)) else '-'
-            dl = (r.get('download') or {}).get('mibps')
-            ul = (r.get('upload') or {}).get('mibps')
-            ul_text = _fmt_mbps(ul) if push_enabled else '未测'
+            prefix = build_node_metric_prefix(_result_metric_item(r), mode)
             lines.append(f"{idx}. {r.get('name', '')}")
-            lines.append(f"   └─ ⏳ {lat_text}  ⬇️ {_fmt_mbps(dl)}  ⬆️ {ul_text}")
+            lines.append(f'   └─ {prefix or "-"}')
         lines.append('')
     else:
         lines.append('⚠️ 没有节点测速成功')
