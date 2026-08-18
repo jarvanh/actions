@@ -208,8 +208,8 @@ jobs:
 
       # ===== 一键还原修复文件 =====
       # 把 marker fixed_files 中的替代文件还原为原路径原文件名:
-      #   改名类 → rclone move 服务端移动；压缩/分卷/base64 内容类 → 下载还
-      #   原后回传原路径；成功后清理目标端替代文件并从 marker 移除条目。
+      #   改名类 → rclone move 服务端移动；压缩/分卷类 → 下载还原后回传
+      #   原路径；成功后清理目标端替代文件并从 marker 移除条目。
       # 完成后发送 Telegram 汇总。restore_task 指定任务名（backup/task0-5）或 all。
       - name: "⚠️ Restore: 一键还原修复文件"
         if: ${{ inputs.run_mode == '⚠️ 还原 · 修复文件还原为原路径' }}
@@ -236,10 +236,13 @@ jobs:
           restore_source_from_target "${{ inputs.restore_task || 'all' }}"
 
       # ===== 调试: 单任务测试修复管线 =====
-      # 用真实生产代码路径（sync_task → sync_with_logging）跑单个 wopan176Crypt 任务，
-      # 验证 truth-check（重启取真值） + 缺失文件修复的实际效果。
-      # 与正式流程的区别: 只跑单任务、跳过任务预览、不检查 --1d-skip 标记、
-      # 跳过结尾 5h sleep，并用 OPENLIST_MISSING_FIX_MAX 限制修复数量快速得到结果。
+      # 用真实生产代码路径（sync_task → sync_with_logging）按任务清单
+      # （tasks.sh SYNC_TASK_REGISTRY）查表跑单个任务（backup/task0-task5，
+      # 覆盖全部目标后端），验证 truth-check（重启取真值） + 缺失文件修复的实际效果。
+      # 与正式流程的区别: 只跑单任务、跳过任务预览、跳过结尾 5h sleep，
+      # 并用 OPENLIST_MISSING_FIX_MAX 限制修复数量快速得到结果。
+      # 注意: --1d-skip 标记仍照常检查（近 1 天已成功同步的任务会跳过），
+      # 需测试这类任务时配合 force_sync=true 强制执行。
       - name: "Debug: 单任务测试修复管线"
         if: ${{ inputs.run_mode == '调试 · 修复管线测试' }}
         timeout-minutes: 120

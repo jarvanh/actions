@@ -1,6 +1,6 @@
 #!/bin/bash
 # ===== OpenList 同步工具 — 大文件分割函数 =====
-# 处理超过 OpenList/阿里云盘 4GB 限制的大文件：
+# 处理超过后端单文件大小阈值（默认 4GB，LARGE_FILE_THRESHOLD 可调）的大文件：
 #   - 视频文件：使用 ffmpeg 按关键帧分割（无损，-c copy）
 #   - 非视频文件：使用 7z 分卷存储模式（可恢复）
 #
@@ -206,7 +206,7 @@ split_large_video() {
   fi
   local file_size
   file_size=$(stat -c%s "$local_file_path" 2>/dev/null || echo 0)
-  # OpenList/阿里云盘大文件阈值按 4,000,000,000 bytes 处理。
+  # 后端单文件大小阈值按 4,000,000,000 bytes 处理（LARGE_FILE_THRESHOLD 可调）。
   # 分片目标略低于 4G，尽量贴近上限，同时给封装开销和关键帧边界留余量。
   local max_part_size="${OPENLIST_MAX_PART_SIZE:-4000000000}"
   local target_part_size="${OPENLIST_TARGET_PART_SIZE:-3980000000}"

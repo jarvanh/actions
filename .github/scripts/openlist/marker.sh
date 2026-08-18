@@ -6,7 +6,9 @@
 #   - 检测源端大小异常减小（可能数据丢失），发送警告并跳过
 #
 # 标记存储路径: onedrive:/logs/sync_state/<task_name>_<dest_hash>.json
-# JSON 字段: last_success, source_path, dest_path, source_bytes, source_count, top_dirs, stats_filtered
+# JSON 字段: last_success, source_path, dest_path, source_bytes, source_count,
+#            top_dirs, stats_filtered, fixed_files, fixed_count, fixed_bytes,
+#            fix_blacklist（详见 save_sync_marker / save_fix_state_marker）
 #
 # 依赖: utils.sh (escape_html, format_bytes), telegram.sh (send_telegram_message)
 # 依赖环境变量: FORCE_SYNC — 为 "true" 时跳过所有标记检查
