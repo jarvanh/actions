@@ -165,7 +165,7 @@ echo "--- 详情 ---"
 echo "${DUP_DETAILS}"
 
 # 发送通知（按 4000 字符分片，避免超过 Telegram 4096 字符限制）
-source "${GITHUB_WORKSPACE}/.github/scripts/tg_notify.sh"
+source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 
 if [ "$DUP_COUNT" -gt 0 ]; then
   HEADER="🔍 ${WORKFLOW_LABEL} 重复视频检测与去重"$'\n'"━━━━━━━━━━━━━━━━━━"$'\n'"📁 目录: ${DIR_LABEL}"$'\n'

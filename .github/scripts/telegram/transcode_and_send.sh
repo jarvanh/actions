@@ -115,7 +115,7 @@ echo "[upload] 开始上传 Telegram: $FILENAME (大小 ${FILESIZE_HUMAN} / ${FI
 UPLOAD_START=$SECONDS
 # tg_send_video.py 的进度/属性输出属于噪音，重定向到日志文件；仅失败时打印尾部便于排查
 UPLOAD_LOG="$WORK_DIR/upload.log"
-if python3 "${GITHUB_WORKSPACE}/.github/scripts/tg_send_video.py" "$LOCAL_FILE" "$CHANNEL_ID" "$CAPTION" > "$UPLOAD_LOG" 2>&1; then
+if python3 "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_send_video.py" "$LOCAL_FILE" "$CHANNEL_ID" "$CAPTION" > "$UPLOAD_LOG" 2>&1; then
   UPLOAD_ELAPSED=$((SECONDS - UPLOAD_START))
   echo "SENT: $FILENAME (上传耗时 ${UPLOAD_ELAPSED}s)"
   exit 0

@@ -12,11 +12,14 @@ bad() { FAIL=$((FAIL+1)); echo "FAIL: $1"; }
 
 LOGF=/tmp/test_truth_log.txt; : > "$LOGF"
 
+# --- 定位仓库根目录（tests/ 向上四级）---
+_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+
 # --- 先 source 被测代码（sed 截取含全部被测函数的区段）---
-source /workspace/.github/scripts/openlist/utils.sh 2>/dev/null
+source "$_REPO_ROOT/.github/scripts/openlist/utils.sh" 2>/dev/null
 # 注意: macOS 自带 bash 3.2 的 source <(...（进程替换）不生效，先落临时文件
 _SYNC_EXCERPT=$(mktemp /tmp/test_truth_sync.XXXXXX)
-sed -n '1,400p' /workspace/.github/scripts/openlist/sync.sh > "$_SYNC_EXCERPT"
+sed -n '1,400p' "$_REPO_ROOT/.github/scripts/openlist/sync.sh" > "$_SYNC_EXCERPT"
 source "$_SYNC_EXCERPT" 2>/dev/null || true
 rm -f "$_SYNC_EXCERPT"
 

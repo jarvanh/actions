@@ -26,7 +26,7 @@ ARCHIVE_FILE="$TARGET_DIR/archive.txt"
 CORRUPTED_LOG="/tmp/ph-dl-downloads/corrupted.txt"
 
 # 如果 FILENAME 包含控制字符或清理后为空，用 URL/ID 生成安全文件名
-CLEANED_FILENAME=$(python3 "${GITHUB_WORKSPACE}/.github/scripts/clean_ytdlp_filename.py" "$FILENAME" "$URL" 2>/dev/null)
+CLEANED_FILENAME=$(python3 "${GITHUB_WORKSPACE}/.github/scripts/telegram/clean_ytdlp_filename.py" "$FILENAME" "$URL" 2>/dev/null)
 [ -z "$CLEANED_FILENAME" ] && CLEANED_FILENAME="$FILENAME"
 if [ "$CLEANED_FILENAME" != "$FILENAME" ]; then
   echo "NOTE: cleaned filename '$FILENAME' -> '$CLEANED_FILENAME'"
@@ -73,8 +73,8 @@ if [ -n "$SOFTWARE_CREATED_AT" ] && [ "$SOFTWARE_CREATED_AT" != "0" ]; then
 else
   SOURCE_CREATED_ISO=""
 fi
-if bash ${GITHUB_WORKSPACE}/.github/scripts/transcode_and_send.sh "${FILEPATH}" "${TELEGRAM_CHANNEL_ID}" "ph"; then
-  python3 "${GITHUB_WORKSPACE}/.github/scripts/add_uploaded_video.py" \
+if bash ${GITHUB_WORKSPACE}/.github/scripts/telegram/transcode_and_send.sh "${FILEPATH}" "${TELEGRAM_CHANNEL_ID}" "ph"; then
+  python3 "${GITHUB_WORKSPACE}/.github/scripts/telegram/add_uploaded_video.py" \
     "${TARGET_DIR}/uploaded_videos.json" \
     "${FILENAME}" \
     ${FILESIZE_BYTES:-0} \
