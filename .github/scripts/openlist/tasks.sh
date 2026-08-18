@@ -249,6 +249,7 @@ _sync_task_impl() {
     sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
     local _rc=$?
     _sync_task_finalize "$_rc"
+    return "$_rc"
   fi
 
   # 50GB 阈值（带默认值，防止跨 step 环境变量丢失时为空）
@@ -270,6 +271,7 @@ _sync_task_impl() {
     sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
     local _rc=$?
     _sync_task_finalize "$_rc"
+    return "$_rc"
   fi
 
   # 超过 50GB，需要拆分
@@ -279,6 +281,7 @@ _sync_task_impl() {
     sync_by_file_batches "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
     local _rc=$?
     _sync_task_finalize "$_rc"
+    return "$_rc"
   fi
 
   echo "源端大小 $(format_bytes_iec "$source_size_bytes") 超过 50GB 阈值，按子目录拆分同步 (depth=${current_depth})"
@@ -292,6 +295,7 @@ _sync_task_impl() {
     sync_by_file_batches "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
     local _rc=$?
     _sync_task_finalize "$_rc"
+    return "$_rc"
   fi
 
   # 从 extra_args 中提取排除的目录名（模式如 notion/** 或 /notion/**）
@@ -335,6 +339,7 @@ _sync_task_impl() {
       sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
       local _rc=$?
       _sync_task_finalize "$_rc"
+      return "$_rc"
     fi
   fi
 
