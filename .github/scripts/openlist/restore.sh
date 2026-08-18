@@ -1,16 +1,18 @@
 #!/bin/bash
 # ===== OpenList 同步工具 — 修复文件一键还原 =====
 # 把 marker fixed_files 中以替代路径/文件名存在的文件还原为「原路径 + 原文件名」。
-# 触发: workflow_dispatch input restore_fixed=true（restore_task 指定任务名或 all）
+# 触发: workflow_dispatch input run_mode="⚠️ 还原 · 修复文件还原为原路径"
+#       （restore_task 指定任务名或 all）
 #
-# 还原策略按修复方式自动分类:
-#   - 改名类（base64URL 文件名/目录、.bak、API 文件名、父目录、根目录、临时目录）:
-#       rclone move 服务端移动回原路径（不经过本地，不重新上传）
+# 还原策略按修复方式自动分类（方法编号对应 fix.sh 现行 11 种方法）:
+#   - 改名类（base64URL 编码目录、短哈希文件名、API 自动生成文件名、
+#     父目录、临时目录）: rclone move 服务端移动回原路径（不经过本地，不重新上传）
 #   - zip / 7z / AES256 加密 zip: 下载 → 7z 解压（密码取自 restore_hint）→
 #       解压产物上传到原路径 → 验证后删除替代文件
 #   - 分卷 zip: 下载全部 .zip.00N 分卷 → cat 合并 → 解压 → 上传 → 删除分卷
-#   - base64 编码内容: 下载 → base64 -d → 上传 → 删除替代文件
-#   - 原路径原名（alt == original）: 仅验证存在，跳过
+#   - 原路径原名（alt == original，含方法2 crypt 直写）: 仅验证存在，跳过
+#   - 已删除方法（.bak / base64 内容 / 根目录上传）的分类分支仅为兼容
+#     旧 marker 残留条目保留
 #
 # 每还原成功一个: 从 marker 的 fixed_files / fix_blacklist 移除该条目并即时写回，
 # 中断后重跑不会重复处理。全部完成后发送 Telegram 汇总。
@@ -33,7 +35,7 @@ _dst_file_exists() {
     --timeout 2m 2>/dev/null | grep -qxF "$(basename "$full")"
 }
 
-# 按修复方法名分类还原方式（move/b64content/split/archive）
+# 按修复方法名分类还原方式（move/split/archive；b64content 仅旧 marker 条目）
 _restore_classify_kind() {
   case "$1" in
     *base64\ 编码文件内容*) echo "b64content" ;;

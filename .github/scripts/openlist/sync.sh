@@ -22,7 +22,7 @@
 #
 # 依赖: utils.sh, telegram.sh, fix.sh (try_fix_failed_file)
 # 依赖环境变量:
-#   RCLONE_DEFAULT_FLAGS — 共用 rclone 参数数组（在 workflow 文件中定义）
+#   RCLONE_DEFAULT_FLAGS — 共用 rclone 参数数组（在 flags.sh 中定义）
 #   TELEGRAM_BOT_TOKEN   — 用于发送日志文件
 #   TELEGRAM_CHAT_ID     — 用于发送日志文件
 
@@ -1112,31 +1112,29 @@ _sync_parse_object_not_found() {
 }
 
   # 把 fix_list 序列化为 JSON 供 save_sync_marker 使用
-  # 格式: [{original, alternative, method, size_human, size_bytes, restore: {kind, summary, steps, script}}]
+  # 格式: [{original, alternative, method, restore_hint, size_human, size_bytes,
+  #         method_id, restore: {kind, summary, steps, script, hint}}]
   # restore 字段记录还原方式，便于日后从目标端恢复原始文件
-        # 14 种修复方式精确识别（方法 1-14）：
+        # 现行 11 种修复方式精确识别（方法 1-11，与 fix.sh _method_desc 对齐）:
         #   "原路径 + 原文件名"                             → 原样 copy (方法1)
         #   "base64URL 编码目录 + 原文件名"                → 仅 b64 目录 (方法1变体)
-        #   "原路径 + base64URL 编码文件名"                → 仅 b64 文件名 (方法2)
-        #   "base64URL 编码目录 + base64URL 编码文件名"    → b64 目录+文件名 (方法2变体)
-        #   "原路径 + zip 压缩包"                          → zip (方法3)
-        #   "base64URL 编码目录 + zip 压缩包"              → zip(+b64dir) (方法3变体)
-        #   "原路径 + 7z 压缩包"                           → 7z (方法4)
-        #   "base64URL 编码目录 + 7z 压缩包"               → 7z(+b64dir) (方法4变体)
-        #   "原路径 + 100MB 分卷切割"                      → split zip (方法5)
-        #   "base64URL 编码目录 + 100MB 分卷切割"          → split zip(+b64dir) (方法5变体)
-        #   "原路径 + base64URL 编码文件名 + 100MB 分卷切割" → split zip + b64name (方法6)
-        #   "base64URL 编码目录 + base64URL 编码文件名 + 100MB 分卷切割" → split zip(+b64dir+b64name) (方法6变体)
-        #   "原路径 + API 自动生成文件名"                  → api rename (方法7)
-        #   "base64URL 编码目录 + API 自动生成文件名"      → api rename(+b64dir) (方法7变体)
-        #   "重命名 .bak"                                 → rename .bak (方法8)
+        #   "rclone crypt 直写（原名原路径）"              → copy，alt==orig 无需还原 (方法2)
+        #   "原路径 + 短哈希文件名"                        → short hash rename (方法3)
+        #   "原路径 + zip 压缩包"                          → zip (方法4)
+        #   "base64URL 编码目录 + zip 压缩包"              → zip(+b64dir) (方法4变体)
+        #   "原路径 + 7z 压缩包"                           → 7z (方法5)
+        #   "base64URL 编码目录 + 7z 压缩包"               → 7z(+b64dir) (方法5变体)
+        #   "原路径 + <粒度> 分卷切割"                     → split zip (方法6)
+        #   "原路径 + base64URL 编码文件名 + <粒度> 分卷切割" → split zip + b64name (方法7)
+        #   "base64URL 编码目录 + [b64文件名 +] <粒度> 分卷切割" → split zip 变体 (方法6/7变体)
+        #   "原路径 + API 自动生成文件名"                  → api rename (方法8)
+        #   "base64URL 编码目录 + API 自动生成文件名"      → api rename(+b64dir) (方法8变体)
         #   "父目录 + 编码原始目录名的文件名"              → parent dir (方法9)
-        #   "上传到根 backup 目录 + 编码文件名"            → root backup (方法10/11)
-        #   "base64 编码文件内容 + .b64 扩展名"            → base64 content (方法12)
-        #   "AES256 加密 zip + .enc.zip 扩展名"             → encrypted zip (方法13)
-        #   "临时目录上传 + OpenList API move"             → tmp + move (方法14)
+        #   "AES256 加密 zip + .enc.zip 扩展名"             → encrypted zip (方法10)
+        #   "临时目录上传 + OpenList API move"             → tmp + move (方法11)
+        # 已删除方法（b64 文件名单传 / .bak / 根目录上传 / base64 内容）的
+        # 分类分支仅为兼容旧 marker 残留条目与 fallback 扫描输出保留
         # 注: 不能用 ".*文件名" 模糊匹配，"原文件名" 里也有 "文件名" 3 个字，会误判
-        # 原目录部分（去掉文件名）和文件名
 # 分类程序在 restore_info.jq（随 *.jq 拷到 /tmp，见 workflow Load helper functions）
 # 依赖调用方（sync_with_logging）作用域: fix_list / source_path / dest_path / LOG_FILENAME
 # 写入: LAST_SYNC_FIXED_FILES_JSON
