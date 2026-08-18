@@ -41,7 +41,7 @@ jobs:
         RDP_PASSWORD: "P@ssw0rd!"
 
     - name: Create Tunnel (background)
-      run: Start-Process -FilePath ".\ngrok\ngrok.exe" -ArgumentList "tcp 3389 --region in --log ngrok.log" -WindowStyle Hidden
+      run: Start-Process -FilePath ".\ngrok\ngrok.exe" -ArgumentList "tcp 3389 --region in --log stdout --log-format term --log ngrok.log" -WindowStyle Hidden
 
     - name: Send RDP info to Telegram
       env:
@@ -49,20 +49,34 @@ jobs:
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         RDP_PASSWORD: "P@ssw0rd!"
       run: |
-        $public = $null
-        # 轮询 ngrok 本地 API（最多 150 秒）拿公网隧道地址
-        for ($i = 0; $i -lt 30; $i++) {
+        $raw = ""
+        $address = $null
+        # 轮询 ngrok 本地 API（最多 2 分钟），tunnels 为空时也要 sleep 等隧道建立
+        for ($i = 0; $i -lt 40; $i++) {
+          Start-Sleep -Seconds 3
           try {
-            $tunnels = Invoke-RestMethod -Uri "http://127.0.0.1:4040/api/tunnels" -TimeoutSec 5
-            $public = ($tunnels.tunnels | Where-Object { $_.proto -eq "tcp" }).public_url
-            if ($public) { break }
-          } catch { Start-Sleep -Seconds 5 }
+            $raw = Invoke-WebRequest -Uri "http://127.0.0.1:4040/api/tunnels" -UseBasicParsing -TimeoutSec 5
+            $tunnels = ($raw.Content | ConvertFrom-Json).tunnels
+            foreach ($t in @($tunnels)) {
+              if ($t.public_url -like "tcp*") { $address = $t.public_url -replace "tcp://", "" }
+            }
+            if ($address) { break }
+          } catch { }
         }
-        if (-not $public) {
+        # API 拿不到时，从 ngrok 日志兜底解析
+        if (-not $address -and (Test-Path .\ngrok.log)) {
+          $m = Select-String -Path .\ngrok.log -Pattern "url=tcp://(\S+)" | Select-Object -Last 1
+          if ($m) { $address = $m.Matches[0].Groups[1].Value }
+        }
+        if (-not $address) {
+          Write-Host "===== ngrok API 原始响应 ====="
+          Write-Host $raw.Content
+          Write-Host "===== ngrok.log ====="
           Get-Content .\ngrok.log -ErrorAction SilentlyContinue
-          throw "无法获取 ngrok 隧道地址，请查看上方 ngrok.log"
+          Write-Host "===== ngrok 进程 ====="
+          Get-Process ngrok -ErrorAction SilentlyContinue | Format-List
+          throw "无法获取 ngrok 隧道地址"
         }
-        $address = $public -replace "tcp://", ""
         $msg = @"
         Windows RDP 已就绪
         地址: $address
