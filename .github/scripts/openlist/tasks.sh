@@ -337,7 +337,7 @@ _sync_task_impl() {
     # 必须用 force: 上一个子目录的完成刷新刚更新过节流时间戳，普通 update
     # 会被 2s 节流吞掉，导致整个子目录同步期间消息停留在旧树（当前子目录
     # 一直显示 ⏳ 待同步而非 🔄 同步中）
-    progress_update_force "" "▸ 📊 子目录：${_completed_before}/${total_subdirs_count} 完成 | ✅${synced_subtasks} ⏭️${skipped_subtasks} ❌${failed_subtasks}"
+    progress_update_force "" "▸ 📊 子目录：${_completed_before}/${total_subdirs_count} 完成 | ✅${synced_subtasks} ⏭️${skipped_subtasks} ⏳$((total_subdirs_count - _completed_before)) ❌${failed_subtasks}"
     SYNC_AUTO_SPLIT_DEPTH=$((current_depth + 1))
     # PROGRESS_SUPPRESS=1: 子任务内部的 progress_update 不覆盖父任务的
     # 阶段树（当前子目录已由上方标记为 🔄 同步中）
@@ -366,7 +366,7 @@ _sync_task_impl() {
     fi
     PROGRESS_PHASE_INFO="$(_render_subdir_phase_tree)"
     local _completed_after=$((synced_subtasks + skipped_subtasks + failed_subtasks))
-    progress_update_force "" "▸ 📊 子目录：${_completed_after}/${total_subdirs_count} 完成 | ✅${synced_subtasks} ⏭️${skipped_subtasks} ❌${failed_subtasks}"
+    progress_update_force "" "▸ 📊 子目录：${_completed_after}/${total_subdirs_count} 完成 | ✅${synced_subtasks} ⏭️${skipped_subtasks} ⏳$((total_subdirs_count - _completed_after)) ❌${failed_subtasks}"
   done <<< "$subdirs"
   SYNC_SKIP_QUIET=0
 
