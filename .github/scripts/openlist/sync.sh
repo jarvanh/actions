@@ -1417,6 +1417,9 @@ _send_sync_result_notification() {
   local extra_args=("$@")
 
   SYNC_FAILED=0
+  # 部分失败标志: 本次同步有文件成功但有文件失败/缺失（导出给调用方，
+  # 子目录进度树据此区分 ⚠️ 部分失败 / ❌ 完全失败）
+  SYNC_PARTIAL=0
 
   # 获取源端和目标端大小及文件数量（各只调一次 --json）
   local source_size_human="未知"
@@ -1547,7 +1550,9 @@ _send_sync_result_notification() {
 
   if [ -s "$fail_list" ]; then
     # 有无法同步的文件，标记失败以便上层触发大文件切割
+    # fail_list 只列出失败文件（其余已正常同步），恒为部分失败
     SYNC_FAILED=1
+    SYNC_PARTIAL=1
     # 根据错误类型构建状态消息
     local fail_status_msg="部分文件无法同步"
     if [ "$has_object_not_found" -eq 1 ]; then
@@ -1619,6 +1624,7 @@ _send_sync_result_notification() {
      [ "$dest_count_raw" -gt 0 ] && [ "$dest_count_raw" -lt "$source_count_raw" ]; then
       is_partial_failure=1
     fi
+    SYNC_PARTIAL=$is_partial_failure
     # 提取关键错误日志
     local critical_logs="无明显错误关键字"
     if [ -f "$log_filename" ]; then
@@ -1672,6 +1678,7 @@ _send_sync_result_notification() {
        [ "$dest_count_raw" -lt "$source_count_raw" ]; then
       is_partial_success=1
       SYNC_FAILED=1
+      SYNC_PARTIAL=1
     fi
     local ok_message
     if [ "$is_partial_success" -eq 1 ]; then

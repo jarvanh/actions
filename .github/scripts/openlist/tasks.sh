@@ -94,6 +94,7 @@ _render_subdir_phase_tree() {
     case "${subdir_status_map[$_name]:-pending}" in
       synced)  _mark="✅"; _state="已同步" ;;
       skipped) _mark="⏭️"; _state="已跳过" ;;
+      partial) _mark="⚠️"; _state="部分失败" ;;
       failed)  _mark="❌"; _state="失败" ;;
       syncing) _mark="🔄"; _state="同步中" ;;
       *)       _mark="⏳"; _state="待同步" ;;
@@ -119,6 +120,7 @@ _sync_task_impl() {
   if [ "$current_depth" -eq 0 ]; then
     SYNC_SKIPPED=0
     SYNC_FAILED=0
+    SYNC_PARTIAL=0
     # 初始化修复文件累计器（sync_with_logging 每次执行后会累加到此变量）
     # auto-split 子目录的修复也会累计到这里，最终由 save_sync_marker 写入 marker
     GLOBAL_FIXED_FILES_JSON="[]"
@@ -318,6 +320,7 @@ _sync_task_impl() {
   local total_subtasks=0
   local synced_subtasks=0
   local failed_subtasks=0
+  local partial_subtasks=0
   local skipped_subtasks=0
   local total_transferred=0
   local synced_list=""
@@ -337,7 +340,7 @@ _sync_task_impl() {
     # 必须用 force: 上一个子目录的完成刷新刚更新过节流时间戳，普通 update
     # 会被 2s 节流吞掉，导致整个子目录同步期间消息停留在旧树（当前子目录
     # 一直显示 ⏳ 待同步而非 🔄 同步中）
-    progress_update_force "" "▸ 📊 子目录：${_completed_before}/${total_subdirs_count} 完成 | ✅${synced_subtasks} ⏭️${skipped_subtasks} ⏳$((total_subdirs_count - _completed_before)) ❌${failed_subtasks}"
+    progress_update_force "" "▸ 📊 子目录：${_completed_before}/${total_subdirs_count} 完成 | ✅${synced_subtasks} ⏭️${skipped_subtasks} ⏳$((total_subdirs_count - _completed_before)) ⚠️${partial_subtasks} ❌$((failed_subtasks - partial_subtasks))"
     SYNC_AUTO_SPLIT_DEPTH=$((current_depth + 1))
     # PROGRESS_SUPPRESS=1: 子任务内部的 progress_update 不覆盖父任务的
     # 阶段树（当前子目录已由上方标记为 🔄 同步中）
@@ -360,20 +363,26 @@ _sync_task_impl() {
       synced_list+="• ${subdir} ($(format_bytes "${subdir_size_map[$subdir]:-0}"))"$'\n'
     else
       failed_subtasks=$((failed_subtasks + 1))
-      subdir_status_map["$subdir"]="failed"
+      if [ "${SYNC_PARTIAL:-0}" = "1" ]; then
+        # 有文件成功但有文件失败/缺失（sync_with_logging 导出的部分失败标志）
+        partial_subtasks=$((partial_subtasks + 1))
+        subdir_status_map["$subdir"]="partial"
+      else
+        subdir_status_map["$subdir"]="failed"
+      fi
       total_transferred=$((total_transferred + SYNC_TRANSFERRED_BYTES))
-      failed_list+="• ${subdir} ($(format_bytes "${subdir_size_map[$subdir]:-0}"))"$'\n'
+      failed_list+="• ${subdir} ($(format_bytes "${subdir_size_map[$subdir]:-0}")$([ "${subdir_status_map[$subdir]}" = partial ] && echo ' · 部分失败'))"$'\n'
     fi
     PROGRESS_PHASE_INFO="$(_render_subdir_phase_tree)"
     local _completed_after=$((synced_subtasks + skipped_subtasks + failed_subtasks))
-    progress_update_force "" "▸ 📊 子目录：${_completed_after}/${total_subdirs_count} 完成 | ✅${synced_subtasks} ⏭️${skipped_subtasks} ⏳$((total_subdirs_count - _completed_after)) ❌${failed_subtasks}"
+    progress_update_force "" "▸ 📊 子目录：${_completed_after}/${total_subdirs_count} 完成 | ✅${synced_subtasks} ⏭️${skipped_subtasks} ⏳$((total_subdirs_count - _completed_after)) ⚠️${partial_subtasks} ❌$((failed_subtasks - partial_subtasks))"
   done <<< "$subdirs"
   SYNC_SKIP_QUIET=0
 
   # 设置拆分信息供最终通知使用
   AUTO_SPLIT_INFO="🔀 子任务拆分统计"$'\n'
   AUTO_SPLIT_INFO+="• 总子目录数：${total_subtasks}"$'\n'
-  AUTO_SPLIT_INFO+="• 已同步：${synced_subtasks}，未同步：${failed_subtasks}，已跳过：${skipped_subtasks}"$'\n'
+  AUTO_SPLIT_INFO+="• 已同步：${synced_subtasks}，未同步：${failed_subtasks}$([ "$partial_subtasks" -gt 0 ] && printf '（其中部分失败 %d）' "$partial_subtasks")，已跳过：${skipped_subtasks}"$'\n'
   AUTO_SPLIT_INFO+="• 子任务传输总量：$(format_bytes "$total_transferred")"
   if [ -n "$synced_list" ]; then
     AUTO_SPLIT_INFO+=$'\n\n'"✅ 已同步的子目录："$'\n'"${synced_list%"$'\n'"}"
@@ -389,7 +398,7 @@ _sync_task_impl() {
   if [ "$current_depth" -eq 0 ]; then
     echo "=== 最终完整同步: ${task_name} ==="
     PROGRESS_PHASE_INFO="$(_render_subdir_phase_tree)"
-    progress_update_force "最终完整同步中" "▸ 📊 子目录：${total_subtasks}/${total_subtasks} 完成 | ✅${synced_subtasks} ⏭️${skipped_subtasks} ❌${failed_subtasks}"
+    progress_update_force "最终完整同步中" "▸ 📊 子目录：${total_subtasks}/${total_subtasks} 完成 | ✅${synced_subtasks} ⏭️${skipped_subtasks} ⚠️${partial_subtasks} ❌$((failed_subtasks - partial_subtasks))"
     sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
     AUTO_SPLIT_INFO=""
     if [ "$SYNC_FAILED" = "0" ] && [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
@@ -400,6 +409,7 @@ _sync_task_impl() {
   else
     SYNC_SKIPPED=0
     SYNC_FAILED=0
+    SYNC_PARTIAL=0
     SYNC_TRANSFERRED_BYTES=$total_transferred
     if [ "$SYNC_FAILED" = "0" ] && [ "$failed_subtasks" -eq 0 ] && [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
       save_sync_marker "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
