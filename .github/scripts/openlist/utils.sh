@@ -29,15 +29,6 @@ check_log_has_content() {
   fi
 }
 
-# 统一的分割日志记录函数（同时输出到日志文件和 stdout）
-# 注意：不仅用于视频分割，也用于非视频 7z 分卷，名称中的 "split" 为通用含义。
-log_split() {
-  local log_file="$1"
-  local message="$2"
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $message" >> "$log_file"
-  echo "$message"
-}
-
 # 修复日志记录函数（独立于分割日志，用于缺失文件修复过程）
 # 文件落时间戳；控制台不再重复前缀时间戳（GitHub Actions 每行自带），
 # 行首越短越可读
@@ -46,6 +37,12 @@ log_fix() {
   local message="$2"
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $message" >> "$log_file" 2>/dev/null || true
   echo "$message"
+}
+
+# 统一的分割日志记录函数（同时输出到日志文件和 stdout）
+# 注意：不仅用于视频分割，也用于非视频 7z 分卷，名称中的 "split" 为通用含义。
+log_split() {
+  log_fix "$@"
 }
 
 # 分节横幅（控制台+文件同写）: 视觉切分长日志的不同阶段
@@ -136,24 +133,47 @@ format_bytes() {
   fi
 }
 
+# IEC 格式字节数（等价 numfmt --to=iec-i --suffix=B，失败回退 "${bytes}B"）
+# 与 format_bytes 的 "1.000 GiB" 风格不同，本函数输出 "1.0GiB"，用于既有日志格式
+format_bytes_iec() {
+  local bytes="$1"
+  numfmt --to=iec-i --suffix=B "$bytes" 2>/dev/null || echo "${bytes}B"
+}
+
+# base64URL 编码（+/ → -_，去掉 = 填充）
+b64url_encode() {
+  printf '%s' "$1" | base64 | tr '+/' '-_' | tr -d '='
+}
+
+# 调用 rclone size --json，输出原始 JSON（失败输出空）；额外参数原样透传
+_rclone_size_json() {
+  local path="$1"
+  shift
+  rclone size "$path" --json "$@" 2>/dev/null || true
+}
+
+# 从 rclone size --json 输出中解析字段（bytes/count），失败/空输入回退 0
+_size_json_field() {
+  local v
+  v=$(echo "${1:-}" | jq -r ".${2} // 0" 2>/dev/null) || v=""
+  [ -z "$v" ] && v=0
+  echo "$v"
+}
+
 # 一次性获取远端路径的 bytes/count/human_size（只调一次 rclone size --json）
 # 返回格式: "bytes count human_size"
 _get_path_stats() {
   local path="$1"
   shift
   local size_json
-  if [ $# -gt 0 ]; then
-    size_json=$(rclone size "$path" --json "$@" 2>/dev/null || true)
-  else
-    size_json=$(rclone size "$path" --json 2>/dev/null || true)
-  fi
+  size_json=$(_rclone_size_json "$path" "$@")
   if [ -z "$size_json" ]; then
     echo "0 0 未知"
     return
   fi
   local bytes count
-  bytes=$(echo "$size_json" | jq -r '.bytes // 0' 2>/dev/null || echo 0)
-  count=$(echo "$size_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
+  bytes=$(_size_json_field "$size_json" bytes)
+  count=$(_size_json_field "$size_json" count)
   echo "${bytes} ${count} $(format_bytes "$bytes")"
 }
 
@@ -268,4 +288,69 @@ _get_openlist_token() {
     fi
   done
   return 1
+}
+
+# 等待 OpenList 就绪（容器刚启动时 401/429 会导致预览 0 B/0 文件、同步无谓重传）
+# 注意：不能用 rclone lsd 反复探测，会触发后端 429 Too Many Requests
+wait_openlist_ready() {
+  local i code c t
+  # 阶段1: HTTP /ping 起来
+  for i in $(seq 1 40); do
+    code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5244/ping 2>/dev/null || echo "000")
+    [ "$code" = "200" ] && break
+    sleep 2
+  done
+  if [ "$code" != "200" ]; then
+    echo "⚠️ OpenList HTTP 未就绪 (code=${code})"
+    return 1
+  fi
+  echo "HTTP 就绪，尝试获取 token..."
+  # 阶段2: 获取 token 用于 API 探测（多个候选路径）
+  local OL_TOKEN=""
+  for c in \
+    "/opt/openlist-data/config.json" \
+    "/dropbox/self-hosted/openlist/data/config.json" \
+    "/dropbox/self-hosted/openlist/data/conf/config.json" \
+    "/data/openlist/data/config.json"; do
+    [ -f "$c" ] || continue
+    t=$(jq -r '.token // .jwt_secret // empty' "$c" 2>/dev/null || echo "")
+    if [ -n "$t" ] && [ "$t" != "null" ]; then
+      OL_TOKEN="$t"
+      echo "  token: OK (来自 ${c}, 长度 ${#OL_TOKEN})"
+      break
+    fi
+  done
+  # 阶段3: 等驱动初始化（长等待 120s，给 ali + crypt 拉元数据）
+  echo "等待驱动初始化 (120s) ..."
+  sleep 120
+  # 阶段4: 单次 rclone 验证（最多 3 次，避免 429）
+  if rclone lsd openlist: >/dev/null 2>&1; then
+    echo "WebDAV(rclone) 验证通过"
+    return 0
+  fi
+  echo "再等 90s ..."
+  sleep 90
+  if rclone lsd openlist: >/dev/null 2>&1; then
+    echo "WebDAV(rclone) 验证通过（第二次）"
+    return 0
+  fi
+  sleep 60
+  rclone lsd openlist: >/dev/null 2>&1 \
+    && { echo "WebDAV(rclone) 验证通过（第三次）"; return 0; } \
+    || echo "⚠️ WebDAV 仍未就绪，继续执行"
+  return 1
+}
+
+# 初始化同步会话状态（计数器/日志名/进度系统）
+# 变量不加 local，故意写入调用方 shell（各 step source 后直接调用）
+init_sync_state() {
+  PROCESSED_FILES_LOG="processed_videos.log"
+  SYNC_SKIP_QUIET=0
+  SYNC_SKIPPED=0
+  SYNC_FAILED=0
+  SYNC_TRANSFERRED_BYTES=0
+  AUTO_SPLIT_INFO=""
+  SYNC_AUTO_SPLIT_DEPTH=0
+  # 初始化全局进度通知（任务在预览阶段自动注册）
+  progress_init
 }

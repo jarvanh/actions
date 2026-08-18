@@ -17,7 +17,7 @@ send_video_split_notification() {
   local validation_summary="${6:-}"
 
   local file_size_human
-  file_size_human=$(numfmt --to=iec-i --suffix=B "$file_size" 2>/dev/null || echo "${file_size}B")
+  file_size_human=$(format_bytes_iec "$file_size")
 
   local message
   if [ "$result" = "success" ]; then
@@ -66,7 +66,7 @@ send_binary_split_notification() {
   local result="$4"
   local log_file="$5"
   local file_size_human
-  file_size_human=$(numfmt --to=iec-i --suffix=B "$file_size" 2>/dev/null || echo "${file_size}B")
+  file_size_human=$(format_bytes_iec "$file_size")
   local message
   if [ "$result" = "success" ]; then
     printf -v message '%s\n%s\n%s\n%s\n%s\n%s\n%s' \
@@ -124,6 +124,64 @@ upload_split_log() {
   fi
 }
 
+# ===== 视频/非视频切割共用的分片校验、上传、删除助手 =====
+
+# 统计并校验分片大小（结果写入全局 SPLIT_PART_COUNT / SPLIT_OVERSIZED_PARTS）
+# 用法: _validate_split_parts <max_part_size> <log_file> <log_label> <part_glob...>
+_validate_split_parts() {
+  local max_part_size="$1" log_file="$2" log_label="$3"
+  shift 3
+  SPLIT_PART_COUNT=0
+  SPLIT_OVERSIZED_PARTS=""
+  local part part_size part_name
+  for part in "$@"; do
+    [ -f "$part" ] || continue
+    SPLIT_PART_COUNT=$((SPLIT_PART_COUNT + 1))
+    part_size=$(stat -c%s "$part" 2>/dev/null || stat -f%z "$part" 2>/dev/null || echo 0)
+    part_name=$(basename -- "$part")
+    log_split "$log_file" "${log_label}: $part_name ($(format_bytes_iec "$part_size"))"
+    if [ "$part_size" -gt "$max_part_size" ]; then
+      SPLIT_OVERSIZED_PARTS+="${part_name} "
+    fi
+  done
+}
+
+# 上传本地文件到远端目录（输出成功上传数；任一失败即中断并返回 1）
+# 用法: _upload_split_parts <remote_dir> <log_file> <log_label> <file_glob...>
+_upload_split_parts() {
+  local remote_dir="$1" log_file="$2" log_label="$3"
+  shift 3
+  local count=0 part part_name upload_exit_code
+  for part in "$@"; do
+    [ -f "$part" ] || continue
+    part_name=$(basename -- "$part")
+    rclone copyto "$part" "${remote_dir}/${part_name}" --retries 3 --low-level-retries 3 2>&1 | \
+      while IFS= read -r line; do
+        log_split "$log_file" "rclone upload ${log_label} ${part_name}: $line"
+      done
+    upload_exit_code=${PIPESTATUS[0]}
+    if [ "$upload_exit_code" -ne 0 ]; then
+      log_split "$log_file" "上传失败: ${remote_dir}/${part_name} exit=$upload_exit_code"
+      echo "$count"
+      return 1
+    fi
+    count=$((count + 1))
+  done
+  echo "$count"
+  return 0
+}
+
+# 删除远端原始大文件（日志记录），返回 rclone 退出码
+# 用法: _delete_original_file <remote_full_path> <log_file> <log_label>
+_delete_original_file() {
+  local remote_full="$1" log_file="$2" log_label="$3"
+  rclone deletefile "$remote_full" 2>&1 | \
+    while IFS= read -r line; do
+      log_split "$log_file" "rclone delete ${log_label}: $line"
+    done
+  return "${PIPESTATUS[0]}"
+}
+
 # 视频文件分割函数（使用 ffmpeg -c copy 无损按关键帧分割）
 # 用法: split_large_video <remote_path> <remote_source> <local_file_path> <file_name> <video_split_log>
 # 流程: 获取时长 → 计算分片数 → ffmpeg 分割 → 验证分片大小 → 上传 → 删除原始文件
@@ -179,7 +237,7 @@ split_large_video() {
     send_video_split_notification "${remote_source}:${remote_path}/${file_name}" "$file_size" "$notify_parts_count" "$notify_result" "$video_split_log" "$split_validation_summary"
   }
 
-  log_split "$video_split_log" "文件大小: $(numfmt --to=iec-i --suffix=B "$file_size" 2>/dev/null || echo "${file_size}B")"
+  log_split "$video_split_log" "文件大小: $(format_bytes_iec "$file_size")"
   log_split "$video_split_log" "获取视频时长..."
 
   # 尝试获取视频时长（优先 format duration，降级到 stream duration，再降级到 bit_rate 估算）
@@ -266,20 +324,9 @@ split_large_video() {
       break
     fi
 
-    generated_count=0
-    oversized_parts=""
-    shopt -s nullglob
-    for part in "$split_dir/${base_name} - part"*"${part_suffix}"; do
-      [ -f "$part" ] || continue
-      generated_count=$((generated_count + 1))
-      part_size=$(stat -c%s "$part" 2>/dev/null || echo 0)
-      part_name=$(basename -- "$part")
-      log_split "$video_split_log" "生成分片: $part_name ($(numfmt --to=iec-i --suffix=B "$part_size" 2>/dev/null || echo "${part_size}B"))"
-      if [ "$part_size" -gt "$max_part_size" ]; then
-        oversized_parts+="${part_name} "
-      fi
-    done
-    shopt -u nullglob
+    _validate_split_parts "$max_part_size" "$video_split_log" "生成分片" "$split_dir/${base_name} - part"*"${part_suffix}"
+    generated_count=$SPLIT_PART_COUNT
+    oversized_parts="$SPLIT_OVERSIZED_PARTS"
 
     if [ "$generated_count" -eq 0 ]; then
       log_split "$video_split_log" "ffmpeg 未生成任何分片"
@@ -322,24 +369,7 @@ split_large_video() {
   # 上传所有分片
   local part_count=0
   local upload_failed=0
-  shopt -s nullglob
-  for part in "$split_dir/${base_name} - part"*"${part_suffix}"; do
-    [ -f "$part" ] || continue
-    part_name=$(basename -- "$part")
-    rclone copyto "$part" "${remote_source}:${remote_path}/${part_name}" --retries 3 --low-level-retries 3 2>&1 | \
-      while IFS= read -r line; do
-        log_split "$video_split_log" "rclone upload part ${part_name}: $line"
-      done
-    local upload_exit_code=${PIPESTATUS[0]}
-    if [ "$upload_exit_code" -ne 0 ]; then
-      log_split "$video_split_log" "上传分片失败: ${remote_source}:${remote_path}/${part_name} exit=$upload_exit_code"
-      check_upload="❌ 未通过（${part_name} exit=$upload_exit_code）"
-      upload_failed=1
-      break
-    fi
-    part_count=$((part_count + 1))
-  done
-  shopt -u nullglob
+  part_count=$(_upload_split_parts "${remote_source}:${remote_path}" "$video_split_log" "part" "$split_dir/${base_name} - part"*"${part_suffix}") || upload_failed=1
 
   # 上传失败：保留原始文件
   if [ "$upload_failed" -ne 0 ] || [ "$part_count" -ne "$generated_count" ]; then
@@ -355,14 +385,8 @@ split_large_video() {
   check_upload="✅ 通过（${part_count}/${generated_count}）"
 
   # 所有分片上传成功后删除原始大文件
-  local delete_exit_code=0
-  rclone deletefile "${remote_source}:${remote_path}/${file_name}" 2>&1 | \
-    while IFS= read -r line; do
-      log_split "$video_split_log" "rclone delete original: $line"
-    done
-  delete_exit_code=${PIPESTATUS[0]}
-  if [ "$delete_exit_code" -ne 0 ]; then
-    log_split "$video_split_log" "删除原始大文件失败: ${remote_source}:${remote_path}/${file_name} exit=$delete_exit_code"
+  if ! _delete_original_file "${remote_source}:${remote_path}/${file_name}" "$video_split_log" "original"; then
+    log_split "$video_split_log" "删除原始大文件失败: ${remote_source}:${remote_path}/${file_name}"
     rm -f "$local_file_path" 2>/dev/null || true
     rm -rf "$split_dir" 2>/dev/null || true
     check_delete="❌ 未通过（删除命令失败）"
@@ -398,7 +422,7 @@ split_large_binary_file() {
   mkdir -p "$split_dir"
 
   log_split "$video_split_log" "开始非视频 7z 分卷: $file_name"
-  log_split "$video_split_log" "文件大小: $(numfmt --to=iec-i --suffix=B "$file_size" 2>/dev/null || echo "${file_size}B") volume_size=${volume_size} max_part_size=${max_part_size}"
+  log_split "$video_split_log" "文件大小: $(format_bytes_iec "$file_size") volume_size=${volume_size} max_part_size=${max_part_size}"
 
   local abs_split_dir
   abs_split_dir="$(cd "$split_dir" && pwd)"
@@ -425,18 +449,9 @@ split_large_binary_file() {
   local generated_count=0
   local oversized_parts=""
   local part part_size part_name
-  shopt -s nullglob
-  for part in "$split_dir/${file_name}.7z."*; do
-    [ -f "$part" ] || continue
-    generated_count=$((generated_count + 1))
-    part_size=$(stat -c%s "$part" 2>/dev/null || stat -f%z "$part" 2>/dev/null || echo 0)
-    part_name=$(basename -- "$part")
-    log_split "$video_split_log" "生成 7z 分卷: $part_name ($(numfmt --to=iec-i --suffix=B "$part_size" 2>/dev/null || echo "${part_size}B"))"
-    if [ "$part_size" -gt "$max_part_size" ]; then
-      oversized_parts+="${part_name} "
-    fi
-  done
-  shopt -u nullglob
+  _validate_split_parts "$max_part_size" "$video_split_log" "生成 7z 分卷" "$split_dir/${file_name}.7z."*
+  generated_count=$SPLIT_PART_COUNT
+  oversized_parts="$SPLIT_OVERSIZED_PARTS"
 
   if [ "$generated_count" -eq 0 ]; then
     log_split "$video_split_log" "7z 未生成任何分卷，跳过删除原始文件"
@@ -469,23 +484,7 @@ split_large_binary_file() {
   # 上传分卷 + 辅助文件
   local upload_count=0
   local upload_failed=0
-  shopt -s nullglob
-  for part in "$split_dir/${file_name}.7z."* "$split_dir/${file_name}.sha256" "$split_dir/${file_name}.restore.txt"; do
-    [ -f "$part" ] || continue
-    part_name=$(basename -- "$part")
-    rclone copyto "$part" "${remote_source}:${remote_path}/${part_name}" --retries 3 --low-level-retries 3 2>&1 | \
-      while IFS= read -r line; do
-        log_split "$video_split_log" "rclone upload binary part ${part_name}: $line"
-      done
-    local upload_exit_code=${PIPESTATUS[0]}
-    if [ "$upload_exit_code" -ne 0 ]; then
-      log_split "$video_split_log" "上传非视频分卷/辅助文件失败: ${remote_source}:${remote_path}/${part_name} exit=$upload_exit_code"
-      upload_failed=1
-      break
-    fi
-    upload_count=$((upload_count + 1))
-  done
-  shopt -u nullglob
+  upload_count=$(_upload_split_parts "${remote_source}:${remote_path}" "$video_split_log" "binary part" "$split_dir/${file_name}.7z."* "$split_dir/${file_name}.sha256" "$split_dir/${file_name}.restore.txt") || upload_failed=1
 
   local expected_upload_count=$((generated_count + 2))
   if [ "$upload_failed" -ne 0 ] || [ "$upload_count" -ne "$expected_upload_count" ]; then
@@ -497,14 +496,8 @@ split_large_binary_file() {
   fi
 
   # 删除原始大文件
-  local delete_exit_code=0
-  rclone deletefile "${remote_source}:${remote_path}/${file_name}" 2>&1 | \
-    while IFS= read -r line; do
-      log_split "$video_split_log" "rclone delete original binary: $line"
-    done
-  delete_exit_code=${PIPESTATUS[0]}
-  if [ "$delete_exit_code" -ne 0 ]; then
-    log_split "$video_split_log" "删除原始非视频大文件失败: ${remote_source}:${remote_path}/${file_name} exit=$delete_exit_code"
+  if ! _delete_original_file "${remote_source}:${remote_path}/${file_name}" "$video_split_log" "original binary"; then
+    log_split "$video_split_log" "删除原始非视频大文件失败: ${remote_source}:${remote_path}/${file_name}"
     rm -f "$local_file_path" 2>/dev/null || true
     rm -rf "$split_dir" 2>/dev/null || true
     send_binary_split_notification "${remote_source}:${remote_path}/${file_name}" "$file_size" "$generated_count" "删除原始文件失败" "$video_split_log"
@@ -589,7 +582,7 @@ preprocess_large_files() {
 
     if [ "$split_success" -eq 1 ]; then
       success_count=$((success_count + 1))
-      processed_files+="• ${remote_source}:${full_path} ($(numfmt --to=iec-i --suffix=B "$file_size" 2>/dev/null || echo "${file_size}B"), ${split_kind})"$'\n'
+      processed_files+="• ${remote_source}:${full_path} ($(format_bytes_iec "$file_size"), ${split_kind})"$'\n'
       deleted_files+="• ${remote_source}:${full_path}"$'\n'
       echo "$(date +%Y-%m-%d_%H:%M:%S) - ${remote_source}:${full_path} - OpenList 前置分割成功(${split_kind})，已删除原始大文件" >> "$PROCESSED_FILES_LOG"
     else

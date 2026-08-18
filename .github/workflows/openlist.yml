@@ -195,13 +195,15 @@ jobs:
 
       # ===== 加载函数库 =====
       # 所有同步相关函数已提取到 .github/scripts/openlist/ 目录下的脚本文件中。
-      # 修改函数逻辑请编辑对应脚本文件；修改任务定义和 rclone 参数请编辑下方 "Preview and sync all tasks" step。
+      # 修改函数逻辑请编辑对应脚本文件；修改任务定义请编辑下方 "Preview and sync all tasks" step，rclone 参数请编辑 flags.sh。
       - name: Load helper functions
         run: |
           echo "加载 OpenList 同步函数库..."
           source "$GITHUB_WORKSPACE/.github/scripts/openlist/load_all.sh"
           # 将函数库复制到 /tmp 以便后续 step 使用（每个 step 是独立 shell）
-          cp "$GITHUB_WORKSPACE/.github/scripts/openlist/"*.sh /tmp/
+          # *.py: save_sync_marker 的 fallback 扫描（scan_fix_signatures.py）
+          # *.jq: fix_list 序列化的修复方式分类程序（restore_info.jq）
+          cp "$GITHUB_WORKSPACE/.github/scripts/openlist/"*.sh "$GITHUB_WORKSPACE/.github/scripts/openlist/"*.py "$GITHUB_WORKSPACE/.github/scripts/openlist/"*.jq /tmp/
           echo "函数库加载完成"
 
       # ===== 一键还原修复文件 =====
@@ -246,79 +248,27 @@ jobs:
 
           # ===== 等待 OpenList 就绪（与正式流程相同的探测策略）=====
           echo "等待 OpenList 就绪..."
-          code="000"
-          for i in $(seq 1 40); do
-            code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5244/ping 2>/dev/null || echo "000")
-            [ "$code" = "200" ] && { echo "HTTP 就绪 (${i}次)"; break; }
-            sleep 2
-          done
-          echo "等待驱动初始化 (120s) ..."
-          sleep 120
-          if rclone lsd openlist: >/dev/null 2>&1; then
-            echo "WebDAV(rclone) 验证通过"
-          else
-            echo "再等 90s ..."
-            sleep 90
-            rclone lsd openlist: >/dev/null 2>&1 && echo "WebDAV(rclone) 验证通过" || echo "⚠️ WebDAV 未就绪，继续执行"
-          fi
+          wait_openlist_ready || true
 
           # ===== 初始化（与 Initialize sync 对齐的最小集）=====
-          SYNC_SKIP_QUIET=0
-          SYNC_SKIPPED=0
-          SYNC_FAILED=0
-          SYNC_TRANSFERRED_BYTES=0
-          AUTO_SPLIT_INFO=""
-          SYNC_AUTO_SPLIT_DEPTH=0
-          progress_init
+          init_sync_state
 
           # 单次修复数量上限（快速验证用）
           export OPENLIST_MISSING_FIX_MAX="${{ inputs.fix_test_max || 5 }}"
           # 跳过 initial sync 实际传输（debug 只验证修复方法: diff → 修复 → 持久化复核）
           export OPENLIST_FIX_TEST_MODE=1
 
-          # ===== rclone 参数（与 "Preview and sync all tasks" step 保持一致）=====
-          RCLONE_DEFAULT_FLAGS=(
-            --progress
-            --stats 15s
-            --stats-one-line
-            --ignore-errors
-            --verbose
-            --size-only
-            --timeout 5m
-            --contimeout 30s
-            --retries 1
-            --low-level-retries 3
-          )
-          RCLONE_SYNC_TASK_FLAGS=(
-            --delete-before
-          )
-
-          # ===== 按 input 选择要测试的任务（与 run_all_tasks 中 sync_task 定义一致）=====
+          # ===== 按 input 从任务清单（tasks.sh SYNC_TASK_REGISTRY）查表执行 =====
           FIX_TASK="${{ inputs.fix_test_task || 'backup' }}"
           echo "=== 修复管线测试任务: ${FIX_TASK} (修复上限 ${OPENLIST_MISSING_FIX_MAX}) ==="
-          case "$FIX_TASK" in
-            backup) sync_task "onedrive:backup" "openlist:wopan176Crypt/backup" "backup" ;;
-            task0)  sync_task "onedrive:0" "openlist:wopan176Crypt/0" "task0" ;;
-            task1)  sync_task "onedrive:1" "openlist:wopan176Crypt/1" "task1" ;;
-            task2)  sync_task "onedrive:2" "openlist:wopan176Crypt/2" "task2" ;;
-            task3)  sync_task "onedrive:3" "openlist:wopan176Crypt/3" "task3" ;;
-            task4)  sync_task "onedrive:4" "openlist:wopan176Crypt/4" "task4" ;;
-            task5)  sync_task "onedrive:5" "openlist:wopan176Crypt/5" "task5" ;;
-            *) echo "未知任务: ${FIX_TASK}（可选: backup/task0-task5）"; exit 1 ;;
-          esac
+          run_task_by_id "$FIX_TASK"
           echo "=== 修复管线测试完成 (SYNC_FAILED=${SYNC_FAILED}) ==="
 
       - name: Initialize sync
         if: ${{ inputs.run_mode == '' || inputs.run_mode == '同步' }}
         run: |
           source /tmp/load_all.sh
-          PROCESSED_FILES_LOG="processed_videos.log"
-          SYNC_SKIP_QUIET=0
-          SYNC_SKIPPED=0
-          SYNC_FAILED=0
-          SYNC_TRANSFERRED_BYTES=0
-          AUTO_SPLIT_INFO=""
-          SYNC_AUTO_SPLIT_DEPTH=0
+          init_sync_state
           # 集中定义阈值，避免魔数散落各处
           LARGE_FILE_THRESHOLD_BYTES="${LARGE_FILE_THRESHOLD:-4000000000}"
           SYNC_SPLIT_THRESHOLD_BYTES="${SYNC_SPLIT_THRESHOLD:-50000000000}"
@@ -332,132 +282,17 @@ jobs:
           echo "开始时间: $(date)" >> "$PROCESSED_FILES_LOG"
           echo "==========================" >> "$PROCESSED_FILES_LOG"
 
-          # 初始化全局进度通知（任务在预览阶段自动注册）
-          progress_init
-
-      # ===== 所有同步任务定义 + 预览 + 执行 =====
-      # 增减任务只需编辑下方 run_all_tasks 函数体；rclone 参数编辑下方 RCLONE_*_FLAGS 数组。
+      # ===== 所有同步任务预览 + 执行 =====
+      # 任务清单在 .github/scripts/openlist/tasks.sh 的 SYNC_TASK_REGISTRY 单点定义
+      # （增减任务只需编辑该数组一行）；rclone 参数编辑同目录 flags.sh。
       - name: Preview and sync all tasks
         if: ${{ inputs.run_mode == '' || inputs.run_mode == '同步' }}
         run: |
           source /tmp/load_all.sh
 
           # 等待 OpenList 就绪（容器刚启动时 401/429 会导致预览 0 B/0 文件、同步无谓重传）
-          # 注意：不能用 rclone lsd 反复探测，会触发后端 429 Too Many Requests
           echo "等待 OpenList 就绪..."
-          _wait_openlist_ready() {
-            local i code c t
-            # 阶段1: HTTP /ping 起来
-            for i in $(seq 1 40); do
-              code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5244/ping 2>/dev/null || echo "000")
-              [ "$code" = "200" ] && break
-              sleep 2
-            done
-            if [ "$code" != "200" ]; then
-              echo "⚠️ OpenList HTTP 未就绪 (code=${code})"
-              return 1
-            fi
-            echo "HTTP 就绪，尝试获取 token..."
-            # 阶段2: 获取 token 用于 API 探测（多个候选路径）
-            local OL_TOKEN=""
-            for c in \
-              "/opt/openlist-data/config.json" \
-              "/dropbox/self-hosted/openlist/data/config.json" \
-              "/dropbox/self-hosted/openlist/data/conf/config.json" \
-              "/data/openlist/data/config.json"; do
-              [ -f "$c" ] || continue
-              t=$(jq -r '.token // .jwt_secret // empty' "$c" 2>/dev/null || echo "")
-              if [ -n "$t" ] && [ "$t" != "null" ]; then
-                OL_TOKEN="$t"
-                echo "  token: OK (来自 ${c}, 长度 ${#OL_TOKEN})"
-                break
-              fi
-            done
-            # 阶段3: 等驱动初始化（长等待 120s，给 ali + crypt 拉元数据）
-            echo "等待驱动初始化 (120s) ..."
-            sleep 120
-            # 阶段4: 单次 rclone 验证（最多 2 次，避免 429）
-            if rclone lsd openlist: >/dev/null 2>&1; then
-              echo "WebDAV(rclone) 验证通过"
-              return 0
-            fi
-            echo "再等 90s ..."
-            sleep 90
-            if rclone lsd openlist: >/dev/null 2>&1; then
-              echo "WebDAV(rclone) 验证通过（第二次）"
-              return 0
-            fi
-            sleep 60
-            rclone lsd openlist: >/dev/null 2>&1 \
-              && { echo "WebDAV(rclone) 验证通过（第三次）"; return 0; } \
-              || echo "⚠️ WebDAV 仍未就绪，继续执行"
-            return 1
-          }
-          _wait_openlist_ready || true
-          unset -f _wait_openlist_ready
-
-          # ===== rclone 参数集中配置（修改参数只需编辑此处）=====
-          # sync_task / copy_task 共用的默认 rclone 参数
-          RCLONE_DEFAULT_FLAGS=(
-            --progress
-            --stats 15s
-            --stats-one-line
-            --ignore-errors
-            --verbose
-            --size-only
-            --timeout 5m
-            --contimeout 30s
-            --retries 1
-            --low-level-retries 3
-          )
-
-          # sync_task 特有参数（rclone sync 模式，删除目标端多余文件，自动追加）
-          # 禁止加 --delete-excluded: rclone 语义下 filter 排除的文件"不传输也不删除"，
-          #   这是已修复文件（original/alternative）在 sync 模式下唯一的删除保护；
-          #   --delete-excluded 会连排除项一起删掉，直接毁掉修复成果。
-          #   代价: --exclude 匹配的历史文件（如 notion/）会在目标端残留，可接受。
-          RCLONE_SYNC_TASK_FLAGS=(
-            --delete-before
-          )
-
-          # ===== 所有同步任务定义（增减任务只需在此添加/删除一行）=====
-          # 所有任务统一 sync_task（rclone sync，删除目标端多余文件）:
-          #   - --delete-before 等由 RCLONE_SYNC_TASK_FLAGS 自动追加
-          #   - 已修复文件（original/alternative）由 sync.sh 的 filter-from 排除，
-          #     排除 = 不传输 + 不删除，sync 模式下不会被误删
-          # gd_task    = Google Drive 专用同步（处理配额超限、API 限流等 GD 特有错误）
-          # 可选参数: --auto-split  --1d-skip (或 --2d-skip / --3d-skip 自定义天数)
-          # 其余 rclone 参数（如 --exclude）直接追加在后面
-          # 共有/特有 rclone 参数请在上方 RCLONE_*_FLAGS 数组中集中修改
-          run_all_tasks() {
-            sync_task "onedrive:backup" "openlist:aliyundriveCrypt/backup" "backup" --auto-split --1d-skip --exclude "/notion/**" --exclude "notion/**" --exclude "/self-hosted_latest.tar.gz" --exclude "self-hosted_latest.tar.gz" --exclude "/github_repos_latest.tar.gz" --exclude "github_repos_latest.tar.gz"
-            sync_task "onedrive:backup" "openlist:wopan176Crypt/backup" "backup" --auto-split --1d-skip
-            # gd_task "onedrive:backup" "gd:backup" "backup" --1d-skip
-
-            sync_task "onedrive:0" "openlist:wopan176Crypt/0" "task0" --auto-split --1d-skip
-            sync_task "onedrive:0" "openlist:baidupanCrypt/0" "task0" --auto-split --1d-skip
-            sync_task "onedrive:0/j-1024j-视频-pornhub-favorites" "openlist:wopan175/0/j-1024j-视频-pornhub-favorites" "task0" --auto-split --1d-skip
-            # gd_task "onedrive:0" "gd:0" "task0" --1d-skip
-
-            sync_task "onedrive:1" "openlist:wopan176Crypt/1" "task1" --auto-split --1d-skip
-            sync_task "onedrive:1" "openlist:baidupanCrypt/1" "task1" --auto-split --1d-skip
-            sync_task "onedrive:1" "openlist:wopan175/1" "task1" --auto-split --1d-skip
-            # gd_task "onedrive:1" "gd:1" "task1" --1d-skip
-
-            sync_task "onedrive:2" "openlist:wopan176Crypt/2" "task2" --auto-split --1d-skip
-            sync_task "onedrive:2" "openlist:wopan175/2" "task2" --auto-split --1d-skip
-            # gd_task "onedrive:2" "gd:2" "task2" --1d-skip
-
-            sync_task "onedrive:3" "openlist:wopan176Crypt/3" "task3" --auto-split --1d-skip
-            sync_task "onedrive:3" "openlist:wopan175/3" "task3" --auto-split --1d-skip
-            # gd_task "onedrive:3" "gd:3" "task3" --1d-skip
-
-            sync_task "onedrive:4" "openlist:wopan176Crypt/4" "task4" --auto-split --1d-skip
-            sync_task "onedrive:4" "openlist:wopan175/4" "task4" --auto-split --1d-skip
-
-            sync_task "onedrive:5" "openlist:wopan176Crypt/5" "task5" --auto-split --1d-skip
-            sync_task "onedrive:5" "openlist:wopan175/5" "task5" --auto-split --1d-skip
-          }
+          wait_openlist_ready || true
 
           if [ "${{ inputs.skip_preview }}" = "true" ]; then
             echo "=== 跳过预览通知（skip_preview=true，仅注册任务队列）==="

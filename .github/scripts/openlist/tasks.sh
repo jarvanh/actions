@@ -1,15 +1,83 @@
 #!/bin/bash
 # ===== OpenList 同步工具 — 任务编排函数 =====
-# 提供 sync_task / copy_task / gd_task 三个用户接口函数，
+# 提供 sync_task 用户接口函数，
 # 支持:
 #   --auto-split  — 源端 > 50GB 时按一级子目录自动拆分
 #   --1d-skip     — 1 天内已成功同步则跳过（--2d-skip / --3d-skip 自定义天数）
 #   其余参数（如 --exclude）原样传给 rclone
 #
-# 依赖: sync.sh, split.sh, marker.sh, preview.sh, gd_sync.sh, progress.sh
+# 依赖: sync.sh, split.sh, marker.sh, preview.sh, progress.sh
 # 依赖环境变量:
-#   RCLONE_SYNC_TASK_FLAGS — sync_task 特有 rclone 参数（在 workflow 文件中定义）
-#   RCLONE_COPY_TASK_FLAGS — copy_task 特有 rclone 参数（在 workflow 文件中定义）
+#   RCLONE_SYNC_TASK_FLAGS — sync_task 特有 rclone 参数（在 flags.sh 中定义）
+
+# ===== 同步任务清单（单点定义，增减任务只需在此添加/删除一行）=====
+# 格式: "id|源端|目标端|任务名|附加参数"
+#   id:       调试模式（run_task_by_id）的选择器，无需单独调试的任务填 "-"
+#   附加参数: --auto-split / --1d-skip / --exclude 等，原样透传给 sync_task
+# 所有任务统一 sync_task（rclone sync，删除目标端多余文件）:
+#   - --delete-before 等由 RCLONE_SYNC_TASK_FLAGS 自动追加
+#   - 已修复文件（original/alternative）由 sync.sh 的 filter-from 排除，
+#     排除 = 不传输 + 不删除，sync 模式下不会被误删
+SYNC_TASK_REGISTRY=(
+  "-|onedrive:backup|openlist:aliyundriveCrypt/backup|backup|--auto-split --1d-skip --exclude /notion/** --exclude notion/** --exclude /self-hosted_latest.tar.gz --exclude self-hosted_latest.tar.gz --exclude /github_repos_latest.tar.gz --exclude github_repos_latest.tar.gz"
+  "backup|onedrive:backup|openlist:wopan176Crypt/backup|backup|--auto-split --1d-skip"
+  # "-|onedrive:backup|gd:backup|backup|--1d-skip"
+
+  "task0|onedrive:0|openlist:wopan176Crypt/0|task0|--auto-split --1d-skip"
+  "-|onedrive:0|openlist:baidupanCrypt/0|task0|--auto-split --1d-skip"
+  "-|onedrive:0/j-1024j-视频-pornhub-favorites|openlist:wopan175/0/j-1024j-视频-pornhub-favorites|task0|--auto-split --1d-skip"
+  # "-|onedrive:0|gd:0|task0|--1d-skip"
+
+  "task1|onedrive:1|openlist:wopan176Crypt/1|task1|--auto-split --1d-skip"
+  "-|onedrive:1|openlist:baidupanCrypt/1|task1|--auto-split --1d-skip"
+  "-|onedrive:1|openlist:wopan175/1|task1|--auto-split --1d-skip"
+  # "-|onedrive:1|gd:1|task1|--1d-skip"
+
+  "task2|onedrive:2|openlist:wopan176Crypt/2|task2|--auto-split --1d-skip"
+  "-|onedrive:2|openlist:wopan175/2|task2|--auto-split --1d-skip"
+  # "-|onedrive:2|gd:2|task2|--1d-skip"
+
+  "task3|onedrive:3|openlist:wopan176Crypt/3|task3|--auto-split --1d-skip"
+  "-|onedrive:3|openlist:wopan175/3|task3|--auto-split --1d-skip"
+  # "-|onedrive:3|gd:3|task3|--1d-skip"
+
+  "task4|onedrive:4|openlist:wopan176Crypt/4|task4|--auto-split --1d-skip"
+  "-|onedrive:4|openlist:wopan175/4|task4|--auto-split --1d-skip"
+
+  "task5|onedrive:5|openlist:wopan176Crypt/5|task5|--auto-split --1d-skip"
+  "-|onedrive:5|openlist:wopan175/5|task5|--auto-split --1d-skip"
+)
+
+# 执行清单中的一条任务（供 run_all_tasks / run_task_by_id 复用）
+_run_registry_entry() {
+  local _e="$1"
+  local _id _src _dst _name _flags
+  local -a _flag_arr
+  IFS='|' read -r _id _src _dst _name _flags <<< "$_e"
+  read -ra _flag_arr <<< "$_flags"
+  sync_task "$_src" "$_dst" "$_name" "${_flag_arr[@]}"
+}
+
+# 顺序执行清单中的全部任务
+run_all_tasks() {
+  local _e
+  for _e in "${SYNC_TASK_REGISTRY[@]}"; do
+    _run_registry_entry "$_e"
+  done
+}
+
+# 按 id 执行清单中的单条任务（调试模式专用）
+run_task_by_id() {
+  local _want="$1" _e _id
+  for _e in "${SYNC_TASK_REGISTRY[@]}"; do
+    _id="${_e%%|*}"
+    [ "$_id" = "$_want" ] || continue
+    _run_registry_entry "$_e"
+    return $?
+  done
+  echo "未知任务: ${_want}（可选: backup/task0-task5）"
+  return 1
+}
 
 # 从 task_name 和 dest_path 派生唯一 task_id（用于进度跟踪）
 # 例: _derive_task_id "task0" "openlist:wopan176Crypt/0" → "task0_wopan176Crypt"
@@ -105,6 +173,21 @@ _render_subdir_phase_tree() {
   echo "$_tree"
 }
 
+# 任务收尾：成功且启用 skip 时写跳过标记；顶级调用失败时切割大文件；恢复进度变量
+# 依赖调用方（_sync_task_impl）作用域内的变量（bash 动态作用域可见）:
+#   source_path / dest_path / task_name / extra_args / current_depth / _old_phase / _old_stats
+_sync_task_finalize() {
+  local _rc="$1"
+  if [ "$SYNC_FAILED" = "0" ] && [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
+    save_sync_marker "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
+  elif [ "$current_depth" -eq 0 ]; then
+    split_on_sync_failure "$source_path" "$task_name"
+  fi
+  PROGRESS_PHASE_INFO="$_old_phase"
+  PROGRESS_STATS="$_old_stats"
+  return "$_rc"
+}
+
 # 自动拆分同步实现：源端 > 50GB 时按一级子目录拆分，最后再完整同步一次
 # 用法: _sync_task_impl <source_path> <dest_path> <task_name> [rclone_extra_args...]
 _sync_task_impl() {
@@ -165,14 +248,7 @@ _sync_task_impl() {
     progress_update "直接同步中"
     sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
     local _rc=$?
-    if [ "$SYNC_FAILED" = "0" ] && [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
-      save_sync_marker "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
-    elif [ "$current_depth" -eq 0 ]; then
-      split_on_sync_failure "$source_path" "$task_name"
-    fi
-    PROGRESS_PHASE_INFO="$_old_phase"
-    PROGRESS_STATS="$_old_stats"
-    return $_rc
+    _sync_task_finalize "$_rc"
   fi
 
   # 50GB 阈值（带默认值，防止跨 step 环境变量丢失时为空）
@@ -181,45 +257,31 @@ _sync_task_impl() {
   # 检查源端大小
   local source_size_bytes=0
   local size_json
-  size_json=$(rclone size "$source_path" --json 2>/dev/null || true)
+  size_json=$(_rclone_size_json "$source_path")
   if [ -n "$size_json" ]; then
-    source_size_bytes=$(echo "$size_json" | jq -r '.bytes // 0' 2>/dev/null || echo 0)
+    source_size_bytes=$(_size_json_field "$size_json" bytes)
   fi
   # 确保 source_size_bytes 是有效整数，否则置 0
   [[ "$source_size_bytes" =~ ^[0-9]+$ ]] || source_size_bytes=0
 
   if [ "$source_size_bytes" -le "$threshold" ]; then
-    echo "源端大小 $(numfmt --to=iec-i --suffix=B "$source_size_bytes" 2>/dev/null || echo "${source_size_bytes}B") 未超过 50GB 阈值，直接同步"
+    echo "源端大小 $(format_bytes_iec "$source_size_bytes") 未超过 50GB 阈值，直接同步"
     progress_update "直接同步中（源端 $(format_bytes "$source_size_bytes")）"
     sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
     local _rc=$?
-    if [ "$SYNC_FAILED" = "0" ] && [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
-      save_sync_marker "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
-    elif [ "$current_depth" -eq 0 ]; then
-      split_on_sync_failure "$source_path" "$task_name"
-    fi
-    PROGRESS_PHASE_INFO="$_old_phase"
-    PROGRESS_STATS="$_old_stats"
-    return $_rc
+    _sync_task_finalize "$_rc"
   fi
 
   # 超过 50GB，需要拆分
   if [ "$current_depth" -ge "$max_depth" ]; then
-    echo "已达最大拆分深度 ${max_depth}，按文件批次拆分 (depth=${current_depth}, size=$(numfmt --to=iec-i --suffix=B "$source_size_bytes" 2>/dev/null || echo "${source_size_bytes}B"))"
+    echo "已达最大拆分深度 ${max_depth}，按文件批次拆分 (depth=${current_depth}, size=$(format_bytes_iec "$source_size_bytes"))"
     progress_update "文件批次拆分（已达最大深度 ${current_depth}）"
     sync_by_file_batches "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
     local _rc=$?
-    if [ "$SYNC_FAILED" = "0" ] && [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
-      save_sync_marker "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
-    elif [ "$current_depth" -eq 0 ]; then
-      split_on_sync_failure "$source_path" "$task_name"
-    fi
-    PROGRESS_PHASE_INFO="$_old_phase"
-    PROGRESS_STATS="$_old_stats"
-    return $_rc
+    _sync_task_finalize "$_rc"
   fi
 
-  echo "源端大小 $(numfmt --to=iec-i --suffix=B "$source_size_bytes" 2>/dev/null || echo "${source_size_bytes}B") 超过 50GB 阈值，按子目录拆分同步 (depth=${current_depth})"
+  echo "源端大小 $(format_bytes_iec "$source_size_bytes") 超过 50GB 阈值，按子目录拆分同步 (depth=${current_depth})"
 
   # 列出一级子目录
   local subdirs
@@ -229,14 +291,7 @@ _sync_task_impl() {
     progress_update "无子目录，按文件批次拆分"
     sync_by_file_batches "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
     local _rc=$?
-    if [ "$SYNC_FAILED" = "0" ] && [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
-      save_sync_marker "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
-    elif [ "$current_depth" -eq 0 ]; then
-      split_on_sync_failure "$source_path" "$task_name"
-    fi
-    PROGRESS_PHASE_INFO="$_old_phase"
-    PROGRESS_STATS="$_old_stats"
-    return $_rc
+    _sync_task_finalize "$_rc"
   fi
 
   # 从 extra_args 中提取排除的目录名（模式如 notion/** 或 /notion/**）
@@ -279,16 +334,7 @@ _sync_task_impl() {
       progress_update "所有子目录被排除，直接完整同步"
       sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
       local _rc=$?
-      if [ "$current_depth" -eq 0 ]; then
-        if [ "$SYNC_FAILED" = "0" ] && [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
-          save_sync_marker "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
-        else
-          split_on_sync_failure "$source_path" "$task_name"
-        fi
-      fi
-      PROGRESS_PHASE_INFO="$_old_phase"
-      PROGRESS_STATS="$_old_stats"
-      return $_rc
+      _sync_task_finalize "$_rc"
     fi
   fi
 
@@ -303,8 +349,8 @@ _sync_task_impl() {
     [ -z "$subdir" ] && continue
     local subdir_bytes=0
     local subdir_json
-    subdir_json=$(rclone size "${source_path}/${subdir}" --json 2>/dev/null || true)
-    [ -n "$subdir_json" ] && subdir_bytes=$(echo "$subdir_json" | jq -r '.bytes // 0' 2>/dev/null || echo 0)
+    subdir_json=$(_rclone_size_json "${source_path}/${subdir}")
+    [ -n "$subdir_json" ] && subdir_bytes=$(_size_json_field "$subdir_json" bytes)
     subdir_size_map["$subdir"]=$subdir_bytes
     echo "  ${subdir}: $(format_bytes "$subdir_bytes")"
     sorted_subdirs+="${subdir_bytes} ${subdir}"$'\n'
@@ -448,10 +494,7 @@ sync_task() {
   done
 
   # 追加 sync_task 特有 rclone 参数（如 --delete-before）
-  # copy_task 调用时 _SYNC_MODE=copy，跳过 sync 特有参数（copy 不删除）
-  if [ "${_SYNC_MODE:-sync}" != "copy" ]; then
-    extra_args=("${RCLONE_SYNC_TASK_FLAGS[@]}" "${extra_args[@]}")
-  fi
+  extra_args=("${RCLONE_SYNC_TASK_FLAGS[@]}" "${extra_args[@]}")
 
   # 根据 skip 天数设置 SYNC_SKIP_SECONDS
   if [ "$_skip_days" -gt 0 ]; then
@@ -492,64 +535,6 @@ sync_task() {
     else
       task_done "completed"
     fi
-  fi
-  return $_rc
-}
-
-# copy_task: 使用 rclone copy 模式（不删除目标端多余文件）
-# 特有参数（--no-traverse 等）由 RCLONE_COPY_TASK_FLAGS 自动追加
-copy_task() {
-  _SYNC_MODE="copy" sync_task "$@" "${RCLONE_COPY_TASK_FLAGS[@]}"
-}
-
-# gd_task: Google Drive 专用同步（处理配额超限、API 限流等 GD 特有错误）
-# 可选参数: --1d-skip (或 --2d-skip / --3d-skip 自定义天数)
-# 其余 rclone 参数（如 --exclude）直接追加在后面
-gd_task() {
-  local source_path="$1"
-  local dest_path="$2"
-  local task_name="$3"
-  shift 3
-
-  # 解析任务级开关
-  local _skip_days=0
-  local extra_args=()
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      --*d-skip)
-        _skip_days="${1#--}"
-        _skip_days="${_skip_days%d-skip}"
-        [[ "$_skip_days" =~ ^[0-9]+$ ]] || _skip_days=0
-        shift ;;
-      *) extra_args+=("$1"); shift ;;
-    esac
-  done
-
-  # 根据 skip 天数设置 SYNC_SKIP_SECONDS
-  if [ "$_skip_days" -gt 0 ]; then
-    SYNC_SKIP_SECONDS=$((_skip_days * 24 * 60 * 60))
-  fi
-
-  # 预览/仅注册模式：只注册，不实际同步
-  if [ -n "$TASK_PREVIEW_ONLY" ] || [ "${TASK_REGISTER_ONLY:-0}" = "1" ]; then
-    _preview_register "$task_name" "$source_path" "$dest_path" "${extra_args[@]}"
-    return 0
-  fi
-
-  # 自动 task_begin/task_done
-  local _task_id
-  _task_id=$(_derive_task_id "$task_name" "$dest_path")
-  task_begin "$_task_id" "${source_path} → ${dest_path}"
-
-  _TASK_SKIP_DAYS=$_skip_days _gd_sync "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
-  local _rc=$?
-
-  if [ "$SYNC_SKIPPED" = "1" ]; then
-    task_done "skipped"
-  elif [ "$SYNC_FAILED" = "1" ]; then
-    task_done "failed"
-  else
-    task_done "completed"
   fi
   return $_rc
 }

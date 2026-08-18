@@ -39,14 +39,6 @@ progress_register_task() {
   echo -e "${task_id}\t${display_name}\tpending\t-\t${size_hint}" >> "$PROGRESS_TASKS_FILE"
 }
 
-# 从任务队列中按 task_id 查找
-# 输出: 匹配的 TSV 行（task_id, display_name, status, detail）
-_progress_get_task_row() {
-  local task_id="$1"
-  [ -f "$PROGRESS_TASKS_FILE" ] || return
-  grep -P "^\Q${task_id}\E\t" "$PROGRESS_TASKS_FILE" 2>/dev/null | head -1
-}
-
 # 更新任务状态
 # 用法: _progress_set_task_status <task_id> <status> [detail]
 _progress_set_task_status() {
@@ -318,20 +310,6 @@ task_update_force() {
   _progress_refresh
 }
 
-# 设置阶段信息（子目录/批次信息）
-# 用法: progress_set_phase <phase_html>
-progress_set_phase() {
-  echo "$1" > "$PROGRESS_PHASE_FILE"
-  _progress_refresh
-}
-
-# 设置统计信息
-# 用法: progress_set_stats <stats_html>
-progress_set_stats() {
-  echo "$1" > "$PROGRESS_STATS_FILE"
-  _progress_refresh
-}
-
 # 手动刷新进度消息（无节流）
 # 用法: 任务队列注册完成后调用，让"总任务"在首个任务开始前就是全量
 progress_reload() {
@@ -369,9 +347,6 @@ progress_finalize() {
 # ===== 兼容层 =====
 # 旧代码直接修改 PROGRESS_PHASE_INFO 和 PROGRESS_STATS 全局变量，
 # 兼容层自动读取这些变量并通过新 API 更新。
-# 这些函数保留为 no-op，避免旧调用报错。
-progress_start() { :; }
-progress_set_detail() { :; }
 progress_update() {
   local detail="$1"
   local stats="${2:-}"
@@ -387,8 +362,3 @@ progress_update_force() {
   local phase="${PROGRESS_PHASE_INFO:-}"
   task_update_force "$detail" "$phase" "$stats"
 }
-progress_finish() { :; }
-_progress_add_completed() { :; }
-_progress_add_skipped() { :; }
-_progress_remove_completed() { :; }
-_progress_remove_skipped() { :; }

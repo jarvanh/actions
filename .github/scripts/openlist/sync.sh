@@ -350,22 +350,12 @@ _persist_fix_entry_now() {
     '{original:$o, alternative:$a, method:$m, restore_hint:$rh, size_human:$sh, size_bytes:$sb, method_id:$mid}') || return 1
 
   # 方法黑名单快照（本轮已判假成功的方法一并写入，中断后下轮仍生效）
-  local bl_json="{}" f
-  for f in "${!FIX_METHOD_BLACKLIST[@]}"; do
-    bl_json=$(jq -cn --argjson j "$bl_json" --arg k "$f" --arg v "${FIX_METHOD_BLACKLIST[$f]}" \
-      '$j + {($k): $v}' 2>/dev/null) || bl_json="{}"
-  done
+  local bl_json
+  bl_json=$(fix_blacklist_to_json)
 
   local merged
-  merged=$(jq -c --argjson e "$entry_json" --argjson bl "$bl_json" '
-    . as $m
-    | ($m.fixed_files // []) as $ff
-    | ($ff | map(select(.original != $e.original)) + [$e]) as $nff
-    | $m + {fixed_files: $nff,
-            fixed_count: ($nff | length),
-            fixed_bytes: ([$nff[].size_bytes] | add // 0),
-            fix_blacklist: (($m.fix_blacklist // {}) * $bl)}
-  ' "$state_file" 2>/dev/null) || return 1
+  merged=$(marker_add_fix_entry "$entry_json" "$bl_json" < "$state_file") || return 1
+  [ -n "$merged" ] || return 1
 
   echo "$merged" > "$state_file"
   if _marker_write "$merged" "$marker_path" >/dev/null 2>&1; then
@@ -382,12 +372,8 @@ _remove_fix_entry_from_state() {
   local state_file="$1" marker_path="$2" orig="$3"
   [ -f "$state_file" ] || return 1
   local merged
-  merged=$(jq -c --arg o "$orig" '
-    .fixed_files //= []
-    | .fixed_files |= map(select(.original != $o))
-    | .fixed_count = (.fixed_files | length)
-    | .fixed_bytes = ([.fixed_files[].size_bytes] | add // 0)
-  ' "$state_file" 2>/dev/null) || return 1
+  merged=$(marker_remove_fix_entry "$orig" < "$state_file") || return 1
+  [ -n "$merged" ] || return 1
   echo "$merged" > "$state_file"
   if _marker_write "$merged" "$marker_path" >/dev/null 2>&1; then
     echo "    ↳ 假成功条目已从修复清单移除 (marker 合计 $(echo "$merged" | jq -r '.fixed_count') 个)"
@@ -534,95 +520,33 @@ _rebuild_raw_baseline() {
   return 1
 }
 
-# 带探测、重试和详细日志的同步函数
-# 用法: sync_with_logging <source_path> <dest_path> <task_name> [rclone_extra_args...]
-# 设置全局变量: SYNC_FAILED, SYNC_SKIPPED, SYNC_TRANSFERRED_BYTES, FAKE_SUCCESS_COUNT
-# 注意: 始终返回 0，失败状态通过 SYNC_FAILED 传递（避免 set -e 下 step 直接退出）
-sync_with_logging() {
-  local source_path="$1"
-  local dest_path="$2"
-  local task_name="$3"
-  shift 3
-  local extra_args=("$@")
-  local TIMESTAMP
-  TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-  local LOG_FILENAME="${task_name}_sync_${TIMESTAMP}.log"
-
-  echo "开始同步: $source_path -> $dest_path"
-
-  # OpenList 目标端在同步前刷新缓存，减少重复上传
-  _refresh_openlist_cache "$dest_path"
-
-  local LAST_ATTEMPT_LOG="${LOG_FILENAME}.last"
-
-  # 执行一次 rclone sync/copy，带心跳输出
-  # 用法: run_rclone_sync_once <attempt_label>
-  run_rclone_sync_once() {
-    local attempt_label="$1"
-    echo "=== ${task_name} ${attempt_label} ===" | tee -a "$LOG_FILENAME"
-    # fix_test 模式: 跳过实际 rclone 传输（调试目的是快速验证修复方法，
-    # 全量 copy 动辄 GB 级/十分钟，与快速迭代背道而驰）。日志置空后
-    # 8005/423/错误解析全部空匹配自动跳过，truth-check + lsf diff +
-    # 修复管线 + 持久化验证照常执行
-    if [ "${OPENLIST_FIX_TEST_MODE:-0}" = "1" ]; then
-      echo "fix_test 模式: 跳过 ${attempt_label} 实际传输（直接 diff + 修复）" | tee -a "$LOG_FILENAME"
-      : > "$LAST_ATTEMPT_LOG"
-      return 0
+# 重启 OpenList 容器并等待驱动就绪 + 刷新路径缓存（持久化验证/假成功重试共用）
+# 用法: _sync_restart_for_verify <log_file> <ol_path 以 / 开头>
+# 返回: 0=重启且 HTTP 就绪, 1=HTTP 60s 内未就绪
+_sync_restart_for_verify() {
+  local log_file="$1" ol_path="$2"
+  sudo docker restart openlist >/dev/null 2>&1 || true
+  local i
+  for i in $(seq 1 30); do
+    if curl -sf http://127.0.0.1:5244/ping >/dev/null 2>&1; then
+      echo "  OpenList HTTP 就绪 (${i}次)" | tee -a "$log_file"
+      break
     fi
-    echo "OpenList sync args: ${extra_args[*]}" | tee -a "$LOG_FILENAME"
-    : > "$LAST_ATTEMPT_LOG"
-
-    # 心跳线程：rclone 扫描/检查阶段可能长时间没有换行输出，
-    # 每分钟输出一次心跳，避免 GitHub Actions 页面看起来像卡死。
-    (
-      while true; do
-        sleep 60
-        echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] ${task_name} ${attempt_label} still running..."
-      done
-    ) &
-    local heartbeat_pid=$!
-
-    # _SYNC_MODE=copy 时用 rclone copy（不删除目标端多余文件），否则 rclone sync
-    local rclone_cmd="sync"
-    if [ "${_SYNC_MODE:-sync}" = "copy" ]; then
-      rclone_cmd="copy"
-    fi
-
-    # OpenList 目标端（特别是 wopan176 crypt 后端）上传速度慢且不支持高并发
-    # 上传保持串行（transfers=1，给后端足够时间持久化每个文件，避免 "object not found"）；
-    # 检查阶段只读列表，可提高并发大幅缩短 diff/比对耗时（上传仍逐个进行）
-    # 同时增加超时时间（单个文件可能耗时 1-2 分钟）
-    local openlist_guard_flags=()
-    if [[ "$dest_path" == openlist:* ]]; then
-      openlist_guard_flags=(
-        "--transfers" "1"
-        "--checkers" "8"
-        "--contimeout" "30s"
-        "--timeout" "30m"
-      )
-      echo "OpenList 目标端：启用低并发保护 (transfers=1, checkers=8, timeout=30m)" | tee -a "$LOG_FILENAME"
-
-      # 同步前主动刷新 wopan176 token
-      # wopan176 的 OAuth access token 有效期约 5 分钟，长时间同步会过期
-      _refresh_wopan_token "$LOG_FILENAME"
-    fi
-
-    rclone "$rclone_cmd" "$source_path" "$dest_path" \
-      "${RCLONE_DEFAULT_FLAGS[@]}" \
-      "${openlist_guard_flags[@]}" \
-      "${extra_args[@]}" \
-      2>&1 | tee "$LAST_ATTEMPT_LOG"
-    local attempt_status=${PIPESTATUS[0]}
-
-    kill "$heartbeat_pid" 2>/dev/null || true
-    wait "$heartbeat_pid" 2>/dev/null || true
-
-    cat "$LAST_ATTEMPT_LOG" >> "$LOG_FILENAME"
-    return "$attempt_status"
-  }
-
-  : > "$LOG_FILENAME"
-  local SYNC_STATUS=0
+    sleep 2
+  done
+  curl -sf http://127.0.0.1:5244/ping >/dev/null 2>&1 || return 1
+  echo "  等待驱动重新初始化 (60s) ..." | tee -a "$log_file"
+  sleep 60
+  local t
+  t=$(_get_openlist_token)
+  if [ -n "$t" ]; then
+    curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh" \
+      -H "Authorization: $t" -H "Content-Type: application/json" \
+      -d "{\"path\":\"$ol_path\",\"recursive\":true}" >/dev/null 2>&1 || true
+    sleep 20
+  fi
+  return 0
+}
 
   # ===== 已修复文件排除（405 防护 + sync 模式删除保护）=====
   # marker fixed_files 里的 original 当初就是原路径传不上（405/超长/假成功）
@@ -636,6 +560,8 @@ sync_with_logging() {
   #   - auto-split 最终全量同步用 GLOBAL_FIXED_FILES_JSON 合并本轮子任务修复
   #   - lsf diff 不带 filter-from，缺失文件照常进修复管线复核
   #   - 文件名 glob 特殊字符 [ ] * ? { } 转成字符类
+# 依赖调用方（sync_with_logging）作用域: dest_path / task_name / LOG_FILENAME；追加 extra_args
+_sync_fixed_files_exclusion() {
   if [[ "$dest_path" == openlist:* ]]; then
     _load_marker_fixed_files "$source_path" "$dest_path" "$task_name"
     local fixed_exclude_file="/tmp/${task_name}_fixed_exclude_$$.txt"
@@ -665,12 +591,13 @@ sync_with_logging() {
       sed 's/^/  exclude: /' "$fixed_exclude_file" | tee -a "$LOG_FILENAME"
     fi
   fi
-
-  run_rclone_sync_once "initial sync" || SYNC_STATUS=$?
+}
 
   # ===== 8005 登录失败重试 =====
   # wopan176 后端写操作可能返回 8005（OpenList 包装为 HTTP 405 返回给 rclone）
   # 需要检查 OpenList 容器日志中的真实 8005 错误，刷新 token 并重试
+# 依赖调用方作用域: OL_LOG_FILE / dest_path / LOG_FILENAME / SYNC_STATUS；调用嵌套函数 run_rclone_sync_once
+_sync_retry_8005() {
   local OL_LOG_FILE=""
   OL_LOG_FILE=$(_find_openlist_log) || true
 
@@ -705,10 +632,13 @@ sync_with_logging() {
       echo "  8005 错误仍然存在，继续重试..." | tee -a "$LOG_FILENAME"
     done
   fi
+}
 
   # ===== HTTP 423 Locked 重试 =====
   # OpenList / WebDAV 可能临时锁定目标对象并返回 HTTP 423。
   # 延迟后重跑整次 sync；已完成文件会被 rclone 跳过，主要补偿锁定残留文件。
+# 依赖调用方作用域: dest_path / LOG_FILENAME / SYNC_STATUS；调用嵌套函数 run_rclone_sync_once
+_sync_retry_423() {
   if [[ "$dest_path" == openlist:* ]] && grep -Eqi 'Locked:[[:space:]]*423|423[[:space:]]+Locked' "$LAST_ATTEMPT_LOG"; then
     local lock_retry_attempts="${OPENLIST_423_RETRY_ATTEMPTS:-3}"
     local lock_retry_sleep="${OPENLIST_423_RETRY_SLEEP_SECONDS:-300}"
@@ -725,23 +655,10 @@ sync_with_logging() {
       fi
     done
   fi
+}
 
-  # ===== truth-check（任意 openlist: 目标端通用）=====
-  # 放在缺失文件 diff 之前：本轮有传输则重启 OpenList 容器取后端真值列表，
-  # diff 才能把"PUT 假成功"文件（仅存在于缓存）识别为缺失并送修复管线。
-  _openlist_truth_check "$dest_path" "$LOG_FILENAME" || true
-
-  # ===== 缺失文件修复管线 =====
-  # 不依赖任何错误码：同步后只要源端有、目标端没有的文件（含 rclone 报告
-  # "成功"但未持久化的假成功文件），一律送 try_fix_failed_file 修复
-  # （目录创建 → base64URL 编码 → zip/7z/分卷/API 多种方式），不阻止后续 task
-  local fail_list="/tmp/${task_name}_sync_failures.txt"
-  local fix_list="/tmp/${task_name}_sync_fixes.txt"
-  : > "$fail_list"
-  : > "$fix_list"
-  local fix_log=""
-  local HAS_OBJECT_NOT_FOUND=0
-
+# 依赖调用方作用域: LAST_ATTEMPT_LOG / task_name / source_path / dest_path / fail_list / fix_list / fix_log / LOG_FILENAME
+_sync_fix_missing_files() {
   if [[ "$dest_path" == openlist:* ]]; then
     # 收集缺失文件：
     #   1) 最后一次尝试日志中 Failed to copy 的文件（object not found 属于
@@ -962,11 +879,15 @@ sync_with_logging() {
     fi
     rm -f "$missing_list"
   fi
+  [ -n "${incr_state:-}" ] && rm -f "$incr_state" 2>/dev/null || true
+}
 
   # ===== 修复文件持久化验证：重启 OpenList 容器后检查修复的文件是否仍存在 =====
   # 目的：确认通过 try_fix_failed_file 同步到 wopan176 的文件真正被后端持久化，
   # 而不仅仅存在于 OpenList 内存缓存中（重启容器后即消失）
   # 仅在：有修复成功的文件、目标是 OpenList 远程、能找到 docker 命令的情况下执行
+# 依赖调用方作用域: dest_path / fix_list / fail_list / fix_log / task_name / source_path / LOG_FILENAME；写 SYNC_PERSIST_FAIL
+_sync_persist_verify_and_retry() {
   if [[ "$dest_path" == openlist:* ]] && [ -s "$fix_list" ] && command -v docker >/dev/null 2>&1; then
     _sec "$LOG_FILENAME" "${task_name} 修复持久化验证（重启容器复核）"
 
@@ -988,7 +909,7 @@ sync_with_logging() {
       local persist_ol_path="${dest_path#openlist:}"
       persist_ol_path="/${persist_ol_path}"
       if [ -n "$persist_ol_token" ]; then
-        curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh"           -H "Authorization: $persist_ol_token"           -H "Content-Type: application/json"           -d "{"path":"$persist_ol_path","recursive":true}" >/dev/null 2>&1 || true
+        curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh"           -H "Authorization: $persist_ol_token"           -H "Content-Type: application/json"           -d "{\"path\":\"$persist_ol_path\",\"recursive\":true}" >/dev/null 2>&1 || true
         sleep 10
       fi
 
@@ -1004,30 +925,9 @@ sync_with_logging() {
         echo "  重启前大小检查: $alt_path (expected=$bytes, actual=$sz)" | tee -a "$LOG_FILENAME"
       done < "$PERSIST_VERIFY_LIST"
 
-      # 4. 重启 OpenList 容器
+      # 4. 重启 OpenList 容器并等待驱动就绪 + 刷新缓存
       echo "  重启 OpenList 容器..." | tee -a "$LOG_FILENAME"
-      sudo docker restart openlist 2>&1 | tee -a "$LOG_FILENAME"
-
-      # 5. 等待 HTTP 就绪 + 驱动重新初始化
-      local persist_http_ok=0
-      for i in $(seq 1 30); do
-        if curl -sf http://127.0.0.1:5244/ping >/dev/null 2>&1; then
-          persist_http_ok=1
-          echo "  OpenList HTTP 就绪 (${i}次)" | tee -a "$LOG_FILENAME"
-          break
-        fi
-        sleep 2
-      done
-      if [ "$persist_http_ok" -eq 1 ]; then
-        echo "  等待驱动重新初始化 (60s) ..." | tee -a "$LOG_FILENAME"
-        sleep 60
-        # 重新刷新缓存（驱动重启后强制从后端拉列表）
-        persist_ol_token=$(_get_openlist_token)
-        if [ -n "$persist_ol_token" ]; then
-          curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh"             -H "Authorization: $persist_ol_token"             -H "Content-Type: application/json"             -d "{"path":"$persist_ol_path","recursive":true}" >/dev/null 2>&1 || true
-          sleep 20
-        fi
-
+      if _sync_restart_for_verify "$LOG_FILENAME" "$persist_ol_path"; then
         # 6. 逐个复核全部修复文件（不再抽样——假成功文件只有重启后才能暴露，
         # 抽前 6 条会漏掉其余假成功条目；复核是纯列表操作，代价可控。
         # 如需限流可用 OPENLIST_PERSIST_VERIFY_MAX 设上限，0/空 = 复核全部）
@@ -1144,27 +1044,10 @@ sync_with_logging() {
 
             # 重启容器复核本轮全部重试条目（一次重启覆盖所有文件）
             echo "  重启 OpenList 容器复核第 ${retry_round} 轮重试结果（${retry_fixed} 个）..." | tee -a "$LOG_FILENAME"
-            sudo docker restart openlist >/dev/null 2>&1 || true
-            local retry_http_ok=0 retry_i
-            for retry_i in $(seq 1 30); do
-              if curl -sf http://127.0.0.1:5244/ping >/dev/null 2>&1; then
-                retry_http_ok=1
-                echo "  OpenList HTTP 就绪 (${retry_i}次)" | tee -a "$LOG_FILENAME"
-                break
-              fi
-              sleep 2
-            done
-            if [ "$retry_http_ok" -ne 1 ]; then
+            if ! _sync_restart_for_verify "$LOG_FILENAME" "$persist_ol_path"; then
               echo "  ⚠️ 重启后 HTTP 未就绪，结束重试（本轮条目以即时校验为准，其余下一轮继续）" | tee -a "$LOG_FILENAME"
               retry_pending=()
               break
-            fi
-            echo "  等待驱动重新初始化 (60s) ..." | tee -a "$LOG_FILENAME"
-            sleep 60
-            persist_ol_token=$(_get_openlist_token)
-            if [ -n "$persist_ol_token" ]; then
-              curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh" -H "Authorization: $persist_ol_token" -H "Content-Type: application/json" -d "{\"path\":\"$persist_ol_path\",\"recursive\":true}" >/dev/null 2>&1 || true
-              sleep 20
             fi
             _persist_verify_entries "$dest_path" "$round_list" 0 "$LOG_FILENAME"
             echo "  第 ${retry_round} 轮复核汇总: 复核 ${PERSIST_IDX}/${retry_fixed} / 通过 ${PERSIST_OK} / 失败 ${PERSIST_FAIL}" | tee -a "$LOG_FILENAME"
@@ -1206,8 +1089,12 @@ sync_with_logging() {
       echo "  跳过持久化验证（无修复成功条目或 openlist 容器不存在）" | tee -a "$LOG_FILENAME"
     fi
   fi
+  [ -n "${incr_state:-}" ] && rm -f "$incr_state" 2>/dev/null || true
+}
 
   # ===== object not found 错误解析（源文件不存在）=====
+# 依赖调用方作用域: LAST_ATTEMPT_LOG / fail_list / LOG_FILENAME / task_name；写 HAS_OBJECT_NOT_FOUND
+_sync_parse_object_not_found() {
   if grep -Eqi 'ERROR : .+: Failed to copy.*object not found' "$LAST_ATTEMPT_LOG" 2>/dev/null; then
     HAS_OBJECT_NOT_FOUND=1
     echo "=== ${task_name} 检测到 object not found 错误（源文件不存在）===" | tee -a "$LOG_FILENAME"
@@ -1222,22 +1109,11 @@ sync_with_logging() {
         sed -E 's/^.*ERROR : //; s/: Failed to copy.*$//' | sort -u
     )
   fi
-
-  # 发送同步结果通知
-  _send_sync_result_notification \
-    "$source_path" "$dest_path" "$task_name" "$SYNC_STATUS" \
-    "$LOG_FILENAME" "$LAST_ATTEMPT_LOG" \
-    "$fail_list" "$fix_list" "$fix_log" \
-    "$HAS_OBJECT_NOT_FOUND" \
-    "${extra_args[@]}"
+}
 
   # 把 fix_list 序列化为 JSON 供 save_sync_marker 使用
   # 格式: [{original, alternative, method, size_human, size_bytes, restore: {kind, summary, steps, script}}]
   # restore 字段记录还原方式，便于日后从目标端恢复原始文件
-  LAST_SYNC_FIXED_FILES_JSON="[]"
-  if [ -s "$fix_list" ]; then
-    LAST_SYNC_FIXED_FILES_JSON=$(jq -R -s '
-      def restore_info($orig; $alt; $method; $src; $dst):
         # 14 种修复方式精确识别（方法 1-14）：
         #   "原路径 + 原文件名"                             → 原样 copy (方法1)
         #   "base64URL 编码目录 + 原文件名"                → 仅 b64 目录 (方法1变体)
@@ -1260,101 +1136,31 @@ sync_with_logging() {
         #   "AES256 加密 zip + .enc.zip 扩展名"             → encrypted zip (方法13)
         #   "临时目录上传 + OpenList API move"             → tmp + move (方法14)
         # 注: 不能用 ".*文件名" 模糊匹配，"原文件名" 里也有 "文件名" 3 个字，会误判
-        ($method | test("base64URL 编码目录 ")) as $has_b64_dir
-        | ($method | test("base64URL 编码文件名")) as $has_b64_name
-        | ($method | test("zip 压缩包")) as $has_zip
-        | ($method | test("7z 压缩包")) as $has_7z
-        | ($method | test("API 自动生成文件名")) as $has_api
-        | ($method | test("重命名 .bak")) as $has_bak
-        | ($method | test("父目录")) as $has_parent
-        | ($method | test("base64 编码文件内容")) as $has_b64_content
-        | ($method | test("AES256 加密 zip")) as $has_enc_zip
-        | ($method | test("临时目录上传")) as $has_tmp_move
-        | ($method | test("短哈希文件名")) as $has_short_hash
-        | ($method | test("分卷切割") and ($method | test("base64URL 编码文件名") | not)) as $has_split_zip
-        | ($method | test("分卷切割") and ($method | test("base64URL 编码文件名"))) as $has_split_zip_b64name
         # 原目录部分（去掉文件名）和文件名
-        | ([$orig | split("/") | .[0:-1] | join("/"), $orig | split("/") | .[-1]]) as [$orig_dir, $orig_name]
-        | ([$alt  | split("/") | .[0:-1] | join("/"), $alt  | split("/") | .[-1]]) as [$alt_dir,  $alt_name]
-        | if   $has_zip      then {kind:"zip",
-            summary: "文件被打包为 .zip（存储模式 mx=0）",
-            steps:   ["下载目标端 " + $alt, "执行: 7z x <alt_zip> -o<output_dir>（或 unzip）", "解压后得到 " + $orig_name],
-            script:  "set -euo pipefail\nSRC=\"" + $src + "\"\nDST=\"" + $dst + "\"\nORIG=\"" + $orig + "\"\nALT=\"" + $alt + "\"\nTMP=$(mktemp -d)\nrclone copyto \"${DST}/${ALT}\" \"$TMP/package.zip\" --progress\n7z x \"$TMP/package.zip\" -o\"$TMP/out\" -y\n# 还原后的源文件在: $TMP/out/" + $orig_name + "\n# 如需回传源端: rclone copyto \"$TMP/out/" + $orig_name + "\" \"${SRC}/${ORIG}\"\nrm -rf \"$TMP\""}
-          elif $has_7z       then {kind:"seven_zip",
-            summary: "文件被打包为 .7z（存储模式 mx=0）",
-            steps:   ["下载目标端 " + $alt, "执行: 7z x <alt_7z> -o<output_dir>", "解压后得到 " + $orig_name],
-            script:  "set -euo pipefail\nSRC=\"" + $src + "\"\nDST=\"" + $dst + "\"\nORIG=\"" + $orig + "\"\nALT=\"" + $alt + "\"\nTMP=$(mktemp -d)\nrclone copyto \"${DST}/${ALT}\" \"$TMP/package.7z\" --progress\n7z x \"$TMP/package.7z\" -o\"$TMP/out\" -y\n# 还原后的源文件在: $TMP/out/" + $orig_name + "\n# 如需回传源端: rclone copyto \"$TMP/out/" + $orig_name + "\" \"${SRC}/${ORIG}\"\nrm -rf \"$TMP\""}
-          elif $has_short_hash then {kind:"short_hash_rename",
-            summary: "文件名替换为 8 位 md5 前缀（规避密文名超长），内容未变",
-            steps:   ["下载目标端 " + $alt, "重命名为原文件名: " + $orig_name],
-            script:  "set -euo pipefail\nSRC=\"" + $src + "\"\nDST=\"" + $dst + "\"\nORIG=\"" + $orig + "\"\nALT=\"" + $alt + "\"\nTMP=$(mktemp -d)\nORIG_FNAME=\"" + $orig_name + "\"\nrclone copyto \"${DST}/${ALT}\" \"$TMP/${ORIG_FNAME}\" --progress\n# 如需回传源端: rclone copyto \"$TMP/${ORIG_FNAME}\" \"${SRC}/${ORIG}\"\nrm -rf \"$TMP\""}
-          elif $has_api      then {kind:"api_rename",
-            summary: "文件名被 OpenList API 自动改写（前缀 file_<ts>_<pid>_api，扩展名保留）",
-            steps:   ["下载目标端 " + $alt, "根据内容哈希对比或直接重命名为: " + $orig_name],
-            script:  "set -euo pipefail\nSRC=\"" + $src + "\"\nDST=\"" + $dst + "\"\nORIG=\"" + $orig + "\"\nALT=\"" + $alt + "\"\nTMP=$(mktemp -d)\nALT_FNAME=\"" + $alt_name + "\"\nORIG_FNAME=\"" + $orig_name + "\"\nrclone copyto \"${DST}/${ALT}\" \"$TMP/${ORIG_FNAME}\" --progress\n# 已直接保存为原始文件名。内容校验可用: rclone hashsum SHA1 \"${SRC}/${ORIG}\" 与 sha1sum \"$TMP/${ORIG_FNAME}\" 对比\n# 如需回传源端: rclone copyto \"$TMP/${ORIG_FNAME}\" \"${SRC}/${ORIG}\"\nrm -rf \"$TMP\""}
-          elif ($has_b64_dir and $has_b64_name) then {kind:"base64url_both",
-            summary: "目录最末一层和文件名均做了 base64URL 编码",
-            steps:   ["取目录最末层路径段 → base64URL 解码得到原目录名", "取文件名（扩展名前部分） → base64URL 解码得到原文件名"],
-            script:  "set -euo pipefail\n# base64URL 解码工具: base64 -d 时要把 -_ 替换为 +/ 并补齐 = 填充\nb64url_decode() {\n  local s=\"$1\"; s=\"${s//-/+}\"; s=\"${s//_/}\"\n  local pad=$(( (4 - ${#s} % 4) % 4 )); while [ $pad -gt 0 ]; do s=\"$s=\"; pad=$((pad-1)); done\n  printf \"%s\" \"$s\" | base64 -d\n}\nSRC=\"" + $src + "\"\nDST=\"" + $dst + "\"\nORIG=\"" + $orig + "\"\nALT=\"" + $alt + "\"\n# 把 ALT 路径按 / 分段，dir 末段和文件名做 base64URL 解码即可还原 ORIG 路径\n# 脚本给出示例：下载后按原名保存\nTMP=$(mktemp -d)\nORIG_FNAME=\"" + $orig_name + "\"\nrclone copyto \"${DST}/${ALT}\" \"$TMP/${ORIG_FNAME}\" --progress\n# 如需回传源端: rclone copyto \"$TMP/${ORIG_FNAME}\" \"${SRC}/${ORIG}\"\nrm -rf \"$TMP\""}
-          elif $has_b64_dir then {kind:"base64url_dir",
-            summary: "最末一层目录名做了 base64URL 编码，文件名保持原样",
-            steps:   ["取目录最末层路径段 → base64URL 解码即得原目录名", "文件名无需改动"],
-            script:  "set -euo pipefail\nb64url_decode() {\n  local s=\"$1\"; s=\"${s//-/+}\"; s=\"${s//_/}\"\n  local pad=$(( (4 - ${#s} % 4) % 4 )); while [ $pad -gt 0 ]; do s=\"$s=\"; pad=$((pad-1)); done\n  printf \"%s\" \"$s\" | base64 -d\n}\nSRC=\"" + $src + "\"\nDST=\"" + $dst + "\"\nORIG=\"" + $orig + "\"\nALT=\"" + $alt + "\"\nTMP=$(mktemp -d)\nORIG_FNAME=\"" + $orig_name + "\"\nrclone copyto \"${DST}/${ALT}\" \"$TMP/${ORIG_FNAME}\" --progress\n# 如需回传源端: rclone copyto \"$TMP/${ORIG_FNAME}\" \"${SRC}/${ORIG}\"\nrm -rf \"$TMP\""}
-          elif $has_b64_name then {kind:"base64url_name",
-            summary: "文件名（不含扩展名部分）做了 base64URL 编码，目录保持原样",
-            steps:   ["取文件名扩展名前部分 → base64URL 解码得到原文件名", "目录名无需改动"],
-            script:  "set -euo pipefail\nb64url_decode() {\n  local s=\"$1\"; s=\"${s//-/+}\"; s=\"${s//_/}\"\n  local pad=$(( (4 - ${#s} % 4) % 4 )); while [ $pad -gt 0 ]; do s=\"$s=\"; pad=$((pad-1)); done\n  printf \"%s\" \"$s\" | base64 -d\n}\nSRC=\"" + $src + "\"\nDST=\"" + $dst + "\"\nORIG=\"" + $orig + "\"\nALT=\"" + $alt + "\"\nTMP=$(mktemp -d)\nORIG_FNAME=\"" + $orig_name + "\"\nrclone copyto \"${DST}/${ALT}\" \"$TMP/${ORIG_FNAME}\" --progress\n# 如需回传源端: rclone copyto \"$TMP/${ORIG_FNAME}\" \"${SRC}/${ORIG}\"\nrm -rf \"$TMP\""}
-          elif $has_b64_content then {kind:"base64_content",
-            summary: "文件内容被 base64 编码后上传，完全改变了 hash 和内容特征",
-            steps:   ["下载目标端 " + $alt, "执行: base64 -d <alt_file> > <orig_file>", "解码后得到原始文件 " + $orig_name],
-            script:  "set -euo pipefail\nSRC=\"" + $src + "\"\nDST=\"" + $dst + "\"\nORIG=\"" + $orig + "\"\nALT=\"" + $alt + "\"\nTMP=$(mktemp -d)\nrclone copyto \"${DST}/${ALT}\" \"$TMP/encoded.b64\" --progress\nbase64 -d \"$TMP/encoded.b64\" > \"$TMP/" + $orig_name + "\"\n# 还原后的源文件在: $TMP/" + $orig_name + "\n# 如需回传源端: rclone copyto \"$TMP/" + $orig_name + "\" \"${SRC}/${ORIG}\"\nrm -rf \"$TMP\""}
-          elif $has_enc_zip   then {kind:"encrypted_zip",
-            summary: "文件被 AES256 加密 zip 打包后上传，改变了二进制特征",
-            steps:   ["下载目标端 " + $alt, "执行: 7z x -p<password> <enc_zip> -o<output_dir>", "解压后得到 " + $orig_name],
-            script:  "set -euo pipefail\n# 密码在修复时的 restore_hint 中记录\nSRC=\"" + $src + "\"\nDST=\"" + $dst + "\"\nORIG=\"" + $orig + "\"\nALT=\"" + $alt + "\"\nTMP=$(mktemp -d)\nrclone copyto \"${DST}/${ALT}\" \"$TMP/package.enc.zip\" --progress\n# 密码格式: OpenList<timestamp>，从 restore_hint 中获取\n7z x -p\"OpenList<password>\" \"$TMP/package.enc.zip\" -o\"$TMP/out\" -y\n# 还原后的源文件在: $TMP/out/" + $orig_name + "\nrm -rf \"$TMP\""}
-          elif $has_bak       then {kind:"rename_bak",
-            summary: "文件被重命名为 .bak 后缀后上传",
-            steps:   ["下载目标端 " + $alt, "重命名为原始文件名: " + $orig_name],
-            script:  "set -euo pipefail\nSRC=\"" + $src + "\"\nDST=\"" + $dst + "\"\nORIG=\"" + $orig + "\"\nALT=\"" + $alt + "\"\nTMP=$(mktemp -d)\nORIG_FNAME=\"" + $orig_name + "\"\nrclone copyto \"${DST}/${ALT}\" \"$TMP/${ORIG_FNAME}\" --progress\n# 文件已恢复原始文件名\n# 如需回传源端: rclone copyto \"$TMP/${ORIG_FNAME}\" \"${SRC}/${ORIG}\"\nrm -rf \"$TMP\""}
-          elif $has_parent    then {kind:"parent_dir",
-            summary: "文件上传到父目录（跳过有问题的子目录），文件名编码了原始目录信息",
-            steps:   ["下载目标端 " + $alt, "从文件名 __fixed__<base64>__<filename> 中解码原始目录名", "移动到正确的目录路径"],
-            script:  "set -euo pipefail\nSRC=\"" + $src + "\"\nDST=\"" + $dst + "\"\nORIG=\"" + $orig + "\"\nALT=\"" + $alt + "\"\nTMP=$(mktemp -d)\nORIG_FNAME=\"" + $orig_name + "\"\nrclone copyto \"${DST}/${ALT}\" \"$TMP/${ORIG_FNAME}\" --progress\n# 如需回传源端: rclone copyto \"$TMP/${ORIG_FNAME}\" \"${SRC}/${ORIG}\"\nrm -rf \"$TMP\""}
-          elif $has_split_zip then {kind:"split_zip",
-            summary: "文件被打包为 zip（存储模式 mx=0）并切割为 100MB 分卷上传，分卷命名 <name>.zip.001/.002/...",
-            steps:   ["下载所有 .zip.0* 分卷到同一目录", "按顺序合并: cat *.zip.0* > merged.zip", "执行: 7z x merged.zip -o<output_dir>（或 unzip merged.zip）"],
-            script:  "set -euo pipefail\nSRC=\"" + $src + "\"\nDST=\"" + $dst + "\"\nORIG=\"" + $orig + "\"\nALT=\"" + $alt + "\"\nTMP=$(mktemp -d)\nALT_DIR=$(dirname \"$ALT\")\nALT_FNAME=$(basename \"$ALT\")\nSPLIT_PREFIX=\"${ALT_FNAME%.*}\"\necho \"分卷前缀: $SPLIT_PREFIX\"\nrclone copy \"${DST}/${ALT_DIR}\" \"$TMP\" --include \"${SPLIT_PREFIX}.zip.*\" --progress 2>&1 | tail -5\ncd \"$TMP\"\ncat ${SPLIT_PREFIX}.zip.0* > merged.zip\necho \"合并后 zip 大小: $(stat -c%s merged.zip 2>/dev/null || stat -f%z merged.zip 2>/dev/null) bytes\"\n7z x merged.zip -o\"$TMP/out\" -y || unzip merged.zip -d \"$TMP/out\"\n# 还原后的源文件在: $TMP/out/" + $orig_name + "\nrm -rf \"$TMP\""}
-          elif $has_split_zip_b64name then {kind:"split_zip_b64name",
-            summary: "文件名 base64URL 编码后，zip 打包并切割为 100MB 分卷上传（分卷命名 <encoded>.zip.001/.002/...）",
-            steps:   ["下载所有 .zip.0* 分卷到同一目录", "按顺序合并: cat *.zip.0* > merged.zip", "解压 merged.zip 得到原始内容文件", "文件名还原：对编码文件名的 base64URL 前缀部分解码"],
-            script:  "set -euo pipefail\nb64url_decode() {\n  local s=\"$1\"; s=\"${s//-/+}\"; s=\"${s//_/}\"\n  local pad=$(( (4 - ${#s} % 4) % 4 )); while [ $pad -gt 0 ]; do s=\"$s=\"; pad=$((pad-1)); done\n  printf \"%s\" \"$s\" | base64 -d\n}\nSRC=\"" + $src + "\"\nDST=\"" + $dst + "\"\nORIG=\"" + $orig + "\"\nALT=\"" + $alt + "\"\nTMP=$(mktemp -d)\nALT_DIR=$(dirname \"$ALT\")\nALT_FNAME=$(basename \"$ALT\")\nSPLIT_FULL_PREFIX=\"${ALT_FNAME%.*}\"\nENCODED_BASE=\"${SPLIT_FULL_PREFIX%.zip}\"\n[ -z \"$ENCODED_BASE\" ] && ENCODED_BASE=\"${SPLIT_FULL_PREFIX}\"\nif [[ \"$ENCODED_BASE\" == *.* ]]; then\n  NAME_EXT=\"${ENCODED_BASE##*.}\"\n  NAME_NOEXT=\"${ENCODED_BASE%.*}\"\n  DECODED_NOEXT=$(b64url_decode \"$NAME_NOEXT\")\n  DECODED_FNAME=\"${DECODED_NOEXT}.${NAME_EXT}\"\nelse\n  DECODED_FNAME=$(b64url_decode \"$ENCODED_BASE\")\nfi\necho \"还原文件名: $ENCODED_BASE -> $DECODED_FNAME\"\nrclone copy \"${DST}/${ALT_DIR}\" \"$TMP\" --include \"${SPLIT_FULL_PREFIX}.*\" --progress 2>&1 | tail -5\ncd \"$TMP\"\ncat ${SPLIT_FULL_PREFIX}.0* > merged.zip 2>/dev/null || ( ls *.zip.0* >/dev/null 2>&1 && cat *.zip.0* > merged.zip )\necho \"合并后 zip 大小: $(stat -c%s merged.zip 2>/dev/null || stat -f%z merged.zip 2>/dev/null) bytes\"\n7z x merged.zip -o\"$TMP/out\" -y || unzip merged.zip -d \"$TMP/out\"\nls -la \"$TMP/out/\"\nrm -rf \"$TMP\""}
-                    elif $has_tmp_move  then {kind:"tmp_move",
-            summary: "文件上传到临时目录后用 OpenList API move 移动（可能已移动或保留在临时目录）",
-            steps:   ["检查目标路径是否已有原文件", "如未移动，用 OpenList API move 从临时目录移动"],
-            script:  "set -euo pipefail\n# 检查目标是否已存在\nrclone lsjson \u0027" + $dst + "/" + $orig + "\u0027 --max-depth 1 2>/dev/null | jq \u0027length\u0027\n# 如不存在，用 OpenList API move\n# curl -X POST http://127.0.0.1:5244/api/fs/move -H \u0027Authorization: <token>\u0027 -d \u0027{\"src_dir\":\"/wopan176Crypt/backup/" + $alt + "\",\"dst_dir\":\"/wopan176Crypt/backup/" + $orig + "\"}\u0027"}
-          else {kind:"copy",
-            summary: "文件按原路径原文件名直接 copyto，无需还原处理",
-            steps:   ["目标端路径与源端相同，直接使用即可"],
-            script:  "# 路径未变化，无需还原\nSRC=\"" + $src + "\"\nDST=\"" + $dst + "\"\nORIG=\"" + $orig + "\"\nALT=\"" + $alt + "\"\n# 如需取回: rclone copyto \"${DST}/${ALT}\" ./local_copy"}
-          end;
-      split("\n") | map(select(length > 0)) | map(
-        split("|") as $f
-        | {
-            original:    $f[0],
-            alternative: $f[1],
-            method:      $f[2],
-            restore_hint: $f[3],
-            size_human:  $f[4],
-            size_bytes:  ($f[5] // "0" | tonumber),
-            method_id:   ($f[6] // "")
-          }
-        | . + {restore: (restore_info(.original; .alternative; .method; "'"$source_path"'"; "'"$dest_path"'") + {hint: .restore_hint})}
-      )
-    ' "$fix_list" 2>/dev/null || echo "[]")
+# 分类程序在 restore_info.jq（随 *.jq 拷到 /tmp，见 workflow Load helper functions）
+# 依赖调用方（sync_with_logging）作用域: fix_list / source_path / dest_path / LOG_FILENAME
+# 写入: LAST_SYNC_FIXED_FILES_JSON
+_sync_serialize_fixed_files() {
+  LAST_SYNC_FIXED_FILES_JSON="[]"
+  [ -s "$fix_list" ] || return 0
+  local _jq_prog
+  for _jq_prog in \
+    "/tmp/restore_info.jq" \
+    "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/restore_info.jq"; do
+    [ -f "$_jq_prog" ] && break
+  done
+  if [ ! -f "$_jq_prog" ]; then
+    echo "⚠️ 未找到 restore_info.jq，restore 元数据留空" | tee -a "$LOG_FILENAME"
+    return 0
   fi
+  LAST_SYNC_FIXED_FILES_JSON=$(jq -R -s --arg sp "$source_path" --arg dp "$dest_path" \
+    -f "$_jq_prog" "$fix_list" 2>/dev/null || echo "[]")
+}
 
   # 累计到全局变量（供 auto-split 拆分模式下顶级 save_sync_marker 收集所有子目录的修复）
   # _sync_task_impl 在 current_depth=0 时初始化 GLOBAL_FIXED_FILES_JSON="[]"
+# 依赖调用方作用域: LAST_SYNC_FIXED_FILES_JSON / LOG_FILENAME；写 GLOBAL_FIXED_FILES_JSON / GLOBAL_FIX_BLACKLIST_JSON
+_sync_accumulate_fixed_results() {
   if [ -z "${GLOBAL_FIXED_FILES_JSON:-}" ]; then
     GLOBAL_FIXED_FILES_JSON="[]"
   fi
@@ -1369,17 +1175,12 @@ sync_with_logging() {
   # 的 fix_blacklist 字段，下一轮修复时跳过对应方法）
   local _task_bl_json="{}"
   if [ "${#FIX_METHOD_BLACKLIST[@]}" -gt 0 ]; then
-    local _bl_f
-    for _bl_f in "${!FIX_METHOD_BLACKLIST[@]}"; do
-      _task_bl_json=$(jq -cn --argjson j "$_task_bl_json" --arg k "$_bl_f" --arg v "${FIX_METHOD_BLACKLIST[$_bl_f]}" \
-        '$j + {($k): $v}' 2>/dev/null || echo "{}")
-    done
+    _task_bl_json=$(fix_blacklist_to_json)
   fi
   if [ -z "${GLOBAL_FIX_BLACKLIST_JSON:-}" ] || ! echo "${GLOBAL_FIX_BLACKLIST_JSON:-}" | jq -e 'type == "object"' >/dev/null 2>&1; then
     GLOBAL_FIX_BLACKLIST_JSON="{}"
   fi
-  GLOBAL_FIX_BLACKLIST_JSON=$(jq -cn --argjson a "$GLOBAL_FIX_BLACKLIST_JSON" --argjson b "$_task_bl_json" \
-    '$a * $b' 2>/dev/null || echo "$GLOBAL_FIX_BLACKLIST_JSON")
+  GLOBAL_FIX_BLACKLIST_JSON=$(_marker_merge_json "$GLOBAL_FIX_BLACKLIST_JSON" "$_task_bl_json")
   # 面包屑: 定位黑名单在链路（数组→GLOBAL→save）中的实际流转（排查 31917285452 丢失问题）
   # 注意: 不能写 ${VAR:-{}} —— bash 把默认词的 } 当作展开结束符，会给已赋值变量
   # 追加一个字面 }（"{...5条...}}"），jq 解析失败后面包屑拆成 "GLOBAL 5 / ? 条"
@@ -1390,13 +1191,199 @@ sync_with_logging() {
   if [ "${#FIX_METHOD_BLACKLIST[@]}" -gt 0 ] || [ "$_global_bl_len" != "0" ]; then
     echo "黑名单累计: 数组 ${#FIX_METHOD_BLACKLIST[@]} 条 → GLOBAL ${_global_bl_len} 条" | tee -a "$LOG_FILENAME"
   fi
+}
 
-  [ -n "${incr_state:-}" ] && rm -f "$incr_state" 2>/dev/null || true
+
+# 带探测、重试和详细日志的同步函数
+# 用法: sync_with_logging <source_path> <dest_path> <task_name> [rclone_extra_args...]
+# 设置全局变量: SYNC_FAILED, SYNC_SKIPPED, SYNC_TRANSFERRED_BYTES, FAKE_SUCCESS_COUNT
+# 注意: 始终返回 0，失败状态通过 SYNC_FAILED 传递（避免 set -e 下 step 直接退出）
+sync_with_logging() {
+  local source_path="$1"
+  local dest_path="$2"
+  local task_name="$3"
+  shift 3
+  local extra_args=("$@")
+  local TIMESTAMP
+  TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+  local LOG_FILENAME="${task_name}_sync_${TIMESTAMP}.log"
+
+  echo "开始同步: $source_path -> $dest_path"
+
+  # OpenList 目标端在同步前刷新缓存，减少重复上传
+  _refresh_openlist_cache "$dest_path"
+
+  local LAST_ATTEMPT_LOG="${LOG_FILENAME}.last"
+
+  # 执行一次 rclone sync/copy，带心跳输出
+  # 用法: run_rclone_sync_once <attempt_label>
+  run_rclone_sync_once() {
+    local attempt_label="$1"
+    echo "=== ${task_name} ${attempt_label} ===" | tee -a "$LOG_FILENAME"
+    # fix_test 模式: 跳过实际 rclone 传输（调试目的是快速验证修复方法，
+    # 全量 copy 动辄 GB 级/十分钟，与快速迭代背道而驰）。日志置空后
+    # 8005/423/错误解析全部空匹配自动跳过，truth-check + lsf diff +
+    # 修复管线 + 持久化验证照常执行
+    if [ "${OPENLIST_FIX_TEST_MODE:-0}" = "1" ]; then
+      echo "fix_test 模式: 跳过 ${attempt_label} 实际传输（直接 diff + 修复）" | tee -a "$LOG_FILENAME"
+      : > "$LAST_ATTEMPT_LOG"
+      return 0
+    fi
+    echo "OpenList sync args: ${extra_args[*]}" | tee -a "$LOG_FILENAME"
+    : > "$LAST_ATTEMPT_LOG"
+
+    # 心跳线程：rclone 扫描/检查阶段可能长时间没有换行输出，
+    # 每分钟输出一次心跳，避免 GitHub Actions 页面看起来像卡死。
+    (
+      while true; do
+        sleep 60
+        echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] ${task_name} ${attempt_label} still running..."
+      done
+    ) &
+    local heartbeat_pid=$!
+
+    # OpenList 目标端（特别是 wopan176 crypt 后端）上传速度慢且不支持高并发
+    # 上传保持串行（transfers=1，给后端足够时间持久化每个文件，避免 "object not found"）；
+    # 检查阶段只读列表，可提高并发大幅缩短 diff/比对耗时（上传仍逐个进行）
+    # 同时增加超时时间（单个文件可能耗时 1-2 分钟）
+    local openlist_guard_flags=()
+    if [[ "$dest_path" == openlist:* ]]; then
+      openlist_guard_flags=(
+        "--transfers" "1"
+        "--checkers" "8"
+        "--contimeout" "30s"
+        "--timeout" "30m"
+      )
+      echo "OpenList 目标端：启用低并发保护 (transfers=1, checkers=8, timeout=30m)" | tee -a "$LOG_FILENAME"
+
+      # 同步前主动刷新 wopan176 token
+      # wopan176 的 OAuth access token 有效期约 5 分钟，长时间同步会过期
+      _refresh_wopan_token "$LOG_FILENAME"
+    fi
+
+    rclone sync "$source_path" "$dest_path" \
+      "${RCLONE_DEFAULT_FLAGS[@]}" \
+      "${openlist_guard_flags[@]}" \
+      "${extra_args[@]}" \
+      2>&1 | tee "$LAST_ATTEMPT_LOG"
+    local attempt_status=${PIPESTATUS[0]}
+
+    kill "$heartbeat_pid" 2>/dev/null || true
+    wait "$heartbeat_pid" 2>/dev/null || true
+
+    cat "$LAST_ATTEMPT_LOG" >> "$LOG_FILENAME"
+    return "$attempt_status"
+  }
+
+  : > "$LOG_FILENAME"
+  local SYNC_STATUS=0
+
+  _sync_fixed_files_exclusion
+
+  run_rclone_sync_once "initial sync" || SYNC_STATUS=$?
+
+  _sync_retry_8005
+
+  _sync_retry_423
+
+  # ===== truth-check（任意 openlist: 目标端通用）=====
+  # 放在缺失文件 diff 之前：本轮有传输则重启 OpenList 容器取后端真值列表，
+  # diff 才能把"PUT 假成功"文件（仅存在于缓存）识别为缺失并送修复管线。
+  _openlist_truth_check "$dest_path" "$LOG_FILENAME" || true
+
+  # ===== 缺失文件修复管线 =====
+  # 不依赖任何错误码：同步后只要源端有、目标端没有的文件（含 rclone 报告
+  # "成功"但未持久化的假成功文件），一律送 try_fix_failed_file 修复
+  # （目录创建 → base64URL 编码 → zip/7z/分卷/API 多种方式），不阻止后续 task
+  local fail_list="/tmp/${task_name}_sync_failures.txt"
+  local fix_list="/tmp/${task_name}_sync_fixes.txt"
+  : > "$fail_list"
+  : > "$fix_list"
+  local fix_log=""
+  local HAS_OBJECT_NOT_FOUND=0
+
+  _sync_fix_missing_files
+
+  _sync_persist_verify_and_retry
+
+  _sync_parse_object_not_found
+
+  # 发送同步结果通知
+  _send_sync_result_notification \
+    "$source_path" "$dest_path" "$task_name" "$SYNC_STATUS" \
+    "$LOG_FILENAME" "$LAST_ATTEMPT_LOG" \
+    "$fail_list" "$fix_list" "$fix_log" \
+    "$HAS_OBJECT_NOT_FOUND" \
+    "${extra_args[@]}"
+
+  _sync_serialize_fixed_files
+
+  _sync_accumulate_fixed_results
+
   rm -f "$LOG_FILENAME" "$LAST_ATTEMPT_LOG" "$fail_list" "$fix_list" "$fix_log" /tmp/probe_src.txt /tmp/probe_dst.txt 2>/dev/null || true
   # 始终返回 0：失败状态已通过 SYNC_FAILED 全局变量传递，
   # 在 set -e 下返回非零会导致整个 step 立即退出，后续同步与
   # split_on_sync_failure 均无法执行。
   return 0
+}
+
+# ===== 通知消息公共段落构建 =====
+# 4 个通知分支共享的头部/任务信息/排除规则/差异列表段落。
+# 通过 printf -v 间接追加到调用方变量（无需 nameref）；
+# 读取调用方（_send_sync_result_notification）作用域:
+#   source_size_human / dest_size_human / count_info / task_name /
+#   source_path / dest_path / exclude_list / AUTO_SPLIT_INFO / diff_files_list
+
+# 变量追加（$1=变量名, $2=追加内容）
+_notify_append() {
+  printf -v "$1" '%s%s' "${!1}" "$2"
+}
+
+# 头部: 标题 + 分隔线 + 源端/目标大小 + 可选状态行 + 文件数信息
+# 用法: _notify_add_header <var> <标题> [状态行文本]
+_notify_add_header() {
+  _notify_append "$1" "$2"$'\n'
+  _notify_append "$1" '━━━━━━━━━━━━━━'$'\n'
+  _notify_append "$1" "源端大小：${source_size_human}"$'\n'
+  _notify_append "$1" "目标大小：${dest_size_human}"$'\n'
+  [ -n "${3:-}" ] && _notify_append "$1" "状态：$3"$'\n'
+  _notify_append "$1" "${count_info}"$'\n'
+}
+
+# AUTO_SPLIT_INFO 段（仅非空时插入）
+_notify_add_autosplit() {
+  [ -n "$AUTO_SPLIT_INFO" ] && _notify_append "$1" $'\n'"${AUTO_SPLIT_INFO}"$'\n'
+  return 0
+}
+
+# 任务信息 + 排除规则段（段前各空一行）
+# 用法: _notify_add_task_and_excludes <var> [trail_nl=1：exclude 列表后补换行]
+_notify_add_task_and_excludes() {
+  _notify_append "$1" $'\n''📁 任务信息'$'\n'
+  _notify_append "$1" "• 任务：${task_name}"$'\n'
+  _notify_append "$1" "• 源端：${source_path}"$'\n'
+  _notify_append "$1" "• 目标：${dest_path}"$'\n'
+  _notify_append "$1" $'\n''🚫 排除规则'$'\n'
+  _notify_append "$1" "${exclude_list}"
+  [ "${2:-1}" = "1" ] && _notify_append "$1" $'\n'
+  return 0
+}
+
+# 差异文件列表段（仅非空时插入）
+# 用法: _notify_add_diff_list <var> <前导空行数:1|2> [标题带全角冒号:1|0]
+_notify_add_diff_list() {
+  [ -z "$diff_files_list" ] && return 0
+  if [ "${2:-2}" = "1" ]; then
+    _notify_append "$1" $'\n'
+  else
+    _notify_append "$1" $'\n\n'
+  fi
+  if [ "${3:-1}" = "1" ]; then
+    _notify_append "$1" "📋 差异文件列表："$'\n'
+  else
+    _notify_append "$1" "📋 差异文件列表"$'\n'
+  fi
+  _notify_append "$1" "$diff_files_list"
 }
 
 # 发送同步结果通知（从 sync_with_logging 拆分出来）
@@ -1559,59 +1546,29 @@ _send_sync_result_notification() {
       fail_status_msg="源文件不存在 (object not found)，部分文件无法同步"
     fi
     local partial_msg=""
-    partial_msg+="⚠️ ${task_name} 部分文件同步失败"$'\n'
-    partial_msg+='━━━━━━━━━━━━━━'$'\n'
-    partial_msg+="源端大小：${source_size_human}"$'\n'
-    partial_msg+="目标大小：${dest_size_human}"$'\n'
-    partial_msg+="状态：${fail_status_msg}"$'\n'
-    partial_msg+="${count_info}"$'\n'
-    [ -n "$AUTO_SPLIT_INFO" ] && partial_msg+=$'\n'"${AUTO_SPLIT_INFO}"$'\n'
-    partial_msg+=$'\n'
-    partial_msg+='📁 任务信息'$'\n'
-    partial_msg+="• 任务：${task_name}"$'\n'
-    partial_msg+="• 源端：${source_path}"$'\n'
-    partial_msg+="• 目标：${dest_path}"$'\n'
-    partial_msg+=$'\n'
-    partial_msg+='🚫 排除规则'$'\n'
-    partial_msg+="${exclude_list}"$'\n'
+    _notify_add_header partial_msg "⚠️ ${task_name} 部分文件同步失败" "$fail_status_msg"
+    _notify_add_autosplit partial_msg
+    _notify_add_task_and_excludes partial_msg
     partial_msg+=$'\n'
     partial_msg+="✅ 已通过其他方式同步（${fix_total} 个文件）："$'\n'
     partial_msg+="${fix_summary}"$'\n'
     partial_msg+=$'\n'
     partial_msg+="❌ 无法同步文件（${fail_total} 个）："$'\n'
     partial_msg+="${fail_summary}"
-    if [ -n "$diff_files_list" ]; then
-      partial_msg+=$'\n\n'"📋 差异文件列表："$'\n'
-      partial_msg+="$diff_files_list"
-    fi
+    _notify_add_diff_list partial_msg 2
 
     send_telegram_message "$partial_msg"
 
   elif [ -s "$fix_list" ]; then
     # 所有缺失文件都已通过其他方式同步
     local partial_msg=""
-    partial_msg+="⚠️ ${task_name} 部分文件已通过其他方式同步"$'\n'
-    partial_msg+='━━━━━━━━━━━━━━'$'\n'
-    partial_msg+="源端大小：${source_size_human}"$'\n'
-    partial_msg+="目标大小：${dest_size_human}"$'\n'
-    partial_msg+="状态：${fix_total} 个缺失文件已全部通过替代方式同步"$'\n'
-    partial_msg+="${count_info}"$'\n'
-    [ -n "$AUTO_SPLIT_INFO" ] && partial_msg+=$'\n'"${AUTO_SPLIT_INFO}"$'\n'
-    partial_msg+=$'\n'
-    partial_msg+='📁 任务信息'$'\n'
-    partial_msg+="• 任务：${task_name}"$'\n'
-    partial_msg+="• 源端：${source_path}"$'\n'
-    partial_msg+="• 目标：${dest_path}"$'\n'
-    partial_msg+=$'\n'
-    partial_msg+='🚫 排除规则'$'\n'
-    partial_msg+="${exclude_list}"$'\n'
+    _notify_add_header partial_msg "⚠️ ${task_name} 部分文件已通过其他方式同步" "${fix_total} 个缺失文件已全部通过替代方式同步"
+    _notify_add_autosplit partial_msg
+    _notify_add_task_and_excludes partial_msg
     partial_msg+=$'\n'
     partial_msg+="✅ 已通过其他方式同步（${fix_total} 个文件）："$'\n'
     partial_msg+="${fix_summary}"
-    if [ -n "$diff_files_list" ]; then
-      partial_msg+=$'\n\n'"📋 差异文件列表："$'\n'
-      partial_msg+="$diff_files_list"
-    fi
+    _notify_add_diff_list partial_msg 2
 
     send_telegram_message "$partial_msg"
 
@@ -1630,37 +1587,24 @@ _send_sync_result_notification() {
     if [ -f "$log_filename" ]; then
       critical_logs=$(grep -Ei "error|failed|too large|timeout|permission denied|connection refused" "$log_filename" | tail -n 5 || echo "无明显错误关键字")
     fi
+    local err_title err_status
+    if [ "$is_partial_failure" -eq 1 ]; then
+      err_title="⚠️ ${task_name} 部分文件同步失败"
+      err_status="部分文件同步失败 (exit=${sync_status})"
+    else
+      err_title="⚠️ ${task_name} 同步失败"
+      err_status="同步失败 (exit=${sync_status})"
+    fi
     local err_msg=""
-    if [ "$is_partial_failure" -eq 1 ]; then
-      err_msg+="⚠️ ${task_name} 部分文件同步失败"$'\n'
-    else
-      err_msg+="⚠️ ${task_name} 同步失败"$'\n'
-    fi
-    err_msg+='━━━━━━━━━━━━━━'$'\n'
-    err_msg+="源端大小：${source_size_human}"$'\n'
-    err_msg+="目标大小：${dest_size_human}"$'\n'
-    if [ "$is_partial_failure" -eq 1 ]; then
-      err_msg+="状态：部分文件同步失败 (exit=${sync_status})"$'\n'
-    else
-      err_msg+="状态：同步失败 (exit=${sync_status})"$'\n'
-    fi
-    err_msg+="${count_info}"$'\n'
-    [ -n "$AUTO_SPLIT_INFO" ] && err_msg+=$'\n'"${AUTO_SPLIT_INFO}"$'\n'
-    err_msg+=$'\n''📁 任务信息'$'\n'
-    err_msg+="• 任务：${task_name}"$'\n'
-    err_msg+="• 源端：${source_path}"$'\n'
-    err_msg+="• 目标：${dest_path}"$'\n'
-    err_msg+=$'\n''🚫 排除规则'$'\n'
-    err_msg+="${exclude_list}"$'\n'
+    _notify_add_header err_msg "$err_title" "$err_status"
+    _notify_add_autosplit err_msg
+    _notify_add_task_and_excludes err_msg
     err_msg+=$'\n''🧾 错误详情'$'\n'
     err_msg+="• 关键日志："$'\n'
     while IFS= read -r line; do
       [ -n "$line" ] && err_msg+="  ${line}"$'\n'
     done <<< "$critical_logs"
-    if [ -n "$diff_files_list" ]; then
-      err_msg+=$'\n'"📋 差异文件列表："$'\n'
-      err_msg+="$diff_files_list"
-    fi
+    _notify_add_diff_list err_msg 1
     send_telegram_message "$err_msg"
     # 发送完整日志文件
     local err_log_size
@@ -1680,54 +1624,16 @@ _send_sync_result_notification() {
       SYNC_FAILED=1
       SYNC_PARTIAL=1
     fi
-    local ok_message
+    local ok_message=""
     if [ "$is_partial_success" -eq 1 ]; then
       # 同步"成功"但目标文件数少于源端，视为部分失败
-      ok_message=""
-      ok_message+="⚠️ ${task_name} 部分文件同步失败"$'\n'
-      ok_message+='━━━━━━━━━━━━━━'$'\n'
-      ok_message+="源端大小：${source_size_human}"$'\n'
-      ok_message+="目标大小：${dest_size_human}"$'\n'
-      ok_message+="状态：部分文件同步失败 (exit=0，文件数不一致)"$'\n'
-      ok_message+="${count_info}"$'\n'
-      ok_message+=$'\n''📁 任务信息'$'\n'
-      ok_message+="• 任务：${task_name}"$'\n'
-      ok_message+="• 源端：${source_path}"$'\n'
-      ok_message+="• 目标：${dest_path}"$'\n'
-      ok_message+=$'\n''🚫 排除规则'$'\n'
-      ok_message+="${exclude_list}"$'\n'
-      if [ -n "$diff_files_list" ]; then
-        ok_message+=$'\n''📋 差异文件列表：'$'\n'
-        ok_message+="$diff_files_list"
-      fi
-    elif [ -n "$diff_files_list" ]; then
-      printf -v ok_message '%s\n%s\n%s\n%s\n%s\n\n%s\n%s\n%s\n%s\n\n%s\n%s\n\n%s\n%s' \
-        "✅ ${task_name} 同步完成" \
-        '━━━━━━━━━━━━━━' \
-        "源端大小：${source_size_human}" \
-        "目标大小：${dest_size_human}" \
-        "$count_info" \
-        '📁 任务信息' \
-        "• 任务：${task_name}" \
-        "• 源端：${source_path}" \
-        "• 目标：${dest_path}" \
-        '🚫 排除规则' \
-        "$exclude_list" \
-        '📋 差异文件列表' \
-        "$diff_files_list"
+      _notify_add_header ok_message "⚠️ ${task_name} 部分文件同步失败" "部分文件同步失败 (exit=0，文件数不一致)"
+      _notify_add_task_and_excludes ok_message
+      _notify_add_diff_list ok_message 1
     else
-      printf -v ok_message '%s\n%s\n%s\n%s\n%s\n\n%s\n%s\n%s\n%s\n\n%s\n%s' \
-        "✅ ${task_name} 同步完成" \
-        '━━━━━━━━━━━━━━' \
-        "源端大小：${source_size_human}" \
-        "目标大小：${dest_size_human}" \
-        "$count_info" \
-        '📁 任务信息' \
-        "• 任务：${task_name}" \
-        "• 源端：${source_path}" \
-        "• 目标：${dest_path}" \
-        '🚫 排除规则' \
-        "$exclude_list"
+      _notify_add_header ok_message "✅ ${task_name} 同步完成"
+      _notify_add_task_and_excludes ok_message 0
+      _notify_add_diff_list ok_message 2 0
     fi
 
     [ -n "$AUTO_SPLIT_INFO" ] && ok_message="${ok_message}"$'\n\n'"${AUTO_SPLIT_INFO}"

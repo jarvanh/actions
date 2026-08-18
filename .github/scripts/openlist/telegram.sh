@@ -37,30 +37,6 @@ _tg_send_get_id() {
   echo "$response" | jq -r '.result.message_id // empty' 2>/dev/null
 }
 
-# 编辑已有 Telegram 消息
-# 用法: _tg_edit_message <message_id> <message> [parse_mode]
-# 返回: "ok" 或 "failed"
-_tg_edit_message() {
-  local message_id="$1"
-  local message="$2"
-  local parse_mode="${3:-HTML}"
-  [ -z "$message_id" ] && echo "failed" && return
-  local edit_resp
-  edit_resp=$(curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/editMessageText" \
-    -d chat_id="${TELEGRAM_CHAT_ID}" \
-    -d message_id="$message_id" \
-    -d parse_mode="$parse_mode" \
-    --data-urlencode text="$message" 2>/dev/null) || true
-  local edit_ok edit_desc
-  edit_ok=$(echo "$edit_resp" | jq -r '.ok // false' 2>/dev/null)
-  edit_desc=$(echo "$edit_resp" | jq -r '.description // ""' 2>/dev/null)
-  if [ "$edit_ok" = "true" ] || [[ "$edit_desc" == *"not modified"* ]]; then
-    echo "ok"
-  else
-    echo "failed"
-  fi
-}
-
 # 删除 Telegram 消息
 # 用法: _tg_delete_message <message_id>
 _tg_delete_message() {
