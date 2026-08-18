@@ -1,0 +1,137 @@
+name: Windows RDP (6h)
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration_hours:
+        description: "运行时长（小时，最大 6）"
+        required: false
+        default: "6"
+
+jobs:
+  windows-rdp:
+    name: Start Windows RDP
+    runs-on: windows-latest
+    timeout-minutes: 360  # 6 小时上限
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Enable RDP (TermService) and configure user
+        shell: pwsh
+        run: |
+          # 启用远程桌面
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          # 允许 NLA 可选关闭（便于从任意客户端连接）
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0
+
+          # 读取可选 secret（未设置则为空）
+          $env:RDP_PASSWORD_SECRET = "${{ secrets.RDP_PASSWORD }}"
+
+          # 密码：若已设置 RDP_PASSWORD secret 则使用，否则随机生成强密码
+          if ($env:RDP_PASSWORD_SECRET) {
+            $pwd = $env:RDP_PASSWORD_SECRET
+            echo "使用已配置的 RDP_PASSWORD"
+          } else {
+            $chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#%^&*"
+            $rand = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+            $pwd = ""
+            for ($i = 0; $i -lt 24; $i++) {
+              $b = New-Object byte[] 1
+              $rand.GetBytes($b)
+              $pwd += $chars[$b[0] % $chars.Length]
+            }
+            echo "随机生成 RDP_PASSWORD"
+          }
+          $Password = ConvertTo-SecureString -AsPlainText -Force $pwd
+
+          # GitHub runner 默认用户为 runneradmin
+          $User = "runneradmin"
+          Set-LocalUser -Name $User -Password $Password
+          # 兜底：若用户不存在则创建
+          if (-not (Get-LocalUser -Name $User -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name $User -Password $Password -AccountNeverExpires -PasswordNeverExpires
+          }
+          Add-LocalGroupMember -Group "Administrators" -Member $User -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $User -ErrorAction SilentlyContinue
+
+          # 获取内网 IP 与用户名
+          $IP = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.InterfaceAlias -notlike "*Loopback*" -and $_.IPAddress -ne "127.0.0.1" } | Select-Object -First 1).IPAddress
+          # 将密码写入 env 供后续步骤使用
+          echo "RDP_USER=$User" >> $env:GITHUB_ENV
+          echo "RDP_LOCAL_IP=$IP" >> $env:GITHUB_ENV
+          echo "RDP_PASSWORD=$pwd" >> $env:GITHUB_ENV
+          echo "Local IP: $IP  User: $User"
+
+      - name: Download and setup Ngrok
+        shell: pwsh
+        run: |
+          # 下载 ngrok
+          $ngrokZip = "$env:RUNNER_TEMP\ngrok.zip"
+          Invoke-WebRequest -Uri "https://bin.equinox.io/c/4VmDzA7iaHb/ngrok-stable-windows-amd64.zip" -OutFile $ngrokZip
+          Expand-Archive -Path $ngrokZip -DestinationPath "$env:RUNNER_TEMP\ngrok" -Force
+          $ngrok = "$env:RUNNER_TEMP\ngrok\ngrok.exe"
+          # 配置 authtoken
+          & $ngrok authtoken "${{ secrets.NGROK_AUTH_TOKEN }}"
+          # 启动 TCP 隧道暴露 3389
+          Start-Process -FilePath $ngrok -ArgumentList "tcp","3389","--log","stdout" -RedirectStandardOutput "$env:RUNNER_TEMP\ngrok.log" -NoNewWindow
+          Start-Sleep -Seconds 8
+          # 从 ngrok API 获取公网转发地址
+          $tries = 0
+          do {
+            try {
+              $api = Invoke-RestMethod -Uri "http://127.0.0.1:4040/api/tunnels" -ErrorAction Stop
+              $tcp = $api.tunnels | Where-Object { $_.proto -eq "tcp" } | Select-Object -First 1
+              if ($tcp) { break }
+            } catch {}
+            Start-Sleep -Seconds 3
+            $tries++
+          } while ($tries -lt 20)
+          if (-not $tcp) {
+            echo "::error::无法获取 ngrok 隧道地址"
+            exit 1
+          }
+          $RDPAddr = $tcp.public_url -replace "^tcp://", ""
+          echo "RDP_PUBLIC=$RDPAddr" >> $env:GITHUB_ENV
+          echo "Public RDP address: $RDPAddr"
+
+      - name: Send connection info via Telegram
+        shell: pwsh
+        run: |
+          $token = "${{ secrets.TELEGRAM_BOT_TOKEN }}"
+          $chat  = "${{ secrets.TELEGRAM_CHAT_ID }}"
+          $msg = @"
+Windows RDP 已就绪 🚀
+主机: ${{ env.RDP_PUBLIC }}
+用户: ${{ env.RDP_USER }}
+密码: ${{ env.RDP_PASSWORD }}
+
+本地 IP (备用): ${{ env.RDP_LOCAL_IP }}:3389
+⏳ 将持续运行约 ${{ github.event.inputs.duration_hours }} 小时
+"@
+          $body = @{ chat_id = $chat; text = $msg; parse_mode = "Markdown" } | ConvertTo-Json
+          Invoke-RestMethod -Uri "https://api.telegram.org/bot$token/sendMessage" -Method Post -ContentType "application/json" -Body $body
+          echo "Telegram 通知已发送"
+
+      - name: Keep alive for ${{ github.event.inputs.duration_hours }} hours
+        shell: pwsh
+        run: |
+          $hours = [math]::Min([int]"${{ github.event.inputs.duration_hours }}", 6)
+          $seconds = $hours * 3600
+          echo "保持运行 $hours 小时 ($seconds 秒) ..."
+          Start-Sleep -Seconds $seconds
+
+          # 结束前 Telegram 提醒（不重发密码，避免日志暴露）
+          $token = "${{ secrets.TELEGRAM_BOT_TOKEN }}"
+          $chat  = "${{ secrets.TELEGRAM_CHAT_ID }}"
+          $msg = @"
+⏹️ Windows RDP 即将关闭
+主机: ${{ env.RDP_PUBLIC }}
+运行时长: $hours 小时
+
+如需继续使用，请重新运行 Workflow。
+"@
+          $body = @{ chat_id = $chat; text = $msg; parse_mode = "Markdown" } | ConvertTo-Json
+          Invoke-RestMethod -Uri "https://api.telegram.org/bot$token/sendMessage" -Method Post -ContentType "application/json" -Body $body
+          echo "运行结束，即将关闭"
