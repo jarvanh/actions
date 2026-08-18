@@ -170,6 +170,9 @@ _progress_render() {
       msg+="⚠️ <b>同步完成（有失败）</b>"$'\n'
     elif [ $((pending + running)) -gt 0 ]; then
       msg+="⛔ <b>同步中断（${pending} 个待处理、${running} 个进行中未执行完）</b>"$'\n'
+    elif [ "$total" -eq 0 ]; then
+      # 一个任务都没注册就到了收尾（注册前被取消/失败），绝非"全部完成"
+      msg+="⛔ <b>同步中断（未注册任何任务）</b>"$'\n'
     else
       msg+="✅ <b>同步全部完成</b>"$'\n'
     fi
@@ -246,7 +249,11 @@ progress_init() {
   rm -f "$PROGRESS_FINALIZED_FILE" 2>/dev/null || true
   date +%s > "$PROGRESS_START_FILE"
 
-  _progress_refresh
+  # 不在此处发送消息: 此刻任务队列为空，只会发出 "总任务：0 | 已用：0s" 的
+  # 空占位消息；若运行在任务注册前被取消（concurrency 抢占/早期失败），
+  # 该消息会冻结为最终状态且每轮 runner 全新、删不掉上一轮的。首条消息
+  # 由注册完成后的 progress_reload（正常/跳预览流程）或 task_begin（调试
+  # 流程）发出，此时任务列表已是全量。
 }
 
 # 标记任务开始（自动注册未注册的任务）
