@@ -34,13 +34,24 @@ jobs:
             $pwd = $env:RDP_PASSWORD_SECRET
             echo "使用已配置的 RDP_PASSWORD"
           } else {
-            $chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#%^&*"
+            # 仅用字母+数字，避免 Windows 密码策略拒绝特殊字符
+            $lower = "abcdefghijklmnopqrstuvwxyz"
+            $upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            $digit = "0123456789"
             $rand = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-            $pwd = ""
-            for ($i = 0; $i -lt 24; $i++) {
+            $pick = {
+              param($set)
               $b = New-Object byte[] 1
               $rand.GetBytes($b)
-              $pwd += $chars[$b[0] % $chars.Length]
+              return $set[$b[0] % $set.Length]
+            }
+            # 保证至少含大小写各一、数字一，满足复杂度要求
+            $pwd = (& $pick $lower) + (& $pick $upper) + (& $pick $digit)
+            for ($i = 3; $i -lt 24; $i++) {
+              $all = $lower + $upper + $digit
+              $b = New-Object byte[] 1
+              $rand.GetBytes($b)
+              $pwd += $all[$b[0] % $all.Length]
             }
             echo "随机生成 RDP_PASSWORD"
           }
