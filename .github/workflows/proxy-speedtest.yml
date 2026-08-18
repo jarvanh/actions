@@ -66,4 +66,7 @@ jobs:
           #                             即可让后续运行「更新」同一 Gist 而非反复新建
           GH_TOKEN: ${{ secrets.PAT }}
           PROXY_SPEEDTEST_GIST_ID: ${{ secrets.PROXY_SPEEDTEST_GIST_ID }}
+          # Telegram 通知：测速完成后推送 TOP 节点（延迟/下载/上传）+ 订阅 Gist 状态
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python .github/scripts/proxy-speedtest/speedtest.py
