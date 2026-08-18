@@ -663,11 +663,11 @@ send_sync_warning() {
   tg_add_path msg "源端" "$source_path"
   tg_add_path msg "目标" "$dest_path"
   tg_add_section msg "📊 大小对比"
-  tg_append msg "• 上次记录：<b>$(format_bytes "$marker_bytes")</b>（${marker_count} 文件）"$'\n'
-  tg_append msg "• 当前大小：<b>$(format_bytes "$MARKER_CURRENT_BYTES")</b>（${MARKER_CURRENT_COUNT} 文件）"$'\n'
-  tg_append msg "• 减少：<b>$(format_bytes "$diff_bytes")</b>（-${pct}%）"$'\n'
+  tg_add_kv msg "上次记录" "$(format_bytes "$marker_bytes") · ${marker_count} 文件"
+  tg_add_kv msg "当前大小" "$(format_bytes "$MARKER_CURRENT_BYTES") · ${MARKER_CURRENT_COUNT} 文件"
+  tg_add_kv msg "减少" "$(format_bytes "$diff_bytes") · ${pct}%"
   if [ "$diff_count" -ne 0 ]; then
-    tg_append msg "• 文件减少：<b>${diff_count}</b> 个"$'\n'
+    tg_add_kv msg "文件减少" "${diff_count} 个"
   fi
 
   if [ -n "$missing_dirs" ]; then
@@ -713,11 +713,11 @@ send_sync_skipped() {
   tg_add_path msg "源端" "$source_path"
   tg_add_path msg "目标" "$dest_path"
   tg_add_section msg "🕒 上次同步"
-  tg_append msg "• 时间：<code>$(escape_html "$MARKER_LAST_SUCCESS")</code>"$'\n'
-  tg_append msg "• 距今：<b>${MARKER_SINCE_HOURS}</b> 小时"$'\n'
-  tg_append msg "• 记录大小：<b>$(format_bytes "$marker_bytes")</b>（${marker_count} 文件）"$'\n'
+  tg_add_kv msg "时间" "$MARKER_LAST_SUCCESS"
+  tg_add_kv msg "距今" "${MARKER_SINCE_HOURS} 小时"
+  tg_add_kv msg "记录大小" "$(format_bytes "$marker_bytes") · ${marker_count} 文件"
   if [ "${fixed_count:-0}" -gt 0 ]; then
-    tg_append msg "• 已修复文件：<b>${fixed_count}</b> 个（<b>$(format_bytes "$fixed_bytes")</b>），以非原名存在于目标端"$'\n'
+    tg_add_kv msg "已修复文件" "${fixed_count} 个 · $(format_bytes "$fixed_bytes")（以非原名存在于目标端）"
     # 修复方式汇总（按 restore.kind 分组统计；TSV 交给 bash 格式化，
     # 字节数走 format_bytes 人类可读单位，summary 缩进为说明行）
     local method_summary
@@ -735,7 +735,7 @@ send_sync_skipped() {
       tg_add_section msg "🔧 修复方式构成"
       while IFS=$'\t' read -r m_kind m_count m_bytes m_summary; do
         [ -z "$m_kind" ] && continue
-        tg_append msg "• <b>$(escape_html "$m_kind")</b> × ${m_count}（$(format_bytes "$m_bytes")）"$'\n'
+        tg_append msg "• <b>$(escape_html "$m_kind")</b> × ${m_count} · <i>$(format_bytes "$m_bytes")</i>"$'\n'
         [ -n "$m_summary" ] && tg_append msg "  $(escape_html "$m_summary")"$'\n'
       done <<< "$method_summary"
     fi

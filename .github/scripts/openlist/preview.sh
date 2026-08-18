@@ -128,7 +128,7 @@ add_preview_pair() {
     [ "$adjusted_count" -lt 0 ] && adjusted_count=0
     local adjusted_bytes=$((sync_bytes - MARKER_FIXED_BYTES))
     [ "$adjusted_bytes" -lt 0 ] && adjusted_bytes=0
-    fixed_note=" (已扣减 ${MARKER_FIXED_COUNT} 个修复文件 / $(format_bytes "$MARKER_FIXED_BYTES"))"
+    fixed_note=" · <i>已扣减 ${MARKER_FIXED_COUNT} 个修复文件 / $(format_bytes "$MARKER_FIXED_BYTES")</i>"
     sync_count=$adjusted_count
     sync_bytes=$adjusted_bytes
   fi

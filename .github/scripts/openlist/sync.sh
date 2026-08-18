@@ -1332,10 +1332,13 @@ sync_with_logging() {
 #   source_size_human / dest_size_human / count_info / task_name /
 #   source_path / dest_path / exclude_list / AUTO_SPLIT_INFO / diff_files_list
 
-# 头部: 标题 + 分隔线 + 源端/目标大小 + 可选状态行 + 文件数信息
+# 头部: 标题 + 分隔线 + 任务/路径 + 大小 + 可选状态行 + 文件数信息
 # 用法: _notify_add_header <var> <标题（含 emoji）> [状态行文本]
 _notify_add_header() {
   tg_add_title "$1" "$2"
+  tg_add_kv "$1" "任务" "$task_name"
+  tg_add_path "$1" "源端" "$source_path"
+  tg_add_path "$1" "目标" "$dest_path"
   tg_add_kv "$1" "源端大小" "$source_size_human"
   tg_add_kv "$1" "目标大小" "$dest_size_human"
   if [ -n "${3:-}" ]; then
@@ -1350,15 +1353,16 @@ _notify_add_autosplit() {
   return 0
 }
 
-# 任务信息 + 排除规则段
-# 用法: _notify_add_task_and_excludes <var>
-_notify_add_task_and_excludes() {
-  tg_add_section "$1" "📁 任务信息"
-  tg_append "$1" "• 任务：<b>$(escape_html "$task_name")</b>"$'\n'
-  tg_append "$1" "• 源端：<code>$(escape_html "$source_path")</code>"$'\n'
-  tg_append "$1" "• 目标：<code>$(escape_html "$dest_path")</code>"$'\n'
+# 排除规则段（仅非空时插入；模式 code 等宽展示）
+# 用法: _notify_add_excludes <var>
+_notify_add_excludes() {
+  [ -z "$exclude_list" ] && return 0
   tg_add_section "$1" "🚫 排除规则"
-  tg_add_block "$1" "$(escape_html "$exclude_list")"
+  local _pattern
+  while IFS= read -r _pattern; do
+    [ -z "$_pattern" ] && continue
+    tg_append "$1" "• <code>$(escape_html "$_pattern")</code>"$'\n'
+  done <<< "$exclude_list"
   return 0
 }
 
@@ -1436,7 +1440,7 @@ _send_sync_result_notification() {
 
   # 提取 --exclude 规则，方便在通知中说明
   local exclude_list=""
-  exclude_list=$(_build_exclude_bullets "${extra_args[@]}")
+  exclude_list=$(_build_exclude_patterns "${extra_args[@]}")
 
   # 构建 fix_summary（已修复文件：目录只展示一次，原名/实际名/大小分行，方法用短标签；
   # HTML 格式，路径 code 等宽，动态内容经 escape_html 转义）
@@ -1536,8 +1540,8 @@ _send_sync_result_notification() {
     fi
     local partial_msg=""
     _notify_add_header partial_msg "⚠️ ${task_name} 部分文件同步失败" "$fail_status_msg"
+    _notify_add_excludes partial_msg
     _notify_add_autosplit partial_msg
-    _notify_add_task_and_excludes partial_msg
     tg_add_section partial_msg "✅ 已通过其他方式同步（${fix_total} 个文件）"
     tg_append partial_msg "${fix_summary}"
     tg_add_section partial_msg "❌ 无法同步文件（${fail_total} 个）"
@@ -1550,8 +1554,8 @@ _send_sync_result_notification() {
     # 所有缺失文件都已通过其他方式同步
     local partial_msg=""
     _notify_add_header partial_msg "⚠️ ${task_name} 部分文件已通过其他方式同步" "${fix_total} 个缺失文件已全部通过替代方式同步"
+    _notify_add_excludes partial_msg
     _notify_add_autosplit partial_msg
-    _notify_add_task_and_excludes partial_msg
     tg_add_section partial_msg "✅ 已通过其他方式同步（${fix_total} 个文件）"
     tg_append partial_msg "${fix_summary}"
     _notify_add_diff_list partial_msg
@@ -1583,8 +1587,8 @@ _send_sync_result_notification() {
     fi
     local err_msg=""
     _notify_add_header err_msg "$err_title" "$err_status"
+    _notify_add_excludes err_msg
     _notify_add_autosplit err_msg
-    _notify_add_task_and_excludes err_msg
     tg_add_section err_msg "🧾 错误详情 · 关键日志"
     if [ -n "$critical_logs" ] && [ "$critical_logs" != "无明显错误关键字" ]; then
       # 日志为原始输出（可能含 <>& 字符），逐行转义后 <pre> 等宽展示
@@ -1621,15 +1625,12 @@ _send_sync_result_notification() {
     if [ "$is_partial_success" -eq 1 ]; then
       # 同步"成功"但目标文件数少于源端，视为部分失败
       _notify_add_header ok_message "⚠️ ${task_name} 部分文件同步失败" "部分文件同步失败（exit=0，文件数不一致）"
-      _notify_add_task_and_excludes ok_message
-      _notify_add_diff_list ok_message
     else
       _notify_add_header ok_message "✅ ${task_name} 同步完成"
-      _notify_add_task_and_excludes ok_message
-      _notify_add_diff_list ok_message
     fi
-
+    _notify_add_excludes ok_message
     _notify_add_autosplit ok_message
+    _notify_add_diff_list ok_message
 
     send_telegram_message "$ok_message"
   fi
