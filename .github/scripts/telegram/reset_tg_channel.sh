@@ -30,13 +30,13 @@ fi
 pip3 install telethon
 
 # 1. 删除 Telegram 频道所有消息
-python3 "${GITHUB_WORKSPACE}/.github/scripts/clean_tg_channel.py" "$CHANNEL_ID"
+python3 "${GITHUB_WORKSPACE}/.github/scripts/telegram/clean_tg_channel.py" "$CHANNEL_ID"
 
 # 2. 删除 uploaded_videos.json，下次运行会重新处理所有视频
 rclone delete "$SOURCE_REMOTE/uploaded_videos.json" 2>/dev/null || true
 echo "已删除 uploaded_videos.json"
 
 # 3. 发送通知（使用共享通知脚本，自动处理 429 限流）
-source "${GITHUB_WORKSPACE}/.github/scripts/tg_notify.sh"
+source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 MSG="🧹 ${WORKFLOW_LABEL} 频道清理完成"$'\n\n'"📁 已清空 Telegram 频道所有视频"$'\n'"📄 已删除 uploaded_videos.json（下次运行重新处理全部视频）"$'\n'"🔗 任务链接: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 send_tg "$MSG"

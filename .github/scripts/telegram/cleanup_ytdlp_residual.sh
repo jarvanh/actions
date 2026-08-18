@@ -45,7 +45,7 @@ find . -type f \( -name '*.mp4-Frag*' -o -name '*.part-Frag*' -o -name '*.ytdl' 
 echo "已清理 ${FRAG_COUNT} 个 yt-dlp 残留文件"
 
 # 发送 Telegram 通知（按 4000 字符分片，避免超过 4096 限制）
-source "${GITHUB_WORKSPACE}/.github/scripts/tg_notify.sh"
+source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 
 DIR_LABEL=$(basename "$TARGET_DIR")
 HEADER="🧹 ph-dl 清理 yt-dlp 残留文件"$'\n'"━━━━━━━━━━━━━━━━━━"$'\n'"📁 目录: ${DIR_LABEL}"$'\n'$'\n'"🗑️ 清理数量: ${FRAG_COUNT}"

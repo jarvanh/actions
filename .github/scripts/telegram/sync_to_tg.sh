@@ -73,7 +73,7 @@ def notify(message):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print(f"[notify] 跳过：缺少 TELEGRAM_BOT_TOKEN 或 TELEGRAM_CHAT_ID，消息: {message}")
         return
-    tg_script = os.path.join(GITHUB_WORKSPACE, ".github", "scripts", "tg_notify.sh")
+    tg_script = os.path.join(GITHUB_WORKSPACE, ".github", "scripts", "telegram", "tg_notify.sh")
     if not os.path.exists(tg_script):
         print(f"[notify] 跳过：通知脚本不存在: {tg_script}")
         return
@@ -411,7 +411,7 @@ def main():
         print(f"✅ 下载完成: {file} (大小 {human_size(file_size)} / {file_size} bytes, 耗时 {dl_elapsed:.2f}s)")
 
         # 预处理 + 上传到 Telegram
-        proc_one = os.path.join(GITHUB_WORKSPACE, ".github", "scripts", "transcode_and_send.sh")
+        proc_one = os.path.join(GITHUB_WORKSPACE, ".github", "scripts", "telegram", "transcode_and_send.sh")
         print(f"🎬 开始处理/上传: {file}")
         up_start = time.time()
         # 透传输出：转码/上传进度实时进 Actions 日志；同时 tee 到日志文件，失败时把尾部附进通知
@@ -552,7 +552,7 @@ FAILED_LIST=$(python3 -c "import json,sys; d=json.load(open('$STATS_FILE')); pri
 SKIPPED_DETAILS=$(python3 -c "import json,sys; d=json.load(open('$STATS_FILE')); print(d.get('skipped_details',''))" 2>/dev/null || echo "")
 
 # 发送通知
-source "${GITHUB_WORKSPACE}/.github/scripts/tg_notify.sh"
+source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 
 SUMMARY_LINE="视频文件 ${TOTAL_VIDEOS} 条，已上传 ${UPLOADED_TOTAL} 条，待上传 ${REMAINING} 条，失败上传 ${FAILED} 条"
 HEADER="📺 ${CAPTION_PREFIX}"$'\n'"${SUMMARY_LINE}"$'\n'"📊 本次处理: ${PENDING_COUNT}"$'\n'"✅ 成功: ${SENT}"$'\n'"❌ 失败: ${FAILED}"
