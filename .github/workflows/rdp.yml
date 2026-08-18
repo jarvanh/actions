@@ -1,30 +1,78 @@
 name: RDP
 
 on:
-  # schedule:
-    # - cron: '30 16 * * *'
   workflow_dispatch:
-  watch:
-    # types: started
+  # schedule:
+  #   - cron: '30 16 * * *'
+  # watch:
+  #   types: started
 
 jobs:
-  build:
-
+  rdp:
     runs-on: windows-latest
+    # GitHub 托管 runner 单任务上限 360 分钟（6 小时）
+    timeout-minutes: 360
+    # 防止并发运行（ngrok 免费版只允许 1 条在线隧道）
+    concurrency:
+      group: rdp-singleton
+      cancel-in-progress: true
 
     steps:
-    - name: Download
+    - name: Download ngrok
       run: Invoke-WebRequest https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip -OutFile ngrok.zip
-    - name: Extract
+
+    - name: Extract ngrok
       run: Expand-Archive ngrok.zip
-    - name: Auth
+
+    - name: Auth ngrok
       run: .\ngrok\ngrok.exe authtoken $Env:NGROK_AUTH_TOKEN
       env:
         NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
-    - name: Enable TS
-      run: Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server'-name "fDenyTSConnections" -Value 0
-    - run: Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-    - run: Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -Value 1
-    - run: Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString -AsPlainText "P@ssw0rd!" -Force)
-    - name: Create Tunnel
-      run: .\ngrok\ngrok.exe tcp --region in 3389
+
+    - name: Enable RDP
+      run: |
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1
+
+    - name: Set password
+      run: Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString -AsPlainText $Env:RDP_PASSWORD -Force)
+      env:
+        RDP_PASSWORD: "P@ssw0rd!"
+
+    - name: Create Tunnel (background)
+      run: Start-Process -FilePath ".\ngrok\ngrok.exe" -ArgumentList "tcp 3389 --region in --log ngrok.log" -WindowStyle Hidden
+
+    - name: Send RDP info to Telegram
+      env:
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        RDP_PASSWORD: "P@ssw0rd!"
+      run: |
+        $public = $null
+        # 轮询 ngrok 本地 API（最多 150 秒）拿公网隧道地址
+        for ($i = 0; $i -lt 30; $i++) {
+          try {
+            $tunnels = Invoke-RestMethod -Uri "http://127.0.0.1:4040/api/tunnels" -TimeoutSec 5
+            $public = ($tunnels.tunnels | Where-Object { $_.proto -eq "tcp" }).public_url
+            if ($public) { break }
+          } catch { Start-Sleep -Seconds 5 }
+        }
+        if (-not $public) {
+          Get-Content .\ngrok.log -ErrorAction SilentlyContinue
+          throw "无法获取 ngrok 隧道地址，请查看上方 ngrok.log"
+        }
+        $address = $public -replace "tcp://", ""
+        $msg = @"
+        Windows RDP 已就绪
+        地址: $address
+        用户名: runneradmin
+        密码: $Env:RDP_PASSWORD
+        本次有效期约 6 小时（超时自动关机）
+        连接方式: Microsoft Remote Desktop / 任何 RDP 客户端，地址填上面这一行
+        "@
+        Invoke-RestMethod -Uri "https://api.telegram.org/bot$Env:TELEGRAM_BOT_TOKEN/sendMessage" `
+          -Method Post -Body @{ chat_id = $Env:TELEGRAM_CHAT_ID; text = $msg }
+
+    - name: Keep alive (6h)
+      run: Start-Sleep -Seconds 21000
