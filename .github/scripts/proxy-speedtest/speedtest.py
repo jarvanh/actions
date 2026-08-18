@@ -43,6 +43,8 @@ from speedtest_gitee import (
     ensure_gitee_remote,
     ensure_test_file,
     git_force_push_testfile,
+    send_telegram,
+    format_duration,
     TEST_FILE_NAME,
     # 订阅导出 + Gist 上传（复刻 speedtest_gitee 的订阅发布能力）
     build_source_mapping,
@@ -884,32 +886,108 @@ def main():
                 'upload_mibs': ul if isinstance(ul, (int, float)) else 0,
             })
         yaml_text = build_subscription_yaml_text(gist_results, DEFAULT_MIN_MEGABIT)
+        gist_res = None
+        qualified_count = 0
         if (yaml_text or '').strip():
             gist_res = update_gist(env, yaml_text)
-            raw_url = gist_res.get('raw_url') or ''
-            html_url = gist_res.get('html_url') or ''
-            # 隐私防护：gist 链接/ID 属于凭据级敏感信息（secret gist 可凭 URL 直接访问），
-            # 不打印到 Actions 日志；链接仅写入本地报告文件与 Gist 本身。
-            action = '新建' if gist_res.get('reason') == 'created' else '更新'
+            action = '新建' if gist_res.get('created') else '更新'
             print('\n================ 订阅已上传 Gist（%s）================' % action)
-            print('订阅链接已写入测速报告（subscription_gist 字段），为防隐私泄漏不在日志中输出')
+            print('订阅链接已写入本地报告与 Telegram 通知，为防隐私泄漏不在日志中输出')
             print('========================================================\n')
             log_progress('gist_uploaded', ok=gist_res.get('ok'), action=action,
                          reason=gist_res.get('reason', ''))
-            # 把订阅链接写入报告 meta，供 HTML 报告展示
-            report_data.setdefault('meta', {})['subscription_gist'] = {
-                'raw_url': raw_url, 'html_url': html_url, 'id': gist_res.get('id'),
-                'action': action,
+            # 订阅信息记录进本地报告 JSON（原代码引用了未定义的 report_data，已修复）
+            summary['subscription_gist'] = {
+                'id': gist_res.get('id'), 'html_url': gist_res.get('html_url'),
+                'raw_url': (gist_res.get('yaml') or {}).get('raw_url', ''),
+                'action': action, 'min_megabit': DEFAULT_MIN_MEGABIT,
             }
+            try:
+                RESULT_JSON.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding='utf-8')
+            except Exception:
+                pass
         else:
             log_progress('gist_skipped', reason='empty subscription (no node met min speed)')
+        # 达标节点数（与订阅导出同一阈值）
+        sort_mode = 'push-only' if CONFIG['PROXY_SPEEDTEST_ENABLE_PUSH'] else 'download'
+        qualified_count = sum(
+            1 for g in gist_results
+            if get_item_megabits(g, sort_mode) >= DEFAULT_MIN_MEGABIT and (g.get('source_entry') or {}).get('proxy')
+        )
     except Exception as e:
-        # gist 上传失败不应中断主流程（报告已生成并 commit）
+        # gist 上传失败不应中断主流程（报告已生成）
         log_progress('gist_upload_failed', error=str(e))
+    try:
+        send_telegram(env, '\n'.join(build_telegram_lines(
+            results, meta=meta, gist_res=gist_res, qualified_count=qualified_count)))
+    except Exception as e:
+        log_progress('telegram_send_failed', error=str(e))
 
     log_progress('speedtest_done', node_count=len(results),
                  json_path=str(RESULT_JSON), html_path=str(RESULT_HTML))
     return 0
+
+
+def _fmt_mbps(mibps):
+    """MiB/s 转 Mbps（兆）显示，None 显示 '-'。"""
+    if isinstance(mibps, (int, float)) and mibps > 0:
+        return f'{mibps * 8:.0f}兆'
+    return '-'
+
+
+def build_telegram_lines(results, *, meta, gist_res, qualified_count):
+    """生成人性化 Telegram 通知：测速概览 + TOP 节点（延迟/下载/上传）+ 订阅状态。"""
+    push_enabled = bool(meta.get('push'))
+    sort_key = (lambda r: (r.get('upload') or {}).get('mibps') or 0) if push_enabled \
+        else (lambda r: (r.get('download') or {}).get('mibps') or 0)
+    ok_results = [r for r in results if r.get('ok')]
+    top_results = sorted(ok_results, key=sort_key, reverse=True)
+
+    started = str(meta.get('started_at', ''))[:19].replace('T', ' ')
+    ended = str(meta.get('ended_at', ''))[:19].replace('T', ' ')
+    try:
+        duration_text = format_duration(
+            (datetime.fromisoformat(meta['ended_at']) - datetime.fromisoformat(meta['started_at'])).total_seconds())
+    except Exception:
+        duration_text = '-'
+
+    lines = [
+        '节点测速完成',
+        '',
+        f'🕒 {started} ~ {ended}（耗时 {duration_text}）',
+        f'📊 节点: 共 {len(results)} 个，可用 {len(ok_results)} 个',
+        '',
+    ]
+    if top_results:
+        best = top_results[0]
+        lines.append(f"🏆 最快节点: {best.get('name', '')}")
+        lines.append('')
+        lines.append('🥇 TOP 5（⏳延迟 ⬇️下载 ⬆️上传）:')
+        for idx, r in enumerate(top_results[:5], 1):
+            lat = (r.get('latency') or {}).get('median_ms')
+            lat_text = f'{lat:.0f}ms' if isinstance(lat, (int, float)) else '-'
+            dl = (r.get('download') or {}).get('mibps')
+            ul = (r.get('upload') or {}).get('mibps')
+            ul_text = _fmt_mbps(ul) if push_enabled else '未测'
+            lines.append(f"{idx}. {r.get('name', '')}")
+            lines.append(f"   └─ ⏳ {lat_text}  ⬇️ {_fmt_mbps(dl)}  ⬆️ {ul_text}")
+        lines.append('')
+    else:
+        lines.append('⚠️ 没有节点测速成功')
+        lines.append('')
+
+    lines.append('📦 订阅（Gist）:')
+    if gist_res and gist_res.get('ok'):
+        action = '新建' if gist_res.get('created') else '更新'
+        html_url = gist_res.get('html_url') or ''
+        lines.append(f'   └─ ✅ 已{action}，达标 {qualified_count} 个节点（≥{DEFAULT_MIN_MEGABIT}兆）')
+        if html_url:
+            lines.append(f'   └─ 🔗 {html_url}')
+    elif gist_res:
+        lines.append(f"   └─ ⚠️ 上传失败: {gist_res.get('reason', '')}")
+    else:
+        lines.append(f'   └─ ⚠️ 无达标节点（阈值 ≥{DEFAULT_MIN_MEGABIT}兆），未更新订阅')
+    return lines
 
 
 def write_termination(started_at, reason):
@@ -931,6 +1009,10 @@ def write_termination(started_at, reason):
     except Exception:
         pass
     log_progress('speedtest_terminated', reason=reason)
+    try:
+        send_telegram(merged_env(), f'节点测速异常终止\n\n⚠️ {reason}')
+    except Exception:
+        pass
 
 
 if __name__ == '__main__':
