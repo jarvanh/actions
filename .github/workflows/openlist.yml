@@ -85,33 +85,7 @@ jobs:
           EOF
 
           # 在 rclone 命令可能打印配置详情前，掩码配置中的嵌套密钥
-          python3 << 'PY'
-          import json
-          import re
-          from pathlib import Path
-
-          text = Path.home().joinpath(".config/rclone/rclone.conf").read_text()
-          secrets = set()
-
-          for match in re.finditer(r'(?im)^\s*(?:client_secret|pass|password)\s*=\s*(.+?)\s*$', text):
-              secrets.add(match.group(1).strip())
-
-          for match in re.finditer(r'(?im)^\s*token\s*=\s*(\{.*\})\s*$', text):
-              try:
-                  token = json.loads(match.group(1))
-              except Exception:
-                  continue
-              for key in ("access_token", "refresh_token", "id_token"):
-                  value = token.get(key)
-                  if value:
-                      secrets.add(str(value))
-
-          for value in sorted(secrets, key=len, reverse=True):
-              if value:
-                  print(f"::add-mask::{value}")
-          PY
-
-
+          python3 "$GITHUB_WORKSPACE/.github/scripts/openlist/mask_rclone_config.py"
       - name: 验证远端连通并挂载 Dropbox
         run: |
           echo "==========onedrive==========="
@@ -128,12 +102,9 @@ jobs:
       - name: 拉起 OpenList 容器（数据库本地化）
         run: |
           sudo docker rm -f openlist 2>/dev/null || true
-          # ===== 数据库本地化 =====
-          # SQLite 不能跑在 rclone FUSE 挂载上（无 POSIX 锁/fsync、runner 销毁无
-          # clean unmount、-wal 与主库异步上传会造成撕裂快照）→ 配置每次重启丢失。
-          # 改为: 启动拉取到 runner 本地 /opt/openlist-data，容器挂本地目录，
-          # 会话期间周期热备 + 结束时整目录 sync 回传（见末尾两个 step）。
-          # 拉取排除 -wal/-shm/-journal: 撕裂快照的源头，宁可不带也不能带错
+          # 数据库本地化: SQLite 不能直接运行在 rclone FUSE 上，
+          # 因此启动时先拉取数据库至本地并排除了会导致撕裂快照的文件，
+          # 随后的周期热备及会话结束都会回传同步此数据库。
           sudo mkdir -p /opt/openlist-data
           sudo chmod 0777 /opt/openlist-data
           rclone copy dropbox:self-hosted/openlist/data /opt/openlist-data \
@@ -147,17 +118,15 @@ jobs:
           echo "db 拉取指纹: $OPENLIST_DB_MD5_PULL"
           sudo docker run -d --restart=unless-stopped -v /opt/openlist-data:/opt/openlist/data -p 5244:5244 -e PUID=0 -e PGID=0 -e UMASK=022 --name="openlist" openlistteam/openlist:latest
 
-      - name: 等待 OpenList 就绪
-        run: |
-          # 等待容器完成初始化（数据库挂载、驱动加载）
-          sleep 60
-
       - name: 校验 OpenList 容器运行状态
         run: |
-          if docker ps --filter name=openlist --filter status=running | grep -q openlist; then
-            echo "OpenList 容器运行正常"
+          # 依赖 utils.sh 中的函数检查 OpenList 就绪状态
+          source "$GITHUB_WORKSPACE/.github/scripts/openlist/utils.sh"
+          echo "等待 OpenList 就绪..."
+          if wait_openlist_ready; then
+            echo "✅ OpenList 容器及 HTTP 服务正常就绪"
           else
-            echo "❌ OpenList 容器未在运行状态"
+            echo "❌ OpenList 容器未能就绪"
             exit 1
           fi
 
@@ -261,11 +230,11 @@ jobs:
         run: |
           source /tmp/load_all.sh
 
-          # ===== 等待 OpenList 就绪（与正式流程相同的探测策略）=====
+          # ===== 等待 OpenList 就绪 =====
           echo "等待 OpenList 就绪..."
           wait_openlist_ready || true
 
-          # ===== 初始化（与 Initialize sync 对齐的最小集）=====
+          # ===== 初始化 =====
           init_sync_state
 
           # 单次修复数量上限（快速验证用）
@@ -305,7 +274,7 @@ jobs:
         run: |
           source /tmp/load_all.sh
 
-          # 等待 OpenList 就绪（容器刚启动时 401/429 会导致预览 0 B/0 文件、同步无谓重传）
+          # 等待 OpenList 就绪（容器刚启动时如果尚未就绪会导致预览为空及无谓的同步重传）
           echo "等待 OpenList 就绪..."
           wait_openlist_ready || true
 

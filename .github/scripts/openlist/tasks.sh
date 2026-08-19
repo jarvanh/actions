@@ -8,7 +8,11 @@
 #
 # 依赖: sync.sh, split.sh, marker.sh, preview.sh, progress.sh
 # 依赖环境变量:
+# 依赖环境变量:
 #   RCLONE_SYNC_TASK_FLAGS — sync_task 特有 rclone 参数（在 flags.sh 中定义）
+
+# 常量定义
+readonly DEFAULT_SPLIT_THRESHOLD_BYTES=50000000000 # 50GB 自动拆分阈值
 
 # ===== 同步任务清单（单点定义，增减任务只需在此添加/删除一行）=====
 # 格式: "id|源端|目标端|任务名|附加参数"
@@ -252,8 +256,8 @@ _sync_task_impl() {
     return "$_rc"
   fi
 
-  # 50GB 阈值（带默认值，防止跨 step 环境变量丢失时为空）
-  local threshold="${SYNC_SPLIT_THRESHOLD_BYTES:-50000000000}"
+  # 根据阈值（默认 50GB）判断是否拆分，防止环境变量丢失
+  local threshold="${SYNC_SPLIT_THRESHOLD_BYTES:-$DEFAULT_SPLIT_THRESHOLD_BYTES}"
 
   # 检查源端大小
   local source_size_bytes=0
@@ -582,7 +586,7 @@ sync_by_file_batches() {
     esac
   fi
 
-  local threshold="${SYNC_SPLIT_THRESHOLD_BYTES:-50000000000}"  # 50GB
+  local threshold="${SYNC_SPLIT_THRESHOLD_BYTES:-$DEFAULT_SPLIT_THRESHOLD_BYTES}"
   local batch_dir="/tmp/file_batches_${task_name}"
   mkdir -p "$batch_dir"
 

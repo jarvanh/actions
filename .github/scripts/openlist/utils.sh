@@ -117,20 +117,12 @@ get_transferred_bytes_from_log() {
 
 # 格式化字节数为人类可读字符串（如 "1.234 GiB"）
 format_bytes() {
-  local bytes="$1"
-  if [ "$bytes" -ge 1125899906842624 ]; then
-    awk "BEGIN {printf \"%.3f PiB\", $bytes / 1125899906842624}"
-  elif [ "$bytes" -ge 1099511627776 ]; then
-    awk "BEGIN {printf \"%.3f TiB\", $bytes / 1099511627776}"
-  elif [ "$bytes" -ge 1073741824 ]; then
-    awk "BEGIN {printf \"%.3f GiB\", $bytes / 1073741824}"
-  elif [ "$bytes" -ge 1048576 ]; then
-    awk "BEGIN {printf \"%.3f MiB\", $bytes / 1048576}"
-  elif [ "$bytes" -ge 1024 ]; then
-    awk "BEGIN {printf \"%.3f KiB\", $bytes / 1024}"
-  else
-    echo "${bytes} B"
-  fi
+  awk -v b="$1" 'BEGIN {
+    split("B KiB MiB GiB TiB PiB", u)
+    for(i=1; b>=1024 && i<6; i++) b/=1024
+    if(i==1) printf "%d %s\n", b, u[i]
+    else printf "%.3f %s\n", b, u[i]
+  }'
 }
 
 # IEC 格式字节数（等价 numfmt --to=iec-i --suffix=B，失败回退 "${bytes}B"）

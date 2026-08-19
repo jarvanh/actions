@@ -947,14 +947,14 @@ _sync_persist_verify_and_retry() {
         local persist_idx=$PERSIST_IDX
         echo "  持久化验证汇总: 复核 ${persist_idx}/${verify_total} / 通过 ${persist_ok} / 失败 ${persist_fail}" | tee -a "$LOG_FILENAME"
         if [ "$persist_fail" -gt 0 ] && [ "$persist_ok" -eq 0 ]; then
-          echo "  🔴 结论：所有复核的修复文件在容器重启后均消失 → OpenList PUT 返回成功但 wopan176 后端未真正持久化（写入内存缓存后未刷盘/未提交）" | tee -a "$LOG_FILENAME"
+          echo "  [持久化失败] 容器重启后复核未通过，全量修复文件已丢失（PUT 成功但后端未刷盘）。" | tee -a "$LOG_FILENAME"
           # 标记为持久化失败（影响通知但不阻止后续 task）
           SYNC_PERSIST_FAIL=1
         elif [ "$persist_fail" -gt 0 ]; then
-          echo "  🟡 结论：部分修复文件在容器重启后消失 → 存在间歇性持久化失败" | tee -a "$LOG_FILENAME"
+          echo "  [持久化异常] 容器重启后复核部分未通过，存在间歇性持久化失败。" | tee -a "$LOG_FILENAME"
           SYNC_PERSIST_FAIL=1
         else
-          echo "  🟢 结论：全部复核的修复文件均已被后端持久化（重启后仍然存在）" | tee -a "$LOG_FILENAME"
+          echo "  [持久化成功] 全部复核的修复文件均已被后端持久化（重启后仍然存在）。" | tee -a "$LOG_FILENAME"
         fi
         # B: 复核拉黑的方法立即落盘 marker（不等任务结束统一保存——
         # run 31917285452 实测拉黑 5 条最终保存 0 条，黑名单在进程内丢失）
@@ -1078,10 +1078,10 @@ _sync_persist_verify_and_retry() {
 
           # 重试总结论
           if [ "$retry_perm_fail" -gt 0 ]; then
-            echo "  🔴 重试结论：${retry_perm_fail} 个文件用尽所有方法仍未持久化（黑名单已记录）" | tee -a "$LOG_FILENAME"
+            echo "  [重试失败] ${retry_perm_fail} 个文件用尽所有方法仍未持久化（黑名单已记录）。" | tee -a "$LOG_FILENAME"
             SYNC_PERSIST_FAIL=1
           else
-            echo "  🟢 重试结论：换方法后全部通过持久化验证，清除持久化失败标记" | tee -a "$LOG_FILENAME"
+            echo "  [重试成功] 换方法后全部通过持久化验证，清除持久化失败标记。" | tee -a "$LOG_FILENAME"
             SYNC_PERSIST_FAIL=0
           fi
           _flush_blacklist_to_marker "$task_name" "$dest_path" "$LOG_FILENAME"
