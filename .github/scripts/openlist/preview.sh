@@ -75,7 +75,7 @@ start_task_preview() {
   PREVIEW_PAIR_COUNT=0
   PREVIEW_TOTAL_SYNC_BYTES=0
   PREVIEW_TOTAL_SYNC_COUNT=0
-  PREVIEW_PAIRS_DETAIL=""
+  PREVIEW_PAIRS_TSV=""
   PREVIEW_FLOW=""
   PREVIEW_CUR_GROUP=""
   echo "=== 预览任务: ${task_name} ==="
@@ -140,17 +140,13 @@ add_preview_pair() {
   local exclude_summary
   exclude_summary=$(_extract_exclude_summary "${extra_args[@]}")
 
-  # 同步对详情（HTML：路径 code 等宽、预估量加粗；
-  # 组与组之间空一行分隔，首组前不加空行——tg_add_section 已带段前空行）
-  [ -n "$PREVIEW_PAIRS_DETAIL" ] && PREVIEW_PAIRS_DETAIL+=$'\n'
-  PREVIEW_PAIRS_DETAIL+="${PREVIEW_PAIR_COUNT}. <code>$(escape_html "$source_path")</code>"$'\n'
-  PREVIEW_PAIRS_DETAIL+="   → <code>$(escape_html "$dest_path")</code>"$'\n'
-  if [ -n "$exclude_summary" ]; then
-    PREVIEW_PAIRS_DETAIL+="   • 排除：<code>$(escape_html "$exclude_summary")</code>"$'\n'
-  fi
-  PREVIEW_PAIRS_DETAIL+="   • 源端：$(format_bytes "$src_bytes") / ${src_count} 文件"$'\n'
-  PREVIEW_PAIRS_DETAIL+="   • 目标：$(format_bytes "$dst_bytes") / ${dst_count} 文件"$'\n'
-  PREVIEW_PAIRS_DETAIL+="   • 预估待同步：<b>+$(format_bytes "$sync_bytes") / +${sync_count} 文件</b>${fixed_note}"$'\n'
+  # 同步对数据缓冲（TSV），flush_task_preview 时按源端（+exclude）分组
+  # 渲染为 📁 组头 + ├─/└─ 树形条目（与进度通知的任务列表同风格）
+  # 空字段写 "-" 占位: tab 是 IFS 空白类字符，read 会吞掉空列导致字段错位
+  # （同 progress.sh 的任务队列 TSV 约定）
+  local _excl_ph="${exclude_summary:--}"
+  local _fnote_ph="${fixed_note:--}"
+  PREVIEW_PAIRS_TSV+="${source_path}"$'\t'"${_excl_ph}"$'\t'"${src_bytes}"$'\t'"${src_count}"$'\t'"${dest_path}"$'\t'"${dst_bytes}"$'\t'"${dst_count}"$'\t'"${sync_bytes}"$'\t'"${sync_count}"$'\t'"${_fnote_ph}"$'\n'
 
   # 流量图分组（按 source + excludes 组合分组，相同分组的 dest 共享一个源端节点）
   local group_key="${source_path}|${exclude_summary}"
@@ -175,13 +171,48 @@ add_preview_pair() {
   PREVIEW_FLOW+="         [+$(format_bytes "$sync_bytes") / +${sync_count} 文件]"$'\n'
 }
 
+# 同步对详情渲染: 按源端（+exclude）分组，与进度通知任务列表同风格
+#   📁 <code>src</code>（排除 <code>pat</code>） · <i>源端 X / N 文件</i>
+#     ├─ <code>dst</code> · <i>目标 Y / M 文件</i> · <b>+Z / +K 文件</b>
+#   组间空一行分隔（首组前不加空行——tg_add_section 已带段前空行）
+# 输入: PREVIEW_PAIRS_TSV（每行 src/excl/sbytes/scount/dst/dbytes/dcount/ybytes/ycount/fnote）
+_preview_render_pairs_detail() {
+  declare -A _g_entries=() _g_header=()
+  local -a _g_order=()
+  while IFS=$'\t' read -r _src _excl _sbytes _scount _dst _dbytes _dcount _ybytes _ycount _fnote; do
+    [ -z "$_src" ] && continue
+    # 还原 "-" 占位为空
+    [ "$_excl" = "-" ] && _excl=""
+    [ "$_fnote" = "-" ] && _fnote=""
+    local _key="${_src}|${_excl}"
+    if [ -z "${_g_entries[$_key]+x}" ]; then
+      _g_entries[$_key]=""
+      _g_order+=("$_key")
+      local _hdr="📁 <code>$(escape_html "$_src")</code>"
+      [ -n "$_excl" ] && _hdr+="（排除 <code>$(escape_html "$_excl")</code>）"
+      _hdr+=" · <i>源端 $(format_bytes "$_sbytes") / ${_scount} 文件</i>"
+      _g_header[$_key]="$_hdr"
+    fi
+    # 目标端 openlist: 前缀冗余（与进度通知一致），统一裁剪
+    local _dst_clean="${_dst#openlist:}"
+    _g_entries[$_key]+="<code>$(escape_html "$_dst_clean")</code> · <i>目标 $(format_bytes "$_dbytes") / ${_dcount} 文件</i> · <b>+$(format_bytes "$_ybytes") / +${_ycount} 文件</b>${_fnote}"$'\n'
+  done <<< "$PREVIEW_PAIRS_TSV"
+  local _out="" _key _gi=0
+  for _key in "${_g_order[@]}"; do
+    [ "$_gi" -gt 0 ] && _out+=$'\n'
+    _out+="${_g_header[$_key]}"$'\n'"$(tree_lines "${_g_entries[$_key]}")"$'\n'
+    _gi=$((_gi + 1))
+  done
+  printf '%s' "$_out"
+}
+
 # 发送任务预览通知到 Telegram
 # 用法: flush_task_preview
 flush_task_preview() {
   local msg=""
   tg_add_title msg "📋 任务预览 · ${PREVIEW_TASK_NAME}"
-  tg_add_section msg "📊 同步对（${PREVIEW_PAIR_COUNT} 组）"
-  tg_append msg "${PREVIEW_PAIRS_DETAIL}"
+  tg_add_section msg "📊 同步对（${PREVIEW_PAIR_COUNT} 对）"
+  tg_append msg "$(_preview_render_pairs_detail)"
   tg_add_section msg "🔀 文件同步流量图"
   # 流量图用 <pre> 等宽渲染，保证 │/├──► 树形对齐（内容构建时已逐行转义）
   tg_add_block msg "<pre>${PREVIEW_FLOW%$'\n'}</pre>"

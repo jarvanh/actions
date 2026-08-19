@@ -134,11 +134,11 @@ _preview_register() {
 #   subdirs（排序后的子目录列表）/ subdir_size_map / subdir_status_map /
 #   total_subdirs_count / source_size_bytes
 # 输出格式（状态由 emoji 表达，不重复文字说明，紧凑单行）:
-#   ▸ 源端 28 GiB
+#   📁 源端 28 GiB
 #   ├─ ✅ a · 4 GiB
 #   └─ 🔄 b · 17 GiB
 _render_subdir_phase_tree() {
-  local _tree="▸ 源端 $(format_bytes "$source_size_bytes")"
+  local _tree="📁 源端 $(format_bytes "$source_size_bytes")"
   local _name _mark _conn _i=0
   while IFS= read -r _name; do
     [ -z "$_name" ] && continue
@@ -390,12 +390,12 @@ _sync_task_impl() {
     if [ "$SYNC_SKIPPED" = "1" ]; then
       skipped_subtasks=$((skipped_subtasks + 1))
       subdir_status_map["$subdir"]="skipped"
-      skipped_list+="• <code>$(escape_html "$subdir")</code> · <i>$(format_bytes "${subdir_size_map[$subdir]:-0}")</i>"$'\n'
+      skipped_list+="<code>$(escape_html "$subdir")</code> · <i>$(format_bytes "${subdir_size_map[$subdir]:-0}")</i>"$'\n'
     elif [ "$SYNC_FAILED" = "0" ]; then
       synced_subtasks=$((synced_subtasks + 1))
       subdir_status_map["$subdir"]="synced"
       total_transferred=$((total_transferred + SYNC_TRANSFERRED_BYTES))
-      synced_list+="• <code>$(escape_html "$subdir")</code> · <i>$(format_bytes "${subdir_size_map[$subdir]:-0}")</i>"$'\n'
+      synced_list+="<code>$(escape_html "$subdir")</code> · <i>$(format_bytes "${subdir_size_map[$subdir]:-0}")</i>"$'\n'
     else
       failed_subtasks=$((failed_subtasks + 1))
       if [ "${SYNC_PARTIAL:-0}" = "1" ]; then
@@ -406,7 +406,7 @@ _sync_task_impl() {
         subdir_status_map["$subdir"]="failed"
       fi
       total_transferred=$((total_transferred + SYNC_TRANSFERRED_BYTES))
-      failed_list+="• <code>$(escape_html "$subdir")</code> · <i>$(format_bytes "${subdir_size_map[$subdir]:-0}")</i>$([ "${subdir_status_map[$subdir]}" = partial ] && echo ' · <b>部分失败</b>')"$'\n'
+      failed_list+="<code>$(escape_html "$subdir")</code> · <i>$(format_bytes "${subdir_size_map[$subdir]:-0}")</i>$([ "${subdir_status_map[$subdir]}" = partial ] && echo ' · <b>部分失败</b>')"$'\n'
     fi
     PROGRESS_PHASE_INFO="$(_render_subdir_phase_tree)"
     local _completed_after=$((synced_subtasks + skipped_subtasks + failed_subtasks))
@@ -422,13 +422,13 @@ _sync_task_impl() {
   _counts+=" · ⏭️ <b>${skipped_subtasks}</b>"
   AUTO_SPLIT_INFO+="${_counts}"
   if [ -n "$synced_list" ]; then
-    AUTO_SPLIT_INFO+=$'\n\n'"<b>✅ 已同步的子目录</b>"$'\n'"${synced_list%$'\n'}"
+    AUTO_SPLIT_INFO+=$'\n\n'"<b>✅ 已同步的子目录</b>"$'\n'"$(tree_lines "$synced_list")"
   fi
   if [ -n "$failed_list" ]; then
-    AUTO_SPLIT_INFO+=$'\n\n'"<b>❌ 未同步的子目录</b>"$'\n'"${failed_list%$'\n'}"
+    AUTO_SPLIT_INFO+=$'\n\n'"<b>❌ 未同步的子目录</b>"$'\n'"$(tree_lines "$failed_list")"
   fi
   if [ -n "$skipped_list" ]; then
-    AUTO_SPLIT_INFO+=$'\n\n'"<b>⏭️ 已跳过的子目录（无文件变动）</b>"$'\n'"${skipped_list%$'\n'}"
+    AUTO_SPLIT_INFO+=$'\n\n'"<b>⏭️ 已跳过的子目录（无文件变动）</b>"$'\n'"$(tree_lines "$skipped_list")"
   fi
 
   # 最终完整同步（仅在顶层执行，正常通知）
@@ -699,7 +699,7 @@ sync_by_file_batches() {
         done
       else
         failed_batches=$((failed_batches + 1))
-        failed_batch_list+="• 批次 $((i+1))/${total_batches} · <i>${batch_file_count} 文件</i> · exit=${rc}"$'\n'
+        failed_batch_list+="批次 $((i+1))/${total_batches} · <i>${batch_file_count} 文件</i> · exit=${rc}"$'\n'
         echo "批次 $((i+1)) 失败 (exit=${rc})"
       fi
       progress_update_force "批次 ${batch_idx}/${total_batches} 完成" "▸ 📊 批次：${batch_idx}/${total_batches} | ✅${synced_batches} ❌${failed_batches}"
@@ -718,7 +718,7 @@ sync_by_file_batches() {
   AUTO_SPLIT_INFO+="总批次：<b>${total_batches}</b> · 文件数：<b>${batch_total_files}</b>"$'\n'
   AUTO_SPLIT_INFO+="✅ <b>${synced_batches}</b> · ❌ <b>${failed_batches}</b>"
   if [ -n "$failed_batch_list" ]; then
-    AUTO_SPLIT_INFO+=$'\n\n'"<b>❌ 失败的批次</b>"$'\n'"${failed_batch_list%$'\n'}"
+    AUTO_SPLIT_INFO+=$'\n\n'"<b>❌ 失败的批次</b>"$'\n'"$(tree_lines "$failed_batch_list")"
   fi
 
   # 最终用 sync_with_logging 做完整同步检查（处理缺失文件修复、通知等）

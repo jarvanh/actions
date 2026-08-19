@@ -18,6 +18,37 @@ escape_html() {
   echo "$s"
 }
 
+# ===== 树形列表渲染（Telegram 通知统一风格）=====
+# 多条目分组列表统一树形层级（├─/└─ 连接符标记条目边界，组间空行分隔，
+# 路径/目录类组头加 📁 前缀），模板规则见 telegram.sh 头部注释;
+# 单行平铺列表（排除规则等无层级条目）仍用 "• " 前缀。
+
+# 树形条目前缀: tree_conn <0|1 是否末条> → "  ├─ " / "  └─ "
+tree_conn() {
+  if [ "$1" = "1" ]; then printf '  └─ '; else printf '  ├─ '; fi
+}
+
+# 树形条目子行前缀（内容对齐条目文本）: tree_sub <0|1 是否末条> → "  │   " / "      "
+tree_sub() {
+  if [ "$1" = "1" ]; then printf '      '; else printf '  │   '; fi
+}
+
+# 多行单行条目 → 树形条目列表（每行 "  ├─/└─ 条目"，末条 └─；输出去尾换行）
+# 用法: tree_lines <多行文本>（每行一个条目，条目内容需已转义/含 HTML 标签）
+tree_lines() {
+  local _in="$1" _total _n=0 _line _out=""
+  _total=$(printf '%s\n' "$_in" | grep -c .)
+  [ "$_total" -eq 0 ] && return 0
+  while IFS= read -r _line; do
+    [ -z "$_line" ] && continue
+    _n=$((_n + 1))
+    local _last=0
+    [ "$_n" -eq "$_total" ] && _last=1
+    _out+="$(tree_conn "$_last")${_line}"$'\n'
+  done <<< "$_in"
+  printf '%s' "${_out%$'\n'}"
+}
+
 # 检查日志文件是否包含实质内容（排除 rclone 统计行和空行）
 # 返回值: "empty" / "transfer_only" / "has_content"
 check_log_has_content() {

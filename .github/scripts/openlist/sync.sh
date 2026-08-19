@@ -1448,54 +1448,39 @@ _send_sync_result_notification() {
   local exclude_list=""
   exclude_list=$(_build_exclude_patterns "${extra_args[@]}")
 
-  # 构建 fix_summary（已修复文件：目录只展示一次，原名/实际名/大小分行，方法用短标签；
-  # HTML 格式，路径 code 等宽，动态内容经 escape_html 转义）
+  # 构建 fix_summary（已修复文件树形列表: 一文件一行，原名 → 实际名 · 大小 · 方式；
+  # HTML 格式，路径 code 等宽，动态内容经 escape_html 转义，条目经 tree_lines 加 ├─/└─）
   local fix_summary=""
   local fix_total=0
   if [ -s "$fix_list" ]; then
     fix_total=$(grep -c . "$fix_list" 2>/dev/null || true)
+    local _fix_entries=""
     while IFS='|' read -r f_original f_alternative f_method f_restore f_size f_bytes f_mid; do
       [ -z "$f_original" ] && continue
-      local f_dir f_orig_base f_alt_base f_method_tag
-      f_dir=$(dirname -- "$f_original")
-      f_orig_base=$(basename -- "$f_original")
-      f_alt_base=$(basename -- "$f_alternative")
+      local f_method_tag _entry
       f_method_tag=$(_method_short "$f_mid")
-      if [ "$f_original" = "$f_alternative" ]; then
-        # 同名修复: 一行完整路径
-        fix_summary+="• <code>$(escape_html "$f_original")</code>"$'\n'
-      elif [ "$f_dir" = "$(dirname -- "$f_alternative")" ]; then
-        # 同目录改名: 目录只展示一次，避免长路径重复两遍
-        if [ "$f_dir" = "." ]; then
-          fix_summary+="• 原名：<code>$(escape_html "$f_orig_base")</code>"$'\n'
-        else
-          fix_summary+="• 目录：<code>$(escape_html "$f_dir")/</code>"$'\n'
-          fix_summary+="  原名：<code>$(escape_html "$f_orig_base")</code>"$'\n'
-        fi
-        fix_summary+="  实际：<code>$(escape_html "$f_alt_base")</code>"$'\n'
-      else
-        # 目录有变（如方法9 上传到父目录）: 双方完整相对路径
-        fix_summary+="• 原路径：<code>$(escape_html "$f_original")</code>"$'\n'
-        fix_summary+="  实际路径：<code>$(escape_html "$f_alternative")</code>"$'\n'
-      fi
-      fix_summary+="  大小：$(escape_html "$f_size")"$'\n'
-      fix_summary+="  方式：$(escape_html "$f_method_tag")"$'\n'
+      _entry="<code>$(escape_html "$f_original")</code>"
+      # 改名修复（含目录变动）: 原名 → 实际名 双方完整路径
+      [ "$f_original" != "$f_alternative" ] && _entry+=" → <code>$(escape_html "$f_alternative")</code>"
+      _entry+=" · <i>$(escape_html "$f_size")</i> · <i>$(escape_html "$f_method_tag")</i>"
+      _fix_entries+="${_entry}"$'\n'
     done < "$fix_list"
+    fix_summary="$(tree_lines "$_fix_entries")"$'\n'
   fi
   [ -z "$fix_summary" ] && fix_summary="无"$'\n'
 
-  # 构建 fail_summary（无法修复的文件；风格与 fix_summary 一致：• 相对路径 + 2 空格标签行）
+  # 构建 fail_summary（无法修复的文件树形列表: 条目行 + tree_sub 缩进的"修复过程"子行；
+  # 风格与 fix_summary 一致）
   local fail_summary=""
   local fail_total=0
   if [ -s "$fail_list" ]; then
     fail_total=$(grep -c . "$fail_list" 2>/dev/null || true)
+    local -a _fail_entries=() _fail_sections=()
     while IFS='|' read -r fpath fsize fmsg; do
       [ -z "$fpath" ] && continue
-      fail_summary+="• <code>$(escape_html "$fpath")</code>"$'\n'
-      fail_summary+="  大小：$(escape_html "$fsize")"$'\n'
-      fail_summary+="  原因：$(escape_html "$fmsg")"$'\n'
+      _fail_entries+=("<code>$(escape_html "$fpath")</code> · <i>$(escape_html "$fsize")</i> · <i>$(escape_html "$fmsg")</i>")
       # 从 fix_log 中按文件名分隔提取该文件对应的修复过程
-      local fix_section=""
+      local fix_section="" _sec
       if [ -f "$fix_log" ]; then
         fix_section=$(awk -v rel="$fpath" '
           index($0, "=== 尝试修复失败文件: " rel " ===") > 0 { capture=1; next }
@@ -1504,17 +1489,29 @@ _send_sync_result_notification() {
         ' "$fix_log" 2>/dev/null)
       fi
       if [ -n "$fix_section" ]; then
-        fail_summary+="  修复过程："$'\n'
+        _sec="修复过程："
         while IFS= read -r log_line; do
           [ -z "$log_line" ] && continue
-          fail_summary+="    $(escape_html "$log_line")"$'\n'
+          _sec+=$'\n'"  $(escape_html "$log_line")"
         done <<< "$fix_section"
       elif echo "$fmsg" | grep -qi 'object not found'; then
-        fail_summary+="  修复过程：源文件不存在，无需修复"$'\n'
+        _sec="修复过程：源文件不存在，无需修复"
       else
-        fail_summary+="  修复过程：无记录"$'\n'
+        _sec="修复过程：无记录"
       fi
+      _fail_sections+=("$_sec")
     done < "$fail_list"
+    local _i _n=${#_fail_entries[@]} _last
+    for (( _i=0; _i<_n; _i++ )); do
+      _last=0
+      [ $((_i + 1)) -eq "$_n" ] && _last=1
+      fail_summary+="$(tree_conn "$_last")${_fail_entries[$_i]}"$'\n'
+      local _sub
+      while IFS= read -r _sub; do
+        [ -z "$_sub" ] && continue
+        fail_summary+="$(tree_sub "$_last")${_sub}"$'\n'
+      done <<< "${_fail_sections[$_i]}"
+    done
   fi
   [ -z "$fail_summary" ] && fail_summary="无"$'\n'
 
