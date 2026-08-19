@@ -431,7 +431,9 @@ _persist_verify_entries() {
       # 列当前存在的所有同前缀编号分卷
       local existing_parts
       existing_parts=$(rclone lsf "${dest_path}/${alt_dir_alt}" --files-only 2>/dev/null | grep -E "${alt_prefix}\.zip\.[0-9]{3}" | sort)
-      local part_count=$(echo -n "$existing_parts" | grep -c . || echo 0)
+      # grep -c 无匹配时已输出 0（退出码 1），用 || true 防止追加第二行 0
+      local part_count
+      part_count=$(printf '%s' "$existing_parts" | grep -c . || true)
       # 至少有 1 个分卷，且分卷大小都 > 0
       local parts_ok=0
       if [ "$part_count" -gt 0 ]; then
@@ -440,7 +442,7 @@ _persist_verify_entries() {
           [ -z "$pn" ] && continue
           local p_sz
           p_sz=$(rclone lsf "${dest_path}/${alt_dir_alt}" --files-only --format "ps" --separator ";" 2>/dev/null | awk -v FS=';' -v bn="$pn" '$1==bn{print $2; exit}')
-          if [ -z "$p_sz" ] || [ "$p_sz" = "" ] || [ "$p_sz" -le 0 ] 2>/dev/null; then
+          if [ -z "$p_sz" ] || ! [ "$p_sz" -gt 0 ] 2>/dev/null; then
             parts_ok=0
             break
           fi
@@ -548,19 +550,19 @@ _sync_restart_for_verify() {
   return 0
 }
 
-  # ===== 已修复文件排除（405 防护 + sync 模式删除保护）=====
-  # marker fixed_files 里的 original 当初就是原路径传不上（405/超长/假成功）
-  # 才修复到 alternative 的；替代文件仍在时原路径重传必然再 405，
-  # 还会被 OpenList 包装成 8005 触发 3 轮全量重试（每轮白白重查全目录）。
-  # sync 模式下排除同时承担"删除保护"——rclone 语义: filter 排除的文件
-  # 不传输也不删除（前提: 不能加 --delete-excluded，否则排除保护失效）:
-  #   - original:   排除 → 不重传（无 405）、即使目标端有也不被删
-  #   - alternative: 只存在于目标端、源端没有 → 不排除必被 sync 当多余删除
-  #   - 分卷类:     alternative 只记录第一卷，.002/.003... 用前缀通配一并保护
-  #   - auto-split 最终全量同步用 GLOBAL_FIXED_FILES_JSON 合并本轮子任务修复
-  #   - lsf diff 不带 filter-from，缺失文件照常进修复管线复核
-  #   - 文件名 glob 特殊字符 [ ] * ? { } 转成字符类
-# 依赖调用方（sync_with_logging）作用域: dest_path / task_name / LOG_FILENAME；追加 extra_args
+# ===== 已修复文件排除（405 防护 + sync 模式删除保护）=====
+# marker fixed_files 里的 original 当初就是原路径传不上（405/超长/假成功）
+# 才修复到 alternative 的；替代文件仍在时原路径重传必然再 405，
+# 还会被 OpenList 包装成 8005 触发 3 轮全量重试（每轮白白重查全目录）。
+# sync 模式下排除同时承担"删除保护"——rclone 语义: filter 排除的文件
+# 不传输也不删除（前提: 不能加 --delete-excluded，否则排除保护失效）:
+#   - original:    排除 → 不重传（无 405）、即使目标端有也不被删
+#   - alternative: 只存在于目标端、源端没有 → 不排除必被 sync 当多余删除
+#   - 分卷类:      alternative 只记录第一卷，.002/.003... 用前缀通配一并保护
+#   - auto-split 最终全量同步用 GLOBAL_FIXED_FILES_JSON 合并本轮子任务修复
+#   - lsf diff 不带 filter-from，缺失文件照常进修复管线复核
+#   - 文件名 glob 特殊字符 [ ] * ? { } 转成字符类
+# 依赖调用方（sync_with_logging）作用域: source_path / dest_path / task_name / LOG_FILENAME；追加 extra_args
 _sync_fixed_files_exclusion() {
   if [[ "$dest_path" == openlist:* ]]; then
     _load_marker_fixed_files "$source_path" "$dest_path" "$task_name"
@@ -593,10 +595,10 @@ _sync_fixed_files_exclusion() {
   fi
 }
 
-  # ===== 8005 登录失败重试 =====
-  # wopan176 后端写操作可能返回 8005（OpenList 包装为 HTTP 405 返回给 rclone）
-  # 需要检查 OpenList 容器日志中的真实 8005 错误，刷新 token 并重试
-# 依赖调用方作用域: OL_LOG_FILE / dest_path / LOG_FILENAME / SYNC_STATUS；调用嵌套函数 run_rclone_sync_once
+# ===== 8005 登录失败重试 =====
+# wopan176 后端写操作可能返回 8005（OpenList 包装为 HTTP 405 返回给 rclone）
+# 需要检查 OpenList 容器日志中的真实 8005 错误，刷新 token 并重试
+# 依赖调用方作用域: dest_path / LOG_FILENAME / SYNC_STATUS；调用嵌套函数 run_rclone_sync_once
 _sync_retry_8005() {
   local OL_LOG_FILE=""
   OL_LOG_FILE=$(_find_openlist_log) || true
@@ -634,9 +636,9 @@ _sync_retry_8005() {
   fi
 }
 
-  # ===== HTTP 423 Locked 重试 =====
-  # OpenList / WebDAV 可能临时锁定目标对象并返回 HTTP 423。
-  # 延迟后重跑整次 sync；已完成文件会被 rclone 跳过，主要补偿锁定残留文件。
+# ===== HTTP 423 Locked 重试 =====
+# OpenList / WebDAV 可能临时锁定目标对象并返回 HTTP 423。
+# 延迟后重跑整次 sync；已完成文件会被 rclone 跳过，主要补偿锁定残留文件。
 # 依赖调用方作用域: dest_path / LOG_FILENAME / SYNC_STATUS；调用嵌套函数 run_rclone_sync_once
 _sync_retry_423() {
   if [[ "$dest_path" == openlist:* ]] && grep -Eqi 'Locked:[[:space:]]*423|423[[:space:]]+Locked' "$LAST_ATTEMPT_LOG"; then
@@ -657,7 +659,9 @@ _sync_retry_423() {
   fi
 }
 
-# 依赖调用方作用域: LAST_ATTEMPT_LOG / task_name / source_path / dest_path / fail_list / fix_list / fix_log / LOG_FILENAME
+# 收集并修复缺失文件（依赖调用方作用域）:
+#   LAST_ATTEMPT_LOG / task_name / source_path / dest_path / extra_args /
+#   fail_list / fix_list / fix_log / LOG_FILENAME
 _sync_fix_missing_files() {
   if [[ "$dest_path" == openlist:* ]]; then
     # 收集缺失文件：
@@ -882,11 +886,12 @@ _sync_fix_missing_files() {
   [ -n "${incr_state:-}" ] && rm -f "$incr_state" 2>/dev/null || true
 }
 
-  # ===== 修复文件持久化验证：重启 OpenList 容器后检查修复的文件是否仍存在 =====
-  # 目的：确认通过 try_fix_failed_file 同步到 wopan176 的文件真正被后端持久化，
-  # 而不仅仅存在于 OpenList 内存缓存中（重启容器后即消失）
-  # 仅在：有修复成功的文件、目标是 OpenList 远程、能找到 docker 命令的情况下执行
-# 依赖调用方作用域: dest_path / fix_list / fail_list / fix_log / task_name / source_path / LOG_FILENAME；写 SYNC_PERSIST_FAIL
+# ===== 修复文件持久化验证：重启 OpenList 容器后检查修复的文件是否仍存在 =====
+# 目的：确认通过 try_fix_failed_file 同步到后端的文件真正被持久化，
+# 而不仅仅存在于 OpenList 内存缓存中（重启容器后即消失）
+# 仅在：有修复成功的文件、目标是 OpenList 远程、能找到 docker 命令的情况下执行
+# 依赖调用方作用域: dest_path / fix_list / fail_list / fix_log / task_name /
+#                  source_path / LOG_FILENAME；写 SYNC_PERSIST_FAIL
 _sync_persist_verify_and_retry() {
   if [[ "$dest_path" == openlist:* ]] && [ -s "$fix_list" ] && command -v docker >/dev/null 2>&1; then
     _sec "$LOG_FILENAME" "${task_name} 修复持久化验证（重启容器复核）"
@@ -928,12 +933,12 @@ _sync_persist_verify_and_retry() {
       # 4. 重启 OpenList 容器并等待驱动就绪 + 刷新缓存
       echo "  重启 OpenList 容器..." | tee -a "$LOG_FILENAME"
       if _sync_restart_for_verify "$LOG_FILENAME" "$persist_ol_path"; then
-        # 6. 逐个复核全部修复文件（不再抽样——假成功文件只有重启后才能暴露，
-        # 抽前 6 条会漏掉其余假成功条目；复核是纯列表操作，代价可控。
+        # 5. 逐个复核全部修复文件（不再抽样——假成功文件只有重启后才能暴露，
+        # 抽前 N 条会漏掉其余假成功条目；复核是纯列表操作，代价可控。
         # 如需限流可用 OPENLIST_PERSIST_VERIFY_MAX 设上限，0/空 = 复核全部）
         # 判定规则见 _persist_verify_entries（原样 copy 精确匹配大小；
         # 压缩/分卷/编码类只检查存在且非空）；失败条目当场拉黑并收集，
-        # 供第 7 步本轮立即换方法重试
+        # 供第 6 步本轮立即换方法重试
         local persist_verify_max="${OPENLIST_PERSIST_VERIFY_MAX:-0}"
         [[ "$persist_verify_max" =~ ^[0-9]+$ ]] || persist_verify_max=0
         _persist_verify_entries "$dest_path" "$PERSIST_VERIFY_LIST" "$persist_verify_max" "$LOG_FILENAME"
@@ -955,7 +960,7 @@ _sync_persist_verify_and_retry() {
         # run 31917285452 实测拉黑 5 条最终保存 0 条，黑名单在进程内丢失）
         _flush_blacklist_to_marker "$task_name" "$dest_path" "$LOG_FILENAME"
 
-        # 7. 假成功条目本轮逐方法重试（换方法 → 重启复核 → 仍未通过再换方法，
+        # 6. 假成功条目本轮逐方法重试（换方法 → 重启复核 → 仍未通过再换方法，
         #    循环直到全部通过持久化验证或所有方法耗尽；不再等下一轮）
         # 黑名单已含刚才判定的假成功方法，try_fix_failed_file 会直接跳过
         # 失效方法、从下一个方法继续尝试；每轮全部重试条目共享一次容器
@@ -1092,7 +1097,7 @@ _sync_persist_verify_and_retry() {
   [ -n "${incr_state:-}" ] && rm -f "$incr_state" 2>/dev/null || true
 }
 
-  # ===== object not found 错误解析（源文件不存在）=====
+# ===== object not found 错误解析（源文件不存在）=====
 # 依赖调用方作用域: LAST_ATTEMPT_LOG / fail_list / LOG_FILENAME / task_name；写 HAS_OBJECT_NOT_FOUND
 _sync_parse_object_not_found() {
   if grep -Eqi 'ERROR : .+: Failed to copy.*object not found' "$LAST_ATTEMPT_LOG" 2>/dev/null; then
@@ -1111,31 +1116,31 @@ _sync_parse_object_not_found() {
   fi
 }
 
-  # 把 fix_list 序列化为 JSON 供 save_sync_marker 使用
-  # 格式: [{original, alternative, method, restore_hint, size_human, size_bytes,
-  #         method_id, restore: {kind, summary, steps, script, hint}}]
-  # restore 字段记录还原方式，便于日后从目标端恢复原始文件
-        # 现行 11 种修复方式精确识别（方法 1-11，与 fix.sh _method_desc 对齐）:
-        #   "原路径 + 原文件名"                             → 原样 copy (方法1)
-        #   "base64URL 编码目录 + 原文件名"                → 仅 b64 目录 (方法1变体)
-        #   "rclone crypt 直写（原名原路径）"              → copy，alt==orig 无需还原 (方法2)
-        #   "原路径 + 短哈希文件名"                        → short hash rename (方法3)
-        #   "原路径 + zip 压缩包"                          → zip (方法4)
-        #   "base64URL 编码目录 + zip 压缩包"              → zip(+b64dir) (方法4变体)
-        #   "原路径 + 7z 压缩包"                           → 7z (方法5)
-        #   "base64URL 编码目录 + 7z 压缩包"               → 7z(+b64dir) (方法5变体)
-        #   "原路径 + <粒度> 分卷切割"                     → split zip (方法6)
-        #   "原路径 + base64URL 编码文件名 + <粒度> 分卷切割" → split zip + b64name (方法7)
-        #   "base64URL 编码目录 + [b64文件名 +] <粒度> 分卷切割" → split zip 变体 (方法6/7变体)
-        #   "原路径 + API 自动生成文件名"                  → api rename (方法8)
-        #   "base64URL 编码目录 + API 自动生成文件名"      → api rename(+b64dir) (方法8变体)
-        #   "父目录 + 编码原始目录名的文件名"              → parent dir (方法9)
-        #   "AES256 加密 zip + .enc.zip 扩展名"             → encrypted zip (方法10)
-        #   "临时目录上传 + OpenList API move"             → tmp + move (方法11)
-        # 已删除方法（b64 文件名单传 / .bak / 根目录上传 / base64 内容）的
-        # 分类分支仅为兼容旧 marker 残留条目与 fallback 扫描输出保留
-        # 注: 不能用 ".*文件名" 模糊匹配，"原文件名" 里也有 "文件名" 3 个字，会误判
-# 分类程序在 restore_info.jq（随 *.jq 拷到 /tmp，见 workflow Load helper functions）
+# 把 fix_list 序列化为 JSON 供 save_sync_marker 使用
+# 格式: [{original, alternative, method, restore_hint, size_human, size_bytes,
+#         method_id, restore: {kind, summary, steps, script, hint}}]
+# restore 字段记录还原方式，便于日后从目标端恢复原始文件
+# 现行 11 种修复方式精确识别（方法 1-11，与 fix.sh _method_desc 对齐）:
+#   "原路径 + 原文件名"                               → 原样 copy (方法1)
+#   "base64URL 编码目录 + 原文件名"                   → 仅 b64 目录 (方法1变体)
+#   "rclone crypt 直写（原名原路径）"                 → copy，alt==orig 无需还原 (方法2)
+#   "原路径 + 短哈希文件名"                           → short hash rename (方法3)
+#   "原路径 + zip 压缩包"                             → zip (方法4)
+#   "base64URL 编码目录 + zip 压缩包"                 → zip(+b64dir) (方法4变体)
+#   "原路径 + 7z 压缩包"                              → 7z (方法5)
+#   "base64URL 编码目录 + 7z 压缩包"                  → 7z(+b64dir) (方法5变体)
+#   "原路径 + <粒度> 分卷切割"                        → split zip (方法6)
+#   "原路径 + base64URL 编码文件名 + <粒度> 分卷切割"  → split zip + b64name (方法7)
+#   "base64URL 编码目录 + [b64文件名 +] <粒度> 分卷切割" → split zip 变体 (方法6/7变体)
+#   "原路径 + API 自动生成文件名"                     → api rename (方法8)
+#   "base64URL 编码目录 + API 自动生成文件名"         → api rename(+b64dir) (方法8变体)
+#   "父目录 + 编码原始目录名的文件名"                 → parent dir (方法9)
+#   "AES256 加密 zip + .enc.zip 扩展名"               → encrypted zip (方法10)
+#   "临时目录上传 + OpenList API move"                → tmp + move (方法11)
+# 已删除方法（b64 文件名单传 / .bak / 根目录上传 / base64 内容）的
+# 分类分支仅为兼容旧 marker 残留条目与 fallback 扫描输出保留
+# 注: 不能用 ".*文件名" 模糊匹配，"原文件名" 里也有 "文件名" 3 个字，会误判
+# 分类程序在 restore_info.jq（随 *.jq 拷到 /tmp，见 workflow 的加载函数库 step）
 # 依赖调用方（sync_with_logging）作用域: fix_list / source_path / dest_path / LOG_FILENAME
 # 写入: LAST_SYNC_FIXED_FILES_JSON
 _sync_serialize_fixed_files() {
@@ -1155,9 +1160,10 @@ _sync_serialize_fixed_files() {
     -f "$_jq_prog" "$fix_list" 2>/dev/null || echo "[]")
 }
 
-  # 累计到全局变量（供 auto-split 拆分模式下顶级 save_sync_marker 收集所有子目录的修复）
-  # _sync_task_impl 在 current_depth=0 时初始化 GLOBAL_FIXED_FILES_JSON="[]"
-# 依赖调用方作用域: LAST_SYNC_FIXED_FILES_JSON / LOG_FILENAME；写 GLOBAL_FIXED_FILES_JSON / GLOBAL_FIX_BLACKLIST_JSON
+# 累计到全局变量（供 auto-split 拆分模式下顶级 save_sync_marker 收集所有子目录的修复）
+# _sync_task_impl 在 current_depth=0 时初始化 GLOBAL_FIXED_FILES_JSON="[]"
+# 依赖调用方作用域: LAST_SYNC_FIXED_FILES_JSON / LOG_FILENAME；
+# 写 GLOBAL_FIXED_FILES_JSON / GLOBAL_FIX_BLACKLIST_JSON
 _sync_accumulate_fixed_results() {
   if [ -z "${GLOBAL_FIXED_FILES_JSON:-}" ]; then
     GLOBAL_FIXED_FILES_JSON="[]"
@@ -1318,7 +1324,7 @@ sync_with_logging() {
 
   _sync_accumulate_fixed_results
 
-  rm -f "$LOG_FILENAME" "$LAST_ATTEMPT_LOG" "$fail_list" "$fix_list" "$fix_log" /tmp/probe_src.txt /tmp/probe_dst.txt 2>/dev/null || true
+  rm -f "$LOG_FILENAME" "$LAST_ATTEMPT_LOG" "$fail_list" "$fix_list" "$fix_log" 2>/dev/null || true
   # 始终返回 0：失败状态已通过 SYNC_FAILED 全局变量传递，
   # 在 set -e 下返回非零会导致整个 step 立即退出，后续同步与
   # split_on_sync_failure 均无法执行。
@@ -1414,7 +1420,7 @@ _send_sync_result_notification() {
   # 同步后刷新 OpenList 缓存，确保 _get_path_stats 拿到真实文件数
   # 避免 stale 缓存里残留"幽灵文件"导致 dest_count 虚高，误报同步成功
   if [[ "$dest_path" == openlist:* ]]; then
-    echo "同步后刷新 OpenList 缓存以获取真实文件数..." | tee -a "$LOG_FILENAME"
+    echo "同步后刷新 OpenList 缓存以获取真实文件数..." | tee -a "$log_filename"
     _refresh_openlist_cache "$dest_path"
   fi
 

@@ -460,11 +460,14 @@ _sync_task_impl() {
       split_on_sync_failure "$source_path" "$task_name"
     fi
   else
+    # 递归子任务收尾：把聚合状态传回父级（父循环依据 SYNC_FAILED/SYNC_SKIPPED
+    # 对本子目录分类）。失败子目录数 > 0 时必须保持 SYNC_FAILED=1，否则父级
+    # 会把本任务误判为"已同步"，深层失败被静默吞掉
     SYNC_SKIPPED=0
-    SYNC_FAILED=0
-    SYNC_PARTIAL=0
+    if [ "$failed_subtasks" -gt 0 ]; then SYNC_FAILED=1; else SYNC_FAILED=0; fi
+    if [ "$partial_subtasks" -gt 0 ]; then SYNC_PARTIAL=1; else SYNC_PARTIAL=0; fi
     SYNC_TRANSFERRED_BYTES=$total_transferred
-    if [ "$SYNC_FAILED" = "0" ] && [ "$failed_subtasks" -eq 0 ] && [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
+    if [ "$failed_subtasks" -eq 0 ] && [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
       save_sync_marker "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
     fi
   fi
@@ -704,7 +707,8 @@ sync_by_file_batches() {
         # exit code 4 = 部分文件失败，大部分成功
         synced_batches=$((synced_batches + 1))
         local err_count
-        err_count=$(grep -c 'ERROR.*object not found' "${task_name}_batch_${i}.log" 2>/dev/null || echo 0)
+        # grep -c 无匹配时已输出 0（退出码 1），用 || true 防止追加第二行 0
+        err_count=$(grep -c 'ERROR.*object not found' "${task_name}_batch_${i}.log" 2>/dev/null || true)
         echo "批次 $((i+1)) 部分成功 (exit=4, ${err_count} 个文件 object not found)"
         grep 'ERROR.*object not found' "${task_name}_batch_${i}.log" 2>/dev/null | head -50 | while IFS= read -r line; do
           echo "  ${line}"
@@ -736,14 +740,11 @@ sync_by_file_batches() {
   # 最终用 sync_with_logging 做完整同步检查（处理缺失文件修复、通知等）
   # 文件批次阶段已完成实质传输，最终 sync 即使无新增 Copied 记录也必须发通知；
   # 此处可能被子目录递归调用（SYNC_SKIP_QUIET=1），需临时关闭静默模式，避免通知被吞。
+  # 跳过标记（save_sync_marker）不在本函数保存——调用方 _sync_task_impl 随后的
+  # _sync_task_finalize 会按统一条件保存，这里保存会重复执行远端统计。
   local _saved_skip_quiet="${SYNC_SKIP_QUIET:-0}"
   SYNC_SKIP_QUIET=0
   sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
   AUTO_SPLIT_INFO=""
   SYNC_SKIP_QUIET="$_saved_skip_quiet"
-
-  # 文件批次同步成功后保存标记
-  if [ "$SYNC_FAILED" = "0" ] && [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
-    save_sync_marker "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
-  fi
 }

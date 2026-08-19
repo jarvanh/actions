@@ -71,11 +71,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: rclone-install
+      - name: 安装 rclone
         run: |
           curl -fsSL https://rclone.org/install.sh | sudo bash
 
-      - name: rclone-config
+      - name: 写入 rclone 配置（含密钥掩码）
         env:
           RCLONE_CONFIG_SECRET: ${{ secrets.RCLONE }}
         run: |
@@ -112,7 +112,7 @@ jobs:
           PY
 
 
-      - name: rclone-run
+      - name: 验证远端连通并挂载 Dropbox
         run: |
           echo "==========onedrive==========="
           rclone lsf onedrive:
@@ -122,9 +122,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y fuse3
           sudo mkdir -p /dropbox
+          # 后台挂载 Dropbox（openlist 配置/凭据等静态数据走该挂载）
           sudo nohup rclone mount dropbox: /dropbox --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 10G &
 
-      - name: Run openlist container
+      - name: 拉起 OpenList 容器（数据库本地化）
         run: |
           sudo docker rm -f openlist 2>/dev/null || true
           # ===== 数据库本地化 =====
@@ -140,45 +141,57 @@ jobs:
           echo "拉取完成: $(ls -la /opt/openlist-data/ | tail -n +2 | wc -l) 个条目"
           # 记录拉取时 db 指纹（回传前对比: 未变化则跳过回传，
           # 避免极端并发场景下用过期副本覆盖远端新配置）
-          OPENLIST_DB_MD5_PULL=$(md5sum /opt/openlist-data/data.db 2>/dev/null | awk '{print $1}' || echo "none")
+          OPENLIST_DB_MD5_PULL=$(md5sum /opt/openlist-data/data.db 2>/dev/null | awk '{print $1}')
+          OPENLIST_DB_MD5_PULL="${OPENLIST_DB_MD5_PULL:-none}"
           echo "OPENLIST_DB_MD5_PULL=$OPENLIST_DB_MD5_PULL" >> "$GITHUB_ENV"
           echo "db 拉取指纹: $OPENLIST_DB_MD5_PULL"
           sudo docker run -d --restart=unless-stopped -v /opt/openlist-data:/opt/openlist/data -p 5244:5244 -e PUID=0 -e PGID=0 -e UMASK=022 --name="openlist" openlistteam/openlist:latest
 
-      - name: sleep
+      - name: 等待 OpenList 就绪
         run: |
-          sudo sleep 1m
+          # 等待容器完成初始化（数据库挂载、驱动加载）
+          sleep 60
 
-      - name: Verify docker container is running
-        run: docker ps --filter name=openlist --filter status=running | grep -q openlist
-
-      - name: install cloudflared
+      - name: 校验 OpenList 容器运行状态
         run: |
-          sudo mkdir ~/.cloudflared/
-          sudo rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
+          if docker ps --filter name=openlist --filter status=running | grep -q openlist; then
+            echo "OpenList 容器运行正常"
+          else
+            echo "❌ OpenList 容器未在运行状态"
+            exit 1
+          fi
+
+      - name: 安装 cloudflared 并载入隧道凭据
+        run: |
+          sudo mkdir -p ~/.cloudflared
+          sudo rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
 
-      - name: Check if the tunnel is running
+      # 隧道状态守卫:
+      #   - 隧道不存在        → 终止（需先手动创建: cloudflared tunnel create openlist）
+      #   - 隧道存在但无连接  → 本实例接管，继续执行
+      #   - 隧道已有活跃连接  → 其他实例正在服务，终止本次运行避免两端争写同一份数据
+      - name: 检查 Cloudflare 隧道状态
         env:
           TUNNEL_NAME: "openlist"
         run: |
           OUTPUT=$(cloudflared tunnel list)
           TUNNEL_LINE=$(echo "$OUTPUT" | grep -w "$TUNNEL_NAME")
           if [ -z "$TUNNEL_LINE" ]; then
-            echo "The tunnel '$TUNNEL_NAME' does not exist. Proceeding."
+            echo "隧道 '$TUNNEL_NAME' 不存在，请先手动创建（cloudflared tunnel create $TUNNEL_NAME），终止本次运行"
             exit 31
           fi
 
           CONNECTIONS=$(echo "$TUNNEL_LINE" | awk '{if (NF>=4) print $4; else print "-"}')
-          if [ "$CONNECTIONS" == "-" ]; then
-            echo "The tunnel '$TUNNEL_NAME' exists but has no active connections. Proceeding."
+          if [ "$CONNECTIONS" = "-" ]; then
+            echo "隧道 '$TUNNEL_NAME' 存在但无活跃连接，继续执行"
           else
-            echo "The tunnel '$TUNNEL_NAME' is running with connections: $CONNECTIONS. Stopping actions."
-            exit 0
+            echo "隧道 '$TUNNEL_NAME' 已有 ${CONNECTIONS} 个活跃连接（其他实例正在服务），终止本次运行"
+            exit 1
           fi
 
-      - name: run cloudflared
+      - name: 启动 Cloudflare 隧道
         run: |
           # DNS 路由只需创建一次；检查是否已解析到该隧道，避免重复 API 调用
           if ! dig +short openlist.'${{ secrets.VD }}'.eu.org | grep -q .; then
@@ -188,15 +201,14 @@ jobs:
           fi
           nohup cloudflared tunnel run --url http://127.0.0.1:5244 openlist &
 
-      - name: Install required tools
+      - name: 安装同步依赖（ffmpeg/jq 等）
         run: |
-          echo "Installing ffmpeg, jq, coreutils..."
           sudo apt-get install -y ffmpeg jq coreutils bc p7zip-full
 
       # ===== 加载函数库 =====
       # 所有同步相关函数已提取到 .github/scripts/openlist/ 目录下的脚本文件中。
-      # 修改函数逻辑请编辑对应脚本文件；修改任务定义请编辑下方 "Preview and sync all tasks" step，rclone 参数请编辑 flags.sh。
-      - name: Load helper functions
+      # 修改函数逻辑请编辑对应脚本文件；修改任务定义请编辑 tasks.sh 的 SYNC_TASK_REGISTRY，rclone 参数请编辑 flags.sh。
+      - name: 加载同步函数库
         run: |
           echo "加载 OpenList 同步函数库..."
           source "$GITHUB_WORKSPACE/.github/scripts/openlist/load_all.sh"
@@ -267,7 +279,7 @@ jobs:
           run_task_by_id "$FIX_TASK"
           echo "=== 修复管线测试完成 (SYNC_FAILED=${SYNC_FAILED}) ==="
 
-      - name: Initialize sync
+      - name: 初始化同步状态
         if: ${{ inputs.run_mode == '' || inputs.run_mode == '同步' }}
         run: |
           source /tmp/load_all.sh
@@ -288,7 +300,7 @@ jobs:
       # ===== 所有同步任务预览 + 执行 =====
       # 任务清单在 .github/scripts/openlist/tasks.sh 的 SYNC_TASK_REGISTRY 单点定义
       # （增减任务只需编辑该数组一行）；rclone 参数编辑同目录 flags.sh。
-      - name: Preview and sync all tasks
+      - name: 任务预览与全量同步
         if: ${{ inputs.run_mode == '' || inputs.run_mode == '同步' }}
         run: |
           source /tmp/load_all.sh
@@ -315,7 +327,7 @@ jobs:
           run_all_tasks
           echo "=== 所有任务同步完成 ==="
 
-      - name: Finalize and cleanup
+      - name: 收尾与清理
         # always(): 大任务（如 task0 的 226GiB）常态撞 6h job 上限被取消，
         # 本 run 已完成的 marker/processed log 收尾不能丢——run 31954162437
         # 实测取消后 always() step（Persist）仍会执行，此处同理
@@ -324,7 +336,6 @@ jobs:
           source /tmp/load_all.sh
           actual_entries=0
           total_lines=0
-          DELETE_COUNT=0
 
           # 标记全局进度通知为最终完成状态
           progress_finalize
@@ -350,7 +361,7 @@ jobs:
           rclone sync onedrive:/logs/sync_state dropbox:sync_state_mirror --create-empty-src-dirs 2>&1 | tail -2 || true
           echo "sync_state 镜像完成: $(rclone lsf dropbox:sync_state_mirror 2>/dev/null | wc -l | tr -d ' ') 个文件"
 
-          rm -f /tmp/*.sh 2>/dev/null || true
+          rm -f /tmp/*.sh /tmp/*.py /tmp/*.jq 2>/dev/null || true
           echo "所有同步任务完成！"
 
       # ===== 会话保持 + 数据库周期热备回传 =====
@@ -359,11 +370,11 @@ jobs:
       # 强杀丢失窗口从 5 小时压缩到 ≤5 分钟。
       # 快照用 SQLite backup API（在线、逻辑一致），不直接拷 data.db 文件
       # （容器运行中直接拷可能捕获到撕裂状态）。
-      - name: sleep
+      - name: 会话保持与数据库周期热备
         if: ${{ inputs.run_mode == '' || inputs.run_mode == '同步' }}
         run: |
           LAST_MD5="${OPENLIST_DB_MD5_PULL:-none}"
-          for i in $(seq 1 60); do
+          for _ in $(seq 1 60); do
             sleep 300
             # 容器运行中的在线一致性快照（root 属主，用 sudo 读）
             if sudo python3 -c "import sqlite3; src=sqlite3.connect('file:/opt/openlist-data/data.db?mode=ro', uri=True); dst=sqlite3.connect('/tmp/data.db.snapshot'); src.backup(dst); dst.close(); src.close()" 2>/dev/null; then
@@ -389,7 +400,8 @@ jobs:
         if: ${{ always() }}
         run: |
           sudo docker stop openlist 2>/dev/null || true
-          CUR_MD5=$(md5sum /opt/openlist-data/data.db 2>/dev/null | awk '{print $1}' || echo "none")
+          CUR_MD5=$(md5sum /opt/openlist-data/data.db 2>/dev/null | awk '{print $1}')
+          CUR_MD5="${CUR_MD5:-none}"
           if [ "$CUR_MD5" = "${OPENLIST_DB_MD5_PULL:-none}" ]; then
             echo "db 未变化（${CUR_MD5}），跳过回传"
           else

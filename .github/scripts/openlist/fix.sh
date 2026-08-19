@@ -571,7 +571,7 @@ _try_fix_split_archive() {
     if [ "$used_base64_dir" -eq 1 ]; then dir_desc="base64URL 编码目录"; else dir_desc="原路径"; fi
     [ "$encode_name" = "1" ] && name_desc="base64URL 编码文件名 + "
     local method_text="分卷 zip（${dir_desc} + ${name_desc}${SPLIT_PART_HUMAN} 分卷切割，共 ${uploaded_count} 卷）"
-    local restore_text="下载所有分卷 ${zip_base}.001~.00${uploaded_count} 后 cat 合并再解压: cat ${zip_base}.0* > merged.zip && 7z x merged.zip"
+    local restore_text="下载所有分卷 ${zip_base}.001~$(printf '%03d' "$uploaded_count") 后 cat 合并再解压: cat ${zip_base}.0* > merged.zip && 7z x merged.zip"
     [ "$encode_name" = "1" ] && restore_text+="，原文件名恢复: base64URL 解码编码部分得到 $file_name"
     _fix_succeed "$mid" "$method_text" "${alt_files[0]}" "$restore_text"
     return 0
@@ -1012,8 +1012,6 @@ try_fix_failed_file() {
   if [ "$file_dir_rel" != "." ] && [ "$file_dir_rel" != "" ]; then
     local parent_dst_dir
     parent_dst_dir="$(dirname -- "$actual_dst_dir")"
-    local parent_ol_dir
-    parent_ol_dir="$(dirname -- "$actual_ol_dir")"
 
     # 编码原始目录名到文件名中，格式: __fixed__<base64_原始目录>__<原文件名>
     local encoded_orig_dir
@@ -1040,9 +1038,6 @@ try_fix_failed_file() {
   fi
   fi
 
-
-
-
   # 方法 10：加密 zip 后上传（改变二进制特征 + 密码保护）
   if _fix_method_gate m10; then
   local zip_password="OpenList$(date +%s)"
@@ -1066,8 +1061,8 @@ try_fix_failed_file() {
 
   # 方法 11：上传到临时目录后用 OpenList API move 移动
   # 在 backup 根目录创建临时目录，上传文件，然后用 API move 到目标路径
-  if [ -n "$ol_token" ] && [ "$ol_token" != "null" ]; then
-    if _fix_method_gate m11; then
+  if _fix_method_gate m11; then
+    if [ -n "$ol_token" ] && [ "$ol_token" != "null" ]; then
     local tmp_dir_name="_tmp_fix_$(date +%s)_$$"
     local tmp_ol_dir="/${ol_dst_base}/${tmp_dir_name}"
     # 通过 API 创建临时目录
@@ -1117,7 +1112,9 @@ try_fix_failed_file() {
       fi
     fi
     log_fix "$fix_log" "  ❌ 方法11 上传失败 http=${m11_upload_http}"
-  fi
+    else
+      log_fix "$fix_log" "  ⏭ 方法11 跳过（无 OpenList token）"
+    fi
   fi
 
   # 所有方法均失败

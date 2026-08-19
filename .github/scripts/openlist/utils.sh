@@ -35,7 +35,7 @@ check_log_has_content() {
   fi
 }
 
-# 修复日志记录函数（独立于分割日志，用于缺失文件修复过程）
+# 统一的双通道日志函数（修复/分割/下载等过程共用）
 # 文件落时间戳；控制台不再重复前缀时间戳（GitHub Actions 每行自带），
 # 行首越短越可读
 log_fix() {
@@ -43,12 +43,6 @@ log_fix() {
   local message="$2"
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $message" >> "$log_file" 2>/dev/null || true
   echo "$message"
-}
-
-# 统一的分割日志记录函数（同时输出到日志文件和 stdout）
-# 注意：不仅用于视频分割，也用于非视频 7z 分卷，名称中的 "split" 为通用含义。
-log_split() {
-  log_fix "$@"
 }
 
 # 分节横幅（控制台+文件同写）: 视觉切分长日志的不同阶段
@@ -298,7 +292,7 @@ _get_openlist_token() {
 # 等待 OpenList 就绪（容器刚启动时 401/429 会导致预览 0 B/0 文件、同步无谓重传）
 # 注意：不能用 rclone lsd 反复探测，会触发后端 429 Too Many Requests
 wait_openlist_ready() {
-  local i code c t
+  local i code
   # 阶段1: HTTP /ping 起来
   for i in $(seq 1 40); do
     code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5244/ping 2>/dev/null || echo "000")
@@ -309,26 +303,17 @@ wait_openlist_ready() {
     echo "⚠️ OpenList HTTP 未就绪 (code=${code})"
     return 1
   fi
-  echo "HTTP 就绪，尝试获取 token..."
-  # 阶段2: 获取 token 用于 API 探测（多个候选路径）
-  local OL_TOKEN=""
-  for c in \
-    "/opt/openlist-data/config.json" \
-    "/dropbox/self-hosted/openlist/data/config.json" \
-    "/dropbox/self-hosted/openlist/data/conf/config.json" \
-    "/data/openlist/data/config.json"; do
-    [ -f "$c" ] || continue
-    t=$(jq -r '.token // .jwt_secret // empty' "$c" 2>/dev/null || echo "")
-    if [ -n "$t" ] && [ "$t" != "null" ]; then
-      OL_TOKEN="$t"
-      echo "  token: OK (来自 ${c}, 长度 ${#OL_TOKEN})"
-      break
-    fi
-  done
+  # 阶段2: 确认 token 可读（config.json 已就位，后续 API 探测的前提）
+  local ol_token
+  if ol_token=$(_get_openlist_token); then
+    echo "HTTP 就绪，token 可读（长度 ${#ol_token}）"
+  else
+    echo "HTTP 就绪，但未找到 token（config.json 缺失或无 token/jwt_secret 字段）"
+  fi
   # 阶段3: 等驱动初始化（长等待 120s，给 ali + crypt 拉元数据）
   echo "等待驱动初始化 (120s) ..."
   sleep 120
-  # 阶段4: 单次 rclone 验证（最多 3 次，避免 429）
+  # 阶段4: rclone 验证（最多 3 次、间隔递减，避免触发 429）
   if rclone lsd openlist: >/dev/null 2>&1; then
     echo "WebDAV(rclone) 验证通过"
     return 0
