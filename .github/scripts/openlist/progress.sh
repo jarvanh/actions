@@ -87,16 +87,18 @@ _progress_get_stats() {
 }
 
 # 任务列表分组渲染（进度通知专用）
-# 任务显示名为 "src → dst"，按源端分组展示，避免长单行在手机上换行成一坨:
-#   <b>src</b> · <i>源端大小</i>
-#     → dst · <i>详情</i>
-#   同源端多目标只展示一次大小; 目标端 openlist: 前缀冗余（所有目标均为
-#   openlist 远端），统一裁剪缩短行宽。
+# 任务显示名为 "src → dst"，按源端分组展示，树形层级:
+#   📁 <b>src</b> · <i>源端大小</i>
+#     ├─ dst · <i>详情</i>
+#     └─ dst
+#   组间空一行分隔（首组前不加空行——tg_add_section 已带段前空行），
+#   树形连接符（├─/└─）标记组边界; 目标端 openlist: 前缀冗余（所有目标
+#   均为 openlist 远端），统一裁剪缩短行宽。
 # 无 " → " 结构的显示名（调试任务等）退化为普通 "• 名称" 条目。
 # 输入: 每行 "display_name\tsize\tdetail"（size/detail 可空）
 _progress_render_task_list() {
   local lines="$1"
-  declare -A _grp=() _grp_size=()
+  declare -A _grp=() _grp_size=() _grp_cnt=()
   local -a _order=()
   local _plain=""
   while IFS=$'\t' read -r _tname _tsize _tdetail; do
@@ -115,19 +117,36 @@ _progress_render_task_list() {
     fi
     if [ -z "${_grp[$_src]+x}" ]; then
       _grp[$_src]=""
+      _grp_cnt[$_src]=0
       _order+=("$_src")
       [ -n "$_tsize" ] && _grp_size[$_src]="$_tsize"
     fi
-    _grp[$_src]+="  → $(escape_html "$_dst")"
-    [ -n "$_tdetail" ] && _grp[$_src]+=" · <i>$(escape_html "$_tdetail")</i>"
-    _grp[$_src]+=$'\n'
+    # 目标行内容（不含前缀，渲染时按组内位置加 ├─/└─ 连接符）
+    local _entry
+    _entry="$(escape_html "$_dst")"
+    [ -n "$_tdetail" ] && _entry+=" · <i>$(escape_html "$_tdetail")</i>"
+    _grp[$_src]+="${_entry}"$'\n'
+    _grp_cnt[$_src]=$(( ${_grp_cnt[$_src]} + 1 ))
   done <<< "$lines"
-  local _out="" _src
+  local _out="" _src _gi=0
   for _src in "${_order[@]}"; do
-    _out+="<b>$(escape_html "$_src")</b>"
+    # 组间空一行
+    [ "$_gi" -gt 0 ] && _out+=$'\n'
+    _out+="📁 <b>$(escape_html "$_src")</b>"
     [ -n "${_grp_size[$_src]:-}" ] && _out+=" · <i>${_grp_size[$_src]}</i>"
-    _out+=$'\n'"${_grp[$_src]}"
+    _out+=$'\n'
+    local _n=0 _line
+    while IFS= read -r _line; do
+      [ -z "$_line" ] && continue
+      _n=$((_n + 1))
+      local _conn="├─"
+      [ "$_n" -eq "${_grp_cnt[$_src]}" ] && _conn="└─"
+      _out+="  ${_conn} ${_line}"$'\n'
+    done <<< "${_grp[$_src]}"
+    _gi=$((_gi + 1))
   done
+  # 普通条目（无 → 结构）与分组之间空一行
+  [ -n "$_out" ] && [ -n "$_plain" ] && _out+=$'\n'
   printf '%s' "${_out}${_plain}"
 }
 
