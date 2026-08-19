@@ -4,66 +4,72 @@
 #   - 每个同步对的源端大小、预估待同步量（按源端分组的树形列表）
 #   - 合计预估待同步量
 #
-# 依赖: utils.sh (format_bytes, _extract_exclude_summary, escape_html, tree_*)
+# 估算口径（与实际 sync 的 rclone --size-only 逐文件对齐）:
+#   对源端/目标端各拉一次递归文件清单（rclone lsjson -R，两端同一
+#   --exclude 口径），按文件路径比对:
+#     新增 = 源端有、目标端无     → 需上传整个文件
+#     更新 = 两端同名但大小不同   → --size-only 下必然整文件重传
+#   预估待同步 = Σ(新增 + 更新文件的源端大小)。
+#   已修复文件（marker fixed_files[].original，实际 sync 用 filter-from
+#   排除 = 不传输不删除）从差异中精确剔除——只剔除真实出现在差异里的条目，
+#   不再按总数盲减。
+#   历史缺陷（总量差值法）: bytes 与 count 各自做总量减法再按总数盲减
+#   fixed_files，同名更新文件（如每日轮转的 *_latest.tar.gz）只贡献字节差
+#   不贡献文件数差，产生 "+6.7 GiB / +0 文件" 的矛盾展示，且盲减可能把
+#   真实缺失文件从预估中吞掉。
+#
+# 依赖: utils.sh (format_bytes, _extract_filter_args, escape_html, tree_*)
 # 依赖: telegram.sh (send_telegram_message, tg_add_title/tg_add_section/tg_append)
 
-# 获取远端大小和文件数
-# 用法: _get_remote_size_count <remote_path> [--exclude pat] ...
-# 与源端 _get_source_size_with_excludes 保持同样的过滤口径，避免因 exclude 规则
-# 仅作用于源端而导致目标端统计包含历史残留文件，使预览文件数/大小永远对不上。
-# 返回: "bytes count" 或 "0 0"
-_get_remote_size_count() {
+# 拉取远端递归文件清单（lsjson，仅文件，含 Path/Size）
+# 用法: _get_listing_json <remote_path> [--exclude pat] ...
+# 输出: lsjson JSON 数组（空目录为 []）; 失败/非数组输出空串
+# 注意: 只传纯 filter 参数（--exclude/--include），调用方须先用
+# _extract_filter_args 剥离 --delete-before 等 sync 特有参数
+_get_listing_json() {
   local remote_path="$1"
   shift
-  local -a extra_args=("$@")
-  local err_file="/tmp/_rclone_size_err_$$"
-  local size_json
-  if [ ${#extra_args[@]} -gt 0 ]; then
-    size_json=$(rclone size "$remote_path" --json "${extra_args[@]}" 2>"$err_file" || true)
+  local -a filter_args=("$@")
+  local listing
+  if [ ${#filter_args[@]} -gt 0 ]; then
+    listing=$(timeout 900 rclone lsjson "$remote_path" --recursive --files-only "${filter_args[@]}" 2>/dev/null || true)
   else
-    size_json=$(rclone size "$remote_path" --json 2>"$err_file" || true)
+    listing=$(timeout 900 rclone lsjson "$remote_path" --recursive --files-only 2>/dev/null || true)
   fi
-  if [ -z "$size_json" ]; then
-    echo "⚠️ _get_remote_size_count: rclone size 失败 (${remote_path})" >&2
-    if [ -s "$err_file" ]; then
-      echo "   $(head -3 "$err_file" | tr '\n' ' ')" >&2
-    fi
-    rm -f "$err_file"
-    echo "0 0"
-    return
+  if [ -n "$listing" ] && printf '%s' "$listing" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    printf '%s' "$listing"
   fi
-  rm -f "$err_file"
-  local bytes count
-  bytes=$(_size_json_field "$size_json" bytes)
-  count=$(_size_json_field "$size_json" count)
-  echo "${bytes} ${count}"
 }
 
-# 源端大小缓存（按 source_path + excludes 组合做 key，避免重复调用 rclone size）
-declare -A PREVIEW_SRC_CACHE
+# 源端文件清单缓存（按 source_path + 过滤参数组合做 key，
+# 同源端多目标/进度注册复用，rclone lsjson 只拉一次）
+# 注意: 缓存写入必须在主 shell 完成——本函数常在命令替换（子 shell）里
+# 被调用，子 shell 里的数组赋值回不到父进程（历史实现因此从未真正命中，
+# 每次统计都重新拉清单）。真正的落盘由 add_preview_pair 在主 shell 执行。
+declare -A PREVIEW_SRC_LIST_CACHE
 
-# 获取源端大小（带 --exclude 参数，带缓存）
-# 用法: _get_source_size_with_excludes <source_path> [--exclude pat] ...
+# 获取源端大小/文件数（带 --exclude 过滤，读 PREVIEW_SRC_LIST_CACHE 缓存）
+# 用法: _get_source_size_with_excludes <source_path> [原始 extra_args...]
+#   （可含 --delete-before 等非过滤参数，内部会剥离，仅保留过滤口径）
 # 返回: "bytes count"
 _get_source_size_with_excludes() {
   local source_path="$1"
   shift
-  local extra_args=("$@")
-  local cache_key="${source_path} ${extra_args[*]}"
-
-  if [ -n "${PREVIEW_SRC_CACHE[$cache_key]:-}" ]; then
-    echo "${PREVIEW_SRC_CACHE[$cache_key]}"
-    return
+  _extract_filter_args "$@"
+  local cache_key="${source_path} ${FILTER_ARGS[*]}"
+  local listing
+  if [ -n "${PREVIEW_SRC_LIST_CACHE[$cache_key]:-}" ]; then
+    listing="${PREVIEW_SRC_LIST_CACHE[$cache_key]}"
+  else
+    listing=$(_get_listing_json "$source_path" "${FILTER_ARGS[@]}")
+    [ -z "$listing" ] && listing="[]"
+    # 尽力写缓存（子 shell 场景写不回父进程，主流程由 add_preview_pair 落盘）
+    PREVIEW_SRC_LIST_CACHE[$cache_key]="$listing"
   fi
-
-  local result="0 0"
-  local size_json
-  size_json=$(_rclone_size_json "$source_path" "${extra_args[@]}")
-  if [ -n "$size_json" ]; then
-    result="$(_size_json_field "$size_json" bytes) $(_size_json_field "$size_json" count)"
-  fi
-  PREVIEW_SRC_CACHE[$cache_key]="$result"
-  echo "$result"
+  local out
+  out=$(echo "$listing" | jq -r '"\((map(.Size // 0) | add // 0)) \(length)"' 2>/dev/null) || out=""
+  [ -z "$out" ] && out="0 0"
+  echo "$out"
 }
 
 # 开始一个主任务的预览
@@ -74,64 +80,106 @@ start_task_preview() {
   PREVIEW_PAIR_COUNT=0
   PREVIEW_TOTAL_SYNC_BYTES=0
   PREVIEW_TOTAL_SYNC_COUNT=0
+  PREVIEW_TOTAL_NEW_COUNT=0
+  PREVIEW_TOTAL_UPD_COUNT=0
   PREVIEW_PAIRS_TSV=""
   echo "=== 预览任务: ${task_name} ==="
 }
 
 # 添加一个同步对到预览
 # 用法: add_preview_pair <source_path> <dest_path> [--exclude pat] ...
+#   （与 tasks.sh 调用约定一致: extra_args 可能含 --delete-before 等
+#   sync 特有参数，统计前先剥离为纯过滤口径）
 add_preview_pair() {
   local source_path="$1"
   local dest_path="$2"
   shift 2
-  local extra_args=("$@")
+  local -a extra_args=("$@")
 
   PREVIEW_PAIR_COUNT=$((PREVIEW_PAIR_COUNT + 1))
   echo "  同步对 ${PREVIEW_PAIR_COUNT}: ${source_path} → ${dest_path}"
 
-  # 获取源端大小（带 exclude，带缓存）
-  local src_data src_bytes src_count
-  src_data=$(_get_source_size_with_excludes "$source_path" "${extra_args[@]}")
-  src_bytes=$(echo "$src_data" | awk '{print $1}')
-  src_count=$(echo "$src_data" | awk '{print $2}')
-
-  # 获取目标大小（与源端使用相同的 --exclude 口径，避免目标端历史残留文件
-  # 被计入统计而使文件数/大小与源端对不上）
-  local dst_data dst_bytes dst_count
-  dst_data=$(_get_remote_size_count "$dest_path" "${extra_args[@]}")
-  dst_bytes=$(echo "$dst_data" | awk '{print $1}')
-  dst_count=$(echo "$dst_data" | awk '{print $2}')
-
-  # 计算预估待同步（原始差值）
-  local sync_bytes sync_count
-  if [ "$src_bytes" -gt "$dst_bytes" ]; then
-    sync_bytes=$((src_bytes - dst_bytes))
+  # 源端清单 + 缓存（主 shell 内读写: 命令替换子 shell 里的数组赋值
+  # 回不到父进程，缓存必须由本函数落盘，供 tasks.sh 进度注册等复用）
+  _extract_filter_args "${extra_args[@]}"
+  local _src_cache_key="${source_path} ${FILTER_ARGS[*]}"
+  local src_json
+  if [ -n "${PREVIEW_SRC_LIST_CACHE[$_src_cache_key]:-}" ]; then
+    src_json="${PREVIEW_SRC_LIST_CACHE[$_src_cache_key]}"
   else
-    sync_bytes=0
-  fi
-  if [ "$src_count" -gt "$dst_count" ]; then
-    sync_count=$((src_count - dst_count))
-  else
-    sync_count=0
+    src_json=$(_get_listing_json "$source_path" "${FILTER_ARGS[@]}")
+    if [ -z "$src_json" ]; then
+      echo "⚠️ add_preview_pair: 源端清单获取失败 (${source_path})" >&2
+      src_json="[]"
+    fi
+    PREVIEW_SRC_LIST_CACHE[$_src_cache_key]="$src_json"
   fi
 
-  # 扣减已通过修复方式同步的文件（这些文件在目标端以不同路径/文件名存在）
-  # 避免修复文件导致预览显示"虚假缺失"
+  # 源端大小/文件数（从同一份清单推导，避免再拉一次 rclone size）
+  local src_bytes src_count
+  src_bytes=$(echo "$src_json" | jq -r 'map(.Size // 0) | add // 0' 2>/dev/null) || src_bytes=0
+  src_count=$(echo "$src_json" | jq -r 'length' 2>/dev/null) || src_count=0
+  [[ "$src_bytes" =~ ^[0-9]+$ ]] || src_bytes=0
+  [[ "$src_count" =~ ^[0-9]+$ ]] || src_count=0
+
+  # 目标端清单（与源端同一 exclude 口径，避免被排除路径/历史残留混入比对）
+  local dst_json
+  dst_json=$(_get_listing_json "$dest_path" "${FILTER_ARGS[@]}")
+  if [ -z "$dst_json" ]; then
+    echo "⚠️ add_preview_pair: 目标端清单获取失败 (${dest_path})，按目标端为空估算（全量待同步）" >&2
+    dst_json="[]"
+  fi
+
+  # 已修复文件（marker fixed_files: original 以替代名存在于目标端）
+  # 实际 sync 用 filter-from 排除 original/alternative（不传输不删除），
+  # 预览同口径剔除，保证预估与 sync 实际行为一致
   _load_marker_fixed_files "$source_path" "$dest_path" "${PREVIEW_TASK_NAME:-}"
-  local raw_sync_bytes="$sync_bytes" raw_sync_count="$sync_count"
+
+  # 逐文件比对（--size-only 口径），输出 TSV:
+  #   new_count new_bytes upd_count upd_bytes fixed_hit_count fixed_hit_bytes
+  # fixed_hit_* = 差异中命中 marker original 的条目（被剔除的部分）
+  local diff_tsv
+  diff_tsv=$(jq -nr \
+    --argjson src "$src_json" \
+    --argjson dst "$dst_json" \
+    --argjson fixed "${MARKER_FIXED_FILES:-[]}" '
+    ($dst | map({key: .Path, value: (.Size // -1)}) | from_entries) as $dmap
+    | (($fixed // []) | map(.original)) as $excl
+    | [$src[]
+        | select(($dmap[.Path] // -1) != .Size)
+        | { size: (.Size // 0),
+            kind: (if ($dmap[.Path] == null) then "new" else "upd" end),
+            fixed: ((.Path as $p | $excl | index($p)) != null) }] as $diff
+    | ($diff | map(select(.fixed))) as $fx
+    | ($diff | map(select(.fixed | not))) as $need
+    | ($need | map(select(.kind == "new"))) as $news
+    | ($need | map(select(.kind == "upd"))) as $upds
+    | [($news | length), ($news | map(.size) | add // 0),
+      ($upds | length), ($upds | map(.size) | add // 0),
+      ($fx   | length), ($fx   | map(.size) | add // 0)]
+    | @tsv
+  ' 2>/dev/null || echo "")
+
+  local new_count=0 new_bytes=0 upd_count=0 upd_bytes=0 fixed_hit_count=0 fixed_hit_bytes=0
+  if [ -n "$diff_tsv" ]; then
+    IFS=$'\t' read -r new_count new_bytes upd_count upd_bytes fixed_hit_count fixed_hit_bytes <<< "$diff_tsv"
+  fi
+  local _v
+  for _v in new_count new_bytes upd_count upd_bytes fixed_hit_count fixed_hit_bytes; do
+    [[ "${!_v}" =~ ^[0-9]+$ ]] || eval "$_v=0"
+  done
+
+  local sync_bytes=$((new_bytes + upd_bytes))
+  local sync_count=$((new_count + upd_count))
   local fixed_note=""
-  if [ "${MARKER_FIXED_COUNT:-0}" -gt 0 ]; then
-    local adjusted_count=$((sync_count - MARKER_FIXED_COUNT))
-    [ "$adjusted_count" -lt 0 ] && adjusted_count=0
-    local adjusted_bytes=$((sync_bytes - MARKER_FIXED_BYTES))
-    [ "$adjusted_bytes" -lt 0 ] && adjusted_bytes=0
-    fixed_note=" · <i>已扣减 ${MARKER_FIXED_COUNT} 个修复文件 / $(format_bytes "$MARKER_FIXED_BYTES")</i>"
-    sync_count=$adjusted_count
-    sync_bytes=$adjusted_bytes
+  if [ "$fixed_hit_count" -gt 0 ]; then
+    fixed_note=" · <i>已扣减 ${fixed_hit_count} 个修复文件 / $(format_bytes "$fixed_hit_bytes")</i>"
   fi
 
   PREVIEW_TOTAL_SYNC_BYTES=$((PREVIEW_TOTAL_SYNC_BYTES + sync_bytes))
   PREVIEW_TOTAL_SYNC_COUNT=$((PREVIEW_TOTAL_SYNC_COUNT + sync_count))
+  PREVIEW_TOTAL_NEW_COUNT=$((PREVIEW_TOTAL_NEW_COUNT + new_count))
+  PREVIEW_TOTAL_UPD_COUNT=$((PREVIEW_TOTAL_UPD_COUNT + upd_count))
 
   # exclude 摘要
   local exclude_summary
@@ -141,24 +189,26 @@ add_preview_pair() {
   # 📁 组头 + ├─/└─ 树形条目（与进度通知的任务列表同风格）
   # 空字段写 "-" 占位: tab 是 IFS 空白类字符，read 会吞掉空列导致字段错位
   # （同 progress.sh 的任务队列 TSV 约定）
+  # 字段: src/excl/sbytes/scount/dst/ybytes/ycount/ynew/yupd/fnote
   local _excl_ph="${exclude_summary:--}"
   local _fnote_ph="${fixed_note:--}"
-  PREVIEW_PAIRS_TSV+="${source_path}"$'\t'"${_excl_ph}"$'\t'"${src_bytes}"$'\t'"${src_count}"$'\t'"${dest_path}"$'\t'"${sync_bytes}"$'\t'"${sync_count}"$'\t'"${_fnote_ph}"$'\n'
+  PREVIEW_PAIRS_TSV+="${source_path}"$'\t'"${_excl_ph}"$'\t'"${src_bytes}"$'\t'"${src_count}"$'\t'"${dest_path}"$'\t'"${sync_bytes}"$'\t'"${sync_count}"$'\t'"${new_count}"$'\t'"${upd_count}"$'\t'"${_fnote_ph}"$'\n'
 }
 
 # 同步对详情渲染: 仅按源端分组（同源端多目标一组的树形列表）
 #   📁 <code>src</code> · <i>源端 X / N 文件</i>        ← 组内各条目源端大小一致时上提组头
 #     ├─ <code>dst</code> · <i>源端 X / N 文件</i> · <b>+Y / +K 文件</b>
+#     │   差异构成：新增 a · 同名更新 b                  ← 存在同名更新时的说明子行
 #     │   排除：<code>pat</code>                          ← 有排除规则的条目子行
 #     └─ <code>dst</code> · <i>无变动</i>
 #   组内源端大小不一（如部分目标带排除规则）时组头不带大小、各条目单独标注，
 #   避免同一源端因排除规则不同而分裂成多组; 组间空一行分隔。
-# 输入: PREVIEW_PAIRS_TSV（每行 src/excl/sbytes/scount/dst/ybytes/ycount/fnote）
+# 输入: PREVIEW_PAIRS_TSV（每行 src/excl/sbytes/scount/dst/ybytes/ycount/ynew/yupd/fnote）
 _preview_render_pairs_detail() {
   # 第一遍: 按源端聚合条目数，并判断组内源端大小是否一致（能否上提组头）
   declare -A _g_total=() _g_size=()
   local -a _g_order=()
-  while IFS=$'\t' read -r _src _excl _sbytes _scount _dst _ybytes _ycount _fnote; do
+  while IFS=$'\t' read -r _src _excl _sbytes _scount _dst _ybytes _ycount _ynew _yupd _fnote; do
     [ -z "$_src" ] && continue
     if [ -z "${_g_total[$_src]+x}" ]; then
       _g_total[$_src]=0
@@ -171,7 +221,7 @@ _preview_render_pairs_detail() {
   done <<< "$PREVIEW_PAIRS_TSV"
   # 第二遍: 渲染条目（含子行），按组缓冲
   declare -A _g_seen=() _g_block=()
-  while IFS=$'\t' read -r _src _excl _sbytes _scount _dst _ybytes _ycount _fnote; do
+  while IFS=$'\t' read -r _src _excl _sbytes _scount _dst _ybytes _ycount _ynew _yupd _fnote; do
     [ -z "$_src" ] && continue
     # 还原 "-" 占位为空
     [ "$_excl" = "-" ] && _excl=""
@@ -191,6 +241,14 @@ _preview_render_pairs_detail() {
     _g_block[$_src]+="$(tree_conn "$_last")${_entry}"$'\n'
     local _sub
     _sub=$(tree_sub "$_last")
+    # 差异构成子行: 存在同名更新时展示（纯新增自明，不占行），
+    # 直接回答 "+X / +0 文件" 类困惑——同名更新文件也计入待同步数
+    if [ "${_yupd:-0}" -gt 0 ]; then
+      local _comp="差异构成："
+      [ "${_ynew:-0}" -gt 0 ] && _comp+="新增 ${_ynew} · "
+      _comp+="同名更新 ${_yupd}"
+      _g_block[$_src]+="${_sub}${_comp}"$'\n'
+    fi
     [ -n "$_excl" ] && _g_block[$_src]+="${_sub}排除：<code>$(escape_html "$_excl")</code>"$'\n'
     [ -n "$_fnote" ] && _g_block[$_src]+="${_sub}${_fnote# · }"$'\n'
   done <<< "$PREVIEW_PAIRS_TSV"
@@ -211,11 +269,19 @@ _preview_render_pairs_detail() {
 # 发送任务预览通知到 Telegram
 # 用法: flush_task_preview
 flush_task_preview() {
+  # 合计构成说明: 存在同名更新时附注（与条目子行同规则），纯新增自明
+  local _total_note=""
+  if [ "${PREVIEW_TOTAL_UPD_COUNT:-0}" -gt 0 ]; then
+    _total_note="（"
+    [ "${PREVIEW_TOTAL_NEW_COUNT:-0}" -gt 0 ] && _total_note+="新增 ${PREVIEW_TOTAL_NEW_COUNT} · "
+    _total_note+="同名更新 ${PREVIEW_TOTAL_UPD_COUNT}）"
+  fi
+
   local msg=""
   tg_add_title msg "📋 任务预览 · ${PREVIEW_TASK_NAME}"
   tg_add_section msg "📊 同步对（${PREVIEW_PAIR_COUNT} 对）"
   tg_append msg "$(_preview_render_pairs_detail)"
-  tg_append msg $'\n\n'"📦 合计预估待同步：<b>$(format_bytes "$PREVIEW_TOTAL_SYNC_BYTES")</b> / <b>${PREVIEW_TOTAL_SYNC_COUNT}</b> 文件"
+  tg_append msg $'\n\n'"📦 合计预估待同步：<b>$(format_bytes "$PREVIEW_TOTAL_SYNC_BYTES")</b> / <b>${PREVIEW_TOTAL_SYNC_COUNT}</b> 文件${_total_note}"
 
   send_telegram_message "$msg"
   echo "  已发送 ${PREVIEW_TASK_NAME} 预览通知"
