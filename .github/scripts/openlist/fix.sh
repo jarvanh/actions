@@ -59,34 +59,7 @@ _get_addition_from_db() {
 
   # 失败原因打到 stderr（由 _get_crypt_config 捕获进诊断日志）;
   # 常规 mode=ro 打不开（WAL/-shm 锁等）时用 immutable=1 重试（私有副本，安全）
-  python3 - "$db_local" "$mount" <<'PY'
-import sqlite3, sys
-db, mount = sys.argv[1], sys.argv[2]
-def norm(p):
-    return (p or "").strip().strip("/")
-def dump(con):
-    rows = con.execute("SELECT mount_path, addition FROM x_storages").fetchall()
-    for mp, add in rows:
-        if norm(mp) == norm(mount):
-            if add:
-                print(add)
-                sys.exit(0)
-            print(f"目标 {mount} 的 addition 为空", file=sys.stderr)
-            sys.exit(3)
-    names = ", ".join(norm(mp) or "?" for mp, _ in rows) or "(空表)"
-    print(f"x_storages 中无 {mount}; 现有: {names}", file=sys.stderr)
-    sys.exit(4)
-try:
-    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-    dump(con)
-except sqlite3.Error as e:
-    try:
-        con = sqlite3.connect(f"file:{db}?mode=ro&immutable=1", uri=True)
-        dump(con)
-    except sqlite3.Error as e2:
-        print(f"sqlite 读取失败: {e}; immutable 重试: {e2}", file=sys.stderr)
-        sys.exit(5)
-PY
+  python3 "$GITHUB_WORKSPACE/.github/scripts/openlist/get_storage_addition.py" "$db_local" "$mount"
   local rc=$?
   rm -f "$db_local" "${db_local}-wal" "${db_local}-shm" 2>/dev/null || true
   return $rc
