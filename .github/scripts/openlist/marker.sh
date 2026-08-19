@@ -735,11 +735,20 @@ send_sync_skipped() {
     ' 2>/dev/null || echo "")
     if [ -n "$method_summary" ]; then
       tg_add_section msg "🔧 修复方式构成"
+      # 树形条目（├─/└─）: 方式 × 数量 · 大小，summary 缩进为子行
+      local -a _m_entries=() _m_summaries=()
       while IFS=$'\t' read -r m_kind m_count m_bytes m_summary; do
         [ -z "$m_kind" ] && continue
-        tg_append msg "• <b>$(escape_html "$m_kind")</b> × ${m_count} · <i>$(format_bytes "$m_bytes")</i>"$'\n'
-        [ -n "$m_summary" ] && tg_append msg "  $(escape_html "$m_summary")"$'\n'
+        _m_entries+=("<b>$(escape_html "$m_kind")</b> × ${m_count} · <i>$(format_bytes "$m_bytes")</i>")
+        _m_summaries+=("$(escape_html "$m_summary")")
       done <<< "$method_summary"
+      local _i _n=${#_m_entries[@]} _last
+      for (( _i=0; _i<_n; _i++ )); do
+        _last=0
+        [ $((_i + 1)) -eq "$_n" ] && _last=1
+        tg_append msg "$(tree_conn "$_last")${_m_entries[$_i]}"$'\n'
+        [ -n "${_m_summaries[$_i]}" ] && tg_append msg "$(tree_sub "$_last")${_m_summaries[$_i]}"$'\n'
+      done
     fi
     tg_append msg "🔗 完整还原脚本保存在 OneDrive marker <code>$(escape_html "$(get_marker_path "$task_name" "$dest_path")")</code> 的 fixed_files[].restore.script 字段"$'\n'
   fi
