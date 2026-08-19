@@ -59,7 +59,7 @@ _carry_forward_fixed() {
   fi
 
   local carried_entries=()
-  local idx orig _dummy size_bytes
+  local idx orig _dummy _size_bytes
   local tsv
   tsv=$(echo "$old_marker" | jq -r '
     (.fixed_files // []) | to_entries[]
@@ -68,7 +68,7 @@ _carry_forward_fixed() {
   local old_fixed_json
   old_fixed_json=$(echo "$old_marker" | jq -c '.fixed_files // []' 2>/dev/null || echo "[]")
 
-  while IFS=$'\t' read -r idx orig _dummy size_bytes; do
+  while IFS=$'\t' read -r idx orig _dummy _size_bytes; do
     [ -z "$orig" ] && continue
     # 探测目标端是否已出现原名文件（已存在则无需继承）
     local probe exists
@@ -620,13 +620,13 @@ _load_marker_fixed_files() {
 # 用法: _top_dirs_to_lines <marker_json_text>
 _top_dirs_to_lines() {
   local json="$1"
-  # 先判断 top_dirs 是不是数组：如果是就 sort .[]；否则按字符串 split("\n") 处理
+  # 先判断 top_dirs 是不是数组：是则逐项输出；否则按字符串原样输出（本身即多行）
   local is_array
   is_array=$(echo "$json" | jq -r 'if (.top_dirs // null) | type == "array" then "1" else "0" end' 2>/dev/null || echo 0)
   if [ "$is_array" = "1" ]; then
     echo "$json" | jq -r '.top_dirs[]' 2>/dev/null | sort
   else
-    echo "$json" | jq -r '.top_dirs // ""' 2>/dev/null | tr '\n' '\012' | sort
+    echo "$json" | jq -r '.top_dirs // ""' 2>/dev/null | sort
   fi
 }
 
@@ -708,7 +708,9 @@ send_sync_skipped() {
   fixed_bytes=$(echo "$MARKER_JSON" | jq -r '.fixed_bytes // 0' 2>/dev/null || echo 0)
 
   local msg=""
-  tg_add_title msg "⏭️ 同步任务跳过（1 天内已成功）"
+  # 跳过窗口由任务开关决定（--1d-skip=24h / --2d-skip=48h / ...），标题动态展示
+  local skip_window_hours=$((SYNC_SKIP_SECONDS / 3600))
+  tg_add_title msg "⏭️ 同步任务跳过（${skip_window_hours} 小时内已成功）"
   tg_add_kv msg "任务" "$task_name"
   tg_add_path msg "源端" "$source_path"
   tg_add_path msg "目标" "$dest_path"
