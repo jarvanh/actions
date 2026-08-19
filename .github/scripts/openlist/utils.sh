@@ -261,33 +261,26 @@ _extract_filter_args() {
   done
 }
 
-# 截断过长的路径用于流量图显示
-# 用法: _shorten_path <path> [max_len]
-_shorten_path() {
-  local p="$1"
-  local max_len="${2:-50}"
-  if [ ${#p} -gt "$max_len" ]; then
-    echo "...${p: -$((max_len - 3))}"
-  else
-    echo "$p"
-  fi
-}
-
-# 提取 --exclude 摘要（用于预览显示，逗号分隔）
+# 提取 --exclude 摘要（用于预览显示，顿号连接）
+# 去重: 任务配置常同时传 "/pat" 与 "pat" 两种锚定形式（rclone 语义有别但
+# 展示冗余），按去前导 / 的形式去重并展示该写法
 _extract_exclude_summary() {
   local extra_args=("$@")
-  local summary=""
-  local j=0
+  local -a _pats=()
+  declare -A _seen=()
+  local j=0 p
   while [ $j -lt ${#extra_args[@]} ]; do
     if [ "${extra_args[$j]}" = "--exclude" ] && [ $((j+1)) -lt ${#extra_args[@]} ]; then
-      if [ -n "$summary" ]; then
-        summary+=", "
+      p="${extra_args[$((j+1))]#/}"
+      if [ -z "${_seen[$p]+x}" ]; then
+        _seen[$p]=1
+        _pats+=("$p")
       fi
-      summary+="${extra_args[$((j+1))]}"
     fi
     j=$((j+1))
   done
-  echo "$summary"
+  local IFS='、'
+  echo "${_pats[*]}"
 }
 
 # 获取 OpenList token（多路径 + 双字段查找）
