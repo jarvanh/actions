@@ -723,10 +723,13 @@ send_sync_skipped() {
     # 修复方式汇总（按 restore.kind 分组统计；TSV 交给 bash 格式化，
     # 字节数走 format_bytes 人类可读单位，summary 缩进为说明行）
     local method_summary
+    # 注意: 对象字面量的值表达式必须整体加括号 —— 裸写 `kind: .x // "y"` 是
+    # jq 编译错误（unexpected //），jq 不读 stdin 即退出（exit 3），大 JSON 下
+    # 上游 echo 写管道触发 Broken pipe（曾在线上报 line 735）
     method_summary=$(echo "$MARKER_JSON" | jq -r '
       (.fixed_files // []) | group_by(.restore.kind // "unknown")
-        | map({kind: .[0].restore.kind // "unknown",
-               summary: .[0].restore.summary // "",
+        | map({kind: (.[0].restore.kind // "unknown"),
+               summary: (.[0].restore.summary // ""),
                count: length,
                bytes: ([.[].size_bytes] | add // 0)})
         | sort_by(-.bytes)
