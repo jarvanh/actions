@@ -95,26 +95,6 @@ _derive_task_id() {
   echo "${task_name}_${first_component}"
 }
 
-# 目标端路径过长时截断为 "remote:挂载/一级目录/..."（保留头部上下文）
-# 用于进度通知的任务显示名（如 openlist:wopan175/0/xxx → openlist:wopan175/0/...）
-_short_dest_head() {
-  local p="${1:-}" max_len=40
-  [ ${#p} -le "$max_len" ] && { echo "$p"; return; }
-  case "$p" in
-    *:*)
-      local remote="${p%%:*}" rest="${p#*:}"
-      local first="${rest%%/*}" rest2="${rest#*/}"
-      case "$rest2" in
-        */*) echo "${remote}:${first}/${rest2%%/*}/..." ;;
-        *)   echo "$p" ;;
-      esac
-      ;;
-    *)
-      echo "...${p: -$((max_len - 3))}"
-      ;;
-  esac
-}
-
 # 预览/仅注册模式：注册任务到进度系统（不实际同步）
 #   TASK_PREVIEW_ONLY=1  — 注册 + 发送预览通知
 #   TASK_REGISTER_ONLY=1 — 仅注册（skip_preview=true 时使用，保证进度消息
@@ -140,13 +120,13 @@ _preview_register() {
   fi
 
   # 注册到进度系统（pending 状态）
-  # 显示名: 目标端过长时截断；附源端大小提示（add_preview_pair 刚算过，缓存命中）
+  # 显示名: 源端 → 目标端完整路径；附源端大小提示（add_preview_pair 刚算过，缓存命中）
   local _task_id _src_bytes _size_hint
   _task_id=$(_derive_task_id "$task_name" "$dest_path")
   _src_bytes=$(_get_source_size_with_excludes "$source_path" "${extra_args[@]}" | awk '{print $1}')
   _size_hint=""
   [[ "$_src_bytes" =~ ^[0-9]+$ ]] && [ "$_src_bytes" -gt 0 ] && _size_hint=$(format_bytes "$_src_bytes")
-  progress_register_task "$_task_id" "${source_path} → $(_short_dest_head "$dest_path")" "$_size_hint"
+  progress_register_task "$_task_id" "${source_path} → ${dest_path}" "$_size_hint"
 }
 
 # 渲染子目录阶段树（供 PROGRESS_PHASE_INFO，多行）
