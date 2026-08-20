@@ -221,28 +221,35 @@ _progress_render() {
 
   # 进行中任务块: 任务条目（分组渲染）+ 缩进两格的阶段/统计信息
   #   阶段首行（▸ 摘要）→ 统计行（▸ 📊 ...）→ 阶段剩余行（├─/└─ 树形子项）
-  if [ "$finalized" -ne 1 ] && [ "$running" -gt 0 ]; then
-    tg_add_section msg "📍 进行中 · ${running}"
+  # finalized（中断/收尾）时仍渲染任务条目: 标题已报 "N 个进行中未执行完"，
+  # 条目却不列出的话，被打断的任务（如 wopan176Crypt/0）在消息里完全失踪;
+  # 阶段/统计不展示（progress_finalize 已清空，属过期信息）
+  if [ "$running" -gt 0 ]; then
+    local _running_title="📍 进行中 · ${running}"
+    [ "$finalized" -eq 1 ] && _running_title="⏸️ 进行中（未执行完）· ${running}"
+    tg_add_section msg "$_running_title"
     tg_add_block msg "$(_progress_render_task_list "$running_lines")"
 
-    local phase phase_first="" phase_rest=""
-    phase=$(_progress_get_phase)
-    if [ -n "$phase" ]; then
-      phase_first="$(printf '%s\n' "$phase" | head -1)"
-      phase_rest="$(printf '%s\n' "$phase" | tail -n +2)"
-      msg+="  ${phase_first}"$'\n'
-    fi
+    if [ "$finalized" -ne 1 ]; then
+      local phase phase_first="" phase_rest=""
+      phase=$(_progress_get_phase)
+      if [ -n "$phase" ]; then
+        phase_first="$(printf '%s\n' "$phase" | head -1)"
+        phase_rest="$(printf '%s\n' "$phase" | tail -n +2)"
+        msg+="  ${phase_first}"$'\n'
+      fi
 
-    local stats
-    stats=$(_progress_get_stats)
-    [ -n "$stats" ] && msg+="  ${stats}"$'\n'
+      local stats
+      stats=$(_progress_get_stats)
+      [ -n "$stats" ] && msg+="  ${stats}"$'\n'
 
-    if [ -n "$phase_rest" ]; then
-      local pline
-      while IFS= read -r pline; do
-        [ -z "$pline" ] && continue
-        msg+="  ${pline}"$'\n'
-      done <<< "$phase_rest"
+      if [ -n "$phase_rest" ]; then
+        local pline
+        while IFS= read -r pline; do
+          [ -z "$pline" ] && continue
+          msg+="  ${pline}"$'\n'
+        done <<< "$phase_rest"
+      fi
     fi
   fi
 
