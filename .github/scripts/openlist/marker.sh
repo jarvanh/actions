@@ -33,12 +33,22 @@ get_marker_path() {
 # 保证 onedrive 上的 marker 始终是人可读的结构化 JSON
 # （历史缺陷: 多数写入点直接 rcat 紧凑 JSON，marker 被"修复管线"重写后
 #  变成不可读的一大坨单行）。
-# jq 解析失败（调用方刚构建的 JSON 理论上不会）时原样写入，保数据不丢。
+# jq 构建产物为空/非法时拒绝写入并返回 1 —— 若把空串原样 rcat 上去，
+# 会直接抹掉旧 marker 里的 fixed_files/fix_blacklist 等修复记录
+# （保留旧 marker + 走调用方兜底路径，远好于静默清零）。
 # 用法: _marker_write <json_text> <marker_path>  返回 rclone 的退出码
 _marker_write() {
   local json="$1" marker_path="$2" pretty
-  pretty=$(printf '%s' "$json" | jq . 2>/dev/null) || pretty=""
-  printf '%s\n' "${pretty:-$json}" | rclone rcat "$marker_path"
+  if [ -z "$json" ]; then
+    echo "⚠️ _marker_write: 拒绝写入空 JSON（保留旧 marker）: ${marker_path}" >&2
+    return 1
+  fi
+  pretty=$(printf '%s' "$json" | jq . 2>/dev/null)
+  if [ -z "$pretty" ]; then
+    echo "⚠️ _marker_write: JSON 非法，拒绝写入（保留旧 marker）: ${marker_path}" >&2
+    return 1
+  fi
+  printf '%s\n' "$pretty" | rclone rcat "$marker_path"
 }
 
 # 从旧 marker 继承仍有效的修复条目（original 在目标端仍不存在 = 未对齐，保留；
@@ -81,10 +91,12 @@ _carry_forward_fixed() {
   done <<< "$tsv"
 
   if [ "${#carried_entries[@]}" -gt 0 ]; then
-    local idx_args
-    idx_args=$(printf ', .[%s]' "${carried_entries[@]}")
-    idx_args=${idx_args#, }
-    carried_json=$(echo "$old_fixed_json" | jq -c "[ $idx_args ]" 2>/dev/null || echo "[]")
+    # 索引走 --argjson 数字数组（极小）; 大清单 old_fixed_json 本就在 stdin，
+    # 不拼进 jq 程序文本——程序文本同受单参数 128KB 上限约束
+    local idx_json
+    local IFS=,
+    idx_json="[${carried_entries[*]}]"
+    carried_json=$(echo "$old_fixed_json" | jq -c --argjson idx "$idx_json" '[.[$idx[]]]' 2>/dev/null || echo "[]")
   fi
   echo "$carried_json"
 }
@@ -105,9 +117,13 @@ fix_blacklist_to_json() {
 
 # 合并两个 JSON 对象（b 并入 a，b 优先）；失败时回退为 a
 # 注意: 调用方禁止写 ${VAR:-{}} —— bash 会给已赋值变量追加字面 }，产生非法 JSON
+# a/b 经 stdin 喂给 jq（--argjson 走 argv，黑名单对象积累到上千条时
+# 超 128KB 单参数上限，execve E2BIG 失败被吞 → 合并结果静默回退）
 _marker_merge_json() {
   local a="$1" b="$2"
-  jq -cn --argjson a "$a" --argjson b "$b" '($a // {}) * ($b // {})' 2>/dev/null || echo "$a"
+  [ -z "$a" ] && a="{}"
+  [ -z "$b" ] && b="{}"
+  printf '%s\n%s\n' "$a" "$b" | jq -sc '. as [$x, $y] | ($x // {}) * ($y // {})' 2>/dev/null || echo "$a"
 }
 
 # 从 marker JSON 安全提取 fix_blacklist 对象（缺失/非对象时输出 {}）
@@ -117,19 +133,25 @@ _marker_read_blacklist() {
 
 # 在 marker JSON 上合并黑名单字段（旧 ∪ 新，新优先），stdin → stdout
 # 用法: echo "$marker_json" | marker_merge_blacklist "$bl_json"
+# bl_json 与 marker 均经 stdin 喂 jq（不走 argv，防 128KB 单参数上限）
 marker_merge_blacklist() {
   local bl_json="$1"
-  jq -c --argjson bl "$bl_json" \
-    '. + {fix_blacklist: ((.fix_blacklist // {}) * $bl)}' 2>/dev/null
+  [ -z "$bl_json" ] && bl_json="{}"
+  { cat; printf '\n%s\n' "$bl_json"; } | jq -sc \
+    '. as [$m, $bl] | $m + {fix_blacklist: (($m.fix_blacklist // {}) * $bl)}' 2>/dev/null
 }
 
 # 在 marker JSON 上追加/覆盖一个修复条目（同 original 新覆盖旧）并合并黑名单，
 # stdin → stdout；fixed_count/fixed_bytes 自动重算
 # 用法: marker_add_fix_entry "$entry_json" "$bl_json" < "$state_file"
+# marker（stdin）/entry/bl 全部并入 stdin 文档流喂 jq -s —— state_file 里的
+# fixed_files 含内嵌 restore 脚本，条目多时远超 argv 单参数 128KB 上限，
+# --argjson 传参会 E2BIG 失败 → merged 为空 → 修复条目静默丢失
 marker_add_fix_entry() {
   local entry_json="$1" bl_json="$2"
-  jq -c --argjson e "$entry_json" --argjson bl "$bl_json" '
-    . as $m
+  [ -z "$bl_json" ] && bl_json="{}"
+  { cat; printf '\n%s\n%s\n' "$entry_json" "$bl_json"; } | jq -sc '
+    . as [$m, $e, $bl]
     | ($m.fixed_files // []) as $ff
     | ($ff | map(select(.original != $e.original)) + [$e]) as $nff
     | $m + {fixed_files: $nff,
@@ -209,11 +231,22 @@ save_fix_state_marker() {
   [[ "$carried_count" =~ ^[0-9]+$ ]] || carried_count=0
 
   local merged_fixed_json
-  # -n: 程序只用 --argjson 变量、不读输入；无 -n 时 jq 会吞掉调用方
-  # while read 循环的 stdin（auto-split 子目录列表被吃 → 后续子任务静默跳过）
-  merged_fixed_json=$(jq -scn --argjson new "$new_fixed_json" --argjson carried "$carried_json" '
-    $new + ([$carried[] | select((.original as $o | $new | map(.original == $o) | any) | not)])
-  ' 2>/dev/null || echo "[]")
+  # 两份清单经 stdin 文档流喂 jq -s（--argjson 走 argv，fixed_files 条目内嵌
+  # restore 脚本、总量轻松超 128KB 单参数上限 → E2BIG 被吞 → 历史上静默
+  # 回退 "[]"，把已落盘修复记录整体清零）
+  merged_fixed_json=$(printf '%s\n%s\n' "$new_fixed_json" "$carried_json" | jq -sc '
+    . as [$new, $carried]
+    | $new + ([$carried[] | select((.original as $o | $new | map(.original == $o) | any) | not)])
+  ' 2>/dev/null || echo "")
+  # 降级链: 完整合并失败时优先保住本轮新修复（最新事实），其次继承清单，
+  # 绝不静默回退 "[]"（那会把旧 marker 修复记录清零）
+  if [ -z "$merged_fixed_json" ]; then
+    if echo "$new_fixed_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
+      merged_fixed_json="$new_fixed_json"
+    else
+      merged_fixed_json="$carried_json"
+    fi
+  fi
 
   # 黑名单合并: 旧 ∪ 新（新优先）；对已对齐文件的黑名单条目一并清理
   local merged_bl_json="{}"
@@ -230,23 +263,23 @@ save_fix_state_marker() {
 
   # 合并写入: 有旧 marker 时仅替换修复字段（保留 last_success 等）；
   # 无旧 marker 时创建仅含修复状态的对象（无 last_success → 不影响跳过判断）
+  # 大字段（fixed_files/fix_blacklist）走 stdin，小标量走 --arg/--argjson
   local marker_json
   if [ -n "$old_marker" ] && echo "$old_marker" | jq -e 'type == "object"' >/dev/null 2>&1; then
-    marker_json=$(echo "$old_marker" | jq -c \
-      --argjson fixed_files "$merged_fixed_json" \
+    marker_json=$(printf '%s\n%s\n%s\n' "$old_marker" "$merged_fixed_json" "$merged_bl_json" | jq -sc \
       --argjson fixed_count "$fixed_count" \
-      --argjson fixed_bytes "$fixed_bytes" \
-      --argjson fix_blacklist "$merged_bl_json" \
-      '. + {fixed_files: $fixed_files, fixed_count: $fixed_count, fixed_bytes: $fixed_bytes, fix_blacklist: $fix_blacklist}')
+      --argjson fixed_bytes "$fixed_bytes" '
+      . as [$m, $fixed_files, $fix_blacklist]
+      | $m + {fixed_files: $fixed_files, fixed_count: $fixed_count, fixed_bytes: $fixed_bytes, fix_blacklist: $fix_blacklist}')
   else
-    marker_json=$(jq -cn \
+    marker_json=$(printf '%s\n%s\n' "$merged_fixed_json" "$merged_bl_json" | jq -sc \
       --arg source_path "$source_path" \
       --arg dest_path "$dest_path" \
-      --argjson fixed_files "$merged_fixed_json" \
       --argjson fixed_count "$fixed_count" \
-      --argjson fixed_bytes "$fixed_bytes" \
-      --argjson fix_blacklist "$merged_bl_json" \
-      '{source_path: $source_path, dest_path: $dest_path, fixed_files: $fixed_files, fixed_count: $fixed_count, fixed_bytes: $fixed_bytes, fix_blacklist: $fix_blacklist}')
+      --argjson fixed_bytes "$fixed_bytes" '
+      . as [$fixed_files, $fix_blacklist]
+      | {source_path: $source_path, dest_path: $dest_path, fixed_files: $fixed_files,
+         fixed_count: $fixed_count, fixed_bytes: $fixed_bytes, fix_blacklist: $fix_blacklist}')
   fi
 
   rclone mkdir "$SYNC_STATE_DIR" >/dev/null 2>&1 || true
@@ -405,23 +438,27 @@ save_sync_marker() {
 
   # 合并: 本轮新修复 ∪ 继承修复 ∪ fallback 扫描修复，以 original 为 key 去重
   # 优先级: 新修复 > 继承 > fallback（新修复信息更精确）
+  # 三份清单经 stdin 文档流喂 jq -s（--argjson 走 argv 受 128KB 单参数上限，
+  # fixed_files 条目内嵌 restore 脚本，积累后必超 → E2BIG 失败 → 修复记录丢失）
   local merged_fixed_json
-  # -n 必须保留: jq 不读 stdin（否则吞掉调用方 while read 循环的列表，见 138 行注释）
-  merged_fixed_json=$(jq -scn --argjson new "$new_fixed_json" \
-                           --argjson carried "$carried_json" \
-                           --argjson fb "$fallback_json" '
+  merged_fixed_json=$(printf '%s\n%s\n%s\n' "$new_fixed_json" "$carried_json" "$fallback_json" | jq -sc '
     def without_originals($arr; $orig_set):
       [$arr[] | select(.original as $o | ($orig_set | map(.original) | index($o) | not))];
-    $new as $N
-    | (without_originals($carried; $N)) as $C
-    | (without_originals($fb; ($N + $C))) as $F
-    | $N + $C + $F
+    . as [$new, $carried, $fb]
+    | (without_originals($carried; $new)) as $C
+    | (without_originals($fb; ($new + $C))) as $F
+    | $new + $C + $F
   ' 2>/dev/null)
-  # 上面 jq 写法较复杂容易错，失败时降级为 new ∪ carried
+  # 上面 jq 写法较复杂容易错，失败时降级为 new ∪ carried（仍走 stdin）
   if [ -z "$merged_fixed_json" ]; then
-    merged_fixed_json=$(jq -scn --argjson new "$new_fixed_json" --argjson carried "$carried_json" '
-      $new + ([$carried[] | select((.original as $o | $new | map(.original == $o) | any) | not)])
-    ' 2>/dev/null || echo "[]")
+    merged_fixed_json=$(printf '%s\n%s\n' "$new_fixed_json" "$carried_json" | jq -sc '
+      . as [$new, $carried]
+      | $new + ([$carried[] | select((.original as $o | $new | map(.original == $o) | any) | not)])
+    ' 2>/dev/null || echo "")
+  fi
+  # 再降级: 合并彻底失败时保住本轮新修复（最新事实），绝不回退 "[]"
+  if [ -z "$merged_fixed_json" ] && echo "$new_fixed_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    merged_fixed_json="$new_fixed_json"
   fi
 
   local fixed_count fixed_bytes
@@ -444,21 +481,23 @@ save_sync_marker() {
   [ -z "$_new_bl_json" ] && _new_bl_json="{}"
   merged_blacklist_json=$(_marker_merge_json "$merged_blacklist_json" "$_new_bl_json")
 
-  # 构建 JSON 标记
+  # 构建 JSON 标记（大字段 fixed_files/fix_blacklist 走 stdin，小标量走 --arg/--argjson）
   local marker_json
-  marker_json=$(jq -n \
+  marker_json=$(printf '%s\n%s\n' "$merged_fixed_json" "$merged_blacklist_json" | jq -s \
     --arg last_success "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --arg source_path "$source_path" \
     --arg dest_path "$dest_path" \
     --argjson source_bytes "$source_bytes" \
     --argjson source_count "$source_count" \
     --argjson top_dirs "$top_dirs_json" \
-    --argjson fixed_files "$merged_fixed_json" \
     --argjson fixed_count "$fixed_count" \
     --argjson fixed_bytes "$fixed_bytes" \
-    --argjson fix_blacklist "$merged_blacklist_json" \
     --argjson stats_filtered true \
-    '{last_success: $last_success, source_path: $source_path, dest_path: $dest_path, source_bytes: $source_bytes, source_count: $source_count, top_dirs: $top_dirs, fixed_files: $fixed_files, fixed_count: $fixed_count, fixed_bytes: $fixed_bytes, fix_blacklist: $fix_blacklist, stats_filtered: $stats_filtered}')
+    '. as [$fixed_files, $fix_blacklist]
+    | {last_success: $last_success, source_path: $source_path, dest_path: $dest_path,
+       source_bytes: $source_bytes, source_count: $source_count, top_dirs: $top_dirs,
+       fixed_files: $fixed_files, fixed_count: $fixed_count, fixed_bytes: $fixed_bytes,
+       fix_blacklist: $fix_blacklist, stats_filtered: $stats_filtered}')
 
   # 上传标记到 OneDrive
   rclone mkdir "$SYNC_STATE_DIR" >/dev/null 2>&1 || true
