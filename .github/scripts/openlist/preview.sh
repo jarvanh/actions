@@ -138,12 +138,15 @@ add_preview_pair() {
   # 逐文件比对（--size-only 口径），输出 TSV:
   #   new_count new_bytes upd_count upd_bytes fixed_hit_count fixed_hit_bytes
   # fixed_hit_* = 差异中命中 marker original 的条目（被剔除的部分）
+  # 三份清单必须经 stdin 喂给 jq（-s slurp 成数组后解构），禁止 --argjson 传参:
+  #   内核单参数上限 MAX_ARG_STRLEN ≈ 128KB，真实任务清单（约 700+ 文件）必超，
+  #   execve 直接 E2BIG "Argument list too long"，被 2>/dev/null 吞掉后
+  #   diff_tsv 为空、差异恒为 0 —— 线上所有任务预览恒示 "0 B / 0 文件" 的元凶
+  #   （源端大小另有管道计算不受影响，故预览里源端大小正常、待同步恒 0）
   local diff_tsv
-  diff_tsv=$(jq -nr \
-    --argjson src "$src_json" \
-    --argjson dst "$dst_json" \
-    --argjson fixed "${MARKER_FIXED_FILES:-[]}" '
-    ($dst | map({key: .Path, value: (.Size // -1)}) | from_entries) as $dmap
+  diff_tsv=$(printf '%s\n%s\n%s\n' "$src_json" "$dst_json" "${MARKER_FIXED_FILES:-[]}" | jq -sr '
+    . as [$src, $dst, $fixed]
+    | ($dst | map({key: .Path, value: (.Size // -1)}) | from_entries) as $dmap
     | (($fixed // []) | map(.original)) as $excl
     | [$src[]
         | select(($dmap[.Path] // -1) != .Size)
