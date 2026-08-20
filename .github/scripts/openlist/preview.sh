@@ -13,6 +13,10 @@
 #   已修复文件（marker fixed_files[].original，实际 sync 用 filter-from
 #   排除 = 不传输不删除）从差异中精确剔除——只剔除真实出现在差异里的条目，
 #   不再按总数盲减。
+#   目标端清单获取失败时（OpenList 驱动懒加载/网盘限流等）: 快速失败先重试，
+#   仍失败则按空目标端全量估算（同步口径上界），且必须在预览里明示 ⚠️——
+#   历史缺陷: 失败只打 job 日志，预览静默把全量当精确值展示，目标端已有
+#   大半文件时合计虚高数倍，用户无从辨别。
 #   历史缺陷（总量差值法）: bytes 与 count 各自做总量减法再按总数盲减
 #   fixed_files，同名更新文件（如每日轮转的 *_latest.tar.gz）只贡献字节差
 #   不贡献文件数差，产生 "+6.7 GiB / +0 文件" 的矛盾展示，且盲减可能把
@@ -82,6 +86,7 @@ start_task_preview() {
   PREVIEW_TOTAL_SYNC_COUNT=0
   PREVIEW_TOTAL_NEW_COUNT=0
   PREVIEW_TOTAL_UPD_COUNT=0
+  PREVIEW_FAIL_PAIRS=0
   PREVIEW_PAIRS_TSV=""
   echo "=== 预览任务: ${task_name} ==="
 }
@@ -123,10 +128,28 @@ add_preview_pair() {
   [[ "$src_count" =~ ^[0-9]+$ ]] || src_count=0
 
   # 目标端清单（与源端同一 exclude 口径，避免被排除路径/历史残留混入比对）
-  local dst_json
-  dst_json=$(_get_listing_json "$dest_path" "${FILTER_ARGS[@]}")
+  # 失败重试: OpenList 刚启动时驱动懒加载、网盘限流等瞬时错误常见（线上实测
+  # baidupan/wopan175 目标端已有大半文件，却因列举失败被按空目标端全量估算，
+  # 合计虚高近 3 倍）。快速失败（<300s，是错误而非超时）间隔 20s 重试至多 3 次;
+  # 超时型失败重试大概率继续超时（最长 900s/次），不重试
+  # 注意: 空目录 lsjson 返回 "[]"（非空串），不会误触发重试
+  local dst_json="" _dst_try _dst_t0
+  for _dst_try in 1 2 3; do
+    _dst_t0=$SECONDS
+    dst_json=$(_get_listing_json "$dest_path" "${FILTER_ARGS[@]}")
+    [ -n "$dst_json" ] && break
+    [ $((SECONDS - _dst_t0)) -ge 300 ] && break
+    [ "$_dst_try" -lt 3 ] && sleep 20
+  done
+  local dst_fail=0
   if [ -z "$dst_json" ]; then
+    dst_fail=1
+    PREVIEW_FAIL_PAIRS=$((PREVIEW_FAIL_PAIRS + 1))
     echo "⚠️ add_preview_pair: 目标端清单获取失败 (${dest_path})，按目标端为空估算（全量待同步）" >&2
+    # 抓一次真实错误进 job 日志（驱动未加载/限流/路径不存在），便于定位
+    local _dst_err
+    _dst_err=$(timeout 60 rclone lsjson "$dest_path" --max-depth 1 2>&1 >/dev/null | tail -n 2)
+    [ -n "$_dst_err" ] && echo "   目标端列举错误: ${_dst_err}" >&2
     dst_json="[]"
   fi
 
@@ -192,10 +215,11 @@ add_preview_pair() {
   # 📁 组头 + ├─/└─ 树形条目（与进度通知的任务列表同风格）
   # 空字段写 "-" 占位: tab 是 IFS 空白类字符，read 会吞掉空列导致字段错位
   # （同 progress.sh 的任务队列 TSV 约定）
-  # 字段: src/excl/sbytes/scount/dst/ybytes/ycount/ynew/yupd/fnote
+  # 字段: src/excl/sbytes/scount/dst/ybytes/ycount/ynew/yupd/fnote/dfail
+  # dfail=1 → 目标端列举失败，该条目为按空目标端的全量估算（不可靠）
   local _excl_ph="${exclude_summary:--}"
   local _fnote_ph="${fixed_note:--}"
-  PREVIEW_PAIRS_TSV+="${source_path}"$'\t'"${_excl_ph}"$'\t'"${src_bytes}"$'\t'"${src_count}"$'\t'"${dest_path}"$'\t'"${sync_bytes}"$'\t'"${sync_count}"$'\t'"${new_count}"$'\t'"${upd_count}"$'\t'"${_fnote_ph}"$'\n'
+  PREVIEW_PAIRS_TSV+="${source_path}"$'\t'"${_excl_ph}"$'\t'"${src_bytes}"$'\t'"${src_count}"$'\t'"${dest_path}"$'\t'"${sync_bytes}"$'\t'"${sync_count}"$'\t'"${new_count}"$'\t'"${upd_count}"$'\t'"${_fnote_ph}"$'\t'"${dst_fail}"$'\n'
 }
 
 # 同步对详情渲染: 仅按源端分组（同源端多目标一组的树形列表）
@@ -211,7 +235,7 @@ _preview_render_pairs_detail() {
   # 第一遍: 按源端聚合条目数，并判断组内源端大小是否一致（能否上提组头）
   declare -A _g_total=() _g_size=()
   local -a _g_order=()
-  while IFS=$'\t' read -r _src _excl _sbytes _scount _dst _ybytes _ycount _ynew _yupd _fnote; do
+  while IFS=$'\t' read -r _src _excl _sbytes _scount _dst _ybytes _ycount _ynew _yupd _fnote _dfail; do
     [ -z "$_src" ] && continue
     if [ -z "${_g_total[$_src]+x}" ]; then
       _g_total[$_src]=0
@@ -224,7 +248,7 @@ _preview_render_pairs_detail() {
   done <<< "$PREVIEW_PAIRS_TSV"
   # 第二遍: 渲染条目（含子行），按组缓冲
   declare -A _g_seen=() _g_block=()
-  while IFS=$'\t' read -r _src _excl _sbytes _scount _dst _ybytes _ycount _ynew _yupd _fnote; do
+  while IFS=$'\t' read -r _src _excl _sbytes _scount _dst _ybytes _ycount _ynew _yupd _fnote _dfail; do
     [ -z "$_src" ] && continue
     # 还原 "-" 占位为空
     [ "$_excl" = "-" ] && _excl=""
@@ -254,6 +278,9 @@ _preview_render_pairs_detail() {
     fi
     [ -n "$_excl" ] && _g_block[$_src]+="${_sub}排除：<code>$(escape_html "$_excl")</code>"$'\n'
     [ -n "$_fnote" ] && _g_block[$_src]+="${_sub}${_fnote# · }"$'\n'
+    # 目标端列举失败: 该条目数值是按空目标端的全量估算，必须明示（否则合计
+    # 虚高被当成精确值，正是 "目标端已有文件却显示全量待同步" 的困惑来源）
+    [ "${_dfail:-0}" = "1" ] && _g_block[$_src]+="${_sub}⚠️ 目标端列举失败 · 按全量估算，实际待同步可能更少"$'\n'
   done <<< "$PREVIEW_PAIRS_TSV"
   # 组装: 组头 + 树形条目块，组间空一行（首组前不加——tg_add_section 已带段前空行）
   local _out="" _src _gi=0
@@ -279,12 +306,18 @@ flush_task_preview() {
     [ "${PREVIEW_TOTAL_NEW_COUNT:-0}" -gt 0 ] && _total_note+="新增 ${PREVIEW_TOTAL_NEW_COUNT} · "
     _total_note+="同名更新 ${PREVIEW_TOTAL_UPD_COUNT}）"
   fi
+  # 有目标端列举失败的对时，合计里混着按全量估算的不可靠分量，必须明示——
+  # 该数字是上界不是精确值（历史缺陷: 只打 job 日志，预览静默虚高无从辨别）
+  local _fail_note=""
+  if [ "${PREVIEW_FAIL_PAIRS:-0}" -gt 0 ]; then
+    _fail_note=$'\n'"⚠️ ${PREVIEW_FAIL_PAIRS} 个同步对目标端列举失败，按全量估算，实际待同步可能更少"
+  fi
 
   local msg=""
   tg_add_title msg "📋 任务预览 · ${PREVIEW_TASK_NAME}"
   tg_add_section msg "📊 同步对（${PREVIEW_PAIR_COUNT} 对）"
   tg_append msg "$(_preview_render_pairs_detail)"
-  tg_append msg $'\n\n'"📦 合计预估待同步：<b>$(format_bytes "$PREVIEW_TOTAL_SYNC_BYTES")</b> / <b>${PREVIEW_TOTAL_SYNC_COUNT}</b> 文件${_total_note}"
+  tg_append msg $'\n\n'"📦 合计预估待同步：<b>$(format_bytes "$PREVIEW_TOTAL_SYNC_BYTES")</b> / <b>${PREVIEW_TOTAL_SYNC_COUNT}</b> 文件${_total_note}${_fail_note}"
 
   send_telegram_message "$msg"
   echo "  已发送 ${PREVIEW_TASK_NAME} 预览通知"
