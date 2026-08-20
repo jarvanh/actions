@@ -36,6 +36,7 @@ rclone() {
       case "$2" in
         "onedrive:backup")   printf '%s' "$SRC_JSON" ;;
         "onedrive:src6")     printf '%s' "$SRC_JSON" ;;
+        "onedrive:srcbig")   printf '%s' "$SRC_JSON" ;;
         "openlist:dst")      printf '%s' "$DST_JSON" ;;
         "onedrive:srcfail")  return 7 ;;
         "openlist:dstfail")  return 7 ;;
@@ -138,6 +139,26 @@ echo "$SEND_CAPTURE" | grep -q '差异构成' && bad "6b 纯新增不应渲染�
 echo "$SEND_CAPTURE" | grep -q '（新增' && bad "6c 纯新增合计不应带构成附注" || ok "6c 纯新增合计无附注"
 [ "$(lsjson_call_count)" = "9" ] && ok "6d 缓存生效（场景5 源端+目标各1、场景6 独立源端+目标各1）" \
   || bad "6d: [$(lsjson_call_count)]"
+
+# ===== 场景 7: 大清单超内核单参数上限（MAX_ARG_STRLEN ≈ 128KB）=====
+# 历史缺陷: src/dst 清单经 --argjson 命令行传参，清单超过 ~128KB（约 700+ 文件）时
+# execve 直接 E2BIG "Argument list too long"，失败被 2>/dev/null 吞掉 → diff_tsv 空
+# → 所有同步对恒显示 无变动/+0，合计恒 "0 B / 0 文件"（线上全量复现）
+_big_src="["; _sep=""
+for i in $(seq 1 5000); do
+  _big_src+="$_sep{\"Path\":\"d/file_$i.bin\",\"Size\":100}"
+  _sep=","
+done
+_big_src+="]"
+[ "${#_big_src}" -gt 131072 ] && ok "7a 测试清单超 128KB（${#_big_src} B）" || bad "7a: 清单未超上限 [${#_big_src} B]"
+SRC_JSON="$_big_src"
+DST_JSON='[]'
+MARKER_JSON='{}'
+start_task_preview "biglist" >/dev/null
+add_preview_pair "onedrive:srcbig" "openlist:dst" --delete-before >/dev/null
+[ "$PREVIEW_TOTAL_SYNC_COUNT" = "5000" ] && [ "$PREVIEW_TOTAL_SYNC_BYTES" = "500000" ] \
+  && ok "7b 大清单差异 = 5000 文件 / 500000 B（不再被参数上限清零）" \
+  || bad "7b: [$PREVIEW_TOTAL_SYNC_COUNT/$PREVIEW_TOTAL_SYNC_BYTES]"
 
 echo "-----"
 echo "PASS=$PASS FAIL=$FAIL"
