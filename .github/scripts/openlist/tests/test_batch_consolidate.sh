@@ -25,7 +25,7 @@ RESTART_RC=0
 # --- mocks（source 之后定义）---
 timeout() { shift; "$@"; }                 # 剥掉时长参数（rclone 是函数，不能被真 timeout 执行）
 progress_update() { :; }
-_refresh_wopan_token() { :; }
+_refresh_ol_drivers() { :; }
 _restart_openlist_for_truth() {
   [ "$RESTART_RC" = "0" ] || return 1
   touch /tmp/bc_restarted

@@ -2,7 +2,8 @@
 # ===== OpenList 同步工具 — 核心同步引擎 =====
 # 封装 rclone sync/copy，提供:
 #   - 同步前 OpenList 缓存刷新（避免 stale listing 导致重复上传）
-#   - wopan176 后端 token 刷新（处理 OAuth access token 过期）
+#   - OpenList 驱动 token 刷新（重建全部驱动，处理 OAuth access token 过期，
+#     wopan176 约 5 分钟的短 token 是主要动机）
 #   - HTTP 423 Locked 重试（OpenList/WebDAV 临时文件锁）
 #   - 8005 登录失败重试（wopan176 token 过期后刷新并重试）
 #   - truth-check（openlist: 目标通用：本轮有传输则重启 OpenList 容器取
@@ -26,32 +27,33 @@
 #   TELEGRAM_BOT_TOKEN   — 用于发送日志文件
 #   TELEGRAM_CHAT_ID     — 用于发送日志文件
 
-# 刷新 OpenList wopan176 后端的 OAuth access token
-# wopan176 的 access token 有效期短（约 5 分钟），长时间同步会过期
+# 刷新 OpenList 全部驱动的 token（重建驱动，非 wopan176 专属）
+# 主要动机: wopan176 的 access token 有效期短（约 5 分钟），长时间同步会过期；
+#           /api/driver/update 是全局 API，会重建所有驱动（aliyundrive 等同样受益）
 #
-# /api/driver/update 失败 = wopan176 驱动状态可疑的实锤信号:
+# /api/driver/update 失败 = 驱动状态可疑的实锤信号:
 # run 31945907528 / 31951008332 两轮实测，该 API 失败后仅做 storage 配置
 # 重载就放行同步 → 窗口期内所有经 OpenList→wopan 的 PUT 全部假成功
 # （rclone 报 Copied (new)，密文从未落盘，容器重启后消失），同样 19 个
 # 文件白传 ~1.3 GiB 两遍。因此方法1 失败时先重启容器（驱动完整重初始
 # 化 + 换新 token，一次 ~2 分钟），重启不可用才退回 storage 重载。
-# 每轮（进程生命周期）最多重启一次，用 _WOPAN_TOKEN_RESTART_DONE 标记。
-# 用法: _refresh_wopan_token [log_filename]
+# 每轮（进程生命周期）最多重启一次，用 _OL_DRIVER_RESTART_DONE 标记。
+# 用法: _refresh_ol_drivers [log_filename]
 # 返回: 0=成功刷新, 非0=刷新失败
-_WOPAN_TOKEN_RESTART_DONE=0
-_refresh_wopan_token() {
+_OL_DRIVER_RESTART_DONE=0
+_refresh_ol_drivers() {
   local log_file="${1:-/dev/null}"
   local ol_token
   ol_token=$(_get_openlist_token)
   if [ -z "$ol_token" ]; then
-    echo "  wopan176 token 刷新: OpenList token 不可用" | tee -a "$log_file"
+    echo "  OpenList 驱动 token 刷新: OpenList token 不可用" | tee -a "$log_file"
     return 1
   fi
 
-  echo "  刷新 wopan176 后端 token..." | tee -a "$log_file"
+  echo "  刷新 OpenList 后端驱动 token（含 wopan176，access token 约 5 分钟过期）..." | tee -a "$log_file"
 
   # 方法 1: 通过 OpenList /api/driver/update 强制重新初始化驱动配置
-  # 这会触发 wopan176 驱动用 refresh_token 换取新的 access_token
+  # 这会触发各驱动用 refresh_token 换取新的 access_token（wopan176 为典型）
   local refresh_result
   refresh_result=$(curl -s -X POST "http://127.0.0.1:5244/api/driver/update" \
     -H "Authorization: $ol_token" \
@@ -60,17 +62,17 @@ _refresh_wopan_token() {
     --max-time 30 2>&1)
 
   if echo "$refresh_result" | grep -qi '"code":0\|"status":"ok\|success'; then
-    echo "  wopan176 token 刷新成功 (方法1: /api/driver/update)" | tee -a "$log_file"
+    echo "  OpenList 驱动 token 刷新成功 (方法1: /api/driver/update)" | tee -a "$log_file"
     sleep 5
     return 0
   fi
 
   # 方法 2: 重启容器（driver/update 失败 = 驱动坏状态窗口，见函数头注释）
-  if [ "$_WOPAN_TOKEN_RESTART_DONE" -eq 0 ]; then
-    echo "  方法1 (/api/driver/update) 失败 → wopan176 驱动状态可疑，重启容器重建驱动..." | tee -a "$log_file"
+  if [ "$_OL_DRIVER_RESTART_DONE" -eq 0 ]; then
+    echo "  方法1 (/api/driver/update) 失败 → 驱动状态可疑，重启容器重建驱动..." | tee -a "$log_file"
     if _restart_openlist_for_truth "" "$log_file"; then
-      _WOPAN_TOKEN_RESTART_DONE=1
-      echo "  wopan176 token 刷新成功 (方法2: 容器重启，驱动已完整重初始化)" | tee -a "$log_file"
+      _OL_DRIVER_RESTART_DONE=1
+      echo "  OpenList 驱动 token 刷新成功 (方法2: 容器重启，驱动已完整重初始化)" | tee -a "$log_file"
       return 0
     fi
     echo "  ⚠️ 方法2 容器重启失败，退回方法3: storage 配置重载..." | tee -a "$log_file"
@@ -92,7 +94,7 @@ _refresh_wopan_token() {
     return 0
   fi
 
-  echo "  ⚠️ wopan176 token 刷新失败: $refresh_result" | tee -a "$log_file"
+  echo "  ⚠️ OpenList 驱动 token 刷新失败: $refresh_result" | tee -a "$log_file"
   return 1
 }
 
@@ -614,7 +616,7 @@ _sync_retry_8005() {
       echo "  OpenList 日志: ${OL_LOG_FILE:-未找到}" | tee -a "$LOG_FILENAME"
       echo "============================================"
 
-      _refresh_wopan_token "$LOG_FILENAME"
+      _refresh_ol_drivers "$LOG_FILENAME"
       # 等待 token 生效
       sleep 10
 
@@ -1260,9 +1262,9 @@ sync_with_logging() {
       )
       echo "OpenList 目标端：启用低并发保护 (transfers=1, checkers=8, timeout=30m)" | tee -a "$LOG_FILENAME"
 
-      # 同步前主动刷新 wopan176 token
+      # 同步前主动刷新 OpenList 驱动 token
       # wopan176 的 OAuth access token 有效期约 5 分钟，长时间同步会过期
-      _refresh_wopan_token "$LOG_FILENAME"
+      _refresh_ol_drivers "$LOG_FILENAME"
     fi
 
     rclone sync "$source_path" "$dest_path" \

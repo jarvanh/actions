@@ -717,7 +717,7 @@ _batch_consolidate() {
   progress_update "${label} 巩固: ${missing_n} 个未落盘，串行重试"
 
   # 重启+列表校验耗时可能已使 wopan token 过期，重试前刷新驱动
-  _refresh_wopan_token "$batch_log" || true
+  _refresh_ol_drivers "$batch_log" || true
 
   local retry_log="${batch_dir}/retry_${batch_idx}.log"
   set +e
@@ -892,7 +892,7 @@ sync_by_file_batches() {
         echo "OpenList 目标端：批次上传启用低并发保护 (transfers=1, checkers=8, timeout=30m)"
         # 长批次开始前主动刷新驱动 token（wopan OAuth access token 有效期约 5
         # 分钟；批次循环没有 8005 重试兜底，驱动坏状态 = 整批 exit 4）
-        _refresh_wopan_token "$batch_log" || true
+        _refresh_ol_drivers "$batch_log" || true
       fi
 
       # set -e 下 rclone 非零退出（如 exit 4 部分失败）会直接终止 step，
