@@ -62,11 +62,114 @@ _run_registry_entry() {
   sync_task "$_src" "$_dst" "$_name" "${_flag_arr[@]}"
 }
 
-# 顺序执行清单中的全部任务
+# ===== 同步对轮转（防饿死）=====
+# 问题: run_all_tasks 按清单固定顺序执行，排在前面的大同步对（如 task0 的
+#       wopan176Crypt/0，200GB+）常态吃满 6h job 上限，后面的同步对
+#       （baidupanCrypt/0、wopan175/...）永远轮不到 —— 预览差值长期不动。
+# 方案: 游标持久化在 sync_state 目录（onedrive），语义 = "下一个待执行的同步对":
+#   - 每个 run 从游标位置开始按序执行，绕一圈回到开头
+#   - 同步对执行前先落盘 attempts+1 —— run 被取消（6h 上限）时游标已指向
+#     该同步对，下轮从它继续（配合批次级巩固 _batch_consolidate，已落盘
+#     进度不丢，续传即可）
+#   - 同步对完成/被跳过标记跳过 → 游标后移一位，attempts 清零
+#   - 同步对失败（run 未被取消）→ 继续执行后续同步对（不堵队列），失败者
+#     下个循环回来重试
+#   - 阀门: 游标指向的同步对连续尝试（含被取消）超过上限仍未完成 → 强制
+#     后移一轮（防病态同步对把"取消-重试"变成死循环，永久堵死队列）
+#   - 预览/仅注册 pass 按同一顺序执行但只读不写（游标不被预览推进）
+# 开关: OPENLIST_TASK_ROTATION=0 关闭（回退清单固定顺序）
+ROTATION_MAX_CONSECUTIVE_ATTEMPTS="${ROTATION_MAX_CONSECUTIVE_ATTEMPTS:-8}"
+
+_rotation_state_path() {
+  echo "${SYNC_STATE_DIR}/task_rotation.json"
+}
+
+# 读取游标 → 全局 ROTATION_CURSOR / ROTATION_ATTEMPTS（读取失败回退 0）
+_rotation_load() {
+  ROTATION_CURSOR=0
+  ROTATION_ATTEMPTS=0
+  local n=${#SYNC_TASK_REGISTRY[@]}
+  [ "$n" -eq 0 ] && return 0
+  local json cursor attempts
+  json=$(rclone cat "$(_rotation_state_path)" 2>/dev/null) || true
+  cursor=$(echo "$json" | jq -r '.cursor // 0' 2>/dev/null)
+  attempts=$(echo "$json" | jq -r '.attempts // 0' 2>/dev/null)
+  [[ "$cursor" =~ ^[0-9]+$ ]] || cursor=0
+  [[ "$attempts" =~ ^[0-9]+$ ]] || attempts=0
+  [ "$cursor" -ge "$n" ] && cursor=0
+  ROTATION_CURSOR=$cursor
+  ROTATION_ATTEMPTS=$attempts
+}
+
+# 写游标（_marker_write 负责校验与 pretty-print；失败静默保留旧值，不影响同步）
+_rotation_save() {
+  local cursor="$1" attempts="$2"
+  local json
+  json=$(jq -cn --argjson c "$cursor" --argjson a "$attempts" \
+    --arg u "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{cursor:$c, attempts:$a, updated:$u}' 2>/dev/null) || return 0
+  _marker_write "$json" "$(_rotation_state_path)" >/dev/null 2>&1 || true
+}
+
+# 顺序执行清单中的全部任务（支持同步对轮转，防饿死，见上方说明）
 run_all_tasks() {
-  local _e
-  for _e in "${SYNC_TASK_REGISTRY[@]}"; do
-    _run_registry_entry "$_e"
+  local n=${#SYNC_TASK_REGISTRY[@]}
+  [ "$n" -eq 0 ] && return 0
+
+  local rotation_enabled=1
+  [ "${OPENLIST_TASK_ROTATION:-1}" = "0" ] && rotation_enabled=0
+
+  local start=0
+  if [ "$rotation_enabled" -eq 1 ]; then
+    _rotation_load
+    start=$ROTATION_CURSOR
+    # 阀门（取消死循环保护）: 游标同步对连续尝试超上限仍未完成 → 本轮从
+    # 下一个开始，给后面的同步对让路；它会在下个循环回来被重试
+    if [ "$ROTATION_ATTEMPTS" -ge "$ROTATION_MAX_CONSECUTIVE_ATTEMPTS" ]; then
+      echo "⚠️ 同步对轮转: 第 $((start + 1))/${n} 个同步对已连续尝试 ${ROTATION_ATTEMPTS} 次未完成，本轮跳过它从第 $(( (start + 1) % n + 1 )) 个开始（下个循环回来重试）"
+      start=$(( (start + 1) % n ))
+      _rotation_save "$start" 0
+    else
+      echo "同步对轮转: 本轮从第 $((start + 1))/${n} 个同步对开始（已连续尝试 ${ROTATION_ATTEMPTS} 次）"
+    fi
+  fi
+
+  # 预览/仅注册 pass 不写游标（顺序与正式执行一致）
+  local real_pass=1
+  [ -n "${TASK_PREVIEW_ONLY:-}" ] && real_pass=0
+  [ "${TASK_REGISTER_ONLY:-0}" = "1" ] && real_pass=0
+
+  local i idx _e
+  local _rot_attempts="${ROTATION_ATTEMPTS:-0}"
+  for ((i = 0; i < n; i++)); do
+    idx=$(( (start + i) % n ))
+    _e="${SYNC_TASK_REGISTRY[$idx]}"
+    # 非起点同步对在本 run 内是首次尝试（连续尝试数从 1 重新计）
+    [ "$i" -gt 0 ] && _rot_attempts=0
+
+    if [ "$rotation_enabled" -eq 1 ] && [ "$real_pass" -eq 1 ]; then
+      # 执行前先落盘"正在尝试第 idx 个（第 N 次）"—— run 在执行中被取消时
+      # 游标已指向该同步对，下轮继续；连续尝试数也因此能跨取消累计
+      _rot_attempts=$((_rot_attempts + 1))
+      _rotation_save "$idx" "$_rot_attempts"
+    fi
+
+    _run_registry_entry "$_e" || true
+
+    if [ "$rotation_enabled" -eq 1 ] && [ "$real_pass" -eq 1 ]; then
+      if [ "${SYNC_SKIPPED:-0}" = "1" ] || [ "${SYNC_FAILED:-0}" = "0" ]; then
+        # 完成/跳过 → 游标后移，连续尝试数清零
+        _rotation_save "$(( (idx + 1) % n ))" 0
+        _rot_attempts=0
+      elif [ "$_rot_attempts" -ge "$ROTATION_MAX_CONSECUTIVE_ATTEMPTS" ]; then
+        # 阀门（失败路径）: 连续失败/取消超上限 → 后移让路（下个循环回来重试）
+        echo "⚠️ 同步对轮转: 第 $((idx + 1))/${n} 个同步对已连续尝试 ${_rot_attempts} 次未完成，强制后移游标（下个循环回来重试）"
+        _rotation_save "$(( (idx + 1) % n ))" 0
+        _rot_attempts=0
+      fi
+      # 失败但未到阀门: 游标停留在当前同步对 —— 若后续同步对继续执行，其
+      # 执行前落盘会推进游标；若 run 到此结束/被取消，下轮优先重试本同步对
+    fi
   done
 }
 
@@ -533,6 +636,117 @@ sync_task() {
   return $_rc
 }
 
+# 批次级巩固: 批次上传完成后立即"重启容器取后端真值 → 校验落盘 → 串行重试缺失"
+# 背景: truth-check / lsf diff / 修复管线原本只在所有批次完成后的最终
+#       sync_with_logging 里执行，而大任务常态在批次阶段被 6h job 上限取消，
+#       巩固链路从未运行 —— PUT 假成功文件（OpenList 缓存里有、后端没有，
+#       容器重启即消失）每轮重传，预览差值纹丝不动（task0 wopan176Crypt
+#       长期 +225GiB 的根因）。
+# 本函数把巩固单元从"整个任务"缩小到"单个批次"（~50GB）:
+#   1. 本批有实际传输 → 重启 OpenList 容器，清缓存取后端真值列表
+#   2. 本批触碰过的文件（Copied + Failed to copy）diff 真值清单 → 未落盘清单
+#   3. 未落盘文件立即串行重试一次（transfers=1，对齐 sync_with_logging 的
+#      openlist_guard_flags 保护参数）
+# 价值: 重启后仍在的文件是真成果 —— 即使本 run 随后被取消，下一轮
+#       --size-only 也会跳过它们，进度不回退；且批次间容器已被重启、缓存即
+#       真值，历史遗留的假成功文件会被后续批次正常识别为缺失并补传。
+#       仍未落盘的文件交由最终检查/下一轮修复管线（try_fix_failed_file
+#       换方法）处理。
+# 只校验"本批触碰过"的文件而非整个批次清单: --exclude 排除的文件从未被传输，
+# 不产生 Copied/Failed 日志，自然不会进重试清单（避免每批对排除项无谓重扫）。
+# 依赖调用方（sync_by_file_batches）作用域（bash 动态作用域）:
+#   source_path / dest_path / task_name / batch_dir / extra_args
+# 用法: _batch_consolidate <batch_idx> <batch_log>（恒返回 0，异常仅告警）
+# 开关: OPENLIST_BATCH_CONSOLIDATE=0 关闭（调试用）
+_batch_consolidate() {
+  local batch_idx="$1"
+  local batch_log="$2"
+  local label="批次 $((batch_idx + 1))"
+
+  [[ "$dest_path" == openlist:* ]] || return 0
+  [ "${OPENLIST_BATCH_CONSOLIDATE:-1}" = "0" ] && return 0
+
+  # 本批实际传输数（无传输 = 无新写入即无新污染，缓存列表可信，无需巩固）
+  local uploaded=0
+  uploaded=$(grep -cE 'Copied \((new|replaced existing)\)' "$batch_log" 2>/dev/null || true)
+  [[ "$uploaded" =~ ^[0-9]+$ ]] || uploaded=0
+  if [ "$uploaded" -eq 0 ]; then
+    echo "${label}: 本批无传输，跳过巩固（无新写入即无假成功污染）"
+    return 0
+  fi
+
+  echo "── ${label} 巩固: 本批传输 ${uploaded} 个，重启容器校验后端真值 ──"
+  progress_update "${label} 巩固: 重启容器校验落盘真值"
+  if ! _restart_openlist_for_truth "${dest_path#openlist:}" "$batch_log"; then
+    echo "⚠️ ${label} 巩固: 容器重启失败，跳过校验（缺失文件由最终检查兜底）"
+    return 0
+  fi
+
+  # 目标端真值清单（重启后缓存已清空，lsf 即后端实际列表）
+  local dest_truth="${batch_dir}/dest_truth_${batch_idx}.txt"
+  timeout 900 rclone lsf "$dest_path" -R --files-only > "$dest_truth" 2>/dev/null || true
+  if ! [ -s "$dest_truth" ]; then
+    echo "⚠️ ${label} 巩固: 目标端列表获取失败/为空，跳过校验（避免半截列表误判全量缺失）"
+    return 0
+  fi
+  sort -u "$dest_truth" -o "$dest_truth"
+
+  # 本批触碰过的文件 = Copied（含假成功）+ Failed to copy（真失败）
+  # 排除 object not found（源端文件不存在的，重试无意义）
+  local touched="${batch_dir}/touched_${batch_idx}.txt"
+  {
+    grep -E 'Copied \((new|replaced existing)\)' "$batch_log" 2>/dev/null | \
+      sed -E 's/^.*INFO *: //; s/: Copied \(.*$//'
+    grep -E 'ERROR : .+: Failed to copy' "$batch_log" 2>/dev/null | \
+      grep -Ev 'object not found' | \
+      sed -E 's/^.*ERROR : //; s/: Failed to copy.*$//'
+  } | sort -u > "$touched"
+
+  # 触碰过但真值清单里没有的 = 未落盘（假成功 / 失败）
+  local retry_list="${batch_dir}/retry_${batch_idx}.txt"
+  comm -23 "$touched" "$dest_truth" > "$retry_list"
+
+  local missing_n=0
+  missing_n=$(wc -l < "$retry_list" | tr -d ' ')
+  if [ "$missing_n" -eq 0 ]; then
+    echo "✅ ${label} 巩固: 本批 ${uploaded} 个传输全部真实落盘（重启后仍在）"
+    return 0
+  fi
+
+  echo "⚠️ ${label} 巩固: ${missing_n} 个文件未落盘（假成功/失败），串行重试..."
+  progress_update "${label} 巩固: ${missing_n} 个未落盘，串行重试"
+
+  # 重启+列表校验耗时可能已使 wopan token 过期，重试前刷新驱动
+  _refresh_wopan_token "$batch_log" || true
+
+  local retry_log="${batch_dir}/retry_${batch_idx}.log"
+  set +e
+  rclone copy "$source_path" "$dest_path" \
+    --files-from "$retry_list" \
+    --size-only \
+    --no-traverse \
+    --transfers 1 \
+    --checkers 8 \
+    --timeout 30m \
+    --retries 1 \
+    --low-level-retries 3 \
+    --contimeout 30s \
+    --ignore-errors \
+    --progress \
+    --stats 15s \
+    --stats-one-line \
+    --verbose \
+    "${extra_args[@]}" \
+    2>&1 | tee "$retry_log"
+  set -e
+
+  local retry_copied=0
+  retry_copied=$(grep -cE 'Copied \((new|replaced existing)\)' "$retry_log" 2>/dev/null || true)
+  [[ "$retry_copied" =~ ^[0-9]+$ ]] || retry_copied=0
+  echo "${label} 巩固: 串行重试完成，重传 ${retry_copied}/${missing_n}（仍未落盘的由最终检查/下轮修复管线处理）"
+  return 0
+}
+
 # 按文件批次拆分同步（用于无子目录的大文件夹）
 # 按 ~50GB 拆分为多个批次，每批用 rclone copy --files-from 同步
 # 用法: sync_by_file_batches <source_path> <dest_path> <task_name> [rclone_extra_args...]
@@ -664,6 +878,23 @@ sync_by_file_batches() {
       PROGRESS_PHASE_INFO="▸ 📦 文件批次拆分：${total_batches} 批 / ${total_files} 文件（当前批次 ${batch_idx}：${batch_file_count} 文件）"
       progress_update "批次 ${batch_idx}/${total_batches}：${batch_file_count} 个文件" "▸ 📊 批次：${batch_idx}/${total_batches} | ✅${synced_batches} ❌${failed_batches}"
 
+      local batch_log="${task_name}_batch_${i}.log"
+
+      # OpenList 目标端低并发保护（对齐 sync_with_logging 的 openlist_guard_flags）:
+      # 批次 copy 此前无 transfers 限制（默认 4 并发上传），慢后端（wopan176 等）
+      # 来不及持久化 → "object not found" / PUT 假成功（缓存里有、后端没有，
+      # 容器重启即消失）—— 正是批次 exit=4 与预览差值不动的直接诱因之一
+      local batch_guard_flags=()
+      local batch_timeout="5m"
+      if [[ "$dest_path" == openlist:* ]]; then
+        batch_guard_flags=("--transfers" "1" "--checkers" "8")
+        batch_timeout="30m"
+        echo "OpenList 目标端：批次上传启用低并发保护 (transfers=1, checkers=8, timeout=30m)"
+        # 长批次开始前主动刷新驱动 token（wopan OAuth access token 有效期约 5
+        # 分钟；批次循环没有 8005 重试兜底，驱动坏状态 = 整批 exit 4）
+        _refresh_wopan_token "$batch_log" || true
+      fi
+
       # set -e 下 rclone 非零退出（如 exit 4 部分失败）会直接终止 step，
       # 导致后续 sync_with_logging 通知无法发出。此处需捕获退出码，临时关闭 set -e。
       set +e
@@ -673,15 +904,16 @@ sync_by_file_batches() {
         --no-traverse \
         --retries 1 \
         --low-level-retries 3 \
-        --timeout 5m \
+        --timeout "$batch_timeout" \
         --contimeout 30s \
         --ignore-errors \
         --progress \
         --stats 15s \
         --stats-one-line \
         --verbose \
+        "${batch_guard_flags[@]}" \
         "${extra_args[@]}" \
-        2>&1 | tee "${task_name}_batch_${i}.log"
+        2>&1 | tee "$batch_log"
       local rc=${PIPESTATUS[0]}
       set -e
 
@@ -692,9 +924,9 @@ sync_by_file_batches() {
         synced_batches=$((synced_batches + 1))
         local err_count
         # grep -c 无匹配时已输出 0（退出码 1），用 || true 防止追加第二行 0
-        err_count=$(grep -c 'ERROR.*object not found' "${task_name}_batch_${i}.log" 2>/dev/null || true)
+        err_count=$(grep -c 'ERROR.*object not found' "$batch_log" 2>/dev/null || true)
         echo "批次 $((i+1)) 部分成功 (exit=4, ${err_count} 个文件 object not found)"
-        grep 'ERROR.*object not found' "${task_name}_batch_${i}.log" 2>/dev/null | head -50 | while IFS= read -r line; do
+        grep 'ERROR.*object not found' "$batch_log" 2>/dev/null | head -50 | while IFS= read -r line; do
           echo "  ${line}"
         done
       else
@@ -702,6 +934,12 @@ sync_by_file_batches() {
         failed_batch_list+="批次 $((i+1))/${total_batches} · <i>${batch_file_count} 文件</i> · exit=${rc}"$'\n'
         echo "批次 $((i+1)) 失败 (exit=${rc})"
       fi
+
+      # 批次级巩固: 重启容器取后端真值 → 校验本批落盘 → 串行重试缺失
+      # （把巩固单元从"整个任务"缩小到"单个批次"，run 被取消也锁住进度；
+      #   详见 _batch_consolidate 函数头注释）
+      _batch_consolidate "$i" "$batch_log" || true
+
       progress_update_force "批次 ${batch_idx}/${total_batches} 完成" "▸ 📊 批次：${batch_idx}/${total_batches} | ✅${synced_batches} ❌${failed_batches}"
     fi
   done
