@@ -585,7 +585,7 @@ _flush_blacklist_to_marker() {
   fi
 }
 
-# wopan176 裸路径密文计数（刷新缓存后统计）
+# OpenList 裸路径密文计数（刷新缓存后统计，任意 Crypt 挂载通用）
 # count_dest 两种形态:
 #   openlist:wopan176/...     —— 字面裸路径（dne=false 时有效）
 #   :crypt,remote=...,...:sub —— crypt 即时远程（dne=true 时唯一正确口径，rclone
@@ -867,8 +867,8 @@ try_fix_failed_file() {
 
   # 方法 2（第 2 顺位）：rclone crypt 直写裸存储
   # 通过 rclone :crypt: 即时远程（与 OpenList crypt 驱动同格式）把密文直接写入
-  # 裸存储 → 文件以原名原路径出现在 wopan176Crypt，绕过 OpenList crypt→后端
-  # 驱动链路（假成功最可疑环节），无需替代名/还原映射
+  # 裸存储 → 文件以原名原路径出现在目标 Crypt 挂载（如 wopan176Crypt），
+  # 绕过 OpenList crypt→后端驱动链路（假成功最可疑环节），无需替代名/还原映射
   if _fix_method_gate m2; then
   local _c_rel_root="" _c_rel _c_dst
   local _c_mount_rel="${dest_path#openlist:}"
@@ -979,7 +979,7 @@ try_fix_failed_file() {
 
 
   # 方法 9：上传到父目录（跳过有问题的目录层级）
-  # 如果当前目录写操作被 wopan176 拒绝，尝试上传到上级目录
+  # 如果当前目录写操作被后端（如 wopan176）拒绝，尝试上传到上级目录
   # 文件名编码原始目录信息，便于后续还原
   if _fix_method_gate m9; then
   if [ "$file_dir_rel" != "." ] && [ "$file_dir_rel" != "" ]; then
