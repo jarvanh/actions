@@ -212,8 +212,8 @@ printf 'ok/file1.mp4\nother/old.mp4\n' > "$LSF_OUT2"
 OUT=$(run_consolidate 0 "$LOG")
 [ "$(calls /tmp/bc_copy_calls)" = "1" ] && ok "8a 串行重试执行" || bad "8a: copy=$(calls /tmp/bc_copy_calls)"
 [ "$(calls /tmp/bc_fixpipe_calls)" = "1" ] && ok "8b 顽固缺失 → 修复管线被调用" || bad "8b: fixpipe=$(calls /tmp/bc_fixpipe_calls)"
-diff <(sort /tmp/bc_fixpipe_override) <(printf 'bad/file3.mp4\nghost/file2.mp4\n') >/dev/null 2>&1 \
-  && ok "8c 修复管线收到的清单 = 重试后仍未落盘的顽固缺失" || bad "8c: $(cat /tmp/bc_fixpipe_override 2>/dev/null | tr '\n' ' ')"
+diff <(sort "$(cat /tmp/bc_fixpipe_override 2>/dev/null)") <(printf 'bad/file3.mp4\nghost/file2.mp4\n') >/dev/null 2>&1 \
+  && ok "8c 修复管线收到的清单 = 重试后仍未落盘的顽固缺失" || bad "8c: $(cat "$(cat /tmp/bc_fixpipe_override 2>/dev/null)" 2>/dev/null | tr '\n' ' ')"
 echo "$OUT" | grep -q "顽固缺失" && echo "$OUT" | grep -q "修复管线换方法落盘" \
   && ok "8d 顽固缺失转修复管线提示" || bad "8d: $OUT"
 echo "$OUT" | grep -q "修复管线完成，2/2" && ok "8e 修复计数汇总" || bad "8e: $OUT"
@@ -228,8 +228,8 @@ OUT=$(run_consolidate 0 "$LOG")
 [ "$(calls /tmp/bc_copy_calls)" = "1" ] && ok "9a 串行重试执行" || bad "9a: copy=$(calls /tmp/bc_copy_calls)"
 [ "$(calls /tmp/bc_restart_calls)" = "1" ] && ok "9b 0 重传 → 不做二次重启复核" || bad "9b: restart=$(calls /tmp/bc_restart_calls)"
 [ "$(calls /tmp/bc_fixpipe_calls)" = "1" ] && ok "9c 全部转修复管线" || bad "9c: fixpipe=$(calls /tmp/bc_fixpipe_calls)"
-diff <(sort /tmp/bc_fixpipe_override) <(printf 'bad/file3.mp4\nghost/file2.mp4\n') >/dev/null 2>&1 \
-  && ok "9d 修复清单 = 全部重试失败文件" || bad "9d: $(cat /tmp/bc_fixpipe_override 2>/dev/null | tr '\n' ' ')"
+diff <(sort "$(cat /tmp/bc_fixpipe_override 2>/dev/null)") <(printf 'bad/file3.mp4\nghost/file2.mp4\n') >/dev/null 2>&1 \
+  && ok "9d 修复清单 = 全部重试失败文件" || bad "9d: $(cat "$(cat /tmp/bc_fixpipe_override 2>/dev/null)" 2>/dev/null | tr '\n' ' ')"
 
 echo "-----"
 echo "PASS=$PASS FAIL=$FAIL"
