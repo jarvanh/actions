@@ -28,16 +28,23 @@
 #   TELEGRAM_CHAT_ID     — 用于发送日志文件
 
 # 刷新 OpenList 全部驱动的 token（重建驱动，非 wopan176 专属）
-# 主要动机: wopan176 的 access token 有效期短（约 5 分钟），长时间同步会过期；
-#           /api/driver/update 是全局 API，会重建所有驱动（aliyundrive 等同样受益）
+# 主要动机: wopan176 的 access token 有效期短（约 5 分钟），长时间同步会过期，
+#           过期后 wopan 驱动的 PUT 全部假成功（rclone 报 Copied (new)，密文
+#           从未落盘，容器重启后消失）——run 32749862280 实锤: 3 小时批次
+#           139/139 假成功，30.757 GiB 全部未落盘。
 #
-# /api/driver/update 失败 = 驱动状态可疑的实锤信号:
-# run 31945907528 / 31951008332 两轮实测，该 API 失败后仅做 storage 配置
-# 重载就放行同步 → 窗口期内所有经 OpenList→wopan 的 PUT 全部假成功
-# （rclone 报 Copied (new)，密文从未落盘，容器重启后消失），同样 19 个
-# 文件白传 ~1.3 GiB 两遍。因此方法1 失败时先重启容器（驱动完整重初始
-# 化 + 换新 token，一次 ~2 分钟），重启不可用才退回 storage 重载。
-# 每轮（进程生命周期）最多重启一次，用 _OL_DRIVER_RESTART_DONE 标记。
+# 方法1: POST /api/admin/storage/load_all — OpenList 官方"重新加载所有存储"
+#        API，从数据库重新初始化全部驱动（等效容器重启的驱动重建，秒级
+#        完成、可无限次重复，传输期间的定时保鲜循环也用它）。
+#        历史教训: 旧端点 /api/driver/update 在 AList/OpenList API 中不存在，
+#        恒失败（run 32749862280: 容器重启后 76 秒仍失败实锤）——其失败
+#        ≠驱动坏，不能当驱动状态信号。run 31945907528/31951008332 的
+#        "storage 配置重载后放行 → 窗口期 PUT 全部假成功"事故，根因正是
+#        方法1 恒失败 + 方法3 不重建驱动。
+# 方法2: 重启容器（load_all 不可用且本轮未重启过时；驱动完整重初始化 +
+#        换新 token，一次 ~2 分钟），_OL_DRIVER_RESTART_DONE 每轮（进程
+#        生命周期）最多标记一次
+# 方法3（兜底）: storage/list 探测——不重建驱动，仅确认 API 可达
 # 用法: _refresh_ol_drivers [log_filename]
 # 返回: 0=成功刷新, 非0=刷新失败
 _OL_DRIVER_RESTART_DONE=0
@@ -52,24 +59,24 @@ _refresh_ol_drivers() {
 
   echo "  刷新 OpenList 后端驱动 token（含 wopan176，access token 约 5 分钟过期）..." | tee -a "$log_file"
 
-  # 方法 1: 通过 OpenList /api/driver/update 强制重新初始化驱动配置
-  # 这会触发各驱动用 refresh_token 换取新的 access_token（wopan176 为典型）
+  # 方法 1: POST /api/admin/storage/load_all 从数据库重载全部存储，
+  # 触发各驱动用 refresh_token 换取新的 access_token（wopan176 为典型）
   local refresh_result
-  refresh_result=$(curl -s -X POST "http://127.0.0.1:5244/api/driver/update" \
+  refresh_result=$(curl -s -X POST "http://127.0.0.1:5244/api/admin/storage/load_all" \
     -H "Authorization: $ol_token" \
     -H "Content-Type: application/json" \
     -d '{}' \
     --max-time 30 2>&1)
 
-  if echo "$refresh_result" | grep -qi '"code":0\|"status":"ok\|success'; then
-    echo "  OpenList 驱动 token 刷新成功 (方法1: /api/driver/update)" | tee -a "$log_file"
+  if echo "$refresh_result" | grep -qE '"code":(200|0)|"message":"success'; then
+    echo "  OpenList 驱动 token 刷新成功 (方法1: /api/admin/storage/load_all 驱动已重建)" | tee -a "$log_file"
     sleep 5
     return 0
   fi
 
-  # 方法 2: 重启容器（driver/update 失败 = 驱动坏状态窗口，见函数头注释）
+  # 方法 2: 重启容器（load_all 不可用 = token 权限不足/版本差异，见函数头注释）
   if [ "$_OL_DRIVER_RESTART_DONE" -eq 0 ]; then
-    echo "  方法1 (/api/driver/update) 失败 → 驱动状态可疑，重启容器重建驱动..." | tee -a "$log_file"
+    echo "  方法1 (/api/admin/storage/load_all) 失败: ${refresh_result:0:200} → 重启容器重建驱动..." | tee -a "$log_file"
     if _restart_openlist_for_truth "" "$log_file"; then
       _OL_DRIVER_RESTART_DONE=1
       echo "  OpenList 驱动 token 刷新成功 (方法2: 容器重启，驱动已完整重初始化)" | tee -a "$log_file"
@@ -96,6 +103,47 @@ _refresh_ol_drivers() {
 
   echo "  ⚠️ OpenList 驱动 token 刷新失败: $refresh_result" | tee -a "$log_file"
   return 1
+}
+
+# ===== 传输期间的后台 token 保鲜循环 =====
+# wopan access token 约 5 分钟过期，OpenList 驱动 token 失效后 PUT 全部
+# 假成功（run 32749862280: 3 小时批次 139/139 假成功、30.757 GiB 全部
+# 未落盘实锤）。仅靠传输前刷新一次远远不够——长时间 rclone 命令（批次
+# 上传/巩固重试/主同步动辄数小时）执行期间，每 OPENLIST_TOKEN_REFRESH_SECS
+# 秒（默认 240s < 5min）后台调一次 load_all 重建驱动，保证任意时刻新
+# 请求拿到的 token 剩余有效期 > 1 分钟。
+# 重建瞬间的在途请求由旧驱动实例收尾（其 token 龄 ≤ 刷新周期 < 5 分钟，
+# 仍在有效期内），不受影响。
+# 用法: 传输命令前 _start_token_refresher，结束后 _stop_token_refresher
+# 开关: OPENLIST_TOKEN_REFRESH_SECS=0 显式关闭保鲜循环
+OPENLIST_TOKEN_REFRESH_SECS="${OPENLIST_TOKEN_REFRESH_SECS:-240}"
+_OL_TOKEN_REFRESHER_PID=""
+_start_token_refresher() {
+  _stop_token_refresher
+  local interval="${OPENLIST_TOKEN_REFRESH_SECS:-0}"
+  [[ "$interval" =~ ^[0-9]+$ ]] || interval=240
+  [ "$interval" -eq 0 ] && return 0
+  (
+    while :; do
+      sleep "$interval"
+      _t=$(_get_openlist_token 2>/dev/null) || continue
+      curl -s -m 30 -X POST "http://127.0.0.1:5244/api/admin/storage/load_all" \
+        -H "Authorization: $_t" \
+        -H "Content-Type: application/json" \
+        -d '{}' >/dev/null 2>&1 || true
+    done
+  ) &
+  _OL_TOKEN_REFRESHER_PID=$!
+  echo "  🔁 token 保鲜循环已启动（每 ${interval}s load_all 重建驱动，pid=${_OL_TOKEN_REFRESHER_PID}）"
+}
+
+_stop_token_refresher() {
+  if [ -n "${_OL_TOKEN_REFRESHER_PID:-}" ]; then
+    kill "$_OL_TOKEN_REFRESHER_PID" 2>/dev/null || true
+    wait "$_OL_TOKEN_REFRESHER_PID" 2>/dev/null || true
+    _OL_TOKEN_REFRESHER_PID=""
+    echo "  🔁 token 保鲜循环已停止"
+  fi
 }
 
 # 检测 wopan176 登录失败（8005）
@@ -664,6 +712,11 @@ _sync_retry_423() {
 # 收集并修复缺失文件（依赖调用方作用域）:
 #   LAST_ATTEMPT_LOG / task_name / source_path / dest_path / extra_args /
 #   fail_list / fix_list / fix_log / LOG_FILENAME
+# 环境变量 SYNC_FIX_MISSING_OVERRIDE: 外部给定缺失清单文件（批次巩固调用，
+# 清单来自"串行重试后重启容器再取真值"的 diff——普通重传已被后端内容性
+# 拒收的顽固缺失文件，直接进 11 种修复方法换路径/换形式落盘）。
+# 设定时跳过日志收集 + lsf diff（清单已是权威口径），其余链路
+# （marker 沿用/方法黑名单/即时落盘校验/名长诊断/增量持久化）原样复用。
 _sync_fix_missing_files() {
   if [[ "$dest_path" == openlist:* ]]; then
     # 收集缺失文件：
@@ -672,28 +725,36 @@ _sync_fix_missing_files() {
     #   2) 源端 vs 目标端 lsf 递归 diff 出的缺失文件（假成功文件没有 ERROR
     #      日志、退出码为 0，只能靠 diff 发现）
     local missing_list="/tmp/${task_name}_missing_$$.txt"
-    : > "$missing_list"
-    grep -E 'ERROR : .+: Failed to copy' "$LAST_ATTEMPT_LOG" 2>/dev/null | \
-      grep -Ev 'object not found' | \
-      sed -E 's/^.*ERROR : //; s/: Failed to copy.*$//' >> "$missing_list"
-
-    # lsf 递归列出两端（源端带上 --exclude/--include 过滤，口径与 sync 一致；
-    # 只传纯 filter 参数，避免把 --delete-before/--no-traverse 等 sync/copy
-    # 特有参数传给 lsf）
-    _extract_filter_args "${extra_args[@]}"
-    local src_ls="/tmp/${task_name}_src_ls_$$.txt"
-    local dst_ls="/tmp/${task_name}_dst_ls_$$.txt"
-    local src_ls_ok=0 dst_ls_ok=0
-    timeout 900 rclone lsf "$source_path" -R --files-only "${FILTER_ARGS[@]}" > "$src_ls" 2>/dev/null && src_ls_ok=1 || true
-    timeout 900 rclone lsf "$dest_path" -R --files-only > "$dst_ls" 2>/dev/null && dst_ls_ok=1 || true
-    if [ "$src_ls_ok" -eq 1 ] && [ "$dst_ls_ok" -eq 1 ]; then
-      # 仅当两端列表都完整获取时才做 diff，避免半截列表产生误报触发无谓修复
-      comm -23 <(sort -u "$src_ls") <(sort -u "$dst_ls") >> "$missing_list"
+    if [ -n "${SYNC_FIX_MISSING_OVERRIDE:-}" ]; then
+      missing_list="$SYNC_FIX_MISSING_OVERRIDE"
+      if ! [ -s "$missing_list" ]; then
+        return 0
+      fi
+      echo "外部缺失清单: $(wc -l < "$missing_list" | tr -d ' ') 个（批次巩固真值 diff）" | tee -a "$LOG_FILENAME"
     else
-      echo "⚠️ 源/目标文件列表获取不完整（src=${src_ls_ok}, dst=${dst_ls_ok}），跳过 lsf diff，仅用日志错误修复" | tee -a "$LOG_FILENAME"
+      : > "$missing_list"
+      grep -E 'ERROR : .+: Failed to copy' "$LAST_ATTEMPT_LOG" 2>/dev/null | \
+        grep -Ev 'object not found' | \
+        sed -E 's/^.*ERROR : //; s/: Failed to copy.*$//' >> "$missing_list"
+
+      # lsf 递归列出两端（源端带上 --exclude/--include 过滤，口径与 sync 一致；
+      # 只传纯 filter 参数，避免把 --delete-before/--no-traverse 等 sync/copy
+      # 特有参数传给 lsf）
+      _extract_filter_args "${extra_args[@]}"
+      local src_ls="/tmp/${task_name}_src_ls_$$.txt"
+      local dst_ls="/tmp/${task_name}_dst_ls_$$.txt"
+      local src_ls_ok=0 dst_ls_ok=0
+      timeout 900 rclone lsf "$source_path" -R --files-only "${FILTER_ARGS[@]}" > "$src_ls" 2>/dev/null && src_ls_ok=1 || true
+      timeout 900 rclone lsf "$dest_path" -R --files-only > "$dst_ls" 2>/dev/null && dst_ls_ok=1 || true
+      if [ "$src_ls_ok" -eq 1 ] && [ "$dst_ls_ok" -eq 1 ]; then
+        # 仅当两端列表都完整获取时才做 diff，避免半截列表产生误报触发无谓修复
+        comm -23 <(sort -u "$src_ls") <(sort -u "$dst_ls") >> "$missing_list"
+      else
+        echo "⚠️ 源/目标文件列表获取不完整（src=${src_ls_ok}, dst=${dst_ls_ok}），跳过 lsf diff，仅用日志错误修复" | tee -a "$LOG_FILENAME"
+      fi
+      rm -f "$src_ls" "$dst_ls"
+      sort -u "$missing_list" -o "$missing_list"
     fi
-    rm -f "$src_ls" "$dst_ls"
-    sort -u "$missing_list" -o "$missing_list"
 
     # ===== B: 失败记忆 — 比对上一轮修复记录（marker fixed_files）=====
     # 缺失清单中曾在上一轮"修复成功"的文件:
@@ -883,7 +944,8 @@ _sync_fix_missing_files() {
         fi
       fi
     fi
-    rm -f "$missing_list"
+    # 外部清单（批次巩固）归调用方所有，不删
+    [ -n "${SYNC_FIX_MISSING_OVERRIDE:-}" ] || rm -f "$missing_list"
   fi
   [ -n "${incr_state:-}" ] && rm -f "$incr_state" 2>/dev/null || true
 }
@@ -1265,6 +1327,9 @@ sync_with_logging() {
       # 同步前主动刷新 OpenList 驱动 token
       # wopan176 的 OAuth access token 有效期约 5 分钟，长时间同步会过期
       _refresh_ol_drivers "$LOG_FILENAME"
+      # 传输期间定时保鲜: 仅传前刷一次撑不过 5 分钟 token 窗口，
+      # 整批假成功事故的根因（run 32749862280 实锤，见函数头注释）
+      _start_token_refresher
     fi
 
     rclone sync "$source_path" "$dest_path" \
@@ -1274,6 +1339,7 @@ sync_with_logging() {
       2>&1 | tee "$LAST_ATTEMPT_LOG"
     local attempt_status=${PIPESTATUS[0]}
 
+    _stop_token_refresher
     kill "$heartbeat_pid" 2>/dev/null || true
     wait "$heartbeat_pid" 2>/dev/null || true
 
