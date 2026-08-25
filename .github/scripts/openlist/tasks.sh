@@ -636,7 +636,8 @@ sync_task() {
   return $_rc
 }
 
-# 批次级巩固: 批次上传完成后立即"重启容器取后端真值 → 校验落盘 → 串行重试缺失"
+# 批次级巩固: 批次上传完成后立即"重启容器取后端真值 → 校验落盘 → 串行重试
+# → 顽固缺失转修复管线"
 # 背景: truth-check / lsf diff / 修复管线原本只在所有批次完成后的最终
 #       sync_with_logging 里执行，而大任务常态在批次阶段被 6h job 上限取消，
 #       巩固链路从未运行 —— PUT 假成功文件（OpenList 缓存里有、后端没有，
@@ -646,12 +647,16 @@ sync_task() {
 #   1. 本批有实际传输 → 重启 OpenList 容器，清缓存取后端真值列表
 #   2. 本批触碰过的文件（Copied + Failed to copy）diff 真值清单 → 未落盘清单
 #   3. 未落盘文件立即串行重试一次（transfers=1，对齐 sync_with_logging 的
-#      openlist_guard_flags 保护参数）
+#      openlist_guard_flags 保护参数；重试期间跑 token 保鲜循环防再次假成功）
+#   4. 重试后再重启取真值复核 → 仍未落盘的"顽固缺失"（后端内容性拒收，
+#      如密文文件名超长——run 32749862280 名长诊断实锤，原路径原名重试
+#      永远失败）复用 _sync_fix_missing_files 修复管线换方法落盘
+#      （短哈希名/AES zip/tmp+move 等 11 种方法 + 增量持久化 + 名长诊断）
 # 价值: 重启后仍在的文件是真成果 —— 即使本 run 随后被取消，下一轮
 #       --size-only 也会跳过它们，进度不回退；且批次间容器已被重启、缓存即
-#       真值，历史遗留的假成功文件会被后续批次正常识别为缺失并补传。
-#       仍未落盘的文件交由最终检查/下一轮修复管线（try_fix_failed_file
-#       换方法）处理。
+#       真值，历史遗留的假成功文件会被后续批次正常识别为缺失并补传；
+#       顽固缺失当场换方法修复并即时写 marker，不再依赖大概率被取消的
+#       最终检查。
 # 只校验"本批触碰过"的文件而非整个批次清单: --exclude 排除的文件从未被传输，
 # 不产生 Copied/Failed 日志，自然不会进重试清单（避免每批对排除项无谓重扫）。
 # 依赖调用方（sync_by_file_batches）作用域（bash 动态作用域）:
@@ -716,8 +721,11 @@ _batch_consolidate() {
   echo "⚠️ ${label} 巩固: ${missing_n} 个文件未落盘（假成功/失败），串行重试..."
   progress_update "${label} 巩固: ${missing_n} 个未落盘，串行重试"
 
-  # 重启+列表校验耗时可能已使 wopan token 过期，重试前刷新驱动
+  # 重启+列表校验耗时可能已使 wopan token 过期，重试前刷新驱动；
+  # 重试本身可能长达数小时（29 GiB 重传 ~2.5h >> 5 分钟 token 窗口），
+  # 不跑保鲜循环的话重试会重演整批假成功（run 32749862280 实锤）
   _refresh_ol_drivers "$batch_log" || true
+  _start_token_refresher
 
   local retry_log="${batch_dir}/retry_${batch_idx}.log"
   set +e
@@ -739,11 +747,72 @@ _batch_consolidate() {
     "${extra_args[@]}" \
     2>&1 | tee "$retry_log"
   set -e
+  _stop_token_refresher
 
   local retry_copied=0
   retry_copied=$(grep -cE 'Copied \((new|replaced existing)\)' "$retry_log" 2>/dev/null || true)
   [[ "$retry_copied" =~ ^[0-9]+$ ]] || retry_copied=0
-  echo "${label} 巩固: 串行重试完成，重传 ${retry_copied}/${missing_n}（仍未落盘的由最终检查/下轮修复管线处理）"
+  echo "${label} 巩固: 串行重试完成，重传 ${retry_copied}/${missing_n}"
+
+  # ===== 顽固缺失 → 修复管线（换方法兜底）=====
+  # 普通重传后仍未落盘 = 后端内容性拒收（如密文文件名超长），原名重试永远失败
+  local stubborn="${batch_dir}/stubborn_${batch_idx}.txt"
+  : > "$stubborn"
+  if [ "$retry_copied" -gt 0 ]; then
+    # 重传过 → 再重启一次取真值，区分"已补上"与"顽固缺失"
+    progress_update "${label} 巩固: 复核重试落盘真值"
+    if _restart_openlist_for_truth "${dest_path#openlist:}" "$batch_log"; then
+      local truth2="${batch_dir}/dest_truth2_${batch_idx}.txt"
+      timeout 900 rclone lsf "$dest_path" -R --files-only > "$truth2" 2>/dev/null || true
+      if [ -s "$truth2" ]; then
+        sort -u "$truth2" -o "$truth2"
+        comm -23 "$retry_list" "$truth2" > "$stubborn"
+      else
+        echo "⚠️ ${label} 巩固: 复核列表获取失败，重试清单全部转交修复管线（宁重复勿遗漏）"
+        cp "$retry_list" "$stubborn"
+      fi
+    else
+      echo "⚠️ ${label} 巩固: 复核重启失败，重试清单全部转交修复管线（宁重复勿遗漏）"
+      cp "$retry_list" "$stubborn"
+    fi
+  else
+    # 一个都没重传成功 → 全部是顽固缺失
+    cp "$retry_list" "$stubborn"
+  fi
+
+  local stubborn_n=0
+  stubborn_n=$(wc -l < "$stubborn" | tr -d ' ')
+  if [ "$stubborn_n" -eq 0 ]; then
+    echo "✅ ${label} 巩固: 重试后顽固缺失 0 个，本批全部真实落盘"
+    return 0
+  fi
+
+  echo "⚠️ ${label} 巩固: ${stubborn_n} 个顽固缺失（后端内容性拒收，如密文名超长），转修复管线换方法落盘..."
+  progress_update "${label} 巩固: ${stubborn_n} 个顽固缺失，修复管线处理中"
+
+  # 复用 _sync_fix_missing_files 全套链路（marker 沿用/方法黑名单/即时落盘
+  # 校验/名长诊断/增量持久化）。它依赖调用方作用域变量，在此对齐；
+  # 修复成果由 _persist_fix_entry_now 即时写 marker（防 run 取消丢失），
+  # 并累计到 GLOBAL_FIXED_FILES_JSON 供顶级 save_sync_marker 收集。
+  local LOG_FILENAME="$batch_log"
+  local LAST_ATTEMPT_LOG="$retry_log"
+  local fail_list="${batch_dir}/consolidate_fail_${batch_idx}.txt"
+  local fix_list="${batch_dir}/consolidate_fix_${batch_idx}.txt"
+  local fix_log="${batch_dir}/consolidate_fixlog_${batch_idx}.log"
+  : > "$fail_list"
+  : > "$fix_list"
+  : > "$fix_log"
+  # 注意: bash 里 "VAR=x func" 的赋值在函数返回后会残留（非 POSIX 模式），
+  # 必须显式 unset，否则最终 sync_with_logging 的 _sync_fix_missing_files
+  # 会误用本批的顽固缺失清单
+  SYNC_FIX_MISSING_OVERRIDE="$stubborn" _sync_fix_missing_files || true
+  unset SYNC_FIX_MISSING_OVERRIDE
+  _sync_serialize_fixed_files || true
+  _sync_accumulate_fixed_results || true
+
+  local fixed_n=0
+  fixed_n=$(wc -l < "$fix_list" 2>/dev/null | tr -d ' ')
+  echo "${label} 巩固: 修复管线完成，${fixed_n}/${stubborn_n} 个换方法落盘成功"
   return 0
 }
 
@@ -891,8 +960,11 @@ sync_by_file_batches() {
         batch_timeout="30m"
         echo "OpenList 目标端：批次上传启用低并发保护 (transfers=1, checkers=8, timeout=30m)"
         # 长批次开始前主动刷新驱动 token（wopan OAuth access token 有效期约 5
-        # 分钟；批次循环没有 8005 重试兜底，驱动坏状态 = 整批 exit 4）
+        # 分钟；批次循环没有 8005 重试兜底，驱动坏状态 = 整批 exit 4）。
+        # 仅传前刷一次撑不过 5 分钟 token 窗口——批次动辄数小时，中途必须
+        # 保鲜（run 32749862280: 3 小时批次 139/139 假成功实锤）
         _refresh_ol_drivers "$batch_log" || true
+        _start_token_refresher
       fi
 
       # set -e 下 rclone 非零退出（如 exit 4 部分失败）会直接终止 step，
@@ -916,6 +988,7 @@ sync_by_file_batches() {
         2>&1 | tee "$batch_log"
       local rc=${PIPESTATUS[0]}
       set -e
+      _stop_token_refresher
 
       if [ "$rc" -eq 0 ]; then
         synced_batches=$((synced_batches + 1))
