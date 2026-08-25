@@ -255,7 +255,7 @@ jobs:
           init_sync_state
           # 集中定义阈值，避免魔数散落各处
           LARGE_FILE_THRESHOLD_BYTES="${LARGE_FILE_THRESHOLD:-4000000000}"
-          SYNC_SPLIT_THRESHOLD_BYTES="${SYNC_SPLIT_THRESHOLD:-50000000000}"
+          SYNC_SPLIT_THRESHOLD_BYTES="${SYNC_SPLIT_THRESHOLD:-20000000000}"
           # 同步任务在独立的 Actions step 中执行（每个 step 是独立 shell），
           # 必须写入 GITHUB_ENV 才能在后续 step 中保留；否则 threshold 为空，
           # 触发 `[: : integer expression expected` 错误。
