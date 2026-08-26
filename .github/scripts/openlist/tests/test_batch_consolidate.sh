@@ -90,7 +90,9 @@ run_consolidate() {
   local task_name="t"
   local batch_dir="$BC_DIR"
   local extra_args=(--delete-before)
+  BATCH_BACKEND_DEAD=0
   _batch_consolidate "$1" "$2"
+  echo "${BATCH_BACKEND_DEAD:-0}" > /tmp/bc_backend_dead
 }
 
 setup() {
@@ -173,6 +175,7 @@ echo "$OUT" | grep -q "顽固缺失 0 个" && ok "4g 重试补全 → 顽固缺�
 [ "$(calls /tmp/bc_fixpipe_calls)" = "0" ] && ok "4h 无顽固缺失 → 不进修复管线" || bad "4h: fixpipe=$(calls /tmp/bc_fixpipe_calls)"
 [ "$(calls /tmp/bc_refresher_starts)" = "1" ] && [ "$(calls /tmp/bc_refresher_stops)" = "1" ] \
   && ok "4i 重试期间跑 token 保鲜循环（启停各 1 次）" || bad "4i: start=$(calls /tmp/bc_refresher_starts) stop=$(calls /tmp/bc_refresher_stops)"
+[ "$(cat /tmp/bc_backend_dead 2>/dev/null)" = "0" ] && ok "4j 重试有产出 → 不触发后端全拒" || bad "4j: dead=$(cat /tmp/bc_backend_dead 2>/dev/null)"
 
 # --- 场景5: 容器重启失败 → 跳过校验 ---
 setup
@@ -230,6 +233,25 @@ OUT=$(run_consolidate 0 "$LOG")
 [ "$(calls /tmp/bc_fixpipe_calls)" = "1" ] && ok "9c 全部转修复管线" || bad "9c: fixpipe=$(calls /tmp/bc_fixpipe_calls)"
 diff <(sort "$(cat /tmp/bc_fixpipe_override 2>/dev/null)") <(printf 'bad/file3.mp4\nghost/file2.mp4\n') >/dev/null 2>&1 \
   && ok "9d 修复清单 = 全部重试失败文件" || bad "9d: $(cat "$(cat /tmp/bc_fixpipe_override 2>/dev/null)" 2>/dev/null | tr '\n' ' ')"
+[ "$(cat /tmp/bc_backend_dead 2>/dev/null)" = "0" ] && ok "9e 缺失数 <3 → 不触发后端全拒（仍进修复管线）" || bad "9e: dead=$(cat /tmp/bc_backend_dead 2>/dev/null)"
+
+# --- 场景10: 后端写入全拒（≥3 触碰文件 0 落盘 + 重试 0 成功）→ 置标志跳过修复管线 ---
+setup
+BC_DEST="openlist:wopan175/0/j-1024j-视频-pornhub-favorites"
+cat > "$LOG" <<'EOF'
+INFO  : dead/file1.mp4: Copied (new)
+INFO  : dead/file2.mp4: Copied (new)
+INFO  : dead/file3.mp4: Copied (new)
+ERROR : dead/file4.mp4: Failed to copy: unchunked simple update failed: Method Not Allowed: 405 Method Not Allowed
+EOF
+printf 'other/old.mp4\n' > "$LSF_OUT"   # 真值列表仅有无关旧文件: 本批 4 个文件后端一个都没收到（405 全拒）
+RETRY_COPY_OK=0         # 串行重试全部 405
+OUT=$(run_consolidate 0 "$LOG")
+[ "$(calls /tmp/bc_copy_calls)" = "1" ] && ok "10a 串行重试执行" || bad "10a: copy=$(calls /tmp/bc_copy_calls)"
+[ "$(cat /tmp/bc_backend_dead 2>/dev/null)" = "1" ] && ok "10b 全拒 → 置 BATCH_BACKEND_DEAD" || bad "10b: dead=$(cat /tmp/bc_backend_dead 2>/dev/null)"
+[ "$(calls /tmp/bc_fixpipe_calls)" = "0" ] && ok "10c 全拒 → 跳过修复管线" || bad "10c: fixpipe=$(calls /tmp/bc_fixpipe_calls)"
+echo "$OUT" | grep -q "后端写入全拒" && ok "10d 全拒提示" || bad "10d: $OUT"
+echo "$OUT" | grep -q "跳过修复管线" && ok "10e 跳过修复管线提示" || bad "10e: $OUT"
 
 echo "-----"
 echo "PASS=$PASS FAIL=$FAIL"
