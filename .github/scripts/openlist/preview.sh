@@ -36,9 +36,9 @@ _get_listing_json() {
   local -a filter_args=("$@")
   local listing
   if [ ${#filter_args[@]} -gt 0 ]; then
-    listing=$(timeout 900 rclone lsjson "$remote_path" --recursive --files-only "${filter_args[@]}" 2>/dev/null || true)
+    listing=$(timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900}" rclone lsjson "$remote_path" --recursive --files-only "${filter_args[@]}" 2>/dev/null || true)
   else
-    listing=$(timeout 900 rclone lsjson "$remote_path" --recursive --files-only 2>/dev/null || true)
+    listing=$(timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900}" rclone lsjson "$remote_path" --recursive --files-only 2>/dev/null || true)
   fi
   if [ -n "$listing" ] && printf '%s' "$listing" | jq -e 'type == "array"' >/dev/null 2>&1; then
     printf '%s' "$listing"

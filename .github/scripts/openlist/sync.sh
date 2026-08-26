@@ -181,7 +181,7 @@ _check_openlist_backend_connectivity() {
   [[ "$dest_path" == openlist:* ]] || return 0
 
   local probe_output probe_rc
-  probe_output=$(rclone lsd "$dest_path" --max-depth 1 --contimeout 10s --timeout 15s 2>&1) && probe_rc=0 || probe_rc=$?
+  probe_output=$(rclone lsd "$dest_path" --max-depth 1 --contimeout "${OPENLIST_PROBE_TIMEOUT:-15}s" --timeout "${OPENLIST_PROBE_TIMEOUT:-15}s" 2>&1) && probe_rc=0 || probe_rc=$?
 
   if [ "$probe_rc" -eq 0 ]; then
     return 0
@@ -236,7 +236,7 @@ _refresh_openlist_cache() {
 
   # 刷新前获取文件数，用于校验缓存是否已过期
   local before_count=0 before_json
-  before_json=$(timeout 120 rclone size "$dest_path" --json 2>/dev/null || true)
+  before_json=$(timeout "${OPENLIST_CACHE_REFRESH_WAIT:-120}" rclone size "$dest_path" --json 2>/dev/null || true)
   before_count=$(echo "$before_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
   echo "刷新 OpenList 缓存: $ol_path (刷新前文件数: $before_count)"
 
@@ -252,7 +252,7 @@ _refresh_openlist_cache() {
 
   # 刷新后获取文件数，校验缓存是否已更新
   local after_count=0 after_json
-  after_json=$(timeout 120 rclone size "$dest_path" --json 2>/dev/null || true)
+  after_json=$(timeout "${OPENLIST_CACHE_REFRESH_WAIT:-120}" rclone size "$dest_path" --json 2>/dev/null || true)
   after_count=$(echo "$after_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
   echo "缓存刷新后文件数: $after_count"
 
@@ -380,7 +380,7 @@ _openlist_truth_check() {
 
   # 有传输 → 列表可能含"PUT 假成功"条目，重启容器取后端真值
   local pre_count=0 dest_json
-  dest_json=$(timeout 900 rclone size "$dest_path" --json 2>/dev/null || true)
+  dest_json=$(timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900}" rclone size "$dest_path" --json 2>/dev/null || true)
   pre_count=$(echo "$dest_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
   [[ "$pre_count" =~ ^[0-9]+$ ]] || pre_count=0
   echo "  本轮传输 ${uploaded} 个文件，目标视图 ${pre_count}（缓存口径）—— 重启容器取后端真值" | tee -a "$log_file"
@@ -392,7 +392,7 @@ _openlist_truth_check() {
 
   # 重启后重新计数（此即后端真值）; pre-post 差 = 假成功文件数（供通知）
   local post_json post_count
-  post_json=$(timeout 900 rclone size "$dest_path" --json 2>/dev/null || true)
+  post_json=$(timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900}" rclone size "$dest_path" --json 2>/dev/null || true)
   post_count=$(echo "$post_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
   [[ "$post_count" =~ ^[0-9]+$ ]] || post_count=0
   echo "  重启后目标视图: ${pre_count} → ${post_count}" | tee -a "$log_file"
@@ -769,8 +769,8 @@ _sync_fix_missing_files() {
       local src_ls="/tmp/${task_name}_src_ls_$$.txt"
       local dst_ls="/tmp/${task_name}_dst_ls_$$.txt"
       local src_ls_ok=0 dst_ls_ok=0
-      timeout 900 rclone lsf "$source_path" -R --files-only "${FILTER_ARGS[@]}" > "$src_ls" 2>/dev/null && src_ls_ok=1 || true
-      timeout 900 rclone lsf "$dest_path" -R --files-only > "$dst_ls" 2>/dev/null && dst_ls_ok=1 || true
+      timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900}" rclone lsf "$source_path" -R --files-only "${FILTER_ARGS[@]}" > "$src_ls" 2>/dev/null && src_ls_ok=1 || true
+      timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900}" rclone lsf "$dest_path" -R --files-only > "$dst_ls" 2>/dev/null && dst_ls_ok=1 || true
       if [ "$src_ls_ok" -eq 1 ] && [ "$dst_ls_ok" -eq 1 ]; then
         # 仅当两端列表都完整获取时才做 diff，避免半截列表产生误报触发无谓修复
         comm -23 <(sort -u "$src_ls") <(sort -u "$dst_ls") >> "$missing_list"
@@ -888,7 +888,7 @@ _sync_fix_missing_files() {
     local _NAMELEN_OVER_255=0
     local _NAMELEN_OVER_RAWMAX=0
     if [[ "$dest_path" == openlist:wopan176Crypt/* ]] && [ -s "$missing_list" ] && _ensure_crypt_config "$dest_path"; then
-      _NAMELEN_RAW_MAX=$(timeout 600 rclone lsf "${_CRYPT_REMOTE}" -R --files-only 2>/dev/null \
+      _NAMELEN_RAW_MAX=$(timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900}" rclone lsf "${_CRYPT_REMOTE}" -R --files-only 2>/dev/null \
         | awk -F/ '{ n=length($NF); if (n>m) m=n } END { print m+0 }')
       echo "名长诊断已启用: crypt=${_CRYPT_REMOTE}, 后端已接受最长密文名 ${_NAMELEN_RAW_MAX} 字节" | tee -a "$LOG_FILENAME"
     fi
@@ -1408,8 +1408,8 @@ sync_with_logging() {
     local openlist_guard_flags=()
     if [[ "$dest_path" == openlist:* ]]; then
       openlist_guard_flags=(
-        "--transfers" "1"
-        "--checkers" "8"
+        "--transfers" "${OPENLIST_TRANSFERS:-1}"
+        "--checkers" "${OPENLIST_CHECKERS:-8}"
         "--contimeout" "30s"
         "--timeout" "30m"
       )
@@ -1767,7 +1767,7 @@ _send_sync_result_notification() {
     # 发送完整日志文件
     local err_log_size
     err_log_size=$(stat -c%s "$log_filename" 2>/dev/null || echo 0)
-    if [ "$err_log_size" -gt 0 ] && [ "$err_log_size" -lt 50000000 ]; then
+    if [ "$err_log_size" -gt 0 ] && [ "$err_log_size" -lt "${OPENLIST_ERR_LOG_MAX_BYTES:-50000000}" ]; then
       curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
         -F chat_id="${TELEGRAM_CHAT_ID}" \
         -F document=@"$log_filename" \

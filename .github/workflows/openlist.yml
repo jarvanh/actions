@@ -61,9 +61,44 @@ jobs:
     env:
       OPENLIST_SPLIT_ON_SYNC_FAILURE: ${{ inputs.split_on_sync_failure || 'false' }}
       FORCE_SYNC: ${{ inputs.force_sync || 'false' }}
-      # Telegram 通知凭据（注入为环境变量供脚本文件使用）
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+      # ===== 集中阈值定义（避免魔数散落各处）=====
+      # 字节大小阈值
+      LARGE_FILE_THRESHOLD_BYTES: "4000000000"
+      SYNC_SPLIT_THRESHOLD_BYTES: "20000000000"
+      OPENLIST_SPLIT_PART_BYTES: "1073741824"
+      OPENLIST_MAX_PART_SIZE: "4000000000"
+      OPENLIST_TARGET_PART_SIZE: "3980000000"
+      OPENLIST_7Z_VOLUME_SIZE: "3810m"
+      OPENLIST_MAX_SPLIT_ATTEMPTS: "4"
+      OPENLIST_ERR_LOG_MAX_BYTES: "50000000"
+
+      # 超时时间（秒）
+      OPENLIST_PROBE_TIMEOUT: "15"
+      OPENLIST_CACHE_REFRESH_WAIT: "60"
+      OPENLIST_DRIVER_INIT_WAIT: "120"
+      OPENLIST_RCLONE_LISTING_TIMEOUT: "900"
+      OPENLIST_MKDIR_TIMEOUT: "120"
+      OPENLIST_DOWNLOAD_TIMEOUT: "300"
+      OPENLIST_UPLOAD_TIMEOUT: "300"
+
+      # 重试/轮询
+      OPENLIST_8005_RETRY_ATTEMPTS: "3"
+      OPENLIST_423_RETRY_ATTEMPTS: "3"
+      OPENLIST_423_RETRY_SLEEP_SECONDS: "300"
+      OPENLIST_PERSIST_RETRY_ROUNDS: "11"
+      OPENLIST_RAW_CHECK_BUDGET: "40"
+      OPENLIST_RAW_COUNT_TIMEOUT: "240"
+      OPENLIST_CB_THRESHOLD: "3"
+      OPENLIST_MISSING_FIX_MAX: "200"
+      OPENLIST_TOKEN_REFRESH_SECS: "240"
+      OPENLIST_MAX_CONSECUTIVE_ATTEMPTS: "8"
+
+      # 并发参数
+      OPENLIST_TRANSFERS: "1"
+      OPENLIST_CHECKERS: "8"
     concurrency: openlist-singleton
     runs-on: ubuntu-latest
     steps:
@@ -253,15 +288,10 @@ jobs:
         run: |
           source /tmp/load_all.sh
           init_sync_state
-          # 集中定义阈值，避免魔数散落各处
-          LARGE_FILE_THRESHOLD_BYTES="${LARGE_FILE_THRESHOLD:-4000000000}"
-          SYNC_SPLIT_THRESHOLD_BYTES="${SYNC_SPLIT_THRESHOLD:-20000000000}"
           # 同步任务在独立的 Actions step 中执行（每个 step 是独立 shell），
           # 必须写入 GITHUB_ENV 才能在后续 step 中保留；否则 threshold 为空，
           # 触发 `[: : integer expression expected` 错误。
           echo "PROCESSED_FILES_LOG=$PROCESSED_FILES_LOG" >> "$GITHUB_ENV"
-          echo "LARGE_FILE_THRESHOLD_BYTES=$LARGE_FILE_THRESHOLD_BYTES" >> "$GITHUB_ENV"
-          echo "SYNC_SPLIT_THRESHOLD_BYTES=$SYNC_SPLIT_THRESHOLD_BYTES" >> "$GITHUB_ENV"
           echo "=== 初始化已处理文件日志 ===" > "$PROCESSED_FILES_LOG"
           echo "开始时间: $(date)" >> "$PROCESSED_FILES_LOG"
           echo "==========================" >> "$PROCESSED_FILES_LOG"
