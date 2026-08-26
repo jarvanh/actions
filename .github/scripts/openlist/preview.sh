@@ -211,15 +211,15 @@ add_preview_pair() {
   local exclude_summary
   exclude_summary=$(_extract_exclude_summary "${extra_args[@]}")
 
-  # 同步对数据缓冲（TSV），flush_task_preview 时按源端分组渲染为
-  # 📁 组头 + ├─/└─ 树形条目（与进度通知的任务列表同风格）
+  # 同步对数据缓冲（TSV），flush_task_preview 时按 task_name 分组、
+  # 源端分组渲染为 📁 组头 + ├─/└─ 树形条目（与进度通知的任务列表同风格）
   # 空字段写 "-" 占位: tab 是 IFS 空白类字符，read 会吞掉空列导致字段错位
   # （同 progress.sh 的任务队列 TSV 约定）
-  # 字段: src/excl/sbytes/scount/dst/ybytes/ycount/ynew/yupd/fnote/dfail
+  # 字段: task/src/excl/sbytes/scount/dst/ybytes/ycount/ynew/yupd/fnote/dfail
   # dfail=1 → 目标端列举失败，该条目为按空目标端的全量估算（不可靠）
   local _excl_ph="${exclude_summary:--}"
   local _fnote_ph="${fixed_note:--}"
-  PREVIEW_PAIRS_TSV+="${source_path}"$'\t'"${_excl_ph}"$'\t'"${src_bytes}"$'\t'"${src_count}"$'\t'"${dest_path}"$'\t'"${sync_bytes}"$'\t'"${sync_count}"$'\t'"${new_count}"$'\t'"${upd_count}"$'\t'"${_fnote_ph}"$'\t'"${dst_fail}"$'\n'
+  PREVIEW_PAIRS_TSV+="${PREVIEW_TASK_NAME}"$'\t'"${source_path}"$'\t'"${_excl_ph}"$'\t'"${src_bytes}"$'\t'"${src_count}"$'\t'"${dest_path}"$'\t'"${sync_bytes}"$'\t'"${sync_count}"$'\t'"${new_count}"$'\t'"${upd_count}"$'\t'"${_fnote_ph}"$'\t'"${dst_fail}"$'\n'
 }
 
 # 同步对详情渲染: 仅按源端分组（同源端多目标一组的树形列表）
@@ -230,13 +230,17 @@ add_preview_pair() {
 #     └─ <code>dst</code> · <i>无变动</i>
 #   组内源端大小不一（如部分目标带排除规则）时组头不带大小、各条目单独标注，
 #   避免同一源端因排除规则不同而分裂成多组; 组间空一行分隔。
-# 输入: PREVIEW_PAIRS_TSV（每行 src/excl/sbytes/scount/dst/ybytes/ycount/ynew/yupd/fnote）
+# 用法: _preview_render_pairs_detail [task_name]
+#   task_name 非空时仅渲染该任务的同步对（用于多任务分组 flush）
+# 输入: PREVIEW_PAIRS_TSV（每行 task/src/excl/sbytes/scount/dst/ybytes/ycount/ynew/yupd/fnote/dfail）
 _preview_render_pairs_detail() {
+  local _filter_task="${1:-}"
   # 第一遍: 按源端聚合条目数，并判断组内源端大小是否一致（能否上提组头）
   declare -A _g_total=() _g_size=()
   local -a _g_order=()
-  while IFS=$'\t' read -r _src _excl _sbytes _scount _dst _ybytes _ycount _ynew _yupd _fnote _dfail; do
+  while IFS=$'\t' read -r _task _src _excl _sbytes _scount _dst _ybytes _ycount _ynew _yupd _fnote _dfail; do
     [ -z "$_src" ] && continue
+    [ -n "$_filter_task" ] && [ "$_task" != "$_filter_task" ] && continue
     if [ -z "${_g_total[$_src]+x}" ]; then
       _g_total[$_src]=0
       _g_order+=("$_src")
@@ -248,8 +252,9 @@ _preview_render_pairs_detail() {
   done <<< "$PREVIEW_PAIRS_TSV"
   # 第二遍: 渲染条目（含子行），按组缓冲
   declare -A _g_seen=() _g_block=()
-  while IFS=$'\t' read -r _src _excl _sbytes _scount _dst _ybytes _ycount _ynew _yupd _fnote _dfail; do
+  while IFS=$'\t' read -r _task _src _excl _sbytes _scount _dst _ybytes _ycount _ynew _yupd _fnote _dfail; do
     [ -z "$_src" ] && continue
+    [ -n "$_filter_task" ] && [ "$_task" != "$_filter_task" ] && continue
     # 还原 "-" 占位为空
     [ "$_excl" = "-" ] && _excl=""
     [ "$_fnote" = "-" ] && _fnote=""
@@ -297,28 +302,72 @@ _preview_render_pairs_detail() {
 }
 
 # 发送任务预览通知到 Telegram
+# 支持轮转游标导致同一任务的同步对不连续的情况：按 task_name 分组，
+# 每个任务发一条独立的预览通知。
 # 用法: flush_task_preview
 flush_task_preview() {
-  # 合计构成说明: 存在同名更新时附注（与条目子行同规则），纯新增自明
-  local _total_note=""
-  if [ "${PREVIEW_TOTAL_UPD_COUNT:-0}" -gt 0 ]; then
-    _total_note="（"
-    [ "${PREVIEW_TOTAL_NEW_COUNT:-0}" -gt 0 ] && _total_note+="新增 ${PREVIEW_TOTAL_NEW_COUNT} · "
-    _total_note+="同名更新 ${PREVIEW_TOTAL_UPD_COUNT}）"
-  fi
-  # 有目标端列举失败的对时，合计里混着按全量估算的不可靠分量，必须明示——
-  # 该数字是上界不是精确值（历史缺陷: 只打 job 日志，预览静默虚高无从辨别）
-  local _fail_note=""
-  if [ "${PREVIEW_FAIL_PAIRS:-0}" -gt 0 ]; then
-    _fail_note=$'\n'"⚠️ ${PREVIEW_FAIL_PAIRS} 个同步对目标端列举失败，按全量估算，实际待同步可能更少"
+  local -a _tasks=()
+  while IFS=$'\t' read -r _t _rest; do
+    [ -z "$_t" ] && continue
+    local _found=0 _e
+    for _e in "${_tasks[@]:-}"; do
+      [ "$_e" = "$_t" ] && _found=1 && break
+    done
+    [ "$_found" -eq 0 ] && _tasks+=("$_t")
+  done <<< "$PREVIEW_PAIRS_TSV"
+
+  if [ ${#_tasks[@]} -eq 0 ] && [ -n "${PREVIEW_TASK_NAME:-}" ]; then
+    _tasks=("$PREVIEW_TASK_NAME")
   fi
 
-  local msg=""
-  tg_add_title msg "📋 任务预览 · ${PREVIEW_TASK_NAME}"
-  tg_add_section msg "📊 同步对（${PREVIEW_PAIR_COUNT} 对）"
-  tg_append msg "$(_preview_render_pairs_detail)"
-  tg_append msg $'\n\n'"📦 合计预估待同步：<b>$(format_bytes "$PREVIEW_TOTAL_SYNC_BYTES")</b> / <b>${PREVIEW_TOTAL_SYNC_COUNT}</b> 文件${_total_note}${_fail_note}"
+  local _t _pc _sb _sc _nc _uc _fc _dfail_val
+  for _t in "${_tasks[@]}"; do
+    _pc=0; _sb=0; _sc=0; _nc=0; _uc=0; _fc=0
+    while IFS=$'\t' read -r _task _src _excl _sbytes _scount _dst _ybytes _ycount _ynew _yupd _fnote _dfail_val; do
+      [ -z "$_src" ] && continue
+      [ "$_task" != "$_t" ] && continue
+      _pc=$((_pc + 1))
+      _sb=$((_sb + ${_ybytes:-0}))
+      _sc=$((_sc + ${_ycount:-0}))
+      _nc=$((_nc + ${_ynew:-0}))
+      _uc=$((_uc + ${_yupd:-0}))
+      [ "${_dfail_val:-0}" = "1" ] && _fc=$((_fc + 1))
+    done <<< "$PREVIEW_PAIRS_TSV"
 
-  send_telegram_message "$msg"
-  echo "  已发送 ${PREVIEW_TASK_NAME} 预览通知"
+    PREVIEW_TASK_NAME="$_t"
+    PREVIEW_PAIR_COUNT="$_pc"
+    PREVIEW_TOTAL_SYNC_BYTES="$_sb"
+    PREVIEW_TOTAL_SYNC_COUNT="$_sc"
+    PREVIEW_TOTAL_NEW_COUNT="$_nc"
+    PREVIEW_TOTAL_UPD_COUNT="$_uc"
+    PREVIEW_FAIL_PAIRS="$_fc"
+
+    local _total_note=""
+    if [ "${PREVIEW_TOTAL_UPD_COUNT:-0}" -gt 0 ]; then
+      _total_note="（"
+      [ "${PREVIEW_TOTAL_NEW_COUNT:-0}" -gt 0 ] && _total_note+="新增 ${PREVIEW_TOTAL_NEW_COUNT} · "
+      _total_note+="同名更新 ${PREVIEW_TOTAL_UPD_COUNT}）"
+    fi
+    local _fail_note=""
+    if [ "${PREVIEW_FAIL_PAIRS:-0}" -gt 0 ]; then
+      _fail_note=$'\n'"⚠️ ${PREVIEW_FAIL_PAIRS} 个同步对目标端列举失败，按全量估算，实际待同步可能更少"
+    fi
+
+    local msg=""
+    tg_add_title msg "📋 任务预览 · ${PREVIEW_TASK_NAME}"
+    tg_add_section msg "📊 同步对（${PREVIEW_PAIR_COUNT} 对）"
+    tg_append msg "$(_preview_render_pairs_detail "$_t")"
+    tg_append msg $'\n\n'"📦 合计预估待同步：<b>$(format_bytes "$PREVIEW_TOTAL_SYNC_BYTES")</b> / <b>${PREVIEW_TOTAL_SYNC_COUNT}</b> 文件${_total_note}${_fail_note}"
+
+    send_telegram_message "$msg"
+    echo "  已发送 ${PREVIEW_TASK_NAME} 预览通知"
+  done
+
+  PREVIEW_PAIRS_TSV=""
+  PREVIEW_PAIR_COUNT=0
+  PREVIEW_TOTAL_SYNC_BYTES=0
+  PREVIEW_TOTAL_SYNC_COUNT=0
+  PREVIEW_TOTAL_NEW_COUNT=0
+  PREVIEW_TOTAL_UPD_COUNT=0
+  PREVIEW_FAIL_PAIRS=0
 }

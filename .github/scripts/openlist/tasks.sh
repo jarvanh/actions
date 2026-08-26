@@ -209,16 +209,8 @@ _preview_register() {
   shift 3
   local extra_args=("$@")
 
-  # 仅注册模式跳过预览通知，只算源端大小并注册
   if [ "${TASK_REGISTER_ONLY:-0}" != "1" ]; then
-    # task_name 变化时刷新上一个预览组
-    if [ "$_PREVIEW_CUR_TASK" != "$task_name" ]; then
-      if [ -n "$_PREVIEW_CUR_TASK" ]; then
-        flush_task_preview
-      fi
-      start_task_preview "$task_name"
-      _PREVIEW_CUR_TASK="$task_name"
-    fi
+    PREVIEW_TASK_NAME="$task_name"
     add_preview_pair "$source_path" "$dest_path" "${extra_args[@]}"
   fi
 
