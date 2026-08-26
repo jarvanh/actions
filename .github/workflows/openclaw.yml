@@ -162,6 +162,7 @@ jobs:
           detached: true
           install-dependencies: true
           limit-access-to-actor: true
+          timeout: 300
           
       - name: Persist tmate connection info
         if: ${{ always() }}
