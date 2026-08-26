@@ -175,6 +175,31 @@ _has_wopan_login_failure() {
   return 1
 }
 
+_check_openlist_backend_connectivity() {
+  local dest_path="$1"
+  local log_file="${2:-}"
+  [[ "$dest_path" == openlist:* ]] || return 0
+
+  local probe_output probe_rc
+  probe_output=$(rclone lsd "$dest_path" --max-depth 1 --contimeout 10s --timeout 15s 2>&1) && probe_rc=0 || probe_rc=$?
+
+  if [ "$probe_rc" -eq 0 ]; then
+    return 0
+  fi
+
+  if echo "$probe_output" | grep -Eqi 'unauthorized|permission denied|login failed|token.*expired|auth.*fail|401|403'; then
+    echo "🚫 目标端 $dest_path 后端认证失效（预检），跳过本轮同步" | tee ${log_file:+-a "$log_file"}
+    return 1
+  fi
+
+  if echo "$probe_output" | grep -Eqi 'connection refused|connection timed out|no such host|network unreachable'; then
+    echo "🚫 目标端 $dest_path 后端不可达（预检），跳过本轮同步" | tee ${log_file:+-a "$log_file"}
+    return 1
+  fi
+
+  return 0
+}
+
 # 查找 OpenList 最新日志文件
 # （数据库本地化后日志在 /opt/openlist-data/log，旧路径保留兜底）
 _find_openlist_log() {
@@ -1336,6 +1361,13 @@ sync_with_logging() {
   local LOG_FILENAME="${task_name}_sync_${TIMESTAMP}.log"
 
   echo "开始同步: $source_path -> $dest_path"
+
+  if ! _check_openlist_backend_connectivity "$dest_path" "$LOG_FILENAME"; then
+    SYNC_FAILED=1
+    SYNC_SKIPPED=0
+    SYNC_TRANSFERRED_BYTES=0
+    return 0
+  fi
 
   # OpenList 目标端在同步前刷新缓存，减少重复上传
   _refresh_openlist_cache "$dest_path"
