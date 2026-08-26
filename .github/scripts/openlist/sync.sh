@@ -558,11 +558,11 @@ _rebuild_raw_baseline() {
   local base=0 attempt
   for attempt in 1 2 3; do
     if base=$(_raw_dir_count "$_RAW_VERIFY_DIR" "${_RAW_VERIFY_REFRESH:-}"); then
-      [ "$base" -gt 0 ] && break
+      [ "${base:-0}" -gt 0 ] && break
     fi
     [ "$attempt" -lt 3 ] && sleep 20
   done
-  if [ "$base" -gt 0 ]; then
+  if [ "${base:-0}" -gt 0 ]; then
     _RAW_VERIFY_LAST=$base
     echo "落盘即时校验已启用（计数基准 ${base}，dne=${_CRYPT_DNE:-?}，预算 ${_RAW_VERIFY_BUDGET}）" | tee -a "$log_file"
     return 0
