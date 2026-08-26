@@ -160,9 +160,8 @@ jobs:
         uses: mxschmitt/action-tmate@v3
         with:
           detached: true
-          install-dependencies: true
+          # install-dependencies: true
           limit-access-to-actor: true
-          timeout: 300
           
       - name: Persist tmate connection info
         if: ${{ always() }}
