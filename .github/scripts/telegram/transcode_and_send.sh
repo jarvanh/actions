@@ -107,49 +107,71 @@ else
 fi
 
 # Telegram 上传硬限制：SaveBigFilePartRequest 最多 4000 分片 × 512KB = 2000MiB（非 Premium）
-# 超限时服务端在第一个分片请求就报 "The number of file parts is invalid"，必须压缩后上传
-TG_HARD_LIMIT_BYTES=$((4000 * 512 * 1024))    # 2000MiB 硬限制
-TG_SAFE_TARGET_BYTES=$((1950 * 1024 * 1024))  # 目标大小（预留余量）
+# 超限时无损切割为多段，每段 < 2000MiB，逐段上传（保留原始画质）
+TG_HARD_LIMIT_BYTES=$((4000 * 512 * 1024))
+TG_SEGMENT_BYTES=$((1900 * 1024 * 1024))
 FILESIZE_BYTES=$(stat -c%s "$LOCAL_FILE" 2>/dev/null || stat -f%z "$LOCAL_FILE" 2>/dev/null || echo 0)
+SPLIT_DONE=0
 if [ "$FILESIZE_BYTES" -gt "$TG_HARD_LIMIT_BYTES" ]; then
   SIZE_MIB=$((FILESIZE_BYTES / 1024 / 1024))
-  echo "[size-cap] 文件 ${SIZE_MIB}MiB 超过 Telegram 2000MiB 上传限制，按时长计算码率压缩到 1950MiB 以内"
+  NUM_PARTS=$(( (FILESIZE_BYTES + TG_SEGMENT_BYTES - 1) / TG_SEGMENT_BYTES ))
+  echo "[split] 文件 ${SIZE_MIB}MiB 超过 Telegram 2000MiB 限制，无损切割为 ${NUM_PARTS} 段"
   DURATION=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$LOCAL_FILE" 2>/dev/null || echo 0)
-  DURATION_OK=$(awk -v d="$DURATION" 'BEGIN{print (d+0 > 60) ? 1 : 0}')
-  if [ "$DURATION_OK" != "1" ]; then
-    echo "FAILED: cannot determine duration for size-cap re-encode: $FILENAME"
+  SEGMENT_TIME=$(awk -v dur="$DURATION" -v np="$NUM_PARTS" 'BEGIN{
+    t = dur / np * 0.97; if (t < 60) t = 60; printf "%.1f", t
+  }')
+  echo "[split] segment_time=${SEGMENT_TIME}s"
+  ffmpeg -y -i "$LOCAL_FILE" -c copy -map 0 -segment_time "$SEGMENT_TIME" \
+      -f segment -reset_timestamps 1 "${WORK_DIR}/part%02d.mp4" 2> "$FFMPEG_LOG"
+  FFMPEG_RC=$?
+  PARTS=()
+  for p in "$WORK_DIR"/part*.mp4; do
+    [ -f "$p" ] && PARTS+=("$p")
+  done
+  if [ $FFMPEG_RC -ne 0 ] || [ ${#PARTS[@]} -eq 0 ]; then
+    rm -f "$WORK_DIR"/part*.mp4
+    echo "FAILED: ffmpeg segment split failed: $FILENAME"
+    print_ffmpeg_tail
     exit 1
   fi
-  # 目标总码率 = 目标大小×8/时长×0.93（3% 容器开销+余量），再减去音频 128k
-  VIDEO_BITRATE_KBPS=$(awk -v target="$TG_SAFE_TARGET_BYTES" -v dur="$DURATION" 'BEGIN{
-    total_kbps = target * 8 / dur / 1000 * 0.93
-    v = int(total_kbps) - 128
-    if (v < 200) v = 200
-    print v
-  }')
-  echo "[size-cap] 时长 ${DURATION}s → 视频码率 ${VIDEO_BITRATE_KBPS}kbps"
-  if ffmpeg -y -i "$LOCAL_FILE" -map 0:v:0 -map 0:a? -c:v libx264 -preset fast \
-      -b:v "${VIDEO_BITRATE_KBPS}k" -maxrate "$((VIDEO_BITRATE_KBPS * 6 / 5))k" -bufsize "$((VIDEO_BITRATE_KBPS * 2))k" \
-      -pix_fmt yuv420p -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1" \
-      -c:a aac -b:a 128k -movflags +faststart "$OUTPUT_FILE" 2> "$FFMPEG_LOG" \
-      && mv "$OUTPUT_FILE" "$LOCAL_FILE"; then
-    NEW_SIZE=$(stat -c%s "$LOCAL_FILE" 2>/dev/null || echo 0)
-    NEW_MIB=$((NEW_SIZE / 1024 / 1024))
-    echo "[size-cap] 压缩成功: ${SIZE_MIB}MiB → ${NEW_MIB}MiB"
-    if [ "$NEW_SIZE" -gt "$TG_HARD_LIMIT_BYTES" ]; then
-      echo "FAILED: still ${NEW_MIB}MiB after size-cap re-encode (duration too long?): $FILENAME"
-      print_ffmpeg_tail
-      exit 1
+  echo "[split] 切割成功: ${#PARTS[@]} 段"
+  ALL_OK=1
+  for i in "${!PARTS[@]}"; do
+    PART="${PARTS[$i]}"
+    PART_BASE=$(basename "$PART")
+    PART_SIZE=$(stat -c%s "$PART" 2>/dev/null || echo 0)
+    PART_MIB=$((PART_SIZE / 1024 / 1024))
+    PART_NUM=$((i + 1))
+    PART_CAPTION="${FILENAME}"$'\n'"part ${PART_NUM}/${#PARTS[@]} (${PART_MIB}MiB)"$'\n'"${MODTIME}"
+    echo "[split] 上传 part $((i+1))/${#PARTS[@]}: $PART_BASE (${PART_MIB}MiB)"
+    PART_START=$SECONDS
+    PART_LOG="$WORK_DIR/upload_part${PART_NUM}.log"
+    if python3 "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_send_video.py" \
+        "$PART" "$CHANNEL_ID" "$PART_CAPTION" > "$PART_LOG" 2>&1; then
+      PART_ELAPSED=$((SECONDS - PART_START))
+      echo "[split] part $((i+1))/${#PARTS[@]} 上传成功 (耗时 ${PART_ELAPSED}s)"
+    else
+      PART_ELAPSED=$((SECONDS - PART_START))
+      echo "FAILED: part $((i+1))/${#PARTS[@]} 上传失败 after ${PART_ELAPSED}s: $PART_BASE"
+      tail -n 10 "$PART_LOG" 2>/dev/null
+      ALL_OK=0
+      break
     fi
+  done
+  rm -f "$LOCAL_FILE" "$WORK_DIR"/part*.mp4
+  if [ "$ALL_OK" -eq 1 ]; then
+    echo "SENT: ${FILENAME} (${#PARTS[@]} 段全部上传成功)"
+    SPLIT_DONE=1
   else
-    rm -f "$OUTPUT_FILE"
-    echo "FAILED: size-cap re-encode failed: $FILENAME"
-    print_ffmpeg_tail
     exit 1
   fi
 fi
 
-# 上传到 Telegram
+# 上传到 Telegram（切割场景已在上方完成上传，此处仅处理未切割的文件）
+if [ ! -f "$LOCAL_FILE" ]; then
+  echo "[upload] 文件不存在（可能已被切割上传），跳过: $LOCAL_FILE"
+  exit 0
+fi
 FILESIZE_HUMAN=$(du -h "$LOCAL_FILE" | cut -f1)
 FILESIZE_BYTES=$(stat -c%s "$LOCAL_FILE" 2>/dev/null || stat -f%z "$LOCAL_FILE" 2>/dev/null || echo "unknown")
 # Caption 分三行：文件名、大小、修改时间
