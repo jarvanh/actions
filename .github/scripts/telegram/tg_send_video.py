@@ -91,6 +91,21 @@ file_path = sys.argv[1]
 chat_id = sys.argv[2]
 caption = sys.argv[3] if len(sys.argv) > 3 else ""
 
+# Telegram 上传硬限制：SaveBigFilePartRequest 最多 4000 分片 × 512KB = 2000MiB（非 Premium）
+# 超限时服务端在第一个分片请求就拒绝："The number of file parts is invalid"
+TG_MAX_UPLOAD_BYTES = 4000 * 512 * 1024
+try:
+    _file_size = os.path.getsize(file_path)
+except OSError as e:
+    print(f"Error: cannot access file {file_path}: {e}")
+    sys.exit(1)
+if _file_size > TG_MAX_UPLOAD_BYTES:
+    print(f"Error: file is {_file_size} bytes ({_file_size / 1024 / 1024:.1f} MiB), "
+          f"exceeds Telegram upload limit of {TG_MAX_UPLOAD_BYTES} bytes "
+          f"({TG_MAX_UPLOAD_BYTES / 1024 / 1024:.0f} MiB, 4000 parts x 512KB). "
+          f"Re-encode to a smaller size before uploading.")
+    sys.exit(1)
+
 try:
     chat_id = int(chat_id)
 except ValueError:

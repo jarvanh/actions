@@ -106,6 +106,49 @@ else
   fi
 fi
 
+# Telegram 上传硬限制：SaveBigFilePartRequest 最多 4000 分片 × 512KB = 2000MiB（非 Premium）
+# 超限时服务端在第一个分片请求就报 "The number of file parts is invalid"，必须压缩后上传
+TG_HARD_LIMIT_BYTES=$((4000 * 512 * 1024))    # 2000MiB 硬限制
+TG_SAFE_TARGET_BYTES=$((1950 * 1024 * 1024))  # 目标大小（预留余量）
+FILESIZE_BYTES=$(stat -c%s "$LOCAL_FILE" 2>/dev/null || stat -f%z "$LOCAL_FILE" 2>/dev/null || echo 0)
+if [ "$FILESIZE_BYTES" -gt "$TG_HARD_LIMIT_BYTES" ]; then
+  SIZE_MIB=$((FILESIZE_BYTES / 1024 / 1024))
+  echo "[size-cap] 文件 ${SIZE_MIB}MiB 超过 Telegram 2000MiB 上传限制，按时长计算码率压缩到 1950MiB 以内"
+  DURATION=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$LOCAL_FILE" 2>/dev/null || echo 0)
+  DURATION_OK=$(awk -v d="$DURATION" 'BEGIN{print (d+0 > 60) ? 1 : 0}')
+  if [ "$DURATION_OK" != "1" ]; then
+    echo "FAILED: cannot determine duration for size-cap re-encode: $FILENAME"
+    exit 1
+  fi
+  # 目标总码率 = 目标大小×8/时长×0.93（3% 容器开销+余量），再减去音频 128k
+  VIDEO_BITRATE_KBPS=$(awk -v target="$TG_SAFE_TARGET_BYTES" -v dur="$DURATION" 'BEGIN{
+    total_kbps = target * 8 / dur / 1000 * 0.93
+    v = int(total_kbps) - 128
+    if (v < 200) v = 200
+    print v
+  }')
+  echo "[size-cap] 时长 ${DURATION}s → 视频码率 ${VIDEO_BITRATE_KBPS}kbps"
+  if ffmpeg -y -i "$LOCAL_FILE" -map 0:v:0 -map 0:a? -c:v libx264 -preset fast \
+      -b:v "${VIDEO_BITRATE_KBPS}k" -maxrate "$((VIDEO_BITRATE_KBPS * 6 / 5))k" -bufsize "$((VIDEO_BITRATE_KBPS * 2))k" \
+      -pix_fmt yuv420p -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1" \
+      -c:a aac -b:a 128k -movflags +faststart "$OUTPUT_FILE" 2> "$FFMPEG_LOG" \
+      && mv "$OUTPUT_FILE" "$LOCAL_FILE"; then
+    NEW_SIZE=$(stat -c%s "$LOCAL_FILE" 2>/dev/null || echo 0)
+    NEW_MIB=$((NEW_SIZE / 1024 / 1024))
+    echo "[size-cap] 压缩成功: ${SIZE_MIB}MiB → ${NEW_MIB}MiB"
+    if [ "$NEW_SIZE" -gt "$TG_HARD_LIMIT_BYTES" ]; then
+      echo "FAILED: still ${NEW_MIB}MiB after size-cap re-encode (duration too long?): $FILENAME"
+      print_ffmpeg_tail
+      exit 1
+    fi
+  else
+    rm -f "$OUTPUT_FILE"
+    echo "FAILED: size-cap re-encode failed: $FILENAME"
+    print_ffmpeg_tail
+    exit 1
+  fi
+fi
+
 # 上传到 Telegram
 FILESIZE_HUMAN=$(du -h "$LOCAL_FILE" | cut -f1)
 FILESIZE_BYTES=$(stat -c%s "$LOCAL_FILE" 2>/dev/null || stat -f%z "$LOCAL_FILE" 2>/dev/null || echo "unknown")
