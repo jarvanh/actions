@@ -87,9 +87,9 @@ add_preview_pair "onedrive:backup" "openlist:dst" --delete-before --exclude '/no
 [ "$PREVIEW_TOTAL_NEW_COUNT" = "1" ]   && ok "1c 新增计数 = 1" || bad "1c: [$PREVIEW_TOTAL_NEW_COUNT]"
 [ "$PREVIEW_TOTAL_UPD_COUNT" = "1" ]   && ok "1d 同名更新计数 = 1" || bad "1d: [$PREVIEW_TOTAL_UPD_COUNT]"
 
-# TSV 字段: src/excl/sbytes/scount/dst/ybytes/ycount/ynew/yupd/fnote/dfail
+# TSV 字段: task/src/excl/sbytes/scount/dst/ybytes/ycount/ynew/yupd/fnote/dfail
 _line="${PREVIEW_PAIRS_TSV%$'\n'}"
-IFS=$'\t' read -r _src _excl _sb _sc _dst _yb _yc _yn _yu _fn _df <<< "$_line"
+IFS=$'\t' read -r _task _src _excl _sb _sc _dst _yb _yc _yn _yu _fn _df <<< "$_line"
 [ "$_sb" = "1350" ] && [ "$_sc" = "5" ] && ok "1e 源端总量 1350 B / 5 文件" || bad "1e: [$_sb/$_sc]"
 [ "$_yb" = "900" ] && [ "$_yc" = "2" ] && ok "1f 条目待同步 900 B / 2 文件" || bad "1f: [$_yb/$_yc]"
 [ "$_yn" = "1" ] && [ "$_yu" = "1" ] && ok "1g 条目构成 新增1/更新1" || bad "1g: [$_yn/$_yu]"
