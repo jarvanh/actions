@@ -625,6 +625,10 @@ _sync_restart_for_verify() {
   return 0
 }
 
+# 转义 rclone filter 中的 glob 特殊字符 [ ] * ? { } → 字符类形式
+# 用法: _fx_escape <glob_pattern>
+_fx_escape() { printf '%s' "$1" | sed -e 's/[][*?{}]/[&]/g'; }
+
 # ===== 已修复文件排除（405 防护 + sync 模式删除保护）=====
 # marker fixed_files 里的 original 当初就是原路径传不上（405/超长/假成功）
 # 才修复到 alternative 的；替代文件仍在时原路径重传必然再 405，
@@ -644,7 +648,6 @@ _sync_fixed_files_exclusion() {
     local fixed_exclude_file="/tmp/${task_name}_fixed_exclude_$$.txt"
     : > "$fixed_exclude_file"
     local _fx_orig _fx_alt _fx_method
-    _fx_escape() { printf '%s' "$1" | sed -e 's/[][*?{}]/[&]/g'; }
     while IFS=$'\t' read -r _fx_orig _fx_alt _fx_method; do
       [ -z "$_fx_orig" ] && [ -z "$_fx_alt" ] && continue
       if [ -n "$_fx_orig" ]; then
@@ -1246,7 +1249,7 @@ _sync_persist_verify_and_retry() {
 }
 
 # ===== object not found 错误解析（源文件不存在）=====
-# 依赖调用方作用域: LAST_ATTEMPT_LOG / fail_list / LOG_FILENAME / task_name；写 HAS_OBJECT_NOT_FOUND
+# 依赖调用方作用域: LAST_ATTEMPT_LOG / fail_list / LOG_FILENAME / task_name / HAS_OBJECT_NOT_FOUND
 _sync_parse_object_not_found() {
   if grep -Eqi 'ERROR : .+: Failed to copy.*object not found' "$LAST_ATTEMPT_LOG" 2>/dev/null; then
     HAS_OBJECT_NOT_FOUND=1

@@ -6,8 +6,7 @@
 #   --1d-skip     — 1 天内已成功同步则跳过（--2d-skip / --3d-skip 自定义天数）
 #   其余参数（如 --exclude）原样传给 rclone
 #
-# 依赖: sync.sh, split.sh, marker.sh, preview.sh, progress.sh
-# 依赖环境变量:
+# 依赖: sync.sh, split.sh, marker.sh, preview.sh, progress.sh, fix.sh
 # 依赖环境变量:
 #   RCLONE_SYNC_TASK_FLAGS — sync_task 特有 rclone 参数（在 flags.sh 中定义）
 
