@@ -153,7 +153,17 @@ run_all_tasks() {
       _rotation_save "$idx" "$_rot_attempts"
     fi
 
+    if [ "$real_pass" -eq 0 ]; then
+      local _hb_src _hb_dst
+      IFS='|' read -r _ _hb_src _hb_dst _ _ <<< "$_e"
+      echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] 注册进度: $((i + 1))/${n} ${_hb_src} → ${_hb_dst}"
+    fi
+
     _run_registry_entry "$_e" || true
+
+    if [ "$real_pass" -eq 0 ]; then
+      echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] 注册完成: $((i + 1))/${n} ${_hb_src} → ${_hb_dst}"
+    fi
 
     if [ "$rotation_enabled" -eq 1 ] && [ "$real_pass" -eq 1 ]; then
       if [ "${SYNC_SKIPPED:-0}" = "1" ] || [ "${SYNC_FAILED:-0}" = "0" ]; then
