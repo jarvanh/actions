@@ -770,6 +770,19 @@ _sync_fix_missing_files() {
         while IFS=$'\t' read -r bl_f bl_m; do
           [ -z "$bl_f" ] && continue
           grep -qxF "$bl_f" "$missing_list" || continue
+          # 全拉黑重置: 11 种方法全部拉黑的文件，黑名单大概率是假成功时代的
+          # 污染（token 过期 → 即时校验误判 → 逐方法拉黑），而非真实的逐方法
+          # 内容性失败——真实的内容性失败（如密文名超长）只会拉黑原名类方法
+          # （m1/m2），短名/打包类方法仍会成功。全拉黑 = 文件永远无法重试，
+          # 只能重置（若确属真失败，本轮会重新逐方法拉黑，代价可控）。
+          # run 32904752243 实锤: task0_照片 3 个名长文件全方法拉黑，修复
+          # 管线对每个文件白下载 300MB 后直接放弃。
+          local bl_cnt
+          bl_cnt=$(printf '%s' "$bl_m" | awk -F'|' 'NF > n { n = NF } END { print n + 0 }')
+          if [ "$bl_cnt" -ge 11 ]; then
+            echo "♻ 全方法拉黑重置（疑为假成功时代污染，重新逐方法尝试）· $(_short_path "$bl_f")" | tee -a "$LOG_FILENAME"
+            continue
+          fi
           FIX_METHOD_BLACKLIST["$bl_f"]="$bl_m"
         done < <(echo "$MARKER_FIX_BLACKLIST" | jq -r 'to_entries[] | [.key, .value] | @tsv' 2>/dev/null)
       fi
@@ -882,6 +895,19 @@ _sync_fix_missing_files() {
       fi
       echo "$incr_base" > "$incr_state"
 
+      # 统一错误熔断器: 连续多个文件全方法失败且主导错误一致（如后端 405
+      # 全拒）→ 后端级故障，继续逐文件跑 11 种方法只会空转烧时间
+      # （run 32904752243 实锤: wopan175 后端全拒，69 个顽固缺失逐个全方法
+      #   405，烧 45 分钟零进展直到 job 结束）
+      # 判据: 单文件 ≥2 个方法报同一错误 + 连续 N 个文件（默认 3）同签名。
+      # 内容性失败（如密文名超长）不会触发——原名类方法假成功无错误行、
+      # 短名类方法直接成功。
+      # 开关: OPENLIST_FIX_CB_FILES=0 关闭
+      local _cb_consec=0 _cb_sig=""
+      local _cb_threshold="${OPENLIST_FIX_CB_FILES:-3}"
+      local _cb_done=0 _cb_total
+      _cb_total=$(wc -l < "$missing_list" | tr -d ' ')
+
       while IFS= read -r failed_line; do
         [ -z "$failed_line" ] && continue
 
@@ -917,7 +943,13 @@ _sync_fix_missing_files() {
           fi
         fi
 
+        # 记录 fix_log 偏移，失败后用于提取本文件修复区段的主导错误签名
+        local _fix_pos_before
+        _fix_pos_before=$(wc -c < "$fix_log" 2>/dev/null | tr -d ' ')
+        [ -n "$_fix_pos_before" ] || _fix_pos_before=0
+
         try_fix_failed_file "$source_path" "$dest_path" "$task_name" "$failed_line" "$fix_log" || true
+        _cb_done=$((_cb_done + 1))
 
         if [ "$TRY_FIX_STATUS" = "success" ]; then
           echo "✅ 修复成功 · $(_method_short "${TRY_FIX_METHOD_ID:-}") · $(_short_path "$failed_line")" | tee -a "$LOG_FILENAME"
@@ -928,9 +960,36 @@ _sync_fix_missing_files() {
           _persist_fix_entry_now "$incr_marker_path" "$incr_state" "$source_path" "$dest_path" \
             "$TRY_FIX_ORIGINAL" "$TRY_FIX_ALTERNATIVE" "$TRY_FIX_METHOD" "$TRY_FIX_RESTORE" \
             "$file_size" "$file_size_bytes" "${TRY_FIX_METHOD_ID:-}" 2>&1 | tee -a "$LOG_FILENAME" || true
+          _cb_consec=0
+          _cb_sig=""
         else
           echo "❌ 修复失败 · $(_short_path "$failed_line") · ${TRY_FIX_MESSAGE}" | tee -a "$LOG_FILENAME"
           echo "${failed_line}|${file_size}|${TRY_FIX_MESSAGE}" >> "$fail_list"
+
+          # 熔断器累计: 提取本文件修复区段的主导错误（出现 ≥2 次的同文错误）
+          if [ "$_cb_threshold" -gt 0 ] 2>/dev/null; then
+            local _delta _sigline _sig _sig_n
+            _delta=$(tail -c +$((_fix_pos_before + 1)) "$fix_log" 2>/dev/null || true)
+            _sigline=$(printf '%s\n' "$_delta" | grep -oE 'Failed to copyto?: .+' | \
+              sed -E 's/^Failed to copyto?: //' | sort | uniq -c | sort -rn | head -1)
+            _sig_n=$(printf '%s\n' "$_sigline" | awk '{print $1}')
+            _sig=$(printf '%s\n' "$_sigline" | sed -E 's/^ *[0-9]+ //')
+            if [ -n "$_sig" ] && [ "${_sig_n:-0}" -ge 2 ]; then
+              if [ "$_sig" = "$_cb_sig" ]; then
+                _cb_consec=$((_cb_consec + 1))
+              else
+                _cb_consec=1
+                _cb_sig="$_sig"
+              fi
+              if [ "$_cb_consec" -ge "$_cb_threshold" ]; then
+                echo "🛑 修复管线熔断: 连续 ${_cb_consec} 个文件全方法失败且错误一致（${_sig}）→ 判定后端级故障，跳过剩余 $((_cb_total - _cb_done)) 个文件的修复" | tee -a "$LOG_FILENAME"
+                break
+              fi
+            else
+              _cb_consec=0
+              _cb_sig=""
+            fi
+          fi
         fi
       done < "$missing_list"
 

@@ -754,6 +754,22 @@ _batch_consolidate() {
   [[ "$retry_copied" =~ ^[0-9]+$ ]] || retry_copied=0
   echo "${label} 巩固: 串行重试完成，重传 ${retry_copied}/${missing_n}"
 
+  # ===== 后端写入全拒检测（批次快速止损）=====
+  # 本批全部触碰文件未落盘 + 串行重试 0 成功 → 后端级故障（如 wopan175
+  # 全量 405: OpenList WebDAV 层拒收 PUT，rclone 报 "unchunked simple
+  # update failed: Method Not Allowed"），继续跑后续批次只会每批烧数十
+  # 分钟产出假成功/失败（run 32904752243 实锤）。置 BATCH_BACKEND_DEAD
+  # 由调用方 sync_by_file_batches 中止剩余批次并标记同步对失败。
+  # 门槛: 缺失 ≥3 且占触碰文件 100%（部分落盘 = 后端还活着，不触发）
+  local touched_n=0
+  touched_n=$(wc -l < "$touched" 2>/dev/null | tr -d ' ')
+  if [ "$missing_n" -ge 3 ] && [ "$retry_copied" -eq 0 ] && [ "$touched_n" -gt 0 ] && [ "$missing_n" -ge "$touched_n" ]; then
+    BATCH_BACKEND_DEAD=1
+    echo "🛑 ${label} 巩固: 后端写入全拒（${missing_n}/${touched_n} 个触碰文件 0 落盘、串行重试 0 成功）"
+    echo "${label} 巩固: 跳过修复管线（后端级故障下 11 种方法同样全拒，白耗下载），等待后端恢复后下轮重试"
+    return 0
+  fi
+
   # ===== 顽固缺失 → 修复管线（换方法兜底）=====
   # 普通重传后仍未落盘 = 后端内容性拒收（如密文文件名超长），原名重试永远失败
   local stubborn="${batch_dir}/stubborn_${batch_idx}.txt"
@@ -1011,7 +1027,25 @@ sync_by_file_batches() {
       # 批次级巩固: 重启容器取后端真值 → 校验本批落盘 → 串行重试缺失
       # （把巩固单元从"整个任务"缩小到"单个批次"，run 被取消也锁住进度；
       #   详见 _batch_consolidate 函数头注释）
+      BATCH_BACKEND_DEAD=0
       _batch_consolidate "$i" "$batch_log" || true
+
+      # 后端写入全拒（如 OpenList WebDAV 层全量 405）→ 中止剩余批次。
+      # 继续跑只会每批烧数十分钟产出假成功/失败，且最终 sync_with_logging
+      # 的全量重传同样全拒（run 32904752243: wopan175 批次 1 全拒后修复
+      # 管线又烧 45 分钟）。直接标记失败返回，轮转机制下轮给其他同步对让路。
+      if [ "${BATCH_BACKEND_DEAD:-0}" = "1" ]; then
+        local remaining_batches=$((total_batches - batch_idx))
+        [ "$remaining_batches" -gt 0 ] && failed_batches=$((failed_batches + remaining_batches))
+        failed_batch_list+="剩余 ${remaining_batches} 批 · 后端写入全拒，中止"$'\n'
+        echo "🛑 后端写入全拒，中止剩余 ${remaining_batches} 个批次，本同步对标记失败（后端恢复后轮转回来重试）"
+        AUTO_SPLIT_INFO="<b>🔀 文件批次拆分统计</b>"$'\n'
+        AUTO_SPLIT_INFO+="总批次：<b>${total_batches}</b> · 文件数：<b>${batch_total_files}</b>"$'\n'
+        AUTO_SPLIT_INFO+="✅ <b>${synced_batches}</b> · ❌ <b>${failed_batches}</b>（后端写入全拒中止）"$'\n'
+        progress_update_force "后端写入全拒，中止同步" "▸ 📊 批次：${batch_idx}/${total_batches} | ✅${synced_batches} ❌${failed_batches}"
+        rm -rf "$batch_dir"
+        return 1
+      fi
 
       progress_update_force "批次 ${batch_idx}/${total_batches} 完成" "▸ 📊 批次：${batch_idx}/${total_batches} | ✅${synced_batches} ❌${failed_batches}"
     fi
