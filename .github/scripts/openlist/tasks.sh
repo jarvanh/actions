@@ -12,7 +12,7 @@
 #   RCLONE_SYNC_TASK_FLAGS — sync_task 特有 rclone 参数（在 flags.sh 中定义）
 
 # 常量定义
-readonly DEFAULT_SPLIT_THRESHOLD_BYTES=50000000000 # 50GB 自动拆分阈值
+readonly DEFAULT_SPLIT_THRESHOLD_BYTES="${SYNC_SPLIT_THRESHOLD_BYTES:-50000000000}" # 50GB 自动拆分阈值
 
 # ===== 同步任务清单（单点定义，增减任务只需在此添加/删除一行）=====
 # 格式: "id|源端|目标端|任务名|附加参数"
@@ -733,11 +733,11 @@ _batch_consolidate() {
     --files-from "$retry_list" \
     --size-only \
     --no-traverse \
-    --transfers 1 \
-    --checkers 8 \
+    --transfers "${OPENLIST_TRANSFERS:-1}" \
+    --checkers "${OPENLIST_CHECKERS:-8}" \
     --timeout 30m \
     --retries 1 \
-    --low-level-retries 3 \
+    --low-level-retries "${OPENLIST_LOW_LEVEL_RETRIES:-3}" \
     --contimeout 30s \
     --ignore-errors \
     --progress \
@@ -972,7 +972,7 @@ sync_by_file_batches() {
       local batch_guard_flags=()
       local batch_timeout="5m"
       if [[ "$dest_path" == openlist:* ]]; then
-        batch_guard_flags=("--transfers" "1" "--checkers" "8")
+        batch_guard_flags=("--transfers" "${OPENLIST_TRANSFERS:-1}" "--checkers" "${OPENLIST_CHECKERS:-8}")
         batch_timeout="30m"
         echo "OpenList 目标端：批次上传启用低并发保护 (transfers=1, checkers=8, timeout=30m)"
         # 长批次开始前主动刷新驱动 token（wopan OAuth access token 有效期约 5
@@ -991,7 +991,7 @@ sync_by_file_batches() {
         --size-only \
         --no-traverse \
         --retries 1 \
-        --low-level-retries 3 \
+        --low-level-retries "${OPENLIST_LOW_LEVEL_RETRIES:-3}" \
         --timeout "$batch_timeout" \
         --contimeout 30s \
         --ignore-errors \

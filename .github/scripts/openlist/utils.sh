@@ -208,7 +208,7 @@ _build_diff_files_list() {
   shift 2
   local -a extra_args=("$@")
   local check_combined
-  check_combined=$(timeout 300 rclone check "$source_path" "$dest_path" --size-only "${extra_args[@]}" --combined - 2>/dev/null || true)
+  check_combined=$(timeout "${OPENLIST_DOWNLOAD_TIMEOUT:-300}" rclone check "$source_path" "$dest_path" --size-only "${extra_args[@]}" --combined - 2>/dev/null || true)
   local result="" diff_count=0
   while IFS= read -r line; do
     local marker="${line:0:1}"

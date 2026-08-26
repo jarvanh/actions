@@ -441,7 +441,7 @@ _try_fix_archive() {
   fi
   local dst status
   dst="${actual_dst_dir}/${pkg_name}"
-  rclone copyto "$temp_dir/${pkg_name}" "$dst" "${RCLONE_RETRY_FLAGS[@]}" --timeout 5m 2>&1 | \
+  rclone copyto "$temp_dir/${pkg_name}" "$dst" "${RCLONE_RETRY_FLAGS[@]}" --timeout "${OPENLIST_UPLOAD_TIMEOUT:-300}s" 2>&1 | \
     _cmd_log "$mid" "$fix_log"
   status=${PIPESTATUS[0]}
   if [ "$status" -eq 0 ] && _confirm_persist_by_count "$(_method_desc "$mid")" "$failed_file_rel" "$fix_log"; then
@@ -517,7 +517,7 @@ _try_fix_split_archive() {
     total_parts=$((total_parts + 1))
     part_bname=$(basename -- "$part_file")
     dst_part="${actual_dst_dir}/${part_bname}"
-    rclone copyto "$part_file" "$dst_part" "${RCLONE_RETRY_FLAGS[@]}" --timeout 10m 2>&1 | \
+    rclone copyto "$part_file" "$dst_part" "${RCLONE_RETRY_FLAGS[@]}" --timeout "${OPENLIST_UPLOAD_TIMEOUT:-300}s" 2>&1 | \
       _cmd_log "${mid}·传${total_parts}" "$fix_log"
     part_rc=${PIPESTATUS[0]}
     part_expected=$(stat -c%s "$part_file" 2>/dev/null || stat -f%z "$part_file" 2>/dev/null || echo 0)
@@ -716,7 +716,7 @@ try_fix_failed_file() {
   local local_file="$temp_dir/$file_name"
 
   log_fix "$fix_log" "⬇ 下载源文件到本地..."
-  rclone copyto "$src_file" "$local_file" "${RCLONE_RETRY_FLAGS[@]}" --timeout 5m 2>&1 | \
+  rclone copyto "$src_file" "$local_file" "${RCLONE_RETRY_FLAGS[@]}" --timeout "${OPENLIST_UPLOAD_TIMEOUT:-300}s" 2>&1 | \
     _cmd_log 下载 "$fix_log"
   local copy_status=${PIPESTATUS[0]}
 
@@ -739,13 +739,13 @@ try_fix_failed_file() {
 
   # 尝试 rclone mkdir
   log_fix "$fix_log" "📁 确保目标目录存在: $(_short_path "$dst_dir")"
-  rclone mkdir "$dst_dir" "${RCLONE_RETRY_FLAGS[@]}" --timeout 2m 2>&1 | \
+  rclone mkdir "$dst_dir" "${RCLONE_RETRY_FLAGS[@]}" --timeout "${OPENLIST_MKDIR_TIMEOUT:-120}s" 2>&1 | \
     _cmd_log mkdir "$fix_log"
   local mkdir_status=${PIPESTATUS[0]}
 
   # rclone mkdir 退出码为 0 时仍需验证目录是否实际存在（WebDAV 可能静默失败）
   if [ "$mkdir_status" -eq 0 ]; then
-    rclone lsd "$dst_dir" "${RCLONE_RETRY_FLAGS[@]}" --timeout 2m >/dev/null 2>&1
+    rclone lsd "$dst_dir" "${RCLONE_RETRY_FLAGS[@]}" --timeout "${OPENLIST_MKDIR_TIMEOUT:-120}s" >/dev/null 2>&1
     local verify_status=$?
     if [ "$verify_status" -eq 0 ]; then
       dir_ok=1
@@ -796,13 +796,13 @@ try_fix_failed_file() {
       log_fix "$fix_log" "原始目录: $file_dir_rel"
       log_fix "$fix_log" "base64URL 编码目录: $new_file_dir_rel"
 
-      rclone mkdir "$actual_dst_dir" "${RCLONE_RETRY_FLAGS[@]}" --timeout 2m 2>&1 | \
+      rclone mkdir "$actual_dst_dir" "${RCLONE_RETRY_FLAGS[@]}" --timeout "${OPENLIST_MKDIR_TIMEOUT:-120}s" 2>&1 | \
         _cmd_log mkdir+b64 "$fix_log"
       mkdir_status=${PIPESTATUS[0]}
 
       if [ "$mkdir_status" -eq 0 ]; then
         log_fix "$fix_log" "rclone mkdir (base64URL) 退出码 0，用 rclone lsd 验证目录..."
-        rclone lsd "$actual_dst_dir" "${RCLONE_RETRY_FLAGS[@]}" --timeout 2m >/dev/null 2>&1
+        rclone lsd "$actual_dst_dir" "${RCLONE_RETRY_FLAGS[@]}" --timeout "${OPENLIST_MKDIR_TIMEOUT:-120}s" >/dev/null 2>&1
         local b64_verify_status=$?
         if [ "$b64_verify_status" -eq 0 ]; then
           dir_ok=1
@@ -850,7 +850,7 @@ try_fix_failed_file() {
 
   # 方法 1：直接 rclone copyto
   if _fix_method_gate m1; then
-  rclone copyto "$src_file" "$dst_file" "${RCLONE_RETRY_FLAGS[@]}" --timeout 5m 2>&1 | \
+  rclone copyto "$src_file" "$dst_file" "${RCLONE_RETRY_FLAGS[@]}" --timeout "${OPENLIST_UPLOAD_TIMEOUT:-300}s" 2>&1 | \
     _cmd_log m1 "$fix_log"
   local m1_status=${PIPESTATUS[0]}
   if [ "$m1_status" -eq 0 ] && _confirm_persist_by_count "$(_method_desc m1)" "$failed_file_rel" "$fix_log"; then
@@ -877,7 +877,7 @@ try_fix_failed_file() {
     _c_rel="${_c_rel_root:+${_c_rel_root}/}${failed_file_rel}"
     _c_dst="${_CRYPT_ONTHEFLY}${_c_rel}"
     log_fix "$fix_log" "  crypt 直写: ${_CRYPT_REMOTE} ← ${_c_rel}（加密名由 rclone 本地生成）"
-    rclone copyto "$local_file" "$_c_dst" "${RCLONE_RETRY_FLAGS[@]}" --timeout 15m 2>&1 | \
+    rclone copyto "$local_file" "$_c_dst" "${RCLONE_RETRY_FLAGS[@]}" --timeout "${OPENLIST_UPLOAD_TIMEOUT:-300}s" 2>&1 | \
       _cmd_log m2 "$fix_log"
     local m2_status=${PIPESTATUS[0]}
     if [ "$m2_status" -eq 0 ] && _confirm_persist_by_count "$(_method_desc m2)" "$failed_file_rel" "$fix_log"; then
@@ -904,7 +904,7 @@ try_fix_failed_file() {
   fi
   m3sh_dst="${actual_dst_dir}/${sh_name}"
   log_fix "$fix_log" "  文件名: ${file_name} → ${sh_name}"
-  rclone copyto "$local_file" "$m3sh_dst" "${RCLONE_RETRY_FLAGS[@]}" --timeout 5m 2>&1 | \
+  rclone copyto "$local_file" "$m3sh_dst" "${RCLONE_RETRY_FLAGS[@]}" --timeout "${OPENLIST_UPLOAD_TIMEOUT:-300}s" 2>&1 | \
     _cmd_log m3 "$fix_log"
   m3sh_status=${PIPESTATUS[0]}
   if [ "$m3sh_status" -eq 0 ] && _confirm_persist_by_count "$(_method_desc m3)" "$failed_file_rel" "$fix_log"; then
@@ -996,10 +996,10 @@ try_fix_failed_file() {
     log_fix "$fix_log" "  编码文件名: $fixed_name"
 
     # 确保父目录存在
-    rclone mkdir "$parent_dst_dir" "${RCLONE_RETRY_FLAGS[@]}" --timeout 2m 2>&1 | \
+    rclone mkdir "$parent_dst_dir" "${RCLONE_RETRY_FLAGS[@]}" --timeout "${OPENLIST_MKDIR_TIMEOUT:-120}s" 2>&1 | \
       _cmd_log m9·mkdir "$fix_log"
 
-    rclone copyto "$local_file" "$m9_dst" "${RCLONE_RETRY_FLAGS[@]}" --timeout 5m 2>&1 | \
+    rclone copyto "$local_file" "$m9_dst" "${RCLONE_RETRY_FLAGS[@]}" --timeout "${OPENLIST_UPLOAD_TIMEOUT:-300}s" 2>&1 | \
       _cmd_log m9 "$fix_log"
     local m9_status=${PIPESTATUS[0]}
     if [ "$m9_status" -eq 0 ] && _confirm_persist_by_count "$(_method_desc m9)" "$failed_file_rel" "$fix_log"; then
@@ -1018,7 +1018,7 @@ try_fix_failed_file() {
     _cmd_log m10·zip "$fix_log"
   if [ -f "$temp_dir/${file_name}.enc.zip" ]; then
     local m10_dst="${actual_dst_dir}/${file_name}.enc.zip"
-    rclone copyto "$temp_dir/${file_name}.enc.zip" "$m10_dst" "${RCLONE_RETRY_FLAGS[@]}" --timeout 5m 2>&1 | \
+    rclone copyto "$temp_dir/${file_name}.enc.zip" "$m10_dst" "${RCLONE_RETRY_FLAGS[@]}" --timeout "${OPENLIST_UPLOAD_TIMEOUT:-300}s" 2>&1 | \
       _cmd_log m10 "$fix_log"
     local m10_status=${PIPESTATUS[0]}
     if [ "$m10_status" -eq 0 ] && _confirm_persist_by_count "$(_method_desc m10)" "$failed_file_rel" "$fix_log"; then
@@ -1052,7 +1052,7 @@ try_fix_failed_file() {
       -F "file=@$local_file" \
       -F "path=$tmp_ol_dir" \
       -F "name=$m11_upload_name" \
-      --max-time 300 2>&1)
+      --max-time "${OPENLIST_UPLOAD_TIMEOUT:-300}" 2>&1)
     m11_upload_http=$(echo "$m11_upload_resp" | tail -n 1)
     log_fix "$fix_log" "  临时目录上传响应: ${m11_upload_http}"
     if echo "$m11_upload_http" | grep -qE 'HTTP_CODE:(200|201|204)' && _confirm_persist_by_count "$(_method_desc m11)" "$failed_file_rel" "$fix_log"; then
