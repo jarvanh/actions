@@ -15,13 +15,12 @@ LOGF=/tmp/test_truth_log.txt; : > "$LOGF"
 # --- 定位仓库根目录（tests/ 向上四级）---
 _REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 
-# --- 先 source 被测代码（sed 截取含全部被测函数的区段）---
-source "$_REPO_ROOT/.github/scripts/openlist/utils.sh" 2>/dev/null
-# 注意: macOS 自带 bash 3.2 的 source <(...（进程替换）不生效，先落临时文件
-_SYNC_EXCERPT=$(mktemp /tmp/test_truth_sync.XXXXXX)
-sed -n '1,400p' "$_REPO_ROOT/.github/scripts/openlist/sync.sh" > "$_SYNC_EXCERPT"
-source "$_SYNC_EXCERPT" 2>/dev/null || true
-rm -f "$_SYNC_EXCERPT"
+# --- 先 source 被测代码（sync.sh 为纯函数库，顶层仅状态变量初始化）---
+source "$_REPO_ROOT/.github/scripts/openlist/utils.sh"
+# 直接全量 source，不用 sed 行号截取: 批次预检熔断提交在 _openlist_api_health_check
+# 内插码后行号右移，'1,400p' 截取线把半截脚本喂给 source 且报错被 2>/dev/null
+# 吞掉 → _openlist_truth_check 未定义 → 测试全线假失败（command not found）
+source "$_REPO_ROOT/.github/scripts/openlist/sync.sh"
 
 # --- mocks（必须在 source 之后定义，否则被脚本内同名函数覆盖）---
 docker() {
