@@ -134,22 +134,29 @@ _restore_one_entry() {
   rm -rf "$tmp"
   mkdir -p "$tmp"
 
-  local res payload
+  local res payload payload_bytes up_bytes
   res=$(_restore_build_payload "$alt" "$dest" "$tmp")
   if [ "${res%%:*}" != "OK" ]; then
     echo "${res:-FAIL: 未知错误}"
     rm -rf "$tmp"
     return 0
   fi
+
+  # 校验基准 = 本地解压产物字节数（7z 解压已过 zip CRC，产物可信）；
+  # marker 的 size_bytes 在 fallback 条目上等于分卷总大小，不能作等值判据
   payload="${res#OK:}"
+  payload_bytes=$(wc -c <"$payload")
   rclone copyto "$payload" "$dst_full" "${rflags[@]}" >/dev/null 2>&1 || { echo "FAIL: 上传还原文件失败"; rm -rf "$tmp"; return 0; }
 
-  # 验证原路径已存在 → 清理目标端替代文件
-  if _dst_file_exists "$dst_full"; then
+  # 原路径存在且大小与解压产物一致 → 才清理目标端替代文件
+  up_bytes=$(rclone size --json "$dst_full" "${rflags[@]}" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null)
+  if ! _dst_file_exists "$dst_full"; then
+    echo "FAIL: 上传返回成功但原路径未见文件（疑似假成功，替代文件已保留）"
+  elif [ "$up_bytes" != "$payload_bytes" ]; then
+    echo "FAIL: 上传后大小与解压产物不符 (产物 ${payload_bytes}B, 现值 ${up_bytes}B)，替代文件已保留"
+  else
     _restore_cleanup_alternative "$dest" "$alt"
     echo "OK"
-  else
-    echo "FAIL: 上传返回成功但原路径未见文件（疑似假成功，替代文件已保留）"
   fi
   rm -rf "$tmp"
   return 0
@@ -246,7 +253,9 @@ _escape_exclude_path() {
 #      rclone copy 目标 → 源端（--size-only，源端已有且同大小则跳过）
 #   2. 修复文件: 排除出批量拷贝后逐条处理——从目标端下载替代形态，
 #      本地解码（合卷解压；改名类内容本就相同），
-#      以原路径原文件名上传到源端，按 marker 记录的 size_bytes 校验
+#      以原路径原文件名上传到源端。校验基准 = 本地解压产物字节数（7z 已过 zip CRC），
+#      防"假成功/截断"；marker 的 size_bytes 在 fallback 条目上等于分卷总大小，
+#      故只降级为交叉核对注记，不用于成败判定
 #   3. 全程不删除目标端任何文件（备份保持完整，可重复执行）
 # 依赖 marker 的 original/alternative/method 映射（marker 与源端同在 OneDrive，
 # 若 OneDrive 整体丢失则 marker 也丢，此工具的前提是 marker 仍可读或已外置备份）
@@ -254,6 +263,7 @@ _escape_exclude_path() {
 
 # 单个修复文件恢复到源端（内部函数，输出一行状态）
 # 用法: _recover_one_to_source <src_remote> <dest_remote> <orig> <alt> <method> <expect_bytes> <tmp_base>
+# 输出: "SKIP" / "OK" / "OK: <附注>"（调用方须按 ${status%%:*} 前缀判定成功）/ "FAIL: <原因>"
 _recover_one_to_source() {
   local src_remote="$1" dest_remote="$2" orig="$3" alt="$4" method="$5" expect_bytes="$6" tmp_base="$7"
   local rflags=("${RCLONE_RETRY_FLAGS[@]}" --timeout 15m)
@@ -285,23 +295,32 @@ _recover_one_to_source() {
   local tmp="${tmp_base}/$(echo "$orig" | md5sum | cut -c1-12)"
   rm -rf "$tmp"; mkdir -p "$tmp"
 
-  local res payload
+  local res payload payload_bytes got
   res=$(_restore_build_payload "$alt" "$dest_remote" "$tmp")
   if [ "${res%%:*}" != "OK" ]; then
     echo "${res:-FAIL: 未知错误}"
     rm -rf "$tmp"
     return 0
   fi
-  payload="${res#OK:}"
-  rclone copyto "$payload" "$src_full" "${rflags[@]}" >/dev/null 2>&1 || { echo "FAIL: 上传源端失败"; rm -rf "$tmp"; return 0; }
 
-  # 按 marker 记录的字节数校验（expect_bytes 为 0 时仅检查非空）
-  local got=0
+  # 唯一校验基准 = 本地解压产物字节数（7z 解压已过 zip CRC，产物即真相）:
+  #   源端已与产物等大 → 内容一致，直接成功（重跑幂等，免重复上传）；
+  #   否则上传后复查同口径——防截断、防假成功。
+  payload="${res#OK:}"
+  payload_bytes=$(wc -c <"$payload")
   got=$(rclone size --json "$src_full" "${rflags[@]}" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null)
-  if { [ "$expect_bytes" != "0" ] && [ "$got" = "$expect_bytes" ]; } || { [ "$expect_bytes" = "0" ] && [ "$got" != "0" ]; }; then
-    echo "OK"
+  if [ "$got" != "$payload_bytes" ]; then
+    rclone copyto "$payload" "$src_full" "${rflags[@]}" >/dev/null 2>&1 || { echo "FAIL: 上传源端失败"; rm -rf "$tmp"; return 0; }
+    got=$(rclone size --json "$src_full" "${rflags[@]}" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null)
+    [ "$got" = "$payload_bytes" ] || { echo "FAIL: 源端大小与解压产物不符 (期望 ${payload_bytes}B, 实际 ${got}B)"; rm -rf "$tmp"; return 0; }
+  fi
+
+  # marker 的 expect_bytes 仅作交叉核对: fallback 条目该值=分卷总大小≠原文件大小，
+  # 与产物不一致只产生说明性附注，不影响成功判定（normal linkage 时两者恒等，走静默 OK）
+  if [ "$expect_bytes" != "0" ] && [ "$expect_bytes" != "$payload_bytes" ]; then
+    echo "OK: 已按解压产物 ${payload_bytes}B 核验（marker 记录 ${expect_bytes}B 为分卷总大小，仅供参考）"
   else
-    echo "FAIL: 大小校验不符 (期望 ${expect_bytes}, 实际 ${got})"
+    echo "OK"
   fi
   rm -rf "$tmp"
   return 0
@@ -382,7 +401,7 @@ restore_source_from_target() {
         local status
         status=$(_recover_one_to_source "$src" "$dst" "$line_orig" "$line_alt" "$method" "$ebytes" "$tmp_base")
         echo "  → ${status}"
-        case "$status" in
+        case "${status%%:*}" in   # 前缀匹配: 兼容 "OK"/"OK: <附注>"，仍可区分 SKIP/FAIL
           OK) total_ok=$((total_ok + 1)) ;;
           SKIP) total_skip=$((total_skip + 1)) ;;
           *) total_fail=$((total_fail + 1)); fail_list+="• <code>$(escape_html "$line_orig")</code> · <i>$(escape_html "${status#FAIL: }")</i>"$'\n' ;;
