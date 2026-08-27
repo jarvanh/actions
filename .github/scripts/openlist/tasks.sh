@@ -653,7 +653,8 @@ sync_task() {
 #   4. 重试后再重启取真值复核 → 仍未落盘的"顽固缺失"（后端内容性拒收，
 #      如密文文件名超长——run 32749862280 名长诊断实锤，原路径原名重试
 #      永远失败）复用 _sync_fix_missing_files 修复管线换方法落盘
-#      （短哈希名/AES zip/tmp+move 等 11 种方法 + 增量持久化 + 名长诊断）
+#      （原名 copyto/短哈希名/zip 分卷等 4 种方法 + 增量持久化 + 名长诊断，
+#      方法编号以 fix.sh _method_desc 为准）
 # 价值: 重启后仍在的文件是真成果 —— 即使本 run 随后被取消，下一轮
 #       --size-only 也会跳过它们，进度不回退；且批次间容器已被重启、缓存即
 #       真值，历史遗留的假成功文件会被后续批次正常识别为缺失并补传；
@@ -768,7 +769,7 @@ _batch_consolidate() {
   if [ "$missing_n" -ge 3 ] && [ "$retry_copied" -eq 0 ] && [ "$touched_n" -gt 0 ] && [ "$missing_n" -ge "$touched_n" ]; then
     BATCH_BACKEND_DEAD=1
     echo "🛑 ${label} 巩固: 后端写入全拒（${missing_n}/${touched_n} 个触碰文件 0 落盘、串行重试 0 成功）"
-    echo "${label} 巩固: 跳过修复管线（后端级故障下 11 种方法同样全拒，白耗下载），等待后端恢复后下轮重试"
+    echo "${label} 巩固: 跳过修复管线（后端级故障下 4 种修复方法同样全拒，白耗下载），等待后端恢复后下轮重试"
     return 0
   fi
 
