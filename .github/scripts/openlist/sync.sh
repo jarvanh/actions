@@ -901,7 +901,7 @@ _sync_retry_423() {
 #   fail_list / fix_list / fix_log / LOG_FILENAME
 # 环境变量 SYNC_FIX_MISSING_OVERRIDE: 外部给定缺失清单文件（批次巩固调用，
 # 清单来自"串行重试后重启容器再取真值"的 diff——普通重传已被后端内容性
-# 拒收的顽固缺失文件，直接进 11 种修复方法换路径/换形式落盘）。
+# 拒收的顽固缺失文件，直接进 4 种修复方法换路径/换形式落盘）。
 # 设定时跳过日志收集 + lsf diff（清单已是权威口径），其余链路
 # （marker 沿用/方法黑名单/即时落盘校验/名长诊断/增量持久化）原样复用。
 _sync_fix_missing_files() {
@@ -957,16 +957,16 @@ _sync_fix_missing_files() {
         while IFS=$'\t' read -r bl_f bl_m; do
           [ -z "$bl_f" ] && continue
           grep -qxF "$bl_f" "$missing_list" || continue
-          # 全拉黑重置: 11 种方法全部拉黑的文件，黑名单大概率是假成功时代的
+          # 全拉黑重置: 4 种方法全部拉黑的文件，黑名单大概率是假成功时代的
           # 污染（token 过期 → 即时校验误判 → 逐方法拉黑），而非真实的逐方法
-          # 内容性失败——真实的内容性失败（如密文名超长）只会拉黑原名类方法
-          # （m1/m2），短名/打包类方法仍会成功。全拉黑 = 文件永远无法重试，
-          # 只能重置（若确属真失败，本轮会重新逐方法拉黑，代价可控）。
+          # 内容性失败——真实的内容性失败（如密文名超长）只会拉黑含原名的
+          # 方法（m1/m3），短哈希类方法（m2/m4）仍会成功。全拉黑 = 文件永远
+          # 无法重试，只能重置（若确属真失败，本轮会重新逐方法拉黑，代价可控）。
           # run 32904752243 实锤: task0_照片 3 个名长文件全方法拉黑，修复
           # 管线对每个文件白下载 300MB 后直接放弃。
           local bl_cnt
           bl_cnt=$(printf '%s' "$bl_m" | awk -F'|' 'NF > n { n = NF } END { print n + 0 }')
-          if [ "$bl_cnt" -ge 11 ]; then
+          if [ "$bl_cnt" -ge 4 ]; then
             echo "♻ 全方法拉黑重置（疑为假成功时代污染，重新逐方法尝试）· $(_short_path "$bl_f")" | tee -a "$LOG_FILENAME"
             continue
           fi
@@ -1083,7 +1083,7 @@ _sync_fix_missing_files() {
       echo "$incr_base" > "$incr_state"
 
       # 统一错误熔断器: 连续多个文件全方法失败且主导错误一致（如后端 405
-      # 全拒）→ 后端级故障，继续逐文件跑 11 种方法只会空转烧时间
+      # 全拒）→ 后端级故障，继续逐文件跑 4 种方法只会空转烧时间
       # （run 32904752243 实锤: wopan175 后端全拒，69 个顽固缺失逐个全方法
       #   405，烧 45 分钟零进展直到 job 结束）
       # 判据: 单文件 ≥2 个方法报同一错误 + 连续 N 个文件（默认 3）同签名。
@@ -1430,25 +1430,11 @@ _sync_parse_object_not_found() {
 # 格式: [{original, alternative, method, restore_hint, size_human, size_bytes,
 #         method_id, restore: {kind, summary, steps, script, hint}}]
 # restore 字段记录还原方式，便于日后从目标端恢复原始文件
-# 现行 11 种修复方式精确识别（方法 1-11，与 fix.sh _method_desc 对齐）:
-#   "原路径 + 原文件名"                               → 原样 copy (方法1)
-#   "base64URL 编码目录 + 原文件名"                   → 仅 b64 目录 (方法1变体)
-#   "rclone crypt 直写（原名原路径）"                 → copy，alt==orig 无需还原 (方法2)
-#   "原路径 + 短哈希文件名"                           → short hash rename (方法3)
-#   "原路径 + zip 压缩包"                             → zip (方法4)
-#   "base64URL 编码目录 + zip 压缩包"                 → zip(+b64dir) (方法4变体)
-#   "原路径 + 7z 压缩包"                              → 7z (方法5)
-#   "base64URL 编码目录 + 7z 压缩包"                  → 7z(+b64dir) (方法5变体)
-#   "原路径 + <粒度> 分卷切割"                        → split zip (方法6)
-#   "原路径 + base64URL 编码文件名 + <粒度> 分卷切割"  → split zip + b64name (方法7)
-#   "base64URL 编码目录 + [b64文件名 +] <粒度> 分卷切割" → split zip 变体 (方法6/7变体)
-#   "原路径 + API 自动生成文件名"                     → api rename (方法8)
-#   "base64URL 编码目录 + API 自动生成文件名"         → api rename(+b64dir) (方法8变体)
-#   "父目录 + 编码原始目录名的文件名"                 → parent dir (方法9)
-#   "AES256 加密 zip + .enc.zip 扩展名"               → encrypted zip (方法10)
-#   "临时目录上传 + OpenList API move"                → tmp + move (方法11)
-# 已删除方法（b64 文件名单传 / .bak / 根目录上传 / base64 内容）的
-# 分类分支仅为兼容旧 marker 残留条目与 fallback 扫描输出保留
+# 现行 4 种修复方式精确识别（文案与 fix.sh _fix_succeed 各调用点对齐）:
+#   "rclone copyto（[base64URL 编码目录 + ]原文件名）"             → copy / b64 目录
+#   "rclone copyto（[base64URL 编码目录 + ]短哈希文件名 <hash>）"   → short_hash_rename
+#   "分卷 zip（[b64目录 + ][短哈希 + ]<粒度> 分卷切割，共 N 卷）"    → split_zip
+# 分类细则与一键还原脚本生成见 restore_info.jq
 # 注: 不能用 ".*文件名" 模糊匹配，"原文件名" 里也有 "文件名" 3 个字，会误判
 # 分类程序在 restore_info.jq（随 *.jq 拷到 /tmp，见 workflow 的加载函数库 step）
 # 依赖调用方（sync_with_logging）作用域: fix_list / source_path / dest_path / LOG_FILENAME

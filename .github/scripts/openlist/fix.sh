@@ -8,12 +8,7 @@
 #              对症"加密后文件名超长"/敏感字符根因）
 #      方法3:  zip 压缩 + 分卷上传（粒度默认 1GB，OPENLIST_SPLIT_PART_BYTES 可调）
 #      方法4:  zip 压缩 + 短哈希文件名 + 分卷上传
-#   历史版本已删除的冗余/低效方法（编号已重新连续分配，旧 marker 不兼容）:
-#      crypt 直写裸存储、OpenList API 直传、父目录上传、AES 加密 zip 等
-#      base64URL 文件名单传 / 重命名 .bak — 编码让名字更长，对"密文名超长"根因无效
-#      反向加压（被方法2 短哈希名取代）
-#      /fs/put 到根目录+hash 名 — 冗余变体
-#      base64 编码内容 — crypt 目标内容本就是密文，33% 膨胀纯浪费
+#   历史版本的低效冗余方法已全部下线，现行仅上述 4 种；旧版方法编号不兼容。
 #
 # 假成功防护（两层）:
 #   1. 落盘即时校验（_confirm_persist_by_count）: 修复方法返回成功后，对比
@@ -408,38 +403,7 @@ _fix_succeed() {
   return 0
 }
 
-# 方法 4/5：压缩（zip/7z 存储模式）后上传
-# 成功时完成 _fix_succeed 并返回 0；失败仅记日志返回 1
-_try_fix_archive() {
-  local mid="$1" fmt="$2"
-  local pkg_name="${file_name}.${fmt}"
-  (cd "$temp_dir" && 7z a -t${fmt} -mx=0 "$pkg_name" "$file_name") 2>&1 | \
-    _cmd_log "${mid}·${fmt}" "$fix_log"
-  if [ ! -f "$temp_dir/${pkg_name}" ]; then
-    log_fix "$fix_log" "  ⚠ $(_method_short "$mid") ${fmt} 未生成"
-    return 1
-  fi
-  local dst status
-  dst="${actual_dst_dir}/${pkg_name}"
-  rclone copyto "$temp_dir/${pkg_name}" "$dst" "${RCLONE_RETRY_FLAGS[@]}" --timeout "${OPENLIST_UPLOAD_TIMEOUT:-300}s" 2>&1 | \
-    _cmd_log "$mid" "$fix_log"
-  status=${PIPESTATUS[0]}
-  if [ "$status" -eq 0 ] && _confirm_persist_by_count "$(_method_desc "$mid")" "$failed_file_rel" "$fix_log"; then
-    log_fix "$fix_log" "  ✅ $(_method_short "$mid") 成功"
-    local method_text
-    if [ "$used_base64_dir" -eq 1 ]; then
-      method_text="rclone copyto（base64URL 编码目录 + ${fmt} 压缩包）"
-    else
-      method_text="rclone copyto（原路径 + ${fmt} 压缩包）"
-    fi
-    _fix_succeed "$mid" "$method_text" "${dst#${dest_path}/}" "下载 ${dst} 后解压: 7z x ${pkg_name}"
-    return 0
-  fi
-  log_fix "$fix_log" "  ❌ $(_method_short "$mid") 失败 exit=$status"
-  return 1
-}
-
-# 方法 6/7：zip 压缩 + 分卷上传（encode_name=1 时额外 base64URL 编码文件名，即方法7）
+# 方法 3/4：zip 压缩 + 分卷上传（encode_name=1 时基底名改用短哈希，即方法4）
 # 成功时完成 _fix_succeed 并返回 0；失败仅记日志返回 1
 _try_fix_split_archive() {
   local mid="$1" encode_name="${2:-0}"
