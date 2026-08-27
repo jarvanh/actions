@@ -143,6 +143,8 @@ marker_merge_blacklist() {
 
 # 在 marker JSON 上追加/覆盖一个修复条目（同 original 新覆盖旧）并合并黑名单，
 # stdin → stdout；fixed_count/fixed_bytes 自动重算
+# 条目字段整对象透传（不白名单剥离），可选 md5 字段（原文件内容指纹）随行保留，
+# 供 restore.sh 还原时做内容级硬校验；旧条目无此字段，读取方以 (.md5 // "") 兼容
 # 用法: marker_add_fix_entry "$entry_json" "$bl_json" < "$state_file"
 # marker（stdin）/entry/bl 全部并入 stdin 文档流喂 jq -s —— state_file 里的
 # fixed_files 含内嵌 restore 脚本，条目多时远超 argv 单参数 128KB 上限，
