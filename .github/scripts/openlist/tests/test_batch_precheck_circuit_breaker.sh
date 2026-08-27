@@ -5,10 +5,13 @@
 #   会把第一个大批次（≤50GB）全额烧完才由 _batch_consolidate 行为启发式止损。
 # 批次熔断把拦截前移到每个批次传输之前（与 run_rclone_sync_once 二次预检同构）。
 # 场景:
-#   G1 openlist 目标 + 首批预检失败 -> 0 个 copy, 全部批次计失败, return 1
-#   G2 openlist 目标 + 第 2 批预检失败 -> 只有第 1 批 copy, ✅1❌2
+#   G1 openlist 目标 + 首批预检失败 -> 0 个 copy, 全部批次计失败, return 1,
+#      SYNC_FAILED=1（run 33048121562 回归: 只 return 1 不置标志会被 task_done
+#      与轮转游标双双误判为成功）
+#   G2 openlist 目标 + 第 2 批预检失败 -> 只有第 1 批 copy, ✅1❌2, SYNC_FAILED=1
 #   G3 openlist 目标 + 预检全通过 -> 3 批照常 + 每批一次预检 + 最终 sync_with_logging
 #   G4 非 openlist 目标 -> 预检零调用
+#   G5 openlist 目标 + 批次传输真失败（exit≠4）-> 最终同步照跑, 尾部归并 SYNC_FAILED=1
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK_DIR="$(mktemp -d)"
@@ -41,6 +44,7 @@ _TASK_SKIP_DAYS=0
 PROGRESS_STATS=""
 PROGRESS_PHASE_INFO=""
 AUTO_SPLIT_INFO=""
+SYNC_FAILED=0
 
 progress_update() { :; }
 progress_update_force() { :; }
@@ -89,6 +93,8 @@ rclone() {
     lsf) : ;;
     copy)
       echo copy >> "$RCLONE_COPY_CALLS_FILE"
+      # G5 用: 非 0 非 4 的真失败码（如 exit 2 整批失败）
+      [ "${COPY_FAIL_RC_OVERRIDE:-0}" -ne 0 ] && return "$COPY_FAIL_RC_OVERRIDE"
       return 0
       ;;
     *) return 0 ;;
@@ -162,6 +168,19 @@ chk "G4 return 0" "$RC" "0"
 chk "G4 预检零调用" "$CHECK_CALLS" "0"
 chk "G4 三批全部传输" "$(copy_count)" "3"
 chk "G4 最终全量同步 1 次" "$SYNC_WITH_LOGGING_CALLS" "1"
+
+# ---------- G5: openlist 目标 + 批次传输真失败（exit=2 非 0 非 4） ----------
+# 循环跑完不触发熔断/全拒出口，靠尾部归并把批次维度失败并入 SYNC_FAILED;
+# run 33048121562 前的旧行为: 批次真失败只有 ✅/❌ 数字变化，任务级仍被判成功
+COPY_FAIL_RC_OVERRIDE=2
+prepare_case
+capture_rc "openlist:crypt" "t_g5"
+chk "G5 return 0 (恒 0, 失败经标志传递)" "$RC" "0"
+chk "G5 三批均尝试传输" "$(copy_count)" "3"
+chk "G5 每批一次预检(3)" "$CHECK_CALLS" "3"
+chk "G5 最终全量同步照跑" "$SYNC_WITH_LOGGING_CALLS" "1"
+chk "G5 尾部归并 SYNC_FAILED=1" "${SYNC_FAILED}" "1"
+unset COPY_FAIL_RC_OVERRIDE
 
 clean_batch_dirs
 echo ""

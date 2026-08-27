@@ -317,6 +317,10 @@ task_begin() {
     progress_register_task "$task_id" "${fallback_name:-$task_id}"
   fi
   echo "$task_id" > "$PROGRESS_CURRENT_FILE"
+  # 清空上一任务遗留的 phase/stats（run 33048121562: task0 的批次统计
+  # "15 批 ❌15" 被残留显示到下一个任务的 📍 进行中 区块下）
+  : > "$PROGRESS_PHASE_FILE"
+  : > "$PROGRESS_STATS_FILE"
   _progress_set_task_status "$task_id" "running" ""
   _progress_refresh
 }

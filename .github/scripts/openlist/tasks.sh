@@ -626,6 +626,15 @@ sync_task() {
   fi
 
   if [ "$current_depth" -eq 0 ]; then
+    # 兜底状态映射: 实现层若只回传了非零返回码而未置位 SYNC_FAILED（批次
+    # 熔断分支的历史教训，run 33048121562: return 1 的失败任务被记成已完成、
+    # 失败计 0、轮转游标当成功后移），进度 task_done 与 run_all_tasks 轮转
+    # 都以全局标志为准会双双误判。此处保证顶级任务 rc≠0 ⇔ 失败标志。
+    # sync_with_logging 契约是恒返回 0、经 SYNC_FAILED 报告失败（见其函数头），
+    # 正常成功路径 rc=0 不受影响；被跳过的任务 rc 可能为 0/1 均不算失败
+    if [ "$_rc" -ne 0 ] && [ "${SYNC_SKIPPED:-0}" != "1" ]; then
+      SYNC_FAILED=1
+    fi
     if [ "$SYNC_SKIPPED" = "1" ]; then
       task_done "skipped"
     elif [ "$SYNC_FAILED" = "1" ]; then
@@ -995,6 +1004,11 @@ sync_by_file_batches() {
           AUTO_SPLIT_INFO+="总批次：<b>${total_batches}</b> · 文件数：<b>${batch_total_files}</b>"$'\n'
           AUTO_SPLIT_INFO+="✅ <b>${synced_batches}</b> · ❌ <b>${failed_batches}</b>（批次预检熔断中止）"$'\n'
           progress_update_force "批次预检未通过，中止同步" "▸ 📊 批次：${batch_idx}/${total_batches} | ✅${synced_batches} ❌${failed_batches}"
+          # 失败状态必须随全局标志传递（与本函数开头 skip 分支置 SYNC_SKIPPED
+          # 的惯例一致）: 下游 task_done 状态映射与轮转游标都只认 SYNC_FAILED，
+          # 只 return 1 会被双双误判为成功（run 33048121562: task0-wopan175
+          # 预检熔断后被记成已完成、失败计 0、游标照常后移）
+          SYNC_FAILED=1
           rm -rf "$batch_dir"
           return 1
         fi
@@ -1061,6 +1075,8 @@ sync_by_file_batches() {
         AUTO_SPLIT_INFO+="总批次：<b>${total_batches}</b> · 文件数：<b>${batch_total_files}</b>"$'\n'
         AUTO_SPLIT_INFO+="✅ <b>${synced_batches}</b> · ❌ <b>${failed_batches}</b>（后端写入全拒中止）"$'\n'
         progress_update_force "后端写入全拒，中止同步" "▸ 📊 批次：${batch_idx}/${total_batches} | ✅${synced_batches} ❌${failed_batches}"
+        # 同预检熔断出口: 失败状态经 SYNC_FAILED 全局标志传递（见上注释）
+        SYNC_FAILED=1
         rm -rf "$batch_dir"
         return 1
       fi
@@ -1094,4 +1110,12 @@ sync_by_file_batches() {
   sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
   AUTO_SPLIT_INFO=""
   SYNC_SKIP_QUIET="$_saved_skip_quiet"
+  # 部分批次失败但循环跑完（含 exit=4 部分成功之外的真失败）: 最终全量同步
+  # 自身恒返回 0（失败经其内部 SYNC_FAILED 传递），此处把批次维度的失败
+  # 归并进任务级标志，供 finalize 跳过 marker / task_done / 轮转正确判定。
+  # 放在最终同步之后: sync_with_logging 内部不消费本标志，提前置位亦无碍，
+  # 但紧跟尾部赋值最不易随下游改动被扰动
+  if [ "$failed_batches" -gt 0 ]; then
+    SYNC_FAILED=1
+  fi
 }

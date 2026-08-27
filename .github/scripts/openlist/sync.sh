@@ -276,6 +276,18 @@ _openlist_api_health_check() {
 
   message=$(echo "$resp" | jq -r '.message // empty' 2>/dev/null)
 
+  # 管理面/驱动面区分（run 33048121562）: code=401 且消息指向我方 API 凭据
+  # （token is invalidated）时，失效的是 OpenList 管理面的 Authorization
+  # token（config.json 缓存凭据与运行实例不匹配，容器重启也无法自愈），
+  # 请求在鉴权中间件即被拒——根本没触达驱动，不能据此判定"后端驱动认证失效"
+  # 而跳过同步。数据面 WebDAV 探针（调用方前置执行）已通过时降级放行，
+  # 以探针结果为准；驱动真实故障的表现形态是 code=500 + failed get storage /
+  # 登录失败类消息，仍走下方原有分类拦截。
+  if [ "$code" = "401" ] && echo "$message" | grep -Eqi 'invalidated|token.*(invalid|expired)|unauthorized'; then
+    echo "⚠️ $label OpenList 管理面 token 失效（API 凭据问题，非驱动故障），API 强校验降级放行（以数据面探针为准）；请在服务端重新获取 token 并更新 config.json" | tee ${log_file:+-a "$log_file"}
+    return 0
+  fi
+
   # 目录尚未创建属于首次同步的正常状态
   if echo "$message" | grep -Eqi 'object not found|path.*not.*found|目录不存在|路径不存在|没有找到文件'; then
     echo "ℹ️ $label API 强校验: 目标目录尚未创建（$message），放行由同步流程建立" | tee ${log_file:+-a "$log_file"}
