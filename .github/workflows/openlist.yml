@@ -6,9 +6,9 @@ on:
     inputs:
       # ===== 运行模式（单选下拉，互斥）=====
       # 取代旧的 3 个 boolean（fix_test_mode / restore_fixed / restore_to_source），
-      # 从 UI 上杜绝多开关误组合; ⚠️ 开头的两项为还原类危险操作，排在末尾
+      # 从 UI 上杜绝多开关误组合; ⚠️ 开头的项为还原类危险操作，排在末尾
       run_mode:
-        description: "▶️ 运行模式（单选互斥）。⚠️ 标记的两项为危险操作: 会改写目标端或回传源端，运行前请核对下方 restore_task 任务名"
+        description: "▶️ 运行模式（单选互斥）。⚠️ 标记的三项为危险操作: 会改写目标端或回传/删改源端，运行前请核对下方 restore_task 任务名"
         required: true
         type: choice
         default: "同步"
@@ -17,6 +17,7 @@ on:
           - "调试 · 修复管线测试"
           - "⚠️ 还原 · 修复文件还原为原路径"
           - "⚠️ 灾难恢复 · 目标端→源端"
+          - "⚠️ 灾难恢复 · 目标端→源端（删除源端多余文件）"
       # ===== 同步模式选项（force_sync 同时作用于调试·修复管线测试）=====
       force_sync:
         description: "同步/调试模式: 强制同步（忽略跳过天数与源端缩小警告，始终执行）"
@@ -252,6 +253,18 @@ jobs:
         run: |
           source /tmp/load_all.sh
           restore_source_from_target "${{ inputs.restore_task || 'all' }}"
+
+      # ===== 镜像灾难恢复: 目标端 → 源端（删除源端多余文件）=====
+      # restore_source_from_target 的破坏性变体: 批量层用 rclone sync 镜像，
+      # 源端存在但目标端没有的文件会被删除，最终源端内容 = 目标端全部有效内容。
+      # 替代形态与修复条目原路径均排除出 sync（防密文名拷回/防误删待还原路径），
+      # 由逐条还原负责回填并按 marker md5 校验。目标端全程只读，可重复执行。
+      - name: "⚠️ Restore: 镜像灾难恢复 目标端→源端（删除源端多余文件）"
+        if: ${{ inputs.run_mode == '⚠️ 灾难恢复 · 目标端→源端（删除源端多余文件）' }}
+        timeout-minutes: 240
+        run: |
+          source /tmp/load_all.sh
+          mirror_source_from_target "${{ inputs.restore_task || 'all' }}"
 
       # ===== 调试: 单任务测试修复管线 =====
       # 用真实生产代码路径（sync_task → sync_with_logging）按任务清单

@@ -402,6 +402,30 @@ _recover_one_to_source() {
   return 0
 }
 
+# 批量逐条恢复 marker 修复条目到源端（restore_source_from_target /
+# mirror_source_from_target 共用）。进度日志走 stderr，结果走 stdout，
+# 每条输出一行 "<original>\t<status>"（status 口径同 _recover_one_to_source），
+# 由调用方按前缀汇总统计与失败清单
+# 用法: _recover_source_entries <src> <dst> <json> <alt_lines_tsv> <tmp_base>
+_recover_source_entries() {
+  local src="$1" dst="$2" json="$3" alt_lines="$4" tmp_base="$5"
+  [ -n "$alt_lines" ] || return 0
+  local line_orig line_alt
+  while IFS=$'\t' read -r line_orig line_alt; do
+    [ -z "$line_orig" ] && continue
+    local method ebytes fmd5 entry status
+    entry=$(echo "$json" | jq -c --arg f "$line_orig" '[.fixed_files[] | select(.original == $f)] | .[0] // empty' 2>/dev/null)
+    method=$(echo "$entry" | jq -r '.method // ""' 2>/dev/null)
+    ebytes=$(echo "$entry" | jq -r '.size_bytes // 0' 2>/dev/null)
+    fmd5=$(echo "$entry" | jq -r '.md5 // ""' 2>/dev/null)
+    [ "$fmd5" = "null" ] && fmd5=""
+    echo "恢复修复文件: ${line_orig} ← ${line_alt} [${method}]" >&2
+    status=$(_recover_one_to_source "$src" "$dst" "$line_orig" "$line_alt" "$method" "$ebytes" "$tmp_base" "$fmd5")
+    echo "  → ${status}" >&2
+    printf '%s\t%s\n' "$line_orig" "$status"
+  done <<< "$alt_lines"
+}
+
 # 灾难恢复入口（目标端 → 源端，非破坏性，可重复执行）
 restore_source_from_target() {
   local task_filter="${1:-all}"
@@ -466,26 +490,14 @@ restore_source_from_target() {
     total_bulk=$((total_bulk + after - before))
 
     # 2. 修复文件逐条: 替代形态 → 解码 → 源端原路径
-    if [ -n "$alt_lines" ]; then
-      while IFS=$'\t' read -r line_orig line_alt; do
-        [ -z "$line_orig" ] && continue
-        local method ebytes fmd5 entry
-        entry=$(echo "$json" | jq -c --arg f "$line_orig" '[.fixed_files[] | select(.original == $f)] | .[0] // empty' 2>/dev/null)
-        method=$(echo "$entry" | jq -r '.method // ""' 2>/dev/null)
-        ebytes=$(echo "$entry" | jq -r '.size_bytes // 0' 2>/dev/null)
-        fmd5=$(echo "$entry" | jq -r '.md5 // ""' 2>/dev/null)
-        [ "$fmd5" = "null" ] && fmd5=""
-        echo "恢复修复文件: ${line_orig} ← ${line_alt} [${method}]"
-        local status
-        status=$(_recover_one_to_source "$src" "$dst" "$line_orig" "$line_alt" "$method" "$ebytes" "$tmp_base" "$fmd5")
-        echo "  → ${status}"
-        case "${status%%:*}" in   # 前缀匹配: 兼容 "OK"/"OK: <附注>"，仍可区分 SKIP/FAIL
-          OK) total_ok=$((total_ok + 1)) ;;
-          SKIP) total_skip=$((total_skip + 1)) ;;
-          *) total_fail=$((total_fail + 1)); fail_list+="• <code>$(escape_html "$line_orig")</code> · <i>$(escape_html "${status#FAIL: }")</i>"$'\n' ;;
-        esac
-      done <<< "$alt_lines"
-    fi
+    while IFS=$'\t' read -r entry_orig entry_status; do
+      [ -z "$entry_orig" ] && continue
+      case "${entry_status%%:*}" in   # 前缀匹配: 兼容 "OK"/"OK: <附注>"，仍可区分 SKIP/FAIL
+        OK) total_ok=$((total_ok + 1)) ;;
+        SKIP) total_skip=$((total_skip + 1)) ;;
+        *) total_fail=$((total_fail + 1)); fail_list+="• <code>$(escape_html "$entry_orig")</code> · <i>$(escape_html "${entry_status#FAIL: }")</i>"$'\n' ;;
+      esac
+    done < <(_recover_source_entries "$src" "$dst" "$json" "$alt_lines" "$tmp_base")
   done
 
   rm -rf "$tmp_base"
@@ -503,4 +515,112 @@ restore_source_from_target() {
   tg_add_note msg "目标端未做任何删改，可重复执行补齐失败条目。"
   send_telegram_message "$msg"
   echo "=== 恢复完成: bulk=${total_bulk} ok=${total_ok} skip=${total_skip} fail=${total_fail} ==="
+}
+
+# ===== 镜像灾难恢复: 目标端 → 源端（删除源端多余文件）=====
+# restore_source_from_target 的破坏性变体: 批量层从 copy 升级为 sync——
+# 源端存在但目标端没有的文件会被删除，最终源端内容 = 目标端全部有效内容。
+# 与非破坏版的差异与安全边界:
+#   - 排除清单 = 替代形态 + 全部修复条目的原路径: 前者防止分卷/改名/
+#     编码目录以密文名被 sync 拷回源端；后者把待还原路径的增删完全交给
+#     逐条还原（sync 若删除原路径，还原失败时源端现存旧文件也保不住）
+#   - alt == original 的修复条目两端口径一致，交由 sync 正常处理
+#   - marker 未登记的替代形态残留不在排除清单内，会被 sync 当普通文件
+#     原样拷回源端（数据不丢但可能残留垃圾文件；不确定时先跑
+#     restore_source_from_target 看失败清单再决定）
+# 执行顺序: 先 sync 镜像、后逐条还原（修复文件路径已被排除，互不干扰）。
+# 目标端全程只读；中断/失败可直接重跑补齐。
+# 用法: mirror_source_from_target [task_name|all]
+mirror_source_from_target() {
+  local task_filter="${1:-all}"
+  local ts; ts=$(date +%Y%m%d_%H%M%S)
+  local tmp_base="/tmp/mirror_src_${ts}"
+  mkdir -p "$tmp_base"
+
+  echo "=== 镜像灾难恢复: 目标端 → 源端 (filter=${task_filter}, 将删除源端多余文件) ==="
+
+  local markers m task marker_path json src dst entries
+  markers=$(rclone lsf "$SYNC_STATE_DIR" --files-only --retries 2 2>/dev/null | sort)
+  if [ -z "$markers" ]; then
+    echo "未找到任何 marker（${SYNC_STATE_DIR}）"
+    return 1
+  fi
+
+  local total_ok=0 total_fail=0 total_skip=0
+  local fail_list=""
+
+  for m in $markers; do
+    [[ "$m" == *.json ]] || continue
+    task="${m%%_*}"
+    if [ "$task_filter" != "all" ] && [ "$task" != "$task_filter" ]; then
+      continue
+    fi
+    marker_path="${SYNC_STATE_DIR}/${m}"
+    json=$(rclone cat "$marker_path" 2>/dev/null) || continue
+    src=$(echo "$json" | jq -r '.source_path // empty' 2>/dev/null)
+    dst=$(echo "$json" | jq -r '.dest_path // empty' 2>/dev/null)
+    [ -z "$src" ] || [ -z "$dst" ] && continue
+    entries=$(echo "$json" | jq -r '(.fixed_files // []) | length' 2>/dev/null || echo 0)
+    echo "--- marker: ${m} (src=${src}, dst=${dst}, 修复条目 ${entries}) ---"
+
+    # 1. sync 镜像（排除替代形态 + 修复条目原路径，见函数头注释）
+    local exf="${tmp_base}/exclude_${m}.txt"
+    : > "$exf"
+    local alt_lines="" line_orig line_alt
+    while IFS=$'\t' read -r line_orig line_alt; do
+      [ -z "$line_orig" ] && continue
+      [ "$line_alt" = "null" ] || [ -z "$line_alt" ] && continue
+      [ "$line_alt" = "$line_orig" ] && continue
+      if echo "$line_alt" | grep -qE '\.zip\.[0-9]{3}$'; then
+        # 分卷: 剥掉 .001 后前缀已含 .zip，按前缀通配排除所有卷（glob 转义）
+        local pdir pfx
+        pdir="$(dirname "$line_alt")"; pfx="$(basename "$line_alt")"; pfx="${pfx%.*}"
+        printf '/%s/%s.[0-9][0-9][0-9]\n' "$(_escape_exclude_path "$pdir")" "$(_escape_exclude_path "$pfx")" >> "$exf"
+      else
+        printf '/%s\n' "$(_escape_exclude_path "$line_alt")" >> "$exf"
+      fi
+      # 原路径一并排除: 待还原路径的增删由逐条还原负责
+      printf '/%s\n' "$(_escape_exclude_path "$line_orig")" >> "$exf"
+      alt_lines+="${line_orig}"$'\t'"${line_alt}"$'\n'
+    done < <(echo "$json" | jq -r '(.fixed_files // [])[] | [.original, .alternative] | @tsv' 2>/dev/null)
+
+    echo "sync 镜像: ${dst} → ${src} (排除 $(grep -c . "$exf" 2>/dev/null || echo 0) 条, 删除源端多余文件)"
+    local before after sync_rc=0
+    before=$(rclone size --json "$src" 2>/dev/null | jq -r '.count // 0' 2>/dev/null)
+    if [ -s "$exf" ]; then
+      rclone sync "$dst" "$src" --size-only --exclude-from "$exf" --retries 2 --low-level-retries 3 --timeout 15m 2>&1 | tail -3
+      sync_rc=${PIPESTATUS[0]}
+    else
+      rclone sync "$dst" "$src" --size-only --retries 2 --low-level-retries 3 --timeout 15m 2>&1 | tail -3
+      sync_rc=${PIPESTATUS[0]}
+    fi
+    after=$(rclone size --json "$src" 2>/dev/null | jq -r '.count // 0' 2>/dev/null)
+    echo "源端文件数: ${before} → ${after}"
+    [ "$sync_rc" -ne 0 ] && echo "⚠️ sync 退出码 ${sync_rc}（镜像可能不完整，可直接重跑本模式补齐）"
+
+    # 2. 修复文件逐条还原（路径已被排除出 sync，不会被镜像删除）
+    while IFS=$'\t' read -r entry_orig entry_status; do
+      [ -z "$entry_orig" ] && continue
+      case "${entry_status%%:*}" in
+        OK) total_ok=$((total_ok + 1)) ;;
+        SKIP) total_skip=$((total_skip + 1)) ;;
+        *) total_fail=$((total_fail + 1)); fail_list+="• <code>$(escape_html "$entry_orig")</code> · <i>$(escape_html "${entry_status#FAIL: }")</i>"$'\n' ;;
+      esac
+    done < <(_recover_source_entries "$src" "$dst" "$json" "$alt_lines" "$tmp_base")
+  done
+
+  rm -rf "$tmp_base"
+
+  local msg=""
+  tg_add_title msg "🆘 镜像灾难恢复完成（目标端 → 源端 · 已删除源端多余文件）"
+  tg_add_kv msg "修复文件恢复成功" "${total_ok} 个"
+  tg_add_kv msg "源端已存在跳过" "${total_skip} 个"
+  tg_add_kv msg "失败" "${total_fail} 个"
+  if [ -n "$fail_list" ]; then
+    tg_add_section msg "❌ 失败清单"
+    tg_add_block msg "$fail_list"
+  fi
+  tg_add_note msg "源端已按目标端镜像（多余文件已删除）；目标端全程只读，失败条目可直接重跑补齐。"
+  send_telegram_message "$msg"
+  echo "=== 镜像恢复完成: ok=${total_ok} skip=${total_skip} fail=${total_fail} ==="
 }
