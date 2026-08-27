@@ -981,6 +981,23 @@ sync_by_file_batches() {
         # 仅传前刷一次撑不过 5 分钟 token 窗口——批次动辄数小时，中途必须
         # 保鲜（run 32749862280: 3 小时批次 139/139 假成功实锤）
         _refresh_ol_drivers "$batch_log" || true
+        # 批次级三层预检熔断: sync_with_logging 的入口预检覆盖不到本循环内
+        # 的 rclone copy --files-from，登录失效后端会把第一个大批次（≤50GB）
+        # 全额烧完才由 _batch_consolidate 行为启发式止损。此处与
+        # run_rclone_sync_once 的二次预检同构（刷新驱动 → 两层强校验 → 起
+        # 保鲜线程），把拦截前移到每个批次传输之前；含 Crypt 底层派生存储校验
+        if ! _check_openlist_backend_connectivity "$dest_path" "$batch_log"; then
+          local unbuilt_batches=$((total_batches - synced_batches - failed_batches))
+          failed_batches=$((failed_batches + unbuilt_batches))
+          [ "$unbuilt_batches" -gt 0 ] && failed_batch_list+="批次 $((i+1))/${total_batches} 起共 ${unbuilt_batches} 批 · 批次预检未通过（后端不健康），中止"$'\n'
+          echo "🛑 批次 $((i+1)) 预检未通过（后端不健康），中止剩余 ${unbuilt_batches} 个批次，本同步对标记失败（后端恢复后轮转回来重试）"
+          AUTO_SPLIT_INFO="<b>🔀 文件批次拆分统计</b>"$'\n'
+          AUTO_SPLIT_INFO+="总批次：<b>${total_batches}</b> · 文件数：<b>${batch_total_files}</b>"$'\n'
+          AUTO_SPLIT_INFO+="✅ <b>${synced_batches}</b> · ❌ <b>${failed_batches}</b>（批次预检熔断中止）"$'\n'
+          progress_update_force "批次预检未通过，中止同步" "▸ 📊 批次：${batch_idx}/${total_batches} | ✅${synced_batches} ❌${failed_batches}"
+          rm -rf "$batch_dir"
+          return 1
+        fi
         _start_token_refresher
       fi
 
