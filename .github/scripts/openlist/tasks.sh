@@ -233,20 +233,20 @@ _preview_register() {
   progress_register_task "$_task_id" "${source_path} → ${dest_path}" "$_size_hint"
 }
 
-# 渲染子目录阶段树（供 PROGRESS_PHASE_INFO，多行）
+# 渲染子目录阶段树原始行（多行、不带连接符——├─/└─ 由进度渲染器统一补，
+# 多层级嵌套时各层分别加连接符才能对齐）
 # 依赖调用方（_sync_task_impl）作用域内的变量（bash 动态作用域可见）:
 #   subdirs（排序后的子目录列表）/ subdir_size_map / subdir_status_map /
-#   total_subdirs_count / source_size_bytes
+#   source_size_bytes
 # 输出格式（状态由 emoji 表达，不重复文字说明，紧凑单行）:
 #   📁 源端 28 GiB
-#   ├─ ✅ a · 4 GiB
-#   └─ 🔄 b · 17 GiB
+#   ✅ a · 4 GiB
+#   🔄 b · 17 GiB
 _render_subdir_phase_tree() {
   local _tree="📁 源端 $(format_bytes "$source_size_bytes")"
-  local _name _mark _conn _i=0
+  local _name _mark
   while IFS= read -r _name; do
     [ -z "$_name" ] && continue
-    _i=$((_i + 1))
     case "${subdir_status_map[$_name]:-pending}" in
       synced)  _mark="✅" ;;
       skipped) _mark="⏭️" ;;
@@ -255,15 +255,14 @@ _render_subdir_phase_tree() {
       syncing) _mark="🔄" ;;
       *)       _mark="⏳" ;;
     esac
-    _conn="├─"; [ "$_i" -eq "$total_subdirs_count" ] && _conn="└─"
-    _tree+=$'\n'"${_conn} ${_mark} $(escape_html "$_name") · $(format_bytes "${subdir_size_map[$_name]:-0}")"
+    _tree+=$'\n'"${_mark} $(escape_html "$_name") · $(format_bytes "${subdir_size_map[$_name]:-0}")"
   done <<< "$subdirs"
   echo "$_tree"
 }
 
-# 任务收尾：成功且启用 skip 时写跳过标记；顶级调用失败时切割大文件；恢复进度变量
+# 任务收尾：成功且启用 skip 时写跳过标记；顶级调用失败时切割大文件
 # 依赖调用方（_sync_task_impl）作用域内的变量（bash 动态作用域可见）:
-#   source_path / dest_path / task_name / extra_args / current_depth / _old_phase / _old_stats
+#   source_path / dest_path / task_name / extra_args / current_depth
 _sync_task_finalize() {
   local _rc="$1"
   if [ "$SYNC_FAILED" = "0" ] && [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
@@ -271,8 +270,6 @@ _sync_task_finalize() {
   elif [ "$current_depth" -eq 0 ]; then
     split_on_sync_failure "$source_path" "$task_name"
   fi
-  PROGRESS_PHASE_INFO="$_old_phase"
-  PROGRESS_STATS="$_old_stats"
   return "$_rc"
 }
 
@@ -325,11 +322,10 @@ _sync_task_impl() {
     esac
   fi
 
-  # 初始化 phase/stats（递归子任务在同一 shell 中继承/修改，返回后由调用方恢复）
-  local _old_phase="${PROGRESS_PHASE_INFO:-}"
-  local _old_stats="${PROGRESS_STATS:-}"
-  PROGRESS_PHASE_INFO=""
-  PROGRESS_STATS=""
+  # 清空本层及更深层的阶段槽位: 同名深度可能被上一个兄弟子树遗留过期内容
+  # （尤其"直接同步中"这类不写树的路径）；祖先层槽位保持不动，
+  # 子任务内容由深度路由写入自己的槽位，不再覆盖父树
+  progress_scope_init "$current_depth"
 
   # 未开启 --auto-split 时跳过大小检查和子目录拆分，直接同步
   if [ "${_TASK_AUTO_SPLIT:-0}" = "0" ]; then
@@ -481,15 +477,13 @@ _sync_task_impl() {
     # 一直显示 ⏳ 待同步而非 🔄 同步中）
     progress_update_force "" "▸ 📊 子目录：${_completed_before}/${total_subdirs_count} 完成 | ✅${synced_subtasks} ⏭️${skipped_subtasks} ⏳$((total_subdirs_count - _completed_before)) ⚠️${partial_subtasks} ❌$((failed_subtasks - partial_subtasks))"
     SYNC_AUTO_SPLIT_DEPTH=$((current_depth + 1))
-    # PROGRESS_SUPPRESS=1: 子任务内部的 progress_update 不覆盖父任务的
-    # 阶段树（当前子目录已由上方标记为 🔄 同步中）
-    PROGRESS_SUPPRESS=1
+    # 不再抑制子任务内部的进度更新: 子任务内容经深度路由写入自己深度
+    # 的槽位，渲染时缩进嵌套展示在父层树下方（父子互不覆盖）
     # < /dev/null: 子任务全链路（sync/fix/marker）不读 stdin；不隔离的话
     # 链路里任何误读 stdin 的命令（jq/rclone rcat 等）会把本循环的子目录
     # 列表吃掉，剩余子任务被静默跳过（run 31954162437 实锤: 只同步了
     # archive 就跳去最终完整同步，照片/j-1024j 两个子任务丢失）
     _sync_task_impl "${source_path}/${subdir}" "${dest_path}/${subdir}" "${safe_subtask}" "${extra_args[@]}" < /dev/null || true
-    PROGRESS_SUPPRESS=0
     SYNC_AUTO_SPLIT_DEPTH=$current_depth
     if [ "$SYNC_SKIPPED" = "1" ]; then
       skipped_subtasks=$((skipped_subtasks + 1))
@@ -559,8 +553,6 @@ _sync_task_impl() {
       save_sync_marker "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
     fi
   fi
-  PROGRESS_PHASE_INFO="$_old_phase"
-  PROGRESS_STATS="$_old_stats"
 }
 
 # sync_task: rclone sync 模式（删除目标端多余文件）
