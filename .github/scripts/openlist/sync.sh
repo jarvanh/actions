@@ -184,12 +184,12 @@ _check_openlist_backend_connectivity() {
   probe_output=$(rclone lsd "$dest_path" --max-depth 1 --contimeout "${OPENLIST_PROBE_TIMEOUT:-15}s" --timeout "${OPENLIST_PROBE_TIMEOUT:-15}s" 2>&1) && probe_rc=0 || probe_rc=$?
 
   if [ "$probe_rc" -ne 0 ]; then
-    if echo "$probe_output" | grep -Eqi 'unauthorized|permission denied|login failed|token.*expired|auth.*fail|401|403'; then
+    if echo "$probe_output" | grep -Eqi 'unauthorized|permission denied|login failed|token.*expired|auth.*fail|401|403|405|Method Not Allowed'; then
       echo "🚫 目标端 $dest_path 后端认证失效（预检），跳过本轮同步" | tee ${log_file:+-a "$log_file"}
       return 1
     fi
 
-    if echo "$probe_output" | grep -Eqi 'connection refused|connection timed out|no such host|network unreachable'; then
+    if echo "$probe_output" | grep -Eqi 'connection refused|connection timed out|no such host|network unreachable|405|Method Not Allowed'; then
       echo "🚫 目标端 $dest_path 后端不可达（预检），跳过本轮同步" | tee ${log_file:+-a "$log_file"}
       return 1
     fi
@@ -208,12 +208,12 @@ _check_openlist_backend_connectivity() {
     ul_output=$(rclone lsd "$underlying" --max-depth 1 --contimeout "${OPENLIST_PROBE_TIMEOUT:-15}s" --timeout "${OPENLIST_PROBE_TIMEOUT:-15}s" 2>&1) && ul_rc=0 || ul_rc=$?
 
     if [ "$ul_rc" -ne 0 ]; then
-      if echo "$ul_output" | grep -Eqi 'unauthorized|permission denied|login failed|token.*expired|auth.*fail|401|403'; then
+      if echo "$ul_output" | grep -Eqi 'unauthorized|permission denied|login failed|token.*expired|auth.*fail|401|403|405|Method Not Allowed'; then
         echo "🚫 Crypt 挂载 $dest_path 底层驱动 $underlying 认证失效（预检），跳过本轮同步" | tee ${log_file:+-a "$log_file"}
         return 1
       fi
 
-      if echo "$ul_output" | grep -Eqi 'connection refused|connection timed out|no such host|network unreachable|8005|登录失败'; then
+      if echo "$ul_output" | grep -Eqi 'connection refused|connection timed out|no such host|network unreachable|8005|登录失败|405|Method Not Allowed'; then
         echo "🚫 Crypt 挂载 $dest_path 底层驱动 $underlying 不可达（预检），跳过本轮同步" | tee ${log_file:+-a "$log_file"}
         return 1
       fi
