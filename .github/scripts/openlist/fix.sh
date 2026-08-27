@@ -312,35 +312,21 @@ _raw_count_view_for() {
 _method_desc() {
   case "$1" in
     m1)  echo "方法1: 直接 rclone copyto（原路径 + 原文件名）" ;;
-    m2)  echo "方法2: rclone crypt 直写裸存储（原名原路径，绕过 OpenList crypt 驱动）" ;;
-    m3)  echo "方法3: 短哈希文件名直传（<md5前8位>.<扩展名>）" ;;
-    m4)  echo "方法4: zip 压缩后上传（存储模式）" ;;
-    m5)  echo "方法5: 7z 压缩后上传（存储模式）" ;;
-    m6)  echo "方法6: zip 压缩 + 分卷上传（默认 1GB 分卷）" ;;
-    m7)  echo "方法7: zip 压缩 + base64URL 文件名 + 分卷上传" ;;
-    m8)  echo "方法8: OpenList API /fs/form 直传（API 自动生成文件名）" ;;
-    m9)  echo "方法9: 上传到父目录（跳过有问题的目录层级）" ;;
-    m10) echo "方法10: AES256 加密 zip 后上传（改变二进制特征）" ;;
-    m11) echo "方法11: 临时目录上传 + OpenList API move 移动" ;;
+    m2)  echo "方法2: 短哈希文件名直传（<md5前8位>.<扩展名>）" ;;
+    m3)  echo "方法3: zip 压缩 + 分卷上传（默认 1GB 分卷）" ;;
+    m4)  echo "方法4: zip 压缩 + 短哈希文件名 + 分卷上传" ;;
     *)   echo "$1" ;;
   esac
 }
 
 # 方法短标签（仅日志展示用；marker/黑名单仍存 _method_desc 全名）
-# 输入短 ID（m1）或全名（方法1: ...）均可，注意 m10/m11 要在 m1 之前匹配
+# 输入短 ID（m1）或全名（方法1: ...）均可
 _method_short() {
   case "$1" in
-    m10|方法10:*) echo "方法10·AES zip" ;;
-    m11|方法11:*) echo "方法11·临时目录+move" ;;
     m1|方法1:*)   echo "方法1·copyto 原名" ;;
-    m2|方法2:*)   echo "方法2·crypt 直写" ;;
-    m3|方法3:*)   echo "方法3·短哈希名" ;;
-    m4|方法4:*)   echo "方法4·zip 打包" ;;
-    m5|方法5:*)   echo "方法5·7z 打包" ;;
-    m6|方法6:*)   echo "方法6·zip 分卷" ;;
-    m7|方法7:*)   echo "方法7·b64名分卷" ;;
-    m8|方法8:*)   echo "方法8·API form" ;;
-    m9|方法9:*)   echo "方法9·上传父目录" ;;
+    m2|方法2:*)   echo "方法2·短哈希名" ;;
+    m3|方法3:*)   echo "方法3·zip 分卷" ;;
+    m4|方法4:*)   echo "方法4·短哈希分卷" ;;
     "") echo "未知方法" ;;
     *) _method_desc "$1" ;;
   esac
@@ -465,10 +451,12 @@ _try_fix_split_archive() {
   local mid="$1" encode_name="${2:-0}"
   local zip_base_name="$file_name"
   if [ "$encode_name" = "1" ]; then
+    local sh_hash
+    sh_hash=$(printf '%s' "$failed_file_rel" | md5sum | cut -c1-8)
     if [[ "$file_name" == *.* ]]; then
-      zip_base_name="$(b64url_encode "${file_name%.*}").${file_name##*.}"
+      zip_base_name="${sh_hash}.${file_name##*.}"
     else
-      zip_base_name="$(b64url_encode "$file_name")"
+      zip_base_name="${sh_hash}"
     fi
   fi
   local split_dir_local="${temp_dir}/split_${mid}"
@@ -542,10 +530,10 @@ _try_fix_split_archive() {
     log_fix "$fix_log" "  ✅ $(_method_short "$mid") 成功（${uploaded_count} 分卷）"
     local dir_desc name_desc=""
     if [ "$used_base64_dir" -eq 1 ]; then dir_desc="base64URL 编码目录"; else dir_desc="原路径"; fi
-    [ "$encode_name" = "1" ] && name_desc="base64URL 编码文件名 + "
+    [ "$encode_name" = "1" ] && name_desc="短哈希文件名 + "
     local method_text="分卷 zip（${dir_desc} + ${name_desc}${SPLIT_PART_HUMAN} 分卷切割，共 ${uploaded_count} 卷）"
     local restore_text="下载所有分卷 ${zip_base}.001~$(printf '%03d' "$uploaded_count") 后 cat 合并再解压: cat ${zip_base}.0* > merged.zip && 7z x merged.zip"
-    [ "$encode_name" = "1" ] && restore_text+="，原文件名恢复: base64URL 解码编码部分得到 $file_name"
+    [ "$encode_name" = "1" ] && restore_text+="，原文件名恢复: 将解压后的文件重命名回 $file_name"
     _fix_succeed "$mid" "$method_text" "${alt_files[0]}" "$restore_text"
     return 0
   fi
@@ -865,233 +853,47 @@ try_fix_failed_file() {
   log_fix "$fix_log" "  ❌ 方法1 失败 exit=$m1_status"
   fi
 
-  # 方法 2（第 2 顺位）：rclone crypt 直写裸存储
-  # 通过 rclone :crypt: 即时远程（与 OpenList crypt 驱动同格式）把密文直接写入
-  # 裸存储 → 文件以原名原路径出现在目标 Crypt 挂载（如 wopan176Crypt），
-  # 绕过 OpenList crypt→后端驱动链路（假成功最可疑环节），无需替代名/还原映射
+  # 方法 2：短哈希文件名直传
+  # <md5前8位>.<扩展名> — 密文名必然远低于 255 字节上限，对症"加密后文件名超长" 或敏感字符
   if _fix_method_gate m2; then
-  local _c_rel_root="" _c_rel _c_dst
-  local _c_mount_rel="${dest_path#openlist:}"
-  [[ "$_c_mount_rel" == */* ]] && _c_rel_root="${_c_mount_rel#*/}"
-  if _ensure_crypt_config "$dest_path"; then
-    _c_rel="${_c_rel_root:+${_c_rel_root}/}${failed_file_rel}"
-    _c_dst="${_CRYPT_ONTHEFLY}${_c_rel}"
-    log_fix "$fix_log" "  crypt 直写: ${_CRYPT_REMOTE} ← ${_c_rel}（加密名由 rclone 本地生成）"
-    rclone copyto "$local_file" "$_c_dst" "${RCLONE_RETRY_FLAGS[@]}" --timeout "${OPENLIST_UPLOAD_TIMEOUT:-300}s" 2>&1 | \
-      _cmd_log m2 "$fix_log"
-    local m2_status=${PIPESTATUS[0]}
-    if [ "$m2_status" -eq 0 ] && _confirm_persist_by_count "$(_method_desc m2)" "$failed_file_rel" "$fix_log"; then
-      log_fix "$fix_log" "  ✅ 方法2 成功"
-      _fix_succeed m2 "rclone crypt 直写（:crypt: → ${_CRYPT_REMOTE}，原名原路径）" "$failed_file_rel" "无需还原（文件已以原名原路径存在，经 rclone crypt 直写裸存储）"
-      return 0
-    fi
-    log_fix "$fix_log" "  ❌ 方法2 失败 exit=$m2_status"
-  else
-    log_fix "$fix_log" "  ⏭ 方法2 跳过（无 crypt 配置/密码）"
-  fi
-  fi
-
-  # 方法 3（第 3 顺位）：短哈希文件名直传
-  # <md5前8位>.<扩展名> — 密文名必然远低于 255 字节上限，对症"加密后文件名超长"
-  # 根因（base64URL 编码反而让名字更长）；内容不变，还原仅需改名
-  if _fix_method_gate m3; then
-  local sh_hash sh_name m3sh_dst m3sh_status
+  local sh_hash sh_name m2sh_dst m2sh_status
   sh_hash=$(printf '%s' "$failed_file_rel" | md5sum | cut -c1-8)
   if [[ "$file_name" == *.* ]]; then
     sh_name="${sh_hash}.${file_name##*.}"
   else
     sh_name="$sh_hash"
   fi
-  m3sh_dst="${actual_dst_dir}/${sh_name}"
+  m2sh_dst="${actual_dst_dir}/${sh_name}"
   log_fix "$fix_log" "  文件名: ${file_name} → ${sh_name}"
-  rclone copyto "$local_file" "$m3sh_dst" "${RCLONE_RETRY_FLAGS[@]}" --timeout "${OPENLIST_UPLOAD_TIMEOUT:-300}s" 2>&1 | \
-    _cmd_log m3 "$fix_log"
-  m3sh_status=${PIPESTATUS[0]}
-  if [ "$m3sh_status" -eq 0 ] && _confirm_persist_by_count "$(_method_desc m3)" "$failed_file_rel" "$fix_log"; then
-    log_fix "$fix_log" "  ✅ 方法3 成功"
-    local m3_method_text
+  rclone copyto "$local_file" "$m2sh_dst" "${RCLONE_RETRY_FLAGS[@]}" --timeout "${OPENLIST_UPLOAD_TIMEOUT:-300}s" 2>&1 | \
+    _cmd_log m2 "$fix_log"
+  m2sh_status=${PIPESTATUS[0]}
+  if [ "$m2sh_status" -eq 0 ] && _confirm_persist_by_count "$(_method_desc m2)" "$failed_file_rel" "$fix_log"; then
+    log_fix "$fix_log" "  ✅ 方法2 成功"
+    local m2_method_text
     if [ "$used_base64_dir" -eq 1 ]; then
-      m3_method_text="rclone copyto（base64URL 编码目录 + 短哈希文件名 ${sh_hash}）"
+      m2_method_text="rclone copyto（base64URL 编码目录 + 短哈希文件名 ${sh_hash}）"
     else
-      m3_method_text="rclone copyto（原路径 + 短哈希文件名 ${sh_hash}）"
+      m2_method_text="rclone copyto（原路径 + 短哈希文件名 ${sh_hash}）"
     fi
-    _fix_succeed m3 "$m3_method_text" "${m3sh_dst#${dest_path}/}" "rclone move '${m3sh_dst}' '${dest_path}/${failed_file_rel}'  # 原文件名: ${file_name}"
+    _fix_succeed m2 "$m2_method_text" "${m2sh_dst#${dest_path}/}" "rclone move '${m2sh_dst}' '${dest_path}/${failed_file_rel}'  # 原文件名: ${file_name}"
     return 0
   fi
-  log_fix "$fix_log" "  ❌ 方法3 失败 exit=$m3sh_status"
+  log_fix "$fix_log" "  ❌ 方法2 失败 exit=$m2sh_status"
   fi
 
-  # 方法 4/5：zip / 7z 压缩后上传（实现合并为 _try_fix_archive）
-  _fix_method_gate m4 && { _try_fix_archive m4 zip && return 0; }
-  _fix_method_gate m5 && { _try_fix_archive m5 7z && return 0; }
-
   # ============================================================
-  # 方法 6/7：压缩并分卷上传（粒度默认 1GB——正常 sync 多 GB 单文件可直传，
-  # 100MB 粒度白白放大分卷数与 API 调用；OPENLIST_SPLIT_PART_BYTES 可调）
-  # 方法7 额外 base64URL 编码文件名；实现合并为 _try_fix_split_archive
+  # 方法 3/4：压缩并分卷上传（粒度默认 1GB）
+  # 方法4 额外短哈希编码文件名
   # ============================================================
   local SPLIT_LIMIT_BYTES="${OPENLIST_SPLIT_PART_BYTES:-1073741824}"
   local SPLIT_PART_HUMAN
   SPLIT_PART_HUMAN=$(format_bytes_iec "$SPLIT_LIMIT_BYTES")
-  _fix_method_gate m6 "（粒度 ${SPLIT_PART_HUMAN}）" && { _try_fix_split_archive m6 0 && return 0; }
-  _fix_method_gate m7 && { _try_fix_split_archive m7 1 && return 0; }
-
-
-  # 方法 8：OpenList API 直传
-  if _fix_method_gate m8; then
-  if [ -n "$ol_token" ] && [ "$ol_token" != "null" ]; then
-    curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh" \
-      -H "Authorization: $ol_token" \
-      -H "Content-Type: application/json" \
-      -d "$(jq -n --arg path "$ol_dst_dir" '{path:$path,recursive:true}')" >/dev/null 2>&1 || true
-    sleep 3
-    local api_name upload_resp upload_http
-    if [[ "$file_name" == *.* ]]; then
-      api_name="file_$(date +%s)_$$_api.${file_name##*.}"
-    else
-      api_name="file_$(date +%s)_$$_api"
-    fi
-    upload_resp=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST "http://127.0.0.1:5244/api/fs/form" \
-      -H "Authorization: $ol_token" \
-      -F "file=@$local_file" \
-      -F "path=$ol_dst_dir" \
-      -F "name=$api_name" 2>&1)
-    upload_http=$(echo "$upload_resp" | tail -n 1)
-    log_fix "$fix_log" "OpenList API 上传响应: ${upload_http}"
-    if echo "$upload_http" | grep -qE 'HTTP_CODE:(200|201|204)' && _confirm_persist_by_count "$(_method_desc m8)" "$failed_file_rel" "$fix_log"; then
-      log_fix "$fix_log" "  ✅ 方法8 成功"
-      local m8_method_text
-      if [ "$used_base64_dir" -eq 1 ]; then
-        m8_method_text="OpenList API /fs/form（base64URL 编码目录 + API 自动生成文件名）"
-      else
-        m8_method_text="OpenList API /fs/form（原路径 + API 自动生成文件名）"
-      fi
-      local alt_rel_base
-      alt_rel_base="${actual_dst_dir#${dest_path}/}"
-      _fix_succeed m8 "$m8_method_text" "${alt_rel_base}/${api_name}" "rclone move '${dest_path}/${alt_rel_base}/${api_name}' '${dest_path}/${failed_file_rel}'"
-      return 0
-    fi
-    log_fix "$fix_log" "  ❌ 方法8 失败 http=${upload_http}"
-  else
-    log_fix "$fix_log" "  ⏭ 方法8 跳过（无 OpenList token）"
-  fi
-  fi
-
-
-  # 方法 9：上传到父目录（跳过有问题的目录层级）
-  # 如果当前目录写操作被后端（如 wopan176）拒绝，尝试上传到上级目录
-  # 文件名编码原始目录信息，便于后续还原
-  if _fix_method_gate m9; then
-  if [ "$file_dir_rel" != "." ] && [ "$file_dir_rel" != "" ]; then
-    local parent_dst_dir
-    parent_dst_dir="$(dirname -- "$actual_dst_dir")"
-
-    # 编码原始目录名到文件名中，格式: __fixed__<base64_原始目录>__<原文件名>
-    local encoded_orig_dir
-    encoded_orig_dir=$(b64url_encode "$(basename -- "$file_dir_rel")")
-    local fixed_name="__fixed__${encoded_orig_dir}__${file_name}"
-    local m9_dst="${parent_dst_dir}/${fixed_name}"
-
-    log_fix "$fix_log" "  父目录: $parent_dst_dir"
-    log_fix "$fix_log" "  编码文件名: $fixed_name"
-
-    # 确保父目录存在
-    rclone mkdir "$parent_dst_dir" "${RCLONE_RETRY_FLAGS[@]}" --timeout "${OPENLIST_MKDIR_TIMEOUT:-120}s" 2>&1 | \
-      _cmd_log m9·mkdir "$fix_log"
-
-    rclone copyto "$local_file" "$m9_dst" "${RCLONE_RETRY_FLAGS[@]}" --timeout "${OPENLIST_UPLOAD_TIMEOUT:-300}s" 2>&1 | \
-      _cmd_log m9 "$fix_log"
-    local m9_status=${PIPESTATUS[0]}
-    if [ "$m9_status" -eq 0 ] && _confirm_persist_by_count "$(_method_desc m9)" "$failed_file_rel" "$fix_log"; then
-      log_fix "$fix_log" "  ✅ 方法9 成功"
-      _fix_succeed m9 "rclone copyto（父目录 + 编码原始目录名的文件名）" "${m9_dst#${dest_path}/}" "rclone move '${m9_dst}' '${dest_path}/${failed_file_rel}'"
-      return 0
-    fi
-    log_fix "$fix_log" "  ❌ 方法9 失败 exit=$m9_status"
-  fi
-  fi
-
-  # 方法 10：加密 zip 后上传（改变二进制特征 + 密码保护）
-  if _fix_method_gate m10; then
-  local zip_password="OpenList$(date +%s)"
-  (cd "$temp_dir" && 7z a -tzip -p"$zip_password" -mem=AES256 "${file_name}.enc.zip" "$file_name") 2>&1 | \
-    _cmd_log m10·zip "$fix_log"
-  if [ -f "$temp_dir/${file_name}.enc.zip" ]; then
-    local m10_dst="${actual_dst_dir}/${file_name}.enc.zip"
-    rclone copyto "$temp_dir/${file_name}.enc.zip" "$m10_dst" "${RCLONE_RETRY_FLAGS[@]}" --timeout "${OPENLIST_UPLOAD_TIMEOUT:-300}s" 2>&1 | \
-      _cmd_log m10 "$fix_log"
-    local m10_status=${PIPESTATUS[0]}
-    if [ "$m10_status" -eq 0 ] && _confirm_persist_by_count "$(_method_desc m10)" "$failed_file_rel" "$fix_log"; then
-      log_fix "$fix_log" "  ✅ 方法10 成功"
-      _fix_succeed m10 "rclone copyto（AES256 加密 zip + .enc.zip 扩展名）" "${m10_dst#${dest_path}/}" "下载 ${m10_dst} 后解压: 7z x -p${zip_password} ${file_name}.enc.zip"
-      return 0
-    fi
-    log_fix "$fix_log" "  ❌ 方法10 失败 exit=$m10_status"
-  else
-    log_fix "$fix_log" "  ⚠ 方法10 zip 未生成"
-  fi
-  fi
-
-  # 方法 11：上传到临时目录后用 OpenList API move 移动
-  # 在 backup 根目录创建临时目录，上传文件，然后用 API move 到目标路径
-  if _fix_method_gate m11; then
-    if [ -n "$ol_token" ] && [ "$ol_token" != "null" ]; then
-    local tmp_dir_name="_tmp_fix_$(date +%s)_$$"
-    local tmp_ol_dir="/${ol_dst_base}/${tmp_dir_name}"
-    # 通过 API 创建临时目录
-    curl -s -X POST "http://127.0.0.1:5244/api/fs/mkdir" \
-      -H "Authorization: $ol_token" \
-      -H "Content-Type: application/json" \
-      -d "$(jq -n --arg path "$tmp_ol_dir" '{path:$path}')" >/dev/null 2>&1 || true
-    sleep 1
-    # 上传文件到临时目录
-    local m11_upload_name="${file_name}"
-    local m11_upload_resp m11_upload_http
-    m11_upload_resp=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST "http://127.0.0.1:5244/api/fs/form" \
-      -H "Authorization: $ol_token" \
-      -F "file=@$local_file" \
-      -F "path=$tmp_ol_dir" \
-      -F "name=$m11_upload_name" \
-      --max-time "${OPENLIST_UPLOAD_TIMEOUT:-300}" 2>&1)
-    m11_upload_http=$(echo "$m11_upload_resp" | tail -n 1)
-    log_fix "$fix_log" "  临时目录上传响应: ${m11_upload_http}"
-    if echo "$m11_upload_http" | grep -qE 'HTTP_CODE:(200|201|204)' && _confirm_persist_by_count "$(_method_desc m11)" "$failed_file_rel" "$fix_log"; then
-      log_fix "$fix_log" "  ⬆ 方法11 临时目录上传成功，move 到目标路径..."
-      # 确保目标目录存在
-      local target_ol_dir="/${ol_dst_base}/${file_dir_rel}"
-      curl -s -X POST "http://127.0.0.1:5244/api/fs/mkdir" \
-        -H "Authorization: $ol_token" \
-        -H "Content-Type: application/json" \
-        -d "$(jq -n --arg path "$target_ol_dir" '{path:$path}')" >/dev/null 2>&1 || true
-      sleep 1
-      # 用 OpenList API move 移动文件
-      local src_move="${tmp_ol_dir}/${file_name}"
-      local dst_move="/${ol_dst_base}/${failed_file_rel}"
-      local move_resp move_http
-      move_resp=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST "http://127.0.0.1:5244/api/fs/move" \
-        -H "Authorization: $ol_token" \
-        -H "Content-Type: application/json" \
-        -d "$(jq -n --arg src "$src_move" --arg dst "$dst_move" '{src_dir:$src,dst_dir:$dst}')")
-      move_http=$(echo "$move_resp" | tail -n 1)
-      log_fix "$fix_log" "  API move 响应: ${move_http}"
-      if echo "$move_resp" | grep -q '"code":200'; then
-        log_fix "$fix_log" "  ✅ 方法11 成功（move 完成）"
-        _fix_succeed m11 "临时目录上传 + OpenList API move（原路径 + 原文件名）" "$failed_file_rel" "无需还原（文件已在正确路径）"
-        return 0
-      else
-        log_fix "$fix_log" "  ❌ 方法11 move 失败，文件留在 ${tmp_ol_dir}/${file_name}"
-        _fix_succeed m11 "临时目录上传（move 失败，文件保留在 ${tmp_dir_name}/）" "${tmp_dir_name}/${file_name}" "OpenList API: POST /api/fs/move {src_dir:'${tmp_ol_dir}/${file_name}', dst_dir:'/${ol_dst_base}/${failed_file_rel}'}"
-        return 0
-      fi
-    fi
-    log_fix "$fix_log" "  ❌ 方法11 上传失败 http=${m11_upload_http}"
-    else
-      log_fix "$fix_log" "  ⏭ 方法11 跳过（无 OpenList token）"
-    fi
-  fi
+  _fix_method_gate m3 "（粒度 ${SPLIT_PART_HUMAN}）" && { _try_fix_split_archive m3 0 && return 0; }
+  _fix_method_gate m4 && { _try_fix_split_archive m4 1 && return 0; }
 
   # 所有方法均失败
-  log_fix "$fix_log" "❌ 全部修复方法（1-11）均失败"
+  log_fix "$fix_log" "❌ 全部修复方法（1-4）均失败"
   TRY_FIX_MESSAGE="所有修复方法均失败"
   rm -rf "$temp_dir" 2>/dev/null || true
   return 1
