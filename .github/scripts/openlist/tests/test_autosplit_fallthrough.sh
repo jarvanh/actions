@@ -39,6 +39,7 @@ save_sync_marker() { SSM_CALLS=$((SSM_CALLS+1)); }
 split_on_sync_failure() { SOSF_CALLS=$((SOSF_CALLS+1)); }
 progress_update() { :; }
 progress_update_force() { :; }
+progress_scope_init() { :; }
 send_sync_skipped() { :; }
 send_sync_warning() { :; }
 

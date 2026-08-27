@@ -8,8 +8,10 @@
 #   PROGRESS_TASKS_FILE      — 任务队列（TSV: task_id, display_name, status, detail, size_hint）
 #   PROGRESS_CURRENT_FILE    — 当前正在执行的任务 ID
 #   PROGRESS_START_FILE      — 进度开始时间戳
-#   PROGRESS_PHASE_FILE      — 当前阶段信息（HTML 片段）
-#   PROGRESS_STATS_FILE      — 当前统计信息（HTML 片段）
+#   PROGRESS_ROWS_FILE.N     — 拆分深度 N 的阶段树行（原始行，连接符由渲染器加）
+#   PROGRESS_STATS_FILE.N    — 拆分深度 N 的统计信息（HTML 片段）
+#   （多层槽位: auto-split 递归时每层写入自己的深度槽位，渲染时逐层缩进
+#   合并展示；行内容含 HTML 已由生产方 escape，此处透传）
 #   PROGRESS_FINALIZED_FILE  — 最终完成标记
 #
 # 依赖: telegram.sh (send/edit/delete), utils.sh (escape_html)
@@ -19,8 +21,10 @@ PROGRESS_MSG_ID_FILE="/tmp/progress_msg_id.txt"
 PROGRESS_TASKS_FILE="/tmp/progress_tasks.tsv"
 PROGRESS_CURRENT_FILE="/tmp/progress_current.txt"
 PROGRESS_START_FILE="/tmp/progress_start.txt"
-PROGRESS_PHASE_FILE="/tmp/progress_phase.txt"
-PROGRESS_STATS_FILE="/tmp/progress_stats.txt"
+# 阶段树/统计按拆分深度分槽存储（auto-split 递归可达 10 层，留余量取 16）
+PROGRESS_MAX_DEPTH=16
+_progress_slot_rows() { printf '/tmp/progress_rows.%d' "$1"; }
+_progress_slot_stats() { printf '/tmp/progress_stats.%d' "$1"; }
 PROGRESS_FINALIZED_FILE="/tmp/progress_finalized.txt"
 # 节流时间戳文件（避免频繁刷新 Telegram 消息）
 PROGRESS_LAST_UPDATE_FILE="/tmp/progress_last_update.txt"
@@ -76,14 +80,34 @@ _progress_get_current_task() {
   [ -f "$PROGRESS_CURRENT_FILE" ] && head -1 "$PROGRESS_CURRENT_FILE" 2>/dev/null || echo ""
 }
 
-# 获取当前阶段信息（HTML 片段）
-_progress_get_phase() {
-  [ -f "$PROGRESS_PHASE_FILE" ] && cat "$PROGRESS_PHASE_FILE" 2>/dev/null || echo ""
+# 清空 base_depth 及更深层级的阶段槽位
+# 用法: progress_scope_init <base_depth>
+# auto-split 递归进入子任务时调用: 同名深度的槽位可能被上一个兄弟子树
+# 留下过期内容（尤其"直接同步中"这类不写树的路径会残留旧树），进入时清空。
+progress_scope_init() {
+  local _d="${1:-0}"
+  local d
+  for ((d = _d; d < PROGRESS_MAX_DEPTH; d++)); do
+    rm -f "$(_progress_slot_rows "$d")" "$(_progress_slot_stats "$d")"
+  done
 }
 
-# 获取当前统计信息（HTML 片段）
-_progress_get_stats() {
-  [ -f "$PROGRESS_STATS_FILE" ] && cat "$PROGRESS_STATS_FILE" 2>/dev/null || echo ""
+_progress_purge_all_slots() {
+  progress_scope_init 0
+}
+
+# 阶段树行重排: 🔄 同步行挪到末尾（其余保持原序）
+# 多层级渲染时深层块紧跟在本层末尾，把当前同步行置尾才能让深层在视觉上挂其下
+_progress_active_last() {
+  local _others="" _active="" _l
+  while IFS= read -r _l; do
+    [ -z "$_l" ] && continue
+    case "$_l" in
+      🔄*) _active+="${_l}"$'\n' ;;
+      *)   _others+="${_l}"$'\n' ;;
+    esac
+  done
+  printf '%s%s' "$_others" "$_active"
 }
 
 # 任务列表分组渲染（进度通知专用）
@@ -219,11 +243,12 @@ _progress_render() {
   tg_add_title msg "$title"
   tg_append msg "📊 总任务：<b>${total}</b> | 待处理：${pending} | 进行中：${running} | 完成：${completed} | 跳过：${skipped} | 失败：${failed}"$'\n'
 
-  # 进行中任务块: 任务条目（分组渲染）+ 缩进两格的阶段/统计信息
-  #   阶段首行（▸ 摘要）→ 统计行（▸ 📊 ...）→ 阶段剩余行（├─/└─ 树形子项）
+  # 进行中任务块: 任务条目（分组渲染）+ 多层级阶段树/统计信息
+  #   各拆分深度槽位逐层缩进两格合并：深度 0 的树挂在任务条目下，
+  #   auto-split 子层的树再缩进一层、视觉上挂在本层活动行（🔄 已置尾）下；
   # finalized（中断/收尾）时仍渲染任务条目: 标题已报 "N 个进行中未执行完"，
   # 条目却不列出的话，被打断的任务（如 wopan176Crypt/0）在消息里完全失踪;
-  # 阶段/统计不展示（progress_finalize 已清空，属过期信息）
+  # 阶段/统计不展示（progress_finalize 已清空各槽位，属过期信息）
   if [ "$running" -gt 0 ]; then
     local _running_title="📍 进行中 · ${running}"
     [ "$finalized" -eq 1 ] && _running_title="⏸️ 进行中（未执行完）· ${running}"
@@ -231,25 +256,28 @@ _progress_render() {
     tg_add_block msg "$(_progress_render_task_list "$running_lines")"
 
     if [ "$finalized" -ne 1 ]; then
-      local phase phase_first="" phase_rest=""
-      phase=$(_progress_get_phase)
-      if [ -n "$phase" ]; then
-        phase_first="$(printf '%s\n' "$phase" | head -1)"
-        phase_rest="$(printf '%s\n' "$phase" | tail -n +2)"
-        msg+="  ${phase_first}"$'\n'
-      fi
-
-      local stats
-      stats=$(_progress_get_stats)
-      [ -n "$stats" ] && msg+="  ${stats}"$'\n'
-
-      if [ -n "$phase_rest" ]; then
-        local pline
-        while IFS= read -r pline; do
-          [ -z "$pline" ] && continue
-          msg+="  ${pline}"$'\n'
-        done <<< "$phase_rest"
-      fi
+      local _d _pad _rf _sf _raw _tree _line
+      for ((_d = 0; _d < PROGRESS_MAX_DEPTH; _d++)); do
+        _rf="$(_progress_slot_rows "$_d")"
+        _sf="$(_progress_slot_stats "$_d")"
+        [ -f "$_rf" ] || [ -f "$_sf" ] || continue
+        _pad=""
+        local _k
+        for ((_k = 0; _k <= _d; _k++)); do _pad+="  "; done
+        if [ -f "$_rf" ]; then
+          _raw="$(_progress_active_last < "$_rf")"
+          # tree_lines 每行自带 2 空格树干前缀（tree_conn），剥掉后
+          # 由本层 pad 统一缩进，保证树与统计行同列对齐
+          _tree="$(tree_lines "$_raw" | sed 's/^  //')"
+          if [ -n "$_tree" ]; then
+            while IFS= read -r _line; do
+              [ -z "$_line" ] && continue
+              msg+="${_pad}${_line}"$'\n'
+            done <<< "$_tree"
+          fi
+        fi
+        [ -f "$_sf" ] && msg+="${_pad}$(cat "$_sf")"$'\n'
+      done
     fi
   fi
 
@@ -293,8 +321,7 @@ progress_init() {
   : > "$PROGRESS_TASKS_FILE"
   : > "$PROGRESS_MSG_ID_FILE"
   : > "$PROGRESS_CURRENT_FILE"
-  : > "$PROGRESS_PHASE_FILE"
-  : > "$PROGRESS_STATS_FILE"
+  _progress_purge_all_slots
   rm -f "$PROGRESS_FINALIZED_FILE" 2>/dev/null || true
   date +%s > "$PROGRESS_START_FILE"
 
@@ -317,58 +344,67 @@ task_begin() {
     progress_register_task "$task_id" "${fallback_name:-$task_id}"
   fi
   echo "$task_id" > "$PROGRESS_CURRENT_FILE"
-  # 清空上一任务遗留的 phase/stats（run 33048121562: task0 的批次统计
+  # 清空上一任务遗留的阶段槽位（run 33048121562: task0 的批次统计
   # "15 批 ❌15" 被残留显示到下一个任务的 📍 进行中 区块下）
-  : > "$PROGRESS_PHASE_FILE"
-  : > "$PROGRESS_STATS_FILE"
+  _progress_purge_all_slots
   _progress_set_task_status "$task_id" "running" ""
   _progress_refresh
 }
 
-# 更新当前任务的详细信息和阶段/统计（带 2 秒节流）
-# 用法: task_update <detail> [phase_html] [stats_html]
-# PROGRESS_SUPPRESS=1 时静默返回: 子任务执行期间不覆盖父任务的
-# phase/stats/detail（父任务树中的当前子目录由父循环标记 🔄）
-task_update() {
-  [ "${PROGRESS_SUPPRESS:-0}" = "1" ] && return 0
-  local detail="$1"
-  local phase="${2:-}"
+# 更新器共享实现：按 SYNC_AUTO_SPLIT_DEPTH 把内容路由到对应深度槽位
+# 用法: _task_progress_apply <detail> [rows_raw] [stats_html] <bypass_throttle>
+#   rows_raw — 本层阶段树的原始行（多行，无连接符），空则不动本层树
+#   深度路由规则（替代旧的 PROGRESS_SUPPRESS 单槽互斥模型）:
+#   - 任务行 detail 只接受深度 0（注册任务本层）的更新——深层子任务的
+#     过程信息不上提到任务行，由各层自己的阶段树/统计行表达;
+#   - rows/stats 写入 SYNC_AUTO_SPLIT_DEPTH 对应槽位，父子天然隔离,
+#     渲染时逐层合并展示（Tasks.sh 递归前后已维护好深度变量）;
+#   - 兼容兜底: 外部仍设 PROGRESS_SUPPRESS=1 时静默丢弃（旧行为）。
+#   节流: 2 秒内不重复刷新消息；bypass=1（force）且深度 0 才豁免——
+#   深层文件批次的高频 force 若不加限流会造成 Telegram 消息风暴。
+_task_progress_apply() {
+  local detail="${1:-}"
+  local rows="${2:-}"
   local stats="${3:-}"
+  local bypass_throttle="${4:-0}"
   local current
   current=$(_progress_get_current_task)
   [ -z "$current" ] && return
 
-  _progress_set_task_status "$current" "running" "$detail"
-  [ -n "$phase" ] && echo "$phase" > "$PROGRESS_PHASE_FILE"
-  [ -n "$stats" ] && echo "$stats" > "$PROGRESS_STATS_FILE"
+  local _d="${SYNC_AUTO_SPLIT_DEPTH:-0}"
+  [[ "$_d" =~ ^[0-9]+$ ]] || _d=0
 
-  # 简单节流：2 秒内不重复刷新
+  if [ "$_d" -eq 0 ]; then
+    _progress_set_task_status "$current" "running" "$detail"
+  fi
+  [ -n "$rows" ] && printf '%s\n' "$rows" > "$(_progress_slot_rows "$_d")"
+  [ -n "$stats" ] && echo "$stats" > "$(_progress_slot_stats "$_d")"
+
   local now last=0
   now=$(date +%s)
   [ -f "$PROGRESS_LAST_UPDATE_FILE" ] && last=$(cat "$PROGRESS_LAST_UPDATE_FILE" 2>/dev/null || echo 0)
-  if [ $((now - last)) -lt 2 ]; then
+  if [ "$bypass_throttle" = "1" ] && [ "$_d" -eq 0 ]; then
+    echo "$now" > "$PROGRESS_LAST_UPDATE_FILE"
+    _progress_refresh
     return 0
   fi
+  [ $((now - last)) -lt 2 ] && return 0
   echo "$now" > "$PROGRESS_LAST_UPDATE_FILE"
   _progress_refresh
 }
 
-# 强制更新（忽略节流）
-# 用法: task_update_force <detail> [phase_html] [stats_html]
+# 更新当前任务的详细信息和阶段/统计（带 2 秒节流）
+# 用法: task_update <detail> [rows_raw] [stats_html]
+task_update() {
+  [ "${PROGRESS_SUPPRESS:-0}" = "1" ] && return 0
+  _task_progress_apply "${1:-}" "${2:-}" "${3:-}" 0
+}
+
+# 强制更新（顶层忽略节流，深层仍限流防消息风暴）
+# 用法: task_update_force <detail> [rows_raw] [stats_html]
 task_update_force() {
   [ "${PROGRESS_SUPPRESS:-0}" = "1" ] && return 0
-  local detail="$1"
-  local phase="${2:-}"
-  local stats="${3:-}"
-  local current
-  current=$(_progress_get_current_task)
-  [ -z "$current" ] && return
-
-  _progress_set_task_status "$current" "running" "$detail"
-  [ -n "$phase" ] && echo "$phase" > "$PROGRESS_PHASE_FILE"
-  [ -n "$stats" ] && echo "$stats" > "$PROGRESS_STATS_FILE"
-  date +%s > "$PROGRESS_LAST_UPDATE_FILE"
-  _progress_refresh
+  _task_progress_apply "${1:-}" "${2:-}" "${3:-}" 1
 }
 
 # 手动刷新进度消息（无节流）
@@ -400,8 +436,7 @@ task_done() {
 progress_finalize() {
   echo "1" > "$PROGRESS_FINALIZED_FILE"
   : > "$PROGRESS_CURRENT_FILE"
-  : > "$PROGRESS_PHASE_FILE"
-  : > "$PROGRESS_STATS_FILE"
+  _progress_purge_all_slots
   _progress_refresh
 }
 
