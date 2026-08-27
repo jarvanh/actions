@@ -1097,9 +1097,15 @@ sync_by_file_batches() {
   # 此处可能被子目录递归调用（SYNC_SKIP_QUIET=1），需临时关闭静默模式，避免通知被吞。
   # 跳过标记（save_sync_marker）不在本函数保存——调用方 _sync_task_impl 随后的
   # _sync_task_finalize 会按统一条件保存，这里保存会重复执行远端统计。
+  # ⚡ 批次阶段已完成实质传输，最终 sync_with_logging 只需做 lsf diff + 修复管线，
+  # 不需要再跑一次完整的 rclone sync（否则大目录需要再扫描数分钟）。
+  # 通过 OPENLIST_FIX_TEST_MODE=1 跳过 run_rclone_sync_once 的实际传输步骤。
   local _saved_skip_quiet="${SYNC_SKIP_QUIET:-0}"
+  local _saved_fix_test="${OPENLIST_FIX_TEST_MODE:-0}"
   SYNC_SKIP_QUIET=0
+  OPENLIST_FIX_TEST_MODE=1
   sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
+  OPENLIST_FIX_TEST_MODE="$_saved_fix_test"
   AUTO_SPLIT_INFO=""
   SYNC_SKIP_QUIET="$_saved_skip_quiet"
   # 部分批次失败但循环跑完（含 exit=4 部分成功之外的真失败）: 最终全量同步

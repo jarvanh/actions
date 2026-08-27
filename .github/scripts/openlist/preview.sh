@@ -143,14 +143,19 @@ add_preview_pair() {
   done
   local dst_fail=0
   if [ -z "$dst_json" ]; then
-    dst_fail=1
-    PREVIEW_FAIL_PAIRS=$((PREVIEW_FAIL_PAIRS + 1))
-    echo "⚠️ add_preview_pair: 目标端清单获取失败 (${dest_path})，按目标端为空估算（全量待同步）" >&2
-    # 抓一次真实错误进 job 日志（驱动未加载/限流/路径不存在），便于定位
     local _dst_err
     _dst_err=$(timeout 60 rclone lsjson "$dest_path" --max-depth 1 2>&1 >/dev/null | tail -n 2)
-    [ -n "$_dst_err" ] && echo "   目标端列举错误: ${_dst_err}" >&2
-    dst_json="[]"
+    if echo "$_dst_err" | grep -iq 'directory not found'; then
+      # Not a real failure, just a new/empty directory on the destination
+      dst_fail=0
+      dst_json="[]"
+    else
+      dst_fail=1
+      PREVIEW_FAIL_PAIRS=$((PREVIEW_FAIL_PAIRS + 1))
+      echo "⚠️ add_preview_pair: 目标端清单获取失败 (${dest_path})，按目标端为空估算（全量待同步）" >&2
+      [ -n "$_dst_err" ] && echo "   目标端列举错误: ${_dst_err}" >&2
+      dst_json="[]"
+    fi
   fi
 
   # 已修复文件（marker fixed_files: original 以替代名存在于目标端）
