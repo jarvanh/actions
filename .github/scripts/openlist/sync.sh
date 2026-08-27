@@ -39,6 +39,14 @@
 #           从未落盘，容器重启后消失）——run 32749862280 实锤: 3 小时批次
 #           139/139 假成功，30.757 GiB 全部未落盘。
 #
+# 注意区分两个时效层次（勿混淆，doc.oplist.org/guide/drivers/wopan）:
+#   - 上述"约 5 分钟"是 OAuth access_token 的短时效，由 refresh_token 自动
+#     续期——本函数维护的就是这条自动链路；
+#   - 文档所述"登录态有效期 7 天（方法一）/2 个月（方法二）"是手动抓取凭据
+#     的整体寿命上限，到期无法自动续，只能人工重抓；且重抓时跨端登录互踢
+#     （方法一怕网页端登录、方法二怕手机 APP 登录），操作前须核对挂载所用
+#     方法。真失效属人工事件，预检不应也无法自动修复它。
+#
 # 方法1: POST /api/admin/storage/load_all — OpenList 官方"重新加载所有存储"
 #        API，从数据库重新初始化全部驱动（等效容器重启的驱动重建，秒级
 #        完成、可无限次重复，传输期间的定时保鲜循环也用它）。
@@ -298,6 +306,11 @@ _openlist_api_health_check() {
   # （如"密码错误"）不能被"需访问密码=配置项"的降级规则吞掉。
   if echo "$message" | grep -Eqi 'unauthorized|permission denied|not authenticated|login|登录|授权|token|auth.*fail|auth.*error|credential|identity|密码错误'; then
     echo "🚫 $label 后端驱动认证失效（API 强校验 code=$code）: $message，跳过本轮同步" | tee ${log_file:+-a "$log_file"}
+    # wopan 登录态有效期有上限（方法一 7 天/方法二 2 个月）且无法自动续期，
+    # 真失效只能人工重抓；重抓时跨端登录互踢，先核对挂载用的方法再动手
+    if [[ "$label" == *wopan* || "$message" == *wopan* ]]; then
+      echo "   ▸ wopan 运维提示: 登录令牌有效期 方法一 7 天 / 方法二 2 个月，到期需人工重抓（doc.oplist.org/guide/drivers/wopan）；重抓登录时跨端互踢——方法一别登网页版、方法二别登手机 APP，以免把其他健康挂载踢下线" | tee ${log_file:+-a "$log_file"}
+    fi
     return 1
   fi
   if echo "$message" | grep -Eqi 'storage|存储|driver|驱动|reload|internal server|服务器内部|exception|panic|bad gateway|service unavailable|gateway timeout|request failed|请求失败|too many requests'; then
