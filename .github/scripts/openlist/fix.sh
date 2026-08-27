@@ -95,7 +95,7 @@ _get_crypt_config() {
   ol_token=$(_get_openlist_token) || ol_token=""
   local http_code="" api_code="" api_msg=""
   if [ -z "$ol_token" ]; then
-    why="token 不可用（config.json 无 token/jwt_secret）"
+    why="token 获取失败（管理面账密登录失败或 OPENLIST_ADMIN_PASSWORD 未注入）"
   else
     resp=$(curl -s -w '\n%{http_code}' "http://127.0.0.1:5244/api/admin/storage/list" \
       -H "Authorization: $ol_token" --max-time 15 2>/dev/null) || resp=""

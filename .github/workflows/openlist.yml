@@ -95,6 +95,9 @@ jobs:
       OPENLIST_TOKEN_REFRESH_SECS: "240"
       OPENLIST_MAX_CONSECUTIVE_ATTEMPTS: "8"
 
+      # OpenList 管理面账密（动态登录换取 token，取代静态 config.json token）
+      OPENLIST_ADMIN_PASSWORD: ${{ secrets.OPENLIST_ADMIN_PASSWORD }}
+
       # 并发参数
       OPENLIST_TRANSFERS: "1"
       OPENLIST_CHECKERS: "8"
