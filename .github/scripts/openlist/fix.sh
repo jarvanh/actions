@@ -392,13 +392,15 @@ _fix_method_gate() {
 }
 
 # 修复方法成功收尾：写入 TRY_FIX_* 结果变量并清理临时目录
-# 用法: _fix_succeed <method_id> <method_text> <alternative> <restore_text>
+# 用法: _fix_succeed <method_id> <method_text> <alternative> <restore_text> [md5]
+#   md5: 原文件内容指纹（try_fix 下载阶段统一计算，供还原时内容级校验；空=不可用）
 _fix_succeed() {
   TRY_FIX_METHOD_ID="$(_method_desc "$1")"
   TRY_FIX_STATUS="success"
   TRY_FIX_METHOD="$2"
   TRY_FIX_ALTERNATIVE="$3"
   TRY_FIX_RESTORE="$4"
+  TRY_FIX_MD5="${5:-}"
   rm -rf "$temp_dir" 2>/dev/null || true
   return 0
 }
@@ -492,7 +494,7 @@ _try_fix_split_archive() {
     local method_text="分卷 zip（${dir_desc} + ${name_desc}${SPLIT_PART_HUMAN} 分卷切割，共 ${uploaded_count} 卷）"
     local restore_text="下载所有分卷 ${zip_base}.001~$(printf '%03d' "$uploaded_count") 后 cat 合并再解压: cat ${zip_base}.0* > merged.zip && 7z x merged.zip"
     [ "$encode_name" = "1" ] && restore_text+="，原文件名恢复: 将解压后的文件重命名回 $file_name"
-    _fix_succeed "$mid" "$method_text" "${alt_files[0]}" "$restore_text"
+    _fix_succeed "$mid" "$method_text" "${alt_files[0]}" "$restore_text" "$file_md5"
     return 0
   fi
   log_fix "$fix_log" "  ❌ $(_method_short "$mid") 失败（分卷未全部上传）"
@@ -651,6 +653,7 @@ try_fix_failed_file() {
   TRY_FIX_METHOD_ID=""
   TRY_FIX_RESTORE=""
   TRY_FIX_MESSAGE=""
+  TRY_FIX_MD5=""
 
   log_fix "$fix_log" "── 修复 $(_short_path "$failed_file_rel")"
   log_fix "$fix_log" "   源: $(_short_path "$src_file")"
@@ -676,6 +679,14 @@ try_fix_failed_file() {
   local file_size
   file_size=$(stat -c%s "$local_file" 2>/dev/null || echo 0)
   log_fix "$fix_log" "✅ 已下载 $(format_bytes_iec "$file_size")"
+
+  # 原文件内容指纹: 本地副本在此统一计算一次（下载失败早已短路），
+  # 四种方法共享；写进 marker 后供还原时做内容级硬校验。
+  # temp_dir 会被 _fix_succeed 清理，但 md5 值已捕获，不受影响。
+  local file_md5
+  file_md5=$(md5sum "$local_file" 2>/dev/null | awk '{print $1}')
+  [[ "$file_md5" =~ ^[0-9a-f]{32}$ ]] || file_md5=""
+  [ -n "$file_md5" ] && log_fix "$fix_log" "  md5: $file_md5"
 
   # ===== Step 1: 创建/确认目标目录 =====
   local dir_ok=0
@@ -802,9 +813,9 @@ try_fix_failed_file() {
   if [ "$m1_status" -eq 0 ] && _confirm_persist_by_count "$(_method_desc m1)" "$failed_file_rel" "$fix_log"; then
     log_fix "$fix_log" "  ✅ 方法1 成功"
     if [ "$used_base64_dir" -eq 1 ]; then
-      _fix_succeed m1 "rclone copyto（base64URL 编码目录 + 原文件名）" "${dst_file#${dest_path}/}" "rclone move '${dst_file}' '${dest_path}/${failed_file_rel}'"
+      _fix_succeed m1 "rclone copyto（base64URL 编码目录 + 原文件名）" "${dst_file#${dest_path}/}" "rclone move '${dst_file}' '${dest_path}/${failed_file_rel}'" "$file_md5"
     else
-      _fix_succeed m1 "rclone copyto（原路径 + 原文件名）" "$failed_file_rel" "无需还原（文件已在正确路径）"
+      _fix_succeed m1 "rclone copyto（原路径 + 原文件名）" "$failed_file_rel" "无需还原（文件已在正确路径）" "$file_md5"
     fi
     return 0
   fi
@@ -834,7 +845,7 @@ try_fix_failed_file() {
     else
       m2_method_text="rclone copyto（原路径 + 短哈希文件名 ${sh_hash}）"
     fi
-    _fix_succeed m2 "$m2_method_text" "${m2sh_dst#${dest_path}/}" "rclone move '${m2sh_dst}' '${dest_path}/${failed_file_rel}'  # 原文件名: ${file_name}"
+    _fix_succeed m2 "$m2_method_text" "${m2sh_dst#${dest_path}/}" "rclone move '${m2sh_dst}' '${dest_path}/${failed_file_rel}'  # 原文件名: ${file_name}" "$file_md5"
     return 0
   fi
   log_fix "$fix_log" "  ❌ 方法2 失败 exit=$m2sh_status"

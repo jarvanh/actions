@@ -571,17 +571,19 @@ _openlist_truth_check() {
 # state_file 是修复循环开始时对当前 marker 的快照，每次调用在快照上合并后整体写回
 # （保留 last_success 等其他字段；同 original 的新条目覆盖旧条目）
 # 用法: _persist_fix_entry_now <marker_path> <state_file> <source_path> <dest_path> \
-#         <orig> <alt> <method> <restore_hint> <size_human> <size_bytes> <method_id>
+#         <orig> <alt> <method> <restore_hint> <size_human> <size_bytes> <method_id> [md5]
 _persist_fix_entry_now() {
   local marker_path="$1" state_file="$2" source_path="$3" dest_path="$4"
   local orig="$5" alt="$6" method="$7" restore_hint="$8" size_human="$9"
-  local size_bytes="${10}" method_id="${11}"
+  local size_bytes="${10}" method_id="${11}" file_md5="${12:-}"
   [ -f "$state_file" ] || return 1
 
   local entry_json
   entry_json=$(jq -cn --arg o "$orig" --arg a "$alt" --arg m "$method" --arg rh "$restore_hint" \
     --arg sh "$size_human" --argjson sb "${size_bytes:-0}" --arg mid "${method_id:-}" \
-    '{original:$o, alternative:$a, method:$m, restore_hint:$rh, size_human:$sh, size_bytes:$sb, method_id:$mid}') || return 1
+    --arg md5 "$file_md5" \
+    '{original:$o, alternative:$a, method:$m, restore_hint:$rh, size_human:$sh, size_bytes:$sb, method_id:$mid}
+     + (if $md5 != "" then {md5:$md5} else {} end)') || return 1
 
   # 方法黑名单快照（本轮已判假成功的方法一并写入，中断后下轮仍生效）
   local bl_json
@@ -1141,12 +1143,12 @@ _sync_fix_missing_files() {
         if [ "$TRY_FIX_STATUS" = "success" ]; then
           echo "✅ 修复成功 · $(_method_short "${TRY_FIX_METHOD_ID:-}") · $(_short_path "$failed_line")" | tee -a "$LOG_FILENAME"
           echo "  ↳ 还原: ${TRY_FIX_RESTORE}" | tee -a "$LOG_FILENAME"
-          echo "${TRY_FIX_ORIGINAL}|${TRY_FIX_ALTERNATIVE}|${TRY_FIX_METHOD}|${TRY_FIX_RESTORE}|${file_size}|${file_size_bytes}|${TRY_FIX_METHOD_ID}" >> "$fix_list"
+          echo "${TRY_FIX_ORIGINAL}|${TRY_FIX_ALTERNATIVE}|${TRY_FIX_METHOD}|${TRY_FIX_RESTORE}|${file_size}|${file_size_bytes}|${TRY_FIX_METHOD_ID}|${TRY_FIX_MD5:-}" >> "$fix_list"
           FIXED_THIS_RUN["$TRY_FIX_ORIGINAL"]="$TRY_FIX_ALTERNATIVE"
           # 立即记录到修复文件清单（增量持久化，防中断丢失）
           _persist_fix_entry_now "$incr_marker_path" "$incr_state" "$source_path" "$dest_path" \
             "$TRY_FIX_ORIGINAL" "$TRY_FIX_ALTERNATIVE" "$TRY_FIX_METHOD" "$TRY_FIX_RESTORE" \
-            "$file_size" "$file_size_bytes" "${TRY_FIX_METHOD_ID:-}" 2>&1 | tee -a "$LOG_FILENAME" || true
+            "$file_size" "$file_size_bytes" "${TRY_FIX_METHOD_ID:-}" "${TRY_FIX_MD5:-}" 2>&1 | tee -a "$LOG_FILENAME" || true
           _cb_consec=0
           _cb_sig=""
         else
@@ -1333,12 +1335,12 @@ _sync_persist_verify_and_retry() {
                 retry_size_bytes=$(echo "$retry_size_json" | jq -r '.bytes // 0' 2>/dev/null || echo 0)
                 [[ "$retry_size_bytes" =~ ^[0-9]+$ ]] || retry_size_bytes=0
                 retry_size_human=$(format_bytes "$retry_size_bytes")
-                echo "${TRY_FIX_ORIGINAL}|${TRY_FIX_ALTERNATIVE}|${TRY_FIX_METHOD}|${TRY_FIX_RESTORE}|${retry_size_human}|${retry_size_bytes}|${TRY_FIX_METHOD_ID}" >> "$fix_list"
+                echo "${TRY_FIX_ORIGINAL}|${TRY_FIX_ALTERNATIVE}|${TRY_FIX_METHOD}|${TRY_FIX_RESTORE}|${retry_size_human}|${retry_size_bytes}|${TRY_FIX_METHOD_ID}|${TRY_FIX_MD5:-}" >> "$fix_list"
                 FIXED_THIS_RUN["$TRY_FIX_ORIGINAL"]="$TRY_FIX_ALTERNATIVE"
                 # 覆盖 marker 里的假成功条目（同 original 新条目替换旧条目）
                 _persist_fix_entry_now "$incr_marker_path" "$incr_state" "$source_path" "$dest_path" \
                   "$TRY_FIX_ORIGINAL" "$TRY_FIX_ALTERNATIVE" "$TRY_FIX_METHOD" "$TRY_FIX_RESTORE" \
-                  "$retry_size_human" "$retry_size_bytes" "${TRY_FIX_METHOD_ID:-}" 2>&1 | tee -a "$LOG_FILENAME" || true
+                  "$retry_size_human" "$retry_size_bytes" "${TRY_FIX_METHOD_ID:-}" "${TRY_FIX_MD5:-}" 2>&1 | tee -a "$LOG_FILENAME" || true
                 echo "${TRY_FIX_ALTERNATIVE}|${retry_size_bytes}|${TRY_FIX_ORIGINAL}|${TRY_FIX_METHOD}|${TRY_FIX_METHOD_ID}" >> "$round_list"
               else
                 echo "❌ 重试失败（方法耗尽）· $(_short_path "$retry_orig") · ${TRY_FIX_MESSAGE}" | tee -a "$LOG_FILENAME"

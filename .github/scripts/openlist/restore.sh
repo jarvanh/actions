@@ -8,6 +8,7 @@
 #   - 改名类（短哈希文件名、base64URL 编码目录变体）: rclone move 服务端移动
 #     回原路径（不经过本地，不重新上传）
 #   - 分卷 zip（方法3/4）: 下载全部 .zip.00N 分卷 → cat 合并 → 解压 →
+#       md5 与 marker 指纹核对（有记录则硬校验，不符拒上传）→
 #       上传到原路径 → 验证后删除替代文件
 #   - 原路径原名（alt == original，方法1）: 仅验证存在，跳过
 #
@@ -25,6 +26,17 @@ _dst_file_exists() {
   local full="$1"
   rclone lsf "$(dirname "$full")" --files-only --retries 1 --low-level-retries 2 \
     --timeout 2m 2>/dev/null | grep -qxF "$(basename "$full")"
+}
+
+# 尽力取远端文件的服务端 md5（源端为普通后端如 OneDrive 时可用；
+# crypt 端不暴露明文 hash → 恒返回空串，调用方必须容忍空值=跳过内容校验）
+# 用法: _rclone_remote_md5 <full_remote_path>   输出: 32 位 hex 或空串
+# 注: lsjson 不接受 --retries 等传输类 flag，故不带 RCLONE_RETRY_FLAGS
+_rclone_remote_md5() {
+  local h
+  h=$(rclone lsjson --hash "$1" 2>/dev/null | jq -r '.[0].Hashes.MD5 // ""' 2>/dev/null)
+  [[ "$h" =~ ^[0-9a-f]{32}$ ]] || h=""
+  echo "$h"
 }
 
 # 按修复方法名分类还原方式（move=改名类 / split=分卷打包类）
@@ -95,9 +107,9 @@ _restore_cleanup_alternative() {
 }
 
 # 还原单个条目（内部函数，输出一行状态: OK 或 FAIL: <原因>）
-# 用法: _restore_one_entry <dest_path> <orig> <alt> <method> <tmp_base>
+# 用法: _restore_one_entry <dest_path> <orig> <alt> <method> <tmp_base> [md5]
 _restore_one_entry() {
-  local dest="$1" orig="$2" alt="$3" method="$4" tmp_base="$5"
+  local dest="$1" orig="$2" alt="$3" method="$4" tmp_base="$5" fmd5="${6:-}"
   local src_full="${dest}/${alt}"
   local dst_full="${dest}/${orig}"
   local rflags=("${RCLONE_RETRY_FLAGS[@]}" --timeout 15m)
@@ -117,7 +129,8 @@ _restore_one_entry() {
   kind=$(_restore_classify_kind "$method")
 
   if [ "$kind" = "move" ]; then
-    # 改名类: 服务端移动回原路径
+    # 改名类: 服务端移动回原路径（目标端为 crypt，明文 md5 无从比对，
+    # 内容级校验只在分卷类的本地解压产物上做，此处以存在性为验收）
     if ! rclone move "$src_full" "$dst_full" "${rflags[@]}" >/dev/null 2>&1; then
       echo "FAIL: rclone move 失败（替代文件可能已不存在）"
       return 0
@@ -146,6 +159,20 @@ _restore_one_entry() {
   # marker 的 size_bytes 在 fallback 条目上等于分卷总大小，不能作等值判据
   payload="${res#OK:}"
   payload_bytes=$(wc -c <"$payload")
+
+  # 内容级硬门: marker 记录了原文件 md5 时，先验本地解压产物再上传
+  # （zip CRC 只保证打包件自身完整，打包前原文件是否坏损只有 md5 能判定）；
+  # 不符 → 拒上传，FAIL 保留替代文件。旧 marker 无 md5 字段 → 静默跳过此门
+  if [ -n "$fmd5" ]; then
+    local payload_md5
+    payload_md5=$(md5sum "$payload" 2>/dev/null | awk '{print $1}')
+    if [ "$payload_md5" != "$fmd5" ]; then
+      echo "FAIL: 解压产物 md5 与 marker 不符 (期望 ${fmd5}, 实际 ${payload_md5})"
+      rm -rf "$tmp"
+      return 0
+    fi
+  fi
+
   rclone copyto "$payload" "$dst_full" "${rflags[@]}" >/dev/null 2>&1 || { echo "FAIL: 上传还原文件失败"; rm -rf "$tmp"; return 0; }
 
   # 原路径存在且大小与解压产物一致 → 才清理目标端替代文件
@@ -198,13 +225,13 @@ restore_fixed_files() {
 
     echo "--- marker: ${m} (dest=${dest}, 待还原 ${count} 条) ---"
 
-    while IFS=$'\t' read -r orig alt method; do
+    while IFS=$'\t' read -r orig alt method fmd5; do
       [ -z "$orig" ] && continue
       [ "$alt" = "null" ] || [ -z "$alt" ] && alt="$orig"
 
       echo "还原中: ${orig} ← ${alt} [${method}]"
       local status
-      status=$(_restore_one_entry "$dest" "$orig" "$alt" "$method" "$tmp_base")
+      status=$(_restore_one_entry "$dest" "$orig" "$alt" "$method" "$tmp_base" "$fmd5")
       echo "  → ${status}"
 
       if [ "${status%%:*}" = "OK" ]; then
@@ -217,7 +244,7 @@ restore_fixed_files() {
         total_fail=$((total_fail + 1))
         fail_list+="• <code>$(escape_html "$orig")</code> · <i>$(escape_html "${status#FAIL: }")</i>"$'\n'
       fi
-    done < <(echo "$json" | jq -r '(.fixed_files // [])[] | [.original, .alternative, .method] | @tsv' 2>/dev/null)
+    done < <(echo "$json" | jq -r '(.fixed_files // [])[] | [.original, .alternative, .method, (.md5 // "")] | @tsv' 2>/dev/null)
   done
 
   rm -rf "$tmp_base"
@@ -253,8 +280,11 @@ _escape_exclude_path() {
 #      rclone copy 目标 → 源端（--size-only，源端已有且同大小则跳过）
 #   2. 修复文件: 排除出批量拷贝后逐条处理——从目标端下载替代形态，
 #      本地解码（合卷解压；改名类内容本就相同），
-#      以原路径原文件名上传到源端。校验基准 = 本地解压产物字节数（7z 已过 zip CRC），
-#      防"假成功/截断"；marker 的 size_bytes 在 fallback 条目上等于分卷总大小，
+#      以原路径原文件名上传到源端。校验基准 = 本地解压产物
+#      （marker 有 md5 指纹时先做内容硬门，7z 已过 zip CRC）；
+#      源端为普通后端时另尽力核对服务端 md5（含 SKIP 前的内容核对，
+#      等大坏件强制重传）——防"假成功/截断/等大坏件"；
+#      marker 的 size_bytes 在 fallback 条目上等于分卷总大小，
 #      故只降级为交叉核对注记，不用于成败判定
 #   3. 全程不删除目标端任何文件（备份保持完整，可重复执行）
 # 依赖 marker 的 original/alternative/method 映射（marker 与源端同在 OneDrive，
@@ -262,20 +292,33 @@ _escape_exclude_path() {
 # 用法: restore_source_from_target [task_name|all]
 
 # 单个修复文件恢复到源端（内部函数，输出一行状态）
-# 用法: _recover_one_to_source <src_remote> <dest_remote> <orig> <alt> <method> <expect_bytes> <tmp_base>
+# 用法: _recover_one_to_source <src_remote> <dest_remote> <orig> <alt> <method> <expect_bytes> <tmp_base> [md5]
 # 输出: "SKIP" / "OK" / "OK: <附注>"（调用方须按 ${status%%:*} 前缀判定成功）/ "FAIL: <原因>"
+# md5: fix 时记录的原文件内容指纹；有值时升级为内容级校验（本地产物硬门 +
+#      源端服务端 hash 尽力核对），无值时维持字节数口径（旧 marker 兼容）
 _recover_one_to_source() {
-  local src_remote="$1" dest_remote="$2" orig="$3" alt="$4" method="$5" expect_bytes="$6" tmp_base="$7"
+  local src_remote="$1" dest_remote="$2" orig="$3" alt="$4" method="$5" expect_bytes="$6" tmp_base="$7" fmd5="${8:-}"
   local rflags=("${RCLONE_RETRY_FLAGS[@]}" --timeout 15m)
   local src_full="${src_remote}/${orig}"
   local src_file="${dest_remote}/${alt}"
 
-  # 源端已存在同名同大小 → 无需恢复（重复执行幂等）
+  # 源端已存在同名同大小 → 无需恢复（重复执行幂等）；
+  # 有 md5 指纹且服务端 hash 可读时升级为内容核对: 等大但内容不符 →
+  # 不跳过，落到下方修复流程强制重传（否则等大坏件会永远被误判已恢复）
   local cur=0
   cur=$(rclone size --json "$src_full" "${rflags[@]}" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null)
   if [ "$cur" = "$expect_bytes" ] && [ "$cur" != "0" ]; then
-    echo "SKIP"
-    return 0
+    if [ -n "$fmd5" ]; then
+      local skip_md5
+      skip_md5=$(_rclone_remote_md5 "$src_full")
+      if [ -z "$skip_md5" ] || [ "$skip_md5" = "$fmd5" ]; then
+        echo "SKIP"
+        return 0
+      fi
+    else
+      echo "SKIP"
+      return 0
+    fi
   fi
 
   # 改名类: 内容与原文件相同，直接 目标端替代路径 → 源端原路径
@@ -283,12 +326,25 @@ _recover_one_to_source() {
   kind=$(_restore_classify_kind "$method")
 
   if [ "$kind" = "move" ]; then
-    if rclone copyto "$src_file" "$src_full" "${rflags[@]}" >/dev/null 2>&1 \
-       && [ "$(rclone size --json "$src_full" "${rflags[@]}" 2>/dev/null | jq -r '.bytes // 0')" = "$expect_bytes" ]; then
-      echo "OK"
-    else
+    # 改名类: 内容与原文件相同，直接 目标端替代路径 → 源端原路径
+    if ! rclone copyto "$src_file" "$src_full" "${rflags[@]}" >/dev/null 2>&1; then
       echo "FAIL: 改名类恢复失败（替代文件可能已不存在于目标端）"
+      return 0
     fi
+    if [ "$(rclone size --json "$src_full" "${rflags[@]}" 2>/dev/null | jq -r '.bytes // 0')" != "$expect_bytes" ]; then
+      echo "FAIL: 改名类恢复失败（上传后大小与 marker 记录不符，疑似假成功/截断）"
+      return 0
+    fi
+    # 内容级尽力核对: 服务端 hash 可读且与指纹不符 → 判失败（等大坏件不放行）
+    if [ -n "$fmd5" ]; then
+      local mv_md5
+      mv_md5=$(_rclone_remote_md5 "$src_full")
+      if [ -n "$mv_md5" ] && [ "$mv_md5" != "$fmd5" ]; then
+        echo "FAIL: 源端 md5 与 marker 不符 (期望 ${fmd5}, 实际 ${mv_md5})"
+        return 0
+      fi
+    fi
+    echo "OK"
     return 0
   fi
 
@@ -303,16 +359,36 @@ _recover_one_to_source() {
     return 0
   fi
 
-  # 唯一校验基准 = 本地解压产物字节数（7z 解压已过 zip CRC，产物即真相）:
-  #   源端已与产物等大 → 内容一致，直接成功（重跑幂等，免重复上传）；
-  #   否则上传后复查同口径——防截断、防假成功。
+  # 唯一校验基准 = 本地解压产物（7z 解压已过 zip CRC，产物即真相）:
+  #   先做内容级硬门（有指纹时），再做上传判定与同口径复查——防截断、防假成功
   payload="${res#OK:}"
   payload_bytes=$(wc -c <"$payload")
+  if [ -n "$fmd5" ]; then
+    local payload_md5
+    payload_md5=$(md5sum "$payload" 2>/dev/null | awk '{print $1}')
+    [ "$payload_md5" = "$fmd5" ] || { echo "FAIL: 解压产物 md5 与 marker 不符 (期望 ${fmd5}, 实际 ${payload_md5})"; rm -rf "$tmp"; return 0; }
+  fi
+
+  # 上传判定（内容级优先）:
+  #   服务端 hash 可读 → md5 一致即内容一致，免重传（重跑幂等）；
+  #     md5 不符 → 即使等大也强制重传（等大坏件若按字节口径会被跳过，重跑永远 FAIL）
+  #   hash 不可读（源端后端不提供 md5）→ 退回字节数比对（既有口径）
   got=$(rclone size --json "$src_full" "${rflags[@]}" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null)
-  if [ "$got" != "$payload_bytes" ]; then
+  local rmd5="" need_upload=0
+  [ -n "$fmd5" ] && rmd5=$(_rclone_remote_md5 "$src_full")
+  if [ -n "$rmd5" ]; then
+    [ "$rmd5" != "$fmd5" ] && need_upload=1
+  else
+    [ "$got" != "$payload_bytes" ] && need_upload=1
+  fi
+  if [ "$need_upload" -eq 1 ]; then
     rclone copyto "$payload" "$src_full" "${rflags[@]}" >/dev/null 2>&1 || { echo "FAIL: 上传源端失败"; rm -rf "$tmp"; return 0; }
     got=$(rclone size --json "$src_full" "${rflags[@]}" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null)
     [ "$got" = "$payload_bytes" ] || { echo "FAIL: 源端大小与解压产物不符 (期望 ${payload_bytes}B, 实际 ${got}B)"; rm -rf "$tmp"; return 0; }
+    if [ -n "$fmd5" ]; then
+      rmd5=$(_rclone_remote_md5 "$src_full")
+      [ -n "$rmd5" ] && [ "$rmd5" != "$fmd5" ] && { echo "FAIL: 源端 md5 与 marker 不符 (期望 ${fmd5}, 实际 ${rmd5})"; rm -rf "$tmp"; return 0; }
+    fi
   fi
 
   # marker 的 expect_bytes 仅作交叉核对: fallback 条目该值=分卷总大小≠原文件大小，
@@ -393,13 +469,15 @@ restore_source_from_target() {
     if [ -n "$alt_lines" ]; then
       while IFS=$'\t' read -r line_orig line_alt; do
         [ -z "$line_orig" ] && continue
-        local method ebytes entry
+        local method ebytes fmd5 entry
         entry=$(echo "$json" | jq -c --arg f "$line_orig" '[.fixed_files[] | select(.original == $f)] | .[0] // empty' 2>/dev/null)
         method=$(echo "$entry" | jq -r '.method // ""' 2>/dev/null)
         ebytes=$(echo "$entry" | jq -r '.size_bytes // 0' 2>/dev/null)
+        fmd5=$(echo "$entry" | jq -r '.md5 // ""' 2>/dev/null)
+        [ "$fmd5" = "null" ] && fmd5=""
         echo "恢复修复文件: ${line_orig} ← ${line_alt} [${method}]"
         local status
-        status=$(_recover_one_to_source "$src" "$dst" "$line_orig" "$line_alt" "$method" "$ebytes" "$tmp_base")
+        status=$(_recover_one_to_source "$src" "$dst" "$line_orig" "$line_alt" "$method" "$ebytes" "$tmp_base" "$fmd5")
         echo "  → ${status}"
         case "${status%%:*}" in   # 前缀匹配: 兼容 "OK"/"OK: <附注>"，仍可区分 SKIP/FAIL
           OK) total_ok=$((total_ok + 1)) ;;
