@@ -6,6 +6,12 @@
 #     wopan176 约 5 分钟的短 token 是主要动机）
 #   - HTTP 423 Locked 重试（OpenList/WebDAV 临时文件锁）
 #   - 8005 登录失败重试（wopan176 token 过期后刷新并重试）
+#   - 同步预检两层健康校验（WebDAV 层错误签名归类 + OpenList API
+#     refresh=true 强制列目录绕过服务端缓存，验证底层驱动真实登录态；
+#     防止 baidupan 死而 baidupanCrypt 等派生挂载带着故障进入写流程，
+#     以及未知错误保守跳过避免空转修复管线）
+#   - 驱动刷新/容器重启后二次预检熔断（哨兵码 88，失败按入口预检
+#     失败语义收尾：无传输、不进 truth-check/修复管线）
 #   - truth-check（openlist: 目标通用：本轮有传输则重启 OpenList 容器取
 #     后端真值列表，暴露"上传成功但未持久化"的假成功文件给 diff）
 #   - 缺失文件修复（同步后 diff 源端/目标端，缺失文件送 try_fix_failed_file，
@@ -175,49 +181,154 @@ _has_wopan_login_failure() {
   return 1
 }
 
+# 对 rclone lsd 预检失败输出归类，返回: auth=认证失效 unreachable=网络不可达
+# backend=后端/驱动异常 notfound=目录尚未创建 unknown=未知错误。
+# 教训（run 33026674750）: baidupan 登录失效时 OpenList 层报的是
+# "Conflict: 409 Conflict"/mkParentDir failed 这类非典型形态，
+# 旧版关键词规则匹配不上会静默放行，直接带着死驱动进入写流程。
+_classify_probe_failure() {
+  local out="$1"
+  if echo "$out" | grep -Eqi 'unauthorized|permission denied|not authenticated|login|登录失败|登录失效|登录已过期|授权|token.*(expired|invalidated|invalid)|invalidated|auth.*fail|auth.*error|credential|identity|invalid_grant|401|403|Method Not Allowed'; then
+    echo auth
+  elif echo "$out" | grep -Eqi 'connection refused|connection timed out|no such host|network unreachable|dial tcp|i/o timeout|couldn.t connect|8005'; then
+    echo unreachable
+  elif echo "$out" | grep -Eqi 'conflict|mkParentDir|internal server error|bad gateway|service unavailable|gateway timeout|too many requests|failed get storage|failed to reload.*storage|storage.*(not found|not exist)|存储不存在|存储加载失败|HTTP/[0-9.]+ 5[0-9][0-9]'; then
+    echo backend
+  elif echo "$out" | grep -Eqi 'directory not found|file does not exist|no such file|object not found|目录不存在|路径不存在|没有找到文件'; then
+    echo notfound
+  else
+    echo unknown
+  fi
+}
+
+# WebDAV 层预检：rclone lsd 探测 + 失败归类。
+# 返回 0=通过；返回 1=应跳过（原因已输出到日志）。
+# unknown 类先重试一次排除网络抖动，仍失败则保守跳过——放行的代价
+# 是 rclone 写入全挂后还要空转一整轮修复管线，跳过的代价只是等下一轮。
+_pre_webdav_health_check() {
+  local probe_path="$1"
+  local label="$2"
+  local log_file="${3:-}"
+
+  local tries=${OPENLIST_PROBE_RETRIES:-2}
+  local rc=0 kind out=""
+  while :; do
+    out=$(rclone lsd "$probe_path" --max-depth 1 \
+      --contimeout "${OPENLIST_PROBE_TIMEOUT:-15}s" \
+      --timeout "${OPENLIST_PROBE_TIMEOUT:-15}s" 2>&1) && rc=0 || rc=$?
+    kind=""
+    [ "$rc" -ne 0 ] && kind=$(_classify_probe_failure "$out")
+    if [ "$rc" -eq 0 ] || [ "$kind" != "unknown" ]; then break; fi
+    tries=$((tries - 1))
+    [ "$tries" -le 0 ] && break
+    sleep "${OPENLIST_PROBE_RETRY_SLEEP:-10}"
+  done
+
+  [ "$rc" -eq 0 ] && return 0
+  # 目录尚未创建属于首次同步的正常状态，放行由后续流程建目录
+  [ "$kind" = "notfound" ] && return 0
+
+  local reason
+  case "$kind" in
+    auth)       reason="认证失效" ;;
+    unreachable) reason="不可达" ;;
+    backend)    reason="后端异常" ;;
+    *)          reason="探测持续失败（未知错误）" ;;
+  esac
+  echo "🚫 $label $reason（WebDAV 预检），跳过本轮同步" | tee ${log_file:+-a "$log_file"}
+  echo "$out" | head -5 | sed 's/^/   ▸ /' | tee ${log_file:+-a "$log_file"}
+  return 1
+}
+
+# API 层强校验：POST /api/fs/list (refresh=true) 强制 OpenList 实时拉取驱动。
+# 动机: WebDAV/rclone 层的列表可能命中服务端缓存——百度网盘这类后端登录
+# 已失效时照样能列出旧数据，写入才会触发真实驱动请求（run 33026674750:
+# baidupan 死而 baidupanCrypt 列表正常）。refresh=true 绕开缓存，是当前
+# 唯一无需写盘即可验证驱动真实登录态的探针。
+# 用法: _openlist_api_health_check <openlist路径> <日志标签> [日志文件]
+# 返回 0=通过（含 token 缺失/API 无响应时的降级放行）；1=应跳过。
+_openlist_api_health_check() {
+  local target_path="$1"
+  local label="${2:-目标端}"
+  local log_file="${3:-}"
+  [[ "$target_path" == openlist:* ]] || return 0
+
+  local ol_token
+  ol_token=$(_get_openlist_token || true)
+  if [ -z "$ol_token" ]; then
+    echo "⚠️ $label OpenList token 不可用，API 层健康校验降级放行" | tee ${log_file:+-a "$log_file"}
+    return 0
+  fi
+
+  local resp curl_rc=0 code message
+  resp=$(curl -s --max-time "${OPENLIST_API_HEALTH_TIMEOUT:-30}" \
+    -X POST "http://127.0.0.1:5244/api/fs/list" \
+    -H "Authorization: $ol_token" \
+    -H "Content-Type: application/json" \
+    -d "{\"path\":\"/${target_path#openlist:}\",\"page\":1,\"per_page\":1,\"refresh\":true}" 2>&1) || curl_rc=$?
+  if [ "$curl_rc" -ne 0 ] || [ -z "$resp" ]; then
+    echo "⚠️ $label API 强校验无响应(rc=$curl_rc)，降级放行" | tee ${log_file:+-a "$log_file"}
+    return 0
+  fi
+
+  code=$(echo "$resp" | jq -r '.code // 0' 2>/dev/null)
+  [ "$code" = "200" ] && return 0
+
+  message=$(echo "$resp" | jq -r '.message // empty' 2>/dev/null)
+
+  # 目录尚未创建属于首次同步的正常状态
+  if echo "$message" | grep -Eqi 'object not found|path.*not.*found|目录不存在|路径不存在|没有找到文件'; then
+    echo "ℹ️ $label API 强校验: 目标目录尚未创建（$message），放行由同步流程建立" | tee ${log_file:+-a "$log_file"}
+    return 0
+  fi
+
+  # 注意分支顺序: 认证/存储异常判定必须在密码降级之前——凭据类错误
+  # （如"密码错误"）不能被"需访问密码=配置项"的降级规则吞掉。
+  if echo "$message" | grep -Eqi 'unauthorized|permission denied|not authenticated|login|登录|授权|token|auth.*fail|auth.*error|credential|identity|密码错误'; then
+    echo "🚫 $label 后端驱动认证失效（API 强校验 code=$code）: $message，跳过本轮同步" | tee ${log_file:+-a "$log_file"}
+    return 1
+  fi
+  if echo "$message" | grep -Eqi 'storage|存储|driver|驱动|reload|internal server|服务器内部|exception|panic|bad gateway|service unavailable|gateway timeout|request failed|请求失败|too many requests'; then
+    echo "🚫 $label 后端驱动异常（API 强校验 code=$code）: $message，跳过本轮同步" | tee ${log_file:+-a "$log_file"}
+    return 1
+  fi
+
+  # 目录设置了访问密码属于配置项而非故障，不能据此判定后端死掉
+  if echo "$message" | grep -Eqi 'password|密码'; then
+    echo "ℹ️ $label API 强校验: 目标目录需访问密码（配置项，$message），降级放行" | tee ${log_file:+-a "$log_file"}
+    return 0
+  fi
+
+  # 未识别的错误一律保守跳过并留痕，等待人工观察或下轮自愈
+  echo "🚫 $label API 强校验未通过（未知错误 code=$code）: $message，保守跳过本轮同步" | tee ${log_file:+-a "$log_file"}
+  return 1
+}
+
+# 同步前连通性预检总入口。
+# 两层校验都针对目标本身与 Crypt 底层裸存储各执行一次：
+#   第1层 _pre_webdav_health_check — 快速、无凭据依赖，抓典型故障签名；
+#   第2层 _openlist_api_health_check — refresh=true 绕过服务端缓存，
+#         验证底层驱动真实登录态（baidupan/baidupanCrypt 事故主防线）。
+# 用法: _check_openlist_backend_connectivity <dest_path> [log_filename]
+# 返回: 0=继续同步, 1=跳过本轮
 _check_openlist_backend_connectivity() {
   local dest_path="$1"
   local log_file="${2:-}"
   [[ "$dest_path" == openlist:* ]] || return 0
 
-  local probe_output probe_rc
-  probe_output=$(rclone lsd "$dest_path" --max-depth 1 --contimeout "${OPENLIST_PROBE_TIMEOUT:-15}s" --timeout "${OPENLIST_PROBE_TIMEOUT:-15}s" 2>&1) && probe_rc=0 || probe_rc=$?
-
-  if [ "$probe_rc" -ne 0 ]; then
-    if echo "$probe_output" | grep -Eqi 'unauthorized|permission denied|login failed|token.*expired|auth.*fail|401|403|405|Method Not Allowed'; then
-      echo "🚫 目标端 $dest_path 后端认证失效（预检），跳过本轮同步" | tee ${log_file:+-a "$log_file"}
-      return 1
-    fi
-
-    if echo "$probe_output" | grep -Eqi 'connection refused|connection timed out|no such host|network unreachable|405|Method Not Allowed'; then
-      echo "🚫 目标端 $dest_path 后端不可达（预检），跳过本轮同步" | tee ${log_file:+-a "$log_file"}
-      return 1
-    fi
-
-    return 0
-  fi
+  _pre_webdav_health_check "$dest_path" "目标端 $dest_path" "$log_file" || return 1
+  _openlist_api_health_check "$dest_path" "目标端 $dest_path" "$log_file" || return 1
 
   if [[ "$dest_path" == openlist:*Crypt/* ]]; then
     local rel="${dest_path#openlist:}"
-    local mount="/${rel%%/*}"
-    local base="${mount#/}"
+    local base="${rel%%/*}"
     base="${base%Crypt}"
     local underlying="openlist:${base}"
 
-    local ul_output ul_rc
-    ul_output=$(rclone lsd "$underlying" --max-depth 1 --contimeout "${OPENLIST_PROBE_TIMEOUT:-15}s" --timeout "${OPENLIST_PROBE_TIMEOUT:-15}s" 2>&1) && ul_rc=0 || ul_rc=$?
-
-    if [ "$ul_rc" -ne 0 ]; then
-      if echo "$ul_output" | grep -Eqi 'unauthorized|permission denied|login failed|token.*expired|auth.*fail|401|403|405|Method Not Allowed'; then
-        echo "🚫 Crypt 挂载 $dest_path 底层驱动 $underlying 认证失效（预检），跳过本轮同步" | tee ${log_file:+-a "$log_file"}
-        return 1
-      fi
-
-      if echo "$ul_output" | grep -Eqi 'connection refused|connection timed out|no such host|network unreachable|8005|登录失败|405|Method Not Allowed'; then
-        echo "🚫 Crypt 挂载 $dest_path 底层驱动 $underlying 不可达（预检），跳过本轮同步" | tee ${log_file:+-a "$log_file"}
-        return 1
-      fi
-    fi
+    # 加密挂载完全建立在底层驱动之上，底层不健康时上层必然写入失败，
+    # 必须把两层校验对底层裸存储再走一遍（baidupanCrypt ← baidupan）
+    _pre_webdav_health_check "$underlying" "Crypt 挂载 $dest_path 底层驱动 $underlying" "$log_file" || return 1
+    _openlist_api_health_check "$underlying" "Crypt 挂载 $dest_path 底层驱动 $underlying" "$log_file" || return 1
   fi
 
   return 0
@@ -1444,6 +1555,20 @@ sync_with_logging() {
       # 同步前主动刷新 OpenList 驱动 token
       # wopan176 的 OAuth access token 有效期约 5 分钟，长时间同步会过期
       _refresh_ol_drivers "$LOG_FILENAME"
+
+      # 二次预检熔断：方法1 load_all 失败后走容器重启时，"重启成功"只证明
+      # 容器活了，不证明后端驱动登录有效（run 33026674750: baidupan 登录
+      # 失效，重启容器判成功后放行，rclone PUT 全部 409 Conflict 并空转
+      # m1-m11 修复管线直至 job 被取消）。此处用完整两层预检再验一次，
+      # 仍不健康则带哨兵码退出——88 是 rclone 理论上不会返回的退出码，
+      # 由 sync_with_logging 消费并转为入口预检失败的跳过语义。
+      if ! _check_openlist_backend_connectivity "$dest_path" "$LOG_FILENAME"; then
+        kill "$heartbeat_pid" 2>/dev/null || true
+        wait "$heartbeat_pid" 2>/dev/null || true
+        echo "🚫 OpenList 驱动刷新/重启后目标端仍未通过二次预检，熔断本轮传输（哨兵码 ${OPENLIST_POSTCHECK_SKIP_RC:-88}）" | tee -a "$LOG_FILENAME"
+        return "${OPENLIST_POSTCHECK_SKIP_RC:-88}"
+      fi
+
       # 传输期间定时保鲜: 仅传前刷一次撑不过 5 分钟 token 窗口，
       # 整批假成功事故的根因（run 32749862280 实锤，见函数头注释）
       _start_token_refresher
@@ -1467,9 +1592,25 @@ sync_with_logging() {
   : > "$LOG_FILENAME"
   local SYNC_STATUS=0
 
+  local fail_list="/tmp/${task_name}_sync_failures.txt"
+  local fix_list="/tmp/${task_name}_sync_fixes.txt"
+  : > "$fail_list"
+  : > "$fix_list"
+
   _sync_fixed_files_exclusion
 
   run_rclone_sync_once "initial sync" || SYNC_STATUS=$?
+
+  # 二次预检熔断哨兵（88, rclone 理论上不会返回的退出码）：驱动刷新/
+  # 容器重启后目标端仍不健康 ⇒ 与入口预检失败同义，无传输、不进
+  # truth-check/修复管线、不发部分失败通知，直接置失败态收尾，
+  # 留下本次同步日志供排查，交由后续轮次自愈
+  if [ "$SYNC_STATUS" -eq "${OPENLIST_POSTCHECK_SKIP_RC:-88}" ]; then
+    SYNC_FAILED=1
+    SYNC_SKIPPED=0
+    SYNC_TRANSFERRED_BYTES=0
+    return 0
+  fi
 
   _sync_retry_8005
 
@@ -1484,10 +1625,6 @@ sync_with_logging() {
   # 不依赖任何错误码：同步后只要源端有、目标端没有的文件（含 rclone 报告
   # "成功"但未持久化的假成功文件），一律送 try_fix_failed_file 修复
   # （目录创建 → base64URL 编码 → zip/7z/分卷/API 多种方式），不阻止后续 task
-  local fail_list="/tmp/${task_name}_sync_failures.txt"
-  local fix_list="/tmp/${task_name}_sync_fixes.txt"
-  : > "$fail_list"
-  : > "$fix_list"
   local fix_log=""
   local HAS_OBJECT_NOT_FOUND=0
 
