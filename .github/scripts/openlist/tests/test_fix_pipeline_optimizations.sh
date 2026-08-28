@@ -26,7 +26,7 @@ rm -rf "$WORK"; mkdir -p "$WORK"
 timeout() { shift; "$@"; }
 progress_update() { :; }
 _progress_update_force() { :; }
-_sec() { :; }
+_log_section() { :; }
 tee() { cat; }              # 剥掉 tee，输出仍可见且不写文件
 rclone() {
   case "$1" in
@@ -69,7 +69,7 @@ try_fix_failed_file() {
   TRY_FIX_ORIGINAL="$3"
   TRY_FIX_ALTERNATIVE="$3"
   TRY_FIX_METHOD="mock"
-  TRY_FIX_METHOD_ID="$(_method_desc copyto_shorthash)"
+  TRY_FIX_METHOD_ID="$(_fix_method_desc copyto_shorthash)"
   TRY_FIX_RESTORE="restore"
   TRY_FIX_MESSAGE=""
   return 0

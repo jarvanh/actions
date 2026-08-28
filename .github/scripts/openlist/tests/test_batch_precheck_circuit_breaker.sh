@@ -6,7 +6,7 @@
 # 批次熔断把拦截前移到每个批次传输之前（与 run_rclone_sync_once 二次预检同构）。
 # 场景:
 #   G1 openlist 目标 + 首批预检失败 -> 0 个 copy, 全部批次计失败, return 1,
-#      SYNC_FAILED=1（run 33048121562 回归: 只 return 1 不置标志会被 task_done
+#      SYNC_FAILED=1（run 33048121562 回归: 只 return 1 不置标志会被 progress_task_done
 #      与轮转游标双双误判为成功）
 #   G2 openlist 目标 + 第 2 批预检失败 -> 只有第 1 批 copy, ✅1❌2, SYNC_FAILED=1
 #   G3 openlist 目标 + 预检全通过 -> 3 批照常 + 每批一次预检 + 最终 sync_with_logging

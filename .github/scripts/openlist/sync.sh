@@ -22,7 +22,7 @@
 #     2. 失败记忆（FIX_METHOD_BLACKLIST + marker fix_blacklist）— 持久化
 #        每文件已判定假成功的方法；持久化验证（_persist_verify_entries，
 #        重启容器复核）发现假成功后本轮循环"换方法 → 重启复核"直到全部
-#        通过或所有方法耗尽（现行文件修复方法1-4 都会轮到，见 fix.sh _method_desc），跨轮修复同样跳过已拉黑
+#        通过或所有方法耗尽（现行文件修复方法1-4 都会轮到，见 fix.sh _fix_method_desc），跨轮修复同样跳过已拉黑
 #        方法；上轮已真实持久化的修复（替代路径仍存在）直接沿用，不再重复上传
 #   - object not found 错误处理
 #   - 结构化同步结果通知（含源/目标大小、差异文件列表、排除规则）
@@ -49,542 +49,6 @@ init_sync_state() {
   progress_init
 }
 
-# 刷新 OpenList 全部驱动的 token（重建驱动，非 wopan176 专属）
-# 主要动机: wopan176 的 access token 有效期短（约 5 分钟），长时间同步会过期，
-#           过期后 wopan 驱动的 PUT 全部假成功（rclone 报 Copied (new)，密文
-#           从未落盘，容器重启后消失）——run 32749862280 实锤: 3 小时批次
-#           139/139 假成功，30.757 GiB 全部未落盘。
-#
-# 注意区分两个时效层次（勿混淆，doc.oplist.org/guide/drivers/wopan）:
-#   - 上述"约 5 分钟"是 OAuth access_token 的短时效，由 refresh_token 自动
-#     续期——本函数维护的就是这条自动链路；
-#   - 文档所述"登录态有效期 7 天（方法一）/2 个月（方法二）"是手动抓取凭据
-#     的整体寿命上限，到期无法自动续，只能人工重抓；且重抓时跨端登录互踢
-#     （方法一怕网页端登录、方法二怕手机 APP 登录），操作前须核对挂载所用
-#     方法。真失效属人工事件，预检不应也无法自动修复它。
-#
-# 驱动刷新方法1: POST /api/admin/storage/load_all — OpenList 官方"重新加载所有
-#        存储" API，从数据库重新初始化全部驱动（等效容器重启的驱动重建，秒级
-#        完成、可无限次重复，传输期间的定时保鲜循环也用它）。
-#        历史教训: 旧端点 /api/driver/update 在 AList/OpenList API 中不存在，
-#        恒失败（run 32749862280: 容器重启后 76 秒仍失败实锤）——其失败
-#        ≠驱动坏，不能当驱动状态信号。run 31945907528/31951008332 的
-#        "storage 配置重载后放行 → 窗口期 PUT 全部假成功"事故，根因正是
-#        驱动刷新方法1 恒失败 + 驱动刷新方法3 不重建驱动。
-# 驱动刷新方法2: 重启容器（load_all 不可用且本轮未重启过时；驱动完整重初始化 +
-#        换新 token，一次 ~2 分钟），_OL_DRIVER_RESTART_DONE 每轮（进程
-#        生命周期）最多标记一次
-# 驱动刷新方法3（兜底）: storage/list 探测——不重建驱动，仅确认 API 可达
-#
-# 命名口径: 以上"驱动刷新方法N"是本函数的三招，与 fix.sh 的"文件修复方法N"
-#   （copyto_original 等 4 种）是两套互不相干的编号体系，日志与注释里的
-#   简写必须带领域限定词，否则读到"方法1"时无从判断指哪一套。
-# 用法: _refresh_ol_drivers [log_filename]
-# 返回: 0=成功刷新, 非0=刷新失败
-_OL_DRIVER_RESTART_DONE=0
-_refresh_ol_drivers() {
-  local log_file="${1:-/dev/null}"
-  local ol_token
-  ol_token=$(_get_openlist_token)
-  if [ -z "$ol_token" ]; then
-    echo "  OpenList 驱动 token 刷新: OpenList token 不可用" | tee -a "$log_file"
-    return 1
-  fi
-
-  echo "  刷新 OpenList 后端驱动 token（含 wopan176，access token 约 5 分钟过期）..." | tee -a "$log_file"
-
-  # 方法 1: POST /api/admin/storage/load_all 从数据库重载全部存储，
-  # 触发各驱动用 refresh_token 换取新的 access_token（wopan176 为典型）
-  local refresh_result
-  refresh_result=$(curl -s -X POST "http://127.0.0.1:5244/api/admin/storage/load_all" \
-    -H "Authorization: $ol_token" \
-    -H "Content-Type: application/json" \
-    -d '{}' \
-    --max-time 30 2>&1)
-
-  if echo "$refresh_result" | grep -qE '"code":(200|0)|"message":"success'; then
-    echo "  OpenList 驱动 token 刷新成功 (驱动刷新方法1: /api/admin/storage/load_all 驱动已重建)" | tee -a "$log_file"
-    sleep 5
-    return 0
-  fi
-
-  # 驱动刷新方法2: 重启容器（load_all 不可用 = token 权限不足/版本差异，见函数头注释）
-  if [ "$_OL_DRIVER_RESTART_DONE" -eq 0 ]; then
-    echo "  驱动刷新方法1 (/api/admin/storage/load_all) 失败: ${refresh_result:0:200} → 重启容器重建驱动..." | tee -a "$log_file"
-    if _restart_openlist_for_truth "" "$log_file"; then
-      _OL_DRIVER_RESTART_DONE=1
-      echo "  OpenList 驱动 token 刷新成功 (驱动刷新方法2: 容器重启，驱动已完整重初始化)" | tee -a "$log_file"
-      return 0
-    fi
-    echo "  ⚠️ 驱动刷新方法2 容器重启失败，退回驱动刷新方法3: storage 配置重载..." | tee -a "$log_file"
-  else
-    echo "  驱动刷新方法1 失败（本轮已重启过容器，跳过重复重启），退回驱动刷新方法3: storage 配置重载..." | tee -a "$log_file"
-  fi
-
-  # 驱动刷新方法3（兜底）: 通过 /api/storage/list 后逐个刷新 storage 配置
-  # 仅在容器不可重启/本轮已重启过仍失败时使用——该方法不重建驱动，
-  # 若驱动真处坏状态则放行同步会重演假成功窗口
-  local storage_list
-  storage_list=$(curl -s -X GET "http://127.0.0.1:5244/api/storage/list" \
-    -H "Authorization: $ol_token" \
-    --max-time 30 2>&1)
-
-  if [ -n "$storage_list" ] && [ "$storage_list" != "null" ]; then
-    echo "  storage 配置已加载，触发刷新..." | tee -a "$log_file"
-    sleep 3
-    return 0
-  fi
-
-  echo "  ⚠️ OpenList 驱动 token 刷新失败: $refresh_result" | tee -a "$log_file"
-  return 1
-}
-
-# ===== 传输期间的后台 token 保鲜循环 =====
-# wopan access token 约 5 分钟过期，OpenList 驱动 token 失效后 PUT 全部
-# 假成功（run 32749862280: 3 小时批次 139/139 假成功、30.757 GiB 全部
-# 未落盘实锤）。仅靠传输前刷新一次远远不够——长时间 rclone 命令（批次
-# 上传/巩固重试/主同步动辄数小时）执行期间，每 OPENLIST_TOKEN_REFRESH_SECS
-# 秒（默认 240s < 5min）后台调一次 load_all 重建驱动，保证任意时刻新
-# 请求拿到的 token 剩余有效期 > 1 分钟。
-# 重建瞬间的在途请求由旧驱动实例收尾（其 token 龄 ≤ 刷新周期 < 5 分钟，
-# 仍在有效期内），不受影响。
-# 用法: 传输命令前 _start_token_refresher，结束后 _stop_token_refresher
-# 开关: OPENLIST_TOKEN_REFRESH_SECS=0 显式关闭保鲜循环
-OPENLIST_TOKEN_REFRESH_SECS="${OPENLIST_TOKEN_REFRESH_SECS:-240}"
-_OL_TOKEN_REFRESHER_PID=""
-_start_token_refresher() {
-  _stop_token_refresher
-  local interval="${OPENLIST_TOKEN_REFRESH_SECS:-0}"
-  [[ "$interval" =~ ^[0-9]+$ ]] || interval=240
-  [ "$interval" -eq 0 ] && return 0
-  (
-    while :; do
-      sleep "$interval"
-      _t=$(_get_openlist_token 2>/dev/null) || continue
-      curl -s -m 30 -X POST "http://127.0.0.1:5244/api/admin/storage/load_all" \
-        -H "Authorization: $_t" \
-        -H "Content-Type: application/json" \
-        -d '{}' >/dev/null 2>&1 || true
-    done
-  ) &
-  _OL_TOKEN_REFRESHER_PID=$!
-  echo "  🔁 token 保鲜循环已启动（每 ${interval}s load_all 重建驱动，pid=${_OL_TOKEN_REFRESHER_PID}）"
-}
-
-_stop_token_refresher() {
-  if [ -n "${_OL_TOKEN_REFRESHER_PID:-}" ]; then
-    kill "$_OL_TOKEN_REFRESHER_PID" 2>/dev/null || true
-    wait "$_OL_TOKEN_REFRESHER_PID" 2>/dev/null || true
-    _OL_TOKEN_REFRESHER_PID=""
-    echo "  🔁 token 保鲜循环已停止"
-  fi
-}
-
-# 检测 wopan176 登录失败（8005）
-# OpenList 把 8005 包装成 HTTP 405 返回给 rclone，rclone 日志里只有 "405 Method Not Allowed"
-# 因此需要同时检查 OpenList 容器日志中的 rsp_code: 8005
-# 用法: _has_wopan_login_failure <rclone_log_file> [openlist_log_file]
-# 返回: 0=检测到 8005 错误, 1=未检测到
-_has_wopan_login_failure() {
-  local rclone_log="$1"
-  local ol_log="${2:-}"
-
-  # 检查 OpenList 容器日志（包含真实的 8005 错误）
-  if [ -n "$ol_log" ] && [ -f "$ol_log" ]; then
-    # 只检查最近 5 分钟的日志，避免匹配到历史错误
-    local recent_ol_log
-    recent_ol_log=$(tail -500 "$ol_log" 2>/dev/null)
-    if echo "$recent_ol_log" | grep -q 'rsp_code.*8005\|rep_desc.*登录失败'; then
-      return 0
-    fi
-  fi
-
-  # 兜底：也检查 rclone 日志（虽然 rclone 日志里通常只有 405，不含 8005）
-  if [ -n "$rclone_log" ] && [ -f "$rclone_log" ]; then
-    if grep -q 'rsp_code.*8005\|登录失败' "$rclone_log" 2>/dev/null; then
-      return 0
-    fi
-  fi
-
-  return 1
-}
-
-# 对 rclone lsd 预检失败输出归类，返回: auth=认证失效 unreachable=网络不可达
-# backend=后端/驱动异常 notfound=目录尚未创建 unknown=未知错误。
-# 教训（run 33026674750）: baidupan 登录失效时 OpenList 层报的是
-# "Conflict: 409 Conflict"/mkParentDir failed 这类非典型形态，
-# 旧版关键词规则匹配不上会静默放行，直接带着死驱动进入写流程。
-_classify_probe_failure() {
-  local out="$1"
-  if echo "$out" | grep -Eqi 'unauthorized|permission denied|not authenticated|login|登录失败|登录失效|登录已过期|授权|token.*(expired|invalidated|invalid)|invalidated|auth.*fail|auth.*error|credential|identity|invalid_grant|401|403|Method Not Allowed'; then
-    echo auth
-  elif echo "$out" | grep -Eqi 'connection refused|connection timed out|no such host|network unreachable|dial tcp|i/o timeout|couldn.t connect|8005'; then
-    echo unreachable
-  elif echo "$out" | grep -Eqi 'conflict|mkParentDir|internal server error|bad gateway|service unavailable|gateway timeout|too many requests|failed get storage|failed to reload.*storage|storage.*(not found|not exist)|存储不存在|存储加载失败|HTTP/[0-9.]+ 5[0-9][0-9]'; then
-    echo backend
-  elif echo "$out" | grep -Eqi 'directory not found|file does not exist|no such file|object not found|目录不存在|路径不存在|没有找到文件'; then
-    echo notfound
-  else
-    echo unknown
-  fi
-}
-
-# WebDAV 层预检：rclone lsd 探测 + 失败归类。
-# 返回 0=通过；返回 1=应跳过（原因已输出到日志）。
-# unknown 类先重试一次排除网络抖动，仍失败则保守跳过——放行的代价
-# 是 rclone 写入全挂后还要空转一整轮修复管线，跳过的代价只是等下一轮。
-_pre_webdav_health_check() {
-  local probe_path="$1"
-  local label="$2"
-  local log_file="${3:-}"
-
-  local tries=${OPENLIST_PROBE_RETRIES:-2}
-  local rc=0 kind out=""
-  while :; do
-    out=$(rclone lsd "$probe_path" --max-depth 1 \
-      --contimeout "${OPENLIST_PROBE_TIMEOUT:-15}s" \
-      --timeout "${OPENLIST_PROBE_TIMEOUT:-15}s" 2>&1) && rc=0 || rc=$?
-    kind=""
-    [ "$rc" -ne 0 ] && kind=$(_classify_probe_failure "$out")
-    if [ "$rc" -eq 0 ] || [ "$kind" != "unknown" ]; then break; fi
-    tries=$((tries - 1))
-    [ "$tries" -le 0 ] && break
-    sleep "${OPENLIST_PROBE_RETRY_SLEEP:-10}"
-  done
-
-  [ "$rc" -eq 0 ] && return 0
-  # 目录尚未创建属于首次同步的正常状态，放行由后续流程建目录
-  [ "$kind" = "notfound" ] && return 0
-
-  local reason
-  case "$kind" in
-    auth)       reason="认证失效" ;;
-    unreachable) reason="不可达" ;;
-    backend)    reason="后端异常" ;;
-    *)          reason="探测持续失败（未知错误）" ;;
-  esac
-  echo "🚫 $label ${reason}（WebDAV 预检），跳过本轮同步" | tee ${log_file:+-a "$log_file"}
-  echo "$out" | head -5 | sed 's/^/   ▸ /' | tee ${log_file:+-a "$log_file"}
-  return 1
-}
-
-# API 层强校验：POST /api/fs/list (refresh=true) 强制 OpenList 实时拉取驱动。
-# 动机: WebDAV/rclone 层的列表可能命中服务端缓存——百度网盘这类后端登录
-# 已失效时照样能列出旧数据，写入才会触发真实驱动请求（run 33026674750:
-# baidupan 死而 baidupanCrypt 列表正常）。refresh=true 绕开缓存，是当前
-# 唯一无需写盘即可验证驱动真实登录态的探针。
-# 用法: _openlist_api_health_check <openlist路径> <日志标签> [日志文件]
-# 返回 0=通过（含 token 缺失/API 无响应时的降级放行）；1=应跳过。
-_openlist_api_health_check() {
-  local target_path="$1"
-  local label="${2:-目标端}"
-  local log_file="${3:-}"
-  [[ "$target_path" == openlist:* ]] || return 0
-
-  local ol_token
-  ol_token=$(_get_openlist_token || true)
-  if [ -z "$ol_token" ]; then
-    echo "⚠️ $label OpenList token 不可用，API 层健康校验降级放行" | tee ${log_file:+-a "$log_file"}
-    return 0
-  fi
-
-  local resp curl_rc=0 code message
-  resp=$(curl -s --max-time "${OPENLIST_API_HEALTH_TIMEOUT:-30}" \
-    -X POST "http://127.0.0.1:5244/api/fs/list" \
-    -H "Authorization: $ol_token" \
-    -H "Content-Type: application/json" \
-    -d "{\"path\":\"/${target_path#openlist:}\",\"page\":1,\"per_page\":1,\"refresh\":true}" 2>&1) || curl_rc=$?
-  if [ "$curl_rc" -ne 0 ] || [ -z "$resp" ]; then
-    echo "⚠️ $label API 强校验无响应(rc=$curl_rc)，降级放行" | tee ${log_file:+-a "$log_file"}
-    return 0
-  fi
-
-  code=$(echo "$resp" | jq -r '.code // 0' 2>/dev/null)
-  [ "$code" = "200" ] && return 0
-
-  message=$(echo "$resp" | jq -r '.message // empty' 2>/dev/null)
-
-  # 管理面/驱动面区分（run 33048121562）: code=401 且消息指向我方 API 凭据
-  # （token is invalidated）时，失效的是 OpenList 管理面的 Authorization
-  # token（config.json 缓存凭据与运行实例不匹配，容器重启也无法自愈），
-  # 请求在鉴权中间件即被拒——根本没触达驱动，不能据此判定"后端驱动认证失效"
-  # 而跳过同步。数据面 WebDAV 探针（调用方前置执行）已通过时降级放行，
-  # 以探针结果为准；驱动真实故障的表现形态是 code=500 + failed get storage /
-  # 登录失败类消息，仍走下方原有分类拦截。
-  if [ "$code" = "401" ] && echo "$message" | grep -Eqi 'invalidated|token.*(invalid|expired)|unauthorized'; then
-    echo "⚠️ $label OpenList 管理面 token 失效（API 凭据问题，非驱动故障），API 强校验降级放行（以数据面探针为准）；请在服务端重新获取 token 并更新 config.json" | tee ${log_file:+-a "$log_file"}
-    return 0
-  fi
-
-  # 目录尚未创建属于首次同步的正常状态
-  if echo "$message" | grep -Eqi 'object not found|path.*not.*found|目录不存在|路径不存在|没有找到文件'; then
-    echo "ℹ️ $label API 强校验: 目标目录尚未创建（${message}），放行由同步流程建立" | tee ${log_file:+-a "$log_file"}
-    return 0
-  fi
-
-  # 注意分支顺序: 认证/存储异常判定必须在密码降级之前——凭据类错误
-  # （如"密码错误"）不能被"需访问密码=配置项"的降级规则吞掉。
-  if echo "$message" | grep -Eqi 'unauthorized|permission denied|not authenticated|login|登录|授权|token|auth.*fail|auth.*error|credential|identity|密码错误'; then
-    echo "🚫 $label 后端驱动认证失效（API 强校验 code=${code}）: ${message}，跳过本轮同步" | tee ${log_file:+-a "$log_file"}
-    # wopan 登录态有效期有上限（方法一 7 天/方法二 2 个月）且无法自动续期，
-    # 真失效只能人工重抓；重抓时跨端登录互踢，先核对挂载用的方法再动手
-    if [[ "$label" == *wopan* || "$message" == *wopan* ]]; then
-      echo "   ▸ wopan 运维提示: 登录令牌有效期 方法一 7 天 / 方法二 2 个月，到期需人工重抓（doc.oplist.org/guide/drivers/wopan）；重抓登录时跨端互踢——方法一别登网页版、方法二别登手机 APP，以免把其他健康挂载踢下线" | tee ${log_file:+-a "$log_file"}
-    fi
-    return 1
-  fi
-  if echo "$message" | grep -Eqi 'storage|存储|driver|驱动|reload|internal server|服务器内部|exception|panic|bad gateway|service unavailable|gateway timeout|request failed|请求失败|too many requests'; then
-    echo "🚫 $label 后端驱动异常（API 强校验 code=${code}）: ${message}，跳过本轮同步" | tee ${log_file:+-a "$log_file"}
-    return 1
-  fi
-
-  # 目录设置了访问密码属于配置项而非故障，不能据此判定后端死掉
-  if echo "$message" | grep -Eqi 'password|密码'; then
-    echo "ℹ️ $label API 强校验: 目标目录需访问密码（配置项，${message}），降级放行" | tee ${log_file:+-a "$log_file"}
-    return 0
-  fi
-
-  # 未识别的错误一律保守跳过并留痕，等待人工观察或下轮自愈
-  echo "🚫 $label API 强校验未通过（未知错误 code=${code}）: ${message}，保守跳过本轮同步" | tee ${log_file:+-a "$log_file"}
-  return 1
-}
-
-# 同步前连通性预检总入口。
-# 两层校验都针对目标本身与 Crypt 底层裸存储各执行一次：
-#   第1层 _pre_webdav_health_check — 快速、无凭据依赖，抓典型故障签名；
-#   第2层 _openlist_api_health_check — refresh=true 绕过服务端缓存，
-#         验证底层驱动真实登录态（baidupan/baidupanCrypt 事故主防线）。
-# 用法: _check_openlist_backend_connectivity <dest_path> [log_filename]
-# 返回: 0=继续同步, 1=跳过本轮
-_check_openlist_backend_connectivity() {
-  local dest_path="$1"
-  local log_file="${2:-}"
-  [[ "$dest_path" == openlist:* ]] || return 0
-
-  _pre_webdav_health_check "$dest_path" "目标端 $dest_path" "$log_file" || return 1
-  _openlist_api_health_check "$dest_path" "目标端 $dest_path" "$log_file" || return 1
-
-  if [[ "$dest_path" == openlist:*Crypt/* ]]; then
-    local rel="${dest_path#openlist:}"
-    local base="${rel%%/*}"
-    base="${base%Crypt}"
-    local underlying="openlist:${base}"
-
-    # 加密挂载完全建立在底层驱动之上，底层不健康时上层必然写入失败，
-    # 必须把两层校验对底层裸存储再走一遍（baidupanCrypt ← baidupan）
-    _pre_webdav_health_check "$underlying" "Crypt 挂载 $dest_path 底层驱动 $underlying" "$log_file" || return 1
-    _openlist_api_health_check "$underlying" "Crypt 挂载 $dest_path 底层驱动 $underlying" "$log_file" || return 1
-  fi
-
-  return 0
-}
-
-# 查找 OpenList 最新日志文件
-# （数据库本地化后日志在 /opt/openlist-data/log，旧路径保留兜底）
-_find_openlist_log() {
-  local logdir
-  for logdir in \
-    "/opt/openlist-data/log" \
-    "/opt/openlist-data/logs" \
-    "/dropbox/self-hosted/openlist/data/log" \
-    "/dropbox/self-hosted/openlist/data/logs" \
-    "/opt/openlist/data/log"; do
-    if [ -d "$logdir" ]; then
-      local latest
-      latest=$(ls -t "$logdir"/*.log 2>/dev/null | head -1)
-      [ -n "$latest" ] && echo "$latest" && return 0
-    fi
-  done
-  return 1
-}
-
-# 同步前刷新 OpenList 服务端目录缓存
-# 避免 PROPFIND 返回 stale listing 导致 rclone 看不到已存在文件而重复上传
-# 用法: _refresh_openlist_cache <dest_path>
-_refresh_openlist_cache() {
-  local dest_path="$1"
-  [[ "$dest_path" == openlist:* ]] || return 0
-
-  local ol_path="${dest_path#openlist:}"
-  ol_path="/${ol_path}"
-  local ol_token
-  ol_token=$(_get_openlist_token)
-  if [ -z "$ol_token" ]; then
-    echo "OpenList token 不可用，跳过缓存刷新"
-    return 0
-  fi
-
-  # 刷新前获取文件数，用于校验缓存是否已过期
-  local before_count=0 before_json
-  before_json=$(timeout "${OPENLIST_CACHE_REFRESH_WAIT:-120}" rclone size "$dest_path" --json 2>/dev/null || true)
-  before_count=$(echo "$before_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
-  echo "刷新 OpenList 缓存: $ol_path (刷新前文件数: $before_count)"
-
-  curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh" \
-    -H "Authorization: $ol_token" \
-    -H "Content-Type: application/json" \
-    -d "{\"path\":\"$ol_path\",\"recursive\":true}" \
-    >/dev/null 2>&1 || true
-
-  # 等待缓存刷新完成（60s，确保递归刷新大目录完成）
-  echo "等待缓存刷新完成 (60s)..."
-  sleep 60
-
-  # 刷新后获取文件数，校验缓存是否已更新
-  local after_count=0 after_json
-  after_json=$(timeout "${OPENLIST_CACHE_REFRESH_WAIT:-120}" rclone size "$dest_path" --json 2>/dev/null || true)
-  after_count=$(echo "$after_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
-  echo "缓存刷新后文件数: $after_count"
-
-  if [ "$before_count" != "$after_count" ]; then
-    echo "⚠️ 缓存刷新改变了 listing: $before_count → $after_count 个文件（刷新前缓存已过期）"
-  else
-    echo "缓存刷新前后文件数一致 ($after_count)，listing 稳定"
-  fi
-}
-
-# 轻量刷新 OpenList 单个路径缓存（无长等待，供校验流程使用）
-# 用法: _refresh_ol_cache_fast <ol_path（不带 openlist: 前缀）>
-_refresh_ol_cache_fast() {
-  local ol_path="/${1#/}"
-  local ol_token
-  ol_token=$(_get_openlist_token) || true
-  [ -z "$ol_token" ] && return 0
-  curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh" \
-    -H "Authorization: $ol_token" \
-    -H "Content-Type: application/json" \
-    -d "{\"path\":\"$ol_path\",\"recursive\":true}" \
-    >/dev/null 2>&1 || true
-  sleep 5
-}
-
-# 重启 OpenList 容器并等待驱动就绪——为拿到"后端真实列表"
-# （PUT 假成功条目只存在于 OpenList 缓存/后端可见列表，容器重启即消失；
-#   持久化验证/假成功重试一直在用这个口径，此处抽出复用）
-# 用法: _restart_openlist_for_truth [ol_path 不带 openlist: 前缀] [log_file]
-#   ol_path 为空时跳过路径级缓存刷新（重启后列表本就是后端新拉的，
-#   且对根路径 recursive 刷新代价大）
-# 返回: 0=重启且驱动就绪（列表已从后端重拉），1=不可重启/未就绪
-_restart_openlist_for_truth() {
-  local ol_path="${1#/}"
-  local log_file="${2:-/dev/null}"
-  command -v docker >/dev/null 2>&1 || return 1
-  sudo docker ps --format '{{.Names}}' 2>/dev/null | grep -qw openlist || return 1
-  echo "  ↻ 重启 OpenList 容器（清掉假成功污染的列表，从后端取真值）..." | tee -a "$log_file"
-  sudo docker restart openlist >/dev/null 2>&1 || return 1
-  local i
-  for i in $(seq 1 30); do
-    curl -sf http://127.0.0.1:5244/ping >/dev/null 2>&1 && break
-    sleep 2
-  done
-  curl -sf http://127.0.0.1:5244/ping >/dev/null 2>&1 || {
-    echo "  ⚠️ 重启后 HTTP 60s 内未就绪" | tee -a "$log_file"
-    return 1
-  }
-  echo "  等待驱动重新初始化 (60s)..." | tee -a "$log_file"
-  sleep 60
-  if [ -n "$ol_path" ]; then
-    local t
-    t=$(_get_openlist_token) || true
-    if [ -n "$t" ]; then
-      curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh" \
-        -H "Authorization: $t" -H "Content-Type: application/json" \
-        -d "{\"path\":\"/${ol_path#/}\",\"recursive\":true}" >/dev/null 2>&1 || true
-    fi
-    sleep 10
-  fi
-  return 0
-}
-
-# OpenList 目标列表真值校验（任意 openlist: 挂载目标通用）
-#
-# 功能: 同步主流程结束后、缺失文件 diff 之前校验目标端列表可信度。
-#       OpenList PUT 假成功文件（rclone 报 Copied、退出码 0，但数据从未
-#       写入后端，仅存在于 OpenList 内存缓存）在缓存列表里与真实文件
-#       无异，diff 无法识别。本函数在有传输的轮次重启 OpenList 容器、
-#       清空缓存、从后端重拉列表，让紧随其后的 diff 把假成功文件识别
-#       为缺失文件、当轮送进修复管线，而不是等容器偶然重启才暴露。
-#
-# 原理: 假成功条目只存在于驱动内存缓存，任何不重启的读取——缓存刷新、
-#       crypt/裸双视图计数对比——最终都可能读到同一份被污染的缓存
-#       （run 31951008332 实锤: 同步后 crypt=raw=1413 判"无幽灵"，重启后
-#       真值 1394，19 个假成功当轮漏网；历史 crypt-vs-raw 计数对比分支
-#       因此移除）。唯一可靠口径 = 重启容器后从后端重拉。重启代价约
-#       2 分钟，仅在"本轮有实际传输"时支付：无传输即无新写入，无新
-#       写入即无新污染，缓存列表可信直接放行（上轮遗留污染会带进 diff，
-#       但下一轮有传输即被重启暴露，一天内自愈）。
-#       重启前后目标视图计数差 = 假成功文件数（仅供通知展示；真正的
-#       暴露与修复靠重启后的 diff，不靠该差值本身）。
-#
-# 用法: _openlist_truth_check <dest_path> [log_file]
-# 设置全局: FAKE_SUCCESS_COUNT — 假成功文件数（供通知展示）
-# 返回: 0=列表可信（非 openlist 目标 / 无传输 / 已重启取到后端真值）
-#       1=重启失败（列表可能仍被污染，diff 口径不可信）
-# 示例:
-#   _openlist_truth_check "openlist:wopan176Crypt/backup" "$LOG"  # Crypt 目标（展示裸存储对照）
-#   _openlist_truth_check "openlist:wopan175/1" "$LOG"            # 普通挂载目标
-#   _openlist_truth_check "remote:bucket/path" "$LOG"             # 非 openlist 目标，直接返回 0
-_openlist_truth_check() {
-  FAKE_SUCCESS_COUNT=0
-  local dest_path="$1"
-  local log_file="${2:-/dev/null}"
-  [[ "$dest_path" == openlist:* ]] || return 0
-
-  # Crypt 目标展示裸存储对照路径（dne=true 时裸存储无字面子路径，仅作展示用）
-  local header="=== truth-check: ${dest_path}（重启后后端真值口径）==="
-  if [[ "$dest_path" == openlist:*Crypt/* ]]; then
-    local raw_display
-    raw_display=$(_raw_remote_for "${dest_path%%/*}" 2>/dev/null || echo "${dest_path/Crypt/}")
-    header="=== truth-check: ${dest_path}（对照 ${raw_display}，重启后后端真值口径）==="
-  fi
-  echo "$header" | tee -a "$log_file"
-
-  # 缓存刷新: 目标挂载（dne=true 的 Crypt 目标裸存储无字面子路径——目录名也是密文，只刷 crypt 侧）
-  _refresh_ol_cache_fast "${dest_path#openlist:}"
-
-  # 本轮 rclone 实际传输数（Copied 行）
-  # 注意 grep -c 无匹配时输出 0 且退出码 1，`|| echo 0` 会拼成 "0\n0" 双行，
-  # [ -gt ] 直接报 integer expression expected —— 用正则防护归零
-  local uploaded=0
-  if [ -n "${LAST_ATTEMPT_LOG:-}" ] && [ -f "$LAST_ATTEMPT_LOG" ]; then
-    uploaded=$(grep -cE 'Copied \((new|replaced existing)\)' "$LAST_ATTEMPT_LOG" 2>/dev/null || true)
-    [[ "$uploaded" =~ ^[0-9]+$ ]] || uploaded=0
-  fi
-
-  # 无传输 → 无新写入即无新污染，缓存列表可信，直接放行给 diff
-  # （上轮遗留污染会带进 diff，但下一轮有传输即重启暴露，一天内自愈）
-  if [ "$uploaded" -eq 0 ]; then
-    echo "  本轮无传输，无新污染，直接放行给 diff" | tee -a "$log_file"
-    return 0
-  fi
-
-  # 有传输 → 列表可能含"PUT 假成功"条目，重启容器取后端真值
-  local pre_count=0 dest_json
-  dest_json=$(timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900}" rclone size "$dest_path" --json 2>/dev/null || true)
-  pre_count=$(echo "$dest_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
-  [[ "$pre_count" =~ ^[0-9]+$ ]] || pre_count=0
-  echo "  本轮传输 ${uploaded} 个文件，目标视图 ${pre_count}（缓存口径）—— 重启容器取后端真值" | tee -a "$log_file"
-
-  if ! _restart_openlist_for_truth "${dest_path#openlist:}" "$log_file"; then
-    echo "  ⚠️ 容器重启失败，保留当前列表继续（可能含假成功条目，diff 口径被污染）" | tee -a "$log_file"
-    return 1
-  fi
-
-  # 重启后重新计数（此即后端真值）; pre-post 差 = 假成功文件数（供通知）
-  local post_json post_count
-  post_json=$(timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900}" rclone size "$dest_path" --json 2>/dev/null || true)
-  post_count=$(echo "$post_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
-  [[ "$post_count" =~ ^[0-9]+$ ]] || post_count=0
-  echo "  重启后目标视图: ${pre_count} → ${post_count}" | tee -a "$log_file"
-  if [ "$pre_count" -gt "$post_count" ]; then
-    FAKE_SUCCESS_COUNT=$((pre_count - post_count))
-    echo "  ⚠️ 检测到 ${FAKE_SUCCESS_COUNT} 个假成功文件（重启后从列表消失 → 未持久化），已暴露为缺失，将由下方 diff 送修复管线" | tee -a "$log_file"
-  else
-    echo "  ✅ 重启前后列表一致，无假成功污染" | tee -a "$log_file"
-  fi
-  # 列表已是后端真值，直接放行给 diff
-  return 0
-}
 
 # 增量持久化单个修复条目到 marker（修复循环内每成功一个立即调用）
 # 目的: step 超时/手动取消/runner 回收等中断发生时，已完成的修复不丢失，
@@ -708,9 +172,9 @@ _persist_verify_entries() {
       fi
       if [ "$parts_ok" -eq 1 ]; then
         verified=1
-        echo "  ✅ 通过 · $(_method_short "$f_mid") · 分卷${part_count} · $(_short_path "$orig_path")" | tee -a "$log_file"
+        echo "  ✅ 通过 · $(_fix_method_short "$f_mid") · 分卷${part_count} · $(_short_path "$orig_path")" | tee -a "$log_file"
       else
-        echo "  ❌ 未持久化 · $(_method_short "$f_mid") · 分卷缺失 · $(_short_path "$orig_path")" | tee -a "$log_file"
+        echo "  ❌ 未持久化 · $(_fix_method_short "$f_mid") · 分卷缺失 · $(_short_path "$orig_path")" | tee -a "$log_file"
         PERSIST_FAIL_DETAILS="${PERSIST_FAIL_DETAILS}• ${orig_path} (${f_method})：分卷缺失或大小异常，当前分卷=${existing_parts}
 "
       fi
@@ -718,9 +182,9 @@ _persist_verify_entries() {
       # 压缩/编码类：只检查 size > 0（压缩包大小与原文件不同）
       if [ "$after_sz" -gt 0 ] 2>/dev/null && [ "$after_lsf_sz" -gt 0 ] 2>/dev/null; then
         verified=1
-        echo "  ✅ 通过 · $(_method_short "$f_mid") · $(_short_path "$orig_path") · ${after_sz}B" | tee -a "$log_file"
+        echo "  ✅ 通过 · $(_fix_method_short "$f_mid") · $(_short_path "$orig_path") · ${after_sz}B" | tee -a "$log_file"
       else
-        echo "  ❌ 未持久化 · $(_method_short "$f_mid") · 空或不存在 sz=${after_sz} · $(_short_path "$orig_path")" | tee -a "$log_file"
+        echo "  ❌ 未持久化 · $(_fix_method_short "$f_mid") · 空或不存在 sz=${after_sz} · $(_short_path "$orig_path")" | tee -a "$log_file"
         PERSIST_FAIL_DETAILS="${PERSIST_FAIL_DETAILS}• ${orig_path} (${f_method})：上传文件为空或不存在, size=${after_sz}
 "
       fi
@@ -728,9 +192,9 @@ _persist_verify_entries() {
       # 原样 copy / rename 类：精确匹配大小
       if [ "$after_sz" = "$bytes" ] && [ "$after_lsf_sz" = "$bytes" ] && [ "$after_sz" -gt 0 ]; then
         verified=1
-        echo "  ✅ 通过 · $(_method_short "$f_mid") · $(_short_path "$orig_path") · ${bytes}B" | tee -a "$log_file"
+        echo "  ✅ 通过 · $(_fix_method_short "$f_mid") · $(_short_path "$orig_path") · ${bytes}B" | tee -a "$log_file"
       else
-        echo "  ❌ 未持久化 · $(_method_short "$f_mid") · 期望${bytes} 实际${after_sz} · $(_short_path "$orig_path")" | tee -a "$log_file"
+        echo "  ❌ 未持久化 · $(_fix_method_short "$f_mid") · 期望${bytes} 实际${after_sz} · $(_short_path "$orig_path")" | tee -a "$log_file"
         PERSIST_FAIL_DETAILS="${PERSIST_FAIL_DETAILS}• ${orig_path} (${f_method})：expected=${bytes}, actual=${after_sz}
 "
       fi
@@ -742,7 +206,7 @@ _persist_verify_entries() {
       # B: 复核失败 = 修复方法假成功 → 当场拉黑，本轮立即换方法重试
       if [ -n "$f_mid" ]; then
         _blacklist_add "$orig_path" "$f_mid"
-        echo "  ⛔ 拉黑 $(_method_short "$f_mid")，本轮换方法: $(_short_path "$orig_path")" | tee -a "$log_file"
+        echo "  ⛔ 拉黑 $(_fix_method_short "$f_mid")，本轮换方法: $(_short_path "$orig_path")" | tee -a "$log_file"
       fi
       PERSIST_FAILED_ORIGS+=("$orig_path")
     fi
@@ -780,37 +244,10 @@ _rebuild_raw_baseline() {
   return 1
 }
 
-# 重启 OpenList 容器并等待驱动就绪 + 刷新路径缓存（持久化验证/假成功重试共用）
-# 用法: _sync_restart_for_verify <log_file> <ol_path 以 / 开头>
-# 返回: 0=重启且 HTTP 就绪, 1=HTTP 60s 内未就绪
-_sync_restart_for_verify() {
-  local log_file="$1" ol_path="$2"
-  sudo docker restart openlist >/dev/null 2>&1 || true
-  local i
-  for i in $(seq 1 30); do
-    if curl -sf http://127.0.0.1:5244/ping >/dev/null 2>&1; then
-      echo "  OpenList HTTP 就绪 (${i}次)" | tee -a "$log_file"
-      break
-    fi
-    sleep 2
-  done
-  curl -sf http://127.0.0.1:5244/ping >/dev/null 2>&1 || return 1
-  echo "  等待驱动重新初始化 (60s) ..." | tee -a "$log_file"
-  sleep 60
-  local t
-  t=$(_get_openlist_token)
-  if [ -n "$t" ]; then
-    curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh" \
-      -H "Authorization: $t" -H "Content-Type: application/json" \
-      -d "{\"path\":\"$ol_path\",\"recursive\":true}" >/dev/null 2>&1 || true
-    sleep 20
-  fi
-  return 0
-}
 
 # 转义 rclone filter 中的 glob 特殊字符 [ ] * ? { } → 字符类形式
-# 用法: _fx_escape <glob_pattern>
-_fx_escape() { printf '%s' "$1" | sed -e 's/[][*?{}]/[&]/g'; }
+# 用法: _escape_filter_glob <glob_pattern>
+_escape_filter_glob() { printf '%s' "$1" | sed -e 's/[][*?{}]/[&]/g'; }
 
 # ===== 已修复文件排除（405 防护 + sync 模式删除保护）=====
 # marker fixed_files 里的 original 当初就是原路径传不上（405/超长/假成功）
@@ -834,14 +271,14 @@ _sync_fixed_files_exclusion() {
     while IFS=$'\t' read -r _fx_orig _fx_alt _fx_method; do
       [ -z "$_fx_orig" ] && [ -z "$_fx_alt" ] && continue
       if [ -n "$_fx_orig" ]; then
-        printf -- "- /%s\n" "$(_fx_escape "$_fx_orig")" >> "$fixed_exclude_file"
+        printf -- "- /%s\n" "$(_escape_filter_glob "$_fx_orig")" >> "$fixed_exclude_file"
       fi
       if [ -n "$_fx_alt" ]; then
-        printf -- "- /%s\n" "$(_fx_escape "$_fx_alt")" >> "$fixed_exclude_file"
+        printf -- "- /%s\n" "$(_escape_filter_glob "$_fx_alt")" >> "$fixed_exclude_file"
         if [[ "$_fx_method" == *分卷* ]]; then
           local _fx_prefix="${_fx_alt%.[0-9]*}"
           if [ "$_fx_prefix" != "$_fx_alt" ]; then
-            printf -- "- /%s*\n" "$(_fx_escape "$_fx_prefix")" >> "$fixed_exclude_file"
+            printf -- "- /%s*\n" "$(_escape_filter_glob "$_fx_prefix")" >> "$fixed_exclude_file"
           fi
         fi
       fi
@@ -1035,13 +472,13 @@ _sync_fix_missing_files() {
               prev_restore=$(echo "$prev_entry" | jq -r '.restore_hint // ""')
               prev_shuman=$(echo "$prev_entry" | jq -r '.size_human // "未知"')
               prev_sbytes=$(echo "$prev_entry" | jq -r '.size_bytes // 0')
-              echo "♻ 沿用上轮修复 · $(_method_short "$prev_mid") · $(_short_path "$mf")" | tee -a "$LOG_FILENAME"
+              echo "♻ 沿用上轮修复 · $(_fix_method_short "$prev_mid") · $(_short_path "$mf")" | tee -a "$LOG_FILENAME"
               echo "${mf}|${prev_alt}|${prev_method}|${prev_restore}|${prev_shuman}|${prev_sbytes}|${prev_mid}" >> "$fix_list"
               FIXED_THIS_RUN["$mf"]="$prev_alt"
               continue
             fi
             if [ -n "$prev_mid" ]; then
-              echo "⛔ 上轮假成功（替代路径已消失），拉黑 $(_method_short "$prev_mid") · $(_short_path "$mf")" | tee -a "$LOG_FILENAME"
+              echo "⛔ 上轮假成功（替代路径已消失），拉黑 $(_fix_method_short "$prev_mid") · $(_short_path "$mf")" | tee -a "$LOG_FILENAME"
               FIX_METHOD_BLACKLIST["$mf"]="$prev_mid"
             fi
           fi
@@ -1107,7 +544,7 @@ _sync_fix_missing_files() {
         mv "${missing_list}.cut" "$missing_list"
       fi
 
-      _sec "$LOG_FILENAME" "${task_name} 缺失文件修复 · 共 $(wc -l < "$missing_list" | tr -d ' ') 个"
+      _log_section "$LOG_FILENAME" "${task_name} 缺失文件修复 · 共 $(wc -l < "$missing_list" | tr -d ' ') 个"
 
       fix_log="file_fix_${task_name}_$(date +%Y%m%d_%H%M%S).log"
       echo "=== 缺失文件修复日志 - $(date) ===" > "$fix_log"
@@ -1177,7 +614,7 @@ _sync_fix_missing_files() {
               # copyto_shorthash / zip_split_shorthash 用短哈希名，密文名远低于上限
               _blacklist_add "$failed_line" copyto_original
               _blacklist_add "$failed_line" zip_split_original
-              echo "  ⏭ 名长注定失败 → 跳过 $(_method_short copyto_original) / $(_method_short zip_split_original)，直接试短哈希名方法" | tee -a "$LOG_FILENAME"
+              echo "  ⏭ 名长注定失败 → 跳过 $(_fix_method_short copyto_original) / $(_fix_method_short zip_split_original)，直接试短哈希名方法" | tee -a "$LOG_FILENAME"
             fi
             echo "  📏 名长: 原名 ${_nl_orig_len}B → 密文名 ${_nl_enc_len}B${_nl_flag}" | tee -a "$LOG_FILENAME"
           fi
@@ -1192,7 +629,7 @@ _sync_fix_missing_files() {
         _cb_done=$((_cb_done + 1))
 
         if [ "$TRY_FIX_STATUS" = "success" ]; then
-          echo "✅ 修复成功 · $(_method_short "${TRY_FIX_METHOD_ID:-}") · $(_short_path "$failed_line")" | tee -a "$LOG_FILENAME"
+          echo "✅ 修复成功 · $(_fix_method_short "${TRY_FIX_METHOD_ID:-}") · $(_short_path "$failed_line")" | tee -a "$LOG_FILENAME"
           echo "  ↳ 还原: ${TRY_FIX_RESTORE}" | tee -a "$LOG_FILENAME"
           echo "${TRY_FIX_ORIGINAL}|${TRY_FIX_ALTERNATIVE}|${TRY_FIX_METHOD}|${TRY_FIX_RESTORE}|${file_size}|${file_size_bytes}|${TRY_FIX_METHOD_ID}|${TRY_FIX_MD5:-}" >> "$fix_list"
           FIXED_THIS_RUN["$TRY_FIX_ORIGINAL"]="$TRY_FIX_ALTERNATIVE"
@@ -1238,9 +675,9 @@ _sync_fix_missing_files() {
       if [ -n "${_CRYPT_ONTHEFLY:-}" ]; then
         echo "名长诊断汇总: 密文名>255B 共 ${_NAMELEN_OVER_255} 个 / 超后端已接受最长(${_NAMELEN_RAW_MAX}B) 共 ${_NAMELEN_OVER_RAWMAX} 个" | tee -a "$LOG_FILENAME"
         if [ "${_NAMELEN_OVER_RAWMAX:-0}" -gt 0 ]; then
-          echo "  → 长度假设成立: 缺失文件密文名超过后端实际接受上限，将由 $(_method_desc zip_split_original) 兜底落盘" | tee -a "$LOG_FILENAME"
+          echo "  → 长度假设成立: 缺失文件密文名超过后端实际接受上限，将由 $(_fix_method_desc zip_split_original) 兜底落盘" | tee -a "$LOG_FILENAME"
         elif [ "${_NAMELEN_OVER_255:-0}" -eq 0 ]; then
-          echo "  → 长度假设不成立: 缺失文件密文名均未超限，根因另有其因（看 $(_method_desc copyto_original) 的真实报错）" | tee -a "$LOG_FILENAME"
+          echo "  → 长度假设不成立: 缺失文件密文名均未超限，根因另有其因（看 $(_fix_method_desc copyto_original) 的真实报错）" | tee -a "$LOG_FILENAME"
         fi
       fi
     fi
@@ -1258,7 +695,7 @@ _sync_fix_missing_files() {
 #                  source_path / LOG_FILENAME；写 SYNC_PERSIST_FAIL
 _sync_persist_verify_and_retry() {
   if [[ "$dest_path" == openlist:* ]] && [ -s "$fix_list" ] && command -v docker >/dev/null 2>&1; then
-    _sec "$LOG_FILENAME" "${task_name} 修复持久化验证（重启容器复核）"
+    _log_section "$LOG_FILENAME" "${task_name} 修复持久化验证（重启容器复核）"
 
     # 1. 先过滤出"修复成功且路径仍在该 dest_path 下"的条目，保存待验证清单
     local PERSIST_VERIFY_LIST="/tmp/${task_name}_persist_verify_$$.txt"
@@ -1356,7 +793,7 @@ _sync_persist_verify_and_retry() {
 
           while [ "${#retry_pending[@]}" -gt 0 ] && [ "$retry_round" -lt "$retry_rounds_max" ]; do
             retry_round=$((retry_round + 1))
-            _sec "$LOG_FILENAME" "假成功重试 ${retry_round}/${retry_rounds_max} · 待重试 ${#retry_pending[@]} 个"
+            _log_section "$LOG_FILENAME" "假成功重试 ${retry_round}/${retry_rounds_max} · 待重试 ${#retry_pending[@]} 个"
 
             # 落盘即时校验基线重建: 上一轮容器重启后假成功条目已从计数中
             # 消失，旧基线偏高会把本轮真实落盘误判为假成功；重建时轮询
@@ -1380,7 +817,7 @@ _sync_persist_verify_and_retry() {
 
               if [ "$TRY_FIX_STATUS" = "success" ]; then
                 retry_fixed=$((retry_fixed + 1))
-                echo "✅ 重试成功 · $(_method_short "${TRY_FIX_METHOD_ID:-}") · $(_short_path "$retry_orig")" | tee -a "$LOG_FILENAME"
+                echo "✅ 重试成功 · $(_fix_method_short "${TRY_FIX_METHOD_ID:-}") · $(_short_path "$retry_orig")" | tee -a "$LOG_FILENAME"
                 echo "  ↳ 还原: ${TRY_FIX_RESTORE}" | tee -a "$LOG_FILENAME"
                 local retry_size_json retry_size_bytes retry_size_human
                 retry_size_json=$(rclone size "${source_path}/${retry_orig}" --json 2>/dev/null || echo '{}')
@@ -1718,312 +1155,4 @@ sync_with_logging() {
   # 在 set -e 下返回非零会导致整个 step 立即退出，后续同步与
   # split_on_sync_failure 均无法执行。
   return 0
-}
-
-# ===== 通知消息公共段落构建 =====
-# 4 个通知分支共享的头部/任务信息/排除规则/差异列表段落。
-# 统一走 telegram.sh 的 tg_* 排版助手（HTML）；
-# 读取调用方（_send_sync_result_notification）作用域:
-#   source_size_human / dest_size_human / count_info / task_name /
-#   source_path / dest_path / exclude_list / AUTO_SPLIT_INFO / diff_files_list
-
-# 头部: 标题 + 分隔线 + 任务/路径 + 大小 + 可选状态行 + 文件数信息
-# 用法: _notify_add_header <var> <标题（含 emoji）> [状态行文本]
-_notify_add_header() {
-  tg_add_title "$1" "$2"
-  tg_add_kv "$1" "任务" "$task_name"
-  tg_add_path "$1" "源端" "$source_path"
-  tg_add_path "$1" "目标" "$dest_path"
-  tg_add_kv "$1" "源端大小" "$source_size_human"
-  tg_add_kv "$1" "目标大小" "$dest_size_human"
-  if [ -n "${3:-}" ]; then
-    tg_add_kv "$1" "状态" "$3"
-  fi
-  tg_append "$1" "文件数：${count_info}"$'\n'
-}
-
-# AUTO_SPLIT_INFO 段（仅非空时插入；内容为 tasks.sh 构建的 HTML 分节片段）
-_notify_add_autosplit() {
-  [ -n "$AUTO_SPLIT_INFO" ] && tg_append "$1" $'\n'"${AUTO_SPLIT_INFO}"$'\n'
-  return 0
-}
-
-# 排除规则段（仅非空时插入；模式 code 等宽展示）
-# 用法: _notify_add_excludes <var>
-_notify_add_excludes() {
-  [ -z "$exclude_list" ] && return 0
-  tg_add_section "$1" "🚫 排除规则"
-  local _pattern
-  while IFS= read -r _pattern; do
-    [ -z "$_pattern" ] && continue
-    tg_append "$1" "• <code>$(escape_html "$_pattern")</code>"$'\n'
-  done <<< "$exclude_list"
-  return 0
-}
-
-# 差异文件列表段（仅非空时插入）
-# 用法: _notify_add_diff_list <var>
-_notify_add_diff_list() {
-  [ -z "$diff_files_list" ] && return 0
-  tg_add_section "$1" "📋 差异文件列表"
-  tg_add_block "$1" "$(escape_html "$diff_files_list")"
-  return 0
-}
-
-# 发送同步结果通知（从 sync_with_logging 拆分出来）
-# 构建包含源/目标大小、差异文件列表、排除规则、修复结果的通知消息
-# 设置全局变量: SYNC_FAILED, SYNC_SKIPPED, SYNC_TRANSFERRED_BYTES
-_send_sync_result_notification() {
-  local source_path="$1"
-  local dest_path="$2"
-  local task_name="$3"
-  local sync_status="$4"
-  local log_filename="$5"
-  local last_attempt_log="$6"
-  local fail_list="$7"
-  local fix_list="$8"
-  local fix_log="$9"
-  local has_object_not_found="${10}"
-  shift 10
-  local extra_args=("$@")
-
-  SYNC_FAILED=0
-  # 部分失败标志: 本次同步有文件成功但有文件失败/缺失（导出给调用方，
-  # 子目录进度树据此区分 ⚠️ 部分失败 / ❌ 完全失败）
-  SYNC_PARTIAL=0
-
-  # 获取源端和目标端大小及文件数量（各只调一次 --json）
-  local source_size_human="未知"
-  local dest_size_human="未知"
-  local source_count="未知"
-  local dest_count="未知"
-  local count_info=""
-  local src_stats dst_stats
-
-  src_stats=$(_get_path_stats "$source_path" "${extra_args[@]}")
-  source_count=$(echo "$src_stats" | awk '{print $2}')
-  source_size_human=$(echo "$src_stats" | awk '{print $3 ($4? " "$4 : "")}')
-  local source_count_raw="$source_count"
-  [ "$source_count" = "0" ] && source_count="未知"
-
-  # 同步后刷新 OpenList 缓存，确保 _get_path_stats 拿到真实文件数
-  # 避免 stale 缓存里残留"幽灵文件"导致 dest_count 虚高，误报同步成功
-  if [[ "$dest_path" == openlist:* ]]; then
-    echo "同步后刷新 OpenList 缓存以获取真实文件数..." | tee -a "$log_filename"
-    _refresh_openlist_cache "$dest_path"
-  fi
-
-  dst_stats=$(_get_path_stats "$dest_path" "${extra_args[@]}")
-  dest_count=$(echo "$dst_stats" | awk '{print $2}')
-  dest_size_human=$(echo "$dst_stats" | awk '{print $3 ($4? " "$4 : "")}')
-  local dest_count_raw="$dest_count"
-  [ "$dest_count" = "0" ] && dest_count="未知"
-
-  # 始终显示文件数信息
-  local diff_files_list=""
-  if [[ "$source_count_raw" =~ ^[0-9]+$ ]] && [[ "$dest_count_raw" =~ ^[0-9]+$ ]]; then
-    local count_diff=$((source_count_raw - dest_count_raw))
-    if [ "$count_diff" -ne 0 ]; then
-      count_info="<b>差异 ${count_diff}</b>（源端 ${source_count} / 目标 ${dest_count}）"
-      diff_files_list=$(_build_diff_files_list "$source_path" "$dest_path" "${extra_args[@]}")
-    else
-      count_info="${source_count}（一致）"
-    fi
-  else
-    count_info="源端 ${source_count} / 目标 ${dest_count}"
-  fi
-
-  # 提取 --exclude 规则，方便在通知中说明
-  local exclude_list=""
-  exclude_list=$(_build_exclude_patterns "${extra_args[@]}")
-
-  # 构建 fix_summary（已修复文件树形列表: 一文件一行，原名 → 实际名 · 大小 · 方式；
-  # HTML 格式，路径 code 等宽，动态内容经 escape_html 转义，条目经 tree_lines 加 ├─/└─）
-  local fix_summary=""
-  local fix_total=0
-  if [ -s "$fix_list" ]; then
-    fix_total=$(grep -c . "$fix_list" 2>/dev/null || true)
-    local _fix_entries=""
-    while IFS='|' read -r f_original f_alternative f_method f_restore f_size f_bytes f_mid; do
-      [ -z "$f_original" ] && continue
-      local f_method_tag _entry
-      f_method_tag=$(_method_short "$f_mid")
-      _entry="<code>$(escape_html "$f_original")</code>"
-      # 改名修复（含目录变动）: 原名 → 实际名 双方完整路径
-      [ "$f_original" != "$f_alternative" ] && _entry+=" → <code>$(escape_html "$f_alternative")</code>"
-      _entry+=" · <i>$(escape_html "$f_size")</i> · <i>$(escape_html "$f_method_tag")</i>"
-      _fix_entries+="${_entry}"$'\n'
-    done < "$fix_list"
-    fix_summary="$(tree_lines "$_fix_entries")"$'\n'
-  fi
-  [ -z "$fix_summary" ] && fix_summary="无"$'\n'
-
-  # 构建 fail_summary（无法修复的文件树形列表: 条目行 + tree_sub 缩进的"修复过程"子行；
-  # 风格与 fix_summary 一致）
-  local fail_summary=""
-  local fail_total=0
-  if [ -s "$fail_list" ]; then
-    fail_total=$(grep -c . "$fail_list" 2>/dev/null || true)
-    local -a _fail_entries=() _fail_sections=()
-    while IFS='|' read -r fpath fsize fmsg; do
-      [ -z "$fpath" ] && continue
-      _fail_entries+=("<code>$(escape_html "$fpath")</code> · <i>$(escape_html "$fsize")</i> · <i>$(escape_html "$fmsg")</i>")
-      # 从 fix_log 中按文件名分隔提取该文件对应的修复过程
-      local fix_section="" _sec
-      if [ -f "$fix_log" ]; then
-        fix_section=$(awk -v rel="$fpath" '
-          index($0, "=== 尝试修复失败文件: " rel " ===") > 0 { capture=1; next }
-          /=== 尝试修复失败文件: / && capture { capture=0 }
-          capture { sub(/^\[[^]]*\] /, ""); print }
-        ' "$fix_log" 2>/dev/null)
-      fi
-      if [ -n "$fix_section" ]; then
-        _sec="修复过程："
-        while IFS= read -r log_line; do
-          [ -z "$log_line" ] && continue
-          _sec+=$'\n'"  $(escape_html "$log_line")"
-        done <<< "$fix_section"
-      elif echo "$fmsg" | grep -qi 'object not found'; then
-        _sec="修复过程：源文件不存在，无需修复"
-      else
-        _sec="修复过程：无记录"
-      fi
-      _fail_sections+=("$_sec")
-    done < "$fail_list"
-    local _i _n=${#_fail_entries[@]} _last
-    for (( _i=0; _i<_n; _i++ )); do
-      _last=0
-      [ $((_i + 1)) -eq "$_n" ] && _last=1
-      fail_summary+="$(tree_conn "$_last")${_fail_entries[$_i]}"$'\n'
-      local _sub
-      while IFS= read -r _sub; do
-        [ -z "$_sub" ] && continue
-        fail_summary+="$(tree_sub "$_last")${_sub}"$'\n'
-      done <<< "${_fail_sections[$_i]}"
-    done
-  fi
-  [ -z "$fail_summary" ] && fail_summary="无"$'\n'
-
-  # 解析本次同步传输的字节数
-  SYNC_TRANSFERRED_BYTES=$(get_transferred_bytes_from_log "$log_filename")
-  SYNC_SKIPPED=0
-
-  # 子目录拆分模式下，如果没有文件变更且无错误，跳过通知
-  if [ "$SYNC_SKIP_QUIET" = "1" ] && [ ! -s "$fail_list" ] && [ ! -s "$fix_list" ]; then
-    if ! grep -Eqi 'Copied|Deleted|Renamed|Moved' "$log_filename" 2>/dev/null; then
-      SYNC_SKIPPED=1
-      echo "无文件变更，跳过通知 (SYNC_SKIP_QUIET=1, task=${task_name})"
-      rm -f "$log_filename" 2>/dev/null || true
-      return 0
-    fi
-  fi
-
-  # ===== 构建并发送通知消息 =====
-
-  if [ -s "$fail_list" ]; then
-    # 有无法同步的文件，标记失败以便上层触发大文件切割
-    # fail_list 只列出失败文件（其余已正常同步），恒为部分失败
-    SYNC_FAILED=1
-    SYNC_PARTIAL=1
-    # 根据错误类型构建状态消息
-    local fail_status_msg="部分文件无法同步"
-    if [ "$has_object_not_found" -eq 1 ]; then
-      fail_status_msg="源文件不存在（object not found），部分文件无法同步"
-    fi
-    local partial_msg=""
-    _notify_add_header partial_msg "⚠️ ${task_name} 部分文件同步失败" "$fail_status_msg"
-    _notify_add_excludes partial_msg
-    _notify_add_autosplit partial_msg
-    tg_add_section partial_msg "✅ 已通过其他方式同步（${fix_total} 个文件）"
-    tg_append partial_msg "${fix_summary}"
-    tg_add_section partial_msg "❌ 无法同步文件（${fail_total} 个）"
-    tg_append partial_msg "${fail_summary}"
-    _notify_add_diff_list partial_msg
-
-    send_telegram_message "$partial_msg"
-
-  elif [ -s "$fix_list" ]; then
-    # 所有缺失文件都已通过其他方式同步
-    local partial_msg=""
-    _notify_add_header partial_msg "⚠️ ${task_name} 部分文件已通过其他方式同步" "${fix_total} 个缺失文件已全部通过替代方式同步"
-    _notify_add_excludes partial_msg
-    _notify_add_autosplit partial_msg
-    tg_add_section partial_msg "✅ 已通过其他方式同步（${fix_total} 个文件）"
-    tg_append partial_msg "${fix_summary}"
-    _notify_add_diff_list partial_msg
-
-    send_telegram_message "$partial_msg"
-
-  elif [ "$sync_status" -ne 0 ] || grep -Eqi '(^|[^[:alpha:]])(ERROR|Failed|timeout|forbidden|unauthorized|permission denied|connection refused)([^[:alpha:]]|$)' "$last_attempt_log"; then
-    # 同步返回非零或日志包含错误关键字
-    SYNC_FAILED=1
-    # 检测是否为部分失败：目标已有部分文件但少于源端
-    local is_partial_failure=0
-    if [[ "$source_count_raw" =~ ^[0-9]+$ ]] && [[ "$dest_count_raw" =~ ^[0-9]+$ ]] && \
-     [ "$dest_count_raw" -gt 0 ] && [ "$dest_count_raw" -lt "$source_count_raw" ]; then
-      is_partial_failure=1
-    fi
-    SYNC_PARTIAL=$is_partial_failure
-    # 提取关键错误日志
-    local critical_logs="无明显错误关键字"
-    if [ -f "$log_filename" ]; then
-      critical_logs=$(grep -Ei "error|failed|too large|timeout|permission denied|connection refused" "$log_filename" | tail -n 5 || echo "无明显错误关键字")
-    fi
-    local err_title err_status
-    if [ "$is_partial_failure" -eq 1 ]; then
-      err_title="⚠️ ${task_name} 部分文件同步失败"
-      err_status="部分文件同步失败（exit=${sync_status}）"
-    else
-      err_title="⚠️ ${task_name} 同步失败"
-      err_status="同步失败（exit=${sync_status}）"
-    fi
-    local err_msg=""
-    _notify_add_header err_msg "$err_title" "$err_status"
-    _notify_add_excludes err_msg
-    _notify_add_autosplit err_msg
-    tg_add_section err_msg "🧾 错误详情 · 关键日志"
-    if [ -n "$critical_logs" ] && [ "$critical_logs" != "无明显错误关键字" ]; then
-      # 日志为原始输出（可能含 <>& 字符），逐行转义后 <pre> 等宽展示
-      local err_log_lines=""
-      while IFS= read -r line; do
-        [ -n "$line" ] && err_log_lines+="${line}"$'\n'
-      done <<< "$critical_logs"
-      tg_add_block err_msg "<pre>$(escape_html "${err_log_lines%$'\n'}")</pre>"
-    else
-      tg_add_block err_msg "• 无明显错误关键字"
-    fi
-    _notify_add_diff_list err_msg
-    send_telegram_message "$err_msg"
-    # 发送完整日志文件
-    local err_log_size
-    err_log_size=$(stat -c%s "$log_filename" 2>/dev/null || echo 0)
-    if [ "$err_log_size" -gt 0 ] && [ "$err_log_size" -lt "${OPENLIST_ERR_LOG_MAX_BYTES:-50000000}" ]; then
-      curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
-        -F chat_id="${TELEGRAM_CHAT_ID}" \
-        -F document=@"$log_filename" \
-        -F parse_mode="HTML" \
-        -F caption="📁 <b>$(escape_html "$task_name")</b> 错误日志" || true
-    fi
-  else
-    # 同步返回成功，检查是否有文件缺失（部分失败）
-    local is_partial_success=0
-    if [[ "$source_count_raw" =~ ^[0-9]+$ ]] && [[ "$dest_count_raw" =~ ^[0-9]+$ ]] && \
-       [ "$dest_count_raw" -lt "$source_count_raw" ]; then
-      is_partial_success=1
-      SYNC_FAILED=1
-      SYNC_PARTIAL=1
-    fi
-    local ok_message=""
-    if [ "$is_partial_success" -eq 1 ]; then
-      # 同步"成功"但目标文件数少于源端，视为部分失败
-      _notify_add_header ok_message "⚠️ ${task_name} 部分文件同步失败" "部分文件同步失败（exit=0，文件数不一致）"
-    else
-      _notify_add_header ok_message "✅ ${task_name} 同步完成"
-    fi
-    _notify_add_excludes ok_message
-    _notify_add_autosplit ok_message
-    _notify_add_diff_list ok_message
-
-    send_telegram_message "$ok_message"
-  fi
 }

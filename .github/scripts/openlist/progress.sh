@@ -311,14 +311,14 @@ _progress_refresh() {
   msg=$(_progress_render)
   local new_id
   new_id=$(_tg_ensure_bottom_message "$msg")
-  # Telegram 失败（new_id 空）时返回 1 会沿 progress_update/task_begin 等
+  # Telegram 失败（new_id 空）时返回 1 会沿 progress_update/progress_task_begin 等
   # 裸调用链在 set -e 下终止整个 step —— 通知失败不传播
   [ -n "$new_id" ] && echo "$new_id" > "$PROGRESS_MSG_ID_FILE"
   return 0
 }
 
 # 初始化进度通知系统（在第一个任务开始前调用一次）
-# 任务通过 task_begin 或预览阶段的 _preview_register 自动注册
+# 任务通过 progress_task_begin 或预览阶段的 _preview_register 自动注册
 progress_init() {
   # 清理旧状态
   : > "$PROGRESS_TASKS_FILE"
@@ -331,15 +331,15 @@ progress_init() {
   # 不在此处发送消息: 此刻任务队列为空，只会发出 "总任务：0 | 已用：0s" 的
   # 空占位消息；若运行在任务注册前被取消（concurrency 抢占/早期失败），
   # 该消息会冻结为最终状态且每轮 runner 全新、删不掉上一轮的。首条消息
-  # 由注册完成后的 progress_reload（正常/跳预览流程）或 task_begin（调试
+  # 由注册完成后的 progress_reload（正常/跳预览流程）或 progress_task_begin（调试
   # 流程）发出，此时任务列表已是全量。
 }
 
 # 标记任务开始（自动注册未注册的任务）
-# 用法: task_begin <task_id> [fallback_display_name]
+# 用法: progress_task_begin <task_id> [fallback_display_name]
 #   第二参数仅在任务未注册时用作显示名（如 debug 模式无预览阶段）；
 #   已注册任务（预览阶段）开始运行时不设置 detail，显示名/大小提示保持注册时的值
-task_begin() {
+progress_task_begin() {
   local task_id="$1"
   local fallback_name="${2:-}"
   # 自动注册未注册的任务
@@ -355,7 +355,7 @@ task_begin() {
 }
 
 # 更新器共享实现：按 SYNC_AUTO_SPLIT_DEPTH 把内容路由到对应深度槽位
-# 用法: _task_progress_apply <detail> [rows_raw] [stats_html] <bypass_throttle>
+# 用法: _progress_task_apply <detail> [rows_raw] [stats_html] <bypass_throttle>
 #   rows_raw — 本层阶段树的原始行（多行，无连接符），空则不动本层树
 #   深度路由规则（替代旧的 PROGRESS_SUPPRESS 单槽互斥模型）:
 #   - 任务行 detail 只接受深度 0（注册任务本层）的更新——深层子任务的
@@ -365,7 +365,7 @@ task_begin() {
 #   - 兼容兜底: 外部仍设 PROGRESS_SUPPRESS=1 时静默丢弃（旧行为）。
 #   节流: 2 秒内不重复刷新消息；bypass=1（force）且深度 0 才豁免——
 #   深层文件批次的高频 force 若不加限流会造成 Telegram 消息风暴。
-_task_progress_apply() {
+_progress_task_apply() {
   local detail="${1:-}"
   local rows="${2:-}"
   local stats="${3:-}"
@@ -397,17 +397,17 @@ _task_progress_apply() {
 }
 
 # 更新当前任务的详细信息和阶段/统计（带 2 秒节流）
-# 用法: task_update <detail> [rows_raw] [stats_html]
-task_update() {
+# 用法: progress_task_update <detail> [rows_raw] [stats_html]
+progress_task_update() {
   [ "${PROGRESS_SUPPRESS:-0}" = "1" ] && return 0
-  _task_progress_apply "${1:-}" "${2:-}" "${3:-}" 0
+  _progress_task_apply "${1:-}" "${2:-}" "${3:-}" 0
 }
 
 # 强制更新（顶层忽略节流，深层仍限流防消息风暴）
-# 用法: task_update_force <detail> [rows_raw] [stats_html]
-task_update_force() {
+# 用法: progress_task_update_force <detail> [rows_raw] [stats_html]
+progress_task_update_force() {
   [ "${PROGRESS_SUPPRESS:-0}" = "1" ] && return 0
-  _task_progress_apply "${1:-}" "${2:-}" "${3:-}" 1
+  _progress_task_apply "${1:-}" "${2:-}" "${3:-}" 1
 }
 
 # 手动刷新进度消息（无节流）
@@ -417,8 +417,8 @@ progress_reload() {
 }
 
 # 标记任务完成
-# 用法: task_done <status: completed|skipped|failed> [detail]
-task_done() {
+# 用法: progress_task_done <status: completed|skipped|failed> [detail]
+progress_task_done() {
   local status="$1"
   local detail="${2:-}"
   local current
@@ -445,19 +445,19 @@ progress_finalize() {
 
 # ===== 阶段信息入口（tasks.sh 高频使用）=====
 # 调用方把阶段树写入 PROGRESS_PHASE_INFO、统计写入 PROGRESS_STATS 全局变量，
-# 本入口将其转发给 task_update/task_update_force 并把变量转换为树行/统计参数。
+# 本入口将其转发给 progress_task_update/progress_task_update_force 并把变量转换为树行/统计参数。
 progress_update() {
   local detail="$1"
   local stats="${2:-}"
   # 如果调用方传了 stats 参数，使用它；否则用全局变量
   [ -z "$stats" ] && [ -n "${PROGRESS_STATS:-}" ] && stats="$PROGRESS_STATS"
   local phase="${PROGRESS_PHASE_INFO:-}"
-  task_update "$detail" "$phase" "$stats"
+  progress_task_update "$detail" "$phase" "$stats"
 }
 progress_update_force() {
   local detail="$1"
   local stats="${2:-}"
   [ -z "$stats" ] && [ -n "${PROGRESS_STATS:-}" ] && stats="$PROGRESS_STATS"
   local phase="${PROGRESS_PHASE_INFO:-}"
-  task_update_force "$detail" "$phase" "$stats"
+  progress_task_update_force "$detail" "$phase" "$stats"
 }

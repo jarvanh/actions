@@ -4,6 +4,12 @@
 #   - 视频/音频文件：ffmpeg 按关键帧无损分割（-c copy）
 #   - 其他文件：7z 分卷（-mx=0 存储模式不压缩，仅切卷；卷大小 OPENLIST_7Z_VOLUME_SIZE 可调）
 #
+# ⚠️ 术语区分（两个"split"互不相干，勿混淆）:
+#   本文件 split = 文件级分割: 把"单个大文件"切成多段（4GB 阈值）
+#   tasks.sh --auto-split = 任务级分批: 源端超 50GB 时按一级子目录把"同步
+#   任务"拆成多个子任务递归执行。两者维度不同（文件 vs 任务），
+#   命名相似纯属历史原因。
+#
 # 依赖: utils.sh (log_fix, check_log_has_content, escape_html, format_bytes_iec),
 #       telegram.sh (send_telegram_message, tg_add_title/tg_add_kv/tg_add_path/tg_add_section/tg_add_block)
 

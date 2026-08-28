@@ -2,7 +2,7 @@
 # ===== OpenList 同步工具 — 失败文件修复函数 =====
 # 处理 OpenList/WebDAV 无法同步的文件（同步报错、diff 缺失、假成功未持久化等），尝试多种修复方式：
 #   1. 创建目标目录（rclone mkdir → OpenList API mkdir → base64URL 编码目录名）
-#   2. 多种方式同步文件（按对症优先级执行，首个真实成功即止，ID 以 _method_desc 为准）:
+#   2. 多种方式同步文件（按对症优先级执行，首个真实成功即止，ID 以 _fix_method_desc 为准）:
 #      文件修复方法1 copyto_original:      直接 rclone copyto（原路径 + 原文件名）
 #      文件修复方法2 copyto_shorthash:     短哈希文件名直传（<md5前8位>.<扩展名>，
 #                                          密文名必然不超长，对症"加密后文件名
@@ -35,15 +35,15 @@
 #   TRY_FIX_ORIGINAL     — 原始文件相对路径
 #   TRY_FIX_ALTERNATIVE  — 实际上传后的文件相对路径
 #   TRY_FIX_METHOD       — 使用的修复方法描述
-#   TRY_FIX_METHOD_ID    — 使用的修复方法全名（供黑名单/marker 记录，即 _method_desc 输出）
+#   TRY_FIX_METHOD_ID    — 使用的修复方法全名（供黑名单/marker 记录，即 _fix_method_desc 输出）
 #   TRY_FIX_RESTORE      — 还原方法描述（如何从 ALTERNATIVE 还原到 ORIGINAL）
 #   TRY_FIX_MESSAGE      — 失败原因（仅 status=failed 时）
 
 # 从 OpenList 数据库（sqlite）读取指定挂载的 addition JSON（API 失败时的兜底）
 # 数据库本地化后 data.db 在 runner 本地 /opt/openlist-data/ 下（旧路径保留兜底）
 # 先拷贝到 /tmp 避免与运行中容器的文件锁冲突（WAL 一并拷贝）
-# 用法: _get_addition_from_db <mount_path 如 /wopan176Crypt>
-_get_addition_from_db() {
+# 用法: _get_storage_addition_from_db <mount_path 如 /wopan176Crypt>
+_get_storage_addition_from_db() {
   local mount="$1"
   local db_src="/opt/openlist-data/data.db"
   [ -f "$db_src" ] || db_src="/dropbox/self-hosted/openlist/data/data.db"
@@ -123,7 +123,7 @@ _get_crypt_config() {
 
   # API 拿不到（401 无数据/挂载名不匹配/curl 失败等）→ 本地 data.db 兜底
   if [ -z "${addition:-}" ] || [ "$addition" = "null" ]; then
-    addition=$(_get_addition_from_db "$mount" 2>"$db_err") || addition=""
+    addition=$(_get_storage_addition_from_db "$mount" 2>"$db_err") || addition=""
     if [ -z "$addition" ]; then
       why="${why:+$why; }db 兜底失败: $(tail -n 1 "$db_err" 2>/dev/null | head -c 300)"
     fi
@@ -324,8 +324,8 @@ _raw_count_view_for() {
 # 不兼容历史全名: marker 里旧写法（"方法1: ..."、"m1"）不再被识别，按未知
 #   方法原样保留——其黑名单条目因此失效，对应文件最多重跑一轮已判定的方法
 #   即会重新拉黑，不修复的代价可控；换来的是命名不再背历史包袱。
-# 用法: _method_desc <method_id 如 copyto_shorthash>
-_method_desc() {
+# 用法: _fix_method_desc <method_id 如 copyto_shorthash>
+_fix_method_desc() {
   case "$1" in
     copyto_original)     echo "文件修复方法1 copyto_original: 直接 rclone copyto（原路径 + 原文件名）" ;;
     copyto_shorthash)    echo "文件修复方法2 copyto_shorthash: 短哈希文件名直传（<md5前8位>.<扩展名>）" ;;
@@ -336,16 +336,16 @@ _method_desc() {
   esac
 }
 
-# 方法短标签（仅日志展示用；marker/黑名单仍存 _method_desc 全名）
+# 方法短标签（仅日志展示用；marker/黑名单仍存 _fix_method_desc 全名）
 # 输入语义 ID 或全名均可
-_method_short() {
+_fix_method_short() {
   case "$1" in
     copyto_original|文件修复方法1*)      echo "修复方法1·copyto 原名" ;;
     copyto_shorthash|文件修复方法2*)     echo "修复方法2·短哈希名" ;;
     zip_split_original|文件修复方法3*)   echo "修复方法3·zip 分卷" ;;
     zip_split_shorthash|文件修复方法4*)  echo "修复方法4·短哈希分卷" ;;
     "") echo "未知方法" ;;
-    *) _method_desc "$1" ;;
+    *) _fix_method_desc "$1" ;;
   esac
 }
 
@@ -383,7 +383,7 @@ declare -A FIXED_THIS_RUN=()
 # 用法: _blacklist_add <file_rel> <method_id_or_full_name>
 _blacklist_add() {
   local entry
-  entry=$(_method_desc "$2")
+  entry=$(_fix_method_desc "$2")
   local cur="${FIX_METHOD_BLACKLIST[$1]:-}"
   case "|$cur|" in
     *"|$entry|"*) return 0 ;;
@@ -392,10 +392,10 @@ _blacklist_add() {
 }
 
 # 判断当前文件（TRY_FIX_ORIGINAL）的某方法是否被黑名单
-# 用法: _method_blocked <method_id>  返回 0=被拉黑应跳过
-_method_blocked() {
+# 用法: _fix_method_blocked <method_id>  返回 0=被拉黑应跳过
+_fix_method_blocked() {
   local entry
-  entry=$(_method_desc "$1")
+  entry=$(_fix_method_desc "$1")
   case "|${FIX_METHOD_BLACKLIST[${TRY_FIX_ORIGINAL:-}]:-}|" in
     *"|$entry|"*) return 0 ;;
     *) return 1 ;;
@@ -412,11 +412,11 @@ _method_blocked() {
 # 用法: _fix_method_gate <method_id> [开始日志附加文本] && { 方法体; }
 _fix_method_gate() {
   local mid="$1" extra="${2:-}"
-  if _method_blocked "$mid"; then
-    log_fix "$fix_log" "⏭  $(_method_short "$mid")（已拉黑，跳过）"
+  if _fix_method_blocked "$mid"; then
+    log_fix "$fix_log" "⏭  $(_fix_method_short "$mid")（已拉黑，跳过）"
     return 1
   fi
-  log_fix "$fix_log" "▶ $(_method_short "$mid")${extra}"
+  log_fix "$fix_log" "▶ $(_fix_method_short "$mid")${extra}"
   return 0
 }
 
@@ -424,7 +424,7 @@ _fix_method_gate() {
 # 用法: _fix_succeed <method_id> <method_text> <alternative> <restore_text> [md5]
 #   md5: 原文件内容指纹（try_fix 下载阶段统一计算，供还原时内容级校验；空=不可用）
 _fix_succeed() {
-  TRY_FIX_METHOD_ID="$(_method_desc "$1")"
+  TRY_FIX_METHOD_ID="$(_fix_method_desc "$1")"
   TRY_FIX_STATUS="success"
   TRY_FIX_METHOD="$2"
   TRY_FIX_ALTERNATIVE="$3"
@@ -455,7 +455,7 @@ _try_fix_split_archive() {
     _cmd_log "${mid}·zip" "$fix_log"
   local zip_path="${temp_dir}/${zip_base}"
   if [ ! -f "$zip_path" ]; then
-    log_fix "$fix_log" "  ⚠ $(_method_short "$mid") zip 未生成"
+    log_fix "$fix_log" "  ⚠ $(_fix_method_short "$mid") zip 未生成"
     return 1
   fi
   local zip_size
@@ -515,8 +515,8 @@ _try_fix_split_archive() {
     fi
   done
   log_fix "$fix_log" "  ${mid} 分卷上传汇总: $uploaded_count / $total_parts"
-  if [ "$all_uploaded" -eq 1 ] && [ "$uploaded_count" -gt 0 ] && _confirm_persist_by_count "$(_method_desc "$mid")" "$failed_file_rel" "$fix_log"; then
-    log_fix "$fix_log" "  ✅ $(_method_short "$mid") 成功（${uploaded_count} 分卷）"
+  if [ "$all_uploaded" -eq 1 ] && [ "$uploaded_count" -gt 0 ] && _confirm_persist_by_count "$(_fix_method_desc "$mid")" "$failed_file_rel" "$fix_log"; then
+    log_fix "$fix_log" "  ✅ $(_fix_method_short "$mid") 成功（${uploaded_count} 分卷）"
     local dir_desc name_desc=""
     if [ "$used_base64_dir" -eq 1 ]; then dir_desc="base64URL 编码目录"; else dir_desc="原路径"; fi
     [ "$encode_name" = "1" ] && name_desc="短哈希文件名 + "
@@ -526,7 +526,7 @@ _try_fix_split_archive() {
     _fix_succeed "$mid" "$method_text" "${alt_files[0]}" "$restore_text" "$file_md5"
     return 0
   fi
-  log_fix "$fix_log" "  ❌ $(_method_short "$mid") 失败（分卷未全部上传）"
+  log_fix "$fix_log" "  ❌ $(_fix_method_short "$mid") 失败（分卷未全部上传）"
   rm -rf "$split_dir_local" 2>/dev/null || true
   return 1
 }
@@ -634,7 +634,7 @@ _confirm_persist_by_count() {
   _RAW_VERIFY_BUDGET=$((_RAW_VERIFY_BUDGET - 1))
   local count=0
   local m_short
-  m_short=$(_method_short "$method_id")
+  m_short=$(_fix_method_short "$method_id")
   count=$(_raw_dir_count "$_RAW_VERIFY_DIR" "${_RAW_VERIFY_REFRESH:-}") || {
     log_fix "$log_file" "  ⚠️ raw 计数失败 → 信任返回值（${m_short}）"
     return 0

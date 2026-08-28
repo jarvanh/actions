@@ -61,7 +61,7 @@ _blacklist_add() {
   FIX_METHOD_BLACKLIST["$1"]="${cur:+$cur|}$2"
 }
 _flush_blacklist_to_marker() { :; }
-_method_short() { echo "$1"; }
+_fix_method_short() { echo "$1"; }
 _short_path() { echo "$1"; }
 # RESTART_FAIL_FROM: 从第 N 次调用起开始失败（0/空 = 永不失败）
 # 用于"只让复核阶段重启失败"这类定向场景

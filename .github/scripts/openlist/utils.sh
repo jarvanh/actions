@@ -84,8 +84,8 @@ log_fix() {
 }
 
 # 分节横幅（控制台+文件同写）: 视觉切分长日志的不同阶段
-# 用法: _sec <log_file> <标题>
-_sec() {
+# 用法: _log_section <log_file> <标题>
+_log_section() {
   local log_file="$1" title="$2"
   local line n
   n=$((72 - ${#title} - 5))

@@ -17,7 +17,9 @@ source "$_OPENLIST_SCRIPT_DIR/telegram.sh"       # Telegram 消息发送/编辑/
 source "$_OPENLIST_SCRIPT_DIR/progress.sh"       # 全局进度通知系统
 source "$_OPENLIST_SCRIPT_DIR/split.sh"          # 大文件分割（视频 ffmpeg + 非视频 7z）
 source "$_OPENLIST_SCRIPT_DIR/fix.sh"            # 缺失文件修复（try_fix_failed_file）
+source "$_OPENLIST_SCRIPT_DIR/openlist_driver.sh" # 驱动维护 / 健康预检 / 缓存与 truth-check
 source "$_OPENLIST_SCRIPT_DIR/sync.sh"           # 核心同步引擎（sync_with_logging）
+source "$_OPENLIST_SCRIPT_DIR/sync_notify.sh"    # 同步结果通知构建（tg_* 排版段落）
 source "$_OPENLIST_SCRIPT_DIR/marker.sh"         # 同步标记系统（跳过/警告/保存）
 source "$_OPENLIST_SCRIPT_DIR/restore.sh"        # 修复文件一键还原（restore_fixed_files）
 source "$_OPENLIST_SCRIPT_DIR/preview.sh"        # 任务预览（大小估算 + 流量图）
