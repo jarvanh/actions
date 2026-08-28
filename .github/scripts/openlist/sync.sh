@@ -22,7 +22,7 @@
 #     2. 失败记忆（FIX_METHOD_BLACKLIST + marker fix_blacklist）— 持久化
 #        每文件已判定假成功的方法；持久化验证（_persist_verify_entries，
 #        重启容器复核）发现假成功后本轮循环"换方法 → 重启复核"直到全部
-#        通过或所有方法耗尽（现行方法1-4 都会轮到，见 fix.sh _method_desc），跨轮修复同样跳过已拉黑
+#        通过或所有方法耗尽（现行文件修复方法1-4 都会轮到，见 fix.sh _method_desc），跨轮修复同样跳过已拉黑
 #        方法；上轮已真实持久化的修复（替代路径仍存在）直接沿用，不再重复上传
 #   - object not found 错误处理
 #   - 结构化同步结果通知（含源/目标大小、差异文件列表、排除规则）
@@ -47,18 +47,22 @@
 #     （方法一怕网页端登录、方法二怕手机 APP 登录），操作前须核对挂载所用
 #     方法。真失效属人工事件，预检不应也无法自动修复它。
 #
-# 方法1: POST /api/admin/storage/load_all — OpenList 官方"重新加载所有存储"
-#        API，从数据库重新初始化全部驱动（等效容器重启的驱动重建，秒级
+# 驱动刷新方法1: POST /api/admin/storage/load_all — OpenList 官方"重新加载所有
+#        存储" API，从数据库重新初始化全部驱动（等效容器重启的驱动重建，秒级
 #        完成、可无限次重复，传输期间的定时保鲜循环也用它）。
 #        历史教训: 旧端点 /api/driver/update 在 AList/OpenList API 中不存在，
 #        恒失败（run 32749862280: 容器重启后 76 秒仍失败实锤）——其失败
 #        ≠驱动坏，不能当驱动状态信号。run 31945907528/31951008332 的
 #        "storage 配置重载后放行 → 窗口期 PUT 全部假成功"事故，根因正是
-#        方法1 恒失败 + 方法3 不重建驱动。
-# 方法2: 重启容器（load_all 不可用且本轮未重启过时；驱动完整重初始化 +
+#        驱动刷新方法1 恒失败 + 驱动刷新方法3 不重建驱动。
+# 驱动刷新方法2: 重启容器（load_all 不可用且本轮未重启过时；驱动完整重初始化 +
 #        换新 token，一次 ~2 分钟），_OL_DRIVER_RESTART_DONE 每轮（进程
 #        生命周期）最多标记一次
-# 方法3（兜底）: storage/list 探测——不重建驱动，仅确认 API 可达
+# 驱动刷新方法3（兜底）: storage/list 探测——不重建驱动，仅确认 API 可达
+#
+# 命名口径: 以上"驱动刷新方法N"是本函数的三招，与 fix.sh 的"文件修复方法N"
+#   （copyto_original 等 4 种）是两套互不相干的编号体系，日志与注释里的
+#   简写必须带领域限定词，否则读到"方法1"时无从判断指哪一套。
 # 用法: _refresh_ol_drivers [log_filename]
 # 返回: 0=成功刷新, 非0=刷新失败
 _OL_DRIVER_RESTART_DONE=0
@@ -83,25 +87,25 @@ _refresh_ol_drivers() {
     --max-time 30 2>&1)
 
   if echo "$refresh_result" | grep -qE '"code":(200|0)|"message":"success'; then
-    echo "  OpenList 驱动 token 刷新成功 (方法1: /api/admin/storage/load_all 驱动已重建)" | tee -a "$log_file"
+    echo "  OpenList 驱动 token 刷新成功 (驱动刷新方法1: /api/admin/storage/load_all 驱动已重建)" | tee -a "$log_file"
     sleep 5
     return 0
   fi
 
-  # 方法 2: 重启容器（load_all 不可用 = token 权限不足/版本差异，见函数头注释）
+  # 驱动刷新方法2: 重启容器（load_all 不可用 = token 权限不足/版本差异，见函数头注释）
   if [ "$_OL_DRIVER_RESTART_DONE" -eq 0 ]; then
-    echo "  方法1 (/api/admin/storage/load_all) 失败: ${refresh_result:0:200} → 重启容器重建驱动..." | tee -a "$log_file"
+    echo "  驱动刷新方法1 (/api/admin/storage/load_all) 失败: ${refresh_result:0:200} → 重启容器重建驱动..." | tee -a "$log_file"
     if _restart_openlist_for_truth "" "$log_file"; then
       _OL_DRIVER_RESTART_DONE=1
-      echo "  OpenList 驱动 token 刷新成功 (方法2: 容器重启，驱动已完整重初始化)" | tee -a "$log_file"
+      echo "  OpenList 驱动 token 刷新成功 (驱动刷新方法2: 容器重启，驱动已完整重初始化)" | tee -a "$log_file"
       return 0
     fi
-    echo "  ⚠️ 方法2 容器重启失败，退回方法3: storage 配置重载..." | tee -a "$log_file"
+    echo "  ⚠️ 驱动刷新方法2 容器重启失败，退回驱动刷新方法3: storage 配置重载..." | tee -a "$log_file"
   else
-    echo "  方法1 失败（本轮已重启过容器，跳过重复重启），退回方法3: storage 配置重载..." | tee -a "$log_file"
+    echo "  驱动刷新方法1 失败（本轮已重启过容器，跳过重复重启），退回驱动刷新方法3: storage 配置重载..." | tee -a "$log_file"
   fi
 
-  # 方法 3（兜底）: 通过 /api/storage/list 后逐个刷新 storage 配置
+  # 驱动刷新方法3（兜底）: 通过 /api/storage/list 后逐个刷新 storage 配置
   # 仅在容器不可重启/本轮已重启过仍失败时使用——该方法不重建驱动，
   # 若驱动真处坏状态则放行同步会重演假成功窗口
   local storage_list
@@ -908,6 +912,10 @@ _sync_retry_423() {
 # 拒收的顽固缺失文件，直接进 4 种修复方法换路径/换形式落盘）。
 # 设定时跳过日志收集 + lsf diff（清单已是权威口径），其余链路
 # （marker 沿用/方法黑名单/即时落盘校验/名长诊断/增量持久化）原样复用。
+# 环境变量 SYNC_FIX_LIST_CACHE: 外部已列好的目标端清单文件（批次巩固刚做过
+#   lsf，见 _batch_consolidate）。设定时直接复用，不再全量重扫目标端——
+#   大目录单次 lsf 递归动辄数分钟，同一轮内重复列两三次纯属浪费。
+#   仅在非 OVERRIDE 路径（需要 src-vs-dst diff 的场景）生效。
 _sync_fix_missing_files() {
   if [[ "$dest_path" == openlist:* ]]; then
     # 收集缺失文件：
@@ -936,14 +944,26 @@ _sync_fix_missing_files() {
       local dst_ls="/tmp/${task_name}_dst_ls_$$.txt"
       local src_ls_ok=0 dst_ls_ok=0
       timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900}" rclone lsf "$source_path" -R --files-only "${FILTER_ARGS[@]}" > "$src_ls" 2>/dev/null && src_ls_ok=1 || true
-      timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900}" rclone lsf "$dest_path" -R --files-only > "$dst_ls" 2>/dev/null && dst_ls_ok=1 || true
+      # 目标端清单复用: 调用方（如批次巩固 _batch_consolidate）刚做过 lsf 的
+      # 话直接沿用，省掉一次全量递归（大目录数分钟）。缓存须非空才算有效，
+      # 空/缺失仍回退到现场 lsf（宁慢勿漏）
+      if [ -n "${SYNC_FIX_LIST_CACHE:-}" ] && [ -s "$SYNC_FIX_LIST_CACHE" ]; then
+        dst_ls="$SYNC_FIX_LIST_CACHE"
+        dst_ls_ok=1
+        echo "  复用调用方目标端清单（$(wc -l < "$dst_ls" | tr -d ' ') 项），跳过重复 lsf" | tee -a "$LOG_FILENAME"
+      else
+        timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900}" rclone lsf "$dest_path" -R --files-only > "$dst_ls" 2>/dev/null && dst_ls_ok=1 || true
+      fi
       if [ "$src_ls_ok" -eq 1 ] && [ "$dst_ls_ok" -eq 1 ]; then
         # 仅当两端列表都完整获取时才做 diff，避免半截列表产生误报触发无谓修复
         comm -23 <(sort -u "$src_ls") <(sort -u "$dst_ls") >> "$missing_list"
       else
         echo "⚠️ 源/目标文件列表获取不完整（src=${src_ls_ok}, dst=${dst_ls_ok}），跳过 lsf diff，仅用日志错误修复" | tee -a "$LOG_FILENAME"
       fi
-      rm -f "$src_ls" "$dst_ls"
+      # 只删本函数自建的临时文件；复用的调用方缓存（SYNC_FIX_LIST_CACHE）
+      # 归调用方所有，删了会让调用方后续步骤读到空清单
+      rm -f "$src_ls"
+      [ "$dst_ls" = "${SYNC_FIX_LIST_CACHE:-}" ] || rm -f "$dst_ls"
       sort -u "$missing_list" -o "$missing_list"
     fi
 
@@ -964,7 +984,8 @@ _sync_fix_missing_files() {
           # 全拉黑重置: 4 种方法全部拉黑的文件，黑名单大概率是假成功时代的
           # 污染（token 过期 → 即时校验误判 → 逐方法拉黑），而非真实的逐方法
           # 内容性失败——真实的内容性失败（如密文名超长）只会拉黑含原名的
-          # 方法（m1/m3），短哈希类方法（m2/m4）仍会成功。全拉黑 = 文件永远
+          # 方法（copyto_original / zip_split_original），短哈希类方法
+          # （copyto_shorthash / zip_split_shorthash）仍会成功。全拉黑 = 文件永远
           # 无法重试，只能重置（若确属真失败，本轮会重新逐方法拉黑，代价可控）。
           # run 32904752243 实锤: task0_照片 3 个名长文件全方法拉黑，修复
           # 管线对每个文件白下载 300MB 后直接放弃。
@@ -1129,6 +1150,18 @@ _sync_fix_missing_files() {
             if [ "${_NAMELEN_RAW_MAX:-0}" -gt 0 ] && [ "$_nl_enc_len" -gt "$_NAMELEN_RAW_MAX" ] 2>/dev/null; then
               _nl_flag="${_nl_flag} 🔴 >后端已接受最长(${_NAMELEN_RAW_MAX}B)"
               _NAMELEN_OVER_RAWMAX=$((_NAMELEN_OVER_RAWMAX + 1))
+              # 密文名已超过后端实际接受过的最长名 → 带原名的修复方法注定
+              # 被拒（后端内容性拒收，重试多少次都一样），直接拉黑，省掉
+              # 一次整文件白下载 + 白跑的 PUT。拉黑走既有黑名单通道，
+              # try_fix_failed_file 会从对症的短哈希名方法开始。
+              # 判据用"后端已接受最长"而非固定 255B: 后者是理论上限，
+              # 多数后端在远低于它时就拒收，只有实测口径才不误伤。
+              # zip_split_original 同样带原名（zip 基底名 = 原文件名 + .zip，
+              # 只长不短），与 copyto_original 同属注定失败；
+              # copyto_shorthash / zip_split_shorthash 用短哈希名，密文名远低于上限
+              _blacklist_add "$failed_line" copyto_original
+              _blacklist_add "$failed_line" zip_split_original
+              echo "  ⏭ 名长注定失败 → 跳过 $(_method_short copyto_original) / $(_method_short zip_split_original)，直接试短哈希名方法" | tee -a "$LOG_FILENAME"
             fi
             echo "  📏 名长: 原名 ${_nl_orig_len}B → 密文名 ${_nl_enc_len}B${_nl_flag}" | tee -a "$LOG_FILENAME"
           fi
@@ -1189,9 +1222,9 @@ _sync_fix_missing_files() {
       if [ -n "${_CRYPT_ONTHEFLY:-}" ]; then
         echo "名长诊断汇总: 密文名>255B 共 ${_NAMELEN_OVER_255} 个 / 超后端已接受最长(${_NAMELEN_RAW_MAX}B) 共 ${_NAMELEN_OVER_RAWMAX} 个" | tee -a "$LOG_FILENAME"
         if [ "${_NAMELEN_OVER_RAWMAX:-0}" -gt 0 ]; then
-          echo "  → 长度假设成立: 缺失文件密文名超过后端实际接受上限，将由 $(_method_desc m3) 兜底落盘" | tee -a "$LOG_FILENAME"
+          echo "  → 长度假设成立: 缺失文件密文名超过后端实际接受上限，将由 $(_method_desc zip_split_original) 兜底落盘" | tee -a "$LOG_FILENAME"
         elif [ "${_NAMELEN_OVER_255:-0}" -eq 0 ]; then
-          echo "  → 长度假设不成立: 缺失文件密文名均未超限，根因另有其因（看 $(_method_desc m1) 的真实报错）" | tee -a "$LOG_FILENAME"
+          echo "  → 长度假设不成立: 缺失文件密文名均未超限，根因另有其因（看 $(_method_desc copyto_original) 的真实报错）" | tee -a "$LOG_FILENAME"
         fi
       fi
     fi
@@ -1572,10 +1605,12 @@ sync_with_logging() {
       # wopan176 的 OAuth access token 有效期约 5 分钟，长时间同步会过期
       _refresh_ol_drivers "$LOG_FILENAME"
 
-      # 二次预检熔断：方法1 load_all 失败后走容器重启时，"重启成功"只证明
+      # 二次预检熔断：驱动刷新方法1 load_all 失败后走容器重启时，"重启成功"只证明
       # 容器活了，不证明后端驱动登录有效（run 33026674750: baidupan 登录
       # 失效，重启容器判成功后放行，rclone PUT 全部 409 Conflict 并空转
-      # m1-m11 修复管线直至 job 被取消）。此处用完整两层预检再验一次，
+      # m1-m11 修复管线直至 job 被取消；m1-m11 为当时旧版 11 种方法的编号，
+      # 现行方法已精简为 4 种并改用语义 ID，见 fix.sh 函数头）。此处用完整
+      # 两层预检再验一次，
       # 仍不健康则带哨兵码退出——88 是 rclone 理论上不会返回的退出码，
       # 由 sync_with_logging 消费并转为入口预检失败的跳过语义。
       if ! _check_openlist_backend_connectivity "$dest_path" "$LOG_FILENAME"; then

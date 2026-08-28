@@ -4,12 +4,12 @@
 # 输出: fixed_files JSON 数组
 def restore_info($orig; $alt; $method; $src; $dst):
   # 现行 4 种修复方式精确识别（文案来源: fix.sh _fix_succeed 各调用点）:
-  #   "rclone copyto（原路径 + 原文件名）"             → copy，alt==orig 无需还原 (方法1)
-  #   "rclone copyto（base64URL 编码目录 + 原文件名）"  → base64url_dir (方法1 目录降级变体)
-  #   "rclone copyto（[base64URL 编码目录 + ]短哈希文件名 <hash>）" → short_hash_rename (方法2)
+  #   "rclone copyto（原路径 + 原文件名）"             → copy，alt==orig 无需还原 (文件修复方法1)
+  #   "rclone copyto（base64URL 编码目录 + 原文件名）"  → base64url_dir (文件修复方法1 目录降级变体)
+  #   "rclone copyto（[base64URL 编码目录 + ]短哈希文件名 <hash>）" → short_hash_rename (文件修复方法2)
   #   "分卷 zip（[base64URL 编码目录 + ][短哈希文件名 + ]<粒度> 分卷切割，共 N 卷）"
-  #                                                   → split_zip (方法3 原名 / 方法4 短哈希)
-  # 注: 分卷分支必须排在短哈希之前——方法4 的方法文本同时含"分卷切割"和
+  #                                                   → split_zip (文件修复方法3 原名 / 文件修复方法4 短哈希)
+  # 注: 分卷分支必须排在短哈希之前——文件修复方法4 的方法文本同时含"分卷切割"和
   #     "短哈希文件名"两个子串，先命中短哈希会把打包类误判成改名类
   # 注: 不能用 ".*文件名" 模糊匹配，"原文件名" 里也有 "文件名" 3 个字，会误判
   # 语法: jq 对象值不能裸用 + 拼接（{a: "x" + "y"} 非法），script 值必须括号包裹
@@ -18,7 +18,7 @@ def restore_info($orig; $alt; $method; $src; $dst):
   | ($method | test("base64URL 编码目录 ")) as $has_b64_dir
   | ($orig | split("/") | .[-1]) as $orig_name
   | if   $has_split_zip then {kind:"split_zip",
-      summary: "zip 打包后切割为分卷上传（粒度见方法文本，OPENLIST_SPLIT_PART_BYTES 可调），替代名为原名（方法3）或短哈希名（方法4）",
+      summary: "zip 打包后切割为分卷上传（粒度见方法文本，OPENLIST_SPLIT_PART_BYTES 可调），替代名为原名（文件修复方法3）或短哈希名（文件修复方法4）",
       steps: ["下载所有分卷到同一目录", "按顺序合并: cat *.0* > merged.zip", "执行: 7z x merged.zip -o<output_dir>（或 unzip merged.zip）"],
       script:  ("set -euo pipefail\nSRC=\"" + $src + "\"\nDST=\"" + $dst + "\"\nORIG=\"" + $orig + "\"\nALT=\"" + $alt + "\"\nTMP=$(mktemp -d)\nALT_DIR=$(dirname \"$ALT\")\nALT_FNAME=$(basename \"$ALT\")\nSPLIT_FULL=\"${ALT_FNAME%.*}\"\necho \"分卷前缀: $SPLIT_FULL\"\nrclone copy \"${DST}/${ALT_DIR}\" \"$TMP\" --include \"${SPLIT_FULL}.*\" --progress 2>&1 | tail -5\ncd \"$TMP\"\ncat ${SPLIT_FULL}.0* > merged.zip\necho \"合并后 zip 大小: $(stat -c%s merged.zip 2>/dev/null || stat -f%z merged.zip 2>/dev/null) bytes\"\n7z x merged.zip -o\"$TMP/out\" -y || unzip merged.zip -d \"$TMP/out\"\nls -la \"$TMP/out/\"\n# 还原后的源文件在: $TMP/out/" + $orig_name + "\nrm -rf \"$TMP\"")}
     elif $has_short_hash then {kind:"short_hash_rename",

@@ -831,14 +831,93 @@ _batch_consolidate() {
   # 注意: bash 里 "VAR=x func" 的赋值在函数返回后会残留（非 POSIX 模式），
   # 必须显式 unset，否则最终 sync_with_logging 的 _sync_fix_missing_files
   # 会误用本批的顽固缺失清单
-  SYNC_FIX_MISSING_OVERRIDE="$stubborn" _sync_fix_missing_files || true
-  unset SYNC_FIX_MISSING_OVERRIDE
+  # SYNC_FIX_LIST_CACHE: 把本函数刚取的真值清单递进去，让修复管线省掉
+  # 一次目标端全量 lsf（大目录数分钟；同一轮内重复列两三次纯属浪费）
+  SYNC_FIX_MISSING_OVERRIDE="$stubborn" SYNC_FIX_LIST_CACHE="$dest_truth" _sync_fix_missing_files || true
+  unset SYNC_FIX_MISSING_OVERRIDE SYNC_FIX_LIST_CACHE
   _sync_serialize_fixed_files || true
   _sync_accumulate_fixed_results || true
 
   local fixed_n=0
   fixed_n=$(wc -l < "$fix_list" 2>/dev/null | tr -d ' ')
   echo "${label} 巩固: 修复管线完成，${fixed_n}/${stubborn_n} 个换方法落盘成功"
+
+  # ===== 修复管线后重启容器复核 =====
+  # 修复方法返回"成功"只代表 PUT 被接受，与批次传输的假成功同源：
+  # OpenList 缓存里有、重启即消失。批次巩固的价值就在于"重启后仍在的才是
+  # 真成果"，修复管线却一直没有这道复核 —— 17/68 的成功数里混有多少假
+  # 成功无从得知，下一轮 marker 沿用判定又把它们当已落盘跳过。
+  # 此处重启取真值、逐条核对 fix_list 替代路径，未落盘的当场拉黑该方法并
+  # 转失败清单（下一轮从剩余方法继续，靠 marker 黑名单收敛，不在此空转重跑）
+  if [ "$fixed_n" -gt 0 ]; then
+    _consolidate_verify_fixed "$label" "$batch_idx" "$batch_dir" "$dest_path" \
+      "$fix_list" "$fail_list" "$batch_log" "$retry_log"
+    local verify_ok=$?
+    [ "$verify_ok" -eq 0 ] || echo "${label} 巩固: 修复复核完成，部分条目重启后未落盘（已拉黑，下轮换方法）"
+  fi
+  return 0
+}
+
+# 批次巩固·修复成果重启复核（_batch_consolidate 的第 5 步）
+# 重启容器取后端真值 → 逐条核对 fix_list 的替代路径是否仍在 → 未落盘者
+# 拉黑所用方法、从 fix_list 剔除、转记 fail_list，避免假成功进入 marker
+# 后被下一轮当作"沿用上轮修复"永久跳过。
+# 依赖调用方作用域: task_name / source_path / dest_path（修复重试用）
+# 用法: _consolidate_verify_fixed <label> <batch_idx> <batch_dir> <dest_path> \
+#         <fix_list> <fail_list> <batch_log> <retry_log>
+# 返回: 0=全部通过或跳过复核, 1=存在未落盘条目
+_consolidate_verify_fixed() {
+  local label="$1"
+  local batch_idx="$2"
+  local batch_dir="$3"
+  local dest_path="$4"
+  local fix_list="$5"
+  local fail_list="$6"
+  local batch_log="$7"
+  local retry_log="$8"
+
+  [ -s "$fix_list" ] || return 0
+
+  progress_update "${label} 巩固: 重启容器复核修复成果"
+  if ! _restart_openlist_for_truth "${dest_path#openlist:}" "$batch_log"; then
+    echo "⚠️ ${label} 巩固: 复核重启失败，跳过修复复核（条目以即时校验为准，最终检查兜底）"
+    return 0
+  fi
+
+  local truth3="${batch_dir}/dest_truth3_${batch_idx}.txt"
+  timeout 900 rclone lsf "$dest_path" -R --files-only > "$truth3" 2>/dev/null || true
+  if ! [ -s "$truth3" ]; then
+    echo "⚠️ ${label} 巩固: 复核列表获取失败，跳过修复复核（宁漏判勿误删已落盘成果）"
+    return 0
+  fi
+  sort -u "$truth3" -o "$truth3"
+
+  local ghost_n=0 kept_n=0
+  local kept="${batch_dir}/fix_kept_${batch_idx}.txt"
+  : > "$kept"
+  local f_orig f_alt f_method f_restore f_size f_bytes f_mid
+  while IFS='|' read -r f_orig f_alt f_method f_restore f_size f_bytes f_mid; do
+    [ -z "$f_alt" ] && continue
+    if grep -qxF "$f_alt" "$truth3"; then
+      echo "${f_orig}|${f_alt}|${f_method}|${f_restore}|${f_size}|${f_bytes}|${f_mid}" >> "$kept"
+      kept_n=$((kept_n + 1))
+    else
+      # 假成功: 拉黑本条所用方法，下一轮直接从剩余方法继续
+      [ -n "$f_mid" ] && _blacklist_add "$f_orig" "$f_mid"
+      echo "🔴 ${label} 巩固: 修复假成功（重启后消失）· $(_method_short "$f_mid") · $(_short_path "$f_orig")"
+      echo "${f_orig}|${f_size}|修复后重启复核未落盘（$(_method_short "$f_mid")，已拉黑）" >> "$fail_list"
+      ghost_n=$((ghost_n + 1))
+    fi
+  done < "$fix_list"
+
+  if [ "$ghost_n" -gt 0 ]; then
+    # fix_list 只留真成果: 它是 _sync_serialize_fixed_files 与 marker 的来源，
+    # 假成功条目写进 marker 会被下一轮当作"沿用上轮修复"永久跳过
+    cp "$kept" "$fix_list"
+    _flush_blacklist_to_marker "$task_name" "$dest_path" "$batch_log" 2>/dev/null || true
+  fi
+  echo "${label} 巩固: 修复复核 ${kept_n} 个真实落盘 / ${ghost_n} 个假成功已剔除"
+  [ "$ghost_n" -eq 0 ] || return 1
   return 0
 }
 
