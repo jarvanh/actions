@@ -29,7 +29,7 @@ ok_or() { if [ "$1" = yes ]; then chk "$2" ok ok; else chk "$2" fail ok; fi }
 has_substr() { printf '%s' "$2" | grep -qF "$1"; }
 
 # ---------- 抽取被测函数 ----------
-sed -n '/^_get_openlist_token()/,/^}/p' "$SCRIPT_DIR/../utils.sh" > extracted.sh
+sed -n '/^_get_openlist_token()/,/^}/p' "$SCRIPT_DIR/../openlist_api.sh" > extracted.sh
 source extracted.sh
 export OPENLIST_ADMIN_PASSWORD="${OPENLIST_ADMIN_PASSWORD:-pw123}"
 

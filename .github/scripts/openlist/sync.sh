@@ -27,11 +27,27 @@
 #   - object not found 错误处理
 #   - 结构化同步结果通知（含源/目标大小、差异文件列表、排除规则）
 #
-# 依赖: utils.sh, telegram.sh, fix.sh (try_fix_failed_file)
+# 依赖: utils.sh, rclone_query.sh, openlist_api.sh, telegram.sh,
+#       fix.sh (try_fix_failed_file)
 # 依赖环境变量:
 #   RCLONE_DEFAULT_FLAGS — 共用 rclone 参数数组（在 flags.sh 中定义）
 #   TELEGRAM_BOT_TOKEN   — 用于发送日志文件
 #   TELEGRAM_CHAT_ID     — 用于发送日志文件
+
+# 初始化同步会话状态（计数器/日志名/进度系统）
+# 变量不加 local，故意写入调用方 shell（各 step source 后直接调用）
+# 由 workflow 在每个同步 step 开头调用；依赖 progress.sh 的 progress_init
+init_sync_state() {
+  PROCESSED_FILES_LOG="processed_videos.log"
+  SYNC_SKIP_QUIET=0
+  SYNC_SKIPPED=0
+  SYNC_FAILED=0
+  SYNC_TRANSFERRED_BYTES=0
+  AUTO_SPLIT_INFO=""
+  SYNC_AUTO_SPLIT_DEPTH=0
+  # 初始化全局进度通知（任务在预览阶段自动注册）
+  progress_init
+}
 
 # 刷新 OpenList 全部驱动的 token（重建驱动，非 wopan176 专属）
 # 主要动机: wopan176 的 access token 有效期短（约 5 分钟），长时间同步会过期，
