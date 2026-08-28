@@ -59,7 +59,7 @@ proxy-speedtest/            测速结果数据
 | | `sync_notify.sh` | 324 | 同步结果通知构建（Telegram 排版） |
 | | `sync_progress.sh` | 463 | 全局进度通知系统 |
 | **file** | `file_split.sh` | 666 | 大文件分割（ffmpeg 关键帧 / 7z 分卷） |
-| | `file_fix.sh` | 899 | 单文件修复的 4 种方法实现 |
+| | `file_fix.sh` | 1243 | 单文件修复的 4 种方法 + 目录可写性预检 + 短哈希目录兜底 |
 | | `file_fix_pipeline.sh` | 875 | 修复管线编排（方法轮换 + 增量持久化） |
 | | `file_restore.sh` | 632 | 修复文件还原（目标端 → 原路径 / 源端） |
 | **task** | `task_preview.sh` | 359 | 任务预览（大小估算、流量图） |
@@ -205,7 +205,10 @@ workflow 会把 `*.sh` `*.py` `*.jq` 拷到 `/tmp` 再 `source /tmp/load_all.sh`
 **并发**：`OPENLIST_TRANSFERS` · `OPENLIST_CHECKERS`
 
 **开关**：`FORCE_SYNC` · `OPENLIST_SPLIT_ON_SYNC_FAILURE` · `OPENLIST_TASK_ROTATION` ·
-`OPENLIST_BATCH_CONSOLIDATE` · `TASK_PREVIEW_ONLY` / `TASK_REGISTER_ONLY`（由 workflow 设置）
+`OPENLIST_BATCH_CONSOLIDATE` · `OPENLIST_HASH_DIR_FALLBACK`（=0 关闭短哈希目录兜底）·
+`OPENLIST_DIR_PROBE_MAX_RESTART`（目录可写性预检的每轮重启预算，默认 3）·
+`OPENLIST_DIR_PROBE_TIMEOUT`（预检探针超时，默认 120s）·
+`TASK_PREVIEW_ONLY` / `TASK_REGISTER_ONLY`（由 workflow 设置）
 
 ---
 
@@ -232,8 +235,10 @@ cd .github/scripts/openlist
 for t in tests/*.sh; do bash "$t"; done
 ```
 
-11 个测试、270 个断言，覆盖轮转、批次巩固、修复管线优化、预览 diff、truth-check、
-token 登录、marker 等。均为纯 bash + stub（mock 掉 rclone/curl/docker），无需真实网盘。
+13 个测试、309 个断言，覆盖轮转、批次巩固、修复管线优化、修复日志区段头提取、
+目录可写性预检（含假成功目录）与短哈希目录兜底、预览 diff、truth-check、
+token 登录、marker 等。均为纯 bash + stub
+（mock 掉 rclone/curl/docker），无需真实网盘。
 
 **注意两点**：
 
@@ -251,6 +256,7 @@ token 登录、marker 等。均为纯 bash + stub（mock 掉 rclone/curl/docker�
 | 增删同步任务 | `task_engine.sh` 的 `SYNC_TASK_REGISTRY` |
 | rclone 参数 | `rclone_flags.sh` |
 | 调阈值/超时 | workflow 的 `env:` 块（不要写死在脚本里） |
-| 加一种文件修复方法 | `file_fix.sh`（实现）+ 同步更新 `文件修复方法N` 文案 |
+| 加一种文件修复方法 | `file_fix.sh`（实现 + `_try_fix_methods_round` 轮换）+ 同步更新 `文件修复方法N` 文案 |
+| 改目录级降级策略 | `file_fix.sh` 的 `_fix_probe_dir_writable`（预检/重启复核）+ `_fix_switch_to_hash_dir`（切换）+ `restore_info.jq` 的目录类分支 |
 | 改通知排版 | `sync_notify.sh` / `telegram.sh` |
 | 加新模块 | 新建 `<领域>_<职责>.sh` + 在 `load_all.sh` 对应层加一行 |
