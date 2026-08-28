@@ -22,7 +22,7 @@
 #     2. 失败记忆（FIX_METHOD_BLACKLIST + marker fix_blacklist）— 持久化
 #        每文件已判定假成功的方法；持久化验证（_persist_verify_entries，
 #        重启容器复核）发现假成功后本轮循环"换方法 → 重启复核"直到全部
-#        通过或所有方法耗尽（方法1-11 都会轮到），跨轮修复同样跳过已拉黑
+#        通过或所有方法耗尽（现行方法1-4 都会轮到，见 fix.sh _method_desc），跨轮修复同样跳过已拉黑
 #        方法；上轮已真实持久化的修复（替代路径仍存在）直接沿用，不再重复上传
 #   - object not found 错误处理
 #   - 结构化同步结果通知（含源/目标大小、差异文件列表、排除规则）
@@ -243,7 +243,7 @@ _pre_webdav_health_check() {
     backend)    reason="后端异常" ;;
     *)          reason="探测持续失败（未知错误）" ;;
   esac
-  echo "🚫 $label $reason（WebDAV 预检），跳过本轮同步" | tee ${log_file:+-a "$log_file"}
+  echo "🚫 $label ${reason}（WebDAV 预检），跳过本轮同步" | tee ${log_file:+-a "$log_file"}
   echo "$out" | head -5 | sed 's/^/   ▸ /' | tee ${log_file:+-a "$log_file"}
   return 1
 }
@@ -298,14 +298,14 @@ _openlist_api_health_check() {
 
   # 目录尚未创建属于首次同步的正常状态
   if echo "$message" | grep -Eqi 'object not found|path.*not.*found|目录不存在|路径不存在|没有找到文件'; then
-    echo "ℹ️ $label API 强校验: 目标目录尚未创建（$message），放行由同步流程建立" | tee ${log_file:+-a "$log_file"}
+    echo "ℹ️ $label API 强校验: 目标目录尚未创建（${message}），放行由同步流程建立" | tee ${log_file:+-a "$log_file"}
     return 0
   fi
 
   # 注意分支顺序: 认证/存储异常判定必须在密码降级之前——凭据类错误
   # （如"密码错误"）不能被"需访问密码=配置项"的降级规则吞掉。
   if echo "$message" | grep -Eqi 'unauthorized|permission denied|not authenticated|login|登录|授权|token|auth.*fail|auth.*error|credential|identity|密码错误'; then
-    echo "🚫 $label 后端驱动认证失效（API 强校验 code=$code）: $message，跳过本轮同步" | tee ${log_file:+-a "$log_file"}
+    echo "🚫 $label 后端驱动认证失效（API 强校验 code=${code}）: ${message}，跳过本轮同步" | tee ${log_file:+-a "$log_file"}
     # wopan 登录态有效期有上限（方法一 7 天/方法二 2 个月）且无法自动续期，
     # 真失效只能人工重抓；重抓时跨端登录互踢，先核对挂载用的方法再动手
     if [[ "$label" == *wopan* || "$message" == *wopan* ]]; then
@@ -314,18 +314,18 @@ _openlist_api_health_check() {
     return 1
   fi
   if echo "$message" | grep -Eqi 'storage|存储|driver|驱动|reload|internal server|服务器内部|exception|panic|bad gateway|service unavailable|gateway timeout|request failed|请求失败|too many requests'; then
-    echo "🚫 $label 后端驱动异常（API 强校验 code=$code）: $message，跳过本轮同步" | tee ${log_file:+-a "$log_file"}
+    echo "🚫 $label 后端驱动异常（API 强校验 code=${code}）: ${message}，跳过本轮同步" | tee ${log_file:+-a "$log_file"}
     return 1
   fi
 
   # 目录设置了访问密码属于配置项而非故障，不能据此判定后端死掉
   if echo "$message" | grep -Eqi 'password|密码'; then
-    echo "ℹ️ $label API 强校验: 目标目录需访问密码（配置项，$message），降级放行" | tee ${log_file:+-a "$log_file"}
+    echo "ℹ️ $label API 强校验: 目标目录需访问密码（配置项，${message}），降级放行" | tee ${log_file:+-a "$log_file"}
     return 0
   fi
 
   # 未识别的错误一律保守跳过并留痕，等待人工观察或下轮自愈
-  echo "🚫 $label API 强校验未通过（未知错误 code=$code）: $message，保守跳过本轮同步" | tee ${log_file:+-a "$log_file"}
+  echo "🚫 $label API 强校验未通过（未知错误 code=${code}）: ${message}，保守跳过本轮同步" | tee ${log_file:+-a "$log_file"}
   return 1
 }
 
@@ -362,6 +362,7 @@ _check_openlist_backend_connectivity() {
 # 查找 OpenList 最新日志文件
 # （数据库本地化后日志在 /opt/openlist-data/log，旧路径保留兜底）
 _find_openlist_log() {
+  local logdir
   for logdir in \
     "/opt/openlist-data/log" \
     "/opt/openlist-data/logs" \
@@ -666,7 +667,8 @@ _persist_verify_entries() {
       alt_prefix="${alt_prefix%.zip}"      # also strip ".zip" if leftover
       # 列当前存在的所有同前缀编号分卷
       local existing_parts
-      existing_parts=$(rclone lsf "${dest_path}/${alt_dir_alt}" --files-only 2>/dev/null | grep -E "${alt_prefix}\.zip\.[0-9]{3}" | sort)
+      # pipefail 下 grep 无匹配(rc=1)会传染赋值语句终止 step; 空结果由下方 part_count=0 分支处理
+      existing_parts=$(rclone lsf "${dest_path}/${alt_dir_alt}" --files-only 2>/dev/null | { grep -E "${alt_prefix}\.zip\.[0-9]{3}" || true; } | sort)
       # grep -c 无匹配时已输出 0（退出码 1），用 || true 防止追加第二行 0
       local part_count
       part_count=$(printf '%s' "$existing_parts" | grep -c . || true)
@@ -1159,7 +1161,8 @@ _sync_fix_missing_files() {
           if [ "$_cb_threshold" -gt 0 ] 2>/dev/null; then
             local _delta _sigline _sig _sig_n
             _delta=$(tail -c +$((_fix_pos_before + 1)) "$fix_log" 2>/dev/null || true)
-            _sigline=$(printf '%s\n' "$_delta" | grep -oE 'Failed to copyto?: .+' | \
+            # pipefail 下 grep 无匹配会传染赋值语句; 无匹配 → _sig 为空 → 下方 -n 判断跳过
+            _sigline=$(printf '%s\n' "$_delta" | { grep -oE 'Failed to copyto?: .+' || true; } | \
               sed -E 's/^Failed to copyto?: //' | sort | uniq -c | sort -rn | head -1)
             _sig_n=$(printf '%s\n' "$_sigline" | awk '{print $1}')
             _sig=$(printf '%s\n' "$_sigline" | sed -E 's/^ *[0-9]+ //')
@@ -1768,9 +1771,9 @@ _send_sync_result_notification() {
   # 始终显示文件数信息
   local diff_files_list=""
   if [[ "$source_count_raw" =~ ^[0-9]+$ ]] && [[ "$dest_count_raw" =~ ^[0-9]+$ ]]; then
-    local diff=$((source_count_raw - dest_count_raw))
-    if [ "$diff" -ne 0 ]; then
-      count_info="<b>差异 ${diff}</b>（源端 ${source_count} / 目标 ${dest_count}）"
+    local count_diff=$((source_count_raw - dest_count_raw))
+    if [ "$count_diff" -ne 0 ]; then
+      count_info="<b>差异 ${count_diff}</b>（源端 ${source_count} / 目标 ${dest_count}）"
       diff_files_list=$(_build_diff_files_list "$source_path" "$dest_path" "${extra_args[@]}")
     else
       count_info="${source_count}（一致）"

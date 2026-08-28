@@ -1,3 +1,7 @@
+# 从 OpenList 数据库（x_storages 表）读取指定挂载的 addition JSON。
+# 用法: python3 get_storage_addition.py <db_path> <mount_path>
+# 输出: 成功时 stdout 为 addition JSON 原文；诊断信息走 stderr。
+# 退出码: 0 成功 / 1 参数缺失 / 3 addition 为空 / 4 挂载不存在 / 5 sqlite 读取失败
 import sqlite3
 import sys
 

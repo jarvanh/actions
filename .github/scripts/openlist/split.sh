@@ -1,8 +1,8 @@
 #!/bin/bash
 # ===== OpenList 同步工具 — 大文件分割函数 =====
-# 处理超过后端单文件大小阈值（默认 4GB，LARGE_FILE_THRESHOLD 可调）的大文件：
+# 处理超过后端单文件大小阈值（默认 4GB，LARGE_FILE_THRESHOLD_BYTES 可调）的大文件：
 #   - 视频/音频文件：ffmpeg 按关键帧无损分割（-c copy）
-#   - 其他文件：7z 分卷存储模式（可恢复）
+#   - 其他文件：7z 分卷（-mx=0 存储模式不压缩，仅切卷；卷大小 OPENLIST_7Z_VOLUME_SIZE 可调）
 #
 # 依赖: utils.sh (log_fix, check_log_has_content, escape_html, format_bytes_iec),
 #       telegram.sh (send_telegram_message, tg_add_title/tg_add_kv/tg_add_path/tg_add_section/tg_add_block)
@@ -217,8 +217,8 @@ split_large_video() {
   fi
   local file_size
   file_size=$(stat -c%s "$local_file_path" 2>/dev/null || echo 0)
-  # 后端单文件大小阈值按 4,000,000,000 bytes 处理（LARGE_FILE_THRESHOLD 可调）。
-  # 分片目标略低于 4G，尽量贴近上限，同时给封装开销和关键帧边界留余量。
+  # 分片上限与目标大小（OPENLIST_MAX_PART_SIZE / OPENLIST_TARGET_PART_SIZE 可调）。
+  # 分片目标略低于上限，给封装开销和关键帧边界留余量。
   local max_part_size="${OPENLIST_MAX_PART_SIZE:-4000000000}"
   local target_part_size="${OPENLIST_TARGET_PART_SIZE:-3980000000}"
   local check_duration="⏳ 未执行"
@@ -322,7 +322,7 @@ split_large_video() {
 
     if [ "$ffmpeg_exit_code" -ne 0 ]; then
       log_fix "$video_split_log" "ffmpeg 分割命令失败，退出码: $ffmpeg_exit_code"
-      check_ffmpeg="❌ 未通过（exit=$ffmpeg_exit_code，已尝试 ${attempt}/${max_split_attempts}）"
+      check_ffmpeg="❌ 未通过（exit=${ffmpeg_exit_code}，已尝试 ${attempt}/${max_split_attempts}）"
       check_parts_generated="❌ 未执行（ffmpeg 失败）"
       check_parts_size="❌ 未执行（ffmpeg 失败）"
       rm -rf "$split_dir" 2>/dev/null || true
@@ -384,10 +384,10 @@ split_large_video() {
 
   # 上传失败：保留原始文件
   if [ "$upload_failed" -ne 0 ] || [ "$part_count" -ne "$generated_count" ]; then
-    log_fix "$video_split_log" "分片上传未全部成功，已上传 $part_count/$generated_count；保留原始大文件"
+    log_fix "$video_split_log" "分片上传未全部成功，已上传 $part_count/${generated_count}；保留原始大文件"
     rm -f "$local_file_path" 2>/dev/null || true
     rm -rf "$split_dir" 2>/dev/null || true
-    check_upload="❌ 未通过（已上传 $part_count/$generated_count）"
+    check_upload="❌ 未通过（已上传 $part_count/${generated_count}）"
     check_delete="⛔ 未删除（分片上传未全部成功）"
     send_split_notification_with_checks "$part_count" "分片上传失败，已保留原始文件"
     return 1
@@ -499,7 +499,7 @@ split_large_binary_file() {
 
   local expected_upload_count=$((generated_count + 2))
   if [ "$upload_failed" -ne 0 ] || [ "$upload_count" -ne "$expected_upload_count" ]; then
-    log_fix "$video_split_log" "非视频分卷上传未全部成功，已上传 $upload_count/$expected_upload_count；保留原始大文件"
+    log_fix "$video_split_log" "非视频分卷上传未全部成功，已上传 $upload_count/${expected_upload_count}；保留原始大文件"
     rm -f "$local_file_path" 2>/dev/null || true
     rm -rf "$split_dir" 2>/dev/null || true
     send_binary_split_notification "${remote_source}:${remote_path}/${file_name}" "$file_size" "$generated_count" "分卷上传失败，已保留原始文件" "$video_split_log"

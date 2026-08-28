@@ -311,7 +311,10 @@ _progress_refresh() {
   msg=$(_progress_render)
   local new_id
   new_id=$(_tg_ensure_bottom_message "$msg")
+  # Telegram 失败（new_id 空）时返回 1 会沿 progress_update/task_begin 等
+  # 裸调用链在 set -e 下终止整个 step —— 通知失败不传播
   [ -n "$new_id" ] && echo "$new_id" > "$PROGRESS_MSG_ID_FILE"
+  return 0
 }
 
 # 初始化进度通知系统（在第一个任务开始前调用一次）
@@ -408,7 +411,7 @@ task_update_force() {
 }
 
 # 手动刷新进度消息（无节流）
-# 用法: 任务队列注册完成后调用，让"总任务"在首个任务开始前就是全量
+# 用法: progress_reload — 任务队列注册完成后调用，让"总任务"在首个任务开始前就是全量
 progress_reload() {
   _progress_refresh
 }
@@ -440,9 +443,9 @@ progress_finalize() {
   _progress_refresh
 }
 
-# ===== 兼容层 =====
-# 旧代码直接修改 PROGRESS_PHASE_INFO 和 PROGRESS_STATS 全局变量，
-# 兼容层自动读取这些变量并通过新 API 更新。
+# ===== 阶段信息入口（tasks.sh 高频使用）=====
+# 调用方把阶段树写入 PROGRESS_PHASE_INFO、统计写入 PROGRESS_STATS 全局变量，
+# 本入口将其转发给 task_update/task_update_force 并把变量转换为树行/统计参数。
 progress_update() {
   local detail="$1"
   local stats="${2:-}"

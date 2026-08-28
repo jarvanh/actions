@@ -37,7 +37,8 @@ tree_sub() {
 # 用法: tree_lines <多行文本>（每行一个条目，条目内容需已转义/含 HTML 标签）
 tree_lines() {
   local _in="$1" _total _n=0 _line _out=""
-  _total=$(printf '%s\n' "$_in" | grep -c .)
+  # grep -c 空输入时输出 0 但 rc=1, pipefail 下会传染调用语句
+  _total=$(printf '%s\n' "$_in" | { grep -c . || true; })
   [ "$_total" -eq 0 ] && return 0
   while IFS= read -r _line; do
     [ -z "$_line" ] && continue
@@ -345,7 +346,7 @@ wait_openlist_ready() {
   # 阶段3: 等驱动初始化（长等待 120s，给 ali + crypt 拉元数据）
   echo "等待驱动初始化 (120s) ..."
   sleep 120
-  # 阶段4: rclone 验证（最多 3 次、间隔递减，避免触发 429）
+  # 阶段4: rclone 验证（首次 + 两次退避重试 90s/60s，避免触发 429）
   if rclone lsd openlist: >/dev/null 2>&1; then
     echo "WebDAV(rclone) 验证通过"
     return 0
@@ -359,7 +360,7 @@ wait_openlist_ready() {
   sleep 60
   rclone lsd openlist: >/dev/null 2>&1 \
     && { echo "WebDAV(rclone) 验证通过（第三次）"; return 0; } \
-    || echo "⚠️ WebDAV 仍未就绪，继续执行"
+    || echo "⚠️ WebDAV 三次验证均未通过（返回 1，由调用方决定终止或忽略）"
   return 1
 }
 

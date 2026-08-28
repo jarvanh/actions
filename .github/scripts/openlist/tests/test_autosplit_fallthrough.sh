@@ -70,7 +70,7 @@ OUT=$(mktemp)
 # --- 场景1: 42GiB ≤ 50GB + auto-split 开 → 只直同步 1 次，绝不拆分 ---
 R_SIZE_src=45000000000
 run_impl 1 0 src dst t1 > "$OUT" 2>&1
-[ "$SWL_CALLS" = "1" ] && ok "1a 42GiB 直同步恰好 1 次（实际 $SWL_CALLS）" || bad "1a: sync=${SWL_CALLS}"
+[ "$SWL_CALLS" = "1" ] && ok "1a 42GiB 直同步恰好 1 次（实际 ${SWL_CALLS}）" || bad "1a: sync=${SWL_CALLS}"
 [ "$SBB_CALLS" = "0" ] && ok "1b 未走文件批次拆分" || bad "1b: batch=${SBB_CALLS}"
 grep -q "未超过 50GB 阈值" "$OUT" && ok "1c 走 ≤50GB 分支" || bad "1c: $(cat "$OUT")"
 ! grep -q "按子目录拆分同步" "$OUT" && ok "1d 未穿透到子目录拆分" || bad "1d: 穿透了"
@@ -94,7 +94,7 @@ R_LSF=$'a/\nb/\n'
 R_SIZE_src=60000000000; R_SIZE_src_a=1000; R_SIZE_src_b=2000
 run_impl 1 0 src dst t4 > "$OUT" 2>&1
 # 子目录 a、b 各直同步 1 次 + 顶层最终完整同步 1 次 = 3；孙目录不再递归
-[ "$SWL_CALLS" = "3" ] && ok "4a 拆分路径: 子目录 2 次 + 最终完整 1 次 = 3（实际 $SWL_CALLS）" || bad "4a: sync=${SWL_CALLS}"
+[ "$SWL_CALLS" = "3" ] && ok "4a 拆分路径: 子目录 2 次 + 最终完整 1 次 = 3（实际 ${SWL_CALLS}）" || bad "4a: sync=${SWL_CALLS}"
 grep -q "按子目录拆分同步" "$OUT" && ok "4b 走拆分分支" || bad "4b: $(cat "$OUT")"
 [ "$SBB_CALLS" = "0" ] && ok "4c 子目录未被批次拆分/递归拆分" || bad "4c: batch=${SBB_CALLS}"
 echo "$SWL_LOG" | grep -cx "sync: src" | grep -q "^1$" && ok "4d 顶层最终完整同步恰好 1 次" || bad "4d: $(echo "$SWL_LOG" | grep -cx 'sync: src')"
@@ -125,7 +125,7 @@ rc=$?
 # --- 场景8: 42GiB + 1d-skip → marker 恰好保存 1 次（原穿透会存 2+ 次）---
 R_SIZE_src=45000000000; SWL_FAIL=0
 run_impl 1 1 src dst t8 > "$OUT" 2>&1
-[ "$SSM_CALLS" = "1" ] && ok "8a skip marker 恰好保存 1 次（实际 $SSM_CALLS）" || bad "8a: marker=${SSM_CALLS}"
+[ "$SSM_CALLS" = "1" ] && ok "8a skip marker 恰好保存 1 次（实际 ${SSM_CALLS}）" || bad "8a: marker=${SSM_CALLS}"
 [ "$SOSF_CALLS" = "0" ] && ok "8b skip 模式不走切割检查" || bad "8b: sosf=${SOSF_CALLS}"
 
 rm -f "$OUT"

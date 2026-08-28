@@ -109,7 +109,7 @@ reset_log
 SCENARIO=wrongpass run_tok
 chk "T2 rc=1" "$TOKEN_RC" "1"
 chk "T2 输出为空" "$TOKEN_OUT" ""
-chk "T2 重试两次" "$(wc -l < "$CALL_LOG")" "2"
+chk "T2 重试两次" "$(wc -l < "$CALL_LOG" | tr -d ' ')" "2"
 ok_or "$(has_substr OPENLIST_ADMIN_PASSWORD "$ERR_OUT" && echo yes)" "T2 stderr 指明变量名"
 if has_substr incorrect "$ERR_OUT"; then
   chk "T2 不回显服务端 message" fail ok
@@ -139,7 +139,7 @@ chk "T4 token 正常返回" "$TOKEN_OUT" "JWT_FAKE_OK"
 reset_log
 SCENARIO=noresp run_tok
 chk "T5 rc=1" "$TOKEN_RC" "1"
-chk "T5 尝试两次" "$(wc -l < "$CALL_LOG")" "2"
+chk "T5 尝试两次" "$(wc -l < "$CALL_LOG" | tr -d ' ')" "2"
 
 # ---------- T6 用户名覆盖 ----------
 reset_log

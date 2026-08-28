@@ -64,7 +64,8 @@ _restore_build_payload() {
   prefix="${prefix%.*}"                # <name>.zip
   parts_regex="^$(printf '%s' "$prefix" | sed 's/[.]/\\./g')\.[0-9]{3}$"
   local parts
-  parts=$(rclone lsf "${alt_base}/${alt_dir}" --files-only --retries 1 2>/dev/null | grep -E "$parts_regex" | sort)
+  # pipefail 下 grep 无匹配(rc=1)会传染裸赋值直接杀 step; 缺失由下方 -z 判断处理
+  parts=$(rclone lsf "${alt_base}/${alt_dir}" --files-only --retries 1 2>/dev/null | { grep -E "$parts_regex" || true; } | sort)
   if [ -z "$parts" ]; then
     echo "FAIL: 未找到分卷（前缀 ${prefix}）"
     return 1
@@ -148,7 +149,9 @@ _restore_one_entry() {
   mkdir -p "$tmp"
 
   local res payload payload_bytes up_bytes
-  res=$(_restore_build_payload "$alt" "$dest" "$tmp")
+  # 命令替换返回码会传染: payload 内部 return 1（分卷缺失/下载/合并/解压失败）
+  # 时，未保护的裸赋值在 set -e step 里会直接终止整个还原 run
+  res=$(_restore_build_payload "$alt" "$dest" "$tmp") || true
   if [ "${res%%:*}" != "OK" ]; then
     echo "${res:-FAIL: 未知错误}"
     rm -rf "$tmp"
@@ -231,7 +234,7 @@ restore_fixed_files() {
 
       echo "还原中: ${orig} ← ${alt} [${method}]"
       local status
-      status=$(_restore_one_entry "$dest" "$orig" "$alt" "$method" "$tmp_base" "$fmd5")
+      status=$(_restore_one_entry "$dest" "$orig" "$alt" "$method" "$tmp_base" "$fmd5") || true
       echo "  → ${status}"
 
       if [ "${status%%:*}" = "OK" ]; then
@@ -352,7 +355,7 @@ _recover_one_to_source() {
   rm -rf "$tmp"; mkdir -p "$tmp"
 
   local res payload payload_bytes got
-  res=$(_restore_build_payload "$alt" "$dest_remote" "$tmp")
+  res=$(_restore_build_payload "$alt" "$dest_remote" "$tmp") || true
   if [ "${res%%:*}" != "OK" ]; then
     echo "${res:-FAIL: 未知错误}"
     rm -rf "$tmp"
@@ -420,7 +423,7 @@ _recover_source_entries() {
     fmd5=$(echo "$entry" | jq -r '.md5 // ""' 2>/dev/null)
     [ "$fmd5" = "null" ] && fmd5=""
     echo "恢复修复文件: ${line_orig} ← ${line_alt} [${method}]" >&2
-    status=$(_recover_one_to_source "$src" "$dst" "$line_orig" "$line_alt" "$method" "$ebytes" "$tmp_base" "$fmd5")
+    status=$(_recover_one_to_source "$src" "$dst" "$line_orig" "$line_alt" "$method" "$ebytes" "$tmp_base" "$fmd5") || true
     echo "  → ${status}" >&2
     printf '%s\t%s\n' "$line_orig" "$status"
   done <<< "$alt_lines"

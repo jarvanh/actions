@@ -2,13 +2,18 @@
 # ===== OpenList 同步工具 — 任务编排函数 =====
 # 提供 sync_task 用户接口函数，
 # 支持:
-#   --auto-split  — 源端 > 50GB 时按一级子目录自动拆分
-#   --1d-skip     — 1 天内已成功同步则跳过（--2d-skip / --3d-skip 自定义天数）
+#   --auto-split  — 源端 > 50GB 时按一级子目录自动拆分（阈值 SYNC_SPLIT_THRESHOLD_BYTES 可调）
+#   --1d-skip     — 1 天内已成功同步则跳过；--Nd-skip 任意天数（如 --2d-skip / --3d-skip）
 #   其余参数（如 --exclude）原样传给 rclone
 #
 # 依赖: sync.sh, split.sh, marker.sh, preview.sh, progress.sh, fix.sh
 # 依赖环境变量:
-#   RCLONE_SYNC_TASK_FLAGS — sync_task 特有 rclone 参数（在 flags.sh 中定义）
+#   RCLONE_SYNC_TASK_FLAGS          — sync_task 特有 rclone 参数（在 flags.sh 中定义）
+#   SYNC_SPLIT_THRESHOLD_BYTES      — auto-split 阈值（默认 50GB）
+#   OPENLIST_TASK_ROTATION          — 同步对轮转开关（=0 关闭，见下方说明）
+#   ROTATION_MAX_CONSECUTIVE_ATTEMPTS — 轮转阀门上限（默认 8）
+#   OPENLIST_FIX_TEST_MODE / OPENLIST_MISSING_FIX_MAX / OPENLIST_BATCH_CONSOLIDATE 等
+#   TASK_PREVIEW_ONLY / TASK_REGISTER_ONLY — 预览/仅注册 pass 标记（由 workflow 设置）
 
 # 常量定义
 readonly DEFAULT_SPLIT_THRESHOLD_BYTES="${SYNC_SPLIT_THRESHOLD_BYTES:-50000000000}" # 50GB 自动拆分阈值
@@ -185,13 +190,15 @@ run_all_tasks() {
 # 按 id 执行清单中的单条任务（调试模式专用）
 run_task_by_id() {
   local _want="$1" _e _id
+  local -a _ids=()
   for _e in "${SYNC_TASK_REGISTRY[@]}"; do
     _id="${_e%%|*}"
+    _ids+=("$_id")
     [ "$_id" = "$_want" ] || continue
     _run_registry_entry "$_e"
     return $?
   done
-  echo "未知任务: ${_want}（可选: backup/task0-task5）"
+  echo "未知任务: ${_want}（可用 id: $(IFS='、'; echo "${_ids[*]}")）"
   return 1
 }
 
