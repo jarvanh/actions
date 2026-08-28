@@ -105,7 +105,10 @@ _tg_send_get_id() {
     -d chat_id="${TELEGRAM_CHAT_ID}" \
     -d parse_mode="$parse_mode" \
     --data-urlencode text="$message" 2>/dev/null) || true
-  echo "$response" | jq -r '.result.message_id // empty' 2>/dev/null
+  # jq 对非 JSON 响应（如网关 502 页面）返回非零 → set -e 下会沿
+  # _tg_ensure_bottom_message → _progress_refresh → progress_update 调用链
+  # 传染并终止整个 step；通知属 fire-and-forget，失败只吞不传
+  echo "$response" | jq -r '.result.message_id // empty' 2>/dev/null || true
 }
 
 # 删除 Telegram 消息

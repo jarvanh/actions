@@ -36,7 +36,7 @@ on:
         default: false
       # ===== 调试模式选项 =====
       fix_test_task:
-        description: "调试模式: 要测试的任务 (backup/task0-task5)"
+        description: "调试模式: 要测试的任务 id（如 backup、task0；带后缀的变体如 task0-baidupan，完整清单见 tasks.sh SYNC_TASK_REGISTRY）"
         required: false
         type: string
         default: "backup"
@@ -47,7 +47,7 @@ on:
         default: 5
       # ===== 还原类模式选项（危险）=====
       restore_task:
-        description: "⚠️ 还原/灾难恢复模式专用: 任务名 (backup/task0-task5/all)"
+        description: "⚠️ 还原/灾难恢复模式专用: 任务名（backup/task0-task5，即 marker 文件名前缀）或 all"
         required: false
         type: string
         default: "all"
@@ -78,23 +78,23 @@ jobs:
       # 超时时间（秒）
       OPENLIST_PROBE_TIMEOUT: "15"
       OPENLIST_CACHE_REFRESH_WAIT: "60"
-      OPENLIST_DRIVER_INIT_WAIT: "120"
+      # 注: 驱动初始化等待 120s 硬编码在 utils.sh wait_openlist_ready 阶段3，未参数化
       OPENLIST_RCLONE_LISTING_TIMEOUT: "900"
       OPENLIST_MKDIR_TIMEOUT: "120"
       OPENLIST_DOWNLOAD_TIMEOUT: "300"
       OPENLIST_UPLOAD_TIMEOUT: "300"
 
       # 重试/轮询
+      # 注: 熔断阈值实际生效变量是 OPENLIST_FIX_CB_FILES（sync.sh，默认3）；
+      #     轮转上限实际生效变量是 ROTATION_MAX_CONSECUTIVE_ATTEMPTS（tasks.sh，默认8）
       OPENLIST_8005_RETRY_ATTEMPTS: "3"
       OPENLIST_423_RETRY_ATTEMPTS: "3"
       OPENLIST_423_RETRY_SLEEP_SECONDS: "300"
       OPENLIST_PERSIST_RETRY_ROUNDS: "11"
       OPENLIST_RAW_CHECK_BUDGET: "40"
       OPENLIST_RAW_COUNT_TIMEOUT: "240"
-      OPENLIST_CB_THRESHOLD: "3"
       OPENLIST_MISSING_FIX_MAX: "200"
       OPENLIST_TOKEN_REFRESH_SECS: "240"
-      OPENLIST_MAX_CONSECUTIVE_ATTEMPTS: "8"
 
       # OpenList 管理面账密（动态登录换取 token，取代静态 config.json token）
       OPENLIST_ADMIN_PASSWORD: ${{ secrets.OPENLIST_ADMIN_PASSWORD }}
@@ -186,7 +186,7 @@ jobs:
           OUTPUT=$(cloudflared tunnel list)
           TUNNEL_LINE=$(echo "$OUTPUT" | grep -w "$TUNNEL_NAME")
           if [ -z "$TUNNEL_LINE" ]; then
-            echo "隧道 '$TUNNEL_NAME' 不存在，请先手动创建（cloudflared tunnel create $TUNNEL_NAME），终止本次运行"
+            echo "隧道 '${TUNNEL_NAME}' 不存在，请先手动创建（cloudflared tunnel create ${TUNNEL_NAME}），终止本次运行"
             exit 31
           fi
 
@@ -229,7 +229,8 @@ jobs:
       # 把 marker fixed_files 中的替代文件还原为原路径原文件名:
       #   改名类 → rclone move 服务端移动；压缩/分卷类 → 下载还原后回传
       #   原路径；成功后清理目标端替代文件并从 marker 移除条目。
-      # 完成后发送 Telegram 汇总。restore_task 指定任务名（backup/task0-5）或 all。
+      # 完成后发送 Telegram 汇总。restore_task 指定任务名（backup/task0-5，
+      # 即 marker 文件名前缀）或 all。
       - name: "⚠️ Restore: 一键还原修复文件"
         if: ${{ inputs.run_mode == '⚠️ 还原 · 修复文件还原为原路径' }}
         timeout-minutes: 240
@@ -268,8 +269,9 @@ jobs:
 
       # ===== 调试: 单任务测试修复管线 =====
       # 用真实生产代码路径（sync_task → sync_with_logging）按任务清单
-      # （tasks.sh SYNC_TASK_REGISTRY）查表跑单个任务（backup/task0-task5，
-      # 覆盖全部目标后端），验证 truth-check（重启取真值） + 缺失文件修复的实际效果。
+      # （tasks.sh SYNC_TASK_REGISTRY）查表跑单个任务（id 形如 backup、task0，
+      # 含带后缀的变体 task0-baidupan / task0-wopan175 等，覆盖全部目标后端），
+      # 验证 truth-check（重启取真值） + 缺失文件修复的实际效果。
       # 与正式流程的区别: 只跑单任务、跳过任务预览、跳过结尾 5h sleep，
       # 并用 OPENLIST_MISSING_FIX_MAX 限制修复数量快速得到结果。
       # 注意: --1d-skip 标记仍照常检查（近 1 天已成功同步的任务会跳过），
@@ -312,8 +314,7 @@ jobs:
           echo "==========================" >> "$PROCESSED_FILES_LOG"
 
       # ===== 所有同步任务预览 + 执行 =====
-      # 任务清单在 .github/scripts/openlist/tasks.sh 的 SYNC_TASK_REGISTRY 单点定义
-      # （增减任务只需编辑该数组一行）；rclone 参数编辑同目录 flags.sh。
+      # （任务清单/参数维护入口见上方"加载同步函数库"step 注释）
       - name: 任务预览与全量同步
         if: ${{ inputs.run_mode == '' || inputs.run_mode == '同步' }}
         run: |

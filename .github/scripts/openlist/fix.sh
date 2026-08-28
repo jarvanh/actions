@@ -708,10 +708,10 @@ try_fix_failed_file() {
       dir_ok=1
       log_fix "$fix_log" "✅ 目录已确认存在"
     else
-      log_fix "$fix_log" "⚠ lsd 验证失败 exit=$verify_status，目录未实际创建，降级处理"
+      log_fix "$fix_log" "⚠ lsd 验证失败 exit=${verify_status}，目录未实际创建，降级处理"
     fi
   else
-    log_fix "$fix_log" "⚠ mkdir 失败 exit=$mkdir_status，尝试 OpenList API..."
+    log_fix "$fix_log" "⚠ mkdir 失败 exit=${mkdir_status}，尝试 OpenList API..."
   fi
 
   # 降级处理：mkdir 失败或 lsd 验证失败时执行（OpenList API + base64URL）
