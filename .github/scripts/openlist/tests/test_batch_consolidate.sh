@@ -43,16 +43,37 @@ _sync_fix_missing_files() {
   if [ -n "${SYNC_FIX_MISSING_OVERRIDE:-}" ] && [ -s "$SYNC_FIX_MISSING_OVERRIDE" ]; then
     while IFS= read -r _f; do
       [ -z "$_f" ] && continue
-      echo "${_f}|${_f}|修复mock|restore|1B|1|m3" >> "$fix_list"
+      echo "${_f}|${_f}|修复mock|restore|1B|1|文件修复方法3 zip_split_original: zip 压缩 + 分卷上传（原文件名基底，默认 1GB 分卷）" >> "$fix_list"
     done < "$SYNC_FIX_MISSING_OVERRIDE"
   fi
   return 0
 }
 _sync_serialize_fixed_files() { :; }
 _sync_accumulate_fixed_results() { :; }
+# 复核步骤依赖的黑名单/展示工具（真实实现在 fix.sh / utils.sh）
+# 拉黑明细落文件: 函数内对关联数组的写入发生在被测函数的作用域里，
+# 父作用域直接读数组读不到，断言改用文件内容校验
+declare -A FIX_METHOD_BLACKLIST=()
+_blacklist_add() {
+  echo "$1|$2" >> /tmp/bc_blacklist_ops
+  local cur="${FIX_METHOD_BLACKLIST[$1]:-}"
+  case "|$cur|" in *"|$2|"*) return 0 ;; esac
+  FIX_METHOD_BLACKLIST["$1"]="${cur:+$cur|}$2"
+}
+_flush_blacklist_to_marker() { :; }
+_method_short() { echo "$1"; }
+_short_path() { echo "$1"; }
+# RESTART_FAIL_FROM: 从第 N 次调用起开始失败（0/空 = 永不失败）
+# 用于"只让复核阶段重启失败"这类定向场景
+RESTART_FAIL_FROM=0
 _restart_openlist_for_truth() {
+  local _n
+  _n=$(( $(cat /tmp/bc_restart_calls 2>/dev/null || echo 0) + 1 ))
+  echo "$_n" > /tmp/bc_restart_calls
+  if [ "${RESTART_FAIL_FROM:-0}" -gt 0 ] && [ "$_n" -ge "$RESTART_FAIL_FROM" ]; then
+    return 1
+  fi
   [ "$RESTART_RC" = "0" ] || return 1
-  echo $(( $(cat /tmp/bc_restart_calls 2>/dev/null || echo 0) + 1 )) > /tmp/bc_restart_calls
   touch /tmp/bc_restarted
   return 0
 }
@@ -98,7 +119,7 @@ run_consolidate() {
 setup() {
   rm -rf "$BC_DIR"
   mkdir -p "$BC_DIR"
-  rm -f /tmp/bc_restarted /tmp/bc_files_from /tmp/bc_fixpipe_override
+  rm -f /tmp/bc_restarted /tmp/bc_files_from /tmp/bc_fixpipe_override /tmp/bc_blacklist_ops
   echo 0 > /tmp/bc_lsf_calls
   echo 0 > /tmp/bc_copy_calls
   echo 0 > /tmp/bc_restart_calls
@@ -106,8 +127,10 @@ setup() {
   echo 0 > /tmp/bc_refresher_stops
   echo 0 > /tmp/bc_fixpipe_calls
   RESTART_RC=0
+  RESTART_FAIL_FROM=0
   RETRY_COPY_OK=1
   LSF_OUT2=""
+  FIX_METHOD_BLACKLIST=()
   : > "$LSF_OUT"
 }
 calls() { cat "$1" 2>/dev/null || echo 0; }
@@ -222,6 +245,8 @@ echo "$OUT" | grep -q "顽固缺失" && echo "$OUT" | grep -q "修复管线换�
 echo "$OUT" | grep -q "修复管线完成，2/2" && ok "8e 修复计数汇总" || bad "8e: $OUT"
 
 # --- 场景9: 重试全部失败（0 重传）→ 不二次重启，直接全部转修复管线 ---
+# 注: 修复管线之后还有一次"修复成果复核重启"（见场景 11），故 restart 计 2 次
+#  （入口校验 1 + 修复复核 1）；0 重传省掉的是"重试后二次重启"那一次
 setup
 BC_DEST="openlist:wopan176Crypt/0"
 write_batch_log "$LOG"
@@ -229,7 +254,7 @@ printf 'ok/file1.mp4\nother/old.mp4\n' > "$LSF_OUT"
 RETRY_COPY_OK=0
 OUT=$(run_consolidate 0 "$LOG")
 [ "$(calls /tmp/bc_copy_calls)" = "1" ] && ok "9a 串行重试执行" || bad "9a: copy=$(calls /tmp/bc_copy_calls)"
-[ "$(calls /tmp/bc_restart_calls)" = "1" ] && ok "9b 0 重传 → 不做二次重启复核" || bad "9b: restart=$(calls /tmp/bc_restart_calls)"
+[ "$(calls /tmp/bc_restart_calls)" = "2" ] && ok "9b 0 重传 → 不做重试后二次重启（restart=入口校验+修复复核）" || bad "9b: restart=$(calls /tmp/bc_restart_calls)"
 [ "$(calls /tmp/bc_fixpipe_calls)" = "1" ] && ok "9c 全部转修复管线" || bad "9c: fixpipe=$(calls /tmp/bc_fixpipe_calls)"
 diff <(sort "$(cat /tmp/bc_fixpipe_override 2>/dev/null)") <(printf 'bad/file3.mp4\nghost/file2.mp4\n') >/dev/null 2>&1 \
   && ok "9d 修复清单 = 全部重试失败文件" || bad "9d: $(cat "$(cat /tmp/bc_fixpipe_override 2>/dev/null)" 2>/dev/null | tr '\n' ' ')"
@@ -252,6 +277,63 @@ OUT=$(run_consolidate 0 "$LOG")
 [ "$(calls /tmp/bc_fixpipe_calls)" = "0" ] && ok "10c 全拒 → 跳过修复管线" || bad "10c: fixpipe=$(calls /tmp/bc_fixpipe_calls)"
 echo "$OUT" | grep -q "后端写入全拒" && ok "10d 全拒提示" || bad "10d: $OUT"
 echo "$OUT" | grep -q "跳过修复管线" && ok "10e 跳过修复管线提示" || bad "10e: $OUT"
+
+# --- 场景11: 修复管线后重启复核 — 假成功条目被剔除，真成果保留 ---
+# 背景: 修复方法返回成功只代表 PUT 被接受，与批次传输假成功同源。修复
+#   管线此前没有重启复核，17/68 这类成功数里混有多少假成功无从得知，
+#   写进 marker 后还会被下一轮当"沿用上轮修复"永久跳过。
+setup
+BC_DEST="openlist:wopan176Crypt/0"
+write_batch_log "$LOG"
+printf 'ok/file1.mp4\nother/old.mp4\n' > "$LSF_OUT"
+RETRY_COPY_OK=0
+# 修复 mock 产出 2 条（bad/file3、ghost/file2）；复核真值只认下 bad/file3
+# → ghost/file2 判假成功，应从 fix_list 剔除 + 拉黑 + 转失败清单
+cat > "/tmp/bc_lsf_out3.txt" <<'EOF'
+ok/file1.mp4
+other/old.mp4
+bad/file3.mp4
+EOF
+LSF_OUT2="/tmp/bc_lsf_out3.txt"
+OUT=$(run_consolidate 0 "$LOG")
+echo "$OUT" | grep -q "修复复核 1 个真实落盘 / 1 个假成功已剔除" \
+  && ok "11a 复核识别出 1 真 1 假" || bad "11a: $OUT"
+[ "$(wc -l < "$BC_DIR/consolidate_fix_0.txt" | tr -d ' ')" = "1" ] \
+  && ok "11b fix_list 只留真成果（假成功已剔除，不进 marker）" || bad "11b: $(cat "$BC_DIR/consolidate_fix_0.txt")"
+cut -d'|' -f1 "$BC_DIR/consolidate_fix_0.txt" | grep -qxF "bad/file3.mp4" \
+  && ok "11c 保留的是重启后仍在的条目" || bad "11c: $(cat "$BC_DIR/consolidate_fix_0.txt")"
+cut -d'|' -f1 "$BC_DIR/consolidate_fix_0.txt" | grep -qxF "ghost/file2.mp4" \
+  && bad "11c2 假成功不应留在 fix_list" || ok "11c2 假成功已移出 fix_list"
+grep -q "ghost/file2.mp4" "$BC_DIR/consolidate_fail_0.txt" \
+  && ok "11d 假成功转记失败清单（下轮继续修）" || bad "11d: $(cat "$BC_DIR/consolidate_fail_0.txt" 2>/dev/null)"
+grep -q "^ghost/file2.mp4|" /tmp/bc_blacklist_ops 2>/dev/null \
+  && ok "11e 假成功所用方法被拉黑（下轮跳过重演）" || bad "11e: 黑名单未记录 $(cat /tmp/bc_blacklist_ops 2>/dev/null)"
+
+# --- 场景12: 复核重启失败 → 保留修复成果不误删（宁漏判勿误删） ---
+setup
+BC_DEST="openlist:wopan176Crypt/0"
+write_batch_log "$LOG"
+printf 'ok/file1.mp4\nother/old.mp4\n' > "$LSF_OUT"
+RETRY_COPY_OK=0
+# 复核真值含两条修复成果（替代路径 = 原路径，见 _sync_fix_missing_files mock）
+LSF_OUT2="/tmp/bc_lsf_out_all.txt"
+printf 'ok/file1.mp4\nother/old.mp4\nbad/file3.mp4\nghost/file2.mp4\n' > "$LSF_OUT2"
+OUT=$(run_consolidate 0 "$LOG")
+[ "$(wc -l < "$BC_DIR/consolidate_fix_0.txt" | tr -d ' ')" = "2" ] \
+  && ok "12a 复核通过时 2 条修复成果全保留" || bad "12a: $(cat "$BC_DIR/consolidate_fix_0.txt")"
+echo "$OUT" | grep -q "0 个假成功已剔除" && ok "12a2 复核无假成功" || bad "12a2: $OUT"
+setup
+BC_DEST="openlist:wopan176Crypt/0"
+write_batch_log "$LOG"
+printf 'ok/file1.mp4\nother/old.mp4\n' > "$LSF_OUT"
+RETRY_COPY_OK=0
+# 只让第 2 次（修复复核）重启失败: 入口校验必须成功，否则走不到修复管线
+RESTART_FAIL_FROM=2
+OUT=$(run_consolidate 0 "$LOG")
+RESTART_FAIL_FROM=0
+echo "$OUT" | grep -q "跳过修复复核" && ok "12b 复核重启失败 → 跳过复核" || bad "12b: $OUT"
+[ "$(wc -l < "$BC_DIR/consolidate_fix_0.txt" | tr -d ' ')" = "2" ] \
+  && ok "12c 复核跳过时修复成果不被误删（宁漏判勿误删）" || bad "12c: $(cat "$BC_DIR/consolidate_fix_0.txt")"
 
 echo "-----"
 echo "PASS=$PASS FAIL=$FAIL"

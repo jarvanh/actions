@@ -6,11 +6,11 @@ marker 被删除或首次同步时，marker.sh save_sync_marker 调用本脚本�
 original 路径。
 
 可识别特征（对应现行修复方法）:
-  特征 1: base64URL 编码目录（文件名与源端相同）  → 方法1 目录降级变体
-  特征 2: 分卷 <name>.zip.00N                     → 方法3（含 b64 目录变体）
+  特征 1: base64URL 编码目录（文件名与源端相同）  → 文件修复方法1 目录降级变体
+  特征 2: 分卷 <name>.zip.00N                     → 文件修复方法3（含 b64 目录变体）
 无法反推的修复形态（不产出条目）:
-  - 方法2/4 短哈希文件名（md5 前 8 位不可逆，无法关联到源端文件）
-  - 方法1 原名直传（替代路径 == 原路径，本就是普通文件形态）
+  - 文件修复方法2/4 短哈希文件名（md5 前 8 位不可逆，无法关联到源端文件）
+  - 文件修复方法1 原名直传（替代路径 == 原路径，本就是普通文件形态）
 
 用法: scan_fix_signatures.py <src_remote> <dst_remote> <out_path> [timeout_s]
 输出: out_path 每行一条 <original>\t<alternative>\t<method>\t<size_bytes>
@@ -88,7 +88,7 @@ def main():
         fname = parts[-1]
         dir_parts = parts[:-1]
 
-        # === 特征 2（收集阶段）: 分卷 <name>.zip.00N（方法3）===
+        # === 特征 2（收集阶段）: 分卷 <name>.zip.00N（文件修复方法3）===
         # 分卷文件只进分组表（成组才能数出卷数、定位首卷），跳过其余特征
         m = SPLIT_VOL_RE.match(fname)
         if m:
@@ -96,7 +96,7 @@ def main():
             split_groups.setdefault(key, {})[m.group('n')] = (path, size_bytes)
             continue
 
-        # === 特征 1: 只有目录最末段是 base64URL，文件名和源端相同（方法1 目录降级变体）===
+        # === 特征 1: 只有目录最末段是 base64URL，文件名和源端相同（文件修复方法1 目录降级变体）===
         if dir_parts:
             dl = b64url_decode(dir_parts[-1])
             if dl and dl in src_dir_leaf_set:
@@ -106,9 +106,9 @@ def main():
                     results.append((cand, path,
                                     "rclone copyto（base64URL 编码目录 + 原文件名）", size_bytes))
 
-    # === 特征 2（成组阶段）: 分卷 <前缀>.zip.00N（方法3）===
-    # 前缀即原文件名；所在目录可能是 base64URL 编码目录（方法1 目录降级变体）。
-    # 方法4 的卷前缀是短哈希名，不可逆 → 不产出条目。
+    # === 特征 2（成组阶段）: 分卷 <前缀>.zip.00N（文件修复方法3）===
+    # 前缀即原文件名；所在目录可能是 base64URL 编码目录（文件修复方法1 目录降级变体）。
+    # 文件修复方法4 的卷前缀是短哈希名，不可逆 → 不产出条目。
     for (dir_rel, prefix), vols in split_groups.items():
         if prefix not in src_by_basename:
             continue

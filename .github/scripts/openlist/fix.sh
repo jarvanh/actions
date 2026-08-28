@@ -2,13 +2,20 @@
 # ===== OpenList 同步工具 — 失败文件修复函数 =====
 # 处理 OpenList/WebDAV 无法同步的文件（同步报错、diff 缺失、假成功未持久化等），尝试多种修复方式：
 #   1. 创建目标目录（rclone mkdir → OpenList API mkdir → base64URL 编码目录名）
-#   2. 多种方式同步文件（按对症优先级执行，首个真实成功即止，编号以 _method_desc 为准）:
-#      方法1:  直接 rclone copyto（原路径 + 原文件名）
-#      方法2:  短哈希文件名直传（<md5前8位>.<扩展名>，密文名必然不超长，
-#              对症"加密后文件名超长"/敏感字符根因）
-#      方法3:  zip 压缩 + 分卷上传（粒度默认 1GB，OPENLIST_SPLIT_PART_BYTES 可调）
-#      方法4:  zip 压缩 + 短哈希文件名 + 分卷上传
-#   历史版本的低效冗余方法已全部下线，现行仅上述 4 种；旧版方法编号不兼容。
+#   2. 多种方式同步文件（按对症优先级执行，首个真实成功即止，ID 以 _method_desc 为准）:
+#      文件修复方法1 copyto_original:      直接 rclone copyto（原路径 + 原文件名）
+#      文件修复方法2 copyto_shorthash:     短哈希文件名直传（<md5前8位>.<扩展名>，
+#                                          密文名必然不超长，对症"加密后文件名
+#                                          超长"/敏感字符根因）
+#      文件修复方法3 zip_split_original:   zip 压缩 + 分卷上传（原文件名作基底名，
+#                                          粒度默认 1GB，OPENLIST_SPLIT_PART_BYTES 可调）
+#      文件修复方法4 zip_split_shorthash:  zip 压缩 + 短哈希文件名 + 分卷上传
+#   历史版本的低效冗余方法已全部下线，现行仅上述 4 种。
+#   方法 ID 用语义名（copyto_original 等）而非 m1/m2 序号: 序号在代码里无法
+#   自解释，且方法增删时会漂移。
+# 命名口径: 全名带"文件修复"限定词——仓库里另有多处独立的"方法N"编号体系
+#   （最易混的是 sync.sh _refresh_ol_drivers 的驱动刷新三招），不带限定词
+#   无法区分。本文件内部的"方法1/2/3/4"简写均指上述文件修复方法。
 #
 # 假成功防护（两层）:
 #   1. 落盘即时校验（_confirm_persist_by_count）: 修复方法返回成功后，对比
@@ -65,13 +72,17 @@ _crypt_diag() {
   echo "  ↳ crypt 配置获取失败 (${mount}): ${msg}" >&2
 }
 
-# 从 OpenList API 提取 crypt 存储配置（供方法2 rclone crypt 直写使用）
+# 从 OpenList API 提取 crypt 存储配置
 # OpenList crypt 驱动与 rclone crypt 格式兼容，addition.password 即 rclone obscure 格式
 # 输出: "<obscured_password> <filename_encryption> <directory_name_encryption> <underlying_remote>"
 # underlying_remote 形如 openlist:wopan176（addition.path 优先，缺失时按 Crypt 后缀名推导）
 # 注意: admin API 的 addition 是 JSON 编码字符串（run 31918439043 实测 .password 直接
-#       取值为空 → 方法2 crypt 直写一直被跳过），必须 fromjson 解码；API 401/无数据时
+#       取值为空 → crypt 直写一直被跳过），必须 fromjson 解码；API 401/无数据时
 #       从本地 data.db 兜底
+# 注: 本函数现供名长诊断 / raw 计数视图使用。早期版本曾有一种"rclone crypt
+#     直写裸存储"的修复方法（当时的编号也是方法2），已随方法精简下线；
+#     本文件里"方法2"若出现在旧 run 实锤的注释中，指的可能是那个已下线的
+#     方法，而非现行文件修复方法2 copyto_shorthash。
 # 用法: _get_crypt_config <mount_path 如 /wopan176Crypt>
 _get_crypt_config() {
   local mount="$1"
@@ -177,7 +188,7 @@ _get_crypt_config() {
   echo "${pass} ${pass2:--} ${fne} ${dne} ${enc:--} ${suf:--} ${underlying}"
 }
 
-# 确保 crypt 配置已缓存到全局（方法2 直写与名长诊断共用，每任务只拉取一次）
+# 确保 crypt 配置已缓存到全局（名长诊断与 raw 计数视图共用，每任务只拉取一次）
 # 设置全局: _CRYPT_MOUNT/_CRYPT_PASS/_CRYPT_FNE/_CRYPT_DNE/_CRYPT_REMOTE/_CRYPT_ONTHEFLY
 # _CRYPT_ONTHEFLY 形如 ":crypt,remote=\"openlist:wopan176\",...password=\"...\":"
 # 用法: _ensure_crypt_config <dest_path 如 openlist:wopan176Crypt/backup>
@@ -188,7 +199,7 @@ _ensure_crypt_config() {
   local rel="${dest_path#openlist:}"
   local mount="/${rel%%/*}"
   # 缓存按挂载点键控: 多个 Crypt 目标（wopan176/baidupan/aliyundrive）并存时
-  # 不能复用彼此的配置（否则方法2 会把密文写进错误的后端）
+  # 不能复用彼此的配置（否则会把密文写进错误的后端）
   if [ -n "${_CRYPT_ONTHEFLY:-}" ] && [ "${_CRYPT_MOUNT:-}" = "$mount" ]; then
     return 0
   fi
@@ -297,25 +308,42 @@ _raw_count_view_for() {
 
 # 方法 ID → 可读描述（单一事实源: 日志显示 / marker 记录 / 黑名单均用此全名）
 # 保持与各方法实现处的描述一致；已是全名或未知 ID 原样返回（幂等）
-# 用法: _method_desc <method_id 如 m2>  → stdout: "方法2: rclone crypt 直写裸存储（...）"
+#
+# ID 用语义名而非 m1/m2 这类序号: 序号在代码里无法自解释（读
+#   _fix_method_gate zip_split_original 一眼可辨，换成 m3 就得回查本表），
+#   且方法增删时序号会漂移。
+#   文件修复方法1 copyto_original      — 原路径 + 原文件名直接 copyto
+#   文件修复方法2 copyto_shorthash     — 短哈希文件名（<md5前8位>.<扩展名>）直传
+#   文件修复方法3 zip_split_original   — zip 压缩 + 分卷上传（原文件名作基底名）
+#   文件修复方法4 zip_split_shorthash  — zip 压缩 + 分卷上传（短哈希名作基底名）
+#
+# 全名必须带"文件修复"限定词: 仓库里另有多处独立的"方法N"编号体系，
+#   同名会让人误以为是一套东西——最易混的是 sync.sh _refresh_ol_drivers 的
+#   驱动刷新三招（方法1 load_all / 方法2 重启容器 / 方法3 storage 探测），
+#   它与文件修复毫无关系。限定词让 marker/日志里的全名自带领域归属。
+# 不兼容历史全名: marker 里旧写法（"方法1: ..."、"m1"）不再被识别，按未知
+#   方法原样保留——其黑名单条目因此失效，对应文件最多重跑一轮已判定的方法
+#   即会重新拉黑，不修复的代价可控；换来的是命名不再背历史包袱。
+# 用法: _method_desc <method_id 如 copyto_shorthash>
 _method_desc() {
   case "$1" in
-    m1)  echo "方法1: 直接 rclone copyto（原路径 + 原文件名）" ;;
-    m2)  echo "方法2: 短哈希文件名直传（<md5前8位>.<扩展名>）" ;;
-    m3)  echo "方法3: zip 压缩 + 分卷上传（默认 1GB 分卷）" ;;
-    m4)  echo "方法4: zip 压缩 + 短哈希文件名 + 分卷上传" ;;
+    copyto_original)     echo "文件修复方法1 copyto_original: 直接 rclone copyto（原路径 + 原文件名）" ;;
+    copyto_shorthash)    echo "文件修复方法2 copyto_shorthash: 短哈希文件名直传（<md5前8位>.<扩展名>）" ;;
+    zip_split_original)  echo "文件修复方法3 zip_split_original: zip 压缩 + 分卷上传（原文件名基底，默认 1GB 分卷）" ;;
+    zip_split_shorthash) echo "文件修复方法4 zip_split_shorthash: zip 压缩 + 短哈希文件名 + 分卷上传" ;;
+    "")  echo "未知方法" ;;
     *)   echo "$1" ;;
   esac
 }
 
 # 方法短标签（仅日志展示用；marker/黑名单仍存 _method_desc 全名）
-# 输入短 ID（m1）或全名（方法1: ...）均可
+# 输入语义 ID 或全名均可
 _method_short() {
   case "$1" in
-    m1|方法1:*)   echo "方法1·copyto 原名" ;;
-    m2|方法2:*)   echo "方法2·短哈希名" ;;
-    m3|方法3:*)   echo "方法3·zip 分卷" ;;
-    m4|方法4:*)   echo "方法4·短哈希分卷" ;;
+    copyto_original|文件修复方法1*)      echo "修复方法1·copyto 原名" ;;
+    copyto_shorthash|文件修复方法2*)     echo "修复方法2·短哈希名" ;;
+    zip_split_original|文件修复方法3*)   echo "修复方法3·zip 分卷" ;;
+    zip_split_shorthash|文件修复方法4*)  echo "修复方法4·短哈希分卷" ;;
     "") echo "未知方法" ;;
     *) _method_desc "$1" ;;
   esac
@@ -342,7 +370,8 @@ _cmd_log() {
   done
 }
 
-# 方法假成功黑名单: <文件相对路径> -> "方法1: ...|方法3: ..."（| 分隔的方法全名集合，
+# 文件修复方法假成功黑名单: <文件相对路径> -> 全名集合（| 分隔，形如
+# "文件修复方法1 copyto_original: ...|文件修复方法3 zip_split_original: ..."；
 # 全名含空格所以不能用空格分隔）
 # 由 sync.sh 修复管线每轮从 marker 加载/重建，并在轮内即时检测时追加
 declare -A FIX_METHOD_BLACKLIST=()
@@ -405,7 +434,7 @@ _fix_succeed() {
   return 0
 }
 
-# 方法 3/4：zip 压缩 + 分卷上传（encode_name=1 时基底名改用短哈希，即方法4）
+# 文件修复方法 3/4：zip 压缩 + 分卷上传（encode_name=1 时基底名改用短哈希，即方法4）
 # 成功时完成 _fix_succeed 并返回 0；失败仅记日志返回 1
 _try_fix_split_archive() {
   local mid="$1" encode_name="${2:-0}"
@@ -589,10 +618,10 @@ _raw_dir_count() {
 #
 # 用法: _confirm_persist_by_count <method_id> <file_rel> <log_file>
 # 示例:
-#   if [ "$m1_status" -eq 0 ] && _confirm_persist_by_count "$(_method_desc m1)" "$rel" "$log"; then
-#     echo "方法1 真实落盘"      # 计数增长（或计数不可用已信任放行）
+#   if [ "$m1_status" -eq 0 ] && _confirm_persist_by_count copyto_original "$rel" "$log"; then
+#     echo "文件修复方法1 真实落盘"   # 计数增长（或计数不可用已信任放行）
 #   else
-#     echo "换下一方法"          # 假成功（方法1 已拉黑）或校验未启用
+#     echo "换下一方法"               # 假成功（文件修复方法1 已拉黑）或校验未启用
 #   fi
 _confirm_persist_by_count() {
   local method_id="$1" rel_path="$2" log_file="$3"
@@ -805,26 +834,26 @@ try_fix_failed_file() {
   local ol_token
   ol_token=$(_get_openlist_token)
 
-  # 方法 1：直接 rclone copyto
-  if _fix_method_gate m1; then
+  # 方法 1 copyto_original：直接 rclone copyto（原路径 + 原文件名）
+  if _fix_method_gate copyto_original; then
   rclone copyto "$src_file" "$dst_file" "${RCLONE_RETRY_FLAGS[@]}" --timeout "${OPENLIST_UPLOAD_TIMEOUT:-300}s" 2>&1 | \
-    _cmd_log m1 "$fix_log"
+    _cmd_log copyto_original "$fix_log"
   local m1_status=${PIPESTATUS[0]}
-  if [ "$m1_status" -eq 0 ] && _confirm_persist_by_count "$(_method_desc m1)" "$failed_file_rel" "$fix_log"; then
-    log_fix "$fix_log" "  ✅ 方法1 成功"
+  if [ "$m1_status" -eq 0 ] && _confirm_persist_by_count copyto_original "$failed_file_rel" "$fix_log"; then
+    log_fix "$fix_log" "  ✅ 文件修复方法1 成功"
     if [ "$used_base64_dir" -eq 1 ]; then
-      _fix_succeed m1 "rclone copyto（base64URL 编码目录 + 原文件名）" "${dst_file#${dest_path}/}" "rclone move '${dst_file}' '${dest_path}/${failed_file_rel}'" "$file_md5"
+      _fix_succeed copyto_original "rclone copyto（base64URL 编码目录 + 原文件名）" "${dst_file#${dest_path}/}" "rclone move '${dst_file}' '${dest_path}/${failed_file_rel}'" "$file_md5"
     else
-      _fix_succeed m1 "rclone copyto（原路径 + 原文件名）" "$failed_file_rel" "无需还原（文件已在正确路径）" "$file_md5"
+      _fix_succeed copyto_original "rclone copyto（原路径 + 原文件名）" "$failed_file_rel" "无需还原（文件已在正确路径）" "$file_md5"
     fi
     return 0
   fi
-  log_fix "$fix_log" "  ❌ 方法1 失败 exit=$m1_status"
+  log_fix "$fix_log" "  ❌ 文件修复方法1 失败 exit=$m1_status"
   fi
 
-  # 方法 2：短哈希文件名直传
+  # 方法 2 copyto_shorthash：短哈希文件名直传
   # <md5前8位>.<扩展名> — 密文名必然远低于 255 字节上限，对症"加密后文件名超长" 或敏感字符
-  if _fix_method_gate m2; then
+  if _fix_method_gate copyto_shorthash; then
   local sh_hash sh_name m2sh_dst m2sh_status
   sh_hash=$(printf '%s' "$failed_file_rel" | md5sum | cut -c1-8)
   if [[ "$file_name" == *.* ]]; then
@@ -835,31 +864,32 @@ try_fix_failed_file() {
   m2sh_dst="${actual_dst_dir}/${sh_name}"
   log_fix "$fix_log" "  文件名: ${file_name} → ${sh_name}"
   rclone copyto "$local_file" "$m2sh_dst" "${RCLONE_RETRY_FLAGS[@]}" --timeout "${OPENLIST_UPLOAD_TIMEOUT:-300}s" 2>&1 | \
-    _cmd_log m2 "$fix_log"
+    _cmd_log copyto_shorthash "$fix_log"
   m2sh_status=${PIPESTATUS[0]}
-  if [ "$m2sh_status" -eq 0 ] && _confirm_persist_by_count "$(_method_desc m2)" "$failed_file_rel" "$fix_log"; then
-    log_fix "$fix_log" "  ✅ 方法2 成功"
+  if [ "$m2sh_status" -eq 0 ] && _confirm_persist_by_count copyto_shorthash "$failed_file_rel" "$fix_log"; then
+    log_fix "$fix_log" "  ✅ 文件修复方法2 成功"
     local m2_method_text
     if [ "$used_base64_dir" -eq 1 ]; then
       m2_method_text="rclone copyto（base64URL 编码目录 + 短哈希文件名 ${sh_hash}）"
     else
       m2_method_text="rclone copyto（原路径 + 短哈希文件名 ${sh_hash}）"
     fi
-    _fix_succeed m2 "$m2_method_text" "${m2sh_dst#${dest_path}/}" "rclone move '${m2sh_dst}' '${dest_path}/${failed_file_rel}'  # 原文件名: ${file_name}" "$file_md5"
+    _fix_succeed copyto_shorthash "$m2_method_text" "${m2sh_dst#${dest_path}/}" "rclone move '${m2sh_dst}' '${dest_path}/${failed_file_rel}'  # 原文件名: ${file_name}" "$file_md5"
     return 0
   fi
-  log_fix "$fix_log" "  ❌ 方法2 失败 exit=$m2sh_status"
+  log_fix "$fix_log" "  ❌ 文件修复方法2 失败 exit=$m2sh_status"
   fi
 
   # ============================================================
   # 方法 3/4：压缩并分卷上传（粒度默认 1GB）
-  # 方法4 额外短哈希编码文件名
+  #   文件修复方法3 zip_split_original  — 基底名用原文件名
+  #   文件修复方法4 zip_split_shorthash — 基底名用短哈希名（encode_name=1）
   # ============================================================
   local SPLIT_LIMIT_BYTES="${OPENLIST_SPLIT_PART_BYTES:-1073741824}"
   local SPLIT_PART_HUMAN
   SPLIT_PART_HUMAN=$(format_bytes_iec "$SPLIT_LIMIT_BYTES")
-  _fix_method_gate m3 "（粒度 ${SPLIT_PART_HUMAN}）" && { _try_fix_split_archive m3 0 && return 0; }
-  _fix_method_gate m4 && { _try_fix_split_archive m4 1 && return 0; }
+  _fix_method_gate zip_split_original "（粒度 ${SPLIT_PART_HUMAN}）" && { _try_fix_split_archive zip_split_original 0 && return 0; }
+  _fix_method_gate zip_split_shorthash && { _try_fix_split_archive zip_split_shorthash 1 && return 0; }
 
   # 所有方法均失败
   log_fix "$fix_log" "❌ 全部修复方法（1-4）均失败"
