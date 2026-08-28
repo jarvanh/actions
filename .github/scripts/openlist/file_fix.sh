@@ -3,6 +3,10 @@
 # 处理 OpenList/WebDAV 无法同步的文件（同步报错、diff 缺失、假成功未持久化等），尝试多种修复方式：
 #   1. 创建目标目录（rclone mkdir → OpenList API mkdir → base64URL 编码目录名）
 #   2. 多种方式同步文件（按对症优先级执行，首个真实成功即止，ID 以 _fix_method_desc 为准）:
+#      目录先过可写性预检（探测失败则重启容器复核），不可写直接切短哈希目录
+#      —— 避免在同一条死路上白跑"整文件下载 + 4 次上传"；
+#      可写目录跑一轮全败后再兜底切一次（见 _fix_probe_dir_writable /
+#      _fix_switch_to_hash_dir 头部注释）
 #      文件修复方法1 copyto_original:      直接 rclone copyto（原路径 + 原文件名）
 #      文件修复方法2 copyto_shorthash:     短哈希文件名直传（<md5前8位>.<扩展名>，
 #                                          密文名必然不超长，对症"加密后文件名
@@ -29,7 +33,10 @@
 #      直接跳过失效方法）；跨轮修复同样跳过，避免方法1 每轮都白白"成功"
 #      一次再被发现。
 #
-# 依赖: utils.sh (log_fix, _get_openlist_token), telegram.sh (间接)
+# 依赖: utils.sh (log_fix, _get_openlist_token), telegram.sh (间接),
+#       openlist_driver.sh (_restart_openlist_for_truth — 目录可写性预检的复核手段)
+#       注: openlist_driver.sh 属 L4 且反向依赖本文件（L3），bash 函数在调用时
+#       才解析，循环依赖不影响正确性（分层只为可读性，见 README 加载机制）
 # 结果写入全局变量:
 #   TRY_FIX_STATUS       — "success" 或 "failed"
 #   TRY_FIX_ORIGINAL     — 原始文件相对路径
@@ -378,6 +385,12 @@ declare -A FIX_METHOD_BLACKLIST=()
 # 本轮已修复文件: <原始路径> -> <替代路径>（同一轮内避免 auto-split 子任务与最终
 # 完整同步重复修复同一文件）
 declare -A FIXED_THIS_RUN=()
+# 本轮目录可写性结论: <目录远端路径> -> 1 可写 / 0 不可写
+# （_fix_probe_dir_writable 的结论缓存: 同一目录整轮只探一次，避免同一目录下
+#  的多个缺失文件各自触发一次 2 分钟的容器重启）
+declare -A _DIR_WRITE_CACHE=()
+# 本轮目录探测已用掉的容器重启次数（预算 OPENLIST_DIR_PROBE_MAX_RESTART）
+_DIR_PROBE_RESTARTS=0
 
 # 向黑名单追加方法（参数可以是短 ID 或全名，统一转全名存储）
 # 用法: _blacklist_add <file_rel> <method_id_or_full_name>
@@ -403,7 +416,7 @@ _fix_method_blocked() {
 }
 
 # ===== 修复方法表驱动框架 =====
-# 11 个方法共享同一骨架: 门禁（拉黑跳过）→ 执行 → 落盘校验 → 成功收尾。
+# 4 个方法共享同一骨架: 门禁（拉黑跳过）→ 执行 → 落盘校验 → 成功收尾。
 # 以下函数与 try_fix_failed_file 通过 bash 动态作用域共享变量
 # （fix_log / temp_dir / file_name / actual_dst_dir / used_base64_dir /
 #   dest_path / failed_file_rel / SPLIT_LIMIT_BYTES 等）。
@@ -518,7 +531,7 @@ _try_fix_split_archive() {
   if [ "$all_uploaded" -eq 1 ] && [ "$uploaded_count" -gt 0 ] && _confirm_persist_by_count "$(_fix_method_desc "$mid")" "$failed_file_rel" "$fix_log"; then
     log_fix "$fix_log" "  ✅ $(_fix_method_short "$mid") 成功（${uploaded_count} 分卷）"
     local dir_desc name_desc=""
-    if [ "$used_base64_dir" -eq 1 ]; then dir_desc="base64URL 编码目录"; else dir_desc="原路径"; fi
+    dir_desc=$(_fix_dir_desc)
     [ "$encode_name" = "1" ] && name_desc="短哈希文件名 + "
     local method_text="分卷 zip（${dir_desc} + ${name_desc}${SPLIT_PART_HUMAN} 分卷切割，共 ${uploaded_count} 卷）"
     local restore_text="下载所有分卷 ${zip_base}.001~$(printf '%03d' "$uploaded_count") 后 cat 合并再解压: cat ${zip_base}.0* > merged.zip && 7z x merged.zip"
@@ -654,6 +667,361 @@ _confirm_persist_by_count() {
   return 1
 }
 
+# ===== 目录可写性预检（跑文件修复方法之前的定性步骤）=====
+#
+# 为什么必须在跑 4 种方法之前:
+#   4 种方法（整文件下载 + copyto / zip 打包 + 分卷上传）全在同一目录里轮换，
+#   若目录本身就是拒收根因（目录名过长/敏感词/整条加密路径超后端上限），
+#   这 4 种方法连同整文件下载全是白跑——顽固文件每轮都要在同一条死路上
+#   重付一次代价（大文件还要 7z 打包 + 逐卷上传）。先花几字节探针定性，
+#   不可写就直接换短哈希目录。
+#
+# 为什么必须在重启后定论（缓存口径两个方向都不可信）:
+#   OpenList 的 PUT 结果只存在于驱动内存缓存，不重启读到的永远是同一份被
+#   污染的缓存（run 31951008332 实锤: 缓存计数与真值差 19 个假成功）。
+#     - "写完 lsf 看得到" 证明不了可写: 目录若是假成功创建的，重启后
+#       连目录带探针一起消失
+#     - "看不到" 也证明不了不可写: 可能只是驱动未就绪的临时失败
+#   故两个方向都以"重启容器 + 刷新路径缓存后探针是否仍可见"定论，
+#   与 openlist_driver.sh 的结论一致: 唯一可靠口径 = 重启后从后端重拉。
+#   缓存口径只用于诊断，以及预算耗尽/容器不可重启时的兜底（并明确标注）。
+#
+# 探针: 往目录写 olprobe_<8hex>.txt（几字节）→ 重启 → lsf 复核 → 删除。
+#
+# 判据只能是"重启后探针仍可见"，缓存口径一律不作数:
+#   PUT 假成功在缓存里与真文件无异（run 31951008332 实锤缓存计数与真值差
+#   19 个），所以"写完 lsf 看得到"什么都证明不了——目录本身若是假成功创建
+#   的，重启后连目录带探针一起消失。反过来，缓存口径的"看不到"同样不作数
+#   （可能只是驱动未就绪）。两个方向都必须以重启后的真值口径定论，
+#   与 openlist_driver.sh 的结论一致: 唯一可靠口径 = 重启后从后端重拉。
+#
+# 成本控制（重启约 2 分钟/次，不可滥用）:
+#   - 目录结论全局缓存 _DIR_WRITE_CACHE: 同一目录整轮只探一次
+#   - 每轮重启预算 OPENLIST_DIR_PROBE_MAX_RESTART（默认 3）; 预算耗尽或容器
+#     不可重启 → 退回缓存口径，并在结论里标注"未经重启确认"，
+#     此时保守取缓存口径（无硬失败信号即按可写放行: 宁可白跑 4 种方法，
+#     不可误判目录不可用而放弃原路径）
+#   - 探针删除失败会永久抬高 raw 计数基准 → 补偿 _RAW_VERIFY_LAST，
+#     否则下一个真实落盘的方法会被 _confirm_persist_by_count 判成假成功
+#   - 重启会打乱 _RAW_VERIFY_LAST 基准 → _fix_rebase_after_restart 重建
+#
+# 依赖: utils.sh (log_fix) / openlist_driver.sh (_restart_openlist_for_truth)
+# 用法: _fix_probe_dir_writable <dir_remote> <ol_dir 以 / 开头>
+#   返回 0=可写，1=不可写
+_fix_probe_dir_writable() {
+  local dir_remote="$1" ol_dir="${2:-}"
+  local probe_timeout="${OPENLIST_DIR_PROBE_TIMEOUT:-120}s"
+
+  # 整轮缓存: 同一目录只探一次（同一目录的结论不会在几分钟内翻转）
+  local cached="${_DIR_WRITE_CACHE[$dir_remote]:-}"
+  if [ -n "$cached" ]; then
+    log_fix "$fix_log" "   🔎 目录可写性（沿用本轮结论 ${cached%%|*}，${cached#*|}）"
+    [ "${cached%%|*}" = "1" ]
+    return $?
+  fi
+
+  local probe_name probe_local probe_dst
+  probe_name="olprobe_$(printf '%s' "${dir_remote}$$" | md5sum | cut -c1-8).txt"
+  probe_local="${temp_dir}/${probe_name}"
+  probe_dst="${dir_remote}/${probe_name}"
+  printf '%s' "openlist dir probe" > "$probe_local" 2>/dev/null || true
+
+  log_fix "$fix_log" "   🔎 预检目录可写性: $(_short_path "$dir_remote")"
+
+  # 第一次探测（缓存口径）: 只用于诊断与"预算耗尽时的兜底判据"，不作定论
+  rclone copyto "$probe_local" "$probe_dst" "${RCLONE_RETRY_FLAGS[@]}" --timeout "$probe_timeout" 2>&1 | \
+    _cmd_log 目录探测 "$fix_log"
+  local prc=${PIPESTATUS[0]}
+  local seen_cache=0
+  if [ "$prc" -eq 0 ]; then
+    if rclone lsf "$dir_remote" --files-only --retries 1 --timeout "$probe_timeout" 2>/dev/null \
+       | grep -qxF "$probe_name"; then
+      seen_cache=1
+    fi
+  fi
+  log_fix "$fix_log" "   缓存口径: rc=${prc}, 探针可见=${seen_cache}（不作判据）"
+
+  local writable="$seen_cache"
+  local note="未经重启确认（缓存口径，不可信）"
+  if [ "${_DIR_PROBE_RESTARTS:-0}" -ge "${OPENLIST_DIR_PROBE_MAX_RESTART:-3}" ]; then
+    log_fix "$fix_log" "   ⚠️ 本轮目录探测重启预算已耗尽（${OPENLIST_DIR_PROBE_MAX_RESTART:-3} 次），退回缓存口径"
+  elif _restart_openlist_for_truth "${ol_dir#/}" "$fix_log"; then
+    _DIR_PROBE_RESTARTS=$((_DIR_PROBE_RESTARTS + 1))
+    # 重启会让假成功条目从计数视图消失（计数下降），重启前建立的基准随之
+    # 虚高 → 后续真实落盘的方法全被判"未增长"级联拉黑，必须重建
+    _fix_rebase_after_restart "$fix_log"
+    local seen_truth=0
+    if rclone lsf "$dir_remote" --files-only --retries 1 --timeout "$probe_timeout" 2>/dev/null \
+       | grep -qxF "$probe_name"; then
+      seen_truth=1
+    fi
+    writable="$seen_truth"
+    note="已重启确认"
+    if [ "$seen_truth" -eq 1 ]; then
+      log_fix "$fix_log" "   ✅ 目录可写（重启后探针仍在）"
+    else
+      # 目录是假成功创建的、或写入根本没落盘——都是"这个目录写不进去"
+      log_fix "$fix_log" "   ❌ 目录不可写（重启后探针消失: 写入未真正落盘）"
+    fi
+  else
+    log_fix "$fix_log" "   ⚠️ 容器重启不可用，退回缓存口径"
+  fi
+
+  # 探针清理: 残留会污染目标端，且会永久抬高 raw 计数基准
+  rclone deletefile "$probe_dst" "${RCLONE_RETRY_FLAGS[@]}" --timeout "$probe_timeout" >/dev/null 2>&1
+  if rclone lsf "$dir_remote" --files-only --retries 1 --timeout "$probe_timeout" 2>/dev/null \
+     | grep -qxF "$probe_name"; then
+    log_fix "$fix_log" "   ⚠️ 探测文件删除失败，raw 计数基准 +1 补偿（避免真实落盘被误判假成功）"
+    [ "${_RAW_VERIFY_LAST:-0}" -gt 0 ] && _RAW_VERIFY_LAST=$((_RAW_VERIFY_LAST + 1))
+  fi
+
+  # 结论带上可信度标注: 排查时一眼能看出这条判定是否经过重启确认，
+  # 避免把缓存口径的结论当真值用
+  log_fix "$fix_log" "   结论: 可写=${writable}（${note}）"
+  _DIR_WRITE_CACHE["$dir_remote"]="${writable}|${note}"
+  [ "$writable" -eq 1 ]
+  return $?
+}
+
+# 目录预检重启后，重建落盘即时校验（_confirm_persist_by_count）的计数基准
+# 为什么必须重建: 基准 _RAW_VERIFY_LAST 是重启前建立的，重启后假成功条目
+#   从计数视图消失（计数下降），基准随之虚高于实际 → 之后每一个真实落盘的
+#   方法都会被判"计数未增长"→ 拉黑 → 换方法 → 再拉黑，一轮内同文件连传
+#   多个方法全被误判（run 31928671112 实锤一轮 9 个方法全是这个下场）。
+# 预算不因重建而回满: 取重建前后的较小值（重建只是取基准，不该把已消耗的
+#   全量计数次数补满）
+# 用法: _fix_rebase_after_restart <log_file>
+_fix_rebase_after_restart() {
+  local log_file="$1"
+  # 未启用落盘即时校验时无需重建；部分测试只 source file_fix.sh，
+  # file_fix_pipeline.sh 的重建函数可能不存在——两种都直接放行
+  [ -n "${_RAW_VERIFY_DIR:-}" ] || return 0
+  if ! declare -F _rebuild_raw_baseline >/dev/null 2>&1; then
+    return 0
+  fi
+  local budget_before="${_RAW_VERIFY_BUDGET:-0}"
+  _rebuild_raw_baseline "$log_file" || true
+  if [ "$budget_before" -gt 0 ] && [ "${_RAW_VERIFY_BUDGET:-0}" -gt "$budget_before" ]; then
+    _RAW_VERIFY_BUDGET="$budget_before"
+  fi
+}
+
+# ===== 目录级兜底: 短哈希目录 =====
+# 产出短哈希目录名: 整条相对目录路径的 md5 前 8 位（定长 8 字符）
+# 折叠整条路径而非只替换末层的理由见 _fix_switch_to_hash_dir 头部注释
+# 用法: _hash_dir_rel_for <file_dir_rel>  → stdout: 8 位 hex
+_hash_dir_rel_for() {
+  printf '%s' "$1" | md5sum | cut -c1-8
+}
+
+# 本轮所在目录的可读描述（三态，供方法文案与还原说明统一取用——
+# 各方法里各写一套 if/else 文案，迟早与实际落盘目录不一致）
+# 依赖调用方作用域: used_hash_dir / HASH_DIR_REL / used_base64_dir
+# 用法: _fix_dir_desc → stdout: 原路径 | base64URL 编码目录 | 短哈希目录 <hash>
+_fix_dir_desc() {
+  if [ "${used_hash_dir:-0}" -eq 1 ]; then
+    echo "短哈希目录 ${HASH_DIR_REL}"
+  elif [ "${used_base64_dir:-0}" -eq 1 ]; then
+    echo "base64URL 编码目录"
+  else
+    echo "原路径"
+  fi
+}
+
+# ===== 目录内的方法轮换（一轮 = 4 种文件修复方法各试一次）=====
+# try_fix_failed_file 最多调用两次: 先在 Step 1 定下的目录跑一轮，全败后由
+# _fix_switch_to_hash_dir 换到短哈希目录再跑一轮。抽成函数保证两轮的行为与
+# 文案完全一致（两条路径各自演化必然漂移，历史已多次吃过这个亏）。
+# 依赖调用方作用域（bash 动态作用域）: fix_log / src_file / local_file /
+#   file_name / actual_dst_dir / used_base64_dir / used_hash_dir / HASH_DIR_REL /
+#   dest_path / failed_file_rel / file_md5 / temp_dir
+# 用法: _try_fix_methods_round
+#   返回 0=某方法成功（TRY_FIX_* 已由 _fix_succeed 就绪），1=本轮全败
+_try_fix_methods_round() {
+  # 目标一律由 actual_dst_dir 推导: base64URL 降级时 dst_file 已被改写，
+  # 短哈希目录轮更是只改 actual_dst_dir，直接用 dst_file 会写回旧目录
+  local round_file="${actual_dst_dir}/${file_name}"
+
+  # 方法 1 copyto_original：直接 rclone copyto（当前目录 + 原文件名）
+  if _fix_method_gate copyto_original; then
+    local m1_status
+    rclone copyto "$src_file" "$round_file" "${RCLONE_RETRY_FLAGS[@]}" --timeout "${OPENLIST_UPLOAD_TIMEOUT:-300}s" 2>&1 | \
+      _cmd_log copyto_original "$fix_log"
+    m1_status=${PIPESTATUS[0]}
+    if [ "$m1_status" -eq 0 ] && _confirm_persist_by_count copyto_original "$failed_file_rel" "$fix_log"; then
+      log_fix "$fix_log" "  ✅ 文件修复方法1 成功"
+      local m1_alt m1_restore
+      if [ "${used_hash_dir:-0}" -eq 1 ] || [ "$used_base64_dir" -eq 1 ]; then
+        m1_alt="${round_file#${dest_path}/}"
+        m1_restore="rclone move '${round_file}' '${dest_path}/${failed_file_rel}'"
+      else
+        m1_alt="$failed_file_rel"
+        m1_restore="无需还原（文件已在正确路径）"
+      fi
+      _fix_succeed copyto_original "rclone copyto（$(_fix_dir_desc) + 原文件名）" \
+        "$m1_alt" "$m1_restore" "$file_md5"
+      return 0
+    fi
+    log_fix "$fix_log" "  ❌ 文件修复方法1 失败 exit=$m1_status"
+  fi
+
+  # 方法 2 copyto_shorthash：短哈希文件名直传
+  # <md5前8位>.<扩展名> — 密文名必然远低于 255 字节上限，对症"加密后文件名超长" 或敏感字符
+  if _fix_method_gate copyto_shorthash; then
+    local sh_hash sh_name m2sh_dst m2sh_status
+    sh_hash=$(printf '%s' "$failed_file_rel" | md5sum | cut -c1-8)
+    if [[ "$file_name" == *.* ]]; then
+      sh_name="${sh_hash}.${file_name##*.}"
+    else
+      sh_name="$sh_hash"
+    fi
+    m2sh_dst="${actual_dst_dir}/${sh_name}"
+    log_fix "$fix_log" "  文件名: ${file_name} → ${sh_name}"
+    rclone copyto "$local_file" "$m2sh_dst" "${RCLONE_RETRY_FLAGS[@]}" --timeout "${OPENLIST_UPLOAD_TIMEOUT:-300}s" 2>&1 | \
+      _cmd_log copyto_shorthash "$fix_log"
+    m2sh_status=${PIPESTATUS[0]}
+    if [ "$m2sh_status" -eq 0 ] && _confirm_persist_by_count copyto_shorthash "$failed_file_rel" "$fix_log"; then
+      log_fix "$fix_log" "  ✅ 文件修复方法2 成功"
+      _fix_succeed copyto_shorthash \
+        "rclone copyto（$(_fix_dir_desc) + 短哈希文件名 ${sh_hash}）" \
+        "${m2sh_dst#${dest_path}/}" \
+        "rclone move '${m2sh_dst}' '${dest_path}/${failed_file_rel}'  # 原文件名: ${file_name}" \
+        "$file_md5"
+      return 0
+    fi
+    log_fix "$fix_log" "  ❌ 文件修复方法2 失败 exit=$m2sh_status"
+  fi
+
+  # ============================================================
+  # 方法 3/4：压缩并分卷上传（粒度默认 1GB）
+  #   文件修复方法3 zip_split_original  — 基底名用原文件名
+  #   文件修复方法4 zip_split_shorthash — 基底名用短哈希名（encode_name=1）
+  # ============================================================
+  local SPLIT_LIMIT_BYTES="${OPENLIST_SPLIT_PART_BYTES:-1073741824}"
+  local SPLIT_PART_HUMAN
+  SPLIT_PART_HUMAN=$(format_bytes_iec "$SPLIT_LIMIT_BYTES")
+  _fix_method_gate zip_split_original "（粒度 ${SPLIT_PART_HUMAN}）" && { _try_fix_split_archive zip_split_original 0 && return 0; }
+  _fix_method_gate zip_split_shorthash && { _try_fix_split_archive zip_split_shorthash 1 && return 0; }
+
+  log_fix "$fix_log" "  ❌ 本轮 4 种方法全部失败（目录: $(_fix_dir_desc)）"
+  return 1
+}
+
+# ===== 目录切换: 整条目录折叠为短哈希目录 =====
+# 两个调用入口（都在 try_fix_failed_file 里）:
+#   1. Step 2 预检判定原目录不可写 → 立刻切换，连整文件下载都省掉
+#   2. Step 5 原目录 4 种方法全败 → 兜底切换（预检只能证明几字节探针能写，
+#      证明不了这个文件能写: 内容级拒收、文件名/密文名超限等都可能）
+# 两个入口共用本函数，切换后一律对新目录做可写性预检
+# 不适用: file_dir_rel = "." （目标端根目录的文件无目录可换）
+#
+# 为什么必须有这一级（既有链路的死角）:
+#   Step 1 的 base64URL 编码目录只在"目录创建失败"时降级，是被动兜底。
+#   目录已存在（同目录其余文件都同步成功）但写入被拒时 mkdir/lsd 双双返回 0
+#   → used_base64_dir=0，4 种方法全在原目录里重试，整条链路没有任何
+#   "换目录"的分支。于是"目录名过长 / 目录名含敏感词 / 整条加密路径超后端
+#   上限"这类根因永远无法自愈（backup 任务的 options.xml 即此形态）。
+#
+# 为什么折叠整条目录路径，而不是像 base64URL 那样只替换末层:
+#   - 敏感词可能出现在任一层，只换末层无效
+#   - base64URL 编码对"名长"是反向的（编码后比原名更长，crypt 加密后更甚），
+#     只有定长 8 字符的哈希目录能真正压短整条路径
+#   代价: 目标端根目录出现 8 位十六进制目录、目录结构丢失。哈希不可逆，
+#   原目录名只能从 marker 的 original 字段取——还原必须走 marker 的
+#   original/alternative 映射，不能像 base64URL 那样就地解码
+#   （restore_info.jq 的 hash_dir 分支据此编写）。
+#
+# 目录换了，该文件的方法黑名单必须清空:
+#   黑名单记的是"某方法在某目录下失败/假成功"，换目录后结论失效；沿用会让
+#   本轮所有方法被 _fix_method_gate 直接跳过，兜底白跑一趟。
+# 开关: OPENLIST_HASH_DIR_FALLBACK=0 关闭
+# 依赖调用方作用域: fix_log / dest_path / ol_dst_base / failed_file_rel /
+#   file_dir_rel / temp_dir；成功时改写 actual_dst_dir / used_hash_dir / HASH_DIR_REL
+# 用法: _fix_switch_to_hash_dir → 0=已切到可写的短哈希目录，1=未能切换
+_fix_switch_to_hash_dir() {
+  [ "${OPENLIST_HASH_DIR_FALLBACK:-1}" = "0" ] && return 1
+  if [ "$file_dir_rel" = "." ] || [ -z "$file_dir_rel" ]; then
+    log_fix "$fix_log" "⏭ 文件位于目标端根目录，无目录可换，跳过短哈希目录兜底"
+    return 1
+  fi
+  if [ "${used_base64_dir:-0}" -eq 1 ]; then
+    log_fix "$fix_log" "⏭ 已降级到 base64URL 编码目录，不再叠加短哈希目录"
+    return 1
+  fi
+
+  HASH_DIR_REL=$(_hash_dir_rel_for "$file_dir_rel")
+  if [ -z "$HASH_DIR_REL" ]; then
+    log_fix "$fix_log" "⚠ 短哈希目录名计算失败，跳过兜底"
+    return 1
+  fi
+  local hash_dst_dir="${dest_path}/${HASH_DIR_REL}"
+  local hash_ol_dir="/${ol_dst_base}/${HASH_DIR_REL}"
+  log_fix "$fix_log" "🔀 目录级兜底: 整条目录折叠为短哈希目录 ${HASH_DIR_REL}"
+  log_fix "$fix_log" "   原目录: ${file_dir_rel}"
+
+  # 创建 + lsd 复核（同 Step 1 口径: mkdir 返回 0 也必须复核，防 WebDAV 静默失败）
+  local hash_dir_ok=0
+  rclone mkdir "$hash_dst_dir" "${RCLONE_RETRY_FLAGS[@]}" --timeout "${OPENLIST_MKDIR_TIMEOUT:-120}s" 2>&1 | \
+    _cmd_log mkdir+hash "$fix_log"
+  local mkdir_status=${PIPESTATUS[0]}
+  if [ "$mkdir_status" -eq 0 ]; then
+    rclone lsd "$hash_dst_dir" "${RCLONE_RETRY_FLAGS[@]}" --timeout "${OPENLIST_MKDIR_TIMEOUT:-120}s" >/dev/null 2>&1
+    if [ $? -eq 0 ]; then
+      hash_dir_ok=1
+      log_fix "$fix_log" "   ✅ 短哈希目录已确认存在"
+    else
+      log_fix "$fix_log" "   ⚠ 短哈希目录 lsd 复核失败，尝试 OpenList API..."
+    fi
+  else
+    log_fix "$fix_log" "   ⚠ rclone mkdir 失败 exit=${mkdir_status}，尝试 OpenList API..."
+  fi
+
+  if [ "$hash_dir_ok" -ne 1 ]; then
+    local ol_token
+    ol_token=$(_get_openlist_token 2>/dev/null) || ol_token=""
+    if [ -n "$ol_token" ]; then
+      local mkdir_resp mkdir_http
+      mkdir_resp=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST "http://127.0.0.1:5244/api/fs/mkdir" \
+        -H "Authorization: $ol_token" \
+        -H "Content-Type: application/json" \
+        -d "$(jq -n --arg path "$hash_ol_dir" '{path:$path}')" 2>&1)
+      mkdir_http=$(echo "$mkdir_resp" | tail -n 1)
+      log_fix "$fix_log" "   OpenList API mkdir (短哈希) 响应: ${mkdir_http}"
+      if echo "$mkdir_http" | grep -qE 'HTTP_CODE:(200|201|204)'; then
+        hash_dir_ok=1
+        log_fix "$fix_log" "   ✅ 短哈希目录创建成功 (API)"
+      fi
+    fi
+  fi
+
+  if [ "$hash_dir_ok" -ne 1 ]; then
+    log_fix "$fix_log" "   ❌ 短哈希目录创建失败，兜底终止"
+    return 1
+  fi
+
+  # 改写本轮落盘目录（不加 local: 写回 try_fix_failed_file 作用域）
+  actual_dst_dir="$hash_dst_dir"
+  actual_ol_dir="$hash_ol_dir"
+  used_hash_dir=1
+
+  # 目录已换 → 原目录下的方法结论作废（黑名单记的是"某方法在某目录下
+  # 失败/假成功"，沿用会让本轮所有方法被门禁直接跳过）
+  if [ -n "${FIX_METHOD_BLACKLIST[$failed_file_rel]+x}" ]; then
+    log_fix "$fix_log" "   ♻ 目录已换，清空方法黑名单（原目录下的失败/假成功结论不再适用）"
+    unset "FIX_METHOD_BLACKLIST[$failed_file_rel]"
+  fi
+
+  # 短哈希目录同样要先过可写性预检: 建得出目录 ≠ 写得进文件。
+  # 不过就立刻返回失败，省掉一趟整文件下载 + 4 次上传
+  log_fix "$fix_log" "   🔎 预检短哈希目录可写性..."
+  if ! _fix_probe_dir_writable "$actual_dst_dir" "$actual_ol_dir"; then
+    log_fix "$fix_log" "   ❌ 短哈希目录不可写（已重启容器复核），兜底终止"
+    return 1
+  fi
+  log_fix "$fix_log" "   ✅ 短哈希目录可写，4 种文件修复方法将在此目录执行"
+  return 0
+}
+
 try_fix_failed_file() {
   local source_path="$1"
   local dest_path="$2"
@@ -684,38 +1052,21 @@ try_fix_failed_file() {
   TRY_FIX_MESSAGE=""
   TRY_FIX_MD5=""
 
+  # 区段头（sync_notify.sh 按它切出每个文件的"修复过程"展示在通知里）:
+  # 必须写完整相对路径——通知侧手里只有完整路径，若写成 _short_path 的截断值
+  # 就对不上，提取结果恒为空 → 通知里只剩"修复过程：无记录"。
+  # 该头部在 4e43120 日志美化时随旧写法一起消失，消费端 awk 自此空转:
+  # 每个失败文件的 4 种方法到底报了什么错，通知里一行都看不到，
+  # 只能回 Actions 翻原始日志。
+  log_fix "$fix_log" "=== 尝试修复失败文件: ${failed_file_rel} ==="
   log_fix "$fix_log" "── 修复 $(_short_path "$failed_file_rel")"
   log_fix "$fix_log" "   源: $(_short_path "$src_file")"
   log_fix "$fix_log" "   目标: $(_short_path "$dst_file")"
 
-  # 下载源文件到本地临时目录
+  # 临时目录: 目录可写性探测（探针）必须先于下载完成，故在此创建
+  # （顺序很重要——目录若不可写，整文件下载连同 4 种方法全是白跑）
   local temp_dir="temp_fix_$(date +%s)_$$"
   mkdir -p "$temp_dir"
-  local local_file="$temp_dir/$file_name"
-
-  log_fix "$fix_log" "⬇ 下载源文件到本地..."
-  rclone copyto "$src_file" "$local_file" "${RCLONE_RETRY_FLAGS[@]}" --timeout "${OPENLIST_UPLOAD_TIMEOUT:-300}s" 2>&1 | \
-    _cmd_log 下载 "$fix_log"
-  local copy_status=${PIPESTATUS[0]}
-
-  if [ "$copy_status" -ne 0 ] || [ ! -f "$local_file" ]; then
-    log_fix "$fix_log" "❌ 下载源文件失败，跳过修复"
-    TRY_FIX_MESSAGE="无法从源端下载文件"
-    rm -rf "$temp_dir" 2>/dev/null || true
-    return 1
-  fi
-
-  local file_size
-  file_size=$(stat -c%s "$local_file" 2>/dev/null || echo 0)
-  log_fix "$fix_log" "✅ 已下载 $(format_bytes_iec "$file_size")"
-
-  # 原文件内容指纹: 本地副本在此统一计算一次（下载失败早已短路），
-  # 四种方法共享；写进 marker 后供还原时做内容级硬校验。
-  # temp_dir 会被 _fix_succeed 清理，但 md5 值已捕获，不受影响。
-  local file_md5
-  file_md5=$(md5sum "$local_file" 2>/dev/null | awk '{print $1}')
-  [[ "$file_md5" =~ ^[0-9a-f]{32}$ ]] || file_md5=""
-  [ -n "$file_md5" ] && log_fix "$fix_log" "  md5: $file_md5"
 
   # ===== Step 1: 创建/确认目标目录 =====
   local dir_ok=0
@@ -824,75 +1175,68 @@ try_fix_failed_file() {
     return 1
   fi
 
-  # ===== Step 2: 目录已就绪，尝试多种方式同步文件 =====
-  log_fix "$fix_log" "目录已就绪，开始尝试多种方式同步到: $dst_file"
+  # ===== Step 2: 目录可写性预检（跑 4 种方法之前先给目录定性）=====
+  # 目录不可写时直接在下方换短哈希目录，连整文件下载都省掉——
+  # 否则每个顽固文件都要在同一条死路上白跑"下载 + 4 次上传/打包"
+  local used_hash_dir=0
+  local HASH_DIR_REL=""
+  log_fix "$fix_log" "📁 目标目录已就绪: $(_short_path "$actual_dst_dir")"
 
-  local ol_dst_dir
-  ol_dst_dir="${dst_file#openlist:}"
-  ol_dst_dir="/$(dirname -- "$ol_dst_dir")"
-
-  local ol_token
-  ol_token=$(_get_openlist_token)
-
-  # 方法 1 copyto_original：直接 rclone copyto（原路径 + 原文件名）
-  if _fix_method_gate copyto_original; then
-  rclone copyto "$src_file" "$dst_file" "${RCLONE_RETRY_FLAGS[@]}" --timeout "${OPENLIST_UPLOAD_TIMEOUT:-300}s" 2>&1 | \
-    _cmd_log copyto_original "$fix_log"
-  local m1_status=${PIPESTATUS[0]}
-  if [ "$m1_status" -eq 0 ] && _confirm_persist_by_count copyto_original "$failed_file_rel" "$fix_log"; then
-    log_fix "$fix_log" "  ✅ 文件修复方法1 成功"
-    if [ "$used_base64_dir" -eq 1 ]; then
-      _fix_succeed copyto_original "rclone copyto（base64URL 编码目录 + 原文件名）" "${dst_file#${dest_path}/}" "rclone move '${dst_file}' '${dest_path}/${failed_file_rel}'" "$file_md5"
-    else
-      _fix_succeed copyto_original "rclone copyto（原路径 + 原文件名）" "$failed_file_rel" "无需还原（文件已在正确路径）" "$file_md5"
+  if ! _fix_probe_dir_writable "$actual_dst_dir" "$actual_ol_dir"; then
+    log_fix "$fix_log" "🔀 原目录不可写（已重启容器复核）→ 直接切短哈希目录，跳过原目录的 4 种方法"
+    if ! _fix_switch_to_hash_dir; then
+      log_fix "$fix_log" "❌ 短哈希目录同样不可写，无法修复文件"
+      TRY_FIX_MESSAGE="目标目录不可写（原目录与短哈希目录均未通过可写性预检）"
+      rm -rf "$temp_dir" 2>/dev/null || true
+      return 1
     fi
+  fi
+
+  # ===== Step 3: 目录已定性，下载源文件到本地 =====
+  local local_file="$temp_dir/$file_name"
+  log_fix "$fix_log" "⬇ 下载源文件到本地..."
+  rclone copyto "$src_file" "$local_file" "${RCLONE_RETRY_FLAGS[@]}" --timeout "${OPENLIST_UPLOAD_TIMEOUT:-300}s" 2>&1 | \
+    _cmd_log 下载 "$fix_log"
+  local copy_status=${PIPESTATUS[0]}
+
+  if [ "$copy_status" -ne 0 ] || [ ! -f "$local_file" ]; then
+    log_fix "$fix_log" "❌ 下载源文件失败，跳过修复"
+    TRY_FIX_MESSAGE="无法从源端下载文件"
+    rm -rf "$temp_dir" 2>/dev/null || true
+    return 1
+  fi
+
+  local file_size
+  file_size=$(stat -c%s "$local_file" 2>/dev/null || echo 0)
+  log_fix "$fix_log" "✅ 已下载 $(format_bytes_iec "$file_size")"
+
+  # 原文件内容指纹: 本地副本在此统一计算一次（下载失败早已短路），
+  # 四种方法共享；写进 marker 后供还原时做内容级硬校验。
+  # temp_dir 会被 _fix_succeed 清理，但 md5 值已捕获，不受影响。
+  local file_md5
+  file_md5=$(md5sum "$local_file" 2>/dev/null | awk '{print $1}')
+  [[ "$file_md5" =~ ^[0-9a-f]{32}$ ]] || file_md5=""
+  [ -n "$file_md5" ] && log_fix "$fix_log" "  md5: $file_md5"
+
+  # ===== Step 4: 在已定性的目录跑 4 种方法 =====
+  log_fix "$fix_log" "开始尝试多种方式同步到: ${actual_dst_dir}/${file_name}"
+  if _try_fix_methods_round; then
     return 0
   fi
-  log_fix "$fix_log" "  ❌ 文件修复方法1 失败 exit=$m1_status"
-  fi
 
-  # 方法 2 copyto_shorthash：短哈希文件名直传
-  # <md5前8位>.<扩展名> — 密文名必然远低于 255 字节上限，对症"加密后文件名超长" 或敏感字符
-  if _fix_method_gate copyto_shorthash; then
-  local sh_hash sh_name m2sh_dst m2sh_status
-  sh_hash=$(printf '%s' "$failed_file_rel" | md5sum | cut -c1-8)
-  if [[ "$file_name" == *.* ]]; then
-    sh_name="${sh_hash}.${file_name##*.}"
-  else
-    sh_name="$sh_hash"
-  fi
-  m2sh_dst="${actual_dst_dir}/${sh_name}"
-  log_fix "$fix_log" "  文件名: ${file_name} → ${sh_name}"
-  rclone copyto "$local_file" "$m2sh_dst" "${RCLONE_RETRY_FLAGS[@]}" --timeout "${OPENLIST_UPLOAD_TIMEOUT:-300}s" 2>&1 | \
-    _cmd_log copyto_shorthash "$fix_log"
-  m2sh_status=${PIPESTATUS[0]}
-  if [ "$m2sh_status" -eq 0 ] && _confirm_persist_by_count copyto_shorthash "$failed_file_rel" "$fix_log"; then
-    log_fix "$fix_log" "  ✅ 文件修复方法2 成功"
-    local m2_method_text
-    if [ "$used_base64_dir" -eq 1 ]; then
-      m2_method_text="rclone copyto（base64URL 编码目录 + 短哈希文件名 ${sh_hash}）"
-    else
-      m2_method_text="rclone copyto（原路径 + 短哈希文件名 ${sh_hash}）"
+  # ===== Step 5: 兜底 —— 方法全败后再换一次短哈希目录 =====
+  # 预检只能证明"几字节探针能写"，证明不了"这个文件能写"（内容级拒收、
+  # 文件名/密文名超限等）。故保留这条兜底: 预检未切换过目录时才走
+  if [ "$used_hash_dir" -eq 0 ] && [ "${OPENLIST_HASH_DIR_FALLBACK:-1}" != "0" ] \
+     && [ "$file_dir_rel" != "." ] && [ -n "$file_dir_rel" ]; then
+    log_fix "$fix_log" "🔀 4 种方法全败，兜底换短哈希目录再试一轮"
+    if _fix_switch_to_hash_dir; then
+      _try_fix_methods_round && return 0
     fi
-    _fix_succeed copyto_shorthash "$m2_method_text" "${m2sh_dst#${dest_path}/}" "rclone move '${m2sh_dst}' '${dest_path}/${failed_file_rel}'  # 原文件名: ${file_name}" "$file_md5"
-    return 0
   fi
-  log_fix "$fix_log" "  ❌ 文件修复方法2 失败 exit=$m2sh_status"
-  fi
-
-  # ============================================================
-  # 方法 3/4：压缩并分卷上传（粒度默认 1GB）
-  #   文件修复方法3 zip_split_original  — 基底名用原文件名
-  #   文件修复方法4 zip_split_shorthash — 基底名用短哈希名（encode_name=1）
-  # ============================================================
-  local SPLIT_LIMIT_BYTES="${OPENLIST_SPLIT_PART_BYTES:-1073741824}"
-  local SPLIT_PART_HUMAN
-  SPLIT_PART_HUMAN=$(format_bytes_iec "$SPLIT_LIMIT_BYTES")
-  _fix_method_gate zip_split_original "（粒度 ${SPLIT_PART_HUMAN}）" && { _try_fix_split_archive zip_split_original 0 && return 0; }
-  _fix_method_gate zip_split_shorthash && { _try_fix_split_archive zip_split_shorthash 1 && return 0; }
 
   # 所有方法均失败
-  log_fix "$fix_log" "❌ 全部修复方法（1-4）均失败"
+  log_fix "$fix_log" "❌ 全部修复方法（1-4）均失败（含短哈希目录兜底）"
   TRY_FIX_MESSAGE="所有修复方法均失败"
   rm -rf "$temp_dir" 2>/dev/null || true
   return 1
