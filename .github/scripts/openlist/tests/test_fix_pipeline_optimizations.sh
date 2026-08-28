@@ -17,6 +17,9 @@ bad() { FAIL=$((FAIL+1)); echo "FAIL: $1"; }
 _REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 source "$_REPO_ROOT/.github/scripts/openlist/utils.sh" 2>/dev/null
 source "$_REPO_ROOT/.github/scripts/openlist/fix.sh" 2>/dev/null
+# 修复管线编排（_sync_fix_missing_files / _persist_fix_entry_now 等）已从 sync.sh
+# 拆到 fix_pipeline.sh，本测试测的就是它，漏 source 会全线 command not found
+source "$_REPO_ROOT/.github/scripts/openlist/fix_pipeline.sh" 2>/dev/null
 source "$_REPO_ROOT/.github/scripts/openlist/sync.sh" 2>/dev/null
 
 WORK="/tmp/fixopt_test_dir"
