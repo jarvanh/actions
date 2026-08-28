@@ -57,13 +57,13 @@ proxy-speedtest/            测速结果数据
 | **sync** | `sync_engine.sh` | 298 | 核心同步引擎（编排 + 423/8005 重试） |
 | | `sync_marker.sh` | 803 | 同步标记持久化（跳过、黑名单、修复清单） |
 | | `sync_notify.sh` | 328 | 同步结果通知构建（Telegram 排版） |
-| | `sync_progress.sh` | 502 | 全局进度通知系统（含收尾四态标题） |
+| | `sync_progress.sh` | 544 | 全局进度通知系统（含收尾四态标题、多层级阶段区） |
 | **file** | `file_split.sh` | 666 | 大文件分割（ffmpeg 关键帧 / 7z 分卷） |
 | | `file_fix.sh` | 1243 | 单文件修复的 4 种方法 + 目录可写性预检 + 短哈希目录兜底 |
 | | `file_fix_pipeline.sh` | 875 | 修复管线编排（方法轮换 + 增量持久化） |
 | | `file_restore.sh` | 632 | 修复文件还原（目标端 → 原路径 / 源端） |
 | **task** | `task_preview.sh` | 359 | 任务预览（大小估算、流量图） |
-| | `task_engine.sh` | 1209 | 任务注册表与编排（分批、轮转） |
+| | `task_engine.sh` | 1267 | 任务注册表与编排（分批、轮转、阶段行生产） |
 | **基础** | `utils.sh` | 176 | 通用工具（转义、格式化、树形渲染） |
 | | `telegram.sh` | 146 | Telegram Bot API 封装 |
 | | `load_all.sh` | 49 | 统一加载入口（L1→L6 分层） |
@@ -235,10 +235,10 @@ cd .github/scripts/openlist
 for t in tests/*.sh; do bash "$t"; done
 ```
 
-14 个测试、319 个断言，覆盖轮转、批次巩固、修复管线优化、修复日志区段头提取、
+15 个测试、336 个断言，覆盖轮转、批次巩固、修复管线优化、修复日志区段头提取、
 目录可写性预检（含假成功目录）与短哈希目录兜底、预览 diff、truth-check、
-token 登录、marker、收尾标题四态等。均为纯 bash + stub
-（mock 掉 rclone/curl/docker），无需真实网盘。
+token 登录、marker、收尾标题四态、进度阶段区排版（子目录树/文件批次的层级
+与缩进）等。均为纯 bash + stub（mock 掉 rclone/curl/docker），无需真实网盘。
 
 **注意两点**：
 
@@ -259,5 +259,6 @@ token 登录、marker、收尾标题四态等。均为纯 bash + stub
 | 加一种文件修复方法 | `file_fix.sh`（实现 + `_try_fix_methods_round` 轮换）+ 同步更新 `文件修复方法N` 文案 |
 | 改目录级降级策略 | `file_fix.sh` 的 `_fix_probe_dir_writable`（预检/重启复核）+ `_fix_switch_to_hash_dir`（切换）+ `restore_info.jq` 的目录类分支 |
 | 改通知排版 | `sync_notify.sh` / `telegram.sh` |
+| 改进度消息的阶段区（子目录树 / 文件批次的层级、缩进、统计字段） | `sync_progress.sh` 的 `_progress_render` + `task_engine.sh` 的 `_render_subdir_phase_tree` / `_render_batch_stats_line` |
 | 改收尾标题四态 | `sync_progress.sh` 的 `_progress_render` 终态分支（中断 / 有文件无法同步 / 带修复完成 / 完全完成，按严重度判定） |
 | 加新模块 | 新建 `<领域>_<职责>.sh` + 在 `load_all.sh` 对应层加一行 |

@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# 进度通知"阶段区"排版回归测试（用户反馈实录的一屏）:
+#   📁 源端 280.790 GiB          ← 与任务分组头 "📁 onedrive:0 · 280.790 GiB" 重复
+#   ├─ ⏭️ archive · 477.281 MiB  ← 与 "└─ wopan176Crypt/0" 同列，看着像目标端的
+#                                  同级兄弟，而非挂在 "▸ 📊 子目录" 之下
+#   ▸ 📦 文件批次拆分：15 批 ...  ← 排在统计行之后，而非挂在正在跑的子目录下
+#   ▸ 📊 批次：1/15 | ✅0 ❌0     ← 只有批次序号，看不出在跑什么、跑了多少
+# 契约（渲染器 _progress_render 与生产方 _render_subdir_phase_tree 各自一半）:
+#   L1 子目录树不再输出 "📁 源端 X" 首行（源端大小分组头已给出）
+#   L2 树型块: 统计行是表头，排在树行之前；树行再缩进 2 格
+#   L3 标签型块（全部行以 "▸" 开头）: 标签排在统计行之前，两者同列、无连接符
+#   L4 下一层表头对齐本层树行文本列 —— 视觉上挂在 🔄 活动行（已置尾）之下
+#   L5 深层 detail 落到本层 note 行（挂在统计行下），不再被静默丢弃
+#   L6 progress_scope_init 连 note 槽位一起清理，子任务收尾不留残影
+set -uo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORK_DIR="$(mktemp -d)"
+trap 'rm -rf "$WORK_DIR"' EXIT
+cd "$WORK_DIR"
+
+PASS=0
+FAIL=0
+chk() {
+  if [ "$2" = "$3" ]; then
+    PASS=$((PASS + 1)); echo "✅ $1"
+  else
+    FAIL=$((FAIL + 1)); echo "❌ $1 (期望 [$3] 实际 [$2])"
+  fi
+}
+
+# ---------- 加载被测模块（部分 source: 只依赖 utils + telegram 排版助手）----------
+source "$SCRIPT_DIR/../utils.sh"
+source "$SCRIPT_DIR/../telegram.sh"
+source "$SCRIPT_DIR/../task_engine.sh"
+source "$SCRIPT_DIR/../sync_progress.sh"
+
+# 状态文件重定向到临时目录（模块顶层写死 /tmp，source 后覆盖）
+PROGRESS_TASKS_FILE="$WORK_DIR/tasks.tsv"
+PROGRESS_START_FILE="$WORK_DIR/start"
+PROGRESS_FINALIZED_FILE="$WORK_DIR/finalized"
+PROGRESS_FIXED_FILE="$WORK_DIR/fixed"
+PROGRESS_MSG_ID_FILE="$WORK_DIR/msgid"
+PROGRESS_CURRENT_FILE="$WORK_DIR/current"
+PROGRESS_LAST_UPDATE_FILE="$WORK_DIR/last_update"
+# 阶段槽位路径默认也是 /tmp（_progress_slot_* 生成），重指向临时目录，
+# 免得测试之间互相污染真实 /tmp
+_progress_slot_rows()  { printf '%s/rows.%d'  "$WORK_DIR" "$1"; }
+_progress_slot_stats() { printf '%s/stats.%d' "$WORK_DIR" "$1"; }
+_progress_slot_note()  { printf '%s/note.%d'  "$WORK_DIR" "$1"; }
+
+# telegram 发送 mock（只需 message_id 落盘，不发真实请求）
+_tg_ensure_bottom_message() { printf '%s\n' "$1" > "$WORK_DIR/last_msg"; echo "mock-id"; }
+
+# 取渲染结果里匹配某关键字的整行（保留行首缩进）
+line_of() { grep -F -- "$1" "$WORK_DIR/last_msg" | head -1; }
+
+# ---------- L1: 子目录树无 "📁 源端" 首行 ----------
+declare -A subdir_status_map=() subdir_size_map=()
+subdirs=$'archive\n照片\nj-1024j-视频-pornhub-favorites'
+subdir_size_map[archive]=500400000
+subdir_size_map[照片]=19250000000000
+subdir_size_map[j-1024j-视频-pornhub-favorites]=281700000000000
+subdir_status_map[archive]=skipped
+subdir_status_map[照片]=synced
+subdir_status_map[j-1024j-视频-pornhub-favorites]=syncing
+TREE=$(_render_subdir_phase_tree)
+chk "L1a 首行是第一个子目录（不再有 📁 源端 表头行）" \
+  "$(printf '%s' "$TREE" | head -1)" "⏭️ archive · $(format_bytes 500400000)"
+chk "L1b 行数 = 子目录数（3）" "$(printf '%s\n' "$TREE" | grep -c .)" "3"
+chk "L1c 末行为 🔄 活动子目录" \
+  "$(printf '%s' "$TREE" | tail -1)" \
+  "🔄 j-1024j-视频-pornhub-favorites · $(format_bytes 281700000000000)"
+
+# ---------- 装配场景: 父层子目录树 + 子层文件批次 ----------
+TASK_SUBDIR_STATS='▸ 📊 子目录：2/3 完成 | ✅1 ⏭️1 ⏳1 ⚠️0 ❌0'
+BATCH_LABEL='▸ 📦 文件批次拆分：15 批 / 1367 文件（当前批次 1：105 文件）'
+BATCH_STATS='▸ 📊 批次：1/15 | ✅0 ❌0 · 📄 105/1367 文件 · 📤 12.345 GiB'
+BATCH_DETAIL='批次 1 巩固: 重启容器校验落盘真值'
+
+progress_init
+progress_register_task task0_wopan176Crypt "onedrive:0 → openlist:wopan176Crypt/0" "280.790 GiB"
+progress_task_begin task0_wopan176Crypt >/dev/null
+SYNC_AUTO_SPLIT_DEPTH=0
+PROGRESS_PHASE_INFO="$TREE"
+PROGRESS_STATS="$TASK_SUBDIR_STATS"
+progress_update_force "" "$PROGRESS_STATS" >/dev/null
+SYNC_AUTO_SPLIT_DEPTH=1
+PROGRESS_PHASE_INFO="$BATCH_LABEL"
+PROGRESS_STATS="$BATCH_STATS"
+# 清掉节流时间戳: 上一步是 force 刷新（force 只豁免深度 0），紧接着的深层
+# 更新会被 2s 节流吞掉，消息不刷新则下面的断言读到的是上一屏
+rm -f "$PROGRESS_LAST_UPDATE_FILE"
+progress_update "$BATCH_DETAIL" >/dev/null
+
+# ---------- L2: 树型块 —— 统计行（表头）在前，树行缩进 2 格 ----------
+chk "L2a 统计行缩进 5 格、位于树行之前" \
+  "$(line_of '子目录：')" "     ${TASK_SUBDIR_STATS}"
+chk "L2b 首个树行缩进 7 格（统计行 +2）并带 ├─ 连接符" \
+  "$(line_of 'archive')" "       ├─ ⏭️ archive · $(format_bytes 500400000)"
+
+# ---------- L3: 标签型块 —— 标签在前、与统计行同列、无连接符 ----------
+# 批次块在深度 1，表头缩进 = 5*1+5 = 10 格（L4 断言它正对本层树行文本列）
+chk "L3a 批次标签与统计行同列、无树形连接符" \
+  "$(line_of '文件批次拆分')" "          ${BATCH_LABEL}"
+chk "L3b 批次统计行紧跟标签、同列" \
+  "$(line_of '批次：1/15')" "          ${BATCH_STATS}"
+# 标签型与树型的"统计行 vs 阶段行"先后相反，是本契约的关键
+N_LABEL=$(grep -n -F -- '文件批次拆分' "$WORK_DIR/last_msg" | head -1 | cut -d: -f1)
+N_BATCH_STATS=$(grep -n -F -- '批次：1/15' "$WORK_DIR/last_msg" | head -1 | cut -d: -f1)
+chk "L3c 标签型: 标签行排在统计行之前" \
+  "$([ "$N_LABEL" -lt "$N_BATCH_STATS" ] && echo yes || echo no)" "yes"
+N_SUBDIR_STATS=$(grep -n -F -- '子目录：' "$WORK_DIR/last_msg" | head -1 | cut -d: -f1)
+N_TREE=$(grep -n -F -- 'archive' "$WORK_DIR/last_msg" | head -1 | cut -d: -f1)
+chk "L2c 树型: 统计行排在树行之前" \
+  "$([ "$N_SUBDIR_STATS" -lt "$N_TREE" ] && echo yes || echo no)" "yes"
+
+# ---------- L4: 下一层表头对齐本层树行文本列（挂在 🔄 行下）----------
+# 树行 "       └─ 🔄 ..." 文本列 = 7 + len("└─ ") = 11
+# 下一层表头缩进 10 格 + "▸" 占 1 列 → 同样落在第 11 列
+ACT_ROW=$(line_of 'j-1024j')
+ACT_LABEL=$(line_of '文件批次拆分')
+chk "L4a 树行是最后一条（🔄 已置尾，深层块才挂得住）" \
+  "$(printf '%s' "$ACT_ROW" | sed 's/^ *//' | cut -c1-4)" "└─ 🔄"
+chk "L4b 标签行前缀空格 10 / 树行前缀空格 7（对齐树行文本列）" \
+  "$(printf '%s' "${ACT_LABEL%%▸*}" | wc -c | tr -d ' ')/$(printf '%s' "${ACT_ROW%%└*}" | wc -c | tr -d ' ')" \
+  "10/7"
+
+# ---------- L5: 深层 detail 落到本层 note 行 ----------
+chk "L5a 深层 detail 渲染为 note 行（挂在统计行下，缩进 12 格）" \
+  "$(line_of '巩固')" "            └─ ${BATCH_DETAIL}"
+chk "L5b 深层 detail 不污染任务行（任务行无 detail）" \
+  "$(line_of 'wopan176Crypt/0')" "  └─ wopan176Crypt/0"
+
+# ---------- L6: 子任务收尾清更深槽位（含 note）----------
+progress_scope_init 1
+chk "L6a 清完 rows" "$([ -f "$(_progress_slot_rows 1)" ] && echo yes || echo no)" "no"
+chk "L6b 清完 stats" "$([ -f "$(_progress_slot_stats 1)" ] && echo yes || echo no)" "no"
+chk "L6c 清完 note" "$([ -f "$(_progress_slot_note 1)" ] && echo yes || echo no)" "no"
+chk "L6d 父层槽位不受影响" "$([ -f "$(_progress_slot_rows 0)" ] && echo yes || echo no)" "yes"
+
+echo ""
+echo "PASS=$PASS FAIL=$FAIL"
+[ "$FAIL" -eq 0 ]

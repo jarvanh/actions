@@ -246,15 +246,16 @@ _preview_register() {
 # 渲染子目录阶段树原始行（多行、不带连接符——├─/└─ 由进度渲染器统一补，
 # 多层级嵌套时各层分别加连接符才能对齐）
 # 依赖调用方（_sync_task_impl）作用域内的变量（bash 动态作用域可见）:
-#   subdirs（排序后的子目录列表）/ subdir_size_map / subdir_status_map /
-#   source_size_bytes
+#   subdirs（排序后的子目录列表）/ subdir_size_map / subdir_status_map
 # 输出格式（状态由 emoji 表达，不重复文字说明，紧凑单行）:
-#   📁 源端 28 GiB
 #   ✅ a · 4 GiB
 #   🔄 b · 17 GiB
+# 不再带 "📁 源端 X" 首行: 源端大小已由进度消息的任务分组头
+# （"📁 <b>onedrive:0</b> · <i>280.790 GiB</i>"）给出，重复一遍只占一行；
+# 且它不带状态 emoji，与本层统计行（▸ 📊 子目录：x/y）同为表头，
+# 会让紧随其后的子目录行看起来与它是同级而非从属。
 _render_subdir_phase_tree() {
-  local _tree="📁 源端 $(format_bytes "$source_size_bytes")"
-  local _name _mark
+  local _tree="" _name _mark
   while IFS= read -r _name; do
     [ -z "$_name" ] && continue
     case "${subdir_status_map[$_name]:-pending}" in
@@ -265,9 +266,9 @@ _render_subdir_phase_tree() {
       syncing) _mark="🔄" ;;
       *)       _mark="⏳" ;;
     esac
-    _tree+=$'\n'"${_mark} $(escape_html "$_name") · $(format_bytes "${subdir_size_map[$_name]:-0}")"
+    _tree+="${_mark} $(escape_html "$_name") · $(format_bytes "${subdir_size_map[$_name]:-0}")"$'\n'
   done <<< "$subdirs"
-  echo "$_tree"
+  printf '%s' "${_tree%$'\n'}"
 }
 
 # 任务收尾：成功且启用 skip 时写跳过标记；顶级调用失败时切割大文件
@@ -439,7 +440,9 @@ _sync_task_impl() {
 
   # 按子目录大小从小到大排序
   echo "按子目录大小排序..."
-  PROGRESS_PHASE_INFO="▸ 📂 子目录拆分（depth=${current_depth}，源端 $(format_bytes "$source_size_bytes")，正在统计大小...）"
+  # 排序阶段还没有子目录树可展示，用标签行（"▸" 开头）说明正在做什么；
+  # 不再夹带源端大小（任务分组头已给出），避免同一数字重复两遍
+  PROGRESS_PHASE_INFO="▸ 📂 子目录拆分（depth=${current_depth}，正在统计各子目录大小...）"
   progress_update "正在按子目录大小排序..."
   local sorted_subdirs=""
   declare -A subdir_size_map=()
@@ -495,6 +498,11 @@ _sync_task_impl() {
     # archive 就跳去最终完整同步，照片/j-1024j 两个子任务丢失）
     _sync_task_impl "${source_path}/${subdir}" "${dest_path}/${subdir}" "${safe_subtask}" "${extra_args[@]}" < /dev/null || true
     SYNC_AUTO_SPLIT_DEPTH=$current_depth
+    # 子任务已收尾: 清掉它那一层（及更深）的阶段行/统计/细粒度状态。
+    # 不清则已完成子目录下仍挂着它最后一批的 "📦 文件批次拆分 / 📊 批次 n/m"，
+    # 看着像还在跑；下一个子任务进入时也会清，但那要等到它自己开口说话，
+    # 中间的最终完整同步阶段会一直顶着上一个子任务的残留
+    progress_scope_init $((current_depth + 1))
     if [ "$SYNC_SKIPPED" = "1" ]; then
       skipped_subtasks=$((skipped_subtasks + 1))
       subdir_status_map["$subdir"]="skipped"
@@ -681,6 +689,13 @@ _batch_consolidate() {
   local batch_log="$2"
   local label="批次 $((batch_idx + 1))"
 
+  # 本批巩固产出（供调用方累加进进度行的 ⚠️ 未落盘 / 🔁 重传 / 🔧 修复）:
+  # 每次进入先归零 —— 下方有多处提前 return（非 openlist 目标端、开关关闭、
+  # 无传输），不归零会把上一批的产出重复累加到统计行
+  CONSOLIDATE_MISSING=0
+  CONSOLIDATE_RETRY_COPIED=0
+  CONSOLIDATE_FIXED=0
+
   [[ "$dest_path" == openlist:* ]] || return 0
   [ "${OPENLIST_BATCH_CONSOLIDATE:-1}" = "0" ] && return 0
 
@@ -731,6 +746,7 @@ _batch_consolidate() {
     return 0
   fi
 
+  CONSOLIDATE_MISSING=$missing_n
   echo "⚠️ ${label} 巩固: ${missing_n} 个文件未落盘（假成功/失败），串行重试..."
   progress_update "${label} 巩固: ${missing_n} 个未落盘，串行重试"
 
@@ -765,6 +781,7 @@ _batch_consolidate() {
   local retry_copied=0
   retry_copied=$(grep -cE 'Copied \((new|replaced existing)\)' "$retry_log" 2>/dev/null || true)
   [[ "$retry_copied" =~ ^[0-9]+$ ]] || retry_copied=0
+  CONSOLIDATE_RETRY_COPIED=$retry_copied
   echo "${label} 巩固: 串行重试完成，重传 ${retry_copied}/${missing_n}"
 
   # ===== 后端写入全拒检测（批次快速止损）=====
@@ -843,6 +860,7 @@ _batch_consolidate() {
 
   local fixed_n=0
   fixed_n=$(wc -l < "$fix_list" 2>/dev/null | tr -d ' ')
+  CONSOLIDATE_FIXED=$fixed_n
   echo "${label} 巩固: 修复管线完成，${fixed_n}/${stubborn_n} 个换方法落盘成功"
 
   # ===== 修复管线后重启容器复核 =====
@@ -857,6 +875,8 @@ _batch_consolidate() {
       "$fix_list" "$fail_list" "$batch_log" "$retry_log"
     local verify_ok=$?
     [ "$verify_ok" -eq 0 ] || echo "${label} 巩固: 修复复核完成，部分条目重启后未落盘（已拉黑，下轮换方法）"
+    # 复核会剔除重启后消失的假成功，统计行只报真实落盘数
+    CONSOLIDATE_FIXED=$(wc -l < "$fix_list" 2>/dev/null | tr -d ' ')
   fi
   return 0
 }
@@ -922,6 +942,25 @@ _consolidate_verify_fixed() {
   echo "${label} 巩固: 修复复核 ${kept_n} 个真实落盘 / ${ghost_n} 个假成功已剔除"
   [ "$ghost_n" -eq 0 ] || return 1
   return 0
+}
+
+# 渲染文件批次阶段的统计行（进度通知 "▸ 📊 批次：..." 行）
+# 依赖调用方（sync_by_file_batches）作用域变量（bash 动态作用域可见）:
+#   batch_idx / total_batches / synced_batches / failed_batches /
+#   batch_file_count / batch_total_files / total_files / batch_transferred_bytes /
+#   consolidate_missing_total / consolidate_retry_total / consolidate_fix_total
+# 信息粒度对齐 Actions 日志: 批次序号、成功/失败批次数、累计文件数、累计传输量、
+# 巩固累计（未落盘 → 串行重传 → 换方法修复）。只报 "✅/❌ 批次数" 时看不出
+# 本批在跑什么、跑了多少，与日志里的 "批次 N 巩固: X 个未落盘，串行重试"
+# 完全对不上；巩固类字段为 0 时整段省略（常态批次无假成功，不占位）。
+_render_batch_stats_line() {
+  local _s="▸ 📊 批次：${batch_idx:-0}/${total_batches:-0} | ✅${synced_batches:-0} ❌${failed_batches:-0}"
+  _s+=" · 📄 ${batch_total_files:-0}/${total_files:-0} 文件"
+  [ "${batch_transferred_bytes:-0}" -gt 0 ] && _s+=" · 📤 $(format_bytes "${batch_transferred_bytes:-0}")"
+  [ "${consolidate_missing_total:-0}" -gt 0 ] && _s+=" · ⚠️ 未落盘 ${consolidate_missing_total}"
+  [ "${consolidate_retry_total:-0}" -gt 0 ] && _s+=" · 🔁 重传 ${consolidate_retry_total}"
+  [ "${consolidate_fix_total:-0}" -gt 0 ] && _s+=" · 🔧 修复 ${consolidate_fix_total}"
+  echo "$_s"
 }
 
 # 按文件批次拆分同步（用于无子目录的大文件夹）
@@ -1032,17 +1071,24 @@ sync_by_file_batches() {
     batch_size=$((batch_size + size))
   done < "$file_list_file"
 
-  local total_batches=$((batch_num + 1))
-  echo "拆分为 ${total_batches} 个批次"
-  PROGRESS_PHASE_INFO="▸ 📦 文件批次拆分：${total_batches} 批 / ${total_files} 文件（每批 ≤ $(format_bytes "$threshold")）"
-  progress_update_force "拆分为 ${total_batches} 个批次" "▸ 📊 批次：0/${total_batches}"
-
   # 逐批同步（rclone copy + --files-from）
+  # 计数器须在首个 progress_update 之前初始化: _render_batch_stats_line 直接
+  # 读调用方作用域的变量，未初始化会得到空串并报未绑定变量（set -u）
+  local total_batches=$((batch_num + 1))
   local synced_batches=0
   local failed_batches=0
   local failed_batch_list=""
   local batch_total_files=0
   local batch_idx=0
+  # 累计量（跨批次）: 已传输字节 + 批次巩固的三类产出（未落盘/重传/换方法修复）
+  local batch_transferred_bytes=0
+  local consolidate_missing_total=0
+  local consolidate_retry_total=0
+  local consolidate_fix_total=0
+
+  echo "拆分为 ${total_batches} 个批次"
+  PROGRESS_PHASE_INFO="▸ 📦 文件批次拆分：${total_batches} 批 / ${total_files} 文件（每批 ≤ $(format_bytes "$threshold")）"
+  progress_update_force "拆分为 ${total_batches} 个批次" "$(_render_batch_stats_line)"
 
   for i in $(seq 0 $batch_num); do
     local bf="${batch_dir}/batch_${i}.txt"
@@ -1053,7 +1099,7 @@ sync_by_file_batches() {
       batch_total_files=$((batch_total_files + batch_file_count))
       echo "=== 批次 $((i+1))/${total_batches}: ${batch_file_count} 个文件 ==="
       PROGRESS_PHASE_INFO="▸ 📦 文件批次拆分：${total_batches} 批 / ${total_files} 文件（当前批次 ${batch_idx}：${batch_file_count} 文件）"
-      progress_update "批次 ${batch_idx}/${total_batches}：${batch_file_count} 个文件" "▸ 📊 批次：${batch_idx}/${total_batches} | ✅${synced_batches} ❌${failed_batches}"
+      progress_update "批次 ${batch_idx}/${total_batches}：${batch_file_count} 个文件" "$(_render_batch_stats_line)"
 
       local batch_log="${task_name}_batch_${i}.log"
 
@@ -1138,11 +1184,23 @@ sync_by_file_batches() {
         echo "批次 $((i+1)) 失败 (exit=${rc})"
       fi
 
+      # 累计本批传输字节（进度行的 📤 字段；日志里的 Transferred 行是唯一
+      # 数据源，rclone 未回传任何计数器）
+      local _batch_bytes
+      _batch_bytes=$(get_transferred_bytes_from_log "$batch_log" 2>/dev/null || echo 0)
+      [[ "$_batch_bytes" =~ ^[0-9]+$ ]] || _batch_bytes=0
+      batch_transferred_bytes=$((batch_transferred_bytes + _batch_bytes))
+
       # 批次级巩固: 重启容器取后端真值 → 校验本批落盘 → 串行重试缺失
       # （把巩固单元从"整个任务"缩小到"单个批次"，run 被取消也锁住进度；
       #   详见 _batch_consolidate 函数头注释）
       BATCH_BACKEND_DEAD=0
       _batch_consolidate "$i" "$batch_log" || true
+      # 巩固产出并入累计（CONSOLIDATE_* 由 _batch_consolidate 每次进入时归零，
+      # 未跑巩固的批次全为 0，累加安全）
+      consolidate_missing_total=$((consolidate_missing_total + ${CONSOLIDATE_MISSING:-0}))
+      consolidate_retry_total=$((consolidate_retry_total + ${CONSOLIDATE_RETRY_COPIED:-0}))
+      consolidate_fix_total=$((consolidate_fix_total + ${CONSOLIDATE_FIXED:-0}))
 
       # 后端写入全拒（如 OpenList WebDAV 层全量 405）→ 中止剩余批次。
       # 继续跑只会每批烧数十分钟产出假成功/失败，且最终 sync_with_logging
@@ -1156,14 +1214,14 @@ sync_by_file_batches() {
         AUTO_SPLIT_INFO="<b>🔀 文件批次拆分统计</b>"$'\n'
         AUTO_SPLIT_INFO+="总批次：<b>${total_batches}</b> · 文件数：<b>${batch_total_files}</b>"$'\n'
         AUTO_SPLIT_INFO+="✅ <b>${synced_batches}</b> · ❌ <b>${failed_batches}</b>（后端写入全拒中止）"$'\n'
-        progress_update_force "后端写入全拒，中止同步" "▸ 📊 批次：${batch_idx}/${total_batches} | ✅${synced_batches} ❌${failed_batches}"
+        progress_update_force "后端写入全拒，中止同步" "$(_render_batch_stats_line)"
         # 同预检熔断出口: 失败状态经 SYNC_FAILED 全局标志传递（见上注释）
         SYNC_FAILED=1
         rm -rf "$batch_dir"
         return 1
       fi
 
-      progress_update_force "批次 ${batch_idx}/${total_batches} 完成" "▸ 📊 批次：${batch_idx}/${total_batches} | ✅${synced_batches} ❌${failed_batches}"
+      progress_update_force "批次 ${batch_idx}/${total_batches} 完成" "$(_render_batch_stats_line)"
     fi
   done
 
@@ -1171,8 +1229,8 @@ sync_by_file_batches() {
   rm -rf "$batch_dir"
 
   echo "=== 批次传输完成 (成功 ${synced_batches}/${total_batches}, 失败 ${failed_batches})，执行最终同步检查 ==="
-  PROGRESS_PHASE_INFO="▸ 📦 文件批次拆分：${total_batches} 批 / ${total_files} 文件（✅${synced_batches} ❌${failed_batches}）"
-  progress_update_force "批次传输完成，最终同步检查中" "▸ 📊 批次：${total_batches}/${total_batches} | ✅${synced_batches} ❌${failed_batches}"
+  PROGRESS_PHASE_INFO="▸ 📦 文件批次拆分：${total_batches} 批 / ${total_files} 文件 · ✅${synced_batches} ❌${failed_batches}"
+  progress_update_force "批次传输完成，最终同步检查中" "$(_render_batch_stats_line)"
 
   # 设置批次统计信息，供最终通知展示（与子目录拆分的 AUTO_SPLIT_INFO 对齐）
   AUTO_SPLIT_INFO="<b>🔀 文件批次拆分统计</b>"$'\n'
