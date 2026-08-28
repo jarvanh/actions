@@ -317,7 +317,8 @@ _sync_task_impl() {
     check_sync_marker "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
     case "$MARKER_ACTION" in
       skip)
-        send_sync_skipped "$task_name" "$source_path" "$dest_path"
+        # 透传 extra_args: 跳过通知要按同一过滤口径算"本次未传"量
+        send_sync_skipped "$task_name" "$source_path" "$dest_path" "${extra_args[@]}"
         SYNC_SKIPPED=1
         SYNC_FAILED=0
         SYNC_TRANSFERRED_BYTES=0
@@ -613,7 +614,10 @@ sync_task() {
 
   # 预览/仅注册模式：只注册，不实际同步
   if [ "$current_depth" -eq 0 ] && { [ -n "$TASK_PREVIEW_ONLY" ] || [ "${TASK_REGISTER_ONLY:-0}" = "1" ]; }; then
-    _preview_register "$task_name" "$source_path" "$dest_path" "${extra_args[@]}"
+    # _TASK_SKIP_DAYS 前缀赋值（与下方 _sync_task_impl 同一手法）: 让预览能按
+    # --Nd-skip 天数预判断"本轮会不会被跳过"，否则预览算出的待同步量会被
+    # 同步 pass 的跳过静默吞掉，看上去像丢数据（详见 add_preview_pair）
+    _TASK_SKIP_DAYS=$_skip_days _preview_register "$task_name" "$source_path" "$dest_path" "${extra_args[@]}"
     return 0
   fi
 
@@ -980,7 +984,7 @@ sync_by_file_batches() {
     case "$MARKER_ACTION" in
       skip)
         echo "跳过 ${task_name} 文件批次同步: $((SYNC_SKIP_SECONDS / 3600))小时内已成功同步"
-        send_sync_skipped "$task_name" "$source_path" "$dest_path"
+        send_sync_skipped "$task_name" "$source_path" "$dest_path" "${extra_args[@]}"
         SYNC_SKIPPED=1
         SYNC_FAILED=0
         SYNC_TRANSFERRED_BYTES=0

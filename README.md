@@ -55,15 +55,15 @@ proxy-speedtest/            测速结果数据
 | **openlist** | `openlist_api.sh` | 89 | 管理面登录换 token、服务就绪等待 |
 | | `openlist_driver.sh` | 581 | 驱动刷新、健康预检、缓存刷新、truth-check |
 | **sync** | `sync_engine.sh` | 298 | 核心同步引擎（编排 + 423/8005 重试） |
-| | `sync_marker.sh` | 803 | 同步标记持久化（跳过、黑名单、修复清单） |
+| | `sync_marker.sh` | 877 | 同步标记持久化（跳过、黑名单、修复清单） |
 | | `sync_notify.sh` | 328 | 同步结果通知构建（Telegram 排版） |
 | | `sync_progress.sh` | 544 | 全局进度通知系统（含收尾四态标题、多层级阶段区） |
 | **file** | `file_split.sh` | 666 | 大文件分割（ffmpeg 关键帧 / 7z 分卷） |
 | | `file_fix.sh` | 1243 | 单文件修复的 4 种方法 + 目录可写性预检 + 短哈希目录兜底 |
 | | `file_fix_pipeline.sh` | 875 | 修复管线编排（方法轮换 + 增量持久化） |
 | | `file_restore.sh` | 632 | 修复文件还原（目标端 → 原路径 / 源端） |
-| **task** | `task_preview.sh` | 359 | 任务预览（大小估算、流量图） |
-| | `task_engine.sh` | 1267 | 任务注册表与编排（分批、轮转、阶段行生产） |
+| **task** | `task_preview.sh` | 468 | 任务预览（大小估算、跳过预判、未传量估算） |
+| | `task_engine.sh` | 1271 | 任务注册表与编排（分批、轮转、阶段行生产） |
 | **基础** | `utils.sh` | 176 | 通用工具（转义、格式化、树形渲染） |
 | | `telegram.sh` | 146 | Telegram Bot API 封装 |
 | | `load_all.sh` | 49 | 统一加载入口（L1→L6 分层） |
@@ -124,6 +124,8 @@ workflow 会把 `*.sh` `*.py` `*.jq` 拷到 `/tmp` 再 `source /tmp/load_all.sh`
 第一遍（预览 pass，TASK_PREVIEW_ONLY=1 或 TASK_REGISTER_ONLY=1）
   run_all_tasks → sync_task → _preview_register
       → add_preview_pair（累加到 PREVIEW_PAIRS_TSV）
+           └─ 顺带预判 --Nd-skip 窗口（pskip 列）+ 把待同步量写入
+              PREVIEW_PENDING_MAP，供第二遍的跳过通知复用
   flush_task_preview → 按 task_name 分组，从 TSV 重算统计量 → 发 Telegram
 
 第二遍（真正同步）
@@ -167,6 +169,22 @@ workflow 会把 `*.sh` `*.py` `*.jq` 拷到 `/tmp` 再 `source /tmp/load_all.sh`
 - `rebuild_source_from_target` — **破坏性**：先 `rclone sync` 镜像再回填，
   源端多余文件会被删除，最终源端 = 目标端内容
 
+### 4. 预览的"待同步" vs 本次实际传输
+
+两者**不相等**，`--Nd-skip` 是唯一原因：预览 pass 不查 marker（只算差异），
+同步 pass 的窗口判断在任何传输之前 —— 命中窗口的同步对整对跳过，一个字节都不传。
+
+因此：
+
+- 预览里命中跳过窗口的同步对会标 `⏭️ 本轮预计跳过`，合计另附
+  "预计跳过 X / 预计实际传输 Y"（`add_preview_pair` 的 pskip 列 + `flush_task_preview`）
+- 跳过通知带 `📦 本次未传`，给出被跳过的差异量（`send_sync_skipped`）：
+  优先复用预览算好的值（`PREVIEW_PENDING_MAP`，预览与同步同 step，零成本），
+  auto-split 子任务无独立预览条目时现场估算（`OPENLIST_SKIP_ESTIMATE=0` 关闭），
+  任一端列举失败则不展示 —— 宁缺毋滥，避免把虚高全量挂到"未传"上
+- `FORCE_SYNC=true` 跳过全部标记检查（`check_sync_marker` / `check_marker_skip_window`），
+  预览此时也不会标注"预计跳过"
+
 ---
 
 ## 任务注册表
@@ -205,6 +223,7 @@ workflow 会把 `*.sh` `*.py` `*.jq` 拷到 `/tmp` 再 `source /tmp/load_all.sh`
 **并发**：`OPENLIST_TRANSFERS` · `OPENLIST_CHECKERS`
 
 **开关**：`FORCE_SYNC` · `OPENLIST_SPLIT_ON_SYNC_FAILURE` · `OPENLIST_TASK_ROTATION` ·
+`OPENLIST_SKIP_ESTIMATE`（=0 关闭跳过通知的"本次未传"现场估算，只复用预览缓存）·
 `OPENLIST_BATCH_CONSOLIDATE` · `OPENLIST_HASH_DIR_FALLBACK`（=0 关闭短哈希目录兜底）·
 `OPENLIST_DIR_PROBE_MAX_RESTART`（目录可写性预检的每轮重启预算，默认 3）·
 `OPENLIST_DIR_PROBE_TIMEOUT`（预检探针超时，默认 120s）·
@@ -235,8 +254,9 @@ cd .github/scripts/openlist
 for t in tests/*.sh; do bash "$t"; done
 ```
 
-15 个测试、336 个断言，覆盖轮转、批次巩固、修复管线优化、修复日志区段头提取、
-目录可写性预检（含假成功目录）与短哈希目录兜底、预览 diff、truth-check、
+16 个测试、359 个断言，覆盖轮转、批次巩固、修复管线优化、修复日志区段头提取、
+目录可写性预检（含假成功目录）与短哈希目录兜底、预览 diff、跳过窗口的预览
+预判与跳过通知"本次未传"（含现场估算与宁缺毋滥分支）、truth-check、
 token 登录、marker、收尾标题四态、进度阶段区排版（子目录树/文件批次的层级
 与缩进）等。均为纯 bash + stub（mock 掉 rclone/curl/docker），无需真实网盘。
 
@@ -259,6 +279,7 @@ token 登录、marker、收尾标题四态、进度阶段区排版（子目录�
 | 加一种文件修复方法 | `file_fix.sh`（实现 + `_try_fix_methods_round` 轮换）+ 同步更新 `文件修复方法N` 文案 |
 | 改目录级降级策略 | `file_fix.sh` 的 `_fix_probe_dir_writable`（预检/重启复核）+ `_fix_switch_to_hash_dir`（切换）+ `restore_info.jq` 的目录类分支 |
 | 改通知排版 | `sync_notify.sh` / `telegram.sh` |
+| 改跳过提示（预览"预计跳过"/ 跳过通知"本次未传"） | `task_preview.sh` 的 `add_preview_pair`（pskip 列）· `flush_task_preview`（合计附注）· `_lookup_skipped_pending`（估算入口）+ `sync_marker.sh` 的 `send_sync_skipped` |
 | 改进度消息的阶段区（子目录树 / 文件批次的层级、缩进、统计字段） | `sync_progress.sh` 的 `_progress_render` + `task_engine.sh` 的 `_render_subdir_phase_tree` / `_render_batch_stats_line` |
 | 改收尾标题四态 | `sync_progress.sh` 的 `_progress_render` 终态分支（中断 / 有文件无法同步 / 带修复完成 / 完全完成，按严重度判定） |
 | 加新模块 | 新建 `<领域>_<职责>.sh` + 在 `load_all.sh` 对应层加一行 |
