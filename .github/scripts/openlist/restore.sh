@@ -406,7 +406,7 @@ _recover_one_to_source() {
 }
 
 # 批量逐条恢复 marker 修复条目到源端（restore_source_from_target /
-# mirror_source_from_target 共用）。进度日志走 stderr，结果走 stdout，
+# rebuild_source_from_target 共用）。进度日志走 stderr，结果走 stdout，
 # 每条输出一行 "<original>\t<status>"（status 口径同 _recover_one_to_source），
 # 由调用方按前缀汇总统计与失败清单
 # 用法: _recover_source_entries <src> <dst> <json> <alt_lines_tsv> <tmp_base>
@@ -521,9 +521,12 @@ restore_source_from_target() {
 }
 
 # ===== 镜像灾难恢复: 目标端 → 源端（删除源端多余文件）=====
-# restore_source_from_target 的破坏性变体: 批量层从 copy 升级为 sync——
-# 源端存在但目标端没有的文件会被删除，最终源端内容 = 目标端全部有效内容。
-# 与非破坏版的差异与安全边界:
+# ⚠️ 破坏性变体（命名对照，勿混用）:
+#   restore_source_from_target — 还原: 仅把 marker 修复条目回填源端，不删任何文件
+#   rebuild_source_from_target — 重建: 先 sync 镜像再回填，源端最终 = 目标端内容
+# 两者同是"目标端 → 源端"，但后者会删除源端多余文件（批量层从 copy 升级为
+# sync），故用 rebuild 而非 restore 命名，避免从名字看不出删除风险。
+# 安全边界:
 #   - 排除清单 = 替代形态 + 全部修复条目的原路径: 前者防止分卷/改名/
 #     编码目录以密文名被 sync 拷回源端；后者把待还原路径的增删完全交给
 #     逐条还原（sync 若删除原路径，还原失败时源端现存旧文件也保不住）
@@ -533,8 +536,8 @@ restore_source_from_target() {
 #     restore_source_from_target 看失败清单再决定）
 # 执行顺序: 先 sync 镜像、后逐条还原（修复文件路径已被排除，互不干扰）。
 # 目标端全程只读；中断/失败可直接重跑补齐。
-# 用法: mirror_source_from_target [task_name|all]
-mirror_source_from_target() {
+# 用法: rebuild_source_from_target [task_name|all]
+rebuild_source_from_target() {
   local task_filter="${1:-all}"
   local ts; ts=$(date +%Y%m%d_%H%M%S)
   local tmp_base="/tmp/mirror_src_${ts}"

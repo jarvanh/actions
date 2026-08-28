@@ -1,7 +1,7 @@
 #!/bin/bash
 # 文件修复方法 ID 语义命名 —— 回归测试
 # 背景: 方法 ID 原为 m1/m2/m3/m4 序号，代码里读 _fix_method_gate m3 无法自
-#   解释（得回查 _method_desc 才知道是"zip 分卷"），且方法增删时序号会漂移。
+#   解释（得回查 _fix_method_desc 才知道是"zip 分卷"），且方法增删时序号会漂移。
 #   现改为语义名 copyto_original / copyto_shorthash / zip_split_original /
 #   zip_split_shorthash，全名格式为:
 #       文件修复方法N <语义ID>: <方法形态说明>
@@ -19,7 +19,7 @@
 #   3. 与驱动刷新方法不混淆: 两套全名字面不重叠
 #   4. 旧写法不再被归一（按未知方法原样返回）
 #   5. 未知/空输入不误伤
-#   6. _method_short 输入语义 ID / 全名均输出同一短标签（带"修复"限定词）
+#   6. _fix_method_short 输入语义 ID / 全名均输出同一短标签（带"修复"限定词）
 #   7. 黑名单通道: 拉黑与查询用同一 ID 互通，重复拉黑不产生重复条目
 set -u
 PASS=0; FAIL=0
@@ -29,17 +29,17 @@ bad() { FAIL=$((FAIL+1)); echo "FAIL: $1"; }
 _REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 source "$_REPO_ROOT/.github/scripts/openlist/fix.sh" 2>/dev/null
 
-# 现行全名（与 _method_desc 输出严格一致，改全名文案时此处需同步）
+# 现行全名（与 _fix_method_desc 输出严格一致，改全名文案时此处需同步）
 D1="文件修复方法1 copyto_original: 直接 rclone copyto（原路径 + 原文件名）"
 D2="文件修复方法2 copyto_shorthash: 短哈希文件名直传（<md5前8位>.<扩展名>）"
 D3="文件修复方法3 zip_split_original: zip 压缩 + 分卷上传（原文件名基底，默认 1GB 分卷）"
 D4="文件修复方法4 zip_split_shorthash: zip 压缩 + 短哈希文件名 + 分卷上传"
 
 # --- 1. 语义 ID → 全名 ---
-[ "$(_method_desc copyto_original)" = "$D1" ] && ok "1a copyto_original → 文件修复方法1" || bad "1a: $(_method_desc copyto_original)"
-[ "$(_method_desc copyto_shorthash)" = "$D2" ] && ok "1b copyto_shorthash → 文件修复方法2" || bad "1b: $(_method_desc copyto_shorthash)"
-[ "$(_method_desc zip_split_original)" = "$D3" ] && ok "1c zip_split_original → 文件修复方法3" || bad "1c: $(_method_desc zip_split_original)"
-[ "$(_method_desc zip_split_shorthash)" = "$D4" ] && ok "1d zip_split_shorthash → 文件修复方法4" || bad "1d: $(_method_desc zip_split_shorthash)"
+[ "$(_fix_method_desc copyto_original)" = "$D1" ] && ok "1a copyto_original → 文件修复方法1" || bad "1a: $(_fix_method_desc copyto_original)"
+[ "$(_fix_method_desc copyto_shorthash)" = "$D2" ] && ok "1b copyto_shorthash → 文件修复方法2" || bad "1b: $(_fix_method_desc copyto_shorthash)"
+[ "$(_fix_method_desc zip_split_original)" = "$D3" ] && ok "1c zip_split_original → 文件修复方法3" || bad "1c: $(_fix_method_desc zip_split_original)"
+[ "$(_fix_method_desc zip_split_shorthash)" = "$D4" ] && ok "1d zip_split_shorthash → 文件修复方法4" || bad "1d: $(_fix_method_desc zip_split_shorthash)"
 
 # --- 2. 全名自解释: 限定词 + 语义名 + 形态关键词 ---
 for _d in "$D1" "$D2" "$D3" "$D4"; do
@@ -72,33 +72,33 @@ fi
 
 # --- 4. 旧写法不再归一（不背历史包袱） ---
 OLD1="方法1: 直接 rclone copyto（原路径 + 原文件名）"
-[ "$(_method_desc "$OLD1")" = "$OLD1" ] \
-  && ok "4a 旧全名按未知方法原样返回（不再归一）" || bad "4a: $(_method_desc "$OLD1")"
-[ "$(_method_desc "m1")" = "m1" ] && ok "4b 旧序号 ID 按未知方法原样返回" || bad "4b: $(_method_desc "m1")"
+[ "$(_fix_method_desc "$OLD1")" = "$OLD1" ] \
+  && ok "4a 旧全名按未知方法原样返回（不再归一）" || bad "4a: $(_fix_method_desc "$OLD1")"
+[ "$(_fix_method_desc "m1")" = "m1" ] && ok "4b 旧序号 ID 按未知方法原样返回" || bad "4b: $(_fix_method_desc "m1")"
 # 现行全名再输入一次仍原样返回（幂等，marker 反复读写不漂移）
-[ "$(_method_desc "$D1")" = "$D1" ] && ok "4c 现行全名幂等" || bad "4c: $(_method_desc "$D1")"
+[ "$(_fix_method_desc "$D1")" = "$D1" ] && ok "4c 现行全名幂等" || bad "4c: $(_fix_method_desc "$D1")"
 
 # --- 5. 未知/空输入不误伤 ---
-[ "$(_method_desc "")" = "未知方法" ] && ok "5a 空输入 → 未知方法" || bad "5a: $(_method_desc "")"
-[ "$(_method_desc "某个已下线的方法")" = "某个已下线的方法" ] \
-  && ok "5b 未知全名原样返回（历史遗留方法不被吞掉）" || bad "5b: $(_method_desc "某个已下线的方法")"
+[ "$(_fix_method_desc "")" = "未知方法" ] && ok "5a 空输入 → 未知方法" || bad "5a: $(_fix_method_desc "")"
+[ "$(_fix_method_desc "某个已下线的方法")" = "某个已下线的方法" ] \
+  && ok "5b 未知全名原样返回（历史遗留方法不被吞掉）" || bad "5b: $(_fix_method_desc "某个已下线的方法")"
 
-# --- 6. _method_short 口径一致（短标签同样带限定词） ---
+# --- 6. _fix_method_short 口径一致（短标签同样带限定词） ---
 S1="修复方法1·copyto 原名"
-[ "$(_method_short copyto_original)" = "$S1" ] && ok "6a 语义 ID → 短标签" || bad "6a: $(_method_short copyto_original)"
-[ "$(_method_short "$D1")" = "$S1" ] && ok "6b 全名 → 同一短标签" || bad "6b: $(_method_short "$D1")"
-[ "$(_method_short "")" = "未知方法" ] && ok "6c 空输入 → 未知方法" || bad "6c: $(_method_short "")"
-echo "$(_method_short zip_split_shorthash)" | grep -q "^修复方法" \
-  && ok "6d 短标签带'修复方法'限定词" || bad "6d: $(_method_short zip_split_shorthash)"
+[ "$(_fix_method_short copyto_original)" = "$S1" ] && ok "6a 语义 ID → 短标签" || bad "6a: $(_fix_method_short copyto_original)"
+[ "$(_fix_method_short "$D1")" = "$S1" ] && ok "6b 全名 → 同一短标签" || bad "6b: $(_fix_method_short "$D1")"
+[ "$(_fix_method_short "")" = "未知方法" ] && ok "6c 空输入 → 未知方法" || bad "6c: $(_fix_method_short "")"
+echo "$(_fix_method_short zip_split_shorthash)" | grep -q "^修复方法" \
+  && ok "6d 短标签带'修复方法'限定词" || bad "6d: $(_fix_method_short zip_split_shorthash)"
 
 # --- 7. 黑名单通道 ---
 FIX_METHOD_BLACKLIST=()
 TRY_FIX_ORIGINAL="path/to/file.mp4"
 _blacklist_add "$TRY_FIX_ORIGINAL" copyto_original
-_method_blocked copyto_original && ok "7a 拉黑后可查询命中" || bad "7a: 拉黑未生效"
-! _method_blocked copyto_shorthash && ok "7b 未拉黑的方法不受影响" || bad "7b: 误拉黑"
+_fix_method_blocked copyto_original && ok "7a 拉黑后可查询命中" || bad "7a: 拉黑未生效"
+! _fix_method_blocked copyto_shorthash && ok "7b 未拉黑的方法不受影响" || bad "7b: 误拉黑"
 # 语义 ID 拉黑 → 用全名查询也应命中（黑名单存全名，两者须同一口径）
-_method_blocked "$D1" && ok "7c 语义 ID 拉黑 → 全名查询命中" || bad "7c: 口径不一致"
+_fix_method_blocked "$D1" && ok "7c 语义 ID 拉黑 → 全名查询命中" || bad "7c: 口径不一致"
 # 同一方法重复拉黑（ID + 全名各一次）不产生重复条目
 FIX_METHOD_BLACKLIST=()
 _blacklist_add "$TRY_FIX_ORIGINAL" copyto_shorthash

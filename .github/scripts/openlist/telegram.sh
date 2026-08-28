@@ -95,9 +95,9 @@ send_telegram_message() {
 }
 
 # 发送 Telegram 消息并返回 message_id
-# 用法: _tg_send_get_id <message> [parse_mode=HTML]
+# 用法: _tg_send_and_get_id <message> [parse_mode=HTML]
 # 输出: message_id（失败时为空）
-_tg_send_get_id() {
+_tg_send_and_get_id() {
   local message="$1"
   local parse_mode="${2:-HTML}"
   local response
@@ -138,7 +138,7 @@ _tg_ensure_bottom_message() {
 
   # 发送新消息（一定是最后一条）
   local new_id
-  new_id=$(_tg_send_get_id "$message" "$parse_mode")
+  new_id=$(_tg_send_and_get_id "$message" "$parse_mode")
   if [ -n "$new_id" ]; then
     echo "$new_id" > "$PROGRESS_MSG_ID_FILE"
     echo "$new_id"

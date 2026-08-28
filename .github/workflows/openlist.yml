@@ -257,7 +257,8 @@ jobs:
           restore_source_from_target "${{ inputs.restore_task || 'all' }}"
 
       # ===== 镜像灾难恢复: 目标端 → 源端（删除源端多余文件）=====
-      # restore_source_from_target 的破坏性变体: 批量层用 rclone sync 镜像，
+      # rebuild_source_from_target（restore_source_from_target 的破坏性变体）:
+      # 批量层用 rclone sync 镜像，
       # 源端存在但目标端没有的文件会被删除，最终源端内容 = 目标端全部有效内容。
       # 替代形态与修复条目原路径均排除出 sync（防密文名拷回/防误删待还原路径），
       # 由逐条还原负责回填并按 marker md5 校验。目标端全程只读，可重复执行。
@@ -266,7 +267,7 @@ jobs:
         timeout-minutes: 240
         run: |
           source /tmp/load_all.sh
-          mirror_source_from_target "${{ inputs.restore_task || 'all' }}"
+          rebuild_source_from_target "${{ inputs.restore_task || 'all' }}"
 
       # ===== 调试: 单任务测试修复管线 =====
       # 用真实生产代码路径（sync_task → sync_with_logging）按任务清单
@@ -328,7 +329,7 @@ jobs:
           if [ "${{ inputs.skip_preview }}" = "true" ]; then
             echo "=== 跳过预览通知（skip_preview=true，仅注册任务队列）==="
             # 仅注册模式: 不发预览通知，但把全部任务（含源端大小）注册进进度队列，
-            # 否则任务随 task_begin 逐个注册，进度消息的"总任务"会从 3 之类的小数字慢慢涨
+            # 否则任务随 progress_task_begin 逐个注册，进度消息的"总任务"会从 3 之类的小数字慢慢涨
             TASK_REGISTER_ONLY=1 run_all_tasks
           else
             echo "=== 发送任务预览通知 ==="
