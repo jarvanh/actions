@@ -153,6 +153,10 @@ _send_sync_result_notification() {
   fi
   [ -z "$fix_summary" ] && fix_summary="无"$'\n'
 
+  # 上报本轮经替代方式同步的文件数（进度面板收尾标题据此区分"带修复的完成"）
+  # auto-split 子任务各报一次，面板侧累加
+  [ "$fix_total" -gt 0 ] && progress_add_fixed_files "$fix_total"
+
   # 构建 fail_summary（无法修复的文件树形列表: 条目行 + tree_sub 缩进的"修复过程"子行；
   # 风格与 fix_summary 一致）
   local fail_summary=""

@@ -10,6 +10,7 @@
 #   PROGRESS_START_FILE      — 进度开始时间戳
 #   PROGRESS_ROWS_FILE.N     — 拆分深度 N 的阶段树行（原始行，连接符由渲染器加）
 #   PROGRESS_STATS_FILE.N    — 拆分深度 N 的统计信息（HTML 片段）
+#   PROGRESS_FIXED_FILE      — 本轮经替代方式（修复管线）同步的文件数累计
 #   （多层槽位: auto-split 递归时每层写入自己的深度槽位，渲染时逐层缩进
 #   合并展示；行内容含 HTML 已由生产方 escape，此处透传）
 #   PROGRESS_FINALIZED_FILE  — 最终完成标记
@@ -26,6 +27,8 @@ PROGRESS_MAX_DEPTH=16
 _progress_slot_rows() { printf '/tmp/progress_rows.%d' "$1"; }
 _progress_slot_stats() { printf '/tmp/progress_stats.%d' "$1"; }
 PROGRESS_FINALIZED_FILE="/tmp/progress_finalized.txt"
+# 本轮经替代方式（修复管线）同步的文件数（收尾标题区分"带修复的完成"）
+PROGRESS_FIXED_FILE="/tmp/progress_fixed_count.txt"
 # 节流时间戳文件（避免频繁刷新 Telegram 消息）
 PROGRESS_LAST_UPDATE_FILE="/tmp/progress_last_update.txt"
 
@@ -78,6 +81,28 @@ _progress_get_start_time() {
 # 获取当前正在执行的任务 ID
 _progress_get_current_task() {
   [ -f "$PROGRESS_CURRENT_FILE" ] && head -1 "$PROGRESS_CURRENT_FILE" 2>/dev/null || echo ""
+}
+
+# 累计本轮经替代方式（修复管线）同步的文件数
+# 用法: progress_add_fixed_files <n>
+# 上报方是 sync_notify.sh（每个同步轮次报一次 fix_list 条数，auto-split
+# 子任务各自上报）；落文件而非全局变量: 任务执行与 progress_finalize
+# 分属不同 Actions step（各自独立 shell），内存变量传不过去。
+progress_add_fixed_files() {
+  local n="${1:-0}"
+  [[ "$n" =~ ^[0-9]+$ ]] || return 0
+  [ "$n" -eq 0 ] && return 0
+  local cur
+  cur=$(_progress_get_fixed_files)
+  echo $((cur + n)) > "$PROGRESS_FIXED_FILE"
+}
+
+# 读取本轮经替代方式同步的文件数（无记录/内容非法一律 0）
+_progress_get_fixed_files() {
+  local cur=0
+  [ -f "$PROGRESS_FIXED_FILE" ] && cur=$(head -1 "$PROGRESS_FIXED_FILE" 2>/dev/null || echo 0)
+  [[ "$cur" =~ ^[0-9]+$ ]] || cur=0
+  echo "$cur"
 }
 
 # 清空 base_depth 及更深层级的阶段槽位
@@ -224,16 +249,29 @@ _progress_render() {
   local msg=""
   local title
   if [ "$finalized" -eq 1 ]; then
-    # 中断检测: 任务被取消/step 提前失败时，Finalize(always() 执行) 会把消息
-    # 标记为最终态；若仍有 pending/running 任务却只看 failed 数，会把
-    # "7 个任务全待处理" 误报成 "✅ 同步全部完成"
-    if [ "$failed" -gt 0 ]; then
-      title="⚠️ 同步完成（有失败）"
-    elif [ $((pending + running)) -gt 0 ]; then
-      title="⛔ 同步中断（${pending} 个待处理、${running} 个进行中未执行完）"
-    elif [ "$total" -eq 0 ]; then
+    # 收尾标题只有 4 种终态，按严重度从高到低判定:
+    #   1 ⛔ 中断          — 仍有 pending/running（撞 job 上限被取消、step 提前
+    #     失败），或一个任务都没注册。它必须排在 failed 之前: 中断时伴生的失败
+    #     只是"没跑完"的副产物，"13 待处理 + 1 失败"被报成"同步完成（有失败）"
+    #     会让人误以为整轮跑完了。
+    #   2 ⚠️ 有文件无法同步 — 全部任务都跑完，但个别文件连修复管线也没搞定
+    #     （已记入 marker 修复清单/黑名单，下轮继续）。修复成功的同时仍有
+    #     顽固失败时，失败优先。
+    #   3 ✅ 带修复的完成  — 全部跑完、无遗留失败，但部分文件是经替代方式
+    #     （改名/短哈希/分卷）落盘的，提醒可还原。
+    #   4 ✅ 完全完成
+    local fixed_total
+    fixed_total=$(_progress_get_fixed_files)
+    if [ "$total" -eq 0 ]; then
       # 一个任务都没注册就到了收尾（注册前被取消/失败），绝非"全部完成"
       title="⛔ 同步中断（未注册任何任务）"
+    elif [ $((pending + running)) -gt 0 ]; then
+      title="⛔ 同步中断（${pending} 个待处理、${running} 个进行中未执行完）"
+      [ "$failed" -gt 0 ] && title="⛔ 同步中断（${pending} 个待处理、${running} 个进行中未执行完、${failed} 个失败）"
+    elif [ "$failed" -gt 0 ]; then
+      title="⚠️ 同步完成（${failed} 个任务有文件无法同步）"
+    elif [ "$fixed_total" -gt 0 ]; then
+      title="✅ 同步全部完成（${fixed_total} 个文件经修复同步）"
     else
       title="✅ 同步全部完成"
     fi
@@ -324,6 +362,7 @@ progress_init() {
   : > "$PROGRESS_TASKS_FILE"
   : > "$PROGRESS_MSG_ID_FILE"
   : > "$PROGRESS_CURRENT_FILE"
+  : > "$PROGRESS_FIXED_FILE"
   _progress_purge_all_slots
   rm -f "$PROGRESS_FINALIZED_FILE" 2>/dev/null || true
   date +%s > "$PROGRESS_START_FILE"
