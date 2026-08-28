@@ -1,0 +1,226 @@
+# 专用单任务同步: onedrive:0 → openlist:wopan176Crypt/0
+# 背景: 主 openlist.yml 按轮转清单执行全部 16 个同步对，task0（263GiB/1367 文件）
+#       常态排到窗口末尾并被 6h job 上限取消。本 workflow 只执行 task0 一个任务，
+#       其余任务全部不启用，用于集中窗口把 task0 同步完整跑完。
+# 用法: Actions 页面手动 Dispatch（可选 force_sync 忽略跳过标记）。
+# 复用主 workflow 的全部基础设施步骤（rclone/OpenList 容器/隧道/函数库），
+# 仅同步执行段不同: run_task_by_id "task0"（任务定义见 task_engine.sh SYNC_TASK_REGISTRY）。
+# 回滚: 删除本文件即可，主 openlist.yml 未做任何修改。
+name: openlist-task0-wopan176
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_sync:
+        description: "强制同步（忽略跳过标记，始终执行）"
+        required: false
+        type: boolean
+        default: false
+
+concurrency: openlist-singleton
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      FORCE_SYNC: ${{ inputs.force_sync || 'false' }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+      # ===== 集中阈值定义（与主 openlist.yml 保持一致）=====
+      LARGE_FILE_THRESHOLD_BYTES: "4000000000"
+      SYNC_SPLIT_THRESHOLD_BYTES: "20000000000"
+      OPENLIST_SPLIT_PART_BYTES: "1073741824"
+      OPENLIST_MAX_PART_SIZE: "4000000000"
+      OPENLIST_TARGET_PART_SIZE: "3980000000"
+      OPENLIST_7Z_VOLUME_SIZE: "3810m"
+      OPENLIST_MAX_SPLIT_ATTEMPTS: "4"
+      OPENLIST_ERR_LOG_MAX_BYTES: "50000000"
+
+      OPENLIST_PROBE_TIMEOUT: "15"
+      OPENLIST_CACHE_REFRESH_WAIT: "60"
+      OPENLIST_RCLONE_LISTING_TIMEOUT: "900"
+      OPENLIST_MKDIR_TIMEOUT: "120"
+      OPENLIST_DOWNLOAD_TIMEOUT: "300"
+      OPENLIST_UPLOAD_TIMEOUT: "300"
+
+      OPENLIST_8005_RETRY_ATTEMPTS: "3"
+      OPENLIST_423_RETRY_ATTEMPTS: "3"
+      OPENLIST_423_RETRY_SLEEP_SECONDS: "300"
+      OPENLIST_PERSIST_RETRY_ROUNDS: "11"
+      OPENLIST_RAW_CHECK_BUDGET: "40"
+      OPENLIST_RAW_COUNT_TIMEOUT: "240"
+      OPENLIST_MISSING_FIX_MAX: "200"
+      OPENLIST_TOKEN_REFRESH_SECS: "240"
+
+      OPENLIST_ADMIN_PASSWORD: ${{ secrets.OPENLIST_ADMIN_PASSWORD }}
+
+      OPENLIST_TRANSFERS: "1"
+      OPENLIST_CHECKERS: "8"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: 安装 rclone
+        run: |
+          curl -fsSL https://rclone.org/install.sh | sudo bash
+
+      - name: 写入 rclone 配置（含密钥掩码）
+        env:
+          RCLONE_CONFIG_SECRET: ${{ secrets.RCLONE }}
+        run: |
+          mkdir -p ~/.config/rclone/
+          cat << EOF > ~/.config/rclone/rclone.conf
+          $RCLONE_CONFIG_SECRET
+          EOF
+          python3 "$GITHUB_WORKSPACE/.github/scripts/openlist/mask_rclone_config.py"
+
+      - name: 验证远端连通并挂载 Dropbox
+        run: |
+          echo "==========onedrive==========="
+          rclone lsf onedrive:
+          echo "==========dropbox==========="
+          rclone lsf dropbox:
+
+          sudo apt-get update
+          sudo apt-get install -y fuse3
+          sudo mkdir -p /dropbox
+          sudo nohup rclone mount dropbox: /dropbox --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 10G &
+
+      - name: 拉起 OpenList 容器（数据库本地化）
+        run: |
+          sudo docker rm -f openlist 2>/dev/null || true
+          sudo mkdir -p /opt/openlist-data
+          sudo chmod 0777 /opt/openlist-data
+          rclone copy dropbox:self-hosted/openlist/data /opt/openlist-data \
+            --exclude "data.db-wal" --exclude "data.db-shm" --exclude "data.db-journal"
+          echo "拉取完成: $(ls -la /opt/openlist-data/ | tail -n +2 | wc -l) 个条目"
+          OPENLIST_DB_MD5_PULL=$(md5sum /opt/openlist-data/data.db 2>/dev/null | awk '{print $1}')
+          OPENLIST_DB_MD5_PULL="${OPENLIST_DB_MD5_PULL:-none}"
+          echo "OPENLIST_DB_MD5_PULL=$OPENLIST_DB_MD5_PULL" >> "$GITHUB_ENV"
+          echo "db 拉取指纹: $OPENLIST_DB_MD5_PULL"
+          sudo docker run -d --restart=unless-stopped -v /opt/openlist-data:/opt/openlist/data -p 5244:5244 -e PUID=0 -e PGID=0 -e UMASK=022 --name="openlist" openlistteam/openlist:latest
+
+      - name: 校验 OpenList 容器运行状态
+        run: |
+          source "$GITHUB_WORKSPACE/.github/scripts/openlist/load_all.sh"
+          echo "等待 OpenList 就绪..."
+          if wait_openlist_ready; then
+            echo "✅ OpenList 容器及 HTTP 服务正常就绪"
+          else
+            echo "❌ OpenList 容器未能就绪"
+            exit 1
+          fi
+
+      - name: 安装 cloudflared 并载入隧道凭据
+        run: |
+          sudo mkdir -p ~/.cloudflared
+          sudo rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
+
+      - name: 检查 Cloudflare 隧道状态
+        env:
+          TUNNEL_NAME: "openlist"
+        run: |
+          OUTPUT=$(cloudflared tunnel list)
+          TUNNEL_LINE=$(echo "$OUTPUT" | grep -w "$TUNNEL_NAME")
+          if [ -z "$TUNNEL_LINE" ]; then
+            echo "隧道 '${TUNNEL_NAME}' 不存在，请先手动创建（cloudflared tunnel create ${TUNNEL_NAME}），终止本次运行"
+            exit 31
+          fi
+          CONNECTIONS=$(echo "$TUNNEL_LINE" | awk '{if (NF>=4) print $4; else print "-"}')
+          if [ "$CONNECTIONS" = "-" ]; then
+            echo "隧道 '$TUNNEL_NAME' 存在但无活跃连接，继续执行"
+          else
+            echo "隧道 '$TUNNEL_NAME' 已有 ${CONNECTIONS} 个活跃连接（其他实例正在服务），终止本次运行"
+            exit 1
+          fi
+
+      - name: 启动 Cloudflare 隧道
+        run: |
+          if ! dig +short openlist.'${{ secrets.VD }}'.eu.org | grep -q .; then
+            cloudflared tunnel route dns openlist openlist.'${{ secrets.VD }}'.eu.org
+          else
+            echo "DNS 路由已存在，跳过 cloudflared tunnel route dns"
+          fi
+          nohup cloudflared tunnel run --url http://127.0.0.1:5244 openlist &
+
+      - name: 安装同步依赖（ffmpeg/jq 等）
+        run: |
+          sudo apt-get install -y ffmpeg jq coreutils bc p7zip-full
+
+      - name: 加载同步函数库
+        run: |
+          echo "加载 OpenList 同步函数库..."
+          source "$GITHUB_WORKSPACE/.github/scripts/openlist/load_all.sh"
+          cp "$GITHUB_WORKSPACE/.github/scripts/openlist/"*.sh "$GITHUB_WORKSPACE/.github/scripts/openlist/"*.py "$GITHUB_WORKSPACE/.github/scripts/openlist/"*.jq /tmp/
+          echo "函数库加载完成"
+
+      - name: 初始化同步状态
+        run: |
+          source /tmp/load_all.sh
+          init_sync_state
+          echo "PROCESSED_FILES_LOG=$PROCESSED_FILES_LOG" >> "$GITHUB_ENV"
+          echo "=== 初始化已处理文件日志 ===" > "$PROCESSED_FILES_LOG"
+          echo "开始时间: $(date)" >> "$PROCESSED_FILES_LOG"
+          echo "==========================" >> "$PROCESSED_FILES_LOG"
+
+      # ===== 唯一同步任务 =====
+      # 仅执行 task0: onedrive:0 → openlist:wopan176Crypt/0（--auto-split --1d-skip）
+      # 其余 15 个同步对（task0-baidupan / task0-wopan175 / task1-5 / backup 等）均不在本 workflow 中。
+      - name: "同步唯一任务: task0 (onedrive:0 → openlist:wopan176Crypt/0)"
+        timeout-minutes: 330
+        run: |
+          source /tmp/load_all.sh
+          echo "=== 等待 OpenList 就绪 ==="
+          wait_openlist_ready || true
+          echo "=== 执行唯一任务 task0: onedrive:0 → openlist:wopan176Crypt/0 (FORCE_SYNC=${FORCE_SYNC:-false}) ==="
+          rc=0
+          run_task_by_id "task0" || rc=$?
+          echo "task0 退出码: $rc, SYNC_FAILED=${SYNC_FAILED:-}, SYNC_SKIPPED=${SYNC_SKIPPED:-}"
+          if [ "$rc" -ne 0 ] || [ "${SYNC_FAILED:-0}" != "0" ]; then
+            echo "❌ task0 同步未完全成功，详见上方日志与修复清单"
+            exit 1
+          fi
+          echo "✅ task0 同步完成"
+
+      - name: 收尾与清理（marker/已处理日志落盘）
+        if: ${{ always() }}
+        run: |
+          source /tmp/load_all.sh
+          progress_finalize || true
+          if [ -f "processed_videos.log" ]; then
+            total_lines=$(wc -l < "processed_videos.log" 2>/dev/null || echo 0)
+            actual_entries=$((total_lines - 3))
+            echo "==========================" >> "processed_videos.log"
+            echo "结束时间: $(date)" >> "processed_videos.log"
+            echo "=== task0 专用同步结束 ===" >> "processed_videos.log"
+            if [ "$actual_entries" -gt 0 ]; then
+              REMOTE_PROC_LOG="onedrive:/logs/processed/processed_videos_$(date +%Y%m%d_%H%M%S).log"
+              rclone copyto "processed_videos.log" "$REMOTE_PROC_LOG" || true
+              echo "已处理文件日志已上传: $REMOTE_PROC_LOG"
+            fi
+          fi
+          echo "镜像 sync_state → dropbox..."
+          rclone sync onedrive:/logs/sync_state dropbox:sync_state_mirror --create-empty-src-dirs 2>&1 | tail -2 || true
+          rm -f /tmp/*.sh /tmp/*.py /tmp/*.jq 2>/dev/null || true
+          echo "task0 专用同步结束！"
+
+      - name: "Persist: openlist 数据库回传"
+        if: ${{ always() }}
+        run: |
+          sudo docker stop openlist 2>/dev/null || true
+          CUR_MD5=$(md5sum /opt/openlist-data/data.db 2>/dev/null | awk '{print $1}')
+          CUR_MD5="${CUR_MD5:-none}"
+          if [ "$CUR_MD5" = "${OPENLIST_DB_MD5_PULL:-none}" ]; then
+            echo "db 未变化（${CUR_MD5}），跳过回传"
+          else
+            echo "db 已变化（${OPENLIST_DB_MD5_PULL:-none} → ${CUR_MD5}），sync 回传..."
+            rclone sync /opt/openlist-data dropbox:self-hosted/openlist/data \
+              --exclude "data.db-wal" --exclude "data.db-shm" --exclude "data.db-journal"
+            rclone delete dropbox:self-hosted/openlist/data \
+              --include "data.db-wal" --include "data.db-shm" --include "data.db-journal" 2>/dev/null || true
+            echo "回传完成: $(rclone lsl dropbox:self-hosted/openlist/data 2>/dev/null | grep -c .) 个文件"
+          fi
