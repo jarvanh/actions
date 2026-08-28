@@ -516,6 +516,60 @@ save_sync_marker() {
   echo "已保存同步标记: $marker_path (源端 $(format_bytes "$source_bytes"), ${source_count} 文件, 修复合计 ${fixed_count} 个${summary})"
 }
 
+# ISO 8601 → epoch 秒（解析失败回退 0，调用方按"未知"处理 = 不跳过）
+# GNU date -d 优先（生产 ubuntu runner）；BSD/macOS date -j -f 回退 ——
+# 本地调试与单测在 macOS 上同样要能跑通跳过窗口判断
+# 用法: _to_epoch <iso8601>
+_to_epoch() {
+  local ts="${1:-}" e=""
+  [ -z "$ts" ] && echo 0 && return 0
+  e=$(date -d "$ts" +%s 2>/dev/null) || e=""
+  if [ -z "$e" ]; then
+    # BSD/macOS: -j 不设置系统时间，-u 按 UTC 解析（marker 的 last_success
+    # 由 date -u 生成、带 Z 后缀；不加 -u 会被当本地时间，差一个时区偏移）
+    e=$(date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$ts" +%s 2>/dev/null) || e=""
+  fi
+  [[ "$e" =~ ^[0-9]+$ ]] || e=0
+  echo "$e"
+}
+
+# 只读判断: 任务的同步标记是否仍落在跳过窗口内（不写 marker、不触碰
+# MARKER_* 全局状态、不拉 rclone size，供预览阶段预判断"本轮会不会被跳过"）
+# 存在意义: 预览 pass 不查 marker，而同步 pass 的跳过判断在任何传输之前，
+#   于是带 --Nd-skip 的任务会"预览显示大量待同步、随后一个字节都不传"，
+#   看上去像 bug（实际是窗口内的预期行为）。
+# 与 check_sync_marker 的窗口判定同口径（last_success + 跳过秒数），但只做
+# 窗口比较 —— 完整检查还含源端缩小检测，逐同步对执行代价过高。
+# 用法: check_marker_skip_window <task_name> <dest_path> [skip_seconds]
+# 输出: 命中时 "last_success<TAB>since_hours"
+# 返回: 0 = 命中（本轮预计跳过）; 1 = 未命中（无 marker / 超窗口 / FORCE_SYNC）
+check_marker_skip_window() {
+  local task_name="$1"
+  local dest_path="$2"
+  local skip_secs="${3:-${SYNC_SKIP_SECONDS:-86400}}"
+  [ "${FORCE_SYNC:-}" = "true" ] && return 1
+  [[ "$skip_secs" =~ ^[0-9]+$ ]] || skip_secs="${SYNC_SKIP_SECONDS:-86400}"
+  [ "$skip_secs" -le 0 ] && return 1
+
+  local marker_path marker_json last_success now_epoch last_epoch diff
+  marker_path=$(get_marker_path "$task_name" "$dest_path")
+  marker_json=$(rclone cat "$marker_path" 2>/dev/null) || return 1
+  [ -z "$marker_json" ] && return 1
+  last_success=$(printf '%s' "$marker_json" | jq -r '.last_success // ""' 2>/dev/null) || return 1
+  case "$last_success" in "" | null) return 1 ;; esac
+
+  last_epoch=$(_to_epoch "$last_success")
+  [ "$last_epoch" -le 0 ] && return 1
+  now_epoch=$(date +%s)
+  diff=$((now_epoch - last_epoch))
+  # 时钟回拨（diff<0）与超窗口一样视为未命中，不做跳过推断
+  if [ "$diff" -lt 0 ] || [ "$diff" -ge "$skip_secs" ]; then
+    return 1
+  fi
+  printf '%s\t%s\n' "$last_success" "$((diff / 3600))"
+  return 0
+}
+
 # 检查同步标记（同步前调用）
 # 设置全局变量:
 #   MARKER_ACTION        — "skip" | "warning" | "proceed"
@@ -584,7 +638,7 @@ check_sync_marker() {
   # 检查是否在跳过时间窗口内
   local now_epoch last_epoch diff
   now_epoch=$(date +%s)
-  last_epoch=$(date -d "$last_success" +%s 2>/dev/null || echo 0)
+  last_epoch=$(_to_epoch "$last_success")
 
   if [ "$last_epoch" -gt 0 ]; then
     diff=$((now_epoch - last_epoch))
@@ -732,12 +786,18 @@ send_sync_warning() {
 }
 
 # 发送"近期已成功同步，本次跳过"的通知
+# 额外展示"本次未传"量: 跳过只是窗口内的省流策略，源端与目标端的差异
+#   依然存在（预览里算出的 +X GiB 就是它）。不写明这个量，"有待同步
+#   却被跳过"在复盘时反复被当成故障排查。
+#   数值优先复用预览 pass 已算好的同口径结果（零成本），未命中（auto-split
+#   子任务没有独立预览条目）时现场估算；估算不可靠则整段不展示（宁缺毋滥）
 # 依赖全局变量: MARKER_LAST_SUCCESS, MARKER_SINCE_HOURS, MARKER_JSON
-# 用法: send_sync_skipped <task_name> <source_path> <dest_path>
+# 用法: send_sync_skipped <task_name> <source_path> <dest_path> [rclone_extra_args...]
 send_sync_skipped() {
   local task_name="$1"
   local source_path="$2"
   local dest_path="$3"
+  shift 3
 
   local marker_bytes marker_count
   marker_bytes=$(echo "$MARKER_JSON" | jq -r '.source_bytes // 0' 2>/dev/null || echo 0)
@@ -796,6 +856,20 @@ send_sync_skipped() {
     fi
     tg_append msg "🔗 完整还原脚本保存在 OneDrive marker <code>$(escape_html "$(get_marker_path "$task_name" "$dest_path")")</code> 的 fixed_files[].restore.script 字段"$'\n'
   fi
+
+  # 本次未传量（--size-only 口径的差异，即预览里那个 +X GiB）
+  local _pending _p_bytes _p_count
+  _pending=$(_lookup_skipped_pending "$task_name" "$dest_path" "$source_path" "$@" 2>/dev/null) || _pending=""
+  if [ -n "$_pending" ]; then
+    _p_bytes="${_pending%% *}"
+    _p_count="${_pending##* }"
+    if [[ "$_p_bytes" =~ ^[0-9]+$ ]] && [[ "$_p_count" =~ ^[0-9]+$ ]] \
+       && { [ "$_p_bytes" -gt 0 ] || [ "$_p_count" -gt 0 ]; }; then
+      tg_add_section msg "📦 本次未传"
+      tg_append msg "$(format_bytes "$_p_bytes") · <b>${_p_count}</b> 文件 <i>（两端仍存在差异，因落在跳过窗口内未传，非故障）</i>"$'\n'
+    fi
+  fi
+
   tg_add_section msg "⏸️ 本次跳过同步，继续执行其他任务"
   tg_add_note msg "如需强制同步，请手动触发 force_sync=true"
 

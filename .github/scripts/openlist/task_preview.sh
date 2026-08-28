@@ -48,6 +48,12 @@ _get_listing_json() {
 # 每次统计都重新拉清单）。真正的落盘由 add_preview_pair 在主 shell 执行。
 declare -A PREVIEW_SRC_LIST_CACHE
 
+# 同步对 → 待同步量缓存（键 "<task_name>|<dest_path>"，值 "bytes count"）
+# 供同步 pass 的跳过通知直接复用 —— 预览 pass 与同步 pass 同处 openlist.yml
+# 的"任务预览与全量同步"step（同一 shell，全局变量跨 pass 有效），
+# 命中时零额外列举；未命中（auto-split 子任务无独立预览条目）才现场估算
+declare -A PREVIEW_PENDING_MAP
+
 # 获取源端大小/文件数（带 --exclude 过滤，读 PREVIEW_SRC_LIST_CACHE 缓存）
 # 用法: _get_source_size_with_excludes <source_path> [原始 extra_args...]
 #   （可含 --delete-before 等非过滤参数，内部会剥离，仅保留过滤口径）
@@ -70,6 +76,40 @@ _get_source_size_with_excludes() {
   out=$(echo "$listing" | jq -r '"\((map(.Size // 0) | add // 0)) \(length)"' 2>/dev/null) || out=""
   [ -z "$out" ] && out="0 0"
   echo "$out"
+}
+
+# 逐文件比对两份清单（--size-only 口径），纯函数: 不做远端调用、无副作用
+# 用法: _diff_pending_tsv <src_json> <dst_json> <fixed_json>
+#   fixed_json: marker fixed_files 数组（其 original 已在目标端以替代名存在，
+#               实际 sync 用 filter-from 排除 → 不计入待同步）
+# 输出 TSV: new_count new_bytes upd_count upd_bytes fixed_hit_count fixed_hit_bytes
+#   fixed_hit_* = 差异中命中 marker original 而被剔除的条目
+# 三份清单必须经 stdin 喂给 jq（-s slurp 成数组后解构），禁止 --argjson 传参:
+#   内核单参数上限 MAX_ARG_STRLEN ≈ 128KB，真实任务清单（约 700+ 文件）必超，
+#   execve 直接 E2BIG "Argument list too long"，被 2>/dev/null 吞掉后
+#   diff_tsv 为空、差异恒为 0 —— 线上所有任务预览恒示 "0 B / 0 文件" 的元凶
+#   （源端大小另有管道计算不受影响，故预览里源端大小正常、待同步恒 0）
+# 抽出为公共函数的原因: 跳过通知要按同一口径算"本次未传"量，两处各写一份
+#   必然漂移（预览扣减修复文件、通知不扣，同一个任务两个数字）
+_diff_pending_tsv() {
+  printf '%s\n%s\n%s\n' "$1" "$2" "$3" | jq -sr '
+    . as [$src, $dst, $fixed]
+    | ($dst | map({key: .Path, value: (.Size // -1)}) | from_entries) as $dmap
+    | (($fixed // []) | map(.original)) as $excl
+    | [$src[]
+        | select(($dmap[.Path] // -1) != .Size)
+        | { size: (.Size // 0),
+            kind: (if ($dmap[.Path] == null) then "new" else "upd" end),
+            fixed: ((.Path as $p | $excl | index($p)) != null) }] as $diff
+    | ($diff | map(select(.fixed))) as $fx
+    | ($diff | map(select(.fixed | not))) as $need
+    | ($need | map(select(.kind == "new"))) as $news
+    | ($need | map(select(.kind == "upd"))) as $upds
+    | [($news | length), ($news | map(.size) | add // 0),
+      ($upds | length), ($upds | map(.size) | add // 0),
+      ($fx   | length), ($fx   | map(.size) | add // 0)]
+    | @tsv
+  ' 2>/dev/null || echo ""
 }
 
 # 添加一个同步对到预览
@@ -144,33 +184,20 @@ add_preview_pair() {
   # 预览同口径剔除，保证预估与 sync 实际行为一致
   _load_marker_fixed_files "$source_path" "$dest_path" "${PREVIEW_TASK_NAME:-}"
 
-  # 逐文件比对（--size-only 口径），输出 TSV:
-  #   new_count new_bytes upd_count upd_bytes fixed_hit_count fixed_hit_bytes
-  # fixed_hit_* = 差异中命中 marker original 的条目（被剔除的部分）
-  # 三份清单必须经 stdin 喂给 jq（-s slurp 成数组后解构），禁止 --argjson 传参:
-  #   内核单参数上限 MAX_ARG_STRLEN ≈ 128KB，真实任务清单（约 700+ 文件）必超，
-  #   execve 直接 E2BIG "Argument list too long"，被 2>/dev/null 吞掉后
-  #   diff_tsv 为空、差异恒为 0 —— 线上所有任务预览恒示 "0 B / 0 文件" 的元凶
-  #   （源端大小另有管道计算不受影响，故预览里源端大小正常、待同步恒 0）
+  # 本轮是否会被 --Nd-skip 跳过（预览侧预判断，口径与同步 pass 的窗口检查一致）
+  # 不预判断的后果: 预览算出 +X GiB 待同步、随后任务在窗口内被整对跳过，
+  # 一个字节都不传，事后复盘反复被当成故障（实为省流策略）
+  local pskip="0"
+  if [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
+    local _sw
+    if _sw=$(check_marker_skip_window "${PREVIEW_TASK_NAME:-}" "$dest_path" "${SYNC_SKIP_SECONDS:-86400}"); then
+      # "1|<last_success>|<since_hours>"（| 分隔: 字段内不含 tab，避免污染 TSV 列）
+      pskip="1|${_sw%%$'\t'*}|${_sw##*$'\t'}"
+    fi
+  fi
+
   local diff_tsv
-  diff_tsv=$(printf '%s\n%s\n%s\n' "$src_json" "$dst_json" "${MARKER_FIXED_FILES:-[]}" | jq -sr '
-    . as [$src, $dst, $fixed]
-    | ($dst | map({key: .Path, value: (.Size // -1)}) | from_entries) as $dmap
-    | (($fixed // []) | map(.original)) as $excl
-    | [$src[]
-        | select(($dmap[.Path] // -1) != .Size)
-        | { size: (.Size // 0),
-            kind: (if ($dmap[.Path] == null) then "new" else "upd" end),
-            fixed: ((.Path as $p | $excl | index($p)) != null) }] as $diff
-    | ($diff | map(select(.fixed))) as $fx
-    | ($diff | map(select(.fixed | not))) as $need
-    | ($need | map(select(.kind == "new"))) as $news
-    | ($need | map(select(.kind == "upd"))) as $upds
-    | [($news | length), ($news | map(.size) | add // 0),
-      ($upds | length), ($upds | map(.size) | add // 0),
-      ($fx   | length), ($fx   | map(.size) | add // 0)]
-    | @tsv
-  ' 2>/dev/null || echo "")
+  diff_tsv=$(_diff_pending_tsv "$src_json" "$dst_json" "${MARKER_FIXED_FILES:-[]}")
 
   local new_count=0 new_bytes=0 upd_count=0 upd_bytes=0 fixed_hit_count=0 fixed_hit_bytes=0
   if [ -n "$diff_tsv" ]; then
@@ -201,11 +228,14 @@ add_preview_pair() {
   # 源端分组渲染为 📁 组头 + ├─/└─ 树形条目（与进度通知的任务列表同风格）
   # 空字段写 "-" 占位: tab 是 IFS 空白类字符，read 会吞掉空列导致字段错位
   # （同 sync_progress.sh 的任务队列 TSV 约定）
-  # 字段: task/src/excl/sbytes/scount/dst/ybytes/ycount/ynew/yupd/fnote/dfail
+  # 字段: task/src/excl/sbytes/scount/dst/ybytes/ycount/ynew/yupd/fnote/dfail/pskip
   # dfail=1 → 目标端列举失败，该条目为按空目标端的全量估算（不可靠）
+  # pskip  = "0" | "1|<last_success>|<since_hours>"，1 = 落在该任务的
+  #          --Nd-skip 窗口内，本轮预计跳过（待同步量照算，但不传）
   local _excl_ph="${exclude_summary:--}"
   local _fnote_ph="${fixed_note:--}"
-  PREVIEW_PAIRS_TSV+="${PREVIEW_TASK_NAME}"$'\t'"${source_path}"$'\t'"${_excl_ph}"$'\t'"${src_bytes}"$'\t'"${src_count}"$'\t'"${dest_path}"$'\t'"${sync_bytes}"$'\t'"${sync_count}"$'\t'"${new_count}"$'\t'"${upd_count}"$'\t'"${_fnote_ph}"$'\t'"${dst_fail}"$'\n'
+  PREVIEW_PAIRS_TSV+="${PREVIEW_TASK_NAME}"$'\t'"${source_path}"$'\t'"${_excl_ph}"$'\t'"${src_bytes}"$'\t'"${src_count}"$'\t'"${dest_path}"$'\t'"${sync_bytes}"$'\t'"${sync_count}"$'\t'"${new_count}"$'\t'"${upd_count}"$'\t'"${_fnote_ph}"$'\t'"${dst_fail}"$'\t'"${pskip}"$'\n'
+  PREVIEW_PENDING_MAP["${PREVIEW_TASK_NAME}|${dest_path}"]="${sync_bytes} ${sync_count}"
 }
 
 # 同步对详情渲染: 仅按源端分组（同源端多目标一组的树形列表）
@@ -238,7 +268,7 @@ _preview_render_pairs_detail() {
   done <<< "$PREVIEW_PAIRS_TSV"
   # 第二遍: 渲染条目（含子行），按组缓冲
   declare -A _g_seen=() _g_block=()
-  while IFS=$'\t' read -r _task _src _excl _sbytes _scount _dst _ybytes _ycount _ynew _yupd _fnote _dfail; do
+  while IFS=$'\t' read -r _task _src _excl _sbytes _scount _dst _ybytes _ycount _ynew _yupd _fnote _dfail _pskip; do
     [ -z "$_src" ] && continue
     [ -n "$_filter_task" ] && [ "$_task" != "$_filter_task" ] && continue
     # 还原 "-" 占位为空
@@ -272,6 +302,11 @@ _preview_render_pairs_detail() {
     # 目标端列举失败: 该条目数值是按空目标端的全量估算，必须明示（否则合计
     # 虚高被当成精确值，正是 "目标端已有文件却显示全量待同步" 的困惑来源）
     [ "${_dfail:-0}" = "1" ] && _g_block[$_src]+="${_sub}⚠️ 目标端列举失败 · 按全量估算，实际待同步可能更少"$'\n'
+    # 预计跳过: 差异照算但不传，必须贴在条目下（否则 "有待同步却没传" 像 bug）
+    if [ "${_pskip:-0}" != "0" ] && [ "${_pskip:-}" != "-" ]; then
+      local _since="${_pskip##*|}"
+      _g_block[$_src]+="${_sub}⏭️ 上次成功距今 ${_since} 小时，仍在跳过窗口内 · <i>本轮预计跳过</i>"$'\n'
+    fi
   done <<< "$PREVIEW_PAIRS_TSV"
   # 组装: 组头 + 树形条目块，组间空一行（首组前不加——tg_add_section 已带段前空行）
   local _out="" _src _gi=0
@@ -306,10 +341,11 @@ flush_task_preview() {
     _tasks=("$PREVIEW_TASK_NAME")
   fi
 
-  local _t _pc _sb _sc _nc _uc _fc _dfail_val
+  local _t _pc _sb _sc _nc _uc _fc _dfail_val _pskip_val
   for _t in "${_tasks[@]}"; do
     _pc=0; _sb=0; _sc=0; _nc=0; _uc=0; _fc=0
-    while IFS=$'\t' read -r _task _src _excl _sbytes _scount _dst _ybytes _ycount _ynew _yupd _fnote _dfail_val; do
+    local _skb=0 _skc=0
+    while IFS=$'\t' read -r _task _src _excl _sbytes _scount _dst _ybytes _ycount _ynew _yupd _fnote _dfail_val _pskip_val; do
       [ -z "$_src" ] && continue
       [ "$_task" != "$_t" ] && continue
       _pc=$((_pc + 1))
@@ -318,6 +354,11 @@ flush_task_preview() {
       _nc=$((_nc + ${_ynew:-0}))
       _uc=$((_uc + ${_yupd:-0}))
       [ "${_dfail_val:-0}" = "1" ] && _fc=$((_fc + 1))
+      # 落在 --Nd-skip 窗口内的同步对: 差异照算，但同步 pass 会在传输前整对跳过
+      if [ "${_pskip_val:-0}" != "0" ] && [ "${_pskip_val:-}" != "-" ]; then
+        _skb=$((_skb + ${_ybytes:-0}))
+        _skc=$((_skc + ${_ycount:-0}))
+      fi
     done <<< "$PREVIEW_PAIRS_TSV"
 
     PREVIEW_TASK_NAME="$_t"
@@ -338,12 +379,21 @@ flush_task_preview() {
     if [ "${PREVIEW_FAIL_PAIRS:-0}" -gt 0 ]; then
       _fail_note=$'\n'"⚠️ ${PREVIEW_FAIL_PAIRS} 个同步对目标端列举失败，按全量估算，实际待同步可能更少"
     fi
+    # 预计跳过附注: 有同步对落在 --Nd-skip 窗口内时才出现，直接给出
+    # "预计实际传输"，避免用户拿合计待同步量去核对实际传输量（两者本就不等）
+    local _skip_note=""
+    if [ "$_skb" -gt 0 ] || [ "$_skc" -gt 0 ]; then
+      local _real_b=$((_sb - _skb)) _real_c=$((_sc - _skc))
+      [ "$_real_b" -lt 0 ] && _real_b=0
+      [ "$_real_c" -lt 0 ] && _real_c=0
+      _skip_note=$'\n'"⏭️ 本轮预计跳过：<b>$(format_bytes "$_skb")</b> / <b>${_skc}</b> 文件 · 预计实际传输 <b>$(format_bytes "$_real_b")</b> / <b>${_real_c}</b> 文件"
+    fi
 
     local msg=""
     tg_add_title msg "📋 任务预览 · ${PREVIEW_TASK_NAME}"
     tg_add_section msg "📊 同步对（${PREVIEW_PAIR_COUNT} 对）"
     tg_append msg "$(_preview_render_pairs_detail "$_t")"
-    tg_append msg $'\n\n'"📦 合计预估待同步：<b>$(format_bytes "$PREVIEW_TOTAL_SYNC_BYTES")</b> / <b>${PREVIEW_TOTAL_SYNC_COUNT}</b> 文件${_total_note}${_fail_note}"
+    tg_append msg $'\n\n'"📦 合计预估待同步：<b>$(format_bytes "$PREVIEW_TOTAL_SYNC_BYTES")</b> / <b>${PREVIEW_TOTAL_SYNC_COUNT}</b> 文件${_total_note}${_fail_note}${_skip_note}"
 
     send_telegram_message "$msg"
     echo "  已发送 ${PREVIEW_TASK_NAME} 预览通知"
@@ -356,4 +406,63 @@ flush_task_preview() {
   PREVIEW_TOTAL_NEW_COUNT=0
   PREVIEW_TOTAL_UPD_COUNT=0
   PREVIEW_FAIL_PAIRS=0
+  # 注意: 不清 PREVIEW_PENDING_MAP —— 同步 pass 的跳过通知还要按它取
+  # "本次未传"量（预览与同步同处一个 step，见数组声明处注释）
+}
+
+# 现场估算一对路径的待同步量（跳过通知用）
+# 与预览完全同口径（--size-only 逐文件比对 + 剔除 marker 修复文件），
+# 复用 _diff_pending_tsv 保证两处数字不会漂移
+# 任一端列举失败 → 返回 1 不估算: 目标端失败会被当成空目标端全量，
+#   把几十 GiB 的虚高值挂到"本次未传"上比不展示更误导（宁缺毋滥）
+# 用法: _estimate_pending_pair <task_name> <source_path> <dest_path> [extra_args...]
+# 输出: "bytes count"
+_estimate_pending_pair() {
+  local task_name="$1" source_path="$2" dest_path="$3"
+  shift 3
+
+  local src_json dst_json diff_tsv
+  _extract_filter_args "$@"
+  local _key="${source_path} ${FILTER_ARGS[*]}"
+  src_json="${PREVIEW_SRC_LIST_CACHE[$_key]:-}"
+  if [ -z "$src_json" ]; then
+    src_json=$(_get_listing_json "$source_path" "${FILTER_ARGS[@]}")
+    [ -z "$src_json" ] && return 1
+    PREVIEW_SRC_LIST_CACHE[$_key]="$src_json"
+  fi
+  dst_json=$(_get_listing_json "$dest_path" "${FILTER_ARGS[@]}")
+  [ -z "$dst_json" ] && return 1
+
+  _load_marker_fixed_files "$source_path" "$dest_path" "$task_name"
+  diff_tsv=$(_diff_pending_tsv "$src_json" "$dst_json" "${MARKER_FIXED_FILES:-[]}")
+  [ -z "$diff_tsv" ] && return 1
+
+  local nc nb uc ub
+  IFS=$'\t' read -r nc nb uc ub _ _ <<< "$diff_tsv"
+  local _v
+  for _v in nc nb uc ub; do
+    [[ "${!_v}" =~ ^[0-9]+$ ]] || eval "$_v=0"
+  done
+  echo "$((nb + ub)) $((nc + uc))"
+}
+
+# 取"本次未传"量（跳过通知用）
+# 取值顺序:
+#   1) PREVIEW_PENDING_MAP —— 预览 pass 已按同口径算好，零额外列举
+#   2) _estimate_pending_pair —— auto-split 子任务（如 task0_archive）没有
+#      独立预览条目，只能现场估算一对子目录清单（开关 OPENLIST_SKIP_ESTIMATE=0 关闭）
+# 都拿不到 → 返回 1（调用方据此不展示该字段）
+# 用法: _lookup_skipped_pending <task_name> <dest_path> <source_path> [extra_args...]
+# 输出: "bytes count"
+_lookup_skipped_pending() {
+  local task_name="$1" dest_path="$2" source_path="$3"
+  shift 3
+
+  local _key="${task_name}|${dest_path}"
+  if [ -n "${PREVIEW_PENDING_MAP[$_key]:-}" ]; then
+    printf '%s' "${PREVIEW_PENDING_MAP[$_key]}"
+    return 0
+  fi
+  [ "${OPENLIST_SKIP_ESTIMATE:-1}" = "0" ] && return 1
+  _estimate_pending_pair "$task_name" "$source_path" "$dest_path" "$@"
 }
