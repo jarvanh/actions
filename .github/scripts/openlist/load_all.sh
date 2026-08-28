@@ -10,7 +10,9 @@ _OPENLIST_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # 按依赖顺序加载所有函数库
 source "$_OPENLIST_SCRIPT_DIR/flags.sh"          # rclone 参数单点定义（RCLONE_*_FLAGS）
-source "$_OPENLIST_SCRIPT_DIR/utils.sh"         # 通用工具函数（escape_html, format_bytes 等）
+source "$_OPENLIST_SCRIPT_DIR/utils.sh"         # 通用工具（escape_html, format_bytes 等）
+source "$_OPENLIST_SCRIPT_DIR/rclone_query.sh"   # rclone 查询与过滤参数解析（size/check/exclude）
+source "$_OPENLIST_SCRIPT_DIR/openlist_api.sh"   # OpenList 服务访问（管理面登录、就绪等待）
 source "$_OPENLIST_SCRIPT_DIR/telegram.sh"       # Telegram 消息发送/编辑/删除
 source "$_OPENLIST_SCRIPT_DIR/progress.sh"       # 全局进度通知系统
 source "$_OPENLIST_SCRIPT_DIR/split.sh"          # 大文件分割（视频 ffmpeg + 非视频 7z）

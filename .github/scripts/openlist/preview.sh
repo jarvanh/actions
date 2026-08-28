@@ -72,21 +72,6 @@ _get_source_size_with_excludes() {
   echo "$out"
 }
 
-# 开始一个主任务的预览
-# 用法: start_task_preview <task_name>
-start_task_preview() {
-  local task_name="$1"
-  PREVIEW_TASK_NAME="$task_name"
-  PREVIEW_PAIR_COUNT=0
-  PREVIEW_TOTAL_SYNC_BYTES=0
-  PREVIEW_TOTAL_SYNC_COUNT=0
-  PREVIEW_TOTAL_NEW_COUNT=0
-  PREVIEW_TOTAL_UPD_COUNT=0
-  PREVIEW_FAIL_PAIRS=0
-  PREVIEW_PAIRS_TSV=""
-  echo "=== 预览任务: ${task_name} ==="
-}
-
 # 添加一个同步对到预览
 # 用法: add_preview_pair <source_path> <dest_path> [--exclude pat] ...
 #   （与 tasks.sh 调用约定一致: extra_args 可能含 --delete-before 等

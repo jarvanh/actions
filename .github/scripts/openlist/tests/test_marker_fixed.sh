@@ -16,6 +16,7 @@ bad() { FAIL=$((FAIL+1)); echo "FAIL: $1"; }
 
 _REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 source "$_REPO_ROOT/.github/scripts/openlist/utils.sh"
+source "$_REPO_ROOT/.github/scripts/openlist/rclone_query.sh"
 source "$_REPO_ROOT/.github/scripts/openlist/marker.sh"
 
 # --- mocks（必须在 source 之后定义，否则被脚本内同名函数覆盖）---

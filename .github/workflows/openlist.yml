@@ -78,7 +78,7 @@ jobs:
       # 超时时间（秒）
       OPENLIST_PROBE_TIMEOUT: "15"
       OPENLIST_CACHE_REFRESH_WAIT: "60"
-      # 注: 驱动初始化等待 120s 硬编码在 utils.sh wait_openlist_ready 阶段3，未参数化
+      # 注: 驱动初始化等待 120s 硬编码在 openlist_api.sh wait_openlist_ready 阶段3，未参数化
       OPENLIST_RCLONE_LISTING_TIMEOUT: "900"
       OPENLIST_MKDIR_TIMEOUT: "120"
       OPENLIST_DOWNLOAD_TIMEOUT: "300"
@@ -158,8 +158,9 @@ jobs:
 
       - name: 校验 OpenList 容器运行状态
         run: |
-          # 依赖 utils.sh 中的函数检查 OpenList 就绪状态
-          source "$GITHUB_WORKSPACE/.github/scripts/openlist/utils.sh"
+          # 依赖 openlist_api.sh 的 wait_openlist_ready 检查 OpenList 就绪状态；
+          # 走 load_all.sh 统一入口，避免函数库再拆分时此处漏改
+          source "$GITHUB_WORKSPACE/.github/scripts/openlist/load_all.sh"
           echo "等待 OpenList 就绪..."
           if wait_openlist_ready; then
             echo "✅ OpenList 容器及 HTTP 服务正常就绪"
