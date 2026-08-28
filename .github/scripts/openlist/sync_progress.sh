@@ -8,12 +8,27 @@
 #   PROGRESS_TASKS_FILE      — 任务队列（TSV: task_id, display_name, status, detail, size_hint）
 #   PROGRESS_CURRENT_FILE    — 当前正在执行的任务 ID
 #   PROGRESS_START_FILE      — 进度开始时间戳
-#   PROGRESS_ROWS_FILE.N     — 拆分深度 N 的阶段树行（原始行，连接符由渲染器加）
+#   PROGRESS_ROWS_FILE.N     — 拆分深度 N 的阶段行（原始行，连接符由渲染器加）
 #   PROGRESS_STATS_FILE.N    — 拆分深度 N 的统计信息（HTML 片段）
+#   PROGRESS_NOTE_FILE.N     — 拆分深度 N 的细粒度状态（深层 detail，见下）
 #   PROGRESS_FIXED_FILE      — 本轮经替代方式（修复管线）同步的文件数累计
 #   （多层槽位: auto-split 递归时每层写入自己的深度槽位，渲染时逐层缩进
 #   合并展示；行内容含 HTML 已由生产方 escape，此处透传）
 #   PROGRESS_FINALIZED_FILE  — 最终完成标记
+#
+# 每层的三种行在消息里的层级关系（缩进每层下沉 5 格 = 连接符 2 + "├─ " 3，
+# 保证下一层表头正好对齐本层树行文本列、视觉上挂在本层 🔄 活动行之下）:
+#   📁 <b>onedrive:0</b> · <i>280.790 GiB</i>      任务条目（按源端分组）
+#     └─ wopan176Crypt/0                            目标端
+#        ▸ 📊 子目录：2/3 完成 | ✅1 ⏭️1 ⏳1         本层统计行（树型块的表头）
+#          ├─ ⏭️ archive · <i>477.281 MiB</i>       本层阶段树（🔄 行已置尾）
+#          └─ 🔄 j-1024j-视频-pornhub-favorites
+#             ▸ 📦 文件批次拆分：15 批 / 1367 文件   下一层标签行（表头，无连接符）
+#             ▸ 📊 批次：1/15 | ✅0 ❌0              下一层统计行
+#               └─ 批次 1 巩固: 重启容器校验落盘真值   下一层细粒度状态（detail）
+# 阶段行两种形态由渲染器按内容判定（生产方无需区分）:
+#   标签型 全部行以 "▸" 开头 → 说明"本层在做什么"，与统计行同列、排在统计行之前
+#   树型   其余（子目录等状态条目）→ 统计行是它的表头，排在其后并缩进 2 格
 #
 # 依赖: telegram.sh (send/edit/delete), utils.sh (escape_html)
 
@@ -26,6 +41,7 @@ PROGRESS_START_FILE="/tmp/progress_start.txt"
 PROGRESS_MAX_DEPTH=16
 _progress_slot_rows() { printf '/tmp/progress_rows.%d' "$1"; }
 _progress_slot_stats() { printf '/tmp/progress_stats.%d' "$1"; }
+_progress_slot_note() { printf '/tmp/progress_note.%d' "$1"; }
 PROGRESS_FINALIZED_FILE="/tmp/progress_finalized.txt"
 # 本轮经替代方式（修复管线）同步的文件数（收尾标题区分"带修复的完成"）
 PROGRESS_FIXED_FILE="/tmp/progress_fixed_count.txt"
@@ -113,7 +129,7 @@ progress_scope_init() {
   local _d="${1:-0}"
   local d
   for ((d = _d; d < PROGRESS_MAX_DEPTH; d++)); do
-    rm -f "$(_progress_slot_rows "$d")" "$(_progress_slot_stats "$d")"
+    rm -f "$(_progress_slot_rows "$d")" "$(_progress_slot_stats "$d")" "$(_progress_slot_note "$d")"
   done
 }
 
@@ -281,9 +297,9 @@ _progress_render() {
   tg_add_title msg "$title"
   tg_append msg "📊 总任务：<b>${total}</b> | 待处理：${pending} | 进行中：${running} | 完成：${completed} | 跳过：${skipped} | 失败：${failed}"$'\n'
 
-  # 进行中任务块: 任务条目（分组渲染）+ 多层级阶段树/统计信息
-  #   各拆分深度槽位逐层缩进两格合并：深度 0 的树挂在任务条目下，
-  #   auto-split 子层的树再缩进一层、视觉上挂在本层活动行（🔄 已置尾）下；
+  # 进行中任务块: 任务条目（分组渲染）+ 多层级阶段行/统计信息/细粒度状态
+  #   各拆分深度槽位逐层下沉合并：深度 0 的块挂在任务条目下，
+  #   auto-split 子层再下沉一层、视觉上挂在本层活动行（🔄 已置尾）下；
   # finalized（中断/收尾）时仍渲染任务条目: 标题已报 "N 个进行中未执行完"，
   # 条目却不列出的话，被打断的任务（如 wopan176Crypt/0）在消息里完全失踪;
   # 阶段/统计不展示（progress_finalize 已清空各槽位，属过期信息）
@@ -294,27 +310,47 @@ _progress_render() {
     tg_add_block msg "$(_progress_render_task_list "$running_lines")"
 
     if [ "$finalized" -ne 1 ]; then
-      local _d _pad _rf _sf _raw _tree _line
+      local _d _ind _ind_rows _rf _sf _nf _is_label _raw _tree _line
       for ((_d = 0; _d < PROGRESS_MAX_DEPTH; _d++)); do
         _rf="$(_progress_slot_rows "$_d")"
         _sf="$(_progress_slot_stats "$_d")"
-        [ -f "$_rf" ] || [ -f "$_sf" ] || continue
-        _pad=""
-        local _k
-        for ((_k = 0; _k <= _d; _k++)); do _pad+="  "; done
-        if [ -f "$_rf" ]; then
+        _nf="$(_progress_slot_note "$_d")"
+        [ -f "$_rf" ] || [ -f "$_sf" ] || [ -f "$_nf" ] || continue
+        # 本层表头缩进（每层下沉 5 格）+ 树行/细粒度状态再下沉 2 格
+        _ind=$(printf '%*s' "$((5 * _d + 5))" '')
+        _ind_rows=$(printf '%*s' "$((5 * _d + 7))" '')
+
+        # 阶段行形态判定（决定它与统计行的先后、是否加树形连接符）:
+        #   标签型（全部行以 "▸" 开头）= 本层在做什么，作表头排在统计行之前
+        #   树型（子目录等状态条目）= 统计行是它的表头，排在其后并缩进 2 格
+        _is_label=1
+        [ -f "$_rf" ] && while IFS= read -r _line; do
+          [ -z "$_line" ] && continue
+          case "$_line" in
+            '▸'*) ;;
+            *) _is_label=0 ;;
+          esac
+        done < "$_rf"
+
+        if [ "$_is_label" -eq 1 ]; then
+          [ -f "$_rf" ] && while IFS= read -r _line; do
+            [ -z "$_line" ] && continue
+            msg+="${_ind}${_line}"$'\n'
+          done < "$_rf"
+          [ -f "$_sf" ] && msg+="${_ind}$(cat "$_sf")"$'\n'
+        else
+          [ -f "$_sf" ] && msg+="${_ind}$(cat "$_sf")"$'\n'
           _raw="$(_progress_active_last < "$_rf")"
           # tree_lines 每行自带 2 空格树干前缀（tree_conn），剥掉后
-          # 由本层 pad 统一缩进，保证树与统计行同列对齐
+          # 由本层缩进统一控制，保证树与统计行同列对齐
           _tree="$(tree_lines "$_raw" | sed 's/^  //')"
-          if [ -n "$_tree" ]; then
-            while IFS= read -r _line; do
-              [ -z "$_line" ] && continue
-              msg+="${_pad}${_line}"$'\n'
-            done <<< "$_tree"
-          fi
+          while IFS= read -r _line; do
+            [ -z "$_line" ] && continue
+            msg+="${_ind_rows}${_line}"$'\n'
+          done <<< "$_tree"
         fi
-        [ -f "$_sf" ] && msg+="${_pad}$(cat "$_sf")"$'\n'
+        # 细粒度状态（深层 detail）挂在最末，对齐树行文本列
+        [ -f "$_nf" ] && msg+="${_ind_rows}└─ $(cat "$_nf")"$'\n'
       done
     fi
   fi
@@ -418,6 +454,12 @@ _progress_task_apply() {
 
   if [ "$_d" -eq 0 ]; then
     _progress_set_task_status "$current" "running" "$detail"
+  elif [ -n "$detail" ]; then
+    # 深层（auto-split 子任务/文件批次）的 detail 无处安放: 任务行只接受深度
+    # 0 的更新（见上），此处落到本层 note 槽，渲染时挂在本层统计行之下 ——
+    # 否则批次阶段只有 "📊 批次 n/m" 一行，正在做什么（列出文件/传输/巩固
+    # /重试/修复）全程不可见
+    echo "$detail" > "$(_progress_slot_note "$_d")"
   fi
   [ -n "$rows" ] && printf '%s\n' "$rows" > "$(_progress_slot_rows "$_d")"
   [ -n "$stats" ] && echo "$stats" > "$(_progress_slot_stats "$_d")"
