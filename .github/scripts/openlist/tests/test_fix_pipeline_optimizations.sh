@@ -16,14 +16,22 @@ bad() { FAIL=$((FAIL+1)); echo "FAIL: $1"; }
 
 _REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 source "$_REPO_ROOT/.github/scripts/openlist/utils.sh" 2>/dev/null
-source "$_REPO_ROOT/.github/scripts/openlist/fix.sh" 2>/dev/null
-# 修复管线编排（_sync_fix_missing_files / _persist_fix_entry_now 等）已从 sync.sh
-# 拆到 fix_pipeline.sh，本测试测的就是它，漏 source 会全线 command not found
-source "$_REPO_ROOT/.github/scripts/openlist/fix_pipeline.sh" 2>/dev/null
-source "$_REPO_ROOT/.github/scripts/openlist/sync.sh" 2>/dev/null
+source "$_REPO_ROOT/.github/scripts/openlist/file_fix.sh" 2>/dev/null
+# 修复管线编排（_sync_fix_missing_files / _persist_fix_entry_now 等）已从 sync_engine.sh
+# 拆到 file_fix_pipeline.sh，本测试测的就是它，漏 source 会全线 command not found
+source "$_REPO_ROOT/.github/scripts/openlist/file_fix_pipeline.sh" 2>/dev/null
+source "$_REPO_ROOT/.github/scripts/openlist/sync_engine.sh" 2>/dev/null
 
 WORK="/tmp/fixopt_test_dir"
 rm -rf "$WORK"; mkdir -p "$WORK"
+# 被测代码用相对路径写修复日志（file_fix_pipeline.sh 的
+#   fix_log="file_fix_${task_name}_$(date +%Y%m%d_%H%M%S).log"）
+# 测试若不切进临时目录，日志会落在源码目录污染工作区（task_name 为 t 时即
+# file_fix_t_*.log）。本测试全部路径都是绝对路径，cd 无副作用。
+cd "$WORK"
+# 末尾虽有 rm -rf，但异常退出时执行不到，用 EXIT trap 兜底。
+# 注意: 必须先 cd 出 $WORK 再删，否则删除自身 CWD 会让 shell 报 getcwd 错误
+trap 'cd / && rm -rf "$WORK" /tmp/marker.json' EXIT
 
 # --- mocks ---
 timeout() { shift; "$@"; }
@@ -166,5 +174,6 @@ N5=$(cat "$LSF_CALLS")
 
 echo "-----"
 echo "PASS=$PASS FAIL=$FAIL"
-rm -rf "$WORK" /tmp/marker.json
+# $WORK 交给 EXIT trap 清理：此处删掉自身 CWD 会让后续 shell 报 getcwd 错误
+rm -f /tmp/marker.json
 [ $FAIL -eq 0 ]

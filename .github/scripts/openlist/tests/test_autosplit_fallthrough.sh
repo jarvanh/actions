@@ -15,7 +15,7 @@ bad() { FAIL=$((FAIL+1)); echo "FAIL: $1"; }
 _REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 source "$_REPO_ROOT/.github/scripts/openlist/utils.sh" 2>/dev/null
 source "$_REPO_ROOT/.github/scripts/openlist/rclone_query.sh" 2>/dev/null
-source "$_REPO_ROOT/.github/scripts/openlist/tasks.sh" 2>/dev/null
+source "$_REPO_ROOT/.github/scripts/openlist/task_engine.sh" 2>/dev/null
 
 # --- mocks（必须在 source 之后定义）---
 SWL_CALLS=0; SWL_LOG=""

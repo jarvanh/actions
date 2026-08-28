@@ -17,8 +17,8 @@ bad() { FAIL=$((FAIL+1)); echo "FAIL: $1"; }
 
 _REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 
-# --- source 被测代码（tasks.sh 顶层只有常量与数组，可直接 source）---
-source "$_REPO_ROOT/.github/scripts/openlist/tasks.sh" 2>/dev/null
+# --- source 被测代码（task_engine.sh 顶层只有常量与数组，可直接 source）---
+source "$_REPO_ROOT/.github/scripts/openlist/task_engine.sh" 2>/dev/null
 
 # --- 测试用 3 条同步对清单（覆盖真实清单结构）---
 SYNC_TASK_REGISTRY=(

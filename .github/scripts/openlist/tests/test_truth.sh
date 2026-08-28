@@ -17,13 +17,13 @@ _REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 
 # --- 先 source 被测代码（均为纯函数库，顶层仅状态变量初始化）---
 source "$_REPO_ROOT/.github/scripts/openlist/utils.sh"
-# truth-check 与容器重启已从 sync.sh 拆到 openlist_driver.sh，必须一并 source:
+# truth-check 与容器重启已从 sync_engine.sh 拆到 openlist_driver.sh，必须一并 source:
 # 漏掉则 _openlist_truth_check 未定义 → 测试全线假失败（command not found）
 source "$_REPO_ROOT/.github/scripts/openlist/openlist_driver.sh"
 # 直接全量 source，不用 sed 行号截取: 批次预检熔断提交在 _openlist_api_health_check
 # 内插码后行号右移，'1,400p' 截取线把半截脚本喂给 source 且报错被 2>/dev/null
 # 吞掉 → 函数未定义 → 测试全线假失败（command not found）
-source "$_REPO_ROOT/.github/scripts/openlist/sync.sh"
+source "$_REPO_ROOT/.github/scripts/openlist/sync_engine.sh"
 
 # --- mocks（必须在 source 之后定义，否则被脚本内同名函数覆盖）---
 docker() {
@@ -98,7 +98,7 @@ _openlist_truth_check "onedrive:backup" "$LOGF" && ok "3 非 openlist: 目标跳
 #   4b 同轮第二次: 不再重启（标记生效），退回驱动刷新方法3 storage 重载
 #   4c load_all 成功: 不重启直接返回 0
 # 注: 本函数是"驱动刷新方法N"（load_all / 重启容器 / storage 探测），
-#   与 fix.sh 的"文件修复方法N"是两套编号体系，断言按带限定词的日志文案
+#   与 file_fix.sh 的"文件修复方法N"是两套编号体系，断言按带限定词的日志文案
 CURL_MODE=fail
 _OL_DRIVER_RESTART_DONE=0
 rm -f /tmp/docker_restarted

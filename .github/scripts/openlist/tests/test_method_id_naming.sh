@@ -8,7 +8,7 @@
 # 三个命名约束（均为踩过的坑）:
 #   1. 自解释: 全名含语义 ID 与形态说明，日志里一眼可辨，无需回查映射表
 #   2. 带"文件修复"限定词: 仓库里另有多处独立的"方法N"编号体系，最易混的
-#      是 sync.sh _refresh_ol_drivers 的驱动刷新三招（驱动刷新方法1 load_all /
+#      是 sync_engine.sh _refresh_ol_drivers 的驱动刷新三招（驱动刷新方法1 load_all /
 #      方法2 重启容器 / 方法3 storage 探测）。不带限定词无法区分领域。
 #   3. 说明方法形态: 原名 / 短哈希名 + 是否 zip 分卷，这是选方法的依据
 #      （如密文名超长时必须避开带原名的方法）
@@ -27,7 +27,7 @@ ok()  { PASS=$((PASS+1)); echo "PASS: $1"; }
 bad() { FAIL=$((FAIL+1)); echo "FAIL: $1"; }
 
 _REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
-source "$_REPO_ROOT/.github/scripts/openlist/fix.sh" 2>/dev/null
+source "$_REPO_ROOT/.github/scripts/openlist/file_fix.sh" 2>/dev/null
 
 # 现行全名（与 _fix_method_desc 输出严格一致，改全名文案时此处需同步）
 D1="文件修复方法1 copyto_original: 直接 rclone copyto（原路径 + 原文件名）"
@@ -57,14 +57,14 @@ echo "$D4" | grep -q "分卷" && echo "$D4" | grep -q "短哈希" \
   && ok "2f 文件修复方法4 说明分卷 + 短哈希名" || bad "2f: $D4"
 
 # --- 3. 与驱动刷新方法不混淆（两套编号体系字面不重叠） ---
-# sync.sh _refresh_ol_drivers 的三招是另一套"方法N"，领域限定词必须不同
+# sync_engine.sh _refresh_ol_drivers 的三招是另一套"方法N"，领域限定词必须不同
 for _d in "$D1" "$D2" "$D3" "$D4"; do
   case "$_d" in *"驱动刷新"*) bad "3 文件修复全名误含'驱动刷新'限定词: $_d" ;; esac
 done
 ok "3a 文件修复全名不含'驱动刷新'限定词（领域不串）"
-# 反向: sync.sh 里"驱动刷新方法N"的运行时日志不得带上文件修复限定词
+# 反向: sync_engine.sh 里"驱动刷新方法N"的运行时日志不得带上文件修复限定词
 # （注释里提到对方领域是正常的——那正是消歧说明；只查实际输出的日志行）
-if grep -n 'echo .*驱动刷新方法' "$_REPO_ROOT/.github/scripts/openlist/sync.sh" | grep -q "文件修复"; then
+if grep -n 'echo .*驱动刷新方法' "$_REPO_ROOT/.github/scripts/openlist/sync_engine.sh" | grep -q "文件修复"; then
   bad "3b 驱动刷新日志误带'文件修复'限定词"
 else
   ok "3b 驱动刷新日志未误带文件修复限定词（两套文案不串）"

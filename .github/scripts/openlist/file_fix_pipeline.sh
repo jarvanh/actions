@@ -6,22 +6,22 @@
 #   - 缺失文件收集 → 4 种修复方法轮换 → 落盘即时校验 → 重启容器复核
 #   - 修复结果序列化与累计（供 save_sync_marker 与结果通知使用）
 #
-# 拆分缘由: sync.sh 曾同时承担同步编排、驱动维护、修复管线、通知排版四类
+# 拆分缘由: sync_engine.sh 曾同时承担同步编排、驱动维护、修复管线、通知排版四类
 #   职责（2000+ 行）。本组是"修复管线编排"，只被 sync_with_logging 调用，
-#   独立后 sync.sh 聚焦于同步编排与重试。
+#   独立后 sync_engine.sh 聚焦于同步编排与重试。
 #
 # 依赖: utils.sh (_log_section, _short_path, format_bytes),
-#       marker.sh (get_marker_path, _marker_write, _marker_merge_json,
+#       sync_marker.sh (get_marker_path, _marker_write, _marker_merge_json,
 #         marker_add_fix_entry, marker_remove_fix_entry,
 #         _load_marker_fixed_files, fix_blacklist_to_json),
-#       fix.sh (try_fix_failed_file, _fix_method_desc, _fix_method_short,
+#       file_fix.sh (try_fix_failed_file, _fix_method_desc, _fix_method_short,
 #         _blacklist_add, _flush_blacklist_to_marker, _ensure_crypt_config,
 #         _crypt_name_len_probe, _raw_remote_for, _raw_count_view_for,
 #         _raw_dir_count),
 #       openlist_driver.sh (_sync_restart_for_verify),
 #       openlist_api.sh (_get_openlist_token),
 #       rclone_query.sh (_extract_filter_args)
-# 被依赖: sync.sh (sync_with_logging)
+# 被依赖: sync_engine.sh (sync_with_logging)
 
 # 增量持久化单个修复条目到 marker（修复循环内每成功一个立即调用）
 # 目的: step 超时/手动取消/runner 回收等中断发生时，已完成的修复不丢失，
@@ -811,7 +811,7 @@ _sync_persist_verify_and_retry() {
 # 格式: [{original, alternative, method, restore_hint, size_human, size_bytes,
 #         method_id, restore: {kind, summary, steps, script, hint}}]
 # restore 字段记录还原方式，便于日后从目标端恢复原始文件
-# 现行 4 种修复方式精确识别（文案与 fix.sh _fix_succeed 各调用点对齐）:
+# 现行 4 种修复方式精确识别（文案与 file_fix.sh _fix_succeed 各调用点对齐）:
 #   "rclone copyto（[base64URL 编码目录 + ]原文件名）"             → copy / b64 目录
 #   "rclone copyto（[base64URL 编码目录 + ]短哈希文件名 <hash>）"   → short_hash_rename
 #   "分卷 zip（[b64目录 + ][短哈希 + ]<粒度> 分卷切割，共 N 卷）"    → split_zip
@@ -865,7 +865,7 @@ _sync_accumulate_fixed_results() {
   # 面包屑: 定位黑名单在链路（数组→GLOBAL→save）中的实际流转（排查 31917285452 丢失问题）
   # 注意: 不能写 ${VAR:-{}} —— bash 把默认词的 } 当作展开结束符，会给已赋值变量
   # 追加一个字面 }（"{...5条...}}"），jq 解析失败后面包屑拆成 "GLOBAL 5 / ? 条"
-  # 两行矛盾日志，marker 侧同因把黑名单清零（详见 marker.sh save_fix_state_marker）
+  # 两行矛盾日志，marker 侧同因把黑名单清零（详见 sync_marker.sh save_fix_state_marker）
   local _global_bl_len="?"
   _global_bl_len=$(printf '%s' "$GLOBAL_FIX_BLACKLIST_JSON" | jq -r 'length' 2>/dev/null) || _global_bl_len="?"
   [[ "$_global_bl_len" =~ ^[0-9]+$ ]] || _global_bl_len="?"

@@ -3,15 +3,15 @@
 # 提供 sync_task 用户接口函数，
 # 支持:
 #   --auto-split  — 源端 > 50GB 时按一级子目录自动分批（阈值 SYNC_SPLIT_THRESHOLD_BYTES 可调）
-#                   注: 这是"任务级分批"，与 split.sh 的"文件级分割"（把单个
+#                   注: 这是"任务级分批"，与 file_split.sh 的"文件级分割"（把单个
 #                   大文件切成多段）无关，两者维度不同（任务 vs 文件）。
 #                   SYNC_SPLIT_* 系历史命名，因属用户可配环境变量故保留不改。
 #   --1d-skip     — 1 天内已成功同步则跳过；--Nd-skip 任意天数（如 --2d-skip / --3d-skip）
 #   其余参数（如 --exclude）原样传给 rclone
 #
-# 依赖: sync.sh, split.sh, marker.sh, preview.sh, progress.sh, fix.sh
+# 依赖: sync_engine.sh, file_split.sh, sync_marker.sh, task_preview.sh, sync_progress.sh, file_fix.sh
 # 依赖环境变量:
-#   RCLONE_SYNC_TASK_FLAGS          — sync_task 特有 rclone 参数（在 flags.sh 中定义）
+#   RCLONE_SYNC_TASK_FLAGS          — sync_task 特有 rclone 参数（在 rclone_flags.sh 中定义）
 #   SYNC_SPLIT_THRESHOLD_BYTES      — auto-split 阈值（默认 50GB）
 #   OPENLIST_TASK_ROTATION          — 同步对轮转开关（=0 关闭，见下方说明）
 #   ROTATION_MAX_CONSECUTIVE_ATTEMPTS — 轮转阀门上限（默认 8）
@@ -27,7 +27,7 @@ readonly DEFAULT_SPLIT_THRESHOLD_BYTES="${SYNC_SPLIT_THRESHOLD_BYTES:-5000000000
 #   附加参数: --auto-split / --1d-skip / --exclude 等，原样透传给 sync_task
 # 所有任务统一 sync_task（rclone sync，删除目标端多余文件）:
 #   - --delete-before 等由 RCLONE_SYNC_TASK_FLAGS 自动追加
-#   - 已修复文件（original/alternative）由 sync.sh 的 filter-from 排除，
+#   - 已修复文件（original/alternative）由 sync_engine.sh 的 filter-from 排除，
 #     排除 = 不传输 + 不删除，sync 模式下不会被误删
 SYNC_TASK_REGISTRY=(
   "backup-aliyundrive|onedrive:backup|openlist:aliyundriveCrypt/backup|backup|--auto-split --1d-skip --exclude /notion/** --exclude notion/** --exclude /self-hosted_latest.tar.gz --exclude self-hosted_latest.tar.gz --exclude /github_repos_latest.tar.gz --exclude github_repos_latest.tar.gz"
@@ -522,7 +522,7 @@ _sync_task_impl() {
   done <<< "$subdirs"
   SYNC_SKIP_QUIET=0
 
-  # 设置拆分信息供最终通知使用（HTML 片段，由 sync.sh 通知按分节插入）
+  # 设置拆分信息供最终通知使用（HTML 片段，由 sync_engine.sh 通知按分节插入）
   AUTO_SPLIT_INFO="<b>🔀 子任务拆分统计</b>"$'\n'
   AUTO_SPLIT_INFO+="总子目录：<b>${total_subtasks}</b> · 传输总量：<b>$(format_bytes "$total_transferred")</b>"$'\n'
   local _counts="✅ <b>${synced_subtasks}</b> · ❌ <b>${failed_subtasks}</b>"
@@ -664,7 +664,7 @@ sync_task() {
 #      如密文文件名超长——run 32749862280 名长诊断实锤，原路径原名重试
 #      永远失败）复用 _sync_fix_missing_files 修复管线换方法落盘
 #      （原名 copyto/短哈希名/zip 分卷等 4 种方法 + 增量持久化 + 名长诊断，
-#      方法编号以 fix.sh _fix_method_desc 为准）
+#      方法编号以 file_fix.sh _fix_method_desc 为准）
 # 价值: 重启后仍在的文件是真成果 —— 即使本 run 随后被取消，下一轮
 #       --size-only 也会跳过它们，进度不回退；且批次间容器已被重启、缓存即
 #       真值，历史遗留的假成功文件会被后续批次正常识别为缺失并补传；

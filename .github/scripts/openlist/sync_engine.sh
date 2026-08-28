@@ -8,7 +8,7 @@
 #
 # 已拆出的职责（勿再放回本文件，各模块头部有其设计说明与历史教训）:
 #   - 驱动维护 / 健康预检 / 缓存与 truth-check → openlist_driver.sh
-#   - 缺失文件修复管线编排（4 种方法轮换 + 增量持久化）→ fix_pipeline.sh
+#   - 缺失文件修复管线编排（4 种方法轮换 + 增量持久化）→ file_fix_pipeline.sh
 #   - 同步结果通知构建（源/目标大小、差异列表、排除规则）→ sync_notify.sh
 #
 # 完整流程（本文件只做编排，各环节实现在上述模块）:
@@ -16,15 +16,15 @@
 #   → diff 出缺失文件 → 修复管线 → 结果通知
 #
 # 依赖: utils.sh, rclone_query.sh, openlist_api.sh, openlist_driver.sh,
-#       fix_pipeline.sh, sync_notify.sh, marker.sh, telegram.sh, progress.sh
+#       file_fix_pipeline.sh, sync_notify.sh, sync_marker.sh, telegram.sh, sync_progress.sh
 # 依赖环境变量:
-#   RCLONE_DEFAULT_FLAGS — 共用 rclone 参数数组（在 flags.sh 中定义）
+#   RCLONE_DEFAULT_FLAGS — 共用 rclone 参数数组（在 rclone_flags.sh 中定义）
 #   TELEGRAM_BOT_TOKEN   — 用于发送日志文件
 #   TELEGRAM_CHAT_ID     — 用于发送日志文件
 
 # 初始化同步会话状态（计数器/日志名/进度系统）
 # 变量不加 local，故意写入调用方 shell（各 step source 后直接调用）
-# 由 workflow 在每个同步 step 开头调用；依赖 progress.sh 的 progress_init
+# 由 workflow 在每个同步 step 开头调用；依赖 sync_progress.sh 的 progress_init
 init_sync_state() {
   PROCESSED_FILES_LOG="processed_videos.log"
   SYNC_SKIP_QUIET=0
@@ -202,7 +202,7 @@ sync_with_logging() {
       # 容器活了，不证明后端驱动登录有效（run 33026674750: baidupan 登录
       # 失效，重启容器判成功后放行，rclone PUT 全部 409 Conflict 并空转
       # m1-m11 修复管线直至 job 被取消；m1-m11 为当时旧版 11 种方法的编号，
-      # 现行方法已精简为 4 种并改用语义 ID，见 fix.sh 函数头）。此处用完整
+      # 现行方法已精简为 4 种并改用语义 ID，见 file_fix.sh 函数头）。此处用完整
       # 两层预检再验一次，
       # 仍不健康则带哨兵码退出——88 是 rclone 理论上不会返回的退出码，
       # 由 sync_with_logging 消费并转为入口预检失败的跳过语义。

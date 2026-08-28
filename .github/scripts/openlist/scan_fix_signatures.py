@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """从目标端扫描"修复特征"文件，反推 fixed_files 记录（fallback 机制）。
 
-marker 被删除或首次同步时，marker.sh save_sync_marker 调用本脚本扫描目标端，
-识别修复机制（fix.sh 方法 1-4）产生的替代形态文件，并与源端列表比对反推出
+marker 被删除或首次同步时，sync_marker.sh save_sync_marker 调用本脚本扫描目标端，
+识别修复机制（file_fix.sh 方法 1-4）产生的替代形态文件，并与源端列表比对反推出
 original 路径。
 
 可识别特征（对应现行修复方法）:
