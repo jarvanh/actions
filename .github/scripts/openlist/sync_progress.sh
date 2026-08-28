@@ -443,7 +443,7 @@ progress_finalize() {
   _progress_refresh
 }
 
-# ===== 阶段信息入口（tasks.sh 高频使用）=====
+# ===== 阶段信息入口（task_engine.sh 高频使用）=====
 # 调用方把阶段树写入 PROGRESS_PHASE_INFO、统计写入 PROGRESS_STATS 全局变量，
 # 本入口将其转发给 progress_task_update/progress_task_update_force 并把变量转换为树行/统计参数。
 progress_update() {

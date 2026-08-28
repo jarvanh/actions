@@ -31,7 +31,7 @@ chk() {
 # ---------- 抽取被测函数 ----------
 # 与 test_batch_precheck_circuit_breaker.sh 同策略: 单函数抽取 + 显式 stub，
 # 保持与 utils/sync/marker/progress 模块零耦合
-sed -n '/^sync_task()/,/^}/p' "$SCRIPT_DIR/../tasks.sh" > extracted.sh
+sed -n '/^sync_task()/,/^}/p' "$SCRIPT_DIR/../task_engine.sh" > extracted.sh
 echo "被测函数抽取: $(wc -l < extracted.sh) 行"
 source extracted.sh
 
@@ -64,7 +64,7 @@ reset_case() {
   SYNC_FAILED=0
 }
 
-# 必须复刻生产调用形态 (tasks.sh run_all_tasks `_run_registry_entry || true`):
+# 必须复刻生产调用形态 (task_engine.sh run_all_tasks `_run_registry_entry || true`):
 # || 列表豁免让 sync_task 的非零透传返回码不会击穿 harness 的 set -e
 capture_rc() {
   RC=0

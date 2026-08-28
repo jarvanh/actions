@@ -5,16 +5,16 @@
 #   - 构建同步结果的 Telegram 通知（成功/失败/跳过/无变化 4 个分支共用排版）
 #   - 共享段落构建器: 头部(任务/路径/大小/状态)、自动拆分、排除规则、差异列表
 #
-# 拆分缘由: sync.sh 曾同时承担同步编排、修复管线、通知排版三类职责
+# 拆分缘由: sync_engine.sh 曾同时承担同步编排、修复管线、通知排版三类职责
 #   （2000+ 行），通知部分与同步逻辑无耦合，独立后按职责即可定位。
 #
 # 依赖: utils.sh (escape_html, tree_conn/tree_sub/tree_lines,
 #         get_transferred_bytes_from_log),
 #       rclone_query.sh (_build_diff_files_list, _build_exclude_patterns,
 #         _get_path_stats),
-#       telegram.sh (tg_*), fix.sh (_fix_method_short),
+#       telegram.sh (tg_*), file_fix.sh (_fix_method_short),
 #       openlist_driver.sh (_refresh_openlist_cache)
-# 被依赖: sync.sh (sync_with_logging)
+# 被依赖: sync_engine.sh (sync_with_logging)
 # ===== 通知消息公共段落构建 =====
 # 4 个通知分支共享的头部/任务信息/排除规则/差异列表段落。
 # 统一走 telegram.sh 的 tg_* 排版助手（HTML）；
@@ -37,7 +37,7 @@ _notify_add_header() {
   tg_append "$1" "文件数：${count_info}"$'\n'
 }
 
-# AUTO_SPLIT_INFO 段（仅非空时插入；内容为 tasks.sh 构建的 HTML 分节片段）
+# AUTO_SPLIT_INFO 段（仅非空时插入；内容为 task_engine.sh 构建的 HTML 分节片段）
 _notify_add_autosplit() {
   [ -n "$AUTO_SPLIT_INFO" ] && tg_append "$1" $'\n'"${AUTO_SPLIT_INFO}"$'\n'
   return 0

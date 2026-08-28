@@ -19,7 +19,7 @@ bad() { FAIL=$((FAIL+1)); echo "FAIL: $1"; }
 _REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 
 # --- source 被测代码 ---
-source "$_REPO_ROOT/.github/scripts/openlist/tasks.sh" 2>/dev/null
+source "$_REPO_ROOT/.github/scripts/openlist/task_engine.sh" 2>/dev/null
 
 BC_DIR="/tmp/bc_test_dir"
 LSF_OUT="/tmp/bc_lsf_out.txt"
@@ -33,10 +33,10 @@ progress_update() { :; }
 _refresh_ol_drivers() { :; }
 _start_token_refresher() { echo $(( $(cat /tmp/bc_refresher_starts 2>/dev/null || echo 0) + 1 )) > /tmp/bc_refresher_starts; }
 _stop_token_refresher() { echo $(( $(cat /tmp/bc_refresher_stops 2>/dev/null || echo 0) + 1 )) > /tmp/bc_refresher_stops; }
-# 修复管线三件套（真实实现在 sync.sh，这里只验证批次巩固的接线与清单传递）
+# 修复管线三件套（真实实现在 sync_engine.sh，这里只验证批次巩固的接线与清单传递）
 _sync_fix_missing_files() {
   echo $(( $(cat /tmp/bc_fixpipe_calls 2>/dev/null || echo 0) + 1 )) > /tmp/bc_fixpipe_calls
-  # SYNC_FIX_MISSING_OVERRIDE 语义 = 缺失清单文件路径（见 sync.sh 实现），记录路径
+  # SYNC_FIX_MISSING_OVERRIDE 语义 = 缺失清单文件路径（见 sync_engine.sh 实现），记录路径
   echo "${SYNC_FIX_MISSING_OVERRIDE:-}" > /tmp/bc_fixpipe_override
   # 模拟: 清单内每个文件都换方法落盘成功 1 条（fix_list 行数 = 清单文件数）
   local _f
@@ -50,7 +50,7 @@ _sync_fix_missing_files() {
 }
 _sync_serialize_fixed_files() { :; }
 _sync_accumulate_fixed_results() { :; }
-# 复核步骤依赖的黑名单/展示工具（真实实现在 fix.sh / utils.sh）
+# 复核步骤依赖的黑名单/展示工具（真实实现在 file_fix.sh / utils.sh）
 # 拉黑明细落文件: 函数内对关联数组的写入发生在被测函数的作用域里，
 # 父作用域直接读数组读不到，断言改用文件内容校验
 declare -A FIX_METHOD_BLACKLIST=()

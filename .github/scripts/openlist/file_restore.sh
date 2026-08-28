@@ -4,7 +4,7 @@
 # 触发: workflow_dispatch input run_mode="⚠️ 还原 · 修复文件还原为原路径"
 #       （restore_task 指定任务名或 all）
 #
-# 还原策略按修复方式自动分类（方法编号对应 fix.sh 现行 4 种方法）:
+# 还原策略按修复方式自动分类（方法编号对应 file_fix.sh 现行 4 种方法）:
 #   - 改名类（短哈希文件名、base64URL 编码目录变体）: rclone move 服务端移动
 #     回原路径（不经过本地，不重新上传）
 #   - 分卷 zip（文件修复方法3/4）: 下载全部 .zip.00N 分卷 → cat 合并 → 解压 →
@@ -18,7 +18,7 @@
 # 注意: 还原 = 把文件放回目标端原路径。若后端对该路径仍无法持久化（假成功），
 # 下一轮同步会重新检测缺失并再次修复，数据不会丢。
 #
-# 依赖: utils.sh, telegram.sh, marker.sh (SYNC_STATE_DIR), rclone, 7z
+# 依赖: utils.sh, telegram.sh, sync_marker.sh (SYNC_STATE_DIR), rclone, 7z
 
 # 目标端文件存在性检查
 # 用法: _dst_file_exists <full_remote_path>

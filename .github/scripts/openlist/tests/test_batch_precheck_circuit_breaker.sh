@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 批次级三层预检熔断回归测试（对应 tasks.sh 批次循环的熔断分支）
+# 批次级三层预检熔断回归测试（对应 task_engine.sh 批次循环的熔断分支）
 # 背景: sync_with_logging 的入口预检覆盖不到 sync_by_file_batches 批次循环内的
 #   rclone copy --files-from。登录失效后端（openlist 服务端缓存掩盖驱动死活）
 #   会把第一个大批次（≤50GB）全额烧完才由 _batch_consolidate 行为启发式止损。
@@ -31,9 +31,9 @@ chk() {
 }
 
 # ---------- 抽取被测函数 ----------
-# sed 单函数抽取而非 source 整个 tasks.sh: 保持与 utils/sync/marker 等模块零耦合，
+# sed 单函数抽取而非 source 整个 task_engine.sh: 保持与 utils/sync/marker 等模块零耦合，
 # 全部协作者用显式 stub 替代，行为断言不受无关改动影响
-sed -n '/^sync_by_file_batches()/,/^}/p' "$SCRIPT_DIR/../tasks.sh" > extracted.sh
+sed -n '/^sync_by_file_batches()/,/^}/p' "$SCRIPT_DIR/../task_engine.sh" > extracted.sh
 echo "被测函数抽取: $(wc -l < extracted.sh) 行"
 source extracted.sh
 
@@ -117,7 +117,7 @@ prepare_case() {
   rm -f "$RCLONE_COPY_CALLS_FILE"
   clean_batch_dirs
 }
-# 必须复刻生产调用形态 (tasks.sh run_all_tasks `_run_registry_entry || true`):
+# 必须复刻生产调用形态 (task_engine.sh run_all_tasks `_run_registry_entry || true`):
 # || 列表豁免随动态调用链穿透，函数体内批次循环的 set ±e 重开不会击穿进程；
 # 若改用 set +e 手工保护，errexit 判定取 "return 完成时刻" 的 options 状态 ->
 # 第一个经历过传输路径的熔断分支 (G2) 会静默杀死整个 harness

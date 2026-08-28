@@ -7,13 +7,13 @@
 #   - OpenList 缓存刷新与 truth-check（重启容器取后端真值，暴露"上传成功
 #     但未持久化"的假成功文件）
 #
-# 拆分缘由: sync.sh 曾同时承担同步编排、驱动维护、修复管线、通知排版四类
+# 拆分缘由: sync_engine.sh 曾同时承担同步编排、驱动维护、修复管线、通知排版四类
 #   职责（2000+ 行）。本组是"与 OpenList 服务打交道"的部分，与同步编排逻辑
 #   无耦合，独立后按职责即可定位。
 #
 # 依赖: openlist_api.sh (_get_openlist_token), utils.sh (_log_section, _short_path),
-#       fix.sh (_raw_remote_for, _raw_dir_count)
-# 被依赖: sync.sh (sync_with_logging, _sync_retry_8005,
+#       file_fix.sh (_raw_remote_for, _raw_dir_count)
+# 被依赖: sync_engine.sh (sync_with_logging, _sync_retry_8005,
 #         _sync_persist_verify_and_retry), sync_notify.sh (_refresh_openlist_cache)
 
 # 刷新 OpenList 全部驱动的 token（重建驱动，非 wopan176 专属）
@@ -43,7 +43,7 @@
 #        生命周期）最多标记一次
 # 驱动刷新方法3（兜底）: storage/list 探测——不重建驱动，仅确认 API 可达
 #
-# 命名口径: 以上"驱动刷新方法N"是本函数的三招，与 fix.sh 的"文件修复方法N"
+# 命名口径: 以上"驱动刷新方法N"是本函数的三招，与 file_fix.sh 的"文件修复方法N"
 #   （copyto_original 等 4 种）是两套互不相干的编号体系，日志与注释里的
 #   简写必须带领域限定词，否则读到"方法1"时无从判断指哪一套。
 # 用法: _refresh_ol_drivers [log_filename]

@@ -14,7 +14,7 @@
 #   方法 ID 用语义名（copyto_original 等）而非 m1/m2 序号: 序号在代码里无法
 #   自解释，且方法增删时会漂移。
 # 命名口径: 全名带"文件修复"限定词——仓库里另有多处独立的"方法N"编号体系
-#   （最易混的是 sync.sh _refresh_ol_drivers 的驱动刷新三招），不带限定词
+#   （最易混的是 sync_engine.sh _refresh_ol_drivers 的驱动刷新三招），不带限定词
 #   无法区分。本文件内部的"方法1/2/3/4"简写均指上述文件修复方法。
 #
 # 假成功防护（两层）:
@@ -24,7 +24,7 @@
 #      无数据"的深层假成功可能漏检，由第 2 层重启复核兜底。
 #   2. 失败记忆（FIX_METHOD_BLACKLIST + marker fix_blacklist 字段）:
 #      持久化每文件已判定假成功的方法（marker 存方法全名，| 分隔）。
-#      sync.sh 持久化验证（_persist_verify_entries，重启容器后逐文件复核）
+#      sync_engine.sh 持久化验证（_persist_verify_entries，重启容器后逐文件复核）
 #      发现假成功后，本轮立即换方法重试（黑名单让 try_fix_failed_file
 #      直接跳过失效方法）；跨轮修复同样跳过，避免方法1 每轮都白白"成功"
 #      一次再被发现。
@@ -234,7 +234,7 @@ _ensure_crypt_config() {
 }
 
 # 实测单个文件名的 crypt 密文名长度（字节）——纯本地探针，不碰真实后端
-# rclone 没有 cryptencode 命令（sync.sh 旧代码调用它一直静默失败，名长诊断
+# rclone 没有 cryptencode 命令（sync_engine.sh 旧代码调用它一直静默失败，名长诊断
 # 从未生效过）。权威替代: 用相同加密参数构建 remote 指向本地临时目录的
 # :crypt: 远程，copyto 空文件后读底层真实密文名。密文名只由加密参数+原文名
 # 决定，与 remote 指向无关 → 本地探针结果与真实后端密文名完全等长
@@ -318,7 +318,7 @@ _raw_count_view_for() {
 #   文件修复方法4 zip_split_shorthash  — zip 压缩 + 分卷上传（短哈希名作基底名）
 #
 # 全名必须带"文件修复"限定词: 仓库里另有多处独立的"方法N"编号体系，
-#   同名会让人误以为是一套东西——最易混的是 sync.sh _refresh_ol_drivers 的
+#   同名会让人误以为是一套东西——最易混的是 sync_engine.sh _refresh_ol_drivers 的
 #   驱动刷新三招（方法1 load_all / 方法2 重启容器 / 方法3 storage 探测），
 #   它与文件修复毫无关系。限定词让 marker/日志里的全名自带领域归属。
 # 不兼容历史全名: marker 里旧写法（"方法1: ..."、"m1"）不再被识别，按未知
@@ -373,7 +373,7 @@ _cmd_log() {
 # 文件修复方法假成功黑名单: <文件相对路径> -> 全名集合（| 分隔，形如
 # "文件修复方法1 copyto_original: ...|文件修复方法3 zip_split_original: ..."；
 # 全名含空格所以不能用空格分隔）
-# 由 sync.sh 修复管线每轮从 marker 加载/重建，并在轮内即时检测时追加
+# 由 sync_engine.sh 修复管线每轮从 marker 加载/重建，并在轮内即时检测时追加
 declare -A FIX_METHOD_BLACKLIST=()
 # 本轮已修复文件: <原始路径> -> <替代路径>（同一轮内避免 auto-split 子任务与最终
 # 完整同步重复修复同一文件）
@@ -594,7 +594,7 @@ _raw_dir_count() {
 }
 
 # 落盘即时校验（裸存储计数增量口径，openlist: 目标通用）
-# 由 sync.sh 修复管线初始化 _RAW_VERIFY_* 全局后启用（未初始化 = 未启用，
+# 由 sync_engine.sh 修复管线初始化 _RAW_VERIFY_* 全局后启用（未初始化 = 未启用，
 # 每次 return 0 纯直通）；Crypt 目标计数视图为裸存储解密口径（见
 # _raw_count_view_for），普通挂载目标即目标路径自身。
 #
@@ -613,7 +613,7 @@ _raw_dir_count() {
 #   随每次确认通过递增；_RAW_VERIFY_BUDGET 限制全量计数次数（大目录
 #   rclone size 代价高，耗尽后退化为信任 rc，OPENLIST_RAW_CHECK_BUDGET
 #   可调）。本层是当轮快速筛查，对"缓存有条目、后端无数据"的深层假
-#   成功可能漏检（计数随缓存条目一起增长）——权威兜底是 sync.sh 持久化
+#   成功可能漏检（计数随缓存条目一起增长）——权威兜底是 sync_engine.sh 持久化
 #   验证 _persist_verify_entries（重启容器后逐文件复核大小）。
 #
 # 用法: _confirm_persist_by_count <method_id> <file_rel> <log_file>
@@ -625,7 +625,7 @@ _raw_dir_count() {
 #   fi
 _confirm_persist_by_count() {
   local method_id="$1" rel_path="$2" log_file="$3"
-  # 未初始化即未启用（sync.sh 修复管线仅对 openlist: 目标初始化）
+  # 未初始化即未启用（sync_engine.sh 修复管线仅对 openlist: 目标初始化）
   [[ -n "${_RAW_VERIFY_DEST:-}" ]] || return 0
   # 校验预算耗尽 → 退化为信任 rc（避免大目录反复全量计数拖垮同步）
   if [ "${_RAW_VERIFY_BUDGET:-0}" -le 0 ]; then

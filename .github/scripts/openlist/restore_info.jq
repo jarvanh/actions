@@ -1,9 +1,9 @@
 # 修复方式 → 还原元数据（kind/summary/steps/script）分类程序
-# 由 sync.sh _sync_serialize_fixed_files 以 jq -R -s --arg sp <src> --arg dp <dst> -f 调用
+# 由 sync_engine.sh _sync_serialize_fixed_files 以 jq -R -s --arg sp <src> --arg dp <dst> -f 调用
 # 输入: fix_list 原始文本（| 分隔，每行 original|alternative|method|restore_hint|size_human|size_bytes|method_id[|md5]）
 # 输出: fixed_files JSON 数组
 def restore_info($orig; $alt; $method; $src; $dst):
-  # 现行 4 种修复方式精确识别（文案来源: fix.sh _fix_succeed 各调用点）:
+  # 现行 4 种修复方式精确识别（文案来源: file_fix.sh _fix_succeed 各调用点）:
   #   "rclone copyto（原路径 + 原文件名）"             → copy，alt==orig 无需还原 (文件修复方法1)
   #   "rclone copyto（base64URL 编码目录 + 原文件名）"  → base64url_dir (文件修复方法1 目录降级变体)
   #   "rclone copyto（[base64URL 编码目录 + ]短哈希文件名 <hash>）" → short_hash_rename (文件修复方法2)

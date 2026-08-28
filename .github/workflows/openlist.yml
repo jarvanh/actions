@@ -1,4 +1,5 @@
 # 备份文件到 openlist 中的网盘
+# 脚本架构、模块划分、环境变量与命名约定见仓库根 README.md 的「OpenList 同步子系统」
 name: openlist
 
 on:
@@ -36,7 +37,7 @@ on:
         default: false
       # ===== 调试模式选项 =====
       fix_test_task:
-        description: "调试模式: 要测试的任务 id（如 backup、task0；带后缀的变体如 task0-baidupan，完整清单见 tasks.sh SYNC_TASK_REGISTRY）"
+        description: "调试模式: 要测试的任务 id（如 backup、task0；带后缀的变体如 task0-baidupan，完整清单见 task_engine.sh SYNC_TASK_REGISTRY）"
         required: false
         type: string
         default: "backup"
@@ -85,8 +86,8 @@ jobs:
       OPENLIST_UPLOAD_TIMEOUT: "300"
 
       # 重试/轮询
-      # 注: 熔断阈值实际生效变量是 OPENLIST_FIX_CB_FILES（sync.sh，默认3）；
-      #     轮转上限实际生效变量是 ROTATION_MAX_CONSECUTIVE_ATTEMPTS（tasks.sh，默认8）
+      # 注: 熔断阈值实际生效变量是 OPENLIST_FIX_CB_FILES（sync_engine.sh，默认3）；
+      #     轮转上限实际生效变量是 ROTATION_MAX_CONSECUTIVE_ATTEMPTS（task_engine.sh，默认8）
       OPENLIST_8005_RETRY_ATTEMPTS: "3"
       OPENLIST_423_RETRY_ATTEMPTS: "3"
       OPENLIST_423_RETRY_SLEEP_SECONDS: "300"
@@ -215,7 +216,7 @@ jobs:
 
       # ===== 加载函数库 =====
       # 所有同步相关函数已提取到 .github/scripts/openlist/ 目录下的脚本文件中。
-      # 修改函数逻辑请编辑对应脚本文件；修改任务定义请编辑 tasks.sh 的 SYNC_TASK_REGISTRY，rclone 参数请编辑 flags.sh。
+      # 修改函数逻辑请编辑对应脚本文件；修改任务定义请编辑 task_engine.sh 的 SYNC_TASK_REGISTRY，rclone 参数请编辑 rclone_flags.sh。
       - name: 加载同步函数库
         run: |
           echo "加载 OpenList 同步函数库..."
@@ -271,7 +272,7 @@ jobs:
 
       # ===== 调试: 单任务测试修复管线 =====
       # 用真实生产代码路径（sync_task → sync_with_logging）按任务清单
-      # （tasks.sh SYNC_TASK_REGISTRY）查表跑单个任务（id 形如 backup、task0，
+      # （task_engine.sh SYNC_TASK_REGISTRY）查表跑单个任务（id 形如 backup、task0，
       # 含带后缀的变体 task0-baidupan / task0-wopan175 等，覆盖全部目标后端），
       # 验证 truth-check（重启取真值） + 缺失文件修复的实际效果。
       # 与正式流程的区别: 只跑单任务、跳过任务预览、跳过结尾 5h sleep，
@@ -296,7 +297,7 @@ jobs:
           # 跳过 initial sync 实际传输（debug 只验证修复方法: diff → 修复 → 持久化复核）
           export OPENLIST_FIX_TEST_MODE=1
 
-          # ===== 按 input 从任务清单（tasks.sh SYNC_TASK_REGISTRY）查表执行 =====
+          # ===== 按 input 从任务清单（task_engine.sh SYNC_TASK_REGISTRY）查表执行 =====
           FIX_TASK="${{ inputs.fix_test_task || 'backup' }}"
           echo "=== 修复管线测试任务: ${FIX_TASK} (修复上限 ${OPENLIST_MISSING_FIX_MAX}) ==="
           run_task_by_id "$FIX_TASK"

@@ -74,7 +74,7 @@ _get_source_size_with_excludes() {
 
 # 添加一个同步对到预览
 # 用法: add_preview_pair <source_path> <dest_path> [--exclude pat] ...
-#   （与 tasks.sh 调用约定一致: extra_args 可能含 --delete-before 等
+#   （与 task_engine.sh 调用约定一致: extra_args 可能含 --delete-before 等
 #   sync 特有参数，统计前先剥离为纯过滤口径）
 add_preview_pair() {
   local source_path="$1"
@@ -86,7 +86,7 @@ add_preview_pair() {
   echo "  同步对 ${PREVIEW_PAIR_COUNT}: ${source_path} → ${dest_path}"
 
   # 源端清单 + 缓存（主 shell 内读写: 命令替换子 shell 里的数组赋值
-  # 回不到父进程，缓存必须由本函数落盘，供 tasks.sh 进度注册等复用）
+  # 回不到父进程，缓存必须由本函数落盘，供 task_engine.sh 进度注册等复用）
   _extract_filter_args "${extra_args[@]}"
   local _src_cache_key="${source_path} ${FILTER_ARGS[*]}"
   local src_json
@@ -200,7 +200,7 @@ add_preview_pair() {
   # 同步对数据缓冲（TSV），flush_task_preview 时按 task_name 分组、
   # 源端分组渲染为 📁 组头 + ├─/└─ 树形条目（与进度通知的任务列表同风格）
   # 空字段写 "-" 占位: tab 是 IFS 空白类字符，read 会吞掉空列导致字段错位
-  # （同 progress.sh 的任务队列 TSV 约定）
+  # （同 sync_progress.sh 的任务队列 TSV 约定）
   # 字段: task/src/excl/sbytes/scount/dst/ybytes/ycount/ynew/yupd/fnote/dfail
   # dfail=1 → 目标端列举失败，该条目为按空目标端的全量估算（不可靠）
   local _excl_ph="${exclude_summary:--}"

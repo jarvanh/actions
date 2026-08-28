@@ -18,8 +18,8 @@ bad() { FAIL=$((FAIL+1)); echo "FAIL: $1"; }
 _REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 source "$_REPO_ROOT/.github/scripts/openlist/utils.sh"
 source "$_REPO_ROOT/.github/scripts/openlist/rclone_query.sh"
-source "$_REPO_ROOT/.github/scripts/openlist/marker.sh"
-source "$_REPO_ROOT/.github/scripts/openlist/preview.sh"
+source "$_REPO_ROOT/.github/scripts/openlist/sync_marker.sh"
+source "$_REPO_ROOT/.github/scripts/openlist/task_preview.sh"
 
 # --- mocks（必须在 source 之后定义，否则被脚本内同名函数覆盖）---
 timeout() { shift; "$@"; }
@@ -30,7 +30,7 @@ LSJSON_CALLS=/tmp/test_preview_lsjson_calls; echo 0 > "$LSJSON_CALLS"
 FLAKY_REMAIN=/tmp/test_preview_flaky; echo 2 > "$FLAKY_REMAIN"
 
 # 场景重置: 各场景之间清空预览状态并指定当前任务名（生产无对应函数）
-# 说明: preview.sh 曾提供 start_task_preview 做同样的事，但其"清零
+# 说明: task_preview.sh 曾提供 start_task_preview 做同样的事，但其"清零
 #   PREVIEW_PAIRS_TSV"的语义与现行"跨任务全局累加 TSV + flush_task_preview
 #   按 task 重算"的设计冲突（生产若在每任务前调用会清空已注册的全部 pair），
 #   生产路径从不调用它，故已从生产代码移除，此处自建仅供测试使用。

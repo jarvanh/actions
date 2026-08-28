@@ -6,7 +6,7 @@
 #   - 服务就绪等待（HTTP /ping → 管理面登录 → 驱动初始化 → rclone 验证）
 #
 # 依赖: 无（自包含；wait_openlist_ready 依赖本文件的 _get_openlist_token）
-# 被依赖: fix.sh, sync.sh, workflow（wait_openlist_ready 由 workflow 直接调用）
+# 被依赖: file_fix.sh, sync_engine.sh, workflow（wait_openlist_ready 由 workflow 直接调用）
 
 # 获取 OpenList 管理面 token（账号密码动态登录，弃用静态读取）
 # 历史: 曾从 config.json 读 .token/.jwt_secret 作为静态凭据，但登录态

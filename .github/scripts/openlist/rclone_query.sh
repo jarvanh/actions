@@ -8,7 +8,7 @@
 #      不剥离会导致 lsf 报错或过滤口径与实际 sync 不一致）
 #
 # 依赖: utils.sh (format_bytes)
-# 被依赖: marker.sh, tasks.sh, preview.sh, sync.sh
+# 被依赖: sync_marker.sh, task_engine.sh, task_preview.sh, sync_engine.sh
 
 # 调用 rclone size --json，输出原始 JSON（失败输出空）；额外参数原样透传
 _rclone_size_json() {
