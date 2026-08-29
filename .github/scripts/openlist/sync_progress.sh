@@ -100,14 +100,13 @@ _start_batch_progress_thread() {
   [ -n "$log_file" ] || return 0
   touch "$log_file" 2>/dev/null || return 0
   (
+    # GitHub Actions shell 带 set -e: 管道内 grep 无匹配（批次刚启动时日志还没有
+    # Transferred 行）会让整条管道非零，_xfer 赋值失败直接杀死子壳 —— 实时刷新
+    # 永久失效（首次运行实测）。全程显式容错: 管道尾部 || true，循环体自身永不非零。
     while :; do
-      sleep "$PROGRESS_RT_INTERVAL"
-      [ -f "$log_file" ] || continue
-      # rclone --progress 用 \r 刷新单行统计，先归一为行再取最后一个带 ETA 的 Transferred 行
-      # 注意: 此处是子壳非函数上下文，不能用 local
-      _xfer=$(tr '\r' '\n' < "$log_file" | grep -a 'Transferred:' | grep -a 'ETA' | tail -1 | sed -E 's/^.*Transferred:[[:space:]]*//')
-      [ -z "$_xfer" ] && continue
-      progress_update "传输中: ${_xfer}" "▸ 📊 批次：${batch_idx:-?}/${total_batches:-?} | ✅${synced_batches:-0} ❌${failed_batches:-0} · 📄 ${batch_total_files:-?}/${total_files:-?} 文件 · ⏱ ${_xfer}"
+      sleep "$PROGRESS_RT_INTERVAL" || break
+      { [ -f "$log_file" ] && _xfer=$(tr '\r' '\n' < "$log_file" | grep -a 'Transferred:' | grep -a 'ETA' | tail -1 | sed -E 's/^.*Transferred:[[:space:]]*//') && [ -n "$_xfer" ]; } || continue
+      progress_update "传输中: ${_xfer}" "▸ 📊 批次：${batch_idx:-?}/${total_batches:-?} | ✅${synced_batches:-0} ❌${failed_batches:-0} · 📄 ${batch_total_files:-?}/${total_files:-?} 文件 · ⏱ ${_xfer}" || true
     done
   ) &
   echo $! > "$PROGRESS_RT_PID_FILE"
