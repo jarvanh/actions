@@ -959,7 +959,9 @@ _consolidate_verify_fixed() {
 # 完全对不上；巩固类字段为 0 时整段省略（常态批次无假成功，不占位）。
 _render_batch_stats_line() {
   local _s="▸ 📊 进度：第 ${batch_idx:-0}/${total_batches:-0} 批 | 完成 ${synced_batches:-0} 批 · 失败 ${failed_batches:-0} 批"
-  _s+=" · 已传 ${batch_total_files:-0}/${total_files:-0} 个文件"
+  _s+=" · 已传 ${batch_total_files:-0}/${total_files:-0} 个文件 · 📤 本轮已传输 $(format_bytes "${batch_transferred_bytes:-0}")"
+  # 目标端估算 = 本轮传输量 + 批次拆分前已有的目标端基线（若上游提供）
+  [ "${DEST_BASE_BYTES:-0}" -gt 0 ] 2>/dev/null && _s+=" · 目标端约 $(format_bytes $((DEST_BASE_BYTES + ${batch_transferred_bytes:-0})))"
   [ "${batch_transferred_bytes:-0}" -gt 0 ] && _s+=" · 📤 $(format_bytes "${batch_transferred_bytes:-0}")"
   [ "${consolidate_missing_total:-0}" -gt 0 ] && _s+=" · ⚠️ 未落盘 ${consolidate_missing_total}"
   [ "${consolidate_retry_total:-0}" -gt 0 ] && _s+=" · 🔁 重传 ${consolidate_retry_total}"
@@ -1092,6 +1094,13 @@ sync_by_file_batches() {
   local consolidate_retry_total=0
   local consolidate_fix_total=0
 
+  # 目标端基线（供进度行显示“目标端约 XX GiB”）：拆分前测一次，含 errors 容错
+  DEST_BASE_BYTES=0
+  local _dst_json
+  _dst_json=$(rclone size "$dest_path" --json 2>/dev/null || true)
+  [ -n "$_dst_json" ] && DEST_BASE_BYTES=$(echo "$_dst_json" | jq -r '.bytes // 0' 2>/dev/null || echo 0)
+  [[ "$DEST_BASE_BYTES" =~ ^[0-9]+$ ]] || DEST_BASE_BYTES=0
+
   echo "拆分为 ${total_batches} 个批次"
   PROGRESS_PHASE_INFO="▸ 📦 文件批次拆分：共 ${total_batches} 批 · ${total_files} 个文件（每批 ≤ $(format_bytes "$threshold")）"
   progress_update_force "拆分为 ${total_batches} 个批次" "$(_render_batch_stats_line)"
@@ -1173,7 +1182,7 @@ sync_by_file_batches() {
         --verbose \
         "${batch_guard_flags[@]}" \
         "${extra_args[@]}" \
-        2>&1 | tee "$batch_log"
+        2>&1 | stdbuf -oL tee "$batch_log"
       local rc=${PIPESTATUS[0]}
       set -e
       _stop_token_refresher
