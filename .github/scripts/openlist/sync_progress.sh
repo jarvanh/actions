@@ -103,9 +103,12 @@ _start_batch_progress_thread() {
     # GitHub Actions shell 带 set -e: 管道内 grep 无匹配（批次刚启动时日志还没有
     # Transferred 行）会让整条管道非零，_xfer 赋值失败直接杀死子壳 —— 实时刷新
     # 永久失效（首次运行实测）。全程显式容错: 管道尾部 || true，循环体自身永不非零。
+    # 排查痕迹: 每次唤醒/刷新写 stderr 日志（job log 可见，仅当 GitHub 显示）
+    echo "[rt-thread] started interval=${PROGRESS_RT_INTERVAL}s log=$log_file pid=$$" >&2
     while :; do
       sleep "$PROGRESS_RT_INTERVAL" || break
-      { [ -f "$log_file" ] && _xfer=$(tr '\r' '\n' < "$log_file" | grep -a 'Transferred:' | grep -a 'ETA' | tail -1 | sed -E 's/^.*Transferred:[[:space:]]*//') && [ -n "$_xfer" ]; } || continue
+      { [ -f "$log_file" ] && _xfer=$(tr '\r' '\n' < "$log_file" | grep -a 'Transferred:' | grep -a 'ETA' | tail -1 | sed -E 's/^.*Transferred:[[:space:]]*//') && [ -n "$_xfer" ]; } || { echo "[rt-thread] no xfer line yet" >&2; continue; }
+      echo "[rt-thread] refreshing: $_xfer" >&2
       progress_update "传输中: ${_xfer}" "▸ 📊 批次：${batch_idx:-?}/${total_batches:-?} | ✅${synced_batches:-0} ❌${failed_batches:-0} · 📄 ${batch_total_files:-?}/${total_files:-?} 文件 · ⏱ ${_xfer}" || true
     done
   ) &
@@ -412,27 +415,27 @@ _progress_render() {
         if [ "$_is_label" -eq 1 ]; then
           # 标签块（▸ 开头）用树形连接符挂到上层 🔄 活动行之下：
           #   非末行 │ + 标签，末行 └─ + 标签；统计行/批次历史/细粒度状态再挂在末条标签下
-          # 每层下沉 5 格保持不变，仅把纯空格缩进升级为可见树干（用户反馈：层级感不足）
+          # 每层下沉 5 格保持不变，树行统一用 <code> 等宽渲染（对齐 + 可读性）
           local _lab_total=0 _lab_n=0
           [ -f "$_rf" ] && _lab_total=$(grep -c . "$_rf" || true)
           [ -f "$_rf" ] && while IFS= read -r _line; do
             [ -z "$_line" ] && continue
             _lab_n=$((_lab_n + 1))
             if [ "$_lab_n" -eq "$_lab_total" ]; then
-              msg+="${_ind}└─ ${_line#▸ }"$'\n'
+              msg+="${_ind}<code>└─ ${_line#▸ }</code>"$'\n'
             else
-              msg+="${_ind}│  ${_line#▸ }"$'\n'
+              msg+="${_ind}<code>│  ${_line#▸ }</code>"$'\n'
             fi
           done < "$_rf"
-          # 统计行与后续块对齐末条标签的文本列（+4 格）
+          # 统计行与后续块对齐末条标签的文本列（+4 格），同样等宽渲染
           local _ind_sub="${_ind}    "
-          [ -f "$_sf" ] && msg+="${_ind_sub}$(cat "$_sf")"$'\n'
+          [ -f "$_sf" ] && msg+="${_ind_sub}<code>$(cat "$_sf")</code>"$'\n'
           # 批次历史回显: 最近 N 个已完成批次的快照（当前批次状态由 rows/stats 表达，不在此重复）
           # 多行块需逐行加缩进前缀，否则仅首行对齐
           local _bh
           _bh=$(_progress_batch_history_render)
           if [ -n "$_bh" ]; then
-            msg+="$(tree_lines "$_bh" | sed 's/^  //' | sed "s/^/${_ind_sub}/")"$'\n'
+            msg+="$(tree_lines "$_bh" | sed 's/^  //' | sed "s/^/${_ind_sub}/" | sed 's/^\(.*\)$/<code>\1<\/code>/')"$'\n'
           fi
         else
           [ -f "$_sf" ] && msg+="${_ind}$(cat "$_sf")"$'\n'
@@ -445,11 +448,11 @@ _progress_render() {
             msg+="${_ind_rows}${_line}"$'\n'
           done <<< "$_tree"
         fi
-        # 细粒度状态（深层 detail）挂在最末；标签型块时对齐末条标签文本列（+4 格）
+        # 细粒度状态（深层 detail）挂在最末；标签型块时对齐末条标签文本列（+4 格），等宽渲染
         if [ "$_is_label" -eq 1 ] && [ -f "$_nf" ]; then
-          msg+="${_ind}    └─ $(cat "$_nf")"$'\n'
+          msg+="${_ind}    <code>└─ $(cat "$_nf")</code>"$'\n'
         elif [ -f "$_nf" ]; then
-          msg+="${_ind_rows}└─ $(cat "$_nf")"$'\n'
+          msg+="${_ind_rows}<code>└─ $(cat "$_nf")</code>"$'\n'
         fi
       done
     fi
