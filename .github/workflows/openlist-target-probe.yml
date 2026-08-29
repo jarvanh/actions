@@ -1,6 +1,8 @@
-# 目标端只读探针: 实测 wopan176Crypt/0 与 onedrive:0 的文件数/字节数
-# 用途: 独立于同步运行取证"目标端是否在真实增长"。可与同步并行（不占 openlist-singleton 锁）。
-# 结果: job 日志 + onedrive:/logs/verify/probe_run_$GITHUB_RUN_ID.log + artifact。
+# 目标端只读探针: 实测 wopan176Crypt/0 的文件数与字节数
+# 用途: 独立于同步运行，实时取证"目标端是否真有文件/是否在增长"。
+# 设计: 不加 openlist-singleton 并发锁（可与同步并行）；只做 size/lsf 读操作；
+#       不启动 OpenList 容器、不碰 wopan token（经现有 OpenList 服务读取）。
+# 结果: 输出到 run artifact + onedrive:/logs/verify/ 留档。
 name: openlist-target-probe
 
 on:
@@ -9,22 +11,24 @@ on:
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
-    env:
-      OPENLIST_ADMIN_PASSWORD: ${{ secrets.OPENLIST_ADMIN_PASSWORD }}
+    timeout-minutes: 20
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: 安装 rclone 与依赖
+      - name: 安装 rclone（GitHub Releases 直下）
         run: |
-          curl -fsSL https://rclone.org/install.sh | sudo bash
-          sudo apt-get update -qq || true
-          sudo apt-get install -y jq || true
+          set -e
+          RVER=v1.71.2
+          curl -fsSL --retry 3 --retry-delay 5 --connect-timeout 30 --max-time 300 \
+            -o /tmp/rclone.deb \
+            "https://github.com/rclone/rclone/releases/download/${RVER}/rclone-${RVER}-linux-amd64.deb"
+          sudo dpkg -i /tmp/rclone.deb
+          rclone version | head -2
 
       - name: 写入 rclone 配置（含密钥掩码）
         env:
-          RCLONE_CONFIG_SECRET: ${{ secrets.RCLONE }}
+          RCLONE_CONFIG_SECRET: *** secrets.RCLONE }}
         run: |
           mkdir -p ~/.config/rclone/
           cat << EOF > ~/.config/rclone/rclone.conf
@@ -32,48 +36,31 @@ jobs:
           EOF
           python3 "$GITHUB_WORKSPACE/.github/scripts/openlist/mask_rclone_config.py"
 
-      - name: 拉起 OpenList 容器（探针专用实例）
-        run: |
-          sudo docker rm -f openlist 2>/dev/null || true
-          sudo mkdir -p /opt/openlist-data
-          sudo chmod 0777 /opt/openlist-data
-          rclone copy dropbox:self-hosted/openlist/data /opt/openlist-data             --exclude "data.db-wal" --exclude "data.db-shm" --exclude "data.db-journal"
-          sudo docker run -d --restart=unless-stopped -v /opt/openlist-data:/opt/openlist/data -p 5244:5244 -e PUID=0 -e PGID=0 -e UMASK=022 --name="openlist" openlistteam/openlist:latest
-
-      - name: 就绪等待与驱动 token 刷新
-        run: |
-          source "$GITHUB_WORKSPACE/.github/scripts/openlist/load_all.sh"
-          if wait_openlist_ready; then
-            echo "OpenList 就绪"
-          else
-            echo "OpenList 未就绪"
-            exit 1
-          fi
-          _refresh_ol_drivers /tmp/refresh.log || true
-          echo "驱动 token 已刷新"
-
       - name: 目标端实测（只读）
         run: |
-          REPORT="/tmp/probe_report.log"
+          TS=$(date -u +%Y%m%d_%H%M%S)
+          REPORT="/tmp/probe_$TS.log"
           {
-            echo "=== target probe run $GITHUB_RUN_ID ==="
-            date -u
-            echo -n "[TARGET_SIZE] "
+            echo "=== 目标端探针 $TS (UTC) ==="
+            echo "run: $GITHUB_RUN_ID"
+            echo ""
+            echo "--- [目标] openlist:wopan176Crypt/0 rclone size ---"
             rclone size openlist:wopan176Crypt/0 --json 2>&1
-            echo -n "[SOURCE_SIZE] "
+            echo ""
+            echo "--- [源端参照] onedrive:0 rclone size ---"
             rclone size onedrive:0 --json 2>&1
-            echo -n "[TARGET_TOP_N] "
+            echo ""
+            echo "--- [目标] 顶层条目数 ---"
             rclone lsf openlist:wopan176Crypt/0 2>/dev/null | wc -l
-            echo "[TARGET_TOP_SAMPLE]"
-            rclone lsf openlist:wopan176Crypt/0 2>/dev/null | head -8
+            echo "--- [目标] 顶层条目样例(前10) ---"
+            rclone lsf openlist:wopan176Crypt/0 2>/dev/null | head -10
           } | tee "$REPORT"
-          rclone copyto "$REPORT" "onedrive:/logs/verify/probe_run_$GITHUB_RUN_ID.log" || true
-          echo "probe done"
+          # 留档到 onedrive:/logs/verify/（与 sync_state 不同子树，不干扰同步）
+          rclone copyto "$REPORT" "onedrive:/logs/verify/$(basename "$REPORT")" || true
 
       - name: 上传报告 artifact
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: probe-report
-          path: /tmp/probe_report.log
+          path: /tmp/probe_*.log
           retention-days: 30
