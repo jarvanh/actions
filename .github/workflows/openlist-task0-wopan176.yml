@@ -29,8 +29,10 @@ jobs:
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
       # ===== 集中阈值定义（与主 openlist.yml 保持一致）=====
+      # 批次拆分阈值: 用户指定 1GiB —— 单批核对/巩固周期分钟级，假成功更早暴露；
+      # 主 openlist.yml 保持 20GB 不变，仅本专用 workflow 调整
       LARGE_FILE_THRESHOLD_BYTES: "4000000000"
-      SYNC_SPLIT_THRESHOLD_BYTES: "20000000000"
+      SYNC_SPLIT_THRESHOLD_BYTES: "1073741824"
       OPENLIST_SPLIT_PART_BYTES: "1073741824"
       OPENLIST_MAX_PART_SIZE: "4000000000"
       OPENLIST_TARGET_PART_SIZE: "3980000000"
