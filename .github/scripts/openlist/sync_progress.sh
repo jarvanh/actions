@@ -107,9 +107,11 @@ _start_batch_progress_thread() {
     echo "[rt-thread] started interval=${PROGRESS_RT_INTERVAL}s log=$log_file pid=$$" >&2
     while :; do
       sleep "$PROGRESS_RT_INTERVAL" || break
-      { [ -f "$log_file" ] && _xfer=$(tr '\r' '\n' < "$log_file" | grep -a 'Transferred:' | grep -a 'ETA' | tail -1 | sed -E 's/^.*Transferred:[[:space:]]*//') && [ -n "$_xfer" ]; } || { echo "[rt-thread] no xfer line yet" >&2; continue; }
+      # 提取已传段: 优先 Transferred: 前缀（多行汇总），兼容 --stats-one-line 的
+      # "NUM 已传 / NUM 总量," 格式（必须同时匹配已传与总量两段，避开速度 MiB/s）
+      { [ -f "$log_file" ] && _xfer=$( { grep -a 'Transferred:' "$log_file" 2>/dev/null | grep -a 'ETA' | tail -1 | sed -E 's/^.*Transferred:[[:space:]]*//' ; grep -aoE '[0-9.]+[[:space:]]+[KMGTPEZY]?iB[[:space:]]*/[[:space:]]*[0-9.]+[[:space:]]+[KMGTPEZY]?iB' "$log_file" 2>/dev/null | tail -1 | sed -E 's/^/传输中: /'; } | head -1 ) && [ -n "$_xfer" ]; } || { echo "[rt-thread] no xfer line yet" >&2; continue; }
       echo "[rt-thread] refreshing: $_xfer" >&2
-      progress_update "传输中: ${_xfer}" "▸ 📊 批次：${batch_idx:-?}/${total_batches:-?} | ✅${synced_batches:-0} ❌${failed_batches:-0} · 📄 ${batch_total_files:-?}/${total_files:-?} 文件 · ⏱ ${_xfer}" || true
+      progress_update "传输中: ${_xfer#传输中: }" "▸ 📊 批次：${batch_idx:-?}/${total_batches:-?} | ✅${synced_batches:-0} ❌${failed_batches:-0} · 📄 ${batch_total_files:-?}/${total_files:-?} 文件 · ⏱ ${_xfer#传输中: }" || true
     done
   ) &
   echo $! > "$PROGRESS_RT_PID_FILE"
