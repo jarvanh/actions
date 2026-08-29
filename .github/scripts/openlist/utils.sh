@@ -124,16 +124,21 @@ _short_path() {
 get_transferred_bytes_from_log() {
   local log_file="$1"
   local line
+  # 优先匹配多行汇总块的 "Transferred:" 行（最终 stats）
   line=$(grep 'Transferred:' "$log_file" 2>/dev/null | tail -1)
-  if [ -z "$line" ]; then
-    echo 0
-    return
+  local size_str=""
+  if [ -n "$line" ]; then
+    size_str=$(echo "$line" | sed -n 's/.*Transferred:[[:space:]]*\([0-9.]*[[:space:]]*[KMGTPEZY]iB\).*/\1/p')
+    [ -z "$size_str" ] && size_str=$(echo "$line" | sed -n 's/.*Transferred:[[:space:]]*\([0-9.]*[[:space:]]*B\).*/\1/p')
   fi
-  # 提取第一个大小值，如 "1.234 GiB" 或 "0 B"
-  local size_str
-  size_str=$(echo "$line" | sed -n 's/.*Transferred:[[:space:]]*\([0-9.]*[[:space:]]*[KMGTPEZY]iB\).*/\1/p')
+  # 兼容 --stats-one-line --progress 格式: 动态刷新行没有 Transferred: 前缀，
+  # 形如 "... :  164.484 MiB / 18.378 GiB, 1%, 32.897 MiB/s, ETA ..."，
+  # 要取的是 "X / Y" 对中的已传段 —— 用 "X / " 且下一字段是总量的模式:
+  # grep -oE 提取所有 "NUM UNIT / NUM UNIT," 对，取已传段；排除 MiB/s 速度段
+  # （速度段的特征是后随 s, 而不是数字）
   if [ -z "$size_str" ]; then
-    size_str=$(echo "$line" | sed -n 's/.*Transferred:[[:space:]]*\([0-9.]*[[:space:]]*B\).*/\1/p')
+    size_str=$(grep -aoE '[0-9.]+[[:space:]]+[KMGTPEZY]?iB[[:space:]]*/[[:space:]]*[0-9.]+[[:space:]]+[KMGTPEZY]?iB' "$log_file" 2>/dev/null | tail -1 | grep -oE '^[0-9.]+[[:space:]]+[KMGTPEZY]?iB')
+    [ -z "$size_str" ] && size_str=$(grep -aoE '[0-9.]+[[:space:]]+B[[:space:]]*/[[:space:]]*[0-9.]+[[:space:]]+[KMGTPEZY]?iB' "$log_file" 2>/dev/null | tail -1 | grep -oE '^[0-9.]+[[:space:]]+B')
   fi
   if [ -z "$size_str" ]; then
     echo 0
@@ -143,11 +148,11 @@ get_transferred_bytes_from_log() {
   num=$(echo "$size_str" | awk '{print $1}')
   unit=$(echo "$size_str" | awk '{print $2}')
   case "$unit" in
-    KiB) awk "BEGIN {printf \"%d\", $num * 1024}" ;;
-    MiB) awk "BEGIN {printf \"%d\", $num * 1048576}" ;;
-    GiB) awk "BEGIN {printf \"%d\", $num * 1073741824}" ;;
-    TiB) awk "BEGIN {printf \"%d\", $num * 1099511627776}" ;;
-    PiB) awk "BEGIN {printf \"%d\", $num * 1125899906842624}" ;;
+    KiB) awk "BEGIN {printf \"%.0f\", $num * 1024}" ;;
+    MiB) awk "BEGIN {printf \"%.0f\", $num * 1048576}" ;;
+    GiB) awk "BEGIN {printf \"%.0f\", $num * 1073741824}" ;;
+    TiB) awk "BEGIN {printf \"%.0f\", $num * 1099511627776}" ;;
+    PiB) awk "BEGIN {printf \"%.0f\", $num * 1125899906842624}" ;;
     B)   awk "BEGIN {printf \"%d\", $num}" ;;
     *) echo 0 ;;
   esac
