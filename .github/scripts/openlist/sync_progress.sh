@@ -47,6 +47,84 @@ PROGRESS_FINALIZED_FILE="/tmp/progress_finalized.txt"
 PROGRESS_FIXED_FILE="/tmp/progress_fixed_count.txt"
 # 节流时间戳文件（避免频繁刷新 Telegram 消息）
 PROGRESS_LAST_UPDATE_FILE="/tmp/progress_last_update.txt"
+# 批次历史记录文件（最近 N 个已完成批次的快照，供进度消息回显既往批次结果）
+# 格式: "<批次号>|<展示文本>"，同批次号覆盖旧条目；展示文本由 task_engine 生成
+PROGRESS_BATCH_HISTORY_FILE="/tmp/progress_batch_history.txt"
+PROGRESS_BATCH_HISTORY_MAX=6
+# 批次实时刷新线程（分钟级）: 间隔与 pid 文件
+PROGRESS_RT_INTERVAL="${PROGRESS_RT_INTERVAL:-60}"
+PROGRESS_RT_PID_FILE="/tmp/progress_rt_pid.txt"
+
+# 追加一条批次历史（同批次号覆盖，只保留最近 PROGRESS_BATCH_HISTORY_MAX 条）
+# 用法: _progress_batch_history_add <批次号> <展示文本>
+_progress_batch_history_add() {
+  local bnum="$1" entry="$2"
+  [[ "$bnum" =~ ^[0-9]+$ ]] || return 0
+  [ -n "$entry" ] || return 0
+  local tmp
+  tmp=$(mktemp)
+  [ -f "$PROGRESS_BATCH_HISTORY_FILE" ] && grep -v "^${bnum}|" "$PROGRESS_BATCH_HISTORY_FILE" > "$tmp" || true
+  echo "${bnum}|${entry}" >> "$tmp"
+  tail -n "$PROGRESS_BATCH_HISTORY_MAX" "$tmp" > "$PROGRESS_BATCH_HISTORY_FILE"
+  rm -f "$tmp"
+}
+
+# 清空批次历史（新任务/新文件批次阶段开始时调用）
+_progress_batch_history_clear() {
+  rm -f "$PROGRESS_BATCH_HISTORY_FILE" 2>/dev/null || true
+}
+
+# 渲染批次历史为树行（无连接符，由调用方 tree_lines 加）；按批次号升序展示
+_progress_batch_history_render() {
+  [ -f "$PROGRESS_BATCH_HISTORY_FILE" ] || return 0
+  local _sorted _out="" _l
+  _sorted=$(sort -t'|' -k1,1n "$PROGRESS_BATCH_HISTORY_FILE" 2>/dev/null)
+  while IFS= read -r _l; do
+    [ -z "$_l" ] && continue
+    _out+="${_l#*|}"$'\n'
+  done <<< "$_sorted"
+  printf '%s' "$_out"
+}
+
+# ===== 批次传输实时刷新线程（分钟级进度）=====
+# 背景: 批次内 rclone copy 阻塞主线程数分钟～数十分钟，期间无 progress_update
+# 调用，进度消息冻结在批次开始时刻。本线程按固定间隔（默认 60s）tail 批次
+# 日志，提取 rclone --progress 的 Transferred 行，刷新为“传输中”实时状态。
+# 生命周期: _start_batch_progress_thread 在每批 copy 前启动；
+#           _stop_batch_progress_thread 在 copy 后（含失败/中止路径）停止。
+# 安全性: 线程是独立子进程，只读写 /tmp 状态文件与 Telegram API；
+#         主线程在 copy 期间阻塞，无并发写冲突；kill 停止。
+_start_batch_progress_thread() {
+  _stop_batch_progress_thread
+  local log_file="$1"
+  [ -n "$log_file" ] || return 0
+  touch "$log_file" 2>/dev/null || return 0
+  (
+    while :; do
+      sleep "$PROGRESS_RT_INTERVAL"
+      [ -f "$log_file" ] || continue
+      # rclone --progress 用 \r 刷新单行统计，先归一为行再取最后一个带 ETA 的 Transferred 行
+      # 注意: 此处是子壳非函数上下文，不能用 local
+      _xfer=$(tr '\r' '\n' < "$log_file" | grep -a 'Transferred:' | grep -a 'ETA' | tail -1 | sed -E 's/^.*Transferred:[[:space:]]*//')
+      [ -z "$_xfer" ] && continue
+      progress_update "传输中: ${_xfer}" "▸ 📊 批次：${batch_idx:-?}/${total_batches:-?} | ✅${synced_batches:-0} ❌${failed_batches:-0} · 📄 ${batch_total_files:-?}/${total_files:-?} 文件 · ⏱ ${_xfer}"
+    done
+  ) &
+  echo $! > "$PROGRESS_RT_PID_FILE"
+}
+
+_stop_batch_progress_thread() {
+  if [ -f "$PROGRESS_RT_PID_FILE" ]; then
+    local _pid
+    _pid=$(head -1 "$PROGRESS_RT_PID_FILE" 2>/dev/null)
+    if [ -n "$_pid" ]; then
+      kill "$_pid" 2>/dev/null || true
+      pkill -P "$_pid" 2>/dev/null || true
+      wait "$_pid" 2>/dev/null || true
+    fi
+    rm -f "$PROGRESS_RT_PID_FILE"
+  fi
+}
 
 # 注册任务到队列（初始化时调用）
 # 用法: progress_register_task <task_id> <display_name> [size_hint]
@@ -338,6 +416,13 @@ _progress_render() {
             msg+="${_ind}${_line}"$'\n'
           done < "$_rf"
           [ -f "$_sf" ] && msg+="${_ind}$(cat "$_sf")"$'\n'
+          # 批次历史回显: 最近 N 个已完成批次的快照（当前批次状态由 rows/stats 表达，不在此重复）
+          # 多行块需逐行加缩进前缀，否则仅首行对齐
+          local _bh
+          _bh=$(_progress_batch_history_render)
+          if [ -n "$_bh" ]; then
+            msg+="$(tree_lines "$_bh" | sed 's/^  //' | sed "s/^/${_ind_rows}/")"$'\n'
+          fi
         else
           [ -f "$_sf" ] && msg+="${_ind}$(cat "$_sf")"$'\n'
           _raw="$(_progress_active_last < "$_rf")"
@@ -400,6 +485,8 @@ progress_init() {
   : > "$PROGRESS_CURRENT_FILE"
   : > "$PROGRESS_FIXED_FILE"
   _progress_purge_all_slots
+  _progress_batch_history_clear
+  _stop_batch_progress_thread
   rm -f "$PROGRESS_FINALIZED_FILE" 2>/dev/null || true
   date +%s > "$PROGRESS_START_FILE"
 
@@ -422,9 +509,11 @@ progress_task_begin() {
     progress_register_task "$task_id" "${fallback_name:-$task_id}"
   fi
   echo "$task_id" > "$PROGRESS_CURRENT_FILE"
-  # 清空上一任务遗留的阶段槽位（run 33048121562: task0 的批次统计
+  # 清空上一任务遗留的阶段槽位与批次历史（run 33048121562: task0 的批次统计
   # "15 批 ❌15" 被残留显示到下一个任务的 📍 进行中 区块下）
   _progress_purge_all_slots
+  _progress_batch_history_clear
+  _stop_batch_progress_thread
   _progress_set_task_status "$task_id" "running" ""
   _progress_refresh
 }
@@ -520,6 +609,7 @@ progress_task_done() {
 progress_finalize() {
   echo "1" > "$PROGRESS_FINALIZED_FILE"
   : > "$PROGRESS_CURRENT_FILE"
+  _stop_batch_progress_thread
   _progress_purge_all_slots
   _progress_refresh
 }
