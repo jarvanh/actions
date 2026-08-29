@@ -1283,12 +1283,8 @@ sync_by_file_batches() {
       local _bh_mark="✅"
       [ "$_fail_n" -gt 0 ] && _bh_mark="⚠️"
       { [ "$rc" -ne 0 ] && [ "$rc" -ne 4 ]; } && _bh_mark="❌"
-      # 分项仅展示非零项（用户反馈: “修复 0 · 失败 0”是噪音）；成功/总数恒显，其余按需
-      local _bh_entry="${_bh_mark} 批次 $((i+1))：共 ${batch_file_count} 个文件，成功 ${_ok_n}"
-      [ "$_fixed_n" -gt 0 ] && _bh_entry+=" · 修复 ${_fixed_n}"
-      [ "$_fail_n" -gt 0 ] && _bh_entry+=" · 失败 ${_fail_n}"
-      [ "$_onf_n" -gt 0 ] && _bh_entry+=" · 跳过 ${_onf_n}"
-      [ "$_have_n" -gt 0 ] && _bh_entry+=" · 已有 ${_have_n}"
+      # 分项无条件拼接（用户偏好: 每个字段恒显，格式稳定）
+      local _bh_entry="${_bh_mark} 批次 $((i+1))：共 ${batch_file_count} 个文件，成功 ${_ok_n} · 修复 ${_fixed_n} · 失败 ${_fail_n} · 跳过 ${_onf_n} · 已有 ${_have_n}"
       _bh_entry+=" · ⏱ ${_batch_dur}"
       [ "${_batch_bytes:-0}" -gt 0 ] && _bh_entry+=" · 📤 $(format_bytes "${_batch_bytes:-0}")"
       _progress_batch_history_add "$((i+1))" "$_bh_entry"
