@@ -1005,6 +1005,8 @@ sync_by_file_batches() {
   mkdir -p "$batch_dir"
 
   echo "=== 按文件批次拆分: ${task_name} ==="
+  # 新一轮文件批次阶段: 清空上一轮批次历史，避免旧批次结果混入本次展示
+  _progress_batch_history_clear
 
   # 递归列出所有文件（使用 lsjson，比 lsf --json 更可靠）
   local file_list_file="${batch_dir}/all_files.jsonl"
@@ -1105,7 +1107,12 @@ sync_by_file_batches() {
       PROGRESS_PHASE_INFO="▸ 📦 文件批次拆分：${total_batches} 批 / ${total_files} 文件（当前批次 ${batch_idx}：${batch_file_count} 文件）"
       progress_update "批次 ${batch_idx}/${total_batches}：${batch_file_count} 个文件" "$(_render_batch_stats_line)"
 
+      # 批次计时基准（历史记录耗时用）
+      BATCH_START_TS=$(date +%s)
+
       local batch_log="${task_name}_batch_${i}.log"
+      # 实时刷新线程（分钟级）: 必须在 batch_log 定义后启动
+      _start_batch_progress_thread "$batch_log"
 
       # OpenList 目标端低并发保护（对齐 sync_with_logging 的 openlist_guard_flags）:
       # 批次 copy 此前无 transfers 限制（默认 4 并发上传），慢后端（wopan176 等）
@@ -1132,6 +1139,7 @@ sync_by_file_batches() {
           failed_batches=$((failed_batches + unbuilt_batches))
           [ "$unbuilt_batches" -gt 0 ] && failed_batch_list+="批次 $((i+1))/${total_batches} 起共 ${unbuilt_batches} 批 · 批次预检未通过（后端不健康），中止"$'\n'
           echo "🛑 批次 $((i+1)) 预检未通过（后端不健康），中止剩余 ${unbuilt_batches} 个批次，本同步对标记失败（后端恢复后轮转回来重试）"
+          _stop_batch_progress_thread
           AUTO_SPLIT_INFO="<b>🔀 文件批次拆分统计</b>"$'\n'
           AUTO_SPLIT_INFO+="总批次：<b>${total_batches}</b> · 文件数：<b>${batch_total_files}</b>"$'\n'
           AUTO_SPLIT_INFO+="✅ <b>${synced_batches}</b> · ❌ <b>${failed_batches}</b>（批次预检熔断中止）"$'\n'
@@ -1169,6 +1177,16 @@ sync_by_file_batches() {
       local rc=${PIPESTATUS[0]}
       set -e
       _stop_token_refresher
+      _stop_batch_progress_thread
+
+      # 批次耗时（mm:ss）
+      local _batch_elapsed=$(( $(date +%s) - ${BATCH_START_TS:-$(date +%s)} ))
+      local _batch_dur
+      if [ "$_batch_elapsed" -ge 60 ]; then
+        _batch_dur="$((_batch_elapsed / 60))m$((_batch_elapsed % 60))s"
+      else
+        _batch_dur="${_batch_elapsed}s"
+      fi
 
       if [ "$rc" -eq 0 ]; then
         synced_batches=$((synced_batches + 1))
@@ -1215,6 +1233,7 @@ sync_by_file_batches() {
         [ "$remaining_batches" -gt 0 ] && failed_batches=$((failed_batches + remaining_batches))
         failed_batch_list+="剩余 ${remaining_batches} 批 · 后端写入全拒，中止"$'\n'
         echo "🛑 后端写入全拒，中止剩余 ${remaining_batches} 个批次，本同步对标记失败（后端恢复后轮转回来重试）"
+        _stop_batch_progress_thread
         AUTO_SPLIT_INFO="<b>🔀 文件批次拆分统计</b>"$'\n'
         AUTO_SPLIT_INFO+="总批次：<b>${total_batches}</b> · 文件数：<b>${batch_total_files}</b>"$'\n'
         AUTO_SPLIT_INFO+="✅ <b>${synced_batches}</b> · ❌ <b>${failed_batches}</b>（后端写入全拒中止）"$'\n'
@@ -1226,6 +1245,16 @@ sync_by_file_batches() {
       fi
 
       progress_update_force "批次 ${batch_idx}/${total_batches} 完成" "$(_render_batch_stats_line)"
+
+      # 批次历史快照（供进度消息回显最近 N 批的结果）
+      local _bh_mark="✅"
+      [ "$rc" -ne 0 ] && _bh_mark="⚠️"
+      [ "$rc" -ne 0 ] && [ "$rc" -ne 4 ] && _bh_mark="❌"
+      local _bh_entry="${_bh_mark} 批次 $((i+1)): ${batch_file_count} 文件 · ⏱ ${_batch_dur}"
+      [ "${_batch_bytes:-0}" -gt 0 ] && _bh_entry+=" · 📤 $(format_bytes "${_batch_bytes:-0}")"
+      [ "${CONSOLIDATE_MISSING:-0}" -gt 0 ] && _bh_entry+=" · ⚠️未落盘${CONSOLIDATE_MISSING}→重传${CONSOLIDATE_RETRY_COPIED:-0}"
+      [ "${CONSOLIDATE_FIXED:-0}" -gt 0 ] && _bh_entry+=" · 🔧修复${CONSOLIDATE_FIXED}"
+      _progress_batch_history_add "$((i+1))" "$_bh_entry"
     fi
   done
 
