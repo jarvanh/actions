@@ -962,7 +962,6 @@ _render_batch_stats_line() {
   _s+=" · 已传 ${batch_total_files:-0}/${total_files:-0} 个文件 · 📤 本轮已传输 $(format_bytes "${batch_transferred_bytes:-0}")"
   # 目标端估算 = 本轮传输量 + 批次拆分前已有的目标端基线（若上游提供）
   [ "${DEST_BASE_BYTES:-0}" -gt 0 ] 2>/dev/null && _s+=" · 目标端约 $(format_bytes $((DEST_BASE_BYTES + ${batch_transferred_bytes:-0})))"
-  [ "${batch_transferred_bytes:-0}" -gt 0 ] && _s+=" · 📤 $(format_bytes "${batch_transferred_bytes:-0}")"
   [ "${consolidate_missing_total:-0}" -gt 0 ] && _s+=" · ⚠️ 未落盘 ${consolidate_missing_total}"
   [ "${consolidate_retry_total:-0}" -gt 0 ] && _s+=" · 🔁 重传 ${consolidate_retry_total}"
   [ "${consolidate_fix_total:-0}" -gt 0 ] && _s+=" · 🔧 修复 ${consolidate_fix_total}"
