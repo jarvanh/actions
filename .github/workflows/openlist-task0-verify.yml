@@ -26,9 +26,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: 安装 rclone
+      - name: 安装 rclone（GitHub Releases 直下，rclone.org 近期持续超时）
         run: |
-          curl -fsSL https://rclone.org/install.sh | sudo bash
+          set -e
+          RVER=v1.71.2
+          curl -fsSL --retry 3 --retry-delay 5 --connect-timeout 30 --max-time 300 \
+            -o /tmp/rclone.deb \
+            "https://github.com/rclone/rclone/releases/download/${RVER}/rclone-${RVER}-linux-amd64.deb"
+          sudo dpkg -i /tmp/rclone.deb
+          rclone version | head -2
 
       - name: 写入 rclone 配置（含密钥掩码）
         env:
