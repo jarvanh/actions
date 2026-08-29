@@ -58,8 +58,11 @@ jobs:
 
       OPENLIST_ADMIN_PASSWORD: ${{ secrets.OPENLIST_ADMIN_PASSWORD }}
 
-      OPENLIST_TRANSFERS: "1"
+      OPENLIST_TRANSFERS: "4"
       OPENLIST_CHECKERS: "8"
+      # 效率优化(用户确认): 1GiB 细粒度下每批容器重启巩固开销过大(318批x60-90s)，
+      # 关闭批次级巩固，由批末 sync_with_logging 的全量 truth-check + 修复管线兜底
+      OPENLIST_BATCH_CONSOLIDATE: "0"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
