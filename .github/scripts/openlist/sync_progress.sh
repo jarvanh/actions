@@ -411,17 +411,29 @@ _progress_render() {
         done < "$_rf"
 
         if [ "$_is_label" -eq 1 ]; then
+          # 标签块（▸ 开头）用树形连接符挂到上层 🔄 活动行之下：
+          #   非末行 │ + 标签，末行 └─ + 标签；统计行/批次历史/细粒度状态再挂在末条标签下
+          # 每层下沉 5 格保持不变，仅把纯空格缩进升级为可见树干（用户反馈：层级感不足）
+          local _lab_total=0 _lab_n=0
+          [ -f "$_rf" ] && _lab_total=$(grep -c . "$_rf" || true)
           [ -f "$_rf" ] && while IFS= read -r _line; do
             [ -z "$_line" ] && continue
-            msg+="${_ind}${_line}"$'\n'
+            _lab_n=$((_lab_n + 1))
+            if [ "$_lab_n" -eq "$_lab_total" ]; then
+              msg+="${_ind}└─ ${_line#▸ }"$'\n'
+            else
+              msg+="${_ind}│  ${_line#▸ }"$'\n'
+            fi
           done < "$_rf"
-          [ -f "$_sf" ] && msg+="${_ind}$(cat "$_sf")"$'\n'
+          # 统计行与后续块对齐末条标签的文本列（+4 格）
+          local _ind_sub="${_ind}    "
+          [ -f "$_sf" ] && msg+="${_ind_sub}$(cat "$_sf")"$'\n'
           # 批次历史回显: 最近 N 个已完成批次的快照（当前批次状态由 rows/stats 表达，不在此重复）
           # 多行块需逐行加缩进前缀，否则仅首行对齐
           local _bh
           _bh=$(_progress_batch_history_render)
           if [ -n "$_bh" ]; then
-            msg+="$(tree_lines "$_bh" | sed 's/^  //' | sed "s/^/${_ind_rows}/")"$'\n'
+            msg+="$(tree_lines "$_bh" | sed 's/^  //' | sed "s/^/${_ind_sub}/")"$'\n'
           fi
         else
           [ -f "$_sf" ] && msg+="${_ind}$(cat "$_sf")"$'\n'
@@ -434,8 +446,12 @@ _progress_render() {
             msg+="${_ind_rows}${_line}"$'\n'
           done <<< "$_tree"
         fi
-        # 细粒度状态（深层 detail）挂在最末，对齐树行文本列
-        [ -f "$_nf" ] && msg+="${_ind_rows}└─ $(cat "$_nf")"$'\n'
+        # 细粒度状态（深层 detail）挂在最末；标签型块时对齐末条标签文本列（+4 格）
+        if [ "$_is_label" -eq 1 ] && [ -f "$_nf" ]; then
+          msg+="${_ind}    └─ $(cat "$_nf")"$'\n'
+        elif [ -f "$_nf" ]; then
+          msg+="${_ind_rows}└─ $(cat "$_nf")"$'\n'
+        fi
       done
     fi
   fi
