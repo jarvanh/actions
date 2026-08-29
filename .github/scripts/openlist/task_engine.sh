@@ -958,8 +958,8 @@ _consolidate_verify_fixed() {
 # 本批在跑什么、跑了多少，与日志里的 "批次 N 巩固: X 个未落盘，串行重试"
 # 完全对不上；巩固类字段为 0 时整段省略（常态批次无假成功，不占位）。
 _render_batch_stats_line() {
-  local _s="▸ 📊 批次：${batch_idx:-0}/${total_batches:-0} | ✅${synced_batches:-0} ❌${failed_batches:-0}"
-  _s+=" · 📄 ${batch_total_files:-0}/${total_files:-0} 文件"
+  local _s="▸ 📊 进度：第 ${batch_idx:-0}/${total_batches:-0} 批 | 完成 ${synced_batches:-0} 批 · 失败 ${failed_batches:-0} 批"
+  _s+=" · 已传 ${batch_total_files:-0}/${total_files:-0} 个文件"
   [ "${batch_transferred_bytes:-0}" -gt 0 ] && _s+=" · 📤 $(format_bytes "${batch_transferred_bytes:-0}")"
   [ "${consolidate_missing_total:-0}" -gt 0 ] && _s+=" · ⚠️ 未落盘 ${consolidate_missing_total}"
   [ "${consolidate_retry_total:-0}" -gt 0 ] && _s+=" · 🔁 重传 ${consolidate_retry_total}"
@@ -1093,7 +1093,7 @@ sync_by_file_batches() {
   local consolidate_fix_total=0
 
   echo "拆分为 ${total_batches} 个批次"
-  PROGRESS_PHASE_INFO="▸ 📦 文件批次拆分：${total_batches} 批 / ${total_files} 文件（每批 ≤ $(format_bytes "$threshold")）"
+  PROGRESS_PHASE_INFO="▸ 📦 文件批次拆分：共 ${total_batches} 批 · ${total_files} 个文件（每批 ≤ $(format_bytes "$threshold")）"
   progress_update_force "拆分为 ${total_batches} 个批次" "$(_render_batch_stats_line)"
 
   for i in $(seq 0 $batch_num); do
@@ -1104,8 +1104,8 @@ sync_by_file_batches() {
       batch_file_count=$(wc -l < "$bf" | tr -d ' ')
       batch_total_files=$((batch_total_files + batch_file_count))
       echo "=== 批次 $((i+1))/${total_batches}: ${batch_file_count} 个文件 ==="
-      PROGRESS_PHASE_INFO="▸ 📦 文件批次拆分：${total_batches} 批 / ${total_files} 文件（当前批次 ${batch_idx}：${batch_file_count} 文件）"
-      progress_update "批次 ${batch_idx}/${total_batches}：${batch_file_count} 个文件" "$(_render_batch_stats_line)"
+      PROGRESS_PHASE_INFO="▸ 📦 文件批次拆分：共 ${total_batches} 批 · ${total_files} 个文件（当前第 ${batch_idx} 批 · ${batch_file_count} 个文件）"
+      progress_update "第 ${batch_idx}/${total_batches} 批：${batch_file_count} 个文件" "$(_render_batch_stats_line)"
 
       # 批次计时基准（历史记录耗时用）
       BATCH_START_TS=$(date +%s)
@@ -1244,7 +1244,7 @@ sync_by_file_batches() {
         return 1
       fi
 
-      progress_update_force "批次 ${batch_idx}/${total_batches} 完成" "$(_render_batch_stats_line)"
+      progress_update_force "第 ${batch_idx}/${total_batches} 批完成" "$(_render_batch_stats_line)"
 
       # 批次历史快照（供进度消息回显最近 N 批的结果）
       # 分项口径（用户反馈: 只写“82 文件”看不出成败）:
@@ -1287,7 +1287,7 @@ sync_by_file_batches() {
   rm -rf "$batch_dir"
 
   echo "=== 批次传输完成 (成功 ${synced_batches}/${total_batches}, 失败 ${failed_batches})，执行最终同步检查 ==="
-  PROGRESS_PHASE_INFO="▸ 📦 文件批次拆分：${total_batches} 批 / ${total_files} 文件 · ✅${synced_batches} ❌${failed_batches}"
+  PROGRESS_PHASE_INFO="▸ 📦 文件批次拆分：共 ${total_batches} 批 · ${total_files} 个文件 · ✅${synced_batches} ❌${failed_batches}"
   progress_update_force "批次传输完成，最终同步检查中" "$(_render_batch_stats_line)"
 
   # 设置批次统计信息，供最终通知展示（与子目录拆分的 AUTO_SPLIT_INFO 对齐）
