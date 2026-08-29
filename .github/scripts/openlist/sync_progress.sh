@@ -52,7 +52,7 @@ PROGRESS_LAST_UPDATE_FILE="/tmp/progress_last_update.txt"
 PROGRESS_BATCH_HISTORY_FILE="/tmp/progress_batch_history.txt"
 PROGRESS_BATCH_HISTORY_MAX=6
 # 批次实时刷新线程（分钟级）: 间隔与 pid 文件
-PROGRESS_RT_INTERVAL="${PROGRESS_RT_INTERVAL:-60}"
+PROGRESS_RT_INTERVAL="${PROGRESS_RT_INTERVAL:-20}"
 PROGRESS_RT_PID_FILE="/tmp/progress_rt_pid.txt"
 
 # 追加一条批次历史（同批次号覆盖，只保留最近 PROGRESS_BATCH_HISTORY_MAX 条）
