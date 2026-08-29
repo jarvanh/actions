@@ -1247,13 +1247,38 @@ sync_by_file_batches() {
       progress_update_force "批次 ${batch_idx}/${total_batches} 完成" "$(_render_batch_stats_line)"
 
       # 批次历史快照（供进度消息回显最近 N 批的结果）
+      # 分项口径（用户反馈: 只写“82 文件”看不出成败）:
+      #   成功 = rclone Copied 且巩固确认落盘（copied - missing）+ 巩固重传补齐（RETRY_COPIED）
+      #   修复 = 修复管线替代方式落盘（FIXED）
+      #   失败 = rclone 传输报错（failed_n）+ 假成功重传/修复后仍未落盘（stubborn）
+      #   跳过 = 源端已不存在（object not found）；其余未传输文件为目标端已同步（已有）
+      local _copied_n=0 _failed_n=0 _onf_n=0
+      _copied_n=$(grep -ac 'Copied (new)\|Copied (replaced existing)' "$batch_log" 2>/dev/null || true)
+      _failed_n=$(grep -ac 'Failed to copy' "$batch_log" 2>/dev/null || true)
+      _onf_n=$(grep -ac 'ERROR.*object not found' "$batch_log" 2>/dev/null || true)
+      [[ "$_copied_n" =~ ^[0-9]+$ ]] || _copied_n=0
+      [[ "$_failed_n" =~ ^[0-9]+$ ]] || _failed_n=0
+      [[ "$_onf_n" =~ ^[0-9]+$ ]] || _onf_n=0
+      local _missing_n="${CONSOLIDATE_MISSING:-0}"
+      [[ "$_missing_n" =~ ^[0-9]+$ ]] || _missing_n=0
+      local _retried_n="${CONSOLIDATE_RETRY_COPIED:-0}"
+      [[ "$_retried_n" =~ ^[0-9]+$ ]] || _retried_n=0
+      local _fixed_n="${CONSOLIDATE_FIXED:-0}"
+      [[ "$_fixed_n" =~ ^[0-9]+$ ]] || _fixed_n=0
+      local _ok_direct=$(( _copied_n > _missing_n ? _copied_n - _missing_n : 0 ))
+      local _ok_n=$((_ok_direct + _retried_n))
+      local _stubborn_n=$(( _missing_n > _retried_n + _fixed_n ? _missing_n - _retried_n - _fixed_n : 0 ))
+      local _fail_n=$((_failed_n + _stubborn_n))
+      local _have_n=$(( batch_file_count - _copied_n - _failed_n - _onf_n ))
+      [ "$_have_n" -lt 0 ] && _have_n=0
       local _bh_mark="✅"
-      [ "$rc" -ne 0 ] && _bh_mark="⚠️"
-      [ "$rc" -ne 0 ] && [ "$rc" -ne 4 ] && _bh_mark="❌"
-      local _bh_entry="${_bh_mark} 批次 $((i+1)): ${batch_file_count} 文件 · ⏱ ${_batch_dur}"
+      [ "$_fail_n" -gt 0 ] && _bh_mark="⚠️"
+      { [ "$rc" -ne 0 ] && [ "$rc" -ne 4 ]; } && _bh_mark="❌"
+      local _bh_entry="${_bh_mark} 批次 $((i+1)): ${batch_file_count} 文件 → 成功${_ok_n} 修复${_fixed_n} 失败${_fail_n}"
+      [ "$_onf_n" -gt 0 ] && _bh_entry+=" 跳过${_onf_n}"
+      [ "$_have_n" -gt 0 ] && _bh_entry+=" 已有${_have_n}"
+      _bh_entry+=" · ⏱ ${_batch_dur}"
       [ "${_batch_bytes:-0}" -gt 0 ] && _bh_entry+=" · 📤 $(format_bytes "${_batch_bytes:-0}")"
-      [ "${CONSOLIDATE_MISSING:-0}" -gt 0 ] && _bh_entry+=" · ⚠️未落盘${CONSOLIDATE_MISSING}→重传${CONSOLIDATE_RETRY_COPIED:-0}"
-      [ "${CONSOLIDATE_FIXED:-0}" -gt 0 ] && _bh_entry+=" · 🔧修复${CONSOLIDATE_FIXED}"
       _progress_batch_history_add "$((i+1))" "$_bh_entry"
     fi
   done
