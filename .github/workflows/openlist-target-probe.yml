@@ -1,7 +1,6 @@
 # 目标端只读探针: 实测 wopan176Crypt/0 与 onedrive:0 的文件数/字节数
 # 用途: 独立于同步运行取证"目标端是否在真实增长"。可与同步并行（不占 openlist-singleton 锁）。
-# 注意: 探针容器使用 dropbox 上的 db 快照副本，只读操作+驱动token刷新，不回写 db。
-# 结果: job 日志 + onedrive:/logs/verify/probe_*.log 留档 + artifact。
+# 结果: job 日志 + onedrive:/logs/verify/probe_run_$GITHUB_RUN_ID.log + artifact。
 name: openlist-target-probe
 
 on:
@@ -50,30 +49,31 @@ jobs:
             echo "OpenList 未就绪"
             exit 1
           fi
-          # 刷新驱动 token（探针 db 为快照副本，token 可能过期）
           _refresh_ol_drivers /tmp/refresh.log || true
           echo "驱动 token 已刷新"
 
       - name: 目标端实测（只读）
         run: |
-          TS=@DS@(date -u +%Y%m%d_%H%M%S)
-          REPORT="/tmp/probe_$TS.log"
+          REPORT="/tmp/probe_report.log"
           {
-            echo "=== target probe $TS UTC (run $GITHUB_RUN_ID) ==="
+            echo "=== target probe run $GITHUB_RUN_ID ==="
+            date -u
             echo -n "[TARGET_SIZE] "
             rclone size openlist:wopan176Crypt/0 --json 2>&1
             echo -n "[SOURCE_SIZE] "
             rclone size onedrive:0 --json 2>&1
-            echo "[TARGET_TOP_N] $(rclone lsf openlist:wopan176Crypt/0 2>/dev/null | wc -l)"
+            echo -n "[TARGET_TOP_N] "
+            rclone lsf openlist:wopan176Crypt/0 2>/dev/null | wc -l
             echo "[TARGET_TOP_SAMPLE]"
             rclone lsf openlist:wopan176Crypt/0 2>/dev/null | head -8
           } | tee "$REPORT"
-          rclone copyto "$REPORT" "onedrive:/logs/verify/probe_$TS.log" || true
+          rclone copyto "$REPORT" "onedrive:/logs/verify/probe_run_$GITHUB_RUN_ID.log" || true
+          echo "probe done"
 
       - name: 上传报告 artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: probe-report
-          path: /tmp/probe_*.log
+          path: /tmp/probe_report.log
           retention-days: 30
