@@ -60,9 +60,8 @@ jobs:
 
       OPENLIST_TRANSFERS: "4"
       OPENLIST_CHECKERS: "8"
-      # 效率优化(用户确认): 1GiB 细粒度下每批容器重启巩固开销过大(318批x60-90s)，
-      # 关闭批次级巩固，由批末 sync_with_logging 的全量 truth-check + 修复管线兜底
-      OPENLIST_BATCH_CONSOLIDATE: "0"
+      # 批次级巩固已恢复（5GiB 粒度下 64 批 x 60-90s ≈ 1-1.5h，可接受）：
+      # 每批传完重启容器取后端真值，假成功当场重传修复
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
