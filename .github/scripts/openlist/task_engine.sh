@@ -293,6 +293,18 @@ _sync_task_impl() {
   shift 3
   local extra_args=("$@")
 
+  # 按目标类型分路由（整合自 task0 专项验证结论）:
+  #   openlist 系目标（WebDAV 慢后端）: 批次阈值 5GiB、并发 4 —— 细粒度+并行传输
+  #   其他目标（baidupan/wopan175/aliyundrive 等）: 保持 20GB / 1
+  # 仅在 task 层临时覆盖，不修改 workflow env（主配置仍是全局默认）
+  if [[ "$dest_path" == openlist:* ]]; then
+    export SYNC_SPLIT_THRESHOLD_BYTES="${OPENLIST_TARGET_BATCH_BYTES:-5368709120}"
+    export OPENLIST_TRANSFERS="${OPENLIST_TARGET_TRANSFERS:-4}"
+  else
+    export SYNC_SPLIT_THRESHOLD_BYTES="${OTHER_TARGET_BATCH_BYTES:-20000000000}"
+    export OPENLIST_TRANSFERS="${OTHER_TARGET_TRANSFERS:-1}"
+  fi
+
   local current_depth=${SYNC_AUTO_SPLIT_DEPTH:-0}
 
   # 只在顶级调用（非递归）时重置状态标志，避免递归子任务覆盖父任务状态
