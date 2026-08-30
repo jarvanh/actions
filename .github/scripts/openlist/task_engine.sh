@@ -778,7 +778,7 @@ _batch_consolidate() {
     --files-from "$retry_list" \
     --size-only \
     --no-traverse \
-    --transfers "${OPENLIST_TARGET_TRANSFERS:-${OPENLIST_TRANSFERS:-1}}" \
+    --transfers "$( [[ "$dest_path" == openlist:* ]] && echo "${OPENLIST_TARGET_TRANSFERS:-4}" || echo "${OTHER_TARGET_TRANSFERS:-${OPENLIST_TRANSFERS:-2}}" )" \
     --checkers "${OPENLIST_CHECKERS:-8}" \
     --timeout 30m \
     --retries 1 \
@@ -1146,8 +1146,12 @@ sync_by_file_batches() {
       local batch_guard_flags=()
       local batch_timeout="5m"
       if [[ "$dest_path" == openlist:* ]]; then
-        local _ol_transfers="${OPENLIST_TRANSFERS:-1}"
-        [[ "$dest_path" == openlist:* ]] && _ol_transfers="${OPENLIST_TARGET_TRANSFERS:-4}"
+        local _ol_transfers
+        if [[ "$dest_path" == openlist:* ]]; then
+          _ol_transfers="${OPENLIST_TARGET_TRANSFERS:-4}"
+        else
+          _ol_transfers="${OTHER_TARGET_TRANSFERS:-2}"
+        fi
         batch_guard_flags=("--transfers" "$_ol_transfers" "--checkers" "${OPENLIST_CHECKERS:-8}")
         batch_timeout="30m"
         echo "OpenList 目标端：批次上传启用低并发保护 (transfers=1, checkers=8, timeout=30m)"
