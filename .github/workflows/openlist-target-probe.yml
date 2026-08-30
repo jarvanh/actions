@@ -2,7 +2,7 @@
 # 用途: 独立于同步运行，实时取证"目标端是否真有文件/是否在增长"。
 # 设计: 不加 openlist-singleton 并发锁（可与同步并行）；只做 size/lsf 读操作；
 #       不启动 OpenList 容器、不碰 wopan token（经现有 OpenList 服务读取）。
-# 结果: 输出到 run artifact + onedrive:/logs/verify/ 留档。
+# 结果: 输出到 run artifact + onedrive:/logs/verify/ 留档（探针只读，可与同步并行）。
 name: openlist-target-probe
 
 on:
