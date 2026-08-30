@@ -293,12 +293,11 @@ _sync_task_impl() {
   shift 3
   local extra_args=("$@")
 
-  # 按目标类型分路由（整合自 task0 专项验证结论）:
-  #   openlist 系目标（WebDAV 慢后端）: 批次阈值 5GiB（可 OPENLIST_BATCH_BYTES 覆盖）、
-  #     并发 transfers=4（可 OPENLIST_TARGET_TRANSFERS 覆盖）—— 细粒度+并行传输
-  #   其他目标: 不覆盖，沿用 workflow env 的 SYNC_SPLIT_THRESHOLD_BYTES(20GB) / OPENLIST_TRANSFERS(1)
-  # 实现说明: 阈值走独立变量，由 sync_engine/rclone_flags 消费时按 dest 判断取值，
-  # 不改写调用方显式设置的 env（避免破坏上游配置与测试预期）
+  # 按后端类型分路由（整合自 task0 专项验证结论）:
+  #   所有 openlist:* 目标（wopan176Crypt/baidupanCrypt/wopan175/aliyundriveCrypt 均
+  #   经 OpenList WebDAV）: 批次阈值 5GiB（可 OPENLIST_BATCH_BYTES 覆盖）、
+  #   并发 transfers=RCLONE_TRANSFERS（默认 2，可覆盖）；
+  #   wopan176Crypt（验证过的慢后端）单独默认 4（可 OPENLIST_TARGET_TRANSFERS 覆盖）
 
   local current_depth=${SYNC_AUTO_SPLIT_DEPTH:-0}
 
@@ -778,7 +777,7 @@ _batch_consolidate() {
     --files-from "$retry_list" \
     --size-only \
     --no-traverse \
-    --transfers "$( [[ "$dest_path" == openlist:* ]] && echo "${OPENLIST_TARGET_TRANSFERS:-4}" || echo "${OTHER_TARGET_TRANSFERS:-${OPENLIST_TRANSFERS:-2}}" )" \
+    --transfers "$( [[ "$dest_path" == *wopan176Crypt* ]] && echo "${OPENLIST_TARGET_TRANSFERS:-4}" || echo "${RCLONE_TRANSFERS:-2}" )" \
     --checkers "${OPENLIST_CHECKERS:-8}" \
     --timeout 30m \
     --retries 1 \
@@ -1146,12 +1145,8 @@ sync_by_file_batches() {
       local batch_guard_flags=()
       local batch_timeout="5m"
       if [[ "$dest_path" == openlist:* ]]; then
-        local _ol_transfers
-        if [[ "$dest_path" == openlist:* ]]; then
-          _ol_transfers="${OPENLIST_TARGET_TRANSFERS:-4}"
-        else
-          _ol_transfers="${OTHER_TARGET_TRANSFERS:-2}"
-        fi
+        local _ol_transfers="${RCLONE_TRANSFERS:-2}"
+        [[ "$dest_path" == *wopan176Crypt* ]] && _ol_transfers="${OPENLIST_TARGET_TRANSFERS:-4}"
         batch_guard_flags=("--transfers" "$_ol_transfers" "--checkers" "${OPENLIST_CHECKERS:-8}")
         batch_timeout="30m"
         echo "OpenList 目标端：批次上传启用低并发保护 (transfers=1, checkers=8, timeout=30m)"
