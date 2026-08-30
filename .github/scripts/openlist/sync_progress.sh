@@ -15,6 +15,10 @@
 #   （多层槽位: auto-split 递归时每层写入自己的深度槽位，渲染时逐层缩进
 #   合并展示；行内容含 HTML 已由生产方 escape，此处透传）
 #   PROGRESS_FINALIZED_FILE  — 最终完成标记
+#   PROGRESS_RT_STOP_FILE    — rt 线程停止标志（优雅停止协议）
+#   PROGRESS_RT_EXIT_FILE    — rt 线程退出标记（主线程确认线程已死）
+#   PROGRESS_LOCK_FILE       — 刷新临界区 flock 锁文件（防双发竞态）
+#   PROGRESS_SENT_IDS_LOG    — 本轮已发进度消息 id 清单（finalize 兜底清孤儿）
 #
 # 每层的三种行在消息里的层级关系（缩进每层下沉 5 格 = 连接符 2 + "├─ " 3，
 # 保证下一层表头正好对齐本层树行文本列、视觉上挂在本层 🔄 活动行之下）:
@@ -54,6 +58,15 @@ PROGRESS_BATCH_HISTORY_MAX=6
 # 批次实时刷新线程（分钟级）: 间隔与 pid 文件
 PROGRESS_RT_INTERVAL="${PROGRESS_RT_INTERVAL:-20}"
 PROGRESS_RT_PID_FILE="/tmp/progress_rt_pid.txt"
+# 线程优雅停止协议（防孤儿进度消息）: 停止标志 + 退出标记。旧行为在批次结束直接
+# kill 线程，若落在 Telegram sendMessage 进行中 → 消息已发出但 id 未写回
+# PROGRESS_MSG_ID_FILE → 追踪丢失 → 聊天里残留多条「🔄 同步进度」（2026-08-30 实录）
+PROGRESS_RT_STOP_FILE="/tmp/progress_rt_stop"
+PROGRESS_RT_EXIT_FILE="/tmp/progress_rt_exit"
+# 刷新临界区锁: 主线程/rt 线程并发刷新时串行化「读 id → 删旧 → 发新 → 写回」
+PROGRESS_LOCK_FILE="/tmp/progress_refresh.lock"
+# 本轮已发出的进度消息 id 清单（progress_finalize 收尾时兜底清理孤儿）
+PROGRESS_SENT_IDS_LOG="/tmp/progress_sent_ids.txt"
 
 # 追加一条批次历史（同批次号覆盖，只保留最近 PROGRESS_BATCH_HISTORY_MAX 条）
 # 用法: _progress_batch_history_add <批次号> <展示文本>
@@ -99,35 +112,71 @@ _start_batch_progress_thread() {
   local log_file="$1"
   [ -n "$log_file" ] || return 0
   touch "$log_file" 2>/dev/null || return 0
+  rm -f "$PROGRESS_RT_STOP_FILE" "$PROGRESS_RT_EXIT_FILE" 2>/dev/null || true
   (
     # GitHub Actions shell 带 set -e: 管道内 grep 无匹配（批次刚启动时日志还没有
     # Transferred 行）会让整条管道非零，_xfer 赋值失败直接杀死子壳 —— 实时刷新
     # 永久失效（首次运行实测）。全程显式容错: 管道尾部 || true，循环体自身永不非零。
     # 排查痕迹: 每次唤醒/刷新写 stderr 日志（job log 可见，仅当 GitHub 显示）
     echo "[rt-thread] started interval=${PROGRESS_RT_INTERVAL}s log=$log_file pid=$$" >&2
+    # 优雅停止协议: 裸 sleep $INTERVAL 换成 1s 粒度轮询停止标志；收到停止后在刷新
+    # 间隙退出并写退出标记，主线程据此确认线程已死 —— 绝不在 Telegram 发送中途
+    # 打断线程（消息已发出但 id 未写回 = 孤儿「同步进度」消息）
     while :; do
-      sleep "$PROGRESS_RT_INTERVAL" || break
+      _rt_i=0
+      while [ "$_rt_i" -lt "$PROGRESS_RT_INTERVAL" ]; do
+        [ -f "$PROGRESS_RT_STOP_FILE" ] && break 2
+        sleep 1 || break
+        _rt_i=$((_rt_i + 1))
+      done
+      [ -f "$PROGRESS_RT_STOP_FILE" ] && break
       # 提取已传段: 优先 Transferred: 前缀（多行汇总），兼容 --stats-one-line 的
       # "NUM 已传 / NUM 总量," 格式（必须同时匹配已传与总量两段，避开速度 MiB/s）
       { [ -f "$log_file" ] && _xfer=$( { grep -a 'Transferred:' "$log_file" 2>/dev/null | grep -a 'ETA' | tail -1 | sed -E 's/^.*Transferred:[[:space:]]*//' ; grep -aoE '[0-9.]+[[:space:]]+[KMGTPEZY]?iB[[:space:]]*/[[:space:]]*[0-9.]+[[:space:]]+[KMGTPEZY]?iB' "$log_file" 2>/dev/null | tail -1 | sed -E 's/^/传输中: /'; } | head -1 ) && [ -n "$_xfer" ]; } || { echo "[rt-thread] no xfer line yet" >&2; continue; }
+      # 刷新前最后一查: 该停就停，不带病把这条刷新发一半
+      [ -f "$PROGRESS_RT_STOP_FILE" ] && break
       echo "[rt-thread] refreshing: $_xfer" >&2
       progress_update "传输中: ${_xfer#传输中: }" "▸ 📊 批次：${batch_idx:-?}/${total_batches:-?} | ✅${synced_batches:-0} ❌${failed_batches:-0} · 📄 ${batch_total_files:-?}/${total_files:-?} 文件 · ⏱ ${_xfer#传输中: }" || true
     done
+    # 退出标记（仅 presence 语义）: _stop_batch_progress_thread 轮询它确认线程已死
+    echo "$$" > "$PROGRESS_RT_EXIT_FILE" 2>/dev/null || true
   ) &
   echo $! > "$PROGRESS_RT_PID_FILE"
 }
 
 _stop_batch_progress_thread() {
   if [ -f "$PROGRESS_RT_PID_FILE" ]; then
-    local _pid
+    local _pid _rt_i _rt_done
     _pid=$(head -1 "$PROGRESS_RT_PID_FILE" 2>/dev/null)
     if [ -n "$_pid" ]; then
-      kill "$_pid" 2>/dev/null || true
-      pkill -P "$_pid" 2>/dev/null || true
+      # 优雅停止: 置停止标志 → 线程在刷新间隙退出并写退出标记 → 轮询确认
+      # （上限 ~9s，覆盖「1s 内察觉 + 一次完整刷新」）。默认绝不 kill 在途刷新:
+      # kill 落在 sendMessage 进行中 = 消息已发出但 id 未写回 = 孤儿进度消息
+      touch "$PROGRESS_RT_STOP_FILE" 2>/dev/null || true
+      _rt_i=0
+      while [ "$_rt_i" -lt 30 ]; do
+        [ -f "$PROGRESS_RT_EXIT_FILE" ] && break
+        kill -0 "$_pid" 2>/dev/null || break
+        sleep 0.3 || true
+        _rt_i=$((_rt_i + 1))
+      done
+      _rt_done=0
+      [ -f "$PROGRESS_RT_EXIT_FILE" ] && _rt_done=1
+      rm -f "$PROGRESS_RT_EXIT_FILE" 2>/dev/null || true
+      if [ "$_rt_done" -eq 0 ] && kill -0 "$_pid" 2>/dev/null; then
+        # 兜底强杀（线程卡死/超时）: 先杀子进程（curl/sleep）再杀父进程 —— 顺序
+        # 不能反，父进程死后子进程被 init 收养，pkill -P 必然扑空
+        echo "[rt-thread] graceful stop timeout, killing pid=$_pid" >&2
+        pkill -P "$_pid" 2>/dev/null || true
+        kill "$_pid" 2>/dev/null || true
+        sleep 0.3 || true
+        pkill -P "$_pid" 2>/dev/null || true
+      fi
       wait "$_pid" 2>/dev/null || true
     fi
     rm -f "$PROGRESS_RT_PID_FILE"
   fi
+  rm -f "$PROGRESS_RT_STOP_FILE" 2>/dev/null || true
 }
 
 # 注册任务到队列（初始化时调用）
@@ -489,7 +538,15 @@ _progress_refresh() {
   local msg
   msg=$(_progress_render)
   local new_id
-  new_id=$(_tg_ensure_bottom_message "$msg")
+  # flock 串行化「读 id → 删旧 → 发新 → 写回」临界区: 主线程与 rt 线程并发刷新
+  # 时禁止交错 —— 双方读到同一旧 id、各发一条时，先发的那条 id 被覆盖而失去
+  # 追踪，成为孤儿「同步进度」消息。子 shell 退出自动释放锁；锁文件打开或
+  # flock 本身失败不阻断主流程（ubuntu runner 必有 flock，此处仅防御）。
+  new_id=$(
+    exec 9>>"$PROGRESS_LOCK_FILE" 2>/dev/null || true
+    flock 9 2>/dev/null || true
+    _tg_ensure_bottom_message "$msg"
+  )
   # Telegram 失败（new_id 空）时返回 1 会沿 progress_update/progress_task_begin 等
   # 裸调用链在 set -e 下终止整个 step —— 通知失败不传播
   [ -n "$new_id" ] && echo "$new_id" > "$PROGRESS_MSG_ID_FILE"
@@ -499,15 +556,23 @@ _progress_refresh() {
 # 初始化进度通知系统（在第一个任务开始前调用一次）
 # 任务通过 progress_task_begin 或预览阶段的 _preview_register 自动注册
 progress_init() {
+  # 先停线程再清状态: 活着的 rt 线程会在清空后立刻发新消息/写回旧追踪，产生竞态
+  _stop_batch_progress_thread
   # 清理旧状态
+  # 旧消息清理: 若存在仍被追踪的进度消息，先删除再清空追踪文件 —— 只清追踪不删
+  # 消息会让旧消息失去追踪成为孤儿（同 runner 重复 init 场景，测试 T5 实录）
+  if [ -s "$PROGRESS_MSG_ID_FILE" ]; then
+    _tg_delete_message "$(head -1 "$PROGRESS_MSG_ID_FILE" 2>/dev/null)"
+  fi
   : > "$PROGRESS_TASKS_FILE"
   : > "$PROGRESS_MSG_ID_FILE"
   : > "$PROGRESS_CURRENT_FILE"
   : > "$PROGRESS_FIXED_FILE"
   _progress_purge_all_slots
   _progress_batch_history_clear
-  _stop_batch_progress_thread
   rm -f "$PROGRESS_FINALIZED_FILE" 2>/dev/null || true
+  : > "$PROGRESS_SENT_IDS_LOG" 2>/dev/null || true
+  rm -f "$PROGRESS_RT_STOP_FILE" "$PROGRESS_RT_EXIT_FILE" 2>/dev/null || true
   date +%s > "$PROGRESS_START_FILE"
 
   # 不在此处发送消息: 此刻任务队列为空，只会发出 "总任务：0 | 已用：0s" 的
@@ -625,6 +690,26 @@ progress_task_done() {
   _progress_refresh
 }
 
+# 收尾清理孤儿进度消息（兜底自愈，最后防线）
+# 背景: 「删旧→发新→写回 id」链路历史上有多处断点（kill 在途刷新、Telegram
+# 429/502、jq 解析失败），断点处的消息已发出但无人追踪，在聊天里永久残留。
+# 本函数把已发 id 清单里除终态消息外的全部 id 再删一遍（绝大多数早已删除，
+# deleteMessage 对不存在消息的报错被吞，无害），保证一轮结束聊天里只剩终态。
+_progress_cleanup_orphan_ids() {
+  local final_id=""
+  [ -f "$PROGRESS_MSG_ID_FILE" ] && final_id=$(head -1 "$PROGRESS_MSG_ID_FILE" 2>/dev/null)
+  [ -f "$PROGRESS_SENT_IDS_LOG" ] || return 0
+  # id 单调递增，sort -un 后 tail 取最近的 150 个（更早的几乎必然已删）；
+  # 逐个删除，50ms 间隔防 Telegram 限流；终态消息排除在外
+  sort -un "$PROGRESS_SENT_IDS_LOG" 2>/dev/null | tail -n 150 | while IFS= read -r _oid; do
+    [ -z "$_oid" ] && continue
+    [ "$_oid" = "$final_id" ] && continue
+    _tg_delete_message "$_oid"
+    sleep 0.05 || true
+  done
+  : > "$PROGRESS_SENT_IDS_LOG" 2>/dev/null || true
+}
+
 # 最终完成所有任务（在最后调用）
 progress_finalize() {
   echo "1" > "$PROGRESS_FINALIZED_FILE"
@@ -632,6 +717,8 @@ progress_finalize() {
   _stop_batch_progress_thread
   _progress_purge_all_slots
   _progress_refresh
+  # 收尾兜底: 清掉本轮追踪丢失的孤儿进度消息（详见 _progress_cleanup_orphan_ids）
+  _progress_cleanup_orphan_ids
 }
 
 # ===== 阶段信息入口（task_engine.sh 高频使用）=====
