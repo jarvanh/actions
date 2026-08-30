@@ -355,8 +355,13 @@ _sync_task_impl() {
     return "$_rc"
   fi
 
-  # 根据阈值（默认 50GB）判断是否拆分，防止环境变量丢失
-  local threshold="${SYNC_SPLIT_THRESHOLD_BYTES:-$DEFAULT_SPLIT_THRESHOLD_BYTES}"
+  # 根据阈值判断是否拆分: openlist 系目标用独立阈值（默认 5GiB），其他沿用 env
+  local threshold
+  if [[ "$dest_path" == openlist:* ]]; then
+    threshold="${OPENLIST_BATCH_BYTES:-5368709120}"
+  else
+    threshold="${SYNC_SPLIT_THRESHOLD_BYTES:-$DEFAULT_SPLIT_THRESHOLD_BYTES}"
+  fi
 
   # 检查源端大小
   local source_size_bytes=0
@@ -773,7 +778,7 @@ _batch_consolidate() {
     --files-from "$retry_list" \
     --size-only \
     --no-traverse \
-    --transfers "${OPENLIST_TRANSFERS:-1}" \
+    --transfers "${OPENLIST_TARGET_TRANSFERS:-${OPENLIST_TRANSFERS:-1}}" \
     --checkers "${OPENLIST_CHECKERS:-8}" \
     --timeout 30m \
     --retries 1 \
@@ -1008,7 +1013,12 @@ sync_by_file_batches() {
     esac
   fi
 
-  local threshold="${SYNC_SPLIT_THRESHOLD_BYTES:-$DEFAULT_SPLIT_THRESHOLD_BYTES}"
+  local threshold
+  if [[ "$dest_path" == openlist:* ]]; then
+    threshold="${OPENLIST_BATCH_BYTES:-5368709120}"
+  else
+    threshold="${SYNC_SPLIT_THRESHOLD_BYTES:-$DEFAULT_SPLIT_THRESHOLD_BYTES}"
+  fi
   local batch_dir="/tmp/file_batches_${task_name}"
   mkdir -p "$batch_dir"
 
@@ -1136,7 +1146,9 @@ sync_by_file_batches() {
       local batch_guard_flags=()
       local batch_timeout="5m"
       if [[ "$dest_path" == openlist:* ]]; then
-        batch_guard_flags=("--transfers" "${OPENLIST_TRANSFERS:-1}" "--checkers" "${OPENLIST_CHECKERS:-8}")
+        local _ol_transfers="${OPENLIST_TRANSFERS:-1}"
+        [[ "$dest_path" == openlist:* ]] && _ol_transfers="${OPENLIST_TARGET_TRANSFERS:-4}"
+        batch_guard_flags=("--transfers" "$_ol_transfers" "--checkers" "${OPENLIST_CHECKERS:-8}")
         batch_timeout="30m"
         echo "OpenList 目标端：批次上传启用低并发保护 (transfers=1, checkers=8, timeout=30m)"
         # 长批次开始前主动刷新驱动 token（wopan OAuth access token 有效期约 5
