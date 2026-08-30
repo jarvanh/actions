@@ -30,6 +30,15 @@
 #             ▸ 📦 文件批次拆分：15 批 / 1367 文件   下一层标签行（表头，无连接符）
 #             ▸ 📊 批次：1/15 | ✅0 ❌0              下一层统计行
 #               └─ 批次 1 巩固: 重启容器校验落盘真值   下一层细粒度状态（detail）
+#
+# 深度 0 扁平批次面板（任务根直接文件批次拆分，无子目录树；2026-08-30 层次重排）:
+#   📁 <b>onedrive:0/x</b> · <i>262.401 GiB</i>
+#     └─ wopan175/0/x                               目标端（唯一的 └─ 树行，无 detail 黏连）
+#        ▸ 📦 文件批次拆分：55 批 / 1367 文件        d0 标签行（无树连接符，▸ 前导）
+#            ▸ 📊 批次：48/55 | ✅0 ❌47 · 📄 …      d0 统计行
+#            ├─ 传输中: 2.469 GiB / 4.976 GiB        d0 note（rt 线程实时状态，历史非空时 ├─）
+#            ├─ ❌ 批次 42：…
+#            └─ ❌ 批次 47：…                        批次历史（tree_lines）
 # 阶段行两种形态由渲染器按内容判定（生产方无需区分）:
 #   标签型 全部行以 "▸" 开头 → 说明"本层在做什么"，与统计行同列、排在统计行之前
 #   树型   其余（子目录等状态条目）→ 统计行是它的表头，排在其后并缩进 2 格
@@ -132,11 +141,12 @@ _start_batch_progress_thread() {
       [ -f "$PROGRESS_RT_STOP_FILE" ] && break
       # 提取已传段: 优先 Transferred: 前缀（多行汇总），兼容 --stats-one-line 的
       # "NUM 已传 / NUM 总量," 格式（必须同时匹配已传与总量两段，避开速度 MiB/s）
-      { [ -f "$log_file" ] && _xfer=$( { grep -a 'Transferred:' "$log_file" 2>/dev/null | grep -a 'ETA' | tail -1 | sed -E 's/^.*Transferred:[[:space:]]*//' ; grep -aoE '[0-9.]+[[:space:]]+[KMGTPEZY]?iB[[:space:]]*/[[:space:]]*[0-9.]+[[:space:]]+[KMGTPEZY]?iB' "$log_file" 2>/dev/null | tail -1 | sed -E 's/^/传输中: /'; } | head -1 ) && [ -n "$_xfer" ]; } || { echo "[rt-thread] no xfer line yet" >&2; continue; }
+      { [ -f "$log_file" ] && _xfer=$( { grep -a 'Transferred:' "$log_file" 2>/dev/null | grep -a 'ETA' | tail -1 | sed -E 's/^.*Transferred:[[:space:]]*//' || true ; grep -aoE '[0-9.]+[[:space:]]+[KMGTPEZY]?iB[[:space:]]*/[[:space:]]*[0-9.]+[[:space:]]+[KMGTPEZY]?iB' "$log_file" 2>/dev/null | tail -1 | sed -E 's/^/传输中: /' || true; } | head -1 ) && [ -n "$_xfer" ]; } || { echo "[rt-thread] no xfer line yet" >&2; continue; }
       # 刷新前最后一查: 该停就停，不带病把这条刷新发一半
       [ -f "$PROGRESS_RT_STOP_FILE" ] && break
       echo "[rt-thread] refreshing: $_xfer" >&2
-      progress_update "传输中: ${_xfer#传输中: }" "▸ 📊 批次：${batch_idx:-?}/${total_batches:-?} | ✅${synced_batches:-0} ❌${failed_batches:-0} · 📄 ${batch_total_files:-?}/${total_files:-?} 文件 · ⏱ ${_xfer#传输中: }" || true
+      # 直写批次面板（d0 note/stats），不碰任务行 —— 渲染为统计行下的「传输中」独立行
+      progress_transfer_tick "传输中: ${_xfer#传输中: }" "▸ 📊 批次：${batch_idx:-?}/${total_batches:-?} | ✅${synced_batches:-0} ❌${failed_batches:-0} · 📄 ${batch_total_files:-?}/${total_files:-?} 文件" || true
     done
     # 退出标记（仅 presence 语义）: _stop_batch_progress_thread 轮询它确认线程已死
     echo "$$" > "$PROGRESS_RT_EXIT_FILE" 2>/dev/null || true
@@ -177,6 +187,25 @@ _stop_batch_progress_thread() {
     rm -f "$PROGRESS_RT_PID_FILE"
   fi
   rm -f "$PROGRESS_RT_STOP_FILE" 2>/dev/null || true
+  # 传输中 note 随线程终止一并清理: 线程停了它必然过期，留着会被巩固阶段渲染成旧值
+  rm -f "$(_progress_slot_note 0)" 2>/dev/null || true
+}
+
+# ===== 批次传输实时状态（rt 线程专用入口）=====
+# 线程不写任务行: 「传输中」是批次面板的实时状态，直写深度 0 的 note/stats 槽。
+# 旧行为经 progress_update 落到任务行 detail，把「传输中: …」黏在目标端行尾且
+# 每 20s 覆盖一次任务行语义（2026-08-30 用户反馈）。
+# 渲染位置: 统计行之下、批次历史之上（当前状态不沉底）。
+progress_transfer_tick() {
+  local note="$1" stats="$2"
+  [ -n "$note" ] && echo "$note" > "$(_progress_slot_note 0)"
+  [ -n "$stats" ] && printf '%s\n' "$stats" > "$(_progress_slot_stats 0)"
+  local now last=0
+  now=$(date +%s)
+  [ -f "$PROGRESS_LAST_UPDATE_FILE" ] && last=$(cat "$PROGRESS_LAST_UPDATE_FILE" 2>/dev/null || echo 0)
+  [ $((now - last)) -lt 2 ] && return 0
+  echo "$now" > "$PROGRESS_LAST_UPDATE_FILE"
+  _progress_refresh
 }
 
 # 注册任务到队列（初始化时调用）
@@ -464,27 +493,38 @@ _progress_render() {
         done < "$_rf"
 
         if [ "$_is_label" -eq 1 ]; then
-          # 标签块（▸ 开头）用树形连接符挂到上层 🔄 活动行之下：
-          #   非末行 │ + 标签，末行 └─ + 标签；统计行/批次历史/细粒度状态再挂在末条标签下
-          # 每层下沉 5 格保持不变，树行统一用 <code> 等宽渲染（对齐 + 可读性）
+          # 标签块（▸ 开头）的归属表达:
+          #   d=0 挂在任务条目/目标端行之下 —— 上层没有 🔄 活动行可挂，去掉 └─/│
+          #   树连接符（否则与目标端行的 └─ 同级同形，层次混淆，2026-08-30 用户反馈），
+          #   保留 ▸ 前导 + 等宽缩进;
+          #   d≥1 挂在本层 🔄 活动行（已置尾）之下 —— 非末行 │ + 标签，末行 └─ + 标签
           local _lab_total=0 _lab_n=0
           [ -f "$_rf" ] && _lab_total=$(grep -c . "$_rf" || true)
           [ -f "$_rf" ] && while IFS= read -r _line; do
             [ -z "$_line" ] && continue
             _lab_n=$((_lab_n + 1))
-            if [ "$_lab_n" -eq "$_lab_total" ]; then
+            if [ "$_d" -eq 0 ]; then
+              msg+="${_ind}<code>▸ ${_line#▸ }</code>"$'\n'
+            elif [ "$_lab_n" -eq "$_lab_total" ]; then
               msg+="${_ind}<code>└─ ${_line#▸ }</code>"$'\n'
             else
               msg+="${_ind}<code>│  ${_line#▸ }</code>"$'\n'
             fi
           done < "$_rf"
-          # 统计行与后续块对齐末条标签的文本列（+4 格），同样等宽渲染
+          # 统计行与后续块对齐标签文本列（+4 格），同样等宽渲染
           local _ind_sub="${_ind}    "
           [ -f "$_sf" ] && msg+="${_ind_sub}<code>$(cat "$_sf")</code>"$'\n'
           # 批次历史回显: 最近 N 个已完成批次的快照（当前批次状态由 rows/stats 表达，不在此重复）
           # 多行块需逐行加缩进前缀，否则仅首行对齐
           local _bh
           _bh=$(_progress_batch_history_render)
+          # 深度 0 的 note（批次实时传输状态，线程专用）紧跟统计行、排在批次历史之前
+          # —— 当前状态不沉到历史后面; 下方还有历史兄弟行时用 ├─（└─ 只留给末节点）
+          if [ "$_d" -eq 0 ] && [ -f "$_nf" ]; then
+            local _conn0="└─"
+            [ -n "$_bh" ] && _conn0="├─"
+            msg+="${_ind_sub}<code>${_conn0} $(cat "$_nf")</code>"$'\n'
+          fi
           if [ -n "$_bh" ]; then
             msg+="$(tree_lines "$_bh" | sed 's/^  //' | sed "s/^/${_ind_sub}/" | sed 's/^\(.*\)$/<code>\1<\/code>/')"$'\n'
           fi
@@ -500,7 +540,10 @@ _progress_render() {
           done <<< "$_tree"
         fi
         # 细粒度状态（深层 detail）挂在最末；标签型块时对齐末条标签文本列（+4 格），等宽渲染
-        if [ "$_is_label" -eq 1 ] && [ -f "$_nf" ]; then
+        # （d=0 的 note 已在标签分支内紧跟统计行渲染，跳过）
+        if [ "$_is_label" -eq 1 ] && [ "$_d" -eq 0 ]; then
+          :
+        elif [ "$_is_label" -eq 1 ] && [ -f "$_nf" ]; then
           msg+="${_ind}    <code>└─ $(cat "$_nf")</code>"$'\n'
         elif [ -f "$_nf" ]; then
           msg+="${_ind_rows}<code>└─ $(cat "$_nf")</code>"$'\n'
@@ -561,8 +604,11 @@ progress_init() {
   # 清理旧状态
   # 旧消息清理: 若存在仍被追踪的进度消息，先删除再清空追踪文件 —— 只清追踪不删
   # 消息会让旧消息失去追踪成为孤儿（同 runner 重复 init 场景，测试 T5 实录）
+  # 仅对数字 id 生效（防测试 mock 非数字 id 触发真实网络调用）
   if [ -s "$PROGRESS_MSG_ID_FILE" ]; then
-    _tg_delete_message "$(head -1 "$PROGRESS_MSG_ID_FILE" 2>/dev/null)"
+    local _old_msg_id
+    _old_msg_id=$(head -1 "$PROGRESS_MSG_ID_FILE" 2>/dev/null)
+    [[ "$_old_msg_id" =~ ^[0-9]+$ ]] && _tg_delete_message "$_old_msg_id"
   fi
   : > "$PROGRESS_TASKS_FILE"
   : > "$PROGRESS_MSG_ID_FILE"
