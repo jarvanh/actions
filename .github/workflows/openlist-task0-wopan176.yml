@@ -22,7 +22,7 @@ concurrency: openlist-singleton
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 600
     env:
       FORCE_SYNC: ${{ inputs.force_sync || 'false' }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -32,7 +32,7 @@ jobs:
       # 批次拆分阈值: 用户指定 1GiB —— 单批核对/巩固周期分钟级，假成功更早暴露；
       # 主 openlist.yml 保持 20GB 不变，仅本专用 workflow 调整
       LARGE_FILE_THRESHOLD_BYTES: "4000000000"
-      SYNC_SPLIT_THRESHOLD_BYTES: "1073741824"
+      SYNC_SPLIT_THRESHOLD_BYTES: "5368709120"
       OPENLIST_SPLIT_PART_BYTES: "1073741824"
       OPENLIST_MAX_PART_SIZE: "4000000000"
       OPENLIST_TARGET_PART_SIZE: "3980000000"
@@ -67,15 +67,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: 安装 rclone（GitHub Releases 直下，rclone.org 近期持续超时）
+      - name: 安装 rclone
         run: |
-          set -e
-          RVER=v1.71.2
-          curl -fsSL --retry 3 --retry-delay 5 --connect-timeout 30 --max-time 300 \
-            -o /tmp/rclone.deb \
-            "https://github.com/rclone/rclone/releases/download/${RVER}/rclone-${RVER}-linux-amd64.deb"
-          sudo dpkg -i /tmp/rclone.deb
-          rclone version | head -2
+          curl -fsSL https://rclone.org/install.sh | sudo bash
 
       - name: 写入 rclone 配置（含密钥掩码）
         env:
@@ -182,7 +176,7 @@ jobs:
       # 仅执行 task0: onedrive:0 → openlist:wopan176Crypt/0（--auto-split --1d-skip）
       # 其余 15 个同步对（task0-baidupan / task0-wopan175 / task1-5 / backup 等）均不在本 workflow 中。
       - name: "同步唯一任务: task0 (onedrive:0 → openlist:wopan176Crypt/0)"
-        timeout-minutes: 330
+        timeout-minutes: 570
         run: |
           source /tmp/load_all.sh
           echo "=== 等待 OpenList 就绪 ==="
