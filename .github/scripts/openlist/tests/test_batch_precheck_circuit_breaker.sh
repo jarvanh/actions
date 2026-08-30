@@ -40,6 +40,7 @@ source extracted.sh
 # ---------- 协作者 stub ----------
 DEFAULT_SPLIT_THRESHOLD_BYTES=$((50 * 1024 * 1024 * 1024))
 SYNC_SPLIT_THRESHOLD_BYTES=100
+OPENLIST_BATCH_BYTES=100
 _TASK_SKIP_DAYS=0
 PROGRESS_STATS=""
 PROGRESS_PHASE_INFO=""
@@ -59,6 +60,11 @@ sync_with_logging() { SYNC_WITH_LOGGING_CALLS=$((SYNC_WITH_LOGGING_CALLS + 1)); 
 
 REFRESH_CALLS=0
 _refresh_ol_drivers() { REFRESH_CALLS=$((REFRESH_CALLS + 1)); return 0; }
+# 批次历史/实时线程（progress 增强）stub
+_progress_batch_history_clear() { :; }
+_progress_batch_history_add() { :; }
+_start_batch_progress_thread() { :; }
+_stop_batch_progress_thread() { :; }
 START_TR_CALLS=0
 _start_token_refresher() { START_TR_CALLS=$((START_TR_CALLS + 1)); }
 STOP_TR_CALLS=0
