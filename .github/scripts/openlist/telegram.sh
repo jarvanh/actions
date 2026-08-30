@@ -5,6 +5,7 @@
 #   TELEGRAM_CHAT_ID   — 目标 Chat ID（由 workflow secrets 注入）
 # 依赖全局变量:
 #   PROGRESS_MSG_ID_FILE — 进度消息 ID 存储文件路径
+#   PROGRESS_SENT_IDS_LOG — 本轮已发进度消息 id 清单（finalize 兑底清孤儿，sync_progress.sh 定义）
 # 依赖函数: utils.sh (escape_html)
 
 # ===== 通知排版助手（统一所有 Telegram 通知的结构与风格）=====
@@ -101,7 +102,7 @@ _tg_send_and_get_id() {
   local message="$1"
   local parse_mode="${2:-HTML}"
   local response
-  response=$(curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+  response=$(curl -s -m 15 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
     -d chat_id="${TELEGRAM_CHAT_ID}" \
     -d parse_mode="$parse_mode" \
     --data-urlencode text="$message" 2>/dev/null) || true
@@ -116,7 +117,7 @@ _tg_send_and_get_id() {
 _tg_delete_message() {
   local message_id="$1"
   [ -z "$message_id" ] && return
-  curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteMessage" \
+  curl -s -m 8 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteMessage" \
     -d chat_id="${TELEGRAM_CHAT_ID}" \
     -d message_id="$message_id" >/dev/null 2>&1 || true
 }
@@ -141,6 +142,9 @@ _tg_ensure_bottom_message() {
   new_id=$(_tg_send_and_get_id "$message" "$parse_mode")
   if [ -n "$new_id" ]; then
     echo "$new_id" > "$PROGRESS_MSG_ID_FILE"
+    # 已发 id 记账: 即使后续某次刷新丢失追踪（发成功但响应丢失/写回被打断），
+    # progress_finalize 仍能按这份清单兑底删除孤儿
+    echo "$new_id" >> "$PROGRESS_SENT_IDS_LOG" 2>/dev/null || true
     echo "$new_id"
   fi
 }
