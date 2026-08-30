@@ -28,7 +28,7 @@ jobs:
 
       - name: 写入 rclone 配置（含密钥掩码）
         env:
-          RCLONE_CONFIG_SECRET: *** secrets.RCLONE }}
+          RCLONE_CONFIG_SECRET: ${{ secrets.RCLONE }}
         run: |
           mkdir -p ~/.config/rclone/
           cat << EOF > ~/.config/rclone/rclone.conf
