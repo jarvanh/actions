@@ -1,12 +1,28 @@
 name: emby
 
+# 架构：默认 302 直链播放（cloudflared → ge2o:8095 → Emby:8096），
+# ge2o 将 /onedrive/% 媒体路径映射到内置 OpenList 的 OneDrive 直链；
+# OpenList/OpenList存储/ge2o 任一环节不健康时自动回退 direct 模式（cloudflared → Emby:8096，行为与旧版一致）。
+# 手动触发时可用 playback_mode 输入强制指定模式。
+
 on:
   schedule:
     - cron: "0 2,8,14,20 * * *"
     # - cron: "*/5 * * * *"
   workflow_dispatch:
+    inputs:
+      playback_mode:
+        description: "播放模式：302 = OpenList 直链（默认）；direct = 现状直连回退"
+        type: choice
+        default: "302"
+        options:
+          - "302"
+          - "direct"
   watch:
     # types: started
+
+env:
+  PLAYBACK_MODE_INPUT: ${{ github.event.inputs.playback_mode || '302' }}
 
 jobs:
   build:
@@ -31,11 +47,12 @@ jobs:
           cat << IN_EOF > ~/.config/rclone/rclone.conf
           $RCLONE_CONFIG
           IN_EOF
+          chmod 600 ~/.config/rclone/rclone.conf
       - name: rclone-run
         run: |
           sudo apt-get update
           sudo apt-get install -y fuse3
-          
+
           if rclone lsf dropbox:self-hosted/emby/config/ --files-only | grep -q "system.xml"; then
             if ! rclone delete dropbox:self-hosted/emby/config/system.xml -vv; then
               echo "[WARNING] Failed to delete system.xml, skipping" >&2
@@ -43,17 +60,17 @@ jobs:
           fi
           sudo rclone copy dropbox:self-hosted/emby/system.xml dropbox:self-hosted/emby/config/ --ignore-errors -vv
 
-          sudo mkdir /onedrive
-          sudo nohup rclone mount onedrive: /onedrive --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
-          sudo mkdir /dropbox
-          sudo nohup rclone mount dropbox: /dropbox --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
-          sudo mkdir /gd
-          sudo nohup rclone mount gd: /gd --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
-
-          echo "==========onedrive==========="
-          rclone lsf onedrive:
-          echo "==========dropbox==========="
-          rclone lsf dropbox:
+          # 只挂载媒体库所在的 onedrive（/dropbox /gd 挂载无引用，已移除）
+          # writes 模式：302 直链播放不经过挂载，本地仅承载扫描/探测/回退流量，磁盘占用≈0
+          sudo mkdir -p /onedrive /opt/logs
+          sudo chown -R runner:runner /opt/logs
+          sudo nohup rclone mount onedrive: /onedrive \
+            --allow-other --umask 000 --attr-timeout 10m --no-gzip-encoding \
+            --vfs-cache-mode writes \
+            --dir-cache-time 30m \
+            --vfs-read-chunk-size-limit 1G \
+            --buffer-size 100M \
+            > /opt/logs/mount-onedrive.log 2>&1 &
       - name: install cloudflared
         run: |
           sudo mkdir ~/.cloudflared/
@@ -76,6 +93,103 @@ jobs:
           else
             echo "The tunnel '$TUNNEL_NAME' is running with connections: $CONNECTIONS. Stopping actions."
             exit 0
+          fi
+      - name: install openlist
+        if: env.PLAYBACK_MODE_INPUT != 'direct'
+        run: |
+          sudo mkdir -p /opt/openlist
+          sudo chown -R runner:runner /opt/openlist /opt/logs
+
+          # 下载 OpenList（失败不致命，健康检查会回退 direct）
+          ASSET_URL=$(curl -s https://api.github.com/repos/OpenListTeam/OpenList/releases/latest \
+            | grep -o '"browser_download_url": *"[^"]*openlist-linux-amd64.tar.gz"' | head -1 | cut -d'"' -f4)
+          if [ -n "$ASSET_URL" ] && curl -fsSL -o /tmp/openlist.tar.gz "$ASSET_URL"; then
+            mkdir -p /tmp/openlist-pkg && tar -xzf /tmp/openlist.tar.gz -C /tmp/openlist-pkg
+            find /tmp/openlist-pkg -type f -name openlist -exec sudo install -m 0755 {} /usr/local/bin/openlist \;
+          fi
+          if ! command -v openlist >/dev/null 2>&1; then
+            echo "::warning::OpenList binary unavailable, 302 链路将回退 direct"
+            exit 0
+          fi
+
+          # 优先恢复 Dropbox 上的数据目录（含自有存储配置与 token）
+          if rclone copy dropbox:self-hosted/openlist-data.tar.zst /tmp/ 2>/dev/null && [ -s /tmp/openlist-data.tar.zst ]; then
+            tar -I zstd -xf /tmp/openlist-data.tar.zst -C /opt/openlist
+            rm -f /tmp/openlist-data.tar.zst
+            echo "OpenList data restored from Dropbox"
+          fi
+
+          nohup openlist server --data /opt/openlist > /opt/logs/openlist.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:5244/ping >/dev/null 2>&1 && break
+            sleep 1
+          done
+          if ! curl -fsS http://127.0.0.1:5244/ping >/dev/null 2>&1; then
+            # 兼容不同版本的参数位置
+            pkill -f "openlist server" 2>/dev/null || true
+            sleep 1
+            nohup openlist --data /opt/openlist server > /opt/logs/openlist.log 2>&1 &
+            for i in $(seq 1 30); do
+              curl -fsS http://127.0.0.1:5244/ping >/dev/null 2>&1 && break
+              sleep 1
+            done
+          fi
+          if ! curl -fsS http://127.0.0.1:5244/ping >/dev/null 2>&1; then
+            echo "::warning::OpenList failed to start, 302 链路将回退 direct"
+            exit 0
+          fi
+
+          # 专用密码（独立于 openlist.yml 的 OPENLIST_ADMIN_PASSWORD，互不影响）
+          OPENLIST_PW="${{ secrets.EMBY_OPENLIST_ADMIN_PASSWORD }}"
+          if [ -z "$OPENLIST_PW" ]; then OPENLIST_PW=$(openssl rand -hex 16); fi
+
+          # 先尝试直接登录：正常情况下恢复分支的库内密码即上次设置值，无需重置
+          TOKEN=$(curl -s -X POST http://127.0.0.1:5244/api/auth/login \
+            -H 'Content-Type: application/json' \
+            -d "{\"username\":\"admin\",\"password\":\"$OPENLIST_PW\"}" | jq -r '.data // empty')
+          if [ -z "$TOKEN" ]; then
+            # 登录失败才重置：全新库（admin 随机密码）或库内密码与 secret 不一致时自愈
+            openlist admin set --data /opt/openlist "$OPENLIST_PW" >/dev/null 2>&1 \
+              || openlist admin set "$OPENLIST_PW" --data /opt/openlist >/dev/null 2>&1
+            TOKEN=$(curl -s -X POST http://127.0.0.1:5244/api/auth/login \
+              -H 'Content-Type: application/json' \
+              -d "{\"username\":\"admin\",\"password\":\"$OPENLIST_PW\"}" | jq -r '.data // empty')
+          fi
+          if [ -z "$TOKEN" ]; then
+            echo "::warning::OpenList login failed, 302 链路将回退 direct"
+            exit 0
+          fi
+          printf '%s' "$TOKEN" > /tmp/openlist-token
+          chmod 600 /tmp/openlist-token
+
+          # 全新初始化：用 rclone 凭据注册 OneDrive 存储（非致命，失败则回退）
+          STORAGE_COUNT=$(curl -s http://127.0.0.1:5244/api/admin/storage/list \
+            -H "Authorization: $TOKEN" | jq -r '.data.content // [] | length' 2>/dev/null || echo 0)
+          if [ "${STORAGE_COUNT:-0}" = "0" ]; then
+            SECTION=$(awk '/^\[onedrive\]/{f=1;next} /^\[/{f=0} f' "$HOME/.config/rclone/rclone.conf")
+            RID=$(printf '%s\n' "$SECTION" | grep -o '^[[:space:]]*client_id[[:space:]]*=.*' | head -1 | sed 's/^[[:space:]]*client_id[[:space:]]*=[[:space:]]*//')
+            RSEC=$(printf '%s\n' "$SECTION" | grep -o '^[[:space:]]*client_secret[[:space:]]*=.*' | head -1 | sed 's/^[[:space:]]*client_secret[[:space:]]*=[[:space:]]*//')
+            RTOK=$(printf '%s\n' "$SECTION" | grep -o '^[[:space:]]*token[[:space:]]*=.*' | head -1 | sed 's/^[[:space:]]*token[[:space:]]*=[[:space:]]*//' | jq -r '.refresh_token // empty' 2>/dev/null)
+            if [ -n "$RID" ] && [ -n "$RTOK" ]; then
+              ADDITION=$(jq -nc --arg rt "$RTOK" --arg cid "$RID" --arg csec "$RSEC" \
+                '{region:"global",is_sharepoint:false,use_online_api:true,api_url_address:"https://api.oplist.org/onedrive/renewapi",client_id:$cid,client_secret:$csec,redirect_uri:"https://api.oplist.org/onedrive/callback",refresh_token:$rt,site_id:"",chunk_size:5}')
+              BODY=$(jq -nc --arg add "$ADDITION" \
+                '{mount_path:"/onedrive",driver:"Onedrive",cache_expiration:30,status:"work",order:0,addition:$add}')
+              if curl -s -X POST http://127.0.0.1:5244/api/admin/storage/create \
+                   -H "Authorization: $TOKEN" -H 'Content-Type: application/json' -d "$BODY" >/dev/null \
+                 && curl -s -X POST http://127.0.0.1:5244/api/fs/list \
+                      -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
+                      -d '{"path":"/onedrive","page":1,"per_page":10}' | jq -e '.code == 200' >/dev/null; then
+                echo "OpenList OneDrive storage provisioned"
+                tar -I 'zstd -3 -T0' -cf /tmp/openlist-data.tar.zst -C /opt/openlist . \
+                  && rclone copyto /tmp/openlist-data.tar.zst dropbox:self-hosted/openlist-data.tar.zst -vv \
+                  && rm -f /tmp/openlist-data.tar.zst
+              else
+                echo "::warning::OpenList storage provisioning failed, 302 链路将回退 direct"
+              fi
+            else
+              echo "::warning::rclone.conf 缺少 onedrive client_id/refresh_token，跳过自动初始化"
+            fi
           fi
       - name: install emby
         run: |
@@ -153,10 +267,11 @@ jobs:
           ]
           library.close()
           
+          # 隐私：只输出计数，不输出用户名/媒体路径明细
           print(
               "Emby guard: "
-              f"users={names} media_items={media_items} "
-              f"library_folders={library_folders} media_paths={media_paths}"
+              f"users={len(names)} media_items={media_items} "
+              f"folders={len(library_folders)} media_paths={len(media_paths)}"
           )
           if "Derrick" not in names:
               raise SystemExit("❌ Emby guard failed: Derrick user is missing")
@@ -211,13 +326,131 @@ jobs:
           sudo ls -la /var/lib/emby
       - name: run emby
         run: |
-          sudo nohup /opt/emby-server/bin/emby-server &
+          sudo nohup /opt/emby-server/bin/emby-server > /opt/logs/emby-console.log 2>&1 &
           # 只有 install emby 阶段完成了数据完整性校验，才允许后续备份步骤执行。
           touch /tmp/EMBY_READY_FOR_BACKUP
+      - name: install ge2o
+        if: env.PLAYBACK_MODE_INPUT != 'direct'
+        run: |
+          mkdir -p /opt/ge2o
+          ASSET_URL=$(curl -s https://api.github.com/repos/AmbitiousJun/go-emby2openlist/releases/latest \
+            | grep -o '"browser_download_url": *"[^"]*ge2o-linux_amd64"' | head -1 | cut -d'"' -f4)
+          if [ -n "$ASSET_URL" ] && curl -fsSL -o /opt/ge2o/ge2o "$ASSET_URL"; then
+            chmod +x /opt/ge2o/ge2o
+          fi
+          if [ ! -x /opt/ge2o/ge2o ]; then
+            echo "::warning::ge2o binary unavailable, 302 链路将回退 direct"
+            exit 0
+          fi
+
+          OPENLIST_TOKEN=$(cat /tmp/openlist-token 2>/dev/null || echo "")
+          APISECRET=$(openssl rand -hex 16)
+          cat > /opt/ge2o/config.yml <<GE2O_EOF
+          emby:
+            host: http://127.0.0.1:8096
+            mount-path: /onedrive
+            episodes-unplay-prior: false
+            resort-random-items: false
+            proxy-error-strategy: origin
+            images-quality: 100
+            download-strategy: 403
+          openlist:
+            host: http://127.0.0.1:5244
+            token: $OPENLIST_TOKEN
+          video-preview:
+            enable: false
+          path:
+            emby2openlist:
+              - /onedrive:/onedrive
+          cache:
+            enable: true
+            expired: 1d
+          ssl:
+            enable: false
+          log:
+            disable-color: true
+          ge2o:
+            api-secret: $APISECRET
+            web:
+              disable: true
+          GE2O_EOF
+
+          cd /opt/ge2o
+          GIN_MODE=release nohup ./ge2o > /opt/logs/ge2o.log 2>&1 &
+          sleep 3
+          if curl -fsS -m 5 http://127.0.0.1:8095/emby/System/Info/Public >/dev/null 2>&1; then
+            echo "ge2o is up on :8095"
+          else
+            echo "::warning::ge2o not responding yet, 健康检查会决定最终模式"
+          fi
       - name: run cloudflared
         run: |
-          cloudflared tunnel route dns e e.'${{ secrets.VD }}'.eu.org
-          nohup cloudflared tunnel run --url http://127.0.0.1:8096 e &
+          MODE="${PLAYBACK_MODE_INPUT:-302}"
+          if [ "$MODE" = "302" ]; then
+            OK=0
+            for i in 1 2 3; do
+              TOK=$(cat /tmp/openlist-token 2>/dev/null)
+              if curl -fsS -m 5 http://127.0.0.1:8095/emby/System/Info/Public >/dev/null 2>&1 \
+                 && [ -n "$TOK" ] \
+                 && curl -s -m 5 -X POST http://127.0.0.1:5244/api/fs/list \
+                      -H "Authorization: $TOK" -H 'Content-Type: application/json' \
+                      -d '{"path":"/onedrive","page":1,"per_page":1}' \
+                    | jq -e '.code == 200' >/dev/null 2>&1; then
+                OK=1
+                break
+              fi
+              sleep 10
+            done
+            if [ "$OK" != "1" ]; then
+              echo "::warning::302 chain unhealthy, falling back to direct mode"
+              MODE="direct"
+            fi
+          fi
+          echo "$MODE" > /tmp/PLAYBACK_MODE
+          echo "PLAYBACK_MODE=$MODE" >> "$GITHUB_ENV"
+          echo "Playback mode: $MODE"
+
+          if [ "$MODE" = "302" ]; then
+            nohup cloudflared tunnel run --url http://127.0.0.1:8095 e > /opt/logs/cloudflared.log 2>&1 &
+          else
+            nohup cloudflared tunnel run --url http://127.0.0.1:8096 e > /opt/logs/cloudflared.log 2>&1 &
+          fi
+
+          # 运行中 watchdog：302 模式下每分钟探活，连续 3 次失败自动回退 direct
+          cat > /opt/watchdog.sh <<'WD_EOF'
+          #!/bin/bash
+          FAIL=0
+          while true; do
+            sleep 60
+            MODE=$(cat /tmp/PLAYBACK_MODE 2>/dev/null || echo direct)
+            [ "$MODE" = "direct" ] && continue
+            TOK=$(cat /tmp/openlist-token 2>/dev/null)
+            if curl -fsS -m 5 http://127.0.0.1:8095/emby/System/Info/Public >/dev/null 2>&1 \
+               && [ -n "$TOK" ] \
+               && curl -s -m 5 -X POST http://127.0.0.1:5244/api/fs/list \
+                    -H "Authorization: $TOK" -H 'Content-Type: application/json' \
+                    -d '{"path":"/onedrive","page":1,"per_page":1}' \
+                  | jq -e '.code == 200' >/dev/null 2>&1; then
+              FAIL=0
+            else
+              FAIL=$((FAIL+1))
+              echo "$(date '+%F %T') 302 health fail #$FAIL"
+            fi
+            if [ "$FAIL" -ge 3 ]; then
+              echo "302 unhealthy -> switching to direct"
+              pkill -f "cloudflared tunnel run" 2>/dev/null
+              sleep 3
+              nohup cloudflared tunnel run --url http://127.0.0.1:8096 e > /opt/logs/cloudflared-direct.log 2>&1 &
+              echo direct > /tmp/PLAYBACK_MODE
+              curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                -d chat_id="${TG_CHAT_ID}" \
+                -d text="📺 Emby 302 链路连续 3 次探活失败，已自动回退 direct 模式" >/dev/null 2>&1
+              exit 0
+            fi
+          done
+          WD_EOF
+          TELEGRAM_BOT_TOKEN="${{ secrets.TELEGRAM_BOT_TOKEN }}" TG_CHAT_ID="${{ secrets.TG_CHAT_ID }}" \
+            nohup bash /opt/watchdog.sh > /opt/logs/watchdog.log 2>&1 &
       - name: sleep
         run: |
           sudo sleep 340m
@@ -239,13 +472,22 @@ jobs:
             fi
             echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
           }
+
+          # 同步 OpenList 数据目录（体积小，保证下轮恢复的存储配置与 token 最新）
+          if [ -x /usr/local/bin/openlist ] && curl -s http://127.0.0.1:5244/ping >/dev/null 2>&1; then
+            tar -I 'zstd -3 -T0' -cf /tmp/openlist-data.tar.zst -C /opt/openlist . 2>/dev/null \
+              && rclone copyto /tmp/openlist-data.tar.zst dropbox:self-hosted/openlist-data.tar.zst -vv \
+              && rm -f /tmp/openlist-data.tar.zst \
+              || echo "[WARNING] OpenList data persist skipped"
+          fi
+
           if [ ! -f /tmp/EMBY_READY_FOR_BACKUP ]; then
               echo "⚠️ Emby 未能成功启动，跳过备份以防空数据覆盖云端。"
               exit 0
           fi
 
           # 优雅停机
-          curl -X POST -H "X-Emby-Token: c33a66119cd94788882617a5bde7f962" http://127.0.0.1:8096/System/Shutdown || true
+          curl -X POST -H "X-Emby-Token: ${{ secrets.EMBY_API_TOKEN }}" http://127.0.0.1:8096/System/Shutdown || true
           sleep 15
 
           validate_emby_data() {
@@ -300,10 +542,11 @@ jobs:
           ]
           library.close()
           
+          # 隐私：只输出计数，不输出用户名/媒体路径明细
           print(
               "Emby guard: "
-              f"users={names} media_items={media_items} "
-              f"library_folders={library_folders} media_paths={media_paths}"
+              f"users={len(names)} media_items={media_items} "
+              f"folders={len(library_folders)} media_paths={len(media_paths)}"
           )
           if "Derrick" not in names:
               raise SystemExit("❌ Emby guard failed: Derrick user is missing")
@@ -350,8 +593,9 @@ jobs:
         if: always()
         run: |
           STATUS="${{ job.status }}"
-          MESSAGE="📺 *Emby Workflow* %0AStatus: ${STATUS} %0ATime: $(date '+%Y-%m-%d %H:%M:%S')"
+          MODE=$(cat /tmp/PLAYBACK_MODE 2>/dev/null || echo unknown)
+          MESSAGE="📺 *Emby Workflow* %0AStatus: ${STATUS} %0APlayback: ${MODE} %0ATime: $(date '+%Y-%m-%d %H:%M:%S')"
           curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-            -d chat_id=83279194 \
+            -d chat_id=${{ secrets.TG_CHAT_ID }} \
             -d text="${MESSAGE}" \
             -d parse_mode=Markdown
