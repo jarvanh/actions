@@ -73,7 +73,7 @@ chk "L1c 末行为 🔄 活动子目录" \
 
 # ---------- 装配场景: 父层子目录树 + 子层文件批次 ----------
 TASK_SUBDIR_STATS='▸ 📊 子目录：2/3 完成 | ✅1 ⏭️1 ⏳1 ⚠️0 ❌0'
-BATCH_LABEL='▸ 📦 文件批次拆分：15 批 / 1367 文件（当前批次 1：105 文件）'
+BATCH_LABEL='▸ 📦 文件批次拆分：共 15 批 · 1367 个文件（当前第 1 批 · 105 个文件）'
 BATCH_STATS='▸ 📊 批次：1/15 | ✅0 ❌0 · 📄 105/1367 文件 · 📤 12.345 GiB'
 BATCH_DETAIL='批次 1 巩固: 重启容器校验落盘真值'
 
@@ -100,10 +100,10 @@ chk "L2b 首个树行缩进 7 格（统计行 +2）并带 ├─ 连接符" \
 
 # ---------- L3: 标签型块 —— 标签在前、与统计行同列、无连接符 ----------
 # 批次块在深度 1，表头缩进 = 5*1+5 = 10 格（L4 断言它正对本层树行文本列）
-chk "L3a 批次标签与统计行同列、无树形连接符" \
-  "$(line_of '文件批次拆分')" "          ${BATCH_LABEL}"
-chk "L3b 批次统计行紧跟标签、同列" \
-  "$(line_of '批次：1/15')" "          ${BATCH_STATS}"
+chk "L3a 批次标签挂树形连接符（code 等宽）" \
+  "$(line_of '文件批次拆分')" "          <code>└─ ${BATCH_LABEL#▸ }</code>"
+chk "L3b 批次统计行（code 等宽，缩进 14 格）" \
+  "$(line_of '批次：1/15')" "              <code>${BATCH_STATS}</code>"
 # 标签型与树型的"统计行 vs 阶段行"先后相反，是本契约的关键
 N_LABEL=$(grep -n -F -- '文件批次拆分' "$WORK_DIR/last_msg" | head -1 | cut -d: -f1)
 N_BATCH_STATS=$(grep -n -F -- '批次：1/15' "$WORK_DIR/last_msg" | head -1 | cut -d: -f1)
@@ -120,14 +120,13 @@ chk "L2c 树型: 统计行排在树行之前" \
 ACT_ROW=$(line_of 'j-1024j')
 ACT_LABEL=$(line_of '文件批次拆分')
 chk "L4a 树行是最后一条（🔄 已置尾，深层块才挂得住）" \
-  "$(printf '%s' "$ACT_ROW" | sed 's/^ *//' | cut -c1-4)" "└─ 🔄"
-chk "L4b 标签行前缀空格 10 / 树行前缀空格 7（对齐树行文本列）" \
-  "$(printf '%s' "${ACT_LABEL%%▸*}" | wc -c | tr -d ' ')/$(printf '%s' "${ACT_ROW%%└*}" | wc -c | tr -d ' ')" \
-  "10/7"
+  "$(printf '%s' "$ACT_ROW" | grep -c '└─ 🔄')" "1"
+chk "L4b 标签行带 code 树干前缀（层级归属可见）" \
+  "$(printf '%s' "$ACT_LABEL" | grep -c '<code>└─ ')" "1"
 
 # ---------- L5: 深层 detail 落到本层 note 行 ----------
-chk "L5a 深层 detail 渲染为 note 行（挂在统计行下，缩进 12 格）" \
-  "$(line_of '巩固')" "            └─ ${BATCH_DETAIL}"
+chk "L5a 深层 detail 渲染为 note 行（code 等宽）" \
+  "$(line_of '巩固')" "              <code>└─ ${BATCH_DETAIL}</code>"
 chk "L5b 深层 detail 不污染任务行（任务行无 detail）" \
   "$(line_of 'wopan176Crypt/0')" "  └─ wopan176Crypt/0"
 
