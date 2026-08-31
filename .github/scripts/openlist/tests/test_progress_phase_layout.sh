@@ -204,11 +204,11 @@ chk "L7g 线程已退出且 pid 文件已清" \
 # 深层 note 写入即清浅层 → 任意时刻只显示最深一条过程注记
 rm -f "$PROGRESS_LAST_UPDATE_FILE"
 SYNC_AUTO_SPLIT_DEPTH=1
-progress_task_update "正在按子目录大小排序..." >/dev/null
+progress_task_update "正在统计并排序子目录..." >/dev/null
 chk "L8a d1 note 落槽" "$([ -f "$(_progress_slot_note 1)" ] && echo yes || echo no)" "yes"
 rm -f "$PROGRESS_LAST_UPDATE_FILE"
 SYNC_AUTO_SPLIT_DEPTH=2
-progress_task_update "📂 子目录拆分（depth=3，正在统计各子目录大小...）" >/dev/null
+progress_task_update "📂 子目录拆分（depth=3）" >/dev/null
 chk "L8b d2 note 落槽" "$([ -f "$(_progress_slot_note 2)" ] && echo yes || echo no)" "yes"
 chk "L8c 深层写入清除浅层 note（d1 已清）" "$([ -f "$(_progress_slot_note 1)" ] && echo 残留 || echo 已清)" "已清"
 

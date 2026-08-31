@@ -454,8 +454,8 @@ _sync_task_impl() {
   echo "按子目录大小排序..."
   # 排序阶段还没有子目录树可展示，用标签行（"▸" 开头）说明正在做什么；
   # 不再夹带源端大小（任务分组头已给出），避免同一数字重复两遍
-  PROGRESS_PHASE_INFO="▸ 📂 子目录拆分（depth=${current_depth}，正在统计各子目录大小...）"
-  progress_update "正在按子目录大小排序..."
+  PROGRESS_PHASE_INFO="▸ 📂 子目录拆分（depth=${current_depth}）"
+  progress_update "正在统计并排序子目录..."
   local sorted_subdirs=""
   declare -A subdir_size_map=()
   declare -A subdir_status_map=()
