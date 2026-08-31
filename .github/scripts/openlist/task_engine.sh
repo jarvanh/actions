@@ -722,15 +722,12 @@ _batch_consolidate() {
   # 405 Method Not Allowed）时 rclone 零报成功 → 跳过巩固 → 重启复核/驱动刷新
   # 串行重试/修复管线/后端全拒熔断全部饿死，批次循环烧完所有批次（2026-08-31
   # 用户反馈实录）。新逻辑: 本批触碰过文件（有声称成功或有直接失败）就巩固;
-  # 仅零触碰（无 Copied 且无非 onf 失败）才跳过。p405_n: 405 签名失败数，
-  # 供下方后端全拒熔断的资格判定
-  local uploaded=0 failed_n=0 p405_n=0
+  # 仅零触碰（无 Copied 且无非 onf 失败）才跳过。
+  local uploaded=0 failed_n=0
   uploaded=$(grep -cE 'Copied \((new|replaced existing)\)' "$batch_log" 2>/dev/null || true)
   failed_n=$(grep -E 'ERROR : .+: Failed to copy' "$batch_log" 2>/dev/null | grep -cv 'object not found' || true)
-  p405_n=$(grep -cE 'Failed to copy.*Method Not Allowed' "$batch_log" 2>/dev/null || true)
   [[ "$uploaded" =~ ^[0-9]+$ ]] || uploaded=0
   [[ "$failed_n" =~ ^[0-9]+$ ]] || failed_n=0
-  [[ "$p405_n" =~ ^[0-9]+$ ]] || p405_n=0
   if [ "$uploaded" -eq 0 ] && [ "$failed_n" -eq 0 ]; then
     echo "${label}: 本批无传输无失败，跳过巩固（无新写入即无假成功污染）"
     return 0
@@ -812,29 +809,21 @@ _batch_consolidate() {
   CONSOLIDATE_RETRY_COPIED=$retry_copied
   echo "${label} 巩固: 串行重试完成，重传 ${retry_copied}/${missing_n}"
 
-  # ===== 后端写入全拒检测（批次快速止损）=====
-  # 本批全部触碰文件未落盘 + 串行重试 0 成功 → 后端级故障（如 wopan175
-  # 全量 405: OpenList WebDAV 层拒收 PUT，rclone 报 "unchunked simple
-  # update failed: Method Not Allowed"），继续跑后续批次只会每批烧数十
-  # 分钟产出假成功/失败（run 32904752243 实锤）。置 BATCH_BACKEND_DEAD
-  # 由调用方 sync_by_file_batches 中止剩余批次并标记同步对失败。
-  # 门槛: 缺失 ≥3 且占触碰文件 100%（部分落盘 = 后端还活着，不触发）
+  # ===== 后端写入全拒检测（中止剩余批次，止损）=====
+  # 本批全部触碰文件未落盘 + 串行重试 0 成功（重试前已刷新驱动 + 跑保鲜
+  # token）→ 后端级写入故障（如 wopan175 全量 405: OpenList WebDAV 层拒收
+  # PUT，rclone 报 "unchunked simple update failed: Method Not Allowed"）。
+  # 置 BATCH_BACKEND_DEAD 由调用方 sync_by_file_batches 中止剩余批次并标记
+  # 同步对失败，避免每批烧数十分钟（run 32904752243 实锤）。
+  # 门槛: 缺失 ≥3 且占触碰文件 100%（部分落盘 = 后端还活着，不触发）。
+  # 注意: 熔断只中止"剩余批次"——本批顽固缺失仍转修复管线换方法（2026-08-31
+  # 用户规格: 直接传输没成功就要进修复管线，不因后端级拒收豁免; 方法黑名单
+  # 自带全拉黑重置兑底，死后端误拉黑不会永久锁死方法）。
   local touched_n=0
   touched_n=$(wc -l < "$touched" 2>/dev/null | tr -d ' ')
-  # 熔断资格: copied>0 的批次（部分假成功+部分失败）维持原判定; copied=0 的
-  # 批次（全为直接失败）须 405 主导 —— 405 = wopan 8005 包装签名（后端级拒收,
-  # 修复方法同源 PUT 也会全拒，白耗下载）; 内容性失败（名长/大小超限等）的
-  # 批次不熔断，交修复管线换方法落盘
-  local dead_eligible=1
-  if [ "$uploaded" -eq 0 ] && [ "$failed_n" -gt 0 ] && [ "$p405_n" -lt "$failed_n" ]; then
-    dead_eligible=0
-    echo "${label} 巩固: 失败非 405 主导（${p405_n}/${failed_n}），不熔断，转修复管线换方法"
-  fi
-  if [ "$dead_eligible" -eq 1 ] && [ "$missing_n" -ge 3 ] && [ "$retry_copied" -eq 0 ] && [ "$touched_n" -gt 0 ] && [ "$missing_n" -ge "$touched_n" ]; then
+  if [ "$missing_n" -ge 3 ] && [ "$retry_copied" -eq 0 ] && [ "$touched_n" -gt 0 ] && [ "$missing_n" -ge "$touched_n" ]; then
     BATCH_BACKEND_DEAD=1
-    echo "🛑 ${label} 巩固: 后端写入全拒（${missing_n}/${touched_n} 个触碰文件 0 落盘、串行重试 0 成功）"
-    echo "${label} 巩固: 跳过修复管线（后端级故障下 4 种修复方法同样全拒，白耗下载），等待后端恢复后下轮重试"
-    return 0
+    echo "🛑 ${label} 巩固: 后端写入全拒（${missing_n}/${touched_n} 个触碰文件 0 落盘、串行重试 0 成功）→ 已请求中止剩余批次"
   fi
 
   # ===== 顽固缺失 → 修复管线（换方法兜底）=====
@@ -908,9 +897,13 @@ _batch_consolidate() {
   # 此处重启取真值、逐条核对 fix_list 替代路径，未落盘的当场拉黑该方法并
   # 转失败清单（下一轮从剩余方法继续，靠 marker 黑名单收敛，不在此空转重跑）
   if [ "$fixed_n" -gt 0 ]; then
+    # errexit-proof: verify 返回非零是预期分支（部分修复为假成功），且此处可能
+    # 处于重试段重新开启的 set -e 下——直接调用会让函数当场终止（local verify_ok
+    # 永远执行不到，CONSOLIDATE_FIXED 不再重新计数，进度面板修复数虚高；
+    # run_consolidate 测试 harness 的 wrapper 记账 echo 也被跳过，2026-08-31 测试实录）
+    local verify_ok=0
     _consolidate_verify_fixed "$label" "$batch_idx" "$batch_dir" "$dest_path" \
-      "$fix_list" "$fail_list" "$batch_log" "$retry_log"
-    local verify_ok=$?
+      "$fix_list" "$fail_list" "$batch_log" "$retry_log" || verify_ok=$?
     [ "$verify_ok" -eq 0 ] || echo "${label} 巩固: 修复复核完成，部分条目重启后未落盘（已拉黑，下轮换方法）"
     # 复核会剔除重启后消失的假成功，统计行只报真实落盘数
     CONSOLIDATE_FIXED=$(wc -l < "$fix_list" 2>/dev/null | tr -d ' ')
