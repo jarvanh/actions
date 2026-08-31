@@ -123,6 +123,14 @@ jobs:
                 && rm -f /tmp/openlist-data.tar.zst \
                 && echo "OpenList data restored from Dropbox" \
                 || { echo "::warning::restore failed, falling back to fresh init"; rm -rf /opt/openlist/*; }
+              # 归一化 config.json 的绝对路径（tarball 可能来自其他机器/系统）
+              OLCONF=/opt/openlist/config.json
+              if [ -f "$OLCONF" ]; then
+                jq '.database.db_file = "/opt/openlist/data/data.db" | .temp_dir = "/opt/openlist/data/temp" | .log.name = "/opt/openlist/data/log/log.log" | .bleve_dir = "/opt/openlist/data/bleve"' \
+                  "$OLCONF" > /tmp/ol-conf.new 2>/dev/null \
+                  && mv /tmp/ol-conf.new "$OLCONF" \
+                  && echo "OpenList config.json paths normalized"
+              fi
             fi
 
             nohup openlist server --data /opt/openlist > /opt/logs/openlist.log 2>&1 &
@@ -142,6 +150,8 @@ jobs:
             fi
             if ! curl -fsS http://127.0.0.1:5244/ping >/dev/null 2>&1; then
               echo "::warning::OpenList failed to start, 302 链路将回退 direct"
+              echo "--- openlist.log tail (secrets redacted) ---"
+              tail -30 /opt/logs/openlist.log 2>/dev/null | sed -E 's/(password|token|secret)("?:?)[ =:]*[^ ,}]*/\1 [redacted]/Ig' || true
               return 0
             fi
 
