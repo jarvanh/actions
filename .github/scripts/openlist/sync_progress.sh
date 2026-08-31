@@ -596,6 +596,21 @@ _progress_refresh() {
   )
   # Telegram 失败（new_id 空）时返回 1 会沿 progress_update/progress_task_begin 等
   # 裸调用链在 set -e 下终止整个 step —— 通知失败不传播
+  # L0 被拒（超长/HTML 解析拒绝/网络）→ 降级重发保面板存活:
+  #   L1 去引用块标签（丢嵌套竖线导轨，层级退化为平铺）→ L2 纯文本（丢全部样式）。
+  # Telegram 拒绝原因已由 _tg_send_and_get_id 写入 job log（[tg] 前缀，stderr），
+  # 根因修完后自动回到 L0。
+  if [ -z "$new_id" ]; then
+    local _body _lvl
+    for _lvl in L1 L2; do
+      case "$_lvl" in
+        L1) _body=$(printf '%s' "$msg" | sed -e 's/<blockquote>//g' -e 's/<\\/blockquote>//g') ;;
+        L2) _body=$(printf '%s' "$msg" | sed -e 's/<[^>]*>//g') ;;
+      esac
+      new_id=$(_tg_ensure_bottom_message "$_body")
+      [ -n "$new_id" ] && { echo "[tg] 进度面板经降级路径 $_lvl 发送成功（L0 被拒，拒绝原因见上方 [tg] 日志）" >&2; break; }
+    done
+  fi
   [ -n "$new_id" ] && echo "$new_id" > "$PROGRESS_MSG_ID_FILE"
   return 0
 }
