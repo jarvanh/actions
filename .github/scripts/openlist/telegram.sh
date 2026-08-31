@@ -97,19 +97,21 @@ send_telegram_message() {
 
 # 发送 Telegram 消息并返回 message_id
 # 用法: _tg_send_and_get_id <message> [parse_mode=HTML]
-# 输出: message_id（失败时为空）
+# 输出: message_id（失败时为空；失败原因写 job log stderr——响应摘要+消息长度，
+# 供排查 4096 超长/HTML 解析拒绝/网络等）
 _tg_send_and_get_id() {
   local message="$1"
   local parse_mode="${2:-HTML}"
-  local response
+  local response _mid
   response=$(curl -s -m 15 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
     -d chat_id="${TELEGRAM_CHAT_ID}" \
     -d parse_mode="$parse_mode" \
     --data-urlencode text="$message" 2>/dev/null) || true
-  # jq 对非 JSON 响应（如网关 502 页面）返回非零 → set -e 下会沿
-  # _tg_ensure_bottom_message → _progress_refresh → progress_update 调用链
-  # 传染并终止整个 step；通知属 fire-and-forget，失败只吞不传
-  echo "$response" | jq -r '.result.message_id // empty' 2>/dev/null || true
+  _mid=$(printf '%s' "$response" | jq -r '.result.message_id // empty' 2>/dev/null || true)
+  if [ -z "$_mid" ]; then
+    echo "[tg] sendMessage 失败: 响应=$(printf '%s' "$response" | head -c 200) 消息长度=$(printf '%s' "$message" | wc -c | tr -d ' ')" >&2
+  fi
+  printf '%s' "$_mid"
 }
 
 # 删除 Telegram 消息
