@@ -512,16 +512,16 @@ _progress_render() {
             [ -z "$_line" ] && continue
             _lab_n=$((_lab_n + 1))
             if [ "$_d" -eq 0 ]; then
-              msg+="${_ind}<code>▸ ${_line#▸ }</code>"$'\n'
+              msg+="<code>${_ind}▸ ${_line#▸ }</code>"$'\n'
             elif [ "$_lab_n" -eq "$_lab_total" ]; then
-              msg+="${_ind}<code>└─ ${_line#▸ }</code>"$'\n'
+              msg+="<code>${_ind}└─ ${_line#▸ }</code>"$'\n'
             else
-              msg+="${_ind}<code>│  ${_line#▸ }</code>"$'\n'
+              msg+="<code>${_ind}│  ${_line#▸ }</code>"$'\n'
             fi
           done < "$_rf"
           # 统计行与后续块对齐标签文本列（+4 格），同样等宽渲染
           local _ind_sub="${_ind}    "
-          [ -f "$_sf" ] && msg+="${_ind_sub}<code>$(cat "$_sf")</code>"$'\n'
+          [ -f "$_sf" ] && msg+="<code>${_ind_sub}$(cat "$_sf")</code>"$'\n'
           # 批次历史回显: 最近 N 个已完成批次的快照（当前批次状态由 rows/stats 表达，不在此重复）
           # 多行块需逐行加缩进前缀，否则仅首行对齐
           local _bh
@@ -530,20 +530,20 @@ _progress_render() {
           # —— 当前状态不沉到历史后面。note 行统一用 "· " 前缀: 状态注记不占树
           # 节点位，├─/└─ 只留给真实条目（2026-08-31 用户反馈: 双 └─ 同级致层次混淆）
           if [ "$_d" -eq 0 ] && [ -f "$_nf" ]; then
-            msg+="${_ind_sub}<code>· $(cat "$_nf")</code>"$'\n'
+            msg+="<code>${_ind_sub}· $(cat "$_nf")</code>"$'\n'
           fi
           if [ -n "$_bh" ]; then
             msg+="$(tree_lines "$_bh" | sed 's/^  //' | sed "s/^/${_ind_sub}/" | sed 's/^\(.*\)$/<code>\1<\/code>/')"$'\n'
           fi
         else
-          [ -f "$_sf" ] && msg+="${_ind}$(cat "$_sf")"$'\n'
+          [ -f "$_sf" ] && msg+="<code>${_ind}$(cat "$_sf")</code>"$'\n'
           _raw="$(_progress_active_last < "$_rf")"
           # tree_lines 每行自带 2 空格树干前缀（tree_conn），剥掉后
           # 由本层缩进统一控制，保证树与统计行同列对齐
           _tree="$(tree_lines "$_raw" | sed 's/^  //')"
           while IFS= read -r _line; do
             [ -z "$_line" ] && continue
-            msg+="${_ind_rows}${_line}"$'\n'
+            msg+="<code>${_ind_rows}${_line}</code>"$'\n'
           done <<< "$_tree"
         fi
         # 细粒度状态（深层 detail）挂在最末；标签型块时对齐末条标签文本列（+4 格），等宽渲染
@@ -552,9 +552,9 @@ _progress_render() {
         if [ "$_is_label" -eq 1 ] && [ "$_d" -eq 0 ]; then
           :
         elif [ "$_is_label" -eq 1 ] && [ -f "$_nf" ]; then
-          msg+="${_ind}    <code>· $(cat "$_nf")</code>"$'\n'
+          msg+="<code>${_ind}    · $(cat "$_nf")</code>"$'\n'
         elif [ -f "$_nf" ]; then
-          msg+="${_ind_rows}<code>· $(cat "$_nf")</code>"$'\n'
+          msg+="<code>${_ind_rows}· $(cat "$_nf")</code>"$'\n'
         fi
       done
     fi
