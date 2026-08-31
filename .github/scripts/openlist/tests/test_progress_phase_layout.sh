@@ -126,7 +126,7 @@ chk "L4b 标签行带 code 树干前缀（层级归属可见）" \
 
 # ---------- L5: 深层 detail 落到本层 note 行 ----------
 chk "L5a 深层 detail 渲染为 note 行（code 等宽）" \
-  "$(line_of '巩固')" "              <code>└─ ${BATCH_DETAIL}</code>"
+  "$(line_of '巩固')" "              <code>· ${BATCH_DETAIL}</code>"
 chk "L5b 深层 detail 不污染任务行（任务行无 detail）" \
   "$(line_of 'wopan176Crypt/0')" "  └─ wopan176Crypt/0"
 
@@ -173,13 +173,13 @@ chk "L7c 目标端行无 detail 黏连" \
 rm -f "$PROGRESS_LAST_UPDATE_FILE"
 progress_transfer_tick "传输中: 2.469 GiB / 4.976 GiB" "" >/dev/null
 chk "L7d-1 传输中独立成行（统计行下、└─ 连接）" \
-  "$(line_of '传输中')" "         <code>└─ 传输中: 2.469 GiB / 4.976 GiB</code>"
+  "$(line_of '传输中')" "         <code>· 传输中: 2.469 GiB / 4.976 GiB</code>"
 
 _progress_batch_history_add 47 "❌ 批次 47：共 21 个文件，成功 0 · 失败 22"
 rm -f "$PROGRESS_LAST_UPDATE_FILE"
 progress_transfer_tick "传输中: 2.469 GiB / 4.976 GiB" "" >/dev/null
 chk "L7d-2 历史非空时 note 用 ├─ 连接" \
-  "$(line_of '传输中')" "         <code>├─ 传输中: 2.469 GiB / 4.976 GiB</code>"
+  "$(line_of '传输中')" "         <code>· 传输中: 2.469 GiB / 4.976 GiB</code>"
 chk "L7d-3 批次历史在 note 之后渲染（缩进在 code 内，渲染器既有行为）" \
   "$(line_of '批次 47')" "<code>         └─ ❌ 批次 47：共 21 个文件，成功 0 · 失败 22</code>"
 
