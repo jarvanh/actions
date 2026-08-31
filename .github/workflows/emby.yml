@@ -492,12 +492,19 @@ jobs:
             echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
           }
 
-          # 同步 OpenList 数据目录（体积小，保证下轮恢复的存储配置与 token 最新）
+          # 同步 OpenList 数据目录：仅当实例真正配置了存储（fs/list 实测通过）才回传，防止空数据覆盖远端
           if [ -x /usr/local/bin/openlist ] && curl -s http://127.0.0.1:5244/ping >/dev/null 2>&1; then
-            tar -I 'zstd -3 -T0' -cf /tmp/openlist-data.tar.zst -C /opt/openlist . 2>/dev/null \
-              && rclone copyto /tmp/openlist-data.tar.zst dropbox:self-hosted/openlist-data.tar.zst -vv \
-              && rm -f /tmp/openlist-data.tar.zst \
-              || echo "[WARNING] OpenList data persist skipped"
+            OTOKEN=$(cat /tmp/openlist-token 2>/dev/null || true)
+            if [ -n "$OTOKEN" ] && curl -s -X POST http://127.0.0.1:5244/api/fs/list \
+                 -H "Authorization: $OTOKEN" -H 'Content-Type: application/json' \
+                 -d '{"path":"/onedrive","page":1,"per_page":1}' | jq -e '.code == 200' >/dev/null 2>&1; then
+              tar -I 'zstd -3 -T0' -cf /tmp/openlist-data.tar.zst -C /opt/openlist . 2>/dev/null \
+                && rclone copyto /tmp/openlist-data.tar.zst dropbox:self-hosted/openlist-data.tar.zst -vv \
+                && rm -f /tmp/openlist-data.tar.zst \
+                || echo "[WARNING] OpenList data persist failed"
+            else
+              echo "[WARNING] OpenList has no working storage; skip persist to protect remote tarball"
+            fi
           fi
 
           if [ ! -f /tmp/EMBY_READY_FOR_BACKUP ]; then
