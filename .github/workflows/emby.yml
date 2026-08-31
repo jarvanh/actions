@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       playback_mode:
-        description: "播放模式：302 = OpenList 直链（默认）；direct = 服务器中转回退"
+        description: "播放模式：302 = OpenList 直链（默认）；direct = 服务器中转。常设开关可用仓库变量 EMBY_PLAYBACK_MODE（302/direct）"
         type: choice
         default: "302"
         options:
@@ -22,7 +22,7 @@ on:
     # types: started
 
 env:
-  PLAYBACK_MODE_INPUT: ${{ github.event.inputs.playback_mode || '302' }}
+  PLAYBACK_MODE_INPUT: ${{ github.event.inputs.playback_mode || vars.EMBY_PLAYBACK_MODE || '302' }}
 
 jobs:
   build:
