@@ -154,9 +154,17 @@ jobs:
               tail -30 /opt/logs/openlist.log 2>/dev/null | sed -E 's/(password|token|secret)("?:?)[ =:]*[^ ,}]*/\1 [redacted]/Ig' || true
               return 0
             fi
+            # OpenList 专有隧道（维护入口，密码 = OPENLIST_ADMIN_PASSWORD）
+            cloudflared tunnel create oe >/dev/null 2>&1 || true
+            cloudflared tunnel route dns oe oe.'${{ secrets.VD }}'.eu.org >/dev/null 2>&1 || true
+            OE_TOKEN=$(cloudflared tunnel token oe 2>/dev/null) || true
+            if [ -n "$OE_TOKEN" ]; then
+              nohup cloudflared tunnel run --url http://127.0.0.1:5244 --token "$OE_TOKEN" > /opt/logs/cloudflared-oe.log 2>&1 &
+              echo "OpenList 维护隧道已启动 (oe)"
+            fi
 
-            # 专用密码（独立于 openlist.yml 的 OPENLIST_ADMIN_PASSWORD，互不影响）
-            OPENLIST_PW="${{ secrets.EMBY_OPENLIST_ADMIN_PASSWORD }}"
+            # 管理密码 = OPENLIST_ADMIN_PASSWORD（与转存线实例同一密码，oe 隧道维护入口用同一套登录）
+            OPENLIST_PW="${{ secrets.OPENLIST_ADMIN_PASSWORD }}"
             if [ -z "$OPENLIST_PW" ]; then OPENLIST_PW=$(openssl rand -hex 16); fi
 
             # 先尝试直接登录：正常情况下恢复分支的库内密码即上次设置值，无需重置
