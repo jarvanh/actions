@@ -418,7 +418,7 @@ jobs:
           if [ "$MODE" = "302" ]; then
             OK=0
             for i in 1 2 3; do
-              TOK=$(cat /tmp/openlist-token 2>/dev/null)
+              TOK=$(cat /tmp/openlist-token 2>/dev/null || true)
               if curl -fsS -m 5 http://127.0.0.1:8095/emby/System/Info/Public >/dev/null 2>&1 \
                  && [ -n "$TOK" ] \
                  && curl -s -m 5 -X POST http://127.0.0.1:5244/api/fs/list \
@@ -453,7 +453,7 @@ jobs:
             sleep 60
             MODE=$(cat /tmp/PLAYBACK_MODE 2>/dev/null || echo direct)
             [ "$MODE" = "direct" ] && continue
-            TOK=$(cat /tmp/openlist-token 2>/dev/null)
+            TOK=$(cat /tmp/openlist-token 2>/dev/null || true)
             if curl -fsS -m 5 http://127.0.0.1:8095/emby/System/Info/Public >/dev/null 2>&1 \
                && [ -n "$TOK" ] \
                && curl -s -m 5 -X POST http://127.0.0.1:5244/api/fs/list \
