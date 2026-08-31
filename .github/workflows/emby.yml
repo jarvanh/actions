@@ -124,14 +124,6 @@ jobs:
                 && RESTORED=true \
                 || echo "::warning::openlist-emby 恢复失败"
             fi
-            # 迁移兜底：openlist-emby 目录尚未生成时，从旧 tarball 迁移一次
-            #（目录格式首次回传并验证后，此兜底与远端 tarball 可一并移除）
-            if [ "$RESTORED" = "false" ] && rclone copy dropbox:self-hosted/openlist-data.tar.zst /tmp/ 2>/dev/null && [ -s /tmp/openlist-data.tar.zst ]; then
-              tar -I zstd -xf /tmp/openlist-data.tar.zst -C /opt/openlist \
-                && rm -f /tmp/openlist-data.tar.zst \
-                && RESTORED=true \
-                || { echo "::warning::restore failed, falling back to fresh init"; rm -rf /opt/openlist/*; }
-            fi
             if [ "$RESTORED" = "true" ]; then
               echo "OpenList data restored from Dropbox"
               # 归一化 config.json 的绝对路径（数据可能来自其他机器/系统）
