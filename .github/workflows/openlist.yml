@@ -157,7 +157,8 @@ jobs:
           sudo mkdir -p /opt/openlist-data
           sudo chmod 0777 /opt/openlist-data
           rclone copy dropbox:self-hosted/openlist/data /opt/openlist-data \
-            --exclude "data.db-wal" --exclude "data.db-shm" --exclude "data.db-journal"
+            --exclude "data.db-wal" --exclude "data.db-shm" --exclude "data.db-journal" \
+            --exclude "log/**" --exclude "temp/**"
           echo "拉取完成: $(ls -la /opt/openlist-data/ | tail -n +2 | wc -l) 个条目"
           # 记录拉取时 db 指纹（回传前对比: 未变化则跳过回传，
           # 避免极端并发场景下用过期副本覆盖远端新配置）
@@ -436,7 +437,8 @@ jobs:
             echo "db 已变化（${OPENLIST_DB_MD5_PULL:-none} → ${CUR_MD5}），sync 回传..."
             # 排除 -wal/-shm/-journal 后 sync 镜像（本地为权威副本）
             rclone sync /opt/openlist-data dropbox:self-hosted/openlist/data \
-              --exclude "data.db-wal" --exclude "data.db-shm" --exclude "data.db-journal"
+              --exclude "data.db-wal" --exclude "data.db-shm" --exclude "data.db-journal" \
+              --exclude "log/**" --exclude "temp/**"
             # sync 的 exclude 不会删远端对应文件，显式清理可能残留的撕裂源
             rclone delete dropbox:self-hosted/openlist/data \
               --include "data.db-wal" --include "data.db-shm" --include "data.db-journal" 2>/dev/null || true
