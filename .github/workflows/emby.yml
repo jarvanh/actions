@@ -64,7 +64,11 @@ jobs:
           # writes 模式：302 直链播放不经过挂载，本地仅承载扫描/探测/回退流量，磁盘占用≈0
           sudo mkdir -p /onedrive /opt/logs
           sudo chown -R runner:runner /opt/logs
+          # root 挂载进程使用独立配置副本：刷新 token 时不会重写 runner 的原始 rclone.conf
+          sudo cp ~/.config/rclone/rclone.conf /opt/rclone-root.conf
+          sudo chmod 600 /opt/rclone-root.conf
           sudo nohup rclone mount onedrive: /onedrive \
+            --config /opt/rclone-root.conf \
             --allow-other --umask 000 --attr-timeout 10m --no-gzip-encoding \
             --vfs-cache-mode writes \
             --dir-cache-time 30m \
@@ -97,100 +101,112 @@ jobs:
       - name: install openlist
         if: env.PLAYBACK_MODE_INPUT != 'direct'
         run: |
-          sudo mkdir -p /opt/openlist
-          sudo chown -R runner:runner /opt/openlist /opt/logs
+          main() {
+            sudo mkdir -p /opt/openlist
+            sudo chown -R runner:runner /opt/openlist /opt/logs
 
-          # 下载 OpenList（失败不致命，健康检查会回退 direct）
-          ASSET_URL=$(curl -s https://api.github.com/repos/OpenListTeam/OpenList/releases/latest \
-            | grep -o '"browser_download_url": *"[^"]*openlist-linux-amd64.tar.gz"' | head -1 | cut -d'"' -f4)
-          if [ -n "$ASSET_URL" ] && curl -fsSL -o /tmp/openlist.tar.gz "$ASSET_URL"; then
-            mkdir -p /tmp/openlist-pkg && tar -xzf /tmp/openlist.tar.gz -C /tmp/openlist-pkg
-            find /tmp/openlist-pkg -type f -name openlist -exec sudo install -m 0755 {} /usr/local/bin/openlist \;
-          fi
-          if ! command -v openlist >/dev/null 2>&1; then
-            echo "::warning::OpenList binary unavailable, 302 链路将回退 direct"
-            exit 0
-          fi
+            # 下载 OpenList（失败不致命，健康检查会回退 direct）
+            ASSET_URL=$(curl -s https://api.github.com/repos/OpenListTeam/OpenList/releases/latest \
+              | grep -o '"browser_download_url": *"[^"]*openlist-linux-amd64.tar.gz"' | head -1 | cut -d'"' -f4 || true)
+            if [ -n "$ASSET_URL" ] && curl -fsSL -o /tmp/openlist.tar.gz "$ASSET_URL"; then
+              mkdir -p /tmp/openlist-pkg && tar -xzf /tmp/openlist.tar.gz -C /tmp/openlist-pkg
+              find /tmp/openlist-pkg -type f -name openlist -exec sudo install -m 0755 {} /usr/local/bin/openlist \;
+            fi
+            if ! command -v openlist >/dev/null 2>&1; then
+              echo "::warning::OpenList binary unavailable, 302 链路将回退 direct"
+              return 0
+            fi
 
-          # 优先恢复 Dropbox 上的数据目录（含自有存储配置与 token）
-          if rclone copy dropbox:self-hosted/openlist-data.tar.zst /tmp/ 2>/dev/null && [ -s /tmp/openlist-data.tar.zst ]; then
-            tar -I zstd -xf /tmp/openlist-data.tar.zst -C /opt/openlist
-            rm -f /tmp/openlist-data.tar.zst
-            echo "OpenList data restored from Dropbox"
-          fi
+            # 优先恢复 Dropbox 上的数据目录（含自有存储配置与 token）
+            if rclone copy dropbox:self-hosted/openlist-data.tar.zst /tmp/ 2>/dev/null && [ -s /tmp/openlist-data.tar.zst ]; then
+              tar -I zstd -xf /tmp/openlist-data.tar.zst -C /opt/openlist \
+                && rm -f /tmp/openlist-data.tar.zst \
+                && echo "OpenList data restored from Dropbox" \
+                || { echo "::warning::restore failed, falling back to fresh init"; rm -rf /opt/openlist/*; }
+            fi
 
-          nohup openlist server --data /opt/openlist > /opt/logs/openlist.log 2>&1 &
-          for i in $(seq 1 30); do
-            curl -fsS http://127.0.0.1:5244/ping >/dev/null 2>&1 && break
-            sleep 1
-          done
-          if ! curl -fsS http://127.0.0.1:5244/ping >/dev/null 2>&1; then
-            # 兼容不同版本的参数位置
-            pkill -f "openlist server" 2>/dev/null || true
-            sleep 1
-            nohup openlist --data /opt/openlist server > /opt/logs/openlist.log 2>&1 &
+            nohup openlist server --data /opt/openlist > /opt/logs/openlist.log 2>&1 &
             for i in $(seq 1 30); do
               curl -fsS http://127.0.0.1:5244/ping >/dev/null 2>&1 && break
               sleep 1
             done
-          fi
-          if ! curl -fsS http://127.0.0.1:5244/ping >/dev/null 2>&1; then
-            echo "::warning::OpenList failed to start, 302 链路将回退 direct"
-            exit 0
-          fi
+            if ! curl -fsS http://127.0.0.1:5244/ping >/dev/null 2>&1; then
+              # 兼容不同版本的参数位置
+              pkill -f "openlist server" 2>/dev/null || true
+              sleep 1
+              nohup openlist --data /opt/openlist server > /opt/logs/openlist.log 2>&1 &
+              for i in $(seq 1 30); do
+                curl -fsS http://127.0.0.1:5244/ping >/dev/null 2>&1 && break
+                sleep 1
+              done
+            fi
+            if ! curl -fsS http://127.0.0.1:5244/ping >/dev/null 2>&1; then
+              echo "::warning::OpenList failed to start, 302 链路将回退 direct"
+              return 0
+            fi
 
-          # 专用密码（独立于 openlist.yml 的 OPENLIST_ADMIN_PASSWORD，互不影响）
-          OPENLIST_PW="${{ secrets.EMBY_OPENLIST_ADMIN_PASSWORD }}"
-          if [ -z "$OPENLIST_PW" ]; then OPENLIST_PW=$(openssl rand -hex 16); fi
+            # 专用密码（独立于 openlist.yml 的 OPENLIST_ADMIN_PASSWORD，互不影响）
+            OPENLIST_PW="${{ secrets.EMBY_OPENLIST_ADMIN_PASSWORD }}"
+            if [ -z "$OPENLIST_PW" ]; then OPENLIST_PW=$(openssl rand -hex 16); fi
 
-          # 先尝试直接登录：正常情况下恢复分支的库内密码即上次设置值，无需重置
-          TOKEN=$(curl -s -X POST http://127.0.0.1:5244/api/auth/login \
-            -H 'Content-Type: application/json' \
-            -d "{\"username\":\"admin\",\"password\":\"$OPENLIST_PW\"}" | jq -r '.data // empty')
-          if [ -z "$TOKEN" ]; then
-            # 登录失败才重置：全新库（admin 随机密码）或库内密码与 secret 不一致时自愈
-            openlist admin set --data /opt/openlist "$OPENLIST_PW" >/dev/null 2>&1 \
-              || openlist admin set "$OPENLIST_PW" --data /opt/openlist >/dev/null 2>&1
+            # 先尝试直接登录：正常情况下恢复分支的库内密码即上次设置值，无需重置
             TOKEN=$(curl -s -X POST http://127.0.0.1:5244/api/auth/login \
               -H 'Content-Type: application/json' \
-              -d "{\"username\":\"admin\",\"password\":\"$OPENLIST_PW\"}" | jq -r '.data // empty')
-          fi
-          if [ -z "$TOKEN" ]; then
-            echo "::warning::OpenList login failed, 302 链路将回退 direct"
-            exit 0
-          fi
-          printf '%s' "$TOKEN" > /tmp/openlist-token
-          chmod 600 /tmp/openlist-token
-
-          # 全新初始化：用 rclone 凭据注册 OneDrive 存储（非致命，失败则回退）
-          STORAGE_COUNT=$(curl -s http://127.0.0.1:5244/api/admin/storage/list \
-            -H "Authorization: $TOKEN" | jq -r '.data.content // [] | length' 2>/dev/null || echo 0)
-          if [ "${STORAGE_COUNT:-0}" = "0" ]; then
-            SECTION=$(awk '/^\[onedrive\]/{f=1;next} /^\[/{f=0} f' "$HOME/.config/rclone/rclone.conf")
-            RID=$(printf '%s\n' "$SECTION" | grep -o '^[[:space:]]*client_id[[:space:]]*=.*' | head -1 | sed 's/^[[:space:]]*client_id[[:space:]]*=[[:space:]]*//')
-            RSEC=$(printf '%s\n' "$SECTION" | grep -o '^[[:space:]]*client_secret[[:space:]]*=.*' | head -1 | sed 's/^[[:space:]]*client_secret[[:space:]]*=[[:space:]]*//')
-            RTOK=$(printf '%s\n' "$SECTION" | grep -o '^[[:space:]]*token[[:space:]]*=.*' | head -1 | sed 's/^[[:space:]]*token[[:space:]]*=[[:space:]]*//' | jq -r '.refresh_token // empty' 2>/dev/null)
-            if [ -n "$RID" ] && [ -n "$RTOK" ]; then
-              ADDITION=$(jq -nc --arg rt "$RTOK" --arg cid "$RID" --arg csec "$RSEC" \
-                '{region:"global",is_sharepoint:false,use_online_api:true,api_url_address:"https://api.oplist.org/onedrive/renewapi",client_id:$cid,client_secret:$csec,redirect_uri:"https://api.oplist.org/onedrive/callback",refresh_token:$rt,site_id:"",chunk_size:5}')
-              BODY=$(jq -nc --arg add "$ADDITION" \
-                '{mount_path:"/onedrive",driver:"Onedrive",cache_expiration:30,status:"work",order:0,addition:$add}')
-              if curl -s -X POST http://127.0.0.1:5244/api/admin/storage/create \
-                   -H "Authorization: $TOKEN" -H 'Content-Type: application/json' -d "$BODY" >/dev/null \
-                 && curl -s -X POST http://127.0.0.1:5244/api/fs/list \
-                      -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
-                      -d '{"path":"/onedrive","page":1,"per_page":10}' | jq -e '.code == 200' >/dev/null; then
-                echo "OpenList OneDrive storage provisioned"
-                tar -I 'zstd -3 -T0' -cf /tmp/openlist-data.tar.zst -C /opt/openlist . \
-                  && rclone copyto /tmp/openlist-data.tar.zst dropbox:self-hosted/openlist-data.tar.zst -vv \
-                  && rm -f /tmp/openlist-data.tar.zst
-              else
-                echo "::warning::OpenList storage provisioning failed, 302 链路将回退 direct"
-              fi
-            else
-              echo "::warning::rclone.conf 缺少 onedrive client_id/refresh_token，跳过自动初始化"
+              -d "{\"username\":\"admin\",\"password\":\"$OPENLIST_PW\"}" | jq -r '.data // empty' || true)
+            if [ -z "$TOKEN" ]; then
+              # 登录失败才重置：全新库（admin 随机密码）或库内密码与 secret 不一致时自愈
+              openlist admin set --data /opt/openlist "$OPENLIST_PW" >/dev/null 2>&1 \
+                || openlist admin set "$OPENLIST_PW" --data /opt/openlist >/dev/null 2>&1 \
+                || true
+              TOKEN=$(curl -s -X POST http://127.0.0.1:5244/api/auth/login \
+                -H 'Content-Type: application/json' \
+                -d "{\"username\":\"admin\",\"password\":\"$OPENLIST_PW\"}" | jq -r '.data // empty' || true)
             fi
-          fi
+            if [ -z "$TOKEN" ]; then
+              echo "::warning::OpenList login failed, 302 链路将回退 direct"
+              return 0
+            fi
+            printf '%s' "$TOKEN" > /tmp/openlist-token
+            chmod 600 /tmp/openlist-token
+
+            # 全新初始化：用 rclone 凭据注册 OneDrive 存储（非致命，失败则回退）
+            STORAGE_COUNT=$(curl -s http://127.0.0.1:5244/api/admin/storage/list \
+              -H "Authorization: $TOKEN" | jq -r '.data.content // [] | length' 2>/dev/null || echo 0)
+            if [ "${STORAGE_COUNT:-0}" = "0" ]; then
+              CONF="$HOME/.config/rclone/rclone.conf"
+              sudo ls -la "$(dirname "$CONF")" || true
+              SECTION=$(awk '/^\[onedrive\]/{f=1;next} /^\[/{f=0} f' "$CONF" 2>/dev/null || true)
+              if [ -z "$SECTION" ]; then
+                SECTION=$(sudo awk '/^\[onedrive\]/{f=1;next} /^\[/{f=0} f' "$CONF" 2>/dev/null || true)
+                sudo chown runner:runner "$CONF" 2>/dev/null || true
+              fi
+              RID=$(printf '%s\n' "$SECTION" | grep -o '^[[:space:]]*client_id[[:space:]]*=.*' | head -1 | sed 's/^[[:space:]]*client_id[[:space:]]*=[[:space:]]*//' || true)
+              RSEC=$(printf '%s\n' "$SECTION" | grep -o '^[[:space:]]*client_secret[[:space:]]*=.*' | head -1 | sed 's/^[[:space:]]*client_secret[[:space:]]*=[[:space:]]*//' || true)
+              RTOK=$(printf '%s\n' "$SECTION" | grep -o '^[[:space:]]*token[[:space:]]*=.*' | head -1 | sed 's/^[[:space:]]*token[[:space:]]*=[[:space:]]*//' | jq -r '.refresh_token // empty' 2>/dev/null || true)
+              if [ -n "$RID" ] && [ -n "$RTOK" ]; then
+                ADDITION=$(jq -nc --arg rt "$RTOK" --arg cid "$RID" --arg csec "$RSEC" \
+                  '{region:"global",is_sharepoint:false,use_online_api:true,api_url_address:"https://api.oplist.org/onedrive/renewapi",client_id:$cid,client_secret:$csec,redirect_uri:"https://api.oplist.org/onedrive/callback",refresh_token:$rt,site_id:"",chunk_size:5}')
+                BODY=$(jq -nc --arg add "$ADDITION" \
+                  '{mount_path:"/onedrive",driver:"Onedrive",cache_expiration:30,status:"work",order:0,addition:$add}')
+                if curl -s -X POST http://127.0.0.1:5244/api/admin/storage/create \
+                     -H "Authorization: $TOKEN" -H 'Content-Type: application/json' -d "$BODY" >/dev/null \
+                   && curl -s -X POST http://127.0.0.1:5244/api/fs/list \
+                        -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
+                        -d '{"path":"/onedrive","page":1,"per_page":10}' | jq -e '.code == 200' >/dev/null; then
+                  echo "OpenList OneDrive storage provisioned"
+                  tar -I 'zstd -3 -T0' -cf /tmp/openlist-data.tar.zst -C /opt/openlist . \
+                    && rclone copyto /tmp/openlist-data.tar.zst dropbox:self-hosted/openlist-data.tar.zst -vv \
+                    && rm -f /tmp/openlist-data.tar.zst \
+                    || echo "::warning::provision persist failed"
+                else
+                  echo "::warning::OpenList storage provisioning failed, 302 链路将回退 direct"
+                fi
+              else
+                echo "::warning::rclone.conf 缺少 onedrive client_id/refresh_token，跳过自动初始化"
+              fi
+            fi
+          }
+          main || echo "::warning::install openlist failed, 302 链路将回退 direct"
       - name: install emby
         run: |
           set -euo pipefail
@@ -332,19 +348,20 @@ jobs:
       - name: install ge2o
         if: env.PLAYBACK_MODE_INPUT != 'direct'
         run: |
-          mkdir -p /opt/ge2o
-          ASSET_URL=$(curl -s https://api.github.com/repos/AmbitiousJun/go-emby2openlist/releases/latest \
-            | grep -o '"browser_download_url": *"[^"]*ge2o-linux_amd64"' | head -1 | cut -d'"' -f4)
-          if [ -n "$ASSET_URL" ] && curl -fsSL -o /opt/ge2o/ge2o "$ASSET_URL"; then
-            chmod +x /opt/ge2o/ge2o
-          fi
-          if [ ! -x /opt/ge2o/ge2o ]; then
-            echo "::warning::ge2o binary unavailable, 302 链路将回退 direct"
-            exit 0
-          fi
+          main() {
+            mkdir -p /opt/ge2o
+            ASSET_URL=$(curl -s https://api.github.com/repos/AmbitiousJun/go-emby2openlist/releases/latest \
+              | grep -o '"browser_download_url": *"[^"]*ge2o-linux_amd64"' | head -1 | cut -d'"' -f4 || true)
+            if [ -n "$ASSET_URL" ] && curl -fsSL -o /opt/ge2o/ge2o "$ASSET_URL"; then
+              chmod +x /opt/ge2o/ge2o
+            fi
+            if [ ! -x /opt/ge2o/ge2o ]; then
+              echo "::warning::ge2o binary unavailable, 302 链路将回退 direct"
+              return 0
+            fi
 
-          OPENLIST_TOKEN=$(cat /tmp/openlist-token 2>/dev/null || echo "")
-          APISECRET=$(openssl rand -hex 16)
+            OPENLIST_TOKEN=$(cat /tmp/openlist-token 2>/dev/null || echo "")
+            APISECRET=$(openssl rand -hex 16)
           cat > /opt/ge2o/config.yml <<GE2O_EOF
           emby:
             host: http://127.0.0.1:8096
@@ -375,14 +392,16 @@ jobs:
               disable: true
           GE2O_EOF
 
-          cd /opt/ge2o
-          GIN_MODE=release nohup ./ge2o > /opt/logs/ge2o.log 2>&1 &
-          sleep 3
-          if curl -fsS -m 5 http://127.0.0.1:8095/emby/System/Info/Public >/dev/null 2>&1; then
-            echo "ge2o is up on :8095"
-          else
-            echo "::warning::ge2o not responding yet, 健康检查会决定最终模式"
-          fi
+            cd /opt/ge2o
+            GIN_MODE=release nohup ./ge2o > /opt/logs/ge2o.log 2>&1 &
+            sleep 3
+            if curl -fsS -m 5 http://127.0.0.1:8095/emby/System/Info/Public >/dev/null 2>&1; then
+              echo "ge2o is up on :8095"
+            else
+              echo "::warning::ge2o not responding yet, 健康检查会决定最终模式"
+            fi
+          }
+          main || echo "::warning::install ge2o failed, 302 链路将回退 direct"
       - name: run cloudflared
         run: |
           MODE="${PLAYBACK_MODE_INPUT:-302}"
