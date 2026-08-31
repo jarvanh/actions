@@ -12,12 +12,13 @@
 #   8. 重试后仍未落盘（后端内容性拒收）→ 顽固缺失转修复管线（换方法）
 #   9. 重试一个都没成功 → 全部直接转修复管线（不二次重启复核）
 #   10. 后端写入全拒（≥3 触碰文件 0 落盘 + 重试 0 成功）→ 置 BATCH_BACKEND_DEAD
+#       （中止剩余批次；本批顽固缺失仍进修复管线）
 #   11. 修复管线后重启复核: 假成功剔除 + 方法拉黑
 #   12. 复核重启失败 → 保留修复成果不误删
 #   13. 全批 405 直接失败（0 Copied、≥3 文件）→ 不再跳过巩固: 重启复核+串行重试,
-#       100% 缺失且重试 0 成功 → 后端全拒熔断（BATCH_BACKEND_DEAD，跳过修复管线）
+#       100% 缺失且重试 0 成功 → 熔断中止剩余批次，本批仍转修复管线
 #   14. 全批 405 但不足熔断门槛（<3 文件）→ 顽固缺失转修复管线换方法
-#   15. 直接失败非 405 主导（内容性失败混合）→ 不熔断，转修复管线
+#   15. 直接失败非 405 主导（内容性失败混合）→ 同样熔断+转修复管线（熔断不豁免修复）
 set -u
 PASS=0; FAIL=0
 ok()  { PASS=$((PASS+1)); echo "PASS: $1"; }
@@ -281,9 +282,9 @@ RETRY_COPY_OK=0         # 串行重试全部 405
 OUT=$(run_consolidate 0 "$LOG")
 [ "$(calls /tmp/bc_copy_calls)" = "1" ] && ok "10a 串行重试执行" || bad "10a: copy=$(calls /tmp/bc_copy_calls)"
 [ "$(cat /tmp/bc_backend_dead 2>/dev/null)" = "1" ] && ok "10b 全拒 → 置 BATCH_BACKEND_DEAD" || bad "10b: dead=$(cat /tmp/bc_backend_dead 2>/dev/null)"
-[ "$(calls /tmp/bc_fixpipe_calls)" = "0" ] && ok "10c 全拒 → 跳过修复管线" || bad "10c: fixpipe=$(calls /tmp/bc_fixpipe_calls)"
+[ "$(calls /tmp/bc_fixpipe_calls)" = "1" ] && ok "10c 全拒熔断 → 本批顽固缺失仍进修复管线" || bad "10c: fixpipe=$(calls /tmp/bc_fixpipe_calls)"
 echo "$OUT" | grep -q "后端写入全拒" && ok "10d 全拒提示" || bad "10d: $OUT"
-echo "$OUT" | grep -q "跳过修复管线" && ok "10e 跳过修复管线提示" || bad "10e: $OUT"
+echo "$OUT" | grep -q "已请求中止剩余批次" && ok "10e 中止剩余批次提示" || bad "10e: $OUT"
 
 # --- 场景11: 修复管线后重启复核 — 假成功条目被剔除，真成果保留 ---
 # 背景: 修复方法返回成功只代表 PUT 被接受，与批次传输假成功同源。修复
@@ -358,11 +359,11 @@ EOF
 printf 'other/old.mp4\n' > "$LSF_OUT"   # 真值清单: 后端啥都没有，全部缺失
 RETRY_COPY_OK=0         # 刷新驱动后的串行重试仍然 405
 OUT=$(run_consolidate 0 "$LOG")
-[ -f /tmp/bc_restarted ] && ok "13a 0 成功但有 405 失败 → 仍重启容器复核" || bad "12a: 未重启"
-[ "$(calls /tmp/bc_copy_calls)" = "1" ] && ok "13b 刷新驱动后串行重试执行" || bad "12b: copy=$(calls /tmp/bc_copy_calls)"
-[ "$(cat /tmp/bc_backend_dead 2>/dev/null)" = "1" ] && ok "13c 100% 缺失+重试 0 成功 → 后端全拒熔断" || bad "12c: dead=$(cat /tmp/bc_backend_dead 2>/dev/null)"
-[ "$(calls /tmp/bc_fixpipe_calls)" = "0" ] && ok "13d 熔断 → 跳过修复管线（防白耗下载）" || bad "12d: fixpipe=$(calls /tmp/bc_fixpipe_calls)"
-echo "$OUT" | grep -q "直接失败 4 个" && ok "13e 巩固入口提示含直接失败数" || bad "12e: $OUT"
+[ -f /tmp/bc_restarted ] && ok "13a 0 成功但有 405 失败 → 仍重启容器复核" || bad "13a: 未重启"
+[ "$(calls /tmp/bc_copy_calls)" = "1" ] && ok "13b 刷新驱动后串行重试执行" || bad "13b: copy=$(calls /tmp/bc_copy_calls)"
+[ "$(cat /tmp/bc_backend_dead 2>/dev/null)" = "1" ] && ok "13c 100% 缺失+重试 0 成功 → 后端全拒熔断" || bad "13c: dead=$(cat /tmp/bc_backend_dead 2>/dev/null)"
+[ "$(calls /tmp/bc_fixpipe_calls)" = "1" ] && ok "13d 熔断 → 本批顽固缺失仍进修复管线" || bad "13d: fixpipe=$(calls /tmp/bc_fixpipe_calls)"
+echo "$OUT" | grep -q "直接失败 4 个" && ok "13e 巩固入口提示含直接失败数" || bad "13e: $OUT"
 
 # --- 场景14: 全批 405 但不足熔断门槛（<3 文件）→ 顽固缺失转修复管线 ---
 setup
@@ -375,14 +376,14 @@ printf 'other/old.mp4\n' > "$LSF_OUT"
 RETRY_COPY_OK=0
 LSF_OUT2="/tmp/bc_lsf_out2.txt"; printf 'other/old.mp4\np405/file1.mp4\np405/file2.mp4\n' > "$LSF_OUT2"
 OUT=$(run_consolidate 0 "$LOG")
-[ "$(cat /tmp/bc_backend_dead 2>/dev/null)" = "0" ] && ok "14a 不足熔断门槛（2<3）→ 不熔断" || bad "13a: dead=$(cat /tmp/bc_backend_dead 2>/dev/null)"
-[ "$(calls /tmp/bc_fixpipe_calls)" = "1" ] && ok "14b 顽固缺失转修复管线（405 换方法落盘）" || bad "13b: fixpipe=$(calls /tmp/bc_fixpipe_calls)"
+[ "$(cat /tmp/bc_backend_dead 2>/dev/null)" = "0" ] && ok "14a 不足熔断门槛（2<3）→ 不熔断" || bad "14a: dead=$(cat /tmp/bc_backend_dead 2>/dev/null)"
+[ "$(calls /tmp/bc_fixpipe_calls)" = "1" ] && ok "14b 顽固缺失转修复管线（405 换方法落盘）" || bad "14b: fixpipe=$(calls /tmp/bc_fixpipe_calls)"
 diff <(sort /tmp/bc_files_from) <(printf 'p405/file1.mp4\np405/file2.mp4\n') >/dev/null 2>&1 \
-  && ok "14c 重试/修复清单 = 全部 405 失败文件" || bad "13c: $(cat /tmp/bc_files_from 2>/dev/null | tr '\n' ' ')"
+  && ok "14c 重试/修复清单 = 全部 405 失败文件" || bad "14c: $(cat /tmp/bc_files_from 2>/dev/null | tr '\n' ' ')"
 
-# --- 场景15: 直接失败非 405 主导（内容性失败）→ 不熔断，转修复管线 ---
-# 防回归: copied=0 批次若一律可熔断，全批名长/大小超限等内容性失败会误中止
-# 剩余批次且修复管线被跳过; 熔断只认 405 主导（wopan 8005 后端级拒收签名）
+# --- 场景15: 直接失败非 405 主导（内容性失败）→ 同样熔断+转修复管线 ---
+# 熔断不区分错误类型、也不豁免修复管线（2026-08-31 用户规格: 只要没成功就
+# 要进修复管线）; 熔断只负责中止剩余批次，本批顽固缺失仍换方法落盘
 setup
 BC_DEST="openlist:wopan176Crypt/0"
 cat > "$LOG" <<'EOF'
@@ -394,9 +395,9 @@ EOF
 printf 'other/old.mp4\n' > "$LSF_OUT"
 RETRY_COPY_OK=0
 OUT=$(run_consolidate 0 "$LOG")
-[ "$(cat /tmp/bc_backend_dead 2>/dev/null)" = "0" ] && ok "15a 内容性失败 → 不熔断" || bad "14a: dead=$(cat /tmp/bc_backend_dead 2>/dev/null)"
-[ "$(calls /tmp/bc_fixpipe_calls)" = "1" ] && ok "15b 转修复管线换方法落盘" || bad "14b: fixpipe=$(calls /tmp/bc_fixpipe_calls)"
-echo "$OUT" | grep -q "失败非 405 主导" && ok "15c 非 405 主导提示" || bad "14c: $OUT"
+[ "$(cat /tmp/bc_backend_dead 2>/dev/null)" = "1" ] && ok "15a 100% 缺失+重试 0 成功 → 熔断触发（不再区分错误类型）" || bad "15a: dead=$(cat /tmp/bc_backend_dead 2>/dev/null)"
+[ "$(calls /tmp/bc_fixpipe_calls)" = "1" ] && ok "15b 熔断下本批仍转修复管线" || bad "15b: fixpipe=$(calls /tmp/bc_fixpipe_calls)"
+echo "$OUT" | grep -q "后端写入全拒" && ok "15c 全拒提示" || bad "15c: $OUT"
 
 echo "-----"
 echo "PASS=$PASS FAIL=$FAIL"
