@@ -136,6 +136,44 @@ jobs:
           npm i -g clawhub
 
 
+      - name: Repair OpenClaw config (version drift)
+        run: |
+          set -euo pipefail
+          CFG="$HOME/.openclaw/openclaw.json"
+          if [ ! -s "$CFG" ]; then
+            echo "No openclaw.json present; nothing to repair."
+            exit 0
+          fi
+          BACKUP="$CFG.bak-repair-$(date +%Y%m%d-%H%M%S)"
+          cp "$CFG" "$BACKUP"
+          TMP="$(mktemp)"
+          jq '
+            del(.meta.lastTouchedAt)
+            | del(.browser.remoteCdpTimeoutMs, .browser.remoteCdpHandshakeTimeoutMs, .browser.color)
+            | (if (.browser.profiles? | type) == "object" then .browser.profiles |= with_entries(.value |= del(.color)) else . end)
+            | del(.agents.defaults.memorySearch)
+            | (if (.agents.entries? | type) == "object" then .agents.entries |= with_entries(.value |= (if type == "object" and (.heartbeat? | type) == "object" then .heartbeat |= del(.skipWhenBusy) else . end)) else . end)
+            | del(.tools.exec.timeoutSec)
+            | del(.commands.ownerDisplay)
+            | del(.gateway.controlUi.allowInsecureAuth)
+            | del(.gateway.tailscale.resetOnExit)
+            | (if .gateway.reload.mode == "restart" then .gateway.reload.mode = "hybrid" else . end)
+            | del(.skills.load.watchDebounceMs)
+            | del(.plugins.bundledDiscovery)
+            | (if (.agents? | type) == "object" then .agents.ownership = "explicit" else . end)
+          ' "$CFG" > "$TMP"
+          if jq -e . "$TMP" > /dev/null 2>&1; then
+            mv "$TMP" "$CFG"
+            echo "✅ Config repaired for version drift (backup: $BACKUP)"
+            echo "- removed keys unknown to the running OpenClaw version"
+            echo "- gateway.reload.mode: restart -> hybrid (if it was restart)"
+            echo "- agents.ownership set to explicit (multi-agent rosters)"
+          else
+            echo "❌ Repaired JSON invalid; keeping original config"
+            rm -f "$TMP"
+            exit 1
+          fi
+
       - name: Restore skill symlink for proactivity
         run: |
           set -euo pipefail
