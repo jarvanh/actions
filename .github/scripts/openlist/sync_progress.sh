@@ -187,8 +187,12 @@ _stop_batch_progress_thread() {
     rm -f "$PROGRESS_RT_PID_FILE"
   fi
   rm -f "$PROGRESS_RT_STOP_FILE" 2>/dev/null || true
-  # 传输中 note 随线程终止一并清理: 线程停了它必然过期，留着会被巩固阶段渲染成旧值
-  rm -f "$(_progress_slot_note 0)" 2>/dev/null || true
+  # 传输中 note 随线程终止一并清理（全深度）: 线程停了它必然过期，留着会被
+  # 巩固阶段渲染成旧值
+  local _c
+  for ((_c = 0; _c < PROGRESS_MAX_DEPTH; _c++)); do
+    rm -f "$(_progress_slot_note "$_c")" 2>/dev/null || true
+  done
 }
 
 # ===== 批次传输实时状态（rt 线程专用入口）=====
@@ -198,8 +202,12 @@ _stop_batch_progress_thread() {
 # 渲染位置: 统计行之下、批次历史之上（当前状态不沉底）。
 progress_transfer_tick() {
   local note="$1" stats="$2"
-  [ -n "$note" ] && echo "$note" > "$(_progress_slot_note 0)"
-  [ -n "$stats" ] && printf '%s\n' "$stats" > "$(_progress_slot_stats 0)"
+  # 写入当前批处理深度对应的槽位（浅层扁平面板 d=0；深层 auto-split 内的
+  # 批次循环 d≥1——写槽 0 会把传输中注记挂错层）
+  local _d="${SYNC_AUTO_SPLIT_DEPTH:-0}"
+  [[ "$_d" =~ ^[0-9]+$ ]] || _d=0
+  [ -n "$note" ] && echo "$note" > "$(_progress_slot_note "$_d")"
+  [ -n "$stats" ] && printf '%s\n' "$stats" > "$(_progress_slot_stats "$_d")"
   local now last=0
   now=$(date +%s)
   [ -f "$PROGRESS_LAST_UPDATE_FILE" ] && last=$(cat "$PROGRESS_LAST_UPDATE_FILE" 2>/dev/null || echo 0)
@@ -680,6 +688,13 @@ _progress_task_apply() {
     # 否则批次阶段只有 "📊 批次 n/m" 一行，正在做什么（列出文件/传输/巩固
     # /重试/修复）全程不可见
     echo "$detail" > "$(_progress_slot_note "$_d")"
+    # 深层 note 写入即清除浅层 note: 最深层的注记才是当前活动描述，
+    # 祖先层的"排序中/统计中"等过程注记在深层开工后已过期，不清除
+    # 会多层叠放重复（2026-08-31 用户反馈实录）
+    local _c
+    for ((_c = 0; _c < _d; _c++)); do
+      rm -f "$(_progress_slot_note "$_c")"
+    done
   fi
   [ -n "$rows" ] && printf '%s\n' "$rows" > "$(_progress_slot_rows "$_d")"
   [ -n "$stats" ] && echo "$stats" > "$(_progress_slot_stats "$_d")"
