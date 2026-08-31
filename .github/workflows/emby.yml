@@ -1,6 +1,6 @@
 name: emby
 
-# 架构：默认 302 直链播放（cloudflared → ge2o:8095 → Emby:8096），
+# 架构：默认 direct 中转播放（cloudflared → Emby:8096，实测国内网络最快）；
 # ge2o 将 /onedrive/% 媒体路径映射到内置 OpenList 的 OneDrive 直链；
 # OpenList/OpenList存储/ge2o 任一环节不健康时自动回退 direct 模式（cloudflared → Emby:8096，行为与旧版一致）。
 # 手动触发时可用 playback_mode 输入强制指定模式。
@@ -12,9 +12,9 @@ on:
   workflow_dispatch:
     inputs:
       playback_mode:
-        description: "播放模式：302 = OpenList 直链（默认）；direct = 现状直连回退"
+        description: "播放模式：direct = 服务器中转（默认，实测最快）；302 = OpenList 直链（客户端有国际加速时手动选用）"
         type: choice
-        default: "302"
+        default: "direct"
         options:
           - "302"
           - "direct"
@@ -22,7 +22,7 @@ on:
     # types: started
 
 env:
-  PLAYBACK_MODE_INPUT: ${{ github.event.inputs.playback_mode || '302' }}
+  PLAYBACK_MODE_INPUT: ${{ github.event.inputs.playback_mode || 'direct' }}
 
 jobs:
   build:
