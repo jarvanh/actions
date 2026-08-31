@@ -117,13 +117,22 @@ jobs:
               return 0
             fi
 
-            # 优先恢复 Dropbox 上的数据目录（含自有存储配置与 token）
-            if rclone copy dropbox:self-hosted/openlist-data.tar.zst /tmp/ 2>/dev/null && [ -s /tmp/openlist-data.tar.zst ]; then
+            # 恢复：优先 openlist-emby 目录（config.json+data.db，无日志）；旧 tarball 仅作迁移兜底
+            RESTORED=false
+            if rclone lsf dropbox:self-hosted/openlist-emby/ 2>/dev/null | grep -q "config.json"; then
+              rclone copy dropbox:self-hosted/openlist-emby/ /opt/openlist/ 2>/dev/null \
+                && RESTORED=true \
+                || echo "::warning::openlist-emby 恢复失败"
+            fi
+            if [ "$RESTORED" = "false" ] && rclone copy dropbox:self-hosted/openlist-data.tar.zst /tmp/ 2>/dev/null && [ -s /tmp/openlist-data.tar.zst ]; then
               tar -I zstd -xf /tmp/openlist-data.tar.zst -C /opt/openlist \
                 && rm -f /tmp/openlist-data.tar.zst \
-                && echo "OpenList data restored from Dropbox" \
+                && RESTORED=true \
                 || { echo "::warning::restore failed, falling back to fresh init"; rm -rf /opt/openlist/*; }
-              # 归一化 config.json 的绝对路径（tarball 可能来自其他机器/系统）
+            fi
+            if [ "$RESTORED" = "true" ]; then
+              echo "OpenList data restored from Dropbox"
+              # 归一化 config.json 的绝对路径（数据可能来自其他机器/系统）
               OLCONF=/opt/openlist/config.json
               if [ -f "$OLCONF" ]; then
                 jq '.database.db_file = "/opt/openlist/data.db" | .temp_dir = "/opt/openlist/temp" | .log.name = "/opt/openlist/log/log.log" | .bleve_dir = "/opt/openlist/bleve"' \
@@ -564,12 +573,15 @@ jobs:
             if [ -n "$OTOKEN" ] && curl -s -X POST http://127.0.0.1:5244/api/fs/list \
                  -H "Authorization: $OTOKEN" -H 'Content-Type: application/json' \
                  -d '{"path":"/onedrive","page":1,"per_page":1}' | jq -e '.code == 200' >/dev/null 2>&1; then
-              tar -I 'zstd -3 -T0' -cf /tmp/openlist-data.tar.zst -C /opt/openlist . 2>/dev/null \
-                && rclone copyto /tmp/openlist-data.tar.zst dropbox:self-hosted/openlist-data.tar.zst -vv \
-                && rm -f /tmp/openlist-data.tar.zst \
+              rm -rf /tmp/ol-persist && mkdir -p /tmp/ol-persist
+              cp /opt/openlist/config.json /tmp/ol-persist/ 2>/dev/null || true
+              cp /opt/openlist/data.db /tmp/ol-persist/ 2>/dev/null || true
+              rclone sync /tmp/ol-persist dropbox:self-hosted/openlist-emby/ -vv 2>/dev/null \
+                && echo "OpenList 数据已同步到 openlist-emby（config.json+data.db，无日志）" \
                 || echo "[WARNING] OpenList data persist failed"
+              rm -rf /tmp/ol-persist
             else
-              echo "[WARNING] OpenList has no working storage; skip persist to protect remote tarball"
+              echo "[WARNING] OpenList has no working storage; skip persist to protect remote data"
             fi
           fi
 
