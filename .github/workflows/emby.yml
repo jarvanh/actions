@@ -1,6 +1,6 @@
 name: emby
 
-# 架构：默认 direct 中转播放（cloudflared → Emby:8096，实测国内网络最快）；
+# 架构：默认 302 直链播放（ge2o:8095 → Emby:8096；健康检查失败自动回退 direct）；
 # ge2o 将 /onedrive/% 媒体路径映射到内置 OpenList 的 OneDrive 直链；
 # OpenList/OpenList存储/ge2o 任一环节不健康时自动回退 direct 模式（cloudflared → Emby:8096，行为与旧版一致）。
 # 手动触发时可用 playback_mode 输入强制指定模式。
@@ -12,9 +12,9 @@ on:
   workflow_dispatch:
     inputs:
       playback_mode:
-        description: "播放模式：direct = 服务器中转（默认，实测最快）；302 = OpenList 直链（客户端有国际加速时手动选用）"
+        description: "播放模式：302 = OpenList 直链（默认）；direct = 服务器中转回退"
         type: choice
-        default: "direct"
+        default: "302"
         options:
           - "302"
           - "direct"
@@ -22,7 +22,7 @@ on:
     # types: started
 
 env:
-  PLAYBACK_MODE_INPUT: ${{ github.event.inputs.playback_mode || 'direct' }}
+  PLAYBACK_MODE_INPUT: ${{ github.event.inputs.playback_mode || '302' }}
 
 jobs:
   build:
@@ -432,12 +432,21 @@ jobs:
             done
             if [ "$OK" != "1" ]; then
               echo "::warning::302 chain unhealthy, falling back to direct mode"
+              echo "--- OpenList fs/list 诊断 ---"
+              curl -s -X POST http://127.0.0.1:5244/api/fs/list \
+                -H "Authorization: $TOK" -H 'Content-Type: application/json' \
+                -d '{"path":"/onedrive","page":1,"per_page":3}' 2>/dev/null \
+                | jq -c '{code: .code, msg: .message, total: (.data.total // 0)}' 2>/dev/null || true
               MODE="direct"
             fi
           fi
           echo "$MODE" > /tmp/PLAYBACK_MODE
           echo "PLAYBACK_MODE=$MODE" >> "$GITHUB_ENV"
           echo "Playback mode: $MODE"
+          # 实时通知：模式决策后立刻推送 Telegram（不等运行结束）
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d chat_id=${{ secrets.TG_CHAT_ID }} \
+            -d text="📺 Emby 播放模式: ${MODE}" >/dev/null 2>&1 || true
 
           if [ "$MODE" = "302" ]; then
             nohup cloudflared tunnel run --url http://127.0.0.1:8095 e > /opt/logs/cloudflared.log 2>&1 &
