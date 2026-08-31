@@ -2,7 +2,7 @@
 # _batch_consolidate（批次级巩固）——逻辑验证（mock rclone/_restart_openlist_for_truth 等）
 # 验证:
 #   1. 非 openlist: 目标 → 直接跳过（不重启/不列表/不重试）
-#   2. 本批无传输（日志无 Copied 行）→ 跳过巩固
+#   2. 零触碰（无 Copied 且无 Failed to copy）→ 跳过巩固
 #   3. 传输全部真实落盘（真值清单都在）→ 重启校验但不重试
 #   4. 假成功/失败混合 → 未落盘文件（排除 object not found）串行重试一次；
 #      重试全部补上 → 复核后顽固缺失 0 → 不进修复管线
@@ -11,6 +11,13 @@
 #   7. OPENLIST_BATCH_CONSOLIDATE=0 → 关闭巩固
 #   8. 重试后仍未落盘（后端内容性拒收）→ 顽固缺失转修复管线（换方法）
 #   9. 重试一个都没成功 → 全部直接转修复管线（不二次重启复核）
+#   10. 后端写入全拒（≥3 触碰文件 0 落盘 + 重试 0 成功）→ 置 BATCH_BACKEND_DEAD
+#   11. 修复管线后重启复核: 假成功剔除 + 方法拉黑
+#   12. 复核重启失败 → 保留修复成果不误删
+#   13. 全批 405 直接失败（0 Copied、≥3 文件）→ 不再跳过巩固: 重启复核+串行重试,
+#       100% 缺失且重试 0 成功 → 后端全拒熔断（BATCH_BACKEND_DEAD，跳过修复管线）
+#   14. 全批 405 但不足熔断门槛（<3 文件）→ 顽固缺失转修复管线换方法
+#   15. 直接失败非 405 主导（内容性失败混合）→ 不熔断，转修复管线
 set -u
 PASS=0; FAIL=0
 ok()  { PASS=$((PASS+1)); echo "PASS: $1"; }
@@ -161,7 +168,7 @@ echo "INFO  : stats line only, no transfers" > "$LOG"
 OUT=$(run_consolidate 0 "$LOG")
 [ ! -f /tmp/bc_restarted ] && [ "$(calls /tmp/bc_lsf_calls)" = "0" ] && [ "$(calls /tmp/bc_copy_calls)" = "0" ] \
   && ok "2 无传输 → 不重启/不列表/不重试" || bad "2: restart/lsf/copy 异常"
-echo "$OUT" | grep -q "本批无传输" && ok "2b 走无传输路径提示" || bad "2b: $OUT"
+echo "$OUT" | grep -q "本批无传输无失败" && ok "2b 走零触碰路径提示" || bad "2b: $OUT"
 
 # --- 场景3: 传输全部落盘 → 重启校验但不重试 ---
 setup
@@ -298,6 +305,7 @@ LSF_OUT2="/tmp/bc_lsf_out3.txt"
 OUT=$(run_consolidate 0 "$LOG")
 echo "$OUT" | grep -q "修复复核 1 个真实落盘 / 1 个假成功已剔除" \
   && ok "11a 复核识别出 1 真 1 假" || bad "11a: $OUT"
+
 [ "$(wc -l < "$BC_DIR/consolidate_fix_0.txt" | tr -d ' ')" = "1" ] \
   && ok "11b fix_list 只留真成果（假成功已剔除，不进 marker）" || bad "11b: $(cat "$BC_DIR/consolidate_fix_0.txt")"
 cut -d'|' -f1 "$BC_DIR/consolidate_fix_0.txt" | grep -qxF "bad/file3.mp4" \
@@ -334,6 +342,61 @@ RESTART_FAIL_FROM=0
 echo "$OUT" | grep -q "跳过修复复核" && ok "12b 复核重启失败 → 跳过复核" || bad "12b: $OUT"
 [ "$(wc -l < "$BC_DIR/consolidate_fix_0.txt" | tr -d ' ')" = "2" ] \
   && ok "12c 复核跳过时修复成果不被误删（宁漏判勿误删）" || bad "12c: $(cat "$BC_DIR/consolidate_fix_0.txt")"
+
+# --- 场景13: 全批 405 直接失败（0 Copied、≥3 文件）→ 不再跳过巩固 ---
+# 2026-08-31 用户反馈实录: wopan175 全量 405（8005 包装）时 rclone 零报成功，
+# 旧逻辑 uploaded=0 直接跳过巩固 → 重启复核/驱动刷新重试/修复管线/全拒熔断
+# 全部饿死，批次循环烧完所有批次。新契约: 触碰过文件就进巩固全链路。
+setup
+BC_DEST="openlist:wopan175/0/j-1024j-视频-pornhub-favorites"
+cat > "$LOG" <<'EOF'
+ERROR : p405/file1.mp4: Failed to copy: unchunked simple update failed: Method Not Allowed: 405 Method Not Allowed
+ERROR : p405/file2.mp4: Failed to copy: unchunked simple update failed: Method Not Allowed: 405 Method Not Allowed
+ERROR : p405/file3.mp4: Failed to copy: unchunked simple update failed: Method Not Allowed: 405 Method Not Allowed
+ERROR : p405/file4.mp4: Failed to copy: unchunked simple update failed: Method Not Allowed: 405 Method Not Allowed
+EOF
+printf 'other/old.mp4\n' > "$LSF_OUT"   # 真值清单: 后端啥都没有，全部缺失
+RETRY_COPY_OK=0         # 刷新驱动后的串行重试仍然 405
+OUT=$(run_consolidate 0 "$LOG")
+[ -f /tmp/bc_restarted ] && ok "13a 0 成功但有 405 失败 → 仍重启容器复核" || bad "12a: 未重启"
+[ "$(calls /tmp/bc_copy_calls)" = "1" ] && ok "13b 刷新驱动后串行重试执行" || bad "12b: copy=$(calls /tmp/bc_copy_calls)"
+[ "$(cat /tmp/bc_backend_dead 2>/dev/null)" = "1" ] && ok "13c 100% 缺失+重试 0 成功 → 后端全拒熔断" || bad "12c: dead=$(cat /tmp/bc_backend_dead 2>/dev/null)"
+[ "$(calls /tmp/bc_fixpipe_calls)" = "0" ] && ok "13d 熔断 → 跳过修复管线（防白耗下载）" || bad "12d: fixpipe=$(calls /tmp/bc_fixpipe_calls)"
+echo "$OUT" | grep -q "直接失败 4 个" && ok "13e 巩固入口提示含直接失败数" || bad "12e: $OUT"
+
+# --- 场景14: 全批 405 但不足熔断门槛（<3 文件）→ 顽固缺失转修复管线 ---
+setup
+BC_DEST="openlist:wopan176Crypt/0"
+cat > "$LOG" <<'EOF'
+ERROR : p405/file1.mp4: Failed to copy: unchunked simple update failed: Method Not Allowed: 405 Method Not Allowed
+ERROR : p405/file2.mp4: Failed to copy: unchunked simple update failed: Method Not Allowed: 405 Method Not Allowed
+EOF
+printf 'other/old.mp4\n' > "$LSF_OUT"
+RETRY_COPY_OK=0
+LSF_OUT2="/tmp/bc_lsf_out2.txt"; printf 'other/old.mp4\np405/file1.mp4\np405/file2.mp4\n' > "$LSF_OUT2"
+OUT=$(run_consolidate 0 "$LOG")
+[ "$(cat /tmp/bc_backend_dead 2>/dev/null)" = "0" ] && ok "14a 不足熔断门槛（2<3）→ 不熔断" || bad "13a: dead=$(cat /tmp/bc_backend_dead 2>/dev/null)"
+[ "$(calls /tmp/bc_fixpipe_calls)" = "1" ] && ok "14b 顽固缺失转修复管线（405 换方法落盘）" || bad "13b: fixpipe=$(calls /tmp/bc_fixpipe_calls)"
+diff <(sort /tmp/bc_files_from) <(printf 'p405/file1.mp4\np405/file2.mp4\n') >/dev/null 2>&1 \
+  && ok "14c 重试/修复清单 = 全部 405 失败文件" || bad "13c: $(cat /tmp/bc_files_from 2>/dev/null | tr '\n' ' ')"
+
+# --- 场景15: 直接失败非 405 主导（内容性失败）→ 不熔断，转修复管线 ---
+# 防回归: copied=0 批次若一律可熔断，全批名长/大小超限等内容性失败会误中止
+# 剩余批次且修复管线被跳过; 熔断只认 405 主导（wopan 8005 后端级拒收签名）
+setup
+BC_DEST="openlist:wopan176Crypt/0"
+cat > "$LOG" <<'EOF'
+ERROR : long/file1.mp4: Failed to copy: unchunked simple update failed: 400 Bad Request
+ERROR : long/file2.mp4: Failed to copy: unchunked simple update failed: 400 Bad Request
+ERROR : long/file3.mp4: Failed to copy: unchunked simple update failed: 400 Bad Request
+ERROR : long/file4.mp4: Failed to copy: unchunked simple update failed: 400 Bad Request
+EOF
+printf 'other/old.mp4\n' > "$LSF_OUT"
+RETRY_COPY_OK=0
+OUT=$(run_consolidate 0 "$LOG")
+[ "$(cat /tmp/bc_backend_dead 2>/dev/null)" = "0" ] && ok "15a 内容性失败 → 不熔断" || bad "14a: dead=$(cat /tmp/bc_backend_dead 2>/dev/null)"
+[ "$(calls /tmp/bc_fixpipe_calls)" = "1" ] && ok "15b 转修复管线换方法落盘" || bad "14b: fixpipe=$(calls /tmp/bc_fixpipe_calls)"
+echo "$OUT" | grep -q "失败非 405 主导" && ok "15c 非 405 主导提示" || bad "14c: $OUT"
 
 echo "-----"
 echo "PASS=$PASS FAIL=$FAIL"

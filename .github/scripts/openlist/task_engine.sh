@@ -679,7 +679,9 @@ sync_task() {
 #       容器重启即消失）每轮重传，预览差值纹丝不动（task0 wopan176Crypt
 #       长期 +225GiB 的根因）。
 # 本函数把巩固单元从"整个任务"缩小到"单个批次"（~50GB）:
-#   1. 本批有实际传输 → 重启 OpenList 容器，清缓存取后端真值列表
+#   1. 本批触碰过文件（Copied 声称成功 或 Failed to copy 直接失败——含全批
+#      405: 只看 Copied 会让 405 批次跳过巩固，复核/重试/修复/熔断全饿死，
+#      2026-08-31 用户反馈实录）→ 重启 OpenList 容器，清缓存取后端真值列表
 #   2. 本批触碰过的文件（Copied + Failed to copy）diff 真值清单 → 未落盘清单
 #   3. 未落盘文件立即串行重试一次（transfers=1，对齐 sync_with_logging 的
 #      openlist_guard_flags 保护参数；重试期间跑 token 保鲜循环防再次假成功）
@@ -714,16 +716,27 @@ _batch_consolidate() {
   [[ "$dest_path" == openlist:* ]] || return 0
   [ "${OPENLIST_BATCH_CONSOLIDATE:-1}" = "0" ] && return 0
 
-  # 本批实际传输数（无传输 = 无新写入即无新污染，缓存列表可信，无需巩固）
-  local uploaded=0
+  # 本批触碰文件数: Copied（声称成功，需复核）+ Failed to copy（真失败，排除
+  # object not found——源端不存在的重试无意义）
+  # 旧逻辑只在 uploaded>0 时巩固: 全批 405（wopan 8005 经 OpenList 包装为 HTTP
+  # 405 Method Not Allowed）时 rclone 零报成功 → 跳过巩固 → 重启复核/驱动刷新
+  # 串行重试/修复管线/后端全拒熔断全部饿死，批次循环烧完所有批次（2026-08-31
+  # 用户反馈实录）。新逻辑: 本批触碰过文件（有声称成功或有直接失败）就巩固;
+  # 仅零触碰（无 Copied 且无非 onf 失败）才跳过。p405_n: 405 签名失败数，
+  # 供下方后端全拒熔断的资格判定
+  local uploaded=0 failed_n=0 p405_n=0
   uploaded=$(grep -cE 'Copied \((new|replaced existing)\)' "$batch_log" 2>/dev/null || true)
+  failed_n=$(grep -E 'ERROR : .+: Failed to copy' "$batch_log" 2>/dev/null | grep -cv 'object not found' || true)
+  p405_n=$(grep -cE 'Failed to copy.*Method Not Allowed' "$batch_log" 2>/dev/null || true)
   [[ "$uploaded" =~ ^[0-9]+$ ]] || uploaded=0
-  if [ "$uploaded" -eq 0 ]; then
-    echo "${label}: 本批无传输，跳过巩固（无新写入即无假成功污染）"
+  [[ "$failed_n" =~ ^[0-9]+$ ]] || failed_n=0
+  [[ "$p405_n" =~ ^[0-9]+$ ]] || p405_n=0
+  if [ "$uploaded" -eq 0 ] && [ "$failed_n" -eq 0 ]; then
+    echo "${label}: 本批无传输无失败，跳过巩固（无新写入即无假成功污染）"
     return 0
   fi
 
-  echo "── ${label} 巩固: 本批传输 ${uploaded} 个，重启容器校验后端真值 ──"
+  echo "── ${label} 巩固: 本批成功 ${uploaded} 个 / 直接失败 ${failed_n} 个，重启容器校验后端真值 ──"
   progress_update "${label} 巩固: 重启容器校验落盘真值"
   if ! _restart_openlist_for_truth "${dest_path#openlist:}" "$batch_log"; then
     echo "⚠️ ${label} 巩固: 容器重启失败，跳过校验（缺失文件由最终检查兜底）"
@@ -808,7 +821,16 @@ _batch_consolidate() {
   # 门槛: 缺失 ≥3 且占触碰文件 100%（部分落盘 = 后端还活着，不触发）
   local touched_n=0
   touched_n=$(wc -l < "$touched" 2>/dev/null | tr -d ' ')
-  if [ "$missing_n" -ge 3 ] && [ "$retry_copied" -eq 0 ] && [ "$touched_n" -gt 0 ] && [ "$missing_n" -ge "$touched_n" ]; then
+  # 熔断资格: copied>0 的批次（部分假成功+部分失败）维持原判定; copied=0 的
+  # 批次（全为直接失败）须 405 主导 —— 405 = wopan 8005 包装签名（后端级拒收,
+  # 修复方法同源 PUT 也会全拒，白耗下载）; 内容性失败（名长/大小超限等）的
+  # 批次不熔断，交修复管线换方法落盘
+  local dead_eligible=1
+  if [ "$uploaded" -eq 0 ] && [ "$failed_n" -gt 0 ] && [ "$p405_n" -lt "$failed_n" ]; then
+    dead_eligible=0
+    echo "${label} 巩固: 失败非 405 主导（${p405_n}/${failed_n}），不熔断，转修复管线换方法"
+  fi
+  if [ "$dead_eligible" -eq 1 ] && [ "$missing_n" -ge 3 ] && [ "$retry_copied" -eq 0 ] && [ "$touched_n" -gt 0 ] && [ "$missing_n" -ge "$touched_n" ]; then
     BATCH_BACKEND_DEAD=1
     echo "🛑 ${label} 巩固: 后端写入全拒（${missing_n}/${touched_n} 个触碰文件 0 落盘、串行重试 0 成功）"
     echo "${label} 巩固: 跳过修复管线（后端级故障下 4 种修复方法同样全拒，白耗下载），等待后端恢复后下轮重试"
