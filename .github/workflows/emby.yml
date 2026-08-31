@@ -152,7 +152,7 @@ jobs:
             # 先尝试直接登录：正常情况下恢复分支的库内密码即上次设置值，无需重置
             TOKEN=$(curl -s -X POST http://127.0.0.1:5244/api/auth/login \
               -H 'Content-Type: application/json' \
-              -d "{\"username\":\"admin\",\"password\":\"$OPENLIST_PW\"}" | jq -r '.data // empty' || true)
+              -d "{\"username\":\"admin\",\"password\":\"$OPENLIST_PW\"}" | jq -r '.data.token // .data // empty' || true)
             if [ -z "$TOKEN" ]; then
               # 登录失败才重置：全新库（admin 随机密码）或库内密码与 secret 不一致时自愈
               openlist admin set --data /opt/openlist "$OPENLIST_PW" >/dev/null 2>&1 \
@@ -160,7 +160,7 @@ jobs:
                 || true
               TOKEN=$(curl -s -X POST http://127.0.0.1:5244/api/auth/login \
                 -H 'Content-Type: application/json' \
-                -d "{\"username\":\"admin\",\"password\":\"$OPENLIST_PW\"}" | jq -r '.data // empty' || true)
+                -d "{\"username\":\"admin\",\"password\":\"$OPENLIST_PW\"}" | jq -r '.data.token // .data // empty' || true)
             fi
             if [ -z "$TOKEN" ]; then
               echo "::warning::OpenList login failed, 302 链路将回退 direct"
