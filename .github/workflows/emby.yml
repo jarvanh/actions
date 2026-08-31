@@ -126,7 +126,7 @@ jobs:
               # 归一化 config.json 的绝对路径（tarball 可能来自其他机器/系统）
               OLCONF=/opt/openlist/config.json
               if [ -f "$OLCONF" ]; then
-                jq '.database.db_file = "/opt/openlist/data/data.db" | .temp_dir = "/opt/openlist/data/temp" | .log.name = "/opt/openlist/data/log/log.log" | .bleve_dir = "/opt/openlist/data/bleve"' \
+                jq '.database.db_file = "/opt/openlist/data.db" | .temp_dir = "/opt/openlist/temp" | .log.name = "/opt/openlist/log/log.log" | .bleve_dir = "/opt/openlist/bleve"' \
                   "$OLCONF" > /tmp/ol-conf.new 2>/dev/null \
                   && mv /tmp/ol-conf.new "$OLCONF" \
                   && echo "OpenList config.json paths normalized"
