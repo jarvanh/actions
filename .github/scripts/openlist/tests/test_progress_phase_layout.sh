@@ -7,9 +7,9 @@
 #   ▸ 📊 批次：1/15 | ✅0 ❌0     ← 只有批次序号，看不出在跑什么、跑了多少
 # 契约（渲染器 _progress_render 与生产方 _render_subdir_phase_tree 各自一半）:
 #   L1 子目录树不再输出 "📁 源端 X" 首行（源端大小分组头已给出）
-#   L2 树型块: 统计行是表头，排在树行之前（引用块内平铺，无空格缩进）
-#   L3 标签型块（全部行以 "▸" 开头）: 标签排在统计行之前（无树连接符，归属由引用块竖线表达）
-#   L4 深层块以嵌套引用块挂在本层 🔄 活动行（已置尾）之下
+#   L2 树型块: 统计行是表头，排在树行之前；树行再缩进 2 格
+#   L3 标签型块（全部行以 "▸" 开头）: 标签排在统计行之前，两者同列、无连接符
+#   L4 下一层表头对齐本层树行文本列 —— 视觉上挂在 🔄 活动行（已置尾）之下
 #   L5 深层 detail 落到本层 note 行（挂在统计行下），不再被静默丢弃
 #   L6 progress_scope_init 连 note 槽位一起清理，子任务收尾不留残影
 set -uo pipefail
@@ -93,17 +93,17 @@ rm -f "$PROGRESS_LAST_UPDATE_FILE"
 progress_update "$BATCH_DETAIL" >/dev/null
 
 # ---------- L2: 树型块 —— 统计行（表头）在前，树行缩进 2 格 ----------
-chk "L2a 统计行（表头）位于树行之前" \
-  "$(line_of '子目录：')" "<blockquote>${TASK_SUBDIR_STATS}"
-chk "L2b 首个树行带 ├─ 连接符（引用块内平铺）" \
-  "$(line_of 'archive')" "  ├─ ⏭️ archive · $(format_bytes 500400000)"
+chk "L2a 统计行缩进 5 格、位于树行之前" \
+  "$(line_of '子目录：')" "<code>     ${TASK_SUBDIR_STATS}</code>"
+chk "L2b 首个树行缩进 7 格（统计行 +2）并带 ├─ 连接符" \
+  "$(line_of 'archive')" "<code>       ├─ ⏭️ archive · $(format_bytes 500400000)</code>"
 
 # ---------- L3: 标签型块 —— 标签在前、与统计行同列、无连接符 ----------
-# 批次块在深度 1（嵌套引用块挂在本层 🔄 活动行下）
-chk "L3a 批次标签行（宣告本层在做什么）" \
-  "$(line_of '文件批次拆分')" "<blockquote>${BATCH_LABEL}"
-chk "L3b 批次统计行（表头）" \
-  "$(line_of '批次：1/15')" "${BATCH_STATS}"
+# 批次块在深度 1，表头缩进 = 5*1+5 = 10 格（L4 断言它正对本层树行文本列）
+chk "L3a 批次标签挂树形连接符（code 等宽）" \
+  "$(line_of '文件批次拆分')" "<code>          └─ ${BATCH_LABEL#▸ }</code>"
+chk "L3b 批次统计行（code 等宽，缩进 14 格）" \
+  "$(line_of '批次：1/15')" "<code>              ${BATCH_STATS}</code>"
 # 标签型与树型的"统计行 vs 阶段行"先后相反，是本契约的关键
 N_LABEL=$(grep -n -F -- '文件批次拆分' "$WORK_DIR/last_msg" | head -1 | cut -d: -f1)
 N_BATCH_STATS=$(grep -n -F -- '批次：1/15' "$WORK_DIR/last_msg" | head -1 | cut -d: -f1)
@@ -114,17 +114,19 @@ N_TREE=$(grep -n -F -- 'archive' "$WORK_DIR/last_msg" | head -1 | cut -d: -f1)
 chk "L2c 树型: 统计行排在树行之前" \
   "$([ "$N_SUBDIR_STATS" -lt "$N_TREE" ] && echo yes || echo no)" "yes"
 
-# ---------- L4: 深层块以嵌套引用块挂在本层 🔄 行下 ----------
+# ---------- L4: 下一层表头对齐本层树行文本列（挂在 🔄 行下）----------
+# 树行 "       └─ 🔄 ..." 文本列 = 7 + len("└─ ") = 11
+# 下一层表头缩进 10 格 + "▸" 占 1 列 → 同样落在第 11 列
 ACT_ROW=$(line_of 'j-1024j')
 ACT_LABEL=$(line_of '文件批次拆分')
 chk "L4a 树行是最后一条（🔄 已置尾，深层块才挂得住）" \
   "$(printf '%s' "$ACT_ROW" | grep -c '└─ 🔄')" "1"
-chk "L4b 标签行不带树连接符（归属由引用块竖线表达）" \
-  "$(printf '%s' "$ACT_LABEL" | grep -c '└─')" "0"
+chk "L4b 标签行带树干连接符（层级归属可见）" \
+  "$(printf '%s' "$ACT_LABEL" | grep -c '└─')" "1"
 
 # ---------- L5: 深层 detail 落到本层 note 行 ----------
-chk "L5a 深层 detail 渲染为斜体注记行" \
-  "$(line_of '巩固')" "<i>· ${BATCH_DETAIL}</i>"
+chk "L5a 深层 detail 渲染为 note 行（code 等宽）" \
+  "$(line_of '巩固')" "<code>              · ${BATCH_DETAIL}</code>"
 chk "L5b 深层 detail 不污染任务行（任务行无 detail）" \
   "$(line_of 'wopan176Crypt/0')" "  └─ wopan176Crypt/0"
 
@@ -160,26 +162,26 @@ PROGRESS_PHASE_INFO="$BATCH_LABEL"
 PROGRESS_STATS="$BATCH_STATS"
 progress_update_force "" "" >/dev/null
 
-chk "L7a d0 标签行（宣告拆分决策）" \
-  "$(line_of '文件批次拆分')" "<blockquote>${BATCH_LABEL}"
-chk "L7b d0 统计行" \
-  "$(line_of '批次：1/15')" "${BATCH_STATS}"
+chk "L7a d0 标签行无树连接符、保留 ▸ 前导（5 格缩进）" \
+  "$(line_of '文件批次拆分')" "<code>     ▸ ${BATCH_LABEL#▸ }</code>"
+chk "L7b d0 统计行缩进 9 格" \
+  "$(line_of '批次：1/15')" "<code>         ${BATCH_STATS}</code>"
 chk "L7c 目标端行无 detail 黏连" \
   "$(line_of 'wopan175/0')" "  └─ wopan175/0/j-1024j"
 
 # rt 线程实时状态 → note 行（直写 d0 note 槽，不碰任务行）
 rm -f "$PROGRESS_LAST_UPDATE_FILE"
 progress_transfer_tick "传输中: 2.469 GiB / 4.976 GiB" "" >/dev/null
-chk "L7d-1 传输中独立成行（统计行下、斜体注记）" \
-  "$(line_of '传输中')" "<i>· 传输中: 2.469 GiB / 4.976 GiB</i>"
+chk "L7d-1 传输中独立成行（统计行下、注记样式）" \
+  "$(line_of '传输中')" "<code>         · 传输中: 2.469 GiB / 4.976 GiB</code>"
 
 _progress_batch_history_add 47 "❌ 批次 47：共 21 个文件，成功 0 · 失败 22"
 rm -f "$PROGRESS_LAST_UPDATE_FILE"
 progress_transfer_tick "传输中: 2.469 GiB / 4.976 GiB" "" >/dev/null
-chk "L7d-2 历史非空时注记保持斜体样式" \
-  "$(line_of '传输中')" "<i>· 传输中: 2.469 GiB / 4.976 GiB</i>"
-chk "L7d-3 批次历史在 note 之后渲染" \
-  "$(line_of '批次 47')" "  └─ ❌ 批次 47：共 21 个文件，成功 0 · 失败 22"
+chk "L7d-2 历史非空时 note 前缀不变（注记不占树节点）" \
+  "$(line_of '传输中')" "<code>         · 传输中: 2.469 GiB / 4.976 GiB</code>"
+chk "L7d-3 批次历史在 note 之后渲染（缩进在 code 内，渲染器既有行为）" \
+  "$(line_of '批次 47')" "<code>         └─ ❌ 批次 47：共 21 个文件，成功 0 · 失败 22</code>"
 
 # 线程实体行为: note 直写 + stats 无 ⏱ + 停止清理
 printf 'Transferred: 2.469 GiB / 4.976 GiB, ETA 3m\n' > "$WORK_DIR/batch_l7.log"

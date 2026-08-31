@@ -478,23 +478,19 @@ _progress_render() {
     tg_add_block msg "$(_progress_render_task_list "$running_lines")"
 
     if [ "$finalized" -ne 1 ]; then
-      # 多层阶段块渲染（Telegram 原生嵌套引用块设计，2026-08-31 重排）:
-      #   各深度先收集为 flat 行缓冲（不再用空格缩进表达层级），最后从最深
-      #   往浅逐层包 <blockquote>——客户端渲染为逐层左侧竖线导轨，层级归属
-      #   由竖线导轨表达，跨客户端/复制路径稳定。
-      #   每层内部行序: 标签行(本层在做什么) → 统计行(表头) → 树行(条目)
-      #   → note(过程注记, 斜体) → 批次历史(d0 批次面板)；子层引用块
-      #   追加在本层缓冲末尾（视觉上挂在本层 🔄 活动行之下）。
-      local -a depth_buf=()
-      local _d _rf _sf _nf _is_label _raw _tree _line _layer
+      local _d _ind _ind_rows _rf _sf _nf _is_label _raw _tree _line
       for ((_d = 0; _d < PROGRESS_MAX_DEPTH; _d++)); do
         _rf="$(_progress_slot_rows "$_d")"
         _sf="$(_progress_slot_stats "$_d")"
         _nf="$(_progress_slot_note "$_d")"
         [ -f "$_rf" ] || [ -f "$_sf" ] || [ -f "$_nf" ] || continue
-        _layer=""
-        # 阶段行形态判定: 标签型（全部行以 "▸" 开头）= 本层在做什么;
-        # 树型（子目录等状态条目）= 统计行是它的表头
+        # 本层表头缩进（每层下沉 5 格）+ 树行/细粒度状态再下沉 2 格
+        _ind=$(printf '%*s' "$((5 * _d + 5))" '')
+        _ind_rows=$(printf '%*s' "$((5 * _d + 7))" '')
+
+        # 阶段行形态判定（决定它与统计行的先后、是否加树形连接符）:
+        #   标签型（全部行以 "▸" 开头）= 本层在做什么，作表头排在统计行之前
+        #   树型（子目录等状态条目）= 统计行是它的表头，排在其后并缩进 2 格
         _is_label=1
         [ -f "$_rf" ] && while IFS= read -r _line; do
           [ -z "$_line" ] && continue
@@ -505,54 +501,62 @@ _progress_render() {
         done < "$_rf"
 
         if [ "$_is_label" -eq 1 ]; then
-          # 标签行: 本层在做什么（头部宣告）。嵌套引用块的竖线导轨已表达
-          # 层级归属，不再需要 └─/│ 树连接符。仅在有 rows 时读取（可能
-          # 只有 note 没有 rows——如深层只写了注记）
+          # 标签块（▸ 开头）的归属表达:
+          #   d=0 挂在任务条目/目标端行之下 —— 上层没有 🔄 活动行可挂，去掉 └─/│
+          #   树连接符（否则与目标端行的 └─ 同级同形，层次混淆，2026-08-30 用户反馈），
+          #   保留 ▸ 前导 + 等宽缩进;
+          #   d≥1 挂在本层 🔄 活动行（已置尾）之下 —— 非末行 │ + 标签，末行 └─ + 标签
+          local _lab_total=0 _lab_n=0
+          [ -f "$_rf" ] && _lab_total=$(grep -c . "$_rf" || true)
           [ -f "$_rf" ] && while IFS= read -r _line; do
             [ -z "$_line" ] && continue
-            _layer+="▸ ${_line#▸ }"$'\n'
+            _lab_n=$((_lab_n + 1))
+            if [ "$_d" -eq 0 ]; then
+              msg+="<code>${_ind}▸ ${_line#▸ }</code>"$'\n'
+            elif [ "$_lab_n" -eq "$_lab_total" ]; then
+              msg+="<code>${_ind}└─ ${_line#▸ }</code>"$'\n'
+            else
+              msg+="<code>${_ind}│  ${_line#▸ }</code>"$'\n'
+            fi
           done < "$_rf"
-          [ -f "$_sf" ] && _layer+="$(cat "$_sf")"$'\n'
-          # d0 note（批次实时传输状态，线程专用）紧跟统计行、排在批次历史之前
-          if [ "$_d" -eq 0 ] && [ -f "$_nf" ]; then
-            _layer+="<i>· $(cat "$_nf")</i>"$'\n'
-          fi
+          # 统计行与后续块对齐标签文本列（+4 格），同样等宽渲染
+          local _ind_sub="${_ind}    "
+          [ -f "$_sf" ] && msg+="<code>${_ind_sub}$(cat "$_sf")</code>"$'\n'
           # 批次历史回显: 最近 N 个已完成批次的快照（当前批次状态由 rows/stats 表达，不在此重复）
+          # 多行块需逐行加缩进前缀，否则仅首行对齐
           local _bh
           _bh=$(_progress_batch_history_render)
-          [ -n "$_bh" ] && _layer+="$(tree_lines "$_bh")"$'\n'
+          # 深度 0 的 note（批次实时传输状态，线程专用）紧跟统计行、排在批次历史之前
+          # —— 当前状态不沉到历史后面。note 行统一用 "· " 前缀: 状态注记不占树
+          # 节点位，├─/└─ 只留给真实条目（2026-08-31 用户反馈: 双 └─ 同级致层次混淆）
+          if [ "$_d" -eq 0 ] && [ -f "$_nf" ]; then
+            msg+="<code>${_ind_sub}· $(cat "$_nf")</code>"$'\n'
+          fi
+          if [ -n "$_bh" ]; then
+            msg+="$(tree_lines "$_bh" | sed 's/^  //' | sed "s/^/${_ind_sub}/" | sed 's/^\(.*\)$/<code>\1<\/code>/')"$'\n'
+          fi
         else
-          [ -f "$_sf" ] && _layer+="$(cat "$_sf")"$'\n'
+          [ -f "$_sf" ] && msg+="<code>${_ind}$(cat "$_sf")</code>"$'\n'
           _raw="$(_progress_active_last < "$_rf")"
-          # tree_lines 自带 ├─/└─ 与 2 格树干缩进（兄弟条目结构），引用块内平铺
-          _tree="$(tree_lines "$_raw")"
+          # tree_lines 每行自带 2 空格树干前缀（tree_conn），剥掉后
+          # 由本层缩进统一控制，保证树与统计行同列对齐
+          _tree="$(tree_lines "$_raw" | sed 's/^  //')"
           while IFS= read -r _line; do
             [ -z "$_line" ] && continue
-            _layer+="$_line"$'\n'
+            msg+="<code>${_ind_rows}${_line}</code>"$'\n'
           done <<< "$_tree"
         fi
-        # note（本层过程注记，斜体弱化）挂在本层内容最末; d0 label 分支已在
-        # 上方渲染（统计行后、批次历史前）
-        if ! { [ "$_is_label" -eq 1 ] && [ "$_d" -eq 0 ]; }; then
-          [ -f "$_nf" ] && _layer+="<i>· $(cat "$_nf")</i>"$'\n'
-        fi
-        depth_buf[$_d]="${depth_buf[$_d]:-}${_layer}"
-      done
-
-      # 嵌套组装: 从最深往浅，把子层引用块包进父层缓冲末尾——客户端渲染为
-      # 逐层左侧竖线导轨
-      local _assembled="" _d2
-      for ((_d2 = PROGRESS_MAX_DEPTH - 1; _d2 >= 0; _d2--)); do
-        [ -n "${depth_buf[$_d2]:-}" ] || continue
-        if [ -z "$_assembled" ]; then
-          _assembled="${depth_buf[$_d2]}"
-        else
-          _assembled="${depth_buf[$_d2]}<blockquote>$_assembled</blockquote>"
+        # 细粒度状态（深层 detail）挂在最末；标签型块时对齐末条标签文本列（+4 格），等宽渲染
+        # （d=0 的 note 已在标签分支内紧跟统计行渲染，跳过）。
+        # note 统一 "· " 前缀（状态注记不占树节点位，双 └─ 同级致层次混淆，2026-08-31）
+        if [ "$_is_label" -eq 1 ] && [ "$_d" -eq 0 ]; then
+          :
+        elif [ "$_is_label" -eq 1 ] && [ -f "$_nf" ]; then
+          msg+="<code>${_ind}    · $(cat "$_nf")</code>"$'\n'
+        elif [ -f "$_nf" ]; then
+          msg+="<code>${_ind_rows}· $(cat "$_nf")</code>"$'\n'
         fi
       done
-      if [ -n "$_assembled" ]; then
-        msg+="<blockquote>${_assembled}</blockquote>"$'\n'
-      fi
     fi
   fi
 
