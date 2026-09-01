@@ -356,7 +356,7 @@ jobs:
           cleanup_archive_workdir
           RESTORED_FROM=
           if rclone lsf onedrive:backup/emby/$BACKUP_NAME 2>/dev/null | grep -q "$BACKUP_NAME"; then
-              BK_BYTES=$(rclone lsl onedrive:backup/emby/$BACKUP_NAME 2>/dev/null | awk '{print $1}'
+              BK_BYTES=$(rclone lsl onedrive:backup/emby/$BACKUP_NAME 2>/dev/null | awk '{print $1}')
               require_free_kb /mnt $((BK_BYTES / 1024 + 2 * 1024 * 1024)) "emby cache extract preflight (/mnt)"
               require_free_kb /var/lib/emby $((4 * 1024 * 1024)) "emby data extract preflight (root)"
               echo "✅ 发现 OneDrive 备份，流式解压..."
