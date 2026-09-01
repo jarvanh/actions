@@ -344,12 +344,12 @@ jobs:
           echo "🔍 正在检查 OneDrive 上的压缩备份（含图片缓存，流式解压不落本地盘）..."
           cleanup_archive_workdir
           RESTORED_FROM=
-          if rclone lsf onedrive:emby-backup/$BACKUP_NAME 2>/dev/null | grep -q "$BACKUP_NAME"; then
-              BK_BYTES=$(rclone lsl onedrive:emby-backup/$BACKUP_NAME 2>/dev/null | awk '{print $1}'
+          if rclone lsf onedrive:backup/emby/$BACKUP_NAME 2>/dev/null | grep -q "$BACKUP_NAME"; then
+              BK_BYTES=$(rclone lsl onedrive:backup/emby/$BACKUP_NAME 2>/dev/null | awk '{print $1}'
               require_free_kb /mnt $((BK_BYTES / 1024 + 2 * 1024 * 1024)) "emby cache extract preflight (/mnt)"
               require_free_kb /var/lib/emby $((4 * 1024 * 1024)) "emby data extract preflight (root)"
               echo "✅ 发现 OneDrive 备份，流式解压..."
-              if rclone cat onedrive:emby-backup/$BACKUP_NAME | sudo tar -I zstd -xf - -C /var/lib/emby/ && sudo chown -R emby:emby /var/lib/emby && validate_emby_data /var/lib/emby; then
+              if rclone cat onedrive:backup/emby/$BACKUP_NAME | sudo tar -I zstd -xf - -C /var/lib/emby/ && sudo chown -R emby:emby /var/lib/emby && validate_emby_data /var/lib/emby; then
                   echo "🎉 OneDrive 备份流式恢复并校验成功"
                   RESTORED_FROM=onedrive
               else
@@ -831,7 +831,7 @@ jobs:
                 --exclude='logs' \
                 --exclude='transcoding-temp' \
                 -C /var/lib/emby . \
-                | rclone rcat onedrive:emby-backup/emby-backup.tar.zst -v
+                | rclone rcat onedrive:backup/emby/emby-backup.tar.zst -v
               echo "📤 备份已流式上传 OneDrive:emby-backup/"
               cleanup_archive_workdir
               cleanup_archive_workdir
