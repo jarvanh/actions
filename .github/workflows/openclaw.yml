@@ -802,21 +802,24 @@ jobs:
               if openclaw config validate >/tmp/config-validate-fallback.log 2>&1; then
                 echo "✅ Config valid for fallback version."
               else
-                echo "⚠️ Config invalid for fallback version. Details:"
+                echo "⚠️ Config invalid for fallback version. Trying 'openclaw doctor --fix' first. Details:"
                 tail -n 10 /tmp/config-validate-fallback.log 2>/dev/null || true
-                if grep -q "uses newer schema version" /tmp/config-validate-fallback.log 2>/dev/null; then
+                openclaw doctor --fix || echo "DOCTOR_EXIT=$? (non-fatal, continuing)"
+                if openclaw config validate >/tmp/config-validate-fallback-2.log 2>&1; then
+                  echo "✅ Config repaired by doctor for fallback version."
+                else
                   DOWNGRADE_TS="$(date +%Y%m%d-%H%M%S)"
-                  echo "⤵️ State DB was migrated by a newer build. Moving newer-schema state aside so the fallback version can start (kept as *.newer-schema-bak-$DOWNGRADE_TS for the next upgrade)."
+                  echo "❌ Config still invalid for fallback version after doctor. Moving the current state aside so the fallback version starts clean (kept as *.state-bak-$DOWNGRADE_TS; sessions will be lost, upgrade back to recover). Details:"
+                  tail -n 10 /tmp/config-validate-fallback-2.log 2>/dev/null || true
                   for STATE_DB in "$HOME/.openclaw/state/openclaw.sqlite" "$HOME/.openclaw/state/openclaw.sqlite-wal" "$HOME/.openclaw/state/openclaw.sqlite-shm"; do
                     if [ -f "$STATE_DB" ]; then
-                      mv "$STATE_DB" "$STATE_DB.newer-schema-bak-$DOWNGRADE_TS" && echo "➡️ Moved aside: $STATE_DB"
+                      mv "$STATE_DB" "$STATE_DB.state-bak-$DOWNGRADE_TS" && echo "➡️ Moved aside: $STATE_DB"
                     fi
                   done
+                  echo "🛠️ Running 'openclaw doctor --fix' on the clean state..."
+                  openclaw doctor --fix || echo "DOCTOR_EXIT=$? (non-fatal, continuing)"
                 fi
               fi
-
-              echo "🛠️ Running 'openclaw doctor --fix' after fallback reinstall..."
-              openclaw doctor --fix || echo "DOCTOR_EXIT=$? (non-fatal, continuing)"
 
               echo "Restarting OpenClaw after fallback reinstall..."
               FALLBACK_RESTART_OK=1
