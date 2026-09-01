@@ -175,6 +175,19 @@ jobs:
             exit 1
           fi
 
+          # 2026.8.x gateway refuses to start while legacy (non-sqlite) session
+          # stores exist; doctor --fix is expected to migrate them but completes
+          # without migrating in CI. Move them aside (kept for recovery) so the
+          # gateway starts with the new SQLite session stores.
+          find "$HOME/.openclaw" -type f -name "sessions.json" 2>/dev/null | while read -r LEGACY_SESSIONS; do
+            TS="$(date +%Y%m%d-%H%M%S)"
+            if mv "$LEGACY_SESSIONS" "$LEGACY_SESSIONS.legacy-bak-$TS" 2>/dev/null; then
+              echo "🔄 Moved legacy session store aside: $LEGACY_SESSIONS -> $LEGACY_SESSIONS.legacy-bak-$TS"
+            else
+              echo "⚠️ Could not move legacy session store: $LEGACY_SESSIONS"
+            fi
+          done
+
       - name: Restore skill symlink for proactivity
         run: |
           set -euo pipefail
@@ -768,7 +781,7 @@ jobs:
           fix_openclaw_permissions
 
           echo "🛠️ Running preflight 'openclaw doctor --fix' before gateway restart..."
-          openclaw doctor --fix || true
+          openclaw doctor --fix || echo "DOCTOR_EXIT=$? (non-fatal, continuing)"
           PREFLIGHT_END_TS=$(date +%s)
           echo "PREFLIGHT_DOCTOR_DURATION_SEC=$((PREFLIGHT_END_TS - PREFLIGHT_BEGIN_TS))" >> "$RUN_OPENCLAW_META"
 
