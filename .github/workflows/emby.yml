@@ -500,10 +500,10 @@ jobs:
           WD_EOF
           TELEGRAM_BOT_TOKEN="${{ secrets.TELEGRAM_BOT_TOKEN }}" TG_CHAT_ID="${{ secrets.TG_CHAT_ID }}" \
             nohup bash /opt/watchdog.sh > /opt/logs/watchdog.log 2>&1 &
-          # 播放事件监听：ge2o 日志的重定向成功行 → workflow 日志 + TG 通知（302 直链 / 中转）
+          # 播放事件监听：ge2o 访问日志（CustomLogger 管道格式，重定向为 307）→ workflow 日志 + TG
           cat > /opt/playlog.sh <<'PL_EOF'
           #!/bin/bash
-          # 播放事件监听：ge2o 日志 [SUCCESS] 重定向行 → 片名反查 → workflow 日志(echo) + TG 通知
+          # 每次播放事件：ge2o 访问日志 307/302 行 → 片名（尝试行路径反查）→ echo 进 workflow 日志 + TG 通知
           LOG=/opt/logs/ge2o.log
           PLAYLOG=/opt/logs/playlog.log
           touch "$LOG"
@@ -511,27 +511,27 @@ jobs:
           LAST_TS=0
           tail -n0 -F "$LOG" 2>/dev/null | while read -r line; do
             case "$line" in
-              *'尝试请求 Openlist 资源: '*)
-                PTH=${line#*尝试请求 Openlist 资源: }
-                continue;;
-              *'请求成功, 重定向到: '*) KIND=302直链;;
-              *'重定向 playlist: '*|*'重定向 strm: '*) KIND=302直链;;
-              *'代理回源'*) KIND=中转;;
+              *'| 307 |'*|*'| 302 |'*) ;;
               *) continue;;
             esac
-            case "$PTH" in
-              *.ts|*.ts?*|*m3u8*) continue;;
+            case "$line" in
+              *master.m3u8*|*proxy_playlist*) KIND=转码中转;;
+              *stream*|*original*) KIND=302直链;;
+              *) continue;;
+            esac
+            case "$line" in
+              *'尝试请求 Openlist 资源: '*) PTH=${line#*尝试请求 Openlist 资源: } ;;
             esac
             NOW=$(date +%s)
             GAP=$((NOW - LAST_TS))
-            if [ "$PTH" = "$LAST_PTH" ] && [ "$GAP" -lt 300 ]; then continue; fi
-            LAST_PTH=$PTH
-            LAST_TS=$NOW
+            if [ -n "$PTH" ] && [ "$PTH" = "$LAST_PTH" ] && [ "$GAP" -lt 300 ]; then continue; fi
+            if [ -n "$PTH" ]; then LAST_PTH=$PTH; LAST_TS=$NOW; fi
             NAME=${PTH##*/}
             NAME=${NAME%.*}
+            [ -n "$NAME" ] || NAME=未知
             TS=$(date '+%F %T')
             echo "🎬 播放 [$KIND] $NAME"
-            printf '%s | %s | %s\n' "$TS" "$KIND" "$PTH" >> "$PLAYLOG"
+            printf '%s | %s | %s\n' "$TS" "$KIND" "${PTH:-未知路径}" >> "$PLAYLOG"
             printf '🎬 播放 [%s]\n%s' "$KIND" "$NAME" > /tmp/ol-text.txt
             curl -s -X POST "https://api.telegram.org/bot$TG_TOKEN/sendMessage" \
               --data-urlencode chat_id=$TG_CHAT \
