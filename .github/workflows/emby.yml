@@ -561,7 +561,11 @@ jobs:
           DIAG=0
           SFAIL=0
           CTX=0
-          redact() { sed -E 's/api_key=[^& ]*/api_key=[redacted]/g; s/X-Emby-Token=[^& ]*/X-Emby-Token=[redacted]/g; s#https?://[^ "]*#<url>#g'; }
+          # 脱敏：密钥、直链 URL；并整行丢弃 ge2o 的 cacheKey 调试日志（内含完整请求头与 cf_clearance Cookie）
+          redact() {
+            grep -v "headers to encode cacheKey" \
+              | sed -E 's/api_key=[^& ]*/api_key=[redacted]/g; s/X-Emby-Token=[^& ]*/X-Emby-Token=[redacted]/g; s#https?://[^ "]*#<url>#g'
+          }
 
           # Emby API 请求：优先用自检选出的认证方式，失败自动回退另一种，返回 http 码
           emby_get() { # $1=路径(含前导 /) $2=输出文件
@@ -945,4 +949,7 @@ jobs:
           tail -n 80 /opt/logs/playlog.log 2>/dev/null || echo "(无 playlog.log)"
           # ge2o 自身日志归档（脱敏）：定位播放走中转而非 302 直链的原因
           echo "--- ge2o.log (tail 60, 脱敏) ---"
-          tail -n 60 /opt/logs/ge2o.log 2>/dev/null | sed -E 's/api_key=[^& ]*/api_key=[redacted]/g; s/X-Emby-Token=[^& ]*/X-Emby-Token=[redacted]/g; s#https?://[^ "]*#<url>#g' || echo "(无 ge2o.log)"
+          # 整行丢弃 ge2o 的 cacheKey 调试日志：内含完整请求头与 cf_clearance Cookie
+          tail -n 60 /opt/logs/ge2o.log 2>/dev/null \
+            | grep -v "headers to encode cacheKey" \
+            | sed -E 's/api_key=[^& ]*/api_key=[redacted]/g; s/X-Emby-Token=[^& ]*/X-Emby-Token=[redacted]/g; s#https?://[^ "]*#<url>#g' || echo "(无 ge2o.log)"
