@@ -612,6 +612,30 @@ jobs:
           TELEGRAM_BOT_TOKEN="${{ secrets.TELEGRAM_BOT_TOKEN }}" TG_CHAT_ID="${{ secrets.TG_CHAT_ID }}" \
             EMBY_API_KEY="${{ secrets.EMBY_API_TOKEN }}" \
             nohup bash /opt/playlog.sh >> /opt/logs/playlog.log 2>&1 &
+      - name: warmup images
+        run: |
+          # 海报墙预热：请求首页最新条目的海报（真实 tag），让 Emby 现场缩放 + ge2o 内存缓存就绪
+          cat > /opt/warmup.sh <<'WU_EOF'
+          #!/bin/bash
+          KEY="$EMBY_API_KEY"
+          EMBY=http://127.0.0.1:8096
+          GE2O=http://127.0.0.1:8095
+          UID=$(curl -s "$EMBY/emby/Users?api_key=$KEY" | jq -r '.[] | select(.Name=="Derrick") | .Id' | head -1)
+          [ -n "$UID" ] || { echo "warmup: 未找到 Derrick 用户，跳过"; exit 0; }
+          curl -s "$EMBY/emby/Users/$UID/Items/Latest?Limit=40&Fields=ImageTags&api_key=$KEY" > /tmp/wu-items.json
+          N=0
+          for ID in $(jq -r '.[].Id' /tmp/wu-items.json | head -40); do
+            jq -r --arg id "$ID" '.[] | select(.Id==$id) | .ImageTags.Primary // empty' /tmp/wu-items.json > /tmp/wu-tag.txt 2>/dev/null
+            read -r TAG < /tmp/wu-tag.txt 2>/dev/null || TAG=
+            [ -n "$TAG" ] || continue
+            curl -s -o /dev/null "$GE2O/emby/Items/$ID/Images/Primary?maxWidth=400&maxHeight=400&tag=$TAG"
+            curl -s -o /dev/null "$GE2O/emby/Items/$ID/Images/Primary?maxWidth=600&maxHeight=600&tag=$TAG"
+            N=$((N + 1))
+          done
+          echo "海报墙预热完成: ${N} 个条目 $(date '+%T')"
+          WU_EOF
+          EMBY_API_KEY="${{ secrets.EMBY_API_TOKEN }}" nohup bash /opt/warmup.sh > /opt/logs/warmup.log 2>&1 &
+
       - name: sleep
         run: |
           sudo sleep 340m
@@ -743,6 +767,7 @@ jobs:
               require_free_kb "$HOME" $((src_kb + 1024 * 1024)) "emby archive preflight"
               sudo rm -f "$HOME/emby-backup.tar.zst"
               sudo tar -I 'zstd -3 -T0' -cf $HOME/emby-backup.tar.zst \
+                --exclude='cache' \
                 --exclude='logs' \
                 --exclude='transcoding-temp' \
                 -C /var/lib/emby .
