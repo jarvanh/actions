@@ -119,8 +119,8 @@ jobs:
             sudo mkdir -p /opt/openlist
             sudo chown -R runner:runner /opt/openlist /opt/logs
 
-            # 下载 OpenList（失败不致命，健康检查会回退 direct）
-            ASSET_URL=$(curl -s https://api.github.com/repos/OpenListTeam/OpenList/releases/latest \
+            # 下载 OpenList（失败不致命，健康检查会回退 direct）；认证调用避免 runner 共享出口 IP 匿名配额耗尽
+            ASSET_URL=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/OpenListTeam/OpenList/releases/latest \
               | grep -o '"browser_download_url": *"[^"]*openlist-linux-amd64.tar.gz"' | head -1 | cut -d'"' -f4 || true)
             if [ -n "$ASSET_URL" ] && curl -fsSL -o /tmp/openlist.tar.gz "$ASSET_URL"; then
               mkdir -p /tmp/openlist-pkg && tar -xzf /tmp/openlist.tar.gz -C /tmp/openlist-pkg
@@ -260,7 +260,13 @@ jobs:
             echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
           }
           require_free_kb /tmp $((2 * 1024 * 1024)) "emby restore preflight"
-          curl -L -o emby-server.deb $(curl -s https://api.github.com/repos/MediaBrowser/Emby.Releases/releases/latest | grep -oP '"browser_download_url": "\K(.*emby-server-deb.*amd64.deb)(?=")')
+          # 认证调用 GitHub API：runner 共享出口 IP 的匿名配额（60 次/h）极易耗尽，
+          # 限流响应里没有 browser_download_url，替换结果为空 → curl 报 "no URL specified" 直接失败
+          EMBY_DEB_URL=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            https://api.github.com/repos/MediaBrowser/Emby.Releases/releases/latest \
+            | grep -oP '"browser_download_url": "\K(.*emby-server-deb.*amd64.deb)(?=")')
+          [ -n "$EMBY_DEB_URL" ] || { echo "::error::未获取到 Emby 最新版下载地址（GitHub API 异常/限流）"; exit 1; }
+          curl -fL --retry 3 -o emby-server.deb "$EMBY_DEB_URL"
           sudo dpkg -i emby-server.deb
           
           # dpkg -i 会自动启动 emby-server，需要先把它停掉，否则 /var/lib/emby 会被锁定无法删除
@@ -405,7 +411,7 @@ jobs:
         run: |
           main() {
             mkdir -p /opt/ge2o
-            ASSET_URL=$(curl -s https://api.github.com/repos/AmbitiousJun/go-emby2openlist/releases/latest \
+            ASSET_URL=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/AmbitiousJun/go-emby2openlist/releases/latest \
               | grep -o '"browser_download_url": *"[^"]*ge2o-linux_amd64"' | head -1 | cut -d'"' -f4 || true)
             if [ -n "$ASSET_URL" ] && curl -fsSL -o /opt/ge2o/ge2o "$ASSET_URL"; then
               chmod +x /opt/ge2o/ge2o
