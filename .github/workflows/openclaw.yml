@@ -186,6 +186,15 @@ jobs:
             fi
           done
 
+          # Legacy exec-approvals file throws ExecApprovalsMigrationRequiredError
+          # inside 'openclaw doctor --fix' in CI, aborting the whole repair flow
+          # before config migrations are written. Remove it (approvals reset to
+          # defaults) so doctor can complete; the file is legacy 7.x format.
+          if [ -f "$HOME/.openclaw/exec-approvals.json" ]; then
+            rm -f "$HOME/.openclaw/exec-approvals.json"
+            echo "🗑️ Deleted legacy exec-approvals.json (doctor can now complete; approvals reset to defaults)"
+          fi
+
       - name: Restore skill symlink for proactivity
         run: |
           set -euo pipefail
