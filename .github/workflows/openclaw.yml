@@ -136,21 +136,48 @@ jobs:
           npm i -g clawhub
 
 
-      - name: Clear legacy doctor warnings
+      - name: Repair OpenClaw config (version drift)
         run: |
           set -euo pipefail
-          # Remove 7.x-era legacy artifacts that break 2026.8.x:
-          # - exec-approvals.json throws ExecApprovalsMigrationRequiredError
-          #   inside 'openclaw doctor --fix', aborting the repair flow before
-          #   config migrations (agents.list -> entries, models ->
-          #   modelPolicy.allow, tier-eval) are written. Deleting it lets
-          #   doctor complete and clears the legacy warnings.
-          # - sessions.json makes the gateway refuse to start; the live state
-          #   no longer contains one, this only guards old-archive restores.
-          if [ -f "$HOME/.openclaw/exec-approvals.json" ]; then
-            rm -f "$HOME/.openclaw/exec-approvals.json"
-            echo "🗑️ Deleted legacy exec-approvals.json (doctor can now complete; approvals reset to defaults)"
+          CFG="$HOME/.openclaw/openclaw.json"
+          if [ ! -s "$CFG" ]; then
+            echo "No openclaw.json present; nothing to repair."
+            exit 0
           fi
+          BACKUP="$CFG.bak-repair-$(date +%Y%m%d-%H%M%S)"
+          cp "$CFG" "$BACKUP"
+          TMP="$(mktemp)"
+          jq '
+            del(.meta.lastTouchedAt)
+            | del(.browser.remoteCdpTimeoutMs, .browser.remoteCdpHandshakeTimeoutMs, .browser.color)
+            | (if (.browser.profiles? | type) == "object" then .browser.profiles |= with_entries(.value |= del(.color)) else . end)
+            | del(.agents.defaults.memorySearch)
+            | (.agents |= (if type == "object" then walk(if type == "object" then del(.skipWhenBusy) else . end) else . end))
+            | del(.tools.exec.timeoutSec)
+            | del(.commands.ownerDisplay)
+            | del(.gateway.controlUi.allowInsecureAuth)
+            | del(.gateway.controlUi.dangerouslyDisableDeviceAuth)
+            | del(.gateway.tailscale.resetOnExit)
+            | (if .gateway.reload.mode == "restart" then .gateway.reload.mode = "hybrid" else . end)
+            | del(.skills.load.watchDebounceMs)
+            | del(.plugins.bundledDiscovery)
+            | (if (.agents? | type) == "object" then .agents.ownership = "explicit" else . end)
+          ' "$CFG" > "$TMP"
+          if jq -e . "$TMP" > /dev/null 2>&1; then
+            mv "$TMP" "$CFG"
+            echo "✅ Config repaired for version drift (backup: $BACKUP)"
+            echo "- removed keys unknown to the running OpenClaw version"
+            echo "- gateway.reload.mode: restart -> hybrid (if it was restart)"
+            echo "- agents.ownership set to explicit (multi-agent rosters)"
+          else
+            echo "❌ Repaired JSON invalid; keeping original config"
+            rm -f "$TMP"
+            exit 1
+          fi
+
+          # 2026.8.x gateway refuses to start while legacy (non-sqlite) session
+          # stores exist; doctor --fix does not migrate them in CI. Delete them
+          # (user-approved) so the gateway starts with the new SQLite stores.
           find "$HOME/.openclaw" -type f -name "sessions.json" 2>/dev/null | while read -r LEGACY_SESSIONS; do
             if rm -f "$LEGACY_SESSIONS"; then
               echo "🗑️ Deleted legacy session store: $LEGACY_SESSIONS"
@@ -158,7 +185,15 @@ jobs:
               echo "⚠️ Could not delete legacy session store: $LEGACY_SESSIONS"
             fi
           done
-          echo "✅ Legacy artifacts clean; doctor --fix can complete without warnings"
+
+          # Legacy exec-approvals file throws ExecApprovalsMigrationRequiredError
+          # inside 'openclaw doctor --fix' in CI, aborting the whole repair flow
+          # before config migrations are written. Remove it (approvals reset to
+          # defaults) so doctor can complete; the file is legacy 7.x format.
+          if [ -f "$HOME/.openclaw/exec-approvals.json" ]; then
+            rm -f "$HOME/.openclaw/exec-approvals.json"
+            echo "🗑️ Deleted legacy exec-approvals.json (doctor can now complete; approvals reset to defaults)"
+          fi
 
       - name: Restore skill symlink for proactivity
         run: |
