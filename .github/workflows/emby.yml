@@ -514,53 +514,104 @@ jobs:
           WD_EOF
           TELEGRAM_BOT_TOKEN="${{ secrets.TELEGRAM_BOT_TOKEN }}" TG_CHAT_ID="${{ secrets.TG_CHAT_ID }}" \
             nohup bash /opt/watchdog.sh > /opt/logs/watchdog.log 2>&1 &
-          # 播放事件监听：ge2o 访问日志 → 事件去重 → echo 进 workflow 日志 + TG 通知（302直链/中转/转码）
+          # 播放事件监听：
+          #   302 模式主源    = ge2o 访问日志（3xx → [302直链]，2xx → [中转]）
+          #   direct 模式兜底 = Emby Sessions 轮询（ge2o 被旁路，ge2o.log 里不会有播放记录）
+          #   两个数据源共享去重状态，同一个 item 180s 内只推一次
           cat > /opt/playlog.sh <<'PL_EOF'
           #!/bin/bash
-          # 播放事件监听（自诊断版）：启动时输出 ge2o.log 末尾（脱敏）→ 格式无关匹配 → echo 进 workflow 日志 + TG
+          # 播放事件监听：ge2o 访问日志（302 模式主源）+ Emby Sessions 轮询（direct 模式兜底）
           LOG=/opt/logs/ge2o.log
           EMBY=http://127.0.0.1:8096
-          touch "$LOG"
-          LAST_ID=
-          LAST_TS=0
-          echo "playlog 启动: ge2o.log $(wc -l < "$LOG" 2>/dev/null || echo 0) 行"
+          STATE=/tmp/playlog-state
+          LOCK=/tmp/playlog.lock
+          touch "$LOG" "$STATE"
+          echo "playlog 启动: mode=$(cat /tmp/PLAYBACK_MODE 2>/dev/null || echo unknown), ge2o.log $(wc -l < "$LOG" 2>/dev/null || echo 0) 行"
           tail -3 "$LOG" 2>/dev/null | sed -E 's/api_key=[^& ]*/api_key=[redacted]/g' || true
-          tail -n0 -F "$LOG" 2>/dev/null | while read -r line; do
-            case "$line" in
-              *'/videos/'*) ;;
-              *) continue;;
-            esac
-            case "$line" in
-              *stream*|*original*|*master.m3u8*|*proxy_playlist*) ;;
-              *) continue;;
-            esac
-            ST=$(printf '%s\n' "$line" | grep -oE '\| [0-9]{3} \|' | head -1 | tr -d '| ')
-            case "$ST" in
-              302|307) KIND=302直链;;
-              200) KIND=中转;;
-              *) continue;;
-            esac
-            printf '%s\n' "$line" > /tmp/ol-line.txt
-            sed -E 's|.*emby/[Vv]ideos/([0-9]+).*|\1|' /tmp/ol-line.txt > /tmp/ol-iid.txt 2>/dev/null
-            read -r IID < /tmp/ol-iid.txt 2>/dev/null || IID=0
-            case "$IID" in
-              ''|*[!0-9]*) IID=0;;
-            esac
-            NOW=$(date +%s)
-            GAP=$((NOW - LAST_TS))
-            if [ "$IID" = "$LAST_ID" ] && [ "$GAP" -lt 180 ]; then continue; fi
-            LAST_ID=$IID
-            LAST_TS=$NOW
-            curl -s "http://127.0.0.1:8096/emby/Items?Ids=$IID&Fields=Name&api_key=***" > /tmp/ol-item.json 2>/dev/null
-            jq -r '.Items[0].Name // "未知"' /tmp/ol-item.json > /tmp/ol-name.txt 2>/dev/null
-            read -r NAME < /tmp/ol-name.txt 2>/dev/null || NAME=未知
-            echo "🎬 播放 [$KIND] $NAME (item $IID)"
-            curl -s -X POST "https://api.telegram.org/bot$TG_TOKEN/sendMessage" \
-              --data-urlencode chat_id=$TG_CHAT \
-              --data-urlencode "text=🎬 播放 [$KIND] $NAME" >/dev/null 2>&1
-          done
+
+          # 去重：同一 item 180s 内只允许推送一次；两个数据源共享 STATE（flock 串行化）
+          claim() {
+            local iid=$1 now ts
+            now=$(date +%s)
+            (
+              flock 9 2>/dev/null || :
+              ts=$(grep -m1 "^$iid " "$STATE" 2>/dev/null | cut -d' ' -f2)
+              if [ -n "$ts" ] && [ $((now - ts)) -lt 180 ]; then exit 1; fi
+              grep -v "^$iid " "$STATE" > "$STATE.tmp" 2>/dev/null
+              echo "$iid $now" >> "$STATE.tmp"
+              mv "$STATE.tmp" "$STATE"
+            ) 9>"$LOCK"
+          }
+
+          notify() { # $1=KIND $2=IID [$3=NAME]
+            local kind=$1 iid=$2 name=$3 code
+            claim "$iid" || return 0
+            if [ -z "$name" ]; then
+              name=$(curl -s -m 8 "$EMBY/emby/Items?Ids=$iid&Fields=Name&api_key=$EMBY_API_KEY" \
+                     | jq -r '.Items[0].Name // "未知"' 2>/dev/null)
+              [ -n "$name" ] || name=未知
+            fi
+            echo "🎬 播放 [$kind] $name (item $iid)"
+            code=$(curl -s -m 10 -o /tmp/pl-tg.json -w '%{http_code}' \
+                     -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
+                     --data-urlencode "chat_id=$TG_CHAT_ID" \
+                     --data-urlencode "text=🎬 播放 [$kind] $name")
+            [ "$code" = "200" ] || echo "[WARNING] TG 推送失败 http=$code resp=$(head -c 200 /tmp/pl-tg.json 2>/dev/null)"
+          }
+
+          # 数据源 A：ge2o 访问日志（302 模式主源）
+          (
+            tail -n0 -F "$LOG" 2>/dev/null | while read -r line; do
+              case "$line" in
+                *'/videos/'*) ;;
+                *) continue;;
+              esac
+              case "$line" in
+                *stream*|*original*|*master.m3u8*|*proxy_playlist*) ;;
+                *) continue;;
+              esac
+              ST=$(printf '%s\n' "$line" | grep -oE '\| [0-9]{3} \|' | head -1 | tr -d '| ')
+              case "$ST" in
+                302|307) KIND=302直链;;
+                200) KIND=中转;;
+                *) continue;;
+              esac
+              IID=$(printf '%s\n' "$line" | sed -E 's|.*emby/[Vv]ideos/([0-9]+).*|\1|')
+              case "$IID" in
+                ''|*[!0-9]*) continue;;
+              esac
+              notify "$KIND" "$IID"
+            done
+          ) &
+
+          # 数据源 B：Emby Sessions 轮询（ge2o 覆盖不到的播放：direct 模式 / 日志格式变化）
+          (
+            while true; do
+              sleep 10
+              MODE=$(cat /tmp/PLAYBACK_MODE 2>/dev/null || echo 302)
+              curl -s -m 8 "$EMBY/emby/Sessions?api_key=$EMBY_API_KEY" 2>/dev/null \
+                | jq -c '.[] | select(.NowPlayingItem != null) | {id: (.NowPlayingItem.Id // ""), name: (.NowPlayingItem.Name // ""), method: (.PlayState.PlayMethod // "")}' 2>/dev/null \
+                | while read -r s; do
+                    IID=$(printf '%s' "$s" | jq -r '.id' 2>/dev/null)
+                    NAME=$(printf '%s' "$s" | jq -r '.name' 2>/dev/null)
+                    METHOD=$(printf '%s' "$s" | jq -r '.method' 2>/dev/null)
+                    case "$IID" in
+                      ''|*[!0-9]*) continue;;
+                    esac
+                    case "$METHOD" in
+                      Transcode) KIND=中转;;
+                      *) if [ "$MODE" = "direct" ]; then KIND=中转; else KIND=302直链; fi;;
+                    esac
+                    notify "$KIND" "$IID" "$NAME"
+                  done
+            done
+          ) &
+
+          wait
           PL_EOF
-          TELEGRAM_BOT_TOKEN="${{ secrets.TELEGRAM_BOT_TOKEN }}" TG_CHAT_ID="${{ secrets.TG_CHAT_ID }}" nohup bash /opt/playlog.sh 2>&1 &
+          TELEGRAM_BOT_TOKEN="${{ secrets.TELEGRAM_BOT_TOKEN }}" TG_CHAT_ID="${{ secrets.TG_CHAT_ID }}" \
+            EMBY_API_KEY="${{ secrets.EMBY_API_TOKEN }}" \
+            nohup bash /opt/playlog.sh >> /opt/logs/playlog.log 2>&1 &
       - name: sleep
         run: |
           sudo sleep 340m
@@ -724,3 +775,6 @@ jobs:
           curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             -d chat_id=${{ secrets.TG_CHAT_ID }} \
             -d text="${MESSAGE}"
+          # 播放事件日志归档：便于排查"播了但没通知"
+          echo "--- playlog.log (tail 50) ---"
+          tail -n 50 /opt/logs/playlog.log 2>/dev/null || echo "(无 playlog.log)"
