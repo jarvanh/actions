@@ -556,16 +556,56 @@ jobs:
           SFAIL=0
           redact() { sed -E 's/api_key=[^& ]*/api_key=[redacted]/g; s#https?://[^ "]*#<url>#g'; }
 
+          # Emby API 请求：优先用自检选出的认证方式，失败自动回退另一种，返回 http 码
+          emby_get() { # $1=路径(含前导 /) $2=输出文件
+            local path=$1 out=$2 code
+            if [ "$AUTH_MODE" = "query" ]; then
+              case "$path" in
+                *\?*) code=$(curl -s -m 8 -o "$out" -w '%{http_code}' "$EMBY$path&api_key=$EMBY_API_KEY");;
+                *)    code=$(curl -s -m 8 -o "$out" -w '%{http_code}' "$EMBY$path?api_key=$EMBY_API_KEY");;
+              esac
+              if [ "$code" = "200" ]; then printf '%s' "$code"; return 0; fi
+              code=$(curl -s -m 8 -o "$out" -w '%{http_code}' -H "X-Emby-Token: $EMBY_API_KEY" "$EMBY$path")
+            else
+              code=$(curl -s -m 8 -o "$out" -w '%{http_code}' \
+                       -H "X-Emby-Token: $EMBY_API_KEY" "$EMBY$path")
+              if [ "$code" = "200" ]; then printf '%s' "$code"; return 0; fi
+              case "$path" in
+                *\?*) code=$(curl -s -m 8 -o "$out" -w '%{http_code}' "$EMBY$path&api_key=$EMBY_API_KEY");;
+                *)    code=$(curl -s -m 8 -o "$out" -w '%{http_code}' "$EMBY$path?api_key=$EMBY_API_KEY");;
+              esac
+            fi
+            printf '%s' "$code"
+          }
+
           echo "=== playlog 启动 $(date '+%F %T') ==="
           echo "PLAYBACK_MODE=$(cat /tmp/PLAYBACK_MODE 2>/dev/null || echo unknown)"
+          echo "EMBY_API_KEY 长度=${#EMBY_API_KEY}（0 或异常值说明密钥没传进来）"
           echo "ge2o.log 行数: $(wc -l < "$LOG" 2>/dev/null || echo 0)"
           echo "--- ge2o.log 末尾 8 行（脱敏，用于确认访问日志格式）---"
           tail -n 8 "$LOG" 2>/dev/null | redact
-          # Emby 连通性自检（只报数量，不输出用户名/媒体路径）
-          SC=$(curl -s -m 8 -o /tmp/pl-sessions.json -w '%{http_code}' \
-                 -H "X-Emby-Token: $EMBY_API_KEY" "$EMBY/emby/Sessions")
+
+          # Emby 认证矩阵自检：优雅停机用同一密钥的 X-Emby-Token 头是成功的，
+          # 这里逐个验证认证方式与端点，定位 playlog 里 401 的真正原因（公开日志只输出 http 码）
+          SC_SYS=$(curl -s -m 8 -o /dev/null -w '%{http_code}' -H "X-Emby-Token: $EMBY_API_KEY" "$EMBY/emby/System/Info")
+          SC1=$(curl -s -m 8 -o /tmp/pl-sessions.json -w '%{http_code}' -H "X-Emby-Token: $EMBY_API_KEY" "$EMBY/emby/Sessions")
+          SC2=$(curl -s -m 8 -o /dev/null -w '%{http_code}' "$EMBY/emby/Sessions?api_key=$EMBY_API_KEY")
+          SC3=$(curl -s -m 8 -o /dev/null -w '%{http_code}' -H "X-MediaBrowser-Token: $EMBY_API_KEY" "$EMBY/emby/Sessions")
+          SC4=$(curl -s -m 8 -o /dev/null -w '%{http_code}' -H "Authorization: MediaBrowser Token=\"$EMBY_API_KEY\"" "$EMBY/emby/Sessions")
+          echo "Emby 认证矩阵: System/Info(头)=$SC_SYS | Sessions 头X-Emby-Token=$SC1 查询api_key=$SC2 头X-MediaBrowser-Token=$SC3 头Authorization=$SC4"
+          if [ "$SC1" = "200" ]; then
+            AUTH_MODE=header
+          elif [ "$SC2" = "200" ]; then
+            AUTH_MODE=query
+          else
+            AUTH_MODE=query
+            echo "401 响应体片段: $(head -c 150 /tmp/pl-sessions.json 2>/dev/null)"
+          fi
+
+          # Emby 连通性自检（用选出的认证方式；只报数量，不输出用户名/媒体路径）
+          SC=$(emby_get /emby/Sessions /tmp/pl-sessions.json)
           SN=$(jq 'if type=="array" then length else ((.Items // []) | length) end' /tmp/pl-sessions.json 2>/dev/null || echo jq失败)
-          echo "Emby Sessions 自检: http=$SC 会话数=$SN"
+          echo "Emby Sessions 自检: http=$SC 会话数=$SN 认证方式=$AUTH_MODE"
           # TG 通道自检：启动即应在 TG 收到这一条，用来区分"推送链路断了"还是"播放事件没识别到"
           TC=$(curl -s -m 10 -o /tmp/pl-tg.json -w '%{http_code}' \
                  -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
@@ -573,28 +613,44 @@ jobs:
                  --data-urlencode "text=🎬 playlog 已就绪（自检）")
           echo "TG 通道自检: http=$TC resp=$(head -c 200 /tmp/pl-tg.json 2>/dev/null)"
 
-          # 去重：同一 item 180s 内只允许推送一次；两个数据源共享 STATE（flock 串行化）
+          # 去重（滑动窗口）：同一 item 的持续播放只推一次。
+          # 每次命中都刷新"最后请求时间"，间隔超过 300s 才视为新的一次播放；
+          # 两个数据源共享 STATE（flock 串行化）
           claim() {
             local iid=$1 now ts
             now=$(date +%s)
             (
               flock 9 2>/dev/null || :
               ts=$(grep -m1 "^$iid " "$STATE" 2>/dev/null | cut -d' ' -f2)
-              if [ -n "$ts" ] && [ $((now - ts)) -lt 180 ]; then exit 1; fi
               grep -v "^$iid " "$STATE" > "$STATE.tmp" 2>/dev/null
               echo "$iid $now" >> "$STATE.tmp"
               mv "$STATE.tmp" "$STATE"
+              [ -n "$ts" ] && [ $((now - ts)) -lt 300 ] && exit 1
+              exit 0
             ) 9>"$LOCK"
+          }
+
+          # 片名反查：Items 接口 → 失败再从 Sessions 里按 Id 反查（emby_get 已含双认证回退）
+          item_name() { # $1=IID
+            local iid=$1 code name
+            code=$(emby_get "/emby/Items?Ids=$iid&Fields=Name" /tmp/pl-item.json)
+            name=$(jq -r '.Items[0].Name // empty' /tmp/pl-item.json 2>/dev/null)
+            if [ -z "$name" ]; then
+              echo "[WARN] 片名查询失败 item=$iid http=$code" >&2
+              code=$(emby_get /emby/Sessions /tmp/pl-sessions-name.json)
+              name=$(jq -r --arg id "$iid" 'if type=="array" then . else (.Items // []) end
+                     | .[] | select((.NowPlayingItem.Id // "") == $id) | .NowPlayingItem.Name' \
+                     /tmp/pl-sessions-name.json 2>/dev/null | head -1)
+              [ -n "$name" ] || echo "[WARN] Sessions 反查片名失败 item=$iid http=$code" >&2
+            fi
+            printf '%s' "${name:-未知}"
           }
 
           notify() { # $1=KIND $2=IID [$3=NAME]
             local kind=$1 iid=$2 name=$3 code
             claim "$iid" || return 0
             if [ -z "$name" ]; then
-              name=$(curl -s -m 8 -H "X-Emby-Token: $EMBY_API_KEY" \
-                       "$EMBY/emby/Items?Ids=$iid&Fields=Name" \
-                     | jq -r '.Items[0].Name // "未知"' 2>/dev/null)
-              [ -n "$name" ] || name=未知
+              name=$(item_name "$iid")
             fi
             echo "🎬 播放 [$kind] $name (item $iid)"
             code=$(curl -s -m 10 -o /tmp/pl-tg.json -w '%{http_code}' \
@@ -605,14 +661,27 @@ jobs:
           }
 
           # 数据源 A：ge2o 访问日志（302 模式主源）
+          #   真实格式（v2.8.2）：
+          #   [ge2o:v2.8.2] 2026-09-01 08:49:01 | 206 | 4.16s | 141.11.43.124 | 8095 <路由> | GET /emby/videos/554849/stream?...
+          #   3xx = 直链重定向；200/206 = 经 ge2o/Emby 中转；304 = 客户端缓存校验，不计为播放
           (
             tail -n0 -F "$LOG" 2>/dev/null | while read -r line; do
               case "$line" in
                 *'/videos/'*) ;;
                 *) continue;;
               esac
+              # 只认访问日志行（带 " | 方法 /path"），[ERROR] 等业务日志一律跳过
               case "$line" in
-                *stream*|*original*|*master.m3u8*|*proxy_playlist*) ;;
+                *' | GET '*|*' | POST '*|*' | HEAD '*) ;;
+                *)
+                  if [ "$DIAG" -lt 12 ]; then
+                    DIAG=$((DIAG+1))
+                    echo "[SKIP] 非访问日志行: $(printf '%s' "$line" | redact | head -c 160)"
+                  fi
+                  continue;;
+              esac
+              case "$line" in
+                *stream*|*original*|*master.m3u8*|*universal*) ;;
                 *)
                   if [ "$DIAG" -lt 12 ]; then
                     DIAG=$((DIAG+1))
@@ -623,15 +692,13 @@ jobs:
               ST=$(printf '%s\n' "$line" | grep -oE '\| [0-9]{3} \|' | head -1 | tr -d '| ')
               case "$ST" in
                 302|307) KIND=302直链;;
-                200) KIND=中转;;
+                200|206) KIND=中转;;
                 *)
-                  # 状态码解析不出来也要报：按当前模式归类，宁可标错也不能漏报
-                  if [ "$(cat /tmp/PLAYBACK_MODE 2>/dev/null || echo 302)" = "direct" ]; then KIND=中转; else KIND=302直链; fi
-                  if [ "$DIAG" -lt 12 ]; then
+                  if [ "$DIAG" -lt 12 ] && [ "$ST" != "304" ]; then
                     DIAG=$((DIAG+1))
-                    echo "[WARN] 未解析到状态码，按 $KIND 兜底: $(printf '%s' "$line" | redact | head -c 200)"
+                    echo "[SKIP] 状态码 $ST 不计为播放: $(printf '%s' "$line" | redact | head -c 160)"
                   fi
-                  ;;
+                  continue;;
               esac
               IID=$(printf '%s\n' "$line" | sed -E 's|.*emby/[Vv]ideos/([0-9]+).*|\1|')
               case "$IID" in
@@ -646,8 +713,7 @@ jobs:
             while true; do
               sleep 10
               MODE=$(cat /tmp/PLAYBACK_MODE 2>/dev/null || echo 302)
-              SC=$(curl -s -m 8 -o /tmp/pl-sessions.json -w '%{http_code}' \
-                     -H "X-Emby-Token: $EMBY_API_KEY" "$EMBY/emby/Sessions")
+              SC=$(emby_get /emby/Sessions /tmp/pl-sessions.json)
               if [ "$SC" != "200" ]; then
                 SFAIL=$((SFAIL+1))
                 [ $((SFAIL % 10)) -eq 1 ] && echo "[WARN] Sessions 查询失败 http=$SC（第 $SFAIL 次）"
@@ -860,5 +926,8 @@ jobs:
             -d chat_id=${{ secrets.TG_CHAT_ID }} \
             -d text="${MESSAGE}"
           # 播放事件日志归档：便于排查"播了但没通知"
-          echo "--- playlog.log (tail 50) ---"
+          echo "--- playlog.log (tail 80) ---"
           tail -n 80 /opt/logs/playlog.log 2>/dev/null || echo "(无 playlog.log)"
+          # ge2o 自身日志归档（脱敏）：定位播放走中转而非 302 直链的原因
+          echo "--- ge2o.log (tail 60, 脱敏) ---"
+          tail -n 60 /opt/logs/ge2o.log 2>/dev/null | sed -E 's/api_key=[^& ]*/api_key=[redacted]/g; s#https?://[^ "]*#<url>#g' || echo "(无 ge2o.log)"
