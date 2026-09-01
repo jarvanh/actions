@@ -17,10 +17,10 @@ on:
     inputs:
       playback_mode:
         description: >-
-          302 直链播放开关（⚠️ 命名反直觉，别按字面理解）：
-          302 = 开启，播放器直接向 OneDrive 拉流，不占 runner 带宽（链路不健康时自动回退 direct）；
-          direct = 关闭，视频流经 runner 中转，"direct" 指直连 Emby 而非直连网盘。
-          本开关只在手动触发时生效；定时/watch 触发读仓库变量 EMBY_PLAYBACK_MODE（缺省 302）。
+          302 直链播放开关：
+          302 ，播放器直接向 OneDrive 拉流，链路不健康时自动回退 direct；
+          direct ，直连 Emby ，视频流经 runner 中转。
+          本开关只在手动触发时生效；定时/watch 触发读仓库变量 EMBY_PLAYBACK_MODE（默认 302）。
         type: choice
         default: "302"
         options:
