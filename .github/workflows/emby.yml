@@ -743,7 +743,6 @@ jobs:
               require_free_kb "$HOME" $((src_kb + 1024 * 1024)) "emby archive preflight"
               sudo rm -f "$HOME/emby-backup.tar.zst"
               sudo tar -I 'zstd -3 -T0' -cf $HOME/emby-backup.tar.zst \
-                --exclude='cache' \
                 --exclude='logs' \
                 --exclude='transcoding-temp' \
                 -C /var/lib/emby .
