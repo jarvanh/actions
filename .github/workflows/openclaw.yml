@@ -828,6 +828,43 @@ jobs:
                 FALLBACK_REINSTALL_END_TS=$(date +%s)
                 echo "FALLBACK_REINSTALL_DURATION_SEC=$((FALLBACK_REINSTALL_END_TS - FALLBACK_REINSTALL_BEGIN_TS))" >> "$RUN_OPENCLAW_META"
                 dump_openclaw_diagnostics
+
+                echo "FAIL_STAGE=snapshot_restore" >> "$RUN_OPENCLAW_META"
+                echo "🔁 Fallback reinstall did not become healthy. Trying automatic snapshot rollback (state + version pair from the healthy snapshot pool)..."
+                SNAPSHOT_TGZ="$(rclone lsf dropbox:self-hosted/snapshots/ --files-only 2>/dev/null | grep -- "-v${TARGET_VERSION}.tar.gz" | sort | tail -n 1 || true)"
+                if [ -z "$SNAPSHOT_TGZ" ]; then
+                  echo "ℹ️ No snapshot for version $TARGET_VERSION in the snapshot pool; snapshot rollback unavailable."
+                else
+                  echo "⬇️ Downloading snapshot: $SNAPSHOT_TGZ ..."
+                  if rclone copyto "dropbox:self-hosted/snapshots/${SNAPSHOT_TGZ}" /tmp/snapshot-restore.tar.gz -v 2>&1 | tail -n 2; then
+                    echo "🛑 Stopping gateway (cancels the systemd auto-restart loop)..."
+                    systemctl --user stop openclaw-gateway.service 2>/dev/null || true
+                    openclaw gateway stop 2>/dev/null || true
+                    sleep 3
+                    BAK_TS="$(date +%Y%m%d-%H%M%S)"
+                    mv "$HOME/.openclaw" "$HOME/.openclaw.broken-bak-$BAK_TS"
+                    if tar -xzf /tmp/snapshot-restore.tar.gz -C "$HOME" && [ -s "$HOME/.openclaw/openclaw.json" ]; then
+                      echo "✅ State restored from snapshot (broken state kept at ~/.openclaw.broken-bak-$BAK_TS)."
+                      fix_openclaw_permissions
+                      if openclaw gateway install --force && openclaw gateway restart && wait_for_openclaw_health "snapshot_restore" 180 5; then
+                        record_successful_openclaw_version "$TARGET_VERSION"
+                        echo "✅ OpenClaw is healthy after automatic snapshot rollback!"
+                      else
+                        dump_openclaw_diagnostics
+                        err="快照回滚（状态+版本成对恢复）后仍无法启动；损坏状态保留于 ~/.openclaw.broken-bak-$BAK_TS"
+                        fail_startup "$err"
+                      fi
+                    else
+                      echo "❌ Snapshot extraction failed; restoring the previous state and giving up."
+                      rm -rf "$HOME/.openclaw"
+                      mv "$HOME/.openclaw.broken-bak-$BAK_TS" "$HOME/.openclaw"
+                      err="快照解包失败，已还原现场"
+                      fail_startup "$err"
+                    fi
+                  else
+                    echo "⚠️ Snapshot download failed; skipping automatic snapshot rollback."
+                  fi
+                fi
                 err="回退到最近记录版本后，OpenClaw 依然无法启动（健康检查失败）"
                 fail_startup "$err"
               fi
