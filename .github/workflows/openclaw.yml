@@ -832,8 +832,24 @@ jobs:
                 echo "FAIL_STAGE=snapshot_restore" >> "$RUN_OPENCLAW_META"
                 echo "🔁 Fallback reinstall did not become healthy. Trying automatic snapshot rollback (state + version pair from the healthy snapshot pool)..."
                 SNAPSHOT_TGZ="$(rclone lsf dropbox:self-hosted/snapshots/ --files-only 2>/dev/null | grep -- "-v${TARGET_VERSION}.tar.gz" | sort | tail -n 1 || true)"
+                if [ -n "$SNAPSHOT_TGZ" ]; then
+                  echo "✅ Found version-matched snapshot: $SNAPSHOT_TGZ"
+                else
+                  echo "ℹ️ No snapshot for known-good version $TARGET_VERSION. Adopting the newest pool snapshot and its version instead (snapshot pool only contains verified-healthy pairs)..."
+                  SNAPSHOT_TGZ="$(rclone lsf dropbox:self-hosted/snapshots/ --files-only 2>/dev/null | grep "openclaw-.*-v" | sort | tail -n 1 || true)"
+                  if [ -n "$SNAPSHOT_TGZ" ]; then
+                    ADOPTED_VERSION="$(printf '%s\n' "$SNAPSHOT_TGZ" | sed -n 's/.*-v\([0-9]\{4\}\.[0-9]*\.[0-9]*\)\.tar\.gz/\1/p')"
+                    if [ -n "$ADOPTED_VERSION" ] && [ "$ADOPTED_VERSION" != "$TARGET_VERSION" ]; then
+                      echo "🔄 Adopting snapshot version $ADOPTED_VERSION: installing openclaw@$ADOPTED_VERSION before restore..."
+                      npm i -g "openclaw@$ADOPTED_VERSION"
+                      fix_openclaw_permissions
+                      TARGET_VERSION="$ADOPTED_VERSION"
+                      echo "SNAPSHOT_ADOPTED_VERSION=$ADOPTED_VERSION" >> "$RUN_OPENCLAW_META"
+                    fi
+                  fi
+                fi
                 if [ -z "$SNAPSHOT_TGZ" ]; then
-                  echo "ℹ️ No snapshot for version $TARGET_VERSION in the snapshot pool; snapshot rollback unavailable."
+                  echo "ℹ️ Snapshot pool empty or unusable; snapshot rollback unavailable."
                 else
                   echo "⬇️ Downloading snapshot: $SNAPSHOT_TGZ ..."
                   if rclone copyto "dropbox:self-hosted/snapshots/${SNAPSHOT_TGZ}" /tmp/snapshot-restore.tar.gz -v 2>&1 | tail -n 2; then
