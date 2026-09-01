@@ -155,6 +155,27 @@ jobs:
               fi
             fi
 
+            # 管理密码 = OPENLIST_ADMIN_PASSWORD（oe 维护入口与 ge2o 同一密码）。
+            # GitHub 密钥只写不可读，人工登录对不上时只能靠这里自愈：剔除粘贴带入的
+            # 首尾空白/换行（机器登录带同样的字符能过、人工输入少了它就失败，是历史坑），
+            # 并在服务启动前直接重置 DB 密码——服务未启动，无 sqlite 锁风险。
+            OPENLIST_PW="${{ secrets.OPENLIST_ADMIN_PASSWORD }}"
+            PW_RAW_LEN=${#OPENLIST_PW}
+            OPENLIST_PW=$(printf '%s' "$OPENLIST_PW" | tr -d '\r\n' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
+            if [ -z "$OPENLIST_PW" ]; then
+              echo "::error::OPENLIST_ADMIN_PASSWORD 未设置或全空白——本次 admin 密码为随机值，oe 人工登录不可用"
+              OPENLIST_PW=$(openssl rand -hex 16)
+            fi
+            echo "OPENLIST_ADMIN_PASSWORD 形状: 原长=$PW_RAW_LEN 采用长=${#OPENLIST_PW}$([ "$PW_RAW_LEN" -ne "${#OPENLIST_PW}" ] && echo '（已剔除空白——若之前 oe 人工登录失败，多半是密钥里混入了不可见字符）')"
+            if [ -f /opt/openlist/data.db ]; then
+              if openlist admin set --data /opt/openlist "$OPENLIST_PW" >/dev/null 2>&1 \
+                 || openlist admin set "$OPENLIST_PW" --data /opt/openlist >/dev/null 2>&1; then
+                echo "admin 密码已在启动前重置为 secret 值"
+              else
+                echo "::warning::启动前 admin set 失败，将在启动后重试"
+              fi
+            fi
+
             nohup openlist server --data /opt/openlist > /opt/logs/openlist.log 2>&1 &
             for i in $(seq 1 30); do
               curl -fsS http://127.0.0.1:5244/ping >/dev/null 2>&1 && break
@@ -185,11 +206,7 @@ jobs:
               echo "OpenList 维护隧道已启动 (oe)"
             fi
 
-            # 管理密码 = OPENLIST_ADMIN_PASSWORD（与转存线实例同一密码，oe 隧道维护入口用同一套登录）
-            OPENLIST_PW="${{ secrets.OPENLIST_ADMIN_PASSWORD }}"
-            if [ -z "$OPENLIST_PW" ]; then OPENLIST_PW=$(openssl rand -hex 16); fi
-
-            # 先尝试直接登录：正常情况下恢复分支的库内密码即上次设置值，无需重置
+            # 登录（密码已在上文启动前统一重置，正常一次通过；失败再补救一次：全新库走这条路）
             TOKEN=$(curl -s -X POST http://127.0.0.1:5244/api/auth/login \
               -H 'Content-Type: application/json' \
               -d "{\"username\":\"admin\",\"password\":\"$OPENLIST_PW\"}" | jq -r '.data.token // .data // empty' || true)
@@ -481,6 +498,10 @@ jobs:
             302|direct) ;;
             *) echo "::warning::未知的播放模式 '$MODE'（EMBY_PLAYBACK_MODE），按 302 处理"; MODE="302";;
           esac
+          # 公开日志脱敏：URL、密钥、媒体路径 → 占位符（探针诊断用）
+          redact_pub() {
+            sed -E 's/api_key=[^& "]*/api_key=[redacted]/g; s#https?://[^ ",}]*#<url>#g; s#/onedrive/[^,"}]*#<path>#g'
+          }
           if [ "$MODE" = "302" ]; then
             # 直链映射探针：取一个媒体库根目录（/onedrive/...），用同路径直查 OpenList fs/get。
             # ge2o 路径换算断了会静默回源（播放一直显示"中转"），这里在启动时就暴露。
@@ -492,11 +513,11 @@ jobs:
               TOK=$(cat /tmp/openlist-token 2>/dev/null || true)
               MAP_OK=1
               if [ -n "$TOK" ] && [ -n "$MEDIA_DIR" ]; then
-                GC=$(curl -s -m 10 -X POST http://127.0.0.1:5244/api/fs/get \
-                       -H "Authorization: $TOK" -H 'Content-Type: application/json' \
-                       -d "$(jq -nc --arg p "$MEDIA_DIR" '{path:$p}')" \
-                     | jq -r '.code // 0' 2>/dev/null || echo 0)
-                [ "$GC" = "200" ] || { MAP_OK=0; echo "直链映射自检失败: OpenList fs/get code=$GC"; }
+                RESP=$(curl -s -m 10 -X POST http://127.0.0.1:5244/api/fs/get \
+                  -H "Authorization: $TOK" -H 'Content-Type: application/json' \
+                  -d "$(jq -nc --arg p "$MEDIA_DIR" '{path:$p}')")
+                GC=$(printf '%s' "$RESP" | jq -r '.code // 0' 2>/dev/null || echo 0)
+                [ "$GC" = "200" ] || { MAP_OK=0; echo "直链映射自检失败: fs/get code=$GC msg=$(printf '%s' "$RESP" | jq -r '.message // empty' 2>/dev/null | redact_pub | head -c 200)"; }
               fi
               if curl -fsS -m 5 http://127.0.0.1:8095/emby/System/Info/Public >/dev/null 2>&1 \
                  && [ -n "$TOK" ] \
@@ -517,13 +538,17 @@ jobs:
                 -H "Authorization: $TOK" -H 'Content-Type: application/json' \
                 -d '{"path":"/onedrive","page":1,"per_page":3}' 2>/dev/null \
                 | jq -c '{code: .code, msg: .message, total: (.data.total // 0)}' 2>/dev/null || true
-              # 映射诊断：只报 code，不打印媒体路径（日志公开）
+              # 映射诊断：fs/get 报错原因 + 同目录 fs/list 对照（区分"get 语义问题"和"子树整体不可达"）
               if [ -n "$MEDIA_DIR" ]; then
-                echo "--- 直链映射诊断（Emby 库目录同路径 fs/get）---"
+                echo "--- 直链映射诊断（脱敏）---"
                 curl -s -m 10 -X POST http://127.0.0.1:5244/api/fs/get \
                   -H "Authorization: $TOK" -H 'Content-Type: application/json' \
                   -d "$(jq -nc --arg p "$MEDIA_DIR" '{path:$p}')" 2>/dev/null \
-                  | jq -c '{code: .code}' 2>/dev/null || true
+                  | jq -c '{code: .code, msg: .message}' 2>/dev/null | redact_pub || true
+                curl -s -m 10 -X POST http://127.0.0.1:5244/api/fs/list \
+                  -H "Authorization: $TOK" -H 'Content-Type: application/json' \
+                  -d "$(jq -nc --arg p "$MEDIA_DIR" '{path:$p,page:1,per_page:1}')" 2>/dev/null \
+                  | jq -c '{code: .code, msg: .message, total: (.data.total // 0)}' 2>/dev/null | redact_pub || true
               fi
               MODE="direct"
             fi
