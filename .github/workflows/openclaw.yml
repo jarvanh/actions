@@ -1297,23 +1297,18 @@ jobs:
             openclaw_final_upload_output=""
             if openclaw_final_upload_output=$(rclone copyto "$TMP_OPENCLAW_TAR" dropbox:self-hosted/openclaw.tar.gz -v 2>&1); then
               echo "final openclaw archive/upload ok: ${openclaw_final_output}"
-              echo "5. Versioned snapshot (healthy runs only, max one per day, keep 5)..."
+              echo "5. Versioned snapshot (every healthy run, keep 3)..."
               if [ -f /tmp/run-openclaw-meta.env ] && grep -q '^RECORDED_SUCCESSFUL_OPENCLAW_VERSION=' /tmp/run-openclaw-meta.env; then
                 SNAP_VERSION="$(grep '^RECORDED_SUCCESSFUL_OPENCLAW_VERSION=' /tmp/run-openclaw-meta.env | tail -n 1 | cut -d= -f2-)"
-                SNAP_DAY="$(date -u +%Y%m%d)"
-                SNAP_NAME="openclaw-${SNAP_DAY}-$(date -u +%H%M)-v${SNAP_VERSION}.tar.gz"
-                if rclone lsf dropbox:self-hosted/snapshots/ --files-only 2>/dev/null | grep -q "openclaw-${SNAP_DAY}-"; then
-                  echo "ℹ️ Snapshot for ${SNAP_DAY} already exists; skipping (max one per day to bound storage)."
+                SNAP_NAME="openclaw-$(date -u +%Y%m%d-%H%M)-v${SNAP_VERSION}.tar.gz"
+                if rclone copyto "$TMP_OPENCLAW_TAR" "dropbox:self-hosted/snapshots/${SNAP_NAME}" -v 2>&1; then
+                  echo "✅ Versioned snapshot uploaded: dropbox:self-hosted/snapshots/${SNAP_NAME}"
                 else
-                  if rclone copyto "$TMP_OPENCLAW_TAR" "dropbox:self-hosted/snapshots/${SNAP_NAME}" -v 2>&1; then
-                    echo "✅ Versioned snapshot uploaded: dropbox:self-hosted/snapshots/${SNAP_NAME}"
-                  else
-                    echo "⚠️ Versioned snapshot upload failed (non-fatal)."
-                  fi
-                  rclone lsf dropbox:self-hosted/snapshots/ --files-only 2>/dev/null | sort -r | tail -n +6 | while read -r OLD_SNAP; do
-                    rclone deletefile "dropbox:self-hosted/snapshots/${OLD_SNAP}" 2>/dev/null || true
-                  done
+                  echo "⚠️ Versioned snapshot upload failed (non-fatal)."
                 fi
+                rclone lsf dropbox:self-hosted/snapshots/ --files-only 2>/dev/null | sort -r | tail -n +4 | while read -r OLD_SNAP; do
+                  rclone deletefile "dropbox:self-hosted/snapshots/${OLD_SNAP}" 2>/dev/null || true
+                done
               else
                 echo "ℹ️ Startup did not succeed this run; skipping versioned snapshot (only healthy states enter the snapshot pool)."
               fi
