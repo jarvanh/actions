@@ -1203,12 +1203,19 @@ jobs:
           echo $$ > "$PID_FILE"
           trap 'rm -f "$PID_FILE"' EXIT
 
+          ARCHIVE_DEST="dropbox:self-hosted/openclaw.tar.gz"
+          if [ -f /tmp/run-openclaw-meta.env ] && ! grep -q '^RECORDED_SUCCESSFUL_OPENCLAW_VERSION=' /tmp/run-openclaw-meta.env; then
+            ARCHIVE_DEST="dropbox:self-hosted/failed/openclaw-failed-$(date -u +%Y%m%d-%H%M).tar.gz"
+            echo "openclaw-failed-$(date -u +%Y%m%d-%H%M).tar.gz" > /tmp/failed-archive-name
+            echo "ℹ️ Unhealthy run detected: background archive targets $ARCHIVE_DEST (main package keeps the last healthy state)."
+          fi
+
           while true; do
             openclaw_archive_output=""
             if openclaw_archive_output=$(flock -E 200 -n "$LOCK_FILE" bash /tmp/create-openclaw-archive.sh "$TMP_OPENCLAW_TAR" 2>&1); then
               echo "[$(date '+%F %T')] openclaw archive ok, uploading... ${openclaw_archive_output}"
               openclaw_upload_output=""
-              if openclaw_upload_output=$(rclone copyto "$TMP_OPENCLAW_TAR" dropbox:self-hosted/openclaw.tar.gz 2>&1); then
+              if openclaw_upload_output=$(rclone copyto "$TMP_OPENCLAW_TAR" "$ARCHIVE_DEST" 2>&1); then
                 echo "[$(date '+%F %T')] openclaw upload ok"
                 rm -f "$TMP_OPENCLAW_TAR"
               else
@@ -1360,10 +1367,20 @@ jobs:
           openclaw_final_output=""
           if openclaw_final_output=$(bash /tmp/create-openclaw-archive.sh "$TMP_OPENCLAW_TAR" 2>&1); then
             openclaw_final_upload_output=""
-            if openclaw_final_upload_output=$(rclone copyto "$TMP_OPENCLAW_TAR" dropbox:self-hosted/openclaw.tar.gz -v 2>&1); then
-              echo "final openclaw archive/upload ok: ${openclaw_final_output}"
-              echo "5. Versioned snapshot (every healthy run, keep 3)..."
-              if [ -f /tmp/run-openclaw-meta.env ] && grep -q '^RECORDED_SUCCESSFUL_OPENCLAW_VERSION=' /tmp/run-openclaw-meta.env; then
+            echo "5. Resolving archive destination (healthy → main package; unhealthy → failed/ isolate)..."
+            ARCHIVE_DEST="dropbox:self-hosted/openclaw.tar.gz"
+            HEALTHY_RUN=0
+            if [ -f /tmp/run-openclaw-meta.env ] && grep -q '^RECORDED_SUCCESSFUL_OPENCLAW_VERSION=' /tmp/run-openclaw-meta.env; then
+              HEALTHY_RUN=1
+            else
+              FAILED_NAME="$(cat /tmp/failed-archive-name 2>/dev/null || echo "openclaw-failed-$(date -u +%Y%m%d-%H%M).tar.gz")"
+              ARCHIVE_DEST="dropbox:self-hosted/failed/${FAILED_NAME}"
+              echo "ℹ️ Unhealthy run: main package will NOT be overwritten; failed state goes to $ARCHIVE_DEST"
+            fi
+            if openclaw_final_upload_output=$(rclone copyto "$TMP_OPENCLAW_TAR" "$ARCHIVE_DEST" -v 2>&1); then
+              echo "final openclaw archive/upload ok → $ARCHIVE_DEST: ${openclaw_final_output}"
+              if [ "$HEALTHY_RUN" = "1" ]; then
+                echo "6. Versioned snapshot (every healthy run, keep 3)..."
                 SNAP_VERSION="$(grep '^RECORDED_SUCCESSFUL_OPENCLAW_VERSION=' /tmp/run-openclaw-meta.env | tail -n 1 | cut -d= -f2-)"
                 SNAP_NAME="openclaw-$(date -u +%Y%m%d-%H%M)-v${SNAP_VERSION}.tar.gz"
                 if rclone copyto "$TMP_OPENCLAW_TAR" "dropbox:self-hosted/snapshots/${SNAP_NAME}" -v 2>&1; then
@@ -1375,7 +1392,10 @@ jobs:
                   rclone deletefile "dropbox:self-hosted/snapshots/${OLD_SNAP}" 2>/dev/null || true
                 done
               else
-                echo "ℹ️ Startup did not succeed this run; skipping versioned snapshot (only healthy states enter the snapshot pool)."
+                rclone lsf dropbox:self-hosted/failed/ --files-only 2>/dev/null | sort -r | tail -n +3 | while read -r OLD_FAILED; do
+                  rclone deletefile "dropbox:self-hosted/failed/${OLD_FAILED}" 2>/dev/null || true
+                done
+                echo "ℹ️ Failed-run archive kept (2 max) in failed/; main package untouched."
               fi
               rm -f "$TMP_OPENCLAW_TAR"
             else

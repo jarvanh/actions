@@ -53,6 +53,7 @@
 - **位置与命名**：`dropbox:self-hosted/snapshots/openclaw-<UTC日期>-<时分>-v<版本>.tar.gz`（日期在前保证按名排序即按时间排序）。
 - **保留策略**：最新 3 份（≈ 覆盖近 18 小时的健康点，约 5.6GB），超出自动删除；随状态增长线性上涨。
 - **内容**：与 `openclaw.tar.gz` 完全一致的完整 `~/.openclaw` 状态包（配置、状态库、会话、工作区）。
+- **失败现场隔离**：非健康运行的状态包上传到 `dropbox:self-hosted/failed/`（保留 2 份），主包 `openclaw.tar.gz` 永远保持“最后一次健康状态”——下一轮恢复主包即恢复健康点，外部改坏配置这类故障无需等快照回滚即可自愈；归档循环与最终归档写入同一份 failed 文件（由 `/tmp/failed-archive-name` 约定）。
 
 **从快照恢复（手动 SOP）**：
 
