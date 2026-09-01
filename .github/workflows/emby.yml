@@ -520,14 +520,33 @@ jobs:
           #   两个数据源共享去重状态，同一个 item 180s 内只推一次
           cat > /opt/playlog.sh <<'PL_EOF'
           #!/bin/bash
-          # 播放事件监听：ge2o 访问日志（302 模式主源）+ Emby Sessions 轮询（direct 模式兜底）
+          # 播放事件监听：ge2o 访问日志（302 模式主源）+ Emby Sessions 轮询（兜底）
+          # 输出全部进 /opt/logs/playlog.log；workflow 日志是公开的，URL 与密钥一律脱敏
           LOG=/opt/logs/ge2o.log
           EMBY=http://127.0.0.1:8096
           STATE=/tmp/playlog-state
           LOCK=/tmp/playlog.lock
           touch "$LOG" "$STATE"
-          echo "playlog 启动: mode=$(cat /tmp/PLAYBACK_MODE 2>/dev/null || echo unknown), ge2o.log $(wc -l < "$LOG" 2>/dev/null || echo 0) 行"
-          tail -3 "$LOG" 2>/dev/null | sed -E 's/api_key=[^& ]*/api_key=[redacted]/g' || true
+          DIAG=0
+          SFAIL=0
+          redact() { sed -E 's/api_key=[^& ]*/api_key=[redacted]/g; s#https?://[^ "]*#<url>#g'; }
+
+          echo "=== playlog 启动 $(date '+%F %T') ==="
+          echo "PLAYBACK_MODE=$(cat /tmp/PLAYBACK_MODE 2>/dev/null || echo unknown)"
+          echo "ge2o.log 行数: $(wc -l < "$LOG" 2>/dev/null || echo 0)"
+          echo "--- ge2o.log 末尾 8 行（脱敏，用于确认访问日志格式）---"
+          tail -n 8 "$LOG" 2>/dev/null | redact
+          # Emby 连通性自检（只报数量，不输出用户名/媒体路径）
+          SC=$(curl -s -m 8 -o /tmp/pl-sessions.json -w '%{http_code}' \
+                 -H "X-Emby-Token: $EMBY_API_KEY" "$EMBY/emby/Sessions")
+          SN=$(jq 'if type=="array" then length else ((.Items // []) | length) end' /tmp/pl-sessions.json 2>/dev/null || echo jq失败)
+          echo "Emby Sessions 自检: http=$SC 会话数=$SN"
+          # TG 通道自检：启动即应在 TG 收到这一条，用来区分"推送链路断了"还是"播放事件没识别到"
+          TC=$(curl -s -m 10 -o /tmp/pl-tg.json -w '%{http_code}' \
+                 -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
+                 --data-urlencode "chat_id=$TG_CHAT_ID" \
+                 --data-urlencode "text=🎬 playlog 已就绪（自检）")
+          echo "TG 通道自检: http=$TC resp=$(head -c 200 /tmp/pl-tg.json 2>/dev/null)"
 
           # 去重：同一 item 180s 内只允许推送一次；两个数据源共享 STATE（flock 串行化）
           claim() {
@@ -547,7 +566,8 @@ jobs:
             local kind=$1 iid=$2 name=$3 code
             claim "$iid" || return 0
             if [ -z "$name" ]; then
-              name=$(curl -s -m 8 "$EMBY/emby/Items?Ids=$iid&Fields=Name&api_key=$EMBY_API_KEY" \
+              name=$(curl -s -m 8 -H "X-Emby-Token: $EMBY_API_KEY" \
+                       "$EMBY/emby/Items?Ids=$iid&Fields=Name" \
                      | jq -r '.Items[0].Name // "未知"' 2>/dev/null)
               [ -n "$name" ] || name=未知
             fi
@@ -568,13 +588,25 @@ jobs:
               esac
               case "$line" in
                 *stream*|*original*|*master.m3u8*|*proxy_playlist*) ;;
-                *) continue;;
+                *)
+                  if [ "$DIAG" -lt 12 ]; then
+                    DIAG=$((DIAG+1))
+                    echo "[SKIP] 非播放请求: $(printf '%s' "$line" | redact | head -c 160)"
+                  fi
+                  continue;;
               esac
               ST=$(printf '%s\n' "$line" | grep -oE '\| [0-9]{3} \|' | head -1 | tr -d '| ')
               case "$ST" in
                 302|307) KIND=302直链;;
                 200) KIND=中转;;
-                *) continue;;
+                *)
+                  # 状态码解析不出来也要报：按当前模式归类，宁可标错也不能漏报
+                  if [ "$(cat /tmp/PLAYBACK_MODE 2>/dev/null || echo 302)" = "direct" ]; then KIND=中转; else KIND=302直链; fi
+                  if [ "$DIAG" -lt 12 ]; then
+                    DIAG=$((DIAG+1))
+                    echo "[WARN] 未解析到状态码，按 $KIND 兜底: $(printf '%s' "$line" | redact | head -c 200)"
+                  fi
+                  ;;
               esac
               IID=$(printf '%s\n' "$line" | sed -E 's|.*emby/[Vv]ideos/([0-9]+).*|\1|')
               case "$IID" in
@@ -589,21 +621,30 @@ jobs:
             while true; do
               sleep 10
               MODE=$(cat /tmp/PLAYBACK_MODE 2>/dev/null || echo 302)
-              curl -s -m 8 "$EMBY/emby/Sessions?api_key=$EMBY_API_KEY" 2>/dev/null \
-                | jq -c '.[] | select(.NowPlayingItem != null) | {id: (.NowPlayingItem.Id // ""), name: (.NowPlayingItem.Name // ""), method: (.PlayState.PlayMethod // "")}' 2>/dev/null \
-                | while read -r s; do
-                    IID=$(printf '%s' "$s" | jq -r '.id' 2>/dev/null)
-                    NAME=$(printf '%s' "$s" | jq -r '.name' 2>/dev/null)
-                    METHOD=$(printf '%s' "$s" | jq -r '.method' 2>/dev/null)
-                    case "$IID" in
-                      ''|*[!0-9]*) continue;;
-                    esac
-                    case "$METHOD" in
-                      Transcode) KIND=中转;;
-                      *) if [ "$MODE" = "direct" ]; then KIND=中转; else KIND=302直链; fi;;
-                    esac
-                    notify "$KIND" "$IID" "$NAME"
-                  done
+              SC=$(curl -s -m 8 -o /tmp/pl-sessions.json -w '%{http_code}' \
+                     -H "X-Emby-Token: $EMBY_API_KEY" "$EMBY/emby/Sessions")
+              if [ "$SC" != "200" ]; then
+                SFAIL=$((SFAIL+1))
+                [ $((SFAIL % 10)) -eq 1 ] && echo "[WARN] Sessions 查询失败 http=$SC（第 $SFAIL 次）"
+                continue
+              fi
+              jq -c 'if type=="array" then . else (.Items // []) end
+                     | .[]
+                     | select(.NowPlayingItem != null)
+                     | {id: (.NowPlayingItem.Id // ""), name: (.NowPlayingItem.Name // ""), method: (.PlayState.PlayMethod // "")}' \
+                /tmp/pl-sessions.json 2>/dev/null | while read -r s; do
+                  IID=$(printf '%s' "$s" | jq -r '.id' 2>/dev/null)
+                  NAME=$(printf '%s' "$s" | jq -r '.name' 2>/dev/null)
+                  METHOD=$(printf '%s' "$s" | jq -r '.method' 2>/dev/null)
+                  case "$IID" in
+                    ''|*[!0-9]*) continue;;
+                  esac
+                  case "$METHOD" in
+                    Transcode) KIND=中转;;
+                    *) if [ "$MODE" = "direct" ]; then KIND=中转; else KIND=302直链; fi;;
+                  esac
+                  notify "$KIND" "$IID" "$NAME"
+                done
             done
           ) &
 
@@ -795,10 +836,10 @@ jobs:
             cancelled) STATUS_EMOJI="⏹";;
             *) STATUS_EMOJI="❓";;
           esac
-          MESSAGE="📺 Emby%0A状态: ${STATUS_EMOJI} ${STATUS}%0A模式: ${MODE}%0A时间: $(date '+%Y-%m-%d %H:%M:%S')""
+          MESSAGE="📺 Emby%0A状态: ${STATUS_EMOJI} ${STATUS}%0A模式: ${MODE}%0A时间: $(date '+%Y-%m-%d %H:%M:%S')"
           curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             -d chat_id=${{ secrets.TG_CHAT_ID }} \
             -d text="${MESSAGE}"
           # 播放事件日志归档：便于排查"播了但没通知"
           echo "--- playlog.log (tail 50) ---"
-          tail -n 50 /opt/logs/playlog.log 2>/dev/null || echo "(无 playlog.log)"
+          tail -n 80 /opt/logs/playlog.log 2>/dev/null || echo "(无 playlog.log)"
