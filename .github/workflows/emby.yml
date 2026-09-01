@@ -73,17 +73,22 @@ jobs:
           # writes 模式：302 直链播放不经过挂载，本地仅承载扫描/探测/回退流量，磁盘占用≈0
           sudo mkdir -p /onedrive /opt/logs
           sudo chown -R runner:runner /opt/logs
-          # root 挂载进程使用独立配置副本：刷新 token 时不会重写 runner 的原始 rclone.conf
-          sudo cp ~/.config/rclone/rclone.conf /opt/rclone-root.conf
-          sudo chmod 600 /opt/rclone-root.conf
-          sudo nohup rclone mount onedrive: /onedrive \
-            --config /opt/rclone-root.conf \
-            --allow-other --umask 000 --attr-timeout 10m --no-gzip-encoding \
-            --vfs-cache-mode writes \
-            --dir-cache-time 30m \
-            --vfs-read-chunk-size-limit 1G \
-            --buffer-size 100M \
-            > /opt/logs/mount-onedrive.log 2>&1 &
+          # 挂载改用 runner 用户：conf 读写全程 runner 身份（root 挂载刷新 token 会把 conf 属主改成 root，是之前 EACCES 的根因）
+          grep -q '^user_allow_other' /etc/fuse.conf 2>/dev/null || echo user_allow_other | sudo tee -a /etc/fuse.conf >/dev/null
+          sudo mkdir -p /onedrive /mnt/vfs/onedrive
+          sudo chown runner:runner /onedrive /mnt/vfs/onedrive
+          rclone mount onedrive: /onedrive \
+            --config /home/runner/.config/rclone/rclone.conf \
+            --cache-dir /mnt/vfs/onedrive \
+            --allow-other --umask 000 --attr-timeout 10m \
+            --dir-cache-time 72h --poll-interval 0 \
+            --vfs-cache-mode full \
+            --vfs-cache-max-size 8G --vfs-cache-max-age 24h \
+            --buffer-size 32M --vfs-read-ahead 512M \
+            --vfs-read-chunk-size 128M --vfs-read-chunk-size-limit 512M \
+            --vfs-handle-caching 1m \
+            --max-read-ahead 32M \
+            --daemon --daemon-wait 60s --log-file /tmp/rclone-onedrive.log
       - name: install cloudflared
         run: |
           sudo mkdir ~/.cloudflared/
