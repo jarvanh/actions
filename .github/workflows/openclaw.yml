@@ -176,15 +176,13 @@ jobs:
           fi
 
           # 2026.8.x gateway refuses to start while legacy (non-sqlite) session
-          # stores exist; doctor --fix is expected to migrate them but completes
-          # without migrating in CI. Move them aside (kept for recovery) so the
-          # gateway starts with the new SQLite session stores.
+          # stores exist; doctor --fix does not migrate them in CI. Delete them
+          # (user-approved) so the gateway starts with the new SQLite stores.
           find "$HOME/.openclaw" -type f -name "sessions.json" 2>/dev/null | while read -r LEGACY_SESSIONS; do
-            TS="$(date +%Y%m%d-%H%M%S)"
-            if mv "$LEGACY_SESSIONS" "$LEGACY_SESSIONS.legacy-bak-$TS" 2>/dev/null; then
-              echo "🔄 Moved legacy session store aside: $LEGACY_SESSIONS -> $LEGACY_SESSIONS.legacy-bak-$TS"
+            if rm -f "$LEGACY_SESSIONS"; then
+              echo "🗑️ Deleted legacy session store: $LEGACY_SESSIONS"
             else
-              echo "⚠️ Could not move legacy session store: $LEGACY_SESSIONS"
+              echo "⚠️ Could not delete legacy session store: $LEGACY_SESSIONS"
             fi
           done
 
