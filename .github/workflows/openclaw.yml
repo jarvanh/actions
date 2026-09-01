@@ -136,33 +136,6 @@ jobs:
           npm i -g clawhub
 
 
-      - name: Clear legacy doctor warnings
-        run: |
-          set -euo pipefail
-          # Ongoing hygiene against 7.x-era legacy artifacts:
-          # - exec-approvals.json throws ExecApprovalsMigrationRequiredError
-          #   inside 'openclaw doctor --fix', aborting the repair flow before
-          #   config migrations (agents.list -> entries, models ->
-          #   modelPolicy.allow, tier-eval) are written. Deleting it lets
-          #   doctor complete and clears the legacy warnings.
-          # - sessions.json makes the 2026.8.x gateway refuse to start; the
-          #   live state no longer contains one, this only guards old-archive
-          #   restores.
-          # Both files are already gone from the live state; this step is a
-          # cheap no-op unless legacy artifacts reappear.
-          if [ -f "$HOME/.openclaw/exec-approvals.json" ]; then
-            rm -f "$HOME/.openclaw/exec-approvals.json"
-            echo "🗑️ Deleted legacy exec-approvals.json (doctor can now complete; approvals reset to defaults)"
-          fi
-          find "$HOME/.openclaw" -type f -name "sessions.json" 2>/dev/null | while read -r LEGACY_SESSIONS; do
-            if rm -f "$LEGACY_SESSIONS"; then
-              echo "🗑️ Deleted legacy session store: $LEGACY_SESSIONS"
-            else
-              echo "⚠️ Could not delete legacy session store: $LEGACY_SESSIONS"
-            fi
-          done
-          echo "✅ Legacy artifacts clean; doctor --fix runs without warnings"
-
       - name: Restore skill symlink for proactivity
         run: |
           set -euo pipefail
