@@ -334,12 +334,30 @@ jobs:
           sudo rm -rf /var/lib/emby
           sudo mkdir -p /var/lib/emby
           sudo chown -R emby:emby /var/lib/emby
+          # 图片缓存软链到 /mnt（根分区 ~14GB 放不下 ~30GB 缓存；/mnt 独立分区 ~65GB）
+          sudo mkdir -p /mnt/emby-cache
+          sudo chown emby:emby /mnt/emby-cache
+          sudo ln -sfn /mnt/emby-cache /var/lib/emby/cache
           BACKUP_NAME="emby-backup.tar.zst"
           IS_LOCAL_MODE=true
 
-          echo "🔍 正在检查 Dropbox 上的压缩备份..."
+          echo "🔍 正在检查 OneDrive 上的压缩备份（含图片缓存，流式解压不落本地盘）..."
           cleanup_archive_workdir
-          if rclone copy dropbox:self-hosted/$BACKUP_NAME /tmp/ -vv; then
+          RESTORED_FROM=
+          if rclone lsf onedrive:emby-backup/$BACKUP_NAME 2>/dev/null | grep -q "$BACKUP_NAME"; then
+              BK_BYTES=$(rclone lsl onedrive:emby-backup/$BACKUP_NAME 2>/dev/null | awk '{print $1}'
+              require_free_kb /mnt $((BK_BYTES / 1024 + 2 * 1024 * 1024)) "emby cache extract preflight (/mnt)"
+              require_free_kb /var/lib/emby $((4 * 1024 * 1024)) "emby data extract preflight (root)"
+              echo "✅ 发现 OneDrive 备份，流式解压..."
+              if rclone cat onedrive:emby-backup/$BACKUP_NAME | sudo tar -I zstd -xf - -C /var/lib/emby/ && sudo chown -R emby:emby /var/lib/emby && validate_emby_data /var/lib/emby; then
+                  echo "🎉 OneDrive 备份流式恢复并校验成功"
+                  RESTORED_FROM=onedrive
+              else
+                  echo "::warning::OneDrive 流式恢复失败，尝试 Dropbox 兜底..."
+                  sudo rm -rf /var/lib/emby/* 2>/dev/null || true
+              fi
+          fi
+          if [ -z "$RESTORED_FROM" ] && rclone copy dropbox:self-hosted/$BACKUP_NAME /tmp/ -vv; then
               backup_kb=$(du -sk "/tmp/$BACKUP_NAME" | awk '{print $1}')
               if [ -z "${backup_kb:-}" ] || [ "$backup_kb" -le 0 ]; then
                   echo "❌ emby extract preflight: unable to calculate archive size" >&2
@@ -352,8 +370,10 @@ jobs:
               sudo chown -R emby:emby /var/lib/emby
               validate_emby_data /var/lib/emby
               echo "🎉 压缩备份恢复并校验成功"
+              RESTORED_FROM=dropbox
               cleanup_archive_workdir
-          else
+          fi
+          if [ -z "$RESTORED_FROM" ]; then
               cleanup_archive_workdir
               echo "⚠️ 未发现压缩备份，尝试从 Dropbox 目录备份恢复..."
               RESTORE_DIR=/tmp/emby-dir-restore
@@ -799,27 +819,21 @@ jobs:
           if [ ! -L /var/lib/emby ]; then
               validate_emby_data /var/lib/emby
               echo "🚀 本地模式运行结束，正在打包数据回传 Dropbox..."
-              src_kb=$(sudo du -sk /var/lib/emby | awk '{print $1}')
+              src_kb=$(sudo du -skL /var/lib/emby | awk '{print $1}')
               if [ -z "${src_kb:-}" ] || [ "$src_kb" -le 0 ]; then
                 echo "❌ emby archive preflight: unable to calculate source size" >&2
                 exit 1
               fi
               echo "待压缩目录大小: ${src_kb}KB"
-              require_free_kb "$HOME" $((src_kb + 1024 * 1024)) "emby archive preflight"
-              sudo rm -f "$HOME/emby-backup.tar.zst"
-              sudo tar -I 'zstd -3 -T0' -cf $HOME/emby-backup.tar.zst \
-                --exclude='cache' \
+              require_free_kb /var/lib/emby $((4 * 1024 * 1024)) "emby archive preflight (root)"
+              # 流式：tar 直接管道进 rcat 上传 OneDrive（含图片缓存），30GB 级 tarball 不落本地盘
+              sudo tar -I 'zstd -3 -T0' -chf - \
                 --exclude='logs' \
                 --exclude='transcoding-temp' \
-                -C /var/lib/emby .
-              sudo chown runner:docker $HOME/emby-backup.tar.zst
-              mkdir -p /tmp/emby-archive-verify
-              rm -rf /tmp/emby-archive-verify/*
-              tar -I zstd -xf $HOME/emby-backup.tar.zst -C /tmp/emby-archive-verify ./data/users.db ./data/library.db
-              validate_emby_data /tmp/emby-archive-verify
-              
-              echo "📤 上传备份到 Dropbox..."
-              rclone copyto $HOME/emby-backup.tar.zst dropbox:self-hosted/emby-backup.tar.zst -vv
+                -C /var/lib/emby . \
+                | rclone rcat onedrive:emby-backup/emby-backup.tar.zst -v
+              echo "📤 备份已流式上传 OneDrive:emby-backup/"
+              cleanup_archive_workdir
               cleanup_archive_workdir
           else
               echo "😴 当前为软链接模式，跳过本地打包备份。"
