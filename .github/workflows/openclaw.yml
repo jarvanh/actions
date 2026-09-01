@@ -728,8 +728,23 @@ jobs:
 
           fix_openclaw_permissions
 
-          echo "🛠️ Running preflight 'openclaw doctor --fix' before gateway restart..."
-          openclaw doctor --fix || echo "DOCTOR_EXIT=$? (non-fatal, continuing)"
+          echo "FAIL_STAGE=config_validate" >> "$RUN_OPENCLAW_META"
+          echo "🧪 Preflight config validation for $CURRENT_OPENCLAW_VERSION (on failure: no doctor, no gateway start, state stays untouched for rollback)..."
+          CONFIG_VALID_FOR_CURRENT=0
+          if openclaw config validate >/tmp/config-validate.log 2>&1; then
+            CONFIG_VALID_FOR_CURRENT=1
+            echo "✅ Config valid for current version."
+          else
+            echo "❌ Config invalid for current version. Skipping doctor and gateway start to preserve rollback capability. Details:"
+            tail -n 15 /tmp/config-validate.log 2>/dev/null || true
+          fi
+
+          if [ "$CONFIG_VALID_FOR_CURRENT" = "1" ]; then
+            echo "🛠️ Running preflight 'openclaw doctor --fix' before gateway restart..."
+            openclaw doctor --fix || echo "DOCTOR_EXIT=$? (non-fatal, continuing)"
+          else
+            echo "⏭️ Skipping preflight doctor (invalid config; doctor may mutate state and break rollback)."
+          fi
           PREFLIGHT_END_TS=$(date +%s)
           echo "PREFLIGHT_DOCTOR_DURATION_SEC=$((PREFLIGHT_END_TS - PREFLIGHT_BEGIN_TS))" >> "$RUN_OPENCLAW_META"
 
@@ -737,7 +752,10 @@ jobs:
           INITIAL_START_BEGIN_TS=$(date +%s)
           echo "Restarting OpenClaw gateway..."
           INITIAL_START_RESTART_OK=1
-          if ! openclaw gateway install --force; then
+          if [ "$CONFIG_VALID_FOR_CURRENT" != "1" ]; then
+            echo "⚠️ Skipping gateway start: config invalid for current version. Going straight to fallback reinstall with the recorded compatible version."
+            INITIAL_START_RESTART_OK=0
+          elif ! openclaw gateway install --force; then
             echo "⚠️ Initial gateway install failed; will attempt fallback reinstall."
             INITIAL_START_RESTART_OK=0
           elif ! openclaw gateway restart; then
@@ -771,8 +789,25 @@ jobs:
 
               fix_openclaw_permissions
 
+              echo "🧪 Validating config against fallback openclaw@$TARGET_VERSION ..."
+              if openclaw config validate >/tmp/config-validate-fallback.log 2>&1; then
+                echo "✅ Config valid for fallback version."
+              else
+                echo "⚠️ Config invalid for fallback version. Details:"
+                tail -n 10 /tmp/config-validate-fallback.log 2>/dev/null || true
+                if grep -q "uses newer schema version" /tmp/config-validate-fallback.log 2>/dev/null; then
+                  DOWNGRADE_TS="$(date +%Y%m%d-%H%M%S)"
+                  echo "⤵️ State DB was migrated by a newer build. Moving newer-schema state aside so the fallback version can start (kept as *.newer-schema-bak-$DOWNGRADE_TS for the next upgrade)."
+                  for STATE_DB in "$HOME/.openclaw/state/openclaw.sqlite" "$HOME/.openclaw/state/openclaw.sqlite-wal" "$HOME/.openclaw/state/openclaw.sqlite-shm"; do
+                    if [ -f "$STATE_DB" ]; then
+                      mv "$STATE_DB" "$STATE_DB.newer-schema-bak-$DOWNGRADE_TS" && echo "➡️ Moved aside: $STATE_DB"
+                    fi
+                  done
+                fi
+              fi
+
               echo "🛠️ Running 'openclaw doctor --fix' after fallback reinstall..."
-              openclaw doctor --fix || true
+              openclaw doctor --fix || echo "DOCTOR_EXIT=$? (non-fatal, continuing)"
 
               echo "Restarting OpenClaw after fallback reinstall..."
               FALLBACK_RESTART_OK=1
@@ -1262,6 +1297,21 @@ jobs:
             openclaw_final_upload_output=""
             if openclaw_final_upload_output=$(rclone copyto "$TMP_OPENCLAW_TAR" dropbox:self-hosted/openclaw.tar.gz -v 2>&1); then
               echo "final openclaw archive/upload ok: ${openclaw_final_output}"
+              echo "5. Versioned snapshot (healthy runs only)..."
+              if [ -f /tmp/run-openclaw-meta.env ] && grep -q '^RECORDED_SUCCESSFUL_OPENCLAW_VERSION=' /tmp/run-openclaw-meta.env; then
+                SNAP_VERSION="$(grep '^RECORDED_SUCCESSFUL_OPENCLAW_VERSION=' /tmp/run-openclaw-meta.env | tail -n 1 | cut -d= -f2-)"
+                SNAP_NAME="openclaw-$(date -u +%Y%m%d-%H%M)-v${SNAP_VERSION}.tar.gz"
+                if rclone copyto "$TMP_OPENCLAW_TAR" "dropbox:self-hosted/snapshots/${SNAP_NAME}" -v 2>&1; then
+                  echo "✅ Versioned snapshot uploaded: dropbox:self-hosted/snapshots/${SNAP_NAME}"
+                else
+                  echo "⚠️ Versioned snapshot upload failed (non-fatal)."
+                fi
+                rclone lsf dropbox:self-hosted/snapshots/ --files-only 2>/dev/null | sort -r | tail -n +11 | while read -r OLD_SNAP; do
+                  rclone deletefile "dropbox:self-hosted/snapshots/${OLD_SNAP}" 2>/dev/null || true
+                done
+              else
+                echo "ℹ️ Startup did not succeed this run; skipping versioned snapshot (only healthy states enter the snapshot pool)."
+              fi
               rm -f "$TMP_OPENCLAW_TAR"
             else
               rc=$?

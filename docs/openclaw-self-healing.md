@@ -1,0 +1,119 @@
+# OpenClaw 自愈机制设计与操作手册
+
+> 适用范围：`jarvanh/actions` 仓库 `.github/workflows/openclaw.yml`
+> 背景：2026-08-31 故障复盘（见仓库提交历史与本地复盘文档）。当次故障中三层既有防线（doctor 自动修复、版本回退、last-known-good 恢复）全部失效，本套自愈机制针对每个失效面做了结构性补强。
+
+## 一、总览
+
+启动链路现在是：
+
+```
+安装 OpenClaw（install.sh，跟踪 latest）
+        │
+        ▼
+恢复 ~/.openclaw（Dropbox 状态包）
+        │
+        ▼
+┌── 机制①：config validate 预检门 ──┐
+│  通过 → doctor --fix → 网关启动     │
+│  失败 → 跳过 doctor 和网关启动      │
+│         （状态零改动，保住回退能力）│
+└───────────────────────────────────┘
+        │
+        ▼
+健康检查（180s）
+  ├─ 成功 → 记录 known-good 版本 → 正常运行 → 归档时打版本化快照（机制③）
+  └─ 失败 → 机制④：回退 known-good 版本
+              ├─ 回退版本 config validate 失败且是 schema 冲突 → 状态库自动移位（机制④）
+              └─ doctor --fix（退出码显式记录，机制②）→ 网关重启 → 健康检查
+                   └─ 仍失败 → 通知 + 归档 + 触发下一轮
+```
+
+## 二、机制详解
+
+### 机制①：升级预检门（config validate fail-fast）
+
+- **位置**：`Run OpenClaw` 步骤内，`fix_openclaw_permissions` 之后、`doctor --fix` 之前。
+- **动作**：运行 `openclaw config validate`。通过 → 照常跑 doctor、启动网关；**不通过 → 跳过 doctor、跳过网关启动**，直接进入既有的 known-good 回退分支。
+- **为什么在 doctor 之前**：doctor 会做状态库单向迁移（写入新 schema）和配置改写。如果新版本根本读不了/不认当前配置，让它运行 = 状态被污染，旧版本回退能力被永久拆除。8-31 事故的死结正是如此：8.1 的 doctor 把数据库升到 schema 15，导致回退目标 2026.7.1 连 CLI 都打不开。
+- **失败时的行为**：输出 validate 详情（进步骤日志与失败通知），`FAIL_STAGE=config_validate`，随后自动安装 known-good 版本重试。known-good 版本写在状态包的 `~/.openclaw/openclaw-known-good-version`（每次成功启动后自动更新）。
+- **边界**：`config validate` 是只读检查，不写状态；即使它自身崩溃（例如数据库 schema 更新）也不会污染任何东西。
+
+### 机制②：修复动作显式化
+
+- `openclaw doctor --fix` 的退出码不再被静默吞掉：`openclaw doctor --fix || echo "DOCTOR_EXIT=$? (non-fatal, continuing)"`。
+- doctor 的失败原因（如 `Legacy exec approvals exist ...`）会进入失败通知的关键日志摘要（通知步骤的 grep 模式包含 doctor/fallback/invalid 等）。
+- 教训来源：8-31 故障中 doctor 实际是**异常中断**（exec-approvals 抛出 `ExecApprovalsMigrationRequiredError`），`|| true` 让它看起来"跑过了"。
+
+### 机制③：版本化状态快照
+
+- **触发条件**：仅在**健康启动**的运行周期结束时打快照（判断依据：meta 文件含 `RECORDED_SUCCESSFUL_OPENCLAW_VERSION=`）。失败运行只更新常规 `openclaw.tar.gz`，**坏状态永远不会进快照池**。
+- **位置与命名**：`dropbox:self-hosted/snapshots/openclaw-<UTC日期>-<时分>-v<版本>.tar.gz`（日期在前保证按名排序即按时间排序）。
+- **保留策略**：最新 10 份，超出自动删除。
+- **内容**：与 `openclaw.tar.gz` 完全一致的完整 `~/.openclaw` 状态包（配置、状态库、会话、工作区）。
+
+**从快照恢复（手动 SOP）**：
+
+```bash
+# 1. 列出可用快照
+rclone lsf dropbox:self-hosted/snapshots/ --files-only
+
+# 2. 下载目标快照并解包查看
+rclone copyto "dropbox:self-hosted/snapshots/<快照名>.tar.gz" /tmp/restore.tar.gz
+mkdir -p /tmp/restore && tar -xzf /tmp/restore.tar.gz -C /tmp/restore
+
+# 3. 两种恢复方式：
+#    a) 整包回滚（推荐，配合下方的版本固定）：
+#       在下一次 Run 的恢复阶段之前，把它上传为常规状态包：
+rclone copyto /tmp/restore.tar.gz dropbox:self-hosted/openclaw.tar.gz
+#    b) 只取某个文件（如 openclaw.json）：
+tar -xzf /tmp/restore.tar.gz -C /tmp/restore .openclaw/openclaw.json
+```
+
+> 注意：整包回滚后，状态对应的 OpenClaw 版本要与之匹配（快照名里的 `v<版本>` 就是它）。若当前安装的版本比快照新且拒绝该配置，可临时 `npm i -g openclaw@<快照版本>` 或直接让预检门把流程导向 known-good 回退。
+
+### 机制④：降级预案（回退版本遇 schema 冲突）
+
+- **触发条件**：回退分支中，`openclaw config validate`（以回退版本运行）失败，且错误包含 `uses newer schema version`——即状态库已被更新版本的迁移升级过。
+- **动作**：把 `~/.openclaw/state/openclaw.sqlite`（含 `-wal`/`-shm`）改名为 `*.newer-schema-bak-<时间戳>` 保留在原地，让回退版本以全新状态库启动。
+- **代价**：会话状态（会话索引）丢失，对话从新开始；工作区文件、配置不受影响。
+- **升回新版时**：新版会重建/迁移自己的状态库；如需找回旧会话，把 `*.newer-schema-bak-*` 改回原名即可（schema 本来就是新版写的）。
+- **为什么是移位不是删除**：保留可恢复性，代价只是几十 MB 磁盘。
+
+## 三、标准操作流程（SOP）
+
+### 升级（当前为隐式升级，需人工观察）
+
+当前安装步骤仍跟踪 latest（锁版本方案已评估、暂未采纳）。新版本发布后：
+
+1. 下一轮运行自动装新版。
+2. **预检门先跑**：配置不兼容 → 不碰状态，自动回退 known-good，通知里会有 `Config invalid for current version` + 详情。此时线上一直稳定运行在旧版本上，**不存在"升级失败即宕机"**。
+3. 兼容 → 正常启动，known-good 自动更新为新版本。
+4. 若 doctor 迁移了配置，之后的运行不再有 Legacy 警告。
+
+### 回退
+
+- **自动回退**（无需人工）：任何"新版本读不了旧配置"的情形，预检门会直接把流程导向 known-good 版本。
+- **手动回退**（新版本已成功启动过，想主动回退）：
+  1. `npm i -g openclaw@<目标版本>`（在 tmate 会话里，或改工作流安装行临时 dispatch）；
+  2. 若报 `uses newer schema version`：`mv ~/.openclaw/state/openclaw.sqlite{,.newer-schema-bak-$(date +%s)}`（含 -wal/-shm），同 机制④；
+  3. `openclaw gateway restart`；健康后 known-good 文件会在下次成功启动时自动回写。
+- **整包回滚**：按 机制③ 的快照恢复 SOP。
+
+### 排障入口
+
+- 失败通知包含：失败阶段（FAIL_STAGE）、当前/回退版本、DOCTOR_EXIT、关键错误日志摘要、tmate 链接。
+- 手动核查：`gh run view --job <job_id> --repo jarvanh/actions`（结束后可拉 `--log`）。
+- 单轮运行日志：`/tmp/run-openclaw-step.log`（keep-alive 期间通过 tmate 可见）。
+
+## 四、已知边界（自愈救不了的场景）
+
+1. **配置被外部改成新旧版本都不认的形态**：预检门会拒绝启动并回退，但若 known-good 版本也不认，需要人工修配置（本次事故的 jq 手术即此类）。
+2. **Dropbox 不可用**：状态恢复和快照都依赖 Dropbox 挂载；挂载失败时本轮没有历史状态可用（首次启动形态）。
+3. **需要语义决策的迁移**（如 agent roster 归属）：doctor 与恢复机制都会拒绝代做决定，必须人工显式声明。
+4. **会话状态的单向迁移**：降级必然丢会话索引（设计如此，换可用性）；升级回新版本可恢复。
+
+## 五、变更记录
+
+- 2026-09-01：引入 机制①②③④；移除应急 jq 修复步骤与 legacy 清理步骤（状态已干净，日常迁移交还 doctor）。
+- 2026-08-31：故障复盘，确认 doctor 异常中断 / 回退状态单向升级 / last-known-good 语义跳过三个失效面。
