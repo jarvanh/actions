@@ -4,6 +4,11 @@ name: emby
 #   - 302（默认）：cloudflared → ge2o:8095 → Emby:8096，ge2o 把 /onedrive/% 媒体路径换成
 #     OpenList 签出的 OneDrive 直链并返回 302/307，播放器最终直接向 OneDrive 拉流，
 #     视频流不经过 runner（本地挂载仅承载扫描/探测流量）。
+#     路径换算约束（2026-09-01 修过一次静默回源的坑）：rclone 挂载根 = OpenList 存储根 =
+#     网盘根，Emby 路径 /onedrive/3/... 与 OpenList /onedrive/3/... 原样一致，ge2o 靠
+#     emby2openlist 的 /onedrive:/onedrive 原样映射，绝不能给 ge2o 配 mount-path（会剥前缀
+#     导致映射永不命中，兜底重试又丢二级目录，只能回源中转）。启动探活/watchdog 里有
+#     "Emby 库目录同路径 fs/get"映射探针，换算断了会告警并回退 direct。
 #   - direct：cloudflared → Emby:8096，视频流经 runner 中转到网盘，行为与旧版一致。
 #     "direct" 指的是"直连 Emby"，不是"直连网盘"，流量反而全走服务器。
 # OpenList / OpenList 存储 / ge2o 任一环节不健康时，启动探活与运行中 watchdog 都会自动回退 direct。
@@ -426,7 +431,12 @@ jobs:
           cat > /opt/ge2o/config.yml <<GE2O_EOF
           emby:
             host: http://127.0.0.1:8096
-            mount-path: /onedrive
+            # ⚠️ 不要配 mount-path：它会先剥掉 Emby 路径的 /onedrive 前缀，
+            # 导致 emby2openlist 映射（/onedrive:/onedrive）永不命中——
+            # 首选路径变成 /3/...（storage not found），兜底重试又丢掉网盘里的
+            # 二级目录 /3，/onedrive/... 必然 object not found，只能回源中转。
+            # rclone 挂载根与 OpenList 存储根都指向网盘根，两侧路径原样一致，
+            # 保持 /onedrive 前缀不剥、靠映射原样替换才是正确换算。
             episodes-unplay-prior: false
             resort-random-items: false
             proxy-error-strategy: origin
@@ -472,11 +482,25 @@ jobs:
             *) echo "::warning::未知的播放模式 '$MODE'（EMBY_PLAYBACK_MODE），按 302 处理"; MODE="302";;
           esac
           if [ "$MODE" = "302" ]; then
+            # 直链映射探针：取一个媒体库根目录（/onedrive/...），用同路径直查 OpenList fs/get。
+            # ge2o 路径换算断了会静默回源（播放一直显示"中转"），这里在启动时就暴露。
+            MEDIA_DIR=$(curl -s -m 8 "http://127.0.0.1:8096/emby/Library/VirtualFolders?api_key=${{ secrets.EMBY_API_TOKEN }}" \
+              | jq -r '[.[].Locations[]?] | map(select(startswith("/onedrive"))) | .[0] // empty' 2>/dev/null || true)
+            echo "直链映射探针: ${MEDIA_DIR:+已取到媒体库目录}"
             OK=0
             for i in 1 2 3; do
               TOK=$(cat /tmp/openlist-token 2>/dev/null || true)
+              MAP_OK=1
+              if [ -n "$TOK" ] && [ -n "$MEDIA_DIR" ]; then
+                GC=$(curl -s -m 10 -X POST http://127.0.0.1:5244/api/fs/get \
+                       -H "Authorization: $TOK" -H 'Content-Type: application/json' \
+                       -d "$(jq -nc --arg p "$MEDIA_DIR" '{path:$p}')" \
+                     | jq -r '.code // 0' 2>/dev/null || echo 0)
+                [ "$GC" = "200" ] || { MAP_OK=0; echo "直链映射自检失败: OpenList fs/get code=$GC"; }
+              fi
               if curl -fsS -m 5 http://127.0.0.1:8095/emby/System/Info/Public >/dev/null 2>&1 \
                  && [ -n "$TOK" ] \
+                 && [ "$MAP_OK" = "1" ] \
                  && curl -s -m 5 -X POST http://127.0.0.1:5244/api/fs/list \
                       -H "Authorization: $TOK" -H 'Content-Type: application/json' \
                       -d '{"path":"/onedrive","page":1,"per_page":1}' \
@@ -493,6 +517,14 @@ jobs:
                 -H "Authorization: $TOK" -H 'Content-Type: application/json' \
                 -d '{"path":"/onedrive","page":1,"per_page":3}' 2>/dev/null \
                 | jq -c '{code: .code, msg: .message, total: (.data.total // 0)}' 2>/dev/null || true
+              # 映射诊断：只报 code，不打印媒体路径（日志公开）
+              if [ -n "$MEDIA_DIR" ]; then
+                echo "--- 直链映射诊断（Emby 库目录同路径 fs/get）---"
+                curl -s -m 10 -X POST http://127.0.0.1:5244/api/fs/get \
+                  -H "Authorization: $TOK" -H 'Content-Type: application/json' \
+                  -d "$(jq -nc --arg p "$MEDIA_DIR" '{path:$p}')" 2>/dev/null \
+                  | jq -c '{code: .code}' 2>/dev/null || true
+              fi
               MODE="direct"
             fi
           fi
@@ -519,8 +551,17 @@ jobs:
             MODE=$(cat /tmp/PLAYBACK_MODE 2>/dev/null || echo direct)
             [ "$MODE" = "direct" ] && continue
             TOK=$(cat /tmp/openlist-token 2>/dev/null || true)
+            MAP_OK=1
+            if [ -n "$TOK" ] && [ -n "$MEDIA_DIR" ]; then
+              GC=$(curl -s -m 10 -X POST http://127.0.0.1:5244/api/fs/get \
+                     -H "Authorization: $TOK" -H 'Content-Type: application/json' \
+                     -d "$(jq -nc --arg p "$MEDIA_DIR" '{path:$p}')" \
+                   | jq -r '.code // 0' 2>/dev/null || echo 0)
+              [ "$GC" = "200" ] || MAP_OK=0
+            fi
             if curl -fsS -m 5 http://127.0.0.1:8095/emby/System/Info/Public >/dev/null 2>&1 \
                && [ -n "$TOK" ] \
+               && [ "$MAP_OK" = "1" ] \
                && curl -s -m 5 -X POST http://127.0.0.1:5244/api/fs/list \
                     -H "Authorization: $TOK" -H 'Content-Type: application/json' \
                     -d '{"path":"/onedrive","page":1,"per_page":1}' \
@@ -528,7 +569,7 @@ jobs:
               FAIL=0
             else
               FAIL=$((FAIL+1))
-              echo "$(date '+%F %T') 302 health fail #$FAIL"
+              echo "$(date '+%F %T') 302 health fail #$FAIL map_ok=$MAP_OK"
             fi
             if [ "$FAIL" -ge 3 ]; then
               echo "302 unhealthy -> switching to direct"
@@ -543,7 +584,7 @@ jobs:
             fi
           done
           WD_EOF
-          TELEGRAM_BOT_TOKEN="${{ secrets.TELEGRAM_BOT_TOKEN }}" TG_CHAT_ID="${{ secrets.TG_CHAT_ID }}" \
+          MEDIA_DIR="$MEDIA_DIR" TELEGRAM_BOT_TOKEN="${{ secrets.TELEGRAM_BOT_TOKEN }}" TG_CHAT_ID="${{ secrets.TG_CHAT_ID }}" \
             nohup bash /opt/watchdog.sh > /opt/logs/watchdog.log 2>&1 &
           # 播放事件监听：
           #   302 模式主源    = ge2o 访问日志（3xx → [302直链]，2xx → [中转]）
