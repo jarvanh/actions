@@ -500,45 +500,53 @@ jobs:
           WD_EOF
           TELEGRAM_BOT_TOKEN="${{ secrets.TELEGRAM_BOT_TOKEN }}" TG_CHAT_ID="${{ secrets.TG_CHAT_ID }}" \
             nohup bash /opt/watchdog.sh > /opt/logs/watchdog.log 2>&1 &
-          # 播放事件监听：ge2o 访问日志（CustomLogger 管道格式，重定向为 307）→ workflow 日志 + TG
+          # 播放事件监听：ge2o 访问日志 → 事件去重 → echo 进 workflow 日志 + TG 通知（302直链/中转/转码）
           cat > /opt/playlog.sh <<'PL_EOF'
           #!/bin/bash
-          # 每次播放事件：ge2o 访问日志 307/302 行 → 片名（尝试行路径反查）→ echo 进 workflow 日志 + TG 通知
+          # 播放事件监听（自诊断版）：启动时输出 ge2o.log 末尾（脱敏）→ 格式无关匹配 → echo 进 workflow 日志 + TG
           LOG=/opt/logs/ge2o.log
-          PLAYLOG=/opt/logs/playlog.log
+          EMBY=http://127.0.0.1:8096
           touch "$LOG"
-          LAST_PTH=
+          LAST_ID=
           LAST_TS=0
+          echo "playlog 启动: ge2o.log $(wc -l < "$LOG" 2>/dev/null || echo 0) 行"
+          tail -3 "$LOG" 2>/dev/null | sed -E 's/api_key=[^& ]*/api_key=[redacted]/g' || true
           tail -n0 -F "$LOG" 2>/dev/null | while read -r line; do
             case "$line" in
-              *'| 307 |'*|*'| 302 |'*) ;;
+              *'/videos/'*) ;;
               *) continue;;
             esac
             case "$line" in
-              *master.m3u8*|*proxy_playlist*) KIND=转码中转;;
-              *stream*|*original*) KIND=302直链;;
+              *stream*|*original*|*master.m3u8*|*proxy_playlist*) ;;
               *) continue;;
             esac
-            case "$line" in
-              *'尝试请求 Openlist 资源: '*) PTH=${line#*尝试请求 Openlist 资源: } ;;
+            ST=$(printf '%s\n' "$line" | grep -oE '\| [0-9]{3} \|' | head -1 | tr -d '| ')
+            case "$ST" in
+              302|307) KIND=302直链;;
+              200) KIND=中转;;
+              *) continue;;
+            esac
+            printf '%s\n' "$line" > /tmp/ol-line.txt
+            sed -E 's|.*emby/[Vv]ideos/([0-9]+).*|\1|' /tmp/ol-line.txt > /tmp/ol-iid.txt 2>/dev/null
+            read -r IID < /tmp/ol-iid.txt 2>/dev/null || IID=0
+            case "$IID" in
+              ''|*[!0-9]*) IID=0;;
             esac
             NOW=$(date +%s)
             GAP=$((NOW - LAST_TS))
-            if [ -n "$PTH" ] && [ "$PTH" = "$LAST_PTH" ] && [ "$GAP" -lt 300 ]; then continue; fi
-            if [ -n "$PTH" ]; then LAST_PTH=$PTH; LAST_TS=$NOW; fi
-            NAME=${PTH##*/}
-            NAME=${NAME%.*}
-            [ -n "$NAME" ] || NAME=未知
-            TS=$(date '+%F %T')
-            echo "🎬 播放 [$KIND] $NAME"
-            printf '%s | %s | %s\n' "$TS" "$KIND" "${PTH:-未知路径}" >> "$PLAYLOG"
-            printf '🎬 播放 [%s]\n%s' "$KIND" "$NAME" > /tmp/ol-text.txt
+            if [ "$IID" = "$LAST_ID" ] && [ "$GAP" -lt 180 ]; then continue; fi
+            LAST_ID=$IID
+            LAST_TS=$NOW
+            curl -s "http://127.0.0.1:8096/emby/Items?Ids=$IID&Fields=Name&api_key=***" > /tmp/ol-item.json 2>/dev/null
+            jq -r '.Items[0].Name // "未知"' /tmp/ol-item.json > /tmp/ol-name.txt 2>/dev/null
+            read -r NAME < /tmp/ol-name.txt 2>/dev/null || NAME=未知
+            echo "🎬 播放 [$KIND] $NAME (item $IID)"
             curl -s -X POST "https://api.telegram.org/bot$TG_TOKEN/sendMessage" \
               --data-urlencode chat_id=$TG_CHAT \
-              --data-urlencode text@/tmp/ol-text.txt >/dev/null 2>&1
+              --data-urlencode "text=🎬 播放 [$KIND] $NAME" >/dev/null 2>&1
           done
           PL_EOF
-          TELEGRAM_BOT_TOKEN="${{ secrets.TELEGRAM_BOT_TOKEN }}" TG_CHAT_ID="${{ secrets.TG_CHAT_ID }}" nohup bash /opt/playlog.sh &
+          TELEGRAM_BOT_TOKEN="${{ secrets.TELEGRAM_BOT_TOKEN }}" TG_CHAT_ID="${{ secrets.TG_CHAT_ID }}" nohup bash /opt/playlog.sh 2>&1 &
       - name: sleep
         run: |
           sudo sleep 340m
