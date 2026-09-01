@@ -560,7 +560,8 @@ jobs:
           touch "$LOG" "$STATE"
           DIAG=0
           SFAIL=0
-          redact() { sed -E 's/api_key=[^& ]*/api_key=[redacted]/g; s#https?://[^ "]*#<url>#g'; }
+          CTX=0
+          redact() { sed -E 's/api_key=[^& ]*/api_key=[redacted]/g; s/X-Emby-Token=[^& ]*/X-Emby-Token=[redacted]/g; s#https?://[^ "]*#<url>#g'; }
 
           # Emby API 请求：优先用自检选出的认证方式，失败自动回退另一种，返回 http 码
           emby_get() { # $1=路径(含前导 /) $2=输出文件
@@ -710,6 +711,12 @@ jobs:
               case "$IID" in
                 ''|*[!0-9]*) continue;;
               esac
+              # 首个中转事件时归档 ge2o 播放时刻上下文（脱敏），用于定位"为何没走 302 直链"
+              if [ "$KIND" = "中转" ] && [ "$CTX" -lt 1 ]; then
+                CTX=1
+                echo "--- 中转事件上下文: ge2o.log 末尾 30 行（脱敏）---"
+                tail -n 30 "$LOG" 2>/dev/null | redact
+              fi
               notify "$KIND" "$IID"
             done
           ) &
@@ -820,7 +827,9 @@ jobs:
           fi
 
           # 优雅停机
-          curl -X POST -H "X-Emby-Token: ${{ secrets.EMBY_API_TOKEN }}" http://127.0.0.1:8096/System/Shutdown || true
+          SHUTDOWN_CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+            -H "X-Emby-Token: ${{ secrets.EMBY_API_TOKEN }}" http://127.0.0.1:8096/System/Shutdown || echo 000)
+          echo "优雅停机: http=$SHUTDOWN_CODE（401 说明该密钥已失效，Emby 只能被 runner 强杀）"
           sleep 15
 
           validate_emby_data() {
@@ -936,4 +945,4 @@ jobs:
           tail -n 80 /opt/logs/playlog.log 2>/dev/null || echo "(无 playlog.log)"
           # ge2o 自身日志归档（脱敏）：定位播放走中转而非 302 直链的原因
           echo "--- ge2o.log (tail 60, 脱敏) ---"
-          tail -n 60 /opt/logs/ge2o.log 2>/dev/null | sed -E 's/api_key=[^& ]*/api_key=[redacted]/g; s#https?://[^ "]*#<url>#g' || echo "(无 ge2o.log)"
+          tail -n 60 /opt/logs/ge2o.log 2>/dev/null | sed -E 's/api_key=[^& ]*/api_key=[redacted]/g; s/X-Emby-Token=[^& ]*/X-Emby-Token=[redacted]/g; s#https?://[^ "]*#<url>#g' || echo "(无 ge2o.log)"
