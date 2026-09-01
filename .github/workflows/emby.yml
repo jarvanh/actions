@@ -1,9 +1,13 @@
 name: emby
 
-# 架构：默认 302 直链播放（ge2o:8095 → Emby:8096；健康检查失败自动回退 direct）；
-# ge2o 将 /onedrive/% 媒体路径映射到内置 OpenList 的 OneDrive 直链；
-# OpenList/OpenList存储/ge2o 任一环节不健康时自动回退 direct 模式（cloudflared → Emby:8096，行为与旧版一致）。
-# 手动触发时可用 playback_mode 输入强制指定模式。
+# 架构：两种播放链路，⚠️ 命名反直觉，别按字面理解：
+#   - 302（默认）：cloudflared → ge2o:8095 → Emby:8096，ge2o 把 /onedrive/% 媒体路径换成
+#     OpenList 签出的 OneDrive 直链并返回 302/307，播放器最终直接向 OneDrive 拉流，
+#     视频流不经过 runner（本地挂载仅承载扫描/探测流量）。
+#   - direct：cloudflared → Emby:8096，视频流经 runner 中转到网盘，行为与旧版一致。
+#     "direct" 指的是"直连 Emby"，不是"直连网盘"，流量反而全走服务器。
+# OpenList / OpenList 存储 / ge2o 任一环节不健康时，启动探活与运行中 watchdog 都会自动回退 direct。
+# 模式来源：手动触发看 playback_mode 开关；定时/watch 触发看仓库变量 EMBY_PLAYBACK_MODE（缺省 302）。
 
 on:
   schedule:
@@ -12,7 +16,11 @@ on:
   workflow_dispatch:
     inputs:
       playback_mode:
-        description: "播放模式：302 = OpenList 直链（默认）；direct = 服务器中转。常设开关可用仓库变量 EMBY_PLAYBACK_MODE（302/direct）"
+        description: >-
+          302 直链播放开关（⚠️ 命名反直觉，别按字面理解）：
+          302 = 开启，播放器直接向 OneDrive 拉流，不占 runner 带宽（链路不健康时自动回退 direct）；
+          direct = 关闭，视频流经 runner 中转，"direct" 指直连 Emby 而非直连网盘。
+          本开关只在手动触发时生效；定时/watch 触发读仓库变量 EMBY_PLAYBACK_MODE（缺省 302）。
         type: choice
         default: "302"
         options:
@@ -22,6 +30,7 @@ on:
     # types: started
 
 env:
+  # 手动触发：playback_mode 开关（有默认值，恒非空）；定时/watch 触发：仓库变量 EMBY_PLAYBACK_MODE，缺省 302
   PLAYBACK_MODE_INPUT: ${{ github.event.inputs.playback_mode || vars.EMBY_PLAYBACK_MODE || '302' }}
 
 jobs:
@@ -425,7 +434,12 @@ jobs:
           main || echo "::warning::install ge2o failed, 302 链路将回退 direct"
       - name: run cloudflared
         run: |
-          MODE="${PLAYBACK_MODE_INPUT:-302}"
+          # 取值统一去空白转小写，仓库变量写成 "Direct" / "DIRECT" 也能识别
+          MODE=$(printf '%s' "${PLAYBACK_MODE_INPUT:-302}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+          case "$MODE" in
+            302|direct) ;;
+            *) echo "::warning::未知的播放模式 '$MODE'（EMBY_PLAYBACK_MODE），按 302 处理"; MODE="302";;
+          esac
           if [ "$MODE" = "302" ]; then
             OK=0
             for i in 1 2 3; do
