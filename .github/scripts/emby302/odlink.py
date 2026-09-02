@@ -71,10 +71,10 @@ LAST_LINK_FILE = os.environ.get("ODLINK_LAST", "/opt/odlink-last.json")
 # 因此任何情况下都必须给出合法 RFC3339 时间戳。
 FALLBACK_TIME = "1970-01-01T00:00:00Z"
 
+# 目录条目缓存无 TTL：本轮 run 内路径不会自己搬家，命中即用，减少 Graph 往返
 LINK_TTL = 40 * 60          # downloadUrl 官方约 1 小时有效，保守缓存 40 分钟
-TOKEN_REFRESH_MARGIN = 600  # 距过期不足 10 分钟就刷新
-CONF_CACHE_TTL = 5          # rclone.conf 读取缓存秒数
-BOOTSTRAP_RETRY = 300       # 就绪前重试间隔
+TOKEN_REFRESH_MARGIN = 600  # 距过期不足 10 分钟就提前刷新
+BOOTSTRAP_RETRY_SEC = 60    # bootstrap 未就绪时的重试间隔
 
 # 仓库公开：日志一律脱敏，不输出 token、完整直链、完整媒体路径
 _QS = re.compile(r"[?&](api_key|access_token|token)=[^&]*", re.I)
@@ -93,7 +93,11 @@ def log(msg):
 
 
 def redact(s):
-    """脱敏，防止意外把凭据/链接写进公开日志。"""
+    """脱敏，防止意外把凭据/链接写进公开日志。
+
+    顺序有意为之：先按 query 参数脱敏（覆盖日志里出现的裸 ?api_key=...），
+    再把整个 URL 替换成占位符——URL 里可能还藏着签名、itemId 等，整体替换最安全。
+    """
     s = _QS.sub(lambda m: m.group(0).split("=")[0] + "=[redacted]", str(s))
     s = _URL.sub("<url>", s)
     return s[:400]
@@ -138,8 +142,6 @@ class TokenStore(object):
         self._lock = threading.Lock()
         self._at = ""
         self._expiry = 0
-        self._read_at = 0
-        self._mtime = 0
 
     def _read_conf(self):
         section = {}
@@ -159,55 +161,50 @@ class TokenStore(object):
             return {}
         return section
 
+    def _read_token(self):
+        """从 rclone.conf 的 [onedrive] 段解析出 token JSON。"""
+        raw = self._read_conf().get("token", "")
+        if not raw:
+            return {}
+        try:
+            return json.loads(raw)
+        except Exception:
+            return {}
+
+    def _rclone_refresh(self):
+        """让 rclone 自己完成刷新（它会把新 token 回写 conf），我们再读回。"""
+        try:
+            subprocess.run(["rclone", "about", "onedrive:", "--config", RCLONE_CONF],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=90)
+        except Exception as e:
+            log("rclone 刷新失败: %s" % type(e).__name__)
+
     def _load(self, force=False):
+        """按代价从低到高取一个可用的 access_token。
+
+        1) 内存里的 token 仍在有效期内（留 TOKEN_REFRESH_MARGIN 余量）→ 直接返回
+        2) 否则重读 rclone.conf —— 常驻的 rclone mount 会持续把刷新后的 token 写回
+        3) 重读后依旧缺失/临近过期 → 主动触发一次 rclone 刷新，再读回
+        """
         now = time.time()
         if not force and self._at and now < self._expiry - TOKEN_REFRESH_MARGIN:
             return self._at
-        if not force and now - self._read_at < CONF_CACHE_TTL and self._at \
-                and now < self._expiry - TOKEN_REFRESH_MARGIN:
-            return self._at
 
-        try:
-            mtime = os.path.getmtime(RCLONE_CONF)
-        except Exception:
-            mtime = 0
-        if not force and mtime == self._mtime and self._at \
-                and now < self._expiry - TOKEN_REFRESH_MARGIN:
-            return self._at
-
-        section = self._read_conf()
-        raw = section.get("token", "")
-        tok = {}
-        if raw:
-            try:
-                tok = json.loads(raw)
-            except Exception:
-                tok = {}
-
+        tok = self._read_token()
         at = tok.get("access_token", "")
         expiry = parse_expiry(tok.get("expiry"))
 
-        if (not at) or (expiry and now > expiry - TOKEN_REFRESH_MARGIN) or force:
-            # 让 rclone 自己完成刷新（它会回写 conf），再取回新 token
+        if force or (not at) or (expiry and now > expiry - TOKEN_REFRESH_MARGIN):
             log("触发 rclone 刷新 token（force=%s）" % bool(force))
-            try:
-                subprocess.run(["rclone", "about", "onedrive:", "--config", RCLONE_CONF],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                               timeout=90)
-            except Exception as e:
-                log("rclone 刷新失败: %s" % type(e).__name__)
-            section = self._read_conf()
-            tok = {}
-            try:
-                tok = json.loads(section.get("token", "") or "{}")
-            except Exception:
-                tok = {}
+            self._rclone_refresh()
+            tok = self._read_token()
             at = tok.get("access_token", "")
             expiry = parse_expiry(tok.get("expiry"))
 
-        self._read_at = now
         if at:
             self._at = at
+            # conf 里没有 expiry 时按 1 小时兜底，避免反复触发刷新
             self._expiry = expiry or (now + 3600)
         return self._at
 
@@ -294,7 +291,7 @@ class Resolver(object):
         self._lock = threading.Lock()
 
     def bump(self, key, n=1):
-        """计数（dict 赋值在 CPython 下原子，仍走锁保持语义清晰）"""
+        """累加计数。与 stats_snapshot 共用同一把锁，保证读到的快照不自相矛盾。"""
         with self._lock:
             self.stats[key] = self.stats.get(key, 0) + n
 
@@ -501,23 +498,26 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
+    def _status_payload(self):
+        """/healthz 与 /stats 的公共载荷。只含计数，不含任何凭据与直链。"""
+        res = self.server.resolver
+        return {"ready": res.ready, "shortcuts": len(res.shortcuts),
+                "graph": res.graph.stats, "fs": res.stats_snapshot(),
+                "dirs_cached": len(res.dir_cache),
+                "links_cached": len(res.link_cache)}
+
     def do_GET(self):
         if self.path == "/ping":
             self._send(200, b'{"code":200,"message":"pong","data":null}')
         elif self.path == "/healthz":
-            res = self.server.resolver
-            st = 200 if (res.ready and self.server.tokens.get()) else 503
-            data = {"ready": res.ready, "shortcuts": len(res.shortcuts),
-                    "graph": res.graph.stats}
-            self._send(st, json.dumps(data).encode())
+            # 探活：ready 且确实能取到 token 才算 200，否则 503 让上层回退 direct
+            p = self._status_payload()
+            st = 200 if (p["ready"] and self.server.tokens.get()) else 503
+            self._send(st, json.dumps(
+                {k: p[k] for k in ("ready", "shortcuts", "graph")}).encode())
         elif self.path == "/stats":
-            # 本轮 302 链路运行统计，供收尾 TG 通知汇总（不含任何凭据/直链）
-            res = self.server.resolver
-            data = {"ready": res.ready, "shortcuts": len(res.shortcuts),
-                    "graph": res.graph.stats, "fs": res.stats_snapshot(),
-                    "dirs_cached": len(res.dir_cache),
-                    "links_cached": len(res.link_cache)}
-            self._send(200, json.dumps(data).encode())
+            # 本轮 302 链路运行统计，供启动/收尾 TG 通知汇总
+            self._send(200, json.dumps(self._status_payload()).encode())
         else:
             self._send(404, b'{"code":404,"message":"not found","data":null}')
 
@@ -647,11 +647,16 @@ class Server(ThreadingHTTPServer):
 
 
 def bootstrap_loop(resolver, stop):
+    """就绪前反复重试；一旦成功即退出——顶层快捷方式名单就此固定。
+
+    这是有意的行为：**顶层**名单是本轮 run 的快照，期间新建/改名/删除的快捷方式
+    不会被感知（首段不命中 → 原样转发 OpenList）。快捷方式**内部**的子路径不受
+    影响，它们是每次请求实时逐段下钻的，任意深度都无需预先扫描。
+    """
     while not stop.is_set():
         if resolver.bootstrap():
             return
-        stop.wait(60)
-    return
+        stop.wait(BOOTSTRAP_RETRY_SEC)
 
 
 def main():

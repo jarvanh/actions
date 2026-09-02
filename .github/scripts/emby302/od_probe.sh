@@ -35,7 +35,9 @@ out "  3. admin 密码——仅 oe 后台人工登录用（admin + OPENLIST_ADMI
 out "     只有机器用 secret 登录失败时才会自愈重置并经 TG 私信告知。"
 
 # ---------- 1. 取凭据 ----------
+# 只取 rclone.conf 的 [onedrive] 段：awk 遇到下一个 [xxx] 段头即停止
 SECTION=$(awk '/^\[onedrive\]/{f=1;next} /^\[/{f=0} f' "$RCLONE_CONF" 2>/dev/null || true)
+# 取段内某个 key 的值：只取首个匹配，值里再出现等号也原样保留
 get_kv() {
   printf '%s\n' "$SECTION" | grep -oE "^[[:space:]]*$1[[:space:]]*=.*" | head -1 | sed 's/^[^=]*=[[:space:]]*//'
 }
@@ -51,6 +53,10 @@ if [ -z "$RTOK" ]; then
 fi
 
 # ---------- 2. 换 access_token ----------
+# 三级降级，任一级拿到 token 即止：
+#   ① 自己拿 refresh_token 去换（需要 conf 里有 client_id/secret）
+#   ② 让 rclone 自己刷新（它会把新 token 回写 conf），再从 conf 读回
+#   ③ 从 rclone 实际发出的请求头里抓（只提取不打印，临时文件随即销毁）
 TOK_JSON=$(curl -s -m 25 -X POST "https://login.microsoftonline.com/common/oauth2/v2.0/token" \
   --data-urlencode "grant_type=refresh_token" \
   --data-urlencode "client_id=$CID" \
@@ -141,7 +147,10 @@ printf '%s' "$ROOT_JSON" | jq -c '.value[]' 2>/dev/null | while read -r item; do
   gget "$GRAPH/drives/$DRIVE/items/$RID/children?\$select=name,id,file,folder&\$top=30"
   CH=$GBODY
   if [ "$GCODE" != "200" ]; then
-    out "     ❌ 跟随后仍无法列子目录 http=$GCODE $(printf '%s' "$CH" | jq -r '.error.code // empty' 2>/dev/null | head -c 80) $(printf '%s' "$CH" | jq -r '.error.code // empty' 2>/dev/null | grep -q . || printf '%s' "$CH" | head -c 80)"
+    # 优先打印 Graph 的结构化错误码；拿不到就退回原始响应前 80 字符
+    ERR=$(printf '%s' "$CH" | jq -r '.error.code // .error.message // empty' 2>/dev/null | head -c 80)
+    [ -n "$ERR" ] || ERR=$(printf '%s' "$CH" | head -c 80)
+    out "     ❌ 跟随后仍无法列子目录 http=$GCODE $ERR"
     continue
   fi
   CNT=$(printf '%s' "$CH" | jq -r '.value | length' 2>/dev/null || echo 0)
@@ -166,4 +175,7 @@ printf '%s' "$ROOT_JSON" | jq -c '.value[]' 2>/dev/null | while read -r item; do
 done
 
 out "=== 探测结束 ==="
+# 本探测只回答"302 直链方案是否可行"，结果不影响任何链路决策（纯旁路诊断）
+out "解读：出现『✅ 取到预授权直链』即方案可行，odlink 会据此提供 302 直链；"
+out "      若全是『❌ 跟随后仍无法列子目录』说明 Graph 侧也跟随不了，odlink 会自动退回 OpenList。"
 exit 0
