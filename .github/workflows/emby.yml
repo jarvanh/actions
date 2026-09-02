@@ -43,6 +43,9 @@ jobs:
     concurrency: emby-singleton
     runs-on: ubuntu-latest
     steps:
+      - name: checkout repo
+        # 检出仓库，使 .github/scripts/emby302/ 下的脚本可用（与 openlist.yml 同做法）
+        uses: actions/checkout@v4
       - name: rclone-install
         run: |
           sudo apt-get update && sudo apt-get install -y zstd
@@ -257,7 +260,7 @@ jobs:
         run: |
           # 只读探测：确认快捷方式(remoteItem)能否被 Graph 跟随、能否取到预授权直链
           # 不改变任何链路行为，探测失败也不影响本次运行
-          bash .github/scripts/emby302/od_probe.sh || echo "::warning::OneDrive 快捷方式探测失败（不影响播放）"
+          bash "$GITHUB_WORKSPACE/.github/scripts/emby302/od_probe.sh" || echo "::warning::OneDrive 快捷方式探测失败（不影响播放）"
       - name: install emby
         run: |
           set -euo pipefail
