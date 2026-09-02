@@ -51,6 +51,10 @@ AUTH_TOKEN = os.environ.get("ODLINK_TOKEN", "")
 PORT = int(os.environ.get("ODLINK_PORT", "5245"))
 LOG_PATH = os.environ.get("ODLINK_LOG", "/opt/logs/odlink.log")
 
+# ge2o 用 Go 把 modified 当 time.Time 解析，空字符串会导致整个响应解析失败并回源中转，
+# 因此任何情况下都必须给出合法 RFC3339 时间戳。
+FALLBACK_TIME = "1970-01-01T00:00:00Z"
+
 LINK_TTL = 40 * 60          # downloadUrl 官方约 1 小时有效，保守缓存 40 分钟
 TOKEN_REFRESH_MARGIN = 600  # 距过期不足 10 分钟就刷新
 CONF_CACHE_TTL = 5          # rclone.conf 读取缓存秒数
@@ -94,6 +98,15 @@ def parse_expiry(value):
 def enc(s):
     """Graph 路径段编码：保留 ! 等 OneDrive itemId 常用字符。"""
     return urllib.parse.quote(s, safe="!()*'$-_.+~")
+
+
+def ts(value):
+    """保证返回合法 RFC3339 时间戳（ge2o 按 time.Time 解析，空串会直接报错）。"""
+    if not value:
+        return FALLBACK_TIME
+    s = str(value).strip()
+    # Graph 返回形如 2024-05-01T12:34:56Z，Go 的 time.Time 可直接解析
+    return s if s.endswith("Z") or "+" in s[10:] else FALLBACK_TIME
 
 
 class TokenStore(object):
@@ -274,7 +287,8 @@ class Resolver(object):
             return False
 
         st, body, err = self.graph.req(
-            GRAPH + "/me/drive/root/children?$select=name,id,remoteItem,folder&$top=200")
+            GRAPH + "/me/drive/root/children"
+                    "?$select=name,id,remoteItem,folder,lastModifiedDateTime&$top=200")
         if st != 200 or not body:
             log("bootstrap 失败：根目录列举 http=%s err=%s" % (st, err))
             return False
@@ -287,7 +301,7 @@ class Resolver(object):
                 "name": name,
                 "size": it.get("size", 0),
                 "is_dir": True,          # 顶层全是快捷方式（指向远程盘目录）或普通目录
-                "modified": it.get("lastModifiedDateTime", ""),
+                "modified": ts(it.get("lastModifiedDateTime")),
             })
             ri = it.get("remoteItem")
             if not ri:
@@ -296,7 +310,8 @@ class Resolver(object):
             iid = ri.get("id", "")
             if drive and iid:
                 shortcuts[name] = (drive, iid)
-                self.dir_cache[name] = (drive, iid, True)
+                self.dir_cache[name] = (drive, iid, True,
+                                        ts(it.get("lastModifiedDateTime")))
 
         with self._lock:
             self.shortcuts = shortcuts
@@ -311,10 +326,11 @@ class Resolver(object):
             return first_seg in self.shortcuts
 
     def resolve(self, segments):
-        """逐段下钻。返回 (driveId, itemId, is_dir, crossed) 或 (None,...)。"""
+        """逐段下钻。返回 (driveId, itemId, is_dir, crossed, err, modified)。"""
         drive, item_id = self.root_drive, self.root_id
         crossed = 0
         is_dir = True
+        modified = FALLBACK_TIME
 
         for i, seg in enumerate(segments):
             key = "/".join(segments[:i + 1])
@@ -325,23 +341,24 @@ class Resolver(object):
             if is_sc:
                 crossed += 1
             if cached:
-                drive, item_id, is_dir = cached
+                drive, item_id, is_dir, modified = cached
                 continue
 
-            url = "%s/drives/%s/items/%s:/%s:?$select=id,name,size,folder,parentReference,remoteItem" % (
+            url = ("%s/drives/%s/items/%s:/%s:"
+                   "?$select=id,name,size,folder,parentReference,remoteItem,lastModifiedDateTime") % (
                 GRAPH, enc(drive), enc(item_id), enc(seg))
             st, body, err = self.graph.req(url)
             if st != 200 or not body:
                 log("解析失败 段%d http=%s err=%s 首段=%s"
                     % (i + 1, st, err, segments[0] if segments else "-"))
-                return None, None, None, crossed, (st, err)
+                return None, None, None, crossed, (st, err), modified
 
             ri = body.get("remoteItem")
             if ri:
                 nd = (ri.get("parentReference") or {}).get("driveId", "")
                 ni = ri.get("id", "")
                 if not (nd and ni):
-                    return None, None, None, crossed, (st, "remoteItem-incomplete")
+                    return None, None, None, crossed, (st, "remoteItem-incomplete"), modified
                 drive, item_id = nd, ni
                 is_dir = "folder" in ri
                 crossed += 1
@@ -350,31 +367,37 @@ class Resolver(object):
                 item_id = body.get("id", "")
                 is_dir = "folder" in body
 
+            modified = ts(body.get("lastModifiedDateTime"))
             if not item_id:
-                return None, None, None, crossed, (st, "no-item-id")
+                return None, None, None, crossed, (st, "no-item-id"), modified
             with self._lock:
-                self.dir_cache[key] = (drive, item_id, is_dir)
+                self.dir_cache[key] = (drive, item_id, is_dir, modified)
 
-        return drive, item_id, is_dir, crossed, None
+        return drive, item_id, is_dir, crossed, None, modified
 
     def download_url(self, drive, item_id, cache_key):
-        """取预授权直链。不带 $select 取完整对象，确保含 @microsoft.graph.downloadUrl。"""
+        """取预授权直链。不带 $select 取完整对象，确保含 @microsoft.graph.downloadUrl。
+
+        返回 (url, size, modified)；失败时 url 为空串。
+        """
         now = time.time()
         with self._lock:
             hit = self.link_cache.get(cache_key)
-        if hit and hit[1] > now:
-            return hit[0]
+        if hit and hit[2] > now:
+            return hit[0], hit[1], hit[3]
 
         st, body, err = self.graph.req("%s/drives/%s/items/%s" % (GRAPH, enc(drive), enc(item_id)))
         if st != 200 or not body:
             log("取直链失败 http=%s err=%s" % (st, err))
-            return ""
+            return "", 0, FALLBACK_TIME
         url = body.get("@microsoft.graph.downloadUrl") or \
             (body.get("content") or {}).get("downloadUrl") or ""
+        size = body.get("size", 0)
+        modified = ts(body.get("lastModifiedDateTime"))
         if url:
             with self._lock:
-                self.link_cache[cache_key] = (url, now + LINK_TTL)
-        return url
+                self.link_cache[cache_key] = (url, size, now + LINK_TTL, modified)
+        return url, size, modified
 
     def list_children(self, drive, item_id):
         items = []
@@ -390,7 +413,7 @@ class Resolver(object):
                     "name": it.get("name", ""),
                     "size": it.get("size", 0),
                     "is_dir": "folder" in it,
-                    "modified": it.get("lastModifiedDateTime", ""),
+                    "modified": ts(it.get("lastModifiedDateTime")),
                 })
             url = body.get("@odata.nextLink", "")
         return items
@@ -503,7 +526,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._send(200, openlist_ok({
                     "name": ROOT_PREFIX.strip("/"), "size": 0, "is_dir": True,
-                    "modified": "", "raw_url": "", "provider": "OneDrive"}))
+                    "modified": ts(None), "raw_url": "", "provider": "OneDrive"}))
                 log("get 根目录（目录，无直链）")
             return
 
@@ -514,7 +537,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(status if status else 502, body or openlist_err(500, "upstream error"))
             return
 
-        drive, item_id, is_dir, crossed, err = res.resolve(segments)
+        drive, item_id, is_dir, crossed, err, modified = res.resolve(segments)
         if err or not item_id:
             # Graph 解析失败 → 转发兜底，不把故障放大给用户
             status, body = forward_upstream(
@@ -538,13 +561,13 @@ class Handler(BaseHTTPRequestHandler):
             # 探活会对媒体顶层目录做 fs/get，目录没有直链但必须返回 200，
             # 否则会被判成链路不健康而回退 direct。
             self._send(200, openlist_ok({
-                "name": name, "size": 0, "is_dir": True, "modified": "",
+                "name": name, "size": 0, "is_dir": True, "modified": modified,
                 "raw_url": "", "provider": "OneDrive"}))
             log("get 目录 段数=%d 跨盘=%d" % (len(segments), crossed))
             return
 
         key = "/".join(segments)
-        url = res.download_url(drive, item_id, key)
+        url, size, modified = res.download_url(drive, item_id, key)
         if not url:
             self._send(200, openlist_err(500, "no downloadUrl"))
             log("get 文件 段数=%d 跨盘=%d 未取到直链" % (len(segments), crossed))
@@ -552,7 +575,7 @@ class Handler(BaseHTTPRequestHandler):
 
         host = urllib.parse.urlparse(url).netloc
         self._send(200, openlist_ok({
-            "name": name, "size": 0, "is_dir": False, "modified": "",
+            "name": name, "size": size, "is_dir": False, "modified": modified,
             "raw_url": url, "provider": "OneDrive"}))
         log("get 文件 段数=%d 跨盘=%d 直链 host=%s 长度=%d" % (
             len(segments), crossed, host, len(url)))
