@@ -155,27 +155,6 @@ jobs:
               fi
             fi
 
-            # 管理密码 = OPENLIST_ADMIN_PASSWORD（oe 维护入口与 ge2o 同一密码）。
-            # GitHub 密钥只写不可读，人工登录对不上时只能靠这里自愈：剔除粘贴带入的
-            # 首尾空白/换行（机器登录带同样的字符能过、人工输入少了它就失败，是历史坑），
-            # 并在服务启动前直接重置 DB 密码——服务未启动，无 sqlite 锁风险。
-            OPENLIST_PW="${{ secrets.OPENLIST_ADMIN_PASSWORD }}"
-            PW_RAW_LEN=${#OPENLIST_PW}
-            OPENLIST_PW=$(printf '%s' "$OPENLIST_PW" | tr -d '\r\n' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
-            if [ -z "$OPENLIST_PW" ]; then
-              echo "::error::OPENLIST_ADMIN_PASSWORD 未设置或全空白——本次 admin 密码为随机值，oe 人工登录不可用"
-              OPENLIST_PW=$(openssl rand -hex 16)
-            fi
-            echo "OPENLIST_ADMIN_PASSWORD 形状: 原长=$PW_RAW_LEN 采用长=${#OPENLIST_PW}$([ "$PW_RAW_LEN" -ne "${#OPENLIST_PW}" ] && echo '（已剔除空白——若之前 oe 人工登录失败，多半是密钥里混入了不可见字符）')"
-            if [ -f /opt/openlist/data.db ]; then
-              if openlist admin set --data /opt/openlist "$OPENLIST_PW" >/dev/null 2>&1 \
-                 || openlist admin set "$OPENLIST_PW" --data /opt/openlist >/dev/null 2>&1; then
-                echo "admin 密码已在启动前重置为 secret 值"
-              else
-                echo "::warning::启动前 admin set 失败，将在启动后重试"
-              fi
-            fi
-
             nohup openlist server --data /opt/openlist > /opt/logs/openlist.log 2>&1 &
             for i in $(seq 1 30); do
               curl -fsS http://127.0.0.1:5244/ping >/dev/null 2>&1 && break
@@ -206,7 +185,16 @@ jobs:
               echo "OpenList 维护隧道已启动 (oe)"
             fi
 
-            # 登录（密码已在上文启动前统一重置，正常一次通过；失败再补救一次：全新库走这条路）
+            # 管理密码 = OPENLIST_ADMIN_PASSWORD（oe 维护入口与 ge2o 同一密码）。
+            # 剔除密钥粘贴可能带入的首尾空白/换行：机器登录带着同样的字符能过、
+            # 人工在 oe 后台手输少了它就 Invalid——形状只报长度不报内容。
+            OPENLIST_PW="${{ secrets.OPENLIST_ADMIN_PASSWORD }}"
+            PW_RAW_LEN=${#OPENLIST_PW}
+            OPENLIST_PW=$(printf '%s' "$OPENLIST_PW" | tr -d '\r\n' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
+            if [ -z "$OPENLIST_PW" ]; then OPENLIST_PW=$(openssl rand -hex 16); fi
+            [ "$PW_RAW_LEN" -ne "${#OPENLIST_PW}" ] && echo "OPENLIST_ADMIN_PASSWORD 含首尾空白（原长=$PW_RAW_LEN），已剔除——oe 人工登录失败多半是这个原因"
+
+            # 先尝试直接登录：正常情况下恢复分支的库内密码即上次设置值，无需重置
             TOKEN=$(curl -s -X POST http://127.0.0.1:5244/api/auth/login \
               -H 'Content-Type: application/json' \
               -d "{\"username\":\"admin\",\"password\":\"$OPENLIST_PW\"}" | jq -r '.data.token // .data // empty' || true)
