@@ -122,6 +122,10 @@ jobs:
           fi
       - name: install openlist
         if: env.PLAYBACK_MODE_INPUT != 'direct'
+        env:
+          # secret 必须经环境变量注入——直接文本注入 run: 脚本时，密码里含
+          # $xxx 片段会被 bash 当未定义变量展开成空（如 @$TM3@ 变 @$TM3@ 骨架）。
+          OPENLIST_ADMIN_PASSWORD: ${{ secrets.OPENLIST_ADMIN_PASSWORD }}
         run: |
           main() {
             sudo mkdir -p /opt/openlist
@@ -189,9 +193,9 @@ jobs:
             fi
 
             # 管理密码 = OPENLIST_ADMIN_PASSWORD（oe 维护入口与 ge2o 同一密码）。
-            # 剔除密钥粘贴可能带入的首尾空白/换行：机器登录带着同样的字符能过、
-            # 人工在 oe 后台手输少了它就 Invalid——形状只报长度不报内容。
-            OPENLIST_PW="${{ secrets.OPENLIST_ADMIN_PASSWORD }}"
+            # secret 经 step env 注入进程环境，这里只做变量拷贝，bash 不会二次
+            # 解析其内容（$、`、" 等字符原样保留）。剔除粘贴可能带入的首尾空白/换行。
+            OPENLIST_PW="$OPENLIST_ADMIN_PASSWORD"
             PW_RAW_LEN=${#OPENLIST_PW}
             OPENLIST_PW=$(printf '%s' "$OPENLIST_PW" | tr -d '\r\n' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
             rm -f /tmp/openlist-pw-note
@@ -208,9 +212,11 @@ jobs:
             # 成功 = 库内已对齐（绝不动密码）；失败 = 库内漂移（Dropbox 历史恢复 /
             # oe 后台人工改动 / 临时轮换遗留），无条件纠正回 secret 并 TG 私信告知。
             # 由此保证：用户随时用 admin + secret 登录 oe 必成，TG 里的临时密码仅本轮有效。
+            # 请求体用 jq 构造：密码含 " 或 \ 时手拼 JSON 会注入/破损。
+            LOGIN_BODY=$(jq -cn --arg pw "$OPENLIST_PW" '{"username":"admin","password":$pw}')
             TOKEN=$(curl -s -X POST http://127.0.0.1:5244/api/auth/login \
               -H 'Content-Type: application/json' \
-              -d "{\"username\":\"admin\",\"password\":\"$OPENLIST_PW\"}" | jq -r '.data.token // .data // empty' || true)
+              -d "$LOGIN_BODY" | jq -r '.data.token // .data // empty' || true)
             if [ -z "$TOKEN" ]; then
               # 登录失败才重置：全新库（admin 随机密码）或库内密码与 secret 不一致时自愈
               openlist admin set --data /opt/openlist "$OPENLIST_PW" >/dev/null 2>&1 \
@@ -221,7 +227,7 @@ jobs:
               echo "OpenList 库内密码与 secret 不一致，已重置为 secret 值（TG 私信告知，不落公开日志）"
               TOKEN=$(curl -s -X POST http://127.0.0.1:5244/api/auth/login \
                 -H 'Content-Type: application/json' \
-                -d "{\"username\":\"admin\",\"password\":\"$OPENLIST_PW\"}" | jq -r '.data.token // .data // empty' || true)
+                -d "$LOGIN_BODY" | jq -r '.data.token // .data // empty' || true)
             fi
             if [ -z "$TOKEN" ]; then
               echo "::warning::OpenList login failed, 302 链路将回退 direct"
@@ -251,7 +257,7 @@ jobs:
                 || true
               FTOKEN=$(curl -s -m 10 -X POST http://127.0.0.1:5244/api/auth/login \
                 -H 'Content-Type: application/json' \
-                -d "{\"username\":\"admin\",\"password\":\"$FORCE_PW\"}" | jq -r '.data.token // .data // empty' || true)
+                -d "$(jq -cn --arg pw "$FORCE_PW" '{"username":"admin","password":$pw}')" | jq -r '.data.token // .data // empty' || true)
               if [ -z "$FTOKEN" ]; then
                 # 个别版本改库后需重启服务才生效
                 pkill -f "openlist server" 2>/dev/null || true
@@ -263,7 +269,7 @@ jobs:
                 done
                 FTOKEN=$(curl -s -m 10 -X POST http://127.0.0.1:5244/api/auth/login \
                   -H 'Content-Type: application/json' \
-                  -d "{\"username\":\"admin\",\"password\":\"$FORCE_PW\"}" | jq -r '.data.token // .data // empty' || true)
+                  -d "$(jq -cn --arg pw "$FORCE_PW" '{"username":"admin","password":$pw}')" | jq -r '.data.token // .data // empty' || true)
               fi
               if [ -n "$FTOKEN" ]; then
                 TOKEN=$FTOKEN
