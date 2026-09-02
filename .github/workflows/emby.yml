@@ -226,6 +226,16 @@ jobs:
             fi
             printf '%s' "$TOKEN" > /tmp/openlist-token
             chmod 600 /tmp/openlist-token
+            # 凭据语义（三套互不相干）：
+            #   1. Graph access_token（微软侧）：rclone.conf 的 refresh_token 自动换取，
+            #      odlink 直链解析用——与 OpenList 无关
+            #   2. OpenList 会话 token：上面机器自动登录所得（/tmp/openlist-token），
+            #      探活/直链转发用——无需人工登录
+            #   3. admin 密码：仅 oe 后台人工登录用（admin + OPENLIST_ADMIN_PASSWORD），
+            #      只有机器用 secret 登录失败时才自愈重置并 TG 私信告知
+            echo "机器已用 OPENLIST_ADMIN_PASSWORD secret 直接登录 OpenList 成功"
+            echo "  → oe 后台同凭据可登录：admin + 该 secret；若后续无'密码重置/轮换'TG 通知，本轮密码未变"
+            echo "  → OpenList 会话 token 已由机器自动获取（/tmp/openlist-token），与 oe 人工登录互不影响"
 
             # 强制轮换（一次性开关）：仓库变量 OPENLIST_FORCE_PW_ROTATE 非空时，
             # 把管理员密码随机重设并经 TG 私信告知，用完把变量删除即可。
