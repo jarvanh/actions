@@ -63,6 +63,9 @@ UPSTREAM_TOKEN_FILE = os.environ.get("ODLINK_UPSTREAM_TOKEN", "/tmp/openlist-tok
 AUTH_TOKEN = os.environ.get("ODLINK_TOKEN", "")
 PORT = int(os.environ.get("ODLINK_PORT", "5245"))
 LOG_PATH = os.environ.get("ODLINK_LOG", "/opt/logs/odlink.log")
+# 最近一次成功取到的直链落盘位置，供 playlog 的 TG 通知附上直链。
+# 只写在 runner 本地、不进 workflow 日志（公开仓库），TG 侧是私密 chat。
+LAST_LINK_FILE = os.environ.get("ODLINK_LAST", "/opt/odlink-last.json")
 
 # ge2o 用 Go 把 modified 当 time.Time 解析，空字符串会导致整个响应解析失败并回源中转，
 # 因此任何情况下都必须给出合法 RFC3339 时间戳。
@@ -283,9 +286,21 @@ class Resolver(object):
         self.root_id = ""
         self.shortcuts = {}     # 顶层名 -> (remote driveId, remote itemId)
         self.root_items = []    # 根目录条目（bootstrap 一次拿全，列根不再依赖上游）
-        self.dir_cache = {}     # "3/电影" -> (driveId, itemId, is_dir)
-        self.link_cache = {}    # "3/电影/x.mkv" -> (url, expire_ts)
+        self.dir_cache = {}     # "3/电影" -> (driveId, itemId, is_dir, modified)
+        self.link_cache = {}    # "3/电影/x.mkv" -> (url, size, expire_ts, modified)
+        # 计数器：供 /stats 与收尾 TG 通知汇总本轮 302 链路运行情况
+        self.stats = {"get": 0, "list": 0, "link_ok": 0, "link_miss": 0,
+                      "resolve_err": 0, "fallback": 0, "cross_drive": 0}
         self._lock = threading.Lock()
+
+    def bump(self, key, n=1):
+        """计数（dict 赋值在 CPython 下原子，仍走锁保持语义清晰）"""
+        with self._lock:
+            self.stats[key] = self.stats.get(key, 0) + n
+
+    def stats_snapshot(self):
+        with self._lock:
+            return dict(self.stats)
 
     def bootstrap(self):
         """列一次根目录：拿到主盘 root 的 (driveId,itemId) 与快捷方式集合。"""
@@ -495,6 +510,14 @@ class Handler(BaseHTTPRequestHandler):
             data = {"ready": res.ready, "shortcuts": len(res.shortcuts),
                     "graph": res.graph.stats}
             self._send(st, json.dumps(data).encode())
+        elif self.path == "/stats":
+            # 本轮 302 链路运行统计，供收尾 TG 通知汇总（不含任何凭据/直链）
+            res = self.server.resolver
+            data = {"ready": res.ready, "shortcuts": len(res.shortcuts),
+                    "graph": res.graph.stats, "fs": res.stats_snapshot(),
+                    "dirs_cached": len(res.dir_cache),
+                    "links_cached": len(res.link_cache)}
+            self._send(200, json.dumps(data).encode())
         else:
             self._send(404, b'{"code":404,"message":"not found","data":null}')
 
@@ -545,6 +568,7 @@ class Handler(BaseHTTPRequestHandler):
 
         # 分流：odlink 未就绪、或首段不是快捷方式 → 原样转发 OpenList（零回归）
         if (not res.ready) or (not segments) or (not res.is_shortcut(segments[0])):
+            res.bump("fallback")
             status, body = forward_upstream(
                 api, payload, self.headers.get("Authorization", ""))
             self._send(status if status else 502, body or openlist_err(500, "upstream error"))
@@ -553,6 +577,8 @@ class Handler(BaseHTTPRequestHandler):
         drive, item_id, is_dir, crossed, err, modified = res.resolve(segments)
         if err or not item_id:
             # Graph 解析失败 → 转发兜底，不把故障放大给用户
+            res.bump("resolve_err")
+            res.bump("fallback")
             status, body = forward_upstream(
                 api, payload, self.headers.get("Authorization", ""))
             log("回退 OpenList 段数=%d 首段=%s http=%s" % (
@@ -560,7 +586,11 @@ class Handler(BaseHTTPRequestHandler):
             self._send(status if status else 502, body or openlist_err(500, "upstream error"))
             return
 
+        if crossed:
+            res.bump("cross_drive")
+
         if api == "/api/fs/list":
+            res.bump("list")
             content = res.list_children(drive, item_id) if is_dir else []
             self._send(200, openlist_ok({
                 "content": content, "total": len(content), "readme": "",
@@ -573,6 +603,7 @@ class Handler(BaseHTTPRequestHandler):
         if is_dir:
             # 探活会对媒体顶层目录做 fs/get，目录没有直链但必须返回 200，
             # 否则会被判成链路不健康而回退 direct。
+            res.bump("get")
             self._send(200, openlist_ok({
                 "name": name, "size": 0, "is_dir": True, "modified": modified,
                 "raw_url": "", "provider": "OneDrive"}))
@@ -581,12 +612,23 @@ class Handler(BaseHTTPRequestHandler):
 
         key = "/".join(segments)
         url, size, modified = res.download_url(drive, item_id, key)
+        res.bump("get")
         if not url:
+            res.bump("link_miss")
             self._send(200, openlist_err(500, "no downloadUrl"))
             log("get 文件 段数=%d 跨盘=%d 未取到直链" % (len(segments), crossed))
             return
 
+        res.bump("link_ok")
         host = urllib.parse.urlparse(url).netloc
+        # 最近一次直链落盘，供 playlog 的 TG 通知附上直链（仅本轮 runner 内，
+        # 不进 workflow 日志；TG 侧为私密 chat）
+        try:
+            with open(LAST_LINK_FILE, "w", encoding="utf-8") as f:
+                json.dump({"name": name, "url": url, "host": host,
+                           "size": size, "ts": time.time()}, f)
+        except Exception:
+            pass
         self._send(200, openlist_ok({
             "name": name, "size": size, "is_dir": False, "modified": modified,
             "raw_url": url, "provider": "OneDrive"}))

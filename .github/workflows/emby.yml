@@ -37,6 +37,8 @@ on:
 env:
   # 手动触发：playback_mode 开关（有默认值，恒非空）；定时/watch 触发：仓库变量 EMBY_PLAYBACK_MODE，缺省 302
   PLAYBACK_MODE_INPUT: ${{ github.event.inputs.playback_mode || vars.EMBY_PLAYBACK_MODE || '302' }}
+  # runner 默认 UTC，TG 通知与日志时间戳统一为北京时间，避免与本地观感差 8 小时
+  TZ: Asia/Shanghai
 
 jobs:
   build:
@@ -665,10 +667,28 @@ jobs:
           echo "$MODE" > /tmp/PLAYBACK_MODE
           echo "PLAYBACK_MODE=$MODE" >> "$GITHUB_ENV"
           echo "Playback mode: $MODE"
-          # 实时通知：模式决策后立刻推送 Telegram（不等运行结束）
+          # 实时通知：模式决策后立刻推送 Telegram（不等运行结束）。
+          # 汇总 302 链路的关键信息：直链源、快捷方式解析、探活结果——
+          # 一条消息即可判断本轮直链是否真的可用。
+          LINK_SRC=$(cat /tmp/link-host 2>/dev/null || echo "-")
+          case "$LINK_SRC" in
+            *5245) SRC_NAME="odlink:5245（Graph 跟随快捷方式）";;
+            *5244) SRC_NAME="OpenList:5244（回退源）";;
+            *)     SRC_NAME="${LINK_SRC:-未启用}";;
+          esac
+          OD_STATS=$(curl -s -m 5 http://127.0.0.1:5245/stats 2>/dev/null || true)
+          OD_READY=$(printf '%s' "$OD_STATS" | jq -r '.ready // empty' 2>/dev/null || true)
+          OD_SC=$(printf '%s' "$OD_STATS" | jq -r '.shortcuts // 0' 2>/dev/null || echo 0)
+          if [ "$OD_READY" = "true" ]; then
+            OD_LINE="快捷方式: ${OD_SC} 个已解析（Graph 就绪）"
+          else
+            OD_LINE="快捷方式: odlink 未就绪"
+          fi
+          START_MSG="$(printf '📺 Emby 启动\n模式: %s\n直链源: %s\n%s\n探活: %s\n时间: %s' \
+            "$MODE" "$SRC_NAME" "$OD_LINE" "${MAP_OK:-?}" "$(date '+%Y-%m-%d %H:%M:%S %Z')")"
           curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             -d chat_id=${{ secrets.TG_CHAT_ID }} \
-            -d text="📺 Emby 启动%0A模式: ${MODE}%0A时间: $(date '+%H:%M')" >/dev/null 2>&1 || true
+            --data-urlencode "text=${START_MSG}" >/dev/null 2>&1 || true
 
           if [ "$MODE" = "302" ]; then
             nohup cloudflared tunnel run --url http://127.0.0.1:8095 e > /opt/logs/cloudflared.log 2>&1 &
@@ -793,11 +813,12 @@ jobs:
           SC=$(emby_get /emby/Sessions /tmp/pl-sessions.json)
           SN=$(jq 'if type=="array" then length else ((.Items // []) | length) end' /tmp/pl-sessions.json 2>/dev/null || echo jq失败)
           echo "Emby Sessions 自检: http=$SC 会话数=$SN 认证方式=$AUTH_MODE"
-          # TG 通道自检：启动即应在 TG 收到这一条，用来区分"推送链路断了"还是"播放事件没识别到"
+          # TG 通道自检：结果只落 playlog.log（收尾会归档），不再单独推一条通知，
+          # 以免与"启动/播放/收尾"三类通知混在一起刷屏。
           TC=$(curl -s -m 10 -o /tmp/pl-tg.json -w '%{http_code}' \
                  -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
                  --data-urlencode "chat_id=$TG_CHAT_ID" \
-                 --data-urlencode "text=🎬 playlog 已就绪（自检）")
+                 --data-urlencode "text=.")
           echo "TG 通道自检: http=$TC resp=$(head -c 200 /tmp/pl-tg.json 2>/dev/null)"
 
           # 去重（滑动窗口）：同一 item 的持续播放只推一次。
@@ -834,16 +855,23 @@ jobs:
           }
 
           notify() { # $1=KIND $2=IID [$3=NAME]
-            local kind=$1 iid=$2 name=$3 code
+            local kind=$1 iid=$2 name=$3 code link text
             claim "$iid" || return 0
             if [ -z "$name" ]; then
               name=$(item_name "$iid")
             fi
+            # 日志侧只记片名（公开仓库，绝不落直链）；TG 私密消息里才附带直链
             echo "🎬 播放 [$kind] $name (item $iid)"
+            text="🎬 播放 [$kind] $name"
+            # 302 直链时附上 odlink 最近一次取到的预授权直链（3 分钟内视为本次播放所用）
+            if [ "$kind" = "302直链" ] && [ -f /opt/odlink-last.json ]; then
+              link=$(jq -r 'select((now - .ts) < 180) | .url // empty' /opt/odlink-last.json 2>/dev/null || true)
+              [ -n "$link" ] && text="${text}$(printf '\n直链: %s' "$link")"
+            fi
             code=$(curl -s -m 10 -o /tmp/pl-tg.json -w '%{http_code}' \
                      -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
                      --data-urlencode "chat_id=$TG_CHAT_ID" \
-                     --data-urlencode "text=🎬 播放 [$kind] $name")
+                     --data-urlencode "text=${text}")
             [ "$code" = "200" ] || echo "[WARNING] TG 推送失败 http=$code resp=$(head -c 200 /tmp/pl-tg.json 2>/dev/null)"
           }
 
@@ -1116,10 +1144,31 @@ jobs:
             cancelled) STATUS_EMOJI="⏹";;
             *) STATUS_EMOJI="❓";;
           esac
-          MESSAGE="📺 Emby%0A状态: ${STATUS_EMOJI} ${STATUS}%0A模式: ${MODE}%0A时间: $(date '+%Y-%m-%d %H:%M:%S')"
+          # 运行时长：run 启动时刻（github.run_started_at，缺失则用本步骤时间兜底）
+          START_TS=$(date -d "${{ github.run_started_at }}" +%s 2>/dev/null || echo 0)
+          if [ "${START_TS:-0}" -gt 0 ]; then
+            DUR_SEC=$(( $(date +%s) - START_TS ))
+            DUR="$(printf '%dh %dm' $((DUR_SEC / 3600)) $(((DUR_SEC % 3600) / 60)))"
+          else
+            DUR="未知"
+          fi
+          # 302 链路统计：直链命中/未取到/解析失败/回落 OpenList 次数（odlink /stats）
+          OD_SUMMARY="odlink 未运行"
+          if curl -fsS -m 5 http://127.0.0.1:5245/ping >/dev/null 2>&1; then
+            S=$(curl -s -m 5 http://127.0.0.1:5245/stats 2>/dev/null || true)
+            G_GET=$(printf '%s' "$S" | jq -r '.fs.get // 0' 2>/dev/null || echo 0)
+            G_OK=$(printf '%s' "$S" | jq -r '.fs.link_ok // 0' 2>/dev/null || echo 0)
+            G_MISS=$(printf '%s' "$S" | jq -r '.fs.link_miss // 0' 2>/dev/null || echo 0)
+            G_ERR=$(printf '%s' "$S" | jq -r '.fs.resolve_err // 0' 2>/dev/null || echo 0)
+            G_FB=$(printf '%s' "$S" | jq -r '.fs.fallback // 0' 2>/dev/null || echo 0)
+            G_XD=$(printf '%s' "$S" | jq -r '.fs.cross_drive // 0' 2>/dev/null || echo 0)
+            OD_SUMMARY="直链命中 ${G_OK} / 未取到 ${G_MISS} / 解析失败 ${G_ERR} / 回落 ${G_FB} / 跨盘 ${G_XD} (get共 ${G_GET})"
+          fi
+          MESSAGE="$(printf '📺 Emby\n状态: %s %s\n模式: %s\n运行: %s\n302 链路: %s\n时间: %s' \
+            "$STATUS_EMOJI" "$STATUS" "$MODE" "$DUR" "$OD_SUMMARY" "$(date '+%Y-%m-%d %H:%M:%S %Z')")"
           curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             -d chat_id=${{ secrets.TG_CHAT_ID }} \
-            -d text="${MESSAGE}"
+            --data-urlencode "text=${MESSAGE}"
           # 播放事件日志归档：便于排查"播了但没通知"
           echo "--- playlog.log (tail 80) ---"
           tail -n 80 /opt/logs/playlog.log 2>/dev/null || echo "(无 playlog.log)"
