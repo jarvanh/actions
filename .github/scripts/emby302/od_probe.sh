@@ -34,9 +34,10 @@ CID=$(get_kv client_id)
 CSEC=$(get_kv client_secret)
 RTOK=$(get_kv token | jq -r '.refresh_token // empty' 2>/dev/null)
 
+# 说明：client_id/client_secret 常为空（用 rclone 内置应用），此时改走 rclone 自身刷新取 token
 out "凭据提取: client_id 长度=${#CID} client_secret 长度=${#CSEC} refresh_token 长度=${#RTOK}"
-if [ -z "$CID" ] || [ -z "$RTOK" ]; then
-  out "❌ 未能从 rclone.conf 取到 client_id/refresh_token，探测中止（不阻塞后续步骤）"
+if [ -z "$RTOK" ]; then
+  out "❌ rclone.conf 里没有 refresh_token，探测中止（不阻塞后续步骤）"
   exit 0
 fi
 
@@ -48,11 +49,28 @@ TOK_JSON=$(curl -s -m 25 -X POST "https://login.microsoftonline.com/common/oauth
   --data-urlencode "refresh_token=$RTOK" \
   --data-urlencode "scope=Files.Read offline_access")
 AT=$(printf '%s' "$TOK_JSON" | jq -r '.access_token // empty' 2>/dev/null)
+
 if [ -z "$AT" ]; then
-  out "❌ 换取 access_token 失败: error=$(printf '%s' "$TOK_JSON" | jq -r '.error // "?"' 2>/dev/null) desc=$(printf '%s' "$TOK_JSON" | jq -r '.error_description // ""' 2>/dev/null | head -c 150)"
+  # rclone.conf 里 client_id/client_secret 常留空（用 rclone 内置应用），这时自己换不到 token。
+  # 改为：让 rclone 自己完成刷新（它会回写配置），再从配置里取回 access_token。
+  out "直接换取 token 失败，改用 rclone 自身刷新后取回"
+  rclone about onedrive: --config "$RCLONE_CONF" >/dev/null 2>&1
+  SECTION=$(awk '/^\[onedrive\]/{f=1;next} /^\[/{f=0} f' "$RCLONE_CONF" 2>/dev/null || true)
+  AT=$(get_kv token | jq -r '.access_token // empty' 2>/dev/null)
+fi
+
+if [ -z "$AT" ]; then
+  # 兜底：从 rclone 实际发出的请求头里抓取它使用的 token（只提取不打印，临时文件随即删除）
+  rclone lsjson onedrive:/ --max-depth 1 --config "$RCLONE_CONF" --dump headers >/dev/null 2>/tmp/od_dump.log
+  AT=$(grep -m1 -oE 'Authorization: Bearer [A-Za-z0-9._~+/-]+' /tmp/od_dump.log 2>/dev/null | sed 's/.*Bearer //' | head -1)
+  shred -u /tmp/od_dump.log 2>/dev/null || rm -f /tmp/od_dump.log
+fi
+
+if [ -z "$AT" ]; then
+  out "❌ 三种方式都未能获取 access_token，探测中止（不阻塞后续步骤）"
   exit 0
 fi
-out "✅ 已获取 access_token（内容不打印）"
+out "✅ 已获取 access_token（长度=${#AT}，内容不打印）"
 
 # ---------- Graph 请求 helper ----------
 # 用法：body=$(gget "$url")，HTTP 码写入 GCODE
