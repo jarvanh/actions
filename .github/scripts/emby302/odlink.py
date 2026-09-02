@@ -23,6 +23,19 @@ POST /api/fs/get   {path,password,refresh} → data.raw_url  （直链的关键�
 POST /api/fs/list  {path,password,refresh} → data.content  （目录树/探活）
 POST /api/fs/other 转码预览，未启用，返回非 200 即可
 请求头 Authorization: <token>；ge2o 要求 HTTP 200 且响应体 code == 200
+
+凭据体系（三套，互不相干）
+------------------------
+1. Graph access_token（微软 OneDrive 侧）：本服务用。由 rclone.conf [onedrive] 段的
+   refresh_token 自动换取（rclone 内置应用通常无 client_id/secret，故在临近过期或
+   遭遇 401 时调用 `rclone about` 触发刷新再从配置取回）。仅用于直连微软 Graph
+   解析路径/取直链，与 OpenList 的任何账号密码无关。
+2. OpenList 会话 token（OpenList 侧）：workflow 用 OPENLIST_ADMIN_PASSWORD secret
+   登录 /api/auth/login 自动获取并写入 /tmp/openlist-token，供探活与（直链源退回
+   OpenList 时的）转发链路使用。ge2o 的请求会原样透传 Authorization 头，本服务
+   只在本进程的 AUTH_TOKEN 上校验 odlink 自身的 token（/tmp/odlink-token）。
+3. admin 密码（OpenList 管理面）：仅 oe 后台人工登录用（admin + secret）。
+   只有机器用 secret 登录失败时才自愈重置，并经 TG 私信告知；正常运行绝不改密。
 """
 
 import json
@@ -610,6 +623,9 @@ def main():
 
     log("odlink 启动 端口=%d 上游=%s root前缀=%s 日志=%s"
         % (PORT, UPSTREAM, ROOT_PREFIX, LOG_PATH))
+    log("凭据说明：本服务仅使用 Graph access_token（rclone.conf 自动刷新，微软侧）；"
+        "OpenList 会话 token 由 workflow 机器自动登录获取；"
+        "oe 后台人工登录（admin+secret）与本进程互不影响")
     if not AUTH_TOKEN:
         log("警告：未配置 ODLINK_TOKEN，将不校验 Authorization")
 

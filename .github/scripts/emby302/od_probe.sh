@@ -24,6 +24,15 @@ mkdir -p "$(dirname "$PROBE_LOG")" 2>/dev/null || true
 out() { printf '%s\n' "$*" | tee -a "$PROBE_LOG"; }
 
 out "=== OneDrive 快捷方式只读探测 $(date '+%F %T') ==="
+out "凭据体系说明（三套，互不相干）："
+out "  1. Graph access_token（微软 OneDrive 侧）——本探测所用。由 rclone.conf [onedrive] 段的"
+out "     refresh_token 自动换取（rclone 内置应用通常无 client_id/secret，故先直接换、"
+out "     失败则让 rclone 自行刷新后从配置取回），只用于直连微软 Graph API 做只读验证，"
+out "     与 OpenList 管理面（admin/密码/oe 后台登录）完全无关。"
+out "  2. OpenList 会话 token——workflow 用 OPENLIST_ADMIN_PASSWORD secret 自动登录获取，"
+out "     写入 /tmp/openlist-token，供探活与直链转发使用，机器全自动、无需人工登录。"
+out "  3. admin 密码——仅 oe 后台人工登录用（admin + OPENLIST_ADMIN_PASSWORD）。"
+out "     只有机器用 secret 登录失败时才会自愈重置并经 TG 私信告知。"
 
 # ---------- 1. 取凭据 ----------
 SECTION=$(awk '/^\[onedrive\]/{f=1;next} /^\[/{f=0} f' "$RCLONE_CONF" 2>/dev/null || true)
@@ -70,7 +79,8 @@ if [ -z "$AT" ]; then
   out "❌ 三种方式都未能获取 access_token，探测中止（不阻塞后续步骤）"
   exit 0
 fi
-out "✅ 已获取 access_token（长度=${#AT}，内容不打印）"
+out "✅ 已获取 Graph access_token（长度=${#AT}，内容不打印；用途=下面直连微软 Graph 的只读验证，"
+out "   与 OpenList 的任何账号密码均无关）"
 
 # ---------- Graph 请求 helper ----------
 # 注意：必须直接调用（gget "$url"），不能放在 $( ) 里——命令替换是子 shell，
