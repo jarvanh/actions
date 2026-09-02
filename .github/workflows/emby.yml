@@ -252,6 +252,12 @@ jobs:
             fi
           }
           main || echo "::warning::install openlist failed, 302 链路将回退 direct"
+      - name: probe onedrive shortcuts
+        continue-on-error: true
+        run: |
+          # 只读探测：确认快捷方式(remoteItem)能否被 Graph 跟随、能否取到预授权直链
+          # 不改变任何链路行为，探测失败也不影响本次运行
+          bash .github/scripts/emby302/od_probe.sh || echo "::warning::OneDrive 快捷方式探测失败（不影响播放）"
       - name: install emby
         run: |
           set -euo pipefail
