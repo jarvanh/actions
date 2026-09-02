@@ -39,6 +39,9 @@ env:
   PLAYBACK_MODE_INPUT: ${{ github.event.inputs.playback_mode || vars.EMBY_PLAYBACK_MODE || '302' }}
   # runner 默认 UTC，TG 通知与日志时间戳统一为北京时间，避免与本地观感差 8 小时
   TZ: Asia/Shanghai
+  # 302 链路脚本目录。checkout 之后可用；各步骤 source 其下的 lib.sh 复用公共函数，
+  # 避免同一段逻辑在多个步骤里各写一份（历史上校验/预检代码重复过两套，容易改走样）
+  EMBY302_DIR: ${{ github.workspace }}/.github/scripts/emby302
 
 jobs:
   build:
@@ -373,20 +376,10 @@ jobs:
       - name: install emby
         run: |
           set -euo pipefail
-          cleanup_archive_workdir() {
-            sudo rm -f /tmp/emby-backup.tar.zst "$HOME/emby-backup.tar.zst" 2>/dev/null || true
-          }
-          free_kb() { df -Pk "${1:-/tmp}" | awk 'NR==2 {print $4}'; }
-          require_free_kb() {
-            local path="$1" min_kb="$2" label="$3"
-            local avail
-            avail=$(free_kb "$path")
-            if [ "${avail:-0}" -lt "$min_kb" ]; then
-              echo "❌ ${label}: insufficient free space at ${path}. available=${avail}KB required=${min_kb}KB" >&2
-              exit 1
-            fi
-            echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
-          }
+          # 公共函数（磁盘预检 / 归档清理 / Emby 数据校验 / 日志脱敏）统一在 lib.sh
+          source "$EMBY302_DIR/lib.sh"
+          # 30GB 级 tarball 解压前先确认空间：解压到一半失败会留下半恢复的残库，
+          # 而残库会被 Emby 当成空库重建，比本轮直接失败更糟
           require_free_kb /tmp $((2 * 1024 * 1024)) "emby restore preflight"
           # 认证调用 GitHub API：runner 共享出口 IP 的匿名配额（60 次/h）极易耗尽，
           # 限流响应里没有 browser_download_url，替换结果为空 → curl 报 "no URL specified" 直接失败
@@ -400,75 +393,6 @@ jobs:
           # dpkg -i 会自动启动 emby-server，需要先把它停掉，否则 /var/lib/emby 会被锁定无法删除
           sudo systemctl stop emby-server || true
 
-          validate_emby_data() {
-            local root="$1"
-            sudo test -f "$root/data/users.db"
-            sudo test -f "$root/data/library.db"
-            sudo python3 - "$root" <<'PY_GUARD'
-          import json
-          import sqlite3
-          import sys
-          from pathlib import Path
-          
-          root = Path(sys.argv[1])
-          users_db = root / "data/users.db"
-          library_db = root / "data/library.db"
-          
-          users = sqlite3.connect(f"file:{users_db}?mode=ro", uri=True)
-          users.row_factory = sqlite3.Row
-          names = []
-          for row in users.execute("select data from LocalUsersv2"):
-              raw = row["data"]
-              if isinstance(raw, bytes):
-                  raw = raw.decode("utf-8", "ignore")
-              names.append(json.loads(raw).get("Name"))
-          users.close()
-          
-          library = sqlite3.connect(f"file:{library_db}?mode=ro", uri=True)
-          media_items = library.execute("select count(*) from MediaItems").fetchone()[0]
-          root_rows = {
-              row[0]: (row[1], row[2])
-              for row in library.execute("select Id, Name, type from MediaItems where Id in (1, 2)")
-          }
-          library_folders = [
-              row[0]
-              for row in library.execute(
-                  "select Name from MediaItems where ParentId = 1 and type = 4 order by Name"
-              )
-          ]
-          media_paths = [
-              row[0]
-              for row in library.execute(
-                  """
-                  select Path
-                  from MediaItems
-                  where ParentId = 2
-                    and type = 3
-                    and Path is not null
-                    and Path like '/onedrive/%'
-                  order by Path
-                  """
-              )
-          ]
-          library.close()
-          
-          # 隐私：只输出计数，不输出用户名/媒体路径明细
-          print(
-              "Emby guard: "
-              f"users={len(names)} media_items={media_items} "
-              f"folders={len(library_folders)} media_paths={len(media_paths)}"
-          )
-          if "Derrick" not in names:
-              raise SystemExit("❌ Emby guard failed: Derrick user is missing")
-          if root_rows.get(1) != ("Media Folders", 2) or root_rows.get(2) != ("root", 1):
-              raise SystemExit(f"❌ Emby guard failed: invalid root structure: {root_rows}")
-          if not library_folders:
-              raise SystemExit("❌ Emby guard failed: no media library folders under Media Folders")
-          if not media_paths:
-              raise SystemExit("❌ Emby guard failed: no real /onedrive media paths under root")
-          PY_GUARD
-          }
-
           # 尝试从备份恢复。恢复必须通过 Derrick + 媒体库结构 + 真实媒体路径校验，否则直接失败，禁止启动空库。
           sudo rm -rf /var/lib/emby
           sudo mkdir -p /var/lib/emby
@@ -478,7 +402,6 @@ jobs:
           sudo chown emby:emby /mnt/emby-cache
           sudo ln -sfn /mnt/emby-cache /var/lib/emby/cache
           BACKUP_NAME="emby-backup.tar.zst"
-          IS_LOCAL_MODE=true
 
           echo "🔍 正在检查 OneDrive 上的压缩备份（含图片缓存，流式解压不落本地盘）..."
           cleanup_archive_workdir
@@ -601,13 +524,15 @@ jobs:
           main || echo "::warning::install ge2o failed, 302 链路将回退 direct"
       - name: run cloudflared
         run: |
+          source "$EMBY302_DIR/lib.sh"
           # 取值统一去空白转小写，仓库变量写成 "Direct" / "DIRECT" 也能识别
           MODE=$(printf '%s' "${PLAYBACK_MODE_INPUT:-302}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
           case "$MODE" in
             302|direct) ;;
             *) echo "::warning::未知的播放模式 '$MODE'（EMBY_PLAYBACK_MODE），按 302 处理"; MODE="302";;
           esac
-          # 公开日志脱敏：URL、密钥、媒体路径 → 占位符（探针诊断用）
+          # 探针诊断专用脱敏：比 lib.sh 的归档脱敏更严格，媒体路径也一并脱敏——
+          # 探针输出里会带真实的 /onedrive/... 库路径，不能进公开日志
           redact_pub() {
             sed -E 's/api_key=[^& "]*/api_key=[redacted]/g; s#https?://[^ ",}]*#<url>#g; s#/onedrive/[^,"}]*#<path>#g'
           }
@@ -619,9 +544,10 @@ jobs:
             echo "直链映射探针: ${MEDIA_DIR:+已取到媒体库目录}"
             OK=0
             for i in 1 2 3; do
-              # 直链源=odlink(:5245) 优先、否则 OpenList(:5244)：探活必须打 ge2o 实际在用的那个
-              TOK=$(cat /tmp/link-token 2>/dev/null || true)
-              LINK_HOST=$(cat /tmp/link-host 2>/dev/null || echo "http://127.0.0.1:5244")
+              # 探活必须打 ge2o 实际在用的那个源（odlink:5245 优先，否则 OpenList:5244），
+              # 否则会出现"探活通过、但 ge2o 仍在绕 OpenList"的假健康
+              TOK=$(link_token)
+              LINK_HOST=$(link_host)
               MAP_OK=1
               if [ -n "$TOK" ] && [ -n "$MEDIA_DIR" ]; then
                 RESP=$(curl -s -m 10 -X POST ${LINK_HOST}/api/fs/get \
@@ -997,20 +923,8 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
-          cleanup_archive_workdir() {
-            sudo rm -f "$HOME/emby-backup.tar.zst" /tmp/emby-backup.tar.zst 2>/dev/null || true
-          }
-          free_kb() { df -Pk "${1:-$HOME}" | awk 'NR==2 {print $4}'; }
-          require_free_kb() {
-            local path="$1" min_kb="$2" label="$3"
-            local avail
-            avail=$(free_kb "$path")
-            if [ "${avail:-0}" -lt "$min_kb" ]; then
-              echo "❌ ${label}: insufficient free space at ${path}. available=${avail}KB required=${min_kb}KB" >&2
-              exit 1
-            fi
-            echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
-          }
+          # 与 install emby 共用同一份公共函数，保证恢复侧与备份侧的校验口径一致
+          source "$EMBY302_DIR/lib.sh"
 
           # 同步 OpenList 数据目录：仅当实例真正配置了存储（fs/list 实测通过）才回传，防止空数据覆盖远端
           if [ -x /usr/local/bin/openlist ] && curl -s http://127.0.0.1:5244/ping >/dev/null 2>&1; then
@@ -1041,75 +955,6 @@ jobs:
           echo "优雅停机: http=$SHUTDOWN_CODE（401 说明该密钥已失效，Emby 只能被 runner 强杀）"
           sleep 15
 
-          validate_emby_data() {
-            local root="$1"
-            sudo test -f "$root/data/users.db"
-            sudo test -f "$root/data/library.db"
-            sudo python3 - "$root" <<'PY_GUARD'
-          import json
-          import sqlite3
-          import sys
-          from pathlib import Path
-          
-          root = Path(sys.argv[1])
-          users_db = root / "data/users.db"
-          library_db = root / "data/library.db"
-          
-          users = sqlite3.connect(f"file:{users_db}?mode=ro", uri=True)
-          users.row_factory = sqlite3.Row
-          names = []
-          for row in users.execute("select data from LocalUsersv2"):
-              raw = row["data"]
-              if isinstance(raw, bytes):
-                  raw = raw.decode("utf-8", "ignore")
-              names.append(json.loads(raw).get("Name"))
-          users.close()
-          
-          library = sqlite3.connect(f"file:{library_db}?mode=ro", uri=True)
-          media_items = library.execute("select count(*) from MediaItems").fetchone()[0]
-          root_rows = {
-              row[0]: (row[1], row[2])
-              for row in library.execute("select Id, Name, type from MediaItems where Id in (1, 2)")
-          }
-          library_folders = [
-              row[0]
-              for row in library.execute(
-                  "select Name from MediaItems where ParentId = 1 and type = 4 order by Name"
-              )
-          ]
-          media_paths = [
-              row[0]
-              for row in library.execute(
-                  """
-                  select Path
-                  from MediaItems
-                  where ParentId = 2
-                    and type = 3
-                    and Path is not null
-                    and Path like '/onedrive/%'
-                  order by Path
-                  """
-              )
-          ]
-          library.close()
-          
-          # 隐私：只输出计数，不输出用户名/媒体路径明细
-          print(
-              "Emby guard: "
-              f"users={len(names)} media_items={media_items} "
-              f"folders={len(library_folders)} media_paths={len(media_paths)}"
-          )
-          if "Derrick" not in names:
-              raise SystemExit("❌ Emby guard failed: Derrick user is missing")
-          if root_rows.get(1) != ("Media Folders", 2) or root_rows.get(2) != ("root", 1):
-              raise SystemExit(f"❌ Emby guard failed: invalid root structure: {root_rows}")
-          if not library_folders:
-              raise SystemExit("❌ Emby guard failed: no media library folders under Media Folders")
-          if not media_paths:
-              raise SystemExit("❌ Emby guard failed: no real /onedrive media paths under root")
-          PY_GUARD
-          }
-
           # 只有在本地模式下才打包回传（避免覆盖云端的软链接源文件）
           if [ ! -L /var/lib/emby ]; then
               validate_emby_data /var/lib/emby
@@ -1129,7 +974,6 @@ jobs:
                 | rclone rcat onedrive:backup/emby/emby-backup.tar.zst -v
               echo "📤 备份已流式上传 OneDrive:emby-backup/"
               cleanup_archive_workdir
-              cleanup_archive_workdir
           else
               echo "😴 当前为软链接模式，跳过本地打包备份。"
           fi
@@ -1137,6 +981,7 @@ jobs:
       - name: send telegram notification
         if: always()
         run: |
+          source "$EMBY302_DIR/lib.sh"
           STATUS="${{ job.status }}"
           MODE=$(cat /tmp/PLAYBACK_MODE 2>/dev/null || echo unknown)
           case "$STATUS" in
@@ -1174,14 +1019,11 @@ jobs:
           # 播放事件日志归档：便于排查"播了但没通知"
           echo "--- playlog.log (tail 80) ---"
           tail -n 80 /opt/logs/playlog.log 2>/dev/null || echo "(无 playlog.log)"
-          # ge2o 自身日志归档（脱敏）：定位播放走中转而非 302 直链的原因
+          # ge2o 自身日志归档：定位播放走中转而非 302 直链的原因。
+          # redact_log 会整行丢掉 ge2o 的 cacheKey 调试行（内含完整请求头与 cf_clearance Cookie）
           echo "--- ge2o.log (tail 60, 脱敏) ---"
-          # 整行丢弃 ge2o 的 cacheKey 调试日志：内含完整请求头与 cf_clearance Cookie
-          tail -n 60 /opt/logs/ge2o.log 2>/dev/null \
-            | grep -v "headers to encode cacheKey" \
-            | sed -E 's/api_key=[^& ]*/api_key=[redacted]/g; s/X-Emby-Token=[^& ]*/X-Emby-Token=[redacted]/g; s#https?://[^ "]*#<url>#g' || echo "(无 ge2o.log)"
-          # odlink 日志归档（脱敏）：直链服务的解析结果——段数/是否跨盘/Graph 码/是否取到直链。
-          # 日志本身已脱敏（不落 token、不落完整链接），这里再拦一道 URL 兜底。
+          tail -n 60 /opt/logs/ge2o.log 2>/dev/null | redact_log || echo "(无 ge2o.log)"
+          # odlink 日志归档：直链服务的解析结果——段数/是否跨盘/Graph 码/是否取到直链。
+          # odlink 自身已脱敏（不落 token、不落完整链接），这里只再拦一道 URL 兜底。
           echo "--- odlink.log (tail 60, 脱敏) ---"
-          tail -n 60 /opt/logs/odlink.log 2>/dev/null \
-            | sed -E 's#https?://[^ "]*#<url>#g' || echo "(无 odlink.log)"
+          tail -n 60 /opt/logs/odlink.log 2>/dev/null | redact_urls || echo "(无 odlink.log)"
