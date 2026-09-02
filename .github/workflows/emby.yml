@@ -227,16 +227,58 @@ jobs:
             printf '%s' "$TOKEN" > /tmp/openlist-token
             chmod 600 /tmp/openlist-token
 
+            # 强制轮换（一次性开关）：仓库变量 OPENLIST_FORCE_PW_ROTATE 非空时，
+            # 把管理员密码随机重设并经 TG 私信告知，用完把变量删除即可。
+            # 轮换后旧 token 可能全部失效，必须重新登录换新 token 写回，
+            # 否则探活 / odlink 转发（直链源退回 OpenList 时）会整体中断。
+            if [ -n "${{ vars.OPENLIST_FORCE_PW_ROTATE }}" ]; then
+              FORCE_PW=$(openssl rand -hex 12)
+              openlist admin set --data /opt/openlist "$FORCE_PW" >/dev/null 2>&1 \
+                || openlist admin set "$FORCE_PW" --data /opt/openlist >/dev/null 2>&1 \
+                || true
+              FTOKEN=$(curl -s -m 10 -X POST http://127.0.0.1:5244/api/auth/login \
+                -H 'Content-Type: application/json' \
+                -d "{\"username\":\"admin\",\"password\":\"$FORCE_PW\"}" | jq -r '.data.token // .data // empty' || true)
+              if [ -z "$FTOKEN" ]; then
+                # 个别版本改库后需重启服务才生效
+                pkill -f "openlist server" 2>/dev/null || true
+                sleep 2
+                nohup openlist server --data /opt/openlist > /opt/logs/openlist.log 2>&1 &
+                for i in 1 2 3 4 5; do
+                  curl -fsS -m 3 http://127.0.0.1:5244/ping >/dev/null 2>&1 && break
+                  sleep 2
+                done
+                FTOKEN=$(curl -s -m 10 -X POST http://127.0.0.1:5244/api/auth/login \
+                  -H 'Content-Type: application/json' \
+                  -d "{\"username\":\"admin\",\"password\":\"$FORCE_PW\"}" | jq -r '.data.token // .data // empty' || true)
+              fi
+              if [ -n "$FTOKEN" ]; then
+                TOKEN=$FTOKEN
+                printf '%s' "$FTOKEN" > /tmp/openlist-token
+                chmod 600 /tmp/openlist-token
+                if [ "$(cat /tmp/link-host 2>/dev/null)" = "http://127.0.0.1:5244" ]; then
+                  printf '%s' "$FTOKEN" > /tmp/link-token
+                  chmod 600 /tmp/link-token
+                fi
+                printf '%s' "force:$FORCE_PW" > /tmp/openlist-pw-note
+                echo "OpenList 密码已强制轮换（TG 私信告知，不落公开日志）"
+              else
+                echo "::warning::OpenList 密码强制轮换失败，保留原密码"
+              fi
+            fi
+
             # OpenList 密码变更立即经 TG 私信告知（不能等 6 小时后的收尾步骤——
             # 用户此刻就在 oe 后台登录）。密码只出现在 TG 消息里，绝不写公开日志。
             # random = OPENLIST_ADMIN_PASSWORD 未配置、本轮随机生成（每轮 run 都会变）；
-            # reset  = 库内密码与 secret 不一致、已重置为 secret 值。
+            # reset  = 库内密码与 secret 不一致、已重置为 secret 值；
+            # force  = 开关变量触发的一次性强制轮换。
             if [ -s /tmp/openlist-pw-note ]; then
               PW_KIND=$(cut -d: -f1 /tmp/openlist-pw-note)
               PW_VAL=$(cut -d: -f2- /tmp/openlist-pw-note)
               case "$PW_KIND" in
                 random) PW_DESC="OPENLIST_ADMIN_PASSWORD 未配置，本轮已随机生成（每轮 run 都会变，配置该 secret 可固定）";;
                 reset)  PW_DESC="库内密码与 secret 不一致，已重置为 secret 值";;
+                force)  PW_DESC="已强制轮换为新随机密码（旧密码已失效）";;
                 *)      PW_DESC="已变更";;
               esac
               PW_MSG="🔐 OpenList 管理员密码${PW_DESC}%0A用户名: admin%0A密码: ${PW_VAL}%0A入口: https://oe.${{ secrets.VD }}.eu.org%0A（本条不会出现在公开日志）"
