@@ -246,49 +246,9 @@ jobs:
             echo "  → oe 后台同凭据可登录：admin + 该 secret；若后续无'密码重置/轮换'TG 通知，本轮密码未变"
             echo "  → OpenList 会话 token 已由机器自动获取（/tmp/openlist-token），与 oe 人工登录互不影响"
 
-            # 强制轮换（一次性开关）：仓库变量 OPENLIST_FORCE_PW_ROTATE 非空时，
-            # 把管理员密码随机重设并经 TG 私信告知，用完把变量删除即可。
-            # 轮换后旧 token 可能全部失效，必须重新登录换新 token 写回，
-            # 否则探活 / odlink 转发（直链源退回 OpenList 时）会整体中断。
-            if [ -n "${{ vars.OPENLIST_FORCE_PW_ROTATE }}" ]; then
-              FORCE_PW=$(openssl rand -hex 12)
-              openlist admin set --data /opt/openlist "$FORCE_PW" >/dev/null 2>&1 \
-                || openlist admin set "$FORCE_PW" --data /opt/openlist >/dev/null 2>&1 \
-                || true
-              FTOKEN=$(curl -s -m 10 -X POST http://127.0.0.1:5244/api/auth/login \
-                -H 'Content-Type: application/json' \
-                -d "$(jq -cn --arg pw "$FORCE_PW" '{"username":"admin","password":$pw}')" | jq -r '.data.token // .data // empty' || true)
-              if [ -z "$FTOKEN" ]; then
-                # 个别版本改库后需重启服务才生效
-                pkill -f "openlist server" 2>/dev/null || true
-                sleep 2
-                nohup openlist server --data /opt/openlist > /opt/logs/openlist.log 2>&1 &
-                for i in 1 2 3 4 5; do
-                  curl -fsS -m 3 http://127.0.0.1:5244/ping >/dev/null 2>&1 && break
-                  sleep 2
-                done
-                FTOKEN=$(curl -s -m 10 -X POST http://127.0.0.1:5244/api/auth/login \
-                  -H 'Content-Type: application/json' \
-                  -d "$(jq -cn --arg pw "$FORCE_PW" '{"username":"admin","password":$pw}')" | jq -r '.data.token // .data // empty' || true)
-              fi
-              if [ -n "$FTOKEN" ]; then
-                TOKEN=$FTOKEN
-                printf '%s' "$FTOKEN" > /tmp/openlist-token
-                chmod 600 /tmp/openlist-token
-                if [ "$(cat /tmp/link-host 2>/dev/null)" = "http://127.0.0.1:5244" ]; then
-                  printf '%s' "$FTOKEN" > /tmp/link-token
-                  chmod 600 /tmp/link-token
-                fi
-                printf '%s' "force:$FORCE_PW" > /tmp/openlist-pw-note
-                echo "OpenList 密码已强制轮换（TG 私信告知，不落公开日志）"
-              else
-                echo "::warning::OpenList 密码强制轮换失败，保留原密码"
-              fi
-            fi
-
-            # OpenList 凭据通知（每轮必发，密码明文只进 TG 私信，绝不写公开日志）：
-            #   登录成功（含纠正成功）→ 告知当前生效的用户名+明文密码，用户随时查 TG 即知；
-            #   发生过纠正/随机/轮换 → 额外标注该密码仅本轮有效，长期密码=secret。
+            # OpenList 凭据通知：仅在【真正执行过改密动作】时发送（reset / random 兜底）。
+            # 直接用 OPENLIST_ADMIN_PASSWORD 登录成功 = 密码本就对齐，按约定静默不打扰。
+            # 密码明文只进 TG 私信，绝不写公开日志。
             # 注意：--data-urlencode 会把文本按字面编码，消息内必须用真实换行符（printf \n），
             # 不能拼 %0A（会被二次编码成字面 "%0A" 发出去）。
             send_pw_tg() {
@@ -305,9 +265,8 @@ jobs:
               PW_KIND=$(cut -d: -f1 /tmp/openlist-pw-note)
               PW_VAL=$(cut -d: -f2- /tmp/openlist-pw-note)
               case "$PW_KIND" in
-                random) PW_DESC="OPENLIST_ADMIN_PASSWORD 未配置，本轮已随机生成";;
+                random) PW_DESC="OPENLIST_ADMIN_PASSWORD 未配置（异常兜底），本轮已随机生成";;
                 reset)  PW_DESC="库内密码与 secret 不一致，已纠正回 secret 值";;
-                force)  PW_DESC="已强制轮换为新随机密码";;
                 *)      PW_DESC="已变更";;
               esac
               # secret 是唯一长期真相源：本条密码仅本轮有效（oe 后台人工改密在 token
@@ -316,10 +275,9 @@ jobs:
                 "长期有效密码 = OPENLIST_ADMIN_PASSWORD（下轮自动恢复为它）"
               shred -u /tmp/openlist-pw-note 2>/dev/null || rm -f /tmp/openlist-pw-note
             else
-              # 未发生任何变更：库内密码=secret。发明文让用户随取随用。
-              # 发剔除空白后的 $OPENLIST_PW——机器登录用的就是它，才是真正有效的形态。
-              send_pw_tg "✅ 本轮机器已用 secret 登录成功，以下为长期有效凭据" "$OPENLIST_PW" \
-                "此密码长期有效（=OPENLIST_ADMIN_PASSWORD，每轮校验对齐）"
+              # 直接用 OPENLIST_ADMIN_PASSWORD 登录成功 = 库内密码本就对齐，
+              # 未发生任何改密动作 → 按约定不打扰，不发送通知。
+              echo "已用 OPENLIST_ADMIN_PASSWORD 直接登录成功，密码未变更，本轮不发送凭据通知"
             fi
 
             # 全新初始化：用 rclone 凭据注册 OneDrive 存储（非致命，失败则回退）
