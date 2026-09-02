@@ -261,6 +261,50 @@ jobs:
           # 只读探测：确认快捷方式(remoteItem)能否被 Graph 跟随、能否取到预授权直链
           # 不改变任何链路行为，探测失败也不影响本次运行
           bash "$GITHUB_WORKSPACE/.github/scripts/emby302/od_probe.sh" || echo "::warning::OneDrive 快捷方式探测失败（不影响播放）"
+      - name: start odlink
+        if: env.PLAYBACK_MODE_INPUT != 'direct'
+        run: |
+          main() {
+            # odlink：OpenList 协议兼容的 OneDrive 直链服务。
+            # 网盘根目录下 0-5/backup 全是快捷方式(remoteItem)，OpenList 官方驱动不跟随，
+            # /onedrive/3/... 必然 object not found → 302 直链从不生效、播放静默回源中转。
+            # odlink 对外伪装 OpenList 的 /api/fs/*，对内用 Graph 复刻 rclone 的快捷方式
+            # 跟随（逐段下钻，遇 remoteItem 切到 /drives/{driveId}/items/{itemId}），
+            # 把 @microsoft.graph.downloadUrl 作为 raw_url 交回 ge2o。
+            # 非快捷方式路径与解析失败一律原样转发本机 OpenList，保证零回归。
+            #
+            # 直链源契约写入 /tmp/link-host + /tmp/link-token，供 ge2o 与各处探活统一读取：
+            # odlink 就绪走 :5245，否则退回 OpenList :5244（行为与今天完全一致）。
+            OD_TOKEN=$(openssl rand -hex 16)
+            printf '%s' "$OD_TOKEN" > /tmp/odlink-token
+            chmod 600 /tmp/odlink-token
+            mkdir -p /opt/logs
+            ODLINK_TOKEN="$OD_TOKEN" \
+            ODLINK_PORT=5245 \
+            ODLINK_LOG=/opt/logs/odlink.log \
+            ODLINK_UPSTREAM=http://127.0.0.1:5244 \
+            ODLINK_UPSTREAM_TOKEN=/tmp/openlist-token \
+            ODLINK_ROOT=/onedrive \
+            nohup python3 "$GITHUB_WORKSPACE/.github/scripts/emby302/odlink.py" \
+              > /opt/logs/odlink.out 2>&1 &
+            sleep 3
+            if curl -fsS -m 5 http://127.0.0.1:5245/ping >/dev/null 2>&1; then
+              printf '%s' "http://127.0.0.1:5245" > /tmp/link-host
+              printf '%s' "$OD_TOKEN" > /tmp/link-token
+              echo "odlink 已在 :5245 就绪（快捷方式跟随生效，302 直链源=odlink）"
+            else
+              printf '%s' "http://127.0.0.1:5244" > /tmp/link-host
+              cp /tmp/openlist-token /tmp/link-token 2>/dev/null || printf '' > /tmp/link-token
+              echo "::warning::odlink 未响应，302 直链源退回 OpenList(:5244)"
+            fi
+            chmod 600 /tmp/link-token 2>/dev/null || true
+            tail -5 /opt/logs/odlink.log 2>/dev/null || true
+          }
+          main || {
+            printf '%s' "http://127.0.0.1:5244" > /tmp/link-host
+            cp /tmp/openlist-token /tmp/link-token 2>/dev/null || printf '' > /tmp/link-token
+            echo "::warning::start odlink failed, 302 直链源退回 OpenList"
+          }
       - name: install emby
         run: |
           set -euo pipefail
@@ -440,7 +484,10 @@ jobs:
               return 0
             fi
 
-            OPENLIST_TOKEN=$(cat /tmp/openlist-token 2>/dev/null || echo "")
+            # 直链源统一读 start odlink 写入的契约：odlink(:5245) 优先，否则 OpenList(:5244)
+            OPENLIST_HOST=$(cat /tmp/link-host 2>/dev/null || echo "http://127.0.0.1:5244")
+            OPENLIST_TOKEN=$(cat /tmp/link-token 2>/dev/null || echo "")
+            echo "ge2o 直链源: $OPENLIST_HOST"
             APISECRET=$(openssl rand -hex 16)
           cat > /opt/ge2o/config.yml <<GE2O_EOF
           emby:
@@ -457,7 +504,7 @@ jobs:
             images-quality: 100
             download-strategy: 403
           openlist:
-            host: http://127.0.0.1:5244
+            host: $OPENLIST_HOST
             token: $OPENLIST_TOKEN
           video-preview:
             enable: false
@@ -507,10 +554,12 @@ jobs:
             echo "直链映射探针: ${MEDIA_DIR:+已取到媒体库目录}"
             OK=0
             for i in 1 2 3; do
-              TOK=$(cat /tmp/openlist-token 2>/dev/null || true)
+              # 直链源=odlink(:5245) 优先、否则 OpenList(:5244)：探活必须打 ge2o 实际在用的那个
+              TOK=$(cat /tmp/link-token 2>/dev/null || true)
+              LINK_HOST=$(cat /tmp/link-host 2>/dev/null || echo "http://127.0.0.1:5244")
               MAP_OK=1
               if [ -n "$TOK" ] && [ -n "$MEDIA_DIR" ]; then
-                RESP=$(curl -s -m 10 -X POST http://127.0.0.1:5244/api/fs/get \
+                RESP=$(curl -s -m 10 -X POST ${LINK_HOST}/api/fs/get \
                   -H "Authorization: $TOK" -H 'Content-Type: application/json' \
                   -d "$(jq -nc --arg p "$MEDIA_DIR" '{path:$p}')")
                 GC=$(printf '%s' "$RESP" | jq -r '.code // 0' 2>/dev/null || echo 0)
@@ -519,7 +568,7 @@ jobs:
               if curl -fsS -m 5 http://127.0.0.1:8095/emby/System/Info/Public >/dev/null 2>&1 \
                  && [ -n "$TOK" ] \
                  && [ "$MAP_OK" = "1" ] \
-                 && curl -s -m 5 -X POST http://127.0.0.1:5244/api/fs/list \
+                 && curl -s -m 5 -X POST ${LINK_HOST}/api/fs/list \
                       -H "Authorization: $TOK" -H 'Content-Type: application/json' \
                       -d '{"path":"/onedrive","page":1,"per_page":1}' \
                     | jq -e '.code == 200' >/dev/null 2>&1; then
@@ -531,18 +580,18 @@ jobs:
             if [ "$OK" != "1" ]; then
               echo "::warning::302 chain unhealthy, falling back to direct mode"
               echo "--- OpenList fs/list 诊断 ---"
-              curl -s -X POST http://127.0.0.1:5244/api/fs/list \
+              curl -s -X POST ${LINK_HOST}/api/fs/list \
                 -H "Authorization: $TOK" -H 'Content-Type: application/json' \
                 -d '{"path":"/onedrive","page":1,"per_page":3}' 2>/dev/null \
                 | jq -c '{code: .code, msg: .message, total: (.data.total // 0)}' 2>/dev/null || true
               # 映射诊断：fs/get 报错原因 + 同目录 fs/list 对照（区分"get 语义问题"和"子树整体不可达"）
               if [ -n "$MEDIA_DIR" ]; then
                 echo "--- 直链映射诊断（脱敏）---"
-                curl -s -m 10 -X POST http://127.0.0.1:5244/api/fs/get \
+                curl -s -m 10 -X POST ${LINK_HOST}/api/fs/get \
                   -H "Authorization: $TOK" -H 'Content-Type: application/json' \
                   -d "$(jq -nc --arg p "$MEDIA_DIR" '{path:$p}')" 2>/dev/null \
                   | jq -c '{code: .code, msg: .message}' 2>/dev/null | redact_pub || true
-                curl -s -m 10 -X POST http://127.0.0.1:5244/api/fs/list \
+                curl -s -m 10 -X POST ${LINK_HOST}/api/fs/list \
                   -H "Authorization: $TOK" -H 'Content-Type: application/json' \
                   -d "$(jq -nc --arg p "$MEDIA_DIR" '{path:$p,page:1,per_page:1}')" 2>/dev/null \
                   | jq -c '{code: .code, msg: .message, total: (.data.total // 0)}' 2>/dev/null | redact_pub || true
@@ -572,10 +621,11 @@ jobs:
             sleep 60
             MODE=$(cat /tmp/PLAYBACK_MODE 2>/dev/null || echo direct)
             [ "$MODE" = "direct" ] && continue
-            TOK=$(cat /tmp/openlist-token 2>/dev/null || true)
+            TOK=$(cat /tmp/link-token 2>/dev/null || true)
+            LINK_HOST=$(cat /tmp/link-host 2>/dev/null || echo "http://127.0.0.1:5244")
             MAP_OK=1
             if [ -n "$TOK" ] && [ -n "$MEDIA_DIR" ]; then
-              GC=$(curl -s -m 10 -X POST http://127.0.0.1:5244/api/fs/get \
+              GC=$(curl -s -m 10 -X POST ${LINK_HOST}/api/fs/get \
                      -H "Authorization: $TOK" -H 'Content-Type: application/json' \
                      -d "$(jq -nc --arg p "$MEDIA_DIR" '{path:$p}')" \
                    | jq -r '.code // 0' 2>/dev/null || echo 0)
@@ -584,7 +634,7 @@ jobs:
             if curl -fsS -m 5 http://127.0.0.1:8095/emby/System/Info/Public >/dev/null 2>&1 \
                && [ -n "$TOK" ] \
                && [ "$MAP_OK" = "1" ] \
-               && curl -s -m 5 -X POST http://127.0.0.1:5244/api/fs/list \
+               && curl -s -m 5 -X POST ${LINK_HOST}/api/fs/list \
                     -H "Authorization: $TOK" -H 'Content-Type: application/json' \
                     -d '{"path":"/onedrive","page":1,"per_page":1}' \
                   | jq -e '.code == 200' >/dev/null 2>&1; then
@@ -1016,3 +1066,8 @@ jobs:
           tail -n 60 /opt/logs/ge2o.log 2>/dev/null \
             | grep -v "headers to encode cacheKey" \
             | sed -E 's/api_key=[^& ]*/api_key=[redacted]/g; s/X-Emby-Token=[^& ]*/X-Emby-Token=[redacted]/g; s#https?://[^ "]*#<url>#g' || echo "(无 ge2o.log)"
+          # odlink 日志归档（脱敏）：直链服务的解析结果——段数/是否跨盘/Graph 码/是否取到直链。
+          # 日志本身已脱敏（不落 token、不落完整链接），这里再拦一道 URL 兜底。
+          echo "--- odlink.log (tail 60, 脱敏) ---"
+          tail -n 60 /opt/logs/odlink.log 2>/dev/null \
+            | sed -E 's#https?://[^ "]*#<url>#g' || echo "(无 odlink.log)"
