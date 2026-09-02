@@ -204,7 +204,10 @@ jobs:
             fi
             [ "$PW_RAW_LEN" -ne "${#OPENLIST_PW}" ] && echo "OPENLIST_ADMIN_PASSWORD 含首尾空白（原长=$PW_RAW_LEN），已剔除——oe 人工登录失败多半是这个原因"
 
-            # 先尝试直接登录：正常情况下恢复分支的库内密码即上次设置值，无需重置
+            # 密码真相源 = OPENLIST_ADMIN_PASSWORD secret：先试 secret 登录——
+            # 成功 = 库内已对齐（绝不动密码）；失败 = 库内漂移（Dropbox 历史恢复 /
+            # oe 后台人工改动 / 临时轮换遗留），无条件纠正回 secret 并 TG 私信告知。
+            # 由此保证：用户随时用 admin + secret 登录 oe 必成，TG 里的临时密码仅本轮有效。
             TOKEN=$(curl -s -X POST http://127.0.0.1:5244/api/auth/login \
               -H 'Content-Type: application/json' \
               -d "{\"username\":\"admin\",\"password\":\"$OPENLIST_PW\"}" | jq -r '.data.token // .data // empty' || true)
@@ -286,14 +289,17 @@ jobs:
               PW_KIND=$(cut -d: -f1 /tmp/openlist-pw-note)
               PW_VAL=$(cut -d: -f2- /tmp/openlist-pw-note)
               case "$PW_KIND" in
-                random) PW_DESC="OPENLIST_ADMIN_PASSWORD 未配置，本轮已随机生成（每轮 run 都会变，配置该 secret 可固定）";;
-                reset)  PW_DESC="库内密码与 secret 不一致，已重置为 secret 值";;
-                force)  PW_DESC="已强制轮换为新随机密码（旧密码已失效）";;
+                random) PW_DESC="OPENLIST_ADMIN_PASSWORD 未配置，本轮已随机生成";;
+                reset)  PW_DESC="库内密码与 secret 不一致，已纠正回 secret 值";;
+                force)  PW_DESC="已强制轮换为新随机密码";;
                 *)      PW_DESC="已变更";;
               esac
+              # 规则写明：secret 是唯一真相源，本条密码仅本轮有效（临时密码随 run 结束消失，
+              # 因为 oe 后台的人工改密在 token 吊销后无法回传持久化）。固定用 secret 登录 oe。
+              PW_RULE="⚠️ 本条密码仅本轮有效，下一轮即失效——oe 后台登录请永远使用 OPENLIST_ADMIN_PASSWORD（admin + secret），那才是唯一长期有效的密码"
               # 注意：--data-urlencode 会把文本按字面编码，消息内必须用真实换行符，
               # 不能拼 %0A（那会被二次编码成字面 "%0A" 发出去）；printf 的 \n 即真实换行
-              PW_MSG="$(printf '🔐 OpenList 管理员密码%s\n用户名: admin\n密码: %s\n入口: https://oe.%s.eu.org\n（本条不会出现在公开日志）' "$PW_DESC" "$PW_VAL" "${{ secrets.VD }}")"
+              PW_MSG="$(printf '🔐 OpenList 管理员密码%s\n用户名: admin\n密码: %s\n入口: https://oe.%s.eu.org\n%s\n（本条不会出现在公开日志）' "$PW_DESC" "$PW_VAL" "${{ secrets.VD }}" "$PW_RULE")"
               curl -s -m 15 -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
                 -d chat_id=${{ secrets.TG_CHAT_ID }} \
                 --data-urlencode "text=${PW_MSG}" >/dev/null \
