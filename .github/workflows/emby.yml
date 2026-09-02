@@ -75,12 +75,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y fuse3
 
-          if rclone lsf dropbox:self-hosted/emby/config/ --files-only | grep -q "system.xml"; then
-            if ! rclone delete dropbox:self-hosted/emby/config/system.xml -vv; then
-              echo "[WARNING] Failed to delete system.xml, skipping" >&2
-            fi
-          fi
-          sudo rclone copy dropbox:self-hosted/emby/system.xml dropbox:self-hosted/emby/config/ --ignore-errors -vv
+          # if rclone lsf dropbox:self-hosted/emby/config/ --files-only | grep -q "system.xml"; then
+          #   if ! rclone delete dropbox:self-hosted/emby/config/system.xml -vv; then
+          #     echo "[WARNING] Failed to delete system.xml, skipping" >&2
+          #   fi
+          # fi
+          # sudo rclone copy dropbox:self-hosted/emby/system.xml dropbox:self-hosted/emby/config/ --ignore-errors -vv
 
           # 只挂载媒体库所在的 onedrive（/dropbox /gd 挂载无引用，已移除）
           # writes 模式：302 直链播放不经过挂载，本地仅承载扫描/探测/回退流量，磁盘占用≈0
