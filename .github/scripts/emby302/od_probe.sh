@@ -73,21 +73,27 @@ fi
 out "✅ 已获取 access_token（长度=${#AT}，内容不打印）"
 
 # ---------- Graph 请求 helper ----------
-# 用法：body=$(gget "$url")，HTTP 码写入 GCODE
+# 注意：必须直接调用（gget "$url"），不能放在 $( ) 里——命令替换是子 shell，
+# 函数内对 GCODE/GBODY 的赋值传不回父 shell（上一版 http=0 假失败的根因）。
+# 结果：JSON 体写入 GBODY，HTTP 码写入 GCODE。
 GCODE=0
+GBODY=""
 gget() {
-  local body
-  body=$(curl -s -m 30 -w '\n%{http_code}' \
-           -H "Authorization: Bearer $AT" -H 'Accept: application/json' "$1")
-  GCODE=$(printf '%s' "$body" | tail -1)
-  printf '%s' "$body" | sed '$d'
+  local raw
+  raw=$(curl -sS -m 30 -w '\n%{http_code}' \
+          -H "Authorization: Bearer $AT" -H 'Accept: application/json' "$1" 2>&1)
+  GCODE=$(printf '%s' "$raw" | tail -1)
+  GBODY=$(printf '%s' "$raw" | sed '$d')
 }
 
 # ---------- 3. 列根目录，识别快捷方式 ----------
-ROOT_JSON=$(gget "$GRAPH/me/drive/root/children?\$select=name,id,remoteItem,folder&\$top=100")
+gget "$GRAPH/me/drive/root/children?\$select=name,id,remoteItem,folder&\$top=100"
+ROOT_JSON=$GBODY
 out "根目录列举: http=$GCODE"
 if [ "$GCODE" != "200" ]; then
-  out "❌ 根目录列举失败: $(printf '%s' "$ROOT_JSON" | jq -r '.error.code // .error.message // "无"' 2>/dev/null | head -c 200)"
+  out "❌ 根目录列举失败: $(printf '%s' "$ROOT_JSON" | jq -r '.error.code // .error.message // empty' 2>/dev/null | head -c 150)"
+  [ -z "$(printf '%s' "$ROOT_JSON" | jq -r '.error.code // empty' 2>/dev/null)" ] && \
+    out "   原始输出前 150 字符: $(printf '%s' "$ROOT_JSON" | head -c 150)"
   exit 0
 fi
 
@@ -122,9 +128,10 @@ printf '%s' "$ROOT_JSON" | jq -c '.value[]' 2>/dev/null | while read -r item; do
   fi
 
   # 4b. 跟随快捷方式后列子目录
-  CH=$(gget "$GRAPH/drives/$DRIVE/items/$RID/children?\$select=name,id,file,folder&\$top=30")
+  gget "$GRAPH/drives/$DRIVE/items/$RID/children?\$select=name,id,file,folder&\$top=30"
+  CH=$GBODY
   if [ "$GCODE" != "200" ]; then
-    out "     ❌ 跟随后仍无法列子目录 http=$GCODE $(printf '%s' "$CH" | jq -r '.error.code // ""' 2>/dev/null | head -c 80)"
+    out "     ❌ 跟随后仍无法列子目录 http=$GCODE $(printf '%s' "$CH" | jq -r '.error.code // empty' 2>/dev/null | head -c 80) $(printf '%s' "$CH" | jq -r '.error.code // empty' 2>/dev/null | grep -q . || printf '%s' "$CH" | head -c 80)"
     continue
   fi
   CNT=$(printf '%s' "$CH" | jq -r '.value | length' 2>/dev/null || echo 0)
@@ -137,13 +144,14 @@ printf '%s' "$ROOT_JSON" | jq -c '.value[]' 2>/dev/null | while read -r item; do
     out "     ⚠️ 首层没有文件（可能全是子目录），未验证直链"
     continue
   fi
-  FB=$(gget "$GRAPH/drives/$DRIVE/items/$FID?\$select=id,name,size,content.downloadUrl")
+  gget "$GRAPH/drives/$DRIVE/items/$FID?\$select=id,name,size,content.downloadUrl"
+  FB=$GBODY
   DL=$(printf '%s' "$FB" | jq -r '."@microsoft.graph.downloadUrl" // .content.downloadUrl // empty' 2>/dev/null)
   if [ -n "$DL" ]; then
     HOST=$(printf '%s' "$DL" | sed -E 's#https?://([^/]+).*#\1#')
     out "     ✅ 取到预授权直链: 样例=${FNAME:0:28}… host=$HOST 链接长度=${#DL}"
   else
-    out "     ❌ 未返回 downloadUrl http=$GCODE $(printf '%s' "$FB" | jq -r '.error.code // ""' 2>/dev/null | head -c 100)"
+    out "     ❌ 未返回 downloadUrl http=$GCODE $(printf '%s' "$FB" | jq -r '.error.code // empty' 2>/dev/null | head -c 100)"
   fi
 done
 
