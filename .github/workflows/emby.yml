@@ -686,6 +686,7 @@ jobs:
           fi
           START_MSG="$(printf '📺 Emby 启动\n模式: %s\n直链源: %s\n%s\n探活: %s\n时间: %s' \
             "$MODE" "$SRC_NAME" "$OD_LINE" "${MAP_OK:-?}" "$(date '+%Y-%m-%d %H:%M:%S %Z')")"
+          echo "TG(启动): ${START_MSG}"
           curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             -d chat_id=${{ secrets.TG_CHAT_ID }} \
             --data-urlencode "text=${START_MSG}" >/dev/null 2>&1 || true
@@ -1166,6 +1167,7 @@ jobs:
           fi
           MESSAGE="$(printf '📺 Emby\n状态: %s %s\n模式: %s\n运行: %s\n302 链路: %s\n时间: %s' \
             "$STATUS_EMOJI" "$STATUS" "$MODE" "$DUR" "$OD_SUMMARY" "$(date '+%Y-%m-%d %H:%M:%S %Z')")"
+          echo "TG(收尾): ${MESSAGE}"
           curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             -d chat_id=${{ secrets.TG_CHAT_ID }} \
             --data-urlencode "text=${MESSAGE}"
