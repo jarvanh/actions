@@ -280,11 +280,21 @@ jobs:
               fi
             fi
 
-            # OpenList 密码变更立即经 TG 私信告知（不能等 6 小时后的收尾步骤——
-            # 用户此刻就在 oe 后台登录）。密码只出现在 TG 消息里，绝不写公开日志。
-            # random = OPENLIST_ADMIN_PASSWORD 未配置、本轮随机生成（每轮 run 都会变）；
-            # reset  = 库内密码与 secret 不一致、已重置为 secret 值；
-            # force  = 开关变量触发的一次性强制轮换。
+            # OpenList 凭据通知（每轮必发，密码明文只进 TG 私信，绝不写公开日志）：
+            #   登录成功（含纠正成功）→ 告知当前生效的用户名+明文密码，用户随时查 TG 即知；
+            #   发生过纠正/随机/轮换 → 额外标注该密码仅本轮有效，长期密码=secret。
+            # 注意：--data-urlencode 会把文本按字面编码，消息内必须用真实换行符（printf \n），
+            # 不能拼 %0A（会被二次编码成字面 "%0A" 发出去）。
+            send_pw_tg() {
+              # $1=场景描述  $2=密码明文  $3=附注规则（可空）
+              local msg
+              msg="$(printf '🔐 OpenList 凭据\n%s\n用户名: admin\n密码: %s\n入口: https://oe.%s.eu.org\n%s\n（本条不会出现在公开日志）' "$1" "$2" "${{ secrets.VD }}" "$3")"
+              curl -s -m 15 -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+                -d chat_id=${{ secrets.TG_CHAT_ID }} \
+                --data-urlencode "text=${msg}" >/dev/null \
+                && echo "已通过 TG 私信发送 OpenList 凭据（不落公开日志）" \
+                || echo "::warning::OpenList 凭据 TG 通知发送失败（不影响链路）"
+            }
             if [ -s /tmp/openlist-pw-note ]; then
               PW_KIND=$(cut -d: -f1 /tmp/openlist-pw-note)
               PW_VAL=$(cut -d: -f2- /tmp/openlist-pw-note)
@@ -294,18 +304,16 @@ jobs:
                 force)  PW_DESC="已强制轮换为新随机密码";;
                 *)      PW_DESC="已变更";;
               esac
-              # 规则写明：secret 是唯一真相源，本条密码仅本轮有效（临时密码随 run 结束消失，
-              # 因为 oe 后台的人工改密在 token 吊销后无法回传持久化）。固定用 secret 登录 oe。
-              PW_RULE="⚠️ 本条密码仅本轮有效，下一轮即失效——oe 后台登录请永远使用 OPENLIST_ADMIN_PASSWORD（admin + secret），那才是唯一长期有效的密码"
-              # 注意：--data-urlencode 会把文本按字面编码，消息内必须用真实换行符，
-              # 不能拼 %0A（那会被二次编码成字面 "%0A" 发出去）；printf 的 \n 即真实换行
-              PW_MSG="$(printf '🔐 OpenList 管理员密码%s\n用户名: admin\n密码: %s\n入口: https://oe.%s.eu.org\n%s\n（本条不会出现在公开日志）' "$PW_DESC" "$PW_VAL" "${{ secrets.VD }}" "$PW_RULE")"
-              curl -s -m 15 -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-                -d chat_id=${{ secrets.TG_CHAT_ID }} \
-                --data-urlencode "text=${PW_MSG}" >/dev/null \
-                && echo "已通过 TG 私信发送 OpenList 密码通知（kind=$PW_KIND，密码不落日志）" \
-                || echo "::warning::OpenList 密码 TG 通知发送失败（不影响链路）"
+              # secret 是唯一长期真相源：本条密码仅本轮有效（oe 后台人工改密在 token
+              # 吊销后无法回传持久化，随 run 结束消失）
+              send_pw_tg "⚠️ $PW_DESC——本条仅本轮有效" "$PW_VAL" \
+                "长期有效密码 = OPENLIST_ADMIN_PASSWORD（下轮自动恢复为它）"
               shred -u /tmp/openlist-pw-note 2>/dev/null || rm -f /tmp/openlist-pw-note
+            else
+              # 未发生任何变更：库内密码=secret。发明文让用户随取随用。
+              # 发剔除空白后的 $OPENLIST_PW——机器登录用的就是它，才是真正有效的形态。
+              send_pw_tg "✅ 本轮机器已用 secret 登录成功，以下为长期有效凭据" "$OPENLIST_PW" \
+                "此密码长期有效（=OPENLIST_ADMIN_PASSWORD，每轮校验对齐）"
             fi
 
             # 全新初始化：用 rclone 凭据注册 OneDrive 存储（非致命，失败则回退）
