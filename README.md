@@ -10,10 +10,20 @@
 ├── workflows/              22 个工作流定义
 └── scripts/
     ├── openlist/           OpenList 同步工具 —— 最复杂的子系统，详见下文
+    ├── emby302/            Emby 302 直链服务 —— 详见 docs/emby302.md
     ├── telegram/           Telegram 机器人相关脚本
     └── proxy-speedtest/    代理测速脚本
+docs/                       子系统文档
 proxy-speedtest/            测速结果数据
 ```
+
+## 文档
+
+| 文档 | 内容 |
+|---|---|
+| [`docs/emby302.md`](docs/emby302.md) | Emby 媒体服务器 + 302 直链子系统（架构、凭据体系、通知、排查手册） |
+| [`docs/openclaw-self-healing.md`](docs/openclaw-self-healing.md) | OpenClaw 自愈 |
+| 下文「OpenList 同步子系统」 | OpenList 同步工具（内联在本文档） |
 
 ## 工作流清单
 
@@ -22,7 +32,8 @@ proxy-speedtest/            测速结果数据
 | `openlist.yml` | OneDrive → OpenList 网盘同步（**本文档重点**） |
 | `self-hosted_backup.yml` | 自建服务备份到 OneDrive |
 | `github_backup_all.yml` | 备份全部 GitHub 仓库到 OneDrive |
-| `emby.yml` / `emby2.yml` / `jellyfin.yml` | 媒体服务器运维 |
+| `emby.yml` | Emby 媒体服务器 + 302 直链 —— 详见 [`docs/emby302.md`](docs/emby302.md) |
+| `emby2.yml` / `jellyfin.yml` | 媒体服务器运维 |
 | `HomeAssistant.yml` / `rdp.yml` / `openclaw.yml` | 自托管服务 |
 | `ql.yml` / `sub-store.yml` / `subs-check.yml` | 签到与订阅管理 |
 | `icloud-photos-downloader.yml` / `ph-dl.yml` / `pixivutil2.yml` | 媒体抓取下载 |
