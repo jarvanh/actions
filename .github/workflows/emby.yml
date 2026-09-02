@@ -227,6 +227,27 @@ jobs:
             printf '%s' "$TOKEN" > /tmp/openlist-token
             chmod 600 /tmp/openlist-token
 
+            # OpenList 密码变更立即经 TG 私信告知（不能等 6 小时后的收尾步骤——
+            # 用户此刻就在 oe 后台登录）。密码只出现在 TG 消息里，绝不写公开日志。
+            # random = OPENLIST_ADMIN_PASSWORD 未配置、本轮随机生成（每轮 run 都会变）；
+            # reset  = 库内密码与 secret 不一致、已重置为 secret 值。
+            if [ -s /tmp/openlist-pw-note ]; then
+              PW_KIND=$(cut -d: -f1 /tmp/openlist-pw-note)
+              PW_VAL=$(cut -d: -f2- /tmp/openlist-pw-note)
+              case "$PW_KIND" in
+                random) PW_DESC="OPENLIST_ADMIN_PASSWORD 未配置，本轮已随机生成（每轮 run 都会变，配置该 secret 可固定）";;
+                reset)  PW_DESC="库内密码与 secret 不一致，已重置为 secret 值";;
+                *)      PW_DESC="已变更";;
+              esac
+              PW_MSG="🔐 OpenList 管理员密码${PW_DESC}%0A用户名: admin%0A密码: ${PW_VAL}%0A入口: https://oe.${{ secrets.VD }}.eu.org%0A（本条不会出现在公开日志）"
+              curl -s -m 15 -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+                -d chat_id=${{ secrets.TG_CHAT_ID }} \
+                --data-urlencode "text=${PW_MSG}" >/dev/null \
+                && echo "已通过 TG 私信发送 OpenList 密码通知（kind=$PW_KIND，密码不落日志）" \
+                || echo "::warning::OpenList 密码 TG 通知发送失败（不影响链路）"
+              shred -u /tmp/openlist-pw-note 2>/dev/null || rm -f /tmp/openlist-pw-note
+            fi
+
             # 全新初始化：用 rclone 凭据注册 OneDrive 存储（非致命，失败则回退）
             STORAGE_COUNT=$(curl -s http://127.0.0.1:5244/api/admin/storage/list \
               -H "Authorization: $TOKEN" | jq -r '.data.content // [] | length' 2>/dev/null || echo 0)
@@ -1067,24 +1088,6 @@ jobs:
           curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             -d chat_id=${{ secrets.TG_CHAT_ID }} \
             -d text="${MESSAGE}"
-          # OpenList 密码变更通知：密码只经 TG 私信送达，绝不写入公开日志。
-          # random = OPENLIST_ADMIN_PASSWORD 未配置、本轮随机生成（每轮 run 都会变，建议配 secret 固定）；
-          # reset  = 库内密码与 secret 不一致、已重置为 secret 值（oe 后台旧密码将失效）。
-          if [ -s /tmp/openlist-pw-note ]; then
-            PW_KIND=$(cut -d: -f1 /tmp/openlist-pw-note)
-            PW_VAL=$(cut -d: -f2- /tmp/openlist-pw-note)
-            case "$PW_KIND" in
-              random) PW_DESC="OPENLIST_ADMIN_PASSWORD 未配置，本轮已随机生成（每轮 run 都会变，配置该 secret 可固定）";;
-              reset)  PW_DESC="库内密码与 secret 不一致，已重置为 secret 值";;
-              *)      PW_DESC="已变更";;
-            esac
-            PW_MSG="🔐 OpenList 管理员密码${PW_DESC}%0A用户名: admin%0A密码: \`${PW_VAL}\`%0A入口: https://oe.${{ secrets.VD }}.eu.org%0A（本条消息不含于公开日志）"
-            curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-              -d chat_id=${{ secrets.TG_CHAT_ID }} \
-              --data-urlencode "text=${PW_MSG}" >/dev/null
-            echo "已通过 TG 私信发送 OpenList 密码通知（kind=$PW_KIND，密码不落日志）"
-            shred -u /tmp/openlist-pw-note 2>/dev/null || rm -f /tmp/openlist-pw-note
-          fi
           # 播放事件日志归档：便于排查"播了但没通知"
           echo "--- playlog.log (tail 80) ---"
           tail -n 80 /opt/logs/playlog.log 2>/dev/null || echo "(无 playlog.log)"
