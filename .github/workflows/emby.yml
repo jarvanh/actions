@@ -570,7 +570,7 @@ jobs:
                  && [ "$MAP_OK" = "1" ] \
                  && curl -s -m 5 -X POST ${LINK_HOST}/api/fs/list \
                       -H "Authorization: $TOK" -H 'Content-Type: application/json' \
-                      -d '{"path":"/onedrive","page":1,"per_page":1}' \
+                      -d "$(jq -nc --arg p "${MEDIA_DIR:-/onedrive}" '{path:$p,page:1,per_page:1}')" \
                     | jq -e '.code == 200' >/dev/null 2>&1; then
                 OK=1
                 break
@@ -636,7 +636,7 @@ jobs:
                && [ "$MAP_OK" = "1" ] \
                && curl -s -m 5 -X POST ${LINK_HOST}/api/fs/list \
                     -H "Authorization: $TOK" -H 'Content-Type: application/json' \
-                    -d '{"path":"/onedrive","page":1,"per_page":1}' \
+                    -d "$(jq -nc --arg p "${MEDIA_DIR:-/onedrive}" '{path:$p,page:1,per_page:1}')" \
                   | jq -e '.code == 200' >/dev/null 2>&1; then
               FAIL=0
             else
