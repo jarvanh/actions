@@ -150,8 +150,8 @@ jobs:
 
             # 恢复：优先 openlist-emby 目录（config.json+data.db，无日志）；旧 tarball 仅作迁移兜底
             RESTORED=false
-            if rclone lsf dropbox:self-hosted/openlist-emby/ 2>/dev/null | grep -q "config.json"; then
-              rclone copy dropbox:self-hosted/openlist-emby/ /opt/openlist/ 2>/dev/null \
+            if rclone lsf dropbox:self-hosted/openlist-emby/data/ 2>/dev/null | grep -q "config.json"; then
+              rclone copy dropbox:self-hosted/openlist-emby/data/ /opt/openlist/ 2>/dev/null \
                 && RESTORED=true \
                 || echo "::warning::openlist-emby 恢复失败"
             fi
@@ -927,7 +927,7 @@ jobs:
               rm -rf /tmp/ol-persist && mkdir -p /tmp/ol-persist
               cp /opt/openlist/config.json /tmp/ol-persist/ 2>/dev/null || true
               cp /opt/openlist/data.db /tmp/ol-persist/ 2>/dev/null || true
-              rclone sync /tmp/ol-persist dropbox:self-hosted/openlist-emby/ -vv 2>/dev/null \
+              rclone sync /tmp/ol-persist dropbox:self-hosted/openlist-emby/data/ -vv 2>/dev/null \
                 && echo "OpenList 数据已同步到 openlist-emby（config.json+data.db，无日志）" \
                 || echo "[WARNING] OpenList data persist failed"
               rm -rf /tmp/ol-persist
