@@ -32,16 +32,10 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y fuse3
           sudo mkdir -p /dropbox
-          # 挂载改用 runner 用户（与 emby.yml 一致）：root 身份挂载时 rclone 刷新 token 会把
-          # rclone.conf 回写成 root:600，之后非 root 的 rclone 读取即 EACCES
-          # （openclaw 归档 "Failed to load config file ... permission denied" 的根因）
-          grep -q '^user_allow_other' /etc/fuse.conf 2>/dev/null || echo user_allow_other | sudo tee -a /etc/fuse.conf >/dev/null
-          sudo chown runner:runner /dropbox
           
           # 挂载 Dropbox 到 /dropbox 目录
           # --daemon 让它在后台运行，--allow-other 允许 docker 访问
-          rclone mount dropbox: /dropbox \
-            --config /home/runner/.config/rclone/rclone.conf \
+          sudo rclone mount dropbox: /dropbox \
             --vfs-cache-mode full \
             --allow-other \
             --daemon
@@ -54,7 +48,7 @@ jobs:
             echo "Mount successful, config directory found."
           else
             echo "Directory not found, creating it..."
-            mkdir -p /dropbox/self-hosted/HomeAssistant
+            sudo mkdir -p /dropbox/self-hosted/HomeAssistant
           fi
           
       # -----------------------------------------------------------
@@ -89,10 +83,8 @@ jobs:
       - name: Install cloudflared
         run: |
           sudo mkdir -p ~/.cloudflared/
-          sudo chown -R runner:runner ~/.cloudflared
           # 尝试从网盘恢复 cloudflared 证书 (如果需要)
-          # rclone 同样以 runner 身份运行：root 运行会在 token 刷新时回写 rclone.conf 属主
-          rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
+          sudo rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
           
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
@@ -178,6 +170,6 @@ jobs:
           nohup cloudflared tunnel run --url http://127.0.0.1:8123 $TUNNEL_NAME &
       - name: sleep
         run: |
-          sleep 340m      
+          sudo sleep 340m      
           sudo docker stop homeassistant 
-          sleep 1m   
+          sudo sleep 1m   

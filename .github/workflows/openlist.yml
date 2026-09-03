@@ -133,11 +133,7 @@ jobs:
           sudo apt-get install -y fuse3
           sudo mkdir -p /dropbox
           # 后台挂载 Dropbox（openlist 配置/凭据等静态数据走该挂载）
-          # 挂载改用 runner 用户（与 emby.yml 一致）：root 身份挂载时 rclone 刷新 token 会把
-          # rclone.conf 回写成 root:600，之后非 root 的 rclone（同步脚本）读取即 EACCES
-          grep -q '^user_allow_other' /etc/fuse.conf 2>/dev/null || echo user_allow_other | sudo tee -a /etc/fuse.conf >/dev/null
-          sudo chown runner:runner /dropbox
-          nohup rclone mount dropbox: /dropbox --config /home/runner/.config/rclone/rclone.conf --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 10G &
+          sudo nohup rclone mount dropbox: /dropbox --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 10G &
 
       - name: 拉起 OpenList 容器（数据库本地化）
         run: |
@@ -175,9 +171,7 @@ jobs:
       - name: 安装 cloudflared 并载入隧道凭据
         run: |
           sudo mkdir -p ~/.cloudflared
-          sudo chown -R runner:runner ~/.cloudflared
-          # rclone 以 runner 身份运行（与挂载步骤同）：root 运行会在 token 刷新时回写 rclone.conf 属主
-          rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared
+          sudo rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
 
@@ -400,8 +394,6 @@ jobs:
             sleep 300
             # 容器运行中的在线一致性快照（root 属主，用 sudo 读）
             if sudo python3 -c "import sqlite3; src=sqlite3.connect('file:/opt/openlist-data/data.db?mode=ro', uri=True); dst=sqlite3.connect('/tmp/data.db.snapshot'); src.backup(dst); dst.close(); src.close()" 2>/dev/null; then
-              # 快照是 root 产出、随后由 runner 身份的 rclone 上传，显式放开读权限
-              sudo chmod 644 /tmp/data.db.snapshot 2>/dev/null || true
               NEW_MD5=$(md5sum /tmp/data.db.snapshot 2>/dev/null | awk '{print $1}' || echo "")
               if [ -n "$NEW_MD5" ] && [ "$NEW_MD5" != "$LAST_MD5" ]; then
                 if rclone copyto /tmp/data.db.snapshot dropbox:self-hosted/openlist/data/data.db; then
