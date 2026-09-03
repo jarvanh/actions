@@ -26,6 +26,9 @@
 #           set -e
 #           bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" config
 #
+# 注意：RCLONE_CONFIG 是 rclone 自身"配置文件路径"的环境变量，这里只是借同名 env 传正文；
+#       脚本入口已把值转存到 RCLONE_CONFIG_CONTENT 并 unset 该变量，切勿在脚本内直接读取。
+#
 # 为什么必须掩码：GitHub 只自动掩 secret 的完整原文，conf 内单个字段值出现在
 # rclone 输出/报错日志中不会命中；且从 Dropbox 恢复的 conf 不是 GitHub secret，
 # 其中凭据若无 ::add-mask:: 会完全明文进日志。
@@ -35,6 +38,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONF="${HOME}/.config/rclone/rclone.conf"
 PERSIST_REMOTE="dropbox:self-hosted/rclone.conf"
+
+# rclone 自身把 RCLONE_CONFIG 当配置文件路径（--config 的环境变量形式）。
+# 各 workflow 以同名 env 注入的是 conf 正文，若不先摘掉该环境变量，rclone 会把整段
+# 正文当路径去加载 → 实际用的是空配置（listremotes 为空），表现为
+# "conf 中无 dropbox remote" + "有效性检查失败"。故先取值再 unset。
+RCLONE_CONFIG_CONTENT="${RCLONE_CONFIG:-}"
+unset RCLONE_CONFIG
 
 # 掩码 rclone.conf 中的敏感值（::add-mask:: 防止 Actions 日志泄露）。
 # 覆盖: 键名含 pass/secret/token/key/credential 的单行键、token = {...} JSON 内的
@@ -120,12 +130,13 @@ check_conf() {
 }
 
 write_secret_conf() {
-  if [ -z "${RCLONE_CONFIG:-}" ]; then
+  local content="$1"
+  if [ -z "$content" ]; then
     echo "::error::RCLONE_CONFIG secret 未配置，无法写入 rclone.conf"
     exit 1
   fi
   mkdir -p "$(dirname "$CONF")"
-  printf '%s\n' "$RCLONE_CONFIG" > "$CONF"
+  printf '%s\n' "$content" > "$CONF"
   chmod 600 "$CONF"
 }
 
@@ -176,7 +187,7 @@ do_install() {
 do_config() {
   # 1. secret 起步（本地无 conf 时；正常 runner 每轮都是全新环境）
   if [ ! -s "$CONF" ]; then
-    write_secret_conf
+    write_secret_conf "$RCLONE_CONFIG_CONTENT"
   fi
   mask_conf
 
@@ -206,6 +217,11 @@ do_config() {
   # 3. 最终有效性检查：conf 无效则本轮必然失败，尽早报错
   if ! check_conf; then
     echo "::error::rclone.conf 有效性检查失败（remote 不可用）"
+    # 排查信息：conf 实际路径 + rclone 原始报错（stderr 平时被 check_conf 吞掉）
+    # remote 列表本身不含凭据，conf 内的敏感值已在前面 ::add-mask::，可安全输出
+    echo "rclone 实际使用的 conf: $(rclone config file 2>&1 | tail -n 1)"
+    echo "--- rclone listremotes ---"
+    rclone listremotes 2>&1 || true
     exit 1
   fi
 
