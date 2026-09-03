@@ -123,23 +123,20 @@ jobs:
             whyour/qinglong:latest  
       - name: sleep
         run: |
-          sleep 1m       
+          sudo sleep 1m       
       - name: Verify Qinglong container is running
         run: docker ps    
       - name: run cloudflared
         run: |
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
-          sudo mkdir -p ~/.cloudflared/
-          sudo chown -R runner:runner ~/.cloudflared
-          # rclone 以 runner 身份运行：root 运行会在 token 刷新时把 rclone.conf 回写成
-          # root:600，之后非 root 的 rclone（末尾 ql.tar.gz 回传）读取即 EACCES
-          rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
+          sudo mkdir ~/.cloudflared/
+          sudo rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
           cloudflared tunnel route dns ql ql.'${{ secrets.VD }}'.eu.org
           nohup cloudflared tunnel run --url http://127.0.0.1:5700 ql &
       - name: sleep
         run: |
-          sleep 340m          
+          sudo sleep 340m          
       - name: Stop
         run: |
           set -euo pipefail
@@ -169,8 +166,6 @@ jobs:
           echo "待压缩目录大小: ${src_kb}KB"
           require_free_kb "$HOME" $((src_kb + 1024 * 1024)) "ql archive preflight"
           sudo tar -czvf ~/ql.tar.gz --exclude="*.tmp" --exclude="*.log" --exclude="./dep_cache" -C ~/ql .
-          # root 产出的包落在 $HOME，随后由 runner 身份的 rclone 上传/校验，显式放开读权限
-          sudo chmod 644 ~/ql.tar.gz
           archive_bytes=$(stat -c%s ~/ql.tar.gz 2>/dev/null || echo 0)
           if [ "$archive_bytes" -le 0 ] || ! tar -tzf ~/ql.tar.gz >/dev/null; then
             echo "❌ ql archive validation: ql.tar.gz is empty or unreadable" >&2
