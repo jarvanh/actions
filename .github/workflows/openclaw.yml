@@ -41,8 +41,17 @@ jobs:
           sudo apt-get install -y fuse3
           sudo mkdir -p /dropbox
 
+          # 挂载改用 runner 用户（与 emby.yml 一致）：conf 全程以 runner 身份读写。
+          # 原来用 sudo 挂载，token 刷新时 rclone 以 root 回写 rclone.conf（属主 root、权限 600），
+          # 之后非 root 的归档循环再读它就变成
+          # "Failed to load config file ... permission denied" —— 即本次 CLIProxyAPI.tar.gz 上传失败的根因。
+          # --allow-other 需要 fuse 允许非 root 共享挂载，挂载点也交给 runner 才能免 sudo 挂载。
+          grep -q '^user_allow_other' /etc/fuse.conf 2>/dev/null || echo user_allow_other | sudo tee -a /etc/fuse.conf >/dev/null
+          sudo chown runner:runner /dropbox
+
           # 挂载 Dropbox
-          sudo nohup rclone mount dropbox: /dropbox \
+          nohup rclone mount dropbox: /dropbox \
+            --config /home/runner/.config/rclone/rclone.conf \
             --allow-non-empty \
             --no-gzip-encoding \
             --umask 000 \
@@ -243,12 +252,14 @@ jobs:
                 if [ -n "$GH_USER_LOGIN" ]; then
                   GH_TMP_DIR="$(mktemp -d)"
                   GH_TMP_HOSTS_FILE="$GH_TMP_DIR/hosts.yml"
-                  cat > "$GH_TMP_HOSTS_FILE" <<EOF_HOSTS
-          github.com:
-              user: ${GH_USER_LOGIN}
-              oauth_token: ${GH_TOKEN_VALUE}
-              git_protocol: https
-          EOF_HOSTS
+                  # 不用 heredoc：heredoc 结束符必须顶格，但本脚本是嵌在 YAML 块里生成的、
+                  # 每行都带缩进，结束符永远匹配不上 —— 会把 runtime-env.sh 剩余部分整个吞进 hosts.yml
+                  {
+                    printf 'github.com:\n'
+                    printf '    user: %s\n' "${GH_USER_LOGIN}"
+                    printf '    oauth_token: %s\n' "${GH_TOKEN_VALUE}"
+                    printf '    git_protocol: https\n'
+                  } > "$GH_TMP_HOSTS_FILE"
                   chmod 600 "$GH_TMP_HOSTS_FILE" 2>/dev/null || true
 
                   if GH_CONFIG_DIR="$GH_TMP_DIR" env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN -u BASH_ENV gh auth status >/dev/null 2>&1; then
@@ -277,6 +288,9 @@ jobs:
           sudo dpkg -i cloudflared-linux-amd64.deb
           sudo mkdir -p ~/.cloudflared/
           sudo cp -r /dropbox/self-hosted/.cloudflared/* ~/.cloudflared/ 2>/dev/null || true
+          # 家目录里的状态必须是 runner 属主：sudo 复制会让凭据变成 root 属主，
+          # 而 cloudflared 是 runner 身份启动的（读 ~/.cloudflared 会 EACCES）
+          sudo chown -R runner:runner ~/.cloudflared
 
       - name: Run Cloudflared Tunnel
         run: |
@@ -643,7 +657,7 @@ jobs:
             fi
 
             if [ -s "$HOME/.openclaw/openclaw.json" ]; then
-              version="$(sudo jq -r '.meta.lastTouchedVersion // empty' "$HOME/.openclaw/openclaw.json" 2>/dev/null | head -n 1 || true)"
+              version="$(jq -r '.meta.lastTouchedVersion // empty' "$HOME/.openclaw/openclaw.json" 2>/dev/null | head -n 1 || true)"
               version="$(normalize_openclaw_version "$version")"
               if [ -n "$version" ]; then
                 echo "FALLBACK_VERSION_SOURCE=meta_lastTouchedVersion" >> "$RUN_OPENCLAW_META"
@@ -659,9 +673,9 @@ jobs:
           fix_openclaw_permissions() {
             echo "🔧 Fixing file permissions to pass security checks..."
             sudo chmod -R o-w "$(npm root -g)"
-            sudo chmod 700 ~/.openclaw
+            chmod 700 ~/.openclaw
             if [ -f ~/.openclaw/openclaw.json ]; then
-              sudo chmod 600 ~/.openclaw/openclaw.json
+              chmod 600 ~/.openclaw/openclaw.json
             fi
           }
 
@@ -1159,6 +1173,8 @@ jobs:
             "$SRC_DIR"/ "$STAGE_DIR"/
 
           sudo tar -C "$STAGE_DIR" -czf "$OUTPUT_TAR" .
+          # 压缩包是 root 产出、随后由 runner 身份的 rclone 上传，显式放开读权限，不依赖 umask
+          sudo chmod 644 "$OUTPUT_TAR"
 
           actual_size=$(stat -c%s "$OUTPUT_TAR" 2>/dev/null || echo 0)
           if [ ! -s "$OUTPUT_TAR" ]; then
@@ -1471,6 +1487,8 @@ jobs:
             sudo rm -f /tmp/rsstt.tar.gz
             rsstt_tar_output=""
             if rsstt_tar_output=$(sudo tar -czf /tmp/rsstt.tar.gz -C /tmp/local_rsstt . 2>&1); then
+              # 同上：root 产出的包由 runner 身份的 rclone 上传，显式放开读权限
+              sudo chmod 644 /tmp/rsstt.tar.gz 2>/dev/null || true
               rsstt_validate_output=""
               if rsstt_validate_output=$(sudo tar -tzf /tmp/rsstt.tar.gz 2>&1); then
                 actual_size=$(stat -c%s /tmp/rsstt.tar.gz 2>/dev/null || echo 0)
