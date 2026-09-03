@@ -42,21 +42,16 @@ jobs:
       # ============ 环境准备：rclone 安装与挂载 ============
       - name: rclone-install
         run: |
-          # 安装 rclone 命令行工具
-          curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
-          unzip rclone-current-linux-amd64.zip
-          cd rclone-*-linux-amd64
-          sudo mv rclone /usr/bin
-          sudo chmod +x /usr/bin/rclone
+          set -e
+          # 安装 rclone：GitHub Releases 直下 .deb，失败回退 rclone.org 安装脚本
+          bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" install
       - name: rclone-config
         env:
           RCLONE_CONFIG: ${{ secrets.RCLONE }}
         run: |
-          # 写入 rclone 配置文件（来自 GitHub secrets）
-          mkdir -p ~/.config/rclone/
-          cat << EOF > ~/.config/rclone/rclone.conf
-          $RCLONE_CONFIG
-          EOF
+          set -e
+          # 写配置 + 持久化：secret 起步 → 掩码 → Dropbox 恢复优先 → 有效性检查 → 同步回 Dropbox
+          bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" config
       - name: rclone-run
         run: |
           # 挂载 OneDrive 到本地目录（后台运行，vfs 全量缓存模式）

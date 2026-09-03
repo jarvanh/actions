@@ -27,26 +27,19 @@ jobs:
           else
             echo "No running workflows found. Continuing with the workflow execution."
           fi
+      - uses: actions/checkout@v4
       - name: rclone-install
         run: |
-          # 安装 rclone
-          # curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
-          # curl -O https://beta.rclone.org/rclone-beta-latest-linux-amd64.zip
-          # unzip rclone-*-amd64.zip
-          # cd rclone-*-linux-amd64
-          # sudo mv rclone /usr/bin
-          # sudo chmod +x /usr/bin/rclone
-          sudo apt-get update
-          sudo apt-get install -y rclone
+          set -e
+          # 安装 rclone：GitHub Releases 直下 .deb，失败回退 rclone.org 安装脚本
+          bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" install
       - name: rclone-config
         env:
           RCLONE_CONFIG: ${{ secrets.RCLONE }}
         run: |
-          # 写配置文件
-          mkdir -p ~/.config/rclone/
-          cat << EOF > ~/.config/rclone/rclone.conf
-          $RCLONE_CONFIG
-          EOF
+          set -e
+          # 写配置 + 持久化：secret 起步 → 掩码 → Dropbox 恢复优先 → 有效性检查 → 同步回 Dropbox
+          bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" config
       - name: rclone-run
         run: |
           sudo apt-get update
