@@ -15,7 +15,7 @@ jobs:
           tags: tag:ci
 
       - name: Enable Tailscale SSH
-        run: sudo tailscale up --ssh --hostname=ts-test-${{ github.run_id }}
+        run: sudo tailscale set --ssh --hostname=ts-test-${{ github.run_id }}
 
       - name: Stay online for verification
         run: sleep 240
