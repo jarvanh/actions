@@ -15,19 +15,19 @@ jobs:
       # -----------------------------------------------------------
       # 1. 配置并挂载 Rclone (Dropbox)
       # -----------------------------------------------------------
-      - name: Install and Config Rclone
+      - uses: actions/checkout@v4
+      - name: rclone-install
+        run: |
+          set -e
+          # 安装 rclone：GitHub Releases 直下 .deb，失败回退 rclone.org 安装脚本
+          bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" install
+      - name: rclone-config
         env:
           RCLONE_CONFIG: ${{ secrets.RCLONE }}
         run: |
-          # 安装 rclone
-          sudo -v ; curl https://rclone.org/install.sh | sudo bash
-          
-          # 写入配置文件
-          mkdir -p ~/.config/rclone/
-          cat << EOF > ~/.config/rclone/rclone.conf
-          $RCLONE_CONFIG
-          EOF
-
+          set -e
+          # 写配置 + 持久化：secret 起步 → 掩码 → Dropbox 恢复优先 → 有效性检查 → 同步回 Dropbox
+          bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" config
       - name: Mount Dropbox
         run: |
           sudo apt-get update && sudo apt-get install -y fuse3

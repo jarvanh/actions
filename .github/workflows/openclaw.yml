@@ -13,29 +13,28 @@ jobs:
   build:
     concurrency: openclaw-singleton
     runs-on: ubuntu-latest
+    env:
+      TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+      TS_OAUTH_CLIENT_SECRET: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
     steps:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
           node-version: 'current' # 始终使用官方发布的最新版
           
-      - name: Install Rclone
+      - uses: actions/checkout@v4
+      - name: rclone-install
         run: |
-          curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
-          unzip rclone-*-amd64.zip
-          cd rclone-*-linux-amd64
-          sudo mv rclone /usr/bin
-          sudo chmod +x /usr/bin/rclone
-
-      - name: Configure Rclone
+          set -e
+          # 安装 rclone：GitHub Releases 直下 .deb，失败回退 rclone.org 安装脚本
+          bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" install
+      - name: rclone-config
         env:
           RCLONE_CONFIG: ${{ secrets.RCLONE }}
         run: |
-          mkdir -p ~/.config/rclone/
-          cat << EOF > ~/.config/rclone/rclone.conf
-          $RCLONE_CONFIG
-          EOF
-
+          set -e
+          # 写配置 + 持久化：secret 起步 → 掩码 → Dropbox 恢复优先 → 有效性检查 → 同步回 Dropbox
+          bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" config
       - name: Mount Dropbox
         run: |
           sudo apt-get update
@@ -153,28 +152,33 @@ jobs:
           find "$HOME/.openclaw/workspace/skills-data/proactivity" -type f -exec chmod 600 {} + 2>/dev/null || true
           ls -ld "$HOME/proactivity" "$HOME/.openclaw/workspace/skills-data/proactivity"
 
-      - name: Run tmate
-        id: tmate
-        if: ${{ always() }}
-        continue-on-error: true
-        timeout-minutes: 5
-        uses: mxschmitt/action-tmate@v3
+      - name: Setup Tailscale (SSH 调试入口)
+        id: ts
+        if: ${{ always() && env.TS_OAUTH_CLIENT_ID != '' && env.TS_OAUTH_CLIENT_SECRET != '' }}
+        uses: tailscale/github-action@v4
         with:
-          detached: true
-          install-dependencies: true
-          limit-access-to-actor: true
-          
-      - name: Persist tmate connection info
-        if: ${{ always() }}
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
+          tags: tag:ci
+
+      - name: Enable Tailscale SSH
+        id: ts_ssh
+        if: ${{ always() && steps.ts.outcome == 'success' }}
         run: |
           set -euo pipefail
+          TS_HOST="openclaw-${{ github.run_id }}"
+          # 重新 up 以开启 Tailscale SSH 并固定主机名；节点为 ephemeral，job 结束自动移除
+          sudo tailscale up --ssh --hostname="$TS_HOST" --advertise-tags=tag:ci
           {
-            printf 'TMATE_SSH=%s\n' '${{ steps.tmate.outputs.ssh-command }}'
-            printf 'TMATE_SSH_ADDRESS=%s\n' '${{ steps.tmate.outputs.ssh-address }}'
-            printf 'TMATE_WEB=%s\n' '${{ steps.tmate.outputs.web-url }}'
+            printf 'TS_HOST=%s\n' "$TS_HOST"
+            printf 'TS_IP=%s\n' "$(tailscale ip -4)"
             printf 'RUN_URL=%s\n' "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          } > "$HOME/tmate.env"
-          echo "tmate env persisted to $HOME/tmate.env"
+          } > "$HOME/ts.env"
+          echo "SSH 入口: tailscale ssh ubuntu@${TS_HOST}（或 ssh ubuntu@$(tailscale ip -4)）"
+
+      - name: Tailscale secrets missing
+        if: ${{ always() && env.TS_OAUTH_CLIENT_ID == '' && env.TS_OAUTH_CLIENT_SECRET == '' }}
+        run: echo "⚠️ 未配置 TS_OAUTH_CLIENT_ID / TS_OAUTH_CLIENT_SECRET，跳过 Tailscale SSH 调试入口"
 
       - name: Prepare runtime env for later steps
         run: |
@@ -903,7 +907,6 @@ jobs:
         run: |
           if [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] && [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ]; then
             run_url="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-            tmate_log="$RUNNER_TEMP/tmate-connection.log"
             step_log="/tmp/run-openclaw-step.log"
             meta_file="/tmp/run-openclaw-meta.env"
 
@@ -929,12 +932,17 @@ jobs:
             fi
             error_summary=$(printf '%s' "$error_summary" | tail -c 2800)
 
-            tmate_url=""
-            if [ -f "$tmate_log" ]; then
-              tmate_url=$(grep -Eo 'https://tmate\.io/t/[A-Za-z0-9_-]+' "$tmate_log" | tail -n 1 || true)
+            ts_host=""
+            ts_ip=""
+            if [ -f "$HOME/ts.env" ]; then
+              ts_host=$(grep '^TS_HOST=' "$HOME/ts.env" | tail -n 1 | cut -d= -f2- || true)
+              ts_ip=$(grep '^TS_IP=' "$HOME/ts.env" | tail -n 1 | cut -d= -f2- || true)
             fi
-            if [ -z "$tmate_url" ]; then
-              tmate_url="（tmate 链接暂不可用，稍后查看 Actions 日志）"
+            ssh_entry="（Tailscale SSH 暂不可用，稍后查看 Actions 日志）"
+            if [ -n "$ts_host" ] && [ -n "$ts_ip" ]; then
+              ssh_entry="tailscale ssh ubuntu@${ts_host} （或 ssh ubuntu@${ts_ip}）"
+            elif [ -n "$ts_host" ]; then
+              ssh_entry="tailscale ssh ubuntu@${ts_host}"
             fi
 
             current_version=""
@@ -957,7 +965,7 @@ jobs:
             fi
 
             export RUN_URL="$run_url"
-            export TMATE_URL="$tmate_url"
+            export SSH_ENTRY="$ssh_entry"
             export ERROR_SUMMARY="$error_summary"
             export CURRENT_VERSION="$current_version"
             export FALLBACK_VERSION="$fallback_version"
@@ -1008,7 +1016,7 @@ jobs:
               msg+="Fallback 重装阶段耗时(秒): ${fallback_reinstall_duration_sec}"
             fi
             msg+=$'\n\n'
-            msg+="TMate: ${tmate_url}"
+            msg+="SSH 调试入口: ${ssh_entry}"
             msg+=$'\n\n'
             msg+="关键日志:"
             msg+=$'\n'

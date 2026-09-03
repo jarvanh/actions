@@ -110,31 +110,18 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: 安装 rclone（GitHub Releases 直下，失败回退 rclone.org 脚本）
+      - name: rclone-install
         run: |
           set -e
-          RVER=v1.71.2
-          if curl -fsSL --retry 2 --retry-delay 5 --connect-timeout 30 --max-time 300 \
-              -o /tmp/rclone.deb \
-              "https://github.com/rclone/rclone/releases/download/${RVER}/rclone-${RVER}-linux-amd64.deb"; then
-            sudo dpkg -i /tmp/rclone.deb
-          else
-            echo "GitHub Releases 下载失败，回退 rclone.org 安装脚本"
-            curl -fsSL https://rclone.org/install.sh | sudo bash
-          fi
-          rclone version | head -2
-
-      - name: 写入 rclone 配置（含密钥掩码）
+          # 安装 rclone：GitHub Releases 直下 .deb，失败回退 rclone.org 安装脚本
+          bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" install
+      - name: rclone-config
         env:
-          RCLONE_CONFIG_SECRET: ${{ secrets.RCLONE }}
+          RCLONE_CONFIG: ${{ secrets.RCLONE }}
         run: |
-          mkdir -p ~/.config/rclone/
-          cat << EOF > ~/.config/rclone/rclone.conf
-          $RCLONE_CONFIG_SECRET
-          EOF
-
-          # 在 rclone 命令可能打印配置详情前，掩码配置中的嵌套密钥
-          python3 "$GITHUB_WORKSPACE/.github/scripts/openlist/mask_rclone_config.py"
+          set -e
+          # 写配置 + 持久化：secret 起步 → 掩码 → Dropbox 恢复优先 → 有效性检查 → 同步回 Dropbox
+          bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" config
       - name: 验证远端连通并挂载 Dropbox
         run: |
           echo "==========onedrive==========="
