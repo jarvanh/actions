@@ -113,8 +113,11 @@ jobs:
             --log-file /opt/logs/rclone-mount.log --log-level INFO
       - name: install cloudflared
         run: |
-          sudo mkdir ~/.cloudflared/
-          sudo rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
+          sudo mkdir -p ~/.cloudflared/
+          sudo chown -R runner:runner ~/.cloudflared
+          # rclone 以 runner 身份运行（与挂载步骤同）：root 运行会在 token 刷新时把
+          # rclone.conf 回写成 root:600，之后非 root 的 rclone 读取即 EACCES
+          rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
       - name: Check if the tunnel is running
@@ -485,7 +488,7 @@ jobs:
           fi
           
           echo "==========/var/lib/emby==========="
-          sudo ls -la /var/lib/emby
+          ls -la /var/lib/emby
       - name: run emby
         run: |
           sudo nohup /opt/emby-server/bin/emby-server > /opt/logs/emby-console.log 2>&1 &
@@ -1011,7 +1014,7 @@ jobs:
 
       - name: sleep
         run: |
-          sudo sleep 340m
+          sleep 340m
       - name: backup emby data
         if: always()
         run: |
