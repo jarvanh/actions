@@ -44,24 +44,20 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y fuse3
-          sudo mkdir /content/
-          sudo mkdir /content/drive/
-          sudo mkdir /content/drive/MyDrive/
-          sudo mkdir /content/drive/MyDrive/my
-          sudo mkdir /content/drive/MyDrive/1024
-          sudo nohup rclone mount 1024: /content/drive/MyDrive/1024 --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
-          sudo mkdir /content/drive/MyDrive/my/i
-          sudo nohup rclone mount i: /content/drive/MyDrive/my/i --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
-          sudo mkdir /content/drive/MyDrive/my/j
-          sudo nohup rclone mount j: /content/drive/MyDrive/my/j --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
-          sudo mkdir /content/drive/MyDrive/my/k
-          sudo nohup rclone mount k: /content/drive/MyDrive/my/k --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
-          sudo mkdir /content/drive/MyDrive/my/av1
-          sudo nohup rclone mount av1: /content/drive/MyDrive/my/av1 --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
-          sudo mkdir /content/drive/MyDrive/my/av2
-          sudo nohup rclone mount av2: /content/drive/MyDrive/my/av2 --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
-          sudo mkdir /content/drive/MyDrive/my/dropbox
-          sudo nohup rclone mount dropbox: /content/drive/MyDrive/my/dropbox --allow-non-empty --no-gzip-encoding --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
+          sudo mkdir -p /content/drive/MyDrive/my /content/drive/MyDrive/1024 \
+            /content/drive/MyDrive/my/i /content/drive/MyDrive/my/j /content/drive/MyDrive/my/k \
+            /content/drive/MyDrive/my/av1 /content/drive/MyDrive/my/av2 /content/drive/MyDrive/my/dropbox
+          # 挂载改用 runner 用户（与 emby.yml 一致）：root 身份挂载时 rclone 刷新 token 会把
+          # rclone.conf 回写成 root:600，之后非 root 的 rclone（含下面的 lsf）读取即 EACCES
+          grep -q '^user_allow_other' /etc/fuse.conf 2>/dev/null || echo user_allow_other | sudo tee -a /etc/fuse.conf >/dev/null
+          sudo chown -R runner:runner /content
+          nohup rclone mount 1024: /content/drive/MyDrive/1024 --config /home/runner/.config/rclone/rclone.conf --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
+          nohup rclone mount i: /content/drive/MyDrive/my/i --config /home/runner/.config/rclone/rclone.conf --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
+          nohup rclone mount j: /content/drive/MyDrive/my/j --config /home/runner/.config/rclone/rclone.conf --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
+          nohup rclone mount k: /content/drive/MyDrive/my/k --config /home/runner/.config/rclone/rclone.conf --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
+          nohup rclone mount av1: /content/drive/MyDrive/my/av1 --config /home/runner/.config/rclone/rclone.conf --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
+          nohup rclone mount av2: /content/drive/MyDrive/my/av2 --config /home/runner/.config/rclone/rclone.conf --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
+          nohup rclone mount dropbox: /content/drive/MyDrive/my/dropbox --config /home/runner/.config/rclone/rclone.conf --allow-non-empty --no-gzip-encoding --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
           echo "==========i==========="
           rclone lsf i:
           echo "==========j==========="
@@ -88,11 +84,18 @@ jobs:
         run: |
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
-          sudo mkdir ~/.cloudflared/
-          sudo rclone copy i:SyncBack/'${{ secrets.VD }}'/.cloudflared ~/.cloudflared -vv
+          sudo mkdir -p ~/.cloudflared/
+          sudo chown -R runner:runner ~/.cloudflared
+          # rclone 以 runner 身份运行（与挂载步骤同）：root 运行会在 token 刷新时回写 rclone.conf 属主
+          rclone copy i:SyncBack/'${{ secrets.VD }}'/.cloudflared ~/.cloudflared -vv
           cloudflared tunnel route dns j j.'${{ secrets.VD }}'.eu.org
           nohup cloudflared tunnel run --url http://127.0.0.1:8096 j &
       - name: sleep
         run: |
-          sudo sleep 340m && curl -X POST -H "X-Emby-Token: d81ced113e714504aeac7c42d5dbda57" http://127.0.0.1:8096/System/Shutdown
+          # 密钥不进 argv（同机任何用户 ps 可见）：写入 600 的临时 curl 配置，用 --config 载入
+          EMBY_CURL_CFG="$(mktemp)"; chmod 600 "$EMBY_CURL_CFG"
+          printf 'header = "X-Emby-Token: %s"\n' 'd81ced113e714504aeac7c42d5dbda57' > "$EMBY_CURL_CFG"
+          sleep 340m
+          curl --config "$EMBY_CURL_CFG" -X POST http://127.0.0.1:8096/System/Shutdown
+          rm -f "$EMBY_CURL_CFG"
           sleep 10m

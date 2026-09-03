@@ -30,8 +30,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y fuse3
-          sudo mkdir /dropbox
-          sudo nohup rclone mount dropbox: /dropbox --vfs-cache-mode full &
+          sudo mkdir -p /dropbox
+          # 挂载改用 runner 用户（与 emby.yml 一致）：root 身份挂载时 rclone 刷新 token 会把
+          # rclone.conf 回写成 root:600，之后非 root 的 rclone（含下面的 lsf）读取即 EACCES
+          # sub-store 容器以 root 挂载 /dropbox/self-hosted/sub-store，非 root 挂载必须开 --allow-other
+          grep -q '^user_allow_other' /etc/fuse.conf 2>/dev/null || echo user_allow_other | sudo tee -a /etc/fuse.conf >/dev/null
+          sudo chown runner:runner /dropbox
+          nohup rclone mount dropbox: /dropbox --config /home/runner/.config/rclone/rclone.conf --vfs-cache-mode full --allow-other &
           # mkdir -p ~/sub-store
           # rclone copy onedrive:self-hosted/sub-store ~/sub-store
           echo "==========onedrive==========="
@@ -44,8 +49,10 @@ jobs:
         run: |
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
-          sudo mkdir ~/.cloudflared/
-          sudo rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
+          sudo mkdir -p ~/.cloudflared/
+          sudo chown -R runner:runner ~/.cloudflared
+          # rclone 以 runner 身份运行（与挂载步骤同）：root 运行会在 token 刷新时回写 rclone.conf 属主
+          rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
           
           cloudflared tunnel list
           # 获取隧道列表
@@ -77,7 +84,7 @@ jobs:
           nohup cloudflared tunnel run --url http://127.0.0.1:3001 sub-store &
       - name: sleep
         run: |
-          sudo sleep 350m          
+          sleep 350m          
       - name: Stop
         run: |
           docker stop sub-store

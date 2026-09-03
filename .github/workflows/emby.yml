@@ -113,8 +113,11 @@ jobs:
             --log-file /opt/logs/rclone-mount.log --log-level INFO
       - name: install cloudflared
         run: |
-          sudo mkdir ~/.cloudflared/
-          sudo rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
+          sudo mkdir -p ~/.cloudflared/
+          sudo chown -R runner:runner ~/.cloudflared
+          # rclone 以 runner 身份运行（与挂载步骤同）：root 运行会在 token 刷新时把
+          # rclone.conf 回写成 root:600，之后非 root 的 rclone 读取即 EACCES
+          rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
       - name: Check if the tunnel is running
@@ -724,25 +727,53 @@ jobs:
               | sed -E 's/api_key=[^& ]*/api_key=[redacted]/g; s/X-Emby-Token=[^& ]*/X-Emby-Token=[redacted]/g; s#https?://[^ "]*#<url>#g'
           }
 
+          # 认证信息一律不进 argv：同机任何用户 ps 都能看到命令行，密钥、URL 里的
+          # api_key 都会泄露。统一写进 600 的临时 curl 配置，用 --config 载入。
+          emby_curl_cfg() { # $1=header 行(可为空) $2=完整 URL
+            local cfg
+            cfg=$(mktemp)
+            chmod 600 "$cfg"
+            [ -n "$1" ] && printf 'header = "%s"\n' "$1" > "$cfg"
+            printf 'url = "%s"\n' "$2" >> "$cfg"
+            printf '%s' "$cfg"
+          }
+
+          emby_curl_code() { # $1=配置文件 $2=输出文件
+            curl --config "$1" -s -m 8 -o "$2" -w '%{http_code}' || echo 000
+          }
+
+          emby_hdr() { printf 'X-Emby-Token: %s' "$EMBY_API_KEY"; }
+          emby_query_url() { # $1=路径
+            case "$1" in
+              *\?*) printf '%s%s&api_key=%s' "$EMBY" "$1" "$EMBY_API_KEY";;
+              *)    printf '%s%s?api_key=%s' "$EMBY" "$1" "$EMBY_API_KEY";;
+            esac
+          }
+
           # Emby API 请求：优先用自检选出的认证方式，失败自动回退另一种，返回 http 码
           emby_get() { # $1=路径(含前导 /) $2=输出文件
-            local path=$1 out=$2 code
+            local path=$1 out=$2 code cfg
             if [ "$AUTH_MODE" = "query" ]; then
-              case "$path" in
-                *\?*) code=$(curl -s -m 8 -o "$out" -w '%{http_code}' "$EMBY$path&api_key=$EMBY_API_KEY");;
-                *)    code=$(curl -s -m 8 -o "$out" -w '%{http_code}' "$EMBY$path?api_key=$EMBY_API_KEY");;
-              esac
+              cfg=$(emby_curl_cfg "" "$(emby_query_url "$path")")
+              code=$(emby_curl_code "$cfg" "$out"); rm -f "$cfg"
               if [ "$code" = "200" ]; then printf '%s' "$code"; return 0; fi
-              code=$(curl -s -m 8 -o "$out" -w '%{http_code}' -H "X-Emby-Token: $EMBY_API_KEY" "$EMBY$path")
+              cfg=$(emby_curl_cfg "$(emby_hdr)" "$EMBY$path")
+              code=$(emby_curl_code "$cfg" "$out"); rm -f "$cfg"
             else
-              code=$(curl -s -m 8 -o "$out" -w '%{http_code}' \
-                       -H "X-Emby-Token: $EMBY_API_KEY" "$EMBY$path")
+              cfg=$(emby_curl_cfg "$(emby_hdr)" "$EMBY$path")
+              code=$(emby_curl_code "$cfg" "$out"); rm -f "$cfg"
               if [ "$code" = "200" ]; then printf '%s' "$code"; return 0; fi
-              case "$path" in
-                *\?*) code=$(curl -s -m 8 -o "$out" -w '%{http_code}' "$EMBY$path&api_key=$EMBY_API_KEY");;
-                *)    code=$(curl -s -m 8 -o "$out" -w '%{http_code}' "$EMBY$path?api_key=$EMBY_API_KEY");;
-              esac
+              cfg=$(emby_curl_cfg "" "$(emby_query_url "$path")")
+              code=$(emby_curl_code "$cfg" "$out"); rm -f "$cfg"
             fi
+            printf '%s' "$code"
+          }
+
+          emby_probe() { # $1=header 行(可为空) $2=完整 URL $3=输出文件
+            local cfg code
+            cfg=$(emby_curl_cfg "$1" "$2")
+            code=$(emby_curl_code "$cfg" "$3")
+            rm -f "$cfg"
             printf '%s' "$code"
           }
 
@@ -755,11 +786,11 @@ jobs:
 
           # Emby 认证矩阵自检：优雅停机用同一密钥的 X-Emby-Token 头是成功的，
           # 这里逐个验证认证方式与端点，定位 playlog 里 401 的真正原因（公开日志只输出 http 码）
-          SC_SYS=$(curl -s -m 8 -o /dev/null -w '%{http_code}' -H "X-Emby-Token: $EMBY_API_KEY" "$EMBY/emby/System/Info")
-          SC1=$(curl -s -m 8 -o /tmp/pl-sessions.json -w '%{http_code}' -H "X-Emby-Token: $EMBY_API_KEY" "$EMBY/emby/Sessions")
-          SC2=$(curl -s -m 8 -o /dev/null -w '%{http_code}' "$EMBY/emby/Sessions?api_key=$EMBY_API_KEY")
-          SC3=$(curl -s -m 8 -o /dev/null -w '%{http_code}' -H "X-MediaBrowser-Token: $EMBY_API_KEY" "$EMBY/emby/Sessions")
-          SC4=$(curl -s -m 8 -o /dev/null -w '%{http_code}' -H "Authorization: MediaBrowser Token=\"$EMBY_API_KEY\"" "$EMBY/emby/Sessions")
+          SC_SYS=$(emby_probe "$(emby_hdr)" "$EMBY/emby/System/Info" /dev/null)
+          SC1=$(emby_probe "$(emby_hdr)" "$EMBY/emby/Sessions" /tmp/pl-sessions.json)
+          SC2=$(emby_probe "" "$EMBY/emby/Sessions?api_key=$EMBY_API_KEY" /dev/null)
+          SC3=$(emby_probe "X-MediaBrowser-Token: $EMBY_API_KEY" "$EMBY/emby/Sessions" /dev/null)
+          SC4=$(emby_probe "Authorization: MediaBrowser Token=\"$EMBY_API_KEY\"" "$EMBY/emby/Sessions" /dev/null)
           echo "Emby 认证矩阵: System/Info(头)=$SC_SYS | Sessions 头X-Emby-Token=$SC1 查询api_key=$SC2 头X-MediaBrowser-Token=$SC3 头Authorization=$SC4"
           if [ "$SC1" = "200" ]; then
             AUTH_MODE=header
@@ -1011,7 +1042,7 @@ jobs:
 
       - name: sleep
         run: |
-          sudo sleep 340m
+          sleep 340m
       - name: backup emby data
         if: always()
         run: |
@@ -1042,9 +1073,12 @@ jobs:
               exit 0
           fi
 
-          # 优雅停机
-          SHUTDOWN_CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
-            -H "X-Emby-Token: ${{ secrets.EMBY_API_TOKEN }}" http://127.0.0.1:8096/System/Shutdown || echo 000)
+          # 优雅停机（密钥不进 argv：ps 对同机任何用户可见，改走 600 的临时 curl 配置）
+          EMBY_CURL_CFG="$(mktemp)"; chmod 600 "$EMBY_CURL_CFG"
+          printf 'header = "X-Emby-Token: %s"\n' '${{ secrets.EMBY_API_TOKEN }}' > "$EMBY_CURL_CFG"
+          SHUTDOWN_CODE=$(curl --config "$EMBY_CURL_CFG" -s -o /dev/null -w '%{http_code}' -X POST \
+            http://127.0.0.1:8096/System/Shutdown || echo 000)
+          rm -f "$EMBY_CURL_CFG"
           echo "优雅停机: http=$SHUTDOWN_CODE（401 说明该密钥已失效，Emby 只能被 runner 强杀）"
           sleep 15
 
