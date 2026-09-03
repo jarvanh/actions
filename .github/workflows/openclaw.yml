@@ -175,15 +175,16 @@ jobs:
         if: ${{ always() && steps.ts.outcome == 'success' }}
         run: |
           set -euo pipefail
-          TS_HOST="openclaw-${{ github.run_id }}"
-          # 增量开启 Tailscale SSH 并固定主机名；节点为 ephemeral，job 结束自动移除
-          sudo tailscale set --ssh --hostname="$TS_HOST"
+          # 固定主机名 openclaw（singleton 并发下不会撞名）；节点为 ephemeral，job 结束自动移除
+          sudo tailscale set --ssh --hostname=openclaw
+          # 回读实际注册的 DNS 短名（极端情况同名冲突会被加后缀，以实际为准）
+          TS_HOST="$(tailscale status --json | jq -r '.Self.DNSName' | cut -d. -f1)"
           {
             printf 'TS_HOST=%s\n' "$TS_HOST"
             printf 'TS_IP=%s\n' "$(tailscale ip -4)"
             printf 'RUN_URL=%s\n' "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           } > "$HOME/ts.env"
-          echo "SSH 入口: tailscale ssh runner@${TS_HOST}（或 ssh runner@$(tailscale ip -4)）"
+          echo "SSH 入口: ssh runner@${TS_HOST}"
 
       - name: Tailscale secrets missing
         if: ${{ always() && env.TS_OAUTH_CLIENT_ID == '' && env.TS_OAUTH_CLIENT_SECRET == '' }}
