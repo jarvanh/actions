@@ -468,6 +468,7 @@ sudo EMBY_USER="$EMBY_USER" python3 emby_guard.py <emby-data-root>   # 例：/va
 | `oe.<VD>.eu.org` 登录不上 | 是否收到 `🔐 OpenList 凭据` 通知 | 没收到 = 密码没变，用 `admin` + `OPENLIST_ADMIN_PASSWORD`；收到 = 用通知里的密码（仅本轮有效） |
 | Emby 启动成空库 | `install emby` 步骤 | 恢复三级全失败，或 `emby_guard.py` 校验不通过 |
 | 备份没回传 | 收尾步骤 | `/tmp/EMBY_READY_FOR_BACKUP` 不存在（Emby 未成功启动），或磁盘预检未过 |
+| 播放通知片名显示`未知` | 归档的 `playlog.log` | 反查全程 401 = secret 密钥在恢复库里失效（Tokens_2 中无此登录态或 IsActive=0）。`run emby` 步骤启动前会把 secret 密钥以专属设备登录态写回 `authentication.db` 并激活（幂等自愈）；若日志出现"密钥自愈失败"则需人工核对 Emby 版本 schema |
 | 播放通知没来 | `playlog.log` 的 TG 通道自检 | ge2o 日志格式变化 / Emby 401 / 300s 去重窗口内 |
 | 点击播放后要等很久才起播 | `emby-console.log` + `warmup.log` | ① Emby 现场 ffprobe（该条目此前未探测过，走挂载随机读）② 转码启动（播放通知标 `[中转]`）③ odlink 冷解析 ④ 播放器缓冲——见下方"起播慢怎么定位" |
 

@@ -491,9 +491,41 @@ jobs:
           ls -la /var/lib/emby
       - name: run emby
         run: |
-          sudo nohup /opt/emby-server/bin/emby-server > /opt/logs/emby-console.log 2>&1 &
-          # 只有 install emby 阶段完成了数据完整性校验，才允许后续备份步骤执行。
-          touch /tmp/EMBY_READY_FOR_BACKUP
+          main() {
+            # API 密钥自愈：恢复出的库里若没有 secret 密钥对应的登录态（历史教训：
+            # Tokens_2 里的记录被登出/迁移后置 IsActive=0，playlog 反查/预热/优雅停机
+            # 会全程 401，播放通知片名显示"未知"），启动 Emby 前把它写回 Tokens_2 并
+            # 激活——以一台专属设备的登录态存在，幂等可重跑。失败不阻塞启动。
+            KEY="${{ secrets.EMBY_API_TOKEN }}"
+            DB=/var/lib/emby/data/authentication.db
+            if [ -n "$KEY" ] && [ -f "$DB" ]; then
+              which sqlite3 >/dev/null 2>&1 || sudo apt-get install -y -qq sqlite3 >/dev/null 2>&1 || true
+              ESC=${KEY//\'/\'\'}
+              if sudo sqlite3 "$DB" "PRAGMA foreign_keys=ON; BEGIN;
+                INSERT INTO Devices2 (ReportedDeviceId, ReportedName, CustomName)
+                  SELECT 'emby302-workflow', 'emby302 workflow', 'workflow'
+                  WHERE NOT EXISTS (SELECT 1 FROM Devices2 WHERE ReportedDeviceId='emby302-workflow');
+                INSERT INTO Tokens_2 (AccessToken, DeviceId, AppName, AppVersion, UserId, IsActive, DateCreatedInt, DateLastActivityInt)
+                  SELECT '$ESC',
+                         (SELECT Id FROM Devices2 WHERE ReportedDeviceId='emby302-workflow'),
+                         'emby302 workflow', '1.0',
+                         COALESCE((SELECT UserId FROM Tokens_2 WHERE IsActive=1 AND UserId IS NOT NULL
+                                   ORDER BY DateLastActivityInt DESC LIMIT 1), 1),
+                         1, strftime('%s','now'), strftime('%s','now')
+                  WHERE NOT EXISTS (SELECT 1 FROM Tokens_2 WHERE AccessToken='$ESC');
+                UPDATE Tokens_2 SET IsActive=1 WHERE AccessToken='$ESC';
+                COMMIT;" 2>/dev/null; then
+                echo "🔑 Emby API 密钥已对齐（Tokens_2 专属登录态，幂等；密钥内容不打印）"
+              else
+                echo "::warning::Emby API 密钥自愈失败（schema 不符？），反查/预热/停机可能 401"
+              fi
+            fi
+
+            sudo nohup /opt/emby-server/bin/emby-server > /opt/logs/emby-console.log 2>&1 &
+            # 只有 install emby 阶段完成了数据完整性校验，才允许后续备份步骤执行。
+            touch /tmp/EMBY_READY_FOR_BACKUP
+          }
+          main
       - name: install ge2o
         if: env.PLAYBACK_MODE_INPUT != 'direct'
         run: |
