@@ -709,9 +709,21 @@ def wait_mihomo(timeout=40):
 
 
 def resolve_mihomo_download_url():
-    req = urllib.request.Request(MIHOMO_RELEASE_API, headers={'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json'})
-    with urllib.request.urlopen(req, timeout=30) as r:
-        data = json.load(r)
+    headers = {'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json'}
+    try:
+        req = urllib.request.Request(MIHOMO_RELEASE_API, headers=headers)
+        with urllib.request.urlopen(req, timeout=30) as r:
+            data = json.load(r)
+    except Exception as e:
+        # 匿名调用受 runner 共享出口 IP 的 60 次/h 配额限制，失败（限流等）时
+        # 回退认证调用：优先 workflow 注入的内置 GITHUB_TOKEN，其次 GH_TOKEN(PAT)
+        token = (os.environ.get('GITHUB_TOKEN') or os.environ.get('GH_TOKEN') or '').strip()
+        if not token:
+            raise
+        log_progress('github_api_anonymous_fallback', reason=str(e))
+        req = urllib.request.Request(MIHOMO_RELEASE_API, headers={**headers, 'Authorization': f'Bearer {token}'})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            data = json.load(r)
     for asset in data.get('assets', []):
         name = str(asset.get('name') or '')
         if 'linux-amd64-compatible' in name and name.endswith('.gz'):

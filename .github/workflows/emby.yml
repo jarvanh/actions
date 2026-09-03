@@ -740,14 +740,6 @@ jobs:
           SC=$(emby_get /emby/Sessions /tmp/pl-sessions.json)
           SN=$(jq 'if type=="array" then length else ((.Items // []) | length) end' /tmp/pl-sessions.json 2>/dev/null || echo jq失败)
           echo "Emby Sessions 自检: http=$SC 会话数=$SN 认证方式=$AUTH_MODE"
-          # TG 通道自检：结果只落 playlog.log（收尾会归档），不再单独推一条通知，
-          # 以免与"启动/播放/收尾"三类通知混在一起刷屏。
-          TC=$(curl -s -m 10 -o /tmp/pl-tg.json -w '%{http_code}' \
-                 -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
-                 --data-urlencode "chat_id=$TG_CHAT_ID" \
-                 --data-urlencode "text=.")
-          echo "TG 通道自检: http=$TC resp=$(head -c 200 /tmp/pl-tg.json 2>/dev/null)"
-
           # 去重（滑动窗口）：同一 item 的持续播放只推一次。
           # 每次命中都刷新"最后请求时间"，间隔超过 300s 才视为新的一次播放；
           # 两个数据源共享 STATE（flock 串行化）

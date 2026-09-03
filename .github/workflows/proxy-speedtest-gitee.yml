@@ -36,6 +36,8 @@ jobs:
           PROXY_SPEEDTEST_DIRECT_BASELINE_MAX_ATTEMPTS: '5'
           PROXY_SPEEDTEST_MODE: push-only
           GH_TOKEN: ${{ secrets.PAT }}
+          # 内置 GITHUB_TOKEN：GitHub API 匿名调用失败（共享出口 IP 60 次/h 限流）时的认证回退
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # 已有 Gist 的 id：传入后「更新」同一 Gist 而非每轮新建。
           # 首次留空会自动新建；到 Gist 页面复制 URL 末尾的 id 回填到 Secrets 即可。
           PROXY_SPEEDTEST_GIST_ID: ${{ secrets.PROXY_SPEEDTEST_GIST_ID }}

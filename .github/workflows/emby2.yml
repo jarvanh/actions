@@ -64,8 +64,20 @@ jobs:
           echo "==========dropbox==========="
           rclone lsf dropbox:
       - name: install emby
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          curl -L -o emby-server.deb $(curl -s https://api.github.com/repos/MediaBrowser/Emby.Releases/releases/latest | grep -oP '"browser_download_url": "\K(.*emby-server-deb.*amd64.deb)(?=")')
+          # 匿名调 GitHub API：runner 共享出口 IP 的匿名配额（60 次/h）极易耗尽，
+          # 限流响应里没有 browser_download_url，此时回退用内置 GITHUB_TOKEN 认证重试
+          RELEASE_JSON=$(curl -s https://api.github.com/repos/MediaBrowser/Emby.Releases/releases/latest)
+          if ! echo "$RELEASE_JSON" | grep -q '"browser_download_url"'; then
+            echo "匿名 GitHub API 调用失败（可能限流），回退 secrets.GITHUB_TOKEN 认证重试"
+            RELEASE_JSON=$(curl -s -H "Authorization: Bearer $GH_TOKEN" \
+              https://api.github.com/repos/MediaBrowser/Emby.Releases/releases/latest)
+          fi
+          DEB_URL=$(echo "$RELEASE_JSON" | grep -oP '"browser_download_url": "\K(.*emby-server-deb.*amd64.deb)(?=")' || true)
+          [ -n "$DEB_URL" ] || { echo "::error::未获取到 Emby 最新版下载地址（GitHub API 异常/限流）"; exit 1; }
+          curl -L -o emby-server.deb "$DEB_URL"
           sudo dpkg -i emby-server.deb
           while true; do
               if [ -d /var/lib/emby ]; then
