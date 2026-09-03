@@ -189,6 +189,31 @@ jobs:
         if: ${{ always() && env.TS_OAUTH_CLIENT_ID == '' && env.TS_OAUTH_CLIENT_SECRET == '' }}
         run: echo "⚠️ 未配置 TS_OAUTH_CLIENT_ID / TS_OAUTH_CLIENT_SECRET，跳过 Tailscale SSH 调试入口"
 
+      - name: Notify Tailscale SSH entry
+        if: ${{ always() && steps.ts_ssh.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -euo pipefail
+          # 每次 runner 就绪都推送 SSH 入口；通知失败不影响主流程
+          . "$HOME/ts.env"
+          msg="🟢 OpenClaw runner 已就绪"
+          msg+=$'\n\n'
+          msg+="SSH: ssh runner@${TS_HOST}"
+          msg+=$'\n'
+          msg+="IP: ssh runner@${TS_IP}"
+          msg+=$'\n'
+          msg+="Run: ${RUN_URL}"
+          payload=$(jq -n --arg chat_id "$TELEGRAM_CHAT_ID" --arg text "$msg" \
+            '{chat_id: $chat_id, text: $text, disable_web_page_preview: true}')
+          curl -fsS --retry 3 --retry-delay 2 --max-time 20 \
+            -X POST -H 'Content-Type: application/json' \
+            -d "$payload" \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" > /dev/null
+          echo "已推送 SSH 入口通知: ssh runner@${TS_HOST}"
+
       - name: Prepare runtime env for later steps
         run: |
           set -euo pipefail
