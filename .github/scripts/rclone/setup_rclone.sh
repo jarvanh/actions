@@ -2,7 +2,8 @@
 # rclone 一键引导：安装 + 配置 + 掩码 + 持久化（所有 workflow 统一调用）。
 #
 # 用法: setup_rclone.sh [install|config]
-#   install — 安装 rclone：GitHub Releases 直下固定版本 .deb，失败回退 rclone.org 安装脚本
+#   install — 安装 rclone：GitHub Releases 直下最新稳定版 .deb（可用 RCLONE_VERSION
+#             覆盖）；版本号解析不到或下载失败，回退 rclone.org 安装脚本（同为最新稳定版）
 #   config  — rclone.conf 引导与持久化：
 #       1. secret 起步：RCLONE_CONFIG（step env 注入，防文本注入被 bash 展开）写入本地 conf
 #       2. 掩码敏感值（::add-mask::）——每次 conf 变更后都重新掩一遍
@@ -128,17 +129,47 @@ write_secret_conf() {
   chmod 600 "$CONF"
 }
 
-do_install() {
-  # 安装 rclone：GitHub Releases 直下 .deb，失败回退 rclone.org 安装脚本
-  local rver=v1.71.2
-  if curl -fsSL --retry 2 --retry-delay 5 --connect-timeout 30 --max-time 300 \
-      -o /tmp/rclone.deb \
-      "https://github.com/rclone/rclone/releases/download/${rver}/rclone-${rver}-linux-amd64.deb"; then
-    sudo dpkg -i /tmp/rclone.deb
-  else
-    echo "GitHub Releases 下载失败，回退 rclone.org 安装脚本"
-    curl -fsSL https://rclone.org/install.sh | sudo bash
+# 解析 rclone 最新稳定版 tag；解析不到返回非 0，由调用方改走 rclone.org 安装脚本。
+# 不走 GitHub API（未鉴权 60 次/小时，共享 runner IP 极易 403），改取 releases/latest 的
+# 302 Location，与下载同源且无限流；downloads.rclone.org/version.txt 作次选。
+resolve_latest_version() {
+  local tag=""
+  tag="$(curl -sI --retry 2 --retry-delay 5 --connect-timeout 15 --max-time 60 \
+      https://github.com/rclone/rclone/releases/latest 2>/dev/null \
+      | tr -d '\r' \
+      | awk 'tolower($1)=="location:"{print $2}' \
+      | sed -n 's#.*/tag/##p' | tail -n 1 || true)"
+  if [ -z "$tag" ]; then
+    tag="$(curl -fsSL --retry 2 --retry-delay 5 --connect-timeout 15 --max-time 60 \
+        https://downloads.rclone.org/version.txt 2>/dev/null \
+        | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)"
   fi
+  [ -n "$tag" ] || return 1
+  printf '%s\n' "$tag"
+}
+
+do_install() {
+  # 安装 rclone：GitHub Releases 直下 .deb，跟踪最新稳定版（RCLONE_VERSION 可覆盖）
+  local rver="${RCLONE_VERSION:-}"
+  if [ -z "$rver" ]; then
+    rver="$(resolve_latest_version || true)"
+  fi
+
+  if [ -n "$rver" ]; then
+    echo "目标 rclone 版本: $rver"
+    if curl -fsSL --retry 2 --retry-delay 5 --connect-timeout 30 --max-time 300 \
+        -o /tmp/rclone.deb \
+        "https://github.com/rclone/rclone/releases/download/${rver}/rclone-${rver}-linux-amd64.deb"; then
+      sudo dpkg -i /tmp/rclone.deb
+      rclone version | head -2
+      return 0
+    fi
+    echo "::warning::GitHub Releases 下载 ${rver} 失败，回退 rclone.org 安装脚本"
+  else
+    echo "::warning::无法解析 rclone 最新版本号，改用 rclone.org 安装脚本"
+  fi
+
+  curl -fsSL https://rclone.org/install.sh | sudo bash
   rclone version | head -2
 }
 
