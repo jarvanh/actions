@@ -30,9 +30,13 @@ jobs:
           sudo apt-get install -y fuse3
           sudo mkdir -p /onedrive
           # 尝试卸载已挂载的目录（如果存在）
-          sudo fusermount -uz /onedrive 2>/dev/null || true
+          fusermount -uz /onedrive 2>/dev/null || true
+          # 挂载改用 runner 用户（与 emby.yml 一致）：root 身份挂载时 rclone 刷新 token 会把
+          # rclone.conf 回写成 root:600，之后非 root 的 rclone 读取即 EACCES
+          grep -q '^user_allow_other' /etc/fuse.conf 2>/dev/null || echo user_allow_other | sudo tee -a /etc/fuse.conf >/dev/null
+          sudo chown runner:runner /onedrive
           # 启动 rclone mount
-          sudo rclone mount onedrive: /onedrive --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G --daemon
+          rclone mount onedrive: /onedrive --config /home/runner/.config/rclone/rclone.conf --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G --daemon
           # 等待挂载完成
           sleep 5
       - name: run pixivutil2

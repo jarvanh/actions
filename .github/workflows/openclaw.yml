@@ -183,7 +183,7 @@ jobs:
             printf 'TS_IP=%s\n' "$(tailscale ip -4)"
             printf 'RUN_URL=%s\n' "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           } > "$HOME/ts.env"
-          echo "SSH 入口: tailscale ssh ubuntu@${TS_HOST}（或 ssh ubuntu@$(tailscale ip -4)）"
+          echo "SSH 入口: tailscale ssh runner@${TS_HOST}（或 ssh runner@$(tailscale ip -4)）"
 
       - name: Tailscale secrets missing
         if: ${{ always() && env.TS_OAUTH_CLIENT_ID == '' && env.TS_OAUTH_CLIENT_SECRET == '' }}
@@ -954,9 +954,9 @@ jobs:
             fi
             ssh_entry="（Tailscale SSH 暂不可用，稍后查看 Actions 日志）"
             if [ -n "$ts_host" ] && [ -n "$ts_ip" ]; then
-              ssh_entry="tailscale ssh ubuntu@${ts_host} （或 ssh ubuntu@${ts_ip}）"
+              ssh_entry="tailscale ssh runner@${ts_host} （或 ssh runner@${ts_ip}）"
             elif [ -n "$ts_host" ]; then
-              ssh_entry="tailscale ssh ubuntu@${ts_host}"
+              ssh_entry="tailscale ssh runner@${ts_host}"
             fi
 
             current_version=""

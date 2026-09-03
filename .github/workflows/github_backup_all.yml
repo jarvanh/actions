@@ -55,7 +55,11 @@ jobs:
           mkdir -p "$BACKUP_DIR"
           
           # 获取用户所有的仓库 (包括 private 和 public)
-          REPOS=$(curl -s -H "Authorization: token $GH_TOKEN" "https://api.github.com/user/repos?per_page=100&type=owner" | jq -r '.[].ssh_url')
+          # PAT 不进 argv（同机任何用户 ps 可见）：写入 600 的临时 curl 配置，用 --config 载入
+          GH_CURL_CFG="$(mktemp)"; chmod 600 "$GH_CURL_CFG"
+          printf 'header = "Authorization: token %s"\n' "$GH_TOKEN" > "$GH_CURL_CFG"
+          REPOS=$(curl --config "$GH_CURL_CFG" -s "https://api.github.com/user/repos?per_page=100&type=owner" | jq -r '.[].ssh_url')
+          rm -f "$GH_CURL_CFG"
           
           if [ -z "$REPOS" ]; then
             echo "未找到任何仓库，请检查 PAT 权限。"
@@ -67,9 +71,14 @@ jobs:
             echo "----------------------------------------"
             echo "正在处理仓库: $REPO_NAME ..."
             
-            CLONE_URL=$(echo $REPO | sed -e "s/git@github.com:/https:\/\/$GH_TOKEN@github.com\//")
-            
-            git clone --mirror "$CLONE_URL" "$BACKUP_DIR/$REPO_NAME.git" || {
+            # PAT 不进 argv：用 GIT_CONFIG_* 环境变量注入 http.extraheader
+            # （环境变量只在 /proc/<pid>/environ，默认 ps 不显示；URL 里带凭据则会被 ps 看到）
+            CLONE_URL=$(echo $REPO | sed -e 's#git@github.com:#https://github.com/#')
+
+            GIT_CONFIG_COUNT=1 \
+            GIT_CONFIG_KEY_0=http.extraheader \
+            GIT_CONFIG_VALUE_0="Authorization: token $GH_TOKEN" \
+              git clone --mirror "$CLONE_URL" "$BACKUP_DIR/$REPO_NAME.git" || {
               echo "❌ $REPO_NAME 备份失败（可能已被 GitHub 禁用或访问受限），跳过此仓库。"
               rm -rf "$BACKUP_DIR/$REPO_NAME.git"
             }
