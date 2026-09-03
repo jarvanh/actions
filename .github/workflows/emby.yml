@@ -842,24 +842,38 @@ jobs:
             printf '%s' "${name:-未知}"
           }
 
+          # HTML 转义：片名里的 & < > 会破坏 parse_mode=HTML 的解析（解析失败 = 整条通知丢失）
+          esc_html() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+
           notify() { # $1=KIND $2=IID [$3=NAME]
-            local kind=$1 iid=$2 name=$3 code link text
+            local kind=$1 iid=$2 name=$3 code link text plain
             claim "$iid" || return 0
             if [ -z "$name" ]; then
               name=$(item_name "$iid")
             fi
             # 日志侧只记片名（公开仓库，绝不落直链）；TG 私密消息里才附带直链
             echo "🎬 播放 [$kind] $name (item $iid)"
-            text="🎬 播放 [$kind] $name"
+            text="🎬 播放 [$kind] $(esc_html "$name")"
             # 302 直链时附上 odlink 最近一次取到的预授权直链（3 分钟内视为本次播放所用）
+            # 长链接折叠成 <a> 超链接，避免整条通知被几百字符的 URL 淹没
             if [ "$kind" = "302直链" ] && [ -f /opt/odlink-last.json ]; then
               link=$(jq -r 'select((now - .ts) < 180) | .url // empty' /opt/odlink-last.json 2>/dev/null || true)
-              [ -n "$link" ] && text="${text}$(printf '\n直链: %s' "$link")"
+              [ -n "$link" ] && text="${text}"$'\n'"<a href=\"$(esc_html "$link")\">▶ 打开直链</a>"
             fi
             code=$(curl -s -m 10 -o /tmp/pl-tg.json -w '%{http_code}' \
                      -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
                      --data-urlencode "chat_id=$TG_CHAT_ID" \
+                     --data-urlencode "parse_mode=HTML" \
                      --data-urlencode "text=${text}")
+            # HTML 解析失败（转义漏网字符）时不重试解析，直接退化为纯文本原样重发：
+            # 宁可链接变长，也不能让播放通知消失
+            if [ "$code" != "200" ] && [ -n "$link" ]; then
+              plain="🎬 播放 [$kind] $name"$'\n'"直链: $link"
+              code=$(curl -s -m 10 -o /tmp/pl-tg.json -w '%{http_code}' \
+                       -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
+                       --data-urlencode "chat_id=$TG_CHAT_ID" \
+                       --data-urlencode "text=${plain}")
+            fi
             [ "$code" = "200" ] || echo "[WARNING] TG 推送失败 http=$code resp=$(head -c 200 /tmp/pl-tg.json 2>/dev/null)"
           }
 
