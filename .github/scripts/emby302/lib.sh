@@ -27,6 +27,39 @@ require_free_kb() { # $1=路径 $2=需要的 KB $3=场景名
   echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
 }
 
+# ---------- /mnt 容量预算（动态分配） ----------
+# /mnt 是共享分区，上面有两个消费者，且它们的大小都只有运行时才知道：
+#   /mnt/emby-cache   —— emby 图片缓存（由 /var/lib/emby/cache 软链过来），解压后才有答案
+#   /mnt/vfs/onedrive —— rclone VFS 缓存，随播放/扫描增长
+# 所以不写死"缓存约 30GB"这类历史经验值，一律按实时剩余空间分配：
+#   预留 MNT_RESERVE_KB 给 emby-cache 增长与安全垫，其余基本全给 VFS；
+#   运行期若真被挤到，由 --vfs-cache-min-free-space 主动逐出让位。
+MNT_RESERVE_KB=${MNT_RESERVE_KB:-$((6 * 1024 * 1024))}   # 6GB，可用 workflow env 覆盖
+
+mnt_total_kb() { df -Pk /mnt | awk 'NR==2 {print $2}'; }
+mnt_free_kb()  { df -Pk /mnt | awk 'NR==2 {print $4}'; }
+dir_used_kb() {                                 # 目录实际占用；不存在或无权限算 0
+  local u
+  u=$(sudo du -sk "$1" 2>/dev/null | awk '{print $1}')
+  echo "${u:-0}"
+}
+
+# 可分配余量 = 当前空闲 - 预留
+# （VFS 与 emby-cache 的占用已经体现在 free 里，此处不重复扣减）
+mnt_headroom_kb() {
+  local h
+  h=$(( $(mnt_free_kb) - MNT_RESERVE_KB ))
+  [ "$h" -gt 0 ] || h=0
+  echo "$h"
+}
+
+# VFS 缓存上限：余量基本全部给它（剩余空间都可以拿去用），仅保留 2GB 下限防止退化
+alloc_vfs_cache_kb() {
+  local min_kb=$((2 * 1024 * 1024)) h
+  h=$(mnt_headroom_kb)
+  if [ "$h" -lt "$min_kb" ]; then echo "$min_kb"; else echo "$h"; fi
+}
+
 # ---------- 归档临时文件清理 ----------
 # 解压/打包用的 tarball 体积巨大，成功失败都要清掉，否则占满根分区。
 cleanup_archive_workdir() {
@@ -40,7 +73,9 @@ validate_emby_data() { # $1=emby 数据根目录
   local root="$1"
   sudo test -f "$root/data/users.db" || return 1
   sudo test -f "$root/data/library.db" || return 1
-  sudo python3 "$EMBY302_DIR/emby_guard.py" "$root"
+  # sudo 默认不透传环境变量，所以在这里显式把 EMBY_USER 带进去
+  # （用户名来自 workflow secret，不能写死在脚本里）
+  sudo EMBY_USER="${EMBY_USER:-}" python3 "$EMBY302_DIR/emby_guard.py" "$root"
 }
 
 # ---------- 日志归档脱敏 ----------

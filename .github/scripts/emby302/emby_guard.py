@@ -13,7 +13,7 @@ Emby 数据来自云端备份的流式解压，任何一环中断都可能留下
 检查项（任一不通过即以非零码退出，调用方据此中止）
 ------------------------------------------------
 1. 关键库文件存在：data/users.db、data/library.db
-2. 存在指定用户（Derrick）        —— 防空库
+2. 存在指定用户（由环境变量 EMBY_USER 指定，未配置则退化为"至少一个用户"）—— 防空库
 3. 媒体库根结构正确               —— Id=1 为 "Media Folders"、Id=2 为 "root"
 4. Media Folders 下存在媒体库目录 —— 防库结构残缺
 5. root 下存在 /onedrive 真实媒体路径 —— 防路径缺失导致 302 直链必然失效
@@ -21,19 +21,25 @@ Emby 数据来自云端备份的流式解压，任何一环中断都可能留下
 隐私
 ----
 仓库公开，输出只给计数（用户数/条目数），绝不打印用户名与媒体路径明细。
+期望用户名也**不写在代码里**，由环境变量 EMBY_USER 传入（来自 workflow secret），
+失败信息里同样不能出现名字。
 
 用法
 ----
-    sudo python3 emby_guard.py <emby-data-root>      # 例：/var/lib/emby
+    sudo EMBY_USER="$EMBY_USER" python3 emby_guard.py <emby-data-root>   # 例：/var/lib/emby
+
+    EMBY_USER 未设置时，第 2 项退化为"至少存在一个用户"，仍然能拦住空库。
 """
 
 import json
+import os
 import sqlite3
 import sys
 from pathlib import Path
 
-# 期望存在的用户名：库里没有它就说明这份数据不是我们的备份
-EXPECTED_USER = "Derrick"
+# 期望存在的用户名：库里没有它就说明这份数据不是我们的备份。
+# 来自环境变量（workflow secret），不硬编码——仓库是公开的。
+EXPECTED_USER = os.environ.get("EMBY_USER", "").strip()
 # 媒体路径前缀：Emby 库路径必须落在这里，才能与 OpenList/rclone 挂载根对齐
 MEDIA_PREFIX = "/onedrive/"
 
@@ -58,8 +64,13 @@ def check_users(root):
     finally:
         conn.close()
 
-    if EXPECTED_USER not in names:
-        fail("%s user is missing (users=%d)" % (EXPECTED_USER, len(names)))
+    # 失败信息只给计数，绝不回显期望用户名（日志是公开的）
+    if EXPECTED_USER:
+        if EXPECTED_USER not in names:
+            fail("expected user is missing (users=%d)" % len(names))
+    elif not names:
+        # EMBY_USER 未配置时不放弃这道闸：退化为"至少一个用户"，同样能拦住空库
+        fail("no users at all (users=0)")
     return len(names)
 
 
