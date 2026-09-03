@@ -42,6 +42,9 @@ env:
   # 302 链路脚本目录。checkout 之后可用；各步骤 source 其下的 lib.sh 复用公共函数，
   # 避免同一段逻辑在多个步骤里各写一份（历史上校验/预检代码重复过两套，容易改走样）
   EMBY302_DIR: ${{ github.workspace }}/.github/scripts/emby302
+  # 期望存在的 Emby 用户名。仓库公开，用户名绝不写死在代码里；走 secret 还有个好处：
+  # GitHub 会自动把 secret 值从日志中打码，即使哪天误打印了也泄漏不出去。
+  EMBY_USER: ${{ secrets.EMBY_USER }}
 
 jobs:
   build:
@@ -75,26 +78,39 @@ jobs:
           # fi
           # sudo rclone copy dropbox:self-hosted/emby/system.xml dropbox:self-hosted/emby/config/ --ignore-errors -vv
 
+          source "$EMBY302_DIR/lib.sh"
           # 只挂载媒体库所在的 onedrive（/dropbox /gd 挂载无引用，已移除）
-          # writes 模式：302 直链播放不经过挂载，本地仅承载扫描/探测/回退流量，磁盘占用≈0
+          # 参数取向：seek 优先（拖进度/快进快退），不是顺序播放吞吐——
+          # 顺序播放走 302 直链、根本不过挂载；挂载真正承载的是"转码"与"direct 回退"，
+          # 这两类流量以随机读为主，所以要小 chunk + 并发、小预读、大缓存。
           sudo mkdir -p /onedrive /opt/logs
           sudo chown -R runner:runner /opt/logs
           # 挂载改用 runner 用户：conf 读写全程 runner 身份（root 挂载刷新 token 会把 conf 属主改成 root，是之前 EACCES 的根因）
           grep -q '^user_allow_other' /etc/fuse.conf 2>/dev/null || echo user_allow_other | sudo tee -a /etc/fuse.conf >/dev/null
           sudo mkdir -p /onedrive /mnt/vfs/onedrive
           sudo chown runner:runner /onedrive /mnt/vfs/onedrive
+
+          # VFS 缓存上限按 /mnt 实时剩余空间动态分配：预留 MNT_RESERVE_KB 给 emby 图片缓存
+          # 的增长与安全垫，其余基本全给 VFS（缓存越大，来回拖进度越容易命中已下载区间）。
+          # 运行期由 --vfs-cache-min-free-space 兜底：真被 emby 缓存挤到时 VFS 主动逐出让位。
+          VFS_MAX_G=$(( $(alloc_vfs_cache_kb) / 1024 / 1024 ))
+          RESERVE_G=$(( MNT_RESERVE_KB / 1024 / 1024 ))
+          echo "VFS 预算: 上限 ${VFS_MAX_G}G / /mnt 剩余 $(( $(mnt_free_kb) / 1024 / 1024 ))G / 预留 ${RESERVE_G}G"
+
           rclone mount onedrive: /onedrive \
             --config /home/runner/.config/rclone/rclone.conf \
             --cache-dir /mnt/vfs/onedrive \
             --allow-other --umask 000 --attr-timeout 10m \
             --dir-cache-time 72h --poll-interval 0 \
             --vfs-cache-mode full \
-            --vfs-cache-max-size 8G --vfs-cache-max-age 24h \
-            --buffer-size 32M --vfs-read-ahead 512M \
-            --vfs-read-chunk-size 128M --vfs-read-chunk-size-limit 512M \
-            --vfs-handle-caching 1m \
-            --max-read-ahead 32M \
-            --daemon --daemon-wait 60s --log-file /tmp/rclone-onedrive.log
+            --vfs-cache-max-size ${VFS_MAX_G}G --vfs-cache-max-age 24h \
+            --vfs-cache-min-free-space ${RESERVE_G}G \
+            --vfs-cache-poll-interval 15s \
+            --buffer-size 16M --vfs-read-ahead 64M --max-read-ahead 64M \
+            --vfs-read-chunk-size 32M --vfs-read-chunk-streams 4 \
+            --vfs-handle-caching 5m \
+            --daemon --daemon-wait 60s \
+            --log-file /opt/logs/rclone-mount.log --log-level INFO
       - name: install cloudflared
         run: |
           sudo mkdir ~/.cloudflared/
@@ -375,7 +391,8 @@ jobs:
           source "$EMBY302_DIR/lib.sh"
           # 30GB 级 tarball 解压前先确认空间：解压到一半失败会留下半恢复的残库，
           # 而残库会被 Emby 当成空库重建，比本轮直接失败更糟
-          require_free_kb /tmp $((2 * 1024 * 1024)) "emby restore preflight"
+          # 恢复全链路已改为流式（不落地 tarball），/tmp 只需容下 apt/dpkg 的产物
+          require_free_kb /tmp $((1024 * 1024)) "emby restore preflight"
           # 认证调用 GitHub API：runner 共享出口 IP 的匿名配额（60 次/h）极易耗尽，
           # 限流响应里没有 browser_download_url，替换结果为空 → curl 报 "no URL specified" 直接失败
           EMBY_DEB_URL=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
@@ -388,7 +405,8 @@ jobs:
           # dpkg -i 会自动启动 emby-server，需要先把它停掉，否则 /var/lib/emby 会被锁定无法删除
           sudo systemctl stop emby-server || true
 
-          # 尝试从备份恢复。恢复必须通过 Derrick + 媒体库结构 + 真实媒体路径校验，否则直接失败，禁止启动空库。
+          # 尝试从备份恢复。恢复必须通过"指定用户 + 媒体库结构 + 真实媒体路径"校验，
+          # 否则直接失败，禁止启动空库。用户名来自 EMBY_USER secret，不写死在仓库里。
           sudo rm -rf /var/lib/emby
           sudo mkdir -p /var/lib/emby
           sudo chown -R emby:emby /var/lib/emby
@@ -403,8 +421,11 @@ jobs:
           RESTORED_FROM=
           if rclone lsf onedrive:backup/emby/$BACKUP_NAME 2>/dev/null | grep -q "$BACKUP_NAME"; then
               BK_BYTES=$(rclone lsl onedrive:backup/emby/$BACKUP_NAME 2>/dev/null | awk '{print $1}')
-              require_free_kb /mnt $((BK_BYTES / 1024 + 2 * 1024 * 1024)) "emby cache extract preflight (/mnt)"
-              require_free_kb /var/lib/emby $((4 * 1024 * 1024)) "emby data extract preflight (root)"
+              # 图片缓存实际多大只有解压后才知道，所以按"包体 + 预留"动态判定，不写死经验值；
+              # 根分区只承接元数据（缓存已软链到 /mnt），2GB 足够。
+              echo "/mnt 状态: 剩余 $(( $(mnt_free_kb) / 1048576 ))G / VFS 已用 $(( $(dir_used_kb /mnt/vfs/onedrive) / 1048576 ))G"
+              require_free_kb /mnt $(( BK_BYTES / 1024 + MNT_RESERVE_KB )) "emby cache extract preflight (/mnt)"
+              require_free_kb /var/lib/emby $((2 * 1024 * 1024)) "emby data extract preflight (root)"
               echo "✅ 发现 OneDrive 备份，流式解压..."
               if rclone cat onedrive:backup/emby/$BACKUP_NAME | sudo tar -I zstd -xf - -C /var/lib/emby/ && sudo chown -R emby:emby /var/lib/emby && validate_emby_data /var/lib/emby; then
                   echo "🎉 OneDrive 备份流式恢复并校验成功"
@@ -414,31 +435,49 @@ jobs:
                   sudo rm -rf /var/lib/emby/* 2>/dev/null || true
               fi
           fi
-          if [ -z "$RESTORED_FROM" ] && rclone copy dropbox:self-hosted/$BACKUP_NAME /tmp/ -vv; then
-              backup_kb=$(du -sk "/tmp/$BACKUP_NAME" | awk '{print $1}')
-              if [ -z "${backup_kb:-}" ] || [ "$backup_kb" -le 0 ]; then
+          # Dropbox 兜底同样走流式：30GB 级 tarball 一旦落到 /tmp（根分区 ≈14GB）必然撑爆，
+          # 所以与 OneDrive 一级保持同一形态——rclone cat 直接管道进 tar，全程不落本地盘。
+          if [ -z "$RESTORED_FROM" ] && rclone lsf dropbox:self-hosted/$BACKUP_NAME 2>/dev/null | grep -q "$BACKUP_NAME"; then
+              BK_BYTES=$(rclone lsl dropbox:self-hosted/$BACKUP_NAME 2>/dev/null | awk '{print $1}')
+              if [ -z "${BK_BYTES:-}" ] || [ "$BK_BYTES" -le 0 ]; then
                   echo "❌ emby extract preflight: unable to calculate archive size" >&2
                   exit 1
               fi
-              echo "$BACKUP_NAME 大小: ${backup_kb}KB"
-              require_free_kb /var/lib/emby $((backup_kb * 3 + 1024 * 1024)) "emby extract preflight"
-              echo "✅ 发现备份压缩包，正在解压..."
-              sudo tar -I zstd -xf /tmp/$BACKUP_NAME -C /var/lib/emby/
-              sudo chown -R emby:emby /var/lib/emby
-              validate_emby_data /var/lib/emby
-              echo "🎉 压缩备份恢复并校验成功"
-              RESTORED_FROM=dropbox
+              echo "Dropbox 备份大小: $(( BK_BYTES / 1048576 ))MB"
+              echo "/mnt 状态: 剩余 $(( $(mnt_free_kb) / 1048576 ))G / VFS 已用 $(( $(dir_used_kb /mnt/vfs/onedrive) / 1048576 ))G"
+              require_free_kb /mnt $(( BK_BYTES / 1024 + MNT_RESERVE_KB )) "emby cache extract preflight (/mnt)"
+              require_free_kb /var/lib/emby $((2 * 1024 * 1024)) "emby data extract preflight (root)"
+              echo "✅ 发现 Dropbox 备份，流式解压..."
+              if rclone cat dropbox:self-hosted/$BACKUP_NAME | sudo tar -I zstd -xf - -C /var/lib/emby/ \
+                 && sudo chown -R emby:emby /var/lib/emby && validate_emby_data /var/lib/emby; then
+                  echo "🎉 Dropbox 压缩备份流式恢复并校验成功"
+                  RESTORED_FROM=dropbox
+              else
+                  echo "::warning::Dropbox 流式恢复失败，继续尝试目录级恢复..."
+                  sudo rm -rf /var/lib/emby/* 2>/dev/null || true
+              fi
               cleanup_archive_workdir
           fi
           if [ -z "$RESTORED_FROM" ]; then
               cleanup_archive_workdir
               echo "⚠️ 未发现压缩备份，尝试从 Dropbox 目录备份恢复..."
+              # 目录级恢复无法流式（必须先落到本地目录），所以按远端体量预检 /tmp：
+              # 根分区 ≈14GB 容不下 30GB 级缓存，宁可明确失败，也不要等磁盘撑爆后再炸。
+              DIR_BYTES=$(rclone size dropbox:self-hosted/emby --json 2>/dev/null | jq -r '.bytes // 0' || echo 0)
+              if [ -z "${DIR_BYTES:-}" ] || [ "$DIR_BYTES" -le 0 ]; then
+                  echo "❌ emby dir-restore preflight: unable to calculate remote size" >&2
+                  exit 1
+              fi
+              require_free_kb /tmp $(( DIR_BYTES / 1024 + 1024 * 1024 )) "emby dir-restore preflight (/tmp)"
               RESTORE_DIR=/tmp/emby-dir-restore
               rm -rf "$RESTORE_DIR"
               mkdir -p "$RESTORE_DIR"
               rclone copy dropbox:self-hosted/emby "$RESTORE_DIR" -vv
               sudo rm -rf /var/lib/emby/*
               sudo cp -a "$RESTORE_DIR"/. /var/lib/emby/
+              # 上面的 rm -rf 会把 cache 软链本身也删掉；不重建，Emby 就会把缓存写进根分区
+              sudo rm -rf /var/lib/emby/cache
+              sudo ln -sfn /mnt/emby-cache /var/lib/emby/cache
               sudo chown -R emby:emby /var/lib/emby
               rm -rf "$RESTORE_DIR"
               validate_emby_data /var/lib/emby
@@ -881,15 +920,35 @@ jobs:
             nohup bash /opt/playlog.sh >> /opt/logs/playlog.log 2>&1 &
       - name: warmup images
         run: |
-          # 海报墙预热：请求首页最新条目的海报（真实 tag），让 Emby 现场缩放 + ge2o 内存缓存就绪
+          # 三段预热，把"点开就播"的冷启动成本提前付掉：
+          #   海报墙 —— Emby 现场缩放 + ge2o 内存缓存就绪
+          #   直链   —— odlink 路径逐段解析与直链签发提前完成（零流量成本）
+          #   头尾   —— ffprobe 读的正是文件头部与尾部，提前读进 VFS 稀疏缓存
+          # 每段都带计时：预热同时就是测量工具，冷解析与冷读的耗时直接可量化。
           cat > /opt/warmup.sh <<'WU_EOF'
           #!/bin/bash
           KEY="$EMBY_API_KEY"
           EMBY=http://127.0.0.1:8096
           GE2O=http://127.0.0.1:8095
-          UID=$(curl -s "$EMBY/emby/Users?api_key=$KEY" | jq -r '.[] | select(.Name=="Derrick") | .Id' | head -1)
-          [ -n "$UID" ] || { echo "warmup: 未找到 Derrick 用户，跳过"; exit 0; }
-          curl -s "$EMBY/emby/Users/$UID/Items/Latest?Limit=40&Fields=ImageTags&api_key=$KEY" > /tmp/wu-items.json
+          # UID 是 bash 只读内建变量，赋值会直接报 "readonly variable" 并失败，
+          # 于是用户 ID 一直是 runner 的数字 uid，Latest 查询拿不到数据、预热静默空转。
+          # 改名以绝后患——这个坑让海报预热一直没真正跑过。
+          # 用户名来自 EMBY_USER secret：仓库公开，绝不写死；日志里也只打 ID 不打名字。
+          # 用 jq --arg 传参而不是拼字符串，顺带避免名字里带引号把 JSON 过滤器搞坏。
+          USER_NAME="${EMBY_USER:-}"
+          [ -n "$USER_NAME" ] || { echo "warmup: EMBY_USER 未配置，跳过"; exit 0; }
+          USER_ID=$(curl -s "$EMBY/emby/Users?api_key=$KEY" \
+                    | jq -r --arg n "$USER_NAME" '.[] | select(.Name==$n) | .Id' | head -1)
+          [ -n "$USER_ID" ] || { echo "warmup: 未找到目标用户（按 EMBY_USER 匹配），跳过"; exit 0; }
+
+          # 预热规模：可用 workflow env 覆盖，无需改脚本
+          WU_ITEMS=${WU_ITEMS:-10}             # 参与直链/头尾预热的条目数
+          WU_EDGE_MB=${WU_EDGE_MB:-64}         # 头尾单边预热大小（每条目 ×2）
+          WU_BUDGET_MB=${WU_BUDGET_MB:-2048}   # 头尾预热总预算(MB)，达上限即停
+
+          curl -s "$EMBY/emby/Users/$USER_ID/Items/Latest?Limit=40&Fields=ImageTags,Path,MediaSources&api_key=$KEY" > /tmp/wu-items.json
+
+          # ---------- 1. 海报墙预热 ----------
           N=0
           for ID in $(jq -r '.[].Id' /tmp/wu-items.json | head -40); do
             jq -r --arg id "$ID" '.[] | select(.Id==$id) | .ImageTags.Primary // empty' /tmp/wu-items.json > /tmp/wu-tag.txt 2>/dev/null
@@ -900,6 +959,53 @@ jobs:
             N=$((N + 1))
           done
           echo "海报墙预热完成: ${N} 个条目 $(date '+%T')"
+
+          # ---------- 2. 直链预热 ----------
+          # odlink 的 dir_cache(无 TTL) 与 link_cache(40min) 都在进程内存里，每轮 run 都是冷启动。
+          # 提前打一次 /api/fs/get，起播时 ge2o 打过来直接命中：路径解析结果本轮内一直有效，
+          # 40 分钟后只需重新签发直链（1 次 Graph 调用，而非逐段下钻 N 次）。
+          source "$EMBY302_DIR/lib.sh"     # link_host / link_token 是直链源的唯一真相
+          LK_HOST=$(link_host)
+          LK_TOKEN=$(link_token)
+          LK_N=0; LK_MS=0
+          for ID in $(jq -r '.[].Id' /tmp/wu-items.json | head -"$WU_ITEMS"); do
+            P=$(jq -r --arg id "$ID" '.[] | select(.Id==$id) | (.MediaSources[0].Path // .Path // empty)' /tmp/wu-items.json)
+            [ -n "$P" ] || continue
+            T0=$(date +%s%N)
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$LK_HOST/api/fs/get" \
+                  -H 'Content-Type: application/json' -H "Authorization: $LK_TOKEN" \
+                  -d "$(jq -nc --arg p "$P" '{path:$p}')" --max-time 30)
+            MS=$(( ( $(date +%s%N) - T0 ) / 1000000 ))
+            echo "直链预热 $(basename "$P") http=$CODE ${MS}ms"
+            LK_N=$((LK_N + 1)); LK_MS=$((LK_MS + MS))
+          done
+          if [ "$LK_N" -gt 0 ]; then
+            echo "直链预热完成: ${LK_N} 条 / 合计 ${LK_MS}ms / 均值 $((LK_MS / LK_N))ms $(date '+%T')"
+          else
+            echo "直链预热: 无可用路径（Latest 未返回 Path/MediaSources）$(date '+%T')"
+          fi
+
+          # ---------- 3. 头尾预热 ----------
+          # Emby 起播会 ffprobe 文件，读的正是头部与尾部（moov / MKV SeekHead）。
+          # full 模式是稀疏缓存、只下载真正读过的区间，所以精准预热这两段即可让探测命中本地。
+          # 代价是真实 OneDrive 流量，故用 WU_BUDGET_MB 兜底；
+          # 这里测出的耗时同时就是"挂载冷读速度"的实测值，可反推 ffprobe 会花多久。
+          EDGE_N=0; EDGE_MS=0; USED_MB=0
+          for ID in $(jq -r '.[].Id' /tmp/wu-items.json | head -"$WU_ITEMS"); do
+            [ "$USED_MB" -lt "$WU_BUDGET_MB" ] || { echo "头尾预热达预算 ${WU_BUDGET_MB}MB，停止 $(date '+%T')"; break; }
+            P=$(jq -r --arg id "$ID" '.[] | select(.Id==$id) | (.MediaSources[0].Path // .Path // empty)' /tmp/wu-items.json)
+            [ -n "$P" ] || continue
+            [ -f "$P" ] || { echo "头尾预热: 挂载上找不到 $(basename "$P")，跳过"; continue; }
+            T0=$(date +%s%N)
+            head -c "${WU_EDGE_MB}M" "$P" >/dev/null 2>&1
+            tail -c "${WU_EDGE_MB}M" "$P" >/dev/null 2>&1
+            MS=$(( ( $(date +%s%N) - T0 ) / 1000000 ))
+            echo "头尾预热 $(basename "$P") ${WU_EDGE_MB}MB×2 ${MS}ms"
+            EDGE_N=$((EDGE_N + 1)); EDGE_MS=$((EDGE_MS + MS)); USED_MB=$((USED_MB + WU_EDGE_MB * 2))
+          done
+          if [ "$EDGE_N" -gt 0 ]; then
+            echo "头尾预热完成: ${EDGE_N} 条 / ${USED_MB}MB / 合计 ${EDGE_MS}ms / 均值 $((EDGE_MS / EDGE_N))ms $(date '+%T')"
+          fi
           WU_EOF
           EMBY_API_KEY="${{ secrets.EMBY_API_TOKEN }}" nohup bash /opt/warmup.sh > /opt/logs/warmup.log 2>&1 &
 
@@ -952,7 +1058,9 @@ jobs:
                 exit 1
               fi
               echo "待压缩目录大小: ${src_kb}KB"
-              require_free_kb /var/lib/emby $((4 * 1024 * 1024)) "emby archive preflight (root)"
+              # 打包是流式的（tar 管道直进 rcat，不落 staging），根分区只需容下
+              # zstd 工作内存与 rclone 缓冲，1GB 足够；写死 4GB 只会在根分区紧张时误杀。
+              require_free_kb /var/lib/emby $((1024 * 1024)) "emby archive preflight (root, 流式不落盘)"
               # 流式：tar 直接管道进 rcat 上传 OneDrive（含图片缓存），30GB 级 tarball 不落本地盘
               sudo tar -I 'zstd -3 -T0' -chf - \
                 --exclude='logs' \
@@ -1014,3 +1122,16 @@ jobs:
           # odlink 自身已脱敏（不落 token、不落完整链接），这里只再拦一道 URL 兜底。
           echo "--- odlink.log (tail 60, 脱敏) ---"
           tail -n 60 /opt/logs/odlink.log 2>/dev/null | redact_urls || echo "(无 odlink.log)"
+          # rclone 挂载日志：VFS 缓存逐出、429/403 限流、seek 后的重取。
+          # 必须 grep 筛关键行而不是纯 tail——缓存清理类输出每 15s 一条，
+          # 5.7 小时上千行，纯 tail 只会被它们占满，看不到真正的异常。
+          echo "--- rclone-mount.log (关键行 40, 脱敏) ---"
+          grep -aE "ERROR|WARNING|throttl|429|403|rate limit|low level retry|vfs cache" \
+            /opt/logs/rclone-mount.log 2>/dev/null | tail -n 40 | redact_urls || echo "(无 rclone-mount.log)"
+          # Emby 控制台日志：起播时的 ffprobe / ffmpeg 记录，
+          # 是定位"点击播放后要等 20 秒"的关键现场——这段成本不在挂载层。
+          echo "--- emby-console.log (tail 60, 脱敏) ---"
+          tail -n 60 /opt/logs/emby-console.log 2>/dev/null | redact_urls || echo "(无 emby-console.log)"
+          # 预热日志：直链冷解析与挂载冷读的实测耗时，判断起播慢在哪一层的量化依据。
+          echo "--- warmup.log (tail 40) ---"
+          tail -n 40 /opt/logs/warmup.log 2>/dev/null || echo "(无 warmup.log)"

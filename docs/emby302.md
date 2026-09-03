@@ -60,6 +60,7 @@
 | `RCLONE` | rclone 配置全文 | 写入 `~/.config/rclone/rclone.conf`，需含 `[onedrive]` 与 `[dropbox]` 段 |
 | `OPENLIST_ADMIN_PASSWORD` | OpenList 管理员密码 | **密码的唯一真相源**，详见[凭据体系](#6-凭据体系) |
 | `EMBY_API_TOKEN` | Emby API 密钥 | 用于探活、片名反查、海报预热、优雅停机、播放监听 |
+| `EMBY_USER` | 期望存在的 Emby 用户名 | 校验"这份数据是我们的备份"与预热定位用户。**仓库公开，用户名不写死在代码里**；走 secret 还自带日志打码 |
 | `TELEGRAM_BOT_TOKEN` | TG 机器人 | 所有通知 |
 | `TG_CHAT_ID` | TG 会话 ID | 通知目标（私密 chat） |
 | `VD` | 域名前缀 | OpenList 维护入口 `oe.<VD>.eu.org` |
@@ -120,7 +121,7 @@
 | ge2o | 8095 | `/opt/ge2o/config.yml`、`/opt/logs/ge2o.log` |
 | OpenList | 5244 | `/opt/openlist`（回传 `dropbox:self-hosted/openlist-emby/`） |
 | odlink | 5245 | `/opt/logs/odlink.log` |
-| rclone mount | — | 挂载点 `/onedrive`，VFS 缓存 `/mnt/vfs/onedrive` |
+| rclone mount | — | 挂载点 `/onedrive`，VFS 缓存 `/mnt/vfs/onedrive`（**上限动态分配**），日志 `/opt/logs/rclone-mount.log` |
 
 **运行时落盘位置**：`/tmp/link-host`、`/tmp/link-token`（直链源契约，见下）、
 `/tmp/PLAYBACK_MODE`（当前模式）、`/opt/odlink-last.json`（最近一次直链，供通知用）。
@@ -263,7 +264,7 @@ rclone 之所以能通，是因为它逐段解析、遇到 `remoteItem` 就切�
 
 ### 安全边界
 
-- **公开日志**（workflow run log）：只出现片名、计数、HTTP 码、域名
+- **公开日志**（workflow run log）：只出现片名、计数、HTTP 码、域名，**绝不出现用户名**（`EMBY_USER` 走 secret，且失败信息只回显计数）
 - **TG 私信**：可含直链与密码
 - 所有归档日志都过脱敏：直链 → `<url>`，密钥 → `[redacted]`，媒体路径 → `<path>`
 - ge2o 的 `headers to encode cacheKey` 调试行整行丢弃（内含完整请求头与 `cf_clearance` Cookie）
@@ -286,8 +287,10 @@ rclone 之所以能通，是因为它逐段解析、遇到 `remoteItem` 就切�
 ```
 ① OneDrive 流式：rclone cat onedrive:backup/emby/emby-backup.tar.zst | tar -I zstd -xf -
       （30GB 级 tarball 不落本地盘，流式解压）
-② Dropbox 压缩包：dropbox:self-hosted/emby-backup.tar.zst → 落 /tmp 后解压
-③ Dropbox 目录：dropbox:self-hosted/emby → 整目录拷贝
+② Dropbox 流式：rclone cat dropbox:self-hosted/emby-backup.tar.zst | tar -I zstd -xf -
+      （同样不落本地盘——根分区 ≈14GB 容不下 30GB 级 tarball）
+③ Dropbox 目录：dropbox:self-hosted/emby → 整目录拷贝（**唯一会落盘的兜底**，
+  需先按远端体量预检 /tmp；恢复后必须重建 `cache` 软链，否则缓存会写进根分区）
 ```
 
 **每级恢复后都必须过 `emby_guard.py` 校验闸**，不通过就拒绝启动——残库会被 Emby
@@ -296,7 +299,7 @@ rclone 之所以能通，是因为它逐段解析、遇到 `remoteItem` 就切�
 ### 校验项（`emby_guard.py`）
 
 1. `data/users.db`、`data/library.db` 存在
-2. 存在 `Derrick` 用户
+2. 存在 `EMBY_USER` 指定的用户（未配置该 secret 时退化为"至少一个用户"）
 3. 根结构正确：`Id=1` 为 `Media Folders`、`Id=2` 为 `root`
 4. `Media Folders` 下存在媒体库目录
 5. `root` 下存在 `/onedrive/` 开头的真实媒体路径
@@ -313,8 +316,21 @@ rclone 之所以能通，是因为它逐段解析、遇到 `remoteItem` 就切�
 
 ### 磁盘预检
 
-30GB 级 tarball 在落盘/解压前统一做空间预检（`require_free_kb`），避免解压到一半
+大体积数据在落盘/解压前统一做空间预检（`require_free_kb`），避免解压到一半
 失败留下残库。图片缓存软链到 `/mnt`（根分区约 14GB 放不下约 30GB 缓存，`/mnt` 独立分区约 65GB）。
+
+**容量改成动态分配，不再写死经验值**：`/mnt` 上有两个消费者——emby 图片缓存
+（`/mnt/emby-cache`）与 rclone VFS 缓存（`/mnt/vfs/onedrive`），两者大小都只有运行时
+才知道（缓存多大要等解压后才有答案）。所以：
+
+| 项 | 口径 |
+|---|---|
+| VFS 缓存上限 | `alloc_vfs_cache_kb` —— `/mnt` 剩余空间减去 `MNT_RESERVE_KB`（默认 6GB）预留，其余基本全给；下限 2GB |
+| 让位机制 | `--vfs-cache-min-free-space` = 同一预留值，运行期真被 emby 缓存挤到时 VFS 主动逐出 |
+| 解压预检 | 包体 + `MNT_RESERVE_KB`，按实时剩余空间判定 |
+| 打包预检 | 流式打包不落 staging，根分区只需 1GB |
+
+`MNT_RESERVE_KB` 可用 workflow `env:` 覆盖，无需改脚本。
 
 ---
 
@@ -390,11 +406,16 @@ rclone 之所以能通，是因为它逐段解析、遇到 `remoteItem` 就切�
 ### 9.3 `emby_guard.py`
 
 ```bash
-sudo python3 emby_guard.py <emby-data-root>   # 例：/var/lib/emby
+sudo EMBY_USER="$EMBY_USER" python3 emby_guard.py <emby-data-root>   # 例：/var/lib/emby
 ```
 
 校验通过打印计数并以 0 退出；任一项不通过即以非零码退出并说明原因。
 详见[校验项](#校验项emby_guardpy)。
+
+> **用户名不写死在代码里**：期望用户由环境变量 `EMBY_USER` 传入（来自 workflow secret，
+> 日志里自动打码）。`sudo` 默认不透传环境变量，所以必须由调用方显式带上——
+> `lib.sh` 的 `validate_emby_data` 已处理好，直接用它即可。
+> 若未配置该 secret，第 2 项退化为"至少一个用户"，仍然能拦住空库。
 
 ### 9.4 `lib.sh`
 
@@ -427,9 +448,16 @@ sudo python3 emby_guard.py <emby-data-root>   # 例：/var/lib/emby
 | `/opt/logs/watchdog.log` | 探活失败计数与回退记录 |
 | `/opt/logs/openlist.log` | OpenList 启动与存储状态 |
 | `/opt/logs/odprobe.log` | 快捷方式探测结论 |
+| `/opt/logs/rclone-mount.log` | 挂载层：VFS 缓存逐出、429/403 限流、seek 后重取（归档时按关键行筛选，非纯 tail） |
+| `/opt/logs/emby-console.log` | Emby 侧：起播时的 ffprobe / ffmpeg 记录——**定位"点击播放要等很久"的关键现场** |
+| `/opt/logs/warmup.log` | 预热耗时：直链冷解析均值 + 挂载冷读均值（判断起播慢在哪一层的量化依据） |
 
-收尾步骤会把 `playlog.log`（80 行）、`ge2o.log`（60 行）、`odlink.log`（60 行）
+收尾步骤会把 `playlog.log`（80 行）、`ge2o.log`（60 行）、`odlink.log`（60 行）、
+`rclone-mount.log`（关键行 40）、`emby-console.log`（60 行）、`warmup.log`（40 行）
 脱敏后归档进 workflow 日志。
+
+> `rclone-mount.log` 用 `grep` 筛关键行而非纯 `tail`：缓存清理类输出每 15s 一条，
+> 5.7 小时上千行，纯 tail 只会被它们占满、看不到真正的异常。
 
 ### 症状 → 排查
 
@@ -441,6 +469,44 @@ sudo python3 emby_guard.py <emby-data-root>   # 例：/var/lib/emby
 | Emby 启动成空库 | `install emby` 步骤 | 恢复三级全失败，或 `emby_guard.py` 校验不通过 |
 | 备份没回传 | 收尾步骤 | `/tmp/EMBY_READY_FOR_BACKUP` 不存在（Emby 未成功启动），或磁盘预检未过 |
 | 播放通知没来 | `playlog.log` 的 TG 通道自检 | ge2o 日志格式变化 / Emby 401 / 300s 去重窗口内 |
+| 点击播放后要等很久才起播 | `emby-console.log` + `warmup.log` | ① Emby 现场 ffprobe（该条目此前未探测过，走挂载随机读）② 转码启动（播放通知标 `[中转]`）③ odlink 冷解析 ④ 播放器缓冲——见下方"起播慢怎么定位" |
+
+### 起播慢怎么定位
+
+`warmup images` 步骤做三段预热，**每段都带计时**，输出进 `warmup.log`：
+
+| 段 | 做什么 | 成本 | 对 **302 直连播放** | 预热后的效果 |
+|---|---|---|---|---|
+| 海报墙 | 请求最新条目海报，让 Emby 现场缩放 + ge2o 内存缓存就绪 | 低 | ✅ 有效（与模式无关，纯 Emby 侧） | 首页秒开 |
+| 直链 | 提前打一次 odlink `/api/fs/get`，填充 `dir_cache` / `link_cache` | 零流量 | ✅ **最有效**——ge2o→odlink 的直链解析本身就是 302 起播链路的一环 | 起播时不再逐段下钻 Graph |
+| 头尾 | 读每个条目的头部与尾部，落进 VFS 稀疏缓存 | 真实流量，受 `WU_BUDGET_MB` 约束 | ⚠️ **基本无效**（视频流不过挂载），只在转码 / 回退 `direct` 时才用得上 | ffprobe / ffmpeg 起播读命中本地 |
+
+日志里两个**均值**就是判断依据：
+
+- **直链均值** —— 起播时 ge2o 那一段的耗时（预热后趋近 0）
+- **头尾均值** —— 冷读 `WU_EDGE_MB × 2` 的成本，换算成 MB/s 可反推 ffprobe 会花多久
+
+> **头尾预热对 302 直连播放基本没用**：302 模式下播放器拿到重定向后直连 OneDrive CDN
+> 拉 Range，全程不经过挂载，VFS 缓存根本不参与。它真正兜住的是四类"仍会读挂载"的场景：
+>
+> 1. 未探测条目的 Emby **ffprobe**（读的正是头尾：`moov` / MKV 的 `SeekHead`）
+> 2. 客户端触发**转码**（ffmpeg 起播要读头部解析 `moov`；非 faststart 的 MP4 还得读尾部）
+> 3. **字幕 / 章节图片**提取（随机读，头尾预热只覆盖头尾区间，命中率低）
+> 4. watchdog 回退 **`direct`**（起播顺序读与探测全部走挂载）
+>
+> 另外它还兼着**唯一的挂载冷读速度探针**（即上面的"头尾均值"），这个价值与播放模式无关；
+> 顺带的好处是提前暴露 OneDrive 限流——限流会在预热阶段就显现，而不是等到你点播放时。
+>
+> **若播放以 302 直连为主、很少转码**，建议把头尾预热压到最小、只当探针用：
+> `WU_ITEMS=3` + `WU_EDGE_MB=32`（≈190MB/轮，约为默认的 15%）。
+> 配置在 workflow `env:` 或仓库变量即可，不需要改脚本。
+>
+> 直链预热的价值主要在 `dir_cache`（无 TTL）：直链本身 40 分钟后会过期，
+> 但路径解析结果本轮内一直命中，届时只需重新签发一次（1 次 Graph 调用，而非逐段下钻）。
+>
+> 历史坑：`warmup.sh` 曾用 `UID` 存用户 ID，而 `UID` 是 bash **只读内建变量**，
+> 赋值直接报 `readonly variable` 并失败 —— 查询拿到空结果、预热静默空转。
+> 已改名为 `USER_ID`。
 
 ### 怎么确认 302 真的生效
 
@@ -460,6 +526,10 @@ sudo python3 emby_guard.py <emby-data-root>   # 例：/var/lib/emby
 | odlink 分流规则 | `odlink.py` 的 `do_POST` |
 | 顶层快捷方式刷新策略 | `odlink.py` 的 `bootstrap_loop`（当前为一次性，成功后不再重跑） |
 | 直链缓存时长 | `odlink.py` 的 `LINK_TTL` |
+| rclone mount 参数（seek 优先口径） | `emby.yml` 的 `rclone-run` 步骤 |
+| `/mnt` 容量预留 | workflow `env:` 的 `MNT_RESERVE_KB`（默认 6GB），分配逻辑在 `lib.sh` |
+| 预热规模 | workflow `env:` 的 `WU_ITEMS`(10) / `WU_EDGE_MB`(64) / `WU_BUDGET_MB`(2048)，脚本在 `emby.yml` 的 `warmup images` 步骤；**302 直连为主时建议 3 / 32**（头尾预热对直连播放基本无效，只当冷读探针，见[起播慢怎么定位](#起播慢怎么定位)） |
+| 校验用的 Emby 用户名 | secret `EMBY_USER`（**不写死在代码里**；未配置则退化为"至少一个用户"） |
 | Emby 校验项 | `emby302/emby_guard.py`（恢复侧与备份侧共用同一份） |
 | 磁盘预检阈值 / 脱敏口径 | `emby302/lib.sh` |
 | 通知内容与时机 | 启动通知、收尾通知在 workflow 内；播放通知在 `playlog.sh` heredoc |
