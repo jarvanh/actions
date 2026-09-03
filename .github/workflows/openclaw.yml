@@ -176,8 +176,8 @@ jobs:
         run: |
           set -euo pipefail
           TS_HOST="openclaw-${{ github.run_id }}"
-          # 重新 up 以开启 Tailscale SSH 并固定主机名；节点为 ephemeral，job 结束自动移除
-          sudo tailscale up --ssh --hostname="$TS_HOST" --advertise-tags=tag:ci
+          # 增量开启 Tailscale SSH 并固定主机名；节点为 ephemeral，job 结束自动移除
+          sudo tailscale set --ssh --hostname="$TS_HOST"
           {
             printf 'TS_HOST=%s\n' "$TS_HOST"
             printf 'TS_IP=%s\n' "$(tailscale ip -4)"
