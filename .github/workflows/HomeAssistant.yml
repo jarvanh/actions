@@ -15,7 +15,7 @@ jobs:
       # -----------------------------------------------------------
       # 1. 配置并挂载 Rclone (Dropbox)
       # -----------------------------------------------------------
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: rclone-install
         run: |
           set -e

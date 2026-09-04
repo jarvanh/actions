@@ -114,7 +114,7 @@ jobs:
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: rclone-install
         shell: bash
         run: |

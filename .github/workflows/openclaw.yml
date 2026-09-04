@@ -22,7 +22,7 @@ jobs:
         with:
           node-version: 'current' # 始终使用官方发布的最新版
           
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: rclone-install
         run: |
           set -e
@@ -187,7 +187,18 @@ jobs:
           sudo sysctl -p /etc/sysctl.d/99-tailscale-forward.conf
 
           # 固定主机名 openclaw（singleton 并发下不会撞名）；节点为 ephemeral，job 结束自动移除
-          # 开启 Exit Node：tailnet 内设备可将本 runner 设为出口节点（需在 Tailscale 管理页批准，或 ACL autoApprovers 配置）
+          # 开启 Exit Node：tailnet 内设备可将本 runner 设为出口节点
+          # 批准方式（任选其一）：
+          #   ① 管理页手动批准: https://login.tailscale.com/admin/machines → 找到 openclaw 节点
+          #      → Edit route settings → 勾选 0.0.0.0/0, ::/0（ephemeral 节点每次运行都需重新批准）
+          #   ② ACL autoApprovers（推荐，免每次批准）: 在 Tailscale ACL rules 前加：
+          #        "autoApprovers": {
+          #          "routes": { "0.0.0.0/0": ["tag:ci"], "::/0": ["tag:ci"] }
+          #        },
+          #   ③ Tailscale API 程序化批准:
+          #      GET  https://api.tailscale.com/api/v2/tailnet/{tailnet}/devices  查到节点 id
+          #      POST https://api.tailscale.com/api/v2/device/{device_id}/routes  body: {"routes": ["0.0.0.0/0", "::/0"]}
+          #      （需 TS_API_KEY，ephemeral 节点 id 每次变化，需按主机名动态查询）
           sudo tailscale set --ssh --hostname=openclaw --advertise-exit-node
           # 回读实际注册的 DNS 短名（极端情况同名冲突会被加后缀，以实际为准）
           TS_HOST="$(tailscale status --json | jq -r '.Self.DNSName' | cut -d. -f1)"
@@ -212,13 +223,38 @@ jobs:
           set -euo pipefail
           # 每次 runner 就绪都推送 SSH 入口；通知失败不影响主流程
           . "$HOME/ts.env"
+
+          # 获取 runner 出口 IP 信息（IP/ISP/ASN/ASN 组织/位置）；失败不影响主流程
+          IP_INFO="$(curl -fsS --max-time 10 'https://ipwho.is/' 2>/dev/null || true)"
+          [ -z "${IP_INFO}" ] && IP_INFO='{}'
+          PUB_IP="$(printf '%s' "${IP_INFO}" | jq -r '.ip // ""')"
+          IP_ISP="$(printf '%s' "${IP_INFO}" | jq -r '.connection.isp // ""')"
+          IP_ASN="$(printf '%s' "${IP_INFO}" | jq -r '.connection.asn // ""')"
+          IP_ORG="$(printf '%s' "${IP_INFO}" | jq -r '.connection.org // ""')"
+          IP_LOC="$(printf '%s' "${IP_INFO}" | jq -r '[.city, .region, (.country_code // .country)] | map(select(. != null and . != "")) | join(", ")')"
+          PUB_IP="${PUB_IP:-未知}"; IP_ISP="${IP_ISP:-未知}"; IP_ASN="${IP_ASN:-}"; IP_ORG="${IP_ORG:-未知}"; IP_LOC="${IP_LOC:-未知}"
+
           msg="🟢 OpenClaw runner 已就绪"
           msg+=$'\n\n'
           msg+="SSH: ssh runner@${TS_HOST}"
           msg+=$'\n'
           msg+="IP: ssh runner@${TS_IP}"
           msg+=$'\n'
-          msg+="Exit Node: 已广播，请在 Tailscale 管理页批准后使用（本 runner 可作为出口节点）"
+          msg+="Exit Node: 已广播（本 runner 可作为出口节点）"
+          msg+=$'\n'
+          msg+="批准① 管理页: admin/machines → openclaw → Edit routes → 勾选 Exit Node"
+          msg+=$'\n'
+          msg+="批准② ACL autoApprovers: routes 0.0.0.0/0,::/0 → tag:ci（免每次批准，推荐）"
+          msg+=$'\n'
+          msg+="批准③ API: POST /api/v2/device/{device_id}/routes"
+          msg+=$'\n\n'
+          msg+="出口 IP: ${PUB_IP}"
+          msg+=$'\n'
+          msg+="ISP: ${IP_ISP}"
+          msg+=$'\n'
+          msg+="ASN: AS${IP_ASN}（${IP_ORG}）"
+          msg+=$'\n'
+          msg+="位置: ${IP_LOC}"
           msg+=$'\n'
           msg+="Run: ${RUN_URL}"
           payload=$(jq -n --arg chat_id "$TELEGRAM_CHAT_ID" --arg text "$msg" \
