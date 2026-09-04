@@ -31,6 +31,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
+      # 统一收尾区（tg_add_footer）: 运行日志链接 + 已运行时长（所有通知 step 继承）
+      TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      TG_RUN_STARTED_AT: ${{ github.run_started_at }}
       # OneDrive 远程路径：rclone 配置中的远端 + 路径
       SOURCE_REMOTE: "onedrive:0/j-1024j-视频-pornhub-favorites"
       # SOURCE_REMOTE: "onedrive:3/1024j-视频-pornhub-channel"
@@ -180,15 +183,18 @@ jobs:
             -i "https://www.pornhub.com/users/${{ secrets.PORNHUBNAME }}/videos/favorites" || echo "url不存在"
           rm -f "$YT_DLP_ARCHIVE"
 
-          # 损坏文件通知（process_ph_download.sh 验证失败并丢弃的文件）
+          # 损坏文件通知（process_ph_download.sh 验证失败并丢弃的文件；统一 HTML 版式）
           if [ -f "$DOWNLOAD_TMP/corrupted.txt" ]; then
             source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
             CORRUPTED_COUNT=$(wc -l < "$DOWNLOAD_TMP/corrupted.txt")
             CORRUPTED_LIST=$(cat "$DOWNLOAD_TMP/corrupted.txt")
-            HEADER="🗑 ph-dl 下载阶段损坏视频"$'\n'"━━━━━━━━━━━━━━━━━━"$'\n'$'\n'"📊 数量: ${CORRUPTED_COUNT}"
-            send_tg "$HEADER"
-            send_tg_chunked "📋 文件列表"$'\n'"━━━━━━━━━━━━━━━━━━"$'\n\n'"${CORRUPTED_LIST}"
-            send_tg "🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            msg=""
+            tg_add_title msg "🗑️ ph-dl 下载阶段损坏视频"
+            tg_add_kv msg "损坏数量" "${CORRUPTED_COUNT} 个"
+            tg_add_section msg "📋 文件列表"
+            tg_add_block msg "$(tree_lines "$CORRUPTED_LIST")"
+            tg_add_footer msg
+            send_tg_chunked "$msg"
           fi
           rm -rf "$DOWNLOAD_TMP"
 
@@ -232,9 +238,16 @@ jobs:
           fi
 
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
-          HEADER="✅ ph-dl 下载任务完成"$'\n'"━━━━━━━━━━━━━━━━━━"$'\n'$'\n'"${VIDEO_SUMMARY}"$'\n'"📊 本次下载: ${DOWNLOAD_COUNT} 个视频"$'\n'"💾 下载前: ${BEFORE_SIZE}"$'\n'"💾 下载后: ${AFTER_SIZE}"
-          send_tg "$HEADER"
+          # 统一 HTML 版式 + 统一收尾区（散装消息合并为一条，明细树形列出）
+          msg=""
+          tg_add_title msg "✅ ph-dl 下载任务完成"
+          tg_add_kv msg "视频文件" "${TOTAL_VIDEOS} 条"
+          tg_add_kv msg "库存状态" "已上传 ${UPLOADED_VIDEOS} · 待上传 ${PENDING_VIDEOS} · 失败 ${FAILED_VIDEOS}"
+          tg_add_kv msg "本次下载" "${DOWNLOAD_COUNT} 个视频"
+          tg_add_kv msg "磁盘占用" "${BEFORE_SIZE} → ${AFTER_SIZE}"
           if [ "$FILE_LIST" != "无" ]; then
-            send_tg_chunked "📋 文件列表"$'\n'"━━━━━━━━━━━━━━━━━━"$'\n\n'"${FILE_LIST}"
+            tg_add_section msg "📋 本次新增"
+            tg_add_block msg "$(tree_lines "$FILE_LIST")"
           fi
-          send_tg "🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          tg_add_footer msg
+          send_tg_chunked "$msg"

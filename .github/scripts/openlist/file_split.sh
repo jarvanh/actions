@@ -73,6 +73,7 @@ send_video_split_notification() {
     fi
   fi
 
+  tg_add_footer message
   send_telegram_message "$message"
 }
 
@@ -109,6 +110,7 @@ send_binary_split_notification() {
     # 日志为原始输出，转义后 <pre> 等宽展示
     tg_add_block message "<pre>$(escape_html "$log_summary")</pre>"
   fi
+  tg_add_footer message
   send_telegram_message "$message"
 }
 
@@ -599,7 +601,7 @@ preprocess_large_files() {
 
     if [ "$split_success" -eq 1 ]; then
       success_count=$((success_count + 1))
-      processed_files+="• <code>$(escape_html "${remote_source}:${full_path}")</code>（$(format_bytes_iec "$file_size")，${split_kind}）"$'\n'
+      processed_files+="• <code>$(escape_html "${remote_source}:${full_path}")</code> · <i>$(format_bytes_iec "$file_size") · ${split_kind}</i>"$'\n'
       deleted_files+="• <code>$(escape_html "${remote_source}:${full_path}")</code>"$'\n'
       echo "$(date +%Y-%m-%d_%H:%M:%S) - ${remote_source}:${full_path} - OpenList 前置分割成功(${split_kind})，已删除原始大文件" >> "$PROCESSED_FILES_LOG"
     else
@@ -626,17 +628,18 @@ preprocess_large_files() {
     tg_add_kv summary_message "处理成功" "$success_count"
     tg_add_kv summary_message "处理失败" "$failed_count"
     if [ -n "$processed_files" ]; then
-      tg_add_section summary_message "✂️ 已切割文件（${success_count} 个）"
+      tg_add_section summary_message "✂️ 已切割文件 · ${success_count}"
       tg_add_block summary_message "$processed_files"
     fi
     if [ -n "$deleted_files" ]; then
-      tg_add_section summary_message "🗑️ 已删除原始大文件（${success_count} 个）"
+      tg_add_section summary_message "🗑️ 已删除原始大文件 · ${success_count}"
       tg_add_block summary_message "$deleted_files"
     fi
     if [ -n "$failed_files" ]; then
-      tg_add_section summary_message "⚠️ 处理失败文件（${failed_count} 个）"
+      tg_add_section summary_message "⚠️ 处理失败文件 · ${failed_count}"
       tg_add_block summary_message "$failed_files"
     fi
+    tg_add_footer summary_message
     send_telegram_message "$summary_message"
   fi
 

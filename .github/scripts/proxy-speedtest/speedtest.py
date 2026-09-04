@@ -17,6 +17,7 @@
 """
 import json
 import os
+import html
 import pathlib
 import re
 import statistics
@@ -941,7 +942,12 @@ def _result_metric_item(r):
 
 
 def build_telegram_lines(results, *, meta, gist_res, qualified_count):
-    """生成人性化 Telegram 通知：测速概览 + TOP 节点（与订阅节点名一致的指标格式）+ 订阅状态。"""
+    """生成人性化 Telegram 通知（统一 HTML 版式，对齐全库通知模板）：
+    emoji 标题 + ━━━ 分隔线 + 键值概览（数值 <b>）+ 树形 TOP5（节点 <code>）+
+    订阅状态 + 统一收尾区（⏱ 已运行 · 🔗 运行日志，读 TG_RUN_URL 环境变量）。"""
+    def esc(s):
+        return html.escape(str(s))
+
     push_enabled = bool(meta.get('push'))
     mode = 'push-only' if push_enabled else 'download'
     sort_key = (lambda r: (r.get('upload') or {}).get('mibps') or 0) if push_enabled \
@@ -957,38 +963,54 @@ def build_telegram_lines(results, *, meta, gist_res, qualified_count):
     except Exception:
         duration_text = '-'
 
+    sep = '━' * 18
     lines = [
-        '节点测速完成',
-        '',
-        f'🕒 {started} ~ {ended}（耗时 {duration_text}）',
-        f'📊 节点: 共 {len(results)} 个，可用 {len(ok_results)} 个',
+        '📈 <b>代理节点测速完成</b>',
+        sep,
+        f'🕒 {esc(started)} ~ {esc(ended)}（耗时 {esc(duration_text)}）',
+        f'📊 节点：共 <b>{len(results)}</b> 个 · 可用 <b>{len(ok_results)}</b> 个',
         '',
     ]
     if top_results:
         best = top_results[0]
-        lines.append(f"🏆 最快节点: {best.get('name', '')}")
+        lines.append(f"🏆 最快节点：<b>{esc(best.get('name', ''))}</b>")
         lines.append('')
-        lines.append('🥇 TOP 5（↑上传 ↓下载 延迟ms）:')
-        for idx, r in enumerate(top_results[:5], 1):
+        lines.append('🥇 <b>TOP 5</b>（↓下载 · ↑上传 · 延迟ms）')
+        top = top_results[:5]
+        for idx, r in enumerate(top, 1):
             prefix = build_node_metric_prefix(_result_metric_item(r), mode)
-            lines.append(f"{idx}. {r.get('name', '')}")
-            lines.append(f'   └─ {prefix or "-"}')
+            connector = '└─' if idx == len(top) else '├─'
+            item = f'{connector} {idx}. <code>{esc(r.get("name", ""))}</code>'
+            if prefix:
+                item += f' · <i>{esc(prefix)}</i>'
+            lines.append(item)
         lines.append('')
     else:
         lines.append('⚠️ 没有节点测速成功')
         lines.append('')
 
-    lines.append('📦 订阅（Gist）:')
+    lines.append('📦 <b>订阅（Gist）</b>')
     if gist_res and gist_res.get('ok'):
         action = '新建' if gist_res.get('created') else '更新'
         html_url = gist_res.get('html_url') or ''
-        lines.append(f'   └─ ✅ 已{action}，达标 {qualified_count} 个节点（≥{DEFAULT_MIN_MEGABIT}兆）')
+        lines.append(f'  └─ ✅ 已{action}，达标 <b>{qualified_count}</b> 个节点（≥{DEFAULT_MIN_MEGABIT}兆）')
         if html_url:
-            lines.append(f'   └─ 🔗 {html_url}')
+            lines.append(f'  └─ 🔗 <a href="{esc(html_url)}">测速报告（HTML）</a>')
     elif gist_res:
-        lines.append(f"   └─ ⚠️ 上传失败: {gist_res.get('reason', '')}")
+        lines.append(f"  └─ ⚠️ 上传失败: {esc(gist_res.get('reason', ''))}")
     else:
-        lines.append(f'   └─ ⚠️ 无达标节点（阈值 ≥{DEFAULT_MIN_MEGABIT}兆），未更新订阅')
+        lines.append(f'  └─ ⚠️ 无达标节点（阈值 ≥{DEFAULT_MIN_MEGABIT}兆），未更新订阅')
+
+    # 统一收尾区（收尾区与正文间固定一个空行）
+    lines.append('')
+    tg_run_url = os.environ.get('TG_RUN_URL', '')
+    footer = ''
+    if tg_run_url:
+        footer = f'⏱ 已运行 <b>{esc(duration_text)}</b> · 🔗 <a href="{esc(tg_run_url)}">运行日志</a>'
+    elif duration_text != '-':
+        footer = f'⏱ 已运行 <b>{esc(duration_text)}</b>'
+    if footer:
+        lines.append(footer)
     return lines
 
 
@@ -1012,7 +1034,13 @@ def write_termination(started_at, reason):
         pass
     log_progress('speedtest_terminated', reason=reason)
     try:
-        send_telegram(merged_env(), f'节点测速异常终止\n\n⚠️ {reason}')
+        abort_msg = (f'📈 <b>代理节点测速异常终止</b>\n{"━" * 18}\n'
+                     f'⚠️ {html.escape(str(reason))}')
+        abort_footer = ''
+        tg_run_url = os.environ.get('TG_RUN_URL', '')
+        if tg_run_url:
+            abort_footer = f'\n\n⏱ 🔗 <a href="{html.escape(tg_run_url)}">运行日志</a>'
+        send_telegram(merged_env(), abort_msg + abort_footer)
     except Exception:
         pass
 

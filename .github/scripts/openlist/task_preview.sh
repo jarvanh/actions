@@ -309,10 +309,11 @@ _preview_render_pairs_detail() {
     fi
   done <<< "$PREVIEW_PAIRS_TSV"
   # 组装: 组头 + 树形条目块，组间空一行（首组前不加——tg_add_section 已带段前空行）
+  # 组头路径加粗（与进度通知同款），条目内路径才用 <code>
   local _out="" _src _gi=0
   for _src in "${_g_order[@]}"; do
     [ "$_gi" -gt 0 ] && _out+=$'\n'
-    _out+="📁 <code>$(escape_html "$_src")</code>"
+    _out+="📁 <b>$(escape_html "$_src")</b>"
     if [ -n "${_g_size[$_src]}" ]; then
       _out+=" · <i>源端 $(format_bytes "${_g_size[$_src]%%|*}") / ${_g_size[$_src]##*|} 文件</i>"
     fi
@@ -391,9 +392,10 @@ flush_task_preview() {
 
     local msg=""
     tg_add_title msg "📋 任务预览 · ${PREVIEW_TASK_NAME}"
-    tg_add_section msg "📊 同步对（${PREVIEW_PAIR_COUNT} 对）"
+    tg_add_section msg "📊 同步对 · ${PREVIEW_PAIR_COUNT}"
     tg_append msg "$(_preview_render_pairs_detail "$_t")"
     tg_append msg $'\n\n'"📦 合计预估待同步：<b>$(format_bytes "$PREVIEW_TOTAL_SYNC_BYTES")</b> / <b>${PREVIEW_TOTAL_SYNC_COUNT}</b> 文件${_total_note}${_fail_note}${_skip_note}"
+    tg_add_footer msg
 
     send_telegram_message "$msg"
     echo "  已发送 ${PREVIEW_TASK_NAME} 预览通知"

@@ -36,7 +36,11 @@ python3 "${GITHUB_WORKSPACE}/.github/scripts/telegram/clean_tg_channel.py" "$CHA
 rclone delete "$SOURCE_REMOTE/uploaded_videos.json" 2>/dev/null || true
 echo "已删除 uploaded_videos.json"
 
-# 3. 发送通知（使用共享通知脚本，自动处理 429 限流）
+# 3. 发送通知（统一 HTML 排版 + 统一收尾区）
 source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
-MSG="🧹 ${WORKFLOW_LABEL} 频道清理完成"$'\n\n'"📁 已清空 Telegram 频道所有视频"$'\n'"📄 已删除 uploaded_videos.json（下次运行重新处理全部视频）"$'\n'"🔗 任务链接: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-send_tg "$MSG"
+msg=""
+tg_add_title msg "🧹 ${WORKFLOW_LABEL} 频道清理完成"
+tg_add_block msg "📁 已清空 Telegram 频道所有视频
+📄 已删除 uploaded_videos.json（下次运行重新处理全部视频）"
+tg_add_footer msg
+send_tg "$msg"

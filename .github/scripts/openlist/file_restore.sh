@@ -258,17 +258,19 @@ restore_fixed_files() {
   # 汇总通知
   local msg=""
   tg_add_title msg "🔧 修复文件一键还原完成"
-  tg_add_kv msg "还原成功" "${total_ok} 个"
-  tg_add_kv msg "还原失败" "${total_fail} 个"
+  tg_add_kv msg "修复恢复" "${total_ok} 个"
+  tg_add_kv msg "失败" "${total_fail} 个"
   if [ -n "$ok_list" ]; then
-    tg_add_section msg "✅ 已还原（原路径原文件名）"
+    tg_add_section msg "✅ 已还原"
     tg_add_block msg "$ok_list"
+    tg_add_note msg "（原路径原文件名）"
   fi
   if [ -n "$fail_list" ]; then
     tg_add_section msg "❌ 失败清单"
     tg_add_block msg "$fail_list"
   fi
   tg_add_note msg "成功条目已从 marker 修复清单移除；失败条目保留，可重试。"
+  tg_add_footer msg
   send_telegram_message "$msg"
   echo "=== 还原完成: OK=${total_ok} FAIL=${total_fail} ==="
 }
@@ -509,16 +511,18 @@ restore_source_from_target() {
   rm -rf "$tmp_base"
 
   local msg=""
-  tg_add_title msg "🆘 灾难恢复完成（目标端 → 源端）"
-  tg_add_kv msg "批量拷回普通文件" "${total_bulk} 个"
-  tg_add_kv msg "修复文件恢复成功" "${total_ok} 个"
-  tg_add_kv msg "源端已存在跳过" "${total_skip} 个"
+  tg_add_title msg "🆘 灾难恢复完成"
+  tg_add_kv msg "方向" "目标端 → 源端"
+  tg_add_kv msg "批量拷回" "${total_bulk} 个"
+  tg_add_kv msg "修复恢复" "${total_ok} 个"
+  tg_add_kv msg "跳过（已存在）" "${total_skip} 个"
   tg_add_kv msg "失败" "${total_fail} 个"
   if [ -n "$fail_list" ]; then
     tg_add_section msg "❌ 失败清单"
     tg_add_block msg "$fail_list"
   fi
   tg_add_note msg "目标端未做任何删改，可重复执行补齐失败条目。"
+  tg_add_footer msg
   send_telegram_message "$msg"
   echo "=== 恢复完成: bulk=${total_bulk} ok=${total_ok} skip=${total_skip} fail=${total_fail} ==="
 }
@@ -621,15 +625,18 @@ rebuild_source_from_target() {
   rm -rf "$tmp_base"
 
   local msg=""
-  tg_add_title msg "🆘 镜像灾难恢复完成（目标端 → 源端 · 已删除源端多余文件）"
-  tg_add_kv msg "修复文件恢复成功" "${total_ok} 个"
-  tg_add_kv msg "源端已存在跳过" "${total_skip} 个"
+  tg_add_title msg "🆘 镜像灾难恢复完成"
+  tg_add_kv msg "方向" "目标端 → 源端"
+  tg_add_kv msg "副作用" "已删除源端多余文件"
+  tg_add_kv msg "修复恢复" "${total_ok} 个"
+  tg_add_kv msg "跳过（已存在）" "${total_skip} 个"
   tg_add_kv msg "失败" "${total_fail} 个"
   if [ -n "$fail_list" ]; then
     tg_add_section msg "❌ 失败清单"
     tg_add_block msg "$fail_list"
   fi
-  tg_add_note msg "源端已按目标端镜像（多余文件已删除）；目标端全程只读，失败条目可直接重跑补齐。"
+  tg_add_note msg "源端已按目标端镜像；目标端全程只读，失败条目可直接重跑补齐。"
+  tg_add_footer msg
   send_telegram_message "$msg"
   echo "=== 镜像恢复完成: ok=${total_ok} skip=${total_skip} fail=${total_fail} ==="
 }

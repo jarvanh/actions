@@ -168,18 +168,22 @@ echo "${DUP_DETAILS}"
 source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 
 if [ "$DUP_COUNT" -gt 0 ]; then
-  HEADER="🔍 ${WORKFLOW_LABEL} 重复视频检测与去重"$'\n'"━━━━━━━━━━━━━━━━━━"$'\n'"📁 目录: ${DIR_LABEL}"$'\n'
-  HEADER+=$'\n'"📊 统计"$'\n'"• 重复哈希: ${DUP_COUNT}"$'\n'"• 已删除: ${REMOVED_COUNT}"
+  msg=""
+  tg_add_title msg "🔍 ${WORKFLOW_LABEL} 重复视频检测与去重"
+  tg_add_path msg "目录" "$DIR_LABEL"
+  tg_add_kv msg "重复哈希" "${DUP_COUNT}"
+  tg_add_kv msg "已删除" "${REMOVED_COUNT}"
   if [ "$AUTO_DELETE" = "true" ]; then
-    HEADER+=$'\n'$'\n'"⚙️ 模式: 自动删除已开启"
+    tg_add_kv msg "模式" "自动删除已开启"
   else
-    HEADER+=$'\n'$'\n'"⚙️ 模式: 仅通知（手动触发可开启 auto_delete_duplicates）"
+    tg_add_kv msg "模式" "仅通知（手动触发可开启 auto_delete_duplicates）"
   fi
-  send_tg "$HEADER"
   if [ -n "$DUP_DETAILS" ]; then
-    send_tg_chunked "📋 详情"$'\n'"━━━━━━━━━━━━━━━━━━"$'\n\n'"${DUP_DETAILS}"
+    tg_add_section msg "📋 详情"
+    tg_add_block msg "$DUP_DETAILS"
   fi
-  send_tg "🔗 任务链接: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+  tg_add_footer msg
+  send_tg_chunked "$msg"
 else
   echo "未发现重复视频"
 fi

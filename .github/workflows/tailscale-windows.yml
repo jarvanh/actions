@@ -90,31 +90,32 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TG_RUN_STARTED_AT: ${{ github.run_started_at }}
         run: |
           # 每次 runner 就绪都推送 SSH/RDP 入口；通知失败不影响主流程
-          $msg = @"
-          🟢 Windows runner 已就绪
-
-          SSH: ssh $Env:TS_USER@$Env:TS_HOST
-          IP: ssh $Env:TS_USER@$Env:TS_IP
-          "@
+          # 统一 HTML 版式 + 统一收尾区（`n 拼接，修复 here-string 前导缩进问题）
+          $sep = [string][char]0x2501 * 18
+          $dur = "不足 1 分钟"
+          try {
+            $started = [DateTime]::Parse($Env:TG_RUN_STARTED_AT, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+            $elapsed = [int]((Get-Date).ToUniversalTime() - $started.ToUniversalTime()).TotalMinutes
+            if ($elapsed -ge 60) { $dur = "{0} 小时 {1} 分" -f [int][math]::Floor($elapsed / 60), ($elapsed % 60) }
+            elseif ($elapsed -gt 0) { $dur = "$elapsed 分钟" }
+          } catch { }
+          $msg = "🟢 <b>Windows runner 已就绪</b>`n$sep`n" +
+            "SSH：<code>ssh $Env:TS_USER@$Env:TS_HOST</code>`n" +
+            "IP：<code>ssh $Env:TS_USER@$Env:TS_IP</code>"
           # RDP 启用成功时附上远程桌面入口
           if ($Env:RDP_ENABLED -eq '1') {
-            $msg += @"
-
-          RDP: $Env:TS_IP:3389
-          RDP 用户: $Env:TS_USER
-          密码: TS_SSH_PASSWORD secret（未配置则为 P@ssw0rd!）
-          连接方式: Microsoft Remote Desktop / 任何 RDP 客户端，走 Tailscale 网络
-          "@
+            $msg += "`nRDP：<code>$Env:TS_IP`:3389</code>`n" +
+              "RDP 用户：<code>$Env:TS_USER</code>`n" +
+              "密码：<i>TS_SSH_PASSWORD secret（未配置则为 P@ssw0rd!）</i>"
           }
-          $msg += @"
-
-          Run: $Env:RUN_URL
-          有效期约 6 小时（超时自动结束）
-          "@
+          $msg += "`n有效期：<i>约 6 小时（超时自动结束）</i>" +
+            "`n`n⏱ 已运行 <b>$dur</b> · 🔗 <a href=""$Env:TG_RUN_URL"">运行日志</a>"
           Invoke-RestMethod -Uri "https://api.telegram.org/bot$Env:TELEGRAM_BOT_TOKEN/sendMessage" `
-            -Method Post -Body @{ chat_id = $Env:TELEGRAM_CHAT_ID; text = $msg }
+            -Method Post -Body @{ chat_id = $Env:TELEGRAM_CHAT_ID; text = $msg; parse_mode = 'HTML'; disable_web_page_preview = 'true' }
           echo "已推送入口通知: ssh $Env:TS_USER@$Env:TS_HOST"
 
       - name: Keep alive (6h)

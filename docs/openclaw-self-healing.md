@@ -120,9 +120,12 @@ tar -xzf /tmp/restore.tar.gz -C /tmp/restore .openclaw/openclaw.json
 
 ### 排障入口
 
-- 失败通知：FAIL_STAGE、当前/回退/采纳版本、DOCTOR_EXIT、关键错误摘要、Tailscale SSH 入口。
-- 启动通知（🟢 runner 已就绪）：SSH 入口、AI 网关后端（CliRelay / CLIProxyAPI + 回退原因）、
+- 失败通知（🚨 OpenClaw 自愈失败）：FAIL_STAGE、当前/回退/采纳版本、DOCTOR_EXIT、关键错误摘要
+  （`<pre>` 等宽块）、Tailscale SSH 入口。
+- 启动通知（🟢 OpenClaw Runner SSH 入口）：SSH 入口、AI 网关后端（CliRelay / CLIProxyAPI + 回退原因）、
   RustDesk 直连地址、SFTP 文件管理入口、出口 IP/ISP/ASN。
+- 全部通知为全库统一 HTML 版式（emoji 标题 + ━━━ 分隔线 + 统一收尾行
+  `⏱ 已运行 X · 🔗 运行日志`），HTML 解析失败自动退化纯文本重发。
 - 运行中日志：`/tmp/run-openclaw-step.log`（经 Tailscale SSH 可见）。
 - 结束后拉日志：`gh run view --job <job_id> --repo jarvanh/actions --log`。
 
@@ -180,6 +183,27 @@ tar -xzf /tmp/restore.tar.gz -C /tmp/restore .openclaw/openclaw.json
 
 `CliRelay.tar.gz` 存在且含 `docker-compose.yml`/`.env` → 解压 → `compose up postgres`
 → `psql -v ON_ERROR_STOP=1 < sql/*.sql` → `compose up` 全栈。PG 数据卷不入包，每轮均为全新库，导入无冲突。
+
+### 凭据体系（两套并存，勿混淆）
+
+| 凭据 | 来源 | 作用域 |
+|---|---|---|
+| **面板登录**（`/manage/login`） | 用户名 `admin`，密码 = 部署 `.env` 的 `CLIRELAY_ADMIN_PASSWORD`（未预设时由 `clirelay-init` 首启自动生成并回写 `.env`，随归档持久化） | CliRelay 面板（独立账号体系，存 postgres，支持租户/角色/权限） |
+| **管理 API**（`/v0/management`，Bearer） | `config.yaml` 的 `remote-management.secret-key`（明文写入后启动时自动哈希） | 管理 API；与 `~/.openclaw/.env` 的 `MANAGEMENT_KEY` 保持一致 |
+
+- 两套密码已统一为同一值；`CLIRELAY_ADMIN_PASSWORD` 若要预设必须满足复杂度规则
+  （≥12 字符 + 大小写 + 非字母数字），不合规会被 `clirelay-init` 替换。
+- Dropbox 的 `CLIProxyAPI.tar.gz` 内 config.yaml 的 secret-key 也保持同步，
+  保证回退恢复后的管理 API 密钥不回退到旧值。
+- 统计/用量/审计数据存 postgres（本地 `data/` SQLite 为空），随 pg_dump 进入归档，不丢失。
+
+### clirelay-updater 版本提示（已知现象）
+
+- updater 跟踪 **main 分支最新 commit**（`CLIRELAY_UPDATE_CHANNEL=main`），而
+  `ghcr.io/kittors/clirelay:latest` 镜像由上游 CI 构建——纯文档类 commit 可能跳过镜像构建，
+  导致镜像落后于 main HEAD，**刚部署也可能提示「可用新版本 main-xxxxxx」**，属正常现象。
+- updater 挂载 docker.sock（更新时主容器会短暂重启）；无状态文件（`.clirelay-updater-status.json`）
+  表示尚未执行过更新。若不需要自动更新，可从 compose 移除 `clirelay-updater` 服务后重新归档。
 
 ## 七、远程访问入口（Tailscale）
 

@@ -128,7 +128,7 @@ chk "L4b 标签行带树干连接符（层级归属可见）" \
 chk "L5a 深层 detail 渲染为 note 行（code 等宽）" \
   "$(line_of '巩固')" "<code>              · ${BATCH_DETAIL}</code>"
 chk "L5b 深层 detail 不污染任务行（任务行无 detail）" \
-  "$(line_of 'wopan176Crypt/0')" "  └─ wopan176Crypt/0"
+  "$(line_of 'wopan176Crypt/0')" "  └─ <code>wopan176Crypt/0</code>"
 
 # ---------- L6: 子任务收尾清更深槽位（含 note）----------
 progress_scope_init 1
@@ -167,7 +167,7 @@ chk "L7a d0 标签行无树连接符、保留 ▸ 前导（5 格缩进）" \
 chk "L7b d0 统计行缩进 9 格" \
   "$(line_of '批次：1/15')" "<code>         ${BATCH_STATS}</code>"
 chk "L7c 目标端行无 detail 黏连" \
-  "$(line_of 'wopan175/0')" "  └─ wopan175/0/j-1024j"
+  "$(line_of 'wopan175/0')" "  └─ <code>wopan175/0/j-1024j</code>"
 
 # rt 线程实时状态 → note 行（直写 d0 note 槽，不碰任务行）
 rm -f "$PROGRESS_LAST_UPDATE_FILE"

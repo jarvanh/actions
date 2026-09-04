@@ -819,51 +819,42 @@ jobs:
           fi
           AI_BACKEND="${AI_BACKEND:-clirelay}"
 
-          msg="🟢 OpenClaw runner 已就绪"
-          msg+=$'\n\n'
-          msg+="SSH: ssh runner@${TS_HOST}"
-          msg+=$'\n'
-          msg+="IP: ssh runner@${TS_IP}"
-          msg+=$'\n'
-          msg+="Exit Node: 已广播（本 runner 可作为出口节点）"
-          msg+=$'\n'
-          msg+="批准① 管理页: admin/machines → openclaw → Edit routes → 勾选 Exit Node"
-          msg+=$'\n'
-          msg+="批准② ACL autoApprovers: routes 0.0.0.0/0,::/0 → tag:ci（免每次批准，推荐）"
-          msg+=$'\n'
-          msg+="批准③ API: POST /api/v2/device/{device_id}/routes"
-          msg+=$'\n\n'
-          if [ "$AI_BACKEND" = "cliproxyapi" ]; then
-            msg+="AI 网关: CLIProxyAPI（回退）"
-          else
-            msg+="AI 网关: CliRelay（全栈）"
-          fi
-          if [ -n "$AI_FALLBACK_REASON" ]; then
-            msg+=$'\n'
-            msg+="回退原因: ${AI_FALLBACK_REASON}"
-          fi
-          if [ -n "${TS_FQDN:-}" ]; then
-            msg+=$'\n'
-            msg+="RustDesk 直连: ${TS_FQDN}:21118"
-          fi
-          msg+=$'\n'
-          msg+="文件管理 (SFTP): sftp://runner@${TS_HOST}/"
-          msg+=$'\n\n'
-          msg+="出口 IP: ${PUB_IP}"
-          msg+=$'\n'
-          msg+="ISP: ${IP_ISP}"
-          msg+=$'\n'
-          msg+="ASN: AS${IP_ASN}（${IP_ORG}）"
-          msg+=$'\n'
-          msg+="位置: ${IP_LOC}"
-          msg+=$'\n'
-          msg+="Run: ${RUN_URL}"
+          # 统一 HTML 通知 + 统一收尾区（tg_notify.sh，checkout 后可用）
+          source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+          TG_RUN_URL="${RUN_URL}" TG_RUN_STARTED_AT="${{ github.run_started_at }}" msg=""
+          tg_add_title msg "🟢 OpenClaw Runner SSH 入口"
+          tg_add_path msg "SSH" "ssh runner@${TS_HOST}"
+          tg_add_path msg "IP" "ssh runner@${TS_IP}"
+          tg_add_kv msg "出口节点" "已广播（可作为出口节点）"
+          tg_add_kv msg "AI 网关" "$(if [ "$AI_BACKEND" = "cliproxyapi" ]; then echo "CLIProxyAPI（回退）"; else echo "CliRelay（全栈）"; fi)"
+          [ -n "$AI_FALLBACK_REASON" ] && tg_add_kv msg "回退原因" "$AI_FALLBACK_REASON"
+          [ -n "${TS_FQDN:-}" ] && tg_add_kv msg "RustDesk 直连" "${TS_FQDN}:21118"
+          tg_add_kv msg "出口 IP" "${PUB_IP}"
+          tg_add_kv msg "ISP" "${IP_ISP}"
+          tg_add_kv msg "ASN" "AS${IP_ASN}（${IP_ORG}）"
+          tg_add_kv msg "位置" "${IP_LOC}"
+          tg_add_section msg "批准方式"
+          tg_add_block msg "• 管理页：admin/machines → openclaw → Edit routes → 勾选 Exit Node
+          • ACL autoApprovers：routes 0.0.0.0/0,::/0 → tag:ci（免每次批准，推荐）
+          • API：POST /api/v2/device/{device_id}/routes"
+          tg_add_note msg "文件管理 (SFTP)：sftp://runner@${TS_HOST}/"
+          # footer 读 TG_RUN_URL/TG_RUN_STARTED_AT（上方前缀注入）
+          tg_add_footer msg
           payload=$(jq -n --arg chat_id "$TELEGRAM_CHAT_ID" --arg text "$msg" \
-            '{chat_id: $chat_id, text: $text, disable_web_page_preview: true}')
+            '{chat_id: $chat_id, text: $text, parse_mode: "HTML", disable_web_page_preview: true}')
           curl -fsS --retry 3 --retry-delay 2 --max-time 20 \
             -X POST -H 'Content-Type: application/json' \
             -d "$payload" \
-            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" > /dev/null
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" > /dev/null \
+            || { # HTML 解析失败 → 退化纯文本重发（IP/ISP 等动态值可能含特殊字符）
+              plain=$(_tg_strip_html "$msg")
+              payload=$(jq -n --arg chat_id "$TELEGRAM_CHAT_ID" --arg text "$plain" \
+                '{chat_id: $chat_id, text: $text, disable_web_page_preview: true}')
+              curl -fsS --retry 3 --retry-delay 2 --max-time 20 \
+                -X POST -H 'Content-Type: application/json' \
+                -d "$payload" \
+                "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" > /dev/null || true
+            }
           echo "已推送 SSH 入口通知: ssh runner@${TS_HOST}（AI 网关: ${AI_BACKEND}）"
 
       - name: Run OpenClaw
@@ -1258,58 +1249,39 @@ jobs:
             export INITIAL_START_DURATION_SEC="$initial_start_duration_sec"
             export DOCTOR_FIX_DURATION_SEC="$doctor_fix_duration_sec"
             export FALLBACK_REINSTALL_DURATION_SEC="$fallback_reinstall_duration_sec"
-            msg="⚠️ OpenClaw 启动失败"
-            msg+=$'\n\n'
-            msg+="步骤: Run OpenClaw"
-            msg+=$'\n'
-            msg+="Run ID: ${{ github.run_id }}"
-            msg+=$'\n'
-            msg+="链接: ${run_url}"
-
-            if [ -n "$fail_stage" ]; then
-              msg+=$'\n'
-              msg+="失败阶段: ${fail_stage}"
-            fi
-            if [ -n "$current_version" ]; then
-              msg+=$'\n'
-              msg+="当前尝试版本: ${current_version}"
-            fi
-            if [ -n "$fallback_version" ]; then
-              msg+=$'\n'
-              msg+="Fallback 目标版本: ${fallback_version}"
-            fi
-            if [ -n "$fallback_version_source" ]; then
-              msg+=$'\n'
-              msg+="Fallback 版本来源: ${fallback_version_source}"
-            fi
-            if [ -n "$recorded_successful_version" ]; then
-              msg+=$'\n'
-              msg+="记录的成功版本: ${recorded_successful_version}"
-            fi
-            if [ -n "$initial_start_duration_sec" ]; then
-              msg+=$'\n'
-              msg+="首次启动耗时(秒): ${initial_start_duration_sec}"
-            fi
-            if [ -n "$doctor_fix_duration_sec" ]; then
-              msg+=$'\n'
-              msg+="Doctor 修复阶段耗时(秒): ${doctor_fix_duration_sec}"
-            fi
-            if [ -n "$fallback_reinstall_duration_sec" ]; then
-              msg+=$'\n'
-              msg+="Fallback 重装阶段耗时(秒): ${fallback_reinstall_duration_sec}"
-            fi
-            msg+=$'\n\n'
-            msg+="SSH 调试入口: ${ssh_entry}"
-            msg+=$'\n\n'
-            msg+="关键日志:"
-            msg+=$'\n'
-            msg+="$error_summary"
+            # 统一 HTML 版式 + 统一收尾区（动态值一律转义；日志收敛 <pre> 等宽块；
+            # HTML 解析失败退化纯文本重发——修复"声明 parse_mode=HTML 但未转义"的隐患）
+            source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+            msg=""
+            tg_add_title msg "🚨 OpenClaw 自愈失败"
+            tg_add_kv msg "步骤" "Run OpenClaw"
+            tg_add_kv msg "Run ID" "${{ github.run_id }}"
+            [ -n "$fail_stage" ] && tg_add_kv msg "失败阶段" "$fail_stage"
+            [ -n "$current_version" ] && tg_add_path msg "当前版本" "$current_version"
+            [ -n "$fallback_version" ] && tg_add_path msg "Fallback" "$fallback_version"
+            [ -n "$fallback_version_source" ] && tg_add_kv msg "Fallback 来源" "$fallback_version_source"
+            [ -n "$recorded_successful_version" ] && tg_add_path msg "成功版本记录" "$recorded_successful_version"
+            [ -n "$initial_start_duration_sec" ] && tg_add_kv msg "首次启动耗时" "${initial_start_duration_sec}s"
+            [ -n "$doctor_fix_duration_sec" ] && tg_add_kv msg "Doctor 修复耗时" "${doctor_fix_duration_sec}s"
+            [ -n "$fallback_reinstall_duration_sec" ] && tg_add_kv msg "Fallback 重装耗时" "${fallback_reinstall_duration_sec}s"
+            [ -n "$ssh_entry" ] && tg_add_path msg "SSH 调试" "$ssh_entry"
+            tg_add_section msg "🧾 关键日志"
+            tg_add_block msg "<pre>$(escape_html "$error_summary")</pre>"
+            TG_RUN_URL="$run_url" TG_RUN_STARTED_AT="${{ github.run_started_at }}" tg_add_footer msg
             curl -fsS --retry 3 --retry-delay 2 --max-time 20 \
               -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
               -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
               -d parse_mode="HTML" \
               -d disable_web_page_preview="true" \
-              --data-urlencode text="$msg"
+              --data-urlencode text="$msg" \
+            || { # HTML 解析失败 → 去标签退化纯文本重发
+              plain=$(_tg_strip_html "$msg")
+              curl -fsS --retry 3 --retry-delay 2 --max-time 20 \
+                -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+                -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+                -d disable_web_page_preview="true" \
+                --data-urlencode text="$plain" || true
+            }
           else
             echo "⚠️ Telegram alert skipped: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is empty"
           fi
@@ -1566,12 +1538,22 @@ jobs:
               local repo="${GITHUB_REPOSITORY:-unknown-repo}"
               local run_id="${GITHUB_RUN_ID:-manual}"
               local run_url="https://github.com/${repo}/actions/runs/${run_id}"
-              local full_msg
-              full_msg=$(printf "⚠️ OpenClaw 归档告警\n\n问题: %s\nRun ID: %s\n链接: %s" "$msg" "$run_id" "$run_url")
+              # 统一 HTML 版式 + 统一收尾区（告警文本经 escape_html，动态值含特殊字符也安全）
+              source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+              local full_msg=""
+              tg_add_title full_msg "⚠️ OpenClaw 归档告警"
+              tg_add_note full_msg "$(escape_html "$msg")"
+              tg_add_kv full_msg "Run ID" "${run_id}"
+              TG_RUN_URL="$run_url" TG_RUN_STARTED_AT="${TG_RUN_STARTED_AT:-}" tg_add_footer full_msg
               curl -fsS --retry 3 --retry-delay 2 --max-time 20 \
                 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
                 -d chat_id="${TELEGRAM_CHAT_ID}" \
-                --data-urlencode text="$full_msg" >/dev/null || true
+                -d parse_mode="HTML" \
+                --data-urlencode text="$full_msg" >/dev/null \
+                || curl -fsS --retry 3 --retry-delay 2 --max-time 20 \
+                     -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                     -d chat_id="${TELEGRAM_CHAT_ID}" \
+                     --data-urlencode text="$(_tg_strip_html "$full_msg")" >/dev/null || true
             fi
           }
 
@@ -1680,11 +1662,22 @@ jobs:
               repo="${GITHUB_REPOSITORY:-unknown-repo}"
               run_id="${GITHUB_RUN_ID:-manual}"
               run_url="https://github.com/${repo}/actions/runs/${run_id}"
-              msg=$(printf '⚠️ OpenClaw 即将进入最终归档\n\n预计约 %s 分钟后开始执行：Stop OpenClaw and Final Archive\n请及时保存状态或完成当前操作。\n\nRun ID: %s\n链接: %s' "$FINAL_ARCHIVE_WARNING_BEFORE_MINUTES" "$run_id" "$run_url")
+              # 统一 HTML 版式 + 统一收尾区
+              source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+              msg=""
+              tg_add_title msg "⚠️ OpenClaw 即将进入最终归档"
+              tg_add_kv msg "预计" "约 ${FINAL_ARCHIVE_WARNING_BEFORE_MINUTES} 分钟后执行"
+              tg_add_note msg "请及时保存状态或完成当前操作。"$'\n'"随后执行：Stop OpenClaw and Final Archive"
+              TG_RUN_URL="$run_url" TG_RUN_STARTED_AT="${TG_RUN_STARTED_AT:-}" tg_add_footer msg
               curl -fsS --retry 3 --retry-delay 2 --max-time 20 \
                 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
                 -d chat_id="${TELEGRAM_CHAT_ID}" \
-                --data-urlencode text="$msg" >/dev/null || true
+                -d parse_mode="HTML" \
+                --data-urlencode text="$msg" >/dev/null \
+                || curl -fsS --retry 3 --retry-delay 2 --max-time 20 \
+                     -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                     -d chat_id="${TELEGRAM_CHAT_ID}" \
+                     --data-urlencode text="$(_tg_strip_html "$msg")" >/dev/null || true
             else
               echo "⚠️ Telegram secrets missing, skip final archive warning."
             fi

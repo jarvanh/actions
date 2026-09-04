@@ -154,6 +154,8 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TG_RUN_STARTED_AT: ${{ github.run_started_at }}
         run: |
           set -e
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
@@ -169,27 +171,31 @@ jobs:
             PU_NOTE="未生成运行报告，任务在 PixivUtil2 启动前即中断"
           fi
 
-          START_TS=$(date -d "${{ github.run_started_at }}" +%s 2>/dev/null || echo 0)
-          if [ "$START_TS" -gt 0 ]; then
-            DURATION=$(( ($(date +%s) - START_TS) / 60 ))
-          else
-            DURATION=0
-          fi
-
           case "$PU_STATUS" in
-            success) ICON="✅"; TITLE="PixivUtil2 任务完成" ;;
-            warning) ICON="⚠️"; TITLE="PixivUtil2 任务完成（有跳过）" ;;
-            *)       ICON="❌"; TITLE="PixivUtil2 任务失败" ;;
+            success) TITLE="✅ PixivUtil2 任务完成" ;;
+            warning) TITLE="⚠️ PixivUtil2 任务完成" ;;
+            *)       TITLE="❌ PixivUtil2 任务失败" ;;
           esac
 
-          MSG="${ICON} ${TITLE}"$'\n'"━━━━━━━━━━━━━━━━━━"$'\n'$'\n'"📊 遍历 ${PU_TOTAL} · 新增下载 ${PU_DOWNLOADED} · 已在库 ${PU_SKIPPED} · 失败 ${PU_FAILED}"$'\n'"⏱ 耗时约 ${DURATION} 分钟"$'\n'"🔢 退出码 ${PU_EXIT:-N/A} ${PU_NOTE}"$'\n'"🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          msg=""
+          tg_add_title msg "$TITLE"
+          tg_add_kv msg "遍历" "${PU_TOTAL}"
+          tg_add_kv msg "新增下载" "${PU_DOWNLOADED}"
+          tg_add_kv msg "已在库" "${PU_SKIPPED}"
+          tg_add_kv msg "失败" "${PU_FAILED}"
+          tg_add_kv msg "退出码" "${PU_EXIT:-N/A}"
+          [ -n "$PU_NOTE" ] && tg_add_note msg "$PU_NOTE"
+          tg_add_footer msg
           # 通知发送失败不额外把任务判失败，避免"任务没事、只是 TG 抖动"却变红
-          send_tg "$MSG" || echo "⚠️ Telegram 通知发送失败，详见步骤日志"
+          send_tg "$msg" || echo "⚠️ Telegram 通知发送失败，详见步骤日志"
 
-          # 失败作品 ID 清单（超过 4000 字符自动分片）
+          # 失败作品 ID 清单（超长自动分片）
           if [ -f /tmp/pixiv_failed_ids.txt ] && [ -s /tmp/pixiv_failed_ids.txt ]; then
             FAILED_COUNT=$(wc -l < /tmp/pixiv_failed_ids.txt | tr -d ' ')
-            send_tg_chunked "📋 失败作品 ID（${FAILED_COUNT} 个）"$'\n'"━━━━━━━━━━━━━━━━━━"$'\n'$'\n'"$(cat /tmp/pixiv_failed_ids.txt)" || true
+            fmsg=""
+            tg_add_section fmsg "📋 失败作品 · ${FAILED_COUNT}"
+            tg_add_block fmsg "$(tree_lines "$(cat /tmp/pixiv_failed_ids.txt)")"
+            send_tg_chunked "$fmsg" || true
           fi
 
           # 只有真正的失败才让任务变红，1/45 这类"跑完但有跳过"按成功处理

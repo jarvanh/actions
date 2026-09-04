@@ -538,32 +538,39 @@ _sync_task_impl() {
     fi
     PROGRESS_PHASE_INFO="$(_render_subdir_phase_tree)"
     local _completed_after=$((synced_subtasks + skipped_subtasks + failed_subtasks))
-    progress_update_force "" "▸ 📊 子目录：${_completed_after}/${total_subdirs_count} 完成 | ✅${synced_subtasks} ⏭️${skipped_subtasks} ⏳$((total_subdirs_count - _completed_after)) ⚠️${partial_subtasks} ❌$((failed_subtasks - partial_subtasks))"
+    progress_update_force "" "▸ 📊 子目录：${_completed_after}/${total_subdirs_count} 完成 · ✅${synced_subtasks} ⏭️${skipped_subtasks} ⏳$((total_subdirs_count - _completed_after)) ⚠️${partial_subtasks} ❌$((failed_subtasks - partial_subtasks))"
   done <<< "$subdirs"
   SYNC_SKIP_QUIET=0
 
-  # 设置拆分信息供最终通知使用（HTML 片段，由 sync_engine.sh 通知按分节插入）
-  AUTO_SPLIT_INFO="<b>🔀 子任务拆分统计</b>"$'\n'
-  AUTO_SPLIT_INFO+="总子目录：<b>${total_subtasks}</b> · 传输总量：<b>$(format_bytes "$total_transferred")</b>"$'\n'
+  # 设置拆分信息供最终通知使用（HTML 片段，由 sync_engine.sh 通知按分节插入；
+  # 统一走 tg_add_section/tg_add_block 助手构建——段前空行/结尾换行由助手保证）
+  AUTO_SPLIT_INFO=""
+  tg_add_section AUTO_SPLIT_INFO "🔀 子任务拆分统计"
+  tg_add_kv AUTO_SPLIT_INFO "总子目录" "${total_subtasks}"
+  tg_add_kv AUTO_SPLIT_INFO "传输总量" "$(format_bytes "$total_transferred")"
   local _counts="✅ <b>${synced_subtasks}</b> · ❌ <b>${failed_subtasks}</b>"
   [ "$partial_subtasks" -gt 0 ] && _counts+=" · ⚠️ <b>${partial_subtasks}</b>"
   _counts+=" · ⏭️ <b>${skipped_subtasks}</b>"
-  AUTO_SPLIT_INFO+="${_counts}"
+  tg_add_block AUTO_SPLIT_INFO "${_counts}"
   if [ -n "$synced_list" ]; then
-    AUTO_SPLIT_INFO+=$'\n\n'"<b>✅ 已同步的子目录</b>"$'\n'"$(tree_lines "$synced_list")"
+    tg_add_section AUTO_SPLIT_INFO "✅ 已同步的子目录"
+    tg_add_block AUTO_SPLIT_INFO "$(tree_lines "$synced_list")"
   fi
   if [ -n "$failed_list" ]; then
-    AUTO_SPLIT_INFO+=$'\n\n'"<b>❌ 未同步的子目录</b>"$'\n'"$(tree_lines "$failed_list")"
+    tg_add_section AUTO_SPLIT_INFO "❌ 未同步的子目录"
+    tg_add_block AUTO_SPLIT_INFO "$(tree_lines "$failed_list")"
   fi
   if [ -n "$skipped_list" ]; then
-    AUTO_SPLIT_INFO+=$'\n\n'"<b>⏭️ 已跳过的子目录（无文件变动）</b>"$'\n'"$(tree_lines "$skipped_list")"
+    tg_add_section AUTO_SPLIT_INFO "⏭️ 已跳过的子目录"
+    tg_add_block AUTO_SPLIT_INFO "$(tree_lines "$skipped_list")
+<i>（无文件变动）</i>"
   fi
 
   # 最终完整同步（仅在顶层执行，正常通知）
   if [ "$current_depth" -eq 0 ]; then
     echo "=== 最终完整同步: ${task_name} ==="
     PROGRESS_PHASE_INFO="$(_render_subdir_phase_tree)"
-    progress_update_force "最终完整同步中" "▸ 📊 子目录：${total_subtasks}/${total_subtasks} 完成 | ✅${synced_subtasks} ⏭️${skipped_subtasks} ⚠️${partial_subtasks} ❌$((failed_subtasks - partial_subtasks))"
+    progress_update_force "最终完整同步中" "▸ 📊 子目录：${total_subtasks}/${total_subtasks} 完成 · ✅${synced_subtasks} ⏭️${skipped_subtasks} ⚠️${partial_subtasks} ❌$((failed_subtasks - partial_subtasks))"
     sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
     AUTO_SPLIT_INFO=""
     if [ "$SYNC_FAILED" = "0" ] && [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
@@ -1185,10 +1192,12 @@ sync_by_file_batches() {
           [ "$unbuilt_batches" -gt 0 ] && failed_batch_list+="批次 $((i+1))/${total_batches} 起共 ${unbuilt_batches} 批 · 批次预检未通过（后端不健康），中止"$'\n'
           echo "🛑 批次 $((i+1)) 预检未通过（后端不健康），中止剩余 ${unbuilt_batches} 个批次，本同步对标记失败（后端恢复后轮转回来重试）"
           _stop_batch_progress_thread
-          AUTO_SPLIT_INFO="<b>🔀 文件批次拆分统计</b>"$'\n'
-          AUTO_SPLIT_INFO+="总批次：<b>${total_batches}</b> · 文件数：<b>${batch_total_files}</b>"$'\n'
-          AUTO_SPLIT_INFO+="✅ <b>${synced_batches}</b> · ❌ <b>${failed_batches}</b>（批次预检熔断中止）"$'\n'
-          progress_update_force "批次预检未通过，中止同步" "▸ 📊 批次：${batch_idx}/${total_batches} | ✅${synced_batches} ❌${failed_batches}"
+          AUTO_SPLIT_INFO=""
+          tg_add_section AUTO_SPLIT_INFO "🔀 文件批次拆分统计"
+          tg_add_kv AUTO_SPLIT_INFO "总批次" "${total_batches}"
+          tg_add_kv AUTO_SPLIT_INFO "文件数" "${batch_total_files}"
+          tg_add_block AUTO_SPLIT_INFO "✅ <b>${synced_batches}</b> · ❌ <b>${failed_batches}</b> <i>（批次预检熔断中止）</i>"
+          progress_update_force "批次预检未通过，中止同步" "▸ 📊 批次：${batch_idx}/${total_batches} · ✅${synced_batches} ❌${failed_batches}"
           # 失败状态必须随全局标志传递（与本函数开头 skip 分支置 SYNC_SKIPPED
           # 的惯例一致）: 下游 progress_task_done 状态映射与轮转游标都只认 SYNC_FAILED，
           # 只 return 1 会被双双误判为成功（run 33048121562: task0-wopan175

@@ -48,6 +48,8 @@ jobs:
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         RDP_PASSWORD: "P@ssw0rd!"
+        TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        TG_RUN_STARTED_AT: ${{ github.run_started_at }}
       run: |
         $raw = ""
         $address = $null
@@ -77,16 +79,28 @@ jobs:
           Get-Process ngrok -ErrorAction SilentlyContinue | Format-List
           throw "无法获取 ngrok 隧道地址"
         }
-        $msg = @"
-        Windows RDP 已就绪
-        地址: $address
-        用户名: runneradmin
-        密码: $Env:RDP_PASSWORD
-        本次有效期约 6 小时（超时自动关机）
-        连接方式: Microsoft Remote Desktop / 任何 RDP 客户端，地址填上面这一行
-        "@
+        # 统一 HTML 版式 + 统一收尾区（修复 here-string 前导缩进问题，改用 `n 拼接）
+        function Esc-Html([string]$s) {
+          if (-not $s) { return $s }
+          return ($s -replace '&','&amp;' -replace '<','&lt;' -replace '>','&gt;')
+        }
+        $sep = [string][char]0x2501 * 18
+        $dur = "不足 1 分钟"
+        try {
+          $started = [DateTime]::Parse($Env:TG_RUN_STARTED_AT, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+          $elapsed = [int]((Get-Date).ToUniversalTime() - $started.ToUniversalTime()).TotalMinutes
+          if ($elapsed -ge 60) { $dur = "{0} 小时 {1} 分" -f [int][math]::Floor($elapsed / 60), ($elapsed % 60) }
+          elseif ($elapsed -gt 0) { $dur = "$elapsed 分钟" }
+        } catch { }
+        $msg = "🖥️ <b>Windows RDP 已就绪</b>`n$sep`n" +
+          "地址：<code>$(Esc-Html $address)</code>`n" +
+          "用户名：<code>runneradmin</code>`n" +
+          "密码：<code>$(Esc-Html $Env:RDP_PASSWORD)</code>`n" +
+          "有效期：<i>约 6 小时（超时自动关机）</i>`n" +
+          "连接方式：<i>Microsoft Remote Desktop / 任何 RDP 客户端，地址填上面这一行</i>`n" +
+          "`n⏱ 已运行 <b>$dur</b> · 🔗 <a href=""$Env:TG_RUN_URL"">运行日志</a>"
         Invoke-RestMethod -Uri "https://api.telegram.org/bot$Env:TELEGRAM_BOT_TOKEN/sendMessage" `
-          -Method Post -Body @{ chat_id = $Env:TELEGRAM_CHAT_ID; text = $msg }
+          -Method Post -Body @{ chat_id = $Env:TELEGRAM_CHAT_ID; text = $msg; parse_mode = 'HTML'; disable_web_page_preview = 'true' }
 
     - name: Keep alive (6h)
       run: Start-Sleep -Seconds 21000
