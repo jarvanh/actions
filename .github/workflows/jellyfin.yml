@@ -51,13 +51,50 @@ jobs:
           # rclone.conf 回写成 root:600，之后非 root 的 rclone（含下面的 lsf）读取即 EACCES
           grep -q '^user_allow_other' /etc/fuse.conf 2>/dev/null || echo user_allow_other | sudo tee -a /etc/fuse.conf >/dev/null
           sudo chown -R runner:runner /content
-          nohup rclone mount 1024: /content/drive/MyDrive/1024 --config /home/runner/.config/rclone/rclone.conf --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
-          nohup rclone mount i: /content/drive/MyDrive/my/i --config /home/runner/.config/rclone/rclone.conf --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
-          nohup rclone mount j: /content/drive/MyDrive/my/j --config /home/runner/.config/rclone/rclone.conf --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
-          nohup rclone mount k: /content/drive/MyDrive/my/k --config /home/runner/.config/rclone/rclone.conf --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
-          nohup rclone mount av1: /content/drive/MyDrive/my/av1 --config /home/runner/.config/rclone/rclone.conf --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
-          nohup rclone mount av2: /content/drive/MyDrive/my/av2 --config /home/runner/.config/rclone/rclone.conf --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
-          nohup rclone mount dropbox: /content/drive/MyDrive/my/dropbox --config /home/runner/.config/rclone/rclone.conf --allow-non-empty --no-gzip-encoding --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G &
+          sudo mkdir -p /mnt/vfs /opt/logs
+          sudo chown runner:runner /mnt/vfs /opt/logs
+
+          # 七个远程逐个挂载。参数按"媒体播放"画像：大文件顺序读 + 拖进度（随机 seek）
+          #   --cache-dir         每个远程独立子目录（官方明确：同一缓存目录不要给重叠远程共用）
+          #   --vfs-cache-max-size 4G × 7 = 28G，/mnt（≈65GB）吃得下；原来写 50G 且落在根分区（≈14GB）
+          #   chunk 32M × 4 并发  seek 后能快速起新 chunk，不必等一个大块下载完
+          #   --vfs-handle-caching 5m  拖进度会反复开关同一文件，句柄多留一会儿
+          #   删除 --vfs-read-chunk-size-limit 10G：会让单个 Range 请求一路翻倍到 10GB
+          #   删除 --allow-non-empty：挂载点都是刚建的空目录，留着只会掩盖"挂载点非空"
+          mount_one() {   # $1=远程 $2=挂载点 $3=缓存/日志用的名字
+            mkdir -p "/mnt/vfs/$3"
+            nohup rclone mount "$1" "$2" \
+              --config /home/runner/.config/rclone/rclone.conf \
+              --cache-dir "/mnt/vfs/$3" \
+              --allow-other --umask 000 --no-gzip-encoding \
+              --attr-timeout 10m \
+              --dir-cache-time 72h --poll-interval 0 \
+              --vfs-cache-mode full \
+              --vfs-cache-max-size 4G --vfs-cache-max-age 24h \
+              --vfs-cache-min-free-space 2G \
+              --vfs-cache-poll-interval 30s \
+              --buffer-size 16M \
+              --vfs-read-chunk-size 32M --vfs-read-chunk-streams 4 \
+              --vfs-read-ahead 64M --max-read-ahead 64M \
+              --vfs-handle-caching 5m \
+              --log-file "/opt/logs/rclone-$3.log" --log-level INFO &
+          }
+          mount_one 1024:    /content/drive/MyDrive/1024        1024
+          mount_one i:       /content/drive/MyDrive/my/i        i
+          mount_one j:       /content/drive/MyDrive/my/j        j
+          mount_one k:       /content/drive/MyDrive/my/k        k
+          mount_one av1:     /content/drive/MyDrive/my/av1      av1
+          mount_one av2:     /content/drive/MyDrive/my/av2      av2
+          mount_one dropbox: /content/drive/MyDrive/my/dropbox  dropbox
+
+          # 等 7 个挂载都就绪（后台 rclone 不会自己退出，这里不能用 wait）
+          MOUNTED=0
+          for _ in $(seq 1 30); do
+            MOUNTED=$(mount | grep -c " on /content/drive/MyDrive/" || true)
+            [ "${MOUNTED:-0}" -ge 7 ] && break
+            sleep 2
+          done
+          echo "挂载就绪: ${MOUNTED}/7"
           echo "==========i==========="
           rclone lsf i:
           echo "==========j==========="
@@ -74,12 +111,48 @@ jobs:
           rclone lsf av2:
           echo "==========dropbox==========="
           rclone lsf dropbox:
+      # Jellyfin 的 datadir 里有 jellyfin.db（SQLite），而 SQLite 不能直接跑在 rclone FUSE 上
+      # （撕裂快照、锁语义都不可靠）。沿用 openlist 工作流的本地化模式，但做一处调整：
+      # metadata / cache / subtitles 这些目录可能几十 GB、全量拉取不现实，而它们并不含 SQLite，
+      # 所以仍留在挂载上，只用软链接回 datadir——即"只把含 SQLite 的部分搬到本地"。
+      - name: 拉取 Jellyfin 数据到本地
+        run: |
+          set -e
+          # 挂载点 /content/drive/MyDrive/my/j 即 j:，故 datadir 在远端是 j:jellyfin
+          sudo mkdir -p /opt/jellyfin
+          sudo chmod 0777 /opt/jellyfin
+          rclone copy "j:jellyfin" /opt/jellyfin \
+            --exclude "data/jellyfin.db-wal" \
+            --exclude "data/jellyfin.db-shm" \
+            --exclude "data/jellyfin.db-journal" \
+            --exclude "data/metadata/**" \
+            --exclude "data/subtitles/**" \
+            --exclude "data/keyframes/**" \
+            --exclude "cache/**" \
+            --exclude "log/**" \
+            --exclude "transcodes/**"
+          echo "拉取完成: $(find /opt/jellyfin -type f 2>/dev/null | wc -l) 个文件 / $(sudo du -sh /opt/jellyfin 2>/dev/null | cut -f1)"
+
+          # 大体积但不含 SQLite 的目录留在挂载上，软链接回 datadir
+          for d in data/metadata data/subtitles data/keyframes cache log transcodes; do
+            sudo mkdir -p "/content/drive/MyDrive/my/j/jellyfin/$d"
+            sudo mkdir -p "/opt/jellyfin/$(dirname "$d")"
+            sudo ln -sfn "/content/drive/MyDrive/my/j/jellyfin/$d" "/opt/jellyfin/$d"
+          done
+
+          # 指纹供收尾回传比对；回传闸防止"拉取失败却回传"毁掉远端
+          JELLYFIN_DB_MD5_PULL=$(sudo md5sum /opt/jellyfin/data/jellyfin.db 2>/dev/null | awk '{print $1}')
+          JELLYFIN_DB_MD5_PULL="${JELLYFIN_DB_MD5_PULL:-none}"
+          echo "JELLYFIN_DB_MD5_PULL=$JELLYFIN_DB_MD5_PULL" >> "$GITHUB_ENV"
+          echo "db 拉取指纹: $JELLYFIN_DB_MD5_PULL"
+          sudo touch /tmp/JELLYFIN_DATA_PULLED
+
       - name: install jellyfin
         run: |
           curl https://repo.jellyfin.org/install-debuntu.sh | sudo bash
       - name: run jellyfin
         run: |
-          sudo nohup /usr/bin/jellyfin -w /usr/share/jellyfin/web --datadir /content/drive/MyDrive/my/j/jellyfin &
+          sudo nohup /usr/bin/jellyfin -w /usr/share/jellyfin/web --datadir /opt/jellyfin &
       - name: run cloudflared
         run: |
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
@@ -94,3 +167,36 @@ jobs:
         run: |
           sleep 340m && curl -X POST -H "X-Emby-Token: d81ced113e714504aeac7c42d5dbda57" http://127.0.0.1:8096/System/Shutdown
           sleep 10m
+
+      # ===== 数据回传（失败/取消也执行）=====
+      # 停服务（幂等）→ SQLite 干净关闭、-wal/-shm 由 SQLite 自行合并 → sync 回传。
+      # metadata / cache / subtitles 等是挂载上的软链接，本来就在远端，不参与回传。
+      - name: "Persist: Jellyfin 数据回传"
+        if: ${{ always() }}
+        run: |
+          # SIGTERM 让 Jellyfin 优雅停机（幂等；上一步已停过也无害）。
+          # 这里不走 HTTP Shutdown，是为了避免把 API Token 再硬编码一份。
+          sudo pkill -f /usr/bin/jellyfin 2>/dev/null || true
+          sleep 30
+          if [ ! -f /tmp/JELLYFIN_DATA_PULLED ]; then
+            echo "::error::数据拉取未完成，拒绝回传以保全远端"
+            exit 0
+          fi
+          # jellyfin 以 root 运行，本地副本属 root；回传前放开读权限给 runner 身份的 rclone
+          sudo chmod -R a+rX /opt/jellyfin 2>/dev/null || true
+          echo "回传前 db 指纹: $(sudo md5sum /opt/jellyfin/data/jellyfin.db 2>/dev/null | awk '{print $1}' || echo none)（拉取时 ${JELLYFIN_DB_MD5_PULL:-none}）"
+          rclone sync /opt/jellyfin "j:jellyfin" \
+            --exclude "data/jellyfin.db-wal" \
+            --exclude "data/jellyfin.db-shm" \
+            --exclude "data/jellyfin.db-journal" \
+            --exclude "data/metadata/**" \
+            --exclude "data/subtitles/**" \
+            --exclude "data/keyframes/**" \
+            --exclude "cache/**" \
+            --exclude "log/**" \
+            --exclude "transcodes/**"
+          # sync 的 exclude 不会删远端对应文件，显式清理可能残留的撕裂源
+          rclone delete "j:jellyfin" \
+            --include "data/jellyfin.db-wal" --include "data/jellyfin.db-shm" \
+            --include "data/jellyfin.db-journal" 2>/dev/null || true
+          echo "回传完成"

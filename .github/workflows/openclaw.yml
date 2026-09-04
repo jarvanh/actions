@@ -39,7 +39,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y fuse3
-          sudo mkdir -p /dropbox
+          sudo mkdir -p /dropbox /mnt/vfs/dropbox /opt/logs
+          sudo chown runner:runner /dropbox /mnt/vfs/dropbox /opt/logs
 
           # 挂载改用 runner 用户（与 emby.yml 一致）：conf 全程以 runner 身份读写。
           # 原来用 sudo 挂载，token 刷新时 rclone 以 root 回写 rclone.conf（属主 root、权限 600），
@@ -47,21 +48,26 @@ jobs:
           # "Failed to load config file ... permission denied" —— 即本次 CLIProxyAPI.tar.gz 上传失败的根因。
           # --allow-other 需要 fuse 允许非 root 共享挂载，挂载点也交给 runner 才能免 sudo 挂载。
           grep -q '^user_allow_other' /etc/fuse.conf 2>/dev/null || echo user_allow_other | sudo tee -a /etc/fuse.conf >/dev/null
-          sudo chown runner:runner /dropbox
 
           # 挂载 Dropbox
+          # 参数按"配置 / Docker 数据卷"画像——小文件随机读写，不需要大块顺序预读：
+          #   --cache-dir        默认 ~/.cache/rclone 会落进根分区（≈14GB），必须指向 /mnt
+          #   --attr-timeout 1m  原 10m：容器内文件频繁增删改，属性缓存 10 分钟有陈旧风险
+          #   --poll-interval 0  run 期间远端目录不会自己变，关轮询省 API 配额
+          #   --buffer-size 16M  原 100M：每个打开的文件常驻一份，小文件场景用不到
+          #   删除 --vfs-read-chunk-size-limit 10G：会让单个 Range 请求一路翻倍到 10GB
           nohup rclone mount dropbox: /dropbox \
             --config /home/runner/.config/rclone/rclone.conf \
-            --allow-non-empty \
-            --no-gzip-encoding \
-            --umask 000 \
-            --allow-other \
-            --attr-timeout 10m \
+            --cache-dir /mnt/vfs/dropbox \
+            --allow-other --umask 000 --no-gzip-encoding \
+            --attr-timeout 1m \
+            --dir-cache-time 72h --poll-interval 0 \
             --vfs-cache-mode full \
-            --vfs-cache-max-age 5m \
-            --vfs-read-chunk-size-limit 10G \
-            --buffer-size 100M \
-            --vfs-cache-max-size 10G &
+            --vfs-cache-max-size 2G --vfs-cache-max-age 1h \
+            --vfs-cache-min-free-space 2G \
+            --vfs-cache-poll-interval 30s \
+            --buffer-size 16M \
+            --log-file /opt/logs/rclone-dropbox.log --log-level INFO &
 
           echo "Waiting for mount..."
           for i in {1..30}; do

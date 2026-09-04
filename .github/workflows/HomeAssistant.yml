@@ -28,41 +28,37 @@ jobs:
           set -e
           # 写配置 + 持久化：secret 起步 → 掩码 → Dropbox 恢复优先 → 有效性检查 → 同步回 Dropbox
           bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" config
-      - name: Mount Dropbox
+      - name: 拉取 HA 配置到本地
         run: |
-          sudo apt-get update && sudo apt-get install -y fuse3
-          sudo mkdir -p /dropbox
-          # 挂载改用 runner 用户（与 emby.yml 一致）：root 身份挂载时 rclone 刷新 token 会把
-          # rclone.conf 回写成 root:600，之后非 root 的 rclone 读取即 EACCES
-          # （openclaw 归档 "Failed to load config file ... permission denied" 的根因）
-          grep -q '^user_allow_other' /etc/fuse.conf 2>/dev/null || echo user_allow_other | sudo tee -a /etc/fuse.conf >/dev/null
-          sudo chown runner:runner /dropbox
-          
-          # 挂载 Dropbox 到 /dropbox 目录
-          # --daemon 让它在后台运行，--allow-other 允许 docker 访问
-          rclone mount dropbox: /dropbox \
-            --config /home/runner/.config/rclone/rclone.conf \
-            --vfs-cache-mode full \
-            --allow-other \
-            --daemon
-          
-          # 等待挂载完成
-          sleep 5
-          
-          # 验证挂载 (可选)
-          if [ -d "/dropbox/self-hosted/HomeAssistant" ]; then
-            echo "Mount successful, config directory found."
-          else
-            echo "Directory not found, creating it..."
-            mkdir -p /dropbox/self-hosted/HomeAssistant
-          fi
-          
+          set -e
+          # SQLite 不能直接运行在 rclone FUSE 上（撕裂快照、锁语义都不可靠），
+          # 而 HA 的 /config 里就有 home-assistant_v2.db，所以改用 openlist 工作流同款模式：
+          # 启动前整目录拉到本地盘 → docker 卷指向本地目录 → 结束回传。
+          # 改造后整条链路不再需要 FUSE，故不再挂载 /dropbox
+          # （数据操作一律直接走 dropbox: 远端，与 openlist.yml 一致）。
+          sudo mkdir -p /opt/ha-config
+          sudo chmod 0777 /opt/ha-config
+          rclone copy dropbox:self-hosted/HomeAssistant /opt/ha-config \
+            --exclude "home-assistant_v2.db-wal" \
+            --exclude "home-assistant_v2.db-shm" \
+            --exclude "home-assistant_v2.db-journal" \
+            --exclude "*.log*" --exclude "deps/**" --exclude "tts/**"
+          echo "拉取完成: $(find /opt/ha-config -type f 2>/dev/null | wc -l) 个文件 / $(sudo du -sh /opt/ha-config 2>/dev/null | cut -f1)"
+          # 指纹供收尾回传比对：未变化则跳过，避免用过期副本覆盖远端的新配置
+          HA_DB_MD5_PULL=$(md5sum /opt/ha-config/home-assistant_v2.db 2>/dev/null | awk '{print $1}')
+          HA_DB_MD5_PULL="${HA_DB_MD5_PULL:-none}"
+          echo "HA_DB_MD5_PULL=$HA_DB_MD5_PULL" >> "$GITHUB_ENV"
+          echo "db 拉取指纹: $HA_DB_MD5_PULL"
+          # 回传闸：只有本步成功才落标记，收尾据此拒绝"拉取失败却回传"这种会毁远端的事
+          sudo touch /tmp/HA_CONFIG_PULLED
+
       # -----------------------------------------------------------
       # 插入修正步骤：解决 400 Bad Request 问题
       # -----------------------------------------------------------
       - name: Configure HA for Reverse Proxy
         run: |
-          CONFIG_FILE="/dropbox/self-hosted/HomeAssistant/configuration.yaml"
+          # 配置已本地化到 /opt/ha-config（SQLite 不能跑在 FUSE 上），这里操作本地副本
+          CONFIG_FILE="/opt/ha-config/configuration.yaml"
           
           # 检查 configuration.yaml 是否存在，如果不存在则创建
           if [ ! -f "$CONFIG_FILE" ]; then
@@ -130,7 +126,7 @@ jobs:
             --privileged \
             --restart=unless-stopped \
             -e TZ=Asia/Shanghai \
-            -v /dropbox/self-hosted/HomeAssistant:/config \
+            -v /opt/ha-config:/config \
             -v /run/dbus:/run/dbus:ro \
             --network=host \
             ghcr.io/home-assistant/home-assistant:stable
@@ -146,7 +142,7 @@ jobs:
       - name: Install HACS (Conditional)
         run: |
           # 定义 HACS 在宿主机上的挂载路径
-          HACS_DIR="/dropbox/self-hosted/HomeAssistant/custom_components/hacs"
+          HACS_DIR="/opt/ha-config/custom_components/hacs"
           
           if [ -d "$HACS_DIR" ]; then
             echo "✅ HACS directory found. Skipping installation."
@@ -176,8 +172,53 @@ jobs:
           
           echo "Starting tunnel to expose http://127.0.0.1:8123"
           nohup cloudflared tunnel run --url http://127.0.0.1:8123 $TUNNEL_NAME &
-      - name: sleep
+      # 会话保持 + 数据库周期热备：原为纯 sleep 340m，runner 被强杀（VM 销毁/取消超时）时
+      # 收尾的回传根本来不及执行，改为每 5 分钟做一次一致性快照并回传变化的 db，
+      # 强杀丢失窗口从 5.7 小时压缩到 ≤5 分钟。与 openlist.yml 同一套做法。
+      - name: 会话保持与数据库周期热备
         run: |
-          sleep 340m      
+          LAST_MD5="${HA_DB_MD5_PULL:-none}"
+          for _ in $(seq 1 68); do      # 68 × 300s = 340m
+            sleep 300
+            # 容器运行中的在线一致性快照（SQLite backup API），不直接拷 db 文件
+            # （运行中直接拷可能捕获到撕裂状态）。db 属 root，故用 sudo 读。
+            if sudo python3 -c "import sqlite3; src=sqlite3.connect('file:/opt/ha-config/home-assistant_v2.db?mode=ro', uri=True); dst=sqlite3.connect('/tmp/ha.db.snapshot'); src.backup(dst); dst.close(); src.close()" 2>/dev/null; then
+              sudo chmod 644 /tmp/ha.db.snapshot 2>/dev/null || true
+              NEW_MD5=$(md5sum /tmp/ha.db.snapshot 2>/dev/null | awk '{print $1}' || echo "")
+              if [ -n "$NEW_MD5" ] && [ "$NEW_MD5" != "$LAST_MD5" ]; then
+                if rclone copyto /tmp/ha.db.snapshot dropbox:self-hosted/HomeAssistant/home-assistant_v2.db; then
+                  LAST_MD5="$NEW_MD5"
+                  echo "[$(date -u +'%H:%M:%SZ')] db 已变化，热备回传完成 ($NEW_MD5)"
+                else
+                  echo "[$(date -u +'%H:%M:%SZ')] ⚠️ 热备回传失败，下轮重试"
+                fi
+              fi
+            fi
+          done
           docker stop homeassistant
-          sleep 1m   
+          sleep 1m
+
+      # ===== 配置回传（失败/取消也执行）=====
+      # 停容器（幂等）→ SQLite 干净关闭、-wal/-shm 由 SQLite 自行清理/合并 → 整目录 sync 镜像回传。
+      # if: always() 保证会话内的配置变更在失败或被取消时也能回传（runner 被强杀除外，
+      # 该场景由上一步的周期热备兜底）。
+      - name: "Persist: HA 配置回传"
+        if: ${{ always() }}
+        run: |
+          docker stop homeassistant 2>/dev/null || true
+          # 拉取闸（关键）：拉取没成功就绝不回传——否则半份本地副本会把远端整份配置抹掉
+          if [ ! -f /tmp/HA_CONFIG_PULLED ]; then
+            echo "::error::配置拉取未完成，拒绝回传以保全远端"
+            exit 0
+          fi
+          echo "回传前 db 指纹: $(md5sum /opt/ha-config/home-assistant_v2.db 2>/dev/null | awk '{print $1}' || echo none)（拉取时 ${HA_DB_MD5_PULL:-none}）"
+          rclone sync /opt/ha-config dropbox:self-hosted/HomeAssistant \
+            --exclude "home-assistant_v2.db-wal" \
+            --exclude "home-assistant_v2.db-shm" \
+            --exclude "home-assistant_v2.db-journal" \
+            --exclude "*.log*" --exclude "deps/**" --exclude "tts/**"
+          # sync 的 exclude 不会删远端对应文件，显式清理可能残留的撕裂源
+          rclone delete dropbox:self-hosted/HomeAssistant \
+            --include "home-assistant_v2.db-wal" --include "home-assistant_v2.db-shm" \
+            --include "home-assistant_v2.db-journal" 2>/dev/null || true
+          echo "回传完成: $(rclone lsf --files-only --recursive dropbox:self-hosted/HomeAssistant 2>/dev/null | wc -l) 个文件"

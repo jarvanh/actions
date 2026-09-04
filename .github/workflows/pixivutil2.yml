@@ -28,17 +28,34 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y fuse3
-          sudo mkdir -p /onedrive
+          sudo mkdir -p /onedrive /mnt/vfs/onedrive /opt/logs
+          sudo chown runner:runner /onedrive /mnt/vfs/onedrive /opt/logs
           # 尝试卸载已挂载的目录（如果存在）
           fusermount -uz /onedrive 2>/dev/null || true
           # 挂载改用 runner 用户（与 emby.yml 一致）：root 身份挂载时 rclone 刷新 token 会把
           # rclone.conf 回写成 root:600，之后非 root 的 rclone 读取即 EACCES
           grep -q '^user_allow_other' /etc/fuse.conf 2>/dev/null || echo user_allow_other | sudo tee -a /etc/fuse.conf >/dev/null
-          sudo chown runner:runner /onedrive
           # 启动 rclone mount
-          rclone mount onedrive: /onedrive --config /home/runner/.config/rclone/rclone.conf --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 50G --daemon
-          # 等待挂载完成
-          sleep 5
+          # 参数按"混合（应用目录）"画像：读 config.ini 之类的小文件，同时批量下载图片写入
+          #   --cache-dir          默认 ~/.cache/rclone 会落进根分区（≈14GB），必须指向 /mnt
+          #   --vfs-cache-max-age 1h  原 5m：下载的图片还没写完就被逐出会出问题
+          #   --vfs-write-back 2m   写完攒 2 分钟再回传，减少请求数
+          #   --attr-timeout 1m     原 10m：应用会频繁改写配置与数据库，属性缓存 10 分钟有陈旧风险
+          #   删除 --vfs-read-chunk-size-limit 10G：会让单个 Range 请求一路翻倍到 10GB
+          rclone mount onedrive: /onedrive \
+            --config /home/runner/.config/rclone/rclone.conf \
+            --cache-dir /mnt/vfs/onedrive \
+            --allow-other --umask 000 --no-gzip-encoding \
+            --attr-timeout 1m \
+            --dir-cache-time 72h --poll-interval 0 \
+            --vfs-cache-mode full \
+            --vfs-cache-max-size 8G --vfs-cache-max-age 1h \
+            --vfs-cache-min-free-space 2G \
+            --vfs-cache-poll-interval 30s \
+            --buffer-size 16M \
+            --vfs-write-back 2m --transfers 4 \
+            --log-file /opt/logs/rclone-onedrive.log --log-level INFO \
+            --daemon --daemon-wait 60s
       - name: run pixivutil2
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
