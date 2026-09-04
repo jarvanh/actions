@@ -200,70 +200,30 @@ jobs:
           #      POST https://api.tailscale.com/api/v2/device/{device_id}/routes  body: {"routes": ["0.0.0.0/0", "::/0"]}
           #      （需 TS_API_KEY，ephemeral 节点 id 每次变化，需按主机名动态查询）
           sudo tailscale set --ssh --hostname=openclaw --advertise-exit-node
-          # 回读实际注册的 DNS 短名（极端情况同名冲突会被加后缀，以实际为准）
-          TS_HOST="$(tailscale status --json | jq -r '.Self.DNSName' | cut -d. -f1)"
+          # 回读实际注册的 DNS 名。--hostname 的重命名有传播延迟，若 set 后立刻读取
+          # 可能拿到机器原始主机名（如 github-runnervmgx7h7），导致 ts.env 里的 SSH/
+          # RustDesk 直连地址每轮漂移。这里轮询等待名字收敛为 openclaw。
+          TS_FQDN=""
+          for i in $(seq 1 15); do
+            TS_FQDN="$(tailscale status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')"
+            case "$TS_FQDN" in
+              openclaw.*) break ;;
+            esac
+            sleep 2
+          done
+          TS_FQDN="${TS_FQDN:-$(tailscale status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')}"
+          TS_HOST="$(printf '%s' "$TS_FQDN" | cut -d. -f1)"
           {
             printf 'TS_HOST=%s\n' "$TS_HOST"
+            printf 'TS_FQDN=%s\n' "$TS_FQDN"
             printf 'TS_IP=%s\n' "$(tailscale ip -4)"
             printf 'RUN_URL=%s\n' "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           } > "$HOME/ts.env"
-          echo "SSH 入口: ssh runner@${TS_HOST}"
+          echo "SSH 入口: ssh runner@${TS_HOST}（RustDesk 直连: ${TS_FQDN}:21118）"
 
       - name: Tailscale secrets missing
         if: ${{ always() && env.TS_OAUTH_CLIENT_ID == '' && env.TS_OAUTH_CLIENT_SECRET == '' }}
         run: echo "⚠️ 未配置 TS_OAUTH_CLIENT_ID / TS_OAUTH_CLIENT_SECRET，跳过 Tailscale SSH 调试入口"
-
-      - name: Notify Tailscale SSH entry
-        if: ${{ always() && steps.ts_ssh.outcome == 'success' }}
-        continue-on-error: true
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          set -euo pipefail
-          # 每次 runner 就绪都推送 SSH 入口；通知失败不影响主流程
-          . "$HOME/ts.env"
-
-          # 获取 runner 出口 IP 信息（IP/ISP/ASN/ASN 组织/位置）；失败不影响主流程
-          IP_INFO="$(curl -fsS --max-time 10 'https://ipwho.is/' 2>/dev/null || true)"
-          [ -z "${IP_INFO}" ] && IP_INFO='{}'
-          PUB_IP="$(printf '%s' "${IP_INFO}" | jq -r '.ip // ""')"
-          IP_ISP="$(printf '%s' "${IP_INFO}" | jq -r '.connection.isp // ""')"
-          IP_ASN="$(printf '%s' "${IP_INFO}" | jq -r '.connection.asn // ""')"
-          IP_ORG="$(printf '%s' "${IP_INFO}" | jq -r '.connection.org // ""')"
-          IP_LOC="$(printf '%s' "${IP_INFO}" | jq -r '[.city, .region, (.country_code // .country)] | map(select(. != null and . != "")) | join(", ")')"
-          PUB_IP="${PUB_IP:-未知}"; IP_ISP="${IP_ISP:-未知}"; IP_ASN="${IP_ASN:-}"; IP_ORG="${IP_ORG:-未知}"; IP_LOC="${IP_LOC:-未知}"
-
-          msg="🟢 OpenClaw runner 已就绪"
-          msg+=$'\n\n'
-          msg+="SSH: ssh runner@${TS_HOST}"
-          msg+=$'\n'
-          msg+="IP: ssh runner@${TS_IP}"
-          msg+=$'\n'
-          msg+="Exit Node: 已广播（本 runner 可作为出口节点）"
-          msg+=$'\n'
-          msg+="批准① 管理页: admin/machines → openclaw → Edit routes → 勾选 Exit Node"
-          msg+=$'\n'
-          msg+="批准② ACL autoApprovers: routes 0.0.0.0/0,::/0 → tag:ci（免每次批准，推荐）"
-          msg+=$'\n'
-          msg+="批准③ API: POST /api/v2/device/{device_id}/routes"
-          msg+=$'\n\n'
-          msg+="出口 IP: ${PUB_IP}"
-          msg+=$'\n'
-          msg+="ISP: ${IP_ISP}"
-          msg+=$'\n'
-          msg+="ASN: AS${IP_ASN}（${IP_ORG}）"
-          msg+=$'\n'
-          msg+="位置: ${IP_LOC}"
-          msg+=$'\n'
-          msg+="Run: ${RUN_URL}"
-          payload=$(jq -n --arg chat_id "$TELEGRAM_CHAT_ID" --arg text "$msg" \
-            '{chat_id: $chat_id, text: $text, disable_web_page_preview: true}')
-          curl -fsS --retry 3 --retry-delay 2 --max-time 20 \
-            -X POST -H 'Content-Type: application/json' \
-            -d "$payload" \
-            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" > /dev/null
-          echo "已推送 SSH 入口通知: ssh runner@${TS_HOST}"
 
       - name: Prepare runtime env for later steps
         run: |
@@ -570,14 +530,24 @@ jobs:
             echo "⚠️ openclaw .env not found, skipping rss-to-telegram startup."
           fi
 
-      - name: Run CLIProxyAPI container
+      - name: Run AI API gateway (CliRelay first, fallback CLIProxyAPI)
         run: |
           set -euo pipefail
 
-          echo "Configuring local CLIProxyAPI directory with persistent data..."
-          mkdir -p /dropbox/self-hosted/CLIProxyAPI
+          echo "Configuring AI API gateway: CliRelay (compose) first, CLIProxyAPI as fallback..."
+          mkdir -p /dropbox/self-hosted/CLIProxyAPI ~/.openclaw/logs
+
+          BACKEND_STATE=/tmp/active-ai-backend.env
+          : > "$BACKEND_STATE"
+
+          CLIRELAY_DIR=/tmp/local_CliRelay
+          CLIRELAY_TAR=/tmp/CliRelay.tar.gz
+          CLIRELAY_ARCHIVE="dropbox:self-hosted/CliRelay.tar.gz"
+          COMPOSE="docker compose -p clirelay -f $CLIRELAY_DIR/docker-compose.yml --project-directory $CLIRELAY_DIR"
+
           cleanup_archive_workdir() {
-            rm -f /tmp/CLIProxyAPI.tar.gz 2>/dev/null || true
+            rm -f /tmp/CLIProxyAPI.tar.gz /tmp/CliRelay.tar.gz 2>/dev/null || true
+            rm -rf /tmp/clirelay-restore 2>/dev/null || true
           }
           free_kb() { df -Pk "${1:-/tmp}" | awk 'NR==2 {print $4}'; }
           require_free_kb() {
@@ -590,78 +560,223 @@ jobs:
             fi
             echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
           }
-          require_free_kb /tmp $((2 * 1024 * 1024)) "CLIProxyAPI restore preflight"
-          rm -rf /tmp/local_CLIPProxyAPI
-          cleanup_archive_workdir
-          mkdir -p /tmp/local_CLIPProxyAPI
 
-          if rclone ls dropbox:self-hosted/CLIProxyAPI.tar.gz > /dev/null 2>&1; then
-            echo "📦 Found CLIProxyAPI.tar.gz! Downloading and extracting..."
-            rclone copyto dropbox:self-hosted/CLIProxyAPI.tar.gz /tmp/CLIProxyAPI.tar.gz
-            archive_kb=$(du -sk /tmp/CLIProxyAPI.tar.gz | awk '{print $1}')
-            if [ -z "${archive_kb:-}" ] || [ "$archive_kb" -le 0 ]; then
-              echo "❌ CLIProxyAPI extract preflight: unable to calculate archive size" >&2
-              exit 1
+          wait_api_ready() {
+            local label="$1"
+            local tries="${2:-120}"
+            local code
+            for i in $(seq 1 "$tries"); do
+              code=$(curl -s --connect-timeout 2 -o /dev/null -w "%{http_code}" http://127.0.0.1:8317/ || true)
+              if [ -n "$code" ] && [ "$code" -ge 100 ] && [ "$code" -lt 600 ]; then
+                echo "✅ [$label] 8317 已就绪 (HTTP ${code})"
+                return 0
+              fi
+              echo "⏳ [$label] 等待中... ${i}/${tries}"
+              sleep 2
+            done
+            return 1
+          }
+
+          # ---------- CLIProxyAPI 数据恢复（现有逻辑函数化，幂等；回退与 bootstrap 共用） ----------
+          restore_cliproxyapi_data() {
+            if [ -f /tmp/local_CLIPProxyAPI/config.yaml ]; then
+              echo "ℹ️ CLIProxyAPI 数据目录已就绪，跳过恢复"
+              return 0
             fi
-            echo "CLIProxyAPI.tar.gz 大小: ${archive_kb}KB"
-            require_free_kb /tmp $((archive_kb * 3 + 512 * 1024)) "CLIProxyAPI extract preflight"
-            MIN_SIZE=$((5 * 1024))
-            actual_size=$(stat -c%s /tmp/CLIProxyAPI.tar.gz 2>/dev/null || echo 0)
-            if [ "$actual_size" -ge "$MIN_SIZE" ] && tar -tzf /tmp/CLIProxyAPI.tar.gz >/dev/null 2>&1; then
-              tar -xzf /tmp/CLIProxyAPI.tar.gz -C /tmp/local_CLIPProxyAPI
+            echo "Configuring local CLIProxyAPI directory with persistent data..."
+            cleanup_archive_workdir
+            require_free_kb /tmp $((2 * 1024 * 1024)) "CLIProxyAPI restore preflight"
+            rm -rf /tmp/local_CLIPProxyAPI
+            mkdir -p /tmp/local_CLIPProxyAPI
+            if rclone ls dropbox:self-hosted/CLIProxyAPI.tar.gz > /dev/null 2>&1; then
+              echo "📦 Found CLIProxyAPI.tar.gz! Downloading and extracting..."
+              rclone copyto dropbox:self-hosted/CLIProxyAPI.tar.gz /tmp/CLIProxyAPI.tar.gz
+              archive_kb=$(du -sk /tmp/CLIProxyAPI.tar.gz | awk '{print $1}')
+              if [ -z "${archive_kb:-}" ] || [ "$archive_kb" -le 0 ]; then
+                echo "❌ CLIProxyAPI extract preflight: unable to calculate archive size" >&2
+                exit 1
+              fi
+              echo "CLIProxyAPI.tar.gz 大小: ${archive_kb}KB"
+              require_free_kb /tmp $((archive_kb * 3 + 512 * 1024)) "CLIProxyAPI extract preflight"
+              MIN_SIZE=$((5 * 1024))
+              actual_size=$(stat -c%s /tmp/CLIProxyAPI.tar.gz 2>/dev/null || echo 0)
+              if [ "$actual_size" -ge "$MIN_SIZE" ] && tar -tzf /tmp/CLIProxyAPI.tar.gz >/dev/null 2>&1; then
+                tar -xzf /tmp/CLIProxyAPI.tar.gz -C /tmp/local_CLIPProxyAPI
+              else
+                echo "⚠️ CLIProxyAPI.tar.gz validation failed, skipping archive restore."
+              fi
+              cleanup_archive_workdir
             else
-              echo "⚠️ CLIProxyAPI.tar.gz validation failed, skipping archive restore."
+              echo "⚠️ No CLIProxyAPI archive found. Falling back to sync from raw directory..."
+              rclone copy dropbox:self-hosted/CLIProxyAPI /tmp/local_CLIPProxyAPI \
+                --retries 10 \
+                --low-level-retries 20 \
+                --timeout 1m \
+                --contimeout 15s \
+                -P || true
+            fi
+            mkdir -p /tmp/local_CLIPProxyAPI/auth-dir /tmp/local_CLIPProxyAPI/logs
+            touch /tmp/local_CLIPProxyAPI/config.yaml
+            touch /tmp/local_CLIPProxyAPI/stats.json
+            echo "=== restored CLIProxyAPI tree ==="
+            find /tmp/local_CLIPProxyAPI -maxdepth 3 | sort || true
+          }
+
+          # ---------- CLIProxyAPI 数据 → CliRelay 部署目录（bootstrap 迁移） ----------
+          bootstrap_clirelay_from_cliproxyapi() {
+            echo "🔄 Bootstrapping CliRelay deployment from CLIProxyAPI data..."
+            rm -rf "$CLIRELAY_DIR"
+            mkdir -p "$CLIRELAY_DIR"/auths "$CLIRELAY_DIR"/sql "$CLIRELAY_DIR"/postgres-data "$CLIRELAY_DIR"/redis-data "$CLIRELAY_DIR"/logs "$CLIRELAY_DIR"/data
+            if [ -f /tmp/local_CLIPProxyAPI/config.yaml ]; then
+              cp -a /tmp/local_CLIPProxyAPI/config.yaml "$CLIRELAY_DIR/config.yaml"
+            else
+              touch "$CLIRELAY_DIR/config.yaml"
+            fi
+            if [ -d /tmp/local_CLIPProxyAPI/auth-dir ]; then
+              cp -a /tmp/local_CLIPProxyAPI/auth-dir/. "$CLIRELAY_DIR/auths/" 2>/dev/null || true
+            fi
+            find "$CLIRELAY_DIR/auths" -name '._*' -delete 2>/dev/null || true
+            curl -fsSL --retry 3 https://raw.githubusercontent.com/kittors/CliRelay/main/docker-compose.yml \
+              -o "$CLIRELAY_DIR/docker-compose.yml" || { echo "❌ 无法下载 CliRelay docker-compose.yml"; return 1; }
+            local pgpass
+            pgpass=$(openssl rand -hex 16)
+            {
+              printf 'CLIRELAY_PROJECT_DIR=%s\n' "$CLIRELAY_DIR"
+              printf 'AUTH_PATH=/root/.cli-proxy-api\n'
+              printf 'CLIRELAY_POSTGRES_DB=clirelay\n'
+              printf 'CLIRELAY_POSTGRES_USER=clirelay\n'
+              printf 'CLIRELAY_POSTGRES_PASSWORD=%s\n' "$pgpass"
+            } > "$CLIRELAY_DIR/.env"
+            chmod 600 "$CLIRELAY_DIR/.env"
+            echo "✅ CliRelay 部署目录就绪: $CLIRELAY_DIR"
+          }
+
+          # ---------- CliRelay 数据恢复：Dropbox 归档优先，无效则 bootstrap 迁移 ----------
+          restore_clirelay_data() {
+            rm -rf "$CLIRELAY_DIR"
+            local restored=0
+            if rclone ls "$CLIRELAY_ARCHIVE" > /dev/null 2>&1; then
+              echo "📦 Found CliRelay.tar.gz! Downloading and validating..."
+              require_free_kb /tmp $((2 * 1024 * 1024)) "clirelay restore preflight"
+              if rclone copyto "$CLIRELAY_ARCHIVE" "$CLIRELAY_TAR"; then
+                if [ -s "$CLIRELAY_TAR" ] && tar -tzf "$CLIRELAY_TAR" >/dev/null 2>&1; then
+                  mkdir -p /tmp/clirelay-restore
+                  tar -xzf "$CLIRELAY_TAR" -C /tmp/clirelay-restore
+                  if [ -f /tmp/clirelay-restore/docker-compose.yml ] && [ -f /tmp/clirelay-restore/.env ]; then
+                    mkdir -p "$CLIRELAY_DIR"
+                    cp -a /tmp/clirelay-restore/. "$CLIRELAY_DIR/"
+                    mkdir -p "$CLIRELAY_DIR"/auths "$CLIRELAY_DIR"/sql "$CLIRELAY_DIR"/postgres-data "$CLIRELAY_DIR"/redis-data "$CLIRELAY_DIR"/logs "$CLIRELAY_DIR"/data
+                    echo "✅ Restored CliRelay deployment from archive"
+                    restored=1
+                  else
+                    echo "⚠️ CliRelay.tar.gz 缺少 docker-compose.yml/.env，转 bootstrap 迁移。"
+                  fi
+                else
+                  echo "⚠️ CliRelay.tar.gz validation failed, 转 bootstrap 迁移。"
+                fi
+              else
+                echo "⚠️ CliRelay.tar.gz 下载失败，转 bootstrap 迁移。"
+              fi
+            else
+              echo "ℹ️ 未找到 CliRelay 归档，从 CLIProxyAPI 数据 bootstrap 迁移。"
             fi
             cleanup_archive_workdir
-          else
-            echo "⚠️ No CLIProxyAPI archive found. Falling back to sync from raw directory..."
-            rclone copy dropbox:self-hosted/CLIProxyAPI /tmp/local_CLIPProxyAPI \
-              --retries 10 \
-              --low-level-retries 20 \
-              --timeout 1m \
-              --contimeout 15s \
-              -P || true
-          fi
-
-          mkdir -p /tmp/local_CLIPProxyAPI/auth-dir /tmp/local_CLIPProxyAPI/logs
-          touch /tmp/local_CLIPProxyAPI/config.yaml
-          touch /tmp/local_CLIPProxyAPI/stats.json
-
-          echo "=== restored CLIProxyAPI tree ==="
-          find /tmp/local_CLIPProxyAPI -maxdepth 3 | sort || true
-
-          docker rm -f clirelay cliproxyapi 2>/dev/null || true
-
-          docker run -d \
-            --name cliproxyapi \
-            --restart unless-stopped \
-            -p 8317:8317 \
-            -e TZ=Asia/Shanghai \
-            -v /tmp/local_CLIPProxyAPI/config.yaml:/CLIProxyAPI/config.yaml \
-            -v /tmp/local_CLIPProxyAPI/auth-dir:/root/.cli-proxy-api \
-            -v /tmp/local_CLIPProxyAPI/logs:/CLIProxyAPI/logs \
-            -v /tmp/local_CLIPProxyAPI/stats.json:/CLIProxyAPI/stats.json \
-            eceasy/cli-proxy-api:latest
-
-          echo "等待 CLIProxyAPI 就绪..."
-          READY=false
-          for i in {1..120}; do
-            code=$(curl -s --connect-timeout 2 -o /dev/null -w "%{http_code}" http://127.0.0.1:8317/ || true)
-            if [ -n "$code" ] && [ "$code" -ge 100 ] && [ "$code" -lt 600 ]; then
-              READY=true
-              echo "✅ CLIProxyAPI 已就绪 (HTTP ${code})"
-              break
+            if [ "$restored" != 1 ]; then
+              restore_cliproxyapi_data
+              bootstrap_clirelay_from_cliproxyapi
             fi
-            echo "⏳ 等待中... ${i}/120"
-            sleep 2
-          done
-          docker ps -a
+          }
 
-          if [ "$READY" != true ]; then
-            echo "❌ CLIProxyAPI 未在预期时间内就绪"
-            docker logs cliproxyapi || true
-            exit 1
+          # ---------- CliRelay 全栈启动：postgres 先行 → SQL 导入 → 全栈 up ----------
+          start_clirelay() {
+            echo "🚀 Starting CliRelay compose stack..."
+            docker rm -f cli-proxy-api clirelay 2>/dev/null || true
+            $COMPOSE down --remove-orphans 2>/dev/null || true
+            $COMPOSE up -d postgres || return 1
+            local pg_ok=0
+            for i in $(seq 1 30); do
+              if $COMPOSE exec -T postgres sh -c '. /clirelay-deploy/.env; pg_isready -U "$CLIRELAY_POSTGRES_USER" -d "$CLIRELAY_POSTGRES_DB"' >/dev/null 2>&1; then
+                pg_ok=1
+                break
+              fi
+              sleep 2
+            done
+            if [ "$pg_ok" != 1 ]; then
+              echo "❌ CliRelay postgres 未在预期时间内就绪"
+              return 1
+            fi
+            # 恢复脚本：先导 SQL 再起全栈（PG 数据卷不入归档，每轮均为全新库，直接导入无冲突）
+            shopt -s nullglob
+            local sql_files=( "$CLIRELAY_DIR"/sql/*.sql )
+            shopt -u nullglob
+            if [ "${#sql_files[@]}" -gt 0 ]; then
+              local latest_sql
+              latest_sql=$(ls -1t "${sql_files[@]}" | head -n 1)
+              echo "📥 Importing PostgreSQL snapshot: $latest_sql"
+              $COMPOSE exec -T postgres sh -c '. /clirelay-deploy/.env; exec psql -U "$CLIRELAY_POSTGRES_USER" -d "$CLIRELAY_POSTGRES_DB" -v ON_ERROR_STOP=1' < "$latest_sql" || return 1
+              echo "✅ PostgreSQL 数据导入完成"
+            fi
+            $COMPOSE up -d || return 1
+          }
+
+          # ---------- CLIProxyAPI 单容器启动（回退后端，参数与原步骤一致） ----------
+          start_cliproxyapi() {
+            echo "🚀 Starting CLIProxyAPI container (fallback backend)..."
+            docker rm -f cliproxyapi cli-proxy-api clirelay 2>/dev/null || true
+            mkdir -p /tmp/local_CLIPProxyAPI/auth-dir /tmp/local_CLIPProxyAPI/logs
+            touch /tmp/local_CLIPProxyAPI/config.yaml
+            touch /tmp/local_CLIPProxyAPI/stats.json
+            docker run -d \
+              --name cliproxyapi \
+              --restart unless-stopped \
+              -p 8317:8317 \
+              -e TZ=Asia/Shanghai \
+              -v /tmp/local_CLIPProxyAPI/config.yaml:/CLIProxyAPI/config.yaml \
+              -v /tmp/local_CLIPProxyAPI/auth-dir:/root/.cli-proxy-api \
+              -v /tmp/local_CLIPProxyAPI/logs:/CLIProxyAPI/logs \
+              -v /tmp/local_CLIPProxyAPI/stats.json:/CLIProxyAPI/stats.json \
+              eceasy/cli-proxy-api:latest || return 1
+          }
+
+          cleanup_archive_workdir
+          # 数据准备失败不终止步骤（条件上下文抑制 errexit），记录原因后仍走回退路径
+          if ! restore_clirelay_data; then
+            FALLBACK_REASON="CliRelay 数据准备失败（归档缺失/校验失败或 bootstrap 迁移失败）"
+            echo "⚠️ $FALLBACK_REASON，将直接走 CLIProxyAPI 回退路径"
           fi
+
+          # ---------- 主流程：CliRelay 优先，启动失败回退 CLIProxyAPI ----------
+          ACTIVE_BACKEND=""
+
+          if start_clirelay && wait_api_ready "clirelay" 120; then
+            ACTIVE_BACKEND=clirelay
+            docker ps -a
+            echo "✅ 当前生效 AI 网关: CliRelay（全栈）"
+          else
+            if [ -z "${FALLBACK_REASON:-}" ]; then
+              FALLBACK_REASON="CliRelay 未能在预期时间内就绪（compose 启动或 8317 健康检查失败）"
+            fi
+            echo "⚠️ $FALLBACK_REASON，打印日志并回退 CLIProxyAPI..."
+            echo "--- clirelay compose logs (tail 80) ---"
+            $COMPOSE logs --tail 80 2>/dev/null || true
+            $COMPOSE down -v --remove-orphans 2>/dev/null || true
+            docker rm -f cli-proxy-api clirelay 2>/dev/null || true
+
+            restore_cliproxyapi_data
+            if start_cliproxyapi && wait_api_ready "cliproxyapi" 120; then
+              ACTIVE_BACKEND=cliproxyapi
+              docker ps -a
+              echo "✅ 已回退，当前生效 AI 网关: CLIProxyAPI"
+            else
+              echo "❌ CLIProxyAPI 未在预期时间内就绪"
+              docker logs cliproxyapi || true
+              exit 1
+            fi
+          fi
+          {
+            printf 'ACTIVE_BACKEND=%s\n' "$ACTIVE_BACKEND"
+            if [ -n "${FALLBACK_REASON:-}" ]; then printf 'FALLBACK_REASON=%s\n' "$FALLBACK_REASON"; fi
+          } > "$BACKEND_STATE"
 
           pkill -f "cloudflared tunnel run --protocol http2 --url http://127.0.0.1:8317 ai-api" || true
 
@@ -671,7 +786,85 @@ jobs:
           sleep 5
           echo $! > ~/.openclaw/logs/cloudflared_CLIPProxyAPI.pid
 
-          echo "CLIProxyAPI 命名隧道已启动：ai-api（固定地址模式）"
+          echo "ai-api 命名隧道已启动（固定地址模式），当前后端: ${ACTIVE_BACKEND}"
+
+      - name: Notify Tailscale SSH entry
+        if: ${{ always() && steps.ts_ssh.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -euo pipefail
+          # runner 就绪后推送 SSH 入口 + 当前生效 AI 网关；通知失败不影响主流程
+          # 注：本步骤位于 AI 网关启动步骤之后，以便读取 /tmp/active-ai-backend.env
+          . "$HOME/ts.env"
+
+          # 获取 runner 出口 IP 信息（IP/ISP/ASN/ASN 组织/位置）；失败不影响主流程
+          IP_INFO="$(curl -fsS --max-time 10 'https://ipwho.is/' 2>/dev/null || true)"
+          [ -z "${IP_INFO}" ] && IP_INFO='{}'
+          PUB_IP="$(printf '%s' "${IP_INFO}" | jq -r '.ip // ""')"
+          IP_ISP="$(printf '%s' "${IP_INFO}" | jq -r '.connection.isp // ""')"
+          IP_ASN="$(printf '%s' "${IP_INFO}" | jq -r '.connection.asn // ""')"
+          IP_ORG="$(printf '%s' "${IP_INFO}" | jq -r '.connection.org // ""')"
+          IP_LOC="$(printf '%s' "${IP_INFO}" | jq -r '[.city, .region, (.country_code // .country)] | map(select(. != null and . != "")) | join(", ")')"
+          PUB_IP="${PUB_IP:-未知}"; IP_ISP="${IP_ISP:-未知}"; IP_ASN="${IP_ASN:-}"; IP_ORG="${IP_ORG:-未知}"; IP_LOC="${IP_LOC:-未知}"
+
+          # 当前生效 AI 网关 + 回退原因（状态文件由 AI 网关启动步骤写入）
+          AI_BACKEND="clirelay"
+          AI_FALLBACK_REASON=""
+          if [ -f /tmp/active-ai-backend.env ]; then
+            AI_BACKEND=$(grep '^ACTIVE_BACKEND=' /tmp/active-ai-backend.env | tail -n 1 | cut -d= -f2- || true)
+            AI_FALLBACK_REASON=$(grep '^FALLBACK_REASON=' /tmp/active-ai-backend.env | tail -n 1 | cut -d= -f2- || true)
+          fi
+          AI_BACKEND="${AI_BACKEND:-clirelay}"
+
+          msg="🟢 OpenClaw runner 已就绪"
+          msg+=$'\n\n'
+          msg+="SSH: ssh runner@${TS_HOST}"
+          msg+=$'\n'
+          msg+="IP: ssh runner@${TS_IP}"
+          msg+=$'\n'
+          msg+="Exit Node: 已广播（本 runner 可作为出口节点）"
+          msg+=$'\n'
+          msg+="批准① 管理页: admin/machines → openclaw → Edit routes → 勾选 Exit Node"
+          msg+=$'\n'
+          msg+="批准② ACL autoApprovers: routes 0.0.0.0/0,::/0 → tag:ci（免每次批准，推荐）"
+          msg+=$'\n'
+          msg+="批准③ API: POST /api/v2/device/{device_id}/routes"
+          msg+=$'\n\n'
+          if [ "$AI_BACKEND" = "cliproxyapi" ]; then
+            msg+="AI 网关: CLIProxyAPI（回退）"
+          else
+            msg+="AI 网关: CliRelay（全栈）"
+          fi
+          if [ -n "$AI_FALLBACK_REASON" ]; then
+            msg+=$'\n'
+            msg+="回退原因: ${AI_FALLBACK_REASON}"
+          fi
+          if [ -n "${TS_FQDN:-}" ]; then
+            msg+=$'\n'
+            msg+="RustDesk 直连: ${TS_FQDN}:21118"
+          fi
+          msg+=$'\n'
+          msg+="文件管理 (SFTP): sftp://runner@${TS_HOST}/"
+          msg+=$'\n\n'
+          msg+="出口 IP: ${PUB_IP}"
+          msg+=$'\n'
+          msg+="ISP: ${IP_ISP}"
+          msg+=$'\n'
+          msg+="ASN: AS${IP_ASN}（${IP_ORG}）"
+          msg+=$'\n'
+          msg+="位置: ${IP_LOC}"
+          msg+=$'\n'
+          msg+="Run: ${RUN_URL}"
+          payload=$(jq -n --arg chat_id "$TELEGRAM_CHAT_ID" --arg text "$msg" \
+            '{chat_id: $chat_id, text: $text, disable_web_page_preview: true}')
+          curl -fsS --retry 3 --retry-delay 2 --max-time 20 \
+            -X POST -H 'Content-Type: application/json' \
+            -d "$payload" \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" > /dev/null
+          echo "已推送 SSH 入口通知: ssh runner@${TS_HOST}（AI 网关: ${AI_BACKEND}）"
 
       - name: Run OpenClaw
         id: run_openclaw
@@ -1248,6 +1441,13 @@ jobs:
             --exclude '*.jsonl.lock' \
             "$SRC_DIR"/ "$STAGE_DIR"/
 
+          # 回退态 token 双保险：把 CliRelay 的 auths 一并打进包（恢复侧忽略未知目录，向后兼容）
+          if [ -d /tmp/local_CliRelay/auths ]; then
+            sudo mkdir -p "$STAGE_DIR/clirelay-auths"
+            sudo cp -a /tmp/local_CliRelay/auths/. "$STAGE_DIR/clirelay-auths/" 2>/dev/null || true
+            sudo find "$STAGE_DIR/clirelay-auths" -name '._*' -delete 2>/dev/null || true
+          fi
+
           sudo tar -C "$STAGE_DIR" -czf "$OUTPUT_TAR" .
           # 压缩包是 root 产出、随后由 runner 身份的 rclone 上传，显式放开读权限，不依赖 umask
           sudo chmod 644 "$OUTPUT_TAR"
@@ -1268,19 +1468,94 @@ jobs:
           EOF
           chmod +x /tmp/create-cliproxyapi-archive.sh
 
+          cat > /tmp/create-clirelay-archive.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          OUTPUT_TAR="${1:-}"
+          if [ -z "$OUTPUT_TAR" ]; then
+            echo "Usage: $0 /path/to/output.tar.gz" >&2
+            exit 2
+          fi
+
+          MIN_SIZE=$((5 * 1024))
+          SRC_DIR="/tmp/local_CliRelay"
+          COMPOSE="docker compose -p clirelay -f $SRC_DIR/docker-compose.yml --project-directory $SRC_DIR"
+          STAGE_DIR=""
+
+          cleanup() {
+            if [ -n "${STAGE_DIR:-}" ] && [ -d "$STAGE_DIR" ]; then
+              rm -rf "$STAGE_DIR"
+            fi
+          }
+          trap cleanup EXIT
+
+          rm -f "$OUTPUT_TAR"
+
+          if [ ! -f "$SRC_DIR/docker-compose.yml" ] || [ ! -f "$SRC_DIR/.env" ]; then
+            echo "clirelay_dir_missing"
+            exit 3
+          fi
+
+          STAGE_DIR=$(mktemp -d /tmp/clirelay-archive-stage.XXXXXX)
+
+          # 1. pg_dump 刷新 SQL（postgres 数据卷不入包，恢复时 psql 导入；容器仍在运行时执行）
+          . "$SRC_DIR/.env"
+          mkdir -p "$SRC_DIR/sql"
+          if $COMPOSE exec -T postgres sh -c '. /clirelay-deploy/.env; exec pg_dump -U "$CLIRELAY_POSTGRES_USER" -d "$CLIRELAY_POSTGRES_DB" --no-owner' > "$SRC_DIR/sql/clirelay-latest.sql" 2>/tmp/clirelay-pgdump.err; then
+            pg_size=$(stat -c%s "$SRC_DIR/sql/clirelay-latest.sql" 2>/dev/null || echo 0)
+            echo "pg_dump ok size=${pg_size}"
+            if [ "$pg_size" -lt 200 ]; then
+              echo "⚠️ pg_dump 输出过小（${pg_size} bytes），可能为空库，仅告警不中断"
+            fi
+          else
+            echo "⚠️ pg_dump 失败（非致命，保留旧 SQL 继续）: $(tail -n 3 /tmp/clirelay-pgdump.err 2>/dev/null || true)"
+          fi
+          rm -f /tmp/clirelay-pgdump.err
+
+          # 2. 打包：auths + config.yaml + .env + compose 文件 + sql/（跳过 postgres-data/redis-data/logs/data 原始目录）
+          mkdir -p "$STAGE_DIR"
+          cp -a "$SRC_DIR/config.yaml" "$SRC_DIR/.env" "$SRC_DIR/docker-compose.yml" "$STAGE_DIR/"
+          mkdir -p "$STAGE_DIR/auths" "$STAGE_DIR/sql"
+          cp -a "$SRC_DIR/auths/." "$STAGE_DIR/auths/" 2>/dev/null || true
+          find "$STAGE_DIR/auths" -name '._*' -delete 2>/dev/null || true
+          cp -a "$SRC_DIR/sql/." "$STAGE_DIR/sql/" 2>/dev/null || true
+
+          tar -C "$STAGE_DIR" -czf "$OUTPUT_TAR" .
+          chmod 644 "$OUTPUT_TAR" 2>/dev/null || true
+
+          actual_size=$(stat -c%s "$OUTPUT_TAR" 2>/dev/null || echo 0)
+          if [ ! -s "$OUTPUT_TAR" ]; then
+            echo "clirelay_archive_empty output=$OUTPUT_TAR"
+            exit 1
+          elif [ "$actual_size" -lt "$MIN_SIZE" ]; then
+            echo "clirelay_archive_too_small size=${actual_size} min=${MIN_SIZE} output=$OUTPUT_TAR"
+            exit 1
+          elif ! tar -tzf "$OUTPUT_TAR" >/dev/null 2>&1; then
+            echo "clirelay_archive_tar_validation_failed output=$OUTPUT_TAR"
+            exit 1
+          else
+            echo "archive_ready size=${actual_size} output=$OUTPUT_TAR"
+          fi
+          EOF
+          chmod +x /tmp/create-clirelay-archive.sh
+
           cat > /tmp/openclaw-archive-loop.sh <<'EOF'
           #!/usr/bin/env bash
           set -euo pipefail
 
           TMP_OPENCLAW_TAR="/tmp/openclaw.tar.gz"
           TMP_CLIPROXYAPI_TAR="/tmp/CLIProxyAPI.tar.gz"
+          TMP_CLIRELAY_TAR="/tmp/CliRelay.tar.gz"
           LOCK_FILE="/tmp/openclaw-archive.lock"
 
           cleanup_archive_outputs() {
             rm -f "$TMP_OPENCLAW_TAR" 2>/dev/null || true
             sudo rm -f "$TMP_CLIPROXYAPI_TAR" 2>/dev/null || true
+            rm -f "$TMP_CLIRELAY_TAR" 2>/dev/null || true
             rm -rf /tmp/openclaw-archive-stage.* 2>/dev/null || true
             sudo rm -rf /tmp/cliproxyapi-archive-stage.* 2>/dev/null || true
+            rm -rf /tmp/clirelay-archive-stage.* 2>/dev/null || true
           }
           cleanup_archive_outputs
           PID_FILE="/tmp/openclaw-archive.pid"
@@ -1335,28 +1610,49 @@ jobs:
               fi
             fi
 
-            cliproxyapi_archive_output=""
-            if cliproxyapi_archive_output=$(flock -E 200 -n "$LOCK_FILE" bash /tmp/create-cliproxyapi-archive.sh "$TMP_CLIPROXYAPI_TAR" 2>&1); then
-              echo "[$(date '+%F %T')] CLIProxyAPI archive ok, uploading... ${cliproxyapi_archive_output}"
-              cliproxyapi_upload_output=""
-              if cliproxyapi_upload_output=$(rclone copyto "$TMP_CLIPROXYAPI_TAR" dropbox:self-hosted/CLIProxyAPI.tar.gz 2>&1); then
-                echo "[$(date '+%F %T')] CLIProxyAPI upload ok"
-                sudo rm -f "$TMP_CLIPROXYAPI_TAR"
+            # AI 网关归档双轨：按当前生效后端选择归档脚本（clirelay → CliRelay.tar.gz；cliproxyapi → CLIProxyAPI.tar.gz，含 clirelay auths 附包）
+            ACTIVE_BACKEND="clirelay"
+            if [ -f /tmp/active-ai-backend.env ]; then
+              ACTIVE_BACKEND=$(grep '^ACTIVE_BACKEND=' /tmp/active-ai-backend.env | tail -n 1 | cut -d= -f2- || true)
+            fi
+            ACTIVE_BACKEND="${ACTIVE_BACKEND:-clirelay}"
+
+            if [ "$ACTIVE_BACKEND" = "cliproxyapi" ]; then
+              AI_ARCHIVE_TAR="$TMP_CLIPROXYAPI_TAR"
+              AI_ARCHIVE_DEST="dropbox:self-hosted/CLIProxyAPI.tar.gz"
+              AI_ARCHIVE_SCRIPT="/tmp/create-cliproxyapi-archive.sh"
+              AI_LABEL="CLIProxyAPI"
+              AI_SUDO_RM="yes"
+            else
+              AI_ARCHIVE_TAR="$TMP_CLIRELAY_TAR"
+              AI_ARCHIVE_DEST="dropbox:self-hosted/CliRelay.tar.gz"
+              AI_ARCHIVE_SCRIPT="/tmp/create-clirelay-archive.sh"
+              AI_LABEL="CliRelay"
+              AI_SUDO_RM="no"
+            fi
+
+            ai_archive_output=""
+            if ai_archive_output=$(flock -E 200 -n "$LOCK_FILE" bash "$AI_ARCHIVE_SCRIPT" "$AI_ARCHIVE_TAR" 2>&1); then
+              echo "[$(date '+%F %T')] ${AI_LABEL} archive ok, uploading... ${ai_archive_output}"
+              ai_upload_output=""
+              if ai_upload_output=$(rclone copyto "$AI_ARCHIVE_TAR" "$AI_ARCHIVE_DEST" 2>&1); then
+                echo "[$(date '+%F %T')] ${AI_LABEL} upload ok"
+                if [ "$AI_SUDO_RM" = "yes" ]; then sudo rm -f "$AI_ARCHIVE_TAR"; else rm -f "$AI_ARCHIVE_TAR"; fi
               else
                 rc=$?
-                echo "[$(date '+%F %T')] ⚠️ CLIProxyAPI.tar.gz upload failed (rc=$rc): ${cliproxyapi_upload_output}"
-                send_telegram_alert "$(printf 'CLIProxyAPI.tar.gz 上传失败（rc=%s)\n原因: rclone 上传失败\n详情: %s' "$rc" "${cliproxyapi_upload_output:-无输出}")"
+                echo "[$(date '+%F %T')] ⚠️ ${AI_LABEL}.tar.gz upload failed (rc=$rc): ${ai_upload_output}"
+                send_telegram_alert "$(printf '%s.tar.gz 上传失败（rc=%%s)\n原因: rclone 上传失败\n详情: %%s' "$AI_LABEL" "$rc" "${ai_upload_output:-无输出}")"
               fi
             else
               rc=$?
               if [ "$rc" -eq 200 ]; then
-                echo "[$(date '+%F %T')] ⏭️ previous archive still running, skip CLIProxyAPI archive"
+                echo "[$(date '+%F %T')] ⏭️ previous archive still running, skip ${AI_LABEL} archive"
               elif [ "$rc" -eq 3 ]; then
-                echo "[$(date '+%F %T')] ⚠️ CLIProxyAPI.tar.gz archive skipped because data directory is missing (rc=$rc): ${cliproxyapi_archive_output}"
-                send_telegram_alert "$(printf 'CLIProxyAPI.tar.gz 归档失败（rc=%s)\n原因: CLIProxyAPI 本地数据目录未初始化（/tmp/local_CLIPProxyAPI 不存在），通常表示 CLIProxyAPI 容器启动步骤被跳过或失败。\n详情: %s' "$rc" "${cliproxyapi_archive_output:-cliproxyapi_dir_missing}")"
+                echo "[$(date '+%F %T')] ⚠️ ${AI_LABEL} archive skipped because deployment/data directory is missing (rc=$rc): ${ai_archive_output}"
+                send_telegram_alert "$(printf '%s 归档跳过（rc=%%s）\n原因: 本地部署/数据目录缺失（通常表示网关容器启动步骤被跳过或失败）\n详情: %%s' "$AI_LABEL" "$rc" "${ai_archive_output:-ai_dir_missing}")"
               else
-                echo "[$(date '+%F %T')] ⚠️ CLIProxyAPI.tar.gz archive failed in periodic archive (rc=$rc): ${cliproxyapi_archive_output}"
-                send_telegram_alert "$(printf 'CLIProxyAPI.tar.gz 归档失败（rc=%s)\n原因: %s' "$rc" "${cliproxyapi_archive_output:-归档脚本无输出}")"
+                echo "[$(date '+%F %T')] ⚠️ ${AI_LABEL} archive failed in periodic archive (rc=$rc): ${ai_archive_output}"
+                send_telegram_alert "$(printf '%s.tar.gz 归档失败（rc=%%s)\n原因: %%s' "$AI_LABEL" "$rc" "${ai_archive_output:-归档脚本无输出}")"
               fi
             fi
             sleep 1200
@@ -1418,7 +1714,9 @@ jobs:
           echo "3. Stopping service containers before final archive..."
           docker stop rss-to-telegram 2>/dev/null || echo "rss-to-telegram already stopped or missing."
           docker stop sub-store 2>/dev/null || echo "sub-store already stopped or missing."
-          docker stop clirelay 2>/dev/null || echo "clirelay already stopped or missing."
+          # CliRelay 主容器名为 cli-proxy-api（compose 固定 container_name）；postgres 保持运行，
+          # 最终 pg_dump 在归档脚本内执行完成后才 compose down
+          docker stop clirelay cli-proxy-api 2>/dev/null || true
           docker stop cliproxyapi 2>/dev/null || echo "cliproxyapi already stopped or missing."
 
           send_archive_alert() {
@@ -1438,10 +1736,11 @@ jobs:
 
           echo "4. Performing final archive to Dropbox..."
           cleanup_archive_outputs() {
-            rm -f /tmp/openclaw-final.tar.gz /tmp/rsstt.tar.gz 2>/dev/null || true
+            rm -f /tmp/openclaw-final.tar.gz /tmp/rsstt.tar.gz /tmp/CliRelay.tar.gz 2>/dev/null || true
             sudo rm -f /tmp/CLIProxyAPI.tar.gz 2>/dev/null || true
             rm -rf /tmp/openclaw-archive-stage.* 2>/dev/null || true
             sudo rm -rf /tmp/cliproxyapi-archive-stage.* 2>/dev/null || true
+            rm -rf /tmp/clirelay-archive-stage.* 2>/dev/null || true
           }
           free_kb() { df -Pk "${1:-/tmp}" | awk 'NR==2 {print $4}'; }
           require_free_kb() {
@@ -1511,8 +1810,47 @@ jobs:
 
           MIN_SIZE=$((5 * 1024))
 
-          echo "5. Archiving CLIProxyAPI persistent data..."
-          if [ -d /tmp/local_CLIPProxyAPI ]; then
+          echo "5. Archiving AI gateway persistent data (dual-track by active backend)..."
+          ACTIVE_BACKEND="clirelay"
+          if [ -f /tmp/active-ai-backend.env ]; then
+            ACTIVE_BACKEND=$(grep '^ACTIVE_BACKEND=' /tmp/active-ai-backend.env | tail -n 1 | cut -d= -f2- || true)
+          fi
+          ACTIVE_BACKEND="${ACTIVE_BACKEND:-clirelay}"
+          echo "当前生效 AI 网关: ${ACTIVE_BACKEND}"
+
+          if [ "$ACTIVE_BACKEND" = "clirelay" ]; then
+            # CliRelay 主用：pg_dump（postgres 仍在运行）→ 打包上传 CliRelay.tar.gz → compose down
+            if [ -f /tmp/local_CliRelay/docker-compose.yml ]; then
+              clirelay_final_output=""
+              if clirelay_final_output=$(bash /tmp/create-clirelay-archive.sh /tmp/CliRelay.tar.gz 2>&1); then
+                actual_size=$(stat -c%s /tmp/CliRelay.tar.gz)
+                if [ "$actual_size" -ge "$MIN_SIZE" ]; then
+                  clirelay_final_upload_output=""
+                  if clirelay_final_upload_output=$(rclone copyto /tmp/CliRelay.tar.gz dropbox:self-hosted/CliRelay.tar.gz -v 2>&1); then
+                    echo "final CliRelay archive/upload ok: ${clirelay_final_output}"
+                    rm -f /tmp/CliRelay.tar.gz
+                  else
+                    rc=$?
+                    echo "⚠️ final CliRelay.tar.gz upload failed (rc=$rc): ${clirelay_final_upload_output}"
+                    send_archive_alert "$(printf 'final CliRelay.tar.gz 上传失败（rc=%s)\n原因: rclone 上传失败\n详情: %s' "$rc" "${clirelay_final_upload_output:-无输出}")"
+                  fi
+                else
+                  echo "⚠️ CliRelay 压缩包小于 5KB，放弃覆盖云端数据: size=${actual_size}"
+                  send_archive_alert "$(printf 'final CliRelay.tar.gz 归档失败\n原因: 压缩包小于最小阈值，放弃覆盖云端数据\n详情: size=%s min=%s output=/tmp/CliRelay.tar.gz' "$actual_size" "$MIN_SIZE")"
+                fi
+              else
+                rc=$?
+                echo "⚠️ final CliRelay.tar.gz archive failed (rc=$rc): ${clirelay_final_output}"
+                send_archive_alert "$(printf 'final CliRelay.tar.gz 归档失败（rc=%s)\n原因: %s' "$rc" "${clirelay_final_output:-归档脚本无输出}")"
+              fi
+              echo "Stopping CliRelay compose stack after final archive..."
+              docker compose -p clirelay -f /tmp/local_CliRelay/docker-compose.yml --project-directory /tmp/local_CliRelay down 2>/dev/null || true
+            else
+              echo "⚠️ /tmp/local_CliRelay 不存在，跳过 CliRelay 归档"
+              send_archive_alert "$(printf 'final CliRelay.tar.gz 归档失败（rc=3）\n原因: CliRelay 本地部署目录未初始化（/tmp/local_CliRelay 不存在），通常表示 CliRelay 启动步骤被跳过或失败。\n详情: clirelay_dir_missing')"
+            fi
+          elif [ -d /tmp/local_CLIPProxyAPI ]; then
+            echo "5a. Archiving CLIProxyAPI persistent data (fallback backend, with clirelay auths)..."
             echo "=== local CLIProxyAPI tree before archive ==="
             find /tmp/local_CLIPProxyAPI -maxdepth 4 | sort || true
             cliproxyapi_src_kb=$(sudo du -sk /tmp/local_CLIPProxyAPI | awk '{print $1}')

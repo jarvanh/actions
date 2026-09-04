@@ -22,7 +22,7 @@ proxy-speedtest/            测速结果数据
 | 文档 | 内容 |
 |---|---|
 | [`docs/emby302.md`](docs/emby302.md) | Emby 媒体服务器 + 302 直链子系统（架构、凭据体系、通知、排查手册） |
-| [`docs/openclaw-self-healing.md`](docs/openclaw-self-healing.md) | OpenClaw 自愈 |
+| [`docs/openclaw-self-healing.md`](docs/openclaw-self-healing.md) | OpenClaw 自愈 + AI 网关双后端（CliRelay 全栈优先 / CLIProxyAPI 回退）+ 远程访问入口 |
 | 下文「OpenList 同步子系统」 | OpenList 同步工具（内联在本文档） |
 
 ## 工作流清单

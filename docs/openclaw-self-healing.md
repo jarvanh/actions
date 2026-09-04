@@ -120,8 +120,10 @@ tar -xzf /tmp/restore.tar.gz -C /tmp/restore .openclaw/openclaw.json
 
 ### 排障入口
 
-- 失败通知：FAIL_STAGE、当前/回退/采纳版本、DOCTOR_EXIT、关键错误摘要、tmate 链接。
-- 运行中日志：`/tmp/run-openclaw-step.log`（经 tmate 可见）。
+- 失败通知：FAIL_STAGE、当前/回退/采纳版本、DOCTOR_EXIT、关键错误摘要、Tailscale SSH 入口。
+- 启动通知（🟢 runner 已就绪）：SSH 入口、AI 网关后端（CliRelay / CLIProxyAPI + 回退原因）、
+  RustDesk 直连地址、SFTP 文件管理入口、出口 IP/ISP/ASN。
+- 运行中日志：`/tmp/run-openclaw-step.log`（经 Tailscale SSH 可见）。
 - 结束后拉日志：`gh run view --job <job_id> --repo jarvanh/actions --log`。
 
 ## 五、已知边界
@@ -133,3 +135,62 @@ tar -xzf /tmp/restore.tar.gz -C /tmp/restore .openclaw/openclaw.json
 | 需要语义决策的迁移（agent roster 归属等） | doctor 与恢复机制拒绝代做决定，需人工显式声明 |
 | 降级/状态库移位 | 会话索引丢失（工作区与配置不受影响）；`*.state-bak-*` / `*.broken-bak-*` 保留可恢复 |
 | Dropbox 挂载失败 | 本轮以首次启动形态运行，不恢复历史状态 |
+
+## 六、AI API 网关：CliRelay 全栈优先 + CLIProxyAPI 回退
+
+> 对应步骤：「Run AI API gateway (CliRelay first, fallback CLIProxyAPI)」。
+
+### 双后端策略
+
+| 后端 | 形态 | 端口 | 数据目录 | 归档 |
+|---|---|---|---|---|
+| **CliRelay（主用）** | docker compose 全栈：`cli-proxy-api` 主容器 + postgres + redis + init + updater（镜像 `ghcr.io/kittors/clirelay:latest`） | 8317 | `/tmp/local_CliRelay`（auths + config.yaml + .env + compose + sql/） | `dropbox:self-hosted/CliRelay.tar.gz` |
+| **CLIProxyAPI（回退）** | 单容器 `eceasy/cli-proxy-api:latest` | 8317 | `/tmp/local_CLIPProxyAPI`（config.yaml + auth-dir + stats.json） | `dropbox:self-hosted/CLIProxyAPI.tar.gz`（附带 clirelay auths 双保险） |
+
+两后端共用 8317 端口 → cloudflared `ai-api` 命名隧道（→ 127.0.0.1:8317）无需按后端切换。
+
+### 启动链路
+
+```
+恢复 CliRelay.tar.gz（缺失/无效 → 从 CLIProxyAPI 数据 bootstrap 迁移）
+    → compose up postgres → 等待 healthy → psql 导入 sql/*.sql（ON_ERROR_STOP=1）
+    → compose up 全栈 → 8317 健康检查（120×2s）
+        ├─ 就绪 → ACTIVE_BACKEND=clirelay
+        └─ 失败 → compose logs + down -v → 记录 FALLBACK_REASON
+                   → 恢复/复用 /tmp/local_CLIPProxyAPI → docker run cliproxyapi
+                   → 8317 健康检查（120×2s）
+                       ├─ 就绪 → ACTIVE_BACKEND=cliproxyapi
+                       └─ 失败 → docker logs + exit 1（进入失败通知链路）
+```
+
+- 当前生效后端与回退原因写入 `/tmp/active-ai-backend.env`，供归档循环分支与启动通知读取。
+- CliRelay 数据准备失败（归档缺失/校验失败/bootstrap 失败）不会终止步骤，直接走回退路径。
+
+### 归档双轨
+
+- **主用（clirelay）**：`create-clirelay-archive.sh` —— postgres 运行中 `pg_dump` 刷新
+  `sql/clirelay-latest.sql` → tar 打包 `auths/ + config.yaml + .env + docker-compose.yml + sql/`
+  （**跳过 postgres-data/ redis-data 原始目录**：Redis 可重建，PG 走 SQL 导入恢复）→ `CliRelay.tar.gz`。
+- **回退态（cliproxyapi）**：现有 `create-cliproxyapi-archive.sh` 逻辑不变，
+  额外把 `/tmp/local_CliRelay/auths` 打进包内 `clirelay-auths/`（token 双保险，恢复侧忽略未知目录）。
+- 20 分钟后台归档循环与最终归档（Stop OpenClaw and Final Archive）均按 `ACTIVE_BACKEND` 分支；
+  最终归档顺序：pg_dump（postgres 尚在运行）→ 打包上传 → `compose down`。
+
+### 恢复链路（下轮 run）
+
+`CliRelay.tar.gz` 存在且含 `docker-compose.yml`/`.env` → 解压 → `compose up postgres`
+→ `psql -v ON_ERROR_STOP=1 < sql/*.sql` → `compose up` 全栈。PG 数据卷不入包，每轮均为全新库，导入无冲突。
+
+## 七、远程访问入口（Tailscale）
+
+Runner 每轮通过 Tailscale 加入 tailnet（ephemeral，`--hostname=openclaw` 固定 MagicDNS 名）：
+
+| 入口 | 地址 | 说明 |
+|---|---|---|
+| SSH | `ssh runner@openclaw`（或 `@<TS_IP>`） | Tailscale SSH，`ts.env` 轮询等待名字收敛后才写入，避免主机名漂移 |
+| 文件管理 | `sftp://runner@openclaw/` | Tailscale SSH 自带 SFTP，Finder ⌘K 原生挂载，零额外服务 |
+| 远程桌面（tailnet 内） | RustDesk 直连 `openclaw.…ts.net:21118` | 配置键 `direct-server='Y'` + `direct-access-port='21118'`（写入持久化 RustDesk2.toml），点对点不经中继 |
+| 远程桌面（任意网络） | RustDesk ID + 密码 | 走官方 ID/中继服务器；ID 每轮变化，以 Telegram 报告推送为准 |
+
+- `ts.env` 字段：`TS_HOST`（MagicDNS 短名）/ `TS_FQDN`（完整域名，RustDesk 直连用）/ `TS_IP` / `RUN_URL`。
+- AI 网关管理地址：`https://ai-api.${VD}.eu.org/manage`（cloudflared 命名隧道，与后端无关）。
