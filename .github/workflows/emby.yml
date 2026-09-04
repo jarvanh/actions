@@ -592,6 +592,13 @@ jobs:
           }
           main || echo "::warning::install ge2o failed, 302 链路将回退 direct"
       - name: run cloudflared
+        # ⚠️ 这个 run 块已接近 GitHub 的 21000 字符表达式上限：块内只要含 ${{ }}，
+        # 整块文本都会按"表达式模板"整体校验，超限直接判 workflow 非法。
+        # secrets 一律经 step 级 env 注入、块内只引用 $VAR，让 run 块保持纯字面量。
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          EMBY_API_KEY: ${{ secrets.EMBY_API_TOKEN }}
         run: |
           source "$EMBY302_DIR/lib.sh"
           # 取值统一去空白转小写，仓库变量写成 "Direct" / "DIRECT" 也能识别
@@ -608,7 +615,7 @@ jobs:
           if [ "$MODE" = "302" ]; then
             # 直链映射探针：取一个媒体库根目录（/onedrive/...），用同路径直查 OpenList fs/get。
             # ge2o 路径换算断了会静默回源（播放一直显示"中转"），这里在启动时就暴露。
-            MEDIA_DIR=$(curl -s -m 8 "http://127.0.0.1:8096/emby/Library/VirtualFolders?api_key=${{ secrets.EMBY_API_TOKEN }}" \
+            MEDIA_DIR=$(curl -s -m 8 "http://127.0.0.1:8096/emby/Library/VirtualFolders?api_key=$EMBY_API_KEY" \
               | jq -r '[.[].Locations[]?] | map(select(startswith("/onedrive"))) | .[0] // empty' 2>/dev/null || true)
             echo "直链映射探针: ${MEDIA_DIR:+已取到媒体库目录}"
             OK=0
@@ -682,8 +689,8 @@ jobs:
           START_MSG="$(printf '📺 Emby 启动\n模式: %s\n直链源: %s\n%s\n探活: %s\n时间: %s' \
             "$MODE" "$SRC_NAME" "$OD_LINE" "${MAP_OK:-?}" "$(date '+%Y-%m-%d %H:%M:%S %Z')")"
           echo "TG(启动): ${START_MSG}"
-          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-            -d chat_id=${{ secrets.TG_CHAT_ID }} \
+          curl -s -X POST "https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage" \
+            -d chat_id=$TG_CHAT_ID \
             --data-urlencode "text=${START_MSG}" >/dev/null 2>&1 || true
 
           if [ "$MODE" = "302" ]; then
@@ -735,8 +742,17 @@ jobs:
             fi
           done
           WD_EOF
-          MEDIA_DIR="$MEDIA_DIR" TELEGRAM_BOT_TOKEN="${{ secrets.TELEGRAM_BOT_TOKEN }}" TG_CHAT_ID="${{ secrets.TG_CHAT_ID }}" \
+          MEDIA_DIR="$MEDIA_DIR" TELEGRAM_BOT_TOKEN="$TG_BOT_TOKEN" TG_CHAT_ID="$TG_CHAT_ID" \
             nohup bash /opt/watchdog.sh > /opt/logs/watchdog.log 2>&1 &
+      - name: start playlog
+        # 从 "run cloudflared" 拆出：该 step 的 run 块必须远离 GitHub 的 21000 字符
+        # 表达式上限（块内含 ${{ }} 时整块按表达式模板校验，超限直接判 workflow 非法）。
+        # secrets 经 step 级 env 注入，块内只引用 $VAR，保持 run 块为纯字面量。
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          EMBY_API_KEY: ${{ secrets.EMBY_API_TOKEN }}
+        run: |
           # 播放事件监听：
           #   302 模式主源    = ge2o 访问日志（3xx → [302直链]，2xx → [中转]）
           #   direct 模式兜底 = Emby Sessions 轮询（ge2o 被旁路，ge2o.log 里不会有播放记录）
@@ -1083,8 +1099,8 @@ jobs:
 
           wait
           PL_EOF
-          TELEGRAM_BOT_TOKEN="${{ secrets.TELEGRAM_BOT_TOKEN }}" TG_CHAT_ID="${{ secrets.TG_CHAT_ID }}" \
-            EMBY_API_KEY="${{ secrets.EMBY_API_TOKEN }}" \
+          TELEGRAM_BOT_TOKEN="$TG_BOT_TOKEN" TG_CHAT_ID="$TG_CHAT_ID" \
+            EMBY_API_KEY="$EMBY_API_KEY" \
             nohup bash /opt/playlog.sh >> /opt/logs/playlog.log 2>&1 &
       - name: warmup images
         run: |
