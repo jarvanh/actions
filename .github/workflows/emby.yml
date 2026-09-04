@@ -53,7 +53,7 @@ jobs:
     steps:
       - name: checkout repo
         # 检出仓库，使 .github/scripts/emby302/ 下的脚本可用（与 openlist.yml 同做法）
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: rclone-install
         run: |
           set -e
@@ -826,40 +826,150 @@ jobs:
             ) 9>"$LOCK"
           }
 
-          # 片名反查：Items 接口 → 失败再从 Sessions 里按 Id 反查（emby_get 已含双认证回退）
-          item_name() { # $1=IID
-            local iid=$1 code name
-            code=$(emby_get "/emby/Items?Ids=$iid&Fields=Name" /tmp/pl-item.json)
-            name=$(jq -r '.Items[0].Name // empty' /tmp/pl-item.json 2>/dev/null)
-            if [ -z "$name" ]; then
-              echo "[WARN] 片名查询失败 item=$iid http=$code" >&2
-              code=$(emby_get /emby/Sessions /tmp/pl-sessions-name.json)
-              name=$(jq -r --arg id "$iid" 'if type=="array" then . else (.Items // []) end
+          # 片名与元数据反查：Items 接口 → 失败再从 Sessions 里按 Id 反查（emby_get 已含双认证回退）
+          # 一次请求把通知需要的信息全取回来（年份/类型/季集/时长/分辨率/编码），不再逐项查。
+          # 输出 TSV：name | year | type | series | season | episode | 时长(分) | 高度(px) | 编码
+          # 临时文件带 $BASHPID：数据源 A/B 是两个并发子 shell，同名的会互相踩。
+          item_meta() { # $1=IID
+            local iid=$1 code meta sn pid=$BASHPID
+            # ⚠️ 必须先把 $BASHPID 固化到普通变量：jq 在 $( ) 里跑，展开时 $BASHPID
+            # 已是子 shell 的 pid，读到的会是另一个（不存在的）临时文件——静默全空
+            code=$(emby_get "/emby/Items?Ids=$iid&Fields=Name,ProductionYear,Type,SeriesName,ParentIndexNumber,IndexNumber,RunTimeTicks,MediaStreams" "/tmp/pl-item-$pid.json")
+            meta=$(jq -r '.Items[0] // empty
+                   | [
+                       (.Name // ""),
+                       (if .ProductionYear then (.ProductionYear|tostring) else "" end),
+                       (.Type // ""),
+                       (.SeriesName // ""),
+                       (if .ParentIndexNumber then (.ParentIndexNumber|tostring) else "" end),
+                       (if .IndexNumber then (.IndexNumber|tostring) else "" end),
+                       ((((.RunTimeTicks // 0) / 600000000) | floor) | tostring),
+                       (([.MediaStreams[]? | select(.Type=="Video") | (.Height // 0)] | max // 0) | tostring),
+                       ([.MediaStreams[]? | select(.Type=="Video") | (.Codec // "")][0] // "")
+                     ] | join("\u001f")' "/tmp/pl-item-$pid.json" 2>/dev/null)
+            if [ -z "$meta" ]; then
+              echo "[WARN] 元数据查询失败 item=$iid http=$code" >&2
+              code=$(emby_get /emby/Sessions "/tmp/pl-sessions-name-$pid.json")
+              sn=$(jq -r --arg id "$iid" 'if type=="array" then . else (.Items // []) end
                      | .[] | select((.NowPlayingItem.Id // "") == $id) | .NowPlayingItem.Name' \
-                     /tmp/pl-sessions-name.json 2>/dev/null | head -1)
-              [ -n "$name" ] || echo "[WARN] Sessions 反查片名失败 item=$iid http=$code" >&2
+                     "/tmp/pl-sessions-name-$pid.json" 2>/dev/null | head -1)
+              [ -n "$sn" ] || echo "[WARN] Sessions 反查片名失败 item=$iid http=$code" >&2
+              meta="${sn:-未知}"$'\037\037\037\037\037\037\037\037'
             fi
-            printf '%s' "${name:-未知}"
+            printf '%s\n' "$meta"
+          }
+
+          # 客户端信息（Sessions 按 item 反查）：Client | DeviceName
+          client_meta() { # $1=IID
+            local pid=$BASHPID   # 同 item_meta：jq 在管道子 shell 里，PID 需先固化
+            emby_get /emby/Sessions "/tmp/pl-sessions-meta-$pid.json" >/dev/null
+            jq -r --arg id "$1" 'if type=="array" then . else (.Items // []) end
+                   | .[] | select((.NowPlayingItem.Id // "") == $id)
+                   | [(.Client // ""), (.DeviceName // "")] | join("\u001f")' \
+                   "/tmp/pl-sessions-meta-$pid.json" 2>/dev/null | head -1
           }
 
           # HTML 转义：片名里的 & < > 会破坏 parse_mode=HTML 的解析（解析失败 = 整条通知丢失）
           esc_html() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
 
-          notify() { # $1=KIND $2=IID [$3=NAME]
-            local kind=$1 iid=$2 name=$3 code link text plain
+          # 以下都是格式化助手：任何一项取不到就返回空，由 join_parts 跳过，不产生 "null · · 0" 这类噪声
+          two_digit() { case "$1" in ''|*[!0-9]*) return 1;; esac; printf '%02d' "$1"; }
+          fmt_dur() { # $1=分钟 → 1h38m / 38m
+            local m=${1:-0}
+            case "$m" in ''|*[!0-9]*) return 0;; esac
+            [ "$m" -lt 1 ] && return 0
+            if [ "$m" -ge 60 ]; then printf '%dh%02dm' "$((m / 60))" "$((m % 60))"; else printf '%dm' "$m"; fi
+          }
+          fmt_res() { # $1=视频高度(px) → 2160p/1080p/720p/480p/SD
+            local h=${1:-0}
+            case "$h" in ''|*[!0-9]*) return 0;; esac
+            [ "$h" -ge 2000 ] && { printf '2160p'; return 0; }
+            [ "$h" -ge 1000 ] && { printf '1080p'; return 0; }
+            [ "$h" -ge 700 ] && { printf '720p'; return 0; }
+            [ "$h" -ge 400 ] && { printf '480p'; return 0; }
+            [ "$h" -gt 0 ] && printf 'SD'
+          }
+          fmt_type() { # $1=Emby Type → 中文
+            case "$1" in
+              Movie) printf '电影';;
+              Episode|Series) printf '剧集';;
+              Audio) printf '音乐';;
+              Video|MusicVideo) printf '视频';;
+              *) [ -n "$1" ] && printf '%s' "$1";;
+            esac
+          }
+          fmt_size() { # $1=字节 → 1.7 GB / 240 MB
+            local b=${1:-0}
+            case "$b" in ''|*[!0-9]*) return 0;; esac
+            [ "$b" -le 0 ] && return 0
+            awk -v b="$b" 'BEGIN{ gb=b/1073741824; if (gb>=1) printf "%.1f GB", gb; else printf "%.0f MB", b/1048576 }'
+          }
+          join_parts() { local out= p; for p in "$@"; do [ -n "$p" ] && out="${out:+${out} · }${p}"; done; printf '%s' "$out"; }
+
+          notify() { # $1=KIND $2=IID [$3=NAME] [$4=起播耗时] [$5=客户端IP]
+            local kind=$1 iid=$2 name=$3 dur=$4 cip=$5
+            local code link text plain n year type series season episode mins hgt codec
+            local cname dev size_b remain_s se title meta client l3 lt
             claim "$iid" || return 0
-            if [ -z "$name" ]; then
-              name=$(item_name "$iid")
-            fi
-            # 日志侧只记片名（公开仓库，绝不落直链）；TG 私密消息里才附带直链
-            echo "🎬 播放 [$kind] $name (item $iid)"
-            text="🎬 播放 [$kind] $(esc_html "$name")"
-            # 302 直链时附上 odlink 最近一次取到的预授权直链（3 分钟内视为本次播放所用）
-            # 长链接折叠成 <a> 超链接，避免整条通知被几百字符的 URL 淹没
+            # 分隔符用 \037（单元分隔符）而非 tab：tab 是 IFS 空白字符，read 会折叠连续的
+            # 分隔符，中间的空字段（如电影没有 series/季集）会被吃掉、后面的字段整体前移
+            IFS=$'\037' read -r n year type series season episode mins hgt codec <<<"$(item_meta "$iid")"
+            [ -n "$name" ] && n="$name"   # 数据源 B 自带片名，优先用它（少一次不可靠依赖）
+
+            # 直链信息：url | size(bytes) | 剩余有效秒数
+            # 2400 = odlink.py 的 LINK_TTL（40 分钟）；改直链缓存时长时这里要同步
             if [ "$kind" = "302直链" ] && [ -f /opt/odlink-last.json ]; then
-              link=$(jq -r 'select((now - .ts) < 180) | .url // empty' /opt/odlink-last.json 2>/dev/null || true)
-              [ -n "$link" ] && text="${text}"$'\n'"<a href=\"$(esc_html "$link")\">▶ 打开直链</a>"
+              lt=$(jq -r 'select((now - .ts) < 180)
+                     | [(.url // ""), ((.size // 0)|tostring), ((2400 - (now - .ts)) | floor | tostring)]
+                     | @tsv' /opt/odlink-last.json 2>/dev/null || true)
+              IFS=$'\t' read -r link size_b remain_s <<<"$lt"
             fi
+
+            # 第 1 行：标题。剧集优先显示"剧名 SxxExx"，集名下移到元数据行，避免一行塞不下
+            se=""
+            if [ -n "$season" ]; then se="S$(two_digit "$season" || printf '?')"; fi
+            if [ -n "$episode" ]; then se="${se}E$(two_digit "$episode" || printf '?')"; fi
+            if [ "$type" = "Episode" ] && [ -n "$series" ]; then
+              title="<b>$(esc_html "$series")</b>"
+              [ -n "$se" ] && title="${title} <i>${se}</i>"
+            else
+              title="<b>$(esc_html "${n:-未知}")</b>"
+              [ -n "$year" ] && title="${title} <i>(${year})</i>"
+            fi
+
+            # 第 2 行：元数据（集名 / 类型 / 时长 / 分辨率 / 编码 / 体积）
+            # 季集号已出现在标题行，这里不再重复
+            meta=$(join_parts \
+              "$( [ "$type" = "Episode" ] && [ -n "$n" ] && esc_html "$n" )" \
+              "$(fmt_type "$type")" \
+              "$(fmt_dur "$mins")" \
+              "$(fmt_res "$hgt")" \
+              "$codec" \
+              "$(fmt_size "$size_b")")
+
+            # 第 3 行：链路。302 时把直链剩余有效期说清楚——链接不是永久的
+            if [ "$kind" = "302直链" ]; then
+              l3="⚡ 302直链 · 播放器直连 OneDrive"
+              case "$remain_s" in
+                ''|*[!0-9]*) ;;
+                *) [ "$remain_s" -gt 0 ] && l3="${l3} · 直链剩余 $(( (remain_s + 59) / 60 )) 分钟";;
+              esac
+            else
+              l3="🔁 中转 · 视频流经 runner 中转到网盘"
+            fi
+
+            # 第 4 行：客户端。IP 来自 ge2o 访问日志（谁在播），起播耗时用于"点播慢"定位
+            IFS=$'\037' read -r cname dev <<<"$(client_meta "$iid")"
+            client=$(join_parts "$(esc_html "$cname")" "$(esc_html "$dev")" "$cip" "${dur:+起播 ${dur}}")
+
+            # 日志侧只记片名（公开仓库，绝不落直链）；TG 私密消息里才附带直链
+            echo "🎬 播放 [$kind] ${n:-未知} (item $iid)"
+            text="🎬 ${title}"
+            [ -n "$meta" ] && text="${text}"$'\n'"${meta}"
+            text="${text}"$'\n'"${l3}"
+            [ -n "$client" ] && text="${text}"$'\n'"📱 ${client}"
+            # 长链接折叠成 <a> 超链接，避免整条通知被几百字符的 URL 淹没
+            [ -n "$link" ] && text="${text}"$'\n'"<a href=\"$(esc_html "$link")\">▶ 打开直链</a>"
             code=$(curl -s -m 10 -o /tmp/pl-tg.json -w '%{http_code}' \
                      -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
                      --data-urlencode "chat_id=$TG_CHAT_ID" \
@@ -867,8 +977,13 @@ jobs:
                      --data-urlencode "text=${text}")
             # HTML 解析失败（转义漏网字符）时不重试解析，直接退化为纯文本原样重发：
             # 宁可链接变长，也不能让播放通知消失
-            if [ "$code" != "200" ] && [ -n "$link" ]; then
-              plain="🎬 播放 [$kind] $name"$'\n'"直链: $link"
+            if [ "$code" != "200" ]; then
+              # 退化版用同一份信息，只是去掉 HTML 标签（超链接变成裸 URL）
+              plain="🎬 播放 [$kind] ${n:-未知}"
+              [ -n "$meta" ] && plain="${plain}"$'\n'"${meta}"
+              plain="${plain}"$'\n'"${l3}"
+              [ -n "$client" ] && plain="${plain}"$'\n'"📱 ${client}"
+              [ -n "$link" ] && plain="${plain}"$'\n'"直链: $link"
               code=$(curl -s -m 10 -o /tmp/pl-tg.json -w '%{http_code}' \
                        -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
                        --data-urlencode "chat_id=$TG_CHAT_ID" \
@@ -927,7 +1042,11 @@ jobs:
                 echo "--- 中转事件上下文: ge2o.log 末尾 30 行（脱敏）---"
                 tail -n 30 "$LOG" 2>/dev/null | redact
               fi
-              notify "$KIND" "$IID"
+              # 访问日志里还有"耗时"与"客户端 IP"两列（起播慢 / 谁在播的定位依据），一并带进通知：
+              #   [ge2o:v2.8.2] <时间> | 206 | 4.16s | 141.11.43.124 | 8095 <路由> | GET /emby/videos/...
+              DUR=$(printf '%s\n' "$line" | grep -oE '\| [0-9]+\.[0-9]+s \|' | head -1 | tr -d '| ')
+              CIP=$(printf '%s\n' "$line" | grep -oE '\| [0-9]{1,3}(\.[0-9]{1,3}){3} \|' | head -1 | tr -d '| ')
+              notify "$KIND" "$IID" "" "$DUR" "$CIP"
             done
           ) &
 

@@ -13,7 +13,7 @@ jobs:
     concurrency: subs-check-singleton
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: rclone-install
         run: |
           set -e
