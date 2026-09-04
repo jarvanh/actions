@@ -1,0 +1,122 @@
+name: windows-tailscale
+
+on:
+  workflow_dispatch:
+  # schedule:
+  #   - cron: "*/5 * * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  windows-tailscale:
+    # singleton 并发：固定主机名下不会撞名（与 openclaw.yml 一致）
+    concurrency: windows-tailscale-singleton
+    # GitHub 托管 runner 单任务上限 360 分钟（6 小时）
+    timeout-minutes: 360
+    runs-on: windows-latest
+    env:
+      TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+      TS_OAUTH_CLIENT_SECRET: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
+    steps:
+      - name: Setup Tailscale (SSH 调试入口)
+        id: ts
+        if: ${{ always() && env.TS_OAUTH_CLIENT_ID != '' && env.TS_OAUTH_CLIENT_SECRET != '' }}
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
+          tags: tag:ci
+
+      - name: Enable SSH over Tailscale
+        id: ts_ssh
+        if: ${{ always() && steps.ts.outcome == 'success' }}
+        shell: pwsh
+        env:
+          TS_SSH_PASSWORD: ${{ secrets.TS_SSH_PASSWORD || 'P@ssw0rd!' }}
+        run: |
+          # Tailscale SSH 服务端仅支持 Linux，Windows 上改为启用内置 OpenSSH Server
+          $cap = Get-WindowsCapability -Online | Where-Object Name -like 'OpenSSH.Server*'
+          if ($cap -and $cap.State -ne 'Installed') {
+            Add-WindowsCapability -Online -Name $cap.Name
+          }
+          Start-Service sshd
+          Set-Service -Name sshd -StartupType Automatic
+          Enable-NetFirewallRule -Name "OpenSSH-Server-In-TCP"
+
+          # 设置 runneradmin 密码，供 SSH 密码登录
+          Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString -AsPlainText $Env:TS_SSH_PASSWORD -Force)
+
+          # 固定主机名（singleton 并发下不会撞名）；节点为 ephemeral，job 结束自动移除
+          tailscale set --hostname=gh-win
+          # 回读实际注册的 DNS 短名（极端情况同名冲突会被加后缀，以实际为准）
+          $status = tailscale status --json | ConvertFrom-Json
+          $tsHost = ($status.Self.DNSName -split '\.')[0]
+          $tsIp = (tailscale ip -4 | Select-Object -First 1)
+
+          Add-Content $Env:GITHUB_ENV "TS_HOST=$tsHost"
+          Add-Content $Env:GITHUB_ENV "TS_IP=$tsIp"
+          Add-Content $Env:GITHUB_ENV "TS_USER=runneradmin"
+          Add-Content $Env:GITHUB_ENV "RUN_URL=https://github.com/$Env:GITHUB_REPOSITORY/actions/runs/$Env:GITHUB_RUN_ID"
+
+          echo "SSH 入口: ssh runneradmin@$tsHost （或 ssh runneradmin@$tsIp）"
+
+      - name: Enable RDP (Windows 自带远程桌面)
+        id: rdp
+        if: ${{ always() && steps.ts.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          # 启用远程桌面 + 网络级身份验证（NLA），与 rdp.yml 一致
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+
+          # 确认 runneradmin 在 Remote Desktop Users 组内（管理员账户默认可登录）
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "runneradmin" -ErrorAction SilentlyContinue
+          Get-LocalGroupMember -Group "Remote Desktop Users" | Format-Table
+
+          echo "RDP 入口: $Env:TS_IP:3389 （用户 runneradmin，走 Tailscale 网络，无需公网隧道）"
+          Add-Content $Env:GITHUB_ENV "RDP_ENABLED=1"
+
+      - name: Tailscale secrets missing
+        if: ${{ always() && env.TS_OAUTH_CLIENT_ID == '' && env.TS_OAUTH_CLIENT_SECRET == '' }}
+        shell: pwsh
+        run: echo "⚠️ 未配置 TS_OAUTH_CLIENT_ID / TS_OAUTH_CLIENT_SECRET，跳过 Tailscale SSH 调试入口"
+
+      - name: Notify Tailscale SSH entry
+        if: ${{ always() && steps.ts_ssh.outcome == 'success' }}
+        continue-on-error: true
+        shell: pwsh
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          # 每次 runner 就绪都推送 SSH/RDP 入口；通知失败不影响主流程
+          $msg = @"
+          🟢 Windows runner 已就绪
+
+          SSH: ssh $Env:TS_USER@$Env:TS_HOST
+          IP: ssh $Env:TS_USER@$Env:TS_IP
+          "@
+          # RDP 启用成功时附上远程桌面入口
+          if ($Env:RDP_ENABLED -eq '1') {
+            $msg += @"
+
+          RDP: $Env:TS_IP:3389
+          RDP 用户: $Env:TS_USER
+          密码: TS_SSH_PASSWORD secret（未配置则为 P@ssw0rd!）
+          连接方式: Microsoft Remote Desktop / 任何 RDP 客户端，走 Tailscale 网络
+          "@
+          }
+          $msg += @"
+
+          Run: $Env:RUN_URL
+          有效期约 6 小时（超时自动结束）
+          "@
+          Invoke-RestMethod -Uri "https://api.telegram.org/bot$Env:TELEGRAM_BOT_TOKEN/sendMessage" `
+            -Method Post -Body @{ chat_id = $Env:TELEGRAM_CHAT_ID; text = $msg }
+          echo "已推送入口通知: ssh $Env:TS_USER@$Env:TS_HOST"
+
+      - name: Keep alive (6h)
+        shell: pwsh
+        run: Start-Sleep -Seconds 21000
