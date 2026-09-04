@@ -11,24 +11,29 @@
 # ===== 通知排版助手（统一所有 Telegram 通知的结构与风格）=====
 # 统一模板（一律 HTML parse_mode，动态内容必须转义——助手函数已内置）:
 #
-#   {emoji} <b>标题</b>            ← tg_add_title
+#   {emoji} <b>标题</b>            ← tg_add_title（emoji + 短语，副标题说明下沉 kv 行）
 #   ━━━━━━━━━━━━━━━━━━             ← TG_SEP（单点定义，勿手写分隔线）
-#   标签：值                        ← 头部键值区（数值 tg_add_kv / 路径 tg_add_path）
+#   标签：<b>值</b>                ← 头部键值区（数值 tg_add_kv / 路径 tg_add_path）
 #
-#   {emoji} <b>分节标题</b>         ← tg_add_section（段前自动空一行）
+#   {emoji} <b>分节标题 · N</b>     ← tg_add_section（段前自动空一行；计数一律 " · N"，
+#                                    不用全角括号，量词并入正文）
 #   • 条目                         ← 单行平铺列表统一 "• " 前缀（无层级条目）
-#   📁 <b>组头</b> · <i>大小</i>   ← 分组列表: 路径/目录类组头加 📁，组间空行分隔
-#     ├─ 条目 · <i>备注</i>        ← 条目用树形连接符 ├─/└─ 标记边界
+#   📁 <b>组头</b> · <i>大小</i>   ← 分组列表: 组头路径加粗，条目内路径才用 <code>
+#     ├─ <code>条目</code> · <i>备注</i>  ← 树形连接符 ├─/└─ 标记边界，条目路径 <code>，
+#                                          元数据一律 " · <i>…</i>"（勿用全角括号）
 #     │   子行                     ← 条目子行缩进对齐（末条目子行 6 空格）
 #   <b>状态组头</b>                ← 块内状态分组（如"✅ 已同步的子目录"），下接树形条目
 #   <pre>块</pre>                  ← 日志/流量图等需对齐的多行内容
 #
 #   条目内多字段一律用 " · " 分隔（勿用全角冒号/括号堆一行）；
-#   数值与状态用 <i>，路径/文件名/模式用 <code>
+#   数值与状态用 <i>，统计行数值统一 <b>，路径/文件名/模式用 <code>
 #   树形渲染助手 tree_conn/tree_sub/tree_lines 定义在 utils.sh（全库共用）
 #
 #   {emoji} <b>结尾提示</b>         ← 收尾状态（如"已跳过此同步"）
 #   斜体说明                        ← tg_add_note
+#   （空行）⏱ 已运行 X · 🔗 运行日志 ← tg_add_footer（全库唯一收尾形态：
+#                                    收尾区与正文间固定一个空行；读 TG_RUN_URL /
+#                                    TG_RUN_STARTED_AT，缺席时优雅降级跳过）
 #
 # 状态 emoji 语义（全库统一）:
 #   ✅ 成功 / ⚠️ 部分失败 / ❌ 失败 / ⏭️ 跳过 / 🔄 进行中 / ⛔ 中断 / 🚨 危险警告
@@ -81,6 +86,44 @@ tg_add_section() {
 # 用法: tg_add_note <var> "说明文字"
 tg_add_note() {
   tg_append "$1" $'\n'"<i>$(escape_html "$2")</i>"$'\n'
+}
+
+# 统一收尾区（全库唯一收尾形态，自带与正文间的空行）:
+#   "\n⏱ 已运行 <b>X 小时 Y 分</b> · 🔗 <a href="TG_RUN_URL">运行日志</a>\n"
+# 降级链: 无 TG_RUN_STARTED_AT → 不显示时长；无 TG_RUN_URL → 整行跳过
+# 附加链接: tg_add_footer <var> ["标签" "URL"]... → 追加 " · 🔗 <a>标签</a>"
+# 环境变量（openlist.yml 注入容器）: TG_RUN_URL / TG_RUN_STARTED_AT
+tg_add_footer() {
+  local var="$1"
+  shift
+  local line=""
+  if [ -n "${TG_RUN_STARTED_AT:-}" ]; then
+    local started
+    started=$(date -d "${TG_RUN_STARTED_AT}" +%s 2>/dev/null || echo 0)
+    if [ "$started" -gt 0 ]; then
+      local elapsed=$(( $(date +%s) - started ))
+      [ "$elapsed" -lt 0 ] && elapsed=0
+      local mins=$((elapsed / 60)) dur
+      if [ "$mins" -ge 60 ]; then
+        dur="$((mins / 60)) 小时 $((mins % 60)) 分"
+      elif [ "$mins" -gt 0 ]; then
+        dur="${mins} 分钟"
+      else
+        dur="${elapsed} 秒"
+      fi
+      line="⏱ 已运行 <b>${dur}</b>"
+    fi
+  fi
+  if [ -n "${TG_RUN_URL:-}" ]; then
+    [ -n "$line" ] && line+=" · "
+    line+="🔗 <a href=\"$(escape_html "${TG_RUN_URL}")\">运行日志</a>"
+    while [ $# -ge 2 ]; do
+      line+=" · 🔗 <a href=\"$(escape_html "$2")\">$(escape_html "$1")</a>"
+      shift 2
+    done
+  fi
+  [ -z "$line" ] && return 0
+  tg_append "$var" $'\n'"${line}"$'\n'
 }
 
 # 通用 Telegram 消息发送（静默，不返回 message_id）

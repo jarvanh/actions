@@ -44,11 +44,15 @@ done
 find . -type f \( -name '*.mp4-Frag*' -o -name '*.part-Frag*' -o -name '*.ytdl' -o -name '*.m3u8' \) -delete
 echo "已清理 ${FRAG_COUNT} 个 yt-dlp 残留文件"
 
-# 发送 Telegram 通知（按 4000 字符分片，避免超过 4096 限制）
+# 发送 Telegram 通知（统一 HTML 排版；明细超长自动分片）
 source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 
 DIR_LABEL=$(basename "$TARGET_DIR")
-HEADER="🧹 ph-dl 清理 yt-dlp 残留文件"$'\n'"━━━━━━━━━━━━━━━━━━"$'\n'"📁 目录: ${DIR_LABEL}"$'\n'$'\n'"🗑️ 清理数量: ${FRAG_COUNT}"
-send_tg "$HEADER"
-send_tg_chunked "📋 文件列表"$'\n'"━━━━━━━━━━━━━━━━━━"$'\n\n'"${FILE_DETAILS}"
-send_tg "🔗 任务链接: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+msg=""
+tg_add_title msg "🧹 ph-dl 清理 yt-dlp 残留文件"
+tg_add_path msg "目录" "$DIR_LABEL"
+tg_add_kv msg "清理数量" "${FRAG_COUNT} 个"
+tg_add_section msg "📋 文件列表"
+tg_add_block msg "$FILE_DETAILS"
+tg_add_footer msg
+send_tg_chunked "$msg"

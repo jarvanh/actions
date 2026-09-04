@@ -779,8 +779,10 @@ send_sync_warning() {
     done <<< "$new_dirs"
   fi
 
-  tg_add_section msg "⏸️ 已跳过此同步，继续执行其他任务"
-  tg_add_note msg "如确认无误，请手动触发 force_sync=true"
+  # 收尾区: 状态 + 备注（斜体），footer 自带空行
+  tg_add_note msg "⏸️ 已跳过此同步，继续执行其他任务
+如确认无误，请手动触发 force_sync=true"
+  tg_add_footer msg
 
   send_telegram_message "$msg"
 }
@@ -843,7 +845,7 @@ send_sync_skipped() {
       local -a _m_entries=() _m_summaries=()
       while IFS=$'\t' read -r m_kind m_count m_bytes m_summary; do
         [ -z "$m_kind" ] && continue
-        _m_entries+=("<b>$(escape_html "$m_kind")</b> × ${m_count} · <i>$(format_bytes "$m_bytes")</i>")
+        _m_entries+=("<b>$(escape_html "$m_kind")</b> × <b>${m_count}</b> · <i>$(format_bytes "$m_bytes")</i>")
         _m_summaries+=("$(escape_html "$m_summary")")
       done <<< "$method_summary"
       local _i _n=${#_m_entries[@]} _last
@@ -854,7 +856,6 @@ send_sync_skipped() {
         [ -n "${_m_summaries[$_i]}" ] && tg_append msg "$(tree_sub "$_last")${_m_summaries[$_i]}"$'\n'
       done
     fi
-    tg_append msg "🔗 完整还原脚本保存在 OneDrive marker <code>$(escape_html "$(get_marker_path "$task_name" "$dest_path")")</code> 的 fixed_files[].restore.script 字段"$'\n'
   fi
 
   # 本次未传量（--size-only 口径的差异，即预览里那个 +X GiB）
@@ -866,12 +867,20 @@ send_sync_skipped() {
     if [[ "$_p_bytes" =~ ^[0-9]+$ ]] && [[ "$_p_count" =~ ^[0-9]+$ ]] \
        && { [ "$_p_bytes" -gt 0 ] || [ "$_p_count" -gt 0 ]; }; then
       tg_add_section msg "📦 本次未传"
-      tg_append msg "$(format_bytes "$_p_bytes") · <b>${_p_count}</b> 文件 <i>（两端仍存在差异，因落在跳过窗口内未传，非故障）</i>"$'\n'
+      tg_append msg "<b>$(format_bytes "$_p_bytes")</b> / <b>${_p_count}</b> 文件 <i>（两端仍存在差异，因落在跳过窗口内未传，非故障）</i>"$'\n'
     fi
   fi
 
-  tg_add_section msg "⏸️ 本次跳过同步，继续执行其他任务"
-  tg_add_note msg "如需强制同步，请手动触发 force_sync=true"
+  # 收尾区: 游离的 🔗 marker 行并入备注；状态/备注统一 tg_add_note；footer 自带空行
+  if [ "${fixed_count:-0}" -gt 0 ]; then
+    tg_add_note msg "🔗 完整还原脚本保存在 OneDrive marker <code>$(escape_html "$(get_marker_path "$task_name" "$dest_path")")</code> 的 fixed_files[].restore.script 字段
+⏸️ 本次跳过同步，继续执行其他任务
+如需强制同步，请手动触发 force_sync=true"
+  else
+    tg_add_note msg "⏸️ 本次跳过同步，继续执行其他任务
+如需强制同步，请手动触发 force_sync=true"
+  fi
+  tg_add_footer msg
 
   send_telegram_message "$msg"
 }

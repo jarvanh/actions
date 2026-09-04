@@ -282,11 +282,15 @@ jobs:
             # 不能拼 %0A（会被二次编码成字面 "%0A" 发出去）。
             send_pw_tg() {
               # $1=场景描述  $2=密码明文  $3=附注规则（可空）
+              # 统一 HTML 版式；密码经实体转义后 <code> 等宽展示（本条只进 TG 私信，不落日志）
+              local pw_esc
+              pw_esc="$(printf '%s' "$2" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')"
               local msg
-              msg="$(printf '🔐 OpenList 凭据\n%s\n用户名: admin\n密码: %s\n入口: https://oe.%s.eu.org\n%s\n（本条不会出现在公开日志）' "$1" "$2" "${{ secrets.VD }}" "$3")"
+              msg="$(printf '🔐 <b>OpenList 凭据</b>\n━━━━━━━━━━━━━━━━━━\n场景：%s\n用户名：<code>admin</code>\n密码：<code>%s</code>\n入口：<code>https://oe.%s.eu.org</code>\n\n<i>%s\n（本条不会出现在公开日志）</i>' "$1" "$pw_esc" "${{ secrets.VD }}" "$3")"
               curl -s -m 15 -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
                 -d chat_id=${{ secrets.TG_CHAT_ID }} \
-                --data-urlencode "text=${msg}" >/dev/null \
+                --data-urlencode "text=${msg}" \
+                -d parse_mode=HTML >/dev/null \
                 && echo "已通过 TG 私信发送 OpenList 凭据（不落公开日志）" \
                 || echo "::warning::OpenList 凭据 TG 通知发送失败（不影响链路）"
             }
@@ -628,6 +632,8 @@ jobs:
           TG_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           EMBY_API_KEY: ${{ secrets.EMBY_API_TOKEN }}
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TG_RUN_STARTED_AT: ${{ github.run_started_at }}
         run: |
           source "$EMBY302_DIR/lib.sh"
           # 取值统一去空白转小写，仓库变量写成 "Direct" / "DIRECT" 也能识别
@@ -715,12 +721,18 @@ jobs:
           else
             OD_LINE="快捷方式: odlink 未就绪"
           fi
-          START_MSG="$(printf '📺 Emby 启动\n模式: %s\n直链源: %s\n%s\n探活: %s\n时间: %s' \
-            "$MODE" "$SRC_NAME" "$OD_LINE" "${MAP_OK:-?}" "$(date '+%Y-%m-%d %H:%M:%S %Z')")"
-          echo "TG(启动): ${START_MSG}"
-          curl -s -X POST "https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage" \
-            -d chat_id=$TG_CHAT_ID \
-            --data-urlencode "text=${START_MSG}" >/dev/null 2>&1 || true
+          # 统一 HTML 通知 + 统一收尾区（tg_notify.sh，checkout 后可用）
+          source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+          START_MSG=""
+          tg_add_title START_MSG "📺 Emby 服务启动"
+          tg_add_kv START_MSG "模式" "$MODE"
+          tg_add_kv START_MSG "直链源" "$SRC_NAME"
+          tg_add_kv START_MSG "快捷方式" "${OD_LINE#快捷方式: }"
+          tg_add_kv START_MSG "探活" "${MAP_OK:-?}"
+          tg_add_kv START_MSG "时间" "$(date '+%Y-%m-%d %H:%M:%S %Z')"
+          tg_add_footer START_MSG
+          echo "TG(启动): 已构建统一版式消息"
+          send_tg "$START_MSG" || true
 
           if [ "$MODE" = "302" ]; then
             nohup cloudflared tunnel run --url http://127.0.0.1:8095 e > /opt/logs/cloudflared.log 2>&1 &
@@ -731,6 +743,8 @@ jobs:
           # 运行中 watchdog：302 模式下每分钟探活，连续 3 次失败自动回退 direct
           cat > /opt/watchdog.sh <<'WD_EOF'
           #!/bin/bash
+          # 统一通知发送层（回退通知用；TG_RUN_* 经 step env 透传）
+          source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
           FAIL=0
           while true; do
             sleep 60
@@ -764,14 +778,19 @@ jobs:
               sleep 3
               nohup cloudflared tunnel run --url http://127.0.0.1:8096 e > /opt/logs/cloudflared-direct.log 2>&1 &
               echo direct > /tmp/PLAYBACK_MODE
-              curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-                -d chat_id="${TG_CHAT_ID}" \
-                -d text="📺 Emby 302 链路连续 3 次探活失败，已自动回退 direct 模式" >/dev/null 2>&1
+              # 统一 HTML 通知 + 统一收尾区（TG_RUN_* 由 step env 透传）
+              WD_MSG=""
+              tg_add_title WD_MSG "⚠️ Emby 302 链路回退"
+              tg_add_kv WD_MSG "事件" "连续 3 次探活失败"
+              tg_add_kv WD_MSG "动作" "已自动回退 direct 模式"
+              tg_add_footer WD_MSG
+              send_tg "$WD_MSG" >/dev/null 2>&1 || true
               exit 0
             fi
           done
           WD_EOF
           MEDIA_DIR="$MEDIA_DIR" TELEGRAM_BOT_TOKEN="$TG_BOT_TOKEN" TG_CHAT_ID="$TG_CHAT_ID" \
+            GITHUB_WORKSPACE="$GITHUB_WORKSPACE" TG_RUN_URL="$TG_RUN_URL" TG_RUN_STARTED_AT="$TG_RUN_STARTED_AT" \
             nohup bash /opt/watchdog.sh > /opt/logs/watchdog.log 2>&1 &
       - name: start playlog
         # 从 "run cloudflared" 拆出：该 step 的 run 块必须远离 GitHub 的 21000 字符
@@ -781,6 +800,8 @@ jobs:
           TG_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           EMBY_API_KEY: ${{ secrets.EMBY_API_TOKEN }}
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TG_RUN_STARTED_AT: ${{ github.run_started_at }}
         run: |
           # 播放事件监听：
           #   302 模式主源    = ge2o 访问日志（3xx → [302直链]，2xx → [中转]）
@@ -916,6 +937,8 @@ jobs:
 
           # HTML 转义：片名里的 & < > 会破坏 parse_mode=HTML 的解析（解析失败 = 整条通知丢失）
           esc_html() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+          # 统一收尾区（TG_SEP/tg_add_footer 来自共享发送层；仅取助手，发送仍走本块的 curl）
+          source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 
           # 以下都是格式化助手：任何一项取不到就返回空，由 join_parts 跳过，不产生 "null · · 0" 这类噪声
           two_digit() { case "$1" in ''|*[!0-9]*) return 1;; esac; printf '%02d' "$1"; }
@@ -1009,12 +1032,16 @@ jobs:
 
             # 日志侧只记片名（公开仓库，绝不落直链）；TG 私密消息里才附带直链
             echo "🎬 播放 [$kind] ${n:-未知} (item $iid)"
-            text="🎬 ${title}"
+            text="🎬 ${title}"$'\n'"${TG_SEP}"
             [ -n "$meta" ] && text="${text}"$'\n'"${meta}"
             text="${text}"$'\n'"${l3}"
             [ -n "$client" ] && text="${text}"$'\n'"📱 ${client}"
             # 长链接折叠成 <a> 超链接，避免整条通知被几百字符的 URL 淹没
             [ -n "$link" ] && text="${text}"$'\n'"<a href=\"$(esc_html "$link")\">▶ 打开直链</a>"
+            # 统一收尾区（自带与正文间的空行；TG_RUN_* 缺席时自动降级跳过）
+            pl_footer=""
+            tg_add_footer pl_footer
+            text="${text}${pl_footer}"
             code=$(curl -s -m 10 -o /tmp/pl-tg.json -w '%{http_code}' \
                      -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
                      --data-urlencode "chat_id=$TG_CHAT_ID" \
@@ -1029,6 +1056,7 @@ jobs:
               plain="${plain}"$'\n'"${l3}"
               [ -n "$client" ] && plain="${plain}"$'\n'"📱 ${client}"
               [ -n "$link" ] && plain="${plain}"$'\n'"直链: $link"
+              [ -n "$pl_footer" ] && plain="${plain}$(_tg_strip_html "$pl_footer")"
               code=$(curl -s -m 10 -o /tmp/pl-tg.json -w '%{http_code}' \
                        -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
                        --data-urlencode "chat_id=$TG_CHAT_ID" \
@@ -1471,6 +1499,9 @@ jobs:
 
       - name: send telegram notification
         if: always()
+        env:
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TG_RUN_STARTED_AT: ${{ github.run_started_at }}
         run: |
           source "$EMBY302_DIR/lib.sh"
           STATUS="${{ job.status }}"
@@ -1524,12 +1555,28 @@ jobs:
                 WHERE IsActive=1 AND DateLastActivityInt >= $CUT AND AppName != '' AND AppName != 'emby302 workflow')" 2>/dev/null) || CLIENTS="未知"
             [ -n "$CLIENTS" ] || CLIENTS="无记录"
           fi
-          MESSAGE="$(printf '📺 Emby\n状态: %s %s\n模式: %s\n运行: %s\n302 链路: %s\n全库预热: %s\n客户端: %s\n时间: %s' \
-            "$STATUS_EMOJI" "$STATUS" "$MODE" "$DUR" "$OD_SUMMARY" "$WW_SUMMARY" "$CLIENTS" "$(date '+%Y-%m-%d %H:%M:%S %Z')")"
-          echo "TG(收尾): ${MESSAGE}"
+          # 统一 HTML 版式 + 统一收尾区（发送层；本 step 无 checkout 依赖，脚本目录
+          # 已由 EMBY302_DIR 旁的 checkout 提供）
+          source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+          case "$MODE" in
+            302) MODE_DESC="302 直链";;
+            direct) MODE_DESC="direct 中转";;
+            *) MODE_DESC="$MODE";;
+          esac
+          msg=""
+          tg_add_title msg "${STATUS_EMOJI} Emby 服务停止"
+          tg_add_kv msg "状态" "${STATUS}"
+          tg_add_kv msg "模式" "${MODE_DESC}"
+          tg_add_kv msg "302 链路" "$OD_SUMMARY"
+          tg_add_kv msg "全库预热" "$WW_SUMMARY"
+          tg_add_kv msg "客户端" "$CLIENTS"
+          tg_add_kv msg "时间" "$(date '+%Y-%m-%d %H:%M:%S %Z')"
+          # 运行时长：本 step 已算好 DUR；TG_RUN_URL 缺席时 footer 仅含时长
+          echo "TG(收尾): 已构建统一版式消息"
           curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             -d chat_id=${{ secrets.TG_CHAT_ID }} \
-            --data-urlencode "text=${MESSAGE}"
+            --data-urlencode "text=${msg}" \
+            -d parse_mode=HTML
           # 播放事件日志归档：便于排查"播了但没通知"
           echo "--- playlog.log (tail 80) ---"
           tail -n 80 /opt/logs/playlog.log 2>/dev/null || echo "(无 playlog.log)"

@@ -57,6 +57,7 @@ tg_add_kv()      { local _n="$1"; printf -v "$_n" '%s%s' "${!_n}" "$2: $3"$'\n';
 tg_add_path()    { local _n="$1"; printf -v "$_n" '%s%s' "${!_n}" "$2: $3"$'\n'; }
 tg_append()      { local _n="$1"; printf -v "$_n" '%s%s' "${!_n}" "$2"; }
 tg_add_note()    { local _n="$1"; printf -v "$_n" '%s%s' "${!_n}" "$2"; }
+tg_add_footer()  { :; }  # 收尾区接线（TG_RUN_URL/TG_RUN_STARTED_AT）不在本测试范围
 send_telegram_message() { SEND_CAPTURE="$1"; }
 
 # ISO8601 时间戳（N 小时前）: GNU date 优先（CI ubuntu），BSD/macOS date 回退
@@ -157,7 +158,7 @@ SEND_CAPTURE=""
 send_sync_skipped "backup" "onedrive:skip" "openlist:skipdst"
 echo "$SEND_CAPTURE" | grep -q '本次未传' \
   && ok "S6a 跳过通知含「本次未传」段" || bad "S6a: $SEND_CAPTURE"
-echo "$SEND_CAPTURE" | grep -q '500 B · <b>2</b> 文件' \
+echo "$SEND_CAPTURE" | grep -q '<b>500 B</b> / <b>2</b> 文件' \
   && ok "S6b 未传量取自预览缓存（500 B / 2 文件）" || bad "S6b: $SEND_CAPTURE"
 [ "$(cat "$LSJSON_CALLS")" = "$_calls_before" ] \
   && ok "S6c 命中缓存未新增 lsjson 调用" || bad "S6c: [$(cat "$LSJSON_CALLS") vs $_calls_before]"
@@ -167,7 +168,7 @@ SEND_CAPTURE=""
 send_sync_skipped "backup_sub" "onedrive:skip/sub" "openlist:skipdst/sub"
 echo "$SEND_CAPTURE" | grep -q '本次未传' \
   && ok "S7a 子任务跳过通知含「本次未传」" || bad "S7a: $SEND_CAPTURE"
-echo "$SEND_CAPTURE" | grep -q '50 B · <b>1</b> 文件' \
+echo "$SEND_CAPTURE" | grep -q '<b>50 B</b> / <b>1</b> 文件' \
   && ok "S7b 现场估算值正确（50 B / 1 文件）" || bad "S7b: $SEND_CAPTURE"
 
 # ===== S8: 目标端列举失败 → 不展示（避免按空目标端虚报全量）=====

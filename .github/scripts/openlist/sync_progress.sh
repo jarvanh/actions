@@ -354,7 +354,7 @@ _progress_render_task_list() {
       [ -n "$_tsize" ] && _grp_size[$_src]="$_tsize"
     fi
     local _entry
-    _entry="$(escape_html "$_dst")"
+    _entry="<code>$(escape_html "$_dst")</code>"
     [ -n "$_tdetail" ] && _entry+=" · <i>$(escape_html "$_tdetail")</i>"
     _grp[$_src]+="${_entry}"$'\n'
   done <<< "$lines"
@@ -378,19 +378,7 @@ _progress_render() {
   local finalized=0
   [ -f "$PROGRESS_FINALIZED_FILE" ] && finalized=1
 
-  local start_time elapsed time_str
-  start_time=$(_progress_get_start_time)
-  elapsed=$(( $(date +%s) - start_time ))
-  local hrs=$((elapsed / 3600))
-  local mins=$(((elapsed % 3600) / 60))
-  local secs=$((elapsed % 60))
-  if [ "$hrs" -gt 0 ]; then
-    time_str="${hrs}h ${mins}m"
-  elif [ "$mins" -gt 0 ]; then
-    time_str="${mins}m ${secs}s"
-  else
-    time_str="${secs}s"
-  fi
+  # 已用时长不再在此计算——收尾区统一走 tg_add_footer（读 TG_RUN_STARTED_AT）
 
   # 统计各状态任务数；条目按 "名\t大小\t详情" 暂存，
   # 渲染时经 _progress_render_task_list 按源端分组（大小为源端大小，
@@ -463,7 +451,7 @@ _progress_render() {
     title="🔄 同步进度"
   fi
   tg_add_title msg "$title"
-  tg_append msg "📊 总任务：<b>${total}</b> | 待处理：${pending} | 进行中：${running} | 完成：${completed} | 跳过：${skipped} | 失败：${failed}"$'\n'
+  tg_append msg "📊 总 <b>${total}</b> · 待处理 <b>${pending}</b> · 进行中 <b>${running}</b> · 完成 <b>${completed}</b> · 跳过 <b>${skipped}</b> · 失败 <b>${failed}</b>"$'\n'
 
   # 进行中任务块: 任务条目（分组渲染）+ 多层级阶段行/统计信息/细粒度状态
   #   各拆分深度槽位逐层下沉合并：深度 0 的块挂在任务条目下，
@@ -580,7 +568,9 @@ _progress_render() {
     tg_add_block msg "$(_progress_render_task_list "$failed_lines")"
   fi
 
-  tg_append msg $'\n'"⏱️ 已用：<b>${time_str}</b>"
+  # 统一收尾区（tg_add_footer 自带与正文间的空行；无 TG_RUN_* 时自动降级跳过，
+  # 进度面板旧「⏱️ 已用：」写法已废除——时长只从 footer 出）
+  tg_add_footer msg
   echo "$msg"
 }
 

@@ -554,22 +554,30 @@ SKIPPED_DETAILS=$(python3 -c "import json,sys; d=json.load(open('$STATS_FILE'));
 # 发送通知
 source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 
-SUMMARY_LINE="视频文件 ${TOTAL_VIDEOS} 条，已上传 ${UPLOADED_TOTAL} 条，待上传 ${REMAINING} 条，失败上传 ${FAILED} 条"
-HEADER="📺 ${CAPTION_PREFIX}"$'\n'"${SUMMARY_LINE}"$'\n'"📊 本次处理: ${PENDING_COUNT}"$'\n'"✅ 成功: ${SENT}"$'\n'"❌ 失败: ${FAILED}"
+# 统一 HTML 排版 + 统一收尾区；明细树形列出（超长自动分片）
+msg=""
+tg_add_title msg "📺 ${CAPTION_PREFIX}"
+tg_add_kv msg "视频文件" "${TOTAL_VIDEOS} 条"
+tg_add_kv msg "库存状态" "已上传 ${UPLOADED_TOTAL} · 待上传 ${REMAINING} · 失败 ${FAILED}"
+tg_add_kv msg "本次处理" "${PENDING_COUNT} 条"
+tg_add_kv msg "本次成功" "${SENT} 条"
+tg_add_kv msg "本次失败" "${FAILED} 条"
 if [ "$SKIPPED_COUNT" -gt 0 ]; then
-  HEADER+=$'\n'"⚠️ 跳过/过滤: ${SKIPPED_COUNT}"
+  tg_add_kv msg "跳过/过滤" "${SKIPPED_COUNT} 条"
 fi
-send_tg "$HEADER"
-
 if [ -n "$SENT_LIST" ]; then
-  send_tg_chunked "✅ 已上传:"$'\n\n'"${SENT_LIST}"
+  tg_add_section msg "✅ 已上传"
+  tg_add_block msg "$(tree_lines "$SENT_LIST")"
 fi
 if [ -n "$FAILED_LIST" ]; then
-  send_tg_chunked "❌ 失败:"$'\n\n'"${FAILED_LIST}"
+  tg_add_section msg "❌ 失败"
+  tg_add_block msg "$(tree_lines "$FAILED_LIST")"
 fi
 if [ -n "$SKIPPED_DETAILS" ]; then
-  send_tg_chunked "⚠️ 跳过/过滤文件详情:"$'\n\n'"${SKIPPED_DETAILS}"
+  tg_add_section msg "⚠️ 跳过/过滤文件"
+  tg_add_block msg "$SKIPPED_DETAILS"
 fi
-send_tg "🔗 任务链接: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+tg_add_footer msg
+send_tg_chunked "$msg"
 
 rm -rf "$TMP_DIR"

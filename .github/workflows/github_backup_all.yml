@@ -111,26 +111,36 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           STATUS: ${{ job.status }}
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TG_RUN_STARTED_AT: ${{ github.run_started_at }}
         run: |
           if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
             echo "Telegram 凭证未配置，跳过发送通知。"
             exit 0
           fi
-          
+          source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+
+          msg=""
           if [ "$STATUS" == "success" ]; then
             ARCHIVE_NAME="${GITHUB_REPOS_ARCHIVE_NAME:-github_repos_latest.tar.gz}"
             FILE_SIZE_BYTES="${GITHUB_REPOS_ARCHIVE_BYTES:-0}"
             FILE_SIZE_HUMAN=$(numfmt --to=iec-i --suffix=B "$FILE_SIZE_BYTES" 2>/dev/null || echo "${FILE_SIZE_BYTES}B")
             if [ "$FILE_SIZE_BYTES" -le 0 ]; then
-              MSG="⚠️ <b>GitHub 全仓库备份状态异常</b>%0A📅 日期: $(date +'%Y-%m-%d')%0A📦 文件: ${ARCHIVE_NAME}%0A📏 文件大小: ${FILE_SIZE_HUMAN}%0A⚠️ 备份任务成功但未记录到有效压缩包大小，请检查 GitHub Actions 日志。"
+              tg_add_title msg "⚠️ GitHub 全仓库备份状态异常"
+              tg_add_kv msg "日期" "$(date +'%Y-%m-%d')"
+              tg_add_path msg "文件" "$ARCHIVE_NAME"
+              tg_add_kv msg "文件大小" "$FILE_SIZE_HUMAN"
+              tg_add_note msg "备份任务成功但未记录到有效压缩包大小，请检查 GitHub Actions 日志。"
             else
-            MSG="✅ <b>GitHub 全仓库备份成功 (已覆盖旧包)</b>%0A📅 日期: $(date +'%Y-%m-%d')%0A📦 文件: ${ARCHIVE_NAME}%0A📏 文件大小: ${FILE_SIZE_HUMAN}"
+              tg_add_title msg "✅ GitHub 全仓库备份成功"
+              tg_add_kv msg "日期" "$(date +'%Y-%m-%d')"
+              tg_add_path msg "文件" "$ARCHIVE_NAME"
+              tg_add_kv msg "文件大小" "$FILE_SIZE_HUMAN"
+              tg_add_note msg "已覆盖旧包"
             fi
           else
-            MSG="❌ <b>GitHub 全仓库备份失败</b>%0A⚠️ 请前往 GitHub Actions 检查日志详情。"
+            tg_add_title msg "❌ GitHub 全仓库备份失败"
+            tg_add_note msg "请前往 GitHub Actions 检查日志详情。"
           fi
-          
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            -d chat_id="${TELEGRAM_CHAT_ID}" \
-            -d text="$(echo -e $MSG)" \
-            -d parse_mode="HTML"
+          tg_add_footer msg
+          send_tg "$msg"

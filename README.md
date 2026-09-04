@@ -62,21 +62,21 @@ proxy-speedtest/            测速结果数据
 | 域 | 文件 | 行数 | 职责 |
 |---|---|---:|---|
 | **rclone** | `rclone_flags.sh` | 35 | rclone 参数单点定义（`RCLONE_*_FLAGS`） |
-| | `rclone_query.sh` | 126 | 查询与过滤解析（`size --json`、`check`、exclude 提取） |
+| | `rclone_query.sh` | 131 | 查询与过滤解析（`size --json`、`check`、exclude 提取） |
 | **openlist** | `openlist_api.sh` | 89 | 管理面登录换 token、服务就绪等待 |
 | | `openlist_driver.sh` | 581 | 驱动刷新、健康预检、缓存刷新、truth-check |
 | **sync** | `sync_engine.sh` | 298 | 核心同步引擎（编排 + 423/8005 重试） |
-| | `sync_marker.sh` | 877 | 同步标记持久化（跳过、黑名单、修复清单） |
-| | `sync_notify.sh` | 328 | 同步结果通知构建（Telegram 排版） |
-| | `sync_progress.sh` | 544 | 全局进度通知系统（含收尾四态标题、多层级阶段区） |
-| **file** | `file_split.sh` | 666 | 大文件分割（ffmpeg 关键帧 / 7z 分卷） |
+| | `sync_marker.sh` | 886 | 同步标记持久化（跳过、黑名单、修复清单） |
+| | `sync_notify.sh` | 334 | 同步结果通知构建（统一 Telegram HTML 排版） |
+| | `sync_progress.sh` | 792 | 全局进度通知系统（含收尾四态标题、多层级阶段区） |
+| **file** | `file_split.sh` | 669 | 大文件分割（ffmpeg 关键帧 / 7z 分卷） |
 | | `file_fix.sh` | 1243 | 单文件修复的 4 种方法 + 目录可写性预检 + 短哈希目录兜底 |
 | | `file_fix_pipeline.sh` | 875 | 修复管线编排（方法轮换 + 增量持久化） |
-| | `file_restore.sh` | 632 | 修复文件还原（目标端 → 原路径 / 源端） |
-| **task** | `task_preview.sh` | 468 | 任务预览（大小估算、跳过预判、未传量估算） |
-| | `task_engine.sh` | 1271 | 任务注册表与编排（分批、轮转、阶段行生产） |
+| | `file_restore.sh` | 642 | 修复文件还原（目标端 → 原路径 / 源端） |
+| **task** | `task_preview.sh` | 470 | 任务预览（大小估算、跳过预判、未传量估算） |
+| | `task_engine.sh` | 1378 | 任务注册表与编排（分批、轮转、阶段行生产） |
 | **基础** | `utils.sh` | 176 | 通用工具（转义、格式化、树形渲染） |
-| | `telegram.sh` | 146 | Telegram Bot API 封装 |
+| | `telegram.sh` | 193 | Telegram 排版助手 + Bot API 封装（含统一收尾区 `tg_add_footer`） |
 | | `load_all.sh` | 49 | 统一加载入口（L1→L6 分层） |
 
 辅助程序：`get_storage_addition.py`（从 db 读存储配置）、`mask_rclone_config.py`（脱敏）、
@@ -289,7 +289,7 @@ token 登录、marker、收尾标题四态、进度阶段区排版（子目录�
 | 调阈值/超时 | workflow 的 `env:` 块（不要写死在脚本里） |
 | 加一种文件修复方法 | `file_fix.sh`（实现 + `_try_fix_methods_round` 轮换）+ 同步更新 `文件修复方法N` 文案 |
 | 改目录级降级策略 | `file_fix.sh` 的 `_fix_probe_dir_writable`（预检/重启复核）+ `_fix_switch_to_hash_dir`（切换）+ `restore_info.jq` 的目录类分支 |
-| 改通知排版 | `sync_notify.sh` / `telegram.sh` |
+| 改通知排版 | 全库统一规范见 `openlist/telegram.sh` 头部注释（唯一样式基准）；openlist 套件走 `sync_notify.sh` / `telegram.sh`，其余通知统一走 `telegram/tg_notify.sh`（HTML 发送层 + tg_* 助手 + `tg_add_footer` 统一收尾区，读 `TG_RUN_URL`/`TG_RUN_STARTED_AT`） |
 | 改跳过提示（预览"预计跳过"/ 跳过通知"本次未传"） | `task_preview.sh` 的 `add_preview_pair`（pskip 列）· `flush_task_preview`（合计附注）· `_lookup_skipped_pending`（估算入口）+ `sync_marker.sh` 的 `send_sync_skipped` |
 | 改进度消息的阶段区（子目录树 / 文件批次的层级、缩进、统计字段） | `sync_progress.sh` 的 `_progress_render` + `task_engine.sh` 的 `_render_subdir_phase_tree` / `_render_batch_stats_line` |
 | 改收尾标题四态 | `sync_progress.sh` 的 `_progress_render` 终态分支（中断 / 有文件无法同步 / 带修复完成 / 完全完成，按严重度判定） |

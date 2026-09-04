@@ -37,9 +37,10 @@ _notify_add_header() {
   tg_append "$1" "文件数：${count_info}"$'\n'
 }
 
-# AUTO_SPLIT_INFO 段（仅非空时插入；内容为 task_engine.sh 构建的 HTML 分节片段）
+# AUTO_SPLIT_INFO 段（仅非空时插入；内容为 task_engine.sh 经 tg_add_section/
+# tg_add_block 构建的 HTML 分节片段，段前空行与结尾换行由助手保证，直接追加）
 _notify_add_autosplit() {
-  [ -n "$AUTO_SPLIT_INFO" ] && tg_append "$1" $'\n'"${AUTO_SPLIT_INFO}"$'\n'
+  [ -n "$AUTO_SPLIT_INFO" ] && tg_append "$1" "${AUTO_SPLIT_INFO}"
   return 0
 }
 
@@ -56,12 +57,13 @@ _notify_add_excludes() {
   return 0
 }
 
-# 差异文件列表段（仅非空时插入）
+# 差异文件列表段（仅非空时插入；内容为 _build_diff_files_list 预构建的 HTML 树，
+# 已逐条转义，此处直接追加）
 # 用法: _notify_add_diff_list <var>
 _notify_add_diff_list() {
   [ -z "$diff_files_list" ] && return 0
   tg_add_section "$1" "📋 差异文件列表"
-  tg_add_block "$1" "$(escape_html "$diff_files_list")"
+  tg_add_block "$1" "$diff_files_list"
   return 0
 }
 
@@ -114,7 +116,7 @@ _send_sync_result_notification() {
   local dest_count_raw="$dest_count"
   [ "$dest_count" = "0" ] && dest_count="未知"
 
-  # 始终显示文件数信息
+  # 始终显示文件数信息（数值统一加粗；count_info 为已构建的 HTML 片段，不走 tg_add_kv）
   local diff_files_list=""
   if [[ "$source_count_raw" =~ ^[0-9]+$ ]] && [[ "$dest_count_raw" =~ ^[0-9]+$ ]]; then
     local count_diff=$((source_count_raw - dest_count_raw))
@@ -122,10 +124,10 @@ _send_sync_result_notification() {
       count_info="<b>差异 ${count_diff}</b>（源端 ${source_count} / 目标 ${dest_count}）"
       diff_files_list=$(_build_diff_files_list "$source_path" "$dest_path" "${extra_args[@]}")
     else
-      count_info="${source_count}（一致）"
+      count_info="<b>${source_count}</b>（一致）"
     fi
   else
-    count_info="源端 ${source_count} / 目标 ${dest_count}"
+    count_info="源端 <b>${source_count}</b> / 目标 <b>${dest_count}</b>"
   fi
 
   # 提取 --exclude 规则，方便在通知中说明
@@ -233,11 +235,12 @@ _send_sync_result_notification() {
     _notify_add_header partial_msg "⚠️ ${task_name} 部分文件同步失败" "$fail_status_msg"
     _notify_add_excludes partial_msg
     _notify_add_autosplit partial_msg
-    tg_add_section partial_msg "✅ 已通过其他方式同步（${fix_total} 个文件）"
+    tg_add_section partial_msg "✅ 已通过其他方式同步 · ${fix_total}"
     tg_append partial_msg "${fix_summary}"
-    tg_add_section partial_msg "❌ 无法同步文件（${fail_total} 个）"
+    tg_add_section partial_msg "❌ 无法同步文件 · ${fail_total}"
     tg_append partial_msg "${fail_summary}"
     _notify_add_diff_list partial_msg
+    tg_add_footer partial_msg
 
     send_telegram_message "$partial_msg"
 
@@ -247,9 +250,10 @@ _send_sync_result_notification() {
     _notify_add_header partial_msg "⚠️ ${task_name} 部分文件已通过其他方式同步" "${fix_total} 个缺失文件已全部通过替代方式同步"
     _notify_add_excludes partial_msg
     _notify_add_autosplit partial_msg
-    tg_add_section partial_msg "✅ 已通过其他方式同步（${fix_total} 个文件）"
+    tg_add_section partial_msg "✅ 已通过其他方式同步 · ${fix_total}"
     tg_append partial_msg "${fix_summary}"
     _notify_add_diff_list partial_msg
+    tg_add_footer partial_msg
 
     send_telegram_message "$partial_msg"
 
@@ -292,6 +296,7 @@ _send_sync_result_notification() {
       tg_add_block err_msg "• 无明显错误关键字"
     fi
     _notify_add_diff_list err_msg
+    tg_add_footer err_msg
     send_telegram_message "$err_msg"
     # 发送完整日志文件
     local err_log_size
@@ -301,7 +306,7 @@ _send_sync_result_notification() {
         -F chat_id="${TELEGRAM_CHAT_ID}" \
         -F document=@"$log_filename" \
         -F parse_mode="HTML" \
-        -F caption="📁 <b>$(escape_html "$task_name")</b> 错误日志" || true
+        -F caption="📁 <b>$(escape_html "$task_name")</b> · 错误日志" || true
     fi
   else
     # 同步返回成功，检查是否有文件缺失（部分失败）
@@ -322,6 +327,7 @@ _send_sync_result_notification() {
     _notify_add_excludes ok_message
     _notify_add_autosplit ok_message
     _notify_add_diff_list ok_message
+    tg_add_footer ok_message
 
     send_telegram_message "$ok_message"
   fi

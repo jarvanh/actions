@@ -51,22 +51,27 @@ _build_diff_files_list() {
   local -a extra_args=("$@")
   local check_combined
   check_combined=$(timeout "${OPENLIST_DOWNLOAD_TIMEOUT:-300}" rclone check "$source_path" "$dest_path" --size-only "${extra_args[@]}" --combined - 2>/dev/null || true)
-  local result="" diff_count=0
+  # 输出已转义的 HTML 树形条目（与修复/失败列表同构）: <i>语义标签</i> · <code>路径</code>
+  local result="" diff_count=0 truncated=0
   while IFS= read -r line; do
     local marker="${line:0:1}"
     local fpath="${line:2}"
     case "$marker" in
-      +) result+="• [源端有/目标缺失] ${fpath}"$'\n' ;;
-      -) result+="• [目标多余/仅目标存在] ${fpath}"$'\n' ;;
-      '*') result+="• [大小/内容不一致] ${fpath}"$'\n' ;;
+      +) result+="<i>新增</i> · <code>$(escape_html "$fpath")</code>"$'\n' ;;
+      -) result+="<i>仅目标存在</i> · <code>$(escape_html "$fpath")</code>"$'\n' ;;
+      '*') result+="<i>不一致</i> · <code>$(escape_html "$fpath")</code>"$'\n' ;;
     esac
     diff_count=$((diff_count + 1))
     if [ "$diff_count" -ge 20 ]; then
-      result+="... (更多差异文件省略)"$'\n'
+      truncated=1
       break
     fi
   done <<< "$(echo "$check_combined" | grep -E '^[-+*] ')"
-  echo "$result"
+  [ -z "$result" ] && return 0
+  local _tree
+  _tree="$(tree_lines "$result")"
+  [ "$truncated" -eq 1 ] && _tree+=$'\n'"• <i>…更多差异文件已省略</i>"
+  echo "$_tree"
 }
 
 # 从 extra_args 中提取 --exclude 规则（每行一条 glob 模式，无规则时输出空）

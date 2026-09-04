@@ -15,6 +15,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import gzip
+import html
 from datetime import datetime
 
 import yaml
@@ -86,9 +87,13 @@ def handle_termination_signal(signum, frame):
         raise SystemExit(128 + int(signum))
     TERMINATION_NOTICE_SENT = True
     sig_name = signal.Signals(signum).name if signum else f'SIGNAL-{signum}'
-    message = f'代理测速完成\n\n⚠️ 脚本被中断: 收到 {sig_name}，本轮测速未正常完成。'
+    _sep = '━' * 18
+    message = f'📈 <b>代理测速异常终止</b>\n{_sep}\n⚠️ 脚本被中断: 收到 {sig_name}，本轮测速未正常完成。'
     if CURRENT_RUN_STARTED_AT:
-        message += f'\n🕒 测速开始时间: {CURRENT_RUN_STARTED_AT}'
+        message += f'\n🕒 测速开始时间: {html.escape(str(CURRENT_RUN_STARTED_AT))}'
+    _run_url = os.environ.get('TG_RUN_URL', '')
+    if _run_url:
+        message += f'\n\n⏱ 🔗 <a href="{html.escape(_run_url)}">运行日志</a>'
     write_termination_artifacts(message)
     try:
         env = merged_env()
@@ -1438,15 +1443,46 @@ def update_gist(env, yaml_text=''):
 
 
 def send_telegram(env, text):
+    """发送 Telegram 消息（统一 HTML parse_mode；解析失败自动去标签退化纯文本重发，
+    保留 429 语义由 HTTP 层报错）。文本应使用全库统一 HTML 版式（emoji 标题 + ━━━
+    分隔线 + <b>/<code>/<i> + 统一收尾行）。"""
     bot = env.get('TELEGRAM_BOT_TOKEN') or env.get('TG_BOT_TOKEN')
     chat = env.get('TELEGRAM_CHAT_ID')
     if not bot or not chat:
         return {'sent': False, 'reason': 'missing TELEGRAM_BOT_TOKEN/TG_BOT_TOKEN or TELEGRAM_CHAT_ID'}
-    payload = urllib.parse.urlencode({'chat_id': chat, 'text': text}).encode()
-    req = urllib.request.Request(f'https://api.telegram.org/bot{bot}/sendMessage', data=payload, method='POST')
-    with urllib.request.urlopen(req, timeout=60) as r:
-        res = json.load(r)
-    return {'sent': bool(res.get('ok')), 'response': res}
+
+    def _post(data):
+        payload = urllib.parse.urlencode(data).encode()
+        req = urllib.request.Request(f'https://api.telegram.org/bot{bot}/sendMessage',
+                                     data=payload, method='POST')
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return json.load(r)
+
+    html_text = text
+    for parse_mode in ('HTML', None):
+        data = {'chat_id': chat, 'disable_web_page_preview': 'true'}
+        if parse_mode:
+            data['parse_mode'] = parse_mode
+        else:
+            # 去标签 + 解码基础实体（退化纯文本版）
+            html_text = re.sub(r'<[^>]+>', '', html_text)
+            html_text = (html_text.replace('&amp;', '&').replace('&lt;', '<')
+                         .replace('&gt;', '>').replace('&quot;', '"').replace('&#39;', "'"))
+            data['text'] = html_text
+        data['text'] = data.get('text', html_text)
+        try:
+            res = _post(data)
+        except urllib.error.HTTPError as e:
+            body = e.read().decode('utf-8', 'replace')
+            if parse_mode == 'HTML' and "can't parse entities" in body:
+                continue  # 退化纯文本重发
+            return {'sent': False, 'reason': body[:200]}
+        if res.get('ok'):
+            return {'sent': True, 'response': res}
+        if parse_mode == 'HTML' and "can't parse entities" in json.dumps(res):
+            continue
+        return {'sent': False, 'response': res}
+    return {'sent': False}
 
 
 def resolve_push_target_info(remote_url: str):
@@ -1668,36 +1704,48 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
     """
     started_text = str(started_at)[:19].replace('T', ' ')
     ended_text = str(ended_at)[:19].replace('T', ' ')
+    # 统一 HTML 版式（对齐 speedtest.build_telegram_lines / 全库通知模板）：
+    # emoji 标题 + ━━━ 分隔线 + 键值概览（数值 <b>）+ 树形 TOP5（节点 <code>）+ 统一收尾区
+    sep = '━' * 18
+    esc = lambda s: html.escape(str(s))
     summary_lines = [
-        '代理测速完成',
-        '',
-        f'🕒 {started_text} ~ {ended_text}（耗时 {duration_text}）',
-        f'📊 节点: 共 {len(speed_results)} 个，可用 {len(ok_results)} 个',
+        '📈 <b>代理测速完成</b>',
+        sep,
+        f'🕒 {esc(started_text)} ~ {esc(ended_text)}（耗时 {esc(duration_text)}）',
+        f'📊 节点：共 <b>{len(speed_results)}</b> 个 · 可用 <b>{len(ok_results)}</b> 个',
         '',
     ]
     if aborted_due_to_runtime:
-        summary_lines.append(f'⚠️ 本轮已中止: {runtime_abort_reason}')
+        summary_lines.append(f'⚠️ 本轮已中止: {esc(runtime_abort_reason)}')
         summary_lines.append('')
     if ok_results_by_download:
         best = ok_results_by_download[0]
-        summary_lines.append(f"🏆 最快节点: {best.get('name', '')}")
+        summary_lines.append(f"🏆 最快节点：<b>{esc(best.get('name', ''))}</b>")
         summary_lines.append('')
-        summary_lines.append('🥇 TOP 5:')
-        for idx, item in enumerate(ok_results_by_download[:5], 1):
+        summary_lines.append('🥇 <b>TOP 5</b>')
+        top = ok_results_by_download[:5]
+        for idx, item in enumerate(top, 1):
             if speedtest_mode == 'push-only':
                 speed_text = f"{get_item_megabits(item, 'push-only')}兆"
             else:
                 speed_text = f"{get_item_megabits(item, speedtest_mode)}兆 / 上传 {get_item_megabits(item, 'push-only')}兆"
-            summary_lines.append(f"{idx}. {item['name']}")
-            summary_lines.append(f"   └─ {speed_text}")
+            connector = '└─' if idx == len(top) else '├─'
+            summary_lines.append(f"{connector} {idx}. <code>{esc(item['name'])}</code> · <i>{esc(speed_text)}</i>")
         summary_lines.append('')
     elif alive_probe_count > 0:
         summary_lines.append('⚠️ 没有节点测速成功')
-        summary_lines.append('   └─ 有节点通过 provider 健康检查，但正式 Gitee 推送/拉取测速全部失败')
+        summary_lines.append('  └─ 有节点通过 provider 健康检查，但正式 Gitee 推送/拉取测速全部失败')
         summary_lines.append('')
     else:
         summary_lines.append('⚠️ 没有节点通过 provider 健康检查')
         summary_lines.append('')
+    # 统一收尾区（收尾区与正文间固定一个空行；TG_RUN_URL 缺席时仅显示时长）
+    summary_lines.append('')
+    tg_run_url = os.environ.get('TG_RUN_URL', '')
+    if tg_run_url:
+        summary_lines.append(f'⏱ 已运行 <b>{esc(duration_text)}</b> · 🔗 <a href="{esc(tg_run_url)}">运行日志</a>')
+    elif duration_text:
+        summary_lines.append(f'⏱ 已运行 <b>{esc(duration_text)}</b>')
     return summary_lines
 
 
@@ -1707,7 +1755,9 @@ def update_summary_artifacts(summary):
 
 
 def finalize_gist_and_notify(env, summary, summary_lines, subscription_text, qualified_count, min_megabit):
-    RESULT_TXT.write_text('\n'.join(summary_lines) + '\n', encoding='utf-8')
+    # summary_lines 已是统一 HTML 版式；文本报告落盘去标签保留纯可读性
+    _plain = re.sub(r'<[^>]+>', '', '\n'.join(summary_lines))
+    RESULT_TXT.write_text(_plain + '\n', encoding='utf-8')
     log_progress('result_txt_written', path=str(RESULT_TXT))
     log_progress('gist_update_started')
     try:
@@ -1730,23 +1780,25 @@ def finalize_gist_and_notify(env, summary, summary_lines, subscription_text, qua
             gist_verify_res = {'ok': False, 'reason': str(e)}
     log_progress('gist_verify_finished', ok=bool(gist_verify_res.get('ok')), sample_ok_count=gist_verify_res.get('sample_ok_count', 0), sample_count=gist_verify_res.get('sample_count', 0), reason=gist_verify_res.get('reason', ''))
     summary['gist_verify'] = gist_verify_res
-    summary_lines.append('📦 订阅（Gist）:')
+    summary_lines.append('📦 <b>订阅（Gist）</b>')
     if gist_res.get('ok'):
         action = '新建' if gist_res.get('created') else '更新'
         html_url = gist_res.get('html_url') or ''
-        summary_lines.append(f'   └─ ✅ 已{action}，达标 {qualified_count} 个节点（≥{min_megabit}兆）')
+        summary_lines.append(f'  └─ ✅ 已{action}，达标 <b>{qualified_count}</b> 个节点（≥{min_megabit}兆）')
         if html_url:
-            summary_lines.append(f'   └─ 🔗 {html_url}')
+            summary_lines.append(f'  └─ 🔗 <a href="{html.escape(html_url)}">订阅源（YAML）</a>')
         if gist_verify_res.get('ok'):
-            summary_lines.append(f"   └─ ✅ 回拉验证通过: {gist_verify_res.get('sample_ok_count', 0)}/{gist_verify_res.get('sample_count', 0)} 个抽检节点可用")
+            summary_lines.append(f"  └─ ✅ 回拉验证通过: <b>{gist_verify_res.get('sample_ok_count', 0)}</b>/<b>{gist_verify_res.get('sample_count', 0)}</b> 个抽检节点可用")
         else:
-            summary_lines.append(f"   └─ ⚠️ 回拉验证失败: {gist_verify_res.get('sample_ok_count', 0)}/{gist_verify_res.get('sample_count', 0)} 个抽检节点可用；{gist_verify_res.get('reason', '')}")
+            summary_lines.append(f"  └─ ⚠️ 回拉验证失败: {gist_verify_res.get('sample_ok_count', 0)}/{gist_verify_res.get('sample_count', 0)} 个抽检节点可用；{html.escape(str(gist_verify_res.get('reason', '')))}")
     elif (gist_res.get('reason') or '').startswith('empty subscription'):
-        summary_lines.append(f'   └─ ⚠️ 无达标节点（阈值 ≥{min_megabit}兆），未更新订阅')
+        summary_lines.append(f'  └─ ⚠️ 无达标节点（阈值 ≥{min_megabit}兆），未更新订阅')
     else:
-        summary_lines.append(f"   └─ ⚠️ 上传失败: {gist_res.get('reason', '')}")
+        summary_lines.append(f"  └─ ⚠️ 上传失败: {html.escape(str(gist_res.get('reason', '')))}")
     try:
-        RESULT_TXT.write_text('\n'.join(summary_lines) + '\n', encoding='utf-8')
+        # summary_lines 已是统一 HTML 版式；文本报告落盘去标签保留纯可读性
+        _plain = re.sub(r'<[^>]+>', '', '\n'.join(summary_lines))
+        RESULT_TXT.write_text(_plain + '\n', encoding='utf-8')
     except Exception as e:
         log_progress('result_txt_rewrite_failed', path=str(RESULT_TXT), error=str(e))
 
