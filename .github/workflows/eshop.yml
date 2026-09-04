@@ -89,14 +89,14 @@ jobs:
           echo "✅ yshop-drink is available at $HOME/yshop-drink"
 
       - name: Setup Java and Node
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "17"
           cache: maven
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: "20"
 

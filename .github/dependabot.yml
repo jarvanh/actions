@@ -1,0 +1,24 @@
+# Dependabot：自动跟进依赖更新
+# 说明：
+#   - gha：扫描 .github/workflows/*.yml 中所有 uses: 的 Action（含大版本升级），
+#     有新版本时每周一自动开 PR。
+#   - 本仓库没有 requirements.txt / package.json / Dockerfile 等清单文件，
+#     Python 包（telethon、yt-dlp 等）都是 workflow 运行时 pip 安装（每次拉最新），
+#     Dependabot 的 pip / docker 生态无从扫描，故不配置。
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    # 升级分组：patch/minor 合一个 PR，大版本单独一个 PR，方便审
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+    commit-message:
+      prefix: "ci"
+    labels:
+      - "dependencies"
