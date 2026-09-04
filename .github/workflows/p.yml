@@ -43,8 +43,10 @@ jobs:
           bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" config
       - name: rclone-run
         run: |
-          # 本工作流不使用挂载：数据操作全部直接走 dropbox:/onedrive: 远端，
-          # 原先的 /dropbox 挂载全程零读写，只是白占一个 FUSE 与 token 刷新。已移除。
+          # 本工作流不使用挂载：/dropbox 只是普通本地目录。
+          # vaultwarden 的 SQLite 数据（dropbox:self-hosted/vaultwarden）在启动前
+          # 整体拉取到 /dropbox/self-hosted/vaultwarden（见下方"数据拉取"步骤），
+          # 停止后 sync 回 Dropbox——SQLite 不能跑在 rclone FUSE 上，必须本地化。
           echo "==========onedrive==========="
           rclone lsf onedrive:
           echo "==========dropbox==========="
@@ -78,6 +80,27 @@ jobs:
             echo "The tunnel '$TUNNEL_NAME' is running with connections: $CONNECTIONS. Stopping actions."
             exit 0
           fi
+      # ===== 数据拉取（容器启动前）=====
+      # 把 Dropbox 上的 vaultwarden 数据拉到本地真实目录（路径与旧 FUSE 挂载一致，
+      # VAULTWARDEN secret 里的 -v /dropbox/self-hosted/vaultwarden:/data 无需修改）。
+      # 找不到 db.sqlite3 说明远端路径不对或数据为空：直接报错终止——宁可不开服务，
+      # 也绝不启动空库（老账号全部失效），更不会在后续步骤回传空数据覆盖远端。
+      - name: Restore vaultwarden data from Dropbox
+        run: |
+          set -euo pipefail
+          VW_DATA=/dropbox/self-hosted/vaultwarden
+          sudo mkdir -p "$VW_DATA"
+          sudo chown -R runner:runner /dropbox
+          rclone copy "dropbox:self-hosted/vaultwarden" "$VW_DATA" -P --retries 5 --retries-sleep 10s --low-level-retries 20
+          if [ ! -s "$VW_DATA/db.sqlite3" ]; then
+            echo "::error::远端 dropbox:self-hosted/vaultwarden 未找到 db.sqlite3，数据拉取异常，终止运行（不启动空库、不回传）"
+            exit 1
+          fi
+          touch /tmp/VW_DATA_PULLED
+          db_md5=$(md5sum "$VW_DATA/db.sqlite3" | awk '{print $1}')
+          echo "数据拉取完成，db.sqlite3 拉取时指纹: $db_md5"
+          echo "VW_DB_MD5_PULL=$db_md5" >> "$GITHUB_ENV"
+          ls -la "$VW_DATA"
       - name: Run vaultwarden container
         run: ${{ secrets.VAULTWARDEN }}
       - name: Verify container is running
@@ -94,3 +117,23 @@ jobs:
           docker stop vaultwarden
           sleep 1m 
           echo "Stopping GitHub Actions"
+      # ===== 数据回传（失败/取消也执行）=====
+      # docker stop（SIGTERM）让 vaultwarden 优雅停机，SQLite 干净关闭、-wal/-shm 合并。
+      # 仅在"数据拉取完成"时回传：拉取失败/未执行时绝不 sync，防止空目录覆盖远端。
+      - name: "Persist: vaultwarden 数据回传"
+        if: ${{ always() }}
+        run: |
+          set -uo pipefail
+          VW_DATA=/dropbox/self-hosted/vaultwarden
+          if [ ! -f /tmp/VW_DATA_PULLED ]; then
+            echo "::warning::数据拉取未完成（/tmp/VW_DATA_PULLED 不存在），跳过回传以保全远端"
+            exit 0
+          fi
+          # 幂等停容器：前面步骤失败时容器可能仍在运行，先停掉再回传
+          docker stop -t 60 vaultwarden 2>/dev/null || true
+          sleep 10
+          # vaultwarden 容器以 root 写数据，回传前放开读权限给 runner 身份的 rclone
+          sudo chmod -R a+rX "$VW_DATA" 2>/dev/null || true
+          echo "回传前 db 指纹: $(md5sum "$VW_DATA/db.sqlite3" 2>/dev/null | awk '{print $1}' || echo none)（拉取时 ${VW_DB_MD5_PULL:-none}）"
+          rclone sync "$VW_DATA" "dropbox:self-hosted/vaultwarden" -P --retries 3
+          echo "vaultwarden 数据已回传 dropbox:self-hosted/vaultwarden"
