@@ -37,8 +37,17 @@
 | 触发 | 模式来源 |
 |---|---|
 | 定时（`cron: 0 2,8,14,20 * * *`） | 仓库变量 `vars.EMBY_PLAYBACK_MODE`，缺省 `302` |
-| 手动 `workflow_dispatch` | 输入项 `playback_mode`（`302` / `direct`） |
+| 手动 `workflow_dispatch` | 输入项 `playback_mode`（`302` / `direct`）；另有两个清理开关 `clear_emby_cache`（清空 `/mnt/emby-cache` 图片缓存）与 `clear_warm_state`（清空预热统计），见下 |
 | `watch` | 同定时 |
+
+**清理开关**（仅手动触发生效，在 restore 之后、Emby 启动之前执行）：
+
+| 开关 | 清什么 | 效果 |
+|---|---|---|
+| `clear_emby_cache` | `/mnt/emby-cache` | 图片缓存从零开始：所有海报首次浏览重新冷读；本轮收尾备份同步变小，之后轮次也没有旧缓存可用 |
+| `clear_warm_state` | `warm-state.json` | 预热档位从头统计：首屏/海报墙预热跳过，等 wallwarmer 重新记录客户端档位 |
+
+两者可同时勾选——相当于把"缓存 + 档位统计"全部归零，从冷启动重建画像。
 
 > ⚠️ **cron 按 UTC 执行**：`2/8/14/20` UTC 对应北京时间 `10:00 / 16:00 / 22:00 / 次日 04:00`。
 > `TZ: Asia/Shanghai` 只影响 runner 内 `date` 的输出（即通知里的时间戳），不改变 cron 时刻。
@@ -259,7 +268,7 @@ rclone 之所以能通，是因为它逐段解析、遇到 `remoteItem` 就切�
 | `📺 Emby 启动` | 模式决策后立刻 | 模式、直链源、快捷方式解析数、探活结果、时间 | ✅ 正文回显（无敏感信息） |
 | `🎬 播放` | 检测到播放 | 多行卡片：**片名+年份**（剧集为剧名+SxxExx）、**元数据**（集名/类型/时长/分辨率/编码/体积）、**链路**（302直链含剩余有效期 / 中转）、**客户端**（客户端名/设备/IP/起播耗时）、302 时附 **直链**（3 分钟内的最近一次，以 HTML `<a>` 折叠为 `▶ 打开直链`） | ❌ 仅记片名 |
 | `📺 Emby 302 链路连续 3 次探活失败，已自动回退 direct` | watchdog 触发 | — | — |
-| `📺 Emby` | run 收尾 | 状态、模式、运行时长、302 链路统计、时间 | ✅ 正文回显 |
+| `📺 Emby` | run 收尾 | 状态、模式、运行时长、302 链路统计、全库预热（请求数+档位）、**本轮活跃客户端**（authentication.db 里本轮有活动的 AppName 去重，只列应用名不带设备名/用户名）、时间 | ✅ 正文回显 |
 | `🔐 OpenList 凭据` | **仅改密时** | 用户名、密码明文、入口 | ❌ 绝不落日志 |
 
 ### 安全边界
@@ -504,6 +513,8 @@ sudo EMBY_USER="$EMBY_USER" python3 emby_guard.py <emby-data-root>   # 例：/va
 | 海报墙 | 请求最新条目海报，让 Emby 现场缩放 + ge2o 内存缓存就绪 | 低 | ✅ 有效（与模式无关，纯 Emby 侧） | 首页秒开 |
 | 直链 | 提前打一次 odlink `/api/fs/get`，填充 `dir_cache` / `link_cache` | 零流量 | ✅ **最有效**——ge2o→odlink 的直链解析本身就是 302 起播链路的一环 | 起播时不再逐段下钻 Graph |
 | 头尾 | 读每个条目的头部与尾部，落进 VFS 稀疏缓存 | 真实流量，受 `WU_BUDGET_MB` 约束 | ⚠️ **基本无效**（视频流不过挂载），只在转码 / 回退 `direct` 时才用得上 | ffprobe / ffmpeg 起播读命中本地 |
+| 各库首屏 | 每个媒体库按默认排序取前 20 张海报 | 约 1-2s/张×档位数，串行 | ✅ 滑进任意媒体库第一屏命中缓存 | 首屏秒开。宽度档位读跨 run 统计 Top5（`/var/lib/emby/warm-state.json`，随备份跨 run 传递）；**无统计时整体跳过**（不预热没人消费的尺寸） |
+| 全库海报（`wallwarmer`） | 按 DateCreated 倒序遍历全部条目持续预热 | 后台持续 ~5h，并发 2 | ✅ 滑到已覆盖区域即秒开；逐轮往深处推进 | 深层页面首次浏览不再冷读 |
 
 日志里两个**均值**就是判断依据：
 
@@ -553,6 +564,7 @@ sudo EMBY_USER="$EMBY_USER" python3 emby_guard.py <emby-data-root>   # 例：/va
 | rclone mount 参数（seek 优先口径） | `emby.yml` 的 `rclone-run` 步骤 |
 | `/mnt` 容量预留 | workflow `env:` 的 `MNT_RESERVE_KB`（默认 6GB），分配逻辑在 `lib.sh` |
 | 预热规模 | workflow `env:` 的 `WU_ITEMS`(10) / `WU_EDGE_MB`(64) / `WU_BUDGET_MB`(2048)，脚本在 `emby.yml` 的 `warmup images` 步骤；**302 直连为主时建议 3 / 32**（头尾预热对直连播放基本无效，只当冷读探针，见[起播慢怎么定位](#起播慢怎么定位)） |
+| 全库海报预热 | `start wall warmer` 步骤的 `/opt/wallwarmer.sh`：按 DateCreated 倒序分页遍历全部条目，把 Primary 海报拉进 Emby 缓存（`/mnt/emby-cache`）。**宽度档位跨 run 统计**——状态文件 `/var/lib/emby/warm-state.json` 存 `[宽度,得分]`（得分=按半衰期衰减的历史请求量，`WW_DECAY`=0.5），每轮启动先对历史得分衰减一次，再与本轮 ge2o 实测计数合并取 Top5（`WW_SIZES_MAX`=5）作为预热档位；持续被消费的档位留存，无人用的按半衰期退出（得分<1 淘汰）。每条目按这些档位各预热一份；请求只带 `maxWidth` 不带 `maxHeight`（缓存键含参数组合，box-fit 下带两者会得到更小的图、与客户端要的对不上）。统计每页写回状态文件、随备份跨 run 传递——ge2o 日志每轮清零，跨 run 全靠它。环境变量 `WW_WORKERS`(2) / `WW_GAP`(0.2s) / `WW_MAX_MIN`(300min) / `WW_SIZES_MAX`(5) / `WW_DECAY`(0.5) / `WW_MIN_FREE_KB`(/mnt 剩余 10GB 下限) / `WW_START_DELAY`(180s，让首屏预热先跑)。直连 Emby 不过 ge2o；缓存随备份持久化，逐轮往深处推进 |
 | 校验用的 Emby 用户名 | secret `EMBY_USER`（**不写死在代码里**；未配置则退化为"至少一个用户"） |
 | Emby 校验项 | `emby302/emby_guard.py`（恢复侧与备份侧共用同一份） |
 | 磁盘预检阈值 / 脱敏口径 | `emby302/lib.sh` |
