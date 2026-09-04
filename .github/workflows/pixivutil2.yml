@@ -13,11 +13,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: rclone-install
+        id: rclone-install
         run: |
           set -e
           # 安装 rclone：GitHub Releases 直下 .deb，失败回退 rclone.org 安装脚本
           bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" install
       - name: rclone-config
+        id: rclone-config
         env:
           RCLONE_CONFIG: ${{ secrets.RCLONE }}
         run: |
@@ -25,6 +27,7 @@ jobs:
           # 写配置 + 持久化：secret 起步 → 掩码 → Dropbox 恢复优先 → 有效性检查 → 同步回 Dropbox
           bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" config
       - name: rclone-run
+        id: rclone-run
         run: |
           sudo apt-get update
           sudo apt-get install -y fuse3
@@ -57,40 +60,139 @@ jobs:
             --log-file /opt/logs/rclone-onedrive.log --log-level INFO \
             --daemon --daemon-wait 60s
       - name: run pixivutil2
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        id: pixiv
         run: |
           cd /onedrive/software/PixivUtil2
-          
+
           # 备份配置文件
           if [ -f config.ini ]; then
             cp config.ini /tmp/config.ini.backup
           fi
-          
+
           # 丢弃所有本地修改，避免 git pull 冲突
           git reset --hard
           git clean -fd
-          
+
           # 拉取最新代码
           git pull https://github.com/Nandaka/PixivUtil2.git
-          
+
           # 恢复配置文件
           if [ -f /tmp/config.ini.backup ]; then
             cp /tmp/config.ini.backup config.ini
           fi
-          
+
           # 安装依赖
           pip install -r requirements.txt
-          
+
+          LOG_FILE=/tmp/pixivutil2.log
+          REPORT_FILE=/tmp/pixiv_report.env
+          FAILED_IDS=/tmp/pixiv_failed_ids.txt
+          rm -f "$REPORT_FILE" "$FAILED_IDS"
+
           # 运行 PixivUtil2
-          python PixivUtil2.py -c config.ini -s 6 -x
-          
-          echo "github PixivUtil2 任务执行结束"
-          
-          # 发送 Telegram 通知
-          if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
-            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-              -d "chat_id=${TELEGRAM_CHAT_ID}" \
-              -d "text=github PixivUtil2 任务执行结束"
+          # PixivUtil2 跑完一律走 sys.exit(ERROR_CODE)：9005（作品页 404 / 服务端错误，已自动跳过）
+          # 被 Linux 截断成 8 位就是退出码 45。默认 shell 是 bash -e，非零退出会直接中断本步骤，
+          # 导致后面的 Telegram 报告永远发不出去，所以这里先关掉 -e 自己接管退出码。
+          set +e
+          python PixivUtil2.py -c config.ini -s 6 -x 2>&1 | tee "$LOG_FILE"
+          PU_EXIT=${PIPESTATUS[0]}
+          set -e
+
+          echo "github PixivUtil2 任务执行结束（exit=${PU_EXIT}）"
+
+          # 统计口径：
+          #   Image #                 本次遍历的作品数
+          #   Already downloaded in DB 本地 DB 已有，直接跳过
+          #   Giving up image_id      抓取失败（多为作品被删除/隐藏导致 404）
+          #   Checking local filename 真正进入下载校验的文件数，其中 Local file exists 表示文件已存在
+          #                           未重复下载，两者差额即本次新增下载的文件数
+          TOTAL=$(grep -c "^Image # " "$LOG_FILE" || true)
+          SKIPPED=$(grep -c "Already downloaded in DB" "$LOG_FILE" || true)
+          FAILED=$(grep -c "Giving up image_id" "$LOG_FILE" || true)
+          CHECKED=$(grep -c "Checking local filename" "$LOG_FILE" || true)
+          EXISTED=$(grep -c "Local file exists" "$LOG_FILE" || true)
+          DOWNLOADED=$((CHECKED - EXISTED))
+          if [ "$DOWNLOADED" -lt 0 ]; then
+            DOWNLOADED=0
+          fi
+
+          if [ "$FAILED" != "0" ]; then
+            grep "Giving up image_id" "$LOG_FILE" | grep -oE '[0-9]{4,}' | sort -un > "$FAILED_IDS" || true
+          fi
+
+          # 退出码语义映射：warning 只代表"跑完了但有跳过"，不该让整个任务变红
+          case "$PU_EXIT" in
+            0)   PU_STATUS="success"; PU_NOTE="" ;;
+            1)   PU_STATUS="warning"; PU_NOTE="存在失败项 (ERROR_CODE=1)" ;;
+            45)  PU_STATUS="warning"; PU_NOTE="作品页 404/服务端错误 (ERROR_CODE=9005，8 位截断为 45)" ;;
+            100) PU_STATUS="failure"; PU_NOTE="未登录，cookie 已失效 (ERROR_CODE=100)" ;;
+            *)   PU_STATUS="failure"; PU_NOTE="未知错误 (exit=${PU_EXIT})" ;;
+          esac
+
+          {
+            echo "PU_EXIT=${PU_EXIT}"
+            echo "PU_STATUS=${PU_STATUS}"
+            # NOTE 里含括号，必须用单引号包起来，否则 notify 步骤 source 时会语法错误
+            echo "PU_NOTE='${PU_NOTE}'"
+            echo "PU_TOTAL=${TOTAL}"
+            echo "PU_SKIPPED=${SKIPPED}"
+            echo "PU_DOWNLOADED=${DOWNLOADED}"
+            echo "PU_FAILED=${FAILED}"
+          } > "$REPORT_FILE"
+
+          {
+            echo "## PixivUtil2 运行结果"
+            echo ""
+            echo "- 遍历作品：${TOTAL}"
+            echo "- 新增下载：${DOWNLOADED}"
+            echo "- 已在库跳过：${SKIPPED}"
+            echo "- 抓取失败：${FAILED}"
+            echo "- 退出码：${PU_EXIT} ${PU_NOTE}"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: telegram-notify
+        if: always()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -e
+          source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+
+          PU_EXIT=""; PU_STATUS=""; PU_NOTE=""
+          PU_TOTAL=0; PU_SKIPPED=0; PU_DOWNLOADED=0; PU_FAILED=0
+
+          # 报告文件不存在说明任务在 PixivUtil2 启动之前就断了（rclone 挂载 / 依赖安装等）
+          if [ -f /tmp/pixiv_report.env ]; then
+            . /tmp/pixiv_report.env
+          else
+            PU_STATUS="failure"
+            PU_NOTE="未生成运行报告，任务在 PixivUtil2 启动前即中断"
+          fi
+
+          START_TS=$(date -d "${{ github.run_started_at }}" +%s 2>/dev/null || echo 0)
+          if [ "$START_TS" -gt 0 ]; then
+            DURATION=$(( ($(date +%s) - START_TS) / 60 ))
+          else
+            DURATION=0
+          fi
+
+          case "$PU_STATUS" in
+            success) ICON="✅"; TITLE="PixivUtil2 任务完成" ;;
+            warning) ICON="⚠️"; TITLE="PixivUtil2 任务完成（有跳过）" ;;
+            *)       ICON="❌"; TITLE="PixivUtil2 任务失败" ;;
+          esac
+
+          MSG="${ICON} ${TITLE}"$'\n'"━━━━━━━━━━━━━━━━━━"$'\n'$'\n'"📊 遍历 ${PU_TOTAL} · 新增下载 ${PU_DOWNLOADED} · 已在库 ${PU_SKIPPED} · 失败 ${PU_FAILED}"$'\n'"⏱ 耗时约 ${DURATION} 分钟"$'\n'"🔢 退出码 ${PU_EXIT:-N/A} ${PU_NOTE}"$'\n'"🔗 任务链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          # 通知发送失败不额外把任务判失败，避免"任务没事、只是 TG 抖动"却变红
+          send_tg "$MSG" || echo "⚠️ Telegram 通知发送失败，详见步骤日志"
+
+          # 失败作品 ID 清单（超过 4000 字符自动分片）
+          if [ -f /tmp/pixiv_failed_ids.txt ] && [ -s /tmp/pixiv_failed_ids.txt ]; then
+            FAILED_COUNT=$(wc -l < /tmp/pixiv_failed_ids.txt | tr -d ' ')
+            send_tg_chunked "📋 失败作品 ID（${FAILED_COUNT} 个）"$'\n'"━━━━━━━━━━━━━━━━━━"$'\n'$'\n'"$(cat /tmp/pixiv_failed_ids.txt)" || true
+          fi
+
+          # 只有真正的失败才让任务变红，1/45 这类"跑完但有跳过"按成功处理
+          if [ "$PU_STATUS" = "failure" ]; then
+            exit 1
           fi
