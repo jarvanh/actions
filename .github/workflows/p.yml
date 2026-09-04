@@ -43,15 +43,8 @@ jobs:
           bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" config
       - name: rclone-run
         run: |
-          sudo apt-get update
-          sudo apt-get install -y fuse3
-          sudo mkdir -p /dropbox
-          # 挂载改用 runner 用户（与 emby.yml 一致）：root 身份挂载时 rclone 刷新 token 会把
-          # rclone.conf 回写成 root:600，之后非 root 的 rclone（含下面的 lsf）读取即 EACCES
-          # 容器以 root 访问该挂载，非 root 挂载必须开 --allow-other 才允许其他用户进入
-          grep -q '^user_allow_other' /etc/fuse.conf 2>/dev/null || echo user_allow_other | sudo tee -a /etc/fuse.conf >/dev/null
-          sudo chown runner:runner /dropbox
-          nohup rclone mount dropbox: /dropbox --config /home/runner/.config/rclone/rclone.conf --vfs-cache-mode full --allow-other &
+          # 本工作流不使用挂载：数据操作全部直接走 dropbox:/onedrive: 远端，
+          # 原先的 /dropbox 挂载全程零读写，只是白占一个 FUSE 与 token 刷新。已移除。
           echo "==========onedrive==========="
           rclone lsf onedrive:
           echo "==========dropbox==========="

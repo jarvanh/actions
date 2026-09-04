@@ -30,13 +30,33 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y fuse3
-          sudo mkdir -p /dropbox
+          sudo mkdir -p /dropbox /mnt/vfs/dropbox /opt/logs
+          sudo chown runner:runner /dropbox /mnt/vfs/dropbox /opt/logs
           # 挂载改用 runner 用户（与 emby.yml 一致）：root 身份挂载时 rclone 刷新 token 会把
           # rclone.conf 回写成 root:600，之后非 root 的 rclone（含下面的 lsf）读取即 EACCES
           # sub-store 容器以 root 挂载 /dropbox/self-hosted/sub-store，非 root 挂载必须开 --allow-other
           grep -q '^user_allow_other' /etc/fuse.conf 2>/dev/null || echo user_allow_other | sudo tee -a /etc/fuse.conf >/dev/null
-          sudo chown runner:runner /dropbox
-          nohup rclone mount dropbox: /dropbox --config /home/runner/.config/rclone/rclone.conf --vfs-cache-mode full --allow-other &
+          # 参数按"配置 / Docker 数据卷"画像：sub-store 的数据目录是小文件随机读写。
+          #   --cache-dir        默认 ~/.cache/rclone 会落进根分区（≈14GB），必须指向 /mnt
+          #   --attr-timeout 1m  容器内文件频繁增删改，属性缓存 10 分钟有陈旧风险
+          #   --poll-interval 0  run 期间远端目录不会自己变，关轮询省 API 配额
+          nohup rclone mount dropbox: /dropbox \
+            --config /home/runner/.config/rclone/rclone.conf \
+            --cache-dir /mnt/vfs/dropbox \
+            --allow-other --umask 000 \
+            --attr-timeout 1m \
+            --dir-cache-time 72h --poll-interval 0 \
+            --vfs-cache-mode full \
+            --vfs-cache-max-size 2G --vfs-cache-max-age 1h \
+            --vfs-cache-min-free-space 2G \
+            --vfs-cache-poll-interval 30s \
+            --buffer-size 16M \
+            --log-file /opt/logs/rclone-dropbox.log --log-level INFO &
+          # 等挂载就绪：容器紧接着就要挂 /dropbox/self-hosted/sub-store，没起来会失败
+          for i in {1..30}; do
+            mount | grep -q " on /dropbox " && break
+            sleep 2
+          done
           # mkdir -p ~/sub-store
           # rclone copy onedrive:self-hosted/sub-store ~/sub-store
           echo "==========onedrive==========="

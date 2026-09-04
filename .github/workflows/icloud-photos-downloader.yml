@@ -31,12 +31,33 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y fuse3
-          sudo mkdir -p /dropbox
+          sudo mkdir -p /dropbox /mnt/vfs/dropbox /opt/logs
+          sudo chown runner:runner /dropbox /mnt/vfs/dropbox /opt/logs
           # 挂载改用 runner 用户（与 emby.yml 一致）：root 身份挂载时 rclone 刷新 token 会把
           # rclone.conf 回写成 root:600，之后非 root 的 rclone（lsf / 末尾 db 回传）读取即 EACCES
           grep -q '^user_allow_other' /etc/fuse.conf 2>/dev/null || echo user_allow_other | sudo tee -a /etc/fuse.conf >/dev/null
-          sudo chown runner:runner /dropbox
-          nohup rclone mount dropbox: /dropbox --config /home/runner/.config/rclone/rclone.conf --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 10G &
+          # 参数按"配置"画像：这个挂载只承载 icloudpd 的 cookie 目录，小文件随机读写
+          #   --cache-dir        默认 ~/.cache/rclone 会落进根分区（≈14GB），必须指向 /mnt
+          #   --attr-timeout 1m  原 10m：cookie 会被反复改写，属性缓存 10 分钟有陈旧风险
+          #   --poll-interval 0  run 期间远端目录不会自己变，关轮询省 API 配额
+          #   删除 --vfs-read-chunk-size-limit 10G：会让单个 Range 请求一路翻倍到 10GB
+          nohup rclone mount dropbox: /dropbox \
+            --config /home/runner/.config/rclone/rclone.conf \
+            --cache-dir /mnt/vfs/dropbox \
+            --allow-other --umask 000 --no-gzip-encoding \
+            --attr-timeout 1m \
+            --dir-cache-time 72h --poll-interval 0 \
+            --vfs-cache-mode full \
+            --vfs-cache-max-size 2G --vfs-cache-max-age 1h \
+            --vfs-cache-min-free-space 2G \
+            --vfs-cache-poll-interval 30s \
+            --buffer-size 16M \
+            --log-file /opt/logs/rclone-dropbox.log --log-level INFO &
+          # 等挂载就绪：下一步的 icloudpd 要立刻读写 cookie 目录
+          for _ in $(seq 1 30); do
+            mount | grep -q " on /dropbox " && break
+            sleep 2
+          done
           echo "==========onedrive==========="
           rclone lsf onedrive:
           echo "==========dropbox==========="
@@ -55,9 +76,32 @@ jobs:
           docker run -d --restart=unless-stopped -v /opt/openlist-data:/opt/openlist/data -p 5244:5244 -e PUID=0 -e PGID=0 -e UMASK=022 --name="openlist" openlistteam/openlist:latest
           sleep 1m
           docker ps
-          sudo mkdir -p /openlist
-          sudo chown runner:runner /openlist
-          nohup rclone mount openlist: /openlist --config /home/runner/.config/rclone/rclone.conf --allow-non-empty --no-gzip-encoding --umask 000 --allow-other --attr-timeout 10m --vfs-cache-mode full --vfs-cache-max-age 5m --vfs-read-chunk-size-limit 10G --buffer-size 100M --vfs-cache-max-size 10G &
+          sudo mkdir -p /openlist /mnt/vfs/openlist /opt/logs
+          sudo chown runner:runner /openlist /mnt/vfs/openlist /opt/logs
+          # 参数按"批量写入"画像：icloudpd 会往这里持续下载大量照片
+          #   --cache-dir          默认 ~/.cache/rclone 会落进根分区（≈14GB），必须指向 /mnt
+          #   --vfs-cache-max-age 24h  ★ 原 5m 是数据风险：文件写完若 5 分钟内没回传完就被逐出
+          #   --vfs-write-back 5m  攒 5 分钟再回传，减少请求数（照片是批量写入，攒批明显更省）
+          #   --transfers 4        并行回传
+          #   --attr-timeout 1m    原 10m：目录内容随下载不断变化，缓存 10 分钟属性有陈旧风险
+          #   删除 --vfs-read-chunk-size-limit 10G：写入场景用不到，且会让读请求涨到 10GB
+          nohup rclone mount openlist: /openlist \
+            --config /home/runner/.config/rclone/rclone.conf \
+            --cache-dir /mnt/vfs/openlist \
+            --allow-other --umask 000 --no-gzip-encoding \
+            --attr-timeout 1m \
+            --dir-cache-time 72h --poll-interval 0 \
+            --vfs-cache-mode full \
+            --vfs-cache-max-size 8G --vfs-cache-max-age 24h \
+            --vfs-cache-min-free-space 2G \
+            --vfs-cache-poll-interval 30s \
+            --buffer-size 16M \
+            --vfs-write-back 5m --transfers 4 \
+            --log-file /opt/logs/rclone-openlist.log --log-level INFO &
+          for _ in $(seq 1 30); do
+            mount | grep -q " on /openlist " && break
+            sleep 2
+          done
       - name: run icloud-photos-downloader
         run: |
           sudo apt-get update
