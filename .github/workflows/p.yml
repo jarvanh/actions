@@ -44,9 +44,9 @@ jobs:
       - name: rclone-run
         run: |
           # 本工作流不使用挂载：/dropbox 只是普通本地目录。
-          # vaultwarden 的 SQLite 数据（dropbox:self-hosted/vaultwarden）在启动前
-          # 整体拉取到 /dropbox/self-hosted/vaultwarden（见下方"数据拉取"步骤），
-          # 停止后 sync 回 Dropbox——SQLite 不能跑在 rclone FUSE 上，必须本地化。
+          # Dropbox 上的 self-hosted/bitwarden/ 整个目录（bitwarden-data 主数据 +
+          # 其他配置/目录）在启动前拉取到 /dropbox/self-hosted/bitwarden/（见下方
+          # "数据拉取"步骤），停止后 sync 回 Dropbox——SQLite 不能跑在 FUSE 上，必须本地化。
           echo "==========onedrive==========="
           rclone lsf onedrive:
           echo "==========dropbox==========="
@@ -81,26 +81,27 @@ jobs:
             exit 0
           fi
       # ===== 数据拉取（容器启动前）=====
-      # 把 Dropbox 上的 vaultwarden 数据拉到本地真实目录（路径与旧 FUSE 挂载一致，
-      # VAULTWARDEN secret 里的 -v /dropbox/self-hosted/vaultwarden:/data 无需修改）。
-      # 找不到 db.sqlite3 说明远端路径不对或数据为空：直接报错终止——宁可不开服务，
-      # 也绝不启动空库（老账号全部失效），更不会在后续步骤回传空数据覆盖远端。
-      - name: Restore vaultwarden data from Dropbox
+      # 把 Dropbox 上的 self-hosted/bitwarden/ 整个目录拉到本地真实目录（路径与旧
+      # FUSE 挂载一致，VAULTWARDEN secret 里的 -v /dropbox/self-hosted/bitwarden/
+      # bitwarden-data:/data 无需修改；目录下其他配置/文件一并拉取、一并回传）。
+      # bitwarden-data/ 下找不到 db.sqlite3 说明远端数据异常：直接报错终止——宁可不开
+      # 服务，也绝不启动空库（老账号全部失效），更不会在后续步骤回传空数据覆盖远端。
+      - name: Restore bitwarden data from Dropbox
         run: |
           set -euo pipefail
-          VW_DATA=/dropbox/self-hosted/vaultwarden
-          sudo mkdir -p "$VW_DATA"
+          VW_DIR=/dropbox/self-hosted/bitwarden
+          sudo mkdir -p "$VW_DIR"
           sudo chown -R runner:runner /dropbox
-          rclone copy "dropbox:self-hosted/vaultwarden" "$VW_DATA" -P --retries 5 --retries-sleep 10s --low-level-retries 20
-          if [ ! -s "$VW_DATA/db.sqlite3" ]; then
-            echo "::error::远端 dropbox:self-hosted/vaultwarden 未找到 db.sqlite3，数据拉取异常，终止运行（不启动空库、不回传）"
+          rclone copy "dropbox:self-hosted/bitwarden" "$VW_DIR" -P --retries 5 --retries-sleep 10s --low-level-retries 20
+          if [ ! -s "$VW_DIR/bitwarden-data/db.sqlite3" ]; then
+            echo "::error::远端 dropbox:self-hosted/bitwarden/bitwarden-data 未找到 db.sqlite3，数据拉取异常，终止运行（不启动空库、不回传）"
             exit 1
           fi
           touch /tmp/VW_DATA_PULLED
-          db_md5=$(md5sum "$VW_DATA/db.sqlite3" | awk '{print $1}')
+          db_md5=$(md5sum "$VW_DIR/bitwarden-data/db.sqlite3" | awk '{print $1}')
           echo "数据拉取完成，db.sqlite3 拉取时指纹: $db_md5"
           echo "VW_DB_MD5_PULL=$db_md5" >> "$GITHUB_ENV"
-          ls -la "$VW_DATA"
+          ls -la "$VW_DIR" "$VW_DIR/bitwarden-data"
       - name: Run vaultwarden container
         run: ${{ secrets.VAULTWARDEN }}
       - name: Verify container is running
@@ -124,7 +125,7 @@ jobs:
         if: ${{ always() }}
         run: |
           set -uo pipefail
-          VW_DATA=/dropbox/self-hosted/vaultwarden
+          VW_DIR=/dropbox/self-hosted/bitwarden
           if [ ! -f /tmp/VW_DATA_PULLED ]; then
             echo "::warning::数据拉取未完成（/tmp/VW_DATA_PULLED 不存在），跳过回传以保全远端"
             exit 0
@@ -133,15 +134,15 @@ jobs:
           docker stop -t 60 vaultwarden 2>/dev/null || true
           sleep 10
           # vaultwarden 容器以 root 写数据，回传前放开读权限给 runner 身份的 rclone
-          sudo chmod -R a+rX "$VW_DATA" 2>/dev/null || true
-          echo "回传前 db 指纹: $(md5sum "$VW_DATA/db.sqlite3" 2>/dev/null | awk '{print $1}' || echo none)（拉取时 ${VW_DB_MD5_PULL:-none}）"
-          rclone sync "$VW_DATA" "dropbox:self-hosted/vaultwarden" -P --retries 3
-          echo "vaultwarden 数据已回传 dropbox:self-hosted/vaultwarden"
+          sudo chmod -R a+rX "$VW_DIR" 2>/dev/null || true
+          echo "回传前 db 指纹: $(md5sum "$VW_DIR/bitwarden-data/db.sqlite3" 2>/dev/null | awk '{print $1}' || echo none)（拉取时 ${VW_DB_MD5_PULL:-none}）"
+          rclone sync "$VW_DIR" "dropbox:self-hosted/bitwarden" -P --retries 3
+          echo "bitwarden 整个目录已回传 dropbox:self-hosted/bitwarden"
           # ===== 压缩备份到 OneDrive =====
           # 风格与 self-hosted_backup.yml 一致：固定文件名直接覆盖 onedrive:backup/ 下旧包
-          ARCHIVE="/tmp/vaultwarden_latest.tar.gz"
+          ARCHIVE="/tmp/bitwarden_latest.tar.gz"
           rm -f "$ARCHIVE"
-          tar -czf "$ARCHIVE" -C / "dropbox/self-hosted/vaultwarden"
+          tar -czf "$ARCHIVE" -C / "dropbox/self-hosted/bitwarden"
           archive_bytes=$(stat -c%s "$ARCHIVE")
           if [ -z "$archive_bytes" ] || [ "$archive_bytes" -le 0 ]; then
             echo "::error::压缩包异常（空文件），跳过上传 OneDrive"
@@ -149,7 +150,7 @@ jobs:
           fi
           tar -tzf "$ARCHIVE" >/dev/null
           archive_human=$(numfmt --to=iec-i --suffix=B "$archive_bytes" 2>/dev/null || echo "${archive_bytes}B")
-          echo "压缩包校验通过: vaultwarden_latest.tar.gz (${archive_human})"
+          echo "压缩包校验通过: bitwarden_latest.tar.gz (${archive_human})"
           rclone copy "$ARCHIVE" "onedrive:backup/" -P --retries 3
           rm -f "$ARCHIVE"
-          echo "已上传 onedrive:backup/vaultwarden_latest.tar.gz"
+          echo "已上传 onedrive:backup/bitwarden_latest.tar.gz"
