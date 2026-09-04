@@ -181,8 +181,14 @@ jobs:
         if: ${{ always() && steps.ts.outcome == 'success' }}
         run: |
           set -euo pipefail
+          # 开启 Exit Node 前置条件：启用内核转发
+          echo 'net.ipv4.ip_forward = 1' | sudo tee /etc/sysctl.d/99-tailscale-forward.conf
+          echo 'net.ipv6.conf.all.forwarding = 1' | sudo tee -a /etc/sysctl.d/99-tailscale-forward.conf
+          sudo sysctl -p /etc/sysctl.d/99-tailscale-forward.conf
+
           # 固定主机名 openclaw（singleton 并发下不会撞名）；节点为 ephemeral，job 结束自动移除
-          sudo tailscale set --ssh --hostname=openclaw
+          # 开启 Exit Node：tailnet 内设备可将本 runner 设为出口节点（需在 Tailscale 管理页批准，或 ACL autoApprovers 配置）
+          sudo tailscale set --ssh --hostname=openclaw --advertise-exit-node
           # 回读实际注册的 DNS 短名（极端情况同名冲突会被加后缀，以实际为准）
           TS_HOST="$(tailscale status --json | jq -r '.Self.DNSName' | cut -d. -f1)"
           {
@@ -211,6 +217,8 @@ jobs:
           msg+="SSH: ssh runner@${TS_HOST}"
           msg+=$'\n'
           msg+="IP: ssh runner@${TS_IP}"
+          msg+=$'\n'
+          msg+="Exit Node: 已广播，请在 Tailscale 管理页批准后使用（本 runner 可作为出口节点）"
           msg+=$'\n'
           msg+="Run: ${RUN_URL}"
           payload=$(jq -n --arg chat_id "$TELEGRAM_CHAT_ID" --arg text "$msg" \
