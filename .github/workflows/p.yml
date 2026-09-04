@@ -137,3 +137,19 @@ jobs:
           echo "回传前 db 指纹: $(md5sum "$VW_DATA/db.sqlite3" 2>/dev/null | awk '{print $1}' || echo none)（拉取时 ${VW_DB_MD5_PULL:-none}）"
           rclone sync "$VW_DATA" "dropbox:self-hosted/vaultwarden" -P --retries 3
           echo "vaultwarden 数据已回传 dropbox:self-hosted/vaultwarden"
+          # ===== 压缩备份到 OneDrive =====
+          # 风格与 self-hosted_backup.yml 一致：固定文件名直接覆盖 onedrive:backup/ 下旧包
+          ARCHIVE="/tmp/vaultwarden_latest.tar.gz"
+          rm -f "$ARCHIVE"
+          tar -czf "$ARCHIVE" -C / "dropbox/self-hosted/vaultwarden"
+          archive_bytes=$(stat -c%s "$ARCHIVE")
+          if [ -z "$archive_bytes" ] || [ "$archive_bytes" -le 0 ]; then
+            echo "::error::压缩包异常（空文件），跳过上传 OneDrive"
+            exit 0
+          fi
+          tar -tzf "$ARCHIVE" >/dev/null
+          archive_human=$(numfmt --to=iec-i --suffix=B "$archive_bytes" 2>/dev/null || echo "${archive_bytes}B")
+          echo "压缩包校验通过: vaultwarden_latest.tar.gz (${archive_human})"
+          rclone copy "$ARCHIVE" "onedrive:backup/" -P --retries 3
+          rm -f "$ARCHIVE"
+          echo "已上传 onedrive:backup/vaultwarden_latest.tar.gz"
