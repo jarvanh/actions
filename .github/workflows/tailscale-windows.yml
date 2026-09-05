@@ -154,20 +154,24 @@ jobs:
             $footer += "🔗 <a href=""$Env:TG_RUN_URL"">运行日志</a>"
           }
           # 按入口分组（SSH / RDP 两套凭据），每组树形列出；
-          # 元数据一律 " · <i>…</i>" 分隔 —— 禁全角括号（规范见 docs/telegram-notify.md）
+          # 取值行只放标签+值，说明性文字（固定不变/每次会变/密码共用）
+          # 集中到底部 ℹ️ 备注行（tg_add_note 形态），不与取值粘在同一行
           $msg = "🟢 <b>Windows runner 已就绪</b>`n$sep`n" +
             "`n🔐 <b>SSH</b>`n" +
             "  ├─ 命令：<code>ssh $Env:TS_USER@$Env:TS_HOST</code>`n" +
-            "  ├─ 域名：<code>$Env:TS_DNS</code> · <i>固定不变</i>`n" +
-            "  └─ 备用 IP：<code>$Env:TS_IP</code> · <i>每次运行会变</i>"
+            "  ├─ 域名：<code>$Env:TS_DNS</code>`n" +
+            "  └─ 备用 IP：<code>$Env:TS_IP</code>"
+          $notes = "域名固定不变 · IP 每次运行会变，仅作备用"
           # RDP 启用成功时附上远程桌面入口（域名固定不变，IP 每次会变，优先给域名）
           if ($Env:RDP_ENABLED -eq '1') {
             $msg += "`n`n🖥️ <b>RDP</b>`n" +
               "  ├─ 地址：<code>$($Env:TS_DNS):3389</code>`n" +
               "  ├─ 用户：<code>$Env:TS_USER</code>`n" +
-              "  └─ 密码：<code>$(Esc-Html $Env:RUNNER_PASSWORD)</code> · <i>SSH/RDP 共用</i>"
+              "  └─ 密码：<code>$(Esc-Html $Env:RUNNER_PASSWORD)</code>"
+            $notes += " · 密码 SSH/RDP 共用"
           }
-          $msg += "`n`n有效期：<i>约 6 小时 · 超时自动结束</i>"
+          $msg += "`n`nℹ️ <i>$notes</i>`n" +
+            "有效期：<i>约 6 小时 · 超时自动结束</i>"
           if ($footer) { $msg += "`n`n$footer" }
           Invoke-RestMethod -Uri "https://api.telegram.org/bot$Env:TELEGRAM_BOT_TOKEN/sendMessage" `
             -Method Post -Body @{ chat_id = $Env:TELEGRAM_CHAT_ID; text = $msg; parse_mode = 'HTML'; disable_web_page_preview = 'true' }
