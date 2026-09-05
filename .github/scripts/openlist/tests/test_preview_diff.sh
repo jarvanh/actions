@@ -80,6 +80,7 @@ SEND_CAPTURE=""
 tg_add_title()   { local _n="$1"; printf -v "$_n" '%s%s' "${!_n}" "TITLE:$2"$'\n'; }
 tg_add_section() { local _n="$1"; printf -v "$_n" '%s%s' "${!_n}" "SECTION:$2"$'\n'; }
 tg_append()      { local _n="$1"; printf -v "$_n" '%s%s' "${!_n}" "$2"; }
+tg_add_footer()  { :; }  # 收尾区接线（TG_RUN_URL/TG_RUN_STARTED_AT）不在本测试范围
 send_telegram_message() { SEND_CAPTURE="$1"; }
 
 lsjson_call_count() { cat "$LSJSON_CALLS"; }
@@ -119,8 +120,8 @@ flush_task_preview >/dev/null
 echo "$SEND_CAPTURE" | grep -q '差异构成：新增 1 · 同名更新 1' && ok "1j 渲染差异构成子行" || bad "1j"
 echo "$SEND_CAPTURE" | grep -q '+900 B / +2 文件' && ok "1k 条目行 +900 B / +2 文件" || bad "1k: $SEND_CAPTURE"
 echo "$SEND_CAPTURE" | grep -q '已扣减 1 个修复文件 / 300 B' && ok "1l 渲染修复扣减子行" || bad "1l"
-echo "$SEND_CAPTURE" | grep -q '合计预估待同步：<b>900 B</b> / <b>2</b> 文件（新增 1 · 同名更新 1）' \
-  && ok "1m 合计行含构成附注" || bad "1m: $SEND_CAPTURE"
+echo "$SEND_CAPTURE" | grep -q '合计预估待同步：<b>900 B</b> / <b>2</b> 文件 · 新增 1 · 同名更新 1' \
+  && ok "1m 合计行含构成附注（\" · \" 分隔，无全角括号）" || bad "1m: $SEND_CAPTURE"
 [ "$(lsjson_call_count)" = "2" ] && ok "1n 源/目标各列一次（2 次 lsjson）" || bad "1n: [$(lsjson_call_count)]"
 
 # ===== 场景 2: 源端清单缓存（进度注册复用，不重复拉清单）=====

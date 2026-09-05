@@ -91,9 +91,9 @@ def handle_termination_signal(signum, frame):
     message = f'📈 <b>代理测速异常终止</b>\n{_sep}\n⚠️ 脚本被中断: 收到 {sig_name}，本轮测速未正常完成。'
     if CURRENT_RUN_STARTED_AT:
         message += f'\n🕒 测速开始时间: {html.escape(str(CURRENT_RUN_STARTED_AT))}'
-    _run_url = os.environ.get('TG_RUN_URL', '')
-    if _run_url:
-        message += f'\n\n⏱ 🔗 <a href="{html.escape(_run_url)}">运行日志</a>'
+    _footer = tg_footer_line()
+    if _footer:
+        message += f'\n\n{_footer}'
     write_termination_artifacts(message)
     try:
         env = merged_env()
@@ -1595,6 +1595,50 @@ def format_duration(seconds: float):
     return f'{s}s'
 
 
+def tg_format_elapsed(seconds):
+    """已运行时长的中文三段式（与 tg_add_footer 同源同形态，勿再自造 40s/5h57m）。
+
+    规则: >=1h → "X 小时 Y 分"；>=1min → "X 分钟"；否则 → "X 秒"
+    注意与 format_duration 分工: 后者是「耗时」的紧凑写法，用于正文；
+    本函数用于收尾区，必须与全库通知的 tg_add_footer 逐字一致。
+    """
+    total = int(max(0, round(seconds)))
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f'{h} 小时 {m} 分'
+    if m:
+        return f'{m} 分钟'
+    return f'{s} 秒'
+
+
+def tg_footer_line():
+    """全库唯一收尾行: "⏱ 已运行 <b>X</b> · 🔗 <a>运行日志</a>"
+
+    与 tg_add_footer（telegram/tg_notify.sh）同形态、同降级链:
+      无 TG_RUN_STARTED_AT → 不显示时长；两者皆无 → 整行跳过
+    时长 = 当前时间 − TG_RUN_STARTED_AT（即 run 已运行时长，非测速耗时）
+    """
+    line = ''
+    started_at = os.environ.get('TG_RUN_STARTED_AT', '')
+    if started_at:
+        try:
+            st = datetime.fromisoformat(str(started_at).replace('Z', '+00:00'))
+            if st.tzinfo is None:
+                elapsed = (datetime.now() - st).total_seconds()
+            else:
+                elapsed = (datetime.now(st.tzinfo) - st).total_seconds()
+            line = f'⏱ 已运行 <b>{html.escape(tg_format_elapsed(elapsed))}</b>'
+        except Exception:
+            line = ''
+    run_url = os.environ.get('TG_RUN_URL', '')
+    if run_url:
+        if line:
+            line += ' · '
+        line += f'🔗 <a href="{html.escape(run_url)}">运行日志</a>'
+    return line
+
+
 # 敏感字段名（小写匹配），值会被自动脱敏
 # 注意：仅对「子串匹配会产生误伤」的字段放这里做模糊匹配
 _SENSITIVE_KEYS = frozenset({
@@ -1704,6 +1748,13 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
     """
     started_text = str(started_at)[:19].replace('T', ' ')
     ended_text = str(ended_at)[:19].replace('T', ' ')
+    # 通知行耗时用中文三段式（与全库时长格式统一，勿出现 5h57m）；
+    # RESULT_JSON 的 duration_text 保持紧凑格式不变
+    try:
+        duration_cn = tg_format_elapsed(
+            (datetime.fromisoformat(str(ended_at)[:19]) - datetime.fromisoformat(str(started_at)[:19])).total_seconds())
+    except Exception:
+        duration_cn = duration_text
     # 统一 HTML 版式（对齐 speedtest.build_telegram_lines / 全库通知模板）：
     # emoji 标题 + ━━━ 分隔线 + 键值概览（数值 <b>）+ 树形 TOP5（节点 <code>）+ 统一收尾区
     sep = '━' * 18
@@ -1711,7 +1762,7 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
     summary_lines = [
         '📈 <b>代理测速完成</b>',
         sep,
-        f'🕒 {esc(started_text)} ~ {esc(ended_text)}（耗时 {esc(duration_text)}）',
+        f'🕒 {esc(started_text)} ~ {esc(ended_text)}（耗时 {esc(duration_cn)}）',
         f'📊 节点：共 <b>{len(speed_results)}</b> 个 · 可用 <b>{len(ok_results)}</b> 个',
         '',
     ]
@@ -1739,13 +1790,12 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
     else:
         summary_lines.append('⚠️ 没有节点通过 provider 健康检查')
         summary_lines.append('')
-    # 统一收尾区（收尾区与正文间固定一个空行；TG_RUN_URL 缺席时仅显示时长）
+    # 统一收尾区（收尾区与正文间固定一个空行；与 tg_add_footer 同形态同降级链）
+    # 注: 正文的「耗时 X」是测速自身耗时，收尾区的「已运行 X」是 run 已运行时长，两者语义不同
     summary_lines.append('')
-    tg_run_url = os.environ.get('TG_RUN_URL', '')
-    if tg_run_url:
-        summary_lines.append(f'⏱ 已运行 <b>{esc(duration_text)}</b> · 🔗 <a href="{esc(tg_run_url)}">运行日志</a>')
-    elif duration_text:
-        summary_lines.append(f'⏱ 已运行 <b>{esc(duration_text)}</b>')
+    footer = tg_footer_line()
+    if footer:
+        summary_lines.append(footer)
     return summary_lines
 
 

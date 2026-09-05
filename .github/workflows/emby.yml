@@ -1512,14 +1512,8 @@ jobs:
             cancelled) STATUS_EMOJI="⏹";;
             *) STATUS_EMOJI="❓";;
           esac
-          # 运行时长：run 启动时刻（github.run_started_at，缺失则用本步骤时间兜底）
-          START_TS=$(date -d "${{ github.run_started_at }}" +%s 2>/dev/null || echo 0)
-          if [ "${START_TS:-0}" -gt 0 ]; then
-            DUR_SEC=$(( $(date +%s) - START_TS ))
-            DUR="$(printf '%dh %dm' $((DUR_SEC / 3600)) $(((DUR_SEC % 3600) / 60)))"
-          else
-            DUR="未知"
-          fi
+          # 运行时长不再在本 step 自算（旧 '%dh %dm' 写法与全库收尾区不一致）：
+          # 统一交给 tg_add_footer 读 step env 的 TG_RUN_STARTED_AT
           # 302 链路统计：直链命中/未取到/解析失败/回落 OpenList 次数（odlink /stats）
           OD_SUMMARY="odlink 未运行"
           if curl -fsS -m 5 http://127.0.0.1:5245/ping >/dev/null 2>&1; then
@@ -1571,7 +1565,8 @@ jobs:
           tg_add_kv msg "全库预热" "$WW_SUMMARY"
           tg_add_kv msg "客户端" "$CLIENTS"
           tg_add_kv msg "时间" "$(date '+%Y-%m-%d %H:%M:%S %Z')"
-          # 运行时长：本 step 已算好 DUR；TG_RUN_URL 缺席时 footer 仅含时长
+          # 统一收尾区（⏱ 已运行 X · 🔗 运行日志；读 step env 的 TG_RUN_URL / TG_RUN_STARTED_AT）
+          tg_add_footer msg
           echo "TG(收尾): 已构建统一版式消息"
           curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             -d chat_id=${{ secrets.TG_CHAT_ID }} \

@@ -372,9 +372,9 @@ flush_task_preview() {
 
     local _total_note=""
     if [ "${PREVIEW_TOTAL_UPD_COUNT:-0}" -gt 0 ]; then
-      _total_note="（"
-      [ "${PREVIEW_TOTAL_NEW_COUNT:-0}" -gt 0 ] && _total_note+="新增 ${PREVIEW_TOTAL_NEW_COUNT} · "
-      _total_note+="同名更新 ${PREVIEW_TOTAL_UPD_COUNT}）"
+      # 计数细节一律 " · " 分隔并入合计行（规范禁全角括号——旧「（新增 X · 同名更新 Y）」废弃）
+      _total_note=" · 同名更新 ${PREVIEW_TOTAL_UPD_COUNT}"
+      [ "${PREVIEW_TOTAL_NEW_COUNT:-0}" -gt 0 ] && _total_note=" · 新增 ${PREVIEW_TOTAL_NEW_COUNT}${_total_note}"
     fi
     local _fail_note=""
     if [ "${PREVIEW_FAIL_PAIRS:-0}" -gt 0 ]; then

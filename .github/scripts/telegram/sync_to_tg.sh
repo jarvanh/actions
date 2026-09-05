@@ -69,7 +69,11 @@ def run(cmd, capture=True, **kwargs):
 
 
 def notify(message):
-    """立即发送 Telegram 通知。失败只打印日志，不中断主流程。"""
+    """立即发送 Telegram 通知。失败只打印日志，不中断主流程。
+
+    统一收尾区（⏱ 已运行 X · 🔗 运行日志）由 tg_notify.sh 的 tg_add_footer 追加：
+    复用全库唯一真源，python 侧不再自造时长格式（无 TG_RUN_* 时自动跳过）。
+    """
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print(f"[notify] 跳过：缺少 TELEGRAM_BOT_TOKEN 或 TELEGRAM_CHAT_ID，消息: {message}")
         return
@@ -78,7 +82,9 @@ def notify(message):
         print(f"[notify] 跳过：通知脚本不存在: {tg_script}")
         return
     print(f"[notify] 发送即时通知: {message[:200]}")
-    result = run(["bash", "-c", f"source {shlex.quote(tg_script)} && send_tg {shlex.quote(message)}"])
+    result = run(["bash", "-c",
+                  f"source {shlex.quote(tg_script)} && msg={shlex.quote(message)} "
+                  f"&& tg_add_footer msg && send_tg \"$msg\""])
     if result.returncode != 0:
         print(f"[notify] 发送通知失败 (code {result.returncode}): {result.stderr}")
 
@@ -92,14 +98,18 @@ def shorten_name(name: str, max_len: int = 60) -> str:
 
 
 def build_fail_notify(title: str, file: str, elapsed: float, lines: list):
-    """构建统一格式的失败通知：标题 + 分隔线 + 📁文件 + ⏱耗时 + 附加行。"""
+    """构建统一格式的失败通知：标题 + 分隔线 + 键值区 + 附加行。
+
+    收尾区（⏱ 已运行 X · 🔗 运行日志）由 notify() 统一追加，此处不重复拼接；
+    这里的「耗时」是单个文件的处理耗时，属正文数据，与 run 已运行时长语义不同。
+    """
     parts = [
         f"{title}",
         "━━━━━━━━━━━━━━━━━━",
         "",
         f"📁 {shorten_name(os.path.basename(file))}",
-        f"📦 分组: {CAPTION_PREFIX}",
-        f"⏱ 耗时: {elapsed:.2f}s",
+        f"📦 分组：{CAPTION_PREFIX}",
+        f"⏱ 耗时：<b>{elapsed:.1f} 秒</b>",
     ]
     parts.extend(lines)
     return "\n".join(parts)
@@ -276,8 +286,8 @@ def get_video_list():
             "❌ 获取远端文件列表失败",
             "━━━━━━━━━━━━━━━━━━",
             "",
-            f"📦 分组: {CAPTION_PREFIX}",
-            f"⚠️ 原因: rclone lsjson 退出码 {result.returncode}",
+            f"📦 分组：{CAPTION_PREFIX}",
+            f"⚠️ 原因：rclone lsjson 退出码 {result.returncode}",
             "📄 stderr 见 Actions 日志",
         ]))
         return [], []
@@ -297,8 +307,8 @@ def get_video_list():
             "❌ 获取远端文件列表失败",
             "━━━━━━━━━━━━━━━━━━",
             "",
-            f"📦 分组: {CAPTION_PREFIX}",
-            f"⚠️ 原因: lsjson 输出解析失败: {e}",
+            f"📦 分组：{CAPTION_PREFIX}",
+            f"⚠️ 原因：lsjson 输出解析失败: {e}",
         ]))
         return [], []
 
@@ -415,7 +425,7 @@ def main():
                 "❌ 下载失败",
                 file, dl_elapsed,
                 [
-                    f"📦 大小: {human_size(size)}",
+                    f"📦 大小：{human_size(size)}",
                     "📄 rclone stderr:\n" + (result.stderr[-500:].strip() if result.stderr else "(无错误输出)"),
                 ],
             ))
@@ -494,8 +504,8 @@ def main():
                     "🗑 损坏视频已标记跳过",
                     file, up_elapsed,
                     [
-                        "⚠️ 原因: 源文件损坏，无法读取视频信息（moov atom 缺失）",
-                        "🔄 后续: 不再重复尝试，远端文件被替换后自动重试",
+                        "⚠️ 原因：源文件损坏，无法读取视频信息（moov atom 缺失）",
+                        "🔄 后续：不再重复尝试，远端文件被替换后自动重试",
                     ],
                 ))
             else:

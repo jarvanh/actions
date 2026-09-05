@@ -1718,12 +1718,15 @@ jobs:
               local repo="${GITHUB_REPOSITORY:-unknown-repo}"
               local run_id="${GITHUB_RUN_ID:-manual}"
               local run_url="https://github.com/${repo}/actions/runs/${run_id}"
-              local full_msg
-              full_msg=$(printf '⚠️ OpenClaw 归档告警\n\n问题: %s\nRun ID: %s\n链接: %s' "$msg" "$run_id" "$run_url")
-              curl -fsS --retry 3 --retry-delay 2 --max-time 20 \
-                -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-                -d chat_id="${TELEGRAM_CHAT_ID}" \
-                --data-urlencode text="$full_msg" >/dev/null || true
+              # 统一 HTML 版式（emoji 标题 + ━━━ 分隔线 + 键值区 + 收尾区）；
+              # source 幂等可重复；收尾区由 tg_add_footer 统一产出（勿自造时长/链接格式）
+              source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+              local full_msg=""
+              tg_add_title full_msg "⚠️ OpenClaw 归档告警"
+              tg_add_kv full_msg "问题" "$msg"
+              tg_add_kv full_msg "Run ID" "$run_id"
+              TG_RUN_URL="$run_url" TG_RUN_STARTED_AT="${TG_RUN_STARTED_AT:-}" tg_add_footer full_msg
+              send_tg "$full_msg" || true
             fi
           }
 
