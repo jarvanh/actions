@@ -132,6 +132,14 @@ tg_add_footer() {
     done
   fi
   [ -z "$line" ] && return 0
+  # 收尾区规范形态 = 与正文间固定一个空行。对"正文是否以换行结尾"不作要求：
+  # 缺尾换行时先补一个，否则下面的 \n 只是给正文末行收尾，空行会消失
+  # （历史踩坑：task_preview 合计行经 tg_append 拼接、无尾换行）
+  local cur="${!var}"
+  case "$cur" in
+    ''|*$'\n') ;;
+    *) tg_append "$var" $'\n' ;;
+  esac
   tg_append "$var" $'\n'"${line}"$'\n'
 }
 
