@@ -274,7 +274,8 @@ class Graph(object):
 
 
 class Resolver(object):
-    """复刻 rclone 的路径解析：逐段下钻，遇 remoteItem 切换 drive 继续。"""
+    """路径→直链解析：优先缓存与 Graph 路径寻址一次解析，逐段下钻作兜底
+    （兜底复刻 rclone 的行为：遇 remoteItem 切换 drive 继续）。"""
 
     def __init__(self, graph):
         self.graph = graph
@@ -287,7 +288,8 @@ class Resolver(object):
         self.link_cache = {}    # "3/电影/x.mkv" -> (url, size, expire_ts, modified)
         # 计数器：供 /stats 与收尾 TG 通知汇总本轮 302 链路运行情况
         self.stats = {"get": 0, "list": 0, "link_ok": 0, "link_miss": 0,
-                      "resolve_err": 0, "fallback": 0, "cross_drive": 0}
+                      "resolve_err": 0, "fallback": 0, "cross_drive": 0,
+                      "fast_path": 0}
         self._lock = threading.Lock()
 
     def bump(self, key, n=1):
@@ -351,7 +353,53 @@ class Resolver(object):
             return first_seg in self.shortcuts
 
     def resolve(self, segments):
-        """逐段下钻。返回 (driveId, itemId, is_dir, crossed, err, modified)。"""
+        """解析路径。返回 (driveId, itemId, is_dir, crossed, err, modified)。
+
+        三级策略（按成本从低到高）：
+        1. 整段路径已在 dir_cache（此前解析过/列目录回填过）→ 零 Graph 调用；
+        2. 路径寻址一次解析：首段快捷方式切盘后（bootstrap 已预缓存），
+           /drives/{d}/items/{id}:/{sub/…}: 一次请求拿到底——冷解析从 N 段
+           串行 Graph 往返压到 1 次（逐段每段一调、单次数百 ms，N 段深路径
+           冷解析数秒，是 302 起播慢的服务端主因）；
+        3. 寻址失败（中段快捷方式未被路径寻址跟随等）→ 逐段下钻兜底。
+        """
+        key = "/".join(segments)
+        with self._lock:
+            cached = self.dir_cache.get(key)
+            sc0 = bool(segments) and segments[0] in self.shortcuts
+        if cached:
+            drive, item_id, is_dir, modified = cached
+            return drive, item_id, is_dir, (1 if sc0 else 0), None, modified
+
+        if len(segments) > 1:
+            with self._lock:
+                cached0 = self.dir_cache.get(segments[0])
+            if cached0:
+                d0, i0 = cached0[0], cached0[1]
+                rest = "/".join(enc(s) for s in segments[1:])
+                url = ("%s/drives/%s/items/%s:/%s:"
+                       "?$select=id,name,size,folder,parentReference,remoteItem,lastModifiedDateTime") % (
+                    GRAPH, enc(d0), enc(i0), rest)
+                st, body, err = self.graph.req(url)
+                if st == 200 and body and not body.get("remoteItem"):
+                    drive = (body.get("parentReference") or {}).get("driveId", d0)
+                    item_id = body.get("id", "")
+                    is_dir = "folder" in body
+                    modified = ts(body.get("lastModifiedDateTime"))
+                    if item_id:
+                        self.bump("fast_path")
+                        with self._lock:
+                            self.dir_cache[key] = (drive, item_id, is_dir, modified)
+                        return drive, item_id, is_dir, 1, None, modified
+                # 终点是快捷方式（remoteItem）时也走兜底：下钻逻辑对 remoteItem
+                # 的跨盘换算更完整，不值得为这个罕见场景复制一份
+                log("路径寻址未命中 http=%s err=%s 段数=%d，回退逐段下钻"
+                    % (st, err, len(segments)))
+
+        return self._resolve_drill(segments)
+
+    def _resolve_drill(self, segments):
+        """逐段下钻（兜底路径，兼容中段快捷方式）。返回值同 resolve()。"""
         drive, item_id = self.root_drive, self.root_id
         crossed = 0
         is_dir = True
@@ -424,23 +472,41 @@ class Resolver(object):
                 self.link_cache[cache_key] = (url, size, now + LINK_TTL, modified)
         return url, size, modified
 
-    def list_children(self, drive, item_id):
+    def list_children(self, drive, item_id, cache_prefix=None):
+        """列目录。cache_prefix 给定时把子条目回填 dir_cache——列过的目录，
+        其下条目后续解析直接整路径命中缓存，不再逐段下钻（子级快捷方式按
+        bootstrap 同口径缓存为远程盘坐标）。"""
         items = []
-        url = "%s/drives/%s/items/%s/children?$select=name,id,size,folder,lastModifiedDateTime&$top=200" % (
+        url = "%s/drives/%s/items/%s/children?$select=name,id,size,folder,parentReference,remoteItem,lastModifiedDateTime&$top=200" % (
             GRAPH, enc(drive), enc(item_id))
+        new_cache = {}
         while url:
             st, body, err = self.graph.req(url)
             if st != 200 or not body:
                 log("列目录失败 http=%s err=%s" % (st, err))
                 break
             for it in body.get("value", []):
+                name = it.get("name", "")
+                modified = ts(it.get("lastModifiedDateTime"))
                 items.append({
-                    "name": it.get("name", ""),
+                    "name": name,
                     "size": it.get("size", 0),
                     "is_dir": "folder" in it,
-                    "modified": ts(it.get("lastModifiedDateTime")),
+                    "modified": modified,
                 })
+                ri = it.get("remoteItem")
+                if cache_prefix and name and it.get("id"):
+                    if ri:
+                        nd = (ri.get("parentReference") or {}).get("driveId", "")
+                        ni = ri.get("id", "")
+                        if nd and ni:
+                            new_cache["%s/%s" % (cache_prefix, name)] = (nd, ni, "folder" in ri, modified)
+                    else:
+                        new_cache["%s/%s" % (cache_prefix, name)] = (drive, it["id"], "folder" in it, modified)
             url = body.get("@odata.nextLink", "")
+        if new_cache:
+            with self._lock:
+                self.dir_cache.update(new_cache)
         return items
 
 
@@ -591,7 +657,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if api == "/api/fs/list":
             res.bump("list")
-            content = res.list_children(drive, item_id) if is_dir else []
+            content = res.list_children(drive, item_id, cache_prefix="/".join(segments)) if is_dir else []
             self._send(200, openlist_ok({
                 "content": content, "total": len(content), "readme": "",
                 "header": "", "write": False, "provider": "OneDrive"}))
