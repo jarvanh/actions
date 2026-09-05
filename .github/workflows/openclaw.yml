@@ -1543,24 +1543,17 @@ jobs:
               local repo="${GITHUB_REPOSITORY:-unknown-repo}"
               local run_id="${GITHUB_RUN_ID:-manual}"
               local run_url="https://github.com/${repo}/actions/runs/${run_id}"
-              # 统一 HTML 版式 + 统一收尾区（告警文本经 escape_html，动态值含特殊字符也安全）
+              # 统一 HTML 版式 + 统一收尾区（tg_add_* 内置转义，告警文本原样传入即可；
+              # 二次 escape_html 会把 & 变成 &amp;amp; 字面量直出）
               source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
               local full_msg=""
               tg_add_title full_msg "⚠️ OpenClaw 归档告警"
-              tg_add_note full_msg "$(escape_html "$msg")"
+              tg_add_note full_msg "$msg"
               tg_add_kv full_msg "Run ID" "${run_id}"
               TG_RUN_URL="$run_url" TG_RUN_STARTED_AT="${TG_RUN_STARTED_AT:-}" tg_add_footer full_msg
-              curl -fsS --retry 3 --retry-delay 2 --max-time 20 \
-                -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-                -d chat_id="${TELEGRAM_CHAT_ID}" \
-                -d parse_mode="HTML" \
-                -d disable_web_page_preview=true \
-                --data-urlencode text="$full_msg" >/dev/null \
-                || curl -fsS --retry 3 --retry-delay 2 --max-time 20 \
-                     -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-                     -d chat_id="${TELEGRAM_CHAT_ID}" \
-                     -d disable_web_page_preview=true \
-                     --data-urlencode text="$(_tg_strip_html "$full_msg")" >/dev/null || true
+              # 走发送层而非 curl 直发：HTML 解析失败自动退化纯文本重发（规范 §5），
+              # 429 限流按 retry_after 等待重试，disable_web_page_preview 内置
+              send_tg "$full_msg" || true
             fi
           }
 
