@@ -471,7 +471,8 @@ _progress_render() {
   # 阶段/统计不展示（progress_finalize 已清空各槽位，属过期信息）
   if [ "$running" -gt 0 ]; then
     local _running_title="📍 进行中 · ${running}"
-    [ "$finalized" -eq 1 ] && _running_title="⏸️ 进行中（未执行完）· ${running}"
+    # 规范：全角括号补充说明禁用；状态 emoji 统一表无 ⏸️（finalize 后仍在跑 = 🔄）
+    [ "$finalized" -eq 1 ] && _running_title="🔄 进行中 · ${running} · 未执行完"
     tg_add_section msg "$_running_title"
     tg_add_block msg "$(_progress_render_task_list "$running_lines")"
 

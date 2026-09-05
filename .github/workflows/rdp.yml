@@ -117,7 +117,7 @@ jobs:
         if ($dur) { $footer = "⏱ 已运行 <b>$dur</b>" }
         if ($Env:TG_RUN_URL) {
           if ($footer) { $footer += " · " }
-          $footer += "🔗 <a href=""$Env:TG_RUN_URL"">运行日志</a>"
+          $footer += "🔗 <a href=""$(Esc-Html $Env:TG_RUN_URL)"">运行日志</a>"
         }
         # 单一入口，平铺 kv 即可；元数据一律 " · <i>…</i>" 分隔 —— 禁全角括号
         # （规范见 docs/telegram-notify.md）
@@ -128,8 +128,16 @@ jobs:
           "有效期：<i>约 6 小时 · 超时自动关机</i>`n" +
           "连接方式：<i>Microsoft Remote Desktop / 任何 RDP 客户端，地址填上面这一行</i>"
         if ($footer) { $msg += "`n`n$footer" }
-        Invoke-RestMethod -Uri "https://api.telegram.org/bot$Env:TELEGRAM_BOT_TOKEN/sendMessage" `
-          -Method Post -Body @{ chat_id = $Env:TELEGRAM_CHAT_ID; text = $msg; parse_mode = 'HTML'; disable_web_page_preview = 'true' }
+        # 发送：HTML 解析失败自动退化纯文本重发（规范 §5：宁可朴素，不让通知消失）
+        try {
+          Invoke-RestMethod -Uri "https://api.telegram.org/bot$Env:TELEGRAM_BOT_TOKEN/sendMessage" `
+            -Method Post -Body @{ chat_id = $Env:TELEGRAM_CHAT_ID; text = $msg; parse_mode = 'HTML'; disable_web_page_preview = 'true' } | Out-Null
+        } catch {
+          $plain = $msg -replace '<[^>]+>', ''
+          $plain = $plain -replace '&amp;','&' -replace '&lt;','<' -replace '&gt;','>'
+          Invoke-RestMethod -Uri "https://api.telegram.org/bot$Env:TELEGRAM_BOT_TOKEN/sendMessage" `
+            -Method Post -Body @{ chat_id = $Env:TELEGRAM_CHAT_ID; text = $plain; disable_web_page_preview = 'true' } | Out-Null
+        }
 
     - name: Keep alive (6h)
       run: Start-Sleep -Seconds 21000

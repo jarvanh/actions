@@ -31,21 +31,21 @@ if [ "$FRAG_COUNT" -eq 0 ]; then
   exit 0
 fi
 
-# 收集文件名与大小，用于通知
+# 发送 Telegram 通知（统一 HTML 排版；明细超长自动分片）
+# 助手需在明细构建前可用：文件名经 escape_html（含 & < > 未转义会 400 整条退化）
+source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+
+# 收集文件名与大小，用于通知（平铺列表统一 "• " 前缀；元数据 " · <i>…</i>"，禁括号）
 FILE_DETAILS=""
 for f in "${FRAG_FILES[@]}"; do
   fname=$(basename "$f")
   fsize=$(du -h "$f" | cut -f1)
-  FILE_DETAILS+="🗑 ${fname} (${fsize})
-"
+  FILE_DETAILS+="• <code>$(escape_html "${fname}")</code> · <i>${fsize}</i>"$'\n'
 done
 
 # 删除残留文件
 find . -type f \( -name '*.mp4-Frag*' -o -name '*.part-Frag*' -o -name '*.ytdl' -o -name '*.m3u8' \) -delete
 echo "已清理 ${FRAG_COUNT} 个 yt-dlp 残留文件"
-
-# 发送 Telegram 通知（统一 HTML 排版；明细超长自动分片）
-source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 
 DIR_LABEL=$(basename "$TARGET_DIR")
 msg=""

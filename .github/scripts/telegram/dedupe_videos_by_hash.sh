@@ -23,6 +23,10 @@ WORKFLOW_LABEL="${WORKFLOW_LABEL:-91-tg}"
 # 从 SOURCE_REMOTE 提取目录名作为通知中的目录标识（如 onedrive:1/1024j/视频/91 → 91）
 DIR_LABEL=$(basename "${SOURCE_REMOTE#*:}")
 
+# 排版助手提前加载：明细条目构建时即做 escape_html（文件名含 & < > 未转义会
+# 触发 400、整条通知退化纯文本）；后文发送处的重复 source 为幂等
+source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh" 2>/dev/null || true
+
 # 一次性获取所有文件的服务端哈希（不下载文件，不修改元数据）
 # OneDrive 个人版仅支持 QuickXorHash，企业版/SharePoint 支持 SHA1/SHA256
 # 按优先级尝试：SHA1 → SHA256 → MD5 → QuickXorHash，使用第一个返回结果的哈希类型
@@ -116,44 +120,44 @@ for hash in "${!HASH_ENTRIES[@]}"; do
     # 排序：size 升序（小的先删），size 相同则 time 旧者优先删；保留最后一个（最大/最新）
     sorted=$(echo "$entries" | sort -t';' -k2,2n -k1,1)
     kept_path=$(echo "$sorted" | tail -n1 | cut -d';' -f3-)
-    group_details=""
+    group_entries=""
     while IFS=';' read -r t s p; do
       [ "$p" = "$kept_path" ] && continue
       [ -z "$p" ] && continue
       if [ "$AUTO_DELETE" = "true" ]; then
         if rclone deletefile "$SOURCE_REMOTE/$p" 2>/tmp/rclone_err.log; then
           REMOVED_COUNT=$((REMOVED_COUNT + 1))
-          group_details+=$'  🗑 删除 '"${p}"$'（'"${s}"$' 字节，'"${t}"$'）\n'
+          group_entries+="🗑 删除 <code>$(escape_html "${p}")</code> · <i>${s} 字节 · ${t}</i>"$'\n'
         else
-          group_details+=$'  ❌ 删除失败 '"${p}"$'\n'
+          group_entries+="❌ 删除失败 <code>$(escape_html "${p}")</code>"$'\n'
           echo "  ❌ 删除失败: $(tail -n 3 /tmp/rclone_err.log)"
         fi
       else
-        group_details+=$'  ⚠ 待删除（已跳过） '"${p}"$'（'"${s}"$' 字节，'"${t}"$'）\n'
+        group_entries+="⚠️ 待删除 · 已跳过 <code>$(escape_html "${p}")</code> · <i>${s} 字节 · ${t}</i>"$'\n'
       fi
     done <<< "$sorted"
-    DUP_DETAILS+=$'\n'"🔖 [${IDX}/${DUP_TOTAL}] 哈希 ${hash:0:12}"$'（'"${count}"$' 个，文件名相同，保留: '"${kept_path}"$'）\n'"${group_details}"
+    DUP_DETAILS+=$'\n'"🔖 <b>哈希 ${hash:0:12}</b> · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 文件名相同 · 保留 <code>$(escape_html "${kept_path}")</code>"$'\n'"$(tree_lines "${group_entries:-}")"
   else
     # 规则2：文件名不同但内容相同 → 删除修改时间旧的，保留最新
     sorted=$(echo "$entries" | sort -t';' -k1,1)
     kept_path=$(echo "$sorted" | tail -n1 | cut -d';' -f3-)
-    group_details=""
+    group_entries=""
     while IFS=';' read -r t s p; do
       [ "$p" = "$kept_path" ] && continue
       [ -z "$p" ] && continue
       if [ "$AUTO_DELETE" = "true" ]; then
         if rclone deletefile "$SOURCE_REMOTE/$p" 2>/tmp/rclone_err.log; then
           REMOVED_COUNT=$((REMOVED_COUNT + 1))
-          group_details+=$'  🗑 删除 '"${p}"$'（哈希一致，旧文件）\n'
+          group_entries+="🗑 删除 <code>$(escape_html "${p}")</code> · <i>哈希一致 · 旧文件</i>"$'\n'
         else
-          group_details+=$'  ❌ 删除失败 '"${p}"$'\n'
+          group_entries+="❌ 删除失败 <code>$(escape_html "${p}")</code>"$'\n'
           echo "  ❌ 删除失败: $(tail -n 3 /tmp/rclone_err.log)"
         fi
       else
-        group_details+=$'  ⚠ 待删除（已跳过） '"${p}"$'（哈希一致，旧文件）\n'
+        group_entries+="⚠️ 待删除 · 已跳过 <code>$(escape_html "${p}")</code> · <i>哈希一致 · 旧文件</i>"$'\n'
       fi
     done <<< "$sorted"
-    DUP_DETAILS+=$'\n'"🔖 [${IDX}/${DUP_TOTAL}] 哈希 ${hash:0:12}"$'（'"${count}"$' 个，文件名不同，保留: '"${kept_path}"$'）\n'"${group_details}"
+    DUP_DETAILS+=$'\n'"🔖 <b>哈希 ${hash:0:12}</b> · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 文件名不同 · 保留 <code>$(escape_html "${kept_path}")</code>"$'\n'"$(tree_lines "${group_entries:-}")"
   fi
 done
 
@@ -162,7 +166,7 @@ echo "=== ${WORKFLOW_LABEL} 去重日志 ==="
 echo "重复哈希数量: ${DUP_COUNT}"
 echo "删除重复文件数量: ${REMOVED_COUNT}"
 echo "--- 详情 ---"
-echo "${DUP_DETAILS}"
+printf '%s\n' "${DUP_DETAILS}" | sed -E 's/<[^>]*>//g'
 
 # 发送通知（按 4000 字符分片，避免超过 Telegram 4096 字符限制）
 source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
@@ -176,7 +180,7 @@ if [ "$DUP_COUNT" -gt 0 ]; then
   if [ "$AUTO_DELETE" = "true" ]; then
     tg_add_kv msg "模式" "自动删除已开启"
   else
-    tg_add_kv msg "模式" "仅通知（手动触发可开启 auto_delete_duplicates）"
+    tg_add_kv msg "模式" "仅通知 · 手动触发可开启 auto_delete_duplicates"
   fi
   if [ -n "$DUP_DETAILS" ]; then
     tg_add_section msg "📋 详情"

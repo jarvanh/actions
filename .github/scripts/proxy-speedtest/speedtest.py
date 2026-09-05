@@ -969,7 +969,7 @@ def build_telegram_lines(results, *, meta, gist_res, qualified_count):
     lines = [
         '📈 <b>代理节点测速完成</b>',
         sep,
-        f'🕒 {esc(started)} ~ {esc(ended)}（耗时 {esc(duration_text)}）',
+        f'🕒 {esc(started)} ~ {esc(ended)} · 耗时 {esc(duration_text)}',
         f'📊 节点：共 <b>{len(results)}</b> 个 · 可用 <b>{len(ok_results)}</b> 个',
         '',
     ]
@@ -977,7 +977,7 @@ def build_telegram_lines(results, *, meta, gist_res, qualified_count):
         best = top_results[0]
         lines.append(f"🏆 最快节点：<b>{esc(best.get('name', ''))}</b>")
         lines.append('')
-        lines.append('🥇 <b>TOP 5</b>（↓下载 · ↑上传 · 延迟ms）')
+        lines.append('⭐ <b>TOP 5</b> · <i>↓下载 · ↑上传 · 延迟ms</i>')
         top = top_results[:5]
         for idx, r in enumerate(top, 1):
             prefix = build_node_metric_prefix(_result_metric_item(r), mode)
@@ -998,15 +998,19 @@ def build_telegram_lines(results, *, meta, gist_res, qualified_count):
         # HTML 报告只写在运行机本地（含节点凭据，不外传），故无可分享链接。
         raw_url = ((gist_res.get('yaml') or {}).get('raw_url') or '').strip()
         html_url = (gist_res.get('html_url') or '').strip()
-        lines.append(f'  └─ ✅ 已{action}，达标 <b>{qualified_count}</b> 个节点（≥{DEFAULT_MIN_MEGABIT}兆）')
+        gist_lines = [f'✅ 已{action}，达标 <b>{qualified_count}</b> 个节点 · ≥{DEFAULT_MIN_MEGABIT}兆']
         if raw_url:
-            lines.append(f'  └─ 🔗 <a href="{esc(raw_url)}">订阅源（YAML）</a>')
+            gist_lines.append(f'🔗 <a href="{esc(raw_url)}">订阅源 YAML</a>')
         elif html_url:
-            lines.append(f'  └─ 🔗 <a href="{esc(html_url)}">Gist 页面</a>')
+            gist_lines.append(f'🔗 <a href="{esc(html_url)}">Gist 页面</a>')
+        _t = '  └─ '
+        for _i, _l in enumerate(gist_lines):
+            _c = '└─' if _i == len(gist_lines) - 1 else '├─'
+            lines.append(f'  {_c} {_l}')
     elif gist_res:
-        lines.append(f"  └─ ⚠️ 上传失败: {esc(gist_res.get('reason', ''))}")
+        lines.append(f"  └─ ⚠️ 上传失败：{esc(gist_res.get('reason', ''))}")
     else:
-        lines.append(f'  └─ ⚠️ 无达标节点（阈值 ≥{DEFAULT_MIN_MEGABIT}兆），未更新订阅')
+        lines.append(f'  └─ ⚠️ 无达标节点 · 阈值 ≥{DEFAULT_MIN_MEGABIT}兆 · 未更新订阅')
 
     # 统一收尾区（收尾区与正文间固定一个空行；与 tg_add_footer 同形态同降级链）
     # 注: 正文的「耗时 X」是测速自身耗时，收尾区的「已运行 X」是 run 已运行时长，两者语义不同

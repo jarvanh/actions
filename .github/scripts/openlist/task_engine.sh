@@ -1235,11 +1235,12 @@ sync_by_file_batches() {
 
       # 批次耗时（mm:ss）
       local _batch_elapsed=$(( $(date +%s) - ${BATCH_START_TS:-$(date +%s)} ))
+      # 中文时长（规范禁英文紧凑时长进通知：3m42s → 3 分 42 秒）
       local _batch_dur
       if [ "$_batch_elapsed" -ge 60 ]; then
-        _batch_dur="$((_batch_elapsed / 60))m$((_batch_elapsed % 60))s"
+        _batch_dur="$((_batch_elapsed / 60)) 分 $((_batch_elapsed % 60)) 秒"
       else
-        _batch_dur="${_batch_elapsed}s"
+        _batch_dur="${_batch_elapsed} 秒"
       fi
 
       if [ "$rc" -eq 0 ]; then
@@ -1330,7 +1331,8 @@ sync_by_file_batches() {
       { [ "$rc" -ne 0 ] && [ "$rc" -ne 4 ]; } && _bh_mark="❌"
       # 分项无条件拼接（用户偏好: 每个字段恒显，格式稳定）
       local _bh_entry="${_bh_mark} 批次 $((i+1))：共 ${batch_file_count} 个文件，成功 ${_ok_n} · 修复 ${_fixed_n} · 失败 ${_fail_n} · 跳过 ${_onf_n} · 已有 ${_have_n}"
-      _bh_entry+=" · ⏱ ${_batch_dur}"
+      # 正文耗时数据：不加 ⏱ 前缀（那是收尾区专用，勿冒充）
+      _bh_entry+=" · 耗时 ${_batch_dur}"
       [ "${_batch_bytes:-0}" -gt 0 ] && _bh_entry+=" · 📤 $(format_bytes "${_batch_bytes:-0}")"
       _progress_batch_history_add "$((i+1))" "$_bh_entry"
     fi

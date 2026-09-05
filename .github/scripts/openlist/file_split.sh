@@ -67,7 +67,7 @@ send_video_split_notification() {
       else
         log_summary=$(tail -c 1200 "$log_file" 2>/dev/null || echo "无法读取日志")
       fi
-      tg_add_section message "🧾 日志摘要（当前文件）"
+      tg_add_section message "🧾 日志摘要 · 当前文件"
       # 日志为原始输出，转义后 <pre> 等宽展示
       tg_add_block message "<pre>$(escape_html "$log_summary")</pre>"
     fi
