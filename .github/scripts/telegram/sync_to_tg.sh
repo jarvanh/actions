@@ -29,6 +29,7 @@ rclone cat "$SOURCE_REMOTE/failed_videos.json" 2>/dev/null > "$TMP_DIR/failed_vi
 # 所有核心逻辑交给 Python：列出、比较、下载、上传、记录
 # 只需要一个持久化文件 uploaded_videos.json（versioned JSON 对象，可扩展元数据），不再需要中间文件
 python3 - "$SOURCE_REMOTE" "$CHANNEL_ID" "$CAPTION_PREFIX" "$TMP_DIR" <<'PYEOF'
+import html as html_mod
 import json
 import os
 import shlex
@@ -97,19 +98,35 @@ def shorten_name(name: str, max_len: int = 60) -> str:
     return f"{name[:keep]}...{name[-keep:]}"
 
 
+# 分隔线与 tg_notify.sh 的 TG_SEP 同形（18 个全角横线）。python 侧按规范
+# 只出结构化数据、不自造版式，这里仅为多 处失败通知复用同一常量（勿手写散置）
+TG_SEP = "━" * 18
+
+
+def esc(s) -> str:
+    """动态内容进 HTML 消息前必须转义（与 tg_notify.sh escape_html 同规则）。"""
+    return html_mod.escape(str(s), quote=False)
+
+
+def fmt_secs(x: float) -> str:
+    """秒数中文形态（规范禁英文紧凑时长进通知：12.34s → 12.34 秒）。"""
+    return f"{x:.2f} 秒"
+
+
 def build_fail_notify(title: str, file: str, elapsed: float, lines: list):
     """构建统一格式的失败通知：标题 + 分隔线 + 键值区 + 附加行。
 
     收尾区（⏱ 已运行 X · 🔗 运行日志）由 notify() 统一追加，此处不重复拼接；
-    这里的「耗时」是单个文件的处理耗时，属正文数据，与 run 已运行时长语义不同。
+    这里的「耗时」是单个文件的处理耗时，属正文数据，与 run 已运行时长语义不同
+    （故用 耗时：N 秒 kv 形态，不加 ⏱ 前缀冒充收尾）。动态内容一律 esc()。
     """
     parts = [
-        f"{title}",
-        "━━━━━━━━━━━━━━━━━━",
+        esc(title),
+        TG_SEP,
         "",
-        f"📁 {shorten_name(os.path.basename(file))}",
-        f"📦 分组：{CAPTION_PREFIX}",
-        f"⏱ 耗时：<b>{elapsed:.1f} 秒</b>",
+        f"📁 {esc(shorten_name(os.path.basename(file)))}",
+        f"📦 分组：{esc(CAPTION_PREFIX)}",
+        f"耗时：{elapsed:.1f} 秒",
     ]
     parts.extend(lines)
     return "\n".join(parts)
@@ -284,9 +301,9 @@ def get_video_list():
         print(f"[get_video_list] stderr: {result.stderr[-2000:] if result.stderr else '(无)'}")
         notify("\n".join([
             "❌ 获取远端文件列表失败",
-            "━━━━━━━━━━━━━━━━━━",
+            TG_SEP,
             "",
-            f"📦 分组：{CAPTION_PREFIX}",
+            f"📦 分组：{esc(CAPTION_PREFIX)}",
             f"⚠️ 原因：rclone lsjson 退出码 {result.returncode}",
             "📄 stderr 见 Actions 日志",
         ]))
@@ -305,10 +322,10 @@ def get_video_list():
         print(err_msg)
         notify("\n".join([
             "❌ 获取远端文件列表失败",
-            "━━━━━━━━━━━━━━━━━━",
+            TG_SEP,
             "",
-            f"📦 分组：{CAPTION_PREFIX}",
-            f"⚠️ 原因：lsjson 输出解析失败: {e}",
+            f"📦 分组：{esc(CAPTION_PREFIX)}",
+            f"⚠️ 原因：lsjson 输出解析失败：{esc(e)}",
         ]))
         return [], []
 
@@ -375,7 +392,7 @@ def main():
         f"{skip_labels.get(reason, reason)} {cnt}"
         for reason, cnt in skip_counts.most_common()
     ]
-    skipped_summary = f"{len(skipped)} 条" + (f"（{' · '.join(skip_parts)}）" if skip_parts else "")
+    skipped_summary = f"{len(skipped)} 条" + (f" · {' · '.join(skip_parts)}" if skip_parts else "")
 
     # 保持原 rclone lsjson 日志（含所有条目数），下一行按用户要求输出统一的统计格式
     print(f"rclone lsjson 返回 {total + len(skipped)} 条条目，视频文件 {total} 条，已上传 {uploaded_before} 条，待上传 {pending_count} 条，损坏已跳过 {corrupt_skipped} 条")
@@ -420,13 +437,13 @@ def main():
             print(result.stderr[-2000:] if result.stderr else "(无错误输出)")
             print("------------------------")
             failed += 1
-            failed_list.append(f"- {file}（下载失败, {dl_elapsed:.2f}s）")
+            failed_list.append(f"{file} · 下载失败 · 耗时 {fmt_secs(dl_elapsed)}")
             notify(build_fail_notify(
                 "❌ 下载失败",
                 file, dl_elapsed,
                 [
                     f"📦 大小：{human_size(size)}",
-                    "📄 rclone stderr:\n" + (result.stderr[-500:].strip() if result.stderr else "(无错误输出)"),
+                    "📄 rclone stderr：\n" + esc(result.stderr[-500:].strip() if result.stderr else "(无错误输出)"),
                 ],
             ))
             continue
@@ -476,7 +493,7 @@ def main():
             # 立即持久化到远端，避免 Action 超时被 kill 时丢失全部进度
             flush_uploaded_to_remote(uploaded)
             sent += 1
-            sent_list.append(f"- {file} (上传耗时 {up_elapsed:.2f}s)")
+            sent_list.append(f"{file} · 上传耗时 {fmt_secs(up_elapsed)}")
             print(f"✅ 上传完成: {file} (总处理耗时 {up_elapsed:.2f}s)")
         else:
             err_tail = tail_file(proc_log, 15)
@@ -499,7 +516,7 @@ def main():
                     "failed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 }
                 flush_failed_to_remote(failed_map)
-                failed_list.append(f"- {file}（源文件损坏已标记跳过, {up_elapsed:.2f}s）")
+                failed_list.append(f"{file} · 源文件损坏已标记跳过 · 耗时 {fmt_secs(up_elapsed)}")
                 notify(build_fail_notify(
                     "🗑 损坏视频已标记跳过",
                     file, up_elapsed,
@@ -509,11 +526,11 @@ def main():
                     ],
                 ))
             else:
-                failed_list.append(f"- {file}（处理/上传失败, {up_elapsed:.2f}s）")
+                failed_list.append(f"{file} · 处理/上传失败 · 耗时 {fmt_secs(up_elapsed)}")
                 notify(build_fail_notify(
                     "❌ 处理/上传失败",
                     file, up_elapsed,
-                    [f"📄 输出尾部:\n{err_tail}"] if err_tail else ["📄 无详细输出，见 Actions 日志"],
+                    [f"📄 输出尾部：\n{esc(err_tail)}"] if err_tail else ["📄 无详细输出，见 Actions 日志"],
                 ))
 
         # 清理工作目录
@@ -591,6 +608,18 @@ SKIPPED_DETAILS=$(python3 -c "import json,sys; d=json.load(open('$STATS_FILE'));
 # 发送通知
 source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 
+# 逐行 escape_html（tree_lines 输入必须已转义）：python 侧按职责分层只出
+# 结构化数据，HTML 一律在 bash 渲染侧统一做——文件名含 & < > 时未转义会
+# 触发 400、整条通知退化纯文本（2026-09-05 审计补的缺口）
+esc_lines() {
+  local _l _out=""
+  while IFS= read -r _l; do
+    [ -z "$_l" ] && continue
+    _out+="$(escape_html "$_l")"$'\n'
+  done <<< "$1"
+  printf '%s' "${_out%$'\n'}"
+}
+
 # 跳过/过滤明细渲染: 按原因分组 —— 组头 "<b>原因</b> · N"，条目 <code>文件名</code> 树形列出。
 # 输入: 多行 "原因\t路径"（python 侧产出）；每组最多 SKIP_DETAIL_MAX 条，超出折叠为
 # "还有 N 条…"（43 条损坏全列会刷屏，且通知会顶到分片边界）
@@ -634,11 +663,11 @@ if [ "$SKIPPED_COUNT" -gt 0 ]; then
 fi
 if [ -n "$SENT_LIST" ]; then
   tg_add_section msg "✅ 已上传"
-  tg_add_block msg "$(tree_lines "$SENT_LIST")"
+  tg_add_block msg "$(tree_lines "$(esc_lines "$SENT_LIST")")"
 fi
 if [ -n "$FAILED_LIST" ]; then
   tg_add_section msg "❌ 失败"
-  tg_add_block msg "$(tree_lines "$FAILED_LIST")"
+  tg_add_block msg "$(tree_lines "$(esc_lines "$FAILED_LIST")")"
 fi
 if [ -n "$SKIPPED_DETAILS" ]; then
   tg_add_section msg "⚠️ 跳过/过滤文件"

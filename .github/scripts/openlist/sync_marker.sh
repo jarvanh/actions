@@ -766,7 +766,7 @@ send_sync_warning() {
   fi
 
   if [ -n "$missing_dirs" ]; then
-    tg_add_section msg "📁 缺失的目录（可能被删除）"
+    tg_add_section msg "📁 缺失的目录 · <i>可能被删除</i>"
     while IFS= read -r d; do
       [ -n "$d" ] && tg_append msg "• <code>$(escape_html "$d")</code>"$'\n'
     done <<< "$missing_dirs"
@@ -813,7 +813,7 @@ send_sync_skipped() {
   local msg=""
   # 跳过窗口由任务开关决定（--1d-skip=24h / --2d-skip=48h / ...），标题动态展示
   local skip_window_hours=$((SYNC_SKIP_SECONDS / 3600))
-  tg_add_title msg "⏭️ 同步任务跳过（${skip_window_hours} 小时内已成功）"
+  tg_add_title msg "⏭️ 同步任务跳过 · ${skip_window_hours} 小时内已成功"
   tg_add_kv msg "任务" "$task_name"
   tg_add_path msg "源端" "$source_path"
   tg_add_path msg "目标" "$dest_path"
@@ -822,7 +822,7 @@ send_sync_skipped() {
   tg_add_kv msg "距今" "${MARKER_SINCE_HOURS} 小时"
   tg_add_kv msg "记录大小" "$(format_bytes "$marker_bytes") · ${marker_count} 文件"
   if [ "${fixed_count:-0}" -gt 0 ]; then
-    tg_add_kv msg "已修复文件" "${fixed_count} 个 · $(format_bytes "$fixed_bytes")（以非原名存在于目标端）"
+    tg_add_kv msg "已修复文件" "${fixed_count} 个 · $(format_bytes "$fixed_bytes") · 以非原名存在于目标端"
     # 修复方式汇总（按 restore.kind 分组统计；TSV 交给 bash 格式化，
     # 字节数走 format_bytes 人类可读单位，summary 缩进为说明行）
     local method_summary
@@ -867,7 +867,7 @@ send_sync_skipped() {
     if [[ "$_p_bytes" =~ ^[0-9]+$ ]] && [[ "$_p_count" =~ ^[0-9]+$ ]] \
        && { [ "$_p_bytes" -gt 0 ] || [ "$_p_count" -gt 0 ]; }; then
       tg_add_section msg "📦 本次未传"
-      tg_append msg "<b>$(format_bytes "$_p_bytes")</b> / <b>${_p_count}</b> 文件 <i>（两端仍存在差异，因落在跳过窗口内未传，非故障）</i>"$'\n'
+      tg_append msg "<b>$(format_bytes "$_p_bytes")</b> / <b>${_p_count}</b> 文件 <i>· 两端仍存在差异，因落在跳过窗口内未传，非故障</i>"$'\n'
     fi
   fi
 

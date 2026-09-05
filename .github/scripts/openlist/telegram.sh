@@ -5,6 +5,7 @@
 # 依赖环境变量:
 #   TELEGRAM_BOT_TOKEN — Telegram Bot API Token（由 workflow secrets 注入）
 #   TELEGRAM_CHAT_ID   — 目标 Chat ID（由 workflow secrets 注入）
+#   （历史名 TG_BOT_TOKEN / TG_CHAT_ID 自动兼容——与 tg_notify.sh 同款别名回退）
 # 依赖全局变量:
 #   PROGRESS_MSG_ID_FILE — 进度消息 ID 存储文件路径
 #   PROGRESS_SENT_IDS_LOG — 本轮已发进度消息 id 清单（finalize 兑底清孤儿，sync_progress.sh 定义）
@@ -42,6 +43,11 @@
 
 # 统一分隔线（18 个全角横线）
 TG_SEP='━━━━━━━━━━━━━━━━━━'
+
+# 凭据变量名兼容（与 tg_notify.sh 同款，两文件同步维护）：历史名自动回退，
+# 防止名字错接导致 chat_id 为空、通知静默消失
+: "${TELEGRAM_BOT_TOKEN:=${TG_BOT_TOKEN:-}}"
+: "${TELEGRAM_CHAT_ID:=${TG_CHAT_ID:-}}"
 
 # 追加原始文本到消息变量（不做任何转义/格式化）
 # 用法: tg_append <var> <text>

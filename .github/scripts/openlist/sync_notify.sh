@@ -121,10 +121,10 @@ _send_sync_result_notification() {
   if [[ "$source_count_raw" =~ ^[0-9]+$ ]] && [[ "$dest_count_raw" =~ ^[0-9]+$ ]]; then
     local count_diff=$((source_count_raw - dest_count_raw))
     if [ "$count_diff" -ne 0 ]; then
-      count_info="<b>差异 ${count_diff}</b>（源端 ${source_count} / 目标 ${dest_count}）"
+      count_info="<b>差异 ${count_diff}</b> · 源端 ${source_count} / 目标 ${dest_count}"
       diff_files_list=$(_build_diff_files_list "$source_path" "$dest_path" "${extra_args[@]}")
     else
-      count_info="<b>${source_count}</b>（一致）"
+      count_info="<b>${source_count}</b> · 一致"
     fi
   else
     count_info="源端 <b>${source_count}</b> / 目标 <b>${dest_count}</b>"
@@ -229,7 +229,7 @@ _send_sync_result_notification() {
     # 根据错误类型构建状态消息
     local fail_status_msg="部分文件无法同步"
     if [ "$has_object_not_found" -eq 1 ]; then
-      fail_status_msg="源文件不存在（object not found），部分文件无法同步"
+      fail_status_msg="源文件不存在 · object not found · 部分文件无法同步"
     fi
     local partial_msg=""
     _notify_add_header partial_msg "⚠️ ${task_name} 部分文件同步失败" "$fail_status_msg"
@@ -275,10 +275,10 @@ _send_sync_result_notification() {
     local err_title err_status
     if [ "$is_partial_failure" -eq 1 ]; then
       err_title="⚠️ ${task_name} 部分文件同步失败"
-      err_status="部分文件同步失败（exit=${sync_status}）"
+      err_status="部分文件同步失败 · exit=${sync_status}"
     else
       err_title="⚠️ ${task_name} 同步失败"
-      err_status="同步失败（exit=${sync_status}）"
+      err_status="同步失败 · exit=${sync_status}"
     fi
     local err_msg=""
     _notify_add_header err_msg "$err_title" "$err_status"
@@ -320,7 +320,7 @@ _send_sync_result_notification() {
     local ok_message=""
     if [ "$is_partial_success" -eq 1 ]; then
       # 同步"成功"但目标文件数少于源端，视为部分失败
-      _notify_add_header ok_message "⚠️ ${task_name} 部分文件同步失败" "部分文件同步失败（exit=0，文件数不一致）"
+      _notify_add_header ok_message "⚠️ ${task_name} 部分文件同步失败" "部分文件同步失败 · exit=0 · 文件数不一致"
     else
       _notify_add_header ok_message "✅ ${task_name} 同步完成"
     fi

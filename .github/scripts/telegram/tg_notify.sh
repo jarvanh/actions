@@ -10,6 +10,7 @@
 #     不切 UTF-8 多字节字符）
 # 用法: source tg_notify.sh
 # 环境变量: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+#   （历史名 TG_BOT_TOKEN / TG_CHAT_ID 自动兼容——见下方别名回退）
 # 收尾接线（可选，缺席时 tg_add_footer 优雅降级）:
 #   TG_RUN_URL        运行日志链接（workflow 注入 https://github.com/<repo>/actions/runs/<id>）
 #   TG_RUN_STARTED_AT run 起始 ISO 时间（workflow 注入 ${{ github.run_started_at }}）
@@ -32,6 +33,13 @@
 # bash 5.2+ patsub_replacement 会破坏 escape_html 的实体替换（"&" 被当作匹配
 # 文本引用），旧 bash 无此选项，shopt 报错被吞（与 openlist/utils.sh 同款防护）
 shopt -u patsub_replacement 2>/dev/null || true
+
+# 凭据变量名兼容：本层真源是 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID，但历史上
+# 部分调用方（如 emby.yml watchdog）注入的是 TG_BOT_TOKEN / TG_CHAT_ID——名字
+# 错接时 chat_id 为空、API 400、再被调用方的 || true 吞掉 = 通知静默消失
+# （2026-09-05 审计发现）。这里做一次性别名回退，调用方两种名字都能用。
+: "${TELEGRAM_BOT_TOKEN:=${TG_BOT_TOKEN:-}}"
+: "${TELEGRAM_CHAT_ID:=${TG_CHAT_ID:-}}"
 
 # ===== 排版助手 =====
 
@@ -153,6 +161,26 @@ tree_lines() {
     if [ "$_last" = "1" ]; then _out+="  └─ ${_line}"$'\n'; else _out+="  ├─ ${_line}"$'\n'; fi
   done <<< "$_in"
   printf '%s' "${_out%$'\n'}"
+}
+
+# 文件列表渲染一站式：逐行 <code>转义</code> → 超过 max 行折叠"还有 N 条…"
+# （折叠行并入条目流，末条 └─ 由 tree_lines 统一决定，禁双 └─）→ tree_lines。
+# 用法: tree_code_fold <多行文本> [每组上限，默认 8]
+# 输入必须是未转义的裸行；动态文件名含 & < > 时未转义会触发 400、整条退化纯文本
+tree_code_fold() {
+  local _in="$1" _max="${2:-8}" _total _entries="" _l _n=0
+  _total=$(printf '%s\n' "$_in" | { grep -c . || true; })
+  [ "${_total:-0}" -eq 0 ] && return 0
+  while IFS= read -r _l; do
+    [ -z "$_l" ] && continue
+    _n=$((_n + 1))
+    [ "$_n" -gt "$_max" ] && break
+    _entries+="<code>$(escape_html "$_l")</code>"$'\n'
+  done <<< "$_in"
+  if [ "$_total" -gt "$_max" ]; then
+    _entries+="<i>还有 $((_total - _max)) 条…</i>"$'\n'
+  fi
+  tree_lines "$_entries"
 }
 
 # ===== 发送层 =====

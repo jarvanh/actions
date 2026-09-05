@@ -825,13 +825,13 @@ jobs:
           tg_add_title msg "🟢 OpenClaw Runner SSH 入口"
           tg_add_path msg "SSH" "ssh runner@${TS_HOST}"
           tg_add_path msg "IP" "ssh runner@${TS_IP}"
-          tg_add_kv msg "出口节点" "已广播（可作为出口节点）"
-          tg_add_kv msg "AI 网关" "$(if [ "$AI_BACKEND" = "cliproxyapi" ]; then echo "CLIProxyAPI（回退）"; else echo "CliRelay（全栈）"; fi)"
+          tg_add_kv msg "出口节点" "已广播 · 可作为出口节点"
+          tg_add_kv msg "AI 网关" "$(if [ "$AI_BACKEND" = "cliproxyapi" ]; then echo "CLIProxyAPI · 回退"; else echo "CliRelay · 全栈"; fi)"
           [ -n "$AI_FALLBACK_REASON" ] && tg_add_kv msg "回退原因" "$AI_FALLBACK_REASON"
           [ -n "${TS_FQDN:-}" ] && tg_add_kv msg "RustDesk 直连" "${TS_FQDN}:21118"
           tg_add_kv msg "出口 IP" "${PUB_IP}"
           tg_add_kv msg "ISP" "${IP_ISP}"
-          tg_add_kv msg "ASN" "AS${IP_ASN}（${IP_ORG}）"
+          tg_add_kv msg "ASN" "AS${IP_ASN} · ${IP_ORG}"
           tg_add_kv msg "位置" "${IP_LOC}"
           tg_add_section msg "批准方式"
           tg_add_block msg "• 管理页：admin/machines → openclaw → Edit routes → 勾选 Exit Node
@@ -1261,9 +1261,9 @@ jobs:
             [ -n "$fallback_version" ] && tg_add_path msg "Fallback" "$fallback_version"
             [ -n "$fallback_version_source" ] && tg_add_kv msg "Fallback 来源" "$fallback_version_source"
             [ -n "$recorded_successful_version" ] && tg_add_path msg "成功版本记录" "$recorded_successful_version"
-            [ -n "$initial_start_duration_sec" ] && tg_add_kv msg "首次启动耗时" "${initial_start_duration_sec}s"
-            [ -n "$doctor_fix_duration_sec" ] && tg_add_kv msg "Doctor 修复耗时" "${doctor_fix_duration_sec}s"
-            [ -n "$fallback_reinstall_duration_sec" ] && tg_add_kv msg "Fallback 重装耗时" "${fallback_reinstall_duration_sec}s"
+            [ -n "$initial_start_duration_sec" ] && tg_add_kv msg "首次启动耗时" "${initial_start_duration_sec} 秒"
+            [ -n "$doctor_fix_duration_sec" ] && tg_add_kv msg "Doctor 修复耗时" "${doctor_fix_duration_sec} 秒"
+            [ -n "$fallback_reinstall_duration_sec" ] && tg_add_kv msg "Fallback 重装耗时" "${fallback_reinstall_duration_sec} 秒"
             [ -n "$ssh_entry" ] && tg_add_path msg "SSH 调试" "$ssh_entry"
             tg_add_section msg "🧾 关键日志"
             tg_add_block msg "<pre>$(escape_html "$error_summary")</pre>"
@@ -1580,7 +1580,7 @@ jobs:
               else
                 rc=$?
                 echo "[$(date '+%F %T')] ⚠️ openclaw.tar.gz upload failed (rc=$rc): ${openclaw_upload_output}"
-                send_telegram_alert "$(printf 'openclaw.tar.gz 上传失败（rc=%s)\n原因: rclone 上传失败\n详情: %s' "$rc" "${openclaw_upload_output:-无输出}")"
+                send_telegram_alert "$(printf 'openclaw.tar.gz 上传失败 · rc=%s\n原因：rclone 上传失败\n详情：%s' "$rc" "${openclaw_upload_output:-无输出}")"
               fi
             else
               rc=$?
@@ -1590,7 +1590,7 @@ jobs:
                 continue
               else
                 echo "[$(date '+%F %T')] ⚠️ openclaw.tar.gz archive failed in periodic archive (rc=$rc): ${openclaw_archive_output}"
-                send_telegram_alert "$(printf 'openclaw.tar.gz 归档失败（rc=%s)\n原因: %s' "$rc" "${openclaw_archive_output:-归档脚本无输出}")"
+                send_telegram_alert "$(printf 'openclaw.tar.gz 归档失败 · rc=%s\n原因：%s' "$rc" "${openclaw_archive_output:-归档脚本无输出}")"
               fi
             fi
 
@@ -1625,7 +1625,7 @@ jobs:
               else
                 rc=$?
                 echo "[$(date '+%F %T')] ⚠️ ${AI_LABEL}.tar.gz upload failed (rc=$rc): ${ai_upload_output}"
-                send_telegram_alert "$(printf '%s.tar.gz 上传失败（rc=%%s)\n原因: rclone 上传失败\n详情: %%s' "$AI_LABEL" "$rc" "${ai_upload_output:-无输出}")"
+                send_telegram_alert "$(printf '%s.tar.gz 上传失败 · rc=%%s\n原因：rclone 上传失败\n详情：%%s' "$AI_LABEL" "$rc" "${ai_upload_output:-无输出}")"
               fi
             else
               rc=$?
@@ -1633,10 +1633,10 @@ jobs:
                 echo "[$(date '+%F %T')] ⏭️ previous archive still running, skip ${AI_LABEL} archive"
               elif [ "$rc" -eq 3 ]; then
                 echo "[$(date '+%F %T')] ⚠️ ${AI_LABEL} archive skipped because deployment/data directory is missing (rc=$rc): ${ai_archive_output}"
-                send_telegram_alert "$(printf '%s 归档跳过（rc=%%s）\n原因: 本地部署/数据目录缺失（通常表示网关容器启动步骤被跳过或失败）\n详情: %%s' "$AI_LABEL" "$rc" "${ai_archive_output:-ai_dir_missing}")"
+                send_telegram_alert "$(printf '%s 归档跳过 · rc=%%s\n原因：本地部署/数据目录缺失 · 通常表示网关容器启动步骤被跳过或失败\n详情：%%s' "$AI_LABEL" "$rc" "${ai_archive_output:-ai_dir_missing}")"
               else
                 echo "[$(date '+%F %T')] ⚠️ ${AI_LABEL} archive failed in periodic archive (rc=$rc): ${ai_archive_output}"
-                send_telegram_alert "$(printf '%s.tar.gz 归档失败（rc=%%s)\n原因: %%s' "$AI_LABEL" "$rc" "${ai_archive_output:-归档脚本无输出}")"
+                send_telegram_alert "$(printf '%s.tar.gz 归档失败 · rc=%%s\n原因：%s' "$AI_LABEL" "$rc" "${ai_archive_output:-归档脚本无输出}")"
               fi
             fi
             sleep 1200

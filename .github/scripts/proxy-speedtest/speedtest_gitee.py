@@ -1447,16 +1447,33 @@ def send_telegram(env, text):
     保留 429 语义由 HTTP 层报错）。文本应使用全库统一 HTML 版式（emoji 标题 + ━━━
     分隔线 + <b>/<code>/<i> + 统一收尾行）。"""
     bot = env.get('TELEGRAM_BOT_TOKEN') or env.get('TG_BOT_TOKEN')
-    chat = env.get('TELEGRAM_CHAT_ID')
+    chat = env.get('TELEGRAM_CHAT_ID') or env.get('TG_CHAT_ID')
     if not bot or not chat:
         return {'sent': False, 'reason': 'missing TELEGRAM_BOT_TOKEN/TG_BOT_TOKEN or TELEGRAM_CHAT_ID'}
 
     def _post(data):
-        payload = urllib.parse.urlencode(data).encode()
-        req = urllib.request.Request(f'https://api.telegram.org/bot{bot}/sendMessage',
-                                     data=payload, method='POST')
-        with urllib.request.urlopen(req, timeout=60) as r:
-            return json.load(r)
+        # 429 限流按 retry_after 等待重试（规范 §5，与 tg_notify.sh 同语义）
+        for _attempt in range(3):
+            payload = urllib.parse.urlencode(data).encode()
+            req = urllib.request.Request(f'https://api.telegram.org/bot{bot}/sendMessage',
+                                         data=payload, method='POST')
+            try:
+                with urllib.request.urlopen(req, timeout=60) as r:
+                    return json.load(r)
+            except urllib.error.HTTPError as e:
+                body = e.read().decode('utf-8', 'replace')
+                if e.code == 429:
+                    m = re.search(r'"retry_after":(\d+)', body)
+                    time.sleep(min(int(m.group(1)), 30) if m else 5)
+                    continue
+                raise HTTPErrorWithBody(e, body)
+        raise RuntimeError('telegram 429 retry exhausted')
+
+    class HTTPErrorWithBody(urllib.error.HTTPError):
+        # 保留响应体供外层识别 "can't parse entities"
+        def __init__(self, e, body):
+            super().__init__(e.url, e.code, e.msg, e.hdrs, e.fp)
+            self.body_text = body
 
     html_text = text
     for parse_mode in ('HTML', None):
@@ -1473,7 +1490,9 @@ def send_telegram(env, text):
         try:
             res = _post(data)
         except urllib.error.HTTPError as e:
-            body = e.read().decode('utf-8', 'replace')
+            body = getattr(e, 'body_text', None)
+            if body is None:
+                body = e.read().decode('utf-8', 'replace')
             if parse_mode == 'HTML' and "can't parse entities" in body:
                 continue  # 退化纯文本重发
             return {'sent': False, 'reason': body[:200]}
@@ -1771,18 +1790,18 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
     summary_lines = [
         '📈 <b>代理测速完成</b>',
         sep,
-        f'🕒 {esc(started_text)} ~ {esc(ended_text)}（耗时 {esc(duration_cn)}）',
+        f'🕒 {esc(started_text)} ~ {esc(ended_text)} · 耗时 {esc(duration_cn)}',
         f'📊 节点：共 <b>{len(speed_results)}</b> 个 · 可用 <b>{len(ok_results)}</b> 个',
         '',
     ]
     if aborted_due_to_runtime:
-        summary_lines.append(f'⚠️ 本轮已中止: {esc(runtime_abort_reason)}')
+        summary_lines.append(f'⚠️ 本轮已中止：{esc(runtime_abort_reason)}')
         summary_lines.append('')
     if ok_results_by_download:
         best = ok_results_by_download[0]
         summary_lines.append(f"🏆 最快节点：<b>{esc(best.get('name', ''))}</b>")
         summary_lines.append('')
-        summary_lines.append('🥇 <b>TOP 5</b>')
+        summary_lines.append('⭐ <b>TOP 5</b>')
         top = ok_results_by_download[:5]
         for idx, item in enumerate(top, 1):
             if speedtest_mode == 'push-only':
@@ -1843,17 +1862,20 @@ def finalize_gist_and_notify(env, summary, summary_lines, subscription_text, qua
     if gist_res.get('ok'):
         action = '新建' if gist_res.get('created') else '更新'
         html_url = gist_res.get('html_url') or ''
-        summary_lines.append(f'  └─ ✅ 已{action}，达标 <b>{qualified_count}</b> 个节点（≥{min_megabit}兆）')
+        gist_lines = [f'✅ 已{action}，达标 <b>{qualified_count}</b> 个节点 · ≥{min_megabit}兆']
         if html_url:
-            summary_lines.append(f'  └─ 🔗 <a href="{html.escape(html_url)}">订阅源（YAML）</a>')
+            gist_lines.append(f'🔗 <a href="{html.escape(html_url)}">订阅源 YAML</a>')
         if gist_verify_res.get('ok'):
-            summary_lines.append(f"  └─ ✅ 回拉验证通过: <b>{gist_verify_res.get('sample_ok_count', 0)}</b>/<b>{gist_verify_res.get('sample_count', 0)}</b> 个抽检节点可用")
+            gist_lines.append(f"✅ 回拉验证通过：<b>{gist_verify_res.get('sample_ok_count', 0)}</b>/<b>{gist_verify_res.get('sample_count', 0)}</b> 个抽检节点可用")
         else:
-            summary_lines.append(f"  └─ ⚠️ 回拉验证失败: {gist_verify_res.get('sample_ok_count', 0)}/{gist_verify_res.get('sample_count', 0)} 个抽检节点可用；{html.escape(str(gist_verify_res.get('reason', '')))}")
+            gist_lines.append(f"⚠️ 回拉验证失败：{gist_verify_res.get('sample_ok_count', 0)}/{gist_verify_res.get('sample_count', 0)} 个抽检节点可用；{html.escape(str(gist_verify_res.get('reason', '')))}")
+        for _i, _l in enumerate(gist_lines):
+            _c = '└─' if _i == len(gist_lines) - 1 else '├─'
+            summary_lines.append(f'  {_c} {_l}')
     elif (gist_res.get('reason') or '').startswith('empty subscription'):
-        summary_lines.append(f'  └─ ⚠️ 无达标节点（阈值 ≥{min_megabit}兆），未更新订阅')
+        summary_lines.append(f'  └─ ⚠️ 无达标节点 · 阈值 ≥{min_megabit}兆 · 未更新订阅')
     else:
-        summary_lines.append(f"  └─ ⚠️ 上传失败: {html.escape(str(gist_res.get('reason', '')))}")
+        summary_lines.append(f"  └─ ⚠️ 上传失败：{html.escape(str(gist_res.get('reason', '')))}")
     try:
         # summary_lines 已是统一 HTML 版式；文本报告落盘去标签保留纯可读性
         _plain = re.sub(r'<[^>]+>', '', '\n'.join(summary_lines))

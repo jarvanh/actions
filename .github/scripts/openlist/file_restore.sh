@@ -263,7 +263,7 @@ restore_fixed_files() {
   if [ -n "$ok_list" ]; then
     tg_add_section msg "✅ 已还原"
     tg_add_block msg "$ok_list"
-    tg_add_note msg "（原路径原文件名）"
+    tg_add_note msg "原路径原文件名"
   fi
   if [ -n "$fail_list" ]; then
     tg_add_section msg "❌ 失败清单"
@@ -515,7 +515,7 @@ restore_source_from_target() {
   tg_add_kv msg "方向" "目标端 → 源端"
   tg_add_kv msg "批量拷回" "${total_bulk} 个"
   tg_add_kv msg "修复恢复" "${total_ok} 个"
-  tg_add_kv msg "跳过（已存在）" "${total_skip} 个"
+  tg_add_kv msg "跳过 · 已存在" "${total_skip} 个"
   tg_add_kv msg "失败" "${total_fail} 个"
   if [ -n "$fail_list" ]; then
     tg_add_section msg "❌ 失败清单"
@@ -629,7 +629,7 @@ rebuild_source_from_target() {
   tg_add_kv msg "方向" "目标端 → 源端"
   tg_add_kv msg "副作用" "已删除源端多余文件"
   tg_add_kv msg "修复恢复" "${total_ok} 个"
-  tg_add_kv msg "跳过（已存在）" "${total_skip} 个"
+  tg_add_kv msg "跳过 · 已存在" "${total_skip} 个"
   tg_add_kv msg "失败" "${total_fail} 个"
   if [ -n "$fail_list" ]; then
     tg_add_section msg "❌ 失败清单"

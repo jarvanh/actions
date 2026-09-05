@@ -20,6 +20,10 @@ set +e
 # 从 SOURCE_REMOTE 提取目录名作为通知中的目录标识（如 onedrive:0/j-1024j-视频-pornhub-favorites → j-1024j-视频-pornhub-favorites）
 DIR_LABEL=$(basename "${SOURCE_REMOTE#*:}")
 
+# 排版助手提前加载：明细条目构建时即做 escape_html（文件名含 & < > 未转义会
+# 触发 400、整条通知退化纯文本）；后文发送处的重复 source 为幂等
+source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh" 2>/dev/null || true
+
 # rclone lsf 列出文件（time;size;path），path 放最后，文件名含 ; 时最后一个字段获取剩余全部，安全
 # -R 递归子目录，path 包含子目录前缀
 rclone lsf "$SOURCE_REMOTE/" --files-only --format "tsp" -R 2>/dev/null \
@@ -85,19 +89,19 @@ for id in "${!ID_ENTRIES[@]}"; do
   if [ "$DEDUPE_BY_ID_ONLY" = "true" ]; then
     sorted=$(echo "$entries" | sort -t';' -k2,2n -k1,1)
     kept_path=$(echo "$sorted" | tail -n1 | cut -d';' -f3-)
-    group_details=""
+    group_entries=""
     while IFS=';' read -r t s p; do
       [ "$p" = "$kept_path" ] && continue
       [ -z "$p" ] && continue
       if rclone deletefile "$SOURCE_REMOTE/$p" 2>/tmp/rclone_err.log; then
         REMOVED_COUNT=$((REMOVED_COUNT + 1))
-        group_details+=$'  🗑 删除 '"${p}"$'（'"${s}"$' 字节，'"${t}"$'）\n'
+        group_entries+="🗑 删除 <code>$(escape_html "${p}")</code> · <i>${s} 字节 · ${t}</i>"$'\n'
       else
-        group_details+=$'  ❌ 删除失败 '"${p}"$'\n'
+        group_entries+="❌ 删除失败 <code>$(escape_html "${p}")</code>"$'\n'
         echo "  ❌ 删除失败: $(tail -n 3 /tmp/rclone_err.log)"
       fi
     done <<< "$sorted"
-    DUP_DETAILS+=$'\n'"🔖 [${IDX}/${DUP_TOTAL}] ID ${id}"$'（'"${count}"$' 个，仅按 ID 去重，保留: '"${kept_path}"$'）\n'"${group_details}"
+    DUP_DETAILS+=$'\n'"🔖 <b>ID ${id}</b> · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 仅按 ID 去重 · 保留 <code>$(escape_html "${kept_path}")</code>"$'\n'"$(tree_lines "${group_entries:-}")"
     continue
   fi
 
@@ -112,23 +116,23 @@ for id in "${!ID_ENTRIES[@]}"; do
     # 排序：size 升序（小的先删），size 相同则 time 旧者优先删；保留最后一个（最大/最新）
     sorted=$(echo "$entries" | sort -t';' -k2,2n -k1,1)
     kept_path=$(echo "$sorted" | tail -n1 | cut -d';' -f3-)
-    group_details=""
+    group_entries=""
     while IFS=';' read -r t s p; do
       [ "$p" = "$kept_path" ] && continue
       [ -z "$p" ] && continue
       if [ "$AUTO_DELETE" = "true" ]; then
         if rclone deletefile "$SOURCE_REMOTE/$p" 2>/tmp/rclone_err.log; then
           REMOVED_COUNT=$((REMOVED_COUNT + 1))
-          group_details+=$'  🗑 删除 '"${p}"$'（'"${s}"$' 字节，'"${t}"$'）\n'
+          group_entries+="🗑 删除 <code>$(escape_html "${p}")</code> · <i>${s} 字节 · ${t}</i>"$'\n'
         else
-          group_details+=$'  ❌ 删除失败 '"${p}"$'\n'
+          group_entries+="❌ 删除失败 <code>$(escape_html "${p}")</code>"$'\n'
           echo "  ❌ 删除失败: $(tail -n 3 /tmp/rclone_err.log)"
         fi
       else
-        group_details+=$'  ⚠ 待删除（已跳过） '"${p}"$'（'"${s}"$' 字节，'"${t}"$'）\n'
+        group_entries+="⚠️ 待删除 · 已跳过 <code>$(escape_html "${p}")</code> · <i>${s} 字节 · ${t}</i>"$'\n'
       fi
     done <<< "$sorted"
-    DUP_DETAILS+=$'\n'"🔖 [${IDX}/${DUP_TOTAL}] ID ${id}"$'（'"${count}"$' 个，标题相同，保留: '"${kept_path}"$'）\n'"${group_details}"
+    DUP_DETAILS+=$'\n'"🔖 <b>ID ${id}</b> · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 标题相同 · 保留 <code>$(escape_html "${kept_path}")</code>"$'\n'"$(tree_lines "${group_entries:-}")"
   else
     # 规则2：title 不同 → 对比哈希
     # 打印各文件规范化 title，便于排查为何被判不同（如不可见字符）
@@ -150,7 +154,7 @@ for id in "${!ID_ENTRIES[@]}"; do
     done <<< "$entries"
     # 找出重复哈希（出现 >1 次的哈希）
     DUP_HASHES=$(awk -F';' '{print $1}' "$HASH_LIST" | sort | uniq -d)
-    group_details=""
+    group_entries=""
     if [ -n "$DUP_HASHES" ]; then
       # 哈希一致的组：每组删除修改时间旧的，保留最新
       while IFS= read -r hash; do
@@ -163,24 +167,24 @@ for id in "${!ID_ENTRIES[@]}"; do
           if [ "$AUTO_DELETE" = "true" ]; then
             if rclone deletefile "$SOURCE_REMOTE/$p" 2>/tmp/rclone_err.log; then
               REMOVED_COUNT=$((REMOVED_COUNT + 1))
-              group_details+=$'  🗑 删除 '"${p}"$'（哈希一致 '"${hash:0:12}"$'，旧文件）\n'
+              group_entries+="🗑 删除 <code>$(escape_html "${p}")</code> · <i>哈希一致 ${hash:0:12} · 旧文件</i>"$'\n'
             else
-              group_details+=$'  ❌ 删除失败 '"${p}"$'\n'
+              group_entries+="❌ 删除失败 <code>$(escape_html "${p}")</code>"$'\n'
               echo "  ❌ 删除失败: $(tail -n 3 /tmp/rclone_err.log)"
             fi
           else
-            group_details+=$'  ⚠ 待删除（已跳过） '"${p}"$'（哈希一致 '"${hash:0:12}"$'，旧文件）\n'
+            group_entries+="⚠️ 待删除 · 已跳过 <code>$(escape_html "${p}")</code> · <i>哈希一致 ${hash:0:12} · 旧文件</i>"$'\n'
           fi
         done <<< "$hsorted"
       done <<< "$DUP_HASHES"
-      DUP_DETAILS+=$'\n'"🔖 [${IDX}/${DUP_TOTAL}] ID ${id}"$'（'"${count}"$' 个，标题不同，删除哈希一致的旧文件）\n'"${group_details}"
+      DUP_DETAILS+=$'\n'"🔖 <b>ID ${id}</b> · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 标题不同 · 删除哈希一致的旧文件"$'\n'"$(tree_lines "${group_entries:-}")"
     else
       # 所有哈希各不相同 → 仅通知不删除
       NOTIFY_ONLY_COUNT=$((NOTIFY_ONLY_COUNT + 1))
       while IFS=';' read -r h t s p; do
-        group_details+=$'  ⚠ 保留 '"${p}"$'（哈希 '"${h:0:12}"$'）\n'
+        group_entries+="⚠️ 保留 <code>$(escape_html "${p}")</code> · <i>哈希 ${h:0:12}</i>"$'\n'
       done < "$HASH_LIST"
-      DUP_DETAILS+=$'\n'"🔖 [${IDX}/${DUP_TOTAL}] ID ${id}"$'（'"${count}"$' 个，标题不同且哈希各不相同，仅通知）\n'"${group_details}"
+      DUP_DETAILS+=$'\n'"🔖 <b>ID ${id}</b> · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 标题不同且哈希各不相同 · 仅通知"$'\n'"$(tree_lines "${group_entries:-}")"
     fi
     rm -f "$HASH_LIST"
   fi
@@ -192,7 +196,7 @@ echo "重复 ID 数量: ${DUP_COUNT}"
 echo "删除重复文件数量: ${REMOVED_COUNT}"
 echo "仅通知未删除数量: ${NOTIFY_ONLY_COUNT}"
 echo "--- 详情 ---"
-echo "${DUP_DETAILS}"
+printf '%s\n' "${DUP_DETAILS}" | sed -E 's/<[^>]*>//g'
 
 # 发送通知（按 4000 字符分片，避免超过 Telegram 4096 字符限制）
 source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
@@ -209,7 +213,7 @@ if [ "$DUP_COUNT" -gt 0 ]; then
   elif [ "$AUTO_DELETE" = "true" ]; then
     tg_add_kv msg "模式" "自动删除已开启"
   else
-    tg_add_kv msg "模式" "仅通知（手动触发可开启 auto_delete_duplicates）"
+    tg_add_kv msg "模式" "仅通知 · 手动触发可开启 auto_delete_duplicates"
   fi
   if [ "$REMOVED_COUNT" -eq 0 ] && [ "$NOTIFY_ONLY_COUNT" -gt 0 ]; then
     tg_add_note msg "ℹ️ 标题不同且哈希各不相同，未自动删除"
