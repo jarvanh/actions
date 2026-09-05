@@ -1287,6 +1287,11 @@ jobs:
           fi
 
       - name: Start background archive loop
+        env:
+          # send_telegram_alert 以这两个变量为发送闸，缺任一即静默跳过
+          # （2026-09-05 复审发现：此前本 step 未注入，约 5 处归档告警从未发出）
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         if: ${{ always() }}
         run: |
           echo "Starting background archive tasks: archive ~/.openclaw every 20 minutes; CLIProxyAPI data is archived at final shutdown..."
@@ -1625,7 +1630,7 @@ jobs:
               else
                 rc=$?
                 echo "[$(date '+%F %T')] ⚠️ ${AI_LABEL}.tar.gz upload failed (rc=$rc): ${ai_upload_output}"
-                send_telegram_alert "$(printf '%s.tar.gz 上传失败 · rc=%%s\n原因：rclone 上传失败\n详情：%%s' "$AI_LABEL" "$rc" "${ai_upload_output:-无输出}")"
+                send_telegram_alert "$(printf '%s.tar.gz 上传失败 · rc=%s\n原因：rclone 上传失败\n详情：%s' "$AI_LABEL" "$rc" "${ai_upload_output:-无输出}")"
               fi
             else
               rc=$?
@@ -1633,10 +1638,10 @@ jobs:
                 echo "[$(date '+%F %T')] ⏭️ previous archive still running, skip ${AI_LABEL} archive"
               elif [ "$rc" -eq 3 ]; then
                 echo "[$(date '+%F %T')] ⚠️ ${AI_LABEL} archive skipped because deployment/data directory is missing (rc=$rc): ${ai_archive_output}"
-                send_telegram_alert "$(printf '%s 归档跳过 · rc=%%s\n原因：本地部署/数据目录缺失 · 通常表示网关容器启动步骤被跳过或失败\n详情：%%s' "$AI_LABEL" "$rc" "${ai_archive_output:-ai_dir_missing}")"
+                send_telegram_alert "$(printf '%s 归档跳过 · rc=%s\n原因：本地部署/数据目录缺失 · 通常表示网关容器启动步骤被跳过或失败\n详情：%s' "$AI_LABEL" "$rc" "${ai_archive_output:-ai_dir_missing}")"
               else
                 echo "[$(date '+%F %T')] ⚠️ ${AI_LABEL} archive failed in periodic archive (rc=$rc): ${ai_archive_output}"
-                send_telegram_alert "$(printf '%s.tar.gz 归档失败 · rc=%%s\n原因：%s' "$AI_LABEL" "$rc" "${ai_archive_output:-归档脚本无输出}")"
+                send_telegram_alert "$(printf '%s.tar.gz 归档失败 · rc=%s\n原因：%s' "$AI_LABEL" "$rc" "${ai_archive_output:-归档脚本无输出}")"
               fi
             fi
             sleep 1200
@@ -1693,6 +1698,10 @@ jobs:
           sleep "${KEEPALIVE_MINUTES}m"
 
       - name: Stop OpenClaw and Final Archive
+        env:
+          # send_archive_alert 同上：未注入时约 15 处最终归档告警静默不发
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         if: ${{ always() }}
         run: |
           set -euo pipefail
