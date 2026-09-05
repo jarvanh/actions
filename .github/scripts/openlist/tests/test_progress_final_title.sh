@@ -3,12 +3,13 @@
 #   / 1 进行中 / 1 完成 / 1 失败，标题却是"⚠️ 同步完成（有失败）"）
 # 背景: 旧判定的 failed>0 分支排在 pending/running 之前，中断与"跑完但有
 #   顽固失败"共用同一个 ⚠️ 标题，被中断的一轮看着像正常收尾。
-# 契约（四态，按严重度从高到低，互斥）:
-#   T1 有 pending/running          -> ⛔ 同步中断（无论是否有 failed，失败数并入标题）
-#   T2 一个任务都没注册            -> ⛔ 同步中断（未注册任何任务）
-#   T3 全部跑完、无失败、无修复    -> ✅ 同步全部完成
-#   T4 全部跑完、无失败、有修复    -> ✅ 同步全部完成（N 个文件经修复同步）
-#   T5 全部跑完、既有失败又有修复  -> ⚠️ 同步完成（N 个任务有文件无法同步）（失败优先）
+# 契约（四态，按严重度从高到低，互斥；标题只留 emoji+短语，计数细节一律
+#   下沉第二行 "状态：" kv 行、" · " 分隔——规范禁全角括号计数）:
+#   T1 有 pending/running          -> ⛔ 同步中断 + 状态行（待处理/进行中未执行完/失败）
+#   T2 一个任务都没注册            -> ⛔ 同步中断 + 状态行（未注册任何任务）
+#   T3 全部跑完、无失败、无修复    -> ✅ 同步全部完成（无状态行）
+#   T4 全部跑完、无失败、有修复    -> ✅ 同步全部完成 + 状态行（N 个文件经修复同步）
+#   T5 全部跑完、既有失败又有修复  -> ⚠️ 同步完成 + 状态行（失败优先）
 #   T6 progress_add_fixed_files 跨轮次累加，progress_init 清零
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -57,9 +58,11 @@ reset_case() {
   echo "$(( $(date +%s) - 3600 ))" > "$PROGRESS_START_FILE"
 }
 
-# 渲染后取首行（tg_add_title 输出 "<b>标题</b>"）
+# 渲染后取首行（tg_add_title 输出 "<b>标题</b>"）与第三行（标题+分隔线之后的 "状态：" kv 行）
 title_of() { _progress_render | head -1; }
+subtitle_of() { _progress_render | sed -n '3p'; }
 expect_title() { printf '<b>%s</b>' "$(escape_html "$1")"; }
+expect_status() { printf '状态：<b>%s</b>\n' "$(escape_html "$1")"; }
 
 # ---------- T1: 中断优先于失败（13 待处理 + 1 进行中 + 1 完成 + 1 失败）----------
 reset_case
@@ -72,19 +75,22 @@ while [ "$local_i" -lt 13 ]; do
   add_task "p${local_i}" "onedrive:$((local_i % 6)) → wopan175/$((local_i % 6))" pending
 done
 chk "T1 中断（含失败数）优先于失败态" "$(title_of)" \
-  "$(expect_title '⛔ 同步中断（13 个待处理、1 个进行中未执行完、1 个失败）')"
+  "$(expect_title '⛔ 同步中断')"
+chk "T1 中断计数下沉状态行" "$(subtitle_of)" \
+  "$(expect_status '待处理 13 · 进行中未执行完 1 · 失败 1')"
 
 # ---------- T2: 无进行中/待处理、无失败 -> 中断文案不带失败数 ----------
 reset_case
 add_task t_done "onedrive:backup → aliyundriveCrypt/backup" completed
 add_task t_run "onedrive:0 → wopan176Crypt/0" running
 add_task t_pend "onedrive:1 → wopan175/1" pending
-chk "T2 中断无失败时不带失败数" "$(title_of)" \
-  "$(expect_title '⛔ 同步中断（1 个待处理、1 个进行中未执行完）')"
+chk "T2 中断无失败时不带失败数" "$(subtitle_of)" \
+  "$(expect_status '待处理 1 · 进行中未执行完 1')"
 
 # ---------- T3: 未注册任何任务 ----------
 reset_case
-chk "T3 未注册任务判中断" "$(title_of)" "$(expect_title '⛔ 同步中断（未注册任何任务）')"
+chk "T3 未注册任务判中断" "$(title_of)" "$(expect_title '⛔ 同步中断')"
+chk "T3 中断原因下沉状态行" "$(subtitle_of)" "$(expect_status '未注册任何任务')"
 
 # ---------- T4: 全部跑完、无失败、无修复 ----------
 reset_case
@@ -98,7 +104,9 @@ add_task t1 "onedrive:backup → aliyundriveCrypt/backup" completed
 progress_add_fixed_files 5
 progress_add_fixed_files 2
 chk "T5 带修复的完成（跨上报累加）" "$(title_of)" \
-  "$(expect_title '✅ 同步全部完成（7 个文件经修复同步）')"
+  "$(expect_title '✅ 同步全部完成')"
+chk "T5 修复计数下沉状态行" "$(subtitle_of)" \
+  "$(expect_status '7 个文件经修复同步')"
 
 # ---------- T6: 全部跑完、既有失败又有修复 -> 失败优先 ----------
 reset_case
@@ -107,7 +115,9 @@ add_task t2 "onedrive:backup → wopan176Crypt/backup" failed "部分文件无�
 add_task t3 "onedrive:3 → wopan175/3" failed "部分文件无法同步"
 progress_add_fixed_files 3
 chk "T6 失败优先于修复" "$(title_of)" \
-  "$(expect_title '⚠️ 同步完成（2 个任务有文件无法同步）')"
+  "$(expect_title '⚠️ 同步完成')"
+chk "T6 失败计数下沉状态行" "$(subtitle_of)" \
+  "$(expect_status '2 个任务有文件无法同步')"
 
 # ---------- T7: 计数器健壮性 ----------
 reset_case

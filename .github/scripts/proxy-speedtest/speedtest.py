@@ -46,6 +46,8 @@ from speedtest_gitee import (
     git_force_push_testfile,
     send_telegram,
     format_duration,
+    tg_format_elapsed,
+    tg_footer_line,
     TEST_FILE_NAME,
     # 订阅导出 + Gist 上传（复刻 speedtest_gitee 的订阅发布能力）
     build_source_mapping,
@@ -958,7 +960,7 @@ def build_telegram_lines(results, *, meta, gist_res, qualified_count):
     started = str(meta.get('started_at', ''))[:19].replace('T', ' ')
     ended = str(meta.get('ended_at', ''))[:19].replace('T', ' ')
     try:
-        duration_text = format_duration(
+        duration_text = tg_format_elapsed(
             (datetime.fromisoformat(meta['ended_at']) - datetime.fromisoformat(meta['started_at'])).total_seconds())
     except Exception:
         duration_text = '-'
@@ -1006,14 +1008,10 @@ def build_telegram_lines(results, *, meta, gist_res, qualified_count):
     else:
         lines.append(f'  └─ ⚠️ 无达标节点（阈值 ≥{DEFAULT_MIN_MEGABIT}兆），未更新订阅')
 
-    # 统一收尾区（收尾区与正文间固定一个空行）
+    # 统一收尾区（收尾区与正文间固定一个空行；与 tg_add_footer 同形态同降级链）
+    # 注: 正文的「耗时 X」是测速自身耗时，收尾区的「已运行 X」是 run 已运行时长，两者语义不同
     lines.append('')
-    tg_run_url = os.environ.get('TG_RUN_URL', '')
-    footer = ''
-    if tg_run_url:
-        footer = f'⏱ 已运行 <b>{esc(duration_text)}</b> · 🔗 <a href="{esc(tg_run_url)}">运行日志</a>'
-    elif duration_text != '-':
-        footer = f'⏱ 已运行 <b>{esc(duration_text)}</b>'
+    footer = tg_footer_line()
     if footer:
         lines.append(footer)
     return lines
@@ -1041,11 +1039,10 @@ def write_termination(started_at, reason):
     try:
         abort_msg = (f'📈 <b>代理节点测速异常终止</b>\n{"━" * 18}\n'
                      f'⚠️ {html.escape(str(reason))}')
-        abort_footer = ''
-        tg_run_url = os.environ.get('TG_RUN_URL', '')
-        if tg_run_url:
-            abort_footer = f'\n\n⏱ 🔗 <a href="{html.escape(tg_run_url)}">运行日志</a>'
-        send_telegram(merged_env(), abort_msg + abort_footer)
+        abort_footer = tg_footer_line()
+        if abort_footer:
+            abort_msg += f'\n\n{abort_footer}'
+        send_telegram(merged_env(), abort_msg)
     except Exception:
         pass
 

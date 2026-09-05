@@ -85,20 +85,32 @@ jobs:
           return ($s -replace '&','&amp;' -replace '<','&lt;' -replace '>','&gt;')
         }
         $sep = [string][char]0x2501 * 18
-        $dur = "不足 1 分钟"
+        # 收尾区（与 tg_add_footer 同形态同降级链）: 时长走中文三段式，
+        # 起始时间解析失败则不显示时长（只留运行日志链接）
+        $dur = ""
         try {
           $started = [DateTime]::Parse($Env:TG_RUN_STARTED_AT, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
-          $elapsed = [int]((Get-Date).ToUniversalTime() - $started.ToUniversalTime()).TotalMinutes
-          if ($elapsed -ge 60) { $dur = "{0} 小时 {1} 分" -f [int][math]::Floor($elapsed / 60), ($elapsed % 60) }
-          elseif ($elapsed -gt 0) { $dur = "$elapsed 分钟" }
+          $totalSec = [int][math]::Max(0, [math]::Round(((Get-Date).ToUniversalTime() - $started.ToUniversalTime()).TotalSeconds))
+          $hh = [int][math]::Floor($totalSec / 3600)
+          $mm = [int][math]::Floor(($totalSec % 3600) / 60)
+          $ss = $totalSec % 60
+          if ($hh -gt 0) { $dur = "$hh 小时 $mm 分" }
+          elseif ($mm -gt 0) { $dur = "$mm 分钟" }
+          else { $dur = "$ss 秒" }
         } catch { }
+        $footer = ""
+        if ($dur) { $footer = "⏱ 已运行 <b>$dur</b>" }
+        if ($Env:TG_RUN_URL) {
+          if ($footer) { $footer += " · " }
+          $footer += "🔗 <a href=""$Env:TG_RUN_URL"">运行日志</a>"
+        }
         $msg = "🖥️ <b>Windows RDP 已就绪</b>`n$sep`n" +
           "地址：<code>$(Esc-Html $address)</code>`n" +
           "用户名：<code>runneradmin</code>`n" +
           "密码：<code>$(Esc-Html $Env:RDP_PASSWORD)</code>`n" +
           "有效期：<i>约 6 小时（超时自动关机）</i>`n" +
-          "连接方式：<i>Microsoft Remote Desktop / 任何 RDP 客户端，地址填上面这一行</i>`n" +
-          "`n⏱ 已运行 <b>$dur</b> · 🔗 <a href=""$Env:TG_RUN_URL"">运行日志</a>"
+          "连接方式：<i>Microsoft Remote Desktop / 任何 RDP 客户端，地址填上面这一行</i>"
+        if ($footer) { $msg += "`n`n$footer" }
         Invoke-RestMethod -Uri "https://api.telegram.org/bot$Env:TELEGRAM_BOT_TOKEN/sendMessage" `
           -Method Post -Body @{ chat_id = $Env:TELEGRAM_CHAT_ID; text = $msg; parse_mode = 'HTML'; disable_web_page_preview = 'true' }
 

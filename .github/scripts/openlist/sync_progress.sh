@@ -420,6 +420,7 @@ _progress_render() {
 
   local msg=""
   local title
+  local subtitle=""
   if [ "$finalized" -eq 1 ]; then
     # 收尾标题只有 4 种终态，按严重度从高到低判定:
     #   1 ⛔ 中断          — 仍有 pending/running（撞 job 上限被取消、step 提前
@@ -434,23 +435,32 @@ _progress_render() {
     #   4 ✅ 完全完成
     local fixed_total
     fixed_total=$(_progress_get_fixed_files)
+    # 标题只留 emoji+短语，计数细节下沉 "状态" kv 行（telegram.sh 规范:
+    # 计数一律 " · " 分隔、不用全角括号——旧「⛔ 同步中断（N 个待处理…）」废弃）
     if [ "$total" -eq 0 ]; then
       # 一个任务都没注册就到了收尾（注册前被取消/失败），绝非"全部完成"
-      title="⛔ 同步中断（未注册任何任务）"
+      title="⛔ 同步中断"
+      subtitle="未注册任何任务"
     elif [ $((pending + running)) -gt 0 ]; then
-      title="⛔ 同步中断（${pending} 个待处理、${running} 个进行中未执行完）"
-      [ "$failed" -gt 0 ] && title="⛔ 同步中断（${pending} 个待处理、${running} 个进行中未执行完、${failed} 个失败）"
+      title="⛔ 同步中断"
+      subtitle="待处理 ${pending} · 进行中未执行完 ${running}"
+      [ "$failed" -gt 0 ] && subtitle+=" · 失败 ${failed}"
     elif [ "$failed" -gt 0 ]; then
-      title="⚠️ 同步完成（${failed} 个任务有文件无法同步）"
+      title="⚠️ 同步完成"
+      subtitle="${failed} 个任务有文件无法同步"
     elif [ "$fixed_total" -gt 0 ]; then
-      title="✅ 同步全部完成（${fixed_total} 个文件经修复同步）"
+      title="✅ 同步全部完成"
+      subtitle="${fixed_total} 个文件经修复同步"
     else
       title="✅ 同步全部完成"
+      subtitle=""
     fi
   else
     title="🔄 同步进度"
+    subtitle=""
   fi
   tg_add_title msg "$title"
+  [ -n "$subtitle" ] && tg_add_kv msg "状态" "$subtitle"
   tg_append msg "📊 总 <b>${total}</b> · 待处理 <b>${pending}</b> · 进行中 <b>${running}</b> · 完成 <b>${completed}</b> · 跳过 <b>${skipped}</b> · 失败 <b>${failed}</b>"$'\n'
 
   # 进行中任务块: 任务条目（分组渲染）+ 多层级阶段行/统计信息/细粒度状态

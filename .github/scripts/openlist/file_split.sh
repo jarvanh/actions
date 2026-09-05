@@ -282,7 +282,7 @@ split_large_video() {
     check_duration="⚠️ 未获取有效时长，改用固定时间分段兜底"
     log_fix "$video_split_log" "无法获取有效视频时长，改用固定时间分段兜底: $file_name"
   else
-    check_duration="✅ 通过（duration=${duration}s）"
+    check_duration="✅ 通过 · duration=${duration}s"
   fi
 
   local n=$(( (file_size + target_part_size - 1) / target_part_size ))
@@ -311,9 +311,9 @@ split_large_video() {
     fi
     if ! echo "$segment_time" | grep -Eq '^[0-9]+([.][0-9]+)?$' || [ "$(echo "$segment_time > 0" | bc 2>/dev/null || echo 0)" -ne 1 ]; then
       log_fix "$video_split_log" "计算分段时长失败: duration=$duration segment_count=$segment_count fallback=$duration_fallback_mode"
-      check_ffmpeg="❌ 未执行（分段时长计算失败）"
-      check_parts_generated="❌ 未执行（分段时长计算失败）"
-      check_parts_size="❌ 未执行（分段时长计算失败）"
+      check_ffmpeg="❌ 未执行 · 分段时长计算失败"
+      check_parts_generated="❌ 未执行 · 分段时长计算失败"
+      check_parts_size="❌ 未执行 · 分段时长计算失败"
       break
     fi
 
@@ -330,9 +330,9 @@ split_large_video() {
 
     if [ "$ffmpeg_exit_code" -ne 0 ]; then
       log_fix "$video_split_log" "ffmpeg 分割命令失败，退出码: $ffmpeg_exit_code"
-      check_ffmpeg="❌ 未通过（exit=${ffmpeg_exit_code}，已尝试 ${attempt}/${max_split_attempts}）"
-      check_parts_generated="❌ 未执行（ffmpeg 失败）"
-      check_parts_size="❌ 未执行（ffmpeg 失败）"
+      check_ffmpeg="❌ 未通过 · exit=${ffmpeg_exit_code} · 已尝试 ${attempt}/${max_split_attempts}"
+      check_parts_generated="❌ 未执行 · ffmpeg 失败"
+      check_parts_size="❌ 未执行 · ffmpeg 失败"
       rm -rf "$split_dir" 2>/dev/null || true
       split_dir=""
       if [ "$attempt" -lt "$max_split_attempts" ]; then
@@ -350,8 +350,8 @@ split_large_video() {
     if [ "$generated_count" -eq 0 ]; then
       log_fix "$video_split_log" "ffmpeg 未生成任何分片"
       check_ffmpeg="✅ 通过"
-      check_parts_generated="❌ 未通过（0 个分片）"
-      check_parts_size="❌ 未执行（无分片）"
+      check_parts_generated="❌ 未通过 · 0 个分片"
+      check_parts_size="❌ 未执行 · 无分片"
       rm -rf "$split_dir" 2>/dev/null || true
       split_dir=""
       break
@@ -362,15 +362,15 @@ split_large_video() {
         check_duration="⚠️ 未获取有效时长；固定时间分段兜底成功"
       fi
       check_ffmpeg="✅ 通过"
-      check_parts_generated="✅ 通过（${generated_count} 个分片）"
-      check_parts_size="✅ 通过（全部 ≤ ${max_part_size} bytes）"
+      check_parts_generated="✅ 通过 · ${generated_count} 个分片"
+      check_parts_size="✅ 通过 · 全部 ≤ ${max_part_size} bytes"
       split_success=1
       break
     fi
 
     check_ffmpeg="✅ 通过"
-    check_parts_generated="✅ 通过（${generated_count} 个分片）"
-    check_parts_size="❌ 未通过（超限：${oversized_parts}）"
+    check_parts_generated="✅ 通过 · ${generated_count} 个分片"
+    check_parts_size="❌ 未通过 · 超限：${oversized_parts}"
     log_fix "$video_split_log" "存在超过阈值的分片，将增加分片数后重试: $oversized_parts"
     attempt=$((attempt + 1))
   done
@@ -380,7 +380,7 @@ split_large_video() {
     log_fix "$video_split_log" "未能生成全部小于阈值的分片，跳过上传和删除原始文件"
     rm -f "$local_file_path" 2>/dev/null || true
     rm -rf "$split_dir" 2>/dev/null || true
-    check_delete="⛔ 未删除（前置检查未通过）"
+    check_delete="⛔ 未删除 · 前置检查未通过"
     send_split_notification_with_checks "$generated_count" "分片仍超过阈值或生成失败，已保留原始文件"
     return 1
   fi
@@ -395,20 +395,20 @@ split_large_video() {
     log_fix "$video_split_log" "分片上传未全部成功，已上传 $part_count/${generated_count}；保留原始大文件"
     rm -f "$local_file_path" 2>/dev/null || true
     rm -rf "$split_dir" 2>/dev/null || true
-    check_upload="❌ 未通过（已上传 $part_count/${generated_count}）"
-    check_delete="⛔ 未删除（分片上传未全部成功）"
+    check_upload="❌ 未通过 · 已上传 $part_count/${generated_count}"
+    check_delete="⛔ 未删除 · 分片上传未全部成功"
     send_split_notification_with_checks "$part_count" "分片上传失败，已保留原始文件"
     return 1
   fi
 
-  check_upload="✅ 通过（${part_count}/${generated_count}）"
+  check_upload="✅ 通过 · ${part_count}/${generated_count}"
 
   # 所有分片上传成功后删除原始大文件
   if ! _delete_original_file "${remote_source}:${remote_path}/${file_name}" "$video_split_log" "original"; then
     log_fix "$video_split_log" "删除原始大文件失败: ${remote_source}:${remote_path}/${file_name}"
     rm -f "$local_file_path" 2>/dev/null || true
     rm -rf "$split_dir" 2>/dev/null || true
-    check_delete="❌ 未通过（删除命令失败）"
+    check_delete="❌ 未通过 · 删除命令失败"
     send_split_notification_with_checks "$part_count" "删除原始文件失败"
     return 1
   fi
@@ -417,7 +417,7 @@ split_large_video() {
   rm -f "$local_file_path" 2>/dev/null || true
   rm -rf "$split_dir" 2>/dev/null || true
   echo "$(date +%Y-%m-%d_%H:%M:%S) - ${remote_source}:${remote_path}/${file_name} - 分割成 $part_count 个部分" >> "$PROCESSED_FILES_LOG"
-  check_delete="✅ 已删除（全部前置条件已满足）"
+  check_delete="✅ 已删除 · 全部前置条件已满足"
   send_split_notification_with_checks "$part_count" "success"
   return 0
 }
