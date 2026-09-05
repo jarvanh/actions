@@ -1,6 +1,8 @@
 #!/bin/bash
 # ===== 共享脚本：Telegram 统一通知发送层 + 排版助手 =====
-# 所有 Telegram 通知（workflows 内联 + scripts/telegram 下脚本）统一经本文件发送：
+# 规范唯一真源: docs/telegram-notify.md（版式模板/收尾区/禁止事项/检查清单，
+# 改版式先改文档再同步实现）。所有 Telegram 通知（workflows 内联 +
+# scripts/telegram 下脚本）统一经本文件发送：
 #   - parse_mode=HTML，动态内容必须经 escape_html 转义（tg_* 助手已内置）
 #   - HTML 解析失败（400 can't parse entities）自动去标签退化纯文本重发：
 #     宁可样式变朴素，也不让通知消失
