@@ -1,5 +1,7 @@
 #!/bin/bash
 # ===== OpenList 同步工具 — Telegram 消息函数 =====
+# 规范唯一真源: docs/telegram-notify.md（版式模板/收尾区/禁止事项/检查清单，
+# 改版式先改文档再同步实现；本文件与 scripts/telegram/tg_notify.sh 需同步维护）
 # 依赖环境变量:
 #   TELEGRAM_BOT_TOKEN — Telegram Bot API Token（由 workflow secrets 注入）
 #   TELEGRAM_CHAT_ID   — 目标 Chat ID（由 workflow secrets 注入）

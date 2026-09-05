@@ -271,8 +271,9 @@ rclone 之所以能通，是因为它逐段解析、遇到 `remoteItem` 就切�
 | `📺 Emby 服务停止` | run 收尾 | 状态、模式、302 链路统计、全库预热（请求数+档位）、**本轮活跃客户端**（authentication.db 里本轮有活动的 AppName 去重，只列应用名不带设备名/用户名）、时间 | ✅ 正文回显 |
 | `🔐 OpenList 凭据` | **仅改密时** | 用户名、密码明文（`<code>` 等宽）、入口 | ❌ 绝不落日志 |
 
-全部通知采用**全库统一 HTML 版式**（规范见 `openlist/telegram.sh` 头部注释 /
-`telegram/tg_notify.sh`）：`emoji 标题 + ━━━ 分隔线 + 键值区 + 统一收尾行
+全部通知采用**全库统一 HTML 版式**，规范唯一真源见
+[`docs/telegram-notify.md`](telegram-notify.md)（实现层：`telegram/tg_notify.sh`
+与 `openlist/telegram.sh` 头部注释）：`emoji 标题 + ━━━ 分隔线 + 键值区 + 统一收尾行
 `⏱ 已运行 X · 🔗 运行日志``（时长 = 当前时间 − `github.run_started_at`，
 收尾区与正文间固定一个空行）。凭据私信为安全边界例外，不走发送层（curl 直发，
 密码经实体转义）。

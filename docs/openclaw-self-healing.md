@@ -124,8 +124,9 @@ tar -xzf /tmp/restore.tar.gz -C /tmp/restore .openclaw/openclaw.json
   （`<pre>` 等宽块）、Tailscale SSH 入口。
 - 启动通知（🟢 OpenClaw Runner SSH 入口）：SSH 入口、AI 网关后端（CliRelay / CLIProxyAPI + 回退原因）、
   RustDesk 直连地址、SFTP 文件管理入口、出口 IP/ISP/ASN。
-- 全部通知为全库统一 HTML 版式（emoji 标题 + ━━━ 分隔线 + 统一收尾行
-  `⏱ 已运行 X · 🔗 运行日志`），HTML 解析失败自动退化纯文本重发。
+- 全部通知为全库统一 HTML 版式（规范唯一真源见 [`telegram-notify.md`](telegram-notify.md)：
+  emoji 标题 + ━━━ 分隔线 + 统一收尾行 `⏱ 已运行 X · 🔗 运行日志`），
+  HTML 解析失败自动退化纯文本重发。
 - 运行中日志：`/tmp/run-openclaw-step.log`（经 Tailscale SSH 可见）。
 - 结束后拉日志：`gh run view --job <job_id> --repo jarvanh/actions --log`。
 
