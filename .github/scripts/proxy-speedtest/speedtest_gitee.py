@@ -1809,7 +1809,7 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
             else:
                 speed_text = f"{get_item_megabits(item, speedtest_mode)}兆 / 上传 {get_item_megabits(item, 'push-only')}兆"
             connector = '└─' if idx == len(top) else '├─'
-            summary_lines.append(f"{connector} {idx}. <code>{esc(item['name'])}</code> · <i>{esc(speed_text)}</i>")
+            summary_lines.append(f"  {connector} {idx}. <code>{esc(item['name'])}</code> · <i>{esc(speed_text)}</i>")
         summary_lines.append('')
     elif alive_probe_count > 0:
         summary_lines.append('⚠️ 没有节点测速成功')
@@ -1858,7 +1858,7 @@ def finalize_gist_and_notify(env, summary, summary_lines, subscription_text, qua
             gist_verify_res = {'ok': False, 'reason': str(e)}
     log_progress('gist_verify_finished', ok=bool(gist_verify_res.get('ok')), sample_ok_count=gist_verify_res.get('sample_ok_count', 0), sample_count=gist_verify_res.get('sample_count', 0), reason=gist_verify_res.get('reason', ''))
     summary['gist_verify'] = gist_verify_res
-    summary_lines.append('📦 <b>订阅（Gist）</b>')
+    summary_lines.append('📦 <b>订阅 · Gist</b>')
     if gist_res.get('ok'):
         action = '新建' if gist_res.get('created') else '更新'
         html_url = gist_res.get('html_url') or ''

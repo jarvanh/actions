@@ -1042,7 +1042,7 @@ jobs:
               "$(fmt_type "$type")" \
               "$(fmt_dur "$mins")" \
               "$(fmt_res "$hgt")" \
-              "$codec" \
+              "$(esc_html "$codec")" \
               "$(fmt_size "$size_b")")
 
             # 第 3 行：链路。302 时把直链剩余有效期说清楚——链接不是永久的
@@ -1058,7 +1058,7 @@ jobs:
 
             # 第 4 行：客户端。IP 来自 ge2o 访问日志（谁在播），起播耗时用于"点播慢"定位
             IFS=$'\037' read -r cname dev <<<"$(client_meta "$iid")"
-            client=$(join_parts "$(esc_html "$cname")" "$(esc_html "$dev")" "$cip" "${dur:+起播 ${dur}}")
+            client=$(join_parts "$(esc_html "$cname")" "$(esc_html "$dev")" "$(esc_html "$cip")" "${dur:+起播 ${dur}}")
 
             # 日志侧只记片名（公开仓库，绝不落直链）；TG 私密消息里才附带直链
             echo "🎬 播放 [$kind] ${n:-未知} (item $iid)"
@@ -1150,6 +1150,8 @@ jobs:
               # 访问日志里还有"耗时"与"客户端 IP"两列（起播慢 / 谁在播的定位依据），一并带进通知：
               #   [ge2o:v2.8.2] <时间> | 206 | 4.16s | 141.11.43.124 | 8095 <路由> | GET /emby/videos/...
               DUR=$(printf '%s\n' "$line" | grep -oE '\| [0-9]+\.[0-9]+s \|' | head -1 | tr -d '| ')
+              # 规范禁英文紧凑时长进通知：ge2o 日志的 "4.16s" → "4.16 秒"
+              DUR="${DUR%s} 秒"
               CIP=$(printf '%s\n' "$line" | grep -oE '\| [0-9]{1,3}(\.[0-9]{1,3}){3} \|' | head -1 | tr -d '| ')
               notify "$KIND" "$IID" "" "$DUR" "$CIP"
             done
@@ -1606,9 +1608,15 @@ jobs:
             direct) MODE_DESC="direct 中转";;
             *) MODE_DESC="$MODE";;
           esac
+          case "$STATUS" in
+            success) STATUS_CN="成功";;
+            failure) STATUS_CN="失败";;
+            cancelled) STATUS_CN="中断";;
+            *) STATUS_CN="$STATUS";;
+          esac
           msg=""
           tg_add_title msg "${STATUS_EMOJI} Emby 服务停止"
-          tg_add_kv msg "状态" "${STATUS}"
+          tg_add_kv msg "状态" "${STATUS_CN}"
           tg_add_kv msg "模式" "${MODE_DESC}"
           tg_add_kv msg "302 链路" "$OD_SUMMARY"
           tg_add_kv msg "全库预热" "$WW_SUMMARY"

@@ -209,7 +209,7 @@ if [ "$DUP_COUNT" -gt 0 ]; then
   tg_add_kv msg "已删除" "${REMOVED_COUNT}"
   tg_add_kv msg "仅通知" "${NOTIFY_ONLY_COUNT}"
   if [ "$DEDUPE_BY_ID_ONLY" = "true" ]; then
-    tg_add_kv msg "模式" "仅按 ID 自动删除（跳过标题/哈希校验）"
+    tg_add_kv msg "模式" "仅按 ID 自动删除 · 跳过标题/哈希校验"
   elif [ "$AUTO_DELETE" = "true" ]; then
     tg_add_kv msg "模式" "自动删除已开启"
   else
