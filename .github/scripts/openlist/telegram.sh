@@ -92,29 +92,36 @@ tg_add_note() {
 
 # 统一收尾区（全库唯一收尾形态，自带与正文间的空行）:
 #   "\n⏱ 已运行 <b>X 小时 Y 分</b> · 🔗 <a href="TG_RUN_URL">运行日志</a>\n"
-# 降级链: 无 TG_RUN_STARTED_AT → 不显示时长；无 TG_RUN_URL → 整行跳过
+# 时长来源优先级:
+#   1. TG_RUN_STARTED_AT（workflow 注入，精确）
+#   2. /proc/1 启动时刻兜底 —— GitHub 平台已于 2026-09-05 移除 github.run_started_at
+#      表达式上下文（API 字段仍在），hosted runner 的 PID 1 随 job 启动，误差秒级
+# 降级链: 无 TG_RUN_STARTED_AT 且无 /proc/1 → 不显示时长；无 TG_RUN_URL → 整行跳过
 # 附加链接: tg_add_footer <var> ["标签" "URL"]... → 追加 " · 🔗 <a>标签</a>"
 # 环境变量（openlist.yml 注入容器）: TG_RUN_URL / TG_RUN_STARTED_AT
 tg_add_footer() {
   local var="$1"
   shift
-  local line=""
+  local line="" elapsed=0
   if [ -n "${TG_RUN_STARTED_AT:-}" ]; then
     local started
     started=$(date -d "${TG_RUN_STARTED_AT}" +%s 2>/dev/null || echo 0)
-    if [ "$started" -gt 0 ]; then
-      local elapsed=$(( $(date +%s) - started ))
-      [ "$elapsed" -lt 0 ] && elapsed=0
-      local mins=$((elapsed / 60)) dur
-      if [ "$mins" -ge 60 ]; then
-        dur="$((mins / 60)) 小时 $((mins % 60)) 分"
-      elif [ "$mins" -gt 0 ]; then
-        dur="${mins} 分钟"
-      else
-        dur="${elapsed} 秒"
-      fi
-      line="⏱ 已运行 <b>${dur}</b>"
+    [ "$started" -gt 0 ] && elapsed=$(( $(date +%s) - started ))
+  elif [ -r /proc/1 ]; then
+    local p1ts
+    p1ts=$(stat -c %Y /proc/1 2>/dev/null || echo 0)
+    [ "${p1ts:-0}" -gt 0 ] && elapsed=$(( $(date +%s) - p1ts ))
+  fi
+  if [ "$elapsed" -gt 0 ]; then
+    local mins=$((elapsed / 60)) dur
+    if [ "$mins" -ge 60 ]; then
+      dur="$((mins / 60)) 小时 $((mins % 60)) 分"
+    elif [ "$mins" -gt 0 ]; then
+      dur="${mins} 分钟"
+    else
+      dur="${elapsed} 秒"
     fi
+    line="⏱ 已运行 <b>${dur}</b>"
   fi
   if [ -n "${TG_RUN_URL:-}" ]; then
     [ -n "$line" ] && line+=" · "

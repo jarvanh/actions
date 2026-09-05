@@ -58,8 +58,12 @@
 - **时长三段式**：`≥1h → "X 小时 Y 分"`、`≥1min → "X 分钟"`、否则 `"X 秒"`。
   语义 = 当前时间 − `github.run_started_at`（run 已运行时长），**不是**步骤自身耗时
   （正文里单文件/单轮耗时可用 `耗时：N 秒` 等 kv 行表达，勿加 ⏱ 前缀冒充收尾）。
-- **降级链**（必须逐字一致）：无 `TG_RUN_STARTED_AT` → 不显示时长；
+- **降级链**（必须逐字一致）：`TG_RUN_STARTED_AT` → 时长；
+  缺失时兜底 **runner 开机时刻**（Linux `/proc/1` mtime / Windows `LastBootUpTime`，
+  hosted runner 随 job 启动、误差秒级）；仍取不到 → 不显示时长；
   `TG_RUN_URL` 与时长皆无 → 整行跳过。
+  > 背景：GitHub 已于 2026-09-05 移除 `github.run_started_at` 表达式上下文
+  > （API 字段仍在），workflow 注入的 `TG_RUN_STARTED_AT` 变为空值，兜底必须存在。
 - **附加链接**：`tg_add_footer <var> ["标签" "URL"]...` → 追加 ` · 🔗 <a>标签</a>`。
 - **环境变量接线**（workflow 侧注入，缺一 Impact 只影响时长）：
 

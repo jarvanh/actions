@@ -126,6 +126,21 @@ jobs:
             elseif ($mm -gt 0) { $dur = "$mm 分钟" }
             else { $dur = "$ss 秒" }
           } catch { }
+          if (-not $dur) {
+            # 兜底: GitHub 平台已移除 github.run_started_at 表达式上下文（2026-09-05 验证），
+            # 用系统 uptime 代替（hosted runner VM 随 job 启动，误差秒级）
+            try {
+              $up = [int][math]::Round(((Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime).TotalSeconds)
+              if ($up -gt 0) {
+                $hh = [int][math]::Floor($up / 3600)
+                $mm = [int][math]::Floor(($up % 3600) / 60)
+                $ss = $up % 60
+                if ($hh -gt 0) { $dur = "$hh 小时 $mm 分" }
+                elseif ($mm -gt 0) { $dur = "$mm 分钟" }
+                else { $dur = "$ss 秒" }
+              }
+            } catch { }
+          }
           $footer = ""
           if ($dur) { $footer = "⏱ 已运行 <b>$dur</b>" }
           if ($Env:TG_RUN_URL) {
