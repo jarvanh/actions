@@ -35,8 +35,8 @@ jobs:
         if: ${{ always() && steps.ts.outcome == 'success' }}
         shell: pwsh
         env:
-          # 系统账户密码，SSH 与 RDP 共用（runneradmin 的登录密码只有一个）
-          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD || 'P@ssw0rd!' }}
+          # runneradmin 的系统登录密码，SSH 与 RDP 共用同一个
+          RUNNER_PASSWORD: ${{ secrets.RUNNER_PASSWORD || 'P@ssw0rd!' }}
         run: |
           # Tailscale SSH 服务端仅支持 Linux，Windows 上改为启用内置 OpenSSH Server
           $cap = Get-WindowsCapability -Online | Where-Object Name -like 'OpenSSH.Server*'
@@ -48,15 +48,15 @@ jobs:
           Enable-NetFirewallRule -Name "OpenSSH-Server-In-TCP"
 
           # 设置 runneradmin 密码，供 SSH / RDP 密码登录
-          Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString -AsPlainText $Env:RDP_PASSWORD -Force)
+          Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString -AsPlainText $Env:RUNNER_PASSWORD -Force)
 
           # 固定主机名（singleton 并发下不会撞名）；节点为 ephemeral，job 结束自动移除
           # 兜底：action 已用 hostname 注册，这里再 set 一次并轮询等待控制面收敛
-          tailscale set --hostname=gh-win
-
-          # 轮询回读实际注册的完整 DNS 名（尾随点要去掉；同名冲突会被加后缀，以实际为准）
+          # 每轮都重试 set：若 tailnet 残留同名旧节点导致本节点被加后缀（gh-win-1），
+          # 旧节点释放后改名即可生效，保证域名跨 run 稳定为 gh-win.<tailnet>.ts.net
           $tsDns = $null
           for ($i = 0; $i -lt 20; $i++) {
+            tailscale set --hostname=gh-win
             $status = tailscale status --json | ConvertFrom-Json
             $dns = ($status.Self.DNSName.TrimEnd('.'))
             if ($dns -and ($dns -split '\.')[0] -eq 'gh-win') { $tsDns = $dns; break }
@@ -105,6 +105,8 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # 与 Enable SSH 步骤同一取值，密码明文只出现在 Telegram 通知里（不打印到 Actions 日志）
+          RUNNER_PASSWORD: ${{ secrets.RUNNER_PASSWORD || 'P@ssw0rd!' }}
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
           TG_RUN_STARTED_AT: ${{ github.run_started_at }}
         run: |
@@ -138,7 +140,7 @@ jobs:
           if ($Env:RDP_ENABLED -eq '1') {
             $msg += "`nRDP：<code>$($Env:TS_DNS):3389</code>`n" +
               "RDP 用户：<code>$Env:TS_USER</code>`n" +
-              "RDP 密码：<i>RDP_PASSWORD secret（未配置则为 P@ssw0rd!）</i>"
+              "密码（SSH/RDP 共用）：<code>$Env:RUNNER_PASSWORD</code>"
           }
           $msg += "`n有效期：<i>约 6 小时（超时自动结束）</i>"
           if ($footer) { $msg += "`n`n$footer" }
