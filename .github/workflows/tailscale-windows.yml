@@ -27,6 +27,8 @@ jobs:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
           tags: tag:ci
+          # 注册时就带上固定主机名，MagicDNS 名稳定为 gh-win.<tailnet>.ts.net
+          hostname: gh-win
 
       - name: Enable SSH over Tailscale
         id: ts_ssh
@@ -48,18 +50,28 @@ jobs:
           Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString -AsPlainText $Env:TS_SSH_PASSWORD -Force)
 
           # 固定主机名（singleton 并发下不会撞名）；节点为 ephemeral，job 结束自动移除
+          # 兜底：action 已用 hostname 注册，这里再 set 一次并轮询等待控制面收敛
           tailscale set --hostname=gh-win
-          # 回读实际注册的 DNS 短名（极端情况同名冲突会被加后缀，以实际为准）
-          $status = tailscale status --json | ConvertFrom-Json
-          $tsHost = ($status.Self.DNSName -split '\.')[0]
+
+          # 轮询回读实际注册的完整 DNS 名（尾随点要去掉；同名冲突会被加后缀，以实际为准）
+          $tsDns = $null
+          for ($i = 0; $i -lt 20; $i++) {
+            $status = tailscale status --json | ConvertFrom-Json
+            $dns = ($status.Self.DNSName.TrimEnd('.'))
+            if ($dns -and ($dns -split '\.')[0] -eq 'gh-win') { $tsDns = $dns; break }
+            Start-Sleep -Seconds 3
+          }
+          if (-not $tsDns) { $tsDns = ((tailscale status --json | ConvertFrom-Json).Self.DNSName).TrimEnd('.') }
+          $tsHost = ($tsDns -split '\.')[0]
           $tsIp = (tailscale ip -4 | Select-Object -First 1)
 
           Add-Content $Env:GITHUB_ENV "TS_HOST=$tsHost"
+          Add-Content $Env:GITHUB_ENV "TS_DNS=$tsDns"
           Add-Content $Env:GITHUB_ENV "TS_IP=$tsIp"
           Add-Content $Env:GITHUB_ENV "TS_USER=runneradmin"
           Add-Content $Env:GITHUB_ENV "RUN_URL=https://github.com/$Env:GITHUB_REPOSITORY/actions/runs/$Env:GITHUB_RUN_ID"
 
-          echo "SSH 入口: ssh runneradmin@$tsHost （或 ssh runneradmin@$tsIp）"
+          echo "SSH 入口: ssh runneradmin@$tsDns （或 ssh runneradmin@$tsIp）"
 
       - name: Enable RDP (Windows 自带远程桌面)
         id: rdp
@@ -75,7 +87,9 @@ jobs:
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "runneradmin" -ErrorAction SilentlyContinue
           Get-LocalGroupMember -Group "Remote Desktop Users" | Format-Table
 
-          echo "RDP 入口: $Env:TS_IP:3389 （用户 runneradmin，走 Tailscale 网络，无需公网隧道）"
+          # 注意：必须写成 $($Env:TS_IP):3389。直接写 $Env:TS_IP:3389 时 PowerShell 会把
+          # ":3389" 一起吞进变量名（drive-qualified 变量名贪婪匹配冒号），展开结果为空
+          echo "RDP 入口: $($Env:TS_DNS):3389 （或 $($Env:TS_IP):3389，用户 runneradmin，走 Tailscale 网络）"
           Add-Content $Env:GITHUB_ENV "RDP_ENABLED=1"
 
       - name: Tailscale secrets missing
@@ -96,24 +110,36 @@ jobs:
           # 每次 runner 就绪都推送 SSH/RDP 入口；通知失败不影响主流程
           # 统一 HTML 版式 + 统一收尾区（`n 拼接，修复 here-string 前导缩进问题）
           $sep = [string][char]0x2501 * 18
-          $dur = "不足 1 分钟"
+          # 收尾区（与 tg_add_footer 同形态同降级链）: 时长走中文三段式，
+          # 起始时间解析失败则不显示时长（只留运行日志链接）
+          $dur = ""
           try {
             $started = [DateTime]::Parse($Env:TG_RUN_STARTED_AT, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
-            $elapsed = [int]((Get-Date).ToUniversalTime() - $started.ToUniversalTime()).TotalMinutes
-            if ($elapsed -ge 60) { $dur = "{0} 小时 {1} 分" -f [int][math]::Floor($elapsed / 60), ($elapsed % 60) }
-            elseif ($elapsed -gt 0) { $dur = "$elapsed 分钟" }
+            $totalSec = [int][math]::Max(0, [math]::Round(((Get-Date).ToUniversalTime() - $started.ToUniversalTime()).TotalSeconds))
+            $hh = [int][math]::Floor($totalSec / 3600)
+            $mm = [int][math]::Floor(($totalSec % 3600) / 60)
+            $ss = $totalSec % 60
+            if ($hh -gt 0) { $dur = "$hh 小时 $mm 分" }
+            elseif ($mm -gt 0) { $dur = "$mm 分钟" }
+            else { $dur = "$ss 秒" }
           } catch { }
+          $footer = ""
+          if ($dur) { $footer = "⏱ 已运行 <b>$dur</b>" }
+          if ($Env:TG_RUN_URL) {
+            if ($footer) { $footer += " · " }
+            $footer += "🔗 <a href=""$Env:TG_RUN_URL"">运行日志</a>"
+          }
           $msg = "🟢 <b>Windows runner 已就绪</b>`n$sep`n" +
-            "SSH：<code>ssh $Env:TS_USER@$Env:TS_HOST</code>`n" +
+            "SSH：<code>ssh $Env:TS_USER@$Env:TS_DNS</code>`n" +
             "IP：<code>ssh $Env:TS_USER@$Env:TS_IP</code>"
-          # RDP 启用成功时附上远程桌面入口
+          # RDP 启用成功时附上远程桌面入口（域名固定不变，IP 每次会变，优先给域名）
           if ($Env:RDP_ENABLED -eq '1') {
-            $msg += "`nRDP：<code>$Env:TS_IP`:3389</code>`n" +
+            $msg += "`nRDP：<code>$($Env:TS_DNS):3389</code>（IP 备用：<code>$($Env:TS_IP):3389</code>）`n" +
               "RDP 用户：<code>$Env:TS_USER</code>`n" +
               "密码：<i>TS_SSH_PASSWORD secret（未配置则为 P@ssw0rd!）</i>"
           }
-          $msg += "`n有效期：<i>约 6 小时（超时自动结束）</i>" +
-            "`n`n⏱ 已运行 <b>$dur</b> · 🔗 <a href=""$Env:TG_RUN_URL"">运行日志</a>"
+          $msg += "`n有效期：<i>约 6 小时（超时自动结束）</i>"
+          if ($footer) { $msg += "`n`n$footer" }
           Invoke-RestMethod -Uri "https://api.telegram.org/bot$Env:TELEGRAM_BOT_TOKEN/sendMessage" `
             -Method Post -Body @{ chat_id = $Env:TELEGRAM_CHAT_ID; text = $msg; parse_mode = 'HTML'; disable_web_page_preview = 'true' }
           echo "已推送入口通知: ssh $Env:TS_USER@$Env:TS_HOST"
