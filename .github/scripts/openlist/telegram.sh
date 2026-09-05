@@ -138,12 +138,15 @@ tg_add_footer() {
 # 通用 Telegram 消息发送（静默，不返回 message_id）
 # 用法: send_telegram_message <message> [parse_mode=HTML]
 # 消息内容必须已按 HTML 规则转义（推荐用上方 tg_* 助手构建）
+# disable_web_page_preview 必须带上：收尾区"运行日志"是消息里唯一的链接，
+# 缺了它 Telegram 会在消息下方渲染 GitHub 页面预览卡片（与 tg_notify.sh 同参数）
 send_telegram_message() {
   local message="$1"
   local parse_mode="${2:-HTML}"
   curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
     -d chat_id="${TELEGRAM_CHAT_ID}" \
     -d parse_mode="$parse_mode" \
+    -d disable_web_page_preview=true \
     --data-urlencode text="$message" >/dev/null 2>&1 || true
 }
 
@@ -157,6 +160,7 @@ _tg_send_and_get_id() {
   response=$(curl -s -m 15 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
     -d chat_id="${TELEGRAM_CHAT_ID}" \
     -d parse_mode="$parse_mode" \
+    -d disable_web_page_preview=true \
     --data-urlencode text="$message" 2>/dev/null) || true
   # jq 对非 JSON 响应（如网关 502 页面）返回非零 → set -e 下会沿
   # _tg_ensure_bottom_message → _progress_refresh → progress_update 调用链

@@ -1549,10 +1549,12 @@ jobs:
                 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
                 -d chat_id="${TELEGRAM_CHAT_ID}" \
                 -d parse_mode="HTML" \
+                -d disable_web_page_preview=true \
                 --data-urlencode text="$full_msg" >/dev/null \
                 || curl -fsS --retry 3 --retry-delay 2 --max-time 20 \
                      -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
                      -d chat_id="${TELEGRAM_CHAT_ID}" \
+                     -d disable_web_page_preview=true \
                      --data-urlencode text="$(_tg_strip_html "$full_msg")" >/dev/null || true
             fi
           }
@@ -1673,10 +1675,12 @@ jobs:
                 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
                 -d chat_id="${TELEGRAM_CHAT_ID}" \
                 -d parse_mode="HTML" \
+                -d disable_web_page_preview=true \
                 --data-urlencode text="$msg" >/dev/null \
                 || curl -fsS --retry 3 --retry-delay 2 --max-time 20 \
                      -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
                      -d chat_id="${TELEGRAM_CHAT_ID}" \
+                     -d disable_web_page_preview=true \
                      --data-urlencode text="$(_tg_strip_html "$msg")" >/dev/null || true
             else
               echo "⚠️ Telegram secrets missing, skip final archive warning."

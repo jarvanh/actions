@@ -1068,6 +1068,7 @@ jobs:
                      -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
                      --data-urlencode "chat_id=$TG_CHAT_ID" \
                      --data-urlencode "parse_mode=HTML" \
+                     --data-urlencode "disable_web_page_preview=true" \
                      --data-urlencode "text=${text}")
             # HTML 解析失败（转义漏网字符）时不重试解析，直接退化为纯文本原样重发：
             # 宁可链接变长，也不能让播放通知消失
@@ -1082,6 +1083,7 @@ jobs:
               code=$(curl -s -m 10 -o /tmp/pl-tg.json -w '%{http_code}' \
                        -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
                        --data-urlencode "chat_id=$TG_CHAT_ID" \
+                       --data-urlencode "disable_web_page_preview=true" \
                        --data-urlencode "text=${plain}")
             fi
             [ "$code" = "200" ] || echo "[WARNING] TG 推送失败 http=$code resp=$(head -c 200 /tmp/pl-tg.json 2>/dev/null)"
@@ -1607,7 +1609,8 @@ jobs:
           curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             -d chat_id=${{ secrets.TG_CHAT_ID }} \
             --data-urlencode "text=${msg}" \
-            -d parse_mode=HTML
+            -d parse_mode=HTML \
+            -d disable_web_page_preview=true
           # 播放事件日志归档：便于排查"播了但没通知"
           echo "--- playlog.log (tail 80) ---"
           tail -n 80 /opt/logs/playlog.log 2>/dev/null || echo "(无 playlog.log)"
