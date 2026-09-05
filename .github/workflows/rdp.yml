@@ -119,11 +119,13 @@ jobs:
           if ($footer) { $footer += " · " }
           $footer += "🔗 <a href=""$Env:TG_RUN_URL"">运行日志</a>"
         }
+        # 单一入口，平铺 kv 即可；元数据一律 " · <i>…</i>" 分隔 —— 禁全角括号
+        # （规范见 docs/telegram-notify.md）
         $msg = "🖥️ <b>Windows RDP 已就绪</b>`n$sep`n" +
           "地址：<code>$(Esc-Html $address)</code>`n" +
           "用户名：<code>runneradmin</code>`n" +
           "密码：<code>$(Esc-Html $Env:RDP_PASSWORD)</code>`n" +
-          "有效期：<i>约 6 小时（超时自动关机）</i>`n" +
+          "有效期：<i>约 6 小时 · 超时自动关机</i>`n" +
           "连接方式：<i>Microsoft Remote Desktop / 任何 RDP 客户端，地址填上面这一行</i>"
         if ($footer) { $msg += "`n`n$footer" }
         Invoke-RestMethod -Uri "https://api.telegram.org/bot$Env:TELEGRAM_BOT_TOKEN/sendMessage" `
