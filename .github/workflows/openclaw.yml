@@ -840,21 +840,9 @@ jobs:
           tg_add_note msg "文件管理 (SFTP)：sftp://runner@${TS_HOST}/"
           # footer 读 TG_RUN_URL/TG_RUN_STARTED_AT（上方前缀注入）
           tg_add_footer msg
-          payload=$(jq -n --arg chat_id "$TELEGRAM_CHAT_ID" --arg text "$msg" \
-            '{chat_id: $chat_id, text: $text, parse_mode: "HTML", disable_web_page_preview: true}')
-          curl -fsS --retry 3 --retry-delay 2 --max-time 20 \
-            -X POST -H 'Content-Type: application/json' \
-            -d "$payload" \
-            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" > /dev/null \
-            || { # HTML 解析失败 → 退化纯文本重发（IP/ISP 等动态值可能含特殊字符）
-              plain=$(_tg_strip_html "$msg")
-              payload=$(jq -n --arg chat_id "$TELEGRAM_CHAT_ID" --arg text "$plain" \
-                '{chat_id: $chat_id, text: $text, disable_web_page_preview: true}')
-              curl -fsS --retry 3 --retry-delay 2 --max-time 20 \
-                -X POST -H 'Content-Type: application/json' \
-                -d "$payload" \
-                "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" > /dev/null || true
-            }
+          # 走发送层而非 curl 直发：HTML 解析失败自动退化纯文本重发（规范 §5），
+          # 429 限流按 retry_after 等待重试，disable_web_page_preview 内置
+          send_tg "$msg" || true
           echo "已推送 SSH 入口通知: ssh runner@${TS_HOST}（AI 网关: ${AI_BACKEND}）"
 
       - name: Run OpenClaw
