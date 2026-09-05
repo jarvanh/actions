@@ -766,7 +766,7 @@ send_sync_warning() {
   fi
 
   if [ -n "$missing_dirs" ]; then
-    tg_add_section msg "📁 缺失的目录 · <i>可能被删除</i>"
+    tg_add_section msg "📁 缺失的目录 · 可能被删除"
     while IFS= read -r d; do
       [ -n "$d" ] && tg_append msg "• <code>$(escape_html "$d")</code>"$'\n'
     done <<< "$missing_dirs"
@@ -780,7 +780,7 @@ send_sync_warning() {
   fi
 
   # 收尾区: 状态 + 备注（斜体），footer 自带空行
-  tg_add_note msg "⏸️ 已跳过此同步，继续执行其他任务
+  tg_add_note msg "⏭️ 已跳过此同步，继续执行其他任务
 如确认无误，请手动触发 force_sync=true"
   tg_add_footer msg
 
@@ -873,11 +873,11 @@ send_sync_skipped() {
 
   # 收尾区: 游离的 🔗 marker 行并入备注；状态/备注统一 tg_add_note；footer 自带空行
   if [ "${fixed_count:-0}" -gt 0 ]; then
-    tg_add_note msg "🔗 完整还原脚本保存在 OneDrive marker <code>$(escape_html "$(get_marker_path "$task_name" "$dest_path")")</code> 的 fixed_files[].restore.script 字段
-⏸️ 本次跳过同步，继续执行其他任务
+    tg_add_note msg "🔗 完整还原脚本保存在 OneDrive marker $(get_marker_path "$task_name" "$dest_path") 的 fixed_files[].restore.script 字段
+⏭️ 本次跳过同步，继续执行其他任务
 如需强制同步，请手动触发 force_sync=true"
   else
-    tg_add_note msg "⏸️ 本次跳过同步，继续执行其他任务
+    tg_add_note msg "⏭️ 本次跳过同步，继续执行其他任务
 如需强制同步，请手动触发 force_sync=true"
   fi
   tg_add_footer msg
