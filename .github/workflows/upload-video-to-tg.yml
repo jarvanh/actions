@@ -24,6 +24,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
+      # 统一收尾区（tg_add_footer）: 运行日志链接 + 已运行时长（所有通知 step 继承）
+      TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      TG_RUN_STARTED_AT: ${{ github.run_started_at }}
       # OneDrive 远程路径：rclone 配置中的远端 + 路径
       SOURCE_REMOTE: "onedrive:1/1024j/视频/91"
       # 91 频道 ID（硬编码，与 ph-dl 使用 secret 不同）

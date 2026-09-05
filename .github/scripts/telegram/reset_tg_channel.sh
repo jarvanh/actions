@@ -1,10 +1,11 @@
 #!/bin/bash
-# 重置 Telegram 频道共享脚本（清空所有消息并删除 uploaded_videos.json）
+# 重置 Telegram 频道共享脚本（清空所有消息并删除 uploaded_videos.json / failed_videos.json）
 #
 # 流程：
 #   1. 调用 clean_tg_channel.py 删除频道内所有消息
 #   2. 删除远端 uploaded_videos.json，使下次运行重新处理全部视频
-#   3. 发送 Telegram 通知
+#   3. 删除远端 failed_videos.json，清除损坏标记（否则损坏文件指纹仍在，"清空重传"对它们无效）
+#   4. 发送 Telegram 通知
 #
 # 用法: reset_tg_channel.sh <channel_id> <workflow_label>
 #   channel_id     - Telegram 频道 ID（如 -100xxxxxxxxxx）
@@ -36,11 +37,17 @@ python3 "${GITHUB_WORKSPACE}/.github/scripts/telegram/clean_tg_channel.py" "$CHA
 rclone delete "$SOURCE_REMOTE/uploaded_videos.json" 2>/dev/null || true
 echo "已删除 uploaded_videos.json"
 
-# 3. 发送通知（统一 HTML 排版 + 统一收尾区）
+# 3. 删除 failed_videos.json：损坏文件靠 size+modtime 指纹跳过，不清除就永远不会被重试，
+#    只删 uploaded_videos.json 的话"清空重传"对这批文件无效
+rclone delete "$SOURCE_REMOTE/failed_videos.json" 2>/dev/null || true
+echo "已删除 failed_videos.json（损坏标记一并清除，下次运行重新尝试这些文件）"
+
+# 4. 发送通知（统一 HTML 排版 + 统一收尾区）
 source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 msg=""
 tg_add_title msg "🧹 ${WORKFLOW_LABEL} 频道清理完成"
 tg_add_block msg "📁 已清空 Telegram 频道所有视频
-📄 已删除 uploaded_videos.json（下次运行重新处理全部视频）"
+📄 已删除 uploaded_videos.json（下次运行重新处理全部视频）
+📄 已删除 failed_videos.json（损坏标记清除，下次运行重新尝试）"
 tg_add_footer msg
 send_tg "$msg"

@@ -261,7 +261,8 @@ def get_video_list():
     """通过 rclone lsjson 获取远端视频文件列表，返回 [(modtime, filename, size_bytes)]。"""
     lsjson_path = os.path.join(TMP, "ls.json")
     err_path = os.path.join(TMP, "lsjson.err")
-    result = run(f"rclone lsjson --recursive {SOURCE_REMOTE}/")
+    # 远程路径含中文/空格时不能被 shell 拆开，必须 quote（copyto 走列表参数，无此问题）
+    result = run(f"rclone lsjson --recursive {shlex.quote(SOURCE_REMOTE + '/')}")
     with open(lsjson_path, "wb") as f:
         f.write(result.stdout.encode("utf-8", errors="replace") if isinstance(result.stdout, str) else result.stdout)
     with open(err_path, "wb") as f:
@@ -353,18 +354,30 @@ def main():
     total = len(all_videos)
     pending_count = len(pending)
     uploaded_before = len(uploaded)
+
+    # 跳过原因分桶：待上传只统计真正进入队列的（pending），损坏/非视频/重复单列。
+    # 否则命中损坏指纹的文件会永久挂在"待上传"里（指纹不变 ⇒ 永不重试 ⇒ 数字恒定），形成清不掉的假库存。
+    from collections import Counter
+    skip_counts = Counter(reason for reason, _ in skipped)
+    corrupt_skipped = skip_counts.get("corrupt", 0)
+    skip_labels = {"corrupt": "损坏", "not_video": "非视频", "duplicate": "重复"}
+    skip_parts = [
+        f"{skip_labels.get(reason, reason)} {cnt}"
+        for reason, cnt in skip_counts.most_common()
+    ]
+    skipped_summary = f"{len(skipped)} 条" + (f"（{' · '.join(skip_parts)}）" if skip_parts else "")
+
     # 保持原 rclone lsjson 日志（含所有条目数），下一行按用户要求输出统一的统计格式
-    print(f"rclone lsjson 返回 {total + len(skipped)} 条条目，视频文件 {total} 条，已上传 {uploaded_before} 条，待上传 {pending_count} 条，失败上传 0 条")
-    print(f"视频文件 {total} 条，已上传 {uploaded_before} 条，待上传 {pending_count} 条，失败上传 0 条")
+    print(f"rclone lsjson 返回 {total + len(skipped)} 条条目，视频文件 {total} 条，已上传 {uploaded_before} 条，待上传 {pending_count} 条，损坏已跳过 {corrupt_skipped} 条")
+    print(f"视频文件 {total} 条，已上传 {uploaded_before} 条，待上传 {pending_count} 条，损坏已跳过 {corrupt_skipped} 条")
     if skipped:
-        from collections import Counter
-        c = Counter(reason for reason, _ in skipped)
-        print(f"非视频/跳过: {len(skipped)} 条")
-        for reason, cnt in c.most_common():
+        print(f"非视频/跳过: {skipped_summary}")
+        for reason, cnt in skip_counts.most_common():
             print(f"   - {reason}: {cnt}")
 
     sent = 0
     failed = 0
+    newly_corrupt = 0
     sent_list = []
     failed_list = []
 
@@ -467,6 +480,7 @@ def main():
                 print("(处理/上传过程已实时输出到上方日志)")
             failed += 1
             if up_result.returncode == EXIT_CORRUPT:
+                newly_corrupt += 1
                 # 源文件损坏（如 moov atom 缺失）：记录指纹并持久化，后续运行跳过
                 failed_map[file] = {
                     "size_bytes": size,
@@ -499,15 +513,22 @@ def main():
 
     write_uploaded(uploaded)
 
+    # 损坏总数 = 运行前已在 failed_videos.json 里的 + 本次新判定的；
+    # 两者都不再计入"待上传"，否则损坏文件会永久挂在待上传里造成"永远清不掉"的假象
+    corrupt_total = corrupt_skipped + newly_corrupt
     stats = {
         "total": total,
         "uploaded_before": uploaded_before,
         "uploaded_total": len(uploaded),
         "pending": pending_count,
-        "remaining": total - len(uploaded),
+        "remaining": max(total - len(uploaded) - corrupt_total, 0),
+        "corrupt_skipped": corrupt_skipped,
+        "corrupt_new": newly_corrupt,
+        "corrupt_total": corrupt_total,
         "sent": sent,
         "failed": failed,
         "skipped_count": len(skipped),
+        "skipped_summary": skipped_summary,
         "skipped_details": "\n".join(f"{reason}: {path}" for reason, path in skipped),
         "sent_list": "\n".join(sent_list),
         "failed_list": "\n".join(failed_list),
@@ -515,7 +536,7 @@ def main():
     with open(STATS_FILE, "w", encoding="utf-8") as f:
         json.dump(stats, f, ensure_ascii=False, indent=2)
 
-    summary_line = f"视频文件 {total} 条，已上传 {len(uploaded)} 条，待上传 {total - len(uploaded)} 条，失败上传 {failed} 条"
+    summary_line = f"视频文件 {total} 条，已上传 {len(uploaded)} 条，待上传 {stats['remaining']} 条，损坏已跳过 {corrupt_total} 条，失败上传 {failed} 条"
     print(summary_line)
     print(f"上传完成: 成功 {sent}, 失败 {failed}")
 
@@ -546,7 +567,9 @@ REMAINING=$(python3 -c "import json,sys; d=json.load(open('$STATS_FILE')); print
 PENDING_COUNT=$(python3 -c "import json,sys; d=json.load(open('$STATS_FILE')); print(d.get('pending',0))" 2>/dev/null || echo 0)
 SENT=$(python3 -c "import json,sys; d=json.load(open('$STATS_FILE')); print(d.get('sent',0))" 2>/dev/null || echo 0)
 FAILED=$(python3 -c "import json,sys; d=json.load(open('$STATS_FILE')); print(d.get('failed',0))" 2>/dev/null || echo 0)
+CORRUPT_TOTAL=$(python3 -c "import json,sys; d=json.load(open('$STATS_FILE')); print(d.get('corrupt_total',0))" 2>/dev/null || echo 0)
 SKIPPED_COUNT=$(python3 -c "import json,sys; d=json.load(open('$STATS_FILE')); print(d.get('skipped_count',0))" 2>/dev/null || echo 0)
+SKIPPED_SUMMARY=$(python3 -c "import json,sys; d=json.load(open('$STATS_FILE')); print(d.get('skipped_summary',''))" 2>/dev/null || echo "")
 SENT_LIST=$(python3 -c "import json,sys; d=json.load(open('$STATS_FILE')); print(d.get('sent_list',''))" 2>/dev/null || echo "")
 FAILED_LIST=$(python3 -c "import json,sys; d=json.load(open('$STATS_FILE')); print(d.get('failed_list',''))" 2>/dev/null || echo "")
 SKIPPED_DETAILS=$(python3 -c "import json,sys; d=json.load(open('$STATS_FILE')); print(d.get('skipped_details',''))" 2>/dev/null || echo "")
@@ -558,12 +581,15 @@ source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 msg=""
 tg_add_title msg "📺 ${CAPTION_PREFIX}"
 tg_add_kv msg "视频文件" "${TOTAL_VIDEOS} 条"
-tg_add_kv msg "库存状态" "已上传 ${UPLOADED_TOTAL} · 待上传 ${REMAINING} · 失败 ${FAILED}"
+tg_add_kv msg "库存状态" "已上传 ${UPLOADED_TOTAL} · 待上传 ${REMAINING}"
+if [ "${CORRUPT_TOTAL:-0}" -gt 0 ]; then
+  tg_add_kv msg "损坏已跳过" "${CORRUPT_TOTAL} 条"
+fi
 tg_add_kv msg "本次处理" "${PENDING_COUNT} 条"
 tg_add_kv msg "本次成功" "${SENT} 条"
 tg_add_kv msg "本次失败" "${FAILED} 条"
 if [ "$SKIPPED_COUNT" -gt 0 ]; then
-  tg_add_kv msg "跳过/过滤" "${SKIPPED_COUNT} 条"
+  tg_add_kv msg "跳过/过滤" "${SKIPPED_SUMMARY:-${SKIPPED_COUNT} 条}"
 fi
 if [ -n "$SENT_LIST" ]; then
   tg_add_section msg "✅ 已上传"
