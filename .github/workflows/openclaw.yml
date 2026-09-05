@@ -741,7 +741,7 @@ jobs:
           cleanup_archive_workdir
           # 数据准备失败不终止步骤（条件上下文抑制 errexit），记录原因后仍走回退路径
           if ! restore_clirelay_data; then
-            FALLBACK_REASON="CliRelay 数据准备失败（归档缺失/校验失败或 bootstrap 迁移失败）"
+            FALLBACK_REASON="CliRelay 数据准备失败 · 归档缺失/校验失败或 bootstrap 迁移失败"
             echo "⚠️ $FALLBACK_REASON，将直接走 CLIProxyAPI 回退路径"
           fi
 
@@ -754,7 +754,7 @@ jobs:
             echo "✅ 当前生效 AI 网关: CliRelay（全栈）"
           else
             if [ -z "${FALLBACK_REASON:-}" ]; then
-              FALLBACK_REASON="CliRelay 未能在预期时间内就绪（compose 启动或 8317 健康检查失败）"
+              FALLBACK_REASON="CliRelay 未能在预期时间内就绪 · compose 启动或 8317 健康检查失败"
             fi
             echo "⚠️ $FALLBACK_REASON，打印日志并回退 CLIProxyAPI..."
             echo "--- clirelay compose logs (tail 80) ---"
@@ -835,7 +835,7 @@ jobs:
           tg_add_kv msg "位置" "${IP_LOC}"
           tg_add_section msg "批准方式"
           tg_add_block msg "• 管理页：admin/machines → openclaw → Edit routes → 勾选 Exit Node
-          • ACL autoApprovers：routes 0.0.0.0/0,::/0 → tag:ci（免每次批准，推荐）
+          • ACL autoApprovers：routes 0.0.0.0/0,::/0 → tag:ci · 免每次批准 · 推荐
           • API：POST /api/v2/device/{device_id}/routes"
           tg_add_note msg "文件管理 (SFTP)：sftp://runner@${TS_HOST}/"
           # footer 读 TG_RUN_URL/TG_RUN_STARTED_AT（上方前缀注入）
@@ -1212,9 +1212,9 @@ jobs:
               ts_host=$(grep '^TS_HOST=' "$HOME/ts.env" | tail -n 1 | cut -d= -f2- || true)
               ts_ip=$(grep '^TS_IP=' "$HOME/ts.env" | tail -n 1 | cut -d= -f2- || true)
             fi
-            ssh_entry="（Tailscale SSH 暂不可用，稍后查看 Actions 日志）"
+            ssh_entry="Tailscale SSH 暂不可用 · 稍后查看 Actions 日志"
             if [ -n "$ts_host" ] && [ -n "$ts_ip" ]; then
-              ssh_entry="tailscale ssh runner@${ts_host} （或 ssh runner@${ts_ip}）"
+              ssh_entry="tailscale ssh runner@${ts_host} · 或 ssh runner@${ts_ip}"
             elif [ -n "$ts_host" ]; then
               ssh_entry="tailscale ssh runner@${ts_host}"
             fi
@@ -1809,12 +1809,12 @@ jobs:
             else
               rc=$?
               echo "⚠️ final openclaw.tar.gz upload failed (rc=$rc): ${openclaw_final_upload_output}"
-              send_archive_alert "$(printf 'final openclaw.tar.gz 上传失败（rc=%s)\n原因: rclone 上传失败\n详情: %s' "$rc" "${openclaw_final_upload_output:-无输出}")"
+              send_archive_alert "$(printf 'final openclaw.tar.gz 上传失败 · rc=%s\n原因：rclone 上传失败\n详情：%s' "$rc" "${openclaw_final_upload_output:-无输出}")"
             fi
           else
             rc=$?
             echo "⚠️ final openclaw.tar.gz archive failed (rc=$rc): ${openclaw_final_output}"
-            send_archive_alert "$(printf 'final openclaw.tar.gz 归档失败（rc=%s)\n原因: %s' "$rc" "${openclaw_final_output:-归档脚本无输出}")"
+            send_archive_alert "$(printf 'final openclaw.tar.gz 归档失败 · rc=%s\n原因：%s' "$rc" "${openclaw_final_output:-归档脚本无输出}")"
           fi
 
           MIN_SIZE=$((5 * 1024))
@@ -1841,22 +1841,22 @@ jobs:
                   else
                     rc=$?
                     echo "⚠️ final CliRelay.tar.gz upload failed (rc=$rc): ${clirelay_final_upload_output}"
-                    send_archive_alert "$(printf 'final CliRelay.tar.gz 上传失败（rc=%s)\n原因: rclone 上传失败\n详情: %s' "$rc" "${clirelay_final_upload_output:-无输出}")"
+                    send_archive_alert "$(printf 'final CliRelay.tar.gz 上传失败 · rc=%s\n原因：rclone 上传失败\n详情：%s' "$rc" "${clirelay_final_upload_output:-无输出}")"
                   fi
                 else
                   echo "⚠️ CliRelay 压缩包小于 5KB，放弃覆盖云端数据: size=${actual_size}"
-                  send_archive_alert "$(printf 'final CliRelay.tar.gz 归档失败\n原因: 压缩包小于最小阈值，放弃覆盖云端数据\n详情: size=%s min=%s output=/tmp/CliRelay.tar.gz' "$actual_size" "$MIN_SIZE")"
+                  send_archive_alert "$(printf 'final CliRelay.tar.gz 归档失败\n原因：压缩包小于最小阈值 · 放弃覆盖云端数据\n详情：size=%s min=%s output=/tmp/CliRelay.tar.gz' "$actual_size" "$MIN_SIZE")"
                 fi
               else
                 rc=$?
                 echo "⚠️ final CliRelay.tar.gz archive failed (rc=$rc): ${clirelay_final_output}"
-                send_archive_alert "$(printf 'final CliRelay.tar.gz 归档失败（rc=%s)\n原因: %s' "$rc" "${clirelay_final_output:-归档脚本无输出}")"
+                send_archive_alert "$(printf 'final CliRelay.tar.gz 归档失败 · rc=%s\n原因：%s' "$rc" "${clirelay_final_output:-归档脚本无输出}")"
               fi
               echo "Stopping CliRelay compose stack after final archive..."
               docker compose -p clirelay -f /tmp/local_CliRelay/docker-compose.yml --project-directory /tmp/local_CliRelay down 2>/dev/null || true
             else
               echo "⚠️ /tmp/local_CliRelay 不存在，跳过 CliRelay 归档"
-              send_archive_alert "$(printf 'final CliRelay.tar.gz 归档失败（rc=3）\n原因: CliRelay 本地部署目录未初始化（/tmp/local_CliRelay 不存在），通常表示 CliRelay 启动步骤被跳过或失败。\n详情: clirelay_dir_missing')"
+              send_archive_alert "$(printf 'final CliRelay.tar.gz 归档失败 · rc=3\n原因：CliRelay 本地部署目录未初始化 · /tmp/local_CliRelay 不存在 · 通常表示 CliRelay 启动步骤被跳过或失败\n详情：clirelay_dir_missing')"
             fi
           elif [ -d /tmp/local_CLIPProxyAPI ]; then
             echo "5a. Archiving CLIProxyAPI persistent data (fallback backend, with clirelay auths)..."
@@ -1880,20 +1880,20 @@ jobs:
                 else
                   rc=$?
                   echo "⚠️ final CLIProxyAPI.tar.gz upload failed (rc=$rc): ${cliproxyapi_final_upload_output}"
-                  send_archive_alert "$(printf 'final CLIProxyAPI.tar.gz 上传失败（rc=%s)\n原因: rclone 上传失败\n详情: %s' "$rc" "${cliproxyapi_final_upload_output:-无输出}")"
+                  send_archive_alert "$(printf 'final CLIProxyAPI.tar.gz 上传失败 · rc=%s\n原因：rclone 上传失败\n详情：%s' "$rc" "${cliproxyapi_final_upload_output:-无输出}")"
                 fi
               else
                 echo "⚠️ CLIProxyAPI 压缩包小于 10KB，放弃覆盖云端数据: size=${actual_size} min=${MIN_SIZE}"
-                send_archive_alert "$(printf 'final CLIProxyAPI.tar.gz 归档失败\n原因: 压缩包小于最小阈值，放弃覆盖云端数据\n详情: size=%s min=%s output=/tmp/CLIProxyAPI.tar.gz' "$actual_size" "$MIN_SIZE")"
+                send_archive_alert "$(printf 'final CLIProxyAPI.tar.gz 归档失败\n原因：压缩包小于最小阈值 · 放弃覆盖云端数据\n详情：size=%s min=%s output=/tmp/CLIProxyAPI.tar.gz' "$actual_size" "$MIN_SIZE")"
               fi
             else
               rc=$?
               echo "⚠️ final CLIProxyAPI.tar.gz archive failed (rc=$rc): ${cliproxyapi_final_output}"
-              send_archive_alert "$(printf 'final CLIProxyAPI.tar.gz 归档失败（rc=%s)\n原因: %s' "$rc" "${cliproxyapi_final_output:-归档脚本无输出}")"
+              send_archive_alert "$(printf 'final CLIProxyAPI.tar.gz 归档失败 · rc=%s\n原因：%s' "$rc" "${cliproxyapi_final_output:-归档脚本无输出}")"
             fi
           else
             echo "⚠️ /tmp/local_CLIPProxyAPI 不存在，跳过 CLIProxyAPI 归档"
-            send_archive_alert "$(printf 'final CLIProxyAPI.tar.gz 归档失败（rc=3）\n原因: CLIProxyAPI 本地数据目录未初始化（/tmp/local_CLIPProxyAPI 不存在），通常表示 CLIProxyAPI 容器启动步骤被跳过或失败。\n详情: cliproxyapi_dir_missing')"
+            send_archive_alert "$(printf 'final CLIProxyAPI.tar.gz 归档失败 · rc=3\n原因：CLIProxyAPI 本地数据目录未初始化 · /tmp/local_CLIPProxyAPI 不存在 · 通常表示 CLIProxyAPI 容器启动步骤被跳过或失败\n详情：cliproxyapi_dir_missing')"
           fi
 
           echo "6. Archiving rss-to-telegram data..."
@@ -1924,25 +1924,25 @@ jobs:
                   else
                     rc=$?
                     echo "⚠️ final rsstt.tar.gz upload failed (rc=$rc): ${rsstt_upload_output}"
-                    send_archive_alert "$(printf 'final rsstt.tar.gz 上传失败（rc=%s)\n原因: rclone 上传失败\n详情: %s' "$rc" "${rsstt_upload_output:-无输出}")"
+                    send_archive_alert "$(printf 'final rsstt.tar.gz 上传失败 · rc=%s\n原因：rclone 上传失败\n详情：%s' "$rc" "${rsstt_upload_output:-无输出}")"
                   fi
                 else
                   echo "⚠️ rsstt 压缩包小于 10KB，放弃覆盖云端数据: size=${actual_size} min=${MIN_SIZE}"
-                  send_archive_alert "$(printf 'final rsstt.tar.gz 归档失败\n原因: 压缩包小于最小阈值，放弃覆盖云端数据\n详情: size=%s min=%s output=/tmp/rsstt.tar.gz' "$actual_size" "$MIN_SIZE")"
+                  send_archive_alert "$(printf 'final rsstt.tar.gz 归档失败\n原因：压缩包小于最小阈值 · 放弃覆盖云端数据\n详情：size=%s min=%s output=/tmp/rsstt.tar.gz' "$actual_size" "$MIN_SIZE")"
                 fi
               else
                 rc=$?
                 echo "⚠️ final rsstt.tar.gz validation failed (rc=$rc): ${rsstt_validate_output}"
-                send_archive_alert "$(printf 'final rsstt.tar.gz 归档校验失败（rc=%s)\n原因: tar 列表校验失败\n详情: %s' "$rc" "${rsstt_validate_output:-无输出}")"
+                send_archive_alert "$(printf 'final rsstt.tar.gz 归档校验失败 · rc=%s\n原因：tar 列表校验失败\n详情：%s' "$rc" "${rsstt_validate_output:-无输出}")"
               fi
             else
               rc=$?
               echo "⚠️ final rsstt.tar.gz archive failed (rc=$rc): ${rsstt_tar_output}"
-              send_archive_alert "$(printf 'final rsstt.tar.gz 归档失败（rc=%s)\n原因: tar 创建失败\n详情: %s' "$rc" "${rsstt_tar_output:-无输出}")"
+              send_archive_alert "$(printf 'final rsstt.tar.gz 归档失败 · rc=%s\n原因：tar 创建失败\n详情：%s' "$rc" "${rsstt_tar_output:-无输出}")"
             fi
           else
             echo "⚠️ /tmp/local_rsstt 不存在，跳过 rss-to-telegram 归档"
-            send_archive_alert "$(printf 'final rsstt.tar.gz 归档失败（rc=3）\n原因: rss-to-telegram 本地数据目录未初始化（/tmp/local_rsstt 不存在），通常表示 rss-to-telegram 容器启动步骤被跳过或失败。\n详情: rsstt_dir_missing')"
+            send_archive_alert "$(printf 'final rsstt.tar.gz 归档失败 · rc=3\n原因：rss-to-telegram 本地数据目录未初始化 · /tmp/local_rsstt 不存在 · 通常表示 rss-to-telegram 容器启动步骤被跳过或失败\n详情：rsstt_dir_missing')"
           fi
 
       - name: Trigger next OpenClaw run

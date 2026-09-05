@@ -982,7 +982,7 @@ def build_telegram_lines(results, *, meta, gist_res, qualified_count):
         for idx, r in enumerate(top, 1):
             prefix = build_node_metric_prefix(_result_metric_item(r), mode)
             connector = '└─' if idx == len(top) else '├─'
-            item = f'{connector} {idx}. <code>{esc(r.get("name", ""))}</code>'
+            item = f'  {connector} {idx}. <code>{esc(r.get("name", ""))}</code>'
             if prefix:
                 item += f' · <i>{esc(prefix)}</i>'
             lines.append(item)
@@ -991,7 +991,7 @@ def build_telegram_lines(results, *, meta, gist_res, qualified_count):
         lines.append('⚠️ 没有节点测速成功')
         lines.append('')
 
-    lines.append('📦 <b>订阅（Gist）</b>')
+    lines.append('📦 <b>订阅 · Gist</b>')
     if gist_res and gist_res.get('ok'):
         action = '新建' if gist_res.get('created') else '更新'
         # 该链接指向 Gist 上的订阅文件（YAML），不是测速报告；

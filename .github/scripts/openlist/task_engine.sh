@@ -374,7 +374,7 @@ _sync_task_impl() {
 
   if [ "$source_size_bytes" -le "$threshold" ]; then
     echo "源端大小 $(format_bytes_iec "$source_size_bytes") 未超过 50GB 阈值，直接同步"
-    progress_update "直接同步中（源端 $(format_bytes "$source_size_bytes")）"
+    progress_update "直接同步中 · 源端 $(format_bytes "$source_size_bytes")"
     sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
     local _rc=$?
     _sync_task_finalize "$_rc"
@@ -384,7 +384,7 @@ _sync_task_impl() {
   # 超过 50GB，需要拆分
   if [ "$current_depth" -ge "$max_depth" ]; then
     echo "已达最大拆分深度 ${max_depth}，按文件批次拆分 (depth=${current_depth}, size=$(format_bytes_iec "$source_size_bytes"))"
-    progress_update "文件批次拆分（已达最大深度 ${current_depth}）"
+    progress_update "文件批次拆分 · 已达最大深度 ${current_depth}"
     sync_by_file_batches "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
     local _rc=$?
     _sync_task_finalize "$_rc"
@@ -454,7 +454,7 @@ _sync_task_impl() {
   echo "按子目录大小排序..."
   # 排序阶段还没有子目录树可展示，用标签行（"▸" 开头）说明正在做什么；
   # 不再夹带源端大小（任务分组头已给出），避免同一数字重复两遍
-  PROGRESS_PHASE_INFO="▸ 📂 子目录拆分（depth=${current_depth}）"
+  PROGRESS_PHASE_INFO="▸ 📂 子目录拆分 · depth=${current_depth}"
   progress_update "正在统计并排序子目录..."
   local sorted_subdirs=""
   declare -A subdir_size_map=()
@@ -563,7 +563,7 @@ _sync_task_impl() {
   if [ -n "$skipped_list" ]; then
     tg_add_section AUTO_SPLIT_INFO "⏭️ 已跳过的子目录"
     tg_add_block AUTO_SPLIT_INFO "$(tree_lines "$skipped_list")
-<i>（无文件变动）</i>"
+<i>无文件变动</i>"
   fi
 
   # 最终完整同步（仅在顶层执行，正常通知）
@@ -1053,7 +1053,7 @@ sync_by_file_batches() {
   # 进入文件批次阶段：清空父级子目录阶段的 stats，避免在批次阶段
   # 仍显示 "📊 子目录: x/y 完成" 这类与当前阶段无关的旧数据。
   PROGRESS_STATS=""
-  PROGRESS_PHASE_INFO="▸ 📦 文件批次拆分（depth=${SYNC_AUTO_SPLIT_DEPTH:-0}，正在列出文件...）"
+  PROGRESS_PHASE_INFO="▸ 📦 文件批次拆分 · depth=${SYNC_AUTO_SPLIT_DEPTH:-0} · 正在列出文件"
   progress_update "正在列出文件..."
   # 注意：GitHub Actions 默认 set -e -o pipefail，rclone lsjson 失败时管道会非零退出，
   # 此处只需文件列表（失败时 total_files=0 触发下方 lsf 备选），用 || true 避免 step 直接退出。
@@ -1062,7 +1062,7 @@ sync_by_file_batches() {
   local total_files
   total_files=$(wc -l < "$file_list_file" | tr -d ' ')
   echo "总文件数: ${total_files}"
-  PROGRESS_PHASE_INFO="▸ 📦 文件批次拆分（${total_files} 文件，正在拆分批次...）"
+  PROGRESS_PHASE_INFO="▸ 📦 文件批次拆分 · ${total_files} 文件 · 正在拆分批次"
   progress_update "总文件数: ${total_files}，正在拆分批次..."
 
   if [ "$total_files" -eq 0 ]; then
@@ -1139,7 +1139,7 @@ sync_by_file_batches() {
   [[ "$DEST_BASE_BYTES" =~ ^[0-9]+$ ]] || DEST_BASE_BYTES=0
 
   echo "拆分为 ${total_batches} 个批次"
-  PROGRESS_PHASE_INFO="▸ 📦 文件批次拆分：共 ${total_batches} 批 · ${total_files} 个文件（每批 ≤ $(format_bytes "$threshold")）"
+  PROGRESS_PHASE_INFO="▸ 📦 文件批次拆分：共 ${total_batches} 批 · ${total_files} 个文件 · 每批 ≤ $(format_bytes "$threshold")"
   progress_update_force "拆分为 ${total_batches} 个批次" "$(_render_batch_stats_line)"
 
   for i in $(seq 0 $batch_num); do
@@ -1150,7 +1150,7 @@ sync_by_file_batches() {
       batch_file_count=$(wc -l < "$bf" | tr -d ' ')
       batch_total_files=$((batch_total_files + batch_file_count))
       echo "=== 批次 $((i+1))/${total_batches}: ${batch_file_count} 个文件 ==="
-      PROGRESS_PHASE_INFO="▸ 📦 文件批次拆分：共 ${total_batches} 批 · ${total_files} 个文件（当前第 ${batch_idx} 批 · ${batch_file_count} 个文件）"
+      PROGRESS_PHASE_INFO="▸ 📦 文件批次拆分：共 ${total_batches} 批 · ${total_files} 个文件 · 当前第 ${batch_idx} 批 · ${batch_file_count} 个文件"
       progress_update "第 ${batch_idx}/${total_batches} 批：${batch_file_count} 个文件" "$(_render_batch_stats_line)"
 
       # 批次计时基准（历史记录耗时用）
@@ -1189,14 +1189,14 @@ sync_by_file_batches() {
         if ! _check_openlist_backend_connectivity "$dest_path" "$batch_log"; then
           local unbuilt_batches=$((total_batches - synced_batches - failed_batches))
           failed_batches=$((failed_batches + unbuilt_batches))
-          [ "$unbuilt_batches" -gt 0 ] && failed_batch_list+="批次 $((i+1))/${total_batches} 起共 ${unbuilt_batches} 批 · 批次预检未通过（后端不健康），中止"$'\n'
+          [ "$unbuilt_batches" -gt 0 ] && failed_batch_list+="批次 $((i+1))/${total_batches} 起共 ${unbuilt_batches} 批 · 批次预检未通过 · 后端不健康 · 中止"$'\n'
           echo "🛑 批次 $((i+1)) 预检未通过（后端不健康），中止剩余 ${unbuilt_batches} 个批次，本同步对标记失败（后端恢复后轮转回来重试）"
           _stop_batch_progress_thread
           AUTO_SPLIT_INFO=""
           tg_add_section AUTO_SPLIT_INFO "🔀 文件批次拆分统计"
           tg_add_kv AUTO_SPLIT_INFO "总批次" "${total_batches}"
           tg_add_kv AUTO_SPLIT_INFO "文件数" "${batch_total_files}"
-          tg_add_block AUTO_SPLIT_INFO "✅ <b>${synced_batches}</b> · ❌ <b>${failed_batches}</b> <i>（批次预检熔断中止）</i>"
+          tg_add_block AUTO_SPLIT_INFO "✅ <b>${synced_batches}</b> · ❌ <b>${failed_batches}</b> <i>批次预检熔断中止</i>"
           progress_update_force "批次预检未通过，中止同步" "▸ 📊 批次：${batch_idx}/${total_batches} · ✅${synced_batches} ❌${failed_batches}"
           # 失败状态必须随全局标志传递（与本函数开头 skip 分支置 SYNC_SKIPPED
           # 的惯例一致）: 下游 progress_task_done 状态映射与轮转游标都只认 SYNC_FAILED，
@@ -1291,7 +1291,7 @@ sync_by_file_batches() {
         _stop_batch_progress_thread
         AUTO_SPLIT_INFO="<b>🔀 文件批次拆分统计</b>"$'\n'
         AUTO_SPLIT_INFO+="总批次：<b>${total_batches}</b> · 文件数：<b>${batch_total_files}</b>"$'\n'
-        AUTO_SPLIT_INFO+="✅ <b>${synced_batches}</b> · ❌ <b>${failed_batches}</b>（后端写入全拒中止）"$'\n'
+        AUTO_SPLIT_INFO+="✅ <b>${synced_batches}</b> · ❌ <b>${failed_batches}</b> · 后端写入全拒中止"$'\n'
         progress_update_force "后端写入全拒，中止同步" "$(_render_batch_stats_line)"
         # 同预检熔断出口: 失败状态经 SYNC_FAILED 全局标志传递（见上注释）
         SYNC_FAILED=1

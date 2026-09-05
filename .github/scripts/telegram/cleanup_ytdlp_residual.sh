@@ -35,13 +35,22 @@ fi
 # 助手需在明细构建前可用：文件名经 escape_html（含 & < > 未转义会 400 整条退化）
 source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 
-# 收集文件名与大小，用于通知（平铺列表统一 "• " 前缀；元数据 " · <i>…</i>"，禁括号）
+# 收集文件名与大小，用于通知（平铺列表统一 "• " 前缀；元数据 " · <i>…</i>"，禁括号）。
+# 每组上限 8 条 + 折叠行"还有 N 条…"（规范 §2.1：残留可能上百条，全量穷举会刷屏
+# 并顶到 4000 分片边界把收尾区切走）
 FILE_DETAILS=""
+DETAIL_MAX=8
+_n=0
 for f in "${FRAG_FILES[@]}"; do
+  _n=$((_n + 1))
+  [ "$_n" -gt "$DETAIL_MAX" ] && break
   fname=$(basename "$f")
   fsize=$(du -h "$f" | cut -f1)
   FILE_DETAILS+="• <code>$(escape_html "${fname}")</code> · <i>${fsize}</i>"$'\n'
 done
+if [ "${#FRAG_FILES[@]}" -gt "$DETAIL_MAX" ]; then
+  FILE_DETAILS+="<i>还有 $(( ${#FRAG_FILES[@]} - DETAIL_MAX )) 条…</i>"$'\n'
+fi
 
 # 删除残留文件
 find . -type f \( -name '*.mp4-Frag*' -o -name '*.part-Frag*' -o -name '*.ytdl' -o -name '*.m3u8' \) -delete
