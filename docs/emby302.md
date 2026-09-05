@@ -45,7 +45,7 @@
 | 开关 | 清什么 | 效果 |
 |---|---|---|
 | `clear_emby_cache` | `/mnt/emby-cache` | 图片缓存从零开始：所有海报首次浏览重新冷读；本轮收尾备份同步变小，之后轮次也没有旧缓存可用 |
-| `clear_warm_state` | `warm-state.json` | 预热档位从头统计：首屏/海报墙预热跳过，等 wallwarmer 重新记录客户端档位 |
+| `clear_warm_state` | `warm-state.json` | 预热档位从头统计：首屏/海报墙预热跳过，等 wallwarmer 重新记录客户端档位；**回看预热列表（recent）一并清空**，最近播放过的条目下轮不再定向预热 |
 
 两者可同时勾选——相当于把"缓存 + 档位统计"全部归零，从冷启动重建画像。
 
@@ -161,9 +161,18 @@ rclone 之所以能通，是因为它逐段解析、遇到 `remoteItem` 就切�
 
 ### 4.2 解法：odlink
 
-`odlink.py` 对外**伪装成 OpenList 的 `/api/fs/*`**，对内用 Microsoft Graph **复刻 rclone
-的快捷方式跟随**，把 `@microsoft.graph.downloadUrl`（官方预授权直链，约 1 小时有效）
-作为 `raw_url` 返回，ge2o 据此发出 302。
+`odlink.py` 对外**伪装成 OpenList 的 `/api/fs/*`**，对内用 Microsoft Graph 跟随快捷方式，
+把 `@microsoft.graph.downloadUrl`（官方预授权直链，约 1 小时有效）作为 `raw_url` 返回，
+ge2o 据此发出 302。
+
+路径解析是三级策略（按成本从低到高，`resolve()`）：
+
+1. **整路径缓存命中** → 零 Graph 调用（此前解析过，或列目录时回填过 `dir_cache`）；
+2. **路径寻址一次解析**：首段快捷方式切盘后，剩余子路径用
+   `/drives/{driveId}/items/{itemId}:/{sub/path}:` 一次请求拿到底——冷解析从 N 段
+   串行 Graph 往返压到 1 次，这是 302 起播慢的服务端主要优化点；
+3. **逐段下钻兜底**（复刻 rclone：逐段解析、遇 `remoteItem` 切换 drive 继续），
+   路径寻址失败或终点本身是快捷方式时走这条。
 
 直链源契约由 `start odlink` 步骤写入，ge2o 配置、启动探活、运行中 watchdog
 **全部从这两个文件读**，保证三者打到同一个源：
@@ -181,7 +190,7 @@ rclone 之所以能通，是因为它逐段解析、遇到 `remoteItem` 就切�
   ├─ odlink 未就绪？            → 转发 OpenList
   ├─ 首段不是快捷方式？          → 转发 OpenList
   ├─ Graph 解析失败？           → 转发 OpenList
-  └─ 否则 → Graph 逐段下钻 → 返回直链
+  └─ 否则 → 缓存命中 / 路径寻址一次解析（失败兜底逐段下钻）→ 返回直链
 ```
 
 非快捷方式路径与解析失败**一律原样转发本机 OpenList**，所以 odlink 不可用时
@@ -194,8 +203,8 @@ rclone 之所以能通，是因为它逐段解析、遇到 `remoteItem` 就切�
 | 范围 | 时机 | 说明 |
 |---|---|---|
 | **顶层**快捷方式名单 | 启动时一次性快照 | `bootstrap()` 列一次根目录，成功后即固定。**本轮内新建/改名/删除的快捷方式不会被感知**（走 fallback 转发 OpenList），需下次 run 才纳入 |
-| 快捷方式**内部**的子路径 | 每次请求实时下钻 | 任意深度都无需预先扫描，结果进 `dir_cache` 缓存 |
-| 嵌套快捷方式（快捷方式里的快捷方式） | 实时跟随跨盘 | 下钻途中遇 `remoteItem` 即切换 drive |
+| 快捷方式**内部**的子路径 | 每次请求实时解析 | 任意深度都无需预先扫描；解析结果进 `dir_cache`（无 TTL），列目录还会把子条目批量回填进缓存 |
+| 嵌套快捷方式（快捷方式里的快捷方式） | 实时跟随跨盘 | 路径寻址不跟随中段 `remoteItem`（会失败），自动兜底逐段下钻切换 drive |
 
 > 顶层列举用 `$top=200`，根目录条目超过 200 会被截断。
 
@@ -523,7 +532,7 @@ sudo EMBY_USER="$EMBY_USER" python3 emby_guard.py <emby-data-root>   # 例：/va
 | 段 | 做什么 | 成本 | 对 **302 直连播放** | 预热后的效果 |
 |---|---|---|---|---|
 | 海报墙 | 请求最新条目海报，让 Emby 现场缩放 + ge2o 内存缓存就绪 | 低 | ✅ 有效（与模式无关，纯 Emby 侧） | 首页秒开 |
-| 直链 | 提前打一次 odlink `/api/fs/get`，填充 `dir_cache` / `link_cache` | 零流量 | ✅ **最有效**——ge2o→odlink 的直链解析本身就是 302 起播链路的一环 | 起播时不再逐段下钻 Graph |
+| 直链 | 提前打一次 odlink `/api/fs/get`，填充 `dir_cache` / `link_cache` | 零流量 | ✅ **最有效**——ge2o→odlink 的直链解析本身就是 302 起播链路的一环 | 起播时不再逐段下钻 Graph。路径来源两路去重：**recent（最近播放，最可能回看）+ Latest 前 N 条** |
 | 头尾 | 读每个条目的头部与尾部，落进 VFS 稀疏缓存 | 真实流量，受 `WU_BUDGET_MB` 约束 | ⚠️ **基本无效**（视频流不过挂载），只在转码 / 回退 `direct` 时才用得上 | ffprobe / ffmpeg 起播读命中本地 |
 | 各库首屏 | 每个媒体库按默认排序取前 20 张海报 | 约 1-2s/张×档位数，串行 | ✅ 滑进任意媒体库第一屏命中缓存 | 首屏秒开。宽度档位读跨 run 统计 Top5（`/var/lib/emby/warm-state.json`，随备份跨 run 传递）；**无统计时整体跳过**（不预热没人消费的尺寸） |
 | 全库海报（`wallwarmer`） | 按 DateCreated 倒序遍历全部条目持续预热 | 后台持续 ~5h，并发 2 | ✅ 滑到已覆盖区域即秒开；逐轮往深处推进 | 深层页面首次浏览不再冷读 |
@@ -551,6 +560,11 @@ sudo EMBY_USER="$EMBY_USER" python3 emby_guard.py <emby-data-root>   # 例：/va
 > 直链预热的价值主要在 `dir_cache`（无 TTL）：直链本身 40 分钟后会过期，
 > 但路径解析结果本轮内一直命中，届时只需重新签发一次（1 次 Graph 调用，而非逐段下钻）。
 >
+> **回看预热（recent）**：playlog 在每次播放时把条目媒体路径记入 `warm-state.json` 的
+> `recent` 列表（保留最近 12 条，随备份跨 run 持久化），下轮 warmup 优先预热这些路径——
+> 你最近在看什么，下一轮点开就基本是热的。`clear_warm_state` 会连它一起清掉；
+> wallwarmer 写回档位统计时会保留该字段，两条链路互不覆盖（写侧共用 flock）。
+>
 > 历史坑：`warmup.sh` 曾用 `UID` 存用户 ID，而 `UID` 是 bash **只读内建变量**，
 > 赋值直接报 `readonly variable` 并失败 —— 查询拿到空结果、预热静默空转。
 > 已改名为 `USER_ID`。
@@ -571,12 +585,13 @@ sudo EMBY_USER="$EMBY_USER" python3 emby_guard.py <emby-data-root>   # 例：/va
 | 播放模式默认值 | workflow `env.PLAYBACK_MODE_INPUT` 的兜底值 / 仓库变量 `EMBY_PLAYBACK_MODE` |
 | 探活判据与重试次数 | `run cloudflared` 步骤的探活循环、`/opt/watchdog.sh` heredoc |
 | odlink 分流规则 | `odlink.py` 的 `do_POST` |
+| odlink 路径解析策略（缓存 / 一次寻址 / 逐段兜底） | `odlink.py` 的 `resolve()` 与 `_resolve_drill()`；列目录回填缓存在 `list_children()` |
 | 顶层快捷方式刷新策略 | `odlink.py` 的 `bootstrap_loop`（当前为一次性，成功后不再重跑） |
 | 直链缓存时长 | `odlink.py` 的 `LINK_TTL` |
 | rclone mount 参数（seek 优先口径） | `emby.yml` 的 `rclone-run` 步骤 |
 | `/mnt` 容量预留 | workflow `env:` 的 `MNT_RESERVE_KB`（默认 6GB），分配逻辑在 `lib.sh` |
-| 预热规模 | workflow `env:` 的 `WU_ITEMS`(10) / `WU_EDGE_MB`(64) / `WU_BUDGET_MB`(2048)，脚本在 `emby.yml` 的 `warmup images` 步骤；**302 直连为主时建议 3 / 32**（头尾预热对直连播放基本无效，只当冷读探针，见[起播慢怎么定位](#起播慢怎么定位)） |
-| 全库海报预热 | `start wall warmer` 步骤的 `/opt/wallwarmer.sh`：按 DateCreated 倒序分页遍历全部条目，把 Primary 海报拉进 Emby 缓存（`/mnt/emby-cache`）。**宽度档位跨 run 统计**——状态文件 `/var/lib/emby/warm-state.json` 存 `[宽度,得分]`（得分=按半衰期衰减的历史请求量，`WW_DECAY`=0.5），每轮启动先对历史得分衰减一次，再与本轮 ge2o 实测计数合并取 Top5（`WW_SIZES_MAX`=5）作为预热档位；持续被消费的档位留存，无人用的按半衰期退出（得分<1 淘汰）。每条目按这些档位各预热一份；请求只带 `maxWidth` 不带 `maxHeight`（缓存键含参数组合，box-fit 下带两者会得到更小的图、与客户端要的对不上）。统计每页写回状态文件、随备份跨 run 传递——ge2o 日志每轮清零，跨 run 全靠它。环境变量 `WW_WORKERS`(2) / `WW_GAP`(0.2s) / `WW_MAX_MIN`(300min) / `WW_SIZES_MAX`(5) / `WW_DECAY`(0.5) / `WW_MIN_FREE_KB`(/mnt 剩余 10GB 下限) / `WW_START_DELAY`(180s，让首屏预热先跑)。直连 Emby 不过 ge2o；缓存随备份持久化，逐轮往深处推进 |
+| 预热规模 | workflow `env:` 的 `WU_ITEMS`(10) / `WU_EDGE_MB`(64) / `WU_BUDGET_MB`(2048)，脚本在 `emby.yml` 的 `warmup images` 步骤；**302 直连为主时建议 3 / 32**（头尾预热对直连播放基本无效，只当冷读探针，见[起播慢怎么定位](#起播慢怎么定位)）。直链预热另含 **recent 回看预热**（playlog 写入 `warm-state.json`，保留最近 12 条，条数无需配置） |
+| 全库海报预热 | `start wall warmer` 步骤的 `/opt/wallwarmer.sh`：按 DateCreated 倒序分页遍历全部条目，把 Primary 海报拉进 Emby 缓存（`/mnt/emby-cache`）。**宽度档位跨 run 统计**——状态文件 `/var/lib/emby/warm-state.json` 存 `[宽度,得分]`（得分=按半衰期衰减的历史请求量，`WW_DECAY`=0.5），每轮启动先对历史得分衰减一次，再与本轮 ge2o 实测计数合并取 Top5（`WW_SIZES_MAX`=5）作为预热档位；持续被消费的档位留存，无人用的按半衰期退出（得分<1 淘汰）。每条目按这些档位各预热一份；请求只带 `maxWidth` 不带 `maxHeight`（缓存键含参数组合，box-fit 下带两者会得到更小的图、与客户端要的对不上）。统计每页写回状态文件、随备份跨 run 传递——ge2o 日志每轮清零，跨 run 全靠它。环境变量 `WW_WORKERS`(2) / `WW_GAP`(0.2s) / `WW_MAX_MIN`(300min) / `WW_SIZES_MAX`(5) / `WW_DECAY`(0.5) / `WW_MIN_FREE_KB`(/mnt 剩余 10GB 下限) / `WW_START_DELAY`(180s，让首屏预热先跑)。直连 Emby 不过 ge2o；缓存随备份持久化，逐轮往深处推进。**写回时保留 `recent` 字段**（playlog 记录的最近播放路径）——persist_state 是整体覆盖写，丢掉它回看预热就失效 |
 | 校验用的 Emby 用户名 | secret `EMBY_USER`（**不写死在代码里**；未配置则退化为"至少一个用户"） |
 | Emby 校验项 | `emby302/emby_guard.py`（恢复侧与备份侧共用同一份） |
 | 磁盘预检阈值 / 脱敏口径 | `emby302/lib.sh` |

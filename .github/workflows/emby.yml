@@ -520,7 +520,7 @@ jobs:
           fi
           if [ "${{ inputs.clear_warm_state }}" = "true" ]; then
             sudo rm -f /var/lib/emby/warm-state.json
-            echo "🧹 预热统计 warm-state.json 已清空（档位从头统计；本轮 wallwarmer 会重新记录）"
+            echo "🧹 预热统计 warm-state.json 已清空（档位从头统计；回看预热列表一并清空，本轮 wallwarmer 会重新记录档位）"
           fi
       - name: run emby
         run: |
@@ -893,14 +893,14 @@ jobs:
           }
 
           # 片名与元数据反查：Items 接口 → 失败再从 Sessions 里按 Id 反查（emby_get 已含双认证回退）
-          # 一次请求把通知需要的信息全取回来（年份/类型/季集/时长/分辨率/编码），不再逐项查。
-          # 输出 TSV：name | year | type | series | season | episode | 时长(分) | 高度(px) | 编码
+          # 一次请求把通知需要的信息全取回来（年份/类型/季集/时长/分辨率/编码/媒体路径），不再逐项查。
+          # 输出 TSV：name | year | type | series | season | episode | 时长(分) | 高度(px) | 编码 | 媒体路径
           # 临时文件带 $BASHPID：数据源 A/B 是两个并发子 shell，同名的会互相踩。
           item_meta() { # $1=IID
             local iid=$1 code meta sn pid=$BASHPID
             # ⚠️ 必须先把 $BASHPID 固化到普通变量：jq 在 $( ) 里跑，展开时 $BASHPID
             # 已是子 shell 的 pid，读到的会是另一个（不存在的）临时文件——静默全空
-            code=$(emby_get "/emby/Items?Ids=$iid&Fields=Name,ProductionYear,Type,SeriesName,ParentIndexNumber,IndexNumber,RunTimeTicks,MediaStreams" "/tmp/pl-item-$pid.json")
+            code=$(emby_get "/emby/Items?Ids=$iid&Fields=Name,ProductionYear,Type,SeriesName,ParentIndexNumber,IndexNumber,RunTimeTicks,MediaStreams,Path,MediaSources" "/tmp/pl-item-$pid.json")
             meta=$(jq -r '.Items[0] // empty
                    | [
                        (.Name // ""),
@@ -911,7 +911,8 @@ jobs:
                        (if .IndexNumber then (.IndexNumber|tostring) else "" end),
                        ((((.RunTimeTicks // 0) / 600000000) | floor) | tostring),
                        (([.MediaStreams[]? | select(.Type=="Video") | (.Height // 0)] | max // 0) | tostring),
-                       ([.MediaStreams[]? | select(.Type=="Video") | (.Codec // "")][0] // "")
+                       ([.MediaStreams[]? | select(.Type=="Video") | (.Codec // "")][0] // ""),
+                       (.MediaSources[0].Path // .Path // "")
                      ] | join("\u001f")' "/tmp/pl-item-$pid.json" 2>/dev/null)
             if [ -z "$meta" ]; then
               echo "[WARN] 元数据查询失败 item=$iid http=$code" >&2
@@ -920,7 +921,7 @@ jobs:
                      | .[] | select((.NowPlayingItem.Id // "") == $id) | .NowPlayingItem.Name' \
                      "/tmp/pl-sessions-name-$pid.json" 2>/dev/null | head -1)
               [ -n "$sn" ] || echo "[WARN] Sessions 反查片名失败 item=$iid http=$code" >&2
-              meta="${sn:-未知}"$'\037\037\037\037\037\037\037\037'
+              meta="${sn:-未知}"$'\037\037\037\037\037\037\037\037\037'
             fi
             printf '%s\n' "$meta"
           }
@@ -974,15 +975,36 @@ jobs:
           }
           join_parts() { local out= p; for p in "$@"; do [ -n "$p" ] && out="${out:+${out} · }${p}"; done; printf '%s' "$out"; }
 
+          # 跨 run 回看预热：把播放条目的媒体路径记入 warm-state.json 的 recent 列表
+          # （随备份跨 run 持久化，下轮 warmup 优先预热这些直链——最可能被回看的内容）。
+          # /var/lib/emby 属主是 emby，runner 写不进，走 sudo 读改写；文件不存在或
+          # JSON 损坏时 jq 失败 → 不写（绝不能拿空输出覆盖掉海报档位统计）。
+          # flock 与 wallwarmer 的整体覆盖写共用一把锁，缩小互踩窗口。
+          STATE_PATH=/var/lib/emby/warm-state.json
+          record_recent() { # $1=媒体路径
+            local p=$1 new
+            case "$p" in /onedrive/*) ;; *) return 0;; esac
+            (
+              flock 9 2>/dev/null || :
+              new=$(sudo jq -c --arg p "$p" --argjson now "$(date +%s)" '
+                     .recent = (([(.recent // [])[]? | select(.path != $p)] + [{path:$p, ts:$now}])[-12:])' \
+                     "$STATE_PATH" 2>/dev/null) || return 0
+              [ -n "$new" ] && printf '%s' "$new" | sudo tee "$STATE_PATH" >/dev/null 2>&1
+              return 0
+            ) 9>/tmp/warm-state.lock
+          }
+
           notify() { # $1=KIND $2=IID [$3=NAME] [$4=起播耗时] [$5=客户端IP]
             local kind=$1 iid=$2 name=$3 dur=$4 cip=$5
-            local code link text plain n year type series season episode mins hgt codec
+            local code link text plain n year type series season episode mins hgt codec mpath
             local cname dev size_b remain_s se title meta client l3 lt
             claim "$iid" || return 0
             # 分隔符用 \037（单元分隔符）而非 tab：tab 是 IFS 空白字符，read 会折叠连续的
             # 分隔符，中间的空字段（如电影没有 series/季集）会被吃掉、后面的字段整体前移
-            IFS=$'\037' read -r n year type series season episode mins hgt codec <<<"$(item_meta "$iid")"
+            IFS=$'\037' read -r n year type series season episode mins hgt codec mpath <<<"$(item_meta "$iid")"
             [ -n "$name" ] && n="$name"   # 数据源 B 自带片名，优先用它（少一次不可靠依赖）
+            # 回看预热记录：取不到路径时静默跳过（不影响通知）
+            [ -n "$mpath" ] && record_recent "$mpath"
 
             # 直链信息：url | size(bytes) | 剩余有效秒数
             # 2400 = odlink.py 的 LINK_TTL（40 分钟）；改直链缓存时长时这里要同步
@@ -1244,13 +1266,22 @@ jobs:
           # odlink 的 dir_cache(无 TTL) 与 link_cache(40min) 都在进程内存里，每轮 run 都是冷启动。
           # 提前打一次 /api/fs/get，起播时 ge2o 打过来直接命中：路径解析结果本轮内一直有效，
           # 40 分钟后只需重新签发直链（1 次 Graph 调用，而非逐段下钻 N 次）。
+          # 路径两个来源（去重，recent 优先）：
+          #   recent —— warm-state.json 里 playlog 跨 run 记录的最近播放路径，最可能被回看；
+          #   Latest —— 首页最近添加前 WU_ITEMS 条（原有行为）。
           source "$EMBY302_DIR/lib.sh"     # link_host / link_token 是直链源的唯一真相
           LK_HOST=$(link_host)
           LK_TOKEN=$(link_token)
-          LK_N=0; LK_MS=0
+          jq -r '(.recent // [])[]?.path // empty' /var/lib/emby/warm-state.json 2>/dev/null > /tmp/wu-paths.txt
+          REC_N=$(grep -c '^/onedrive/' /tmp/wu-paths.txt 2>/dev/null || echo 0)
           for ID in $(jq -r '.[].Id' /tmp/wu-items.json | head -"$WU_ITEMS"); do
-            P=$(jq -r --arg id "$ID" '.[] | select(.Id==$id) | (.MediaSources[0].Path // .Path // empty)' /tmp/wu-items.json)
+            jq -r --arg id "$ID" '.[] | select(.Id==$id) | (.MediaSources[0].Path // .Path // empty)' /tmp/wu-items.json >> /tmp/wu-paths.txt
+          done
+          LK_N=0; LK_MS=0
+          # 进程替换而非管道喂 while：计数器要留在主 shell（管道会让 while 进子 shell）
+          while IFS= read -r P; do
             [ -n "$P" ] || continue
+            case "$P" in /onedrive/*) ;; *) continue;; esac
             T0=$(date +%s%N)
             CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$LK_HOST/api/fs/get" \
                   -H 'Content-Type: application/json' -H "Authorization: $LK_TOKEN" \
@@ -1258,11 +1289,12 @@ jobs:
             MS=$(( ( $(date +%s%N) - T0 ) / 1000000 ))
             echo "直链预热 $(basename "$P") http=$CODE ${MS}ms"
             LK_N=$((LK_N + 1)); LK_MS=$((LK_MS + MS))
-          done
+          done < <(awk 'NF && !seen[$0]++' /tmp/wu-paths.txt)
+          rm -f /tmp/wu-paths.txt
           if [ "$LK_N" -gt 0 ]; then
-            echo "直链预热完成: ${LK_N} 条 / 合计 ${LK_MS}ms / 均值 $((LK_MS / LK_N))ms $(date '+%T')"
+            echo "直链预热完成: ${LK_N} 条（含回看预热 ${REC_N} 条）/ 合计 ${LK_MS}ms / 均值 $((LK_MS / LK_N))ms $(date '+%T')"
           else
-            echo "直链预热: 无可用路径（Latest 未返回 Path/MediaSources）$(date '+%T')"
+            echo "直链预热: 无可用路径（recent 为空且 Latest 未返回 Path/MediaSources）$(date '+%T')"
           fi
 
           # ---------- 3. 头尾预热 ----------
@@ -1358,14 +1390,18 @@ jobs:
           # runner 写不进，走 sudo tee；失败不影响预热。用 here-string 而非管道喂
           # while——管道会让 while 进子 shell，first 标记失效、JSON 逗号丢失。
           persist_state() { # $1="得分 宽度"多行
-            local entries="" first=1 w s
+            local entries="" first=1 w s recent
             while read -r s w; do
               [ -n "$w" ] || continue
               [ "$first" -eq 1 ] || entries="${entries},"
               entries="${entries}[$w,$s]"
               first=0
             done <<< "$(printf '%s' "$1" | sort -rn | head -"$WW_SIZES_MAX")"
-            { printf '{"updated":%s,"scores":[%s]}' "$(date +%s)" "$entries"
+            # recent 字段（playlog 记录的最近播放路径，warmup 回看预热用）必须随写保留：
+            # 本函数是整体覆盖写，丢掉 recent 会让下轮的回看预热静默失效
+            recent=$(sudo jq -c '.recent // []' "$STATE" 2>/dev/null)
+            case "$recent" in ''|null) recent='[]';; esac
+            { printf '{"updated":%s,"scores":[%s],"recent":%s}' "$(date +%s)" "$entries" "$recent"
             } | sudo tee "$STATE" >/dev/null 2>&1 || true
           }
           persist_state "$BASE"   # 启动即落盘衰减结果：哪怕本轮中途被杀，衰减也已生效
