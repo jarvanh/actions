@@ -992,10 +992,15 @@ def build_telegram_lines(results, *, meta, gist_res, qualified_count):
     lines.append('📦 <b>订阅（Gist）</b>')
     if gist_res and gist_res.get('ok'):
         action = '新建' if gist_res.get('created') else '更新'
-        html_url = gist_res.get('html_url') or ''
+        # 该链接指向 Gist 上的订阅文件（YAML），不是测速报告；
+        # HTML 报告只写在运行机本地（含节点凭据，不外传），故无可分享链接。
+        raw_url = ((gist_res.get('yaml') or {}).get('raw_url') or '').strip()
+        html_url = (gist_res.get('html_url') or '').strip()
         lines.append(f'  └─ ✅ 已{action}，达标 <b>{qualified_count}</b> 个节点（≥{DEFAULT_MIN_MEGABIT}兆）')
-        if html_url:
-            lines.append(f'  └─ 🔗 <a href="{esc(html_url)}">测速报告（HTML）</a>')
+        if raw_url:
+            lines.append(f'  └─ 🔗 <a href="{esc(raw_url)}">订阅源（YAML）</a>')
+        elif html_url:
+            lines.append(f'  └─ 🔗 <a href="{esc(html_url)}">Gist 页面</a>')
     elif gist_res:
         lines.append(f"  └─ ⚠️ 上传失败: {esc(gist_res.get('reason', ''))}")
     else:
