@@ -35,7 +35,8 @@ jobs:
         if: ${{ always() && steps.ts.outcome == 'success' }}
         shell: pwsh
         env:
-          TS_SSH_PASSWORD: ${{ secrets.TS_SSH_PASSWORD || 'P@ssw0rd!' }}
+          # 系统账户密码，SSH 与 RDP 共用（runneradmin 的登录密码只有一个）
+          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD || 'P@ssw0rd!' }}
         run: |
           # Tailscale SSH 服务端仅支持 Linux，Windows 上改为启用内置 OpenSSH Server
           $cap = Get-WindowsCapability -Online | Where-Object Name -like 'OpenSSH.Server*'
@@ -46,8 +47,8 @@ jobs:
           Set-Service -Name sshd -StartupType Automatic
           Enable-NetFirewallRule -Name "OpenSSH-Server-In-TCP"
 
-          # 设置 runneradmin 密码，供 SSH 密码登录
-          Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString -AsPlainText $Env:TS_SSH_PASSWORD -Force)
+          # 设置 runneradmin 密码，供 SSH / RDP 密码登录
+          Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString -AsPlainText $Env:RDP_PASSWORD -Force)
 
           # 固定主机名（singleton 并发下不会撞名）；节点为 ephemeral，job 结束自动移除
           # 兜底：action 已用 hostname 注册，这里再 set 一次并轮询等待控制面收敛
@@ -130,13 +131,14 @@ jobs:
             $footer += "🔗 <a href=""$Env:TG_RUN_URL"">运行日志</a>"
           }
           $msg = "🟢 <b>Windows runner 已就绪</b>`n$sep`n" +
-            "SSH：<code>ssh $Env:TS_USER@$Env:TS_DNS</code>`n" +
-            "IP：<code>ssh $Env:TS_USER@$Env:TS_IP</code>"
+            "SSH：<code>ssh $Env:TS_USER@$Env:TS_HOST</code>`n" +
+            "固定域名：<code>$Env:TS_DNS</code>（<i>每次运行不变</i>）`n" +
+            "IP：<code>$Env:TS_IP</code>（<i>每次运行会变，仅备用</i>）"
           # RDP 启用成功时附上远程桌面入口（域名固定不变，IP 每次会变，优先给域名）
           if ($Env:RDP_ENABLED -eq '1') {
-            $msg += "`nRDP：<code>$($Env:TS_DNS):3389</code>（IP 备用：<code>$($Env:TS_IP):3389</code>）`n" +
+            $msg += "`nRDP：<code>$($Env:TS_DNS):3389</code>`n" +
               "RDP 用户：<code>$Env:TS_USER</code>`n" +
-              "密码：<i>TS_SSH_PASSWORD secret（未配置则为 P@ssw0rd!）</i>"
+              "RDP 密码：<i>RDP_PASSWORD secret（未配置则为 P@ssw0rd!）</i>"
           }
           $msg += "`n有效期：<i>约 6 小时（超时自动结束）</i>"
           if ($footer) { $msg += "`n`n$footer" }
