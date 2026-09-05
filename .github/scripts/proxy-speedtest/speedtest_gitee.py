@@ -1616,10 +1616,13 @@ def tg_footer_line():
     """全库唯一收尾行: "⏱ 已运行 <b>X</b> · 🔗 <a>运行日志</a>"
 
     与 tg_add_footer（telegram/tg_notify.sh）同形态、同降级链:
-      无 TG_RUN_STARTED_AT → 不显示时长；两者皆无 → 整行跳过
-    时长 = 当前时间 − TG_RUN_STARTED_AT（即 run 已运行时长，非测速耗时）
+      无 TG_RUN_STARTED_AT → 兜底 /proc/1 启动时刻（hosted runner PID 1 随 job
+      启动，误差秒级——GitHub 平台已于 2026-09-05 移除 github.run_started_at 上下文）；
+      仍取不到 → 不显示时长；无 TG_RUN_URL → 整行跳过
+    时长 = run 已运行时长，非测速耗时
     """
     line = ''
+    elapsed = 0.0
     started_at = os.environ.get('TG_RUN_STARTED_AT', '')
     if started_at:
         try:
@@ -1628,9 +1631,15 @@ def tg_footer_line():
                 elapsed = (datetime.now() - st).total_seconds()
             else:
                 elapsed = (datetime.now(st.tzinfo) - st).total_seconds()
-            line = f'⏱ 已运行 <b>{html.escape(tg_format_elapsed(elapsed))}</b>'
         except Exception:
-            line = ''
+            elapsed = 0.0
+    if elapsed <= 0:
+        try:
+            elapsed = max(0.0, time.time() - int(os.stat('/proc/1').st_mtime))
+        except Exception:
+            elapsed = 0.0
+    if elapsed > 0:
+        line = f'⏱ 已运行 <b>{html.escape(tg_format_elapsed(elapsed))}</b>'
     run_url = os.environ.get('TG_RUN_URL', '')
     if run_url:
         if line:
