@@ -539,7 +539,11 @@ def main():
         "failed": failed,
         "skipped_count": len(skipped),
         "skipped_summary": skipped_summary,
-        "skipped_details": "\n".join(f"{reason}: {path}" for reason, path in skipped),
+        # 跳过明细: 每行 "<中文原因>\t<路径>"，由 bash 侧按原因分组渲染树形。
+        # 此处不拼 HTML —— 版式统一交给 tg_* 助手（规范见 docs/telegram-notify.md），
+        # 避免 python 侧自造标签与全库版式漂移
+        "skipped_details": "\n".join(
+            f"{skip_labels.get(reason, reason)}\t{path}" for reason, path in skipped),
         "sent_list": "\n".join(sent_list),
         "failed_list": "\n".join(failed_list),
     }
@@ -587,6 +591,33 @@ SKIPPED_DETAILS=$(python3 -c "import json,sys; d=json.load(open('$STATS_FILE'));
 # 发送通知
 source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 
+# 跳过/过滤明细渲染: 按原因分组 —— 组头 "<b>原因</b> · N"，条目 <code>文件名</code> 树形列出。
+# 输入: 多行 "原因\t路径"（python 侧产出）；每组最多 SKIP_DETAIL_MAX 条，超出折叠为
+# "还有 N 条…"（43 条损坏全列会刷屏，且通知会顶到分片边界）
+_render_skipped_groups() {
+  local _in="$1" _max="${SKIP_DETAIL_MAX:-8}"
+  local _g _items _total _out=""
+  while IFS= read -r _g; do
+    [ -z "$_g" ] && continue
+    _items=$(printf '%s\n' "$_in" | awk -F'\t' -v g="$_g" '$1==g {print $2}')
+    _total=$(printf '%s\n' "$_items" | grep -c . || true)
+    [ "${_total:-0}" -le 0 ] && continue
+    _out+="<b>$(escape_html "$_g")</b> · ${_total}"$'\n'
+    # 条目先转义成 HTML 再交给 tree_lines（它接收参数、不读 stdin）。
+    # "还有 N 条…" 并入条目流作末条 —— 否则会出现双 └─ 同级、层次混淆
+    local _entries=""
+    while IFS= read -r _p; do
+      [ -z "$_p" ] && continue
+      _entries+="<code>$(escape_html "$(basename "$_p")")</code>"$'\n'
+    done < <(printf '%s\n' "$_items" | head -n "$_max")
+    if [ "$_total" -gt "$_max" ]; then
+      _entries+="<i>还有 $((_total - _max)) 条…</i>"$'\n'
+    fi
+    _out+="$(tree_lines "$_entries")"$'\n'
+  done < <(printf '%s\n' "$_in" | cut -f1 | uniq)
+  printf '%s' "${_out%$'\n'}"
+}
+
 # 统一 HTML 排版 + 统一收尾区；明细树形列出（超长自动分片）
 msg=""
 tg_add_title msg "📺 ${CAPTION_PREFIX}"
@@ -611,7 +642,7 @@ if [ -n "$FAILED_LIST" ]; then
 fi
 if [ -n "$SKIPPED_DETAILS" ]; then
   tg_add_section msg "⚠️ 跳过/过滤文件"
-  tg_add_block msg "$SKIPPED_DETAILS"
+  tg_add_block msg "$(_render_skipped_groups "$SKIPPED_DETAILS")"
 fi
 tg_add_footer msg
 send_tg_chunked "$msg"
