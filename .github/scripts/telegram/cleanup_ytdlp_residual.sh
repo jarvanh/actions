@@ -35,9 +35,9 @@ fi
 # 助手需在明细构建前可用：文件名经 escape_html（含 & < > 未转义会 400 整条退化）
 source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 
-# 收集文件名与大小，用于通知（平铺列表统一 "• " 前缀；元数据 " · <i>…</i>"，禁括号）。
-# 每组上限 8 条 + 折叠行"还有 N 条…"（规范 §2.1：残留可能上百条，全量穷举会刷屏
-# 并顶到 4000 分片边界把收尾区切走）
+# 收集文件名与大小，用于通知（树形条目统一 ├─/└─；元数据 " · <i>…</i>"，禁括号）。
+# 每组上限 8 条 + 折叠行"还有 N 条…"并入条目流（规范 §2.1：残留可能上百条，
+# 全量穷举会刷屏并顶到 4000 分片边界把收尾区切走；末条 └─ 由 tree_lines 统一决定）
 FILE_DETAILS=""
 DETAIL_MAX=8
 _n=0
@@ -46,7 +46,7 @@ for f in "${FRAG_FILES[@]}"; do
   [ "$_n" -gt "$DETAIL_MAX" ] && break
   fname=$(basename "$f")
   fsize=$(du -h "$f" | cut -f1)
-  FILE_DETAILS+="• <code>$(escape_html "${fname}")</code> · <i>${fsize}</i>"$'\n'
+  FILE_DETAILS+="<code>$(escape_html "${fname}")</code> · <i>${fsize}</i>"$'\n'
 done
 if [ "${#FRAG_FILES[@]}" -gt "$DETAIL_MAX" ]; then
   FILE_DETAILS+="<i>还有 $(( ${#FRAG_FILES[@]} - DETAIL_MAX )) 条…</i>"$'\n'
@@ -62,6 +62,6 @@ tg_add_title msg "🧹 ph-dl 清理 yt-dlp 残留文件"
 tg_add_path msg "目录" "$DIR_LABEL"
 tg_add_kv msg "清理数量" "${FRAG_COUNT} 个"
 tg_add_section msg "📋 文件列表"
-tg_add_block msg "$FILE_DETAILS"
+tg_add_block msg "$(tree_lines "$FILE_DETAILS")"
 tg_add_footer msg
 send_tg_chunked "$msg"

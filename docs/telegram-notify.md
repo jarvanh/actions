@@ -7,10 +7,10 @@
 
 | 运行环境 | 真源 | 说明 |
 |---|---|---|
-| ubuntu runner（bash） | [`scripts/telegram/tg_notify.sh`](../.github/scripts/telegram/tg_notify.sh) | 排版助手 + 发送层（HTML 退化 / 429 重试 / 4000 分片），`source` 使用 |
-| openlist docker 容器 | [`scripts/openlist/telegram.sh`](../.github/scripts/openlist/telegram.sh) | 排版助手同款（容器内路径不同不跨目录 source），**与 tg_notify.sh 需同步维护** |
-| python | `scripts/proxy-speedtest/speedtest_gitee.py` 的 `tg_format_elapsed` / `tg_footer_line` | 其余 python 一律复用或经 `notify()` 借 bash 生成，**禁止自造** |
-| PowerShell（windows runner） | `rdp.yml` / `tailscale-windows.yml` 内联 `$footer` 构建 | 形态与降级链必须与 bash 版逐字对齐 |
+| ubuntu runner（bash） | [`scripts/telegram/tg_notify.sh`](../.github/scripts/telegram/tg_notify.sh) | 排版助手 + 发送层（HTML 退化 / 429 重试 / 4000 分片 / curl `-m 15`），`source` 使用 |
+| openlist docker 容器 | [`scripts/openlist/telegram.sh`](../.github/scripts/openlist/telegram.sh) | 排版助手 + 发送层同款（`send_tg` / `send_tg_chunked` / 降级链已对齐；容器内路径不同不跨目录 source），**与 tg_notify.sh 需同步维护** |
+| python | `scripts/proxy-speedtest/speedtest_gitee.py` 的 `tg_format_elapsed` / `tg_footer_line` / `send_telegram_chunked` | 其余 python 一律复用或经 `notify()` 借 bash 生成，**禁止自造** |
+| PowerShell（windows runner） | `rdp.yml` / `tailscale-windows.yml` 内联 `$footer` 构建 + `Send-TgMessage` | 形态与降级链必须与 bash 版逐字对齐（429 读 `Retry-After` 重试 5 次同语义） |
 
 ## 2. 版式模板
 
@@ -73,6 +73,7 @@
 
 - **每组上限 8 条**（`SKIP_DETAIL_MAX` 可调），超出折叠为 `还有 N 条…`：
   43 条损坏全列会刷屏，且容易顶到 4000 字符分片边界把收尾区切走。
+  多组并列时（如去重明细）通知内**最多展示 8 组**，超出折叠为 `还有 N 组…`。
 - **折叠行必须并入条目流再交给 `tree_lines`**，由它统一决定末条 ——
   单独补一行 `  └─ 还有 N 条…` 会造成双 `└─` 同级、层次混淆。
   文件类列表可直接用一站式助手 `tree_code_fold <多行> [max=8]`
@@ -126,10 +127,11 @@ env:
 | 裸文本条目列表 | `not_video: failed_videos.json` | 按原因分组：组头 `<b>非视频</b> · 2` + `  ├─ <code>failed_videos.json</code>` |
 | 英文原因/状态 token 直出 | `corrupt: xxx` | 用中文标签（损坏 / 非视频 / 重复） |
 | 双 `└─` 同级 | 条目末尾 `└─` 后再补 `  └─ 还有 N 条…` | 折叠行并入条目流，由 `tree_lines` 统一决定末条 |
-| 超长列表全量穷举 | 43 条损坏逐行列 | 每组上限 8 条 + `还有 N 条…` |
+| 超长列表全量穷举 | 43 条损坏逐行列 | 每组上限 8 条 + `还有 N 条…`；多组并列最多展示 8 组 |
+| 已 source 发送层仍 curl 直发 | `curl ... sendMessage \|\| { plain=$(_tg_strip_html ...); curl ... }` | 一律 `send_tg "$msg"`（退化/429 重试已内建；自造退化链缺 429 处理，限流时通知消失） |
 
 状态 emoji 语义（全库统一）：
-`✅` 成功 / `⚠️` 部分失败 / `❌` 失败 / `⏭️` 跳过 / `🔄` 进行中 / `⛔` 中断 / `🚨` 危险警告。
+`✅` 成功 / `⚠️` 部分失败 / `❌` 失败 / `⏭️` 跳过 / `🔄` 进行中 / `⏳` 待处理 / `⛔` 中断 / `🚨` 危险警告。
 
 ## 5. 发送层要求
 
@@ -139,6 +141,10 @@ env:
   > （`tailscale-windows.yml` 曾因此缺发入口通知）。加转义调用前先确认函数存在。
 - HTML 解析失败（400 can't parse entities）→ 自动去标签退化纯文本重发：宁可样式变朴素，不让通知消失。
 - 429 限流按 `retry_after` 等待重试；长消息按 4000 字符分片（断在换行处，不切 UTF-8 多字节）。
+- 降级链（HTML 退化 + 429 重试）是发送层职责，调用方勿自造重复实现——
+  已 `source` 发送层的通知点再 curl 直发属禁止事项（见 §4）。
+- 媒体上传（`sendDocument`/`sendVideo` 等）不走 sendMessage 发送层（固有例外），
+  但 caption 仍须转义、429 重试仍需自带（参考 `sync_notify.sh` 的 sendDocument 段）。
 - 安全边界例外：凭据私信（如 openlist 改密）不走发送层，curl 直发且密码经实体转义、绝不落日志。
 
 ## 6. 新增通知检查清单

@@ -198,7 +198,8 @@ jobs:
           # 损坏文件通知（process_ph_download.sh 验证失败并丢弃的文件；统一 HTML 版式）
           if [ -f "$DOWNLOAD_TMP/corrupted.txt" ]; then
             source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
-            CORRUPTED_COUNT=$(wc -l < "$DOWNLOAD_TMP/corrupted.txt")
+            # grep -c . 而非 wc -l：文件末行无换行符时 wc -l 会少计 1
+            CORRUPTED_COUNT=$(grep -c . "$DOWNLOAD_TMP/corrupted.txt" || true)
             CORRUPTED_LIST=$(cat "$DOWNLOAD_TMP/corrupted.txt")
             msg=""
             tg_add_title msg "🗑️ ph-dl 下载阶段损坏视频"

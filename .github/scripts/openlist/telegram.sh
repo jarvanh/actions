@@ -149,33 +149,152 @@ tg_add_footer() {
   tg_append "$var" $'\n'"${line}"$'\n'
 }
 
+# 去标签 + 解码基础实体（HTML 解析失败时的纯文本退化版；与 tg_notify.sh 同款）
+_tg_strip_html() {
+  printf '%s' "$1" \
+    | sed -e 's/<[^>]*>//g' \
+          -e 's/&amp;/\&/g; s/&lt;/</g; s/&gt;/>/g; s/&quot;/"/g; s/&#39;/'"'"'/g'
+}
+
+# 单次发送尝试（不退化）。退出码: 0 成功 / 2 HTML 解析失败（可退化）/ 1 其他失败
+# 与 tg_notify.sh 同款（两文件同步维护）；429 按 retry_after 等待重试，
+# curl 带 -m 15 防网络挂起阻塞调用链
+_tg_send_once() {
+  local text="$1" parse_mode="$2"
+  local resp retry_after attempt max_attempts=5
+  for attempt in $(seq 1 "$max_attempts"); do
+    if [ -n "$parse_mode" ]; then
+      resp=$(curl -s -m 15 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+        --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+        --data-urlencode "text=${text}" \
+        --data-urlencode "disable_web_page_preview=true" \
+        -d "parse_mode=${parse_mode}" 2>&1)
+    else
+      resp=$(curl -s -m 15 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+        --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+        --data-urlencode "text=${text}" \
+        --data-urlencode "disable_web_page_preview=true" 2>&1)
+    fi
+    if echo "$resp" | grep -q '"ok":true'; then
+      return 0
+    fi
+    # 429 限流: 按 retry_after 等待后重试
+    retry_after=$(echo "$resp" | grep -oE '"retry_after":[0-9]+' | head -1 | cut -d: -f2)
+    if [ -n "$retry_after" ]; then
+      echo "⚠️ Telegram 限流 (429)，等待 ${retry_after}s 后重试 (尝试 $attempt/$max_attempts)..." >&2
+      sleep "$retry_after"
+      continue
+    fi
+    # HTML 解析失败: 交由 send_tg 退化纯文本重发（不消耗重试次数）
+    if echo "$resp" | grep -q "can't parse entities"; then
+      echo "⚠️ Telegram HTML 解析失败，将退化纯文本重发" >&2
+      return 2
+    fi
+    echo "⚠️ Telegram 通知发送失败: $(echo "$resp" | head -c 200)" >&2
+    return 1
+  done
+  echo "⚠️ Telegram 通知发送失败（重试 $max_attempts 次仍失败）: $(echo "$resp" | head -c 200)" >&2
+  return 1
+}
+
+# 单条发送（HTML 优先，解析失败退化纯文本；空消息守卫与 tg_notify.sh 同款）
+send_tg() {
+  local text="$1"
+  [ -z "$text" ] && return 0
+  local rc=0
+  _tg_send_once "$text" "HTML"
+  rc=$?
+  [ "$rc" -ne 2 ] && return "$rc"
+  _tg_send_once "$(_tg_strip_html "$text")" ""
+}
+
+# 按 4000 字符分片，尽量在换行处断开，避免切断 UTF-8 多字节字符（与 tg_notify.sh 同款）
+send_tg_chunked() {
+  local text="$1"
+  [ -z "$text" ] && return 0
+  local delay="${TG_CHUNK_DELAY:-2}"
+  printf '%s' "$text" | python3 -c '
+import sys
+data = sys.stdin.read()
+chunk_size = 4000
+chunks = []
+i = 0
+n = len(data)
+while i < n:
+    end = min(i + chunk_size, n)
+    if end < n:
+        last_nl = data.rfind("\n", i, end)
+        if last_nl > i + chunk_size // 2:
+            end = last_nl + 1
+    chunks.append(data[i:end])
+    i = end
+try:
+    for idx, c in enumerate(chunks, 1):
+        sys.stderr.write(f"--- 发送分片 {idx}/{len(chunks)} ({len(c)} 字符) ---\n")
+        sys.stdout.write(c + "\x00")
+        sys.stdout.flush()
+except BrokenPipeError:
+    pass
+' | while IFS= read -r -d "" chunk; do
+    send_tg "$chunk" || true
+    sleep "$delay"
+  done
+}
+
 # 通用 Telegram 消息发送（静默，不返回 message_id）
 # 用法: send_telegram_message <message> [parse_mode=HTML]
 # 消息内容必须已按 HTML 规则转义（推荐用上方 tg_* 助手构建）
+# 统一走发送层：HTML 解析失败退化纯文本 + 429 限流重试（send_tg 内建），
+# 超 4000 字符自动分片（send_tg_chunked）
 # disable_web_page_preview 必须带上：收尾区"运行日志"是消息里唯一的链接，
 # 缺了它 Telegram 会在消息下方渲染 GitHub 页面预览卡片（与 tg_notify.sh 同参数）
 send_telegram_message() {
   local message="$1"
   local parse_mode="${2:-HTML}"
-  curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-    -d chat_id="${TELEGRAM_CHAT_ID}" \
-    -d parse_mode="$parse_mode" \
-    -d disable_web_page_preview=true \
-    --data-urlencode text="$message" >/dev/null 2>&1 || true
+  [ -z "$message" ] && return 0
+  if [ "${#message}" -gt 4000 ]; then
+    send_tg_chunked "$message" >/dev/null 2>&1 || true
+    return 0
+  fi
+  send_tg "$message" >/dev/null 2>&1 || true
 }
 
 # 发送 Telegram 消息并返回 message_id
 # 用法: _tg_send_and_get_id <message> [parse_mode=HTML]
 # 输出: message_id（失败时为空）
+# 与 send_telegram_message 同降级链：429 按 retry_after 重试、HTML 解析失败退化纯文本
 _tg_send_and_get_id() {
   local message="$1"
   local parse_mode="${2:-HTML}"
-  local response
-  response=$(curl -s -m 15 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-    -d chat_id="${TELEGRAM_CHAT_ID}" \
-    -d parse_mode="$parse_mode" \
-    -d disable_web_page_preview=true \
-    --data-urlencode text="$message" 2>/dev/null) || true
+  local response attempt retry_after
+  for attempt in 1 2 3 4 5; do
+    if [ -n "$parse_mode" ]; then
+      response=$(curl -s -m 15 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+        -d chat_id="${TELEGRAM_CHAT_ID}" \
+        -d parse_mode="$parse_mode" \
+        -d disable_web_page_preview=true \
+        --data-urlencode text="$message" 2>/dev/null) || true
+    else
+      response=$(curl -s -m 15 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+        -d chat_id="${TELEGRAM_CHAT_ID}" \
+        -d disable_web_page_preview=true \
+        --data-urlencode text="$message" 2>/dev/null) || true
+    fi
+    echo "$response" | grep -q '"ok":true' && break
+    retry_after=$(echo "$response" | grep -oE '"retry_after":[0-9]+' | head -1 | cut -d: -f2)
+    if [ -n "$retry_after" ]; then
+      echo "⚠️ Telegram 限流 (429)，等待 ${retry_after}s 后重试 (尝试 $attempt/5)..." >&2
+      sleep "$retry_after"
+      continue
+    fi
+    if echo "$response" | grep -q "can't parse entities"; then
+      echo "⚠️ Telegram HTML 解析失败，退化纯文本重发" >&2
+      message=$(_tg_strip_html "$message")
+      parse_mode=""
+      continue
+    fi
+    break
+  done
   # jq 对非 JSON 响应（如网关 502 页面）返回非零 → set -e 下会沿
   # _tg_ensure_bottom_message → _progress_refresh → progress_update 调用链
   # 传染并终止整个 step；通知属 fire-and-forget，失败只吞不传

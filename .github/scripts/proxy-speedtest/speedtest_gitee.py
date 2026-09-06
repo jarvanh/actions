@@ -88,9 +88,9 @@ def handle_termination_signal(signum, frame):
     TERMINATION_NOTICE_SENT = True
     sig_name = signal.Signals(signum).name if signum else f'SIGNAL-{signum}'
     _sep = '━' * 18
-    message = f'📈 <b>代理测速异常终止</b>\n{_sep}\n⚠️ 脚本被中断: 收到 {sig_name}，本轮测速未正常完成。'
+    message = f'📈 <b>代理测速异常终止</b>\n{_sep}\n⚠️ 脚本被中断：收到 {sig_name}，本轮测速未正常完成。'
     if CURRENT_RUN_STARTED_AT:
-        message += f'\n🕒 测速开始时间: {html.escape(str(CURRENT_RUN_STARTED_AT))}'
+        message += f'\n🕒 测速开始时间：{html.escape(str(CURRENT_RUN_STARTED_AT))}'
     _footer = tg_footer_line()
     if _footer:
         message += f'\n\n{_footer}'
@@ -1452,8 +1452,8 @@ def send_telegram(env, text):
         return {'sent': False, 'reason': 'missing TELEGRAM_BOT_TOKEN/TG_BOT_TOKEN or TELEGRAM_CHAT_ID'}
 
     def _post(data):
-        # 429 限流按 retry_after 等待重试（规范 §5，与 tg_notify.sh 同语义）
-        for _attempt in range(3):
+        # 429 限流按 retry_after 完整等待重试（规范 §5，与 tg_notify.sh 同语义：5 次尝试）
+        for _attempt in range(5):
             payload = urllib.parse.urlencode(data).encode()
             req = urllib.request.Request(f'https://api.telegram.org/bot{bot}/sendMessage',
                                          data=payload, method='POST')
@@ -1464,7 +1464,7 @@ def send_telegram(env, text):
                 body = e.read().decode('utf-8', 'replace')
                 if e.code == 429:
                     m = re.search(r'"retry_after":(\d+)', body)
-                    time.sleep(min(int(m.group(1)), 30) if m else 5)
+                    time.sleep(int(m.group(1)) if m else 5)
                     continue
                 raise HTTPErrorWithBody(e, body)
         raise RuntimeError('telegram 429 retry exhausted')
@@ -1502,6 +1502,35 @@ def send_telegram(env, text):
             continue
         return {'sent': False, 'response': res}
     return {'sent': False}
+
+
+TG_CHUNK_SIZE = 4000
+
+
+def send_telegram_chunked(env, text):
+    """长消息按 4000 字符分片发送（规范 §5：断在换行处，不切 UTF-8 多字节字符，
+    与 tg_notify.sh send_tg_chunked 同语义）；短消息直接走 send_telegram。"""
+    if not text:
+        return {'sent': True}
+    if len(text) <= TG_CHUNK_SIZE:
+        return send_telegram(env, text)
+    chunks = []
+    i, n = 0, len(text)
+    while i < n:
+        end = min(i + TG_CHUNK_SIZE, n)
+        if end < n:
+            last_nl = text.rfind('\n', i, end)
+            if last_nl > i + TG_CHUNK_SIZE // 2:
+                end = last_nl + 1
+        chunks.append(text[i:end])
+        i = end
+    results = []
+    for idx, chunk in enumerate(chunks):
+        results.append(send_telegram(env, chunk))
+        if idx < len(chunks) - 1:
+            time.sleep(2)
+    return {'sent': all(r.get('sent') for r in results),
+            'chunks': len(chunks), 'results': results}
 
 
 def resolve_push_target_info(remote_url: str):
@@ -1885,7 +1914,7 @@ def finalize_gist_and_notify(env, summary, summary_lines, subscription_text, qua
 
     log_progress('telegram_send_started')
     try:
-        tg_res = send_telegram(env, '\n'.join(summary_lines))
+        tg_res = send_telegram_chunked(env, '\n'.join(summary_lines))
     except Exception as e:
         tg_res = {'ok': False, 'reason': str(e)}
     log_progress('telegram_send_finished', sent=bool(tg_res.get('sent')), reason=tg_res.get('reason', ''))
@@ -2128,7 +2157,16 @@ if __name__ == '__main__':
         print(json.dumps({'ok': False, 'stage': stage, 'error': err_text}, ensure_ascii=False))
         try:
             env = merged_env()
-            send_telegram(env, f'代理测速完成\n\n⚠️ 脚本异常退出\n阶段: {stage}\n错误: {err_text}')
+            # 统一 HTML 版式（emoji+加粗标题/分隔线/全角冒号 kv/统一收尾区）；
+            # 异常文本含 <>& 时未转义会触发 400 整条退化，必须 html.escape
+            _sep = '━' * 18
+            _msg = (f'🚨 <b>代理测速异常退出</b>\n{_sep}\n'
+                    f'阶段：<b>{html.escape(str(stage))}</b>\n'
+                    f'错误：<code>{html.escape(err_text[:800])}</code>')
+            _footer = tg_footer_line()
+            if _footer:
+                _msg += f'\n\n{_footer}'
+            send_telegram_chunked(env, _msg)
         except Exception:
             pass
         sys.exit(1)

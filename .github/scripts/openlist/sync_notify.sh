@@ -135,14 +135,16 @@ _send_sync_result_notification() {
   exclude_list=$(_build_exclude_patterns "${extra_args[@]}")
 
   # 构建 fix_summary（已修复文件树形列表: 一文件一行，原名 → 实际名 · 大小 · 方式；
-  # HTML 格式，路径 code 等宽，动态内容经 escape_html 转义，条目经 tree_lines 加 ├─/└─）
+  # HTML 格式，路径 code 等宽，动态内容经 escape_html 转义，条目经 tree_lines 加 ├─/└─；
+  # 每组上限 8 条，超出折叠"还有 N 条…"——折叠行并入条目流，末条 └─ 由 tree_lines 决定）
   local fix_summary=""
   local fix_total=0
   if [ -s "$fix_list" ]; then
     fix_total=$(grep -c . "$fix_list" 2>/dev/null || true)
-    local _fix_entries=""
+    local _fix_entries="" _fix_shown=0
     while IFS='|' read -r f_original f_alternative f_method f_restore f_size f_bytes f_mid; do
       [ -z "$f_original" ] && continue
+      [ "$_fix_shown" -ge 8 ] && continue
       local f_method_tag _entry
       f_method_tag=$(_fix_method_short "$f_mid")
       _entry="<code>$(escape_html "$f_original")</code>"
@@ -150,7 +152,11 @@ _send_sync_result_notification() {
       [ "$f_original" != "$f_alternative" ] && _entry+=" → <code>$(escape_html "$f_alternative")</code>"
       _entry+=" · <i>$(escape_html "$f_size")</i> · <i>$(escape_html "$f_method_tag")</i>"
       _fix_entries+="${_entry}"$'\n'
+      _fix_shown=$((_fix_shown + 1))
     done < "$fix_list"
+    if [ "$fix_total" -gt 8 ]; then
+      _fix_entries+="<i>还有 $((fix_total - 8)) 条…</i>"$'\n'
+    fi
     fix_summary="$(tree_lines "$_fix_entries")"$'\n'
   fi
   [ -z "$fix_summary" ] && fix_summary="无"$'\n'
@@ -160,7 +166,7 @@ _send_sync_result_notification() {
   [ "$fix_total" -gt 0 ] && progress_add_fixed_files "$fix_total"
 
   # 构建 fail_summary（无法修复的文件树形列表: 条目行 + tree_sub 缩进的"修复过程"子行；
-  # 风格与 fix_summary 一致）
+  # 风格与 fix_summary 一致；每组上限 8 个文件，超出折叠"还有 N 个文件…"）
   local fail_summary=""
   local fail_total=0
   if [ -s "$fail_list" ]; then
@@ -168,6 +174,7 @@ _send_sync_result_notification() {
     local -a _fail_entries=() _fail_sections=()
     while IFS='|' read -r fpath fsize fmsg; do
       [ -z "$fpath" ] && continue
+      [ "${#_fail_entries[@]}" -ge 8 ] && continue
       _fail_entries+=("<code>$(escape_html "$fpath")</code> · <i>$(escape_html "$fsize")</i> · <i>$(escape_html "$fmsg")</i>")
       # 从 fix_log 中按文件名分隔提取该文件对应的修复过程
       local fix_section="" _fix_log_text
@@ -182,7 +189,7 @@ _send_sync_result_notification() {
         _fix_log_text="修复过程："
         while IFS= read -r log_line; do
           [ -z "$log_line" ] && continue
-          _fix_log_text+=$'\n'"  $(escape_html "$log_line")"
+          _fix_log_text+=$'\n'"$(escape_html "$log_line")"
         done <<< "$fix_section"
       elif echo "$fmsg" | grep -qi 'object not found'; then
         _fix_log_text="修复过程：源文件不存在，无需修复"
@@ -191,10 +198,12 @@ _send_sync_result_notification() {
       fi
       _fail_sections+=("$_fix_log_text")
     done < "$fail_list"
-    local _i _n=${#_fail_entries[@]} _last
+    local _i _n=${#_fail_entries[@]} _last _fold=0
+    [ "$fail_total" -gt "$_n" ] && _fold=1
     for (( _i=0; _i<_n; _i++ )); do
+      # 有折叠行时折叠行才是末条，最后一条展示条目让出 └─（禁双 └─ 同级）
       _last=0
-      [ $((_i + 1)) -eq "$_n" ] && _last=1
+      [ "$_fold" = "0" ] && [ $((_i + 1)) -eq "$_n" ] && _last=1
       fail_summary+="$(tree_conn "$_last")${_fail_entries[$_i]}"$'\n'
       local _sub
       while IFS= read -r _sub; do
@@ -202,6 +211,10 @@ _send_sync_result_notification() {
         fail_summary+="$(tree_sub "$_last")${_sub}"$'\n'
       done <<< "${_fail_sections[$_i]}"
     done
+    if [ "$_fold" = "1" ]; then
+      # 折叠行并入条目流作末条
+      fail_summary+="$(tree_conn 1)<i>还有 $((fail_total - _n)) 个文件…</i>"$'\n'
+    fi
   fi
   [ -z "$fail_summary" ] && fail_summary="无"$'\n'
 
@@ -229,7 +242,7 @@ _send_sync_result_notification() {
     # 根据错误类型构建状态消息
     local fail_status_msg="部分文件无法同步"
     if [ "$has_object_not_found" -eq 1 ]; then
-      fail_status_msg="源文件不存在 · object not found · 部分文件无法同步"
+      fail_status_msg="源文件不存在于远端 · 部分文件无法同步"
     fi
     local partial_msg=""
     _notify_add_header partial_msg "⚠️ ${task_name} 部分文件同步失败" "$fail_status_msg"
@@ -298,15 +311,23 @@ _send_sync_result_notification() {
     _notify_add_diff_list err_msg
     tg_add_footer err_msg
     send_telegram_message "$err_msg"
-    # 发送完整日志文件
+    # 发送完整日志文件（sendDocument 不走 sendMessage 发送层，媒体上传固有例外；
+    # 429 限流仍按 retry_after 重试，不让日志文件静默丢失）
     local err_log_size
     err_log_size=$(stat -c%s "$log_filename" 2>/dev/null || echo 0)
     if [ "$err_log_size" -gt 0 ] && [ "$err_log_size" -lt "${OPENLIST_ERR_LOG_MAX_BYTES:-50000000}" ]; then
-      curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
-        -F chat_id="${TELEGRAM_CHAT_ID}" \
-        -F document=@"$log_filename" \
-        -F parse_mode="HTML" \
-        -F caption="📁 <b>$(escape_html "$task_name")</b> · 错误日志" || true
+      local _doc_resp _doc_wait
+      for _doc_attempt in 1 2 3; do
+        _doc_resp=$(curl -s -m 60 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
+          -F chat_id="${TELEGRAM_CHAT_ID}" \
+          -F document=@"$log_filename" \
+          -F parse_mode="HTML" \
+          -F caption="📁 <b>$(escape_html "$task_name")</b> · 错误日志" 2>/dev/null) || true
+        if echo "$_doc_resp" | grep -q '"ok":true'; then break; fi
+        _doc_wait=$(echo "$_doc_resp" | grep -oE '"retry_after":[0-9]+' | head -1 | cut -d: -f2)
+        if [ -n "$_doc_wait" ]; then sleep "$_doc_wait"; else break; fi
+      done
+      true
     fi
   else
     # 同步返回成功，检查是否有文件缺失（部分失败）

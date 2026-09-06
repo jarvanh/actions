@@ -1257,7 +1257,8 @@ sync_by_file_batches() {
         done
       else
         failed_batches=$((failed_batches + 1))
-        failed_batch_list+="批次 $((i+1))/${total_batches} · <i>${batch_file_count} 文件</i> · exit=${rc}"$'\n'
+        # 英文 token 不直出通知（规范 §4）: exit=N 改写为中文说明
+        failed_batch_list+="批次 $((i+1))/${total_batches} · <i>${batch_file_count} 文件</i> · <i>传输退出码 ${rc}</i>"$'\n'
         echo "批次 $((i+1)) 失败 (exit=${rc})"
       fi
 
@@ -1289,9 +1290,12 @@ sync_by_file_batches() {
         failed_batch_list+="剩余 ${remaining_batches} 批 · 后端写入全拒，中止"$'\n'
         echo "🛑 后端写入全拒，中止剩余 ${remaining_batches} 个批次，本同步对标记失败（后端恢复后轮转回来重试）"
         _stop_batch_progress_thread
-        AUTO_SPLIT_INFO="<b>🔀 文件批次拆分统计</b>"$'\n'
-        AUTO_SPLIT_INFO+="总批次：<b>${total_batches}</b> · 文件数：<b>${batch_total_files}</b>"$'\n'
-        AUTO_SPLIT_INFO+="✅ <b>${synced_batches}</b> · ❌ <b>${failed_batches}</b> · 后端写入全拒中止"$'\n'
+        # 统一走 tg_* 助手构建（与预检熔断出口同款；手拼 HTML = 版式漂移根源）
+        AUTO_SPLIT_INFO=""
+        tg_add_section AUTO_SPLIT_INFO "🔀 文件批次拆分统计"
+        tg_add_kv AUTO_SPLIT_INFO "总批次" "${total_batches}"
+        tg_add_kv AUTO_SPLIT_INFO "文件数" "${batch_total_files}"
+        tg_add_block AUTO_SPLIT_INFO "✅ <b>${synced_batches}</b> · ❌ <b>${failed_batches}</b> <i>后端写入全拒中止</i>"
         progress_update_force "后端写入全拒，中止同步" "$(_render_batch_stats_line)"
         # 同预检熔断出口: 失败状态经 SYNC_FAILED 全局标志传递（见上注释）
         SYNC_FAILED=1
@@ -1345,12 +1349,16 @@ sync_by_file_batches() {
   PROGRESS_PHASE_INFO="▸ 📦 文件批次拆分：共 ${total_batches} 批 · ${total_files} 个文件 · ✅${synced_batches} ❌${failed_batches}"
   progress_update_force "批次传输完成，最终同步检查中" "$(_render_batch_stats_line)"
 
-  # 设置批次统计信息，供最终通知展示（与子目录拆分的 AUTO_SPLIT_INFO 对齐）
-  AUTO_SPLIT_INFO="<b>🔀 文件批次拆分统计</b>"$'\n'
-  AUTO_SPLIT_INFO+="总批次：<b>${total_batches}</b> · 文件数：<b>${batch_total_files}</b>"$'\n'
-  AUTO_SPLIT_INFO+="✅ <b>${synced_batches}</b> · ❌ <b>${failed_batches}</b>"
+  # 设置批次统计信息，供最终通知展示（与子目录拆分的 AUTO_SPLIT_INFO 对齐）；
+  # 统一走 tg_* 助手构建（段前空行/结尾换行由助手保证）
+  AUTO_SPLIT_INFO=""
+  tg_add_section AUTO_SPLIT_INFO "🔀 文件批次拆分统计"
+  tg_add_kv AUTO_SPLIT_INFO "总批次" "${total_batches}"
+  tg_add_kv AUTO_SPLIT_INFO "文件数" "${batch_total_files}"
+  tg_add_block AUTO_SPLIT_INFO "✅ <b>${synced_batches}</b> · ❌ <b>${failed_batches}</b>"
   if [ -n "$failed_batch_list" ]; then
-    AUTO_SPLIT_INFO+=$'\n\n'"<b>❌ 失败的批次</b>"$'\n'"$(tree_lines "$failed_batch_list")"
+    tg_add_section AUTO_SPLIT_INFO "❌ 失败的批次"
+    tg_add_block AUTO_SPLIT_INFO "$(tree_lines "$failed_batch_list")"
   fi
 
   # 最终用 sync_with_logging 做完整同步检查（处理缺失文件修复、通知等）

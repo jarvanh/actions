@@ -284,12 +284,12 @@ jobs:
               # $1=场景描述  $2=密码明文  $3=附注规则（可空）
               # 统一 HTML 版式；密码经实体转义后 <code> 等宽展示（本条只进 TG 私信，不落日志）。
               # 规范豁免：凭据私信不走发送层、curl 直发（docs/telegram-notify.md §5），
-              # 但版式仍对齐——分隔线用 TG_SEP 常量（勿手写）、补充说明用 " · "（禁全角括号）
-              local pw_esc sep
-              pw_esc="$(printf '%s' "$2" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')"
-              sep='━━━━━━━━━━━━━━━━━━'
-              local msg
-              msg="$(printf '🔐 <b>OpenList 凭据</b>\n%s\n场景：%s\n用户名：<code>admin</code>\n密码：<code>%s</code>\n入口：<code>https://oe.%s.eu.org</code>\n\n<i>%s · 本条不会出现在公开日志</i>' "$sep" "$1" "$pw_esc" "${{ secrets.VD }}" "$3")"
+              # 但版式仍对齐——source 发送层取 TG_SEP/escape_html（勿手写分隔线）、
+              # 补充说明用 " · "（禁全角括号）
+              source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+              local pw_esc msg
+              pw_esc="$(escape_html "$2")"
+              msg="$(printf '🔐 <b>OpenList 凭据</b>\n%s\n场景：%s\n用户名：<code>admin</code>\n密码：<code>%s</code>\n入口：<code>https://oe.%s.eu.org</code>\n\n<i>%s · 本条不会出现在公开日志</i>' "${TG_SEP}" "$1" "$pw_esc" "$(escape_html '${{ secrets.VD }}')" "$3")"
               curl -s -m 15 -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
                 -d chat_id=${{ secrets.TG_CHAT_ID }} \
                 --data-urlencode "text=${msg}" \
@@ -1072,29 +1072,9 @@ jobs:
             pl_footer=""
             tg_add_footer pl_footer
             text="${text}${pl_footer}"
-            code=$(curl -s -m 10 -o /tmp/pl-tg.json -w '%{http_code}' \
-                     -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
-                     --data-urlencode "chat_id=$TG_CHAT_ID" \
-                     --data-urlencode "parse_mode=HTML" \
-                     --data-urlencode "disable_web_page_preview=true" \
-                     --data-urlencode "text=${text}")
-            # HTML 解析失败（转义漏网字符）时不重试解析，直接退化为纯文本原样重发：
-            # 宁可链接变长，也不能让播放通知消失
-            if [ "$code" != "200" ]; then
-              # 退化版用同一份信息，只是去掉 HTML 标签（超链接变成裸 URL）
-              plain="🎬 播放 [$kind] ${n:-未知}"
-              [ -n "$meta" ] && plain="${plain}"$'\n'"${meta}"
-              plain="${plain}"$'\n'"${l3}"
-              [ -n "$client" ] && plain="${plain}"$'\n'"📱 ${client}"
-              [ -n "$link" ] && plain="${plain}"$'\n'"直链: $link"
-              [ -n "$pl_footer" ] && plain="${plain}$(_tg_strip_html "$pl_footer")"
-              code=$(curl -s -m 10 -o /tmp/pl-tg.json -w '%{http_code}' \
-                       -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
-                       --data-urlencode "chat_id=$TG_CHAT_ID" \
-                       --data-urlencode "disable_web_page_preview=true" \
-                       --data-urlencode "text=${plain}")
-            fi
-            [ "$code" = "200" ] || echo "[WARNING] TG 推送失败 http=$code resp=$(head -c 200 /tmp/pl-tg.json 2>/dev/null)"
+            # 统一走发送层：HTML 解析失败自动退化纯文本、429 按 retry_after 等待重试
+            # 均已内建（此前自造退化链缺 429 处理，限流时播放通知会丢失）
+            send_tg "$text" || echo "[WARNING] TG 推送失败（详见发送层日志）"
           }
 
           # 数据源 A：ge2o 访问日志（302 模式主源）
@@ -1575,7 +1555,7 @@ jobs:
             G_ERR=$(printf '%s' "$S" | jq -r '.fs.resolve_err // 0' 2>/dev/null || echo 0)
             G_FB=$(printf '%s' "$S" | jq -r '.fs.fallback // 0' 2>/dev/null || echo 0)
             G_XD=$(printf '%s' "$S" | jq -r '.fs.cross_drive // 0' 2>/dev/null || echo 0)
-            OD_SUMMARY="直链命中 ${G_OK} / 未取到 ${G_MISS} / 解析失败 ${G_ERR} / 回落 ${G_FB} / 跨盘 ${G_XD} (get共 ${G_GET})"
+            OD_SUMMARY="直链命中 ${G_OK} / 未取到 ${G_MISS} / 解析失败 ${G_ERR} / 回落 ${G_FB} / 跨盘 ${G_XD} · get 共 ${G_GET}"
           fi
           # 全库海报预热统计：取 wallwarm.log 最后的进度数字与档位。
           # 优先解析"结束"行（正常收尾时最准确）；cancelled 中途被杀时该行不存在，

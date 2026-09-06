@@ -195,6 +195,20 @@ _restore_one_entry() {
   return 0
 }
 
+# 条目列表渲染: 每组上限 8 条，超出折叠"还有 N 条…"（规范 §2.1/§4，
+# 防超长列表刷屏并顶到 4000 字符分片边界把收尾区切走）
+# 用法: _fold_list <条目列表（多行，末条目行已含换行）> <总条数>
+_fold_list() {
+  local _entries="$1" _total="$2" _shown _rest
+  _shown=$(printf '%s' "$_entries" | head -8)
+  _rest=$((_total - 8))
+  if [ "$_rest" -gt 0 ]; then
+    printf '%s\n• <i>还有 %d 条…</i>' "${_shown%$'\n'}" "$_rest"
+  else
+    printf '%s' "${_shown%$'\n'}"
+  fi
+}
+
 # 一键还原入口
 # 用法: restore_fixed_files [task_name|all]
 restore_fixed_files() {
@@ -262,12 +276,12 @@ restore_fixed_files() {
   tg_add_kv msg "失败" "${total_fail} 个"
   if [ -n "$ok_list" ]; then
     tg_add_section msg "✅ 已还原"
-    tg_add_block msg "$ok_list"
+    tg_add_block msg "$(_fold_list "$ok_list" "$total_ok")"
     tg_add_note msg "原路径原文件名"
   fi
   if [ -n "$fail_list" ]; then
     tg_add_section msg "❌ 失败清单"
-    tg_add_block msg "$fail_list"
+    tg_add_block msg "$(_fold_list "$fail_list" "$total_fail")"
   fi
   tg_add_note msg "成功条目已从 marker 修复清单移除；失败条目保留，可重试。"
   tg_add_footer msg
@@ -519,7 +533,7 @@ restore_source_from_target() {
   tg_add_kv msg "失败" "${total_fail} 个"
   if [ -n "$fail_list" ]; then
     tg_add_section msg "❌ 失败清单"
-    tg_add_block msg "$fail_list"
+    tg_add_block msg "$(_fold_list "$fail_list" "$total_fail")"
   fi
   tg_add_note msg "目标端未做任何删改，可重复执行补齐失败条目。"
   tg_add_footer msg
@@ -633,7 +647,7 @@ rebuild_source_from_target() {
   tg_add_kv msg "失败" "${total_fail} 个"
   if [ -n "$fail_list" ]; then
     tg_add_section msg "❌ 失败清单"
-    tg_add_block msg "$fail_list"
+    tg_add_block msg "$(_fold_list "$fail_list" "$total_fail")"
   fi
   tg_add_note msg "源端已按目标端镜像；目标端全程只读，失败条目可直接重跑补齐。"
   tg_add_footer msg

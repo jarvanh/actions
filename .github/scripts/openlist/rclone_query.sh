@@ -42,8 +42,9 @@ _get_path_stats() {
   echo "${bytes} ${count} $(format_bytes "$bytes")"
 }
 
-# 运行 rclone check 并构建差异文件列表（最多 20 条）
-# 返回多行文本，每条格式: "• [差异类型] 文件路径"（与通知 bullet 风格一致）
+# 运行 rclone check 并构建差异文件列表（按状态分组: 新增/仅目标存在/不一致，
+# 每组上限 8 条，超出折叠"还有 N 条…"——与规范 §2.1 一致）
+# 返回多行 HTML: 组头 "<b>状态 · N</b>" + tree_code_fold 树形条目
 _build_diff_files_list() {
   local source_path="$1"
   local dest_path="$2"
@@ -51,27 +52,26 @@ _build_diff_files_list() {
   local -a extra_args=("$@")
   local check_combined
   check_combined=$(timeout "${OPENLIST_DOWNLOAD_TIMEOUT:-300}" rclone check "$source_path" "$dest_path" --size-only "${extra_args[@]}" --combined - 2>/dev/null || true)
-  # 输出已转义的 HTML 树形条目（与修复/失败列表同构）: <i>语义标签</i> · <code>路径</code>
-  local result="" diff_count=0 truncated=0
+  # 按状态分桶收集裸路径（转义交给 tree_code_fold）
+  local _add="" _del="" _mod=""
   while IFS= read -r line; do
-    local marker="${line:0:1}"
-    local fpath="${line:2}"
-    case "$marker" in
-      +) result+="<i>新增</i> · <code>$(escape_html "$fpath")</code>"$'\n' ;;
-      -) result+="<i>仅目标存在</i> · <code>$(escape_html "$fpath")</code>"$'\n' ;;
-      '*') result+="<i>不一致</i> · <code>$(escape_html "$fpath")</code>"$'\n' ;;
+    [ -z "$line" ] && continue
+    case "${line:0:1}" in
+      +) _add+="${line:2}"$'\n' ;;
+      -) _del+="${line:2}"$'\n' ;;
+      '*') _mod+="${line:2}"$'\n' ;;
     esac
-    diff_count=$((diff_count + 1))
-    if [ "$diff_count" -ge 20 ]; then
-      truncated=1
-      break
-    fi
   done <<< "$(echo "$check_combined" | grep -E '^[-+*] ')"
+  local result="" _bucket _label _cnt
+  for _bucket in "_add:新增" "_del:仅目标存在" "_mod:不一致"; do
+    local _var="${_bucket%%:*}" _name="${_bucket#*:}"
+    _cnt=$(printf '%s\n' "${!_var}" | { grep -c . || true; })
+    [ "${_cnt:-0}" -eq 0 ] && continue
+    result+="<b>${_name} · ${_cnt}</b>"$'\n'
+    result+="$(tree_code_fold "${!_var}" 8)"$'\n'
+  done
   [ -z "$result" ] && return 0
-  local _tree
-  _tree="$(tree_lines "$result")"
-  [ "$truncated" -eq 1 ] && _tree+=$'\n'"• <i>…更多差异文件已省略</i>"
-  echo "$_tree"
+  printf '%s' "${result%$'\n'}"
 }
 
 # 从 extra_args 中提取 --exclude 规则（每行一条 glob 模式，无规则时输出空）

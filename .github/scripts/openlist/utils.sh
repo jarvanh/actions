@@ -56,6 +56,28 @@ tree_lines() {
   printf '%s' "${_out%$'\n'}"
 }
 
+# 文件列表渲染一站式：逐行 <code>转义</code> → 超过 max 行折叠"还有 N 条…"
+# （折叠行并入条目流，末条 └─ 由 tree_lines 统一决定，禁双 └─）→ tree_lines。
+# 与 tg_notify.sh 同名同语义（两文件同步维护；本文件不 source 该脚本，
+# openlist 跑在容器内、路径不同）
+# 用法: tree_code_fold <多行文本> [每组上限，默认 8]
+# 输入必须是未转义的裸行；动态文件名含 & < > 时未转义会触发 400、整条退化纯文本
+tree_code_fold() {
+  local _in="$1" _max="${2:-8}" _total _entries="" _l _n=0
+  _total=$(printf '%s\n' "$_in" | { grep -c . || true; })
+  [ "${_total:-0}" -eq 0 ] && return 0
+  while IFS= read -r _l; do
+    [ -z "$_l" ] && continue
+    _n=$((_n + 1))
+    [ "$_n" -gt "$_max" ] && break
+    _entries+="<code>$(escape_html "$_l")</code>"$'\n'
+  done <<< "$_in"
+  if [ "$_total" -gt "$_max" ]; then
+    _entries+="<i>还有 $((_total - _max)) 条…</i>"$'\n'
+  fi
+  tree_lines "$_entries"
+}
+
 # 检查日志文件是否包含实质内容（排除 rclone 统计行和空行）
 # 返回值: "empty" / "transfer_only" / "has_content"
 check_log_has_content() {
