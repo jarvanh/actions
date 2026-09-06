@@ -811,10 +811,12 @@ send_sync_skipped() {
   fixed_bytes=$(echo "$MARKER_JSON" | jq -r '.fixed_bytes // 0' 2>/dev/null || echo 0)
 
   local msg=""
-  # 跳过窗口由任务开关决定（--1d-skip=24h / --2d-skip=48h / ...），标题动态展示
+  # 跳过窗口由任务开关决定（--1d-skip=24h / --2d-skip=48h / ...）；
+  # 标题只放 emoji+短语，动态细节下沉 kv 行
   local skip_window_hours=$((SYNC_SKIP_SECONDS / 3600))
-  tg_add_title msg "⏭️ 同步任务跳过 · ${skip_window_hours} 小时内已成功"
+  tg_add_title msg "⏭️ 同步任务跳过"
   tg_add_kv msg "任务" "$task_name"
+  tg_add_kv msg "跳过窗口" "${skip_window_hours} 小时内已成功"
   tg_add_path msg "源端" "$source_path"
   tg_add_path msg "目标" "$dest_path"
   tg_add_section msg "🕒 上次同步"
@@ -841,11 +843,21 @@ send_sync_skipped() {
     ' 2>/dev/null || echo "")
     if [ -n "$method_summary" ]; then
       tg_add_section msg "🔧 修复方式构成"
-      # 树形条目（├─/└─）: 方式 × 数量 · 大小，summary 缩进为子行
+      # 树形条目（├─/└─）: 方式 × 数量 · 大小，summary 缩进为子行；
+      # restore.kind 英文 token 映射中文标签（规范 §4：英文原因 token 不得直出通知）
       local -a _m_entries=() _m_summaries=()
+      local _m_kind_label
       while IFS=$'\t' read -r m_kind m_count m_bytes m_summary; do
         [ -z "$m_kind" ] && continue
-        _m_entries+=("<b>$(escape_html "$m_kind")</b> × <b>${m_count}</b> · <i>$(format_bytes "$m_bytes")</i>")
+        case "$m_kind" in
+          split_zip)          _m_kind_label="分包上传";;
+          hash_dir)           _m_kind_label="哈希目录还原";;
+          short_hash_rename)  _m_kind_label="短哈希改名";;
+          base64url_dir)      _m_kind_label="base64url 目录还原";;
+          copy)               _m_kind_label="直接复制";;
+          *)                  _m_kind_label="$m_kind";;
+        esac
+        _m_entries+=("<b>$(escape_html "$_m_kind_label")</b> × <b>${m_count}</b> · <i>$(format_bytes "$m_bytes")</i>")
         _m_summaries+=("$(escape_html "$m_summary")")
       done <<< "$method_summary"
       local _i _n=${#_m_entries[@]} _last

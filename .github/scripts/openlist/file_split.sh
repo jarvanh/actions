@@ -282,7 +282,7 @@ split_large_video() {
     check_duration="⚠️ 未获取有效时长，改用固定时间分段兜底"
     log_fix "$video_split_log" "无法获取有效视频时长，改用固定时间分段兜底: $file_name"
   else
-    check_duration="✅ 通过 · duration=${duration}s"
+    check_duration="✅ 通过 · 时长 ${duration} 秒"
   fi
 
   local n=$(( (file_size + target_part_size - 1) / target_part_size ))
@@ -330,7 +330,7 @@ split_large_video() {
 
     if [ "$ffmpeg_exit_code" -ne 0 ]; then
       log_fix "$video_split_log" "ffmpeg 分割命令失败，退出码: $ffmpeg_exit_code"
-      check_ffmpeg="❌ 未通过 · exit=${ffmpeg_exit_code} · 已尝试 ${attempt}/${max_split_attempts}"
+      check_ffmpeg="❌ 未通过 · 退出码 ${ffmpeg_exit_code} · 已尝试 ${attempt}/${max_split_attempts}"
       check_parts_generated="❌ 未执行 · ffmpeg 失败"
       check_parts_size="❌ 未执行 · ffmpeg 失败"
       rm -rf "$split_dir" 2>/dev/null || true
@@ -363,7 +363,7 @@ split_large_video() {
       fi
       check_ffmpeg="✅ 通过"
       check_parts_generated="✅ 通过 · ${generated_count} 个分片"
-      check_parts_size="✅ 通过 · 全部 ≤ ${max_part_size} bytes"
+      check_parts_size="✅ 通过 · 全部 ≤ ${max_part_size} 字节"
       split_success=1
       break
     fi
@@ -601,7 +601,10 @@ preprocess_large_files() {
 
     if [ "$split_success" -eq 1 ]; then
       success_count=$((success_count + 1))
-      processed_files+="• <code>$(escape_html "${remote_source}:${full_path}")</code> · <i>$(format_bytes_iec "$file_size") · ${split_kind}</i>"$'\n'
+      # 英文 kind 不直出通知（规范 §4）: media/binary 映射中文标签
+      local _kind_label="二进制"
+      [ "$split_kind" = "media" ] && _kind_label="媒体"
+      processed_files+="• <code>$(escape_html "${remote_source}:${full_path}")</code> · <i>$(format_bytes_iec "$file_size") · ${_kind_label}</i>"$'\n'
       deleted_files+="• <code>$(escape_html "${remote_source}:${full_path}")</code>"$'\n'
       echo "$(date +%Y-%m-%d_%H:%M:%S) - ${remote_source}:${full_path} - OpenList 前置分割成功(${split_kind})，已删除原始大文件" >> "$PROCESSED_FILES_LOG"
     else

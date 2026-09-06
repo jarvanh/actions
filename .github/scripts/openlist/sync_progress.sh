@@ -344,7 +344,7 @@ _progress_render_task_list() {
     fi
     if [ -z "$_dst" ]; then
       _plain+="• $(escape_html "$_src")"
-      [ -n "$_tsize" ] && _plain+=" · <i>$_tsize</i>"
+      [ -n "$_tsize" ] && _plain+=" · <i>$(escape_html "$_tsize")</i>"
       _plain+=$'\n'
       continue
     fi
@@ -363,7 +363,7 @@ _progress_render_task_list() {
     # 组间空一行
     [ "$_gi" -gt 0 ] && _out+=$'\n'
     _out+="📁 <b>$(escape_html "$_src")</b>"
-    [ -n "${_grp_size[$_src]:-}" ] && _out+=" · <i>${_grp_size[$_src]}</i>"
+    [ -n "${_grp_size[$_src]:-}" ] && _out+=" · <i>$(escape_html "${_grp_size[$_src]}")</i>"
     _out+=$'\n'"$(tree_lines "${_grp[$_src]}")"$'\n'
     _gi=$((_gi + 1))
   done

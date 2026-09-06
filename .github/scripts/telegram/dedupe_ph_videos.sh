@@ -21,8 +21,36 @@ set +e
 DIR_LABEL=$(basename "${SOURCE_REMOTE#*:}")
 
 # 排版助手提前加载：明细条目构建时即做 escape_html（文件名含 & < > 未转义会
-# 触发 400、整条通知退化纯文本）；后文发送处的重复 source 为幂等
-source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh" 2>/dev/null || true
+# 触发 400、整条通知退化纯文本）；后文发送处的重复 source 为幂等。
+# 加载失败必须显式暴露（勿 2>/dev/null || true 吞掉）：助手缺失时后续
+# escape_html/tree_lines 全部 command-not-found，通知会静默缺损
+source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+
+# ===== 通知明细折叠（规范 §4: 超长列表禁全量穷举）=====
+# 组内条目上限 8 条（_grp_add 超出转计数），通知中最多展示 8 组（_grp_block 超出折叠）
+GRP_SHOWN=0 GRP_HIDDEN=0
+GRP_BLOCK_SHOWN=0 GRP_BLOCK_HIDDEN=0
+_grp_reset() { GRP_SHOWN=0 GRP_HIDDEN=0; }
+_grp_add() {
+  if [ "$GRP_SHOWN" -ge 8 ]; then
+    GRP_HIDDEN=$((GRP_HIDDEN + 1))
+    return 0
+  fi
+  GRP_SHOWN=$((GRP_SHOWN + 1))
+  printf -v "$1" '%s%s' "${!1}" "$2"
+}
+_grp_fold() {
+  [ "$GRP_HIDDEN" -gt 0 ] && printf '%s' "<i>还有 ${GRP_HIDDEN} 条…</i>"$'\n'
+  return 0
+}
+_grp_block() {
+  if [ "$GRP_BLOCK_SHOWN" -ge 8 ]; then
+    GRP_BLOCK_HIDDEN=$((GRP_BLOCK_HIDDEN + 1))
+    return 0
+  fi
+  GRP_BLOCK_SHOWN=$((GRP_BLOCK_SHOWN + 1))
+  DUP_DETAILS+=$'\n'"$1"
+}
 
 # rclone lsf 列出文件（time;size;path），path 放最后，文件名含 ; 时最后一个字段获取剩余全部，安全
 # -R 递归子目录，path 包含子目录前缀
@@ -90,18 +118,20 @@ for id in "${!ID_ENTRIES[@]}"; do
     sorted=$(echo "$entries" | sort -t';' -k2,2n -k1,1)
     kept_path=$(echo "$sorted" | tail -n1 | cut -d';' -f3-)
     group_entries=""
+    _grp_reset
     while IFS=';' read -r t s p; do
       [ "$p" = "$kept_path" ] && continue
       [ -z "$p" ] && continue
       if rclone deletefile "$SOURCE_REMOTE/$p" 2>/tmp/rclone_err.log; then
         REMOVED_COUNT=$((REMOVED_COUNT + 1))
-        group_entries+="🗑 删除 <code>$(escape_html "${p}")</code> · <i>${s} 字节 · ${t}</i>"$'\n'
+        _grp_add group_entries "🗑 删除 <code>$(escape_html "${p}")</code> · <i>${s} 字节 · ${t}</i>"$'\n'
       else
-        group_entries+="❌ 删除失败 <code>$(escape_html "${p}")</code>"$'\n'
+        _grp_add group_entries "❌ 删除失败 <code>$(escape_html "${p}")</code>"$'\n'
         echo "  ❌ 删除失败: $(tail -n 3 /tmp/rclone_err.log)"
       fi
     done <<< "$sorted"
-    DUP_DETAILS+=$'\n'"🔖 <b>ID ${id}</b> · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 仅按 ID 去重 · 保留 <code>$(escape_html "${kept_path}")</code>"$'\n'"$(tree_lines "${group_entries:-}")"
+    _fold=$(_grp_fold)
+    _grp_block "🔖 <b>ID ${id}</b> · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 仅按 ID 去重 · 保留 <code>$(escape_html "${kept_path}")</code>"$'\n'"$(tree_lines "${group_entries}${_fold}")"
     continue
   fi
 
@@ -117,22 +147,24 @@ for id in "${!ID_ENTRIES[@]}"; do
     sorted=$(echo "$entries" | sort -t';' -k2,2n -k1,1)
     kept_path=$(echo "$sorted" | tail -n1 | cut -d';' -f3-)
     group_entries=""
+    _grp_reset
     while IFS=';' read -r t s p; do
       [ "$p" = "$kept_path" ] && continue
       [ -z "$p" ] && continue
       if [ "$AUTO_DELETE" = "true" ]; then
         if rclone deletefile "$SOURCE_REMOTE/$p" 2>/tmp/rclone_err.log; then
           REMOVED_COUNT=$((REMOVED_COUNT + 1))
-          group_entries+="🗑 删除 <code>$(escape_html "${p}")</code> · <i>${s} 字节 · ${t}</i>"$'\n'
+          _grp_add group_entries "🗑 删除 <code>$(escape_html "${p}")</code> · <i>${s} 字节 · ${t}</i>"$'\n'
         else
-          group_entries+="❌ 删除失败 <code>$(escape_html "${p}")</code>"$'\n'
+          _grp_add group_entries "❌ 删除失败 <code>$(escape_html "${p}")</code>"$'\n'
           echo "  ❌ 删除失败: $(tail -n 3 /tmp/rclone_err.log)"
         fi
       else
-        group_entries+="⚠️ 待删除 · 已跳过 <code>$(escape_html "${p}")</code> · <i>${s} 字节 · ${t}</i>"$'\n'
+        _grp_add group_entries "⚠️ 待删除 · 已跳过 <code>$(escape_html "${p}")</code> · <i>${s} 字节 · ${t}</i>"$'\n'
       fi
     done <<< "$sorted"
-    DUP_DETAILS+=$'\n'"🔖 <b>ID ${id}</b> · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 标题相同 · 保留 <code>$(escape_html "${kept_path}")</code>"$'\n'"$(tree_lines "${group_entries:-}")"
+    _fold=$(_grp_fold)
+    _grp_block "🔖 <b>ID ${id}</b> · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 标题相同 · 保留 <code>$(escape_html "${kept_path}")</code>"$'\n'"$(tree_lines "${group_entries}${_fold}")"
   else
     # 规则2：title 不同 → 对比哈希
     # 打印各文件规范化 title，便于排查为何被判不同（如不可见字符）
@@ -155,6 +187,7 @@ for id in "${!ID_ENTRIES[@]}"; do
     # 找出重复哈希（出现 >1 次的哈希）
     DUP_HASHES=$(awk -F';' '{print $1}' "$HASH_LIST" | sort | uniq -d)
     group_entries=""
+    _grp_reset
     if [ -n "$DUP_HASHES" ]; then
       # 哈希一致的组：每组删除修改时间旧的，保留最新
       while IFS= read -r hash; do
@@ -167,28 +200,36 @@ for id in "${!ID_ENTRIES[@]}"; do
           if [ "$AUTO_DELETE" = "true" ]; then
             if rclone deletefile "$SOURCE_REMOTE/$p" 2>/tmp/rclone_err.log; then
               REMOVED_COUNT=$((REMOVED_COUNT + 1))
-              group_entries+="🗑 删除 <code>$(escape_html "${p}")</code> · <i>哈希一致 ${hash:0:12} · 旧文件</i>"$'\n'
+              _grp_add group_entries "🗑 删除 <code>$(escape_html "${p}")</code> · <i>哈希一致 ${hash:0:12} · 旧文件</i>"$'\n'
             else
-              group_entries+="❌ 删除失败 <code>$(escape_html "${p}")</code>"$'\n'
+              _grp_add group_entries "❌ 删除失败 <code>$(escape_html "${p}")</code>"$'\n'
               echo "  ❌ 删除失败: $(tail -n 3 /tmp/rclone_err.log)"
             fi
           else
-            group_entries+="⚠️ 待删除 · 已跳过 <code>$(escape_html "${p}")</code> · <i>哈希一致 ${hash:0:12} · 旧文件</i>"$'\n'
+            _grp_add group_entries "⚠️ 待删除 · 已跳过 <code>$(escape_html "${p}")</code> · <i>哈希一致 ${hash:0:12} · 旧文件</i>"$'\n'
           fi
         done <<< "$hsorted"
       done <<< "$DUP_HASHES"
-      DUP_DETAILS+=$'\n'"🔖 <b>ID ${id}</b> · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 标题不同 · 删除哈希一致的旧文件"$'\n'"$(tree_lines "${group_entries:-}")"
+      _fold=$(_grp_fold)
+      _grp_block "🔖 <b>ID ${id}</b> · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 标题不同 · 删除哈希一致的旧文件"$'\n'"$(tree_lines "${group_entries}${_fold}")"
     else
       # 所有哈希各不相同 → 仅通知不删除
       NOTIFY_ONLY_COUNT=$((NOTIFY_ONLY_COUNT + 1))
+      _grp_reset
       while IFS=';' read -r h t s p; do
-        group_entries+="⚠️ 保留 <code>$(escape_html "${p}")</code> · <i>哈希 ${h:0:12}</i>"$'\n'
+        _grp_add group_entries "⚠️ 保留 <code>$(escape_html "${p}")</code> · <i>哈希 ${h:0:12}</i>"$'\n'
       done < "$HASH_LIST"
-      DUP_DETAILS+=$'\n'"🔖 <b>ID ${id}</b> · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 标题不同且哈希各不相同 · 仅通知"$'\n'"$(tree_lines "${group_entries:-}")"
+      _fold=$(_grp_fold)
+      _grp_block "🔖 <b>ID ${id}</b> · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 标题不同且哈希各不相同 · 仅通知"$'\n'"$(tree_lines "${group_entries}${_fold}")"
     fi
     rm -f "$HASH_LIST"
   fi
 done
+
+# 组级折叠行（通知最多展示 8 组，超出并入条目流；逐组处理过程已在 Actions 日志回显）
+if [ "$GRP_BLOCK_HIDDEN" -gt 0 ]; then
+  DUP_DETAILS+=$'\n'"<i>还有 ${GRP_BLOCK_HIDDEN} 组未展开 · 明细见运行日志</i>"$'\n'
+fi
 
 # 去重日志输出到 Actions 日志，便于追溯
 echo "=== ph-dl 去重日志 ==="

@@ -198,13 +198,13 @@ _tg_send_once() {
   local resp retry_after attempt max_attempts=5
   for attempt in $(seq 1 "$max_attempts"); do
     if [ -n "$parse_mode" ]; then
-      resp=$(curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+      resp=$(curl -s -m 15 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
         --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
         --data-urlencode "text=${text}" \
         --data-urlencode "disable_web_page_preview=true" \
         -d "parse_mode=${parse_mode}" 2>&1)
     else
-      resp=$(curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+      resp=$(curl -s -m 15 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
         --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
         --data-urlencode "text=${text}" \
         --data-urlencode "disable_web_page_preview=true" 2>&1)

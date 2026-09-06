@@ -115,13 +115,14 @@ jobs:
             DOWNLOADED=0
           fi
 
-          # 退出码语义映射：warning 只代表"跑完了但有跳过"，不该让整个任务变红
+          # 退出码语义映射：warning 只代表"跑完了但有跳过"，不该让整个任务变红。
+          # NOTE 走 tg_add_note 进通知：补充说明禁全角括号，用 " · " 分隔（规范 §4）
           case "$PU_EXIT" in
             0)   PU_STATUS="success"; PU_NOTE="" ;;
-            1)   PU_STATUS="warning"; PU_NOTE="存在失败项 (ERROR_CODE=1)" ;;
-            45)  PU_STATUS="warning"; PU_NOTE="作品页 404/服务端错误 (ERROR_CODE=9005，8 位截断为 45)" ;;
-            100) PU_STATUS="failure"; PU_NOTE="未登录，cookie 已失效 (ERROR_CODE=100)" ;;
-            *)   PU_STATUS="failure"; PU_NOTE="未知错误 (exit=${PU_EXIT})" ;;
+            1)   PU_STATUS="warning"; PU_NOTE="存在失败项 · 退出码 1" ;;
+            45)  PU_STATUS="warning"; PU_NOTE="作品页 404/服务端错误 · 退出码 9005，8 位截断为 45" ;;
+            100) PU_STATUS="failure"; PU_NOTE="未登录，cookie 已失效 · 退出码 100" ;;
+            *)   PU_STATUS="failure"; PU_NOTE="未知错误 · 退出码 ${PU_EXIT}" ;;
           esac
 
           {

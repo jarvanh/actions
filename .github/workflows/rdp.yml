@@ -128,15 +128,38 @@ jobs:
           "有效期：<i>约 6 小时 · 超时自动关机</i>`n" +
           "连接方式：<i>Microsoft Remote Desktop / 任何 RDP 客户端，地址填上面这一行</i>"
         if ($footer) { $msg += "`n`n$footer" }
-        # 发送：HTML 解析失败自动退化纯文本重发（规范 §5：宁可朴素，不让通知消失）
+        # 发送：HTML 解析失败自动退化纯文本重发（规范 §5：宁可朴素，不让通知消失）；
+        # 429 限流按 Retry-After 等待重试（此前缺 429 处理，限流时通知丢失）
+        function Send-TgMessage([string]$text, [bool]$withHtml) {
+          $body = @{ chat_id = $Env:TELEGRAM_CHAT_ID; text = $text; disable_web_page_preview = 'true' }
+          if ($withHtml) { $body['parse_mode'] = 'HTML' }
+          for ($attempt = 1; $attempt -le 5; $attempt++) {
+            try {
+              Invoke-RestMethod -Uri "https://api.telegram.org/bot$Env:TELEGRAM_BOT_TOKEN/sendMessage" `
+                -Method Post -Body $body | Out-Null
+              return
+            } catch {
+              $resp = $_.Exception.Response
+              $status = 0
+              if ($resp -and $resp.StatusCode) { $status = [int]$resp.StatusCode }
+              if ($status -eq 429) {
+                $wait = 5
+                try { if ($resp.Headers['Retry-After']) { $wait = [int]$resp.Headers['Retry-After'] } } catch { }
+                Write-Host "⚠️ Telegram 限流 (429)，等待 ${wait}s 后重试 ($attempt/5)..."
+                Start-Sleep -Seconds $wait
+                continue
+              }
+              throw
+            }
+          }
+          throw "Telegram 通知发送失败（重试 5 次仍限流）"
+        }
         try {
-          Invoke-RestMethod -Uri "https://api.telegram.org/bot$Env:TELEGRAM_BOT_TOKEN/sendMessage" `
-            -Method Post -Body @{ chat_id = $Env:TELEGRAM_CHAT_ID; text = $msg; parse_mode = 'HTML'; disable_web_page_preview = 'true' } | Out-Null
+          Send-TgMessage $msg $true
         } catch {
           $plain = $msg -replace '<[^>]+>', ''
           $plain = $plain -replace '&amp;','&' -replace '&lt;','<' -replace '&gt;','>'
-          Invoke-RestMethod -Uri "https://api.telegram.org/bot$Env:TELEGRAM_BOT_TOKEN/sendMessage" `
-            -Method Post -Body @{ chat_id = $Env:TELEGRAM_CHAT_ID; text = $plain; disable_web_page_preview = 'true' } | Out-Null
+          Send-TgMessage $plain $false
         }
 
     - name: Keep alive (6h)

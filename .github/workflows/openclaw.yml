@@ -385,6 +385,9 @@ jobs:
           fi
 
       - name: Run rss-to-telegram container
+        env:
+          # rsstt 服务使用独立 bot，token 经同名 secret 注入（此前未接线导致容器 TOKEN 恒空）
+          TELEGRAM_BOT_TOKEN_RSS_SB_BOT: ${{ secrets.TELEGRAM_BOT_TOKEN_RSS_SB_BOT }}
         run: |
           set -euo pipefail
           echo "Starting rss-to-telegram before CLIProxyAPI..."
@@ -1166,6 +1169,12 @@ jobs:
 
       - name: Notify OpenClaw startup failure
         if: ${{ always() && steps.run_openclaw.outcome == 'failure' }}
+        env:
+          # send_tg 发送闸 + 收尾区接线（TG_RUN_STARTED_AT 平台移除后为空值，
+          # tg_add_footer 内有 runner 开机时刻兜底）
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_RUN_STARTED_AT: ${{ github.run_started_at }}
         run: |
           if [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] && [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ]; then
             run_url="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
@@ -1239,12 +1248,24 @@ jobs:
             export FALLBACK_REINSTALL_DURATION_SEC="$fallback_reinstall_duration_sec"
             # 统一 HTML 版式 + 统一收尾区（动态值一律转义；日志收敛 <pre> 等宽块；
             # HTML 解析失败退化纯文本重发——修复"声明 parse_mode=HTML 但未转义"的隐患）
+            # 失败阶段英文 token → 中文标签（规范 §4：英文原因 token 不得直出通知）
+            fail_stage_label=""
+            if [ -n "$fail_stage" ]; then
+              case "$fail_stage" in
+                preflight_doctor) fail_stage_label="预检修复";;
+                config_validate) fail_stage_label="配置校验";;
+                initial_start) fail_stage_label="首次启动";;
+                fallback_reinstall) fail_stage_label="回退重装";;
+                snapshot_restore) fail_stage_label="快照回滚";;
+                *) fail_stage_label="$fail_stage";;
+              esac
+            fi
             source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
             msg=""
             tg_add_title msg "🚨 OpenClaw 自愈失败"
             tg_add_kv msg "步骤" "Run OpenClaw"
             tg_add_kv msg "Run ID" "${{ github.run_id }}"
-            [ -n "$fail_stage" ] && tg_add_kv msg "失败阶段" "$fail_stage"
+            [ -n "$fail_stage_label" ] && tg_add_kv msg "失败阶段" "$fail_stage_label"
             [ -n "$current_version" ] && tg_add_path msg "当前版本" "$current_version"
             [ -n "$fallback_version" ] && tg_add_path msg "Fallback" "$fallback_version"
             [ -n "$fallback_version_source" ] && tg_add_kv msg "Fallback 来源" "$fallback_version_source"
@@ -1255,21 +1276,9 @@ jobs:
             [ -n "$ssh_entry" ] && tg_add_path msg "SSH 调试" "$ssh_entry"
             tg_add_section msg "🧾 关键日志"
             tg_add_block msg "<pre>$(escape_html "$error_summary")</pre>"
-            TG_RUN_URL="$run_url" TG_RUN_STARTED_AT="${{ github.run_started_at }}" tg_add_footer msg
-            curl -fsS --retry 3 --retry-delay 2 --max-time 20 \
-              -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-              -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
-              -d parse_mode="HTML" \
-              -d disable_web_page_preview="true" \
-              --data-urlencode text="$msg" \
-            || { # HTML 解析失败 → 去标签退化纯文本重发
-              plain=$(_tg_strip_html "$msg")
-              curl -fsS --retry 3 --retry-delay 2 --max-time 20 \
-                -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-                -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
-                -d disable_web_page_preview="true" \
-                --data-urlencode text="$plain" || true
-            }
+            TG_RUN_URL="$run_url" TG_RUN_STARTED_AT="${TG_RUN_STARTED_AT:-}" tg_add_footer msg
+            # 统一走发送层：HTML 解析失败退化纯文本 + 429 按 retry_after 重试均已内置
+            send_tg "$msg" || true
           else
             echo "⚠️ Telegram alert skipped: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is empty"
           fi
@@ -1638,6 +1647,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_RUN_STARTED_AT: ${{ github.run_started_at }}
         run: |
           set -euo pipefail
           KEEPALIVE_MINUTES=340
@@ -1657,17 +1667,8 @@ jobs:
               tg_add_kv msg "预计" "约 ${FINAL_ARCHIVE_WARNING_BEFORE_MINUTES} 分钟后执行"
               tg_add_note msg "请及时保存状态或完成当前操作。"$'\n'"随后执行：Stop OpenClaw and Final Archive"
               TG_RUN_URL="$run_url" TG_RUN_STARTED_AT="${TG_RUN_STARTED_AT:-}" tg_add_footer msg
-              curl -fsS --retry 3 --retry-delay 2 --max-time 20 \
-                -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-                -d chat_id="${TELEGRAM_CHAT_ID}" \
-                -d parse_mode="HTML" \
-                -d disable_web_page_preview=true \
-                --data-urlencode text="$msg" >/dev/null \
-                || curl -fsS --retry 3 --retry-delay 2 --max-time 20 \
-                     -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-                     -d chat_id="${TELEGRAM_CHAT_ID}" \
-                     -d disable_web_page_preview=true \
-                     --data-urlencode text="$(_tg_strip_html "$msg")" >/dev/null || true
+              # 统一走发送层（退化/429 重试内置）
+              send_tg "$msg" || true
             else
               echo "⚠️ Telegram secrets missing, skip final archive warning."
             fi
@@ -1683,6 +1684,7 @@ jobs:
           # send_archive_alert 同上：未注入时约 15 处最终归档告警静默不发
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_RUN_STARTED_AT: ${{ github.run_started_at }}
         if: ${{ always() }}
         run: |
           set -euo pipefail

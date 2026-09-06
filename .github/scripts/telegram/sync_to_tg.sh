@@ -121,7 +121,8 @@ def build_fail_notify(title: str, file: str, elapsed: float, lines: list):
     （故用 耗时：N 秒 kv 形态，不加 ⏱ 前缀冒充收尾）。动态内容一律 esc()。
     """
     parts = [
-        esc(title),
+        # 标题 = emoji + 短语加粗（规范 §2；此前未加粗与 tg_add_title 版式漂移）
+        f"<b>{esc(title)}</b>",
         TG_SEP,
         "",
         f"📁 {esc(shorten_name(os.path.basename(file)))}",
@@ -518,10 +519,10 @@ def main():
                 flush_failed_to_remote(failed_map)
                 failed_list.append(f"{file} · 源文件损坏已标记跳过 · 耗时 {fmt_secs(up_elapsed)}")
                 notify(build_fail_notify(
-                    "🗑 损坏视频已标记跳过",
+                    "⏭️ 损坏视频已标记跳过",
                     file, up_elapsed,
                     [
-                        "⚠️ 原因：源文件损坏，无法读取视频信息（moov atom 缺失）",
+                        "⚠️ 原因：源文件损坏，无法读取视频信息 · moov atom 缺失",
                         "🔄 后续：不再重复尝试，远端文件被替换后自动重试",
                     ],
                 ))
