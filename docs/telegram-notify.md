@@ -77,7 +77,7 @@
    不得穷举裸文本；组头 `<b>原因</b> · N` + 条目 `<code>名称</code>` 树形。
 2. **多套同类信息** —— 条目虽少但存在多套并列结构（如 SSH / RDP 两套入口凭据），
    按套分节（emoji 区分语义），否则平铺混排难以扫读；组头可不带计数。
-   实现参考：`tailscale-windows.yml`（`🟢 Windows runner 已就绪`）。
+   实现参考：`tailscale-windows.yml` 与 `openclaw.yml`（`🟢 … 已就绪`）。
 
 ```
 ⚠️ 跳过/过滤文件
@@ -96,7 +96,8 @@
 - **折叠行必须并入条目流再交给 `tree_lines`**，由它统一决定末条 ——
   单独补一行 `  └─ 还有 N 条…` 会造成双 `└─` 同级、层次混淆。
   文件类列表可直接用一站式助手 `tree_code_fold <多行> [max=8]`
-  （tg_notify.sh：逐行 `<code>转义</code>` + 折叠 + 树形一次完成）。
+  （`telegram/tg_notify.sh` 与 `openlist/utils.sh` 各有同名同语义一份，
+  逐行 `<code>转义</code>` + 折叠 + 树形一次完成）。
 - **职责分层**：脚本层只输出结构化数据（如 `中文原因\t路径`），
   HTML 与树形一律交给 `tg_*` 助手；脚本侧自造标签是版式漂移的根源。
 - 实现参考：`telegram/sync_to_tg.sh` 的 `_render_skipped_groups`。
@@ -180,9 +181,13 @@ env:
 - [ ] 收尾区经 `tg_add_footer`（bash）/ `tg_footer_line`（python），无手拼
 - [ ] workflow 已注入 `TG_RUN_URL` / `TG_RUN_STARTED_AT`（job 或 step 级 env）
 - [ ] 动态内容全部经转义助手；发送走 `send_tg` / `send_tg_chunked` / `notify()`
+- [ ] 数值/时间戳已人性化：无原始高精度浮点、无 ISO 原始戳直出（见 §4）
 - [ ] 相关测试同步更新（如 `openlist/tests/test_progress_final_title.sh`）
 
 ## 7. 回归测试守卫
+
+`openlist/tests/` 现有 **17 个回归套件**——凡改动 `telegram.sh` / `utils.sh` /
+排版助手 / 同步管线，全量跑通后再交付。与本规范直接相关的守卫点：
 
 | 测试 | 守卫点 |
 |---|---|
@@ -190,6 +195,9 @@ env:
 | `openlist/tests/test_preview_diff.sh` | 任务预览合计行/树形/扣减子行 |
 | `openlist/tests/test_progress_phase_layout.sh` | 进度面板无 ⏱ 尾（时长只从 footer 出） |
 | `openlist/tests/test_skip_preview_hint.sh` | 跳过预览提示 |
+| `openlist/tests/test_method_id_naming.sh` | 修复方法 ID ↔ 中文标签映射 |
+| `openlist/tests/test_hash_dir_fallback.sh` | 哈希目录兜底（含 fix_log 文案） |
+| `openlist/tests/test_fix_log_section.sh` | fix_log 分节横幅 |
 
 `telegram/sync_to_tg.sh`（ph-dl / 91 通知）**暂无测试套件**——
 改动后靠本地渲染实测验证（提取函数 + 造模拟数据跑 `tree_lines` 输出对比）。
