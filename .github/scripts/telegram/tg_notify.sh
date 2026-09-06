@@ -147,9 +147,20 @@ tg_add_footer() {
   tg_append "$var" $'\n'"${line}"$'\n'
 }
 
+# 树形条目前缀: tree_conn <0|1 是否末条> → "  ├─ " / "  └─ "
+# openlist 的 task_preview / sync_progress 等直接调用（2026-09-06 从 openlist/utils.sh
+# 收敛至此——此前 utils.sh 删副本时漏迁，导致任务预览通知树形连接符全丢、粘成一坨）
+tree_conn() {
+  if [ "$1" = "1" ]; then printf '  └─ '; else printf '  ├─ '; fi
+}
+
+# 树形条目子行前缀（内容对齐条目文本）: tree_sub <0|1 是否末条> → "  │   " / "      "
+tree_sub() {
+  if [ "$1" = "1" ]; then printf '      '; else printf '  │   '; fi
+}
+
 # 多行单行条目 → 树形条目列表（每行 "  ├─/└─ 条目"，末条 └─；输出去尾换行）
 # 用法: tree_lines <多行文本>（每行一个条目，条目内容需已转义/含 HTML 标签）
-# 与 openlist/utils.sh 同名同语义（该脚本层不 source utils.sh，此处自带一份）
 tree_lines() {
   local _in="$1" _total _n=0 _line _out=""
   _total=$(printf '%s\n' "$_in" | { grep -c . || true; })

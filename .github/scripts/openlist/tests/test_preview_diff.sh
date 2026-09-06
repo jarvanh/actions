@@ -16,6 +16,8 @@ ok()  { PASS=$((PASS+1)); echo "PASS: $1"; }
 bad() { FAIL=$((FAIL+1)); echo "FAIL: $1"; }
 
 _REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+# 排版助手 + 发送层的唯一真源（openlist 侧已不再自带副本，2026-09-06 收敛）
+source "$_REPO_ROOT/.github/scripts/telegram/tg_notify.sh"
 source "$_REPO_ROOT/.github/scripts/openlist/utils.sh"
 source "$_REPO_ROOT/.github/scripts/openlist/rclone_query.sh"
 source "$_REPO_ROOT/.github/scripts/openlist/sync_marker.sh"

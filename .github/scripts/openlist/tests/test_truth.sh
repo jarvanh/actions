@@ -16,6 +16,8 @@ LOGF=/tmp/test_truth_log.txt; : > "$LOGF"
 _REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 
 # --- 先 source 被测代码（均为纯函数库，顶层仅状态变量初始化）---
+# 排版助手 + 发送层的唯一真源（openlist 侧已不再自带副本，2026-09-06 收敛）
+source "$_REPO_ROOT/.github/scripts/telegram/tg_notify.sh"
 source "$_REPO_ROOT/.github/scripts/openlist/utils.sh"
 # truth-check 与容器重启已从 sync_engine.sh 拆到 openlist_driver.sh，必须一并 source:
 # 漏掉则 _openlist_truth_check 未定义 → 测试全线假失败（command not found）
