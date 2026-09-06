@@ -47,7 +47,7 @@ source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 msg=""
 tg_add_title msg "🧹 ${WORKFLOW_LABEL} 频道清理完成"
 tg_add_block msg "📁 已清空 Telegram 频道所有视频
-📄 已删除 uploaded_videos.json · <i>下次运行重新处理全部视频</i>
-📄 已删除 failed_videos.json · <i>损坏标记清除，下次运行重新尝试</i>"
+📄 已删除 uploaded_videos.json（下次运行重新处理全部视频）
+📄 已删除 failed_videos.json（损坏标记清除，下次运行重新尝试）"
 tg_add_footer msg
 send_tg "$msg"
