@@ -285,7 +285,7 @@ jobs:
               # 统一 HTML 版式；密码经实体转义后 <code> 等宽展示（本条只进 TG 私信，不落日志）。
               # 规范豁免：凭据私信不走发送层、curl 直发（docs/telegram-notify.md §5），
               # 但版式仍对齐——source 发送层取 TG_SEP/escape_html（勿手写分隔线）、
-              # 补充说明用 " · "（禁全角括号）
+              # 补充说明用 " · " 分隔
               source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
               local pw_esc msg
               pw_esc="$(escape_html "$2")"

@@ -116,7 +116,7 @@ jobs:
           fi
 
           # 退出码语义映射：warning 只代表"跑完了但有跳过"，不该让整个任务变红。
-          # NOTE 走 tg_add_note 进通知：补充说明禁全角括号，用 " · " 分隔（规范 §4）
+          # NOTE 走 tg_add_note 进通知：补充说明用 " · " 分隔（规范 §4）
           case "$PU_EXIT" in
             0)   PU_STATUS="success"; PU_NOTE="" ;;
             1)   PU_STATUS="warning"; PU_NOTE="存在失败项 · 退出码 1" ;;

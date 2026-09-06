@@ -121,7 +121,7 @@ echo "$SEND_CAPTURE" | grep -q '差异构成：新增 1 · 同名更新 1' && ok
 echo "$SEND_CAPTURE" | grep -q '+900 B / +2 文件' && ok "1k 条目行 +900 B / +2 文件" || bad "1k: $SEND_CAPTURE"
 echo "$SEND_CAPTURE" | grep -q '已扣减 1 个修复文件 / 300 B' && ok "1l 渲染修复扣减子行" || bad "1l"
 echo "$SEND_CAPTURE" | grep -q '合计预估待同步：<b>900 B</b> / <b>2</b> 文件 · 新增 1 · 同名更新 1' \
-  && ok "1m 合计行含构成附注（\" · \" 分隔，无全角括号）" || bad "1m: $SEND_CAPTURE"
+  && ok "1m 合计行含构成附注（\" · \" 分隔）" || bad "1m: $SEND_CAPTURE"
 [ "$(lsjson_call_count)" = "2" ] && ok "1n 源/目标各列一次（2 次 lsjson）" || bad "1n: [$(lsjson_call_count)]"
 
 # ===== 场景 2: 源端清单缓存（进度注册复用，不重复拉清单）=====
