@@ -822,25 +822,44 @@ jobs:
           fi
           AI_BACKEND="${AI_BACKEND:-clirelay}"
 
-          # 统一 HTML 通知 + 统一收尾区（tg_notify.sh，checkout 后可用）
+          # 统一 HTML 通知 + 统一收尾区（tg_notify.sh，checkout 后可用）。
+          # 版式与 tailscale-windows.yml "🟢 Windows runner 已就绪" 同款：
+          # 按套分节（§2.1 场景 2）+ 组内树形条目，凭据/网络/出口/AI 网关
+          # 各归其节，避免一级平铺 10 行 kv 混排
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
           TG_RUN_URL="${RUN_URL}" TG_RUN_STARTED_AT="${{ github.run_started_at }}" msg=""
-          tg_add_title msg "🟢 OpenClaw Runner SSH 入口"
-          tg_add_path msg "SSH" "ssh runner@${TS_HOST}"
-          tg_add_path msg "IP" "ssh runner@${TS_IP}"
-          tg_add_kv msg "出口节点" "已广播 · 可作为出口节点"
-          tg_add_kv msg "AI 网关" "$(if [ "$AI_BACKEND" = "cliproxyapi" ]; then echo "CLIProxyAPI · 回退"; else echo "CliRelay · 全栈"; fi)"
-          [ -n "$AI_FALLBACK_REASON" ] && tg_add_kv msg "回退原因" "$AI_FALLBACK_REASON"
-          [ -n "${TS_FQDN:-}" ] && tg_add_kv msg "RustDesk 直连" "${TS_FQDN}:21118"
-          tg_add_kv msg "出口 IP" "${PUB_IP}"
-          tg_add_kv msg "ISP" "${IP_ISP}"
-          tg_add_kv msg "ASN" "AS${IP_ASN} · ${IP_ORG}"
-          tg_add_kv msg "位置" "${IP_LOC}"
-          tg_add_section msg "批准方式"
-          tg_add_block msg "• 管理页：admin/machines → openclaw → Edit routes → 勾选 Exit Node
-          • ACL autoApprovers：routes 0.0.0.0/0,::/0 → tag:ci · 免每次批准 · 推荐
-          • API：POST /api/v2/device/{device_id}/routes"
-          tg_add_note msg "文件管理 (SFTP)：sftp://runner@${TS_HOST}/"
+          tg_add_title msg "🟢 OpenClaw Runner 已就绪"
+
+          _entries="命令：<code>ssh runner@$(escape_html "${TS_HOST}")</code>"
+          _entries+=$'\n'"备用 IP：<code>ssh runner@$(escape_html "${TS_IP}")</code>"
+          _entries+=$'\n'"文件管理：<code>sftp://runner@$(escape_html "${TS_HOST}")/</code>"
+          tg_add_section msg "🔐 SSH"
+          tg_add_block msg "$(tree_lines "$_entries")"
+
+          if [ -n "${TS_FQDN:-}" ]; then
+            tg_add_section msg "🖥️ RustDesk"
+            tg_add_block msg "$(tree_lines "直连：<code>$(escape_html "${TS_FQDN}"):21118</code>")"
+          fi
+
+          _entries="出口 IP：<code>$(escape_html "${PUB_IP}")</code>"
+          _entries+=$'\n'"ISP：$(escape_html "${IP_ISP}")"
+          _entries+=$'\n'"ASN：$(escape_html "AS${IP_ASN} · ${IP_ORG}")"
+          _entries+=$'\n'"位置：$(escape_html "${IP_LOC}")"
+          tg_add_section msg "🌐 出口网络"
+          tg_add_block msg "$(tree_lines "$_entries")"
+
+          _entries="状态：已广播 · 可作为出口节点"
+          _entries+=$'\n'"管理页批准：<code>admin/machines → openclaw → Edit routes → 勾选 Exit Node</code>"
+          _entries+=$'\n'"ACL 免批准（推荐）：<code>routes 0.0.0.0/0,::/0 → tag:ci</code> · <i>免每次批准</i>"
+          _entries+=$'\n'"API：<code>POST /api/v2/device/{device_id}/routes</code>"
+          tg_add_section msg "🛰️ 出口节点"
+          tg_add_block msg "$(tree_lines "$_entries")"
+
+          if [ "$AI_BACKEND" = "cliproxyapi" ]; then _ai_note="CLIProxyAPI · 回退"; else _ai_note="CliRelay · 全栈"; fi
+          _entries="后端：${_ai_note}"
+          [ -n "$AI_FALLBACK_REASON" ] && _entries+=$'\n'"回退原因：$(escape_html "${AI_FALLBACK_REASON}")"
+          tg_add_section msg "🤖 AI 网关"
+          tg_add_block msg "$(tree_lines "$_entries")"
           # footer 读 TG_RUN_URL/TG_RUN_STARTED_AT（上方前缀注入）
           tg_add_footer msg
           # 走发送层而非 curl 直发：HTML 解析失败自动退化纯文本重发（规范 §5），
