@@ -119,7 +119,7 @@ jobs:
           if ($footer) { $footer += " · " }
           $footer += "🔗 <a href=""$(Esc-Html $Env:TG_RUN_URL)"">运行日志</a>"
         }
-        # 单一入口，平铺 kv 即可；元数据一律 " · <i>…</i>" 分隔 —— 禁全角括号
+        # 单一入口，平铺 kv 即可；元数据一律 " · <i>…</i>" 分隔
         # （规范见 docs/telegram-notify.md）
         $msg = "🖥️ <b>Windows RDP 已就绪</b>`n$sep`n" +
           "地址：<code>$(Esc-Html $address)</code>`n" +

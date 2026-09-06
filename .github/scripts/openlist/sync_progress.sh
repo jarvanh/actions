@@ -436,7 +436,7 @@ _progress_render() {
     local fixed_total
     fixed_total=$(_progress_get_fixed_files)
     # 标题只留 emoji+短语，计数细节下沉 "状态" kv 行（telegram.sh 规范:
-    # 计数一律 " · " 分隔、不用全角括号——旧「⛔ 同步中断（N 个待处理…）」废弃）
+    # 计数一律 " · " 分隔——旧「⛔ 同步中断（N 个待处理…）」废弃）
     if [ "$total" -eq 0 ]; then
       # 一个任务都没注册就到了收尾（注册前被取消/失败），绝非"全部完成"
       title="⛔ 同步中断"
@@ -471,7 +471,7 @@ _progress_render() {
   # 阶段/统计不展示（progress_finalize 已清空各槽位，属过期信息）
   if [ "$running" -gt 0 ]; then
     local _running_title="📍 进行中 · ${running}"
-    # 规范：全角括号补充说明禁用；状态 emoji 统一表无 ⏸️（finalize 后仍在跑 = 🔄）
+    # 规范：状态 emoji 统一表无 ⏸️（finalize 后仍在跑 = 🔄）
     [ "$finalized" -eq 1 ] && _running_title="🔄 进行中 · ${running} · 未执行完"
     tg_add_section msg "$_running_title"
     tg_add_block msg "$(_progress_render_task_list "$running_lines")"

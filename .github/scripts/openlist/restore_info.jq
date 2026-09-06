@@ -25,7 +25,7 @@ def restore_info($orig; $alt; $method; $src; $dst):
   | ($orig | split("/") | .[-1]) as $orig_name
   | if   $has_split_zip then {kind:"split_zip",
       # summary 直出 Telegram 通知（sync_marker 修复方式构成子行）：
-      # 禁全角括号与长句，用 " · " 分隔（docs/telegram-notify.md §4）
+      # 避免长句，用 " · " 分隔（docs/telegram-notify.md §2.1）
       summary: "zip 打包切割为分卷上传 · 粒度见方法文本 · OPENLIST_SPLIT_PART_BYTES 可调 · 替代名为原名或短哈希名",
       steps: ["下载所有分卷到同一目录", "按顺序合并: cat *.0* > merged.zip", "执行: 7z x merged.zip -o<output_dir>（或 unzip merged.zip）"],
       script:  ("set -euo pipefail\nSRC=\"" + $src + "\"\nDST=\"" + $dst + "\"\nORIG=\"" + $orig + "\"\nALT=\"" + $alt + "\"\nTMP=$(mktemp -d)\nALT_DIR=$(dirname \"$ALT\")\nALT_FNAME=$(basename \"$ALT\")\nSPLIT_FULL=\"${ALT_FNAME%.*}\"\necho \"分卷前缀: $SPLIT_FULL\"\nrclone copy \"${DST}/${ALT_DIR}\" \"$TMP\" --include \"${SPLIT_FULL}.*\" --progress 2>&1 | tail -5\ncd \"$TMP\"\ncat ${SPLIT_FULL}.0* > merged.zip\necho \"合并后 zip 大小: $(stat -c%s merged.zip 2>/dev/null || stat -f%z merged.zip 2>/dev/null) bytes\"\n7z x merged.zip -o\"$TMP/out\" -y || unzip merged.zip -d \"$TMP/out\"\nls -la \"$TMP/out/\"\n# 还原后的源文件在: $TMP/out/" + $orig_name + "\nrm -rf \"$TMP\"")}
