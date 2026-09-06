@@ -426,7 +426,7 @@ _fix_method_blocked() {
 _fix_method_gate() {
   local mid="$1" extra="${2:-}"
   if _fix_method_blocked "$mid"; then
-    log_fix "$fix_log" "⏭  $(_fix_method_short "$mid") · 已拉黑，跳过"
+    log_fix "$fix_log" "⏭  $(_fix_method_short "$mid")（已拉黑，跳过）"
     return 1
   fi
   log_fix "$fix_log" "▶ $(_fix_method_short "$mid")${extra}"
@@ -529,7 +529,7 @@ _try_fix_split_archive() {
   done
   log_fix "$fix_log" "  ${mid} 分卷上传汇总: $uploaded_count / $total_parts"
   if [ "$all_uploaded" -eq 1 ] && [ "$uploaded_count" -gt 0 ] && _confirm_persist_by_count "$(_fix_method_desc "$mid")" "$failed_file_rel" "$fix_log"; then
-    log_fix "$fix_log" "  ✅ $(_fix_method_short "$mid") 成功 · ${uploaded_count} 分卷"
+    log_fix "$fix_log" "  ✅ $(_fix_method_short "$mid") 成功（${uploaded_count} 分卷）"
     local dir_desc name_desc=""
     dir_desc=$(_fix_dir_desc)
     [ "$encode_name" = "1" ] && name_desc="短哈希文件名 + "
@@ -539,7 +539,7 @@ _try_fix_split_archive() {
     _fix_succeed "$mid" "$method_text" "${alt_files[0]}" "$restore_text" "$file_md5"
     return 0
   fi
-  log_fix "$fix_log" "  ❌ $(_fix_method_short "$mid") 失败 · 分卷未全部上传"
+  log_fix "$fix_log" "  ❌ $(_fix_method_short "$mid") 失败（分卷未全部上传）"
   rm -rf "$split_dir_local" 2>/dev/null || true
   return 1
 }
@@ -649,17 +649,17 @@ _confirm_persist_by_count() {
   local m_short
   m_short=$(_fix_method_short "$method_id")
   count=$(_raw_dir_count "$_RAW_VERIFY_DIR" "${_RAW_VERIFY_REFRESH:-}") || {
-    log_fix "$log_file" "  ⚠️ raw 计数失败 → 信任返回值 · ${m_short}"
+    log_fix "$log_file" "  ⚠️ raw 计数失败 → 信任返回值（${m_short}）"
     return 0
   }
   # 基准 > 0 而计数返回 0 → 不是"未增长"，是目录列表异常（驱动未就绪）
   if [ "$count" -eq 0 ] && [ "${_RAW_VERIFY_LAST:-0}" -gt 0 ]; then
-    log_fix "$log_file" "  ⚠️ raw 计数异常为 0 · 基准 ${_RAW_VERIFY_LAST} · 列表未就绪 → 信任返回值 · ${m_short}"
+    log_fix "$log_file" "  ⚠️ raw 计数异常为 0（基准 ${_RAW_VERIFY_LAST}，列表未就绪）→ 信任返回值（${m_short}）"
     return 0
   fi
   if [ "$count" -gt "${_RAW_VERIFY_LAST:--1}" ]; then
     _RAW_VERIFY_LAST=$count
-    log_fix "$log_file" "  ✅ 落盘确认 raw=${_RAW_VERIFY_LAST} · ${m_short}"
+    log_fix "$log_file" "  ✅ 落盘确认 raw=${_RAW_VERIFY_LAST}（${m_short}）"
     return 0
   fi
   log_fix "$log_file" "  🔴 假成功 raw 未增长 ${_RAW_VERIFY_LAST}→${count} → 拉黑 ${m_short}，换下一方法"
@@ -715,7 +715,7 @@ _fix_probe_dir_writable() {
   # 整轮缓存: 同一目录只探一次（同一目录的结论不会在几分钟内翻转）
   local cached="${_DIR_WRITE_CACHE[$dir_remote]:-}"
   if [ -n "$cached" ]; then
-    log_fix "$fix_log" "   🔎 目录可写性 · 沿用本轮结论 ${cached%%|*} · ${cached#*|}"
+    log_fix "$fix_log" "   🔎 目录可写性（沿用本轮结论 ${cached%%|*}，${cached#*|}）"
     [ "${cached%%|*}" = "1" ]
     return $?
   fi
@@ -739,12 +739,12 @@ _fix_probe_dir_writable() {
       seen_cache=1
     fi
   fi
-  log_fix "$fix_log" "   缓存口径: rc=${prc}, 探针可见=${seen_cache} · 不作判据"
+  log_fix "$fix_log" "   缓存口径: rc=${prc}, 探针可见=${seen_cache}（不作判据）"
 
   local writable="$seen_cache"
   local note="未经重启确认（缓存口径，不可信）"
   if [ "${_DIR_PROBE_RESTARTS:-0}" -ge "${OPENLIST_DIR_PROBE_MAX_RESTART:-3}" ]; then
-    log_fix "$fix_log" "   ⚠️ 本轮目录探测重启预算已耗尽 · ${OPENLIST_DIR_PROBE_MAX_RESTART:-3} 次 · 退回缓存口径"
+    log_fix "$fix_log" "   ⚠️ 本轮目录探测重启预算已耗尽（${OPENLIST_DIR_PROBE_MAX_RESTART:-3} 次），退回缓存口径"
   elif _restart_openlist_for_truth "${ol_dir#/}" "$fix_log"; then
     _DIR_PROBE_RESTARTS=$((_DIR_PROBE_RESTARTS + 1))
     # 重启会让假成功条目从计数视图消失（计数下降），重启前建立的基准随之
@@ -758,10 +758,10 @@ _fix_probe_dir_writable() {
     writable="$seen_truth"
     note="已重启确认"
     if [ "$seen_truth" -eq 1 ]; then
-      log_fix "$fix_log" "   ✅ 目录可写 · 重启后探针仍在"
+      log_fix "$fix_log" "   ✅ 目录可写（重启后探针仍在）"
     else
       # 目录是假成功创建的、或写入根本没落盘——都是"这个目录写不进去"
-      log_fix "$fix_log" "   ❌ 目录不可写 · 重启后探针消失: 写入未真正落盘"
+      log_fix "$fix_log" "   ❌ 目录不可写（重启后探针消失: 写入未真正落盘）"
     fi
   else
     log_fix "$fix_log" "   ⚠️ 容器重启不可用，退回缓存口径"
@@ -771,13 +771,13 @@ _fix_probe_dir_writable() {
   rclone deletefile "$probe_dst" "${RCLONE_RETRY_FLAGS[@]}" --timeout "$probe_timeout" >/dev/null 2>&1
   if rclone lsf "$dir_remote" --files-only --retries 1 --timeout "$probe_timeout" 2>/dev/null \
      | grep -qxF "$probe_name"; then
-    log_fix "$fix_log" "   ⚠️ 探测文件删除失败，raw 计数基准 +1 补偿 · 避免真实落盘被误判假成功"
+    log_fix "$fix_log" "   ⚠️ 探测文件删除失败，raw 计数基准 +1 补偿（避免真实落盘被误判假成功）"
     [ "${_RAW_VERIFY_LAST:-0}" -gt 0 ] && _RAW_VERIFY_LAST=$((_RAW_VERIFY_LAST + 1))
   fi
 
   # 结论带上可信度标注: 排查时一眼能看出这条判定是否经过重启确认，
   # 避免把缓存口径的结论当真值用
-  log_fix "$fix_log" "   结论: 可写=${writable} · ${note}"
+  log_fix "$fix_log" "   结论: 可写=${writable}（${note}）"
   _DIR_WRITE_CACHE["$dir_remote"]="${writable}|${note}"
   [ "$writable" -eq 1 ]
   return $?
@@ -903,7 +903,7 @@ _try_fix_methods_round() {
   _fix_method_gate zip_split_original "（粒度 ${SPLIT_PART_HUMAN}）" && { _try_fix_split_archive zip_split_original 0 && return 0; }
   _fix_method_gate zip_split_shorthash && { _try_fix_split_archive zip_split_shorthash 1 && return 0; }
 
-  log_fix "$fix_log" "  ❌ 本轮 4 种方法全部失败 · 目录: $(_fix_dir_desc)"
+  log_fix "$fix_log" "  ❌ 本轮 4 种方法全部失败（目录: $(_fix_dir_desc)）"
   return 1
 }
 
@@ -1007,7 +1007,7 @@ _fix_switch_to_hash_dir() {
   # 目录已换 → 原目录下的方法结论作废（黑名单记的是"某方法在某目录下
   # 失败/假成功"，沿用会让本轮所有方法被门禁直接跳过）
   if [ -n "${FIX_METHOD_BLACKLIST[$failed_file_rel]+x}" ]; then
-    log_fix "$fix_log" "   ♻ 目录已换，清空方法黑名单 · 原目录下的失败/假成功结论不再适用"
+    log_fix "$fix_log" "   ♻ 目录已换，清空方法黑名单（原目录下的失败/假成功结论不再适用）"
     unset "FIX_METHOD_BLACKLIST[$failed_file_rel]"
   fi
 
@@ -1015,7 +1015,7 @@ _fix_switch_to_hash_dir() {
   # 不过就立刻返回失败，省掉一趟整文件下载 + 4 次上传
   log_fix "$fix_log" "   🔎 预检短哈希目录可写性..."
   if ! _fix_probe_dir_writable "$actual_dst_dir" "$actual_ol_dir"; then
-    log_fix "$fix_log" "   ❌ 短哈希目录不可写 · 已重启容器复核 · 兜底终止"
+    log_fix "$fix_log" "   ❌ 短哈希目录不可写（已重启容器复核），兜底终止"
     return 1
   fi
   log_fix "$fix_log" "   ✅ 短哈希目录可写，4 种文件修复方法将在此目录执行"
@@ -1169,7 +1169,7 @@ try_fix_failed_file() {
   fi
 
   if [ "$dir_ok" -ne 1 ]; then
-    log_fix "$fix_log" "目录创建最终失败 · base64URL 编码目录也失败 · 无法修复文件"
+    log_fix "$fix_log" "目录创建最终失败（含 base64URL 编码后），无法修复文件"
     TRY_FIX_MESSAGE="目录创建失败，base64URL 编码后仍失败"
     rm -rf "$temp_dir" 2>/dev/null || true
     return 1
@@ -1183,7 +1183,7 @@ try_fix_failed_file() {
   log_fix "$fix_log" "📁 目标目录已就绪: $(_short_path "$actual_dst_dir")"
 
   if ! _fix_probe_dir_writable "$actual_dst_dir" "$actual_ol_dir"; then
-    log_fix "$fix_log" "🔀 原目录不可写 · 已重启容器复核 → 直接切短哈希目录，跳过原目录的 4 种方法"
+    log_fix "$fix_log" "🔀 原目录不可写（已重启容器复核）→ 直接切短哈希目录，跳过原目录的 4 种方法"
     if ! _fix_switch_to_hash_dir; then
       log_fix "$fix_log" "❌ 短哈希目录同样不可写，无法修复文件"
       TRY_FIX_MESSAGE="目标目录不可写（原目录与短哈希目录均未通过可写性预检）"
@@ -1236,7 +1236,7 @@ try_fix_failed_file() {
   fi
 
   # 所有方法均失败
-  log_fix "$fix_log" "❌ 全部修复方法 1-4 均失败 · 含短哈希目录兜底"
+  log_fix "$fix_log" "❌ 全部修复方法（1-4）均失败（含短哈希目录兜底）"
   TRY_FIX_MESSAGE="所有修复方法均失败"
   rm -rf "$temp_dir" 2>/dev/null || true
   return 1

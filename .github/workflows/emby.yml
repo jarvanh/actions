@@ -1560,7 +1560,7 @@ jobs:
             G_ERR=$(printf '%s' "$S" | jq -r '.fs.resolve_err // 0' 2>/dev/null || echo 0)
             G_FB=$(printf '%s' "$S" | jq -r '.fs.fallback // 0' 2>/dev/null || echo 0)
             G_XD=$(printf '%s' "$S" | jq -r '.fs.cross_drive // 0' 2>/dev/null || echo 0)
-            OD_SUMMARY="直链命中 ${G_OK} / 未取到 ${G_MISS} / 解析失败 ${G_ERR} / 回落 ${G_FB} / 跨盘 ${G_XD} · get 共 ${G_GET}"
+            OD_SUMMARY="直链命中 ${G_OK} / 未取到 ${G_MISS} / 解析失败 ${G_ERR} / 回落 ${G_FB} / 跨盘 ${G_XD} (get共 ${G_GET})"
           fi
           # 全库海报预热统计：取 wallwarm.log 最后的进度数字与档位。
           # 优先解析"结束"行（正常收尾时最准确）；cancelled 中途被杀时该行不存在，
