@@ -820,8 +820,11 @@ send_sync_skipped() {
   tg_add_path msg "源端" "$source_path"
   tg_add_path msg "目标" "$dest_path"
   tg_add_section msg "🕒 上次同步"
-  tg_add_kv msg "时间" "$MARKER_LAST_SUCCESS"
-  tg_add_kv msg "距今" "${MARKER_SINCE_HOURS} 小时"
+  # ISO 原始戳人性化（2026-09-05T11:34:19Z → 2026-09-05 11:34 UTC），
+  # 解析失败保留原值；"距今"并作同行的 " · N 小时前"，少一行 kv
+  local _last_fmt
+  _last_fmt=$(date -u -d "${MARKER_LAST_SUCCESS}" '+%Y-%m-%d %H:%M UTC' 2>/dev/null || echo "${MARKER_LAST_SUCCESS}")
+  tg_add_kv msg "时间" "${_last_fmt} · ${MARKER_SINCE_HOURS} 小时前"
   tg_add_kv msg "记录大小" "$(format_bytes "$marker_bytes") · ${marker_count} 文件"
   if [ "${fixed_count:-0}" -gt 0 ]; then
     tg_add_kv msg "已修复文件" "${fixed_count} 个 · $(format_bytes "$fixed_bytes") · 以非原名存在于目标端"
@@ -883,9 +886,12 @@ send_sync_skipped() {
     fi
   fi
 
-  # 收尾区: 游离的 🔗 marker 行并入备注；状态/备注统一 tg_add_note；footer 自带空行
+  # 收尾区: 状态/备注统一 tg_add_note；footer 自带空行。
+  # marker 路径很长（含完整任务名），单独走 <code> 等宽 kv 行，备注只留字段指引，
+  # 避免一整行长句把说明淹没
   if [ "${fixed_count:-0}" -gt 0 ]; then
-    tg_add_note msg "🔗 完整还原脚本保存在 OneDrive marker $(get_marker_path "$task_name" "$dest_path") 的 fixed_files[].restore.script 字段
+    tg_add_path msg "还原脚本" "$(get_marker_path "$task_name" "$dest_path")"
+    tg_add_note msg "🔗 脚本位于该 marker 的 fixed_files[].restore.script 字段
 ⏭️ 本次跳过同步，继续执行其他任务
 如需强制同步，请手动触发 force_sync=true"
   else

@@ -951,7 +951,8 @@ jobs:
 
           # 以下都是格式化助手：任何一项取不到就返回空，由 join_parts 跳过，不产生 "null · · 0" 这类噪声
           two_digit() { case "$1" in ''|*[!0-9]*) return 1;; esac; printf '%02d' "$1"; }
-          fmt_dur() { # $1=分钟 → 1 小时 38 分 / 38 分钟（规范：中文三段式，紧凑格式禁入通知）
+          fmt_dur() { # $1=分钟 → 1 小时 38 分 / 38 分钟（规范：中文三段式，紧凑格式禁入通知；
+                      # 分钟 %02d 补零为既定形态——对齐时长条目"2 小时 08 分"）
             local m=${1:-0}
             case "$m" in ''|*[!0-9]*) return 0;; esac
             [ "$m" -lt 1 ] && return 0
@@ -1035,8 +1036,10 @@ jobs:
               [ -n "$year" ] && title="${title} <i>(${year})</i>"
             fi
 
-            # 第 2 行：元数据（集名 / 类型 / 时长 / 分辨率 / 编码 / 体积）
-            # 季集号已出现在标题行，这里不再重复
+            # 第 2 行：规格（集名 / 类型 / 时长 / 分辨率 / 编码 / 体积）
+            # 季集号已出现在标题行，这里不再重复。
+            # 排版 = 标签锚点行（用户选定）：每行全角冒号标签打头，扫读有锚点，
+            # 不再是 " · " 串起来的无锚长行
             meta=$(join_parts \
               "$( [ "$type" = "Episode" ] && [ -n "$n" ] && esc_html "$n" )" \
               "$(fmt_type "$type")" \
@@ -1047,13 +1050,13 @@ jobs:
 
             # 第 3 行：链路。302 时把直链剩余有效期说清楚——链接不是永久的
             if [ "$kind" = "302直链" ]; then
-              l3="⚡ 302直链 · 播放器直连 OneDrive"
+              l3="⚡ 302直连 OneDrive"
               case "$remain_s" in
                 ''|*[!0-9]*) ;;
                 *) [ "$remain_s" -gt 0 ] && l3="${l3} · 直链剩余 $(( (remain_s + 59) / 60 )) 分钟";;
               esac
             else
-              l3="🔁 中转 · 视频流经 runner 中转到网盘"
+              l3="🔁 视频流经 runner 中转到网盘"
             fi
 
             # 第 4 行：客户端。IP 来自 ge2o 访问日志（谁在播），起播耗时用于"点播慢"定位
@@ -1063,11 +1066,12 @@ jobs:
             # 日志侧只记片名（公开仓库，绝不落直链）；TG 私密消息里才附带直链
             echo "🎬 播放 [$kind] ${n:-未知} (item $iid)"
             text="🎬 ${title}"$'\n'"${TG_SEP}"
-            [ -n "$meta" ] && text="${text}"$'\n'"${meta}"
-            text="${text}"$'\n'"${l3}"
-            [ -n "$client" ] && text="${text}"$'\n'"📱 ${client}"
-            # 长链接折叠成 <a> 超链接，避免整条通知被几百字符的 URL 淹没
-            [ -n "$link" ] && text="${text}"$'\n'"<a href=\"$(esc_html "$link")\">▶ 打开直链</a>"
+            [ -n "$meta" ] && text="${text}"$'\n'"规格：${meta}"
+            text="${text}"$'\n'"链路：${l3}"
+            [ -n "$client" ] && text="${text}"$'\n'"客户端：${client}"
+            # 长链接折叠成 <a> 超链接，避免整条通知被几百字符的 URL 淹没；
+            # 段前空一行，与正文数据区隔开
+            [ -n "$link" ] && text="${text}"$'\n'$'\n'"<a href=\"$(esc_html "$link")\">▶ 打开直链</a>"
             # 统一收尾区（自带与正文间的空行；TG_RUN_* 缺席时自动降级跳过）
             pl_footer=""
             tg_add_footer pl_footer
@@ -1130,8 +1134,9 @@ jobs:
               # 访问日志里还有"耗时"与"客户端 IP"两列（起播慢 / 谁在播的定位依据），一并带进通知：
               #   [ge2o:v2.8.2] <时间> | 206 | 4.16s | 141.11.43.124 | 8095 <路由> | GET /emby/videos/...
               DUR=$(printf '%s\n' "$line" | grep -oE '\| [0-9]+\.[0-9]+s \|' | head -1 | tr -d '| ')
-              # 规范禁英文紧凑时长进通知：ge2o 日志的 "4.16s" → "4.16 秒"
-              DUR="${DUR%s} 秒"
+              # 规范禁英文紧凑时长进通知：ge2o 日志的 "4.16s" → "4.2 秒"
+              # （一位小数足够定位"点播慢"，8 位原始精度无意义）
+              [ -n "$DUR" ] && DUR="$(printf '%s' "$DUR" | awk '{printf "%.1f 秒", $1}')"
               CIP=$(printf '%s\n' "$line" | grep -oE '\| [0-9]{1,3}(\.[0-9]{1,3}){3} \|' | head -1 | tr -d '| ')
               notify "$KIND" "$IID" "" "$DUR" "$CIP"
             done
