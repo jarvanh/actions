@@ -72,7 +72,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          bash "${GITHUB_WORKSPACE}/.github/scripts/telegram/cleanup_ytdlp_residual.sh"
+          bash "${GITHUB_WORKSPACE}/.github/scripts/tg-channel/cleanup_ytdlp_residual.sh"
 
       # ============ 步骤2：检测并去重重复视频 ============
       - name: check duplicate videos by ID and dedupe by hash
@@ -82,7 +82,7 @@ jobs:
           AUTO_DELETE: ${{ github.event.inputs.auto_delete_duplicates == 'true' }}
           DEDUPE_BY_ID_ONLY: ${{ github.event.inputs.dedupe_by_id_only == 'true' }}
         run: |
-          bash "${GITHUB_WORKSPACE}/.github/scripts/telegram/dedupe_ph_videos.sh"
+          bash "${GITHUB_WORKSPACE}/.github/scripts/tg-channel/dedupe_ph_videos.sh"
 
       # ============ 步骤3：清空 Telegram 频道并重置上传记录 ============
       - name: clean telegram channel and reset upload archive
@@ -95,7 +95,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          bash "${GITHUB_WORKSPACE}/.github/scripts/telegram/reset_tg_channel.sh" \
+          bash "${GITHUB_WORKSPACE}/.github/scripts/tg-channel/reset_tg_channel.sh" \
             "${TELEGRAM_CHANNEL_ID}" \
             "ph-dl"
 
@@ -112,7 +112,7 @@ jobs:
         run: |
           sudo apt-get install -y ffmpeg
           pip3 install telethon
-          bash "${GITHUB_WORKSPACE}/.github/scripts/telegram/sync_to_tg.sh" \
+          bash "${GITHUB_WORKSPACE}/.github/scripts/tg-channel/sync_to_tg.sh" \
             "$SOURCE_REMOTE" \
             "${TELEGRAM_CHANNEL_ID}" \
             "ph"
@@ -191,7 +191,7 @@ jobs:
             --merge-output-format mp4 --remux-video mp4 --force-overwrites \
             --download-archive "$YT_DLP_ARCHIVE" --playlist-end 50 \
             -o "$DOWNLOAD_TMP/%(title)s-%(id)s.%(ext)s" \
-            --exec "bash ${GITHUB_WORKSPACE}/.github/scripts/telegram/process_ph_download.sh {} %(webpage_url)q" \
+            --exec "bash ${GITHUB_WORKSPACE}/.github/scripts/tg-channel/process_ph_download.sh {} %(webpage_url)q" \
             -i "https://www.pornhub.com/users/${{ secrets.PORNHUBNAME }}/videos/favorites" || echo "url不存在"
           rm -f "$YT_DLP_ARCHIVE"
 
@@ -225,7 +225,7 @@ jobs:
           # 计算视频文件统计（总数 / 已上传 / 待上传 / 失败上传）
           # 使用外部 Python 脚本避免内联 heredoc 与 YAML 的歧义
           TARGET_DIR="$HOME/onedrive/0/j-1024j-视频-pornhub-favorites"
-          VIDEO_STATS=$(python3 "${GITHUB_WORKSPACE}/.github/scripts/telegram/compute_video_stats.py" "$TARGET_DIR" || echo "0|0|0|0|0")
+          VIDEO_STATS=$(python3 "${GITHUB_WORKSPACE}/.github/scripts/tg-channel/compute_video_stats.py" "$TARGET_DIR" || echo "0|0|0|0|0")
           TOTAL_VIDEOS=$(echo "$VIDEO_STATS" | cut -d'|' -f1)
           UPLOADED_VIDEOS=$(echo "$VIDEO_STATS" | cut -d'|' -f2)
           PENDING_VIDEOS=$(echo "$VIDEO_STATS" | cut -d'|' -f3)

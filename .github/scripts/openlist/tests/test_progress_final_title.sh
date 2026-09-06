@@ -30,6 +30,8 @@ chk() {
 }
 
 # ---------- 加载被测模块（部分 source: 只依赖 utils + telegram 排版助手）----------
+# 排版助手 + 发送层的唯一真源（openlist 侧已不再自带副本，2026-09-06 收敛）
+source "$SCRIPT_DIR/../../telegram/tg_notify.sh"
 source "$SCRIPT_DIR/../utils.sh"
 source "$SCRIPT_DIR/../telegram.sh"
 source "$SCRIPT_DIR/../sync_progress.sh"

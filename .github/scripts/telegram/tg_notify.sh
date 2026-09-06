@@ -4,18 +4,20 @@
 # 改版式先改文档再同步实现）。所有 Telegram 通知（workflows 内联 +
 # scripts/telegram 下脚本）统一经本文件发送：
 #   - parse_mode=HTML，动态内容必须经 escape_html 转义（tg_* 助手已内置）
-#   - HTML 解析失败（400 can't parse entities）自动去标签退化纯文本重发：
-#     宁可样式变朴素，也不让通知消失
+#   - HTML 解析失败（400 can't parse entities）直接报错、不重发：消息本来就没发出去，
+#     退化纯文本只会把版式 bug 藏起来；动态内容一律经 tg_* 助手转义即可避免
 #   - 429 限流按 retry_after 等待重试；长消息按 4000 字符分片（断在换行处，
 #     不切 UTF-8 多字节字符）
 # 用法: source tg_notify.sh
+# 目录职责: 本目录 = 通知域（bash 真源 tg_notify.sh，未来 pwsh 真源 tg_notify.ps1）。
+#   Telegram 频道内容管线（同步/上传/去重/清理）见 scripts/tg-channel/ ——
+#   它与本文件是单向依赖: tg-channel/ 只 source 本文件，本文件不反向引用。
 # 环境变量: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 #   （历史名 TG_BOT_TOKEN / TG_CHAT_ID 自动兼容——见下方别名回退）
 # 收尾接线（可选，缺席时 tg_add_footer 优雅降级）:
 #   TG_RUN_URL        运行日志链接（workflow 注入 https://github.com/<repo>/actions/runs/<id>）
 #   TG_RUN_STARTED_AT run 起始 ISO 时间（workflow 注入 ${{ github.run_started_at }}）
-# 版式规范（与 openlist/telegram.sh 头部模板一致，两份需同步维护——openlist 跑在
-# docker 容器内、路径不同，不跨目录 source）:
+# 版式规范（openlist 侧经 load_all.sh L0 层 source 本文件，不再自带副本）:
 #   {emoji} <b>标题</b>          ← tg_add_title
 #   ━━━━━━━━━━━━━━━━━━           ← TG_SEP（勿手写分隔线）
 #   标签：<b>值</b>               ← tg_add_kv / 路径 tg_add_path
@@ -137,7 +139,6 @@ tg_add_footer() {
   [ -z "$line" ] && return 0
   # 收尾区规范形态 = 与正文间固定一个空行。对"正文是否以换行结尾"不作要求：
   # 缺尾换行时先补一个，否则下面的 \n 只是给正文末行收尾，空行会消失
-  # （与 openlist/telegram.sh 同款自愈逻辑，两文件需同步维护）
   local cur="${!var}"
   case "$cur" in
     ''|*$'\n') ;;
@@ -166,7 +167,7 @@ tree_lines() {
 # 文件列表渲染一站式：逐行 <code>转义</code> → 超过 max 行折叠"还有 N 条…"
 # （折叠行并入条目流，末条 └─ 由 tree_lines 统一决定，禁双 └─）→ tree_lines。
 # 用法: tree_code_fold <多行文本> [每组上限，默认 8]
-# 输入必须是未转义的裸行；动态文件名含 & < > 时未转义会触发 400、整条退化纯文本
+# 输入必须是未转义的裸行；动态文件名含 & < > 时未转义会触发 400、整条发送失败（不重发）
 tree_code_fold() {
   local _in="$1" _max="${2:-8}" _total _entries="" _l _n=0
   _total=$(printf '%s\n' "$_in" | { grep -c . || true; })
@@ -185,14 +186,8 @@ tree_code_fold() {
 
 # ===== 发送层 =====
 
-# 去标签 + 解码基础实体（HTML 解析失败时的纯文本退化版）
-_tg_strip_html() {
-  printf '%s' "$1" \
-    | sed -e 's/<[^>]*>//g' \
-          -e 's/&amp;/\&/g; s/&lt;/</g; s/&gt;/>/g; s/&quot;/"/g; s/&#39;/'"'"'/g'
-}
-
-# 单次发送尝试（不退化）。退出码: 0 成功 / 2 HTML 解析失败（可退化）/ 1 其他失败
+# 单次发送尝试（429 自动重试；其余失败直接返回非 0 并输出错误信息）
+# 退出码: 0 成功 / 2 HTML 解析失败（can't parse entities）/ 1 其他失败
 _tg_send_once() {
   local text="$1" parse_mode="$2"
   local resp retry_after attempt max_attempts=5
@@ -219,9 +214,10 @@ _tg_send_once() {
       sleep "$retry_after"
       continue
     fi
-    # HTML 解析失败: 交由 send_tg 退化纯文本重发（不消耗重试次数）
+    # HTML 解析失败: 不退化重发（消息本就没发出去，退化只会把版式 bug 藏起来），
+    # 直接报错暴露——动态内容一律经 tg_add_* 助手转义即可避免
     if echo "$resp" | grep -q "can't parse entities"; then
-      echo "⚠️ Telegram HTML 解析失败，将退化纯文本重发" >&2
+      echo "❌ Telegram HTML 解析失败（400 can't parse entities），消息未发送: $(echo "$resp" | head -c 200)" >&2
       return 2
     fi
     echo "⚠️ Telegram 通知发送失败: $(echo "$resp" | head -c 200)" >&2
@@ -231,14 +227,11 @@ _tg_send_once() {
   return 1
 }
 
-# 单条发送（HTML 优先，解析失败退化纯文本）
+# 单条发送（HTML parse_mode；429 自动重试，其余失败直接返回非 0 并在 stderr 输出错误）
 send_tg() {
   local text="$1"
   [ -z "$text" ] && return 0
-  _tg_send_once "$text" "HTML" && return 0
-  local rc=$?
-  [ "$rc" -ne 2 ] && return "$rc"
-  _tg_send_once "$(_tg_strip_html "$text")" ""
+  _tg_send_once "$text" "HTML"
 }
 
 # 按 4000 字符分片，尽量在换行处断开，避免切断 UTF-8 多字节字符
@@ -273,3 +266,8 @@ except BrokenPipeError:
     sleep "$delay"
   done
 }
+
+# 凭据/密码类消息（如 OpenList 改密回执）不需要单独的发送函数：
+# 用 tg_add_* 助手构建（密码走 tg_add_path，自动 escape_html）后一律 send_tg。
+# 不要为凭据自造"单发不重试"通道 —— 429 与 400 都表示上一条没被 Telegram 接收，
+# 重试/退化不会产生两条密码；反过来放弃重试会让凭据在限流时直接丢失。

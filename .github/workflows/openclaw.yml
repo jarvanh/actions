@@ -862,7 +862,7 @@ jobs:
           tg_add_block msg "$(tree_lines "$_entries")"
           # footer 读 TG_RUN_URL/TG_RUN_STARTED_AT（上方前缀注入）
           tg_add_footer msg
-          # 走发送层而非 curl 直发：HTML 解析失败自动退化纯文本重发（规范 §5），
+          # 走发送层而非 curl 直发：429 重试已内建，HTML 解析失败直接报错（规范 §5），
           # 429 限流按 retry_after 等待重试，disable_web_page_preview 内置
           send_tg "$msg" || true
           echo "已推送 SSH 入口通知: ssh runner@${TS_HOST}（AI 网关: ${AI_BACKEND}）"
@@ -1266,7 +1266,7 @@ jobs:
             export DOCTOR_FIX_DURATION_SEC="$doctor_fix_duration_sec"
             export FALLBACK_REINSTALL_DURATION_SEC="$fallback_reinstall_duration_sec"
             # 统一 HTML 版式 + 统一收尾区（动态值一律转义；日志收敛 <pre> 等宽块；
-            # HTML 解析失败退化纯文本重发——修复"声明 parse_mode=HTML 但未转义"的隐患）
+            # HTML 解析失败直接报错不重发——修复"声明 parse_mode=HTML 但未转义"的隐患）
             # 失败阶段英文 token → 中文标签（规范 §4：英文原因 token 不得直出通知）
             fail_stage_label=""
             if [ -n "$fail_stage" ]; then
@@ -1296,7 +1296,7 @@ jobs:
             tg_add_section msg "🧾 关键日志"
             tg_add_block msg "<pre>$(escape_html "$error_summary")</pre>"
             TG_RUN_URL="$run_url" TG_RUN_STARTED_AT="${TG_RUN_STARTED_AT:-}" tg_add_footer msg
-            # 统一走发送层：HTML 解析失败退化纯文本 + 429 按 retry_after 重试均已内置
+            # 统一走发送层：429 按 retry_after 重试已内置，HTML 解析失败直接报错
             send_tg "$msg" || true
           else
             echo "⚠️ Telegram alert skipped: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is empty"
@@ -1567,7 +1567,7 @@ jobs:
               tg_add_note full_msg "$msg"
               tg_add_kv full_msg "Run ID" "${run_id}"
               TG_RUN_URL="$run_url" TG_RUN_STARTED_AT="${TG_RUN_STARTED_AT:-}" tg_add_footer full_msg
-              # 走发送层而非 curl 直发：HTML 解析失败自动退化纯文本重发（规范 §5），
+              # 走发送层而非 curl 直发：429 重试已内建，HTML 解析失败直接报错（规范 §5），
               # 429 限流按 retry_after 等待重试，disable_web_page_preview 内置
               send_tg "$full_msg" || true
             fi

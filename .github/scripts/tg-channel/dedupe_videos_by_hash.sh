@@ -24,7 +24,7 @@ WORKFLOW_LABEL="${WORKFLOW_LABEL:-91-tg}"
 DIR_LABEL=$(basename "${SOURCE_REMOTE#*:}")
 
 # 排版助手提前加载：明细条目构建时即做 escape_html（文件名含 & < > 未转义会
-# 触发 400、整条通知退化纯文本）；后文发送处的重复 source 为幂等。
+# 触发 400、整条通知发送失败（不重发））；后文发送处的重复 source 为幂等。
 # 加载失败必须显式暴露（勿 2>/dev/null || true 吞掉）：助手缺失时后续
 # escape_html/tree_lines 全部 command-not-found，通知会静默缺损
 source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"

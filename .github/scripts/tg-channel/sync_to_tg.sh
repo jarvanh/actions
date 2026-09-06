@@ -611,7 +611,7 @@ source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 
 # 逐行 escape_html（tree_lines 输入必须已转义）：python 侧按职责分层只出
 # 结构化数据，HTML 一律在 bash 渲染侧统一做——文件名含 & < > 时未转义会
-# 触发 400、整条通知退化纯文本（2026-09-05 审计补的缺口）
+# 触发 400、整条通知发送失败（不重发）（2026-09-05 审计补的缺口）
 esc_lines() {
   local _l _out=""
   while IFS= read -r _l; do

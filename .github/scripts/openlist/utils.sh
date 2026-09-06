@@ -15,68 +15,12 @@
 # 旧 bash/zsh 无此选项，shopt 报错被吞，不影响加载。
 shopt -u patsub_replacement 2>/dev/null || true
 
-# HTML 实体转义（用于 HTML parse_mode 消息）
-escape_html() {
-  local s="$1"
-  s="${s//&/&amp;}"
-  s="${s//</&lt;}"
-  s="${s//>/&gt;}"
-  echo "$s"
-}
-
-# ===== 树形列表渲染（Telegram 通知统一风格）=====
-# 多条目分组列表统一树形层级（├─/└─ 连接符标记条目边界，组间空行分隔，
-# 路径/目录类组头加 📁 前缀），模板规则见 telegram.sh 头部注释;
-# 单行平铺列表（排除规则等无层级条目）仍用 "• " 前缀。
-
-# 树形条目前缀: tree_conn <0|1 是否末条> → "  ├─ " / "  └─ "
-tree_conn() {
-  if [ "$1" = "1" ]; then printf '  └─ '; else printf '  ├─ '; fi
-}
-
-# 树形条目子行前缀（内容对齐条目文本）: tree_sub <0|1 是否末条> → "  │   " / "      "
-tree_sub() {
-  if [ "$1" = "1" ]; then printf '      '; else printf '  │   '; fi
-}
-
-# 多行单行条目 → 树形条目列表（每行 "  ├─/└─ 条目"，末条 └─；输出去尾换行）
-# 用法: tree_lines <多行文本>（每行一个条目，条目内容需已转义/含 HTML 标签）
-tree_lines() {
-  local _in="$1" _total _n=0 _line _out=""
-  # grep -c 空输入时输出 0 但 rc=1, pipefail 下会传染调用语句
-  _total=$(printf '%s\n' "$_in" | { grep -c . || true; })
-  [ "$_total" -eq 0 ] && return 0
-  while IFS= read -r _line; do
-    [ -z "$_line" ] && continue
-    _n=$((_n + 1))
-    local _last=0
-    [ "$_n" -eq "$_total" ] && _last=1
-    _out+="$(tree_conn "$_last")${_line}"$'\n'
-  done <<< "$_in"
-  printf '%s' "${_out%$'\n'}"
-}
-
-# 文件列表渲染一站式：逐行 <code>转义</code> → 超过 max 行折叠"还有 N 条…"
-# （折叠行并入条目流，末条 └─ 由 tree_lines 统一决定，禁双 └─）→ tree_lines。
-# 与 tg_notify.sh 同名同语义（两文件同步维护；本文件不 source 该脚本，
-# openlist 跑在容器内、路径不同）
-# 用法: tree_code_fold <多行文本> [每组上限，默认 8]
-# 输入必须是未转义的裸行；动态文件名含 & < > 时未转义会触发 400、整条退化纯文本
-tree_code_fold() {
-  local _in="$1" _max="${2:-8}" _total _entries="" _l _n=0
-  _total=$(printf '%s\n' "$_in" | { grep -c . || true; })
-  [ "${_total:-0}" -eq 0 ] && return 0
-  while IFS= read -r _l; do
-    [ -z "$_l" ] && continue
-    _n=$((_n + 1))
-    [ "$_n" -gt "$_max" ] && break
-    _entries+="<code>$(escape_html "$_l")</code>"$'\n'
-  done <<< "$_in"
-  if [ "$_total" -gt "$_max" ]; then
-    _entries+="<i>还有 $((_total - _max)) 条…</i>"$'\n'
-  fi
-  tree_lines "$_entries"
-}
+# ===== 排版助手来自通知真源 =====
+# escape_html / tree_conn / tree_sub / tree_lines / tree_code_fold 已收敛到
+# scripts/telegram/tg_notify.sh（全库唯一真源），由 load_all.sh 在 L0 层最先 source。
+# 本文件不再自带副本——两份实现迟早漂移（2026-09-06 收敛）。
+# 树形规则要点（详见 docs/telegram-notify.md §2）:
+#   多条目分组列表统一树形层级（├─/└─ 标记条目边界），单行平铺列表仍用 "• " 前缀。
 
 # 检查日志文件是否包含实质内容（排除 rclone 统计行和空行）
 # 返回值: "empty" / "transfer_only" / "has_content"

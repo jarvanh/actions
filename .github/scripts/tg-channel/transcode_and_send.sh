@@ -146,7 +146,7 @@ if [ "$FILESIZE_BYTES" -gt "$TG_HARD_LIMIT_BYTES" ]; then
     echo "[split] 上传 part $((i+1))/${#PARTS[@]}: $PART_BASE (${PART_MIB}MiB)"
     PART_START=$SECONDS
     PART_LOG="$WORK_DIR/upload_part${PART_NUM}.log"
-    if python3 "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_send_video.py" \
+    if python3 "${GITHUB_WORKSPACE}/.github/scripts/tg-channel/tg_send_video.py" \
         "$PART" "$CHANNEL_ID" "$PART_CAPTION" > "$PART_LOG" 2>&1; then
       PART_ELAPSED=$((SECONDS - PART_START))
       echo "[split] part $((i+1))/${#PARTS[@]} 上传成功 (耗时 ${PART_ELAPSED}s)"
@@ -180,7 +180,7 @@ echo "[upload] 开始上传 Telegram: $FILENAME (大小 ${FILESIZE_HUMAN} / ${FI
 UPLOAD_START=$SECONDS
 # tg_send_video.py 的进度/属性输出属于噪音，重定向到日志文件；仅失败时打印尾部便于排查
 UPLOAD_LOG="$WORK_DIR/upload.log"
-if python3 "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_send_video.py" "$LOCAL_FILE" "$CHANNEL_ID" "$CAPTION" > "$UPLOAD_LOG" 2>&1; then
+if python3 "${GITHUB_WORKSPACE}/.github/scripts/tg-channel/tg_send_video.py" "$LOCAL_FILE" "$CHANNEL_ID" "$CAPTION" > "$UPLOAD_LOG" 2>&1; then
   UPLOAD_ELAPSED=$((SECONDS - UPLOAD_START))
   echo "SENT: $FILENAME (上传耗时 ${UPLOAD_ELAPSED}s)"
   exit 0

@@ -1443,9 +1443,9 @@ def update_gist(env, yaml_text=''):
 
 
 def send_telegram(env, text):
-    """发送 Telegram 消息（统一 HTML parse_mode；解析失败自动去标签退化纯文本重发，
-    保留 429 语义由 HTTP 层报错）。文本应使用全库统一 HTML 版式（emoji 标题 + ━━━
-    分隔线 + <b>/<code>/<i> + 统一收尾行）。"""
+    """发送 Telegram 消息（统一 HTML parse_mode；429 自动重试，其余失败直接返回
+    {'sent': False, ...} 并带上响应体）。文本应使用全库统一 HTML 版式（emoji 标题 + ━━━
+    分隔线 + <b>/<code>/<i> + 统一收尾行）；动态内容一律经 tg_* 助手转义。"""
     bot = env.get('TELEGRAM_BOT_TOKEN') or env.get('TG_BOT_TOKEN')
     chat = env.get('TELEGRAM_CHAT_ID') or env.get('TG_CHAT_ID')
     if not bot or not chat:
@@ -1470,38 +1470,24 @@ def send_telegram(env, text):
         raise RuntimeError('telegram 429 retry exhausted')
 
     class HTTPErrorWithBody(urllib.error.HTTPError):
-        # 保留响应体供外层识别 "can't parse entities"
+        # 保留响应体供外层输出错误信息
         def __init__(self, e, body):
             super().__init__(e.url, e.code, e.msg, e.hdrs, e.fp)
             self.body_text = body
 
-    html_text = text
-    for parse_mode in ('HTML', None):
-        data = {'chat_id': chat, 'disable_web_page_preview': 'true'}
-        if parse_mode:
-            data['parse_mode'] = parse_mode
-        else:
-            # 去标签 + 解码基础实体（退化纯文本版）
-            html_text = re.sub(r'<[^>]+>', '', html_text)
-            html_text = (html_text.replace('&amp;', '&').replace('&lt;', '<')
-                         .replace('&gt;', '>').replace('&quot;', '"').replace('&#39;', "'"))
-            data['text'] = html_text
-        data['text'] = data.get('text', html_text)
-        try:
-            res = _post(data)
-        except urllib.error.HTTPError as e:
-            body = getattr(e, 'body_text', None)
-            if body is None:
-                body = e.read().decode('utf-8', 'replace')
-            if parse_mode == 'HTML' and "can't parse entities" in body:
-                continue  # 退化纯文本重发
-            return {'sent': False, 'reason': body[:200]}
-        if res.get('ok'):
-            return {'sent': True, 'response': res}
-        if parse_mode == 'HTML' and "can't parse entities" in json.dumps(res):
-            continue
-        return {'sent': False, 'response': res}
-    return {'sent': False}
+    # 不退化纯文本重发：HTML 解析失败时消息本就没发出去，退化只会把版式 bug 藏起来
+    data = {'chat_id': chat, 'disable_web_page_preview': 'true',
+            'parse_mode': 'HTML', 'text': text}
+    try:
+        res = _post(data)
+    except urllib.error.HTTPError as e:
+        body = getattr(e, 'body_text', None)
+        if body is None:
+            body = e.read().decode('utf-8', 'replace')
+        return {'sent': False, 'reason': body[:200]}
+    if res.get('ok'):
+        return {'sent': True, 'response': res}
+    return {'sent': False, 'response': res}
 
 
 TG_CHUNK_SIZE = 4000

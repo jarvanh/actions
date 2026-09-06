@@ -11,11 +11,22 @@
 #   task_*      — 任务级编排（预览、引擎）
 #   utils / telegram / load_all — 基础层，无领域归属
 #
-# 加载按分层自下而上（L1 → L6），括号内为主要依赖。
+# 加载按分层自下而上（L0 通知真源 → L6），括号内为主要依赖。
 # 注: bash 函数在调用时才解析，故顺序不影响正确性；保持分层是为了可读性。
 
 # 获取脚本所在目录（支持 source 和 bash 两种调用方式）
 _OPENLIST_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# --- L0 通知真源（跨目录共享：排版助手 + 发送层的唯一实现）---
+# 两种布局都要覆盖:
+#   1. workspace 检出 —— telegram/ 与本目录同级（在上层 scripts/ 下）
+#   2. /tmp 平铺     —— workflow 把 tg_notify.sh 复制到 /tmp/telegram/ 后再 source /tmp/load_all.sh
+# 排版助手（tg_add_* / tree_* / escape_html）与发送层（send_tg / send_tg_chunked）
+# 一律来自这里，openlist 侧不再自带副本（2026-09-06 收敛）。
+_OPENLIST_TG_LIB="$_OPENLIST_SCRIPT_DIR/telegram/tg_notify.sh"
+[ -f "$_OPENLIST_TG_LIB" ] || _OPENLIST_TG_LIB="$_OPENLIST_SCRIPT_DIR/../telegram/tg_notify.sh"
+source "$_OPENLIST_TG_LIB"
+unset _OPENLIST_TG_LIB
 
 # --- L1 基础层（无内部依赖）---
 source "$_OPENLIST_SCRIPT_DIR/rclone_flags.sh"  # rclone 参数单点定义（RCLONE_*_FLAGS）

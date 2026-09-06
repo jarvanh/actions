@@ -11,7 +11,8 @@
 └── scripts/
     ├── openlist/           OpenList 同步工具 —— 最复杂的子系统，详见下文
     ├── emby302/            Emby 302 直链服务 —— 详见 docs/emby302.md
-    ├── telegram/           Telegram 机器人相关脚本
+    ├── telegram/           Telegram 通知（tg_notify.sh = 全库发送层真源）
+    ├── tg-channel/         Telegram 频道内容管线（同步/上传/去重/清理）
     └── proxy-speedtest/    代理测速脚本
 docs/                       子系统文档
 proxy-speedtest/            测速结果数据
@@ -76,9 +77,9 @@ proxy-speedtest/            测速结果数据
 | | `file_restore.sh` | 642 | 修复文件还原（目标端 → 原路径 / 源端） |
 | **task** | `task_preview.sh` | 470 | 任务预览（大小估算、跳过预判、未传量估算） |
 | | `task_engine.sh` | 1378 | 任务注册表与编排（分批、轮转、阶段行生产） |
-| **基础** | `utils.sh` | 176 | 通用工具（转义、格式化、树形渲染） |
-| | `telegram.sh` | 193 | Telegram 排版助手 + Bot API 封装（含统一收尾区 `tg_add_footer`） |
-| | `load_all.sh` | 49 | 统一加载入口（L1→L6 分层） |
+| **基础** | `utils.sh` | 147 | 通用工具（格式化、日志判定；转义/树形渲染已收敛到 `telegram/tg_notify.sh`） |
+| | `telegram.sh` | 127 | Telegram 进度面板（`send_telegram_message` + 原地编辑；排版/发送 source 真源） |
+| | `load_all.sh` | 60 | 统一加载入口（L0 通知真源 → L6 分层） |
 
 辅助程序：`get_storage_addition.py`（从 db 读存储配置）、`mask_rclone_config.py`（脱敏）、
 `scan_fix_signatures.py`（marker 丢失时反推修复条目）、`restore_info.jq`（还原方式分类）。
@@ -109,10 +110,11 @@ proxy-speedtest/            测速结果数据
 source "$GITHUB_WORKSPACE/.github/scripts/openlist/load_all.sh"
 ```
 
-按 **L1 → L6** 分层自下而上加载，括号内为主要依赖：
+按 **L0 → L6** 分层自下而上加载，括号内为主要依赖：
 
 ```
-L1 基础     rclone_flags · utils · telegram
+L0 通知真源 telegram/tg_notify.sh（跨目录 source，全库唯一实现）
+L1 基础     rclone_flags · utils · telegram(进度面板)
 L2 适配     rclone_query[utils] · openlist_api
 L3 能力     file_fix · file_split · sync_marker · sync_progress
 L4 编排     openlist_driver[openlist_api,file_fix] · file_fix_pipeline · sync_notify
@@ -290,7 +292,7 @@ token 登录、marker、收尾标题四态、进度阶段区排版（子目录�
 | 调阈值/超时 | workflow 的 `env:` 块（不要写死在脚本里） |
 | 加一种文件修复方法 | `file_fix.sh`（实现 + `_try_fix_methods_round` 轮换）+ 同步更新 `文件修复方法N` 文案 |
 | 改目录级降级策略 | `file_fix.sh` 的 `_fix_probe_dir_writable`（预检/重启复核）+ `_fix_switch_to_hash_dir`（切换）+ `restore_info.jq` 的目录类分支 |
-| 改通知排版 | 全库统一规范见 `openlist/telegram.sh` 头部注释（唯一样式基准）；openlist 套件走 `sync_notify.sh` / `telegram.sh`，其余通知统一走 `telegram/tg_notify.sh`（HTML 发送层 + tg_* 助手 + `tg_add_footer` 统一收尾区，读 `TG_RUN_URL`/`TG_RUN_STARTED_AT`） |
+| 改通知排版 | 全库统一规范见 `docs/telegram-notify.md`；实现真源：bash `telegram/tg_notify.sh`、pwsh `telegram/tg_notify.ps1`（rdp / tailscale dot-source）、python 复用 `speedtest_gitee.py`；openlist 侧经 `load_all.sh` L0 层 source 真源，`openlist/telegram.sh` 只留进度面板函数 |
 | 改跳过提示（预览"预计跳过"/ 跳过通知"本次未传"） | `task_preview.sh` 的 `add_preview_pair`（pskip 列）· `flush_task_preview`（合计附注）· `_lookup_skipped_pending`（估算入口）+ `sync_marker.sh` 的 `send_sync_skipped` |
 | 改进度消息的阶段区（子目录树 / 文件批次的层级、缩进、统计字段） | `sync_progress.sh` 的 `_progress_render` + `task_engine.sh` 的 `_render_subdir_phase_tree` / `_render_batch_stats_line` |
 | 改收尾标题四态 | `sync_progress.sh` 的 `_progress_render` 终态分支（中断 / 有文件无法同步 / 带修复完成 / 完全完成，按严重度判定） |

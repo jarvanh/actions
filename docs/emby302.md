@@ -281,11 +281,11 @@ ge2o 据此发出 302。
 | `🔐 OpenList 凭据` | **仅改密时** | 用户名、密码明文（`<code>` 等宽）、入口 | ❌ 绝不落日志 |
 
 全部通知采用**全库统一 HTML 版式**，规范唯一真源见
-[`docs/telegram-notify.md`](telegram-notify.md)（实现层：`telegram/tg_notify.sh`
-与 `openlist/telegram.sh` 头部注释）：`emoji 标题 + ━━━ 分隔线 + 键值区 + 统一收尾行
-`⏱ 已运行 X · 🔗 运行日志``（时长 = 当前时间 − `github.run_started_at`，
-收尾区与正文间固定一个空行）。凭据私信为安全边界例外，不走发送层（curl 直发，
-密码经实体转义）。
+[`docs/telegram-notify.md`](telegram-notify.md)（实现层：bash `telegram/tg_notify.sh`
++ pwsh `telegram/tg_notify.ps1`；openlist 侧仅薄适配面板函数）：`emoji 标题 + ━━━ 分隔线 +
+键值区 + 统一收尾行 `⏱ 已运行 X · 🔗 运行日志``（时长 = run 已运行时长，
+收尾区与正文间固定一个空行）。凭据私信同样走发送层 `send_tg`
+（密码经 `tg_add_path` 自动实体转义，绝不落日志）。
 
 ### 安全边界
 

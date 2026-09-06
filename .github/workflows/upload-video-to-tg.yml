@@ -64,7 +64,7 @@ jobs:
           AUTO_DELETE: ${{ github.event.inputs.auto_delete_duplicates == 'true' }}
           WORKFLOW_LABEL: "91-tg"
         run: |
-          bash "${GITHUB_WORKSPACE}/.github/scripts/telegram/dedupe_videos_by_hash.sh"
+          bash "${GITHUB_WORKSPACE}/.github/scripts/tg-channel/dedupe_videos_by_hash.sh"
 
       # ============ 步骤2：清空 Telegram 频道并重置上传记录 ============
       - name: clean telegram channel and reset upload archive
@@ -76,7 +76,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          bash "${GITHUB_WORKSPACE}/.github/scripts/telegram/reset_tg_channel.sh" \
+          bash "${GITHUB_WORKSPACE}/.github/scripts/tg-channel/reset_tg_channel.sh" \
             "${TG_CHANNEL_ID}" \
             "91-tg"
 
@@ -92,7 +92,7 @@ jobs:
         run: |
           sudo apt-get install -y ffmpeg
           pip3 install telethon
-          bash "${GITHUB_WORKSPACE}/.github/scripts/telegram/sync_to_tg.sh" \
+          bash "${GITHUB_WORKSPACE}/.github/scripts/tg-channel/sync_to_tg.sh" \
             "$SOURCE_REMOTE" \
             "${TG_CHANNEL_ID}" \
             "91"
