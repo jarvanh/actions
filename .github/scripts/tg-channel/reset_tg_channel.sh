@@ -31,7 +31,7 @@ fi
 pip3 install telethon
 
 # 1. 删除 Telegram 频道所有消息
-python3 "${GITHUB_WORKSPACE}/.github/scripts/telegram/clean_tg_channel.py" "$CHANNEL_ID"
+python3 "${GITHUB_WORKSPACE}/.github/scripts/tg-channel/clean_tg_channel.py" "$CHANNEL_ID"
 
 # 2. 删除 uploaded_videos.json，下次运行会重新处理所有视频
 rclone delete "$SOURCE_REMOTE/uploaded_videos.json" 2>/dev/null || true

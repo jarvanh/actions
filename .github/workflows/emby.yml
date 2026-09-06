@@ -278,26 +278,11 @@ jobs:
             # OpenList 凭据通知：仅在【真正执行过改密动作】时发送（reset / random 兜底）。
             # 直接用 OPENLIST_ADMIN_PASSWORD 登录成功 = 密码本就对齐，按约定静默不打扰。
             # 密码明文只进 TG 私信，绝不写公开日志。
-            # 注意：--data-urlencode 会把文本按字面编码，消息内必须用真实换行符（printf \n），
-            # 不能拼 %0A（会被二次编码成字面 "%0A" 发出去）。
-            send_pw_tg() {
-              # $1=场景描述  $2=密码明文  $3=附注规则（可空）
-              # 统一 HTML 版式；密码经实体转义后 <code> 等宽展示（本条只进 TG 私信，不落日志）。
-              # 规范豁免：凭据私信不走发送层、curl 直发（docs/telegram-notify.md §5），
-              # 但版式仍对齐——source 发送层取 TG_SEP/escape_html（勿手写分隔线）、
-              # 补充说明用 " · " 分隔
-              source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
-              local pw_esc msg
-              pw_esc="$(escape_html "$2")"
-              msg="$(printf '🔐 <b>OpenList 凭据</b>\n%s\n场景：%s\n用户名：<code>admin</code>\n密码：<code>%s</code>\n入口：<code>https://oe.%s.eu.org</code>\n\n<i>%s · 本条不会出现在公开日志</i>' "${TG_SEP}" "$1" "$pw_esc" "$(escape_html '${{ secrets.VD }}')" "$3")"
-              curl -s -m 15 -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-                -d chat_id=${{ secrets.TG_CHAT_ID }} \
-                --data-urlencode "text=${msg}" \
-                -d parse_mode=HTML \
-                -d disable_web_page_preview=true >/dev/null \
-                && echo "已通过 TG 私信发送 OpenList 凭据（不落公开日志）" \
-                || echo "::warning::OpenList 凭据 TG 通知发送失败（不影响链路）"
-            }
+            # 凭据消息与其他通知同构：tg_add_* 构建（密码走 tg_add_path 自动转义）+ send_tg
+            # （保留 429 重试与纯文本兜底，避免限流时凭据直接丢失）。
+            export TELEGRAM_BOT_TOKEN="${{ secrets.TELEGRAM_BOT_TOKEN }}"
+            export TELEGRAM_CHAT_ID="${{ secrets.TG_CHAT_ID }}"
+            source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
             if [ -s /tmp/openlist-pw-note ]; then
               PW_KIND=$(cut -d: -f1 /tmp/openlist-pw-note)
               PW_VAL=$(cut -d: -f2- /tmp/openlist-pw-note)
@@ -308,8 +293,16 @@ jobs:
               esac
               # secret 是唯一长期真相源：本条密码仅本轮有效（oe 后台人工改密在 token
               # 吊销后无法回传持久化，随 run 结束消失）
-              send_pw_tg "⚠️ $PW_DESC · 本条仅本轮有效" "$PW_VAL" \
-                "长期有效密码 = OPENLIST_ADMIN_PASSWORD · 下轮自动恢复为它"
+              PW_MSG=""
+              tg_add_title PW_MSG "🔐 OpenList 凭据"
+              tg_add_kv PW_MSG "场景" "⚠️ $PW_DESC · 本条仅本轮有效"
+              tg_add_path PW_MSG "用户名" "admin"
+              tg_add_path PW_MSG "密码" "$PW_VAL"
+              tg_add_path PW_MSG "入口" "https://oe.${{ secrets.VD }}.eu.org"
+              tg_add_note PW_MSG "长期有效密码 = OPENLIST_ADMIN_PASSWORD · 下轮自动恢复为它 · 本条不会出现在公开日志"
+              send_tg "$PW_MSG" \
+                && echo "已通过 TG 私信发送 OpenList 凭据（不落公开日志）" \
+                || echo "::warning::OpenList 凭据 TG 通知发送失败（不影响链路）"
               shred -u /tmp/openlist-pw-note 2>/dev/null || rm -f /tmp/openlist-pw-note
             else
               # 直接用 OPENLIST_ADMIN_PASSWORD 登录成功 = 库内密码本就对齐，
@@ -1076,7 +1069,7 @@ jobs:
             pl_footer=""
             tg_add_footer pl_footer
             text="${text}${pl_footer}"
-            # 统一走发送层：HTML 解析失败自动退化纯文本、429 按 retry_after 等待重试
+            # 统一走发送层：429 按 retry_after 等待重试；HTML 解析失败直接报错
             # 均已内建（此前自造退化链缺 429 处理，限流时播放通知会丢失）
             send_tg "$text" || echo "[WARNING] TG 推送失败（详见发送层日志）"
           }
@@ -1610,7 +1603,7 @@ jobs:
           # 统一收尾区（⏱ 已运行 X · 🔗 运行日志；读 step env 的 TG_RUN_URL / TG_RUN_STARTED_AT）
           tg_add_footer msg
           echo "TG(收尾): 已构建统一版式消息"
-          # 走发送层而非 curl 直发：HTML 解析失败自动退化纯文本重发（规范 §5），
+          # 走发送层而非 curl 直发：429 重试已内建，HTML 解析失败直接报错（规范 §5），
           # 429 限流自动等待重试，disable_web_page_preview 内置
           send_tg "$msg" || echo "::warning::收尾 TG 通知发送失败"
           # 播放事件日志归档：便于排查"播了但没通知"

@@ -8,9 +8,10 @@
 | 运行环境 | 真源 | 说明 |
 |---|---|---|
 | ubuntu runner（bash） | [`scripts/telegram/tg_notify.sh`](../.github/scripts/telegram/tg_notify.sh) | 排版助手 + 发送层（HTML 退化 / 429 重试 / 4000 分片 / curl `-m 15`），`source` 使用 |
-| openlist docker 容器 | [`scripts/openlist/telegram.sh`](../.github/scripts/openlist/telegram.sh) | 排版助手 + 发送层同款（`send_tg` / `send_tg_chunked` / 降级链已对齐；容器内路径不同不跨目录 source），**与 tg_notify.sh 需同步维护** |
+| Telegram 频道内容管线 | `scripts/tg-channel/` | 频道同步 / 上传 / 去重 / 清理（**不是**通知域），单向依赖上面的 `tg_notify.sh` |
+| openlist 同步脚本（runner 上执行） | [`scripts/openlist/telegram.sh`](../.github/scripts/openlist/telegram.sh) | 薄适配层：只放「需要 message_id」的进度面板函数（`send_telegram_message` / 原地编辑 3 函数）；排版与发送经 `load_all.sh` L0 层 source 上一行真源，不再自带副本 |
 | python | `scripts/proxy-speedtest/speedtest_gitee.py` 的 `tg_format_elapsed` / `tg_footer_line` / `send_telegram_chunked` | 其余 python 一律复用或经 `notify()` 借 bash 生成，**禁止自造** |
-| PowerShell（windows runner） | `rdp.yml` / `tailscale-windows.yml` 内联 `$footer` 构建 + `Send-TgMessage` | 形态与降级链必须与 bash 版逐字对齐（429 读 `Retry-After` 重试 5 次同语义） |
+| PowerShell（windows runner） | [`scripts/telegram/tg_notify.ps1`](../.github/scripts/telegram/tg_notify.ps1)（`rdp.yml` / `tailscale-windows.yml` dot-source，需先 checkout） | `Esc-Html` / `Get-TgFooter` / `Send-TgMessage` / `$TG_SEP`；语义与 bash 版对齐（429 读 `Retry-After` 重试 5 次，解析失败不重发直接抛出并带响应体） |
 
 ## 2. 版式模板
 
@@ -100,7 +101,7 @@
   逐行 `<code>转义</code>` + 折叠 + 树形一次完成）。
 - **职责分层**：脚本层只输出结构化数据（如 `中文原因\t路径`），
   HTML 与树形一律交给 `tg_*` 助手；脚本侧自造标签是版式漂移的根源。
-- 实现参考：`telegram/sync_to_tg.sh` 的 `_render_skipped_groups`。
+- 实现参考：`tg-channel/sync_to_tg.sh` 的 `_render_skipped_groups`。
 
 > 踩坑：`tree_lines` **接收参数、不读 stdin**。
 > `... | tree_lines` 会静默输出空条目（无报错），必须 `tree_lines "$var"`。
@@ -147,7 +148,7 @@ env:
 | 英文原因/状态 token 直出 | `corrupt: xxx` | 用中文标签（损坏 / 非视频 / 重复） |
 | 双 `└─` 同级 | 条目末尾 `└─` 后再补 `  └─ 还有 N 条…` | 折叠行并入条目流，由 `tree_lines` 统一决定末条 |
 | 超长列表全量穷举 | 43 条损坏逐行列 | 每组上限 8 条 + `还有 N 条…`；多组并列最多展示 8 组 |
-| 已 source 发送层仍 curl 直发 | `curl ... sendMessage \|\| { plain=$(_tg_strip_html ...); curl ... }` | 一律 `send_tg "$msg"`（退化/429 重试已内建；自造退化链缺 429 处理，限流时通知消失） |
+| 已 source 发送层仍 curl 直发 | `curl ... sendMessage \|\| { plain=$(...); curl ... }` | 一律 `send_tg "$msg"`（429 重试已内建；自造发送缺 429 处理，限流时通知消失） |
 | 高精度浮点直出 | `起播 2.16068914 秒` | 一位小数：`起播 2.2 秒`（原始精度无意义，只碍扫读） |
 | ISO 原始时间戳直出 | `时间：2026-09-05T11:34:19Z` | 人性化：`上次同步：2026-09-05 11:34 UTC · 15 小时前`（`date -d` 解析，失败保留原值） |
 
@@ -164,13 +165,19 @@ env:
   > pwsh 侧注意：转义函数需自行定义（`Esc-Html`）。调用未定义函数是**终止错误**，
   > 若该 step 带 `continue-on-error: true`，表现为通知静默消失、不报失败
   > （`tailscale-windows.yml` 曾因此缺发入口通知）。加转义调用前先确认函数存在。
-- HTML 解析失败（400 can't parse entities）→ 自动去标签退化纯文本重发：宁可样式变朴素，不让通知消失。
-- 429 限流按 `retry_after` 等待重试；长消息按 4000 字符分片（断在换行处，不切 UTF-8 多字节）。
-- 降级链（HTML 退化 + 429 重试）是发送层职责，调用方勿自造重复实现——
+- HTML 解析失败（400 can't parse entities）→ **不重发**，直接报错暴露（见下）。消息本来就没被
+  Telegram 接收，退化成纯文本只是把版式 bug 藏起来；动态内容一律经 `tg_*` 助手转义即可避免。
+- 429 限流按 `retry_after` 等待重试（最多 5 次）；长消息按 4000 字符分片（断在换行处，不切 UTF-8 多字节）。
+- 发送失败必须在 stderr/日志输出错误原因（含 API 响应体前 200 字符），由调用方决定 `|| true` 还是失败。
+- 429 重试是发送层职责，调用方勿自造重复实现——
   已 `source` 发送层的通知点再 curl 直发属禁止事项（见 §4）。
 - 媒体上传（`sendDocument`/`sendVideo` 等）不走 sendMessage 发送层（固有例外），
   但 caption 仍须转义、429 重试仍需自带（参考 `sync_notify.sh` 的 sendDocument 段）。
-- 安全边界例外：凭据私信（如 openlist 改密）不走发送层，curl 直发且密码经实体转义、绝不落日志。
+- **凭据/密码类消息**（如 OpenList 改密回执）**没有**特殊发送通道：用 `tg_add_*` 构建
+  （密码走 `tg_add_path`，自动 `escape_html`）后照常 `send_tg`。
+  不要为凭据自造「单发不重试不退化」的实现 —— 429 与 400 都表示上一条**没被 Telegram
+  接收**，重试/退化不会产生两条密码；放弃重试反而会让凭据在限流时直接丢失。
+  实现参考：`emby.yml` 的 OpenList 凭据通知。
 
 ## 6. 新增通知检查清单
 
@@ -199,7 +206,7 @@ env:
 | `openlist/tests/test_hash_dir_fallback.sh` | 哈希目录兜底（含 fix_log 文案） |
 | `openlist/tests/test_fix_log_section.sh` | fix_log 分节横幅 |
 
-`telegram/sync_to_tg.sh`（ph-dl / 91 通知）**暂无测试套件**——
+`tg-channel/sync_to_tg.sh`（ph-dl / 91 通知）**暂无测试套件**——
 改动后靠本地渲染实测验证（提取函数 + 造模拟数据跑 `tree_lines` 输出对比）。
 后续补测试时可参考上述 openlist 套件的 mock 方式（mock `tg_add_*` +
 捕获 `send_telegram_message` 入参）。

@@ -18,6 +18,9 @@ jobs:
       cancel-in-progress: true
 
     steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
     - name: Download ngrok
       run: Invoke-WebRequest https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip -OutFile ngrok.zip
 
@@ -79,88 +82,21 @@ jobs:
           Get-Process ngrok -ErrorAction SilentlyContinue | Format-List
           throw "无法获取 ngrok 隧道地址"
         }
-        # 统一 HTML 版式 + 统一收尾区（修复 here-string 前导缩进问题，改用 `n 拼接）
-        function Esc-Html([string]$s) {
-          if (-not $s) { return $s }
-          return ($s -replace '&','&amp;' -replace '<','&lt;' -replace '>','&gt;')
-        }
-        $sep = [string][char]0x2501 * 18
-        # 收尾区（与 tg_add_footer 同形态同降级链）: 时长走中文三段式，
-        # 起始时间解析失败则不显示时长（只留运行日志链接）
-        $dur = ""
-        try {
-          $started = [DateTime]::Parse($Env:TG_RUN_STARTED_AT, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
-          $totalSec = [int][math]::Max(0, [math]::Round(((Get-Date).ToUniversalTime() - $started.ToUniversalTime()).TotalSeconds))
-          $hh = [int][math]::Floor($totalSec / 3600)
-          $mm = [int][math]::Floor(($totalSec % 3600) / 60)
-          $ss = $totalSec % 60
-          if ($hh -gt 0) { $dur = "$hh 小时 $mm 分" }
-          elseif ($mm -gt 0) { $dur = "$mm 分钟" }
-          else { $dur = "$ss 秒" }
-        } catch { }
-        if (-not $dur) {
-          # 兜底: GitHub 平台已移除 github.run_started_at 表达式上下文（2026-09-05 验证），
-          # 用系统 uptime 代替（hosted runner VM 随 job 启动，误差秒级）
-          try {
-            $up = [int][math]::Round(((Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime).TotalSeconds)
-            if ($up -gt 0) {
-              $hh = [int][math]::Floor($up / 3600)
-              $mm = [int][math]::Floor(($up % 3600) / 60)
-              $ss = $up % 60
-              if ($hh -gt 0) { $dur = "$hh 小时 $mm 分" }
-              elseif ($mm -gt 0) { $dur = "$mm 分钟" }
-              else { $dur = "$ss 秒" }
-            }
-          } catch { }
-        }
-        $footer = ""
-        if ($dur) { $footer = "⏱ 已运行 <b>$dur</b>" }
-        if ($Env:TG_RUN_URL) {
-          if ($footer) { $footer += " · " }
-          $footer += "🔗 <a href=""$(Esc-Html $Env:TG_RUN_URL)"">运行日志</a>"
-        }
+        # 排版助手 + 发送层真源（pwsh 版，与 bash tg_notify.sh 同语义: 429 重试、解析失败抛出）
+        . "$env:GITHUB_WORKSPACE\.github\scripts\telegram\tg_notify.ps1"
+        # 自检: dot-source 失败会让后续调用未定义函数而静默无通知，显式暴露
+        if (-not (Get-Command Send-TgMessage -ErrorAction SilentlyContinue)) { throw "tg_notify.ps1 加载失败" }
         # 单一入口，平铺 kv 即可；元数据一律 " · <i>…</i>" 分隔
         # （规范见 docs/telegram-notify.md）
-        $msg = "🖥️ <b>Windows RDP 已就绪</b>`n$sep`n" +
+        $msg = "🖥️ <b>Windows RDP 已就绪</b>`n$TG_SEP`n" +
           "地址：<code>$(Esc-Html $address)</code>`n" +
           "用户名：<code>runneradmin</code>`n" +
           "密码：<code>$(Esc-Html $Env:RDP_PASSWORD)</code>`n" +
           "有效期：<i>约 6 小时 · 超时自动关机</i>`n" +
           "连接方式：<i>Microsoft Remote Desktop / 任何 RDP 客户端，地址填上面这一行</i>"
+        $footer = Get-TgFooter
         if ($footer) { $msg += "`n`n$footer" }
-        # 发送：HTML 解析失败自动退化纯文本重发（规范 §5：宁可朴素，不让通知消失）；
-        # 429 限流按 Retry-After 等待重试（此前缺 429 处理，限流时通知丢失）
-        function Send-TgMessage([string]$text, [bool]$withHtml) {
-          $body = @{ chat_id = $Env:TELEGRAM_CHAT_ID; text = $text; disable_web_page_preview = 'true' }
-          if ($withHtml) { $body['parse_mode'] = 'HTML' }
-          for ($attempt = 1; $attempt -le 5; $attempt++) {
-            try {
-              Invoke-RestMethod -Uri "https://api.telegram.org/bot$Env:TELEGRAM_BOT_TOKEN/sendMessage" `
-                -Method Post -Body $body | Out-Null
-              return
-            } catch {
-              $resp = $_.Exception.Response
-              $status = 0
-              if ($resp -and $resp.StatusCode) { $status = [int]$resp.StatusCode }
-              if ($status -eq 429) {
-                $wait = 5
-                try { if ($resp.Headers['Retry-After']) { $wait = [int]$resp.Headers['Retry-After'] } } catch { }
-                Write-Host "⚠️ Telegram 限流 (429)，等待 ${wait}s 后重试 ($attempt/5)..."
-                Start-Sleep -Seconds $wait
-                continue
-              }
-              throw
-            }
-          }
-          throw "Telegram 通知发送失败（重试 5 次仍限流）"
-        }
-        try {
-          Send-TgMessage $msg $true
-        } catch {
-          $plain = $msg -replace '<[^>]+>', ''
-          $plain = $plain -replace '&amp;','&' -replace '&lt;','<' -replace '&gt;','>'
-          Send-TgMessage $plain $false
-        }
+        Send-TgMessage $msg
 
     - name: Keep alive (6h)
       run: Start-Sleep -Seconds 21000

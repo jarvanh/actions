@@ -225,6 +225,10 @@ jobs:
           # *.py: save_sync_marker 的 fallback 扫描（scan_fix_signatures.py）
           # *.jq: fix_list 序列化的修复方式分类程序（restore_info.jq）
           cp "$GITHUB_WORKSPACE/.github/scripts/openlist/"*.sh "$GITHUB_WORKSPACE/.github/scripts/openlist/"*.py "$GITHUB_WORKSPACE/.github/scripts/openlist/"*.jq /tmp/
+          # 通知真源（tg_add_* 排版助手 + send_tg 发送层）由 load_all.sh 在 L0 层 source；
+          # 复制到 /tmp/telegram/ 以保持与 workspace 布局一致的路径形态
+          mkdir -p /tmp/telegram
+          cp "$GITHUB_WORKSPACE/.github/scripts/telegram/tg_notify.sh" /tmp/telegram/
           echo "函数库加载完成"
 
       # ===== 一键还原修复文件 =====
