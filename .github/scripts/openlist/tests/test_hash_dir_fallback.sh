@@ -25,6 +25,8 @@ bad() { FAIL=$((FAIL+1)); echo "FAIL: $1"; }
 
 _REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 source "$_REPO_ROOT/.github/scripts/openlist/rclone_flags.sh" 2>/dev/null
+# 排版助手 + 发送层的唯一真源（openlist 侧已不再自带副本，2026-09-06 收敛）
+source "$_REPO_ROOT/.github/scripts/telegram/tg_notify.sh"
 source "$_REPO_ROOT/.github/scripts/openlist/utils.sh" 2>/dev/null
 source "$_REPO_ROOT/.github/scripts/openlist/file_fix.sh" 2>/dev/null
 
