@@ -279,7 +279,7 @@ jobs:
             # 直接用 OPENLIST_ADMIN_PASSWORD 登录成功 = 密码本就对齐，按约定静默不打扰。
             # 密码明文只进 TG 私信，绝不写公开日志。
             # 凭据消息与其他通知同构：tg_add_* 构建（密码走 tg_add_path 自动转义）+ send_tg
-            # （保留 429 重试与纯文本兜底，避免限流时凭据直接丢失）。
+            # （429 按 retry_after 等待重试；HTML 解析失败不重发、直接报错——与全库同一套语义）。
             export TELEGRAM_BOT_TOKEN="${{ secrets.TELEGRAM_BOT_TOKEN }}"
             export TELEGRAM_CHAT_ID="${{ secrets.TG_CHAT_ID }}"
             source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
@@ -706,31 +706,45 @@ jobs:
           echo "PLAYBACK_MODE=$MODE" >> "$GITHUB_ENV"
           echo "Playback mode: $MODE"
           # 实时通知：模式决策后立刻推送 Telegram（不等运行结束）。
-          # 汇总 302 链路的关键信息：直链源、快捷方式解析、探活结果——
+          # 汇总 302 链路的关键信息：直链源、快捷方式解析、取链自检结果——
           # 一条消息即可判断本轮直链是否真的可用。
           LINK_SRC=$(cat /tmp/link-host 2>/dev/null || echo "-")
+          # 文案面向非技术读者：不出现服务代号/端口/internal 术语，值一律中文结论
           case "$LINK_SRC" in
-            *5245) SRC_NAME="odlink:5245 · Graph 跟随快捷方式";;
-            *5244) SRC_NAME="OpenList:5244 · 回退源";;
-            *)     SRC_NAME="${LINK_SRC:-未启用}";;
+            *5245) SRC_NAME="OneDrive 原生直链 · 可跟随网盘快捷方式";;
+            *5244) SRC_NAME="OpenList · 备用取链通道";;
+            *)     SRC_NAME="自定义源（${LINK_SRC:-未启用}）";;
           esac
           OD_STATS=$(curl -s -m 5 http://127.0.0.1:5245/stats 2>/dev/null || true)
           OD_READY=$(printf '%s' "$OD_STATS" | jq -r '.ready // empty' 2>/dev/null || true)
           OD_SC=$(printf '%s' "$OD_STATS" | jq -r '.shortcuts // 0' 2>/dev/null || echo 0)
           if [ "$OD_READY" = "true" ]; then
-            OD_LINE="${OD_SC} 个已解析 · Graph 就绪"
+            OD_LINE="已解析 ${OD_SC} 个 · 已自动跟随换成真实直链"
           else
-            OD_LINE="odlink 未就绪"
+            OD_LINE="未启用 · 由 OpenList 代取直链"
           fi
+          # 取链自检：媒体库目录能否换算出直链（1 通过 / 0 未通过）
+          case "${MAP_OK:-?}" in
+            1) MAP_CN="✅ 通过";;
+            0) MAP_CN="❌ 未通过（已回退）";;
+            *) MAP_CN="未检测";;
+          esac
+          case "$MODE" in
+            302) MODE_CN="302 直链 · 播放器直连网盘";;
+            direct) MODE_CN="中转 · 视频经服务器转发";;
+            *) MODE_CN="$MODE";;
+          esac
           # 统一 HTML 通知 + 统一收尾区（tg_notify.sh，checkout 后可用）
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
           START_MSG=""
           tg_add_title START_MSG "📺 Emby 服务启动"
-          tg_add_kv START_MSG "模式" "$MODE"
+          tg_add_kv START_MSG "模式" "$MODE_CN"
           tg_add_kv START_MSG "直链源" "$SRC_NAME"
-          tg_add_kv START_MSG "快捷方式" "$OD_LINE"
-          tg_add_kv START_MSG "探活" "${MAP_OK:-?}"
+          tg_add_kv START_MSG "网盘快捷方式" "$OD_LINE"
+          tg_add_kv START_MSG "取链自检" "$MAP_CN"
           tg_add_kv START_MSG "时间" "$(date '+%Y-%m-%d %H:%M:%S %Z')"
+          # 说明行（tg_add_note，段前空行）："网盘快捷方式"不是通用词，补一句人话解释
+          tg_add_note START_MSG "网盘快捷方式 = 网盘里指向别处文件的 .url 文件；本服务会自动跟随它换成可直接播放的链接"
           tg_add_footer START_MSG
           echo "TG(启动): 已构建统一版式消息"
           send_tg "$START_MSG" || true
@@ -781,9 +795,9 @@ jobs:
               echo direct > /tmp/PLAYBACK_MODE
               # 统一 HTML 通知 + 统一收尾区（TG_RUN_* 由 step env 透传）
               WD_MSG=""
-              tg_add_title WD_MSG "⚠️ Emby 302 链路回退"
-              tg_add_kv WD_MSG "事件" "连续 3 次探活失败"
-              tg_add_kv WD_MSG "动作" "已自动回退 direct 模式"
+              tg_add_title WD_MSG "⚠️ Emby 直链已回退"
+              tg_add_kv WD_MSG "事件" "连续 3 次链路自检失败"
+              tg_add_kv WD_MSG "动作" "已自动切到中转模式（视频经服务器转发）"
               tg_add_footer WD_MSG
               send_tg "$WD_MSG" >/dev/null 2>&1 || true
               exit 0
@@ -939,7 +953,7 @@ jobs:
 
           # HTML 转义：片名里的 & < > 会破坏 parse_mode=HTML 的解析（解析失败 = 整条通知丢失）
           esc_html() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
-          # 统一收尾区（TG_SEP/tg_add_footer 来自共享发送层；仅取助手，发送仍走本块的 curl）
+          # 统一收尾区（TG_SEP/tg_add_footer 来自共享发送层；本块同时用它的 send_tg 发送）
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 
           # 以下都是格式化助手：任何一项取不到就返回空，由 join_parts 跳过，不产生 "null · · 0" 这类噪声
@@ -1022,10 +1036,11 @@ jobs:
             if [ -n "$season" ]; then se="S$(two_digit "$season" || printf '?')"; fi
             if [ -n "$episode" ]; then se="${se}E$(two_digit "$episode" || printf '?')"; fi
             if [ "$type" = "Episode" ] && [ -n "$series" ]; then
-              title="<b>$(esc_html "$series")</b>"
+              # emoji 一律在 <b> 内（规范 §2 标签语义表裁决 7）
+              title="<b>🎬 $(esc_html "$series")</b>"
               [ -n "$se" ] && title="${title} <i>${se}</i>"
             else
-              title="<b>$(esc_html "${n:-未知}")</b>"
+              title="<b>🎬 $(esc_html "${n:-未知}")</b>"
               [ -n "$year" ] && title="${title} <i>(${year})</i>"
             fi
 
@@ -1058,7 +1073,7 @@ jobs:
 
             # 日志侧只记片名（公开仓库，绝不落直链）；TG 私密消息里才附带直链
             echo "🎬 播放 [$kind] ${n:-未知} (item $iid)"
-            text="🎬 ${title}"$'\n'"${TG_SEP}"
+            text="${title}"$'\n'"${TG_SEP}"
             [ -n "$meta" ] && text="${text}"$'\n'"规格：${meta}"
             text="${text}"$'\n'"链路：${l3}"
             [ -n "$client" ] && text="${text}"$'\n'"客户端：${client}"
@@ -1526,7 +1541,7 @@ jobs:
       - name: send telegram notification
         if: always()
         env:
-          # 发送走 send_tg（HTML 失败退化重发 + 429 重试 + 预览禁用），需注入标准名
+          # 发送走 send_tg（429 按 retry_after 重试 + HTML 解析失败直接报错不重发 + 预览禁用），需注入标准名
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -1544,7 +1559,9 @@ jobs:
           # 运行时长不再在本 step 自算（旧 '%dh %dm' 写法与全库收尾区不一致）：
           # 统一交给 tg_add_footer 读 step env 的 TG_RUN_STARTED_AT
           # 302 链路统计：直链命中/未取到/解析失败/回落 OpenList 次数（odlink /stats）
-          OD_SUMMARY="odlink 未运行"
+          # 文案面向非技术读者：不出现服务代号/internal 术语，专有名词另配说明行
+          OD_SUMMARY="直链服务未运行"
+          OD_NOTE=""
           if curl -fsS -m 5 http://127.0.0.1:5245/ping >/dev/null 2>&1; then
             S=$(curl -s -m 5 http://127.0.0.1:5245/stats 2>/dev/null || true)
             G_GET=$(printf '%s' "$S" | jq -r '.fs.get // 0' 2>/dev/null || echo 0)
@@ -1553,7 +1570,8 @@ jobs:
             G_ERR=$(printf '%s' "$S" | jq -r '.fs.resolve_err // 0' 2>/dev/null || echo 0)
             G_FB=$(printf '%s' "$S" | jq -r '.fs.fallback // 0' 2>/dev/null || echo 0)
             G_XD=$(printf '%s' "$S" | jq -r '.fs.cross_drive // 0' 2>/dev/null || echo 0)
-            OD_SUMMARY="直链命中 ${G_OK} / 未取到 ${G_MISS} / 解析失败 ${G_ERR} / 回落 ${G_FB} / 跨盘 ${G_XD} (get共 ${G_GET})"
+            OD_SUMMARY="成功取到 ${G_OK} / 未取到 ${G_MISS} / 解析失败 ${G_ERR} / 改走备用 ${G_FB} / 跨网盘 ${G_XD}（共 ${G_GET} 次）"
+            OD_NOTE="改走备用 = 该文件取不到 OneDrive 直链、改由 OpenList 转发；跨网盘 = 一次取链横跨了多个网盘"
           fi
           # 全库海报预热统计：取 wallwarm.log 最后的进度数字与档位。
           # 优先解析"结束"行（正常收尾时最准确）；cancelled 中途被杀时该行不存在，
@@ -1563,7 +1581,7 @@ jobs:
             WW_N=$(grep -oE '共 [0-9]+ 次图片请求' /opt/logs/wallwarm.log 2>/dev/null | tail -1 | grep -oE '[0-9]+')
             [ -n "$WW_N" ] || WW_N=$(grep -oE '已预热 [0-9]+ 请求' /opt/logs/wallwarm.log 2>/dev/null | tail -1 | grep -oE '[0-9]+')
             WW_TOP=$(grep '宽度档:' /opt/logs/wallwarm.log 2>/dev/null | tail -1 | sed -E 's/.*宽度档: ([^（]*).*/\1/' | tr -s ' ')
-            case "$WW_N" in ''|0) ;; *) WW_SUMMARY="${WW_N} 次请求 / 档位 ${WW_TOP:-?}";; esac
+            case "$WW_N" in ''|0) ;; *) WW_SUMMARY="${WW_N} 次请求 / 宽度档 ${WW_TOP:-?}";; esac
           fi
           # 本轮活跃客户端：authentication.db 登态表中本轮有活动的 AppName（去重）。
           # 活动窗口锚定 run 起点——/tmp/link-host 由本轮早期步骤创建，mtime 即本轮开始。
@@ -1582,8 +1600,8 @@ jobs:
           # 已由 EMBY302_DIR 旁的 checkout 提供）
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
           case "$MODE" in
-            302) MODE_DESC="302 直链";;
-            direct) MODE_DESC="direct 中转";;
+            302) MODE_DESC="302 直链 · 播放器直连网盘";;
+            direct) MODE_DESC="中转 · 视频经服务器转发";;
             *) MODE_DESC="$MODE";;
           esac
           case "$STATUS" in
@@ -1596,10 +1614,12 @@ jobs:
           tg_add_title msg "${STATUS_EMOJI} Emby 服务停止"
           tg_add_kv msg "状态" "${STATUS_CN}"
           tg_add_kv msg "模式" "${MODE_DESC}"
-          tg_add_kv msg "302 链路" "$OD_SUMMARY"
-          tg_add_kv msg "全库预热" "$WW_SUMMARY"
-          tg_add_kv msg "客户端" "$CLIENTS"
+          tg_add_kv msg "本轮直链" "$OD_SUMMARY"
+          tg_add_kv msg "海报预热" "$WW_SUMMARY"
+          tg_add_kv msg "播放客户端" "$CLIENTS"
           tg_add_kv msg "时间" "$(date '+%Y-%m-%d %H:%M:%S %Z')"
+          # 说明行（tg_add_note，段前空行）：统计里的两个内部口径补一句人话
+          if [ -n "$OD_NOTE" ]; then tg_add_note msg "$OD_NOTE"; fi
           # 统一收尾区（⏱ 已运行 X · 🔗 运行日志；读 step env 的 TG_RUN_URL / TG_RUN_STARTED_AT）
           tg_add_footer msg
           echo "TG(收尾): 已构建统一版式消息"

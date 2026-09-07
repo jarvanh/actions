@@ -10,7 +10,7 @@
 ├── workflows/              23 个工作流定义
 └── scripts/
     ├── openlist/           OpenList 同步工具 —— 最复杂的子系统，详见下文
-    ├── emby302/            Emby 302 直链服务 —— 详见 docs/emby302.md
+    ├── emby302/            Emby 302 直链服务 —— 详见 docs/emby.md
     ├── telegram/           Telegram 通知（tg_notify.sh = 全库发送层真源）
     ├── tg-channel/         Telegram 频道内容管线（同步/上传/去重/清理）
     └── proxy-speedtest/    代理测速脚本（gitee 上行 / 延迟+下载 / 泰尔三网测速）
@@ -23,8 +23,8 @@ proxy-speedtest/            测速结果数据
 | 文档 | 内容 |
 |---|---|
 | [`docs/telegram-notify.md`](docs/telegram-notify.md) | **Telegram 通知规范**（全库唯一真源：版式模板、收尾区、禁止事项、检查清单） |
-| [`docs/emby302.md`](docs/emby302.md) | Emby 媒体服务器 + 302 直链子系统（架构、凭据体系、通知、排查手册） |
-| [`docs/openclaw-self-healing.md`](docs/openclaw-self-healing.md) | OpenClaw 自愈 + AI 网关双后端（CliRelay 全栈优先 / CLIProxyAPI 回退）+ 远程访问入口 |
+| [`docs/emby.md`](docs/emby.md) | Emby 媒体服务器 + 302 直链子系统（架构、凭据体系、通知、排查手册） |
+| [`docs/openclaw.md`](docs/openclaw.md) | OpenClaw Runner：自愈五层机制 + 常驻服务（sub-store / rss-to-telegram / AI 网关）+ Tailscale 远程入口 |
 | [`docs/proxy-speedtest-gitee.md`](docs/proxy-speedtest-gitee.md) / [`-cdn.md`](docs/proxy-speedtest-cdn.md) / [`-taier.md`](docs/proxy-speedtest-taier.md) | 代理测速三件套（按测速点命名）：Gitee 上行 / 国内 CDN 延迟+下载 / 泰尔三网 |
 | 下文「OpenList 同步子系统」 | OpenList 同步工具（内联在本文档） |
 
@@ -35,7 +35,7 @@ proxy-speedtest/            测速结果数据
 | `openlist.yml` | OneDrive → OpenList 网盘同步（**本文档重点**） |
 | `self-hosted_backup.yml` | 自建服务备份到 OneDrive |
 | `github_backup_all.yml` | 备份全部 GitHub 仓库到 OneDrive |
-| `emby.yml` | Emby 媒体服务器 + 302 直链 —— 详见 [`docs/emby302.md`](docs/emby302.md) |
+| `emby.yml` | Emby 媒体服务器 + 302 直链 —— 详见 [`docs/emby.md`](docs/emby.md) |
 | `emby2.yml` / `jellyfin.yml` | 媒体服务器运维 |
 | `HomeAssistant.yml` / `rdp.yml` / `openclaw.yml` | 自托管服务 |
 | `ql.yml` / `sub-store.yml` / `subs-check.yml` | 签到与订阅管理 |

@@ -1,7 +1,38 @@
-# OpenClaw 自愈机制设计与操作手册
+# OpenClaw Runner：自愈机制 · 常驻服务 · 远程入口
 
 > 适用范围：`jarvanh/actions` 仓库 `.github/workflows/openclaw.yml`
-> 配套阅读：本仓库工作流源码。本文描述当前生效的全部自愈行为与操作流程。
+> 配套阅读：本仓库工作流源码。本文描述当前生效的自愈行为、常驻服务与操作流程。
+
+## 零、运行概览
+
+| 项 | 值 |
+|---|---|
+| 触发 | 定时 `cron: "*/5 * * * *"` + `workflow_dispatch`（手动） |
+| 并发 | `concurrency: openclaw-singleton` —— 同时只跑一个 run |
+| 单轮时长 | `Keep alive` 340 分钟；结束前 15 分钟推送「即将进入最终归档」预警 |
+| 自我接力 | 末尾 `Trigger next OpenClaw run`：`gh workflow run openclaw.yml`（仅 keepalive 成功时触发） |
+| 权限 | `contents: read` + `actions: write`（自我触发需要） |
+
+### 步骤顺序
+
+| 步骤 | 作用 | 落点 / 端口 |
+|---|---|---|
+| Setup Node.js（`current`）+ checkout | 运行时基础 | — |
+| rclone-install / rclone-config | 挂载 Dropbox 的前提 | — |
+| Mount Dropbox | `rclone mount dropbox: /dropbox`（**runner 身份挂载**：root 挂载会在 token 刷新时把 conf 改成 root:600，导致后续上传 EACCES）；VFS 上限 2G、`--attr-timeout 1m`、`--poll-interval 0` | `/dropbox`，日志 `/opt/logs/rclone-dropbox.log` |
+| Install OpenClaw | `install.sh --no-onboard` → 恢复 `~/.openclaw` → `npm i -g @google/gemini-cli clawhub` | `~/.openclaw` |
+| Restore skill symlink for proactivity | proactivity 真实状态落 `~/.openclaw/workspace/skills-data/proactivity`，`~/proactivity` 只是兼容软链 | — |
+| Setup / Enable Tailscale | ephemeral 节点、固定主机名 `openclaw`、开启 SSH 与 Exit Node | `ssh runner@openclaw` |
+| Prepare runtime env | 生成 `~/runtime-env.sh` 并设为 `BASH_ENV`：加载 `~/.openclaw/.env`、继承 runner add_path、本地化 gh/git 认证 | — |
+| Install / Run Cloudflared Tunnel | 命名隧道 `oc`、`sub-store`（`ai-api` 在网关步骤起） | `oc.<VD>.eu.org`→18789；`sub-store.<VD>.eu.org`→3001 |
+| Run sub-store container | `xream/sub-store:http-meta`，后端同步 cron `50 * * * *` | 9876 + 127.0.0.1:3001，数据 `/dropbox/self-hosted/sub-store` |
+| Run rss-to-telegram container | `rongronggg9/rss-to-telegram:latest`，独立 bot secret `TELEGRAM_BOT_TOKEN_RSS_SB_BOT` | 数据 `/tmp/local_rsstt`（config + data） |
+| Run AI API gateway | CliRelay 全栈优先 / CLIProxyAPI 回退 | 8317 → 隧道 `ai-api` |
+| Run OpenClaw | 自愈主流程（本文第三、四章） | 18789 |
+| Start background archive loop | 每 20 分钟归档 `~/.openclaw` + AI 网关数据（`flock` 防重入） | Dropbox |
+| Keep alive → Stop OpenClaw and Final Archive → Trigger next OpenClaw run | 收尾与自我接力 | — |
+
+> rss-to-telegram 带一层自愈：登录被 `AuthKeyDuplicatedError` 判废时删掉 `bot.session*` 重启一次并立即归档。
 
 ## 一、设计目标
 
@@ -13,10 +44,11 @@
 ## 二、运行链路
 
 ```
-安装 OpenClaw（install.sh，跟踪 latest）
+前置（零章）：Node → checkout → rclone 挂载 /dropbox → 安装 OpenClaw（install.sh --no-onboard）
         │
         ▼
-恢复主状态包 openclaw.tar.gz（永远 = 最后一次健康状态）
+恢复主状态包 openclaw.tar.gz（永远 = 最后一次健康状态；
+缺失或校验失败 → 回退为目录同步 dropbox:self-hosted/openclaw）
         │
         ▼
 ┌── 机制① 预检门（机制② doctor 显式退出码）──────────────┐
@@ -54,11 +86,26 @@
 - **失败**：先运行 `doctor --fix` 尝试修复并**复检**；修复成功则照常启动，仍失败则跳过网关启动、进入回退。
 - doctor 在预检门内最多运行一次（`DOCTOR_RAN` 标记防重复）。
 - 两次 validate 的错误详情均写入步骤日志与失败通知。
+- 启动动作固定为 `openclaw gateway install --force` + `openclaw gateway restart`，任一失败即本阶段失败。
+- 阶段标记 `FAIL_STAGE` 依次写入 `/tmp/run-openclaw-meta.env`：
+  `preflight_doctor` → `config_validate` → `initial_start` → `fallback_reinstall` → `snapshot_restore`，
+  失败通知里映射为中文：预检修复 / 配置校验 / 首次启动 / 回退重装 / 快照回滚。
 
 ### 机制②：修复动作显式化
 
 - 所有 `doctor --fix` 调用均记录退出码：`openclaw doctor --fix || echo "DOCTOR_EXIT=$? (non-fatal, continuing)"`。
 - doctor 的失败原因会进入失败通知的关键日志摘要。
+
+### 健康检查判据（`wait_for_openclaw_health`）
+
+默认 180 秒、每 5 秒一轮，判据是**端口 + HTTP** 双条件：
+
+1. `18789` 处于 LISTEN（`sudo lsof -Pi :18789 -sTCP:LISTEN`）；
+2. `http://127.0.0.1:18789/health` 返回 200。
+
+只 LISTEN 未 200 时，若 journal 已出现 `[gateway] ready` 则继续宽限等待；超时判失败，
+随后 `dump_openclaw_diagnostics` 打印 systemd status、journal（近 10 分钟）与
+`/tmp/openclaw/openclaw-*.log` 最新两个文件的尾部 80 行。
 
 ### 机制③：存储三区（主包 / 失败隔离 / 快照池）
 
@@ -69,11 +116,18 @@
 | `snapshots/openclaw-<UTC日期-时分>-v<版本>.tar.gz` | 版本化健康快照 | 仅健康运行 | 最新 3 份 |
 
 - 快照文件名内嵌版本号（`v<版本>` = 实际通过健康检查的二进制），可按版本检索。
-- 失败运行不覆盖主包、不进快照池；归档循环（每 20 分钟）与最终归档写入同一份 failed 文件。
+- 失败运行不覆盖主包、不进快照池；归档循环（每 20 分钟）与最终归档写入同一份 failed 文件
+  （循环把名字写进 `/tmp/failed-archive-name`，最终归档复用它，避免同一轮产生两份）。
+- 除这三区外，最终归档还上传 `dropbox:self-hosted/rsstt.tar.gz`（rss-to-telegram 数据）
+  与 AI 网关归档（见第六节）。
 
 ### 机制④：回退与降级守卫
 
-- 启动失败后自动安装 known-good 版本（`~/.openclaw/openclaw-known-good-version`，每次成功启动自动更新），并以**回退版本**再次 validate。
+- 回退版本由 `resolve_fallback_openclaw_version` 两级解析，来源写进 meta 的 `FALLBACK_VERSION_SOURCE`：
+  ① `~/.openclaw/openclaw-known-good-version`（每次成功启动自动更新）→ `known_good_file`；
+  ② `~/.openclaw/openclaw.json` 的 `.meta.lastTouchedVersion` → `meta_lastTouchedVersion`；
+  两者都取不到则直接失败（`No fallback OpenClaw version found`）。
+- 装好回退版本后，以**回退版本**再次 validate。
 - validate 通过：`doctor --fix` → 网关重启 → 健康检查。
 - validate 失败：先 `doctor --fix` 修复并复检；**仍失败** → 将 `~/.openclaw/state/openclaw.sqlite*`（含 -wal/-shm）整体移位为 `*.state-bak-<时间戳>`，让回退版本以全新状态库启动，再运行一次 doctor 完成初始化。
 - 移位只发生在确认必要时；被移位的库是新版格式数据，升级回新版后改回原名可找回旧会话。
@@ -118,16 +172,25 @@ tar -xzf /tmp/restore.tar.gz -C /tmp/restore .openclaw/openclaw.json
 
 > 快照名中的 `v<版本>` 是写下该状态的 OpenClaw 版本；整包回滚后如当前安装版本更新且拒绝该配置，预检门会自动导向回退，不会硬启动。
 
+### 通知清单
+
+| 通知 | 时机 | 内容 |
+|---|---|---|
+| `🟢 OpenClaw Runner 已就绪` | Tailscale SSH 步骤成功且 AI 网关已起 | 按套分节 + 树形条目：🔐 SSH（命令 / 备用 IP / 文件管理）、🖥️ RustDesk（直连 `FQDN:21118`）、🌐 出口网络（出口 IP / ISP / ASN / 位置）、🛰️ 出口节点（状态 / 三种批准方式 / API）、🤖 AI 网关（后端 + 回退原因） |
+| `🚨 OpenClaw 自愈失败` | `Run OpenClaw` 步骤失败 | 步骤、Run ID、失败阶段（中文）、当前版本、Fallback + 来源、成功版本记录、三段耗时、SSH 调试入口、🧾 关键日志（`<pre>` 等宽块，最多 2800 字节） |
+| `⚠️ OpenClaw 归档告警` | 20 分钟归档循环 或 最终归档失败 | 问题（上传失败 / 归档失败 / 目录缺失）+ Run ID |
+| `⚠️ OpenClaw 即将进入最终归档` | keepalive 第 325 分钟 | 约 15 分钟后执行 `Stop OpenClaw and Final Archive` |
+
+全部通知为全库统一 HTML 版式（规范唯一真源见 [`telegram-notify.md`](telegram-notify.md)：
+emoji 标题 + ━━━ 分隔线 + 键值/分节区 + 统一收尾行 `⏱ 已运行 X · 🔗 运行日志`），
+一律走发送层 `send_tg`：429 按 `retry_after` 重试，**HTML 解析失败直接报错、不重发**。
+
 ### 排障入口
 
-- 失败通知（🚨 OpenClaw 自愈失败）：FAIL_STAGE、当前/回退/采纳版本、DOCTOR_EXIT、关键错误摘要
-  （`<pre>` 等宽块）、Tailscale SSH 入口。
-- 启动通知（🟢 OpenClaw Runner SSH 入口）：SSH 入口、AI 网关后端（CliRelay / CLIProxyAPI + 回退原因）、
-  RustDesk 直连地址、SFTP 文件管理入口、出口 IP/ISP/ASN。
-- 全部通知为全库统一 HTML 版式（规范唯一真源见 [`telegram-notify.md`](telegram-notify.md)：
-  emoji 标题 + ━━━ 分隔线 + 统一收尾行 `⏱ 已运行 X · 🔗 运行日志`），
-  HTML 解析失败直接报错、不重发。
-- 运行中日志：`/tmp/run-openclaw-step.log`（经 Tailscale SSH 可见）。
+- 运行中日志：`/tmp/run-openclaw-step.log`（`Run OpenClaw` 步骤 stdout/stderr 全量 tee，经 Tailscale SSH 可见）。
+- 阶段与版本元数据：`/tmp/run-openclaw-meta.env`（`FAIL_STAGE` / `CURRENT_OPENCLAW_VERSION` /
+  `FALLBACK_TARGET_VERSION` / `FALLBACK_VERSION_SOURCE` / `RECORDED_SUCCESSFUL_OPENCLAW_VERSION` / 各段耗时）。
+- 归档循环日志：`/tmp/openclaw-archive-loop.log`；AI 网关生效后端：`/tmp/active-ai-backend.env`。
 - 结束后拉日志：`gh run view --job <job_id> --repo jarvanh/actions --log`。
 
 ## 五、已知边界
@@ -148,7 +211,7 @@ tar -xzf /tmp/restore.tar.gz -C /tmp/restore .openclaw/openclaw.json
 
 | 后端 | 形态 | 端口 | 数据目录 | 归档 |
 |---|---|---|---|---|
-| **CliRelay（主用）** | docker compose 全栈：`cli-proxy-api` 主容器 + postgres + redis + init + updater（镜像 `ghcr.io/kittors/clirelay:latest`） | 8317 | `/tmp/local_CliRelay`（auths + config.yaml + .env + compose + sql/） | `dropbox:self-hosted/CliRelay.tar.gz` |
+| **CliRelay（主用）** | docker compose 全栈（项目名 `clirelay`）：`cli-proxy-api` 主容器 + postgres + redis + init + updater；compose 文件来自归档，bootstrap 时从上游 raw 下载（`kittors/CliRelay/main/docker-compose.yml`，镜像 `ghcr.io/kittors/clirelay:latest`） | 8317 | `/tmp/local_CliRelay`（auths + config.yaml + .env + compose + sql/） | `dropbox:self-hosted/CliRelay.tar.gz` |
 | **CLIProxyAPI（回退）** | 单容器 `eceasy/cli-proxy-api:latest` | 8317 | `/tmp/local_CLIPProxyAPI`（config.yaml + auth-dir + stats.json） | `dropbox:self-hosted/CLIProxyAPI.tar.gz`（附带 clirelay auths 双保险） |
 
 两后端共用 8317 端口 → cloudflared `ai-api` 命名隧道（→ 127.0.0.1:8317）无需按后端切换。
@@ -157,8 +220,8 @@ tar -xzf /tmp/restore.tar.gz -C /tmp/restore .openclaw/openclaw.json
 
 ```
 恢复 CliRelay.tar.gz（缺失/无效 → 从 CLIProxyAPI 数据 bootstrap 迁移）
-    → compose up postgres → 等待 healthy → psql 导入 sql/*.sql（ON_ERROR_STOP=1）
-    → compose up 全栈 → 8317 健康检查（120×2s）
+    → compose up postgres → pg_isready（30×2s）→ psql 导入最新 sql/*.sql（ON_ERROR_STOP=1）
+    → compose up 全栈 → 8317 健康检查（120×2s，判据为任意 HTTP 响应码）
         ├─ 就绪 → ACTIVE_BACKEND=clirelay
         └─ 失败 → compose logs + down -v → 记录 FALLBACK_REASON
                    → 恢复/复用 /tmp/local_CLIPProxyAPI → docker run cliproxyapi
@@ -169,6 +232,9 @@ tar -xzf /tmp/restore.tar.gz -C /tmp/restore .openclaw/openclaw.json
 
 - 当前生效后端与回退原因写入 `/tmp/active-ai-backend.env`，供归档循环分支与启动通知读取。
 - CliRelay 数据准备失败（归档缺失/校验失败/bootstrap 失败）不会终止步骤，直接走回退路径。
+- 就绪后重启 `ai-api` 命名隧道：`cloudflared tunnel run --protocol http2 --url http://127.0.0.1:8317 ai-api`。
+- 收尾时先 `docker stop clirelay cli-proxy-api cliproxyapi`（compose 主容器名是 `cli-proxy-api`），
+  postgres 保留到最终 pg_dump 完成后才 `compose down`。
 
 ### 归档双轨
 
@@ -214,8 +280,22 @@ Runner 每轮通过 Tailscale 加入 tailnet（ephemeral，`--hostname=openclaw`
 |---|---|---|
 | SSH | `ssh runner@openclaw`（或 `@<TS_IP>`） | Tailscale SSH，`ts.env` 轮询等待名字收敛后才写入，避免主机名漂移 |
 | 文件管理 | `sftp://runner@openclaw/` | Tailscale SSH 自带 SFTP，Finder ⌘K 原生挂载，零额外服务 |
-| 远程桌面（tailnet 内） | RustDesk 直连 `openclaw.…ts.net:21118` | 配置键 `direct-server='Y'` + `direct-access-port='21118'`（写入持久化 RustDesk2.toml），点对点不经中继 |
-| 远程桌面（任意网络） | RustDesk ID + 密码 | 走官方 ID/中继服务器；ID 每轮变化，以 Telegram 报告推送为准 |
+| 远程桌面 | `openclaw.…ts.net:21118` | 本 workflow **不再部署 RustDesk**：该地址由 `TS_FQDN` 拼端口后随「🟢 OpenClaw Runner 已就绪」推送，供 tailnet 内已装 RustDesk 的客户端点对点直连（不经中继）；无官方 ID/中继入口 |
 
-- `ts.env` 字段：`TS_HOST`（MagicDNS 短名）/ `TS_FQDN`（完整域名，RustDesk 直连用）/ `TS_IP` / `RUN_URL`。
+- 节点属性：ephemeral、`tag:ci`，job 结束自动移除。`TS_OAUTH_CLIENT_ID` / `TS_OAUTH_CLIENT_SECRET`
+  任一缺失时 Tailscale 段整体跳过，只打一行告警（此时没有 SSH 入口）。
+- `ts.env` 字段：`TS_HOST`（MagicDNS 短名）/ `TS_FQDN`（完整域名）/ `TS_IP` / `RUN_URL`。
+  `--hostname` 重命名有传播延迟，步骤会轮询最多 15 次等待名字收敛为 `openclaw.*`，避免地址每轮漂移。
 - AI 网关管理地址：`https://ai-api.${VD}.eu.org/manage`（cloudflared 命名隧道，与后端无关）。
+
+### 出口节点（Exit Node）
+
+runner 以 `tailscale set --ssh --hostname=openclaw --advertise-exit-node` 广播出口能力，
+前置由步骤写入 `net.ipv4.ip_forward=1` 与 `net.ipv6.conf.all.forwarding=1`。
+**广播 ≠ 生效**，路由需要批准（ephemeral 节点每轮都变）：
+
+| 方式 | 做法 |
+|---|---|
+| 管理页手动 | `login.tailscale.com/admin/machines` → `openclaw` → Edit route settings → 勾选 `0.0.0.0/0`、`::/0`（每轮重批） |
+| ACL 自动批准（推荐） | ACL 的 `autoApprovers.routes` 加 `"0.0.0.0/0": ["tag:ci"]`、`"::/0": ["tag:ci"]` |
+| Tailscale API | `POST /api/v2/device/{device_id}/routes`，body `{"routes":["0.0.0.0/0","::/0"]}`（需 `TS_API_KEY`，节点 id 每轮变化） |

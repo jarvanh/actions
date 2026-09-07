@@ -327,13 +327,14 @@ _progress_active_last() {
 #   组间空一行分隔（首组前不加空行——tg_add_section 已带段前空行），
 #   条目经 tree_lines 加 ├─/└─ 连接符（utils.sh）; 目标端 openlist: 前缀
 #   冗余（所有目标均为 openlist 远端），统一裁剪缩短行宽。
-# 无 " → " 结构的显示名（调试任务等）退化为普通 "• 名称" 条目。
+# 无 " → " 结构的显示名（调试任务等）退化为无组头的平铺条目，同样走 tree_lines
+# 树形 —— 同一面板内不得 "• " 与 "├─" 并存（规范 §2 标签语义表裁决 3）。
 # 输入: 每行 "display_name\tsize\tdetail"（size/detail 可空）
 _progress_render_task_list() {
   local lines="$1"
   declare -A _grp=() _grp_size=()
   local -a _order=()
-  local _plain=""
+  local _plain_entries=""
   while IFS=$'\t' read -r _tname _tsize _tdetail; do
     [ -z "$_tname" ] && continue
     local _src="$_tname" _dst=""
@@ -343,9 +344,10 @@ _progress_render_task_list() {
       _dst="${_dst#openlist:}"
     fi
     if [ -z "$_dst" ]; then
-      _plain+="• $(escape_html "$_src")"
-      [ -n "$_tsize" ] && _plain+=" · <i>$(escape_html "$_tsize")</i>"
-      _plain+=$'\n'
+      # 条目主体用 <code>（裁决 2/4：非文件值也不得裸文本）
+      _plain_entries+="<code>$(escape_html "$_src")</code>"
+      [ -n "$_tsize" ] && _plain_entries+=" · <i>$(escape_html "$_tsize")</i>"
+      _plain_entries+=$'\n'
       continue
     fi
     if [ -z "${_grp[$_src]+x}" ]; then
@@ -367,9 +369,11 @@ _progress_render_task_list() {
     _out+=$'\n'"$(tree_lines "${_grp[$_src]}")"$'\n'
     _gi=$((_gi + 1))
   done
-  # 普通条目（无 → 结构）与分组之间空一行
-  [ -n "$_out" ] && [ -n "$_plain" ] && _out+=$'\n'
-  printf '%s' "${_out}${_plain}"
+  local _plain_out=""
+  [ -n "$_plain_entries" ] && _plain_out="$(tree_lines "${_plain_entries%$'\n'}")"$'\n'
+  # 无组头的平铺条目与分组之间空一行
+  [ -n "$_out" ] && [ -n "$_plain_out" ] && _out+=$'\n'
+  printf '%s' "${_out}${_plain_out}"
 }
 
 # 渲染进度消息为 HTML

@@ -327,13 +327,11 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, qualif
         '',
     ]
     if top:
-        lines.append(f"🏆 最快节点：<b>{esc(top[0].get('name', ''))}</b>")
-        lines.append('')
-        lines.append('⭐ <b>TOP 5</b> · <i>↓下载 · ↑上传 · 延迟</i>')
+        lines.append(f'🏆 <b>最快节点 · {len(top)}</b> · <i>↓下载 · ↑上传 · 延迟</i>')
         for idx, r in enumerate(top, 1):
             connector = '└─' if idx == len(top) else '├─'
             lines.append(
-                f"  {connector} {idx}. <code>{esc(r.get('name', ''))}</code>"
+                f"  {connector} <code>{esc(r.get('name', ''))}</code>"
                 f" · <i>↓{esc(r.get('down', 0))}Mbps · ↑{esc(r.get('up', 0))}Mbps"
                 f" · {esc(r.get('rtt') or '-')}</i>")
         lines.append('')
@@ -352,7 +350,8 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, qualif
         lines.append(f'❌ <b>失败 · {len(failed)}</b>')
         for idx, r in enumerate(failed[:5], 1):
             connector = '└─' if idx == min(len(failed), 5) else '├─'
-            lines.append(f"  {connector} <code>{esc(r.get('name', ''))}</code> · <i>{esc((r.get('error') or '-')[:80])}</i>")
+            # 原始异常串属机器值 → <code>（标签语义表第 3 类；此前用 <i> 与元数据撞语义）
+            lines.append(f"  {connector} <code>{esc(r.get('name', ''))}</code> · <code>{esc((r.get('error') or '-')[:80])}</code>")
         lines.append('')
 
     lines.append('📦 <b>订阅 · Gist</b>')
@@ -416,7 +415,7 @@ def handle_termination_signal(signum, frame):
         pass
     sig_name = signal.Signals(signum).name if signum else f'SIGNAL-{signum}'
     msg = (f'⛔ <b>泰尔三网测速异常终止</b>\n{"━" * 18}\n'
-           f'⚠️ 脚本被中断：收到 {sig_name}，本轮测速未正常完成。')
+           f'⚠️ 脚本被中断：收到 <code>{sig_name}</code>，本轮测速未正常完成。')
     footer = tg_footer_line()
     if footer:
         msg += f'\n\n{footer}'

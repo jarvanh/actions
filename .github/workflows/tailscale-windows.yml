@@ -121,8 +121,9 @@ jobs:
           # 按入口分组（SSH / RDP 两套凭据），每组树形列出；
           # 取值行只放标签+值，说明性文字（固定不变/每次会变/密码共用）
           # 集中到底部 ℹ️ 备注行（tg_add_note 形态），不与取值粘在同一行
+          # 紧跟标题的首个分节不补段前空行（与 bash tg_add_section 同规则：分隔线后不空行）
           $msg = "🟢 <b>Windows runner 已就绪</b>`n$TG_SEP`n" +
-            "`n🔐 <b>SSH</b>`n" +
+            "🔐 <b>SSH</b>`n" +
             "  ├─ 命令：<code>ssh $(Esc-Html $Env:TS_USER)@$(Esc-Html $Env:TS_HOST)</code>`n" +
             "  ├─ 域名：<code>$(Esc-Html $Env:TS_DNS)</code>`n" +
             "  └─ 备用 IP：<code>$(Esc-Html $Env:TS_IP)</code>"
@@ -146,13 +147,14 @@ jobs:
             $locParts = @($geo.city, $geo.region, $geo.country_code) | Where-Object { $_ }
             if ($locParts) { $loc = $locParts -join ", " }
           } catch { }
+          # 条目非文件值：可复制的（IP/ASN）→ <code>，其余 → <b>（禁裸文本）
           $msg += "`n`n🌐 <b>出口网络</b>`n" +
             "  ├─ 出口 IP：<code>$(Esc-Html $pubIp)</code>`n" +
-            "  ├─ ISP：$(Esc-Html $isp)`n" +
-            "  ├─ ASN：$(Esc-Html $asnLine)`n" +
-            "  └─ 位置：$(Esc-Html $loc)"
+            "  ├─ ISP：<b>$(Esc-Html $isp)</b>`n" +
+            "  ├─ ASN：<code>$(Esc-Html $asnLine)</code>`n" +
+            "  └─ 位置：<b>$(Esc-Html $loc)</b>"
           $msg += "`n`nℹ️ <i>$notes</i>`n" +
-            "有效期：<i>约 6 小时 · 超时自动结束</i>"
+            "有效期：<b>约 6 小时 · 超时自动结束</b>"
           $footer = Get-TgFooter
           if ($footer) { $msg += "`n`n$footer" }
           Send-TgMessage $msg
