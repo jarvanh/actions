@@ -1333,11 +1333,12 @@ sync_by_file_batches() {
       local _bh_mark="✅"
       [ "$_fail_n" -gt 0 ] && _bh_mark="⚠️"
       { [ "$rc" -ne 0 ] && [ "$rc" -ne 4 ]; } && _bh_mark="❌"
-      # 分项无条件拼接（用户偏好: 每个字段恒显，格式稳定）
-      local _bh_entry="${_bh_mark} 批次 $((i+1))：共 ${batch_file_count} 个文件，成功 ${_ok_n} · 修复 ${_fixed_n} · 失败 ${_fail_n} · 跳过 ${_onf_n} · 已有 ${_have_n}"
-      # 正文耗时数据：不加 ⏱ 前缀（那是收尾区专用，勿冒充）
-      _bh_entry+=" · 耗时 ${_batch_dur}"
-      [ "${_batch_bytes:-0}" -gt 0 ] && _bh_entry+=" · 📤 $(format_bytes "${_batch_bytes:-0}")"
+      # 分项 emoji 计数恒显（用户偏好: 全字段恒显格式稳定；字段 emoji 表见 docs/telegram-notify.md §4）:
+      #   ✅成功 🔧修复 ❗失败（不用 ❌，避免与批次状态撞形）⏭️跳过 ♻️已有
+      # 批次号 #n；⏱ 前缀耗时（2026-09-07 放宽: ⏱=耗时类前缀，收尾区专属的是「⏱ 已运行 X」完整形态；
+      #   时长去空格 1分15秒 压行宽 —— 单行 ≈31 全角 < 手机 33，自动折行不再发生）
+      # ⬆️ 上传量恒显（0 → ⬆️0 B）；⏭️/♻️ 整批性质批次照常入史（2026-09-07 用户确认）
+      local _bh_entry="${_bh_mark}#$((i+1)) ✅${_ok_n} 🔧${_fixed_n} ❗${_fail_n} ⏭️${_onf_n} ♻️${_have_n} ⏱${_batch_dur// /} ⬆️$(format_bytes "${_batch_bytes:-0}")"
       _progress_batch_history_add "$((i+1))" "$_bh_entry"
     fi
   done
