@@ -65,8 +65,9 @@ RESULT_JSON = HOME_RUNTIME / 'taier_speedtest_result.json'
 CONFIG = {
     # 测速点：单个点即可（每点 = 一次完整上下行），多点会成倍拉长单节点耗时
     'TAIER_POINTS': (os.environ.get('TAIER_POINTS', '') or '广东联通').strip(),
-    # multi = 多线程上下行（更贴近代理真实吞吐）；single / both 亦可
-    'TAIER_MODE': (os.environ.get('TAIER_MODE', '') or 'multi').strip(),
+    # 默认 single = 单连接：与 proxy-speedtest 系列的单流口径可比，也更贴近日常
+    # 单流体验；multi（下 8 + 上 4 连接）看节点带宽上限，both 两者对照
+    'TAIER_MODE': (os.environ.get('TAIER_MODE', '') or 'single').strip(),
     # 上游二进制把 --duration 硬钳制在 5-13（main.go），>13 会被压到 13
     'TAIER_DURATION': min(max(int(os.environ.get('TAIER_DURATION', '10') or 10), 5), 13),
     # 0 = 不限（默认）；节点多时整体耗时 ≈ 节点数 × (2×duration + 5)s
