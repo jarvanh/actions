@@ -413,10 +413,12 @@ def _run():
                                  CONFIG['TAIER_DURATION'], CONFIG['TAIER_TIMEOUT'],
                                  CONFIG['TAIER_IMAGE'])
         parsed = parse_taier_output(out)
+        # 有 region 但上下行全 0（表格里全是 "-"）= 节点连不上测速点，不能算成功
+        has_speed = parsed['up'] > 0 or parsed['down'] > 0
         row = {
             'name': name,
             'type': item.get('type', ''),
-            'ok': rc == 0 and bool(parsed['region']),
+            'ok': rc == 0 and bool(parsed['region']) and has_speed,
             'exit_ip': parsed['exit_ip'],
             'exit_loc': parsed['exit_loc'],
             'region': parsed['region'],
@@ -431,8 +433,11 @@ def _run():
         if row['bypass']:
             bypass_hits += 1
         if not row['ok']:
-            tail = (err or out or '').strip().splitlines()
-            row['error'] = (tail[-1][:200] if tail else f'rc={rc}（无输出）')
+            if parsed['region'] and not has_speed:
+                row['error'] = f"连不上测速点 {parsed['region']}（延迟/上下行全空）"
+            else:
+                tail = (err or out or '').strip().splitlines()
+                row['error'] = (tail[-1][:200] if tail else f'rc={rc}（无输出）')
         results.append(row)
         log_progress('taier_node_done', name=name, rc=rc, region=row['region'],
                      rtt=row['rtt'], up=row['up'], down=row['down'],
