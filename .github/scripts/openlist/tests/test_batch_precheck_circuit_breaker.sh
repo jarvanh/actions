@@ -60,6 +60,10 @@ tg_append() { printf -v "$1" '%s%s' "${!1}" "$2"; }
 tg_add_section() { tg_append "$1" $'\n'"<b>$(escape_html "$2")</b>"$'\n'; }
 tg_add_kv() { tg_append "$1" "$2：<b>$(escape_html "$3")</b>"$'\n'; }
 tg_add_block() { tg_append "$1" "$2"; case "$2" in *$'\n') ;; *) tg_append "$1" $'\n' ;; esac; }
+# 进度面板统计行定义在 task_engine.sh（本测试按 sed 行号抽取，不含它）；
+# 与批次熔断断言无关，补 stub 以消除 "command not found" 噪音
+# （门禁：测试日志不得出现 command not found，否则会掩盖真实的未定义函数）
+_render_batch_stats_line() { echo "批次统计"; }
 
 SYNC_WITH_LOGGING_CALLS=0
 sync_with_logging() { SYNC_WITH_LOGGING_CALLS=$((SYNC_WITH_LOGGING_CALLS + 1)); }
