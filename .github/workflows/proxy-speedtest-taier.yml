@@ -91,6 +91,8 @@ jobs:
           # 订阅导出：本工作流专属 Gist（三个测速工作流各用各的，互不覆盖）。
           # 留空则首次运行自动新建，TG 通知会给链接；拿到 id 后回填此 secret 避免每轮新建
           PROXY_SPEEDTEST_GIST_ID: ${{ secrets.PROXY_SPEEDTEST_TAIER_GIST_ID }}
+          PROXY_SPEEDTEST_GIST_FILENAME: proxy_speedtest_taier_subscription.yaml
+          PROXY_SPEEDTEST_GIST_DESCRIPTION: 'proxy speedtest subscription (taier 三网)'
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           # 统一收尾区（footer）: 运行日志链接 + 已运行时长

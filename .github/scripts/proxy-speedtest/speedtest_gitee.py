@@ -1368,15 +1368,26 @@ def github_api_request(url: str, token: str, payload=None, method='GET', timeout
         return json.load(r)
 
 
+GIST_DEFAULT_FILENAME = 'proxy_speedtest_subscription.yaml'
+GIST_DEFAULT_DESCRIPTION = 'proxy speedtest subscription result'
+
+
+def _gist_identity(env):
+    """Gist 文件名/描述，允许各测速工作流经 env 覆盖（三件套各用各的 Gist，便于区分）。"""
+    filename = (env.get('PROXY_SPEEDTEST_GIST_FILENAME') or '').strip() or GIST_DEFAULT_FILENAME
+    description = (env.get('PROXY_SPEEDTEST_GIST_DESCRIPTION') or '').strip() or GIST_DEFAULT_DESCRIPTION
+    return filename, description
+
+
 def create_gist(env, yaml_text=''):
     token = env.get('GH_TOKEN')
-    yaml_filename = 'proxy_speedtest_subscription.yaml'
+    yaml_filename, description = _gist_identity(env)
     if not token:
         return {'ok': False, 'reason': 'missing GH_TOKEN'}
     if not (yaml_text or '').strip():
         return {'ok': False, 'reason': 'empty subscription text'}
     payload = {
-        'description': 'proxy speedtest subscription result',
+        'description': description,
         'public': False,
         'files': {
             yaml_filename: {'content': yaml_text},
@@ -1403,7 +1414,7 @@ def create_gist(env, yaml_text=''):
 def update_gist(env, yaml_text=''):
     token = env.get('GH_TOKEN')
     gist_id = env.get('PROXY_SPEEDTEST_GIST_ID', '').strip()
-    yaml_filename = 'proxy_speedtest_subscription.yaml'
+    yaml_filename, description = _gist_identity(env)
     if not token:
         return {'ok': False, 'reason': 'missing GH_TOKEN'}
     if not (yaml_text or '').strip():
@@ -1411,10 +1422,12 @@ def update_gist(env, yaml_text=''):
     if not gist_id:
         return create_gist(env, yaml_text)
     files_payload = {}
-    if (yaml_text or '').strip():
-        files_payload[yaml_filename] = {'content': yaml_text}
+    if yaml_filename != GIST_DEFAULT_FILENAME:
+        # 文件名变更：旧文件必须显式置 null 才会被删除，否则新旧并存分不清
+        files_payload[GIST_DEFAULT_FILENAME] = None
+    files_payload[yaml_filename] = {'content': yaml_text}
     payload = {
-        'description': 'proxy speedtest subscription result',
+        'description': description,
         'public': False,
         'files': files_payload,
     }
