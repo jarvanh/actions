@@ -166,6 +166,14 @@ def build_tun_config(env):
         'auto-route': True,
         'auto-detect-interface': True,
     }
+    # TUN 起来后 DNS 会被 mihomo 劫持：默认递归解析器（国内 DNS）在 Azure runner 上
+    # 经常不通，会让 runner 自己（日志/状态回传）与测速客户端一起解析失败。
+    # 显式指定可达的公共递归解析器 + respect-rules=false（DNS 不走规则，直接解析）。
+    cfg['dns'] = {
+        'enable': True,
+        'respect-rules': False,
+        'nameserver': ['1.1.1.1', '8.8.8.8'],
+    }
     cfg['rules'] = [f'PROCESS-NAME,{TAIER.name},AUTO', 'MATCH,DIRECT']
     MIHOMO_CONFIG.write_text(yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False),
                              encoding='utf-8')
@@ -187,6 +195,19 @@ def start_mihomo_tun(env):
     except Exception:
         pass
     return raw_proxy_map
+
+
+def stop_mihomo_tun():
+    """收尾必须关掉 mihomo（可重复调用）。
+
+    TUN 的 auto-route 会接管整机的出向路由：脚本退出后若内核还活着，runner 自己
+    的日志/状态回传也会被劫持，表现为「所有 step 已完成但 run 永远 in_progress、
+    连 cancel 都执行不了」，只能等 job 超时。mihomo 正常退出时会撤掉路由表，
+    所以这里 kill 即可；workflow 里另有一个 always() 兜底步骤。
+    """
+    _kill_stale_mihomo()
+    time.sleep(2)
+    log_progress('mihomo_tun_stopped')
 
 
 def direct_egress_ip():
@@ -344,7 +365,7 @@ def notify_failure(env, reason):
 # ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
-def main():
+def _run():
     started_at = datetime.now()
     log_progress('taier_speedtest_started', started_at=started_at.isoformat(), config={
         'points': CONFIG['TAIER_POINTS'],
@@ -422,6 +443,9 @@ def main():
         except Exception:
             pass
 
+    # 先关 TUN 再发通知：通知走的是 runner 自身网络，必须在路由恢复之后
+    stop_mihomo_tun()
+
     ended_at = datetime.now()
     duration_text = tg_format_elapsed((ended_at - started_at).total_seconds())
     meta = {
@@ -454,6 +478,17 @@ def main():
                  json_path=str(RESULT_JSON))
     # 全部/大量节点命中 bypass ⇒ 结果不可信，判失败便于在 Actions 上看见
     return 1 if (bypass_hits and bypass_hits >= max(1, len(results))) else 0
+
+
+def main():
+    # TUN 必须收尾：异常/提前 return 也要撤掉路由，否则 runner 无法回传状态
+    try:
+        return _run()
+    finally:
+        try:
+            stop_mihomo_tun()
+        except Exception:
+            pass
 
 
 if __name__ == '__main__':
