@@ -315,7 +315,7 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, qualif
     ok_results = [r for r in results if r.get('ok') and not r.get('bypass')]
     top = sorted(ok_results, key=lambda r: r.get('down') or 0.0, reverse=True)[:5]
     lines = [
-        '📶 <b>订阅节点三网测速</b>',
+        '📶 <b>泰尔三网测速</b>',
         sep,
         f"🕒 {esc(meta['started_text'])} ~ {esc(meta['ended_text'])} · 耗时 {esc(meta['duration_text'])}",
         f"📊 节点：共 <b>{len(results)}</b> 个 · 成功 <b>{len(ok_results)}</b> 个",
@@ -379,7 +379,7 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, qualif
 
 def notify_failure(env, reason):
     lines = [
-        '❌ <b>订阅节点三网测速失败</b>',
+        '❌ <b>泰尔三网测速失败</b>',
         '━' * 18,
         f'原因：<b>{html.escape(str(reason))}</b>',
         '',

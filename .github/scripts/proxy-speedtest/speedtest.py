@@ -967,7 +967,7 @@ def build_telegram_lines(results, *, meta, gist_res, qualified_count):
 
     sep = '━' * 18
     lines = [
-        '📈 <b>代理节点测速完成</b>',
+        '📈 <b>CDN 测速完成</b>',
         sep,
         f'🕒 {esc(started)} ~ {esc(ended)} · 耗时 {esc(duration_text)}',
         f'📊 节点：共 <b>{len(results)}</b> 个 · 可用 <b>{len(ok_results)}</b> 个',
@@ -1041,7 +1041,7 @@ def write_termination(started_at, reason):
         pass
     log_progress('speedtest_terminated', reason=reason)
     try:
-        abort_msg = (f'📈 <b>代理节点测速异常终止</b>\n{"━" * 18}\n'
+        abort_msg = (f'📈 <b>CDN 测速异常终止</b>\n{"━" * 18}\n'
                      f'⚠️ {html.escape(str(reason))}')
         abort_footer = tg_footer_line()
         if abort_footer:
