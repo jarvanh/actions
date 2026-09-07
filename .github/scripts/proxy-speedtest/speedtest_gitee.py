@@ -1,4 +1,24 @@
 #!/usr/bin/env python3
+"""Gitee 上行专项测速 + 三件套共享引擎（proxy-speedtest-gitee）。
+
+仓库代理测速三件套按测速点命名，本脚本承担双重角色：
+  1. 独立工作流 proxy-speedtest-gitee 的引擎：对订阅的每个可用节点，经 mihomo 代理
+     git push 测速文件到 Gitee 私有仓库（push-only 模式），得到「节点 → Gitee」的
+     单流上行带宽；达标节点订阅导出到本工作流专属 Gist 并回拉验证。
+  2. 三件套共享引擎：mihomo 下载/配置/生命周期、订阅拉取解析、节点快照与切换、
+     Gist 上传、Telegram 发送均在本文件，speedtest.py（CDN）与 taier_speedtest.py
+     （泰尔三网）以 `from speedtest_gitee import ...` 复用。顶层的 signal/异常通知
+     只在 main() 里注册，import 复用不会误触发。
+
+运行模式（PROXY_SPEEDTEST_MODE）：
+  push-only     只测经代理上行（gitee 工作流使用）
+  其他          上行 + clone 下行对照；另有直连基线（git_direct_speedtest）供对比
+
+Gist 约定（三件套各用各的，互不覆盖）：
+  secret PROXY_SPEEDTEST_GIST_ID / PROXY_SPEEDTEST_CDN_GIST_ID / PROXY_SPEEDTEST_TAIER_GIST_ID
+  分别注入各 workflow 的 PROXY_SPEEDTEST_GIST_ID env；文件名/描述经
+  PROXY_SPEEDTEST_GIST_FILENAME / PROXY_SPEEDTEST_GIST_DESCRIPTION 覆盖（_gist_identity）。
+"""
 import base64
 import json
 import os
@@ -2157,7 +2177,7 @@ if __name__ == '__main__':
         try:
             env = merged_env()
             # 统一 HTML 版式（emoji+加粗标题/分隔线/全角冒号 kv/统一收尾区）；
-            # 异常文本含 <>& 时未转义会触发 400 整条退化，必须 html.escape
+            # 异常文本含 <>& 时未转义会触发 400 整条丢失（不退化，2026-09-06 拍板），必须 html.escape
             _sep = '━' * 18
             _msg = (f'❌ <b>Gitee 上行测速异常退出 · {html.escape(str(stage))}</b>\n{_sep}\n'
                     f'错误：<code>{html.escape(err_text[:800])}</code>')
