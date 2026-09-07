@@ -1229,11 +1229,14 @@ def _mibs_to_megabits(mibs):
     return 0
 
 
-def build_node_metric_prefix(item: dict, speedtest_mode: str):
+def build_node_metric_prefix(item: dict, speedtest_mode: str, order: str = 'down_first'):
     """生成节点名前的简短指标前缀：主速度（兆）+ 附加指标（另一方向 ↓/↑ 兆、延迟 ms）。
 
     附加字段缺失时自动省略——如 gitee push-only 模式无下载/延迟数据，保持原「42兆 |」不变；
     出现两项及以上指标时主速度补方向箭头，便于区分上传/下载；主指标缺失时退化为仅展示可用指标。
+    order: 指标顺序——'down_first'（默认）= ↓主速度在前，用于订阅节点命名（保持既有格式）；
+           'up_first' = ↑上传在前，对齐泰尔引擎列序，用于通知 TOP5 条目。
+           上传未测出（0/缺失）时两种顺序下 ↑ 项都自动整项省略。
     """
     push_mode = speedtest_mode == 'push-only'
     upload_mbps = _mibs_to_megabits(item.get('upload_mibs'))
@@ -1249,6 +1252,9 @@ def build_node_metric_prefix(item: dict, speedtest_mode: str):
             parts.append(f'↑{primary}兆' if labeled else f'{primary}兆')
             if download_mbps > 0:
                 parts.append(f'↓{download_mbps}兆')
+        elif order == 'up_first' and upload_mbps > 0:
+            parts.append(f'↑{upload_mbps}兆')
+            parts.append(f'↓{primary}兆' if labeled else f'{primary}兆')
         else:
             parts.append(f'↓{primary}兆' if labeled else f'{primary}兆')
             if upload_mbps > 0:
@@ -1900,12 +1906,23 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
         summary_lines.append('')
     if ok_results_by_download:
         top = ok_results_by_download[:5]
-        summary_lines.append(f"🏆 <b>最快节点 · {len(top)}</b> · <i>上行速率</i>")
+        # 指标顺序对齐泰尔引擎列序（↑上传在前）；上传未测出时整段省略，不显示「上传 0兆」，
+        # 图例同步省略 ↑上传
+        push_only = speedtest_mode == 'push-only'
+        any_up = any(get_item_megabits(it, 'push-only') > 0 for it in top)
+        if push_only:
+            legend = '↑上传' if any_up else '上行'
+        else:
+            legend = '↑上传 · ↓下载' if any_up else '↓下载'
+        summary_lines.append(f"🏆 <b>最快节点 · {len(top)}</b> · <i>{legend}</i>")
         for idx, item in enumerate(top, 1):
-            if speedtest_mode == 'push-only':
-                speed_text = f"{get_item_megabits(item, 'push-only')}兆"
+            up = get_item_megabits(item, 'push-only')
+            if push_only:
+                speed_text = f"{up}兆" if up > 0 else '-'
+            elif up > 0:
+                speed_text = f"上传 {up}兆 / {get_item_megabits(item, speedtest_mode)}兆"
             else:
-                speed_text = f"{get_item_megabits(item, speedtest_mode)}兆 / 上传 {get_item_megabits(item, 'push-only')}兆"
+                speed_text = f"{get_item_megabits(item, speedtest_mode)}兆"
             connector = '└─' if idx == len(top) else '├─'
             summary_lines.append(f"  {connector} <code>{esc(item['name'])}</code> · <i>{esc(speed_text)}</i>")
         summary_lines.append('')
