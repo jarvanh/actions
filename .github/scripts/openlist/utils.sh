@@ -1,7 +1,9 @@
 #!/bin/bash
 # ===== OpenList 同步工具 — 通用工具函数 =====
-# 本文件只放与业务无关的通用工具：字符串转义、树形列表渲染、日志内容判定、
-# 字节数格式化、base64URL 编码。
+# 本文件只放与业务无关的通用工具：日志内容判定与落盘、字节数格式化、
+# base64URL 编码、长路径缩短。
+# 字符串转义（escape_html）与树形列表渲染（tree_*）已迁至通知真源
+# scripts/telegram/tg_notify.sh —— 此处不再提供（见下方说明）。
 #
 # 领域函数已按职责拆出，勿再往本文件堆放业务逻辑:
 #   - rclone 查询与过滤参数解析 → rclone_query.sh
@@ -10,7 +12,7 @@
 # 所有函数通过 load_all.sh 统一加载。
 
 # bash 5.2+ 默认开启 patsub_replacement: ${var//pat/rep} 的 rep 中 "&" 表示
-# 匹配文本，会让下方 escape_html 把 "<" 替换成 "<lt;"（实体里的 & 被吃掉），
+# 匹配文本，会让通知真源里的 escape_html 把 "<" 替换成 "<lt;"（实体里的 & 被吃掉），
 # Telegram HTML 渲染随之损坏。关闭该选项恢复 bash 5.1 及更早的字面量语义；
 # 旧 bash/zsh 无此选项，shopt 报错被吞，不影响加载。
 shopt -u patsub_replacement 2>/dev/null || true

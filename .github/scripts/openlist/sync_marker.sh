@@ -10,7 +10,8 @@
 #            top_dirs, stats_filtered, fixed_files, fixed_count, fixed_bytes,
 #            fix_blacklist（详见 save_sync_marker / save_fix_state_marker）
 #
-# 依赖: utils.sh (escape_html, format_bytes), telegram.sh (send_telegram_message)
+# 依赖: utils.sh (format_bytes), telegram.sh (send_telegram_message)
+# 依赖: telegram/tg_notify.sh (escape_html, tree_* — 排版助手真源，L0 层 source)
 # 依赖环境变量: FORCE_SYNC — 为 "true" 时跳过所有标记检查
 
 # 标记存储目录

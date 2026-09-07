@@ -43,7 +43,8 @@
 #   标签型 全部行以 "▸" 开头 → 说明"本层在做什么"，与统计行同列、排在统计行之前
 #   树型   其余（子目录等状态条目）→ 统计行是它的表头，排在其后并缩进 2 格
 #
-# 依赖: telegram.sh (send/edit/delete), utils.sh (escape_html)
+# 依赖: telegram.sh (send/edit/delete), utils.sh (format_bytes),
+#       telegram/tg_notify.sh (escape_html, tree_* — 排版助手真源，L0 层 source)
 
 # 状态文件路径定义
 PROGRESS_MSG_ID_FILE="/tmp/progress_msg_id.txt"
@@ -325,7 +326,7 @@ _progress_active_last() {
 #     ├─ dst · <i>详情</i>
 #     └─ dst
 #   组间空一行分隔（首组前不加空行——tg_add_section 已带段前空行），
-#   条目经 tree_lines 加 ├─/└─ 连接符（utils.sh）; 目标端 openlist: 前缀
+#   条目经 tree_lines 加 ├─/└─ 连接符（telegram/tg_notify.sh）; 目标端 openlist: 前缀
 #   冗余（所有目标均为 openlist 远端），统一裁剪缩短行宽。
 # 无 " → " 结构的显示名（调试任务等）退化为无组头的平铺条目，同样走 tree_lines
 # 树形 —— 同一面板内不得 "• " 与 "├─" 并存（规范 §2 标签语义表裁决 3）。

@@ -18,8 +18,9 @@
 #   仍失败则按空目标端全量估算（同步口径上界），且必须在预览里明示 ⚠️
 #   （历史只打 job 日志静默当精确值展示，合计虚高数倍无从辨别）。
 #
-# 依赖: utils.sh (format_bytes, _extract_filter_args, escape_html, tree_*)
-# 依赖: telegram.sh (send_telegram_message, tg_add_title/tg_add_section/tg_append)
+# 依赖: utils.sh (format_bytes), rclone_query.sh (_extract_filter_args),
+#       telegram/tg_notify.sh (escape_html, tree_* — 排版助手真源，L0 层 source)
+# 依赖: telegram.sh (send_telegram_message), telegram/tg_notify.sh (tg_add_title/tg_add_section/tg_append)
 
 # 拉取远端递归文件清单（lsjson，仅文件，含 Path/Size）
 # 用法: _get_listing_json <remote_path> [--exclude pat] ...

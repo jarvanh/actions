@@ -46,20 +46,20 @@ jobs:
           # 本工作流不使用挂载：/dropbox 只是普通本地目录。
           # Dropbox 上的 self-hosted/bitwarden/ 整个目录（bitwarden-data 主数据 +
           # 其他配置/目录）在启动前拉取到 /dropbox/self-hosted/bitwarden/（见下方
-          # "数据拉取"步骤），停止后 sync 回 Dropbox——SQLite 不能跑在 FUSE 上，必须本地化。
+          # "Restore bitwarden data from Dropbox" 步骤），停止后 sync 回 Dropbox——SQLite 不能跑在 FUSE 上，必须本地化。
           echo "==========onedrive==========="
           rclone lsf onedrive:
           echo "==========dropbox==========="
           rclone lsf dropbox:
       - name: Check if the tunnel is running
         env:
-          TUNNEL_NAME: "p" # 替换为你的隧道名称
+          TUNNEL_NAME: "p" # cloudflared 隧道名
         run: |
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
           sudo mkdir -p ~/.cloudflared/
           sudo chown -R runner:runner ~/.cloudflared
-          # rclone 以 runner 身份运行（与挂载步骤同）：root 运行会在 token 刷新时回写 rclone.conf 属主
+          # rclone 以 runner 身份运行：root 运行会在 token 刷新时回写 rclone.conf 属主
           rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
 
           # 获取隧道列表

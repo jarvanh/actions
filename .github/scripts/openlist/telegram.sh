@@ -20,6 +20,8 @@
 #   PROGRESS_SENT_IDS_LOG — 本轮已发进度消息 id 清单（finalize 兜底清孤儿，sync_progress.sh 定义）
 
 # 统一分隔线（18 个全角横线）
+# 注: tg_notify.sh 已定义同值 TG_SEP（真源），此处是收敛后遗留的重复定义；
+# 两者必须保持一致，改版式一律改真源 tg_notify.sh（勿只改这里）。
 TG_SEP='━━━━━━━━━━━━━━━━━━'
 
 # 凭据变量名兼容（与 tg_notify.sh 同款，两文件同步维护）：历史名自动回退，

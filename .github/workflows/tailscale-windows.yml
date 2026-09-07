@@ -41,7 +41,8 @@ jobs:
           # runneradmin 的系统登录密码，SSH 与 RDP 共用同一个
           RUNNER_PASSWORD: ${{ secrets.RUNNER_PASSWORD || 'P@ssw0rd!' }}
         run: |
-          # Tailscale SSH 服务端仅支持 Linux，Windows 上改为启用内置 OpenSSH Server
+          # Windows 上启用内置 OpenSSH Server 作为 SSH 服务端（截至 2026-09 本 workflow
+          # 仍走该方案，未使用 tailscale set --ssh）
           $cap = Get-WindowsCapability -Online | Where-Object Name -like 'OpenSSH.Server*'
           if ($cap -and $cap.State -ne 'Installed') {
             Add-WindowsCapability -Online -Name $cap.Name

@@ -4,6 +4,9 @@
 用法: compute_video_stats.py <target_dir>
 输出: total|uploaded|pending|failed|corrupt  (管道符分隔的一行)
 
+注: failed 恒为 0 —— 本脚本无上传失败台账可读，该字段仅作 5 段输出格式的
+占位（ph-dl.yml 不展示此字段）。
+
 读取 uploaded_videos.json（v1 JSON 对象格式）。不再兼容旧的 .txt 格式。
 同时读取 failed_videos.json（v1 JSON 对象格式），命中损坏指纹的文件不再计入"待上传"
 ——它们指纹不变就不会被重试，计入待上传会形成永远清不掉的假库存。

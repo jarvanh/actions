@@ -21,7 +21,8 @@ OpenList(:5244)，保证零回归——odlink 不可用时行为与今天完全�
 ------------------------------------------------------
 POST /api/fs/get   {path,password,refresh} → data.raw_url  （直链的关键）
 POST /api/fs/list  {path,password,refresh} → data.content  （目录树/探活）
-POST /api/fs/other 转码预览，未启用，返回非 200 即可
+POST /api/fs/other 转码预览，未启用：返回 HTTP 200 + 响应体 code=500
+                   （ge2o 按 code != 200 处理；HTTP 层保持 200 与上方契约一致）
 请求头 Authorization: <token>；ge2o 要求 HTTP 200 且响应体 code == 200
 
 凭据体系（三套，互不相干）
@@ -71,7 +72,6 @@ LAST_LINK_FILE = os.environ.get("ODLINK_LAST", "/opt/odlink-last.json")
 # 因此任何情况下都必须给出合法 RFC3339 时间戳。
 FALLBACK_TIME = "1970-01-01T00:00:00Z"
 
-# 目录条目缓存无 TTL：本轮 run 内路径不会自己搬家，命中即用，减少 Graph 往返
 LINK_TTL = 40 * 60          # downloadUrl 官方约 1 小时有效，保守缓存 40 分钟
 TOKEN_REFRESH_MARGIN = 600  # 距过期不足 10 分钟就提前刷新
 BOOTSTRAP_RETRY_SEC = 60    # bootstrap 未就绪时的重试间隔
@@ -285,6 +285,7 @@ class Resolver(object):
         self.shortcuts = {}     # 顶层名 -> (remote driveId, remote itemId)
         self.root_items = []    # 根目录条目（bootstrap 一次拿全，列根不再依赖上游）
         self.dir_cache = {}     # "3/电影" -> (driveId, itemId, is_dir, modified)
+        # dir_cache 无 TTL：本轮 run 内路径不会自己搬家，命中即用，减少 Graph 往返
         self.link_cache = {}    # "3/电影/x.mkv" -> (url, size, expire_ts, modified)
         # 计数器：供 /stats 与收尾 TG 通知汇总本轮 302 链路运行情况
         self.stats = {"get": 0, "list": 0, "link_ok": 0, "link_miss": 0,

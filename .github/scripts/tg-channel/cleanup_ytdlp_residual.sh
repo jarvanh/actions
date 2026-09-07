@@ -32,7 +32,8 @@ if [ "$FRAG_COUNT" -eq 0 ]; then
 fi
 
 # 发送 Telegram 通知（统一 HTML 排版；明细超长自动分片）
-# 助手需在明细构建前可用：文件名经 escape_html（含 & < > 未转义会 400 整条退化）
+# 助手需在明细构建前可用：文件名经 escape_html（含 & < > 未转义会 400 解析失败、
+# 整条消息发送失败——解析失败不重发，直接暴露）
 source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 
 # 收集文件名与大小，用于通知（树形条目统一 ├─/└─；元数据 " · <i>…</i>"，禁括号）。

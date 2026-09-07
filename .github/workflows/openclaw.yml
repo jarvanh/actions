@@ -824,7 +824,7 @@ jobs:
 
           # 统一 HTML 通知 + 统一收尾区（tg_notify.sh，checkout 后可用）。
           # 版式与 tailscale-windows.yml "🟢 Windows runner 已就绪" 同款：
-          # 按套分节（§2.1 场景 2）+ 组内树形条目，凭据/网络/出口/AI 网关
+          # 按套分节（§2.2 分组场景 2：多套同类信息）+ 组内树形条目，凭据/网络/出口/AI 网关
           # 各归其节，避免一级平铺 10 行 kv 混排
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
           TG_RUN_URL="${RUN_URL}" TG_RUN_STARTED_AT="${{ github.run_started_at }}" msg=""

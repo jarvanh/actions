@@ -2,7 +2,7 @@ name: self-hosted_backup
 
 on:
   schedule:
-    - cron: '0 2 * * *' # 每天凌晨2点运行
+    - cron: '0 2 * * *' # 每天 UTC 02:00（北京 10:00）运行
   workflow_dispatch:
 
 concurrency:

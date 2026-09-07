@@ -36,7 +36,7 @@ proxy-speedtest/            测速结果数据
 | `self-hosted_backup.yml` | 自建服务备份到 OneDrive |
 | `github_backup_all.yml` | 备份全部 GitHub 仓库到 OneDrive |
 | `emby.yml` | Emby 媒体服务器 + 302 直链 —— 详见 [`docs/emby.md`](docs/emby.md) |
-| `emby2.yml` / `jellyfin.yml` | 媒体服务器运维 |
+| `jellyfin.yml` | 媒体服务器运维 |
 | `HomeAssistant.yml` / `rdp.yml` / `openclaw.yml` | 自托管服务 |
 | `ql.yml` / `sub-store.yml` / `subs-check.yml` | 签到与订阅管理 |
 | `icloud-photos-downloader.yml` / `ph-dl.yml` / `pixivutil2.yml` | 媒体抓取下载 |
@@ -69,20 +69,20 @@ proxy-speedtest/            测速结果数据
 | **openlist** | `openlist_api.sh` | 89 | 管理面登录换 token、服务就绪等待 |
 | | `openlist_driver.sh` | 581 | 驱动刷新、健康预检、缓存刷新、truth-check |
 | **sync** | `sync_engine.sh` | 298 | 核心同步引擎（编排 + 423/8005 重试） |
-| | `sync_marker.sh` | 886 | 同步标记持久化（跳过、黑名单、修复清单） |
-| | `sync_notify.sh` | 334 | 同步结果通知构建（统一 Telegram HTML 排版） |
-| | `sync_progress.sh` | 792 | 全局进度通知系统（含收尾四态标题、多层级阶段区） |
-| **file** | `file_split.sh` | 669 | 大文件分割（ffmpeg 关键帧 / 7z 分卷） |
+| | `sync_marker.sh` | 907 | 同步标记持久化（跳过、黑名单、修复清单） |
+| | `sync_notify.sh` | 355 | 同步结果通知构建（统一 Telegram HTML 排版） |
+| | `sync_progress.sh` | 807 | 全局进度通知系统（含收尾四态标题、多层级阶段区） |
+| **file** | `file_split.sh` | 672 | 大文件分割（ffmpeg 关键帧 / 7z 分卷） |
 | | `file_fix.sh` | 1243 | 单文件修复的 4 种方法 + 目录可写性预检 + 短哈希目录兜底 |
 | | `file_fix_pipeline.sh` | 875 | 修复管线编排（方法轮换 + 增量持久化） |
-| | `file_restore.sh` | 642 | 修复文件还原（目标端 → 原路径 / 源端） |
-| **task** | `task_preview.sh` | 470 | 任务预览（大小估算、跳过预判、未传量估算） |
-| | `task_engine.sh` | 1378 | 任务注册表与编排（分批、轮转、阶段行生产） |
+| | `file_restore.sh` | 656 | 修复文件还原（目标端 → 原路径 / 源端） |
+| **task** | `task_preview.sh` | 490 | 任务预览（大小估算、跳过预判、未传量估算） |
+| | `task_engine.sh` | 1386 | 任务注册表与编排（分批、轮转、阶段行生产） |
 | **基础** | `utils.sh` | 147 | 通用工具（格式化、日志判定；转义/树形渲染已收敛到 `telegram/tg_notify.sh`） |
 | | `telegram.sh` | 127 | Telegram 进度面板（`send_telegram_message` + 原地编辑；排版/发送 source 真源） |
 | | `load_all.sh` | 60 | 统一加载入口（L0 通知真源 → L6 分层） |
 
-辅助程序：`get_storage_addition.py`（从 db 读存储配置）、`mask_rclone_config.py`（脱敏）、
+辅助程序：`get_storage_addition.py`（从 db 读存储配置）、
 `scan_fix_signatures.py`（marker 丢失时反推修复条目）、`restore_info.jq`（还原方式分类）。
 
 ---
@@ -269,7 +269,7 @@ cd .github/scripts/openlist
 for t in tests/*.sh; do bash "$t"; done
 ```
 
-16 个测试、359 个断言，覆盖轮转、批次巩固、修复管线优化、修复日志区段头提取、
+17 个测试，覆盖轮转、批次巩固、修复管线优化、修复日志区段头提取、
 目录可写性预检（含假成功目录）与短哈希目录兜底、预览 diff、跳过窗口的预览
 预判与跳过通知"本次未传"（含现场估算与宁缺毋滥分支）、truth-check、
 token 登录、marker、收尾标题四态、进度阶段区排版（子目录树/文件批次的层级

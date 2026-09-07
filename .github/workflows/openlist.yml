@@ -172,7 +172,7 @@ jobs:
         run: |
           sudo mkdir -p ~/.cloudflared
           sudo chown -R runner:runner ~/.cloudflared
-          # rclone 以 runner 身份运行（与挂载步骤同）：root 运行会在 token 刷新时回写 rclone.conf 属主
+          # rclone 以 runner 身份运行：root 运行会在 token 刷新时回写 rclone.conf 属主
           rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb

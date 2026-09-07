@@ -41,10 +41,10 @@ progress_update() { :; }
 _refresh_ol_drivers() { :; }
 _start_token_refresher() { echo $(( $(cat /tmp/bc_refresher_starts 2>/dev/null || echo 0) + 1 )) > /tmp/bc_refresher_starts; }
 _stop_token_refresher() { echo $(( $(cat /tmp/bc_refresher_stops 2>/dev/null || echo 0) + 1 )) > /tmp/bc_refresher_stops; }
-# 修复管线三件套（真实实现在 sync_engine.sh，这里只验证批次巩固的接线与清单传递）
+# 修复管线三件套（真实实现在 file_fix_pipeline.sh，这里只验证批次巩固的接线与清单传递）
 _sync_fix_missing_files() {
   echo $(( $(cat /tmp/bc_fixpipe_calls 2>/dev/null || echo 0) + 1 )) > /tmp/bc_fixpipe_calls
-  # SYNC_FIX_MISSING_OVERRIDE 语义 = 缺失清单文件路径（见 sync_engine.sh 实现），记录路径
+  # SYNC_FIX_MISSING_OVERRIDE 语义 = 缺失清单文件路径（见 file_fix_pipeline.sh 实现），记录路径
   echo "${SYNC_FIX_MISSING_OVERRIDE:-}" > /tmp/bc_fixpipe_override
   # 模拟: 清单内每个文件都换方法落盘成功 1 条（fix_list 行数 = 清单文件数）
   local _f

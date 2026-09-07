@@ -189,9 +189,10 @@ do_config() {
   if [ ! -s "$CONF" ]; then
     write_secret_conf "$RCLONE_CONFIG_CONTENT"
   fi
+  # 2. 掩码敏感值（::add-mask::）——每次 conf 变更后都重新掩一遍
   mask_conf
 
-  # 2. 恢复首选 Dropbox：拉取持久化副本覆盖本地，无效则回退
+  # 3. 恢复首选 Dropbox：拉取持久化副本覆盖本地，无效则回退
   if has_dropbox; then
     local persisted="/tmp/rclone.conf.persisted.$$"
     if rclone copyto "$PERSIST_REMOTE" "$persisted" 2>/dev/null && [ -s "$persisted" ]; then
@@ -214,7 +215,7 @@ do_config() {
     echo "::warning::conf 中无 dropbox remote，跳过持久化恢复/同步（仅使用 secret 版）"
   fi
 
-  # 3. 最终有效性检查：conf 无效则本轮必然失败，尽早报错
+  # 4. 最终有效性检查：conf 无效则本轮必然失败，尽早报错
   if ! check_conf; then
     echo "::error::rclone.conf 有效性检查失败（remote 不可用）"
     # 排查信息：conf 实际路径 + rclone 原始报错（stderr 平时被 check_conf 吞掉）
@@ -225,7 +226,7 @@ do_config() {
     exit 1
   fi
 
-  # 4. 同步回 Dropbox：copyto 幂等，内容相同自动跳过（即"有修改才上传"）
+  # 5. 同步回 Dropbox：copyto 幂等，内容相同自动跳过（即"有修改才上传"）
   if has_dropbox; then
     if rclone copyto "$CONF" "$PERSIST_REMOTE"; then
       echo "rclone.conf 已同步到 $PERSIST_REMOTE"
