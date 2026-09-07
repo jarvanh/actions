@@ -23,21 +23,36 @@ on:
   workflow_dispatch:
     inputs:
       points:
-        description: '测速点（省份/城市/运营商；多点用逗号分隔，每多一个点单节点耗时翻倍）'
+        description: '测速点（省份/城市 + 运营商；每多一个点单节点耗时翻倍）'
         required: false
-        default: '北京电信'
+        type: choice
+        default: '广东联通'
+        options:
+          - '广东联通'
+          - '广东电信'
+          - '广东移动'
+          - '北京电信'
+          - '北京联通'
+          - '北京移动'
+          - '上海电信'
+          - '上海联通'
+          - '上海移动'
+          - '浙江电信'
+          - '江苏电信'
+          - '四川电信'
+          - '湖北电信'
       mode:
         description: '测速模式：multi = 多线程上下行（贴近代理真实吞吐）'
         required: false
         default: 'multi'
       duration:
-        description: '每个方向测速秒数（5-13）'
+        description: '每个方向测速秒数（上游二进制硬钳制 5-13，>13 会被压到 13）'
         required: false
-        default: '5'
+        default: '10'
       max_nodes:
         description: '最多测几个节点（0 = 不限）'
         required: false
-        default: '10'
+        default: '0'
 
 jobs:
   speedtest:
@@ -61,10 +76,10 @@ jobs:
           # 订阅源（与 proxy-speedtest / proxy-speedtest-gitee 同一个 secret）
           PROXY_SPEEDTEST_SUB_URLS: ${{ secrets.PROXY_SPEEDTEST_SUB_URLS }}
           # 测速参数（workflow_dispatch 可覆盖；定时运行走默认值）
-          TAIER_POINTS: ${{ github.event.inputs.points || '北京电信' }}
+          TAIER_POINTS: ${{ github.event.inputs.points || '广东联通' }}
           TAIER_MODE: ${{ github.event.inputs.mode || 'multi' }}
-          TAIER_DURATION: ${{ github.event.inputs.duration || '5' }}
-          TAIER_MAX_NODES: ${{ github.event.inputs.max_nodes || '10' }}
+          TAIER_DURATION: ${{ github.event.inputs.duration || '10' }}
+          TAIER_MAX_NODES: ${{ github.event.inputs.max_nodes || '0' }}
           # GitHub API 匿名调用在共享出口 IP 上 60 次/h 限流时的认证回退
           GH_TOKEN: ${{ secrets.PAT }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
