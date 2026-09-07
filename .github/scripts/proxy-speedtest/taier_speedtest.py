@@ -22,6 +22,7 @@ Go 的 net.Dialer 又直接发系统调用（proxychains 这类 LD_PRELOAD 方�
   - 节点串行测试（共享同一 mihomo 内核，切换后 settle）
   - 参数全部经环境变量控制
   - 兜底对齐 gitee：SIGTERM/SIGINT → ⛔ 通知（先撤 TUN 再发）；未捕获异常 → ❌ 通知
+    （其余失败路径只发通知，撤路由依赖 main() 的 finally，通知可能在撤 TUN 之前发出）
 """
 import html
 import json
@@ -37,7 +38,8 @@ from datetime import datetime
 import yaml
 
 # ---------------------------------------------------------------------------
-# 复用 speedtest_gitee.py 的已验证能力（import 期仅会创建 ~/proxy-speedtest 目录）
+# 复用 speedtest_gitee.py 的已验证能力（import 期会创建 ~/proxy-speedtest 及其 providers/、
+# source-snapshots/ 子目录）
 # ---------------------------------------------------------------------------
 from speedtest_gitee import (
     DEFAULT_MIN_MEGABIT,
@@ -59,6 +61,7 @@ from speedtest_gitee import (
     tg_format_elapsed,
     update_gist,
     wait_mihomo,
+    egress_network_lines,
 )
 
 # ---------------------------------------------------------------------------
@@ -326,6 +329,10 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, qualif
         f"🧪 引擎：<code>taierspeedtest {esc(VERSION['taier'] or 'latest')}</code>",
         '',
     ]
+    # 出口网络信息（runner 侧 IP/ISP/ASN/位置，与 Windows runner 就绪通知同款）；
+    # 此处已在 stop_mihomo_tun() 之后调用，探测到的是 runner 直连出口
+    lines.extend(egress_network_lines())
+    lines.append('')
     if top:
         lines.append(f'🏆 <b>最快节点 · {len(top)}</b> · <i>↓下载 · ↑上传 · 延迟</i>')
         for idx, r in enumerate(top, 1):
@@ -595,7 +602,7 @@ def _run():
 
     log_progress('taier_speedtest_done', node_count=len(results), bypass_hits=bypass_hits,
                  json_path=str(RESULT_JSON))
-    # 全部/大量节点命中 bypass ⇒ 结果不可信，判失败便于在 Actions 上看见
+    # 全部节点都命中 bypass ⇒ 结果不可信，判失败便于在 Actions 上看见
     return 1 if (bypass_hits and bypass_hits >= max(1, len(results))) else 0
 
 

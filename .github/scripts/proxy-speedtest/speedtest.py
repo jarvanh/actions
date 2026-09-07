@@ -38,7 +38,8 @@ from datetime import datetime
 import yaml
 
 # ----------------------------------------------------------------------------
-# 复用 speedtest_gitee.py 的已验证能力（import 期仅会创建 ~/proxy-speedtest 目录）
+# 复用 speedtest_gitee.py 的已验证能力（import 期会创建 ~/proxy-speedtest 及其 providers/、
+# source-snapshots/ 子目录）
 # ----------------------------------------------------------------------------
 from speedtest_gitee import (
     MIHOMO_MIXED_PORT,
@@ -56,6 +57,7 @@ from speedtest_gitee import (
     format_duration,
     tg_format_elapsed,
     tg_footer_line,
+    egress_network_lines,
     TEST_FILE_NAME,
     # 订阅导出 + Gist 上传（复刻 speedtest_gitee 的订阅发布能力）
     build_source_mapping,
@@ -378,7 +380,7 @@ def gitee_push_speedtest(env, size_mib, push_timeout, branch, via_proxy=True):
             gitee=gitee,
         )
         dt = time.perf_counter() - t0
-        # git_force_push_testfile 返回其内置 time.time() 计时，取两者中较稳者
+        # 优先用 git_force_push_testfile 内置的 time.time() 计时，为 0/缺失时回退本地计时
         measured = dur if dur and dur > 0 else dt
         if measured <= 0:
             return {'ok': False, 'mibps': None, 'error': 'upload too fast to measure'}
@@ -657,7 +659,7 @@ if(gist && (gist.raw_url||gist.html_url)){
   }
   if(gist.id){
     html+='<div class="tip">Gist ID：<code>'+escapeHtml(gist.id)+
-      '</code> —— 回填仓库 Secrets 的 PROXY_SPEEDTEST_GIST_ID 可使后续运行更新同一 Gist 而非新建。</div>';
+      '</code> —— 回填仓库 Secrets 的 PROXY_SPEEDTEST_CDN_GIST_ID 可使后续运行更新同一 Gist 而非新建。</div>';
   }
   box.innerHTML=html;
   document.getElementById('gist-section').style.display='block';
@@ -758,7 +760,7 @@ function drawCharts(rows){drawLatency(rows);drawDownload(rows);}
 
 document.getElementById('footer').innerHTML=
   '测速方法：延迟为经代理对目标 URL 的 HTTP 响应计时（多次取中位数）；下载速度为经 mihomo 代理 '+
-  'curl 拉取国内/国际测速点的 MiB/s。节点逐节点串行测量。参数快照：'+
+  'curl 拉取国内镜像站/软件源测速点的 MiB/s。节点逐节点串行测量。参数快照：'+
   '<code>size_mib='+META.size_mib+'</code> <code>latency_samples='+META.latency_samples+
   '</code> <code>download_timeout='+META.download_timeout+'s</code> <code>push='+(META.push?'on':'off')+'</code>。'+
   '数据仅供网络质量参考。';
@@ -878,8 +880,8 @@ def main():
     except Exception as e:
         log_progress('report_write_failed', error=str(e))
 
-    # 隐私防护：报告含节点完整凭据（server/uuid/订阅地址），仅写入运行机本地临时目录，
-    # 不再写入仓库（仓库为公开仓库，历史提交曾泄漏敏感信息，已彻底清除）。
+    # 隐私防护：报告含节点完整凭据（server/uuid/订阅地址），仅写入运行机本地
+    # ~/proxy-speedtest（不进仓库、不进 Actions 日志）。
 
     # ----------------------------------------------------------------------
     # 订阅导出 + 上传 Gist：复用 speedtest_gitee 的 build_subscription_yaml_text /
@@ -912,7 +914,7 @@ def main():
             print('========================================================\n')
             log_progress('gist_uploaded', ok=gist_res.get('ok'), action=action,
                          reason=gist_res.get('reason', ''))
-            # 订阅信息记录进本地报告 JSON（原代码引用了未定义的 report_data，已修复）
+            # 订阅信息补写进本地报告 JSON（RESULT_JSON 二次回写）
             summary['subscription_gist'] = {
                 'id': gist_res.get('id'), 'html_url': gist_res.get('html_url'),
                 'raw_url': (gist_res.get('yaml') or {}).get('raw_url', ''),
@@ -983,9 +985,12 @@ def build_telegram_lines(results, *, meta, gist_res, qualified_count):
         f'📊 节点：共 <b>{len(results)}</b> 个 · 可用 <b>{len(ok_results)}</b> 个',
         '',
     ]
+    # 出口网络信息（runner 侧 IP/ISP/ASN/位置，与 Windows runner 就绪通知同款）
+    lines.extend(egress_network_lines())
+    lines.append('')
     if top_results:
         top = top_results[:5]
-        # 名次类分节用 🏆（规范 §2 标签语义表裁决 5：禁 ⭐/🥇 自造前缀；计数在粗体外）
+        # 名次类分节用 🏆（规范 §2 裁决 5：禁 ⭐/🥇 自造前缀；名次类计数在 <b> 内）
         lines.append(f'🏆 <b>最快节点 · {len(top)}</b> · <i>↓下载 · ↑上传 · 延迟ms</i>')
         for idx, r in enumerate(top, 1):
             prefix = build_node_metric_prefix(_result_metric_item(r), mode)

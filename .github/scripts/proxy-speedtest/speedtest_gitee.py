@@ -1715,6 +1715,56 @@ def tg_footer_line():
     return line
 
 
+def fetch_egress_network_info(timeout=10):
+    """runner 直连出口网络信息（IP/ISP/ASN/位置），数据源 https://ipwho.is/。
+
+    与 openclaw.yml / tailscale-windows.yml「🌐 出口网络」分节同源同款（同一 API、
+    同一降级语义）。注意必须在 mihomo TUN 关闭之后调用（三脚本发通知前均已撤 TUN），
+    且显式禁用环境代理——探测的是 runner 自身出口，不是任何节点出口。
+    任一字段取不到逐项降级「未知」；整体失败也不抛异常，不阻塞通知。
+    """
+    info = {'ip': '未知', 'isp': '未知', 'asn': '未知', 'loc': '未知'}
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        req = urllib.request.Request('https://ipwho.is/', headers={'User-Agent': 'Mozilla/5.0'})
+        with opener.open(req, timeout=timeout) as r:
+            geo = json.load(r)
+        if geo.get('ip'):
+            info['ip'] = str(geo['ip'])
+        conn = geo.get('connection') or {}
+        if conn.get('isp'):
+            info['isp'] = str(conn['isp'])
+        if conn.get('asn'):
+            asn_line = f"AS{conn['asn']}"
+            if conn.get('org'):
+                asn_line += f" · {conn['org']}"
+            info['asn'] = asn_line
+        loc_parts = [str(x) for x in (geo.get('city'), geo.get('region'), geo.get('country_code')) if x]
+        if loc_parts:
+            info['loc'] = ', '.join(loc_parts)
+    except Exception as e:
+        log_progress('egress_network_fetch_failed', error=str(e))
+    return info
+
+
+def egress_network_lines(info=None):
+    """渲染「🌐 出口网络」树形块（版式对齐 openclaw.yml / tailscale-windows.yml）。
+
+    标签语义（docs/telegram-notify.md §2）：IP/ASN 是可复制机器值 → <code>；
+    ISP/位置是结论值 → <b>。info 缺省时现场探测；返回行不含尾随空行，由调用方补。
+    """
+    if info is None:
+        info = fetch_egress_network_info()
+    esc = lambda s: html.escape(str(s))  # noqa: E731
+    return [
+        '🌐 <b>出口网络</b>',
+        f"  ├─ 出口 IP：<code>{esc(info['ip'])}</code>",
+        f"  ├─ ISP：<b>{esc(info['isp'])}</b>",
+        f"  ├─ ASN：<code>{esc(info['asn'])}</code>",
+        f"  └─ 位置：<b>{esc(info['loc'])}</b>",
+    ]
+
+
 # 敏感字段名（小写匹配），值会被自动脱敏
 # 注意：仅对「子串匹配会产生误伤」的字段放这里做模糊匹配
 _SENSITIVE_KEYS = frozenset({
@@ -1842,6 +1892,9 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
         f'📊 节点：共 <b>{len(speed_results)}</b> 个 · 可用 <b>{len(ok_results)}</b> 个',
         '',
     ]
+    # 出口网络信息（runner 侧 IP/ISP/ASN/位置，与 Windows runner 就绪通知同款）
+    summary_lines.extend(egress_network_lines())
+    summary_lines.append('')
     if aborted_due_to_runtime:
         summary_lines.append(f'⚠️ 本轮已中止：{esc(runtime_abort_reason)}')
         summary_lines.append('')
