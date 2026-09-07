@@ -177,13 +177,13 @@ progress_transfer_tick "传输中: 2.469 GiB / 4.976 GiB" "" >/dev/null
 chk "L7d-1 传输中独立成行（统计行下、注记样式）" \
   "$(line_of '传输中')" "<code>         · 传输中: 2.469 GiB / 4.976 GiB</code>"
 
-_progress_batch_history_add 47 "❌ 批次 47：共 21 个文件，成功 0 · 失败 22"
+_progress_batch_history_add 47 "❌#47 ✅00 🔧00 ❗22 ⏭️00 ♻️00 ⏱00:58 ⬆️4.72G"
 rm -f "$PROGRESS_LAST_UPDATE_FILE"
 progress_transfer_tick "传输中: 2.469 GiB / 4.976 GiB" "" >/dev/null
 chk "L7d-2 历史非空时 note 前缀不变（注记不占树节点）" \
   "$(line_of '传输中')" "<code>         · 传输中: 2.469 GiB / 4.976 GiB</code>"
 chk "L7d-3 批次历史在 note 之后渲染（缩进在 code 内，渲染器既有行为）" \
-  "$(line_of '批次 47')" "<code>         └─ ❌ 批次 47：共 21 个文件，成功 0 · 失败 22</code>"
+  "$(line_of '#47')" "<code>         └─ ❌#47 ✅00 🔧00 ❗22 ⏭️00 ♻️00 ⏱00:58 ⬆️4.72G</code>"
 
 # 线程实体行为: note 直写 + stats 无 ⏱ + 停止清理
 printf 'Transferred: 2.469 GiB / 4.976 GiB, ETA 3m\n' > "$WORK_DIR/batch_l7.log"

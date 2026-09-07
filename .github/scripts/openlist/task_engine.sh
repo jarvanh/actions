@@ -1233,15 +1233,9 @@ sync_by_file_batches() {
       _stop_token_refresher
       _stop_batch_progress_thread
 
-      # 批次耗时（mm:ss）
+      # 批次耗时（mm:ss 补零，定宽对齐；≥1h 时 mm 延伸如 75:20）
       local _batch_elapsed=$(( $(date +%s) - ${BATCH_START_TS:-$(date +%s)} ))
-      # 中文时长（规范禁英文紧凑时长进通知：3m42s → 3 分 42 秒）
-      local _batch_dur
-      if [ "$_batch_elapsed" -ge 60 ]; then
-        _batch_dur="$((_batch_elapsed / 60)) 分 $((_batch_elapsed % 60)) 秒"
-      else
-        _batch_dur="${_batch_elapsed} 秒"
-      fi
+      local _bh_mm=$((_batch_elapsed / 60)) _bh_ss=$((_batch_elapsed % 60))
 
       if [ "$rc" -eq 0 ]; then
         synced_batches=$((synced_batches + 1))
@@ -1333,12 +1327,15 @@ sync_by_file_batches() {
       local _bh_mark="✅"
       [ "$_fail_n" -gt 0 ] && _bh_mark="⚠️"
       { [ "$rc" -ne 0 ] && [ "$rc" -ne 4 ]; } && _bh_mark="❌"
-      # 分项 emoji 计数恒显（用户偏好: 全字段恒显格式稳定；字段 emoji 表见 docs/telegram-notify.md §4）:
-      #   ✅成功 🔧修复 ❗失败（不用 ❌，避免与批次状态撞形）⏭️跳过 ♻️已有
-      # 批次号 #n；⏱ 前缀耗时（2026-09-07 放宽: ⏱=耗时类前缀，收尾区专属的是「⏱ 已运行 X」完整形态；
-      #   时长去空格 1分15秒 压行宽 —— 单行 ≈31 全角 < 手机 33，自动折行不再发生）
-      # ⬆️ 上传量恒显（0 → ⬆️0 B）；⏭️/♻️ 整批性质批次照常入史（2026-09-07 用户确认）
-      local _bh_entry="${_bh_mark}#$((i+1)) ✅${_ok_n} 🔧${_fixed_n} ❗${_fail_n} ⏭️${_onf_n} ♻️${_have_n} ⏱${_batch_dur// /} ⬆️$(format_bytes "${_batch_bytes:-0}")"
+      # 分项 emoji 计数恒显 + 定宽补零（用户偏好: 全字段恒显 + 数字列竖向对齐；形态 2，2026-09-07）:
+      #   ✅00 🔧00 ❗33 ⏭️22 ♻️00（%02d 补零）⏱01:15（mm:ss）⬆️4.79G（GiB 两位，末列不补）
+      #   代价: 行宽 ≈42 全角，手机折 2 行（用户接受，换数字列竖向对齐）；字段表见 docs/telegram-notify.md §4
+      #   状态: ✅全成 ⚠️部分失败 ❌失败 ⏭️整批跳过 ♻️整批已有；❗=失败（不用 ❌ 避免与状态撞形）
+      local _bh_gib
+      _bh_gib=$(awk "BEGIN{printf \"%.2f\", ${_batch_bytes:-0}/1073741824}")
+      printf -v _bh_entry '%s#%d ✅%02d 🔧%02d ❗%02d ⏭️%02d ♻️%02d ⏱%02d:%02d ⬆️%sG' \
+        "${_bh_mark}" "$((i+1))" "$_ok_n" "$_fixed_n" "$_fail_n" "$_onf_n" "$_have_n" \
+        "$_bh_mm" "$_bh_ss" "$_bh_gib"
       _progress_batch_history_add "$((i+1))" "$_bh_entry"
     fi
   done
