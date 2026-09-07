@@ -43,6 +43,9 @@ jobs:
           # 注意：这是 gitee 专属 Gist —— cdn / taier 分别用 PROXY_SPEEDTEST_CDN_GIST_ID /
           # PROXY_SPEEDTEST_TAIER_GIST_ID，三个测速工作流各用各的，互不覆盖。
           PROXY_SPEEDTEST_GIST_ID: ${{ secrets.PROXY_SPEEDTEST_GIST_ID }}
+          # Gist 文件名/描述：三件套各不相同，便于在 Gist 列表里分辨
+          PROXY_SPEEDTEST_GIST_FILENAME: proxy_speedtest_gitee_subscription.yaml
+          PROXY_SPEEDTEST_GIST_DESCRIPTION: 'proxy speedtest subscription (gitee 上行)'
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           # 统一收尾区（footer）: 运行日志链接 + 已运行时长
