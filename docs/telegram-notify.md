@@ -28,7 +28,7 @@
   │   子行                      ← tree_sub（│ 后 3 空格；末条目整行前缀 6 空格）
   └─ <i>还有 N 条…</i>          ← 超长折叠行（并入条目流作末条，禁双 └─）
 
-<pre>日志块</pre>                ← tg_add_block（需对齐的多行内容）
+<pre>日志块</pre>                ← tg_add_block（原始追加；<pre> 标签由调用方自带）
 <i>备注说明</i>                  ← tg_add_note（段前空行）
 
 （空行）⏱ 已运行 <b>X</b> · 🔗 <a href="URL">运行日志</a>   ← tg_add_footer
@@ -100,6 +100,29 @@
 ```
 
    实现参考：`openlist/task_preview.sh`（`排除 · N` 子树）。
+
+### 2.3 复制即用命令块（操作指引给人可执行命令，不给数据文件路径）
+
+通知里需要用户后续操作时（跳过通知的强制同步/修复还原、失败通知的重跑入口…），
+**直接给可复制执行的 `gh` 命令**，用 `<pre>` 包裹（等宽不折行、TG 点按整块复制）；
+不要给 marker/JSON 等数据文件路径 —— 那是程序消费的落盘载体，对人没有动作。
+
+- 参数值必须按实际匹配逻辑核实（如 `restore_task` 按 marker 文件名**首个 `_` 前缀**
+  精确匹配，`file_restore.sh` —— 填完整任务名反而匹配不到）；行为差异需注明
+  （`force_sync` 是全量，无单任务参数）。
+- 实现参考：`openlist/sync_marker.sh` `send_sync_skipped`（🛠️ 复制即用）。
+
+```
+🛠️ 复制即用
+
+▸ 强制同步（全量，含本任务）
+gh workflow run openlist.yml -f run_mode=同步 -f force_sync=true
+
+▸ 还原 5 个非原名文件（restore_task=task0）
+gh workflow run openlist.yml \
+  -f run_mode='⚠️ 还原 · 修复文件还原为原路径' \
+  -f restore_task=task0
+```
 
 ```
 ⚠️ 跳过/过滤文件
