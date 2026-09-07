@@ -57,7 +57,9 @@ from speedtest_gitee import (
     format_duration,
     tg_format_elapsed,
     tg_footer_line,
-    egress_network_lines,
+    resolve_host_ipv4,
+    fetch_ip_network_info,
+    target_network_line,
     TEST_FILE_NAME,
     # 订阅导出 + Gist 上传（复刻 speedtest_gitee 的订阅发布能力）
     build_source_mapping,
@@ -866,6 +868,14 @@ def main():
         'download_timeout': CONFIG['PROXY_SPEEDTEST_DOWNLOAD_TIMEOUT'],
         'push': CONFIG['PROXY_SPEEDTEST_ENABLE_PUSH'],
     }
+    # 测速点域名（按下载 URL 去重提取，运行时解析的镜像站/软件源），
+    # 供通知展示「📍 测速点网络」归属信息
+    meta['download_hosts'] = []
+    for u in download_urls:
+        u = str(u or '').strip()
+        host = u.split('/')[2] if u.startswith(('http://', 'https://')) and len(u.split('/')) > 2 else u
+        if host and host not in meta['download_hosts']:
+            meta['download_hosts'].append(host)
     summary = {
         'ok': True,
         'started_at': started_at,
@@ -985,8 +995,19 @@ def build_telegram_lines(results, *, meta, gist_res, qualified_count):
         f'📊 节点：共 <b>{len(results)}</b> 个 · 可用 <b>{len(ok_results)}</b> 个',
         '',
     ]
-    # 出口网络信息（runner 侧 IP/ISP/ASN/位置，与 Windows runner 就绪通知同款）
-    lines.extend(egress_network_lines())
+    # 测速点（下载镜像/软件源）的网络归属：域名 → 解析 IP → ipwho.is 查 ISP/ASN/位置
+    lines.append('📍 <b>测速点网络</b>')
+    hosts = meta.get('download_hosts') or []
+    if hosts:
+        infos = []
+        for h in hosts:
+            ip = resolve_host_ipv4(h)
+            infos.append((h, ip, fetch_ip_network_info(ip) if ip else None))
+        for i, (h, ip, info) in enumerate(infos):
+            connector = '└─' if i == len(infos) - 1 else '├─'
+            lines.append(target_network_line(h, ip, info, connector=connector))
+    else:
+        lines.append('  └─ 归属获取失败')
     lines.append('')
     if top_results:
         top = top_results[:5]

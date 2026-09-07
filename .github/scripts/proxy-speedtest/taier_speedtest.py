@@ -21,8 +21,8 @@ Go 的 net.Dialer 又直接发系统调用（proxychains 这类 LD_PRELOAD 方�
     （为三件套 Gist 区分做的少量共享扩展见其 _gist_identity）
   - 节点串行测试（共享同一 mihomo 内核，切换后 settle）
   - 参数全部经环境变量控制
-  - 兜底对齐 gitee：SIGTERM/SIGINT → ⛔ 通知（先撤 TUN 再发）；未捕获异常 → ❌ 通知
-    （其余失败路径只发通知，撤路由依赖 main() 的 finally，通知可能在撤 TUN 之前发出）
+  - 兜底对齐 gitee：SIGTERM/SIGINT → ⛔ 通知；未捕获异常/阶段失败 → ❌ 通知
+    （所有失败路径均先撤 TUN 再发——notify_failure 内部先调幂等的 stop_mihomo_tun）
 """
 import html
 import json
@@ -32,6 +32,7 @@ import shutil
 import signal
 import subprocess
 import time
+import urllib.parse
 import urllib.request
 from datetime import datetime
 
@@ -61,7 +62,9 @@ from speedtest_gitee import (
     tg_format_elapsed,
     update_gist,
     wait_mihomo,
-    egress_network_lines,
+    resolve_host_ipv4,
+    fetch_ip_network_info,
+    network_cells,
 )
 
 # ---------------------------------------------------------------------------
@@ -313,6 +316,133 @@ def parse_taier_output(text: str):
 # ---------------------------------------------------------------------------
 # 通知（全库统一 HTML 版式；动态内容一律 escape）
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# 测速点定位（复刻 taierspeedtest 的 match 协议，protocol.go/main.go）
+# ---------------------------------------------------------------------------
+# 泰尔控制服务器（引擎 fetchClient 的降级链，原样照抄）
+_TAIER_CTRL_SERVERS = [
+    'https://dlcv2.cnspeedtest.cn:8443',
+    'http://dlc.duoweisoft.com:8096',
+    'http://dlcv2.duoweisoft.com:8088',
+]
+_TAIER_PKG = 'com.cnspeedtest.globalspeed'
+_TAIER_UA_DALVIK = 'Dalvik/2.1.0 (Linux; U; Android 14; NE2210 Build/TP1A.220624.014)'
+# 省 → 省会城市（main.go provinceCity，match API 的 city 参数用）
+_TAIER_PROVINCE_CITY = {
+    '北京': '北京', '天津': '天津', '上海': '上海', '重庆': '重庆',
+    '河北': '石家庄', '山西': '太原', '内蒙古': '呼和浩特',
+    '辽宁': '沈阳', '吉林': '长春', '黑龙江': '哈尔滨',
+    '江苏': '南京', '浙江': '杭州', '安徽': '合肥', '福建': '福州',
+    '江西': '南昌', '山东': '济南', '河南': '郑州', '湖北': '武汉',
+    '湖南': '长沙', '广东': '广州', '广西': '南宁', '海南': '海口',
+    '四川': '成都', '贵州': '贵阳', '云南': '昆明', '西藏': '拉萨',
+    '陕西': '西安', '甘肃': '兰州', '青海': '西宁', '宁夏': '银川',
+    '新疆': '乌鲁木齐',
+}
+# 计划单列市（main.go extraCity）：城市名 → (省, 市)
+_TAIER_EXTRA_CITY = {
+    '深圳': ('广东', '深圳'), '苏州': ('江苏', '苏州'), '宁波': ('浙江', '宁波'),
+    '青岛': ('山东', '青岛'), '厦门': ('福建', '厦门'), '东莞': ('广东', '东莞'),
+    '无锡': ('江苏', '无锡'), '佛山': ('广东', '佛山'),
+}
+_TAIER_ISPS = ('电信', '联通', '移动')
+
+
+def parse_taier_points(points):
+    """'广东联通' / '武汉电信' → (省, 市, 运营商)；解析失败返回 (None, None, None)。
+
+    口径与引擎 parsePoints/resolveLocation 一致：去运营商后缀 → 先查计划单列市、
+    再查省份（city 取省会）。
+    """
+    s = str(points or '').strip()
+    oper = ''
+    for name in _TAIER_ISPS:
+        if s.endswith(name):
+            oper = name
+            s = s[:-len(name)].strip()
+            break
+    if not s:
+        return (None, None, None)
+    if s in _TAIER_EXTRA_CITY:
+        prov, city = _TAIER_EXTRA_CITY[s]
+    elif s in _TAIER_PROVINCE_CITY:
+        prov, city = s, _TAIER_PROVINCE_CITY[s]
+    else:
+        # 城市名（省会）反查省份（引擎 resolveLocation 第三分支，如「武汉电信」）
+        for p, cty in _TAIER_PROVINCE_CITY.items():
+            if cty == s:
+                prov, city = p, s
+                break
+        else:
+            return (None, None, None)
+    return (prov, city, oper)
+
+
+def match_taier_server(prov, city, oper, client_ip, timeout=10):
+    """调泰尔控制服务器 mobilematch_many.php 定位测速服务器（复刻 matchServers）。
+
+    按 省/市/运营商 显式过滤；选服务器按引擎 pickServer 口径：优先 hostname 含
+    运营商名的，否则取列表第一个。失败返回 None，不抛异常。
+    """
+    v = urllib.parse.urlencode({
+        'ip': client_ip or '', 'network': '4', 'province': prov, 'city': city,
+        'wifioper': oper, 'mobileoperid': '', 'ipv6': '0',
+        'model': 'Android', 'pkg': _TAIER_PKG,
+    })
+    for base in _TAIER_CTRL_SERVERS:
+        try:
+            req = urllib.request.Request(
+                base + '/dataServer/mobilematch_many.php?' + v,
+                headers={'User-Agent': _TAIER_UA_DALVIK})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                arr = json.load(r)
+            if not isinstance(arr, list) or not arr:
+                continue
+            for s in arr:
+                if oper and oper in str(s.get('hostname') or ''):
+                    return s
+            return arr[0]
+        except Exception as e:
+            log_progress('taier_match_server_failed', base=base, error=str(e))
+            continue
+    return None
+
+
+def taier_target_network_lines(points, client_ip):
+    """「📍 测速点网络」树形块：泰尔测速服务器（IP:port · 主机名）+ 其 IP 归属。
+
+    match / 归属查询失败逐级降级为「归属获取失败」，不抛异常、不阻塞通知。
+    须在 stop_mihomo_tun() 之后调用（此时为 runner 直连出口视角）。
+    """
+    esc = lambda s: html.escape(str(s))  # noqa: E731
+    lines = ['📍 <b>测速点网络</b>']
+    prov, city, oper = parse_taier_points(points)
+    info = None
+    if prov:
+        srv = match_taier_server(prov, city, oper, client_ip)
+        if srv:
+            ip = str(srv.get('hostip') or '')
+            port = str(srv.get('port') or '')
+            hostname = str(srv.get('hostname') or '').strip()
+            if ip:
+                info = fetch_ip_network_info(ip)
+                line = f"  ├─ 测速服务器：<code>{esc(ip)}:{esc(port)}</code>"
+                if hostname:
+                    line += f" · <i>{esc(hostname)}</i>"
+                lines.append(line)
+    if info:
+        isp, asn, loc = network_cells(info)
+        lines += [
+            f"  ├─ ISP：<b>{esc(isp)}</b>",
+            f"  ├─ ASN：<code>{esc(asn)}</code>",
+            f"  └─ 位置：<b>{esc(loc)}</b>",
+        ]
+    else:
+        fallback = ' · '.join(x for x in (prov, city, oper) if x)
+        lines.append(f"  └─ 归属获取失败{('（' + fallback + '）') if fallback else ''}")
+    return lines
+
+
 def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, qualified_count):
     def esc(s):
         return html.escape(str(s))
@@ -329,9 +459,9 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, qualif
         f"🧪 引擎：<code>taierspeedtest {esc(VERSION['taier'] or 'latest')}</code>",
         '',
     ]
-    # 出口网络信息（runner 侧 IP/ISP/ASN/位置，与 Windows runner 就绪通知同款）；
-    # 此处已在 stop_mihomo_tun() 之后调用，探测到的是 runner 直连出口
-    lines.extend(egress_network_lines())
+    # 测速点（泰尔服务器）的网络归属：按测速点参数复刻引擎 match 协议定位服务器，
+    # 再查其 IP 归属（IP/ISP/ASN/位置）；已在 stop_mihomo_tun() 之后调用（直连视角）
+    lines.extend(taier_target_network_lines(meta['points'], direct_ip))
     lines.append('')
     if top:
         # 指标顺序对齐泰尔引擎列序（↑上传在前）；上传未测出（CDN 类节点拒绝泰尔
@@ -393,6 +523,12 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, qualif
 
 
 def notify_failure(env, reason):
+    # 先撤 TUN 再发——auto-route 劫持下连 TG API 都可能送不出去。
+    # stop_mihomo_tun 可重复调用，main() finally 的二次收尾安全幂等。
+    try:
+        stop_mihomo_tun()
+    except Exception:
+        pass
     # 标题直接带原因（reason 形如「环境准备失败：…」，取全角冒号前的阶段名）
     _head = str(reason).split('：')[0].splitlines()[0][:40].strip() or '未知原因'
     lines = [
