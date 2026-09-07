@@ -40,8 +40,6 @@ from datetime import datetime
 
 import yaml
 
-WORKSPACE = pathlib.Path(os.environ.get('PROXY_SPEEDTEST_WORKSPACE', os.path.expanduser('~/.openclaw/workspace')))
-SCRIPTS = WORKSPACE / 'scripts'
 HOME_RUNTIME = pathlib.Path(os.path.expanduser('~/proxy-speedtest'))
 HOME_RUNTIME.mkdir(parents=True, exist_ok=True)
 PROVIDERS_DIR = HOME_RUNTIME / 'providers'
@@ -1721,54 +1719,80 @@ def tg_footer_line():
     return line
 
 
-def fetch_egress_network_info(timeout=10):
-    """runner 直连出口网络信息（IP/ISP/ASN/位置），数据源 https://ipwho.is/。
+def resolve_host_ipv4(target, timeout=5):
+    """域名或 IP → IPv4 字符串；解析失败返回 ''。
 
-    与 openclaw.yml / tailscale-windows.yml「🌐 出口网络」分节同源同款（同一 API、
-    同一降级语义）。注意必须在 mihomo TUN 关闭之后调用（三脚本发通知前均已撤 TUN），
-    且显式禁用环境代理——探测的是 runner 自身出口，不是任何节点出口。
-    任一字段取不到逐项降级「未知」；整体失败也不抛异常，不阻塞通知。
+    直连 DNS（不经代理、不经 mihomo）：测速点是固定的国内站点，直连解析结果
+    即可代表其服务侧归属；传 IP 时原样返回。
     """
-    info = {'ip': '未知', 'isp': '未知', 'asn': '未知', 'loc': '未知'}
+    t = str(target or '').strip()
+    if not t:
+        return ''
+    host = t
+    if '://' in t:
+        host = urllib.parse.urlparse(t).hostname or ''
+    host = host.split(':')[0].strip('[]').strip()
+    if not host:
+        return ''
+    if re.match(r'^(?:\d{1,3}\.){3}\d{1,3}$', host):
+        return host
+    try:
+        infos = socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_STREAM)
+        return infos[0][4][0] if infos else ''
+    except Exception:
+        return ''
+
+
+def fetch_ip_network_info(ip, timeout=10):
+    """查单个 IP 的网络归属（ISP/ASN/位置），数据源 https://ipwho.is/<ip>。
+
+    与 openclaw.yml / tailscale-windows.yml「🌐 出口网络」同源同款（同一 API）。
+    显式禁用环境代理；失败返回 None（调用方降级），不抛异常。
+    """
+    if not ip:
+        return None
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        req = urllib.request.Request('https://ipwho.is/', headers={'User-Agent': 'Mozilla/5.0'})
+        req = urllib.request.Request(f'https://ipwho.is/{ip}',
+                                     headers={'User-Agent': 'Mozilla/5.0'})
         with opener.open(req, timeout=timeout) as r:
             geo = json.load(r)
-        if geo.get('ip'):
-            info['ip'] = str(geo['ip'])
+        if not geo.get('ip'):
+            return None
         conn = geo.get('connection') or {}
-        if conn.get('isp'):
-            info['isp'] = str(conn['isp'])
-        if conn.get('asn'):
-            asn_line = f"AS{conn['asn']}"
-            if conn.get('org'):
-                asn_line += f" · {conn['org']}"
-            info['asn'] = asn_line
+        asn_line = f"AS{conn['asn']}" if conn.get('asn') else '未知'
+        if conn.get('org'):
+            asn_line += f" · {conn['org']}"
         loc_parts = [str(x) for x in (geo.get('city'), geo.get('region'), geo.get('country_code')) if x]
-        if loc_parts:
-            info['loc'] = ', '.join(loc_parts)
+        return {
+            'ip': str(geo['ip']),
+            'isp': str(conn.get('isp') or '未知'),
+            'asn': asn_line,
+            'loc': ', '.join(loc_parts) if loc_parts else '未知',
+        }
     except Exception as e:
-        log_progress('egress_network_fetch_failed', error=str(e))
-    return info
+        log_progress('target_network_lookup_failed', ip=ip, error=str(e))
+        return None
 
 
-def egress_network_lines(info=None):
-    """渲染「🌐 出口网络」树形块（版式对齐 openclaw.yml / tailscale-windows.yml）。
+def network_cells(info):
+    """归属 dict → (isp, asn, loc) 文本；info=None 或缺项逐项降级「未知」。"""
+    if not info:
+        return ('未知', '未知', '未知')
+    return (info.get('isp') or '未知', info.get('asn') or '未知', info.get('loc') or '未知')
 
-    标签语义（docs/telegram-notify.md §2）：IP/ASN 是可复制机器值 → <code>；
-    ISP/位置是结论值 → <b>。info 缺省时现场探测；返回行不含尾随空行，由调用方补。
-    """
-    if info is None:
-        info = fetch_egress_network_info()
+
+def target_network_line(host, ip, info, connector='├─'):
+    """单测速点一行（树形条目）：
+    `  ├─ <code>host</code> · <code>ip</code> · <b>ISP</b> · <code>ASN</code> · <b>位置</b>`
+    host 与 ip 相同（IP 直填）时省 ip 段；归属查询失败逐项降级「未知」。"""
     esc = lambda s: html.escape(str(s))  # noqa: E731
-    return [
-        '🌐 <b>出口网络</b>',
-        f"  ├─ 出口 IP：<code>{esc(info['ip'])}</code>",
-        f"  ├─ ISP：<b>{esc(info['isp'])}</b>",
-        f"  ├─ ASN：<code>{esc(info['asn'])}</code>",
-        f"  └─ 位置：<b>{esc(info['loc'])}</b>",
-    ]
+    cells = [f'<code>{esc(host)}</code>']
+    if ip and ip != host:
+        cells.append(f'<code>{esc(ip)}</code>')
+    isp, asn, loc = network_cells(info)
+    cells += [f'<b>{esc(isp)}</b>', f'<code>{esc(asn)}</code>', f'<b>{esc(loc)}</b>']
+    return f'  {connector} ' + ' · '.join(cells)
 
 
 # 敏感字段名（小写匹配），值会被自动脱敏
@@ -1898,8 +1922,12 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
         f'📊 节点：共 <b>{len(speed_results)}</b> 个 · 可用 <b>{len(ok_results)}</b> 个',
         '',
     ]
-    # 出口网络信息（runner 侧 IP/ISP/ASN/位置，与 Windows runner 就绪通知同款）
-    summary_lines.extend(egress_network_lines())
+    # 测速点（Gitee push 目标）的网络归属：域名解析 IP 后查 ISP/ASN/位置
+    gitee_ip = resolve_host_ipv4('gitee.com')
+    summary_lines.append('📍 <b>测速点网络</b>')
+    summary_lines.append(target_network_line(
+        'gitee.com', gitee_ip, fetch_ip_network_info(gitee_ip) if gitee_ip else None,
+        connector='└─'))
     summary_lines.append('')
     if aborted_due_to_runtime:
         summary_lines.append(f'⚠️ 本轮已中止：{esc(runtime_abort_reason)}')
@@ -2041,8 +2069,8 @@ def main():
         mapped_count=(len(source_mapping.get('exact_raw') or {}) + len(source_mapping.get('normalized_raw') or {})),
         raw_exact_count=len(source_mapping.get('exact_raw') or {}),
         raw_normalized_count=len(source_mapping.get('normalized_raw') or {}),
-        fallback_exact_count=len(source_mapping.get('exact_fallback') or {}),
-        fallback_normalized_count=len(source_mapping.get('normalized_fallback') or {}),
+        exact_count=len(source_mapping.get('exact') or {}),
+        normalized_count=len(source_mapping.get('normalized') or {}),
     )
     raw_proxy_map = run_stage('mihomo 启动/配置', ensure_mihomo_running, env)
     log_progress('mihomo_ready', api=MIHOMO_API, mixed_port=MIHOMO_MIXED_PORT)
