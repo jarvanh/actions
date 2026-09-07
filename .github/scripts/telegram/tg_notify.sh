@@ -21,7 +21,7 @@
 #   {emoji} <b>标题</b>          ← tg_add_title
 #   ━━━━━━━━━━━━━━━━━━           ← TG_SEP（勿手写分隔线）
 #   标签：<b>值</b>               ← tg_add_kv / 路径 tg_add_path
-#   {emoji} <b>分节 · N</b>       ← tg_add_section（段前空行；计数一律 " · N"）
+#   {emoji} <b>分节 · N</b>       ← tg_add_section（段前空行，紧跟标题时无；计数一律 " · N"）
 #   • 条目 /  ├─ 树形条目         ← 平铺 "• "，分组树形
 #   <pre>日志</pre>              ← tg_add_block
 #   {可选 <i>备注</i>}            ← tg_add_note
@@ -77,14 +77,24 @@ tg_add_path() {
   tg_append "$1" "$2：<code>$(escape_html "$3")</code>"$'\n'
 }
 
-# 分节标题（段前空一行）: "\n{标题（含 emoji）加粗}\n"
+# 分节标题: "\n{标题（含 emoji）加粗}\n"（段前空一行与上一区块分隔）
+# 例外: 紧跟标题时（消息以 "分隔线\n" 结尾）不补段前空行 ——
+#   否则视觉上等于"分隔线自带空行"，与全库"分隔线后不空行"冲突
+#   （任务预览 / openclaw·tailscale 入口通知的首个分节即此形态）
 tg_add_section() {
-  tg_append "$1" $'\n'"<b>$(escape_html "$2")</b>"$'\n'
+  case "${!1}" in
+    *"${TG_SEP}"$'\n') tg_append "$1" "<b>$(escape_html "$2")</b>"$'\n' ;;
+    *) tg_append "$1" $'\n'"<b>$(escape_html "$2")</b>"$'\n' ;;
+  esac
 }
 
 # 斜体说明（段前空一行）: "\n<i>说明</i>\n"
+# 紧跟标题时同样不补段前空行（与 tg_add_section 同规则，避免"分隔线自带空行"）
 tg_add_note() {
-  tg_append "$1" $'\n'"<i>$(escape_html "$2")</i>"$'\n'
+  case "${!1}" in
+    *"${TG_SEP}"$'\n') tg_append "$1" "<i>$(escape_html "$2")</i>"$'\n' ;;
+    *) tg_append "$1" $'\n'"<i>$(escape_html "$2")</i>"$'\n' ;;
+  esac
 }
 
 # 追加多行文本块并保证段尾换行

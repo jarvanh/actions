@@ -984,15 +984,14 @@ def build_telegram_lines(results, *, meta, gist_res, qualified_count):
         '',
     ]
     if top_results:
-        best = top_results[0]
-        lines.append(f"🏆 最快节点：<b>{esc(best.get('name', ''))}</b>")
-        lines.append('')
-        lines.append('⭐ <b>TOP 5</b> · <i>↓下载 · ↑上传 · 延迟ms</i>')
         top = top_results[:5]
+        # 名次类分节用 🏆（规范 §2 标签语义表裁决 5：禁 ⭐/🥇 自造前缀；计数在粗体外）
+        lines.append(f'🏆 <b>最快节点 · {len(top)}</b> · <i>↓下载 · ↑上传 · 延迟ms</i>')
         for idx, r in enumerate(top, 1):
             prefix = build_node_metric_prefix(_result_metric_item(r), mode)
             connector = '└─' if idx == len(top) else '├─'
-            item = f'  {connector} {idx}. <code>{esc(r.get("name", ""))}</code>'
+            # 条目不编号（裁决 6）：顺序即名次
+            item = f'  {connector} <code>{esc(r.get("name", ""))}</code>'
             if prefix:
                 item += f' · <i>{esc(prefix)}</i>'
             lines.append(item)
@@ -1054,7 +1053,7 @@ def write_termination(started_at, reason):
         # 标题直接带原因首行（原文截断后再转义，避免切断 HTML 实体）
         _head = str(reason).splitlines()[0][:40].strip() or '未知原因'
         abort_msg = (f'❌ <b>CDN 测速异常退出 · {html.escape(_head)}</b>\n{"━" * 18}\n'
-                     f'⚠️ {html.escape(str(reason))}')
+                     f'原因：<code>{html.escape(str(reason))}</code>')
         abort_footer = tg_footer_line()
         if abort_footer:
             abort_msg += f'\n\n{abort_footer}'
@@ -1067,7 +1066,7 @@ def handle_termination_signal(signum, frame):
     """SIGTERM/SIGINT 兜底：run 被取消/超时也发通知（与 speedtest_gitee 同款）。"""
     sig_name = signal.Signals(signum).name if signum else f'SIGNAL-{signum}'
     msg = (f'⛔ <b>CDN 测速异常终止</b>\n{"━" * 18}\n'
-           f'⚠️ 脚本被中断：收到 {sig_name}，本轮测速未正常完成。')
+           f'⚠️ 脚本被中断：收到 <code>{sig_name}</code>，本轮测速未正常完成。')
     footer = tg_footer_line()
     if footer:
         msg += f'\n\n{footer}'

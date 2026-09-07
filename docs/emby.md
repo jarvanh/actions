@@ -1,7 +1,7 @@
-# emby302 —— Emby 媒体服务器 + 302 直链子系统
+# emby —— Emby 媒体服务器 + 302 直链子系统
 
 > 入口：`.github/workflows/emby.yml`
-> 脚本：`.github/scripts/emby302/`
+> 脚本：`.github/scripts/emby302/`（目录名沿用历史命名，不随本文档改名）
 >
 > 在 GitHub Actions runner 上临时拉起一套可用的 Emby（含数据恢复与备份），并把媒体播放
 > 流量从"经服务器中转"改为"播放器直连 OneDrive 直链"（302 重定向）。
@@ -55,7 +55,7 @@
 ### 并发与时长
 
 - `concurrency: emby-singleton` —— 同时只允许一个 run，后来的排队而不打断
-- `sudo sleep 340m`（约 5 小时 40 分）—— 留出余量给每 6 小时一次的定时触发
+- `sleep 340m`（约 5 小时 40 分）—— 留出余量给每 6 小时一次的定时触发
 - run 结束即销毁 runner，所有状态靠云端备份延续
 
 ---
@@ -133,7 +133,9 @@
 | rclone mount | — | 挂载点 `/onedrive`，VFS 缓存 `/mnt/vfs/onedrive`（**上限动态分配**），日志 `/opt/logs/rclone-mount.log` |
 
 **运行时落盘位置**：`/tmp/link-host`、`/tmp/link-token`（直链源契约，见下）、
-`/tmp/PLAYBACK_MODE`（当前模式）、`/opt/odlink-last.json`（最近一次直链，供通知用）。
+`/tmp/openlist-token`（机器自动登录所得的 OpenList 会话 token）、`/tmp/odlink-token`（odlink 访问令牌）、
+`/tmp/PLAYBACK_MODE`（当前模式）、`/tmp/EMBY_READY_FOR_BACKUP`（收尾打包闸门）、
+`/opt/odlink-last.json`（最近一次直链，供通知用）、`/var/lib/emby/warm-state.json`（海报档位 + 回看预热，随备份跨 run 传递）。
 
 ### 3.4 路径映射约束（关键坑）
 
@@ -217,7 +219,7 @@ ge2o 据此发出 302。
 | 层 | 时机 | 行为 |
 |---|---|---|
 | **启动探活** | run 启动后 | 依次检查：ge2o 存活 → 直链源 `fs/get` → 直链源 `fs/list`。重试 3 次（间隔 10s），全失败则 `MODE=direct` |
-| **运行中 watchdog** | 每 60 秒 | 相同检查；**连续 3 次失败**自动 kill cloudflared、改指 Emby:8096、写 `direct` 到 `/tmp/PLAYBACK_MODE` 并 TG 通知，然后退出 |
+| **运行中 watchdog** | 每 60 秒 | 相同检查（含媒体库目录 `fs/get` 映射探针）；**连续 3 次失败**自动 kill cloudflared、改指 Emby:8096、写 `direct` 到 `/tmp/PLAYBACK_MODE`、发 `⚠️ Emby 直链已回退` 通知，然后退出 |
 | **odlink 自身降级** | 请求级 | 解析失败即单请求回退 OpenList，不影响整体模式 |
 
 探活**必须打 ge2o 实际在用的那个源**（`link_host` / `link_token`），否则会出现
@@ -274,18 +276,19 @@ ge2o 据此发出 302。
 
 | 通知 | 时机 | 内容 | 落日志 |
 |---|---|---|---|
-| `📺 Emby 服务启动` | 模式决策后立刻 | 模式、直链源、快捷方式解析数、探活结果、时间 | ✅ 正文回显（无敏感信息） |
-| `🎬 媒体播放` | 检测到播放 | 多行卡片：**片名+年份**（剧集为剧名+SxxExx）、**元数据**（集名/类型/时长/分辨率/编码/体积）、**链路**（302直链含剩余有效期 / 中转）、**客户端**（客户端名/设备/IP/起播耗时）、302 时附 **直链**（3 分钟内的最近一次，以 HTML `<a>` 折叠为 `▶ 打开直链`） | ❌ 仅记片名 |
-| `⚠️ Emby 302 链路回退` | watchdog 触发 | 事件（连续 3 次探活失败）、动作（自动回退 direct） | — |
-| `📺 Emby 服务停止` | run 收尾 | 状态、模式、302 链路统计、全库预热（请求数+档位）、**本轮活跃客户端**（authentication.db 里本轮有活动的 AppName 去重，只列应用名不带设备名/用户名）、时间 | ✅ 正文回显 |
-| `🔐 OpenList 凭据` | **仅改密时** | 用户名、密码明文（`<code>` 等宽）、入口 | ❌ 绝不落日志 |
+| `📺 Emby 服务启动` | 模式决策后立刻 | 模式、直链源、网盘快捷方式（解析数）、取链自检（通过/未通过）、时间，外加一条"网盘快捷方式"的说明行 | ✅ 正文回显（无敏感信息） |
+| `🎬 媒体播放` | 检测到播放 | 多行卡片：首行 **片名+年份**（剧集为剧名 + SxxExx），分隔线后三行标签锚点行 **规格 / 链路 / 客户端**，302 时另起一段附 **直链**（3 分钟内的最近一次，以 HTML `<a>` 折叠为 `▶ 打开直链`） | ❌ 仅记片名 |
+| `⚠️ Emby 直链已回退` | watchdog 触发 | 事件（连续 3 次链路自检失败）、动作（已自动切到中转模式） | — |
+| `📺 Emby 服务停止` | run 收尾 | 状态、模式、**本轮直链**（成功取到 / 未取到 / 解析失败 / 改走备用 / 跨网盘，共 N 次）、**海报预热**（请求数 + 宽度档）、**播放客户端**（authentication.db 里本轮有活动的 AppName 去重，只列应用名不带设备名/用户名）、时间 | ✅ 正文回显 |
+| `🔐 OpenList 凭据` | **仅改密时**（secret 为空随机生成 / 库内密码漂移纠正） | 场景、用户名、密码明文（`<code>` 等宽）、入口，外加一条"长期有效密码 = secret"的说明行 | ❌ 绝不落日志 |
 
 全部通知采用**全库统一 HTML 版式**，规范唯一真源见
 [`docs/telegram-notify.md`](telegram-notify.md)（实现层：bash `telegram/tg_notify.sh`
 + pwsh `telegram/tg_notify.ps1`；openlist 侧仅薄适配面板函数）：`emoji 标题 + ━━━ 分隔线 +
-键值区 + 统一收尾行 `⏱ 已运行 X · 🔗 运行日志``（时长 = run 已运行时长，
+键值区 + 统一收尾行`（`⏱ 已运行 X · 🔗 运行日志`，时长 = run 已运行时长，
 收尾区与正文间固定一个空行）。凭据私信同样走发送层 `send_tg`
-（密码经 `tg_add_path` 自动实体转义，绝不落日志）。
+（密码经 `tg_add_path` 自动实体转义，绝不落日志；
+HTML 解析失败不重发、429 限流保留重试——与全库其余通知同一套语义）。
 
 ### 安全边界
 
@@ -306,27 +309,30 @@ ge2o 据此发出 302。
 ### 播放通知的卡片结构（统一版式 + 收尾区）
 
 ```
-🎬 五十度飞 (2018)                                  ← 第 1 行：片名 + 年份（<b> 加粗）
-━━━━━━━━━━━━━━━━━━                                 ← 第 2 行：统一分隔线
-电影 · 1h58m · 2160p · hevc · 1.7 GB                ← 第 3 行：元数据
-⚡ 302直链 · 播放器直连 OneDrive · 直链剩余 38 分钟     ← 第 4 行：链路
-📱 Infuse-Direct · iPhone · 45.130.164.109 · 起播 4.16s  ← 第 5 行：客户端
-▶ 打开直链                                          ← 第 6 行：超链接（仅 302）
-                                                   ← 空行（收尾区铁律）
-⏱ 已运行 1h35m · 🔗 运行日志                          ← 第 7 行：统一收尾行
+🎬 五十度飞 (2018)                                   ← 第 1 行：片名 + 年份（<b> 加粗）
+━━━━━━━━━━━━━━━━━━                                  ← 第 2 行：统一分隔线
+规格：电影 · 1 小时 58 分 · 2160p · hevc · 1.7 GB    ← 第 3 行：规格（标签锚点行）
+链路：⚡ 302直连 OneDrive · 直链剩余 38 分钟           ← 第 4 行：链路
+客户端：Infuse-Direct · iPhone · 45.130.164.109 · 起播 4.2 秒  ← 第 5 行：客户端
+                                                    ← 空行
+▶ 打开直链                                           ← 第 6 行：超链接（仅 302）
+                                                    ← 空行（收尾区铁律）
+⏱ 已运行 1 小时 35 分 · 🔗 运行日志                    ← 第 7 行：统一收尾行
 ```
 
 | 行 | 来源 | 说明 |
 |---|---|---|
-| 1 片名 | Emby `Items` | 剧集显示**剧名 + SxxExx**，集名下移到元数据行；查不到显示`未知` |
+| 1 片名 | Emby `Items` | 剧集显示**剧名 + SxxExx**，集名下移到规格行；查不到显示`未知` |
 | 2 分隔线 | `TG_SEP` | 与全库通知一致（18 全角横线） |
-| 3 元数据 | Emby `Items` 一次取全 + odlink | 类型 / 时长 / 分辨率 / 编码；体积来自 `odlink-last.json`（仅 302 有）——**任一项取不到就整项省略**，不会出现 `null · · 0` |
-| 4 链路 | 模式 + `odlink-last.json` | 302 时给出直链剩余有效期（`2400s` = `odlink.py` 的 `LINK_TTL`，改缓存时长需同步 `notify()`） |
-| 5 客户端 | Emby `Sessions` + ge2o 日志 | 客户端名 / 设备名来自 Sessions；IP 与起播耗时来自 ge2o 访问日志（数据源 A 才有，用于"谁在播"与起播慢定位） |
-| 6 直链 | `odlink-last.json` | 3 分钟内才视为本次播放所用；HTML `<a>` 折叠 |
+| 3 规格 | Emby `Items` 一次取全 + odlink | 集名（剧集）/ 类型 / 时长 / 分辨率 / 编码 / 体积；体积来自 `odlink-last.json`（仅 302 有）——**任一项取不到就整项省略**，不会出现 `null · · 0` |
+| 4 链路 | 模式 + `odlink-last.json` | 302 = `⚡ 302直连 OneDrive` + 直链剩余有效期；中转 = `🔁 视频流经 runner 中转到网盘`。`2400s` = `odlink.py` 的 `LINK_TTL`，改缓存时长需同步 `playlog.sh` 的 `notify()` |
+| 5 客户端 | Emby `Sessions` + ge2o 日志 | 客户端名 / 设备名来自 Sessions；IP 与起播耗时来自 ge2o 访问日志（数据源 A 才有，用于"谁在播"与起播慢定位；日志里 `4.16s` 规范为 `4.2 秒`） |
+| 6 直链 | `odlink-last.json` | 3 分钟内才视为本次播放所用；HTML `<a>` 折叠，段前空一行 |
 | 7 收尾区 | `tg_notify.sh` 的 `tg_add_footer` | 读 `TG_RUN_URL` / `TG_RUN_STARTED_AT`，缺席时优雅降级跳过 |
 
-**HTML 解析失败时自动退化为纯文本重发**（超链接变裸 URL，收尾区同步去标签）——宁可通知变长，也不让播放通知消失。
+**HTML 解析失败（400 can't parse entities）不重发**：发送层 `send_tg` 直接输出错误并返回非 0；
+只有 **429 限流保留重试**（最多 5 次，按 `retry_after` 等待）。解析失败说明版式有 bug，
+退化成纯文本只会把 bug 藏起来；且两类失败都意味着上一条未被 Telegram 接收，不存在"发重复"风险。
 
 > 实现坑（已踩过）：TSV 用 tab 分隔会让 `read` 吃掉中间空字段（tab 是 IFS 空白字符，连续分隔符被折叠），
 > 导致电影没有 series/季集时后续字段整体前移。现改用 `\037`（单元分隔符）。
@@ -407,6 +413,7 @@ ge2o 据此发出 302。
 |---|---|---|
 | `ODLINK_PORT` | `5245` | 监听端口 |
 | `ODLINK_UPSTREAM` | `http://127.0.0.1:5244` | 回退的 OpenList 地址 |
+| `ODLINK_UPSTREAM_TOKEN` | `/tmp/openlist-token` | 转发上游时带的 token 文件（OpenList 会话 token） |
 | `ODLINK_ROOT` | `/onedrive` | 需剥掉的挂载前缀 |
 | `ODLINK_TOKEN` | 空 | 校验 `Authorization` 头；为空则不校验 |
 | `ODLINK_LOG` | `/opt/logs/odlink.log` | 日志 |
@@ -420,19 +427,25 @@ ge2o 据此发出 302。
 | GET | `/ping` | 存活 |
 | GET | `/healthz` | 就绪（ready + token 可取 → 200，否则 503） |
 | GET | `/stats` | 运行统计（不含任何凭据与直链） |
-| POST | `/api/fs/get` | 取直链 → `data.raw_url` |
+| POST | `/api/fs/get` | 取直链 → `data.raw_url`；命中目录时返回 200 但 `raw_url` 为空（探活正是拿媒体库目录打这一接口，不能报错否则会误判链路不健康） |
 | POST | `/api/fs/list` | 列目录 → `data.content` |
-| POST | `/api/fs/other` | 转码预览未启用，返回非 200 |
+| POST | `/api/fs/other` | 转码预览未启用：HTTP 200，body 里 `code=500` |
+
+> 根目录请求（`path=/onedrive`）在 `ready` 后由 odlink 本地应答（bootstrap 已拿到全部顶层条目），
+> 不再绕上游——少一个级联故障点。未配置 `ODLINK_TOKEN` 时启动日志会告警"不校验 Authorization"。
 
 **统计字段**（`/stats` 与收尾通知）
 
 | 字段 | 含义 |
 |---|---|
+| `ready` / `shortcuts` | 是否已就绪 / 顶层快捷方式数量 |
 | `fs.get` / `fs.list` | 请求次数 |
 | `fs.link_ok` / `fs.link_miss` | 取到 / 未取到直链 |
 | `fs.resolve_err` | Graph 解析失败 |
-| `fs.fallback` | 回退 OpenList 次数 |
+| `fs.fallback` | 回退 OpenList 次数（含"首段非快捷方式"与"解析失败"两类） |
 | `fs.cross_drive` | 跨盘（跟随快捷方式）次数 |
+| `fs.fast_path` | 路径寻址一次解析命中次数（第 2 级策略） |
+| `dirs_cached` / `links_cached` | 路径缓存 / 直链缓存条数 |
 | `graph.ok` / `graph.err` / `graph.refresh` | Graph 请求成功/失败/触发 token 刷新 |
 
 **Token 取值三级降级**：① 直接拿 refresh_token 换（需 client_id/secret）
@@ -473,13 +486,16 @@ sudo EMBY_USER="$EMBY_USER" python3 emby_guard.py <emby-data-root>   # 例：/va
 ### 9.4 `lib.sh`
 
 被 `install emby` / `backup emby data` / `run cloudflared` / `send telegram notification`
-四个步骤 source。只定义函数、不设 shell 选项，避免污染调用方的 `set -euo pipefail`。
+四个 workflow 步骤、以及 `warmup.sh`（`warmup images` 步骤生成的脚本）source。
+只定义函数、不设 shell 选项，避免污染调用方的 `set -euo pipefail`。
 
 | 函数 | 用途 |
 |---|---|
 | `free_kb` / `require_free_kb` | 磁盘空间预检 |
+| `mnt_total_kb` / `mnt_free_kb` / `dir_used_kb` | `/mnt` 与目录容量读数 |
+| `mnt_headroom_kb` / `alloc_vfs_cache_kb` | VFS 缓存上限动态分配（余量 = 空闲 − `MNT_RESERVE_KB`，下限 2GB） |
 | `cleanup_archive_workdir` | 清理 30GB 级临时 tarball |
-| `validate_emby_data` | 转调 `emby_guard.py` |
+| `validate_emby_data` | 转调 `emby_guard.py`（`sudo` 下显式透传 `EMBY_USER`） |
 | `redact_log` | 归档脱敏（丢弃 cacheKey 行 + 脱敏密钥/URL） |
 | `redact_urls` | 只脱敏 URL（自有日志兜底） |
 | `link_host` / `link_token` | 读直链源契约（带缺省回退） |
@@ -504,10 +520,12 @@ sudo EMBY_USER="$EMBY_USER" python3 emby_guard.py <emby-data-root>   # 例：/va
 | `/opt/logs/rclone-mount.log` | 挂载层：VFS 缓存逐出、429/403 限流、seek 后重取（归档时按关键行筛选，非纯 tail） |
 | `/opt/logs/emby-console.log` | Emby 侧：起播时的 ffprobe / ffmpeg 记录——**定位"点击播放要等很久"的关键现场** |
 | `/opt/logs/warmup.log` | 预热耗时：直链冷解析均值 + 挂载冷读均值（判断起播慢在哪一层的量化依据） |
+| `/opt/logs/wallwarm.log` | 全库海报预热：本轮覆盖页数与请求数、宽度档位、是否触发时长/磁盘/停机保护 |
+| `/opt/logs/cloudflared.log` | 隧道 e 的运行日志（回退后另写 `cloudflared-direct.log`） |
 
 收尾步骤会把 `playlog.log`（80 行）、`ge2o.log`（60 行）、`odlink.log`（60 行）、
-`rclone-mount.log`（关键行 40）、`emby-console.log`（60 行）、`warmup.log`（40 行）
-脱敏后归档进 workflow 日志。
+`rclone-mount.log`（关键行 40）、`emby-console.log`（60 行）、`warmup.log`（40 行）、
+`wallwarm.log`（15 行）脱敏后归档进 workflow 日志。
 
 > `rclone-mount.log` 用 `grep` 筛关键行而非纯 `tail`：缓存清理类输出每 15s 一条，
 > 5.7 小时上千行，纯 tail 只会被它们占满、看不到真正的异常。
@@ -517,13 +535,13 @@ sudo EMBY_USER="$EMBY_USER" python3 emby_guard.py <emby-data-root>   # 例：/va
 | 症状 | 优先看 | 常见原因 |
 |---|---|---|
 | 播放一直显示"中转" | 启动通知里的`直链源` + `ge2o.log` | ① 直链源是 `OpenList:5244`（odlink 没起来）② 路径换算断了（探活 `map_ok=0`）③ 首段不在顶层快捷方式名单里 |
-| 收尾通知 `直链命中 0` | `odlink.log` | odlink 未就绪，或全部回退 OpenList |
+| 收尾通知`本轮直链`里"成功取到 0" | `odlink.log` | odlink 未就绪，或全部回退 OpenList |
 | `oe.<VD>.eu.org` 登录不上 | 是否收到 `🔐 OpenList 凭据` 通知 | 没收到 = 密码没变，用 `admin` + `OPENLIST_ADMIN_PASSWORD`；收到 = 用通知里的密码（仅本轮有效） |
 | Emby 启动成空库 | `install emby` 步骤 | 恢复三级全失败，或 `emby_guard.py` 校验不通过 |
 | 备份没回传 | 收尾步骤 | `/tmp/EMBY_READY_FOR_BACKUP` 不存在（Emby 未成功启动），或磁盘预检未过 |
 | 播放通知片名显示`未知` | 归档的 `playlog.log` | 反查全程 401 = secret 密钥在恢复库里失效（Tokens_2 中无此登录态或 IsActive=0）。`run emby` 步骤启动前会把 secret 密钥以专属设备登录态写回 `authentication.db` 并激活（幂等自愈）；若日志出现"密钥自愈失败"则需人工核对 Emby 版本 schema |
 | 播放通知没来 | `playlog.log` 的 TG 通道自检 | ge2o 日志格式变化 / Emby 401 / 300s 去重窗口内 |
-| 点击播放后要等很久才起播 | `emby-console.log` + `warmup.log` | ① Emby 现场 ffprobe（该条目此前未探测过，走挂载随机读）② 转码启动（播放通知标 `[中转]`）③ odlink 冷解析 ④ 播放器缓冲——见下方"起播慢怎么定位" |
+| 点击播放后要等很久才起播 | `emby-console.log` + `warmup.log` | ① Emby 现场 ffprobe（该条目此前未探测过，走挂载随机读）② 转码启动（播放通知链路行显示`🔁 视频流经 runner 中转到网盘`）③ odlink 冷解析 ④ 播放器缓冲——见下方"起播慢怎么定位" |
 
 ### 起播慢怎么定位
 
@@ -571,9 +589,9 @@ sudo EMBY_USER="$EMBY_USER" python3 emby_guard.py <emby-data-root>   # 例：/va
 
 ### 怎么确认 302 真的生效
 
-1. 启动通知里`直链源`应为 `odlink:5245（Graph 跟随快捷方式）`
-2. 播放通知的标签应为 `[302直链]` 而非 `[中转]`
-3. 收尾通知的 `302 链路` 中 `直链命中` 应大于 0
+1. 启动通知里`直链源`应为 `OneDrive 原生直链 · 可跟随网盘快捷方式`（回退时才显示 `OpenList · 备用取链通道`）
+2. 播放通知的`链路`行应为 `⚡ 302直连 OneDrive`，而不是 `🔁 视频流经 runner 中转到网盘`
+3. 收尾通知的`本轮直链`中"成功取到"应大于 0
 4. `odlink.log` 里应有 `get 文件 ... 直链 host=... ` 记录
 
 ---
@@ -587,7 +605,9 @@ sudo EMBY_USER="$EMBY_USER" python3 emby_guard.py <emby-data-root>   # 例：/va
 | odlink 分流规则 | `odlink.py` 的 `do_POST` |
 | odlink 路径解析策略（缓存 / 一次寻址 / 逐段兜底） | `odlink.py` 的 `resolve()` 与 `_resolve_drill()`；列目录回填缓存在 `list_children()` |
 | 顶层快捷方式刷新策略 | `odlink.py` 的 `bootstrap_loop`（当前为一次性，成功后不再重跑） |
-| 直链缓存时长 | `odlink.py` 的 `LINK_TTL` |
+| 直链缓存时长 | `odlink.py` 的 `LINK_TTL`（40 分钟 = 2400s；改它必须同步 `playlog.sh` 里 `notify()` 写死的 2400，否则播放通知的"直链剩余"会算错） |
+| 播放通知去重窗口 | `start playlog` 生成的 `/opt/playlog.sh` 的 `claim()`（同一 item 300 秒内只推一次，两数据源共享状态文件） |
+| Emby API 密钥自愈 | `run emby` 步骤（把 secret 密钥以 `emby302-workflow` 专属设备登录态写回 `authentication.db` 的 `Tokens_2` 并激活，幂等） |
 | rclone mount 参数（seek 优先口径） | `emby.yml` 的 `rclone-run` 步骤 |
 | `/mnt` 容量预留 | workflow `env:` 的 `MNT_RESERVE_KB`（默认 6GB），分配逻辑在 `lib.sh` |
 | 预热规模 | workflow `env:` 的 `WU_ITEMS`(10) / `WU_EDGE_MB`(64) / `WU_BUDGET_MB`(2048)，脚本在 `emby.yml` 的 `warmup images` 步骤；**302 直连为主时建议 3 / 32**（头尾预热对直连播放基本无效，只当冷读探针，见[起播慢怎么定位](#起播慢怎么定位)）。直链预热另含 **recent 回看预热**（playlog 写入 `warm-state.json`，保留最近 12 条，条数无需配置） |

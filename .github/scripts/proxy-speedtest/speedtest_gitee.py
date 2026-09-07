@@ -108,7 +108,7 @@ def handle_termination_signal(signum, frame):
     TERMINATION_NOTICE_SENT = True
     sig_name = signal.Signals(signum).name if signum else f'SIGNAL-{signum}'
     _sep = '━' * 18
-    message = f'⛔ <b>Gitee 上行测速异常终止</b>\n{_sep}\n⚠️ 脚本被中断：收到 {sig_name}，本轮测速未正常完成。'
+    message = f'⛔ <b>Gitee 上行测速异常终止</b>\n{_sep}\n⚠️ 脚本被中断：收到 <code>{sig_name}</code>，本轮测速未正常完成。'
     if CURRENT_RUN_STARTED_AT:
         message += f'\n🕒 测速开始时间：{html.escape(str(CURRENT_RUN_STARTED_AT))}'
     _footer = tg_footer_line()
@@ -1846,18 +1846,15 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
         summary_lines.append(f'⚠️ 本轮已中止：{esc(runtime_abort_reason)}')
         summary_lines.append('')
     if ok_results_by_download:
-        best = ok_results_by_download[0]
-        summary_lines.append(f"🏆 最快节点：<b>{esc(best.get('name', ''))}</b>")
-        summary_lines.append('')
-        summary_lines.append('⭐ <b>TOP 5</b>')
         top = ok_results_by_download[:5]
+        summary_lines.append(f"🏆 <b>最快节点 · {len(top)}</b> · <i>上行速率</i>")
         for idx, item in enumerate(top, 1):
             if speedtest_mode == 'push-only':
                 speed_text = f"{get_item_megabits(item, 'push-only')}兆"
             else:
                 speed_text = f"{get_item_megabits(item, speedtest_mode)}兆 / 上传 {get_item_megabits(item, 'push-only')}兆"
             connector = '└─' if idx == len(top) else '├─'
-            summary_lines.append(f"  {connector} {idx}. <code>{esc(item['name'])}</code> · <i>{esc(speed_text)}</i>")
+            summary_lines.append(f"  {connector} <code>{esc(item['name'])}</code> · <i>{esc(speed_text)}</i>")
         summary_lines.append('')
     elif alive_probe_count > 0:
         summary_lines.append('⚠️ 没有节点测速成功')

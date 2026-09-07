@@ -86,14 +86,14 @@ jobs:
         . "$env:GITHUB_WORKSPACE\.github\scripts\telegram\tg_notify.ps1"
         # 自检: dot-source 失败会让后续调用未定义函数而静默无通知，显式暴露
         if (-not (Get-Command Send-TgMessage -ErrorAction SilentlyContinue)) { throw "tg_notify.ps1 加载失败" }
-        # 单一入口，平铺 kv 即可；元数据一律 " · <i>…</i>" 分隔
-        # （规范见 docs/telegram-notify.md）
+        # 单一入口，平铺 kv 即可；值一律 <b>/<code>，说明性文字降为 <i> 说明段
+        # （规范见 docs/telegram-notify.md §2 标签语义表）
         $msg = "🖥️ <b>Windows RDP 已就绪</b>`n$TG_SEP`n" +
           "地址：<code>$(Esc-Html $address)</code>`n" +
           "用户名：<code>runneradmin</code>`n" +
           "密码：<code>$(Esc-Html $Env:RDP_PASSWORD)</code>`n" +
-          "有效期：<i>约 6 小时 · 超时自动关机</i>`n" +
-          "连接方式：<i>Microsoft Remote Desktop / 任何 RDP 客户端，地址填上面这一行</i>"
+          "有效期：<b>约 6 小时 · 超时自动关机</b>"
+        $msg += "`n`n<i>连接方式：Microsoft Remote Desktop / 任何 RDP 客户端，地址填上面这一行</i>"
         $footer = Get-TgFooter
         if ($footer) { $msg += "`n`n$footer" }
         Send-TgMessage $msg

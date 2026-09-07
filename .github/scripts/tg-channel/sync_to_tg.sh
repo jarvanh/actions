@@ -124,7 +124,6 @@ def build_fail_notify(title: str, file: str, elapsed: float, lines: list):
         # 标题 = emoji + 短语加粗（规范 §2；此前未加粗与 tg_add_title 版式漂移）
         f"<b>{esc(title)}</b>",
         TG_SEP,
-        "",
         f"📁 {esc(shorten_name(os.path.basename(file)))}",
         f"📦 分组：{esc(CAPTION_PREFIX)}",
         f"耗时：{elapsed:.1f} 秒",
@@ -301,9 +300,8 @@ def get_video_list():
         print(err_msg)
         print(f"[get_video_list] stderr: {result.stderr[-2000:] if result.stderr else '(无)'}")
         notify("\n".join([
-            "❌ 获取远端文件列表失败",
+            "<b>❌ 获取远端文件列表失败</b>",
             TG_SEP,
-            "",
             f"📦 分组：{esc(CAPTION_PREFIX)}",
             f"⚠️ 原因：rclone lsjson 退出码 {result.returncode}",
             "📄 stderr 见 Actions 日志",
@@ -322,9 +320,8 @@ def get_video_list():
         err_msg = f"❌ rclone lsjson 解析失败: {e}"
         print(err_msg)
         notify("\n".join([
-            "❌ 获取远端文件列表失败",
+            "<b>❌ 获取远端文件列表失败</b>",
             TG_SEP,
-            "",
             f"📦 分组：{esc(CAPTION_PREFIX)}",
             f"⚠️ 原因：lsjson 输出解析失败：{esc(e)}",
         ]))

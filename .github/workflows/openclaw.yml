@@ -841,14 +841,15 @@ jobs:
             tg_add_block msg "$(tree_lines "直连：<code>$(escape_html "${TS_FQDN}"):21118</code>")"
           fi
 
+          # 条目非文件值：可复制的（ASN/命令）→ <code>，其余 → <b>（禁裸文本）
           _entries="出口 IP：<code>$(escape_html "${PUB_IP}")</code>"
-          _entries+=$'\n'"ISP：$(escape_html "${IP_ISP}")"
-          _entries+=$'\n'"ASN：$(escape_html "AS${IP_ASN} · ${IP_ORG}")"
-          _entries+=$'\n'"位置：$(escape_html "${IP_LOC}")"
+          _entries+=$'\n'"ISP：<b>$(escape_html "${IP_ISP}")</b>"
+          _entries+=$'\n'"ASN：<code>$(escape_html "AS${IP_ASN} · ${IP_ORG}")</code>"
+          _entries+=$'\n'"位置：<b>$(escape_html "${IP_LOC}")</b>"
           tg_add_section msg "🌐 出口网络"
           tg_add_block msg "$(tree_lines "$_entries")"
 
-          _entries="状态：已广播 · 可作为出口节点"
+          _entries="状态：<b>已广播 · 可作为出口节点</b>"
           _entries+=$'\n'"管理页批准：<code>admin/machines → openclaw → Edit routes → 勾选 Exit Node</code>"
           _entries+=$'\n'"ACL 免批准（推荐）：<code>routes 0.0.0.0/0,::/0 → tag:ci</code> · <i>免每次批准</i>"
           _entries+=$'\n'"API：<code>POST /api/v2/device/{device_id}/routes</code>"
@@ -856,8 +857,8 @@ jobs:
           tg_add_block msg "$(tree_lines "$_entries")"
 
           if [ "$AI_BACKEND" = "cliproxyapi" ]; then _ai_note="CLIProxyAPI · 回退"; else _ai_note="CliRelay · 全栈"; fi
-          _entries="后端：${_ai_note}"
-          [ -n "$AI_FALLBACK_REASON" ] && _entries+=$'\n'"回退原因：$(escape_html "${AI_FALLBACK_REASON}")"
+          _entries="后端：<b>${_ai_note}</b>"
+          [ -n "$AI_FALLBACK_REASON" ] && _entries+=$'\n'"回退原因：<b>$(escape_html "${AI_FALLBACK_REASON}")</b>"
           tg_add_section msg "🤖 AI 网关"
           tg_add_block msg "$(tree_lines "$_entries")"
           # footer 读 TG_RUN_URL/TG_RUN_STARTED_AT（上方前缀注入）
@@ -1241,7 +1242,7 @@ jobs:
             recorded_successful_version=""
             fail_stage=""
             initial_start_duration_sec=""
-            doctor_fix_duration_sec=""
+            preflight_doctor_duration_sec=""
             fallback_reinstall_duration_sec=""
             if [ -f "$meta_file" ]; then
               current_version=$(grep '^CURRENT_OPENCLAW_VERSION=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
@@ -1250,7 +1251,7 @@ jobs:
               recorded_successful_version=$(grep '^RECORDED_SUCCESSFUL_OPENCLAW_VERSION=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
               fail_stage=$(grep '^FAIL_STAGE=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
               initial_start_duration_sec=$(grep '^INITIAL_START_DURATION_SEC=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
-              doctor_fix_duration_sec=$(grep '^DOCTOR_FIX_DURATION_SEC=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
+              preflight_doctor_duration_sec=$(grep '^PREFLIGHT_DOCTOR_DURATION_SEC=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
               fallback_reinstall_duration_sec=$(grep '^FALLBACK_REINSTALL_DURATION_SEC=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
             fi
 
@@ -1263,7 +1264,7 @@ jobs:
             export RECORDED_SUCCESSFUL_VERSION="$recorded_successful_version"
             export FAIL_STAGE="$fail_stage"
             export INITIAL_START_DURATION_SEC="$initial_start_duration_sec"
-            export DOCTOR_FIX_DURATION_SEC="$doctor_fix_duration_sec"
+            export PREFLIGHT_DOCTOR_DURATION_SEC="$preflight_doctor_duration_sec"
             export FALLBACK_REINSTALL_DURATION_SEC="$fallback_reinstall_duration_sec"
             # 统一 HTML 版式 + 统一收尾区（动态值一律转义；日志收敛 <pre> 等宽块；
             # HTML 解析失败直接报错不重发——修复"声明 parse_mode=HTML 但未转义"的隐患）
@@ -1290,7 +1291,7 @@ jobs:
             [ -n "$fallback_version_source" ] && tg_add_kv msg "Fallback 来源" "$fallback_version_source"
             [ -n "$recorded_successful_version" ] && tg_add_path msg "成功版本记录" "$recorded_successful_version"
             [ -n "$initial_start_duration_sec" ] && tg_add_kv msg "首次启动耗时" "${initial_start_duration_sec} 秒"
-            [ -n "$doctor_fix_duration_sec" ] && tg_add_kv msg "Doctor 修复耗时" "${doctor_fix_duration_sec} 秒"
+            [ -n "$preflight_doctor_duration_sec" ] && tg_add_kv msg "预检修复耗时" "${preflight_doctor_duration_sec} 秒"
             [ -n "$fallback_reinstall_duration_sec" ] && tg_add_kv msg "Fallback 重装耗时" "${fallback_reinstall_duration_sec} 秒"
             [ -n "$ssh_entry" ] && tg_add_path msg "SSH 调试" "$ssh_entry"
             tg_add_section msg "🧾 关键日志"

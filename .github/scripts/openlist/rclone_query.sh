@@ -44,7 +44,7 @@ _get_path_stats() {
 
 # 运行 rclone check 并构建差异文件列表（按状态分组: 新增/仅目标存在/不一致，
 # 每组上限 8 条，超出折叠"还有 N 条…"——与规范 §2.2 一致）
-# 返回多行 HTML: 组头 "<b>状态 · N</b>" + tree_code_fold 树形条目
+# 返回多行 HTML: 组头 "<b>状态</b> · N"（计数在粗体外，规范 §2 标签语义表裁决 4）+ tree_code_fold 树形条目
 _build_diff_files_list() {
   local source_path="$1"
   local dest_path="$2"
@@ -67,7 +67,7 @@ _build_diff_files_list() {
     local _var="${_bucket%%:*}" _name="${_bucket#*:}"
     _cnt=$(printf '%s\n' "${!_var}" | { grep -c . || true; })
     [ "${_cnt:-0}" -eq 0 ] && continue
-    result+="<b>${_name} · ${_cnt}</b>"$'\n'
+    result+="<b>${_name}</b> · ${_cnt}"$'\n'
     result+="$(tree_code_fold "${!_var}" 8)"$'\n'
   done
   [ -z "$result" ] && return 0
