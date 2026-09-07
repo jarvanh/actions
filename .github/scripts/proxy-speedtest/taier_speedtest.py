@@ -64,11 +64,13 @@ RESULT_JSON = HOME_RUNTIME / 'taier_speedtest_result.json'
 
 CONFIG = {
     # 测速点：单个点即可（每点 = 一次完整上下行），多点会成倍拉长单节点耗时
-    'TAIER_POINTS': (os.environ.get('TAIER_POINTS', '') or '北京电信').strip(),
+    'TAIER_POINTS': (os.environ.get('TAIER_POINTS', '') or '广东联通').strip(),
     # multi = 多线程上下行（更贴近代理真实吞吐）；single / both 亦可
     'TAIER_MODE': (os.environ.get('TAIER_MODE', '') or 'multi').strip(),
-    'TAIER_DURATION': int(os.environ.get('TAIER_DURATION', '5') or 5),
-    'TAIER_MAX_NODES': int(os.environ.get('TAIER_MAX_NODES', '10') or 10),
+    # 上游二进制把 --duration 硬钳制在 5-13（main.go），>13 会被压到 13
+    'TAIER_DURATION': min(max(int(os.environ.get('TAIER_DURATION', '10') or 10), 5), 13),
+    # 0 = 不限（默认）；节点多时整体耗时 ≈ 节点数 × (2×duration + 5)s
+    'TAIER_MAX_NODES': int(os.environ.get('TAIER_MAX_NODES', '0') or 0),
     'TAIER_TIMEOUT': int(os.environ.get('TAIER_TIMEOUT', '120') or 120),
     'TAIER_SWITCH_SETTLE': float(os.environ.get('TAIER_SWITCH_SETTLE_SECONDS', '1.5') or 1.5),
     # 每节点是否出结果图（上传图床）：默认关，避免 N 个节点刷 N 张图
