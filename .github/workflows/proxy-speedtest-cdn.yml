@@ -68,10 +68,10 @@ jobs:
           #   PROXY_SPEEDTEST_SUB_URLS : 见上方（第 28 行）原始订阅源定义，用于解析节点原始配置；留空则不上传 gist
           #   GH_TOKEN                 : 具备 gist 写入权限的 Personal Access Token（Secrets: PAT，与 proxy-speedtest-gitee 对齐）；
           #                             注意：默认 GITHUB_TOKEN 无 gist 作用域，会导致 403，须用 PAT
-          #   PROXY_SPEEDTEST_GIST_ID  : 已存在的 Gist id；首次留空会自动新建，拿到 id 后回填此处
-          #                             即可让后续运行「更新」同一 Gist 而非反复新建
+          #   PROXY_SPEEDTEST_CDN_GIST_ID : 本工作流专属 Gist 的 id（三个测速工作流各用各的，互不覆盖）；
+          #                             首次留空会自动新建，TG 通知会给链接，拿到 id 后回填此 secret
           GH_TOKEN: ${{ secrets.PAT }}
-          PROXY_SPEEDTEST_GIST_ID: ${{ secrets.PROXY_SPEEDTEST_GIST_ID }}
+          PROXY_SPEEDTEST_GIST_ID: ${{ secrets.PROXY_SPEEDTEST_CDN_GIST_ID }}
           # Telegram 通知：测速完成后推送 TOP 节点（延迟/下载/上传）+ 订阅 Gist 状态
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
