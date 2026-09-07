@@ -164,6 +164,12 @@ echo "$SEND_CAPTURE" | grep -q '<b>500 B</b> / <b>2</b> 文件' \
   && ok "S6b 未传量取自预览缓存（500 B / 2 文件）" || bad "S6b: $SEND_CAPTURE"
 [ "$(cat "$LSJSON_CALLS")" = "$_calls_before" ] \
   && ok "S6c 命中缓存未新增 lsjson 调用" || bad "S6c: [$(cat "$LSJSON_CALLS") vs $_calls_before]"
+echo "$SEND_CAPTURE" | grep -q '复制即用' \
+  && ok "S6d 收尾为 🛠️ 复制即用命令块（规范 §2.3）" || bad "S6d: $SEND_CAPTURE"
+echo "$SEND_CAPTURE" | grep -q '<pre>gh workflow run openlist.yml -f run_mode=同步 -f force_sync=true</pre>' \
+  && ok "S6e 强制同步命令 pre 可复制" || bad "S6e: $SEND_CAPTURE"
+echo "$SEND_CAPTURE" | grep -q 'restore_task' \
+  && bad "S6f 无修复文件时不应有还原命令" || ok "S6f 无修复文件 → 无还原命令"
 
 # ===== S7: 子任务（预览无独立条目）→ 现场估算 =====
 SEND_CAPTURE=""
@@ -186,6 +192,19 @@ send_sync_skipped "backup_sub2" "onedrive:skip/sub2" "openlist:skipdst/sub2"
 echo "$SEND_CAPTURE" | grep -q '本次未传' \
   && bad "S9 OPENLIST_SKIP_ESTIMATE=0 不应估算" || ok "S9 关闭估算开关 → 不展示"
 unset OPENLIST_SKIP_ESTIMATE
+
+# ===== S11: 有修复文件 → 🛠️ 复制即用含还原命令（restore_task=任务名首段前缀）=====
+MARKER_JSON='{"last_success":"2026-09-05T11:34:19Z","source_bytes":100,"source_count":1,"fixed_count":5,"fixed_bytes":100,"fixed_files":[{"restore":{"kind":"copy","summary":"直接复制"}}]}'
+MARKER_LAST_SUCCESS="2026-09-05T11:34:19Z"
+MARKER_SINCE_HOURS=1
+SEND_CAPTURE=""
+send_sync_skipped "task0_照片" "onedrive:t0" "openlist:t0dst"
+echo "$SEND_CAPTURE" | grep -q 'restore_task=task0' \
+  && ok "S11a 还原命令 restore_task 取任务名首段前缀（非完整名）" || bad "S11a: $SEND_CAPTURE"
+echo "$SEND_CAPTURE" | grep -q '还原 5 个非原名文件' \
+  && ok "S11b 还原 note 带计数" || bad "S11b: $SEND_CAPTURE"
+echo "$SEND_CAPTURE" | grep -q "run_mode='⚠️ 还原 · 修复文件还原为原路径'" \
+  && ok "S11c run_mode 为一键还原模式" || bad "S11c: $SEND_CAPTURE"
 
 # ===== S10: sync_task 在预览 pass 把 --Nd-skip 天数传给 _preview_register =====
 # 抽取式（同 test_sync_task_status_mapping.sh）: 预览分支在任何 progress_*

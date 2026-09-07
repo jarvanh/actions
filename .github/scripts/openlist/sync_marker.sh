@@ -886,18 +886,21 @@ send_sync_skipped() {
     fi
   fi
 
-  # 收尾区: 状态/备注统一 tg_add_note；footer 自带空行。
-  # marker 路径很长（含完整任务名），单独走 <code> 等宽 kv 行，备注只留字段指引，
-  # 避免一整行长句把说明淹没
+  # 收尾区: 🛠️ 复制即用（规范 §2.3）—— 给人可复制执行的 gh 命令（pre 不折行、
+  # 整块复制），替代原「还原脚本：<marker JSON 路径> + 字段指引」（数据文件路径
+  # 对人没有动作）。restore_task 按 marker 文件名首个 _ 前缀精确匹配
+  # （file_restore.sh restore_fixed_files），填完整任务名匹配不到；
+  # force_sync 作用于全部任务（无单任务参数），需注明"全量"。
+  tg_add_section msg "🛠️ 复制即用"
+  tg_add_note msg "▸ 强制同步（全量，含本任务）"
+  tg_add_block msg '<pre>gh workflow run openlist.yml -f run_mode=同步 -f force_sync=true</pre>'
   if [ "${fixed_count:-0}" -gt 0 ]; then
-    tg_add_path msg "还原脚本" "$(get_marker_path "$task_name" "$dest_path")"
-    tg_add_note msg "🔗 脚本位于该 marker 的 fixed_files[].restore.script 字段
-⏭️ 本次跳过同步，继续执行其他任务
-如需强制同步，请手动触发 force_sync=true"
-  else
-    tg_add_note msg "⏭️ 本次跳过同步，继续执行其他任务
-如需强制同步，请手动触发 force_sync=true"
+    tg_add_note msg "▸ 还原 ${fixed_count} 个非原名文件（restore_task=${task_name%%_*}）"
+    tg_add_block msg "<pre>gh workflow run openlist.yml \\
+  -f run_mode='⚠️ 还原 · 修复文件还原为原路径' \\
+  -f restore_task=${task_name%%_*}</pre>"
   fi
+  tg_add_note msg "⏭️ 本次跳过同步，继续执行其他任务"
   tg_add_footer msg
 
   send_telegram_message "$msg"
