@@ -26,6 +26,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import time
 import urllib.request
@@ -315,7 +316,7 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, qualif
     ok_results = [r for r in results if r.get('ok') and not r.get('bypass')]
     top = sorted(ok_results, key=lambda r: r.get('down') or 0.0, reverse=True)[:5]
     lines = [
-        '📶 <b>泰尔三网测速</b>',
+        '✅ <b>泰尔三网测速</b>',
         sep,
         f"🕒 {esc(meta['started_text'])} ~ {esc(meta['ended_text'])} · 耗时 {esc(meta['duration_text'])}",
         f"📊 节点：共 <b>{len(results)}</b> 个 · 成功 <b>{len(ok_results)}</b> 个",
@@ -378,8 +379,10 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, qualif
 
 
 def notify_failure(env, reason):
+    # 标题直接带原因（reason 形如「环境准备失败：…」，取全角冒号前的阶段名）
+    _head = str(reason).split('：')[0].splitlines()[0][:40].strip() or '未知原因'
     lines = [
-        '❌ <b>泰尔三网测速失败</b>',
+        f'❌ <b>泰尔三网测速异常退出 · {html.escape(_head)}</b>',
         '━' * 18,
         f'原因：<b>{html.escape(str(reason))}</b>',
         '',
@@ -391,6 +394,35 @@ def notify_failure(env, reason):
         send_telegram(env, '\n'.join(lines))
     except Exception as e:
         log_progress('telegram_send_failed', error=str(e))
+
+
+_TERM_NOTICE_SENT = False
+
+
+def handle_termination_signal(signum, frame):
+    """SIGTERM/SIGINT 兜底：run 被取消/超时也发通知（与 speedtest_gitee 同款）。
+
+    必须先撤 TUN 再发——auto-route 劫持下连 TG API 都可能送不出去。
+    """
+    global _TERM_NOTICE_SENT
+    if _TERM_NOTICE_SENT:
+        raise SystemExit(128 + int(signum))
+    _TERM_NOTICE_SENT = True
+    try:
+        stop_mihomo_tun()
+    except Exception:
+        pass
+    sig_name = signal.Signals(signum).name if signum else f'SIGNAL-{signum}'
+    msg = (f'⛔ <b>泰尔三网测速异常终止</b>\n{"━" * 18}\n'
+           f'⚠️ 脚本被中断：收到 {sig_name}，本轮测速未正常完成。')
+    footer = tg_footer_line()
+    if footer:
+        msg += f'\n\n{footer}'
+    try:
+        send_telegram(merged_env(), msg)
+    except Exception:
+        pass
+    raise SystemExit(128 + int(signum))
 
 
 # ---------------------------------------------------------------------------
@@ -568,8 +600,17 @@ def _run():
 
 def main():
     # TUN 必须收尾：异常/提前 return 也要撤掉路由，否则 runner 无法回传状态
+    signal.signal(signal.SIGTERM, handle_termination_signal)
+    signal.signal(signal.SIGINT, handle_termination_signal)
     try:
         return _run()
+    except Exception as e:
+        # 未捕获异常兜底：标题带原因摘要（gitee 同款）
+        try:
+            notify_failure(merged_env(), f'未捕获异常：{e}')
+        except Exception:
+            pass
+        return 1
     finally:
         try:
             stop_mihomo_tun()

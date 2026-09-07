@@ -20,6 +20,7 @@ import os
 import html
 import pathlib
 import re
+import signal
 import statistics
 import subprocess
 import tempfile
@@ -766,6 +767,8 @@ renderTable();
 # 主流程：复用 mihomo 启动 / 节点快照 / 节点切换，串行测速
 # ----------------------------------------------------------------------------
 def main():
+    signal.signal(signal.SIGTERM, handle_termination_signal)
+    signal.signal(signal.SIGINT, handle_termination_signal)
     started_at = datetime.now().isoformat()
     log_progress('speedtest_started', started_at=started_at, config={
         'latency_samples': CONFIG['PROXY_SPEEDTEST_LATENCY_SAMPLES'],
@@ -967,7 +970,7 @@ def build_telegram_lines(results, *, meta, gist_res, qualified_count):
 
     sep = '━' * 18
     lines = [
-        '📈 <b>CDN 测速完成</b>',
+        '✅ <b>CDN 测速完成</b>',
         sep,
         f'🕒 {esc(started)} ~ {esc(ended)} · 耗时 {esc(duration_text)}',
         f'📊 节点：共 <b>{len(results)}</b> 个 · 可用 <b>{len(ok_results)}</b> 个',
@@ -1041,7 +1044,9 @@ def write_termination(started_at, reason):
         pass
     log_progress('speedtest_terminated', reason=reason)
     try:
-        abort_msg = (f'📈 <b>CDN 测速异常终止</b>\n{"━" * 18}\n'
+        # 标题直接带原因首行（原文截断后再转义，避免切断 HTML 实体）
+        _head = str(reason).splitlines()[0][:40].strip() or '未知原因'
+        abort_msg = (f'❌ <b>CDN 测速异常退出 · {html.escape(_head)}</b>\n{"━" * 18}\n'
                      f'⚠️ {html.escape(str(reason))}')
         abort_footer = tg_footer_line()
         if abort_footer:
@@ -1051,6 +1056,32 @@ def write_termination(started_at, reason):
         pass
 
 
+def handle_termination_signal(signum, frame):
+    """SIGTERM/SIGINT 兜底：run 被取消/超时也发通知（与 speedtest_gitee 同款）。"""
+    sig_name = signal.Signals(signum).name if signum else f'SIGNAL-{signum}'
+    msg = (f'⛔ <b>CDN 测速异常终止</b>\n{"━" * 18}\n'
+           f'⚠️ 脚本被中断：收到 {sig_name}，本轮测速未正常完成。')
+    footer = tg_footer_line()
+    if footer:
+        msg += f'\n\n{footer}'
+    try:
+        send_telegram(merged_env(), msg)
+    except Exception:
+        pass
+    raise SystemExit(128 + int(signum))
+
+
 if __name__ == '__main__':
     import sys
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception as e:
+        # 未捕获异常兜底：标题直接带原因摘要，正文留完整错误（TG 私聊，不进公开日志）
+        _head = str(e).splitlines()[0][:60].strip() if str(e).strip() else '未知异常'
+        try:
+            send_telegram(merged_env(), f'❌ <b>CDN 测速异常退出 · {html.escape(_head)}</b>\n'
+                                        f'{"━" * 18}\n'
+                                        f'错误：<code>{html.escape(f"{type(e).__name__}: {e}"[:800])}</code>')
+        except Exception:
+            pass
+        sys.exit(1)
