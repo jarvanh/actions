@@ -442,6 +442,14 @@ def _run():
                 lf.write(f'===== {name} (rc={rc}) =====\n{ANSI_RE.sub("", out)}\n')
         except Exception:
             pass
+        # 诊断：表格与 stderr 尾部进 step 日志（不含出口 IP —— 公开仓库日志勿泄漏节点出口）
+        if parsed['table'] or rc != 0:
+            print(f'--- taier[{name}] rc={rc} ---')
+            if parsed['table']:
+                print(parsed['table'])
+            err_tail = (err or '').strip().splitlines()[-3:]
+            if err_tail:
+                print('stderr: ' + ' | '.join(err_tail))
 
     # 先关 TUN 再发通知：通知走的是 runner 自身网络，必须在路由恢复之后
     stop_mihomo_tun()
