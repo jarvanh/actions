@@ -74,3 +74,13 @@ jobs:
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
           TG_RUN_STARTED_AT: ${{ github.run_started_at }}
         run: python .github/scripts/proxy-speedtest/taier_speedtest.py
+
+      # 兜底收尾：mihomo TUN 的 auto-route 会接管整机出向路由，内核不撤掉的话
+      # runner 无法把日志/状态回传 GitHub（表现为所有 step 已完成但 run 卡在
+      # in_progress、连取消都执行不了）。脚本正常路径会自己关，这里防异常/超时。
+      - name: Cleanup mihomo TUN
+        if: ${{ always() }}
+        run: |
+          sudo -n pkill -f "mihomo -d" || true
+          sleep 2
+          echo "mihomo 残留进程：$(pgrep -cf 'mihomo -d' || true)"
