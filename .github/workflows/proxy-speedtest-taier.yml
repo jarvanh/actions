@@ -1,0 +1,76 @@
+name: proxy-speedtest-taier
+
+# 订阅节点三网测速：逐个节点用 MiaM1ku/taierspeedtest（全球网测 / 泰尔测速，
+# 协议还原自 com.cnspeedtest.globalspeed）测「节点 → 国内电信/联通/移动测速点」
+# 的延迟与单/多线程上下行，结果推送 Telegram。
+#
+# 与 proxy-speedtest 系列同族（同一订阅源 PROXY_SPEEDTEST_SUB_URLS、同一 mihomo 内核），
+# 只是测速引擎换成泰尔测速：它给的是三网测速点口径的延迟/带宽，而 proxy-speedtest
+# 给的是延迟 + 镜像站下载 + Gitee 上行的综合口径。
+#
+# 链路说明：taierspeedtest 是原生 TCP/ICMP 客户端，没有 --proxy 参数，且 Go 的
+# net.Dialer 直接发系统调用（proxychains 之类 LD_PRELOAD 方案无效），所以走
+# mihomo TUN 透明接管该进程流量：
+#   rules: [PROCESS-NAME,taierspeedtest,AUTO, MATCH,DIRECT]
+# 即只有测速进程走节点、其余流量（含 runner 心跳/日志）直连；再用「测速出口 IP
+# 是否等于 runner 直连出口 IP」校验规则真的生效（TUN 起不来会静默直连、结果失真）。
+# 开 TUN 需要 CAP_NET_ADMIN，脚本会在非 root 时自动加 sudo。
+on:
+  schedule:
+    # 每 6 小时测一次：UTC 04:00, 10:00, 16:00, 22:00（北京 12:00, 18:00, 00:00, 06:00）
+    # 与 proxy-speedtest-gitee（02/08/14/20）、proxy-speedtest（03/09/15/21）错峰
+    - cron: "0 4,10,16,22 * * *"
+  workflow_dispatch:
+    inputs:
+      points:
+        description: '测速点（省份/城市/运营商；多点用逗号分隔，每多一个点单节点耗时翻倍）'
+        required: false
+        default: '北京电信'
+      mode:
+        description: '测速模式：multi = 多线程上下行（贴近代理真实吞吐）'
+        required: false
+        default: 'multi'
+      duration:
+        description: '每个方向测速秒数（5-13）'
+        required: false
+        default: '5'
+      max_nodes:
+        description: '最多测几个节点（0 = 不限）'
+        required: false
+        default: '10'
+
+jobs:
+  speedtest:
+    concurrency: proxy-speedtest-taier-singleton
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      - name: Run taier speedtest
+        env:
+          # 订阅源（与 proxy-speedtest / proxy-speedtest-gitee 同一个 secret）
+          PROXY_SPEEDTEST_SUB_URLS: ${{ secrets.PROXY_SPEEDTEST_SUB_URLS }}
+          # 测速参数（workflow_dispatch 可覆盖；定时运行走默认值）
+          TAIER_POINTS: ${{ github.event.inputs.points || '北京电信' }}
+          TAIER_MODE: ${{ github.event.inputs.mode || 'multi' }}
+          TAIER_DURATION: ${{ github.event.inputs.duration || '5' }}
+          TAIER_MAX_NODES: ${{ github.event.inputs.max_nodes || '10' }}
+          # GitHub API 匿名调用在共享出口 IP 上 60 次/h 限流时的认证回退
+          GH_TOKEN: ${{ secrets.PAT }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # 统一收尾区（footer）: 运行日志链接 + 已运行时长
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TG_RUN_STARTED_AT: ${{ github.run_started_at }}
+        run: python .github/scripts/proxy-speedtest/taier_speedtest.py

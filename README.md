@@ -13,8 +13,7 @@
     ├── emby302/            Emby 302 直链服务 —— 详见 docs/emby302.md
     ├── telegram/           Telegram 通知（tg_notify.sh = 全库发送层真源）
     ├── tg-channel/         Telegram 频道内容管线（同步/上传/去重/清理）
-    ├── proxy-speedtest/    代理测速脚本
-    └── taier-speedtest/    三网测速脚本（泰尔测速 / 全球网测 Linux 客户端）
+    └── proxy-speedtest/    代理测速脚本（gitee 上行 / 延迟+下载 / 泰尔三网测速）
 docs/                       子系统文档
 proxy-speedtest/            测速结果数据
 ```
@@ -41,7 +40,7 @@ proxy-speedtest/            测速结果数据
 | `ql.yml` / `sub-store.yml` / `subs-check.yml` | 签到与订阅管理 |
 | `icloud-photos-downloader.yml` / `ph-dl.yml` / `pixivutil2.yml` | 媒体抓取下载 |
 | `proxy-speedtest.yml` / `proxy-speedtest-gitee.yml` | 代理测速 |
-| `taier-speedtest.yml` | 三网测速（泰尔测速 / 全球网测，runner 出口直连电信/联通/移动测速点） |
+| `proxy-speedtest-taier.yml` | 订阅节点三网测速（泰尔测速引擎，经 mihomo TUN 把测速进程透明接入节点） |
 | `upload-video-to-tg.yml` / `p.yml` / `eshop.yml` / `teslamate.yml` | 杂项 |
 | `delete-workflow-runs.yml` | 清理历史运行记录 |
 
