@@ -1,6 +1,7 @@
 #!/bin/bash
 # ===== OpenList 同步工具 — rclone 参数单点定义 =====
-# 所有 rclone 参数集中在此修改，由 load_all.sh 最先加载，
+# 所有 rclone 参数集中在此修改，由 load_all.sh 在 L1 层最先加载
+# （L0 是通知真源 telegram/tg_notify.sh，比本文件更早），
 # workflow 各 step source /tmp/load_all.sh 后自动获得。
 
 # sync_task 共用的默认 rclone 参数

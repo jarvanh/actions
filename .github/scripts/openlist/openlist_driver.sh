@@ -13,8 +13,9 @@
 #
 # 依赖: openlist_api.sh (_get_openlist_token), utils.sh (_log_section, _short_path),
 #       file_fix.sh (_raw_remote_for, _raw_dir_count)
-# 被依赖: sync_engine.sh (sync_with_logging, _sync_retry_8005,
-#         _sync_persist_verify_and_retry), sync_notify.sh (_refresh_openlist_cache)
+# 被依赖: sync_engine.sh (sync_with_logging, _sync_retry_8005),
+#         file_fix_pipeline.sh (_sync_persist_verify_and_retry),
+#         sync_notify.sh (_refresh_openlist_cache)
 
 # 刷新 OpenList 全部驱动的 token（重建驱动，非 wopan176 专属）
 # 主要动机: wopan176 的 access token 有效期短（约 5 分钟），长时间同步会过期，

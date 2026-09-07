@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # -----------------------------------------------------------
-      # 1. 配置并挂载 Rclone (Dropbox)
+      # 1. 配置 Rclone 并把 HA 配置拉到本地（不再挂载 FUSE，见下方说明）
       # -----------------------------------------------------------
       - uses: actions/checkout@v7
       - name: rclone-install

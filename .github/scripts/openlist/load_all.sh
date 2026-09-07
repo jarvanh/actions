@@ -30,7 +30,7 @@ unset _OPENLIST_TG_LIB
 
 # --- L1 基础层（无内部依赖）---
 source "$_OPENLIST_SCRIPT_DIR/rclone_flags.sh"  # rclone 参数单点定义（RCLONE_*_FLAGS）
-source "$_OPENLIST_SCRIPT_DIR/utils.sh"         # 通用工具（escape_html, format_bytes 等）
+source "$_OPENLIST_SCRIPT_DIR/utils.sh"         # 通用工具（log_fix, format_bytes 等）
 source "$_OPENLIST_SCRIPT_DIR/telegram.sh"      # Telegram 消息发送/编辑/删除
 
 # --- L2 外部服务适配 ---

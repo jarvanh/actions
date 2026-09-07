@@ -222,16 +222,16 @@ jobs:
           AFTER_SIZE=$(du -sh . | cut -f1)
           echo "$AFTER_SIZE"
 
-          # 计算视频文件统计（总数 / 已上传 / 待上传 / 失败上传）
+          # 计算视频文件统计（总数 / 已上传 / 待上传 / 损坏已跳过；
+          # 脚本第 4 字段 failed 恒为 0，仅作格式占位，此处不展示）
           # 使用外部 Python 脚本避免内联 heredoc 与 YAML 的歧义
           TARGET_DIR="$HOME/onedrive/0/j-1024j-视频-pornhub-favorites"
           VIDEO_STATS=$(python3 "${GITHUB_WORKSPACE}/.github/scripts/tg-channel/compute_video_stats.py" "$TARGET_DIR" || echo "0|0|0|0|0")
           TOTAL_VIDEOS=$(echo "$VIDEO_STATS" | cut -d'|' -f1)
           UPLOADED_VIDEOS=$(echo "$VIDEO_STATS" | cut -d'|' -f2)
           PENDING_VIDEOS=$(echo "$VIDEO_STATS" | cut -d'|' -f3)
-          FAILED_VIDEOS=$(echo "$VIDEO_STATS" | cut -d'|' -f4)
           CORRUPT_VIDEOS=$(echo "$VIDEO_STATS" | cut -d'|' -f5)
-          VIDEO_SUMMARY="视频文件 ${TOTAL_VIDEOS} 条，已上传 ${UPLOADED_VIDEOS} 条，待上传 ${PENDING_VIDEOS} 条，损坏已跳过 ${CORRUPT_VIDEOS} 条，失败上传 ${FAILED_VIDEOS} 条"
+          VIDEO_SUMMARY="视频文件 ${TOTAL_VIDEOS} 条，已上传 ${UPLOADED_VIDEOS} 条，待上传 ${PENDING_VIDEOS} 条，损坏已跳过 ${CORRUPT_VIDEOS} 条"
           echo "$VIDEO_SUMMARY"
 
           # 强制将挂载目录中 appended 的 uploaded_videos.json 写回远端（VFS full 模式写回是后台异步，避免 VM 销毁前丢数据）
@@ -257,7 +257,7 @@ jobs:
           msg=""
           tg_add_title msg "✅ ph-dl 下载任务完成"
           tg_add_kv msg "视频文件" "${TOTAL_VIDEOS} 条"
-          tg_add_kv msg "库存状态" "已上传 ${UPLOADED_VIDEOS} · 待上传 ${PENDING_VIDEOS} · 失败 ${FAILED_VIDEOS}"
+          tg_add_kv msg "库存状态" "已上传 ${UPLOADED_VIDEOS} · 待上传 ${PENDING_VIDEOS}"
           if [ "${CORRUPT_VIDEOS:-0}" -gt 0 ]; then
             tg_add_kv msg "损坏已跳过" "${CORRUPT_VIDEOS} 条"
           fi

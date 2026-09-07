@@ -10,8 +10,10 @@
 #   任务"拆成多个子任务递归执行。两者维度不同（文件 vs 任务），
 #   命名相似纯属历史原因。
 #
-# 依赖: utils.sh (log_fix, check_log_has_content, escape_html, format_bytes_iec),
-#       telegram.sh (send_telegram_message, tg_add_title/tg_add_kv/tg_add_path/tg_add_section/tg_add_block)
+# 依赖: utils.sh (log_fix, check_log_has_content, format_bytes_iec),
+#       telegram.sh (send_telegram_message),
+#       telegram/tg_notify.sh (escape_html, tree_*,
+#         tg_add_title/tg_add_kv/tg_add_path/tg_add_section/tg_add_block — 排版助手真源，L0 层 source)
 
 # 发送视频分割通知到 Telegram
 # 用法: send_video_split_notification <file_path> <file_size> <parts_count> <result> <log_file> [validation_summary]

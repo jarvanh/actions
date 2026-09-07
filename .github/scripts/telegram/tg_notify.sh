@@ -9,14 +9,15 @@
 #   - 429 限流按 retry_after 等待重试；长消息按 4000 字符分片（断在换行处，
 #     不切 UTF-8 多字节字符）
 # 用法: source tg_notify.sh
-# 目录职责: 本目录 = 通知域（bash 真源 tg_notify.sh，未来 pwsh 真源 tg_notify.ps1）。
+# 目录职责: 本目录 = 通知域（bash 真源 tg_notify.sh，pwsh 真源 tg_notify.ps1）。
 #   Telegram 频道内容管线（同步/上传/去重/清理）见 scripts/tg-channel/ ——
 #   它与本文件是单向依赖: tg-channel/ 只 source 本文件，本文件不反向引用。
 # 环境变量: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 #   （历史名 TG_BOT_TOKEN / TG_CHAT_ID 自动兼容——见下方别名回退）
 # 收尾接线（可选，缺席时 tg_add_footer 优雅降级）:
 #   TG_RUN_URL        运行日志链接（workflow 注入 https://github.com/<repo>/actions/runs/<id>）
-#   TG_RUN_STARTED_AT run 起始 ISO 时间（workflow 注入 ${{ github.run_started_at }}）
+#   TG_RUN_STARTED_AT run 起始 ISO 时间（历史由 workflow 注入 ${{ github.run_started_at }}；
+#     该表达式上下文已从平台移除，注入后通常为空值，故时长实际走 /proc/1 兜底）
 # 版式规范（openlist 侧经 load_all.sh L0 层 source 本文件，不再自带副本）:
 #   {emoji} <b>标题</b>          ← tg_add_title
 #   ━━━━━━━━━━━━━━━━━━           ← TG_SEP（勿手写分隔线）
@@ -31,6 +32,7 @@
 #   send_tg_chunked <text>             分片发送（长消息用）
 #   escape_html / tg_append / tg_add_title / tg_add_kv / tg_add_path /
 #   tg_add_section / tg_add_note / tg_add_block / tg_add_footer
+#   tree_conn / tree_sub / tree_lines / tree_code_fold（树形条目与折叠）
 
 # bash 5.2+ patsub_replacement 会破坏 escape_html 的实体替换（"&" 被当作匹配
 # 文本引用），旧 bash 无此选项，shopt 报错被吞（与 openlist/utils.sh 同款防护）

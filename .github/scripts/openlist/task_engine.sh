@@ -1150,8 +1150,11 @@ sync_by_file_batches() {
       batch_file_count=$(wc -l < "$bf" | tr -d ' ')
       batch_total_files=$((batch_total_files + batch_file_count))
       echo "=== 批次 $((i+1))/${total_batches}: ${batch_file_count} 个文件 ==="
-      PROGRESS_PHASE_INFO="▸ 📦 文件批次拆分：共 ${total_batches} 批 · ${total_files} 个文件 · 当前第 ${batch_idx} 批 · ${batch_file_count} 个文件"
-      progress_update "第 ${batch_idx}/${total_batches} 批：${batch_file_count} 个文件" "$(_render_batch_stats_line)"
+      # 标签行只保留总量（共 N 批 · M 个文件）；当前批次号/文件数已由
+      # 统计行（📊 批次：n/m · 📄 x/y 文件）表达，detail 不再重复写进任务行
+      # —— 三处重复（任务行 detail + 标签行尾 + 统计行）只留统计行（用户反馈）
+      PROGRESS_PHASE_INFO="▸ 📦 文件批次拆分：共 ${total_batches} 批 · ${total_files} 个文件"
+      progress_update "" "$(_render_batch_stats_line)"
 
       # 批次计时基准（历史记录耗时用）
       BATCH_START_TS=$(date +%s)

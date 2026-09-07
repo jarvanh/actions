@@ -2,7 +2,7 @@ name: Backup All GitHub Repositories to OneDrive
 
 on:
   schedule:
-    - cron: '0 3 * * *' # 每天凌晨3点运行
+    - cron: '0 3 * * *' # 每天 UTC 03:00（北京 11:00）运行
   workflow_dispatch:
 
 concurrency:

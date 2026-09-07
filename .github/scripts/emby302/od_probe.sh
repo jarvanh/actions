@@ -90,7 +90,7 @@ out "   与 OpenList 的任何账号密码均无关）"
 
 # ---------- Graph 请求 helper ----------
 # 注意：必须直接调用（gget "$url"），不能放在 $( ) 里——命令替换是子 shell，
-# 函数内对 GCODE/GBODY 的赋值传不回父 shell（上一版 http=0 假失败的根因）。
+# 函数内对 GCODE/GBODY 的赋值传不回父 shell。
 # 结果：JSON 体写入 GBODY，HTTP 码写入 GCODE。
 GCODE=0
 GBODY=""

@@ -54,7 +54,7 @@ tree_lines() { cat; }
 check_sync_marker() { :; }
 send_sync_skipped() { :; }
 send_sync_warning() { :; }
-# 排版助手 stub（与 openlist/telegram.sh 同语义——AUTO_SPLIT_INFO 经其构建）
+# 排版助手 stub（与 telegram/tg_notify.sh 同语义——AUTO_SPLIT_INFO 经其构建）
 escape_html() { local s="$1"; s="${s//&/&amp;}"; s="${s//</&lt;}"; s="${s//>/&gt;}"; echo "$s"; }
 tg_append() { printf -v "$1" '%s%s' "${!1}" "$2"; }
 tg_add_section() { tg_append "$1" $'\n'"<b>$(escape_html "$2")</b>"$'\n'; }

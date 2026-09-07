@@ -5,19 +5,20 @@
 #   - 构建同步结果的 Telegram 通知（成功/失败/跳过/无变化 4 个分支共用排版）
 #   - 共享段落构建器: 头部(任务/路径/大小/状态)、自动拆分、排除规则、差异列表
 #
-# 拆分缘由: sync_engine.sh 曾同时承担同步编排、修复管线、通知排版三类职责
-#   （2000+ 行），通知部分与同步逻辑无耦合，独立后按职责即可定位。
+# 拆分缘由: sync_engine.sh 曾同时承担同步编排、驱动维护、修复管线、通知排版四类
+#   职责（2000+ 行），通知部分与同步逻辑无耦合，独立后按职责即可定位。
 #
-# 依赖: utils.sh (escape_html, tree_conn/tree_sub/tree_lines,
-#         get_transferred_bytes_from_log),
+# 依赖: utils.sh (get_transferred_bytes_from_log),
 #       rclone_query.sh (_build_diff_files_list, _build_exclude_patterns,
 #         _get_path_stats),
-#       telegram.sh (tg_*), file_fix.sh (_fix_method_short),
+#       telegram/tg_notify.sh (escape_html, tree_conn/tree_sub/tree_lines,
+#         tg_add_* — 排版与发送真源，由 load_all.sh L0 层 source),
+#       telegram.sh (send_telegram_message), file_fix.sh (_fix_method_short),
 #       openlist_driver.sh (_refresh_openlist_cache)
 # 被依赖: sync_engine.sh (sync_with_logging)
 # ===== 通知消息公共段落构建 =====
 # 4 个通知分支共享的头部/任务信息/排除规则/差异列表段落。
-# 统一走 telegram.sh 的 tg_* 排版助手（HTML）；
+# 统一走 telegram/tg_notify.sh 的 tg_* 排版助手（HTML）；
 # 读取调用方（_send_sync_result_notification）作用域:
 #   source_size_human / dest_size_human / count_info / task_name /
 #   source_path / dest_path / exclude_list / AUTO_SPLIT_INFO / diff_files_list

@@ -1,5 +1,5 @@
 # 修复方式 → 还原元数据（kind/summary/steps/script）分类程序
-# 由 sync_engine.sh _sync_serialize_fixed_files 以 jq -R -s --arg sp <src> --arg dp <dst> -f 调用
+# 由 file_fix_pipeline.sh _sync_serialize_fixed_files 以 jq -R -s --arg sp <src> --arg dp <dst> -f 调用
 # 输入: fix_list 原始文本（| 分隔，每行 original|alternative|method|restore_hint|size_human|size_bytes|method_id[|md5]）
 # 输出: fixed_files JSON 数组
 def restore_info($orig; $alt; $method; $src; $dst):

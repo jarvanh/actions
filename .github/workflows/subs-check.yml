@@ -64,7 +64,7 @@ jobs:
           rclone lsf dropbox:
       - name: Check if the tunnel is running
         env:
-          TUNNEL_NAME: "subs-check" # 替换为你的隧道名称
+          TUNNEL_NAME: "subs-check" # cloudflared 隧道名
         run: |
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
