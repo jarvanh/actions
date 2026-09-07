@@ -7,7 +7,7 @@
 
 | 运行环境 | 真源 | 说明 |
 |---|---|---|
-| ubuntu runner（bash） | [`scripts/telegram/tg_notify.sh`](../.github/scripts/telegram/tg_notify.sh) | 排版助手 + 发送层（HTML 退化 / 429 重试 / 4000 分片 / curl `-m 15`），`source` 使用 |
+| ubuntu runner（bash） | [`scripts/telegram/tg_notify.sh`](../.github/scripts/telegram/tg_notify.sh) | 排版助手 + 发送层（429 重试 / 4000 分片 / 解析失败直接报错不重发 / curl `-m 15`），`source` 使用 |
 | Telegram 频道内容管线 | `scripts/tg-channel/` | 频道同步 / 上传 / 去重 / 清理（**不是**通知域），单向依赖上面的 `tg_notify.sh` |
 | openlist 同步脚本（runner 上执行） | [`scripts/openlist/telegram.sh`](../.github/scripts/openlist/telegram.sh) | 薄适配层：只放「需要 message_id」的进度面板函数（`send_telegram_message` / 原地编辑 3 函数）；排版与发送经 `load_all.sh` L0 层 source 上一行真源，不再自带副本 |
 | python | `scripts/proxy-speedtest/speedtest_gitee.py` 的 `tg_format_elapsed` / `tg_footer_line` / `send_telegram_chunked` | 其余 python 一律复用或经 `notify()` 借 bash 生成，**禁止自造** |
@@ -25,7 +25,7 @@
 {emoji} <b>分节 · N</b>          ← tg_add_section（段前空行；计数一律 " · N"）
 📁 <b>组头</b> · <i>大小</i>      ← 分组列表：组头路径加粗
   ├─ <code>条目</code> · <i>备注</i>   ← tree_conn / tree_lines（末条 └─）
-  │     子行                    ← tree_sub（末条目子行 6 空格）
+  │   子行                      ← tree_sub（│ 后 3 空格；末条目整行前缀 6 空格）
   └─ <i>还有 N 条…</i>          ← 超长折叠行（并入条目流作末条，禁双 └─）
 
 <pre>日志块</pre>                ← tg_add_block（需对齐的多行内容）
@@ -34,21 +34,27 @@
 （空行）⏱ 已运行 <b>X</b> · 🔗 <a href="URL">运行日志</a>   ← tg_add_footer
 ```
 
-完整示例（`任务预览`）：
+完整示例（`任务预览`，2026-09-07 实录）：
 
 ```
-📋 任务预览 · emby
+📋 任务预览 · backup
 ━━━━━━━━━━━━━━━━━━
 
-📊 同步对 · 12
-📁 onedrive:media → openlist:/media
-  ├─ openlist:/media/a.mp4 · +300 B / +1 文件
-  │     差异构成：新增 1 · 同名更新 1
-  └─ openlist:/media/b.mp4 · 无变动
+📊 同步对 · 2
+📁 <b>onedrive:backup</b>
+  ├─ <code>aliyundriveCrypt/backup</code> · <i>源端 36.065 GiB / 1415 文件</i> · <b>+7.268 GiB / +2 文件</b>
+  │   差异构成：同名更新 2
+  │   排除 · 3
+  │     ├─ <code>notion/**</code>
+  │     ├─ <code>self-hosted_latest.tar.gz</code>
+  │     └─ <code>github_repos_latest.tar.gz</code>
+  └─ <code>wopan176Crypt/backup</code> · <i>源端 53.594 GiB / 1417 文件</i> · <b>+26.509 GiB / +41 文件</b>
+      差异构成：新增 38 · 同名更新 3
+      已扣减 1 个修复文件 / 2.796 KiB
 
-📦 合计预估待同步：900 B / 2 文件 · 新增 1 · 同名更新 1
+📦 合计预估待同步：33.777 GiB / 43 文件 · 新增 38 · 同名更新 3
 
-⏱ 已运行 1 小时 12 分 · 🔗 运行日志
+⏱ 已运行 22 分钟 · 🔗 运行日志
 ```
 
 ### 2.1 标签锚点行（多字段拼行必用）
@@ -72,7 +78,7 @@
 
 ### 2.2 明细列表与分组
 
-**两种分组场景，形态一致**（组头 + 条目树形）：
+**三种分组场景，形态一致**（组头 + 条目树形）：
 
 1. **长列表** —— 条目数可能很大（跳过、失败、待处理），必须按状态或原因分组，
    不得穷举裸文本；组头 `<b>原因</b> · N` + 条目 `<code>名称</code>` 树形。
@@ -90,7 +96,7 @@
   │     ├─ <code>notion/**</code>
   │     └─ <code>self-hosted_latest.tar.gz</code>
   └─ <code>wopan176Crypt/backup</code> · …
-        排除 · 1 组以上时同形态（前缀 8 空格 + ├─/└─）
+        排除 · N（末条目的子树前缀 8 空格 + ├─/└─）
 ```
 
    实现参考：`openlist/task_preview.sh`（`排除 · N` 子树）。
@@ -112,8 +118,7 @@
 - **折叠行必须并入条目流再交给 `tree_lines`**，由它统一决定末条 ——
   单独补一行 `  └─ 还有 N 条…` 会造成双 `└─` 同级、层次混淆。
   文件类列表可直接用一站式助手 `tree_code_fold <多行> [max=8]`
-  （`telegram/tg_notify.sh` 与 `openlist/utils.sh` 各有同名同语义一份，
-  逐行 `<code>转义</code>` + 折叠 + 树形一次完成）。
+  （真源 `telegram/tg_notify.sh`，逐行 `<code>转义</code>` + 折叠 + 树形一次完成）。
 - **职责分层**：脚本层只输出结构化数据（如 `中文原因\t路径`），
   HTML 与树形一律交给 `tg_*` 助手；脚本侧自造标签是版式漂移的根源。
 - 实现参考：`tg-channel/sync_to_tg.sh` 的 `_render_skipped_groups`。
@@ -128,8 +133,9 @@
 ```
 
 - **时长三段式**：`≥1h → "X 小时 Y 分"`、`≥1min → "X 分钟"`、否则 `"X 秒"`。
-  语义 = 当前时间 − `github.run_started_at`（run 已运行时长），**不是**步骤自身耗时
-  （正文里单文件/单轮耗时可用 `耗时：N 秒` 等 kv 行表达，勿加 ⏱ 前缀冒充收尾）。
+  语义 = run 已运行时长，**不是**步骤自身耗时。条目内耗时用 `⏱mm:ss` 定宽形态
+  （如批次历史行 `⏱01:15`，见 §4 字段 emoji 表）；收尾区专属的是
+  「⏱ 已运行 X」完整形态，两者不混用。
 - **降级链**（必须逐字一致）：`TG_RUN_STARTED_AT` → 时长；
   缺失时兜底 **runner 开机时刻**（Linux `/proc/1` mtime / Windows `LastBootUpTime`，
   hosted runner 随 job 启动、误差秒级）；仍取不到 → 不显示时长；
@@ -154,7 +160,7 @@ env:
 
 | 禁止 | 反例 | 正例 |
 |---|---|---|
-| 英文紧凑时长进通知 | `⏱ 已运行 5h 57m`、`耗时: 12.34s` | `⏱ 已运行 5 小时 57 分`（紧凑格式仅允许进 RESULT_JSON artifacts） |
+| 英文紧凑时长进通知 | `⏱ 已运行 5h 57m`、`耗时: 12.34s` | `⏱ 已运行 5 小时 57 分`（紧凑格式仅允许进 RESULT_JSON artifacts；批次历史行 `⏱01:15` mm:ss 为既定字段形态，见下方字段表） |
 | 手拼收尾行 | `"\n\n⏱ 🔗 <a>运行日志</a>"` | 一律经 `tg_add_footer` / `tg_footer_line` |
 | `⏱️`（带 VS16 变体） | `⏱️ 已用：…` | 裸 `⏱`：收尾区 `⏱ 已运行 X`；条目内耗时 `⏱1分15秒`（紧跟数字无空格） |
 | 半角冒号 kv 行 | `📦 分组: xxx` | `📦 分组：xxx` |
@@ -185,9 +191,10 @@ env:
 ## 5. 发送层要求
 
 - **一律 HTML parse_mode**，动态内容必须转义（`escape_html` / `tg_*` 助手已内置）。
-  > pwsh 侧注意：转义函数需自行定义（`Esc-Html`）。调用未定义函数是**终止错误**，
-  > 若该 step 带 `continue-on-error: true`，表现为通知静默消失、不报失败
-  > （`tailscale-windows.yml` 曾因此缺发入口通知）。加转义调用前先确认函数存在。
+  > pwsh 侧：转义/发送经 `telegram/tg_notify.ps1` dot-source 提供（`Esc-Html` /
+  > `Send-TgMessage` / `Get-TgFooter`），dot-source 后加 `Get-Command Send-TgMessage`
+  > 自检——调用未定义函数是**终止错误**，若 step 带 `continue-on-error: true`
+  > 会表现为通知静默消失、不报失败（`tailscale-windows.yml` 曾因此缺发入口通知）。
 - HTML 解析失败（400 can't parse entities）→ **不重发**，直接报错暴露（见下）。消息本来就没被
   Telegram 接收，退化成纯文本只是把版式 bug 藏起来；动态内容一律经 `tg_*` 助手转义即可避免。
 - 429 限流按 `retry_after` 等待重试（最多 5 次）；长消息按 4000 字符分片（断在换行处，不切 UTF-8 多字节）。
@@ -212,19 +219,22 @@ env:
 - [ ] workflow 已注入 `TG_RUN_URL` / `TG_RUN_STARTED_AT`（job 或 step 级 env）
 - [ ] 动态内容全部经转义助手；发送走 `send_tg` / `send_tg_chunked` / `notify()`
 - [ ] 数值/时间戳已人性化：无原始高精度浮点、无 ISO 原始戳直出（见 §4）
+- [ ] 进度面板批次行按 §4 字段 emoji 表（六计数 %02d 恒显 + ⏱mm:ss + ⬆️GiB）
 - [ ] 相关测试同步更新（如 `openlist/tests/test_progress_final_title.sh`）
 
 ## 7. 回归测试守卫
 
-`openlist/tests/` 现有 **17 个回归套件**——凡改动 `telegram.sh` / `utils.sh` /
-排版助手 / 同步管线，全量跑通后再交付。与本规范直接相关的守卫点：
+`openlist/tests/` 现有 **17 个回归套件**——凡改动 `telegram/tg_notify.sh`（真源）/
+`openlist/telegram.sh` / `task_engine.sh` 批次行 / 同步管线，全量跑通后再交付，
+且全量日志 `command not found` 必须为零。与本规范直接相关的守卫点：
 
 | 测试 | 守卫点 |
 |---|---|
 | `openlist/tests/test_progress_final_title.sh` | 收尾标题四态 + 状态行下沉 |
-| `openlist/tests/test_preview_diff.sh` | 任务预览合计行/树形/扣减子行 |
-| `openlist/tests/test_progress_phase_layout.sh` | 进度面板无 ⏱ 尾（时长只从 footer 出） |
+| `openlist/tests/test_preview_diff.sh` | 任务预览合计行/树形/排除子树/扣减子行 |
+| `openlist/tests/test_progress_phase_layout.sh` | 进度面板无 ⏱ 尾 + 批次历史行 emoji 形态渲染 |
 | `openlist/tests/test_skip_preview_hint.sh` | 跳过预览提示 |
+| `openlist/tests/test_batch_precheck_circuit_breaker.sh` | 批次熔断分支（字段 emoji stub 在此） |
 | `openlist/tests/test_method_id_naming.sh` | 修复方法 ID ↔ 中文标签映射 |
 | `openlist/tests/test_hash_dir_fallback.sh` | 哈希目录兜底（含 fix_log 文案） |
 | `openlist/tests/test_fix_log_section.sh` | fix_log 分节横幅 |
