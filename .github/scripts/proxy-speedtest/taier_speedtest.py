@@ -37,19 +37,24 @@ import yaml
 # 复用 speedtest_gitee.py 的已验证能力（import 期仅会创建 ~/proxy-speedtest 目录）
 # ---------------------------------------------------------------------------
 from speedtest_gitee import (
+    DEFAULT_MIN_MEGABIT,
     HOME_RUNTIME,
     MIHOMO,
     MIHOMO_CONFIG,
     MIHOMO_LOG,
     build_mihomo_config,
+    build_source_mapping,
+    build_subscription_yaml_text,
     collect_provider_snapshot,
     ensure_local_mihomo,
+    get_item_megabits,
     log_progress,
     merged_env,
     send_telegram,
     switch_proxy,
     tg_footer_line,
     tg_format_elapsed,
+    update_gist,
     wait_mihomo,
 )
 
@@ -250,6 +255,11 @@ def _mbps(value):
     return float(m.group(1)) if m else 0.0
 
 
+def _rtt_to_ms(rtt):
+    m = re.match(r'^([0-9]+(?:\.[0-9]+)?)', str(rtt or ''))
+    return float(m.group(1)) if m else 0
+
+
 def parse_taier_output(text: str):
     """解析 stdout → 出口 IP/位置、首行结果（延迟/上行/下行）、原始表格。
 
@@ -297,7 +307,7 @@ def parse_taier_output(text: str):
 # ---------------------------------------------------------------------------
 # 通知（全库统一 HTML 版式；动态内容一律 escape）
 # ---------------------------------------------------------------------------
-def build_telegram_lines(results, meta, direct_ip, bypass_hits):
+def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, qualified_count):
     def esc(s):
         return html.escape(str(s))
 
@@ -341,6 +351,24 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits):
             connector = '└─' if idx == min(len(failed), 5) else '├─'
             lines.append(f"  {connector} <code>{esc(r.get('name', ''))}</code> · <i>{esc((r.get('error') or '-')[:80])}</i>")
         lines.append('')
+
+    lines.append('📦 <b>订阅 · Gist</b>')
+    if gist_res and gist_res.get('ok'):
+        action = '新建' if gist_res.get('created') else '更新'
+        raw_url = ((gist_res.get('yaml') or {}).get('raw_url') or '').strip()
+        gist_lines = [f'✅ 已{action}，达标 <b>{qualified_count}</b> 个 · 阈值 ≥{DEFAULT_MIN_MEGABIT}兆']
+        if gist_res.get('created'):
+            gist_lines.append('❗ 请把 Gist id 回填到 Secrets <code>PROXY_SPEEDTEST_TAIER_GIST_ID</code>，避免每轮新建')
+        if raw_url:
+            gist_lines.append(f'🔗 <a href="{esc(raw_url)}">订阅源 YAML</a>')
+        for _i, _l in enumerate(gist_lines):
+            _c = '└─' if _i == len(gist_lines) - 1 else '├─'
+            lines.append(f'  {_c} {_l}')
+    elif gist_res:
+        lines.append(f"  └─ ⚠️ 上传失败：{esc(gist_res.get('reason', ''))}")
+    else:
+        lines.append(f'  └─ ⚠️ 无达标节点 · 阈值 ≥{DEFAULT_MIN_MEGABIT}兆 · 未更新订阅')
+    lines.append('')
 
     lines.append('')
     footer = tg_footer_line()
@@ -389,8 +417,18 @@ def _run():
     direct_ip = direct_egress_ip()
     log_progress('direct_egress_resolved', ip=direct_ip)
 
+    # 订阅源映射：解析每个节点的原始配置（share_link / proxy YAML），供订阅导出使用
     try:
-        _, alive_items = collect_provider_snapshot()
+        source_mapping = build_source_mapping(env)
+        log_progress('source_mapping_built',
+                     entries=len(source_mapping.get('exact_proxy') or {}) +
+                             len(source_mapping.get('exact_raw') or {}))
+    except Exception as e:
+        log_progress('source_mapping_failed', error=str(e))
+        source_mapping = {}
+
+    try:
+        _, alive_items = collect_provider_snapshot(source_mapping)
     except Exception as e:
         log_progress('snapshot_failed', error=str(e))
         notify_failure(env, f'节点快照失败：{e}')
@@ -421,6 +459,8 @@ def _run():
         row = {
             'name': name,
             'type': item.get('type', ''),
+            'source_entry': item.get('source_entry', {}) or {},
+            'mode': 'download',
             'ok': rc == 0 and bool(parsed['region']) and has_speed,
             'exit_ip': parsed['exit_ip'],
             'exit_loc': parsed['exit_loc'],
@@ -462,6 +502,35 @@ def _run():
     # 先关 TUN 再发通知：通知走的是 runner 自身网络，必须在路由恢复之后
     stop_mihomo_tun()
 
+    # 订阅导出到本工作流专属 Gist（secret: PROXY_SPEEDTEST_TAIER_GIST_ID）——
+    # 三个测速工作流各用各的 Gist，互不覆盖。taier 数值是 Mbps，导出字段是 MiB/s（÷8.388608），
+    # 阈值/前缀沿用 speedtest_gitee 的 ×8 折算，展示值与 Mbps 基本一致
+    gist_res = None
+    qualified_count = 0
+    gist_results = [{
+        'name': r.get('name', ''),
+        'source_entry': r.get('source_entry') or {},
+        'mode': 'download',
+        'download_mibs': (r.get('down') or 0) / 8.388608,
+        'upload_mibs': (r.get('up') or 0) / 8.388608,
+        'latency_ms': _rtt_to_ms(r.get('rtt')),
+    } for r in results]
+    yaml_text = build_subscription_yaml_text(gist_results, DEFAULT_MIN_MEGABIT)
+    if (yaml_text or '').strip():
+        try:
+            gist_res = update_gist(env, yaml_text)
+            qualified_count = sum(
+                1 for g in gist_results
+                if get_item_megabits(g, 'download') >= DEFAULT_MIN_MEGABIT
+                and (g.get('source_entry') or {}).get('proxy'))
+            log_progress('gist_uploaded', ok=gist_res.get('ok'),
+                         action='新建' if gist_res.get('created') else '更新',
+                         qualified=qualified_count)
+        except Exception as e:
+            log_progress('gist_upload_failed', error=str(e))
+    else:
+        log_progress('gist_skipped', reason='no node met min speed')
+
     ended_at = datetime.now()
     duration_text = tg_format_elapsed((ended_at - started_at).total_seconds())
     meta = {
@@ -486,7 +555,8 @@ def _run():
         log_progress('report_write_failed', error=str(e))
 
     try:
-        send_telegram(env, '\n'.join(build_telegram_lines(results, meta, direct_ip, bypass_hits)))
+        send_telegram(env, '\n'.join(build_telegram_lines(
+            results, meta, direct_ip, bypass_hits, gist_res, qualified_count)))
     except Exception as e:
         log_progress('telegram_send_failed', error=str(e))
 

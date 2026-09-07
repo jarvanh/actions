@@ -88,6 +88,9 @@ jobs:
           # GitHub API 匿名调用在共享出口 IP 上 60 次/h 限流时的认证回退
           GH_TOKEN: ${{ secrets.PAT }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 订阅导出：本工作流专属 Gist（三个测速工作流各用各的，互不覆盖）。
+          # 留空则首次运行自动新建，TG 通知会给链接；拿到 id 后回填此 secret 避免每轮新建
+          PROXY_SPEEDTEST_GIST_ID: ${{ secrets.PROXY_SPEEDTEST_TAIER_GIST_ID }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           # 统一收尾区（footer）: 运行日志链接 + 已运行时长

@@ -40,6 +40,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # 已有 Gist 的 id：传入后「更新」同一 Gist 而非每轮新建。
           # 首次留空会自动新建；到 Gist 页面复制 URL 末尾的 id 回填到 Secrets 即可。
+          # 注意：这是 gitee 专属 Gist —— cdn / taier 分别用 PROXY_SPEEDTEST_CDN_GIST_ID /
+          # PROXY_SPEEDTEST_TAIER_GIST_ID，三个测速工作流各用各的，互不覆盖。
           PROXY_SPEEDTEST_GIST_ID: ${{ secrets.PROXY_SPEEDTEST_GIST_ID }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
