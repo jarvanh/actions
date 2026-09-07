@@ -18,7 +18,7 @@ name: proxy-speedtest-taier
 on:
   schedule:
     # 每 6 小时测一次：UTC 04:00, 10:00, 16:00, 22:00（北京 12:00, 18:00, 00:00, 06:00）
-    # 与 proxy-speedtest-gitee（02/08/14/20）、proxy-speedtest-download（03/09/15/21）错峰
+    # 与 proxy-speedtest-gitee（02/08/14/20）、proxy-speedtest-mirror（03/09/15/21）错峰
     - cron: "0 4,10,16,22 * * *"
   workflow_dispatch:
     inputs:
