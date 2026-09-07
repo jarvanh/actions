@@ -1,11 +1,11 @@
-name: proxy-speedtest-mirror
+name: proxy-speedtest-cdn
 
 # 代理节点测速三件套（按测速点命名，便于在 Actions 列表一眼分辨）：
-#   proxy-speedtest-gitee  = 测速点 Gitee 私有仓库：经代理 git push 测上行
-#   proxy-speedtest-mirror = 本工作流，测速点国内镜像站/CDN（腾讯云 mirrors、清华 TUNA、
-#                            npmmirror；延迟目标 baidu/taobao）：经代理 HTTP 计时 +
-#                            单连接 curl 下载，生成 HTML 报告 + 达标节点订阅导出 Gist
-#   proxy-speedtest-taier  = 测速点泰尔三网（电信/联通/移动）：taierspeedtest + mihomo TUN
+#   proxy-speedtest-gitee = 测速点 Gitee 私有仓库：经代理 git push 测上行
+#   proxy-speedtest-cdn   = 本工作流，测速点国内 CDN/镜像站（腾讯云 mirrors、清华 TUNA、
+#                           npmmirror；延迟目标 baidu/taobao）：经代理 HTTP 计时 +
+#                           单连接 curl 下载，生成 HTML 报告 + 达标节点订阅导出 Gist
+#   proxy-speedtest-taier = 测速点泰尔三网（电信/联通/移动）：taierspeedtest + mihomo TUN
 # 本工作流：测量节点延迟 + 下载速度 + 经代理上行速度，生成可交互 HTML 报告。
 # 上行测速复用 speedtest_gitee 的「经 mihomo 代理 git push」方案向 Gitee 私有仓库推送测速文件。
 on:
@@ -16,7 +16,7 @@ on:
 
 jobs:
   speedtest:
-    concurrency: proxy-speedtest-mirror-singleton
+    concurrency: proxy-speedtest-cdn-singleton
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
