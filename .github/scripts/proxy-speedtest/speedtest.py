@@ -990,10 +990,14 @@ def build_telegram_lines(results, *, meta, gist_res, qualified_count):
     lines.append('')
     if top_results:
         top = top_results[:5]
-        # 名次类分节用 🏆（规范 §2 裁决 5：禁 ⭐/🥇 自造前缀；名次类计数在 <b> 内）
-        lines.append(f'🏆 <b>最快节点 · {len(top)}</b> · <i>↓下载 · ↑上传 · 延迟ms</i>')
+        # 名次类分节用 🏆（规范 §2 裁决 5：禁 ⭐/🥇 自造前缀；名次类计数在 <b> 内）；
+        # 指标顺序对齐泰尔引擎列序（↑上传在前）；上传未启用/未测出时条目自动省略
+        # ↑ 项（build_node_metric_prefix 内置），图例同步省略
+        has_up = any((_result_metric_item(r).get('upload_mibs') or 0) > 0 for r in top)
+        legend = '↑上传 · ↓下载 · 延迟ms' if has_up else '↓下载 · 延迟ms'
+        lines.append(f'🏆 <b>最快节点 · {len(top)}</b> · <i>{legend}</i>')
         for idx, r in enumerate(top, 1):
-            prefix = build_node_metric_prefix(_result_metric_item(r), mode)
+            prefix = build_node_metric_prefix(_result_metric_item(r), mode, order='up_first')
             connector = '└─' if idx == len(top) else '├─'
             # 条目不编号（裁决 6）：顺序即名次
             item = f'  {connector} <code>{esc(r.get("name", ""))}</code>'

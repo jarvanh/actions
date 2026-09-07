@@ -334,12 +334,18 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, qualif
     lines.extend(egress_network_lines())
     lines.append('')
     if top:
-        lines.append(f'🏆 <b>最快节点 · {len(top)}</b> · <i>↓下载 · ↑上传 · 延迟</i>')
+        # 指标顺序对齐泰尔引擎列序（↑上传在前）；上传未测出（CDN 类节点拒绝泰尔
+        # 900MB 上传请求体，引擎渲染 failed → 0）时条目省略 ↑ 项、图例同步省略，
+        # 避免误导为「测得 0.0Mbps」
+        has_up = any((r.get('up') or 0) > 0 for r in top)
+        legend = '↑上传 · ↓下载 · 延迟' if has_up else '↓下载 · 延迟'
+        lines.append(f'🏆 <b>最快节点 · {len(top)}</b> · <i>{legend}</i>')
         for idx, r in enumerate(top, 1):
             connector = '└─' if idx == len(top) else '├─'
+            up_text = f"↑{esc(r['up'])}Mbps · " if (r.get('up') or 0) > 0 else ''
             lines.append(
                 f"  {connector} <code>{esc(r.get('name', ''))}</code>"
-                f" · <i>↓{esc(r.get('down', 0))}Mbps · ↑{esc(r.get('up', 0))}Mbps"
+                f" · <i>{up_text}↓{esc(r.get('down', 0))}Mbps"
                 f" · {esc(r.get('rtt') or '-')}</i>")
         lines.append('')
     else:
