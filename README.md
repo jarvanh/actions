@@ -39,7 +39,7 @@ proxy-speedtest/            测速结果数据
 | `HomeAssistant.yml` / `rdp.yml` / `openclaw.yml` | 自托管服务 |
 | `ql.yml` / `sub-store.yml` / `subs-check.yml` | 签到与订阅管理 |
 | `icloud-photos-downloader.yml` / `ph-dl.yml` / `pixivutil2.yml` | 媒体抓取下载 |
-| `proxy-speedtest-gitee.yml` / `proxy-speedtest-mirror.yml` / `proxy-speedtest-taier.yml` | 代理测速三件套（按测速点命名）：Gitee 上行 / 国内镜像站延迟+下载 / 泰尔三网 |
+| `proxy-speedtest-gitee.yml` / `proxy-speedtest-cdn.yml` / `proxy-speedtest-taier.yml` | 代理测速三件套（按测速点命名）：Gitee 上行 / 国内 CDN 延迟+下载 / 泰尔三网 |
 | `upload-video-to-tg.yml` / `p.yml` / `eshop.yml` / `teslamate.yml` | 杂项 |
 | `delete-workflow-runs.yml` | 清理历史运行记录 |
 
