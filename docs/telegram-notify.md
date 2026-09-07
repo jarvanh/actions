@@ -79,6 +79,21 @@
 2. **多套同类信息** —— 条目虽少但存在多套并列结构（如 SSH / RDP 两套入口凭据），
    按套分节（emoji 区分语义），否则平铺混排难以扫读；组头可不带计数。
    实现参考：`tailscale-windows.yml` 与 `openclaw.yml`（`🟢 … 已就绪`）。
+3. **条目子树（附属明细）** —— 某条目自身还有附属明细（如任务预览的排除规则）且
+   **条数 ≥2** 时，降为二层列表：组头 = `tree_sub` 前缀 + `标签 · N`，子条目再缩进
+   2 格用 `├─/└─`（模式内末条 └─）；仅 1 条时并入子行（`标签：<code>…</code>`），不为
+   单条扩树。子树会显著拉高通知，谨慎使用。
+
+```
+  ├─ <code>aliyundriveCrypt/backup</code> · <i>源端 …</i> · <b>+7.270 GiB / +2 文件</b>
+  │   排除 · 2
+  │     ├─ <code>notion/**</code>
+  │     └─ <code>self-hosted_latest.tar.gz</code>
+  └─ <code>wopan176Crypt/backup</code> · …
+        排除 · 1 组以上时同形态（前缀 8 空格 + ├─/└─）
+```
+
+   实现参考：`openlist/task_preview.sh`（`排除 · N` 子树）。
 
 ```
 ⚠️ 跳过/过滤文件

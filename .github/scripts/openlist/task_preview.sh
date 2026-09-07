@@ -297,7 +297,27 @@ _preview_render_pairs_detail() {
       _comp+="同名更新 ${_yupd}"
       _g_block[$_src]+="${_sub}${_comp}"$'\n'
     fi
-    [ -n "$_excl" ] && _g_block[$_src]+="${_sub}排除：<code>$(escape_html "$_excl")</code>"$'\n'
+    # 排除规则（顿号「、」连接，_extract_exclude_summary 产出）:
+    #   ≥2 条 → 条目子树（组头「排除 · N」+ 逐条 <code>，模式内末条 └─；
+    #           前缀 = tree_sub(last) + 2 空格，末条目整块 8 空格起）
+    #   1 条  → 并入子行（不为单条扩树，规范 §2.2.3）
+    if [ -n "$_excl" ]; then
+      local -a _pats=()
+      local _p
+      IFS='、' read -ra _pats <<< "$_excl"
+      if [ "${#_pats[@]}" -ge 2 ]; then
+        _g_block[$_src]+="${_sub}排除 · ${#_pats[@]}"$'\n'
+        local _pi=0 _p_last=0
+        for _p in "${_pats[@]}"; do
+          _pi=$((_pi + 1))
+          _p_last=0
+          [ "$_pi" -eq "${#_pats[@]}" ] && _p_last=1
+          _g_block[$_src]+="${_sub}$(tree_conn "$_p_last")<code>$(escape_html "$_p")</code>"$'\n'
+        done
+      else
+        _g_block[$_src]+="${_sub}排除：<code>$(escape_html "$_excl")</code>"$'\n'
+      fi
+    fi
     [ -n "$_fnote" ] && _g_block[$_src]+="${_sub}${_fnote# · }"$'\n'
     # 目标端列举失败: 该条目数值是按空目标端的全量估算，必须明示（否则合计
     # 虚高被当成精确值，正是 "目标端已有文件却显示全量待同步" 的困惑来源）

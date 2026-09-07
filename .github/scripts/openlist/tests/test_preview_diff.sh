@@ -119,6 +119,8 @@ IFS=$'\t' read -r _task _src _excl _sb _sc _dst _yb _yc _yn _yu _fn _df _ps <<< 
 
 # 渲染 + 发送
 flush_task_preview >/dev/null
+echo "$SEND_CAPTURE" | grep -q '排除：<code>notion/\*\*</code>' \
+  && ok "1i3 单条排除并入子行（不扩树，规范 §2.2.3）" || bad "1i3: $SEND_CAPTURE"
 echo "$SEND_CAPTURE" | grep -q '差异构成：新增 1 · 同名更新 1' && ok "1j 渲染差异构成子行" || bad "1j"
 echo "$SEND_CAPTURE" | grep -q '+900 B / +2 文件' && ok "1k 条目行 +900 B / +2 文件" || bad "1k: $SEND_CAPTURE"
 echo "$SEND_CAPTURE" | grep -q '已扣减 1 个修复文件 / 300 B' && ok "1l 渲染修复扣减子行" || bad "1l"
@@ -214,6 +216,27 @@ echo "$SEND_CAPTURE" | grep -q '目标端列举失败' && bad "8c 恢复后不�
 echo "$SEND_CAPTURE" | grep -q '+20 B / +1 文件' && ok "8d 条目行 +20 B / +1 文件" || bad "8d: $SEND_CAPTURE"
 [ "$(lsjson_call_count)" = "18" ] && ok "8e 调用数 = S7 后 14 + 源端 1 + 目标端重试 3" \
   || bad "8e: [$(lsjson_call_count)]"
+
+# ===== 场景 9: 排除规则 ≥2 → 条目子树（方案 B，规范 §2.2.3）=====
+# 同源端两个目标 → 组内首条（│ 形态）与末条（8 空格形态）两种子树前缀都覆盖；
+# 两端空清单 → 无变动条目，排除子树照渲染
+SRC_JSON='[]'
+DST_JSON='[]'
+MARKER_JSON='{}'
+_reset_preview_state "backup" >/dev/null
+add_preview_pair "onedrive:src9" "openlist:dst9" --exclude '/notion/**' --exclude 'self-hosted_latest.tar.gz' >/dev/null
+add_preview_pair "onedrive:src9" "openlist:dst9b" --exclude '/notion/**' --exclude 'self-hosted_latest.tar.gz' >/dev/null
+flush_task_preview >/dev/null
+[ "$(echo "$SEND_CAPTURE" | grep -c '排除 · 2')" = "2" ] \
+  && ok "9a 两组头「排除 · 2」（每组一条）" || bad "9a: $SEND_CAPTURE"
+echo "$SEND_CAPTURE" | grep -q '│     ├─ <code>notion/\*\*</code>' \
+  && ok "9b 非末条目子树首条（│ + 5 空格 + ├─）" || bad "9b: $SEND_CAPTURE"
+echo "$SEND_CAPTURE" | grep -q '│     └─ <code>self-hosted_latest.tar.gz</code>' \
+  && ok "9c 非末条目子树末条（模式内 └─）" || bad "9c: $SEND_CAPTURE"
+echo "$SEND_CAPTURE" | grep -q '^        ├─ <code>notion/\*\*</code>' \
+  && ok "9d 末条目子树（8 空格 + ├─）" || bad "9d: $SEND_CAPTURE"
+echo "$SEND_CAPTURE" | grep -q '排除：<code>notion/\*\*、self-hosted_latest.tar.gz</code>' \
+  && bad "9e 不应再有整串顿号连排形态" || ok "9e 无整串 <code> 连排"
 
 echo "-----"
 echo "PASS=$PASS FAIL=$FAIL"
