@@ -17,9 +17,11 @@ Go 的 net.Dialer 又直接发系统调用（proxychains 这类 LD_PRELOAD 方�
 起不来时会静默直连、整轮结果失真，这个校验必须存在（bypass 命中即判失败）。
 
 设计原则（与 speedtest.py 一致）：
-  - 不修改 speedtest_gitee.py，仅 `from speedtest_gitee import ...` 复用已验证能力
+  - 尽量不改 speedtest_gitee.py，仅 `from speedtest_gitee import ...` 复用已验证能力
+    （为三件套 Gist 区分做的少量共享扩展见其 _gist_identity）
   - 节点串行测试（共享同一 mihomo 内核，切换后 settle）
   - 参数全部经环境变量控制
+  - 兜底对齐 gitee：SIGTERM/SIGINT → ⛔ 通知（先撤 TUN 再发）；未捕获异常 → ❌ 通知
 """
 import html
 import json

@@ -1,19 +1,27 @@
 #!/usr/bin/env python3
-"""独立代理节点测速脚本（延迟 + 下载速度 + 经代理上行速度）。
+"""CDN 测速（proxy-speedtest-cdn）：订阅节点 → 国内 CDN/镜像站 延迟 + 下载 + 可选上行。
+
+仓库代理测速三件套之一（按测速点命名）：测速点是「真实公网站点」——延迟目标
+baidu/taobao、下载测速点腾讯云/清华 TUNA 镜像 ISO 与 npmmirror 最新 node 包，
+与 gitee（Gitee 私有仓库上行专项）、taier（泰尔三网测速服务器）相区分。
 
 复用 speedtest_gitee.py 的 mihomo 内核启动 / 节点快照 / 节点切换能力，新增：
   - latency_probe      : 经代理对目标 URL 做 HTTP 计时（延迟）
   - resolve_download_urls: 运行时自动发现国内测速点（滚动 ISO 软链 + npmmirror 最新版），规避写死版本号失效
-  - download_speedtest : 经 mixed-port 代理 curl Range 拉取测速点，换算 MiB/s
+  - download_speedtest : 经 mixed-port 代理 curl Range 拉取测速点，换算 MiB/s（单连接，与 gitee 上行口径一致）
   - gitee_push_speedtest: 经代理 git push 到 Gitee 测上行（复用 speedtest_gitee.git_force_push_testfile）
   - build_html_report  : 生成自包含、可交互 HTML 可视化报告
   - 订阅导出 + Gist 上传: 复用 speedtest_gitee.build_source_mapping / build_subscription_yaml_text /
-    update_gist，把达标节点的原始配置整理成订阅并发布到 GitHub 私有 Gist
+    update_gist，把达标节点的原始配置整理成订阅并发布到本工作流专属 Gist
+    （secret PROXY_SPEEDTEST_CDN_GIST_ID；文件名/描述经 PROXY_SPEEDTEST_GIST_FILENAME/
+    PROXY_SPEEDTEST_GIST_DESCRIPTION 覆盖，三件套各自可辨）
 
 设计原则：
-  - 不修改 speedtest_gitee.py，仅以 `from speedtest_gitee import ...` 复用已验证的纯函数/低副作用函数。
+  - 尽量不改 speedtest_gitee.py，仅以 `from speedtest_gitee import ...` 复用已验证能力
+    （为三件套 Gist 区分做的少量共享扩展见其 _gist_identity）。
   - 节点逐节点**串行**测试（共享同一 mihomo 内核，切换后等待 settle）。
   - 自定义参数全部通过环境变量控制（见 CONFIG 区块）。
+  - 兜底对齐 gitee：SIGTERM/SIGINT → ⛔ 通知；未捕获异常 → ❌ 通知（标题带原因摘要）。
 """
 import json
 import os
@@ -23,7 +31,6 @@ import re
 import signal
 import statistics
 import subprocess
-import tempfile
 import time
 import urllib.request
 from datetime import datetime
