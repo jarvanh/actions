@@ -63,11 +63,10 @@ from speedtest_gitee import (
     TEST_FILE_NAME,
     # 订阅导出 + Gist 上传（复刻 speedtest_gitee 的订阅发布能力）
     build_source_mapping,
-    build_subscription_yaml_text,
+    build_subscription_bundle,
     build_node_metric_prefix,
     update_gist,
-    get_item_megabits,
-    DEFAULT_MIN_MEGABIT,
+    resolve_subscription_policy,
 )
 
 # ----------------------------------------------------------------------------
@@ -899,6 +898,8 @@ def main():
     # build_subscription_yaml_text 以 download_mibs / upload_mibs（MiB/s）作为
     # 度量、以 source_entry 提供节点原始配置，这里做一次字段适配。
     # ----------------------------------------------------------------------
+    gist_res = None
+    bundle = None
     try:
         gist_results = []
         for r in results:
@@ -913,41 +914,44 @@ def main():
                 'upload_mibs': ul if isinstance(ul, (int, float)) else 0,
                 'latency_ms': lat if isinstance(lat, (int, float)) else 0,
             })
-        yaml_text = build_subscription_yaml_text(gist_results, DEFAULT_MIN_MEGABIT)
-        gist_res = None
-        qualified_count = 0
-        if (yaml_text or '').strip():
-            gist_res = update_gist(env, yaml_text)
+        # 达标策略（阈值 / 判定指标 / 最少节点数）与三件套共用，见 resolve_subscription_policy：
+        # 默认按上行判定，达标不足 min_nodes 时自动改用下行（反之亦然）。
+        bundle = build_subscription_bundle(gist_results, resolve_subscription_policy(env))
+        log_progress('subscription_policy', metric=bundle['metric'], qualified=bundle['qualified'],
+                     min_megabit=bundle['min_megabit'], min_nodes=bundle['min_nodes'],
+                     fallback=bundle['fallback'])
+        if (bundle['text'] or '').strip():
+            gist_res = update_gist(env, bundle['text'])
             action = '新建' if gist_res.get('created') else '更新'
             print('\n================ 订阅已上传 Gist（%s）================' % action)
             print('订阅链接已写入本地报告与 Telegram 通知，为防隐私泄漏不在日志中输出')
             print('========================================================\n')
             log_progress('gist_uploaded', ok=gist_res.get('ok'), action=action,
-                         reason=gist_res.get('reason', ''))
+                         reason=gist_res.get('reason', ''), metric=bundle['metric'],
+                         qualified=bundle['qualified'])
             # 订阅信息补写进本地报告 JSON（RESULT_JSON 二次回写）
             summary['subscription_gist'] = {
                 'id': gist_res.get('id'), 'html_url': gist_res.get('html_url'),
                 'raw_url': (gist_res.get('yaml') or {}).get('raw_url', ''),
-                'action': action, 'min_megabit': DEFAULT_MIN_MEGABIT,
+                'action': action, 'min_megabit': bundle['min_megabit'],
+                'metric': bundle['metric'], 'min_nodes': bundle['min_nodes'],
             }
             try:
                 RESULT_JSON.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding='utf-8')
             except Exception:
                 pass
         else:
-            log_progress('gist_skipped', reason='empty subscription (no node met min speed)')
-        # 达标节点数（与订阅导出同一阈值）
-        sort_mode = 'push-only' if CONFIG['PROXY_SPEEDTEST_ENABLE_PUSH'] else 'download'
-        qualified_count = sum(
-            1 for g in gist_results
-            if get_item_megabits(g, sort_mode) >= DEFAULT_MIN_MEGABIT and (g.get('source_entry') or {}).get('proxy')
-        )
+            log_progress('gist_skipped', reason='qualified nodes < min_nodes',
+                         qualified=bundle['qualified'], min_nodes=bundle['min_nodes'],
+                         metric=bundle['metric'])
     except Exception as e:
-        # gist 上传失败不应中断主流程（报告已生成）
+        # gist 上传失败不应中断主流程（报告已生成）。
+        # 抛异常时 gist_res 还是 None，若不带回原因，通知会误报「无达标节点」。
         log_progress('gist_upload_failed', error=str(e))
+        gist_res = gist_res or {'ok': False, 'reason': str(e)}
     try:
         send_telegram(env, '\n'.join(build_telegram_lines(
-            results, meta=meta, gist_res=gist_res, qualified_count=qualified_count)))
+            results, meta=meta, gist_res=gist_res, bundle=bundle)))
     except Exception as e:
         log_progress('telegram_send_failed', error=str(e))
 
@@ -965,12 +969,19 @@ def _result_metric_item(r):
     }
 
 
-def build_telegram_lines(results, *, meta, gist_res, qualified_count):
+def build_telegram_lines(results, *, meta, gist_res, bundle=None):
     """生成人性化 Telegram 通知（统一 HTML 版式，对齐全库通知模板）：
     emoji 标题 + ━━━ 分隔线 + 键值概览（数值 <b>）+ 树形 TOP5（节点 <code>）+
     订阅状态 + 统一收尾区（⏱ 已运行 · 🔗 运行日志，读 TG_RUN_URL 环境变量）。"""
     def esc(s):
         return html.escape(str(s))
+
+    # 订阅策略（阈值 / 实际采用的判定指标 / 达标数 / 最少节点数）
+    bundle = bundle or {}
+    qualified_count = bundle.get('qualified', 0)
+    min_megabit = bundle.get('min_megabit', 0)
+    min_nodes = bundle.get('min_nodes', 1)
+    metric_label = bundle.get('metric_label', '')
 
     push_enabled = bool(meta.get('push'))
     mode = 'push-only' if push_enabled else 'download'
@@ -1037,7 +1048,7 @@ def build_telegram_lines(results, *, meta, gist_res, qualified_count):
         # HTML 报告只写在运行机本地（含节点凭据，不外传），故无可分享链接。
         raw_url = ((gist_res.get('yaml') or {}).get('raw_url') or '').strip()
         html_url = (gist_res.get('html_url') or '').strip()
-        gist_lines = [f'✅ 已{action}，达标 <b>{qualified_count}</b> 个节点 · ≥{DEFAULT_MIN_MEGABIT}兆']
+        gist_lines = [f'✅ 已{action}，达标 <b>{qualified_count}</b> 个节点 · ≥{min_megabit}兆（按{esc(metric_label)}）']
         if raw_url:
             gist_lines.append(f'🔗 <a href="{esc(raw_url)}">订阅源 YAML</a>')
         elif html_url:
@@ -1049,7 +1060,7 @@ def build_telegram_lines(results, *, meta, gist_res, qualified_count):
     elif gist_res:
         lines.append(f"  └─ ⚠️ 上传失败：{esc(gist_res.get('reason', ''))}")
     else:
-        lines.append(f'  └─ ⚠️ 无达标节点 · 阈值 ≥{DEFAULT_MIN_MEGABIT}兆 · 未更新订阅')
+        lines.append(f'  └─ ⚠️ 达标不足 {min_nodes} 个 · 阈值 ≥{min_megabit}兆（按{esc(metric_label)}）· 未更新订阅')
 
     # 统一收尾区（收尾区与正文间固定一个空行；与 tg_add_footer 同形态同降级链）
     # 注: 正文的「耗时 X」是测速自身耗时，收尾区的「已运行 X」是 run 已运行时长，两者语义不同

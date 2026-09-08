@@ -63,6 +63,15 @@ jobs:
           PROXY_SPEEDTEST_GITEE_OWNER: ${{ secrets.PROXY_SPEEDTEST_GITEE_OWNER }}
           PROXY_SPEEDTEST_GITEE_REPO: proxy-speedtest-temp
           PROXY_SPEEDTEST_PUSH_TIMEOUT: '30'
+          # 订阅导出策略（三件套共用；可在仓库 Settings → Secrets and variables → Actions
+          # → Variables 里覆盖，留空走脚本默认值）：
+          #   PROXY_SPEEDTEST_MIN_MEGABIT  达标阈值（兆，默认 10）
+          #   PROXY_SPEEDTEST_SPEED_METRIC 判定指标 upload|download（默认 upload 按上行判定；
+          #                                达标数 < 最少节点数时自动改用另一指标，反之亦然）
+          #   PROXY_SPEEDTEST_MIN_NODES    上传订阅的最少节点数（默认 1，不足则不上传）
+          PROXY_SPEEDTEST_MIN_MEGABIT: ${{ vars.PROXY_SPEEDTEST_MIN_MEGABIT || '10' }}
+          PROXY_SPEEDTEST_SPEED_METRIC: ${{ vars.PROXY_SPEEDTEST_SPEED_METRIC || 'upload' }}
+          PROXY_SPEEDTEST_MIN_NODES: ${{ vars.PROXY_SPEEDTEST_MIN_NODES || '1' }}
           # 订阅导出 + 上传 Gist：脚本复用 speedtest_gitee 的 build_subscription_yaml_text /
           # update_gist，把达标节点整理成可用订阅并发布到 GitHub 私有 Gist。
           #   PROXY_SPEEDTEST_SUB_URLS : 见上方同步骤 env 的原始订阅源定义，用于解析节点原始配置；留空则不上传 gist

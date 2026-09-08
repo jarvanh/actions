@@ -34,7 +34,7 @@
 4. 生成 `PROXY_SPEEDTEST_SIZE_MIB` MiB 测速文件；
 5. 逐节点：切换 AUTO → 经代理 `git push`（单流 HTTPS，超时 `PROXY_SPEEDTEST_PUSH_TIMEOUT`）
    → 按推送耗时换算上行；
-6. 汇总 → 达标节点（≥`DEFAULT_MIN_MEGABIT` 兆）订阅导出到专属 Gist，并用**第二个 mihomo
+6. 汇总 → 按**订阅导出策略**判定达标节点（见[订阅导出策略](#订阅导出策略三件套共用)）导出到专属 Gist，并用**第二个 mihomo
    实例**（端口 19690/19691）把 Gist raw 回拉、抽样节点经 AUTO 切换验证可用性
    （`verify_gist_subscriptions_with_mihomo`）；
 7. Telegram 推 `✅ Gitee 上行测速完成`（TOP 节点 + 订阅状态）。
@@ -84,6 +84,25 @@
 | `PROXY_SPEEDTEST_SWITCH_SETTLE_SECONDS` | 1.5 | 切节点后等待 |
 | `PROXY_SPEEDTEST_DETACH` | 0（workflow 注入） | 1 = detach 后台自跑（本地手跑用） |
 | `PROXY_SPEEDTEST_GIST_FILENAME` / `_DESCRIPTION` | 见 workflow | Gist 文件名/描述 |
+| `PROXY_SPEEDTEST_MIN_MEGABIT` | 10 | 达标阈值（兆） |
+| `PROXY_SPEEDTEST_SPEED_METRIC` | upload | 判定指标 `upload`/`download`；达标数 < 最少节点数时自动改用另一指标（双向对称） |
+| `PROXY_SPEEDTEST_MIN_NODES` | 1 | 上传订阅的最少节点数，不足则不上传（通知显示「达标不足 N 个」） |
+
+### 订阅导出策略（三件套共用）
+
+三件套共用同一套达标判定（`speedtest_gitee.resolve_subscription_policy` +
+`build_subscription_bundle`，workflow env 已接仓库 **Variables**，Settings → Secrets and
+variables → Actions → Variables 可随时改，留空走默认）：
+
+1. **阈值**：`兆 = round(MiB/s × 8)`，≥ `PROXY_SPEEDTEST_MIN_MEGABIT`（默认 10）为达标；
+2. **判定指标**：`PROXY_SPEEDTEST_SPEED_METRIC`（默认 `upload` 按上行）；
+3. **双向回退**：主指标达标数 < `PROXY_SPEEDTEST_MIN_NODES` 时自动改用另一指标重新判定
+   （例：默认按上行，上行达标 0 个 → 改按下行）；另一指标也不更多时维持主指标；
+4. **最少节点数**：最终达标数仍 < `PROXY_SPEEDTEST_MIN_NODES` 就不上传订阅
+   （日志 `gist_skipped`，通知显示「达标不足 N 个 · 阈值 ≥X兆（按上行/下行）」）。
+
+实际采用的指标会写进日志（`subscription_policy` / `subscription_metric_fallback`）与
+TG 通知文案。节点必须有原始配置（`source_entry.proxy`）才计入达标——否则导不进订阅。
 
 ## Telegram 通知与兜底
 
@@ -103,5 +122,6 @@
 | GitHub API 403/限流 | 匿名调用共享出口 IP 60 次/h；workflow 已带 `GITHUB_TOKEN`/`GH_TOKEN` 回退 |
 | Gitee 仓库体积超限 | `rebuild_gitee_repo` 自动重建私有仓库 `proxy-speedtest-temp` |
 | Gist 404 | id 失效 → 自动新建新 Gist，TG 给链接后回填 secret |
+| Gist 422（`missing_field: files`） | 2026-09-08 修：`update_gist` 曾在旧文件已删除后每轮仍发 `旧文件名: null`，GitHub 判 files 无有效字段。现在先 GET 探测旧文件是否存在才发删除项，且 422 会去掉删除项重试一次 |
 | 订阅可用性存疑 | 看日志 `gist_verify` 段（回拉抽样验证），`sample_ok_count` 为抽样通过数 |
 | 该工作流当前在 Actions 里被手动禁用 | 重新启用后按计划运行 |

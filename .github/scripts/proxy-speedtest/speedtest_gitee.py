@@ -62,6 +62,13 @@ MIHOMO_MIXED_PORT = 17892
 MIHOMO_RELEASE_API = 'https://api.github.com/repos/MetaCubeX/mihomo/releases/latest'
 DEFAULT_HEALTHCHECK_URL = 'https://www.gstatic.com/generate_204'
 DEFAULT_MIN_MEGABIT = 10
+# 订阅导出策略默认值（全部可经 env / 仓库 Variables 覆盖，见 resolve_subscription_policy）：
+#   阈值（兆） / 判定指标（upload|download） / 上传订阅的最少节点数
+DEFAULT_MIN_NODES = 1
+DEFAULT_SPEED_METRIC = 'upload'
+# 判定指标 → build_mihomo_yaml_text 的 speedtest_mode（push-only = 按上行判定）
+METRIC_MODES = {'upload': 'push-only', 'download': 'download'}
+METRIC_LABELS = {'upload': '上传', 'download': '下载'}
 
 CURRENT_RUN_STARTED_AT = ''
 TERMINATION_NOTICE_SENT = False
@@ -666,6 +673,91 @@ def get_item_megabits(item: dict, speedtest_mode: str):
     if not isinstance(value, (int, float)) or value <= 0:
         return 0
     return max(1, int(round(float(value) * 8)))
+
+
+def _env_int(env, key: str, default, minimum=0):
+    raw = str((env or {}).get(key, '') or '').strip()
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = int(default)
+    return max(minimum, value)
+
+
+def resolve_subscription_policy(env=None):
+    """订阅导出策略（三件套共用，全部经 env 覆盖，workflow 里接仓库 Variables）：
+
+      PROXY_SPEEDTEST_MIN_MEGABIT   达标阈值（兆），默认 10
+      PROXY_SPEEDTEST_SPEED_METRIC  判定指标：upload（默认，按上行）/ download（按下行）
+      PROXY_SPEEDTEST_MIN_NODES     上传订阅的最少节点数，默认 1
+
+    非法值一律退回默认值（不因配置写错而静默改变口径）。
+    """
+    env = env if env is not None else merged_env()
+    metric = str(env.get('PROXY_SPEEDTEST_SPEED_METRIC') or '').strip().lower()
+    if metric not in METRIC_MODES:
+        metric = DEFAULT_SPEED_METRIC
+    return {
+        'min_megabit': _env_int(env, 'PROXY_SPEEDTEST_MIN_MEGABIT', DEFAULT_MIN_MEGABIT, 0),
+        'min_nodes': _env_int(env, 'PROXY_SPEEDTEST_MIN_NODES', DEFAULT_MIN_NODES, 1),
+        'metric': metric,
+    }
+
+
+def count_qualified_nodes(results: list, metric: str, min_megabit):
+    """按指定指标统计达标节点数（须同时有原始配置 source_entry.proxy，否则导不进订阅）。"""
+    mode = METRIC_MODES.get(metric, METRIC_MODES[DEFAULT_SPEED_METRIC])
+    return sum(
+        1 for item in results
+        if get_item_megabits(item, mode) >= int(min_megabit)
+        and (item.get('source_entry') or {}).get('proxy')
+    )
+
+
+def resolve_subscription_metric(results: list, policy: dict):
+    """判定指标选择：主指标达标数 < 最少节点数时改用另一指标（双向对称）。
+
+    例：默认按 upload 判定，达标 0 个（<min_nodes）→ 改用 download 判定；反之若配置
+    metric=download 而下行达标不足，则改用 upload。另一指标也不更多时维持主指标
+    （最终仍不足 min_nodes 就不上传订阅）。
+    """
+    metric = policy.get('metric') or DEFAULT_SPEED_METRIC
+    other = 'download' if metric == 'upload' else 'upload'
+    min_megabit = policy.get('min_megabit', DEFAULT_MIN_MEGABIT)
+    min_nodes = policy.get('min_nodes', DEFAULT_MIN_NODES)
+    primary = count_qualified_nodes(results, metric, min_megabit)
+    if primary >= min_nodes:
+        return metric, primary, False
+    secondary = count_qualified_nodes(results, other, min_megabit)
+    if secondary > primary:
+        log_progress('subscription_metric_fallback', from_metric=metric, to_metric=other,
+                     primary=primary, secondary=secondary, min_nodes=min_nodes)
+        return other, secondary, True
+    return metric, primary, False
+
+
+def build_subscription_bundle(results: list, policy: dict):
+    """按策略一次性算出「订阅文本 + 判定指标 + 达标数」，供上传与通知共用。
+
+    text 为空 = 达标节点不足 min_nodes（不上传订阅），调用方据此跳过 update_gist。
+    """
+    min_megabit = policy.get('min_megabit', DEFAULT_MIN_MEGABIT)
+    min_nodes = policy.get('min_nodes', DEFAULT_MIN_NODES)
+    metric, qualified, fallback = resolve_subscription_metric(results, policy)
+    text = ''
+    if qualified >= min_nodes:
+        text = build_subscription_yaml_text(
+            results, min_megabit, mode=METRIC_MODES.get(metric, METRIC_MODES[DEFAULT_SPEED_METRIC]))
+    return {
+        'text': text,
+        'metric': metric,
+        'metric_label': METRIC_LABELS.get(metric, metric),
+        'metric_mode': METRIC_MODES.get(metric, METRIC_MODES[DEFAULT_SPEED_METRIC]),
+        'qualified': qualified,
+        'fallback': fallback,
+        'min_megabit': min_megabit,
+        'min_nodes': min_nodes,
+    }
 
 
 def resolve_source_entry_for_node(name: str, source_mapping, proxy_obj=None):
@@ -1287,16 +1379,20 @@ def build_mihomo_yaml_text(results: list, speedtest_mode: str, min_megabit: int 
     return yaml.safe_dump({'proxies': proxies}, allow_unicode=True, sort_keys=False)
 
 
-def build_subscription_yaml_text(results: list, min_megabit: int = DEFAULT_MIN_MEGABIT):
-    """根据测速结果生成最终导出的 YAML 订阅文本。"""
+def build_subscription_yaml_text(results: list, min_megabit: int = DEFAULT_MIN_MEGABIT, mode: str = ''):
+    """根据测速结果生成最终导出的 YAML 订阅文本。
+
+    mode 为空时沿用结果自带的 mode（各脚本按自己测速口径写入）；显式传入则按策略
+    判定指标导出（见 resolve_subscription_policy / build_subscription_bundle）。
+    """
     if not results:
         return ''
-    speedtest_mode = str(results[0].get('mode') or 'push-only')
+    speedtest_mode = str(mode or results[0].get('mode') or 'push-only')
     return build_mihomo_yaml_text(results, speedtest_mode, min_megabit=min_megabit)
 
 
-def build_share_link_text(results: list, min_megabit: int = DEFAULT_MIN_MEGABIT):
-    return build_subscription_yaml_text(results, min_megabit=min_megabit)
+def build_share_link_text(results: list, min_megabit: int = DEFAULT_MIN_MEGABIT, mode: str = ''):
+    return build_subscription_yaml_text(results, min_megabit=min_megabit, mode=mode)
 
 
 
@@ -1376,6 +1472,23 @@ def verify_gist_subscriptions_with_mihomo(yaml_url: str):
             pass
 
 
+def _http_error_with_body(e):
+    """把 HTTPError 的响应体并进异常文本——只有状态码看不到 GitHub 的报错原因。
+
+    Gist 422 之类的失败，光看 `HTTP Error 422: Unprocessable Entity` 完全无法定位
+    （真实原因在 body 的 errors[].field 里），这里把 body 截断附到 msg 上。
+    """
+    body = ''
+    try:
+        body = (e.read() or b'').decode('utf-8', 'ignore').strip()
+    except Exception:
+        body = ''
+    msg = str(e.reason or '')
+    if body:
+        msg = f'{msg} | {body[:300]}'
+    return urllib.error.HTTPError(e.url, e.code, msg, e.headers, e.fp)
+
+
 def github_api_request(url: str, token: str, payload=None, method='GET', timeout=60):
     data = None
     headers = {
@@ -1388,8 +1501,12 @@ def github_api_request(url: str, token: str, payload=None, method='GET', timeout
         data = json.dumps(payload).encode()
         headers['Content-Type'] = 'application/json'
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.load(r)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        # 保留 HTTPError 类型（调用方按 e.code 分流），但带上响应体便于定位
+        raise _http_error_with_body(e) from None
 
 
 GIST_DEFAULT_FILENAME = 'proxy_speedtest_subscription.yaml'
@@ -1435,6 +1552,27 @@ def create_gist(env, yaml_text=''):
     }
 
 
+def gist_has_file(env, gist_id, filename, token=''):
+    """目标 Gist 里是否已存在 filename（查询失败一律返回 False，即「当它不存在」）。
+
+    用于「旧文件名是否还需要删」的判定：见 update_gist 的说明。
+    """
+    token = token or env.get('GH_TOKEN')
+    if not (token and gist_id and filename):
+        return False
+    try:
+        res = github_api_request(f'https://api.github.com/gists/{gist_id}', token)
+    except Exception as e:
+        log_progress('gist_probe_failed', gist_id=gist_id, error=str(e))
+        return False
+    return filename in ((res or {}).get('files') or {})
+
+
+def _patch_gist(gist_id, token, payload):
+    return github_api_request(
+        f'https://api.github.com/gists/{gist_id}', token, payload=payload, method='PATCH')
+
+
 def update_gist(env, yaml_text=''):
     token = env.get('GH_TOKEN')
     gist_id = env.get('PROXY_SPEEDTEST_GIST_ID', '').strip()
@@ -1446,8 +1584,11 @@ def update_gist(env, yaml_text=''):
     if not gist_id:
         return create_gist(env, yaml_text)
     files_payload = {}
-    if yaml_filename != GIST_DEFAULT_FILENAME:
-        # 文件名变更：旧文件必须显式置 null 才会被删除，否则新旧并存分不清
+    # 文件名变更：旧文件必须显式置 null 才会被删除，否则新旧并存分不清。
+    # 但旧文件一旦已被删掉（迁移后的第二轮起），再发 null 会让 GitHub 认为 files
+    # 里没有任何有效文件 → 422 Validation Failed / missing_field: files，整轮订阅
+    # 上传失败（三件套曾因此连续多轮「无达标节点」）。故只在旧文件确实存在时发删除项。
+    if yaml_filename != GIST_DEFAULT_FILENAME and gist_has_file(env, gist_id, GIST_DEFAULT_FILENAME, token):
         files_payload[GIST_DEFAULT_FILENAME] = None
     files_payload[yaml_filename] = {'content': yaml_text}
     payload = {
@@ -1456,16 +1597,18 @@ def update_gist(env, yaml_text=''):
         'files': files_payload,
     }
     try:
-        res = github_api_request(
-            f'https://api.github.com/gists/{gist_id}',
-            token,
-            payload=payload,
-            method='PATCH',
-        )
+        res = _patch_gist(gist_id, token, payload)
     except urllib.error.HTTPError as e:
         if e.code == 404:
             return create_gist(env, yaml_text)
-        raise
+        if e.code == 422 and GIST_DEFAULT_FILENAME in files_payload and files_payload[GIST_DEFAULT_FILENAME] is None:
+            # 兜底：删除项引发 422（旧文件其实已不存在 / API 口径变动）→ 去掉删除项重试一次
+            log_progress('gist_patch_retry_without_delete', gist_id=gist_id, error=str(e))
+            files_payload.pop(GIST_DEFAULT_FILENAME, None)
+            payload['files'] = files_payload
+            res = _patch_gist(gist_id, token, payload)
+        else:
+            raise
     files = res.get('files') or {}
     yaml_raw_url = ''
     if isinstance(files, dict):
@@ -1975,7 +2118,12 @@ def update_summary_artifacts(summary):
     log_progress('result_json_written', path=str(RESULT_JSON))
 
 
-def finalize_gist_and_notify(env, summary, summary_lines, subscription_text, qualified_count, min_megabit):
+def finalize_gist_and_notify(env, summary, summary_lines, subscription_text, bundle):
+    # 订阅策略 bundle：阈值 / 实际采用的判定指标 / 达标数 / 最少节点数
+    qualified_count = (bundle or {}).get('qualified', 0)
+    min_megabit = (bundle or {}).get('min_megabit', DEFAULT_MIN_MEGABIT)
+    min_nodes = (bundle or {}).get('min_nodes', DEFAULT_MIN_NODES)
+    metric_label = (bundle or {}).get('metric_label', METRIC_LABELS[DEFAULT_SPEED_METRIC])
     # summary_lines 已是统一 HTML 版式；文本报告落盘去标签保留纯可读性
     _plain = re.sub(r'<[^>]+>', '', '\n'.join(summary_lines))
     RESULT_TXT.write_text(_plain + '\n', encoding='utf-8')
@@ -2005,7 +2153,7 @@ def finalize_gist_and_notify(env, summary, summary_lines, subscription_text, qua
     if gist_res.get('ok'):
         action = '新建' if gist_res.get('created') else '更新'
         html_url = gist_res.get('html_url') or ''
-        gist_lines = [f'✅ 已{action}，达标 <b>{qualified_count}</b> 个节点 · ≥{min_megabit}兆']
+        gist_lines = [f'✅ 已{action}，达标 <b>{qualified_count}</b> 个节点 · ≥{min_megabit}兆（按{metric_label}）']
         if html_url:
             gist_lines.append(f'🔗 <a href="{html.escape(html_url)}">订阅源 YAML</a>')
         if gist_verify_res.get('ok'):
@@ -2016,7 +2164,7 @@ def finalize_gist_and_notify(env, summary, summary_lines, subscription_text, qua
             _c = '└─' if _i == len(gist_lines) - 1 else '├─'
             summary_lines.append(f'  {_c} {_l}')
     elif (gist_res.get('reason') or '').startswith('empty subscription'):
-        summary_lines.append(f'  └─ ⚠️ 无达标节点 · 阈值 ≥{min_megabit}兆 · 未更新订阅')
+        summary_lines.append(f'  └─ ⚠️ 达标不足 {min_nodes} 个 · 阈值 ≥{min_megabit}兆（按{metric_label}）· 未更新订阅')
     else:
         summary_lines.append(f"  └─ ⚠️ 上传失败：{html.escape(str(gist_res.get('reason', '')))}")
     try:
@@ -2177,13 +2325,18 @@ def main():
     alive_probe_count = sum(v['alive'] for v in provider_snapshot.values())
     ok_results = [x for x in speed_results if x.get('ok')]
     failed_results = [x for x in speed_results if not x.get('ok')]
+    # 订阅导出策略：阈值/判定指标/最少节点数（env 覆盖；判定指标默认 upload，
+    # 达标不足 min_nodes 时自动改用 download，反之亦然 —— 见 resolve_subscription_metric）
+    policy = resolve_subscription_policy(env)
+    bundle = build_subscription_bundle(ok_results, policy)
+    min_megabit = policy['min_megabit']
+    # TOP 排序与订阅判定同口径（按实际采用的指标排序，避免「按上行导出却按下行排 TOP」）
     ok_results_by_download = sorted(
         ok_results,
-        key=lambda x: x.get('upload_mibs', 0) if speedtest_mode == 'push-only' else x.get('download_mibs', 0),
+        key=lambda x: x.get('upload_mibs', 0) if bundle['metric_mode'] == 'push-only' else x.get('download_mibs', 0),
         reverse=True,
     )
-    min_megabit = int(str(env.get('PROXY_SPEEDTEST_MIN_MEGABIT', DEFAULT_MIN_MEGABIT)).strip() or DEFAULT_MIN_MEGABIT)
-    subscription_text = build_share_link_text(ok_results_by_download, min_megabit=min_megabit)
+    subscription_text = bundle['text']
     try:
         RESULT_SUBSCRIPTION.write_text(subscription_text, encoding='utf-8')
     except Exception as e:
@@ -2235,12 +2388,7 @@ def main():
         runtime_abort_reason=runtime_abort_reason,
         ok_results_by_download=ok_results_by_download,
     )
-    # 达标节点数（与订阅导出同一阈值、同一判定口径，供通知展示）
-    qualified_count = sum(
-        1 for item in ok_results_by_download
-        if get_item_megabits(item, speedtest_mode) >= min_megabit and (item.get('source_entry') or {}).get('proxy')
-    )
-    run_stage('Gist 更新/回拉验证/通知', finalize_gist_and_notify, env, summary, summary_lines, subscription_text, qualified_count, min_megabit)
+    run_stage('Gist 更新/回拉验证/通知', finalize_gist_and_notify, env, summary, summary_lines, subscription_text, bundle)
 
 
 def scrub_secrets(text: str, env=None) -> str:

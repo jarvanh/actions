@@ -72,13 +72,21 @@ TUN 起来后 DNS 会被 mihomo 劫持，必须显式给可达的公共解析器
 | `TAIER_IMAGE` | `0` | 每节点出结果图（上传图床），默认关避免刷图 |
 | `TAIER_NO_IPV6` | `1` | TUN 下客户端易误判 v6 可用导致耗时翻倍，默认关 |
 | `TAIER_REPO` | `MiaM1ku/taierspeedtest` | 引擎仓库 |
+| `PROXY_SPEEDTEST_MIN_MEGABIT` | 10 | 达标阈值（兆），三件套共用 |
+| `PROXY_SPEEDTEST_SPEED_METRIC` | upload | 判定指标 `upload`/`download`；达标数 < 最少节点数时自动改用另一指标 |
+| `PROXY_SPEEDTEST_MIN_NODES` | 1 | 上传订阅的最少节点数，不足则不上传 |
+
+订阅导出策略（阈值/判定指标/最少节点数，含双向回退规则）详见
+[gitee 文档 · 订阅导出策略](proxy-speedtest-gitee.md#订阅导出策略三件套共用)。
+注意 taier **上行常测不出**（CDN 类测速点拒绝上传包，引擎渲染 failed → 0），默认按上行
+判定时通常达标 0 个 → 自动落到下行判定，通知会显示实际采用的指标。
 
 ### Gist 文件名/描述（三件套区分）
 
 `PROXY_SPEEDTEST_GIST_FILENAME` = `proxy_speedtest_taier_subscription.yaml`、
 `PROXY_SPEEDTEST_GIST_DESCRIPTION` = `proxy speedtest subscription (taier 三网)`。
 导出字段单位是 MiB/s，taier 数值为 Mbps，脚本内 ÷8.388608 换算（节点名前缀"↓xx兆"与
-真实 Mbps 基本一致）；阈值沿用 `DEFAULT_MIN_MEGABIT`（≥10 兆）。
+真实 Mbps 基本一致）。
 
 ## Telegram 通知
 

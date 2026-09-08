@@ -85,6 +85,16 @@ jobs:
           TAIER_MODE: ${{ github.event.inputs.mode || 'single' }}
           TAIER_DURATION: ${{ github.event.inputs.duration || '10' }}
           TAIER_MAX_NODES: ${{ github.event.inputs.max_nodes || '0' }}
+          # 订阅导出策略（三件套共用；可在仓库 Settings → Secrets and variables → Actions
+          # → Variables 里覆盖，留空走脚本默认值）：
+          #   PROXY_SPEEDTEST_MIN_MEGABIT  达标阈值（兆，默认 10）
+          #   PROXY_SPEEDTEST_SPEED_METRIC 判定指标 upload|download（默认 upload 按上行判定；
+          #                                达标数 < 最少节点数时自动改用另一指标，反之亦然。
+          #                                taier 上传常测不出（CDN 拒绝上传包），通常会自动落到下行）
+          #   PROXY_SPEEDTEST_MIN_NODES    上传订阅的最少节点数（默认 1，不足则不上传）
+          PROXY_SPEEDTEST_MIN_MEGABIT: ${{ vars.PROXY_SPEEDTEST_MIN_MEGABIT || '10' }}
+          PROXY_SPEEDTEST_SPEED_METRIC: ${{ vars.PROXY_SPEEDTEST_SPEED_METRIC || 'upload' }}
+          PROXY_SPEEDTEST_MIN_NODES: ${{ vars.PROXY_SPEEDTEST_MIN_NODES || '1' }}
           # GitHub API 匿名调用在共享出口 IP 上 60 次/h 限流时的认证回退
           GH_TOKEN: ${{ secrets.PAT }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

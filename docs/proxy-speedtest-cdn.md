@@ -74,6 +74,12 @@
 | `PROXY_SPEEDTEST_MAX_NODES` | 0 | 0 = 不限 |
 | `PROXY_SPEEDTEST_NPMMIRROR_ENABLED` | 1 | 是否合并 npmmirror 最新版测速点 |
 | `PROXY_SPEEDTEST_GIST_FILENAME` / `_DESCRIPTION` | 见 workflow | Gist 文件名/描述（三件套区分） |
+| `PROXY_SPEEDTEST_MIN_MEGABIT` | 10 | 达标阈值（兆），三件套共用 |
+| `PROXY_SPEEDTEST_SPEED_METRIC` | upload | 判定指标 `upload`/`download`；达标数 < 最少节点数时自动改用另一指标 |
+| `PROXY_SPEEDTEST_MIN_NODES` | 1 | 上传订阅的最少节点数，不足则不上传 |
+
+订阅导出策略（阈值/判定指标/最少节点数，含双向回退规则）详见
+[gitee 文档 · 订阅导出策略](proxy-speedtest-gitee.md#订阅导出策略三件套共用)。
 
 ## Telegram 通知
 
