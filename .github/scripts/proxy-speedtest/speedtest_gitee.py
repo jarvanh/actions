@@ -1602,6 +1602,17 @@ def main():
     speed_results = []
     aborted_due_to_runtime = False
     runtime_abort_reason = ''
+    repo_rebuilt = False
+    ok_pushes = 0
+
+    def _enrich_result(r, index, item):
+        r['index'] = index
+        r['share_link'] = item.get('share_link', '')
+        r['share_link_match'] = item.get('share_link_match', '')
+        r['source_entry'] = deep_copy_json(item.get('source_entry') or {})
+        r['source_id'] = item.get('source_id', '')
+        return r
+
     for index, item in enumerate(alive_items, 1):
         touch_lock_file()
         runtime_status = check_mihomo_runtime()
@@ -1612,7 +1623,7 @@ def main():
             break
         log_progress('node_start', index=index, total=len(alive_items), name=item['name'], provider=item['provider'], node_type=item.get('type'))
         try:
-            result = speedtest_single_item(
+            result = _enrich_result(speedtest_single_item(
                 env=env,
                 gitee=gitee,
                 item=item,
@@ -1621,30 +1632,51 @@ def main():
                 clone_timeout=clone_timeout,
                 switch_settle_seconds=switch_settle_seconds,
                 speedtest_mode=speedtest_mode,
-            )
-            result['index'] = index
-            result['share_link'] = item.get('share_link', '')
-            result['share_link_match'] = item.get('share_link_match', '')
-            result['source_entry'] = deep_copy_json(item.get('source_entry') or {})
-            result['source_id'] = item.get('source_id', '')
+            ), index, item)
         except Exception as e:
             err_text = str(e)
-            result = {
-                'index': index,
-                'name': item['name'],
-                'provider': item['provider'],
-                'type': item.get('type'),
-                'share_link': item.get('share_link', ''),
-                'share_link_match': item.get('share_link_match', ''),
-                'source_entry': deep_copy_json(item.get('source_entry') or {}),
-                'source_id': item.get('source_id', ''),
-                'ok': False,
-                'error': err_text,
-            }
-            if ('127.0.0.1' in err_text and f'port {MIHOMO_MIXED_PORT}' in err_text and ("Couldn't connect to server" in err_text or 'Connection refused' in err_text)) or '<urlopen error [Errno 111] Connection refused>' in err_text:
-                aborted_due_to_runtime = True
-                runtime_abort_reason = err_text
+            result = None
+            # 本轮首个 push/clone 就超时或被拒（Gitee 仓库超限/被回收时，git 常表现为
+            # 挂起超时而非明确报错，直连基线会同步失败）→ 重建仓库后重试该节点一次；
+            # 每轮最多重建一次，避免个别慢节点误触发反复删库。
+            if not repo_rebuilt and ok_pushes == 0 and (
+                    'timed out' in err_text or REPO_SIZE_LIMIT_PATTERN in err_text
+                    or 'could not read Username' in err_text):
+                log_progress('repo_rebuild_on_push_timeout', node=item.get('name', ''), error=err_text[:200])
+                repo_rebuilt = True
+                try:
+                    rebuild_gitee_repo(env, gitee)
+                    result = _enrich_result(speedtest_single_item(
+                        env=env,
+                        gitee=gitee,
+                        item=item,
+                        test_file=test_file,
+                        push_timeout=push_timeout,
+                        clone_timeout=clone_timeout,
+                        switch_settle_seconds=switch_settle_seconds,
+                        speedtest_mode=speedtest_mode,
+                    ), index, item)
+                except Exception as e2:
+                    err_text = f'{err_text} | rebuild retry: {str(e2)[:300]}'
+            if result is None:
+                result = {
+                    'index': index,
+                    'name': item['name'],
+                    'provider': item['provider'],
+                    'type': item.get('type'),
+                    'share_link': item.get('share_link', ''),
+                    'share_link_match': item.get('share_link_match', ''),
+                    'source_entry': deep_copy_json(item.get('source_entry') or {}),
+                    'source_id': item.get('source_id', ''),
+                    'ok': False,
+                    'error': err_text,
+                }
+                if ('127.0.0.1' in err_text and f'port {MIHOMO_MIXED_PORT}' in err_text and ("Couldn't connect to server" in err_text or 'Connection refused' in err_text)) or '<urlopen error [Errno 111] Connection refused>' in err_text:
+                    aborted_due_to_runtime = True
+                    runtime_abort_reason = err_text
         speed_results.append(result)
+        if result.get('ok'):
+            ok_pushes += 1
         log_progress('node_done', index=index, total=len(alive_items), name=item['name'], ok=bool(result.get('ok')), error=result.get('error', ''), upload_mibs=result.get('upload_mibs'), download_mibs=result.get('download_mibs'))
         # 日志只输出脱敏摘要：节点名/分享链接/原始代理配置/订阅来源一律打码，防止 Actions 日志泄漏
         print(json.dumps(_redact_value('result', result), ensure_ascii=False), flush=True)
