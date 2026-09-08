@@ -21,9 +21,11 @@
 
 1. **独立引擎**：push-only 模式下对每个可用节点经 mihomo 代理 git push 测速文件到
    Gitee 私有仓库，得到「节点 → Gitee」单流上行带宽；
-2. **共享引擎**：mihomo 下载/配置/生命周期、订阅拉取解析、节点快照与切换、Gist 上传、
-   Telegram 发送均在本文件；`speedtest.py` / `taier_speedtest.py` import 复用。
-   顶层的 signal/异常通知只在 `main()` 注册，import 复用不会误触发。
+2. **共享引擎**：mihomo 下载/配置/生命周期、订阅拉取解析、节点快照与切换在本文件；
+   与引擎无关的纯共享层（订阅导出策略、通知排版、归属查询、Telegram 发送、Gist 上传、
+   进度日志）在 `speedtest_common.py`（2026-09-08 从本文件抽出，共享代码不再挂在 gitee
+   名下），本文件 import 它并保持再导出兼容；`speedtest.py` / `taier_speedtest.py`
+   import 复用。顶层的 signal/异常通知只在 `main()` 注册，import 复用不会误触发。
 
 ## 功能与链路
 
@@ -90,7 +92,7 @@
 
 ### 订阅导出策略（三件套共用）
 
-三件套共用同一套达标判定（`speedtest_gitee.resolve_subscription_policy` +
+三件套共用同一套达标判定（`speedtest_common.resolve_subscription_policy` +
 `build_subscription_bundle`，workflow env 已接仓库 **Variables**，Settings → Secrets and
 variables → Actions → Variables 可随时改，留空走默认）：
 

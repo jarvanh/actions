@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """订阅节点三网测速（引擎 MiaM1ku/taierspeedtest，链路 mihomo TUN 透明代理）。
 
-与 speedtest.py 同属「订阅节点测速」域：复用 speedtest_gitee.py 的 mihomo 内核 /
-订阅供应商 / 节点快照 / 节点切换 / Telegram 发送；测速引擎换成泰尔测速（全球网测，
+与 speedtest.py 同属「订阅节点测速」域：复用 speedtest_common.py 共享层（订阅导出策略 /
+通知排版 / 测速点归属查询 / Telegram 发送 / Gist 上传）与 speedtest_gitee.py 的 mihomo 内核 /
+订阅供应商 / 节点快照 / 节点切换；测速引擎换成泰尔测速（全球网测，
 协议还原自 com.cnspeedtest.globalspeed），拿到的是「订阅节点 → 国内电信/联通/移动
 测速点」的延迟与单/多线程上下行带宽。
 
@@ -17,8 +18,8 @@ Go 的 net.Dialer 又直接发系统调用（proxychains 这类 LD_PRELOAD 方�
 起不来时会静默直连、整轮结果失真，这个校验必须存在（bypass 命中即判失败）。
 
 设计原则（与 speedtest.py 一致）：
-  - 尽量不改 speedtest_gitee.py，仅 `from speedtest_gitee import ...` 复用已验证能力
-    （为三件套 Gist 区分做的少量共享扩展见其 _gist_identity）
+  - 共享能力一律 import 复用：纯共享层来自 speedtest_common，mihomo/订阅源来自
+    speedtest_gitee（不改它们的既有行为）
   - 节点串行测试（共享同一 mihomo 内核，切换后 settle）
   - 参数全部经环境变量控制
   - 兜底对齐 gitee：SIGTERM/SIGINT → ⛔ 通知；未捕获异常/阶段失败 → ❌ 通知
@@ -42,28 +43,30 @@ import yaml
 # 复用 speedtest_gitee.py 的已验证能力（import 期会创建 ~/proxy-speedtest 及其 providers/、
 # source-snapshots/ 子目录）
 # ---------------------------------------------------------------------------
-from speedtest_gitee import (
+from speedtest_common import (
     HOME_RUNTIME,
+    build_subscription_bundle,
+    build_target_network_section,
+    fetch_ip_network_info,
+    log_progress,
+    merged_env,
+    resolve_host_ipv4,
+    resolve_subscription_policy,
+    send_telegram,
+    tg_footer_line,
+    tg_format_elapsed,
+    update_gist,
+)
+from speedtest_gitee import (
     MIHOMO,
     MIHOMO_CONFIG,
     MIHOMO_LOG,
     build_mihomo_config,
     build_source_mapping,
-    build_subscription_bundle,
-    build_target_network_section,
     collect_provider_snapshot,
     ensure_local_mihomo,
-    log_progress,
-    merged_env,
-    resolve_subscription_policy,
-    send_telegram,
     switch_proxy,
-    tg_footer_line,
-    tg_format_elapsed,
-    update_gist,
     wait_mihomo,
-    resolve_host_ipv4,
-    fetch_ip_network_info,
 )
 
 # ---------------------------------------------------------------------------

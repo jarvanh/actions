@@ -5,19 +5,18 @@
   1. 独立工作流 proxy-speedtest-gitee 的引擎：对订阅的每个可用节点，经 mihomo 代理
      git push 测速文件到 Gitee 私有仓库（push-only 模式），得到「节点 → Gitee」的
      单流上行带宽；达标节点订阅导出到本工作流专属 Gist 并回拉验证。
-  2. 三件套共享引擎：mihomo 下载/配置/生命周期、订阅拉取解析、节点快照与切换、
-     Gist 上传、Telegram 发送均在本文件，speedtest.py（CDN）与 taier_speedtest.py
-     （泰尔三网）以 `from speedtest_gitee import ...` 复用。顶层的 signal/异常通知
-     只在 main() 里注册，import 复用不会误触发。
-
-运行模式（PROXY_SPEEDTEST_MODE）：
-  push-only     只测经代理上行（gitee 工作流使用）
-  其他          上行 + clone 下行对照；另有直连基线（git_direct_speedtest）供对比
+  2. 三件套共享引擎：mihomo 下载/配置/生命周期、订阅拉取解析、节点快照与切换
+     均在本文件，speedtest.py（CDN）与 taier_speedtest.py（泰尔三网）以
+     `from speedtest_gitee import ...` 复用。与引擎无关的纯共享层（订阅导出策略、
+     通知排版、归属查询、Telegram 发送、Gist 上传、进度日志）已于 2026-09-08 抽到
+     `speedtest_common.py`——共享代码不再挂在 gitee 专项引擎名下，本文件 import
+     它并保持再导出兼容。顶层的 signal/异常通知只在 main() 里注册，import 复用
+     不会误触发。
 
 Gist 约定（三件套各用各的，互不覆盖）：
   secret PROXY_SPEEDTEST_GIST_ID / PROXY_SPEEDTEST_CDN_GIST_ID / PROXY_SPEEDTEST_TAIER_GIST_ID
   分别注入各 workflow 的 PROXY_SPEEDTEST_GIST_ID env；文件名/描述经
-  PROXY_SPEEDTEST_GIST_FILENAME / PROXY_SPEEDTEST_GIST_DESCRIPTION 覆盖（_gist_identity）。
+  PROXY_SPEEDTEST_GIST_FILENAME / PROXY_SPEEDTEST_GIST_DESCRIPTION 覆盖。
 """
 import base64
 import json
@@ -40,16 +39,28 @@ from datetime import datetime
 
 import yaml
 
-HOME_RUNTIME = pathlib.Path(os.path.expanduser('~/proxy-speedtest'))
-HOME_RUNTIME.mkdir(parents=True, exist_ok=True)
-PROVIDERS_DIR = HOME_RUNTIME / 'providers'
-PROVIDERS_DIR.mkdir(parents=True, exist_ok=True)
-ENV_PATH = pathlib.Path(os.environ.get('PROXY_SPEEDTEST_ENV_PATH', os.path.expanduser('~/.openclaw/.env')))
+# 三件套共享层（运行时目录 / env / 进度日志 / 订阅策略与排版 / 归属查询 / Telegram 发送 / Gist 上传）。
+# 2026-09-08 从本文件抽到 speedtest_common.py —— 共享代码不再挂在 gitee 专项引擎名下；
+# 本文件 import 即继续兼容旧的 `from speedtest_gitee import X` 用法。
+from speedtest_common import (
+    DEFAULT_MIN_MEGABIT, DEFAULT_MIN_NODES, DEFAULT_SPEED_METRIC,
+    ENV_PATH, GIST_DEFAULT_DESCRIPTION, GIST_DEFAULT_FILENAME,
+    HOME_RUNTIME, METRIC_LABELS, METRIC_MODES, PROVIDERS_DIR,
+    SOURCE_SNAPSHOT_DIR, TG_CHUNK_SIZE,
+    _env_int, _http_error_with_body, _mibs_to_megabits, _redact_value,
+    _scrub_cred_urls, build_mihomo_yaml_text, build_node_metric_prefix,
+    build_share_link_text, build_subscription_bundle,
+    build_subscription_yaml_text, build_target_network_section,
+    count_qualified_nodes, create_gist, deep_copy_json, fetch_ip_network_info,
+    get_item_megabits, gist_has_file, github_api_request, load_env_file,
+    log_progress, merged_env, network_cells, resolve_host_ipv4,
+    resolve_subscription_metric, resolve_subscription_policy, send_telegram,
+    send_telegram_chunked, set_env_value, tg_footer_line, tg_format_elapsed,
+    update_gist,
+)
 RESULT_JSON = HOME_RUNTIME / 'proxy_speedtest_last_result.json'
 RESULT_TXT = HOME_RUNTIME / 'proxy_speedtest_last_result.txt'
 RESULT_SUBSCRIPTION = HOME_RUNTIME / 'proxy_speedtest_subscription.yaml'
-SOURCE_SNAPSHOT_DIR = HOME_RUNTIME / 'source-snapshots'
-SOURCE_SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
 BACKGROUND_LOG = HOME_RUNTIME / 'proxy_speedtest_background.log'
 BACKGROUND_PID = HOME_RUNTIME / 'proxy_speedtest_background.pid'
 TEST_BRANCH = 'master'
@@ -61,18 +72,8 @@ MIHOMO_API = 'http://127.0.0.1:19090'
 MIHOMO_MIXED_PORT = 17892
 MIHOMO_RELEASE_API = 'https://api.github.com/repos/MetaCubeX/mihomo/releases/latest'
 DEFAULT_HEALTHCHECK_URL = 'https://www.gstatic.com/generate_204'
-DEFAULT_MIN_MEGABIT = 10
-# 订阅导出策略默认值（全部可经 env / 仓库 Variables 覆盖，见 resolve_subscription_policy）：
-#   阈值（兆） / 判定指标（upload|download） / 上传订阅的最少节点数
-DEFAULT_MIN_NODES = 1
-DEFAULT_SPEED_METRIC = 'upload'
-# 判定指标 → build_mihomo_yaml_text 的 speedtest_mode（push-only = 按上行判定）
-METRIC_MODES = {'upload': 'push-only', 'download': 'download'}
-METRIC_LABELS = {'upload': '上传', 'download': '下载'}
-
 CURRENT_RUN_STARTED_AT = ''
 TERMINATION_NOTICE_SENT = False
-
 
 class StageError(RuntimeError):
     def __init__(self, stage: str, error: Exception | str):
@@ -80,13 +81,11 @@ class StageError(RuntimeError):
         self.original_error = error
         super().__init__(f'{stage}: {error}')
 
-
 def run_stage(stage: str, func, *args, **kwargs):
     try:
         return func(*args, **kwargs)
     except Exception as e:
         raise StageError(stage, e) from e
-
 
 def write_termination_artifacts(message: str):
     try:
@@ -104,7 +103,6 @@ def write_termination_artifacts(message: str):
         RESULT_JSON.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
     except Exception:
         pass
-
 
 def handle_termination_signal(signum, frame):
     global TERMINATION_NOTICE_SENT
@@ -127,7 +125,6 @@ def handle_termination_signal(signum, frame):
         pass
     raise SystemExit(128 + int(signum))
 
-
 def touch_lock_file():
     """更新锁文件时间戳，防止被心跳机制误判为 stale。"""
     try:
@@ -136,7 +133,6 @@ def touch_lock_file():
             lock_file.touch(exist_ok=True)
     except Exception:
         pass
-
 
 def maybe_detach_self():
     detach_value = os.environ.get('PROXY_SPEEDTEST_DETACH', '').strip().lower()
@@ -187,59 +183,14 @@ def maybe_detach_self():
     }, ensure_ascii=False))
     return True
 
-
-def load_env_file(path: pathlib.Path):
-    env = {}
-    if path.exists():
-        for raw in path.read_text(encoding='utf-8').splitlines():
-            line = raw.strip()
-            if not line or line.startswith('#') or '=' not in line:
-                continue
-            k, v = line.split('=', 1)
-            env[k.strip()] = v.strip()
-    return env
-
-
-def set_env_value(path: pathlib.Path, key: str, value: str):
-    lines = []
-    found = False
-    if path.exists():
-        for raw in path.read_text(encoding='utf-8').splitlines():
-            stripped = raw.strip()
-            if stripped.startswith(f'{key}='):
-                lines.append(f'{key}={value}')
-                found = True
-            else:
-                lines.append(raw)
-    if not found:
-        lines.append(f'{key}={value}')
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + '.tmp')
-    tmp_path.write_text('\n'.join(lines).rstrip('\n') + '\n', encoding='utf-8')
-    tmp_path.replace(path)
-
-
-def merged_env():
-    env = dict(os.environ)
-    env.update(load_env_file(ENV_PATH))
-    return env
-
-
-def deep_copy_json(value):
-    """仅用于由 JSON 兼容类型组成的数据结构深拷贝。"""
-    return json.loads(json.dumps(value, ensure_ascii=False))
-
-
 def run(cmd, cwd=None, env=None, timeout=600):
     p = subprocess.run(cmd, cwd=cwd, env=env, text=True, capture_output=True, timeout=timeout)
     return p.returncode, p.stdout, p.stderr
-
 
 def sanitize_name(name: str):
     bad = '<>:"/\\|?*\n\r\t'
     out = ''.join('_' if c in bad else c for c in name)
     return out[:120] or 'node'
-
 
 def parse_sub_urls(env):
     raw = env.get('PROXY_SPEEDTEST_SUB_URLS', '').strip()
@@ -256,7 +207,6 @@ def parse_sub_urls(env):
         raise RuntimeError('PROXY_SPEEDTEST_SUB_URLS is empty after parsing')
     return urls
 
-
 def fetch_text(url: str):
     req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
     with urllib.request.urlopen(req, timeout=60) as r:
@@ -265,7 +215,6 @@ def fetch_text(url: str):
         return raw.decode('utf-8')
     except UnicodeDecodeError:
         return raw.decode('utf-8', 'ignore')
-
 
 def maybe_decode_base64_subscription(text: str):
     import base64
@@ -284,7 +233,6 @@ def maybe_decode_base64_subscription(text: str):
         log_progress('subscription_base64_decode_skipped', error=str(e))
     return text
 
-
 def normalize_node_name(name: str):
     if not name:
         return ''
@@ -294,7 +242,6 @@ def normalize_node_name(name: str):
     text = re.sub(r'^[^\w\u4e00-\u9fff]+', '', text)
     text = re.sub(r'\s+', '', text)
     return text
-
 
 def build_proxy_fingerprint(proxy: dict):
     if not isinstance(proxy, dict):
@@ -337,7 +284,6 @@ def build_proxy_fingerprint(proxy: dict):
         alpn, auth, obfs, obfs_password,
         udp_relay_mode, congestion_controller, disable_sni,
     ])
-
 
 def extract_proxy_from_share_link(share_link: str):
     line = (share_link or '').strip()
@@ -554,7 +500,6 @@ def extract_proxy_from_share_link(share_link: str):
 
     return {}
 
-
 def make_source_entry(source_url: str, name: str, share_link: str = '', proxy=None):
     proxy_copy = deep_copy_json(proxy or {}) if proxy else {}
     normalized_name = normalize_node_name(name)
@@ -578,7 +523,6 @@ def make_source_entry(source_url: str, name: str, share_link: str = '', proxy=No
         'fingerprint': fingerprint,
         'source_kind': source_kind,
     }
-
 
 def build_source_mapping(env):
     exact_mapping = {}
@@ -667,99 +611,6 @@ def build_source_mapping(env):
         'snapshot_meta': snapshot_meta,
     }
 
-
-def get_item_megabits(item: dict, speedtest_mode: str):
-    value = item.get('upload_mibs') if speedtest_mode == 'push-only' else item.get('download_mibs')
-    if not isinstance(value, (int, float)) or value <= 0:
-        return 0
-    return max(1, int(round(float(value) * 8)))
-
-
-def _env_int(env, key: str, default, minimum=0):
-    raw = str((env or {}).get(key, '') or '').strip()
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        value = int(default)
-    return max(minimum, value)
-
-
-def resolve_subscription_policy(env=None):
-    """订阅导出策略（三件套共用，全部经 env 覆盖，workflow 里接仓库 Variables）：
-
-      PROXY_SPEEDTEST_MIN_MEGABIT   达标阈值（兆），默认 10
-      PROXY_SPEEDTEST_SPEED_METRIC  判定指标：upload（默认，按上行）/ download（按下行）
-      PROXY_SPEEDTEST_MIN_NODES     上传订阅的最少节点数，默认 1
-
-    非法值一律退回默认值（不因配置写错而静默改变口径）。
-    """
-    env = env if env is not None else merged_env()
-    metric = str(env.get('PROXY_SPEEDTEST_SPEED_METRIC') or '').strip().lower()
-    if metric not in METRIC_MODES:
-        metric = DEFAULT_SPEED_METRIC
-    return {
-        'min_megabit': _env_int(env, 'PROXY_SPEEDTEST_MIN_MEGABIT', DEFAULT_MIN_MEGABIT, 0),
-        'min_nodes': _env_int(env, 'PROXY_SPEEDTEST_MIN_NODES', DEFAULT_MIN_NODES, 1),
-        'metric': metric,
-    }
-
-
-def count_qualified_nodes(results: list, metric: str, min_megabit):
-    """按指定指标统计达标节点数（须同时有原始配置 source_entry.proxy，否则导不进订阅）。"""
-    mode = METRIC_MODES.get(metric, METRIC_MODES[DEFAULT_SPEED_METRIC])
-    return sum(
-        1 for item in results
-        if get_item_megabits(item, mode) >= int(min_megabit)
-        and (item.get('source_entry') or {}).get('proxy')
-    )
-
-
-def resolve_subscription_metric(results: list, policy: dict):
-    """判定指标选择：主指标达标数 < 最少节点数时改用另一指标（双向对称）。
-
-    例：默认按 upload 判定，达标 0 个（<min_nodes）→ 改用 download 判定；反之若配置
-    metric=download 而下行达标不足，则改用 upload。另一指标也不更多时维持主指标
-    （最终仍不足 min_nodes 就不上传订阅）。
-    """
-    metric = policy.get('metric') or DEFAULT_SPEED_METRIC
-    other = 'download' if metric == 'upload' else 'upload'
-    min_megabit = policy.get('min_megabit', DEFAULT_MIN_MEGABIT)
-    min_nodes = policy.get('min_nodes', DEFAULT_MIN_NODES)
-    primary = count_qualified_nodes(results, metric, min_megabit)
-    if primary >= min_nodes:
-        return metric, primary, False
-    secondary = count_qualified_nodes(results, other, min_megabit)
-    if secondary > primary:
-        log_progress('subscription_metric_fallback', from_metric=metric, to_metric=other,
-                     primary=primary, secondary=secondary, min_nodes=min_nodes)
-        return other, secondary, True
-    return metric, primary, False
-
-
-def build_subscription_bundle(results: list, policy: dict):
-    """按策略一次性算出「订阅文本 + 判定指标 + 达标数」，供上传与通知共用。
-
-    text 为空 = 达标节点不足 min_nodes（不上传订阅），调用方据此跳过 update_gist。
-    """
-    min_megabit = policy.get('min_megabit', DEFAULT_MIN_MEGABIT)
-    min_nodes = policy.get('min_nodes', DEFAULT_MIN_NODES)
-    metric, qualified, fallback = resolve_subscription_metric(results, policy)
-    text = ''
-    if qualified >= min_nodes:
-        text = build_subscription_yaml_text(
-            results, min_megabit, mode=METRIC_MODES.get(metric, METRIC_MODES[DEFAULT_SPEED_METRIC]))
-    return {
-        'text': text,
-        'metric': metric,
-        'metric_label': METRIC_LABELS.get(metric, metric),
-        'metric_mode': METRIC_MODES.get(metric, METRIC_MODES[DEFAULT_SPEED_METRIC]),
-        'qualified': qualified,
-        'fallback': fallback,
-        'min_megabit': min_megabit,
-        'min_nodes': min_nodes,
-    }
-
-
 def resolve_source_entry_for_node(name: str, source_mapping, proxy_obj=None):
     source_mapping = source_mapping or {}
     exact_raw_mapping = source_mapping.get('exact_raw') or {}
@@ -791,11 +642,9 @@ def resolve_source_entry_for_node(name: str, source_mapping, proxy_obj=None):
         return make_source_entry('', name, share_link=share_link, proxy=proxy), 'raw-normalized'
     return {}, ''
 
-
 def mihomo_api_get(path: str):
     with urllib.request.urlopen(MIHOMO_API + path, timeout=30) as r:
         return json.load(r)
-
 
 def mihomo_api_put(path: str, payload: dict):
     req = urllib.request.Request(
@@ -807,7 +656,6 @@ def mihomo_api_put(path: str, payload: dict):
     with urllib.request.urlopen(req, timeout=30) as r:
         raw = r.read().decode('utf-8', 'ignore')
     return raw
-
 
 def wait_mihomo(timeout=40):
     start = time.time()
@@ -821,7 +669,6 @@ def wait_mihomo(timeout=40):
             last_error = str(e)
             time.sleep(1)
     raise RuntimeError(f'mihomo controller not ready: {last_error}')
-
 
 def resolve_mihomo_download_url():
     headers = {'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json'}
@@ -845,7 +692,6 @@ def resolve_mihomo_download_url():
             return asset.get('browser_download_url')
     raise RuntimeError('mihomo linux-amd64-compatible asset not found in latest release')
 
-
 def ensure_local_mihomo():
     if MIHOMO.exists() and os.access(MIHOMO, os.X_OK):
         return MIHOMO
@@ -863,7 +709,6 @@ def ensure_local_mihomo():
     except FileNotFoundError:
         log_progress('mihomo_gz_cleanup_skipped', path=str(gz_path), reason='not_found')
     return MIHOMO
-
 
 def build_mihomo_config(env):
     health_url = env.get('PROXY_SPEEDTEST_HEALTHCHECK_URL', DEFAULT_HEALTHCHECK_URL).strip() or DEFAULT_HEALTHCHECK_URL
@@ -918,7 +763,6 @@ def build_mihomo_config(env):
     MIHOMO_CONFIG.write_text(yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False), encoding='utf-8')
     return cfg, provider_source_meta
 
-
 def ensure_mihomo_running(env):
     ensure_local_mihomo()
 
@@ -970,7 +814,6 @@ def ensure_mihomo_running(env):
     wait_mihomo(timeout=40)
     return raw_proxy_map
 
-
 def collect_provider_snapshot(source_mapping=None, raw_proxy_map=None):
     data = mihomo_api_get('/providers/proxies')
     providers = {}
@@ -1018,7 +861,6 @@ def collect_provider_snapshot(source_mapping=None, raw_proxy_map=None):
         }
     return providers, alive_items
 
-
 def build_proxy_env(env):
     local_env = dict(env)
     proxy = f'http://127.0.0.1:{MIHOMO_MIXED_PORT}'
@@ -1026,7 +868,6 @@ def build_proxy_env(env):
         local_env[k] = proxy
     local_env['GIT_TERMINAL_PROMPT'] = '0'
     return local_env
-
 
 def ensure_gitee_remote(env):
     token = env.get('GITEE_PRIVATE_TOKEN', '').strip()
@@ -1072,9 +913,7 @@ def ensure_gitee_remote(env):
     remote_public = f'https://gitee.com/{owner}/{repo}.git'
     return {'owner': owner, 'repo': repo, 'remote_with_token': remote_with_token, 'remote_public': remote_public}
 
-
 REPO_SIZE_LIMIT_PATTERN = 'size exceeds limit'
-
 
 def rebuild_gitee_repo(env, gitee: dict):
     """仓库体积超限时，删除并重建仓库。"""
@@ -1110,7 +949,6 @@ def rebuild_gitee_repo(env, gitee: dict):
         pass
     log_progress('repo_auto_rebuilt', owner=owner, repo=repo, reason='size exceeds limit')
 
-
 def ensure_test_file(size_mib: int):
     path = HOME_RUNTIME / f'gitee_speed_{size_mib}mb.bin'
     wanted = size_mib * 1024 * 1024
@@ -1118,7 +956,6 @@ def ensure_test_file(size_mib: int):
         with open(path, 'wb') as f:
             f.write(os.urandom(wanted))
     return path
-
 
 def git_prepare_work_repo(repo_dir: pathlib.Path, remote: str, env, branch_name: str):
     shutil.rmtree(repo_dir, ignore_errors=True)
@@ -1147,7 +984,6 @@ def git_prepare_work_repo(repo_dir: pathlib.Path, remote: str, env, branch_name:
         if code != 0:
             raise RuntimeError((err or out or 'git config failed')[-400:])
 
-
 def git_force_push_testfile(repo_dir: pathlib.Path, remote: str, env, file_path: pathlib.Path, commit_message: str, push_timeout: int, branch_name: str, target_filename: str, gitee: dict | None = None):
     """Push 测速文件；若 gitee 传入且 push 因 size exceeds limit 失败，自动重建仓库并重试一次。"""
     def _do_push():
@@ -1174,7 +1010,6 @@ def git_force_push_testfile(repo_dir: pathlib.Path, remote: str, env, file_path:
         rebuild_gitee_repo(env, gitee)
         return _do_push()
 
-
 def git_clone_testbranch(clone_dir: pathlib.Path, remote: str, env, timeout: int, branch_name: str, target_filename: str):
     shutil.rmtree(clone_dir, ignore_errors=True)
     t0 = time.time()
@@ -1190,11 +1025,9 @@ def git_clone_testbranch(clone_dir: pathlib.Path, remote: str, env, timeout: int
         raise RuntimeError('downloaded test file missing')
     return time.time() - t0, pulled
 
-
 def switch_proxy(name: str, settle_seconds: float):
     mihomo_api_put(f'/proxies/{urllib.parse.quote("AUTO", safe="")}', {'name': name})
     time.sleep(settle_seconds)
-
 
 def git_direct_speedtest(env, gitee, test_file: pathlib.Path, push_timeout: int, clone_timeout: int, speedtest_mode: str, max_attempts: int = 5):
     local_env = dict(env)
@@ -1260,7 +1093,6 @@ def git_direct_speedtest(env, gitee, test_file: pathlib.Path, push_timeout: int,
     joined_errors = ' | '.join(f'第{i}次: {err}' for i, err in enumerate(attempt_errors, 1))
     raise RuntimeError(f'本机直连基线测速连续 {max_attempts} 次失败: {joined_errors[-1500:]}')
 
-
 def speedtest_single_item(env, gitee, item: dict, test_file: pathlib.Path, push_timeout: int, clone_timeout: int, switch_settle_seconds: float, speedtest_mode: str):
     name = item['name']
     local_env = build_proxy_env(env)
@@ -1311,90 +1143,6 @@ def speedtest_single_item(env, gitee, item: dict, test_file: pathlib.Path, push_
             'download_seconds': round(download_s, 3),
         })
     return result
-
-
-def _mibs_to_megabits(mibs):
-    if isinstance(mibs, (int, float)) and float(mibs) > 0:
-        return max(1, int(round(float(mibs) * 8)))
-    return 0
-
-
-def build_node_metric_prefix(item: dict, speedtest_mode: str, order: str = 'down_first'):
-    """生成节点名前的简短指标前缀：主速度（兆）+ 附加指标（另一方向 ↓/↑ 兆、延迟 ms）。
-
-    附加字段缺失时自动省略——如 gitee push-only 模式无下载/延迟数据，保持原「42兆 |」不变；
-    出现两项及以上指标时主速度补方向箭头，便于区分上传/下载；主指标缺失时退化为仅展示可用指标。
-    order: 指标顺序——'down_first'（默认）= ↓主速度在前，用于订阅节点命名（保持既有格式）；
-           'up_first' = ↑上传在前，对齐泰尔引擎列序，用于通知 TOP5 条目。
-           上传未测出（0/缺失）时两种顺序下 ↑ 项都自动整项省略。
-    """
-    push_mode = speedtest_mode == 'push-only'
-    upload_mbps = _mibs_to_megabits(item.get('upload_mibs'))
-    download_mbps = _mibs_to_megabits(item.get('download_mibs'))
-    primary = get_item_megabits(item, speedtest_mode)
-    latency_ms = item.get('latency_ms')
-    has_latency = isinstance(latency_ms, (int, float)) and latency_ms > 0
-    parts = []
-    if primary > 0:
-        secondary = download_mbps if push_mode else upload_mbps
-        labeled = secondary > 0 or has_latency
-        if push_mode:
-            parts.append(f'↑{primary}兆' if labeled else f'{primary}兆')
-            if download_mbps > 0:
-                parts.append(f'↓{download_mbps}兆')
-        elif order == 'up_first' and upload_mbps > 0:
-            parts.append(f'↑{upload_mbps}兆')
-            parts.append(f'↓{primary}兆' if labeled else f'{primary}兆')
-        else:
-            parts.append(f'↓{primary}兆' if labeled else f'{primary}兆')
-            if upload_mbps > 0:
-                parts.append(f'↑{upload_mbps}兆')
-    elif push_mode and download_mbps > 0:
-        parts.append(f'↓{download_mbps}兆')
-    elif not push_mode and upload_mbps > 0:
-        parts.append(f'↑{upload_mbps}兆')
-    if has_latency:
-        parts.append(f'{latency_ms:.0f}ms')
-    return ' '.join(parts)
-
-
-def build_mihomo_yaml_text(results: list, speedtest_mode: str, min_megabit: int = DEFAULT_MIN_MEGABIT):
-    proxies = []
-    for item in results:
-        if get_item_megabits(item, speedtest_mode) < int(min_megabit):
-            continue
-        source_entry = item.get('source_entry') or {}
-        proxy = deep_copy_json(source_entry.get('proxy') or {})
-        if not proxy:
-            log_progress('subscription_yaml_source_missing', name=item.get('name', ''), share_link_match=item.get('share_link_match', ''), source_id=item.get('source_id', ''))
-            continue
-        name = str(proxy.get('name') or item.get('name') or '').strip()
-        prefix = build_node_metric_prefix(item, speedtest_mode)
-        if prefix:
-            name = f"{prefix} | {name}"
-        proxy['name'] = name
-        proxies.append(proxy)
-    if not proxies:
-        return ''
-    return yaml.safe_dump({'proxies': proxies}, allow_unicode=True, sort_keys=False)
-
-
-def build_subscription_yaml_text(results: list, min_megabit: int = DEFAULT_MIN_MEGABIT, mode: str = ''):
-    """根据测速结果生成最终导出的 YAML 订阅文本。
-
-    mode 为空时沿用结果自带的 mode（各脚本按自己测速口径写入）；显式传入则按策略
-    判定指标导出（见 resolve_subscription_policy / build_subscription_bundle）。
-    """
-    if not results:
-        return ''
-    speedtest_mode = str(mode or results[0].get('mode') or 'push-only')
-    return build_mihomo_yaml_text(results, speedtest_mode, min_megabit=min_megabit)
-
-
-def build_share_link_text(results: list, min_megabit: int = DEFAULT_MIN_MEGABIT, mode: str = ''):
-    return build_subscription_yaml_text(results, min_megabit=min_megabit, mode=mode)
-
-
 
 def verify_gist_subscriptions_with_mihomo(yaml_url: str):
     if not yaml_url:
@@ -1471,234 +1219,6 @@ def verify_gist_subscriptions_with_mihomo(yaml_url: str):
         except Exception:
             pass
 
-
-def _http_error_with_body(e):
-    """把 HTTPError 的响应体并进异常文本——只有状态码看不到 GitHub 的报错原因。
-
-    Gist 422 之类的失败，光看 `HTTP Error 422: Unprocessable Entity` 完全无法定位
-    （真实原因在 body 的 errors[].field 里），这里把 body 截断附到 msg 上。
-    """
-    body = ''
-    try:
-        body = (e.read() or b'').decode('utf-8', 'ignore').strip()
-    except Exception:
-        body = ''
-    msg = str(e.reason or '')
-    if body:
-        msg = f'{msg} | {body[:300]}'
-    return urllib.error.HTTPError(e.url, e.code, msg, e.headers, e.fp)
-
-
-def github_api_request(url: str, token: str, payload=None, method='GET', timeout=60):
-    data = None
-    headers = {
-        'Authorization': f'token {token}',
-        'User-Agent': 'Mozilla/5.0',
-        'Accept': 'application/vnd.github+json',
-        'X-GitHub-Api-Version': '2022-11-28',
-    }
-    if payload is not None:
-        data = json.dumps(payload).encode()
-        headers['Content-Type'] = 'application/json'
-    req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.load(r)
-    except urllib.error.HTTPError as e:
-        # 保留 HTTPError 类型（调用方按 e.code 分流），但带上响应体便于定位
-        raise _http_error_with_body(e) from None
-
-
-GIST_DEFAULT_FILENAME = 'proxy_speedtest_subscription.yaml'
-GIST_DEFAULT_DESCRIPTION = 'proxy speedtest subscription result'
-
-
-def _gist_identity(env):
-    """Gist 文件名/描述，允许各测速工作流经 env 覆盖（三件套各用各的 Gist，便于区分）。"""
-    filename = (env.get('PROXY_SPEEDTEST_GIST_FILENAME') or '').strip() or GIST_DEFAULT_FILENAME
-    description = (env.get('PROXY_SPEEDTEST_GIST_DESCRIPTION') or '').strip() or GIST_DEFAULT_DESCRIPTION
-    return filename, description
-
-
-def create_gist(env, yaml_text=''):
-    token = env.get('GH_TOKEN')
-    yaml_filename, description = _gist_identity(env)
-    if not token:
-        return {'ok': False, 'reason': 'missing GH_TOKEN'}
-    if not (yaml_text or '').strip():
-        return {'ok': False, 'reason': 'empty subscription text'}
-    payload = {
-        'description': description,
-        'public': False,
-        'files': {
-            yaml_filename: {'content': yaml_text},
-        },
-    }
-    res = github_api_request('https://api.github.com/gists', token, payload=payload, method='POST')
-    files = res.get('files') or {}
-    yaml_raw_url = ''
-    if isinstance(files, dict):
-        yaml_raw_url = ((files.get(yaml_filename) or {}).get('raw_url') or '').strip()
-    gist_id = (res.get('id') or '').strip()
-    if gist_id:
-        env['PROXY_SPEEDTEST_GIST_ID'] = gist_id
-        set_env_value(ENV_PATH, 'PROXY_SPEEDTEST_GIST_ID', gist_id)
-    return {
-        'ok': True,
-        'id': gist_id,
-        'html_url': res.get('html_url'),
-        'yaml': {'filename': yaml_filename, 'raw_url': yaml_raw_url},
-        'created': True,
-    }
-
-
-def gist_has_file(env, gist_id, filename, token=''):
-    """目标 Gist 里是否已存在 filename（查询失败一律返回 False，即「当它不存在」）。
-
-    用于「旧文件名是否还需要删」的判定：见 update_gist 的说明。
-    """
-    token = token or env.get('GH_TOKEN')
-    if not (token and gist_id and filename):
-        return False
-    try:
-        res = github_api_request(f'https://api.github.com/gists/{gist_id}', token)
-    except Exception as e:
-        log_progress('gist_probe_failed', gist_id=gist_id, error=str(e))
-        return False
-    return filename in ((res or {}).get('files') or {})
-
-
-def _patch_gist(gist_id, token, payload):
-    return github_api_request(
-        f'https://api.github.com/gists/{gist_id}', token, payload=payload, method='PATCH')
-
-
-def update_gist(env, yaml_text=''):
-    token = env.get('GH_TOKEN')
-    gist_id = env.get('PROXY_SPEEDTEST_GIST_ID', '').strip()
-    yaml_filename, description = _gist_identity(env)
-    if not token:
-        return {'ok': False, 'reason': 'missing GH_TOKEN'}
-    if not (yaml_text or '').strip():
-        return {'ok': False, 'reason': 'empty subscription text'}
-    if not gist_id:
-        return create_gist(env, yaml_text)
-    files_payload = {}
-    # 文件名变更：旧文件必须显式置 null 才会被删除，否则新旧并存分不清。
-    # 但旧文件一旦已被删掉（迁移后的第二轮起），再发 null 会让 GitHub 认为 files
-    # 里没有任何有效文件 → 422 Validation Failed / missing_field: files，整轮订阅
-    # 上传失败（三件套曾因此连续多轮「无达标节点」）。故只在旧文件确实存在时发删除项。
-    if yaml_filename != GIST_DEFAULT_FILENAME and gist_has_file(env, gist_id, GIST_DEFAULT_FILENAME, token):
-        files_payload[GIST_DEFAULT_FILENAME] = None
-    files_payload[yaml_filename] = {'content': yaml_text}
-    payload = {
-        'description': description,
-        'public': False,
-        'files': files_payload,
-    }
-    try:
-        res = _patch_gist(gist_id, token, payload)
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            return create_gist(env, yaml_text)
-        if e.code == 422 and GIST_DEFAULT_FILENAME in files_payload and files_payload[GIST_DEFAULT_FILENAME] is None:
-            # 兜底：删除项引发 422（旧文件其实已不存在 / API 口径变动）→ 去掉删除项重试一次
-            log_progress('gist_patch_retry_without_delete', gist_id=gist_id, error=str(e))
-            files_payload.pop(GIST_DEFAULT_FILENAME, None)
-            payload['files'] = files_payload
-            res = _patch_gist(gist_id, token, payload)
-        else:
-            raise
-    files = res.get('files') or {}
-    yaml_raw_url = ''
-    if isinstance(files, dict):
-        yaml_raw_url = ((files.get(yaml_filename) or {}).get('raw_url') or '').strip()
-    return {
-        'ok': True,
-        'id': res.get('id'),
-        'html_url': res.get('html_url'),
-        'yaml': {'filename': yaml_filename, 'raw_url': yaml_raw_url},
-        'created': False,
-    }
-
-
-def send_telegram(env, text):
-    """发送 Telegram 消息（统一 HTML parse_mode；429 自动重试，其余失败直接返回
-    {'sent': False, ...} 并带上响应体）。文本应使用全库统一 HTML 版式（emoji 标题 + ━━━
-    分隔线 + <b>/<code>/<i> + 统一收尾行）；动态内容一律经 tg_* 助手转义。"""
-    bot = env.get('TELEGRAM_BOT_TOKEN') or env.get('TG_BOT_TOKEN')
-    chat = env.get('TELEGRAM_CHAT_ID') or env.get('TG_CHAT_ID')
-    if not bot or not chat:
-        return {'sent': False, 'reason': 'missing TELEGRAM_BOT_TOKEN/TG_BOT_TOKEN or TELEGRAM_CHAT_ID'}
-
-    def _post(data):
-        # 429 限流按 retry_after 完整等待重试（规范 §5，与 tg_notify.sh 同语义：5 次尝试）
-        for _attempt in range(5):
-            payload = urllib.parse.urlencode(data).encode()
-            req = urllib.request.Request(f'https://api.telegram.org/bot{bot}/sendMessage',
-                                         data=payload, method='POST')
-            try:
-                with urllib.request.urlopen(req, timeout=60) as r:
-                    return json.load(r)
-            except urllib.error.HTTPError as e:
-                body = e.read().decode('utf-8', 'replace')
-                if e.code == 429:
-                    m = re.search(r'"retry_after":(\d+)', body)
-                    time.sleep(int(m.group(1)) if m else 5)
-                    continue
-                raise HTTPErrorWithBody(e, body)
-        raise RuntimeError('telegram 429 retry exhausted')
-
-    class HTTPErrorWithBody(urllib.error.HTTPError):
-        # 保留响应体供外层输出错误信息
-        def __init__(self, e, body):
-            super().__init__(e.url, e.code, e.msg, e.hdrs, e.fp)
-            self.body_text = body
-
-    # 不退化纯文本重发：HTML 解析失败时消息本就没发出去，退化只会把版式 bug 藏起来
-    data = {'chat_id': chat, 'disable_web_page_preview': 'true',
-            'parse_mode': 'HTML', 'text': text}
-    try:
-        res = _post(data)
-    except urllib.error.HTTPError as e:
-        body = getattr(e, 'body_text', None)
-        if body is None:
-            body = e.read().decode('utf-8', 'replace')
-        return {'sent': False, 'reason': body[:200]}
-    if res.get('ok'):
-        return {'sent': True, 'response': res}
-    return {'sent': False, 'response': res}
-
-
-TG_CHUNK_SIZE = 4000
-
-
-def send_telegram_chunked(env, text):
-    """长消息按 4000 字符分片发送（规范 §5：断在换行处，不切 UTF-8 多字节字符，
-    与 tg_notify.sh send_tg_chunked 同语义）；短消息直接走 send_telegram。"""
-    if not text:
-        return {'sent': True}
-    if len(text) <= TG_CHUNK_SIZE:
-        return send_telegram(env, text)
-    chunks = []
-    i, n = 0, len(text)
-    while i < n:
-        end = min(i + TG_CHUNK_SIZE, n)
-        if end < n:
-            last_nl = text.rfind('\n', i, end)
-            if last_nl > i + TG_CHUNK_SIZE // 2:
-                end = last_nl + 1
-        chunks.append(text[i:end])
-        i = end
-    results = []
-    for idx, chunk in enumerate(chunks):
-        results.append(send_telegram(env, chunk))
-        if idx < len(chunks) - 1:
-            time.sleep(2)
-    return {'sent': all(r.get('sent') for r in results),
-            'chunks': len(chunks), 'results': results}
-
-
 def resolve_push_target_info(remote_url: str):
     parsed = urllib.parse.urlparse(remote_url)
     host = parsed.hostname or 'gitee.com'
@@ -1724,7 +1244,6 @@ def resolve_push_target_info(remote_url: str):
         'address_count': len(addresses),
         'error': '; '.join(errors) if errors else '',
     }
-
 
 def lookup_ip_city(ip: str):
     providers = [
@@ -1767,7 +1286,6 @@ def lookup_ip_city(ip: str):
             continue
     raise RuntimeError(last_error or 'ip city lookup failed')
 
-
 def build_push_ip_city_text(addresses):
     items = []
     for ip in addresses[:8]:
@@ -1776,7 +1294,6 @@ def build_push_ip_city_text(addresses):
         except Exception:
             items.append(f'{ip} (查询失败)')
     return '；'.join(items)
-
 
 def check_mihomo_runtime():
     errors = []
@@ -1797,7 +1314,6 @@ def check_mihomo_runtime():
             log_progress('mihomo_runtime_socket_close_failed', error=str(e))
     return {'ok': not errors, 'error': '; '.join(errors)}
 
-
 def format_duration(seconds: float):
     total = int(round(seconds))
     h, rem = divmod(total, 3600)
@@ -1807,229 +1323,6 @@ def format_duration(seconds: float):
     if m:
         return f'{m}m {s}s'
     return f'{s}s'
-
-
-def tg_format_elapsed(seconds):
-    """已运行时长的中文三段式（与 tg_add_footer 同源同形态，勿再自造 40s/5h57m）。
-
-    规则: >=1h → "X 小时 Y 分"；>=1min → "X 分钟"；否则 → "X 秒"
-    注意与 format_duration 分工: 后者是「耗时」的紧凑写法，用于正文；
-    本函数用于收尾区，必须与全库通知的 tg_add_footer 逐字一致。
-    """
-    total = int(max(0, round(seconds)))
-    h, rem = divmod(total, 3600)
-    m, s = divmod(rem, 60)
-    if h:
-        return f'{h} 小时 {m} 分'
-    if m:
-        return f'{m} 分钟'
-    return f'{s} 秒'
-
-
-def tg_footer_line():
-    """全库唯一收尾行: "⏱ 已运行 <b>X</b> · 🔗 <a>运行日志</a>"
-
-    与 tg_add_footer（telegram/tg_notify.sh）同形态、同降级链:
-      无 TG_RUN_STARTED_AT → 兜底 /proc/1 启动时刻（hosted runner PID 1 随 job
-      启动，误差秒级——GitHub 平台已于 2026-09-05 移除 github.run_started_at 上下文）；
-      仍取不到 → 不显示时长；无 TG_RUN_URL → 整行跳过
-    时长 = run 已运行时长，非测速耗时
-    """
-    line = ''
-    elapsed = 0.0
-    started_at = os.environ.get('TG_RUN_STARTED_AT', '')
-    if started_at:
-        try:
-            st = datetime.fromisoformat(str(started_at).replace('Z', '+00:00'))
-            if st.tzinfo is None:
-                elapsed = (datetime.now() - st).total_seconds()
-            else:
-                elapsed = (datetime.now(st.tzinfo) - st).total_seconds()
-        except Exception:
-            elapsed = 0.0
-    if elapsed <= 0:
-        try:
-            elapsed = max(0.0, time.time() - int(os.stat('/proc/1').st_mtime))
-        except Exception:
-            elapsed = 0.0
-    if elapsed > 0:
-        line = f'⏱ 已运行 <b>{html.escape(tg_format_elapsed(elapsed))}</b>'
-    run_url = os.environ.get('TG_RUN_URL', '')
-    if run_url:
-        if line:
-            line += ' · '
-        line += f'🔗 <a href="{html.escape(run_url)}">运行日志</a>'
-    return line
-
-
-def resolve_host_ipv4(target, timeout=5):
-    """域名或 IP → IPv4 字符串；解析失败返回 ''。
-
-    直连 DNS（不经代理、不经 mihomo）：测速点是固定的国内站点，直连解析结果
-    即可代表其服务侧归属；传 IP 时原样返回。
-    """
-    t = str(target or '').strip()
-    if not t:
-        return ''
-    host = t
-    if '://' in t:
-        host = urllib.parse.urlparse(t).hostname or ''
-    host = host.split(':')[0].strip('[]').strip()
-    if not host:
-        return ''
-    if re.match(r'^(?:\d{1,3}\.){3}\d{1,3}$', host):
-        return host
-    try:
-        infos = socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_STREAM)
-        return infos[0][4][0] if infos else ''
-    except Exception:
-        return ''
-
-
-def fetch_ip_network_info(ip, timeout=10):
-    """查单个 IP 的网络归属（ISP/ASN/位置），数据源 https://ipwho.is/<ip>。
-
-    与 openclaw.yml / tailscale-windows.yml「🌐 出口网络」同源同款（同一 API）。
-    显式禁用环境代理；失败返回 None（调用方降级），不抛异常。
-    """
-    if not ip:
-        return None
-    try:
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        req = urllib.request.Request(f'https://ipwho.is/{ip}',
-                                     headers={'User-Agent': 'Mozilla/5.0'})
-        with opener.open(req, timeout=timeout) as r:
-            geo = json.load(r)
-        if not geo.get('ip'):
-            return None
-        conn = geo.get('connection') or {}
-        asn_line = f"AS{conn['asn']}" if conn.get('asn') else '未知'
-        if conn.get('org'):
-            asn_line += f" · {conn['org']}"
-        loc_parts = [str(x) for x in (geo.get('city'), geo.get('region'), geo.get('country_code')) if x]
-        return {
-            'ip': str(geo['ip']),
-            'isp': str(conn.get('isp') or '未知'),
-            'asn': asn_line,
-            'loc': ', '.join(loc_parts) if loc_parts else '未知',
-        }
-    except Exception as e:
-        log_progress('target_network_lookup_failed', ip=ip, error=str(e))
-        return None
-
-
-def network_cells(info):
-    """归属 dict → (isp, asn, loc) 文本；info=None 或缺项逐项降级「未知」。"""
-    if not info:
-        return ('未知', '未知', '未知')
-    return (info.get('isp') or '未知', info.get('asn') or '未知', info.get('loc') or '未知')
-
-
-def build_target_network_section(targets):
-    """三件套统一的「📍 测速点网络」分节（KV 树版式，2026-09-08 用户拍板）。
-
-    targets 为 [(server, label, info)] 列表：
-      server = 测速服务器标识（taier=「ip:port」，cdn/gitee=解析出的 IP；空 = 定位失败）
-      label  = 补充标识（taier=服务器主机名，cdn/gitee=测速点域名；可空）
-      info   = fetch_ip_network_info() 的归属 dict（None = 查询失败，逐项降级「未知」）
-
-    单测速点（与泰尔版式逐字一致）：
-        📍 测速点网络
-          ├─ 测速服务器：<server> · <label>
-          ├─ ISP：…
-          ├─ ASN：…
-          └─ 位置：…
-    多测速点：每个测速点前加 `[N] <label>` 定位行，测速服务器行只放 server。
-    server 为空 → 该块降级为「归属获取失败（label）」。
-    """
-    esc = lambda s: html.escape(str(s))  # noqa: E731
-    targets = list(targets or [])
-    if not targets:
-        targets = [('', '', None)]
-    count_hint = f' · {len(targets)}' if len(targets) > 1 else ''
-    lines = [f'📍 <b>测速点网络{count_hint}</b>']
-    for idx, (server, label, info) in enumerate(targets, 1):
-        server = str(server or '').strip()
-        label = str(label or '').strip()
-        multi = len(targets) > 1
-        if not server:
-            fallback = f'（{esc(label)}）' if label else ''
-            lines.append(f'  └─ 归属获取失败{fallback}')
-            continue
-        if multi:
-            lines.append(f'[{idx}] <code>{esc(label or server)}</code>')
-            lines.append(f'  ├─ 测速服务器：<code>{esc(server)}</code>')
-        elif label:
-            lines.append(f'  ├─ 测速服务器：<code>{esc(server)}</code> · <code>{esc(label)}</code>')
-        else:
-            lines.append(f'  ├─ 测速服务器：<code>{esc(server)}</code>')
-        isp, asn, loc = network_cells(info)
-        lines += [
-            f'  ├─ ISP：<b>{esc(isp)}</b>',
-            f'  ├─ ASN：<code>{esc(asn)}</code>',
-            f'  └─ 位置：<b>{esc(loc)}</b>',
-        ]
-    return lines
-
-
-# 敏感字段名（小写匹配），值会被自动脱敏
-# 注意：仅对「子串匹配会产生误伤」的字段放这里做模糊匹配
-_SENSITIVE_KEYS = frozenset({
-    'server', 'share_link', 'source_url', 'url', 'password', 'uuid',
-    'cipher', 'subscription', 'subscription_url', 'proxy_url',
-    'host', 'address', 'remote_public', 'ip', 'ip_city_text',
-    'paths', 'path',
-})
-
-# 精确匹配的敏感 key（节点身份 / 订阅来源 / 代理原始配置 / 仓库属主等，
-# 用精确匹配避免误伤 provider_count、hostname 等无害字段）
-_SENSITIVE_EXACT_KEYS = frozenset({
-    'name', 'provider', 'type', 'node_type', 'owner',
-    'proxy_obj', 'source_entry', 'source_id', 'share_link_match',
-    'id', 'raw_url', 'html_url',
-})
-
-# 带 userinfo 凭据的 URL（如 https://owner:TOKEN@gitee.com/...），
-# 常出现在 git 报错回显中，统一替换为 https://***@
-_CRED_URL_RE = re.compile(r'https?://[^/@\s:]+:[^/@\s]+@')
-
-_REDACTED = '***'
-
-
-def _scrub_cred_urls(text: str) -> str:
-    """清除字符串中带凭据的 URL（git 报错会回显 remote_with_token）。"""
-    return _CRED_URL_RE.sub('https://***@', text)
-
-
-def _redact_value(key: str, value):
-    """对敏感字段的值进行脱敏，递归处理嵌套 dict/list；普通字符串清除凭据 URL。"""
-    kl = key.lower()
-    # 精确匹配敏感 key
-    if kl in _SENSITIVE_KEYS or kl in _SENSITIVE_EXACT_KEYS:
-        return _REDACTED
-    # 模糊匹配
-    for sk in _SENSITIVE_KEYS:
-        if sk in kl:
-            return _REDACTED
-    if isinstance(value, dict):
-        return {k: _redact_value(k, v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_redact_value(key, v) for v in value]
-    if isinstance(value, str):
-        return _scrub_cred_urls(value)
-    return value
-
-
-def log_progress(stage: str, **kwargs):
-    payload = {
-        'kind': 'progress',
-        'stage': stage,
-        'time': datetime.now().isoformat(),
-    }
-    for k, v in kwargs.items():
-        payload[k] = _redact_value(k, v)
-    print(json.dumps(payload, ensure_ascii=False), flush=True)
-
 
 def build_run_summary(*, started_at, ended_at, elapsed_seconds, duration_text, aborted_due_to_runtime, runtime_abort_reason, direct_baseline, size_mib, speedtest_mode, snapshot_meta, provider_snapshot, gitee, push_target_info, total_probe_count, alive_probe_count, speed_results, ok_results, failed_results, ok_results_by_download, subscription_text):
     return {
@@ -2070,7 +1363,6 @@ def build_run_summary(*, started_at, ended_at, elapsed_seconds, duration_text, a
         'subscription_text': subscription_text,
         'gist': {'ok': False, 'reason': 'not-run-yet'},
     }
-
 
 def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_count, ok_results, speed_results, speedtest_mode, aborted_due_to_runtime, runtime_abort_reason, ok_results_by_download, metric_label=''):
     """生成人性化 Telegram 通知，版式对齐 speedtest.build_telegram_lines。
@@ -2146,11 +1438,9 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
         summary_lines.append(footer)
     return summary_lines
 
-
 def update_summary_artifacts(summary):
     RESULT_JSON.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding='utf-8')
     log_progress('result_json_written', path=str(RESULT_JSON))
-
 
 def finalize_gist_and_notify(env, summary, summary_lines, subscription_text, bundle):
     # 订阅策略 bundle：阈值 / 实际采用的判定指标 / 达标数 / 最少节点数
@@ -2228,7 +1518,6 @@ def finalize_gist_and_notify(env, summary, summary_lines, subscription_text, bun
         'result_txt': str(RESULT_TXT),
         'result_subscription': str(RESULT_SUBSCRIPTION),
     }), ensure_ascii=False))
-
 
 def main():
     if maybe_detach_self():
@@ -2425,7 +1714,6 @@ def main():
     )
     run_stage('Gist 更新/回拉验证/通知', finalize_gist_and_notify, env, summary, summary_lines, subscription_text, bundle)
 
-
 def scrub_secrets(text: str, env=None) -> str:
     """从任意文本中清除已知凭据：带凭据的 URL、订阅地址、各类 Token。"""
     scrubbed = _scrub_cred_urls(text)
@@ -2443,7 +1731,6 @@ def scrub_secrets(text: str, env=None) -> str:
     except Exception:
         pass
     return scrubbed
-
 
 if __name__ == '__main__':
     try:
