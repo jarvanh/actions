@@ -454,7 +454,10 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
 
     sep = '━' * 18
     ok_results = [r for r in results if r.get('ok') and not r.get('bypass')]
-    top = sorted(ok_results, key=lambda r: r.get('down') or 0.0, reverse=True)[:5]
+    # TOP 排序与订阅判定同口径：按实际采用的判定指标排序（默认上传），
+    # 否则会出现「按上传达标导出、却按下行排 TOP」的自相矛盾展示
+    top_sort_key = 'up' if bundle.get('metric', 'upload') == 'upload' else 'down'
+    top = sorted(ok_results, key=lambda r: r.get(top_sort_key) or 0.0, reverse=True)[:5]
     lines = [
         '✅ <b>泰尔三网测速</b>',
         sep,
@@ -474,7 +477,9 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
         # 避免误导为「测得 0.0Mbps」
         has_up = any((r.get('up') or 0) > 0 for r in top)
         legend = '↑上传 · ↓下载 · 延迟' if has_up else '↓下载 · 延迟'
-        lines.append(f'🏆 <b>最快节点 · {len(top)}</b> · <i>{legend}</i>')
+        # 标题点出排序依据（= 订阅判定指标），避免读者按 ↓ 数值读不出顺序
+        sort_hint = f' · 按{esc(metric_label)}' if metric_label else ''
+        lines.append(f'🏆 <b>最快节点 · {len(top)}{sort_hint}</b> · <i>{legend}</i>')
         for idx, r in enumerate(top, 1):
             connector = '└─' if idx == len(top) else '├─'
             up_text = f"↑{esc(r['up'])}Mbps · " if (r.get('up') or 0) > 0 else ''
