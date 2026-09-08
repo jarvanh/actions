@@ -9,8 +9,8 @@
      均在本文件，speedtest.py（CDN）与 taier_speedtest.py（泰尔三网）以
      `from speedtest_gitee import ...` 复用。与引擎无关的纯共享层（订阅导出策略、
      通知排版、归属查询、Telegram 发送、Gist 上传、进度日志）已于 2026-09-08 抽到
-     `speedtest_common.py`——共享代码不再挂在 gitee 专项引擎名下，本文件 import
-     它并保持再导出兼容。顶层的 signal/异常通知只在 main() 里注册，import 复用
+     `speedtest_common.py`——共享代码不再挂在 gitee 专项引擎名下，本文件只按需
+     import（无兼容再导出）。顶层的 signal/异常通知只在 main() 里注册，import 复用
      不会误触发。
 
 Gist 约定（三件套各用各的，互不覆盖）：
@@ -39,25 +39,17 @@ from datetime import datetime
 
 import yaml
 
-# 三件套共享层（运行时目录 / env / 进度日志 / 订阅策略与排版 / 归属查询 / Telegram 发送 / Gist 上传）。
-# 2026-09-08 从本文件抽到 speedtest_common.py —— 共享代码不再挂在 gitee 专项引擎名下；
-# 本文件 import 即继续兼容旧的 `from speedtest_gitee import X` 用法。
+# 三件套共享层（speedtest_common）：只 import 本文件实际用到的共享名，不做兼容再导出。
 from speedtest_common import (
-    DEFAULT_MIN_MEGABIT, DEFAULT_MIN_NODES, DEFAULT_SPEED_METRIC,
-    ENV_PATH, GIST_DEFAULT_DESCRIPTION, GIST_DEFAULT_FILENAME,
-    HOME_RUNTIME, METRIC_LABELS, METRIC_MODES, PROVIDERS_DIR,
-    SOURCE_SNAPSHOT_DIR, TG_CHUNK_SIZE,
-    _env_int, _http_error_with_body, _mibs_to_megabits, _redact_value,
-    _scrub_cred_urls, build_mihomo_yaml_text, build_node_metric_prefix,
-    build_share_link_text, build_subscription_bundle,
-    build_subscription_yaml_text, build_target_network_section,
-    count_qualified_nodes, create_gist, deep_copy_json, fetch_ip_network_info,
-    get_item_megabits, gist_has_file, github_api_request, load_env_file,
-    log_progress, merged_env, network_cells, resolve_host_ipv4,
-    resolve_subscription_metric, resolve_subscription_policy, send_telegram,
-    send_telegram_chunked, set_env_value, tg_footer_line, tg_format_elapsed,
-    update_gist,
+    DEFAULT_MIN_MEGABIT, DEFAULT_MIN_NODES, DEFAULT_SPEED_METRIC, HOME_RUNTIME, METRIC_LABELS, PROVIDERS_DIR, SOURCE_SNAPSHOT_DIR,
+    _redact_value, _scrub_cred_urls, build_subscription_bundle,
+    build_target_network_section, deep_copy_json, fetch_ip_network_info,
+    get_item_megabits, log_progress, merged_env,
+    resolve_host_ipv4, resolve_subscription_policy,
+    send_telegram, send_telegram_chunked, tg_footer_line,
+    tg_format_elapsed, update_gist,
 )
+
 RESULT_JSON = HOME_RUNTIME / 'proxy_speedtest_last_result.json'
 RESULT_TXT = HOME_RUNTIME / 'proxy_speedtest_last_result.txt'
 RESULT_SUBSCRIPTION = HOME_RUNTIME / 'proxy_speedtest_subscription.yaml'

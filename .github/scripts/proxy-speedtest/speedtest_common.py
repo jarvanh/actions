@@ -4,7 +4,7 @@
 背景：`speedtest_gitee.py` 名字里带 gitee，却长期兼任三件套共享引擎，共享代码越堆越多后
 「共享函数挂在 gitee 专项引擎名下」已经名不副实（2026-09-08 用户指出）。本模块承接共享层，
 `speedtest_gitee.py` 只保留引擎特有部分（mihomo 生命周期、订阅源解析、Gitee 仓库/push 测速、
-运行摘要与 gitee 工作流主流程），并对旧导入路径保持再导出兼容。
+运行摘要与 gitee 工作流主流程），按需 import 本模块、不做兼容再导出。
 
 内容分区：
   - 运行时目录 / env 文件读写 / 合并环境（merged_env）/ 进度日志（log_progress，输出前脱敏）
