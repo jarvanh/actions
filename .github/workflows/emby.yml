@@ -1005,6 +1005,22 @@ jobs:
           }
           join_parts() { local out= p; for p in "$@"; do [ -n "$p" ] && out="${out:+${out} · }${p}"; done; printf '%s' "$out"; }
 
+          # ge2o 访问日志的耗时列单位随量级变化：152.244µs / 90.359458ms / 1.4s。
+          # 只认 "数字s" 会漏掉毫秒级请求——实测 PlaybackInfo 全是 ms 级，
+          # 这正是首测通知缺「Emby 读文件头」的真因（不是查找窗口太窄）。
+          # 统一归一化成秒；传入非耗时（空/异常）时返回空。
+          to_sec() {
+            local v=$1 u
+            case "$v" in
+              *µs) v=${v%µs}; u=1000000;;
+              *ms) v=${v%ms}; u=1000;;
+              *s)  v=${v%s};  u=1;;
+              *) printf ''; return 0;;
+            esac
+            case "$v" in ''|*[!0-9.]*) printf ''; return 0;; esac
+            awk -v x="$v" -v d="$u" 'BEGIN {printf "%.3f", x / d}'
+          }
+
           # 跨 run 回看预热：把播放条目的媒体路径记入 warm-state.json 的 recent 列表
           # （随备份跨 run 持久化，下轮 warmup 优先预热这些直链——最可能被回看的内容）。
           # /var/lib/emby 属主是 emby，runner 写不进，走 sudo 读改写；文件不存在或
@@ -1098,8 +1114,12 @@ jobs:
             # 全文件找（与 PREP 同理：400 行窗口会被 wallwarmer 的图片请求淹没）
             sub=""
             if [ -n "$cip" ]; then
-              sub=$(grep -aF -- "$cip" "$LOG" 2>/dev/null | grep -a 'Subtitles' \
-                    | grep -aoE '\| [0-9]+\.[0-9]+s \|' | tail -1 | tr -d '|s ')
+              # 与 PREP 同口径：优先取带路由的那行（小写 subtitles），失败再回退 URL 的大写写法
+              sub=$(grep -aF -- "$cip" "$LOG" 2>/dev/null | grep -a 'subtitles' \
+                    | grep -aoE '\| [0-9.]+(µs|ms|s) \|' | tail -1 | tr -d '| ')
+              [ -z "$sub" ] && sub=$(grep -aF -- "$cip" "$LOG" 2>/dev/null | grep -a 'Subtitles' \
+                    | grep -aoE '\| [0-9.]+(µs|ms|s) \|' | tail -1 | tr -d '| ')
+              sub=$(to_sec "$sub")
               [ -n "$sub" ] && sub="$(printf '%.1f' "$sub")"
             fi
             # 拖动进度条：该条目最近一次 seek 的取链耗时（seek.log 由数据源 A 的循环写入）
@@ -1199,7 +1219,8 @@ jobs:
               fi
               # 访问日志里还有"耗时"与"客户端 IP"两列（起播慢 / 谁在播的定位依据），一并带进通知：
               #   [ge2o:v2.8.2] <时间> | 206 | 4.16s | 141.11.43.124 | 8095 <路由> | GET /emby/videos/...
-              DUR_RAW=$(printf '%s\n' "$line" | grep -oE '\| [0-9]+\.[0-9]+s \|' | head -1 | tr -d '|s ')
+              DUR_RAW=$(printf '%s\n' "$line" | grep -aoE '\| [0-9.]+(µs|ms|s) \|' | head -1 | tr -d '| ')
+              DUR_RAW=$(to_sec "$DUR_RAW")
               DUR="$DUR_RAW"
               # 规范禁英文紧凑时长进通知：ge2o 日志的 "4.16s" → "4.2 秒"
               # （一位小数足够定位"点播慢"，8 位原始精度无意义）
@@ -1214,9 +1235,15 @@ jobs:
               # （首测就是因此缺项）。日志几 MB 级，播放频率低，全扫可接受。
               PREP=""
               if [ -n "$CIP" ]; then
-                PREP=$(grep -aF -- "$CIP" "$LOG" 2>/dev/null | grep -a 'PlaybackInfo' \
-                       | grep -aoE '\| [0-9]+\.[0-9]+s \|' | tail -1 | tr -d '|s ')
-                [ -n "$PREP" ] && PREP="$(printf '%s' "$PREP" | awk '{printf "%.1f", $1}')"
+                # ge2o 对同一请求打两行：带路由的那行是完整耗时，紧随其后的空路由行是
+                # 上游子请求（µs 级，会严重低估）。路由正则里是小写 playbackinfo，
+                # 用小写即可精确取到带路由那行；取不到再回退到 URL 里的大写写法。
+                PREP=$(grep -aF -- "$CIP" "$LOG" 2>/dev/null | grep -a 'playbackinfo' \
+                       | grep -aoE '\| [0-9.]+(µs|ms|s) \|' | tail -1 | tr -d '| ')
+                [ -z "$PREP" ] && PREP=$(grep -aF -- "$CIP" "$LOG" 2>/dev/null | grep -a 'PlaybackInfo' \
+                       | grep -aoE '\| [0-9.]+(µs|ms|s) \|' | tail -1 | tr -d '| ')
+                PREP=$(to_sec "$PREP")
+                [ -n "$PREP" ] && PREP="$(printf '%.1f' "$PREP")"
               fi
               # 同一条目的"后续"stream 请求 = 拖动进度条 / 续播后重新取链。
               # 这是起播之后的成本，不该混进起播通知（claim 还有 300s 去重），
@@ -1321,6 +1348,28 @@ jobs:
           for ID in $(jq -r '.[].Id' /tmp/wu-items.json | head -"$WU_ITEMS"); do
             jq -r --arg id "$ID" '.[] | select(.Id==$id) | (.MediaSources[0].Path // .Path // empty)' /tmp/wu-items.json >> /tmp/wu-paths.txt
           done
+          awk 'NF && !seen[$0]++' /tmp/wu-paths.txt > /tmp/wu-paths-uniq.txt
+
+          # ---------- 1b. 目录级预热（批量回填 dir_cache，覆盖率远超逐条预热） ----------
+          # odlink 列目录时会把该目录下**所有**子条目一次写进 dir_cache（无 TTL），
+          # 一次请求覆盖几十上百个文件，比逐条 fs/get 便宜两个数量级。
+          # 冷解析实测 1.75s/条（段数 5、跨盘 1 次），命中 dir_cache 之后起播只需
+          # 重新签发直链（1 次 Graph），不必再逐段解析——这是压"取直链 1.4 秒"的主力。
+          # 目录就十来个，串行即可（每目录约 0.5s）。
+          DIR_N=0; DIR_MS=0
+          while IFS= read -r D; do
+            [ -n "$D" ] || continue
+            case "$D" in /onedrive/*) ;; *) continue;; esac
+            T0=$(date +%s%N)
+            curl -s -o /dev/null -X POST "$LK_HOST/api/fs/list" \
+                 -H 'Content-Type: application/json' -H "Authorization: $LK_TOKEN" \
+                 -d "$(jq -nc --arg p "$D" '{path:$p}')" --max-time 30
+            MS=$(( ( $(date +%s%N) - T0 ) / 1000000 ))
+            DIR_N=$((DIR_N + 1)); DIR_MS=$((DIR_MS + MS))
+            echo "目录预热 $(basename "$D") ${MS}ms"
+          done < <(xargs -r -n1 dirname < /tmp/wu-paths-uniq.txt | sort -u)
+          [ "$DIR_N" -gt 0 ] && echo "目录预热完成: ${DIR_N} 个目录 / 合计 ${DIR_MS}ms / 均值 $((DIR_MS / DIR_N))ms $(date '+%T')"
+
           LK_N=0; LK_MS=0
           : > /tmp/wu-ttfb.txt
           # 进程替换而非管道喂 while：计数器要留在主 shell（管道会让 while 进子 shell）
@@ -1348,8 +1397,8 @@ jobs:
                 esac
               fi
             fi
-          done < <(awk 'NF && !seen[$0]++' /tmp/wu-paths.txt)
-          rm -f /tmp/wu-paths.txt /tmp/wu-fsget.json
+          done < /tmp/wu-paths-uniq.txt
+          rm -f /tmp/wu-paths.txt /tmp/wu-paths-uniq.txt /tmp/wu-fsget.json
           if [ -s /tmp/wu-ttfb.txt ]; then
             # 一次 awk 出三个数（均值/最大/条数），用 read 拆开，避免为拼一行跑三遍 awk
             read -r TTFB_AVG TTFB_MAX TTFB_N <<<"$(awk '{if ($1 > m) m = $1; s += $1; n++} END {printf "%.2f %.2f %d", s / n, m, n}' /tmp/wu-ttfb.txt)"
@@ -1372,8 +1421,10 @@ jobs:
           #   隧道往返 TTFB —— 从公网经隧道域名打一次 Emby，测首字节。≈ 客户端到服务器的单程基线，
           #                    用于解释"为什么起播 1.4 + 准备 5.3，实际却等了 10 秒"。
           # 域名走 env EMBY_PUBLIC_HOST（由 VD secret 拼出，不写死、不落日志）。
+          # location 值大小写与位数都可能变（HKG / SJC / LAX1…），用宽松正则；
+          # 抓不到就退化为"未知"，不影响其余读数。
           EDGE=$(grep -a 'Registered tunnel connection' /opt/logs/cloudflared.log 2>/dev/null \
-                 | grep -ao 'location=[A-Z0-9]*' | tail -1 | cut -d= -f2)
+                 | grep -aoE 'location=[A-Za-z0-9]+' | tail -1 | cut -d= -f2)
           echo "隧道边缘机房: ${EDGE:-未知}"
           printf 'TUNNEL_EDGE=%s\n' "${EDGE:-}" >> /tmp/warm-baseline.env
           if [ -n "${EMBY_PUBLIC_HOST:-}" ]; then
@@ -1668,9 +1719,13 @@ jobs:
             echo "(无 seek 记录)"
           fi
           echo "--- ge2o 请求耗时统计（按类型）---"
-          grep -aE '\| [0-9]+\.[0-9]+s \|' /opt/logs/ge2o.log 2>/dev/null | awk -F' \\| ' '
+          # 耗时列单位随量级变化（µs / ms / s）：只认秒会漏掉毫秒级请求——
+          # 实测 PlaybackInfo 全是 ms 级，首测统计里它整个分类都消失了。
+          grep -aE '\| [0-9.]+(µs|ms|s) \|' /opt/logs/ge2o.log 2>/dev/null | awk -F' \\| ' '
             NF >= 6 {
-              ms = $3; sub(/s$/, "", ms); ms = ms * 1000   # 日志列是秒（4.16s），统计口径统一毫秒
+              unit = $3; sub(/^[0-9.]+/, "", unit)
+              val = $3; sub(/[^0-9.].*$/, "", val)
+              ms = (unit == "µs") ? val / 1000 : ((unit == "ms") ? val : val * 1000)
               k = "其它"
               if ($6 ~ /PlaybackInfo/)    k = "起播准备 PlaybackInfo"
               else if ($6 ~ /\/videos\//) k = "视频流 stream"
@@ -1843,9 +1898,13 @@ jobs:
           # 依赖 ge2o 访问日志列序（" | 状态码 | 耗时 | IP | 端口 路由 | 方法 路径"），
           # 版本漂移后如遇全空只需按新格式调列号，不影响其余流程。
           echo "--- ge2o 请求耗时统计（按类型）---"
-          grep -aE '\| [0-9]+\.[0-9]+s \|' /opt/logs/ge2o.log 2>/dev/null | awk -F' \\| ' '
+          # 耗时列单位随量级变化（µs / ms / s）：只认秒会漏掉毫秒级请求——
+          # 实测 PlaybackInfo 全是 ms 级，首测统计里它整个分类都消失了。
+          grep -aE '\| [0-9.]+(µs|ms|s) \|' /opt/logs/ge2o.log 2>/dev/null | awk -F' \\| ' '
             NF >= 6 {
-              ms = $3; sub(/s$/, "", ms); ms = ms * 1000   # 日志列是秒（4.16s），统计口径统一毫秒
+              unit = $3; sub(/^[0-9.]+/, "", unit)
+              val = $3; sub(/[^0-9.].*$/, "", val)
+              ms = (unit == "µs") ? val / 1000 : ((unit == "ms") ? val : val * 1000)
               k = "其它"
               if ($6 ~ /PlaybackInfo/)    k = "起播准备 PlaybackInfo"
               else if ($6 ~ /\/videos\//) k = "视频流 stream"
