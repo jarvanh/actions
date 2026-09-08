@@ -984,8 +984,11 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None):
     metric_label = bundle.get('metric_label', '')
 
     push_enabled = bool(meta.get('push'))
-    mode = 'push-only' if push_enabled else 'download'
-    sort_key = (lambda r: (r.get('upload') or {}).get('mibps') or 0) if push_enabled \
+    # 判定指标以订阅策略实际采用的为准（默认上行；上行达标不足时会自动落到下行），
+    # 未拿到 bundle 时退回「是否启用上行测速」的既有口径 —— TOP 排序与导出口径必须一致
+    metric_mode = bundle.get('metric_mode') or ('push-only' if push_enabled else 'download')
+    mode = metric_mode
+    sort_key = (lambda r: (r.get('upload') or {}).get('mibps') or 0) if metric_mode == 'push-only' \
         else (lambda r: (r.get('download') or {}).get('mibps') or 0)
     ok_results = [r for r in results if r.get('ok')]
     top_results = sorted(ok_results, key=sort_key, reverse=True)
@@ -1027,7 +1030,9 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None):
         # ↑ 项（build_node_metric_prefix 内置），图例同步省略
         has_up = any((_result_metric_item(r).get('upload_mibs') or 0) > 0 for r in top)
         legend = '↑上传 · ↓下载 · 延迟ms' if has_up else '↓下载 · 延迟ms'
-        lines.append(f'🏆 <b>最快节点 · {len(top)}</b> · <i>{legend}</i>')
+        # 标题点出排序依据（= 订阅判定指标），避免与列表数值对不上
+        sort_hint = f' · 按{esc(metric_label)}' if metric_label else ''
+        lines.append(f'🏆 <b>最快节点 · {len(top)}{sort_hint}</b> · <i>{legend}</i>')
         for idx, r in enumerate(top, 1):
             prefix = build_node_metric_prefix(_result_metric_item(r), mode, order='up_first')
             connector = '└─' if idx == len(top) else '├─'

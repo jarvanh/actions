@@ -104,6 +104,9 @@ variables → Actions → Variables 可随时改，留空走默认）：
 实际采用的指标会写进日志（`subscription_policy` / `subscription_metric_fallback`）与
 TG 通知文案。节点必须有原始配置（`source_entry.proxy`）才计入达标——否则导不进订阅。
 
+**TOP5 排序与判定指标一致**：三件套的 TOP 榜都按实际采用的指标排序，通知标题标注
+`🏆 最快节点 · N · 按上传/按下载`，避免出现「按上传导出订阅、却按下行排 TOP」的自相矛盾。
+
 ## Telegram 通知与兜底
 
 | 标题 | 触发 |
