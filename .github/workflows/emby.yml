@@ -1081,9 +1081,9 @@ jobs:
             # 段前空一行，与正文数据区隔开
             [ -n "$link" ] && text="${text}"$'\n'$'\n'"<a href=\"$(esc_html "$link")\">▶ 打开直链</a>"
             # 统一收尾区（自带与正文间的空行；TG_RUN_* 缺席时自动降级跳过）
-            pl_footer=""
-            tg_add_footer pl_footer
-            text="${text}${pl_footer}"
+            # 必须直接对 text 原地追加：tg_add_footer 的补尾换行检查的是传入变量自身，
+            # 走"中间空变量再拼接"会让那个 \n 只收尾正文末行，空行丢失（2026-09-08 实测踩坑）
+            tg_add_footer text
             # 统一走发送层：429 按 retry_after 等待重试；HTML 解析失败直接报错
             # 均已内建（此前自造退化链缺 429 处理，限流时播放通知会丢失）
             send_tg "$text" || echo "[WARNING] TG 推送失败（详见发送层日志）"
