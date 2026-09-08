@@ -29,6 +29,9 @@ on:
 
 jobs:
   build:
+    # 安全守卫（2026-09-08）：公开仓库任何人 star 都会触发 watch 事件——仅放行仓库本人，
+    # schedule / workflow_dispatch 等其余触发方式不受影响
+    if: github.event_name != 'watch' || github.actor == 'jarvanh'
     runs-on: ubuntu-latest
     env:
       # 统一收尾区（tg_add_footer）: 运行日志链接 + 已运行时长（所有通知 step 继承）

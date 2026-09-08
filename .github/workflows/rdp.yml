@@ -41,7 +41,7 @@ jobs:
     - name: Set password
       run: Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString -AsPlainText $Env:RDP_PASSWORD -Force)
       env:
-        RDP_PASSWORD: "P@ssw0rd!"
+        RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
 
     - name: Create Tunnel (background)
       run: Start-Process -FilePath ".\ngrok\ngrok.exe" -ArgumentList "tcp 3389 --region in --log stdout --log-format term --log ngrok.log" -WindowStyle Hidden
@@ -50,7 +50,7 @@ jobs:
       env:
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        RDP_PASSWORD: "P@ssw0rd!"
+        RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
         TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         TG_RUN_STARTED_AT: ${{ github.run_started_at }}
       run: |

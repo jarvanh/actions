@@ -9,6 +9,9 @@ on:
 
 jobs:
   build:
+    # 安全守卫（2026-09-08）：公开仓库任何人 star 都会触发 watch 事件——仅放行仓库本人，
+    # schedule / workflow_dispatch 等其余触发方式不受影响
+    if: github.event_name != 'watch' || github.actor == 'jarvanh'
     # 与 openlist 工作流共用并发组: 两个工作流都会启动 OpenList 容器，
     # 数据库本地化后各 runner 持有独立副本，并发运行会互相覆盖配置（脑裂）
     concurrency: openlist-singleton

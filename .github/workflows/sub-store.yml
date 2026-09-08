@@ -10,6 +10,9 @@ on:
 
 jobs:
   build:
+    # 安全守卫（2026-09-08）：公开仓库任何人 star 都会触发 watch 事件——仅放行仓库本人，
+    # schedule / workflow_dispatch 等其余触发方式不受影响
+    if: github.event_name != 'watch' || github.actor == 'jarvanh'
     concurrency: sub-store-singleton
     runs-on: ubuntu-latest
     steps:
@@ -95,7 +98,10 @@ jobs:
       - name: Set up Docker
         uses: docker/setup-buildx-action@v4
       - name: Run sub-store container
-        run: docker run -it -d --restart=always -e "SUB_STORE_BACKEND_SYNC_CRON=50 * * * *" -e SUB_STORE_FRONTEND_BACKEND_PATH=/65jwaf2357gsnret4uods -p 9876:9876 -p 127.0.0.1:3001:3001 -v /dropbox/self-hosted/sub-store:/opt/app/data --name sub-store xream/sub-store:http-meta
+        # 后端鉴权路径走 secret：公开仓库绝不写死（2026-09-08 已轮换，旧值作废）
+        env:
+          SUB_STORE_FRONTEND_BACKEND_PATH: ${{ secrets.SUB_STORE_FRONTEND_BACKEND_PATH }}
+        run: docker run -it -d --restart=always -e "SUB_STORE_BACKEND_SYNC_CRON=50 * * * *" -e SUB_STORE_FRONTEND_BACKEND_PATH="$SUB_STORE_FRONTEND_BACKEND_PATH" -p 9876:9876 -p 127.0.0.1:3001:3001 -v /dropbox/self-hosted/sub-store:/opt/app/data --name sub-store xream/sub-store:http-meta
       - name: Verify container is running
         run: docker ps    
       - name: run cloudflared

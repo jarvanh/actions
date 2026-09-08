@@ -25,7 +25,7 @@ jobs:
       - name: Setup Tailscale (SSH 调试入口)
         id: ts
         if: ${{ always() && env.TS_OAUTH_CLIENT_ID != '' && env.TS_OAUTH_CLIENT_SECRET != '' }}
-        uses: tailscale/github-action@v4
+        uses: tailscale/github-action@306e68a486fd2350f2bfc3b19fcd143891a4a2d8 # v4
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
@@ -39,7 +39,7 @@ jobs:
         shell: pwsh
         env:
           # runneradmin 的系统登录密码，SSH 与 RDP 共用同一个
-          RUNNER_PASSWORD: ${{ secrets.RUNNER_PASSWORD || 'P@ssw0rd!' }}
+          RUNNER_PASSWORD: ${{ secrets.RUNNER_PASSWORD }}
         run: |
           # Windows 上启用内置 OpenSSH Server 作为 SSH 服务端（截至 2026-09 本 workflow
           # 仍走该方案，未使用 tailscale set --ssh）
@@ -110,7 +110,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           # 与 Enable SSH 步骤同一取值，密码明文只出现在 Telegram 通知里（不打印到 Actions 日志）
-          RUNNER_PASSWORD: ${{ secrets.RUNNER_PASSWORD || 'P@ssw0rd!' }}
+          RUNNER_PASSWORD: ${{ secrets.RUNNER_PASSWORD }}
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
           TG_RUN_STARTED_AT: ${{ github.run_started_at }}
         run: |
