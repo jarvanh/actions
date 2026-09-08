@@ -116,6 +116,8 @@ tg_add_block() {
 #      表达式上下文（API 字段仍在），hosted runner 的 PID 1 随 job 启动，误差秒级
 # 降级链: 无 TG_RUN_STARTED_AT 且无 /proc/1 → 不显示时长；无 TG_RUN_URL → 整行跳过
 # 附加链接: tg_add_footer <var> ["标签" "URL"]... → 追加 " · 🔗 <a>标签</a>"
+# 注意: <var> 必须是已积累正文的消息变量（原地追加）。勿用"中间空变量接 footer 再拼到
+# 正文"的两步写法——补尾换行检查的是 <var> 自身，空变量会跳过补换行，空行丢失。
 tg_add_footer() {
   local var="$1"
   shift
