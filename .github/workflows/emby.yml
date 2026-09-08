@@ -1043,7 +1043,7 @@ jobs:
               del) city=德里;;     jnb) city=约翰内斯堡;; cpt) city=开普敦;;
               *) ;;
             esac
-            [ -n "$city" ] && printf '%s %s' "$code" "$city" || printf '%s' "$code"
+            [ -n "$city" ] && printf '%s（%s）' "$code" "$city" || printf '%s' "$code"
           }
 
           # 跨 run 回看预热：把播放条目的媒体路径记入 warm-state.json 的 recent 列表
@@ -1152,25 +1152,23 @@ jobs:
               seek=$(grep -a "item=$iid " /opt/logs/seek.log 2>/dev/null | tail -1 | awk '{print $NF}' | tr -d 's')
             fi
             waitline=""
-            # 圆圈编号 = 点下播放后的真实先后，缺哪项就是那步没发生/没测到：
-            #   ① 网络到服务器 ② Emby 读文件头 ③ 服务器取直链 ④ OneDrive 首字节
-            #   ⑤ 加载字幕 ⑥ 拖动进度条重新取链 ⑦ 播放器联网缓冲（测不到）
-            # "开机实测"指 warmup 服务启动时探测的参考值，不是本次播放的读数——
-            # 之前叫"基线"，看不懂的人太多。
+            # 访问链写法：每行 = 谁访问哪里 + 耗时，按点下播放后的真实先后排，缺哪项
+            # 就是那步没发生/没测到。①④两段发生在服务器看不见的地方（请求到达前 /
+            # 302 之后的直连），只能用 warmup 启动时探测的参考值，就在该项内标"（预估值）"。
             if [ -n "${TUNNEL_TTFB:-}" ]; then
-              wt="① 客户端到服务器（开机实测"
-              [ -n "${TUNNEL_EDGE:-}" ] && wt="${wt} · 边缘 $(edge_cn "${TUNNEL_EDGE}")"
-              waitline="${waitline}${wt}）：$(fmt_ms "${TUNNEL_TTFB}")"$'\n'
+              wt="你 → Cloudflare"
+              [ -n "${TUNNEL_EDGE:-}" ] && wt="${wt} $(edge_cn "${TUNNEL_EDGE}")"
+              waitline="${waitline}${wt} → Emby（预估值）：$(fmt_ms "${TUNNEL_TTFB}")"$'\n'
             fi
-            [ -n "$prep" ] && waitline="${waitline}② Emby 读文件头：$(fmt_ms "$prep")"$'\n'
-            [ -n "$dur" ]  && waitline="${waitline}③ 服务器向 OneDrive 取直链：$(fmt_ms "$dur")"$'\n'
+            [ -n "$prep" ] && waitline="${waitline}Emby → OneDrive 读文件头（走挂载）：$(fmt_ms "$prep")"$'\n'
+            [ -n "$dur" ]  && waitline="${waitline}Emby → OneDrive 取直链：$(fmt_ms "$dur")"$'\n'
             [ -n "${LINK_TTFB:-}" ] && \
-              waitline="${waitline}④ OneDrive 首字节（开机实测）：$(fmt_ms "${LINK_TTFB}")"$'\n'
-            [ -n "$sub" ]  && waitline="${waitline}⑤ 加载字幕：$(fmt_ms "$sub")"$'\n'
-            [ -n "$seek" ] && waitline="${waitline}⑥ 拖动进度条重新取链：$(fmt_ms "$seek")"$'\n'
+              waitline="${waitline}你 → OneDrive 拉首字节（预估值）：$(fmt_ms "${LINK_TTFB}")"$'\n'
+            [ -n "$sub" ]  && waitline="${waitline}Emby → OneDrive 抽字幕：$(fmt_ms "$sub")"$'\n'
+            [ -n "$seek" ] && waitline="${waitline}拖动进度条（重走取直链）：$(fmt_ms "$seek")"$'\n'
             if [ -n "$waitline" ]; then
               # 末项固定交代"还有一段测不到"，避免把上面几项加起来当成总共等了多久
-              waitline="${waitline}⑦ 你播放器联网、缓冲：这段服务器测不到"
+              waitline="${waitline}你 → OneDrive 拉流缓冲：这段服务器测不到"
               waitline="⏳ 起播等待"$'\n'"$(tree_lines "$waitline")"
             fi
             if [ -n "$waitline" ]; then
