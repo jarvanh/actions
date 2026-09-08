@@ -1021,6 +1021,15 @@ jobs:
             awk -v x="$v" -v d="$u" 'BEGIN {printf "%.3f", x / d}'
           }
 
+          # 耗时显示：≥1 秒用秒（一位小数），不足 1 秒用毫秒。
+          # 实测 Emby 读文件头只要 20~30ms、命中缓存的取直链也是几十毫秒，
+          # 一律按秒保留一位小数会显示成"0.0 秒"——既看不出快慢，也让人怀疑没测到。
+          fmt_ms() { # $1=秒（小数或空）→ "27 毫秒" / "1.4 秒"；空或非法返回空
+            local v=$1
+            case "$v" in ''|*[!0-9.]*) printf ''; return 0;; esac
+            awk -v x="$v" 'BEGIN { if (x < 1) printf "%d 毫秒", x * 1000 + 0.5; else printf "%.1f 秒", x }'
+          }
+
           # 跨 run 回看预热：把播放条目的媒体路径记入 warm-state.json 的 recent 列表
           # （随备份跨 run 持久化，下轮 warmup 优先预热这些直链——最可能被回看的内容）。
           # /var/lib/emby 属主是 emby，runner 写不进，走 sudo 读改写；文件不存在或
@@ -1120,27 +1129,24 @@ jobs:
               [ -z "$sub" ] && sub=$(grep -aF -- "$cip" "$LOG" 2>/dev/null | grep -a 'Subtitles' \
                     | grep -aoE '\| [0-9.]+(µs|ms|s) \|' | tail -1 | tr -d '| ')
               sub=$(to_sec "$sub")
-              [ -n "$sub" ] && sub="$(printf '%.1f' "$sub")"
             fi
             # 拖动进度条：该条目最近一次 seek 的取链耗时（seek.log 由数据源 A 的循环写入）
             seek=""
             if [ -f /opt/logs/seek.log ]; then
               seek=$(grep -a "item=$iid " /opt/logs/seek.log 2>/dev/null | tail -1 | awk '{print $NF}' | tr -d 's')
             fi
-            [ -n "$seek" ] && seek="$(printf '%.1f' "$seek")"
-
             waitline=""
             if [ -n "${TUNNEL_TTFB:-}" ]; then
               wt="客户端到服务器（基线"
               [ -n "${TUNNEL_EDGE:-}" ] && wt="${wt} · 边缘 ${TUNNEL_EDGE}"
-              waitline="${waitline}${wt}）：$(printf '%.1f 秒' "${TUNNEL_TTFB}")"$'\n'
+              waitline="${waitline}${wt}）：$(fmt_ms "${TUNNEL_TTFB}")"$'\n'
             fi
-            [ -n "$prep" ] && waitline="${waitline}Emby 读文件头：${prep} 秒"$'\n'
-            [ -n "$dur" ]  && waitline="${waitline}服务器向 OneDrive 取直链：${dur}"$'\n'
-            [ -n "$sub" ]  && waitline="${waitline}加载字幕：${sub} 秒"$'\n'
+            [ -n "$prep" ] && waitline="${waitline}Emby 读文件头：$(fmt_ms "$prep")"$'\n'
+            [ -n "$dur" ]  && waitline="${waitline}服务器向 OneDrive 取直链：$(fmt_ms "$dur")"$'\n'
+            [ -n "$sub" ]  && waitline="${waitline}加载字幕：$(fmt_ms "$sub")"$'\n'
             [ -n "${LINK_TTFB:-}" ] && \
-              waitline="${waitline}OneDrive 首字节（基线）：$(printf '%.1f 秒' "${LINK_TTFB}")"$'\n'
-            [ -n "$seek" ] && waitline="${waitline}拖动进度条重新取链：${seek} 秒"$'\n'
+              waitline="${waitline}OneDrive 首字节（基线）：$(fmt_ms "${LINK_TTFB}")"$'\n'
+            [ -n "$seek" ] && waitline="${waitline}拖动进度条重新取链：$(fmt_ms "$seek")"$'\n'
             if [ -n "$waitline" ]; then
               # 末项固定交代"还有一段测不到"，避免把上面几项加起来当成总共等了多久
               waitline="${waitline}你播放器联网、缓冲：这段服务器测不到"
@@ -1220,11 +1226,8 @@ jobs:
               # 访问日志里还有"耗时"与"客户端 IP"两列（起播慢 / 谁在播的定位依据），一并带进通知：
               #   [ge2o:v2.8.2] <时间> | 206 | 4.16s | 141.11.43.124 | 8095 <路由> | GET /emby/videos/...
               DUR_RAW=$(printf '%s\n' "$line" | grep -aoE '\| [0-9.]+(µs|ms|s) \|' | head -1 | tr -d '| ')
+              # 先归一化成秒（单位会变 µs/ms/s），显示格式交给 notify 里的 fmt_ms 按量级选
               DUR_RAW=$(to_sec "$DUR_RAW")
-              DUR="$DUR_RAW"
-              # 规范禁英文紧凑时长进通知：ge2o 日志的 "4.16s" → "4.2 秒"
-              # （一位小数足够定位"点播慢"，8 位原始精度无意义）
-              [ -n "$DUR" ] && DUR="$(printf '%.1f 秒' "$DUR")"
               CIP=$(printf '%s\n' "$line" | grep -oE '\| [0-9]{1,3}(\.[0-9]{1,3}){3} \|' | head -1 | tr -d '| ')
               # Emby 准备耗时：本次播放前、同一 IP 最近一次 PlaybackInfo 的耗时。
               # 客户端"点播放"第一步就是它，Emby 在这一步组装 MediaSources，必要时现场
@@ -1243,7 +1246,6 @@ jobs:
                 [ -z "$PREP" ] && PREP=$(grep -aF -- "$CIP" "$LOG" 2>/dev/null | grep -a 'PlaybackInfo' \
                        | grep -aoE '\| [0-9.]+(µs|ms|s) \|' | tail -1 | tr -d '| ')
                 PREP=$(to_sec "$PREP")
-                [ -n "$PREP" ] && PREP="$(printf '%.1f' "$PREP")"
               fi
               # 同一条目的"后续"stream 请求 = 拖动进度条 / 续播后重新取链。
               # 这是起播之后的成本，不该混进起播通知（claim 还有 300s 去重），
@@ -1255,7 +1257,7 @@ jobs:
                 continue
               fi
               : > "$SEEN_DIR/$IID" 2>/dev/null
-              notify "$KIND" "$IID" "" "$DUR" "$CIP" "$PREP"
+              notify "$KIND" "$IID" "" "$DUR_RAW" "$CIP" "$PREP"
             done
           ) &
 
