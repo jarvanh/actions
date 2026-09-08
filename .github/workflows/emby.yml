@@ -64,9 +64,10 @@ env:
   # 302 直连为主时头尾预热只需兜住 ffprobe：30 条 × 32MB × 2 ≈ 1.9GB，仍在 2048MB 预算内。
   # 起播慢的定位口径：播放通知「⏳ 起播等待」树里，"服务器向 OneDrive 取直链" = ge2o+odlink 段，
   # "Emby 读文件头、抽内封字幕" = Emby 的 PlaybackInfo 段（ffprobe / 内封字幕提取）。
-  # Emby 的公网域名（用于自测隧道往返）：仓库公开，不写死在代码里，走 Variables。
-  # 留空则跳过隧道探针，只记录 cloudflared 连到的边缘机房。
-  EMBY_PUBLIC_HOST: ${{ vars.EMBY_PUBLIC_HOST }}
+  # Emby 的公网域名（隧道 e 的对外地址）——自测隧道往返用。
+  # 域名前缀走 VD secret：公开仓库不写死域名，日志里也会被自动打码。
+  # 需要换域名时用仓库 Variables EMBY_PUBLIC_HOST 覆盖即可。
+  EMBY_PUBLIC_HOST: ${{ vars.EMBY_PUBLIC_HOST || format('e.{0}.eu.org', secrets.VD) }}
   WU_ITEMS: "30"
   WU_EDGE_MB: "32"
   WU_PI_ITEMS: "6"
@@ -1485,7 +1486,8 @@ jobs:
             case "$TT" in
               ''|*[!0-9.]*) echo "隧道往返 TTFB: 测量失败（超时或域名不通）";;
               *)
-                echo "隧道往返 TTFB: ${TT}s（经 https://${EMBY_PUBLIC_HOST}）"
+                # 不打印域名：公开日志里出现完整域名等于把入口地址公开出去
+                echo "隧道往返 TTFB: ${TT}s（经公网域名）"
                 printf 'TUNNEL_TTFB=%s\n' "$TT" >> /tmp/warm-baseline.env
                 ;;
             esac
