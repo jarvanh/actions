@@ -1367,7 +1367,10 @@ jobs:
             MS=$(( ( $(date +%s%N) - T0 ) / 1000000 ))
             DIR_N=$((DIR_N + 1)); DIR_MS=$((DIR_MS + MS))
             echo "目录预热 $(basename "$D") ${MS}ms"
-          done < <(xargs -r -n1 dirname < /tmp/wu-paths-uniq.txt | sort -u)
+          # ⚠️ 不能用 xargs -n1 dirname：它按空白分词，媒体文件名含空格/中文会被切碎，
+          # 目录名直接错成半个文件名（首轮实测就是这么静默失效的）。逐行 read 再 dirname。
+          done < <(while IFS= read -r P; do [ -n "$P" ] && dirname -- "$P"; done \
+                   < /tmp/wu-paths-uniq.txt | sort -u)
           [ "$DIR_N" -gt 0 ] && echo "目录预热完成: ${DIR_N} 个目录 / 合计 ${DIR_MS}ms / 均值 $((DIR_MS / DIR_N))ms $(date '+%T')"
 
           LK_N=0; LK_MS=0
