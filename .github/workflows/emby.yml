@@ -1094,9 +1094,10 @@ jobs:
             [ -f /tmp/warm-baseline.env ] && . /tmp/warm-baseline.env || true   # TUNNEL_TTFB / TUNNEL_EDGE / LINK_TTFB
             # 加载字幕：同 IP 最近一次字幕请求耗时。Emby 首次要用 ffmpeg 把内封字幕抽出来，
             # 这常常是"读文件头"之外的另一大块，单独计时才看得到它在不在。
+            # 全文件找（与 PREP 同理：400 行窗口会被 wallwarmer 的图片请求淹没）
             sub=""
             if [ -n "$cip" ]; then
-              sub=$(tail -n 400 "$LOG" 2>/dev/null | grep -aF -- "$cip" | grep -a 'Subtitles' \
+              sub=$(grep -aF -- "$cip" "$LOG" 2>/dev/null | grep -a 'Subtitles' \
                     | grep -aoE '\| [0-9]+\.[0-9]+s \|' | tail -1 | tr -d '|s ')
               [ -n "$sub" ] && sub="$(printf '%.1f' "$sub")"
             fi
@@ -1207,11 +1208,12 @@ jobs:
               # 客户端"点播放"第一步就是它，Emby 在这一步组装 MediaSources，必要时现场
               # ffprobe、提取内封字幕（都读挂载）。与上面的"起播 X 秒"并排即可判断
               # 10 秒等待里 Emby 占多少、ge2o 占多少、剩下多少是播放器缓冲。
-              # 只看最近 400 行：避免扫全量日志，也天然落在"本次播放前后"的窗口内。
+              # 全文件找而不是 tail -n 400：wallwarmer 每分钟几十行图片请求，
+              # 400 行只盖住最近 ~1 分钟，真正要的那条 PlaybackInfo 可能已被挤出窗口
+              # （首测就是因此缺项）。日志几 MB 级，播放频率低，全扫可接受。
               PREP=""
               if [ -n "$CIP" ]; then
-                PREP=$(tail -n 400 "$LOG" 2>/dev/null \
-                       | grep -aF -- "$CIP" | grep -a 'PlaybackInfo' \
+                PREP=$(grep -aF -- "$CIP" "$LOG" 2>/dev/null | grep -a 'PlaybackInfo' \
                        | grep -aoE '\| [0-9]+\.[0-9]+s \|' | tail -1 | tr -d '|s ')
                 [ -n "$PREP" ] && PREP="$(printf '%s' "$PREP" | awk '{printf "%.1f", $1}')"
               fi
