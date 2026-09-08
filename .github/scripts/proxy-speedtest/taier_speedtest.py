@@ -50,6 +50,7 @@ from speedtest_gitee import (
     build_mihomo_config,
     build_source_mapping,
     build_subscription_bundle,
+    build_target_network_section,
     collect_provider_snapshot,
     ensure_local_mihomo,
     log_progress,
@@ -63,7 +64,6 @@ from speedtest_gitee import (
     wait_mihomo,
     resolve_host_ipv4,
     fetch_ip_network_info,
-    network_cells,
 )
 
 # ---------------------------------------------------------------------------
@@ -408,38 +408,30 @@ def match_taier_server(prov, city, oper, client_ip, timeout=10):
 
 
 def taier_target_network_lines(points, client_ip):
-    """「📍 测速点网络」树形块：泰尔测速服务器（IP:port · 主机名）+ 其 IP 归属。
+    """「📍 测速点网络」KV 树块：泰尔测速服务器（IP:port · 主机名）+ 其 IP 归属。
 
+    版式由三件套统一的 build_target_network_section 渲染（单测速点 = 4 行 KV 树）；
+    本函数只负责泰尔特有的一步——按省/市/运营商 match 协议定位测速服务器。
     match / 归属查询失败逐级降级为「归属获取失败」，不抛异常、不阻塞通知。
     须在 stop_mihomo_tun() 之后调用（此时为 runner 直连出口视角）。
     """
-    esc = lambda s: html.escape(str(s))  # noqa: E731
-    lines = ['📍 <b>测速点网络</b>']
     prov, city, oper = parse_taier_points(points)
+    server = ''
+    label = ''
     info = None
     if prov:
         srv = match_taier_server(prov, city, oper, client_ip)
         if srv:
             ip = str(srv.get('hostip') or '')
             port = str(srv.get('port') or '')
-            hostname = str(srv.get('hostname') or '').strip()
+            label = str(srv.get('hostname') or '').strip()
             if ip:
+                server = f'{ip}:{port}' if port else ip
                 info = fetch_ip_network_info(ip)
-                line = f"  ├─ 测速服务器：<code>{esc(ip)}:{esc(port)}</code>"
-                if hostname:
-                    line += f" · <i>{esc(hostname)}</i>"
-                lines.append(line)
-    if info:
-        isp, asn, loc = network_cells(info)
-        lines += [
-            f"  ├─ ISP：<b>{esc(isp)}</b>",
-            f"  ├─ ASN：<code>{esc(asn)}</code>",
-            f"  └─ 位置：<b>{esc(loc)}</b>",
-        ]
-    else:
-        fallback = ' · '.join(x for x in (prov, city, oper) if x)
-        lines.append(f"  └─ 归属获取失败{('（' + fallback + '）') if fallback else ''}")
-    return lines
+    if not server:
+        # 降级提示保留旧口径：省 · 市 · 运营商（或原始测速点参数）
+        label = label or ' · '.join(x for x in (prov, city, oper) if x) or str(points or '')
+    return build_target_network_section([(server, label, info)])
 
 
 def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle, gist_error=''):

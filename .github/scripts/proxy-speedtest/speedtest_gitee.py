@@ -1925,17 +1925,51 @@ def network_cells(info):
     return (info.get('isp') or '未知', info.get('asn') or '未知', info.get('loc') or '未知')
 
 
-def target_network_line(host, ip, info, connector='├─'):
-    """单测速点一行（树形条目）：
-    `  ├─ <code>host</code> · <code>ip</code> · <b>ISP</b> · <code>ASN</code> · <b>位置</b>`
-    host 与 ip 相同（IP 直填）时省 ip 段；归属查询失败逐项降级「未知」。"""
+def build_target_network_section(targets):
+    """三件套统一的「📍 测速点网络」分节（KV 树版式，2026-09-08 用户拍板）。
+
+    targets 为 [(server, label, info)] 列表：
+      server = 测速服务器标识（taier=「ip:port」，cdn/gitee=解析出的 IP；空 = 定位失败）
+      label  = 补充标识（taier=服务器主机名，cdn/gitee=测速点域名；可空）
+      info   = fetch_ip_network_info() 的归属 dict（None = 查询失败，逐项降级「未知」）
+
+    单测速点（与泰尔版式逐字一致）：
+        📍 测速点网络
+          ├─ 测速服务器：<server> · <label>
+          ├─ ISP：…
+          ├─ ASN：…
+          └─ 位置：…
+    多测速点：每个测速点前加 `[N] <label>` 定位行，测速服务器行只放 server。
+    server 为空 → 该块降级为「归属获取失败（label）」。
+    """
     esc = lambda s: html.escape(str(s))  # noqa: E731
-    cells = [f'<code>{esc(host)}</code>']
-    if ip and ip != host:
-        cells.append(f'<code>{esc(ip)}</code>')
-    isp, asn, loc = network_cells(info)
-    cells += [f'<b>{esc(isp)}</b>', f'<code>{esc(asn)}</code>', f'<b>{esc(loc)}</b>']
-    return f'  {connector} ' + ' · '.join(cells)
+    targets = list(targets or [])
+    if not targets:
+        targets = [('', '', None)]
+    count_hint = f' · {len(targets)}' if len(targets) > 1 else ''
+    lines = [f'📍 <b>测速点网络{count_hint}</b>']
+    for idx, (server, label, info) in enumerate(targets, 1):
+        server = str(server or '').strip()
+        label = str(label or '').strip()
+        multi = len(targets) > 1
+        if not server:
+            fallback = f'（{esc(label)}）' if label else ''
+            lines.append(f'  └─ 归属获取失败{fallback}')
+            continue
+        if multi:
+            lines.append(f'[{idx}] <code>{esc(label or server)}</code>')
+            lines.append(f'  ├─ 测速服务器：<code>{esc(server)}</code>')
+        elif label:
+            lines.append(f'  ├─ 测速服务器：<code>{esc(server)}</code> · <code>{esc(label)}</code>')
+        else:
+            lines.append(f'  ├─ 测速服务器：<code>{esc(server)}</code>')
+        isp, asn, loc = network_cells(info)
+        lines += [
+            f'  ├─ ISP：<b>{esc(isp)}</b>',
+            f'  ├─ ASN：<code>{esc(asn)}</code>',
+            f'  └─ 位置：<b>{esc(loc)}</b>',
+        ]
+    return lines
 
 
 # 敏感字段名（小写匹配），值会被自动脱敏
@@ -2067,10 +2101,8 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
     ]
     # 测速点（Gitee push 目标）的网络归属：域名解析 IP 后查 ISP/ASN/位置
     gitee_ip = resolve_host_ipv4('gitee.com')
-    summary_lines.append('📍 <b>测速点网络</b>')
-    summary_lines.append(target_network_line(
-        'gitee.com', gitee_ip, fetch_ip_network_info(gitee_ip) if gitee_ip else None,
-        connector='└─'))
+    gitee_info = fetch_ip_network_info(gitee_ip) if gitee_ip else None
+    summary_lines.extend(build_target_network_section([(gitee_ip or '', 'gitee.com', gitee_info)]))
     summary_lines.append('')
     if aborted_due_to_runtime:
         summary_lines.append(f'⚠️ 本轮已中止：{esc(runtime_abort_reason)}')

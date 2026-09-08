@@ -59,7 +59,7 @@ from speedtest_gitee import (
     tg_footer_line,
     resolve_host_ipv4,
     fetch_ip_network_info,
-    target_network_line,
+    build_target_network_section,
     TEST_FILE_NAME,
     # 订阅导出 + Gist 上传（复刻 speedtest_gitee 的订阅发布能力）
     build_source_mapping,
@@ -1009,19 +1009,14 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None):
         f'📊 节点：共 <b>{len(results)}</b> 个 · 可用 <b>{len(ok_results)}</b> 个',
         '',
     ]
-    # 测速点（下载镜像/软件源）的网络归属：域名 → 解析 IP → ipwho.is 查 ISP/ASN/位置
-    lines.append('📍 <b>测速点网络</b>')
+    # 测速点（下载镜像/软件源）的网络归属：域名 → 解析 IP → ipwho.is 查 ISP/ASN/位置；
+    # 统一 KV 树版式（build_target_network_section），多域名逐个成块
     hosts = meta.get('download_hosts') or []
-    if hosts:
-        infos = []
-        for h in hosts:
-            ip = resolve_host_ipv4(h)
-            infos.append((h, ip, fetch_ip_network_info(ip) if ip else None))
-        for i, (h, ip, info) in enumerate(infos):
-            connector = '└─' if i == len(infos) - 1 else '├─'
-            lines.append(target_network_line(h, ip, info, connector=connector))
-    else:
-        lines.append('  └─ 归属获取失败')
+    targets = []
+    for h in hosts:
+        ip = resolve_host_ipv4(h)
+        targets.append((ip or '', h, fetch_ip_network_info(ip) if ip else None))
+    lines.extend(build_target_network_section(targets))
     lines.append('')
     if top_results:
         top = top_results[:5]
