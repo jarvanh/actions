@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Gitee 上行专项测速 + 三件套共享引擎（proxy-speedtest-gitee）。
+"""Gitee 上下行 + 延迟测速 + 三件套共享引擎（proxy-speedtest-gitee）。
 
 仓库代理测速三件套按测速点命名，本脚本承担双重角色：
   1. 独立工作流 proxy-speedtest-gitee 的引擎：对订阅的每个可用节点，经 mihomo 代理
-     git push 测速文件到 Gitee 私有仓库（push-only 模式），得到「节点 → Gitee」的
-     单流上行带宽；达标节点订阅导出到本工作流专属 Gist 并回拉验证。
+     git push 测速文件到 Gitee 私有仓库测上行、clone 拉回测下行、对 gitee.com 做
+     HTTP 计时测延迟（both 模式，2026-09-08 起默认，三件套指标口径对齐）；
+     达标节点订阅导出到本工作流专属 Gist 并回拉验证。
   2. 三件套共享引擎：mihomo 下载/配置/生命周期、订阅拉取解析、节点快照与切换
      均在本文件，speedtest.py（CDN）与 taier_speedtest.py（泰尔三网）以
      `from speedtest_gitee import ...` 复用。与引擎无关的纯共享层（订阅导出策略、
@@ -12,6 +13,11 @@
      `speedtest_common.py`——共享代码不再挂在 gitee 专项引擎名下，本文件只按需
      import（无兼容再导出）。顶层的 signal/异常通知只在 main() 里注册，import 复用
      不会误触发。
+
+运行模式（PROXY_SPEEDTEST_MODE，2026-09-08 起默认 both）：
+  both       ↑上传（git push）+ ↓下载（clone 拉回）+ gitee.com HTTP 延迟，三项全测
+  push-only  只测经代理上行（历史模式，可用 env 退回）
+  直连基线（git_direct_speedtest）不受模式影响，作为「家庭宽带上行」对照单独执行
 
 Gist 约定（三件套各用各的，互不覆盖）：
   secret PROXY_SPEEDTEST_GIST_ID / PROXY_SPEEDTEST_CDN_GIST_ID / PROXY_SPEEDTEST_TAIER_GIST_ID
@@ -42,9 +48,9 @@ import yaml
 # 三件套共享层（speedtest_common）：只 import 本文件实际用到的共享名，不做兼容再导出。
 from speedtest_common import (
     DEFAULT_MIN_MEGABIT, DEFAULT_MIN_NODES, DEFAULT_SPEED_METRIC, HOME_RUNTIME, METRIC_LABELS, PROVIDERS_DIR, SOURCE_SNAPSHOT_DIR,
-    _redact_value, _scrub_cred_urls, build_subscription_bundle,
+    _redact_value, _scrub_cred_urls, build_node_metric_prefix, build_subscription_bundle,
     build_target_network_section, deep_copy_json, fetch_ip_network_info,
-    get_item_megabits, log_progress, merged_env,
+    get_item_megabits, latency_probe, log_progress, merged_env,
     resolve_host_ipv4, resolve_subscription_policy,
     send_telegram, send_telegram_chunked, tg_footer_line,
     tg_format_elapsed, update_gist,
@@ -1092,6 +1098,16 @@ def speedtest_single_item(env, gitee, item: dict, test_file: pathlib.Path, push_
     target_filename = TEST_FILE_NAME
     switch_proxy(name, switch_settle_seconds)
 
+    # 延迟：经代理对 gitee.com 做 HTTP 计时（与 cdn 的 latency_probe 同口径，共享实现）。
+    # 失败只降级（prefix/图例自动省略 ms 项），不影响该节点 push/clone 计成功。
+    latency = latency_probe(
+        ['https://gitee.com'], local_env,
+        samples=int(env.get('PROXY_SPEEDTEST_LATENCY_SAMPLES', '4') or 4),
+        timeout=float(env.get('PROXY_SPEEDTEST_LATENCY_TIMEOUT', '8') or 8),
+    )
+    log_progress('latency_probe_finished', name=name, ok=latency.get('ok'),
+                 median_ms=latency.get('median_ms'), error=latency.get('error'))
+
     repo_dir = HOME_RUNTIME / f'upload-{sanitize_name(name)}'
     clone_dir = HOME_RUNTIME / f'download-{sanitize_name(name)}'
     upload_s = git_force_push_testfile(
@@ -1117,6 +1133,8 @@ def speedtest_single_item(env, gitee, item: dict, test_file: pathlib.Path, push_
         'branch_name': branch_name,
         'target_filename': target_filename,
         'mode': speedtest_mode,
+        'latency': latency,
+        'latency_ms': latency.get('median_ms') if latency.get('ok') else None,
         'upload_mibs': round(size_mib / upload_s, 2),
         'upload_seconds': round(upload_s, 3),
     }
@@ -1359,8 +1377,8 @@ def build_run_summary(*, started_at, ended_at, elapsed_seconds, duration_text, a
 def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_count, ok_results, speed_results, speedtest_mode, aborted_due_to_runtime, runtime_abort_reason, ok_results_by_download, metric_label=''):
     """生成人性化 Telegram 通知，版式对齐 speedtest.build_telegram_lines。
 
-    差异点：gitee 版 TOP 节点指标依旧只显示主速度单指标（如「42兆」），
-    不采用 speedtest 版的三项指标（↑上传 ↓下载 延迟ms）格式。
+    2026-09-08 起 TOP 节点条目与三件套统一为三项指标（↑上传 · ↓下载 · 延迟ms，
+    build_node_metric_prefix 渲染，未测出的指标整项省略）。
     Push 目标 / 直连基线等诊断信息保留在 RESULT_JSON，不再进通知。
     """
     started_text = str(started_at)[:19].replace('T', ' ')
@@ -1393,27 +1411,23 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
         summary_lines.append('')
     if ok_results_by_download:
         top = ok_results_by_download[:5]
-        # 指标顺序对齐泰尔引擎列序（↑上传在前）；上传未测出时整段省略，不显示「上传 0兆」，
-        # 图例同步省略 ↑上传
-        push_only = speedtest_mode == 'push-only'
-        any_up = any(get_item_megabits(it, 'push-only') > 0 for it in top)
-        if push_only:
-            legend = '↑上传' if any_up else '上行'
-        else:
-            legend = '↑上传 · ↓下载' if any_up else '↓下载'
+        # 三件套统一三项指标（↑上传 · ↓下载 · 延迟ms）：条目复用共享的
+        # build_node_metric_prefix（↑在前对齐泰尔列序），未测出的指标整项省略，
+        # 图例按 TOP 内实际存在的指标拼，避免误导
+        has_up = any(get_item_megabits(it, 'push-only') > 0 for it in top)
+        has_down = speedtest_mode != 'push-only' and any(
+            get_item_megabits(it, speedtest_mode) > 0 for it in top)
+        has_lat = any(isinstance(it.get('latency_ms'), (int, float)) and it['latency_ms'] > 0
+                      for it in top)
+        legend = ' · '.join(part for part, on in (
+            ('↑上传', has_up), ('↓下载', has_down), ('延迟ms', has_lat)) if on) or '速度'
         # TOP 已按订阅判定指标排序（见 ok_results_by_download），标题同步点出排序依据
         sort_hint = f' · 按{html.escape(metric_label)}' if metric_label else ''
         summary_lines.append(f"🏆 <b>最快节点 · {len(top)}{sort_hint}</b> · <i>{legend}</i>")
         for idx, item in enumerate(top, 1):
-            up = get_item_megabits(item, 'push-only')
-            if push_only:
-                speed_text = f"{up}兆" if up > 0 else '-'
-            elif up > 0:
-                speed_text = f"上传 {up}兆 / {get_item_megabits(item, speedtest_mode)}兆"
-            else:
-                speed_text = f"{get_item_megabits(item, speedtest_mode)}兆"
+            prefix = build_node_metric_prefix(item, speedtest_mode, order='up_first') or '-'
             connector = '└─' if idx == len(top) else '├─'
-            summary_lines.append(f"  {connector} <code>{esc(item['name'])}</code> · <i>{esc(speed_text)}</i>")
+            summary_lines.append(f"  {connector} <code>{esc(item['name'])}</code> · <i>{esc(prefix)}</i>")
         summary_lines.append('')
     elif alive_probe_count > 0:
         summary_lines.append('⚠️ 没有节点测速成功')
@@ -1552,7 +1566,9 @@ def main():
     direct_baseline_max_attempts = int(env.get('PROXY_SPEEDTEST_DIRECT_BASELINE_MAX_ATTEMPTS', '5'))
     max_nodes = int(env.get('PROXY_SPEEDTEST_MAX_NODES', '0'))
     switch_settle_seconds = float(env.get('PROXY_SPEEDTEST_SWITCH_SETTLE_SECONDS', '1.5'))
-    speedtest_mode = (env.get('PROXY_SPEEDTEST_MODE', 'push-only') or 'push-only').strip().lower()
+    # 默认 both = 上行 + clone 下行 + 延迟（2026-09-08 用户拍板：三件套指标口径对齐）；
+    # push-only = 只测上行（历史模式，可用 env 退回）
+    speedtest_mode = (env.get('PROXY_SPEEDTEST_MODE', 'both') or 'both').strip().lower()
 
     if max_nodes > 0:
         alive_items = alive_items[:max_nodes]

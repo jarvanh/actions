@@ -9,7 +9,7 @@
 
 | 工作流 | 测速点 | 口径 | 引擎/链路 | 文档 |
 |---|---|---|---|---|
-| `proxy-speedtest-gitee` | Gitee 私有仓库 | 经代理 git push 单流上行 | 本文 | — |
+| `proxy-speedtest-gitee` | Gitee 私有仓库 | 经代理 git push 上行 + clone 下行 + gitee.com HTTP 延迟 | 本文 | — |
 | `proxy-speedtest-cdn` | 国内 CDN/镜像站 + baidu/taobao | 经代理单连接 curl 下载 + HTTP 计时延迟 | `speedtest.py` | [cdn](proxy-speedtest-cdn.md) |
 | `proxy-speedtest-taier` | 泰尔三网（电信/联通/移动测速服务器） | taierspeedtest 延迟 + 单/多线程上下行 | `taier_speedtest.py` + mihomo TUN | [taier](proxy-speedtest-taier.md) |
 
@@ -19,8 +19,9 @@
 
 `speedtest_gitee.py` 既是独立工作流引擎，也是三件套共享引擎：
 
-1. **独立引擎**：push-only 模式下对每个可用节点经 mihomo 代理 git push 测速文件到
-   Gitee 私有仓库，得到「节点 → Gitee」单流上行带宽；
+1. **独立引擎**：both 模式（默认）下对每个可用节点经 mihomo 代理测三项——git push
+   测速文件到 Gitee 私有仓库（上行）、clone 拉回（下行）、对 gitee.com 做 HTTP 计时
+   （延迟，与 cdn 的 `latency_probe` 同实现）；
 2. **共享引擎**：mihomo 下载/配置/生命周期、订阅拉取解析、节点快照与切换在本文件；
    与引擎无关的纯共享层（订阅导出策略、通知排版、归属查询、Telegram 发送、Gist 上传、
    进度日志）在 `speedtest_common.py`（2026-09-08 从本文件抽出，共享代码不再挂在 gitee
@@ -34,21 +35,23 @@
    健康检查后 `collect_provider_snapshot` 取存活节点；
 3. 准备 Gitee 私有仓库（`ensure_gitee_remote`：不存在则创建，超限自动 `rebuild_gitee_repo`）；
 4. 生成 `PROXY_SPEEDTEST_SIZE_MIB` MiB 测速文件；
-5. 逐节点：切换 AUTO → 经代理 `git push`（单流 HTTPS，超时 `PROXY_SPEEDTEST_PUSH_TIMEOUT`）
-   → 按推送耗时换算上行；
+5. 逐节点：切换 AUTO → 经代理 HTTP 计时测 gitee.com 延迟（`latency_probe`，采样
+   `PROXY_SPEEDTEST_LATENCY_SAMPLES` × 超时 `PROXY_SPEEDTEST_LATENCY_TIMEOUT`）
+   → 经代理 `git push`（单流 HTTPS，超时 `PROXY_SPEEDTEST_PUSH_TIMEOUT`）按推送耗时
+   换算上行 → `git clone` 拉回（超时 `PROXY_SPEEDTEST_CLONE_TIMEOUT`）换算下行；
 6. 汇总 → 按**订阅导出策略**判定达标节点（见[订阅导出策略](#订阅导出策略三件套共用)）导出到专属 Gist，并用**第二个 mihomo
    实例**（端口 19690/19691）把 Gist raw 回拉、抽样节点经 AUTO 切换验证可用性
    （`verify_gist_subscriptions_with_mihomo`）；
-7. Telegram 推 `✅ Gitee 上行测速完成`（TOP 节点 + 订阅状态）。
+7. Telegram 推 `✅ Gitee 上行测速完成`（TOP 节点三项指标 + 订阅状态）。
 
 ## 运行模式与直连基线
 
-`PROXY_SPEEDTEST_MODE`：
+`PROXY_SPEEDTEST_MODE`（2026-09-08 起默认 `both`）：
 
-- `push-only`：只测经代理上行（gitee 工作流使用）；
-- 其他：上行 + clone 下行对照；
+- `both`：↑上传（push）+ ↓下载（clone）+ 延迟三项全测，三件套指标口径对齐；
+- `push-only`：只测经代理上行（历史模式，可用 env 退回）；
 - `git_direct_speedtest`：不经代理直连 Gitee push/clone，作为「家庭宽带上行」基线对比
-  （`PROXY_SPEEDTEST_DIRECT_BASELINE_TIMEOUT` / `_MAX_ATTEMPTS` 控制）。
+  （`PROXY_SPEEDTEST_DIRECT_BASELINE_TIMEOUT` / `_MAX_ATTEMPTS` 控制），不受模式影响。
 
 ## Gist 约定（三件套各用各的）
 
@@ -57,7 +60,7 @@
   `PROXY_SPEEDTEST_GIST_ID` env，脚本读同名 env，共享代码零特判；
 - 文件名/描述经 `PROXY_SPEEDTEST_GIST_FILENAME` / `PROXY_SPEEDTEST_GIST_DESCRIPTION`
   覆盖（`_gist_identity`），本工作流为 `proxy_speedtest_gitee_subscription.yaml` /
-  `proxy speedtest subscription (gitee 上行)`；
+  `proxy speedtest subscription (gitee 上行/下行/延迟)`；
 - id 缺失或 404 时自动新建（`update_gist` → `create_gist`），新 id 写回
   `~/.openclaw/.env`（runner 上不跨 run 持久）+ TG 通知给链接，需回填 secret。
 
@@ -79,9 +82,10 @@
 
 | env | 默认 | 说明 |
 |---|---|---|
-| `PROXY_SPEEDTEST_MODE` | push-only | push-only = 只测上行 |
+| `PROXY_SPEEDTEST_MODE` | both | both = 上行+下行+延迟三项；push-only = 只测上行 |
 | `PROXY_SPEEDTEST_SIZE_MIB` | 10 | 测速文件大小 |
 | `PROXY_SPEEDTEST_PUSH_TIMEOUT` / `CLONE_TIMEOUT` | 30 / 30 | 单次 push / clone 超时 |
+| `PROXY_SPEEDTEST_LATENCY_SAMPLES` / `_TIMEOUT` | 4 / 8 | gitee.com 延迟采样次数 / 单次超时 |
 | `PROXY_SPEEDTEST_DIRECT_BASELINE_TIMEOUT` / `_MAX_ATTEMPTS` | 60 / 5 | 直连基线 |
 | `PROXY_SPEEDTEST_SWITCH_SETTLE_SECONDS` | 1.5 | 切节点后等待 |
 | `PROXY_SPEEDTEST_DETACH` | 0（workflow 注入） | 1 = detach 后台自跑（本地手跑用） |

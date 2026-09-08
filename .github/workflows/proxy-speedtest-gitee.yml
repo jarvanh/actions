@@ -32,9 +32,14 @@ jobs:
           PROXY_SPEEDTEST_SIZE_MIB: '10'
           PROXY_SPEEDTEST_PUSH_TIMEOUT: '30'
           PROXY_SPEEDTEST_CLONE_TIMEOUT: '30'
+          # 测速模式（2026-09-08 起默认 both）：both = ↑上传(push) + ↓下载(clone) +
+          # gitee.com HTTP 延迟三项全测（与 cdn/taier 的指标口径对齐）；push-only = 只测上行
+          PROXY_SPEEDTEST_MODE: both
+          # 延迟探测参数（经代理对 gitee.com HTTP 计时，与 cdn 的 latency_probe 同实现）
+          PROXY_SPEEDTEST_LATENCY_SAMPLES: '4'
+          PROXY_SPEEDTEST_LATENCY_TIMEOUT: '8'
           PROXY_SPEEDTEST_DIRECT_BASELINE_TIMEOUT: '60'
           PROXY_SPEEDTEST_DIRECT_BASELINE_MAX_ATTEMPTS: '5'
-          PROXY_SPEEDTEST_MODE: push-only
           # 订阅导出策略（三件套共用；可在仓库 Settings → Secrets and variables → Actions
           # → Variables 里覆盖，留空走脚本默认值）：
           #   PROXY_SPEEDTEST_MIN_MEGABIT  达标阈值（兆，默认 10）
@@ -54,7 +59,7 @@ jobs:
           PROXY_SPEEDTEST_GIST_ID: ${{ secrets.PROXY_SPEEDTEST_GIST_ID }}
           # Gist 文件名/描述：三件套各不相同，便于在 Gist 列表里分辨
           PROXY_SPEEDTEST_GIST_FILENAME: proxy_speedtest_gitee_subscription.yaml
-          PROXY_SPEEDTEST_GIST_DESCRIPTION: 'proxy speedtest subscription (gitee 上行)'
+          PROXY_SPEEDTEST_GIST_DESCRIPTION: 'proxy speedtest subscription (gitee 上行/下行/延迟)'
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           # 统一收尾区（footer）: 运行日志链接 + 已运行时长
