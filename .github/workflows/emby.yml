@@ -74,6 +74,9 @@ env:
 
 jobs:
   build:
+    # 安全守卫（2026-09-08）：公开仓库任何人 star 都会触发 watch 事件——仅放行仓库本人，
+    # schedule / workflow_dispatch 等其余触发方式不受影响
+    if: github.event_name != 'watch' || github.actor == 'jarvanh'
     concurrency: emby-singleton
     runs-on: ubuntu-latest
     steps:
@@ -1199,7 +1202,7 @@ jobs:
 
           # 数据源 A：ge2o 访问日志（302 模式主源）
           #   真实格式（ge2o v2.8.x 实测样例；版本随 releases/latest 漂移，升级后请重新核对列序）：
-          #   [ge2o:v2.8.2] 2026-09-01 08:49:01 | 206 | 4.16s | 141.11.43.124 | 8095 <路由> | GET /emby/videos/554849/stream?...
+          #   [ge2o:v2.8.2] 2026-09-01 08:49:01 | 206 | 4.16s | 198.51.100.23 | 8095 <路由> | GET /emby/videos/554849/stream?...
           #   3xx = 直链重定向；200/206 = 经 ge2o/Emby 中转；304 = 客户端缓存校验，不计为播放
           (
             tail -n0 -F "$LOG" 2>/dev/null | while read -r line; do
@@ -1248,7 +1251,7 @@ jobs:
                 tail -n 30 "$LOG" 2>/dev/null | redact
               fi
               # 访问日志里还有"耗时"与"客户端 IP"两列（起播慢 / 谁在播的定位依据），一并带进通知：
-              #   [ge2o:v2.8.2] <时间> | 206 | 4.16s | 141.11.43.124 | 8095 <路由> | GET /emby/videos/...
+              #   [ge2o:v2.8.2] <时间> | 206 | 4.16s | 198.51.100.23 | 8095 <路由> | GET /emby/videos/...
               DUR_RAW=$(printf '%s\n' "$line" | grep -aoE '\| [0-9.]+(µs|ms|s) \|' | head -1 | tr -d '| ')
               # 先归一化成秒（单位会变 µs/ms/s），显示格式交给 notify 里的 fmt_ms 按量级选
               DUR_RAW=$(to_sec "$DUR_RAW")

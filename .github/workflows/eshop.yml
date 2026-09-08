@@ -22,7 +22,8 @@ env:
   PUBLIC_ORIGIN: https://dc.${{ secrets.VD }}.eu.org
   MYSQL_DATABASE: yixiang-drink-open
   MYSQL_USER: yshop
-  MYSQL_PASSWORD: yshop_runner_password
+  MYSQL_PASSWORD: ${{ secrets.ESHOP_MYSQL_PASSWORD }}
+  MYSQL_ROOT_PASSWORD: ${{ secrets.ESHOP_MYSQL_ROOT_PASSWORD }}
   REDIS_PORT: "6379"
   BACKEND_PORT: "48080"
   WEB_PORT: "8080"
@@ -38,14 +39,15 @@ jobs:
       mysql:
         image: mysql:8.0
         env:
-          MYSQL_ROOT_PASSWORD: root
+          MYSQL_ROOT_PASSWORD: ${{ secrets.ESHOP_MYSQL_ROOT_PASSWORD }}
           MYSQL_DATABASE: yixiang-drink-open
           MYSQL_USER: yshop
-          MYSQL_PASSWORD: yshop_runner_password
+          MYSQL_PASSWORD: ${{ secrets.ESHOP_MYSQL_PASSWORD }}
         ports:
           - 3306:3306
         options: >-
-          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot --silent"
+          # health-cmd 在 mysql 容器内执行，直接用容器环境变量传口令
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -p$MYSQL_ROOT_PASSWORD --silent"
           --health-interval=10s
           --health-timeout=5s
           --health-retries=30
@@ -65,7 +67,7 @@ jobs:
         run: |
           set -euo pipefail
           missing=0
-          for name in RCLONE VD YSHOP_WX_MINIAPP_APPID YSHOP_WX_MINIAPP_SECRET; do
+          for name in RCLONE VD YSHOP_WX_MINIAPP_APPID YSHOP_WX_MINIAPP_SECRET ESHOP_MYSQL_ROOT_PASSWORD ESHOP_MYSQL_PASSWORD; do
             value="${!name:-}"
             if [ -z "$value" ]; then
               echo "::error::Missing required secret: $name"
@@ -142,7 +144,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          until mysqladmin ping -h 127.0.0.1 -uroot -proot --silent; do
+          until mysqladmin ping -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD" --silent; do
             echo "Waiting for MySQL..."
             sleep 2
           done
@@ -150,13 +152,13 @@ jobs:
           snapshot="$RUNNER_TEMP/$YSHOP_DB_SNAPSHOT_NAME"
           if rclone copyto "$YSHOP_DATA_REMOTE_DIR/$YSHOP_DB_SNAPSHOT_NAME" "$snapshot" --ignore-times --stats=0 2>/dev/null && [ -s "$snapshot" ]; then
             echo "✅ Found persisted database snapshot in Dropbox; importing fixed data..."
-            gzip -dc "$snapshot" | mysql -h 127.0.0.1 -uroot -proot "$MYSQL_DATABASE"
+            gzip -dc "$snapshot" | mysql -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD" "$MYSQL_DATABASE"
           else
             echo "ℹ️ No persisted database snapshot found in Dropbox; importing default project SQL..."
-            mysql -h 127.0.0.1 -uroot -proot "$MYSQL_DATABASE" < "$BACKEND_DIR/sql/yixiang-drink-open.sql"
+            mysql -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD" "$MYSQL_DATABASE" < "$BACKEND_DIR/sql/yixiang-drink-open.sql"
           fi
 
-          mysql -h 127.0.0.1 -uroot -proot -e "ALTER USER '$MYSQL_USER'@'%' IDENTIFIED BY '$MYSQL_PASSWORD'; FLUSH PRIVILEGES;"
+          mysql -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD" -e "ALTER USER '$MYSQL_USER'@'%' IDENTIFIED BY '$MYSQL_PASSWORD'; FLUSH PRIVILEGES;"
 
       - name: Patch backend config without leaking secrets
         shell: bash
@@ -396,7 +398,7 @@ jobs:
           persist_database() {
             set +e
             echo "Persisting YShop Drink database to Dropbox..."
-            if ! mysqladmin ping -h 127.0.0.1 -uroot -proot --silent; then
+            if ! mysqladmin ping -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD" --silent; then
               echo "::warning::MySQL is not reachable; skip database persistence."
               return 0
             fi
@@ -407,7 +409,7 @@ jobs:
             if mysqldump \
               -h 127.0.0.1 \
               -uroot \
-              -proot \
+              -p"$MYSQL_ROOT_PASSWORD" \
               --single-transaction \
               --routines \
               --triggers \
@@ -445,7 +447,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if ! mysqladmin ping -h 127.0.0.1 -uroot -proot --silent; then
+          if ! mysqladmin ping -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD" --silent; then
             echo "::warning::MySQL is not reachable; skip database persistence."
             exit 0
           fi
@@ -456,7 +458,7 @@ jobs:
           mysqldump \
             -h 127.0.0.1 \
             -uroot \
-            -proot \
+            -p"$MYSQL_ROOT_PASSWORD" \
             --single-transaction \
             --routines \
             --triggers \

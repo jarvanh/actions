@@ -59,6 +59,9 @@ on:
 
 jobs:
   build:
+    # 安全守卫（2026-09-08）：公开仓库任何人 star 都会触发 watch 事件——仅放行仓库本人，
+    # schedule / workflow_dispatch 等其余触发方式不受影响
+    if: github.event_name != 'watch' || github.actor == 'jarvanh'
     env:
       OPENLIST_SPLIT_ON_SYNC_FAILURE: ${{ inputs.split_on_sync_failure || 'false' }}
       FORCE_SYNC: ${{ inputs.force_sync || 'false' }}
