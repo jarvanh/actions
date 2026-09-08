@@ -13,7 +13,7 @@
     ├── emby302/            Emby 302 直链服务 —— 详见 docs/emby.md
     ├── telegram/           Telegram 通知（tg_notify.sh = 全库发送层真源）
     ├── tg-channel/         Telegram 频道内容管线（同步/上传/去重/清理）
-    └── proxy-speedtest/    代理测速脚本（gitee 上行 / 延迟+下载 / 泰尔三网测速）
+    └── proxy-speedtest/    代理测速脚本（common 共享层 + gitee 上行/下行/延迟 + CDN 延迟/下载 + 泰尔三网）
 docs/                       子系统文档
 proxy-speedtest/            测速结果数据
 ```
@@ -25,7 +25,7 @@ proxy-speedtest/            测速结果数据
 | [`docs/telegram-notify.md`](docs/telegram-notify.md) | **Telegram 通知规范**（全库唯一真源：版式模板、收尾区、禁止事项、检查清单） |
 | [`docs/emby.md`](docs/emby.md) | Emby 媒体服务器 + 302 直链子系统（架构、凭据体系、通知、排查手册） |
 | [`docs/openclaw.md`](docs/openclaw.md) | OpenClaw Runner：自愈五层机制 + 常驻服务（sub-store / rss-to-telegram / AI 网关）+ Tailscale 远程入口 |
-| [`docs/proxy-speedtest-gitee.md`](docs/proxy-speedtest-gitee.md) / [`-cdn.md`](docs/proxy-speedtest-cdn.md) / [`-taier.md`](docs/proxy-speedtest-taier.md) | 代理测速三件套（按测速点命名）：Gitee 上行 / 国内 CDN 延迟+下载 / 泰尔三网 |
+| [`docs/proxy-speedtest-gitee.md`](docs/proxy-speedtest-gitee.md) / [`-cdn.md`](docs/proxy-speedtest-cdn.md) / [`-taier.md`](docs/proxy-speedtest-taier.md) | 代理测速三件套（按测速点命名）：Gitee 上行/下行/延迟 / 国内 CDN 延迟+下载 / 泰尔三网 |
 | 下文「OpenList 同步子系统」 | OpenList 同步工具（内联在本文档） |
 
 ## 工作流清单
@@ -40,7 +40,7 @@ proxy-speedtest/            测速结果数据
 | `HomeAssistant.yml` / `rdp.yml` / `openclaw.yml` | 自托管服务 |
 | `ql.yml` / `sub-store.yml` / `subs-check.yml` | 签到与订阅管理 |
 | `icloud-photos-downloader.yml` / `ph-dl.yml` / `pixivutil2.yml` | 媒体抓取下载 |
-| `proxy-speedtest-gitee.yml` / `proxy-speedtest-cdn.yml` / `proxy-speedtest-taier.yml` | 代理测速三件套（按测速点命名）：Gitee 上行 / 国内 CDN 延迟+下载 / 泰尔三网 |
+| `proxy-speedtest-gitee.yml` / `proxy-speedtest-cdn.yml` / `proxy-speedtest-taier.yml` | 代理测速三件套（按测速点命名）：Gitee 上行/下行/延迟 / 国内 CDN 延迟+下载 / 泰尔三网 |
 | `upload-video-to-tg.yml` / `p.yml` / `eshop.yml` / `teslamate.yml` | 杂项 |
 | `delete-workflow-runs.yml` | 清理历史运行记录 |
 
@@ -293,7 +293,7 @@ token 登录、marker、收尾标题四态、进度阶段区排版（子目录�
 | 调阈值/超时 | workflow 的 `env:` 块（不要写死在脚本里） |
 | 加一种文件修复方法 | `file_fix.sh`（实现 + `_try_fix_methods_round` 轮换）+ 同步更新 `文件修复方法N` 文案 |
 | 改目录级降级策略 | `file_fix.sh` 的 `_fix_probe_dir_writable`（预检/重启复核）+ `_fix_switch_to_hash_dir`（切换）+ `restore_info.jq` 的目录类分支 |
-| 改通知排版 | 全库统一规范见 `docs/telegram-notify.md`；实现真源：bash `telegram/tg_notify.sh`、pwsh `telegram/tg_notify.ps1`（rdp / tailscale dot-source）、python 复用 `speedtest_gitee.py`；openlist 侧经 `load_all.sh` L0 层 source 真源，`openlist/telegram.sh` 只留进度面板函数 |
+| 改通知排版 | 全库统一规范见 `docs/telegram-notify.md`；实现真源：bash `telegram/tg_notify.sh`、pwsh `telegram/tg_notify.ps1`（rdp / tailscale dot-source）、python 复用 `speedtest_common.py`；openlist 侧经 `load_all.sh` L0 层 source 真源，`openlist/telegram.sh` 只留进度面板函数 |
 | 改跳过提示（预览"预计跳过"/ 跳过通知"本次未传"） | `task_preview.sh` 的 `add_preview_pair`（pskip 列）· `flush_task_preview`（合计附注）· `_lookup_skipped_pending`（估算入口）+ `sync_marker.sh` 的 `send_sync_skipped` |
 | 改进度消息的阶段区（子目录树 / 文件批次的层级、缩进、统计字段） | `sync_progress.sh` 的 `_progress_render` + `task_engine.sh` 的 `_render_subdir_phase_tree` / `_render_batch_stats_line` |
 | 改收尾标题四态 | `sync_progress.sh` 的 `_progress_render` 终态分支（中断 / 有文件无法同步 / 带修复完成 / 完全完成，按严重度判定） |

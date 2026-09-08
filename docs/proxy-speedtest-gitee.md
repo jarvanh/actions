@@ -1,4 +1,4 @@
-# Gitee 上行测速（proxy-speedtest-gitee）
+# Gitee 上下行 + 延迟测速（proxy-speedtest-gitee）
 
 > 代码：`.github/scripts/proxy-speedtest/speedtest_gitee.py`
 > 入口：`.github/workflows/proxy-speedtest-gitee.yml`
@@ -42,7 +42,7 @@
 6. 汇总 → 按**订阅导出策略**判定达标节点（见[订阅导出策略](#订阅导出策略三件套共用)）导出到专属 Gist，并用**第二个 mihomo
    实例**（端口 19690/19691）把 Gist raw 回拉、抽样节点经 AUTO 切换验证可用性
    （`verify_gist_subscriptions_with_mihomo`）；
-7. Telegram 推 `✅ Gitee 上行测速完成`（TOP 节点三项指标 + 订阅状态）。
+7. Telegram 推 `✅ Gitee 测速完成`（TOP 节点三项指标 + 订阅状态）。
 
 ## 运行模式与直连基线
 
@@ -59,8 +59,8 @@
   `PROXY_SPEEDTEST_TAIER_GIST_ID`（taier）——分别注入各 workflow 的
   `PROXY_SPEEDTEST_GIST_ID` env，脚本读同名 env，共享代码零特判；
 - 文件名/描述经 `PROXY_SPEEDTEST_GIST_FILENAME` / `PROXY_SPEEDTEST_GIST_DESCRIPTION`
-  覆盖（`_gist_identity`），本工作流为 `proxy_speedtest_gitee_subscription.yaml` /
-  `proxy speedtest subscription (gitee 上行/下行/延迟)`；
+  覆盖（`_gist_identity`，实现在 speedtest_common.py），本工作流为
+  `proxy_speedtest_gitee_subscription.yaml` / `proxy speedtest subscription (gitee 上行/下行/延迟)`；
 - id 缺失或 404 时自动新建（`update_gist` → `create_gist`），新 id 写回
   `~/.openclaw/.env`（runner 上不跨 run 持久）+ TG 通知给链接，需回填 secret。
 
@@ -117,9 +117,9 @@ TG 通知文案。节点必须有原始配置（`source_entry.proxy`）才计入
 
 | 标题 | 触发 |
 |---|---|
-| `✅ Gitee 上行测速完成` | 正常完成 |
-| `⛔ Gitee 上行测速异常终止` | 收到 SIGTERM/SIGINT（run 被取消/超时），`handle_termination_signal` 兜底 |
-| `❌ Gitee 上行测速异常退出 · <阶段>` | 任一 `run_stage` 阶段抛异常（阶段即原因：`订阅源拉取/解析`、`mihomo 启动/配置`、`Gitee 仓库准备`、`测速文件准备`、`Gist 更新/回拉验证/通知`…） |
+| `✅ Gitee 测速完成` | 正常完成 |
+| `⛔ Gitee 测速异常终止` | 收到 SIGTERM/SIGINT（run 被取消/超时），`handle_termination_signal` 兜底 |
+| `❌ Gitee 测速异常退出 · <阶段>` | 任一 `run_stage` 阶段抛异常（阶段即原因：`订阅源拉取/解析`、`mihomo 启动/配置`、`Gitee 仓库准备`、`测速文件准备`、`Gist 更新/回拉验证/通知`…） |
 
 辅助机制：`/tmp/proxy_speedtest.lock` 每轮循环 touch（供外部心跳判 stale）；
 `maybe_detach_self` 支持 detach 后台自跑（CI 里固定关闭）。

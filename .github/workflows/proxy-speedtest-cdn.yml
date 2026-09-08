@@ -1,7 +1,7 @@
 name: proxy-speedtest-cdn
 
 # 代理节点测速三件套（按测速点命名，便于在 Actions 列表一眼分辨）：
-#   proxy-speedtest-gitee = 测速点 Gitee 私有仓库：经代理 git push 测上行
+#   proxy-speedtest-gitee = 测速点 Gitee 私有仓库：经代理 git push 上行 + clone 下行 + gitee.com HTTP 延迟
 #   proxy-speedtest-cdn   = 本工作流，测速点国内 CDN/镜像站（腾讯云 mirrors、清华 TUNA、
 #                           npmmirror；延迟目标 baidu/taobao）：经代理 HTTP 计时 +
 #                           单连接 curl 下载，生成 HTML 报告 + 达标节点订阅导出 Gist

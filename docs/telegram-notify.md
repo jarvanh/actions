@@ -10,7 +10,7 @@
 | ubuntu runner（bash） | [`scripts/telegram/tg_notify.sh`](../.github/scripts/telegram/tg_notify.sh) | 排版助手 + 发送层（429 重试 / 4000 分片 / 解析失败直接报错不重发 / curl `-m 15`），`source` 使用 |
 | Telegram 频道内容管线 | `scripts/tg-channel/` | 频道同步 / 上传 / 去重 / 清理（**不是**通知域），单向依赖上面的 `tg_notify.sh` |
 | openlist 同步脚本（runner 上执行） | [`scripts/openlist/telegram.sh`](../.github/scripts/openlist/telegram.sh) | 薄适配层：只放「需要 message_id」的进度面板函数（`send_telegram_message` / 原地编辑 3 函数）；排版与发送经 `load_all.sh` L0 层 source 上一行真源，不再自带副本 |
-| python | `scripts/proxy-speedtest/speedtest_gitee.py` 的 `tg_format_elapsed` / `tg_footer_line` / `send_telegram_chunked` | 其余 python 一律复用或经 `notify()` 借 bash 生成，**禁止自造** |
+| python | `scripts/proxy-speedtest/speedtest_common.py` 的 `tg_format_elapsed` / `tg_footer_line` / `send_telegram` / `send_telegram_chunked` | 其余 python 一律复用或经 `notify()` 借 bash 生成，**禁止自造** |
 | PowerShell（windows runner） | [`scripts/telegram/tg_notify.ps1`](../.github/scripts/telegram/tg_notify.ps1)（`rdp.yml` / `tailscale-windows.yml` dot-source，需先 checkout） | `Esc-Html` / `Get-TgFooter` / `Send-TgMessage` / `$TG_SEP`；语义与 bash 版对齐（429 读 `Retry-After` 重试 5 次，解析失败不重发直接抛出并带响应体） |
 
 ## 2. 版式模板
