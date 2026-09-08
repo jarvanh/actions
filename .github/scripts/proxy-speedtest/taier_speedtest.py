@@ -43,19 +43,18 @@ import yaml
 # source-snapshots/ 子目录）
 # ---------------------------------------------------------------------------
 from speedtest_gitee import (
-    DEFAULT_MIN_MEGABIT,
     HOME_RUNTIME,
     MIHOMO,
     MIHOMO_CONFIG,
     MIHOMO_LOG,
     build_mihomo_config,
     build_source_mapping,
-    build_subscription_yaml_text,
+    build_subscription_bundle,
     collect_provider_snapshot,
     ensure_local_mihomo,
-    get_item_megabits,
     log_progress,
     merged_env,
+    resolve_subscription_policy,
     send_telegram,
     switch_proxy,
     tg_footer_line,
@@ -443,9 +442,15 @@ def taier_target_network_lines(points, client_ip):
     return lines
 
 
-def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, qualified_count):
+def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle, gist_error=''):
     def esc(s):
         return html.escape(str(s))
+    # 订阅策略（阈值 / 实际采用的判定指标 / 达标数 / 最少节点数）
+    bundle = bundle or {}
+    qualified_count = bundle.get('qualified', 0)
+    min_megabit = bundle.get('min_megabit', 0)
+    min_nodes = bundle.get('min_nodes', 1)
+    metric_label = bundle.get('metric_label', '')
 
     sep = '━' * 18
     ok_results = [r for r in results if r.get('ok') and not r.get('bypass')]
@@ -501,7 +506,7 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, qualif
     if gist_res and gist_res.get('ok'):
         action = '新建' if gist_res.get('created') else '更新'
         raw_url = ((gist_res.get('yaml') or {}).get('raw_url') or '').strip()
-        gist_lines = [f'✅ 已{action}，达标 <b>{qualified_count}</b> 个 · 阈值 ≥{DEFAULT_MIN_MEGABIT}兆']
+        gist_lines = [f'✅ 已{action}，达标 <b>{qualified_count}</b> 个 · 阈值 ≥{min_megabit}兆（按{esc(metric_label)}）']
         if gist_res.get('created'):
             gist_lines.append('❗ 请把 Gist id 回填到 Secrets <code>PROXY_SPEEDTEST_TAIER_GIST_ID</code>，避免每轮新建')
         if raw_url:
@@ -511,8 +516,11 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, qualif
             lines.append(f'  {_c} {_l}')
     elif gist_res:
         lines.append(f"  └─ ⚠️ 上传失败：{esc(gist_res.get('reason', ''))}")
+    elif gist_error:
+        # 上传阶段抛异常（HTTP 4xx 等）≠ 没有达标节点，文案必须区分
+        lines.append(f'  └─ ⚠️ 上传失败：{esc(gist_error[:120])}')
     else:
-        lines.append(f'  └─ ⚠️ 无达标节点 · 阈值 ≥{DEFAULT_MIN_MEGABIT}兆 · 未更新订阅')
+        lines.append(f'  └─ ⚠️ 达标不足 {min_nodes} 个 · 阈值 ≥{min_megabit}兆（按{esc(metric_label)}）· 未更新订阅')
     lines.append('')
 
     lines.append('')
@@ -686,9 +694,11 @@ def _run():
 
     # 订阅导出到本工作流专属 Gist（secret: PROXY_SPEEDTEST_TAIER_GIST_ID）——
     # 三个测速工作流各用各的 Gist，互不覆盖。taier 数值是 Mbps，导出字段是 MiB/s（÷8.388608），
-    # 阈值/前缀沿用 speedtest_gitee 的 ×8 折算，展示值与 Mbps 基本一致
+    # 阈值/前缀沿用 speedtest_gitee 的 ×8 折算，展示值与 Mbps 基本一致。
+    # 达标策略（阈值 / 判定指标 / 最少节点数）与三件套共用，见 resolve_subscription_policy：
+    # 默认按上行判定，达标不足 min_nodes 时自动改用下行（反之亦然）。
     gist_res = None
-    qualified_count = 0
+    gist_error = ''
     gist_results = [{
         'name': r.get('name', ''),
         'source_entry': r.get('source_entry') or {},
@@ -697,21 +707,25 @@ def _run():
         'upload_mibs': (r.get('up') or 0) / 8.388608,
         'latency_ms': _rtt_to_ms(r.get('rtt')),
     } for r in results]
-    yaml_text = build_subscription_yaml_text(gist_results, DEFAULT_MIN_MEGABIT)
-    if (yaml_text or '').strip():
+    bundle = build_subscription_bundle(gist_results, resolve_subscription_policy(env))
+    log_progress('subscription_policy', metric=bundle['metric'], qualified=bundle['qualified'],
+                 min_megabit=bundle['min_megabit'], min_nodes=bundle['min_nodes'],
+                 fallback=bundle['fallback'])
+    if (bundle['text'] or '').strip():
         try:
-            gist_res = update_gist(env, yaml_text)
-            qualified_count = sum(
-                1 for g in gist_results
-                if get_item_megabits(g, 'download') >= DEFAULT_MIN_MEGABIT
-                and (g.get('source_entry') or {}).get('proxy'))
+            gist_res = update_gist(env, bundle['text'])
             log_progress('gist_uploaded', ok=gist_res.get('ok'),
                          action='新建' if gist_res.get('created') else '更新',
-                         qualified=qualified_count)
+                         qualified=bundle['qualified'], metric=bundle['metric'])
         except Exception as e:
-            log_progress('gist_upload_failed', error=str(e))
+            # 上传抛异常时 gist_res 仍是 None，必须单独记住原因，否则通知会误报
+            # 「达标不足」（达标与否是 text 是否为空，与上传是否成功无关）
+            gist_error = str(e)
+            log_progress('gist_upload_failed', error=gist_error)
     else:
-        log_progress('gist_skipped', reason='no node met min speed')
+        log_progress('gist_skipped', reason='qualified nodes < min_nodes',
+                     qualified=bundle['qualified'], min_nodes=bundle['min_nodes'],
+                     metric=bundle['metric'])
 
     ended_at = datetime.now()
     duration_text = tg_format_elapsed((ended_at - started_at).total_seconds())
@@ -738,7 +752,7 @@ def _run():
 
     try:
         send_telegram(env, '\n'.join(build_telegram_lines(
-            results, meta, direct_ip, bypass_hits, gist_res, qualified_count)))
+            results, meta, direct_ip, bypass_hits, gist_res, bundle, gist_error)))
     except Exception as e:
         log_progress('telegram_send_failed', error=str(e))
 
