@@ -1165,7 +1165,7 @@ jobs:
             [ -n "${LINK_TTFB:-}" ] && \
               waitline="${waitline}你 → OneDrive 拉首字节（预估值）：$(fmt_ms "${LINK_TTFB}")"$'\n'
             [ -n "$sub" ]  && waitline="${waitline}Emby → OneDrive 抽字幕：$(fmt_ms "$sub")"$'\n'
-            [ -n "$seek" ] && waitline="${waitline}拖动进度条（重走取直链）：$(fmt_ms "$seek")"$'\n'
+            [ -n "$seek" ] && waitline="${waitline}拖动进度条（Emby → OneDrive 重取直链）：$(fmt_ms "$seek")"$'\n'
             if [ -n "$waitline" ]; then
               # 末项固定交代"还有一段测不到"，避免把上面几项加起来当成总共等了多久
               waitline="${waitline}你 → OneDrive 拉流缓冲：这段服务器测不到"
