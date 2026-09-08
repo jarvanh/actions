@@ -1363,7 +1363,35 @@ jobs:
             echo "直链预热: 无可用路径（recent 为空且 Latest 未返回 Path/MediaSources）$(date '+%T')"
           fi
 
-          # ---------- 2. 海报墙预热 ----------
+          # ---------- 2. 链路基线（网络侧的两个读数，不是预热） ----------
+          # 紧跟着直链跑：零成本、秒级完成，取消 run 时也保得住这两个读数
+          # （排在海报墙/头尾这些慢段之后，中途被杀就白测了）。
+          # 其余各段测的都是服务器内部耗时；客户端感知的等待还要加"网络上的时间"：
+          #   隧道边缘机房 —— cloudflared 连到哪个 Cloudflare 机房。离你越远，客户端每次 API
+          #                    往返越贵，而这段完全不进服务器日志（ge2o 耗时只算服务端处理）。
+          #   隧道往返 TTFB —— 从公网经隧道域名打一次 Emby，测首字节。≈ 客户端到服务器的单程基线，
+          #                    用于解释"为什么起播 1.4 + 准备 5.3，实际却等了 10 秒"。
+          # 域名走 env EMBY_PUBLIC_HOST（由 VD secret 拼出，不写死、不落日志）。
+          EDGE=$(grep -a 'Registered tunnel connection' /opt/logs/cloudflared.log 2>/dev/null \
+                 | grep -ao 'location=[A-Z0-9]*' | tail -1 | cut -d= -f2)
+          echo "隧道边缘机房: ${EDGE:-未知}"
+          printf 'TUNNEL_EDGE=%s\n' "${EDGE:-}" >> /tmp/warm-baseline.env
+          if [ -n "${EMBY_PUBLIC_HOST:-}" ]; then
+            TT=$(curl -s -o /dev/null -w '%{time_starttransfer}' --max-time 20 \
+                 "https://${EMBY_PUBLIC_HOST}/emby/System/Info/Public" 2>/dev/null)
+            case "$TT" in
+              ''|*[!0-9.]*) echo "隧道往返 TTFB: 测量失败（超时或域名不通）";;
+              *)
+                # 不打印域名：公开日志里出现完整域名等于把入口地址公开出去
+                echo "隧道往返 TTFB: ${TT}s（经公网域名）"
+                printf 'TUNNEL_TTFB=%s\n' "$TT" >> /tmp/warm-baseline.env
+                ;;
+            esac
+          else
+            echo "隧道往返 TTFB: 跳过（未配置 EMBY_PUBLIC_HOST）"
+          fi
+
+          # ---------- 3. 海报墙预热 ----------
           # 宽度档位读跨 run 统计 Top5（随备份跨 run 传递；兼容旧版无得分的 sizes 格式）。
           # ⚠️ 不回退固定 400/600——没有客户端消费过的尺寸预热了也是白占空间，
           # 无档位时本段与 1b 自然零请求（wallwarmer 本轮会把统计写回状态文件）。
@@ -1384,7 +1412,7 @@ jobs:
           done
           echo "海报墙预热完成: ${N} 次请求 $(date '+%T')"
 
-          # ---------- 2b. 各媒体库首屏海报预热 ----------
+          # ---------- 3b. 各媒体库首屏海报预热 ----------
           # 上面的 Latest 只是"首页-最近添加"那 40 条；滑进某个媒体库的第一屏是另一批
           # 条目，每张首图都要 经挂载冷读原图 → 现场缩放 → 写缓存（85k 条目不可能全量
           # 预热）。这里对每个媒体库按默认排序（SortName）取前 WU_LIB_ITEMS 张预热，
@@ -1414,7 +1442,7 @@ jobs:
           done
           echo "媒体库首屏预热完成: 共 ${LIB_N} 张 $(date '+%T')"
 
-          # ---------- 3. 头尾预热 ----------
+          # ---------- 4. 头尾预热 ----------
           # Emby 起播会 ffprobe 文件，读的正是头部与尾部（moov / MKV SeekHead）。
           # full 模式是稀疏缓存、只下载真正读过的区间，所以精准预热这两段即可让探测命中本地。
           # 代价是真实 OneDrive 流量，故用 WU_BUDGET_MB 兜底；
@@ -1436,7 +1464,7 @@ jobs:
             echo "头尾预热完成: ${EDGE_N} 条 / ${USED_MB}MB / 合计 ${EDGE_MS}ms / 均值 $((EDGE_MS / EDGE_N))ms $(date '+%T')"
           fi
 
-          # ---------- 4. 起播准备预热（PlaybackInfo 冷/热计时） ----------
+          # ---------- 5. 起播准备预热（PlaybackInfo 冷/热计时） ----------
           # 客户端"点播放"的第一步是 POST /emby/Items/{id}/PlaybackInfo：Emby 在这一步组装
           # MediaSources，必要时现场 ffprobe、提取内封字幕（都读挂载），ge2o 还会顺带把
           # 媒体路径换成 OneDrive 直链。上游对该接口有 12 小时缓存，所以同一条目连打两次：
@@ -1468,32 +1496,6 @@ jobs:
             echo "起播准备预热完成: ${PI_N} 条 / $(awk '{c += $1; h += $2} END {printf "冷均值 %dms 热均值 %dms", c / NR, h / NR}' /tmp/wu-pi.txt) $(date '+%T')"
           fi
           rm -f /tmp/wu-pi.txt
-
-          # ---------- 5. 链路基线（网络侧的两个读数，不是预热） ----------
-          # 上面四段测的都是服务器内部耗时；客户端感知的等待还要加"网络上的时间"：
-          #   隧道边缘机房 —— cloudflared 连到哪个 Cloudflare 机房。离你越远，客户端每次 API
-          #                    往返越贵，而这段完全不进服务器日志（ge2o 耗时只算服务端处理）。
-          #   隧道往返 TTFB —— 从公网经隧道域名打一次 Emby，测首字节。≈ 客户端到服务器的单程基线，
-          #                    用于解释"为什么起播 1.4 + 准备 5.3，实际却等了 10 秒"。
-          # 域名走 env EMBY_PUBLIC_HOST（公开仓库不写死），未配置则只记边缘机房。
-          EDGE=$(grep -a 'Registered tunnel connection' /opt/logs/cloudflared.log 2>/dev/null \
-                 | grep -ao 'location=[A-Z0-9]*' | tail -1 | cut -d= -f2)
-          echo "隧道边缘机房: ${EDGE:-未知}"
-          printf 'TUNNEL_EDGE=%s\n' "${EDGE:-}" >> /tmp/warm-baseline.env
-          if [ -n "${EMBY_PUBLIC_HOST:-}" ]; then
-            TT=$(curl -s -o /dev/null -w '%{time_starttransfer}' --max-time 20 \
-                 "https://${EMBY_PUBLIC_HOST}/emby/System/Info/Public" 2>/dev/null)
-            case "$TT" in
-              ''|*[!0-9.]*) echo "隧道往返 TTFB: 测量失败（超时或域名不通）";;
-              *)
-                # 不打印域名：公开日志里出现完整域名等于把入口地址公开出去
-                echo "隧道往返 TTFB: ${TT}s（经公网域名）"
-                printf 'TUNNEL_TTFB=%s\n' "$TT" >> /tmp/warm-baseline.env
-                ;;
-            esac
-          else
-            echo "隧道往返 TTFB: 跳过（未配置 EMBY_PUBLIC_HOST）"
-          fi
           WU_EOF
           EMBY_API_KEY="${{ secrets.EMBY_API_TOKEN }}" nohup bash /opt/warmup.sh > /opt/logs/warmup.log 2>&1 &
 
