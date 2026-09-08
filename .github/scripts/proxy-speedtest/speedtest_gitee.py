@@ -2038,7 +2038,7 @@ def build_run_summary(*, started_at, ended_at, elapsed_seconds, duration_text, a
     }
 
 
-def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_count, ok_results, speed_results, speedtest_mode, aborted_due_to_runtime, runtime_abort_reason, ok_results_by_download):
+def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_count, ok_results, speed_results, speedtest_mode, aborted_due_to_runtime, runtime_abort_reason, ok_results_by_download, metric_label=''):
     """生成人性化 Telegram 通知，版式对齐 speedtest.build_telegram_lines。
 
     差异点：gitee 版 TOP 节点指标依旧只显示主速度单指标（如「42兆」），
@@ -2085,7 +2085,9 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
             legend = '↑上传' if any_up else '上行'
         else:
             legend = '↑上传 · ↓下载' if any_up else '↓下载'
-        summary_lines.append(f"🏆 <b>最快节点 · {len(top)}</b> · <i>{legend}</i>")
+        # TOP 已按订阅判定指标排序（见 ok_results_by_download），标题同步点出排序依据
+        sort_hint = f' · 按{html.escape(metric_label)}' if metric_label else ''
+        summary_lines.append(f"🏆 <b>最快节点 · {len(top)}{sort_hint}</b> · <i>{legend}</i>")
         for idx, item in enumerate(top, 1):
             up = get_item_megabits(item, 'push-only')
             if push_only:
@@ -2387,6 +2389,7 @@ def main():
         aborted_due_to_runtime=aborted_due_to_runtime,
         runtime_abort_reason=runtime_abort_reason,
         ok_results_by_download=ok_results_by_download,
+        metric_label=bundle['metric_label'],
     )
     run_stage('Gist 更新/回拉验证/通知', finalize_gist_and_notify, env, summary, summary_lines, subscription_text, bundle)
 
