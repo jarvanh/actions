@@ -57,6 +57,19 @@ env:
   # 期望存在的 Emby 用户名。仓库公开，用户名绝不写死在代码里；走 secret 还有个好处：
   # GitHub 会自动把 secret 值从日志中打码，即使哪天误打印了也泄漏不出去。
   EMBY_USER: ${{ secrets.EMBY_USER }}
+  # 预热规模（warmup.sh 用 ${VAR:-默认} 读取，调参改这里即可，不必改脚本）：
+  #   WU_ITEMS    —— 直链预热（零流量）与头尾预热（真实流量）的条目数
+  #   WU_EDGE_MB  —— 头尾单边预热大小（每条目 ×2），受 WU_BUDGET_MB 总预算约束
+  #   WU_PI_ITEMS —— 起播准备(PlaybackInfo)预热条目数：同一条目连打两次，测 Emby 冷/热准备耗时
+  # 302 直连为主时头尾预热只需兜住 ffprobe：30 条 × 32MB × 2 ≈ 1.9GB，仍在 2048MB 预算内。
+  # 起播慢的定位口径：播放通知「⏳ 起播等待」树里，"服务器向 OneDrive 取直链" = ge2o+odlink 段，
+  # "Emby 读文件头、抽内封字幕" = Emby 的 PlaybackInfo 段（ffprobe / 内封字幕提取）。
+  # Emby 的公网域名（用于自测隧道往返）：仓库公开，不写死在代码里，走 Variables。
+  # 留空则跳过隧道探针，只记录 cloudflared 连到的边缘机房。
+  EMBY_PUBLIC_HOST: ${{ vars.EMBY_PUBLIC_HOST }}
+  WU_ITEMS: "30"
+  WU_EDGE_MB: "32"
+  WU_PI_ITEMS: "6"
 
 jobs:
   build:
@@ -1010,10 +1023,10 @@ jobs:
             ) 9>/tmp/warm-state.lock
           }
 
-          notify() { # $1=KIND $2=IID [$3=NAME] [$4=起播耗时] [$5=客户端IP]
-            local kind=$1 iid=$2 name=$3 dur=$4 cip=$5
+          notify() { # $1=KIND $2=IID [$3=NAME] [$4=要直链耗时] [$5=客户端IP] [$6=读文件头/抽字幕耗时]
+            local kind=$1 iid=$2 name=$3 dur=$4 cip=$5 prep=$6
             local code link text plain n year type series season episode mins hgt codec mpath
-            local cname dev size_b remain_s se title meta client l3 lt
+            local cname dev size_b remain_s se title meta client l3 lt waitline wt sub seek
             claim "$iid" || return 0
             # 分隔符用 \037（单元分隔符）而非 tab：tab 是 IFS 空白字符，read 会折叠连续的
             # 分隔符，中间的空字段（如电影没有 series/季集）会被吃掉、后面的字段整体前移
@@ -1067,9 +1080,50 @@ jobs:
               l3="🔁 视频流经 runner 中转到网盘"
             fi
 
-            # 第 4 行：客户端。IP 来自 ge2o 访问日志（谁在播），起播耗时用于"点播慢"定位
+            # 第 4 行：客户端。IP 来自 ge2o 访问日志（谁在播）
             IFS=$'\037' read -r cname dev <<<"$(client_meta "$iid")"
-            client=$(join_parts "$(esc_html "$cname")" "$(esc_html "$dev")" "$(esc_html "$cip")" "${dur:+起播 ${dur}}")
+            client=$(join_parts "$(esc_html "$cname")" "$(esc_html "$dev")" "$(esc_html "$cip")")
+
+            # 第 5 行起：起播等待（KV 树，与测速三件套「📍 测速点网络」同款，tree_lines 渲染）。
+            # 按"点下播放之后谁先谁后"排：① 客户端到服务器（隧道）② Emby 读文件头 ③ 服务器取直链
+            # ④ 加载字幕 ⑤ OneDrive 首字节 ⑥ 拖动进度条重新取链 ⑦ 播放器缓冲（测不到）。
+            # 一项一行，写清是谁（你客户端 / Emby / 服务器 / OneDrive）在等什么，不用内部黑话；
+            # ①⑤ 是 warmup 探针值、不是本次实测，故标"基线"，免得被当成这次播放的读数。
+            # 变量名不叫 wait：那是 shell 内建命令名，虽然变量与内建互不遮蔽，读起来容易混淆。
+            # 末尾 || true：[ -f ] 不成立时短路会让整条语句返回非 0，在 set -e 下会直接退出
+            [ -f /tmp/warm-baseline.env ] && . /tmp/warm-baseline.env || true   # TUNNEL_TTFB / TUNNEL_EDGE / LINK_TTFB
+            # 加载字幕：同 IP 最近一次字幕请求耗时。Emby 首次要用 ffmpeg 把内封字幕抽出来，
+            # 这常常是"读文件头"之外的另一大块，单独计时才看得到它在不在。
+            sub=""
+            if [ -n "$cip" ]; then
+              sub=$(tail -n 400 "$LOG" 2>/dev/null | grep -aF -- "$cip" | grep -a 'Subtitles' \
+                    | grep -aoE '\| [0-9]+\.[0-9]+s \|' | tail -1 | tr -d '|s ')
+              [ -n "$sub" ] && sub="$(printf '%.1f' "$sub")"
+            fi
+            # 拖动进度条：该条目最近一次 seek 的取链耗时（seek.log 由数据源 A 的循环写入）
+            seek=""
+            if [ -f /opt/logs/seek.log ]; then
+              seek=$(grep -a "item=$iid " /opt/logs/seek.log 2>/dev/null | tail -1 | awk '{print $NF}' | tr -d 's')
+            fi
+            [ -n "$seek" ] && seek="$(printf '%.1f' "$seek")"
+
+            waitline=""
+            if [ -n "${TUNNEL_TTFB:-}" ]; then
+              wt="客户端到服务器（基线"
+              [ -n "${TUNNEL_EDGE:-}" ] && wt="${wt} · 边缘 ${TUNNEL_EDGE}"
+              waitline="${waitline}${wt}）：$(printf '%.1f 秒' "${TUNNEL_TTFB}")"$'\n'
+            fi
+            [ -n "$prep" ] && waitline="${waitline}Emby 读文件头：${prep} 秒"$'\n'
+            [ -n "$dur" ]  && waitline="${waitline}服务器向 OneDrive 取直链：${dur}"$'\n'
+            [ -n "$sub" ]  && waitline="${waitline}加载字幕：${sub} 秒"$'\n'
+            [ -n "${LINK_TTFB:-}" ] && \
+              waitline="${waitline}OneDrive 首字节（基线）：$(printf '%.1f 秒' "${LINK_TTFB}")"$'\n'
+            [ -n "$seek" ] && waitline="${waitline}拖动进度条重新取链：${seek} 秒"$'\n'
+            if [ -n "$waitline" ]; then
+              # 末项固定交代"还有一段测不到"，避免把上面几项加起来当成总共等了多久
+              waitline="${waitline}你播放器联网、缓冲：这段服务器测不到"
+              waitline="⏳ 起播等待"$'\n'"$(tree_lines "$waitline")"
+            fi
 
             # 日志侧只记片名（公开仓库，绝不落直链）；TG 私密消息里才附带直链
             echo "🎬 播放 [$kind] ${n:-未知} (item $iid)"
@@ -1077,6 +1131,8 @@ jobs:
             [ -n "$meta" ] && text="${text}"$'\n'"规格：${meta}"
             text="${text}"$'\n'"链路：${l3}"
             [ -n "$client" ] && text="${text}"$'\n'"客户端：${client}"
+            # waitline 自带「⏳ 起播等待」标题行（KV 树），这里原样追加，不要再套"等待："标签
+            [ -n "$waitline" ] && text="${text}"$'\n'"${waitline}"
             # 长链接折叠成 <a> 超链接，避免整条通知被几百字符的 URL 淹没；
             # 段前空一行，与正文数据区隔开
             [ -n "$link" ] && text="${text}"$'\n'$'\n'"<a href=\"$(esc_html "$link")\">▶ 打开直链</a>"
@@ -1141,12 +1197,35 @@ jobs:
               fi
               # 访问日志里还有"耗时"与"客户端 IP"两列（起播慢 / 谁在播的定位依据），一并带进通知：
               #   [ge2o:v2.8.2] <时间> | 206 | 4.16s | 141.11.43.124 | 8095 <路由> | GET /emby/videos/...
-              DUR=$(printf '%s\n' "$line" | grep -oE '\| [0-9]+\.[0-9]+s \|' | head -1 | tr -d '| ')
+              DUR_RAW=$(printf '%s\n' "$line" | grep -oE '\| [0-9]+\.[0-9]+s \|' | head -1 | tr -d '|s ')
+              DUR="$DUR_RAW"
               # 规范禁英文紧凑时长进通知：ge2o 日志的 "4.16s" → "4.2 秒"
               # （一位小数足够定位"点播慢"，8 位原始精度无意义）
-              [ -n "$DUR" ] && DUR="$(printf '%s' "$DUR" | awk '{printf "%.1f 秒", $1}')"
+              [ -n "$DUR" ] && DUR="$(printf '%.1f 秒' "$DUR")"
               CIP=$(printf '%s\n' "$line" | grep -oE '\| [0-9]{1,3}(\.[0-9]{1,3}){3} \|' | head -1 | tr -d '| ')
-              notify "$KIND" "$IID" "" "$DUR" "$CIP"
+              # Emby 准备耗时：本次播放前、同一 IP 最近一次 PlaybackInfo 的耗时。
+              # 客户端"点播放"第一步就是它，Emby 在这一步组装 MediaSources，必要时现场
+              # ffprobe、提取内封字幕（都读挂载）。与上面的"起播 X 秒"并排即可判断
+              # 10 秒等待里 Emby 占多少、ge2o 占多少、剩下多少是播放器缓冲。
+              # 只看最近 400 行：避免扫全量日志，也天然落在"本次播放前后"的窗口内。
+              PREP=""
+              if [ -n "$CIP" ]; then
+                PREP=$(tail -n 400 "$LOG" 2>/dev/null \
+                       | grep -aF -- "$CIP" | grep -a 'PlaybackInfo' \
+                       | grep -aoE '\| [0-9]+\.[0-9]+s \|' | tail -1 | tr -d '|s ')
+                [ -n "$PREP" ] && PREP="$(printf '%s' "$PREP" | awk '{printf "%.1f", $1}')"
+              fi
+              # 同一条目的"后续"stream 请求 = 拖动进度条 / 续播后重新取链。
+              # 这是起播之后的成本，不该混进起播通知（claim 还有 300s 去重），
+              # 但必须留痕：拖动卡不卡全看这一段，故单独记 seek.log 供通知与收尾统计用。
+              SEEN_DIR=/tmp/pl-seen
+              mkdir -p "$SEEN_DIR" 2>/dev/null
+              if [ -f "$SEEN_DIR/$IID" ]; then
+                printf '%s item=%s %s\n' "$(date '+%F %T')" "$IID" "${DUR_RAW:-0}" >> /opt/logs/seek.log
+                continue
+              fi
+              : > "$SEEN_DIR/$IID" 2>/dev/null
+              notify "$KIND" "$IID" "" "$DUR" "$CIP" "$PREP"
             done
           ) &
 
@@ -1188,10 +1267,13 @@ jobs:
             nohup bash /opt/playlog.sh >> /opt/logs/playlog.log 2>&1 &
       - name: warmup images
         run: |
-          # 三段预热，把"点开就播"的冷启动成本提前付掉：
+          # 四段预热 + 一段链路基线测量：预热把"点开就播"的冷启动成本提前付掉，
+          # 基线把"网络上的时间"单独量出来（这段不进服务器日志，容易被误判成服务器慢）：
           #   海报墙 —— Emby 现场缩放 + ge2o 内存缓存就绪
           #   直链   —— odlink 路径逐段解析与直链签发提前完成（零流量成本）
           #   头尾   —— ffprobe 读的正是文件头部与尾部，提前读进 VFS 稀疏缓存
+          #   起播准备 —— PlaybackInfo 连打两次：逼 Emby 把 ffprobe/字幕提取提前做完，
+          #             同时测出"冷/热"准备耗时（10 秒起播里 Emby 占多少的量化依据）
           # 每段都带计时：预热同时就是测量工具，冷解析与冷读的耗时直接可量化。
           cat > /opt/warmup.sh <<'WU_EOF'
           #!/bin/bash
@@ -1215,6 +1297,11 @@ jobs:
           WU_BUDGET_MB=${WU_BUDGET_MB:-2048}   # 头尾预热总预算(MB)，达上限即停
 
           curl -s "$EMBY/emby/Users/$USER_ID/Items/Latest?Limit=40&Fields=ImageTags,Path,MediaSources&api_key=$KEY" > /tmp/wu-items.json
+
+          # 基线与实测耗时统一落这里，供 playlog 拼"⏳ 起播等待"树读取（空值即该项缺席）。
+          # 只有 warmup 能测的网络侧读数（隧道 / OneDrive 首字节）都标"基线"，
+          # 免得被当成这次播放的实测值。
+          : > /tmp/warm-baseline.env
 
           # ---------- 1. 海报墙预热 ----------
           # 宽度档位读跨 run 统计 Top5（随备份跨 run 传递；兼容旧版无得分的 sizes 格式）。
@@ -1283,19 +1370,41 @@ jobs:
             jq -r --arg id "$ID" '.[] | select(.Id==$id) | (.MediaSources[0].Path // .Path // empty)' /tmp/wu-items.json >> /tmp/wu-paths.txt
           done
           LK_N=0; LK_MS=0
+          : > /tmp/wu-ttfb.txt
           # 进程替换而非管道喂 while：计数器要留在主 shell（管道会让 while 进子 shell）
           while IFS= read -r P; do
             [ -n "$P" ] || continue
             case "$P" in /onedrive/*) ;; *) continue;; esac
             T0=$(date +%s%N)
-            CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$LK_HOST/api/fs/get" \
+            CODE=$(curl -s -o /tmp/wu-fsget.json -w '%{http_code}' -X POST "$LK_HOST/api/fs/get" \
                   -H 'Content-Type: application/json' -H "Authorization: $LK_TOKEN" \
                   -d "$(jq -nc --arg p "$P" '{path:$p}')" --max-time 30)
             MS=$(( ( $(date +%s%N) - T0 ) / 1000000 ))
             echo "直链预热 $(basename "$P") http=$CODE ${MS}ms"
             LK_N=$((LK_N + 1)); LK_MS=$((LK_MS + MS))
+            # 直链首字节(TTFB)：302 之后播放器要新建 TLS 连接去 OneDrive 取第一个字节，
+            # 这是"点播放到出画面"里唯一能在服务端侧近似测到的客户端成本（1 字节 Range，
+            # 零流量代价）。测得慢 = OneDrive 侧响应慢，与本仓库的链路无关。
+            if [ "${WU_TTFB:-1}" != "0" ] && [ "$CODE" = "200" ]; then
+              URL=$(jq -r '.data.raw_url // empty' /tmp/wu-fsget.json 2>/dev/null)
+              if [ -n "$URL" ]; then
+                TTFB=$(curl -s -o /dev/null -w '%{time_starttransfer}' -r 0-0 \
+                       --max-time 20 "$URL" 2>/dev/null)
+                case "$TTFB" in
+                  ''|*[!0-9.]*) ;;
+                  *) echo "直链 TTFB $(basename "$P") ${TTFB}s"; printf '%s\n' "$TTFB" >> /tmp/wu-ttfb.txt;;
+                esac
+              fi
+            fi
           done < <(awk 'NF && !seen[$0]++' /tmp/wu-paths.txt)
-          rm -f /tmp/wu-paths.txt
+          rm -f /tmp/wu-paths.txt /tmp/wu-fsget.json
+          if [ -s /tmp/wu-ttfb.txt ]; then
+            # 一次 awk 出三个数（均值/最大/条数），用 read 拆开，避免为拼一行跑三遍 awk
+            read -r TTFB_AVG TTFB_MAX TTFB_N <<<"$(awk '{if ($1 > m) m = $1; s += $1; n++} END {printf "%.2f %.2f %d", s / n, m, n}' /tmp/wu-ttfb.txt)"
+            echo "直链 TTFB: n=${TTFB_N} 均值 ${TTFB_AVG}s 最大 ${TTFB_MAX}s"
+            printf 'LINK_TTFB=%s\n' "$TTFB_AVG" >> /tmp/warm-baseline.env
+          fi
+          rm -f /tmp/wu-ttfb.txt
           if [ "$LK_N" -gt 0 ]; then
             echo "直链预热完成: ${LK_N} 条（含回看预热 ${REC_N} 条）/ 合计 ${LK_MS}ms / 均值 $((LK_MS / LK_N))ms $(date '+%T')"
           else
@@ -1322,6 +1431,64 @@ jobs:
           done
           if [ "$EDGE_N" -gt 0 ]; then
             echo "头尾预热完成: ${EDGE_N} 条 / ${USED_MB}MB / 合计 ${EDGE_MS}ms / 均值 $((EDGE_MS / EDGE_N))ms $(date '+%T')"
+          fi
+
+          # ---------- 4. 起播准备预热（PlaybackInfo 冷/热计时） ----------
+          # 客户端"点播放"的第一步是 POST /emby/Items/{id}/PlaybackInfo：Emby 在这一步组装
+          # MediaSources，必要时现场 ffprobe、提取内封字幕（都读挂载），ge2o 还会顺带把
+          # 媒体路径换成 OneDrive 直链。上游对该接口有 12 小时缓存，所以同一条目连打两次：
+          #   冷 = Emby 真实准备成本（ffprobe / 字幕提取 / 取直链）
+          #   热 = 命中缓存后的成本 ≈ 真正起播时这一段还要等的时间
+          # 两者之差就是"预热能省下的秒数"，也是"10 秒起播"里 Emby 侧占多少的直接答案。
+          # 预热的意义不只是测量：冷调用已把 Emby 侧的探测/字幕提取与直链一起跑完，
+          # 用户点开时走的是热路径。
+          PI_ITEMS=${WU_PI_ITEMS:-6}
+          PI_N=0
+          : > /tmp/wu-pi.txt
+          for ID in $(jq -r '.[].Id' /tmp/wu-items.json | head -"$PI_ITEMS"); do
+            BODY=$(jq -nc --arg u "$USER_ID" '{UserId:$u}')
+            T0=$(date +%s%N)
+            C1=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+                 "$GE2O/emby/Items/$ID/PlaybackInfo?api_key=$KEY" \
+                 -H 'Content-Type: application/json' -d "$BODY" --max-time 180)
+            C1_MS=$(( ( $(date +%s%N) - T0 ) / 1000000 ))
+            T0=$(date +%s%N)
+            C2=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+                 "$GE2O/emby/Items/$ID/PlaybackInfo?api_key=$KEY" \
+                 -H 'Content-Type: application/json' -d "$BODY" --max-time 60)
+            C2_MS=$(( ( $(date +%s%N) - T0 ) / 1000000 ))
+            echo "起播准备预热 item=$ID 冷=${C1_MS}ms(http=$C1) 热=${C2_MS}ms(http=$C2)"
+            printf '%s %s\n' "$C1_MS" "$C2_MS" >> /tmp/wu-pi.txt
+            PI_N=$((PI_N + 1))
+          done
+          if [ "$PI_N" -gt 0 ]; then
+            echo "起播准备预热完成: ${PI_N} 条 / $(awk '{c += $1; h += $2} END {printf "冷均值 %dms 热均值 %dms", c / NR, h / NR}' /tmp/wu-pi.txt) $(date '+%T')"
+          fi
+          rm -f /tmp/wu-pi.txt
+
+          # ---------- 5. 链路基线（网络侧的两个读数，不是预热） ----------
+          # 上面四段测的都是服务器内部耗时；客户端感知的等待还要加"网络上的时间"：
+          #   隧道边缘机房 —— cloudflared 连到哪个 Cloudflare 机房。离你越远，客户端每次 API
+          #                    往返越贵，而这段完全不进服务器日志（ge2o 耗时只算服务端处理）。
+          #   隧道往返 TTFB —— 从公网经隧道域名打一次 Emby，测首字节。≈ 客户端到服务器的单程基线，
+          #                    用于解释"为什么起播 1.4 + 准备 5.3，实际却等了 10 秒"。
+          # 域名走 env EMBY_PUBLIC_HOST（公开仓库不写死），未配置则只记边缘机房。
+          EDGE=$(grep -a 'Registered tunnel connection' /opt/logs/cloudflared.log 2>/dev/null \
+                 | grep -ao 'location=[A-Z0-9]*' | tail -1 | cut -d= -f2)
+          echo "隧道边缘机房: ${EDGE:-未知}"
+          printf 'TUNNEL_EDGE=%s\n' "${EDGE:-}" >> /tmp/warm-baseline.env
+          if [ -n "${EMBY_PUBLIC_HOST:-}" ]; then
+            TT=$(curl -s -o /dev/null -w '%{time_starttransfer}' --max-time 20 \
+                 "https://${EMBY_PUBLIC_HOST}/emby/System/Info/Public" 2>/dev/null)
+            case "$TT" in
+              ''|*[!0-9.]*) echo "隧道往返 TTFB: 测量失败（超时或域名不通）";;
+              *)
+                echo "隧道往返 TTFB: ${TT}s（经 https://${EMBY_PUBLIC_HOST}）"
+                printf 'TUNNEL_TTFB=%s\n' "$TT" >> /tmp/warm-baseline.env
+                ;;
+            esac
+          else
+            echo "隧道往返 TTFB: 跳过（未配置 EMBY_PUBLIC_HOST）"
           fi
           WU_EOF
           EMBY_API_KEY="${{ secrets.EMBY_API_TOKEN }}" nohup bash /opt/warmup.sh > /opt/logs/warmup.log 2>&1 &
@@ -1629,10 +1796,37 @@ jobs:
           # 播放事件日志归档：便于排查"播了但没通知"
           echo "--- playlog.log (tail 80) ---"
           tail -n 80 /opt/logs/playlog.log 2>/dev/null || echo "(无 playlog.log)"
+          # ge2o 分段耗时统计：把"点播放到出画面"的等待按请求类型拆开——起播准备(PlaybackInfo) /
+          # 视频流(stream) / 字幕 / 图片，一眼看出大头落在哪一段；与 warmup 的冷/热准备均值互为印证。
+          # 依赖 ge2o 访问日志列序（" | 状态码 | 耗时 | IP | 端口 路由 | 方法 路径"），
+          # 版本漂移后如遇全空只需按新格式调列号，不影响其余流程。
+          echo "--- ge2o 请求耗时统计（按类型）---"
+          grep -aE '\| [0-9]+\.[0-9]+s \|' /opt/logs/ge2o.log 2>/dev/null | awk -F' \\| ' '
+            NF >= 6 {
+              ms = $3; sub(/s$/, "", ms); ms = ms * 1000   # 日志列是秒（4.16s），统计口径统一毫秒
+              k = "其它"
+              if ($6 ~ /PlaybackInfo/)    k = "起播准备 PlaybackInfo"
+              else if ($6 ~ /\/videos\//) k = "视频流 stream"
+              else if ($6 ~ /Subtitles/)  k = "字幕"
+              else if ($6 ~ /\/Images\//) k = "图片"
+              n[k]++; s[k] += ms; if (!(k in mx) || ms > mx[k]) mx[k] = ms
+            }
+            END { for (k in n) printf "  %s: n=%d 均值 %dms 最大 %dms\n", k, n[k], s[k] / n[k], mx[k] }' \
+            | sort || echo "(无可用 ge2o 访问日志)"
           # ge2o 自身日志归档：定位播放走中转而非 302 直链的原因。
           # redact_log 会整行丢掉 ge2o 的 cacheKey 调试行（内含完整请求头与 cf_clearance Cookie）
           echo "--- ge2o.log (tail 60, 脱敏) ---"
           tail -n 60 /opt/logs/ge2o.log 2>/dev/null | redact_log || echo "(无 ge2o.log)"
+          # 拖动进度条（seek）的取链耗时：起播之后的成本，通知里只带"最近一次"，
+          # 全量与均值在这里——拖一次卡一次的话，这里能直接看出量级。
+          echo "--- seek.log（拖动取链统计）---"
+          if [ -s /opt/logs/seek.log ]; then
+            awk '{n++; s += $NF; if ($NF > m) m = $NF} \
+                 END {printf "  n=%d 均值 %.1fs 最大 %.1fs\n", n, s / n, m}' /opt/logs/seek.log 2>/dev/null
+            tail -n 20 /opt/logs/seek.log 2>/dev/null
+          else
+            echo "(本轮没有拖动取链记录)"
+          fi
           # odlink 日志归档：直链服务的解析结果——段数/是否跨盘/Graph 码/是否取到直链。
           # odlink 自身已脱敏（不落 token、不落完整链接），这里只再拦一道 URL 兜底。
           echo "--- odlink.log (tail 60, 脱敏) ---"
@@ -1648,6 +1842,10 @@ jobs:
           echo "--- emby-console.log (tail 60, 脱敏) ---"
           tail -n 60 /opt/logs/emby-console.log 2>/dev/null | redact_urls || echo "(无 emby-console.log)"
           # 预热日志：直链冷解析与挂载冷读的实测耗时，判断起播慢在哪一层的量化依据。
+          # 四段各有逐条输出（30 条直链 + 30 条头尾 + 起播准备），只 tail 40 会把前面的
+          # 汇总行挤掉，故先把所有汇总/均值行捞出来，再补尾部上下文。
+          echo "--- warmup.log（汇总行：四个均值）---"
+          grep -aE "预热完成|直链 TTFB:|均值" /opt/logs/warmup.log 2>/dev/null || true
           echo "--- warmup.log (tail 40) ---"
           tail -n 40 /opt/logs/warmup.log 2>/dev/null || echo "(无 warmup.log)"
           # 全库海报预热日志：本轮覆盖了多少张、是否触发磁盘/停机保护
