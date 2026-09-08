@@ -49,6 +49,7 @@ from speedtest_common import (
     build_subscription_bundle,
     build_target_network_section,
     fetch_ip_network_info,
+    latency_probe,
     log_progress,
     merged_env,
     resolve_host_ipv4,
@@ -149,40 +150,8 @@ RESULT_HTML = HOME_RUNTIME / 'speedtest_report.html'
 
 
 # ----------------------------------------------------------------------------
-# 延迟测量：经代理对目标做 HTTP GET，记录分段耗时，取 min/median
+# 延迟测量：latency_probe 已抽到 speedtest_common.py（与 gitee 共用，口径一致）
 # ----------------------------------------------------------------------------
-def latency_probe(targets, proxy_env, samples=4, timeout=8.0):
-    """经代理测量一组目标的延迟，返回 {ok, min_ms, median_ms, samples, error}。"""
-    measurements = []
-    last_error = ''
-    proxy = proxy_env.get('HTTP_PROXY') or proxy_env.get('HTTPS_PROXY')
-    handlers = [urllib.request.ProxyHandler({'http': proxy, 'https': proxy})] if proxy else []
-    opener = urllib.request.build_opener(*handlers)
-    for t in targets:
-        t = t.strip()
-        if not t:
-            continue
-        for _ in range(max(1, samples)):
-            try:
-                req = urllib.request.Request(t, headers={'User-Agent': 'Mozilla/5.0', 'Cache-Control': 'no-cache'})
-                t0 = time.perf_counter()
-                with opener.open(req, timeout=timeout) as r:
-                    r.read(1)
-                elapsed_ms = (time.perf_counter() - t0) * 1000.0
-                measurements.append(round(elapsed_ms, 1))
-            except Exception as e:
-                last_error = f'{t}: {e}'
-                measurements.append(None)
-    valid = [m for m in measurements if m is not None]
-    if not valid:
-        return {'ok': False, 'min_ms': None, 'median_ms': None, 'samples': len(measurements), 'error': last_error}
-    return {
-        'ok': True,
-        'min_ms': round(min(valid), 1),
-        'median_ms': round(statistics.median(valid), 1),
-        'samples': len(measurements),
-        'error': None,
-    }
 
 
 # ----------------------------------------------------------------------------
