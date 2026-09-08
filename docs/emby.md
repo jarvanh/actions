@@ -314,14 +314,14 @@ HTML 解析失败不重发、429 限流保留重试——与全库其余通知�
 规格：电影 · 1 小时 58 分 · 2160p · hevc · 1.7 GB    ← 第 3 行：规格（标签锚点行）
 链路：⚡ 302直连 OneDrive · 直链剩余 38 分钟           ← 第 4 行：链路
 客户端：Infuse-Direct · iPhone · 45.130.164.109          ← 第 5 行：客户端
-⏳ 起播等待                                          ← 第 6 行起：等待（KV 树，同测速三件套，按先后）
-  ├─ 客户端到服务器（基线 · 边缘 HKG）：0.4 秒        ① 你手机 → 隧道 → 服务器
-  ├─ Emby 读文件头：5.3 秒                          ② Emby 打开视频前读文件头
-  ├─ 服务器向 OneDrive 取直链：1.4 秒                ③ 服务器去要下载直链
-  ├─ 加载字幕：2.8 秒                               ④ 抽内封字幕（首次最慢）
-  ├─ OneDrive 首字节（基线）：0.3 秒                 ⑤ 直链拿到第一个字节
-  ├─ 拖动进度条重新取链：0.9 秒                      ⑥ 该条目最近一次 seek
-  └─ 你播放器联网、缓冲：这段服务器测不到             ⑦ 剩下的都在播放器自己身上
+⏳ 起播等待                                          ← 第 6 行起：等待（访问链 KV 树，同测速三件套）
+  ├─ 你 → Cloudflare hkg01（香港） → Emby（预估值）：120 毫秒   ← 你 → 隧道 → 服务器
+  ├─ Emby → OneDrive 读文件头（走挂载）：27 毫秒        ← Emby 打开视频前读文件头
+  ├─ Emby → OneDrive 取直链：1.4 秒                    ← 服务器去要下载直链
+  ├─ 你 → OneDrive 拉首字节（预估值）：200 毫秒         ← 直链拿到第一个字节
+  ├─ Emby → OneDrive 抽字幕：2.8 秒                    ← 抽内封字幕（首次最慢）
+  ├─ 拖动进度条（Emby → OneDrive 重取直链）：880 毫秒   ← 该条目最近一次 seek
+  └─ 你 → OneDrive 拉流缓冲：这段服务器测不到           ← 剩下的都在播放器自己身上
                                                     ← 空行
 ▶ 打开直链                                           ← 超链接（仅 302）
                                                     ← 空行（收尾区铁律）
@@ -335,7 +335,7 @@ HTML 解析失败不重发、429 限流保留重试——与全库其余通知�
 | 3 规格 | Emby `Items` 一次取全 + odlink | 集名（剧集）/ 类型 / 时长 / 分辨率 / 编码 / 体积；体积来自 `odlink-last.json`（仅 302 有）——**任一项取不到就整项省略**，不会出现 `null · · 0` |
 | 4 链路 | 模式 + `odlink-last.json` | 302 = `⚡ 302直连 OneDrive` + 直链剩余有效期；中转 = `🔁 视频流经 runner 中转到网盘`。`2400s` = `odlink.py` 的 `LINK_TTL`，改缓存时长需同步 `playlog.sh` 的 `notify()` |
 | 5 客户端 | Emby `Sessions` + ge2o 日志 | 客户端名 / 设备名来自 Sessions；IP 来自 ge2o 访问日志（数据源 A 才有，用于"谁在播"） |
-| 6 起播等待 | ge2o 访问日志 + warmup 基线 | **KV 树版式**（与测速三件套「📍 测速点网络」同款，`tree_lines` 渲染），**按点播放后的先后顺序排、一行一件事**：① `客户端到服务器` 你手机 → 隧道 → 服务器（**基线**，含边缘机房）② `Emby 读文件头` = `PlaybackInfo` 里读文件头（`ffprobe`）③ `服务器向 OneDrive 取直链` = ge2o + odlink ④ `加载字幕` = 抽内封字幕（首次最慢，常是隐藏大头）⑤ `OneDrive 首字节` = 直链 TTFB（**基线**）⑥ `拖动进度条重新取链` = 该条目最近一次 seek ⑦ 末行固定提示**还有一段在你播放器侧、服务器测不到**，避免把上面几项加起来当成总耗时。措辞按"读通知的人不懂内部术语"写。**基线项**来自 warmup 探针（不是本次播放实测），**取不到的项整行省略**，全都没有则整段不出现 |
+| 6 起播等待 | ge2o 访问日志 + warmup 探针 | **访问链 KV 树版式**（与测速三件套「📍 测速点网络」同款，`tree_lines` 渲染），每行 = 谁访问哪里 + 耗时，**按点播放后的先后顺序排**：`你 → Cloudflare hkg01（香港） → Emby`（预估值，含边缘机房）→ `Emby → OneDrive 读文件头（走挂载）`（`PlaybackInfo` 里的 `ffprobe`）→ `Emby → OneDrive 取直链`（ge2o + odlink）→ `你 → OneDrive 拉首字节`（预估值，直链 TTFB）→ `Emby → OneDrive 抽字幕`（首次最慢，常是隐藏大头）→ `拖动进度条（Emby → OneDrive 重取直链）`（该条目最近一次 seek）→ 末行固定提示**还有一段在你播放器侧、服务器测不到**，避免把上面几项加起来当成总耗时。耗时 <1s 用毫秒、≥1s 用秒（`fmt_ms`）；「你 → Cloudflare → Emby」与「你 → OneDrive 拉首字节」两行来自 warmup 启动探测、**不是本次播放实测**，故标`（预估值）`。措辞按"读通知的人不懂内部术语"写。**取不到的项整行省略**，全都没有则整段不出现 |
 | 7 直链 | `odlink-last.json` | 3 分钟内才视为本次播放所用；HTML `<a>` 折叠，段前空一行 |
 | 8 收尾区 | `tg_notify.sh` 的 `tg_add_footer` | 读 `TG_RUN_URL` / `TG_RUN_STARTED_AT`，缺席时优雅降级跳过 |
 
@@ -552,28 +552,31 @@ sudo EMBY_USER="$EMBY_USER" python3 emby_guard.py <emby-data-root>   # 例：/va
 | 备份没回传 | 收尾步骤 | `/tmp/EMBY_READY_FOR_BACKUP` 不存在（Emby 未成功启动），或磁盘预检未过 |
 | 播放通知片名显示`未知` | 归档的 `playlog.log` | 反查全程 401 = secret 密钥在恢复库里失效（Tokens_2 中无此登录态或 IsActive=0）。`run emby` 步骤启动前会把 secret 密钥以专属设备登录态写回 `authentication.db` 并激活（幂等自愈）；若日志出现"密钥自愈失败"则需人工核对 Emby 版本 schema |
 | 播放通知没来 | `playlog.log` 的 TG 通道自检 | ge2o 日志格式变化 / Emby 401 / 300s 去重窗口内 |
-| 点击播放后要等很久才起播 | 播放通知的**「起播等待」段**（三行：要直链 / 读文件头抽字幕 / 播放器缓冲）→ `warmup.log` / `emby-console.log` | 按秒数定位段：**"Emby 读文件头、抽内封字幕"大** = Emby 侧 ffprobe / 内封字幕提取（走挂载随机读，可让"起播准备预热"提前付掉）；**"服务器向 OneDrive 取直链"大** = odlink 冷解析（未命中 `dir_cache`，扩 `WU_ITEMS`）；**两项都小却仍慢** = 卡在你播放器侧（联网 + 缓冲，服务器测不到），或链路行显示`🔁 视频流经 runner 中转到网盘`（转码）——见下方"起播慢怎么定位" |
+| 点击播放后要等很久才起播 | 播放通知的**「起播等待」段**（访问链：Cloudflare → Emby → OneDrive 各一行）→ `warmup.log` / `emby-console.log` | 按秒数定位段：**"抽字幕"大** = Emby 侧 ffprobe / 内封字幕提取（走挂载随机读，可让"起播准备预热"提前付掉）；**"取直链"大** = odlink 冷解析（未命中 `dir_cache`，扩 `WU_ITEMS`，目录预热 1b 会批量回填）；**各项都小却仍慢** = 卡在你播放器侧（联网 + 缓冲，服务器测不到），或链路行显示`🔁 视频流经 runner 中转到网盘`（转码）——见下方"起播慢怎么定位" |
 
 ### 起播慢怎么定位
 
-`warmup images` 步骤做三段预热，**每段都带计时**，输出进 `warmup.log`：
+`warmup images` 步骤做五段预热，**每段都带计时**，输出进 `warmup.log`。
+段序刻意安排：**快且关键的在前**（直链几十秒、基线秒级），慢的（海报墙 / 头尾 / 起播准备）
+靠后——中途取消 run 也保得住最重要的读数：
 
 | 段 | 做什么 | 成本 | 对 **302 直连播放** | 预热后的效果 |
 |---|---|---|---|---|
-| 海报墙 | 请求最新条目海报，让 Emby 现场缩放 + ge2o 内存缓存就绪 | 低 | ✅ 有效（与模式无关，纯 Emby 侧） | 首页秒开 |
-| 目录（1b） | 对预热路径所在目录打一次 `/api/fs/list`，odlink 会**批量**把该目录所有子条目写进 `dir_cache` | 每目录约 0.5s，十来个目录 | ✅ **覆盖率最高**：一次请求覆盖几十上百个文件；命中 `dir_cache` 后起播只需重新签发直链（1 次 Graph），不必逐段解析。冷解析实测 **1.75s/条**（段数 5、跨盘 1），这是压"取直链 1.4 秒"的主力 |
-| 直链 | 提前打一次 odlink `/api/fs/get`，填充 `link_cache` 并测 TTFB | 零流量 | ✅ **最有效**——ge2o→odlink 的直链解析本身就是 302 起播链路的一环 | 起播时不再逐段下钻 Graph。路径来源两路去重：**recent（最近播放，最可能回看）+ Latest 前 N 条** |
-| 头尾 | 读每个条目的头部与尾部，落进 VFS 稀疏缓存 | 真实流量，受 `WU_BUDGET_MB` 约束 | ⚠️ **基本无效**（视频流不过挂载），只在转码 / 回退 `direct` 时才用得上 | ffprobe / ffmpeg 起播读命中本地 |
-| 起播准备 | 对条目连打**两次** `POST /emby/Items/{id}/PlaybackInfo`（走 ge2o:8095） | 冷调用可能触发 ffprobe / 字幕提取（读挂载） | ✅ **直接消掉"点播放"第一步的冷成本**：ge2o 对该接口有 12h 缓存，冷调用已把 Emby 侧探测与直链改写跑完，用户点开即走热路径 | 冷/热两个均值直接给出「Emby 准备耗时」与「预热能省多少秒」 |
-| 各库首屏 | 每个媒体库按默认排序取前 20 张海报 | 约 1-2s/张×档位数，串行 | ✅ 滑进任意媒体库第一屏命中缓存 | 首屏秒开。宽度档位读跨 run 统计 Top5（`/var/lib/emby/warm-state.json`，随备份跨 run 传递）；**无统计时整体跳过**（不预热没人消费的尺寸） |
+| 1 直链 | 提前打一次 odlink `/api/fs/get`，填充 `link_cache` 并测 TTFB | 零流量，几十秒完成 | ✅ **最有效**——ge2o→odlink 的直链解析本身就是 302 起播链路的一环 | 起播时不再逐段下钻 Graph。路径来源两路去重：**recent（最近播放，最可能回看）+ Latest 前 N 条** |
+| 1b 目录 | 对预热路径所在目录打一次 `/api/fs/list`，odlink 会**批量**把该目录所有子条目写进 `dir_cache` | 每目录约 0.5s，十来个目录 | ✅ **覆盖率最高**：一次请求覆盖几十上百个文件；命中 `dir_cache` 后起播只需重新签发直链（1 次 Graph），不必逐段解析。冷解析实测 **1.75s/条**（段数 5、跨盘 1），这是压"取直链 1.4 秒"的主力 |
+| 2 链路基线 | 见下方"第 2 段是测量" | 秒级 | — | — |
+| 3 海报墙 | 请求最新条目海报，让 Emby 现场缩放 + ge2o 内存缓存就绪 | 低 | ✅ 有效（与模式无关，纯 Emby 侧） | 首页秒开 |
+| 3b 各库首屏 | 每个媒体库按默认排序取前 20 张海报 | 约 1-2s/张×档位数，串行 | ✅ 滑进任意媒体库第一屏命中缓存 | 首屏秒开。宽度档位读跨 run 统计 Top5（`/var/lib/emby/warm-state.json`，随备份跨 run 传递）；**无统计时整体跳过**（不预热没人消费的尺寸） |
+| 4 头尾 | 读每个条目的头部与尾部，落进 VFS 稀疏缓存 | 真实流量，受 `WU_BUDGET_MB` 约束 | ⚠️ **基本无效**（视频流不过挂载），只在转码 / 回退 `direct` 时才用得上 | ffprobe / ffmpeg 起播读命中本地 |
+| 5 起播准备 | 对条目连打**两次** `POST /emby/Items/{id}/PlaybackInfo`（走 ge2o:8095） | 冷调用可能触发 ffprobe / 字幕提取（读挂载） | ✅ **直接消掉"点播放"第一步的冷成本**：ge2o 对该接口有 12h 缓存，冷调用已把 Emby 侧探测与直链改写跑完，用户点开即走热路径 | 冷/热两个均值直接给出「Emby 准备耗时」与「预热能省多少秒」 |
 | 全库海报（`wallwarmer`） | 按 DateCreated 倒序遍历全部条目持续预热 | 后台持续 ~5h，并发 2 | ✅ 滑到已覆盖区域即秒开；逐轮往深处推进 | 深层页面首次浏览不再冷读 |
 
-**第 5 段是测量、不是预热**（`warmup.log` 里单独输出，不产生缓存）：
+**第 2 段（链路基线）是测量、不是预热**（`warmup.log` 里单独输出，不产生缓存）：
 
 | 读数 | 怎么测 | 回答什么问题 |
 |---|---|---|
 | 隧道边缘机房 | 从 `cloudflared.log` 抓 `location=XXX` | cloudflared 连到哪个 Cloudflare 机房。离你越远，客户端每次 API 往返越贵——而这段**完全不进服务器日志** |
-| 隧道往返 TTFB | 经公网域名打一次 `/emby/System/Info/Public` 测首字节（需仓库 Variables 配 `EMBY_PUBLIC_HOST`，未配则跳过） | ≈ 客户端到服务器的单程基线，解释"为什么起播 1.4 + 准备 5.3，实际却等了 10 秒" |
+| 隧道往返 TTFB | 经公网域名打一次 `/emby/System/Info/Public` 测首字节（域名默认由 `VD` secret 拼成 `e.<VD>.eu.org`，可用仓库 Variables `EMBY_PUBLIC_HOST` 覆盖） | ≈ 客户端到服务器的单程基线，解释"为什么起播 1.4 + 准备 5.3，实际却等了 10 秒" |
 
 日志里这几个**均值**就是判断依据：
 
@@ -583,13 +586,21 @@ sudo EMBY_USER="$EMBY_USER" python3 emby_guard.py <emby-data-root>   # 例：/va
 - **头尾均值** —— 冷读 `WU_EDGE_MB × 2` 的成本，换算成 MB/s 可反推 ffprobe 会花多久
 - **直链 TTFB** —— 302 之后取第一个字节要多久（1 字节 Range 实测）。它慢说明 OneDrive 侧响应慢，
   与本仓库链路无关，且是"点播放到出画面"里服务端唯一能近似的客户端成本
-- **隧道边缘机房 / 隧道往返 TTFB**（第 5 段）—— 网络侧的基线。服务器耗时加起来只有 6.7 秒、
+- **隧道边缘机房 / 隧道往返 TTFB**（第 2 段）—— 网络侧的基线。服务器耗时加起来只有 6.7 秒、
   你却等了 10 秒时，差额基本就在这里：客户端 → Cloudflare 边缘 → runner 的往返，
-  且 `PlaybackInfo` 这类接口往往要往返好几次
+  且 `PlaybackInfo` 这类接口往往要往返好几次。边缘机房会漂移（实测出现过 sjc01 / iad14），
+  通知里带中文城市（`edge_cn` 映射表，IATA 机场码 → 中文，未收录回退原代码）
 
-> 想定位单次播放：直接看**播放通知的「起播等待」段**，一行一件事——
-> 「服务器向 OneDrive 取直链」是服务器去拿下载链接的时间；「Emby 读文件头、抽内封字幕」是 Emby 打开视频前
-> 读文件头、必要时把内封字幕抽出来的时间（这段常是大头）；剩下的都在你播放器自己身上（联网 + 缓冲），服务器测不到。
+> ⚠️ **ge2o 日志的耗时列单位不固定**：同一列会出现 `152.244µs` / `90.36ms` / `1.4s` 三种单位，
+> 只认 "数字s" 会漏掉全部毫秒级请求——`PlaybackInfo` 实测全是 ms 级（冷 22~27ms），
+> 这是首版「Emby 读文件头」永远缺失的真因。仓库侧已用 `to_sec()` 归一化，自己 grep 时注意。
+> 另外 ge2o 对同一请求打两行：带路由的那行是完整耗时，紧随其后的空路由行是 µs 级上游子请求，
+> 取数要认带路由的（小写 `playbackinfo` / `subtitles`）。
+
+> 想定位单次播放：直接看**播放通知的「起播等待」段**（访问链写法，一行 = 谁访问哪里 + 耗时）——
+> 「Emby → OneDrive 取直链」是服务器去拿下载链接的时间（未命中 `dir_cache` 冷解析 1.75s，
+> 命中后几十毫秒）；「Emby → OneDrive 读文件头」是 Emby 打开视频前读文件头的时间；
+> 剩下的都在你播放器自己身上（联网 + 缓冲），服务器测不到。
 
 > **头尾预热对 302 直连播放基本没用**：302 模式下播放器拿到重定向后直连 OneDrive CDN
 > 拉 Range，全程不经过挂载，VFS 缓存根本不参与。它真正兜住的是四类"仍会读挂载"的场景：
@@ -641,11 +652,12 @@ sudo EMBY_USER="$EMBY_USER" python3 emby_guard.py <emby-data-root>   # 例：/va
 | Emby API 密钥自愈 | `run emby` 步骤（把 secret 密钥以 `emby302-workflow` 专属设备登录态写回 `authentication.db` 的 `Tokens_2` 并激活，幂等） |
 | rclone mount 参数（seek 优先口径） | `emby.yml` 的 `rclone-run` 步骤 |
 | `/mnt` 容量预留 | workflow `env:` 的 `MNT_RESERVE_KB`（默认 6GB），分配逻辑在 `lib.sh` |
-| 预热规模 | workflow `env:` 的 `WU_ITEMS`(30) / `WU_EDGE_MB`(32) / `WU_BUDGET_MB`(2048) / `WU_PI_ITEMS`(6)，脚本在 `emby.yml` 的 `warmup images` 步骤。`WU_ITEMS` 同时管直链（零流量）与头尾（真实流量）预热，30×32MB×2≈1.9GB 仍在预算内；`WU_PI_ITEMS` 是起播准备预热的条目数（每条连打两次 `PlaybackInfo`，冷调用可能触发 ffprobe/字幕提取，别设太大）。直链预热另含 **recent 回看预热**（playlog 写入 `warm-state.json`，保留最近 12 条，条数无需配置）。想量化起播慢看 `warmup.log` 的四个均值与收尾的「ge2o 请求耗时统计」 |
+| 预热规模 | workflow `env:` 的 `WU_ITEMS`(30) / `WU_EDGE_MB`(32) / `WU_BUDGET_MB`(2048) / `WU_PI_ITEMS`(6)，脚本在 `emby.yml` 的 `warmup images` 步骤。`WU_ITEMS` 同时管直链（零流量）与头尾（真实流量）预热，30×32MB×2≈1.9GB 仍在预算内；`WU_PI_ITEMS` 是起播准备预热的条目数（每条连打两次 `PlaybackInfo`，冷调用可能触发 ffprobe/字幕提取，别设太大）。段序：1 直链 → 1b 目录 → 2 链路基线 → 3 海报墙/3b 首屏 → 4 头尾 → 5 起播准备（快且关键的在前，中途取消也保得住读数）。直链预热另含 **recent 回看预热**（playlog 写入 `warm-state.json`，保留最近 12 条，条数无需配置）。想量化起播慢看 `warmup.log` 的均值与收尾的「ge2o 请求耗时统计」 |
 | 全库海报预热 | `start wall warmer` 步骤的 `/opt/wallwarmer.sh`：按 DateCreated 倒序分页遍历全部条目，把 Primary 海报拉进 Emby 缓存（`/mnt/emby-cache`）。**宽度档位跨 run 统计**——状态文件 `/var/lib/emby/warm-state.json` 存 `[宽度,得分]`（得分=按半衰期衰减的历史请求量，`WW_DECAY`=0.5），每轮启动先对历史得分衰减一次，再与本轮 ge2o 实测计数合并取 Top5（`WW_SIZES_MAX`=5）作为预热档位；持续被消费的档位留存，无人用的按半衰期退出（得分<1 淘汰）。每条目按这些档位各预热一份；请求只带 `maxWidth` 不带 `maxHeight`（缓存键含参数组合，box-fit 下带两者会得到更小的图、与客户端要的对不上）。统计每页写回状态文件、随备份跨 run 传递——ge2o 日志每轮清零，跨 run 全靠它。环境变量 `WW_WORKERS`(2) / `WW_GAP`(0.2s) / `WW_MAX_MIN`(300min) / `WW_SIZES_MAX`(5) / `WW_DECAY`(0.5) / `WW_MIN_FREE_KB`(/mnt 剩余 10GB 下限) / `WW_START_DELAY`(180s，让首屏预热先跑)。直连 Emby 不过 ge2o；缓存随备份持久化，逐轮往深处推进。**写回时保留 `recent` 字段**（playlog 记录的最近播放路径）——persist_state 是整体覆盖写，丢掉它回看预热就失效 |
 | 校验用的 Emby 用户名 | secret `EMBY_USER`（**不写死在代码里**；未配置则退化为"至少一个用户"） |
 | Emby 公网域名（隧道往返自测用） | 默认取 `e.<VD>.eu.org`（`VD` secret 拼出来，公开仓库不写死域名，日志里也会被自动打码）；换域名时用仓库 **Variables** `EMBY_PUBLIC_HOST` 覆盖。域名解析不通则跳过隧道 TTFB，只记边缘机房 |
-| 起播等待树的基线与字幕/拖动读数 | 基线由 `warmup.sh` 第 5 段写入 `/tmp/warm-baseline.env`（`TUNNEL_TTFB` / `TUNNEL_EDGE` / `LINK_TTFB`），playlog 每次播放现读；字幕耗时取同 IP 最近一次 `Subtitles` 请求；拖动取链由 playlog 写 `/opt/logs/seek.log`（同一条目第 2 次起 stream 请求才算拖动，首播不计） |
+| 起播等待树的基线与字幕/拖动读数 | 基线由 `warmup.sh` 第 2 段写入 `/tmp/warm-baseline.env`（`TUNNEL_TTFB` / `TUNNEL_EDGE` / `LINK_TTFB`），playlog 每次播放现读；字幕耗时取同 IP 最近一次 `Subtitles` 请求（µs/ms/s 三种单位经 `to_sec()` 归一化）；拖动取链由 playlog 写 `/opt/logs/seek.log`（同一条目第 2 次起 stream 请求才算拖动，首播不计） |
+| 取消 run 也要拿诊断日志 | `gh run cancel`（**不要 force-cancel**：force 直接杀 runner，`always()` 步骤不执行）→ 等 ~5 分钟宽限期 → `archive diagnostics` 步骤会在宽限期内秒级输出 warmup / seek / ge2o 分类统计 / odlink / emby-console 全部诊断。该步骤排在 `backup emby data` **之前**——备份是 30GB 级上传，宽限期跑不完会被 SIGTERM 强杀，排它后面的归档永远轮不到输出 |
 | Emby 校验项 | `emby302/emby_guard.py`（恢复侧与备份侧共用同一份） |
 | 磁盘预检阈值 / 脱敏口径 | `emby302/lib.sh` |
 | 通知内容与时机 | 启动通知、收尾通知在 workflow 内；播放通知在 `playlog.sh` heredoc |
