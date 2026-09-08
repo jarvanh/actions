@@ -1030,6 +1030,22 @@ jobs:
             awk -v x="$v" 'BEGIN { if (x < 1) printf "%d 毫秒", x * 1000 + 0.5; else printf "%.1f 秒", x }'
           }
 
+          # Cloudflare 边缘机房代码 → 中文城市。代码是 IATA 机场码（iad=华盛顿杜勒斯、
+          # sjc=圣何塞），一般人看不懂，通知里带上中文。只映射常见节点，未收录回退原代码。
+          edge_cn() {
+            local code=$1 city=""
+            case "${code%%[0-9]*}" in
+              iad) city=华盛顿;;   sjc) city=圣何塞;;   lax) city=洛杉矶;;   ord) city=芝加哥;;
+              hkg) city=香港;;     nrt) city=东京;;     kix) city=大阪;;     icn) city=首尔;;
+              sin) city=新加坡;;   syd) city=悉尼;;     akl) city=奥克兰;;   fra) city=法兰克福;;
+              lhr) city=伦敦;;     ams) city=阿姆斯特丹;; cdg) city=巴黎;;   yyz) city=多伦多;;
+              gru) city=圣保罗;;   mex) city=墨西哥城;; bom) city=孟买;;    maa) city=金奈;;
+              del) city=德里;;     jnb) city=约翰内斯堡;; cpt) city=开普敦;;
+              *) ;;
+            esac
+            [ -n "$city" ] && printf '%s %s' "$code" "$city" || printf '%s' "$code"
+          }
+
           # 跨 run 回看预热：把播放条目的媒体路径记入 warm-state.json 的 recent 列表
           # （随备份跨 run 持久化，下轮 warmup 优先预热这些直链——最可能被回看的内容）。
           # /var/lib/emby 属主是 emby，runner 写不进，走 sudo 读改写；文件不存在或
@@ -1136,17 +1152,27 @@ jobs:
               seek=$(grep -a "item=$iid " /opt/logs/seek.log 2>/dev/null | tail -1 | awk '{print $NF}' | tr -d 's')
             fi
             waitline=""
+            # 圆圈编号 = 点下播放后的真实先后，缺哪项就是那步没发生/没测到：
+            #   ① 网络到服务器 ② Emby 读文件头 ③ 服务器取直链 ④ OneDrive 首字节
+            #   ⑤ 加载字幕 ⑥ 拖动进度条重新取链 ⑦ 播放器联网缓冲（测不到）
+            # "开机实测"指 warmup 服务启动时探测的参考值，不是本次播放的读数——
+            # 之前叫"基线"，看不懂的人太多。
             if [ -n "${TUNNEL_TTFB:-}" ]; then
-              wt="客户端到服务器（基线"
-              [ -n "${TUNNEL_EDGE:-}" ] && wt="${wt} · 边缘 ${TUNNEL_EDGE}"
+              wt="① 客户端到服务器（开机实测"
+              [ -n "${TUNNEL_EDGE:-}" ] && wt="${wt} · 边缘 $(edge_cn "${TUNNEL_EDGE}")"
               waitline="${waitline}${wt}）：$(fmt_ms "${TUNNEL_TTFB}")"$'\n'
             fi
-            [ -n "$prep" ] && waitline="${waitline}Emby 读文件头：$(fmt_ms "$prep")"$'\n'
-            [ -n "$dur" ]  && waitline="${waitline}服务器向 OneDrive 取直链：$(fmt_ms "$dur")"$'\n'
-            [ -n "$sub" ]  && waitline="${waitline}加载字幕：$(fmt_ms "$sub")"$'\n'
+            [ -n "$prep" ] && waitline="${waitline}② Emby 读文件头：$(fmt_ms "$prep")"$'\n'
+            [ -n "$dur" ]  && waitline="${waitline}③ 服务器向 OneDrive 取直链：$(fmt_ms "$dur")"$'\n'
             [ -n "${LINK_TTFB:-}" ] && \
-              waitline="${waitline}OneDrive 首字节（基线）：$(fmt_ms "${LINK_TTFB}")"$'\n'
-            [ -n "$seek" ] && waitline="${waitline}拖动进度条重新取链：$(fmt_ms "$seek")"$'\n'
+              waitline="${waitline}④ OneDrive 首字节（开机实测）：$(fmt_ms "${LINK_TTFB}")"$'\n'
+            [ -n "$sub" ]  && waitline="${waitline}⑤ 加载字幕：$(fmt_ms "$sub")"$'\n'
+            [ -n "$seek" ] && waitline="${waitline}⑥ 拖动进度条重新取链：$(fmt_ms "$seek")"$'\n'
+            if [ -n "$waitline" ]; then
+              # 末项固定交代"还有一段测不到"，避免把上面几项加起来当成总共等了多久
+              waitline="${waitline}⑦ 你播放器联网、缓冲：这段服务器测不到"
+              waitline="⏳ 起播等待"$'\n'"$(tree_lines "$waitline")"
+            fi
             if [ -n "$waitline" ]; then
               # 末项固定交代"还有一段测不到"，避免把上面几项加起来当成总共等了多久
               waitline="${waitline}你播放器联网、缓冲：这段服务器测不到"
