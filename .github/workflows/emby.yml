@@ -1305,58 +1305,7 @@ jobs:
           # 免得被当成这次播放的实测值。
           : > /tmp/warm-baseline.env
 
-          # ---------- 1. 海报墙预热 ----------
-          # 宽度档位读跨 run 统计 Top5（随备份跨 run 传递；兼容旧版无得分的 sizes 格式）。
-          # ⚠️ 不回退固定 400/600——没有客户端消费过的尺寸预热了也是白占空间，
-          # 无档位时本段与 1b 自然零请求（wallwarmer 本轮会把统计写回状态文件）。
-          # 请求只带 maxWidth：缓存键含参数组合，box-fit 下补 maxHeight 得到的是
-          # 更小的图，与客户端实际要的对不上（同 wallwarmer 口径）。
-          WU_SIZES=$(jq -r 'if has("scores") then .scores[]?[0] else .sizes[]? end' \
-                     /var/lib/emby/warm-state.json 2>/dev/null | tr '\n' ' ')
-          echo "海报墙/首屏预热宽度档: ${WU_SIZES:-无（跳过，等 wallwarmer 记录客户端档位）}"
-          N=0
-          for ID in $(jq -r '.[].Id' /tmp/wu-items.json | head -40); do
-            jq -r --arg id "$ID" '.[] | select(.Id==$id) | .ImageTags.Primary // empty' /tmp/wu-items.json > /tmp/wu-tag.txt 2>/dev/null
-            read -r TAG < /tmp/wu-tag.txt 2>/dev/null || TAG=
-            [ -n "$TAG" ] || continue
-            for W in $WU_SIZES; do
-              curl -s -o /dev/null "$GE2O/emby/Items/$ID/Images/Primary?maxWidth=$W&tag=$TAG"
-              N=$((N + 1))
-            done
-          done
-          echo "海报墙预热完成: ${N} 次请求 $(date '+%T')"
-
-          # ---------- 1b. 各媒体库首屏海报预热 ----------
-          # 上面的 Latest 只是"首页-最近添加"那 40 条；滑进某个媒体库的第一屏是另一批
-          # 条目，每张首图都要 经挂载冷读原图 → 现场缩放 → 写缓存（85k 条目不可能全量
-          # 预热）。这里对每个媒体库按默认排序（SortName）取前 WU_LIB_ITEMS 张预热，
-          # 让"点开任意媒体库的第一屏"也命中缓存。串行请求，避免并发冷读触发限流。
-          WU_LIB_ITEMS=${WU_LIB_ITEMS:-20}
-          LIB_N=0
-          # 宽度档位沿用上面的 $WU_SIZES（已含"无档位则零请求"语义）
-          VIEWS=$(curl -s "$EMBY/emby/Users/$USER_ID/Views?api_key=$KEY" \
-                  | jq -r '.Items[]?.Id' 2>/dev/null || true)
-          for VIEW in $VIEWS; do
-            T0=$(date +%s%N)
-            LIB_OK=0
-            # ImageTags 的值是十六进制串（无空格），"Id TAG" 空格分行即可安全 split
-            ROWS=$(curl -s "$EMBY/emby/Users/$USER_ID/Items?ParentId=$VIEW&Recursive=true&SortBy=SortName&SortOrder=Ascending&Limit=$WU_LIB_ITEMS&Fields=ImageTags&api_key=$KEY" \
-                   | jq -r '.Items[]? | "\(.Id) \(.ImageTags.Primary // "-")"' 2>/dev/null || true)
-            for ROW in $ROWS; do
-              ID=${ROW%% *}; TAG=${ROW#* }
-              { [ -n "$TAG" ] && [ "$TAG" != "-" ]; } || continue
-              for W in $WU_SIZES; do
-                curl -s -o /dev/null "$GE2O/emby/Items/$ID/Images/Primary?maxWidth=$W&tag=$TAG" || true
-                LIB_OK=$((LIB_OK + 1))
-              done
-            done
-            MS=$(( ( $(date +%s%N) - T0 ) / 1000000 ))
-            LIB_N=$((LIB_N + LIB_OK))
-            echo "媒体库首屏预热 view=$VIEW ${LIB_OK}张 ${MS}ms"
-          done
-          echo "媒体库首屏预热完成: 共 ${LIB_N} 张 $(date '+%T')"
-
-          # ---------- 2. 直链预热 ----------
+          # ---------- 1. 直链预热（最先跑：零流量、几十秒完成，取消 run 时也保得住数据） ----------
           # odlink 的 dir_cache(无 TTL) 与 link_cache(40min) 都在进程内存里，每轮 run 都是冷启动。
           # 提前打一次 /api/fs/get，起播时 ge2o 打过来直接命中：路径解析结果本轮内一直有效，
           # 40 分钟后只需重新签发直链（1 次 Graph 调用，而非逐段下钻 N 次）。
@@ -1412,6 +1361,57 @@ jobs:
           else
             echo "直链预热: 无可用路径（recent 为空且 Latest 未返回 Path/MediaSources）$(date '+%T')"
           fi
+
+          # ---------- 2. 海报墙预热 ----------
+          # 宽度档位读跨 run 统计 Top5（随备份跨 run 传递；兼容旧版无得分的 sizes 格式）。
+          # ⚠️ 不回退固定 400/600——没有客户端消费过的尺寸预热了也是白占空间，
+          # 无档位时本段与 1b 自然零请求（wallwarmer 本轮会把统计写回状态文件）。
+          # 请求只带 maxWidth：缓存键含参数组合，box-fit 下补 maxHeight 得到的是
+          # 更小的图，与客户端实际要的对不上（同 wallwarmer 口径）。
+          WU_SIZES=$(jq -r 'if has("scores") then .scores[]?[0] else .sizes[]? end' \
+                     /var/lib/emby/warm-state.json 2>/dev/null | tr '\n' ' ')
+          echo "海报墙/首屏预热宽度档: ${WU_SIZES:-无（跳过，等 wallwarmer 记录客户端档位）}"
+          N=0
+          for ID in $(jq -r '.[].Id' /tmp/wu-items.json | head -40); do
+            jq -r --arg id "$ID" '.[] | select(.Id==$id) | .ImageTags.Primary // empty' /tmp/wu-items.json > /tmp/wu-tag.txt 2>/dev/null
+            read -r TAG < /tmp/wu-tag.txt 2>/dev/null || TAG=
+            [ -n "$TAG" ] || continue
+            for W in $WU_SIZES; do
+              curl -s -o /dev/null "$GE2O/emby/Items/$ID/Images/Primary?maxWidth=$W&tag=$TAG"
+              N=$((N + 1))
+            done
+          done
+          echo "海报墙预热完成: ${N} 次请求 $(date '+%T')"
+
+          # ---------- 2b. 各媒体库首屏海报预热 ----------
+          # 上面的 Latest 只是"首页-最近添加"那 40 条；滑进某个媒体库的第一屏是另一批
+          # 条目，每张首图都要 经挂载冷读原图 → 现场缩放 → 写缓存（85k 条目不可能全量
+          # 预热）。这里对每个媒体库按默认排序（SortName）取前 WU_LIB_ITEMS 张预热，
+          # 让"点开任意媒体库的第一屏"也命中缓存。串行请求，避免并发冷读触发限流。
+          WU_LIB_ITEMS=${WU_LIB_ITEMS:-20}
+          LIB_N=0
+          # 宽度档位沿用上面的 $WU_SIZES（已含"无档位则零请求"语义）
+          VIEWS=$(curl -s "$EMBY/emby/Users/$USER_ID/Views?api_key=$KEY" \
+                  | jq -r '.Items[]?.Id' 2>/dev/null || true)
+          for VIEW in $VIEWS; do
+            T0=$(date +%s%N)
+            LIB_OK=0
+            # ImageTags 的值是十六进制串（无空格），"Id TAG" 空格分行即可安全 split
+            ROWS=$(curl -s "$EMBY/emby/Users/$USER_ID/Items?ParentId=$VIEW&Recursive=true&SortBy=SortName&SortOrder=Ascending&Limit=$WU_LIB_ITEMS&Fields=ImageTags&api_key=$KEY" \
+                   | jq -r '.Items[]? | "\(.Id) \(.ImageTags.Primary // "-")"' 2>/dev/null || true)
+            for ROW in $ROWS; do
+              ID=${ROW%% *}; TAG=${ROW#* }
+              { [ -n "$TAG" ] && [ "$TAG" != "-" ]; } || continue
+              for W in $WU_SIZES; do
+                curl -s -o /dev/null "$GE2O/emby/Items/$ID/Images/Primary?maxWidth=$W&tag=$TAG" || true
+                LIB_OK=$((LIB_OK + 1))
+              done
+            done
+            MS=$(( ( $(date +%s%N) - T0 ) / 1000000 ))
+            LIB_N=$((LIB_N + LIB_OK))
+            echo "媒体库首屏预热 view=$VIEW ${LIB_OK}张 ${MS}ms"
+          done
+          echo "媒体库首屏预热完成: 共 ${LIB_N} 张 $(date '+%T')"
 
           # ---------- 3. 头尾预热 ----------
           # Emby 起播会 ffprobe 文件，读的正是头部与尾部（moov / MKV SeekHead）。
@@ -1646,6 +1646,42 @@ jobs:
       - name: sleep
         run: |
           sleep 340m
+      - name: archive diagnostics
+        if: always()
+        run: |
+          # 取消/失败时也拿得到诊断数据：抢在取消信号的 ~5 分钟宽限期内输出完（只 echo，秒级）。
+          # 必须排在 backup emby data 之前——备份是 30GB 级上传，宽限期内跑不完会被强杀，
+          # 排在它后面的话归档永远轮不到输出（2026-09-08 实测两次取消都因此拿不到日志）。
+          source "$EMBY302_DIR/lib.sh"
+          echo "--- warmup.log (tail 60) ---"
+          tail -n 60 /opt/logs/warmup.log 2>/dev/null || echo "(无 warmup.log)"
+          echo "--- seek.log（拖动取链统计）---"
+          if [ -s /opt/logs/seek.log ]; then
+            awk '{n++; s += $NF; if ($NF > m) m = $NF} \
+                 END {printf "  n=%d 均值 %.1fs 最大 %.1fs\n", n, s / n, m}' /opt/logs/seek.log
+            tail -n 20 /opt/logs/seek.log
+          else
+            echo "(无 seek 记录)"
+          fi
+          echo "--- ge2o 请求耗时统计（按类型）---"
+          grep -aE '\| [0-9]+\.[0-9]+s \|' /opt/logs/ge2o.log 2>/dev/null | awk -F' \\| ' '
+            NF >= 6 {
+              ms = $3; sub(/s$/, "", ms); ms = ms * 1000   # 日志列是秒（4.16s），统计口径统一毫秒
+              k = "其它"
+              if ($6 ~ /PlaybackInfo/)    k = "起播准备 PlaybackInfo"
+              else if ($6 ~ /\/videos\//) k = "视频流 stream"
+              else if ($6 ~ /Subtitles/)  k = "字幕"
+              else if ($6 ~ /\/Images\//) k = "图片"
+              n[k]++; s[k] += ms; if (!(k in mx) || ms > mx[k]) mx[k] = ms
+            }
+            END { for (k in n) printf "  %s: n=%d 均值 %dms 最大 %dms\n", k, n[k], s[k] / n[k], mx[k] }' \
+            | sort
+          echo "--- ge2o.log (tail 80, 脱敏) ---"
+          tail -n 80 /opt/logs/ge2o.log 2>/dev/null | redact_log || echo "(无 ge2o.log)"
+          echo "--- odlink.log (tail 40, 脱敏) ---"
+          tail -n 40 /opt/logs/odlink.log 2>/dev/null | redact_urls || echo "(无 odlink.log)"
+          echo "--- emby-console.log (tail 40, 脱敏) ---"
+          tail -n 40 /opt/logs/emby-console.log 2>/dev/null | redact_urls || echo "(无 emby-console.log)"
       - name: backup emby data
         if: always()
         run: |
