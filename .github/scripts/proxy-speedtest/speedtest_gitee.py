@@ -1067,7 +1067,7 @@ def git_direct_speedtest(env, gitee, test_file: pathlib.Path, push_timeout: int,
             if speedtest_mode != 'push-only':
                 download_s, pulled = git_clone_testbranch(
                     clone_dir=clone_dir,
-                    remote=gitee['remote_public'],
+                    remote=gitee['remote_with_token'],
                     env=local_env,
                     timeout=clone_timeout,
                     branch_name=branch_name,
@@ -1141,7 +1141,7 @@ def speedtest_single_item(env, gitee, item: dict, test_file: pathlib.Path, push_
     if speedtest_mode != 'push-only':
         download_s, pulled = git_clone_testbranch(
             clone_dir=clone_dir,
-            remote=gitee['remote_public'],
+            remote=gitee['remote_with_token'],
             env=local_env,
             timeout=clone_timeout,
             branch_name=branch_name,
