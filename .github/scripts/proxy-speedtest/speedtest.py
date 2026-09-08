@@ -5,20 +5,21 @@
 baidu/taobao、下载测速点腾讯云/清华 TUNA 镜像 ISO 与 npmmirror 最新 node 包，
 与 gitee（Gitee 私有仓库上行专项）、taier（泰尔三网测速服务器）相区分。
 
-复用 speedtest_gitee.py 的 mihomo 内核启动 / 节点快照 / 节点切换能力，新增：
+复用 speedtest_common.py 共享层（订阅导出策略 / 通知排版 / 归属查询 / Telegram 发送 /
+Gist 上传）与 speedtest_gitee.py 的 mihomo 内核启动 / 节点快照 / 节点切换能力，新增：
   - latency_probe      : 经代理对目标 URL 做 HTTP 计时（延迟）
   - resolve_download_urls: 运行时自动发现国内测速点（滚动 ISO 软链 + npmmirror 最新版），规避写死版本号失效
   - download_speedtest : 经 mixed-port 代理 curl Range 拉取测速点，换算 MiB/s（单连接，与 gitee 上行口径一致）
   - gitee_push_speedtest: 经代理 git push 到 Gitee 测上行（复用 speedtest_gitee.git_force_push_testfile）
   - build_html_report  : 生成自包含、可交互 HTML 可视化报告
-  - 订阅导出 + Gist 上传: 复用 speedtest_gitee.build_source_mapping / build_subscription_yaml_text /
+  - 订阅导出 + Gist 上传: 复用 speedtest_common.build_subscription_bundle / build_target_network_section /
     update_gist，把达标节点的原始配置整理成订阅并发布到本工作流专属 Gist
     （secret PROXY_SPEEDTEST_CDN_GIST_ID；文件名/描述经 PROXY_SPEEDTEST_GIST_FILENAME/
     PROXY_SPEEDTEST_GIST_DESCRIPTION 覆盖，三件套各自可辨）
 
 设计原则：
-  - 尽量不改 speedtest_gitee.py，仅以 `from speedtest_gitee import ...` 复用已验证能力
-    （为三件套 Gist 区分做的少量共享扩展见其 _gist_identity）。
+  - 共享能力一律 import 复用：纯共享层来自 speedtest_common，mihomo/订阅源来自
+    speedtest_gitee（不改它们的既有行为）。
   - 节点逐节点**串行**测试（共享同一 mihomo 内核，切换后等待 settle）。
   - 自定义参数全部通过环境变量控制（见 CONFIG 区块）。
   - 兜底对齐 gitee：SIGTERM/SIGINT → ⛔ 通知；未捕获异常 → ❌ 通知（标题带原因摘要）。
@@ -38,35 +39,37 @@ from datetime import datetime
 import yaml
 
 # ----------------------------------------------------------------------------
-# 复用 speedtest_gitee.py 的已验证能力（import 期会创建 ~/proxy-speedtest 及其 providers/、
-# source-snapshots/ 子目录）
+# 三件套共享层（speedtest_common：进度日志/订阅策略/排版/归属查询/TG 发送/Gist 上传）
+# 与 gitee 专项引擎（mihomo 生命周期/订阅源/Gitee 仓库/push 测速）。import 期会创建
+# ~/proxy-speedtest 及其 providers/、source-snapshots/ 子目录
 # ----------------------------------------------------------------------------
-from speedtest_gitee import (
-    MIHOMO_MIXED_PORT,
+from speedtest_common import (
     HOME_RUNTIME,
-    collect_provider_snapshot,
-    switch_proxy,
-    build_proxy_env,
-    ensure_mihomo_running,
+    build_node_metric_prefix,
+    build_subscription_bundle,
+    build_target_network_section,
+    fetch_ip_network_info,
     log_progress,
     merged_env,
-    ensure_gitee_remote,
-    ensure_test_file,
-    git_force_push_testfile,
-    send_telegram,
-    format_duration,
-    tg_format_elapsed,
-    tg_footer_line,
     resolve_host_ipv4,
-    fetch_ip_network_info,
-    build_target_network_section,
-    TEST_FILE_NAME,
-    # 订阅导出 + Gist 上传（复刻 speedtest_gitee 的订阅发布能力）
-    build_source_mapping,
-    build_subscription_bundle,
-    build_node_metric_prefix,
-    update_gist,
     resolve_subscription_policy,
+    send_telegram,
+    tg_footer_line,
+    tg_format_elapsed,
+    update_gist,
+)
+from speedtest_gitee import (
+    MIHOMO_MIXED_PORT,
+    TEST_FILE_NAME,
+    build_proxy_env,
+    build_source_mapping,
+    collect_provider_snapshot,
+    ensure_gitee_remote,
+    ensure_mihomo_running,
+    ensure_test_file,
+    format_duration,
+    git_force_push_testfile,
+    switch_proxy,
 )
 
 # ----------------------------------------------------------------------------
