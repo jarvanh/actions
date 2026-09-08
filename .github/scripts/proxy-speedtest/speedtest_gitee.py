@@ -109,7 +109,7 @@ def handle_termination_signal(signum, frame):
     TERMINATION_NOTICE_SENT = True
     sig_name = signal.Signals(signum).name if signum else f'SIGNAL-{signum}'
     _sep = '━' * 18
-    message = f'⛔ <b>Gitee 上行测速异常终止</b>\n{_sep}\n⚠️ 脚本被中断：收到 <code>{sig_name}</code>，本轮测速未正常完成。'
+    message = f'⛔ <b>Gitee 测速异常终止</b>\n{_sep}\n⚠️ 脚本被中断：收到 <code>{sig_name}</code>，本轮测速未正常完成。'
     if CURRENT_RUN_STARTED_AT:
         message += f'\n🕒 测速开始时间：{html.escape(str(CURRENT_RUN_STARTED_AT))}'
     _footer = tg_footer_line()
@@ -1395,7 +1395,7 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
     sep = '━' * 18
     esc = lambda s: html.escape(str(s))
     summary_lines = [
-        '✅ <b>Gitee 上行测速完成</b>',
+        '✅ <b>Gitee 测速完成</b>',
         sep,
         f'🕒 {esc(started_text)} ~ {esc(ended_text)} · 耗时 {esc(duration_cn)}',
         f'📊 节点：共 <b>{len(speed_results)}</b> 个 · 可用 <b>{len(ok_results)}</b> 个',
@@ -1752,7 +1752,7 @@ if __name__ == '__main__':
             # 统一 HTML 版式（emoji+加粗标题/分隔线/全角冒号 kv/统一收尾区）；
             # 异常文本含 <>& 时未转义会触发 400 整条丢失（不退化，2026-09-06 拍板），必须 html.escape
             _sep = '━' * 18
-            _msg = (f'❌ <b>Gitee 上行测速异常退出 · {html.escape(str(stage))}</b>\n{_sep}\n'
+            _msg = (f'❌ <b>Gitee 测速异常退出 · {html.escape(str(stage))}</b>\n{_sep}\n'
                     f'错误：<code>{html.escape(err_text[:800])}</code>')
             _footer = tg_footer_line()
             if _footer:

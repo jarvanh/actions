@@ -9,7 +9,7 @@
 
 | 工作流 | 测速点 | 口径 | 引擎/链路 | 文档 |
 |---|---|---|---|---|
-| `proxy-speedtest-gitee` | Gitee 私有仓库 | 经代理 git push 单流上行 | `speedtest_gitee.py` | [gitee](proxy-speedtest-gitee.md) |
+| `proxy-speedtest-gitee` | Gitee 私有仓库 | 经代理 git push 上行 + clone 下行 + gitee.com HTTP 延迟 | `speedtest_gitee.py` | [gitee](proxy-speedtest-gitee.md) |
 | `proxy-speedtest-cdn` | 国内 CDN/镜像站 + baidu/taobao | 经代理单连接 curl 下载 + HTTP 计时延迟 | 本文 | — |
 | `proxy-speedtest-taier` | 泰尔三网（电信/联通/移动测速服务器） | taierspeedtest 延迟 + 单/多线程上下行 | `taier_speedtest.py` + mihomo TUN | [taier](proxy-speedtest-taier.md) |
 
@@ -19,8 +19,9 @@
 
 对订阅 `PROXY_SPEEDTEST_SUB_URLS` 的每个可用节点串行执行（共享 mihomo 内核，切换后 settle）：
 
-1. **延迟** `latency_probe`：经代理对 `baidu.com` / `taobao.com` 做 HTTP 完整请求计时，
-   多次采样取中位数（反映"打开网页"的真实握手+响应体验）；
+1. **延迟** `latency_probe`（实现在 `speedtest_common.py`，与 gitee 的 gitee.com 延迟探测共用）：
+   经代理对 `baidu.com` / `taobao.com` 做 HTTP 完整请求计时，多次采样取中位数
+   （反映"打开网页"的真实握手+响应体验）；
 2. **下载** `download_speedtest`：经 mixed-port（`127.0.0.1:17892`）**单连接** curl Range
    拉取国内测速点，按耗时换算 MiB/s，多 URL 串行取最优；
 3. **上行**（`PROXY_SPEEDTEST_ENABLE_PUSH=1` 时）：复用 gitee 的「经 mihomo 代理 git push」
