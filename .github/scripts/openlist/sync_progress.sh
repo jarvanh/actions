@@ -219,7 +219,7 @@ progress_transfer_tick() {
 
 # 注册任务到队列（初始化时调用）
 # 用法: progress_register_task <task_id> <display_name> [size_hint]
-#   size_hint — 源端大小（如 "3.100 GiB"），非运行态任务展示为 "• 名称 — 大小"
+#   size_hint — 源端大小（如 "3.100 GiB"），非运行态任务展示为树形条目 "├─ 名称 · 大小"
 # TSV 格式: task_id \t display_name \t status(pending/running/completed/skipped/failed) \t detail \t size_hint
 progress_register_task() {
   local task_id="$1"

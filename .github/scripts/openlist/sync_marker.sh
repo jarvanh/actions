@@ -780,21 +780,27 @@ send_sync_warning() {
   fi
 
   if [ -n "$missing_dirs" ]; then
-    tg_add_section msg "📁 缺失的目录 · 可能被删除"
+    # 列表分节带计数（规范 §2：凡分节后跟条目列表必须 · N）+ 统一树形（裁决 3，不再 "• "）
+    tg_add_section msg "📁 缺失的目录 · 可能被删除 · $(printf '%s' "$missing_dirs" | grep -c .)"
+    _dirs_html=""
     while IFS= read -r d; do
-      [ -n "$d" ] && tg_append msg "• <code>$(escape_html "$d")</code>"$'\n'
+      [ -n "$d" ] && _dirs_html+="<code>$(escape_html "$d")</code>"$'\n'
     done <<< "$missing_dirs"
+    tg_append msg "$(tree_lines "${_dirs_html%$'\n'}")"$'\n'
   fi
 
   if [ -n "$new_dirs" ]; then
-    tg_add_section msg "📁 新增的目录"
+    tg_add_section msg "📁 新增的目录 · $(printf '%s' "$new_dirs" | grep -c .)"
+    _dirs_html=""
     while IFS= read -r d; do
-      [ -n "$d" ] && tg_append msg "• <code>$(escape_html "$d")</code>"$'\n'
+      [ -n "$d" ] && _dirs_html+="<code>$(escape_html "$d")</code>"$'\n'
     done <<< "$new_dirs"
+    tg_append msg "$(tree_lines "${_dirs_html%$'\n'}")"$'\n'
   fi
 
-  # 收尾区: 状态 + 备注（斜体），footer 自带空行
-  tg_add_note msg "⏭️ 已跳过此同步，继续执行其他任务
+  # 收尾区: 状态 + 备注（斜体），footer 自带空行。
+  # 说明段内 emoji 用 <b> 包裹（裁决 7 统一后唯一形态）
+  tg_add_note msg "<b>⏭️</b> 已跳过此同步，继续执行其他任务
 如确认无误，请手动触发 force_sync=true"
   tg_add_footer msg
 
@@ -914,7 +920,7 @@ send_sync_skipped() {
   -f run_mode='⚠️ 还原 · 修复文件还原为原路径' \\
   -f restore_task=${task_name%%_*}</pre>"
   fi
-  tg_add_note msg "⏭️ 本次跳过同步，继续执行其他任务"
+  tg_add_note msg "<b>⏭️</b> 本次跳过同步，继续执行其他任务"
   tg_add_footer msg
 
   send_telegram_message "$msg"

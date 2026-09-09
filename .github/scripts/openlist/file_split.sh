@@ -97,7 +97,7 @@ send_binary_split_notification() {
     tg_add_kv message "原始大小" "$file_size_human"
     tg_add_kv message "分卷数量" "${parts_count} 个 .7z.00x"
     tg_add_section message "📦 恢复方法"
-    tg_add_block message "• 下载全部分卷后，双击 <code>.7z.001</code> 或运行 <code>7z x 文件名.7z.001</code>"
+    tg_add_block message "<b>下载全部分卷后</b>，双击 <code>.7z.001</code> 或运行 <code>7z x 文件名.7z.001</code>"
   else
     tg_add_title message "❌ 7z 分卷失败"
     tg_add_kv message "状态" "分卷失败"
@@ -606,12 +606,12 @@ preprocess_large_files() {
       # 英文 kind 不直出通知（规范 §4）: media/binary 映射中文标签
       local _kind_label="二进制"
       [ "$split_kind" = "media" ] && _kind_label="媒体"
-      processed_files+="• <code>$(escape_html "${remote_source}:${full_path}")</code> · <i>$(format_bytes_iec "$file_size") · ${_kind_label}</i>"$'\n'
-      deleted_files+="• <code>$(escape_html "${remote_source}:${full_path}")</code>"$'\n'
+      processed_files+="<code>$(escape_html "${remote_source}:${full_path}")</code> · <i>$(format_bytes_iec "$file_size") · ${_kind_label}</i>"$'\n'
+      deleted_files+="<code>$(escape_html "${remote_source}:${full_path}")</code>"$'\n'
       echo "$(date +%Y-%m-%d_%H:%M:%S) - ${remote_source}:${full_path} - OpenList 前置分割成功(${split_kind})，已删除原始大文件" >> "$PROCESSED_FILES_LOG"
     else
       failed_count=$((failed_count + 1))
-      failed_files+="• <code>$(escape_html "${remote_source}:${full_path}")</code>"$'\n'
+      failed_files+="<code>$(escape_html "${remote_source}:${full_path}")</code>"$'\n'
       log_fix "$video_split_log" "OpenList 前置分割失败: ${remote_source}:${full_path}"
     fi
 
@@ -634,15 +634,16 @@ preprocess_large_files() {
     tg_add_kv summary_message "处理失败" "$failed_count"
     if [ -n "$processed_files" ]; then
       tg_add_section summary_message "✂️ 已切割文件 · ${success_count}"
-      tg_add_block summary_message "$processed_files"
+      tg_add_block summary_message "$(tree_lines "${processed_files%$'\n'}")"
     fi
     if [ -n "$deleted_files" ]; then
-      tg_add_section summary_message "🗑️ 已删除原始大文件 · ${success_count}"
-      tg_add_block summary_message "$deleted_files"
+      # 计数用 deleted_files 实际行数（此前误用 success_count，删除数≠切割成功数）
+      tg_add_section summary_message "🗑️ 已删除原始大文件 · $(printf '%s' "$deleted_files" | grep -c .)"
+      tg_add_block summary_message "$(tree_lines "${deleted_files%$'\n'}")"
     fi
     if [ -n "$failed_files" ]; then
       tg_add_section summary_message "⚠️ 处理失败文件 · ${failed_count}"
-      tg_add_block summary_message "$failed_files"
+      tg_add_block summary_message "$(tree_lines "${failed_files%$'\n'}")"
     fi
     tg_add_footer summary_message
     send_telegram_message "$summary_message"
