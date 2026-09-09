@@ -110,7 +110,7 @@ def handle_termination_signal(signum, frame):
     TERMINATION_NOTICE_SENT = True
     sig_name = signal.Signals(signum).name if signum else f'SIGNAL-{signum}'
     _sep = TG_SEP
-    message = f'<b>⛔ Gitee 测速异常终止</b>\n{_sep}\n⚠️ 脚本被中断：收到 <code>{sig_name}</code>，本轮测速未正常完成。'
+    message = f'⛔ <b>Gitee 测速异常终止</b>\n{_sep}\n⚠️ 脚本被中断：收到 <code>{sig_name}</code>，本轮测速未正常完成。'
     if CURRENT_RUN_STARTED_AT:
         # 原始值是 datetime.isoformat()（含 T 与毫秒）→ 通知只取到秒并去掉 T（规范 §4 禁 ISO 直出）
         message += f'\n🕒 测速开始时间：{html.escape(str(CURRENT_RUN_STARTED_AT)[:19].replace("T", " "))}'
@@ -1413,7 +1413,7 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
     summary_lines.extend(build_target_network_section([(gitee_ip or '', 'gitee.com', gitee_info)]))
     summary_lines.append('')
     if aborted_due_to_runtime:
-        summary_lines.append(f'<b>⚠️ 本轮已中止：{esc(runtime_abort_reason)}</b>')
+        summary_lines.append(f'⚠️ <b>本轮已中止：{esc(runtime_abort_reason)}</b>')
         summary_lines.append('')
     if ok_results_by_download:
         top = ok_results_by_download[:5]
@@ -1429,18 +1429,18 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
             ('↑上传', has_up), ('↓下载', has_down), ('延迟ms', has_lat)) if on) or '速度'
         # TOP 已按订阅判定指标排序（见 ok_results_by_download），标题同步点出排序依据
         sort_hint = f' · 按{html.escape(metric_label)}' if metric_label else ''
-        summary_lines.append(f"<b>🏆 最快节点 · {len(top)}{sort_hint}</b> · {legend}")
+        summary_lines.append(f"🏆 <b>最快节点 · {len(top)}{sort_hint}</b> · {legend}")
         for idx, item in enumerate(top, 1):
             prefix = build_node_metric_prefix(item, speedtest_mode, order='up_first') or '-'
             connector = '└─' if idx == len(top) else '├─'
             summary_lines.append(f"  {connector} <code>{esc(item['name'])}</code> · {esc(prefix)}")
         summary_lines.append('')
     elif alive_probe_count > 0:
-        summary_lines.append('<b>⚠️ 没有节点测速成功</b>')
+        summary_lines.append('⚠️ <b>没有节点测速成功</b>')
         summary_lines.append('  └─ <b>有节点通过 provider 健康检查，但正式 Gitee 推送/拉取测速全部失败</b>')
         summary_lines.append('')
     else:
-        summary_lines.append('<b>⚠️ 没有节点通过 provider 健康检查</b>')
+        summary_lines.append('⚠️ <b>没有节点通过 provider 健康检查</b>')
         summary_lines.append('')
     # 收尾区不在这里追加：finalize_gist_and_notify 还会在正文末尾补「📦 订阅 · Gist」段，
     # 收尾行必须位于所有正文之后（规范 §3），统一由 finalize 在最后追加
@@ -1481,24 +1481,24 @@ def finalize_gist_and_notify(env, summary, summary_lines, subscription_text, bun
             gist_verify_res = {'ok': False, 'reason': str(e)}
     log_progress('gist_verify_finished', ok=bool(gist_verify_res.get('ok')), sample_ok_count=gist_verify_res.get('sample_ok_count', 0), sample_count=gist_verify_res.get('sample_count', 0), reason=gist_verify_res.get('reason', ''))
     summary['gist_verify'] = gist_verify_res
-    summary_lines.append('<b>📦 订阅 · Gist</b>')
+    summary_lines.append('📦 <b>订阅 · Gist</b>')
     if gist_res.get('ok'):
         action = '新建' if gist_res.get('created') else '更新'
         html_url = gist_res.get('html_url') or ''
-        gist_lines = [f'<b>✅ 已{action}，达标 {qualified_count} 个节点</b> · ≥{min_megabit}兆（按{html.escape(metric_label)}）']
+        gist_lines = [f'✅ <b>已{action}，达标 {qualified_count} 个节点</b> · ≥{min_megabit}兆（按{html.escape(metric_label)}）']
         if html_url:
             gist_lines.append(f'🔗 <a href="{html.escape(html_url)}">订阅源 YAML</a>')
         if gist_verify_res.get('ok'):
-            gist_lines.append(f"<b>✅ 回拉验证通过</b>：{gist_verify_res.get('sample_ok_count', 0)}/{gist_verify_res.get('sample_count', 0)} 个抽检节点可用")
+            gist_lines.append(f"✅ <b>回拉验证通过</b>：{gist_verify_res.get('sample_ok_count', 0)}/{gist_verify_res.get('sample_count', 0)} 个抽检节点可用")
         else:
-            gist_lines.append(f"<b>⚠️ 回拉验证失败</b>：{gist_verify_res.get('sample_ok_count', 0)}/{gist_verify_res.get('sample_count', 0)} 个抽检节点可用；<code>{html.escape(str(gist_verify_res.get('reason', '')))}</code>")
+            gist_lines.append(f"⚠️ <b>回拉验证失败</b>：{gist_verify_res.get('sample_ok_count', 0)}/{gist_verify_res.get('sample_count', 0)} 个抽检节点可用；<code>{html.escape(str(gist_verify_res.get('reason', '')))}</code>")
         for _i, _l in enumerate(gist_lines):
             _c = '└─' if _i == len(gist_lines) - 1 else '├─'
             summary_lines.append(f'  {_c} {_l}')
     elif (gist_res.get('reason') or '').startswith('empty subscription'):
-        summary_lines.append(f'  └─ <b>⚠️ 达标不足 {min_nodes} 个</b> · 阈值 ≥{min_megabit}兆（按{html.escape(metric_label)}）· 未更新订阅')
+        summary_lines.append(f'  └─ ⚠️ <b>达标不足 {min_nodes} 个</b> · 阈值 ≥{min_megabit}兆（按{html.escape(metric_label)}）· 未更新订阅')
     else:
-        summary_lines.append(f"  └─ <b>⚠️ 上传失败</b>：<code>{html.escape(str(gist_res.get('reason', '')))}</code>")
+        summary_lines.append(f"  └─ ⚠️ <b>上传失败</b>：<code>{html.escape(str(gist_res.get('reason', '')))}</code>")
     # 统一收尾区（收尾区与正文间固定一个空行；与 tg_add_footer 同形态同降级链）
     # 必须在所有正文段之后追加（「📦 订阅 · Gist」是正文的最后一段）——此前在
     # build_summary_lines 里加，被此段挤到正文中间，消息末尾反而没有收尾行（规范 §3）
@@ -1793,7 +1793,7 @@ if __name__ == '__main__':
             # 统一 HTML 版式（emoji+加粗标题/分隔线/全角冒号 kv/统一收尾区）；
             # 异常文本含 <>& 时未转义会触发 400 整条丢失（不退化，2026-09-06 拍板），必须 html.escape
             _sep = TG_SEP
-            _msg = (f'<b>❌ Gitee 测速异常退出 · {html.escape(str(stage))}</b>\n{_sep}\n'
+            _msg = (f'❌ <b>Gitee 测速异常退出 · {html.escape(str(stage))}</b>\n{_sep}\n'
                     f'错误：<code>{html.escape(err_text[:800])}</code>')
             _footer = tg_footer_line()
             if _footer:

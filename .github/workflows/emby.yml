@@ -1104,10 +1104,10 @@ jobs:
             if [ -n "$episode" ]; then se="${se}E$(two_digit "$episode" || printf '?')"; fi
             if [ "$type" = "Episode" ] && [ -n "$series" ]; then
               # emoji 一律在 <b> 内（规范 §2 标签语义表裁决 7）
-              title="<b>🎬 $(escape_html "$series")</b>"
+              title="🎬 <b>$(escape_html "$series")</b>"
               [ -n "$se" ] && title="${title} ${se}"
             else
-              title="<b>🎬 $(escape_html "${n:-未知}")</b>"
+              title="🎬 <b>$(escape_html "${n:-未知}")</b>"
               [ -n "$year" ] && title="${title} (${year})"
             fi
 
@@ -1126,13 +1126,13 @@ jobs:
             # 第 3 行：链路。302 时把直链剩余有效期说清楚——链接不是永久的
             # emoji 入 <b>，剩余有效期是元数据 → · （规范 §2 裁决 7 + 语义表 #5）
             if [ "$kind" = "302直链" ]; then
-              l3="<b>⚡ 302直连 OneDrive</b>"
+              l3="⚡ <b>302直连 OneDrive</b>"
               case "$remain_s" in
                 ''|*[!0-9]*) ;;
                 *) [ "$remain_s" -gt 0 ] && l3="${l3} · 直链剩余 $(( (remain_s + 59) / 60 )) 分钟";;
               esac
             else
-              l3="<b>🔁 视频流经 runner 中转到网盘</b>"
+              l3="🔁 <b>视频流经 runner 中转到网盘</b>"
             fi
 
             # 第 4 行：客户端。IP 来自 ge2o 访问日志（谁在播）

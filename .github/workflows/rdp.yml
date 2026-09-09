@@ -88,7 +88,7 @@ jobs:
         if (-not (Get-Command Send-TgMessage -ErrorAction SilentlyContinue)) { throw "tg_notify.ps1 加载失败" }
         # 单一入口，平铺 kv 即可；值一律 <b>/<code>，说明性文字降为  说明段
         # （规范见 docs/telegram-notify.md §2 标签语义表）
-        $msg = "<b>🖥️ Windows RDP 已就绪</b>`n$TG_SEP`n" +
+        $msg = "🖥️ <b>Windows RDP 已就绪</b>`n$TG_SEP`n" +
           "地址：<code>$(Esc-Html $address)</code>`n" +
           "用户名：<code>runneradmin</code>`n" +
           "密码：<code>$(Esc-Html $Env:RDP_PASSWORD)</code>`n" +

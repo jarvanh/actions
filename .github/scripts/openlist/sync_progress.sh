@@ -369,7 +369,7 @@ _progress_render_task_list() {
   for _src in "${_order[@]}"; do
     # 组间空一行
     [ "$_gi" -gt 0 ] && _out+=$'\n'
-    _out+="<b>📁 $(escape_html "$_src")</b>"
+    _out+="📁 <b>$(escape_html "$_src")</b>"
     [ -n "${_grp_size[$_src]:-}" ] && _out+=" · $(escape_html "${_grp_size[$_src]}")"
     _out+=$'\n'"$(tree_lines "${_grp[$_src]}")"$'\n'
     _gi=$((_gi + 1))
@@ -471,7 +471,7 @@ _progress_render() {
   tg_add_title msg "$title"
   [ -n "$subtitle" ] && tg_add_kv msg "状态" "$subtitle"
   # 计数行字段图标同样入 <b>（规范 §2 裁决 7：emoji 一律在 <b> 内，无例外）
-  tg_append msg "<b>📊 总 ${total}</b> · 待处理 ${pending} · 进行中 ${running} · 完成 ${completed} · 跳过 ${skipped} · 失败 ${failed}"$'\n'
+  tg_append msg "📊 <b>总 ${total}</b> · 待处理 ${pending} · 进行中 ${running} · 完成 ${completed} · 跳过 ${skipped} · 失败 ${failed}"$'\n'
 
   # 进行中任务块: 任务条目（分组渲染）+ 多层级阶段行/统计信息/细粒度状态
   #   各拆分深度槽位逐层下沉合并：深度 0 的块挂在任务条目下，

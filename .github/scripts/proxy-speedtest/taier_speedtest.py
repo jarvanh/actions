@@ -481,7 +481,7 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
         legend = '↑上传 · ↓下载 · 延迟ms' if has_up else '↓下载 · 延迟ms'
         # 标题点出排序依据（= 订阅判定指标），避免读者按 ↓ 数值读不出顺序
         sort_hint = f' · 按{esc(metric_label)}' if metric_label else ''
-        lines.append(f'<b>🏆 最快节点 · {len(top)}{sort_hint}</b> · {legend}')
+        lines.append(f'🏆 <b>最快节点 · {len(top)}{sort_hint}</b> · {legend}')
         for idx, r in enumerate(top, 1):
             connector = '└─' if idx == len(top) else '├─'
             prefix = build_node_metric_prefix({
@@ -495,18 +495,18 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
             lines.append(item)
         lines.append('')
     else:
-        lines.append('<b>⚠️ 没有节点测速成功</b>')
+        lines.append('⚠️ <b>没有节点测速成功</b>')
         lines.append('')
 
     if bypass_hits:
-        lines.append('<b>⚠️ 疑似未走代理</b>')
+        lines.append('⚠️ <b>疑似未走代理</b>')
         lines.append(f"  └─ <b>{bypass_hits} 个节点的出口 IP 与 runner 直连出口（<code>{esc(direct_ip)}</code>）相同，"
                      'TUN 进程规则可能未生效，结果不可信</b>')
         lines.append('')
 
     failed = [r for r in results if not r.get('ok')]
     if failed:
-        lines.append(f'<b>❌ 失败 · {len(failed)}</b>')
+        lines.append(f'❌ <b>失败 · {len(failed)}</b>')
         _failed_entries = []
         for r in failed[:5]:
             # 原始异常串属机器值 → <code>（标签语义表第 3 类；此前用  与元数据撞语义）
@@ -520,11 +520,11 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
             lines.append(f'  {_c} {_l}')
         lines.append('')
 
-    lines.append('<b>📦 订阅 · Gist</b>')
+    lines.append('📦 <b>订阅 · Gist</b>')
     if gist_res and gist_res.get('ok'):
         action = '新建' if gist_res.get('created') else '更新'
         raw_url = ((gist_res.get('yaml') or {}).get('raw_url') or '').strip()
-        gist_lines = [f'<b>✅ 已{action}，达标 {qualified_count} 个</b> · 阈值 ≥{min_megabit}兆（按{esc(metric_label)}）']
+        gist_lines = [f'✅ <b>已{action}，达标 {qualified_count} 个</b> · 阈值 ≥{min_megabit}兆（按{esc(metric_label)}）']
         if gist_res.get('created'):
             gist_lines.append('⚠️ 请把 Gist id 回填到 Secrets <code>PROXY_SPEEDTEST_TAIER_GIST_ID</code>，避免每轮新建')
         if raw_url:
@@ -533,12 +533,12 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
             _c = '└─' if _i == len(gist_lines) - 1 else '├─'
             lines.append(f'  {_c} {_l}')
     elif gist_res:
-        lines.append(f"  └─ <b>⚠️ 上传失败</b>：<code>{esc(gist_res.get('reason', ''))}</code>")
+        lines.append(f"  └─ ⚠️ <b>上传失败</b>：<code>{esc(gist_res.get('reason', ''))}</code>")
     elif gist_error:
         # 上传阶段抛异常（HTTP 4xx 等）≠ 没有达标节点，文案必须区分
-        lines.append(f'  └─ <b>⚠️ 上传失败</b>：<code>{esc(gist_error[:120])}</code>')
+        lines.append(f'  └─ ⚠️ <b>上传失败</b>：<code>{esc(gist_error[:120])}</code>')
     else:
-        lines.append(f'  └─ <b>⚠️ 达标不足 {min_nodes} 个</b> · 阈值 ≥{min_megabit}兆（按{esc(metric_label)}）· 未更新订阅')
+        lines.append(f'  └─ ⚠️ <b>达标不足 {min_nodes} 个</b> · 阈值 ≥{min_megabit}兆（按{esc(metric_label)}）· 未更新订阅')
     # 统一收尾区（收尾区与正文间固定**一个**空行）：此前连写两个 append('') 变双空行
     lines.append('')
     footer = tg_footer_line()
@@ -557,7 +557,7 @@ def notify_failure(env, reason):
     # 标题直接带原因（reason 形如「环境准备失败：…」，取全角冒号前的阶段名）
     _head = str(reason).split('：')[0].splitlines()[0][:40].strip() or '未知原因'
     lines = [
-        f'<b>❌ 泰尔三网测速异常退出 · {html.escape(_head)}</b>',
+        f'❌ <b>泰尔三网测速异常退出 · {html.escape(_head)}</b>',
         TG_SEP,
         # reason 含原始异常串（机器值）→ <code>；与 cdn/gitee 的「原因/错误」同口径（裁决 8）
         f'原因：<code>{html.escape(str(reason))}</code>',
@@ -589,7 +589,7 @@ def handle_termination_signal(signum, frame):
     except Exception:
         pass
     sig_name = signal.Signals(signum).name if signum else f'SIGNAL-{signum}'
-    msg = (f'<b>⛔ 泰尔三网测速异常终止</b>\n{TG_SEP}\n'
+    msg = (f'⛔ <b>泰尔三网测速异常终止</b>\n{TG_SEP}\n'
            f'⚠️ 脚本被中断：收到 <code>{sig_name}</code>，本轮测速未正常完成。')
     footer = tg_footer_line()
     if footer:

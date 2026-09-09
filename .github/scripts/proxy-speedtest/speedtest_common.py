@@ -467,7 +467,7 @@ def build_target_network_section(targets):
     if not targets:
         targets = [('', '', None)]
     count_hint = f' · {len(targets)}' if len(targets) > 1 else ''
-    lines = [f'<b>📍 测速点网络{count_hint}</b>']
+    lines = [f'📍 <b>测速点网络{count_hint}</b>']
     for idx, (server, label, info) in enumerate(targets, 1):
         server = str(server or '').strip()
         label = str(label or '').strip()
