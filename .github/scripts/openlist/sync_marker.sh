@@ -799,8 +799,9 @@ send_sync_warning() {
   fi
 
   # 收尾区: 状态 + 备注（斜体），footer 自带空行。
-  # 说明段内 emoji 用 <b> 包裹（裁决 7 统一后唯一形态）
-  tg_add_note msg "<b>⏭️</b> 已跳过此同步，继续执行其他任务
+  # 注意: tg_add_note 对整段做 escape_html，段内不能携带 HTML 标签——
+  # emoji 只能随段裸置（转义边界决定的既定形态，勿"统一"成 <b>）
+  tg_add_note msg "⏭️ 已跳过此同步，继续执行其他任务
 如确认无误，请手动触发 force_sync=true"
   tg_add_footer msg
 
@@ -920,7 +921,7 @@ send_sync_skipped() {
   -f run_mode='⚠️ 还原 · 修复文件还原为原路径' \\
   -f restore_task=${task_name%%_*}</pre>"
   fi
-  tg_add_note msg "<b>⏭️</b> 本次跳过同步，继续执行其他任务"
+  tg_add_note msg "⏭️ 本次跳过同步，继续执行其他任务"
   tg_add_footer msg
 
   send_telegram_message "$msg"
