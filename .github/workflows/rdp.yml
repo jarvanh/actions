@@ -86,9 +86,9 @@ jobs:
         . "$env:GITHUB_WORKSPACE\.github\scripts\telegram\tg_notify.ps1"
         # 自检: dot-source 失败会让后续调用未定义函数而静默无通知，显式暴露
         if (-not (Get-Command Send-TgMessage -ErrorAction SilentlyContinue)) { throw "tg_notify.ps1 加载失败" }
-        # 单一入口，平铺 kv 即可；值一律 <b>/<code>，说明性文字降为  说明段
+        # 单一入口，平铺 kv 即可；值一律 /<code>，说明性文字降为  说明段
         # （规范见 docs/telegram-notify.md §2 标签语义表）
-        $msg = "🖥️ <b>Windows RDP 已就绪</b>`n$TG_SEP`n" +
+        $msg = "🖥️ Windows RDP 已就绪`n$TG_SEP`n" +
           "地址：<code>$(Esc-Html $address)</code>`n" +
           "用户名：<code>runneradmin</code>`n" +
           "密码：<code>$(Esc-Html $Env:RDP_PASSWORD)</code>`n" +

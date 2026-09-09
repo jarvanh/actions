@@ -63,11 +63,11 @@ reset_case() {
   echo "$(( $(date +%s) - 3600 ))" > "$PROGRESS_START_FILE"
 }
 
-# 渲染后取首行（tg_add_title 输出 "<b>标题</b>"）与第三行（标题+分隔线之后的 "状态：" kv 行）
+# 渲染后取首行（tg_add_title 输出 "标题"）与第三行（标题+分隔线之后的 "状态：" kv 行）
 title_of() { _progress_render | head -1; }
 subtitle_of() { _progress_render | sed -n '3p'; }
-# 收尾标题经 tg_add_title 加粗，且前导 emoji 被自动拆到 <b> 外（2026-09-10 emoji 不入 <b>）
-expect_title() { printf '%s <b>%s</b>' "${1%% *}" "${1#* }"; }
+# 收尾标题经 tg_add_title 加粗，且前导 emoji 被自动拆到  外（2026-09-10 emoji 不入 ）
+expect_title() { printf '%s %s' "${1%% *}" "${1#* }"; }
 expect_status() { printf '状态：%s\n' "$(escape_html "$1")"; }
 
 # ---------- T1: 中断优先于失败（13 待处理 + 1 进行中 + 1 完成 + 1 失败）----------

@@ -843,7 +843,7 @@ jobs:
             tg_add_block msg "$(tree_lines "直连：<code>$(escape_html "${TS_FQDN}"):21118</code>")"
           fi
 
-          # 条目非文件值：可复制的（ASN/命令）→ <code>，其余 → <b>（禁裸文本）
+          # 条目非文件值：可复制的（ASN/命令）→ <code>，其余 → （禁裸文本）
           _entries="出口 IP：<code>$(escape_html "${PUB_IP}")</code>"
           _entries+=$'\n'"ISP：$(escape_html "${IP_ISP}")"
           _entries+=$'\n'"ASN：<code>$(escape_html "AS${IP_ASN} · ${IP_ORG}")</code>"
@@ -1756,7 +1756,7 @@ jobs:
               source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
               local full_msg=""
               tg_add_title full_msg "⚠️ OpenClaw 归档告警"
-              # 与 send_telegram_alert 同版式（此前一个用  说明段、一个用 <b> kv，
+              # 与 send_telegram_alert 同版式（此前一个用  说明段、一个用  kv，
               # 同一标题两种形态）：多行原始输出 → <pre>；Run ID 属机器值 → <code>
               tg_add_block full_msg "<pre>$(escape_html "$msg")</pre>"
               tg_add_path full_msg "Run ID" "$run_id"

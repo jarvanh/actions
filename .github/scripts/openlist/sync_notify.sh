@@ -121,7 +121,7 @@ _send_sync_result_notification() {
   if [[ "$source_count_raw" =~ ^[0-9]+$ ]] && [[ "$dest_count_raw" =~ ^[0-9]+$ ]]; then
     local count_diff=$((source_count_raw - dest_count_raw))
     if [ "$count_diff" -ne 0 ]; then
-      count_info="<b>差异 ${count_diff}</b> · 源端 ${source_count} / 目标 ${dest_count}"
+      count_info="差异 ${count_diff} · 源端 ${source_count} / 目标 ${dest_count}"
       diff_files_list=$(_build_diff_files_list "$source_path" "$dest_path" "${extra_args[@]}")
     else
       count_info="${source_count} · 一致"
@@ -306,8 +306,8 @@ _send_sync_result_notification() {
       done <<< "$critical_logs"
       tg_add_block err_msg "<pre>$(escape_html "${err_log_lines%$'\n'}")</pre>"
     else
-      # 中文结论 → <b>（语义表：条目/结论值不得裸文本；此前是裸 "• 无明显错误关键字"）
-      tg_add_block err_msg "<b>无明显错误关键字</b>"
+      # 中文结论 → （语义表：条目/结论值不得裸文本；此前是裸 "• 无明显错误关键字"）
+      tg_add_block err_msg "无明显错误关键字"
     fi
     _notify_add_diff_list err_msg
     tg_add_footer err_msg
@@ -324,7 +324,7 @@ _send_sync_result_notification() {
           -F chat_id="${TELEGRAM_CHAT_ID}" \
           -F document=@"$log_filename" \
           -F parse_mode="HTML" \
-          -F caption="📁 <b>$(escape_html "$task_name")</b> · 错误日志" 2>/dev/null) || true
+          -F caption="📁 $(escape_html "$task_name") · 错误日志" 2>/dev/null) || true
         if echo "$_doc_resp" | grep -q '"ok":true'; then break; fi
         _doc_wait=$(echo "$_doc_resp" | grep -oE '"retry_after":[0-9]+' | head -1 | cut -d: -f2)
         if [ -n "$_doc_wait" ]; then sleep "$_doc_wait"; else break; fi

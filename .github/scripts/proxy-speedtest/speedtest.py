@@ -623,13 +623,13 @@ if(gist && (gist.raw_url||gist.html_url)){
   const action=gist.action==='新建'?'（首次新建）':'（已更新）';
   let html='<p class="tip">以下订阅为本次达标节点的可用配置，可直接作为客户端订阅源'+action+'</p>';
   if(gist.raw_url){
-    html+='<div style="margin:10px 0;"><b>订阅链接</b><br/>'+
+    html+='<div style="margin:10px 0;">订阅链接<br/>'+
       '<code style="display:inline-block;max-width:100%;overflow:auto;padding:8px;background:#0e1530;'+
       'border-radius:8px;border:1px solid rgba(255,255,255,.1);">'+escapeHtml(gist.raw_url)+'</code> '+
       '<a href="'+escapeHtml(gist.raw_url)+'" style="color:var(--primary);">打开</a></div>';
   }
   if(gist.html_url){
-    html+='<div style="margin:6px 0;"><b>Gist 页面</b>：<a href="'+escapeHtml(gist.html_url)+
+    html+='<div style="margin:6px 0;">Gist 页面：<a href="'+escapeHtml(gist.html_url)+
       '" style="color:var(--primary);">'+escapeHtml(gist.html_url)+'</a></div>';
   }
   if(gist.id){
@@ -950,7 +950,7 @@ def _result_metric_item(r):
 
 def build_telegram_lines(results, *, meta, gist_res, bundle=None):
     """生成人性化 Telegram 通知（统一 HTML 版式，对齐全库通知模板）：
-    emoji 标题 + ━━━ 分隔线 + 键值概览（数值 <b>）+ 树形 TOP5（节点 <code>）+
+    emoji 标题 + ━━━ 分隔线 + 键值概览（数值 ）+ 树形 TOP5（节点 <code>）+
     订阅状态 + 统一收尾区（⏱ 已运行 · 🔗 运行日志，读 TG_RUN_URL 环境变量）。"""
     def esc(s):
         return html.escape(str(s))
@@ -984,7 +984,7 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None):
     # 标题状态随结论降级（规范 §4 状态 emoji 语义）：0 可用节点 → ⚠️，不再恒 ✅
     _title_emoji = '⚠️' if not ok_results else '✅'
     lines = [
-        f'<b>{_title_emoji} CDN 测速完成</b>',
+        f'{_title_emoji} CDN 测速完成',
         sep,
         f'🕒 起止：{esc(started)} ~ {esc(ended)} · 耗时 {esc(duration_text)}',
         f'📊 节点：共 {len(results)} 个 · 可用 {len(ok_results)} 个',
@@ -1001,14 +1001,14 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None):
     lines.append('')
     if top_results:
         top = top_results[:5]
-        # 名次类分节用 🏆（规范 §2 裁决 5：禁 ⭐/🥇 自造前缀；名次类计数在 <b> 内）；
+        # 名次类分节用 🏆（规范 §2 裁决 5：禁 ⭐/🥇 自造前缀；名次类计数在  内）；
         # 指标顺序对齐泰尔引擎列序（↑上传在前）；上传未启用/未测出时条目自动省略
         # ↑ 项（build_node_metric_prefix 内置），图例同步省略
         has_up = any((_result_metric_item(r).get('upload_mibs') or 0) > 0 for r in top)
         legend = '↑上传 · ↓下载 · 延迟ms' if has_up else '↓下载 · 延迟ms'
         # 标题点出排序依据（= 订阅判定指标），避免与列表数值对不上
         sort_hint = f' · 按{esc(metric_label)}' if metric_label else ''
-        lines.append(f'🏆 <b>最快节点 · {len(top)}{sort_hint}</b> · {legend}')
+        lines.append(f'🏆 最快节点 · {len(top)}{sort_hint} · {legend}')
         for idx, r in enumerate(top, 1):
             prefix = build_node_metric_prefix(_result_metric_item(r), mode, order='up_first')
             connector = '└─' if idx == len(top) else '├─'
@@ -1019,17 +1019,17 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None):
             lines.append(item)
         lines.append('')
     else:
-        lines.append('⚠️ <b>没有节点测速成功</b>')
+        lines.append('⚠️ 没有节点测速成功')
         lines.append('')
 
-    lines.append('📦 <b>订阅 · Gist</b>')
+    lines.append('📦 订阅 · Gist')
     if gist_res and gist_res.get('ok'):
         action = '新建' if gist_res.get('created') else '更新'
         # 该链接指向 Gist 上的订阅文件（YAML），不是测速报告；
         # HTML 报告只写在运行机本地（含节点凭据，不外传），故无可分享链接。
         raw_url = ((gist_res.get('yaml') or {}).get('raw_url') or '').strip()
         html_url = (gist_res.get('html_url') or '').strip()
-        gist_lines = [f'✅ <b>已{action}，达标 {qualified_count} 个节点</b> · ≥{min_megabit}兆（按{esc(metric_label)}）']
+        gist_lines = [f'✅ 已{action}，达标 {qualified_count} 个节点 · ≥{min_megabit}兆（按{esc(metric_label)}）']
         if raw_url:
             gist_lines.append(f'🔗 <a href="{esc(raw_url)}">订阅源 YAML</a>')
         elif html_url:
@@ -1038,9 +1038,9 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None):
             _c = '└─' if _i == len(gist_lines) - 1 else '├─'
             lines.append(f'  {_c} {_l}')
     elif gist_res:
-        lines.append(f"  └─ ⚠️ <b>上传失败</b>：<code>{esc(gist_res.get('reason', ''))}</code>")
+        lines.append(f"  └─ ⚠️ 上传失败：<code>{esc(gist_res.get('reason', ''))}</code>")
     else:
-        lines.append(f'  └─ ⚠️ <b>达标不足 {min_nodes} 个</b> · 阈值 ≥{min_megabit}兆（按{esc(metric_label)}）· 未更新订阅')
+        lines.append(f'  └─ ⚠️ 达标不足 {min_nodes} 个 · 阈值 ≥{min_megabit}兆（按{esc(metric_label)}）· 未更新订阅')
 
     # 统一收尾区（收尾区与正文间固定一个空行；与 tg_add_footer 同形态同降级链）
     # 注: 正文的「耗时 X」是测速自身耗时，收尾区的「已运行 X」是 run 已运行时长，两者语义不同
@@ -1073,7 +1073,7 @@ def write_termination(started_at, reason):
     try:
         # 标题直接带原因首行（原文截断后再转义，避免切断 HTML 实体）
         _head = str(reason).splitlines()[0][:40].strip() or '未知原因'
-        abort_msg = (f'❌ <b>CDN 测速异常退出 · {html.escape(_head)}</b>\n{TG_SEP}\n'
+        abort_msg = (f'❌ CDN 测速异常退出 · {html.escape(_head)}\n{TG_SEP}\n'
                      f'原因：<code>{html.escape(str(reason))}</code>')
         abort_footer = tg_footer_line()
         if abort_footer:
@@ -1086,7 +1086,7 @@ def write_termination(started_at, reason):
 def handle_termination_signal(signum, frame):
     """SIGTERM/SIGINT 兜底：run 被取消/超时也发通知（与 speedtest_gitee 同款）。"""
     sig_name = signal.Signals(signum).name if signum else f'SIGNAL-{signum}'
-    msg = (f'⛔ <b>CDN 测速异常终止</b>\n{TG_SEP}\n'
+    msg = (f'⛔ CDN 测速异常终止\n{TG_SEP}\n'
            f'⚠️ 脚本被中断：收到 <code>{sig_name}</code>，本轮测速未正常完成。')
     footer = tg_footer_line()
     if footer:
@@ -1105,7 +1105,7 @@ if __name__ == '__main__':
     except Exception as e:
         # 未捕获异常兜底：标题直接带原因摘要，正文留完整错误（TG 私聊，不进公开日志）
         _head = str(e).splitlines()[0][:60].strip() if str(e).strip() else '未知异常'
-        _msg = (f'❌ <b>CDN 测速异常退出 · {html.escape(_head)}</b>\n'
+        _msg = (f'❌ CDN 测速异常退出 · {html.escape(_head)}\n'
                 f'{TG_SEP}\n'
                 f'错误：<code>{html.escape(f"{type(e).__name__}: {e}"[:800])}</code>')
         # 收尾区不可省（规范 §3/§6）：兜底通知同样要带 ⏱ 已运行 + 运行日志

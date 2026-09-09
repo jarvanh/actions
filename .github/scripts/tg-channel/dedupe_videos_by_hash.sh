@@ -156,17 +156,17 @@ for hash in "${!HASH_ENTRIES[@]}"; do
       if [ "$AUTO_DELETE" = "true" ]; then
         if rclone deletefile "$SOURCE_REMOTE/$p" 2>/tmp/rclone_err.log; then
           REMOVED_COUNT=$((REMOVED_COUNT + 1))
-          _grp_add group_entries "🗑 <b>删除</b> <code>$(escape_html "${p}")</code> · ${s} 字节 · ${t}"$'\n'
+          _grp_add group_entries "🗑 删除 <code>$(escape_html "${p}")</code> · ${s} 字节 · ${t}"$'\n'
         else
-          _grp_add group_entries "❌ <b>删除失败</b> <code>$(escape_html "${p}")</code>"$'\n'
+          _grp_add group_entries "❌ 删除失败 <code>$(escape_html "${p}")</code>"$'\n'
           echo "  ❌ 删除失败: $(tail -n 3 /tmp/rclone_err.log)"
         fi
       else
-        _grp_add group_entries "⚠️ <b>待删除 · 已跳过</b> <code>$(escape_html "${p}")</code> · ${s} 字节 · ${t}"$'\n'
+        _grp_add group_entries "⚠️ 待删除 · 已跳过 <code>$(escape_html "${p}")</code> · ${s} 字节 · ${t}"$'\n'
       fi
     done <<< "$sorted"
     _fold=$(_grp_fold)
-    _grp_block "🔖 <b>哈希 ${hash:0:12}</b> · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 文件名相同 · 保留 <code>$(escape_html "${kept_path}")</code>"$'\n'"$(tree_lines "${group_entries}${_fold}")"
+    _grp_block "🔖 哈希 ${hash:0:12} · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 文件名相同 · 保留 <code>$(escape_html "${kept_path}")</code>"$'\n'"$(tree_lines "${group_entries}${_fold}")"
   else
     # 规则2：文件名不同但内容相同 → 删除修改时间旧的，保留最新
     sorted=$(echo "$entries" | sort -t';' -k1,1)
@@ -179,17 +179,17 @@ for hash in "${!HASH_ENTRIES[@]}"; do
       if [ "$AUTO_DELETE" = "true" ]; then
         if rclone deletefile "$SOURCE_REMOTE/$p" 2>/tmp/rclone_err.log; then
           REMOVED_COUNT=$((REMOVED_COUNT + 1))
-          _grp_add group_entries "🗑 <b>删除</b> <code>$(escape_html "${p}")</code> · 哈希一致 · 旧文件"$'\n'
+          _grp_add group_entries "🗑 删除 <code>$(escape_html "${p}")</code> · 哈希一致 · 旧文件"$'\n'
         else
-          _grp_add group_entries "❌ <b>删除失败</b> <code>$(escape_html "${p}")</code>"$'\n'
+          _grp_add group_entries "❌ 删除失败 <code>$(escape_html "${p}")</code>"$'\n'
           echo "  ❌ 删除失败: $(tail -n 3 /tmp/rclone_err.log)"
         fi
       else
-        _grp_add group_entries "⚠️ <b>待删除 · 已跳过</b> <code>$(escape_html "${p}")</code> · 哈希一致 · 旧文件"$'\n'
+        _grp_add group_entries "⚠️ 待删除 · 已跳过 <code>$(escape_html "${p}")</code> · 哈希一致 · 旧文件"$'\n'
       fi
     done <<< "$sorted"
     _fold=$(_grp_fold)
-    _grp_block "🔖 <b>哈希 ${hash:0:12}</b> · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 文件名不同 · 保留 <code>$(escape_html "${kept_path}")</code>"$'\n'"$(tree_lines "${group_entries}${_fold}")"
+    _grp_block "🔖 哈希 ${hash:0:12} · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 文件名不同 · 保留 <code>$(escape_html "${kept_path}")</code>"$'\n'"$(tree_lines "${group_entries}${_fold}")"
   fi
 done
 

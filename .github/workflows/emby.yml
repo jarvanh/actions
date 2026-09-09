@@ -1103,11 +1103,11 @@ jobs:
             if [ -n "$season" ]; then se="S$(two_digit "$season" || printf '?')"; fi
             if [ -n "$episode" ]; then se="${se}E$(two_digit "$episode" || printf '?')"; fi
             if [ "$type" = "Episode" ] && [ -n "$series" ]; then
-              # emoji 一律在 <b> 内（规范 §2 标签语义表裁决 7）
-              title="🎬 <b>$(escape_html "$series")</b>"
+              # emoji 一律在  内（规范 §2 标签语义表裁决 7）
+              title="🎬 $(escape_html "$series")"
               [ -n "$se" ] && title="${title} ${se}"
             else
-              title="🎬 <b>$(escape_html "${n:-未知}")</b>"
+              title="🎬 $(escape_html "${n:-未知}")"
               [ -n "$year" ] && title="${title} (${year})"
             fi
 
@@ -1124,15 +1124,15 @@ jobs:
               "$(fmt_size "$size_b")")
 
             # 第 3 行：链路。302 时把直链剩余有效期说清楚——链接不是永久的
-            # emoji 入 <b>，剩余有效期是元数据 → · （规范 §2 裁决 7 + 语义表 #5）
+            # emoji 入 ，剩余有效期是元数据 → · （规范 §2 裁决 7 + 语义表 #5）
             if [ "$kind" = "302直链" ]; then
-              l3="⚡ <b>302直连 OneDrive</b>"
+              l3="⚡ 302直连 OneDrive"
               case "$remain_s" in
                 ''|*[!0-9]*) ;;
                 *) [ "$remain_s" -gt 0 ] && l3="${l3} · 直链剩余 $(( (remain_s + 59) / 60 )) 分钟";;
               esac
             else
-              l3="🔁 <b>视频流经 runner 中转到网盘</b>"
+              l3="🔁 视频流经 runner 中转到网盘"
             fi
 
             # 第 4 行：客户端。IP 来自 ge2o 访问日志（谁在播）
@@ -1196,7 +1196,7 @@ jobs:
             [ -n "$meta" ] && text="${text}"$'\n'"规格：${meta}"
             text="${text}"$'\n'"链路：${l3}"
             [ -n "$client" ] && text="${text}"$'\n'"客户端：${client}"
-            # 分节标题交给 tg_add_section：emoji 入 <b>（规范 §2 裁决 7）、段前空行自动补全。
+            # 分节标题交给 tg_add_section：emoji 入 （规范 §2 裁决 7）、段前空行自动补全。
             # waitline 只含树形条目，不要再自带"⏳ 起播等待"标题行，也不要再套"等待："标签
             if [ -n "$waitline" ]; then
               # 列表分节带计数（规范 §2：分节后跟条目列表必须 · N）
