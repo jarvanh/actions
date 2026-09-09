@@ -71,6 +71,7 @@ proxy-speedtest/            测速结果数据
 | **sync** | `sync_engine.sh` | 298 | 核心同步引擎（编排 + 423/8005 重试） |
 | | `sync_marker.sh` | 907 | 同步标记持久化（跳过、黑名单、修复清单） |
 | | `sync_notify.sh` | 355 | 同步结果通知构建（统一 Telegram HTML 排版） |
+| | `sync_trend.sh` | 240 | 跨 run 传输趋势（P0 可见化：剩余未传/净传速率/预计清零，收尾发「📈 同步趋势」通知） |
 | | `sync_progress.sh` | 807 | 全局进度通知系统（含收尾四态标题、多层级阶段区） |
 | **file** | `file_split.sh` | 672 | 大文件分割（ffmpeg 关键帧 / 7z 分卷） |
 | | `file_fix.sh` | 1243 | 单文件修复的 4 种方法 + 目录可写性预检 + 短哈希目录兜底 |
@@ -235,7 +236,14 @@ workflow 会把 `*.sh` `*.py` `*.jq` 拷到 `/tmp` 再 `source /tmp/load_all.sh`
 `OPENLIST_PERSIST_RETRY_ROUNDS` · `OPENLIST_MISSING_FIX_MAX`(200) ·
 `OPENLIST_MAX_SPLIT_ATTEMPTS` · `ROTATION_MAX_CONSECUTIVE_ATTEMPTS`(8)
 
-**并发**：`OPENLIST_TRANSFERS` · `OPENLIST_CHECKERS`
+**并发**：`OPENLIST_TRANSFERS`（workflow 输入 `transfers` 可调，默认 1；wopan176 保持 1——run 32749862280 整批假成功事故后端）· `OPENLIST_CHECKERS` ·
+`OPENLIST_SUBDIR_PARALLEL`（workflow 输入 `subdir_parallel`，默认 1 串行；≥2 时顶层 auto-split 子目录并行同步，递归层始终串行）·
+`OPENLIST_SUBDIR_LIST_PARALLEL`（子目录大小列举并行度，默认 8）·
+`OPENLIST_CONTAINER_LOCK`（容器读写锁文件，默认 /tmp/ol_container.lock——传输持共享锁、容器重启持独占锁）
+
+**时间预算（优雅到站）**：`OPENLIST_SYNC_BUDGET_SECONDS`(19200=320min，同步 step 启动锚点) ·
+`OPENLIST_SYNC_MIN_SLICE_SECONDS`(600=10min，剩余预算低于此不再开新工作) ·
+`OPENLIST_SYNC_DEADLINE_EPOCH`（由 workflow 计算，调试/还原模式不设置=不干预）
 
 **开关**：`FORCE_SYNC` · `OPENLIST_SPLIT_ON_SYNC_FAILURE` · `OPENLIST_TASK_ROTATION` ·
 `OPENLIST_SKIP_ESTIMATE`（=0 关闭跳过通知的"本次未传"现场估算，只复用预览缓存）·
@@ -262,6 +270,40 @@ workflow 的 `run_mode` 单选互斥：
 
 ---
 
+## 传输趋势与接力
+
+**跨 run 传输趋势（P0 可见化，`sync_trend.sh`）**：回答"照现在的速度还要多久传完"。
+预览 pass 后把全量未传量（`PREVIEW_PENDING_MAP` 合计）落盘，每次实际传输累计净传字节
+（两个记录点：`_sync_task_finalize` + 最终完整同步尾部，无重复计数），收尾 step（always()，
+被取消的 run 也执行）追加 `{时间戳, run_id, 历时, 净传, 剩余}` 到
+`onedrive:/logs/sync_state/trend.jsonl` 并发送「📈 同步趋势」通知（近 5 轮净传速率 +
+剩余 + 预计清零）。`trend.jsonl` 读改写三情形：远端不存在→创建 / 存在→追加 /
+读取失败→放弃回传只发通知（宁丢一条样本，不覆盖历史——同 marker 过期副本防护原则）。
+`skip_preview=true` 的 run 剩余量记为未知，趋势速率不受影响。
+
+**优雅到站（P2）**：大任务常态撞 6h runner 上限被硬杀。现在同步 step 启动时设预算锚点
+（`OPENLIST_SYNC_BUDGET_SECONDS`=320min），剩余预算不足最小工作片
+（`OPENLIST_SYNC_MIN_SLICE_SECONDS`=10min）时不再开新同步对/子目录/最终完整同步，
+做完当前即以 **success** 正常收场。跳过最终完整同步时不保存 pair 级成功 marker
+（任务确实未完整）。被跳过的子目录 marker 已各自落盘，进度零回退。
+
+**自续触发（P2 接力）**：GitHub 对高频 cron 限流严重（*/5 实测曾 4.5h 零触发），
+"常驻队列"假设不成立 → 本轮收场后「自续触发」step 用 GITHUB_TOKEN 立即 dispatch
+下一轮（workflow_dispatch 是 GITHUB_TOKEN 可触发新 run 的例外事件，job permissions
+含 `actions:write`）。三道护栏：仅同步模式且 `self_retrigger` 开启（默认开）；
+人工取消不打架（同步 step 被 cancel 且 job 未到 6h 上限即 <5h50m → 判人工取消不接力）；
+已有 queued/waiting 运行不重复触发。schedule cron 降为 `*/30` 只做兜底。
+
+**全量冲刺期推荐**：`session_hold=false` + `self_retrigger=true` → 6h 窗口全部
+让给同步，轮与轮之间零空窗；全量收敛后恢复默认。
+
+**吞吐调优（P1）**：`transfers`（默认 1 串行）与 `subdir_parallel`（默认 1 串行）
+均可按 run 调整，但两者都会提高对同一后端的并发 PUT 数——与 run 32749862280
+整批假成功事故的规避方向相悖。启用前先用调试模式单任务观察一轮
+"object not found" 率与修复管线触发量；wopan176 的 `transfers` 保持 1。
+
+---
+
 ## 测试
 
 ```bash
@@ -269,7 +311,7 @@ cd .github/scripts/openlist
 for t in tests/*.sh; do bash "$t"; done
 ```
 
-17 个测试，覆盖轮转、批次巩固、修复管线优化、修复日志区段头提取、
+18 个测试，覆盖轮转、批次巩固、修复管线优化、修复日志区段头提取、
 目录可写性预检（含假成功目录）与短哈希目录兜底、预览 diff、跳过窗口的预览
 预判与跳过通知"本次未传"（含现场估算与宁缺毋滥分支）、truth-check、
 token 登录、marker、收尾标题四态、进度阶段区排版（子目录树/文件批次的层级
