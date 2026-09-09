@@ -80,23 +80,30 @@ tg_add_path() {
 }
 
 # 分节标题: "\n{标题（含 emoji）加粗}\n"（段前空一行与上一区块分隔）
-# 例外: 紧跟标题时（消息以 "分隔线\n" 结尾）不补段前空行 ——
-#   否则视觉上等于"分隔线自带空行"，与全库"分隔线后不空行"冲突
-#   （任务预览 / openclaw·tailscale 入口通知的首个分节即此形态）
+# 段前空行的两个例外:
+#   1. 紧跟标题时（消息以 "分隔线\n" 结尾）—— 否则视觉上等于"分隔线自带空行"，
+#      与全库"分隔线后不空行"冲突（任务预览 / openclaw·tailscale 入口通知的首个分节即此形态）
+#   2. 空消息（首个分节）—— 消息开头不需要空行
+# 另: 正文无尾换行时（手拼变量，如 emby.yml 播放通知的 text）先补一个再进分节 ——
+#   否则下面的 \n 只给正文末行收尾，段前空行消失（与 tg_add_footer 同款处理）
 tg_add_section() {
   case "${!1}" in
-    *"${TG_SEP}"$'\n') tg_append "$1" "<b>$(escape_html "$2")</b>"$'\n' ;;
-    *) tg_append "$1" $'\n'"<b>$(escape_html "$2")</b>"$'\n' ;;
+    ''|*"${TG_SEP}"$'\n') ;;
+    *$'\n') tg_append "$1" $'\n' ;;
+    *) tg_append "$1" $'\n'$'\n' ;;
   esac
+  tg_append "$1" "<b>$(escape_html "$2")</b>"$'\n'
 }
 
 # 斜体说明（段前空一行）: "\n<i>说明</i>\n"
-# 紧跟标题时同样不补段前空行（与 tg_add_section 同规则，避免"分隔线自带空行"）
+# 段前空行的例外与 tg_add_section 完全一致（紧跟分隔线 / 空消息不补；正文无尾换行先补）
 tg_add_note() {
   case "${!1}" in
-    *"${TG_SEP}"$'\n') tg_append "$1" "<i>$(escape_html "$2")</i>"$'\n' ;;
-    *) tg_append "$1" $'\n'"<i>$(escape_html "$2")</i>"$'\n' ;;
+    ''|*"${TG_SEP}"$'\n') ;;
+    *$'\n') tg_append "$1" $'\n' ;;
+    *) tg_append "$1" $'\n'$'\n' ;;
   esac
+  tg_append "$1" "<i>$(escape_html "$2")</i>"$'\n'
 }
 
 # 追加多行文本块并保证段尾换行
