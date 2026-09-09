@@ -59,6 +59,11 @@ on:
         required: false
         type: boolean
         default: true
+      self_retrigger:
+        description: "同步模式: 本轮收场后立即自动触发下一轮接力（时间预算优雅到站/正常收摊后触发；人工取消且未到 6h 上限时不接力）"
+        required: false
+        type: boolean
+        default: true
       # ===== 调试模式选项 =====
       fix_test_task:
         description: "调试模式: 要测试的任务 id（如 backup、task0；带后缀的变体如 task0-baidupan，完整清单见 task_engine.sh SYNC_TASK_REGISTRY）"
@@ -77,7 +82,9 @@ on:
         type: string
         default: "all"
   schedule:
-    - cron: "*/5 * * * *"
+    # 兜底触发（自续触发是主接力机制，见「自续触发」step）。
+    # GitHub 对高频 cron 限流严重（实测 */5 曾 4.5h 零触发），降为 */30
+    - cron: "*/30 * * * *"
   watch:
     types: started
 
@@ -137,6 +144,11 @@ jobs:
       OPENLIST_SUBDIR_PARALLEL: ${{ inputs.subdir_parallel || '1' }}
     concurrency: openlist-singleton
     runs-on: ubuntu-latest
+    # actions:write 供「自续触发」step 用 GITHUB_TOKEN dispatch 下一轮
+    # （workflow_dispatch 是 GITHUB_TOKEN 触发新 run 的两种例外事件之一）
+    permissions:
+      actions: write
+      contents: read
     steps:
       # 检出仓库，使 .github/scripts/openlist/ 下的脚本文件可用
       - name: Checkout repository
@@ -352,11 +364,20 @@ jobs:
       # ===== 所有同步任务预览 + 执行 =====
       # （任务清单/参数维护入口见上方"加载同步函数库"step 注释）
       - name: 任务预览与全量同步
+        id: sync
+        # P2 优雅到站硬兜底: 预算正常时脚本会先优雅退出（success），
+        # 此超时只防"预算检查本身失效"的极端情况（330min < 6h job 上限，
+        # 给收尾/Persist/接力留出余量）
+        timeout-minutes: 330
         if: ${{ inputs.run_mode == '' || inputs.run_mode == '同步' }}
         run: |
           source /tmp/load_all.sh
           # P0 趋势: 记录同步工作开始时间（收尾时算本轮历时）
           trend_capture_start
+          # P2 优雅到站: 预算锚点 = 本 step 启动 + 320min（6h 上限留出
+          # setup/收尾/Persist/接力余量；超预算后不再开新工作，做完当前即退）
+          export OPENLIST_SYNC_DEADLINE_EPOCH=$(( $(date +%s) + ${OPENLIST_SYNC_BUDGET_SECONDS:-19200} ))
+          echo "同步时间预算: 320min（至 $(date -d "@$OPENLIST_SYNC_DEADLINE_EPOCH" '+%H:%M') UTC，超时优雅收摊）"
 
           # 等待 OpenList 就绪（容器刚启动时如果尚未就绪会导致预览为空及无谓的同步重传）
           echo "等待 OpenList 就绪..."
@@ -381,7 +402,11 @@ jobs:
 
           echo "=== 开始同步所有任务 ==="
           run_all_tasks
-          echo "=== 所有任务同步完成 ==="
+          if [ "${SYNC_TIME_EXHAUSTED:-0}" = "1" ]; then
+            echo "=== 时间预算用尽，优雅收摊（剩余任务由下轮接力，marker/游标已持久化）==="
+          else
+            echo "=== 所有任务同步完成 ==="
+          fi
 
       - name: 收尾与清理
         # always(): 大任务（如 task0 的 226GiB）常态撞 6h job 上限被取消，
@@ -423,7 +448,13 @@ jobs:
           trend_record_and_notify "${{ github.run_id }}" "${{ github.event_name }}"
 
           rm -f /tmp/*.sh /tmp/*.py /tmp/*.jq 2>/dev/null || true
-          echo "所有同步任务完成！"
+          # P4: 按同步 step 实际结论分流收场消息——旧版无条件打印
+          # "所有同步任务完成！"，被取消/失败的 run 也这么报，误导排查
+          if [ "${{ steps.sync.conclusion }}" = "success" ]; then
+            echo "所有同步任务完成！"
+          else
+            echo "本轮同步未完整收场（conclusion=${{ steps.sync.conclusion }}），状态已持久化，下轮接力继续"
+          fi
 
       # ===== 会话保持 + 数据库周期热备回传 =====
       # 原为纯 sleep 300m；runner 被强杀（VM 销毁/取消超时）时 Finalize 的
@@ -481,3 +512,40 @@ jobs:
               --include "data.db-wal" --include "data.db-shm" --include "data.db-journal" 2>/dev/null || true
             echo "回传完成: $(rclone lsl dropbox:self-hosted/openlist/data 2>/dev/null | grep -c .) 个文件"
           fi
+
+      # ===== 自续触发（P2 接力机制）=====
+      # 背景: GitHub 对高频 cron 限流严重（*/5 实测曾 4.5h 零触发），"常驻
+      # 队列"假设不成立 → 改为本轮收场后立即 dispatch 下一轮，cron 只做兜底。
+      # workflow_dispatch 是 GITHUB_TOKEN 能触发新 run 的两种例外事件之一，
+      # 已在 job permissions 里给 actions:write。
+      # 三道护栏:
+      #   1. 仅同步模式且 self_retrigger 开启（调试/还原/关闭即完全静止）
+      #   2. 人工取消不打架: 同步 step 被 cancel 且 job 未到 6h 上限
+      #      （<5h50m）→ 判定为人工取消，不接力
+      #   3. 防堆积: 已有排队/等待中的运行则不重复触发
+      - name: 自续触发（下轮接力）
+        if: ${{ always() && (inputs.run_mode == '' || inputs.run_mode == '同步') && (inputs.self_retrigger != false) }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          REPO="${{ github.repository }}"
+          SYNC_CONCLUSION="${{ steps.sync.conclusion }}"
+          ELAPSED=$(( $(date +%s) - $(date -d "${{ github.run_started_at }}" +%s) ))
+
+          # 护栏2: 人工取消不接力（6h 上限的取消表现为 elapsed ≈ 21600s）
+          if [ "$SYNC_CONCLUSION" = "cancelled" ] && [ "$ELAPSED" -lt 21000 ]; then
+            echo "同步 step 被取消且运行仅 $((ELAPSED / 60))min，判定为人工取消，不接力"
+            exit 0
+          fi
+
+          # 护栏3: 已有排队/等待中的运行则不重复触发（cron 仍会创建排队）
+          PENDING=$(gh run list -R "$REPO" --workflow=openlist.yml --limit 30 --json status \
+            | jq '[.[] | select(.status == "queued" or .status == "waiting" or .status == "pending")] | length')
+          if [ "${PENDING:-0}" -gt 0 ]; then
+            echo "已有 ${PENDING} 个排队/等待中的运行，跳过接力"
+            exit 0
+          fi
+
+          gh workflow run openlist.yml -R "$REPO"
+          echo "✅ 已触发下一轮接力（本轮 conclusion=${SYNC_CONCLUSION:-unknown}，运行 $((ELAPSED / 60))min）"

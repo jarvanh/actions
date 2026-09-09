@@ -118,6 +118,20 @@ _rotation_save() {
   _marker_write "$json" "$(_rotation_state_path)" >/dev/null 2>&1 || true
 }
 
+# ===== 优雅到站（P2）: 时间预算将尽时不再开新工作 =====
+# 背景: 大任务常态撞 6h runner 上限被硬杀——收尾/Persist 虽是 always() 会跑，
+# 但 run 以 cancelled 收场、在途批次通知统计被截断。改为: 同步 step 启动时
+# 设定预算锚点 OPENLIST_SYNC_DEADLINE_EPOCH（step 时刻 + BUDGET_SECONDS），
+# 剩余预算不足"一个最小工作片"时不再启动新的同步对/子目录/最终完整同步，
+# 当前工作做完即正常退出 → run 以 success 收场，接力 step 立即触发下轮。
+# 预算未设置（调试/还原模式）→ 永不触发停止。
+OPENLIST_SYNC_BUDGET_SECONDS="${OPENLIST_SYNC_BUDGET_SECONDS:-19200}"      # 320min
+OPENLIST_SYNC_MIN_SLICE_SECONDS="${OPENLIST_SYNC_MIN_SLICE_SECONDS:-600}"  # 10min
+sync_budget_stop() {
+  [ -n "${OPENLIST_SYNC_DEADLINE_EPOCH:-}" ] || return 1
+  [ $(( $(date +%s) + OPENLIST_SYNC_MIN_SLICE_SECONDS )) -ge "$OPENLIST_SYNC_DEADLINE_EPOCH" ]
+}
+
 # 顺序执行清单中的全部任务（支持同步对轮转，防饿死，见上方说明）
 run_all_tasks() {
   local n=${#SYNC_TASK_REGISTRY[@]}
@@ -151,6 +165,13 @@ run_all_tasks() {
   for ((i = 0; i < n; i++)); do
     idx=$(( (start + i) % n ))
     _e="${SYNC_TASK_REGISTRY[$idx]}"
+    # P2 优雅到站: 剩余预算不足一个最小工作片时不再开新同步对。
+    # 游标停在上一个已完成同步对（本轮已推进），剩余任务由下轮接力
+    if [ "$real_pass" -eq 1 ] && sync_budget_stop; then
+      echo "⏳ 时间预算将尽，优雅收摊: 剩余 $((n - i)) 个同步对留给下轮接力（游标已指向下一个待重试同步对）"
+      SYNC_TIME_EXHAUSTED=1
+      break
+    fi
     # 非起点同步对在本 run 内是首次尝试（连续尝试数从 1 重新计）
     [ "$i" -gt 0 ] && _rot_attempts=0
 
@@ -423,6 +444,12 @@ _sync_subdirs_parallel_run() {
   local _idx=0 _running=0 _pid
   while IFS= read -r subdir || [ -n "$subdir" ]; do
     [ -z "$subdir" ] && continue
+    # P2 优雅到站: 预算将尽不再分发新 worker（在途的等待自然完成）
+    if sync_budget_stop; then
+      echo "⏳ 时间预算将尽，停止分发新子目录（未分发的留给下轮接力）"
+      SYNC_TIME_EXHAUSTED=1
+      break
+    fi
     # 满载: 先收割一个完成槽位再分发
     while [ "$_running" -ge "$_par" ]; do
       _sync_par_reap_one "$_par_dir"
@@ -725,6 +752,12 @@ _sync_task_impl() {
   else
   while IFS= read -r subdir; do
     [ -z "$subdir" ] && continue
+    # P2 优雅到站: 预算将尽不再开新子目录（已完成的子目录 marker 已各自落盘）
+    if sync_budget_stop; then
+      echo "⏳ 时间预算将尽，停止开新子目录（未同步的留给下轮接力）"
+      SYNC_TIME_EXHAUSTED=1
+      break
+    fi
     total_subtasks=$((total_subtasks + 1))
     subtask_idx=$((subtask_idx + 1))
     local safe_subtask="${task_name}_${subdir//\//_}"
@@ -805,6 +838,12 @@ _sync_task_impl() {
 
   # 最终完整同步（仅在顶层执行，正常通知）
   if [ "$current_depth" -eq 0 ]; then
+    # P2 优雅到站: 预算将尽跳过最终完整同步——各子目录 marker 已落盘，
+    # 直接收摊不保存 pair 级成功 marker（任务确实未完整，下轮继续）
+    if sync_budget_stop; then
+      echo "⏳ 时间预算将尽，跳过最终完整同步（子目录 marker 已落盘，下轮接力）"
+      SYNC_TIME_EXHAUSTED=1
+    else
     echo "=== 最终完整同步: ${task_name} ==="
     PROGRESS_PHASE_INFO="$(_render_subdir_phase_tree)"
     progress_update_force "最终完整同步中" "▸ 📊 子目录：${total_subtasks}/${total_subtasks} 完成 · ✅${synced_subtasks} ⏭️${skipped_subtasks} ⚠️${partial_subtasks} ❌$((failed_subtasks - partial_subtasks))"
@@ -817,6 +856,7 @@ _sync_task_impl() {
       save_sync_marker "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
     else
       split_on_sync_failure "$source_path" "$task_name"
+    fi
     fi
   else
     # 递归子任务收尾：把聚合状态传回父级（父循环依据 SYNC_FAILED/SYNC_SKIPPED
