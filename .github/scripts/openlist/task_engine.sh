@@ -276,12 +276,207 @@ _render_subdir_phase_tree() {
 #   source_path / dest_path / task_name / extra_args / current_depth
 _sync_task_finalize() {
   local _rc="$1"
+  # P0 趋势: 记录本次实际净传字节。仅"本调用内 sync_with_logging 真正
+  # 执行过"的直接同步路径会走到这里（预览/跳过/子目录聚合不经过此函数
+  # 或不计入），各调用相加即本轮真实净传，无重复计数（另一记录点:
+  # _sync_task_impl 顶层的最终完整同步尾部）
+  if [ "${SYNC_SKIPPED:-0}" != "1" ]; then
+    trend_record_transferred "${SYNC_TRANSFERRED_BYTES:-0}"
+  fi
   if [ "$SYNC_FAILED" = "0" ] && [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
     save_sync_marker "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
   elif [ "$current_depth" -eq 0 ]; then
     split_on_sync_failure "$source_path" "$task_name"
   fi
   return "$_rc"
+}
+
+# ===== 并行子目录同步（可选: OPENLIST_SUBDIR_PARALLEL>=2 且 depth=0 启用）=====
+# 设计（与串行路径语义对齐，默认关闭 = 行为不变）:
+#   - worker = 子 shell 跑 _sync_task_impl（递归深度+1，内部仍串行），结果经
+#     .done 文件回传父级（subdir/status/transferred/修复累计器 base64）
+#   - worker 全程 PROGRESS_WORKER_MUTE=1: 深度槽位是跨 worker 共享文件，
+#     worker 互清/互写会打碎父级渲染 —— 子目录树由父进程按完成事件统一渲染
+#   - marker 按子目录各自落盘（文件互不相干，天然并行安全）；worker 的修复
+#     累计器（GLOBAL_FIXED_FILES_JSON 数组 / GLOBAL_FIX_BLACKLIST_JSON 对象）
+#     回传父级合并，保证顶层 marker 的 fixed_files/fix_blacklist 完整性
+#   - 传输持容器共享锁、truth-check 容器重启持独占锁（openlist_driver.sh
+#     读写锁）→ 重启只发生在无 worker 在途传输时
+#   - reap 用"结果文件为准 + kill -0 存活探测"轮询（wait -n -p 对被信号
+#     杀死的子进程不回填 pid 变量，实测 rc=127，故弃用），无版本要求
+# ⚠️ 并行会把对同一后端的并发 PUT 数翻倍，与 run 32749862280 整批假成功
+#   事故的规避方向相悖（transfers=1 的保守性被部分放弃）。启用前先用调试
+#   模式单任务观察一轮 "object not found" 率与修复管线触发量。
+_sync_par_render() {
+  # 依赖调用方（_sync_task_impl）作用域: subdirs / subdir_status_map /
+  # subdir_size_map / total_subdirs_count / 各分类计数（bash 动态作用域）
+  PROGRESS_PHASE_INFO="$(_render_subdir_phase_tree)"
+  local _completed=$((synced_subtasks + skipped_subtasks + failed_subtasks))
+  progress_update_force "" "▸ 📊 子目录：${_completed}/${total_subdirs_count} 完成 · ✅${synced_subtasks} ⏭️${skipped_subtasks} ⏳$((total_subdirs_count - _completed)) ⚠️${partial_subtasks} ❌$((failed_subtasks - partial_subtasks))"
+  return 0
+}
+
+_sync_par_consume() {
+  # 消费一个 worker 结果文件并按串行同款口径分类
+  local _f="$1" _subdir _st _tr _fb _bb _fj _bj
+  _subdir=$(sed -n 's/^subdir=//p' "$_f" | head -1)
+  _st=$(sed -n 's/^status=//p' "$_f" | head -1)
+  _tr=$(sed -n 's/^transferred=//p' "$_f" | head -1)
+  _fb=$(sed -n 's/^fixed_b64=//p' "$_f" | head -1)
+  _bb=$(sed -n 's/^blacklist_b64=//p' "$_f" | head -1)
+  [[ "$_tr" =~ ^[0-9]+$ ]] || _tr=0
+  rm -f "$_f"
+  case "$_st" in
+    skipped)
+      skipped_subtasks=$((skipped_subtasks + 1))
+      subdir_status_map["$_subdir"]="skipped"
+      skipped_list+="<code>$(escape_html "$_subdir")</code> · <i>$(format_bytes "${subdir_size_map[$_subdir]:-0}")</i>"$'\n'
+      ;;
+    synced)
+      synced_subtasks=$((synced_subtasks + 1))
+      subdir_status_map["$_subdir"]="synced"
+      total_transferred=$((total_transferred + _tr))
+      synced_list+="<code>$(escape_html "$_subdir")</code> · <i>$(format_bytes "${subdir_size_map[$_subdir]:-0}")</i>"$'\n'
+      ;;
+    partial)
+      partial_subtasks=$((partial_subtasks + 1))
+      failed_subtasks=$((failed_subtasks + 1))
+      subdir_status_map["$_subdir"]="partial"
+      total_transferred=$((total_transferred + _tr))
+      failed_list+="<code>$(escape_html "$_subdir")</code> · <i>$(format_bytes "${subdir_size_map[$_subdir]:-0}")</i> · <b>部分失败</b>"$'\n'
+      ;;
+    *)
+      failed_subtasks=$((failed_subtasks + 1))
+      subdir_status_map["$_subdir"]="failed"
+      failed_list+="<code>$(escape_html "$_subdir")</code> · <i>$(format_bytes "${subdir_size_map[$_subdir]:-0}")</i>"$'\n'
+      ;;
+  esac
+  # 修复累计器合并: fixed_files 是数组（拼接），fix_blacklist 是对象
+  # （方法级失败记忆，用 _marker_merge_json 与 save_sync_marker 同口径合并）
+  _fj=$(printf '%s' "$_fb" | base64 -d 2>/dev/null || echo "")
+  _bj=$(printf '%s' "$_bb" | base64 -d 2>/dev/null || echo "")
+  if [ -n "$_fj" ] && [ "$_fj" != "[]" ]; then
+    GLOBAL_FIXED_FILES_JSON=$(printf '%s\n%s' "${GLOBAL_FIXED_FILES_JSON:-[]}" "$_fj" | jq -sc 'add' 2>/dev/null) \
+      || GLOBAL_FIXED_FILES_JSON="${GLOBAL_FIXED_FILES_JSON:-[]}"
+  fi
+  if [ -n "$_bj" ] && [ "$_bj" != "{}" ]; then
+    GLOBAL_FIX_BLACKLIST_JSON=$(_marker_merge_json "${GLOBAL_FIX_BLACKLIST_JSON:-}" "$_bj" 2>/dev/null) \
+      || GLOBAL_FIX_BLACKLIST_JSON="${GLOBAL_FIX_BLACKLIST_JSON:-}"
+  fi
+  _sync_par_render
+  return 0
+}
+
+_sync_par_reap_one() {
+  # 等待并收割任意一个完成的 worker（阻塞，每 2s 轮询——对分钟级同步开销
+  # 可忽略）。依赖调用方（_sync_subdirs_parallel_run）作用域:
+  #   _par_dir / _w_subdir[idx]=子目录 / _w_pid[idx]=worker pid
+  # 为什么不用 wait -n -p 归因: 子进程被 SIGKILL 等信号杀死时实测不回填
+  # pid 变量（rc=127，dbg 复现），归因会落空 → 改为"结果文件为准 +
+  # kill -0 存活探测": 有 .done 即正常收；无 .done 但进程已死即崩溃兜底
+  local _par_dir="$1" _tries=0 _idx _pid _sub _f
+  while :; do
+    _tries=$((_tries + 1))
+    for _idx in "${!_w_subdir[@]}"; do
+      _pid=${_w_pid[$_idx]:-}
+      _sub=${_w_subdir[$_idx]:-}
+      _f="$_par_dir/$_idx.done"
+      if [ -f "$_f" ]; then
+        # 正常完成: 回收 zombie 后消费结果
+        [ -n "$_pid" ] && wait "$_pid" 2>/dev/null || true
+        unset '_w_subdir[$_idx]' '_w_pid[$_idx]'
+        _sync_par_consume "$_f"
+        return 0
+      fi
+      if [ -n "$_pid" ] && ! kill -0 "$_pid" 2>/dev/null; then
+        # 崩溃且无结果文件: 按失败分类保持统计一致，marker 未落盘，
+        # 下轮 run 自动重试
+        wait "$_pid" 2>/dev/null || true
+        unset '_w_subdir[$_idx]' '_w_pid[$_idx]'
+        echo "⚠️ 并行子目录 worker 异常退出（无结果文件），按失败计: ${_sub}"
+        failed_subtasks=$((failed_subtasks + 1))
+        subdir_status_map["$_sub"]="failed"
+        failed_list+="<code>$(escape_html "$_sub")</code> · <i>worker 崩溃</i>"$'\n'
+        _sync_par_render
+        return 0
+      fi
+    done
+    sleep 2
+  done
+}
+
+_sync_subdirs_parallel_run() {
+  # 依赖调用方（_sync_task_impl）作用域（读）: subdirs / source_path /
+  #   dest_path / task_name / extra_args / current_depth / subdir_size_map /
+  #   total_subdirs_count
+  # （写，均为 _sync_task_impl 的 local，此处赋值即更新调用方变量）:
+  #   subdir_status_map / total_subtasks / synced_subtasks / failed_subtasks /
+  #   partial_subtasks / skipped_subtasks / total_transferred /
+  #   synced_list / failed_list / skipped_list / GLOBAL_FIXED_FILES_JSON /
+  #   GLOBAL_FIX_BLACKLIST_JSON
+  local _par="${OPENLIST_SUBDIR_PARALLEL:-2}"
+  [ "$_par" -lt 2 ] && _par=2
+  local _par_dir="/tmp/ol_par_$(date +%s)_$$"
+  mkdir -p "$_par_dir"
+  declare -A _w_subdir=()
+  declare -A _w_pid=()
+  local _idx=0 _running=0 _pid
+  while IFS= read -r subdir || [ -n "$subdir" ]; do
+    [ -z "$subdir" ] && continue
+    # 满载: 先收割一个完成槽位再分发
+    while [ "$_running" -ge "$_par" ]; do
+      _sync_par_reap_one "$_par_dir"
+      _running=$((_running - 1))
+    done
+    _idx=$((_idx + 1))
+    total_subtasks=$((total_subtasks + 1))
+    local _safe="${task_name}_${subdir//\//_}"
+    echo "=== 子目录同步(并行): ${_safe} ==="
+    subdir_status_map["$subdir"]="syncing"
+    _sync_par_render
+    (
+      PROGRESS_WORKER_MUTE=1
+      # 修复累计器从零开始: worker 只上交"本子目录新增"，父级负责合并。
+      # 不重置的话，worker 会继承父级当前累计值并随 .done 回传，被父级
+      # 再合并一次 —— 尤其跳过/失败分支不改累计器，继承值被原样回传，
+      # 造成条目指数级重复（实测复现）
+      GLOBAL_FIXED_FILES_JSON='[]'
+      GLOBAL_FIX_BLACKLIST_JSON='{}'
+      SYNC_AUTO_SPLIT_DEPTH=$((current_depth + 1))
+      _sync_task_impl "${source_path}/${subdir}" "${dest_path}/${subdir}" "${_safe}" "${extra_args[@]}" < /dev/null || true
+      # 注意: worker 是子 shell 不是函数，此处禁用 local（"local: can only
+      # be used in a function" 在 set -e 下会杀死 worker，.done 永不落盘）
+      _st=""; _tr="0"
+      if [ "${SYNC_SKIPPED:-0}" = "1" ]; then
+        _st="skipped"
+      elif [ "${SYNC_FAILED:-0}" = "0" ]; then
+        _st="synced"
+      elif [ "${SYNC_PARTIAL:-0}" = "1" ]; then
+        _st="partial"
+      else
+        _st="failed"
+      fi
+      _tr="${SYNC_TRANSFERRED_BYTES:-0}"
+      {
+        printf 'subdir=%s\n' "$subdir"
+        printf 'status=%s\n' "$_st"
+        printf 'transferred=%s\n' "$_tr"
+        printf 'fixed_b64=%s\n' "$(printf '%s' "${GLOBAL_FIXED_FILES_JSON:-[]}" | base64 -w0 2>/dev/null || true)"
+        printf 'blacklist_b64=%s\n' "$(printf '%s' "${GLOBAL_FIX_BLACKLIST_JSON:-}" | base64 -w0 2>/dev/null || true)"
+      } > "${_par_dir}/${_idx}.done" 2>/dev/null || true
+      exit 0
+    ) &
+    _pid=$!
+    _w_subdir[$_idx]="$subdir"
+    _w_pid[$_idx]=$_pid
+    _running=$((_running + 1))
+  done <<< "$subdirs"
+  while [ "$_running" -gt 0 ]; do
+    _sync_par_reap_one "$_par_dir"
+    _running=$((_running - 1))
+  done
+  rm -rf "$_par_dir"
+  return 0
 }
 
 # 自动拆分同步实现：源端 > 50GB 时按一级子目录拆分，最后再完整同步一次
@@ -459,16 +654,48 @@ _sync_task_impl() {
   local sorted_subdirs=""
   declare -A subdir_size_map=()
   declare -A subdir_status_map=()
+  # 并行统计子目录大小（纯只读列举，无状态冲突；_rclone_size_json 单次
+  # 1-3s，串行在 150+ 子目录的任务上要耗 5 分钟以上，8 路并行 <1 分钟）。
+  # 结果按索引写临时文件回收，保持与串行完全一致的排序口径与日志输出
+  local _sz_dir="/tmp/ol_sz_$(date +%s)_$$"
+  mkdir -p "$_sz_dir"
+  local -a _sz_names=()
   while IFS= read -r subdir; do
     [ -z "$subdir" ] && continue
-    local subdir_bytes=0
-    local subdir_json
-    subdir_json=$(_rclone_size_json "${source_path}/${subdir}")
-    [ -n "$subdir_json" ] && subdir_bytes=$(_size_json_field "$subdir_json" bytes)
-    subdir_size_map["$subdir"]=$subdir_bytes
-    echo "  ${subdir}: $(format_bytes "$subdir_bytes")"
-    sorted_subdirs+="${subdir_bytes} ${subdir}"$'\n'
+    _sz_names+=("$subdir")
   done <<< "$subdirs"
+  local _sz_n=${#_sz_names[@]}
+  local _sz_k=0
+  while [ "$_sz_k" -lt "$_sz_n" ]; do
+    local _sz_c=0
+    while [ "$_sz_c" -lt "${OPENLIST_SUBDIR_LIST_PARALLEL:-8}" ] && [ "$_sz_k" -lt "$_sz_n" ]; do
+      local _sz_sub="${_sz_names[$_sz_k]}"
+      local _sz_idx=$_sz_k
+      (
+        local _j _b
+        _j=$(_rclone_size_json "${source_path}/${_sz_sub}") || _j=""
+        _b=0
+        [ -n "$_j" ] && _b=$(_size_json_field "$_j" bytes)
+        [[ "$_b" =~ ^[0-9]+$ ]] || _b=0
+        printf '%s' "$_b" > "$_sz_dir/$_sz_idx"
+      ) &
+      _sz_k=$((_sz_k + 1))
+      _sz_c=$((_sz_c + 1))
+    done
+    wait || true
+  done
+  _sz_k=0
+  while [ "$_sz_k" -lt "$_sz_n" ]; do
+    local _sz_sub="${_sz_names[$_sz_k]}"
+    local _sz_bytes=0
+    _sz_bytes=$(cat "$_sz_dir/$_sz_k" 2>/dev/null || echo 0)
+    [[ "$_sz_bytes" =~ ^[0-9]+$ ]] || _sz_bytes=0
+    subdir_size_map["$_sz_sub"]=$_sz_bytes
+    echo "  ${_sz_sub}: $(format_bytes "$_sz_bytes")"
+    sorted_subdirs+="${_sz_bytes} ${_sz_sub}"$'\n'
+    _sz_k=$((_sz_k + 1))
+  done
+  rm -rf "$_sz_dir"
   subdirs=$(echo "$sorted_subdirs" | sort -n | cut -d' ' -f2-)
 
   # 预统计子目录总数（用于进度展示）
@@ -487,6 +714,15 @@ _sync_task_impl() {
   local failed_list=""
   local skipped_list=""
   local subtask_idx=0
+  # ===== 并行子目录同步分支（默认关闭，行为不变）=====
+  # 启用条件: OPENLIST_SUBDIR_PARALLEL>=2 且 仅顶层拆分（depth=0，递归层
+  # 仍串行避免锁嵌套）且 子目录数>=2。默认串行，开启前见
+  # _sync_subdirs_parallel_run 头注释
+  if [ "${OPENLIST_SUBDIR_PARALLEL:-1}" -ge 2 ] \
+     && [ "$current_depth" -eq 0 ] \
+     && [ "${total_subdirs_count:-0}" -ge 2 ]; then
+    _sync_subdirs_parallel_run
+  else
   while IFS= read -r subdir; do
     [ -z "$subdir" ] && continue
     total_subtasks=$((total_subtasks + 1))
@@ -540,6 +776,7 @@ _sync_task_impl() {
     local _completed_after=$((synced_subtasks + skipped_subtasks + failed_subtasks))
     progress_update_force "" "▸ 📊 子目录：${_completed_after}/${total_subdirs_count} 完成 · ✅${synced_subtasks} ⏭️${skipped_subtasks} ⏳$((total_subdirs_count - _completed_after)) ⚠️${partial_subtasks} ❌$((failed_subtasks - partial_subtasks))"
   done <<< "$subdirs"
+  fi
   SYNC_SKIP_QUIET=0
 
   # 设置拆分信息供最终通知使用（HTML 片段，由 sync_engine.sh 通知按分节插入；
@@ -572,6 +809,9 @@ _sync_task_impl() {
     PROGRESS_PHASE_INFO="$(_render_subdir_phase_tree)"
     progress_update_force "最终完整同步中" "▸ 📊 子目录：${total_subtasks}/${total_subtasks} 完成 · ✅${synced_subtasks} ⏭️${skipped_subtasks} ⚠️${partial_subtasks} ❌$((failed_subtasks - partial_subtasks))"
     sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
+    # P0 趋势: 最终完整同步的净传字节（此前各子目录已各自记录，这里只
+    # 记本调用自己的 sync_with_logging，二者相加无重复）
+    trend_record_transferred "${SYNC_TRANSFERRED_BYTES:-0}"
     AUTO_SPLIT_INFO=""
     if [ "$SYNC_FAILED" = "0" ] && [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
       save_sync_marker "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
@@ -790,6 +1030,8 @@ _batch_consolidate() {
 
   local retry_log="${batch_dir}/retry_${batch_idx}.log"
   set +e
+  # 容器共享锁（与并行 worker 的传输窗口互斥容器重启，见 openlist_driver.sh）
+  _ol_lock_shared
   rclone copy "$source_path" "$dest_path" \
     --files-from "$retry_list" \
     --size-only \
@@ -807,6 +1049,7 @@ _batch_consolidate() {
     --verbose \
     "${extra_args[@]}" \
     2>&1 | tee "$retry_log"
+  _ol_lock_shared_release
   set -e
   _stop_token_refresher
 

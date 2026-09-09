@@ -42,6 +42,7 @@ source "$_OPENLIST_SCRIPT_DIR/file_fix.sh"      # 单文件修复 4 种方法实
 source "$_OPENLIST_SCRIPT_DIR/file_split.sh"    # 大文件分割（视频 ffmpeg + 非视频 7z 分卷）
 source "$_OPENLIST_SCRIPT_DIR/sync_marker.sh"   # 同步标记系统（跳过/警告/保存）
 source "$_OPENLIST_SCRIPT_DIR/sync_progress.sh" # 全局进度通知系统
+source "$_OPENLIST_SCRIPT_DIR/sync_trend.sh"    # 跨 run 传输趋势（P0 可见化: 剩余量/速率/ETA）
 
 # --- L4 服务与管线编排 ---
 source "$_OPENLIST_SCRIPT_DIR/openlist_driver.sh"   # 驱动维护/健康预检/缓存与 truth-check [openlist_api, file_fix]

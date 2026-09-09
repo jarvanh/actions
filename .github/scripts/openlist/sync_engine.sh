@@ -192,7 +192,7 @@ sync_with_logging() {
         "--contimeout" "30s"
         "--timeout" "30m"
       )
-      echo "OpenList 目标端：启用低并发保护 (transfers=1, checkers=8, timeout=30m)" | tee -a "$LOG_FILENAME"
+      echo "OpenList 目标端：启用低并发保护 (transfers=${OPENLIST_TRANSFERS:-1}, checkers=${OPENLIST_CHECKERS:-8}, timeout=30m)" | tee -a "$LOG_FILENAME"
 
       # 同步前主动刷新 OpenList 驱动 token
       # wopan176 的 OAuth access token 有效期约 5 分钟，长时间同步会过期
@@ -218,6 +218,11 @@ sync_with_logging() {
       _start_token_refresher
     fi
 
+    # 容器共享锁: 传输期间声明"容器必须存活"，truth-check 的容器重启
+    # （独占锁）会等全部共享持有者退出后才执行 —— 串行模式无争用，
+    # 并行子目录同步（OPENLIST_SUBDIR_PARALLEL>=2）时防止重启打断在途上传。
+    # 锁在心跳/token 保鲜线程全部停止后释放（子进程不持有 fd 7）
+    _ol_lock_shared
     rclone sync "$source_path" "$dest_path" \
       "${RCLONE_DEFAULT_FLAGS[@]}" \
       "${openlist_guard_flags[@]}" \
@@ -228,6 +233,7 @@ sync_with_logging() {
     _stop_token_refresher
     kill "$heartbeat_pid" 2>/dev/null || true
     wait "$heartbeat_pid" 2>/dev/null || true
+    _ol_lock_shared_release
 
     cat "$LAST_ATTEMPT_LOG" >> "$LOG_FILENAME"
     return "$attempt_status"

@@ -426,14 +426,61 @@ _refresh_ol_cache_fast() {
   sleep 5
 }
 
+# ===== 容器级读写锁（并行子目录同步的互斥基础，串行模式无争用直通）=====
+# 共享锁（fd 7）: rclone 传输 / 巩固重试等"容器必须存活"的窗口，多个并行
+#   worker 可同时持有；独占锁（fd 6）: 容器重启（truth-check / 驱动刷新
+#   方法2）—— 等全部共享持有者退出后才重启，杜绝"重启打断在途上传"。
+#   串行模式下只有一个执行流，锁总是立即可得，行为不变。
+# fd 口径: 9 已被进度系统占用（PROGRESS_LOCK_FILE），此处用 7/6。
+OPENLIST_CONTAINER_LOCK="${OPENLIST_CONTAINER_LOCK:-/tmp/ol_container.lock}"
+# 独占锁最长等待 1h（另一 worker 的大文件传输可能很久）；超时放弃重启，
+# 列表可能仍被假成功污染 —— 与"无传输轮次不重启"同一自愈语义：下轮有
+# 传输即再重启暴露
+_OL_EXCLUSIVE_LOCK_WAIT="${_OL_EXCLUSIVE_LOCK_WAIT:-3600}"
+_ol_lock_shared() {
+  exec 7>>"$OPENLIST_CONTAINER_LOCK" 2>/dev/null || return 0
+  flock -s 7 2>/dev/null || true
+  return 0
+}
+_ol_lock_shared_release() {
+  flock -u 7 2>/dev/null || true
+  eval "exec 7>&-" 2>/dev/null || true
+  return 0
+}
+_ol_lock_exclusive() {
+  # $1 = log_file（超时警告写入；可省略）
+  exec 6>>"$OPENLIST_CONTAINER_LOCK" 2>/dev/null || return 0
+  if ! flock -x -w "$_OL_EXCLUSIVE_LOCK_WAIT" 6 2>/dev/null; then
+    echo "  ⚠️ 容器独占锁等待超时（${_OL_EXCLUSIVE_LOCK_WAIT}s），跳过重启（下轮自愈）" | tee -a "${1:-/dev/null}"
+    eval "exec 6>&-" 2>/dev/null || true
+    return 1
+  fi
+  return 0
+}
+_ol_lock_exclusive_release() {
+  flock -u 6 2>/dev/null || true
+  eval "exec 6>&-" 2>/dev/null || true
+  return 0
+}
+
 # 重启 OpenList 容器并等待驱动就绪——为拿到"后端真实列表"
 # （PUT 假成功条目只存在于 OpenList 缓存/后端可见列表，容器重启即消失；
 #   持久化验证/假成功重试一直在用这个口径，此处抽出复用）
+# 并行模式下经容器独占锁互斥: 有 worker 在传输（共享锁）时等待其完成
 # 用法: _restart_openlist_for_truth [ol_path 不带 openlist: 前缀] [log_file]
 #   ol_path 为空时跳过路径级缓存刷新（重启后列表本就是后端新拉的，
 #   且对根路径 recursive 刷新代价大）
-# 返回: 0=重启且驱动就绪（列表已从后端重拉），1=不可重启/未就绪
+# 返回: 0=重启且驱动就绪（列表已从后端重拉），1=不可重启/未就绪/锁超时
 _restart_openlist_for_truth() {
+  if ! _ol_lock_exclusive "${2:-/dev/null}"; then
+    return 1
+  fi
+  local _rc=0
+  _restart_openlist_for_truth_impl "$@" || _rc=$?
+  _ol_lock_exclusive_release
+  return "$_rc"
+}
+_restart_openlist_for_truth_impl() {
   local ol_path="${1#/}"
   local log_file="${2:-/dev/null}"
   command -v docker >/dev/null 2>&1 || return 1
