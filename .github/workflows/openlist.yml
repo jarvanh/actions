@@ -35,6 +35,30 @@ on:
         required: false
         type: boolean
         default: false
+      transfers:
+        description: "同步模式: OpenList 目标端 rclone 并发上传数（默认 1 串行=最保守；wopan176 保持 1——run 32749862280 整批假成功事故后端。baidupan/wopan175 可先在调试模式单任务试 2，truth-check 会兜底暴露假成功）"
+        required: false
+        type: choice
+        default: "1"
+        options:
+          - "1"
+          - "2"
+          - "3"
+          - "4"
+      subdir_parallel:
+        description: "同步模式: auto-split 子目录并行数（默认 1 串行。>=2 时顶层子目录并行同步，对同一后端并发 PUT 翻倍——启用前先用调试模式观察一轮 object not found 率；递归层始终串行）"
+        required: false
+        type: choice
+        default: "1"
+        options:
+          - "1"
+          - "2"
+          - "3"
+      session_hold:
+        description: "同步模式: 同步完成后保持会话 5 小时并周期热备 db（关闭后同步结束立即回传收摊，适合全量冲刺期提升运行密度）"
+        required: false
+        type: boolean
+        default: true
       # ===== 调试模式选项 =====
       fix_test_task:
         description: "调试模式: 要测试的任务 id（如 backup、task0；带后缀的变体如 task0-baidupan，完整清单见 task_engine.sh SYNC_TASK_REGISTRY）"
@@ -107,8 +131,10 @@ jobs:
       OPENLIST_ADMIN_PASSWORD: ${{ secrets.OPENLIST_ADMIN_PASSWORD }}
 
       # 并发参数
-      OPENLIST_TRANSFERS: "1"
+      OPENLIST_TRANSFERS: ${{ inputs.transfers || '1' }}
       OPENLIST_CHECKERS: "8"
+      # auto-split 顶层子目录并行数（1=串行，行为与历史版本一致）
+      OPENLIST_SUBDIR_PARALLEL: ${{ inputs.subdir_parallel || '1' }}
     concurrency: openlist-singleton
     runs-on: ubuntu-latest
     steps:
@@ -329,6 +355,8 @@ jobs:
         if: ${{ inputs.run_mode == '' || inputs.run_mode == '同步' }}
         run: |
           source /tmp/load_all.sh
+          # P0 趋势: 记录同步工作开始时间（收尾时算本轮历时）
+          trend_capture_start
 
           # 等待 OpenList 就绪（容器刚启动时如果尚未就绪会导致预览为空及无谓的同步重传）
           echo "等待 OpenList 就绪..."
@@ -345,6 +373,9 @@ jobs:
             flush_task_preview
             echo "=== 所有任务预览通知已发送 ==="
           fi
+          # P0 趋势: 预览完成后把全量"未传量"落文件（收尾趋势通知的剩余口径；
+          # skip_preview=true 时无预览数据，本轮剩余记为未知）
+          trend_capture_remaining
           # 注册完成后立即刷新，让"总任务"在同步开始前就是全量
           progress_reload
 
@@ -386,6 +417,11 @@ jobs:
           rclone sync onedrive:/logs/sync_state dropbox:sync_state_mirror --create-empty-src-dirs 2>&1 | tail -2 || true
           echo "sync_state 镜像完成: $(rclone lsf dropbox:sync_state_mirror 2>/dev/null | wc -l | tr -d ' ') 个文件"
 
+          # P0 趋势: 追加本轮 {历时/净传/剩余} 到 trend.jsonl 并回传，
+          # 发送 "📈 同步趋势" 通知（近 5 轮速率 + 剩余 + 预计清零时间）。
+          # 放在 always() 收尾里: 被 6h 上限取消的 run 也计入趋势，不丢样本
+          trend_record_and_notify "${{ github.run_id }}" "${{ github.event_name }}"
+
           rm -f /tmp/*.sh /tmp/*.py /tmp/*.jq 2>/dev/null || true
           echo "所有同步任务完成！"
 
@@ -395,8 +431,11 @@ jobs:
       # 强杀丢失窗口从 5 小时压缩到 ≤5 分钟。
       # 快照用 SQLite backup API（在线、逻辑一致），不直接拷 data.db 文件
       # （容器运行中直接拷可能捕获到撕裂状态）。
+      # session_hold=false（全量冲刺期）时整个 step 跳过: 同步结束立即走
+      # Persist 回传收摊，6h 窗口全部让给同步；代价是强杀丢失窗口回到
+      # "自上次 Persist 起"（冲刺期通常 ≤6h，可接受）
       - name: 会话保持与数据库周期热备
-        if: ${{ inputs.run_mode == '' || inputs.run_mode == '同步' }}
+        if: ${{ (inputs.run_mode == '' || inputs.run_mode == '同步') && (inputs.session_hold != false) }}
         run: |
           LAST_MD5="${OPENLIST_DB_MD5_PULL:-none}"
           for _ in $(seq 1 60); do

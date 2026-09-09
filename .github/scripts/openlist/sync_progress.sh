@@ -295,6 +295,10 @@ _progress_get_fixed_files() {
 # auto-split 递归进入子任务时调用: 同名深度的槽位可能被上一个兄弟子树
 # 留下过期内容（尤其"直接同步中"这类不写树的路径会残留旧树），进入时清空。
 progress_scope_init() {
+  # 并行 worker 静默: worker（PROGRESS_WORKER_MUTE=1）不得清槽位 ——
+  # 深度槽位是跨 worker 共享的文件，worker 互清会抹掉对方的在途状态，
+  # 子目录树由父进程统一渲染（见 task_engine.sh 并行子目录分支）
+  [ "${PROGRESS_WORKER_MUTE:-0}" = "1" ] && return 0
   local _d="${1:-0}"
   local d
   for ((d = _d; d < PROGRESS_MAX_DEPTH; d++)); do
@@ -647,6 +651,9 @@ progress_init() {
 #   第二参数仅在任务未注册时用作显示名（如 debug 模式无预览阶段）；
 #   已注册任务（预览阶段）开始运行时不设置 detail，显示名/大小提示保持注册时的值
 progress_task_begin() {
+  # 并行 worker 静默: task_begin 会 PURGE_ALL 槽位 + 改写"当前任务"，
+  # worker 一律不得触碰（见 progress_scope_init 同款保护）
+  [ "${PROGRESS_WORKER_MUTE:-0}" = "1" ] && return 0
   local task_id="$1"
   local fallback_name="${2:-}"
   # 自动注册未注册的任务
@@ -722,6 +729,7 @@ _progress_task_apply() {
 # 用法: progress_task_update <detail> [rows_raw] [stats_html]
 progress_task_update() {
   [ "${PROGRESS_SUPPRESS:-0}" = "1" ] && return 0
+  [ "${PROGRESS_WORKER_MUTE:-0}" = "1" ] && return 0
   _progress_task_apply "${1:-}" "${2:-}" "${3:-}" 0
 }
 
@@ -729,6 +737,7 @@ progress_task_update() {
 # 用法: progress_task_update_force <detail> [rows_raw] [stats_html]
 progress_task_update_force() {
   [ "${PROGRESS_SUPPRESS:-0}" = "1" ] && return 0
+  [ "${PROGRESS_WORKER_MUTE:-0}" = "1" ] && return 0
   _progress_task_apply "${1:-}" "${2:-}" "${3:-}" 1
 }
 
