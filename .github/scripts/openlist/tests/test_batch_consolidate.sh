@@ -27,6 +27,11 @@ bad() { FAIL=$((FAIL+1)); echo "FAIL: $1"; }
 _REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 
 # --- source 被测代码 ---
+# 注意: 必须一并 source openlist_driver.sh —— 容器级读写锁 _ol_lock_shared /
+# _ol_lock_shared_release 定义在那里，task_engine.sh 只调用不定义。漏掉时锁调用报
+# "command not found"、走直通，测试仍绿但与生产加锁行为不一致（2026-09-09 全量
+# grep "command not found" 发现 20 条，此前被 2>/dev/null 吞掉没人看见）。
+source "$_REPO_ROOT/.github/scripts/openlist/openlist_driver.sh" 2>/dev/null
 source "$_REPO_ROOT/.github/scripts/openlist/task_engine.sh" 2>/dev/null
 
 BC_DIR="/tmp/bc_test_dir"

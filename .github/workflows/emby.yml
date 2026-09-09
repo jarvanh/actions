@@ -172,6 +172,9 @@ jobs:
           # secret 必须经环境变量注入——直接文本注入 run: 脚本时，密码里含
           # $xxx 片段会被 bash 当未定义变量展开成空（如 @$TM3@ 变 @$TM3@ 骨架）。
           OPENLIST_ADMIN_PASSWORD: ${{ secrets.OPENLIST_ADMIN_PASSWORD }}
+          # 收尾区接线（规范 §3）：本 step 有 OpenList 凭据通知，需要运行日志链接
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TG_RUN_STARTED_AT: ${{ github.run_started_at }}
         run: |
           main() {
             sudo mkdir -p /opt/openlist
@@ -317,6 +320,10 @@ jobs:
               tg_add_path PW_MSG "密码" "$PW_VAL"
               tg_add_path PW_MSG "入口" "https://oe.${{ secrets.VD }}.eu.org"
               tg_add_note PW_MSG "长期有效密码 = OPENLIST_ADMIN_PASSWORD · 下轮自动恢复为它 · 本条不会出现在公开日志"
+              # 统一收尾区（规范 §3）：凭据消息没有特殊通道，照常 tg_add_* 构建 + 收尾 + send_tg。
+              # TG_RUN_URL 由本 step env 注入；TG_RUN_STARTED_AT 平台已移除表达式上下文（注入为空），
+              # 时长走 /proc/1 兜底（本 step 靠 job 头部，误差秒级）。两者皆无时整行自动跳过。
+              tg_add_footer PW_MSG
               send_tg "$PW_MSG" \
                 && echo "已通过 TG 私信发送 OpenList 凭据（不落公开日志）" \
                 || echo "::warning::OpenList 凭据 TG 通知发送失败（不影响链路）"
@@ -1170,14 +1177,13 @@ jobs:
             [ -n "$sub" ]  && waitline="${waitline}Emby → OneDrive 抽字幕：$(fmt_ms "$sub")"$'\n'
             [ -n "$seek" ] && waitline="${waitline}拖动进度条（Emby → OneDrive 重取直链）：$(fmt_ms "$seek")"$'\n'
             if [ -n "$waitline" ]; then
-              # 末项固定交代"还有一段测不到"，避免把上面几项加起来当成总共等了多久
-              waitline="${waitline}你 → OneDrive 拉流缓冲：这段服务器测不到"
-              waitline="⏳ 起播等待"$'\n'"$(tree_lines "$waitline")"
-            fi
-            if [ -n "$waitline" ]; then
-              # 末项固定交代"还有一段测不到"，避免把上面几项加起来当成总共等了多久
-              waitline="${waitline}你播放器联网、缓冲：这段服务器测不到"
-              waitline="⏳ 起播等待"$'\n'"$(tree_lines "$waitline")"
+              # 末项固定交代"还有一段测不到"，避免把上面几项加起来当成总共等了多久。
+              # 形态按规范 §2 语义表 #5：末条主体后接 " · <i>备注</i>"，并入条目流由
+              # tree_lines 统一决定末条（§2.3）。不写成全角冒号 kv —— 值位不得斜体（裁决 1）。
+              waitline="${waitline}你 → OneDrive 拉流缓冲 · <i>这段服务器测不到</i>"$'\n'
+              # tree_lines 只调用一次：重复调用会把已带 "  ├─/└─" 前缀的行再前缀一层。
+              # （此前这里有两个 if，第二个恒真 → 产出 "  ├─   ├─" 双层树 + 标题行重复）
+              waitline="$(tree_lines "$waitline")"
             fi
 
             # 日志侧只记片名（公开仓库，绝不落直链）；TG 私密消息里才附带直链
@@ -1186,8 +1192,12 @@ jobs:
             [ -n "$meta" ] && text="${text}"$'\n'"规格：${meta}"
             text="${text}"$'\n'"链路：${l3}"
             [ -n "$client" ] && text="${text}"$'\n'"客户端：${client}"
-            # waitline 自带「⏳ 起播等待」标题行（KV 树），这里原样追加，不要再套"等待："标签
-            [ -n "$waitline" ] && text="${text}"$'\n'"${waitline}"
+            # 分节标题交给 tg_add_section：emoji 入 <b>（规范 §2 裁决 7）、段前空行自动补全。
+            # waitline 只含树形条目，不要再自带"⏳ 起播等待"标题行，也不要再套"等待："标签
+            if [ -n "$waitline" ]; then
+              tg_add_section text "⏳ 起播等待"
+              tg_add_block text "$waitline"
+            fi
             # 长链接折叠成 <a> 超链接，避免整条通知被几百字符的 URL 淹没；
             # 段前空一行，与正文数据区隔开
             [ -n "$link" ] && text="${text}"$'\n'$'\n'"<a href=\"$(esc_html "$link")\">▶ 打开直链</a>"

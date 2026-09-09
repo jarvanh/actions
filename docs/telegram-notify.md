@@ -10,19 +10,19 @@
 | ubuntu runner（bash） | [`scripts/telegram/tg_notify.sh`](../.github/scripts/telegram/tg_notify.sh) | 排版助手 + 发送层（429 重试 / 4000 分片 / 解析失败直接报错不重发 / curl `-m 15`），`source` 使用 |
 | Telegram 频道内容管线 | `scripts/tg-channel/` | 频道同步 / 上传 / 去重 / 清理（**不是**通知域），单向依赖上面的 `tg_notify.sh` |
 | openlist 同步脚本（runner 上执行） | [`scripts/openlist/telegram.sh`](../.github/scripts/openlist/telegram.sh) | 薄适配层：只放「需要 message_id」的进度面板函数（`send_telegram_message` / 原地编辑 3 函数）；排版与发送经 `load_all.sh` L0 层 source 上一行真源，不再自带副本 |
-| python | `scripts/proxy-speedtest/speedtest_common.py` 的 `tg_format_elapsed` / `tg_footer_line` / `send_telegram` / `send_telegram_chunked` | 其余 python 一律复用或经 `notify()` 借 bash 生成，**禁止自造** |
+| python | `scripts/proxy-speedtest/speedtest_common.py` 的 `tg_format_elapsed` / `tg_footer_line` / `send_telegram` / `send_telegram_chunked` | 三件套（`speedtest.py` / `speedtest_gitee.py` / `taier_speedtest.py`）一律 `from speedtest_common import ...` 复用，**禁止自造**；`notify()` 是 `emby.yml` 内联的播放通知函数，不是通用出口 |
 | PowerShell（windows runner） | [`scripts/telegram/tg_notify.ps1`](../.github/scripts/telegram/tg_notify.ps1)（`rdp.yml` / `tailscale-windows.yml` dot-source，需先 checkout） | `Esc-Html` / `Get-TgFooter` / `Send-TgMessage` / `$TG_SEP`；语义与 bash 版对齐（429 读 `Retry-After` 重试 5 次，解析失败不重发直接抛出并带响应体） |
 
 ## 2. 版式模板
 
 ```
-{emoji} <b>标题</b>              ← tg_add_title（emoji + 短语，副标题说明下沉 kv 行）
+<b>{emoji} 标题</b>              ← tg_add_title（emoji 与短语同入 <b>，副标题说明下沉 kv 行）
 ━━━━━━━━━━━━━━━━━━              ← TG_SEP（18 个全角横线，勿手写；其后不空行）
 标签：<b>值</b>                  ← tg_add_kv（全角冒号，关键值加粗）
 标签：<code>路径/命令</code>      ← tg_add_path（等宽展示）
 
-{emoji} <b>分节 · N</b>          ← tg_add_section（段前空行；计数一律 " · N"）
-📁 <b>组头</b> · <i>大小</i>      ← 分组列表：组头路径加粗
+<b>{emoji} 分节 · N</b>          ← tg_add_section（段前空行；计数一律 " · N"）
+<b>📁 组头</b> · <i>大小</i>      ← 分组列表：组头路径加粗（emoji 同入 <b>，计数在粗体外）
   ├─ <code>条目</code> · <i>备注</i>   ← tree_conn / tree_lines（末条 └─）
   │   子行                      ← tree_sub（│ 后 3 空格；末条目整行前缀 6 空格）
   └─ <i>还有 N 条…</i>          ← 超长折叠行（并入条目流作末条，禁双 └─）
@@ -37,6 +37,9 @@
 > 分隔线与紧随其后的内容之间**不空行**（`tg_add_title` 只输出 `标题\n分隔线\n`）。
 > 若紧随分隔线的是分节/说明（任务预览的 `📊 同步对`、openclaw/tailscale 的 `🔐 SSH`），
 > `tg_add_section` / `tg_add_note` 会**自动省略段前空行**——分隔线后一律不留空。
+> 另两种不补的情形：消息为空（首个分节/说明，开头不需要空行）；正文变量**无尾换行**
+> 时（手拼变量，如 `emby.yml` 播放通知的 `text`）会先补一个 `\n` 收尾，再补段前空行 ——
+> 否则那个 `\n` 只给正文末行换行，空行消失（`tg_add_footer` 同款处理）。
 > pwsh 侧无这两个助手，`tailscale-windows.yml` 手拼时同样不得在分隔线后加 `` `n ``。
 
 #### 标签语义表（全库唯一，冲突按下表裁决）
@@ -158,18 +161,20 @@ gh workflow run openlist.yml \
 
 ```
 ⚠️ 跳过/过滤文件
-损坏 · 43
+<b>损坏</b> · 43
   ├─ <code>Sexy Young 1.mp4</code>
   ├─ <code>Sexy Young 2.mp4</code>
   └─ <i>还有 35 条…</i>
-非视频 · 2
+<b>非视频</b> · 2
   ├─ <code>failed_videos.json</code>
   └─ <code>uploaded_videos.json</code>
 ```
 
 - **每组上限 8 条**（`SKIP_DETAIL_MAX` 可调），超出折叠为 `还有 N 条…`：
   43 条损坏全列会刷屏，且容易顶到 4000 字符分片边界把收尾区切走。
-  多组并列时（如去重明细）通知内**最多展示 8 组**，超出折叠为 `还有 N 组…`。
+  多组并列时（如去重明细）通知内**最多展示 8 组**，超出折叠为
+  `还有 N 组未展开 · 明细见运行日志`（实现：`tg-channel/dedupe_videos_by_hash.sh` /
+  `dedupe_ph_videos.sh` 的 `_grp_block`，文案与条目级 `还有 N 条…` 不同，勿混写）。
 - **折叠行必须并入条目流再交给 `tree_lines`**，由它统一决定末条 ——
   单独补一行 `  └─ 还有 N 条…` 会造成双 `└─` 同级、层次混淆。
   文件类列表可直接用一站式助手 `tree_code_fold <多行> [max=8]`
@@ -219,7 +224,7 @@ env:
 | 手拼收尾行 | `"\n\n⏱ 🔗 <a>运行日志</a>"` | 一律经 `tg_add_footer` / `tg_footer_line` |
 | `⏱️`（带 VS16 变体） | `⏱️ 已用：…` | 裸 `⏱`：收尾区 `⏱ 已运行 X`；条目内耗时 `⏱1分15秒`（紧跟数字无空格） |
 | 半角冒号 kv 行 | `📦 分组: xxx` | `📦 分组：xxx` |
-| `🥇 TOP 5` 等自造分节前缀混用 | — | 分节 emoji 与语义对齐：📍 进行中 / ✅ 完成 / ⏭️ 跳过 / ❌ 失败 / ⚠️ 警告 |
+| `🥇 TOP 5` 等自造分节前缀混用 | — | 分节 emoji 与语义对齐：📍 进行中（进度面板阶段）/ ✅ 完成 / ⏭️ 跳过 / ❌ 失败 / ⚠️ 警告 |
 | 裸文本条目列表 | `not_video: failed_videos.json` | 按原因分组：组头 `<b>非视频</b> · 2` + `  ├─ <code>failed_videos.json</code>` |
 | 英文原因/状态 token 直出 | `corrupt: xxx` | 用中文标签（损坏 / 非视频 / 重复） |
 | 双 `└─` 同级 | 条目末尾 `└─` 后再补 `  └─ 还有 N 条…` | 折叠行并入条目流，由 `tree_lines` 统一决定末条 |
@@ -231,13 +236,19 @@ env:
 状态 emoji 语义（全库统一）：
 `✅` 成功 / `⚠️` 部分失败 / `❌` 失败 / `⏭️` 跳过 / `🔄` 进行中 / `⏳` 待处理 / `⛔` 中断 / `🚨` 危险警告。
 
+> **📍 与 🔄 的分工**（曾两表互相打架，此处裁决）：`📍` 是进度面板「进行中」**分节**标题
+> （当前阶段，正常在跑）；`🔄` 是**状态/活动**语义（进行中的条目与标题）。同一面板里
+> 两者是互斥分支：`📍 进行中 · N`（未收尾）／`🔄 进行中 · N · 未执行完`（已 finalize
+> 但仍有任务在跑）。实现：`openlist/sync_progress.sh`。判违例时按此分工，勿互相替代。
+
 批次计数 emoji 字段表（进度面板批次历史行，**全字段恒显 + 定宽补零**；行宽 ≈42 全角，
 手机折 2 行为既定取舍 —— 换取计数列竖向对齐）：
 `❌#n` 状态+批次号 | `✅00` 成功 | `🔧00` 修复 | `❗33` 失败（不用 ❌，避免与状态撞形）|
 `⏭️22` 跳过 | `♻️22` 已有（目标端已存在）—— 五计数 `%02d` 补零 | `⏱01:15` 耗时（mm:ss 补零）|
 `⬆️4.79G` 上传量（GiB 两位小数，末列不补）。
 状态: ✅全成 ⚠️部分失败 ❌失败 ⏭️整批跳过 ♻️整批已有。全部入史（MAX=6 滚动窗口，全量在运行日志）。
-实现：`openlist/task_engine.sh` 批次历史行。
+实现：条目生成 `openlist/task_engine.sh`（`_bh_entry`）；滚动窗口与渲染
+`openlist/sync_progress.sh`（`PROGRESS_BATCH_HISTORY_MAX=6` / `_progress_batch_history_render`）。
 
 既定形态豁免（不算违例，勿"修复"）：
 内容片长分钟补零 `2 小时 08 分`（条目内媒体时长，区别于收尾区无补零的
@@ -272,7 +283,7 @@ env:
 - [ ] 脚本层只出结构化数据，HTML 与树形交给 `tg_*` 助手（不在脚本里拼标签）
 - [ ] 收尾区经 `tg_add_footer`（bash）/ `tg_footer_line`（python），无手拼
 - [ ] workflow 已注入 `TG_RUN_URL` / `TG_RUN_STARTED_AT`（job 或 step 级 env）
-- [ ] 动态内容全部经转义助手；发送走 `send_tg` / `send_tg_chunked` / `notify()`
+- [ ] 动态内容全部经转义助手；发送走 `send_tg` / `send_tg_chunked`（python 侧 `send_telegram` / `send_telegram_chunked`）
 - [ ] 数值/时间戳已人性化：无原始高精度浮点、无 ISO 原始戳直出（见 §4）
 - [ ] 进度面板批次行按 §4 字段 emoji 表（六计数 %02d 恒显 + ⏱mm:ss + ⬆️GiB）
 - [ ] 相关测试同步更新（如 `openlist/tests/test_progress_final_title.sh`）
@@ -292,7 +303,7 @@ env:
 | `openlist/tests/test_batch_precheck_circuit_breaker.sh` | 批次熔断分支（字段 emoji stub 在此） |
 | `openlist/tests/test_method_id_naming.sh` | 修复方法 ID ↔ 中文标签映射 |
 | `openlist/tests/test_hash_dir_fallback.sh` | 哈希目录兜底（含 fix_log 文案） |
-| `openlist/tests/test_fix_log_section.sh` | fix_log 分节横幅 |
+| `openlist/tests/test_fix_log_section.sh` | 修复日志区段头 `=== 尝试修复失败文件: <rel> ===` 写完整相对路径 + 通知侧 awk 能切出非空片段 + 相邻区段不串味 |
 
 `tg-channel/sync_to_tg.sh`（ph-dl / 91 通知）**暂无测试套件**——
 改动后靠本地渲染实测验证（提取函数 + 造模拟数据跑 `tree_lines` 输出对比）。
