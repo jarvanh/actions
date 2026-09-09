@@ -1286,11 +1286,19 @@ jobs:
             msg=""
             tg_add_title msg "🚨 OpenClaw 自愈失败"
             tg_add_kv msg "步骤" "Run OpenClaw"
-            tg_add_kv msg "Run ID" "${{ github.run_id }}"
+            tg_add_path msg "Run ID" "${{ github.run_id }}"
             [ -n "$fail_stage_label" ] && tg_add_kv msg "失败阶段" "$fail_stage_label"
             [ -n "$current_version" ] && tg_add_path msg "当前版本" "$current_version"
             [ -n "$fallback_version" ] && tg_add_path msg "Fallback" "$fallback_version"
-            [ -n "$fallback_version_source" ] && tg_add_kv msg "Fallback 来源" "$fallback_version_source"
+            # 英文 token 不直出通知（规范 §4）：known_good_file / meta_lastTouchedVersion → 中文
+            if [ -n "$fallback_version_source" ]; then
+              case "$fallback_version_source" in
+                known_good_file) _fvs="known-good 版本文件" ;;
+                meta_lastTouchedVersion) _fvs="meta 里的 lastTouchedVersion" ;;
+                *) _fvs="$fallback_version_source" ;;
+              esac
+              tg_add_kv msg "Fallback 来源" "$_fvs"
+            fi
             [ -n "$recorded_successful_version" ] && tg_add_path msg "成功版本记录" "$recorded_successful_version"
             [ -n "$initial_start_duration_sec" ] && tg_add_kv msg "首次启动耗时" "${initial_start_duration_sec} 秒"
             [ -n "$preflight_doctor_duration_sec" ] && tg_add_kv msg "预检修复耗时" "${preflight_doctor_duration_sec} 秒"
@@ -1311,6 +1319,8 @@ jobs:
           # （2026-09-05 复审发现：此前本 step 未注入，约 5 处归档告警从未发出）
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # 收尾区接线（规范 §6）：缺了只能走 runner 开机时刻兜底（同类 step 均已注入）
+          TG_RUN_STARTED_AT: ${{ github.run_started_at }}
         if: ${{ always() }}
         run: |
           echo "Starting background archive tasks: archive ~/.openclaw every 20 minutes; CLIProxyAPI data is archived at final shutdown..."
@@ -1567,8 +1577,11 @@ jobs:
               source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
               local full_msg=""
               tg_add_title full_msg "⚠️ OpenClaw 归档告警"
-              tg_add_note full_msg "$msg"
-              tg_add_kv full_msg "Run ID" "${run_id}"
+              # 告警正文是 rclone/tar 的多行原始输出 → <pre>（裁决 8：多行日志 → <pre>，
+              # 此前塞进单个 <i> 说明段，跨行斜体且英文 token 直出）
+              tg_add_block full_msg "<pre>$(escape_html "$msg")</pre>"
+              # Run ID 属机器值 → <code>（语义表 #3）
+              tg_add_path full_msg "Run ID" "${run_id}"
               TG_RUN_URL="$run_url" TG_RUN_STARTED_AT="${TG_RUN_STARTED_AT:-}" tg_add_footer full_msg
               # 走发送层而非 curl 直发：429 重试已内建，HTML 解析失败直接报错（规范 §5），
               # 429 限流按 retry_after 等待重试，disable_web_page_preview 内置
@@ -1597,7 +1610,7 @@ jobs:
               else
                 rc=$?
                 echo "[$(date '+%F %T')] ⚠️ openclaw.tar.gz upload failed (rc=$rc): ${openclaw_upload_output}"
-                send_telegram_alert "$(printf 'openclaw.tar.gz 上传失败 · rc=%s\n原因：rclone 上传失败\n详情：%s' "$rc" "${openclaw_upload_output:-无输出}")"
+                send_telegram_alert "$(printf 'openclaw.tar.gz 上传失败 · 退出码 %s\n原因：rclone 上传失败\n详情：%s' "$rc" "${openclaw_upload_output:-无输出}")"
               fi
             else
               rc=$?
@@ -1607,7 +1620,7 @@ jobs:
                 continue
               else
                 echo "[$(date '+%F %T')] ⚠️ openclaw.tar.gz archive failed in periodic archive (rc=$rc): ${openclaw_archive_output}"
-                send_telegram_alert "$(printf 'openclaw.tar.gz 归档失败 · rc=%s\n原因：%s' "$rc" "${openclaw_archive_output:-归档脚本无输出}")"
+                send_telegram_alert "$(printf 'openclaw.tar.gz 归档失败 · 退出码 %s\n原因：%s' "$rc" "${openclaw_archive_output:-归档脚本无输出}")"
               fi
             fi
 
@@ -1642,7 +1655,7 @@ jobs:
               else
                 rc=$?
                 echo "[$(date '+%F %T')] ⚠️ ${AI_LABEL}.tar.gz upload failed (rc=$rc): ${ai_upload_output}"
-                send_telegram_alert "$(printf '%s.tar.gz 上传失败 · rc=%s\n原因：rclone 上传失败\n详情：%s' "$AI_LABEL" "$rc" "${ai_upload_output:-无输出}")"
+                send_telegram_alert "$(printf '%s.tar.gz 上传失败 · 退出码 %s\n原因：rclone 上传失败\n详情：%s' "$AI_LABEL" "$rc" "${ai_upload_output:-无输出}")"
               fi
             else
               rc=$?
@@ -1650,10 +1663,10 @@ jobs:
                 echo "[$(date '+%F %T')] ⏭️ previous archive still running, skip ${AI_LABEL} archive"
               elif [ "$rc" -eq 3 ]; then
                 echo "[$(date '+%F %T')] ⚠️ ${AI_LABEL} archive skipped because deployment/data directory is missing (rc=$rc): ${ai_archive_output}"
-                send_telegram_alert "$(printf '%s 归档跳过 · rc=%s\n原因：本地部署/数据目录缺失 · 通常表示网关容器启动步骤被跳过或失败\n详情：%s' "$AI_LABEL" "$rc" "${ai_archive_output:-ai_dir_missing}")"
+                send_telegram_alert "$(printf '%s 归档跳过 · 退出码 %s\n原因：本地部署/数据目录缺失 · 通常表示网关容器启动步骤被跳过或失败\n详情：%s' "$AI_LABEL" "$rc" "${ai_archive_output:-AI 本地部署/数据目录缺失}")"
               else
                 echo "[$(date '+%F %T')] ⚠️ ${AI_LABEL} archive failed in periodic archive (rc=$rc): ${ai_archive_output}"
-                send_telegram_alert "$(printf '%s.tar.gz 归档失败 · rc=%s\n原因：%s' "$AI_LABEL" "$rc" "${ai_archive_output:-归档脚本无输出}")"
+                send_telegram_alert "$(printf '%s.tar.gz 归档失败 · 退出码 %s\n原因：%s' "$AI_LABEL" "$rc" "${ai_archive_output:-归档脚本无输出}")"
               fi
             fi
             sleep 1200
@@ -1687,7 +1700,9 @@ jobs:
               msg=""
               tg_add_title msg "⚠️ OpenClaw 即将进入最终归档"
               tg_add_kv msg "预计" "约 ${FINAL_ARCHIVE_WARNING_BEFORE_MINUTES} 分钟后执行"
-              tg_add_note msg "请及时保存状态或完成当前操作。"$'\n'"随后执行：Stop OpenClaw and Final Archive"
+              # 说明段只装说明；"随后执行：…" 是 kv 形态，此前整行塞进 <i> 说明段
+              tg_add_note msg "请及时保存状态或完成当前操作。"
+              tg_add_kv msg "随后执行" "Stop OpenClaw and Final Archive"
               TG_RUN_URL="$run_url" TG_RUN_STARTED_AT="${TG_RUN_STARTED_AT:-}" tg_add_footer msg
               # 统一走发送层（退化/429 重试内置）
               send_tg "$msg" || true
@@ -1741,8 +1756,10 @@ jobs:
               source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
               local full_msg=""
               tg_add_title full_msg "⚠️ OpenClaw 归档告警"
-              tg_add_kv full_msg "问题" "$msg"
-              tg_add_kv full_msg "Run ID" "$run_id"
+              # 与 send_telegram_alert 同版式（此前一个用 <i> 说明段、一个用 <b> kv，
+              # 同一标题两种形态）：多行原始输出 → <pre>；Run ID 属机器值 → <code>
+              tg_add_block full_msg "<pre>$(escape_html "$msg")</pre>"
+              tg_add_path full_msg "Run ID" "$run_id"
               TG_RUN_URL="$run_url" TG_RUN_STARTED_AT="${TG_RUN_STARTED_AT:-}" tg_add_footer full_msg
               send_tg "$full_msg" || true
             fi
@@ -1814,12 +1831,12 @@ jobs:
             else
               rc=$?
               echo "⚠️ final openclaw.tar.gz upload failed (rc=$rc): ${openclaw_final_upload_output}"
-              send_archive_alert "$(printf 'final openclaw.tar.gz 上传失败 · rc=%s\n原因：rclone 上传失败\n详情：%s' "$rc" "${openclaw_final_upload_output:-无输出}")"
+              send_archive_alert "$(printf 'final openclaw.tar.gz 上传失败 · 退出码 %s\n原因：rclone 上传失败\n详情：%s' "$rc" "${openclaw_final_upload_output:-无输出}")"
             fi
           else
             rc=$?
             echo "⚠️ final openclaw.tar.gz archive failed (rc=$rc): ${openclaw_final_output}"
-            send_archive_alert "$(printf 'final openclaw.tar.gz 归档失败 · rc=%s\n原因：%s' "$rc" "${openclaw_final_output:-归档脚本无输出}")"
+            send_archive_alert "$(printf 'final openclaw.tar.gz 归档失败 · 退出码 %s\n原因：%s' "$rc" "${openclaw_final_output:-归档脚本无输出}")"
           fi
 
           MIN_SIZE=$((5 * 1024))
@@ -1846,7 +1863,7 @@ jobs:
                   else
                     rc=$?
                     echo "⚠️ final CliRelay.tar.gz upload failed (rc=$rc): ${clirelay_final_upload_output}"
-                    send_archive_alert "$(printf 'final CliRelay.tar.gz 上传失败 · rc=%s\n原因：rclone 上传失败\n详情：%s' "$rc" "${clirelay_final_upload_output:-无输出}")"
+                    send_archive_alert "$(printf 'final CliRelay.tar.gz 上传失败 · 退出码 %s\n原因：rclone 上传失败\n详情：%s' "$rc" "${clirelay_final_upload_output:-无输出}")"
                   fi
                 else
                   echo "⚠️ CliRelay 压缩包小于 5KB，放弃覆盖云端数据: size=${actual_size}"
@@ -1855,13 +1872,13 @@ jobs:
               else
                 rc=$?
                 echo "⚠️ final CliRelay.tar.gz archive failed (rc=$rc): ${clirelay_final_output}"
-                send_archive_alert "$(printf 'final CliRelay.tar.gz 归档失败 · rc=%s\n原因：%s' "$rc" "${clirelay_final_output:-归档脚本无输出}")"
+                send_archive_alert "$(printf 'final CliRelay.tar.gz 归档失败 · 退出码 %s\n原因：%s' "$rc" "${clirelay_final_output:-归档脚本无输出}")"
               fi
               echo "Stopping CliRelay compose stack after final archive..."
               docker compose -p clirelay -f /tmp/local_CliRelay/docker-compose.yml --project-directory /tmp/local_CliRelay down 2>/dev/null || true
             else
               echo "⚠️ /tmp/local_CliRelay 不存在，跳过 CliRelay 归档"
-              send_archive_alert "$(printf 'final CliRelay.tar.gz 归档失败 · rc=3\n原因：CliRelay 本地部署目录未初始化 · /tmp/local_CliRelay 不存在 · 通常表示 CliRelay 启动步骤被跳过或失败\n详情：clirelay_dir_missing')"
+              send_archive_alert "$(printf 'final CliRelay.tar.gz 归档失败 · rc=3\n原因：CliRelay 本地部署目录未初始化 · /tmp/local_CliRelay 不存在 · 通常表示 CliRelay 启动步骤被跳过或失败\n详情：CliRelay 本地部署目录未初始化')"
             fi
           elif [ -d /tmp/local_CLIPProxyAPI ]; then
             echo "5a. Archiving CLIProxyAPI persistent data (fallback backend, with clirelay auths)..."
@@ -1885,7 +1902,7 @@ jobs:
                 else
                   rc=$?
                   echo "⚠️ final CLIProxyAPI.tar.gz upload failed (rc=$rc): ${cliproxyapi_final_upload_output}"
-                  send_archive_alert "$(printf 'final CLIProxyAPI.tar.gz 上传失败 · rc=%s\n原因：rclone 上传失败\n详情：%s' "$rc" "${cliproxyapi_final_upload_output:-无输出}")"
+                  send_archive_alert "$(printf 'final CLIProxyAPI.tar.gz 上传失败 · 退出码 %s\n原因：rclone 上传失败\n详情：%s' "$rc" "${cliproxyapi_final_upload_output:-无输出}")"
                 fi
               else
                 echo "⚠️ CLIProxyAPI 压缩包小于 10KB，放弃覆盖云端数据: size=${actual_size} min=${MIN_SIZE}"
@@ -1894,7 +1911,7 @@ jobs:
             else
               rc=$?
               echo "⚠️ final CLIProxyAPI.tar.gz archive failed (rc=$rc): ${cliproxyapi_final_output}"
-              send_archive_alert "$(printf 'final CLIProxyAPI.tar.gz 归档失败 · rc=%s\n原因：%s' "$rc" "${cliproxyapi_final_output:-归档脚本无输出}")"
+              send_archive_alert "$(printf 'final CLIProxyAPI.tar.gz 归档失败 · 退出码 %s\n原因：%s' "$rc" "${cliproxyapi_final_output:-归档脚本无输出}")"
             fi
           else
             echo "⚠️ /tmp/local_CLIPProxyAPI 不存在，跳过 CLIProxyAPI 归档"
@@ -1929,7 +1946,7 @@ jobs:
                   else
                     rc=$?
                     echo "⚠️ final rsstt.tar.gz upload failed (rc=$rc): ${rsstt_upload_output}"
-                    send_archive_alert "$(printf 'final rsstt.tar.gz 上传失败 · rc=%s\n原因：rclone 上传失败\n详情：%s' "$rc" "${rsstt_upload_output:-无输出}")"
+                    send_archive_alert "$(printf 'final rsstt.tar.gz 上传失败 · 退出码 %s\n原因：rclone 上传失败\n详情：%s' "$rc" "${rsstt_upload_output:-无输出}")"
                   fi
                 else
                   echo "⚠️ rsstt 压缩包小于 10KB，放弃覆盖云端数据: size=${actual_size} min=${MIN_SIZE}"
@@ -1938,12 +1955,12 @@ jobs:
               else
                 rc=$?
                 echo "⚠️ final rsstt.tar.gz validation failed (rc=$rc): ${rsstt_validate_output}"
-                send_archive_alert "$(printf 'final rsstt.tar.gz 归档校验失败 · rc=%s\n原因：tar 列表校验失败\n详情：%s' "$rc" "${rsstt_validate_output:-无输出}")"
+                send_archive_alert "$(printf 'final rsstt.tar.gz 归档校验失败 · 退出码 %s\n原因：tar 列表校验失败\n详情：%s' "$rc" "${rsstt_validate_output:-无输出}")"
               fi
             else
               rc=$?
               echo "⚠️ final rsstt.tar.gz archive failed (rc=$rc): ${rsstt_tar_output}"
-              send_archive_alert "$(printf 'final rsstt.tar.gz 归档失败 · rc=%s\n原因：tar 创建失败\n详情：%s' "$rc" "${rsstt_tar_output:-无输出}")"
+              send_archive_alert "$(printf 'final rsstt.tar.gz 归档失败 · 退出码 %s\n原因：tar 创建失败\n详情：%s' "$rc" "${rsstt_tar_output:-无输出}")"
             fi
           else
             echo "⚠️ /tmp/local_rsstt 不存在，跳过 rss-to-telegram 归档"

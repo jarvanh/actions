@@ -62,7 +62,7 @@ msg=""
 tg_add_title msg "🧹 ph-dl 清理 yt-dlp 残留文件"
 tg_add_path msg "目录" "$DIR_LABEL"
 tg_add_kv msg "清理数量" "${FRAG_COUNT} 个"
-tg_add_section msg "📋 文件列表"
+tg_add_section msg "📋 文件列表 · ${FRAG_COUNT}"
 tg_add_block msg "$(tree_lines "$FILE_DETAILS")"
 tg_add_footer msg
 send_tg_chunked "$msg"

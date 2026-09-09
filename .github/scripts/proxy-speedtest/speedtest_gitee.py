@@ -54,6 +54,7 @@ from speedtest_common import (
     resolve_host_ipv4, resolve_subscription_policy,
     send_telegram, send_telegram_chunked, tg_footer_line,
     tg_format_elapsed, update_gist,
+    TG_SEP,
 )
 
 RESULT_JSON = HOME_RUNTIME / 'proxy_speedtest_last_result.json'
@@ -108,10 +109,11 @@ def handle_termination_signal(signum, frame):
         raise SystemExit(128 + int(signum))
     TERMINATION_NOTICE_SENT = True
     sig_name = signal.Signals(signum).name if signum else f'SIGNAL-{signum}'
-    _sep = '━' * 18
+    _sep = TG_SEP
     message = f'<b>⛔ Gitee 测速异常终止</b>\n{_sep}\n⚠️ 脚本被中断：收到 <code>{sig_name}</code>，本轮测速未正常完成。'
     if CURRENT_RUN_STARTED_AT:
-        message += f'\n🕒 测速开始时间：{html.escape(str(CURRENT_RUN_STARTED_AT))}'
+        # 原始值是 datetime.isoformat()（含 T 与毫秒）→ 通知只取到秒并去掉 T（规范 §4 禁 ISO 直出）
+        message += f'\n🕒 测速开始时间：{html.escape(str(CURRENT_RUN_STARTED_AT)[:19].replace("T", " "))}'
     _footer = tg_footer_line()
     if _footer:
         message += f'\n\n{_footer}'
@@ -1389,15 +1391,19 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
         duration_cn = tg_format_elapsed(
             (datetime.fromisoformat(str(ended_at)[:19]) - datetime.fromisoformat(str(started_at)[:19])).total_seconds())
     except Exception:
-        duration_cn = duration_text
+        # 兜底不能回退到 duration_text（紧凑英文格式 5h57m，规范 §4 禁进通知）
+        duration_cn = '-'
     # 统一 HTML 版式（对齐 speedtest.build_telegram_lines / 全库通知模板）：
     # emoji 标题 + ━━━ 分隔线 + 键值概览（数值 <b>）+ 树形 TOP5（节点 <code>）+ 统一收尾区
-    sep = '━' * 18
+    sep = TG_SEP
     esc = lambda s: html.escape(str(s))
+    # 标题状态随结论降级（规范 §4 状态 emoji 语义）：0 节点测速成功 / 本轮中止 → ⚠️，
+    # 不再恒 ✅（此前「✅ 完成」下面写着「⚠️ 没有节点测速成功」，自相矛盾）
+    _title_emoji = '⚠️' if (aborted_due_to_runtime or not ok_results_by_download) else '✅'
     summary_lines = [
-        '<b>✅ Gitee 测速完成</b>',
+        f'<b>{_title_emoji} Gitee 测速完成</b>',
         sep,
-        f'🕒 {esc(started_text)} ~ {esc(ended_text)} · 耗时 {esc(duration_cn)}',
+        f'🕒 起止：{esc(started_text)} ~ {esc(ended_text)} · 耗时 <b>{esc(duration_cn)}</b>',
         f'📊 节点：共 <b>{len(speed_results)}</b> 个 · 可用 <b>{len(ok_results)}</b> 个',
         '',
     ]
@@ -1407,7 +1413,7 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
     summary_lines.extend(build_target_network_section([(gitee_ip or '', 'gitee.com', gitee_info)]))
     summary_lines.append('')
     if aborted_due_to_runtime:
-        summary_lines.append(f'⚠️ 本轮已中止：{esc(runtime_abort_reason)}')
+        summary_lines.append(f'<b>⚠️ 本轮已中止：{esc(runtime_abort_reason)}</b>')
         summary_lines.append('')
     if ok_results_by_download:
         top = ok_results_by_download[:5]
@@ -1430,18 +1436,14 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
             summary_lines.append(f"  {connector} <code>{esc(item['name'])}</code> · <i>{esc(prefix)}</i>")
         summary_lines.append('')
     elif alive_probe_count > 0:
-        summary_lines.append('⚠️ 没有节点测速成功')
-        summary_lines.append('  └─ 有节点通过 provider 健康检查，但正式 Gitee 推送/拉取测速全部失败')
+        summary_lines.append('<b>⚠️ 没有节点测速成功</b>')
+        summary_lines.append('  └─ <b>有节点通过 provider 健康检查，但正式 Gitee 推送/拉取测速全部失败</b>')
         summary_lines.append('')
     else:
-        summary_lines.append('⚠️ 没有节点通过 provider 健康检查')
+        summary_lines.append('<b>⚠️ 没有节点通过 provider 健康检查</b>')
         summary_lines.append('')
-    # 统一收尾区（收尾区与正文间固定一个空行；与 tg_add_footer 同形态同降级链）
-    # 注: 正文的「耗时 X」是测速自身耗时，收尾区的「已运行 X」是 run 已运行时长，两者语义不同
-    summary_lines.append('')
-    footer = tg_footer_line()
-    if footer:
-        summary_lines.append(footer)
+    # 收尾区不在这里追加：finalize_gist_and_notify 还会在正文末尾补「📦 订阅 · Gist」段，
+    # 收尾行必须位于所有正文之后（规范 §3），统一由 finalize 在最后追加
     return summary_lines
 
 def update_summary_artifacts(summary):
@@ -1483,20 +1485,27 @@ def finalize_gist_and_notify(env, summary, summary_lines, subscription_text, bun
     if gist_res.get('ok'):
         action = '新建' if gist_res.get('created') else '更新'
         html_url = gist_res.get('html_url') or ''
-        gist_lines = [f'✅ 已{action}，达标 <b>{qualified_count}</b> 个节点 · ≥{min_megabit}兆（按{metric_label}）']
+        gist_lines = [f'<b>✅ 已{action}，达标 {qualified_count} 个节点</b> · <i>≥{min_megabit}兆（按{html.escape(metric_label)}）</i>']
         if html_url:
             gist_lines.append(f'🔗 <a href="{html.escape(html_url)}">订阅源 YAML</a>')
         if gist_verify_res.get('ok'):
-            gist_lines.append(f"✅ 回拉验证通过：<b>{gist_verify_res.get('sample_ok_count', 0)}</b>/<b>{gist_verify_res.get('sample_count', 0)}</b> 个抽检节点可用")
+            gist_lines.append(f"<b>✅ 回拉验证通过</b>：<b>{gist_verify_res.get('sample_ok_count', 0)}</b>/<b>{gist_verify_res.get('sample_count', 0)}</b> 个抽检节点可用")
         else:
-            gist_lines.append(f"⚠️ 回拉验证失败：{gist_verify_res.get('sample_ok_count', 0)}/{gist_verify_res.get('sample_count', 0)} 个抽检节点可用；{html.escape(str(gist_verify_res.get('reason', '')))}")
+            gist_lines.append(f"<b>⚠️ 回拉验证失败</b>：<b>{gist_verify_res.get('sample_ok_count', 0)}</b>/<b>{gist_verify_res.get('sample_count', 0)}</b> 个抽检节点可用；<code>{html.escape(str(gist_verify_res.get('reason', '')))}</code>")
         for _i, _l in enumerate(gist_lines):
             _c = '└─' if _i == len(gist_lines) - 1 else '├─'
             summary_lines.append(f'  {_c} {_l}')
     elif (gist_res.get('reason') or '').startswith('empty subscription'):
-        summary_lines.append(f'  └─ ⚠️ 达标不足 {min_nodes} 个 · 阈值 ≥{min_megabit}兆（按{metric_label}）· 未更新订阅')
+        summary_lines.append(f'  └─ <b>⚠️ 达标不足 {min_nodes} 个</b> · <i>阈值 ≥{min_megabit}兆（按{html.escape(metric_label)}）· 未更新订阅</i>')
     else:
-        summary_lines.append(f"  └─ ⚠️ 上传失败：{html.escape(str(gist_res.get('reason', '')))}")
+        summary_lines.append(f"  └─ <b>⚠️ 上传失败</b>：<code>{html.escape(str(gist_res.get('reason', '')))}</code>")
+    # 统一收尾区（收尾区与正文间固定一个空行；与 tg_add_footer 同形态同降级链）
+    # 必须在所有正文段之后追加（「📦 订阅 · Gist」是正文的最后一段）——此前在
+    # build_summary_lines 里加，被此段挤到正文中间，消息末尾反而没有收尾行（规范 §3）
+    summary_lines.append('')
+    footer = tg_footer_line()
+    if footer:
+        summary_lines.append(footer)
     try:
         # summary_lines 已是统一 HTML 版式；文本报告落盘去标签保留纯可读性
         _plain = re.sub(r'<[^>]+>', '', '\n'.join(summary_lines))
@@ -1783,7 +1792,7 @@ if __name__ == '__main__':
             env = merged_env()
             # 统一 HTML 版式（emoji+加粗标题/分隔线/全角冒号 kv/统一收尾区）；
             # 异常文本含 <>& 时未转义会触发 400 整条丢失（不退化，2026-09-06 拍板），必须 html.escape
-            _sep = '━' * 18
+            _sep = TG_SEP
             _msg = (f'<b>❌ Gitee 测速异常退出 · {html.escape(str(stage))}</b>\n{_sep}\n'
                     f'错误：<code>{html.escape(err_text[:800])}</code>')
             _footer = tg_footer_line()

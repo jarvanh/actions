@@ -45,9 +45,9 @@ send_video_split_notification() {
 
   if [ -n "$validation_summary" ]; then
     tg_add_section message "🛡️ 安全检查"
-    # 逐行转义（行内含 duration=/exit= 等动态值）
+    # 逐行转义 + <b>（语义表：条目主体非文件值不得裸文本；行内含 duration=/exit= 等动态值）
     while IFS= read -r line; do
-      [ -n "$line" ] && tg_append message "$(escape_html "$line")"$'\n'
+      [ -n "$line" ] && tg_append message "<b>$(escape_html "$line")</b>"$'\n'
     done <<< "$validation_summary"
   fi
 

@@ -474,7 +474,8 @@ def build_target_network_section(targets):
         multi = len(targets) > 1
         if not server:
             fallback = f'（{esc(label)}）' if label else ''
-            lines.append(f'  └─ 归属获取失败{fallback}')
+            # 中文原因 → <b>（语义表：条目主体非文件值不得裸文本）
+            lines.append(f'  └─ <b>归属获取失败{fallback}</b>')
             continue
         if multi:
             lines.append(f'[{idx}] <code>{esc(label or server)}</code>')
@@ -542,6 +543,10 @@ def send_telegram(env, text):
         return {'sent': True, 'response': res}
     return {'sent': False, 'response': res}
 
+
+# 统一分隔线（18 个全角横线）：与 bash 真源 telegram/tg_notify.sh 的 TG_SEP 同值。
+# python 侧此前 10 处各写 '━' * 18，改版式要逐处改；三件套一律 import 本常量
+TG_SEP = '━' * 18
 
 TG_CHUNK_SIZE = 4000
 

@@ -470,7 +470,8 @@ _progress_render() {
   fi
   tg_add_title msg "$title"
   [ -n "$subtitle" ] && tg_add_kv msg "状态" "$subtitle"
-  tg_append msg "📊 总 <b>${total}</b> · 待处理 <b>${pending}</b> · 进行中 <b>${running}</b> · 完成 <b>${completed}</b> · 跳过 <b>${skipped}</b> · 失败 <b>${failed}</b>"$'\n'
+  # 计数行字段图标同样入 <b>（规范 §2 裁决 7：emoji 一律在 <b> 内，无例外）
+  tg_append msg "<b>📊 总 ${total}</b> · 待处理 <b>${pending}</b> · 进行中 <b>${running}</b> · 完成 <b>${completed}</b> · 跳过 <b>${skipped}</b> · 失败 <b>${failed}</b>"$'\n'
 
   # 进行中任务块: 任务条目（分组渲染）+ 多层级阶段行/统计信息/细粒度状态
   #   各拆分深度槽位逐层下沉合并：深度 0 的块挂在任务条目下，

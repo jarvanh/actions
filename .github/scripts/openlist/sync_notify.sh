@@ -50,11 +50,9 @@ _notify_add_autosplit() {
 _notify_add_excludes() {
   [ -z "$exclude_list" ] && return 0
   tg_add_section "$1" "🚫 排除规则"
-  local _pattern
-  while IFS= read -r _pattern; do
-    [ -z "$_pattern" ] && continue
-    tg_append "$1" "• <code>$(escape_html "$_pattern")</code>"$'\n'
-  done <<< "$exclude_list"
+  # 树形（tree_code_fold：逐行 <code>转义</code> + 超 8 条折叠）——此前用 "• " 平铺，
+  # 与同一条通知里的失败清单（├─/└─）两种前缀并存（规范 §2 裁决 3）
+  tg_add_block "$1" "$(tree_code_fold "$exclude_list")"
   return 0
 }
 
@@ -214,7 +212,7 @@ _send_sync_result_notification() {
     done
     if [ "$_fold" = "1" ]; then
       # 折叠行并入条目流作末条
-      fail_summary+="$(tree_conn 1)<i>还有 $((fail_total - _n)) 个文件…</i>"$'\n'
+      fail_summary+="$(tree_conn 1)<i>还有 $((fail_total - _n)) 条…</i>"$'\n'
     fi
   fi
   [ -z "$fail_summary" ] && fail_summary="无"$'\n'
@@ -307,7 +305,8 @@ _send_sync_result_notification() {
       done <<< "$critical_logs"
       tg_add_block err_msg "<pre>$(escape_html "${err_log_lines%$'\n'}")</pre>"
     else
-      tg_add_block err_msg "• 无明显错误关键字"
+      # 中文结论 → <b>（语义表：条目/结论值不得裸文本；此前是裸 "• 无明显错误关键字"）
+      tg_add_block err_msg "<b>无明显错误关键字</b>"
     fi
     _notify_add_diff_list err_msg
     tg_add_footer err_msg
@@ -318,7 +317,8 @@ _send_sync_result_notification() {
     err_log_size=$(stat -c%s "$log_filename" 2>/dev/null || echo 0)
     if [ "$err_log_size" -gt 0 ] && [ "$err_log_size" -lt "${OPENLIST_ERR_LOG_MAX_BYTES:-50000000}" ]; then
       local _doc_resp _doc_wait
-      for _doc_attempt in 1 2 3; do
+      # 重试次数与发送层对齐（5 次；此前 3 次，与 §5「429 重试最多 5 次」口径不一）
+      for _doc_attempt in 1 2 3 4 5; do
         _doc_resp=$(curl -s -m 60 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
           -F chat_id="${TELEGRAM_CHAT_ID}" \
           -F document=@"$log_filename" \

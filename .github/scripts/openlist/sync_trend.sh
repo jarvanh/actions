@@ -120,11 +120,13 @@ trend_record_and_notify() {
   _trend_send_summary "$_local"
 }
 
+# 通知内时长一律中文三段式（规范 §4 禁英文紧凑格式 2h15m；
+# 紧凑写法只留在 RESULT_JSON/日志，不进通知）
 _trend_fmt_duration() {
   local s="${1:-0}" h m
   [[ "$s" =~ ^[0-9]+$ ]] || s=0
   h=$((s / 3600)); m=$(((s % 3600) / 60))
-  if [ "$h" -gt 0 ]; then echo "${h}h${m}m"; else echo "${m}m"; fi
+  if [ "$h" -gt 0 ]; then echo "${h} 小时 ${m} 分"; else echo "${m} 分钟"; fi
 }
 
 _trend_send_summary() {
