@@ -257,7 +257,8 @@ if [ "$DUP_COUNT" -gt 0 ]; then
     tg_add_kv msg "模式" "仅通知 · 手动触发可开启 auto_delete_duplicates"
   fi
   if [ "$REMOVED_COUNT" -eq 0 ] && [ "$NOTIFY_ONLY_COUNT" -gt 0 ]; then
-    tg_add_note msg "<b>ℹ️ 标题不同且哈希各不相同，未自动删除</b>"
+    # tg_add_note 整段 escape_html，段内不能带 HTML 标签——emoji 只能随段裸置
+    tg_add_note msg "ℹ️ 标题不同且哈希各不相同，未自动删除"
   fi
   if [ -n "$DUP_DETAILS" ]; then
     tg_add_section msg "📋 详情"
