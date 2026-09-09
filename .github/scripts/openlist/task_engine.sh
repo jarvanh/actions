@@ -595,7 +595,7 @@ _sync_task_impl() {
   [[ "$source_size_bytes" =~ ^[0-9]+$ ]] || source_size_bytes=0
 
   if [ "$source_size_bytes" -le "$threshold" ]; then
-    echo "源端大小 $(format_bytes_iec "$source_size_bytes") 未超过 50GB 阈值，直接同步"
+    echo "源端大小 $(format_bytes_iec "$source_size_bytes") 未超过拆分阈值 $(format_bytes_iec "$threshold")，直接同步"
     progress_update "直接同步中 · 源端 $(format_bytes "$source_size_bytes")"
     sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
     local _rc=$?
@@ -613,7 +613,7 @@ _sync_task_impl() {
     return "$_rc"
   fi
 
-  echo "源端大小 $(format_bytes_iec "$source_size_bytes") 超过 50GB 阈值，按子目录拆分同步 (depth=${current_depth})"
+  echo "源端大小 $(format_bytes_iec "$source_size_bytes") 超过拆分阈值 $(format_bytes_iec "$threshold")，按子目录拆分同步 (depth=${current_depth})"
 
   # 列出一级子目录
   local subdirs
@@ -1340,7 +1340,10 @@ sync_by_file_batches() {
   progress_update "正在列出文件..."
   # 注意：GitHub Actions 默认 set -e -o pipefail，rclone lsjson 失败时管道会非零退出，
   # 此处只需文件列表（失败时 total_files=0 触发下方 lsf 备选），用 || true 避免 step 直接退出。
+  # 记录 rclone 自身退出码: 供下方区分"源端为空"与"两次列举全失败"（防静默漏同步）。
+  local _lsjson_rc=0 _lsf_rc=0
   rclone lsjson --recursive --files-only --no-modtime --no-mimetype "$source_path" 2>&1 | jq -c '.[]' > "$file_list_file" 2>/dev/null || true
+  _lsjson_rc=${PIPESTATUS[0]}
 
   local total_files
   total_files=$(wc -l < "$file_list_file" | tr -d ' ')
@@ -1359,12 +1362,24 @@ sync_by_file_batches() {
         for(i=5;i<=NF;i++) name = (i==5 ? $i : name " " $i)
         if (name != "") printf "{\"size\":%s,\"path\":\"%s\"}\n", size, name
       }' > "$file_list_file" 2>/dev/null || true
+    _lsf_rc=${PIPESTATUS[0]}
     total_files=$(wc -l < "$file_list_file" | tr -d ' ')
     echo "备选方案文件数: ${total_files}"
   fi
 
   if [ "$total_files" -eq 0 ]; then
-    echo "无文件可同步"
+    if [ "$_lsjson_rc" -ne 0 ] || [ "$_lsf_rc" -ne 0 ]; then
+      # 两次列举全失败 ≠ 空源端: 历史行为是按"无文件可同步"静默跳过，
+      # 源端持续列举失败（驱动失效/网盘故障）会让任务无限期静默漏同步
+      # 且无任何告警。按失败处理，交由通知与 marker 逻辑走失败分支。
+      echo "🛑 两次列举均失败（lsjson exit=${_lsjson_rc} / lsf exit=${_lsf_rc}）且 0 文件: 无法区分『源端为空』与『列举失败』，按失败处理（防静默漏同步）"
+      SYNC_SKIPPED=0
+      SYNC_FAILED=1
+      SYNC_TRANSFERRED_BYTES=0
+      rm -rf "$batch_dir"
+      return 0
+    fi
+    echo "两次列举均成功但源端 0 文件，视为空源端，跳过"
     SYNC_SKIPPED=1
     SYNC_FAILED=0
     SYNC_TRANSFERRED_BYTES=0

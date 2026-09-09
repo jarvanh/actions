@@ -643,6 +643,10 @@ check_sync_marker() {
 
   if [ "$last_epoch" -gt 0 ]; then
     diff=$((now_epoch - last_epoch))
+    # 时钟回拨防护: diff 为负（runner 时钟早于 last_success，或 marker 时间
+    # 写入自未来）不得落入"窗口内"分支误跳过——与 check_marker_skip_window
+    # 的 _diff<0 口径对齐（负 diff = 未命中窗口 = 继续同步）
+    [ "$diff" -lt 0 ] && diff=$SYNC_SKIP_SECONDS
     if [ "$diff" -lt "$SYNC_SKIP_SECONDS" ]; then
       echo "$((SYNC_SKIP_SECONDS / 3600))小时内已成功同步（距今 $((diff / 3600)) 小时），跳过"
       MARKER_ACTION="skip"
@@ -660,6 +664,15 @@ check_sync_marker() {
   _extract_filter_args "${extra_args[@]}"
   local current_size_json
   current_size_json=$(_rclone_size_json "$source_path" "${FILTER_ARGS[@]}")
+  # 列举失败 ≠ 数据缩小: rclone size 瞬时失败（网盘限流/驱动抖动）回退 0 会
+  # 把 0 < marker_bytes 误判成"源端大小减小"，发失真告警并跳过同步，且持续
+  # 失败时任务长期静默停摆。无法判定时放行同步（fail-open），由缩小检测的
+  # 本意——真实数据丢失——之外的机制兜底。
+  if [ -z "$current_size_json" ]; then
+    echo "⚠️ 无法获取源端统计（rclone size 失败），跳过缩小检测并放行同步（不把列举失败当数据缩小误报）"
+    MARKER_ACTION="proceed"
+    return 0
+  fi
   MARKER_CURRENT_BYTES=$(_size_json_field "$current_size_json" bytes)
   MARKER_CURRENT_COUNT=$(_size_json_field "$current_size_json" count)
   MARKER_CURRENT_DIRS=$(rclone lsf --dirs-only "$source_path" "${FILTER_ARGS[@]}" 2>/dev/null | sed 's|/$||' | sort)

@@ -75,7 +75,7 @@ R_SIZE_src=45000000000
 run_impl 1 0 src dst t1 > "$OUT" 2>&1
 [ "$SWL_CALLS" = "1" ] && ok "1a 42GiB 直同步恰好 1 次（实际 ${SWL_CALLS}）" || bad "1a: sync=${SWL_CALLS}"
 [ "$SBB_CALLS" = "0" ] && ok "1b 未走文件批次拆分" || bad "1b: batch=${SBB_CALLS}"
-grep -q "未超过 50GB 阈值" "$OUT" && ok "1c 走 ≤50GB 分支" || bad "1c: $(cat "$OUT")"
+grep -q "未超过拆分阈值" "$OUT" && ok "1c 走 ≤阈值直同步分支" || bad "1c: $(cat "$OUT")"
 ! grep -q "按子目录拆分同步" "$OUT" && ok "1d 未穿透到子目录拆分" || bad "1d: 穿透了"
 ! grep -q "最终完整同步" "$OUT" && ok "1e 未重复最终完整同步" || bad "1e: 重复完整同步"
 [ "$SOSF_CALLS" = "1" ] && ok "1f 收尾切割检查恰好 1 次" || bad "1f: sosf=${SOSF_CALLS}"
