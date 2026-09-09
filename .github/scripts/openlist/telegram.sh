@@ -19,10 +19,8 @@
 #   PROGRESS_MSG_ID_FILE — 进度消息 ID 存储文件路径
 #   PROGRESS_SENT_IDS_LOG — 本轮已发进度消息 id 清单（finalize 兜底清孤儿，sync_progress.sh 定义）
 
-# 统一分隔线（18 个全角横线）
-# 注: tg_notify.sh 已定义同值 TG_SEP（真源），此处是收敛后遗留的重复定义；
-# 两者必须保持一致，改版式一律改真源 tg_notify.sh（勿只改这里）。
-TG_SEP='━━━━━━━━━━━━━━━━━━'
+# 统一分隔线 TG_SEP（18 个全角横线）**不加定义**：真源是 telegram/tg_notify.sh，
+# 由 load_all.sh L0 层最先 source；此处若再写一份必然漂移（2026-09-09 删除本文件副本）。
 
 # 凭据变量名兼容（与 tg_notify.sh 同款，两文件同步维护）：历史名自动回退，
 # 防止名字错接导致 chat_id 为空、通知静默消失
@@ -44,11 +42,13 @@ send_telegram_message() {
   local message="$1"
   local parse_mode="${2:-HTML}"
   [ -z "$message" ] && return 0
+  # 不再吞掉 stderr：发送层已把失败原因（429 重试耗尽 / 400 解析失败 / 其它 API 错误）
+  # 写到 stderr，>/dev/null 会让「通知静默消失」无法定位（规范 §5）
   if [ "${#message}" -gt 4000 ]; then
-    send_tg_chunked "$message" >/dev/null 2>&1 || true
+    send_tg_chunked "$message" || true
     return 0
   fi
-  send_tg "$message" >/dev/null 2>&1 || true
+  send_tg "$message" || true
 }
 
 # 发送 Telegram 消息并返回 message_id
@@ -80,9 +80,12 @@ _tg_send_and_get_id() {
       continue
     fi
     if echo "$response" | grep -q "can't parse entities"; then
-      echo "❌ Telegram HTML 解析失败（400 can't parse entities），消息未发送" >&2
+      # 与真源 tg_notify.sh 同语义：不重发、报错暴露，且带上响应体前 200 字符
+      echo "❌ Telegram HTML 解析失败（400 can't parse entities），消息未发送: $(echo "$response" | head -c 200)" >&2
       break
     fi
+    # 其它失败同样要留痕（此前静默 break，限流/鉴权失败都看不到原因）
+    echo "⚠️ Telegram 通知发送失败: $(echo "$response" | head -c 200)" >&2
     break
   done
   # jq 对非 JSON 响应（如网关 502 页面）返回非零 → set -e 下会沿

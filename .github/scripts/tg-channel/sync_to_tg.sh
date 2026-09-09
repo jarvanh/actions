@@ -109,8 +109,11 @@ def esc(s) -> str:
 
 
 def fmt_secs(x: float) -> str:
-    """秒数中文形态（规范禁英文紧凑时长进通知：12.34s → 12.34 秒）。"""
-    return f"{x:.2f} 秒"
+    """秒数中文形态（规范禁英文紧凑时长进通知：12.34s → 12.3 秒）。
+
+    一位小数：原始精度无意义，只碍扫读（规范 §4「高精度浮点直出」）。
+    """
+    return f"{x:.1f} 秒"
 
 
 def build_fail_notify(title: str, file: str, elapsed: float, lines: list):
@@ -124,9 +127,10 @@ def build_fail_notify(title: str, file: str, elapsed: float, lines: list):
         # 标题 = emoji + 短语加粗（规范 §2；此前未加粗与 tg_add_title 版式漂移）
         f"<b>{esc(title)}</b>",
         TG_SEP,
-        f"📁 {esc(shorten_name(os.path.basename(file)))}",
-        f"📦 分组：{esc(CAPTION_PREFIX)}",
-        f"耗时：{elapsed:.1f} 秒",
+        # 文件名属机器值 → <code>；emoji 入 <b>（规范 §2 语义表 #3 + 裁决 7）
+        f"<b>📁</b> <code>{esc(shorten_name(os.path.basename(file)))}</code>",
+        f"<b>📦 分组</b>：<b>{esc(CAPTION_PREFIX)}</b>",
+        f"<b>耗时</b>：<b>{fmt_secs(elapsed)}</b>",
     ]
     parts.extend(lines)
     return "\n".join(parts)
@@ -302,9 +306,9 @@ def get_video_list():
         notify("\n".join([
             "<b>❌ 获取远端文件列表失败</b>",
             TG_SEP,
-            f"📦 分组：{esc(CAPTION_PREFIX)}",
-            f"⚠️ 原因：rclone lsjson 退出码 {result.returncode}",
-            "📄 stderr 见 Actions 日志",
+            f"<b>📦 分组</b>：<b>{esc(CAPTION_PREFIX)}</b>",
+            f"<b>⚠️ 原因</b>：<b>rclone lsjson 退出码 {result.returncode}</b>",
+            "<b>📄 stderr 见 Actions 日志</b>",
         ]))
         return [], []
 
@@ -435,12 +439,12 @@ def main():
             print(result.stderr[-2000:] if result.stderr else "(无错误输出)")
             print("------------------------")
             failed += 1
-            failed_list.append(f"{file} · 下载失败 · 耗时 {fmt_secs(dl_elapsed)}")
+            failed_list.append(f"{file}\t下载失败 · 耗时 {fmt_secs(dl_elapsed)}")
             notify(build_fail_notify(
                 "❌ 下载失败",
                 file, dl_elapsed,
                 [
-                    f"📦 大小：{human_size(size)}",
+                    f"<b>📦 大小</b>：<b>{human_size(size)}</b>",
                     "📄 rclone stderr：\n" + esc(result.stderr[-500:].strip() if result.stderr else "(无错误输出)"),
                 ],
             ))
@@ -491,7 +495,7 @@ def main():
             # 立即持久化到远端，避免 Action 超时被 kill 时丢失全部进度
             flush_uploaded_to_remote(uploaded)
             sent += 1
-            sent_list.append(f"{file} · 上传耗时 {fmt_secs(up_elapsed)}")
+            sent_list.append(f"{file}\t上传耗时 {fmt_secs(up_elapsed)}")
             print(f"✅ 上传完成: {file} (总处理耗时 {up_elapsed:.2f}s)")
         else:
             err_tail = tail_file(proc_log, 15)
@@ -514,21 +518,21 @@ def main():
                     "failed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 }
                 flush_failed_to_remote(failed_map)
-                failed_list.append(f"{file} · 源文件损坏已标记跳过 · 耗时 {fmt_secs(up_elapsed)}")
+                failed_list.append(f"{file}\t源文件损坏已标记跳过 · 耗时 {fmt_secs(up_elapsed)}")
                 notify(build_fail_notify(
                     "⏭️ 损坏视频已标记跳过",
                     file, up_elapsed,
                     [
-                        "⚠️ 原因：源文件损坏，无法读取视频信息（moov atom 缺失）",
-                        "🔄 后续：不再重复尝试，远端文件被替换后自动重试",
+                        "<b>⚠️ 原因</b>：<b>源文件损坏，无法读取视频信息（moov atom 缺失）</b>",
+                        "<b>🔄 后续</b>：<b>不再重复尝试，远端文件被替换后自动重试</b>",
                     ],
                 ))
             else:
-                failed_list.append(f"{file} · 处理/上传失败 · 耗时 {fmt_secs(up_elapsed)}")
+                failed_list.append(f"{file}\t处理/上传失败 · 耗时 {fmt_secs(up_elapsed)}")
                 notify(build_fail_notify(
                     "❌ 处理/上传失败",
                     file, up_elapsed,
-                    [f"📄 输出尾部：\n{esc(err_tail)}"] if err_tail else ["📄 无详细输出，见 Actions 日志"],
+                    [f"<b>📄 输出尾部</b>：\n<pre>{esc(err_tail)}</pre>"] if err_tail else ["<b>📄 无详细输出，见 Actions 日志</b>"],
                 ))
 
         # 清理工作目录
@@ -618,6 +622,23 @@ esc_lines() {
   printf '%s' "${_out%$'\n'}"
 }
 
+# 已上传/失败条目渲染: 每行 "文件名\t备注"（python 侧产出）→ 树形
+# "  ├─ <code>文件名</code> · <i>备注</i>"。
+# 与 _render_skipped_groups 同款标签（条目主体文件类 <code>、元数据 · <i>）——此前这两个
+# 列表整行只转义不加标签，与同通知内的跳过明细两种条目风格并存（规范 §2 语义表 #4/#5）
+_render_named_entries() {
+  local _in="$1" _name _meta _out=""
+  [ -z "$_in" ] && return 0
+  while IFS=$'\t' read -r _name _meta; do
+    [ -z "$_name" ] && continue
+    _out+="<code>$(escape_html "$_name")</code>"
+    [ -n "$_meta" ] && _out+=" · <i>$(escape_html "$_meta")</i>"
+    _out+=$'\n'
+  done <<< "$_in"
+  [ -z "$_out" ] && return 0
+  tree_lines "${_out%$'\n'}"
+}
+
 # 跳过/过滤明细渲染: 按原因分组 —— 组头 "<b>原因</b> · N"，条目 <code>文件名</code> 树形列出。
 # 输入: 多行 "原因\t路径"（python 侧产出）；每组最多 SKIP_DETAIL_MAX 条，超出折叠为
 # "还有 N 条…"（43 条损坏全列会刷屏，且通知会顶到分片边界）
@@ -660,12 +681,12 @@ if [ "$SKIPPED_COUNT" -gt 0 ]; then
   tg_add_kv msg "跳过/过滤" "${SKIPPED_SUMMARY:-${SKIPPED_COUNT} 条}"
 fi
 if [ -n "$SENT_LIST" ]; then
-  tg_add_section msg "✅ 已上传"
-  tg_add_block msg "$(tree_lines "$(esc_lines "$SENT_LIST")")"
+  tg_add_section msg "✅ 已上传 · ${SENT}"
+  tg_add_block msg "$(_render_named_entries "$SENT_LIST")"
 fi
 if [ -n "$FAILED_LIST" ]; then
-  tg_add_section msg "❌ 失败"
-  tg_add_block msg "$(tree_lines "$(esc_lines "$FAILED_LIST")")"
+  tg_add_section msg "❌ 失败 · ${FAILED}"
+  tg_add_block msg "$(_render_named_entries "$FAILED_LIST")"
 fi
 if [ -n "$SKIPPED_DETAILS" ]; then
   tg_add_section msg "⚠️ 跳过/过滤文件"

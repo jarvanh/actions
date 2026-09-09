@@ -45,6 +45,7 @@ import yaml
 # ---------------------------------------------------------------------------
 from speedtest_common import (
     HOME_RUNTIME,
+    build_node_metric_prefix,
     build_subscription_bundle,
     build_target_network_section,
     fetch_ip_network_info,
@@ -53,9 +54,11 @@ from speedtest_common import (
     resolve_host_ipv4,
     resolve_subscription_policy,
     send_telegram,
+    send_telegram_chunked,
     tg_footer_line,
     tg_format_elapsed,
     update_gist,
+    TG_SEP,
 )
 from speedtest_gitee import (
     MIHOMO,
@@ -447,16 +450,19 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
     min_nodes = bundle.get('min_nodes', 1)
     metric_label = bundle.get('metric_label', '')
 
-    sep = '━' * 18
+    sep = TG_SEP
     ok_results = [r for r in results if r.get('ok') and not r.get('bypass')]
     # TOP 排序与订阅判定同口径：按实际采用的判定指标排序（默认上传），
     # 否则会出现「按上传达标导出、却按下行排 TOP」的自相矛盾展示
     top_sort_key = 'up' if bundle.get('metric', 'upload') == 'upload' else 'down'
     top = sorted(ok_results, key=lambda r: r.get(top_sort_key) or 0.0, reverse=True)[:5]
+    # 标题状态随结论降级（规范 §4 状态 emoji 语义）：0 成功 / 命中「疑似未走代理」→ ⚠️，
+    # 不再恒 ✅（此前 ✅ 标题下写着 ⚠️ 疑似未走代理，与 rc=1 的失败判定自相矛盾）
+    _title_emoji = '⚠️' if (not ok_results or bypass_hits) else '✅'
     lines = [
-        '<b>✅ 泰尔三网测速</b>',
+        f'<b>{_title_emoji} 泰尔三网测速</b>',
         sep,
-        f"🕒 {esc(meta['started_text'])} ~ {esc(meta['ended_text'])} · 耗时 {esc(meta['duration_text'])}",
+        f"🕒 起止：{esc(meta['started_text'])} ~ {esc(meta['ended_text'])} · 耗时 <b>{esc(meta['duration_text'])}</b>",
         f"📊 节点：共 <b>{len(results)}</b> 个 · 成功 <b>{len(ok_results)}</b> 个",
         f"📍 测速点：<b>{esc(meta['points'])}</b> · 模式：<b>{esc(meta['mode_label'])}</b>",
         f"🧪 引擎：<code>taierspeedtest {esc(VERSION['taier'] or 'latest')}</code>",
@@ -467,62 +473,73 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
     lines.extend(taier_target_network_lines(meta['points'], direct_ip))
     lines.append('')
     if top:
-        # 指标顺序对齐泰尔引擎列序（↑上传在前）；上传未测出（CDN 类节点拒绝泰尔
-        # 900MB 上传请求体，引擎渲染 failed → 0）时条目省略 ↑ 项、图例同步省略，
-        # 避免误导为「测得 0.0Mbps」
+        # 三件套统一：TOP 条目复用共享的 build_node_metric_prefix（↑上传 · ↓下载 · 延迟ms，
+        # 单位「兆」），不再手拼 Mbps —— 此前只有 taier 一处两种单位/分隔符（规范 §1 禁止自造）。
+        # 引擎原始值 Mbps → 共享层单位 MiB/s（÷8.388608），与订阅导出口径一致
+        _top_mode = 'push-only' if bundle.get('metric', 'upload') == 'upload' else 'download'
         has_up = any((r.get('up') or 0) > 0 for r in top)
-        legend = '↑上传 · ↓下载 · 延迟' if has_up else '↓下载 · 延迟'
+        legend = '↑上传 · ↓下载 · 延迟ms' if has_up else '↓下载 · 延迟ms'
         # 标题点出排序依据（= 订阅判定指标），避免读者按 ↓ 数值读不出顺序
         sort_hint = f' · 按{esc(metric_label)}' if metric_label else ''
         lines.append(f'<b>🏆 最快节点 · {len(top)}{sort_hint}</b> · <i>{legend}</i>')
         for idx, r in enumerate(top, 1):
             connector = '└─' if idx == len(top) else '├─'
-            up_text = f"↑{esc(r['up'])}Mbps · " if (r.get('up') or 0) > 0 else ''
-            lines.append(
-                f"  {connector} <code>{esc(r.get('name', ''))}</code>"
-                f" · <i>{up_text}↓{esc(r.get('down', 0))}Mbps"
-                f" · {esc(r.get('rtt') or '-')}</i>")
+            prefix = build_node_metric_prefix({
+                'upload_mibs': (r.get('up') or 0) / 8.388608,
+                'download_mibs': (r.get('down') or 0) / 8.388608,
+                'latency_ms': _rtt_to_ms(r.get('rtt')),
+            }, _top_mode, order='up_first')
+            item = f'  {connector} <code>{esc(r.get("name", ""))}</code>'
+            if prefix:
+                item += f' · <i>{esc(prefix)}</i>'
+            lines.append(item)
         lines.append('')
     else:
-        lines.append('⚠️ 没有节点测速成功')
+        lines.append('<b>⚠️ 没有节点测速成功</b>')
         lines.append('')
 
     if bypass_hits:
         lines.append('<b>⚠️ 疑似未走代理</b>')
-        lines.append(f"  └─ {bypass_hits} 个节点的出口 IP 与 runner 直连出口（<code>{esc(direct_ip)}</code>）相同，"
-                     'TUN 进程规则可能未生效，结果不可信')
+        lines.append(f"  └─ <b>{bypass_hits} 个节点的出口 IP 与 runner 直连出口（<code>{esc(direct_ip)}</code>）相同，"
+                     'TUN 进程规则可能未生效，结果不可信</b>')
         lines.append('')
 
     failed = [r for r in results if not r.get('ok')]
     if failed:
         lines.append(f'<b>❌ 失败 · {len(failed)}</b>')
-        for idx, r in enumerate(failed[:5], 1):
-            connector = '└─' if idx == min(len(failed), 5) else '├─'
+        _failed_entries = []
+        for r in failed[:5]:
             # 原始异常串属机器值 → <code>（标签语义表第 3 类；此前用 <i> 与元数据撞语义）
-            lines.append(f"  {connector} <code>{esc(r.get('name', ''))}</code> · <code>{esc((r.get('error') or '-')[:80])}</code>")
+            _failed_entries.append(
+                f"<code>{esc(r.get('name', ''))}</code> · <code>{esc((r.get('error') or '-')[:80])}</code>")
+        if len(failed) > 5:
+            # 折叠行并入条目流，末条 └─ 由下面的循环统一决定（禁双 └─；规范 §2.3）
+            _failed_entries.append(f'<i>还有 {len(failed) - 5} 条…</i>')
+        for _i, _l in enumerate(_failed_entries, 1):
+            _c = '└─' if _i == len(_failed_entries) else '├─'
+            lines.append(f'  {_c} {_l}')
         lines.append('')
 
     lines.append('<b>📦 订阅 · Gist</b>')
     if gist_res and gist_res.get('ok'):
         action = '新建' if gist_res.get('created') else '更新'
         raw_url = ((gist_res.get('yaml') or {}).get('raw_url') or '').strip()
-        gist_lines = [f'✅ 已{action}，达标 <b>{qualified_count}</b> 个 · 阈值 ≥{min_megabit}兆（按{esc(metric_label)}）']
+        gist_lines = [f'<b>✅ 已{action}，达标 {qualified_count} 个</b> · <i>阈值 ≥{min_megabit}兆（按{esc(metric_label)}）</i>']
         if gist_res.get('created'):
-            gist_lines.append('❗ 请把 Gist id 回填到 Secrets <code>PROXY_SPEEDTEST_TAIER_GIST_ID</code>，避免每轮新建')
+            gist_lines.append('⚠️ 请把 Gist id 回填到 Secrets <code>PROXY_SPEEDTEST_TAIER_GIST_ID</code>，避免每轮新建')
         if raw_url:
             gist_lines.append(f'🔗 <a href="{esc(raw_url)}">订阅源 YAML</a>')
         for _i, _l in enumerate(gist_lines):
             _c = '└─' if _i == len(gist_lines) - 1 else '├─'
             lines.append(f'  {_c} {_l}')
     elif gist_res:
-        lines.append(f"  └─ ⚠️ 上传失败：{esc(gist_res.get('reason', ''))}")
+        lines.append(f"  └─ <b>⚠️ 上传失败</b>：<code>{esc(gist_res.get('reason', ''))}</code>")
     elif gist_error:
         # 上传阶段抛异常（HTTP 4xx 等）≠ 没有达标节点，文案必须区分
-        lines.append(f'  └─ ⚠️ 上传失败：{esc(gist_error[:120])}')
+        lines.append(f'  └─ <b>⚠️ 上传失败</b>：<code>{esc(gist_error[:120])}</code>')
     else:
-        lines.append(f'  └─ ⚠️ 达标不足 {min_nodes} 个 · 阈值 ≥{min_megabit}兆（按{esc(metric_label)}）· 未更新订阅')
-    lines.append('')
-
+        lines.append(f'  └─ <b>⚠️ 达标不足 {min_nodes} 个</b> · <i>阈值 ≥{min_megabit}兆（按{esc(metric_label)}）· 未更新订阅</i>')
+    # 统一收尾区（收尾区与正文间固定**一个**空行）：此前连写两个 append('') 变双空行
     lines.append('')
     footer = tg_footer_line()
     if footer:
@@ -541,8 +558,9 @@ def notify_failure(env, reason):
     _head = str(reason).split('：')[0].splitlines()[0][:40].strip() or '未知原因'
     lines = [
         f'<b>❌ 泰尔三网测速异常退出 · {html.escape(_head)}</b>',
-        '━' * 18,
-        f'原因：<b>{html.escape(str(reason))}</b>',
+        TG_SEP,
+        # reason 含原始异常串（机器值）→ <code>；与 cdn/gitee 的「原因/错误」同口径（裁决 8）
+        f'原因：<code>{html.escape(str(reason))}</code>',
         '',
     ]
     footer = tg_footer_line()
@@ -571,7 +589,7 @@ def handle_termination_signal(signum, frame):
     except Exception:
         pass
     sig_name = signal.Signals(signum).name if signum else f'SIGNAL-{signum}'
-    msg = (f'<b>⛔ 泰尔三网测速异常终止</b>\n{"━" * 18}\n'
+    msg = (f'<b>⛔ 泰尔三网测速异常终止</b>\n{TG_SEP}\n'
            f'⚠️ 脚本被中断：收到 <code>{sig_name}</code>，本轮测速未正常完成。')
     footer = tg_footer_line()
     if footer:
@@ -751,8 +769,12 @@ def _run():
         log_progress('report_write_failed', error=str(e))
 
     try:
-        send_telegram(env, '\n'.join(build_telegram_lines(
+        # 长消息分片发送（失败列表 + Gist 段容易超 4000 字符，单发会被整条拒收）
+        tg_res = send_telegram_chunked(env, '\n'.join(build_telegram_lines(
             results, meta, direct_ip, bypass_hits, gist_res, bundle, gist_error)))
+        # 发送层不写 stderr（python 侧靠返回值），失败原因必须回传日志（规范 §5）
+        log_progress('telegram_send_finished', sent=bool(tg_res.get('sent')),
+                     reason=tg_res.get('reason', ''))
     except Exception as e:
         log_progress('telegram_send_failed', error=str(e))
 

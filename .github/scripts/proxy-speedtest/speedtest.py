@@ -55,9 +55,11 @@ from speedtest_common import (
     resolve_host_ipv4,
     resolve_subscription_policy,
     send_telegram,
+    send_telegram_chunked,
     tg_footer_line,
     tg_format_elapsed,
     update_gist,
+    TG_SEP,
 )
 from speedtest_gitee import (
     MIHOMO_MIXED_PORT,
@@ -922,8 +924,13 @@ def main():
         log_progress('gist_upload_failed', error=str(e))
         gist_res = gist_res or {'ok': False, 'reason': str(e)}
     try:
-        send_telegram(env, '\n'.join(build_telegram_lines(
+        # 长消息分片发送（多测速点 + TOP5 + Gist 段容易超 4000 字符，单发会被整条拒收）
+        tg_res = send_telegram_chunked(env, '\n'.join(build_telegram_lines(
             results, meta=meta, gist_res=gist_res, bundle=bundle)))
+        # 发送层不写 stderr（python 侧靠返回值），失败原因必须回传日志，否则
+        # 400 解析失败/限流会表现为「通知静默消失」（规范 §5）
+        log_progress('telegram_send_finished', sent=bool(tg_res.get('sent')),
+                     reason=tg_res.get('reason', ''))
     except Exception as e:
         log_progress('telegram_send_failed', error=str(e))
 
@@ -973,11 +980,13 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None):
     except Exception:
         duration_text = '-'
 
-    sep = '━' * 18
+    sep = TG_SEP
+    # 标题状态随结论降级（规范 §4 状态 emoji 语义）：0 可用节点 → ⚠️，不再恒 ✅
+    _title_emoji = '⚠️' if not ok_results else '✅'
     lines = [
-        '<b>✅ CDN 测速完成</b>',
+        f'<b>{_title_emoji} CDN 测速完成</b>',
         sep,
-        f'🕒 {esc(started)} ~ {esc(ended)} · 耗时 {esc(duration_text)}',
+        f'🕒 起止：{esc(started)} ~ {esc(ended)} · 耗时 <b>{esc(duration_text)}</b>',
         f'📊 节点：共 <b>{len(results)}</b> 个 · 可用 <b>{len(ok_results)}</b> 个',
         '',
     ]
@@ -1010,7 +1019,7 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None):
             lines.append(item)
         lines.append('')
     else:
-        lines.append('⚠️ 没有节点测速成功')
+        lines.append('<b>⚠️ 没有节点测速成功</b>')
         lines.append('')
 
     lines.append('<b>📦 订阅 · Gist</b>')
@@ -1020,19 +1029,18 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None):
         # HTML 报告只写在运行机本地（含节点凭据，不外传），故无可分享链接。
         raw_url = ((gist_res.get('yaml') or {}).get('raw_url') or '').strip()
         html_url = (gist_res.get('html_url') or '').strip()
-        gist_lines = [f'✅ 已{action}，达标 <b>{qualified_count}</b> 个节点 · ≥{min_megabit}兆（按{esc(metric_label)}）']
+        gist_lines = [f'<b>✅ 已{action}，达标 {qualified_count} 个节点</b> · <i>≥{min_megabit}兆（按{esc(metric_label)}）</i>']
         if raw_url:
             gist_lines.append(f'🔗 <a href="{esc(raw_url)}">订阅源 YAML</a>')
         elif html_url:
             gist_lines.append(f'🔗 <a href="{esc(html_url)}">Gist 页面</a>')
-        _t = '  └─ '
         for _i, _l in enumerate(gist_lines):
             _c = '└─' if _i == len(gist_lines) - 1 else '├─'
             lines.append(f'  {_c} {_l}')
     elif gist_res:
-        lines.append(f"  └─ ⚠️ 上传失败：{esc(gist_res.get('reason', ''))}")
+        lines.append(f"  └─ <b>⚠️ 上传失败</b>：<code>{esc(gist_res.get('reason', ''))}</code>")
     else:
-        lines.append(f'  └─ ⚠️ 达标不足 {min_nodes} 个 · 阈值 ≥{min_megabit}兆（按{esc(metric_label)}）· 未更新订阅')
+        lines.append(f'  └─ <b>⚠️ 达标不足 {min_nodes} 个</b> · <i>阈值 ≥{min_megabit}兆（按{esc(metric_label)}）· 未更新订阅</i>')
 
     # 统一收尾区（收尾区与正文间固定一个空行；与 tg_add_footer 同形态同降级链）
     # 注: 正文的「耗时 X」是测速自身耗时，收尾区的「已运行 X」是 run 已运行时长，两者语义不同
@@ -1065,7 +1073,7 @@ def write_termination(started_at, reason):
     try:
         # 标题直接带原因首行（原文截断后再转义，避免切断 HTML 实体）
         _head = str(reason).splitlines()[0][:40].strip() or '未知原因'
-        abort_msg = (f'<b>❌ CDN 测速异常退出 · {html.escape(_head)}</b>\n{"━" * 18}\n'
+        abort_msg = (f'<b>❌ CDN 测速异常退出 · {html.escape(_head)}</b>\n{TG_SEP}\n'
                      f'原因：<code>{html.escape(str(reason))}</code>')
         abort_footer = tg_footer_line()
         if abort_footer:
@@ -1078,7 +1086,7 @@ def write_termination(started_at, reason):
 def handle_termination_signal(signum, frame):
     """SIGTERM/SIGINT 兜底：run 被取消/超时也发通知（与 speedtest_gitee 同款）。"""
     sig_name = signal.Signals(signum).name if signum else f'SIGNAL-{signum}'
-    msg = (f'<b>⛔ CDN 测速异常终止</b>\n{"━" * 18}\n'
+    msg = (f'<b>⛔ CDN 测速异常终止</b>\n{TG_SEP}\n'
            f'⚠️ 脚本被中断：收到 <code>{sig_name}</code>，本轮测速未正常完成。')
     footer = tg_footer_line()
     if footer:
@@ -1097,10 +1105,15 @@ if __name__ == '__main__':
     except Exception as e:
         # 未捕获异常兜底：标题直接带原因摘要，正文留完整错误（TG 私聊，不进公开日志）
         _head = str(e).splitlines()[0][:60].strip() if str(e).strip() else '未知异常'
+        _msg = (f'<b>❌ CDN 测速异常退出 · {html.escape(_head)}</b>\n'
+                f'{TG_SEP}\n'
+                f'错误：<code>{html.escape(f"{type(e).__name__}: {e}"[:800])}</code>')
+        # 收尾区不可省（规范 §3/§6）：兜底通知同样要带 ⏱ 已运行 + 运行日志
+        _footer = tg_footer_line()
+        if _footer:
+            _msg += f'\n\n{_footer}'
         try:
-            send_telegram(merged_env(), f'<b>❌ CDN 测速异常退出 · {html.escape(_head)}</b>\n'
-                                        f'{"━" * 18}\n'
-                                        f'错误：<code>{html.escape(f"{type(e).__name__}: {e}"[:800])}</code>')
+            send_telegram(merged_env(), _msg)
         except Exception:
             pass
         sys.exit(1)

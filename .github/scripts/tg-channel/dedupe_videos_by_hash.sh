@@ -156,13 +156,13 @@ for hash in "${!HASH_ENTRIES[@]}"; do
       if [ "$AUTO_DELETE" = "true" ]; then
         if rclone deletefile "$SOURCE_REMOTE/$p" 2>/tmp/rclone_err.log; then
           REMOVED_COUNT=$((REMOVED_COUNT + 1))
-          _grp_add group_entries "🗑 删除 <code>$(escape_html "${p}")</code> · <i>${s} 字节 · ${t}</i>"$'\n'
+          _grp_add group_entries "<b>🗑 删除</b> <code>$(escape_html "${p}")</code> · <i>${s} 字节 · ${t}</i>"$'\n'
         else
-          _grp_add group_entries "❌ 删除失败 <code>$(escape_html "${p}")</code>"$'\n'
+          _grp_add group_entries "<b>❌ 删除失败</b> <code>$(escape_html "${p}")</code>"$'\n'
           echo "  ❌ 删除失败: $(tail -n 3 /tmp/rclone_err.log)"
         fi
       else
-        _grp_add group_entries "⚠️ 待删除 · 已跳过 <code>$(escape_html "${p}")</code> · <i>${s} 字节 · ${t}</i>"$'\n'
+        _grp_add group_entries "<b>⚠️ 待删除 · 已跳过</b> <code>$(escape_html "${p}")</code> · <i>${s} 字节 · ${t}</i>"$'\n'
       fi
     done <<< "$sorted"
     _fold=$(_grp_fold)
@@ -179,13 +179,13 @@ for hash in "${!HASH_ENTRIES[@]}"; do
       if [ "$AUTO_DELETE" = "true" ]; then
         if rclone deletefile "$SOURCE_REMOTE/$p" 2>/tmp/rclone_err.log; then
           REMOVED_COUNT=$((REMOVED_COUNT + 1))
-          _grp_add group_entries "🗑 删除 <code>$(escape_html "${p}")</code> · <i>哈希一致 · 旧文件</i>"$'\n'
+          _grp_add group_entries "<b>🗑 删除</b> <code>$(escape_html "${p}")</code> · <i>哈希一致 · 旧文件</i>"$'\n'
         else
-          _grp_add group_entries "❌ 删除失败 <code>$(escape_html "${p}")</code>"$'\n'
+          _grp_add group_entries "<b>❌ 删除失败</b> <code>$(escape_html "${p}")</code>"$'\n'
           echo "  ❌ 删除失败: $(tail -n 3 /tmp/rclone_err.log)"
         fi
       else
-        _grp_add group_entries "⚠️ 待删除 · 已跳过 <code>$(escape_html "${p}")</code> · <i>哈希一致 · 旧文件</i>"$'\n'
+        _grp_add group_entries "<b>⚠️ 待删除 · 已跳过</b> <code>$(escape_html "${p}")</code> · <i>哈希一致 · 旧文件</i>"$'\n'
       fi
     done <<< "$sorted"
     _fold=$(_grp_fold)

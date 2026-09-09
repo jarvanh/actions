@@ -399,7 +399,7 @@ flush_task_preview() {
     fi
     local _fail_note=""
     if [ "${PREVIEW_FAIL_PAIRS:-0}" -gt 0 ]; then
-      _fail_note=$'\n'"⚠️ ${PREVIEW_FAIL_PAIRS} 个同步对目标端列举失败，按全量估算，实际待同步可能更少"
+      _fail_note=$'\n'"<b>⚠️ ${PREVIEW_FAIL_PAIRS} 个同步对目标端列举失败，按全量估算，实际待同步可能更少</b>"
     fi
     # 预计跳过附注: 有同步对落在 --Nd-skip 窗口内时才出现，直接给出
     # "预计实际传输"，避免用户拿合计待同步量去核对实际传输量（两者本就不等）
@@ -408,7 +408,7 @@ flush_task_preview() {
       local _real_b=$((_sb - _skb)) _real_c=$((_sc - _skc))
       [ "$_real_b" -lt 0 ] && _real_b=0
       [ "$_real_c" -lt 0 ] && _real_c=0
-      _skip_note=$'\n'"⏭️ 本轮预计跳过：<b>$(format_bytes "$_skb")</b> / <b>${_skc}</b> 文件 · 预计实际传输 <b>$(format_bytes "$_real_b")</b> / <b>${_real_c}</b> 文件"
+      _skip_note=$'\n'"<b>⏭️ 本轮预计跳过</b>：<b>$(format_bytes "$_skb")</b> / <b>${_skc}</b> 文件 · 预计实际传输 <b>$(format_bytes "$_real_b")</b> / <b>${_real_c}</b> 文件"
     fi
 
     local msg=""
