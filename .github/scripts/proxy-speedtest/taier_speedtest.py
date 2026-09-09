@@ -462,9 +462,9 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
     lines = [
         f'<b>{_title_emoji} 泰尔三网测速</b>',
         sep,
-        f"🕒 起止：{esc(meta['started_text'])} ~ {esc(meta['ended_text'])} · 耗时 <b>{esc(meta['duration_text'])}</b>",
-        f"📊 节点：共 <b>{len(results)}</b> 个 · 成功 <b>{len(ok_results)}</b> 个",
-        f"📍 测速点：<b>{esc(meta['points'])}</b> · 模式：<b>{esc(meta['mode_label'])}</b>",
+        f"🕒 起止：{esc(meta['started_text'])} ~ {esc(meta['ended_text'])} · 耗时 {esc(meta['duration_text'])}",
+        f"📊 节点：共 {len(results)} 个 · 成功 {len(ok_results)} 个",
+        f"📍 测速点：{esc(meta['points'])} · 模式：{esc(meta['mode_label'])}",
         f"🧪 引擎：<code>taierspeedtest {esc(VERSION['taier'] or 'latest')}</code>",
         '',
     ]
@@ -481,7 +481,7 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
         legend = '↑上传 · ↓下载 · 延迟ms' if has_up else '↓下载 · 延迟ms'
         # 标题点出排序依据（= 订阅判定指标），避免读者按 ↓ 数值读不出顺序
         sort_hint = f' · 按{esc(metric_label)}' if metric_label else ''
-        lines.append(f'<b>🏆 最快节点 · {len(top)}{sort_hint}</b> · <i>{legend}</i>')
+        lines.append(f'<b>🏆 最快节点 · {len(top)}{sort_hint}</b> · {legend}')
         for idx, r in enumerate(top, 1):
             connector = '└─' if idx == len(top) else '├─'
             prefix = build_node_metric_prefix({
@@ -491,7 +491,7 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
             }, _top_mode, order='up_first')
             item = f'  {connector} <code>{esc(r.get("name", ""))}</code>'
             if prefix:
-                item += f' · <i>{esc(prefix)}</i>'
+                item += f' · {esc(prefix)}'
             lines.append(item)
         lines.append('')
     else:
@@ -509,12 +509,12 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
         lines.append(f'<b>❌ 失败 · {len(failed)}</b>')
         _failed_entries = []
         for r in failed[:5]:
-            # 原始异常串属机器值 → <code>（标签语义表第 3 类；此前用 <i> 与元数据撞语义）
+            # 原始异常串属机器值 → <code>（标签语义表第 3 类；此前用  与元数据撞语义）
             _failed_entries.append(
                 f"<code>{esc(r.get('name', ''))}</code> · <code>{esc((r.get('error') or '-')[:80])}</code>")
         if len(failed) > 5:
             # 折叠行并入条目流，末条 └─ 由下面的循环统一决定（禁双 └─；规范 §2.3）
-            _failed_entries.append(f'<i>还有 {len(failed) - 5} 条…</i>')
+            _failed_entries.append(f'还有 {len(failed) - 5} 条…')
         for _i, _l in enumerate(_failed_entries, 1):
             _c = '└─' if _i == len(_failed_entries) else '├─'
             lines.append(f'  {_c} {_l}')
@@ -524,7 +524,7 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
     if gist_res and gist_res.get('ok'):
         action = '新建' if gist_res.get('created') else '更新'
         raw_url = ((gist_res.get('yaml') or {}).get('raw_url') or '').strip()
-        gist_lines = [f'<b>✅ 已{action}，达标 {qualified_count} 个</b> · <i>阈值 ≥{min_megabit}兆（按{esc(metric_label)}）</i>']
+        gist_lines = [f'<b>✅ 已{action}，达标 {qualified_count} 个</b> · 阈值 ≥{min_megabit}兆（按{esc(metric_label)}）']
         if gist_res.get('created'):
             gist_lines.append('⚠️ 请把 Gist id 回填到 Secrets <code>PROXY_SPEEDTEST_TAIER_GIST_ID</code>，避免每轮新建')
         if raw_url:
@@ -538,7 +538,7 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
         # 上传阶段抛异常（HTTP 4xx 等）≠ 没有达标节点，文案必须区分
         lines.append(f'  └─ <b>⚠️ 上传失败</b>：<code>{esc(gist_error[:120])}</code>')
     else:
-        lines.append(f'  └─ <b>⚠️ 达标不足 {min_nodes} 个</b> · <i>阈值 ≥{min_megabit}兆（按{esc(metric_label)}）· 未更新订阅</i>')
+        lines.append(f'  └─ <b>⚠️ 达标不足 {min_nodes} 个</b> · 阈值 ≥{min_megabit}兆（按{esc(metric_label)}）· 未更新订阅')
     # 统一收尾区（收尾区与正文间固定**一个**空行）：此前连写两个 append('') 变双空行
     lines.append('')
     footer = tg_footer_line()

@@ -36,7 +36,7 @@ fi
 # 整条消息发送失败——解析失败不重发，直接暴露）
 source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 
-# 收集文件名与大小，用于通知（树形条目统一 ├─/└─；元数据 " · <i>…</i>"，禁括号）。
+# 收集文件名与大小，用于通知（树形条目统一 ├─/└─；元数据 " · …"，禁括号）。
 # 每组上限 8 条 + 折叠行"还有 N 条…"并入条目流（规范 §2.2：残留可能上百条，
 # 全量穷举会刷屏并顶到 4000 分片边界把收尾区切走；末条 └─ 由 tree_lines 统一决定）
 FILE_DETAILS=""
@@ -47,10 +47,10 @@ for f in "${FRAG_FILES[@]}"; do
   [ "$_n" -gt "$DETAIL_MAX" ] && break
   fname=$(basename "$f")
   fsize=$(du -h "$f" | cut -f1)
-  FILE_DETAILS+="<code>$(escape_html "${fname}")</code> · <i>${fsize}</i>"$'\n'
+  FILE_DETAILS+="<code>$(escape_html "${fname}")</code> · ${fsize}"$'\n'
 done
 if [ "${#FRAG_FILES[@]}" -gt "$DETAIL_MAX" ]; then
-  FILE_DETAILS+="<i>还有 $(( ${#FRAG_FILES[@]} - DETAIL_MAX )) 条…</i>"$'\n'
+  FILE_DETAILS+="还有 $(( ${#FRAG_FILES[@]} - DETAIL_MAX )) 条…"$'\n'
 fi
 
 # 删除残留文件

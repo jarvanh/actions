@@ -1403,8 +1403,8 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
     summary_lines = [
         f'<b>{_title_emoji} Gitee 测速完成</b>',
         sep,
-        f'🕒 起止：{esc(started_text)} ~ {esc(ended_text)} · 耗时 <b>{esc(duration_cn)}</b>',
-        f'📊 节点：共 <b>{len(speed_results)}</b> 个 · 可用 <b>{len(ok_results)}</b> 个',
+        f'🕒 起止：{esc(started_text)} ~ {esc(ended_text)} · 耗时 {esc(duration_cn)}',
+        f'📊 节点：共 {len(speed_results)} 个 · 可用 {len(ok_results)} 个',
         '',
     ]
     # 测速点（Gitee push 目标）的网络归属：域名解析 IP 后查 ISP/ASN/位置
@@ -1429,11 +1429,11 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
             ('↑上传', has_up), ('↓下载', has_down), ('延迟ms', has_lat)) if on) or '速度'
         # TOP 已按订阅判定指标排序（见 ok_results_by_download），标题同步点出排序依据
         sort_hint = f' · 按{html.escape(metric_label)}' if metric_label else ''
-        summary_lines.append(f"<b>🏆 最快节点 · {len(top)}{sort_hint}</b> · <i>{legend}</i>")
+        summary_lines.append(f"<b>🏆 最快节点 · {len(top)}{sort_hint}</b> · {legend}")
         for idx, item in enumerate(top, 1):
             prefix = build_node_metric_prefix(item, speedtest_mode, order='up_first') or '-'
             connector = '└─' if idx == len(top) else '├─'
-            summary_lines.append(f"  {connector} <code>{esc(item['name'])}</code> · <i>{esc(prefix)}</i>")
+            summary_lines.append(f"  {connector} <code>{esc(item['name'])}</code> · {esc(prefix)}")
         summary_lines.append('')
     elif alive_probe_count > 0:
         summary_lines.append('<b>⚠️ 没有节点测速成功</b>')
@@ -1485,18 +1485,18 @@ def finalize_gist_and_notify(env, summary, summary_lines, subscription_text, bun
     if gist_res.get('ok'):
         action = '新建' if gist_res.get('created') else '更新'
         html_url = gist_res.get('html_url') or ''
-        gist_lines = [f'<b>✅ 已{action}，达标 {qualified_count} 个节点</b> · <i>≥{min_megabit}兆（按{html.escape(metric_label)}）</i>']
+        gist_lines = [f'<b>✅ 已{action}，达标 {qualified_count} 个节点</b> · ≥{min_megabit}兆（按{html.escape(metric_label)}）']
         if html_url:
             gist_lines.append(f'🔗 <a href="{html.escape(html_url)}">订阅源 YAML</a>')
         if gist_verify_res.get('ok'):
-            gist_lines.append(f"<b>✅ 回拉验证通过</b>：<b>{gist_verify_res.get('sample_ok_count', 0)}</b>/<b>{gist_verify_res.get('sample_count', 0)}</b> 个抽检节点可用")
+            gist_lines.append(f"<b>✅ 回拉验证通过</b>：{gist_verify_res.get('sample_ok_count', 0)}/{gist_verify_res.get('sample_count', 0)} 个抽检节点可用")
         else:
-            gist_lines.append(f"<b>⚠️ 回拉验证失败</b>：<b>{gist_verify_res.get('sample_ok_count', 0)}</b>/<b>{gist_verify_res.get('sample_count', 0)}</b> 个抽检节点可用；<code>{html.escape(str(gist_verify_res.get('reason', '')))}</code>")
+            gist_lines.append(f"<b>⚠️ 回拉验证失败</b>：{gist_verify_res.get('sample_ok_count', 0)}/{gist_verify_res.get('sample_count', 0)} 个抽检节点可用；<code>{html.escape(str(gist_verify_res.get('reason', '')))}</code>")
         for _i, _l in enumerate(gist_lines):
             _c = '└─' if _i == len(gist_lines) - 1 else '├─'
             summary_lines.append(f'  {_c} {_l}')
     elif (gist_res.get('reason') or '').startswith('empty subscription'):
-        summary_lines.append(f'  └─ <b>⚠️ 达标不足 {min_nodes} 个</b> · <i>阈值 ≥{min_megabit}兆（按{html.escape(metric_label)}）· 未更新订阅</i>')
+        summary_lines.append(f'  └─ <b>⚠️ 达标不足 {min_nodes} 个</b> · 阈值 ≥{min_megabit}兆（按{html.escape(metric_label)}）· 未更新订阅')
     else:
         summary_lines.append(f"  └─ <b>⚠️ 上传失败</b>：<code>{html.escape(str(gist_res.get('reason', '')))}</code>")
     # 统一收尾区（收尾区与正文间固定一个空行；与 tg_add_footer 同形态同降级链）

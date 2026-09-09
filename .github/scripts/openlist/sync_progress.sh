@@ -22,17 +22,17 @@
 #
 # 每层的三种行在消息里的层级关系（缩进每层下沉 5 格 = 连接符 2 + "├─ " 3，
 # 保证下一层表头正好对齐本层树行文本列、视觉上挂在本层 🔄 活动行之下）:
-#   <b>📁 onedrive:0</b> · <i>280.790 GiB</i>      任务条目（按源端分组）
+#   📁 onedrive:0 · 280.790 GiB      任务条目（按源端分组）
 #     └─ wopan176Crypt/0                            目标端
 #        ▸ 📊 子目录：2/3 完成 | ✅1 ⏭️1 ⏳1         本层统计行（树型块的表头）
-#          ├─ ⏭️ archive · <i>477.281 MiB</i>       本层阶段树（🔄 行已置尾）
+#          ├─ ⏭️ archive · 477.281 MiB       本层阶段树（🔄 行已置尾）
 #          └─ 🔄 j-1024j-视频-pornhub-favorites
 #             ▸ 📦 文件批次拆分：15 批 / 1367 文件   下一层标签行（表头，无连接符）
 #             ▸ 📊 批次：1/15 | ✅0 ❌0              下一层统计行
 #               · 批次 1 巩固: 重启容器校验落盘真值   下一层细粒度状态（detail，注记不占树节点）
 #
 # 深度 0 扁平批次面板（任务根直接文件批次拆分，无子目录树；2026-08-30 层次重排）:
-#   <b>📁 onedrive:0/x</b> · <i>262.401 GiB</i>
+#   📁 onedrive:0/x · 262.401 GiB
 #     └─ wopan175/0/x                               目标端（唯一的 └─ 树行，无 detail 黏连）
 #        ▸ 📦 文件批次拆分：55 批 / 1367 文件        d0 标签行（无树连接符，▸ 前导）
 #            ▸ 📊 批次：48/55 | ✅0 ❌47 · 📄 …      d0 统计行
@@ -326,8 +326,8 @@ _progress_active_last() {
 
 # 任务列表分组渲染（进度通知专用）
 # 任务显示名为 "src → dst"，按源端分组展示，树形层级:
-#   <b>📁 src</b> · <i>源端大小</i>
-#     ├─ dst · <i>详情</i>
+#   📁 src · 源端大小
+#     ├─ dst · 详情
 #     └─ dst
 #   组间空一行分隔（首组前不加空行——tg_add_section 已带段前空行），
 #   条目经 tree_lines 加 ├─/└─ 连接符（telegram/tg_notify.sh）; 目标端 openlist: 前缀
@@ -351,7 +351,7 @@ _progress_render_task_list() {
     if [ -z "$_dst" ]; then
       # 条目主体用 <code>（裁决 2/4：非文件值也不得裸文本）
       _plain_entries+="<code>$(escape_html "$_src")</code>"
-      [ -n "$_tsize" ] && _plain_entries+=" · <i>$(escape_html "$_tsize")</i>"
+      [ -n "$_tsize" ] && _plain_entries+=" · $(escape_html "$_tsize")"
       _plain_entries+=$'\n'
       continue
     fi
@@ -362,7 +362,7 @@ _progress_render_task_list() {
     fi
     local _entry
     _entry="<code>$(escape_html "$_dst")</code>"
-    [ -n "$_tdetail" ] && _entry+=" · <i>$(escape_html "$_tdetail")</i>"
+    [ -n "$_tdetail" ] && _entry+=" · $(escape_html "$_tdetail")"
     _grp[$_src]+="${_entry}"$'\n'
   done <<< "$lines"
   local _out="" _src _gi=0
@@ -370,7 +370,7 @@ _progress_render_task_list() {
     # 组间空一行
     [ "$_gi" -gt 0 ] && _out+=$'\n'
     _out+="<b>📁 $(escape_html "$_src")</b>"
-    [ -n "${_grp_size[$_src]:-}" ] && _out+=" · <i>$(escape_html "${_grp_size[$_src]}")</i>"
+    [ -n "${_grp_size[$_src]:-}" ] && _out+=" · $(escape_html "${_grp_size[$_src]}")"
     _out+=$'\n'"$(tree_lines "${_grp[$_src]}")"$'\n'
     _gi=$((_gi + 1))
   done
@@ -471,7 +471,7 @@ _progress_render() {
   tg_add_title msg "$title"
   [ -n "$subtitle" ] && tg_add_kv msg "状态" "$subtitle"
   # 计数行字段图标同样入 <b>（规范 §2 裁决 7：emoji 一律在 <b> 内，无例外）
-  tg_append msg "<b>📊 总 ${total}</b> · 待处理 <b>${pending}</b> · 进行中 <b>${running}</b> · 完成 <b>${completed}</b> · 跳过 <b>${skipped}</b> · 失败 <b>${failed}</b>"$'\n'
+  tg_append msg "<b>📊 总 ${total}</b> · 待处理 ${pending} · 进行中 ${running} · 完成 ${completed} · 跳过 ${skipped} · 失败 ${failed}"$'\n'
 
   # 进行中任务块: 任务条目（分组渲染）+ 多层级阶段行/统计信息/细粒度状态
   #   各拆分深度槽位逐层下沉合并：深度 0 的块挂在任务条目下，

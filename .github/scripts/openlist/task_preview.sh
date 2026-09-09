@@ -213,7 +213,7 @@ add_preview_pair() {
   local sync_count=$((new_count + upd_count))
   local fixed_note=""
   if [ "$fixed_hit_count" -gt 0 ]; then
-    fixed_note=" · <i>已扣减 ${fixed_hit_count} 个修复文件 / $(format_bytes "$fixed_hit_bytes")</i>"
+    fixed_note=" · 已扣减 ${fixed_hit_count} 个修复文件 / $(format_bytes "$fixed_hit_bytes")"
   fi
 
   PREVIEW_TOTAL_SYNC_BYTES=$((PREVIEW_TOTAL_SYNC_BYTES + sync_bytes))
@@ -240,11 +240,11 @@ add_preview_pair() {
 }
 
 # 同步对详情渲染: 仅按源端分组（同源端多目标一组的树形列表）
-#   📁 <code>src</code> · <i>源端 X / N 文件</i>        ← 组内各条目源端大小一致时上提组头
-#     ├─ <code>dst</code> · <i>源端 X / N 文件</i> · <b>+Y / +K 文件</b>
+#   📁 <code>src</code> · 源端 X / N 文件        ← 组内各条目源端大小一致时上提组头
+#     ├─ <code>dst</code> · 源端 X / N 文件 · <b>+Y / +K 文件</b>
 #     │   差异构成：新增 a · 同名更新 b                  ← 存在同名更新时的说明子行
 #     │   排除：<code>pat</code>                          ← 有排除规则的条目子行
-#     └─ <code>dst</code> · <i>无变动</i>
+#     └─ <code>dst</code> · 无变动
 #   组内源端大小不一（如部分目标带排除规则）时组头不带大小、各条目单独标注，
 #   避免同一源端因排除规则不同而分裂成多组; 组间空一行分隔。
 # 用法: _preview_render_pairs_detail [task_name]
@@ -281,11 +281,11 @@ _preview_render_pairs_detail() {
     # 目标端 openlist: 前缀冗余（与进度通知一致），统一裁剪
     local _entry="<code>$(escape_html "${_dst#openlist:}")</code>"
     # 源端大小未上提组头时在条目行标注
-    [ -z "${_g_size[$_src]}" ] && _entry+=" · <i>源端 $(format_bytes "$_sbytes") / ${_scount} 文件</i>"
+    [ -z "${_g_size[$_src]}" ] && _entry+=" · 源端 $(format_bytes "$_sbytes") / ${_scount} 文件"
     if [ "$_ybytes" -gt 0 ] || [ "$_ycount" -gt 0 ]; then
-      _entry+=" · <b>+$(format_bytes "$_ybytes") / +${_ycount} 文件</b>"
+      _entry+=" · +$(format_bytes "$_ybytes") / +${_ycount} 文件"
     else
-      _entry+=" · <i>无变动</i>"
+      _entry+=" · 无变动"
     fi
     _g_block[$_src]+="$(tree_conn "$_last")${_entry}"$'\n'
     local _sub
@@ -326,7 +326,7 @@ _preview_render_pairs_detail() {
     # 预计跳过: 差异照算但不传，必须贴在条目下（否则 "有待同步却没传" 像 bug）
     if [ "${_pskip:-0}" != "0" ] && [ "${_pskip:-}" != "-" ]; then
       local _since="${_pskip##*|}"
-      _g_block[$_src]+="${_sub}⏭️ 上次成功距今 ${_since} 小时，仍在跳过窗口内 · <i>本轮预计跳过</i>"$'\n'
+      _g_block[$_src]+="${_sub}⏭️ 上次成功距今 ${_since} 小时，仍在跳过窗口内 · 本轮预计跳过"$'\n'
     fi
   done <<< "$PREVIEW_PAIRS_TSV"
   # 组装: 组头 + 树形条目块，组间空一行（首组前不加——tg_add_section 已带段前空行）
@@ -336,7 +336,7 @@ _preview_render_pairs_detail() {
     [ "$_gi" -gt 0 ] && _out+=$'\n'
     _out+="<b>📁 $(escape_html "$_src")</b>"
     if [ -n "${_g_size[$_src]}" ]; then
-      _out+=" · <i>源端 $(format_bytes "${_g_size[$_src]%%|*}") / ${_g_size[$_src]##*|} 文件</i>"
+      _out+=" · 源端 $(format_bytes "${_g_size[$_src]%%|*}") / ${_g_size[$_src]##*|} 文件"
     fi
     _out+=$'\n'"${_g_block[$_src]%$'\n'}"$'\n'
     _gi=$((_gi + 1))
@@ -408,14 +408,14 @@ flush_task_preview() {
       local _real_b=$((_sb - _skb)) _real_c=$((_sc - _skc))
       [ "$_real_b" -lt 0 ] && _real_b=0
       [ "$_real_c" -lt 0 ] && _real_c=0
-      _skip_note=$'\n'"<b>⏭️ 本轮预计跳过</b>：<b>$(format_bytes "$_skb")</b> / <b>${_skc}</b> 文件 · 预计实际传输 <b>$(format_bytes "$_real_b")</b> / <b>${_real_c}</b> 文件"
+      _skip_note=$'\n'"<b>⏭️ 本轮预计跳过</b>：$(format_bytes "$_skb") / ${_skc} 文件 · 预计实际传输 $(format_bytes "$_real_b") / ${_real_c} 文件"
     fi
 
     local msg=""
     tg_add_title msg "📋 任务预览 · ${PREVIEW_TASK_NAME}"
     tg_add_section msg "📊 同步对 · ${PREVIEW_PAIR_COUNT}"
     tg_append msg "$(_preview_render_pairs_detail "$_t")"
-    tg_append msg $'\n\n'"📦 合计预估待同步：<b>$(format_bytes "$PREVIEW_TOTAL_SYNC_BYTES")</b> / <b>${PREVIEW_TOTAL_SYNC_COUNT}</b> 文件${_total_note}${_fail_note}${_skip_note}"
+    tg_append msg $'\n\n'"📦 合计预估待同步：$(format_bytes "$PREVIEW_TOTAL_SYNC_BYTES") / ${PREVIEW_TOTAL_SYNC_COUNT} 文件${_total_note}${_fail_note}${_skip_note}"
     tg_add_footer msg
 
     send_telegram_message "$msg"

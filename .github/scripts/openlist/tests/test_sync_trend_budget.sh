@@ -23,7 +23,7 @@ send_telegram_message() { TG_SENT+=("$1"); return 0; }
 tg_add_title() { local -n m=$1; m+="<t>${2}</t>"; }
 tg_add_section() { local -n m=$1; m+="<s>${2}</s>"; }
 tg_add_kv() { local -n m=$1; m+="<kv>${2}=${3}</kv>"; }
-tg_add_block() { local -n m=$1; m+="<b>${2}</b>"; }
+tg_add_block() { local -n m=$1; m+="${2}"; }
 tg_add_footer() { local -n m=$1; m+="<f>"; }
 
 # rclone 桩: 远端目录模拟 onedrive:/logs/sync_state/（文件名必须与

@@ -272,7 +272,7 @@ _preview_register() {
 #   ✅ a · 4 GiB
 #   🔄 b · 17 GiB
 # 不再带 "📁 源端 X" 首行: 源端大小已由进度消息的任务分组头
-# （"<b>📁 onedrive:0</b> · <i>280.790 GiB</i>"）给出，重复一遍只占一行；
+# （"📁 onedrive:0 · 280.790 GiB"）给出，重复一遍只占一行；
 # 且它不带状态 emoji，与本层统计行（▸ 📊 子目录：x/y）同为表头，
 # 会让紧随其后的子目录行看起来与它是同级而非从属。
 _render_subdir_phase_tree() {
@@ -351,25 +351,25 @@ _sync_par_consume() {
     skipped)
       skipped_subtasks=$((skipped_subtasks + 1))
       subdir_status_map["$_subdir"]="skipped"
-      skipped_list+="<code>$(escape_html "$_subdir")</code> · <i>$(format_bytes "${subdir_size_map[$_subdir]:-0}")</i>"$'\n'
+      skipped_list+="<code>$(escape_html "$_subdir")</code> · $(format_bytes "${subdir_size_map[$_subdir]:-0}")"$'\n'
       ;;
     synced)
       synced_subtasks=$((synced_subtasks + 1))
       subdir_status_map["$_subdir"]="synced"
       total_transferred=$((total_transferred + _tr))
-      synced_list+="<code>$(escape_html "$_subdir")</code> · <i>$(format_bytes "${subdir_size_map[$_subdir]:-0}")</i>"$'\n'
+      synced_list+="<code>$(escape_html "$_subdir")</code> · $(format_bytes "${subdir_size_map[$_subdir]:-0}")"$'\n'
       ;;
     partial)
       partial_subtasks=$((partial_subtasks + 1))
       failed_subtasks=$((failed_subtasks + 1))
       subdir_status_map["$_subdir"]="partial"
       total_transferred=$((total_transferred + _tr))
-      failed_list+="<code>$(escape_html "$_subdir")</code> · <i>$(format_bytes "${subdir_size_map[$_subdir]:-0}")</i> · <b>部分失败</b>"$'\n'
+      failed_list+="<code>$(escape_html "$_subdir")</code> · $(format_bytes "${subdir_size_map[$_subdir]:-0}") · 部分失败"$'\n'
       ;;
     *)
       failed_subtasks=$((failed_subtasks + 1))
       subdir_status_map["$_subdir"]="failed"
-      failed_list+="<code>$(escape_html "$_subdir")</code> · <i>$(format_bytes "${subdir_size_map[$_subdir]:-0}")</i>"$'\n'
+      failed_list+="<code>$(escape_html "$_subdir")</code> · $(format_bytes "${subdir_size_map[$_subdir]:-0}")"$'\n'
       ;;
   esac
   # 修复累计器合并: fixed_files 是数组（拼接），fix_blacklist 是对象
@@ -417,7 +417,7 @@ _sync_par_reap_one() {
         echo "⚠️ 并行子目录 worker 异常退出（无结果文件），按失败计: ${_sub}"
         failed_subtasks=$((failed_subtasks + 1))
         subdir_status_map["$_sub"]="failed"
-        failed_list+="<code>$(escape_html "$_sub")</code> · <i>worker 崩溃</i>"$'\n'
+        failed_list+="<code>$(escape_html "$_sub")</code> · worker 崩溃"$'\n'
         _sync_par_render
         return 0
       fi
@@ -787,12 +787,12 @@ _sync_task_impl() {
     if [ "$SYNC_SKIPPED" = "1" ]; then
       skipped_subtasks=$((skipped_subtasks + 1))
       subdir_status_map["$subdir"]="skipped"
-      skipped_list+="<code>$(escape_html "$subdir")</code> · <i>$(format_bytes "${subdir_size_map[$subdir]:-0}")</i>"$'\n'
+      skipped_list+="<code>$(escape_html "$subdir")</code> · $(format_bytes "${subdir_size_map[$subdir]:-0}")"$'\n'
     elif [ "$SYNC_FAILED" = "0" ]; then
       synced_subtasks=$((synced_subtasks + 1))
       subdir_status_map["$subdir"]="synced"
       total_transferred=$((total_transferred + SYNC_TRANSFERRED_BYTES))
-      synced_list+="<code>$(escape_html "$subdir")</code> · <i>$(format_bytes "${subdir_size_map[$subdir]:-0}")</i>"$'\n'
+      synced_list+="<code>$(escape_html "$subdir")</code> · $(format_bytes "${subdir_size_map[$subdir]:-0}")"$'\n'
     else
       failed_subtasks=$((failed_subtasks + 1))
       if [ "${SYNC_PARTIAL:-0}" = "1" ]; then
@@ -803,7 +803,7 @@ _sync_task_impl() {
         subdir_status_map["$subdir"]="failed"
       fi
       total_transferred=$((total_transferred + SYNC_TRANSFERRED_BYTES))
-      failed_list+="<code>$(escape_html "$subdir")</code> · <i>$(format_bytes "${subdir_size_map[$subdir]:-0}")</i>$([ "${subdir_status_map[$subdir]}" = partial ] && echo ' · <b>部分失败</b>')"$'\n'
+      failed_list+="<code>$(escape_html "$subdir")</code> · $(format_bytes "${subdir_size_map[$subdir]:-0}")$([ "${subdir_status_map[$subdir]}" = partial ] && echo ' · 部分失败')"$'\n'
     fi
     PROGRESS_PHASE_INFO="$(_render_subdir_phase_tree)"
     local _completed_after=$((synced_subtasks + skipped_subtasks + failed_subtasks))
@@ -818,9 +818,9 @@ _sync_task_impl() {
   tg_add_section AUTO_SPLIT_INFO "🔀 子任务拆分统计"
   tg_add_kv AUTO_SPLIT_INFO "总子目录" "${total_subtasks}"
   tg_add_kv AUTO_SPLIT_INFO "传输总量" "$(format_bytes "$total_transferred")"
-  local _counts="<b>✅ ${synced_subtasks}</b> · <b>❌ ${failed_subtasks}</b>"
-  [ "$partial_subtasks" -gt 0 ] && _counts+=" · <b>⚠️ ${partial_subtasks}</b>"
-  _counts+=" · <b>⏭️ ${skipped_subtasks}</b>"
+  local _counts="✅ ${synced_subtasks} · ❌ ${failed_subtasks}"
+  [ "$partial_subtasks" -gt 0 ] && _counts+=" · ⚠️ ${partial_subtasks}"
+  _counts+=" · ⏭️ ${skipped_subtasks}"
   tg_add_block AUTO_SPLIT_INFO "${_counts}"
   if [ -n "$synced_list" ]; then
     tg_add_section AUTO_SPLIT_INFO "✅ 已同步的子目录"
@@ -833,7 +833,7 @@ _sync_task_impl() {
   if [ -n "$skipped_list" ]; then
     tg_add_section AUTO_SPLIT_INFO "⏭️ 已跳过的子目录"
     tg_add_block AUTO_SPLIT_INFO "$(tree_lines "$skipped_list")
-<i>无文件变动</i>"
+无文件变动"
   fi
 
   # 最终完整同步（仅在顶层执行，正常通知）
@@ -1497,7 +1497,7 @@ sync_by_file_batches() {
           tg_add_section AUTO_SPLIT_INFO "🔀 文件批次拆分统计"
           tg_add_kv AUTO_SPLIT_INFO "总批次" "${total_batches}"
           tg_add_kv AUTO_SPLIT_INFO "文件数" "${batch_total_files}"
-          tg_add_block AUTO_SPLIT_INFO "<b>✅ ${synced_batches}</b> · <b>❌ ${failed_batches}</b> <i>批次预检熔断中止</i>"
+          tg_add_block AUTO_SPLIT_INFO "✅ ${synced_batches} · ❌ ${failed_batches} 批次预检熔断中止"
           progress_update_force "批次预检未通过，中止同步" "▸ 📊 批次：${batch_idx}/${total_batches} · ✅${synced_batches} ❌${failed_batches}"
           # 失败状态必须随全局标志传递（与本函数开头 skip 分支置 SYNC_SKIPPED
           # 的惯例一致）: 下游 progress_task_done 状态映射与轮转游标都只认 SYNC_FAILED，
@@ -1553,8 +1553,8 @@ sync_by_file_batches() {
       else
         failed_batches=$((failed_batches + 1))
         # 英文 token 不直出通知（规范 §4）: exit=N 改写为中文说明
-        # 条目主体（中文说明）→ <b>，元数据（文件数/退出码）→ · <i>（语义表 #4/#5，禁裸文本）
-        failed_batch_list+="<b>批次 $((i+1))/${total_batches}</b> · <i>${batch_file_count} 文件</i> · <i>传输退出码 ${rc}</i>"$'\n'
+        # 条目主体（中文说明）→ <b>，元数据（文件数/退出码）→ · （语义表 #4/#5，禁裸文本）
+        failed_batch_list+="<b>批次 $((i+1))/${total_batches}</b> · ${batch_file_count} 文件 · 传输退出码 ${rc}"$'\n'
         echo "批次 $((i+1)) 失败 (exit=${rc})"
       fi
 
@@ -1591,7 +1591,7 @@ sync_by_file_batches() {
         tg_add_section AUTO_SPLIT_INFO "🔀 文件批次拆分统计"
         tg_add_kv AUTO_SPLIT_INFO "总批次" "${total_batches}"
         tg_add_kv AUTO_SPLIT_INFO "文件数" "${batch_total_files}"
-        tg_add_block AUTO_SPLIT_INFO "<b>✅ ${synced_batches}</b> · <b>❌ ${failed_batches}</b> <i>后端写入全拒中止</i>"
+        tg_add_block AUTO_SPLIT_INFO "✅ ${synced_batches} · ❌ ${failed_batches} 后端写入全拒中止"
         progress_update_force "后端写入全拒，中止同步" "$(_render_batch_stats_line)"
         # 同预检熔断出口: 失败状态经 SYNC_FAILED 全局标志传递（见上注释）
         SYNC_FAILED=1
@@ -1655,7 +1655,7 @@ sync_by_file_batches() {
   tg_add_section AUTO_SPLIT_INFO "🔀 文件批次拆分统计"
   tg_add_kv AUTO_SPLIT_INFO "总批次" "${total_batches}"
   tg_add_kv AUTO_SPLIT_INFO "文件数" "${batch_total_files}"
-  tg_add_block AUTO_SPLIT_INFO "<b>✅ ${synced_batches}</b> · <b>❌ ${failed_batches}</b>"
+  tg_add_block AUTO_SPLIT_INFO "✅ ${synced_batches} · ❌ ${failed_batches}"
   if [ -n "$failed_batch_list" ]; then
     tg_add_section AUTO_SPLIT_INFO "❌ 失败的批次"
     tg_add_block AUTO_SPLIT_INFO "$(tree_lines "$failed_batch_list")"

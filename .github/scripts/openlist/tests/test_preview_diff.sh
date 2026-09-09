@@ -113,7 +113,7 @@ IFS=$'\t' read -r _task _src _excl _sb _sc _dst _yb _yc _yn _yu _fn _df _ps <<< 
 [ "$_sb" = "1350" ] && [ "$_sc" = "5" ] && ok "1e 源端总量 1350 B / 5 文件" || bad "1e: [$_sb/$_sc]"
 [ "$_yb" = "900" ] && [ "$_yc" = "2" ] && ok "1f 条目待同步 900 B / 2 文件" || bad "1f: [$_yb/$_yc]"
 [ "$_yn" = "1" ] && [ "$_yu" = "1" ] && ok "1g 条目构成 新增1/更新1" || bad "1g: [$_yn/$_yu]"
-[ "$_fn" = " · <i>已扣减 1 个修复文件 / 300 B</i>" ] && ok "1h 修复扣减注记（仅剔除命中差异的 fixed1.bin）" || bad "1h: [$_fn]"
+[ "$_fn" = " · 已扣减 1 个修复文件 / 300 B" ] && ok "1h 修复扣减注记（仅剔除命中差异的 fixed1.bin）" || bad "1h: [$_fn]"
 [ "$_df" = "0" ] && ok "1i dfail 字段 = 0（目标端列举正常）" || bad "1i: [$_df]"
 [ "$_ps" = "0" ] && ok "1i2 pskip 字段 = 0（未开启 --Nd-skip 时不预判跳过）" || bad "1i2: [$_ps]"
 
@@ -124,7 +124,7 @@ echo "$SEND_CAPTURE" | grep -q '排除：<code>notion/\*\*</code>' \
 echo "$SEND_CAPTURE" | grep -q '差异构成：新增 1 · 同名更新 1' && ok "1j 渲染差异构成子行" || bad "1j"
 echo "$SEND_CAPTURE" | grep -q '+900 B / +2 文件' && ok "1k 条目行 +900 B / +2 文件" || bad "1k: $SEND_CAPTURE"
 echo "$SEND_CAPTURE" | grep -q '已扣减 1 个修复文件 / 300 B' && ok "1l 渲染修复扣减子行" || bad "1l"
-echo "$SEND_CAPTURE" | grep -q '合计预估待同步：<b>900 B</b> / <b>2</b> 文件 · 新增 1 · 同名更新 1' \
+echo "$SEND_CAPTURE" | grep -q '合计预估待同步：900 B / 2 文件 · 新增 1 · 同名更新 1' \
   && ok "1m 合计行含构成附注（\" · \" 分隔）" || bad "1m: $SEND_CAPTURE"
 [ "$(lsjson_call_count)" = "2" ] && ok "1n 源/目标各列一次（2 次 lsjson）" || bad "1n: [$(lsjson_call_count)]"
 

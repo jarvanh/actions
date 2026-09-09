@@ -613,7 +613,7 @@ document.getElementById('meta-sub').textContent=
 const top5=RESULTS.filter(r=>get(r,'download.mibps')!=null)
   .sort((a,b)=>get(b,'download.mibps')-get(a,'download.mibps')).slice(0,5);
 document.getElementById('top5').innerHTML=top5.length?top5.map(r=>
-  '<div class="chip">'+escapeHtml(r.name)+' <b>'+get(r,'download.mibps')+'</b> MiB/s</div>').join('')
+  '<div class="chip">'+escapeHtml(r.name)+' '+get(r,'download.mibps')+' MiB/s</div>').join('')
   :'<span class="tip">无可用的下载测速结果</span>';
 
 // 订阅链接（Gist）
@@ -986,8 +986,8 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None):
     lines = [
         f'<b>{_title_emoji} CDN 测速完成</b>',
         sep,
-        f'🕒 起止：{esc(started)} ~ {esc(ended)} · 耗时 <b>{esc(duration_text)}</b>',
-        f'📊 节点：共 <b>{len(results)}</b> 个 · 可用 <b>{len(ok_results)}</b> 个',
+        f'🕒 起止：{esc(started)} ~ {esc(ended)} · 耗时 {esc(duration_text)}',
+        f'📊 节点：共 {len(results)} 个 · 可用 {len(ok_results)} 个',
         '',
     ]
     # 测速点（下载镜像/软件源）的网络归属：域名 → 解析 IP → ipwho.is 查 ISP/ASN/位置；
@@ -1008,14 +1008,14 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None):
         legend = '↑上传 · ↓下载 · 延迟ms' if has_up else '↓下载 · 延迟ms'
         # 标题点出排序依据（= 订阅判定指标），避免与列表数值对不上
         sort_hint = f' · 按{esc(metric_label)}' if metric_label else ''
-        lines.append(f'<b>🏆 最快节点 · {len(top)}{sort_hint}</b> · <i>{legend}</i>')
+        lines.append(f'<b>🏆 最快节点 · {len(top)}{sort_hint}</b> · {legend}')
         for idx, r in enumerate(top, 1):
             prefix = build_node_metric_prefix(_result_metric_item(r), mode, order='up_first')
             connector = '└─' if idx == len(top) else '├─'
             # 条目不编号（裁决 6）：顺序即名次
             item = f'  {connector} <code>{esc(r.get("name", ""))}</code>'
             if prefix:
-                item += f' · <i>{esc(prefix)}</i>'
+                item += f' · {esc(prefix)}'
             lines.append(item)
         lines.append('')
     else:
@@ -1029,7 +1029,7 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None):
         # HTML 报告只写在运行机本地（含节点凭据，不外传），故无可分享链接。
         raw_url = ((gist_res.get('yaml') or {}).get('raw_url') or '').strip()
         html_url = (gist_res.get('html_url') or '').strip()
-        gist_lines = [f'<b>✅ 已{action}，达标 {qualified_count} 个节点</b> · <i>≥{min_megabit}兆（按{esc(metric_label)}）</i>']
+        gist_lines = [f'<b>✅ 已{action}，达标 {qualified_count} 个节点</b> · ≥{min_megabit}兆（按{esc(metric_label)}）']
         if raw_url:
             gist_lines.append(f'🔗 <a href="{esc(raw_url)}">订阅源 YAML</a>')
         elif html_url:
@@ -1040,7 +1040,7 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None):
     elif gist_res:
         lines.append(f"  └─ <b>⚠️ 上传失败</b>：<code>{esc(gist_res.get('reason', ''))}</code>")
     else:
-        lines.append(f'  └─ <b>⚠️ 达标不足 {min_nodes} 个</b> · <i>阈值 ≥{min_megabit}兆（按{esc(metric_label)}）· 未更新订阅</i>')
+        lines.append(f'  └─ <b>⚠️ 达标不足 {min_nodes} 个</b> · 阈值 ≥{min_megabit}兆（按{esc(metric_label)}）· 未更新订阅')
 
     # 统一收尾区（收尾区与正文间固定一个空行；与 tg_add_footer 同形态同降级链）
     # 注: 正文的「耗时 X」是测速自身耗时，收尾区的「已运行 X」是 run 已运行时长，两者语义不同

@@ -1105,10 +1105,10 @@ jobs:
             if [ "$type" = "Episode" ] && [ -n "$series" ]; then
               # emoji 一律在 <b> 内（规范 §2 标签语义表裁决 7）
               title="<b>🎬 $(escape_html "$series")</b>"
-              [ -n "$se" ] && title="${title} <i>${se}</i>"
+              [ -n "$se" ] && title="${title} ${se}"
             else
               title="<b>🎬 $(escape_html "${n:-未知}")</b>"
-              [ -n "$year" ] && title="${title} <i>(${year})</i>"
+              [ -n "$year" ] && title="${title} (${year})"
             fi
 
             # 第 2 行：规格（集名 / 类型 / 时长 / 分辨率 / 编码 / 体积）
@@ -1124,12 +1124,12 @@ jobs:
               "$(fmt_size "$size_b")")
 
             # 第 3 行：链路。302 时把直链剩余有效期说清楚——链接不是永久的
-            # emoji 入 <b>，剩余有效期是元数据 → · <i>（规范 §2 裁决 7 + 语义表 #5）
+            # emoji 入 <b>，剩余有效期是元数据 → · （规范 §2 裁决 7 + 语义表 #5）
             if [ "$kind" = "302直链" ]; then
               l3="<b>⚡ 302直连 OneDrive</b>"
               case "$remain_s" in
                 ''|*[!0-9]*) ;;
-                *) [ "$remain_s" -gt 0 ] && l3="${l3} · <i>直链剩余 $(( (remain_s + 59) / 60 )) 分钟</i>";;
+                *) [ "$remain_s" -gt 0 ] && l3="${l3} · 直链剩余 $(( (remain_s + 59) / 60 )) 分钟";;
               esac
             else
               l3="<b>🔁 视频流经 runner 中转到网盘</b>"
@@ -1181,9 +1181,9 @@ jobs:
             [ -n "$seek" ] && waitline="${waitline}拖动进度条（Emby → OneDrive 重取直链）：$(fmt_ms "$seek")"$'\n'
             if [ -n "$waitline" ]; then
               # 末项固定交代"还有一段测不到"，避免把上面几项加起来当成总共等了多久。
-              # 形态按规范 §2 语义表 #5：末条主体后接 " · <i>备注</i>"，并入条目流由
+              # 形态按规范 §2 语义表 #5：末条主体后接 " · 备注"，并入条目流由
               # tree_lines 统一决定末条（§2.3）。不写成全角冒号 kv —— 值位不得斜体（裁决 1）。
-              waitline="${waitline}你 → OneDrive 拉流缓冲 · <i>这段服务器测不到</i>"$'\n'
+              waitline="${waitline}你 → OneDrive 拉流缓冲 · 这段服务器测不到"$'\n'
               # tree_lines 只调用一次：重复调用会把已带 "  ├─/└─" 前缀的行再前缀一层。
               # （此前这里有两个 if，第二个恒真 → 产出 "  ├─   ├─" 双层树 + 标题行重复）
               waitline="$(tree_lines "$waitline")"
@@ -1192,10 +1192,10 @@ jobs:
             # 日志侧只记片名（公开仓库，绝不落直链）；TG 私密消息里才附带直链
             echo "🎬 播放 [$kind] ${n:-未知} (item $iid)"
             text="${title}"$'\n'"${TG_SEP}"
-            # kv 值加粗（语义表 #2：结论值 → <b>）；链路行 l3 已自带 <b>
-            [ -n "$meta" ] && text="${text}"$'\n'"规格：<b>${meta}</b>"
+            # kv 值不再加粗（结论值/状态/计数/数值一律裸文本 + 转义）
+            [ -n "$meta" ] && text="${text}"$'\n'"规格：${meta}"
             text="${text}"$'\n'"链路：${l3}"
-            [ -n "$client" ] && text="${text}"$'\n'"客户端：<b>${client}</b>"
+            [ -n "$client" ] && text="${text}"$'\n'"客户端：${client}"
             # 分节标题交给 tg_add_section：emoji 入 <b>（规范 §2 裁决 7）、段前空行自动补全。
             # waitline 只含树形条目，不要再自带"⏳ 起播等待"标题行，也不要再套"等待："标签
             if [ -n "$waitline" ]; then

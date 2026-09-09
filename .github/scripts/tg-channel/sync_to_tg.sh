@@ -125,12 +125,13 @@ def build_fail_notify(title: str, file: str, elapsed: float, lines: list):
     """
     parts = [
         # 标题 = emoji + 短语加粗（规范 §2；此前未加粗与 tg_add_title 版式漂移）
+        # 标题（emoji + 短语）入 <b>：值/计数才无标签
         f"<b>{esc(title)}</b>",
         TG_SEP,
         # 文件名属机器值 → <code>；emoji 入 <b>（规范 §2 语义表 #3 + 裁决 7）
         f"<b>📁</b> <code>{esc(shorten_name(os.path.basename(file)))}</code>",
-        f"<b>📦 分组</b>：<b>{esc(CAPTION_PREFIX)}</b>",
-        f"<b>耗时</b>：<b>{fmt_secs(elapsed)}</b>",
+        f"<b>📦 分组</b>：{esc(CAPTION_PREFIX)}",
+        f"<b>耗时</b>：{fmt_secs(elapsed)}",
     ]
     parts.extend(lines)
     return "\n".join(parts)
@@ -306,8 +307,8 @@ def get_video_list():
         notify("\n".join([
             "<b>❌ 获取远端文件列表失败</b>",
             TG_SEP,
-            f"<b>📦 分组</b>：<b>{esc(CAPTION_PREFIX)}</b>",
-            f"<b>⚠️ 原因</b>：<b>rclone lsjson 退出码 {result.returncode}</b>",
+            f"<b>📦 分组</b>：{esc(CAPTION_PREFIX)}",
+            f"<b>⚠️ 原因</b>：rclone lsjson 退出码 {result.returncode}",
             "<b>📄 stderr 见 Actions 日志</b>",
         ]))
         return [], []
@@ -444,7 +445,7 @@ def main():
                 "❌ 下载失败",
                 file, dl_elapsed,
                 [
-                    f"<b>📦 大小</b>：<b>{human_size(size)}</b>",
+                    f"<b>📦 大小</b>：{human_size(size)}",
                     "📄 rclone stderr：\n" + esc(result.stderr[-500:].strip() if result.stderr else "(无错误输出)"),
                 ],
             ))
@@ -523,8 +524,8 @@ def main():
                     "⏭️ 损坏视频已标记跳过",
                     file, up_elapsed,
                     [
-                        "<b>⚠️ 原因</b>：<b>源文件损坏，无法读取视频信息（moov atom 缺失）</b>",
-                        "<b>🔄 后续</b>：<b>不再重复尝试，远端文件被替换后自动重试</b>",
+                        "<b>⚠️ 原因</b>：源文件损坏，无法读取视频信息（moov atom 缺失）",
+                        "<b>🔄 后续</b>：不再重复尝试，远端文件被替换后自动重试",
                     ],
                 ))
             else:
@@ -623,8 +624,8 @@ esc_lines() {
 }
 
 # 已上传/失败条目渲染: 每行 "文件名\t备注"（python 侧产出）→ 树形
-# "  ├─ <code>文件名</code> · <i>备注</i>"。
-# 与 _render_skipped_groups 同款标签（条目主体文件类 <code>、元数据 · <i>）——此前这两个
+# "  ├─ <code>文件名</code> · 备注"。
+# 与 _render_skipped_groups 同款标签（条目主体文件类 <code>、元数据 · ）——此前这两个
 # 列表整行只转义不加标签，与同通知内的跳过明细两种条目风格并存（规范 §2 语义表 #4/#5）
 _render_named_entries() {
   local _in="$1" _name _meta _out=""
@@ -632,7 +633,7 @@ _render_named_entries() {
   while IFS=$'\t' read -r _name _meta; do
     [ -z "$_name" ] && continue
     _out+="<code>$(escape_html "$_name")</code>"
-    [ -n "$_meta" ] && _out+=" · <i>$(escape_html "$_meta")</i>"
+    [ -n "$_meta" ] && _out+=" · $(escape_html "$_meta")"
     _out+=$'\n'
   done <<< "$_in"
   [ -z "$_out" ] && return 0
@@ -650,7 +651,7 @@ _render_skipped_groups() {
     _items=$(printf '%s\n' "$_in" | awk -F'\t' -v g="$_g" '$1==g {print $2}')
     _total=$(printf '%s\n' "$_items" | grep -c . || true)
     [ "${_total:-0}" -le 0 ] && continue
-    _out+="<b>$(escape_html "$_g")</b> · ${_total}"$'\n'
+    _out+="$(escape_html "$_g") · ${_total}"$'\n'
     # 条目先转义成 HTML 再交给 tree_lines（它接收参数、不读 stdin）。
     # "还有 N 条…" 并入条目流作末条 —— 否则会出现双 └─ 同级、层次混淆
     local _entries=""
@@ -659,7 +660,7 @@ _render_skipped_groups() {
       _entries+="<code>$(escape_html "$(basename "$_p")")</code>"$'\n'
     done < <(printf '%s\n' "$_items" | head -n "$_max")
     if [ "$_total" -gt "$_max" ]; then
-      _entries+="<i>还有 $((_total - _max)) 条…</i>"$'\n'
+      _entries+="还有 $((_total - _max)) 条…"$'\n'
     fi
     _out+="$(tree_lines "$_entries")"$'\n'
   done < <(printf '%s\n' "$_in" | cut -f1 | uniq)

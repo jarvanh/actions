@@ -46,7 +46,7 @@ function Get-TgFooter {
     } catch { }
   }
   $footer = ""
-  if ($dur) { $footer = "⏱ 已运行 <b>$dur</b>" }
+  if ($dur) { $footer = "⏱ 已运行 $dur" }
   if ($Env:TG_RUN_URL) {
     if ($footer) { $footer += " · " }
     $footer += "🔗 <a href=""$(Esc-Html $Env:TG_RUN_URL)"">运行日志</a>"

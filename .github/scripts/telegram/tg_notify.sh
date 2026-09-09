@@ -21,11 +21,11 @@
 # 版式规范（openlist 侧经 load_all.sh L0 层 source 本文件，不再自带副本）:
 #   {emoji} <b>标题</b>          ← tg_add_title
 #   ━━━━━━━━━━━━━━━━━━           ← TG_SEP（勿手写分隔线）
-#   标签：<b>值</b>               ← tg_add_kv / 路径 tg_add_path
+#   标签：值               ← tg_add_kv / 路径 tg_add_path
 #   {emoji} <b>分节 · N</b>       ← tg_add_section（段前空行，紧跟标题时无；列表分节计数一律 " · N"）
 #   ├─/└─ 树形条目               ← 唯一条目前缀（tree_lines / tree_code_fold，无平铺形态）
 #   <pre>日志</pre>              ← tg_add_block
-#   {可选 <i>备注</i>}            ← tg_add_note
+#   {可选 备注}            ← tg_add_note
 #   （空行）⏱ 已运行 X · 🔗 运行日志 ← tg_add_footer（全库唯一收尾形态，自带空行）
 # 函数:
 #   send_tg <text>                     单条发送（短消息用）
@@ -69,9 +69,10 @@ tg_add_title() {
   tg_append "$1" "<b>$(escape_html "$2")</b>"$'\n'"${TG_SEP}"$'\n'
 }
 
-# 键值行（值加粗）: "标签：<b>值</b>\n"
+# 键值行（值不再加粗，2026-09-09 拍板：结论值/状态/计数/数值一律裸文本加转义，
+# <b> 只留给标题/分节/组头/条目主体；标签后的全角冒号 + 空格已足够分隔）
 tg_add_kv() {
-  tg_append "$1" "$2：<b>$(escape_html "$3")</b>"$'\n'
+  tg_append "$1" "$2：$(escape_html "$3")"$'\n'
 }
 
 # 键值行（路径/版本/命令等宽展示）: "标签：<code>值</code>\n"
@@ -95,7 +96,7 @@ tg_add_section() {
   tg_append "$1" "<b>$(escape_html "$2")</b>"$'\n'
 }
 
-# 斜体说明（段前空一行）: "\n<i>说明</i>\n"
+# 说明段（段前空一行；不再套 ，2026-09-09 全库去掉斜体标签）
 # 段前空行的例外与 tg_add_section 完全一致（紧跟分隔线 / 空消息不补；正文无尾换行先补）
 tg_add_note() {
   case "${!1}" in
@@ -103,7 +104,7 @@ tg_add_note() {
     *$'\n') tg_append "$1" $'\n' ;;
     *) tg_append "$1" $'\n'$'\n' ;;
   esac
-  tg_append "$1" "<i>$(escape_html "$2")</i>"$'\n'
+  tg_append "$1" "$(escape_html "$2")"$'\n'
 }
 
 # 追加多行文本块并保证段尾换行
@@ -147,7 +148,7 @@ tg_add_footer() {
     else
       dur="${elapsed} 秒"
     fi
-    line="⏱ 已运行 <b>${dur}</b>"
+    line="⏱ 已运行 ${dur}"
   fi
   if [ -n "${TG_RUN_URL:-}" ]; then
     [ -n "$line" ] && line+=" · "
@@ -211,7 +212,7 @@ tree_code_fold() {
     _entries+="<code>$(escape_html "$_l")</code>"$'\n'
   done <<< "$_in"
   if [ "$_total" -gt "$_max" ]; then
-    _entries+="<i>还有 $((_total - _max)) 条…</i>"$'\n'
+    _entries+="还有 $((_total - _max)) 条…"$'\n'
   fi
   tree_lines "$_entries"
 }
