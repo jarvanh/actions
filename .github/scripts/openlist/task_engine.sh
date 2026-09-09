@@ -1553,8 +1553,8 @@ sync_by_file_batches() {
       else
         failed_batches=$((failed_batches + 1))
         # 英文 token 不直出通知（规范 §4）: exit=N 改写为中文说明
-        # 条目主体（中文说明）→ <b>，元数据（文件数/退出码）→ · （语义表 #4/#5，禁裸文本）
-        failed_batch_list+="<b>批次 $((i+1))/${total_batches}</b> · ${batch_file_count} 文件 · 传输退出码 ${rc}"$'\n'
+        # 条目主体（中文说明）→ ，元数据（文件数/退出码）→ · （语义表 #4/#5，禁裸文本）
+        failed_batch_list+="批次 $((i+1))/${total_batches} · ${batch_file_count} 文件 · 传输退出码 ${rc}"$'\n'
         echo "批次 $((i+1)) 失败 (exit=${rc})"
       fi
 
@@ -1583,7 +1583,7 @@ sync_by_file_batches() {
       if [ "${BATCH_BACKEND_DEAD:-0}" = "1" ]; then
         local remaining_batches=$((total_batches - batch_idx))
         [ "$remaining_batches" -gt 0 ] && failed_batches=$((failed_batches + remaining_batches))
-        failed_batch_list+="<b>剩余 ${remaining_batches} 批 · 后端写入全拒，中止</b>"$'\n'
+        failed_batch_list+="剩余 ${remaining_batches} 批 · 后端写入全拒，中止"$'\n'
         echo "🛑 后端写入全拒，中止剩余 ${remaining_batches} 个批次，本同步对标记失败（后端恢复后轮转回来重试）"
         _stop_batch_progress_thread
         # 统一走 tg_* 助手构建（与预检熔断出口同款；手拼 HTML = 版式漂移根源）

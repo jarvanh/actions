@@ -19,10 +19,12 @@
 #   TG_RUN_STARTED_AT run 起始 ISO 时间（历史由 workflow 注入 ${{ github.run_started_at }}；
 #     该表达式上下文已从平台移除，注入后通常为空值，故时长实际走 /proc/1 兜底）
 # 版式规范（openlist 侧经 load_all.sh L0 层 source 本文件，不再自带副本）:
-#   {emoji} <b>标题</b>          ← tg_add_title
+#   ★ 2026-09-10 终版：全库无 <b>——一切信息文字裸文本，仅 <code>（机器值）、
+#     <pre>（日志/命令）、<a>（链接）有标签；层级由分隔线/空行/emoji/等宽承担。
+#   {emoji} 标题          ← tg_add_title
 #   ━━━━━━━━━━━━━━━━━━           ← TG_SEP（勿手写分隔线）
 #   标签：值               ← tg_add_kv / 路径 tg_add_path
-#   {emoji} <b>分节 · N</b>       ← tg_add_section（段前空行，紧跟标题时无；列表分节计数一律 " · N"）
+#   {emoji} 分节 · N       ← tg_add_section（段前空行，紧跟标题时无；列表分节计数一律 " · N"）
 #   ├─/└─ 树形条目               ← 唯一条目前缀（tree_lines / tree_code_fold，无平铺形态）
 #   <pre>日志</pre>              ← tg_add_block
 #   {可选 备注}            ← tg_add_note
@@ -64,27 +66,14 @@ tg_append() {
   printf -v "$1" '%s%s' "${!1}" "$2"
 }
 
-# 拆出前导 emoji 序列（含 VS16/ZWJ/keycap）——emoji 不入 <b>（2026-09-10 拍板），
-# 真源自动拆分，调用方仍传「emoji + 短语」整串、无需感知。
-# 输出两行: 第一行=前导 emoji（可为空），第二行=剩余文字
-_split_leading_emoji() {
-  printf '%s' "$1" | perl -CSD -ne '
-    if (/^((?:[\x{2100}-\x{2BFF}\x{1F000}-\x{1FAFF}\x{FE0F}\x{200D}\x{20E3}])+)\s*(.*)\z/s) { print "$1\n$2"; }
-    else { print "\n$_"; }
-  '
-}
-
-# 标题块: "{emoji} <b>标题文字</b>\n分隔线\n"（emoji 在 <b> 外）
+# 标题块: "标题\n分隔线\n"（2026-09-10 终版：全库无 ，一切信息文字裸文本，
+# 层级由分隔线/空行/emoji/等宽 <code> 承担）
 tg_add_title() {
-  local _split _e _t
-  _split=$(_split_leading_emoji "$2") || _split=$'\n'"$2"
-  _e="${_split%%$'\n'*}"
-  _t="${_split#*$'\n'}"
-  tg_append "$1" "${_e:+$_e }<b>$(escape_html "$_t")</b>"$'\n'"${TG_SEP}"$'\n'
+  tg_append "$1" "$(escape_html "$2")"$'\n'"${TG_SEP}"$'\n'
 }
 
 # 键值行（值不再加粗，2026-09-09 拍板：结论值/状态/计数/数值一律裸文本加转义，
-# <b> 只留给标题/分节/组头/条目主体；标签后的全角冒号 + 空格已足够分隔）
+#  只留给标题/分节/组头/条目主体；标签后的全角冒号 + 空格已足够分隔）
 tg_add_kv() {
   tg_append "$1" "$2：$(escape_html "$3")"$'\n'
 }
@@ -107,11 +96,7 @@ tg_add_section() {
     *$'\n') tg_append "$1" $'\n' ;;
     *) tg_append "$1" $'\n'$'\n' ;;
   esac
-  local _split _e _t
-  _split=$(_split_leading_emoji "$2") || _split=$'\n'"$2"
-  _e="${_split%%$'\n'*}"
-  _t="${_split#*$'\n'}"
-  tg_append "$1" "${_e:+$_e }<b>$(escape_html "$_t")</b>"$'\n'
+  tg_append "$1" "$(escape_html "$2")"$'\n'
 }
 
 # 说明段（段前空一行；不再套 ，2026-09-09 全库去掉斜体标签）
@@ -135,7 +120,7 @@ tg_add_block() {
 }
 
 # 统一收尾区（全库唯一收尾形态，自带与正文间的空行）:
-#   "\n⏱ 已运行 <b>X 小时 Y 分</b> · 🔗 <a href="TG_RUN_URL">运行日志</a>\n"
+#   "\n⏱ 已运行 X 小时 Y 分 · 🔗 <a href="TG_RUN_URL">运行日志</a>\n"
 # 时长来源优先级:
 #   1. TG_RUN_STARTED_AT（workflow 注入，精确）
 #   2. /proc/1 启动时刻兜底 —— GitHub 平台已于 2026-09-05 移除 github.run_started_at

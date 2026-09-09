@@ -125,13 +125,13 @@ def build_fail_notify(title: str, file: str, elapsed: float, lines: list):
     """
     parts = [
         # 标题 = emoji + 短语加粗（规范 §2；此前未加粗与 tg_add_title 版式漂移）
-        # 标题（emoji + 短语）入 <b>：值/计数才无标签
-        f"<b>{esc(title)}</b>",
+        # 标题（emoji + 短语）入 ：值/计数才无标签
+        f"{esc(title)}",
         TG_SEP,
-        # 文件名属机器值 → <code>；emoji 入 <b>（规范 §2 语义表 #3 + 裁决 7）
-        f"📁<b></b> <code>{esc(shorten_name(os.path.basename(file)))}</code>",
-        f"📦 <b>分组</b>：{esc(CAPTION_PREFIX)}",
-        f"<b>耗时</b>：{fmt_secs(elapsed)}",
+        # 文件名属机器值 → <code>；emoji 入 （规范 §2 语义表 #3 + 裁决 7）
+        f"📁 <code>{esc(shorten_name(os.path.basename(file)))}</code>",
+        f"📦 分组：{esc(CAPTION_PREFIX)}",
+        f"耗时：{fmt_secs(elapsed)}",
     ]
     parts.extend(lines)
     return "\n".join(parts)
@@ -305,11 +305,11 @@ def get_video_list():
         print(err_msg)
         print(f"[get_video_list] stderr: {result.stderr[-2000:] if result.stderr else '(无)'}")
         notify("\n".join([
-            "❌ <b>获取远端文件列表失败</b>",
+            "❌ 获取远端文件列表失败",
             TG_SEP,
-            f"📦 <b>分组</b>：{esc(CAPTION_PREFIX)}",
-            f"⚠️ <b>原因</b>：rclone lsjson 退出码 {result.returncode}",
-            "📄 <b>stderr 见 Actions 日志</b>",
+            f"📦 分组：{esc(CAPTION_PREFIX)}",
+            f"⚠️ 原因：rclone lsjson 退出码 {result.returncode}",
+            "📄 stderr 见 Actions 日志",
         ]))
         return [], []
 
@@ -325,7 +325,7 @@ def get_video_list():
         err_msg = f"❌ rclone lsjson 解析失败: {e}"
         print(err_msg)
         notify("\n".join([
-            "❌ <b>获取远端文件列表失败</b>",
+            "❌ 获取远端文件列表失败",
             TG_SEP,
             f"📦 分组：{esc(CAPTION_PREFIX)}",
             f"⚠️ 原因：lsjson 输出解析失败：{esc(e)}",
@@ -445,7 +445,7 @@ def main():
                 "❌ 下载失败",
                 file, dl_elapsed,
                 [
-                    f"📦 <b>大小</b>：{human_size(size)}",
+                    f"📦 大小：{human_size(size)}",
                     "📄 rclone stderr：\n" + esc(result.stderr[-500:].strip() if result.stderr else "(无错误输出)"),
                 ],
             ))
@@ -524,8 +524,8 @@ def main():
                     "⏭️ 损坏视频已标记跳过",
                     file, up_elapsed,
                     [
-                        "⚠️ <b>原因</b>：源文件损坏，无法读取视频信息（moov atom 缺失）",
-                        "🔄 <b>后续</b>：不再重复尝试，远端文件被替换后自动重试",
+                        "⚠️ 原因：源文件损坏，无法读取视频信息（moov atom 缺失）",
+                        "🔄 后续：不再重复尝试，远端文件被替换后自动重试",
                     ],
                 ))
             else:
@@ -533,7 +533,7 @@ def main():
                 notify(build_fail_notify(
                     "❌ 处理/上传失败",
                     file, up_elapsed,
-                    [f"📄 <b>输出尾部</b>：\n<pre>{esc(err_tail)}</pre>"] if err_tail else ["📄 <b>无详细输出，见 Actions 日志</b>"],
+                    [f"📄 输出尾部：\n<pre>{esc(err_tail)}</pre>"] if err_tail else ["📄 无详细输出，见 Actions 日志"],
                 ))
 
         # 清理工作目录
@@ -640,7 +640,7 @@ _render_named_entries() {
   tree_lines "${_out%$'\n'}"
 }
 
-# 跳过/过滤明细渲染: 按原因分组 —— 组头 "<b>原因</b> · N"，条目 <code>文件名</code> 树形列出。
+# 跳过/过滤明细渲染: 按原因分组 —— 组头 "原因 · N"，条目 <code>文件名</code> 树形列出。
 # 输入: 多行 "原因\t路径"（python 侧产出）；每组最多 SKIP_DETAIL_MAX 条，超出折叠为
 # "还有 N 条…"（43 条损坏全列会刷屏，且通知会顶到分片边界）
 _render_skipped_groups() {

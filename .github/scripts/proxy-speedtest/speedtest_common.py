@@ -467,15 +467,15 @@ def build_target_network_section(targets):
     if not targets:
         targets = [('', '', None)]
     count_hint = f' · {len(targets)}' if len(targets) > 1 else ''
-    lines = [f'📍 <b>测速点网络{count_hint}</b>']
+    lines = [f'📍 测速点网络{count_hint}']
     for idx, (server, label, info) in enumerate(targets, 1):
         server = str(server or '').strip()
         label = str(label or '').strip()
         multi = len(targets) > 1
         if not server:
             fallback = f'（{esc(label)}）' if label else ''
-            # 中文原因 → <b>（语义表：条目主体非文件值不得裸文本）
-            lines.append(f'  └─ <b>归属获取失败{fallback}</b>')
+            # 中文原因 → （语义表：条目主体非文件值不得裸文本）
+            lines.append(f'  └─ 归属获取失败{fallback}')
             continue
         if multi:
             lines.append(f'[{idx}] <code>{esc(label or server)}</code>')
@@ -499,7 +499,7 @@ def build_target_network_section(targets):
 def send_telegram(env, text):
     """发送 Telegram 消息（统一 HTML parse_mode；429 自动重试，其余失败直接返回
     {'sent': False, ...} 并带上响应体）。文本应使用全库统一 HTML 版式（emoji 标题 + ━━━
-    分隔线 + <b>/<code>/ + 统一收尾行）；动态内容一律经 tg_* 助手转义。"""
+    分隔线 + /<code>/ + 统一收尾行）；动态内容一律经 tg_* 助手转义。"""
     bot = env.get('TELEGRAM_BOT_TOKEN') or env.get('TG_BOT_TOKEN')
     chat = env.get('TELEGRAM_CHAT_ID') or env.get('TG_CHAT_ID')
     if not bot or not chat:
@@ -595,7 +595,7 @@ def tg_format_elapsed(seconds):
 
 
 def tg_footer_line():
-    """全库唯一收尾行: "⏱ 已运行 <b>X</b> · 🔗 <a>运行日志</a>"
+    """全库唯一收尾行: "⏱ 已运行 X · 🔗 <a>运行日志</a>"
 
     与 tg_add_footer（telegram/tg_notify.sh）同形态、同降级链:
       无 TG_RUN_STARTED_AT → 兜底 /proc/1 启动时刻（hosted runner PID 1 随 job

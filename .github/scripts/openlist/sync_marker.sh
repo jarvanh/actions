@@ -800,7 +800,7 @@ send_sync_warning() {
 
   # 收尾区: 状态 + 备注（斜体），footer 自带空行。
   # 注意: tg_add_note 对整段做 escape_html，段内不能携带 HTML 标签——
-  # emoji 只能随段裸置（转义边界决定的既定形态，勿"统一"成 <b>）
+  # emoji 只能随段裸置（转义边界决定的既定形态，勿"统一"成 ）
   tg_add_note msg "⏭️ 已跳过此同步，继续执行其他任务
 如确认无误，请手动触发 force_sync=true"
   tg_add_footer msg
@@ -881,7 +881,7 @@ send_sync_skipped() {
           copy)               _m_kind_label="直接复制";;
           *)                  _m_kind_label="$m_kind";;
         esac
-        _m_entries+=("<b>$(escape_html "$_m_kind_label")</b> × ${m_count} · $(format_bytes "$m_bytes")")
+        _m_entries+=("$(escape_html "$_m_kind_label") × ${m_count} · $(format_bytes "$m_bytes")")
         _m_summaries+=("$(escape_html "$m_summary")")
       done <<< "$method_summary"
       local _i _n=${#_m_entries[@]} _last
