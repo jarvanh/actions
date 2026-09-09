@@ -150,7 +150,7 @@ chk "G1 return 1" "$RC" "1"
 chk "G1 零批次传输" "$(copy_count)" "0"
 chk "G1 预检被调用 1 次" "$CHECK_CALLS" "1"
 chk "G1 未进入最终全量同步" "$SYNC_WITH_LOGGING_CALLS" "0"
-chk "G1 三批全部计失败" "$(echo "$AUTO_SPLIT_INFO" | grep -c '❌ <b>3</b>' || true)" "1"
+chk "G1 三批全部计失败" "$(echo "$AUTO_SPLIT_INFO" | grep -c '<b>❌ 3</b>' || true)" "1"
 chk "G1 统计含熔断标注" "$(echo "$AUTO_SPLIT_INFO" | grep -c '批次预检熔断中止' || true)" "1"
 unset CHECK_FAIL_FROM_OVERRIDE
 
@@ -161,7 +161,7 @@ capture_rc "openlist:crypt" "t_g2"
 chk "G2 return 1" "$RC" "1"
 chk "G2 仅第 1 批完成传输" "$(copy_count)" "1"
 chk "G2 预检被调用 2 次" "$CHECK_CALLS" "2"
-chk "G2 统计 ✅1❌2" "$(echo "$AUTO_SPLIT_INFO" | grep -c '✅ <b>1</b> · ❌ <b>2</b>' || true)" "1"
+chk "G2 统计 ✅1❌2" "$(echo "$AUTO_SPLIT_INFO" | grep -c '<b>✅ 1</b> · <b>❌ 2</b>' || true)" "1"
 unset CHECK_FAIL_FROM_OVERRIDE
 
 # ---------- G3: openlist 目标 + 预检全通过 ----------

@@ -975,7 +975,7 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None):
 
     sep = '━' * 18
     lines = [
-        '✅ <b>CDN 测速完成</b>',
+        '<b>✅ CDN 测速完成</b>',
         sep,
         f'🕒 {esc(started)} ~ {esc(ended)} · 耗时 {esc(duration_text)}',
         f'📊 节点：共 <b>{len(results)}</b> 个 · 可用 <b>{len(ok_results)}</b> 个',
@@ -999,7 +999,7 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None):
         legend = '↑上传 · ↓下载 · 延迟ms' if has_up else '↓下载 · 延迟ms'
         # 标题点出排序依据（= 订阅判定指标），避免与列表数值对不上
         sort_hint = f' · 按{esc(metric_label)}' if metric_label else ''
-        lines.append(f'🏆 <b>最快节点 · {len(top)}{sort_hint}</b> · <i>{legend}</i>')
+        lines.append(f'<b>🏆 最快节点 · {len(top)}{sort_hint}</b> · <i>{legend}</i>')
         for idx, r in enumerate(top, 1):
             prefix = build_node_metric_prefix(_result_metric_item(r), mode, order='up_first')
             connector = '└─' if idx == len(top) else '├─'
@@ -1013,7 +1013,7 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None):
         lines.append('⚠️ 没有节点测速成功')
         lines.append('')
 
-    lines.append('📦 <b>订阅 · Gist</b>')
+    lines.append('<b>📦 订阅 · Gist</b>')
     if gist_res and gist_res.get('ok'):
         action = '新建' if gist_res.get('created') else '更新'
         # 该链接指向 Gist 上的订阅文件（YAML），不是测速报告；
@@ -1065,7 +1065,7 @@ def write_termination(started_at, reason):
     try:
         # 标题直接带原因首行（原文截断后再转义，避免切断 HTML 实体）
         _head = str(reason).splitlines()[0][:40].strip() or '未知原因'
-        abort_msg = (f'❌ <b>CDN 测速异常退出 · {html.escape(_head)}</b>\n{"━" * 18}\n'
+        abort_msg = (f'<b>❌ CDN 测速异常退出 · {html.escape(_head)}</b>\n{"━" * 18}\n'
                      f'原因：<code>{html.escape(str(reason))}</code>')
         abort_footer = tg_footer_line()
         if abort_footer:
@@ -1078,7 +1078,7 @@ def write_termination(started_at, reason):
 def handle_termination_signal(signum, frame):
     """SIGTERM/SIGINT 兜底：run 被取消/超时也发通知（与 speedtest_gitee 同款）。"""
     sig_name = signal.Signals(signum).name if signum else f'SIGNAL-{signum}'
-    msg = (f'⛔ <b>CDN 测速异常终止</b>\n{"━" * 18}\n'
+    msg = (f'<b>⛔ CDN 测速异常终止</b>\n{"━" * 18}\n'
            f'⚠️ 脚本被中断：收到 <code>{sig_name}</code>，本轮测速未正常完成。')
     footer = tg_footer_line()
     if footer:
@@ -1098,7 +1098,7 @@ if __name__ == '__main__':
         # 未捕获异常兜底：标题直接带原因摘要，正文留完整错误（TG 私聊，不进公开日志）
         _head = str(e).splitlines()[0][:60].strip() if str(e).strip() else '未知异常'
         try:
-            send_telegram(merged_env(), f'❌ <b>CDN 测速异常退出 · {html.escape(_head)}</b>\n'
+            send_telegram(merged_env(), f'<b>❌ CDN 测速异常退出 · {html.escape(_head)}</b>\n'
                                         f'{"━" * 18}\n'
                                         f'错误：<code>{html.escape(f"{type(e).__name__}: {e}"[:800])}</code>')
         except Exception:

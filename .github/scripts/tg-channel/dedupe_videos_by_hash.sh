@@ -166,7 +166,7 @@ for hash in "${!HASH_ENTRIES[@]}"; do
       fi
     done <<< "$sorted"
     _fold=$(_grp_fold)
-    _grp_block "🔖 <b>哈希 ${hash:0:12}</b> · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 文件名相同 · 保留 <code>$(escape_html "${kept_path}")</code>"$'\n'"$(tree_lines "${group_entries}${_fold}")"
+    _grp_block "<b>🔖 哈希 ${hash:0:12}</b> · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 文件名相同 · 保留 <code>$(escape_html "${kept_path}")</code>"$'\n'"$(tree_lines "${group_entries}${_fold}")"
   else
     # 规则2：文件名不同但内容相同 → 删除修改时间旧的，保留最新
     sorted=$(echo "$entries" | sort -t';' -k1,1)
@@ -189,7 +189,7 @@ for hash in "${!HASH_ENTRIES[@]}"; do
       fi
     done <<< "$sorted"
     _fold=$(_grp_fold)
-    _grp_block "🔖 <b>哈希 ${hash:0:12}</b> · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 文件名不同 · 保留 <code>$(escape_html "${kept_path}")</code>"$'\n'"$(tree_lines "${group_entries}${_fold}")"
+    _grp_block "<b>🔖 哈希 ${hash:0:12}</b> · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 文件名不同 · 保留 <code>$(escape_html "${kept_path}")</code>"$'\n'"$(tree_lines "${group_entries}${_fold}")"
   fi
 done
 

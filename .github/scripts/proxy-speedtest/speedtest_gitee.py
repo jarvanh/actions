@@ -109,7 +109,7 @@ def handle_termination_signal(signum, frame):
     TERMINATION_NOTICE_SENT = True
     sig_name = signal.Signals(signum).name if signum else f'SIGNAL-{signum}'
     _sep = '━' * 18
-    message = f'⛔ <b>Gitee 测速异常终止</b>\n{_sep}\n⚠️ 脚本被中断：收到 <code>{sig_name}</code>，本轮测速未正常完成。'
+    message = f'<b>⛔ Gitee 测速异常终止</b>\n{_sep}\n⚠️ 脚本被中断：收到 <code>{sig_name}</code>，本轮测速未正常完成。'
     if CURRENT_RUN_STARTED_AT:
         message += f'\n🕒 测速开始时间：{html.escape(str(CURRENT_RUN_STARTED_AT))}'
     _footer = tg_footer_line()
@@ -1395,7 +1395,7 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
     sep = '━' * 18
     esc = lambda s: html.escape(str(s))
     summary_lines = [
-        '✅ <b>Gitee 测速完成</b>',
+        '<b>✅ Gitee 测速完成</b>',
         sep,
         f'🕒 {esc(started_text)} ~ {esc(ended_text)} · 耗时 {esc(duration_cn)}',
         f'📊 节点：共 <b>{len(speed_results)}</b> 个 · 可用 <b>{len(ok_results)}</b> 个',
@@ -1423,7 +1423,7 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
             ('↑上传', has_up), ('↓下载', has_down), ('延迟ms', has_lat)) if on) or '速度'
         # TOP 已按订阅判定指标排序（见 ok_results_by_download），标题同步点出排序依据
         sort_hint = f' · 按{html.escape(metric_label)}' if metric_label else ''
-        summary_lines.append(f"🏆 <b>最快节点 · {len(top)}{sort_hint}</b> · <i>{legend}</i>")
+        summary_lines.append(f"<b>🏆 最快节点 · {len(top)}{sort_hint}</b> · <i>{legend}</i>")
         for idx, item in enumerate(top, 1):
             prefix = build_node_metric_prefix(item, speedtest_mode, order='up_first') or '-'
             connector = '└─' if idx == len(top) else '├─'
@@ -1479,7 +1479,7 @@ def finalize_gist_and_notify(env, summary, summary_lines, subscription_text, bun
             gist_verify_res = {'ok': False, 'reason': str(e)}
     log_progress('gist_verify_finished', ok=bool(gist_verify_res.get('ok')), sample_ok_count=gist_verify_res.get('sample_ok_count', 0), sample_count=gist_verify_res.get('sample_count', 0), reason=gist_verify_res.get('reason', ''))
     summary['gist_verify'] = gist_verify_res
-    summary_lines.append('📦 <b>订阅 · Gist</b>')
+    summary_lines.append('<b>📦 订阅 · Gist</b>')
     if gist_res.get('ok'):
         action = '新建' if gist_res.get('created') else '更新'
         html_url = gist_res.get('html_url') or ''
@@ -1784,7 +1784,7 @@ if __name__ == '__main__':
             # 统一 HTML 版式（emoji+加粗标题/分隔线/全角冒号 kv/统一收尾区）；
             # 异常文本含 <>& 时未转义会触发 400 整条丢失（不退化，2026-09-06 拍板），必须 html.escape
             _sep = '━' * 18
-            _msg = (f'❌ <b>Gitee 测速异常退出 · {html.escape(str(stage))}</b>\n{_sep}\n'
+            _msg = (f'<b>❌ Gitee 测速异常退出 · {html.escape(str(stage))}</b>\n{_sep}\n'
                     f'错误：<code>{html.escape(err_text[:800])}</code>')
             _footer = tg_footer_line()
             if _footer:

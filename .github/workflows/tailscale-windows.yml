@@ -123,15 +123,15 @@ jobs:
           # 取值行只放标签+值，说明性文字（固定不变/每次会变/密码共用）
           # 集中到底部 ℹ️ 备注行（tg_add_note 形态），不与取值粘在同一行
           # 紧跟标题的首个分节不补段前空行（与 bash tg_add_section 同规则：分隔线后不空行）
-          $msg = "🟢 <b>Windows runner 已就绪</b>`n$TG_SEP`n" +
-            "🔐 <b>SSH</b>`n" +
+          $msg = "<b>🟢 Windows runner 已就绪</b>`n$TG_SEP`n" +
+            "<b>🔐 SSH</b>`n" +
             "  ├─ 命令：<code>ssh $(Esc-Html $Env:TS_USER)@$(Esc-Html $Env:TS_HOST)</code>`n" +
             "  ├─ 域名：<code>$(Esc-Html $Env:TS_DNS)</code>`n" +
             "  └─ 备用 IP：<code>$(Esc-Html $Env:TS_IP)</code>"
           $notes = "域名固定不变 · IP 每次运行会变，仅作备用"
           # RDP 启用成功时附上远程桌面入口（域名固定不变，IP 每次会变，优先给域名）
           if ($Env:RDP_ENABLED -eq '1') {
-            $msg += "`n`n🖥️ <b>RDP</b>`n" +
+            $msg += "`n`n<b>🖥️ RDP</b>`n" +
               "  ├─ 地址：<code>$(Esc-Html $Env:TS_DNS):3389</code>`n" +
               "  ├─ 用户：<code>$(Esc-Html $Env:TS_USER)</code>`n" +
               "  └─ 密码：<code>$(Esc-Html $Env:RUNNER_PASSWORD)</code>"
@@ -148,8 +148,8 @@ jobs:
             $locParts = @($geo.city, $geo.region, $geo.country_code) | Where-Object { $_ }
             if ($locParts) { $loc = $locParts -join ", " }
           } catch { }
-          # 条目非文件值：可复制的（IP/ASN）→ <code>，其余 → <b>（禁裸文本）
-          $msg += "`n`n🌐 <b>出口网络</b>`n" +
+          # 条目非文件值：可复制的（IP/ASN）→ <code>，其余 <b>→ （禁裸文本）
+          $msg += "`n`n<b>🌐 出口网络</b>`n" +
             "  ├─ 出口 IP：<code>$(Esc-Html $pubIp)</code>`n" +
             "  ├─ ISP：<b>$(Esc-Html $isp)</b>`n" +
             "  ├─ ASN：<code>$(Esc-Html $asnLine)</code>`n" +
