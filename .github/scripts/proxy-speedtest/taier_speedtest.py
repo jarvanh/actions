@@ -454,7 +454,7 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
     top_sort_key = 'up' if bundle.get('metric', 'upload') == 'upload' else 'down'
     top = sorted(ok_results, key=lambda r: r.get(top_sort_key) or 0.0, reverse=True)[:5]
     lines = [
-        '✅ <b>泰尔三网测速</b>',
+        '<b>✅ 泰尔三网测速</b>',
         sep,
         f"🕒 {esc(meta['started_text'])} ~ {esc(meta['ended_text'])} · 耗时 {esc(meta['duration_text'])}",
         f"📊 节点：共 <b>{len(results)}</b> 个 · 成功 <b>{len(ok_results)}</b> 个",
@@ -474,7 +474,7 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
         legend = '↑上传 · ↓下载 · 延迟' if has_up else '↓下载 · 延迟'
         # 标题点出排序依据（= 订阅判定指标），避免读者按 ↓ 数值读不出顺序
         sort_hint = f' · 按{esc(metric_label)}' if metric_label else ''
-        lines.append(f'🏆 <b>最快节点 · {len(top)}{sort_hint}</b> · <i>{legend}</i>')
+        lines.append(f'<b>🏆 最快节点 · {len(top)}{sort_hint}</b> · <i>{legend}</i>')
         for idx, r in enumerate(top, 1):
             connector = '└─' if idx == len(top) else '├─'
             up_text = f"↑{esc(r['up'])}Mbps · " if (r.get('up') or 0) > 0 else ''
@@ -488,21 +488,21 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
         lines.append('')
 
     if bypass_hits:
-        lines.append('⚠️ <b>疑似未走代理</b>')
+        lines.append('<b>⚠️ 疑似未走代理</b>')
         lines.append(f"  └─ {bypass_hits} 个节点的出口 IP 与 runner 直连出口（<code>{esc(direct_ip)}</code>）相同，"
                      'TUN 进程规则可能未生效，结果不可信')
         lines.append('')
 
     failed = [r for r in results if not r.get('ok')]
     if failed:
-        lines.append(f'❌ <b>失败 · {len(failed)}</b>')
+        lines.append(f'<b>❌ 失败 · {len(failed)}</b>')
         for idx, r in enumerate(failed[:5], 1):
             connector = '└─' if idx == min(len(failed), 5) else '├─'
             # 原始异常串属机器值 → <code>（标签语义表第 3 类；此前用 <i> 与元数据撞语义）
             lines.append(f"  {connector} <code>{esc(r.get('name', ''))}</code> · <code>{esc((r.get('error') or '-')[:80])}</code>")
         lines.append('')
 
-    lines.append('📦 <b>订阅 · Gist</b>')
+    lines.append('<b>📦 订阅 · Gist</b>')
     if gist_res and gist_res.get('ok'):
         action = '新建' if gist_res.get('created') else '更新'
         raw_url = ((gist_res.get('yaml') or {}).get('raw_url') or '').strip()
@@ -540,7 +540,7 @@ def notify_failure(env, reason):
     # 标题直接带原因（reason 形如「环境准备失败：…」，取全角冒号前的阶段名）
     _head = str(reason).split('：')[0].splitlines()[0][:40].strip() or '未知原因'
     lines = [
-        f'❌ <b>泰尔三网测速异常退出 · {html.escape(_head)}</b>',
+        f'<b>❌ 泰尔三网测速异常退出 · {html.escape(_head)}</b>',
         '━' * 18,
         f'原因：<b>{html.escape(str(reason))}</b>',
         '',
@@ -571,7 +571,7 @@ def handle_termination_signal(signum, frame):
     except Exception:
         pass
     sig_name = signal.Signals(signum).name if signum else f'SIGNAL-{signum}'
-    msg = (f'⛔ <b>泰尔三网测速异常终止</b>\n{"━" * 18}\n'
+    msg = (f'<b>⛔ 泰尔三网测速异常终止</b>\n{"━" * 18}\n'
            f'⚠️ 脚本被中断：收到 <code>{sig_name}</code>，本轮测速未正常完成。')
     footer = tg_footer_line()
     if footer:

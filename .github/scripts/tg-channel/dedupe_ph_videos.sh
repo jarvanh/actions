@@ -131,7 +131,7 @@ for id in "${!ID_ENTRIES[@]}"; do
       fi
     done <<< "$sorted"
     _fold=$(_grp_fold)
-    _grp_block "🔖 <b>ID ${id}</b> · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 仅按 ID 去重 · 保留 <code>$(escape_html "${kept_path}")</code>"$'\n'"$(tree_lines "${group_entries}${_fold}")"
+    _grp_block "<b>🔖 ID ${id}</b> · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 仅按 ID 去重 · 保留 <code>$(escape_html "${kept_path}")</code>"$'\n'"$(tree_lines "${group_entries}${_fold}")"
     continue
   fi
 
@@ -164,7 +164,7 @@ for id in "${!ID_ENTRIES[@]}"; do
       fi
     done <<< "$sorted"
     _fold=$(_grp_fold)
-    _grp_block "🔖 <b>ID ${id}</b> · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 标题相同 · 保留 <code>$(escape_html "${kept_path}")</code>"$'\n'"$(tree_lines "${group_entries}${_fold}")"
+    _grp_block "<b>🔖 ID ${id}</b> · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 标题相同 · 保留 <code>$(escape_html "${kept_path}")</code>"$'\n'"$(tree_lines "${group_entries}${_fold}")"
   else
     # 规则2：title 不同 → 对比哈希
     # 打印各文件规范化 title，便于排查为何被判不同（如不可见字符）
@@ -211,7 +211,7 @@ for id in "${!ID_ENTRIES[@]}"; do
         done <<< "$hsorted"
       done <<< "$DUP_HASHES"
       _fold=$(_grp_fold)
-      _grp_block "🔖 <b>ID ${id}</b> · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 标题不同 · 删除哈希一致的旧文件"$'\n'"$(tree_lines "${group_entries}${_fold}")"
+      _grp_block "<b>🔖 ID ${id}</b> · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 标题不同 · 删除哈希一致的旧文件"$'\n'"$(tree_lines "${group_entries}${_fold}")"
     else
       # 所有哈希各不相同 → 仅通知不删除
       NOTIFY_ONLY_COUNT=$((NOTIFY_ONLY_COUNT + 1))
@@ -220,7 +220,7 @@ for id in "${!ID_ENTRIES[@]}"; do
         _grp_add group_entries "⚠️ 保留 <code>$(escape_html "${p}")</code> · <i>哈希 ${h:0:12}</i>"$'\n'
       done < "$HASH_LIST"
       _fold=$(_grp_fold)
-      _grp_block "🔖 <b>ID ${id}</b> · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 标题不同且哈希各不相同 · 仅通知"$'\n'"$(tree_lines "${group_entries}${_fold}")"
+      _grp_block "<b>🔖 ID ${id}</b> · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 标题不同且哈希各不相同 · 仅通知"$'\n'"$(tree_lines "${group_entries}${_fold}")"
     fi
     rm -f "$HASH_LIST"
   fi

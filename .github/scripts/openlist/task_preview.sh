@@ -334,7 +334,7 @@ _preview_render_pairs_detail() {
   local _out="" _src _gi=0
   for _src in "${_g_order[@]}"; do
     [ "$_gi" -gt 0 ] && _out+=$'\n'
-    _out+="📁 <b>$(escape_html "$_src")</b>"
+    _out+="<b>📁 $(escape_html "$_src")</b>"
     if [ -n "${_g_size[$_src]}" ]; then
       _out+=" · <i>源端 $(format_bytes "${_g_size[$_src]%%|*}") / ${_g_size[$_src]##*|} 文件</i>"
     fi

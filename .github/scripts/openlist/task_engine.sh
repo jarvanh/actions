@@ -272,7 +272,7 @@ _preview_register() {
 #   ✅ a · 4 GiB
 #   🔄 b · 17 GiB
 # 不再带 "📁 源端 X" 首行: 源端大小已由进度消息的任务分组头
-# （"📁 <b>onedrive:0</b> · <i>280.790 GiB</i>"）给出，重复一遍只占一行；
+# （"<b>📁 onedrive:0</b> · <i>280.790 GiB</i>"）给出，重复一遍只占一行；
 # 且它不带状态 emoji，与本层统计行（▸ 📊 子目录：x/y）同为表头，
 # 会让紧随其后的子目录行看起来与它是同级而非从属。
 _render_subdir_phase_tree() {
@@ -818,9 +818,9 @@ _sync_task_impl() {
   tg_add_section AUTO_SPLIT_INFO "🔀 子任务拆分统计"
   tg_add_kv AUTO_SPLIT_INFO "总子目录" "${total_subtasks}"
   tg_add_kv AUTO_SPLIT_INFO "传输总量" "$(format_bytes "$total_transferred")"
-  local _counts="✅ <b>${synced_subtasks}</b> · ❌ <b>${failed_subtasks}</b>"
-  [ "$partial_subtasks" -gt 0 ] && _counts+=" · ⚠️ <b>${partial_subtasks}</b>"
-  _counts+=" · ⏭️ <b>${skipped_subtasks}</b>"
+  local _counts="<b>✅ ${synced_subtasks}</b> · <b>❌ ${failed_subtasks}</b>"
+  [ "$partial_subtasks" -gt 0 ] && _counts+=" · <b>⚠️ ${partial_subtasks}</b>"
+  _counts+=" · <b>⏭️ ${skipped_subtasks}</b>"
   tg_add_block AUTO_SPLIT_INFO "${_counts}"
   if [ -n "$synced_list" ]; then
     tg_add_section AUTO_SPLIT_INFO "✅ 已同步的子目录"
@@ -1497,7 +1497,7 @@ sync_by_file_batches() {
           tg_add_section AUTO_SPLIT_INFO "🔀 文件批次拆分统计"
           tg_add_kv AUTO_SPLIT_INFO "总批次" "${total_batches}"
           tg_add_kv AUTO_SPLIT_INFO "文件数" "${batch_total_files}"
-          tg_add_block AUTO_SPLIT_INFO "✅ <b>${synced_batches}</b> · ❌ <b>${failed_batches}</b> <i>批次预检熔断中止</i>"
+          tg_add_block AUTO_SPLIT_INFO "<b>✅ ${synced_batches}</b> · <b>❌ ${failed_batches}</b> <i>批次预检熔断中止</i>"
           progress_update_force "批次预检未通过，中止同步" "▸ 📊 批次：${batch_idx}/${total_batches} · ✅${synced_batches} ❌${failed_batches}"
           # 失败状态必须随全局标志传递（与本函数开头 skip 分支置 SYNC_SKIPPED
           # 的惯例一致）: 下游 progress_task_done 状态映射与轮转游标都只认 SYNC_FAILED，
@@ -1590,7 +1590,7 @@ sync_by_file_batches() {
         tg_add_section AUTO_SPLIT_INFO "🔀 文件批次拆分统计"
         tg_add_kv AUTO_SPLIT_INFO "总批次" "${total_batches}"
         tg_add_kv AUTO_SPLIT_INFO "文件数" "${batch_total_files}"
-        tg_add_block AUTO_SPLIT_INFO "✅ <b>${synced_batches}</b> · ❌ <b>${failed_batches}</b> <i>后端写入全拒中止</i>"
+        tg_add_block AUTO_SPLIT_INFO "<b>✅ ${synced_batches}</b> · <b>❌ ${failed_batches}</b> <i>后端写入全拒中止</i>"
         progress_update_force "后端写入全拒，中止同步" "$(_render_batch_stats_line)"
         # 同预检熔断出口: 失败状态经 SYNC_FAILED 全局标志传递（见上注释）
         SYNC_FAILED=1
@@ -1654,7 +1654,7 @@ sync_by_file_batches() {
   tg_add_section AUTO_SPLIT_INFO "🔀 文件批次拆分统计"
   tg_add_kv AUTO_SPLIT_INFO "总批次" "${total_batches}"
   tg_add_kv AUTO_SPLIT_INFO "文件数" "${batch_total_files}"
-  tg_add_block AUTO_SPLIT_INFO "✅ <b>${synced_batches}</b> · ❌ <b>${failed_batches}</b>"
+  tg_add_block AUTO_SPLIT_INFO "<b>✅ ${synced_batches}</b> · <b>❌ ${failed_batches}</b>"
   if [ -n "$failed_batch_list" ]; then
     tg_add_section AUTO_SPLIT_INFO "❌ 失败的批次"
     tg_add_block AUTO_SPLIT_INFO "$(tree_lines "$failed_batch_list")"

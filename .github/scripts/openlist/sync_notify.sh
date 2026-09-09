@@ -323,7 +323,7 @@ _send_sync_result_notification() {
           -F chat_id="${TELEGRAM_CHAT_ID}" \
           -F document=@"$log_filename" \
           -F parse_mode="HTML" \
-          -F caption="📁 <b>$(escape_html "$task_name")</b> · 错误日志" 2>/dev/null) || true
+          -F caption="<b>📁 $(escape_html "$task_name")</b> · 错误日志" 2>/dev/null) || true
         if echo "$_doc_resp" | grep -q '"ok":true'; then break; fi
         _doc_wait=$(echo "$_doc_resp" | grep -oE '"retry_after":[0-9]+' | head -1 | cut -d: -f2)
         if [ -n "$_doc_wait" ]; then sleep "$_doc_wait"; else break; fi
