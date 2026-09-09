@@ -304,6 +304,23 @@ workflow 的 `run_mode` 单选互斥：
 
 ---
 
+## 安全模型与信任单点
+
+- **管理面凭据**：`OPENLIST_ADMIN_PASSWORD` 只存 secrets，每次现场 `POST /api/auth/login`
+  换新鲜 JWT，不在任何文件落盘（历史静态 token 的 401 潜伏故障已由此根除）。
+- **rclone.conf 的信任单点（显式决策）**：conf 以 secret 起步、持久化副本在
+  `dropbox:self-hosted/rclone.conf`（可能比 secret 新，故恢复时优先取 Dropbox）。
+  注意 **rclone obscure 不是加密**——Dropbox 上那份 conf 等于 OneDrive 源端 + 全部目标
+  网盘的通行证，且与 `sync_state` marker 镜像同账号可达：该 Dropbox 账号失守 =
+  全部云端联动失守。这是接受的设计决策（换取 runner 无状态 + conf 变更自动持久化）；
+  爆炸半径的收敛依赖 Dropbox 账号本身的 2FA/密码强度，若需进一步收敛，可把 conf
+  副本迁至独立账号或加密存储后再上传。
+- **注入面**：workflow 的 string/number inputs（`restore_task` / `fix_test_task` /
+  `fix_test_max`）一律经 step 级 `env:` 传入 `run:`，不做 `${{ }}` 直接内插 bash
+  （GitHub 官方反模式清单）；`watch` 触发有 actor 守卫，公开仓库 star 不触发。
+
+---
+
 ## 测试
 
 ```bash

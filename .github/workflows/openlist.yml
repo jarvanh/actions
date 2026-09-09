@@ -230,6 +230,8 @@ jobs:
           TUNNEL_LINE=$(echo "$OUTPUT" | grep -w "$TUNNEL_NAME")
           if [ -z "$TUNNEL_LINE" ]; then
             echo "隧道 '${TUNNEL_NAME}' 不存在，请先手动创建（cloudflared tunnel create ${TUNNEL_NAME}），终止本次运行"
+            # 退出码 31: 隧道未初始化（人工前置操作缺失），区别于一般运行失败，
+            # 便于在 Actions 失败列表里一眼分类
             exit 31
           fi
 
@@ -249,7 +251,9 @@ jobs:
           else
             echo "DNS 路由已存在，跳过 cloudflared tunnel route dns"
           fi
-          nohup cloudflared tunnel run --url http://127.0.0.1:5244 openlist &
+          # setsid 脱离会话组: 纯 nohup 在 broken session 下有被连带杀死的
+          # 先例；隧道须存活整个 job（~6h），必须最可靠的启动形态
+          setsid nohup cloudflared tunnel run --url http://127.0.0.1:5244 openlist &
 
       - name: 安装同步依赖（ffmpeg/jq 等）
         run: |
@@ -281,9 +285,13 @@ jobs:
       - name: "⚠️ Restore: 一键还原修复文件"
         if: ${{ inputs.run_mode == '⚠️ 还原 · 修复文件还原为原路径' }}
         timeout-minutes: 240
+        env:
+          # 经 env 传参，不经 "${{ }} 直接内插 bash（string input 注入面，
+          # 危险模式更不该留此门；GitHub 官方反模式清单）
+          RESTORE_TASK: ${{ inputs.restore_task || 'all' }}
         run: |
           source /tmp/load_all.sh
-          restore_fixed_files "${{ inputs.restore_task || 'all' }}"
+          restore_fixed_files "$RESTORE_TASK"
 
       # ===== 灾难恢复: 目标端 → 源端 =====
       # 修复文件以替代形态存在正是因为原形态无法在该后端持久化，因此恢复
@@ -298,9 +306,11 @@ jobs:
       - name: "⚠️ Restore: 灾难恢复 目标端→源端"
         if: ${{ inputs.run_mode == '⚠️ 灾难恢复 · 目标端→源端' }}
         timeout-minutes: 240
+        env:
+          RESTORE_TASK: ${{ inputs.restore_task || 'all' }}
         run: |
           source /tmp/load_all.sh
-          restore_source_from_target "${{ inputs.restore_task || 'all' }}"
+          restore_source_from_target "$RESTORE_TASK"
 
       # ===== 镜像灾难恢复: 目标端 → 源端（删除源端多余文件）=====
       # rebuild_source_from_target（restore_source_from_target 的破坏性变体）:
@@ -311,9 +321,11 @@ jobs:
       - name: "⚠️ Restore: 镜像灾难恢复 目标端→源端（删除源端多余文件）"
         if: ${{ inputs.run_mode == '⚠️ 灾难恢复 · 目标端→源端（删除源端多余文件）' }}
         timeout-minutes: 240
+        env:
+          RESTORE_TASK: ${{ inputs.restore_task || 'all' }}
         run: |
           source /tmp/load_all.sh
-          rebuild_source_from_target "${{ inputs.restore_task || 'all' }}"
+          rebuild_source_from_target "$RESTORE_TASK"
 
       # ===== 调试: 单任务测试修复管线 =====
       # 用真实生产代码路径（sync_task → sync_with_logging）按任务清单
@@ -327,6 +339,10 @@ jobs:
       - name: "Debug: 单任务测试修复管线"
         if: ${{ inputs.run_mode == '调试 · 修复管线测试' }}
         timeout-minutes: 120
+        env:
+          # 经 env 传参，不经 "${{ }} 直接内插 bash（string/number input 注入面）
+          FIX_TEST_TASK: ${{ inputs.fix_test_task || 'backup' }}
+          FIX_TEST_MAX: ${{ inputs.fix_test_max || 5 }}
         run: |
           source /tmp/load_all.sh
 
@@ -338,14 +354,13 @@ jobs:
           init_sync_state
 
           # 单次修复数量上限（快速验证用）
-          export OPENLIST_MISSING_FIX_MAX="${{ inputs.fix_test_max || 5 }}"
+          export OPENLIST_MISSING_FIX_MAX="${FIX_TEST_MAX}"
           # 跳过 initial sync 实际传输（debug 只验证修复方法: diff → 修复 → 持久化复核）
           export OPENLIST_FIX_TEST_MODE=1
 
           # ===== 按 input 从任务清单（task_engine.sh SYNC_TASK_REGISTRY）查表执行 =====
-          FIX_TASK="${{ inputs.fix_test_task || 'backup' }}"
-          echo "=== 修复管线测试任务: ${FIX_TASK} (修复上限 ${OPENLIST_MISSING_FIX_MAX}) ==="
-          run_task_by_id "$FIX_TASK"
+          echo "=== 修复管线测试任务: ${FIX_TEST_TASK} (修复上限 ${OPENLIST_MISSING_FIX_MAX}) ==="
+          run_task_by_id "$FIX_TEST_TASK"
           echo "=== 修复管线测试完成 (SYNC_FAILED=${SYNC_FAILED}) ==="
 
       - name: 初始化同步状态
@@ -370,6 +385,8 @@ jobs:
         # 给收尾/Persist/接力留出余量）
         timeout-minutes: 330
         if: ${{ inputs.run_mode == '' || inputs.run_mode == '同步' }}
+        env:
+          SKIP_PREVIEW: ${{ inputs.skip_preview || 'false' }}
         run: |
           source /tmp/load_all.sh
           # P0 趋势: 记录同步工作开始时间（收尾时算本轮历时）
@@ -383,7 +400,9 @@ jobs:
           echo "等待 OpenList 就绪..."
           wait_openlist_ready || true
 
-          if [ "${{ inputs.skip_preview }}" = "true" ]; then
+          # 跳过预览通知（skip_preview=true，仅注册任务队列）:
+          # boolean input 也经 env 传参，与 restore_task 等同一注入面规范
+          if [ "${SKIP_PREVIEW:-false}" = "true" ]; then
             echo "=== 跳过预览通知（skip_preview=true，仅注册任务队列）==="
             # 仅注册模式: 不发预览通知，但把全部任务（含源端大小）注册进进度队列，
             # 否则任务随 progress_task_begin 逐个注册，进度消息的"总任务"会从 3 之类的小数字慢慢涨
