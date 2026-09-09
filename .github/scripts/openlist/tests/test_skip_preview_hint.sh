@@ -112,7 +112,7 @@ echo "$SEND_CAPTURE" | grep -q '+500 B / +2 文件' \
 echo "$SEND_CAPTURE" | grep -q '⏭️ 上次成功距今 3 小时' \
   && ok "S1e 条目子行标注预计跳过" || bad "S1e: $SEND_CAPTURE"
 # 2026-09-09: 附注行 emoji 入 <b>（规范 §2 裁决 7），断言同步
-echo "$SEND_CAPTURE" | grep -q '<b>⏭️ 本轮预计跳过</b>：500 B / 2 文件' \
+echo "$SEND_CAPTURE" | grep -q '⏭️ <b>本轮预计跳过</b>：500 B / 2 文件' \
   && ok "S1f 合计附注给出预计跳过量" || bad "S1f: $SEND_CAPTURE"
 echo "$SEND_CAPTURE" | grep -q '预计实际传输 0 B / 0 文件' \
   && ok "S1g 合计附注给出预计实际传输 = 0" || bad "S1g: $SEND_CAPTURE"

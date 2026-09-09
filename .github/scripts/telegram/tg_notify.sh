@@ -64,9 +64,23 @@ tg_append() {
   printf -v "$1" '%s%s' "${!1}" "$2"
 }
 
-# 标题块: "{标题（含 emoji）加粗}\n分隔线\n"
+# 拆出前导 emoji 序列（含 VS16/ZWJ/keycap）——emoji 不入 <b>（2026-09-10 拍板），
+# 真源自动拆分，调用方仍传「emoji + 短语」整串、无需感知。
+# 输出两行: 第一行=前导 emoji（可为空），第二行=剩余文字
+_split_leading_emoji() {
+  printf '%s' "$1" | perl -CSD -ne '
+    if (/^((?:[\x{2100}-\x{2BFF}\x{1F000}-\x{1FAFF}\x{FE0F}\x{200D}\x{20E3}])+)\s*(.*)\z/s) { print "$1\n$2"; }
+    else { print "\n$_"; }
+  '
+}
+
+# 标题块: "{emoji} <b>标题文字</b>\n分隔线\n"（emoji 在 <b> 外）
 tg_add_title() {
-  tg_append "$1" "<b>$(escape_html "$2")</b>"$'\n'"${TG_SEP}"$'\n'
+  local _split _e _t
+  _split=$(_split_leading_emoji "$2") || _split=$'\n'"$2"
+  _e="${_split%%$'\n'*}"
+  _t="${_split#*$'\n'}"
+  tg_append "$1" "${_e:+$_e }<b>$(escape_html "$_t")</b>"$'\n'"${TG_SEP}"$'\n'
 }
 
 # 键值行（值不再加粗，2026-09-09 拍板：结论值/状态/计数/数值一律裸文本加转义，
@@ -93,7 +107,11 @@ tg_add_section() {
     *$'\n') tg_append "$1" $'\n' ;;
     *) tg_append "$1" $'\n'$'\n' ;;
   esac
-  tg_append "$1" "<b>$(escape_html "$2")</b>"$'\n'
+  local _split _e _t
+  _split=$(_split_leading_emoji "$2") || _split=$'\n'"$2"
+  _e="${_split%%$'\n'*}"
+  _t="${_split#*$'\n'}"
+  tg_append "$1" "${_e:+$_e }<b>$(escape_html "$_t")</b>"$'\n'
 }
 
 # 说明段（段前空一行；不再套 ，2026-09-09 全库去掉斜体标签）
