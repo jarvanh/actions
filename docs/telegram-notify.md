@@ -296,9 +296,18 @@ env:
 
 ## 7. 回归测试守卫
 
-`openlist/tests/` 现有 **17 个回归套件**——凡改动 `telegram/tg_notify.sh`（真源）/
+`openlist/tests/` 现有 **19 个回归套件**（2026-09-09 由 17 增至 19，新增
+`test_marker_skip_guards.sh` / `test_sync_trend_budget.sh`）——凡改动 `telegram/tg_notify.sh`（真源）/
 `openlist/telegram.sh` / `task_engine.sh` 批次行 / 同步管线，全量跑通后再交付，
-且全量日志 `command not found` 必须为零。与本规范直接相关的守卫点：
+且全量日志 `command not found` 必须为零。
+
+> **本地跑的 4 个已知失败属基线，不是回归**（macOS 环境所致，Linux runner 正常）：
+> `test_truth.sh` FAIL=7（容器重启依赖 docker/真实服务）、`test_progress_no_orphans.sh`
+> 的 T5 时序 flake、`test_marker_skip_guards.sh` 1b（BSD `date` 无 `-d`）、
+> `test_sync_trend_budget.sh`（macOS `wc` 输出对齐空格 + 脚本 `unbound variable`）。
+> 判定时与这条基线比对，偏离才算回归。
+
+与本规范直接相关的守卫点：
 
 | 测试 | 守卫点 |
 |---|---|
@@ -310,6 +319,8 @@ env:
 | `openlist/tests/test_method_id_naming.sh` | 修复方法 ID ↔ 中文标签映射 |
 | `openlist/tests/test_hash_dir_fallback.sh` | 哈希目录兜底（含 fix_log 文案） |
 | `openlist/tests/test_fix_log_section.sh` | 修复日志区段头 `=== 尝试修复失败文件: <rel> ===` 写完整相对路径 + 通知侧 awk 能切出非空片段 + 相邻区段不串味 |
+| `openlist/tests/test_marker_skip_guards.sh` | 跳过窗口守卫（未来戳 / rclone size 失败 fail-open / 源端缩小 warning / FORCE_SYNC 放行）→ 决定 `send_sync_skipped` 是否触发 |
+| `openlist/tests/test_sync_trend_budget.sh` | `📈 同步趋势`通知（sync_trend.sh）的跨 run 记录与预算门控 |
 
 `tg-channel/sync_to_tg.sh`（ph-dl / 91 通知）**暂无测试套件**——
 改动后靠本地渲染实测验证（提取函数 + 造模拟数据跑 `tree_lines` 输出对比）。
