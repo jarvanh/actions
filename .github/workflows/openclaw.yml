@@ -861,7 +861,7 @@ jobs:
           if [ "$AI_BACKEND" = "cliproxyapi" ]; then _ai_note="CLIProxyAPI · 回退"; else _ai_note="CliRelay · 全栈"; fi
           _entries="后端：<b>${_ai_note}</b>"
           [ -n "$AI_FALLBACK_REASON" ] && _entries+=$'\n'"回退原因：<b>$(escape_html "${AI_FALLBACK_REASON}")</b>"
-          tg_add_section msg "🤖 AI 网关"
+          tg_add_section msg "🤖 AI 网关 · $(printf '%s' "$_entries" | grep -c .)"
           tg_add_block msg "$(tree_lines "$_entries")"
           # footer 读 TG_RUN_URL/TG_RUN_STARTED_AT（上方前缀注入）
           tg_add_footer msg

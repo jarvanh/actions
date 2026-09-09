@@ -61,7 +61,8 @@ _notify_add_excludes() {
 # 用法: _notify_add_diff_list <var>
 _notify_add_diff_list() {
   [ -z "$diff_files_list" ] && return 0
-  tg_add_section "$1" "📋 差异文件列表"
+  # 列表分节带计数（规范 §2：分节后跟条目列表必须 · N）
+  tg_add_section "$1" "📋 差异文件列表 · $(printf '%s' "$diff_files_list" | grep -c .)"
   tg_add_block "$1" "$diff_files_list"
   return 0
 }

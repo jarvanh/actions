@@ -22,7 +22,7 @@ shopt -u patsub_replacement 2>/dev/null || true
 # scripts/telegram/tg_notify.sh（全库唯一真源），由 load_all.sh 在 L0 层最先 source。
 # 本文件不再自带副本——两份实现迟早漂移（2026-09-06 收敛）。
 # 树形规则要点（详见 docs/telegram-notify.md §2）:
-#   多条目分组列表统一树形层级（├─/└─ 标记条目边界），单行平铺列表仍用 "• " 前缀。
+#   条目一律树形层级（├─/└─ 标记条目边界），全库无 "• " 平铺形态（2026-09-09 收敛）。
 
 # 检查日志文件是否包含实质内容（排除 rclone 统计行和空行）
 # 返回值: "empty" / "transfer_only" / "has_content"

@@ -196,17 +196,19 @@ _restore_one_entry() {
 }
 
 # 条目列表渲染: 每组上限 8 条，超出折叠"还有 N 条…"（规范 §2.2/§4，
-# 防超长列表刷屏并顶到 4000 字符分片边界把收尾区切走）
+# 防超长列表刷屏并顶到 4000 字符分片边界把收尾区切走）。
+# 统一树形（2026-09-09 收敛：条目统一 ├─/└─，不再用 "• " 平铺；折叠行并入条目流，
+# 末条 └─ 由 tree_lines 统一决定，禁双 └─）
 # 用法: _fold_list <条目列表（多行，末条目行已含换行）> <总条数>
 _fold_list() {
-  local _entries="$1" _total="$2" _shown _rest
+  local _entries="$1" _total="$2" _shown _rest _out
   _shown=$(printf '%s' "$_entries" | head -8)
   _rest=$((_total - 8))
+  _out="${_shown%$'\n'}"
   if [ "$_rest" -gt 0 ]; then
-    printf '%s\n• <i>还有 %d 条…</i>' "${_shown%$'\n'}" "$_rest"
-  else
-    printf '%s' "${_shown%$'\n'}"
+    _out+=$'\n'"<i>还有 ${_rest} 条…</i>"
   fi
+  tree_lines "$_out"
 }
 
 # 一键还原入口
@@ -256,13 +258,13 @@ restore_fixed_files() {
 
       if [ "${status%%:*}" = "OK" ]; then
         total_ok=$((total_ok + 1))
-        ok_list+="• <code>$(escape_html "$orig")</code>"$'\n'
+        ok_list+="<code>$(escape_html "$orig")</code>"$'\n'
         # 从 marker 移除该条目（fixed_files + fix_blacklist），即时写回
         json=$(echo "$json" | marker_remove_fix_entry "$orig" 1) || true
         _marker_write "$json" "$marker_path" >/dev/null 2>&1 || true
       else
         total_fail=$((total_fail + 1))
-        fail_list+="• <code>$(escape_html "$orig")</code> · <i>$(escape_html "${status#FAIL: }")</i>"$'\n'
+        fail_list+="<code>$(escape_html "$orig")</code> · <i>$(escape_html "${status#FAIL: }")</i>"$'\n'
       fi
     done < <(echo "$json" | jq -r '(.fixed_files // [])[] | [.original, .alternative, .method, (.md5 // "")] | @tsv' 2>/dev/null)
   done
@@ -517,7 +519,7 @@ restore_source_from_target() {
       case "${entry_status%%:*}" in   # 前缀匹配: 兼容 "OK"/"OK: <附注>"，仍可区分 SKIP/FAIL
         OK) total_ok=$((total_ok + 1)) ;;
         SKIP) total_skip=$((total_skip + 1)) ;;
-        *) total_fail=$((total_fail + 1)); fail_list+="• <code>$(escape_html "$entry_orig")</code> · <i>$(escape_html "${entry_status#FAIL: }")</i>"$'\n' ;;
+        *) total_fail=$((total_fail + 1)); fail_list+="<code>$(escape_html "$entry_orig")</code> · <i>$(escape_html "${entry_status#FAIL: }")</i>"$'\n' ;;
       esac
     done < <(_recover_source_entries "$src" "$dst" "$json" "$alt_lines" "$tmp_base")
   done
@@ -631,7 +633,7 @@ rebuild_source_from_target() {
       case "${entry_status%%:*}" in
         OK) total_ok=$((total_ok + 1)) ;;
         SKIP) total_skip=$((total_skip + 1)) ;;
-        *) total_fail=$((total_fail + 1)); fail_list+="• <code>$(escape_html "$entry_orig")</code> · <i>$(escape_html "${entry_status#FAIL: }")</i>"$'\n' ;;
+        *) total_fail=$((total_fail + 1)); fail_list+="<code>$(escape_html "$entry_orig")</code> · <i>$(escape_html "${entry_status#FAIL: }")</i>"$'\n' ;;
       esac
     done < <(_recover_source_entries "$src" "$dst" "$json" "$alt_lines" "$tmp_base")
   done

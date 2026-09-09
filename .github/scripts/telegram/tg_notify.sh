@@ -22,8 +22,8 @@
 #   {emoji} <b>标题</b>          ← tg_add_title
 #   ━━━━━━━━━━━━━━━━━━           ← TG_SEP（勿手写分隔线）
 #   标签：<b>值</b>               ← tg_add_kv / 路径 tg_add_path
-#   {emoji} <b>分节 · N</b>       ← tg_add_section（段前空行，紧跟标题时无；计数一律 " · N"）
-#   • 条目 /  ├─ 树形条目         ← 平铺 "• "，分组树形
+#   {emoji} <b>分节 · N</b>       ← tg_add_section（段前空行，紧跟标题时无；列表分节计数一律 " · N"）
+#   ├─/└─ 树形条目               ← 唯一条目前缀（tree_lines / tree_code_fold，无平铺形态）
 #   <pre>日志</pre>              ← tg_add_block
 #   {可选 <i>备注</i>}            ← tg_add_note
 #   （空行）⏱ 已运行 X · 🔗 运行日志 ← tg_add_footer（全库唯一收尾形态，自带空行）

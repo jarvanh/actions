@@ -1199,7 +1199,8 @@ jobs:
             # 分节标题交给 tg_add_section：emoji 入 <b>（规范 §2 裁决 7）、段前空行自动补全。
             # waitline 只含树形条目，不要再自带"⏳ 起播等待"标题行，也不要再套"等待："标签
             if [ -n "$waitline" ]; then
-              tg_add_section text "⏳ 起播等待"
+              # 列表分节带计数（规范 §2：分节后跟条目列表必须 · N）
+              tg_add_section text "⏳ 起播等待 · $(printf '%s' "$waitline" | grep -c .)"
               tg_add_block text "$waitline"
             fi
             # 长链接折叠成 <a> 超链接，避免整条通知被几百字符的 URL 淹没；
