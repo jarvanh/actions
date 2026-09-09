@@ -16,8 +16,8 @@ name: emby
 
 on:
   schedule:
-    - cron: "0 2,8,14,20 * * *"
-    # - cron: "*/5 * * * *"
+    # - cron: "0 2,8,14,20 * * *"
+    - cron: "*/5 * * * *"
   workflow_dispatch:
     inputs:
       playback_mode:
