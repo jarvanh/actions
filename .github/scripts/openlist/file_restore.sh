@@ -206,7 +206,7 @@ _fold_list() {
   _rest=$((_total - 8))
   _out="${_shown%$'\n'}"
   if [ "$_rest" -gt 0 ]; then
-    _out+=$'\n'"<i>还有 ${_rest} 条…</i>"
+    _out+=$'\n'"还有 ${_rest} 条…"
   fi
   tree_lines "$_out"
 }
@@ -264,7 +264,7 @@ restore_fixed_files() {
         _marker_write "$json" "$marker_path" >/dev/null 2>&1 || true
       else
         total_fail=$((total_fail + 1))
-        fail_list+="<code>$(escape_html "$orig")</code> · <i>$(escape_html "${status#FAIL: }")</i>"$'\n'
+        fail_list+="<code>$(escape_html "$orig")</code> · $(escape_html "${status#FAIL: }")"$'\n'
       fi
     done < <(echo "$json" | jq -r '(.fixed_files // [])[] | [.original, .alternative, .method, (.md5 // "")] | @tsv' 2>/dev/null)
   done
@@ -519,7 +519,7 @@ restore_source_from_target() {
       case "${entry_status%%:*}" in   # 前缀匹配: 兼容 "OK"/"OK: <附注>"，仍可区分 SKIP/FAIL
         OK) total_ok=$((total_ok + 1)) ;;
         SKIP) total_skip=$((total_skip + 1)) ;;
-        *) total_fail=$((total_fail + 1)); fail_list+="<code>$(escape_html "$entry_orig")</code> · <i>$(escape_html "${entry_status#FAIL: }")</i>"$'\n' ;;
+        *) total_fail=$((total_fail + 1)); fail_list+="<code>$(escape_html "$entry_orig")</code> · $(escape_html "${entry_status#FAIL: }")"$'\n' ;;
       esac
     done < <(_recover_source_entries "$src" "$dst" "$json" "$alt_lines" "$tmp_base")
   done
@@ -633,7 +633,7 @@ rebuild_source_from_target() {
       case "${entry_status%%:*}" in
         OK) total_ok=$((total_ok + 1)) ;;
         SKIP) total_skip=$((total_skip + 1)) ;;
-        *) total_fail=$((total_fail + 1)); fail_list+="<code>$(escape_html "$entry_orig")</code> · <i>$(escape_html "${entry_status#FAIL: }")</i>"$'\n' ;;
+        *) total_fail=$((total_fail + 1)); fail_list+="<code>$(escape_html "$entry_orig")</code> · $(escape_html "${entry_status#FAIL: }")"$'\n' ;;
       esac
     done < <(_recover_source_entries "$src" "$dst" "$json" "$alt_lines" "$tmp_base")
   done

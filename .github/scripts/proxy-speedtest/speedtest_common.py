@@ -486,9 +486,9 @@ def build_target_network_section(targets):
             lines.append(f'  ├─ 测速服务器：<code>{esc(server)}</code>')
         isp, asn, loc = network_cells(info)
         lines += [
-            f'  ├─ ISP：<b>{esc(isp)}</b>',
+            f'  ├─ ISP：{esc(isp)}',
             f'  ├─ ASN：<code>{esc(asn)}</code>',
-            f'  └─ 位置：<b>{esc(loc)}</b>',
+            f'  └─ 位置：{esc(loc)}',
         ]
     return lines
 
@@ -499,7 +499,7 @@ def build_target_network_section(targets):
 def send_telegram(env, text):
     """发送 Telegram 消息（统一 HTML parse_mode；429 自动重试，其余失败直接返回
     {'sent': False, ...} 并带上响应体）。文本应使用全库统一 HTML 版式（emoji 标题 + ━━━
-    分隔线 + <b>/<code>/<i> + 统一收尾行）；动态内容一律经 tg_* 助手转义。"""
+    分隔线 + <b>/<code>/ + 统一收尾行）；动态内容一律经 tg_* 助手转义。"""
     bot = env.get('TELEGRAM_BOT_TOKEN') or env.get('TG_BOT_TOKEN')
     chat = env.get('TELEGRAM_CHAT_ID') or env.get('TG_CHAT_ID')
     if not bot or not chat:
@@ -621,7 +621,7 @@ def tg_footer_line():
         except Exception:
             elapsed = 0.0
     if elapsed > 0:
-        line = f'⏱ 已运行 <b>{html.escape(tg_format_elapsed(elapsed))}</b>'
+        line = f'⏱ 已运行 {html.escape(tg_format_elapsed(elapsed))}'
     run_url = os.environ.get('TG_RUN_URL', '')
     if run_url:
         if line:

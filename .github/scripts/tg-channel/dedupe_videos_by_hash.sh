@@ -43,7 +43,7 @@ _grp_add() {
   printf -v "$1" '%s%s' "${!1}" "$2"
 }
 _grp_fold() {
-  [ "$GRP_HIDDEN" -gt 0 ] && printf '%s' "<i>还有 ${GRP_HIDDEN} 条…</i>"$'\n'
+  [ "$GRP_HIDDEN" -gt 0 ] && printf '%s' "还有 ${GRP_HIDDEN} 条…"$'\n'
   return 0
 }
 _grp_block() {
@@ -156,13 +156,13 @@ for hash in "${!HASH_ENTRIES[@]}"; do
       if [ "$AUTO_DELETE" = "true" ]; then
         if rclone deletefile "$SOURCE_REMOTE/$p" 2>/tmp/rclone_err.log; then
           REMOVED_COUNT=$((REMOVED_COUNT + 1))
-          _grp_add group_entries "<b>🗑 删除</b> <code>$(escape_html "${p}")</code> · <i>${s} 字节 · ${t}</i>"$'\n'
+          _grp_add group_entries "<b>🗑 删除</b> <code>$(escape_html "${p}")</code> · ${s} 字节 · ${t}"$'\n'
         else
           _grp_add group_entries "<b>❌ 删除失败</b> <code>$(escape_html "${p}")</code>"$'\n'
           echo "  ❌ 删除失败: $(tail -n 3 /tmp/rclone_err.log)"
         fi
       else
-        _grp_add group_entries "<b>⚠️ 待删除 · 已跳过</b> <code>$(escape_html "${p}")</code> · <i>${s} 字节 · ${t}</i>"$'\n'
+        _grp_add group_entries "<b>⚠️ 待删除 · 已跳过</b> <code>$(escape_html "${p}")</code> · ${s} 字节 · ${t}"$'\n'
       fi
     done <<< "$sorted"
     _fold=$(_grp_fold)
@@ -179,13 +179,13 @@ for hash in "${!HASH_ENTRIES[@]}"; do
       if [ "$AUTO_DELETE" = "true" ]; then
         if rclone deletefile "$SOURCE_REMOTE/$p" 2>/tmp/rclone_err.log; then
           REMOVED_COUNT=$((REMOVED_COUNT + 1))
-          _grp_add group_entries "<b>🗑 删除</b> <code>$(escape_html "${p}")</code> · <i>哈希一致 · 旧文件</i>"$'\n'
+          _grp_add group_entries "<b>🗑 删除</b> <code>$(escape_html "${p}")</code> · 哈希一致 · 旧文件"$'\n'
         else
           _grp_add group_entries "<b>❌ 删除失败</b> <code>$(escape_html "${p}")</code>"$'\n'
           echo "  ❌ 删除失败: $(tail -n 3 /tmp/rclone_err.log)"
         fi
       else
-        _grp_add group_entries "<b>⚠️ 待删除 · 已跳过</b> <code>$(escape_html "${p}")</code> · <i>哈希一致 · 旧文件</i>"$'\n'
+        _grp_add group_entries "<b>⚠️ 待删除 · 已跳过</b> <code>$(escape_html "${p}")</code> · 哈希一致 · 旧文件"$'\n'
       fi
     done <<< "$sorted"
     _fold=$(_grp_fold)
@@ -195,7 +195,7 @@ done
 
 # 组级折叠行（通知最多展示 8 组，超出并入条目流；逐组处理过程已在 Actions 日志回显）
 if [ "$GRP_BLOCK_HIDDEN" -gt 0 ]; then
-  DUP_DETAILS+=$'\n'"<i>还有 ${GRP_BLOCK_HIDDEN} 组未展开 · 明细见运行日志</i>"$'\n'
+  DUP_DETAILS+=$'\n'"还有 ${GRP_BLOCK_HIDDEN} 组未展开 · 明细见运行日志"$'\n'
 fi
 
 # 去重日志输出到 Actions 日志，便于追溯

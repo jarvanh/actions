@@ -112,9 +112,9 @@ echo "$SEND_CAPTURE" | grep -q '+500 B / +2 文件' \
 echo "$SEND_CAPTURE" | grep -q '⏭️ 上次成功距今 3 小时' \
   && ok "S1e 条目子行标注预计跳过" || bad "S1e: $SEND_CAPTURE"
 # 2026-09-09: 附注行 emoji 入 <b>（规范 §2 裁决 7），断言同步
-echo "$SEND_CAPTURE" | grep -q '<b>⏭️ 本轮预计跳过</b>：<b>500 B</b> / <b>2</b> 文件' \
+echo "$SEND_CAPTURE" | grep -q '<b>⏭️ 本轮预计跳过</b>：500 B / 2 文件' \
   && ok "S1f 合计附注给出预计跳过量" || bad "S1f: $SEND_CAPTURE"
-echo "$SEND_CAPTURE" | grep -q '预计实际传输 <b>0 B</b> / <b>0</b> 文件' \
+echo "$SEND_CAPTURE" | grep -q '预计实际传输 0 B / 0 文件' \
   && ok "S1g 合计附注给出预计实际传输 = 0" || bad "S1g: $SEND_CAPTURE"
 
 # ===== S2: marker 超出窗口（72 小时前）→ 不标注 =====
@@ -161,7 +161,7 @@ SEND_CAPTURE=""
 send_sync_skipped "backup" "onedrive:skip" "openlist:skipdst"
 echo "$SEND_CAPTURE" | grep -q '本次未传' \
   && ok "S6a 跳过通知含「本次未传」段" || bad "S6a: $SEND_CAPTURE"
-echo "$SEND_CAPTURE" | grep -q '<b>500 B</b> / <b>2</b> 文件' \
+echo "$SEND_CAPTURE" | grep -q '500 B / 2 文件' \
   && ok "S6b 未传量取自预览缓存（500 B / 2 文件）" || bad "S6b: $SEND_CAPTURE"
 [ "$(cat "$LSJSON_CALLS")" = "$_calls_before" ] \
   && ok "S6c 命中缓存未新增 lsjson 调用" || bad "S6c: [$(cat "$LSJSON_CALLS") vs $_calls_before]"
@@ -177,7 +177,7 @@ SEND_CAPTURE=""
 send_sync_skipped "backup_sub" "onedrive:skip/sub" "openlist:skipdst/sub"
 echo "$SEND_CAPTURE" | grep -q '本次未传' \
   && ok "S7a 子任务跳过通知含「本次未传」" || bad "S7a: $SEND_CAPTURE"
-echo "$SEND_CAPTURE" | grep -q '<b>50 B</b> / <b>1</b> 文件' \
+echo "$SEND_CAPTURE" | grep -q '50 B / 1 文件' \
   && ok "S7b 现场估算值正确（50 B / 1 文件）" || bad "S7b: $SEND_CAPTURE"
 
 # ===== S8: 目标端列举失败 → 不展示（避免按空目标端虚报全量）=====

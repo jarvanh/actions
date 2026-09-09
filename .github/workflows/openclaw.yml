@@ -845,22 +845,22 @@ jobs:
 
           # 条目非文件值：可复制的（ASN/命令）→ <code>，其余 → <b>（禁裸文本）
           _entries="出口 IP：<code>$(escape_html "${PUB_IP}")</code>"
-          _entries+=$'\n'"ISP：<b>$(escape_html "${IP_ISP}")</b>"
+          _entries+=$'\n'"ISP：$(escape_html "${IP_ISP}")"
           _entries+=$'\n'"ASN：<code>$(escape_html "AS${IP_ASN} · ${IP_ORG}")</code>"
-          _entries+=$'\n'"位置：<b>$(escape_html "${IP_LOC}")</b>"
+          _entries+=$'\n'"位置：$(escape_html "${IP_LOC}")"
           tg_add_section msg "🌐 出口网络"
           tg_add_block msg "$(tree_lines "$_entries")"
 
-          _entries="状态：<b>已广播 · 可作为出口节点</b>"
+          _entries="状态：已广播 · 可作为出口节点"
           _entries+=$'\n'"管理页批准：<code>admin/machines → openclaw → Edit routes → 勾选 Exit Node</code>"
-          _entries+=$'\n'"ACL 免批准（推荐）：<code>routes 0.0.0.0/0,::/0 → tag:ci</code> · <i>免每次批准</i>"
+          _entries+=$'\n'"ACL 免批准（推荐）：<code>routes 0.0.0.0/0,::/0 → tag:ci</code> · 免每次批准"
           _entries+=$'\n'"API：<code>POST /api/v2/device/{device_id}/routes</code>"
           tg_add_section msg "🛰️ 出口节点"
           tg_add_block msg "$(tree_lines "$_entries")"
 
           if [ "$AI_BACKEND" = "cliproxyapi" ]; then _ai_note="CLIProxyAPI · 回退"; else _ai_note="CliRelay · 全栈"; fi
-          _entries="后端：<b>${_ai_note}</b>"
-          [ -n "$AI_FALLBACK_REASON" ] && _entries+=$'\n'"回退原因：<b>$(escape_html "${AI_FALLBACK_REASON}")</b>"
+          _entries="后端：${_ai_note}"
+          [ -n "$AI_FALLBACK_REASON" ] && _entries+=$'\n'"回退原因：$(escape_html "${AI_FALLBACK_REASON}")"
           tg_add_section msg "🤖 AI 网关 · $(printf '%s' "$_entries" | grep -c .)"
           tg_add_block msg "$(tree_lines "$_entries")"
           # footer 读 TG_RUN_URL/TG_RUN_STARTED_AT（上方前缀注入）
@@ -1578,7 +1578,7 @@ jobs:
               local full_msg=""
               tg_add_title full_msg "⚠️ OpenClaw 归档告警"
               # 告警正文是 rclone/tar 的多行原始输出 → <pre>（裁决 8：多行日志 → <pre>，
-              # 此前塞进单个 <i> 说明段，跨行斜体且英文 token 直出）
+              # 此前塞进单个  说明段，跨行斜体且英文 token 直出）
               tg_add_block full_msg "<pre>$(escape_html "$msg")</pre>"
               # Run ID 属机器值 → <code>（语义表 #3）
               tg_add_path full_msg "Run ID" "${run_id}"
@@ -1700,7 +1700,7 @@ jobs:
               msg=""
               tg_add_title msg "⚠️ OpenClaw 即将进入最终归档"
               tg_add_kv msg "预计" "约 ${FINAL_ARCHIVE_WARNING_BEFORE_MINUTES} 分钟后执行"
-              # 说明段只装说明；"随后执行：…" 是 kv 形态，此前整行塞进 <i> 说明段
+              # 说明段只装说明；"随后执行：…" 是 kv 形态，此前整行塞进  说明段
               tg_add_note msg "请及时保存状态或完成当前操作。"
               tg_add_kv msg "随后执行" "Stop OpenClaw and Final Archive"
               TG_RUN_URL="$run_url" TG_RUN_STARTED_AT="${TG_RUN_STARTED_AT:-}" tg_add_footer msg
@@ -1756,7 +1756,7 @@ jobs:
               source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
               local full_msg=""
               tg_add_title full_msg "⚠️ OpenClaw 归档告警"
-              # 与 send_telegram_alert 同版式（此前一个用 <i> 说明段、一个用 <b> kv，
+              # 与 send_telegram_alert 同版式（此前一个用  说明段、一个用 <b> kv，
               # 同一标题两种形态）：多行原始输出 → <pre>；Run ID 属机器值 → <code>
               tg_add_block full_msg "<pre>$(escape_html "$msg")</pre>"
               tg_add_path full_msg "Run ID" "$run_id"

@@ -606,7 +606,7 @@ preprocess_large_files() {
       # 英文 kind 不直出通知（规范 §4）: media/binary 映射中文标签
       local _kind_label="二进制"
       [ "$split_kind" = "media" ] && _kind_label="媒体"
-      processed_files+="<code>$(escape_html "${remote_source}:${full_path}")</code> · <i>$(format_bytes_iec "$file_size") · ${_kind_label}</i>"$'\n'
+      processed_files+="<code>$(escape_html "${remote_source}:${full_path}")</code> · $(format_bytes_iec "$file_size") · ${_kind_label}"$'\n'
       deleted_files+="<code>$(escape_html "${remote_source}:${full_path}")</code>"$'\n'
       echo "$(date +%Y-%m-%d_%H:%M:%S) - ${remote_source}:${full_path} - OpenList 前置分割成功(${split_kind})，已删除原始大文件" >> "$PROCESSED_FILES_LOG"
     else

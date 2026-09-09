@@ -124,10 +124,10 @@ _send_sync_result_notification() {
       count_info="<b>差异 ${count_diff}</b> · 源端 ${source_count} / 目标 ${dest_count}"
       diff_files_list=$(_build_diff_files_list "$source_path" "$dest_path" "${extra_args[@]}")
     else
-      count_info="<b>${source_count}</b> · 一致"
+      count_info="${source_count} · 一致"
     fi
   else
-    count_info="源端 <b>${source_count}</b> / 目标 <b>${dest_count}</b>"
+    count_info="源端 ${source_count} / 目标 ${dest_count}"
   fi
 
   # 提取 --exclude 规则，方便在通知中说明
@@ -150,12 +150,12 @@ _send_sync_result_notification() {
       _entry="<code>$(escape_html "$f_original")</code>"
       # 改名修复（含目录变动）: 原名 → 实际名 双方完整路径
       [ "$f_original" != "$f_alternative" ] && _entry+=" → <code>$(escape_html "$f_alternative")</code>"
-      _entry+=" · <i>$(escape_html "$f_size")</i> · <i>$(escape_html "$f_method_tag")</i>"
+      _entry+=" · $(escape_html "$f_size") · $(escape_html "$f_method_tag")"
       _fix_entries+="${_entry}"$'\n'
       _fix_shown=$((_fix_shown + 1))
     done < "$fix_list"
     if [ "$fix_total" -gt 8 ]; then
-      _fix_entries+="<i>还有 $((fix_total - 8)) 条…</i>"$'\n'
+      _fix_entries+="还有 $((fix_total - 8)) 条…"$'\n'
     fi
     fix_summary="$(tree_lines "$_fix_entries")"$'\n'
   fi
@@ -175,7 +175,7 @@ _send_sync_result_notification() {
     while IFS='|' read -r fpath fsize fmsg; do
       [ -z "$fpath" ] && continue
       [ "${#_fail_entries[@]}" -ge 8 ] && continue
-      _fail_entries+=("<code>$(escape_html "$fpath")</code> · <i>$(escape_html "$fsize")</i> · <i>$(escape_html "$fmsg")</i>")
+      _fail_entries+=("<code>$(escape_html "$fpath")</code> · $(escape_html "$fsize") · $(escape_html "$fmsg")")
       # 从 fix_log 中按文件名分隔提取该文件对应的修复过程
       local fix_section="" _fix_log_text
       if [ -f "$fix_log" ]; then
@@ -213,7 +213,7 @@ _send_sync_result_notification() {
     done
     if [ "$_fold" = "1" ]; then
       # 折叠行并入条目流作末条
-      fail_summary+="$(tree_conn 1)<i>还有 $((fail_total - _n)) 条…</i>"$'\n'
+      fail_summary+="$(tree_conn 1)还有 $((fail_total - _n)) 条…"$'\n'
     fi
   fi
   [ -z "$fail_summary" ] && fail_summary="无"$'\n'

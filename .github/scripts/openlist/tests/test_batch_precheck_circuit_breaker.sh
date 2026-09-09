@@ -57,8 +57,8 @@ send_sync_warning() { :; }
 # 排版助手 stub（与 telegram/tg_notify.sh 同语义——AUTO_SPLIT_INFO 经其构建）
 escape_html() { local s="$1"; s="${s//&/&amp;}"; s="${s//</&lt;}"; s="${s//>/&gt;}"; echo "$s"; }
 tg_append() { printf -v "$1" '%s%s' "${!1}" "$2"; }
-tg_add_section() { tg_append "$1" $'\n'"<b>$(escape_html "$2")</b>"$'\n'; }
-tg_add_kv() { tg_append "$1" "$2：<b>$(escape_html "$3")</b>"$'\n'; }
+tg_add_section() { tg_append "$1" $'\n'"$(escape_html "$2")"$'\n'; }
+tg_add_kv() { tg_append "$1" "$2：$(escape_html "$3")"$'\n'; }
 tg_add_block() { tg_append "$1" "$2"; case "$2" in *$'\n') ;; *) tg_append "$1" $'\n' ;; esac; }
 # 进度面板统计行定义在 task_engine.sh（本测试按 sed 行号抽取，不含它）；
 # 与批次熔断断言无关，补 stub 以消除 "command not found" 噪音
@@ -150,7 +150,7 @@ chk "G1 return 1" "$RC" "1"
 chk "G1 零批次传输" "$(copy_count)" "0"
 chk "G1 预检被调用 1 次" "$CHECK_CALLS" "1"
 chk "G1 未进入最终全量同步" "$SYNC_WITH_LOGGING_CALLS" "0"
-chk "G1 三批全部计失败" "$(echo "$AUTO_SPLIT_INFO" | grep -c '<b>❌ 3</b>' || true)" "1"
+chk "G1 三批全部计失败" "$(echo "$AUTO_SPLIT_INFO" | grep -c '❌ 3' || true)" "1"
 chk "G1 统计含熔断标注" "$(echo "$AUTO_SPLIT_INFO" | grep -c '批次预检熔断中止' || true)" "1"
 unset CHECK_FAIL_FROM_OVERRIDE
 
@@ -161,7 +161,7 @@ capture_rc "openlist:crypt" "t_g2"
 chk "G2 return 1" "$RC" "1"
 chk "G2 仅第 1 批完成传输" "$(copy_count)" "1"
 chk "G2 预检被调用 2 次" "$CHECK_CALLS" "2"
-chk "G2 统计 ✅1❌2" "$(echo "$AUTO_SPLIT_INFO" | grep -c '<b>✅ 1</b> · <b>❌ 2</b>' || true)" "1"
+chk "G2 统计 ✅1❌2" "$(echo "$AUTO_SPLIT_INFO" | grep -c '✅ 1 · ❌ 2' || true)" "1"
 unset CHECK_FAIL_FROM_OVERRIDE
 
 # ---------- G3: openlist 目标 + 预检全通过 ----------

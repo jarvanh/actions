@@ -881,7 +881,7 @@ send_sync_skipped() {
           copy)               _m_kind_label="直接复制";;
           *)                  _m_kind_label="$m_kind";;
         esac
-        _m_entries+=("<b>$(escape_html "$_m_kind_label")</b> × <b>${m_count}</b> · <i>$(format_bytes "$m_bytes")</i>")
+        _m_entries+=("<b>$(escape_html "$_m_kind_label")</b> × ${m_count} · $(format_bytes "$m_bytes")")
         _m_summaries+=("$(escape_html "$m_summary")")
       done <<< "$method_summary"
       local _i _n=${#_m_entries[@]} _last
@@ -903,7 +903,7 @@ send_sync_skipped() {
     if [[ "$_p_bytes" =~ ^[0-9]+$ ]] && [[ "$_p_count" =~ ^[0-9]+$ ]] \
        && { [ "$_p_bytes" -gt 0 ] || [ "$_p_count" -gt 0 ]; }; then
       tg_add_section msg "📦 本次未传"
-      tg_append msg "<b>$(format_bytes "$_p_bytes")</b> / <b>${_p_count}</b> 文件 <i>· 两端仍存在差异，因落在跳过窗口内未传，非故障</i>"$'\n'
+      tg_append msg "$(format_bytes "$_p_bytes") / ${_p_count} 文件 · 两端仍存在差异，因落在跳过窗口内未传，非故障"$'\n'
     fi
   fi
 

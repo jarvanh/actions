@@ -67,7 +67,7 @@ _build_diff_files_list() {
     local _var="${_bucket%%:*}" _name="${_bucket#*:}"
     _cnt=$(printf '%s\n' "${!_var}" | { grep -c . || true; })
     [ "${_cnt:-0}" -eq 0 ] && continue
-    result+="<b>${_name}</b> · ${_cnt}"$'\n'
+    result+="${_name} · ${_cnt}"$'\n'
     result+="$(tree_code_fold "${!_var}" 8)"$'\n'
   done
   [ -z "$result" ] && return 0
