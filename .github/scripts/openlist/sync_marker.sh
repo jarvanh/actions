@@ -837,7 +837,8 @@ send_sync_skipped() {
   local skip_window_hours=$((SYNC_SKIP_SECONDS / 3600))
   tg_add_title msg "⏭️ 同步任务跳过"
   tg_add_kv msg "任务" "$task_name"
-  tg_add_kv msg "跳过窗口" "${skip_window_hours} 小时内已成功"
+  # 值只写时长，"已成功"由标签「跳过窗口」表达（值不重复标签语义）
+  tg_add_kv msg "跳过窗口" "${skip_window_hours} 小时内"
   tg_add_path msg "源端" "$source_path"
   tg_add_path msg "目标" "$dest_path"
   tg_add_section msg "🕒 上次同步"

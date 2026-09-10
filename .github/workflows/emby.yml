@@ -985,11 +985,11 @@ jobs:
           # 以下都是格式化助手：任何一项取不到就返回空，由 join_parts 跳过，不产生 "null · · 0" 这类噪声
           two_digit() { case "$1" in ''|*[!0-9]*) return 1;; esac; printf '%02d' "$1"; }
           fmt_dur() { # $1=分钟 → 1 小时 38 分 / 38 分钟（规范：中文三段式，紧凑格式禁入通知；
-                      # 分钟 %02d 补零为既定形态——对齐时长条目"2 小时 08 分"）
+                      # 分钟不补零，与收尾区时长写法统一：2 小时 8 分）
             local m=${1:-0}
             case "$m" in ''|*[!0-9]*) return 0;; esac
             [ "$m" -lt 1 ] && return 0
-            if [ "$m" -ge 60 ]; then printf '%d 小时 %02d 分' "$((m / 60))" "$((m % 60))"; else printf '%d 分钟' "$m"; fi
+            if [ "$m" -ge 60 ]; then printf '%d 小时 %d 分' "$((m / 60))" "$((m % 60))"; else printf '%d 分钟' "$m"; fi
           }
           fmt_res() { # $1=视频高度(px) → 2160p/1080p/720p/480p/SD
             local h=${1:-0}

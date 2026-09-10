@@ -591,7 +591,8 @@ def tg_format_elapsed(seconds):
         return f'{h} 小时 {m} 分'
     if m:
         return f'{m} 分钟'
-    return f'{s} 秒'
+    # 秒统一一位小数（与 bash/pwsh 真源及条目内单文件耗时同形态）
+    return f'{s:.1f} 秒'
 
 
 def tg_entry(subject, *meta, code: bool = True):

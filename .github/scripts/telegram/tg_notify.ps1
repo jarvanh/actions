@@ -26,7 +26,10 @@ function Format-TgDuration([int]$totalSec) {
   $ss = $totalSec % 60
   if ($hh -gt 0) { return "$hh 小时 $mm 分" }
   elseif ($mm -gt 0) { return "$mm 分钟" }
-  else { return "$ss 秒" }
+  else {
+    # 秒统一一位小数，且强制 InvariantCulture（避免某些区域把小数点渲染成逗号）
+    return ([string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0:0.0}', $ss)) + " 秒"
+  }
 }
 
 # 收尾区（与 bash tg_add_footer 同形态同降级链）:
