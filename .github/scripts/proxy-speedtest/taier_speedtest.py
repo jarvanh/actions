@@ -468,7 +468,7 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
         # 计数口径与 cdn/gitee 统一用「可用」（成功=功能可用，含节点连接成功但速度偏低）
         f"📊 节点：共 {len(results)} 个 · 可用 {len(ok_results)} 个",
         f"📍 测速点：{esc(meta['points'])} · 模式：{esc(meta['mode_label'])}",
-        f"🧪 引擎：<code>taierspeedtest {esc(VERSION['taier'] or 'latest')}</code>",
+        f"🧪 引擎：{tg_entry('taierspeedtest ' + (VERSION['taier'] or 'latest'))}",
         '',
     ]
     # 测速点（泰尔服务器）的网络归属：按测速点参数复刻引擎 match 协议定位服务器，
@@ -501,7 +501,7 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
 
     if bypass_hits:
         lines.append('⚠️ 疑似未走代理')
-        lines.append(f"  └─ {bypass_hits} 个节点的出口 IP 与 runner 直连出口（<code>{esc(direct_ip)}</code>）相同，"
+        lines.append(f"  └─ {bypass_hits} 个节点的出口 IP 与 runner 直连出口（{tg_entry(direct_ip)}）相同，"
                      'TUN 进程规则可能未生效，结果不可信')
         lines.append('')
 
@@ -527,17 +527,17 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
         raw_url = ((gist_res.get('yaml') or {}).get('raw_url') or '').strip()
         gist_lines = [f'✅ 已{action}，达标 {qualified_count} 个 · 阈值 ≥{min_megabit}兆（按{esc(metric_label)}）']
         if gist_res.get('created'):
-            gist_lines.append('⚠️ 请把 Gist id 回填到 Secrets <code>PROXY_SPEEDTEST_TAIER_GIST_ID</code>，避免每轮新建')
+            gist_lines.append(f'⚠️ 请把 Gist id 回填到 Secrets {tg_entry("PROXY_SPEEDTEST_TAIER_GIST_ID")}，避免每轮新建')
         if raw_url:
             gist_lines.append(f'🔗 <a href="{esc(raw_url)}">订阅源 YAML</a>')
         for _i, _l in enumerate(gist_lines):
             _c = '└─' if _i == len(gist_lines) - 1 else '├─'
             lines.append(f'  {_c} {_l}')
     elif gist_res:
-        lines.append(f"  └─ ⚠️ 上传失败：<code>{esc(gist_res.get('reason', ''))}</code>")
+        lines.append(f"  └─ ⚠️ 上传失败：{tg_entry(gist_res.get('reason', ''))}")
     elif gist_error:
         # 上传阶段抛异常（HTTP 4xx 等）≠ 没有达标节点，文案必须区分
-        lines.append(f'  └─ ⚠️ 上传失败：<code>{esc(gist_error[:120])}</code>')
+        lines.append(f'  └─ ⚠️ 上传失败：{tg_entry(gist_error[:120])}')
     else:
         lines.append(f'  └─ ⚠️ 达标不足 {min_nodes} 个 · 阈值 ≥{min_megabit}兆（按{esc(metric_label)}）· 未更新订阅')
     # 统一收尾区（收尾区与正文间固定**一个**空行）：此前连写两个 append('') 变双空行
@@ -561,7 +561,7 @@ def notify_failure(env, reason):
         f'❌ 泰尔三网测速异常退出 · {html.escape(_head)}',
         TG_SEP,
         # reason 含原始异常串（机器值）→ <code>；与 cdn/gitee 的「原因/错误」同口径（裁决 8）
-        f'原因：<code>{html.escape(str(reason))}</code>',
+        f'原因：{tg_entry(reason)}',
         '',
     ]
     footer = tg_footer_line()
@@ -591,7 +591,7 @@ def handle_termination_signal(signum, frame):
         pass
     sig_name = signal.Signals(signum).name if signum else f'SIGNAL-{signum}'
     msg = (f'⛔ 泰尔三网测速异常终止\n{TG_SEP}\n'
-           f'⚠️ 脚本被中断：收到 <code>{sig_name}</code>，本轮测速未正常完成。')
+           f'⚠️ 脚本被中断：收到 {tg_entry(sig_name)}，本轮测速未正常完成。')
     footer = tg_footer_line()
     if footer:
         msg += f'\n\n{footer}'

@@ -124,14 +124,14 @@ for id in "${!ID_ENTRIES[@]}"; do
       [ -z "$p" ] && continue
       if rclone deletefile "$SOURCE_REMOTE/$p" 2>/tmp/rclone_err.log; then
         REMOVED_COUNT=$((REMOVED_COUNT + 1))
-        _grp_add group_entries "🗑 删除 <code>$(escape_html "${p}")</code> · ${s} 字节 · ${t}"$'\n'
+        _grp_add group_entries "🗑 删除 $(tg_entry "${p}" "${s} 字节" "${t}")"$'\n'
       else
-        _grp_add group_entries "❌ 删除失败 <code>$(escape_html "${p}")</code>"$'\n'
+        _grp_add group_entries "❌ 删除失败 $(tg_entry "${p}")"$'\n'
         echo "  ❌ 删除失败: $(tail -n 3 /tmp/rclone_err.log)"
       fi
     done <<< "$sorted"
     _fold=$(_grp_fold)
-    _grp_block "🔖 ID ${id} · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 仅按 ID 去重 · 保留 <code>$(escape_html "${kept_path}")</code>"$'\n'"$(tree_lines "${group_entries}${_fold}")"
+    _grp_block "🔖 ID ${id} · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 仅按 ID 去重 · 保留 $(tg_entry "${kept_path}")"$'\n'"$(tree_lines "${group_entries}${_fold}")"
     continue
   fi
 
@@ -154,17 +154,17 @@ for id in "${!ID_ENTRIES[@]}"; do
       if [ "$AUTO_DELETE" = "true" ]; then
         if rclone deletefile "$SOURCE_REMOTE/$p" 2>/tmp/rclone_err.log; then
           REMOVED_COUNT=$((REMOVED_COUNT + 1))
-          _grp_add group_entries "🗑 删除 <code>$(escape_html "${p}")</code> · ${s} 字节 · ${t}"$'\n'
+          _grp_add group_entries "🗑 删除 $(tg_entry "${p}" "${s} 字节" "${t}")"$'\n'
         else
-          _grp_add group_entries "❌ 删除失败 <code>$(escape_html "${p}")</code>"$'\n'
+          _grp_add group_entries "❌ 删除失败 $(tg_entry "${p}")"$'\n'
           echo "  ❌ 删除失败: $(tail -n 3 /tmp/rclone_err.log)"
         fi
       else
-        _grp_add group_entries "⚠️ 待删除 · 已跳过 <code>$(escape_html "${p}")</code> · ${s} 字节 · ${t}"$'\n'
+        _grp_add group_entries "⚠️ 待删除 · 已跳过 $(tg_entry "${p}" "${s} 字节" "${t}")"$'\n'
       fi
     done <<< "$sorted"
     _fold=$(_grp_fold)
-    _grp_block "🔖 ID ${id} · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 标题相同 · 保留 <code>$(escape_html "${kept_path}")</code>"$'\n'"$(tree_lines "${group_entries}${_fold}")"
+    _grp_block "🔖 ID ${id} · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 标题相同 · 保留 $(tg_entry "${kept_path}")"$'\n'"$(tree_lines "${group_entries}${_fold}")"
   else
     # 规则2：title 不同 → 对比哈希
     # 打印各文件规范化 title，便于排查为何被判不同（如不可见字符）
@@ -200,13 +200,13 @@ for id in "${!ID_ENTRIES[@]}"; do
           if [ "$AUTO_DELETE" = "true" ]; then
             if rclone deletefile "$SOURCE_REMOTE/$p" 2>/tmp/rclone_err.log; then
               REMOVED_COUNT=$((REMOVED_COUNT + 1))
-              _grp_add group_entries "🗑 删除 <code>$(escape_html "${p}")</code> · 哈希一致 ${hash:0:12} · 旧文件"$'\n'
+              _grp_add group_entries "🗑 删除 $(tg_entry "${p}" "哈希一致 ${hash:0:12}" "旧文件")"$'\n'
             else
-              _grp_add group_entries "❌ 删除失败 <code>$(escape_html "${p}")</code>"$'\n'
+              _grp_add group_entries "❌ 删除失败 $(tg_entry "${p}")"$'\n'
               echo "  ❌ 删除失败: $(tail -n 3 /tmp/rclone_err.log)"
             fi
           else
-            _grp_add group_entries "⚠️ 待删除 · 已跳过 <code>$(escape_html "${p}")</code> · 哈希一致 ${hash:0:12} · 旧文件"$'\n'
+            _grp_add group_entries "⚠️ 待删除 · 已跳过 $(tg_entry "${p}" "哈希一致 ${hash:0:12}" "旧文件")"$'\n'
           fi
         done <<< "$hsorted"
       done <<< "$DUP_HASHES"
@@ -217,7 +217,7 @@ for id in "${!ID_ENTRIES[@]}"; do
       NOTIFY_ONLY_COUNT=$((NOTIFY_ONLY_COUNT + 1))
       _grp_reset
       while IFS=';' read -r h t s p; do
-        _grp_add group_entries "⚠️ 保留 <code>$(escape_html "${p}")</code> · 哈希 ${h:0:12}"$'\n'
+        _grp_add group_entries "⚠️ 保留 $(tg_entry "${p}" "哈希 ${h:0:12}")"$'\n'
       done < "$HASH_LIST"
       _fold=$(_grp_fold)
       _grp_block "🔖 ID ${id} · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 标题不同且哈希各不相同 · 仅通知"$'\n'"$(tree_lines "${group_entries}${_fold}")"

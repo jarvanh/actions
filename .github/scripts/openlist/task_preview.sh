@@ -316,10 +316,10 @@ _preview_render_pairs_detail() {
           _pi=$((_pi + 1))
           _p_last=0
           [ "$_pi" -eq "${#_pats[@]}" ] && _p_last=1
-          _g_block[$_src]+="${_sub}$(tree_conn "$_p_last")<code>$(escape_html "$_p")</code>"$'\n'
+          _g_block[$_src]+="${_sub}$(tree_conn "$_p_last")$(tg_entry "$_p")"$'\n'
         done
       else
-        _g_block[$_src]+="${_sub}排除：<code>$(escape_html "$_excl")</code>"$'\n'
+        _g_block[$_src]+="${_sub}排除：$(tg_entry "$_excl")"$'\n'
       fi
     fi
     [ -n "$_fnote" ] && _g_block[$_src]+="${_sub}${_fnote# · }"$'\n'
