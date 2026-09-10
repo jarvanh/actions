@@ -48,14 +48,28 @@ jobs:
       - name: Install dependencies
         run: pip install pyyaml
 
-      # Ookla 官方源安装官方 CLI（二进制名固定为 speedtest，供 TUN 进程规则匹配）；
-      # 不要用 Debian/Ubuntu 的 speedtest-cli 包（第三方实现，输出结构与口径都不同）
+      # Ookla 官方源安装官方 CLI（二进制名固定为 speedtest，供 TUN 进程规则匹配）。
+      # 不用官方 script.deb.sh：它按 runner 发行版选 dist，而 Ookla 的 packagecloud 源
+      # 只发布到 jammy（最后更新 2022-08），ubuntu-24.04（noble）没有对应发行线，
+      # 会报「Unable to locate package speedtest」→ 这里显式钉住 jammy 借用；
+      # apt 仍失败时回退官方 tarball。
+      # 也不要用 Debian/Ubuntu 的 speedtest-cli 包（第三方实现，输出结构与口径都不同）
       - name: Install Ookla Speedtest CLI
         run: |
-          curl -sSL https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh | sudo bash
-          sudo apt-get install -y speedtest
-          which speedtest
-          speedtest --version || true
+          curl -fsSL https://packagecloud.io/ookla/speedtest-cli/gpgkey \
+            | sudo gpg --dearmor -o /usr/share/keyrings/ookla-speedtest-cli.gpg
+          echo "deb [signed-by=/usr/share/keyrings/ookla-speedtest-cli.gpg] https://packagecloud.io/ookla/speedtest-cli/ubuntu jammy main" \
+            | sudo tee /etc/apt/sources.list.d/ookla-speedtest-cli.list
+          sudo apt-get update -o Dir::Etc::sourcelist="sources.list.d/ookla-speedtest-cli.list" \
+            -o Dir::Etc::sourceparts="-" -o APT::Get::List-Cleanup="0"
+          if ! sudo apt-get install -y speedtest; then
+            echo "::warning::apt 安装失败，回退官方 tarball"
+            curl -fsSL https://install.speedtest.net/app/cli/ookla-speedtest-1.2.0-linux-x86_64.tgz \
+              -o /tmp/speedtest.tgz
+            sudo tar -xzf /tmp/speedtest.tgz -C /usr/local/bin speedtest
+            sudo chmod +x /usr/local/bin/speedtest
+          fi
+          speedtest --version
 
       - name: Run ookla speedtest
         env:

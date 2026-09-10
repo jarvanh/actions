@@ -413,7 +413,9 @@ jobs:
           cleanup_archive_workdir
           mkdir -p /tmp/local_rsstt /tmp/rsstt-restore
 
-          if [ -f ~/.openclaw/.env ]; then
+          # 门禁只看 rsstt 真正依赖的凭据（同名 secret 注入）：
+          # ~/.openclaw/.env 由 OpenClaw 自身维护、与 rsstt 无关，不能作为启动条件
+          if [ -n "${TELEGRAM_BOT_TOKEN_RSS_SB_BOT:-}" ]; then
             if rclone ls dropbox:self-hosted/rsstt.tar.gz > /dev/null 2>&1; then
               echo "📦 Found rsstt.tar.gz! Downloading and extracting..."
               rclone copyto dropbox:self-hosted/rsstt.tar.gz /tmp/rsstt.tar.gz
@@ -531,7 +533,7 @@ jobs:
             echo "=== rss-to-telegram local bind tree after startup ==="
             find /tmp/local_rsstt -maxdepth 3 | sort || true
           else
-            echo "⚠️ openclaw .env not found, skipping rss-to-telegram startup."
+            echo "❌ TELEGRAM_BOT_TOKEN_RSS_SB_BOT 未配置，跳过 rss-to-telegram 启动；本轮无 rsstt 数据，最终归档会跳过上传"
           fi
 
       - name: Run AI API gateway (CliRelay first, fallback CLIProxyAPI)
@@ -1933,7 +1935,13 @@ jobs:
             require_free_kb /tmp $((rsstt_src_kb + 512 * 1024)) "final rsstt archive preflight"
             sudo rm -f /tmp/rsstt.tar.gz
             rsstt_tar_output=""
-            if rsstt_tar_output=$(sudo tar -czf /tmp/rsstt.tar.gz -C /tmp/local_rsstt . 2>&1); then
+            # 目录里只剩占位 .keep = 本轮容器没起来（凭据缺失/启动失败）：
+            # 此时打包上传只会用空包覆盖云端 rsstt.tar.gz，直接跳过并说明原因
+            rsstt_data_files=$(sudo find /tmp/local_rsstt -type f ! -name '.keep' 2>/dev/null | wc -l)
+            if [ "$((rsstt_data_files + 0))" -lt 1 ]; then
+              echo "⚠️ rss-to-telegram 本轮没有产生数据文件，跳过归档，云端 rsstt.tar.gz 保持原状"
+              send_archive_alert "$(printf 'final rsstt.tar.gz 归档跳过\n原因：本轮 rss-to-telegram 未产生数据 · 云端归档保持原状未覆盖\n详情：data_files=0 dir=/tmp/local_rsstt')"
+            elif rsstt_tar_output=$(sudo tar -czf /tmp/rsstt.tar.gz -C /tmp/local_rsstt . 2>&1); then
               # 同上：root 产出的包由 runner 身份的 rclone 上传，显式放开读权限
               sudo chmod 644 /tmp/rsstt.tar.gz 2>/dev/null || true
               rsstt_validate_output=""

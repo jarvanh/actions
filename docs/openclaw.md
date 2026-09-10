@@ -26,7 +26,7 @@
 | Prepare runtime env | 生成 `~/runtime-env.sh` 并设为 `BASH_ENV`：加载 `~/.openclaw/.env`、继承 runner add_path、本地化 gh/git 认证 | — |
 | Install / Run Cloudflared Tunnel | 命名隧道 `oc`、`sub-store`（`ai-api` 在网关步骤起） | `oc.<VD>.eu.org`→18789；`sub-store.<VD>.eu.org`→3001 |
 | Run sub-store container | `xream/sub-store:http-meta`，后端同步 cron `50 * * * *` | 9876 + 127.0.0.1:3001，数据 `/dropbox/self-hosted/sub-store` |
-| Run rss-to-telegram container | `rongronggg9/rss-to-telegram:latest`，独立 bot secret `TELEGRAM_BOT_TOKEN_RSS_SB_BOT` | 数据 `/tmp/local_rsstt`（config + data） |
+| Run rss-to-telegram container | `rongronggg9/rss-to-telegram:latest`，启动门禁 = 独立 bot secret `TELEGRAM_BOT_TOKEN_RSS_SB_BOT`（未配置则跳过启动，本轮不产生数据、最终归档也跳过上传） | 数据 `/tmp/local_rsstt`（config + data） |
 | Run AI API gateway | CliRelay 全栈优先 / CLIProxyAPI 回退 | 8317 → 隧道 `ai-api` |
 | Run OpenClaw | 自愈主流程（本文第三、四章） | 18789 |
 | Start background archive loop | 每 20 分钟归档 `~/.openclaw` + AI 网关数据（`flock` 防重入） | Dropbox |
@@ -120,6 +120,8 @@
   （循环把名字写进 `/tmp/failed-archive-name`，最终归档复用它，避免同一轮产生两份）。
 - 除这三区外，最终归档还上传 `dropbox:self-hosted/rsstt.tar.gz`（rss-to-telegram 数据）
   与 AI 网关归档（见第六节）。
+- rsstt 归档带空数据保护：数据目录内只有占位 `.keep`（本轮容器没起来）时不打包、不上传，
+  只发一条「归档跳过」告警——空包上传会用几百字节的 tar 覆盖掉云端正常归档。
 
 ### 机制④：回退与降级守卫
 
