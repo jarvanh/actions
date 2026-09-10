@@ -329,7 +329,8 @@ _preview_render_pairs_detail() {
     # 预计跳过: 差异照算但不传，必须贴在条目下（否则 "有待同步却没传" 像 bug）
     if [ "${_pskip:-0}" != "0" ] && [ "${_pskip:-}" != "-" ]; then
       local _since="${_pskip##*|}"
-      _g_block[$_src]+="${_sub}⏭️ 上次成功距今 ${_since} 小时，仍在跳过窗口内 · 本轮预计跳过"$'\n'
+      # 相对时间统一 "N 小时前" 形态（此前 "距今 N 小时" 是另一种表达）
+      _g_block[$_src]+="${_sub}⏭️ 上次成功 ${_since} 小时前，仍在跳过窗口内 · 本轮预计跳过"$'\n'
     fi
   done <<< "$PREVIEW_PAIRS_TSV"
   # 组装: 组头 + 树形条目块，组间空一行（首组前不加——tg_add_section 已带段前空行）

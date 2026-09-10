@@ -109,7 +109,7 @@ SEND_CAPTURE=""
 flush_task_preview >/dev/null
 echo "$SEND_CAPTURE" | grep -q '+500 B / +2 文件' \
   && ok "S1d 条目行仍展示待同步量" || bad "S1d: $SEND_CAPTURE"
-echo "$SEND_CAPTURE" | grep -q '⏭️ 上次成功距今 3 小时' \
+echo "$SEND_CAPTURE" | grep -q '⏭️ 上次成功 3 小时' \
   && ok "S1e 条目子行标注预计跳过" || bad "S1e: $SEND_CAPTURE"
 # 2026-09-09: 附注行 emoji 入 （规范 §2 裁决 7），断言同步
 echo "$SEND_CAPTURE" | grep -q '⏭️ 本轮预计跳过：500 B / 2 文件' \
@@ -126,7 +126,7 @@ SEND_CAPTURE=""
 flush_task_preview >/dev/null
 echo "$SEND_CAPTURE" | grep -q '本轮预计跳过' \
   && bad "S2b 超窗口不应渲染跳过附注" || ok "S2b 超窗口无跳过附注"
-echo "$SEND_CAPTURE" | grep -q '⏭️ 上次成功距今' \
+echo "$SEND_CAPTURE" | grep -q '⏭️ 上次成功 ' \
   && bad "S2c 超窗口不应渲染条目标记" || ok "S2c 超窗口无条目标记"
 
 # ===== S3: marker 无 last_success → 不标注 =====

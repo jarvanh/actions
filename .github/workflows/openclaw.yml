@@ -1700,7 +1700,8 @@ jobs:
               source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
               msg=""
               tg_add_title msg "⚠️ OpenClaw 即将进入最终归档"
-              tg_add_kv msg "预计" "约 ${FINAL_ARCHIVE_WARNING_BEFORE_MINUTES} 分钟后执行"
+              # 值只写时长，"后执行"由标签「预计」表达（值不重复标签语义）
+              tg_add_kv msg "预计" "约 ${FINAL_ARCHIVE_WARNING_BEFORE_MINUTES} 分钟"
               # 说明段只装说明；"随后执行：…" 是 kv 形态，此前整行塞进  说明段
               tg_add_note msg "请及时保存状态或完成当前操作。"
               tg_add_kv msg "随后执行" "Stop OpenClaw and Final Archive"

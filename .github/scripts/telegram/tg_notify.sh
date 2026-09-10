@@ -149,7 +149,8 @@ tg_add_footer() {
     elif [ "$mins" -gt 0 ]; then
       dur="${mins} 分钟"
     else
-      dur="${elapsed} 秒"
+      # 秒统一一位小数（与条目内单文件耗时 12.3 秒 同形态；整数输入输出 12.0 秒）
+      dur="$(printf '%.1f' "$elapsed") 秒"
     fi
     line="⏱ 已运行 ${dur}"
   fi
