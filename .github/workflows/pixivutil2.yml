@@ -121,7 +121,7 @@ jobs:
           # 退出码语义映射：warning 只代表"跑完了但有跳过"，不该让整个任务变红
           case "$PU_EXIT" in
             0)   PU_STATUS="success"; PU_NOTE="" ;;
-            # 英文 token 不直出通知（规范 §4）：ERROR_CODE=N / exit=N 一律写中文
+            # 英文 token 不直出通知（规范 第 4 章）：ERROR_CODE=N / exit=N 一律写中文
             1)   PU_STATUS="warning"; PU_NOTE="存在失败项 · 错误码 1" ;;
             45)  PU_STATUS="warning"; PU_NOTE="作品页 404/服务端错误 · 错误码 9005（8 位截断为 45）" ;;
             100) PU_STATUS="failure"; PU_NOTE="未登录，cookie 已失效 · 错误码 100" ;;

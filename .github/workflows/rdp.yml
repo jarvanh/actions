@@ -87,7 +87,7 @@ jobs:
         # 自检: dot-source 失败会让后续调用未定义函数而静默无通知，显式暴露
         if (-not (Get-Command Send-TgMessage -ErrorAction SilentlyContinue)) { throw "tg_notify.ps1 加载失败" }
         # 版式与 tailscale-windows.yml 入口通知同款：分节 · N + 树形条目 + 说明段
-        # （规范见 docs/telegram-notify.md §3.4 / §4.5）
+        # （规范见 docs/telegram-notify.md 3.4 节 / 4.5 节）
         $msg = "🖥️ Windows RDP 已就绪`n$TG_SEP`n" +
           "🖥️ RDP · 3`n" +
           "  ├─ 地址：<code>$(Esc-Html $address)</code>`n" +

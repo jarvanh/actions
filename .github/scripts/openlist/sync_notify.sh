@@ -52,7 +52,7 @@ _notify_add_excludes() {
   # 列表分节带计数（规模一眼可见）
   tg_add_section "$1" "🚫 排除规则 · $(printf '%s' "$exclude_list" | grep -c .)"
   # 树形（tree_code_fold：逐行 <code>转义</code> + 超 8 条折叠）——此前用 "• " 平铺，
-  # 与同一条通知里的失败清单（├─/└─）两种前缀并存（规范 §2 裁决 3）
+  # 与同一条通知里的失败清单（├─/└─）两种前缀并存（规范 第 2 章 裁决 3）
   tg_add_block "$1" "$(tree_code_fold "$exclude_list")"
   return 0
 }
@@ -62,7 +62,7 @@ _notify_add_excludes() {
 # 用法: _notify_add_diff_list <var>
 _notify_add_diff_list() {
   [ -z "$diff_files_list" ] && return 0
-  # 列表分节带计数（规范 §2：分节后跟条目列表必须 · N）
+  # 列表分节带计数（规范 第 2 章：分节后跟条目列表必须 · N）
   tg_add_section "$1" "📋 差异文件列表 · $(printf '%s' "$diff_files_list" | grep -c .)"
   tg_add_block "$1" "$diff_files_list"
   return 0
@@ -323,7 +323,7 @@ _send_sync_result_notification() {
     err_log_size=$(stat -c%s "$log_filename" 2>/dev/null || echo 0)
     if [ "$err_log_size" -gt 0 ] && [ "$err_log_size" -lt "${OPENLIST_ERR_LOG_MAX_BYTES:-50000000}" ]; then
       local _doc_resp _doc_wait
-      # 重试次数与发送层对齐（5 次；此前 3 次，与 §5「429 重试最多 5 次」口径不一）
+      # 重试次数与发送层对齐（5 次；此前 3 次，与 第 5 章「429 重试最多 5 次」口径不一）
       for _doc_attempt in 1 2 3 4 5; do
         _doc_resp=$(curl -s -m 60 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
           -F chat_id="${TELEGRAM_CHAT_ID}" \

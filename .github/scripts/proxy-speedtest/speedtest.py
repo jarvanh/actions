@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """CDN 测速（proxy-speedtest-cdn）：订阅节点 → 国内 CDN/镜像站 延迟 + 下载 + 可选上行。
 
-仓库代理测速三件套之一（按测速点命名）：测速点是「真实公网站点」——延迟目标
+仓库代理测速四套之一（按测速点命名）：测速点是「真实公网站点」——延迟目标
 baidu/taobao、下载测速点腾讯云/清华 TUNA 镜像 ISO 与 npmmirror 最新 node 包，
 与 gitee（Gitee 私有仓库上行专项）、taier（泰尔三网测速服务器）相区分。
 
@@ -15,7 +15,7 @@ Gist 上传）与 speedtest_gitee.py 的 mihomo 内核启动 / 节点快照 / �
   - 订阅导出 + Gist 上传: 复用 speedtest_common.build_subscription_bundle / build_target_network_section /
     update_gist，把达标节点的原始配置整理成订阅并发布到本工作流专属 Gist
     （secret PROXY_SPEEDTEST_CDN_GIST_ID；文件名/描述经 PROXY_SPEEDTEST_GIST_FILENAME/
-    PROXY_SPEEDTEST_GIST_DESCRIPTION 覆盖，三件套各自可辨）
+    PROXY_SPEEDTEST_GIST_DESCRIPTION 覆盖，四套各自可辨）
 
 设计原则：
   - 共享能力一律 import 复用：纯共享层来自 speedtest_common，mihomo/订阅源来自
@@ -39,7 +39,7 @@ from datetime import datetime
 import yaml
 
 # ----------------------------------------------------------------------------
-# 三件套共享层（speedtest_common：进度日志/订阅策略/排版/归属查询/TG 发送/Gist 上传）
+# 四套共享层（speedtest_common：进度日志/订阅策略/排版/归属查询/TG 发送/Gist 上传）
 # 与 gitee 专项引擎（mihomo 生命周期/订阅源/Gitee 仓库/push 测速）。import 期会创建
 # ~/proxy-speedtest 及其 providers/、source-snapshots/ 子目录
 # ----------------------------------------------------------------------------
@@ -890,7 +890,7 @@ def main():
                 'upload_mibs': ul if isinstance(ul, (int, float)) else 0,
                 'latency_ms': lat if isinstance(lat, (int, float)) else 0,
             })
-        # 达标策略（阈值 / 判定指标 / 最少节点数）与三件套共用，见 resolve_subscription_policy：
+        # 达标策略（阈值 / 判定指标 / 最少节点数）与四套共用，见 resolve_subscription_policy：
         # 默认按上行判定，达标不足 min_nodes 时自动改用下行（反之亦然）。
         bundle = build_subscription_bundle(gist_results, resolve_subscription_policy(env))
         log_progress('subscription_policy', metric=bundle['metric'], qualified=bundle['qualified'],
@@ -930,7 +930,7 @@ def main():
         tg_res = send_telegram_chunked(env, '\n'.join(build_telegram_lines(
             results, meta=meta, gist_res=gist_res, bundle=bundle)))
         # 发送层不写 stderr（python 侧靠返回值），失败原因必须回传日志，否则
-        # 400 解析失败/限流会表现为「通知静默消失」（规范 §5）
+        # 400 解析失败/限流会表现为「通知静默消失」（规范 第 5 章）
         log_progress('telegram_send_finished', sent=bool(tg_res.get('sent')),
                      reason=tg_res.get('reason', ''))
     except Exception as e:
@@ -983,7 +983,7 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None):
         duration_text = '-'
 
     sep = TG_SEP
-    # 标题状态随结论降级（规范 §4 状态 emoji 语义）：0 可用节点 → ⚠️，不再恒 ✅
+    # 标题状态随结论降级（规范 第 4 章 状态 emoji 语义）：0 可用节点 → ⚠️，不再恒 ✅
     _title_emoji = '⚠️' if not ok_results else '✅'
     lines = [
         f'{_title_emoji} CDN 测速完成',
@@ -1003,7 +1003,7 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None):
     lines.append('')
     if top_results:
         top = top_results[:5]
-        # 名次类分节用 🏆（规范 §2 裁决 5：禁 ⭐/🥇 自造前缀；名次类计数在  内）；
+        # 名次类分节用 🏆（规范 第 2 章 裁决 5：禁 ⭐/🥇 自造前缀；名次类计数在  内）；
         # 指标顺序对齐泰尔引擎列序（↑上传在前）；上传未启用/未测出时条目自动省略
         # ↑ 项（build_node_metric_prefix 内置），图例同步省略
         has_up = any((_result_metric_item(r).get('upload_mibs') or 0) > 0 for r in top)
@@ -1120,7 +1120,7 @@ if __name__ == '__main__':
         _msg = (f'❌ CDN 测速异常退出 · {html.escape(_head)}\n'
                 f'{TG_SEP}\n'
                 f'错误：{tg_entry(f"{type(e).__name__}: {e}"[:800])}')
-        # 收尾区不可省（规范 §3/§6）：兜底通知同样要带 ⏱ 已运行 + 运行日志
+        # 收尾区不可省（规范 第 3 章/第 6 章）：兜底通知同样要带 ⏱ 已运行 + 运行日志
         _footer = tg_footer_line()
         if _footer:
             _msg += f'\n\n{_footer}'

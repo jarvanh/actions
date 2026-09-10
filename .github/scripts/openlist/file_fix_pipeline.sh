@@ -83,7 +83,7 @@ _remove_fix_entry_from_state() {
 # max_sample: 0 = 复核全部条目（默认语义，修复条目本来就有限，
 #             OPENLIST_MISSING_FIX_MAX 封顶）；>0 = 仅复核前 N 条（限流逃生阀）
 # 结果写入全局: PERSIST_OK / PERSIST_FAIL / PERSIST_IDX /
-#               PERSIST_FAILED_ORIGS（失败条目 original 数组）/ PERSIST_FAIL_DETAILS
+#               PERSIST_FAILED_ORIGS（失败条目 original 数组）
 # 用法: _persist_verify_entries <dest_path> <list_file> <max_sample> <log_file>
 _persist_verify_entries() {
   local dest_path="$1" list_file="$2" max_sample="$3" log_file="$4"
@@ -91,7 +91,6 @@ _persist_verify_entries() {
   PERSIST_FAIL=0
   PERSIST_IDX=0
   PERSIST_FAILED_ORIGS=()
-  PERSIST_FAIL_DETAILS=""
   local alt_path bytes orig_path f_method f_mid
   while IFS='|' read -r alt_path bytes orig_path f_method f_mid; do
     [ -z "$alt_path" ] && continue
@@ -148,8 +147,6 @@ _persist_verify_entries() {
         echo "  ✅ 通过 · $(_fix_method_short "$f_mid") · 分卷${part_count} · $(_short_path "$orig_path")" | tee -a "$log_file"
       else
         echo "  ❌ 未持久化 · $(_fix_method_short "$f_mid") · 分卷缺失 · $(_short_path "$orig_path")" | tee -a "$log_file"
-        PERSIST_FAIL_DETAILS="${PERSIST_FAIL_DETAILS}• ${orig_path} (${f_method})：分卷缺失或大小异常，当前分卷=${existing_parts}
-"
       fi
     elif [ "$is_transformed" -eq 1 ]; then
       # 压缩/编码类：只检查 size > 0（压缩包大小与原文件不同）
@@ -158,8 +155,6 @@ _persist_verify_entries() {
         echo "  ✅ 通过 · $(_fix_method_short "$f_mid") · $(_short_path "$orig_path") · ${after_sz}B" | tee -a "$log_file"
       else
         echo "  ❌ 未持久化 · $(_fix_method_short "$f_mid") · 空或不存在 sz=${after_sz} · $(_short_path "$orig_path")" | tee -a "$log_file"
-        PERSIST_FAIL_DETAILS="${PERSIST_FAIL_DETAILS}• ${orig_path} (${f_method})：上传文件为空或不存在, size=${after_sz}
-"
       fi
     else
       # 原样 copy / rename 类：精确匹配大小
@@ -168,8 +163,6 @@ _persist_verify_entries() {
         echo "  ✅ 通过 · $(_fix_method_short "$f_mid") · $(_short_path "$orig_path") · ${bytes}B" | tee -a "$log_file"
       else
         echo "  ❌ 未持久化 · $(_fix_method_short "$f_mid") · 期望${bytes} 实际${after_sz} · $(_short_path "$orig_path")" | tee -a "$log_file"
-        PERSIST_FAIL_DETAILS="${PERSIST_FAIL_DETAILS}• ${orig_path} (${f_method})：expected=${bytes}, actual=${after_sz}
-"
       fi
     fi
     if [ "$verified" -eq 1 ]; then
