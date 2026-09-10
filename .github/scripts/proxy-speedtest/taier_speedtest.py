@@ -55,8 +55,10 @@ from speedtest_common import (
     resolve_subscription_policy,
     send_telegram,
     send_telegram_chunked,
+    tg_entry,
     tg_footer_line,
     tg_format_elapsed,
+    tg_pre_block,
     update_gist,
     TG_SEP,
 )
@@ -489,10 +491,8 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
                 'download_mibs': (r.get('down') or 0) / 8.388608,
                 'latency_ms': _rtt_to_ms(r.get('rtt')),
             }, _top_mode, order='up_first')
-            item = f'  {connector} <code>{esc(r.get("name", ""))}</code>'
-            if prefix:
-                item += f' · {esc(prefix)}'
-            lines.append(item)
+            # 条目行统一走共享的 tg_entry（主体 + 元数据，转义与分隔符一致）
+            lines.append(f'  {connector} ' + tg_entry(r.get("name", ""), prefix))
         lines.append('')
     else:
         lines.append('⚠️ 没有节点测速成功')

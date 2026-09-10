@@ -279,14 +279,17 @@ _preview_render_pairs_detail() {
     local _last=0
     [ "${_g_seen[$_src]}" -eq "${_g_total[$_src]}" ] && _last=1
     # 目标端 openlist: 前缀冗余（与进度通知一致），统一裁剪
-    local _entry="<code>$(escape_html "${_dst#openlist:}")</code>"
+    # 条目行统一走 tg_entry（主体 <code> + 元数据 " · " 分隔、统一转义）
+    local _meta_src="" _meta_diff
     # 源端大小未上提组头时在条目行标注
-    [ -z "${_g_size[$_src]}" ] && _entry+=" · 源端 $(format_bytes "$_sbytes") / ${_scount} 文件"
+    [ -z "${_g_size[$_src]}" ] && _meta_src="源端 $(format_bytes "$_sbytes") / ${_scount} 文件"
     if [ "$_ybytes" -gt 0 ] || [ "$_ycount" -gt 0 ]; then
-      _entry+=" · +$(format_bytes "$_ybytes") / +${_ycount} 文件"
+      _meta_diff="+$(format_bytes "$_ybytes") / +${_ycount} 文件"
     else
-      _entry+=" · 无变动"
+      _meta_diff="无变动"
     fi
+    local _entry
+    _entry="$(tg_entry "${_dst#openlist:}" "$_meta_src" "$_meta_diff")"
     _g_block[$_src]+="$(tree_conn "$_last")${_entry}"$'\n'
     local _sub
     _sub=$(tree_sub "$_last")

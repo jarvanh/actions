@@ -27,7 +27,7 @@
   │   子行                      ← tree_sub（│ 后 3 空格；末条目整行前缀 6 空格）
   └─ 还有 N 条…                 ← 超长折叠行（并入条目流作末条，禁双 └─）
 
-<pre>日志块</pre>                ← tg_add_block（原始追加；<pre> 标签由调用方自带）
+<pre>日志块</pre>                ← tg_add_pre（转义 + <pre> 包裹；tg_add_block 仅用于已含标签的片段）
 备注说明                        ← tg_add_note（段前空行）
 
 （空行）⏱ 已运行 X · 🔗 <a href="URL">运行日志</a>   ← tg_add_footer
@@ -59,12 +59,19 @@
 | 1 | 标题 / 分节 | 无 | `tg_add_title` / `tg_add_section` | `📋 任务预览 · backup`、`📊 同步对 · 2` |
 | 2 | 结论值（kv 值 / 状态 / 计数 / 数值） | 无 | `tg_add_kv` | `状态：成功` |
 | 3 | 机器值（路径 / 文件名 / 命令 / 密码 / IP / ID / 端口 / 原始异常串） | `<code>` | `tg_add_path` | `文件：<code>a/b.mp4</code>` |
-| 4 | 条目主体 | 文件类 `<code>`，其它无 | `tree_code_fold` / 手写 | `<code>x.mp4</code>`、`香港 01` |
-| 5 | 元数据（` · ` 后的大小 / 时间 / 图例 / 备注） | 无 | 手写 | ` · 1.7 GB · 2160p` |
+| 4 | 条目主体 | 文件类 `<code>`，其它无 | **`tg_entry` / `tg_add_entry`** | `<code>x.mp4</code>`、`香港 01` |
+| 5 | 元数据（` · ` 后的大小 / 时间 / 图例 / 备注） | 无 | **同上（作为 `tg_entry` 的后续参数）** | ` · 1.7 GB · 2160p` |
 | 6 | 折叠行 | 无 | `tree_code_fold` | `还有 8 条…` |
 | 7 | 说明段（独立成段） | 无 | `tg_add_note` | `密码 SSH/RDP 共用` |
-| 8 | 日志块 | `<pre>` | `tg_add_block` | `<pre>…</pre>` |
-| 9 | 可复制命令块 | `<pre>` | `tg_add_block`（§2.3） | `<pre>gh workflow run …</pre>` |
+| 8 | 日志块 | `<pre>` | **`tg_add_pre`** | `<pre>…</pre>` |
+| 9 | 可复制命令块 | `<pre>` | **`tg_add_pre`**（§2.3） | `<pre>gh workflow run …</pre>` |
+
+> **全库九类语义 100% 有产出方式，规范中已无"手写"**（2026-09-10）：
+> 条目行统一 `tg_entry <主体> [元数据...]`（返回**单行无尾换行**，`$( )` 会吃掉换行，
+> 拼接时自行补 `$'\n'`）；累积多行列表用 `tg_add_entry <var> <主体> [元数据...]`；
+> python 侧 `speedtest_common.tg_entry(subject, *meta)` / `tg_pre_block(text)` 同语义。
+> 唯一保留手拼的形态：双机器值条目（`<code>原名</code> → <code>替代名</code> · 元数据`、
+> `<code>节点</code> · <code>异常串</code>`）——两个都是机器值，非"主体 + 元数据"结构。
 
 **裁决规则（冲突时按此，勿各自发挥）**：
 

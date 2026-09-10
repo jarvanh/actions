@@ -56,8 +56,10 @@ from speedtest_common import (
     resolve_subscription_policy,
     send_telegram,
     send_telegram_chunked,
+    tg_entry,
     tg_footer_line,
     tg_format_elapsed,
+    tg_pre_block,
     update_gist,
     TG_SEP,
 )
@@ -1012,11 +1014,8 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None):
         for idx, r in enumerate(top, 1):
             prefix = build_node_metric_prefix(_result_metric_item(r), mode, order='up_first')
             connector = '└─' if idx == len(top) else '├─'
-            # 条目不编号（裁决 6）：顺序即名次
-            item = f'  {connector} <code>{esc(r.get("name", ""))}</code>'
-            if prefix:
-                item += f' · {esc(prefix)}'
-            lines.append(item)
+            # 条目不编号（裁决 6）：顺序即名次；条目行统一走 tg_entry（主体 + 元数据）
+            lines.append(f'  {connector} ' + tg_entry(r.get("name", ""), prefix))
         lines.append('')
     else:
         lines.append('⚠️ 没有节点测速成功')

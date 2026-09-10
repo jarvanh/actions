@@ -914,12 +914,12 @@ send_sync_skipped() {
   # force_sync 作用于全部任务（无单任务参数），需注明"全量"。
   tg_add_section msg "🛠️ 复制即用"
   tg_add_note msg "▸ 强制同步（全量，含本任务）"
-  tg_add_block msg '<pre>gh workflow run openlist.yml -f run_mode=同步 -f force_sync=true</pre>'
+  tg_add_pre msg 'gh workflow run openlist.yml -f run_mode=同步 -f force_sync=true'
   if [ "${fixed_count:-0}" -gt 0 ]; then
     tg_add_note msg "▸ 还原 ${fixed_count} 个非原名文件（restore_task=${task_name%%_*}）"
-    tg_add_block msg "<pre>gh workflow run openlist.yml \\
+    tg_add_pre msg "gh workflow run openlist.yml \\
   -f run_mode='⚠️ 还原 · 修复文件还原为原路径' \\
-  -f restore_task=${task_name%%_*}</pre>"
+  -f restore_task=${task_name%%_*}"
   fi
   tg_add_note msg "⏭️ 本次跳过同步，继续执行其他任务"
   tg_add_footer msg

@@ -258,13 +258,13 @@ restore_fixed_files() {
 
       if [ "${status%%:*}" = "OK" ]; then
         total_ok=$((total_ok + 1))
-        ok_list+="<code>$(escape_html "$orig")</code>"$'\n'
+        tg_add_entry ok_list "$orig"
         # 从 marker 移除该条目（fixed_files + fix_blacklist），即时写回
         json=$(echo "$json" | marker_remove_fix_entry "$orig" 1) || true
         _marker_write "$json" "$marker_path" >/dev/null 2>&1 || true
       else
         total_fail=$((total_fail + 1))
-        fail_list+="<code>$(escape_html "$orig")</code> · $(escape_html "${status#FAIL: }")"$'\n'
+        tg_add_entry fail_list "$orig" "${status#FAIL: }"
       fi
     done < <(echo "$json" | jq -r '(.fixed_files // [])[] | [.original, .alternative, .method, (.md5 // "")] | @tsv' 2>/dev/null)
   done
@@ -519,7 +519,7 @@ restore_source_from_target() {
       case "${entry_status%%:*}" in   # 前缀匹配: 兼容 "OK"/"OK: <附注>"，仍可区分 SKIP/FAIL
         OK) total_ok=$((total_ok + 1)) ;;
         SKIP) total_skip=$((total_skip + 1)) ;;
-        *) total_fail=$((total_fail + 1)); fail_list+="<code>$(escape_html "$entry_orig")</code> · $(escape_html "${entry_status#FAIL: }")"$'\n' ;;
+        *) total_fail=$((total_fail + 1)); tg_add_entry fail_list "$entry_orig" "${entry_status#FAIL: }" ;;
       esac
     done < <(_recover_source_entries "$src" "$dst" "$json" "$alt_lines" "$tmp_base")
   done
@@ -633,7 +633,7 @@ rebuild_source_from_target() {
       case "${entry_status%%:*}" in
         OK) total_ok=$((total_ok + 1)) ;;
         SKIP) total_skip=$((total_skip + 1)) ;;
-        *) total_fail=$((total_fail + 1)); fail_list+="<code>$(escape_html "$entry_orig")</code> · $(escape_html "${entry_status#FAIL: }")"$'\n' ;;
+        *) total_fail=$((total_fail + 1)); tg_add_entry fail_list "$entry_orig" "${entry_status#FAIL: }" ;;
       esac
     done < <(_recover_source_entries "$src" "$dst" "$json" "$alt_lines" "$tmp_base")
   done

@@ -52,8 +52,8 @@ from speedtest_common import (
     build_target_network_section, deep_copy_json, fetch_ip_network_info,
     get_item_megabits, latency_probe, log_progress, merged_env,
     resolve_host_ipv4, resolve_subscription_policy,
-    send_telegram, send_telegram_chunked, tg_footer_line,
-    tg_format_elapsed, update_gist,
+    send_telegram, send_telegram_chunked, tg_entry, tg_footer_line,
+    tg_format_elapsed, tg_pre_block, update_gist,
     TG_SEP,
 )
 
@@ -1433,7 +1433,8 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
         for idx, item in enumerate(top, 1):
             prefix = build_node_metric_prefix(item, speedtest_mode, order='up_first') or '-'
             connector = '└─' if idx == len(top) else '├─'
-            summary_lines.append(f"  {connector} <code>{esc(item['name'])}</code> · {esc(prefix)}")
+            # 条目行统一走共享的 tg_entry（主体 + 元数据，转义与分隔符一致）
+            summary_lines.append(f'  {connector} ' + tg_entry(item['name'], prefix))
         summary_lines.append('')
     elif alive_probe_count > 0:
         summary_lines.append('⚠️ 没有节点测速成功')

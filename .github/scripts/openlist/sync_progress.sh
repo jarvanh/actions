@@ -349,10 +349,8 @@ _progress_render_task_list() {
       _dst="${_dst#openlist:}"
     fi
     if [ -z "$_dst" ]; then
-      # 条目主体用 <code>（裁决 2/4：非文件值也不得裸文本）
-      _plain_entries+="<code>$(escape_html "$_src")</code>"
-      [ -n "$_tsize" ] && _plain_entries+=" · $(escape_html "$_tsize")"
-      _plain_entries+=$'\n'
+      # 条目行统一走 tg_entry（主体机器值 <code> + 元数据 " · " 分隔、统一转义）
+      _plain_entries+="$(tg_entry "$_src" "$_tsize")"$'\n'
       continue
     fi
     if [ -z "${_grp[$_src]+x}" ]; then
@@ -361,8 +359,7 @@ _progress_render_task_list() {
       [ -n "$_tsize" ] && _grp_size[$_src]="$_tsize"
     fi
     local _entry
-    _entry="<code>$(escape_html "$_dst")</code>"
-    [ -n "$_tdetail" ] && _entry+=" · $(escape_html "$_tdetail")"
+    _entry="$(tg_entry "$_dst" "$_tdetail")"
     _grp[$_src]+="${_entry}"$'\n'
   done <<< "$lines"
   local _out="" _src _gi=0

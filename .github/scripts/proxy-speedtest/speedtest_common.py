@@ -594,6 +594,26 @@ def tg_format_elapsed(seconds):
     return f'{s} 秒'
 
 
+def tg_entry(subject, *meta, code: bool = True):
+    """条目行构造器（与 bash 真源 tg_entry 同语义，2026-09-10 新增）。
+
+    消灭语义表 #4/#5 的"手写"：条目主体 + 元数据统一 " · " 分隔、统一转义、
+    顺序固定。code=True 用于机器值主体（文件名/路径/ID/命令），False 用于
+    文字主体（节点名以外的短语）。
+    输出: "<code>主体</code> · 元数据 · 元数据"（不含换行，由调用方拼接）
+    """
+    out = f'<code>{html.escape(str(subject))}</code>' if code else html.escape(str(subject))
+    for m in meta:
+        if m not in (None, ''):
+            out += f' · {html.escape(str(m))}'
+    return out
+
+
+def tg_pre_block(text: str) -> str:
+    """多行块（日志/命令/异常栈）：统一 <pre> 包裹 + 转义（与 bash tg_add_pre 同义）。"""
+    return f'<pre>{html.escape(str(text))}</pre>'
+
+
 def tg_footer_line():
     """全库唯一收尾行: "⏱ 已运行 X · 🔗 <a>运行日志</a>"
 
