@@ -109,11 +109,11 @@ def esc(s) -> str:
 
 
 def fmt_secs(x: float) -> str:
-    """秒数中文形态（规范禁英文紧凑时长进通知：12.34s → 12.3 秒）。
+    """秒数中文形态（规范禁英文紧凑时长进通知：12.34s → 12.34 秒）。
 
-    一位小数：原始精度无意义，只碍扫读（规范 §4「高精度浮点直出」）。
+    两位小数：全库秒级统一形态（见 docs/telegram-notify.md 时长写法的秒层）。
     """
-    return f"{x:.1f} 秒"
+    return f"{x:.2f} 秒"
 
 
 def tg_pre_block(text: str) -> str:
