@@ -47,7 +47,8 @@ for f in "${FRAG_FILES[@]}"; do
   [ "$_n" -gt "$DETAIL_MAX" ] && break
   fname=$(basename "$f")
   fsize=$(du -h "$f" | cut -f1)
-  FILE_DETAILS+="<code>$(escape_html "${fname}")</code> · ${fsize}"$'\n'
+  # 条目行统一走 tg_add_entry（主体等宽 + 元数据 " · " 分隔、统一转义）
+  tg_add_entry FILE_DETAILS "$fname" "$fsize"
 done
 if [ "${#FRAG_FILES[@]}" -gt "$DETAIL_MAX" ]; then
   FILE_DETAILS+="还有 $(( ${#FRAG_FILES[@]} - DETAIL_MAX )) 条…"$'\n'

@@ -1021,6 +1021,19 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None):
         lines.append('⚠️ 没有节点测速成功')
         lines.append('')
 
+    # 失败节点明细（与 taier 对齐：原因可见，便于区分拒测/超时/鉴权失败）
+    _failed = [r for r in results if not r.get('ok')]
+    if _failed:
+        lines.append(f'❌ 失败 · {len(_failed)}')
+        _fe = [tg_entry_codes(r.get('name', ''), (r.get('error') or r.get('reason') or '-')[:80])
+               for r in _failed[:5]]
+        if len(_failed) > 5:
+            _fe.append(f'还有 {len(_failed) - 5} 条…')
+        for _i, _l in enumerate(_fe, 1):
+            _c = '└─' if _i == len(_fe) else '├─'
+            lines.append(f'  {_c} {_l}')
+        lines.append('')
+
     lines.append('📦 订阅 · Gist')
     if gist_res and gist_res.get('ok'):
         action = '新建' if gist_res.get('created') else '更新'

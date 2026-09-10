@@ -126,7 +126,7 @@ jobs:
             tg_add_title msg "⛔ 任务已中断"
             tg_add_note msg "任务被取消，数据未受影响；如需继续请重新运行。"
             tg_add_footer msg
-            send_tg "$msg"
+            send_tg "$msg" || echo "::warning::TG 通知发送失败（不影响任务结果）"
             exit 0
           fi
           if [ "$STATUS" == "success" ]; then
@@ -151,4 +151,4 @@ jobs:
             tg_add_note msg "请前往 GitHub Actions 检查日志详情。"
           fi
           tg_add_footer msg
-          send_tg "$msg"
+          send_tg "$msg" || echo "::warning::TG 通知发送失败（不影响任务结果）"

@@ -866,7 +866,8 @@ send_sync_skipped() {
         | join("\n")
     ' 2>/dev/null || echo "")
     if [ -n "$method_summary" ]; then
-      tg_add_section msg "🔧 修复方式构成"
+      # 计数取自 method_summary 行数（_m_entries 数组在下方才声明，此处引用会 unbound）
+      tg_add_section msg "🔧 修复方式构成 · $(printf '%s' "$method_summary" | grep -c .)"
       # 树形条目（├─/└─）: 方式 × 数量 · 大小，summary 缩进为子行；
       # restore.kind 英文 token 映射中文标签（规范 §4：英文原因 token 不得直出通知）
       local -a _m_entries=() _m_summaries=()
@@ -881,7 +882,8 @@ send_sync_skipped() {
           copy)               _m_kind_label="直接复制";;
           *)                  _m_kind_label="$m_kind";;
         esac
-        _m_entries+=("$(escape_html "$_m_kind_label") × ${m_count} · $(format_bytes "$m_bytes")")
+        # 条目行统一走 tg_entry_text（文字主体 + 元数据 " · " 分隔、统一转义）
+        _m_entries+=("$(tg_entry_text "$_m_kind_label" "${m_count} 个" "$(format_bytes "$m_bytes")")")
         _m_summaries+=("$(escape_html "$m_summary")")
       done <<< "$method_summary"
       local _i _n=${#_m_entries[@]} _last

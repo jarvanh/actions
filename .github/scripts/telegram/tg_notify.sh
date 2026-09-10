@@ -250,6 +250,11 @@ tg_add_entry() {
   tg_append "$_var" "$(tg_entry "$_subj" "$@")"$'\n'
 }
 
+tg_add_entry_text() {
+  local _var="$1" _subj="$2"; shift 2
+  tg_append "$_var" "$(tg_entry_text "$_subj" "$@")"$'\n'
+}
+
 # 双机器值主体条目（语义表 #10）：两个主体都是机器值（都进 <code>），连接符不同语义：
 #   tg_entry_pair  <主体1> <主体2> [元数据...]  → "<code>A</code> → <code>B</code> · 元数据"
 #     （→ = 替换/映射关系，如「原名 → 替代名」，不能写成 " · "）

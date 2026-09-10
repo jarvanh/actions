@@ -822,18 +822,20 @@ _sync_task_impl() {
   [ "$partial_subtasks" -gt 0 ] && _counts+=" · ⚠️ ${partial_subtasks}"
   _counts+=" · ⏭️ ${skipped_subtasks}"
   tg_add_block AUTO_SPLIT_INFO "${_counts}"
+  # 列表分节带计数（规模一眼可见）
   if [ -n "$synced_list" ]; then
-    tg_add_section AUTO_SPLIT_INFO "✅ 已同步的子目录"
+    tg_add_section AUTO_SPLIT_INFO "✅ 已同步的子目录 · ${synced_subtasks}"
     tg_add_block AUTO_SPLIT_INFO "$(tree_lines "$synced_list")"
   fi
   if [ -n "$failed_list" ]; then
-    tg_add_section AUTO_SPLIT_INFO "❌ 未同步的子目录"
+    tg_add_section AUTO_SPLIT_INFO "❌ 未同步的子目录 · ${failed_subtasks}"
     tg_add_block AUTO_SPLIT_INFO "$(tree_lines "$failed_list")"
   fi
   if [ -n "$skipped_list" ]; then
-    tg_add_section AUTO_SPLIT_INFO "⏭️ 已跳过的子目录"
-    tg_add_block AUTO_SPLIT_INFO "$(tree_lines "$skipped_list")
-无文件变动"
+    tg_add_section AUTO_SPLIT_INFO "⏭️ 已跳过的子目录 · ${skipped_subtasks}"
+    # 「无文件变动」是说明，交给 tg_add_note（此前裸贴在树末尾、无前缀）
+    tg_add_block AUTO_SPLIT_INFO "$(tree_lines "$skipped_list")"
+    tg_add_note AUTO_SPLIT_INFO "无文件变动"
   fi
 
   # 最终完整同步（仅在顶层执行，正常通知）
@@ -1657,7 +1659,7 @@ sync_by_file_batches() {
   tg_add_kv AUTO_SPLIT_INFO "文件数" "${batch_total_files}"
   tg_add_block AUTO_SPLIT_INFO "✅ ${synced_batches} · ❌ ${failed_batches}"
   if [ -n "$failed_batch_list" ]; then
-    tg_add_section AUTO_SPLIT_INFO "❌ 失败的批次"
+    tg_add_section AUTO_SPLIT_INFO "❌ 失败的批次 · ${failed_batches}"
     tg_add_block AUTO_SPLIT_INFO "$(tree_lines "$failed_batch_list")"
   fi
 

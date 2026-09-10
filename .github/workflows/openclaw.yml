@@ -835,11 +835,12 @@ jobs:
           _entries="命令：<code>ssh runner@$(escape_html "${TS_HOST}")</code>"
           _entries+=$'\n'"备用 IP：<code>ssh runner@$(escape_html "${TS_IP}")</code>"
           _entries+=$'\n'"文件管理：<code>sftp://runner@$(escape_html "${TS_HOST}")/</code>"
-          tg_add_section msg "🔐 SSH"
+          # 列表分节带计数（与 tailscale-windows / AI 网关同款；此前四节形态不一）
+          tg_add_section msg "🔐 SSH · $(printf '%s' "$_entries" | grep -c .)"
           tg_add_block msg "$(tree_lines "$_entries")"
 
           if [ -n "${TS_FQDN:-}" ]; then
-            tg_add_section msg "🖥️ RustDesk"
+            tg_add_section msg "🖥️ RustDesk · 1"
             tg_add_block msg "$(tree_lines "直连：<code>$(escape_html "${TS_FQDN}"):21118</code>")"
           fi
 
@@ -848,14 +849,14 @@ jobs:
           _entries+=$'\n'"ISP：$(escape_html "${IP_ISP}")"
           _entries+=$'\n'"ASN：<code>$(escape_html "AS${IP_ASN} · ${IP_ORG}")</code>"
           _entries+=$'\n'"位置：$(escape_html "${IP_LOC}")"
-          tg_add_section msg "🌐 出口网络"
+          tg_add_section msg "🌐 出口网络 · $(printf '%s' "$_entries" | grep -c .)"
           tg_add_block msg "$(tree_lines "$_entries")"
 
           _entries="状态：已广播 · 可作为出口节点"
           _entries+=$'\n'"管理页批准：<code>admin/machines → openclaw → Edit routes → 勾选 Exit Node</code>"
           _entries+=$'\n'"ACL 免批准（推荐）：<code>routes 0.0.0.0/0,::/0 → tag:ci</code> · 免每次批准"
           _entries+=$'\n'"API：<code>POST /api/v2/device/{device_id}/routes</code>"
-          tg_add_section msg "🛰️ 出口节点"
+          tg_add_section msg "🛰️ 出口节点 · $(printf '%s' "$_entries" | grep -c .)"
           tg_add_block msg "$(tree_lines "$_entries")"
 
           if [ "$AI_BACKEND" = "cliproxyapi" ]; then _ai_note="CLIProxyAPI · 回退"; else _ai_note="CliRelay · 全栈"; fi
@@ -1289,7 +1290,7 @@ jobs:
             tg_add_path msg "Run ID" "${{ github.run_id }}"
             [ -n "$fail_stage_label" ] && tg_add_kv msg "失败阶段" "$fail_stage_label"
             [ -n "$current_version" ] && tg_add_path msg "当前版本" "$current_version"
-            [ -n "$fallback_version" ] && tg_add_path msg "Fallback" "$fallback_version"
+            [ -n "$fallback_version" ] && tg_add_path msg "回退版本" "$fallback_version"
             # 英文 token 不直出通知（规范 §4）：known_good_file / meta_lastTouchedVersion → 中文
             if [ -n "$fallback_version_source" ]; then
               case "$fallback_version_source" in
@@ -1297,12 +1298,12 @@ jobs:
                 meta_lastTouchedVersion) _fvs="meta 里的 lastTouchedVersion" ;;
                 *) _fvs="$fallback_version_source" ;;
               esac
-              tg_add_kv msg "Fallback 来源" "$_fvs"
+              tg_add_kv msg "回退来源" "$_fvs"
             fi
             [ -n "$recorded_successful_version" ] && tg_add_path msg "成功版本记录" "$recorded_successful_version"
             [ -n "$initial_start_duration_sec" ] && tg_add_kv msg "首次启动耗时" "${initial_start_duration_sec} 秒"
             [ -n "$preflight_doctor_duration_sec" ] && tg_add_kv msg "预检修复耗时" "${preflight_doctor_duration_sec} 秒"
-            [ -n "$fallback_reinstall_duration_sec" ] && tg_add_kv msg "Fallback 重装耗时" "${fallback_reinstall_duration_sec} 秒"
+            [ -n "$fallback_reinstall_duration_sec" ] && tg_add_kv msg "回退重装耗时" "${fallback_reinstall_duration_sec} 秒"
             [ -n "$ssh_entry" ] && tg_add_path msg "SSH 调试" "$ssh_entry"
             tg_add_section msg "🧾 关键日志"
             tg_add_block msg "<pre>$(escape_html "$error_summary")</pre>"

@@ -44,11 +44,13 @@ send_video_split_notification() {
   fi
 
   if [ -n "$validation_summary" ]; then
-    tg_add_section message "🛡️ 安全检查"
-    # 逐行转义 + （语义表：条目主体非文件值不得裸文本；行内含 duration=/exit= 等动态值）
+    # 列表分节带计数；条目行用 tg_entry_text（文字主体 + 统一转义）后交 tree_lines 出树形
+    local _checks=""
     while IFS= read -r line; do
-      [ -n "$line" ] && tg_append message "$(escape_html "$line")"$'\n'
+      [ -n "$line" ] && _checks+="$(tg_entry_text "$line")"$'\n'
     done <<< "$validation_summary"
+    tg_add_section message "🛡️ 安全检查 · $(printf '%s' "$validation_summary" | grep -c .)"
+    tg_add_block message "$(tree_lines "${_checks%$'\n'}")"
   fi
 
   if [ -f "$log_file" ]; then
@@ -110,7 +112,7 @@ send_binary_split_notification() {
     log_summary=$(tail -c 1200 "$log_file" 2>/dev/null || echo "无法读取日志")
     tg_add_section message "🧾 日志摘要"
     # 日志为原始输出，转义后 <pre> 等宽展示
-    tg_add_block message "<pre>$(escape_html "$log_summary")</pre>"
+    tg_add_pre message "$log_summary"
   fi
   tg_add_footer message
   send_telegram_message "$message"

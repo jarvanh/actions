@@ -111,9 +111,6 @@ def handle_termination_signal(signum, frame):
     sig_name = signal.Signals(signum).name if signum else f'SIGNAL-{signum}'
     _sep = TG_SEP
     message = f'⛔ Gitee 测速异常终止\n{_sep}\n⚠️ 脚本被中断：收到 <code>{sig_name}</code>，本轮测速未正常完成。'
-    if CURRENT_RUN_STARTED_AT:
-        # 原始值是 datetime.isoformat()（含 T 与毫秒）→ 通知只取到秒并去掉 T（规范 §4 禁 ISO 直出）
-        message += f'\n🕒 测速开始时间：{html.escape(str(CURRENT_RUN_STARTED_AT)[:19].replace("T", " "))}'
     _footer = tg_footer_line()
     if _footer:
         message += f'\n\n{_footer}'
@@ -1367,6 +1364,18 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
         summary_lines.append('')
     else:
         summary_lines.append('⚠️ 没有节点通过 provider 健康检查')
+        summary_lines.append('')
+    # 失败节点明细（与 taier 对齐：原因可见，便于区分拒测/超时/鉴权失败）
+    _failed = [r for r in speed_results if not r.get('ok')]
+    if _failed:
+        summary_lines.append(f'❌ 失败 · {len(_failed)}')
+        _fe = [tg_entry_codes(r.get('name', ''), (r.get('error') or r.get('reason') or '-')[:80])
+               for r in _failed[:5]]
+        if len(_failed) > 5:
+            _fe.append(f'还有 {len(_failed) - 5} 条…')
+        for _i, _l in enumerate(_fe, 1):
+            _c = '└─' if _i == len(_fe) else '├─'
+            summary_lines.append(f'  {_c} {_l}')
         summary_lines.append('')
     # 收尾区不在这里追加：finalize_gist_and_notify 还会在正文末尾补「📦 订阅 · Gist」段，
     # 收尾行必须位于所有正文之后（规范 §3），统一由 finalize 在最后追加

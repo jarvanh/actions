@@ -1,133 +1,313 @@
-# Telegram 通知规范（全库唯一）
+# Telegram 通知规范（全库唯一真源）
 
-全库所有 Telegram 通知（workflows 内联 + scripts 下各子系统）统一遵守本文档。
-**改版式先改这里，再同步各实现**；本文档是规范的唯一真源。
+全库所有 Telegram 通知（workflows 内联 + scripts 下各子系统）都在这里找答案。
 
-## 1. 实现真源
+## 1. 这份文档怎么用
 
-| 运行环境 | 真源 | 说明 |
+这份文档是**风格指南**，不是军规：绝大多数条目是「建议 + 为什么 + 反例/正例」，
+目的是让你在没有先例可循时也能写出和别人风格一致的通知。
+
+只有三处是**硬约束**（不遵守会造成通知丢失或误判失败），改动前请务必读：
+
+| 硬约束 | 位置 | 为什么是硬的 |
 |---|---|---|
-| ubuntu runner（bash） | [`scripts/telegram/tg_notify.sh`](../.github/scripts/telegram/tg_notify.sh) | 排版助手 + 发送层（429 重试 / 4000 分片 / 解析失败直接报错不重发 / curl `-m 15`），`source` 使用 |
-| Telegram 频道内容管线 | `scripts/tg-channel/` | 频道同步 / 上传 / 去重 / 清理（**不是**通知域），单向依赖上面的 `tg_notify.sh` |
-| openlist 同步脚本（runner 上执行） | [`scripts/openlist/telegram.sh`](../.github/scripts/openlist/telegram.sh) | 薄适配层：只放「需要 message_id」的进度面板函数（`send_telegram_message` / 原地编辑 3 函数）；排版与发送经 `load_all.sh` L0 层 source 上一行真源，不再自带副本 |
-| python | `scripts/proxy-speedtest/speedtest_common.py` 的 `tg_format_elapsed` / `tg_footer_line` / `send_telegram` / `send_telegram_chunked` | 三件套（`speedtest.py` / `speedtest_gitee.py` / `taier_speedtest.py`）一律 `from speedtest_common import ...` 复用，**禁止自造**；`notify()` 是 `emby.yml` 内联的播放通知函数，不是通用出口 |
-| PowerShell（windows runner） | [`scripts/telegram/tg_notify.ps1`](../.github/scripts/telegram/tg_notify.ps1)（`rdp.yml` / `tailscale-windows.yml` dot-source，需先 checkout） | `Esc-Html` / `Get-TgFooter` / `Send-TgMessage` / `$TG_SEP`；语义与 bash 版对齐（429 读 `Retry-After` 重试 5 次，解析失败不重发直接抛出并带响应体） |
+| 发送层行为（429 重试 / 400 不重发 / 必须转义 / 不得 curl 直发） | [§6 发送层要求](#6-发送层要求) | 不遵守 = 通知静默消失或限流丢消息 |
+| 收尾区与接线（`TG_RUN_URL` / `TG_RUN_STARTED_AT`） | [§4.9 收尾区](#49-收尾区硬要求) | 不遵守 = 通知没有运行日志入口 |
+| 回归测试基线（19 套件、`command not found` 归零） | [§7 测试与交付基线](#7-测试与交付基线) | 不遵守 = 无法判断改动有没有破坏既有通知 |
 
-## 2. 版式模板
+**改动流程建议**：改版式先改这份文档，再同步实现；实现改完跑一遍渲染预览
+（[§7.3 渲染预览](#73-渲染预览强烈建议)）和相关测试。
 
-```
-{emoji} 标题              ← tg_add_title（纯文字；层级靠分隔线与 emoji）
-━━━━━━━━━━━━━━━━━━              ← TG_SEP（18 个全角横线，勿手写；其后不空行）
-标签：值                          ← tg_add_kv（全角冒号）
-标签：<code>路径/命令</code>      ← tg_add_path（等宽展示）
+> 版本沿革（理解现状用）：早期通知用「粗体 + 斜体 + 平铺 `• `」多种形态，
+> 各子系统自己拼 HTML，版式漂移严重。2026-09 起逐步收敛为**只有两档**：
+> 信息文字裸文本、机器值等宽。演变：去 `<i>` → 值去粗 → emoji 去粗 → 全去 →
+> 补条目/块助手。当前形态见下。
 
-{emoji} 分节 · N          ← tg_add_section（段前空行；计数一律 " · N"）
-{emoji} 组头 · 大小      ← 分组列表：组头（emoji 与计数同态裸文本）
-  ├─ <code>条目</code> · 备注    ← tree_conn / tree_lines（末条 └─；备注无标签）
-  │   子行                      ← tree_sub（│ 后 3 空格；末条目整行前缀 6 空格）
-  └─ 还有 N 条…                 ← 超长折叠行（并入条目流作末条，禁双 └─）
+---
 
-<pre>日志块</pre>                ← tg_add_pre（转义 + <pre> 包裹；tg_add_block 仅用于已含标签的片段）
-备注说明                        ← tg_add_note（段前空行）
+## 2. 设计原则
 
-（空行）⏱ 已运行 X · 🔗 <a href="URL">运行日志</a>   ← tg_add_footer
-```
+### 2.1 一条通知要回答三个问题
 
-> **空行只由三处产生**：`tg_add_section` 段前、`tg_add_note` 段前、`tg_add_footer` 前。
-> 分隔线与紧随其后的内容之间**不空行**（`tg_add_title` 只输出 `标题\n分隔线\n`）。
-> 若紧随分隔线的是分节/说明（任务预览的 `📊 同步对`、openclaw/tailscale 的 `🔐 SSH`），
-> `tg_add_section` / `tg_add_note` 会**自动省略段前空行**——分隔线后一律不留空。
-> 另两种不补的情形：消息为空（首个分节/说明，开头不需要空行）；正文变量**无尾换行**
-> 时（手拼变量，如 `emby.yml` 播放通知的 `text`）会先补一个 `\n` 收尾，再补段前空行 ——
-> 否则那个 `\n` 只给正文末行换行，空行消失（`tg_add_footer` 同款处理）。
-> pwsh 侧无这两个助手，`tailscale-windows.yml` 手拼时同样不得在分隔线后加 `` `n ``。
+> **发生了什么 / 影响多大 / 我要做什么**
 
-#### 标签语义表（全库唯一，冲突按下表裁决）
+写通知前先过一遍这三问，比纠结用哪个 emoji 更有价值：
 
-`§2` 模板只列了 6 类形态，实际内容有 11 类语义——缺归属的部分过去由 4 套发送层各自手拼，
-这是全库标签不一致的根源。下表是唯一裁决依据：
+- 发生了什么 → 标题（emoji + 短语）+ 状态 kv
+- 影响多大 → 计数与量化（失败 3 个 / 减少 100 GiB / 跳过 12 条）
+- 我要做什么 → 复制即用命令块、下一步说明、运行日志链接
 
-> **2026-09-10 终版拍板：全库无 `<b>`。**
-> 一切信息文字（标题/分节/组头/条目主体/kv 值/状态/计数/数值/元数据/折叠行/说明段）
-> 一律**裸文本**（动态内容照常转义）；仅有标签的是机器值 `<code>`、日志/命令块 `<pre>`、
-> 链接 `<a>`。理由：emoji（彩色）+ 分隔线 + 空行 + 等宽已完整承担视觉层级，加粗是
-> 冗余权重；且「哪个位置该加粗」的边界判断（条目主体 vs kv 值）是历史返工的根源，
-> 归零后新增通知零判断成本。（演变：09-09 去 `<i>` → 值去粗 → emoji 去粗 → 全去。）
+### 2.2 视觉层级靠四件套，不靠粗体
 
-| # | 语义 | 标签 | 产出方式 | 例 |
-|---|---|---|---|---|
-| 1 | 标题 / 分节 | 无 | `tg_add_title` / `tg_add_section` | `📋 任务预览 · backup`、`📊 同步对 · 2` |
-| 2 | 结论值（kv 值 / 状态 / 计数 / 数值） | 无 | `tg_add_kv` | `状态：成功` |
-| 3 | 机器值（路径 / 文件名 / 命令 / 密码 / IP / ID / 端口 / 原始异常串） | `<code>` | `tg_add_path` | `文件：<code>a/b.mp4</code>` |
-| 4 | 条目主体 | 文件类 `<code>`，其它无 | **`tg_entry` / `tg_add_entry`** | `<code>x.mp4</code>`、`香港 01` |
-| 5 | 元数据（` · ` 后的大小 / 时间 / 图例 / 备注） | 无 | **同上（作为 `tg_entry` 的后续参数）** | ` · 1.7 GB · 2160p` |
-| 6 | 折叠行 | 无 | `tree_code_fold` | `还有 8 条…` |
-| 7 | 说明段（独立成段） | 无 | `tg_add_note` | `密码 SSH/RDP 共用` |
-| 8 | 日志块 | `<pre>` | **`tg_add_pre`** | `<pre>…</pre>` |
-| 9 | 可复制命令块 | `<pre>` | **`tg_add_pre`**（§2.3） | `<pre>gh workflow run …</pre>` |
-| 10 | 双机器值条目（替换关系） | 两个都 `<code>` | **`tg_entry_pair`** | `<code>原名</code> → <code>替代名</code> · 1.2 GiB` |
-| 11 | 双机器值条目（并列） | 两个都 `<code>` | **`tg_entry_codes`** | `<code>香港 01</code> · <code>connection reset</code>` |
+| 手段 | 承担的作用 |
+|---|---|
+| 分隔线（`━━━` 18 条） | 标题锚点 |
+| 空行 | 段落/分节边界（只有三处产生，见 §4） |
+| emoji | 语义与状态的彩色锚点（比粗体更醒目） |
+| 等宽 `<code>` | 「这个可以复制」的机器值 |
 
-> **全库语义 100% 有产出方式，规范中已无"手写"**（2026-09-10）：
-> - 单主体条目：`tg_entry <主体> [元数据...]`（返回**单行无尾换行**，`$( )` 会吃掉换行，
->   拼接时自行补 `$'\n'`）；累积多行列表用 `tg_add_entry <var> <主体> [元数据...]`。
-> - **双机器值条目**（两个主体都是机器值，非"主体 + 元数据"结构）：
->   `tg_entry_pair <A> <B> [元数据...]` → `<code>A</code> → <code>B</code> · 元数据`
->   （`→` 表替换/映射关系，如原名 → 替代名，**不可写成 " · "**；B 为空自动省略）；
->   `tg_entry_codes <A> <B> [元数据...]` → `<code>A</code> · <code>B</code> · 元数据`
->   （并列机器值、无主次，如节点名 · 原始异常串）。追加版 `tg_add_entry_pair` /
->   `tg_add_entry_codes`。
-> - python 侧同义：`speedtest_common.tg_entry(subject, *meta)` / `tg_entry_pair` /
->   `tg_entry_codes` / `tg_pre_block(text)`。
+因此**全库不用 `<b>` 与 `<i>`**：加粗/斜体能提供的区分，上面四件套已经给足；
+而「哪个位置该加粗」的边界判断（条目主体 vs kv 值）曾是反复返工的根源。
+不用的另一个理由：`<i>` 对中文几乎看不出效果，却会让 HTML 变复杂。
 
-**裁决规则（冲突时按此，勿各自发挥）**：
+### 2.3 只有三处需要标签
 
-1. **一切信息文字裸文本**：不加粗、不斜体，动态内容照常转义。说明性内容
-   （有效期、连接方式…）进 kv 值或 `tg_add_note` 说明段。
-2. **条目非文件值不加等宽**：可复制的机器值用 `<code>`；非机器值的条目主体
-   （如节点名、原因短语）裸文本 + emoji 表意。
-3. **条目前缀**：一律 `├─/└─` 树形（真源唯一形态，`tree_lines` / `tree_code_fold`）。
-   `• ` 平铺已于 2026-09-09 全库清除（含 file_restore / sync_marker / file_split /
-   sync_notify），**不得再引入**——同一条通知更不得两种前缀并存。
-4. **组头形态**：`{emoji} 名 · 大小/计数`（emoji 打头、计数 ` · ` 尾随，全裸文本）。
-5. **分节前缀不得自造**：`🥇` / `⭐` 等不在语义表内的前缀一律不用；名次类分节用
-   `🏆 最快节点 · N`，图例挂 ` · …`。
-6. **条目不编号**：树形条目靠顺序表名次，不加 `1.` `2.`（与 bash 侧一致）。
-7. **emoji 与文字同态**：emoji 跟随它所在的文字——文字有标签它就有，文字没有它就
-   没有。全库无 `<b>` 后此规则自动满足，唯一例外是批次行等宽 `<code>`（见下）。
-   等宽对齐块：进度面板阶段行/批次历史行整行包 `<code>` 换数字列竖向对齐，
-   emoji 与 `▸` 随之在 `<code>` 内（§4 字段表）。
-8. **错误/原因三选一**：中文阶段/原因 → 裸文本；原始异常串 → `<code>`；多行日志 → `<pre>`。
+| 标签 | 用在哪 |
+|---|---|
+| `<code>` | 机器值：路径、文件名、命令、密码、IP、ID、端口、原始异常串 |
+| `<pre>` | 多行块：日志、复制即用命令、异常栈（保留换行、整块复制） |
+| `<a>` | 链接（收尾区运行日志、订阅源等） |
 
-完整示例（`任务预览`，2026-09-07 实录）：
+其余一律裸文本——但要**转义**（动态内容里的 `& < >` 会触发 400，见 §6）。
+
+### 2.4 统一优先于个性
+
+同一类信息在不同子系统里形态一致，读者才能跨通知扫读。
+因此所有版式都尽量走真源助手（§8.1），而不是各脚本自己拼字符串。
+
+---
+
+## 3. 通知种类索引
+
+全库约 30 类通知，按子系统分组。表格给出「在哪 / 何时发」，其后给出
+**代表性渲染示例**（示例取自实现代码结构，个别为构造示例，已标注）。
+
+### 3.1 OpenList 同步域（`.github/scripts/openlist/`）
+
+| 通知 | 位置 | 触发场景 |
+|---|---|---|
+| 📋 任务预览 · 任务名 | `task_preview.sh` | 预览阶段，每个任务一条 |
+| 📍 进行中 / ⛔ 同步中断 / ⚠️ 同步完成 / ✅ 同步全部完成 | `sync_progress.sh` | 进度面板原地刷新与四种终态 |
+| ✅ 同步完成 / ⚠️ 部分文件同步失败 / ⚠️ 同步失败 | `sync_notify.sh` | 同步结束，按结果分三态 |
+| ⏭️ 同步任务跳过 | `sync_marker.sh` | 落在 `--Nd-skip` 窗口内 |
+| 🚨 源端大小异常减小 | `sync_marker.sh` | 源端比上次记录缩水超阈值 |
+| 🔧 修复文件一键还原完成 | `file_restore.sh` | 还原 marker 修复条目到原路径 |
+| 🆘 灾难恢复完成 / 🆘 镜像灾难恢复完成 | `file_restore.sh:530 / :644` | 目标端回填源端 |
+| 📈 同步趋势 | `sync_trend.sh` | 一轮结束输出净传速率/ETA |
+| ✅ 视频分割成功 / ❌ 视频分割失败 | `file_split.sh:33 / :39` | 单文件 ffmpeg 切割 |
+| ✅ 7z 分卷成功 / ❌ 7z 分卷失败 | `file_split.sh:94 / :102` | 非视频大文件分卷 |
+| 📊 前置大文件处理总结 | `file_split.sh` | 前置大文件批处理结束 |
+
+**示例：任务预览**
 
 ```
 📋 任务预览 · backup
 ━━━━━━━━━━━━━━━━━━
-📊 同步对 · 2
-📁 onedrive:backup
-  ├─ <code>aliyundriveCrypt/backup</code> · 源端 36.065 GiB / 1415 文件 · +7.268 GiB / +2 文件
-  │   差异构成：同名更新 2
-  │   排除 · 3
-  │     ├─ <code>notion/**</code>
-  │     ├─ <code>self-hosted_latest.tar.gz</code>
-  │     └─ <code>github_repos_latest.tar.gz</code>
-  └─ <code>wopan176Crypt/backup</code> · 源端 53.594 GiB / 1417 文件 · +26.509 GiB / +41 文件
-      差异构成：新增 38 · 同名更新 3
-      已扣减 1 个修复文件 / 2.796 KiB
+📊 同步对 · 1
+  └─ 📁 onedrive:backup
+  └─ <code>aliyundriveCrypt/backup</code> · 源端 36.065 GiB / 1415 文件 · +7.268 GiB / +2 文件
 
 📦 合计预估待同步：33.777 GiB / 43 文件 · 新增 38 · 同名更新 3
 
 ⏱ 已运行 22 分钟 · 🔗 运行日志
 ```
 
-### 2.1 标签锚点行（多字段拼行必用）
+**示例：同步结果（部分失败）**
 
-一行要塞多个字段时（类型/时长/分辨率/编码…），**禁止无锚点的裸 " · " 串**——
-整条消息读起来是一坨。每行用全角冒号标签打头作锚点（规格：/链路：/客户端：…），
-kv 值无标签（语义表 #2），` · ` 后的元数据同样无标签（全库无 `<b>`/`<i>`，见语义表拍板说明）；
-动作行（如 ▶ 打开直链）段前空行与正文数据区隔，条目化等待链走独立分节。
-实现参考：`emby.yml` 播放通知（`notify()`）。
+```
+⚠️ task0 部分文件同步失败
+━━━━━━━━━━━━━━━━━━
+任务：task0
+源端：onedrive:0/media
+目标：openlist:0/media
+状态：部分失败
+文件数：源端 1415 / 目标 1412
+
+🚫 排除规则 · 2
+  ├─ <code>notion/**</code>
+  └─ <code>*.tmp</code>
+
+❌ 无法同步文件 · 2
+  ├─ <code>media/大文件A.mkv</code> · 超过 45 GiB，需分割后重传
+  └─ <code>media/损坏B.mp4</code> · moov atom 缺失
+
+⏱ 已运行 34 分钟 · 🔗 运行日志
+```
+
+**示例：跳过通知（含复制即用命令块）**
+
+```
+⏭️ 同步任务跳过
+━━━━━━━━━━━━━━━━━━
+任务：media
+源端：<code>onedrive:0/media</code>
+
+📊 大小对比
+上次记录：1.2 TB · 3200 文件
+当前大小：1.1 TB · 3180 文件
+减少：100 GiB · 8%
+
+📁 缺失的目录 · 可能被删除 · 2
+  ├─ <code>media/电影</code>
+  └─ <code>media/纪录片</code>
+
+🛠️ 复制即用
+
+▸ 强制同步（全量，含本任务）
+<pre>gh workflow run openlist.yml -f run_mode=同步 -f force_sync=true</pre>
+
+⏭️ 本次跳过同步，继续执行其他任务
+
+⏱ 已运行 3 分钟 · 🔗 运行日志
+```
+
+**示例：进度面板（简化，仅骨架）**
+
+```
+📍 进行中
+━━━━━━━━━━━━━━━━━━
+状态：进行中
+📊 总 12 · 待处理 4 · 进行中 1 · 完成 6 · 跳过 0 · 失败 1
+
+📍 进行中 · 1
+  └─ <code>onedrive:media/电影</code> · 3.1 GiB / 12 文件
+
+✅ 已完成 · 2
+  ├─ <code>onedrive:media/剧集</code> · 800 MiB / 5 文件
+  └─ <code>onedrive:media/音乐</code> · 120 MiB / 30 文件
+
+⏱ 已运行 18 分钟 · 🔗 运行日志
+```
+
+**示例：修复文件还原**
+
+```
+🔧 修复文件一键还原完成
+━━━━━━━━━━━━━━━━━━
+成功：2 个
+失败：1 个
+
+✅ 已还原 · 2
+  ├─ <code>media/视频A.mp4</code>
+  └─ <code>media/视频B.mkv</code>
+
+❌ 失败清单 · 1
+  └─ <code>media/视频C.mp4</code> · 目标端写入被拒
+
+⏱ 已运行 5 分钟 · 🔗 运行日志
+```
+
+### 3.2 Telegram 频道视频管线（`.github/scripts/tg-channel/`）
+
+| 通知 | 位置 | 触发场景 |
+|---|---|---|
+| 📺 同步汇总（CAPTION_PREFIX） | `sync_to_tg.sh` | 一轮频道同步结束 |
+| ❌ 获取远端文件列表失败 / ❌ 下载失败 / ⏭️ 损坏视频已标记跳过 / ❌ 处理上传失败 | `sync_to_tg.sh:308 / 445 / 524 / 534` | 单文件级失败即时通知 |
+| 🔍 重复视频检测与去重（按 ID / 按哈希） | `dedupe_ph_videos.sh`、`dedupe_videos_by_hash.sh` | 发现重复组 |
+| 🧹 ph-dl 清理 yt-dlp 残留文件 | `cleanup_ytdlp_residual.sh` | 清理 `-Frag/.ytdl/.m3u8` |
+| 🧹 频道清理完成 | `reset_tg_channel.sh` | 清空频道 + 删 uploaded/failed json |
+
+**示例：频道同步汇总（构造示例，结构取自实现）**
+
+```
+📺 91-tg
+━━━━━━━━━━━━━━━━━━
+视频文件：120 条
+库存状态：已上传 118 · 待上传 2
+本次处理：2 条
+本次成功：2 条
+损坏已跳过：1 条
+
+✅ 已上传 · 2
+  ├─ <code>video_a.mp4</code> · 上传耗时 12.3 秒
+  └─ <code>video_b.mp4</code> · 上传耗时 20.1 秒
+
+⚠️ 跳过/过滤文件 · 1
+损坏 · 1
+  └─ <code>video_c.mp4</code>
+
+⏱ 已运行 41 分钟 · 🔗 运行日志
+```
+
+**示例：重复检测（构造示例）**
+
+```
+🔍 91-tg 重复视频检测与去重
+━━━━━━━━━━━━━━━━━━
+目录：<code>91</code>
+重复哈希：3
+已删除：2
+
+📋 详情
+🔖 哈希 a1b2c3d4e5f6 · 第 1/3 组 · 2 个 · 文件名相同 · 保留 <code>keep.mp4</code>
+  ├─ 🗑 删除 <code>dup_old.mp4</code> · 1.2 GB · 2026-09-01
+
+⏱ 已运行 6 分钟 · 🔗 运行日志
+```
+
+### 3.3 备份与任务类（workflows 内联）
+
+| 通知 | 位置 | 触发场景 |
+|---|---|---|
+| ✅/⚠️/❌/⛔ GitHub 全仓库备份（四态） | `github_backup_all.yml` | 备份结束，`if: always()` |
+| ✅/⚠️/❌/⛔ Self-Hosted 数据备份（四态） | `self-hosted_backup.yml` | 同上 |
+| ☁️/❌/⛔ iCloud 照片下载（三态） | `icloud-photos-downloader.yml`（独立 `if: always()` step） | icloudpd 跑完，按 `job.status` 分态 |
+| ✅/⚠️/❌ PixivUtil2 任务完成 | `pixivutil2.yml` | 按 `PU_STATUS` 三态 |
+| 🗑️ ph-dl 下载阶段损坏视频 / ✅ ph-dl 下载任务完成 | `ph-dl.yml:208 / 261` | 下载完整性 / 收尾 |
+
+**示例：备份结果（结构取自实现）**
+
+```
+✅ GitHub 全仓库备份成功
+━━━━━━━━━━━━━━━━━━
+仓库数：42
+备份大小：3.4 GiB
+耗时：18 分钟
+
+⏱ 已运行 18 分钟 · 🔗 运行日志
+```
+
+### 3.4 入口与凭据类
+
+| 通知 | 位置 | 触发场景 |
+|---|---|---|
+| 🟢 OpenClaw Runner 已就绪 | `openclaw.yml` | Tailscale SSH 就绪，推 SSH/RDP/网络/网关 |
+| 🟢 Windows runner 已就绪 | `tailscale-windows.yml` | 同上（Windows） |
+| 🖥️ Windows RDP 已就绪 | `rdp.yml` | ngrok 隧道地址拿到后推 RDP 凭据 |
+| 🔐 OpenList 凭据 | `emby.yml` | OpenList 改密后私信凭据 |
+
+**示例：入口通知（构造示例，结构取自 tailscale-windows.yml）**
+
+```
+🟢 Windows runner 已就绪
+━━━━━━━━━━━━━━━━━━
+🔐 SSH · 3
+  ├─ 命令：<code>ssh runner@example.ts.net</code>
+  ├─ 域名：<code>runner.example.ts.net</code>
+  └─ 备用 IP：<code>100.64.0.1</code>
+
+🖥️ RDP · 3
+  ├─ 地址：<code>runner.example.ts.net:3389</code>
+  ├─ 用户：<code>runner</code>
+  └─ 密码：<code>********</code>
+
+🌐 出口网络 · 4
+  ├─ 出口 IP：<code>203.0.113.7</code>
+  ├─ ISP：Contoso
+  ├─ ASN：<code>AS64512 · Contoso</code>
+  └─ 位置：Tokyo, JP
+
+有效期：约 6 小时 · 超时自动结束
+
+ℹ️ 域名固定不变 · IP 每次运行会变，仅作备用 · 密码 SSH/RDP 共用
+
+⏱ 已运行 2 分钟 · 🔗 运行日志
+```
+
+> 凭据通知**没有特殊发送通道**：照样用 `tg_add_*` 构建（密码走 `tg_add_path`
+> 自动等宽 + 转义）再 `send_tg`。不要为凭据自造「单发不重试」的实现——
+> 429/400 都意味着上一条没被 Telegram 收到，放弃重试只会让凭据彻底丢失。
+
+### 3.5 Emby
+
+| 通知 | 位置 | 触发场景 |
+|---|---|---|
+| 🎬 片名（播放通知） | `emby.yml` | 每次播放事件（180s 去重） |
+| 📺 Emby 服务启动 | `emby.yml` | Emby + cloudflared 就绪自检 |
+| ⚠️ Emby 直链已回退 | `emby.yml` | watchdog 连续探活失败切 direct |
+| ⛔/❌/✅ Emby 服务停止 | `emby.yml` | 收尾，按 job 状态 |
+
+**示例：播放通知**
 
 ```
 🎬 五十度灰 (2015)
@@ -136,8 +316,9 @@ kv 值无标签（语义表 #2），` · ` 后的元数据同样无标签（全�
 链路：⚡ 302直连 OneDrive · 直链剩余 40 分钟
 客户端：203.0.113.57 · Safari · macOS
 
-⏳ 起播等待
+⏳ 起播等待 · 3
   ├─ <code>你 → Cloudflare</code> · 27 毫秒
+  ├─ <code>Emby → OneDrive 取直链</code> · 1.4 秒
   └─ <code>你 → OneDrive 拉流缓冲</code> · 这段服务器测不到
 
 ▶ 打开直链
@@ -145,126 +326,147 @@ kv 值无标签（语义表 #2），` · ` 后的元数据同样无标签（全�
 ⏱ 已运行 38 分钟 · 🔗 运行日志
 ```
 
-### 2.2 明细列表与分组
+### 3.6 测速三件套（`.github/scripts/proxy-speedtest/`）
 
-**三种分组场景，形态一致**（组头 + 条目树形）：
+| 通知 | 位置 | 触发场景 |
+|---|---|---|
+| ✅/⚠️ CDN 测速完成 | `speedtest.py` | 主报告（0 可用节点降级 ⚠️） |
+| ✅/⚠️ Gitee 测速完成 | `speedtest_gitee.py` | 主报告（中止/0 可用降级） |
+| ✅/⚠️ 泰尔三网测速 | `taier_speedtest.py` | 主报告（0 成功/未走代理降级） |
+| ❌ …异常退出 / ⛔ …异常终止 | 三件套各自 | 异常与信号终止 |
 
-1. **长列表** —— 条目数可能很大（跳过、失败、待处理），必须按状态或原因分组，
-   不得穷举裸文本；组头 `原因 · N` + 条目 `<code>名称</code>` 树形。
-2. **多套同类信息** —— 条目虽少但存在多套并列结构（如 SSH / RDP 两套入口凭据），
-   按套分节（emoji 区分语义），否则平铺混排难以扫读。
-   **列表分节一律带 ` · N`**（2026-09-09 收敛，取消「多套同类信息免计数」例外）——
-   `🔐 SSH · 3`、`🖥️ RDP · 3`、`🤖 AI 网关 · N` 同样计数；
-   分节后跟 kv 行或单段说明的（如 `📊 大小对比`）不带。
-3. **条目子树（附属明细）** —— 某条目自身还有附属明细（如任务预览的排除规则）且
-   **条数 ≥2** 时，降为二层列表：组头 = `tree_sub` 前缀 + `标签 · N`，子条目再缩进
-   2 格用 `├─/└─`（模式内末条 └─）；仅 1 条时并入子行（`标签：<code>…</code>`），不为
-   单条扩树。子树会显著拉高通知，谨慎使用。
+**示例：测速主报告（构造示例）**
 
 ```
-  ├─ <code>aliyundriveCrypt/backup</code> · 源端 … · +7.270 GiB / +2 文件
-  │   排除 · 2
-  │     ├─ <code>notion/**</code>
-  │     └─ <code>self-hosted_latest.tar.gz</code>
-  └─ <code>wopan176Crypt/backup</code> · …
-        排除 · N（末条目的子树前缀 8 空格 + ├─/└─）
-```
+✅ CDN 测速完成
+━━━━━━━━━━━━━━━━━━
+🕒 起止：2026-09-10 12:00:00 ~ 2026-09-10 12:20:31 · 耗时 20 分钟
+📊 节点：共 12 个 · 可用 9 个
 
-   实现参考：`openlist/task_preview.sh`（`排除 · N` 子树）。
-
-### 2.3 复制即用命令块（操作指引给人可执行命令，不给数据文件路径）
-
-通知里需要用户后续操作时（跳过通知的强制同步/修复还原、失败通知的重跑入口…），
-**直接给可复制执行的 `gh` 命令**，用 `<pre>` 包裹（等宽不折行、TG 点按整块复制）；
-不要给 marker/JSON 等数据文件路径 —— 那是程序消费的落盘载体，对人没有动作。
-
-- 参数值必须按实际匹配逻辑核实（如 `restore_task` 按 marker 文件名**首个 `_` 前缀**
-  精确匹配，`file_restore.sh` —— 填完整任务名反而匹配不到）；行为差异需注明
-  （`force_sync` 是全量，无单任务参数）。
-- 实现参考：`openlist/sync_marker.sh` `send_sync_skipped`（🛠️ 复制即用）。
-
-```
-🛠️ 复制即用
-
-▸ 强制同步（全量，含本任务）
-gh workflow run openlist.yml -f run_mode=同步 -f force_sync=true
-
-▸ 还原 5 个非原名文件（restore_task=task0）
-gh workflow run openlist.yml \
-  -f run_mode='⚠️ 还原 · 修复文件还原为原路径' \
-  -f restore_task=task0
-```
-
-```
-⚠️ 跳过/过滤文件
-损坏 · 43
-  ├─ <code>Sexy Young 1.mp4</code>
-  ├─ <code>Sexy Young 2.mp4</code>
-  └─ 还有 35 条…
-非视频 · 2
-  ├─ <code>failed_videos.json</code>
-  └─ <code>uploaded_videos.json</code>
-```
-
-- **每组上限 8 条**，超出折叠为 `还有 N 条…`：
-  43 条损坏全列会刷屏，且容易顶到 4000 字符分片边界把收尾区切走。
-  上限 8 是各实现的内定值（`tg-channel/sync_to_tg.sh` 读 `SKIP_DETAIL_MAX`（默认 8，
-  全库无定义点）、其余 openlist/tg-channel 处均硬编码 8）——改上限需逐处改，暂无全局开关。
-  多组并列时（如去重明细）通知内**最多展示 8 组**，超出折叠为
-  `还有 N 组未展开 · 明细见运行日志`（实现：`tg-channel/dedupe_videos_by_hash.sh` /
-  `dedupe_ph_videos.sh` 的 `_grp_block`，文案与条目级 `还有 N 条…` 不同，勿混写）。
-- **折叠行必须并入条目流再交给 `tree_lines`**，由它统一决定末条 ——
-  单独补一行 `  └─ 还有 N 条…` 会造成双 `└─` 同级、层次混淆。
-  文件类列表可直接用一站式助手 `tree_code_fold <多行> [max=8]`
-  （真源 `telegram/tg_notify.sh`，逐行 `<code>转义</code>` + 折叠 + 树形一次完成）。
-- **职责分层**：脚本层只输出结构化数据（如 `中文原因\t路径`），
-  HTML 与树形一律交给 `tg_*` 助手；脚本侧自造标签是版式漂移的根源。
-- 实现参考：`tg-channel/sync_to_tg.sh` 的 `_render_skipped_groups`。
-
-> 踩坑：`tree_lines` **接收参数、不读 stdin**。
-> `... | tree_lines` 会静默输出空条目（无报错），必须 `tree_lines "$var"`。
-
-### 2.4 「📍 测速点网络」统一 KV 树（测速三件套）
-
-三件套（`speedtest.py` / `speedtest_gitee.py` / `taier_speedtest.py`）的测速点网络归属
-共用唯一渲染入口 **`speedtest_common.build_target_network_section(targets)`**，
-`targets = [(server, label, info)]`（cdn/gitee 传解析 IP + 域名，taier 传 ip:port + 主机名）。
-单测速点 = 测速服务器/ISP/ASN/位置 4 行树；多测速点 = 标题带 ` · N`，
-每块以 `[{i}] 域名` 定位行打头（与组头同级的定位行，非树形条目）：
-
-```
 📍 测速点网络 · 2
 [1] <code>mirror.example.com</code>
   ├─ 测速服务器：<code>93.184.216.34</code>
-  ├─ ISP：…
-  ├─ ASN：<code>AS15169</code>
-  └─ 位置：…
-[2] <code>…</code>
-  └─ 归属获取失败（…）
+  ├─ ISP：Contoso
+  ├─ ASN：<code>AS64512</code>
+  └─ 位置：Hong Kong, HK
+
+🏆 最快节点 · 5 · 按上传 · ↑上传 · ↓下载 · 延迟ms
+  ├─ <code>香港 01</code> · ↑42兆 ↓58兆 35ms
+  └─ <code>日本 02</code> · ↑30兆 ↓61兆 52ms
+
+📦 订阅 · Gist
+  ├─ ✅ 已更新，达标 9 个节点 · ≥10兆（按上传）
+  └─ 🔗 订阅源 YAML
+
+⏱ 已运行 20 分钟 · 🔗 运行日志
 ```
 
-`server` 解析失败时该块降级为「归属获取失败」一行（``，不裸文本）。
-python 侧共用 `TG_SEP`（`speedtest_common.TG_SEP`）与 `tg_footer_line`，勿再手写 `'━' * 18`。
+### 3.7 其它
 
-## 3. 收尾区（全库唯一收尾形态）
+- `subs-check.yml`：当前**无通知**（如需补，按 §3.3 备份类形态即可）。
+- `upload-video-to-tg.yml`：通知在 `tg-channel/*.sh` 外部脚本，job 级注入了
+  `TG_RUN_*`，本身无内联通知。
+
+---
+
+## 4. 版式构件速查
+
+每个构件给出：形态 → 为什么 → 示例 → 助手。
+
+### 4.1 标题
 
 ```
-（空行）⏱ 已运行 X 小时 Y 分 · 🔗 <a href="TG_RUN_URL">运行日志</a>
+{emoji} 标题
+━━━━━━━━━━━━━━━━━━
+```
+- 助手：`tg_add_title`（bash/pwsh：`$TG_SEP` 手拼）
+- 建议：emoji + 短语，状态与细节下沉到 kv 行；标题后紧跟分隔线、不空行。
+
+### 4.2 分节
+
+```
+{emoji} 分节 · N
+```
+- 助手：`tg_add_section`（段前自动空行；紧跟分隔线时自动不空行）
+- 建议：**分节后跟条目列表时带计数 ` · N`**（读者一眼知道规模）；后面是 kv 行
+  或单段说明时可以不带。
+
+### 4.3 kv 行
+
+```
+标签：值
+```
+- 助手：`tg_add_kv`（值自动转义）
+- 建议：全角冒号；多个字段用 ` · ` 连（如 `文件数：源端 1415 / 目标 1412`）。
+- 一行要塞多个字段时，建议用全角冒号标签打头作锚点（规格：/链路：/客户端：…），
+  避免无锚点的裸 ` · ` 串。
+
+### 4.4 机器值
+
+```
+路径：<code>/mnt/media/a.mp4</code>
+```
+- 助手：`tg_add_path`
+- 建议：路径/文件名/命令/密码/IP/ID/端口/原始异常串一律等宽——读者能一眼看出
+  「这段可以直接复制」。
+
+### 4.5 条目
+
+```
+  ├─ <code>video_a.mp4</code> · 1.7 GB · 2160p
+  └─ <code>video_b.mp4</code> · 重试修复失败
+```
+- 助手：`tg_entry`（单行）/ `tg_add_entry`（累积多行）；
+  双机器值用 `tg_entry_pair`（`→` 替换关系）或 `tg_entry_codes`（`·` 并列）；
+  与 `tree_lines` 组合成树形条目流。
+- 建议：条目一律 `├─/└─` 树形（`• ` 平铺已废弃，勿再引入）；
+  元数据用 ` · ` 分隔、放在主体之后。
+- 注意：`$(tg_entry …)` 会吃掉尾换行，**累积多行请用 `tg_add_entry`**。
+
+### 4.6 折叠行
+
+```
+  └─ 还有 8 条…
+```
+- 助手：`tree_code_fold`（文件列表一站式：等宽 + 超 8 条折叠）
+- 建议：折叠行并入条目流作末条（由 `tree_lines` 统一决定 `└─`），
+  不要单独补一行造成双 `└─`；多组并列时通知内建议最多展示 8 组。
+
+### 4.7 多行块（日志/命令）
+
+```
+<pre>gh workflow run openlist.yml -f run_mode=同步</pre>
+```
+- 助手：`tg_add_pre`（转义 + `<pre>` 包裹）；`tg_add_block` 只用于已含标签的片段
+- 建议：日志、异常栈、复制即用命令用 `<pre>`（保留换行、整块复制）；
+  不要用它替代行内 `<code>`。
+
+### 4.8 说明段
+
+```
+如确认无误，请手动触发 force_sync=true
+```
+- 助手：`tg_add_note`（段前自动空行）
+- 建议：说明、备注、免责声明用独立说明段，与数据区分开。
+  注意该助手对整段转义，**段内不能携带 HTML 标签**。
+
+### 4.9 收尾区（硬要求）
+
+```
+⏱ 已运行 22 分钟 · 🔗 <a href="…">运行日志</a>
 ```
 
-- **时长三段式**：`≥1h → "X 小时 Y 分"`、`≥1min → "X 分钟"`、否则 `"X 秒"`。
-  语义 = run 已运行时长，**不是**步骤自身耗时。条目内耗时用 `⏱mm:ss` 定宽形态
-  （如批次历史行 `⏱01:15`，见 §4 字段 emoji 表）；收尾区专属的是
-  「⏱ 已运行 X」完整形态，两者不混用。
-- **降级链**（必须逐字一致）：`TG_RUN_STARTED_AT` → 时长；
-  缺失时兜底 **runner 开机时刻**（Linux `/proc/1` mtime / Windows `LastBootUpTime`，
-  hosted runner 随 job 启动、误差秒级）；仍取不到 → 不显示时长；
-  `TG_RUN_URL` 与时长皆无 → 整行跳过。
-  > 背景：GitHub 已于 2026-09-05 移除 `github.run_started_at` 表达式上下文
-  > （API 字段仍在），workflow 注入的 `TG_RUN_STARTED_AT` 变为空值，兜底必须存在。
-- **附加链接**：`tg_add_footer <var> ["标签" "URL"]...` → 追加 ` · 🔗 <a>标签</a>`。
-- **环境变量接线**（workflow 侧注入；`TG_RUN_URL` 决定有无链接，
-  `TG_RUN_STARTED_AT` 只影响时长精度）：
+**硬要求**：所有通知都要有收尾区（进度面板的每次刷新除外，它在 finalize 时补）。
+必须用 `tg_add_footer` / `Get-TgFooter` / `tg_footer_line`，不要手拼——
+助手已处理空行、降级与链接。
+
+- 时长三段式：`≥1h → X 小时 Y 分`、`≥1min → X 分钟`、否则 `X 秒`；
+  语义是 **run 已运行时长**，不是步骤自身耗时。
+- 降级链：`TG_RUN_STARTED_AT` → runner 开机时刻（Linux `/proc/1`、
+  Windows `LastBootUpTime`）→ 不显示时长；`TG_RUN_URL` 缺失则整行跳过。
+- 附加链接：`tg_add_footer <var> "标签" "URL"` 可追加多个 `· 🔗 <a>`。
+
+**接线（硬要求）**：workflow 必须在 job 或 step 级 env 注入，否则通知没有日志入口：
 
 ```yaml
 env:
@@ -272,124 +474,202 @@ env:
   TG_RUN_STARTED_AT: ${{ github.run_started_at }}
 ```
 
-> 注：`github.run_started_at` 目前已被平台从表达式上下文移除（注入后为空值），
-> 时长靠上述 runner 开机时刻兜底。注入行保留——属性若恢复可立即生效，
-> 且自托管 runner 仍可用精确值覆盖。
+> 注：`github.run_started_at` 已被平台从表达式上下文移除，注入后为空值，
+> 时长靠 runner 开机时刻兜底（误差秒级）。注入行保留，属性恢复后可立即生效。
 
-## 4. 禁止事项（历史踩坑，勿回退）
+### 4.10 空行的三个来源
 
-| 禁止 | 反例 | 正例 |
+只有这三处会产生空行，其余地方不要手写 `\n\n`：
+
+1. `tg_add_section` 段前
+2. `tg_add_note` 段前
+3. `tg_add_footer` 前
+
+分隔线与紧随其后的内容之间不空行。
+
+---
+
+## 5. 各类通知的写法建议
+
+### 5.1 结果通知
+
+建议顺序：标题（状态 emoji）→ 关键 kv（对象/状态/计数）→ 明细分节 → 收尾。
+状态与结论下沉到 kv，不要塞进标题；标题只说「谁 + 怎么了」。
+
+### 5.2 进度面板
+
+- 标题随终态变化（进行中 📍 / 中断 ⛔ / 完成 ⚠️·✅ / 失败 ❌）。
+- 面板内用等宽 `<code>` 包裹阶段行与批次历史行，换取计数列竖向对齐
+  （这是既定的等宽豁免，见 §8.4）。
+- 批次行字段：`✅00 🔧00 ❗33 ⏭️22 ♻️22 ⏱01:15 ⬆️4.79G`（五计数补零），
+  最近 6 条滚动。
+
+### 5.3 列表明细
+
+- 先按状态或原因分组（组头 + 计数），再树形列出条目。
+- 每组建议上限 8 条，超出折叠为「还有 N 条…」。
+- 组内还有附属明细时降为二层列表（`│ ` 前缀 + 缩进 2 格的 `├─/└─`）。
+
+### 5.4 凭据与入口通知
+
+按套分节（SSH / RDP / 出口网络），每套内的取值行用 `标签：<code>值</code>`，
+可复制性优先；有效期、共用说明放说明段。
+
+### 5.5 失败与异常
+
+- 中文阶段或原因写清楚；原始异常串用 `<code>`；多行日志用 `<pre>`。
+- 英文 token 与错误码建议中文化（`退出码 45` 而不是 `exit=45`）。
+- 建议给出下一步动作（复制即用命令或「见运行日志」）。
+
+### 5.6 复制即用命令块
+
+给人**可复制执行的命令**，而不是数据文件路径（marker/JSON 是人读不懂的落盘载体）：
+
+```
+🛠️ 复制即用
+
+▸ 强制同步（全量，含本任务）
+<pre>gh workflow run openlist.yml -f run_mode=同步 -f force_sync=true</pre>
+```
+
+参数值要按实际匹配逻辑核实（如 `restore_task` 按 marker 文件名首个 `_` 前缀匹配，
+填完整任务名反而匹配不到）。
+
+### 5.7 常见偏差与改进建议
+
+| 偏差 | 为什么会这样 | 建议改成 |
 |---|---|---|
-| 英文紧凑时长进通知 | `⏱ 已运行 5h 57m`、`耗时: 12.34s` | `⏱ 已运行 5 小时 57 分`（紧凑格式仅允许进 RESULT_JSON artifacts；批次历史行 `⏱01:15` mm:ss 为既定字段形态，见下方字段表） |
-| 手拼收尾行 | `"\n\n⏱ 🔗 <a>运行日志</a>"` | 一律经 `tg_add_footer` / `tg_footer_line` |
-| `⏱️`（带 VS16 变体） | `⏱️ 已用：…` | 裸 `⏱`：收尾区 `⏱ 已运行 X`；条目内耗时 `⏱1分15秒`（紧跟数字无空格） |
-| 半角冒号 kv 行 | `📦 分组: xxx` | `📦 分组：xxx` |
-| emoji 入 `<b>`（已随全库无 `<b>` 作废） | `<b>✅ 3</b>`、`<b>📁 组头</b>` | `✅ 3`、`📁 组头`（全裸文本，语义表 #1/#2/#4） |
-| `🥇 TOP 5` 等自造分节前缀混用 | — | 分节 emoji 与语义对齐：📍 进行中（进度面板阶段）/ ✅ 完成 / ⏭️ 跳过 / ❌ 失败 / ⚠️ 警告 |
-| 裸文本条目列表 | `not_video: failed_videos.json` | 按原因分组：组头 `非视频 · 2` + `  ├─ <code>failed_videos.json</code>` |
-| 英文原因/状态 token 直出 | `corrupt: xxx` | 用中文标签（损坏 / 非视频 / 重复） |
-| 双 `└─` 同级 | 条目末尾 `└─` 后再补 `  └─ 还有 N 条…` | 折叠行并入条目流，由 `tree_lines` 统一决定末条 |
-| 超长列表全量穷举 | 43 条损坏逐行列 | 每组上限 8 条 + `还有 N 条…`；多组并列最多展示 8 组 |
-| 已 source 发送层仍 curl 直发 | `curl ... sendMessage \|\| { plain=$(...); curl ... }` | 一律 `send_tg "$msg"`（429 重试已内建；自造发送缺 429 处理，限流时通知消失） |
-| 高精度浮点直出 | `起播 2.16068914 秒` | 一位小数：`起播 2.2 秒`（原始精度无意义，只碍扫读） |
-| ISO 原始时间戳直出 | `时间：2026-09-05T11:34:19Z` | 人性化：`上次同步：2026-09-05 11:34 UTC · 15 小时前`（`date -d` 解析，失败保留原值） |
+| 手拼 HTML（`msg+="<code>…"`） | 历史遗留、助手不全 | 用 §8.1 助手；确实需要时先 `escape_html` 再拼 |
+| 分节后跟列表却没计数 | 忘了拼 | 带 ` · N`，规模一眼可见 |
+| 条目用 `• ` 平铺 | 旧形态 | 改 `├─/└─` 树形 |
+| 长列表全量穷举 | 怕漏信息 | 分组 + 每组 8 条 + 折叠行 |
+| 英文紧凑时长（`5h 57m`） | 脚本内部格式直接输出 | 中文三段式（紧凑格式只留在日志/artifacts） |
+| 高精度浮点（`2.16068914 秒`） | 原始值直出 | 一位小数 |
+| ISO 时间戳直出（`2026-09-05T11:34:19Z`） | 原始值直出 | `2026-09-05 11:34 UTC · 15 小时前` |
+| 半角冒号 kv（`状态: 成功`） | 手误 | 全角冒号 |
+| 手拼收尾行 | 不知道有助手 | `tg_add_footer` |
+| 已 source 发送层仍 curl 直发 | 想要 message_id 等 | 除进度面板（需 message_id）外一律走发送层 |
 
-状态 emoji 语义（全库统一）：
-`✅` 成功 / `⚠️` 部分失败 / `❌` 失败 / `⏭️` 跳过 / `🔄` 进行中 / `⏳` 待处理 / `⛔` 中断 / `🚨` 危险警告。
+---
 
-> **📍 与 🔄 的分工**（曾两表互相打架，此处裁决）：`📍` 是进度面板「进行中」**分节**标题
-> （当前阶段，正常在跑）；`🔄` 是**状态/活动**语义（进行中的条目与标题）。同一面板里
-> 两者是互斥分支：`📍 进行中 · N`（未收尾）／`🔄 进行中 · N · 未执行完`（已 finalize
-> 但仍有任务在跑）。实现：`openlist/sync_progress.sh`。判违例时按此分工，勿互相替代。
+## 6. 发送层要求
 
-批次计数 emoji 字段表（进度面板批次历史行，**全字段恒显 + 定宽补零**；行宽 ≈42 全角，
-手机折 2 行为既定取舍 —— 换取计数列竖向对齐）：
-`❌#n` 状态+批次号 | `✅00` 成功 | `🔧00` 修复 | `❗33` 失败（不用 ❌，避免与状态撞形）|
-`⏭️22` 跳过 | `♻️22` 已有（目标端已存在）—— 五计数 `%02d` 补零 | `⏱01:15` 耗时（mm:ss 补零；
-≥1h 时 mm 延伸为 3 位，如 `75:20`，定宽让位于真值）|
-`⬆️4.79G` 上传量（GiB 两位小数，末列不补）。
-状态: ✅全成 ⚠️部分失败 ❌失败 ⏭️整批跳过 ♻️整批已有。全部入史（MAX=6 滚动窗口，全量在运行日志）。
-实现：条目生成 `openlist/task_engine.sh`（`_bh_entry`）；滚动窗口与渲染
-`openlist/sync_progress.sh`（`PROGRESS_BATCH_HISTORY_MAX=6` / `_progress_batch_history_render`）。
+> 这一章是**硬约束**。
 
-既定豁免清单（**技术必需**，不算违例，勿"修复"；2026-09-10 终版仅剩这 3 条，
-风格类豁免——`• ` 平铺、列表分节免计数、加粗/斜体——已全部清除）：
-1. 内容片长分钟补零 `2 小时 08 分`（条目内媒体时长，区别于收尾区无补零的 `X 小时 Y 分`）。
-2. 批次历史行 `⏱mm:ss` ≥1h 时 mm 延伸 3 位（`75:20`）——定宽让位于真值。
-3. 进度面板阶段行/批次历史行整行 `<code>` 等宽包裹（emoji/`▸` 随之在 `<code>` 内）——
-   换计数列竖向对齐，见上方字段表；`🔗` 在 `<a>` 内、`▸`/`▶` 动作行前缀同理（链接/
-   动作形态）。`tg_add_note` 说明段整段 `escape_html`、段内无法带标签——在全库无
-   `<b>` 后已自动与规则一致，不再是特例。
+- **一律 HTML parse_mode**，动态内容**必须**转义（`escape_html` / `Esc-Html` /
+  `html.escape`，或经 `tg_*` 助手自动转义）。
+- **HTML 解析失败（400 can't parse entities）不重发**，直接报错暴露并带上响应体
+  前 200 字符：消息本来就没发出去，退化成纯文本只会把 bug 藏起来。
+- **429 限流按 `retry_after` 等待重试（最多 5 次）**；长消息按 4000 字符分片
+  （断在换行处，不切 UTF-8 多字节）。
+- 发送失败**必须**在 stderr/日志输出原因（含响应体前 200 字符），由调用方决定
+  `|| true` 还是失败；**不要 `>/dev/null 2>&1` 吞掉**。
+  python 侧 `send_telegram` 只回传 `reason`，调用方**必须**把它记进日志。
+- **已 source 发送层的通知点不得 curl 直发**。唯一豁免：需要 message_id 的进度面板
+  原地维护（`openlist/telegram.sh` 的 `_tg_send_and_get_id` / `_tg_delete_message`）。
+- 媒体上传（`sendDocument`/`sendVideo`）不走 sendMessage 发送层（固有例外），
+  但 caption **必须**转义、429 重试与发送层同口径（最多 5 次）。
+- pwsh 侧 dot-source `tg_notify.ps1` 后建议加 `Get-Command Send-TgMessage` 自检：
+  调用未定义函数是**终止错误**，若 step 带 `continue-on-error` 会表现为通知静默消失。
 
-## 5. 发送层要求
+---
 
-- **一律 HTML parse_mode**，动态内容必须转义（`escape_html` / `tg_*` 助手已内置）。
-  > pwsh 侧：转义/发送经 `telegram/tg_notify.ps1` dot-source 提供（`Esc-Html` /
-  > `Send-TgMessage` / `Get-TgFooter`），dot-source 后加 `Get-Command Send-TgMessage`
-  > 自检——调用未定义函数是**终止错误**，若 step 带 `continue-on-error: true`
-  > 会表现为通知静默消失、不报失败（`tailscale-windows.yml` 曾因此缺发入口通知）。
-- HTML 解析失败（400 can't parse entities）→ **不重发**，直接报错暴露（见下）。消息本来就没被
-  Telegram 接收，退化成纯文本只是把版式 bug 藏起来；动态内容一律经 `tg_*` 助手转义即可避免。
-- 429 限流按 `retry_after` 等待重试（最多 5 次）；长消息按 4000 字符分片（断在换行处，不切 UTF-8 多字节）。
-- 发送失败必须在 stderr/日志输出错误原因（含 API 响应体前 200 字符），由调用方决定 `|| true` 还是失败。
-  bash 真源把原因写 stderr——调用方**不要 `>/dev/null 2>&1` 吞掉**；python 侧 `send_telegram`
-  失败不写 stderr，靠返回值 `{'sent': False, 'reason': …}` 回传，**调用方必须把 reason 记进日志**
-  （三件套已在发送后 `log_progress('telegram_send_finished', …)`），否则 400 解析失败表现为通知静默消失。
-- **curl 直发的唯一豁免**：需要 message_id 的进度面板原地维护（`openlist/telegram.sh` 的
-  `_tg_send_and_get_id` / `_tg_delete_message`）——sendMessage 发送层不返回 message_id，
-  原地编辑/删旧必须直发；除此之外已 source 发送层的通知点再 curl 直发仍属禁止（见 §4）。
-- 媒体上传（`sendDocument`/`sendVideo` 等）不走 sendMessage 发送层（固有例外），
-  但 caption 仍须转义、429 重试与发送层同口径（**最多 5 次**，见 `sync_notify.sh` sendDocument 段）。
-- 429 重试是发送层职责，调用方勿自造重复实现——
-  已 `source` 发送层的通知点再 curl 直发属禁止事项（见 §4）。
-- **凭据/密码类消息**（如 OpenList 改密回执）**没有**特殊发送通道：用 `tg_add_*` 构建
-  （密码走 `tg_add_path`，自动 `escape_html`）后照常 `send_tg`。
-  不要为凭据自造「单发不重试不退化」的实现 —— 429 与 400 都表示上一条**没被 Telegram
-  接收**，重试/退化不会产生两条密码；放弃重试反而会让凭据在限流时直接丢失。
-  实现参考：`emby.yml` 的 OpenList 凭据通知。
+## 7. 测试与交付基线
 
-## 6. 新增通知检查清单
+> 这一章是**硬约束**。
 
-- [ ] 标题 = emoji + 短语，计数/细节下沉 kv 行
-- [ ] 列表分节计数 ` · N`（分节后跟条目列表必带；kv/单段说明分节不带）；条目元数据 ` · …` 无标签；kv 行全角冒号；全库无 `<b>`
-- [ ] 明细列表按状态/原因分组、树形列出，超长折叠（无裸文本、无双 `└─`）
-- [ ] 脚本层只出结构化数据，HTML 与树形交给 `tg_*` 助手（不在脚本里拼标签）
-- [ ] 收尾区经 `tg_add_footer`（bash）/ `tg_footer_line`（python），无手拼
-- [ ] workflow 已注入 `TG_RUN_URL` / `TG_RUN_STARTED_AT`（job 或 step 级 env）
-- [ ] 动态内容全部经转义助手；发送走 `send_tg` / `send_tg_chunked`（python 侧 `send_telegram` / `send_telegram_chunked`）
-- [ ] 数值/时间戳已人性化：无原始高精度浮点、无 ISO 原始戳直出（见 §4）
-- [ ] 进度面板批次行按 §4 字段 emoji 表（**五计数** %02d 恒显 + ⏱mm:ss + ⬆️GiB）
-- [ ] 相关测试同步更新（如 `openlist/tests/test_progress_final_title.sh`）
+### 7.1 openlist 回归套件（19 个）
 
-## 7. 回归测试守卫
+- 必须重定向 stdin：`bash test_x.sh </dev/null`（否则
+  `test_batch_precheck_circuit_breaker.sh` 会卡在读 stdin）。
+- 跑全量约 4 分钟，建议后台 `nohup … &` 再轮询日志。
+- **套件 PASS 不等于通过**：跑完必须 `grep "command not found"` 全库测试日志，
+  **必须为空**。
 
-`openlist/tests/` 现有 **19 个回归套件**（2026-09-09 由 17 增至 19，新增
-`test_marker_skip_guards.sh` / `test_sync_trend_budget.sh`）——凡改动 `telegram/tg_notify.sh`（真源）/
-`openlist/telegram.sh` / `task_engine.sh` 批次行 / 同步管线，全量跑通后再交付，
-且全量日志 `command not found` 必须为零。
+### 7.2 本地基线（不是回归，勿修）
 
-> **本地跑的 4 个已知失败属基线，不是回归**（macOS 环境所致，Linux runner 正常）：
-> `test_truth.sh` FAIL=7（容器重启依赖 docker/真实服务）、`test_progress_no_orphans.sh`
-> 的 T5 时序 flake、`test_marker_skip_guards.sh` 1b（BSD `date` 无 `-d`）、
-> `test_sync_trend_budget.sh`（macOS `wc` 输出对齐空格 + 脚本 `unbound variable`）。
-> 判定时与这条基线比对，偏离才算回归。
+| 套件 | 现象 | 原因 |
+|---|---|---|
+| `test_truth.sh` | `PASS=12 FAIL=7` | 依赖 docker/真实 OpenList 服务，本地跑不了 |
+| `test_progress_no_orphans.sh` | T5「强杀路径有超时上限」偶发失败 | 时序 flake |
+| `test_marker_skip_guards.sh` | 1b 失败 | 测试用 `date -d`，macOS BSD date 无 `-d` |
+| `test_sync_trend_budget.sh` | 「期望1条实得       1」+ `unbound variable` | macOS `wc` 输出对齐 + 远端脚本自身问题 |
 
-与本规范直接相关的守卫点：
+判定基线：**16 个 EXIT=0 + test_truth 那 7 条**，偏离才是回归。
 
-| 测试 | 守卫点 |
-|---|---|
-| `openlist/tests/test_progress_final_title.sh` | 收尾标题四态 + 状态行下沉 |
-| `openlist/tests/test_preview_diff.sh` | 任务预览合计行/树形/排除子树/扣减子行 |
-| `openlist/tests/test_progress_phase_layout.sh` | 进度面板无 ⏱ 尾 + 批次历史行 emoji 形态渲染 |
-| `openlist/tests/test_skip_preview_hint.sh` | 跳过预览提示 |
-| `openlist/tests/test_batch_precheck_circuit_breaker.sh` | 批次熔断分支（字段 emoji stub 在此） |
-| `openlist/tests/test_method_id_naming.sh` | 修复方法 ID ↔ 中文标签映射 |
-| `openlist/tests/test_hash_dir_fallback.sh` | 哈希目录兜底（含 fix_log 文案） |
-| `openlist/tests/test_fix_log_section.sh` | 修复日志区段头 `=== 尝试修复失败文件: <rel> ===` 写完整相对路径 + 通知侧 awk 能切出非空片段 + 相邻区段不串味 |
-| `openlist/tests/test_marker_skip_guards.sh` | 跳过窗口守卫（未来戳 / rclone size 失败 fail-open / 源端缩小 warning / FORCE_SYNC 放行）→ 决定 `send_sync_skipped` 是否触发 |
-| `openlist/tests/test_sync_trend_budget.sh` | `📈 同步趋势`通知（sync_trend.sh）的跨 run 记录与预算门控 |
+### 7.3 渲染预览（强烈建议）
 
-`tg-channel/sync_to_tg.sh`（ph-dl / 91 通知）**暂无测试套件**——
-改动后靠本地渲染实测验证（提取函数 + 造模拟数据跑 `tree_lines` 输出对比）。
-后续补测试时可参考上述 openlist 套件的 mock 方式（mock `tg_add_*` +
-捕获 `send_telegram_message` 入参）。
+改动版式后，用真源助手构造数据渲染一遍再交付：
+
+```bash
+source .github/scripts/telegram/tg_notify.sh
+msg=""; tg_add_title msg "⚠️ 示例"; tg_add_section msg "❌ 清单 · 2"
+tg_add_block msg "$(tree_lines "$(tg_entry "a.mp4" "1.7 GB")")"
+tg_add_footer msg; printf '%s\n' "$msg"
+```
+
+实践中这一步抓到过三类纯代码审查漏掉的问题：转义被二次处理、空行数量不对、
+命令替换吃掉尾换行导致条目粘连。
+
+### 7.4 提交与生效
+
+- 提交前 `git fetch` + `git pull --rebase`（远端常有他人新提交）。
+- 提交信息含中文/特殊字符时用**单引号**包裹 `-m`（双引号会被 shell 拆成多个 pathspec）。
+- 改动 workflow 后按约定重启可 dispatch 的：
+  `emby`（需 `-f playback_mode=302`）、`tailscale-windows`、`proxy-speedtest-taier`；
+  触发前先取消在跑的旧代码 run（取消非即时，ubuntu runner 约 2–4 分钟）。
+
+---
+
+## 8. 附录
+
+### 8.1 助手速查
+
+| 用途 | bash 真源 | pwsh | python |
+|---|---|---|---|
+| 标题 / 分节 | `tg_add_title` / `tg_add_section` | `$TG_SEP` 手拼 | 手拼 + `TG_SEP` |
+| kv / 机器值 | `tg_add_kv` / `tg_add_path` | 手拼 | 手拼 |
+| 条目（单主体） | `tg_entry` / `tg_add_entry` | — | `tg_entry(subject, *meta)` |
+| 条目（文字主体） | `tg_entry_text` / `tg_add_entry_text` | — | `tg_entry(..., code=False)` |
+| 条目（双机器值 →） | `tg_entry_pair` / `tg_add_entry_pair` | — | `tg_entry_pair(a, b, *meta)` |
+| 条目（双机器值 ·） | `tg_entry_codes` / `tg_add_entry_codes` | — | `tg_entry_codes(a, b, *meta)` |
+| 多行块 | `tg_add_pre` | — | `tg_pre_block(text)` |
+| 说明段 | `tg_add_note` | 手拼 | 手拼 |
+| 树形 / 折叠 | `tree_conn` `tree_sub` `tree_lines` `tree_code_fold` | 手拼 | 手拼 |
+| 转义 | `escape_html` | `Esc-Html` | `html.escape` |
+| 收尾 | `tg_add_footer` | `Get-TgFooter` | `tg_footer_line` / `tg_format_elapsed` |
+| 发送 | `send_tg` / `send_tg_chunked` | `Send-TgMessage` | `send_telegram` / `send_telegram_chunked` |
+
+真源文件：`.github/scripts/telegram/tg_notify.sh`、`tg_notify.ps1`、
+`.github/scripts/proxy-speedtest/speedtest_common.py`。
+
+> 内嵌 python 段（如 `tg-channel/sync_to_tg.sh`）无法 import 共享层，
+> 在本文件内同义实现 `esc` / `tg_pre_block`，三处定义保持一致。
+
+### 8.2 状态图标语义
+
+`✅` 成功 · `⚠️` 部分失败/警告 · `❌` 失败 · `⏭️` 跳过 · `🔄` 进行中 ·
+`⏳` 待处理 · `⛔` 中断 · `🚨` 危险警告 · `🆘` 灾难恢复 · `📍` 进度面板当前阶段
+
+建议：状态图标与结论一致——0 成功/中止/疑似未走代理时，标题应降级为 ⚠️/❌，
+不要恒 `✅`。
+
+### 8.3 批次历史行字段（进度面板）
+
+`状态#批次号`（`✅/⚠️/❌`）· `✅00` 成功 · `🔧00` 修复 · `❗33` 失败 ·
+`⏭️22` 跳过 · `♻️22` 已有 —— 五计数 `%02d` 补零 · `⏱01:15` 耗时（mm:ss）·
+`⬆️4.79G` 上传量（GiB 两位小数）。最近 6 条滚动。
+
+### 8.4 既定豁免（技术必需，不算偏差）
+
+1. **内容片长补零** `2 小时 08 分`——条目内媒体时长，区别于收尾区无补零的
+   `X 小时 Y 分`。
+2. **批次行 `⏱mm:ss` ≥1h 时 mm 延伸 3 位**（`75:20`）——定宽让位于真值。
+3. **等宽块**：进度面板阶段行/批次历史行整行 `<code>` 包裹（emoji 与 `▸` 在内），
+   换计数列竖向对齐；`🔗` 在 `<a>` 内、`▸`/`▶` 动作前缀同理。
+
+### 8.5 术语
+
+- **面板**：需要 message_id 的原地刷新消息（openlist 进度面板）。
+- **构造示例**：文档中为说明版式而用助手渲染的示例（非线上实录）。
+- **硬约束**：不遵守会造成通知丢失或误判失败的规则（§6、§7、§4.9）。

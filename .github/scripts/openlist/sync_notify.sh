@@ -35,7 +35,7 @@ _notify_add_header() {
   if [ -n "${3:-}" ]; then
     tg_add_kv "$1" "状态" "$3"
   fi
-  tg_append "$1" "文件数：${count_info}"$'\n'
+  tg_add_kv "$1" "文件数" "$count_info"
 }
 
 # AUTO_SPLIT_INFO 段（仅非空时插入；内容为 task_engine.sh 经 tg_add_section/
@@ -49,7 +49,8 @@ _notify_add_autosplit() {
 # 用法: _notify_add_excludes <var>
 _notify_add_excludes() {
   [ -z "$exclude_list" ] && return 0
-  tg_add_section "$1" "🚫 排除规则"
+  # 列表分节带计数（规模一眼可见）
+  tg_add_section "$1" "🚫 排除规则 · $(printf '%s' "$exclude_list" | grep -c .)"
   # 树形（tree_code_fold：逐行 <code>转义</code> + 超 8 条折叠）——此前用 "• " 平铺，
   # 与同一条通知里的失败清单（├─/└─）两种前缀并存（规范 §2 裁决 3）
   tg_add_block "$1" "$(tree_code_fold "$exclude_list")"
@@ -177,7 +178,8 @@ _send_sync_result_notification() {
     while IFS='|' read -r fpath fsize fmsg; do
       [ -z "$fpath" ] && continue
       [ "${#_fail_entries[@]}" -ge 8 ] && continue
-      _fail_entries+=("<code>$(escape_html "$fpath")</code> · $(escape_html "$fsize") · $(escape_html "$fmsg")")
+      # 条目行统一走 tg_entry（主体等宽 + 元数据 " · " 分隔、统一转义）
+      _fail_entries+=("$(tg_entry "$fpath" "$fsize" "$fmsg")")
       # 从 fix_log 中按文件名分隔提取该文件对应的修复过程
       local fix_section="" _fix_log_text
       if [ -f "$fix_log" ]; then
@@ -299,7 +301,8 @@ _send_sync_result_notification() {
     _notify_add_header err_msg "$err_title" "$err_status"
     _notify_add_excludes err_msg
     _notify_add_autosplit err_msg
-    tg_add_section err_msg "🧾 错误详情 · 关键日志"
+    # 「· 关键日志」是说明性后缀，别与计数的 " · N" 混写（易误读为数量）
+    tg_add_section err_msg "🧾 错误详情（关键日志）"
     if [ -n "$critical_logs" ] && [ "$critical_logs" != "无明显错误关键字" ]; then
       # 日志为原始输出（可能含 <>& 字符），交给 tg_add_pre 统一转义 + <pre> 包裹
       local err_log_lines=""
@@ -308,8 +311,8 @@ _send_sync_result_notification() {
       done <<< "$critical_logs"
       tg_add_pre err_msg "${err_log_lines%$'\n'}"
     else
-      # 中文结论 → （语义表：条目/结论值不得裸文本；此前是裸 "• 无明显错误关键字"）
-      tg_add_block err_msg "无明显错误关键字"
+      # 没有关键日志时给一句说明（走 tg_add_note：段前空行与转义都由助手保证）
+      tg_add_note err_msg "无明显错误关键字"
     fi
     _notify_add_diff_list err_msg
     tg_add_footer err_msg

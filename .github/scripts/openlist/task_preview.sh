@@ -418,7 +418,9 @@ flush_task_preview() {
     tg_add_title msg "📋 任务预览 · ${PREVIEW_TASK_NAME}"
     tg_add_section msg "📊 同步对 · ${PREVIEW_PAIR_COUNT}"
     tg_append msg "$(_preview_render_pairs_detail "$_t")"
-    tg_append msg $'\n\n'"📦 合计预估待同步：$(format_bytes "$PREVIEW_TOTAL_SYNC_BYTES") / ${PREVIEW_TOTAL_SYNC_COUNT} 文件${_total_note}${_fail_note}${_skip_note}"
+    # 合计段与附注走 tg_add_note：段前空行与转义由助手保证
+    # （此前手写 $'\n\n' 拼接，且附注内还嵌了 \n，空行来源不受控）
+    tg_add_note msg "📦 合计预估待同步：$(format_bytes "$PREVIEW_TOTAL_SYNC_BYTES") / ${PREVIEW_TOTAL_SYNC_COUNT} 文件${_total_note}${_fail_note}${_skip_note}"
     tg_add_footer msg
 
     send_telegram_message "$msg"

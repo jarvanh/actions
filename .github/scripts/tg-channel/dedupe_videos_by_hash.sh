@@ -220,7 +220,7 @@ if [ "$DUP_COUNT" -gt 0 ]; then
     tg_add_kv msg "模式" "仅通知 · 手动触发可开启 auto_delete_duplicates"
   fi
   if [ -n "$DUP_DETAILS" ]; then
-    tg_add_section msg "📋 详情"
+    tg_add_section msg "📋 详情 · ${DUP_COUNT}"
     tg_add_block msg "$DUP_DETAILS"
   fi
   tg_add_footer msg
