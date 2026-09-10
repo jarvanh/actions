@@ -116,6 +116,15 @@ def fmt_secs(x: float) -> str:
     return f"{x:.1f} 秒"
 
 
+def tg_pre_block(text: str) -> str:
+    """多行块（日志/命令/异常栈）：转义 + <pre> 包裹。
+
+    与 bash 真源 tg_add_pre、python 共享层 speedtest_common.tg_pre_block 同语义；
+    本文件是内嵌 python 段、无法 import 共享层，故在此同义实现（保持三者一致）。
+    """
+    return f"<pre>{esc(text)}</pre>"
+
+
 def build_fail_notify(title: str, file: str, elapsed: float, lines: list):
     """构建统一格式的失败通知：标题 + 分隔线 + 键值区 + 附加行。
 
@@ -446,7 +455,8 @@ def main():
                 file, dl_elapsed,
                 [
                     f"📦 大小：{human_size(size)}",
-                    "📄 rclone stderr：\n" + esc(result.stderr[-500:].strip() if result.stderr else "(无错误输出)"),
+                    # 多行日志走 <pre>（与「输出尾部」同款，避免裸换行破坏排版）
+                    "📄 rclone stderr：\n" + tg_pre_block(result.stderr[-500:].strip() if result.stderr else "(无错误输出)"),
                 ],
             ))
             continue
@@ -690,7 +700,7 @@ if [ -n "$FAILED_LIST" ]; then
   tg_add_block msg "$(_render_named_entries "$FAILED_LIST")"
 fi
 if [ -n "$SKIPPED_DETAILS" ]; then
-  tg_add_section msg "⚠️ 跳过/过滤文件"
+  tg_add_section msg "⚠️ 跳过/过滤文件 · ${SKIPPED_COUNT}"
   tg_add_block msg "$(_render_skipped_groups "$SKIPPED_DETAILS")"
 fi
 tg_add_footer msg

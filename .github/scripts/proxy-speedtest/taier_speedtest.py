@@ -465,7 +465,8 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
         f'{_title_emoji} 泰尔三网测速',
         sep,
         f"🕒 起止：{esc(meta['started_text'])} ~ {esc(meta['ended_text'])} · 耗时 {esc(meta['duration_text'])}",
-        f"📊 节点：共 {len(results)} 个 · 成功 {len(ok_results)} 个",
+        # 计数口径与 cdn/gitee 统一用「可用」（成功=功能可用，含节点连接成功但速度偏低）
+        f"📊 节点：共 {len(results)} 个 · 可用 {len(ok_results)} 个",
         f"📍 测速点：{esc(meta['points'])} · 模式：{esc(meta['mode_label'])}",
         f"🧪 引擎：<code>taierspeedtest {esc(VERSION['taier'] or 'latest')}</code>",
         '',

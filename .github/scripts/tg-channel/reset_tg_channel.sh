@@ -46,9 +46,12 @@ echo "已删除 failed_videos.json（损坏标记一并清除，下次运行重�
 source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 msg=""
 tg_add_title msg "🧹 ${WORKFLOW_LABEL} 频道清理完成"
-# 段落条目：说明主体 、文件名 <code>（语义表 #3/#4；此前整块裸文本，是本子系统版式漂移最明显处）
-tg_add_block msg "📁 已清空 Telegram 频道所有视频
-📄 已删除 <code>uploaded_videos.json</code> · 下次运行重新处理全部视频
-📄 已删除 <code>failed_videos.json</code> · 损坏标记清除，下次运行重新尝试"
+# 条目行走 tg_add_entry_text / tg_add_entry_codes（此前是整块裸文本：无分节、无树形）
+_cl=""
+tg_add_entry_text _cl "📁 已清空 Telegram 频道所有视频"
+tg_add_entry_codes _cl "uploaded_videos.json" "" "已删除 · 下次运行重新处理全部视频"
+tg_add_entry_codes _cl "failed_videos.json" "" "已删除 · 损坏标记清除，下次运行重新尝试"
+tg_add_section msg "🧹 清理动作 · 3"
+tg_add_block msg "$(tree_lines "${_cl%$'\n'}")"
 tg_add_footer msg
 send_tg "$msg"

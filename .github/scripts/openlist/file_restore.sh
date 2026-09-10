@@ -277,12 +277,12 @@ restore_fixed_files() {
   tg_add_kv msg "修复恢复" "${total_ok} 个"
   tg_add_kv msg "失败" "${total_fail} 个"
   if [ -n "$ok_list" ]; then
-    tg_add_section msg "✅ 已还原"
+    tg_add_section msg "✅ 已还原 · ${total_ok}"
     tg_add_block msg "$(_fold_list "$ok_list" "$total_ok")"
     tg_add_note msg "原路径原文件名"
   fi
   if [ -n "$fail_list" ]; then
-    tg_add_section msg "❌ 失败清单"
+    tg_add_section msg "❌ 失败清单 · ${total_fail}"
     tg_add_block msg "$(_fold_list "$fail_list" "$total_fail")"
   fi
   tg_add_note msg "成功条目已从 marker 修复清单移除；失败条目保留，可重试。"
@@ -534,7 +534,7 @@ restore_source_from_target() {
   tg_add_kv msg "跳过 · 已存在" "${total_skip} 个"
   tg_add_kv msg "失败" "${total_fail} 个"
   if [ -n "$fail_list" ]; then
-    tg_add_section msg "❌ 失败清单"
+    tg_add_section msg "❌ 失败清单 · ${total_fail}"
     tg_add_block msg "$(_fold_list "$fail_list" "$total_fail")"
   fi
   tg_add_note msg "目标端未做任何删改，可重复执行补齐失败条目。"
@@ -648,7 +648,7 @@ rebuild_source_from_target() {
   tg_add_kv msg "跳过 · 已存在" "${total_skip} 个"
   tg_add_kv msg "失败" "${total_fail} 个"
   if [ -n "$fail_list" ]; then
-    tg_add_section msg "❌ 失败清单"
+    tg_add_section msg "❌ 失败清单 · ${total_fail}"
     tg_add_block msg "$(_fold_list "$fail_list" "$total_fail")"
   fi
   tg_add_note msg "源端已按目标端镜像；目标端全程只读，失败条目可直接重跑补齐。"

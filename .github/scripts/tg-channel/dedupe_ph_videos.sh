@@ -261,7 +261,7 @@ if [ "$DUP_COUNT" -gt 0 ]; then
     tg_add_note msg "ℹ️ 标题不同且哈希各不相同，未自动删除"
   fi
   if [ -n "$DUP_DETAILS" ]; then
-    tg_add_section msg "📋 详情"
+    tg_add_section msg "📋 详情 · ${DUP_COUNT}"
     tg_add_block msg "$DUP_DETAILS"
   fi
   tg_add_footer msg

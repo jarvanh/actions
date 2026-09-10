@@ -118,12 +118,28 @@ jobs:
           icloudpd --library SharedSync-6D80D39D-BDF2-49D1-9E6C-1EE9B681177F --directory /openlist/123panCrypt1/iCloudPhotosShared --cookie-directory /dropbox/self-hosted/iCloudPhotosCookie --username ${{ secrets.APPLEID }} --password ${{ secrets.APPLEPASSWORD }} --auto-delete
           icloudpd --library PrimarySync --directory /openlist/123panCrypt1/iCloudPhotosPersonal --cookie-directory /dropbox/self-hosted/iCloudPhotosCookie --username ${{ secrets.APPLEID }} --password ${{ secrets.APPLEPASSWORD }} --auto-delete
           echo "github icloud-photos-downloader 任务执行结束"
-          # 统一 HTML 通知 + 统一收尾区（发送失败不判任务失败）
+
+      # ===== 通知（失败/取消也发布）=====
+      # 此前通知写在业务 run 块末尾且无 always()：icloudpd 非零退出时通知整段不执行，
+      # 失败时反而收不到消息；标题也恒「完成」。改为独立 step 按 job.status 分态。
+      - name: "Notify: iCloud 下载结果"
+        if: ${{ always() }}
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TG_RUN_STARTED_AT: ${{ github.run_started_at }}
+        run: |
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+          case "${{ job.status }}" in
+            success)   _emoji="☁️"; _status="✅ 完成" ;;
+            cancelled) _emoji="⛔"; _status="⛔ 已取消" ;;
+            *)         _emoji="❌"; _status="❌ 失败" ;;
+          esac
           msg=""
-          tg_add_title msg "☁️ iCloud 照片下载完成"
+          tg_add_title msg "$_emoji iCloud 照片下载"
           tg_add_kv msg "图库" "个人 + 共享 · 增量 · 自动清理"
-          tg_add_kv msg "状态" "✅ 完成"
+          tg_add_kv msg "状态" "$_status"
           tg_add_footer msg
           send_tg "$msg" || echo "::warning::iCloud 通知发送失败（不影响任务）"
 
