@@ -1,0 +1,99 @@
+name: proxy-speedtest-ookla
+
+# 订阅节点 Speedtest 测速：逐个节点用 Ookla 官方 speedtest CLI 测「节点 → 指定 Speedtest
+# 测速点（默认广东广州·联通 5G，server id 26678）」的延迟与上下行带宽，结果推送 Telegram。
+#
+# 与 proxy-speedtest 系列同族（同一订阅源 PROXY_SPEEDTEST_SUB_URLS、同一 mihomo 内核），
+# 只是测速引擎换成 Ookla 官方 CLI：口径是 Speedtest 官方自适应多连接测量。
+#
+# 为什么必须显式指定测速点编号：Ookla 的服务器列表按请求方出口 IP 的远近排序，runner
+# （Azure 出口）视角看不到中国大陆节点，自动「就近选择」必然落到境外节点、口径失真，
+# 所以用 --server-id 显式锁定（可用 OOKLA_SERVER_ID 改成别的编号或逗号分隔多候选）。
+#
+# 链路说明：Ookla CLI 没有 --proxy 参数，只能走 mihomo TUN 透明接管该进程流量：
+#   rules: [PROCESS-NAME,speedtest,AUTO, MATCH,DIRECT]
+# 即只有测速进程走节点、其余流量（含 runner 心跳/日志）直连；再用「测速出口 IP
+# 是否等于 runner 直连出口 IP」校验规则真的生效（TUN 起不来会静默直连、结果失真）。
+# 开 TUN 需要 CAP_NET_ADMIN，脚本会在非 root 时自动加 sudo。
+on:
+  schedule:
+    # 每 6 小时测一次：UTC 05:00, 11:00, 17:00, 23:00（北京 13:00, 19:00, 01:00, 07:00）
+    # 与 gitee（02/08/14/20）、cdn（03/09/15/21）、taier（04/10/16/22）错峰
+    - cron: "0 5,11,17,23 * * *"
+  workflow_dispatch:
+    inputs:
+      server_id:
+        description: 'Speedtest 测速点编号（多个用英文逗号分隔，首选不可用时按序顺延；默认广州联通 26678）'
+        required: false
+        default: '26678'
+      max_nodes:
+        description: '最多测几个节点（0 = 不限）'
+        required: false
+        default: '0'
+
+jobs:
+  speedtest:
+    concurrency: proxy-speedtest-ookla-singleton
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      # Ookla 官方源安装官方 CLI（二进制名固定为 speedtest，供 TUN 进程规则匹配）；
+      # 不要用 Debian/Ubuntu 的 speedtest-cli 包（第三方实现，输出结构与口径都不同）
+      - name: Install Ookla Speedtest CLI
+        run: |
+          curl -sSL https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh | sudo bash
+          sudo apt-get install -y speedtest
+          which speedtest
+          speedtest --version || true
+
+      - name: Run ookla speedtest
+        env:
+          # 订阅源（与其他测速工作流同一个 secret）
+          PROXY_SPEEDTEST_SUB_URLS: ${{ secrets.PROXY_SPEEDTEST_SUB_URLS }}
+          # 测速点与测速参数（workflow_dispatch 可覆盖；定时运行走默认值）
+          OOKLA_SERVER_ID: ${{ github.event.inputs.server_id || '26678' }}
+          OOKLA_MAX_NODES: ${{ github.event.inputs.max_nodes || '0' }}
+          # 订阅导出策略（四套共用；可在仓库 Settings → Secrets and variables → Actions
+          # → Variables 里覆盖，留空走脚本默认值）：
+          #   PROXY_SPEEDTEST_MIN_MEGABIT  达标阈值（兆，默认 10）
+          #   PROXY_SPEEDTEST_SPEED_METRIC 判定指标 upload|download（默认 upload 按上行判定；
+          #                                达标数 < 最少节点数时自动改用另一指标，反之亦然）
+          #   PROXY_SPEEDTEST_MIN_NODES    上传订阅的最少节点数（默认 1，不足则不上传）
+          PROXY_SPEEDTEST_MIN_MEGABIT: ${{ vars.PROXY_SPEEDTEST_MIN_MEGABIT || '10' }}
+          PROXY_SPEEDTEST_SPEED_METRIC: ${{ vars.PROXY_SPEEDTEST_SPEED_METRIC || 'upload' }}
+          PROXY_SPEEDTEST_MIN_NODES: ${{ vars.PROXY_SPEEDTEST_MIN_NODES || '1' }}
+          # GitHub API 匿名调用在共享出口 IP 上 60 次/h 限流时的认证回退
+          GH_TOKEN: ${{ secrets.PAT }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 订阅导出：本工作流专属 Gist（四个测速工作流各用各的，互不覆盖）。
+          # 留空则首次运行自动新建，TG 通知会给链接；拿到 id 后回填此 secret 避免每轮新建
+          PROXY_SPEEDTEST_GIST_ID: ${{ secrets.PROXY_SPEEDTEST_OOKLA_GIST_ID }}
+          PROXY_SPEEDTEST_GIST_FILENAME: proxy_speedtest_ookla_subscription.yaml
+          PROXY_SPEEDTEST_GIST_DESCRIPTION: 'proxy speedtest subscription (ookla 广州联通)'
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # 统一收尾区（footer）: 运行日志链接 + 已运行时长
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TG_RUN_STARTED_AT: ${{ github.run_started_at }}
+        run: python .github/scripts/proxy-speedtest/speedtest_ookla.py
+
+      # 兜底收尾：mihomo TUN 的 auto-route 会接管整机出向路由，内核不撤掉的话
+      # runner 无法把日志/状态回传 GitHub（表现为所有 step 已完成但 run 卡在
+      # in_progress、连取消都执行不了）。脚本正常路径会自己关，这里防异常/超时。
+      - name: Cleanup mihomo TUN
+        if: ${{ always() }}
+        run: |
+          sudo -n pkill -f "mihomo -d" || true
+          sleep 2
+          echo "mihomo 残留进程：$(pgrep -cf 'mihomo -d' || true)"
