@@ -147,10 +147,12 @@ _send_sync_result_notification() {
       [ "$_fix_shown" -ge 8 ] && continue
       local f_method_tag _entry
       f_method_tag=$(_fix_method_short "$f_mid")
-      _entry="<code>$(escape_html "$f_original")</code>"
-      # 改名修复（含目录变动）: 原名 → 实际名 双方完整路径
-      [ "$f_original" != "$f_alternative" ] && _entry+=" → <code>$(escape_html "$f_alternative")</code>"
-      _entry+=" · $(escape_html "$f_size") · $(escape_html "$f_method_tag")"
+      # 双机器值条目（原名 → 替代名）走 tg_entry_pair；同名修复时第二主体为空自动省略
+      if [ "$f_original" != "$f_alternative" ]; then
+        _entry="$(tg_entry_pair "$f_original" "$f_alternative" "$f_size" "$f_method_tag")"
+      else
+        _entry="$(tg_entry "$f_original" "$f_size" "$f_method_tag")"
+      fi
       _fix_entries+="${_entry}"$'\n'
       _fix_shown=$((_fix_shown + 1))
     done < "$fix_list"

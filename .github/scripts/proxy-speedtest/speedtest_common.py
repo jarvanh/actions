@@ -609,6 +609,32 @@ def tg_entry(subject, *meta, code: bool = True):
     return out
 
 
+def _tg_entry2(sep: str, a, b, *meta) -> str:
+    out = f'<code>{html.escape(str(a))}</code>'
+    if b not in (None, ''):
+        out += f'{sep}<code>{html.escape(str(b))}</code>'
+    for m in meta:
+        if m not in (None, ''):
+            out += f' · {html.escape(str(m))}'
+    return out
+
+
+def tg_entry_pair(a, b=None, *meta) -> str:
+    """双机器值条目（语义表 #10）："<code>A</code> → <code>B</code> · 元数据"。
+
+    → 表达替换/映射关系（原名 → 替代名），不可写成 " · "；第二主体为空时自动省略。
+    """
+    return _tg_entry2(' → ', a, b, *meta)
+
+
+def tg_entry_codes(a, b=None, *meta) -> str:
+    """并列双机器值条目（语义表 #10）："<code>A</code> · <code>B</code> · 元数据"。
+
+    无主次关系（如节点名 · 原始异常串），与 tg_entry 的区别是第二个值也是机器值。
+    """
+    return _tg_entry2(' · ', a, b, *meta)
+
+
 def tg_pre_block(text: str) -> str:
     """多行块（日志/命令/异常栈）：统一 <pre> 包裹 + 转义（与 bash tg_add_pre 同义）。"""
     return f'<pre>{html.escape(str(text))}</pre>'
