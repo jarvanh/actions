@@ -3,17 +3,19 @@
 > 代码：`.github/scripts/proxy-speedtest/taier_speedtest.py`
 > 入口：`.github/workflows/proxy-speedtest-taier.yml`
 
-## 三件套总览
+## 四件套总览
 
-仓库代理测速三件套**按测速点命名**，口径互不可比（单流 vs 多连接 vs 专用测速协议）：
+仓库代理测速四套**按测速点命名**，口径互不可比（单流 vs 多连接 vs 专用测速协议）：
 
 | 工作流 | 测速点 | 口径 | 引擎/链路 | 文档 |
 |---|---|---|---|---|
 | `proxy-speedtest-gitee` | Gitee 私有仓库 | 经代理 git push 上行 + clone 下行 + gitee.com HTTP 延迟 | `speedtest_gitee.py` | [gitee](proxy-speedtest-gitee.md) |
 | `proxy-speedtest-cdn` | 国内 CDN/镜像站 + baidu/taobao | 经代理单连接 curl 下载 + HTTP 计时延迟 | `speedtest.py` | [cdn](proxy-speedtest-cdn.md) |
 | `proxy-speedtest-taier` | 泰尔三网（电信/联通/移动测速服务器） | taierspeedtest 延迟 + 单/多线程上下行 | 本文 | — |
+| `proxy-speedtest-ookla` | Speedtest 官方测速点（默认广东广州 · 联通 5G） | speedtest CLI 延迟 + 上下行 | `speedtest_ookla.py` + mihomo TUN | [ookla](proxy-speedtest-ookla.md) |
 
-调度：UTC 04/10/16/22（北京 12/18/00/06），与 gitee（02/08/14/20）、cdn（03/09/15/21）错峰。
+调度：UTC 04/10/16/22（北京 12/18/00/06），与 gitee（02/08/14/20）、cdn（03/09/15/21）、
+ookla（05/11/17/23）错峰。
 
 ## 功能与链路
 
@@ -54,7 +56,7 @@ TUN 起来后 DNS 会被 mihomo 劫持，必须显式给可达的公共解析器
 
 | secret | 用途 |
 |---|---|
-| `PROXY_SPEEDTEST_SUB_URLS` | 订阅源（三件套共用） |
+| `PROXY_SPEEDTEST_SUB_URLS` | 订阅源（四套共用） |
 | `PROXY_SPEEDTEST_TAIER_GIST_ID` | 本工作流专属订阅 Gist 的 id；留空首跑自动新建（TG 给链接），回填避免每轮新建 |
 | `PAT` | gist 写权限（默认 GITHUB_TOKEN 无 gist scope 会 403） |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | 通知 |
@@ -72,16 +74,16 @@ TUN 起来后 DNS 会被 mihomo 劫持，必须显式给可达的公共解析器
 | `TAIER_IMAGE` | `0` | 每节点出结果图（上传图床），默认关避免刷图 |
 | `TAIER_NO_IPV6` | `1` | TUN 下客户端易误判 v6 可用导致耗时翻倍，默认关 |
 | `TAIER_REPO` | `MiaM1ku/taierspeedtest` | 引擎仓库 |
-| `PROXY_SPEEDTEST_MIN_MEGABIT` | 10 | 达标阈值（兆），三件套共用 |
+| `PROXY_SPEEDTEST_MIN_MEGABIT` | 10 | 达标阈值（兆），四套共用 |
 | `PROXY_SPEEDTEST_SPEED_METRIC` | upload | 判定指标 `upload`/`download`；达标数 < 最少节点数时自动改用另一指标 |
 | `PROXY_SPEEDTEST_MIN_NODES` | 1 | 上传订阅的最少节点数，不足则不上传 |
 
 订阅导出策略（阈值/判定指标/最少节点数，含双向回退规则）详见
-[gitee 文档 · 订阅导出策略](proxy-speedtest-gitee.md#订阅导出策略三件套共用)。
+[gitee 文档 · 订阅导出策略](proxy-speedtest-gitee.md#订阅导出策略四套共用)。
 注意 taier **上行常测不出**（CDN 类测速点拒绝上传包，引擎渲染 failed → 0），默认按上行
 判定时通常达标 0 个 → 自动落到下行判定，通知会显示实际采用的指标。
 
-### Gist 文件名/描述（三件套区分）
+### Gist 文件名/描述（四套区分）
 
 `PROXY_SPEEDTEST_GIST_FILENAME` = `proxy_speedtest_taier_subscription.yaml`、
 `PROXY_SPEEDTEST_GIST_DESCRIPTION` = `proxy speedtest subscription (taier 三网)`。
