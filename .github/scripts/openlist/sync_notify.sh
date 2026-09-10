@@ -299,12 +299,12 @@ _send_sync_result_notification() {
     _notify_add_autosplit err_msg
     tg_add_section err_msg "🧾 错误详情 · 关键日志"
     if [ -n "$critical_logs" ] && [ "$critical_logs" != "无明显错误关键字" ]; then
-      # 日志为原始输出（可能含 <>& 字符），逐行转义后 <pre> 等宽展示
+      # 日志为原始输出（可能含 <>& 字符），交给 tg_add_pre 统一转义 + <pre> 包裹
       local err_log_lines=""
       while IFS= read -r line; do
         [ -n "$line" ] && err_log_lines+="${line}"$'\n'
       done <<< "$critical_logs"
-      tg_add_block err_msg "<pre>$(escape_html "${err_log_lines%$'\n'}")</pre>"
+      tg_add_pre err_msg "${err_log_lines%$'\n'}"
     else
       # 中文结论 → （语义表：条目/结论值不得裸文本；此前是裸 "• 无明显错误关键字"）
       tg_add_block err_msg "无明显错误关键字"

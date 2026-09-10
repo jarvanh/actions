@@ -70,8 +70,8 @@ send_video_split_notification() {
         log_summary=$(tail -c 1200 "$log_file" 2>/dev/null || echo "无法读取日志")
       fi
       tg_add_section message "🧾 日志摘要 · 当前文件"
-      # 日志为原始输出，转义后 <pre> 等宽展示
-      tg_add_block message "<pre>$(escape_html "$log_summary")</pre>"
+      # 日志为原始输出，转义后 <pre> 等宽展示（tg_add_pre 统一转义与包裹）
+      tg_add_pre message "$log_summary"
     fi
   fi
 
@@ -606,12 +606,12 @@ preprocess_large_files() {
       # 英文 kind 不直出通知（规范 §4）: media/binary 映射中文标签
       local _kind_label="二进制"
       [ "$split_kind" = "media" ] && _kind_label="媒体"
-      processed_files+="<code>$(escape_html "${remote_source}:${full_path}")</code> · $(format_bytes_iec "$file_size") · ${_kind_label}"$'\n'
-      deleted_files+="<code>$(escape_html "${remote_source}:${full_path}")</code>"$'\n'
+      tg_add_entry processed_files "${remote_source}:${full_path}" "$(format_bytes_iec "$file_size") · ${_kind_label}"
+      tg_add_entry deleted_files "${remote_source}:${full_path}"
       echo "$(date +%Y-%m-%d_%H:%M:%S) - ${remote_source}:${full_path} - OpenList 前置分割成功(${split_kind})，已删除原始大文件" >> "$PROCESSED_FILES_LOG"
     else
       failed_count=$((failed_count + 1))
-      failed_files+="<code>$(escape_html "${remote_source}:${full_path}")</code>"$'\n'
+      tg_add_entry failed_files "${remote_source}:${full_path}"
       log_fix "$video_split_log" "OpenList 前置分割失败: ${remote_source}:${full_path}"
     fi
 

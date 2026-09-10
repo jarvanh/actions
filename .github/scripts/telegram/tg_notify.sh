@@ -220,6 +220,42 @@ tree_code_fold() {
   tree_lines "$_entries"
 }
 
+# 条目行构造器（2026-09-10 新增：消灭语义表 #4/#5 的"手写"——此前各脚本自己拼
+# "主体 · 元数据"，转义/分隔符/顺序各自为政，是版式漂移的最后一块）
+#   tg_entry      <机器值主体> [元数据...]  → "<code>主体</code> · 元数据"（单行，**无尾换行**）
+#   tg_entry_text <文字主体>   [元数据...]  → "主体 · 元数据"（主体裸文本）
+#   tg_add_entry  <var> <机器值主体> [元数据...]  → 追加一整行到消息变量（含尾换行）
+# 元数据一律 " · " 分隔、统一转义。注意 $( ) 会吃掉尾换行，故 tg_entry 不输出换行：
+# 拼接用 tg_entry（自行补 $'\n'），累积多行列表用 tg_add_entry。
+tg_entry() {
+  local _subj="$1"; shift
+  local _out="<code>$(escape_html "$_subj")</code>" _m
+  for _m in "$@"; do
+    [ -n "$_m" ] && _out+=" · $(escape_html "$_m")"
+  done
+  printf '%s' "$_out"
+}
+
+tg_entry_text() {
+  local _subj="$1"; shift
+  local _out="$(escape_html "$_subj")" _m
+  for _m in "$@"; do
+    [ -n "$_m" ] && _out+=" · $(escape_html "$_m")"
+  done
+  printf '%s' "$_out"
+}
+
+tg_add_entry() {
+  local _var="$1" _subj="$2"; shift 2
+  tg_append "$_var" "$(tg_entry "$_subj" "$@")"$'\n'
+}
+
+# 多行块（日志/命令/异常栈）：统一 <pre> 包裹 + 转义，替代各脚本手拼 <pre>
+# 用法: tg_add_pre <var> <多行文本>
+tg_add_pre() {
+  tg_add_block "$1" "<pre>$(escape_html "$2")</pre>"
+}
+
 # ===== 发送层 =====
 
 # 单次发送尝试（429 自动重试；其余失败直接返回非 0 并输出错误信息）

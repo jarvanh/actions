@@ -533,7 +533,8 @@ def main():
                 notify(build_fail_notify(
                     "❌ 处理/上传失败",
                     file, up_elapsed,
-                    [f"📄 输出尾部：\n<pre>{esc(err_tail)}</pre>"] if err_tail else ["📄 无详细输出，见 Actions 日志"],
+                    # 多行块统一用 tg_pre_block（转义 + <pre> 包裹）
+                    [f"📄 输出尾部：\n{tg_pre_block(err_tail)}"] if err_tail else ["📄 无详细输出，见 Actions 日志"],
                 ))
 
         # 清理工作目录
@@ -632,9 +633,8 @@ _render_named_entries() {
   [ -z "$_in" ] && return 0
   while IFS=$'\t' read -r _name _meta; do
     [ -z "$_name" ] && continue
-    _out+="<code>$(escape_html "$_name")</code>"
-    [ -n "$_meta" ] && _out+=" · $(escape_html "$_meta")"
-    _out+=$'\n'
+    # 条目行统一走真源 tg_add_entry（主体 <code> + 元数据 " · " 分隔、统一转义）
+    tg_add_entry _out "$_name" "$_meta"
   done <<< "$_in"
   [ -z "$_out" ] && return 0
   tree_lines "${_out%$'\n'}"
