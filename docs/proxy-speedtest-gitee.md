@@ -39,9 +39,9 @@
    `PROXY_SPEEDTEST_LATENCY_SAMPLES` × 超时 `PROXY_SPEEDTEST_LATENCY_TIMEOUT`）
    → 经代理 `git push`（单流 HTTPS，超时 `PROXY_SPEEDTEST_PUSH_TIMEOUT`）按推送耗时
    换算上行 → `git clone` 拉回（超时 `PROXY_SPEEDTEST_CLONE_TIMEOUT`）换算下行；
-6. 汇总 → 按**订阅导出策略**判定达标节点（见[订阅导出策略](#订阅导出策略三件套共用)）导出到专属 Gist，并用**第二个 mihomo
-   实例**（端口 19690/19691）把 Gist raw 回拉、抽样节点经 AUTO 切换验证可用性
-   （`verify_gist_subscriptions_with_mihomo`）；
+6. 汇总 → 按**订阅导出策略**判定达标节点（见[订阅导出策略](#订阅导出策略三件套共用)）导出到专属 Gist
+   （`update_gist`，只上传不回拉；2026-09-10 已移除原先「第二个 mihomo 实例（19690/19691）
+   回拉 Gist raw + 抽样验证」的步骤，见[运维与排查](#运维与排查)）；
 7. Telegram 推 `✅ Gitee 测速完成`（TOP 节点三项指标 + 订阅状态）。
 
 ## 运行模式与直连基线
@@ -119,7 +119,7 @@ TG 通知文案。节点必须有原始配置（`source_entry.proxy`）才计入
 |---|---|
 | `✅ Gitee 测速完成` | 正常完成 |
 | `⛔ Gitee 测速异常终止` | 收到 SIGTERM/SIGINT（run 被取消/超时），`handle_termination_signal` 兜底 |
-| `❌ Gitee 测速异常退出 · <阶段>` | 任一 `run_stage` 阶段抛异常（阶段即原因：`订阅源拉取/解析`、`mihomo 启动/配置`、`Gitee 仓库准备`、`测速文件准备`、`Gist 更新/回拉验证/通知`…） |
+| `❌ Gitee 测速异常退出 · <阶段>` | 任一 `run_stage` 阶段抛异常（阶段即原因：`订阅源拉取/解析`、`mihomo 启动/配置`、`Gitee 仓库准备`、`测速文件准备`、`Gist 更新/通知`…） |
 
 辅助机制：`/tmp/proxy_speedtest.lock` 每轮循环 touch（供外部心跳判 stale）；
 `maybe_detach_self` 支持 detach 后台自跑（CI 里固定关闭）。
@@ -133,5 +133,5 @@ TG 通知文案。节点必须有原始配置（`source_entry.proxy`）才计入
 | **节点 push 全部超时**（连直连基线也超时） | Gitee 仓库超限/被回收时 git 常表现为**挂起超时**而非明确报错（2026-09-08 实测连续三轮 0 成功）。引擎已自愈：本轮尚无成功 push 且节点失败为超时/被拒/size limit 时，自动 `rebuild_gitee_repo` 一次并重试该节点（日志 `repo_rebuild_on_push_timeout`，每轮限一次）；若重建后仍失败，多为 Gitee 账号级限流，等下一轮即可 |
 | Gist 404 | id 失效 → 自动新建新 Gist，TG 给链接后回填 secret |
 | Gist 422（`missing_field: files`） | 2026-09-08 修：`update_gist` 曾在旧文件已删除后每轮仍发 `旧文件名: null`，GitHub 判 files 无有效字段。现在先 GET 探测旧文件是否存在才发删除项，且 422 会去掉删除项重试一次 |
-| 订阅可用性存疑 | 看日志 `gist_verify` 段（回拉抽样验证），`sample_ok_count` 为抽样通过数 |
+| 订阅可用性存疑 | 本工作流只负责导出达标节点、不做可用性回拉验证（2026-09-10 移除：抽检信息量低于本轮 push/clone 实测，且失败只制造误导性告警）。订阅端导入失败的排查重心回到「节点是否达标、订阅源本身是否可用」 |
 | 该工作流当前在 Actions 里被手动禁用 | 重新启用后按计划运行 |
