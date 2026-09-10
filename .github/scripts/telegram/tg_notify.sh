@@ -250,6 +250,36 @@ tg_add_entry() {
   tg_append "$_var" "$(tg_entry "$_subj" "$@")"$'\n'
 }
 
+# 双机器值主体条目（语义表 #10）：两个主体都是机器值（都进 <code>），连接符不同语义：
+#   tg_entry_pair  <主体1> <主体2> [元数据...]  → "<code>A</code> → <code>B</code> · 元数据"
+#     （→ = 替换/映射关系，如「原名 → 替代名」，不能写成 " · "）
+#   tg_entry_codes <主体1> <主体2> [元数据...]  → "<code>A</code> · <code>B</code> · 元数据"
+#     （并列机器值、无主次，如「节点名 · 原始异常串」）
+# 追加到变量版: tg_add_entry_pair / tg_add_entry_codes
+_tg_entry2() {
+  local _sep="$1" _a="$2" _b="$3"; shift 3
+  local _out="<code>$(escape_html "$_a")</code>" _v
+  [ -n "$_b" ] && _out+="${_sep}<code>$(escape_html "$_b")</code>"
+  for _v in "$@"; do
+    [ -n "$_v" ] && _out+=" · $(escape_html "$_v")"
+  done
+  printf '%s' "$_out"
+}
+
+tg_entry_pair() { _tg_entry2 ' → ' "$@"; }
+
+tg_entry_codes() { _tg_entry2 ' · ' "$@"; }
+
+tg_add_entry_pair() {
+  local _var="$1"; shift
+  tg_append "$_var" "$(tg_entry_pair "$@")"$'\n'
+}
+
+tg_add_entry_codes() {
+  local _var="$1"; shift
+  tg_append "$_var" "$(tg_entry_codes "$@")"$'\n'
+}
+
 # 多行块（日志/命令/异常栈）：统一 <pre> 包裹 + 转义，替代各脚本手拼 <pre>
 # 用法: tg_add_pre <var> <多行文本>
 tg_add_pre() {

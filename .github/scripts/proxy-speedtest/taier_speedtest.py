@@ -55,7 +55,7 @@ from speedtest_common import (
     resolve_subscription_policy,
     send_telegram,
     send_telegram_chunked,
-    tg_entry,
+    tg_entry, tg_entry_codes,
     tg_footer_line,
     tg_format_elapsed,
     tg_pre_block,
@@ -509,9 +509,9 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
         lines.append(f'❌ 失败 · {len(failed)}')
         _failed_entries = []
         for r in failed[:5]:
-            # 原始异常串属机器值 → <code>（标签语义表第 3 类；此前用  与元数据撞语义）
+            # 并列双机器值（节点名 · 原始异常串）走 tg_entry_codes（语义表 #10）
             _failed_entries.append(
-                f"<code>{esc(r.get('name', ''))}</code> · <code>{esc((r.get('error') or '-')[:80])}</code>")
+                tg_entry_codes(r.get('name', ''), (r.get('error') or '-')[:80]))
         if len(failed) > 5:
             # 折叠行并入条目流，末条 └─ 由下面的循环统一决定（禁双 └─；规范 §2.3）
             _failed_entries.append(f'还有 {len(failed) - 5} 条…')
