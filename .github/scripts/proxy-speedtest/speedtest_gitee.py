@@ -5,7 +5,7 @@
   1. 独立工作流 proxy-speedtest-gitee 的引擎：对订阅的每个可用节点，经 mihomo 代理
      git push 测速文件到 Gitee 私有仓库测上行、clone 拉回测下行、对 gitee.com 做
      HTTP 计时测延迟（both 模式，2026-09-08 起默认，三件套指标口径对齐）；
-     达标节点订阅导出到本工作流专属 Gist 并回拉验证。
+     达标节点订阅导出到本工作流专属 Gist（只上传，不回拉验证——见文件内 gist 收尾说明）。
   2. 三件套共享引擎：mihomo 下载/配置/生命周期、订阅拉取解析、节点快照与切换
      均在本文件，speedtest.py（CDN）与 taier_speedtest.py（泰尔三网）以
      `from speedtest_gitee import ...` 复用。与引擎无关的纯共享层（订阅导出策略、
@@ -1156,81 +1156,6 @@ def speedtest_single_item(env, gitee, item: dict, test_file: pathlib.Path, push_
         })
     return result
 
-def verify_gist_subscriptions_with_mihomo(yaml_url: str):
-    if not yaml_url:
-        return {'ok': False, 'reason': 'missing yaml_url'}
-    verify_dir = HOME_RUNTIME / 'gist-verify-runtime'
-    shutil.rmtree(verify_dir, ignore_errors=True)
-    verify_dir.mkdir(parents=True, exist_ok=True)
-
-    yaml_text = fetch_text(yaml_url)
-    yaml_obj = yaml.safe_load(yaml_text) or {}
-    proxies = yaml_obj.get('proxies') or []
-    if not proxies:
-        return {'ok': False, 'reason': 'yaml has no proxies'}
-
-    run_dir = verify_dir / 'yaml'
-    run_dir.mkdir(parents=True, exist_ok=True)
-    controller_port = 19690
-    mixed_port = 19691
-    cfg = {
-        'mixed-port': mixed_port,
-        'allow-lan': False,
-        'mode': 'Rule',
-        'log-level': 'warning',
-        'external-controller': f'127.0.0.1:{controller_port}',
-        'secret': '',
-        'proxies': proxies,
-        'proxy-groups': [{'name': 'AUTO', 'type': 'select', 'proxies': [p.get('name') for p in proxies if p.get('name')]}],
-        'rules': ['MATCH,AUTO'],
-    }
-    cfg_path = run_dir / 'config.yaml'
-    log_path = run_dir / 'mihomo.log'
-    cfg_path.write_text(yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False), encoding='utf-8')
-    proc = subprocess.Popen([str(ensure_local_mihomo()), '-d', str(run_dir), '-f', str(cfg_path)], stdout=log_path.open('w'), stderr=subprocess.STDOUT, start_new_session=True)
-    try:
-        data = None
-        for _ in range(50):
-            try:
-                with urllib.request.urlopen(f'http://127.0.0.1:{controller_port}/proxies', timeout=2) as r:
-                    data = json.load(r)
-                break
-            except Exception:
-                time.sleep(0.5)
-        if data is None:
-            return {'ok': False, 'reason': 'controller_not_ready', 'log': log_path.read_text(errors='ignore')[:2000]}
-        names = [k for k in data.get('proxies', {}).keys() if k not in ('DIRECT', 'GLOBAL', 'REJECT', 'REJECT-DROP', 'PASS', 'COMPATIBLE', 'AUTO')]
-        sample = names[:5]
-        results = []
-        for name in sample:
-            req = urllib.request.Request(f'http://127.0.0.1:{controller_port}/proxies/AUTO', data=json.dumps({'name': name}).encode(), headers={'Content-Type': 'application/json'}, method='PUT')
-            with urllib.request.urlopen(req, timeout=5) as r:
-                r.read()
-            ok = False
-            err = ''
-            try:
-                proxy_handler = urllib.request.ProxyHandler({'http': f'http://127.0.0.1:{mixed_port}', 'https': f'http://127.0.0.1:{mixed_port}'})
-                opener = urllib.request.build_opener(proxy_handler)
-                req2 = urllib.request.Request('https://www.gstatic.com/generate_204', headers={'User-Agent': 'Mozilla/5.0'})
-                with opener.open(req2, timeout=8) as r:
-                    ok = (r.status == 204)
-            except Exception as e:
-                err = str(e)
-            results.append({'name': name, 'ok': ok, 'error': err})
-        ok_count = sum(1 for x in results if x.get('ok'))
-        return {
-            'ok': ok_count > 0,
-            'yaml_proxy_count': len(proxies),
-            'sample_count': len(results),
-            'sample_ok_count': ok_count,
-            'samples': results,
-        }
-    finally:
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        except Exception:
-            pass
-
 def resolve_push_target_info(remote_url: str):
     parsed = urllib.parse.urlparse(remote_url)
     host = parsed.hostname or 'gitee.com'
@@ -1473,15 +1398,11 @@ def finalize_gist_and_notify(env, summary, summary_lines, subscription_text, bun
     except Exception as e:
         log_progress('result_json_write_failed', path=str(RESULT_JSON), error=str(e))
 
-    yaml_raw_url = ((gist_res.get('yaml') or {}).get('raw_url') or '').strip()
-    gist_verify_res = {'ok': False, 'reason': 'gist upload failed'}
-    if gist_res.get('ok') and yaml_raw_url:
-        try:
-            gist_verify_res = verify_gist_subscriptions_with_mihomo(yaml_raw_url)
-        except Exception as e:
-            gist_verify_res = {'ok': False, 'reason': str(e)}
-    log_progress('gist_verify_finished', ok=bool(gist_verify_res.get('ok')), sample_ok_count=gist_verify_res.get('sample_ok_count', 0), sample_count=gist_verify_res.get('sample_count', 0), reason=gist_verify_res.get('reason', ''))
-    summary['gist_verify'] = gist_verify_res
+    # 2026-09-10：不再对上传的订阅做「回拉 + 第二 mihomo 抽样验证」。
+    # 理由：抽检通过与否并不比本轮刚跑过的 push/clone 指标更有信息量，却要额外
+    # 拉 raw + 起第二个内核（成本高）；失败时（如 raw 端 400）只会在每轮通知挂一行
+    # 误导性的 ⚠️（抽样未开始也显示成 0/0「一个都不通」）。而「导出的 YAML 可解析」
+    # 在导出端已由 build_mihomo_yaml_text 保证（proxies 为空直接不上传）。
     summary_lines.append('📦 订阅 · Gist')
     if gist_res.get('ok'):
         action = '新建' if gist_res.get('created') else '更新'
@@ -1489,10 +1410,6 @@ def finalize_gist_and_notify(env, summary, summary_lines, subscription_text, bun
         gist_lines = [f'✅ 已{action}，达标 {qualified_count} 个节点 · ≥{min_megabit}兆（按{html.escape(metric_label)}）']
         if html_url:
             gist_lines.append(f'🔗 <a href="{html.escape(html_url)}">订阅源 YAML</a>')
-        if gist_verify_res.get('ok'):
-            gist_lines.append(f"✅ 回拉验证通过：{gist_verify_res.get('sample_ok_count', 0)}/{gist_verify_res.get('sample_count', 0)} 个抽检节点可用")
-        else:
-            gist_lines.append(f"⚠️ 回拉验证失败：{gist_verify_res.get('sample_ok_count', 0)}/{gist_verify_res.get('sample_count', 0)} 个抽检节点可用；<code>{html.escape(str(gist_verify_res.get('reason', '')))}</code>")
         for _i, _l in enumerate(gist_lines):
             _c = '└─' if _i == len(gist_lines) - 1 else '├─'
             summary_lines.append(f'  {_c} {_l}')
@@ -1762,7 +1679,7 @@ def main():
         ok_results_by_download=ok_results_by_download,
         metric_label=bundle['metric_label'],
     )
-    run_stage('Gist 更新/回拉验证/通知', finalize_gist_and_notify, env, summary, summary_lines, subscription_text, bundle)
+    run_stage('Gist 更新/通知', finalize_gist_and_notify, env, summary, summary_lines, subscription_text, bundle)
 
 def scrub_secrets(text: str, env=None) -> str:
     """从任意文本中清除已知凭据：带凭据的 URL、订阅地址、各类 Token。"""
