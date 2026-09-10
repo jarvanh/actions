@@ -133,11 +133,11 @@ def build_fail_notify(title: str, file: str, elapsed: float, lines: list):
     （故用 耗时：N 秒 kv 形态，不加 ⏱ 前缀冒充收尾）。动态内容一律 esc()。
     """
     parts = [
-        # 标题 = emoji + 短语加粗（规范 §2；此前未加粗与 tg_add_title 版式漂移）
+        # 标题 = emoji + 短语加粗（规范 第 2 章；此前未加粗与 tg_add_title 版式漂移）
         # 标题（emoji + 短语）入 ：值/计数才无标签
         f"{esc(title)}",
         TG_SEP,
-        # 文件名属机器值 → <code>；emoji 入 （规范 §2 语义表 #3 + 裁决 7）
+        # 文件名属机器值 → <code>；emoji 入 （规范 第 2 章 语义表 #3 + 裁决 7）
         f"📁 {tg_entry(shorten_name(os.path.basename(file)))}",
         f"📦 分组：{esc(CAPTION_PREFIX)}",
         f"耗时：{fmt_secs(elapsed)}",
@@ -637,7 +637,7 @@ esc_lines() {
 # 已上传/失败条目渲染: 每行 "文件名\t备注"（python 侧产出）→ 树形
 # "  ├─ <code>文件名</code> · 备注"。
 # 与 _render_skipped_groups 同款标签（条目主体文件类 <code>、元数据 · ）——此前这两个
-# 列表整行只转义不加标签，与同通知内的跳过明细两种条目风格并存（规范 §2 语义表 #4/#5）
+# 列表整行只转义不加标签，与同通知内的跳过明细两种条目风格并存（规范 第 2 章 语义表 #4/#5）
 _render_named_entries() {
   local _in="$1" _name _meta _out=""
   [ -z "$_in" ] && return 0

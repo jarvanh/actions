@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""proxy-speedtest 三件套共享层（与具体测速引擎无关的公共能力）。
+"""proxy-speedtest 四套共享层（与具体测速引擎无关的公共能力）。
 
-背景：`speedtest_gitee.py` 名字里带 gitee，却长期兼任三件套共享引擎，共享代码越堆越多后
+背景：`speedtest_gitee.py` 名字里带 gitee，却长期兼任四套共享引擎，共享代码越堆越多后
 「共享函数挂在 gitee 专项引擎名下」已经名不副实（2026-09-08 用户指出）。本模块承接共享层，
 `speedtest_gitee.py` 只保留引擎特有部分（mihomo 生命周期、订阅源解析、Gitee 仓库/push 测速、
 运行摘要与 gitee 工作流主流程），按需 import 本模块、不做兼容再导出。
@@ -11,7 +11,7 @@
   - 订阅导出策略：阈值 / 判定指标（upload|download）/ 最少节点数（resolve_subscription_policy
     → build_subscription_bundle，双向回退见 resolve_subscription_metric）
   - 速度单位换算、节点名指标前缀、达标订阅 YAML 构建
-  - 测速点 IP 归属查询（ipwho.is）与三件套统一的「📍 测速点网络」KV 树分节渲染
+  - 测速点 IP 归属查询（ipwho.is）与四套统一的「📍 测速点网络」KV 树分节渲染
   - Telegram 发送层（统一 HTML 版式 + 429 重试 + 长消息分片）与统一收尾行
   - GitHub Gist 订阅上传（update_gist：旧文件名删除探测 + 422 去删除项兜底重试）
 
@@ -226,7 +226,7 @@ def _env_int(env, key: str, default, minimum=0):
 
 
 def resolve_subscription_policy(env=None):
-    """订阅导出策略（三件套共用，全部经 env 覆盖，workflow 里接仓库 Variables）：
+    """订阅导出策略（四套共用，全部经 env 覆盖，workflow 里接仓库 Variables）：
 
       PROXY_SPEEDTEST_MIN_MEGABIT   达标阈值（兆），默认 10
       PROXY_SPEEDTEST_SPEED_METRIC  判定指标：upload（默认，按上行）/ download（按下行）
@@ -446,7 +446,7 @@ def network_cells(info):
 
 
 def build_target_network_section(targets):
-    """三件套统一的「📍 测速点网络」分节（KV 树版式，2026-09-08 用户拍板）。
+    """四套统一的「📍 测速点网络」分节（KV 树版式，2026-09-08 用户拍板）。
 
     targets 为 [(server, label, info)] 列表：
       server = 测速服务器标识（taier=「ip:port」，cdn/gitee=解析出的 IP；空 = 定位失败）
@@ -506,7 +506,7 @@ def send_telegram(env, text):
         return {'sent': False, 'reason': 'missing TELEGRAM_BOT_TOKEN/TG_BOT_TOKEN or TELEGRAM_CHAT_ID'}
 
     def _post(data):
-        # 429 限流按 retry_after 完整等待重试（规范 §5，与 tg_notify.sh 同语义：5 次尝试）
+        # 429 限流按 retry_after 完整等待重试（规范 第 5 章，与 tg_notify.sh 同语义：5 次尝试）
         for _attempt in range(5):
             payload = urllib.parse.urlencode(data).encode()
             req = urllib.request.Request(f'https://api.telegram.org/bot{bot}/sendMessage',
@@ -545,14 +545,14 @@ def send_telegram(env, text):
 
 
 # 统一分隔线（18 个全角横线）：与 bash 真源 telegram/tg_notify.sh 的 TG_SEP 同值。
-# python 侧此前 10 处各写 '━' * 18，改版式要逐处改；三件套一律 import 本常量
+# python 侧此前 10 处各写 '━' * 18，改版式要逐处改；四套一律 import 本常量
 TG_SEP = '━' * 18
 
 TG_CHUNK_SIZE = 4000
 
 
 def send_telegram_chunked(env, text):
-    """长消息按 4000 字符分片发送（规范 §5：断在换行处，不切 UTF-8 多字节字符，
+    """长消息按 4000 字符分片发送（规范 第 5 章：断在换行处，不切 UTF-8 多字节字符，
     与 tg_notify.sh send_tg_chunked 同语义）；短消息直接走 send_telegram。"""
     if not text:
         return {'sent': True}
@@ -722,7 +722,7 @@ GIST_DEFAULT_DESCRIPTION = 'proxy speedtest subscription result'
 
 
 def _gist_identity(env):
-    """Gist 文件名/描述，允许各测速工作流经 env 覆盖（三件套各用各的 Gist，便于区分）。"""
+    """Gist 文件名/描述，允许各测速工作流经 env 覆盖（四套各用各的 Gist，便于区分）。"""
     filename = (env.get('PROXY_SPEEDTEST_GIST_FILENAME') or '').strip() or GIST_DEFAULT_FILENAME
     description = (env.get('PROXY_SPEEDTEST_GIST_DESCRIPTION') or '').strip() or GIST_DEFAULT_DESCRIPTION
     return filename, description

@@ -120,13 +120,19 @@ trend_record_and_notify() {
   _trend_send_summary "$_local"
 }
 
-# 通知内时长一律中文三段式（规范 §4 禁英文紧凑格式 2h15m；
-# 紧凑写法只留在 RESULT_JSON/日志，不进通知）
+# 通知内时长一律中文形态（规范第 4 章禁英文紧凑格式 2h15m；
+# 紧凑写法只留在 RESULT_JSON/日志，不进通知；不足 1 分钟用两位小数秒）
 _trend_fmt_duration() {
   local s="${1:-0}" h m
   [[ "$s" =~ ^[0-9]+$ ]] || s=0
   h=$((s / 3600)); m=$(((s % 3600) / 60))
-  if [ "$h" -gt 0 ]; then echo "${h} 小时 ${m} 分"; else echo "${m} 分钟"; fi
+  if [ "$h" -gt 0 ]; then
+    echo "${h} 小时 ${m} 分"
+  elif [ "$m" -gt 0 ]; then
+    echo "${m} 分钟"
+  else
+    printf '%.2f 秒' "$s"
+  fi
 }
 
 _trend_send_summary() {
@@ -164,14 +170,14 @@ for e in reversed(entries):
     if e.get("remaining_bytes") is not None:
         rem = int(e["remaining_bytes"])
         break
-eta = (rem / rate) if (rem is not None and rate > 0) else None
+eta_minutes = int(round(rem / rate * 60)) if (rem is not None and rate > 0) else None
 cur = entries[-1] if entries else {}
 print("rounds=%d" % len(recent))
 print("this_transferred=%d" % (cur.get("transferred_bytes") or 0))
 print("this_duration=%d" % (cur.get("duration_s") or 0))
 print("rate_per_hour=%.1f" % rate)
 print("remaining=%s" % (rem if rem is not None else ""))
-print("eta_hours=%s" % (("%.1f" % eta) if eta is not None else ""))
+print("eta_minutes=%s" % (eta_minutes if eta_minutes is not None else ""))
 print("history=%d" % len(entries))
 PYEOF
 ) || _py_out=""
@@ -184,7 +190,7 @@ PYEOF
       this_duration)    _this_du=$_v ;;
       rate_per_hour)    _rate=$_v ;;
       remaining)        _rem=$_v ;;
-      eta_hours)        _eta=$_v ;;
+      eta_minutes)      _eta=$_v ;;
       history)          _hist=$_v ;;
     esac
   done <<< "$_py_out"
@@ -200,8 +206,13 @@ PYEOF
     tg_add_kv msg "平均净传速率" "$(format_bytes "${_rate%.*}")/h"
     if [ -n "$_rem" ]; then
       tg_add_kv msg "剩余未传" "$(format_bytes "$_rem")"
-      if [ -n "$_eta" ]; then
-        tg_add_kv msg "预计清零" "约 ${_eta} 小时（按近 ${_rounds} 轮速率，含跳过等待）"
+      if [ -n "$_eta" ] && [ "$_eta" -ge 0 ] 2>/dev/null; then
+        # ETA 按时长五层渲染：≥60 分钟 → 约 X 小时 Y 分，否则 → 约 X 分钟
+        if [ "$_eta" -ge 60 ]; then
+          tg_add_kv msg "预计清零" "约 $((_eta / 60)) 小时 $((_eta % 60)) 分（按近 ${_rounds} 轮速率，含跳过等待）"
+        else
+          tg_add_kv msg "预计清零" "约 ${_eta} 分钟（按近 ${_rounds} 轮速率，含跳过等待）"
+        fi
       fi
     else
       tg_add_block msg "剩余未传未知（近期 run 未启用预览，无法估算清零时间）"

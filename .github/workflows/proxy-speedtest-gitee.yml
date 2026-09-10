@@ -40,7 +40,7 @@ jobs:
           PROXY_SPEEDTEST_LATENCY_TIMEOUT: '8'
           PROXY_SPEEDTEST_DIRECT_BASELINE_TIMEOUT: '60'
           PROXY_SPEEDTEST_DIRECT_BASELINE_MAX_ATTEMPTS: '5'
-          # 订阅导出策略（三件套共用；可在仓库 Settings → Secrets and variables → Actions
+          # 订阅导出策略（四套共用；可在仓库 Settings → Secrets and variables → Actions
           # → Variables 里覆盖，留空走脚本默认值）：
           #   PROXY_SPEEDTEST_MIN_MEGABIT  达标阈值（兆，默认 10）
           #   PROXY_SPEEDTEST_SPEED_METRIC 判定指标 upload|download（默认 upload 按上行判定；
@@ -57,7 +57,7 @@ jobs:
           # 注意：这是 gitee 专属 Gist —— cdn / taier 分别用 PROXY_SPEEDTEST_CDN_GIST_ID /
           # PROXY_SPEEDTEST_TAIER_GIST_ID，三个测速工作流各用各的，互不覆盖。
           PROXY_SPEEDTEST_GIST_ID: ${{ secrets.PROXY_SPEEDTEST_GIST_ID }}
-          # Gist 文件名/描述：三件套各不相同，便于在 Gist 列表里分辨
+          # Gist 文件名/描述：四套各不相同，便于在 Gist 列表里分辨
           PROXY_SPEEDTEST_GIST_FILENAME: proxy_speedtest_gitee_subscription.yaml
           PROXY_SPEEDTEST_GIST_DESCRIPTION: 'proxy speedtest subscription (gitee 上行/下行/延迟)'
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}

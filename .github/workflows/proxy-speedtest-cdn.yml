@@ -1,6 +1,6 @@
 name: proxy-speedtest-cdn
 
-# 代理节点测速三件套（按测速点命名，便于在 Actions 列表一眼分辨）：
+# 代理节点测速四套（按测速点命名，便于在 Actions 列表一眼分辨）：
 #   proxy-speedtest-gitee = 测速点 Gitee 私有仓库：经代理 git push 上行 + clone 下行 + gitee.com HTTP 延迟
 #   proxy-speedtest-cdn   = 本工作流，测速点国内 CDN/镜像站（腾讯云 mirrors、清华 TUNA、
 #                           npmmirror；延迟目标 baidu/taobao）：经代理 HTTP 计时 +
@@ -63,7 +63,7 @@ jobs:
           PROXY_SPEEDTEST_GITEE_OWNER: ${{ secrets.PROXY_SPEEDTEST_GITEE_OWNER }}
           PROXY_SPEEDTEST_GITEE_REPO: proxy-speedtest-temp
           PROXY_SPEEDTEST_PUSH_TIMEOUT: '30'
-          # 订阅导出策略（三件套共用；可在仓库 Settings → Secrets and variables → Actions
+          # 订阅导出策略（四套共用；可在仓库 Settings → Secrets and variables → Actions
           # → Variables 里覆盖，留空走脚本默认值）：
           #   PROXY_SPEEDTEST_MIN_MEGABIT  达标阈值（兆，默认 10）
           #   PROXY_SPEEDTEST_SPEED_METRIC 判定指标 upload|download（默认 upload 按上行判定；

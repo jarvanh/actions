@@ -418,7 +418,7 @@ def match_taier_server(prov, city, oper, client_ip, timeout=10):
 def taier_target_network_lines(points, client_ip):
     """「📍 测速点网络」KV 树块：泰尔测速服务器（IP:port · 主机名）+ 其 IP 归属。
 
-    版式由三件套统一的 build_target_network_section 渲染（单测速点 = 4 行 KV 树）；
+    版式由四套统一的 build_target_network_section 渲染（单测速点 = 4 行 KV 树）；
     本函数只负责泰尔特有的一步——按省/市/运营商 match 协议定位测速服务器。
     match / 归属查询失败逐级降级为「归属获取失败」，不抛异常、不阻塞通知。
     须在 stop_mihomo_tun() 之后调用（此时为 runner 直连出口视角）。
@@ -458,7 +458,7 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
     # 否则会出现「按上传达标导出、却按下行排 TOP」的自相矛盾展示
     top_sort_key = 'up' if bundle.get('metric', 'upload') == 'upload' else 'down'
     top = sorted(ok_results, key=lambda r: r.get(top_sort_key) or 0.0, reverse=True)[:5]
-    # 标题状态随结论降级（规范 §4 状态 emoji 语义）：0 成功 / 命中「疑似未走代理」→ ⚠️，
+    # 标题状态随结论降级（规范 第 4 章 状态 emoji 语义）：0 成功 / 命中「疑似未走代理」→ ⚠️，
     # 不再恒 ✅（此前 ✅ 标题下写着 ⚠️ 疑似未走代理，与 rc=1 的失败判定自相矛盾）
     _title_emoji = '⚠️' if (not ok_results or bypass_hits) else '✅'
     lines = [
@@ -476,8 +476,8 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
     lines.extend(taier_target_network_lines(meta['points'], direct_ip))
     lines.append('')
     if top:
-        # 三件套统一：TOP 条目复用共享的 build_node_metric_prefix（↑上传 · ↓下载 · 延迟ms，
-        # 单位「兆」），不再手拼 Mbps —— 此前只有 taier 一处两种单位/分隔符（规范 §1 禁止自造）。
+        # 四套统一：TOP 条目复用共享的 build_node_metric_prefix（↑上传 · ↓下载 · 延迟ms，
+        # 单位「兆」），不再手拼 Mbps —— 此前只有 taier 一处两种单位/分隔符（规范 第 1 章 禁止自造）。
         # 引擎原始值 Mbps → 共享层单位 MiB/s（÷8.388608），与订阅导出口径一致
         _top_mode = 'push-only' if bundle.get('metric', 'upload') == 'upload' else 'download'
         has_up = any((r.get('up') or 0) > 0 for r in top)
@@ -514,7 +514,7 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
             _failed_entries.append(
                 tg_entry_codes(r.get('name', ''), (r.get('error') or '-')[:80]))
         if len(failed) > 5:
-            # 折叠行并入条目流，末条 └─ 由下面的循环统一决定（禁双 └─；规范 §2.3）
+            # 折叠行并入条目流，末条 └─ 由下面的循环统一决定（禁双 └─；规范 2.3 节）
             _failed_entries.append(f'还有 {len(failed) - 5} 条…')
         for _i, _l in enumerate(_failed_entries, 1):
             _c = '└─' if _i == len(_failed_entries) else '├─'
@@ -714,7 +714,7 @@ def _run():
     # 订阅导出到本工作流专属 Gist（secret: PROXY_SPEEDTEST_TAIER_GIST_ID）——
     # 三个测速工作流各用各的 Gist，互不覆盖。taier 数值是 Mbps，导出字段是 MiB/s（÷8.388608），
     # 阈值/前缀沿用 speedtest_gitee 的 ×8 折算，展示值与 Mbps 基本一致。
-    # 达标策略（阈值 / 判定指标 / 最少节点数）与三件套共用，见 resolve_subscription_policy：
+    # 达标策略（阈值 / 判定指标 / 最少节点数）与四套共用，见 resolve_subscription_policy：
     # 默认按上行判定，达标不足 min_nodes 时自动改用下行（反之亦然）。
     gist_res = None
     gist_error = ''
@@ -773,7 +773,7 @@ def _run():
         # 长消息分片发送（失败列表 + Gist 段容易超 4000 字符，单发会被整条拒收）
         tg_res = send_telegram_chunked(env, '\n'.join(build_telegram_lines(
             results, meta, direct_ip, bypass_hits, gist_res, bundle, gist_error)))
-        # 发送层不写 stderr（python 侧靠返回值），失败原因必须回传日志（规范 §5）
+        # 发送层不写 stderr（python 侧靠返回值），失败原因必须回传日志（规范 第 5 章）
         log_progress('telegram_send_finished', sent=bool(tg_res.get('sent')),
                      reason=tg_res.get('reason', ''))
     except Exception as e:

@@ -286,7 +286,14 @@ split_large_video() {
     check_duration="⚠️ 未获取有效时长，改用固定时间分段兜底"
     log_fix "$video_split_log" "无法获取有效视频时长，改用固定时间分段兜底: $file_name"
   else
-    check_duration="✅ 通过 · 时长 ${duration} 秒"
+    # 时长按五层渲染（≥1 小时 → X 小时 Y 分；≥1 分钟 → X 分钟；否则 → X.XX 秒）
+    local _dur_fmt
+    _dur_fmt=$(awk -v d="$duration" 'BEGIN {
+      if (d >= 3600) printf "%d 小时 %d 分", int(d / 3600), int((d % 3600) / 60)
+      else if (d >= 60) printf "%d 分钟", int(d / 60)
+      else printf "%.2f 秒", d
+    }')
+    check_duration="✅ 通过 · 时长 ${_dur_fmt}"
   fi
 
   local n=$(( (file_size + target_part_size - 1) / target_part_size ))
@@ -605,7 +612,7 @@ preprocess_large_files() {
 
     if [ "$split_success" -eq 1 ]; then
       success_count=$((success_count + 1))
-      # 英文 kind 不直出通知（规范 §4）: media/binary 映射中文标签
+      # 英文 kind 不直出通知（规范 第 4 章）: media/binary 映射中文标签
       local _kind_label="二进制"
       [ "$split_kind" = "media" ] && _kind_label="媒体"
       tg_add_entry processed_files "${remote_source}:${full_path}" "$(format_bytes_iec "$file_size") · ${_kind_label}"

@@ -304,7 +304,7 @@ _preview_render_pairs_detail() {
     # 排除规则（顿号「、」连接，_extract_exclude_summary 产出）:
     #   ≥2 条 → 条目子树（组头「排除 · N」+ 逐条 <code>，模式内末条 └─；
     #           前缀 = tree_sub(last) + 2 空格，末条目整块 8 空格起）
-    #   1 条  → 并入子行（不为单条扩树，规范 §2.2.3）
+    #   1 条  → 并入子行（不为单条扩树，规范 2.2.3 节）
     if [ -n "$_excl" ]; then
       local -a _pats=()
       local _p

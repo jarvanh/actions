@@ -85,7 +85,7 @@ jobs:
           TAIER_MODE: ${{ github.event.inputs.mode || 'single' }}
           TAIER_DURATION: ${{ github.event.inputs.duration || '10' }}
           TAIER_MAX_NODES: ${{ github.event.inputs.max_nodes || '0' }}
-          # 订阅导出策略（三件套共用；可在仓库 Settings → Secrets and variables → Actions
+          # 订阅导出策略（四套共用；可在仓库 Settings → Secrets and variables → Actions
           # → Variables 里覆盖，留空走脚本默认值）：
           #   PROXY_SPEEDTEST_MIN_MEGABIT  达标阈值（兆，默认 10）
           #   PROXY_SPEEDTEST_SPEED_METRIC 判定指标 upload|download（默认 upload 按上行判定；

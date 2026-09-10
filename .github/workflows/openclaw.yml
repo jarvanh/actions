@@ -217,7 +217,6 @@ jobs:
             printf 'TS_HOST=%s\n' "$TS_HOST"
             printf 'TS_FQDN=%s\n' "$TS_FQDN"
             printf 'TS_IP=%s\n' "$(tailscale ip -4)"
-            printf 'RUN_URL=%s\n' "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           } > "$HOME/ts.env"
           echo "SSH 入口: ssh runner@${TS_HOST}（RustDesk 直连: ${TS_FQDN}:21118）"
 
@@ -799,6 +798,9 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # 收尾区接线由 env 注入（此前是写进 ts.env 再由脚本前缀传参）
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TG_RUN_STARTED_AT: ${{ github.run_started_at }}
         run: |
           set -euo pipefail
           # runner 就绪后推送 SSH 入口 + 当前生效 AI 网关；通知失败不影响主流程
@@ -825,11 +827,12 @@ jobs:
           AI_BACKEND="${AI_BACKEND:-clirelay}"
 
           # 统一 HTML 通知 + 统一收尾区（tg_notify.sh，checkout 后可用）。
+          # TG_RUN_URL / TG_RUN_STARTED_AT 由本 step 的 env 注入，tg_add_footer 直接读取。
           # 版式与 tailscale-windows.yml "🟢 Windows runner 已就绪" 同款：
-          # 按套分节（§2.2 分组场景 2：多套同类信息）+ 组内树形条目，凭据/网络/出口/AI 网关
+          # 按套分节（2.2 节 分组场景 2：多套同类信息）+ 组内树形条目，凭据/网络/出口/AI 网关
           # 各归其节，避免一级平铺 10 行 kv 混排
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
-          TG_RUN_URL="${RUN_URL}" TG_RUN_STARTED_AT="${{ github.run_started_at }}" msg=""
+          msg=""
           tg_add_title msg "🟢 OpenClaw Runner 已就绪"
 
           _entries="命令：<code>ssh runner@$(escape_html "${TS_HOST}")</code>"
@@ -864,9 +867,9 @@ jobs:
           [ -n "$AI_FALLBACK_REASON" ] && _entries+=$'\n'"回退原因：$(escape_html "${AI_FALLBACK_REASON}")"
           tg_add_section msg "🤖 AI 网关 · $(printf '%s' "$_entries" | grep -c .)"
           tg_add_block msg "$(tree_lines "$_entries")"
-          # footer 读 TG_RUN_URL/TG_RUN_STARTED_AT（上方前缀注入）
+          # footer 读 TG_RUN_URL/TG_RUN_STARTED_AT（由本 step 的 env 注入）
           tg_add_footer msg
-          # 走发送层而非 curl 直发：429 重试已内建，HTML 解析失败直接报错（规范 §5），
+          # 走发送层而非 curl 直发：429 重试已内建，HTML 解析失败直接报错（规范 第 5 章），
           # 429 限流按 retry_after 等待重试，disable_web_page_preview 内置
           send_tg "$msg" || true
           echo "已推送 SSH 入口通知: ssh runner@${TS_HOST}（AI 网关: ${AI_BACKEND}）"
@@ -1197,10 +1200,10 @@ jobs:
           # tg_add_footer 内有 runner 开机时刻兜底）
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
           TG_RUN_STARTED_AT: ${{ github.run_started_at }}
         run: |
           if [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] && [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ]; then
-            run_url="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             step_log="/tmp/run-openclaw-step.log"
             meta_file="/tmp/run-openclaw-meta.env"
 
@@ -1258,7 +1261,7 @@ jobs:
               fallback_reinstall_duration_sec=$(grep '^FALLBACK_REINSTALL_DURATION_SEC=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
             fi
 
-            export RUN_URL="$run_url"
+            export RUN_URL="${TG_RUN_URL}"
             export SSH_ENTRY="$ssh_entry"
             export ERROR_SUMMARY="$error_summary"
             export CURRENT_VERSION="$current_version"
@@ -1271,7 +1274,7 @@ jobs:
             export FALLBACK_REINSTALL_DURATION_SEC="$fallback_reinstall_duration_sec"
             # 统一 HTML 版式 + 统一收尾区（动态值一律转义；日志收敛 <pre> 等宽块；
             # HTML 解析失败直接报错不重发——修复"声明 parse_mode=HTML 但未转义"的隐患）
-            # 失败阶段英文 token → 中文标签（规范 §4：英文原因 token 不得直出通知）
+            # 失败阶段英文 token → 中文标签（规范 第 4 章：英文原因 token 不得直出通知）
             fail_stage_label=""
             if [ -n "$fail_stage" ]; then
               case "$fail_stage" in
@@ -1291,7 +1294,7 @@ jobs:
             [ -n "$fail_stage_label" ] && tg_add_kv msg "失败阶段" "$fail_stage_label"
             [ -n "$current_version" ] && tg_add_path msg "当前版本" "$current_version"
             [ -n "$fallback_version" ] && tg_add_path msg "回退版本" "$fallback_version"
-            # 英文 token 不直出通知（规范 §4）：known_good_file / meta_lastTouchedVersion → 中文
+            # 英文 token 不直出通知（规范 第 4 章）：known_good_file / meta_lastTouchedVersion → 中文
             if [ -n "$fallback_version_source" ]; then
               case "$fallback_version_source" in
                 known_good_file) _fvs="known-good 版本文件" ;;
@@ -1301,13 +1304,14 @@ jobs:
               tg_add_kv msg "回退来源" "$_fvs"
             fi
             [ -n "$recorded_successful_version" ] && tg_add_path msg "成功版本记录" "$recorded_successful_version"
-            [ -n "$initial_start_duration_sec" ] && tg_add_kv msg "首次启动耗时" "${initial_start_duration_sec} 秒"
-            [ -n "$preflight_doctor_duration_sec" ] && tg_add_kv msg "预检修复耗时" "${preflight_doctor_duration_sec} 秒"
-            [ -n "$fallback_reinstall_duration_sec" ] && tg_add_kv msg "回退重装耗时" "${fallback_reinstall_duration_sec} 秒"
+            # 秒统一两位小数（时长五层第 3 层）
+            [ -n "$initial_start_duration_sec" ] && tg_add_kv msg "首次启动耗时" "$(printf '%.2f' "$initial_start_duration_sec") 秒"
+            [ -n "$preflight_doctor_duration_sec" ] && tg_add_kv msg "预检修复耗时" "$(printf '%.2f' "$preflight_doctor_duration_sec") 秒"
+            [ -n "$fallback_reinstall_duration_sec" ] && tg_add_kv msg "回退重装耗时" "$(printf '%.2f' "$fallback_reinstall_duration_sec") 秒"
             [ -n "$ssh_entry" ] && tg_add_path msg "SSH 调试" "$ssh_entry"
             tg_add_section msg "🧾 关键日志"
             tg_add_block msg "<pre>$(escape_html "$error_summary")</pre>"
-            TG_RUN_URL="$run_url" TG_RUN_STARTED_AT="${TG_RUN_STARTED_AT:-}" tg_add_footer msg
+            tg_add_footer msg
             # 统一走发送层：429 按 retry_after 重试已内置，HTML 解析失败直接报错
             send_tg "$msg" || true
           else
@@ -1320,7 +1324,8 @@ jobs:
           # （2026-09-05 复审发现：此前本 step 未注入，约 5 处归档告警从未发出）
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          # 收尾区接线（规范 §6）：缺了只能走 runner 开机时刻兜底（同类 step 均已注入）
+          # 收尾区接线（规范 第 6 章）：缺了只能走 runner 开机时刻兜底（同类 step 均已注入）
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
           TG_RUN_STARTED_AT: ${{ github.run_started_at }}
         if: ${{ always() }}
         run: |
@@ -1570,9 +1575,7 @@ jobs:
           send_telegram_alert() {
             local msg="$1"
             if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
-              local repo="${GITHUB_REPOSITORY:-unknown-repo}"
               local run_id="${GITHUB_RUN_ID:-manual}"
-              local run_url="https://github.com/${repo}/actions/runs/${run_id}"
               # 统一 HTML 版式 + 统一收尾区（tg_add_* 内置转义，告警文本原样传入即可；
               # 二次 escape_html 会把 & 变成 &amp;amp; 字面量直出）
               source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
@@ -1583,8 +1586,8 @@ jobs:
               tg_add_block full_msg "<pre>$(escape_html "$msg")</pre>"
               # Run ID 属机器值 → <code>（语义表 #3）
               tg_add_path full_msg "Run ID" "${run_id}"
-              TG_RUN_URL="$run_url" TG_RUN_STARTED_AT="${TG_RUN_STARTED_AT:-}" tg_add_footer full_msg
-              # 走发送层而非 curl 直发：429 重试已内建，HTML 解析失败直接报错（规范 §5），
+              TG_RUN_STARTED_AT="${TG_RUN_STARTED_AT:-}" tg_add_footer full_msg
+              # 走发送层而非 curl 直发：429 重试已内建，HTML 解析失败直接报错（规范 第 5 章），
               # 429 限流按 retry_after 等待重试，disable_web_page_preview 内置
               send_tg "$full_msg" || true
             fi
@@ -1683,6 +1686,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
           TG_RUN_STARTED_AT: ${{ github.run_started_at }}
         run: |
           set -euo pipefail
@@ -1693,9 +1697,6 @@ jobs:
           send_final_archive_warning() {
             sleep "${WARNING_DELAY_MINUTES}m"
             if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
-              repo="${GITHUB_REPOSITORY:-unknown-repo}"
-              run_id="${GITHUB_RUN_ID:-manual}"
-              run_url="https://github.com/${repo}/actions/runs/${run_id}"
               # 统一 HTML 版式 + 统一收尾区
               source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
               msg=""
@@ -1705,7 +1706,7 @@ jobs:
               # 说明段只装说明；"随后执行：…" 是 kv 形态，此前整行塞进  说明段
               tg_add_note msg "请及时保存状态或完成当前操作。"
               tg_add_kv msg "随后执行" "Stop OpenClaw and Final Archive"
-              TG_RUN_URL="$run_url" TG_RUN_STARTED_AT="${TG_RUN_STARTED_AT:-}" tg_add_footer msg
+              tg_add_footer msg
               # 统一走发送层（退化/429 重试内置）
               send_tg "$msg" || true
             else
@@ -1723,6 +1724,7 @@ jobs:
           # send_archive_alert 同上：未注入时约 15 处最终归档告警静默不发
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
           TG_RUN_STARTED_AT: ${{ github.run_started_at }}
         if: ${{ always() }}
         run: |
@@ -1750,9 +1752,7 @@ jobs:
           send_archive_alert() {
             local msg="$1"
             if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
-              local repo="${GITHUB_REPOSITORY:-unknown-repo}"
               local run_id="${GITHUB_RUN_ID:-manual}"
-              local run_url="https://github.com/${repo}/actions/runs/${run_id}"
               # 统一 HTML 版式（emoji 标题 + ━━━ 分隔线 + 键值区 + 收尾区）；
               # source 幂等可重复；收尾区由 tg_add_footer 统一产出（勿自造时长/链接格式）
               source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
@@ -1762,7 +1762,7 @@ jobs:
               # 同一标题两种形态）：多行原始输出 → <pre>；Run ID 属机器值 → <code>
               tg_add_block full_msg "<pre>$(escape_html "$msg")</pre>"
               tg_add_path full_msg "Run ID" "$run_id"
-              TG_RUN_URL="$run_url" TG_RUN_STARTED_AT="${TG_RUN_STARTED_AT:-}" tg_add_footer full_msg
+              tg_add_footer full_msg
               send_tg "$full_msg" || true
             fi
           }

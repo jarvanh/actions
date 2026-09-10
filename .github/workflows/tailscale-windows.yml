@@ -155,7 +155,7 @@ jobs:
             "  ├─ ISP：$(Esc-Html $isp)`n" +
             "  ├─ ASN：<code>$(Esc-Html $asnLine)</code>`n" +
             "  └─ 位置：$(Esc-Html $loc)"
-          # 说明段独立成段且排在 kv 之后（规范 §2 模板顺序：kv → note → footer）：
+          # 说明段独立成段且排在 kv 之后（规范 第 2 章 模板顺序：kv → note → footer）：
           # 此前 note 在前、kv 挂在其后，说明段既不独立也打乱了取值区
           $msg += "`n`n有效期：约 6 小时 · 超时自动结束"
           $msg += "`n`nℹ️ $notes"
