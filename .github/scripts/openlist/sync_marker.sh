@@ -784,7 +784,7 @@ send_sync_warning() {
     tg_add_section msg "📁 缺失的目录 · 可能被删除 · $(printf '%s' "$missing_dirs" | grep -c .)"
     _dirs_html=""
     while IFS= read -r d; do
-      [ -n "$d" ] && _dirs_html+="<code>$(escape_html "$d")</code>"$'\n'
+      [ -n "$d" ] && tg_add_entry _dirs_html "$d"
     done <<< "$missing_dirs"
     tg_append msg "$(tree_lines "${_dirs_html%$'\n'}")"$'\n'
   fi
@@ -793,7 +793,7 @@ send_sync_warning() {
     tg_add_section msg "📁 新增的目录 · $(printf '%s' "$new_dirs" | grep -c .)"
     _dirs_html=""
     while IFS= read -r d; do
-      [ -n "$d" ] && _dirs_html+="<code>$(escape_html "$d")</code>"$'\n'
+      [ -n "$d" ] && tg_add_entry _dirs_html "$d"
     done <<< "$new_dirs"
     tg_append msg "$(tree_lines "${_dirs_html%$'\n'}")"$'\n'
   fi

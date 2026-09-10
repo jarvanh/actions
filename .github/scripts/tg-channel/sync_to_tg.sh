@@ -138,7 +138,7 @@ def build_fail_notify(title: str, file: str, elapsed: float, lines: list):
         f"{esc(title)}",
         TG_SEP,
         # 文件名属机器值 → <code>；emoji 入 （规范 §2 语义表 #3 + 裁决 7）
-        f"📁 <code>{esc(shorten_name(os.path.basename(file)))}</code>",
+        f"📁 {tg_entry(shorten_name(os.path.basename(file)))}",
         f"📦 分组：{esc(CAPTION_PREFIX)}",
         f"耗时：{fmt_secs(elapsed)}",
     ]
@@ -667,7 +667,7 @@ _render_skipped_groups() {
     local _entries=""
     while IFS= read -r _p; do
       [ -z "$_p" ] && continue
-      _entries+="<code>$(escape_html "$(basename "$_p")")</code>"$'\n'
+      tg_add_entry _entries "$(basename "$_p")"
     done < <(printf '%s\n' "$_items" | head -n "$_max")
     if [ "$_total" -gt "$_max" ]; then
       _entries+="还有 $((_total - _max)) 条…"$'\n'

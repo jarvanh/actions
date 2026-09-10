@@ -110,7 +110,7 @@ def handle_termination_signal(signum, frame):
     TERMINATION_NOTICE_SENT = True
     sig_name = signal.Signals(signum).name if signum else f'SIGNAL-{signum}'
     _sep = TG_SEP
-    message = f'⛔ Gitee 测速异常终止\n{_sep}\n⚠️ 脚本被中断：收到 <code>{sig_name}</code>，本轮测速未正常完成。'
+    message = f'⛔ Gitee 测速异常终止\n{_sep}\n⚠️ 脚本被中断：收到 {tg_entry(sig_name)}，本轮测速未正常完成。'
     _footer = tg_footer_line()
     if _footer:
         message += f'\n\n{_footer}'
@@ -1425,7 +1425,7 @@ def finalize_gist_and_notify(env, summary, summary_lines, subscription_text, bun
     elif (gist_res.get('reason') or '').startswith('empty subscription'):
         summary_lines.append(f'  └─ ⚠️ 达标不足 {min_nodes} 个 · 阈值 ≥{min_megabit}兆（按{html.escape(metric_label)}）· 未更新订阅')
     else:
-        summary_lines.append(f"  └─ ⚠️ 上传失败：<code>{html.escape(str(gist_res.get('reason', '')))}</code>")
+        summary_lines.append(f"  └─ ⚠️ 上传失败：{tg_entry(gist_res.get('reason', ''))}")
     # 统一收尾区（收尾区与正文间固定一个空行；与 tg_add_footer 同形态同降级链）
     # 必须在所有正文段之后追加（「📦 订阅 · Gist」是正文的最后一段）——此前在
     # build_summary_lines 里加，被此段挤到正文中间，消息末尾反而没有收尾行（规范 §3）
@@ -1721,7 +1721,7 @@ if __name__ == '__main__':
             # 异常文本含 <>& 时未转义会触发 400 整条丢失（不退化，2026-09-06 拍板），必须 html.escape
             _sep = TG_SEP
             _msg = (f'❌ Gitee 测速异常退出 · {html.escape(str(stage))}\n{_sep}\n'
-                    f'错误：<code>{html.escape(err_text[:800])}</code>')
+                    f'错误：{tg_entry(err_text[:800])}')
             _footer = tg_footer_line()
             if _footer:
                 _msg += f'\n\n{_footer}'

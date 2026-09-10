@@ -351,25 +351,25 @@ _sync_par_consume() {
     skipped)
       skipped_subtasks=$((skipped_subtasks + 1))
       subdir_status_map["$_subdir"]="skipped"
-      skipped_list+="<code>$(escape_html "$_subdir")</code> · $(format_bytes "${subdir_size_map[$_subdir]:-0}")"$'\n'
+      tg_add_entry skipped_list "$_subdir" "$(format_bytes "${subdir_size_map[$_subdir]:-0}")"
       ;;
     synced)
       synced_subtasks=$((synced_subtasks + 1))
       subdir_status_map["$_subdir"]="synced"
       total_transferred=$((total_transferred + _tr))
-      synced_list+="<code>$(escape_html "$_subdir")</code> · $(format_bytes "${subdir_size_map[$_subdir]:-0}")"$'\n'
+      tg_add_entry synced_list "$_subdir" "$(format_bytes "${subdir_size_map[$_subdir]:-0}")"
       ;;
     partial)
       partial_subtasks=$((partial_subtasks + 1))
       failed_subtasks=$((failed_subtasks + 1))
       subdir_status_map["$_subdir"]="partial"
       total_transferred=$((total_transferred + _tr))
-      failed_list+="<code>$(escape_html "$_subdir")</code> · $(format_bytes "${subdir_size_map[$_subdir]:-0}") · 部分失败"$'\n'
+      tg_add_entry failed_list "$_subdir" "$(format_bytes "${subdir_size_map[$_subdir]:-0}")" "部分失败"
       ;;
     *)
       failed_subtasks=$((failed_subtasks + 1))
       subdir_status_map["$_subdir"]="failed"
-      failed_list+="<code>$(escape_html "$_subdir")</code> · $(format_bytes "${subdir_size_map[$_subdir]:-0}")"$'\n'
+      tg_add_entry failed_list "$_subdir" "$(format_bytes "${subdir_size_map[$_subdir]:-0}")"
       ;;
   esac
   # 修复累计器合并: fixed_files 是数组（拼接），fix_blacklist 是对象
@@ -417,7 +417,7 @@ _sync_par_reap_one() {
         echo "⚠️ 并行子目录 worker 异常退出（无结果文件），按失败计: ${_sub}"
         failed_subtasks=$((failed_subtasks + 1))
         subdir_status_map["$_sub"]="failed"
-        failed_list+="<code>$(escape_html "$_sub")</code> · worker 崩溃"$'\n'
+        tg_add_entry failed_list "$_sub" "worker 崩溃"
         _sync_par_render
         return 0
       fi
@@ -787,12 +787,12 @@ _sync_task_impl() {
     if [ "$SYNC_SKIPPED" = "1" ]; then
       skipped_subtasks=$((skipped_subtasks + 1))
       subdir_status_map["$subdir"]="skipped"
-      skipped_list+="<code>$(escape_html "$subdir")</code> · $(format_bytes "${subdir_size_map[$subdir]:-0}")"$'\n'
+      tg_add_entry skipped_list "$subdir" "$(format_bytes "${subdir_size_map[$subdir]:-0}")"
     elif [ "$SYNC_FAILED" = "0" ]; then
       synced_subtasks=$((synced_subtasks + 1))
       subdir_status_map["$subdir"]="synced"
       total_transferred=$((total_transferred + SYNC_TRANSFERRED_BYTES))
-      synced_list+="<code>$(escape_html "$subdir")</code> · $(format_bytes "${subdir_size_map[$subdir]:-0}")"$'\n'
+      tg_add_entry synced_list "$subdir" "$(format_bytes "${subdir_size_map[$subdir]:-0}")"
     else
       failed_subtasks=$((failed_subtasks + 1))
       if [ "${SYNC_PARTIAL:-0}" = "1" ]; then
@@ -803,7 +803,8 @@ _sync_task_impl() {
         subdir_status_map["$subdir"]="failed"
       fi
       total_transferred=$((total_transferred + SYNC_TRANSFERRED_BYTES))
-      failed_list+="<code>$(escape_html "$subdir")</code> · $(format_bytes "${subdir_size_map[$subdir]:-0}")$([ "${subdir_status_map[$subdir]}" = partial ] && echo ' · 部分失败')"$'\n'
+      tg_add_entry failed_list "$subdir" "$(format_bytes "${subdir_size_map[$subdir]:-0}")" \
+        "$([ "${subdir_status_map[$subdir]}" = partial ] && echo '部分失败')"
     fi
     PROGRESS_PHASE_INFO="$(_render_subdir_phase_tree)"
     local _completed_after=$((synced_subtasks + skipped_subtasks + failed_subtasks))
