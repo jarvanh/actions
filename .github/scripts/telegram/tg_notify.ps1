@@ -27,8 +27,8 @@ function Format-TgDuration([int]$totalSec) {
   if ($hh -gt 0) { return "$hh 小时 $mm 分" }
   elseif ($mm -gt 0) { return "$mm 分钟" }
   else {
-    # 秒统一一位小数，且强制 InvariantCulture（避免某些区域把小数点渲染成逗号）
-    return ([string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0:0.0}', $ss)) + " 秒"
+    # 秒统一两位小数，且强制 InvariantCulture（避免某些区域把小数点渲染成逗号）
+    return ([string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0:0.00}', $ss)) + " 秒"
   }
 }
 
