@@ -36,7 +36,10 @@ taier（04/10/16/22）错峰。
 ## 引擎准备
 
 - workflow 用 **Ookla 官方 apt 源**（packagecloud 的 `ookla/speedtest-cli`）安装，二进制名固定为
-  `speedtest`（PROCESS-NAME 规则即按它匹配）；
+  `speedtest`（PROCESS-NAME 规则即按它匹配）。**注意**：Ookla 的该源只发布到 `jammy` 发行线
+  （2022-08 后未更新），官方 `script.deb.sh` 按 runner 发行版选 dist，在 ubuntu-24.04 上会报
+  「Unable to locate package speedtest」→ workflow 里显式钉住 `jammy` 借用该源；apt 仍失败时
+  回退官方 tarball（`install.speedtest.net`）；
 - 脚本侧按 `OOKLA_BIN` → `which speedtest` → `OOKLA_CLI_URL` 现场下载官方 tgz 的顺序定位，
   仍找不到则带说明报错退出；
 - **不要用 Debian/Ubuntu 的 `speedtest-cli` 包**（sivel 的 Python 第三方实现）：输出结构与口径
