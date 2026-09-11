@@ -57,6 +57,7 @@ from speedtest_common import (
     send_telegram,
     send_telegram_chunked,
     tg_entry,
+    tg_entry_codes,
     tg_footer_line,
     tg_format_elapsed,
     tg_pre_block,
