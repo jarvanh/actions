@@ -1,14 +1,17 @@
 name: proxy-speedtest-ookla
 
-# 订阅节点 Speedtest 测速：逐个节点用 Ookla 官方 speedtest CLI 测「节点 → 指定 Speedtest
-# 测速点（默认广东广州·联通 5G，server id 26678）」的延迟与上下行带宽，结果推送 Telegram。
+# 订阅节点 Speedtest 测速：逐个节点用 Ookla 官方 speedtest CLI 测「节点 → Speedtest 官方
+# 测速点」的延迟与上下行，结果推送 Telegram。
 #
 # 与 proxy-speedtest 系列同族（同一订阅源 PROXY_SPEEDTEST_SUB_URLS、同一 mihomo 内核），
 # 只是测速引擎换成 Ookla 官方 CLI：口径是 Speedtest 官方自适应多连接测量。
 #
-# 为什么必须显式指定测速点编号：Ookla 的服务器列表按请求方出口 IP 的远近排序，runner
-# （Azure 出口）视角看不到中国大陆节点，自动「就近选择」必然落到境外节点、口径失真，
-# 所以用 --server-id 显式锁定（可用 OOKLA_SERVER_ID 改成别的编号或逗号分隔多候选）。
+# 测速点怎么选（默认动态，不要写死编号）：CLI 的服务器列表按**请求方出口 IP** 就近返回，
+# 实测出口在新加坡的节点列表里 10 条全是新加坡、CN=0——写死「广州联通 26678」在境外出口
+# 节点上必然 NoServersException、整轮空跑（历史事故：33 节点全失败却报 success）。
+# 所以默认不给 OOKLA_SERVER_ID：每个节点用自己出口可见列表里最近的测速点；只有显式给了
+# 编号、且该编号在节点可见列表里时才锁定它（要同口径横评时用，见文档）。
+# 偏好可用 OOKLA_SERVER_PREFER 调（默认广州/Guangzhou/广东/Guangdong，命不中就就近）。
 #
 # 链路说明：Ookla CLI 没有 --proxy 参数，只能走 mihomo TUN 透明接管该进程流量：
 #   rules: [PROCESS-NAME,speedtest,AUTO, MATCH,DIRECT]
