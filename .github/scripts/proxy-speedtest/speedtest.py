@@ -1064,6 +1064,20 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None):
     return lines
 
 
+def notify_best_effort(stage: str, msg: str):
+    """兜底分支（异常退出/信号终止/未捕获异常）的统一发送。
+
+    python 发送层不写 stderr、只靠返回值报错，调用方必须把失败原因记进日志，
+    否则 400 解析失败/429 限流会表现为「通知静默消失」（规范 第 6 章）。
+    此前这些分支直接 `send_telegram(...)` 后 `except: pass`，返回值被丢弃。
+    """
+    try:
+        res = send_telegram(merged_env(), msg)
+        log_progress(stage, sent=bool(res.get('sent')), reason=res.get('reason', ''))
+    except Exception as e:
+        log_progress(f'{stage}_failed', error=str(e))
+
+
 def write_termination(started_at, reason):
     payload = {
         'ok': False,
@@ -1083,17 +1097,14 @@ def write_termination(started_at, reason):
     except Exception:
         pass
     log_progress('speedtest_terminated', reason=reason)
-    try:
-        # 标题直接带原因首行（原文截断后再转义，避免切断 HTML 实体）
-        _head = str(reason).splitlines()[0][:40].strip() or '未知原因'
-        abort_msg = (f'❌ CDN 测速异常退出 · {html.escape(_head)}\n{TG_SEP}\n'
-                     f'原因：{tg_entry(reason)}')
-        abort_footer = tg_footer_line()
-        if abort_footer:
-            abort_msg += f'\n\n{abort_footer}'
-        send_telegram(merged_env(), abort_msg)
-    except Exception:
-        pass
+    # 标题直接带原因首行（原文截断后再转义，避免切断 HTML 实体）
+    _head = str(reason).splitlines()[0][:40].strip() or '未知原因'
+    abort_msg = (f'❌ CDN 测速异常退出 · {html.escape(_head)}\n{TG_SEP}\n'
+                 f'原因：{tg_entry(reason)}')
+    abort_footer = tg_footer_line()
+    if abort_footer:
+        abort_msg += f'\n\n{abort_footer}'
+    notify_best_effort('abort_notify', abort_msg)
 
 
 def handle_termination_signal(signum, frame):
@@ -1104,10 +1115,7 @@ def handle_termination_signal(signum, frame):
     footer = tg_footer_line()
     if footer:
         msg += f'\n\n{footer}'
-    try:
-        send_telegram(merged_env(), msg)
-    except Exception:
-        pass
+    notify_best_effort('termination_notify', msg)
     raise SystemExit(128 + int(signum))
 
 
@@ -1125,8 +1133,5 @@ if __name__ == '__main__':
         _footer = tg_footer_line()
         if _footer:
             _msg += f'\n\n{_footer}'
-        try:
-            send_telegram(merged_env(), _msg)
-        except Exception:
-            pass
+        notify_best_effort('uncaught_notify', _msg)
         sys.exit(1)

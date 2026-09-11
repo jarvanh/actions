@@ -549,6 +549,20 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
     return lines
 
 
+def notify_best_effort(env, stage: str, msg: str):
+    """兜底分支（异常退出/信号终止）的统一发送。
+
+    python 发送层不写 stderr、只靠返回值报错，调用方必须把失败原因记进日志，
+    否则 400 解析失败/429 限流会表现为「通知静默消失」（规范 第 6 章）。
+    此前这些分支直接 `send_telegram(...)` 后 `except: pass`，返回值被丢弃。
+    """
+    try:
+        res = send_telegram(env, msg)
+        log_progress(stage, sent=bool(res.get('sent')), reason=res.get('reason', ''))
+    except Exception as e:
+        log_progress(f'{stage}_failed', error=str(e))
+
+
 def notify_failure(env, reason):
     # 先撤 TUN 再发——auto-route 劫持下连 TG API 都可能送不出去。
     # stop_mihomo_tun 可重复调用，main() finally 的二次收尾安全幂等。
@@ -569,10 +583,7 @@ def notify_failure(env, reason):
     footer = tg_footer_line()
     if footer:
         lines.append(footer)
-    try:
-        send_telegram(env, '\n'.join(lines))
-    except Exception as e:
-        log_progress('telegram_send_failed', error=str(e))
+    notify_best_effort(env, 'abort_notify', '\n'.join(lines))
 
 
 _TERM_NOTICE_SENT = False
@@ -597,10 +608,7 @@ def handle_termination_signal(signum, frame):
     footer = tg_footer_line()
     if footer:
         msg += f'\n\n{footer}'
-    try:
-        send_telegram(merged_env(), msg)
-    except Exception:
-        pass
+    notify_best_effort(merged_env(), 'termination_notify', msg)
     raise SystemExit(128 + int(signum))
 
 
