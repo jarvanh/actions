@@ -75,14 +75,27 @@ TUN 起来后 DNS 会被 mihomo 劫持，必须显式给可达的公共解析器
 全是港澳），`search=Guangzhou` / `Guangdong` 也返回 0；全大陆当前只剩三个点：
 苏州 `16204`（JSQY）、昆山 `30852`（Duke Kunshan）、上海 `24447`（China Unicom 5G，**唯一联通**）。
 
+补充两个 2026-09-11 的检索事实：
+
+- `search=Unicom` 全大陆**只返回 1 条**（24447 上海）；
+- 广东省范围内**一个 Ookla 测速点都没有**：广州/深圳/东莞/佛山/珠海/汕头/湛江/惠州 8 市
+  经纬度查下来附近只有香港、澳门（湛江那边是越南海防），`search=Guangzhou` / `Shenzhen` /
+  `Guangdong` 全部 0 条。→ 排序里的「广东」这一档当前不生效，结果仍是上海联通；
+  Ookla 一旦上线广东点（哪怕非联通），规则会让它自动优先。
+
 流程：
 
 1. 用目标经纬度锚点（默认 **广州 → 上海 → 北京**）调 Ookla 服务器列表 API
    （`www.speedtest.net/api/js/servers?engine=js&lat=&lon=`）。该端点**按经纬度返回，与请求方
    出口 IP 无关**——这是境外出口也能拿到大陆点的唯一入口。注意它对简略 UA 直接 403，
    脚本已带完整浏览器 UA；直连被 403/429 时改走 mihomo mixed-port 换出口重试一次；
-2. 按 `OOKLA_TARGET_CC`（默认 `CN`）过滤 → 按 `OOKLA_TARGET_ISP`（默认 `unicom,联通`）
-   优先 → 再按距**首锚点**距离排序，锁定第一个，所有节点同口径复用；
+2. 按 `OOKLA_TARGET_CC`（默认 `CN`）过滤后，按 **运营商 → 目标区域 → 距离** 三级排序，
+   锁定第一个，所有节点同口径复用：
+   1. `OOKLA_TARGET_ISP`（默认 `unicom,联通`）：命中的排前面，**运营商优先于地理**——
+      同族三套（gitee / cdn / taier）测的都是运营商链路质量，地理近但运营商不对没意义；
+   2. `OOKLA_TARGET_RADIUS_KM`（默认 `300`，以首锚点为圆心）：圈内 = 目标区域（广东/珠三角）
+      优先于圈外；
+   3. 最后才比距首锚点的直线距离。
 3. 显式 `OOKLA_SERVER_ID` 优先级最高（同口径横评用）；
 4. 只在**目标候选池内部**顺延，两种情况：编号失效（NoServersException，全局剔除）、
    该编号对本节点连不上/没数据（累计计数，换下一个候选）。**不会**因为连不上就跳到
@@ -127,7 +140,8 @@ TUN 起来后 DNS 会被 mihomo 劫持，必须显式给可达的公共解析器
 | `OOKLA_SERVER_ID` | 空 | 显式测速点编号（逗号分隔多候选），**优先级最高**；留空 = 按目标地区检索并锁定（见上节）。编号被 Ookla 下线时自动顺延下一个候选 |
 | `OOKLA_TARGET_POINTS` | `23.1291,113.2644 31.2304,121.4737 39.9042,116.4074` | 目标地区经纬度锚点（空格分隔，按序检索扩大）；第一个锚点即「距目标」的计算基准 |
 | `OOKLA_TARGET_CC` | `CN` | 目标国家/地区代码过滤（留空 = 不过滤） |
-| `OOKLA_TARGET_ISP` | `unicom,联通` | 运营商关键词（按序优先，在 name/host/location 上匹配）；留空 = 只按距离排 |
+| `OOKLA_TARGET_ISP` | `unicom,联通` | 运营商关键词（按序优先，在 name/host/location 上匹配）；**运营商优先于地理**；留空 = 只看区域与距离 |
+| `OOKLA_TARGET_RADIUS_KM` | `300` | 「目标区域」半径（以首锚点为圆心）：圈内优先于圈外，默认 ≈ 珠三角 + 港澳 |
 | `OOKLA_ALLOW_NEAREST_FALLBACK` | `1` | 目标点全部失效时是否退回「按节点出口就近」（`0` = 不测，避免拿不相干数据充数） |
 | `OOKLA_SERVER_PREFER` | 空 | **仅就近兜底路径**生效：在节点可见列表内按 name/location/country 匹配，命不中就取列表首个 |
 | `OOKLA_SERVER_LABEL` | 空 | 通知里测速点标签覆盖（留空按 CLI / 服务器 API 返回的 location · name 自动生成） |
