@@ -220,7 +220,8 @@ _escape_filter_glob() { printf '%s' "$1" | sed -e 's/[][*?{}]/[&]/g'; }
 # 才修复到 alternative 的；替代文件仍在时原路径重传必然再 405，
 # 还会被 OpenList 包装成 8005 触发 3 轮全量重试（每轮白白重查全目录）。
 # sync 模式下排除同时承担"删除保护"——rclone 语义: filter 排除的文件
-# 不传输也不删除（前提: 不能加 --delete-excluded，否则排除保护失效）:
+# 不传输也不删除（前提: 不能加 --delete-excluded，否则排除保护失效；
+# 2026-09-12 起同步已整体移除 --delete-*，排除项只剩"不重传"这层作用）:
 #   - original:    排除 → 不重传（无 405）、即使目标端有也不被删
 #   - alternative: 只存在于目标端、源端没有 → 不排除必被 sync 当多余删除
 #   - 分卷类:      alternative 只记录第一卷，.002/.003... 用前缀通配一并保护
@@ -320,6 +321,12 @@ _sync_fix_missing_files() {
       rm -f "$src_ls"
       [ "$dst_ls" = "${SYNC_FIX_LIST_CACHE:-}" ] || rm -f "$dst_ls"
       sort -u "$missing_list" -o "$missing_list"
+    fi
+
+    # 本轮缺失总量累计（供收尾统计: 没有它就无法判断"修复成功率"，
+    # run #12616 报 success 而实际 0 成功/394 失败，全靠事后翻日志才发现）
+    if [ -s "$missing_list" ]; then
+      SYNC_MISSING_TOTAL_RUN=$(( ${SYNC_MISSING_TOTAL_RUN:-0} + $(wc -l < "$missing_list" | tr -d ' ') ))
     fi
 
     # ===== B: 失败记忆 — 比对上一轮修复记录（marker fixed_files）=====
@@ -830,6 +837,23 @@ _sync_serialize_fixed_files() {
     -f "$_jq_prog" "$fix_list" 2>/dev/null || echo "[]")
 }
 
+# 本轮修复成效累计器（每个子任务结束时调用一次，累加落 /tmp/ol_round_stats.env）
+# 为什么落文件而不是靠全局变量: 收尾 step 是独立 shell，全局变量传不过去；
+# 而"本轮修复成功 0 个"这类信号必须在收尾一眼可见 —— run #12616 结论是
+# success，实际 394 次修复全败、5 小时零产出，除翻日志外无任何提示。
+# 用法: _ol_round_stats_bump <本次新增 fixed_files JSON> <本轮累计缺失数>
+_ol_round_stats_bump() {
+  local fixed_json="$1" missing_total="${2:-0}"
+  local f="/tmp/ol_round_stats.env"
+  local cur_ok=0 add_ok=0
+  [ -f "$f" ] && cur_ok=$(sed -n 's/^ROUND_FIXED_OK=//p' "$f" 2>/dev/null)
+  [[ "$cur_ok" =~ ^[0-9]+$ ]] || cur_ok=0
+  add_ok=$(printf '%s' "$fixed_json" | jq 'length' 2>/dev/null)
+  [[ "$add_ok" =~ ^[0-9]+$ ]] || add_ok=0
+  [[ "$missing_total" =~ ^[0-9]+$ ]] || missing_total=0
+  printf 'ROUND_FIXED_OK=%s\nROUND_MISSING=%s\n' "$((cur_ok + add_ok))" "$missing_total" > "$f"
+}
+
 # 累计到全局变量（供 auto-split 拆分模式下顶级 save_sync_marker 收集所有子目录的修复）
 # _sync_task_impl 在 current_depth=0 时初始化 GLOBAL_FIXED_FILES_JSON="[]"
 # 依赖调用方作用域: LAST_SYNC_FIXED_FILES_JSON / LOG_FILENAME；
@@ -865,4 +889,7 @@ _sync_accumulate_fixed_results() {
   if [ "${#FIX_METHOD_BLACKLIST[@]}" -gt 0 ] || [ "$_global_bl_len" != "0" ]; then
     echo "黑名单累计: 数组 ${#FIX_METHOD_BLACKLIST[@]} 条 → GLOBAL ${_global_bl_len} 条" | tee -a "$LOG_FILENAME"
   fi
+
+  # 本轮修复成效累计（收尾告警口径，见 _ol_round_stats_bump 注释）
+  _ol_round_stats_bump "${LAST_SYNC_FIXED_FILES_JSON:-[]}" "${SYNC_MISSING_TOTAL_RUN:-0}"
 }

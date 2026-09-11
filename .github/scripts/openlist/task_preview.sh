@@ -26,7 +26,7 @@
 # 用法: _get_listing_json <remote_path> [--exclude pat] ...
 # 输出: lsjson JSON 数组（空目录为 []）; 失败/非数组输出空串
 # 注意: 只传纯 filter 参数（--exclude/--include），调用方须先用
-# _extract_filter_args 剥离 --delete-before 等 sync 特有参数
+# _extract_filter_args 剥离 --delete-* 等 sync 特有参数
 _get_listing_json() {
   local remote_path="$1"
   shift
@@ -57,7 +57,7 @@ declare -A PREVIEW_PENDING_MAP
 
 # 获取源端大小/文件数（带 --exclude 过滤，读 PREVIEW_SRC_LIST_CACHE 缓存）
 # 用法: _get_source_size_with_excludes <source_path> [原始 extra_args...]
-#   （可含 --delete-before 等非过滤参数，内部会剥离，仅保留过滤口径）
+#   （可含 --delete-* 等非过滤参数，内部会剥离，仅保留过滤口径）
 # 返回: "bytes count"
 _get_source_size_with_excludes() {
   local source_path="$1"
@@ -115,7 +115,7 @@ _diff_pending_tsv() {
 
 # 添加一个同步对到预览
 # 用法: add_preview_pair <source_path> <dest_path> [--exclude pat] ...
-#   （与 task_engine.sh 调用约定一致: extra_args 可能含 --delete-before 等
+#   （与 task_engine.sh 调用约定一致: extra_args 可能含 --delete-* 等
 #   sync 特有参数，统计前先剥离为纯过滤口径）
 add_preview_pair() {
   local source_path="$1"

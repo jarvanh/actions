@@ -61,12 +61,29 @@ wait_openlist_ready() {
     return 1
   fi
   # 阶段2: 管理面账密实登验证（现场换取 token，后续 API 探测的前提）
+  # 登录失败必须 fail fast: 后续所有驱动探测 / API 健康检查都拿不到 token，
+  # 会一路"降级放行"，让本该 3 分钟结束的运行空转到 6h 上限（run #12613:
+  # 登录失败 → 16 个目标端列举全部失败 → 预览吃掉 3h+ → 330min 硬超时）。
   local ol_token
   if ol_token=$(_get_openlist_token); then
     echo "HTTP 就绪，管理面登录成功（token 长度 ${#ol_token}）"
   else
-    echo "HTTP 就绪，但管理面登录失败（检查 OPENLIST_ADMIN_PASSWORD 是否已注入且与管理员密码一致）"
+    echo "❌ HTTP 就绪，但管理面登录失败（检查 OPENLIST_ADMIN_PASSWORD 是否已注入且与管理员密码一致），终止本次运行"
+    return 1
   fi
+
+  # 阶段2.5: 存储（驱动）清单校验 —— 数据库是从 Dropbox 拉回来的副本，
+  # 空库/坏库会让后面所有探测"降级放行"（token 有、存储无），同样演变成
+  # 整轮空转。此处 fail fast: 一个存储都没有即判定本次拉库失败。
+  local storage_total
+  storage_total=$(curl -s -m 20 -X GET "http://127.0.0.1:5244/api/admin/storage/list" \
+    -H "Authorization: $ol_token" 2>/dev/null \
+    | jq -r '.data.total // (.data.content | length) // empty' 2>/dev/null)
+  if [ -z "$storage_total" ] || [ "$storage_total" = "0" ] || [ "$storage_total" = "null" ]; then
+    echo "❌ OpenList 存储清单为空（total=${storage_total:-无响应}）: 拉取到的 data.db 为空或损坏，终止本次运行"
+    return 1
+  fi
+  echo "存储清单校验通过: ${storage_total} 个存储"
   # 阶段3: 等驱动初始化（长等待 120s，给 ali + crypt 拉元数据）
   echo "等待驱动初始化 (120s) ..."
   sleep 120
