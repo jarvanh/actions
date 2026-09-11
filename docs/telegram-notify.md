@@ -465,9 +465,20 @@
 ```
   └─ 还有 8 条…
 ```
-- 助手：`tree_code_fold`（文件列表一站式：等宽 + 超 8 条折叠）
+- 助手：两个，按**输入是裸文本还是已构建条目流**选（选错会造成二次转义）：
+
+  | 助手 | 输入 | 做什么 |
+  |---|---|---|
+  | `tree_code_fold` | 裸文本（未转义、无标签） | 逐行转义 + 套 `<code>` + 超 max 折叠 |
+  | `tree_fold` | 已由 `tg_add_entry` / `tg_entry` 构建的条目流（已转义、已含 `<code>`） | **只**截断 + 加折叠行 |
+
+  对已含 `<code>` 的条目流误用 `tree_code_fold`，会把 `&` 转成 `&amp;amp;`、
+  并把 `<code>` 本身转义掉——条目流一律走 `tree_fold`。
 - 建议：折叠行并入条目流作末条（由 `tree_lines` 统一决定 `└─`），
   不要单独补一行造成双 `└─`；多组并列时通知内建议最多展示 8 组。
+- **超 8 条折叠是全库统一要求**，不因子系统而异（2026-09-12 核对：`file_split` /
+  `sync_marker` / `sync_to_tg` 已上传组曾裸用 `tree_lines` 不折叠，而 `file_restore`
+  有折叠——同一 openlist 域两种口径，已统一收敛到 `tree_fold`）。
 
 ### 4.7 多行块（日志/命令）
 
@@ -667,6 +678,51 @@ tg_add_footer msg; printf '%s\n' "$msg"
 实践中这一步抓到过三类纯代码审查漏掉的问题：转义被二次处理、空行数量不对、
 命令替换吃掉尾换行导致条目粘连。
 
+### 7.4 全库版式核对基线（2026-09-12）
+
+首次对全库约 30 类通知做逐套核对（四个子系统并行审计 → 逐条复核 → 渲染预览验证）。
+结论：**统一度达标**；发现 6 处偏差，均已修复。本节是下次核对的起点——
+**改动版式后，下面两张表应当仍然成立**。
+
+核对方法：① Grep 机械扫描（`<b>`/`<i>`、`• `、半角冒号、`curl` 直发、时长格式）。
+② 分域通读（openlist / tg-channel / workflows 内联 / 测速三套）。③ 渲染预览（7.3 节）。
+
+#### 已统一 · 12 项
+
+| # | 版式要素 | 核对范围 | 结论 |
+|---|---|---|---|
+| 1 | 分隔线 `TG_SEP` | bash 真源 / pwsh / python 共享层 / tg-channel 内嵌段 | 四套同值，均为 18 条全角横线 ━；openlist 侧不自带副本 |
+| 2 | `<b>` / `<i>` | 全库 | 零使用（仅注释提及） |
+| 3 | 条目前缀 | 全库 | 一律 `├─/└─`，无 `• ` 平铺 |
+| 4 | kv 冒号 | 全库 | 全角冒号，无半角混入 |
+| 5 | 收尾区 | 所有通知点 | 一律 `tg_add_footer` / `Get-TgFooter` / `tg_footer_line`，无手拼 |
+| 6 | 运行日志接线 | 14 个有通知的 workflow | 全部注入 `TG_RUN_URL`；「有通知的集合」与「注入集合」完全重合 |
+| 7 | 时长写法 | 全库 | 五层（4.3 节）；无 `5h 57m`、无高精度浮点、无 ISO 时间戳直出 |
+| 8 | 发送通道 | 全库 | `curl` 直发仅 4 处允许位置（两个发送层自身 / 进度面板 message_id / `sendDocument`） |
+| 9 | 发送层引入 | 每个通知点 | 均 source / dot-source，无 `command not found` 风险 |
+| 10 | 转义 | 动态内容 | 经 `escape_html` / `Esc-Html` / `tg_*` 助手 |
+| 11 | 内嵌 python 助手 | `tg-channel/sync_to_tg.sh` | `esc` / `tg_entry` / `tg_pre_block` / `fmt_secs` / `shorten_name` 齐全，无 NameError 风险 |
+| 12 | 多组列表组间空行 | `tg-channel/dedupe_*.sh` | 空行带条件（首组前不补），曾漏、已修 |
+
+#### 核对发现并已修复 · 6 处
+
+| 级别 | 位置 | 偏差 | 修法 |
+|---|---|---|---|
+| P1 | `taier_speedtest.py` `main()` | 裸 `except: pass` 包住兜底通知，同时吞掉异常与返回值——429 限流 / 400 解析失败时毫无痕迹（第 6 章点名的反模式）。cdn / gitee 早已收敛，只有 taier 没跟上；且漏 `type(e).__name__` | 去掉外层 try，直接 `notify_failure(...)`（内部已走 `notify_best_effort` + `log_progress`）；补异常类型名 |
+| P1 | `taier_speedtest.py` `notify_best_effort` | 签名比另两套多一个前置 `env`，调用点随之出现 `(env, …)` 与 `(merged_env(), …)` 两种写法 | 统一为 `(stage, msg)`，env 内部取 `merged_env()` |
+| P2 | `file_split.sh` / `sync_marker.sh` / `sync_to_tg.sh` | 列表无 8 条上限：同域内 `file_restore`（`_fold_list`）与 `sync_notify`（`tree_code_fold`）有折叠，这三处裸用 `tree_lines` 全量穷举 | 真源新增 `tree_fold`（只折叠、不二次转义），三处统一收敛；`_fold_list` 退化为薄封装 |
+| P2 | `sync_notify.sh` | `fix_total=0` 时仍输出「✅ 已通过其他方式同步 · 0」+「无」——图标与计数自相矛盾（8.2 节），且空分节白占版面 | `[ "$fix_total" -gt 0 ]` 才插该分节 |
+| P3 | `sync_marker.sh` | 分节写成「📁 缺失的目录 · 可能被删除 · 3」——说明文字与计数并列，会被读成两个计数 | 计数独占标题，说明下沉为 `tg_add_note` |
+| P3 | `speedtest_common.py` | 降级行「归属获取失败（gitee.com）」的 label 裸文本，而同节「测速服务器 / ISP / ASN / 位置」四行均 `<code>`——正是 2.3 节被反馈过的斑马纹 | label 是域名 / hostname（机器值），改为 `<code>` |
+| P3 | `openclaw.yml` | 「AI 网关」条目两个值直插未过 `escape_html`，与相邻 861-864 行口径不一（当前是字面量不炸，改动态值即 400） | 两个值均经 `escape_html` |
+
+#### 判定为「无害、不修」的存疑项
+
+| 位置 | 现象 | 为什么不管 |
+|---|---|---|
+| `sync_to_tg.sh` `esc` | 用 `quote=False`，共享层 `html.escape` 默认 `quote=True` | 正文场景不转义引号是安全的，bash `escape_html` 同样只转 `& < >`；二者差异无害 |
+| `dedupe_*.sh` 组头 | 哈希 / ID 直插未转义 | 字符集受限（十六进制），风险低；元数据部分已走 `tg_entry` |
+
 
 ## 8. 附录
 
@@ -682,7 +738,7 @@ tg_add_footer msg; printf '%s\n' "$msg"
 | 条目（双机器值 ·） | `tg_entry_codes` / `tg_add_entry_codes` | — | `tg_entry_codes(a, b, *meta)` |
 | 多行块 | `tg_add_pre` | — | `tg_pre_block(text)` |
 | 说明段 | `tg_add_note` | 手拼 | 手拼 |
-| 树形 / 折叠 | `tree_conn` `tree_sub` `tree_lines` `tree_code_fold` | 手拼 | 手拼 |
+| 树形 / 折叠 | `tree_conn` `tree_sub` `tree_lines` `tree_code_fold`（裸文本）/ `tree_fold`（已构建条目流） | 手拼 | 手拼 |
 | 转义 | `escape_html` | `Esc-Html` | `html.escape` |
 | 收尾 | `tg_add_footer` | `Get-TgFooter` | `tg_footer_line` / `tg_format_elapsed` |
 | 发送 | `send_tg` / `send_tg_chunked` | `Send-TgMessage` | `send_telegram` / `send_telegram_chunked` |
