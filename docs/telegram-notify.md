@@ -640,9 +640,11 @@ env:
 | `test_truth.sh` | `PASS=12 FAIL=7` | 依赖 docker/真实 OpenList 服务，本地跑不了 |
 | `test_progress_no_orphans.sh` | T5「强杀路径有超时上限」偶发失败 | 时序 flake |
 | `test_marker_skip_guards.sh` | 1b 失败 | 测试用 `date -d`，macOS BSD date 无 `-d` |
-| `test_sync_trend_budget.sh` | 「期望1条实得       1」+ `unbound variable` | macOS `wc` 输出对齐 + 远端脚本自身问题 |
 
-判定基线：**16 个 EXIT=0 + test_truth 那 7 条**，偏离才是回归。
+判定基线：**17 个 EXIT=0 + test_truth 那 7 条**，偏离才是回归。
+
+> `test_sync_trend_budget.sh` 原在本表内（`wc` 输出对齐 + `unbound variable`）。
+> 2026-09-11 复跑 17/17 全绿，已从基线表移除——上面的判定基线同步由 16 改为 17。
 
 ### 7.3 渲染预览（强烈建议）
 

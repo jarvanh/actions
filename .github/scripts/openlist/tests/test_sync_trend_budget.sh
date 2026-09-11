@@ -20,11 +20,16 @@ _REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 # --- mocks（被测模块依赖的最小面）---
 format_bytes() { echo "$1"; }
 send_telegram_message() { TG_SENT+=("$1"); return 0; }
-tg_add_title() { local -n m=$1; m+="<t>${2}</t>"; }
-tg_add_section() { local -n m=$1; m+="<s>${2}</s>"; }
-tg_add_kv() { local -n m=$1; m+="<kv>${2}=${3}</kv>"; }
-tg_add_block() { local -n m=$1; m+="${2}"; }
-tg_add_footer() { local -n m=$1; m+="<f>"; }
+# 版式助手 mock 用纯文本标记（TITLE:/SECTION:/KV:/FOOTER:），不冒充 HTML 标签。
+# 此前是 <t>/<s>/<kv>/<f>：真源只产出裸文本 + <code>/<pre>/<a>，mock 里的
+# <s> 更是 Telegram 真实存在的删除线标签，读测试的人容易误以为线上通知带删除线
+# （2026-09-11 修）。形态与 test_skip_preview_hint.sh 同风格，并补上真源的
+# 「每行带尾换行 / block 保证段尾换行」，让 mock 输出更接近真实消息。
+tg_add_title()   { local -n m=$1; m+="TITLE:${2}"$'\n'; }
+tg_add_section() { local -n m=$1; m+="SECTION:${2}"$'\n'; }
+tg_add_kv()      { local -n m=$1; m+="KV:${2}=${3}"$'\n'; }
+tg_add_block()   { local -n m=$1; m+="${2}"; case "${2}" in *$'\n') ;; *) m+=$'\n' ;; esac; }
+tg_add_footer()  { local -n m=$1; m+="FOOTER"$'\n'; }
 
 # rclone 桩: 远端目录模拟 onedrive:/logs/sync_state/（文件名必须与
 # TREND_FILE 的 basename 一致——模块按 basename 在 lsf 输出里判定存在性）
@@ -43,8 +48,9 @@ rclone() {
   esac
 }
 
-# --- source 被测模块（trend 全量 + task_engine 全量；两者顶层均只定义
-#     常量/函数，mock 在 source 之后覆盖，与 test_rotation.sh 同一手法）---
+# --- source 被测模块（trend 全量 + task_engine 全量；两者顶层均只定义常量/函数，
+#     且都不自行 source 通知真源 telegram/tg_notify.sh——版式助手全部由上方 mock
+#     提供，故 mock 定义在 source 之前同样生效。手法同 test_rotation.sh，仅顺序不同）---
 rm -rf "$TREND_DIR" /tmp/ol_trend_*.txt /tmp/ol_trend_transferred.log /tmp/ol_trend_start_ts /tmp/ol_trend.jsonl
 mkdir -p "$TREND_DIR"
 source "$_REPO_ROOT/.github/scripts/openlist/sync_trend.sh"
