@@ -191,9 +191,11 @@ OOKLA_BIN = ''
 #   candidates    按目标地区（经纬度 + cc + 运营商）解析出的候选编号，已按优先级排序
 #   locked        当前锁定的测速点编号（所有节点同口径复用）
 #   dead          Ookla 侧已失效的编号（NoServersException），本轮不再尝试
+#   unreachable   编号在本轮被判「连不上/没数据」的次数（按 id 累计，用于排序与标注）
 #   fallback      是否已进入「按节点出口就近」兜底（目标点全失效/目标区域无点）
 _SERVER_STATE = {'explicit_ids': list(CONFIG['OOKLA_SERVER_IDS']), 'candidates': [],
-                 'locked': '', 'dead': set(), 'fallback': False}
+                 'locked': '', 'dead': set(), 'unreachable': {}, 'fallback': False,
+                 'fallback_streak': 0}
 
 # 本轮目标地区解析结果摘要（供通知标注「实际用了什么点、离目标多远」）
 TARGET_INFO = {'origin': CONFIG['OOKLA_TARGET_POINTS'][0] if CONFIG['OOKLA_TARGET_POINTS'] else '',
@@ -505,15 +507,22 @@ def _is_dead_point(parsed, err):
 
 
 def _candidate_ids():
-    """本节点要尝试的编号顺序：已锁定的 → 显式指定 → 目标地区解析结果（跳过已失效的）。"""
+    """本节点要尝试的编号顺序：已锁定的 → 显式指定 → 目标地区解析结果（跳过已失效的）。
+
+    「对这批节点整体不通」的编号（连续不可达达到熔断阈值）排到最后：否则每个节点都要
+    先白等它失败一次（实测单次失败 7~20s、超时上限 120s），29 个节点就是十几分钟空转。
+    """
     ordered = []
     locked = _SERVER_STATE['locked']
     if locked and locked not in _SERVER_STATE['dead']:
         ordered.append(locked)
+    rest = []
     for sid in list(_SERVER_STATE['explicit_ids']) + list(_SERVER_STATE['candidates']):
         if sid and sid not in ordered and sid not in _SERVER_STATE['dead']:
-            ordered.append(sid)
-    return ordered
+            rest.append(sid)
+    bad = _SERVER_STATE['unreachable']
+    rest.sort(key=lambda s: 1 if bad.get(s, 0) >= max(1, CONFIG['OOKLA_ABORT_AFTER']) else 0)
+    return ordered + rest
 
 
 def _run_nearest(name, prev_sid):
@@ -539,17 +548,23 @@ def server_hint(item):
 def run_ookla(name: str):
     """跑一次测速，返回 (rc, out, err, parsed, sid, note)。
 
-    note: '' = 用锁定测速点；'reselected' = 换了候选（前一个编号已失效）；
-    'nearest_fallback' = 目标点全部失效，已退回本节点出口就近；
+    note: '' = 用锁定测速点；'reselected' = 换了候选（前一个编号失效或连不上）；
+    'nearest_fallback' = 目标候选全不可达，已退回本节点出口就近；
+    'no_target' = 目标候选全不可达且未开启就近兜底（如实失败，不拿无关数据充数）；
     'no_server_list' = 本节点连测速点列表都拉不到（控制面不通，属引擎级问题）。
 
-    锁点口径：所有节点尽量用同一个编号（横评才有意义）。编号失效才顺延下一个候选，
-    节点连不上不换点——换点只在「编号没了」这一种情况下发生。
+    锁点口径：所有节点尽量用同一个编号（横评才有意义），只在两种情况下顺延下一个候选：
+      1. 编号被 Ookla 下线（NoServersException）——全局剔除；
+      2. 该编号对本节点连不上/没数据——**只在目标候选池内部**顺延，绝不跳到就近。
+    实测（2026-09-11 日本出口节点）：同一批候选里 24447/16204 连不上、30852 通，
+    固定死一个点会整轮空跑，所以顺延必须存在；但顺延仍限定在目标地区候选内，
+    换点结果由通知的「测速点分布」如实展示。
     """
     if _SERVER_STATE['fallback']:
         return _run_nearest(name, _SERVER_STATE['locked'])
 
     prev = _SERVER_STATE['locked']
+    last = None
     for sid in _candidate_ids():
         rc, out, err = _run_ookla_once(sid)
         parsed = parse_ookla_result(parse_ookla_json(out))
@@ -557,16 +572,34 @@ def run_ookla(name: str):
             _SERVER_STATE['dead'].add(sid)
             log_progress('ookla_point_dead', point_id=sid, name=name)
             continue
-        _SERVER_STATE['locked'] = sid
-        return rc, out, err, parsed, sid, ('' if (not prev or sid == prev) else 'reselected')
+        if parsed['ok']:
+            _SERVER_STATE['fallback_streak'] = 0
+            _SERVER_STATE['locked'] = sid
+            return rc, out, err, parsed, sid, ('' if (not prev or sid == prev) else 'reselected')
+        # 连不上 / 没数据：累计一次，顺延下一个候选（仍留在候选池里，别处可能通）
+        _SERVER_STATE['unreachable'][sid] = _SERVER_STATE['unreachable'].get(sid, 0) + 1
+        log_progress('ookla_point_unreachable', point_id=sid, name=name, rc=rc,
+                     error=(parsed.get('error') or '')[:120])
+        last = (rc, out, err, parsed, sid)
 
-    # 走到这里 = 候选编号全被 Ookla 下线（典型：社区清单里的老编号），
-    # 或目标区域压根没解析出点（典型：只要广州一个锚点 + cc=CN）
-    if not CONFIG['OOKLA_ALLOW_NEAREST_FALLBACK']:
-        return 3, '', '目标测速点全部失效（未开启就近兜底）', \
-            parse_ookla_result(None), prev, 'no_target'
-    _SERVER_STATE['fallback'] = True
-    log_progress('ookla_target_exhausted', dead=sorted(_SERVER_STATE['dead']), name=name)
+    # 走到这里 = 候选编号全被下线，或全部对本节点不可达
+    if last and not CONFIG['OOKLA_ALLOW_NEAREST_FALLBACK']:
+        return last[0], last[1], last[2], last[3], last[4], 'no_target'
+    if not last:
+        # 一个候选都没有（目标区域无点）
+        if not CONFIG['OOKLA_ALLOW_NEAREST_FALLBACK']:
+            return 3, '', '目标区域无可用测速点（未开启就近兜底）', \
+                parse_ookla_result(None), prev, 'no_target'
+        last = (0, '', '目标区域无可用测速点', parse_ookla_result(None), prev)
+    # 兜底是**按节点**的：节点出口地区不同，A 节点连不上的点 B 节点未必连不上。
+    # 只有连续多个节点都整体兜底（= 这批节点对目标地区整体不通）才转成全局兜底，
+    # 免得每个节点都白试一遍候选。
+    _SERVER_STATE['fallback_streak'] += 1
+    if _SERVER_STATE['fallback_streak'] >= max(1, CONFIG['OOKLA_ABORT_AFTER']):
+        _SERVER_STATE['fallback'] = True
+    log_progress('ookla_target_exhausted', dead=sorted(_SERVER_STATE['dead']),
+                 unreachable=_SERVER_STATE['unreachable'], name=name,
+                 streak=_SERVER_STATE['fallback_streak'])
     return _run_nearest(name, prev)
 
 
@@ -1313,6 +1346,10 @@ def _run():
     ok_points = [p for p in ok_points if p]
     top_point = max(point_hits, key=lambda k: point_hits[k]) if point_hits else \
         (ok_points[0] if ok_points else (_SERVER_STATE['locked'] or ''))
+    _unreach = _SERVER_STATE['unreachable']
+    _unreach_text = ('候选点不可达：' + ', '.join(
+        f'{k}×{v}' for k, v in sorted(_unreach.items(), key=lambda kv: -kv[1])[:3])
+        + (' …' if len(_unreach) > 3 else '')) if _unreach else ''
     meta = {
         'started_text': started_at.isoformat()[:19].replace('T', ' '),
         'ended_text': ended_at.isoformat()[:19].replace('T', ' '),
@@ -1329,10 +1366,11 @@ def _run():
         # 口径降级（目标点不可用 → 按节点出口就近）：必须显式标注，绝不静默换口径
         'degraded': _SERVER_STATE['fallback'],
         'degraded_label': TARGET_INFO['label'] or ','.join(sorted(_SERVER_STATE['dead'])[:3]),
-        # 真烧完过候选编号 = 编号被下线；没烧过就说明一开始就没解析到点
+        # 真烧完过候选编号 = 编号被下线；连不上 = 候选对节点不可达；都没有 = 一开始就没解析到点
         'degraded_reason': (f'{len(_SERVER_STATE["dead"])} 个候选编号已被 Ookla 下线'
                             if _SERVER_STATE['dead']
-                            else (TARGET_INFO['note'] or '目标区域无可用测速点')),
+                            else (_unreach_text or TARGET_INFO['note']
+                                  or '目标区域无可用测速点')),
         # 目标地区说明（如「距目标 1210km」—— 广州没有 CN 点时必然出现）
         'target_note': TARGET_INFO['note'],
     }
