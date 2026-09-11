@@ -156,8 +156,12 @@ CONFIG = {
                                         DEFAULT_TARGET_POINTS),
     # 目标国家/地区代码（留空 = 不过滤）。CN 实测当前只剩苏州/昆山/上海三个点
     'OOKLA_TARGET_CC': (os.environ.get('OOKLA_TARGET_CC', 'CN') or '').strip().upper(),
-    # 运营商关键词（按序优先，在 name/sponsor/host 上匹配）；留空 = 只按距离排
+    # 运营商关键词（按序优先，在 name/sponsor/host 上匹配）；留空 = 只按距离排。
+    # 排序口径：**先联通、再广东省**——运营商比地理更重要（同族三套测的都是运营商链路）
     'OOKLA_TARGET_ISP': _split_words(os.environ.get('OOKLA_TARGET_ISP', ''), ('unicom', '联通')),
+    # 「目标区域」半径（km，以首锚点为圆心）：圈内的点优先于圈外的点。
+    # 默认 300 ≈ 珠三角 + 港澳；落在圈内算「目标区域内」（第二排序档，仅次于运营商）
+    'OOKLA_TARGET_RADIUS_KM': float(os.environ.get('OOKLA_TARGET_RADIUS_KM', '300') or 300),
     # 目标点全部失效时，是否退回「按节点出口就近」（0 = 不测，避免拿不相干的数据充数）
     'OOKLA_ALLOW_NEAREST_FALLBACK': (os.environ.get('OOKLA_ALLOW_NEAREST_FALLBACK', '1') or '1')
                                      .strip().lower() not in ('0', 'false', 'no'),
@@ -743,8 +747,18 @@ def _isp_rank(item):
     return len(CONFIG['OOKLA_TARGET_ISP'])
 
 
+def _region_rank(item):
+    """是否落在目标区域内（以首锚点为圆心、OOKLA_TARGET_RADIUS_KM 为半径）：0 = 圈内。"""
+    return 0 if item.get('distance_km', 0) <= CONFIG['OOKLA_TARGET_RADIUS_KM'] else 1
+
+
 def resolve_target_candidates():
-    """按目标地区解析候选测速点：锚点经纬度 → cc 过滤 → 运营商优先 → 距首锚点距离。
+    """按目标地区解析候选测速点：锚点经纬度 → cc 过滤 → **运营商 → 目标区域 → 距离**。
+
+    排序口径（2026-09-11 定）：先运营商（联通）、再目标区域（广东）、最后距离 ——
+    运营商比地理更重要：同族三套（gitee/cdn/taier）测的都是运营商链路质量。
+    实测当前约束下广东 0 个点、联通只有上海 24447，所以结果仍是它，但规则已固化：
+    Ookla 一旦上线广东点（哪怕非联通）或广东联通点，排序会自动让它优先。
 
     结果写入 _SERVER_STATE['candidates'] 与 _POINT_LABELS，并把「目标附近有没有点 /
     实际用的点离目标多远」回填到 TARGET_INFO，供通知如实标注。
@@ -767,7 +781,8 @@ def resolve_target_candidates():
     for s in pool:
         s['distance_km'] = round(_distance_km(origin, (s['lat'], s['lon'])), 1)
         s['isp_rank'] = _isp_rank(s)
-    pool.sort(key=lambda s: (s['isp_rank'], s['distance_km']))
+        s['region_rank'] = _region_rank(s)
+    pool.sort(key=lambda s: (s['isp_rank'], s['region_rank'], s['distance_km']))
     for s in pool:
         _POINT_LABELS[s['id']] = server_hint(s)
     _SERVER_STATE['candidates'] = [s['id'] for s in pool]
@@ -779,7 +794,10 @@ def resolve_target_candidates():
     else:
         TARGET_INFO['note'] = f'目标区域无 {cc} 测速点'.strip() if cc else '目标区域无测速点'
     log_progress('ookla_target_resolved', cc=cc, anchors=len(anchors),
-                 candidates=_SERVER_STATE['candidates'][:5], note=TARGET_INFO['note'])
+                 candidates=[{'id': s['id'], 'label': server_hint(s), 'isp': s['isp_rank'],
+                              'region': s['region_rank'], 'km': s['distance_km']}
+                             for s in pool[:5]],
+                 note=TARGET_INFO['note'])
     return pool
 
 
