@@ -125,6 +125,20 @@ def tg_pre_block(text: str) -> str:
     return f"<pre>{esc(text)}</pre>"
 
 
+def tg_entry(subject, *meta, code: bool = True):
+    """条目行构造器（与 bash 真源 tg_entry、python 共享层同语义）。
+
+    本文件是内嵌 python 段、无法 import 共享层，故在此同义实现（保持三者一致）：
+    条目主体 + 元数据统一 " · " 分隔、统一经 esc() 转义、顺序固定（规范 4.5 节）。
+    输出: "<code>主体</code> · 元数据"（不含换行，由调用方拼接）
+    """
+    out = f"<code>{esc(subject)}</code>" if code else esc(subject)
+    for m in meta:
+        if m not in (None, ""):
+            out += f" · {esc(m)}"
+    return out
+
+
 def build_fail_notify(title: str, file: str, elapsed: float, lines: list):
     """构建统一格式的失败通知：标题 + 分隔线 + 键值区 + 附加行。
 
@@ -318,7 +332,8 @@ def get_video_list():
             TG_SEP,
             f"📦 分组：{esc(CAPTION_PREFIX)}",
             f"⚠️ 原因：rclone lsjson 退出码 {result.returncode}",
-            "📄 stderr 见 Actions 日志",
+            # 多行日志走 <pre>（与下载失败通知同款口径：5.5 节要求给出原始输出）
+            f"📄 stderr：\n{tg_pre_block((result.stderr or '(无错误输出)')[-500:].strip())}",
         ]))
         return [], []
 
@@ -667,7 +682,15 @@ _render_skipped_groups() {
 
 # 统一 HTML 排版 + 统一收尾区；明细树形列出（超长自动分片）
 msg=""
-tg_add_title msg "📺 ${CAPTION_PREFIX}"
+# 状态图标随结论降级（规范 8.2 节）：本次全部失败 → ❌；部分失败 → ⚠️；否则 📺
+# （此前恒 📺，任何失败都不降级，读者会把「一条没传成功」误读为正常）
+if [ "${FAILED:-0}" -gt 0 ] && [ "${SENT:-0}" -eq 0 ]; then
+  tg_add_title msg "❌ ${CAPTION_PREFIX}"
+elif [ "${FAILED:-0}" -gt 0 ]; then
+  tg_add_title msg "⚠️ ${CAPTION_PREFIX}"
+else
+  tg_add_title msg "📺 ${CAPTION_PREFIX}"
+fi
 tg_add_kv msg "视频文件" "${TOTAL_VIDEOS} 条"
 tg_add_kv msg "库存状态" "已上传 ${UPLOADED_TOTAL} · 待上传 ${REMAINING}"
 if [ "${CORRUPT_TOTAL:-0}" -gt 0 ]; then

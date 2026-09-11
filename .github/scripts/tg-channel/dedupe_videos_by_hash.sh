@@ -52,7 +52,10 @@ _grp_block() {
     return 0
   fi
   GRP_BLOCK_SHOWN=$((GRP_BLOCK_SHOWN + 1))
-  DUP_DETAILS+=$'\n'"$1"
+  # 空行只作**组间**分隔：首组前也补会让分节标题与首组之间多出一个空行
+  # （规范 4.10 节：空行只有三个来源，组间空行属第 4 处但需按此条件补）
+  [ -n "$DUP_DETAILS" ] && DUP_DETAILS+=$'\n'
+  DUP_DETAILS+="$1"
 }
 
 # 一次性获取所有文件的服务端哈希（不下载文件，不修改元数据）
