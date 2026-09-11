@@ -25,7 +25,7 @@ proxy-speedtest/            测速结果数据
 | [`docs/telegram-notify.md`](docs/telegram-notify.md) | **Telegram 通知规范**（全库唯一真源：版式模板、收尾区、禁止事项、检查清单） |
 | [`docs/emby.md`](docs/emby.md) | Emby 媒体服务器 + 302 直链子系统（架构、凭据体系、通知、排查手册） |
 | [`docs/openclaw.md`](docs/openclaw.md) | OpenClaw Runner：自愈五层机制 + 常驻服务（sub-store / rss-to-telegram / AI 网关）+ Tailscale 远程入口 |
-| [`docs/proxy-speedtest-gitee.md`](docs/proxy-speedtest-gitee.md) / [`-cdn.md`](docs/proxy-speedtest-cdn.md) / [`-taier.md`](docs/proxy-speedtest-taier.md) / [`-ookla.md`](docs/proxy-speedtest-ookla.md) | 代理测速四套（按测速点命名）：Gitee 上行/下行/延迟 / 国内 CDN 延迟+下载 / 泰尔三网 / Speedtest 官方测速点 |
+| [`docs/proxy-speedtest-gitee.md`](docs/proxy-speedtest-gitee.md) / [`-cdn.md`](docs/proxy-speedtest-cdn.md) / [`-taier.md`](docs/proxy-speedtest-taier.md) | 代理测速三套（按测速点命名）：Gitee 上行/下行/延迟 / 国内 CDN 延迟+下载 / 泰尔三网 |
 | 下文「OpenList 同步子系统」 | OpenList 同步工具（内联在本文档） |
 
 ## 工作流清单
@@ -40,7 +40,7 @@ proxy-speedtest/            测速结果数据
 | `HomeAssistant.yml` / `rdp.yml` / `openclaw.yml` | 自托管服务 |
 | `ql.yml` / `sub-store.yml` / `subs-check.yml` | 签到与订阅管理 |
 | `icloud-photos-downloader.yml` / `ph-dl.yml` / `pixivutil2.yml` | 媒体抓取下载 |
-| `proxy-speedtest-gitee.yml` / `proxy-speedtest-cdn.yml` / `proxy-speedtest-taier.yml` / `proxy-speedtest-ookla.yml` | 代理测速四套（按测速点命名）：Gitee 上行/下行/延迟 / 国内 CDN 延迟+下载 / 泰尔三网 / Speedtest 官方测速点 |
+| `proxy-speedtest-gitee.yml` / `proxy-speedtest-cdn.yml` / `proxy-speedtest-taier.yml` | 代理测速三套（按测速点命名）：Gitee 上行/下行/延迟 / 国内 CDN 延迟+下载 / 泰尔三网 |
 | `upload-video-to-tg.yml` / `p.yml` / `eshop.yml` / `teslamate.yml` | 杂项 |
 | `delete-workflow-runs.yml` | 清理历史运行记录 |
 
