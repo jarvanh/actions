@@ -333,7 +333,9 @@ _sync_par_render() {
   # subdir_size_map / total_subdirs_count / 各分类计数（bash 动态作用域）
   PROGRESS_PHASE_INFO="$(_render_subdir_phase_tree)"
   local _completed=$((synced_subtasks + skipped_subtasks + failed_subtasks))
-  progress_update_force "" "▸ 📊 子目录：${_completed}/${total_subdirs_count} 完成 · ✅${synced_subtasks} ⏭️${skipped_subtasks} ⏳$((total_subdirs_count - _completed)) ⚠️${partial_subtasks} ❌$((failed_subtasks - partial_subtasks))"
+  # 分隔符与同文件另外两处统计行、以及 sync_progress.sh 顶部注释的面板契约一致：
+  # 「X/Y 完成 | 状态计数」（| 分隔进度与计数两段，计数内部用空格）
+  progress_update_force "" "▸ 📊 子目录：${_completed}/${total_subdirs_count} 完成 | ✅${synced_subtasks} ⏭️${skipped_subtasks} ⏳$((total_subdirs_count - _completed)) ⚠️${partial_subtasks} ❌$((failed_subtasks - partial_subtasks))"
   return 0
 }
 
@@ -808,7 +810,7 @@ _sync_task_impl() {
     fi
     PROGRESS_PHASE_INFO="$(_render_subdir_phase_tree)"
     local _completed_after=$((synced_subtasks + skipped_subtasks + failed_subtasks))
-    progress_update_force "" "▸ 📊 子目录：${_completed_after}/${total_subdirs_count} 完成 · ✅${synced_subtasks} ⏭️${skipped_subtasks} ⏳$((total_subdirs_count - _completed_after)) ⚠️${partial_subtasks} ❌$((failed_subtasks - partial_subtasks))"
+    progress_update_force "" "▸ 📊 子目录：${_completed_after}/${total_subdirs_count} 完成 | ✅${synced_subtasks} ⏭️${skipped_subtasks} ⏳$((total_subdirs_count - _completed_after)) ⚠️${partial_subtasks} ❌$((failed_subtasks - partial_subtasks))"
   done <<< "$subdirs"
   fi
   SYNC_SKIP_QUIET=0
@@ -849,7 +851,7 @@ _sync_task_impl() {
     else
     echo "=== 最终完整同步: ${task_name} ==="
     PROGRESS_PHASE_INFO="$(_render_subdir_phase_tree)"
-    progress_update_force "最终完整同步中" "▸ 📊 子目录：${total_subtasks}/${total_subtasks} 完成 · ✅${synced_subtasks} ⏭️${skipped_subtasks} ⚠️${partial_subtasks} ❌$((failed_subtasks - partial_subtasks))"
+    progress_update_force "最终完整同步中" "▸ 📊 子目录：${total_subtasks}/${total_subtasks} 完成 | ✅${synced_subtasks} ⏭️${skipped_subtasks} ⚠️${partial_subtasks} ❌$((failed_subtasks - partial_subtasks))"
     sync_with_logging "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
     # P0 趋势: 最终完整同步的净传字节（此前各子目录已各自记录，这里只
     # 记本调用自己的 sync_with_logging，二者相加无重复）
@@ -1493,7 +1495,9 @@ sync_by_file_batches() {
         if ! _check_openlist_backend_connectivity "$dest_path" "$batch_log"; then
           local unbuilt_batches=$((total_batches - synced_batches - failed_batches))
           failed_batches=$((failed_batches + unbuilt_batches))
-          [ "$unbuilt_batches" -gt 0 ] && failed_batch_list+="批次 $((i+1))/${total_batches} 起共 ${unbuilt_batches} 批 · 批次预检未通过 · 后端不健康 · 中止"$'\n'
+          # 条目统一走真源助手（4.5 节）：主体为文字 → tg_add_entry_text，元数据 " · " 分隔
+          [ "$unbuilt_batches" -gt 0 ] && tg_add_entry_text failed_batch_list \
+            "批次 $((i+1))/${total_batches} 起共 ${unbuilt_batches} 批" "批次预检未通过" "后端不健康" "中止"
           echo "🛑 批次 $((i+1)) 预检未通过（后端不健康），中止剩余 ${unbuilt_batches} 个批次，本同步对标记失败（后端恢复后轮转回来重试）"
           _stop_batch_progress_thread
           AUTO_SPLIT_INFO=""
@@ -1557,7 +1561,8 @@ sync_by_file_batches() {
         failed_batches=$((failed_batches + 1))
         # 英文 token 不直出通知（规范 5.5 节）: exit=N 改写为中文说明
         # 条目主体（中文说明）→ 裸文本，元数据（文件数/退出码）→ · （4.5 节）
-        failed_batch_list+="批次 $((i+1))/${total_batches} · ${batch_file_count} 文件 · 传输退出码 ${rc}"$'\n'
+        tg_add_entry_text failed_batch_list "批次 $((i+1))/${total_batches}" \
+          "${batch_file_count} 文件" "传输退出码 ${rc}"
         echo "批次 $((i+1)) 失败 (exit=${rc})"
       fi
 
@@ -1586,7 +1591,7 @@ sync_by_file_batches() {
       if [ "${BATCH_BACKEND_DEAD:-0}" = "1" ]; then
         local remaining_batches=$((total_batches - batch_idx))
         [ "$remaining_batches" -gt 0 ] && failed_batches=$((failed_batches + remaining_batches))
-        failed_batch_list+="剩余 ${remaining_batches} 批 · 后端写入全拒，中止"$'\n'
+        tg_add_entry_text failed_batch_list "剩余 ${remaining_batches} 批" "后端写入全拒，中止"
         echo "🛑 后端写入全拒，中止剩余 ${remaining_batches} 个批次，本同步对标记失败（后端恢复后轮转回来重试）"
         _stop_batch_progress_thread
         # 统一走 tg_* 助手构建（与预检熔断出口同款；手拼 HTML = 版式漂移根源）

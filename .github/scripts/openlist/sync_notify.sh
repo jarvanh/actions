@@ -41,7 +41,17 @@ _notify_add_header() {
 # AUTO_SPLIT_INFO 段（仅非空时插入；内容为 task_engine.sh 经 tg_add_section/
 # tg_add_block 构建的 HTML 分节片段，段前空行与结尾换行由助手保证，直接追加）
 _notify_add_autosplit() {
-  [ -n "$AUTO_SPLIT_INFO" ] && tg_append "$1" "${AUTO_SPLIT_INFO}"
+  [ -n "$AUTO_SPLIT_INFO" ] || return 0
+  # AUTO_SPLIT_INFO 是 task_engine.sh 在**独立变量**上构建的分节片段：tg_add_section 对空
+  # 消息不补段前空行（真源注释「段前空行的两个例外」第 2 条），所以片段自身不带前导空行。
+  # 直接 tg_append 进正文会让分节与上一行粘连（2026-09-12 审计发现）。
+  # 这里按正文尾部状态补出那一个空行——与 tg_add_section / tg_add_note 同口径。
+  case "${!1}" in
+    ''|*$'\n'$'\n') ;;
+    *$'\n') tg_append "$1" $'\n' ;;
+    *) tg_append "$1" $'\n'$'\n' ;;
+  esac
+  tg_append "$1" "${AUTO_SPLIT_INFO}"
   return 0
 }
 
@@ -62,8 +72,21 @@ _notify_add_excludes() {
 # 用法: _notify_add_diff_list <var>
 _notify_add_diff_list() {
   [ -z "$diff_files_list" ] && return 0
-  # 列表分节带计数（规范 4.2 节：分节后跟条目列表必须 · N）
-  tg_add_section "$1" "📋 差异文件列表 · $(printf '%s' "$diff_files_list" | grep -c .)"
+  # 列表分节带计数（规范 4.2 节：分节后跟条目列表必须 · N）。
+  # 计数取各组头的 N 之和（rclone_query.sh 输出的组头形如「新增 · 3」）：
+  # 差异列表是「组头 + 条目 + 折叠行」的混合，直接数行数会把组头和
+  # 「还有 N 条…」也算成文件，计数虚高；而且每组最多展示 8 条，数行数
+  # 还会把「待同步 43 个」显示成 19。
+  local _cnt=0 _n
+  while IFS= read -r _line; do
+    case "$_line" in
+      '  '*) continue ;;          # 树形条目 / 折叠行（两个空格起头）
+      *' · '*)                     # 组头
+        _n="${_line##* · }"
+        [[ "$_n" =~ ^[0-9]+$ ]] && _cnt=$((_cnt + _n)) ;;
+    esac
+  done <<< "$diff_files_list"
+  tg_add_section "$1" "📋 差异文件列表 · ${_cnt}"
   tg_add_block "$1" "$diff_files_list"
   return 0
 }
@@ -292,10 +315,11 @@ _send_sync_result_notification() {
     local err_title err_status
     if [ "$is_partial_failure" -eq 1 ]; then
       err_title="⚠️ ${task_name} 部分文件同步失败"
-      err_status="部分文件同步失败 · exit=${sync_status}"
+      # 英文 token 中文化（规范 5.5 节：退出码 45，而不是 exit=45）
+      err_status="部分文件同步失败 · 退出码 ${sync_status}"
     else
       err_title="⚠️ ${task_name} 同步失败"
-      err_status="同步失败 · exit=${sync_status}"
+      err_status="同步失败 · 退出码 ${sync_status}"
     fi
     local err_msg=""
     _notify_add_header err_msg "$err_title" "$err_status"
@@ -348,7 +372,7 @@ _send_sync_result_notification() {
     local ok_message=""
     if [ "$is_partial_success" -eq 1 ]; then
       # 同步"成功"但目标文件数少于源端，视为部分失败
-      _notify_add_header ok_message "⚠️ ${task_name} 部分文件同步失败" "部分文件同步失败 · exit=0 · 文件数不一致"
+      _notify_add_header ok_message "⚠️ ${task_name} 部分文件同步失败" "部分文件同步失败 · 退出码 0 · 文件数不一致"
     else
       _notify_add_header ok_message "✅ ${task_name} 同步完成"
     fi

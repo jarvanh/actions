@@ -215,7 +215,8 @@ PYEOF
         fi
       fi
     else
-      tg_add_block msg "剩余未传未知（近期 run 未启用预览，无法估算清零时间）"
+      # 说明/备注走 tg_add_note（4.8 节）：tg_add_block 只接已含标签的片段
+      tg_add_note msg "剩余未传未知（近期 run 未启用预览，无法估算清零时间）"
     fi
   fi
   tg_add_footer msg

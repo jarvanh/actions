@@ -97,9 +97,12 @@ send_binary_split_notification() {
     tg_add_kv message "状态" "分卷成功"
     tg_add_path message "文件" "$file_path"
     tg_add_kv message "原始大小" "$file_size_human"
-    tg_add_kv message "分卷数量" "${parts_count} 个 .7z.00x"
-    tg_add_section message "📦 恢复方法"
-    tg_add_block message "下载全部分卷后，双击 $(tg_entry ".7z.001") 或运行 $(tg_entry "7z x 文件名.7z.001")"
+    # 扩展名是机器值 → 等宽（2.3 节）；tg_add_kv 会转义整值，故自行拼 code
+    tg_append message "分卷数量：${parts_count} 个 <code>.7z.00x</code>"$'\n'
+    # 复制即用块（5.6 节）：▸ 描述 + <pre> 命令，与 sync_marker.sh 同形态
+    tg_add_section message "🛠️ 复制即用"
+    tg_add_note message "▸ 解压还原（下载全部分卷后，双击第一个分卷，或运行下面命令）"
+    tg_add_pre message "7z x 文件名.7z.001"
   else
     tg_add_title message "❌ 7z 分卷失败"
     tg_add_kv message "状态" "分卷失败"

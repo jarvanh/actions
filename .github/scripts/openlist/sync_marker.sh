@@ -906,7 +906,10 @@ send_sync_skipped() {
     if [[ "$_p_bytes" =~ ^[0-9]+$ ]] && [[ "$_p_count" =~ ^[0-9]+$ ]] \
        && { [ "$_p_bytes" -gt 0 ] || [ "$_p_count" -gt 0 ]; }; then
       tg_add_section msg "📦 本次未传"
-      tg_append msg "$(format_bytes "$_p_bytes") / ${_p_count} 文件 · 两端仍存在差异，因落在跳过窗口内未传，非故障"$'\n'
+      # 取值行走 tg_add_kv（4.3 节），解释性文字另起说明段（4.8 节）——
+      # 此前两者挤在一行，且没走助手
+      tg_add_kv msg "未传量" "$(format_bytes "$_p_bytes") / ${_p_count} 文件"
+      tg_add_note msg "两端仍存在差异，因落在跳过窗口内未传，非故障"
     fi
   fi
 
