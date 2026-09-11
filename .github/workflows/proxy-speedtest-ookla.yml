@@ -6,13 +6,21 @@ name: proxy-speedtest-ookla
 # 与 proxy-speedtest 系列同族（同一订阅源 PROXY_SPEEDTEST_SUB_URLS、同一 mihomo 内核），
 # 只是测速引擎换成 Ookla 官方 CLI：口径是 Speedtest 官方自适应多连接测量。
 #
-# 测速点怎么选（默认动态，不要写死编号）：CLI 的服务器列表按**请求方出口 IP** 就近返回，
-# 实测出口在新加坡的节点列表里 10 条全是新加坡、CN=0——写死「广州联通 26678」在境外出口
-# 节点上必然 NoServersException、整轮空跑（历史事故：33 节点全失败却报 success）。
-# 所以默认不给 OOKLA_SERVER_ID：每个节点用自己出口可见列表里最近的测速点；只有显式给了
-# 编号、且该编号在节点可见列表里时才锁定它（要同口径横评时用，见文档）。
-# 偏好可用 OOKLA_SERVER_PREFER 在节点可见列表内按关键词调（默认空 = 就近；境外出口的
-# 可见列表里没有 CN 测速点，广州类关键词永远命不中，放默认里纯属误导）。
+# 测速点怎么选（**按目标地区检索并锁定**，不要写死老编号）：
+#   1. CLI 自己的列表（-L / 自动选点）由 Ookla 按**请求方出口 IP** 生成，境外出口节点
+#      拿到的整张列表都是境外点（实测出口在新加坡时 10 条全是新加坡、CN=0）——想测
+#      「节点 → 大陆」就不能走这条路；
+#   2. 但 --server-id **不受该列表限制**：从境外出口指定不在就近列表里的新加坡 12687 /
+#      上海 24447 / 苏州 16204 都能测通。报 NoServersException 是**编号被 Ookla 下线**，
+#      不是地理不可见（2026-09-11 实测：旧表里 15 个国内编号只剩 24447 活着，
+#      26678「广州联通」早在其中）；
+#   3. 所以默认走 OOKLA_TARGET_POINTS（经纬度锚点，默认广州→上海→北京）向 Ookla 服务器
+#      列表 API 检索候选点（与请求方出口无关），按 运营商 → 距目标距离 排序后锁定，
+#      所有节点同口径复用；
+#   4. 广州/广东目前 CN 测速点数量为 0（最近的是港澳），全大陆只剩苏州 16204 / 昆山 30852 /
+#      上海 24447（唯一联通）——会如实标注「距目标 1211km」，不假装测到了广州；
+#   5. 编号失效才顺延下一个候选；节点连不上**不换点**（那就是测量结果）；候选全失效才
+#      退回按节点出口就近，并在通知里标注，绝不静默换口径。
 #
 # 链路说明：Ookla CLI 没有 --proxy 参数，只能走 mihomo TUN 透明接管该进程流量：
 #   rules: [PROCESS-NAME,speedtest,AUTO, MATCH,DIRECT]
@@ -27,7 +35,13 @@ on:
   workflow_dispatch:
     inputs:
       server_id:
-        description: 'Speedtest 测速点编号（可选，多个逗号分隔；仅当编号在该节点可见列表里才锁定。境外出口拿不到 CN 测速点，留空 = 按各节点出口就近动态选点）'
+        description: 'Speedtest 测速点编号（可选，多个逗号分隔；优先级最高。留空 = 按目标地区自动检索并锁定；编号被 Ookla 下线时自动顺延下一个候选）'
+        required: false
+      target_points:
+        description: '目标地区经纬度锚点（空格分隔 "lat,lon"，按序检索。默认 广州→上海→北京；广州附近目前没有 CN 测速点，会逐级扩大并如实标注距离）'
+        required: false
+      target_isp:
+        description: '运营商关键词（逗号分隔，按序优先；默认 unicom,联通。留空 = 只按距目标距离排）'
         required: false
       max_nodes:
         description: '最多测几个节点（0 = 不限）'
@@ -84,9 +98,12 @@ jobs:
           # 订阅源（与其他测速工作流同一个 secret）
           PROXY_SPEEDTEST_SUB_URLS: ${{ secrets.PROXY_SPEEDTEST_SUB_URLS }}
           # 测速点与测速参数（workflow_dispatch 可覆盖；定时运行走默认值）。
-          # 定时运行 inputs 为空，绝不能兜底写死编号——那是「整轮空跑却报 success」
-          # 的历史事故根源；兜底必须是空串，让脚本走动态就近
+          # 定时运行 inputs 为空，必须兜底成空串让脚本走「按目标地区检索」——
+          # 兜底写死编号才是「整轮空跑却报 success」的历史事故根源（老编号几乎全被下线）
           OOKLA_SERVER_ID: ${{ github.event.inputs.server_id || '' }}
+          # 目标地区锚点 / 运营商偏好 / 国家码（留空走脚本默认：广州→上海→北京、unicom、CN）
+          OOKLA_TARGET_POINTS: ${{ github.event.inputs.target_points || '' }}
+          OOKLA_TARGET_ISP: ${{ github.event.inputs.target_isp || '' }}
           OOKLA_MAX_NODES: ${{ github.event.inputs.max_nodes || '0' }}
           # 诊断模式：只看探针结论（step 日志 [diag] 行），不发通知、不写订阅
           OOKLA_DIAGNOSE: ${{ github.event.inputs.diagnose || 'false' }}
@@ -106,7 +123,7 @@ jobs:
           # 留空则首次运行自动新建，TG 通知会给链接；拿到 id 后回填此 secret 避免每轮新建
           PROXY_SPEEDTEST_GIST_ID: ${{ secrets.PROXY_SPEEDTEST_OOKLA_GIST_ID }}
           PROXY_SPEEDTEST_GIST_FILENAME: proxy_speedtest_ookla_subscription.yaml
-          PROXY_SPEEDTEST_GIST_DESCRIPTION: 'proxy speedtest subscription (ookla 按节点出口就近)'
+          PROXY_SPEEDTEST_GIST_DESCRIPTION: 'proxy speedtest subscription (ookla 按目标地区锁定测速点)'
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           # 统一收尾区（footer）: 运行日志链接 + 已运行时长
