@@ -1,8 +1,14 @@
 name: Delete old workflow runs
 on:
   schedule:
-    - cron: "*/6 * * * *"
+    - cron: "0 3 * * *"
   workflow_dispatch:
+    inputs:
+      retain_days:
+        description: '保留最近 N 天的运行记录，更旧的会被删除'
+        type: number
+        default: 7
+        required: false
   watch:
     types: started
 
@@ -20,5 +26,6 @@ jobs:
         with:
           token: ${{ secrets.PAT }}
           repository: ${{ github.repository }}
-          retain_days: 1
+          # schedule 触发时 inputs.retain_days 为空，|| 兜底保证默认 7 天
+          retain_days: ${{ inputs.retain_days || 7 }}
           keep_minimum_runs: 0
