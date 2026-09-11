@@ -549,21 +549,25 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
     return lines
 
 
-def notify_best_effort(env, stage: str, msg: str):
-    """兜底分支（异常退出/信号终止）的统一发送。
+def notify_best_effort(stage: str, msg: str):
+    """兜底分支（异常退出/信号终止/未捕获异常）的统一发送。
 
     python 发送层不写 stderr、只靠返回值报错，调用方必须把失败原因记进日志，
     否则 400 解析失败/429 限流会表现为「通知静默消失」（规范 第 6 章）。
     此前这些分支直接 `send_telegram(...)` 后 `except: pass`，返回值被丢弃。
+
+    签名与 cdn / gitee 两套保持一致：`(stage, msg)`，env 内部取 merged_env()。
+    此前本文件多一个前置 env 参数，调用点随之出现 `notify_best_effort(env, ...)`
+    与 `notify_best_effort(merged_env(), ...)` 两种写法（2026-09-12 收敛）。
     """
     try:
-        res = send_telegram(env, msg)
+        res = send_telegram(merged_env(), msg)
         log_progress(stage, sent=bool(res.get('sent')), reason=res.get('reason', ''))
     except Exception as e:
         log_progress(f'{stage}_failed', error=str(e))
 
 
-def notify_failure(env, reason):
+def notify_failure(reason):
     # 先撤 TUN 再发——auto-route 劫持下连 TG API 都可能送不出去。
     # stop_mihomo_tun 可重复调用，main() finally 的二次收尾安全幂等。
     try:
@@ -583,7 +587,7 @@ def notify_failure(env, reason):
     footer = tg_footer_line()
     if footer:
         lines.append(footer)
-    notify_best_effort(env, 'abort_notify', '\n'.join(lines))
+    notify_best_effort('abort_notify', '\n'.join(lines))
 
 
 _TERM_NOTICE_SENT = False
@@ -608,7 +612,7 @@ def handle_termination_signal(signum, frame):
     footer = tg_footer_line()
     if footer:
         msg += f'\n\n{footer}'
-    notify_best_effort(merged_env(), 'termination_notify', msg)
+    notify_best_effort('termination_notify', msg)
     raise SystemExit(128 + int(signum))
 
 
@@ -630,7 +634,7 @@ def _run():
         start_mihomo_tun(env)
     except Exception as e:
         log_progress('bootstrap_failed', error=str(e))
-        notify_failure(env, f'环境准备失败：{e}')
+        notify_failure(f'环境准备失败：{e}')
         return 1
 
     direct_ip = direct_egress_ip()
@@ -650,7 +654,7 @@ def _run():
         _, alive_items = collect_provider_snapshot(source_mapping)
     except Exception as e:
         log_progress('snapshot_failed', error=str(e))
-        notify_failure(env, f'节点快照失败：{e}')
+        notify_failure(f'节点快照失败：{e}')
         return 1
 
     max_nodes = CONFIG['TAIER_MAX_NODES']
@@ -802,11 +806,12 @@ def main():
     try:
         return _run()
     except Exception as e:
-        # 未捕获异常兜底：标题带原因摘要（gitee 同款）
-        try:
-            notify_failure(merged_env(), f'未捕获异常：{e}')
-        except Exception:
-            pass
+        # 未捕获异常兜底：标题带阶段摘要，正文留完整异常（含类型名，与 cdn 同口径）。
+        # 这里不再包 `try: … except Exception: pass`——notify_failure 内部已走
+        # notify_best_effort，发送结果会记进 log_progress；外层再吞一次等于
+        # 429 限流 / 400 解析失败时完全没有痕迹（规范 第 6 章点名的反模式，
+        # 2026-09-12 收敛：cdn 与 gitee 早已是这个形态）。
+        notify_failure(f'未捕获异常：{type(e).__name__}: {e}')
         return 1
     finally:
         try:
