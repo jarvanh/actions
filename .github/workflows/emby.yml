@@ -14,12 +14,30 @@ name: emby
 # OpenList / OpenList 存储 / ge2o 任一环节不健康时，启动探活与运行中 watchdog 都会自动回退 direct。
 # 模式来源：手动触发看 playback_mode 开关；定时/watch 触发看仓库变量 EMBY_PLAYBACK_MODE（缺省 302）。
 
+# 自续触发（收尾用 gh workflow run 起下一轮）需要 actions:write，其余只读
+permissions:
+  contents: read
+  actions: write
+
 on:
   schedule:
-    # - cron: "0 2,8,14,20 * * *"
-    - cron: "*/5 * * * *"
+    # 常态由收尾的「自续触发」接力：一轮结束立刻起下一轮，中间不留空档。
+    # cron 只做兜底——链条断裂（run 被杀/失败、接力 step 没跑到）时才由它接上。
+    # ⚠️ 不要改回高频（*/5）：GitHub 对高频 cron 限流严重，且单轮 5h 会导致
+    # 队列长期积压（实测排队 3h41m 才开跑）。
+    - cron: "0 2,8,14,20 * * *"
   workflow_dispatch:
     inputs:
+      run_minutes:
+        description: >-
+          本轮保留时长（分钟）。留空则用仓库变量 EMBY_RUN_MINUTES 或默认 270。
+          调小可快速跑完一轮用于调试（如 8），不影响其余步骤。
+        type: string
+        default: ""
+      self_retrigger:
+        description: "收尾是否自动起下一轮（流式接力）。关掉则本轮结束后完全静止。"
+        type: boolean
+        default: true
       playback_mode:
         description: >-
           302 直链播放开关：
@@ -71,6 +89,25 @@ env:
   WU_ITEMS: "30"
   WU_EDGE_MB: "32"
   WU_PI_ITEMS: "6"
+  # 本轮保留时长（分钟）。⚠️ GitHub job 硬上限 6h（含 5 分钟宽限），实测两轮都
+  # 精确死在 6h05m：`sleep 340m` + 启动 ~5min + 30GB 级打包上传必然超限，
+  # 于是备份 step 被 SIGTERM、收尾通知 skipped。现在备份改成运行期增量，
+  # 收尾只剩一次差量同步，270 + 启动/收尾 ≈ 5h，留足一小时余量。
+  EMBY_RUN_MINUTES: ${{ github.event.inputs.run_minutes || vars.EMBY_RUN_MINUTES || '270' }}
+  # 运行期增量备份：间隔（分钟）与远端目录。只同步关键数据（data/config/plugins/
+  # metadata），排除图片缓存软链 cache（/mnt/emby-cache，体积大且可重建）。
+  EMBY_BACKUP_EVERY_MIN: ${{ vars.EMBY_BACKUP_EVERY_MIN || '25' }}
+  EMBY_BACKUP_DEST: ${{ vars.EMBY_BACKUP_DEST || 'onedrive:backup/emby/live' }}
+  # 收尾是否再做一次全量打包（含图片缓存）：auto = 按剩余时间预算决定，
+  # 预算不够就跳过——宁可丢缓存，也不能让关键数据卡在 6h 上限里。
+  EMBY_FULL_BACKUP: ${{ vars.EMBY_FULL_BACKUP || 'auto' }}
+  # 全量打包预计耗时（秒），收尾据此判断剩余预算够不够
+  EMBY_FULL_BACKUP_ETA: "2400"
+  # job 总预算（秒）：超过就不再启动任何耗时操作。6h 上限 21600s 减 20 分钟余量
+  EMBY_JOB_BUDGET: "20400"
+  # 直链预热器：详情页预取（抓 ge2o.log 的 Items 请求）+ dir_cache 批量回填
+  EMBY_PREFETCH: ${{ vars.EMBY_PREFETCH || '1' }}
+  EMBY_PREFETCH_MAX_DIRS: ${{ vars.EMBY_PREFETCH_MAX_DIRS || '400' }}
 
 jobs:
   build:
@@ -457,6 +494,35 @@ jobs:
           sudo chown emby:emby /mnt/emby-cache
           sudo ln -sfn /mnt/emby-cache /var/lib/emby/cache
           BACKUP_NAME="emby-backup.tar.zst"
+
+          # 恢复优先级（2026-09-12 改）：① 运行期增量目录 → ② OneDrive 全量包 →
+          # ③ Dropbox 全量包 → ④ Dropbox 目录。
+          # 增量目录是上一轮运行期每 N 分钟同步、收尾又补过一次的最新关键数据
+          # （data/config/plugins/metadata，不含图片缓存）；全量包虽完整但往往已经
+          # 是几轮之前的进度（旧方案 6h 上限下几乎从未成功上传过）。
+          LIVE_DEST="${EMBY_BACKUP_DEST:-onedrive:backup/emby/live}"
+          LIVE_BYTES=$(rclone size "$LIVE_DEST" --json 2>/dev/null | jq -r '.bytes // 0' || echo 0)
+          if [ "${LIVE_BYTES:-0}" -gt 0 ]; then
+            echo "✅ 发现增量备份目录（$(( LIVE_BYTES / 1048576 ))MB），优先恢复关键数据..."
+            require_free_kb /tmp $(( LIVE_BYTES / 1024 + 2 * 1024 * 1024 )) "emby live-restore preflight (/tmp)"
+            rm -rf /tmp/emby-live-restore && mkdir -p /tmp/emby-live-restore
+            if rclone copy "$LIVE_DEST" /tmp/emby-live-restore --fast-list --transfers 8 -v; then
+              sudo cp -a /tmp/emby-live-restore/. /var/lib/emby/
+              # cp 可能把软链目录替换成真实目录，重建缓存软链，否则缓存写进根分区
+              sudo rm -rf /var/lib/emby/cache
+              sudo ln -sfn /mnt/emby-cache /var/lib/emby/cache
+              sudo chown -R emby:emby /var/lib/emby
+              if validate_emby_data /var/lib/emby; then
+                echo "🎉 增量备份恢复并校验成功（不含图片缓存，冷启动后重新生成）"
+                RESTORED_FROM=live
+              else
+                echo "::warning::增量恢复校验不通过，改用压缩备份..."
+                sudo rm -rf /var/lib/emby/* 2>/dev/null || true
+                sudo ln -sfn /mnt/emby-cache /var/lib/emby/cache
+              fi
+            fi
+            rm -rf /tmp/emby-live-restore
+          fi
 
           echo "🔍 正在检查 OneDrive 上的压缩备份（含图片缓存，流式解压不落本地盘）..."
           cleanup_archive_workdir
@@ -1763,9 +1829,174 @@ jobs:
           EMBY_API_KEY="${{ secrets.EMBY_API_TOKEN }}" EMBY_USER="${{ secrets.EMBY_USER }}" \
             nohup bash /opt/wallwarmer.sh > /opt/logs/wallwarm.log 2>&1 &
 
+      - name: start incremental backup
+        # 运行期增量备份：把"收尾一次性打包 30GB"改成"运行期每 N 分钟传一次变化量"。
+        # 背景（2026-09-11 实测）：sleep 340m + 30GB 级流式打包必然超过 GitHub job
+        # 6h 硬上限，备份 step 每轮都被 SIGTERM（exit 143）→ 关键数据从未落云端。
+        # 现在关键数据在运行时就已经传完，收尾只剩一次差量同步（秒级到几分钟）。
+        # 一致性：SQLite 在 Emby 运行中直接 cp 可能拿到撕裂页，故优先 VACUUM INTO
+        # 做快照（不阻塞读写、不复制 -wal），失败才回退 cp。
+        # 排除：cache（软链到 /mnt 的图片缓存，体积大且可重建）、logs、transcoding-temp。
+        env:
+          EMBY_API_KEY: ${{ secrets.EMBY_API_TOKEN }}
+        run: |
+          cat > /opt/emby_incbak.sh <<'IB_EOF'
+          #!/bin/bash
+          SRC=/var/lib/emby
+          DEST="${EMBY_BACKUP_DEST:?EMBY_BACKUP_DEST 未设置}"
+          STAGE=/tmp/emby-incbak
+          EVERY=${EMBY_BACKUP_EVERY_MIN:-25}
+          INTERVAL=$(( (EVERY > 0 ? EVERY : 25) * 60 ))
+          command -v sqlite3 >/dev/null 2>&1 || sudo apt-get install -y -qq sqlite3 >/dev/null 2>&1 || true
+
+          snapshot() {
+            sudo rm -rf "$STAGE" 2>/dev/null
+            sudo mkdir -p "$STAGE/data"
+            for db in "$SRC"/data/*.db; do
+              [ -f "$db" ] || continue
+              b=$(basename "$db")
+              if sudo sqlite3 "$db" "VACUUM INTO '$STAGE/data/$b'" 2>/dev/null; then
+                :
+              else
+                sudo cp -a "$db" "$STAGE/data/$b" 2>/dev/null || true
+              fi
+            done
+            # 其余关键数据：config / plugins / metadata / root / 非 db 文件
+            if command -v rsync >/dev/null 2>&1; then
+              sudo rsync -a --exclude 'cache/' --exclude 'logs/' --exclude 'transcoding-temp/' \
+                --exclude 'data/*.db' --exclude 'data/*.db-wal' --exclude 'data/*.db-shm' \
+                "$SRC"/ "$STAGE"/ 2>/dev/null || true
+            else
+              for d in config plugins metadata root; do
+                [ -d "$SRC/$d" ] && sudo cp -a "$SRC/$d" "$STAGE"/ 2>/dev/null || true
+              done
+            fi
+            sudo chown -R "$(id -u):$(id -g)" "$STAGE" 2>/dev/null || true
+          }
+
+          sync_up() {  # 用 copy 而非 sync：远端不会被"本轮快照缺失"误删（安全优先）
+            rclone copy "$STAGE" "$DEST" --fast-list --transfers 8 --checkers 8 \
+              --exclude 'cache/**' --exclude 'logs/**' --exclude 'transcoding-temp/**' -v
+          }
+
+          once() {
+            T0=$(date +%s)
+            echo "=== 增量备份开始 $(date '+%F %T') dest=$DEST"
+            snapshot
+            N=$(sudo find "$STAGE" -type f 2>/dev/null | wc -l | tr -d ' ')
+            SZ=$(sudo du -sk "$STAGE" 2>/dev/null | awk '{print $1}')
+            echo "快照: ${N} 文件 / $(( SZ / 1024 ))MB"
+            if sync_up; then
+              echo "=== 增量备份完成 耗时 $(( $(date +%s) - T0 ))s $(date '+%T')"
+              return 0
+            fi
+            echo "[WARNING] 增量备份上传失败（耗时 $(( $(date +%s) - T0 ))s）"
+            return 1
+          }
+
+          if [ "${1:-loop}" = "once" ]; then once; exit $?; fi
+          # 首轮先报一下各目录体量，便于后续调参（metadata 大的话就要考虑排除它）
+          sudo du -sh "$SRC"/data "$SRC"/config "$SRC"/metadata "$SRC"/plugins "$SRC"/root 2>/dev/null || true
+          sleep 120   # 让 Emby 完成启动与 warmup 的冷读，避免首轮同步抢占带宽
+          while :; do
+            once || true
+            sleep "$INTERVAL"
+          done
+          IB_EOF
+          chmod +x /opt/emby_incbak.sh
+          nohup bash /opt/emby_incbak.sh loop > /opt/logs/incbackup.log 2>&1 &
+
+      - name: start link prefetcher
+        # 把"取直链"从起播关键路径挪走（302 起播慢的主力：冷解析实测 0.65~0.86s）：
+        #   A) dir_cache 批量回填 —— 按 DateCreated 倒序遍历条目，对所属目录打一次
+        #      fs/list，odlink 会把该目录所有子条目一次写进 dir_cache（无 TTL）。
+        #      命中后首播只需 1 次 Graph 拿 downloadUrl，而不是逐段下钻 N 次。零视频流量。
+        #   B) 详情页预取 —— tail ge2o.log，客户端打开详情页必发 /emby/Items/{id}，
+        #      抓到就异步预热该条目的直链（含其目录），等你按播放时 link_cache 已热。
+        # 两个都是旁路：失败不影响任何播放链路。
+        if: env.PLAYBACK_MODE_INPUT != 'direct'
+        env:
+          EMBY_API_KEY: ${{ secrets.EMBY_API_TOKEN }}
+        run: |
+          if [ "${EMBY_PREFETCH:-1}" != "1" ]; then echo "直链预热器已关闭（EMBY_PREFETCH）"; exit 0; fi
+          cat > /opt/odwarm.sh <<'OW_EOF'
+          #!/bin/bash
+          source "$EMBY302_DIR/lib.sh"
+          KEY="$EMBY_API_KEY"
+          EMBY=http://127.0.0.1:8096
+          LK_HOST=$(link_host); LK_TOKEN=$(link_token)
+          MAX_DIRS=${EMBY_PREFETCH_MAX_DIRS:-400}
+          USER_NAME="${EMBY_USER:-}"
+
+          fs_get()  { curl -s -m 20 -o /dev/null -X POST "$LK_HOST/api/fs/get" \
+                        -H "Authorization: $LK_TOKEN" -H 'Content-Type: application/json' \
+                        -d "$(jq -nc --arg p "$1" '{path:$p}')"; }
+          fs_list() { curl -s -m 30 -o /dev/null -X POST "$LK_HOST/api/fs/list" \
+                        -H "Authorization: $LK_TOKEN" -H 'Content-Type: application/json' \
+                        -d "$(jq -nc --arg p "$1" '{path:$p}')"; }
+
+          [ -n "$USER_NAME" ] || { echo "预热器: EMBY_USER 未配置，退出"; exit 0; }
+          USER_ID=$(curl -s "$EMBY/emby/Users?api_key=$KEY" \
+                    | jq -r --arg n "$USER_NAME" '.[] | select(.Name==$n) | .Id' | head -1)
+          [ -n "$USER_ID" ] || { echo "预热器: 未找到目标用户，退出"; exit 0; }
+
+          # ---- B) 详情页预取（后台 tail）----
+          (
+            declare -A SEEN_AT=()
+            tail -F -n 0 /opt/logs/ge2o.log 2>/dev/null | while IFS= read -r line; do
+              ID=$(printf '%s' "$line" | grep -oE 'Items/[0-9]+' | head -1 | cut -d/ -f2)
+              case "$ID" in ''|*[!0-9]*) continue;; esac
+              NOW=$(date +%s); LAST=${SEEN_AT[$ID]:-0}
+              [ $(( NOW - LAST )) -gt 600 ] || continue
+              SEEN_AT[$ID]=$NOW
+              P=$(curl -s -m 10 "$EMBY/emby/Items/$ID?api_key=$KEY" \
+                  | jq -r '.MediaSources[0].Path // .Path // empty')
+              case "$P" in /onedrive/*) ;; *) continue;; esac
+              fs_list "$(dirname -- "$P")"
+              fs_get "$P"
+              echo "详情页预取 item=$ID $(basename "$P") $(date '+%T')"
+            done
+          ) &
+
+          # ---- A) dir_cache 批量回填（主进程）----
+          IDX=0; DIRS=0
+          declare -A DSEEN=()
+          echo "=== dir_cache 回填启动 上限 ${MAX_DIRS} 个目录 $(date '+%F %T')"
+          while [ "$DIRS" -lt "$MAX_DIRS" ]; do
+            JSON=$(curl -s -m 30 "$EMBY/emby/Users/$USER_ID/Items?Recursive=true&SortBy=DateCreated&SortOrder=Descending&Limit=200&StartIndex=$IDX&Fields=Path,MediaSources&api_key=$KEY")
+            PATHS=$(printf '%s' "$JSON" | jq -r '.Items[]? | (.MediaSources[0].Path // .Path // empty)' 2>/dev/null)
+            [ -n "$PATHS" ] || { echo "目录回填: 第 $IDX 条起无更多条目，遍历完成"; break; }
+            while IFS= read -r P; do
+              [ -n "$P" ] || continue
+              D=$(dirname -- "$P")
+              case "$D" in /onedrive/*) ;; *) continue;; esac
+              [ -z "${DSEEN[$D]:-}" ] || continue
+              DSEEN[$D]=1
+              T0=$(date +%s)
+              fs_list "$D"
+              DIRS=$((DIRS + 1))
+              [ $((DIRS % 20)) -ne 0 ] || echo "目录回填 ${DIRS}/${MAX_DIRS} 累计 $(( $(date +%s) - T_START ))s $(date '+%T')"
+              [ "$DIRS" -lt "$MAX_DIRS" ] || break
+            done <<< "$PATHS"
+            IDX=$((IDX + 200))
+            sleep 1
+          done
+          echo "=== dir_cache 回填完成: ${DIRS} 个目录 $(date '+%F %T')"
+          wait
+          OW_EOF
+          T_START=$(date +%s)   # 供脚本内进度行读取（export 让 nohup 子进程可见）
+          export T_START
+          EMBY_API_KEY="${{ secrets.EMBY_API_TOKEN }}" nohup bash /opt/odwarm.sh > /opt/logs/odwarm.log 2>&1 &
+
       - name: sleep
         run: |
-          sleep 340m
+          # 保留时长由 EMBY_RUN_MINUTES 控制（默认 270；调试时可手填 8 分钟）。
+          # ⚠️ 加上启动恢复与收尾增量备份，总时长必须留在 6h 以内——超过就又是
+          # "备份被 SIGTERM + 通知 skipped"。
+          MIN="${EMBY_RUN_MINUTES:-270}"
+          case "$MIN" in ''|*[!0-9]*) MIN=270;; esac
+          echo "本轮保留 ${MIN} 分钟（至 $(date -d "+${MIN} minutes" '+%F %T')）"
+          sleep "${MIN}m"
       - name: archive diagnostics
         if: always()
         run: |
@@ -1842,30 +2073,74 @@ jobs:
           echo "优雅停机: http=$SHUTDOWN_CODE（401 说明该密钥已失效，Emby 只能被 runner 强杀）"
           sleep 15
 
-          # 只有在本地模式下才打包回传（避免覆盖云端的软链接源文件）
+          # 只有在本地模式下才回传（避免覆盖云端的软链接源文件）
           if [ ! -L /var/lib/emby ]; then
               validate_emby_data /var/lib/emby
-              echo "🚀 本地模式运行结束，正在打包数据回传 Dropbox..."
-              src_kb=$(sudo du -skL /var/lib/emby | awk '{print $1}')
-              if [ -z "${src_kb:-}" ] || [ "$src_kb" -le 0 ]; then
-                echo "❌ emby archive preflight: unable to calculate source size" >&2
-                exit 1
+              # ① 收尾增量同步（必做）：Emby 已优雅停机，这一份快照最一致。
+              #    运行期已经把绝大部分传上去了，这里只补最后一轮差量。
+              echo "🚀 收尾增量备份（关键数据，必做）..."
+              if [ -x /opt/emby_incbak.sh ] && bash /opt/emby_incbak.sh once; then
+                echo "✅ 关键数据已增量同步到 ${EMBY_BACKUP_DEST}"
+                echo "增量完成" > /tmp/emby-backup-result
+              else
+                echo "::warning::收尾增量备份失败（关键数据本轮未落云端）"
+                echo "增量失败" > /tmp/emby-backup-result
               fi
+
+              # ② 全量打包（含图片缓存）：只在剩余预算够的时候做。
+              #    关键数据已经安全，缓存丢了只是重新冷读，绝不能为了它把
+              #    整个 step 拖过 6h 上限（历史事故：备份被 TERM、通知 skipped）。
+              ELAPSED=$(( $(date +%s) - $(date -d "${{ github.run_started_at }}" +%s) ))
+              ETA=${EMBY_FULL_BACKUP_ETA:-2400}
+              LEFT=$(( ${EMBY_JOB_BUDGET:-20400} - ELAPSED - ETA ))
+              case "${EMBY_FULL_BACKUP:-auto}" in
+                0|false|no)
+                  echo "⏭️ 全量打包已关闭（EMBY_FULL_BACKUP=${EMBY_FULL_BACKUP}）"
+                  printf '%s · 全量已关闭\n' "$(cat /tmp/emby-backup-result 2>/dev/null)" > /tmp/emby-backup-result.tmp
+                  mv /tmp/emby-backup-result.tmp /tmp/emby-backup-result
+                  ;;
+                *)
+                  if [ "$LEFT" -lt 0 ]; then
+                    echo "⏭️ 剩余预算不足（已运行 $((ELAPSED / 60)) 分钟，全量需约 $((ETA / 60)) 分钟），跳过全量打包——图片缓存本轮不回传"
+                    printf '%s · 全量跳过（预算不足）\n' "$(cat /tmp/emby-backup-result 2>/dev/null)" > /tmp/emby-backup-result.tmp
+                    mv /tmp/emby-backup-result.tmp /tmp/emby-backup-result
+                  else
+              echo "🚀 本地模式运行结束，正在打包数据回传（含图片缓存）..."
+              src_kb=$(sudo du -skL /var/lib/emby | awk '{print $1}' || echo 0)
+              if [ -z "${src_kb:-}" ] || [ "$src_kb" -le 0 ]; then
+                # 拿不到体积就跳过全量：关键数据已增量同步，不必为了缓存让整个 step 失败
+                echo "❌ 全量打包预检失败（源体积未知），跳过"
+                printf '%s · 全量跳过（预检失败）\n' "$(cat /tmp/emby-backup-result 2>/dev/null)" > /tmp/emby-backup-result.tmp
+                mv /tmp/emby-backup-result.tmp /tmp/emby-backup-result
+              else
               echo "待压缩目录大小: ${src_kb}KB"
               # 打包是流式的（tar 管道直进 rcat，不落 staging），根分区只需容下
               # zstd 工作内存与 rclone 缓冲，1GB 足够；写死 4GB 只会在根分区紧张时误杀。
               require_free_kb /var/lib/emby $((1024 * 1024)) "emby archive preflight (root, 流式不落盘)"
               # 流式：tar 直接管道进 rcat 上传 OneDrive（含图片缓存），30GB 级 tarball 不落本地盘
-              sudo tar -I 'zstd -3 -T0' -chf - \
+              if sudo tar -I 'zstd -3 -T0' -chf - \
                 --exclude='logs' \
                 --exclude='transcoding-temp' \
                 -C /var/lib/emby . \
                 | rclone rcat onedrive:backup/emby/emby-backup.tar.zst -v
-              echo "📤 备份已流式上传 OneDrive:emby-backup/"
+              then
+                echo "📤 全量备份已流式上传 OneDrive:emby-backup/"
+                printf '%s · 全量完成\n' "$(cat /tmp/emby-backup-result 2>/dev/null)" > /tmp/emby-backup-result.tmp
+              else
+                echo "::warning::全量打包失败（关键数据已增量同步，图片缓存本轮未回传）"
+                printf '%s · 全量失败\n' "$(cat /tmp/emby-backup-result 2>/dev/null)" > /tmp/emby-backup-result.tmp
+              fi
+              mv /tmp/emby-backup-result.tmp /tmp/emby-backup-result 2>/dev/null || true
+              fi
+                  fi
+                  ;;
+              esac
               cleanup_archive_workdir
           else
               echo "😴 当前为软链接模式，跳过本地打包备份。"
+              echo "跳过（软链接模式）" > /tmp/emby-backup-result
           fi
+          echo "备份结果: $(cat /tmp/emby-backup-result 2>/dev/null || echo 未知)"
 
       - name: send telegram notification
         if: always()
@@ -1946,6 +2221,8 @@ jobs:
           tg_add_kv msg "模式" "${MODE_DESC}"
           tg_add_kv msg "本轮直链" "$OD_SUMMARY"
           tg_add_kv msg "海报预热" "$WW_SUMMARY"
+          # 备份结果：运行期增量 + 收尾全量的最终结论（backup step 写入 /tmp/emby-backup-result）
+          tg_add_kv msg "数据备份" "$(cat /tmp/emby-backup-result 2>/dev/null || echo 未知)"
           tg_add_kv msg "播放客户端" "$CLIENTS"
           tg_add_kv msg "时间" "$(date '+%Y-%m-%d %H:%M:%S %Z')"
           # 说明行（tg_add_note，段前空行）：统计里的两个内部口径补一句人话
@@ -1956,6 +2233,38 @@ jobs:
           # 走发送层而非 curl 直发：429 重试已内建，HTML 解析失败直接报错（规范 第 6 章），
           # 429 限流自动等待重试，disable_web_page_preview 内置
           send_tg "$msg" || echo "::warning::收尾 TG 通知发送失败"
+
+      # ===== 自续触发（流式接力）=====
+      # 一轮结束立刻 dispatch 下一轮，中间不留空档；cron 只做链条断裂时的兜底。
+      # 三道护栏：① 开关（调试可关）② 人工取消不接力 ③ 已有排队 run 不重复触发
+      - name: 自续触发（下轮接力）
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # ⚠️ 不能写成 inputs.self_retrigger != false：schedule 触发时 inputs.x 为空串，
+          # GitHub 松比较下 '' == false → 定时运行永远跳不过这道判断（全库已踩过一次）
+          EMBY_SELF_RETRIGGER: ${{ github.event.inputs.self_retrigger || 'true' }}
+        run: |
+          set -e
+          if [ "${EMBY_SELF_RETRIGGER:-true}" != "true" ]; then
+            echo "self_retrigger=false，本轮结束后静止"
+            exit 0
+          fi
+          REPO="${{ github.repository }}"
+          ELAPSED=$(( $(date +%s) - $(date -d "${{ github.run_started_at }}" +%s) ))
+          # 6h 上限导致的取消 elapsed ≈ 21600s；远小于它说明是人为取消，不替你续
+          if [ "${{ job.status }}" = "cancelled" ] && [ "$ELAPSED" -lt 21000 ]; then
+            echo "本轮被取消且仅运行 $((ELAPSED / 60)) 分钟，判定为人工取消，不接力"
+            exit 0
+          fi
+          PENDING=$(gh run list -R "$REPO" --workflow=emby.yml --limit 30 --json status \
+            | jq '[.[] | select(.status == "queued" or .status == "waiting" or .status == "pending")] | length')
+          if [ "${PENDING:-0}" -gt 0 ]; then
+            echo "已有 ${PENDING} 个排队/等待中的运行，跳过接力"
+            exit 0
+          fi
+          gh workflow run emby.yml -R "$REPO"
+          echo "✅ 已触发下一轮接力（本轮 ${{ job.status }}，运行 $((ELAPSED / 60)) 分钟，备份=$(cat /tmp/emby-backup-result 2>/dev/null || echo 未知)）"
           # 播放事件日志归档：便于排查"播了但没通知"
           echo "--- playlog.log (tail 80) ---"
           tail -n 80 /opt/logs/playlog.log 2>/dev/null || echo "(无 playlog.log)"
