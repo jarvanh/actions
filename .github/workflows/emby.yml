@@ -318,7 +318,9 @@ jobs:
               tg_add_kv PW_MSG "场景" "⚠️ $PW_DESC · 本条仅本轮有效"
               tg_add_path PW_MSG "用户名" "admin"
               tg_add_path PW_MSG "密码" "$PW_VAL"
-              tg_add_path PW_MSG "入口" "https://oe.${{ secrets.VD }}.eu.org"
+              # 入口是**链接** → <a>（2.3 节）：套 <code> 会让它不可点击，只能手抄域名。
+              # tg_add_kv 会转义整值、把标签变成 &lt;a&gt;，故这里用 tg_append 自行转义
+              tg_append PW_MSG "入口：🔗 <a href=\"$(escape_html "https://oe.${{ secrets.VD }}.eu.org")\">OpenList 后台</a>"$'\n'
               tg_add_note PW_MSG "长期有效密码 = OPENLIST_ADMIN_PASSWORD · 下轮自动恢复为它 · 本条不会出现在公开日志"
               # 统一收尾区（规范 4.9 节）：凭据消息没有特殊通道，照常 tg_add_* 构建 + 收尾 + send_tg。
               # TG_RUN_URL 由本 step env 注入；TG_RUN_STARTED_AT 平台已移除表达式上下文（注入为空），
@@ -761,7 +763,13 @@ jobs:
           # 统一 HTML 通知 + 统一收尾区（tg_notify.sh，checkout 后可用）
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
           START_MSG=""
-          tg_add_title START_MSG "📺 Emby 服务启动"
+          # 状态图标随结论降级（规范 8.2 节）：取链自检未通过时标题不能还是「启动成功」的口吻。
+          # 细节照旧下沉到 kv（5.1 节），标题只换图标、不塞原因
+          if [ "${MAP_OK:-?}" = "0" ]; then
+            tg_add_title START_MSG "⚠️ Emby 服务启动"
+          else
+            tg_add_title START_MSG "📺 Emby 服务启动"
+          fi
           tg_add_kv START_MSG "模式" "$MODE_CN"
           tg_add_kv START_MSG "直链源" "$SRC_NAME"
           tg_add_kv START_MSG "网盘快捷方式" "$OD_LINE"

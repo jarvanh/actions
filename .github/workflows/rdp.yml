@@ -89,7 +89,8 @@ jobs:
         # 版式与 tailscale-windows.yml 入口通知同款：分节 · N + 树形条目 + 说明段
         # （规范见 docs/telegram-notify.md 3.4 节 / 4.5 节）
         $msg = "🖥️ Windows RDP 已就绪`n$TG_SEP`n" +
-          "🖥️ RDP · 3`n" +
+          # 分节 emoji 不与标题重复（标题已是 🖥️），否则首行与分节视觉粘连
+          "🔐 RDP · 3`n" +
           "  ├─ 地址：<code>$(Esc-Html $address)</code>`n" +
           "  ├─ 用户名：<code>runneradmin</code>`n" +
           "  └─ 密码：<code>$(Esc-Html $Env:RDP_PASSWORD)</code>`n" +
