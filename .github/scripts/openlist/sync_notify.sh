@@ -275,8 +275,13 @@ _send_sync_result_notification() {
     _notify_add_header partial_msg "⚠️ ${task_name} 部分文件同步失败" "$fail_status_msg"
     _notify_add_excludes partial_msg
     _notify_add_autosplit partial_msg
-    tg_add_section partial_msg "✅ 已通过其他方式同步 · ${fix_total}"
-    tg_append partial_msg "${fix_summary}"
+    # fix_total 为 0 时不插该分节：本分支是「有文件彻底失败」，替代方式同步清单常为空，
+    # 此时渲染成「✅ 已通过其他方式同步 · 0」+「无」——状态图标与计数自相矛盾
+    # （8.2 节：图标要与结论一致），且空分节白占版面（2026-09-12 修正）
+    if [ "$fix_total" -gt 0 ]; then
+      tg_add_section partial_msg "✅ 已通过其他方式同步 · ${fix_total}"
+      tg_append partial_msg "${fix_summary}"
+    fi
     tg_add_section partial_msg "❌ 无法同步文件 · ${fail_total}"
     tg_append partial_msg "${fail_summary}"
     _notify_add_diff_list partial_msg

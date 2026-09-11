@@ -877,7 +877,7 @@ jobs:
           # 后端**标识**是机器值 → <code>；「回退/全栈」是自然语言结论 → 裸文本。
           # 此前二者拼成一个串整段套 <code>，等于让自然语言冒充机器值（规范 2.3 节）
           tg_add_section msg "🤖 AI 网关 · 1"
-          tg_add_block msg "$(tree_lines "后端：<code>${_ai_backend}</code> · ${_ai_state}")"
+          tg_add_block msg "$(tree_lines "后端：<code>$(escape_html "${_ai_backend}")</code> · $(escape_html "${_ai_state}")")"
           if [ -n "$AI_FALLBACK_REASON" ]; then
             tg_add_note msg "回退原因：${AI_FALLBACK_REASON}"
           fi

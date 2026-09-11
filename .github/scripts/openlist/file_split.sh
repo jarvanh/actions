@@ -646,16 +646,16 @@ preprocess_large_files() {
     tg_add_kv summary_message "处理失败" "$failed_count"
     if [ -n "$processed_files" ]; then
       tg_add_section summary_message "✂️ 已切割文件 · ${success_count}"
-      tg_add_block summary_message "$(tree_lines "${processed_files%$'\n'}")"
+      tg_add_block summary_message "$(tree_fold "${processed_files%$'\n'}")"
     fi
     if [ -n "$deleted_files" ]; then
       # 计数用 deleted_files 实际行数（此前误用 success_count，删除数≠切割成功数）
       tg_add_section summary_message "🗑️ 已删除原始大文件 · $(printf '%s' "$deleted_files" | grep -c .)"
-      tg_add_block summary_message "$(tree_lines "${deleted_files%$'\n'}")"
+      tg_add_block summary_message "$(tree_fold "${deleted_files%$'\n'}")"
     fi
     if [ -n "$failed_files" ]; then
       tg_add_section summary_message "⚠️ 处理失败文件 · ${failed_count}"
-      tg_add_block summary_message "$(tree_lines "${failed_files%$'\n'}")"
+      tg_add_block summary_message "$(tree_fold "${failed_files%$'\n'}")"
     fi
     tg_add_footer summary_message
     send_telegram_message "$summary_message"

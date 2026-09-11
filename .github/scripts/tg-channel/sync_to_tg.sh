@@ -650,7 +650,9 @@ _render_named_entries() {
     tg_add_entry _out "$_name" "$_meta"
   done <<< "$_in"
   [ -z "$_out" ] && return 0
-  tree_lines "${_out%$'\n'}"
+  # 超 8 条折叠（4.6 节）：条目已由 tg_add_entry 构建（已转义且含 <code>），
+  # 走 tree_fold 而非 tree_code_fold（后者会二次转义）
+  tree_fold "${_out%$'\n'}"
 }
 
 # 跳过/过滤明细渲染: 按原因分组 —— 组头 "原因 · N"，条目 <code>文件名</code> 树形列出。
