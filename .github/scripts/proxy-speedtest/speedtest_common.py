@@ -473,8 +473,11 @@ def build_target_network_section(targets):
         label = str(label or '').strip()
         multi = len(targets) > 1
         if not server:
-            fallback = f'（{esc(label)}）' if label else ''
-            # 中文原因 → 裸文本（2.3 节：自然语言不走 <code>）
+            # label 是域名 / hostname（机器值）→ 与同节「测速服务器 / ISP / ASN / 位置」
+            # 同为 <code>。2.3 节取值行口径看的是「来源」而不是「值不值得复制」：
+            # 同一次归属查询的返回值就该整节同口径。此前 label 裸文本，与同节另四行
+            # 形成等宽/正体交错的斑马纹（2026-09-12 修正）。
+            fallback = f'（<code>{esc(label)}</code>）' if label else ''
             lines.append(f'  └─ 归属获取失败{fallback}')
             continue
         if multi:

@@ -780,13 +780,17 @@ send_sync_warning() {
   fi
 
   if [ -n "$missing_dirs" ]; then
-    # 列表分节带计数（规范 4.2 节：凡分节后跟条目列表必须 · N）+ 统一树形（4.5 节，不再 "• "）
-    tg_add_section msg "📁 缺失的目录 · 可能被删除 · $(printf '%s' "$missing_dirs" | grep -c .)"
+    # 列表分节带计数（规范 4.2 节：凡分节后跟条目列表必须 · N）+ 统一树形（4.5 节，
+    # 不再 "• "）+ 超 8 条折叠（4.6 节，此前裸用 tree_lines 不折叠）。
+    # 说明性文字不再与计数并列写进标题（此前 "📁 缺失的目录 · 可能被删除 · N" 会被
+    # 读成两个计数），下沉为独立说明段（4.8 节）。
+    tg_add_section msg "📁 缺失的目录 · $(printf '%s' "$missing_dirs" | grep -c .)"
     _dirs_html=""
     while IFS= read -r d; do
       [ -n "$d" ] && tg_add_entry _dirs_html "$d"
     done <<< "$missing_dirs"
-    tg_append msg "$(tree_lines "${_dirs_html%$'\n'}")"$'\n'
+    tg_append msg "$(tree_fold "${_dirs_html%$'\n'}")"$'\n'
+    tg_add_note msg "源端已不存在，可能是被删除。"
   fi
 
   if [ -n "$new_dirs" ]; then
@@ -795,7 +799,7 @@ send_sync_warning() {
     while IFS= read -r d; do
       [ -n "$d" ] && tg_add_entry _dirs_html "$d"
     done <<< "$new_dirs"
-    tg_append msg "$(tree_lines "${_dirs_html%$'\n'}")"$'\n'
+    tg_append msg "$(tree_fold "${_dirs_html%$'\n'}")"$'\n'
   fi
 
   # 收尾区: 状态 + 备注（裸文本说明段），footer 自带空行。

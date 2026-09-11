@@ -34,7 +34,8 @@
 #   send_tg_chunked <text>             分片发送（长消息用）
 #   escape_html / tg_append / tg_add_title / tg_add_kv / tg_add_path /
 #   tg_add_section / tg_add_note / tg_add_block / tg_add_footer
-#   tree_conn / tree_sub / tree_lines / tree_code_fold（树形条目与折叠）
+#   tree_conn / tree_sub / tree_lines / tree_code_fold / tree_fold（树形条目与折叠；
+#     tree_code_fold 收裸文本、tree_fold 收已构建条目流，勿互换）
 
 # bash 5.2+ patsub_replacement 会破坏 escape_html 的实体替换（"&" 被当作匹配
 # 文本引用），旧 bash 无此选项，shopt 报错被吞（与 openlist/utils.sh 同款防护）
@@ -219,6 +220,23 @@ tree_code_fold() {
     _entries+="还有 $((_total - _max)) 条…"$'\n'
   fi
   tree_lines "$_entries"
+}
+
+# 已构建条目流的折叠（与 tree_code_fold 分工，2026-09-12 新增）:
+#   tree_code_fold  裸文本  → 逐行 <code>转义</code> + 折叠（一站式）
+#   tree_fold       条目流  → 只截断 + 加折叠行（**不再转义、不再套 code**）
+# 二者不能互换：条目若已由 tg_add_entry / tg_entry 构建（已转义且已含 <code>），
+# 再走 tree_code_fold 会二次转义（& → &amp;amp;）。此前 file_split / sync_marker /
+# sync_to_tg 的已上传组直接裸用 tree_lines，既不折叠也与 file_restore 的 _fold_list
+# 口径不一致——统一收敛到本函数。
+# 用法: tree_fold <多行条目流> [上限，默认 8]
+tree_fold() {
+  local _in="$1" _max="${2:-8}" _total _shown
+  [ -z "$_in" ] && return 0
+  _total=$(printf '%s\n' "$_in" | { grep -c . || true; })
+  [ "${_total:-0}" -le "$_max" ] && { tree_lines "$_in"; return 0; }
+  _shown=$(printf '%s\n' "$_in" | head -n "$_max")
+  tree_lines "${_shown}"$'\n'"还有 $((_total - _max)) 条…"
 }
 
 # 条目行构造器（2026-09-10 新增：消灭 4.5 节之前的"手写"——此前各脚本自己拼

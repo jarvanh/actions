@@ -201,14 +201,9 @@ _restore_one_entry() {
 # 末条 └─ 由 tree_lines 统一决定，禁双 └─）
 # 用法: _fold_list <条目列表（多行，末条目行已含换行）> <总条数>
 _fold_list() {
-  local _entries="$1" _total="$2" _shown _rest _out
-  _shown=$(printf '%s' "$_entries" | head -8)
-  _rest=$((_total - 8))
-  _out="${_shown%$'\n'}"
-  if [ "$_rest" -gt 0 ]; then
-    _out+=$'\n'"还有 ${_rest} 条…"
-  fi
-  tree_lines "$_out"
+  # 折叠实现已收敛到真源 tree_fold（2026-09-12）：本函数退化为薄封装，
+  # 保留是因为四处调用点都按 <条目流> <总条数> 传参（总条数由 tree_fold 自行统计）。
+  tree_fold "$1" 8
 }
 
 # 一键还原入口
