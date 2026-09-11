@@ -52,7 +52,7 @@ from speedtest_common import (
     build_target_network_section, deep_copy_json, fetch_ip_network_info,
     get_item_megabits, latency_probe, log_progress, merged_env,
     resolve_host_ipv4, resolve_subscription_policy,
-    send_telegram, send_telegram_chunked, tg_entry, tg_footer_line,
+    send_telegram, send_telegram_chunked, tg_entry, tg_entry_codes, tg_footer_line,
     tg_format_elapsed, tg_pre_block, update_gist,
     TG_SEP,
 )
