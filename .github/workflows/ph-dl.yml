@@ -258,14 +258,21 @@ jobs:
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
           # 统一 HTML 版式 + 统一收尾区（散装消息合并为一条，明细树形列出）
           msg=""
-          tg_add_title msg "✅ ph-dl 下载任务完成"
+          # 状态图标随结论降级（规范 8.2 节）：有损坏视频被跳过时不能恒 ✅，
+          # 否则读者会把「缺了几部」读成全部成功
+          if [ "${CORRUPT_VIDEOS:-0}" -gt 0 ]; then
+            tg_add_title msg "⚠️ ph-dl 下载任务完成"
+          else
+            tg_add_title msg "✅ ph-dl 下载任务完成"
+          fi
           tg_add_kv msg "视频文件" "${TOTAL_VIDEOS} 条"
           tg_add_kv msg "库存状态" "已上传 ${UPLOADED_VIDEOS} · 待上传 ${PENDING_VIDEOS}"
           if [ "${CORRUPT_VIDEOS:-0}" -gt 0 ]; then
             tg_add_kv msg "损坏已跳过" "${CORRUPT_VIDEOS} 条"
           fi
           tg_add_kv msg "本次下载" "${DOWNLOAD_COUNT} 个视频"
-          tg_add_kv msg "磁盘占用" "${BEFORE_SIZE} → ${AFTER_SIZE}"
+          # du 输出属机器返回值 → 等宽（2.3 节取值行口径）
+          tg_add_path msg "磁盘占用" "${BEFORE_SIZE} → ${AFTER_SIZE}"
           if [ "$FILE_LIST" != "无" ]; then
             tg_add_section msg "📋 本次新增 · ${DOWNLOAD_COUNT}"
             tg_add_block msg "$(tree_code_fold "$FILE_LIST")"

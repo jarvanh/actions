@@ -873,11 +873,11 @@ jobs:
           # 「状态」是自然语言结论 → 说明段，留在取值行里会变成 code/裸交错（规范 2.3 节）
           tg_add_note msg "状态：已广播 · 可作为出口节点"
 
-          if [ "$AI_BACKEND" = "cliproxyapi" ]; then _ai_note="CLIProxyAPI · 回退"; else _ai_note="CliRelay · 全栈"; fi
-          # 后端标识是机器值 → <code>；回退原因是自然语言，放说明段而不是留在取值行里，
-          # 否则同一节出现 code/裸交错（规范 2.3 节）
+          if [ "$AI_BACKEND" = "cliproxyapi" ]; then _ai_backend="CLIProxyAPI"; _ai_state="回退"; else _ai_backend="CliRelay"; _ai_state="全栈"; fi
+          # 后端**标识**是机器值 → <code>；「回退/全栈」是自然语言结论 → 裸文本。
+          # 此前二者拼成一个串整段套 <code>，等于让自然语言冒充机器值（规范 2.3 节）
           tg_add_section msg "🤖 AI 网关 · 1"
-          tg_add_block msg "$(tree_lines "后端：<code>${_ai_note}</code>")"
+          tg_add_block msg "$(tree_lines "后端：<code>${_ai_backend}</code> · ${_ai_state}")"
           if [ -n "$AI_FALLBACK_REASON" ]; then
             tg_add_note msg "回退原因：${AI_FALLBACK_REASON}"
           fi
@@ -1303,7 +1303,8 @@ jobs:
             source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
             msg=""
             tg_add_title msg "🚨 OpenClaw 自愈失败"
-            tg_add_kv msg "步骤" "Run OpenClaw"
+            # 英文步骤名不直出通知（规范 5.5 节）
+            tg_add_kv msg "步骤" "运行 OpenClaw"
             tg_add_path msg "Run ID" "${{ github.run_id }}"
             [ -n "$fail_stage_label" ] && tg_add_kv msg "失败阶段" "$fail_stage_label"
             [ -n "$current_version" ] && tg_add_path msg "当前版本" "$current_version"
@@ -1731,9 +1732,10 @@ jobs:
               tg_add_title msg "⚠️ OpenClaw 即将进入最终归档"
               # 值只写时长，"后执行"由标签「预计」表达（值不重复标签语义）
               tg_add_kv msg "预计" "约 ${FINAL_ARCHIVE_WARNING_BEFORE_MINUTES} 分钟"
-              # 说明段只装说明；"随后执行：…" 是 kv 形态，此前整行塞进 <i> 说明段
+              # kv 区集中连排；英文 token 不直出通知（规范 5.5 节）：步骤名写中文
+              tg_add_kv msg "随后执行" "停止 OpenClaw 并执行最终归档"
+              # 说明段只装说明，且作末段（规范 4.8 节）：此前它插在两个 kv 之间
               tg_add_note msg "请及时保存状态或完成当前操作。"
-              tg_add_kv msg "随后执行" "Stop OpenClaw and Final Archive"
               tg_add_footer msg
               # 统一走发送层（退化/429 重试内置）
               send_tg "$msg" || true
