@@ -515,15 +515,20 @@ env:
 > 注：`github.run_started_at` 已被平台从表达式上下文移除，注入后为空值，
 > 时长靠 runner 开机时刻兜底（误差秒级）。注入行保留，属性恢复后可立即生效。
 
-### 4.10 空行的三个来源
+### 4.10 空行的来源
 
-只有这三处会产生空行，其余地方不要手写 `\n\n`：
+只有这几处会产生空行，其余地方不要手写 `\n\n`：
 
 1. `tg_add_section` 段前
 2. `tg_add_note` 段前
 3. `tg_add_footer` 前
 4. **正文与动作行之间**（如「▶ 打开直链」超链接），由调用方补空行——
    先判断正文是否已有尾换行，避免产出双空行（`emby.yml` 播放通知的同款 case 判断）。
+5. **多组列表的组与组之间**（任务预览/进度面板的 `📁 源端` 分组、去重通知的重复组）。
+   这是唯一允许「手写」的空行，但**必须带条件**：只在前面已有组时才补
+   （`[ "$_gi" -gt 0 ] && _out+=$'\n'`）。首组之前也补一次，分节标题与首组之间就会
+   多出一个空行——`task_preview.sh` / `sync_progress.sh` 是正确范例，
+   `tg-channel/dedupe_*.sh` 曾漏掉这个条件（2026-09-12 修正）。
 
 分隔线与紧随其后的内容之间不空行。
 
@@ -610,6 +615,9 @@ env:
   `|| true` 还是失败；**不要 `>/dev/null 2>&1` 吞掉**。
   python 侧 `send_telegram` 返回字典（成功 `{'sent': True, 'response': …}`、
   失败 `{'sent': False, 'reason': 响应体}`），调用方**必须**把失败原因记进日志。
+  **最易漏的是异常/信号兜底分支**：那里习惯写 `try: send_telegram(...) except: pass`，
+  等于同时吞掉异常和返回值，限流/400 时完全没有痕迹。三套测速已统一收敛到
+  `notify_best_effort(stage, msg)`（内部取返回值 + 记 `log_progress`），新增兜底分支照抄。
 - **已 source 发送层的通知点不得 curl 直发**。唯一例外是需要 message_id 的进度面板
   原地维护（`openlist/telegram.sh` 的 `_tg_send_and_get_id` / `_tg_delete_message`）——
   `sendMessage` 发送层不返回 message_id，原地刷新只能直发。
@@ -689,7 +697,13 @@ tg_add_footer msg; printf '%s\n' "$msg"
 > 哪天想让它们也收敛，就在 pwsh 侧补一组 `Add-TgEntry` 之类的助手，再从四处迁移。
 
 > 内嵌 python 段（如 `tg-channel/sync_to_tg.sh`）无法 import 共享层，
-> 在本文件内同义实现 `esc` / `tg_pre_block`，三处定义保持一致。
+> 在本文件内同义实现 `esc` / `tg_entry` / `tg_pre_block`，三处定义保持一致。
+>
+> **新增助手时别忘了同步补进内嵌段**。2026-09-12 前的教训：内嵌段只实现了
+> `esc` / `tg_pre_block`，代码里却调用了 `tg_entry` → 每次单文件失败都 NameError
+> → python 非零退出 → 脚本提前 `exit` → **连整轮汇总通知一起丢**。这类问题
+> 代码审查很容易漏（函数名看着就像内置的），改完内嵌 python 务必跑一次
+> [7.3 节渲染预览](#73-渲染预览强烈建议)或等价的实跑验证。
 
 ### 8.2 状态图标语义
 
