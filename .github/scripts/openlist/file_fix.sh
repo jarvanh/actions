@@ -708,6 +708,33 @@ _confirm_persist_by_count() {
 # 依赖: utils.sh (log_fix) / openlist_driver.sh (_restart_openlist_for_truth)
 # 用法: _fix_probe_dir_writable <dir_remote> <ol_dir 以 / 开头>
 #   返回 0=可写，1=不可写
+# 后端级"目录连续不可写"熔断（配合 openlist_driver.sh 的 _backend_write_probe）:
+#   写探针拦的是"整轮开始前就写不进"的后端；本表拦的是"开跑后才暴露"的后端
+#   （预检偶发放行、或探测期间后端刚好还能写）。判据是同一挂载根下连续
+#   N 个不同目录都被判不可写——目录各不相同，目录级缓存 _DIR_WRITE_CACHE
+#   命中不了，于是每个目录都要付出一次"探测 + 重启容器 60-120s"的代价
+#   （run #12616: 769 次"不可写"、231 次重启/缓存刷新，5h 零产出）。
+#   连续 N 个目录全不可写 = 后端级故障，不是目录级故障，此后本轮该后端
+#   的目录一律直接判不可写: 不探测、不重启、不跑 4 种方法。
+# 阈值: OPENLIST_BACKEND_DEAD_THRESHOLD（默认 3）
+declare -A _BACKEND_DIR_FAIL_STREAK=()
+declare -A _BACKEND_DEAD=()
+
+# 挂载根（file_fix 层内联实现: 测试常单独 source 本文件，
+# openlist_driver.sh 的同名函数存在时优先用它的）
+_fix_backend_root_of() {
+  if declare -F _backend_root_of >/dev/null 2>&1; then
+    _backend_root_of "$1"
+    return 0
+  fi
+  local p="$1"
+  if [[ "$p" == openlist:* ]]; then
+    printf 'openlist:%s' "${p#openlist:}" | cut -d/ -f1
+  else
+    printf '%s' "$p"
+  fi
+}
+
 _fix_probe_dir_writable() {
   local dir_remote="$1" ol_dir="${2:-}"
   local probe_timeout="${OPENLIST_DIR_PROBE_TIMEOUT:-120}s"
@@ -718,6 +745,15 @@ _fix_probe_dir_writable() {
     log_fix "$fix_log" "   🔎 目录可写性（沿用本轮结论 ${cached%%|*}，${cached#*|}）"
     [ "${cached%%|*}" = "1" ]
     return $?
+  fi
+
+  # 后端已熔断 → 直接判不可写，省掉探测与容器重启
+  local be_root
+  be_root=$(_fix_backend_root_of "$dir_remote")
+  if [[ "$dir_remote" == openlist:* ]] && [ "${_BACKEND_DEAD[$be_root]:-0}" = "1" ]; then
+    log_fix "$fix_log" "   🔎 目录可写性（后端 ${be_root} 本轮已熔断，直接判不可写: 不探测、不重启）"
+    _DIR_WRITE_CACHE["$dir_remote"]="0|后端熔断"
+    return 1
   fi
 
   local probe_name probe_local probe_dst
@@ -779,6 +815,27 @@ _fix_probe_dir_writable() {
   # 避免把缓存口径的结论当真值用
   log_fix "$fix_log" "   结论: 可写=${writable}（${note}）"
   _DIR_WRITE_CACHE["$dir_remote"]="${writable}|${note}"
+
+  # 后端级熔断计数（见上方 _BACKEND_DEAD 说明）: 同一挂载根下连续 N 个
+  # 目录不可写 ⇒ 后端级故障，本轮剩余目录全部直接判不可写。
+  # 只认"已重启确认"的不可写结论: 预算耗尽/容器不可重启时退回的缓存口径
+  # 本身标注了"不可信"（可能是驱动临时抖动），拿它判死整个后端会误伤
+  # （宁可多探几个目录，不可放弃一个可能健康的后端）
+  if [[ "$dir_remote" == openlist:* ]]; then
+    if [ "$writable" -eq 1 ]; then
+      _BACKEND_DIR_FAIL_STREAK["$be_root"]=0
+      [ -n "${_BACKEND_DEAD[$be_root]:-}" ] && unset "_BACKEND_DEAD[$be_root]"
+    elif [ "$note" = "已重启确认" ]; then
+      local streak=$(( ${_BACKEND_DIR_FAIL_STREAK[$be_root]:-0} + 1 ))
+      _BACKEND_DIR_FAIL_STREAK["$be_root"]=$streak
+      local dead_threshold="${OPENLIST_BACKEND_DEAD_THRESHOLD:-3}"
+      if [ "$streak" -ge "$dead_threshold" ]; then
+        _BACKEND_DEAD["$be_root"]=1
+        log_fix "$fix_log" "🚫 后端 ${be_root} 连续 ${streak} 个目录不可写（阈值 ${dead_threshold}）→ 判定后端级故障，本轮该后端剩余目录一律直接判不可写（不再逐个探测/重启）"
+      fi
+    fi
+  fi
+
   [ "$writable" -eq 1 ]
   return $?
 }

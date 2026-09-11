@@ -112,6 +112,10 @@ reset_state() {
   FIX_METHOD_BLACKLIST=()
   _DIR_WRITE_CACHE=()
   _DIR_PROBE_RESTARTS=0
+  # 后端级熔断状态（每个用例模拟的是"一个健康的后端"，不清会跨用例累积：
+  # 前面几个用例故意造的不可写目录会把后端判死，后续用例直接短路）
+  _BACKEND_DEAD=()
+  _BACKEND_DIR_FAIL_STREAK=()
   : > "$DST_FILES_FILE"
   RESTART_CALLS=0
   RESTART_OK=1

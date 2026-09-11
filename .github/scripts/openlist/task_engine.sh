@@ -11,7 +11,8 @@
 #
 # 依赖: sync_engine.sh, file_split.sh, sync_marker.sh, task_preview.sh, sync_progress.sh, file_fix.sh
 # 依赖环境变量:
-#   RCLONE_SYNC_TASK_FLAGS          — sync_task 特有 rclone 参数（在 rclone_flags.sh 中定义）
+#   RCLONE_SYNC_TASK_FLAGS          — sync_task 特有 rclone 参数（在 rclone_flags.sh 中定义；
+#                                     已移除全部 --delete-*，目标端只增不减）
 #   SYNC_SPLIT_THRESHOLD_BYTES      — auto-split 阈值（默认 50GB）
 #   OPENLIST_TASK_ROTATION          — 同步对轮转开关（=0 关闭，见下方说明）
 #   ROTATION_MAX_CONSECUTIVE_ATTEMPTS — 轮转阀门上限（默认 8）
@@ -188,6 +189,8 @@ run_all_tasks() {
       echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] 注册进度: $((i + 1))/${n} ${_hb_src} → ${_hb_dst}"
     fi
 
+    # 每个同步对开始前置位重置: 由 sync_engine 在"后端级熔断"时置 1
+    SYNC_BACKEND_DEAD=0
     _run_registry_entry "$_e" || true
 
     if [ "$real_pass" -eq 0 ]; then
@@ -197,6 +200,14 @@ run_all_tasks() {
     if [ "$rotation_enabled" -eq 1 ] && [ "$real_pass" -eq 1 ]; then
       if [ "${SYNC_SKIPPED:-0}" = "1" ] || [ "${SYNC_FAILED:-0}" = "0" ]; then
         # 完成/跳过 → 游标后移，连续尝试数清零
+        _rotation_save "$(( (idx + 1) % n ))" 0
+        _rot_attempts=0
+      elif [ "${SYNC_BACKEND_DEAD:-0}" = "1" ]; then
+        # 后端级熔断（写探针/读探针判定该后端本轮不可用）: 不必等满
+        # ROTATION_MAX_CONSECUTIVE_ATTEMPTS 次——死后端重试多少次都一样，
+        # 立即让路，把剩余预算交给健康后端（run #12615/#12616 连续两轮
+        # 烧在同一个 wopan175 同步对上，各 5h 零产出）
+        echo "⚠️ 同步对轮转: 第 $((idx + 1))/${n} 个同步对所属后端本轮已判不可用，立即后移游标（把剩余时间让给健康后端，下个循环再试它）"
         _rotation_save "$(( (idx + 1) % n ))" 0
         _rot_attempts=0
       elif [ "$_rot_attempts" -ge "$ROTATION_MAX_CONSECUTIVE_ATTEMPTS" ]; then
@@ -905,7 +916,7 @@ sync_task() {
     esac
   done
 
-  # 追加 sync_task 特有 rclone 参数（如 --delete-before）
+  # 追加 sync_task 特有 rclone 参数（RCLONE_SYNC_TASK_FLAGS；已不再包含任何 --delete-*）
   extra_args=("${RCLONE_SYNC_TASK_FLAGS[@]}" "${extra_args[@]}")
 
   # 根据 skip 天数设置 SYNC_SKIP_SECONDS

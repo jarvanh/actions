@@ -134,6 +134,12 @@ jobs:
       OPENLIST_MISSING_FIX_MAX: "200"
       OPENLIST_TOKEN_REFRESH_SECS: "240"
 
+      # 后端级熔断（读预检放行了"写不进"的后端是 5h 零产出的根因，见
+      # openlist_driver.sh _backend_write_probe 与 file_fix.sh _BACKEND_DEAD）
+      OPENLIST_BACKEND_WRITE_PROBE: "1"
+      OPENLIST_BACKEND_WRITE_PROBE_TIMEOUT: "60"
+      OPENLIST_BACKEND_DEAD_THRESHOLD: "3"
+
       # OpenList 管理面账密（动态登录换取 token，取代静态 config.json token）
       OPENLIST_ADMIN_PASSWORD: ${{ secrets.OPENLIST_ADMIN_PASSWORD }}
 
@@ -434,6 +440,20 @@ jobs:
         if: ${{ always() && (inputs.run_mode == '' || inputs.run_mode == '同步') }}
         run: |
           source /tmp/load_all.sh
+
+          # 本轮修复成效（跨任务累计，见 file_fix_pipeline.sh _ol_round_stats_bump）
+          # 收尾必须自己说出来: run #12616 结论 success，实际 394 次修复全败、
+          # 5 小时零产出 —— 不打印就只能在 5 万行日志里翻。
+          ROUND_FIXED_OK=0
+          ROUND_MISSING=0
+          if [ -f /tmp/ol_round_stats.env ]; then . /tmp/ol_round_stats.env; fi
+          ROUND_FAILED=$(( ROUND_MISSING - ROUND_FIXED_OK ))
+          [ "$ROUND_FAILED" -lt 0 ] && ROUND_FAILED=0
+          echo "本轮修复成效: 成功 ${ROUND_FIXED_OK} · 缺失 ${ROUND_MISSING} · 未修复 ${ROUND_FAILED}"
+          if [ "$ROUND_MISSING" -gt 0 ] && [ "$ROUND_FIXED_OK" -eq 0 ]; then
+            echo "🚨 本轮零成功: ${ROUND_MISSING} 个缺失文件全部修复失败（典型成因: 目标后端写不进/驱动失效）—— 本 run 可能仍以 success 收场，但实际没有任何数据落盘"
+          fi
+
           actual_entries=0
           total_lines=0
 
@@ -485,8 +505,19 @@ jobs:
       # Persist 回传收摊，6h 窗口全部让给同步；代价是强杀丢失窗口回到
       # "自上次 Persist 起"（冲刺期通常 ≤6h，可接受）
       - name: 会话保持与数据库周期热备
-        if: ${{ (inputs.run_mode == '' || inputs.run_mode == '同步') && (inputs.session_hold != false) }}
+        # 注意: 开关判断不能用 `inputs.session_hold != false` —— schedule 触发时
+        # inputs.* 为空串，GitHub 松比较下 '' == false 成立，该条件恒为 false，
+        # 本 step 在所有定时运行里都是 skipped（run #12613~#12618 已确认）。
+        # 改用 github.event.inputs（字符串上下文，未触发时为 null）经 env 取默认
+        # 值，再由 bash 字符串比较决定是否执行。
+        if: ${{ inputs.run_mode == '' || inputs.run_mode == '同步' }}
+        env:
+          SESSION_HOLD: ${{ github.event.inputs.session_hold || 'true' }}
         run: |
+          if [ "${SESSION_HOLD:-true}" != "true" ]; then
+            echo "session_hold=false，跳过会话保持（同步结束立即回传收摊，6h 窗口全部让给同步）"
+            exit 0
+          fi
           LAST_MD5="${OPENLIST_DB_MD5_PULL:-none}"
           for _ in $(seq 1 60); do
             sleep 300
@@ -543,11 +574,19 @@ jobs:
       #      （<5h50m）→ 判定为人工取消，不接力
       #   3. 防堆积: 已有排队/等待中的运行则不重复触发
       - name: 自续触发（下轮接力）
-        if: ${{ always() && (inputs.run_mode == '' || inputs.run_mode == '同步') && (inputs.self_retrigger != false) }}
+        # 同「会话保持」step: 开关判断从 `inputs.self_retrigger != false`
+        # （schedule 下恒 false → 定时运行从未接接过力）改为 env 默认值 +
+        # bash 字符串比较。
+        if: ${{ always() && (inputs.run_mode == '' || inputs.run_mode == '同步') }}
         env:
           GH_TOKEN: ${{ github.token }}
+          SELF_RETRIGGER: ${{ github.event.inputs.self_retrigger || 'true' }}
         run: |
           set -e
+          if [ "${SELF_RETRIGGER:-true}" != "true" ]; then
+            echo "self_retrigger=false，不接力（完全静止）"
+            exit 0
+          fi
           REPO="${{ github.repository }}"
           SYNC_CONCLUSION="${{ steps.sync.conclusion }}"
           ELAPSED=$(( $(date +%s) - $(date -d "${{ github.run_started_at }}" +%s) ))

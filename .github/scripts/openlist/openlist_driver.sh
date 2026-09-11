@@ -344,7 +344,93 @@ _check_openlist_backend_connectivity() {
     _openlist_api_health_check "$underlying" "Crypt 挂载 $dest_path 底层驱动 $underlying" "$log_file" || return 1
   fi
 
+  _backend_write_probe "$dest_path" "$log_file" || return 1
+
   return 0
+}
+
+# ===== 后端级写探针（整轮一次，按挂载根缓存）=====
+# 为什么必须有这一层（run #12616 实锤，2026-09-11）:
+#   上面两层预检（lsd + API list refresh=true）**全是读操作**。wopan175 那轮
+#   读全部正常、写入却恒定 `Update mkParentDir failed: Conflict: 409 Conflict`
+#   （OpenList API mkdir 返回 200、rclone 侧 409，探针写入从不落盘），
+#   结果: 一轮 394 次修复全败、769 次"目录不可写"、231 次容器重启/缓存刷新，
+#   5 小时零产出。读探针放行了根本写不进的后端，整轮预算全烧在"逐目录、
+#   逐文件证明写不了"上——失败是注定的，代价却是全额的。
+# 做法: 每个挂载根（openlist:wopan175 / openlist:wopan176Crypt …）**只做一次**
+#   写探针: 写几字节 → 复核可见 → 删除。不可见即假成功，与写入报错同判 dead。
+#   判定结果整轮缓存，命中即短路（不重复探测、不重启容器）。
+# 成本: 一次 copyto + 一次 lsf + 一次 deletefile，秒级。与之相比，漏检的代价
+#   是整轮 5 小时。
+# 开关: OPENLIST_BACKEND_WRITE_PROBE=0 关闭（回退纯读预检）
+# 依赖: _cmd_log(file_fix.sh) 可缺省——本文件被单独 source 时不强依赖
+# 用法: _backend_write_probe <dest_path> [log_file] → 0=可写, 1=该后端本轮不可用
+declare -A _BACKEND_WRITE_PROBE_CACHE=()
+
+# 挂载根: openlist:wopan175/1/1024j → openlist:wopan175
+_backend_root_of() {
+  local p="$1"
+  if [[ "$p" == openlist:* ]]; then
+    printf 'openlist:%s' "${p#openlist:}" | cut -d/ -f1
+  else
+    printf '%s' "$p"
+  fi
+}
+
+_backend_write_probe() {
+  [ "${OPENLIST_BACKEND_WRITE_PROBE:-1}" = "0" ] && return 0
+  [[ "$1" == openlist:* ]] || return 0
+  local dest="$1" log_file="${2:-}"
+  local root
+  root=$(_backend_root_of "$dest")
+
+  # 整轮缓存: 同一挂载根只探一次（结论不会在几分钟内翻转）
+  if [ -n "${_BACKEND_WRITE_PROBE_CACHE[$root]:-}" ]; then
+    if [ "${_BACKEND_WRITE_PROBE_CACHE[$root]}" = "1" ]; then
+      return 0
+    fi
+    echo "🚫 目标端 $dest 所属后端 $root 本轮写探针已判不可用，跳过（不再重复探测/重启）" | tee ${log_file:+-a "$log_file"}
+    return 1
+  fi
+
+  local probe_name="olwprobe_$(printf '%s' "${root}$$" | md5sum | cut -c1-8).txt"
+  local probe_local="${TMPDIR:-/tmp}/${probe_name}"
+  local probe_dst="${root}/${probe_name}"
+  local probe_timeout="${OPENLIST_BACKEND_WRITE_PROBE_TIMEOUT:-60}s"
+  printf '%s' "openlist backend write probe" > "$probe_local" 2>/dev/null || true
+
+  echo "💉 后端写探针: $root" | tee ${log_file:+-a "$log_file"}
+  local out rc=0 seen=0
+  out=$(rclone copyto "$probe_local" "$probe_dst" \
+    --retries 1 --low-level-retries 3 --contimeout 30s --timeout "$probe_timeout" 2>&1) || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    # rc=0 只说明 rclone 认为成功: PUT 假成功在缓存里与真文件无异，
+    # 必须再读一次确认探针真的在后端（run 31951008332 同口径）
+    if rclone lsf "$root" --files-only --retries 1 --timeout "$probe_timeout" 2>/dev/null \
+       | grep -qxF "$probe_name"; then
+      seen=1
+    fi
+  fi
+  rclone deletefile "$probe_dst" --retries 1 --low-level-retries 3 --timeout "$probe_timeout" >/dev/null 2>&1
+
+  rm -f "$probe_local" 2>/dev/null || true
+
+  if [ "$rc" -eq 0 ] && [ "$seen" -eq 1 ]; then
+    _BACKEND_WRITE_PROBE_CACHE["$root"]=1
+    echo "   ✅ 后端可写" | tee ${log_file:+-a "$log_file"}
+    return 0
+  fi
+
+  _BACKEND_WRITE_PROBE_CACHE["$root"]=0
+  local reason
+  if [ "$rc" -ne 0 ]; then
+    reason="写入失败 (exit=${rc})"
+    echo "$out" | head -5 | sed 's/^/   ▸ /' | tee ${log_file:+-a "$log_file"}
+  else
+    reason="写入返回成功但复核不可见（PUT 假成功）"
+  fi
+  echo "🚫 后端 $root ${reason}，判定本轮不可用 → 熔断该后端全部同步对（把时间让给健康后端）" | tee ${log_file:+-a "$log_file"}
+  return 1
 }
 
 # 查找 OpenList 最新日志文件

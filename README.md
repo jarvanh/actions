@@ -236,6 +236,10 @@ workflow 会把 `*.sh` `*.py` `*.jq` 拷到 `/tmp` 再 `source /tmp/load_all.sh`
 `OPENLIST_PERSIST_RETRY_ROUNDS` · `OPENLIST_MISSING_FIX_MAX`(200) ·
 `OPENLIST_MAX_SPLIT_ATTEMPTS` · `ROTATION_MAX_CONSECUTIVE_ATTEMPTS`(8)
 
+**后端级熔断**（2026-09-12 加，见下方「后端级熔断」）: `OPENLIST_BACKEND_WRITE_PROBE`(1=开启) ·
+`OPENLIST_BACKEND_WRITE_PROBE_TIMEOUT`(60s) · `OPENLIST_BACKEND_DEAD_THRESHOLD`(3，同挂载根连续几个目录判不可写即判后端死) ·
+`OPENLIST_DIR_PROBE_MAX_RESTART`(3，目录探测的每轮重启预算)
+
 **并发**：`OPENLIST_TRANSFERS`（workflow 输入 `transfers` 可调，默认 1；wopan176 保持 1——run 32749862280 整批假成功事故后端）· `OPENLIST_CHECKERS` ·
 `OPENLIST_SUBDIR_PARALLEL`（workflow 输入 `subdir_parallel`，默认 1 串行；≥2 时顶层 auto-split 子目录并行同步，递归层始终串行）·
 `OPENLIST_SUBDIR_LIST_PARALLEL`（子目录大小列举并行度，默认 8）·
@@ -296,6 +300,36 @@ workflow 的 `run_mode` 单选互斥：
 
 **全量冲刺期推荐**：`session_hold=false` + `self_retrigger=true` → 6h 窗口全部
 让给同步，轮与轮之间零空窗；全量收敛后恢复默认。
+
+> 开关读取口径（2026-09-12 修）：`session_hold` / `self_retrigger` **不能**在 `if:` 里写
+> `inputs.x != false` —— cron 触发时 `inputs.*` 为空串、GitHub 松比较下 `'' == false` 成立，
+> 条件恒为 false，两个 step 在所有定时运行里都是 skipped（run #12613~#12618 实测）。
+> 现改为经 env 取默认值 `${{ github.event.inputs.x || 'true' }}`（字符串上下文，未触发时为
+> null），再由 bash 字符串比较决定是否执行。
+
+**后端级熔断（2026-09-12 加）**：同步预检原本只有读探针（`lsd` + `refresh=true` 的
+API list），读得通但写不进的后端会被整轮放行——run #12616 实测 wopan175 读全正常、
+写入恒定 `409 Conflict`，结果一轮 394 次修复全败、769 次「目录不可写」、231 次容器
+重启/缓存刷新，5 小时零产出。现在两级拦截：
+
+1. **写探针**（`openlist_driver.sh` `_backend_write_probe`）：每个挂载根整轮只探一次
+   （写几字节 → 复核可见 → 删除），不可写即熔断该后端的全部同步对，把 6h 让给健康后端。
+2. **目录连续不可写计数**（`file_fix.sh` `_BACKEND_DEAD`）：开跑后才暴露的后端
+   （预检偶发放行）由「同一挂载根连续 N 个目录被**重启确认**判不可写」捕获；判定后该后端
+   剩余目录一律直接判不可写 —— 不探测、不重启、不跑 4 种方法。只认「已重启确认」的
+   结论，缓存口径（预算耗尽/容器不可重启）不计入，避免误伤健康后端。
+
+被熔断的同步对会让轮转游标**立即后移**（不等 `ROTATION_MAX_CONSECUTIVE_ATTEMPTS` 次），
+死后端重试多少次都一样。收尾 step 打印 `本轮修复成效: 成功 X · 缺失 Y · 未修复 Z`，
+`Y>0 且 X=0` 时额外输出 🚨 零成功告警 —— `conclusion=success` 不等于有数据落盘。
+
+**删除语义（2026-09-12 改）**：`RCLONE_SYNC_TASK_FLAGS` 已移除 `--delete-before`，
+`rclone sync` 退化为只增不减的 copy 语义。原因：上一轮以替代形态修复成功的文件，会被
+下一轮的 initial sync 当成「源端没有的多余文件」删除（run #12616：50 个 `Deleted` +
+短哈希目录 `f21d720a` 被整个 `Removing directory`），随后 truth-check 又把同一批文件判为
+缺失重新修复——修一轮、删一轮，跨轮净进度为零。排除清单是文件级的，目录里混有未记录
+文件就会被逐个删空、目录随之消失，保护形同虚设。备份语义下目标端是灾备副本，误删代价
+远大于残留。
 
 **吞吐调优（P1）**：`transfers`（默认 1 串行）与 `subdir_parallel`（默认 1 串行）
 均可按 run 调整，但两者都会提高对同一后端的并发 PUT 数——与 run 32749862280

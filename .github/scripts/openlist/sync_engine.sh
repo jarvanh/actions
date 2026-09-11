@@ -145,6 +145,11 @@ sync_with_logging() {
     SYNC_FAILED=1
     SYNC_SKIPPED=0
     SYNC_TRANSFERRED_BYTES=0
+    # 后端级熔断（写探针判定该后端本轮不可写）→ 置位供 run_all_tasks
+    # 立即后移轮转游标，而不是连续多轮把预算烧在同一个死后端上
+    local _be_root
+    _be_root=$(_backend_root_of "$dest_path" 2>/dev/null || echo "$dest_path")
+    [ "${_BACKEND_WRITE_PROBE_CACHE[$_be_root]:-}" = "0" ] && SYNC_BACKEND_DEAD=1
     return 0
   fi
 
@@ -259,6 +264,9 @@ sync_with_logging() {
     SYNC_FAILED=1
     SYNC_SKIPPED=0
     SYNC_TRANSFERRED_BYTES=0
+    local _be_root
+    _be_root=$(_backend_root_of "$dest_path" 2>/dev/null || echo "$dest_path")
+    [ "${_BACKEND_WRITE_PROBE_CACHE[$_be_root]:-}" = "0" ] && SYNC_BACKEND_DEAD=1
     return 0
   fi
 
@@ -295,6 +303,13 @@ sync_with_logging() {
   _sync_serialize_fixed_files
 
   _sync_accumulate_fixed_results
+
+  # 后端级熔断（修复阶段才暴露的那一类: 同一挂载根连续 N 个目录不可写，
+  # 见 file_fix.sh _BACKEND_DEAD）: 预检当时还放行了，但本同步对的实际
+  # 结果是"写不进"，同样给轮转让路信号，避免连续多轮重复烧预算
+  local _be_root
+  _be_root=$(_backend_root_of "$dest_path" 2>/dev/null || echo "$dest_path")
+  [ "${_BACKEND_DEAD[$_be_root]:-0}" = "1" ] && SYNC_BACKEND_DEAD=1
 
   rm -f "$LOG_FILENAME" "$LAST_ATTEMPT_LOG" "$fail_list" "$fix_list" "$fix_log" 2>/dev/null || true
   # 始终返回 0：失败状态已通过 SYNC_FAILED 全局变量传递，
