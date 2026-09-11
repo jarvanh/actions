@@ -3,19 +3,17 @@
 > 代码：`.github/scripts/proxy-speedtest/speedtest.py`
 > 入口：`.github/workflows/proxy-speedtest-cdn.yml`
 
-## 四件套总览
+## 三件套总览
 
-仓库代理测速四套**按测速点命名**，口径互不可比：
+仓库代理测速三套**按测速点命名**，口径互不可比：
 
 | 工作流 | 测速点 | 口径 | 引擎/链路 | 文档 |
 |---|---|---|---|---|
 | `proxy-speedtest-gitee` | Gitee 私有仓库 | 经代理 git push 上行 + clone 下行 + gitee.com HTTP 延迟 | `speedtest_gitee.py` | [gitee](proxy-speedtest-gitee.md) |
 | `proxy-speedtest-cdn` | 国内 CDN/镜像站 + baidu/taobao | 经代理单连接 curl 下载 + HTTP 计时延迟 | 本文 | — |
 | `proxy-speedtest-taier` | 泰尔三网（电信/联通/移动测速服务器） | taierspeedtest 延迟 + 单/多线程上下行 | `taier_speedtest.py` + mihomo TUN | [taier](proxy-speedtest-taier.md) |
-| `proxy-speedtest-ookla` | Speedtest 官方测速点（按节点出口就近，可显式锁编号） | speedtest CLI 延迟 + 上下行 | `speedtest_ookla.py` + mihomo TUN | [ookla](proxy-speedtest-ookla.md) |
 
-调度：UTC 03/09/15/21（北京 11/17/23/05），与 gitee（02/08/14/20）、taier（04/10/16/22）、
-ookla（05/11/17/23）错峰。
+调度：UTC 03/09/15/21（北京 11/17/23/05），与 gitee（02/08/14/20）、taier（04/10/16/22）错峰。
 
 ## 功能与链路
 
@@ -56,7 +54,7 @@ ookla（05/11/17/23）错峰。
 
 | secret | 用途 |
 |---|---|
-| `PROXY_SPEEDTEST_SUB_URLS` | 订阅源（四套共用） |
+| `PROXY_SPEEDTEST_SUB_URLS` | 订阅源（三套共用） |
 | `PROXY_SPEEDTEST_CDN_GIST_ID` | 本工作流专属订阅 Gist 的 id；留空首跑自动新建（TG 给链接），回填避免每轮新建 |
 | `PAT` | gist 写权限（默认 GITHUB_TOKEN 无 gist scope 会 403） |
 | `GITEE_PRIVATE_TOKEN` | 上行测速 push 用（`ENABLE_PUSH=1` 时必需） |
@@ -76,13 +74,13 @@ ookla（05/11/17/23）错峰。
 | `PROXY_SPEEDTEST_SWITCH_SETTLE_SECONDS` | 1.5 | 切节点后等待 |
 | `PROXY_SPEEDTEST_MAX_NODES` | 0 | 0 = 不限 |
 | `PROXY_SPEEDTEST_NPMMIRROR_ENABLED` | 1 | 是否合并 npmmirror 最新版测速点 |
-| `PROXY_SPEEDTEST_GIST_FILENAME` / `_DESCRIPTION` | 见 workflow | Gist 文件名/描述（四套区分） |
-| `PROXY_SPEEDTEST_MIN_MEGABIT` | 10 | 达标阈值（兆），四套共用 |
+| `PROXY_SPEEDTEST_GIST_FILENAME` / `_DESCRIPTION` | 见 workflow | Gist 文件名/描述（三套区分） |
+| `PROXY_SPEEDTEST_MIN_MEGABIT` | 10 | 达标阈值（兆），三套共用 |
 | `PROXY_SPEEDTEST_SPEED_METRIC` | upload | 判定指标 `upload`/`download`；达标数 < 最少节点数时自动改用另一指标 |
 | `PROXY_SPEEDTEST_MIN_NODES` | 1 | 上传订阅的最少节点数，不足则不上传 |
 
 订阅导出策略（阈值/判定指标/最少节点数，含双向回退规则）详见
-[gitee 文档 · 订阅导出策略](proxy-speedtest-gitee.md#订阅导出策略四套共用)。
+[gitee 文档 · 订阅导出策略](proxy-speedtest-gitee.md#订阅导出策略三套共用)。
 
 ## Telegram 通知
 

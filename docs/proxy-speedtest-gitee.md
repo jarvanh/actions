@@ -3,23 +3,21 @@
 > 代码：`.github/scripts/proxy-speedtest/speedtest_gitee.py`
 > 入口：`.github/workflows/proxy-speedtest-gitee.yml`
 
-## 四件套总览
+## 三件套总览
 
-仓库代理测速四套**按测速点命名**，口径互不可比：
+仓库代理测速三套**按测速点命名**，口径互不可比：
 
 | 工作流 | 测速点 | 口径 | 引擎/链路 | 文档 |
 |---|---|---|---|---|
 | `proxy-speedtest-gitee` | Gitee 私有仓库 | 经代理 git push 上行 + clone 下行 + gitee.com HTTP 延迟 | 本文 | — |
 | `proxy-speedtest-cdn` | 国内 CDN/镜像站 + baidu/taobao | 经代理单连接 curl 下载 + HTTP 计时延迟 | `speedtest.py` | [cdn](proxy-speedtest-cdn.md) |
 | `proxy-speedtest-taier` | 泰尔三网（电信/联通/移动测速服务器） | taierspeedtest 延迟 + 单/多线程上下行 | `taier_speedtest.py` + mihomo TUN | [taier](proxy-speedtest-taier.md) |
-| `proxy-speedtest-ookla` | Speedtest 官方测速点（按节点出口就近，可显式锁编号） | speedtest CLI 延迟 + 上下行 | `speedtest_ookla.py` + mihomo TUN | [ookla](proxy-speedtest-ookla.md) |
 
-调度：UTC 02/08/14/20（北京 10/16/22/04），与 cdn（03/09/15/21）、taier（04/10/16/22）、
-ookla（05/11/17/23）错峰。
+调度：UTC 02/08/14/20（北京 10/16/22/04），与 cdn（03/09/15/21）、taier（04/10/16/22）错峰。
 
 ## 双重角色
 
-`speedtest_gitee.py` 既是独立工作流引擎，也是四套共享引擎：
+`speedtest_gitee.py` 既是独立工作流引擎，也是三套共享引擎：
 
 1. **独立引擎**：both 模式（默认）下对每个可用节点经 mihomo 代理测三项——git push
    测速文件到 Gitee 私有仓库（上行）、clone 拉回（下行）、对 gitee.com 做 HTTP 计时
@@ -27,8 +25,7 @@ ookla（05/11/17/23）错峰。
 2. **共享引擎**：mihomo 下载/配置/生命周期、订阅拉取解析、节点快照与切换在本文件；
    与引擎无关的纯共享层（订阅导出策略、通知排版、归属查询、Telegram 发送、Gist 上传、
    进度日志）在 `speedtest_common.py`（2026-09-08 从本文件抽出，共享代码不再挂在 gitee
-   名下），本文件按需 import、无兼容再导出；`speedtest.py` / `taier_speedtest.py` /
-   `speedtest_ookla.py` import 复用。顶层的 signal/异常通知只在 `main()` 注册，
+   名下），本文件按需 import、无兼容再导出；`speedtest.py` / `taier_speedtest.py` import 复用。顶层的 signal/异常通知只在 `main()` 注册，
    import 复用不会误触发。
 
 ## 功能与链路
@@ -42,7 +39,7 @@ ookla（05/11/17/23）错峰。
    `PROXY_SPEEDTEST_LATENCY_SAMPLES` × 超时 `PROXY_SPEEDTEST_LATENCY_TIMEOUT`）
    → 经代理 `git push`（单流 HTTPS，超时 `PROXY_SPEEDTEST_PUSH_TIMEOUT`）按推送耗时
    换算上行 → `git clone` 拉回（超时 `PROXY_SPEEDTEST_CLONE_TIMEOUT`）换算下行；
-6. 汇总 → 按**订阅导出策略**判定达标节点（见[订阅导出策略](#订阅导出策略四套共用)）导出到专属 Gist
+6. 汇总 → 按**订阅导出策略**判定达标节点（见[订阅导出策略](#订阅导出策略三套共用)）导出到专属 Gist
    （`update_gist`，只上传不回拉；2026-09-10 已移除原先「第二个 mihomo 实例（19690/19691）
    回拉 Gist raw + 抽样验证」的步骤，见[运维与排查](#运维与排查)）；
 7. Telegram 推 `✅ Gitee 测速完成`（TOP 节点三项指标 + 订阅状态）。
@@ -51,15 +48,15 @@ ookla（05/11/17/23）错峰。
 
 `PROXY_SPEEDTEST_MODE`（2026-09-08 起默认 `both`）：
 
-- `both`：↑上传（push）+ ↓下载（clone）+ 延迟三项全测，四套指标口径对齐；
+- `both`：↑上传（push）+ ↓下载（clone）+ 延迟三项全测，三套指标口径对齐；
 - `push-only`：只测经代理上行（历史模式，可用 env 退回）；
 - `git_direct_speedtest`：不经代理直连 Gitee push/clone，作为「家庭宽带上行」基线对比
   （`PROXY_SPEEDTEST_DIRECT_BASELINE_TIMEOUT` / `_MAX_ATTEMPTS` 控制），不受模式影响。
 
-## Gist 约定（四套各用各的）
+## Gist 约定（三套各用各的）
 
 - secret：`PROXY_SPEEDTEST_GIST_ID`（本工作流）、`PROXY_SPEEDTEST_CDN_GIST_ID`（cdn）、
-  `PROXY_SPEEDTEST_TAIER_GIST_ID`（taier）、`PROXY_SPEEDTEST_OOKLA_GIST_ID`（ookla）
+  `PROXY_SPEEDTEST_TAIER_GIST_ID`（taier）
   ——分别注入各 workflow 的 `PROXY_SPEEDTEST_GIST_ID` env，脚本读同名 env，共享代码零特判；
 - 文件名/描述经 `PROXY_SPEEDTEST_GIST_FILENAME` / `PROXY_SPEEDTEST_GIST_DESCRIPTION`
   覆盖（`_gist_identity`，实现在 speedtest_common.py），本工作流为
@@ -73,7 +70,7 @@ ookla（05/11/17/23）错峰。
 
 | secret | 用途 |
 |---|---|
-| `PROXY_SPEEDTEST_SUB_URLS` | 订阅源（四套共用） |
+| `PROXY_SPEEDTEST_SUB_URLS` | 订阅源（三套共用） |
 | `PROXY_SPEEDTEST_GIST_ID` | 本工作流专属订阅 Gist 的 id |
 | `PAT` | gist 写权限（默认 GITHUB_TOKEN 无 gist scope 会 403） |
 | `GITEE_PRIVATE_TOKEN` | Gitee 私有仓库建仓/push |
@@ -97,9 +94,9 @@ ookla（05/11/17/23）错峰。
 | `PROXY_SPEEDTEST_SPEED_METRIC` | upload | 判定指标 `upload`/`download`；达标数 < 最少节点数时自动改用另一指标（双向对称） |
 | `PROXY_SPEEDTEST_MIN_NODES` | 1 | 上传订阅的最少节点数，不足则不上传（通知显示「达标不足 N 个」） |
 
-### 订阅导出策略（四套共用）
+### 订阅导出策略（三套共用）
 
-四套共用同一套达标判定（`speedtest_common.resolve_subscription_policy` +
+三套共用同一套达标判定（`speedtest_common.resolve_subscription_policy` +
 `build_subscription_bundle`，workflow env 已接仓库 **Variables**，Settings → Secrets and
 variables → Actions → Variables 可随时改，留空走默认）：
 
@@ -113,7 +110,7 @@ variables → Actions → Variables 可随时改，留空走默认）：
 实际采用的指标会写进日志（`subscription_policy` / `subscription_metric_fallback`）与
 TG 通知文案。节点必须有原始配置（`source_entry.proxy`）才计入达标——否则导不进订阅。
 
-**TOP5 排序与判定指标一致**：四套的 TOP 榜都按实际采用的指标排序，通知标题标注
+**TOP5 排序与判定指标一致**：三套的 TOP 榜都按实际采用的指标排序，通知标题标注
 `🏆 最快节点 · N · 按上传/按下载`，避免出现「按上传导出订阅、却按下行排 TOP」的自相矛盾。
 
 ## Telegram 通知与兜底
