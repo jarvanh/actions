@@ -38,7 +38,7 @@
 #            ▸ 📊 批次：48/55 | ✅0 ❌47 · 📄 …      d0 统计行
 #            · 传输中: 2.469 GiB / 4.976 GiB        d0 note（rt 线程实时状态，注记不占树节点）
 #            ├─ ❌#42 ✅00 🔧00 ❗33 ⏭️00 ♻️00 ⏱01:15 ⬆️4.79G
-#            └─ ❌#47 ✅00 🔧00 ❗22 ⏭️00 ♻️00 ⏱00:58 ⬆️4.72G    批次历史（tree_lines，字段表见 docs 第 4 章）
+#            └─ ❌#47 ✅00 🔧00 ❗22 ⏭️00 ♻️00 ⏱00:58 ⬆️4.72G    批次历史（tree_lines，字段表见 docs 8.3 节）
 # 阶段行两种形态由渲染器按内容判定（生产方无需区分）:
 #   标签型 全部行以 "▸" 开头 → 说明"本层在做什么"，与统计行同列、排在统计行之前
 #   树型   其余（子目录等状态条目）→ 统计行是它的表头，排在其后并缩进 2 格
@@ -333,7 +333,7 @@ _progress_active_last() {
 #   条目经 tree_lines 加 ├─/└─ 连接符（telegram/tg_notify.sh）; 目标端 openlist: 前缀
 #   冗余（所有目标均为 openlist 远端），统一裁剪缩短行宽。
 # 无 " → " 结构的显示名（调试任务等）退化为无组头的平铺条目，同样走 tree_lines
-# 树形 —— 同一面板内不得 "• " 与 "├─" 并存（规范 第 2 章 标签语义表裁决 3）。
+# 树形 —— 同一面板内不得 "• " 与 "├─" 并存（规范 4.5 节）。
 # 输入: 每行 "display_name\tsize\tdetail"（size/detail 可空）
 _progress_render_task_list() {
   local lines="$1"
@@ -467,7 +467,7 @@ _progress_render() {
   fi
   tg_add_title msg "$title"
   [ -n "$subtitle" ] && tg_add_kv msg "状态" "$subtitle"
-  # 计数行字段图标同样入 （规范 第 2 章 裁决 7：emoji 一律在  内，无例外）
+  # 计数行字段图标同样裸置（规范 2.3 节：emoji 一律不套标签，无例外）
   tg_append msg "📊 总 ${total} · 待处理 ${pending} · 进行中 ${running} · 完成 ${completed} · 跳过 ${skipped} · 失败 ${failed}"$'\n'
 
   # 进行中任务块: 任务条目（分组渲染）+ 多层级阶段行/统计信息/细粒度状态
@@ -527,7 +527,9 @@ _progress_render() {
           done < "$_rf"
           # 统计行与后续块对齐标签文本列（+4 格），同样等宽渲染
           local _ind_sub="${_ind}    "
-          [ -f "$_sf" ] && msg+="<code>${_ind_sub}$(cat "$_sf")</code>"$'\n'
+          # 槽位内容是原始文本（rows 由调用方按需预转义，stats/note 一律原始）→ 渲染时转义；
+          # 不转义时文件名里的 & < > 会让整条面板 HTML 解析失败（400，规范不重发 = 静默丢失）
+          [ -f "$_sf" ] && msg+="<code>${_ind_sub}$(escape_html "$(cat "$_sf")")</code>"$'\n'
           # 批次历史回显: 最近 N 个已完成批次的快照（当前批次状态由 rows/stats 表达，不在此重复）
           # 多行块需逐行加缩进前缀，否则仅首行对齐
           local _bh
@@ -536,13 +538,13 @@ _progress_render() {
           # —— 当前状态不沉到历史后面。note 行统一用 "· " 前缀: 状态注记不占树
           # 节点位，├─/└─ 只留给真实条目（2026-08-31 用户反馈: 双 └─ 同级致层次混淆）
           if [ "$_d" -eq 0 ] && [ -f "$_nf" ]; then
-            msg+="<code>${_ind_sub}· $(cat "$_nf")</code>"$'\n'
+            msg+="<code>${_ind_sub}· $(escape_html "$(cat "$_nf")")</code>"$'\n'
           fi
           if [ -n "$_bh" ]; then
             msg+="$(tree_lines "$_bh" | sed 's/^  //' | sed "s/^/${_ind_sub}/" | sed 's/^\(.*\)$/<code>\1<\/code>/')"$'\n'
           fi
         else
-          [ -f "$_sf" ] && msg+="<code>${_ind}$(cat "$_sf")</code>"$'\n'
+          [ -f "$_sf" ] && msg+="<code>${_ind}$(escape_html "$(cat "$_sf")")</code>"$'\n'
           _raw="$(_progress_active_last < "$_rf")"
           # tree_lines 每行自带 2 空格树干前缀（tree_conn），剥掉后
           # 由本层缩进统一控制，保证树与统计行同列对齐
@@ -558,9 +560,9 @@ _progress_render() {
         if [ "$_is_label" -eq 1 ] && [ "$_d" -eq 0 ]; then
           :
         elif [ "$_is_label" -eq 1 ] && [ -f "$_nf" ]; then
-          msg+="<code>${_ind}    · $(cat "$_nf")</code>"$'\n'
+          msg+="<code>${_ind}    · $(escape_html "$(cat "$_nf")")</code>"$'\n'
         elif [ -f "$_nf" ]; then
-          msg+="<code>${_ind_rows}· $(cat "$_nf")</code>"$'\n'
+          msg+="<code>${_ind_rows}· $(escape_html "$(cat "$_nf")")</code>"$'\n'
         fi
       done
     fi

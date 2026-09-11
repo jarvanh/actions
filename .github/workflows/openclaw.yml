@@ -838,14 +838,14 @@ jobs:
           # 统一 HTML 通知 + 统一收尾区（tg_notify.sh，checkout 后可用）。
           # TG_RUN_URL / TG_RUN_STARTED_AT 由本 step 的 env 注入，tg_add_footer 直接读取。
           # 版式与 tailscale-windows.yml "🟢 Windows runner 已就绪" 同款：
-          # 按套分节（2.2 节 分组场景 2：多套同类信息）+ 组内树形条目，凭据/网络/出口/AI 网关
+          # 按套分节（规范 5.4 节：多套同类信息各占一分节）+ 组内树形条目，凭据/网络/出口/AI 网关
           # 各归其节，避免一级平铺 10 行 kv 混排
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
           msg=""
           tg_add_title msg "🟢 OpenClaw Runner 已就绪"
 
           _entries="命令：<code>ssh runner@$(escape_html "${TS_HOST}")</code>"
-          _entries+=$'\n'"备用 IP：<code>ssh runner@$(escape_html "${TS_IP}")</code>"
+          _entries+=$'\n'"备用 IP：<code>$(escape_html "${TS_IP}")</code>"
           _entries+=$'\n'"文件管理：<code>sftp://runner@$(escape_html "${TS_HOST}")/</code>"
           # 列表分节带计数（与 tailscale-windows / AI 网关同款；此前四节形态不一）
           tg_add_section msg "🔐 SSH · $(printf '%s' "$_entries" | grep -c .)"
@@ -856,29 +856,34 @@ jobs:
             tg_add_block msg "$(tree_lines "直连：<code>$(escape_html "${TS_FQDN}"):21118</code>")"
           fi
 
-          # 条目非文件值：可复制的（ASN/命令）→ <code>，其余 → （禁裸文本）
+          # 取值行口径（规范 2.3 节）：一次 ipwho.is 返回的 IP/ISP/ASN/位置 都是机器返回值，
+          # 整节同为 <code>；按「值不值得复制」逐个判断会产出等宽/正体交错的斑马纹
           _entries="出口 IP：<code>$(escape_html "${PUB_IP}")</code>"
-          _entries+=$'\n'"ISP：$(escape_html "${IP_ISP}")"
+          _entries+=$'\n'"ISP：<code>$(escape_html "${IP_ISP}")</code>"
           _entries+=$'\n'"ASN：<code>$(escape_html "AS${IP_ASN} · ${IP_ORG}")</code>"
-          _entries+=$'\n'"位置：$(escape_html "${IP_LOC}")"
+          _entries+=$'\n'"位置：<code>$(escape_html "${IP_LOC}")</code>"
           tg_add_section msg "🌐 出口网络 · $(printf '%s' "$_entries" | grep -c .)"
           tg_add_block msg "$(tree_lines "$_entries")"
 
-          _entries="状态：已广播 · 可作为出口节点"
-          _entries+=$'\n'"管理页批准：<code>admin/machines → openclaw → Edit routes → 勾选 Exit Node</code>"
+          _entries="管理页批准：<code>admin/machines → openclaw → Edit routes → 勾选 Exit Node</code>"
           _entries+=$'\n'"ACL 免批准（推荐）：<code>routes 0.0.0.0/0,::/0 → tag:ci</code> · 免每次批准"
           _entries+=$'\n'"API：<code>POST /api/v2/device/{device_id}/routes</code>"
           tg_add_section msg "🛰️ 出口节点 · $(printf '%s' "$_entries" | grep -c .)"
           tg_add_block msg "$(tree_lines "$_entries")"
+          # 「状态」是自然语言结论 → 说明段，留在取值行里会变成 code/裸交错（规范 2.3 节）
+          tg_add_note msg "状态：已广播 · 可作为出口节点"
 
           if [ "$AI_BACKEND" = "cliproxyapi" ]; then _ai_note="CLIProxyAPI · 回退"; else _ai_note="CliRelay · 全栈"; fi
-          _entries="后端：${_ai_note}"
-          [ -n "$AI_FALLBACK_REASON" ] && _entries+=$'\n'"回退原因：$(escape_html "${AI_FALLBACK_REASON}")"
-          tg_add_section msg "🤖 AI 网关 · $(printf '%s' "$_entries" | grep -c .)"
-          tg_add_block msg "$(tree_lines "$_entries")"
+          # 后端标识是机器值 → <code>；回退原因是自然语言，放说明段而不是留在取值行里，
+          # 否则同一节出现 code/裸交错（规范 2.3 节）
+          tg_add_section msg "🤖 AI 网关 · 1"
+          tg_add_block msg "$(tree_lines "后端：<code>${_ai_note}</code>")"
+          if [ -n "$AI_FALLBACK_REASON" ]; then
+            tg_add_note msg "回退原因：${AI_FALLBACK_REASON}"
+          fi
           # footer 读 TG_RUN_URL/TG_RUN_STARTED_AT（由本 step 的 env 注入）
           tg_add_footer msg
-          # 走发送层而非 curl 直发：429 重试已内建，HTML 解析失败直接报错（规范 第 5 章），
+          # 走发送层而非 curl 直发：429 重试已内建，HTML 解析失败直接报错（规范 第 6 章），
           # 429 限流按 retry_after 等待重试，disable_web_page_preview 内置
           send_tg "$msg" || true
           echo "已推送 SSH 入口通知: ssh runner@${TS_HOST}（AI 网关: ${AI_BACKEND}）"
@@ -1283,7 +1288,7 @@ jobs:
             export FALLBACK_REINSTALL_DURATION_SEC="$fallback_reinstall_duration_sec"
             # 统一 HTML 版式 + 统一收尾区（动态值一律转义；日志收敛 <pre> 等宽块；
             # HTML 解析失败直接报错不重发——修复"声明 parse_mode=HTML 但未转义"的隐患）
-            # 失败阶段英文 token → 中文标签（规范 第 4 章：英文原因 token 不得直出通知）
+            # 失败阶段英文 token → 中文标签（规范 5.5 节：英文原因 token 不得直出通知）
             fail_stage_label=""
             if [ -n "$fail_stage" ]; then
               case "$fail_stage" in
@@ -1303,7 +1308,7 @@ jobs:
             [ -n "$fail_stage_label" ] && tg_add_kv msg "失败阶段" "$fail_stage_label"
             [ -n "$current_version" ] && tg_add_path msg "当前版本" "$current_version"
             [ -n "$fallback_version" ] && tg_add_path msg "回退版本" "$fallback_version"
-            # 英文 token 不直出通知（规范 第 4 章）：known_good_file / meta_lastTouchedVersion → 中文
+            # 英文 token 不直出通知（规范 5.5 节）：known_good_file / meta_lastTouchedVersion → 中文
             if [ -n "$fallback_version_source" ]; then
               case "$fallback_version_source" in
                 known_good_file) _fvs="known-good 版本文件" ;;
@@ -1333,7 +1338,7 @@ jobs:
           # （2026-09-05 复审发现：此前本 step 未注入，约 5 处归档告警从未发出）
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          # 收尾区接线（规范 第 6 章）：缺了只能走 runner 开机时刻兜底（同类 step 均已注入）
+          # 收尾区接线（规范 4.9 节）：缺了只能走 runner 开机时刻兜底（同类 step 均已注入）
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
           TG_RUN_STARTED_AT: ${{ github.run_started_at }}
         if: ${{ always() }}
@@ -1590,13 +1595,13 @@ jobs:
               source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
               local full_msg=""
               tg_add_title full_msg "⚠️ OpenClaw 归档告警"
-              # 告警正文是 rclone/tar 的多行原始输出 → <pre>（裁决 8：多行日志 → <pre>，
-              # 此前塞进单个  说明段，跨行斜体且英文 token 直出）
+              # 告警正文是 rclone/tar 的多行原始输出 → <pre>（4.7 节：多行日志 → <pre>，
+              # 此前塞进单个 <i> 说明段，跨行斜体且英文 token 直出）
               tg_add_block full_msg "<pre>$(escape_html "$msg")</pre>"
-              # Run ID 属机器值 → <code>（语义表 #3）
+              # Run ID 属机器值 → <code>（4.4 节）
               tg_add_path full_msg "Run ID" "${run_id}"
               TG_RUN_STARTED_AT="${TG_RUN_STARTED_AT:-}" tg_add_footer full_msg
-              # 走发送层而非 curl 直发：429 重试已内建，HTML 解析失败直接报错（规范 第 5 章），
+              # 走发送层而非 curl 直发：429 重试已内建，HTML 解析失败直接报错（规范 第 6 章），
               # 429 限流按 retry_after 等待重试，disable_web_page_preview 内置
               send_tg "$full_msg" || true
             fi
@@ -1726,7 +1731,7 @@ jobs:
               tg_add_title msg "⚠️ OpenClaw 即将进入最终归档"
               # 值只写时长，"后执行"由标签「预计」表达（值不重复标签语义）
               tg_add_kv msg "预计" "约 ${FINAL_ARCHIVE_WARNING_BEFORE_MINUTES} 分钟"
-              # 说明段只装说明；"随后执行：…" 是 kv 形态，此前整行塞进  说明段
+              # 说明段只装说明；"随后执行：…" 是 kv 形态，此前整行塞进 <i> 说明段
               tg_add_note msg "请及时保存状态或完成当前操作。"
               tg_add_kv msg "随后执行" "Stop OpenClaw and Final Archive"
               tg_add_footer msg
@@ -1781,7 +1786,7 @@ jobs:
               source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
               local full_msg=""
               tg_add_title full_msg "⚠️ OpenClaw 归档告警"
-              # 与 send_telegram_alert 同版式（此前一个用  说明段、一个用  kv，
+              # 与 send_telegram_alert 同版式（此前一个用 <i> 说明段、一个用 <b> kv，
               # 同一标题两种形态）：多行原始输出 → <pre>；Run ID 属机器值 → <code>
               tg_add_block full_msg "<pre>$(escape_html "$msg")</pre>"
               tg_add_path full_msg "Run ID" "$run_id"
