@@ -36,8 +36,9 @@
 
 | 触发 | 模式来源 |
 |---|---|
-| 定时（`cron: 0 2,8,14,20 * * *`） | 仓库变量 `vars.EMBY_PLAYBACK_MODE`，缺省 `302` |
-| 手动 `workflow_dispatch` | 输入项 `playback_mode`（`302` / `direct`）；另有两个清理开关 `clear_emby_cache`（清空 `/mnt/emby-cache` 图片缓存）与 `clear_warm_state`（清空预热统计），见下 |
+| **自续触发（常态）** | 上一轮收尾用 `gh workflow run` 立刻起下一轮，中间不留空档；模式沿用默认值 |
+| 定时（`cron: 0 2,8,14,20 * * *`，**兜底**） | 仓库变量 `vars.EMBY_PLAYBACK_MODE`，缺省 `302`。只在接力链条断裂（run 被杀/失败且接力 step 没跑到）时才真正起作用 |
+| 手动 `workflow_dispatch` | 输入项 `playback_mode`（`302` / `direct`）；另有 `run_minutes`（本轮保留时长，调试可填 8）、`self_retrigger`（收尾是否起下一轮）、`clear_emby_cache`、`clear_warm_state`，见下 |
 | `watch` | 同定时 |
 
 **清理开关**（仅手动触发生效，在 restore 之后、Emby 启动之前执行）：
@@ -54,9 +55,21 @@
 
 ### 并发与时长
 
-- `concurrency: emby-singleton` —— 同时只允许一个 run，后来的排队而不打断
-- `sleep 340m`（约 5 小时 40 分）—— 留出余量给每 6 小时一次的定时触发
+- `concurrency: emby-singleton` —— 同时只允许一个 run，后来的排队而不打断（自续触发正是靠它排成一条链）
+- 保留时长由 `EMBY_RUN_MINUTES` 控制（默认 `270`）。⚠️ **GitHub job 硬上限 6 小时**（含 5 分钟宽限）：保留时长 + 启动恢复 + 收尾备份必须全部留在 6h 内
 - run 结束即销毁 runner，所有状态靠云端备份延续
+
+### 流式接力（为什么改成自续触发）
+
+一轮跑完再等 cron 会有空档，而把 cron 调高频（`*/5`）又会撞上 GitHub 对高频定时的限流、
+并造成队列积压（实测排队 3h41m 才开跑）。所以改成：**收尾最后一步立刻 dispatch 下一轮**，
+cron 退回 6 小时一档只做兜底。三道护栏：
+
+| 护栏 | 行为 |
+|---|---|
+| 开关 `self_retrigger` | 手动触发可关（调试时关掉，本轮结束后完全静止） |
+| 人工取消不接力 | job conclusion 为 cancelled 且运行 < 5h50m（≈非 6h 上限导致）时不接力，避免跟你手动取消对着干 |
+| 防堆积 | 已存在排队/等待中的 run 就跳过（cron 也会创建排队 run） |
 
 ---
 
@@ -88,6 +101,14 @@
 | `PLAYBACK_MODE_INPUT` | 归一化后的模式入参（手动输入优先，其次仓库变量，最后 `302`） |
 | `TZ` | 固定 `Asia/Shanghai`，统一所有日志与通知的时间戳 |
 | `EMBY302_DIR` | 脚本目录，各步骤 `source $EMBY302_DIR/lib.sh` 复用公共函数 |
+| `EMBY_RUN_MINUTES` | 本轮保留时长（默认 `270`），手动触发可用 `run_minutes` 覆盖（调试填 8） |
+| `EMBY_BACKUP_EVERY_MIN` | 运行期增量备份间隔（默认 `25` 分钟） |
+| `EMBY_BACKUP_DEST` | 增量备份远端目录（默认 `onedrive:backup/emby/live`），同时是恢复侧第 ① 级来源 |
+| `EMBY_FULL_BACKUP` | 收尾全量打包：`auto`（按剩余预算决定，默认）/ `0`（永远关） |
+| `EMBY_FULL_BACKUP_ETA` | 全量打包预计耗时（默认 `2400`s），收尾据此判断预算够不够 |
+| `EMBY_JOB_BUDGET` | job 总预算（默认 `20400`s = 5h40m），超过就不再启动任何耗时操作 |
+| `EMBY_PREFETCH` | 直链预热器开关（默认 `1`），见[起播慢怎么定位](#起播慢怎么定位) |
+| `EMBY_PREFETCH_MAX_DIRS` | 目录回填上限（默认 `400` 个目录） |
 
 ---
 
@@ -350,11 +371,14 @@ HTML 解析失败不重发、429 限流保留重试——与全库其余通知�
 
 ## 8. 数据与备份
 
-### 恢复（三级降级，任一通过即止）
+### 恢复（四级降级，任一通过即止）
 
 ```
-① OneDrive 流式：rclone cat onedrive:backup/emby/emby-backup.tar.zst | tar -I zstd -xf -
-      （30GB 级 tarball 不落本地盘，流式解压）
+① 增量目录：onedrive:backup/emby/live —— 上一轮运行期持续同步、收尾又补过一次的
+      最新关键数据（data / config / plugins / metadata），不含图片缓存。体量小、恢复快，
+      是最新的，所以排在最前
+② OneDrive 流式：rclone cat onedrive:backup/emby/emby-backup.tar.zst | tar -I zstd -xf -
+      （30GB 级 tarball 不落本地盘，流式解压；含图片缓存，但可能已是几轮之前的进度）
 ② Dropbox 流式：rclone cat dropbox:self-hosted/emby-backup.tar.zst | tar -I zstd -xf -
       （同样不落本地盘——根分区 ≈14GB 容不下 30GB 级 tarball）
 ③ Dropbox 目录：dropbox:self-hosted/emby → 整目录拷贝（**唯一会落盘的兜底**，
@@ -374,13 +398,30 @@ HTML 解析失败不重发、429 限流保留重试——与全库其余通知�
 
 > 只输出计数，绝不打印用户名与媒体路径明细。
 
-### 回传
+### 回传：运行期增量 + 收尾全量
 
-- **Emby**：流式 `tar | rclone rcat` 回传 `onedrive:backup/emby/emby-backup.tar.zst`（排除 `logs`、`transcoding-temp`）
+**为什么改**：旧方案是收尾一次性打包 30GB 级 tarball 上传，而 `sleep 340m` + 启动恢复
+已经吃掉 5h45m，必然越过 GitHub job 6h 硬上限——实测两轮都精确死在 6h05m，备份 step
+每轮被 SIGTERM（exit 143），**关键数据一轮都没落过云端**，收尾通知也恒 skipped。
+
+```
+运行期（每 EMBY_BACKUP_EVERY_MIN=25 分钟，后台常驻 /opt/emby_incbak.sh）
+   SQLite 用 VACUUM INTO 做一致性快照（Emby 运行中直接 cp 可能拿到撕裂页）
+   → rclone copy 到 onedrive:backup/emby/live（排除 cache / logs / transcoding-temp）
+收尾（Emby 优雅停机后，/opt/emby_incbak.sh once）
+   ① 增量同步（必做）：此时 Emby 已停，这份快照最一致，只补最后一轮差量
+   ② 全量打包（可选）：仅当剩余时间预算够（EMBY_JOB_BUDGET − 已运行 − ETA > 0）
+      才 tar|zstd|rcat 上传含缓存的全量包；不够就跳过——缓存丢了只是重新冷读，
+      绝不能为了它把关键数据一起拖过 6h 上限
+```
+
+用 `rclone copy` 而非 `sync`：远端不会被"本轮快照恰好缺失"误删。
+
 - **OpenList**：`config.json` + `data.db` 同步到 `dropbox:self-hosted/openlist-emby/`，
   且**仅当 `fs/list` 实测通过**才回传，防止空数据覆盖远端
 - 前置闸门：只有 `install emby` 校验通过才会 `touch /tmp/EMBY_READY_FOR_BACKUP`，
-  收尾步骤见到该标记才允许打包
+  收尾步骤见到该标记才允许回传
+- 结果落 `/tmp/emby-backup-result`，收尾通知的「数据备份」行与接力 step 都会回显它
 
 ### 磁盘预检
 
@@ -411,6 +452,19 @@ HTML 解析失败不重发、429 限流保留重试——与全库其余通知�
 ├── emby_guard.py    Emby 数据完整性校验（恢复后/备份前）
 └── lib.sh           公共 shell 函数库（被各步骤 source）
 ```
+
+### 9.0 运行时生成的常驻脚本
+
+由各步骤 heredoc 写到 runner 上、不在仓库里。前两个是 2026-09-12 新增：
+
+| 脚本 | 作用 | 日志 |
+|---|---|---|
+| `/opt/emby_incbak.sh` | 运行期增量备份（后台循环；`once` 参数 = 只跑一次，收尾用） | `/opt/logs/incbackup.log` |
+| `/opt/odwarm.sh` | 直链预热器：`dir_cache` 批量回填 + 详情页预取 | `/opt/logs/odwarm.log` |
+| `/opt/warmup.sh` | 五段预热 + 链路基线测量 | `/opt/logs/warmup.log` |
+| `/opt/wallwarmer.sh` | 全库海报预热 | `/opt/logs/wallwarm.log` |
+| `/opt/playlog.sh` | 播放监听与播放通知 | `/opt/logs/playlog.log` |
+| `/opt/watchdog.sh` | 直链链路探活与自动回退 | `/opt/logs/watchdog.log` |
 
 ### 9.1 `odlink.py`
 
@@ -532,6 +586,8 @@ sudo EMBY_USER="$EMBY_USER" python3 emby_guard.py <emby-data-root>   # 例：/va
 | `/opt/logs/emby-console.log` | Emby 侧：起播时的 ffprobe / ffmpeg 记录——**定位"点击播放要等很久"的关键现场** |
 | `/opt/logs/warmup.log` | 预热耗时：直链冷解析均值 + 挂载冷读均值（判断起播慢在哪一层的量化依据） |
 | `/opt/logs/wallwarm.log` | 全库海报预热：本轮覆盖页数与请求数、宽度档位、是否触发时长/磁盘/停机保护 |
+| `/opt/logs/incbackup.log` | 运行期增量备份：每轮快照的文件数与体积、上传耗时、失败原因 |
+| `/opt/logs/odwarm.log` | 直链预热器：目录回填进度（个/累计秒）、详情页预取命中 |
 | `/opt/logs/cloudflared.log` | 隧道 e 的运行日志（回退后另写 `cloudflared-direct.log`） |
 
 收尾步骤会把 `playlog.log`（80 行）、`ge2o.log`（60 行 + 按类型的耗时统计）、`odlink.log`（60 行）、
@@ -550,6 +606,8 @@ sudo EMBY_USER="$EMBY_USER" python3 emby_guard.py <emby-data-root>   # 例：/va
 | `oe.<VD>.eu.org` 登录不上 | 是否收到 `🔐 OpenList 凭据` 通知 | 没收到 = 密码没变，用 `admin` + `OPENLIST_ADMIN_PASSWORD`；收到 = 用通知里的密码（仅本轮有效） |
 | Emby 启动成空库 | `install emby` 步骤 | 恢复三级全失败，或 `emby_guard.py` 校验不通过 |
 | 备份没回传 | 收尾步骤 | `/tmp/EMBY_READY_FOR_BACKUP` 不存在（Emby 未成功启动），或磁盘预检未过 |
+| 通知「数据备份」显示`全量跳过（预算不足）` | `incbackup.log` + 收尾步骤 | 保留时长设太长或启动恢复太慢，剩余预算不够全量打包。**关键数据已增量同步**，只是图片缓存本轮不回传；调小 `EMBY_RUN_MINUTES` 即可 |
+| 恢复走了旧的全量包 | `install emby` 步骤 | 增量目录 `onedrive:backup/emby/live` 为空或校验失败（看该步骤是否打印`增量恢复校验不通过`） |
 | 播放通知片名显示`未知` | 归档的 `playlog.log` | 反查全程 401 = secret 密钥在恢复库里失效（Tokens_2 中无此登录态或 IsActive=0）。`run emby` 步骤启动前会把 secret 密钥以专属设备登录态写回 `authentication.db` 并激活（幂等自愈）；若日志出现"密钥自愈失败"则需人工核对 Emby 版本 schema |
 | 播放通知没来 | `playlog.log` 的 TG 通道自检 | ge2o 日志格式变化 / Emby 401 / 300s 去重窗口内 |
 | 点击播放后要等很久才起播 | 播放通知的**「起播等待」段**（访问链：Cloudflare → Emby → OneDrive 各一行）→ `warmup.log` / `emby-console.log` | 按秒数定位段：**"抽字幕"大** = Emby 侧 ffprobe / 内封字幕提取（走挂载随机读，可让"起播准备预热"提前付掉）；**"取直链"大** = odlink 冷解析（未命中 `dir_cache`，扩 `WU_ITEMS`，目录预热 1b 会批量回填）；**各项都小却仍慢** = 卡在你播放器侧（联网 + 缓冲，服务器测不到），或链路行显示`🔁 视频流经 runner 中转到网盘`（转码）——见下方"起播慢怎么定位" |
@@ -643,6 +701,11 @@ sudo EMBY_USER="$EMBY_USER" python3 emby_guard.py <emby-data-root>   # 例：/va
 | 想改什么 | 改哪里 |
 |---|---|
 | 播放模式默认值 | workflow `env.PLAYBACK_MODE_INPUT` 的兜底值 / 仓库变量 `EMBY_PLAYBACK_MODE` |
+| 保留时长 | workflow `env.EMBY_RUN_MINUTES`（默认 270；手测可用 `run_minutes` 覆盖）。⚠️ 总时长必须留在 6h 内 |
+| 增量备份（间隔/远端） | `EMBY_BACKUP_EVERY_MIN` / `EMBY_BACKUP_DEST`；脚本 `start incremental backup` 步骤的 `/opt/emby_incbak.sh` |
+| 全量打包是否做 | `EMBY_FULL_BACKUP`（auto/0）、`EMBY_FULL_BACKUP_ETA`、`EMBY_JOB_BUDGET`；判断逻辑在 `backup emby data` 步骤 |
+| 直链预热器 | `EMBY_PREFETCH` / `EMBY_PREFETCH_MAX_DIRS`；脚本 `start link prefetcher` 步骤的 `/opt/odwarm.sh` |
+| 自续触发（接力） | workflow 末尾「自续触发（下轮接力）」步骤：三道护栏见[流式接力](#流式接力为什么改成自续触发) |
 | 探活判据与重试次数 | `run cloudflared` 步骤的探活循环、`/opt/watchdog.sh` heredoc |
 | odlink 分流规则 | `odlink.py` 的 `do_POST` |
 | odlink 路径解析策略（缓存 / 一次寻址 / 逐段兜底） | `odlink.py` 的 `resolve()` 与 `_resolve_drill()`；列目录回填缓存在 `list_children()` |
