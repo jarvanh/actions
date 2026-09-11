@@ -15,13 +15,20 @@ mihomo 内核 / 订阅供应商 / 节点快照 / 节点切换；测速引擎换�
 「测速看到的出口 IP == runner 直连出口 IP」校验规则是否真的生效——规则失灵或 TUN 起不来时会
 静默直连、整轮结果失真，这个校验必须存在（bypass 命中即判失败）。
 
-测速点口径（默认动态就近，不写死编号）：Ookla 的服务器列表按**请求方出口 IP** 返回，
-GitHub runner（Azure 出口）看不到中国大陆节点，境外出口节点看到的也只有本地列表（实测
-出口在新加坡时 10 条全是新加坡、CN=0；--server-id 指定不在列表里的编号必然
-NoServersException，历史事故：33 节点全失败却报 success）。所以默认不锁编号：每个节点用
-自己出口可见列表里最近的测速点；显式 OOKLA_SERVER_ID 只在该编号出现在该节点可见列表里时
-才锁定（同口径横评用，且要求各节点出口同地区）；锁点在本节点不可用时按该节点出口重选，
-**换点结果会在通知里明确标注**，绝不静默换口径。
+测速点口径（按目标地区检索 + 锁定，不写死老编号）：
+  1. CLI 自己的列表（`-L` / 不带 --server-id 的自动选点）由 Ookla 按**请求方出口 IP**
+     生成：境外出口节点看到的整张列表都是境外点（实测出口在新加坡时 10 条全是新加坡、
+     CN=0），所以「就近」这条路永远拿不到大陆点；
+  2. 但 `--server-id` **不受该列表限制**（2026-09-11 实测：从境外出口指定不在就近 10 条
+     里的新加坡 12687 / 上海 24447 / 苏州 16204 全部测通）——报 NoServersException 是
+     **编号被 Ookla 下线**，不是地理不可见。旧实现把两者混为一谈、据此放弃锁点，是错的；
+  3. 因此默认走「按目标地区检索」：用目标经纬度（默认广州→上海→北京）向 Ookla 服务器
+     列表 API 要候选点（该 API 与请求方出口无关），按 运营商关键词 → 距目标距离 排序，
+     锁定编号后所有节点同口径复用；
+  4. 广州/广东实测 CN 测速点数量为 0（最近的是港澳），全大陆当前只剩苏州 16204 /
+     昆山 30852 / 上海 24447 三个点（仅 24447 是联通）——会如实标注「距目标 xxxkm」；
+  5. 编号失效才顺延下一个候选；节点连不上**不换点**（那就是测量结果）；候选全失效才
+     退回按节点出口就近，且**在通知里明确标注**，绝不静默换口径。
 
 设计原则（与 speedtest.py / taier_speedtest.py 一致）：
   - 共享能力一律 import 复用：纯共享层来自 speedtest_common，mihomo/订阅源来自
@@ -33,6 +40,7 @@ NoServersException，历史事故：33 节点全失败却报 success）。所以
 """
 import html
 import json
+import math
 import os
 import pathlib
 import re
@@ -90,26 +98,13 @@ RESULT_JSON = HOME_RUNTIME / 'ookla_speedtest_result.json'
 # 落地文件名固定，供 PROCESS-NAME 进程规则匹配
 OOKLA_FALLBACK_BIN = HOME_RUNTIME / 'ookla-speedtest'
 
-# 已知测速点编号 → 人类可读标签（仅用于通知展示；id 来自社区维护的国内测速点清单
-# https://github.com/reizhi/speedtest-cn-server-list ，Ookla 侧会随运营调整失效；
-# 未收录的编号按 CLI 返回的 location/name 自动生成）
-SERVER_LABELS = {
-    '26678': '广东广州 · 联通5G',
-    '27594': '广东广州 · 电信5G',
-    '24447': '上海 · 联通5G',
-    '27154': '天津 · 联通5G',
-    '4870': '湖南长沙 · 联通5G',
-    '5039': '山东济南 · 联通',
-    '4863': '陕西西安 · 联通',
-    '13704': '江苏南京 · 联通',
-    '33995': '浙江杭州 · 联通',
-    '5726': '重庆 · 联通',
-    '37235': '辽宁沈阳 · 联通',
-    '36646': '河南郑州 · 联通5G',
-    '4884': '福建福州 · 联通',
-    '5485': '湖北武汉 · 联通',
-    '5674': '广西南宁 · 联通',
-}
+# 测速点标签：一律由 CLI / 服务器 API 返回的 location · name 生成，运行时缓存。
+#
+# 为什么不再维护「编号 → 地名」硬编码表：2026-09-11 逐个实测，原表 15 个国内编号里
+# 只有 24447（上海 · 联通5G）还在 Ookla 列表里，26678（广州联通5G）/ 27594 / 27154 /
+# 4870 … 全部 NoServersException —— 是 Ookla 侧把点下线了，不是"地理不可见"。留着
+# 死编号只会把选点引向必然失败的目标，并在通知里显示过期地名。
+_POINT_LABELS = {}
 
 
 def _server_ids():
@@ -126,18 +121,52 @@ def _split_words(raw, default):
     return [x.strip() for x in raw.replace('，', ',').split(',') if x.strip()]
 
 
+def _split_points(raw, default):
+    """目标地区锚点：`"lat,lon lat,lon ..."`（空格/逗号混排都吃），返回 [(lat, lon), ...]。"""
+    raw = (raw or '').strip()
+    if not raw:
+        return list(default)
+    out = []
+    for chunk in raw.replace(';', ' ').split():
+        parts = chunk.replace('，', ',').split(',')
+        if len(parts) != 2:
+            continue
+        try:
+            out.append((float(parts[0]), float(parts[1])))
+        except ValueError:
+            continue
+    return out or list(default)
+
+
+# 默认锚点：广州 → 上海 → 北京。广州放第一位是因为本项目要的就是「节点 → 广东/华南」，
+# 但实测广州/深圳/东莞/佛山经纬度查下来 CN 测速点数量均为 0（最近的全是港澳），
+# 必须逐级扩大才拿得到大陆点 —— 所以后面跟上海、北京兜底。
+DEFAULT_TARGET_POINTS = [(23.1291, 113.2644), (31.2304, 121.4737), (39.9042, 116.4074)]
+
+
 CONFIG = {
-    # 显式测速点编号候选（逗号分隔）。留空（默认）→ 按每个节点出口可见的测速点动态选。
-    # 为什么默认不写死编号：CLI 的 -L 列表按**请求方出口 IP** 就近返回（实测首节点出口
-    # 在新加坡时列表 10 条全是新加坡、CN=0），写死的「广州联通」对境外出口节点根本不可见，
-    # --server-id 指定一个不在列表里的编号会直接 NoServersException、整轮空跑。
+    # 显式测速点编号候选（逗号分隔），优先级最高；留空 → 用下面按目标地区解析出的点。
+    # 注意：--server-id **不受**「就近列表」限制（2026-09-11 实测：从境外出口指定不在
+    # 就近 10 条里的新加坡 12687 / 上海 24447 / 苏州 16204 都能测通），所以只要编号还在
+    # Ookla 列表里就能锁住；报 NoServersException 是**编号本身已失效**，不是地理不可见。
     'OOKLA_SERVER_IDS': _server_ids(),
+    # 目标地区锚点（按序检索）：用经纬度向 Ookla 服务器 API 要「目标区域附近」的点，
+    # 绕开 CLI 列表「按出口 IP 就近返回」的限制 —— 这是能拿到大陆点的唯一入口。
+    'OOKLA_TARGET_POINTS': _split_points(os.environ.get('OOKLA_TARGET_POINTS', ''),
+                                        DEFAULT_TARGET_POINTS),
+    # 目标国家/地区代码（留空 = 不过滤）。CN 实测当前只剩苏州/昆山/上海三个点
+    'OOKLA_TARGET_CC': (os.environ.get('OOKLA_TARGET_CC', 'CN') or '').strip().upper(),
+    # 运营商关键词（按序优先，在 name/sponsor/host 上匹配）；留空 = 只按距离排
+    'OOKLA_TARGET_ISP': _split_words(os.environ.get('OOKLA_TARGET_ISP', ''), ('unicom', '联通')),
+    # 目标点全部失效时，是否退回「按节点出口就近」（0 = 不测，避免拿不相干的数据充数）
+    'OOKLA_ALLOW_NEAREST_FALLBACK': (os.environ.get('OOKLA_ALLOW_NEAREST_FALLBACK', '1') or '1')
+                                     .strip().lower() not in ('0', 'false', 'no'),
     # 动态选点偏好关键词（按序在 name/location/country 上匹配），命不中就用列表首个（就近）。
     # 默认空 = 不加偏好。别放 CN 关键词：可见列表按节点出口就近返回，境外出口根本没有
     # CN 测速点，广州/Guangdong 类关键词永远命不中（2026-09-11 诊断实测：出口在新加坡
     # 时列表 10 条全是新加坡、CN=0）
     'OOKLA_SERVER_PREFER': _split_words(os.environ.get('OOKLA_SERVER_PREFER', ''), ()),
-    # 测速点标签覆盖（留空按 SERVER_LABELS / CLI 返回的 location 自动生成）
+    # 测速点标签覆盖（留空按 CLI / 服务器 API 返回的 location · name 自动生成）
     'OOKLA_SERVER_LABEL': (os.environ.get('OOKLA_SERVER_LABEL', '') or '').strip(),
     # 0 = 不限（默认）
     'OOKLA_MAX_NODES': int(os.environ.get('OOKLA_MAX_NODES', '0') or 0),
@@ -157,20 +186,29 @@ VERSION = {'ookla': '', 'mihomo': ''}
 # 与真实进程名严格一致，否则进程规则不命中会静默直连
 OOKLA_BIN = ''
 
-# 测速点状态：explicit_ids = 显式指定候选；locked = 当前锁定的测速点编号（同一出口地区
-# 的节点复用，换地区导致失败时按该节点出口重新选，见 run_ookla）
-_SERVER_STATE = {'explicit_ids': list(CONFIG['OOKLA_SERVER_IDS']), 'locked': ''}
+# 测速点状态：
+#   explicit_ids  显式指定候选（OOKLA_SERVER_ID），优先级最高
+#   candidates    按目标地区（经纬度 + cc + 运营商）解析出的候选编号，已按优先级排序
+#   locked        当前锁定的测速点编号（所有节点同口径复用）
+#   dead          Ookla 侧已失效的编号（NoServersException），本轮不再尝试
+#   fallback      是否已进入「按节点出口就近」兜底（目标点全失效/目标区域无点）
+_SERVER_STATE = {'explicit_ids': list(CONFIG['OOKLA_SERVER_IDS']), 'candidates': [],
+                 'locked': '', 'dead': set(), 'fallback': False}
+
+# 本轮目标地区解析结果摘要（供通知标注「实际用了什么点、离目标多远」）
+TARGET_INFO = {'origin': CONFIG['OOKLA_TARGET_POINTS'][0] if CONFIG['OOKLA_TARGET_POINTS'] else '',
+               'label': '', 'note': ''}
+
+# Ookla 服务器列表 API（与官方 CLI 同源的 js engine 端点）。支持 lat/lon 检索，
+# 因此与请求方出口 IP 无关——这是境外出口也能拿到大陆点的关键。
+# 注意：该端点对简略 UA（如 "Mozilla/5.0"）直接 403，必须带完整浏览器 UA。
+_SERVERS_API = 'https://www.speedtest.net/api/js/servers'
+_UA = ('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
+       '(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36')
 
 # CLI 可选参数开关：--progress=no 关掉进度条（避免它混进 stdout 破坏 JSON 解析）。
 # 该写法若被某个 CLI 版本拒绝，首次失败后自动去掉并记日志（不让整轮测速白跑）。
 _CLI_FLAGS = {'progress': True}
-
-# CLI 报「测速点找不到 / 连不上」的特征（用于区分「测速点坏了」与「节点坏了」）
-_SERVER_ERROR_HINTS = (
-    'server not found', 'no server', 'server unavailable', 'invalid server',
-    'cannot connect to server', 'unable to connect to server', 'failed to connect to server',
-    'server selection',
-)
 
 # CLI 报「参数不认」的特征（用于 --progress 的自动降级）
 _BAD_FLAG_HINTS = ('invalid', 'unknown', 'unexpected', 'possible values', 'unrecognized')
@@ -365,11 +403,6 @@ def direct_egress_ip():
 # ---------------------------------------------------------------------------
 # 测速执行与解析
 # ---------------------------------------------------------------------------
-def _looks_like_server_error(text):
-    low = str(text or '').lower()
-    return any(hint in low for hint in _SERVER_ERROR_HINTS)
-
-
 def parse_ookla_json(stdout: str):
     """从 CLI stdout 提取结果 JSON。
 
@@ -459,47 +492,82 @@ def _run_ookla_once(server_id, timeout=None):
     return rc, out, err
 
 
-def _looks_like_point_unavailable(parsed, err):
-    """CLI 拿不到测速点（区别于节点自身故障）：才值得为该节点重新选点。"""
+def _is_dead_point(parsed, err):
+    """NoServersException = 该编号在 Ookla 侧已下线（与节点、与出口地区都无关）。
+
+    必须和「连不上」区分开：
+      - NoServersException / No servers defined → 编号失效，换下一个候选（全局标记）
+      - Cannot read / Latency test failed / 超时  → 节点到该点不通，这**就是**测量结果，
+        记失败即可，绝不能换个点把难看的数据盖掉
+    """
     text = f"{parsed.get('error', '')}\n{err}".lower()
-    return _looks_like_server_error(text) or 'noserversexception' in text
+    return 'noserversexception' in text or 'no servers defined' in text
+
+
+def _candidate_ids():
+    """本节点要尝试的编号顺序：已锁定的 → 显式指定 → 目标地区解析结果（跳过已失效的）。"""
+    ordered = []
+    locked = _SERVER_STATE['locked']
+    if locked and locked not in _SERVER_STATE['dead']:
+        ordered.append(locked)
+    for sid in list(_SERVER_STATE['explicit_ids']) + list(_SERVER_STATE['candidates']):
+        if sid and sid not in ordered and sid not in _SERVER_STATE['dead']:
+            ordered.append(sid)
+    return ordered
+
+
+def _run_nearest(name, prev_sid):
+    """兜底路径：按**本节点**出口可见列表就近选点（列表由 CLI 按出口 IP 返回）。"""
+    servers = list_servers()
+    if not servers:
+        return 2, '', 'server list unavailable（本节点拉不到测速点列表）', \
+            parse_ookla_result(None), prev_sid, 'no_server_list'
+    sid, reason = pick_server_id(servers)
+    _POINT_LABELS.setdefault(sid, next((server_hint(s) for s in servers if s['id'] == sid), ''))
+    rc, out, err = _run_ookla_once(sid)
+    parsed = parse_ookla_result(parse_ookla_json(out))
+    log_progress('ookla_nearest_used', point_id=sid, reason=reason, name=name)
+    return rc, out, err, parsed, sid, 'nearest_fallback'
+
+
+def server_hint(item):
+    """列表项 → 「location · name」展示串（列表项字段与 CLI 结果字段同构）。"""
+    return ' · '.join(x for x in (str(item.get('location') or ''),
+                                  str(item.get('name') or '')) if x)
 
 
 def run_ookla(name: str):
     """跑一次测速，返回 (rc, out, err, parsed, sid, note)。
 
-    note: '' = 用当前锁定测速点；'reselected' = 锁点在本节点不可用、已按本节点出口重选；
+    note: '' = 用锁定测速点；'reselected' = 换了候选（前一个编号已失效）；
+    'nearest_fallback' = 目标点全部失效，已退回本节点出口就近；
     'no_server_list' = 本节点连测速点列表都拉不到（控制面不通，属引擎级问题）。
 
-    为什么必须按节点选点：CLI 的 -L 列表按**请求方出口 IP** 就近返回（实测出口在新加坡的
-    节点列表里 10 条全是新加坡、CN=0），写死的编号在异地出口节点上必然 NoServersException。
-    同出口地区的节点复用锁定值省一次列表调用，只有「锁点在本节点拿不到」时才重新列/选。
+    锁点口径：所有节点尽量用同一个编号（横评才有意义）。编号失效才顺延下一个候选，
+    节点连不上不换点——换点只在「编号没了」这一种情况下发生。
     """
-    sid = _SERVER_STATE['locked']
-    if sid:
+    if _SERVER_STATE['fallback']:
+        return _run_nearest(name, _SERVER_STATE['locked'])
+
+    prev = _SERVER_STATE['locked']
+    for sid in _candidate_ids():
         rc, out, err = _run_ookla_once(sid)
         parsed = parse_ookla_result(parse_ookla_json(out))
-        if rc == 0 and parsed['ok']:
-            return rc, out, err, parsed, sid, ''
-        if not _looks_like_point_unavailable(parsed, err):
-            # 节点自身故障（超时/连不上/被拒）：不重选，避免把节点问题误判成测速点问题
-            return rc, out, err, parsed, sid, ''
-        log_progress('ookla_point_unusable_on_node', point_id=sid, name=name)
+        if _is_dead_point(parsed, err):
+            _SERVER_STATE['dead'].add(sid)
+            log_progress('ookla_point_dead', point_id=sid, name=name)
+            continue
+        _SERVER_STATE['locked'] = sid
+        return rc, out, err, parsed, sid, ('' if (not prev or sid == prev) else 'reselected')
 
-    servers = list_servers()
-    if not servers:
-        return 2, '', 'server list unavailable（本节点拉不到测速点列表）', \
-            parse_ookla_result(None), sid, 'no_server_list'
-    new_sid, reason = pick_server_id(servers)
-    if new_sid == sid:
-        # 重选还是同一个 ⇒ 不是「锁点不可用」的问题，没必要重复跑
-        return rc, out, err, parsed, sid, ''
-    log_progress('ookla_point_selected', from_point_id=sid, to_point_id=new_sid,
-                 reason=reason, name=name)
-    _SERVER_STATE['locked'] = new_sid
-    rc2, out2, err2 = _run_ookla_once(new_sid)
-    parsed2 = parse_ookla_result(parse_ookla_json(out2))
-    return rc2, out2, err2, parsed2, new_sid, 'reselected'
+    # 走到这里 = 候选编号全被 Ookla 下线（典型：社区清单里的老编号），
+    # 或目标区域压根没解析出点（典型：只要广州一个锚点 + cc=CN）
+    if not CONFIG['OOKLA_ALLOW_NEAREST_FALLBACK']:
+        return 3, '', '目标测速点全部失效（未开启就近兜底）', \
+            parse_ookla_result(None), prev, 'no_target'
+    _SERVER_STATE['fallback'] = True
+    log_progress('ookla_target_exhausted', dead=sorted(_SERVER_STATE['dead']), name=name)
+    return _run_nearest(name, prev)
 
 
 # ---------------------------------------------------------------------------
@@ -559,6 +627,127 @@ def list_servers(timeout=90):
     if not servers:
         log_progress('ookla_server_list_empty', rc=rc, error=(err or '').strip()[-200:])
     return servers
+
+
+# ---------------------------------------------------------------------------
+# 目标地区检索：绕开「列表按出口 IP 就近返回」的唯一入口
+#
+# CLI 自己的列表（`-L` 与不带 --server-id 的自动选点）由 Ookla 按**请求方出口 IP** 生成，
+# 节点出口在境外时整张列表都是境外点，大陆点一个都没有 —— 想测「节点 → 大陆」就必须
+# 换条路：Ookla 的服务器列表 API 支持按经纬度检索，与请求来源无关。实测（2026-09-11）
+# 广州/深圳/东莞/佛山经纬度查下来 CN 点数量均为 0，全大陆只剩苏州 16204 / 昆山 30852 /
+# 上海 24447 三个点，其中只有 24447 是联通。
+# ---------------------------------------------------------------------------
+def _http_json(url, timeout=20, via_proxy=None):
+    """取 JSON；可经 mihomo mixed-port 换出口重试（直连被 speedtest.net 403/429 时）。"""
+    handlers = [urllib.request.ProxyHandler({'http': via_proxy, 'https': via_proxy})] \
+        if via_proxy else []
+    opener = urllib.request.build_opener(*handlers)
+    req = urllib.request.Request(url, headers={
+        'User-Agent': _UA,
+        'Accept': 'application/json, text/plain, */*',
+        'Cache-Control': 'no-cache',
+    })
+    with opener.open(req, timeout=timeout) as r:
+        return json.loads(r.read().decode('utf-8', 'ignore'))
+
+
+def _distance_km(a, b):
+    """两点球面距离（km）。"""
+    lat1, lon1, lat2, lon2 = (math.radians(v) for v in (a[0], a[1], b[0], b[1]))
+    h = (math.sin((lat2 - lat1) / 2) ** 2
+         + math.cos(lat1) * math.cos(lat2) * math.sin((lon2 - lon1) / 2) ** 2)
+    return 6371.0 * 2 * math.asin(math.sqrt(h))
+
+
+def query_servers_near(lat, lon, limit=20):
+    """按经纬度向 Ookla 服务器 API 取测速点列表（不受请求方出口 IP 影响）。
+
+    直连被拒（403/429，出口 IP 风控）时改走 mihomo mixed-port 换一个出口再试一次。
+    """
+    url = f'{_SERVERS_API}?engine=js&lat={lat}&lon={lon}&limit={limit}'
+    data, last_err = None, ''
+    for via in (None, f'http://127.0.0.1:{MIHOMO_MIXED_PORT}'):
+        try:
+            data = _http_json(url, via_proxy=via)
+            break
+        except Exception as e:
+            last_err = f'{type(e).__name__}: {str(e)[:120]}'
+    if not isinstance(data, list):
+        log_progress('ookla_server_api_failed', lat=lat, lon=lon, error=last_err)
+        return []
+    out = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        sid = str(item.get('id') or '').strip()
+        if not sid:
+            continue
+        try:
+            pos = (float(item.get('lat')), float(item.get('lon')))
+        except (TypeError, ValueError):
+            pos = (lat, lon)
+        # API 字段与 CLI 结果字段对不齐：API 的 name 是城市、sponsor 才是运营方，
+        # 而 CLI 的 location=城市、name=运营方 —— 这里统一成 CLI 的形状
+        out.append({
+            'id': sid,
+            'name': str(item.get('sponsor') or '').strip(),
+            'location': str(item.get('name') or '').strip(),
+            'country': str(item.get('country') or '').strip(),
+            'cc': str(item.get('cc') or '').strip().upper(),
+            'host': str(item.get('host') or '').strip(),
+            'lat': pos[0], 'lon': pos[1],
+        })
+    return out
+
+
+def _isp_rank(item):
+    """运营商关键词命中次序（越小越优先）；全不中 = 排在最后。"""
+    hay = f"{item.get('name', '')} {item.get('host', '')} {item.get('location', '')}".lower()
+    for i, kw in enumerate(CONFIG['OOKLA_TARGET_ISP']):
+        if kw.lower() in hay:
+            return i
+    return len(CONFIG['OOKLA_TARGET_ISP'])
+
+
+def resolve_target_candidates():
+    """按目标地区解析候选测速点：锚点经纬度 → cc 过滤 → 运营商优先 → 距首锚点距离。
+
+    结果写入 _SERVER_STATE['candidates'] 与 _POINT_LABELS，并把「目标附近有没有点 /
+    实际用的点离目标多远」回填到 TARGET_INFO，供通知如实标注。
+    """
+    anchors = CONFIG['OOKLA_TARGET_POINTS']
+    if not anchors:
+        return []
+    origin = anchors[0]
+    pool, seen = [], set()
+    for idx, (lat, lon) in enumerate(anchors):
+        for item in query_servers_near(lat, lon):
+            if item['id'] not in seen:
+                seen.add(item['id'])
+                pool.append(item)
+        if idx < len(anchors) - 1:
+            time.sleep(1.1)  # 该 API 限流约 1 req/s（429 实测）
+    cc = CONFIG['OOKLA_TARGET_CC']
+    if cc:
+        pool = [s for s in pool if s['cc'] == cc]
+    for s in pool:
+        s['distance_km'] = round(_distance_km(origin, (s['lat'], s['lon'])), 1)
+        s['isp_rank'] = _isp_rank(s)
+    pool.sort(key=lambda s: (s['isp_rank'], s['distance_km']))
+    for s in pool:
+        _POINT_LABELS[s['id']] = server_hint(s)
+    _SERVER_STATE['candidates'] = [s['id'] for s in pool]
+    if pool:
+        first = pool[0]
+        TARGET_INFO['label'] = server_hint(first)
+        # 200km 内算「目标附近」，超过就如实说明（默认锚点广州目前必然命中这一支）
+        TARGET_INFO['note'] = f"距目标 {first['distance_km']}km" if first['distance_km'] >= 200 else ''
+    else:
+        TARGET_INFO['note'] = f'目标区域无 {cc} 测速点'.strip() if cc else '目标区域无测速点'
+    log_progress('ookla_target_resolved', cc=cc, anchors=len(anchors),
+                 candidates=_SERVER_STATE['candidates'][:5], note=TARGET_INFO['note'])
+    return pool
 
 
 def pick_server_id(servers):
@@ -635,18 +824,24 @@ def diagnose_on_node():
     """切到节点后的完整探针：列表 → 控制面 → 实测一次 → mihomo 日志。"""
     servers = list_servers()
     _diag(f'server-list count={len(servers)}')
-    ids = [s['id'] for s in servers]
-    _diag(f'server-list contains 26678: {"26678" in ids}')
     for s in servers[:20]:
         _diag('  server: ' + json.dumps(s, ensure_ascii=False))
     cn = [s for s in servers if 'china' in (s['country'] or '').lower() or s['country'] == 'CN']
     _diag(f'server-list CN={len(cn)}: ' + ', '.join(s['id'] for s in cn[:30]))
     diagnose_control_plane()
+    # 目标地区候选（正式测速就用它）：先看解析结果，再逐个试能否测通
+    _diag(f'target candidates={_SERVER_STATE["candidates"]} note={TARGET_INFO["note"]}')
+    for sid in _candidate_ids()[:3]:
+        rc, out, err = _run_ookla_once(sid, timeout=90)
+        parsed = parse_ookla_result(parse_ookla_json(out))
+        _diag(f'target probe point={sid} rc={rc} ok={parsed["ok"]} '
+              f'down={parsed["download_mibs"]:.2f}MiB/s up={parsed["upload_mibs"]:.2f}MiB/s '
+              f'latency={parsed["latency_ms"]} dead={_is_dead_point(parsed, err)} '
+              f'error={parsed.get("error", "")[:120]}')
     if not servers:
         _diag('measure skipped: 本节点拉不到测速点列表')
     else:
-        # 重构后 _SERVER_STATE 只有 explicit_ids/locked，没有旧游标 ids/pos；
-        # 诊断实测按与正式测速同规则的动态选点走
+        # 就近兜底路径：按与正式测速同规则选一个，对比目标点的结果
         sid, reason = pick_server_id(servers)
         rc, out, err = _run_ookla_once(sid, timeout=90)
         parsed = parse_ookla_result(parse_ookla_json(out))
@@ -663,13 +858,17 @@ def _latency_ms(value):
 
 
 def server_label(server_id, server_info=None):
+    """测速点展示名：显式覆盖 → 结果里的 location · name → 检索时缓存的标签 → 裸 id。
+
+    不再查硬编码的「编号 → 地名」表：实测原表 15 个国内编号 14 个已被 Ookla 下线，
+    保留只会显示过期地名。
+    """
     if CONFIG['OOKLA_SERVER_LABEL']:
         return CONFIG['OOKLA_SERVER_LABEL']
-    if str(server_id) in SERVER_LABELS:
-        return SERVER_LABELS[str(server_id)]
     info = server_info or {}
-    return ' · '.join(x for x in (str(info.get('location') or ''), str(info.get('name') or '')) if x) \
-        or '未标注测速点'
+    label = ' · '.join(x for x in (str(info.get('location') or ''),
+                                   str(info.get('name') or '')) if x)
+    return label or _POINT_LABELS.get(str(server_id), '') or f'id {server_id}'
 
 
 def target_network_lines(server_id, server_info):
@@ -745,11 +944,17 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
     if meta.get('skipped_for_budget'):
         lines.append(f"  ⏱ 达到时间预算，剩余 {meta['skipped_for_budget']} 个节点未测")
         lines.append('')
-    # 显式指定了测速点、但节点可见列表里没有它 ⇒ 必须显式标注（绝不静默改口径）
-    first_id = (CONFIG['OOKLA_SERVER_IDS'] or [''])[0]
-    if first_id and str(first_id) not in point_hits:
-        lines.append('  └─ ' + tg_entry_pair(first_id, '按节点出口就近',
-                                             '指定测速点不在节点可见列表'))
+    # 口径说明（绝不静默换口径）：
+    #   1) 目标点拿不到 ⇒ 已退回「按节点出口就近」，点名 → 就近 + 原因
+    #   2) 拿到了但离目标很远（如广州没有 CN 点、退到上海）⇒ 如实标距离
+    if meta.get('degraded'):
+        lines.append('  └─ ' + tg_entry_pair(meta.get('degraded_label') or '目标测速点',
+                                             '按节点出口就近', meta.get('degraded_reason', '')))
+        lines.append('')
+    elif meta.get('target_note') and not meta.get('degraded'):
+        lines.append('  └─ ' + tg_entry(TARGET_INFO['label'] or meta['point_label'],
+                                        meta['target_note'], '目标附近无点，已扩大检索',
+                                        code=False))
         lines.append('')
     # 测速点（Speedtest 服务器）的网络归属：服务器 IP/主机名取自 CLI 结果 JSON；
     # 已在 stop_mihomo_tun() 之后调用（直连视角）
@@ -944,9 +1149,17 @@ def _run():
         alive_items = alive_items[:max_nodes]
     log_progress('nodes_collected', count=len(alive_items))
 
+    # 按目标地区解析候选测速点（绕开「CLI 列表按出口 IP 就近返回」）。
+    # 解析失败不致命：候选为空时首个节点会自动走就近兜底，并在通知里标注。
+    try:
+        resolve_target_candidates()
+    except Exception as e:
+        log_progress('ookla_target_resolve_failed', error=str(e))
+
     if DIAGNOSE:
         # 诊断：只在一个节点上跑探针，不写 Gist、不发 TG、不按失败退出
         _diag(f'alive nodes={len(alive_items)}')
+        _diag(f"target candidates={_SERVER_STATE['candidates']} note={TARGET_INFO['note']}")
         if alive_items:
             try:
                 switch_proxy(str(alive_items[0].get('name') or ''), CONFIG['OOKLA_SWITCH_SETTLE'])
@@ -1113,6 +1326,15 @@ def _run():
                          for pid in point_info},
         'skipped_for_budget': skipped_for_budget,
         'engine_error': engine_error,
+        # 口径降级（目标点不可用 → 按节点出口就近）：必须显式标注，绝不静默换口径
+        'degraded': _SERVER_STATE['fallback'],
+        'degraded_label': TARGET_INFO['label'] or ','.join(sorted(_SERVER_STATE['dead'])[:3]),
+        # 真烧完过候选编号 = 编号被下线；没烧过就说明一开始就没解析到点
+        'degraded_reason': (f'{len(_SERVER_STATE["dead"])} 个候选编号已被 Ookla 下线'
+                            if _SERVER_STATE['dead']
+                            else (TARGET_INFO['note'] or '目标区域无可用测速点')),
+        # 目标地区说明（如「距目标 1210km」—— 广州没有 CN 点时必然出现）
+        'target_note': TARGET_INFO['note'],
     }
     summary = {
         'ok': bypass_hits == 0 and not engine_error,
