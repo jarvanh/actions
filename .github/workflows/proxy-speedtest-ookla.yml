@@ -11,7 +11,8 @@ name: proxy-speedtest-ookla
 # 节点上必然 NoServersException、整轮空跑（历史事故：33 节点全失败却报 success）。
 # 所以默认不给 OOKLA_SERVER_ID：每个节点用自己出口可见列表里最近的测速点；只有显式给了
 # 编号、且该编号在节点可见列表里时才锁定它（要同口径横评时用，见文档）。
-# 偏好可用 OOKLA_SERVER_PREFER 调（默认广州/Guangzhou/广东/Guangdong，命不中就就近）。
+# 偏好可用 OOKLA_SERVER_PREFER 在节点可见列表内按关键词调（默认空 = 就近；境外出口的
+# 可见列表里没有 CN 测速点，广州类关键词永远命不中，放默认里纯属误导）。
 #
 # 链路说明：Ookla CLI 没有 --proxy 参数，只能走 mihomo TUN 透明接管该进程流量：
 #   rules: [PROCESS-NAME,speedtest,AUTO, MATCH,DIRECT]
@@ -26,9 +27,8 @@ on:
   workflow_dispatch:
     inputs:
       server_id:
-        description: 'Speedtest 测速点编号（多个用英文逗号分隔，首选不可用时按序顺延；默认广州联通 26678）'
+        description: 'Speedtest 测速点编号（可选，多个逗号分隔；仅当编号在该节点可见列表里才锁定。境外出口拿不到 CN 测速点，留空 = 按各节点出口就近动态选点）'
         required: false
-        default: '26678'
       max_nodes:
         description: '最多测几个节点（0 = 不限）'
         required: false
@@ -83,8 +83,10 @@ jobs:
         env:
           # 订阅源（与其他测速工作流同一个 secret）
           PROXY_SPEEDTEST_SUB_URLS: ${{ secrets.PROXY_SPEEDTEST_SUB_URLS }}
-          # 测速点与测速参数（workflow_dispatch 可覆盖；定时运行走默认值）
-          OOKLA_SERVER_ID: ${{ github.event.inputs.server_id || '26678' }}
+          # 测速点与测速参数（workflow_dispatch 可覆盖；定时运行走默认值）。
+          # 定时运行 inputs 为空，绝不能兜底写死编号——那是「整轮空跑却报 success」
+          # 的历史事故根源；兜底必须是空串，让脚本走动态就近
+          OOKLA_SERVER_ID: ${{ github.event.inputs.server_id || '' }}
           OOKLA_MAX_NODES: ${{ github.event.inputs.max_nodes || '0' }}
           # 诊断模式：只看探针结论（step 日志 [diag] 行），不发通知、不写订阅
           OOKLA_DIAGNOSE: ${{ github.event.inputs.diagnose || 'false' }}
@@ -104,7 +106,7 @@ jobs:
           # 留空则首次运行自动新建，TG 通知会给链接；拿到 id 后回填此 secret 避免每轮新建
           PROXY_SPEEDTEST_GIST_ID: ${{ secrets.PROXY_SPEEDTEST_OOKLA_GIST_ID }}
           PROXY_SPEEDTEST_GIST_FILENAME: proxy_speedtest_ookla_subscription.yaml
-          PROXY_SPEEDTEST_GIST_DESCRIPTION: 'proxy speedtest subscription (ookla 广州联通)'
+          PROXY_SPEEDTEST_GIST_DESCRIPTION: 'proxy speedtest subscription (ookla 按节点出口就近)'
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           # 统一收尾区（footer）: 运行日志链接 + 已运行时长

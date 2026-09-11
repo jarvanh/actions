@@ -12,7 +12,7 @@
 | `proxy-speedtest-gitee` | Gitee 私有仓库 | 经代理 git push 上行 + clone 下行 + gitee.com HTTP 延迟 | `speedtest_gitee.py` | [gitee](proxy-speedtest-gitee.md) |
 | `proxy-speedtest-cdn` | 国内 CDN/镜像站 + baidu/taobao | 经代理单连接 curl 下载 + HTTP 计时延迟 | 本文 | — |
 | `proxy-speedtest-taier` | 泰尔三网（电信/联通/移动测速服务器） | taierspeedtest 延迟 + 单/多线程上下行 | `taier_speedtest.py` + mihomo TUN | [taier](proxy-speedtest-taier.md) |
-| `proxy-speedtest-ookla` | Speedtest 官方测速点（默认广东广州 · 联通 5G） | speedtest CLI 延迟 + 上下行 | `speedtest_ookla.py` + mihomo TUN | [ookla](proxy-speedtest-ookla.md) |
+| `proxy-speedtest-ookla` | Speedtest 官方测速点（按节点出口就近，可显式锁编号） | speedtest CLI 延迟 + 上下行 | `speedtest_ookla.py` + mihomo TUN | [ookla](proxy-speedtest-ookla.md) |
 
 调度：UTC 03/09/15/21（北京 11/17/23/05），与 gitee（02/08/14/20）、taier（04/10/16/22）、
 ookla（05/11/17/23）错峰。

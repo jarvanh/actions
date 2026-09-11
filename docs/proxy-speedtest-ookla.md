@@ -12,7 +12,7 @@
 | `proxy-speedtest-gitee` | Gitee 私有仓库 | 经代理 git push 上行 + clone 下行 + gitee.com HTTP 延迟 | `speedtest_gitee.py` | [gitee](proxy-speedtest-gitee.md) |
 | `proxy-speedtest-cdn` | 国内 CDN/镜像站 + baidu/taobao | 经代理单连接 curl 下载 + HTTP 计时延迟 | `speedtest.py` | [cdn](proxy-speedtest-cdn.md) |
 | `proxy-speedtest-taier` | 泰尔三网（电信/联通/移动测速服务器） | taierspeedtest 延迟 + 单/多线程上下行 | `taier_speedtest.py` + mihomo TUN | [taier](proxy-speedtest-taier.md) |
-| `proxy-speedtest-ookla` | Speedtest 官方测速点（默认广东广州 · 联通 5G） | speedtest CLI 延迟 + 上下行 | 本文 | — |
+| `proxy-speedtest-ookla` | Speedtest 官方测速点（按节点出口就近，可显式锁编号） | speedtest CLI 延迟 + 上下行 | 本文 | — |
 
 调度：UTC 05/11/17/23（北京 13/19/01/07），与 gitee（02/08/14/20）、cdn（03/09/15/21）、
 taier（04/10/16/22）错峰。
@@ -58,20 +58,24 @@ TUN 起来后 DNS 会被 mihomo 劫持，必须显式给可达的公共解析器
 （`dns.nameserver: [1.1.1.1, 8.8.8.8]` + `respect-rules: false`）——默认国内递归 DNS
 在 Azure runner 上不通，会导致被代理程序秒失败。
 
-## 为什么必须显式指定测速点编号
+## 测速点怎么选（默认动态就近）
 
-Ookla 的服务器列表**按请求方出口 IP 的远近排序**，GitHub runner（Azure 出口）视角根本看不到
-中国大陆节点：把「广州联通」交给自动就近选择，必然落到境外节点，测速点口径失真。因此一律用
-`--server-id=<id>` 显式锁定。
+Ookla 的服务器列表**按请求方出口 IP 就近返回**——GitHub runner（Azure 出口）看不到中国大陆
+节点，境外出口节点看到的也只有本地列表（2026-09-11 诊断实测：节点出口在新加坡时列表 10 条
+全是新加坡、CN=0；`--server-id` 指定不在列表里的编号必然 NoServersException）。也就是说
+「广州联通」这类 CN 编号对绝大多数节点**机制上不可见**，写死编号只会整轮空跑（历史事故：
+33 节点全失败却报 success）。
 
-- 默认：`26678` = 广东广州 · 联通 5G；
-- 编号来源是社区维护的国内测速点清单（如 `reizhi/speedtest-cn-server-list`、
-  `spiritLHLS/speedtest.net-CN-ID`），**Ookla 侧会随运营调整失效**，故支持多候选：
-  `OOKLA_SERVER_ID=26678,4870,24447` 逗号分隔，按序尝试；
-- **顺延只在 CLI 明确报「测速点找不到/连不上」时发生**（节点自身故障不消耗候选）；
-  一旦顺延，通知会多一行 `<code>首选 id</code> → <code>实际 id</code> · 首选测速点不可用，已顺延`，
-  **绝不静默换点**；
-- 每个节点的测速点由本轮锁定值决定，通知头部 `📍 测速点` 显示本轮实际命中的编号与标签。
+- **默认（推荐）**：`OOKLA_SERVER_ID` 留空，每个节点用自己出口可见列表里最近的测速点，
+  通知头部显示 `📍 测速点：按节点出口就近 · N 个`；
+- **显式锁编号**：只在该编号出现在该节点可见列表里时才锁定，用于同口径横评（前提是各节点
+  出口同地区）；指定的编号不在可见列表时，通知会标注「指定测速点不在节点可见列表」，
+  **绝不静默换口径**；
+- **偏好关键词**：`OOKLA_SERVER_PREFER` 在节点可见列表内按 name/location/country 匹配，
+  命不中就就近。别放 CN 关键词——境外出口的可见列表里没有 CN 测速点，永远命不中；
+- 编号参考自社区维护的国内测速点清单（如 `reizhi/speedtest-cn-server-list`、
+  `spiritLHLS/speedtest.net-CN-ID`），**Ookla 侧会随运营调整失效**（`SERVER_LABELS` 仅作
+  展示，不参与选点）。
 
 ## 未走代理校验（必须有）
 
@@ -96,7 +100,8 @@ Ookla 的服务器列表**按请求方出口 IP 的远近排序**，GitHub runne
 
 | env | 默认 | 说明 |
 |---|---|---|
-| `OOKLA_SERVER_ID` | `26678` | Speedtest 测速点编号，逗号分隔多候选（见上节顺延规则） |
+| `OOKLA_SERVER_ID` | 空 | 显式测速点编号（逗号分隔多候选）；**仅当编号在该节点可见列表里才锁定**，境外出口拿不到 CN 测速点，留空 = 按节点出口就近动态选点（见上节） |
+| `OOKLA_SERVER_PREFER` | 空 | 动态选点偏好关键词（仅在节点可见列表内匹配，命不中就近；CN 关键词在境外出口永远命不中） |
 | `OOKLA_SERVER_LABEL` | 空 | 通知里测速点标签覆盖（留空按内置编号表 / CLI 返回自动生成） |
 | `OOKLA_MAX_NODES` | `0` | 最多测几个节点，0 = 不限 |
 | `OOKLA_TIMEOUT` | `120` | 单节点子进程超时秒 |
@@ -113,7 +118,7 @@ Ookla 的服务器列表**按请求方出口 IP 的远近排序**，GitHub runne
 ### Gist 文件名/描述（四套区分）
 
 `PROXY_SPEEDTEST_GIST_FILENAME` = `proxy_speedtest_ookla_subscription.yaml`、
-`PROXY_SPEEDTEST_GIST_DESCRIPTION` = `proxy speedtest subscription (ookla 广州联通)`。
+`PROXY_SPEEDTEST_GIST_DESCRIPTION` = `proxy speedtest subscription (ookla 按节点出口就近)`。
 导出字段单位是 MiB/s（与另三套一致），节点名前缀「↑xx兆 | ↓xx兆 | xxms」。
 
 ## Telegram 通知
@@ -132,16 +137,20 @@ Ookla 的服务器列表**按请求方出口 IP 的远近排序**，GitHub runne
 | 现象 | 原因 / 处置 |
 |---|---|
 | 通知出现 `⚠️ 疑似未走代理` | TUN 没起来或 `PROCESS-NAME` 规则未命中（规则名取 CLI 真实 basename）；查 `mihomo.log` 与 `/dev/net/tun`；结果不可信，整轮判失败 |
-| 节点全部「连不上测速点」 | 节点到控制面 `www.speedtest.net` 或测速点本身不可达；换节点或检查 mihomo DNS 配置 |
-| 通知出现「首选测速点不可用，已顺延」 | 默认编号已失效，顺延到了候选；建议把 `OOKLA_SERVER_ID` 改成实际可用的编号（或直接从 Variables 覆盖） |
-| 延迟明显高于同城 | 测速点在广州、节点出口在境外，属正常；要测同城需换广州本地节点 |
+| 全部节点 rc=2 `ConfigurationError`，但测速点列表能拉到 | speedtest.net 对节点出口 IP 风控（2026-09-11 诊断实测：经节点访问 `www.speedtest.net` → 403、`api.speedtest.net` → 429）；代码侧无解，换时段/换出口，或改用 taier/gitee 口径交叉验证 |
+| 通知出现「指定测速点不在节点可见列表」 | 显式编号对该节点出口不可见（列表按出口 IP 就近返回），已按预期兜底就近；要同口径横评需换出口同地区的节点组 |
+| 节点全部「拉不到测速点列表」 | 节点到控制面不可达（引擎级问题，连续命中会熔断停止整轮）；检查节点可用性与 mihomo DNS 配置 |
+| 延迟明显高于同区 | 测速点按节点出口就近返回，出口在境外时测速点也在境外；延迟反映「节点 → 测速点」，不是「你家 → 节点」 |
 | **run 卡在 in_progress、取消也无效** | TUN 未撤（历史事故）：脚本退出前必须 `stop_mihomo_tun()`；workflow 里有 `always()` 兜底步骤 `pkill "mihomo -d"` |
 | CLI 首跑失败并提示许可 | 调用必须带 `--accept-license --accept-gdpr`（脚本已固定带上） |
 
 ## 已知风险
 
-- **测速点可用性会变**：广州联通是否仍有 Ookla 服务器不由本项目控制，默认编号来自社区清单；
-  顺延与显式覆盖是缓解手段，不是保证。
+- **speedtest.net 会风控机房/代理 IP**：经节点出口访问控制面可能被 403/429（2026-09-11
+  实测），此时整轮 `ConfigurationError`、拿不到任何数据；是否被风控取决于出口 IP 与时段，
+  本项目无法缓解——测不出数不代表节点不可用，用 gitee/taier 口径交叉验证。
+- **测速点可用性会变**：可见列表由 Ookla 按出口 IP 实时决定，任何具体编号（含 CN 清单里的）
+  随时可能失效；动态就近不依赖单个编号，天然免疫此类失效。
 - **结果会写入 speedtest.net 公开结果页**：官方 CLI 默认把测量结果持久化到其公开结果页
   （`result.url`，不含账号凭据）。介意公开的话需自行评估是否使用本引擎。
 - **许可**：Ookla 官方 CLI 的许可对再分发 / 商业化集成有限制，个人与内部自动化使用可接受；
