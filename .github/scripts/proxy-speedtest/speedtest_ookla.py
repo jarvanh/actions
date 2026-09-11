@@ -4,7 +4,7 @@
 与 speedtest.py / taier_speedtest.py 同属「订阅节点测速」域：复用 speedtest_common.py 共享层
 （订阅导出策略 / 通知排版 / 测速点归属查询 / Telegram 发送 / Gist 上传）与 speedtest_gitee.py 的
 mihomo 内核 / 订阅供应商 / 节点快照 / 节点切换；测速引擎换成 Ookla 官方 Speedtest CLI，
-拿到的是「订阅节点 → 指定 Speedtest 测速点（默认广东广州·联通）」的延迟与上下行带宽。
+拿到的是「订阅节点 → 该节点出口可见的就近 Speedtest 测速点」的延迟与上下行带宽。
 
 为什么必须开 TUN：Ookla 官方 CLI 没有 --proxy 参数，只能靠 mihomo TUN 把该进程的流量透明
 接入代理节点。为不误伤 runner 自身网络：
@@ -15,11 +15,13 @@ mihomo 内核 / 订阅供应商 / 节点快照 / 节点切换；测速引擎换�
 「测速看到的出口 IP == runner 直连出口 IP」校验规则是否真的生效——规则失灵或 TUN 起不来时会
 静默直连、整轮结果失真，这个校验必须存在（bypass 命中即判失败）。
 
-为什么必须显式指定测速点编号：Ookla 的服务器列表按**请求方出口 IP** 的远近排序，GitHub
-runner（Azure 出口）视角根本看不到中国大陆节点（社区清单里的广州联通 26678 在 runner 上
-`speedtest -L` 不会出现），自动「就近选择」必然落到境外节点、测速点口径失真。所以一律用
-`--server-id=<id>` 显式锁定；候选不可用（服务端报测速点不存在/连不上）时按候选列表顺延，
-**顺延结果会在通知里明确标注**，绝不静默换点。
+测速点口径（默认动态就近，不写死编号）：Ookla 的服务器列表按**请求方出口 IP** 返回，
+GitHub runner（Azure 出口）看不到中国大陆节点，境外出口节点看到的也只有本地列表（实测
+出口在新加坡时 10 条全是新加坡、CN=0；--server-id 指定不在列表里的编号必然
+NoServersException，历史事故：33 节点全失败却报 success）。所以默认不锁编号：每个节点用
+自己出口可见列表里最近的测速点；显式 OOKLA_SERVER_ID 只在该编号出现在该节点可见列表里时
+才锁定（同口径横评用，且要求各节点出口同地区）；锁点在本节点不可用时按该节点出口重选，
+**换点结果会在通知里明确标注**，绝不静默换口径。
 
 设计原则（与 speedtest.py / taier_speedtest.py 一致）：
   - 共享能力一律 import 复用：纯共享层来自 speedtest_common，mihomo/订阅源来自
@@ -88,11 +90,9 @@ RESULT_JSON = HOME_RUNTIME / 'ookla_speedtest_result.json'
 # 落地文件名固定，供 PROCESS-NAME 进程规则匹配
 OOKLA_FALLBACK_BIN = HOME_RUNTIME / 'ookla-speedtest'
 
-# 默认测速点：广东广州 · 联通5G（id 来自社区维护的国内测速点清单
-# https://github.com/reizhi/speedtest-cn-server-list ，Ookla 侧会随运营调整失效，
-# 故支持多候选顺延 + env 覆盖）
-DEFAULT_SERVER_IDS = '26678'
-# 已知测速点编号 → 人类可读标签（仅用于通知展示；未收录的编号留空走兜底）
+# 已知测速点编号 → 人类可读标签（仅用于通知展示；id 来自社区维护的国内测速点清单
+# https://github.com/reizhi/speedtest-cn-server-list ，Ookla 侧会随运营调整失效；
+# 未收录的编号按 CLI 返回的 location/name 自动生成）
 SERVER_LABELS = {
     '26678': '广东广州 · 联通5G',
     '27594': '广东广州 · 电信5G',
@@ -132,9 +132,11 @@ CONFIG = {
     # 在新加坡时列表 10 条全是新加坡、CN=0），写死的「广州联通」对境外出口节点根本不可见，
     # --server-id 指定一个不在列表里的编号会直接 NoServersException、整轮空跑。
     'OOKLA_SERVER_IDS': _server_ids(),
-    # 动态选点偏好关键词（按序在 name/location/country 上匹配），命不中就用列表首个（就近）
-    'OOKLA_SERVER_PREFER': _split_words(os.environ.get('OOKLA_SERVER_PREFER', ''),
-                                        ('广州', 'Guangzhou', '广东', 'Guangdong')),
+    # 动态选点偏好关键词（按序在 name/location/country 上匹配），命不中就用列表首个（就近）。
+    # 默认空 = 不加偏好。别放 CN 关键词：可见列表按节点出口就近返回，境外出口根本没有
+    # CN 测速点，广州/Guangdong 类关键词永远命不中（2026-09-11 诊断实测：出口在新加坡
+    # 时列表 10 条全是新加坡、CN=0）
+    'OOKLA_SERVER_PREFER': _split_words(os.environ.get('OOKLA_SERVER_PREFER', ''), ()),
     # 测速点标签覆盖（留空按 SERVER_LABELS / CLI 返回的 location 自动生成）
     'OOKLA_SERVER_LABEL': (os.environ.get('OOKLA_SERVER_LABEL', '') or '').strip(),
     # 0 = 不限（默认）
@@ -580,13 +582,19 @@ def pick_server_id(servers):
 # ---------------------------------------------------------------------------
 # 诊断探针（OOKLA_DIAGNOSE=1）
 # ---------------------------------------------------------------------------
-def diagnose_direct_baseline(server_id):
-    """TUN 未起时的直连基线：runner 出口 + 指定编号能否拿到结果。"""
-    cmd = [OOKLA_BIN, '--accept-license', '--accept-gdpr', '--format=json',
-           f'--server-id={server_id}']
+def diagnose_direct_baseline(server_id=None):
+    """TUN 未起时的直连基线：runner 出口能否拿到结果（显式给了编号则一并探它）。
+
+    未显式给编号时不带 --server-id（就近）：Azure 出口本就看不到 CN 测速点，
+    固定拿 26678 探只会稳定 NoServersException，探不出 runner 基线是否健康。
+    """
+    cmd = [OOKLA_BIN, '--accept-license', '--accept-gdpr', '--format=json']
+    if server_id:
+        cmd.append(f'--server-id={server_id}')
     rc, out, err = _exec_ookla(cmd, timeout=60)
     parsed = parse_ookla_result(parse_ookla_json(out))
-    _diag(f'direct-baseline rc={rc} ok={parsed["ok"]} error={parsed.get("error", "")[:120]}')
+    _diag(f'direct-baseline server_id={server_id or "(dynamic)"} rc={rc} '
+          f'ok={parsed["ok"]} error={parsed.get("error", "")[:120]}')
     _diag('direct-baseline stderr: ' + ' | '.join((err or '').strip().splitlines()[-3:]))
 
 
@@ -634,14 +642,19 @@ def diagnose_on_node():
     cn = [s for s in servers if 'china' in (s['country'] or '').lower() or s['country'] == 'CN']
     _diag(f'server-list CN={len(cn)}: ' + ', '.join(s['id'] for s in cn[:30]))
     diagnose_control_plane()
-    sid = _SERVER_STATE['ids'][_SERVER_STATE['pos']]
-    rc, out, err = _run_ookla_once(sid, timeout=90)
-    parsed = parse_ookla_result(parse_ookla_json(out))
-    _diag(f'measure rc={rc} point={sid} ok={parsed["ok"]} '
-          f'down={parsed["download_mibs"]:.2f}MiB/s up={parsed["upload_mibs"]:.2f}MiB/s '
-          f'latency={parsed["latency_ms"]} error={parsed.get("error", "")[:120]}')
-    if not parsed['ok']:
-        _diag('measure stderr: ' + ' | '.join((err or '').strip().splitlines()[-3:]))
+    if not servers:
+        _diag('measure skipped: 本节点拉不到测速点列表')
+    else:
+        # 重构后 _SERVER_STATE 只有 explicit_ids/locked，没有旧游标 ids/pos；
+        # 诊断实测按与正式测速同规则的动态选点走
+        sid, reason = pick_server_id(servers)
+        rc, out, err = _run_ookla_once(sid, timeout=90)
+        parsed = parse_ookla_result(parse_ookla_json(out))
+        _diag(f'measure point={sid} reason={reason} rc={rc} ok={parsed["ok"]} '
+              f'down={parsed["download_mibs"]:.2f}MiB/s up={parsed["upload_mibs"]:.2f}MiB/s '
+              f'latency={parsed["latency_ms"]} error={parsed.get("error", "")[:120]}')
+        if not parsed['ok']:
+            _diag('measure stderr: ' + ' | '.join((err or '').strip().splitlines()[-3:]))
     diagnose_mihomo_log()
 
 
@@ -897,9 +910,9 @@ def _run():
     try:
         ensure_local_ookla()
         if DIAGNOSE:
-            # 直连基线（TUN 未起）：先确认 runner 自身出口 + 指定编号的可用性
+            # 直连基线（TUN 未起）：先确认 runner 自身出口（显式给了编号则一并探它）
             diagnose_direct_baseline(
-                (_SERVER_STATE['explicit_ids'] or [DEFAULT_SERVER_IDS])[0])
+                (_SERVER_STATE['explicit_ids'] or [None])[0])
         start_mihomo_tun(env)
     except Exception as e:
         log_progress('bootstrap_failed', error=str(e))
