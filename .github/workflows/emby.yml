@@ -2006,6 +2006,12 @@ jobs:
           source "$EMBY302_DIR/lib.sh"
           echo "--- warmup.log (tail 60) ---"
           tail -n 60 /opt/logs/warmup.log 2>/dev/null || echo "(无 warmup.log)"
+          echo "--- incbackup.log（运行期增量备份, tail 30）---"
+          tail -n 30 /opt/logs/incbackup.log 2>/dev/null || echo "(无 incbackup.log)"
+          echo "--- odwarm.log（直链预热: 目录回填 + 详情页预取, tail 30）---"
+          tail -n 30 /opt/logs/odwarm.log 2>/dev/null || echo "(无 odwarm.log)"
+          echo "--- odlink /stats（缓存命中情况）---"
+          curl -s -m 5 http://127.0.0.1:5245/stats 2>/dev/null | jq -c . 2>/dev/null || echo "(odlink 未就绪)"
           echo "--- seek.log（拖动取链统计）---"
           if [ -s /opt/logs/seek.log ]; then
             awk '{n++; s += $NF; if ($NF > m) m = $NF} \
