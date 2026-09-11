@@ -103,6 +103,20 @@ def write_termination_artifacts(message: str):
     except Exception:
         pass
 
+def notify_best_effort(stage: str, msg: str):
+    """兜底分支（信号终止/未捕获异常）的统一发送。
+
+    python 发送层不写 stderr、只靠返回值报错，调用方必须把失败原因记进日志，
+    否则 400 解析失败/429 限流会表现为「通知静默消失」（规范 第 6 章）。
+    此前这些分支直接 send_telegram(...) 后 `except: pass`，返回值被丢弃。
+    """
+    try:
+        res = send_telegram(merged_env(), msg)
+    except Exception as e:
+        res = {'sent': False, 'reason': str(e)}
+    log_progress(stage, sent=bool(res.get('sent')), reason=res.get('reason', ''))
+
+
 def handle_termination_signal(signum, frame):
     global TERMINATION_NOTICE_SENT
     if TERMINATION_NOTICE_SENT:
@@ -115,11 +129,7 @@ def handle_termination_signal(signum, frame):
     if _footer:
         message += f'\n\n{_footer}'
     write_termination_artifacts(message)
-    try:
-        env = merged_env()
-        send_telegram(env, message)
-    except Exception:
-        pass
+    notify_best_effort('termination_notify', message)
     raise SystemExit(128 + int(signum))
 
 def touch_lock_file():
@@ -1725,7 +1735,8 @@ if __name__ == '__main__':
             _footer = tg_footer_line()
             if _footer:
                 _msg += f'\n\n{_footer}'
-            send_telegram_chunked(env, _msg)
-        except Exception:
-            pass
+            _res = send_telegram_chunked(env, _msg)
+        except Exception as e:
+            _res = {'sent': False, 'reason': str(e)}
+        log_progress('uncaught_notify', sent=bool(_res.get('sent')), reason=_res.get('reason', ''))
         sys.exit(1)
