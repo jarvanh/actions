@@ -132,7 +132,9 @@ async def main():
     else:
         print("Warning: No video attributes detected, uploading may be sent as document", file=sys.stderr)
 
-    MAX_RETRIES = 3
+    # 429 重试上限与 sendMessage 发送层同口径（5 次），不可更少——限流时放弃重试
+    # 等于让媒体彻底丢失（规范 第 6 章）
+    MAX_RETRIES = 5
     INITIAL_BACKOFF = 5
     last_error = None
     try:
@@ -156,6 +158,11 @@ async def main():
                 print(f"\nAttempt {attempt}/{MAX_RETRIES} failed: {e}", file=sys.stderr)
                 if attempt < MAX_RETRIES:
                     backoff = INITIAL_BACKOFF * (2 ** (attempt - 1))
+                    # 429 限流按服务端 retry_after 等待（与 sendMessage 发送层同口径）：
+                    # telethon 的 FloodWaitError 带 .seconds，指数退避可能短于它，取较大者
+                    wait_seconds = getattr(e, 'seconds', None)
+                    if isinstance(wait_seconds, int) and wait_seconds > 0:
+                        backoff = max(backoff, wait_seconds)
                     print(f"Retrying in {backoff}s...", file=sys.stderr)
                     await asyncio.sleep(backoff)
         print(f"\nAll {MAX_RETRIES} attempts failed. Last error: {last_error}", file=sys.stderr)
