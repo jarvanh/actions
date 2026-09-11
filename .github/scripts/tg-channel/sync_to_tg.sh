@@ -104,8 +104,14 @@ TG_SEP = "━" * 18
 
 
 def esc(s) -> str:
-    """动态内容进 HTML 消息前必须转义（与 tg_notify.sh escape_html 同规则）。"""
-    return html_mod.escape(str(s), quote=False)
+    """动态内容进 HTML 消息前必须转义。
+
+    quote=True 与 python 共享层 speedtest_common 的 html.escape 默认口径一致
+    （规范 8.1 节：内嵌段与共享层同义实现、三处定义保持一致）。此前本函数用
+    quote=False，只转义 & < >——输出只进正文时够用，但若哪天被拼进 HTML 属性值
+    （如 <a href="…">）就会漏；统一取更严格的一侧（2026-09-12 收敛）。
+    """
+    return html_mod.escape(str(s), quote=True)
 
 
 def fmt_secs(x: float) -> str:
