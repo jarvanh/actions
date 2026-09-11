@@ -458,7 +458,7 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
     # 否则会出现「按上传达标导出、却按下行排 TOP」的自相矛盾展示
     top_sort_key = 'up' if bundle.get('metric', 'upload') == 'upload' else 'down'
     top = sorted(ok_results, key=lambda r: r.get(top_sort_key) or 0.0, reverse=True)[:5]
-    # 标题状态随结论降级（规范 第 4 章 状态 emoji 语义）：0 成功 / 命中「疑似未走代理」→ ⚠️，
+    # 标题状态随结论降级（规范 8.2 节 状态图标语义）：0 成功 / 命中「疑似未走代理」→ ⚠️，
     # 不再恒 ✅（此前 ✅ 标题下写着 ⚠️ 疑似未走代理，与 rc=1 的失败判定自相矛盾）
     _title_emoji = '⚠️' if (not ok_results or bypass_hits) else '✅'
     lines = [
@@ -467,7 +467,8 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
         f"🕒 起止：{esc(meta['started_text'])} ~ {esc(meta['ended_text'])} · 耗时 {esc(meta['duration_text'])}",
         # 计数口径与 cdn/gitee 统一用「可用」（成功=功能可用，含节点连接成功但速度偏低）
         f"📊 节点：共 {len(results)} 个 · 可用 {len(ok_results)} 个",
-        f"📍 测速点：{esc(meta['points'])} · 模式：{esc(meta['mode_label'])}",
+        # 取值行口径（规范 2.3 节）：测速点与模式都取自引擎参数（机器返回值），整行同为等宽
+        f"📍 测速点：{tg_entry(meta['points'])} · 模式：{tg_entry(meta['mode_label'])}",
         f"🧪 引擎：{tg_entry('taierspeedtest ' + (VERSION['taier'] or 'latest'))}",
         '',
     ]
@@ -477,7 +478,7 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
     lines.append('')
     if top:
         # 四套统一：TOP 条目复用共享的 build_node_metric_prefix（↑上传 · ↓下载 · 延迟ms，
-        # 单位「兆」），不再手拼 Mbps —— 此前只有 taier 一处两种单位/分隔符（规范 第 1 章 禁止自造）。
+        # 单位「兆」），不再手拼 Mbps —— 此前只有 taier 一处两种单位/分隔符（规范 2.4 节 统一优先于个性）。
         # 引擎原始值 Mbps → 共享层单位 MiB/s（÷8.388608），与订阅导出口径一致
         _top_mode = 'push-only' if bundle.get('metric', 'upload') == 'upload' else 'download'
         has_up = any((r.get('up') or 0) > 0 for r in top)
@@ -510,11 +511,11 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
         lines.append(f'❌ 失败 · {len(failed)}')
         _failed_entries = []
         for r in failed[:5]:
-            # 并列双机器值（节点名 · 原始异常串）走 tg_entry_codes（语义表 #10）
+            # 并列双机器值（节点名 · 原始异常串）走 tg_entry_codes（4.5 节）
             _failed_entries.append(
                 tg_entry_codes(r.get('name', ''), (r.get('error') or '-')[:80]))
         if len(failed) > 5:
-            # 折叠行并入条目流，末条 └─ 由下面的循环统一决定（禁双 └─；规范 2.3 节）
+            # 折叠行并入条目流，末条 └─ 由下面的循环统一决定（禁双 └─；规范 4.6 节）
             _failed_entries.append(f'还有 {len(failed) - 5} 条…')
         for _i, _l in enumerate(_failed_entries, 1):
             _c = '└─' if _i == len(_failed_entries) else '├─'
@@ -560,7 +561,8 @@ def notify_failure(env, reason):
     lines = [
         f'❌ 泰尔三网测速异常退出 · {html.escape(_head)}',
         TG_SEP,
-        # reason 含原始异常串（机器值）→ <code>；与 cdn/gitee 的「原因/错误」同口径（裁决 8）
+        # reason 含原始异常串（机器值）→ <code>；与 cdn/gitee 的「原因/错误」同口径
+        # （2.3 节取值行口径）
         f'原因：{tg_entry(reason)}',
         '',
     ]
@@ -773,7 +775,7 @@ def _run():
         # 长消息分片发送（失败列表 + Gist 段容易超 4000 字符，单发会被整条拒收）
         tg_res = send_telegram_chunked(env, '\n'.join(build_telegram_lines(
             results, meta, direct_ip, bypass_hits, gist_res, bundle, gist_error)))
-        # 发送层不写 stderr（python 侧靠返回值），失败原因必须回传日志（规范 第 5 章）
+        # 发送层不写 stderr（python 侧靠返回值），失败原因必须回传日志（规范 第 6 章）
         log_progress('telegram_send_finished', sent=bool(tg_res.get('sent')),
                      reason=tg_res.get('reason', ''))
     except Exception as e:

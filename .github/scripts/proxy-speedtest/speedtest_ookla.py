@@ -113,14 +113,28 @@ SERVER_LABELS = {
 
 
 def _server_ids():
-    raw = (os.environ.get('OOKLA_SERVER_ID', '') or '').strip() or DEFAULT_SERVER_IDS
+    """显式指定的测速点编号候选（逗号分隔）。留空 = 动态选点（默认）。"""
+    raw = (os.environ.get('OOKLA_SERVER_ID', '') or '').strip()
     ids = [x.strip() for x in raw.replace('，', ',').split(',')]
     return [x for x in ids if x]
 
 
+def _split_words(raw, default):
+    raw = (raw or '').strip()
+    if not raw:
+        return list(default)
+    return [x.strip() for x in raw.replace('，', ',').split(',') if x.strip()]
+
+
 CONFIG = {
-    # 测速点编号候选（逗号分隔）：首选失败（服务端报不可用）时按序顺延，命中项会在通知标注
+    # 显式测速点编号候选（逗号分隔）。留空（默认）→ 按每个节点出口可见的测速点动态选。
+    # 为什么默认不写死编号：CLI 的 -L 列表按**请求方出口 IP** 就近返回（实测首节点出口
+    # 在新加坡时列表 10 条全是新加坡、CN=0），写死的「广州联通」对境外出口节点根本不可见，
+    # --server-id 指定一个不在列表里的编号会直接 NoServersException、整轮空跑。
     'OOKLA_SERVER_IDS': _server_ids(),
+    # 动态选点偏好关键词（按序在 name/location/country 上匹配），命不中就用列表首个（就近）
+    'OOKLA_SERVER_PREFER': _split_words(os.environ.get('OOKLA_SERVER_PREFER', ''),
+                                        ('广州', 'Guangzhou', '广东', 'Guangdong')),
     # 测速点标签覆盖（留空按 SERVER_LABELS / CLI 返回的 location 自动生成）
     'OOKLA_SERVER_LABEL': (os.environ.get('OOKLA_SERVER_LABEL', '') or '').strip(),
     # 0 = 不限（默认）
@@ -128,6 +142,10 @@ CONFIG = {
     # 单节点子进程超时（Ookla CLI 一次完整测量含延迟+下行+上行，慢节点可能 60s+）
     'OOKLA_TIMEOUT': int(os.environ.get('OOKLA_TIMEOUT', '120') or 120),
     'OOKLA_SWITCH_SETTLE': float(os.environ.get('OOKLA_SWITCH_SETTLE_SECONDS', '1.5') or 1.5),
+    # 引擎级熔断：连续这么多个节点都拿不到测速点列表（控制面不通）就停止后续节点
+    'OOKLA_ABORT_AFTER': int(os.environ.get('OOKLA_ABORT_AFTER', '3') or 3),
+    # 整轮时间预算（秒）：到点停止剩余节点，保证能撤 TUN / 发通知，不被 job 超时打断
+    'OOKLA_TIME_BUDGET': int(os.environ.get('OOKLA_TIME_BUDGET_SECONDS', '2700') or 2700),
 }
 
 ANSI_RE = re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
@@ -137,8 +155,9 @@ VERSION = {'ookla': '', 'mihomo': ''}
 # 与真实进程名严格一致，否则进程规则不命中会静默直连
 OOKLA_BIN = ''
 
-# 测速点候选游标（服务端报测速点不可用时顺延）
-_SERVER_STATE = {'ids': list(CONFIG['OOKLA_SERVER_IDS']), 'pos': 0}
+# 测速点状态：explicit_ids = 显式指定候选；locked = 当前锁定的测速点编号（同一出口地区
+# 的节点复用，换地区导致失败时按该节点出口重新选，见 run_ookla）
+_SERVER_STATE = {'explicit_ids': list(CONFIG['OOKLA_SERVER_IDS']), 'locked': ''}
 
 # CLI 可选参数开关：--progress=no 关掉进度条（避免它混进 stdout 破坏 JSON 解析）。
 # 该写法若被某个 CLI 版本拒绝，首次失败后自动去掉并记日志（不让整轮测速白跑）。
@@ -438,24 +457,47 @@ def _run_ookla_once(server_id, timeout=None):
     return rc, out, err
 
 
-def run_ookla(name: str):
-    """跑一次测速；测速点不可用时顺延候选（返回实际命中的编号）。
+def _looks_like_point_unavailable(parsed, err):
+    """CLI 拿不到测速点（区别于节点自身故障）：才值得为该节点重新选点。"""
+    text = f"{parsed.get('error', '')}\n{err}".lower()
+    return _looks_like_server_error(text) or 'noserversexception' in text
 
-    只把「CLI 明确报测速点找不到/连不上」当作测速点问题顺延；节点自身故障（超时、DNS、
-    连接被拒等）不会消耗候选，避免把节点问题误判成测速点问题。
+
+def run_ookla(name: str):
+    """跑一次测速，返回 (rc, out, err, parsed, sid, note)。
+
+    note: '' = 用当前锁定测速点；'reselected' = 锁点在本节点不可用、已按本节点出口重选；
+    'no_server_list' = 本节点连测速点列表都拉不到（控制面不通，属引擎级问题）。
+
+    为什么必须按节点选点：CLI 的 -L 列表按**请求方出口 IP** 就近返回（实测出口在新加坡的
+    节点列表里 10 条全是新加坡、CN=0），写死的编号在异地出口节点上必然 NoServersException。
+    同出口地区的节点复用锁定值省一次列表调用，只有「锁点在本节点拿不到」时才重新列/选。
     """
-    ids = _SERVER_STATE['ids']
-    while True:
-        sid = ids[_SERVER_STATE['pos']]
+    sid = _SERVER_STATE['locked']
+    if sid:
         rc, out, err = _run_ookla_once(sid)
         parsed = parse_ookla_result(parse_ookla_json(out))
-        if rc == 0 or not _looks_like_server_error(f"{parsed.get('error', '')}\n{err}"):
-            return rc, out, err, parsed, sid
-        if _SERVER_STATE['pos'] + 1 >= len(ids):
-            return rc, out, err, parsed, sid
-        nxt = _SERVER_STATE['pos'] + 1
-        log_progress('ookla_server_fallback', from_point_id=sid, to_point_id=ids[nxt], name=name)
-        _SERVER_STATE['pos'] = nxt
+        if rc == 0 and parsed['ok']:
+            return rc, out, err, parsed, sid, ''
+        if not _looks_like_point_unavailable(parsed, err):
+            # 节点自身故障（超时/连不上/被拒）：不重选，避免把节点问题误判成测速点问题
+            return rc, out, err, parsed, sid, ''
+        log_progress('ookla_point_unusable_on_node', point_id=sid, name=name)
+
+    servers = list_servers()
+    if not servers:
+        return 2, '', 'server list unavailable（本节点拉不到测速点列表）', \
+            parse_ookla_result(None), sid, 'no_server_list'
+    new_sid, reason = pick_server_id(servers)
+    if new_sid == sid:
+        # 重选还是同一个 ⇒ 不是「锁点不可用」的问题，没必要重复跑
+        return rc, out, err, parsed, sid, ''
+    log_progress('ookla_point_selected', from_point_id=sid, to_point_id=new_sid,
+                 reason=reason, name=name)
+    _SERVER_STATE['locked'] = new_sid
+    rc2, out2, err2 = _run_ookla_once(new_sid)
+    parsed2 = parse_ookla_result(parse_ookla_json(out2))
+    return rc2, out2, err2, parsed2, new_sid, 'reselected'
 
 
 # ---------------------------------------------------------------------------
@@ -515,6 +557,24 @@ def list_servers(timeout=90):
     if not servers:
         log_progress('ookla_server_list_empty', rc=rc, error=(err or '').strip()[-200:])
     return servers
+
+
+def pick_server_id(servers):
+    """从「当前节点可见」的测速点列表里挑一个，返回 (id, reason)。
+
+    优先级：显式 OOKLA_SERVER_ID（且在本节点列表里）→ 偏好关键词命中 → 列表首个。
+    列表由 CLI 按距出口由近及远返回，首个即官方口径的「就近测速点」。
+    """
+    for sid in _SERVER_STATE['explicit_ids']:
+        if any(s['id'] == sid for s in servers):
+            return sid, 'explicit'
+    for kw in CONFIG['OOKLA_SERVER_PREFER']:
+        low = kw.lower()
+        for s in servers:
+            hay = f"{s['name']} {s['location']} {s['country']}".lower()
+            if low in hay:
+                return s['id'], f'prefer:{kw}'
+    return servers[0]['id'], 'nearest'
 
 
 # ---------------------------------------------------------------------------
@@ -637,8 +697,15 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
     # 否则会出现「按上传达标导出、却按下行排 TOP」的自相矛盾展示
     top_sort_key = 'up' if bundle.get('metric', 'upload') == 'upload' else 'down'
     top = sorted(ok_results, key=lambda r: r.get(top_sort_key) or 0.0, reverse=True)[:5]
-    # 标题状态随结论降级（规范 第 4 章 状态 emoji 语义）：0 成功 / 命中「疑似未走代理」→ ⚠️
-    _title_emoji = '⚠️' if (not ok_results or bypass_hits) else '✅'
+    # 标题状态随结论降级（规范 8.2 节 状态图标语义）：0 成功 / 命中「疑似未走代理」
+    # / 引擎级失败 → ⚠️
+    _title_emoji = '⚠️' if (not ok_results or bypass_hits or meta.get('engine_error')) else '✅'
+    point_hits = meta.get('point_hits') or {}
+    point_labels = meta.get('point_labels') or {}
+    # 动态选点：本轮命中多个测速点时，头部不能只报一个（会误导成同口径横评）
+    _point_main = (f"📍 测速点：{tg_entry(meta['point_label'])} · id {tg_entry(meta['point_id'])}"
+                   if len(point_hits) <= 1
+                   else f"📍 测速点：按节点出口就近 · {len(point_hits)} 个")
     lines = [
         f'{_title_emoji} Ookla 测速',
         sep,
@@ -646,15 +713,30 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
         # 计数口径与四套统一用「可用」（成功=功能可用，含节点连接成功但速度偏低）
         f"📊 节点：共 {len(results)} 个 · 可用 {len(ok_results)} 个",
         # 取值行口径（规范 2.3 节）：测速点名与 id 都是机器返回值，整行同为等宽
-        f"📍 测速点：{tg_entry(meta['point_label'])} · id {tg_entry(meta['point_id'])}",
+        _point_main,
         f"🧪 引擎：{tg_entry('speedtest ' + (VERSION['ookla'] or 'latest'))}",
         '',
     ]
-    # 首选测速点不可用而顺延：必须显式标注（绝不静默换点）
+    if len(point_hits) > 1:
+        # 命中分布：按节点数降序取前 3，其余折叠
+        _ranked = sorted(point_hits.items(), key=lambda kv: (-kv[1], str(kv[0])))
+        _shown = _ranked[:3]
+        _entries = [tg_entry_codes(point_labels.get(str(pid)) or str(pid),
+                                   f'id {pid} · {cnt} 个节点') for pid, cnt in _shown]
+        if len(_ranked) > len(_shown):
+            _entries.append(f'还有 {len(_ranked) - len(_shown)} 个测速点…')
+        for _i, _l in enumerate(_entries, 1):
+            _c = '└─' if _i == len(_entries) else '├─'
+            lines.append(f'  {_c} {_l}')
+        lines.append('')
+    if meta.get('skipped_for_budget'):
+        lines.append(f"  ⏱ 达到时间预算，剩余 {meta['skipped_for_budget']} 个节点未测")
+        lines.append('')
+    # 显式指定了测速点、但节点可见列表里没有它 ⇒ 必须显式标注（绝不静默改口径）
     first_id = (CONFIG['OOKLA_SERVER_IDS'] or [''])[0]
-    if first_id and str(first_id) != str(meta['point_id']):
-        lines.append('  └─ ' + tg_entry_pair(first_id, meta['point_id'],
-                                             '首选测速点不可用，已顺延'))
+    if first_id and str(first_id) not in point_hits:
+        lines.append('  └─ ' + tg_entry_pair(first_id, '按节点出口就近',
+                                             '指定测速点不在节点可见列表'))
         lines.append('')
     # 测速点（Speedtest 服务器）的网络归属：服务器 IP/主机名取自 CLI 结果 JSON；
     # 已在 stop_mihomo_tun() 之后调用（直连视角）
@@ -688,17 +770,28 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
         lines.append(f"  └─ {bypass_hits} 个节点的出口 IP 与 runner 直连出口（{tg_entry(direct_ip)}）相同，"
                      'TUN 进程规则可能未生效，结果不可信')
         lines.append('')
+    unverified = len([r for r in ok_results if r.get('unverified')])
+    if unverified:
+        # 成功但 CLI 没给出口 IP：不能默认算「走了节点」，否则 bypass 校验形同虚设
+        lines.append('⚠️ 无法校验是否走代理')
+        lines.append(f'  └─ {unverified} 个节点测速成功但 CLI 未返回出口 IP，无法自证流量进了节点')
+        lines.append('')
+    if meta.get('engine_error'):
+        lines.append('⛔ 引擎级失败')
+        lines.append(f"  └─ 连续 {max(1, CONFIG['OOKLA_ABORT_AFTER'])} 个节点拉不到测速点列表，"
+                     f"已停止后续节点：{tg_entry(str(meta['engine_error'])[:120])}")
+        lines.append('')
 
     failed = [r for r in results if not r.get('ok')]
     if failed:
         lines.append(f'❌ 失败 · {len(failed)}')
         _failed_entries = []
         for r in failed[:5]:
-            # 并列双机器值（节点名 · 原始异常串）走 tg_entry_codes（语义表 #10）
+            # 并列双机器值（节点名 · 原始异常串）走 tg_entry_codes（4.5 节）
             _failed_entries.append(
                 tg_entry_codes(r.get('name', ''), (r.get('error') or '-')[:80]))
         if len(failed) > 5:
-            # 折叠行并入条目流，末条 └─ 由下面的循环统一决定（禁双 └─；规范 2.3 节）
+            # 折叠行并入条目流，末条 └─ 由下面的循环统一决定（禁双 └─；规范 4.6 节）
             _failed_entries.append(f'还有 {len(failed) - 5} 条…')
         for _i, _l in enumerate(_failed_entries, 1):
             _c = '└─' if _i == len(_failed_entries) else '├─'
@@ -805,7 +898,8 @@ def _run():
         ensure_local_ookla()
         if DIAGNOSE:
             # 直连基线（TUN 未起）：先确认 runner 自身出口 + 指定编号的可用性
-            diagnose_direct_baseline(_SERVER_STATE['ids'][0])
+            diagnose_direct_baseline(
+                (_SERVER_STATE['explicit_ids'] or [DEFAULT_SERVER_IDS])[0])
         start_mihomo_tun(env)
     except Exception as e:
         log_progress('bootstrap_failed', error=str(e))
@@ -856,7 +950,19 @@ def _run():
     results = []
     bypass_hits = 0
     server_info = {}
+    # 每个测速点（按 id）的元信息 + 命中次数：动态选点后一轮可能命中多个测速点，
+    # 通知头部要能说清「本轮到底测了哪些点」
+    point_info = {}
+    point_hits = {}
+    consecutive_no_list = 0
+    engine_error = ''
+    skipped_for_budget = 0
     for item in alive_items:
+        # 时间预算：到点就停，留时间撤 TUN / 发通知，别让 job 超时把整轮结果吞掉
+        if (datetime.now() - started_at).total_seconds() > CONFIG['OOKLA_TIME_BUDGET']:
+            skipped_for_budget = len(alive_items) - len(results)
+            log_progress('time_budget_exhausted', done=len(results), skipped=skipped_for_budget)
+            break
         name = str(item.get('name') or '')
         try:
             switch_proxy(name, CONFIG['OOKLA_SWITCH_SETTLE'])
@@ -865,9 +971,23 @@ def _run():
             results.append({'name': name, 'ok': False, 'error': f'切换失败：{e}'})
             continue
 
-        rc, out, err, parsed, sid = run_ookla(name)
-        if not server_info and parsed.get('server'):
-            server_info = parsed['server']
+        rc, out, err, parsed, sid, note = run_ookla(name)
+        if note == 'no_server_list':
+            # 引擎级问题（节点侧连测速点列表都拉不到）：连续命中就熔断，别白跑整轮
+            consecutive_no_list += 1
+            engine_error = engine_error or (err or 'server list unavailable')[:200]
+            if consecutive_no_list >= max(1, CONFIG['OOKLA_ABORT_AFTER']):
+                log_progress('ookla_engine_aborted', consecutive=consecutive_no_list,
+                             error=engine_error)
+                results.append({'name': name, 'ok': False, 'point_id': sid,
+                                'error': f'拉不到测速点列表：{engine_error}'})
+                break
+        else:
+            consecutive_no_list = 0
+        if parsed.get('server'):
+            point_info.setdefault(str(sid), parsed['server'])
+        if rc == 0 and parsed['ok']:
+            point_hits[str(sid)] = point_hits.get(str(sid), 0) + 1
         # 结果 JSON 体积小但含测速点信息；首条落盘供人工核对字段（日志不落出口 IP）
         row = {
             'name': name,
@@ -876,6 +996,7 @@ def _run():
             'mode': 'download',
             'ok': rc == 0 and parsed['ok'],
             'point_id': sid,
+            'point_label': server_label(sid, parsed.get('server') or {}),
             'exit_ip': parsed['exit_ip'],
             'rtt': _latency_ms(parsed['latency_ms']),
             # 单位与 taier 行字段一致（Mbps 口径），MiB/s × 8.388608 折算；
@@ -888,6 +1009,8 @@ def _run():
         row['bypass'] = bool(direct_ip and parsed['exit_ip'] and parsed['exit_ip'] == direct_ip)
         if row['bypass']:
             bypass_hits += 1
+        # 成功了但 CLI 没给出口 IP ⇒ 这条「是否真走了节点」无法自证，不能默认算通过
+        row['unverified'] = bool(row['ok'] and not parsed['exit_ip'])
         if not row['ok']:
             if parsed['server'] and not (parsed['download_mibs'] or parsed['upload_mibs']):
                 row['error'] = '测速点未返回有效带宽（延迟/上下行全空）'
@@ -958,22 +1081,35 @@ def _run():
 
     ended_at = datetime.now()
     duration_text = tg_format_elapsed((ended_at - started_at).total_seconds())
-    point_id = _SERVER_STATE['ids'][_SERVER_STATE['pos']]
+    # 动态选点：本轮可能命中多个测速点（不同出口地区的节点各自就近）。
+    # 通知头部要如实反映：命中 1 个就写死它；多个就写「按节点出口就近」+ 命中分布。
+    ok_points = [str(r.get('point_id') or '') for r in results if r.get('ok')]
+    ok_points = [p for p in ok_points if p]
+    top_point = max(point_hits, key=lambda k: point_hits[k]) if point_hits else \
+        (ok_points[0] if ok_points else (_SERVER_STATE['locked'] or ''))
     meta = {
         'started_text': started_at.isoformat()[:19].replace('T', ' '),
         'ended_text': ended_at.isoformat()[:19].replace('T', ' '),
         'duration_text': duration_text,
-        'point_id': point_id,
-        'point_label': server_label(point_id, server_info),
-        'server_info': server_info,
+        'point_id': top_point,
+        'point_label': server_label(top_point, point_info.get(top_point) or server_info),
+        'server_info': point_info.get(top_point) or server_info,
+        # 本轮实际用到的测速点分布（id → 命中次数），用于「多个测速点」时的展示
+        'point_hits': point_hits,
+        'point_labels': {pid: server_label(pid, point_info.get(pid) or {})
+                         for pid in point_info},
+        'skipped_for_budget': skipped_for_budget,
+        'engine_error': engine_error,
     }
     summary = {
-        'ok': bypass_hits == 0,
+        'ok': bypass_hits == 0 and not engine_error,
         'started_at': started_at.isoformat(),
         'ended_at': ended_at.isoformat(),
         'direct_egress_ip': direct_ip,
         'bypass_hits': bypass_hits,
-        'point_id': point_id,
+        'point_id': top_point,
+        'point_hits': point_hits,
+        'engine_error': engine_error,
         'node_count': len(results),
         'results': results,
     }
@@ -986,16 +1122,24 @@ def _run():
         # 长消息分片发送（失败列表 + Gist 段容易超 4000 字符，单发会被整条拒收）
         tg_res = send_telegram_chunked(env, '\n'.join(build_telegram_lines(
             results, meta, direct_ip, bypass_hits, gist_res, bundle, gist_error)))
-        # 发送层不写 stderr（python 侧靠返回值），失败原因必须回传日志（规范 第 5 章）
+        # 发送层不写 stderr（python 侧靠返回值），失败原因必须回传日志（规范 第 6 章）
         log_progress('telegram_send_finished', sent=bool(tg_res.get('sent')),
                      reason=tg_res.get('reason', ''))
     except Exception as e:
         log_progress('telegram_send_failed', error=str(e))
 
-    log_progress('ookla_speedtest_done', node_count=len(results), bypass_hits=bypass_hits,
-                 json_path=str(RESULT_JSON))
-    # 全部节点都命中 bypass ⇒ 结果不可信，判失败便于在 Actions 上看见
-    return 1 if (bypass_hits and bypass_hits >= max(1, len(results))) else 0
+    ok_count = len([r for r in results if r.get('ok') and not r.get('bypass')])
+    log_progress('ookla_speedtest_done', node_count=len(results), ok_count=ok_count,
+                 bypass_hits=bypass_hits, json_path=str(RESULT_JSON))
+    # 判失败（此前 0 个成功节点也返回 0，run 显示 success、整轮空数据无人发现）：
+    #   1) 引擎级失败（连续拉不到测速点列表）
+    #   2) 一个可用节点都没有
+    #   3) 全部节点命中「疑似未走代理」⇒ 结果不可信
+    if engine_error:
+        return 1
+    if ok_count == 0:
+        return 1
+    return 1 if (bypass_hits and bypass_hits >= len(results)) else 0
 
 
 def main():

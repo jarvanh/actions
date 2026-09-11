@@ -612,7 +612,7 @@ preprocess_large_files() {
 
     if [ "$split_success" -eq 1 ]; then
       success_count=$((success_count + 1))
-      # 英文 kind 不直出通知（规范 第 4 章）: media/binary 映射中文标签
+      # 英文 kind 不直出通知（规范 5.5 节）: media/binary 映射中文标签
       local _kind_label="二进制"
       [ "$split_kind" = "media" ] && _kind_label="媒体"
       tg_add_entry processed_files "${remote_source}:${full_path}" "$(format_bytes_iec "$file_size") · ${_kind_label}"

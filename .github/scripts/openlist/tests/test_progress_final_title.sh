@@ -66,7 +66,7 @@ reset_case() {
 # 渲染后取首行（tg_add_title 输出 "标题"）与第三行（标题+分隔线之后的 "状态：" kv 行）
 title_of() { _progress_render | head -1; }
 subtitle_of() { _progress_render | sed -n '3p'; }
-# 收尾标题经 tg_add_title 加粗，且前导 emoji 被自动拆到  外（2026-09-10 emoji 不入 ）
+# 收尾标题经 tg_add_title 渲染为裸文本，前导 emoji 不套标签（2026-09-10 emoji 不入 <b>）
 expect_title() { printf '%s %s' "${1%% *}" "${1#* }"; }
 expect_status() { printf '状态：%s\n' "$(escape_html "$1")"; }
 

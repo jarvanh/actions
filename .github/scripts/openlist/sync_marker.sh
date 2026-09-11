@@ -780,7 +780,7 @@ send_sync_warning() {
   fi
 
   if [ -n "$missing_dirs" ]; then
-    # 列表分节带计数（规范 第 2 章：凡分节后跟条目列表必须 · N）+ 统一树形（裁决 3，不再 "• "）
+    # 列表分节带计数（规范 4.2 节：凡分节后跟条目列表必须 · N）+ 统一树形（4.5 节，不再 "• "）
     tg_add_section msg "📁 缺失的目录 · 可能被删除 · $(printf '%s' "$missing_dirs" | grep -c .)"
     _dirs_html=""
     while IFS= read -r d; do
@@ -798,9 +798,9 @@ send_sync_warning() {
     tg_append msg "$(tree_lines "${_dirs_html%$'\n'}")"$'\n'
   fi
 
-  # 收尾区: 状态 + 备注（斜体），footer 自带空行。
+  # 收尾区: 状态 + 备注（裸文本说明段），footer 自带空行。
   # 注意: tg_add_note 对整段做 escape_html，段内不能携带 HTML 标签——
-  # emoji 只能随段裸置（转义边界决定的既定形态，勿"统一"成 ）
+  # emoji 只能随段裸置（转义边界决定的既定形态，勿套任何标签）
   tg_add_note msg "⏭️ 已跳过此同步，继续执行其他任务
 如确认无误，请手动触发 force_sync=true"
   tg_add_footer msg
@@ -870,7 +870,7 @@ send_sync_skipped() {
       # 计数取自 method_summary 行数（_m_entries 数组在下方才声明，此处引用会 unbound）
       tg_add_section msg "🔧 修复方式构成 · $(printf '%s' "$method_summary" | grep -c .)"
       # 树形条目（├─/└─）: 方式 × 数量 · 大小，summary 缩进为子行；
-      # restore.kind 英文 token 映射中文标签（规范 第 4 章：英文原因 token 不得直出通知）
+      # restore.kind 英文 token 映射中文标签（规范 5.5 节：英文原因 token 不得直出通知）
       local -a _m_entries=() _m_summaries=()
       local _m_kind_label
       while IFS=$'\t' read -r m_kind m_count m_bytes m_summary; do

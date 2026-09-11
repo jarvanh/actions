@@ -29,7 +29,7 @@ DIR_LABEL=$(basename "${SOURCE_REMOTE#*:}")
 # escape_html/tree_lines 全部 command-not-found，通知会静默缺损
 source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 
-# ===== 通知明细折叠（规范 第 4 章: 超长列表禁全量穷举）=====
+# ===== 通知明细折叠（规范 4.6 节: 超长列表禁全量穷举）=====
 # 组内条目上限 8 条（_grp_add 超出转计数），通知中最多展示 8 组（_grp_block 超出折叠）
 GRP_SHOWN=0 GRP_HIDDEN=0
 GRP_BLOCK_SHOWN=0 GRP_BLOCK_HIDDEN=0

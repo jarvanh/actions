@@ -1313,13 +1313,13 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
         duration_cn = tg_format_elapsed(
             (datetime.fromisoformat(str(ended_at)[:19]) - datetime.fromisoformat(str(started_at)[:19])).total_seconds())
     except Exception:
-        # 兜底不能回退到 duration_text（紧凑英文格式 5h57m，规范 第 4 章 禁进通知）
+        # 兜底不能回退到 duration_text（紧凑英文格式 5h57m，规范 4.3 节 禁进通知）
         duration_cn = '-'
     # 统一 HTML 版式（对齐 speedtest.build_telegram_lines / 全库通知模板）：
-    # emoji 标题 + ━━━ 分隔线 + 键值概览（数值 ）+ 树形 TOP5（节点 <code>）+ 统一收尾区
+    # emoji 标题 + ━━━ 分隔线 + 键值概览（数值裸文本）+ 树形 TOP5（节点 <code>）+ 统一收尾区
     sep = TG_SEP
     esc = lambda s: html.escape(str(s))
-    # 标题状态随结论降级（规范 第 4 章 状态 emoji 语义）：0 节点测速成功 / 本轮中止 → ⚠️，
+    # 标题状态随结论降级（规范 8.2 节 状态图标语义）：0 节点测速成功 / 本轮中止 → ⚠️，
     # 不再恒 ✅（此前「✅ 完成」下面写着「⚠️ 没有节点测速成功」，自相矛盾）
     _title_emoji = '⚠️' if (aborted_due_to_runtime or not ok_results_by_download) else '✅'
     summary_lines = [
@@ -1378,7 +1378,7 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
             summary_lines.append(f'  {_c} {_l}')
         summary_lines.append('')
     # 收尾区不在这里追加：finalize_gist_and_notify 还会在正文末尾补「📦 订阅 · Gist」段，
-    # 收尾行必须位于所有正文之后（规范 第 3 章），统一由 finalize 在最后追加
+    # 收尾行必须位于所有正文之后（规范 4.9 节），统一由 finalize 在最后追加
     return summary_lines
 
 def update_summary_artifacts(summary):
@@ -1428,7 +1428,7 @@ def finalize_gist_and_notify(env, summary, summary_lines, subscription_text, bun
         summary_lines.append(f"  └─ ⚠️ 上传失败：{tg_entry(gist_res.get('reason', ''))}")
     # 统一收尾区（收尾区与正文间固定一个空行；与 tg_add_footer 同形态同降级链）
     # 必须在所有正文段之后追加（「📦 订阅 · Gist」是正文的最后一段）——此前在
-    # build_summary_lines 里加，被此段挤到正文中间，消息末尾反而没有收尾行（规范 第 3 章）
+    # build_summary_lines 里加，被此段挤到正文中间，消息末尾反而没有收尾行（规范 4.9 节）
     summary_lines.append('')
     footer = tg_footer_line()
     if footer:
@@ -1717,7 +1717,7 @@ if __name__ == '__main__':
         print(json.dumps({'ok': False, 'stage': stage, 'error': err_text}, ensure_ascii=False))
         try:
             env = merged_env()
-            # 统一 HTML 版式（emoji+加粗标题/分隔线/全角冒号 kv/统一收尾区）；
+            # 统一 HTML 版式（emoji + 短语标题（无加粗）/分隔线/全角冒号 kv/统一收尾区）；
             # 异常文本含 <>& 时未转义会触发 400 整条丢失（不退化，2026-09-06 拍板），必须 html.escape
             _sep = TG_SEP
             _msg = (f'❌ Gitee 测速异常退出 · {html.escape(str(stage))}\n{_sep}\n'

@@ -37,7 +37,7 @@ fi
 source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 
 # 收集文件名与大小，用于通知（树形条目统一 ├─/└─；元数据 " · …"，禁括号）。
-# 每组上限 8 条 + 折叠行"还有 N 条…"并入条目流（规范 2.2 节：残留可能上百条，
+# 每组上限 8 条 + 折叠行"还有 N 条…"并入条目流（规范 4.6 节：残留可能上百条，
 # 全量穷举会刷屏并顶到 4000 分片边界把收尾区切走；末条 └─ 由 tree_lines 统一决定）
 FILE_DETAILS=""
 DETAIL_MAX=8

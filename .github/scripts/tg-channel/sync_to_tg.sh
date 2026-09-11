@@ -133,11 +133,11 @@ def build_fail_notify(title: str, file: str, elapsed: float, lines: list):
     （故用 耗时：N 秒 kv 形态，不加 ⏱ 前缀冒充收尾）。动态内容一律 esc()。
     """
     parts = [
-        # 标题 = emoji + 短语加粗（规范 第 2 章；此前未加粗与 tg_add_title 版式漂移）
-        # 标题（emoji + 短语）入 ：值/计数才无标签
+        # 标题 = emoji + 短语（裸文本，规范 2.3 节；此前加粗与 tg_add_title 版式漂移）
+        # 标题（emoji + 短语）裸文本；值/计数按 2.3 节取值行口径
         f"{esc(title)}",
         TG_SEP,
-        # 文件名属机器值 → <code>；emoji 入 （规范 第 2 章 语义表 #3 + 裁决 7）
+        # 文件名属机器值 → <code>；emoji 不套标签（规范 2.3 节）
         f"📁 {tg_entry(shorten_name(os.path.basename(file)))}",
         f"📦 分组：{esc(CAPTION_PREFIX)}",
         f"耗时：{fmt_secs(elapsed)}",
@@ -622,22 +622,10 @@ SKIPPED_DETAILS=$(python3 -c "import json,sys; d=json.load(open('$STATS_FILE'));
 # 发送通知
 source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 
-# 逐行 escape_html（tree_lines 输入必须已转义）：python 侧按职责分层只出
-# 结构化数据，HTML 一律在 bash 渲染侧统一做——文件名含 & < > 时未转义会
-# 触发 400、整条通知发送失败（不重发）（2026-09-05 审计补的缺口）
-esc_lines() {
-  local _l _out=""
-  while IFS= read -r _l; do
-    [ -z "$_l" ] && continue
-    _out+="$(escape_html "$_l")"$'\n'
-  done <<< "$1"
-  printf '%s' "${_out%$'\n'}"
-}
-
 # 已上传/失败条目渲染: 每行 "文件名\t备注"（python 侧产出）→ 树形
 # "  ├─ <code>文件名</code> · 备注"。
 # 与 _render_skipped_groups 同款标签（条目主体文件类 <code>、元数据 · ）——此前这两个
-# 列表整行只转义不加标签，与同通知内的跳过明细两种条目风格并存（规范 第 2 章 语义表 #4/#5）
+# 列表整行只转义不加标签，与同通知内的跳过明细两种条目风格并存（规范 4.5 节）
 _render_named_entries() {
   local _in="$1" _name _meta _out=""
   [ -z "$_in" ] && return 0

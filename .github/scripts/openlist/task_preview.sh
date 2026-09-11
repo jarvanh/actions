@@ -240,7 +240,7 @@ add_preview_pair() {
 }
 
 # 同步对详情渲染: 仅按源端分组（同源端多目标一组的树形列表）
-#   📁 <code>src</code> · 源端 X / N 文件        ← 组内各条目源端大小一致时上提组头
+#   📁 src · 源端 X / N 文件                    ← 组内各条目源端大小一致时上提组头（组头裸文本）
 #     ├─ <code>dst</code> · 源端 X / N 文件 · +Y / +K 文件
 #     │   差异构成：新增 a · 同名更新 b                  ← 存在同名更新时的说明子行
 #     │   排除：<code>pat</code>                          ← 有排除规则的条目子行
@@ -304,7 +304,7 @@ _preview_render_pairs_detail() {
     # 排除规则（顿号「、」连接，_extract_exclude_summary 产出）:
     #   ≥2 条 → 条目子树（组头「排除 · N」+ 逐条 <code>，模式内末条 └─；
     #           前缀 = tree_sub(last) + 2 空格，末条目整块 8 空格起）
-    #   1 条  → 并入子行（不为单条扩树，规范 2.2.3 节）
+    #   1 条  → 并入子行（不为单条扩树，规范 4.5 节）
     if [ -n "$_excl" ]; then
       local -a _pats=()
       local _p
@@ -334,7 +334,7 @@ _preview_render_pairs_detail() {
     fi
   done <<< "$PREVIEW_PAIRS_TSV"
   # 组装: 组头 + 树形条目块，组间空一行（首组前不加——tg_add_section 已带段前空行）
-  # 组头路径加粗（与进度通知同款），条目内路径才用 <code>
+  # 组头是分节标题 → 裸文本（规范 4.2 节），条目内的路径才走 <code> 等宽
   local _out="" _src _gi=0
   for _src in "${_g_order[@]}"; do
     [ "$_gi" -gt 0 ] && _out+=$'\n'

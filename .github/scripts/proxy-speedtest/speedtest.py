@@ -930,7 +930,7 @@ def main():
         tg_res = send_telegram_chunked(env, '\n'.join(build_telegram_lines(
             results, meta=meta, gist_res=gist_res, bundle=bundle)))
         # 发送层不写 stderr（python 侧靠返回值），失败原因必须回传日志，否则
-        # 400 解析失败/限流会表现为「通知静默消失」（规范 第 5 章）
+        # 400 解析失败/限流会表现为「通知静默消失」（规范 第 6 章）
         log_progress('telegram_send_finished', sent=bool(tg_res.get('sent')),
                      reason=tg_res.get('reason', ''))
     except Exception as e:
@@ -952,7 +952,7 @@ def _result_metric_item(r):
 
 def build_telegram_lines(results, *, meta, gist_res, bundle=None):
     """生成人性化 Telegram 通知（统一 HTML 版式，对齐全库通知模板）：
-    emoji 标题 + ━━━ 分隔线 + 键值概览（数值 ）+ 树形 TOP5（节点 <code>）+
+    emoji 标题 + ━━━ 分隔线 + 键值概览（数值裸文本）+ 树形 TOP5（节点 <code>）+
     订阅状态 + 统一收尾区（⏱ 已运行 · 🔗 运行日志，读 TG_RUN_URL 环境变量）。"""
     def esc(s):
         return html.escape(str(s))
@@ -983,7 +983,7 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None):
         duration_text = '-'
 
     sep = TG_SEP
-    # 标题状态随结论降级（规范 第 4 章 状态 emoji 语义）：0 可用节点 → ⚠️，不再恒 ✅
+    # 标题状态随结论降级（规范 8.2 节 状态图标语义）：0 可用节点 → ⚠️，不再恒 ✅
     _title_emoji = '⚠️' if not ok_results else '✅'
     lines = [
         f'{_title_emoji} CDN 测速完成',
@@ -1003,7 +1003,7 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None):
     lines.append('')
     if top_results:
         top = top_results[:5]
-        # 名次类分节用 🏆（规范 第 2 章 裁决 5：禁 ⭐/🥇 自造前缀；名次类计数在  内）；
+        # 名次类分节用 🏆（规范 8.2 节：禁 ⭐/🥇 自造前缀；名次类计数裸文本）；
         # 指标顺序对齐泰尔引擎列序（↑上传在前）；上传未启用/未测出时条目自动省略
         # ↑ 项（build_node_metric_prefix 内置），图例同步省略
         has_up = any((_result_metric_item(r).get('upload_mibs') or 0) > 0 for r in top)
@@ -1014,7 +1014,7 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None):
         for idx, r in enumerate(top, 1):
             prefix = build_node_metric_prefix(_result_metric_item(r), mode, order='up_first')
             connector = '└─' if idx == len(top) else '├─'
-            # 条目不编号（裁决 6）：顺序即名次；条目行统一走 tg_entry（主体 + 元数据）
+            # 条目不编号，顺序即名次；条目行统一走 tg_entry（主体 + 元数据，见 4.5 节）
             lines.append(f'  {connector} ' + tg_entry(r.get("name", ""), prefix))
         lines.append('')
     else:
@@ -1120,7 +1120,7 @@ if __name__ == '__main__':
         _msg = (f'❌ CDN 测速异常退出 · {html.escape(_head)}\n'
                 f'{TG_SEP}\n'
                 f'错误：{tg_entry(f"{type(e).__name__}: {e}"[:800])}')
-        # 收尾区不可省（规范 第 3 章/第 6 章）：兜底通知同样要带 ⏱ 已运行 + 运行日志
+        # 收尾区不可省（规范 4.9 节）：兜底通知同样要带 ⏱ 已运行 + 运行日志
         _footer = tg_footer_line()
         if _footer:
             _msg += f'\n\n{_footer}'

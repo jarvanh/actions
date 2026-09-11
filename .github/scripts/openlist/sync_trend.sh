@@ -120,7 +120,7 @@ trend_record_and_notify() {
   _trend_send_summary "$_local"
 }
 
-# 通知内时长一律中文形态（规范第 4 章禁英文紧凑格式 2h15m；
+# 通知内时长一律中文形态（规范 4.3 节 时长五层，禁英文紧凑格式 2h15m；
 # 紧凑写法只留在 RESULT_JSON/日志，不进通知；不足 1 分钟用两位小数秒）
 _trend_fmt_duration() {
   local s="${1:-0}" h m

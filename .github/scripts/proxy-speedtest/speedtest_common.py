@@ -455,10 +455,10 @@ def build_target_network_section(targets):
 
     单测速点（与泰尔版式逐字一致）：
         📍 测速点网络
-          ├─ 测速服务器：<server> · <label>
-          ├─ ISP：…
-          ├─ ASN：…
-          └─ 位置：…
+          ├─ 测速服务器：<code><server> · <label></code>
+          ├─ ISP：<code>…</code>
+          ├─ ASN：<code>…</code>
+          └─ 位置：<code>…</code>
     多测速点：每个测速点前加 `[N] <label>` 定位行，测速服务器行只放 server。
     server 为空 → 该块降级为「归属获取失败（label）」。
     """
@@ -474,7 +474,7 @@ def build_target_network_section(targets):
         multi = len(targets) > 1
         if not server:
             fallback = f'（{esc(label)}）' if label else ''
-            # 中文原因 → （语义表：条目主体非文件值不得裸文本）
+            # 中文原因 → 裸文本（2.3 节：自然语言不走 <code>）
             lines.append(f'  └─ 归属获取失败{fallback}')
             continue
         if multi:
@@ -485,10 +485,12 @@ def build_target_network_section(targets):
         else:
             lines.append(f'  ├─ 测速服务器：<code>{esc(server)}</code>')
         isp, asn, loc = network_cells(info)
+        # 取值行口径（规范 2.3 节）：一次归属查询返回的 ISP/ASN/位置 与 IP 同属机器
+        # 返回值，整节同为 <code>；按「值不值得复制」逐个判断会产出等宽/正体交错的斑马纹
         lines += [
-            f'  ├─ ISP：{esc(isp)}',
+            f'  ├─ ISP：<code>{esc(isp)}</code>',
             f'  ├─ ASN：<code>{esc(asn)}</code>',
-            f'  └─ 位置：{esc(loc)}',
+            f'  └─ 位置：<code>{esc(loc)}</code>',
         ]
     return lines
 
@@ -506,7 +508,7 @@ def send_telegram(env, text):
         return {'sent': False, 'reason': 'missing TELEGRAM_BOT_TOKEN/TG_BOT_TOKEN or TELEGRAM_CHAT_ID'}
 
     def _post(data):
-        # 429 限流按 retry_after 完整等待重试（规范 第 5 章，与 tg_notify.sh 同语义：5 次尝试）
+        # 429 限流按 retry_after 完整等待重试（规范 第 6 章，与 tg_notify.sh 同语义：5 次尝试）
         for _attempt in range(5):
             payload = urllib.parse.urlencode(data).encode()
             req = urllib.request.Request(f'https://api.telegram.org/bot{bot}/sendMessage',
@@ -552,7 +554,7 @@ TG_CHUNK_SIZE = 4000
 
 
 def send_telegram_chunked(env, text):
-    """长消息按 4000 字符分片发送（规范 第 5 章：断在换行处，不切 UTF-8 多字节字符，
+    """长消息按 4000 字符分片发送（规范 第 6 章：断在换行处，不切 UTF-8 多字节字符，
     与 tg_notify.sh send_tg_chunked 同语义）；短消息直接走 send_telegram。"""
     if not text:
         return {'sent': True}
@@ -598,7 +600,7 @@ def tg_format_elapsed(seconds):
 def tg_entry(subject, *meta, code: bool = True):
     """条目行构造器（与 bash 真源 tg_entry 同语义，2026-09-10 新增）。
 
-    消灭语义表 #4/#5 的"手写"：条目主体 + 元数据统一 " · " 分隔、统一转义、
+    消灭 4.5 节之前的"手写"：条目主体 + 元数据统一 " · " 分隔、统一转义、
     顺序固定。code=True 用于机器值主体（文件名/路径/ID/命令），False 用于
     文字主体（节点名以外的短语）。
     输出: "<code>主体</code> · 元数据 · 元数据"（不含换行，由调用方拼接）
@@ -621,7 +623,7 @@ def _tg_entry2(sep: str, a, b, *meta) -> str:
 
 
 def tg_entry_pair(a, b=None, *meta) -> str:
-    """双机器值条目（语义表 #10）："<code>A</code> → <code>B</code> · 元数据"。
+    """双机器值条目（4.5 节）："<code>A</code> → <code>B</code> · 元数据"。
 
     → 表达替换/映射关系（原名 → 替代名），不可写成 " · "；第二主体为空时自动省略。
     """
@@ -629,7 +631,7 @@ def tg_entry_pair(a, b=None, *meta) -> str:
 
 
 def tg_entry_codes(a, b=None, *meta) -> str:
-    """并列双机器值条目（语义表 #10）："<code>A</code> · <code>B</code> · 元数据"。
+    """并列双机器值条目（4.5 节）："<code>A</code> · <code>B</code> · 元数据"。
 
     无主次关系（如节点名 · 原始异常串），与 tg_entry 的区别是第二个值也是机器值。
     """

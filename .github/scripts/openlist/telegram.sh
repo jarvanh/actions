@@ -43,7 +43,7 @@ send_telegram_message() {
   local parse_mode="${2:-HTML}"
   [ -z "$message" ] && return 0
   # 不再吞掉 stderr：发送层已把失败原因（429 重试耗尽 / 400 解析失败 / 其它 API 错误）
-  # 写到 stderr，>/dev/null 会让「通知静默消失」无法定位（规范 第 5 章）
+  # 写到 stderr，>/dev/null 会让「通知静默消失」无法定位（规范 第 6 章）
   if [ "${#message}" -gt 4000 ]; then
     send_tg_chunked "$message" || true
     return 0
@@ -54,7 +54,7 @@ send_telegram_message() {
 # 发送 Telegram 消息并返回 message_id
 # 用法: _tg_send_and_get_id <message> [parse_mode=HTML]
 # 输出: message_id（失败时为空）
-# 429 按 retry_after 重试；HTML 解析失败直接报错、不重发（见 docs/telegram-notify.md 第 5 章）
+# 429 按 retry_after 重试；HTML 解析失败直接报错、不重发（见 docs/telegram-notify.md 第 6 章）
 _tg_send_and_get_id() {
   local message="$1"
   local parse_mode="${2:-HTML}"
