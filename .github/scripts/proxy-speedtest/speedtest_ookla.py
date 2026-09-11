@@ -70,6 +70,7 @@ from speedtest_gitee import (
     MIHOMO,
     MIHOMO_CONFIG,
     MIHOMO_LOG,
+    MIHOMO_MIXED_PORT,
     build_mihomo_config,
     build_source_mapping,
     collect_provider_snapshot,
@@ -152,6 +153,17 @@ _SERVER_ERROR_HINTS = (
 
 # CLI 报「参数不认」的特征（用于 --progress 的自动降级）
 _BAD_FLAG_HINTS = ('invalid', 'unknown', 'unexpected', 'possible values', 'unrecognized')
+
+# 诊断模式：OOKLA_DIAGNOSE=1 时只跑探针、结果进 step 日志（不发 TG、不写 Gist、
+# 不按失败退出）。用于判定失败形态是「服务器列表整体拉不到（控制面不通）」还是
+# 「列表有、只是指定编号已失效」——两者的修法完全不同，不能靠猜。
+DIAGNOSE = (os.environ.get('OOKLA_DIAGNOSE', '') or '').strip().lower() in ('1', 'true', 'yes')
+
+
+def _diag(msg):
+    """诊断输出：只进 step 日志。禁止打印节点名 / 出口 IP / 订阅内容。"""
+    if DIAGNOSE:
+        print(f'[diag] {msg}', flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -404,24 +416,25 @@ def _ookla_cmd(server_id):
     return cmd
 
 
-def _exec_ookla(cmd):
+def _exec_ookla(cmd, timeout=None):
+    limit = timeout if timeout and timeout > 0 else CONFIG['OOKLA_TIMEOUT']
     try:
         p = subprocess.run(cmd, text=True, capture_output=True,
-                           timeout=CONFIG['OOKLA_TIMEOUT'], stdin=subprocess.DEVNULL)
+                           timeout=limit, stdin=subprocess.DEVNULL)
         return p.returncode, p.stdout or '', p.stderr or ''
     except subprocess.TimeoutExpired:
-        return 124, '', f'timeout after {CONFIG["OOKLA_TIMEOUT"]}s'
+        return 124, '', f'timeout after {limit}s'
 
 
-def _run_ookla_once(server_id):
-    rc, out, err = _exec_ookla(_ookla_cmd(server_id))
+def _run_ookla_once(server_id, timeout=None):
+    rc, out, err = _exec_ookla(_ookla_cmd(server_id), timeout=timeout)
     # --progress=no 不被当前 CLI 版本接受时，去掉该参数重试一次并永久关闭开关
     low = (err or '').lower()
     if rc != 0 and _CLI_FLAGS['progress'] and 'progress' in low and \
             any(hint in low for hint in _BAD_FLAG_HINTS):
         log_progress('ookla_progress_flag_unsupported', error=(err or '').strip()[-200:])
         _CLI_FLAGS['progress'] = False
-        rc, out, err = _exec_ookla(_ookla_cmd(server_id))
+        rc, out, err = _exec_ookla(_ookla_cmd(server_id), timeout=timeout)
     return rc, out, err
 
 
@@ -443,6 +456,133 @@ def run_ookla(name: str):
         nxt = _SERVER_STATE['pos'] + 1
         log_progress('ookla_server_fallback', from_point_id=sid, to_point_id=ids[nxt], name=name)
         _SERVER_STATE['pos'] = nxt
+
+
+# ---------------------------------------------------------------------------
+# 测速点列表（动态选点 / 诊断共用）
+# ---------------------------------------------------------------------------
+def _parse_server_list(stdout: str):
+    """解析 `speedtest -L --format=json` 的输出，返回原始 dict 列表。
+
+    官方 CLI 的列表输出顶层可能是数组，也可能是 {"servers": [...]}，两种都要吃；
+    解析不出来一律返回 []（由调用方判「列表拉不到」）。
+    """
+    text = ANSI_RE.sub('', stdout or '')
+    candidates = []
+    s, e = text.find('['), text.rfind(']')
+    if s >= 0 and e > s:
+        candidates.append(text[s:e + 1])
+    s2, e2 = text.find('{'), text.rfind('}')
+    if s2 >= 0 and e2 > s2:
+        candidates.append(text[s2:e2 + 1])
+    for raw in candidates:
+        try:
+            obj = json.loads(raw)
+        except Exception:
+            continue
+        if isinstance(obj, list):
+            return obj
+        if isinstance(obj, dict):
+            for key in ('servers', 'data'):
+                if isinstance(obj.get(key), list):
+                    return obj[key]
+    return []
+
+
+def list_servers(timeout=90):
+    """经当前节点列出可用测速点：`speedtest -L`。
+
+    与正式测速走同一条链路（同一个二进制 → 同一个 PROCESS-NAME 规则 → 同一个节点），
+    所以这里看到的就是「当前节点出口视角」的测速点列表；runner 直连（Azure 出口）
+    视角看不到大陆测速点，不能用直连列表代替。
+    """
+    cmd = [OOKLA_BIN, '--accept-license', '--accept-gdpr', '--format=json', '-L']
+    rc, out, err = _exec_ookla(cmd, timeout=timeout)
+    raw = _parse_server_list(out)
+    servers = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        servers.append({
+            'id': str(item.get('id') or '').strip(),
+            'name': str(item.get('name') or '').strip(),
+            'location': str(item.get('location') or '').strip(),
+            'country': str(item.get('country') or '').strip(),
+            'host': str(item.get('host') or '').strip(),
+        })
+    servers = [s for s in servers if s['id']]
+    log_progress('ookla_server_listed', rc=rc, count=len(servers))
+    if not servers:
+        log_progress('ookla_server_list_empty', rc=rc, error=(err or '').strip()[-200:])
+    return servers
+
+
+# ---------------------------------------------------------------------------
+# 诊断探针（OOKLA_DIAGNOSE=1）
+# ---------------------------------------------------------------------------
+def diagnose_direct_baseline(server_id):
+    """TUN 未起时的直连基线：runner 出口 + 指定编号能否拿到结果。"""
+    cmd = [OOKLA_BIN, '--accept-license', '--accept-gdpr', '--format=json',
+           f'--server-id={server_id}']
+    rc, out, err = _exec_ookla(cmd, timeout=60)
+    parsed = parse_ookla_result(parse_ookla_json(out))
+    _diag(f'direct-baseline rc={rc} ok={parsed["ok"]} error={parsed.get("error", "")[:120]}')
+    _diag('direct-baseline stderr: ' + ' | '.join((err or '').strip().splitlines()[-3:]))
+
+
+def diagnose_control_plane():
+    """经 mihomo mixed-port 探 speedtest.net 控制面：判断节点侧是否可达。"""
+    proxy = f'http://127.0.0.1:{MIHOMO_MIXED_PORT}'
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({'http': proxy, 'https': proxy}))
+    for url in ('https://www.speedtest.net/', 'https://api.speedtest.net/api/v1/servers?limit=1'):
+        t0 = time.time()
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with opener.open(req, timeout=20) as r:
+                _diag(f'control-plane {url} -> HTTP {r.status} in {time.time() - t0:.1f}s')
+        except Exception as e:
+            _diag(f'control-plane {url} -> {type(e).__name__}: {str(e)[:120]} '
+                  f'({time.time() - t0:.1f}s)')
+
+
+def diagnose_mihomo_log():
+    """mihomo 日志里与 speedtest 相关的行：确认 PROCESS-NAME 规则是否命中。
+
+    debug 级日志会带节点名 / 目标域名，这里只取含 speedtest 的行并截断，
+    避免把节点身份打进公开 step 日志。
+    """
+    try:
+        lines = MIHOMO_LOG.read_text(encoding='utf-8', errors='ignore').splitlines()
+    except Exception as e:
+        _diag(f'mihomo log unreadable: {e}')
+        return
+    hits = [l for l in lines if 'speedtest' in l.lower()][-20:]
+    _diag(f'mihomo log matched(speedtest)={len(hits)}')
+    for l in hits:
+        _diag('  mihomo: ' + l[-200:])
+
+
+def diagnose_on_node():
+    """切到节点后的完整探针：列表 → 控制面 → 实测一次 → mihomo 日志。"""
+    servers = list_servers()
+    _diag(f'server-list count={len(servers)}')
+    ids = [s['id'] for s in servers]
+    _diag(f'server-list contains 26678: {"26678" in ids}')
+    for s in servers[:20]:
+        _diag('  server: ' + json.dumps(s, ensure_ascii=False))
+    cn = [s for s in servers if 'china' in (s['country'] or '').lower() or s['country'] == 'CN']
+    _diag(f'server-list CN={len(cn)}: ' + ', '.join(s['id'] for s in cn[:30]))
+    diagnose_control_plane()
+    sid = _SERVER_STATE['ids'][_SERVER_STATE['pos']]
+    rc, out, err = _run_ookla_once(sid, timeout=90)
+    parsed = parse_ookla_result(parse_ookla_json(out))
+    _diag(f'measure rc={rc} point={sid} ok={parsed["ok"]} '
+          f'down={parsed["download_mibs"]:.2f}MiB/s up={parsed["upload_mibs"]:.2f}MiB/s '
+          f'latency={parsed["latency_ms"]} error={parsed.get("error", "")[:120]}')
+    if not parsed['ok']:
+        _diag('measure stderr: ' + ' | '.join((err or '').strip().splitlines()[-3:]))
+    diagnose_mihomo_log()
 
 
 def _latency_ms(value):
@@ -505,8 +645,9 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
         f"🕒 起止：{esc(meta['started_text'])} ~ {esc(meta['ended_text'])} · 耗时 {esc(meta['duration_text'])}",
         # 计数口径与四套统一用「可用」（成功=功能可用，含节点连接成功但速度偏低）
         f"📊 节点：共 {len(results)} 个 · 可用 {len(ok_results)} 个",
-        f"📍 测速点：{esc(meta['point_label'])}（id <code>{esc(meta['point_id'])}</code>）",
-        f"🧪 引擎：<code>speedtest {esc(VERSION['ookla'] or 'latest')}</code>",
+        # 取值行口径（规范 2.3 节）：测速点名与 id 都是机器返回值，整行同为等宽
+        f"📍 测速点：{tg_entry(meta['point_label'])} · id {tg_entry(meta['point_id'])}",
+        f"🧪 引擎：{tg_entry('speedtest ' + (VERSION['ookla'] or 'latest'))}",
         '',
     ]
     # 首选测速点不可用而顺延：必须显式标注（绝不静默换点）
@@ -544,7 +685,7 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
 
     if bypass_hits:
         lines.append('⚠️ 疑似未走代理')
-        lines.append(f"  └─ {bypass_hits} 个节点的出口 IP 与 runner 直连出口（<code>{esc(direct_ip)}</code>）相同，"
+        lines.append(f"  └─ {bypass_hits} 个节点的出口 IP 与 runner 直连出口（{tg_entry(direct_ip)}）相同，"
                      'TUN 进程规则可能未生效，结果不可信')
         lines.append('')
 
@@ -570,17 +711,17 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
         raw_url = ((gist_res.get('yaml') or {}).get('raw_url') or '').strip()
         gist_lines = [f'✅ 已{action}，达标 {qualified_count} 个 · 阈值 ≥{min_megabit}兆（按{esc(metric_label)}）']
         if gist_res.get('created'):
-            gist_lines.append('⚠️ 请把 Gist id 回填到 Secrets <code>PROXY_SPEEDTEST_OOKLA_GIST_ID</code>，避免每轮新建')
+            gist_lines.append(f'⚠️ 请把 Gist id 回填到 Secrets {tg_entry("PROXY_SPEEDTEST_OOKLA_GIST_ID")}，避免每轮新建')
         if raw_url:
             gist_lines.append(f'🔗 <a href="{esc(raw_url)}">订阅源 YAML</a>')
         for _i, _l in enumerate(gist_lines):
             _c = '└─' if _i == len(gist_lines) - 1 else '├─'
             lines.append(f'  {_c} {_l}')
     elif gist_res:
-        lines.append(f"  └─ ⚠️ 上传失败：<code>{esc(gist_res.get('reason', ''))}</code>")
+        lines.append(f"  └─ ⚠️ 上传失败：{tg_entry(gist_res.get('reason', ''))}")
     elif gist_error:
         # 上传阶段抛异常（HTTP 4xx 等）≠ 没有达标节点，文案必须区分
-        lines.append(f'  └─ ⚠️ 上传失败：<code>{esc(gist_error[:120])}</code>')
+        lines.append(f'  └─ ⚠️ 上传失败：{tg_entry(gist_error[:120])}')
     else:
         lines.append(f'  └─ ⚠️ 达标不足 {min_nodes} 个 · 阈值 ≥{min_megabit}兆（按{esc(metric_label)}）· 未更新订阅')
     # 统一收尾区（收尾区与正文间固定**一个**空行）
@@ -604,7 +745,7 @@ def notify_failure(env, reason):
         f'❌ Ookla 测速异常退出 · {html.escape(_head)}',
         TG_SEP,
         # reason 含原始异常串（机器值）→ <code>；与 cdn/gitee 的「原因/错误」同口径
-        f'原因：<code>{html.escape(str(reason))}</code>',
+        f'原因：{tg_entry(reason)}',
         '',
     ]
     footer = tg_footer_line()
@@ -634,7 +775,7 @@ def handle_termination_signal(signum, frame):
         pass
     sig_name = signal.Signals(signum).name if signum else f'SIGNAL-{signum}'
     msg = (f'⛔ Ookla 测速异常终止\n{TG_SEP}\n'
-           f'⚠️ 脚本被中断：收到 <code>{sig_name}</code>，本轮测速未正常完成。')
+           f'⚠️ 脚本被中断：收到 {tg_entry(sig_name)}，本轮测速未正常完成。')
     footer = tg_footer_line()
     if footer:
         msg += f'\n\n{footer}'
@@ -656,9 +797,15 @@ def _run():
         'timeout': CONFIG['OOKLA_TIMEOUT'],
     })
     env = merged_env()
+    if DIAGNOSE:
+        # 诊断要看 mihomo 的规则命中（PROCESS-NAME 是否匹配到测速进程）
+        env['PROXY_SPEEDTEST_MIHOMO_LOG_LEVEL'] = 'debug'
 
     try:
         ensure_local_ookla()
+        if DIAGNOSE:
+            # 直连基线（TUN 未起）：先确认 runner 自身出口 + 指定编号的可用性
+            diagnose_direct_baseline(_SERVER_STATE['ids'][0])
         start_mihomo_tun(env)
     except Exception as e:
         log_progress('bootstrap_failed', error=str(e))
@@ -689,6 +836,22 @@ def _run():
     if max_nodes and max_nodes > 0:
         alive_items = alive_items[:max_nodes]
     log_progress('nodes_collected', count=len(alive_items))
+
+    if DIAGNOSE:
+        # 诊断：只在一个节点上跑探针，不写 Gist、不发 TG、不按失败退出
+        _diag(f'alive nodes={len(alive_items)}')
+        if alive_items:
+            try:
+                switch_proxy(str(alive_items[0].get('name') or ''), CONFIG['OOKLA_SWITCH_SETTLE'])
+            except Exception as e:
+                _diag(f'switch failed: {e}')
+            try:
+                diagnose_on_node()
+            except Exception as e:
+                _diag(f'diagnose failed: {type(e).__name__}: {str(e)[:200]}')
+        stop_mihomo_tun()
+        _diag('diagnose done')
+        return 0
 
     results = []
     bypass_hits = 0

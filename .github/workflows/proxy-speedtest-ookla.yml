@@ -30,6 +30,11 @@ on:
         description: '最多测几个节点（0 = 不限）'
         required: false
         default: '0'
+      diagnose:
+        description: '只跑诊断探针（判断拿不到测速点是「列表空」还是「编号失效」）：不发通知、不写订阅'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   speedtest:
@@ -78,6 +83,8 @@ jobs:
           # 测速点与测速参数（workflow_dispatch 可覆盖；定时运行走默认值）
           OOKLA_SERVER_ID: ${{ github.event.inputs.server_id || '26678' }}
           OOKLA_MAX_NODES: ${{ github.event.inputs.max_nodes || '0' }}
+          # 诊断模式：只看探针结论（step 日志 [diag] 行），不发通知、不写订阅
+          OOKLA_DIAGNOSE: ${{ github.event.inputs.diagnose || 'false' }}
           # 订阅导出策略（四套共用；可在仓库 Settings → Secrets and variables → Actions
           # → Variables 里覆盖，留空走脚本默认值）：
           #   PROXY_SPEEDTEST_MIN_MEGABIT  达标阈值（兆，默认 10）
