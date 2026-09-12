@@ -4,15 +4,6 @@ on:
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
-    inputs:
-      openclaw_shrink_guard:
-        description: '主包 openclaw.tar.gz 缩水保护：0 = 本轮放行，直接覆盖主包'
-        required: false
-        default: '1'
-      zcode_shrink_guard:
-        description: 'zcode.tar.gz 缩水保护：0 = 本轮放行，直接覆盖主包'
-        required: false
-        default: '1'
 
 permissions:
   contents: read
@@ -25,11 +16,6 @@ jobs:
     env:
       TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
       TS_OAUTH_CLIENT_SECRET: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
-      # 缩水保护开关。定时触发取默认 1；手动触发可用同名 input 覆盖为 0。
-      # 放行用途：归档排除规则收紧（主动瘦身）后，新包会永久小于云端旧包而被保护挡住，
-      # 主包就此冻结、之后每轮归档重复告警 —— 手动跑一轮 0 写入新包即可重建体积基线。
-      OPENCLAW_SHRINK_GUARD: ${{ github.event.inputs.openclaw_shrink_guard || '1' }}
-      ZCODE_SHRINK_GUARD: ${{ github.event.inputs.zcode_shrink_guard || '1' }}
     steps:
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -1480,6 +1466,22 @@ jobs:
             echo "openclaw_snapshot_partial_live_changes"
           fi
 
+          # 完整性校验：关键文件必须存在且非空 —— 这才是「状态全不全」的判据。
+          # 取代原先「新包不足云端现有包 60% 则拒绝覆盖」的体积基准：体积会被主动
+          # 瘦身（排除缓存/调试转储）、日志轮转永久改变，拿上一次归档当基准会把
+          # 正常瘦身判成状态丢失，且主包就此冻结、每轮重复告警（2026-09-12）。
+          # 退出码 4 = 状态不全，调用方按归档失败处理，不覆盖云端。
+          missing=""
+          for f in openclaw.json; do
+            if [ ! -s "$STAGE_DIR/.openclaw/$f" ]; then
+              missing="$missing $f"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            echo "openclaw_archive_incomplete missing=$missing" >&2
+            exit 4
+          fi
+
           tar -C "$STAGE_DIR" -czf "$OUTPUT_TAR" .openclaw
 
           actual_size=$(stat -c%s "$OUTPUT_TAR" 2>/dev/null || echo 0)
@@ -1564,6 +1566,20 @@ jobs:
             cp -a /home/runner/.zcode/v2/certs/. "$STAGE_DIR/.zcode/v2/certs"/
             [ -f /home/runner/.zcode/v2/telemetry-state.json ] && \
               cp -a /home/runner/.zcode/v2/telemetry-state.json "$STAGE_DIR/.zcode/v2"/
+          fi
+
+          # 完整性校验（口径同 openclaw 主包，取代体积基准）：db.sqlite 是会话真实
+          # 状态，缺它说明本轮没有可恢复状态，宁可不覆盖云端。排除 model-io 之类的
+          # 调试转储不影响此判据 —— 主动瘦身不再被误判为状态丢失。
+          missing=""
+          for f in db/db.sqlite; do
+            if [ ! -s "$STAGE_DIR/.zcode/cli/$f" ]; then
+              missing="$missing $f"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            echo "zcode_archive_incomplete missing=$missing" >&2
+            exit 4
           fi
 
           tar -C "$STAGE_DIR" -czf "$OUTPUT_TAR" .zcode
@@ -1754,6 +1770,18 @@ jobs:
           # 结论与原因是人写的自然语言 → 裸文本 kv；rclone/tar 的原始输出 → <pre>。
           # 此前四者拼成一整串塞进单个 <pre>，自然语言被一并等宽化，与全库
           # 「kv 区 + 明细分节」形态不一致。
+          # 对象 → 标题短名：五种归档曾共用「OpenClaw 归档告警」这一个标题，读者无法
+          # 从标题判断是哪个包出问题（看到标题会以为是主包，实际可能是 ZCode）。
+          obj_label() {
+            case "$1" in
+              openclaw.tar.gz)                  echo "OpenClaw 主包" ;;
+              zcode.tar.gz)                     echo "ZCode" ;;
+              CliRelay|CliRelay.tar.gz)         echo "CliRelay" ;;
+              CLIProxyAPI|CLIProxyAPI.tar.gz)   echo "CLIProxyAPI" ;;
+              rsstt|rsstt.tar.gz)               echo "rss-to-telegram" ;;
+              *)                                echo "$1" ;;
+            esac
+          }
           send_telegram_alert() {
             local obj="$1" verdict="$2" reason="${3:-}" detail="${4:-}"
             if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
@@ -1762,7 +1790,7 @@ jobs:
               # 二次 escape_html 会把 & 变成 &amp;amp; 字面量直出）
               source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
               local full_msg=""
-              tg_add_title full_msg "⚠️ OpenClaw 归档告警"
+              tg_add_title full_msg "⚠️ 归档告警 · $(obj_label "$obj")"
               tg_add_path full_msg "对象" "$obj"
               tg_add_kv full_msg "结论" "$verdict"
               if [ -n "$reason" ]; then
@@ -1803,23 +1831,21 @@ jobs:
               if [ "$ARCHIVE_DEST" = "dropbox:self-hosted/openclaw.tar.gz" ]; then
                 remote_size=$(rclone ls "$ARCHIVE_DEST" 2>/dev/null | awk '{s+=$1} END {print s+0}')
               fi
-              # 主包缩水保护：新包不足云端现有包的 60% 时拒绝覆盖
-              # （完整状态包被残缺包覆盖过：仅靠 5KB 下限拦不住「非空但少了 99%」）
-              if [ "${OPENCLAW_SHRINK_GUARD:-1}" = "1" ] && [ "$remote_size" -gt 0 ] && [ "$new_size" -lt "$((remote_size * 60 / 100))" ]; then
-                echo "[$(date '+%F %T')] ❌ 主包缩水保护触发: new=${new_size}B remote=${remote_size}B，拒绝覆盖，转存 failed/"
-                rclone copyto "$TMP_OPENCLAW_TAR" "dropbox:self-hosted/failed/openclaw-shrunk-$(date -u +%Y%m%d-%H%M).tar.gz" 2>&1 || true
-                send_telegram_alert "openclaw.tar.gz" "缩水保护 · 已拒绝覆盖主包" "新包远小于云端现有包（疑似状态不全）" "new=$new_size remote=$remote_size threshold=60%"
+              # 体积骤降只记录、不拦截：完整性由归档脚本的关键文件校验把关（见
+              # create-openclaw-archive.sh）。原先拿云端现有包当基准判「缩水」，会被
+              # 主动瘦身（排除缓存/调试转储）永久卡死 —— 新包永远小于旧包，主包就此
+              # 冻结且每轮重复告警；体积本也不是「状态全不全」的判据（2026-09-12）。
+              if [ "$remote_size" -gt 0 ] && [ "$new_size" -lt "$((remote_size * 60 / 100))" ]; then
+                echo "[$(date '+%F %T')] ℹ️ 体积较云端下降超 40%（new=${new_size}B remote=${remote_size}B），已通过完整性校验，正常覆盖"
+              fi
+              openclaw_upload_output=""
+              if openclaw_upload_output=$(rclone copyto "$TMP_OPENCLAW_TAR" "$ARCHIVE_DEST" 2>&1); then
+                echo "[$(date '+%F %T')] openclaw upload ok"
                 rm -f "$TMP_OPENCLAW_TAR"
               else
-                openclaw_upload_output=""
-                if openclaw_upload_output=$(rclone copyto "$TMP_OPENCLAW_TAR" "$ARCHIVE_DEST" 2>&1); then
-                  echo "[$(date '+%F %T')] openclaw upload ok"
-                  rm -f "$TMP_OPENCLAW_TAR"
-                else
-                  rc=$?
-                  echo "[$(date '+%F %T')] ⚠️ openclaw.tar.gz upload failed (rc=$rc): ${openclaw_upload_output}"
-                  send_telegram_alert "openclaw.tar.gz" "上传失败 · 退出码 $rc" "rclone 上传失败" "${openclaw_upload_output:-无输出}"
-                fi
+                rc=$?
+                echo "[$(date '+%F %T')] ⚠️ openclaw.tar.gz upload failed (rc=$rc): ${openclaw_upload_output}"
+                send_telegram_alert "openclaw.tar.gz" "上传失败 · 退出码 $rc" "rclone 上传失败" "${openclaw_upload_output:-无输出}"
               fi
             else
               rc=$?
@@ -1878,28 +1904,27 @@ jobs:
                 send_telegram_alert "${AI_LABEL}.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${ai_archive_output:-归档脚本无输出}"
               fi
             fi
-            # ZCode 个人数据归档：~/.zcode/cli → dropbox:self-hosted/zcode.tar.gz（带缩水保护）
+            # ZCode 个人数据归档：~/.zcode/cli → dropbox:self-hosted/zcode.tar.gz（带完整性校验）
             if [ -d "$HOME/.zcode/cli" ]; then
               zcode_archive_output=""
               if zcode_archive_output=$(flock -E 200 -n "$LOCK_FILE" bash /tmp/create-zcode-archive.sh "$TMP_ZCODE_TAR" 2>&1); then
                 echo "[$(date '+%F %T')] zcode archive ok, uploading... ${zcode_archive_output}"
                 zcode_new_size=$(stat -c%s "$TMP_ZCODE_TAR" 2>/dev/null || echo 0)
                 zcode_remote_size=$(rclone ls "dropbox:self-hosted/zcode.tar.gz" 2>/dev/null | awk '{s+=$1} END {print s+0}')
-                if [ "${ZCODE_SHRINK_GUARD:-1}" = "1" ] && [ "$zcode_remote_size" -gt 0 ] && [ "$zcode_new_size" -lt "$((zcode_remote_size * 60 / 100))" ]; then
-                  echo "[$(date '+%F %T')] ❌ zcode.tar.gz 缩水保护触发: new=${zcode_new_size}B remote=${zcode_remote_size}B，拒绝覆盖，转存 failed/"
-                  rclone copyto "$TMP_ZCODE_TAR" "dropbox:self-hosted/failed/zcode-shrunk-$(date -u +%Y%m%d-%H%M).tar.gz" 2>&1 || true
-                  send_telegram_alert "zcode.tar.gz" "缩水保护 · 已拒绝覆盖主包" "新包远小于云端现有包（疑似状态不全）" "new=$zcode_new_size remote=$zcode_remote_size threshold=60%"
+                # 体积骤降只记录、不拦截（口径同 openclaw 主包）：完整性由
+                # create-zcode-archive.sh 的 db.sqlite 校验把关。原先的缩水保护
+                # 在排除 model-io 调试转储后把正常瘦身判成状态丢失，主包冻结。
+                if [ "$zcode_remote_size" -gt 0 ] && [ "$zcode_new_size" -lt "$((zcode_remote_size * 60 / 100))" ]; then
+                  echo "[$(date '+%F %T')] ℹ️ zcode 体积较云端下降超 40%（new=${zcode_new_size}B remote=${zcode_remote_size}B），已通过完整性校验，正常覆盖"
+                fi
+                zcode_upload_output=""
+                if zcode_upload_output=$(rclone copyto "$TMP_ZCODE_TAR" "dropbox:self-hosted/zcode.tar.gz" 2>&1); then
+                  echo "[$(date '+%F %T')] zcode upload ok"
                   rm -f "$TMP_ZCODE_TAR"
                 else
-                  zcode_upload_output=""
-                  if zcode_upload_output=$(rclone copyto "$TMP_ZCODE_TAR" "dropbox:self-hosted/zcode.tar.gz" 2>&1); then
-                    echo "[$(date '+%F %T')] zcode upload ok"
-                    rm -f "$TMP_ZCODE_TAR"
-                  else
-                    rc=$?
-                    echo "[$(date '+%F %T')] ⚠️ zcode.tar.gz upload failed (rc=$rc): ${zcode_upload_output}"
-                    send_telegram_alert "zcode.tar.gz" "上传失败 · 退出码 $rc" "rclone 上传失败" "${zcode_upload_output:-无输出}"
-                  fi
+                  rc=$?
+                  echo "[$(date '+%F %T')] ⚠️ zcode.tar.gz upload failed (rc=$rc): ${zcode_upload_output}"
+                  send_telegram_alert "zcode.tar.gz" "上传失败 · 退出码 $rc" "rclone 上传失败" "${zcode_upload_output:-无输出}"
                 fi
               else
                 rc=$?
@@ -1996,6 +2021,17 @@ jobs:
           # 用法与版式同 send_telegram_alert（<对象> <结论> <原因> [原始输出]）；
           # 两个函数分处不同 step、无法共享定义，改版式时两处要一起改
           # （此前一个用 <i> 说明段、一个用 <b> kv，同一标题两种形态）
+          # 对象 → 标题短名（与周期归档的 obj_label 同口径，两处脚本各自独立故各存一份）
+          obj_label() {
+            case "$1" in
+              openclaw.tar.gz)                  echo "OpenClaw 主包" ;;
+              zcode.tar.gz)                     echo "ZCode" ;;
+              CliRelay|CliRelay.tar.gz)         echo "CliRelay" ;;
+              CLIProxyAPI|CLIProxyAPI.tar.gz)   echo "CLIProxyAPI" ;;
+              rsstt|rsstt.tar.gz)               echo "rss-to-telegram" ;;
+              *)                                echo "$1" ;;
+            esac
+          }
           send_archive_alert() {
             local obj="$1" verdict="$2" reason="${3:-}" detail="${4:-}"
             if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
@@ -2006,7 +2042,7 @@ jobs:
               local full_msg=""
               # 标题区分阶段：周期归档与最终归档走两个函数，此前标题完全相同，
               # 读者分不清告警来自哪一轮（调用点里的 "final" 前缀已由本标题承担）
-              tg_add_title full_msg "⚠️ OpenClaw 最终归档告警"
+              tg_add_title full_msg "⚠️ 最终归档告警 · $(obj_label "$obj")"
               tg_add_path full_msg "对象" "$obj"
               tg_add_kv full_msg "结论" "$verdict"
               if [ -n "$reason" ]; then
@@ -2065,18 +2101,17 @@ jobs:
               ARCHIVE_DEST="dropbox:self-hosted/failed/${FAILED_NAME}"
               echo "ℹ️ Unhealthy run: main package will NOT be overwritten; failed state goes to $ARCHIVE_DEST"
             fi
-            ARCHIVE_SHRINK_BLOCKED=0
-            if [ "$HEALTHY_RUN" = "1" ] && [ "${OPENCLAW_SHRINK_GUARD:-1}" = "1" ]; then
+            # 体积骤降只记录、不拦截（口径同周期归档）：完整性已由归档脚本的关键文件
+            # 校验把关，这里不再拿云端现有包当基准 —— 那会被主动瘦身永久卡死（新包
+            # 永远小于瘦身前的旧包，主包冻结、每轮重复告警，2026-09-12）。
+            if [ "$HEALTHY_RUN" = "1" ]; then
               final_new_size=$(stat -c%s "$TMP_OPENCLAW_TAR" 2>/dev/null || echo 0)
               final_remote_size=$(rclone ls "$ARCHIVE_DEST" 2>/dev/null | awk '{s+=$1} END {print s+0}')
               if [ "$final_remote_size" -gt 0 ] && [ "$final_new_size" -lt "$((final_remote_size * 60 / 100))" ]; then
-                ARCHIVE_SHRINK_BLOCKED=1
-                echo "❌ 主包缩水保护触发: new=${final_new_size}B remote=${final_remote_size}B，拒绝覆盖，转存 failed/"
-                rclone copyto "$TMP_OPENCLAW_TAR" "dropbox:self-hosted/failed/openclaw-shrunk-$(date -u +%Y%m%d-%H%M).tar.gz" -v 2>&1 || true
-                send_archive_alert "openclaw.tar.gz" "缩水保护 · 已拒绝覆盖主包" "新包远小于云端现有包（疑似状态不全）" "new=$final_new_size remote=$final_remote_size threshold=60%"
+                echo "ℹ️ 体积较云端下降超 40%（new=${final_new_size}B remote=${final_remote_size}B），已通过完整性校验，正常覆盖"
               fi
             fi
-            if [ "$ARCHIVE_SHRINK_BLOCKED" = "0" ] && openclaw_final_upload_output=$(rclone copyto "$TMP_OPENCLAW_TAR" "$ARCHIVE_DEST" -v 2>&1); then
+            if openclaw_final_upload_output=$(rclone copyto "$TMP_OPENCLAW_TAR" "$ARCHIVE_DEST" -v 2>&1); then
               echo "final openclaw archive/upload ok → $ARCHIVE_DEST: ${openclaw_final_output}"
               if [ "$HEALTHY_RUN" = "1" ]; then
                 echo "6. Versioned snapshot (every healthy run, keep 3)..."
@@ -2097,7 +2132,7 @@ jobs:
                 echo "ℹ️ Failed-run archive kept (2 max) in failed/; main package untouched."
               fi
               rm -f "$TMP_OPENCLAW_TAR"
-            elif [ "$ARCHIVE_SHRINK_BLOCKED" = "0" ]; then
+            else
               rc=$?
               echo "⚠️ final openclaw.tar.gz upload failed (rc=$rc): ${openclaw_final_upload_output}"
               send_archive_alert "openclaw.tar.gz" "上传失败 · 退出码 $rc" "rclone 上传失败" "${openclaw_final_upload_output:-无输出}"
@@ -2114,23 +2149,19 @@ jobs:
             if zcode_final_output=$(bash /tmp/create-zcode-archive.sh "$TMP_ZCODE_FINAL_TAR" 2>&1); then
               zcode_final_new_size=$(stat -c%s "$TMP_ZCODE_FINAL_TAR" 2>/dev/null || echo 0)
               zcode_final_remote_size=$(rclone ls "dropbox:self-hosted/zcode.tar.gz" 2>/dev/null | awk '{s+=$1} END {print s+0}')
-              ZCODE_FINAL_SHRINK_BLOCKED=0
-              if [ "${ZCODE_SHRINK_GUARD:-1}" = "1" ] && [ "$zcode_final_remote_size" -gt 0 ] && [ "$zcode_final_new_size" -lt "$((zcode_final_remote_size * 60 / 100))" ]; then
-                ZCODE_FINAL_SHRINK_BLOCKED=1
-                echo "❌ zcode.tar.gz 缩水保护触发: new=${zcode_final_new_size}B remote=${zcode_final_remote_size}B，拒绝覆盖，转存 failed/"
-                rclone copyto "$TMP_ZCODE_FINAL_TAR" "dropbox:self-hosted/failed/zcode-shrunk-$(date -u +%Y%m%d-%H%M).tar.gz" -v 2>&1 || true
-                send_archive_alert "zcode.tar.gz" "缩水保护 · 已拒绝覆盖主包" "新包远小于云端现有包（疑似状态不全）" "new=$zcode_final_new_size remote=$zcode_final_remote_size threshold=60%"
+              # 体积骤降只记录、不拦截（口径同周期归档）：完整性由 create-zcode-archive.sh
+              # 的 db.sqlite 校验把关，不再拿云端现有包当基准。
+              if [ "$zcode_final_remote_size" -gt 0 ] && [ "$zcode_final_new_size" -lt "$((zcode_final_remote_size * 60 / 100))" ]; then
+                echo "ℹ️ zcode 体积较云端下降超 40%（new=${zcode_final_new_size}B remote=${zcode_final_remote_size}B），已通过完整性校验，正常覆盖"
               fi
-              if [ "$ZCODE_FINAL_SHRINK_BLOCKED" = "0" ]; then
-                zcode_final_upload_output=""
-                if zcode_final_upload_output=$(rclone copyto "$TMP_ZCODE_FINAL_TAR" "dropbox:self-hosted/zcode.tar.gz" -v 2>&1); then
-                  echo "final zcode archive/upload ok: ${zcode_final_output}"
-                  rm -f "$TMP_ZCODE_FINAL_TAR"
-                else
-                  rc=$?
-                  echo "⚠️ final zcode.tar.gz upload failed (rc=$rc): ${zcode_final_upload_output}"
-                  send_archive_alert "zcode.tar.gz" "上传失败 · 退出码 $rc" "rclone 上传失败" "${zcode_final_upload_output:-无输出}"
-                fi
+              zcode_final_upload_output=""
+              if zcode_final_upload_output=$(rclone copyto "$TMP_ZCODE_FINAL_TAR" "dropbox:self-hosted/zcode.tar.gz" -v 2>&1); then
+                echo "final zcode archive/upload ok: ${zcode_final_output}"
+                rm -f "$TMP_ZCODE_FINAL_TAR"
+              else
+                rc=$?
+                echo "⚠️ final zcode.tar.gz upload failed (rc=$rc): ${zcode_final_upload_output}"
+                send_archive_alert "zcode.tar.gz" "上传失败 · 退出码 $rc" "rclone 上传失败" "${zcode_final_upload_output:-无输出}"
               fi
             else
               rc=$?
