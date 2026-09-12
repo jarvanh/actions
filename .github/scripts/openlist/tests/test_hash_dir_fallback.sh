@@ -188,6 +188,11 @@ run_fix "options.xml"
 [ "$TRY_FIX_STATUS" = "failed" ] && ok "5a 根目录文件修复失败（预期）" || bad "5a: 不该成功"
 grep -q "无目录可换" "$FIX_LOG" && ok "5b 根目录文件跳过目录切换" || bad "5b: 未跳过（根目录无目录可换）"
 ! grep -q "🔀 目录级兜底" "$FIX_LOG" && ok "5c 未创建无谓的短哈希目录" || bad "5c: 根目录文件不该建短哈希目录"
+# 根目录场景**没探过**短哈希目录，失败原因就不能写它不可写
+printf '%s' "$TRY_FIX_MESSAGE" | grep -q "无目录可换" \
+  && ok "5d 失败原因点明是无目录可换" || bad "5d: msg=${TRY_FIX_MESSAGE}"
+! printf '%s' "$TRY_FIX_MESSAGE" | grep -q "短哈希目录" \
+  && ok "5e 失败原因不谎报短哈希目录不可写" || bad "5e: msg=${TRY_FIX_MESSAGE}"
 
 # ===== 场景6: 短哈希目录同样不可写 → 收尾消息准确 =====
 reset_state
@@ -195,7 +200,14 @@ WRITABLE_DIR=""                  # 全拒
 run_fix "$REL"
 [ "$TRY_FIX_STATUS" = "failed" ] && ok "6a 短哈希目录也不可写 → 整体失败" || bad "6a: 不该成功"
 printf '%s' "$TRY_FIX_MESSAGE" | grep -q "目标目录不可写" && ok "6b 失败原因点明是目录不可写" || bad "6b: msg=${TRY_FIX_MESSAGE}"
-grep -q "短哈希目录同样不可写" "$FIX_LOG" && ok "6c 日志记录切换后仍不可写" || bad "6c: 无对应日志"
+grep -q "无法换目录（备用目录也写不进去）" "$FIX_LOG" && ok "6c 日志记录切换后仍不可写" || bad "6c: 无对应日志"
+printf '%s' "$TRY_FIX_MESSAGE" | grep -q "备用目录也写不进去" \
+  && ok "6d 失败原因点明备用目录也写不进去" || bad "6d: msg=${TRY_FIX_MESSAGE}"
+# 判定依据要如实（本场景真的重启复核过），不能再是笼统的"未通过可写性预检"
+printf '%s' "$TRY_FIX_MESSAGE" | grep -q "已复核确认写不进去" \
+  && ok "6e 失败原因带真实判定依据" || bad "6e: msg=${TRY_FIX_MESSAGE}"
+! printf '%s' "$TRY_FIX_MESSAGE" | grep -qE "熔断|探测|短哈希|哈希目录|base64|rc=|HTTP_CODE" \
+  && ok "6f 失败原因不含内部术语（说人话）" || bad "6f: msg=${TRY_FIX_MESSAGE}"
 
 # ===== 场景7: 开关 OPENLIST_HASH_DIR_FALLBACK=0 → 关闭切换 =====
 reset_state
@@ -245,6 +257,41 @@ if [ -n "$(type -P jq 2>/dev/null)" ]; then
 else
   echo "SKIP: 11a restore_info.jq 分类（环境无 jq）"
 fi
+
+# ===== 场景12: 后端级写熔断 → 不探测、不重启，且文案不得谎报 =====
+# 熔断（_BACKEND_DEAD）是"同一挂载根连续 N 个目录不可写"后的短路：直接判不可写，
+# 省掉探测与容器重启。此时下游结论文案若还写「已重启容器复核」，就与上一行日志
+# 自相矛盾——线上通知里实锤过（2026-09-12 用户反馈的 Hayley Williams 任务）。
+# 根目录文件 + 熔断 = 线上那条通知的完整形态: 原目录没探、短哈希目录也没得换。
+reset_state
+_BACKEND_DEAD["openlist:wopan176Crypt"]=1
+WRITABLE_DIR="$HASH"                 # 熔断下根本不会探，写成可写也不该被采信
+run_fix "options.xml"
+[ "$TRY_FIX_STATUS" = "failed" ] && ok "12a 熔断下直接失败（未白跑 4 种方法）" || bad "12a: status=${TRY_FIX_STATUS}"
+[ "$RESTART_CALLS" -eq 0 ] && ok "12b 熔断不触发容器重启" || bad "12b: 重启 ${RESTART_CALLS} 次"
+grep -q "本轮已熔断，直接判不可写: 不探测、不重启" "$FIX_LOG" \
+  && ok "12c 日志说明熔断短路" || bad "12c: 无熔断日志"
+! grep -q "已重启容器复核" "$FIX_LOG" \
+  && ok "12d 不再谎报「已重启容器复核」" || bad "12d: 未重启却写已重启复核"
+printf '%s' "$TRY_FIX_MESSAGE" | grep -q "存储端本轮整体故障，未试写" \
+  && ok "12e 失败原因点明存储端整体故障未试写" || bad "12e: msg=${TRY_FIX_MESSAGE}"
+printf '%s' "$TRY_FIX_MESSAGE" | grep -q "无目录可换" \
+  && ok "12f 失败原因点明无目录可换" || bad "12f: msg=${TRY_FIX_MESSAGE}"
+! printf '%s' "$TRY_FIX_MESSAGE" | grep -q "均未通过可写性预检" \
+  && ok "12g 失败原因不再笼统归为「均未通过可写性预检」" || bad "12g: msg=${TRY_FIX_MESSAGE}"
+# 规范 · 说人话: 通知里的失败原因不得出现内部机制术语（日志里可以有）。
+# 注意"编码目录"/"已复核确认"是规范认可的人话译法，不算术语
+! printf '%s' "$TRY_FIX_MESSAGE" | grep -qE "熔断|探测|短哈希|哈希目录|base64|rc=|HTTP_CODE" \
+  && ok "12j 失败原因不含内部术语（说人话）" || bad "12j: msg=${TRY_FIX_MESSAGE}"
+
+# 同后端、非根目录文件: 短哈希目录照建，但其探测同样被熔断短路 → 原因要分得清
+reset_state
+_BACKEND_DEAD["openlist:wopan176Crypt"]=1
+WRITABLE_DIR="$HASH"
+run_fix "$REL"
+printf '%s' "$TRY_FIX_MESSAGE" | grep -q "存储端本轮整体故障，未试写；备用目录也写不进去" \
+  && ok "12h 换过目录时原因同时点明两段" || bad "12h: msg=${TRY_FIX_MESSAGE}"
+[ "$RESTART_CALLS" -eq 0 ] && ok "12i 换目录后仍未重启" || bad "12i: 重启 ${RESTART_CALLS} 次"
 
 echo "-----"
 echo "PASS=$PASS FAIL=$FAIL"

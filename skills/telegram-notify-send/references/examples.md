@@ -138,6 +138,7 @@ Send-TgMessage $msg
 ## 反例（别学）
 
 - `.github/scripts/tg-channel/sync_to_tg.sh:72-90` 的 `notify()`：为了让 python 已拼好的正文复用 bash 的 `tg_add_footer`，它 `bash -c` 起子进程把整条消息塞进 `shlex.quote`。代价是正文完全绕过 `tg_add_*` 助手、跨语言桥接脆弱、每发一条启一个 bash。**python 侧就用 `speedtest_common` 的镜像助手，不要绕回 bash。**
+- 失败清单曾把 `file_fix` 的日志片段灌成「修复过程」子行（单文件 15+ 行，含源/目标全路径、rclone 原始报错与内部机制术语），是通知里最难看的形态——2026-09-12 已删。失败原因一律写进条目行元数据、一句人话说完（规范 · 说人话），过程细节留给运行日志链接。
 - `upload-video-to-tg.yml:33` 硬编码频道 ID（不是通知收件人，不违反通知规范，但 hygiene 上应用 secret——同仓库 `ph-dl.yml` 走的就是 secret）。
 
-**看似违规、实为合规**（别误判成反例）：进度面板任务列表不折叠；失败清单用 `tree_fold`、排除规则用 `tree_code_fold`；二层列表（`sync_notify.sh` fail_summary 的修复过程子行）手写按条目计数而不用 `tree_fold`；`sendDocument` 不走 sendMessage 发送层；单条排除规则不扩树。
+**看似违规、实为合规**（别误判成反例）：进度面板任务列表不折叠；失败清单用 `tree_fold`、排除规则用 `tree_code_fold`；二层列表（`task_preview.sh` 的差异构成/排除子行、`sync_marker.sh` 的方法摘要）手写按条目计数而不用 `tree_fold`；`sendDocument` 不走 sendMessage 发送层；单条排除规则不扩树。

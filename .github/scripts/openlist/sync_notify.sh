@@ -11,8 +11,8 @@
 # 依赖: utils.sh (get_transferred_bytes_from_log),
 #       rclone_query.sh (_build_diff_files_list, _build_exclude_patterns,
 #         _get_path_stats),
-#       telegram/tg_notify.sh (escape_html, tree_conn/tree_sub/tree_lines,
-#         tg_add_* — 排版与发送真源，由 load_all.sh L0 层 source),
+#       telegram/tg_notify.sh (escape_html, tree_fold/tree_code_fold,
+#         tg_entry/tg_add_* — 排版与发送真源，由 load_all.sh L0 层 source),
 #       telegram.sh (send_telegram_message), file_fix.sh (_fix_method_short),
 #       openlist_driver.sh (_refresh_openlist_cache)
 # 被依赖: sync_engine.sh (sync_with_logging)
@@ -93,6 +93,10 @@ _notify_add_diff_list() {
 
 # 发送同步结果通知（从 sync_with_logging 拆分出来）
 # 构建包含源/目标大小、差异文件列表、排除规则、修复结果的通知消息
+# 参数: <源端> <目标端> <任务名> <同步退出码> <本轮日志> <末次尝试日志>
+#       <失败清单> <修复清单> <是否 object-not-found> [rclone 额外参数...]
+# 注: 曾收 fix_log 参数（用于给失败条目挂"修复过程"子行），2026-09-12 删掉子行后
+#   通知侧不再读修复日志——过程细节看收尾区的运行日志链接。
 # 设置全局变量: SYNC_FAILED, SYNC_SKIPPED, SYNC_TRANSFERRED_BYTES
 _send_sync_result_notification() {
   local source_path="$1"
@@ -103,9 +107,8 @@ _send_sync_result_notification() {
   local last_attempt_log="$6"
   local fail_list="$7"
   local fix_list="$8"
-  local fix_log="$9"
-  local has_object_not_found="${10}"
-  shift 10
+  local has_object_not_found="$9"
+  shift 9
   local extra_args=("$@")
 
   SYNC_FAILED=0
@@ -189,60 +192,26 @@ _send_sync_result_notification() {
   # auto-split 子任务各报一次，面板侧累加
   [ "$fix_total" -gt 0 ] && progress_add_fixed_files "$fix_total"
 
-  # 构建 fail_summary（无法修复的文件树形列表: 条目行 + tree_sub 缩进的"修复过程"子行；
-  # 风格与 fix_summary 一致；每组上限 8 个文件，超出折叠"还有 N 个文件…"）
-  # **这里不走 tree_fold**（与上面的 fix_summary 不同）：tree_fold 按"行"截断，
-  # 而本列表的截断单位是"文件条目"（每条 = 1 条目行 + N 行修复过程子行），
-  # 按行截断会把修复过程子行切在半路。故由调用方按条目计数，
-  # 折叠行仍并入条目流作末条（禁双 └─ 同级）——二层列表的折叠例外，见 规范 · 折叠规则。
+  # 构建 fail_summary（无法同步的文件树形列表: 一个文件一行，条目行统一走 tg_entry，
+  # 失败原因取 fail_list 第三列——由 file_fix.sh 按「规范 · 说人话」写成一句人话）。
+  #
+  # 为什么不挂"修复过程"子行（2026-09-12 用户拍板删掉）:
+  #   子行原样灌入 file_fix 的日志片段，单个文件就能撑出 15+ 行（源/目标全路径、
+  #   rclone 原始报错、内部机制术语），一条通知里最难看的正是它；而日志片段的结论
+  #   早已由第三列的失败原因概括。要看过程的读者走收尾区的运行日志链接。
+  #   删掉子行后本列表回到「单行条目流」，折叠直接交给真源 tree_fold——
+  #   此前那套"按条目计数手写折叠行"的二层列表特例（规范 · 折叠规则）随之作废。
   local fail_summary=""
   local fail_total=0
   if [ -s "$fail_list" ]; then
     fail_total=$(grep -c . "$fail_list" 2>/dev/null || true)
-    local -a _fail_entries=() _fail_sections=()
+    local _fail_entries=""
     while IFS='|' read -r fpath fsize fmsg; do
       [ -z "$fpath" ] && continue
-      [ "${#_fail_entries[@]}" -ge 8 ] && continue
-      # 条目行统一走 tg_entry（主体等宽 + 元数据 " · " 分隔、统一转义）
-      _fail_entries+=("$(tg_entry "$fpath" "$fsize" "$fmsg")")
-      # 从 fix_log 中按文件名分隔提取该文件对应的修复过程
-      local fix_section="" _fix_log_text
-      if [ -f "$fix_log" ]; then
-        fix_section=$(awk -v rel="$fpath" '
-          index($0, "=== 尝试修复失败文件: " rel " ===") > 0 { capture=1; next }
-          /=== 尝试修复失败文件: / && capture { capture=0 }
-          capture { sub(/^\[[^]]*\] /, ""); print }
-        ' "$fix_log" 2>/dev/null)
-      fi
-      if [ -n "$fix_section" ]; then
-        _fix_log_text="修复过程："
-        while IFS= read -r log_line; do
-          [ -z "$log_line" ] && continue
-          _fix_log_text+=$'\n'"$(escape_html "$log_line")"
-        done <<< "$fix_section"
-      elif echo "$fmsg" | grep -qi 'object not found'; then
-        _fix_log_text="修复过程：源文件不存在，无需修复"
-      else
-        _fix_log_text="修复过程：无记录"
-      fi
-      _fail_sections+=("$_fix_log_text")
+      _fail_entries+="$(tg_entry "$fpath" "$fsize" "$fmsg")"$'\n'
     done < "$fail_list"
-    local _i _n=${#_fail_entries[@]} _last _fold=0
-    [ "$fail_total" -gt "$_n" ] && _fold=1
-    for (( _i=0; _i<_n; _i++ )); do
-      # 有折叠行时折叠行才是末条，最后一条展示条目让出 └─（禁双 └─ 同级）
-      _last=0
-      [ "$_fold" = "0" ] && [ $((_i + 1)) -eq "$_n" ] && _last=1
-      fail_summary+="$(tree_conn "$_last")${_fail_entries[$_i]}"$'\n'
-      local _sub
-      while IFS= read -r _sub; do
-        [ -z "$_sub" ] && continue
-        fail_summary+="$(tree_sub "$_last")${_sub}"$'\n'
-      done <<< "${_fail_sections[$_i]}"
-    done
-    if [ "$_fold" = "1" ]; then
-      # 折叠行并入条目流作末条
-      fail_summary+="$(tree_conn 1)还有 $((fail_total - _n)) 条…"$'\n'
+    if [ -n "$_fail_entries" ]; then
+      fail_summary="$(tree_fold "${_fail_entries%$'\n'}")"$'\n'
     fi
   fi
   [ -z "$fail_summary" ] && fail_summary="无"$'\n'

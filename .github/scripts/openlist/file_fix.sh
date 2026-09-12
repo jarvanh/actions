@@ -994,21 +994,35 @@ _try_fix_methods_round() {
 # 开关: OPENLIST_HASH_DIR_FALLBACK=0 关闭
 # 依赖调用方作用域: fix_log / dest_path / ol_dst_base / failed_file_rel /
 #   file_dir_rel / temp_dir；成功时改写 actual_dst_dir / used_hash_dir / HASH_DIR_REL
+# 产出: _HASH_DIR_FAIL_REASON —— 未能切换的**人话**原因（返回 1 时有效，直接进
+#   失败原因文案，规范 · 说人话）。技术细节由各分支自己的 log_fix 负责（"短哈希
+#   目录创建失败" 这类术语留在日志里，通知读者不需要知道内部机制）
+#   为什么要有它: 调用方此前一律把"切换失败"写成「短哈希目录同样不可写」，
+#   但"文件在目标端根目录、无目录可换"等分支**根本没探过短哈希目录**，
+#   文案与事实相反（2026-09-12 修，同批修正预检依据文案）
 # 用法: _fix_switch_to_hash_dir → 0=已切到可写的短哈希目录，1=未能切换
+_HASH_DIR_FAIL_REASON=""
 _fix_switch_to_hash_dir() {
-  [ "${OPENLIST_HASH_DIR_FALLBACK:-1}" = "0" ] && return 1
+  _HASH_DIR_FAIL_REASON=""
+  if [ "${OPENLIST_HASH_DIR_FALLBACK:-1}" = "0" ]; then
+    _HASH_DIR_FAIL_REASON="备用目录兜底已关闭"
+    return 1
+  fi
   if [ "$file_dir_rel" = "." ] || [ -z "$file_dir_rel" ]; then
     log_fix "$fix_log" "⏭ 文件位于目标端根目录，无目录可换，跳过短哈希目录兜底"
+    _HASH_DIR_FAIL_REASON="无目录可换"
     return 1
   fi
   if [ "${used_base64_dir:-0}" -eq 1 ]; then
     log_fix "$fix_log" "⏭ 已降级到 base64URL 编码目录，不再叠加短哈希目录"
+    _HASH_DIR_FAIL_REASON="已在编码目录里，不再换"
     return 1
   fi
 
   HASH_DIR_REL=$(_hash_dir_rel_for "$file_dir_rel")
   if [ -z "$HASH_DIR_REL" ]; then
     log_fix "$fix_log" "⚠ 短哈希目录名计算失败，跳过兜底"
+    _HASH_DIR_FAIL_REASON="备用目录名算不出来"
     return 1
   fi
   local hash_dst_dir="${dest_path}/${HASH_DIR_REL}"
@@ -1053,6 +1067,7 @@ _fix_switch_to_hash_dir() {
 
   if [ "$hash_dir_ok" -ne 1 ]; then
     log_fix "$fix_log" "   ❌ 短哈希目录创建失败，兜底终止"
+    _HASH_DIR_FAIL_REASON="备用目录建不出来"
     return 1
   fi
 
@@ -1072,7 +1087,11 @@ _fix_switch_to_hash_dir() {
   # 不过就立刻返回失败，省掉一趟整文件下载 + 4 次上传
   log_fix "$fix_log" "   🔎 预检短哈希目录可写性..."
   if ! _fix_probe_dir_writable "$actual_dst_dir" "$actual_ol_dir"; then
-    log_fix "$fix_log" "   ❌ 短哈希目录不可写（已重启容器复核），兜底终止"
+    # 依据取本轮缓存标注（后端熔断 / 已重启确认 / 未经重启确认…），
+    # 不再一律写「已重启容器复核」——熔断与缓存命中两条路径都不重启
+    local _h_basis="${_DIR_WRITE_CACHE[$actual_dst_dir]#*|}"
+    log_fix "$fix_log" "   ❌ 短哈希目录不可写（${_h_basis:-依据未知}），兜底终止"
+    _HASH_DIR_FAIL_REASON="备用目录也写不进去"
     return 1
   fi
   log_fix "$fix_log" "   ✅ 短哈希目录可写，4 种文件修复方法将在此目录执行"
@@ -1109,12 +1128,13 @@ try_fix_failed_file() {
   TRY_FIX_MESSAGE=""
   TRY_FIX_MD5=""
 
-  # 区段头（sync_notify.sh 按它切出每个文件的"修复过程"展示在通知里）:
-  # 必须写完整相对路径——通知侧手里只有完整路径，若写成 _short_path 的截断值
-  # 就对不上，提取结果恒为空 → 通知里只剩"修复过程：无记录"。
-  # 该头部在 4e43120 日志美化时随旧写法一起消失，消费端 awk 自此空转:
-  # 每个失败文件的 4 种方法到底报了什么错，通知里一行都看不到，
-  # 只能回 Actions 翻原始日志。
+  # 区段头（每个失败文件一段的定界符，供人按文件翻 fix.log——失败时该日志
+  # 会作为文档发到 Telegram）:
+  # 必须写完整相对路径——写成 _short_path 的截断值就看不出这一段是哪个文件，
+  # 长路径（>56 字符）还会与相邻区段难以区分。_short_path 的截断只用于行内展示。
+  # 历史: 该头部曾是 sync_notify.sh 提取"修复过程"子行的锚点（4e43120 日志美化时
+  # 随旧写法消失，消费端 awk 自此空转）；2026-09-12 通知侧删掉子行后不再有自动
+  # 消费方，头部保留为日志定界符。
   log_fix "$fix_log" "=== 尝试修复失败文件: ${failed_file_rel} ==="
   log_fix "$fix_log" "── 修复 $(_short_path "$failed_file_rel")"
   log_fix "$fix_log" "   源: $(_short_path "$src_file")"
@@ -1227,7 +1247,9 @@ try_fix_failed_file() {
 
   if [ "$dir_ok" -ne 1 ]; then
     log_fix "$fix_log" "目录创建最终失败（含 base64URL 编码后），无法修复文件"
-    TRY_FIX_MESSAGE="目录创建失败，base64URL 编码后仍失败"
+    # 通知口径说人话（规范 · 说人话）: base64URL 是内部机制，读者只要知道
+    # "目录建不出来、换过编码目录也不行"
+    TRY_FIX_MESSAGE="目标目录建不出来（换用编码目录后仍失败）"
     rm -rf "$temp_dir" 2>/dev/null || true
     return 1
   fi
@@ -1240,10 +1262,25 @@ try_fix_failed_file() {
   log_fix "$fix_log" "📁 目标目录已就绪: $(_short_path "$actual_dst_dir")"
 
   if ! _fix_probe_dir_writable "$actual_dst_dir" "$actual_ol_dir"; then
-    log_fix "$fix_log" "🔀 原目录不可写（已重启容器复核）→ 直接切短哈希目录，跳过原目录的 4 种方法"
+    # 判定依据如实透出: 日志取本轮缓存里的技术标注（后端熔断 / 已重启确认 /
+    # 未经重启确认（缓存口径）…）——此前一律写「已重启容器复核」，但后端级写熔断
+    # 与缓存命中两条路径都不探测、不重启，文案与上一行日志自相矛盾。
+    local _probe_basis="${_DIR_WRITE_CACHE[$actual_dst_dir]#*|}"
+    log_fix "$fix_log" "🔀 原目录不可写（${_probe_basis:-依据未知}）→ 跳过原目录的 4 种方法"
+    # 通知里的失败原因另走人话口径（规范 · 说人话）: 熔断/探测/重启复核都是
+    # 内部机制，读者只要知道"哪一步没成立、还能不能救"
+    local _probe_human
+    case "$_probe_basis" in
+      后端熔断)   _probe_human="存储端本轮整体故障，未试写" ;;
+      已重启确认) _probe_human="已复核确认写不进去" ;;
+      '')         _probe_human="原因未知" ;;
+      *)          _probe_human="判定未经复核，可能不准" ;;
+    esac
     if ! _fix_switch_to_hash_dir; then
-      log_fix "$fix_log" "❌ 短哈希目录同样不可写，无法修复文件"
-      TRY_FIX_MESSAGE="目标目录不可写（原目录与短哈希目录均未通过可写性预检）"
+      log_fix "$fix_log" "❌ 无法换目录（${_HASH_DIR_FAIL_REASON:-未知原因}），无法修复文件"
+      # 原因里必须带上"哪一步没成立"：熔断未探测、无目录可换、备用目录也不可写
+      # 是三件不同的事，旧文案一律归为"均未通过可写性预检"（2026-09-12 修）
+      TRY_FIX_MESSAGE="目标目录不可写（${_probe_human}；${_HASH_DIR_FAIL_REASON:-未知原因}）"
       rm -rf "$temp_dir" 2>/dev/null || true
       return 1
     fi
