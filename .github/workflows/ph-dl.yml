@@ -163,12 +163,9 @@ jobs:
           echo "favorites 文件列表"
           ls
           echo "favorites 文件夹 下载前大小"
-          # 大小口径统一走 1024 进制 + 三位小数（规范 · 大小写法）：
-          # du -sh 的「263G」是 1000 进制且无精度，与全库「1.150 GiB」对不上。
-          # 与 openlist 域的 format_bytes 同口径（本 step 无法 source openlist/utils.sh）
-          format_bytes() {
-            awk -v b="$1" 'BEGIN { split("B KiB MiB GiB TiB PiB", u); for(i=1; b>=1024 && i<6; i++) b/=1024; if(i==1) printf "%d %s\n", b, u[i]; else printf "%.3f %s\n", b, u[i] }'
-          }
+          # 版式助手 + 发送层 + format_bytes 的真源（本 step 后面发通知也用它，
+          # 这里提前 source 是为了算大小时就能拿到 format_bytes）
+          source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
           BEFORE_SIZE=$(du -s --block-size=1 . 2>/dev/null | cut -f1)
           BEFORE_SIZE_H=$(format_bytes "${BEFORE_SIZE:-0}")
           echo "$BEFORE_SIZE_H"
@@ -217,7 +214,6 @@ jobs:
           # 与库存里的累计损坏数（CORRUPT_VIDEOS）是两回事，别混用
           NEW_CORRUPT=0
           if [ -f "$DOWNLOAD_TMP/corrupted.txt" ]; then
-            source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
             # grep -c . 而非 wc -l：文件末行无换行符时 wc -l 会少计 1
             CORRUPTED_COUNT=$(grep -c . "$DOWNLOAD_TMP/corrupted.txt" || true)
             CORRUPTED_LIST=$(cat "$DOWNLOAD_TMP/corrupted.txt")
@@ -274,7 +270,6 @@ jobs:
             FILE_LIST="无"
           fi
 
-          source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
           # 统一 HTML 版式 + 统一收尾区（散装消息合并为一条，明细树形列出）
           msg=""
           # 状态图标随结论降级（规范 · 状态图标）：本轮有文件损坏被丢弃才 ⚠️。

@@ -62,6 +62,20 @@ escape_html() {
 # 统一分隔线（18 个全角横线）
 TG_SEP='━━━━━━━━━━━━━━━━━━'
 
+# 字节数 → 人类可读：1024 进制 + 三位小数 + IEC 单位（1.150 GiB / 800 MiB）
+# 全库唯一实现。此前 openlist / tg-channel / workflow 内联各有一份同义实现
+# （format_bytes / human_bytes / 内联 awk），改口径要四处同步、极易漏改，
+# 故收敛到这里——凡是 source 了本文件的通知点都直接用它。
+# python 侧（内嵌段与独立 .py）无法调用 bash 函数，仍保留同义实现，见规范 5.2 节。
+format_bytes() {
+  awk -v b="$1" 'BEGIN {
+    split("B KiB MiB GiB TiB PiB", u)
+    for(i=1; b>=1024 && i<6; i++) b/=1024
+    if(i==1) printf "%d %s\n", b, u[i]
+    else printf "%.3f %s\n", b, u[i]
+  }'
+}
+
 # 追加原始文本到消息变量（不做任何转义/格式化）
 tg_append() {
   printf -v "$1" '%s%s' "${!1}" "$2"

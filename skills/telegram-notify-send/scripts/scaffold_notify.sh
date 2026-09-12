@@ -68,8 +68,8 @@ source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 # 1) 累积条目：tg_add_entry <var> <机器值主体> [元数据...]（自动转义 + 补尾换行）
 ITEMS=""
 for f in "${FILES[@]}"; do
-  # format_bytes 在 openlist/utils.sh（口径 1.150 GiB，勿用 du -h 的 1G）；
-  # 非 openlist 域需自行实现同口径。stat: Linux runner -c%s / macOS 本地 -f%z
+  # format_bytes 来自通知真源 tg_notify.sh（口径 1.150 GiB，勿用 du -h 的 1G）
+  # stat: Linux runner -c%s / macOS 本地 -f%z
   tg_add_entry ITEMS "$(basename "$f")" "$(format_bytes "$(stat -c%s "$f")")"
 done
 

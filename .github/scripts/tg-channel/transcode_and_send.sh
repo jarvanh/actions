@@ -172,7 +172,9 @@ if [ ! -f "$LOCAL_FILE" ]; then
   echo "[upload] 文件不存在（可能已被切割上传），跳过: $LOCAL_FILE"
   exit 0
 fi
-FILESIZE_HUMAN=$(du -h "$LOCAL_FILE" | cut -f1)
+# 版式助手真源（format_bytes 等）：caption 里的大小也要与全库同口径
+source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+FILESIZE_HUMAN=$(format_bytes "$(stat -c%s "$LOCAL_FILE" 2>/dev/null || echo 0)")
 FILESIZE_BYTES=$(stat -c%s "$LOCAL_FILE" 2>/dev/null || stat -f%z "$LOCAL_FILE" 2>/dev/null || echo "unknown")
 # Caption 分三行：文件名、大小、修改时间
 CAPTION="${FILENAME}"$'\n'"${FILESIZE_HUMAN}"$'\n'"${MODTIME}"

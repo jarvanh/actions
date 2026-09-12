@@ -42,7 +42,8 @@ source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 FILE_DETAILS=""
 for f in "${FRAG_FILES[@]}"; do
   fname=$(basename "$f")
-  fsize=$(du -h "$f" | cut -f1)
+  # 大小口径统一走真源助手（规范 · 大小写法）：du -h 的「8.0M」与全库不同口径
+  fsize=$(format_bytes "$(stat -c%s "$f")")
   # 条目行统一走 tg_add_entry（主体等宽 + 元数据 " · " 分隔、统一转义）
   tg_add_entry FILE_DETAILS "$fname" "$fsize"
 done

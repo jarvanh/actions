@@ -19,7 +19,10 @@ set +e
 FILEPATH="$1"
 URL="$2"
 FILENAME=$(basename "$FILEPATH")
-FILESIZE_HUMAN=$(du -h "$FILEPATH" | cut -f1)
+# 版式助手真源（format_bytes 等）：本脚本写进 new_downloads_list.txt 的大小会原样
+# 出现在 ph-dl 收尾通知的条目里，口径必须与全库一致
+source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+FILESIZE_HUMAN=$(format_bytes "$(stat -c%s "$FILEPATH" 2>/dev/null || echo 0)")
 TARGET_DIR="$HOME/onedrive/0/j-1024j-视频-pornhub-favorites"
 REMOTE_BASE="$SOURCE_REMOTE"
 ARCHIVE_FILE="$TARGET_DIR/archive.txt"

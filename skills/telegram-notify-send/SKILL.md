@@ -122,7 +122,7 @@ send_tg "$msg" || echo "::warning::TG 通知发送失败（不影响任务）"
 5. **pwsh 不自检**：dot-source 后要 `if (-not (Get-Command Send-TgMessage -ErrorAction SilentlyContinue)) { throw ... }`。调用未定义函数是终止错误，step 带 `continue-on-error` 时表现为**通知静默消失**。
 6. **python 兜底分支吞异常**：`try: send_telegram(...) except: pass` 会同时吞掉异常和返回值，400/429 完全没有痕迹。用 `notify_best_effort(stage, msg)`。
 7. **`<pre>` 超长**：原始输出取尾部 1200 字节（与 `file_split.sh` 同口径）——超长会让 `<pre>` 跨 4000 分片、标签断开即破版。
-8. **大小口径**：`format_bytes` 输出 `1.150 GiB`（1024 进制 + 三位小数），**不是** `du -h` 的 `1G`，也不要裸字节。三处实现（`format_bytes` / `human_bytes` / `human_size`）**改一处必须同步另两处**。
+8. **大小口径**：用通知真源的 `format_bytes`（输出 `1.150 GiB`，1024 进制 + 三位小数），**不是** `du -h` 的 `1G`，也不要裸字节。python 侧两处同义实现改口径时要同步。
 9. **内嵌 python 段漏实现助手**：bash 里的 python 段无法 import 共享层，用到 `tg_entry` 却没在本文件定义 → NameError → 连整轮汇总通知一起丢。
 
 ## 参考文件
