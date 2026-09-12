@@ -304,7 +304,7 @@ _preview_render_pairs_detail() {
     # 排除规则（顿号「、」连接，_extract_exclude_summary 产出）:
     #   ≥2 条 → 条目子树（组头「排除 · N」+ 逐条 <code>，模式内末条 └─；
     #           前缀 = tree_sub(last) + 2 空格，末条目整块 8 空格起）
-    #   1 条  → 并入子行（不为单条扩树，规范 4.5 节）
+    #   1 条  → 并入子行（不为单条扩树，规范 3.5 节）
     if [ -n "$_excl" ]; then
       local -a _pats=()
       local _p
@@ -322,7 +322,7 @@ _preview_render_pairs_detail() {
         _g_block[$_src]+="${_sub}排除：$(tg_entry "$_excl")"$'\n'
       fi
     fi
-    # 第 6 章是硬约束：动态内容必须转义，没有「值是脚本自造、字符集受限」的豁免条款
+    # 第 7 章是硬约束：动态内容必须转义，没有「值是脚本自造、字符集受限」的豁免条款
     # （本值含计数与 format_bytes 输出，但口径统一优先于逐案判断）
     [ -n "$_fnote" ] && _g_block[$_src]+="${_sub}$(escape_html "${_fnote# · }")"$'\n'
     # 目标端列举失败: 该条目数值是按空目标端的全量估算，必须明示（否则合计
@@ -336,7 +336,7 @@ _preview_render_pairs_detail() {
     fi
   done <<< "$PREVIEW_PAIRS_TSV"
   # 组装: 组头 + 树形条目块，组间空一行（首组前不加——tg_add_section 已带段前空行）
-  # 组头是分节标题 → 裸文本（规范 4.2 节），条目内的路径才走 <code> 等宽
+  # 组头是分节标题 → 裸文本（规范 3.4 节），条目内的路径才走 <code> 等宽
   local _out="" _src _gi=0
   for _src in "${_g_order[@]}"; do
     [ "$_gi" -gt 0 ] && _out+=$'\n'

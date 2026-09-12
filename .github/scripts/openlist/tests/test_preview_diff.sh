@@ -120,7 +120,7 @@ IFS=$'\t' read -r _task _src _excl _sb _sc _dst _yb _yc _yn _yu _fn _df _ps <<< 
 # 渲染 + 发送
 flush_task_preview >/dev/null
 echo "$SEND_CAPTURE" | grep -q '排除：<code>notion/\*\*</code>' \
-  && ok "1i3 单条排除并入子行（不扩树，规范 4.5 节）" || bad "1i3: $SEND_CAPTURE"
+  && ok "1i3 单条排除并入子行（不扩树，规范 3.5 节）" || bad "1i3: $SEND_CAPTURE"
 echo "$SEND_CAPTURE" | grep -q '差异构成：新增 1 · 同名更新 1' && ok "1j 渲染差异构成子行" || bad "1j"
 echo "$SEND_CAPTURE" | grep -q '+900 B / +2 文件' && ok "1k 条目行 +900 B / +2 文件" || bad "1k: $SEND_CAPTURE"
 echo "$SEND_CAPTURE" | grep -q '已扣减 1 个修复文件 / 300 B' && ok "1l 渲染修复扣减子行" || bad "1l"
@@ -217,7 +217,7 @@ echo "$SEND_CAPTURE" | grep -q '+20 B / +1 文件' && ok "8d 条目行 +20 B / +
 [ "$(lsjson_call_count)" = "18" ] && ok "8e 调用数 = S7 后 14 + 源端 1 + 目标端重试 3" \
   || bad "8e: [$(lsjson_call_count)]"
 
-# ===== 场景 9: 排除规则 ≥2 → 条目子树（方案 B，规范 4.5 节）=====
+# ===== 场景 9: 排除规则 ≥2 → 条目子树（方案 B，规范 3.5 节）=====
 # 同源端两个目标 → 组内首条（│ 形态）与末条（8 空格形态）两种子树前缀都覆盖；
 # 两端空清单 → 无变动条目，排除子树照渲染
 SRC_JSON='[]'

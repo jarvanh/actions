@@ -458,7 +458,7 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
     # 否则会出现「按上传达标导出、却按下行排 TOP」的自相矛盾展示
     top_sort_key = 'up' if bundle.get('metric', 'upload') == 'upload' else 'down'
     top = sorted(ok_results, key=lambda r: r.get(top_sort_key) or 0.0, reverse=True)[:5]
-    # 标题状态随结论降级（规范 8.2 节 状态图标语义）：0 成功 / 命中「疑似未走代理」→ ⚠️，
+    # 标题状态随结论降级（规范 5.5 节 状态图标语义）：0 成功 / 命中「疑似未走代理」→ ⚠️，
     # 不再恒 ✅（此前 ✅ 标题下写着 ⚠️ 疑似未走代理，与 rc=1 的失败判定自相矛盾）
     _title_emoji = '⚠️' if (not ok_results or bypass_hits) else '✅'
     lines = [
@@ -467,7 +467,7 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
         f"🕒 起止：{esc(meta['started_text'])} ~ {esc(meta['ended_text'])} · 耗时 {esc(meta['duration_text'])}",
         # 计数口径与 cdn/gitee 统一用「可用」（成功=功能可用，含节点连接成功但速度偏低）
         f"📊 节点：共 {len(results)} 个 · 可用 {len(ok_results)} 个",
-        # 取值行口径（规范 2.3 节）：测速点与模式都取自引擎参数（机器返回值），整行同为等宽
+        # 取值行口径（规范 1.3 节）：测速点与模式都取自引擎参数（机器返回值），整行同为等宽
         # 不用 📍：紧随其后的「📍 测速点网络」分节（共享层）已占用该 emoji，
         # 同一条通知两个 📍 会让读者以为是同一块的两个小组
         f"🎯 测速点：{tg_entry(meta['points'])} · 模式：{tg_entry(meta['mode_label'])}",
@@ -512,13 +512,13 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
     if failed:
         lines.append(f'❌ 失败 · {len(failed)}')
         _failed_entries = []
-        # 折叠上限取全库默认 8（4.6 节；此前本域用 5，与 tree_fold 默认值不一致）
+        # 折叠上限取全库默认 8（3.6 节；此前本域用 5，与 tree_fold 默认值不一致）
         for r in failed[:8]:
-            # 并列双机器值（节点名 · 原始异常串）走 tg_entry_codes（4.5 节）
+            # 并列双机器值（节点名 · 原始异常串）走 tg_entry_codes（3.5 节）
             _failed_entries.append(
                 tg_entry_codes(r.get('name', ''), (r.get('error') or '-')[:80]))
         if len(failed) > 8:
-            # 折叠行并入条目流，末条 └─ 由下面的循环统一决定（禁双 └─；规范 4.6 节）
+            # 折叠行并入条目流，末条 └─ 由下面的循环统一决定（禁双 └─；规范 3.6 节）
             _failed_entries.append(f'还有 {len(failed) - 8} 条…')
         for _i, _l in enumerate(_failed_entries, 1):
             _c = '└─' if _i == len(_failed_entries) else '├─'
@@ -557,7 +557,7 @@ def notify_best_effort(stage: str, msg: str):
     """兜底分支（异常退出/信号终止/未捕获异常）的统一发送。
 
     python 发送层不写 stderr、只靠返回值报错，调用方必须把失败原因记进日志，
-    否则 400 解析失败/429 限流会表现为「通知静默消失」（规范 第 6 章）。
+    否则 400 解析失败/429 限流会表现为「通知静默消失」（规范 第 7 章）。
     此前这些分支直接 `send_telegram(...)` 后 `except: pass`，返回值被丢弃。
 
     签名与 cdn / gitee 两套保持一致：`(stage, msg)`，env 内部取 merged_env()。
@@ -584,7 +584,7 @@ def notify_failure(reason):
         f'❌ 泰尔三网测速异常退出 · {html.escape(_head)}',
         TG_SEP,
         # reason 含原始异常串（机器值）→ <code>；与 cdn/gitee 的「原因/错误」同口径
-        # （2.3 节取值行口径）
+        # （1.3 节取值行口径）
         f'原因：{tg_entry(reason)}',
         '',
     ]
@@ -791,7 +791,7 @@ def _run():
         # 长消息分片发送（失败列表 + Gist 段容易超 4000 字符，单发会被整条拒收）
         tg_res = send_telegram_chunked(env, '\n'.join(build_telegram_lines(
             results, meta, direct_ip, bypass_hits, gist_res, bundle, gist_error)))
-        # 发送层不写 stderr（python 侧靠返回值），失败原因必须回传日志（规范 第 6 章）
+        # 发送层不写 stderr（python 侧靠返回值），失败原因必须回传日志（规范 第 7 章）
         log_progress('telegram_send_finished', sent=bool(tg_res.get('sent')),
                      reason=tg_res.get('reason', ''))
     except Exception as e:
@@ -813,7 +813,7 @@ def main():
         # 未捕获异常兜底：标题带阶段摘要，正文留完整异常（含类型名，与 cdn 同口径）。
         # 这里不再包 `try: … except Exception: pass`——notify_failure 内部已走
         # notify_best_effort，发送结果会记进 log_progress；外层再吞一次等于
-        # 429 限流 / 400 解析失败时完全没有痕迹（规范 第 6 章点名的反模式，
+        # 429 限流 / 400 解析失败时完全没有痕迹（规范 第 7 章点名的反模式，
         # 2026-09-12 收敛：cdn 与 gitee 早已是这个形态）。
         notify_failure(f'未捕获异常：{type(e).__name__}: {e}')
         return 1

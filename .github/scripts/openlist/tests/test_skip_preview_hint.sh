@@ -111,7 +111,7 @@ echo "$SEND_CAPTURE" | grep -q '+500 B / +2 文件' \
   && ok "S1d 条目行仍展示待同步量" || bad "S1d: $SEND_CAPTURE"
 echo "$SEND_CAPTURE" | grep -q '⏭️ 上次成功 3 小时' \
   && ok "S1e 条目子行标注预计跳过" || bad "S1e: $SEND_CAPTURE"
-# 2026-09-09: 附注行 emoji 不套标签（规范 2.3 节），断言同步
+# 2026-09-09: 附注行 emoji 不套标签（规范 1.3 节），断言同步
 echo "$SEND_CAPTURE" | grep -q '⏭️ 本轮预计跳过：500 B / 2 文件' \
   && ok "S1f 合计附注给出预计跳过量" || bad "S1f: $SEND_CAPTURE"
 echo "$SEND_CAPTURE" | grep -q '预计实际传输 0 B / 0 文件' \
@@ -166,7 +166,7 @@ echo "$SEND_CAPTURE" | grep -q '500 B / 2 文件' \
 [ "$(cat "$LSJSON_CALLS")" = "$_calls_before" ] \
   && ok "S6c 命中缓存未新增 lsjson 调用" || bad "S6c: [$(cat "$LSJSON_CALLS") vs $_calls_before]"
 echo "$SEND_CAPTURE" | grep -q '复制即用' \
-  && ok "S6d 收尾为 🛠️ 复制即用命令块（规范 2.3 节）" || bad "S6d: $SEND_CAPTURE"
+  && ok "S6d 收尾为 🛠️ 复制即用命令块（规范 1.3 节）" || bad "S6d: $SEND_CAPTURE"
 echo "$SEND_CAPTURE" | grep -q '<pre>gh workflow run openlist.yml -f run_mode=同步 -f force_sync=true</pre>' \
   && ok "S6e 强制同步命令 pre 可复制" || bad "S6e: $SEND_CAPTURE"
 echo "$SEND_CAPTURE" | grep -q 'restore_task' \

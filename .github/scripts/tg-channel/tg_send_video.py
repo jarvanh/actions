@@ -92,9 +92,9 @@ file_path = sys.argv[1]
 chat_id = sys.argv[2]
 caption = sys.argv[3] if len(sys.argv) > 3 else ""
 # 媒体上传不走 sendMessage 发送层（固有例外），但 caption 必须转义 + 显式 HTML
-# parse_mode（规范 第 6 章）：文件名来自远端列表，可含 & < > 与 markdown 语法字符
+# parse_mode（规范 第 7 章）：文件名来自远端列表，可含 & < > 与 markdown 语法字符
 # （_ * [ ]），不转义会在 HTML 解析下 400、在 Telethon 默认 markdown 下破版。
-# 与 python 共享层 speedtest_common.py 同为 html.escape(quote=True) 口径（8.1 节）。
+# 与 python 共享层 speedtest_common.py 同为 html.escape(quote=True) 口径（6.3 节）。
 if caption:
     caption = html.escape(caption, quote=True)
 
@@ -140,7 +140,7 @@ async def main():
         print("Warning: No video attributes detected, uploading may be sent as document", file=sys.stderr)
 
     # 429 重试上限与 sendMessage 发送层同口径（5 次），不可更少——限流时放弃重试
-    # 等于让媒体彻底丢失（规范 第 6 章）
+    # 等于让媒体彻底丢失（规范 第 7 章）
     MAX_RETRIES = 5
     INITIAL_BACKOFF = 5
     last_error = None

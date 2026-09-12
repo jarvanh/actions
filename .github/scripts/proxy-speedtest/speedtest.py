@@ -931,7 +931,7 @@ def main():
         tg_res = send_telegram_chunked(env, '\n'.join(build_telegram_lines(
             results, meta=meta, gist_res=gist_res, bundle=bundle)))
         # 发送层不写 stderr（python 侧靠返回值），失败原因必须回传日志，否则
-        # 400 解析失败/限流会表现为「通知静默消失」（规范 第 6 章）
+        # 400 解析失败/限流会表现为「通知静默消失」（规范 第 7 章）
         log_progress('telegram_send_finished', sent=bool(tg_res.get('sent')),
                      reason=tg_res.get('reason', ''))
     except Exception as e:
@@ -984,7 +984,7 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None):
         duration_text = '-'
 
     sep = TG_SEP
-    # 标题状态随结论降级（规范 8.2 节 状态图标语义）：0 可用节点 → ⚠️，不再恒 ✅
+    # 标题状态随结论降级（规范 5.5 节 状态图标语义）：0 可用节点 → ⚠️，不再恒 ✅
     _title_emoji = '⚠️' if not ok_results else '✅'
     lines = [
         f'{_title_emoji} CDN 测速完成',
@@ -1004,7 +1004,7 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None):
     lines.append('')
     if top_results:
         top = top_results[:5]
-        # 名次类分节用 🏆（规范 8.2 节：禁 ⭐/🥇 自造前缀；名次类计数裸文本）；
+        # 名次类分节用 🏆（规范 5.5 节：禁 ⭐/🥇 自造前缀；名次类计数裸文本）；
         # 指标顺序对齐泰尔引擎列序（↑上传在前）；上传未启用/未测出时条目自动省略
         # ↑ 项（build_node_metric_prefix 内置），图例同步省略
         has_up = any((_result_metric_item(r).get('upload_mibs') or 0) > 0 for r in top)
@@ -1015,7 +1015,7 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None):
         for idx, r in enumerate(top, 1):
             prefix = build_node_metric_prefix(_result_metric_item(r), mode, order='up_first')
             connector = '└─' if idx == len(top) else '├─'
-            # 条目不编号，顺序即名次；条目行统一走 tg_entry（主体 + 元数据，见 4.5 节）
+            # 条目不编号，顺序即名次；条目行统一走 tg_entry（主体 + 元数据，见 3.5 节）
             lines.append(f'  {connector} ' + tg_entry(r.get("name", ""), prefix))
         lines.append('')
     else:
@@ -1026,7 +1026,7 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None):
     _failed = [r for r in results if not r.get('ok')]
     if _failed:
         lines.append(f'❌ 失败 · {len(_failed)}')
-        # 折叠上限取全库默认 8（4.6 节；此前本域用 5，与 tree_fold 默认值不一致）
+        # 折叠上限取全库默认 8（3.6 节；此前本域用 5，与 tree_fold 默认值不一致）
         _fe = [tg_entry_codes(r.get('name', ''), (r.get('error') or r.get('reason') or '-')[:80])
                for r in _failed[:8]]
         if len(_failed) > 8:
@@ -1069,7 +1069,7 @@ def notify_best_effort(stage: str, msg: str):
     """兜底分支（异常退出/信号终止/未捕获异常）的统一发送。
 
     python 发送层不写 stderr、只靠返回值报错，调用方必须把失败原因记进日志，
-    否则 400 解析失败/429 限流会表现为「通知静默消失」（规范 第 6 章）。
+    否则 400 解析失败/429 限流会表现为「通知静默消失」（规范 第 7 章）。
     此前这些分支直接 `send_telegram(...)` 后 `except: pass`，返回值被丢弃。
     """
     try:
@@ -1130,7 +1130,7 @@ if __name__ == '__main__':
         _msg = (f'❌ CDN 测速异常退出 · {html.escape(_head)}\n'
                 f'{TG_SEP}\n'
                 f'错误：{tg_entry(f"{type(e).__name__}: {e}"[:800])}')
-        # 收尾区不可省（规范 4.9 节）：兜底通知同样要带 ⏱ 已运行 + 运行日志
+        # 收尾区不可省（规范 3.9 节）：兜底通知同样要带 ⏱ 已运行 + 运行日志
         _footer = tg_footer_line()
         if _footer:
             _msg += f'\n\n{_footer}'

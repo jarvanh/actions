@@ -780,10 +780,10 @@ send_sync_warning() {
   fi
 
   if [ -n "$missing_dirs" ]; then
-    # 列表分节带计数（规范 4.2 节：凡分节后跟条目列表必须 · N）+ 统一树形（4.5 节，
-    # 不再 "• "）+ 超 8 条折叠（4.6 节，此前裸用 tree_lines 不折叠）。
+    # 列表分节带计数（规范 3.4 节：凡分节后跟条目列表必须 · N）+ 统一树形（3.5 节，
+    # 不再 "• "）+ 超 8 条折叠（3.6 节，此前裸用 tree_lines 不折叠）。
     # 说明性文字不再与计数并列写进标题（此前 "📁 缺失的目录 · 可能被删除 · N" 会被
-    # 读成两个计数），下沉为独立说明段（4.8 节）。
+    # 读成两个计数），下沉为独立说明段（3.8 节）。
     tg_add_section msg "📁 缺失的目录 · $(printf '%s' "$missing_dirs" | grep -c .)"
     _dirs_html=""
     while IFS= read -r d; do
@@ -874,7 +874,7 @@ send_sync_skipped() {
       # 计数取自 method_summary 行数（_m_entries 数组在下方才声明，此处引用会 unbound）
       tg_add_section msg "🔧 修复方式构成 · $(printf '%s' "$method_summary" | grep -c .)"
       # 树形条目（├─/└─）: 方式 × 数量 · 大小，summary 缩进为子行；
-      # restore.kind 英文 token 映射中文标签（规范 5.5 节：英文原因 token 不得直出通知）
+      # restore.kind 英文 token 映射中文标签（规范 4.4 节：英文原因 token 不得直出通知）
       local -a _m_entries=() _m_summaries=()
       local _m_kind_label
       while IFS=$'\t' read -r m_kind m_count m_bytes m_summary; do
@@ -910,14 +910,14 @@ send_sync_skipped() {
     if [[ "$_p_bytes" =~ ^[0-9]+$ ]] && [[ "$_p_count" =~ ^[0-9]+$ ]] \
        && { [ "$_p_bytes" -gt 0 ] || [ "$_p_count" -gt 0 ]; }; then
       tg_add_section msg "📦 本次未传"
-      # 取值行走 tg_add_kv（4.3 节），解释性文字另起说明段（4.8 节）——
+      # 取值行走 tg_add_kv（3.2 节），解释性文字另起说明段（3.8 节）——
       # 此前两者挤在一行，且没走助手
       tg_add_kv msg "未传量" "$(format_bytes "$_p_bytes") / ${_p_count} 文件"
       tg_add_note msg "两端仍存在差异，因落在跳过窗口内未传，非故障"
     fi
   fi
 
-  # 收尾区: 🛠️ 复制即用（规范 2.3 节）—— 给人可复制执行的 gh 命令（pre 不折行、
+  # 收尾区: 🛠️ 复制即用（规范 1.3 节）—— 给人可复制执行的 gh 命令（pre 不折行、
   # 整块复制），替代原「还原脚本：<marker JSON 路径> + 字段指引」（数据文件路径
   # 对人没有动作）。restore_task 按 marker 文件名首个 _ 前缀精确匹配
   # （file_restore.sh restore_fixed_files），填完整任务名匹配不到；

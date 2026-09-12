@@ -31,7 +31,7 @@
         run: |
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
           case "${{ job.status }}" in
-            # 状态语义由标题 emoji 承担即可，kv 值里再带一个就成了重复（规范 5.1 节）
+            # 状态语义由标题 emoji 承担即可，kv 值里再带一个就成了重复（规范 4.1 节）
             success)   _emoji="☁️"; _status="完成" ;;
             cancelled) _emoji="⛔"; _status="已取消" ;;
             *)         _emoji="❌"; _status="失败" ;;

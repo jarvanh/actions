@@ -62,7 +62,7 @@ _notify_add_excludes() {
   # 列表分节带计数（规模一眼可见）
   tg_add_section "$1" "🚫 排除规则 · $(printf '%s' "$exclude_list" | grep -c .)"
   # 树形（tree_code_fold：逐行 <code>转义</code> + 超 8 条折叠）——此前用 "• " 平铺，
-  # 与同一条通知里的失败清单（├─/└─）两种前缀并存（规范 4.5 节）
+  # 与同一条通知里的失败清单（├─/└─）两种前缀并存（规范 3.5 节）
   tg_add_block "$1" "$(tree_code_fold "$exclude_list")"
   return 0
 }
@@ -72,7 +72,7 @@ _notify_add_excludes() {
 # 用法: _notify_add_diff_list <var>
 _notify_add_diff_list() {
   [ -z "$diff_files_list" ] && return 0
-  # 列表分节带计数（规范 4.2 节：分节后跟条目列表必须 · N）。
+  # 列表分节带计数（规范 3.4 节：分节后跟条目列表必须 · N）。
   # 计数取各组头的 N 之和（rclone_query.sh 输出的组头形如「新增 · 3」）：
   # 差异列表是「组头 + 条目 + 折叠行」的混合，直接数行数会把组头和
   # 「还有 N 条…」也算成文件，计数虚高；而且每组最多展示 8 条，数行数
@@ -178,7 +178,7 @@ _send_sync_result_notification() {
       fi
       _fix_entries+="${_entry}"$'\n'
     done < "$fix_list"
-    # 超 8 条折叠交给真源 tree_fold（4.6 节）：条目流已由 tg_entry* 构建（已转义、
+    # 超 8 条折叠交给真源 tree_fold（3.6 节）：条目流已由 tg_entry* 构建（已转义、
     # 已含 <code>），tree_fold 只截断 + 加折叠行；不能再走 tree_code_fold（二次转义），
     # 也不再自己手写 head -n 8 + 折叠行（此前是 tree_fold 的重复实现）
     fix_summary="$(tree_fold "${_fix_entries%$'\n'}")"$'\n'
@@ -194,7 +194,7 @@ _send_sync_result_notification() {
   # **这里不走 tree_fold**（与上面的 fix_summary 不同）：tree_fold 按"行"截断，
   # 而本列表的截断单位是"文件条目"（每条 = 1 条目行 + N 行修复过程子行），
   # 按行截断会把修复过程子行切在半路。故由调用方按条目计数，
-  # 折叠行仍并入条目流作末条（禁双 └─ 同级）——二层列表的折叠例外，见 4.6 节。
+  # 折叠行仍并入条目流作末条（禁双 └─ 同级）——二层列表的折叠例外，见 3.6 节。
   local fail_summary=""
   local fail_total=0
   if [ -s "$fail_list" ]; then
@@ -279,7 +279,7 @@ _send_sync_result_notification() {
     _notify_add_autosplit partial_msg
     # fix_total 为 0 时不插该分节：本分支是「有文件彻底失败」，替代方式同步清单常为空，
     # 此时渲染成「✅ 已通过其他方式同步 · 0」+「无」——状态图标与计数自相矛盾
-    # （8.2 节：图标要与结论一致），且空分节白占版面（2026-09-12 修正）
+    # （5.5 节：图标要与结论一致），且空分节白占版面（2026-09-12 修正）
     if [ "$fix_total" -gt 0 ]; then
       tg_add_section partial_msg "✅ 已通过其他方式同步 · ${fix_total}"
       tg_append partial_msg "${fix_summary}"
@@ -322,7 +322,7 @@ _send_sync_result_notification() {
     local err_title err_status
     if [ "$is_partial_failure" -eq 1 ]; then
       err_title="⚠️ ${task_name} 部分文件同步失败"
-      # 英文 token 中文化（规范 5.5 节：退出码 45，而不是 exit=45）
+      # 英文 token 中文化（规范 4.4 节：退出码 45，而不是 exit=45）
       err_status="部分文件同步失败 · 退出码 ${sync_status}"
     else
       err_title="⚠️ ${task_name} 同步失败"
@@ -354,7 +354,7 @@ _send_sync_result_notification() {
     err_log_size=$(stat -c%s "$log_filename" 2>/dev/null || echo 0)
     if [ "$err_log_size" -gt 0 ] && [ "$err_log_size" -lt "${OPENLIST_ERR_LOG_MAX_BYTES:-50000000}" ]; then
       local _doc_resp _doc_wait
-      # 重试次数与发送层对齐（5 次；此前 3 次，与 第 6 章「429 重试最多 5 次」口径不一）
+      # 重试次数与发送层对齐（5 次；此前 3 次，与 第 7 章「429 重试最多 5 次」口径不一）
       for _doc_attempt in 1 2 3 4 5; do
         _doc_resp=$(curl -s -m 60 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
           -F chat_id="${TELEGRAM_CHAT_ID}" \

@@ -1506,7 +1506,7 @@ sync_by_file_batches() {
         if ! _check_openlist_backend_connectivity "$dest_path" "$batch_log"; then
           local unbuilt_batches=$((total_batches - synced_batches - failed_batches))
           failed_batches=$((failed_batches + unbuilt_batches))
-          # 条目统一走真源助手（4.5 节）：主体为文字 → tg_add_entry_text，元数据 " · " 分隔
+          # 条目统一走真源助手（3.5 节）：主体为文字 → tg_add_entry_text，元数据 " · " 分隔
           [ "$unbuilt_batches" -gt 0 ] && tg_add_entry_text failed_batch_list \
             "批次 $((i+1))/${total_batches} 起共 ${unbuilt_batches} 批" "批次预检未通过" "后端不健康" "中止"
           echo "🛑 批次 $((i+1)) 预检未通过（后端不健康），中止剩余 ${unbuilt_batches} 个批次，本同步对标记失败（后端恢复后轮转回来重试）"
@@ -1570,8 +1570,8 @@ sync_by_file_batches() {
         done
       else
         failed_batches=$((failed_batches + 1))
-        # 英文 token 不直出通知（规范 5.5 节）: exit=N 改写为中文说明
-        # 条目主体（中文说明）→ 裸文本，元数据（文件数/退出码）→ · （4.5 节）
+        # 英文 token 不直出通知（规范 4.4 节）: exit=N 改写为中文说明
+        # 条目主体（中文说明）→ 裸文本，元数据（文件数/退出码）→ · （3.5 节）
         tg_add_entry_text failed_batch_list "批次 $((i+1))/${total_batches}" \
           "${batch_file_count} 文件" "传输退出码 ${rc}"
         echo "批次 $((i+1)) 失败 (exit=${rc})"
@@ -1650,7 +1650,7 @@ sync_by_file_batches() {
       { [ "$rc" -ne 0 ] && [ "$rc" -ne 4 ]; } && _bh_mark="❌"
       # 分项 emoji 计数恒显 + 定宽补零（用户偏好: 全字段恒显 + 数字列竖向对齐；形态 2，2026-09-07）:
       #   ✅00 🔧00 ❗33 ⏭️22 ♻️00（%02d 补零）⏱01:15（mm:ss）⬆️4.79G（GiB 两位，末列不补）
-      #   代价: 行宽 ≈42 全角，手机折 2 行（用户接受，换数字列竖向对齐）；字段表见 docs/telegram-notify.md 8.3 节
+      #   代价: 行宽 ≈42 全角，手机折 2 行（用户接受，换数字列竖向对齐）；字段表见 docs/telegram-notify.md 5.4 节
       #   状态: ✅全成 ⚠️部分失败 ❌失败 ⏭️整批跳过 ♻️整批已有；❗=失败（不用 ❌ 避免与状态撞形）
       local _bh_gib
       _bh_gib=$(awk "BEGIN{printf \"%.2f\", ${_batch_bytes:-0}/1073741824}")

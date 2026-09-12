@@ -1,6 +1,6 @@
 ---
 name: telegram-notify-audit
-description: 对 actions 仓库的全部 Telegram 通知做版式一致性核对与复验。This skill should be used when the user asks to 核对/审查 telegram 通知、检查通知样式结构是否统一、改版式后复验基线是否仍成立，或要求按 docs/telegram-notify.md 第 7.4 节的「已统一 N 项」逐项确认。覆盖 openlist、tg-channel、workflows 内联、测速三套+pwsh 四个域共约 30 类通知，产出疑似偏差清单并回写核对基线。
+description: 对 actions 仓库的全部 Telegram 通知做版式一致性核对与复验。This skill should be used when the user asks to 核对/审查 telegram 通知、检查通知样式结构是否统一、改版式后复验基线是否仍成立，或要求按本 skill 的基线清单（references/audit-checklist.md）逐项确认。覆盖 openlist、tg-channel、workflows 内联、测速三套+pwsh 四个域，产出疑似偏差清单并回写核对基线。
 agent_created: true
 ---
 
@@ -8,8 +8,9 @@ agent_created: true
 
 ## Overview
 
-`docs/telegram-notify.md` 是全库通知版式的唯一真源，其 7.4 节记录了逐轮累积的
-「已统一 N 项」基线。本 skill 把该基线的核对流程固化下来：机械扫描 → 四域并行
+`docs/telegram-notify.md` 是全库通知版式的唯一真源。核对基线**单独维护在**
+`references/audit-checklist.md`（逐轮累积的「已统一 N 项」），不写进规范文档——
+数字断言放在规范里必然腐化。本 skill 把核对流程固化下来：机械扫描 → 四域并行
 通读 → **逐条复核** → 渲染预览 → 回归验证 → 回写基线。
 
 核对的目标不是「找 bug」，而是「确认基线仍然成立，并找出新出现的不一致」。
@@ -18,15 +19,15 @@ agent_created: true
 ## 何时使用
 
 - 用户要求核对 / 审查 / 检查 telegram 通知的样式结构是否统一
-- 改动了任何通知版式后，需要确认 7.4 节基线没被破坏
+- 改动了任何通知版式后，需要确认 `references/audit-checklist.md` 的基线没被破坏
 - 用户问「某类通知是不是漏改了」——用本流程定位并给出判定依据
 
 ## 核对流程
 
 ### 第 0 步：读真源（不可跳过）
 
-先完整读 `docs/telegram-notify.md`，重点是第 4 章「版式构件速查」、4.6 节折叠判定、
-第 6 章发送层（硬约束）、第 7 章测试基线、7.4 节既有基线。
+先完整读 `docs/telegram-notify.md`，重点是第 3 章「版式构件速查」、3.6 节折叠判定、
+第 7 章发送层（硬约束）、第 8 章验证与交付；既有基线见 `references/audit-checklist.md`。
 
 判定「谁是真源」看三样：真源文件的注释、测试夹具、与平行实现的对照——
 **不看出现次数**。多处重复实现不代表它是规范。
@@ -63,8 +64,8 @@ agent_created: true
 且是 3:1 的多数意见。每条结论都要回到代码看一眼，再决定是真偏差还是有意为之。
 
 复核时回到规范原文确认：某个写法到底是「硬约束」还是「建议」。
-硬约束只有三处（第 6 章发送层、4.9 收尾区接线、第 7 章测试基线）。
-**「字符集受限、风险低」不是硬约束的豁免理由**——第 6 章明写动态内容必须转义。
+硬约束只有三处（第 7 章发送层、3.9 收尾区接线、第 8 章验证与交付）。
+**「字符集受限、风险低」不是硬约束的豁免理由**——第 7 章明写动态内容必须转义。
 
 易误判为偏差、实为合规的写法见 `references/audit-checklist.md`「易误判项」。
 每次核对若发现新的易误判项，追加进该文件。
@@ -82,8 +83,11 @@ agent_created: true
 
 ### 第 6 步：回写基线
 
-把本轮结论写进 `docs/telegram-notify.md` 7.4 节：本轮方法、1–N 项是否仍成立、
-修正了哪些文档自身错误、新增/待修条目。本节是下一轮的起点。
+把本轮结论写进 `references/audit-checklist.md`：本轮方法、1–N 项是否仍成立、
+修正了哪些文档自身错误、新增/待修条目。该文件是下一轮的起点。
+
+规范文档 `docs/telegram-notify.md` 本身**不再记录核对轮次**——只写版式，不写
+「哪一轮核对过什么」。
 
 同时修正核对中发现的**文档与实现不符**——文档数字（行数、状态数、秒数、计数、
 成员清单）最容易腐化，凭印象写下的断言几乎必错。改文档数字前先 grep 出实现行号，
@@ -112,7 +116,7 @@ agent_created: true
 
 ### scripts/
 
-- `render_preview.sh` —— 用真源助手渲染预览（对应规范 7.3 节），直接执行即可。
+- `render_preview.sh` —— 用真源助手渲染预览（对应规范 8.1 节），直接执行即可。
 
 ### references/
 

@@ -107,7 +107,7 @@ def notify_best_effort(stage: str, msg: str):
     """兜底分支（信号终止/未捕获异常）的统一发送。
 
     python 发送层不写 stderr、只靠返回值报错，调用方必须把失败原因记进日志，
-    否则 400 解析失败/429 限流会表现为「通知静默消失」（规范 第 6 章）。
+    否则 400 解析失败/429 限流会表现为「通知静默消失」（规范 第 7 章）。
     此前这些分支直接 send_telegram(...) 后 `except: pass`，返回值被丢弃。
     """
     try:
@@ -1323,13 +1323,13 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
         duration_cn = tg_format_elapsed(
             (datetime.fromisoformat(str(ended_at)[:19]) - datetime.fromisoformat(str(started_at)[:19])).total_seconds())
     except Exception:
-        # 兜底不能回退到 duration_text（紧凑英文格式 5h57m，规范 4.3 节 禁进通知）
+        # 兜底不能回退到 duration_text（紧凑英文格式 5h57m，规范 3.2 节 禁进通知）
         duration_cn = '-'
     # 统一 HTML 版式（对齐 speedtest.build_telegram_lines / 全库通知模板）：
     # emoji 标题 + ━━━ 分隔线 + 键值概览（数值裸文本）+ 树形 TOP5（节点 <code>）+ 统一收尾区
     sep = TG_SEP
     esc = lambda s: html.escape(str(s))
-    # 标题状态随结论降级（规范 8.2 节 状态图标语义）：0 节点测速成功 / 本轮中止 → ⚠️，
+    # 标题状态随结论降级（规范 5.5 节 状态图标语义）：0 节点测速成功 / 本轮中止 → ⚠️，
     # 不再恒 ✅（此前「✅ 完成」下面写着「⚠️ 没有节点测速成功」，自相矛盾）
     _title_emoji = '⚠️' if (aborted_due_to_runtime or not ok_results_by_download) else '✅'
     summary_lines = [
@@ -1379,7 +1379,7 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
     _failed = [r for r in speed_results if not r.get('ok')]
     if _failed:
         summary_lines.append(f'❌ 失败 · {len(_failed)}')
-        # 折叠上限取全库默认 8（4.6 节；此前本域用 5，与 tree_fold 默认值不一致）
+        # 折叠上限取全库默认 8（3.6 节；此前本域用 5，与 tree_fold 默认值不一致）
         _fe = [tg_entry_codes(r.get('name', ''), (r.get('error') or r.get('reason') or '-')[:80])
                for r in _failed[:8]]
         if len(_failed) > 8:
@@ -1389,7 +1389,7 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
             summary_lines.append(f'  {_c} {_l}')
         summary_lines.append('')
     # 收尾区不在这里追加：finalize_gist_and_notify 还会在正文末尾补「📦 订阅 · Gist」段，
-    # 收尾行必须位于所有正文之后（规范 4.9 节），统一由 finalize 在最后追加
+    # 收尾行必须位于所有正文之后（规范 3.9 节），统一由 finalize 在最后追加
     return summary_lines
 
 def update_summary_artifacts(summary):
@@ -1439,7 +1439,7 @@ def finalize_gist_and_notify(env, summary, summary_lines, subscription_text, bun
         summary_lines.append(f"  └─ ⚠️ 上传失败：{tg_entry(gist_res.get('reason', ''))}")
     # 统一收尾区（收尾区与正文间固定一个空行；与 tg_add_footer 同形态同降级链）
     # 必须在所有正文段之后追加（「📦 订阅 · Gist」是正文的最后一段）——此前在
-    # build_summary_lines 里加，被此段挤到正文中间，消息末尾反而没有收尾行（规范 4.9 节）
+    # build_summary_lines 里加，被此段挤到正文中间，消息末尾反而没有收尾行（规范 3.9 节）
     summary_lines.append('')
     footer = tg_footer_line()
     if footer:
