@@ -109,6 +109,8 @@ cron 退回 6 小时一档只做兜底。三道护栏：
 | `EMBY_JOB_BUDGET` | job 总预算（默认 `20400`s = 5h40m），超过就不再启动任何耗时操作 |
 | `EMBY_PREFETCH` | 直链预热器开关（默认 `1`），见[起播慢怎么定位](#起播慢怎么定位) |
 | `EMBY_PREFETCH_MAX_DIRS` | 目录回填上限（默认 `400` 个目录） |
+| `WW_DEFAULT_SIZES` | 海报预热宽度档兜底值（默认 `400 600`）。`warm-state.json` 无客户端统计时用它开跑，避免与 wallwarmer 形成死锁；置空可恢复"只按实测档位预热"的旧行为 |
+| `WU_EDGE_ITEMS` | 头尾预热条目数（默认 `3`）。真实 OneDrive 流量，与直链预热的 `WU_ITEMS` 分开，避免为省流量把直链覆盖率一起压掉 |
 
 ---
 
@@ -610,6 +612,9 @@ sudo EMBY_USER="$EMBY_USER" python3 emby_guard.py <emby-data-root>   # 例：/va
 | 恢复走了旧的全量包 | `install emby` 步骤 | 增量目录 `onedrive:backup/emby/live` 为空或校验失败（看该步骤是否打印`增量恢复校验不通过`） |
 | 播放通知片名显示`未知` | 归档的 `playlog.log` | 反查全程 401 = secret 密钥在恢复库里失效（Tokens_2 中无此登录态或 IsActive=0）。`run emby` 步骤启动前会把 secret 密钥以专属设备登录态写回 `authentication.db` 并激活（幂等自愈）；若日志出现"密钥自愈失败"则需人工核对 Emby 版本 schema |
 | 播放通知没来 | `playlog.log` 的 TG 通道自检 | ge2o 日志格式变化 / Emby 401 / 300s 去重窗口内 |
+| 海报墙/首屏预热恒为 0（宽度档含"默认档"） | 归档 `warmup.log` 的「海报墙/首屏预热宽度档」行、`wallwarm.log` 的「宽度档」行 | `warm-state.json` 里没有客户端档位统计。旧版会一直干等到有客户端浏览才预热（与 wallwarmer 死锁），现已用 `WW_DEFAULT_SIZES` 兜底；看到"默认档"即说明本轮走的是兜底，等客户端真实请求出现后会自动切回实测档位 |
+| 收尾「海报预热」行缺失或 0 次 | `wallwarm.log` 是否出现「已覆盖全部 / 遍历完成」 | wallwarmer 每页都要有档位才推进；`odwarm.log` 若停在 `xx/400` 且无「回填完成」，见下一条 |
+| `dir_cache` 回填只完成一小部分就停 | `odwarm.log` | Emby 偶发返回非 JSON，旧写法会与"翻到最后一页"混淆而提前 break（实测 60/400）。现已单独识别异常响应并重试 3 次 |
 | 点击播放后要等很久才起播 | 播放通知的**「起播等待」段**（访问链：Cloudflare → Emby → OneDrive 各一行）→ `warmup.log` / `emby-console.log` | 按秒数定位段：**"抽字幕"大** = Emby 侧 ffprobe / 内封字幕提取（走挂载随机读，可让"起播准备预热"提前付掉）；**"取直链"大** = odlink 冷解析（未命中 `dir_cache`，扩 `WU_ITEMS`，目录预热 1b 会批量回填）；**各项都小却仍慢** = 卡在你播放器侧（联网 + 缓冲，服务器测不到），或链路行显示`🔁 视频流经 runner 中转到网盘`（转码）——见下方"起播慢怎么定位" |
 
 ### 起播慢怎么定位
@@ -621,10 +626,10 @@ sudo EMBY_USER="$EMBY_USER" python3 emby_guard.py <emby-data-root>   # 例：/va
 | 段 | 做什么 | 成本 | 对 **302 直连播放** | 预热后的效果 |
 |---|---|---|---|---|
 | 1 直链 | 提前打一次 odlink `/api/fs/get`，填充 `link_cache` 并测 TTFB | 零流量，几十秒完成 | ✅ **最有效**——ge2o→odlink 的直链解析本身就是 302 起播链路的一环 | 起播时不再逐段下钻 Graph。路径来源两路去重：**recent（最近播放，最可能回看）+ Latest 前 N 条** |
-| 1b 目录 | 对预热路径所在目录打一次 `/api/fs/list`，odlink 会**批量**把该目录所有子条目写进 `dir_cache` | 每目录约 0.5s，十来个目录 | ✅ **覆盖率最高**：一次请求覆盖几十上百个文件；命中 `dir_cache` 后起播只需重新签发直链（1 次 Graph），不必逐段解析。冷解析实测 **1.75s/条**（段数 5、跨盘 1），这是压"取直链 1.40 秒"的主力 |
+| 1b 目录 | 对预热路径所在目录打一次 `/api/fs/list`，odlink 会**批量**把该目录所有子条目写进 `dir_cache` | 每目录实测 1.2~3.1s（早先记的"约 0.5s"已不符） | ✅ **覆盖率最高**：一次请求覆盖几十上百个文件；命中 `dir_cache` 后起播只需重新签发直链（1 次 Graph），不必逐段解析。冷解析实测 **1.75s/条**（段数 5、跨盘 1），这是压"取直链 1.40 秒"的主力 |
 | 2 链路基线 | 见下方"第 2 段是测量" | 秒级 | — | — |
 | 3 海报墙 | 请求最新条目海报，让 Emby 现场缩放 + ge2o 内存缓存就绪 | 低 | ✅ 有效（与模式无关，纯 Emby 侧） | 首页秒开 |
-| 3b 各库首屏 | 每个媒体库按默认排序取前 20 张海报 | 约 1-2s/张×档位数，串行 | ✅ 滑进任意媒体库第一屏命中缓存 | 首屏秒开。宽度档位读跨 run 统计 Top5（`/var/lib/emby/warm-state.json`，随备份跨 run 传递）；**无统计时整体跳过**（不预热没人消费的尺寸） |
+| 3b 各库首屏 | 每个媒体库按默认排序取前 20 张海报 | 约 1-2s/张×档位数，串行 | ✅ 滑进任意媒体库第一屏命中缓存 | 首屏秒开。宽度档位读跨 run 统计 Top5（`/var/lib/emby/warm-state.json`，随备份跨 run 传递）；**无统计时回退 `WW_DEFAULT_SIZES`**（不干等客户端，否则与 wallwarmer 死锁） |
 | 4 头尾 | 读每个条目的头部与尾部，落进 VFS 稀疏缓存 | 真实流量，受 `WU_BUDGET_MB` 约束 | ⚠️ **基本无效**（视频流不过挂载），只在转码 / 回退 `direct` 时才用得上 | ffprobe / ffmpeg 起播读命中本地 |
 | 5 起播准备 | 对条目连打**两次** `POST /emby/Items/{id}/PlaybackInfo`（走 ge2o:8095） | 冷调用可能触发 ffprobe / 字幕提取（读挂载） | ✅ **直接消掉"点播放"第一步的冷成本**：ge2o 对该接口有 12h 缓存，冷调用已把 Emby 侧探测与直链改写跑完，用户点开即走热路径 | 冷/热两个均值直接给出「Emby 准备耗时」与「预热能省多少秒」 |
 | 全库海报（`wallwarmer`） | 按 DateCreated 倒序遍历全部条目持续预热 | 后台持续 ~5h，并发 2 | ✅ 滑到已覆盖区域即秒开；逐轮往深处推进 | 深层页面首次浏览不再冷读 |
@@ -672,7 +677,8 @@ sudo EMBY_USER="$EMBY_USER" python3 emby_guard.py <emby-data-root>   # 例：/va
 > 顺带的好处是提前暴露 OneDrive 限流——限流会在预热阶段就显现，而不是等到你点播放时。
 >
 > **若播放以 302 直连为主、很少转码**，建议把头尾预热压到最小、只当探针用：
-> `WU_ITEMS=3` + `WU_EDGE_MB=32`（≈190MB/轮，约为默认的 15%）。
+> `WU_EDGE_ITEMS=3`（配 `WU_EDGE_MB=32` ≈190MB/轮）。头尾条目数已与直链预热的
+> `WU_ITEMS` 拆开、代码默认就是 3——不必再靠压 `WU_ITEMS` 省流量，那会连累直链覆盖。
 > 配置在 workflow `env:` 或仓库变量即可，不需要改脚本。
 >
 > 直链预热的价值主要在 `dir_cache`（无 TTL）：直链本身 40 分钟后会过期，
@@ -715,7 +721,10 @@ sudo EMBY_USER="$EMBY_USER" python3 emby_guard.py <emby-data-root>   # 例：/va
 | Emby API 密钥自愈 | `run emby` 步骤（把 secret 密钥以 `emby302-workflow` 专属设备登录态写回 `authentication.db` 的 `Tokens_2` 并激活，幂等） |
 | rclone mount 参数（seek 优先口径） | `emby.yml` 的 `rclone-run` 步骤 |
 | `/mnt` 容量预留 | workflow `env:` 的 `MNT_RESERVE_KB`（默认 6GB），分配逻辑在 `lib.sh` |
-| 预热规模 | workflow `env:` 的 `WU_ITEMS`(30) / `WU_EDGE_MB`(32) / `WU_BUDGET_MB`(2048) / `WU_PI_ITEMS`(6)，脚本在 `emby.yml` 的 `warmup images` 步骤。`WU_ITEMS` 同时管直链（零流量）与头尾（真实流量）预热，30×32MB×2≈1.9GB 仍在预算内；`WU_PI_ITEMS` 是起播准备预热的条目数（每条连打两次 `PlaybackInfo`，冷调用可能触发 ffprobe/字幕提取，别设太大）。段序：1 直链 → 1b 目录 → 2 链路基线 → 3 海报墙/3b 首屏 → 4 头尾 → 5 起播准备（快且关键的在前，中途取消也保得住读数）。直链预热另含 **recent 回看预热**（playlog 写入 `warm-state.json`，保留最近 12 条，条数无需配置）。想量化起播慢看 `warmup.log` 的均值与收尾的「ge2o 请求耗时统计」 |
+| 预热规模 | workflow `env:` 的 `WU_ITEMS`(30) / `WU_EDGE_MB`(32) / `WU_BUDGET_MB`(2048) / `WU_PI_ITEMS`(6)，脚本在 `emby.yml` 的 `warmup images` 步骤。`WU_ITEMS`(30) 只管直链预热（零流量，覆盖率越高越好）；头尾（真实流量）由新增的 `WU_EDGE_ITEMS`(3) 单独控制，3×32MB×2≈190MB；`WU_PI_ITEMS` 是起播准备预热的条目数（每条连打两次 `PlaybackInfo`，冷调用可能触发 ffprobe/字幕提取，别设太大）。段序：1 直链 → 1b 目录 → 2 链路基线 → 3 海报墙/3b 首屏 → 4 头尾 → 5 起播准备（快且关键的在前，中途取消也保得住读数）。直链预热另含 **recent 回看预热**（playlog 写入 `warm-state.json`，保留最近 12 条，条数无需配置）。想量化起播慢看 `warmup.log` 的均值与收尾的「ge2o 请求耗时统计」 |
+| 海报预热宽度档兜底 | workflow `env:` 的 `WW_DEFAULT_SIZES`（默认 `400 600`）。两个读取点：`warmup images` 步骤「3. 海报墙预热」的 `WU_SIZES` 兜底分支、`start wall warmer` 步骤里 `TOP` 为空的分支。置空即恢复"只按实测档位预热" |
+| 头尾预热条目数 | workflow `env:` 的 `WU_EDGE_ITEMS`（默认 `3`），脚本在 `warmup images` 步骤「4. 头尾预热」。302 直连下头尾预热只剩"挂载冷读探针"价值，别调大 |
+| dir_cache 回填的异常响应处理 | `start link prefetcher` 步骤的 `/opt/odwarm.sh`：非 JSON 响应重试 3 次的分支，以及详情页预取 jq 的 `2>/dev/null`（不加会刷满 odwarm.log） |
 | 全库海报预热 | `start wall warmer` 步骤的 `/opt/wallwarmer.sh`：按 DateCreated 倒序分页遍历全部条目，把 Primary 海报拉进 Emby 缓存（`/mnt/emby-cache`）。**宽度档位跨 run 统计**——状态文件 `/var/lib/emby/warm-state.json` 存 `[宽度,得分]`（得分=按半衰期衰减的历史请求量，`WW_DECAY`=0.5），每轮启动先对历史得分衰减一次，再与本轮 ge2o 实测计数合并取 Top5（`WW_SIZES_MAX`=5）作为预热档位；持续被消费的档位留存，无人用的按半衰期退出（得分<1 淘汰）。每条目按这些档位各预热一份；请求只带 `maxWidth` 不带 `maxHeight`（缓存键含参数组合，box-fit 下带两者会得到更小的图、与客户端要的对不上）。统计每页写回状态文件、随备份跨 run 传递——ge2o 日志每轮清零，跨 run 全靠它。环境变量 `WW_WORKERS`(2) / `WW_GAP`(0.2s) / `WW_MAX_MIN`(300min) / `WW_SIZES_MAX`(5) / `WW_DECAY`(0.5) / `WW_MIN_FREE_KB`(/mnt 剩余 10GB 下限) / `WW_START_DELAY`(180s，让首屏预热先跑)。直连 Emby 不过 ge2o；缓存随备份持久化，逐轮往深处推进。**写回时保留 `recent` 字段**（playlog 记录的最近播放路径）——persist_state 是整体覆盖写，丢掉它回看预热就失效 |
 | 校验用的 Emby 用户名 | secret `EMBY_USER`（**不写死在代码里**；未配置则退化为"至少一个用户"） |
 | Emby 公网域名（隧道往返自测用） | 默认取 `e.<VD>.eu.org`（`VD` secret 拼出来，公开仓库不写死域名，日志里也会被自动打码）；换域名时用仓库 **Variables** `EMBY_PUBLIC_HOST` 覆盖。域名解析不通则跳过隧道 TTFB，只记边缘机房 |
