@@ -108,6 +108,16 @@ env:
   # 直链预热器：详情页预取（抓 ge2o.log 的 Items 请求）+ dir_cache 批量回填
   EMBY_PREFETCH: ${{ vars.EMBY_PREFETCH || '1' }}
   EMBY_PREFETCH_MAX_DIRS: ${{ vars.EMBY_PREFETCH_MAX_DIRS || '400' }}
+  # 海报预热宽度档的兜底值：warm-state.json 里没有客户端统计时用这组尺寸开跑。
+  # 原来「无统计就零请求」的写法会造成死锁——海报请求本身来自 127.0.0.1、被
+  # wallwarmer 的统计逻辑排除，于是永远等不到"客户端先访问"（实测连续多轮 0 次
+  # 请求、wallwarmer 0 页）。给一组主流客户端尺寸兜底，真实档位一出现就自动接管。
+  # 置空可恢复"只按实测档位预热"的旧行为。
+  WW_DEFAULT_SIZES: ${{ vars.WW_DEFAULT_SIZES || '400 600' }}
+  # 头尾预热条目数（真实 OneDrive 流量）。与 WU_ITEMS 分开：WU_ITEMS 管直链预热
+  # （零流量、覆盖率越高越好，保持 30），头尾预热对 302 直连基本无效、只当挂载
+  # 冷读探针用，3 条即可——原先跟着 WU_ITEMS=30 走，每轮白烧 1.9GB 流量。
+  WU_EDGE_ITEMS: ${{ vars.WU_EDGE_ITEMS || '3' }}
 
 jobs:
   build:
@@ -1451,7 +1461,11 @@ jobs:
           [ -n "$USER_ID" ] || { echo "warmup: 未找到目标用户（按 EMBY_USER 匹配），跳过"; exit 0; }
 
           # 预热规模：可用 workflow env 覆盖，无需改脚本
-          WU_ITEMS=${WU_ITEMS:-10}             # 参与直链/头尾预热的条目数
+          WU_ITEMS=${WU_ITEMS:-10}             # 参与直链预热的条目数（零流量，覆盖率越高越好）
+          # 头尾预热条目数：与 WU_ITEMS 分开。302 直连下视频流不过挂载，头尾预热
+          # 基本无效、只剩"挂载冷读速度探针"这一个价值，跟着 WU_ITEMS=30 走等于
+          # 每轮白烧 1.9GB 真实流量；压到 3 条（≈190MB）探针作用不变。
+          WU_EDGE_ITEMS=${WU_EDGE_ITEMS:-3}
           WU_EDGE_MB=${WU_EDGE_MB:-64}         # 头尾单边预热大小（每条目 ×2）
           WU_BUDGET_MB=${WU_BUDGET_MB:-2048}   # 头尾预热总预算(MB)，达上限即停
 
@@ -1533,7 +1547,9 @@ jobs:
           rm -f /tmp/wu-paths.txt /tmp/wu-paths-uniq.txt /tmp/wu-fsget.json
           if [ -s /tmp/wu-ttfb.txt ]; then
             # 一次 awk 出三个数（均值/最大/条数），用 read 拆开，避免为拼一行跑三遍 awk
-            read -r TTFB_AVG TTFB_MAX TTFB_N <<<"$(awk '{if ($1 > m) m = $1; s += $1; n++} END {printf "%.2f %.2f %d", s / n, m, n}' /tmp/wu-ttfb.txt)"
+            # v=$1+0 强制数值化：$1 与 m 都是 strnum，直接比会退化成字符串比较
+            # （"2" > "10" 为假，最大值会算错）
+            read -r TTFB_AVG TTFB_MAX TTFB_N <<<"$(awk '{v=$1+0; if (v > m) m = v; s += v; n++} END {printf "%.2f %.2f %d", s / n, m, n}' /tmp/wu-ttfb.txt)"
             echo "直链 TTFB: n=${TTFB_N} 均值 ${TTFB_AVG}s 最大 ${TTFB_MAX}s"
             printf 'LINK_TTFB=%s\n' "$TTFB_AVG" >> /tmp/warm-baseline.env
           fi
@@ -1576,13 +1592,25 @@ jobs:
 
           # ---------- 3. 海报墙预热 ----------
           # 宽度档位读跨 run 统计 Top5（随备份跨 run 传递；兼容旧版无得分的 sizes 格式）。
-          # ⚠️ 不回退固定 400/600——没有客户端消费过的尺寸预热了也是白占空间，
-          # 无档位时本段与 1b 自然零请求（wallwarmer 本轮会把统计写回状态文件）。
+          # 无统计时回退 WW_DEFAULT_SIZES 而非零请求：本段发出的请求来自 127.0.0.1、
+          # 恰好被 wallwarmer 的统计排除，"等客户端先访问再预热"永远等不到
+          # （实测连续多轮 0 次请求）。真实档位一出现即自动接管。
           # 请求只带 maxWidth：缓存键含参数组合，box-fit 下补 maxHeight 得到的是
           # 更小的图，与客户端实际要的对不上（同 wallwarmer 口径）。
           WU_SIZES=$(jq -r 'if has("scores") then .scores[]?[0] else .sizes[]? end' \
                      /var/lib/emby/warm-state.json 2>/dev/null | tr '\n' ' ')
-          echo "海报墙/首屏预热宽度档: ${WU_SIZES:-无（跳过，等 wallwarmer 记录客户端档位）}"
+          # 无客户端统计时用 WW_DEFAULT_SIZES 兜底。原来「无档位就零请求」会死锁：
+          # 本段发出的海报请求来自 127.0.0.1，恰好被 wallwarmer 的统计排除
+          # （它只统计非 127.0.0.1 的客户端请求），于是"等客户端先访问"永远等不到
+          # ——实测连续多轮「海报墙 0 次请求 / 首屏 0 张 / wallwarmer 0 页」。
+          # 默认档只在没有统计时顶上，真实档位一出现就自动接管。置空该变量可恢复旧行为。
+          case "${WU_SIZES// /}" in
+            '')
+              WU_SIZES="${WW_DEFAULT_SIZES:-}"
+              echo "海报墙/首屏预热宽度档: ${WU_SIZES:-无（WW_DEFAULT_SIZES 已置空，跳过）}（默认档，尚无客户端统计）"
+              ;;
+            *) echo "海报墙/首屏预热宽度档: $WU_SIZES";;
+          esac
           N=0
           for ID in $(jq -r '.[].Id' /tmp/wu-items.json | head -40); do
             jq -r --arg id "$ID" '.[] | select(.Id==$id) | .ImageTags.Primary // empty' /tmp/wu-items.json > /tmp/wu-tag.txt 2>/dev/null
@@ -1631,7 +1659,7 @@ jobs:
           # 代价是真实 OneDrive 流量，故用 WU_BUDGET_MB 兜底；
           # 这里测出的耗时同时就是"挂载冷读速度"的实测值，可反推 ffprobe 会花多久。
           EDGE_N=0; EDGE_MS=0; USED_MB=0
-          for ID in $(jq -r '.[].Id' /tmp/wu-items.json | head -"$WU_ITEMS"); do
+          for ID in $(jq -r '.[].Id' /tmp/wu-items.json | head -"$WU_EDGE_ITEMS"); do
             [ "$USED_MB" -lt "$WU_BUDGET_MB" ] || { echo "头尾预热达预算 ${WU_BUDGET_MB}MB，停止 $(date '+%T')"; break; }
             P=$(jq -r --arg id "$ID" '.[] | select(.Id==$id) | (.MediaSources[0].Path // .Path // empty)' /tmp/wu-items.json)
             [ -n "$P" ] || continue
@@ -1789,16 +1817,27 @@ jobs:
             MERGED=$(merged_sizes)
             TOP=$(printf '%s' "$MERGED" | head -"$WW_SIZES_MAX" | awk '{printf "%s ", $2}')
             if [ -z "$TOP" ]; then
-              # ⚠️ 不回退 400：没有客户端消费过的尺寸预热了也是白占空间——
-              # 等到有人浏览、日志里出现真实宽度再开跑
-              echo "尚无客户端图片请求数据，60s 后重试 $(date '+%T')"
-              sleep 60
-              continue
+              # 无客户端统计时用 WW_DEFAULT_SIZES 开跑，不再干等：
+              # 干等会与 warmup 形成死锁——warmup 等这里记录档位，这里等客户端产生
+              # 请求，而客户端不先浏览就永远没有请求（实测连续多轮 wallwarmer 0 页）。
+              # 真实档位一旦出现在 ge2o 日志里，下一页的合并得分就会自动接管。
+              TOP="${WW_DEFAULT_SIZES:-}"
+              if [ -z "$TOP" ]; then
+                # 兜底值被显式置空 = 恢复"只按实测档位预热"的旧行为
+                echo "尚无客户端图片请求数据，60s 后重试 $(date '+%T')"
+                sleep 60
+                continue
+              fi
+              echo "尚无客户端图片请求数据，用默认档开跑: $TOP $(date '+%T')"
             fi
             PAGE=$((PAGE + 1))
             # 统计写回：衰减分+本轮实测，只留 Top-N（≤5 条恒小）；ge2o 日志每轮
-            # 清零，跨 run 统计全靠它
-            persist_state "$MERGED"
+            # 清零，跨 run 统计全靠它。
+            # ⚠️ MERGED 为空时必须跳过：persist_state 是整体覆盖写，拿空输入写会
+            # 把历史得分清空（默认档预热期间每页都会走到这里）
+            if [ -n "$MERGED" ]; then
+              persist_state "$MERGED"
+            fi
             echo "第 $PAGE 页 宽度档: $TOP（每条目预热 $(( $(printf '%s' "$TOP" | wc -w) )) 个尺寸）"
             for ROW in $ROWS; do
               ID=${ROW%%,*}; TAG=${ROW#*,}
@@ -1950,8 +1989,10 @@ jobs:
               NOW=$(date +%s); LAST=${SEEN_AT[$ID]:-0}
               [ $(( NOW - LAST )) -gt 600 ] || continue
               SEEN_AT[$ID]=$NOW
+              # 2>/dev/null：Emby 偶发返回非 JSON，jq 的 parse error 会刷进 odwarm.log
+              # 把真正的进度行挤掉（归档只 tail 30 行，实测被这两行占满）
               P=$(curl -s -m 10 "$EMBY/emby/Items/$ID?api_key=$KEY" \
-                  | jq -r '.MediaSources[0].Path // .Path // empty')
+                  | jq -r '.MediaSources[0].Path // .Path // empty' 2>/dev/null)
               case "$P" in /onedrive/*) ;; *) continue;; esac
               fs_list "$(dirname -- "$P")"
               fs_get "$P"
@@ -1960,11 +2001,24 @@ jobs:
           ) &
 
           # ---- A) dir_cache 批量回填（主进程）----
-          IDX=0; DIRS=0
+          IDX=0; DIRS=0; BAD_ROUNDS=0
           declare -A DSEEN=()
           echo "=== dir_cache 回填启动 上限 ${MAX_DIRS} 个目录 $(date '+%F %T')"
           while [ "$DIRS" -lt "$MAX_DIRS" ]; do
             JSON=$(curl -s -m 30 "$EMBY/emby/Users/$USER_ID/Items?Recursive=true&SortBy=DateCreated&SortOrder=Descending&Limit=200&StartIndex=$IDX&Fields=Path,MediaSources&api_key=$KEY")
+            # Emby 偶发返回非 JSON（限流 / 500 / 半截响应）。此时 PATHS 也为空，
+            # 与"真的翻到最后一页"无法区分——原写法直接 break，实测 60/400 就提前
+            # 收工且不留任何结束行。这里单独识别：异常响应重试，连续 3 次才放弃。
+            if ! printf '%s' "$JSON" | jq -e '.Items' >/dev/null 2>&1; then
+              BAD_ROUNDS=$((BAD_ROUNDS + 1))
+              echo "目录回填: 第 $IDX 条起响应异常（非 JSON）重试 $BAD_ROUNDS/3 $(date '+%T')"
+              if [ "$BAD_ROUNDS" -ge 3 ]; then
+                echo "目录回填: 连续 3 次响应异常，提前结束（已回填 $DIRS 个目录）"
+                break
+              fi
+              sleep 10; continue
+            fi
+            BAD_ROUNDS=0
             PATHS=$(printf '%s' "$JSON" | jq -r '.Items[]? | (.MediaSources[0].Path // .Path // empty)' 2>/dev/null)
             [ -n "$PATHS" ] || { echo "目录回填: 第 $IDX 条起无更多条目，遍历完成"; break; }
             while IFS= read -r P; do
@@ -2015,7 +2069,8 @@ jobs:
           curl -s -m 5 http://127.0.0.1:5245/stats 2>/dev/null | jq -c . 2>/dev/null || echo "(odlink 未就绪)"
           echo "--- seek.log（拖动取链统计）---"
           if [ -s /opt/logs/seek.log ]; then
-            awk '{n++; s += $NF; if ($NF > m) m = $NF} \
+            # v=$NF+0 强制数值化：$NF 与 m 都是 strnum，直接比会退化成字符串比较
+            awk '{v=$NF+0; n++; s += v; if (v > m) m = v} \
                  END {printf "  n=%d 均值 %.1fs 最大 %.1fs\n", n, s / n, m}' /opt/logs/seek.log
             tail -n 20 /opt/logs/seek.log
           else
@@ -2028,7 +2083,9 @@ jobs:
             NF >= 6 {
               unit = $3; sub(/^[0-9.]+/, "", unit)
               val = $3; sub(/[^0-9.].*$/, "", val)
-              ms = (unit == "µs") ? val / 1000 : ((unit == "ms") ? val : val * 1000)
+              # +0 强制数值化：三元表达式会保留 val 的 strnum 属性，后续 ms > mx[k]
+              # 退化成字符串比较（实测输出过「均值 77ms 最大 9ms」——字符串下 "9" > "27"）
+              ms = ((unit == "µs") ? val / 1000 : ((unit == "ms") ? val : val * 1000)) + 0
               k = "其它"
               if ($6 ~ /PlaybackInfo/)    k = "起播准备 PlaybackInfo"
               else if ($6 ~ /\/videos\//) k = "视频流 stream"
@@ -2286,7 +2343,9 @@ jobs:
             NF >= 6 {
               unit = $3; sub(/^[0-9.]+/, "", unit)
               val = $3; sub(/[^0-9.].*$/, "", val)
-              ms = (unit == "µs") ? val / 1000 : ((unit == "ms") ? val : val * 1000)
+              # +0 强制数值化：三元表达式会保留 val 的 strnum 属性，后续 ms > mx[k]
+              # 退化成字符串比较（实测输出过「均值 77ms 最大 9ms」——字符串下 "9" > "27"）
+              ms = ((unit == "µs") ? val / 1000 : ((unit == "ms") ? val : val * 1000)) + 0
               k = "其它"
               if ($6 ~ /PlaybackInfo/)    k = "起播准备 PlaybackInfo"
               else if ($6 ~ /\/videos\//) k = "视频流 stream"
@@ -2304,7 +2363,8 @@ jobs:
           # 全量与均值在这里——拖一次卡一次的话，这里能直接看出量级。
           echo "--- seek.log（拖动取链统计）---"
           if [ -s /opt/logs/seek.log ]; then
-            awk '{n++; s += $NF; if ($NF > m) m = $NF} \
+            # v=$NF+0 强制数值化：$NF 与 m 都是 strnum，直接比会退化成字符串比较
+            awk '{v=$NF+0; n++; s += v; if (v > m) m = v} \
                  END {printf "  n=%d 均值 %.1fs 最大 %.1fs\n", n, s / n, m}' /opt/logs/seek.log 2>/dev/null
             tail -n 20 /opt/logs/seek.log 2>/dev/null
           else
