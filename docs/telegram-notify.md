@@ -284,7 +284,8 @@
 |---|---|---|
 | 🟢 OpenClaw Runner 已就绪 | `openclaw.yml` | Tailscale SSH 就绪，推 SSH/RDP/网络/网关 |
 | 🚨 OpenClaw 自愈失败 | `openclaw.yml` | Run OpenClaw 步骤失败，推失败阶段/版本/关键日志 |
-| ⚠️ OpenClaw 归档告警 | `openclaw.yml` | 周期归档或最终归档（rclone/tar）失败 |
+| ⚠️ OpenClaw 归档告警 | `openclaw.yml` | 周期归档失败（rclone/tar），按包各一条 |
+| ⚠️ OpenClaw 最终归档告警 | `openclaw.yml` | 最终归档失败，版式同上（标题带「最终」区分阶段） |
 | ⚠️ OpenClaw 即将进入最终归档 | `openclaw.yml` | keepalive 剩余 15 分钟时预警 |
 | 🟢 Windows runner 已就绪 | `tailscale-windows.yml` | 同上（Windows） |
 | 🖥️ Windows RDP 已就绪 | `rdp.yml` | ngrok 隧道地址拿到后推 RDP 凭据 |
@@ -321,6 +322,31 @@
 > 凭据通知**没有特殊发送通道**：照样用 `tg_add_*` 构建（密码走 `tg_add_path`
 > 自动等宽 + 转义）再 `send_tg`。不要为凭据自造「单发不重试」的实现——
 > 429/400 都意味着上一条没被 Telegram 收到，放弃重试只会让凭据彻底丢失。
+
+**示例：归档告警（结构取自实现）**
+
+```
+⚠️ OpenClaw 归档告警
+━━━━━━━━━━━━━━━━━━
+对象：<code>openclaw.tar.gz</code>
+结论：上传失败 · 退出码 2
+原因：rclone 上传失败
+Run ID：<code>12345678</code>
+
+🧾 原始输出
+<pre>2026/09/12 09:00:00 ERROR : Failed to copy: connection reset</pre>
+
+⏱ 已运行 41 分钟 · 🔗 运行日志
+```
+
+取值行口径同 2.3 节：对象（包名/标签）是机器返回值 → `<code>`；
+结论与原因是人写的自然语言 → 裸文本 kv；rclone/tar 的原始输出 → 单独 `<pre>` 分节。
+原始输出取尾部 1200 字节（与 `file_split.sh` 日志摘要同口径）——超长输出会让
+`<pre>` 跨 4000 字符分片，标签断开即破版。
+
+> 周期归档（`send_telegram_alert`）与最终归档（`send_archive_alert`）分处两个 step，
+> 函数定义无法共享，**改版式时两处要一起改**。二者此前标题完全相同，读者分不清
+> 告警来自哪一轮，故最终归档的标题带「最终」。
 
 ### 3.5 Emby
 
@@ -701,6 +727,8 @@ tg_add_footer msg; printf '%s\n' "$msg"
 对全库约 30 类通知做逐套核对（四个子系统并行审计 → 逐条复核 → 渲染预览验证）。
 本节是下次核对的起点——**改动版式后，下表应当仍然成立**。
 （2026-09-12 第二轮复验：1–12 项全部仍成立，新增 13–15 项。）
+（2026-09-12 第三轮复验：1–15 项全部仍成立，新增 16 项；本轮把 openclaw 归档告警
+从整块 `<pre>` 收敛为全库 kv 形态，见 3.4 节示例。）
 
 核对方法：① Grep 机械扫描（`<b>`/`<i>`、`• `、半角冒号、`curl` 直发、时长格式）。
 ② 分域通读（openlist / tg-channel / workflows 内联 / 测速三套）。③ 渲染预览（7.3 节）。
@@ -715,7 +743,7 @@ tg_add_footer msg; printf '%s\n' "$msg"
 - macOS 的 BSD `grep` **不支持 `\S`**（GNU 扩展），用了会静默零匹配 → 假阴性。
   用 `[^ ]*` / `[^/]*` 代替，或改用 Grep 工具。
 
-#### 已统一 · 15 项
+#### 已统一 · 16 项
 
 | # | 版式要素 | 核对范围 | 结论 |
 |---|---|---|---|
@@ -734,6 +762,7 @@ tg_add_footer msg; printf '%s\n' "$msg"
 | 13 | 折叠口径 | 全库列表 | 按清单性质判定（4.6 节）：流水/日志类超 8 条折叠；结构性清单（`task_preview` 同步对、`task_engine` 子目录/批次统计）**全量展示——不是漏改** |
 | 14 | python 发送层返回值 | `speedtest_common.py` | `send_telegram` 成功/失败均返回字典，失败一律带 `reason`；`send_telegram_chunked` 顶层亦有 `reason`（汇总失败分片），调用方不会记空原因 |
 | 15 | 媒体发送 | `tg_send_video.py` / `sync_notify.sh` 的 `sendDocument` | caption 转义 + 显式 `parse_mode='html'`（不指定则 Telethon 走 markdown 默认解析）；429 重试与发送层同口径（5 次） |
+| 16 | 归档告警版式 | `openclaw.yml` 两处（`send_telegram_alert` / `send_archive_alert`，29 个调用点） | 对象 `<code>` + 结论/原因裸文本 kv + `Run ID`，原始输出单独 `<pre>` 分节（尾部 1200 字节）；两函数标题区分「归档告警 / 最终归档告警」；调用点为 4 参（对象/结论/原因/原始输出） |
 
 
 ## 8. 附录
