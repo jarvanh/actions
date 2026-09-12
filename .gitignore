@@ -1,6 +1,7 @@
 __pycache__/
 .codebuddy/
-# 项目级 skill 需随仓库共享（.workbuddy-ai/skills/），其余本地数据（memory 等）仍忽略。
+# skill 真身在仓库根的 skills/（供所有 AI 工具共用），此处只放行 WorkBuddy 侧的
+# 符号链接，其余本地数据（memory 等）仍忽略。
 # 注意：必须用 .workbuddy-ai/* + 否定的写法——直接写 /.workbuddy-ai/ 时 git 不会进入
 # 该目录，子级的否定规则不生效。
 .workbuddy-ai/*
