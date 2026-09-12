@@ -172,7 +172,12 @@ do_install() {
         -o /tmp/rclone.deb \
         "https://github.com/rclone/rclone/releases/download/${rver}/rclone-${rver}-linux-amd64.deb"; then
       sudo dpkg -i /tmp/rclone.deb
-      rclone version | head -2
+      # 用 sed 而不是 head 取前两行: head 读满 2 行就关闭管道，rclone 随即收到
+      # SIGPIPE 以 141 退出；本脚本 set -euo pipefail，141 会一路冒成 install step
+      # 的失败，后面 18 个 step 全 skipped —— run 34685067684 就是 rclone v1.75.1
+      # 明明装好可用，step 却报 "Process completed with exit code 141"，整轮白跑。
+      # sed 会读完整个输入，不会提前关闭管道。
+      rclone version 2>&1 | sed -n '1,2p'
       return 0
     fi
     echo "::warning::GitHub Releases 下载 ${rver} 失败，回退 rclone.org 安装脚本"
@@ -181,7 +186,8 @@ do_install() {
   fi
 
   curl -fsSL https://rclone.org/install.sh | sudo bash
-  rclone version | head -2
+  # 同 do_install 内的说明: 用 sed 取前两行，避免 head 提前关管道触发 SIGPIPE(141)
+  rclone version 2>&1 | sed -n '1,2p'
 }
 
 do_config() {
