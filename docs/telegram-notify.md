@@ -217,8 +217,9 @@
 >
 > 媒体 caption 是 4.9 收尾区的**固有例外**：无标题与分隔线，
 > 也不带 `⏱ 已运行 · 🔗 运行日志`（`transcode_and_send.sh:145/178` 拼完即交
-> `tg_send_video.py`）。分片（>2000MiB）场景 caption 为四行，中间多一行
-> `part N/M (XMib)`。
+> `tg_send_video.py`）。caption 恒为三行（文件名 / 大小 / 修改时间）；
+> 分片（>2000MiB）场景中间行由「大小」换成 `part N/M (XMib)`，**仍为三行**
+> （`transcode_and_send.sh:145` 与 `:178` 对照）。
 
 **示例：频道同步汇总（构造示例，结构取自实现）**
 
@@ -519,14 +520,17 @@ Run ID：<code>12345678</code>
   | 清单性质 | 超 8 条怎么办 | 例 |
   |---|---|---|
   | 流水/日志类（读者只需知道规模，单条价值低） | 折叠为「还有 N 条…」 | 已上传文件、删除的重复文件、排除规则、日志行 |
-  | 结构性清单（读者要逐条核对，少一条就漏了结论） | **全量展示，不折叠** | `task_preview` 的同步对、`task_engine` 的子目录/批次统计清单 |
+  | 结构性清单（读者要逐条核对，少一条就漏了结论） | **全量展示，不折叠** | `task_preview` 的同步对、`task_engine` 的子目录/批次统计清单、
+  **进度面板的四组任务列表**（待处理/已完成/已跳过/失败 + 进行中） |
 
   判据是「折叠掉后半段会不会让读者误判」，不是「列表长不长」。结构性清单若确实很长，
   靠分节计数 ` · N` 交代规模（4.2 节）即可——把「失败了哪些」折叠成「还有 N 条…」
   等于把读者最需要看的部分藏起来。
   （2026-09-12 核对：openlist 域 `file_split` / `sync_marker` / `sync_to_tg` 已上传组
   与 `file_restore` 曾两种口径，已统一收敛到 `tree_fold`；`task_preview` 与
-  `task_engine` 属结构性清单，保持不折叠——不是漏改。）
+  `task_engine` 属结构性清单，保持不折叠——不是漏改。
+  进度面板同此判据：折叠掉后半段就等于把「哪些任务没跑完」藏起来
+  （`sync_progress.sh:476-478` 注释即此意），故四组任务列表全量展示。）
 
   **二层列表（条目 + 子行）在 `tree_fold` 适用范围之外**：`tree_fold` 按「行」截断，
   而带子行的列表截断单位是「条目」（1 条目行 + N 行子行），按行截断会把子行切在半路。
@@ -759,6 +763,33 @@ tg_add_footer msg; printf '%s\n' "$msg"
 （pwsh 无分片 / python 429 耗尽抛异常 / bash 降级链不回落）。
 教训：**具体数字断言最容易腐化**——状态数、秒数、计数、成员清单在正向通读时会被跳过，
 却恰恰会随实现改动而失效。改文档数字前先 grep 出实现行号，一并写进正文。）
+（2026-09-12 第五轮复验：机械扫描（`<b>`/`<i>`、`• `、半角冒号、curl 直发、时长格式、
+收尾区覆盖、`TG_RUN_*` 接线）+ 四域并行通读 + 逐条复核 + 渲染预览。
+**1–16 项版式结论全部仍成立**；本轮修正 2 处文档自身错误（3.2 节 caption 行数、
+4.6 节补进度面板判定），新增 1 项已统一（第 17 项），并留下**待修清单**（下表）。
+教训复现：第 4 轮才写下的「数字最容易腐化」在本轮再次命中——3.2 节的「四行」是凭印象写的，
+实现一直是三行。第 6 章的转义是硬约束，**「值是脚本内部拼的、字符集受限」不是豁免理由**。）
+
+#### 本轮新增 · 已修（12 条同轮全部修完；下表保留作变更记录）
+
+修复时顺带收敛了 2 处关联实现：`openclaw.yml` 自愈失败手拼 `<pre>` → `tg_add_pre`；
+`sync_to_tg.sh` 的 `human_size` 由 du -h 口径（`1G`）→ 全库 `format_bytes` 口径（`1.150 GiB`），
+并在两个 `dedupe_*.sh` 内同义实现 `human_bytes`（三处输出逐字一致）。
+
+| # | 位置 | 现状 | 建议 |
+|---|---|---|---|
+| 1 | `task_preview.sh:325` | `_fnote` 裸拼，未经 `escape_html`（值由脚本自造） | 第 6 章硬约束无豁免条款，套 `tg_add_note` |
+| 2 | `sync_to_tg.sh:163` `fmt_secs` | 上传耗时 ≥60 秒仍输出 `185.32 秒` | 按 4.3 节时长五层升级到分钟层（`<60s` 才走秒层） |
+| 3 | `taier_speedtest.py:529` | `达标 9 个 · 阈值 ≥10兆` | 与 cdn/gitee 统一为 `达标 9 个节点 · ≥10兆` |
+| 4 | `sync_to_tg.sh:162` | `📦 分组：91` 裸文本 | 2.3 节：分组名属机器值，与 `dedupe_*.sh` 的 `目录：<code>` 同口径 |
+| 5 | `taier_speedtest.py:471` | `📍 测速点：` kv 行与共享层 `📍 测速点网络` 分节并存 | 同一条通知两个 `📍`，改其中一个的 emoji |
+| 6 | `openclaw.yml:1275` | 关键日志 `<pre>` 取尾部 2800 字节，同文件归档告警取 1200；且走无分片的 `send_tg` | 收敛到 1200（或换 `send_tg_chunked`），否则转义膨胀后可能超 4096 被整条拒收 |
+| 7 | `cleanup_ytdlp_residual.sh:45-55` | 手写 8 条截断 + 折叠行 | `tree_fold` 的重复实现，收敛到真源 |
+| 8 | `sync_progress.sh:482` | `🔄 进行中 · 3 · 未执行完` | 计数后再追加说明，与 4.6 节已修的「缺失的目录 · 可能被删除 · N」同款，说明应下沉 |
+| 9 | `emby.yml:1214` | 客户端字段序 `Safari · macOS · IP` | 3.5 节示例为 `IP · Safari · macOS`，二选一统一 |
+| 10 | 测速三套失败清单 | 截断阈值 5（全库默认 8） | 统一到 8，或在 4.6 节点名此为测速域定值 |
+| 11 | `dedupe_*.sh:162/168` | 元数据 `1234567890 字节` | 与全库 `1.2 GB` 口径统一（走 `format_bytes` 一类） |
+| 12 | `rdp.yml:97` vs `tailscale-windows.yml:161` | 「超时自动关机」/「超时自动结束」 | 同一 6h 上限，措辞统一 |
 
 核对方法：① Grep 机械扫描（`<b>`/`<i>`、`• `、半角冒号、`curl` 直发、时长格式）。
 ② 分域通读（openlist / tg-channel / workflows 内联 / 测速三套）。③ 渲染预览（7.3 节）。
@@ -773,7 +804,7 @@ tg_add_footer msg; printf '%s\n' "$msg"
 - macOS 的 BSD `grep` **不支持 `\S`**（GNU 扩展），用了会静默零匹配 → 假阴性。
   用 `[^ ]*` / `[^/]*` 代替，或改用 Grep 工具。
 
-#### 已统一 · 16 项
+#### 已统一 · 17 项
 
 | # | 版式要素 | 核对范围 | 结论 |
 |---|---|---|---|
@@ -793,6 +824,7 @@ tg_add_footer msg; printf '%s\n' "$msg"
 | 14 | python 发送层返回值 | `speedtest_common.py` | `send_telegram` 成功/失败均返回字典，失败一律带 `reason`；`send_telegram_chunked` 顶层亦有 `reason`（汇总失败分片），调用方不会记空原因 |
 | 15 | 媒体发送 | `tg_send_video.py` / `sync_notify.sh` 的 `sendDocument` | caption 转义 + 显式 `parse_mode='html'`（不指定则 Telethon 走 markdown 默认解析）；429 重试与发送层同口径（5 次） |
 | 16 | 归档告警版式 | `openclaw.yml` 两处（`send_telegram_alert` / `send_archive_alert`，29 个调用点） | 对象 `<code>` + 结论/原因裸文本 kv + `Run ID`，原始输出单独 `<pre>` 分节（尾部 1200 字节）；两函数标题区分「归档告警 / 最终归档告警」；调用点为 4 参（对象/结论/原因/原始输出） |
+| 17 | 内嵌 python 助手可用性 | `tg-channel/sync_to_tg.sh` 内嵌段 | 段内调用的助手全部在文件内定义（无 NameError 风险）；`esc`/`tg_entry`/`tg_pre_block` 与 `speedtest_common.py` 逐字一致（`esc` 同为 `quote=True`）；`TG_SEP` 同为 18 条 |
 
 
 ## 8. 附录
@@ -827,6 +859,12 @@ tg_add_footer msg; printf '%s\n' "$msg"
 > 即可（`标签：值`、`  ├─ 键：<code>值</code>`），注意值一律经 `Esc-Html`。
 > 哪天想让它们也收敛，就在 pwsh 侧补一组 `Add-TgEntry` 之类的助手，再从两处迁移。
 
+> **大小与时长没有跨语言助手**：bash 用 `format_bytes`（openlist/utils.sh）与
+> `human_bytes`（tg-channel 两个 dedupe 脚本内同义实现），python 用 `human_size`
+> （sync_to_tg.sh 内嵌）——三者同为 1024 进制、B/KiB/MiB/GiB/TiB，输出逐字一致，
+> 改一处必须同步另两处。时长同理：python 侧 `fmt_secs` 必须走 4.3 节五层，
+> 不能恒输出秒层。
+>
 > 内嵌 python 段（如 `tg-channel/sync_to_tg.sh`）无法 import 共享层，
 > 在本文件内同义实现 `esc` / `tg_entry` / `tg_pre_block`，三处定义保持一致。
 >
