@@ -172,6 +172,20 @@ jobs:
               else
                 echo "⚠️ Archive does not contain .zcode/cli, skipping ZCode restore."
               fi
+              # 还原 server 设备身份（v2/certs CA + deviceMid）。每次重新部署 server 都会重新
+              # 生成身份，客户端把归档等本地 UI 状态 keyed 到该身份上；身份一变，客户端里
+              # 已归档会话全部复活（2026-09-12 排查结论：归档动作在 runner 侧零落盘）。复用
+              # 身份后客户端跨重置认得同一个 server。tasks-index.sqlite 是可再生索引，不备份。
+              if [ -d "$ZCODE_RESTORE_DIR/.zcode/v2/certs" ]; then
+                mkdir -p ~/.zcode/v2/certs
+                cp -a "$ZCODE_RESTORE_DIR/.zcode/v2/certs/." ~/.zcode/v2/certs/
+                if [ -f "$ZCODE_RESTORE_DIR/.zcode/v2/telemetry-state.json" ]; then
+                  cp -a "$ZCODE_RESTORE_DIR/.zcode/v2/telemetry-state.json" ~/.zcode/v2/
+                fi
+                echo "✅ Restored ~/.zcode/v2 server identity (certs + deviceMid)"
+              else
+                echo "ℹ️ Archive has no .zcode/v2 identity (old package), server will generate a fresh one."
+              fi
             else
               echo "⚠️ zcode.tar.gz validation failed, skipping ZCode restore."
             fi
@@ -1527,6 +1541,15 @@ jobs:
 
           if [ "$rsync_rc" -eq 24 ]; then
             echo "zcode_snapshot_partial_live_changes"
+          fi
+
+          # 一并备份 server 设备身份（v2/certs CA + telemetry-state.json 的 deviceMid），
+          # 供下次还原后 server 复用，客户端跨重置保持同一实例认知（详见还原步骤注释）。
+          if [ -d /home/runner/.zcode/v2/certs ]; then
+            mkdir -p "$STAGE_DIR/.zcode/v2/certs"
+            cp -a /home/runner/.zcode/v2/certs/. "$STAGE_DIR/.zcode/v2/certs"/
+            [ -f /home/runner/.zcode/v2/telemetry-state.json ] && \
+              cp -a /home/runner/.zcode/v2/telemetry-state.json "$STAGE_DIR/.zcode/v2"/
           fi
 
           tar -C "$STAGE_DIR" -czf "$OUTPUT_TAR" .zcode
