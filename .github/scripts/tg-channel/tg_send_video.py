@@ -4,6 +4,7 @@ import base64
 import asyncio
 import subprocess
 import json
+import html
 
 try:
     from telethon import TelegramClient
@@ -90,6 +91,12 @@ if len(sys.argv) < 3:
 file_path = sys.argv[1]
 chat_id = sys.argv[2]
 caption = sys.argv[3] if len(sys.argv) > 3 else ""
+# 媒体上传不走 sendMessage 发送层（固有例外），但 caption 必须转义 + 显式 HTML
+# parse_mode（规范 第 6 章）：文件名来自远端列表，可含 & < > 与 markdown 语法字符
+# （_ * [ ]），不转义会在 HTML 解析下 400、在 Telethon 默认 markdown 下破版。
+# 与 python 共享层 speedtest_common.py 同为 html.escape(quote=True) 口径（8.1 节）。
+if caption:
+    caption = html.escape(caption, quote=True)
 
 # Telegram 上传硬限制：SaveBigFilePartRequest 最多 4000 分片 × 512KB = 2000MiB（非 Premium）
 # 超限时服务端在第一个分片请求就拒绝："The number of file parts is invalid"
@@ -144,6 +151,9 @@ async def main():
                     'entity': chat_id,
                     'file': file_path,
                     'caption': caption,
+                    # 显式 HTML：不指定时 Telethon 走 markdown 默认解析，文件名里的
+                    # _ * [ ] 会被当语法吃掉；与 caption 的 escape 必须成对出现
+                    'parse_mode': 'html',
                     'force_document': False,
                     'supports_streaming': True,
                     'progress_callback': progress_callback,

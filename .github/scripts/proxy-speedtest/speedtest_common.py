@@ -466,7 +466,10 @@ def build_target_network_section(targets):
     targets = list(targets or [])
     if not targets:
         targets = [('', '', None)]
-    count_hint = f' · {len(targets)}' if len(targets) > 1 else ''
+    # 分节后跟条目列表一律带计数（4.2 节）：此前只在多测速点时带，单测速点输出
+    # 「📍 测速点网络」后接 4 行树形条目却无 · N —— taier / gitee 恒为单目标，
+    # 等于这两套的通知里该行永远没有计数。
+    count_hint = f' · {len(targets)}'
     lines = [f'📍 测速点网络{count_hint}']
     for idx, (server, label, info) in enumerate(targets, 1):
         server = str(server or '').strip()
@@ -546,7 +549,10 @@ def send_telegram(env, text):
         return {'sent': False, 'reason': body[:200]}
     if res.get('ok'):
         return {'sent': True, 'response': res}
-    return {'sent': False, 'response': res}
+    # 失败一律带 reason（规范 第 6 章：'sent': False 时 reason 是响应体）。
+    # ok:false 这条分支此前只回 response，调用方 tg_res.get('reason', '') 恒取空串
+    # ——「失败必须留下原因」在这条路径上等于没做，日志里看不出为什么失败。
+    return {'sent': False, 'reason': json.dumps(res)[:200], 'response': res}
 
 
 # 统一分隔线（18 个全角横线）：与 bash 真源 telegram/tg_notify.sh 的 TG_SEP 同值。
@@ -578,7 +584,15 @@ def send_telegram_chunked(env, text):
         results.append(send_telegram(env, chunk))
         if idx < len(chunks) - 1:
             time.sleep(2)
-    return {'sent': all(r.get('sent') for r in results),
+    # 顶层必须有 reason：三套主报告都走本函数，调用方统一读 tg_res['reason'] 记日志。
+    # 此前顶层只有 sent/chunks/results，分片失败时 reason 恒为空串 —— 只有部分分片
+    # 失败（sent=False）却查不到任何原因，正是第 6 章要防的「静默失败」。
+    failed = [r for r in results if not r.get('sent')]
+    reason = ''
+    if failed:
+        reason = '; '.join(
+            str(r.get('reason') or r.get('response') or '') for r in failed)[:400]
+    return {'sent': not failed, 'reason': reason,
             'chunks': len(chunks), 'results': results}
 
 
