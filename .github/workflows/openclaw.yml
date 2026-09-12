@@ -4,6 +4,15 @@ on:
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
+    inputs:
+      openclaw_shrink_guard:
+        description: '主包 openclaw.tar.gz 缩水保护：0 = 本轮放行，直接覆盖主包'
+        required: false
+        default: '1'
+      zcode_shrink_guard:
+        description: 'zcode.tar.gz 缩水保护：0 = 本轮放行，直接覆盖主包'
+        required: false
+        default: '1'
 
 permissions:
   contents: read
@@ -16,6 +25,11 @@ jobs:
     env:
       TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
       TS_OAUTH_CLIENT_SECRET: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
+      # 缩水保护开关。定时触发取默认 1；手动触发可用同名 input 覆盖为 0。
+      # 放行用途：归档排除规则收紧（主动瘦身）后，新包会永久小于云端旧包而被保护挡住，
+      # 主包就此冻结、之后每轮归档重复告警 —— 手动跑一轮 0 写入新包即可重建体积基线。
+      OPENCLAW_SHRINK_GUARD: ${{ github.event.inputs.openclaw_shrink_guard || '1' }}
+      ZCODE_SHRINK_GUARD: ${{ github.event.inputs.zcode_shrink_guard || '1' }}
     steps:
       - name: Setup Node.js
         uses: actions/setup-node@v7
