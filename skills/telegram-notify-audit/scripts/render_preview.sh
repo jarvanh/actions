@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Telegram 通知渲染预览（对应 docs/telegram-notify.md 8.1 节）
+# Telegram 通知渲染预览（对应 docs/telegram-notify.md 规范 · 渲染预览）
 #
 # 用法（skill 真身在仓库根的 skills/ 下，供所有 AI 工具共用）:
 #   bash skills/telegram-notify-audit/scripts/render_preview.sh [仓库根目录]
@@ -93,7 +93,7 @@ printf '%s' "$msg" | grep -q '&amp;amp;'; [ $? -ne 0 ]; check "无二次转义�
 printf '%s' "$msg" | grep -q '&amp; &lt;剧集&gt;'; check "动态内容已转义一次" $?
 printf '%s' "$msg" | grep -q '└─ <code>media/被排除C.tmp</code>'; check "末条用 └─ 且无双 └─" $?
 # 只校验链接部分：⏱ 时长依赖 GNU date 的 -d，macOS(BSD date) 下解析失败 → 时长按
-# 3.9 节降级链消失，属预期，不判 FAIL（Linux runner 上会正常显示「⏱ 已运行 X 」）
+# 规范 · 收尾区降级链消失，属预期，不判 FAIL（Linux runner 上会正常显示「⏱ 已运行 X 」）
 printf '%s' "$msg" | grep -q '🔗 <a href=.*>运行日志</a>'; check "收尾区含运行日志链接" $?
 case "$(printf '%s' "$msg")" in
   *"命中排除规则"$'\n\n'"成功条目"*) check "说明段前有且仅有一个空行" 0 ;;

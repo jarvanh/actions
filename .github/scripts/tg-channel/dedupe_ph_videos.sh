@@ -36,7 +36,7 @@ human_bytes() {
   }'
 }
 
-# ===== 通知明细折叠（规范 3.6 节: 超长列表禁全量穷举）=====
+# ===== 通知明细折叠（规范 · 折叠规则: 超长列表禁全量穷举）=====
 # 组内条目上限 8 条（_grp_add 超出转计数），通知中最多展示 8 组（_grp_block 超出折叠）
 GRP_SHOWN=0 GRP_HIDDEN=0
 GRP_BLOCK_SHOWN=0 GRP_BLOCK_HIDDEN=0
@@ -60,7 +60,7 @@ _grp_block() {
   fi
   GRP_BLOCK_SHOWN=$((GRP_BLOCK_SHOWN + 1))
   # 空行只作**组间**分隔：首组前也补会让分节标题与首组之间多出一个空行
-  # （规范 3.10 节：空行只有三个来源，组间空行属第 4 处但需按此条件补）
+  # （规范 · 空行：空行只有三个来源，组间空行属第 4 处但需按此条件补）
   [ -n "$DUP_DETAILS" ] && DUP_DETAILS+=$'\n'
   DUP_DETAILS+="$1"
 }

@@ -43,7 +43,7 @@ emit_simple() {
           fi
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 
-          # 状态语义只由标题 emoji 承担，kv 里不再重复（规范 4.1 节）
+          # 状态语义只由标题 emoji 承担，kv 里不再重复（规范 · 结果通知）
           case "${{ job.status }}" in
             success)   _emoji="✅"; _status="完成" ;;
             cancelled) _emoji="⛔"; _status="已取消" ;;

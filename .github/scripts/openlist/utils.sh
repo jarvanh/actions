@@ -21,7 +21,7 @@ shopt -u patsub_replacement 2>/dev/null || true
 # escape_html / tree_conn / tree_sub / tree_lines / tree_code_fold 已收敛到
 # scripts/telegram/tg_notify.sh（全库唯一真源），由 load_all.sh 在 L0 层最先 source。
 # 本文件不再自带副本——两份实现迟早漂移（2026-09-06 收敛）。
-# 树形规则要点（详见 docs/telegram-notify.md 3.5 节）:
+# 树形规则要点（详规范 · 条目与树形）:
 #   条目一律树形层级（├─/└─ 标记条目边界），全库无 "• " 平铺形态（2026-09-09 收敛）。
 
 # 检查日志文件是否包含实质内容（排除 rclone 统计行和空行）

@@ -15,8 +15,8 @@ GitHub Actions 工作流与脚本集合：OpenList 网盘同步、Emby 302 直�
 
 - **规范真源 `docs/telegram-notify.md`：动通知前必读，实现必须与它一致。**
   - 实现与规范不一致 → 改实现；规范本身过时或有误 → **先改规范，再同步实现**（依赖方向恒为 文档 → 实现，不反向）。
-  - 三处硬约束没有例外条款：第 7 章发送层（一律 HTML、动态内容必须转义、429 按 `retry_after` 重试最多 5 次、400 不重发直接暴露、已 source 发送层不得 curl 直发）、3.9 节收尾区与 `TG_RUN_URL` 接线、第 8 章回归基线。
-- 三套实现真源：bash `.github/scripts/telegram/tg_notify.sh`、pwsh `.github/scripts/telegram/tg_notify.ps1`、python `.github/scripts/proxy-speedtest/speedtest_common.py`。**新增或修改助手要三处同步**（大小/时长格式另有三处同义实现，见规范 5.2 节）。
+  - 三处硬约束没有例外条款：规范 · 发送层（一律 HTML、动态内容必须转义、429 按 `retry_after` 重试最多 5 次、400 不重发直接暴露、已 source 发送层不得 curl 直发）、规范 · 收尾区与 `TG_RUN_URL` 接线、规范 · 8回归基线。
+- 三套实现真源：bash `.github/scripts/telegram/tg_notify.sh`、pwsh `.github/scripts/telegram/tg_notify.ps1`、python `.github/scripts/proxy-speedtest/speedtest_common.py`。**新增或修改助手要三处同步**（大小/时长格式另有三处同义实现，规范 · 大小写法）。
 - 全库禁用 `<b>` / `<i>`；条目一律 `├─/└─` 树形；kv 一律全角冒号。
 
 ## 可用 skill
@@ -33,4 +33,4 @@ GitHub Actions 工作流与脚本集合：OpenList 网盘同步、Emby 302 直�
 ## 改完必验
 
 - 通知：`bash skills/telegram-notify-audit/scripts/render_preview.sh`（渲染预览 + 11 项自动校验）。
-- openlist 域：跑回归套件，基线 17 套 `EXIT=0` + 2 个已知环境失败，且 `command not found` 扫描必须为空（命令与 flake 名单见规范 7.1 / 8.2 节）。
+- openlist 域：跑回归套件，基线 17 套 `EXIT=0` + 2 个已知环境失败，且 `command not found` 扫描必须为空（命令与 flake 名单见规范 7.1 / 规范 · 回归套件）。

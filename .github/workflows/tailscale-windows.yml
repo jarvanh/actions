@@ -149,14 +149,14 @@ jobs:
             $locParts = @($geo.city, $geo.region, $geo.country_code) | Where-Object { $_ }
             if ($locParts) { $loc = $locParts -join ", " }
           } catch { }
-          # 取值行口径（规范 1.3 节）：一次 ipwho.is 返回的 IP/ISP/ASN/位置 都是机器返回值，
+          # 取值行口径（规范 · 取值行口径）：一次 ipwho.is 返回的 IP/ISP/ASN/位置 都是机器返回值，
           # 整节同为 <code>；按「值不值得复制」逐个判断会产出等宽/正体交错的斑马纹
           $msg += "`n`n🌐 出口网络 · 4`n" +
             "  ├─ 出口 IP：<code>$(Esc-Html $pubIp)</code>`n" +
             "  ├─ ISP：<code>$(Esc-Html $isp)</code>`n" +
             "  ├─ ASN：<code>$(Esc-Html $asnLine)</code>`n" +
             "  └─ 位置：<code>$(Esc-Html $loc)</code>"
-          # 说明段独立成段且排在 kv 之后（规范 3.8 节 说明段：kv → note → footer）：
+          # 说明段独立成段且排在 kv 之后（规范 · 说明段：kv → note → footer）：
           # 此前 note 在前、kv 挂在其后，说明段既不独立也打乱了取值区
           $msg += "`n`n有效期：约 6 小时 · 超时自动结束"
           $msg += "`n`nℹ️ $notes"

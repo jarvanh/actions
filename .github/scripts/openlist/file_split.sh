@@ -71,7 +71,7 @@ send_video_split_notification() {
       else
         log_summary=$(tail -c 1200 "$log_file" 2>/dev/null || echo "无法读取日志")
       fi
-      # 分节后跟的是 <pre> 块而非条目列表 → 不带计数（3.4 节）；
+      # 分节后跟的是 <pre> 块而非条目列表 → 不带计数（规范 · 分节）；
       # `· 当前文件` 会被读成「N 条」，且与本文件 7z 分支的 `🧾 日志摘要` 两写法
       tg_add_section message "🧾 日志摘要"
       # 日志为原始输出，转义后 <pre> 等宽展示（tg_add_pre 统一转义与包裹）
@@ -99,9 +99,9 @@ send_binary_split_notification() {
     tg_add_kv message "状态" "分卷成功"
     tg_add_path message "文件" "$file_path"
     tg_add_kv message "原始大小" "$file_size_human"
-    # 扩展名是机器值 → 等宽（1.3 节）；tg_add_kv 会转义整值，故自行拼 code
+    # 扩展名是机器值 → 等宽（规范 · 取值行口径）；tg_add_kv 会转义整值，故自行拼 code
     tg_append message "分卷数量：${parts_count} 个 <code>.7z.00x</code>"$'\n'
-    # 复制即用块（4.3 节）：▸ 描述 + <pre> 命令，与 sync_marker.sh 同形态
+    # 复制即用块（规范 · 复制即用命令块）：▸ 描述 + <pre> 命令，与 sync_marker.sh 同形态
     tg_add_section message "🛠️ 复制即用"
     tg_add_note message "▸ 解压还原（下载全部分卷后，双击第一个分卷，或运行下面命令）"
     tg_add_pre message "7z x 文件名.7z.001"
@@ -617,7 +617,7 @@ preprocess_large_files() {
 
     if [ "$split_success" -eq 1 ]; then
       success_count=$((success_count + 1))
-      # 英文 kind 不直出通知（规范 4.4 节）: media/binary 映射中文标签
+      # 英文 kind 不直出通知（规范 · 失败与异常）: media/binary 映射中文标签
       local _kind_label="二进制"
       [ "$split_kind" = "media" ] && _kind_label="媒体"
       tg_add_entry processed_files "${remote_source}:${full_path}" "$(format_bytes_iec "$file_size") · ${_kind_label}"

@@ -466,7 +466,7 @@ def build_target_network_section(targets):
     targets = list(targets or [])
     if not targets:
         targets = [('', '', None)]
-    # 分节后跟条目列表一律带计数（3.4 节）：此前只在多测速点时带，单测速点输出
+    # 分节后跟条目列表一律带计数（规范 · 分节）：此前只在多测速点时带，单测速点输出
     # 「📍 测速点网络」后接 4 行树形条目却无 · N —— taier / gitee 恒为单目标，
     # 等于这两套的通知里该行永远没有计数。
     count_hint = f' · {len(targets)}'
@@ -477,7 +477,7 @@ def build_target_network_section(targets):
         multi = len(targets) > 1
         if not server:
             # label 是域名 / hostname（机器值）→ 与同节「测速服务器 / ISP / ASN / 位置」
-            # 同为 <code>。1.3 节取值行口径看的是「来源」而不是「值不值得复制」：
+            # 同为 <code>。规范 · 取值行口径看的是「来源」而不是「值不值得复制」：
             # 同一次归属查询的返回值就该整节同口径。此前 label 裸文本，与同节另四行
             # 形成等宽/正体交错的斑马纹（2026-09-12 修正）。
             fallback = f'（<code>{esc(label)}</code>）' if label else ''
@@ -491,7 +491,7 @@ def build_target_network_section(targets):
         else:
             lines.append(f'  ├─ 测速服务器：<code>{esc(server)}</code>')
         isp, asn, loc = network_cells(info)
-        # 取值行口径（规范 1.3 节）：一次归属查询返回的 ISP/ASN/位置 与 IP 同属机器
+        # 取值行口径（规范 · 取值行口径）：一次归属查询返回的 ISP/ASN/位置 与 IP 同属机器
         # 返回值，整节同为 <code>；按「值不值得复制」逐个判断会产出等宽/正体交错的斑马纹
         lines += [
             f'  ├─ ISP：<code>{esc(isp)}</code>',
@@ -514,7 +514,7 @@ def send_telegram(env, text):
         return {'sent': False, 'reason': 'missing TELEGRAM_BOT_TOKEN/TG_BOT_TOKEN or TELEGRAM_CHAT_ID'}
 
     def _post(data):
-        # 429 限流按 retry_after 完整等待重试（规范 第 7 章，与 tg_notify.sh 同语义：5 次尝试）
+        # 429 限流按 retry_after 完整等待重试（规范 · 发送层，与 tg_notify.sh 同语义：5 次尝试）
         for _attempt in range(5):
             payload = urllib.parse.urlencode(data).encode()
             req = urllib.request.Request(f'https://api.telegram.org/bot{bot}/sendMessage',
@@ -549,7 +549,7 @@ def send_telegram(env, text):
         return {'sent': False, 'reason': body[:200]}
     if res.get('ok'):
         return {'sent': True, 'response': res}
-    # 失败一律带 reason（规范 第 7 章：'sent': False 时 reason 是响应体）。
+    # 失败一律带 reason（规范 · 发送层：'sent': False 时 reason 是响应体）。
     # ok:false 这条分支此前只回 response，调用方 tg_res.get('reason', '') 恒取空串
     # ——「失败必须留下原因」在这条路径上等于没做，日志里看不出为什么失败。
     return {'sent': False, 'reason': json.dumps(res)[:200], 'response': res}
@@ -563,7 +563,7 @@ TG_CHUNK_SIZE = 4000
 
 
 def send_telegram_chunked(env, text):
-    """长消息按 4000 字符分片发送（规范 第 7 章：断在换行处，不切 UTF-8 多字节字符，
+    """长消息按 4000 字符分片发送（规范 · 发送层：断在换行处，不切 UTF-8 多字节字符，
     与 tg_notify.sh send_tg_chunked 同语义）；短消息直接走 send_telegram。"""
     if not text:
         return {'sent': True}
@@ -586,7 +586,7 @@ def send_telegram_chunked(env, text):
             time.sleep(2)
     # 顶层必须有 reason：三套主报告都走本函数，调用方统一读 tg_res['reason'] 记日志。
     # 此前顶层只有 sent/chunks/results，分片失败时 reason 恒为空串 —— 只有部分分片
-    # 失败（sent=False）却查不到任何原因，正是第 7 章要防的「静默失败」。
+    # 失败（sent=False）却查不到任何原因，正是规范 · 发送层要防的「静默失败」。
     failed = [r for r in results if not r.get('sent')]
     reason = ''
     if failed:
@@ -617,7 +617,7 @@ def tg_format_elapsed(seconds):
 def tg_entry(subject, *meta, code: bool = True):
     """条目行构造器（与 bash 真源 tg_entry 同语义，2026-09-10 新增）。
 
-    消灭 3.5 节之前的"手写"：条目主体 + 元数据统一 " · " 分隔、统一转义、
+    消灭 规范 · 条目与树形之前的"手写"：条目主体 + 元数据统一 " · " 分隔、统一转义、
     顺序固定。code=True 用于机器值主体（文件名/路径/ID/命令），False 用于
     文字主体（节点名以外的短语）。
     输出: "<code>主体</code> · 元数据 · 元数据"（不含换行，由调用方拼接）
@@ -640,7 +640,7 @@ def _tg_entry2(sep: str, a, b, *meta) -> str:
 
 
 def tg_entry_pair(a, b=None, *meta) -> str:
-    """双机器值条目（3.5 节）："<code>A</code> → <code>B</code> · 元数据"。
+    """双机器值条目（规范 · 条目与树形）："<code>A</code> → <code>B</code> · 元数据"。
 
     → 表达替换/映射关系（原名 → 替代名），不可写成 " · "；第二主体为空时自动省略。
     """
@@ -648,7 +648,7 @@ def tg_entry_pair(a, b=None, *meta) -> str:
 
 
 def tg_entry_codes(a, b=None, *meta) -> str:
-    """并列双机器值条目（3.5 节）："<code>A</code> · <code>B</code> · 元数据"。
+    """并列双机器值条目（规范 · 条目与树形）："<code>A</code> · <code>B</code> · 元数据"。
 
     无主次关系（如节点名 · 原始异常串），与 tg_entry 的区别是第二个值也是机器值。
     """

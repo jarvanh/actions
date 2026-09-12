@@ -195,7 +195,7 @@ _restore_one_entry() {
   return 0
 }
 
-# 条目列表渲染: 每组上限 8 条，超出折叠"还有 N 条…"（规范 3.6 节，
+# 条目列表渲染: 每组上限 8 条，超出折叠"还有 N 条…"（规范 · 折叠规则，
 # 防超长列表刷屏并顶到 4000 字符分片边界把收尾区切走）。
 # 统一树形（2026-09-09 收敛：条目统一 ├─/└─，不再用 "• " 平铺；折叠行并入条目流，
 # 末条 └─ 由 tree_lines 统一决定，禁双 └─）
@@ -526,7 +526,7 @@ restore_source_from_target() {
   tg_add_kv msg "方向" "目标端 → 源端"
   tg_add_kv msg "批量拷回" "${total_bulk} 个"
   tg_add_kv msg "修复恢复" "${total_ok} 个"
-  # 标签保持单一锚点（3.2 节）：原因用括号附在标签上，不塞进「 · 」当字段
+  # 标签保持单一锚点（规范 · kv 行）：原因用括号附在标签上，不塞进「 · 」当字段
   tg_add_kv msg "跳过（已存在）" "${total_skip} 个"
   tg_add_kv msg "失败" "${total_fail} 个"
   if [ -n "$fail_list" ]; then
@@ -641,7 +641,7 @@ rebuild_source_from_target() {
   tg_add_kv msg "方向" "目标端 → 源端"
   tg_add_kv msg "副作用" "已删除源端多余文件"
   tg_add_kv msg "修复恢复" "${total_ok} 个"
-  # 标签保持单一锚点（3.2 节）：原因用括号附在标签上，不塞进「 · 」当字段
+  # 标签保持单一锚点（规范 · kv 行）：原因用括号附在标签上，不塞进「 · 」当字段
   tg_add_kv msg "跳过（已存在）" "${total_skip} 个"
   tg_add_kv msg "失败" "${total_fail} 个"
   if [ -n "$fail_list" ]; then
