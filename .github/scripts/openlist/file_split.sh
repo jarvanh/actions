@@ -71,7 +71,9 @@ send_video_split_notification() {
       else
         log_summary=$(tail -c 1200 "$log_file" 2>/dev/null || echo "无法读取日志")
       fi
-      tg_add_section message "🧾 日志摘要 · 当前文件"
+      # 分节后跟的是 <pre> 块而非条目列表 → 不带计数（4.2 节）；
+      # `· 当前文件` 会被读成「N 条」，且与本文件 7z 分支的 `🧾 日志摘要` 两写法
+      tg_add_section message "🧾 日志摘要"
       # 日志为原始输出，转义后 <pre> 等宽展示（tg_add_pre 统一转义与包裹）
       tg_add_pre message "$log_summary"
     fi

@@ -1704,20 +1704,34 @@ jobs:
           cleanup_archive_outputs
           PID_FILE="/tmp/openclaw-archive.pid"
 
+          # 用法: send_telegram_alert <对象> <结论> <原因> [原始输出]
+          # 版式（docs/telegram-notify.md 2.3 / 4.3 / 4.7 节）：对象是机器返回的包名 → <code>；
+          # 结论与原因是人写的自然语言 → 裸文本 kv；rclone/tar 的原始输出 → <pre>。
+          # 此前四者拼成一整串塞进单个 <pre>，自然语言被一并等宽化，与全库
+          # 「kv 区 + 明细分节」形态不一致。
           send_telegram_alert() {
-            local msg="$1"
+            local obj="$1" verdict="$2" reason="${3:-}" detail="${4:-}"
             if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
               local run_id="${GITHUB_RUN_ID:-manual}"
-              # 统一 HTML 版式 + 统一收尾区（tg_add_* 内置转义，告警文本原样传入即可；
+              # 统一 HTML 版式 + 统一收尾区（tg_add_* 内置转义，值原样传入即可；
               # 二次 escape_html 会把 & 变成 &amp;amp; 字面量直出）
               source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
               local full_msg=""
               tg_add_title full_msg "⚠️ OpenClaw 归档告警"
-              # 告警正文是 rclone/tar 的多行原始输出 → <pre>（4.7 节：多行日志 → <pre>，
-              # 此前塞进单个 <i> 说明段，跨行斜体且英文 token 直出）
-              tg_add_block full_msg "<pre>$(escape_html "$msg")</pre>"
-              # Run ID 属机器值 → <code>（4.4 节）
+              tg_add_path full_msg "对象" "$obj"
+              tg_add_kv full_msg "结论" "$verdict"
+              if [ -n "$reason" ]; then
+                tg_add_kv full_msg "原因" "$reason"
+              fi
+              # Run ID 属机器值 → <code>（4.4 节）；排在 kv 区末行，
+              # 让 <pre> 原始输出成为正文最后一块（其后只跟收尾区）
               tg_add_path full_msg "Run ID" "${run_id}"
+              if [ -n "$detail" ]; then
+                # 多行原始输出 → <pre>（4.7 节）；取尾部 1200 字节（与 file_split.sh
+                # 日志摘要同口径）：超长输出会让 <pre> 跨 4000 字符分片，标签断开即破版
+                tg_add_section full_msg "🧾 原始输出"
+                tg_add_pre full_msg "$(printf '%s' "$detail" | tail -c 1200)"
+              fi
               TG_RUN_STARTED_AT="${TG_RUN_STARTED_AT:-}" tg_add_footer full_msg
               # 走发送层而非 curl 直发：429 重试已内建，HTML 解析失败直接报错（规范 第 6 章），
               # 429 限流按 retry_after 等待重试，disable_web_page_preview 内置
@@ -1749,7 +1763,7 @@ jobs:
               if [ "${OPENCLAW_SHRINK_GUARD:-1}" = "1" ] && [ "$remote_size" -gt 0 ] && [ "$new_size" -lt "$((remote_size * 60 / 100))" ]; then
                 echo "[$(date '+%F %T')] ❌ 主包缩水保护触发: new=${new_size}B remote=${remote_size}B，拒绝覆盖，转存 failed/"
                 rclone copyto "$TMP_OPENCLAW_TAR" "dropbox:self-hosted/failed/openclaw-shrunk-$(date -u +%Y%m%d-%H%M).tar.gz" 2>&1 || true
-                send_telegram_alert "$(printf 'openclaw.tar.gz 缩水保护 · 已拒绝覆盖主包\n原因：新包远小于云端现有包（疑似状态不全）\n详情：new=%s remote=%s threshold=60%%' "$new_size" "$remote_size")"
+                send_telegram_alert "openclaw.tar.gz" "缩水保护 · 已拒绝覆盖主包" "新包远小于云端现有包（疑似状态不全）" "new=$new_size remote=$remote_size threshold=60%"
                 rm -f "$TMP_OPENCLAW_TAR"
               else
                 openclaw_upload_output=""
@@ -1759,7 +1773,7 @@ jobs:
                 else
                   rc=$?
                   echo "[$(date '+%F %T')] ⚠️ openclaw.tar.gz upload failed (rc=$rc): ${openclaw_upload_output}"
-                  send_telegram_alert "$(printf 'openclaw.tar.gz 上传失败 · 退出码 %s\n原因：rclone 上传失败\n详情：%s' "$rc" "${openclaw_upload_output:-无输出}")"
+                  send_telegram_alert "openclaw.tar.gz" "上传失败 · 退出码 $rc" "rclone 上传失败" "${openclaw_upload_output:-无输出}"
                 fi
               fi
             else
@@ -1770,7 +1784,7 @@ jobs:
                 continue
               else
                 echo "[$(date '+%F %T')] ⚠️ openclaw.tar.gz archive failed in periodic archive (rc=$rc): ${openclaw_archive_output}"
-                send_telegram_alert "$(printf 'openclaw.tar.gz 归档失败 · 退出码 %s\n原因：%s' "$rc" "${openclaw_archive_output:-归档脚本无输出}")"
+                send_telegram_alert "openclaw.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${openclaw_archive_output:-归档脚本无输出}"
               fi
             fi
 
@@ -1805,7 +1819,7 @@ jobs:
               else
                 rc=$?
                 echo "[$(date '+%F %T')] ⚠️ ${AI_LABEL}.tar.gz upload failed (rc=$rc): ${ai_upload_output}"
-                send_telegram_alert "$(printf '%s.tar.gz 上传失败 · 退出码 %s\n原因：rclone 上传失败\n详情：%s' "$AI_LABEL" "$rc" "${ai_upload_output:-无输出}")"
+                send_telegram_alert "${AI_LABEL}.tar.gz" "上传失败 · 退出码 $rc" "rclone 上传失败" "${ai_upload_output:-无输出}"
               fi
             else
               rc=$?
@@ -1813,10 +1827,10 @@ jobs:
                 echo "[$(date '+%F %T')] ⏭️ previous archive still running, skip ${AI_LABEL} archive"
               elif [ "$rc" -eq 3 ]; then
                 echo "[$(date '+%F %T')] ⚠️ ${AI_LABEL} archive skipped because deployment/data directory is missing (rc=$rc): ${ai_archive_output}"
-                send_telegram_alert "$(printf '%s 归档跳过 · 退出码 %s\n原因：本地部署/数据目录缺失 · 通常表示网关容器启动步骤被跳过或失败\n详情：%s' "$AI_LABEL" "$rc" "${ai_archive_output:-AI 本地部署/数据目录缺失}")"
+                send_telegram_alert "$AI_LABEL" "归档跳过 · 退出码 $rc" "本地部署/数据目录缺失 · 通常表示网关容器启动步骤被跳过或失败" "${ai_archive_output:-AI 本地部署/数据目录缺失}"
               else
                 echo "[$(date '+%F %T')] ⚠️ ${AI_LABEL} archive failed in periodic archive (rc=$rc): ${ai_archive_output}"
-                send_telegram_alert "$(printf '%s.tar.gz 归档失败 · 退出码 %s\n原因：%s' "$AI_LABEL" "$rc" "${ai_archive_output:-归档脚本无输出}")"
+                send_telegram_alert "${AI_LABEL}.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${ai_archive_output:-归档脚本无输出}"
               fi
             fi
             # ZCode 个人数据归档：~/.zcode/cli → dropbox:self-hosted/zcode.tar.gz（带缩水保护）
@@ -1829,7 +1843,7 @@ jobs:
                 if [ "${ZCODE_SHRINK_GUARD:-1}" = "1" ] && [ "$zcode_remote_size" -gt 0 ] && [ "$zcode_new_size" -lt "$((zcode_remote_size * 60 / 100))" ]; then
                   echo "[$(date '+%F %T')] ❌ zcode.tar.gz 缩水保护触发: new=${zcode_new_size}B remote=${zcode_remote_size}B，拒绝覆盖，转存 failed/"
                   rclone copyto "$TMP_ZCODE_TAR" "dropbox:self-hosted/failed/zcode-shrunk-$(date -u +%Y%m%d-%H%M).tar.gz" 2>&1 || true
-                  send_telegram_alert "$(printf 'zcode.tar.gz 缩水保护 · 已拒绝覆盖主包\n原因：新包远小于云端现有包（疑似状态不全）\n详情：new=%s remote=%s threshold=60%%' "$zcode_new_size" "$zcode_remote_size")"
+                  send_telegram_alert "zcode.tar.gz" "缩水保护 · 已拒绝覆盖主包" "新包远小于云端现有包（疑似状态不全）" "new=$zcode_new_size remote=$zcode_remote_size threshold=60%"
                   rm -f "$TMP_ZCODE_TAR"
                 else
                   zcode_upload_output=""
@@ -1839,7 +1853,7 @@ jobs:
                   else
                     rc=$?
                     echo "[$(date '+%F %T')] ⚠️ zcode.tar.gz upload failed (rc=$rc): ${zcode_upload_output}"
-                    send_telegram_alert "$(printf 'zcode.tar.gz 上传失败 · 退出码 %s\n原因：rclone 上传失败\n详情：%s' "$rc" "${zcode_upload_output:-无输出}")"
+                    send_telegram_alert "zcode.tar.gz" "上传失败 · 退出码 $rc" "rclone 上传失败" "${zcode_upload_output:-无输出}"
                   fi
                 fi
               else
@@ -1850,7 +1864,7 @@ jobs:
                   echo "[$(date '+%F %T')] ⏭️ zcode data dir missing, skip zcode archive (rc=3)"
                 else
                   echo "[$(date '+%F %T')] ⚠️ zcode.tar.gz archive failed in periodic archive (rc=$rc): ${zcode_archive_output}"
-                  send_telegram_alert "$(printf 'zcode.tar.gz 归档失败 · 退出码 %s\n原因：%s' "$rc" "${zcode_archive_output:-归档脚本无输出}")"
+                  send_telegram_alert "zcode.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${zcode_archive_output:-归档脚本无输出}"
                 fi
               fi
             else
@@ -1934,19 +1948,30 @@ jobs:
           docker stop clirelay cli-proxy-api 2>/dev/null || true
           docker stop cliproxyapi 2>/dev/null || echo "cliproxyapi already stopped or missing."
 
+          # 用法与版式同 send_telegram_alert（<对象> <结论> <原因> [原始输出]）；
+          # 两个函数分处不同 step、无法共享定义，改版式时两处要一起改
+          # （此前一个用 <i> 说明段、一个用 <b> kv，同一标题两种形态）
           send_archive_alert() {
-            local msg="$1"
+            local obj="$1" verdict="$2" reason="${3:-}" detail="${4:-}"
             if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
               local run_id="${GITHUB_RUN_ID:-manual}"
               # 统一 HTML 版式（emoji 标题 + ━━━ 分隔线 + 键值区 + 收尾区）；
               # source 幂等可重复；收尾区由 tg_add_footer 统一产出（勿自造时长/链接格式）
               source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
               local full_msg=""
-              tg_add_title full_msg "⚠️ OpenClaw 归档告警"
-              # 与 send_telegram_alert 同版式（此前一个用 <i> 说明段、一个用 <b> kv，
-              # 同一标题两种形态）：多行原始输出 → <pre>；Run ID 属机器值 → <code>
-              tg_add_block full_msg "<pre>$(escape_html "$msg")</pre>"
+              # 标题区分阶段：周期归档与最终归档走两个函数，此前标题完全相同，
+              # 读者分不清告警来自哪一轮（调用点里的 "final" 前缀已由本标题承担）
+              tg_add_title full_msg "⚠️ OpenClaw 最终归档告警"
+              tg_add_path full_msg "对象" "$obj"
+              tg_add_kv full_msg "结论" "$verdict"
+              if [ -n "$reason" ]; then
+                tg_add_kv full_msg "原因" "$reason"
+              fi
               tg_add_path full_msg "Run ID" "$run_id"
+              if [ -n "$detail" ]; then
+                tg_add_section full_msg "🧾 原始输出"
+                tg_add_pre full_msg "$(printf '%s' "$detail" | tail -c 1200)"
+              fi
               tg_add_footer full_msg
               send_tg "$full_msg" || true
             fi
@@ -2003,7 +2028,7 @@ jobs:
                 ARCHIVE_SHRINK_BLOCKED=1
                 echo "❌ 主包缩水保护触发: new=${final_new_size}B remote=${final_remote_size}B，拒绝覆盖，转存 failed/"
                 rclone copyto "$TMP_OPENCLAW_TAR" "dropbox:self-hosted/failed/openclaw-shrunk-$(date -u +%Y%m%d-%H%M).tar.gz" -v 2>&1 || true
-                send_archive_alert "$(printf 'final openclaw.tar.gz 缩水保护 · 已拒绝覆盖主包\n原因：新包远小于云端现有包（疑似状态不全）\n详情：new=%s remote=%s threshold=60%%' "$final_new_size" "$final_remote_size")"
+                send_archive_alert "openclaw.tar.gz" "缩水保护 · 已拒绝覆盖主包" "新包远小于云端现有包（疑似状态不全）" "new=$final_new_size remote=$final_remote_size threshold=60%"
               fi
             fi
             if [ "$ARCHIVE_SHRINK_BLOCKED" = "0" ] && openclaw_final_upload_output=$(rclone copyto "$TMP_OPENCLAW_TAR" "$ARCHIVE_DEST" -v 2>&1); then
@@ -2030,12 +2055,12 @@ jobs:
             elif [ "$ARCHIVE_SHRINK_BLOCKED" = "0" ]; then
               rc=$?
               echo "⚠️ final openclaw.tar.gz upload failed (rc=$rc): ${openclaw_final_upload_output}"
-              send_archive_alert "$(printf 'final openclaw.tar.gz 上传失败 · 退出码 %s\n原因：rclone 上传失败\n详情：%s' "$rc" "${openclaw_final_upload_output:-无输出}")"
+              send_archive_alert "openclaw.tar.gz" "上传失败 · 退出码 $rc" "rclone 上传失败" "${openclaw_final_upload_output:-无输出}"
             fi
           else
             rc=$?
             echo "⚠️ final openclaw.tar.gz archive failed (rc=$rc): ${openclaw_final_output}"
-            send_archive_alert "$(printf 'final openclaw.tar.gz 归档失败 · 退出码 %s\n原因：%s' "$rc" "${openclaw_final_output:-归档脚本无输出}")"
+            send_archive_alert "openclaw.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${openclaw_final_output:-归档脚本无输出}"
           fi
 
           echo "4b. Final archive of ZCode personal data (~/.zcode/cli)..."
@@ -2049,7 +2074,7 @@ jobs:
                 ZCODE_FINAL_SHRINK_BLOCKED=1
                 echo "❌ zcode.tar.gz 缩水保护触发: new=${zcode_final_new_size}B remote=${zcode_final_remote_size}B，拒绝覆盖，转存 failed/"
                 rclone copyto "$TMP_ZCODE_FINAL_TAR" "dropbox:self-hosted/failed/zcode-shrunk-$(date -u +%Y%m%d-%H%M).tar.gz" -v 2>&1 || true
-                send_archive_alert "$(printf 'final zcode.tar.gz 缩水保护 · 已拒绝覆盖主包\n原因：新包远小于云端现有包（疑似状态不全）\n详情：new=%s remote=%s threshold=60%%' "$zcode_final_new_size" "$zcode_final_remote_size")"
+                send_archive_alert "zcode.tar.gz" "缩水保护 · 已拒绝覆盖主包" "新包远小于云端现有包（疑似状态不全）" "new=$zcode_final_new_size remote=$zcode_final_remote_size threshold=60%"
               fi
               if [ "$ZCODE_FINAL_SHRINK_BLOCKED" = "0" ]; then
                 zcode_final_upload_output=""
@@ -2059,13 +2084,13 @@ jobs:
                 else
                   rc=$?
                   echo "⚠️ final zcode.tar.gz upload failed (rc=$rc): ${zcode_final_upload_output}"
-                  send_archive_alert "$(printf 'final zcode.tar.gz 上传失败 · 退出码 %s\n原因：rclone 上传失败\n详情：%s' "$rc" "${zcode_final_upload_output:-无输出}")"
+                  send_archive_alert "zcode.tar.gz" "上传失败 · 退出码 $rc" "rclone 上传失败" "${zcode_final_upload_output:-无输出}"
                 fi
               fi
             else
               rc=$?
               echo "⚠️ final zcode.tar.gz archive failed (rc=$rc): ${zcode_final_output}"
-              send_archive_alert "$(printf 'final zcode.tar.gz 归档失败 · 退出码 %s\n原因：%s' "$rc" "${zcode_final_output:-归档脚本无输出}")"
+              send_archive_alert "zcode.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${zcode_final_output:-归档脚本无输出}"
             fi
           else
             echo "ℹ️ ~/.zcode/cli 不存在（本机从未部署 ZCode），跳过 ZCode 最终归档"
@@ -2095,22 +2120,22 @@ jobs:
                   else
                     rc=$?
                     echo "⚠️ final CliRelay.tar.gz upload failed (rc=$rc): ${clirelay_final_upload_output}"
-                    send_archive_alert "$(printf 'final CliRelay.tar.gz 上传失败 · 退出码 %s\n原因：rclone 上传失败\n详情：%s' "$rc" "${clirelay_final_upload_output:-无输出}")"
+                    send_archive_alert "CliRelay.tar.gz" "上传失败 · 退出码 $rc" "rclone 上传失败" "${clirelay_final_upload_output:-无输出}"
                   fi
                 else
                   echo "⚠️ CliRelay 压缩包小于 5KB，放弃覆盖云端数据: size=${actual_size}"
-                  send_archive_alert "$(printf 'final CliRelay.tar.gz 归档失败\n原因：压缩包小于最小阈值 · 放弃覆盖云端数据\n详情：size=%s min=%s output=/tmp/CliRelay.tar.gz' "$actual_size" "$MIN_SIZE")"
+                  send_archive_alert "CliRelay.tar.gz" "归档失败" "压缩包小于最小阈值 · 放弃覆盖云端数据" "size=$actual_size min=$MIN_SIZE output=/tmp/CliRelay.tar.gz"
                 fi
               else
                 rc=$?
                 echo "⚠️ final CliRelay.tar.gz archive failed (rc=$rc): ${clirelay_final_output}"
-                send_archive_alert "$(printf 'final CliRelay.tar.gz 归档失败 · 退出码 %s\n原因：%s' "$rc" "${clirelay_final_output:-归档脚本无输出}")"
+                send_archive_alert "CliRelay.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${clirelay_final_output:-归档脚本无输出}"
               fi
               echo "Stopping CliRelay compose stack after final archive..."
               docker compose -p clirelay -f /tmp/local_CliRelay/docker-compose.yml --project-directory /tmp/local_CliRelay down 2>/dev/null || true
             else
               echo "⚠️ /tmp/local_CliRelay 不存在，跳过 CliRelay 归档"
-              send_archive_alert "$(printf 'final CliRelay.tar.gz 归档失败 · rc=3\n原因：CliRelay 本地部署目录未初始化 · /tmp/local_CliRelay 不存在 · 通常表示 CliRelay 启动步骤被跳过或失败\n详情：CliRelay 本地部署目录未初始化')"
+              send_archive_alert "CliRelay.tar.gz" "归档失败 · 退出码 3" "CliRelay 本地部署目录未初始化 · /tmp/local_CliRelay 不存在 · 通常表示 CliRelay 启动步骤被跳过或失败" "CliRelay 本地部署目录未初始化"
             fi
           elif [ -d /tmp/local_CLIPProxyAPI ]; then
             echo "5a. Archiving CLIProxyAPI persistent data (fallback backend, with clirelay auths)..."
@@ -2134,20 +2159,20 @@ jobs:
                 else
                   rc=$?
                   echo "⚠️ final CLIProxyAPI.tar.gz upload failed (rc=$rc): ${cliproxyapi_final_upload_output}"
-                  send_archive_alert "$(printf 'final CLIProxyAPI.tar.gz 上传失败 · 退出码 %s\n原因：rclone 上传失败\n详情：%s' "$rc" "${cliproxyapi_final_upload_output:-无输出}")"
+                  send_archive_alert "CLIProxyAPI.tar.gz" "上传失败 · 退出码 $rc" "rclone 上传失败" "${cliproxyapi_final_upload_output:-无输出}"
                 fi
               else
                 echo "⚠️ CLIProxyAPI 压缩包小于 10KB，放弃覆盖云端数据: size=${actual_size} min=${MIN_SIZE}"
-                send_archive_alert "$(printf 'final CLIProxyAPI.tar.gz 归档失败\n原因：压缩包小于最小阈值 · 放弃覆盖云端数据\n详情：size=%s min=%s output=/tmp/CLIProxyAPI.tar.gz' "$actual_size" "$MIN_SIZE")"
+                send_archive_alert "CLIProxyAPI.tar.gz" "归档失败" "压缩包小于最小阈值 · 放弃覆盖云端数据" "size=$actual_size min=$MIN_SIZE output=/tmp/CLIProxyAPI.tar.gz"
               fi
             else
               rc=$?
               echo "⚠️ final CLIProxyAPI.tar.gz archive failed (rc=$rc): ${cliproxyapi_final_output}"
-              send_archive_alert "$(printf 'final CLIProxyAPI.tar.gz 归档失败 · 退出码 %s\n原因：%s' "$rc" "${cliproxyapi_final_output:-归档脚本无输出}")"
+              send_archive_alert "CLIProxyAPI.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${cliproxyapi_final_output:-归档脚本无输出}"
             fi
           else
             echo "⚠️ /tmp/local_CLIPProxyAPI 不存在，跳过 CLIProxyAPI 归档"
-            send_archive_alert "$(printf 'final CLIProxyAPI.tar.gz 归档失败 · rc=3\n原因：CLIProxyAPI 本地数据目录未初始化 · /tmp/local_CLIPProxyAPI 不存在 · 通常表示 CLIProxyAPI 容器启动步骤被跳过或失败\n详情：cliproxyapi_dir_missing')"
+            send_archive_alert "CLIProxyAPI.tar.gz" "归档失败 · 退出码 3" "CLIProxyAPI 本地数据目录未初始化 · /tmp/local_CLIPProxyAPI 不存在 · 通常表示 CLIProxyAPI 容器启动步骤被跳过或失败" "cliproxyapi_dir_missing"
           fi
 
           echo "6. Archiving rss-to-telegram data..."
@@ -2168,7 +2193,7 @@ jobs:
             rsstt_data_files=$(sudo find /tmp/local_rsstt -type f ! -name '.keep' 2>/dev/null | wc -l)
             if [ "$((rsstt_data_files + 0))" -lt 1 ]; then
               echo "⚠️ rss-to-telegram 本轮没有产生数据文件，跳过归档，云端 rsstt.tar.gz 保持原状"
-              send_archive_alert "$(printf 'final rsstt.tar.gz 归档跳过\n原因：本轮 rss-to-telegram 未产生数据 · 云端归档保持原状未覆盖\n详情：data_files=0 dir=/tmp/local_rsstt')"
+              send_archive_alert "rsstt.tar.gz" "归档跳过" "本轮 rss-to-telegram 未产生数据 · 云端归档保持原状未覆盖" "data_files=0 dir=/tmp/local_rsstt"
             elif rsstt_tar_output=$(sudo tar -czf /tmp/rsstt.tar.gz -C /tmp/local_rsstt . 2>&1); then
               # 同上：root 产出的包由 runner 身份的 rclone 上传，显式放开读权限
               sudo chmod 644 /tmp/rsstt.tar.gz 2>/dev/null || true
@@ -2184,25 +2209,25 @@ jobs:
                   else
                     rc=$?
                     echo "⚠️ final rsstt.tar.gz upload failed (rc=$rc): ${rsstt_upload_output}"
-                    send_archive_alert "$(printf 'final rsstt.tar.gz 上传失败 · 退出码 %s\n原因：rclone 上传失败\n详情：%s' "$rc" "${rsstt_upload_output:-无输出}")"
+                    send_archive_alert "rsstt.tar.gz" "上传失败 · 退出码 $rc" "rclone 上传失败" "${rsstt_upload_output:-无输出}"
                   fi
                 else
                   echo "⚠️ rsstt 压缩包小于 10KB，放弃覆盖云端数据: size=${actual_size} min=${MIN_SIZE}"
-                  send_archive_alert "$(printf 'final rsstt.tar.gz 归档失败\n原因：压缩包小于最小阈值 · 放弃覆盖云端数据\n详情：size=%s min=%s output=/tmp/rsstt.tar.gz' "$actual_size" "$MIN_SIZE")"
+                  send_archive_alert "rsstt.tar.gz" "归档失败" "压缩包小于最小阈值 · 放弃覆盖云端数据" "size=$actual_size min=$MIN_SIZE output=/tmp/rsstt.tar.gz"
                 fi
               else
                 rc=$?
                 echo "⚠️ final rsstt.tar.gz validation failed (rc=$rc): ${rsstt_validate_output}"
-                send_archive_alert "$(printf 'final rsstt.tar.gz 归档校验失败 · 退出码 %s\n原因：tar 列表校验失败\n详情：%s' "$rc" "${rsstt_validate_output:-无输出}")"
+                send_archive_alert "rsstt.tar.gz" "归档校验失败 · 退出码 $rc" "tar 列表校验失败" "${rsstt_validate_output:-无输出}"
               fi
             else
               rc=$?
               echo "⚠️ final rsstt.tar.gz archive failed (rc=$rc): ${rsstt_tar_output}"
-              send_archive_alert "$(printf 'final rsstt.tar.gz 归档失败 · 退出码 %s\n原因：tar 创建失败\n详情：%s' "$rc" "${rsstt_tar_output:-无输出}")"
+              send_archive_alert "rsstt.tar.gz" "归档失败 · 退出码 $rc" "tar 创建失败" "${rsstt_tar_output:-无输出}"
             fi
           else
             echo "⚠️ /tmp/local_rsstt 不存在，跳过 rss-to-telegram 归档"
-            send_archive_alert "$(printf 'final rsstt.tar.gz 归档失败 · rc=3\n原因：rss-to-telegram 本地数据目录未初始化 · /tmp/local_rsstt 不存在 · 通常表示 rss-to-telegram 容器启动步骤被跳过或失败\n详情：rsstt_dir_missing')"
+            send_archive_alert "rsstt.tar.gz" "归档失败 · 退出码 3" "rss-to-telegram 本地数据目录未初始化 · /tmp/local_rsstt 不存在 · 通常表示 rss-to-telegram 容器启动步骤被跳过或失败" "rsstt_dir_missing"
           fi
 
       - name: Trigger next OpenClaw run

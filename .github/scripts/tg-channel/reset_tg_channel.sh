@@ -51,7 +51,8 @@ _cl=""
 tg_add_entry_text _cl "📁 已清空 Telegram 频道所有视频"
 tg_add_entry_codes _cl "uploaded_videos.json" "" "已删除 · 下次运行重新处理全部视频"
 tg_add_entry_codes _cl "failed_videos.json" "" "已删除 · 损坏标记清除，下次运行重新尝试"
-tg_add_section msg "🧹 清理动作 · 3"
+# 计数随条目流走，不写死（4.2 节：分节后的 ` · N` 是条目数，加动作时不会悄悄失配）
+tg_add_section msg "🧹 清理动作 · $(printf '%s' "$_cl" | grep -c .)"
 tg_add_block msg "$(tree_lines "${_cl%$'\n'}")"
 tg_add_footer msg
 send_tg "$msg"
