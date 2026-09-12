@@ -1504,6 +1504,8 @@ jobs:
           # 只备个人数据：db（会话库，连 -wal/-shm 一起打包保证一致性）、rollout（对话原始流）、
           # memories（持久记忆）、plugins/data + marketplaces（插件运行数据与市场配置）。
           # 排除 plugins/cache（13MB 插件缓存，可按需重新下载）与 log/exec（运行日志，可再生）。
+          # 排除 rollout/model-io-*：模型请求/响应调试转储，单文件可膨胀到 64MB+，
+          # 且会被 ZCode 随时轮转清零，进出归档会让包体积剧烈波动、误触缩水保护（2026-09-12 假警报）。
           # server/ 运行时由桌面客户端自动重新部署，不备份。
           # rsync 返回 24 表示活动会话文件复制中消失，属预期，仍校验最终包。
           set +e
@@ -1511,6 +1513,7 @@ jobs:
             --exclude 'log/**' \
             --exclude 'exec/**' \
             --exclude 'plugins/cache/**' \
+            --exclude 'rollout/model-io-*.jsonl' \
             --exclude '*.lock' \
             --exclude '*.pid' \
             "$SRC_DIR"/ "$STAGE_DIR/.zcode/cli"/
