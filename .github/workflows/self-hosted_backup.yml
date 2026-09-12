@@ -123,7 +123,7 @@ jobs:
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 
           msg=""
-          # 状态语义对齐规范 5.5 节：cancelled=⛔ 中断（区别于 ❌ 失败）
+          # 状态语义对齐规范 · 状态图标：cancelled=⛔ 中断（区别于 ❌ 失败）
           if [ "$STATUS" == "cancelled" ]; then
             tg_add_title msg "⛔ 任务已中断"
             tg_add_note msg "任务被取消，数据未受影响；如需继续请重新运行。"
