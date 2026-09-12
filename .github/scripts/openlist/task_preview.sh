@@ -242,9 +242,10 @@ add_preview_pair() {
 # 同步对详情渲染: 仅按源端分组（同源端多目标一组的树形列表）
 #   📁 src · 源端 X / N 文件                    ← 组内各条目源端大小一致时上提组头（组头裸文本）
 #     ├─ <code>dst</code> · 源端 X / N 文件 · +Y / +K 文件
-#     │   差异构成：新增 a · 同名更新 b                  ← 存在同名更新时的说明子行
-#     │   排除：<code>pat</code>                          ← 有排除规则的条目子行
+#     │  差异构成：新增 a · 同名更新 b                  ← 存在同名更新时的说明子行
+#     │  排除：<code>pat</code>                          ← 有排除规则的条目子行
 #     └─ <code>dst</code> · 无变动
+#   （子行前缀 tree_sub 与条目前缀 tree_conn 等宽，子行正文与条目正文对齐）
 #   组内源端大小不一（如部分目标带排除规则）时组头不带大小、各条目单独标注，
 #   避免同一源端因排除规则不同而分裂成多组; 组间空一行分隔。
 # 用法: _preview_render_pairs_detail [task_name]
@@ -303,7 +304,7 @@ _preview_render_pairs_detail() {
     fi
     # 排除规则（顿号「、」连接，_extract_exclude_summary 产出）:
     #   ≥2 条 → 条目子树（组头「排除 · N」+ 逐条 <code>，模式内末条 └─；
-    #           前缀 = tree_sub(last) + 2 空格，末条目整块 8 空格起）
+    #           前缀 = tree_sub(last) + 2 空格，末条目整块 7 空格起）
     #   1 条  → 并入子行（不为单条扩树，规范 · 条目与树形）
     if [ -n "$_excl" ]; then
       local -a _pats=()

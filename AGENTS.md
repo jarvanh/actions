@@ -32,5 +32,5 @@ GitHub Actions 工作流与脚本集合：OpenList 网盘同步、Emby 302 直�
 
 ## 改完必验
 
-- 通知：`bash skills/telegram-notify-audit/scripts/render_preview.sh`（渲染预览 + 11 项自动校验）。
+- 通知：`bash skills/telegram-notify-audit/scripts/render_preview.sh`（渲染预览 + 16 项自动校验）。
 - openlist 域：跑回归套件，基线 18 套 `EXIT=0` + 2 个已知环境失败，且 `command not found` 扫描必须为空（命令与 flake 名单见规范 · 回归套件）。

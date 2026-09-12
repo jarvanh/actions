@@ -17,6 +17,7 @@
 | 8 | 运行日志接线 | `TG_RUN_URL` 按文件列出 | 14 个 workflow，与「有通知集合」完全重合 |
 | 9 | 树形/折叠调用点 | `tree_lines\|tree_fold\|tree_code_fold` | 逐个确认折叠口径（见第 3 节） |
 | 10 | 分节计数 | `tg_add_section +[a-z_]+ +"[^"]*"` | 后跟列表的带 ` · N`；后跟 `<pre>` 或 kv 行的可不带 |
+| 11 | 速查表行号 | 按 `skills/telegram-notify-send/references/api-reference.md` 三列逐个 `grep -nE '^函数名\(\)'` 对真源 | 与表内数字一致（bash 列曾在 `TG_SEP`→`tg_add_title` 之间整体漂 14 行） |
 
 ## 2. 四域判据（派 worker 时写进 prompt 的摘要）
 

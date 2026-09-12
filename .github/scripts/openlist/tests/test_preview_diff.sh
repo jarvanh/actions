@@ -218,7 +218,7 @@ echo "$SEND_CAPTURE" | grep -q '+20 B / +1 文件' && ok "8d 条目行 +20 B / +
   || bad "8e: [$(lsjson_call_count)]"
 
 # ===== 场景 9: 排除规则 ≥2 → 条目子树（方案 B，规范 · 条目与树形）=====
-# 同源端两个目标 → 组内首条（│ 形态）与末条（8 空格形态）两种子树前缀都覆盖；
+# 同源端两个目标 → 组内首条（│ 形态）与末条（5 空格形态）两种子树前缀都覆盖；
 # 两端空清单 → 无变动条目，排除子树照渲染
 SRC_JSON='[]'
 DST_JSON='[]'
@@ -229,14 +229,23 @@ add_preview_pair "onedrive:src9" "openlist:dst9b" --exclude '/notion/**' --exclu
 flush_task_preview >/dev/null
 [ "$(echo "$SEND_CAPTURE" | grep -c '排除 · 2')" = "2" ] \
   && ok "9a 两组头「排除 · 2」（每组一条）" || bad "9a: $SEND_CAPTURE"
-echo "$SEND_CAPTURE" | grep -q '│     ├─ <code>notion/\*\*</code>' \
-  && ok "9b 非末条目子树首条（│ + 5 空格 + ├─）" || bad "9b: $SEND_CAPTURE"
-echo "$SEND_CAPTURE" | grep -q '│     └─ <code>self-hosted_latest.tar.gz</code>' \
+echo "$SEND_CAPTURE" | grep -q '│    ├─ <code>notion/\*\*</code>' \
+  && ok "9b 非末条目子树首条（│ + 4 空格 + ├─）" || bad "9b: $SEND_CAPTURE"
+echo "$SEND_CAPTURE" | grep -q '│    └─ <code>self-hosted_latest.tar.gz</code>' \
   && ok "9c 非末条目子树末条（模式内 └─）" || bad "9c: $SEND_CAPTURE"
-echo "$SEND_CAPTURE" | grep -q '^        ├─ <code>notion/\*\*</code>' \
-  && ok "9d 末条目子树（8 空格 + ├─）" || bad "9d: $SEND_CAPTURE"
+echo "$SEND_CAPTURE" | grep -q '^       ├─ <code>notion/\*\*</code>' \
+  && ok "9d 末条目子树（7 空格 + ├─）" || bad "9d: $SEND_CAPTURE"
 echo "$SEND_CAPTURE" | grep -q '排除：<code>notion/\*\*、self-hosted_latest.tar.gz</code>' \
   && bad "9e 不应再有整串顿号连排形态" || ok "9e 无整串 <code> 连排"
+
+# 9f/9g: 子行前缀宽度锁定 —— tree_sub 必须与 tree_conn 等宽（5 字符），
+# 否则子行正文比条目正文右移一格，与规范 · 条目与树形的示例不对齐
+echo "$SEND_CAPTURE" | grep -q '^  │  排除 · 2' \
+  && ok "9f 非末条目子行前缀 = 2 空格 + │ + 2 空格（与 tree_conn 等宽）" \
+  || bad "9f: $SEND_CAPTURE"
+echo "$SEND_CAPTURE" | grep -q '^     排除 · 2' \
+  && ok "9g 末条目子行前缀 = 5 空格（与 tree_conn 等宽）" \
+  || bad "9g: $SEND_CAPTURE"
 
 echo "-----"
 echo "PASS=$PASS FAIL=$FAIL"
