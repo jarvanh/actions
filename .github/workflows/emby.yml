@@ -108,12 +108,6 @@ env:
   # 直链预热器：详情页预取（抓 ge2o.log 的 Items 请求）+ dir_cache 批量回填
   EMBY_PREFETCH: ${{ vars.EMBY_PREFETCH || '1' }}
   EMBY_PREFETCH_MAX_DIRS: ${{ vars.EMBY_PREFETCH_MAX_DIRS || '400' }}
-  # 海报预热宽度档的兜底值：warm-state.json 里没有客户端统计时用这组尺寸开跑。
-  # 原来「无统计就零请求」的写法会造成死锁——海报请求本身来自 127.0.0.1、被
-  # wallwarmer 的统计逻辑排除，于是永远等不到"客户端先访问"（实测连续多轮 0 次
-  # 请求、wallwarmer 0 页）。给一组主流客户端尺寸兜底，真实档位一出现就自动接管。
-  # 置空可恢复"只按实测档位预热"的旧行为。
-  WW_DEFAULT_SIZES: ${{ vars.WW_DEFAULT_SIZES || '400 600' }}
   # 头尾预热条目数（真实 OneDrive 流量）。与 WU_ITEMS 分开：WU_ITEMS 管直链预热
   # （零流量、覆盖率越高越好，保持 30），头尾预热对 302 直连基本无效、只当挂载
   # 冷读探针用，3 条即可——原先跟着 WU_ITEMS=30 走，每轮白烧 1.9GB 流量。
@@ -1592,25 +1586,14 @@ jobs:
 
           # ---------- 3. 海报墙预热 ----------
           # 宽度档位读跨 run 统计 Top5（随备份跨 run 传递；兼容旧版无得分的 sizes 格式）。
-          # 无统计时回退 WW_DEFAULT_SIZES 而非零请求：本段发出的请求来自 127.0.0.1、
-          # 恰好被 wallwarmer 的统计排除，"等客户端先访问再预热"永远等不到
-          # （实测连续多轮 0 次请求）。真实档位一出现即自动接管。
+          # ⚠️ 不回退任何固定尺寸：没有客户端消费过的尺寸预热了也是白占空间，
+          # 无档位时本段与 3b 自然零请求（wallwarmer 本轮会把统计写回状态文件）。
+          # 零请求是预期行为，不是故障——日志里会打出"无（跳过）"说明原因。
           # 请求只带 maxWidth：缓存键含参数组合，box-fit 下补 maxHeight 得到的是
           # 更小的图，与客户端实际要的对不上（同 wallwarmer 口径）。
           WU_SIZES=$(jq -r 'if has("scores") then .scores[]?[0] else .sizes[]? end' \
                      /var/lib/emby/warm-state.json 2>/dev/null | tr '\n' ' ')
-          # 无客户端统计时用 WW_DEFAULT_SIZES 兜底。原来「无档位就零请求」会死锁：
-          # 本段发出的海报请求来自 127.0.0.1，恰好被 wallwarmer 的统计排除
-          # （它只统计非 127.0.0.1 的客户端请求），于是"等客户端先访问"永远等不到
-          # ——实测连续多轮「海报墙 0 次请求 / 首屏 0 张 / wallwarmer 0 页」。
-          # 默认档只在没有统计时顶上，真实档位一出现就自动接管。置空该变量可恢复旧行为。
-          case "${WU_SIZES// /}" in
-            '')
-              WU_SIZES="${WW_DEFAULT_SIZES:-}"
-              echo "海报墙/首屏预热宽度档: ${WU_SIZES:-无（WW_DEFAULT_SIZES 已置空，跳过）}（默认档，尚无客户端统计）"
-              ;;
-            *) echo "海报墙/首屏预热宽度档: $WU_SIZES";;
-          esac
+          echo "海报墙/首屏预热宽度档: ${WU_SIZES:-无（跳过，等 wallwarmer 记录客户端档位）}"
           N=0
           for ID in $(jq -r '.[].Id' /tmp/wu-items.json | head -40); do
             jq -r --arg id "$ID" '.[] | select(.Id==$id) | .ImageTags.Primary // empty' /tmp/wu-items.json > /tmp/wu-tag.txt 2>/dev/null
@@ -1817,27 +1800,16 @@ jobs:
             MERGED=$(merged_sizes)
             TOP=$(printf '%s' "$MERGED" | head -"$WW_SIZES_MAX" | awk '{printf "%s ", $2}')
             if [ -z "$TOP" ]; then
-              # 无客户端统计时用 WW_DEFAULT_SIZES 开跑，不再干等：
-              # 干等会与 warmup 形成死锁——warmup 等这里记录档位，这里等客户端产生
-              # 请求，而客户端不先浏览就永远没有请求（实测连续多轮 wallwarmer 0 页）。
-              # 真实档位一旦出现在 ge2o 日志里，下一页的合并得分就会自动接管。
-              TOP="${WW_DEFAULT_SIZES:-}"
-              if [ -z "$TOP" ]; then
-                # 兜底值被显式置空 = 恢复"只按实测档位预热"的旧行为
-                echo "尚无客户端图片请求数据，60s 后重试 $(date '+%T')"
-                sleep 60
-                continue
-              fi
-              echo "尚无客户端图片请求数据，用默认档开跑: $TOP $(date '+%T')"
+              # ⚠️ 不回退 400：没有客户端消费过的尺寸预热了也是白占空间——
+              # 等到有人浏览、日志里出现真实宽度再开跑
+              echo "尚无客户端图片请求数据，60s 后重试 $(date '+%T')"
+              sleep 60
+              continue
             fi
             PAGE=$((PAGE + 1))
             # 统计写回：衰减分+本轮实测，只留 Top-N（≤5 条恒小）；ge2o 日志每轮
-            # 清零，跨 run 统计全靠它。
-            # ⚠️ MERGED 为空时必须跳过：persist_state 是整体覆盖写，拿空输入写会
-            # 把历史得分清空（默认档预热期间每页都会走到这里）
-            if [ -n "$MERGED" ]; then
-              persist_state "$MERGED"
-            fi
+            # 清零，跨 run 统计全靠它
+            persist_state "$MERGED"
             echo "第 $PAGE 页 宽度档: $TOP（每条目预热 $(( $(printf '%s' "$TOP" | wc -w) )) 个尺寸）"
             for ROW in $ROWS; do
               ID=${ROW%%,*}; TAG=${ROW#*,}
