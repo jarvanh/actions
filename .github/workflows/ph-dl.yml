@@ -199,6 +199,9 @@ jobs:
           rm -f "$YT_DLP_ARCHIVE"
 
           # 损坏文件通知（process_ph_download.sh 验证失败并丢弃的文件；统一 HTML 版式）
+          # NEW_CORRUPT = 本轮新增的损坏数，收尾标题的降级依据；
+          # 与库存里的累计损坏数（CORRUPT_VIDEOS）是两回事，别混用
+          NEW_CORRUPT=0
           if [ -f "$DOWNLOAD_TMP/corrupted.txt" ]; then
             source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
             # grep -c . 而非 wc -l：文件末行无换行符时 wc -l 会少计 1
@@ -212,6 +215,7 @@ jobs:
             tg_add_block msg "$(tree_code_fold "$CORRUPTED_LIST")"
             tg_add_footer msg
             send_tg_chunked "$msg"
+            NEW_CORRUPT=$CORRUPTED_COUNT
           fi
           rm -rf "$DOWNLOAD_TMP"
 
@@ -258,9 +262,11 @@ jobs:
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
           # 统一 HTML 版式 + 统一收尾区（散装消息合并为一条，明细树形列出）
           msg=""
-          # 状态图标随结论降级（规范 · 状态图标）：有损坏视频被跳过时不能恒 ✅，
-          # 否则读者会把「缺了几部」读成全部成功
-          if [ "${CORRUPT_VIDEOS:-0}" -gt 0 ]; then
+          # 状态图标随结论降级（规范 · 状态图标）：本轮有文件损坏被丢弃才 ⚠️。
+          # 不能拿库存里的累计损坏数判定——历史遗留的损坏每轮都在，本轮空转
+          #（0 下载）也会被标黄，读者分不清「这轮出事」还是「旧账没清」，
+          # 而且本轮真有损坏时上面已单独发过 🗑️ 通知，再标一次等于重复报警
+          if [ "${NEW_CORRUPT:-0}" -gt 0 ]; then
             tg_add_title msg "⚠️ ph-dl 下载任务完成"
           else
             tg_add_title msg "✅ ph-dl 下载任务完成"
@@ -268,7 +274,10 @@ jobs:
           tg_add_kv msg "视频文件" "${TOTAL_VIDEOS} 条"
           tg_add_kv msg "库存状态" "已上传 ${UPLOADED_VIDEOS} · 待上传 ${PENDING_VIDEOS}"
           if [ "${CORRUPT_VIDEOS:-0}" -gt 0 ]; then
-            tg_add_kv msg "损坏已跳过" "${CORRUPT_VIDEOS} 条"
+            tg_add_kv msg "损坏已跳过" "${CORRUPT_VIDEOS} 条（累计）"
+          fi
+          if [ "${NEW_CORRUPT:-0}" -gt 0 ]; then
+            tg_add_kv msg "本次损坏丢弃" "${NEW_CORRUPT} 个（已单独通知）"
           fi
           tg_add_kv msg "本次下载" "${DOWNLOAD_COUNT} 个视频"
           # du 输出属机器返回值 → 等宽（规范 · 取值行口径）
