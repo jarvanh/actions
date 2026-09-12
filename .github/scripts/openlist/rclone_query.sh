@@ -2,7 +2,7 @@
 # ===== OpenList 同步工具 — rclone 查询与过滤参数解析 =====
 #
 # 职责边界:
-#   - rclone 查询类: size --json 调用、字段解析、路径统计、check 差异比对
+#   - rclone 查询类: size --json 调用、字段解析、路径统计
 #   - 过滤参数提取: 从 sync 参数串中剥离出 lsf 等子命令可接受的过滤类参数
 #     （lsf 不接受 --delete-before/--no-traverse 等 sync 特有参数，
 #      不剥离会导致 lsf 报错或过滤口径与实际 sync 不一致）
@@ -40,38 +40,6 @@ _get_path_stats() {
   bytes=$(_size_json_field "$size_json" bytes)
   count=$(_size_json_field "$size_json" count)
   echo "${bytes} ${count} $(format_bytes "$bytes")"
-}
-
-# 运行 rclone check 并构建差异文件列表（按状态分组: 新增/仅目标存在/不一致，
-# 每组上限 8 条，超出折叠"还有 N 条…"——与规范 · 折叠规则 一致）
-# 返回多行 HTML: 组头 "状态 · N"（计数裸文本，全库无粗体，规范 · 取值行口径）+ tree_code_fold 树形条目
-_build_diff_files_list() {
-  local source_path="$1"
-  local dest_path="$2"
-  shift 2
-  local -a extra_args=("$@")
-  local check_combined
-  check_combined=$(timeout "${OPENLIST_DOWNLOAD_TIMEOUT:-300}" rclone check "$source_path" "$dest_path" --size-only "${extra_args[@]}" --combined - 2>/dev/null || true)
-  # 按状态分桶收集裸路径（转义交给 tree_code_fold）
-  local _add="" _del="" _mod=""
-  while IFS= read -r line; do
-    [ -z "$line" ] && continue
-    case "${line:0:1}" in
-      +) _add+="${line:2}"$'\n' ;;
-      -) _del+="${line:2}"$'\n' ;;
-      '*') _mod+="${line:2}"$'\n' ;;
-    esac
-  done <<< "$(echo "$check_combined" | grep -E '^[-+*] ')"
-  local result="" _bucket _label _cnt
-  for _bucket in "_add:新增" "_del:仅目标存在" "_mod:不一致"; do
-    local _var="${_bucket%%:*}" _name="${_bucket#*:}"
-    _cnt=$(printf '%s\n' "${!_var}" | { grep -c . || true; })
-    [ "${_cnt:-0}" -eq 0 ] && continue
-    result+="${_name} · ${_cnt}"$'\n'
-    result+="$(tree_code_fold "${!_var}" 8)"$'\n'
-  done
-  [ -z "$result" ] && return 0
-  printf '%s' "${result%$'\n'}"
 }
 
 # 从 extra_args 中提取 --exclude 规则（每行一条 glob 模式，无规则时输出空）
