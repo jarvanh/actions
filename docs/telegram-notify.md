@@ -117,8 +117,8 @@
 ⚠️ task0 部分文件同步失败
 ━━━━━━━━━━━━━━━━━━
 任务：task0
-源端：onedrive:0/media
-目标：openlist:0/media
+源端：<code>onedrive:0/media</code>
+目标：<code>openlist:0/media</code>
 源端大小：1.2 TB
 目标大小：1.1 TB
 状态：部分失败
@@ -202,18 +202,23 @@
 
 | 通知 | 位置 | 触发场景 |
 |---|---|---|
-| 📺 同步汇总（CAPTION_PREFIX） | `sync_to_tg.sh` | 一轮频道同步结束 |
+| 📺/⚠️/❌ 同步汇总（CAPTION_PREFIX） | `sync_to_tg.sh` | 一轮频道同步结束，按结果降级（全失败 ❌ / 部分失败 ⚠️ / 否则 📺，`sync_to_tg.sh:696-702`） |
 | ❌ 获取远端文件列表失败 / ❌ 下载失败 / ⏭️ 损坏视频已标记跳过 / ❌ 处理/上传失败 | `sync_to_tg.sh` | 单文件级失败即时通知 |
 | 🔍 重复视频检测与去重（按 ID / 按哈希） | `dedupe_ph_videos.sh`、`dedupe_videos_by_hash.sh` | 发现重复组 |
 | 🧹 ph-dl 清理 yt-dlp 残留文件 | `cleanup_ytdlp_residual.sh` | 清理 `-Frag/.ytdl/.m3u8` |
 | 🧹 频道清理完成 | `reset_tg_channel.sh` | 清空频道 + 删 uploaded/failed json |
 | 文件名 · 大小 · 修改时间（媒体 caption） | `transcode_and_send.sh` → `tg_send_video.py` | 每个视频随媒体发送，无标题与分隔线 |
 
-> **两类「caption」别混淆**：本节的 📺 同步汇总（`CAPTION_PREFIX`）是**普通消息**，
-> 走 `tg_add_title` + `send_tg`；而 `transcode_and_send.sh` 传给 `tg_send_video.py`
+> **两类「caption」别混淆**：本节的同步汇总（`CAPTION_PREFIX`）是**普通消息**，
+> 走 `tg_add_title` + `send_tg_chunked`；而 `transcode_and_send.sh` 传给 `tg_send_video.py`
 > 的才是**媒体 caption**——随视频发出、不走 sendMessage 发送层（第 6 章的固有例外），
 > 但同样**必须转义并显式 HTML parse_mode**，否则文件名里的 `& < >` 会 400、
 > markdown 语法字符会被 Telethon 默认解析吃掉。
+>
+> 媒体 caption 是 4.9 收尾区的**固有例外**：无标题与分隔线，
+> 也不带 `⏱ 已运行 · 🔗 运行日志`（`transcode_and_send.sh:145/178` 拼完即交
+> `tg_send_video.py`）。分片（>2000MiB）场景 caption 为四行，中间多一行
+> `part N/M (XMib)`。
 
 **示例：频道同步汇总（构造示例，结构取自实现）**
 
@@ -247,7 +252,7 @@
 重复哈希：3
 已删除：2
 
-📋 详情
+📋 详情 · 3
 🔖 哈希 a1b2c3d4e5f6 · 第 1/3 组 · 2 个 · 文件名相同 · 保留 <code>keep.mp4</code>
   ├─ 🗑 删除 <code>dup_old.mp4</code> · 1.2 GB · 2026-09-01
 
@@ -262,7 +267,7 @@
 | ✅/⚠️/❌/⛔ Self-Hosted 数据备份（同上四态） | `self-hosted_backup.yml` | 同上 |
 | ☁️/❌/⛔ iCloud 照片下载（三态） | `icloud-photos-downloader.yml`（独立 `if: always()` step） | icloudpd 跑完，按 `job.status` 分态 |
 | ✅/⚠️/❌ PixivUtil2 任务完成 / 任务失败 | `pixivutil2.yml` | 按 `PU_STATUS` 三态 |
-| 🗑️ ph-dl 下载阶段损坏视频 / ✅ ph-dl 下载任务完成 | `ph-dl.yml` | 下载完整性 / 收尾 |
+| 🗑️ ph-dl 下载阶段损坏视频 / ✅/⚠️ ph-dl 下载任务完成 | `ph-dl.yml` | 下载完整性 / 收尾（有损坏跳过时标题降级 ⚠️，`ph-dl.yml:263-267`） |
 
 **示例：备份结果（结构取自实现）**
 
@@ -282,7 +287,7 @@
 
 | 通知 | 位置 | 触发场景 |
 |---|---|---|
-| 🟢 OpenClaw Runner 已就绪 | `openclaw.yml` | Tailscale SSH 就绪，推 SSH/RDP/网络/网关 |
+| 🟢 OpenClaw Runner 已就绪 | `openclaw.yml` | Tailscale SSH 就绪，推 SSH/RustDesk/网络/网关 |
 | 🚨 OpenClaw 自愈失败 | `openclaw.yml` | Run OpenClaw 步骤失败，推失败阶段/版本/关键日志 |
 | ⚠️ OpenClaw 归档告警 | `openclaw.yml` | 周期归档失败（rclone/tar），按包各一条 |
 | ⚠️ OpenClaw 最终归档告警 | `openclaw.yml` | 最终归档失败，版式同上（标题带「最终」区分阶段） |
@@ -352,10 +357,10 @@ Run ID：<code>12345678</code>
 
 | 通知 | 位置 | 触发场景 |
 |---|---|---|
-| 🎬 片名（播放通知） | `emby.yml` | 每次播放事件（180s 去重） |
-| 📺 Emby 服务启动 | `emby.yml` | Emby + cloudflared 就绪自检 |
+| 🎬 片名（播放通知） | `emby.yml` | 每次播放事件（300s 去重，`emby.yml:1004`） |
+| 📺/⚠️ Emby 服务启动 | `emby.yml` | Emby + cloudflared 就绪自检（取链自检未过降级 ⚠️，`emby.yml:834-838`） |
 | ⚠️ Emby 直链已回退 | `emby.yml` | watchdog 连续探活失败切 direct |
-| ⛔/❌/✅ Emby 服务停止 | `emby.yml` | 收尾，按 job 状态 |
+| ⛔/❌/✅/⚠️ Emby 服务停止 | `emby.yml` | 收尾，按 job 状态（未知状态兜底 ⚠️，`emby.yml:2163-2168`） |
 
 **示例：播放通知**
 
@@ -523,6 +528,12 @@ Run ID：<code>12345678</code>
   与 `file_restore` 曾两种口径，已统一收敛到 `tree_fold`；`task_preview` 与
   `task_engine` 属结构性清单，保持不折叠——不是漏改。）
 
+  **二层列表（条目 + 子行）在 `tree_fold` 适用范围之外**：`tree_fold` 按「行」截断，
+  而带子行的列表截断单位是「条目」（1 条目行 + N 行子行），按行截断会把子行切在半路。
+  这类列表由调用方按条目计数并自行补折叠行（照 5.3 节的 `tree_sub` 缩进），
+  折叠行仍并入条目流作末条——全库唯一实例是 `sync_notify.sh` 的 fail_summary
+  「修复过程」子行（`sync_notify.sh:196-245`），同文件的 fix_summary 无子行，走 `tree_fold`。
+
 ### 4.7 多行块（日志/命令）
 
 ```
@@ -547,7 +558,12 @@ Run ID：<code>12345678</code>
 ⏱ 已运行 22 分钟 · 🔗 <a href="…">运行日志</a>
 ```
 
-**硬要求**：所有通知都要有收尾区（进度面板的每次刷新除外，它在 finalize 时补）。
+**硬要求**：所有通知都要有收尾区。唯一例外是媒体 caption（3.2 节）：它无标题与分隔线、
+拼完即随媒体发出。
+
+进度面板**每次刷新都带**收尾区——`sync_progress.sh:593` 在 `_progress_render()` 末尾
+无条件执行，而 `_progress_refresh` 覆盖刷新与终态的全部入口（旧「⏱️ 已用：」写法已废除，
+时长只从 footer 出）。
 必须用 `tg_add_footer` / `Get-TgFooter` / `tg_footer_line`，不要手拼——
 助手已处理空行、降级与链接。
 
@@ -556,6 +572,10 @@ Run ID：<code>12345678</code>
   语义是 **run 已运行时长**，不是步骤自身耗时。
 - 降级链：`TG_RUN_STARTED_AT` → runner 开机时刻（Linux `/proc/1`、
   Windows `LastBootUpTime`）→ 不显示时长；`TG_RUN_URL` 缺失则整行跳过。
+  **已知差异**：bash 真源是 `if/elif`（`tg_notify.sh:137-145`）——`TG_RUN_STARTED_AT`
+  有值但 `date -d` 解析失败时不再回落 `/proc/1`，时长直接消失；pwsh（`tg_notify.ps1:41-50`
+  catch 后继续试 `LastBootUpTime`）与 python（`speedtest_common.py:684` 再试 `/proc/1`）
+  都会回落。平台注入为空时三者都走开机时刻，该差异不触发。
 - 附加链接：`tg_add_footer <var> "标签" "URL"` 可追加多个 `· 🔗 <a>`。
 
 **接线（硬要求）**：workflow 必须在 job 或 step 级 env 注入，否则通知没有日志入口：
@@ -664,12 +684,16 @@ env:
   `html.escape`，或经 `tg_*` 助手自动转义）。
 - **HTML 解析失败（400 can't parse entities）不重发**，直接报错暴露并带上响应体
   前 200 字符：消息本来就没发出去，退化成纯文本只会把 bug 藏起来。
-- **429 限流按 `retry_after` 等待重试（最多 5 次）**；长消息按 4000 字符分片
-  （断在换行处，不切 UTF-8 多字节）。
+- **429 限流按 `retry_after` 等待重试（最多 5 次尝试，即 4 次重试）**；长消息按 4000
+  字符分片（断在换行处，不切 UTF-8 多字节）。
+  **已知缺口**：pwsh 侧无分片实现（`tg_notify.ps1` 的 `Send-TgMessage` 单条全量 POST），
+  超长消息会被 Telegram 直接拒；bash `send_tg_chunked` 与 python `TG_CHUNK_SIZE` 均已实现。
 - 发送失败**必须**在 stderr/日志输出原因（含响应体前 200 字符），由调用方决定
   `|| true` 还是失败；**不要 `>/dev/null 2>&1` 吞掉**。
   python 侧 `send_telegram` 返回字典（成功 `{'sent': True, 'response': …}`、
   失败 `{'sent': False, 'reason': 响应体}`），调用方**必须**把失败原因记进日志。
+  **已知缺口**：429 耗尽路径是 `raise RuntimeError`（`speedtest_common.py:532`），而外层
+  只 `except urllib.error.HTTPError`（:545）——异常会穿出而非返回字典。
   **最易漏的是异常/信号兜底分支**：那里习惯写 `try: send_telegram(...) except: pass`，
   等于同时吞掉异常和返回值，限流/400 时完全没有痕迹。三套测速已统一收敛到
   `notify_best_effort(stage, msg)`（内部取返回值 + 记 `log_progress`），新增兜底分支照抄。
@@ -691,7 +715,7 @@ env:
 
 - 必须重定向 stdin：`bash test_x.sh </dev/null`（否则
   `test_batch_precheck_circuit_breaker.sh` 会卡在读 stdin）。
-- 跑全量约 4 分钟，建议后台 `nohup … &` 再轮询日志。
+- 跑全量约 10 分钟（本机实测 8–12 分钟，负载高时更久），建议后台 `nohup … &` 再轮询日志。
 - **套件 PASS 不等于通过**：跑完必须 `grep "command not found"` 全库测试日志，
   **必须为空**。
 
@@ -729,6 +753,12 @@ tg_add_footer msg; printf '%s\n' "$msg"
 （2026-09-12 第二轮复验：1–12 项全部仍成立，新增 13–15 项。）
 （2026-09-12 第三轮复验：1–15 项全部仍成立，新增 16 项；本轮把 openclaw 归档告警
 从整块 `<pre>` 收敛为全库 kv 形态，见 3.4 节示例。）
+（2026-09-12 第四轮复验：**反向核对**——以本文档为准逐条比对实现，而非正向审计代码。
+1–16 项的版式结论全部仍成立，但修正了 16 处「数字 / 状态数与实现不符」的描述
+（3.1/3.2/3.3/3.4/3.5/4.9/6/7.1/7.4/8.1 各节），并补记 3 项已知缺口
+（pwsh 无分片 / python 429 耗尽抛异常 / bash 降级链不回落）。
+教训：**具体数字断言最容易腐化**——状态数、秒数、计数、成员清单在正向通读时会被跳过，
+却恰恰会随实现改动而失效。改文档数字前先 grep 出实现行号，一并写进正文。）
 
 核对方法：① Grep 机械扫描（`<b>`/`<i>`、`• `、半角冒号、`curl` 直发、时长格式）。
 ② 分域通读（openlist / tg-channel / workflows 内联 / 测速三套）。③ 渲染预览（7.3 节）。
@@ -754,7 +784,7 @@ tg_add_footer msg; printf '%s\n' "$msg"
 | 5 | 收尾区 | 所有通知点 | 一律 `tg_add_footer` / `Get-TgFooter` / `tg_footer_line`，无手拼 |
 | 6 | 运行日志接线 | 14 个有通知的 workflow | 全部注入 `TG_RUN_URL`；「有通知的集合」与「注入集合」完全重合 |
 | 7 | 时长写法 | 全库 | 五层（4.3 节）；无 `5h 57m`、无高精度浮点、无 ISO 时间戳直出 |
-| 8 | 发送通道 | 全库 | `curl` 直发仅 4 处允许位置（两个发送层自身 / 进度面板 message_id / `sendDocument`）；pwsh 发送层走 `Invoke-RestMethod`，媒体走 Telethon `send_file`，均非 `curl` |
+| 8 | 发送通道 | 全库 | `curl` 直发共 6 处（`tg_notify.sh:322/328` 发送层自身 / `openlist/telegram.sh:64/70/102` 进度面板 message_id 与 deleteMessage / `sync_notify.sh:357` `sendDocument`），即 3 类；pwsh 发送层走 `Invoke-RestMethod`，媒体走 Telethon `send_file`，均非 `curl` |
 | 9 | 发送层引入 | 每个通知点 | 均 source / dot-source，无 `command not found` 风险 |
 | 10 | 转义 | 全库动态内容（含 dedupe 组头 ID/哈希、内嵌段 `esc`、**媒体 caption**） | 一律经 `escape_html` / `Esc-Html` / `html.escape` / `tg_*` 助手；**无「字符集受限」豁免**——第 6 章是硬约束 |
 | 11 | 内嵌 python 助手 | `tg-channel/sync_to_tg.sh` | `esc` / `tg_entry` / `tg_pre_block` / `fmt_secs` / `shorten_name` 齐全，无 NameError 风险；`esc` 与 python 共享层同为 `quote=True` |
@@ -784,6 +814,7 @@ tg_add_footer msg; printf '%s\n' "$msg"
 | 转义 | `escape_html` | `Esc-Html` | `html.escape` |
 | 收尾 | `tg_add_footer` | `Get-TgFooter` | `tg_footer_line` / `tg_format_elapsed` |
 | 发送 | `send_tg` / `send_tg_chunked` | `Send-TgMessage` | `send_telegram` / `send_telegram_chunked` |
+| 原始追加（**不转义**） | `tg_append` | — | — |
 
 真源文件：`.github/scripts/telegram/tg_notify.sh`、`tg_notify.ps1`、
 `.github/scripts/proxy-speedtest/speedtest_common.py`。
