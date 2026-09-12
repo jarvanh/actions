@@ -1,5 +1,5 @@
 #!/bin/bash
-# 同步结果通知 —— 失败清单（❌ 无法同步文件）版式验证
+# 同步结果通知 —— 失败清单（❌ 无法同步文件）版式验证 + 文件数行口径
 #
 # 背景: 失败清单原先是「1 条目行 + N 行"修复过程"子行」的二层列表——子行原样
 #   灌入 file_fix 的日志片段，单个文件就能撑出 15+ 行（源/目标全路径、rclone
@@ -12,6 +12,9 @@
 #   3. 超 8 条折叠走真源 tree_fold（折叠行并入条目流作末条，禁双 └─）
 #   4. 失败原因是人话——不得出现 熔断/探测/哈希/base64 这类内部术语
 #   另: 参数表去掉 fix_log 后 shift 数必须跟着改，用"额外参数仍能生效"锁住
+#   5. 「📋 差异文件列表」分节已删除（2026-09-12 用户拍板）——该段是 rclone check
+#      的原始差异，与失败清单/已修复清单重复，且「差异 N」与 kv 行的文件数口径
+#      互相矛盾（目标端更多时还会渲染出负数的「差异 -1」）
 set -u
 PASS=0; FAIL=0
 ok()  { PASS=$((PASS+1)); echo "PASS: $1"; }
@@ -31,14 +34,16 @@ LOG="$WORK/sync.log"
 : > "$LOG"
 
 # --- mocks ---
+# 源端 / 目标端文件数（各用例按需改，用于覆盖文件数行的三个分支）
+SRC_N=1; DST_N=0
 _get_path_stats() {
   case "$1" in
-    onedrive:*) echo "70185 1 68.540 KiB" ;;
+    onedrive:*) echo "70185 $SRC_N 68.540 KiB" ;;
+    openlist:*) echo "5000 $DST_N 4.883 KiB" ;;
     *)          echo "0 0 未知" ;;
   esac
 }
 _refresh_openlist_cache() { return 0; }
-_build_diff_files_list() { printf '%s\n' '新增 · 1' '  └─ fSWP4H4.jpg'; }
 _build_exclude_patterns() {
   local a
   for a in "$@"; do
@@ -57,8 +62,8 @@ export TG_RUN_STARTED_AT=""
 captured=""
 send_telegram_message() { captured="$1"; }
 
-# 只取「❌ 无法同步文件」这一段（到下一个空行为止）——同一条通知里
-# 差异文件列表也是 `  └─` 树形，按整条消息数行会把两者混在一起
+# 只取「❌ 无法同步文件」这一段（到下一个空行为止）——按整条消息数缩进行会
+# 把 ✅ 已通过其他方式同步 那段也算进来
 fail_block() {
   printf '%s\n' "$captured" | awk '
     /^❌ 无法同步文件/ { capture=1 }
@@ -134,6 +139,47 @@ printf '%s' "$captured" | grep -q "🚫 排除规则 · 1" \
 call_notify
 ! printf '%s' "$captured" | grep -q "无法同步文件" \
   && ok "5a 无失败文件时不出现该分节" || bad "5a: 空清单仍渲染分节"
+
+# ===== 6. 文件数行口径：差异数只在源端更多时前置 =====
+# 目标端更多（上一轮修复留下的替代名 / 删除未执行）时该数为负，前置出来读者看不懂
+: > "$FAIL_LIST"; : > "$WORK/fix_list.txt"
+SRC_N=3; DST_N=2
+call_notify
+printf '%s' "$captured" | grep -q "^文件数：差异 1 · 源端 3 / 目标 2$" \
+  && ok "6a 源端多 → 前置「差异 1」" \
+  || bad "6a: $(printf '%s' "$captured" | grep '^文件数')"
+
+SRC_N=3; DST_N=4
+call_notify
+printf '%s' "$captured" | grep -q "^文件数：源端 3 / 目标 4$" \
+  && ok "6b 目标端多 → 不前置负数差异" \
+  || bad "6b: $(printf '%s' "$captured" | grep '^文件数')"
+
+SRC_N=3; DST_N=3
+call_notify
+printf '%s' "$captured" | grep -q "^文件数：3 · 一致$" \
+  && ok "6c 两端一致 → 单值 + 一致" \
+  || bad "6c: $(printf '%s' "$captured" | grep '^文件数')"
+
+# ===== 7. 不再有「📋 差异文件列表」分节 =====
+# 该段是 rclone check 的原始差异（新增/仅目标存在/不一致），与失败清单、
+# 已修复清单重复；每组最多展示 8 条，实际只传达计数，而计数把已处理的也算进去了
+# 该分节原先挂在 4 处（失败分支 / 仅修复分支 / 错误分支 / 成功分支），
+# 两条分支各锁一次——只测一条会让另一条漏掉
+SRC_N=3; DST_N=2
+call_notify
+! printf '%s' "$captured" | grep -qE "差异文件列表|仅目标存在" \
+  && ok "7a 成功分支不再出现差异文件列表" \
+  || bad "7a: 成功分支仍渲染差异清单"
+
+printf '%s\n' 'fSWP4H4.jpg|68.540 KiB|目标目录不可写（存储端本轮整体故障，未试写；无目录可换）' > "$FAIL_LIST"
+call_notify
+! printf '%s' "$captured" | grep -qE "差异文件列表|仅目标存在" \
+  && ok "7b 失败分支不再出现差异文件列表" \
+  || bad "7b: 失败分支仍渲染差异清单"
+
+: > "$FAIL_LIST"
+SRC_N=1; DST_N=0   # 还原成其余用例的默认口径
 
 echo "-----"
 echo "PASS=$PASS FAIL=$FAIL"

@@ -3,25 +3,24 @@
 #
 # 职责边界:
 #   - 构建同步结果的 Telegram 通知（成功/失败/跳过/无变化 4 个分支共用排版）
-#   - 共享段落构建器: 头部(任务/路径/大小/状态)、自动拆分、排除规则、差异列表
+#   - 共享段落构建器: 头部(任务/路径/大小/状态)、自动拆分、排除规则
 #
 # 拆分缘由: sync_engine.sh 曾同时承担同步编排、驱动维护、修复管线、通知排版四类
 #   职责（2000+ 行），通知部分与同步逻辑无耦合，独立后按职责即可定位。
 #
 # 依赖: utils.sh (get_transferred_bytes_from_log),
-#       rclone_query.sh (_build_diff_files_list, _build_exclude_patterns,
-#         _get_path_stats),
+#       rclone_query.sh (_build_exclude_patterns, _get_path_stats),
 #       telegram/tg_notify.sh (escape_html, tree_fold/tree_code_fold,
 #         tg_entry/tg_add_* — 排版与发送真源，由 load_all.sh L0 层 source),
 #       telegram.sh (send_telegram_message), file_fix.sh (_fix_method_short),
 #       openlist_driver.sh (_refresh_openlist_cache)
 # 被依赖: sync_engine.sh (sync_with_logging)
 # ===== 通知消息公共段落构建 =====
-# 4 个通知分支共享的头部/任务信息/排除规则/差异列表段落。
+# 4 个通知分支共享的头部/任务信息/排除规则段落。
 # 统一走 telegram/tg_notify.sh 的 tg_* 排版助手（HTML）；
 # 读取调用方（_send_sync_result_notification）作用域:
 #   source_size_human / dest_size_human / count_info / task_name /
-#   source_path / dest_path / exclude_list / AUTO_SPLIT_INFO / diff_files_list
+#   source_path / dest_path / exclude_list / AUTO_SPLIT_INFO
 
 # 头部: 标题 + 分隔线 + 任务/路径 + 大小 + 可选状态行 + 文件数信息
 # 用法: _notify_add_header <var> <标题（含 emoji）> [状态行文本]
@@ -67,32 +66,8 @@ _notify_add_excludes() {
   return 0
 }
 
-# 差异文件列表段（仅非空时插入；内容为 _build_diff_files_list 预构建的 HTML 树，
-# 已逐条转义，此处直接追加）
-# 用法: _notify_add_diff_list <var>
-_notify_add_diff_list() {
-  [ -z "$diff_files_list" ] && return 0
-  # 列表分节带计数（规范 · 分节：分节后跟条目列表必须 · N）。
-  # 计数取各组头的 N 之和（rclone_query.sh 输出的组头形如「新增 · 3」）：
-  # 差异列表是「组头 + 条目 + 折叠行」的混合，直接数行数会把组头和
-  # 「还有 N 条…」也算成文件，计数虚高；而且每组最多展示 8 条，数行数
-  # 还会把「待同步 43 个」显示成 19。
-  local _cnt=0 _n
-  while IFS= read -r _line; do
-    case "$_line" in
-      '  '*) continue ;;          # 树形条目 / 折叠行（两个空格起头）
-      *' · '*)                     # 组头
-        _n="${_line##* · }"
-        [[ "$_n" =~ ^[0-9]+$ ]] && _cnt=$((_cnt + _n)) ;;
-    esac
-  done <<< "$diff_files_list"
-  tg_add_section "$1" "📋 差异文件列表 · ${_cnt}"
-  tg_add_block "$1" "$diff_files_list"
-  return 0
-}
-
 # 发送同步结果通知（从 sync_with_logging 拆分出来）
-# 构建包含源/目标大小、差异文件列表、排除规则、修复结果的通知消息
+# 构建包含源/目标大小、排除规则、修复结果的通知消息
 # 参数: <源端> <目标端> <任务名> <同步退出码> <本轮日志> <末次尝试日志>
 #       <失败清单> <修复清单> <是否 object-not-found> [rclone 额外参数...]
 # 注: 曾收 fix_log 参数（用于给失败条目挂"修复过程"子行），2026-09-12 删掉子行后
@@ -144,14 +119,16 @@ _send_sync_result_notification() {
   [ "$dest_count" = "0" ] && dest_count="未知"
 
   # 始终显示文件数信息（数值一律裸文本；count_info 为已构建的 HTML 片段，不走 tg_add_kv）
-  local diff_files_list=""
+  # 差异数只在源端比目标端多（确有文件没同步过去）时前置；目标端更多时该数会为负
+  # （上一轮修复留下的替代名 / 删除未执行），前置成「差异 -1」读者看不懂。
   if [[ "$source_count_raw" =~ ^[0-9]+$ ]] && [[ "$dest_count_raw" =~ ^[0-9]+$ ]]; then
     local count_diff=$((source_count_raw - dest_count_raw))
-    if [ "$count_diff" -ne 0 ]; then
+    if [ "$count_diff" -gt 0 ]; then
       count_info="差异 ${count_diff} · 源端 ${source_count} / 目标 ${dest_count}"
-      diff_files_list=$(_build_diff_files_list "$source_path" "$dest_path" "${extra_args[@]}")
-    else
+    elif [ "$count_diff" -eq 0 ]; then
       count_info="${source_count} · 一致"
+    else
+      count_info="源端 ${source_count} / 目标 ${dest_count}"
     fi
   else
     count_info="源端 ${source_count} / 目标 ${dest_count}"
@@ -255,7 +232,6 @@ _send_sync_result_notification() {
     fi
     tg_add_section partial_msg "❌ 无法同步文件 · ${fail_total}"
     tg_append partial_msg "${fail_summary}"
-    _notify_add_diff_list partial_msg
     tg_add_footer partial_msg
 
     send_telegram_message "$partial_msg"
@@ -268,7 +244,6 @@ _send_sync_result_notification() {
     _notify_add_autosplit partial_msg
     tg_add_section partial_msg "✅ 已通过其他方式同步 · ${fix_total}"
     tg_append partial_msg "${fix_summary}"
-    _notify_add_diff_list partial_msg
     tg_add_footer partial_msg
 
     send_telegram_message "$partial_msg"
@@ -314,7 +289,6 @@ _send_sync_result_notification() {
       # 没有关键日志时给一句说明（走 tg_add_note：段前空行与转义都由助手保证）
       tg_add_note err_msg "无明显错误关键字"
     fi
-    _notify_add_diff_list err_msg
     tg_add_footer err_msg
     send_telegram_message "$err_msg"
     # 发送完整日志文件（sendDocument 不走 sendMessage 发送层，媒体上传固有例外；
@@ -354,7 +328,6 @@ _send_sync_result_notification() {
     fi
     _notify_add_excludes ok_message
     _notify_add_autosplit ok_message
-    _notify_add_diff_list ok_message
     tg_add_footer ok_message
 
     send_telegram_message "$ok_message"
