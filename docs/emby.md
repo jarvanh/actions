@@ -110,7 +110,9 @@ cron 退回 6 小时一档只做兜底。三道护栏：
 | `EMBY_PREFETCH` | 直链预热器开关（默认 `1`），见[起播慢怎么定位](#起播慢怎么定位) |
 | `EMBY_PREFETCH_MAX_DIRS` | 目录回填上限（默认 `400` 个目录） |
 | `WU_EDGE_ITEMS` | 头尾预热条目数（默认 `3`）。真实 OneDrive 流量，与直链预热的 `WU_ITEMS` 分开，避免为省流量把直链覆盖率一起压掉 |
-| `WW_KEEP_MIN` | 跨 run 海报档位保底数（默认 `5`）。半衰期衰减后若不足这个数，从衰减前的 Top-N 补足，避免长时间没人访问就把已学到的尺寸淘汰干净。可用仓库变量覆盖，但**只能往上调、硬下限 3**；实际保留数还受 `WW_SIZES_MAX` 约束（写回时只留 Top-N）。**补足的必须是历史实测过的尺寸——没有实际访问数据时一律不补，宁可保持零请求也不凭空造** |
+| `WW_KEEP_MIN` | 衰减后的保底档数（默认 `5`）。半衰期衰减后若不足这个数，从衰减前的 Top-N 补足，避免长时间没人访问就把已学到的尺寸淘汰干净。**有输入变量按输入的来**。实际保留数还受 `WW_SIZES_MAX` 约束（写回只留 Top-N） |
+| `WW_SIZES_MAX` | 访问尺寸上限（默认 `10`）。客户端用了几档就预热几档，超过则取得分最高的 Top-N。**有输入变量按输入的来**。保底档数受它约束 |
+| — | ⚠️ 档位来源**只能是实际访问尺寸**：保底补的是历史实测过的宽度，没有实际访问数据时一律不补，宁可保持实际访问值（零请求）也不凭空造尺寸 |
 
 ---
 
@@ -629,7 +631,7 @@ sudo EMBY_USER="$EMBY_USER" python3 emby_guard.py <emby-data-root>   # 例：/va
 | 1b 目录 | 对预热路径所在目录打一次 `/api/fs/list`，odlink 会**批量**把该目录所有子条目写进 `dir_cache` | 每目录实测 1.2~3.1s（早先记的"约 0.5s"已不符） | ✅ **覆盖率最高**：一次请求覆盖几十上百个文件；命中 `dir_cache` 后起播只需重新签发直链（1 次 Graph），不必逐段解析。冷解析实测 **1.75s/条**（段数 5、跨盘 1），这是压"取直链 1.40 秒"的主力 |
 | 2 链路基线 | 见下方"第 2 段是测量" | 秒级 | — | — |
 | 3 海报墙 | 请求最新条目海报，让 Emby 现场缩放 + ge2o 内存缓存就绪 | 低 | ✅ 有效（与模式无关，纯 Emby 侧） | 首页秒开 |
-| 3b 各库首屏 | 每个媒体库按默认排序取前 20 张海报 | 约 1-2s/张×档位数，串行 | ✅ 滑进任意媒体库第一屏命中缓存 | 首屏秒开。宽度档位读跨 run 统计 Top5（`/var/lib/emby/warm-state.json`，随备份跨 run 传递）；**无统计时整体跳过**（只预热有人消费过的尺寸，宁可不预热也不白占空间） |
+| 3b 各库首屏 | 每个媒体库按默认排序取前 20 张海报 | 约 1-2s/张×档位数，串行 | ✅ 滑进任意媒体库第一屏命中缓存 | 首屏秒开。宽度档位读跨 run 统计 Top-N（`WW_SIZES_MAX`=10，存 `/var/lib/emby/warm-state.json`，随备份跨 run 传递）；**无统计时整体跳过**（只预热有人消费过的尺寸，宁可不预热也不白占空间） |
 | 4 头尾 | 读每个条目的头部与尾部，落进 VFS 稀疏缓存 | 真实流量，受 `WU_BUDGET_MB` 约束 | ⚠️ **基本无效**（视频流不过挂载），只在转码 / 回退 `direct` 时才用得上 | ffprobe / ffmpeg 起播读命中本地 |
 | 5 起播准备 | 对条目连打**两次** `POST /emby/Items/{id}/PlaybackInfo`（走 ge2o:8095） | 冷调用可能触发 ffprobe / 字幕提取（读挂载） | ✅ **直接消掉"点播放"第一步的冷成本**：ge2o 对该接口有 12h 缓存，冷调用已把 Emby 侧探测与直链改写跑完，用户点开即走热路径 | 冷/热两个均值直接给出「Emby 准备耗时」与「预热能省多少秒」 |
 | 全库海报（`wallwarmer`） | 按 DateCreated 倒序遍历全部条目持续预热 | 后台持续 ~5h，并发 2 | ✅ 滑到已覆盖区域即秒开；逐轮往深处推进 | 深层页面首次浏览不再冷读 |
@@ -724,7 +726,7 @@ sudo EMBY_USER="$EMBY_USER" python3 emby_guard.py <emby-data-root>   # 例：/va
 | 预热规模 | workflow `env:` 的 `WU_ITEMS`(30) / `WU_EDGE_MB`(32) / `WU_BUDGET_MB`(2048) / `WU_PI_ITEMS`(6)，脚本在 `emby.yml` 的 `warmup images` 步骤。`WU_ITEMS`(30) 只管直链预热（零流量，覆盖率越高越好）；头尾（真实流量）由新增的 `WU_EDGE_ITEMS`(3) 单独控制，3×32MB×2≈190MB；`WU_PI_ITEMS` 是起播准备预热的条目数（每条连打两次 `PlaybackInfo`，冷调用可能触发 ffprobe/字幕提取，别设太大）。段序：1 直链 → 1b 目录 → 2 链路基线 → 3 海报墙/3b 首屏 → 4 头尾 → 5 起播准备（快且关键的在前，中途取消也保得住读数）。直链预热另含 **recent 回看预热**（playlog 写入 `warm-state.json`，保留最近 12 条，条数无需配置）。想量化起播慢看 `warmup.log` 的均值与收尾的「ge2o 请求耗时统计」 |
 | 头尾预热条目数 | workflow `env:` 的 `WU_EDGE_ITEMS`（默认 `3`），脚本在 `warmup images` 步骤「4. 头尾预热」。302 直连下头尾预热只剩"挂载冷读探针"价值，别调大 |
 | dir_cache 回填的异常响应处理 | `start link prefetcher` 步骤的 `/opt/odwarm.sh`：非 JSON 响应重试 3 次的分支，以及详情页预取 jq 的 `2>/dev/null`（不加会刷满 odwarm.log） |
-| 全库海报预热 | `start wall warmer` 步骤的 `/opt/wallwarmer.sh`：按 DateCreated 倒序分页遍历全部条目，把 Primary 海报拉进 Emby 缓存（`/mnt/emby-cache`）。**宽度档位跨 run 统计**——状态文件 `/var/lib/emby/warm-state.json` 存 `[宽度,得分]`（得分=按半衰期衰减的历史请求量，`WW_DECAY`=0.5），每轮启动先对历史得分衰减一次，再与本轮 ge2o 实测计数合并取 Top5（`WW_SIZES_MAX`=5）作为预热档位；持续被消费的档位留存，无人用的按半衰期退出（得分<1 淘汰），但**至少保留 `WW_KEEP_MIN`(5) 档**——不足时从衰减前的 Top-N 按原得分降序补足（得分记 1.0），避免长时间没人访问就把已学到的尺寸忘光、下次访问第一轮只能冷启动。该值可覆盖但**最低 3**，且补的只能是实测过的尺寸：没有访问数据就不补，宁可零请求也不造尺寸。每条目按这些档位各预热一份；请求只带 `maxWidth` 不带 `maxHeight`（缓存键含参数组合，box-fit 下带两者会得到更小的图、与客户端要的对不上）。统计每页写回状态文件、随备份跨 run 传递——ge2o 日志每轮清零，跨 run 全靠它。环境变量 `WW_WORKERS`(2) / `WW_GAP`(0.2s) / `WW_MAX_MIN`(300min) / `WW_SIZES_MAX`(5) / `WW_DECAY`(0.5) / `WW_MIN_FREE_KB`(/mnt 剩余 10GB 下限) / `WW_START_DELAY`(180s，让首屏预热先跑)。直连 Emby 不过 ge2o；缓存随备份持久化，逐轮往深处推进。**写回时保留 `recent` 字段**（playlog 记录的最近播放路径）——persist_state 是整体覆盖写，丢掉它回看预热就失效 |
+| 全库海报预热 | `start wall warmer` 步骤的 `/opt/wallwarmer.sh`：按 DateCreated 倒序分页遍历全部条目，把 Primary 海报拉进 Emby 缓存（`/mnt/emby-cache`）。**宽度档位跨 run 统计**——状态文件 `/var/lib/emby/warm-state.json` 存 `[宽度,得分]`（得分=按半衰期衰减的历史请求量，`WW_DECAY`=0.5），每轮启动先对历史得分衰减一次，再与本轮 ge2o 实测计数合并取 Top-N（`WW_SIZES_MAX`=10）作为预热档位；持续被消费的档位留存，无人用的按半衰期退出（得分<1 淘汰），但**至少保留 `WW_KEEP_MIN`(5) 档**——不足时从衰减前的 Top-N 按原得分降序补足（得分记 1.0），避免长时间没人访问就把已学到的尺寸忘光、下次访问第一轮只能冷启动。补的只能是实测过的尺寸：没有访问数据就不补，宁可保持实际访问值也不造尺寸。`WW_KEEP_MIN` 与 `WW_SIZES_MAX` 都是**有输入变量按输入的来**。每条目按这些档位各预热一份；请求只带 `maxWidth` 不带 `maxHeight`（缓存键含参数组合，box-fit 下带两者会得到更小的图、与客户端要的对不上）。统计每页写回状态文件、随备份跨 run 传递——ge2o 日志每轮清零，跨 run 全靠它。环境变量 `WW_WORKERS`(2) / `WW_GAP`(0.2s) / `WW_MAX_MIN`(300min) / `WW_SIZES_MAX`(5) / `WW_DECAY`(0.5) / `WW_MIN_FREE_KB`(/mnt 剩余 10GB 下限) / `WW_START_DELAY`(180s，让首屏预热先跑)。直连 Emby 不过 ge2o；缓存随备份持久化，逐轮往深处推进。**写回时保留 `recent` 字段**（playlog 记录的最近播放路径）——persist_state 是整体覆盖写，丢掉它回看预热就失效 |
 | 校验用的 Emby 用户名 | secret `EMBY_USER`（**不写死在代码里**；未配置则退化为"至少一个用户"） |
 | Emby 公网域名（隧道往返自测用） | 默认取 `e.<VD>.eu.org`（`VD` secret 拼出来，公开仓库不写死域名，日志里也会被自动打码）；换域名时用仓库 **Variables** `EMBY_PUBLIC_HOST` 覆盖。域名解析不通则跳过隧道 TTFB，只记边缘机房 |
 | 起播等待树的基线与字幕/拖动读数 | 基线由 `warmup.sh` 第 2 段写入 `/tmp/warm-baseline.env`（`TUNNEL_TTFB` / `TUNNEL_EDGE` / `LINK_TTFB`），playlog 每次播放现读；字幕耗时取同 IP 最近一次 `Subtitles` 请求（µs/ms/s 三种单位经 `to_sec()` 归一化）；拖动取链由 playlog 写 `/opt/logs/seek.log`（同一条目第 2 次起 stream 请求才算拖动，首播不计） |

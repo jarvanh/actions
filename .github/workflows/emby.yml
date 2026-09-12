@@ -115,10 +115,13 @@ env:
   # 跨 run 海报档位保底数：历史档位按半衰期衰减（WW_DECAY=0.5）后若不足这个数，
   # 从衰减前的 Top-N 补足。避免长时间没人访问就把已学到的尺寸全淘汰干净
   # （每轮 ×0.5，几轮就 <1 淘汰），下次访问第一轮只能冷启动、要等第二轮才热。
-  # 补足的只能是历史实测过的尺寸，不是默认档：没有实际访问数据时一律不补，
-  # 宁可保持零请求也不凭空造尺寸；真实流量一来就会被挤下去。
-  # 该值可用仓库变量覆盖，但只能往上调，硬下限 3（再少就没有预热意义）。
+  # 衰减后的保底档数：有输入变量按输入的来，默认 5。补的只能是**历史实测过的尺寸**——
+  # 没有实际访问数据时一律不补，宁可保持实际访问值也不凭空造尺寸；
+  # 真实流量一来，高分档位自然会把保底档挤下去。
   WW_KEEP_MIN: ${{ vars.WW_KEEP_MIN || '5' }}
+  # 访问尺寸上限：客户端用了几档就预热几档，超过则取得分最高的 Top-N。
+  # 有输入变量按输入的来，默认 10。保底档数受它约束（写回时只留 Top-N）。
+  WW_SIZES_MAX: ${{ vars.WW_SIZES_MAX || '10' }}
 
 jobs:
   build:
@@ -1730,7 +1733,7 @@ jobs:
           WW_WORKERS=${WW_WORKERS:-2}                   # 并发数
           WW_GAP=${WW_GAP:-0.2}                         # 每批间隔（秒）
           WW_MAX_MIN=${WW_MAX_MIN:-300}                 # 最长预热时长（分钟）
-          WW_SIZES_MAX=${WW_SIZES_MAX:-5}               # 宽度档数上限：客户端用了几档就预热几档，超过则取得分最高的 Top-N
+          WW_SIZES_MAX=${WW_SIZES_MAX:-10}              # 访问尺寸上限：客户端用了几档就预热几档，超过则取得分最高的 Top-N
           WW_DECAY=${WW_DECAY:-0.5}                     # 跨 run 衰减系数：每轮历史得分×0.5，无人消费的档位按半衰期退出
           STATE=/var/lib/emby/warm-state.json           # 统计文件（随备份跨 run 传递），只存 Top-N 条 [宽度,得分]
           WW_MIN_FREE_KB=${WW_MIN_FREE_KB:-10485760}    # /mnt 剩余低于 10GB 停止
@@ -1752,13 +1755,9 @@ jobs:
           # ⚠️ 补足的只能是**历史实测过的尺寸**：$BASE 来自 warm-state.json，里面全是
           # 客户端真实请求过的宽度。没有历史数据时一律不补——宁可保持零请求，
           # 也不凭空造一个尺寸；真实流量一来，高分档位自然会把保底档挤下去。
+          # 衰减后的保底档数：有输入变量按输入的来，默认 5。
+          # 实际保留数还受 WW_SIZES_MAX 约束（persist_state 写回时只留 Top-N）
           WW_KEEP_MIN=${WW_KEEP_MIN:-5}
-          # 硬下限 3：仓库变量只能往上调，往下最低减到 3——再少就没有预热意义了。
-          # （实际保留数还受 WW_SIZES_MAX 约束：persist_state 写回时只留 Top-N）
-          case "$WW_KEEP_MIN" in
-            ''|*[!0-9]*) WW_KEEP_MIN=5;;
-            *) [ "$WW_KEEP_MIN" -ge 3 ] || WW_KEEP_MIN=3;;
-          esac
           if [ "$(printf '%s' "$DECAYED" | grep -c .)" -lt "$WW_KEEP_MIN" ] && [ -n "$BASE" ]; then
             FILL=$(printf '%s\n' "$BASE" | sort -k2,2gr | head -"$WW_KEEP_MIN" \
                    | awk '{printf "%s 1.0\n", $1}')
