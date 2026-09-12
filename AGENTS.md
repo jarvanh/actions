@@ -15,7 +15,10 @@ GitHub Actions 工作流与脚本集合：OpenList 网盘同步、Emby 302 直�
 
 | skill | 何时用 |
 |---|---|
-| `skills/telegram-notify-audit` | 核对 / 审查全部 Telegram 通知的版式风格是否统一；改动通知版式后复验基线是否仍成立 |
+| `skills/telegram-notify-send` | **写通知**：新增一条通知、给 workflow/脚本加通知、改通知内容或版式 |
+| `skills/telegram-notify-audit` | **核对通知**：审查全部 Telegram 通知的版式风格是否统一；改动通知版式后复验基线是否仍成立 |
+
+两者配套：先用 `send` 写，再用 `audit` 核对。
 
 ## 改 Telegram 通知前必读
 
