@@ -479,9 +479,12 @@ _progress_render() {
   if [ "$running" -gt 0 ]; then
     local _running_title="📍 进行中 · ${running}"
     # 规范：状态 emoji 统一表无 ⏸️（finalize 后仍在跑 = 🔄）
-    [ "$finalized" -eq 1 ] && _running_title="🔄 进行中 · ${running} · 未执行完"
+    [ "$finalized" -eq 1 ] && _running_title="🔄 进行中 · ${running}"
     tg_add_section msg "$_running_title"
     tg_add_block msg "$(_progress_render_task_list "$running_lines")"
+    # 「未执行完」是说明而不是计数的一部分（4.2 节：分节标题 = emoji 分节 · N），
+    # 故下沉为说明段——与 4.6 节「缺失的目录 · 可能被删除 · N」的收敛方式同款
+    [ "$finalized" -eq 1 ] && tg_add_note msg "run 已结束，以上任务本轮未执行完"
 
     if [ "$finalized" -ne 1 ]; then
       local _d _ind _ind_rows _rf _sf _nf _is_label _raw _tree _line

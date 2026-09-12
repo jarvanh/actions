@@ -1211,7 +1211,8 @@ jobs:
 
             # 第 4 行：客户端。IP 来自 ge2o 访问日志（谁在播）
             IFS=$'\037' read -r cname dev <<<"$(client_meta "$iid")"
-            client=$(join_parts "$(escape_html "$cname")" "$(escape_html "$dev")" "$(escape_html "$cip")")
+            # 字段序与规范 3.5 节示例一致：IP（谁）在前，客户端与设备在后
+            client=$(join_parts "$(escape_html "$cip")" "$(escape_html "$cname")" "$(escape_html "$dev")")
 
             # 第 5 行起：起播等待（KV 树，与测速四套「📍 测速点网络」同款，tree_lines 渲染）。
             # 按"点下播放之后谁先谁后"排：① 客户端到服务器（隧道）② Emby 读文件头 ③ 服务器取直链

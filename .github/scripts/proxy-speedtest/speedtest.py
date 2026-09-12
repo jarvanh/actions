@@ -1026,10 +1026,11 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None):
     _failed = [r for r in results if not r.get('ok')]
     if _failed:
         lines.append(f'❌ 失败 · {len(_failed)}')
+        # 折叠上限取全库默认 8（4.6 节；此前本域用 5，与 tree_fold 默认值不一致）
         _fe = [tg_entry_codes(r.get('name', ''), (r.get('error') or r.get('reason') or '-')[:80])
-               for r in _failed[:5]]
-        if len(_failed) > 5:
-            _fe.append(f'还有 {len(_failed) - 5} 条…')
+               for r in _failed[:8]]
+        if len(_failed) > 8:
+            _fe.append(f'还有 {len(_failed) - 8} 条…')
         for _i, _l in enumerate(_fe, 1):
             _c = '└─' if _i == len(_fe) else '├─'
             lines.append(f'  {_c} {_l}')

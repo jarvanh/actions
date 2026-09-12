@@ -1272,7 +1272,9 @@ jobs:
             if [ -z "$error_summary" ]; then
               error_summary="openclaw.log 与步骤日志均未找到可用摘要"
             fi
-            error_summary=$(printf '%s' "$error_summary" | tail -c 2800)
+            # 与同文件 send_telegram_alert / send_archive_alert 同口径（尾部 1200 字节）：
+            # 超长输出会让 <pre> 跨 4000 字符分片、标签断开即破版（规范 3.4 节）
+            error_summary=$(printf '%s' "$error_summary" | tail -c 1200)
 
             ts_host=""
             ts_ip=""
@@ -1365,10 +1367,13 @@ jobs:
             [ -n "$fallback_reinstall_duration_sec" ] && tg_add_kv msg "回退重装耗时" "$(fmt_ms "$fallback_reinstall_duration_sec")"
             [ -n "$ssh_entry" ] && tg_add_path msg "SSH 调试" "$ssh_entry"
             tg_add_section msg "🧾 关键日志"
-            tg_add_block msg "<pre>$(escape_html "$error_summary")</pre>"
+            # 走真源 tg_add_pre（转义 + <pre> 包裹），与同文件归档告警同款；
+            # 此前本处手拼 <pre>，是 tg_add_pre 的重复实现
+            tg_add_pre msg "$error_summary"
             tg_add_footer msg
-            # 统一走发送层：429 按 retry_after 重试已内置，HTML 解析失败直接报错
-            send_tg "$msg" || true
+            # 统一走发送层：429 按 retry_after 重试已内置，HTML 解析失败直接报错。
+            # 用 chunked 版：日志经转义后可能膨胀到单条上限，分片比整条被拒好
+            send_tg_chunked "$msg" || true
           else
             echo "⚠️ Telegram alert skipped: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is empty"
           fi

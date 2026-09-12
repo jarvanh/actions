@@ -322,7 +322,9 @@ _preview_render_pairs_detail() {
         _g_block[$_src]+="${_sub}排除：$(tg_entry "$_excl")"$'\n'
       fi
     fi
-    [ -n "$_fnote" ] && _g_block[$_src]+="${_sub}${_fnote# · }"$'\n'
+    # 第 6 章是硬约束：动态内容必须转义，没有「值是脚本自造、字符集受限」的豁免条款
+    # （本值含计数与 format_bytes 输出，但口径统一优先于逐案判断）
+    [ -n "$_fnote" ] && _g_block[$_src]+="${_sub}$(escape_html "${_fnote# · }")"$'\n'
     # 目标端列举失败: 该条目数值是按空目标端的全量估算，必须明示（否则合计
     # 虚高被当成精确值，正是 "目标端已有文件却显示全量待同步" 的困惑来源）
     [ "${_dfail:-0}" = "1" ] && _g_block[$_src]+="${_sub}⚠️ 目标端列举失败 · 按全量估算，实际待同步可能更少"$'\n'
@@ -330,7 +332,7 @@ _preview_render_pairs_detail() {
     if [ "${_pskip:-0}" != "0" ] && [ "${_pskip:-}" != "-" ]; then
       local _since="${_pskip##*|}"
       # 相对时间统一 "N 小时前" 形态（此前 "距今 N 小时" 是另一种表达）
-      _g_block[$_src]+="${_sub}⏭️ 上次成功 ${_since} 小时前，仍在跳过窗口内 · 本轮预计跳过"$'\n'
+      _g_block[$_src]+="${_sub}⏭️ 上次成功 $(escape_html "$_since") 小时前，仍在跳过窗口内 · 本轮预计跳过"$'\n'
     fi
   done <<< "$PREVIEW_PAIRS_TSV"
   # 组装: 组头 + 树形条目块，组间空一行（首组前不加——tg_add_section 已带段前空行）
