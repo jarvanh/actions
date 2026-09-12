@@ -163,14 +163,28 @@ jobs:
           echo "favorites 文件列表"
           ls
           echo "favorites 文件夹 下载前大小"
-          BEFORE_SIZE=$(du -sh . | cut -f1)
-          echo "$BEFORE_SIZE"
+          # 大小口径统一走 1024 进制 + 三位小数（规范 · 大小写法）：
+          # du -sh 的「263G」是 1000 进制且无精度，与全库「1.150 GiB」对不上。
+          # 与 openlist 域的 format_bytes 同口径（本 step 无法 source openlist/utils.sh）
+          format_bytes() {
+            awk -v b="$1" 'BEGIN { split("B KiB MiB GiB TiB PiB", u); for(i=1; b>=1024 && i<6; i++) b/=1024; if(i==1) printf "%d %s\n", b, u[i]; else printf "%.3f %s\n", b, u[i] }'
+          }
+          BEFORE_SIZE=$(du -s --block-size=1 . 2>/dev/null | cut -f1)
+          BEFORE_SIZE_H=$(format_bytes "${BEFORE_SIZE:-0}")
+          echo "$BEFORE_SIZE_H"
 
           # 下载到临时目录，验证完整性后再上传到 OneDrive
           DOWNLOAD_TMP="/tmp/ph-dl-downloads"
           mkdir -p "$DOWNLOAD_TMP"
 
           BEFORE_COUNT=$(wc -l < archive.txt 2>/dev/null || echo 0)
+
+          # 收藏夹总条数（远端 favorites 列表的实际长度，与本地库存是两回事）：
+          # --flat-playlist 只列条目不下载；取不到就留空，通知里降级为「未知」
+          PH_FAV_TOTAL=$(yt-dlp --flat-playlist --simulate -i \
+            "https://www.pornhub.com/users/${{ secrets.PORNHUBNAME }}/videos/favorites" \
+            --print id 2>/dev/null | grep -c . || true)
+          echo "收藏夹总条数: ${PH_FAV_TOTAL:-未知}"
 
           # 迁移 archive.txt 到新格式（id|filename|url），兼容旧格式（Pornhub id）
           if [ -f archive.txt ]; then
@@ -226,8 +240,9 @@ jobs:
           fi
           echo "本次新增下载数量: ${DOWNLOAD_COUNT}"
           echo "favorites 文件夹 下载后大小"
-          AFTER_SIZE=$(du -sh . | cut -f1)
-          echo "$AFTER_SIZE"
+          AFTER_SIZE=$(du -s --block-size=1 . 2>/dev/null | cut -f1)
+          AFTER_SIZE_H=$(format_bytes "${AFTER_SIZE:-0}")
+          echo "$AFTER_SIZE_H"
 
           # 计算视频文件统计（总数 / 已上传 / 待上传 / 损坏已跳过；
           # 脚本第 4 字段 failed 恒为 0，仅作格式占位，此处不展示）
@@ -266,11 +281,15 @@ jobs:
           # 不能拿库存里的累计损坏数判定——历史遗留的损坏每轮都在，本轮空转
           #（0 下载）也会被标黄，读者分不清「这轮出事」还是「旧账没清」，
           # 而且本轮真有损坏时上面已单独发过 🗑️ 通知，再标一次等于重复报警
+          # 标题写「同步」而不是「下载」：本 workflow 是「拉收藏夹增量 → 去重 →
+          # 转码上传频道」，写「下载」会让人以为只下不传，也解释不了下面那几行
+          # 库存/已上传统计
           if [ "${NEW_CORRUPT:-0}" -gt 0 ]; then
-            tg_add_title msg "⚠️ ph-dl 下载任务完成"
+            tg_add_title msg "⚠️ ph 收藏夹同步完成"
           else
-            tg_add_title msg "✅ ph-dl 下载任务完成"
+            tg_add_title msg "✅ ph 收藏夹同步完成"
           fi
+          tg_add_kv msg "收藏夹" "${PH_FAV_TOTAL:-未知} 个视频"
           tg_add_kv msg "视频文件" "${TOTAL_VIDEOS} 条"
           tg_add_kv msg "库存状态" "已上传 ${UPLOADED_VIDEOS} · 待上传 ${PENDING_VIDEOS}"
           if [ "${CORRUPT_VIDEOS:-0}" -gt 0 ]; then
@@ -281,7 +300,7 @@ jobs:
           fi
           tg_add_kv msg "本次下载" "${DOWNLOAD_COUNT} 个视频"
           # du 输出属机器返回值 → 等宽（规范 · 取值行口径）
-          tg_add_path msg "磁盘占用" "${BEFORE_SIZE} → ${AFTER_SIZE}"
+          tg_add_path msg "磁盘占用" "${BEFORE_SIZE_H} → ${AFTER_SIZE_H}"
           if [ "$FILE_LIST" != "无" ]; then
             tg_add_section msg "📋 本次新增 · ${DOWNLOAD_COUNT}"
             tg_add_block msg "$(tree_code_fold "$FILE_LIST")"
