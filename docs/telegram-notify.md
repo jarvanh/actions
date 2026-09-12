@@ -207,6 +207,13 @@
 | 🔍 重复视频检测与去重（按 ID / 按哈希） | `dedupe_ph_videos.sh`、`dedupe_videos_by_hash.sh` | 发现重复组 |
 | 🧹 ph-dl 清理 yt-dlp 残留文件 | `cleanup_ytdlp_residual.sh` | 清理 `-Frag/.ytdl/.m3u8` |
 | 🧹 频道清理完成 | `reset_tg_channel.sh` | 清空频道 + 删 uploaded/failed json |
+| 文件名 · 大小 · 修改时间（媒体 caption） | `transcode_and_send.sh` → `tg_send_video.py` | 每个视频随媒体发送，无标题与分隔线 |
+
+> **两类「caption」别混淆**：本节的 📺 同步汇总（`CAPTION_PREFIX`）是**普通消息**，
+> 走 `tg_add_title` + `send_tg`；而 `transcode_and_send.sh` 传给 `tg_send_video.py`
+> 的才是**媒体 caption**——随视频发出、不走 sendMessage 发送层（第 6 章的固有例外），
+> 但同样**必须转义并显式 HTML parse_mode**，否则文件名里的 `& < >` 会 400、
+> markdown 语法字符会被 Telethon 默认解析吃掉。
 
 **示例：频道同步汇总（构造示例，结构取自实现）**
 
@@ -476,9 +483,19 @@
   并把 `<code>` 本身转义掉——条目流一律走 `tree_fold`。
 - 建议：折叠行并入条目流作末条（由 `tree_lines` 统一决定 `└─`），
   不要单独补一行造成双 `└─`；多组并列时通知内建议最多展示 8 组。
-- **超 8 条折叠是全库统一要求**，不因子系统而异（2026-09-12 核对：`file_split` /
-  `sync_marker` / `sync_to_tg` 已上传组曾裸用 `tree_lines` 不折叠，而 `file_restore`
-  有折叠——同一 openlist 域两种口径，已统一收敛到 `tree_fold`）。
+- **折叠与否看清单性质，不只看条数**：
+
+  | 清单性质 | 超 8 条怎么办 | 例 |
+  |---|---|---|
+  | 流水/日志类（读者只需知道规模，单条价值低） | 折叠为「还有 N 条…」 | 已上传文件、删除的重复文件、排除规则、日志行 |
+  | 结构性清单（读者要逐条核对，少一条就漏了结论） | **全量展示，不折叠** | `task_preview` 的同步对、`task_engine` 的子目录/批次统计清单 |
+
+  判据是「折叠掉后半段会不会让读者误判」，不是「列表长不长」。结构性清单若确实很长，
+  靠分节计数 ` · N` 交代规模（4.2 节）即可——把「失败了哪些」折叠成「还有 N 条…」
+  等于把读者最需要看的部分藏起来。
+  （2026-09-12 核对：openlist 域 `file_split` / `sync_marker` / `sync_to_tg` 已上传组
+  与 `file_restore` 曾两种口径，已统一收敛到 `tree_fold`；`task_preview` 与
+  `task_engine` 属结构性清单，保持不折叠——不是漏改。）
 
 ### 4.7 多行块（日志/命令）
 
@@ -566,7 +583,8 @@ env:
 ### 5.3 列表明细
 
 - 先按状态或原因分组（组头 + 计数），再树形列出条目。
-- 每组建议上限 8 条，超出折叠为「还有 N 条…」。
+- 流水类清单每组上限 8 条，超出折叠为「还有 N 条…」；结构性清单不受此限
+  （性质判据见 4.6 节）。
 - 组内还有附属明细时降为二层列表（`│ ` 前缀 + 缩进 2 格的 `├─/└─`）。
 
 ### 5.4 凭据与入口通知
@@ -602,7 +620,7 @@ env:
 | 手拼 HTML（`msg+="<code>…"`） | pwsh 无助手；bash/python 已全部走助手 | 用 8.1 节的助手：`tg_add_*` / `tg_entry` 家族 / `tg_add_pre`（pwsh 按第 4 章的形态手拼、值经 `Esc-Html`） | `tg_entry "video.mp4" "1.7 GB"` → `<code>video.mp4</code> · 1.7 GB`（再交 `tree_lines` 出 `  ├─ ` 前缀） |
 | 分节后跟列表却没计数 | 忘了拼 | 带 ` · N`，规模一眼可见 | `❌ 失败清单 · 3` |
 | 条目用 `• ` 平铺 | 沿用了平铺写法 | 改 `├─/└─` 树形 | `  ├─ <code>video_a.mp4</code><br>  └─ <code>video_b.mp4</code>` |
-| 长列表全量穷举 | 怕漏信息 | 分组 + 每组 8 条 + 折叠行 | `  ├─ <code>video_08.mp4</code><br>  └─ 还有 35 条…` |
+| 长列表全量穷举（流水类） | 怕漏信息 | 分组 + 每组 8 条 + 折叠行；结构性清单不折叠（4.6 节） | `  ├─ <code>video_08.mp4</code><br>  └─ 还有 35 条…` |
 | 英文紧凑时长（`5h 57m`） | 脚本内部格式直接输出 | 中文三段式（4.3 节的时长五层） | `⏱ 已运行 5 小时 57 分` |
 | 高精度浮点（`2.16068914 秒`） | 原始值直出 | 两位小数（4.3 节的时长五层） | `起播 2.16 秒` |
 | ISO 时间戳直出（`2026-09-05T11:34:19Z`） | 原始值直出 | 人性化：UTC + 相对时间（解析失败保留原值） | `上次同步：2026-09-05 11:34 UTC · 15 小时前` |
@@ -718,6 +736,7 @@ tg_add_footer msg; printf '%s\n' "$msg"
 | 条目（双机器值 ·） | `tg_entry_codes` / `tg_add_entry_codes` | — | `tg_entry_codes(a, b, *meta)` |
 | 多行块 | `tg_add_pre` | — | `tg_pre_block(text)` |
 | 说明段 | `tg_add_note` | 手拼 | 手拼 |
+| 测速点网络分节 | — | — | `build_target_network_section` / `network_cells` |
 | 树形 / 折叠 | `tree_conn` `tree_sub` `tree_lines` `tree_code_fold`（裸文本）/ `tree_fold`（已构建条目流） | 手拼 | 手拼 |
 | 转义 | `escape_html` | `Esc-Html` | `html.escape` |
 | 收尾 | `tg_add_footer` | `Get-TgFooter` | `tg_footer_line` / `tg_format_elapsed` |
@@ -726,11 +745,13 @@ tg_add_footer msg; printf '%s\n' "$msg"
 真源文件：`.github/scripts/telegram/tg_notify.sh`、`tg_notify.ps1`、
 `.github/scripts/proxy-speedtest/speedtest_common.py`。
 
-> **pwsh 侧现状**：`tg_notify.ps1` 只有 `Esc-Html` / `Get-TgFooter` / `Send-TgMessage` /
-> `$TG_SEP` 四个成员，**没有 kv 与条目助手**，所以 `openclaw.yml` / `tailscale-windows.yml` /
-> `rdp.yml` / `pixivutil2.yml` 里的 kv 行与树形条目是手拼的——按第 4 章的形态拼即可
-> （`标签：值`、`  ├─ 键：<code>值</code>`），注意值一律经 `Esc-Html`。
-> 哪天想让它们也收敛，就在 pwsh 侧补一组 `Add-TgEntry` 之类的助手，再从四处迁移。
+> **pwsh 侧现状**：`tg_notify.ps1` 只有五个成员——`Esc-Html` / `Format-TgDuration` /
+> `Get-TgFooter` / `Send-TgMessage` / `$TG_SEP`，**没有 kv 与条目助手**。
+> 全库只有 `rdp.yml` 与 `tailscale-windows.yml` **两个** workflow dot-source 它
+> （`openclaw.yml` 与 `pixivutil2.yml` 走的是 bash 真源 `tg_notify.sh`，pixivutil2 还跑在
+> ubuntu-latest，都不碰 pwsh），这两处的 kv 行与树形条目是手拼的——按第 4 章的形态拼
+> 即可（`标签：值`、`  ├─ 键：<code>值</code>`），注意值一律经 `Esc-Html`。
+> 哪天想让它们也收敛，就在 pwsh 侧补一组 `Add-TgEntry` 之类的助手，再从两处迁移。
 
 > 内嵌 python 段（如 `tg-channel/sync_to_tg.sh`）无法 import 共享层，
 > 在本文件内同义实现 `esc` / `tg_entry` / `tg_pre_block`，三处定义保持一致。
