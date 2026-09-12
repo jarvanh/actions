@@ -271,7 +271,7 @@ HTML 变复杂。
 | ☁️ / ⛔ / ❌ iCloud 照片下载 | `icloud-photos-downloader.yml` | 独立 `if: always()` step，按 `job.status` 三态 |
 | ✅ / ⚠️ / ❌ PixivUtil2 任务完成 · 失败 | `pixivutil2.yml` | 按任务状态三态 |
 | 🗑️ ph-dl 下载阶段损坏视频 | `ph-dl.yml` | 下载完整性检查发现损坏 |
-| ✅ / ⚠️ ph-dl 下载任务完成 | `ph-dl.yml` | 收尾（**本轮**有损坏丢弃才降级 ⚠️；库存累计损坏数只作 kv，不参与判定） |
+| ✅ / ⚠️ ph 收藏夹同步完成 | `ph-dl.yml` | 收尾（**本轮**有损坏丢弃才降级 ⚠️；库存累计损坏数只作 kv，不参与判定） |
 
 **示例：备份成功**
 
@@ -865,6 +865,8 @@ run 已结束，以上任务本轮未执行完
 
 三处实现必须同口径，改一处要同步另两处：`format_bytes`（openlist 域）、`human_bytes`
 （tg-channel 两个 dedupe 脚本内的同义实现）、`human_size`（`sync_to_tg.sh` 内嵌 python）。
+workflow 内联的 step 拿不到这些函数，就在 step 内写同义的 awk 实现（如 `ph-dl.yml`），
+口径保持一致——这是「统一优先于个性」的代价，别图省事直接输出 `du -h` 的结果。
 
 > 已知不一致：媒体 caption 里的大小仍走 `du -h`，是全库唯一没收敛到 1024 进制的大小
 > 输出。
