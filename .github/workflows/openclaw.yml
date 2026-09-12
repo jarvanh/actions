@@ -1332,6 +1332,15 @@ jobs:
               esac
             fi
             source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+            # 耗时显示：≥1 秒用秒（两位小数），不足 1 秒用整数毫秒 —— 时长五层
+            # （4.3 节第 3/4 层）同 emby.yml fmt_ms 口径，勿自创形态。
+            # 上游写入的是整数秒，恒按 %.2f 输出时 0 会显示成 "0.00 秒"：既看不出
+            # 快慢，也让人怀疑没测到（4.3 节第 4 层就是为这个单列的）。
+            fmt_ms() { # $1=秒（小数或空）→ "27 毫秒" / "1.40 秒"；空或非法返回空
+              local v=$1
+              case "$v" in ''|*[!0-9.]*) printf ''; return 0;; esac
+              awk -v x="$v" 'BEGIN { if (x < 1) printf "%d 毫秒", x * 1000 + 0.5; else printf "%.2f 秒", x }'
+            }
             msg=""
             tg_add_title msg "🚨 OpenClaw 自愈失败"
             # 英文步骤名不直出通知（规范 5.5 节）
@@ -1350,10 +1359,10 @@ jobs:
               tg_add_kv msg "回退来源" "$_fvs"
             fi
             [ -n "$recorded_successful_version" ] && tg_add_path msg "成功版本记录" "$recorded_successful_version"
-            # 秒统一两位小数（时长五层第 3 层）
-            [ -n "$initial_start_duration_sec" ] && tg_add_kv msg "首次启动耗时" "$(printf '%.2f' "$initial_start_duration_sec") 秒"
-            [ -n "$preflight_doctor_duration_sec" ] && tg_add_kv msg "预检修复耗时" "$(printf '%.2f' "$preflight_doctor_duration_sec") 秒"
-            [ -n "$fallback_reinstall_duration_sec" ] && tg_add_kv msg "回退重装耗时" "$(printf '%.2f' "$fallback_reinstall_duration_sec") 秒"
+            # 耗时走 fmt_ms（4.3 节第 3/4 层），不再一律按秒两位小数
+            [ -n "$initial_start_duration_sec" ] && tg_add_kv msg "首次启动耗时" "$(fmt_ms "$initial_start_duration_sec")"
+            [ -n "$preflight_doctor_duration_sec" ] && tg_add_kv msg "预检修复耗时" "$(fmt_ms "$preflight_doctor_duration_sec")"
+            [ -n "$fallback_reinstall_duration_sec" ] && tg_add_kv msg "回退重装耗时" "$(fmt_ms "$fallback_reinstall_duration_sec")"
             [ -n "$ssh_entry" ] && tg_add_path msg "SSH 调试" "$ssh_entry"
             tg_add_section msg "🧾 关键日志"
             tg_add_block msg "<pre>$(escape_html "$error_summary")</pre>"

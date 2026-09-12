@@ -672,18 +672,19 @@ _render_skipped_groups() {
     _items=$(printf '%s\n' "$_in" | awk -F'\t' -v g="$_g" '$1==g {print $2}')
     _total=$(printf '%s\n' "$_items" | grep -c . || true)
     [ "${_total:-0}" -le 0 ] && continue
+    # 多组列表的组与组之间空行（4.10 第 5 条）：只在前面已有组时才补，首组前不补
+    # （dedupe_*.sh 同款条件；此前两组原因直接相邻，看不出分组边界）
+    [ -n "$_out" ] && _out+=$'\n'
     _out+="$(escape_html "$_g") · ${_total}"$'\n'
-    # 条目先转义成 HTML 再交给 tree_lines（它接收参数、不读 stdin）。
-    # "还有 N 条…" 并入条目流作末条 —— 否则会出现双 └─ 同级、层次混淆
+    # 条目统一走真源 tg_add_entry → 已构建条目流（已转义且含 <code>），
+    # 超 max 条折叠交给 tree_fold（4.6 节）：它只截断 + 加折叠行，不再转义。
+    # 此前这里手写 head -n "$_max" + 拼折叠行，是 tree_fold 的重复实现。
     local _entries=""
     while IFS= read -r _p; do
       [ -z "$_p" ] && continue
       tg_add_entry _entries "$(basename "$_p")"
-    done < <(printf '%s\n' "$_items" | head -n "$_max")
-    if [ "$_total" -gt "$_max" ]; then
-      _entries+="还有 $((_total - _max)) 条…"$'\n'
-    fi
-    _out+="$(tree_lines "$_entries")"$'\n'
+    done < <(printf '%s\n' "$_items")
+    _out+="$(tree_fold "${_entries%$'\n'}" "$_max")"$'\n'
   done < <(printf '%s\n' "$_in" | cut -f1 | uniq)
   printf '%s' "${_out%$'\n'}"
 }
