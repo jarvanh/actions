@@ -126,6 +126,14 @@
   转存 `failed/openclaw-shrunk-<UTC时间>.tar.gz` 并告警。5KB 下限只能拦空包，拦不住
   「非空但少了 99% 内容」——状态恢复不全的一轮会把残缺状态合法写回云端。
   确需主动瘦身时设 `OPENCLAW_SHRINK_GUARD=0` 关闭本轮保护。
+  `zcode.tar.gz` 用同一套判据，开关是 `ZCODE_SHRINK_GUARD`（转存
+  `failed/zcode-shrunk-<UTC时间>.tar.gz`）。
+- **放行（手动）**：保护以「云端现有包」为基准，归档排除规则一旦收紧，新包就会永久
+  小于旧包、被逐轮拒绝 —— 主包冻结，且每 20 分钟重复一次告警。此时手动放行一轮即可
+  重建体积基线：
+  `gh workflow run openclaw.yml -f openclaw_shrink_guard=0 -f zcode_shrink_guard=0`
+  （`workflow_dispatch` inputs，默认 `1`，只传需要放开的那个即可）。
+  归档循环每 20 分钟一轮，日志出现 `upload ok` 后即可取消该轮运行。
 
 ### 机制④：回退与降级守卫
 
