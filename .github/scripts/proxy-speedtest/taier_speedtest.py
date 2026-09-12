@@ -468,7 +468,9 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
         # 计数口径与 cdn/gitee 统一用「可用」（成功=功能可用，含节点连接成功但速度偏低）
         f"📊 节点：共 {len(results)} 个 · 可用 {len(ok_results)} 个",
         # 取值行口径（规范 2.3 节）：测速点与模式都取自引擎参数（机器返回值），整行同为等宽
-        f"📍 测速点：{tg_entry(meta['points'])} · 模式：{tg_entry(meta['mode_label'])}",
+        # 不用 📍：紧随其后的「📍 测速点网络」分节（共享层）已占用该 emoji，
+        # 同一条通知两个 📍 会让读者以为是同一块的两个小组
+        f"🎯 测速点：{tg_entry(meta['points'])} · 模式：{tg_entry(meta['mode_label'])}",
         f"🧪 引擎：{tg_entry('taierspeedtest ' + (VERSION['taier'] or 'latest'))}",
         '',
     ]
@@ -510,13 +512,14 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
     if failed:
         lines.append(f'❌ 失败 · {len(failed)}')
         _failed_entries = []
-        for r in failed[:5]:
+        # 折叠上限取全库默认 8（4.6 节；此前本域用 5，与 tree_fold 默认值不一致）
+        for r in failed[:8]:
             # 并列双机器值（节点名 · 原始异常串）走 tg_entry_codes（4.5 节）
             _failed_entries.append(
                 tg_entry_codes(r.get('name', ''), (r.get('error') or '-')[:80]))
-        if len(failed) > 5:
+        if len(failed) > 8:
             # 折叠行并入条目流，末条 └─ 由下面的循环统一决定（禁双 └─；规范 4.6 节）
-            _failed_entries.append(f'还有 {len(failed) - 5} 条…')
+            _failed_entries.append(f'还有 {len(failed) - 8} 条…')
         for _i, _l in enumerate(_failed_entries, 1):
             _c = '└─' if _i == len(_failed_entries) else '├─'
             lines.append(f'  {_c} {_l}')
@@ -526,7 +529,8 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
     if gist_res and gist_res.get('ok'):
         action = '新建' if gist_res.get('created') else '更新'
         raw_url = ((gist_res.get('yaml') or {}).get('raw_url') or '').strip()
-        gist_lines = [f'✅ 已{action}，达标 {qualified_count} 个 · 阈值 ≥{min_megabit}兆（按{esc(metric_label)}）']
+        # 措辞与 cdn / gitee 统一为「达标 N 个节点 · ≥X兆」（此前本处多「阈值」二字、少「节点」二字）
+        gist_lines = [f'✅ 已{action}，达标 {qualified_count} 个节点 · ≥{min_megabit}兆（按{esc(metric_label)}）']
         if gist_res.get('created'):
             gist_lines.append(f'⚠️ 请把 Gist id 回填到 Secrets {tg_entry("PROXY_SPEEDTEST_TAIER_GIST_ID")}，避免每轮新建')
         if raw_url:

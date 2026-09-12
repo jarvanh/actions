@@ -115,11 +115,21 @@ def esc(s) -> str:
 
 
 def fmt_secs(x: float) -> str:
-    """秒数中文形态（规范禁英文紧凑时长进通知：12.34s → 12.34 秒）。
+    """时长中文形态（规范 4.3 节 时长五层，按量级选，勿自创形态）。
 
-    两位小数：全库秒级统一形态（见 docs/telegram-notify.md 时长写法的秒层）。
+    ≥1h → X 小时 Y 分（分钟不补零）／≥1min → X 分钟／否则 X.XX 秒（两位小数）。
+    禁英文紧凑时长（12.34s → 12.34 秒）。此前本函数恒走秒层，上传耗时 185 秒
+    会输出「185.32 秒」，与全库分钟层口径不一致（大文件必然触发）。
     """
-    return f"{x:.2f} 秒"
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return f"{x} 秒"
+    if v >= 3600:
+        return f"{int(v // 3600)} 小时 {int(v % 3600 // 60)} 分"
+    if v >= 60:
+        return f"{int(v // 60)} 分钟"
+    return f"{v:.2f} 秒"
 
 
 def tg_pre_block(text: str) -> str:
@@ -159,7 +169,7 @@ def build_fail_notify(title: str, file: str, elapsed: float, lines: list):
         TG_SEP,
         # 文件名属机器值 → <code>；emoji 不套标签（规范 2.3 节）
         f"📁 {tg_entry(shorten_name(os.path.basename(file)))}",
-        f"📦 分组：{esc(CAPTION_PREFIX)}",
+        f"📦 分组：{tg_entry(CAPTION_PREFIX)}",  # 机器值 → <code>（2.3 节）
         f"耗时：{fmt_secs(elapsed)}",
     ]
     parts.extend(lines)
@@ -309,13 +319,17 @@ def tail_file(path: str, n: int = 15) -> str:
 
 
 def human_size(num):
-    """与 du -h 风格一致：1024 进制、四舍五入取整，单位 B/K/M/G/T。"""
+    """1024 进制、GiB/MiB/KiB/B，与 openlist format_bytes（及本域 dedupe_*.sh 的
+    human_bytes）同口径：整体统一优先于个性（规范 2.4 节）。
+
+    此前是 du -h 风格（1G / 512M），与全库「1.200 GiB」形态不一致。
+    """
     num = float(num)
-    for unit in ("B", "K", "M", "G", "T"):
-        if num < 1024 or unit == "T":
-            return f"{round(num)}{unit}"
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if num < 1024 or unit == "TiB":
+            return f"{int(num)} {unit}" if unit == "B" else f"{num:.3f} {unit}"
         num /= 1024
-    return f"{round(num)}T"
+    return f"{num:.3f} TiB"
 
 
 def get_video_list():
@@ -336,7 +350,7 @@ def get_video_list():
         notify("\n".join([
             "❌ 获取远端文件列表失败",
             TG_SEP,
-            f"📦 分组：{esc(CAPTION_PREFIX)}",
+            f"📦 分组：{tg_entry(CAPTION_PREFIX)}",  # 机器值 → <code>（2.3 节）
             f"⚠️ 原因：rclone lsjson 退出码 {result.returncode}",
             # 多行日志走 <pre>（与下载失败通知同款口径：5.5 节要求给出原始输出）
             f"📄 stderr：\n{tg_pre_block((result.stderr or '(无错误输出)')[-500:].strip())}",
@@ -357,7 +371,7 @@ def get_video_list():
         notify("\n".join([
             "❌ 获取远端文件列表失败",
             TG_SEP,
-            f"📦 分组：{esc(CAPTION_PREFIX)}",
+            f"📦 分组：{tg_entry(CAPTION_PREFIX)}",  # 机器值 → <code>（2.3 节）
             f"⚠️ 原因：lsjson 输出解析失败：{esc(e)}",
         ]))
         return [], []

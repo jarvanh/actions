@@ -40,19 +40,15 @@ source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 # 每组上限 8 条 + 折叠行"还有 N 条…"并入条目流（规范 4.6 节：残留可能上百条，
 # 全量穷举会刷屏并顶到 4000 分片边界把收尾区切走；末条 └─ 由 tree_lines 统一决定）
 FILE_DETAILS=""
-DETAIL_MAX=8
-_n=0
 for f in "${FRAG_FILES[@]}"; do
-  _n=$((_n + 1))
-  [ "$_n" -gt "$DETAIL_MAX" ] && break
   fname=$(basename "$f")
   fsize=$(du -h "$f" | cut -f1)
   # 条目行统一走 tg_add_entry（主体等宽 + 元数据 " · " 分隔、统一转义）
   tg_add_entry FILE_DETAILS "$fname" "$fsize"
 done
-if [ "${#FRAG_FILES[@]}" -gt "$DETAIL_MAX" ]; then
-  FILE_DETAILS+="还有 $(( ${#FRAG_FILES[@]} - DETAIL_MAX )) 条…"$'\n'
-fi
+# 超 8 条折叠交给真源 tree_fold（4.6 节）：条目流已由 tg_add_entry 构建（已转义、
+# 已含 <code>），tree_fold 只截断 + 加折叠行；此前此处手写计数器截断 + 拼折叠行，
+# 是 tree_fold 的重复实现（与 file_split / sync_marker / sync_to_tg 收敛后不一致）
 
 # 删除残留文件
 find . -type f \( -name '*.mp4-Frag*' -o -name '*.part-Frag*' -o -name '*.ytdl' -o -name '*.m3u8' \) -delete
@@ -64,6 +60,6 @@ tg_add_title msg "🧹 ph-dl 清理 yt-dlp 残留文件"
 tg_add_path msg "目录" "$DIR_LABEL"
 tg_add_kv msg "清理数量" "${FRAG_COUNT} 个"
 tg_add_section msg "📋 文件列表 · ${FRAG_COUNT}"
-tg_add_block msg "$(tree_lines "$FILE_DETAILS")"
+tg_add_block msg "$(tree_fold "${FILE_DETAILS%$'\n'}")"
 tg_add_footer msg
 send_tg_chunked "$msg"

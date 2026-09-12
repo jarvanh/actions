@@ -26,6 +26,16 @@ DIR_LABEL=$(basename "${SOURCE_REMOTE#*:}")
 # escape_html/tree_lines 全部 command-not-found，通知会静默缺损
 source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 
+# 字节数 → 人类可读（与 openlist/utils.sh 的 format_bytes 同口径：1024 进制、
+# B/KiB/MiB/GiB/TiB；此前本域直出「1234567890 字节」，与全库 1.2 GiB 形态不一致）
+human_bytes() {
+  awk -v b="${1:-0}" 'BEGIN {
+    split("B KiB MiB GiB TiB", u)
+    for (i = 1; b >= 1024 && i < 5; i++) b /= 1024
+    if (i == 1) printf "%d %s", b, u[i]; else printf "%.3f %s", b, u[i]
+  }'
+}
+
 # ===== 通知明细折叠（规范 4.6 节: 超长列表禁全量穷举）=====
 # 组内条目上限 8 条（_grp_add 超出转计数），通知中最多展示 8 组（_grp_block 超出折叠）
 GRP_SHOWN=0 GRP_HIDDEN=0
@@ -127,7 +137,7 @@ for id in "${!ID_ENTRIES[@]}"; do
       [ -z "$p" ] && continue
       if rclone deletefile "$SOURCE_REMOTE/$p" 2>/tmp/rclone_err.log; then
         REMOVED_COUNT=$((REMOVED_COUNT + 1))
-        _grp_add group_entries "🗑 删除 $(tg_entry "${p}" "${s} 字节" "${t}")"$'\n'
+        _grp_add group_entries "🗑 删除 $(tg_entry "${p}" "$(human_bytes "$s")" "${t}")"$'\n'
       else
         _grp_add group_entries "❌ 删除失败 $(tg_entry "${p}")"$'\n'
         echo "  ❌ 删除失败: $(tail -n 3 /tmp/rclone_err.log)"
@@ -157,13 +167,13 @@ for id in "${!ID_ENTRIES[@]}"; do
       if [ "$AUTO_DELETE" = "true" ]; then
         if rclone deletefile "$SOURCE_REMOTE/$p" 2>/tmp/rclone_err.log; then
           REMOVED_COUNT=$((REMOVED_COUNT + 1))
-          _grp_add group_entries "🗑 删除 $(tg_entry "${p}" "${s} 字节" "${t}")"$'\n'
+          _grp_add group_entries "🗑 删除 $(tg_entry "${p}" "$(human_bytes "$s")" "${t}")"$'\n'
         else
           _grp_add group_entries "❌ 删除失败 $(tg_entry "${p}")"$'\n'
           echo "  ❌ 删除失败: $(tail -n 3 /tmp/rclone_err.log)"
         fi
       else
-        _grp_add group_entries "⚠️ 待删除 · 已跳过 $(tg_entry "${p}" "${s} 字节" "${t}")"$'\n'
+        _grp_add group_entries "⚠️ 待删除 · 已跳过 $(tg_entry "${p}" "$(human_bytes "$s")" "${t}")"$'\n'
       fi
     done <<< "$sorted"
     _fold=$(_grp_fold)
