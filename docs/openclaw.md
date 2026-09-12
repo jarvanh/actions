@@ -30,7 +30,7 @@
 | Run AI API gateway | CliRelay 全栈优先 / CLIProxyAPI 回退 | 8317 → 隧道 `ai-api` |
 | Run OpenClaw | 自愈主流程（本文第三、四章） | 18789 |
 | Start background archive loop | 每 20 分钟归档 `~/.openclaw` + AI 网关数据（`flock` 防重入） | Dropbox |
-| Keep alive → Stop OpenClaw and Final Archive → Trigger next OpenClaw run | 收尾与自我接力 | — |
+| Keep alive → Stop OpenClaw and Final Archive → Notify OpenClaw final archive result → Trigger next OpenClaw run | 收尾与自我接力 | — |
 
 > rss-to-telegram 带一层自愈：登录被 `AuthKeyDuplicatedError` 判废时删掉 `bot.session*` 重启一次并立即归档。
 
@@ -131,6 +131,11 @@
 - **体积骤降只记录、不拦截**：新包不足云端 60% 时仅在日志留一行
   `ℹ️ 体积较云端下降超 40%`，照常覆盖。保留「包为什么变小了」的可追溯性，
   但不再拿它当拦截判据。
+- **归档结果汇总**：各归档分支边归档边把结果（对象 / 结论 / 字节 / 备注）写进
+  `/tmp/openclaw-final-archive-results.tsv`，快照名另写一个文件；最终归档结束后由
+  独立步骤 `Notify OpenClaw final archive result` 渲染成一条通知。之所以不在归档步骤
+  内直接发：该步骤多处 `exit 1`（预检失败 / 磁盘不足），写在末尾的通知会随之被跳过。
+  临时包成功上传后即被删除，所以大小只能当场记、不能事后反推。
 
 ### 机制④：回退与降级守卫
 
@@ -191,6 +196,7 @@ tar -xzf /tmp/restore.tar.gz -C /tmp/restore .openclaw/openclaw.json
 | `🚨 OpenClaw 自愈失败` | `Run OpenClaw` 步骤失败 | 步骤、Run ID、失败阶段（中文）、当前版本、Fallback + 来源、成功版本记录、三段耗时、SSH 调试入口、🧾 关键日志（`<pre>` 等宽块，最多 2800 字节） |
 | `⚠️ 归档告警 · <对象>` | 20 分钟归档循环失败 | 问题（上传失败 / 归档失败 / 目录缺失 / 状态不全）+ 对象名 + Run ID |
 | `⚠️ 最终归档告警 · <对象>` | 最终归档失败 | 同上；标题以「最终归档」区分阶段 |
+| `✅ / ⚠️ / ❌ OpenClaw 最终归档结果` | 最终归档之后（`Notify OpenClaw final archive result`） | 结果计数（成功 / 失败 / 跳过）+ 合计大小 + 快照名 + 📦 归档明细（每个包一行：结论 + 大小 + 去向）；未产出明细时降级为「⚠️ 最终归档未完成」 |
 | `⚠️ OpenClaw 即将进入最终归档` | keepalive 第 325 分钟 | 约 15 分钟后执行 `Stop OpenClaw and Final Archive` |
 
 > `<对象>` 为归档短名：`OpenClaw 主包` / `ZCode` / `CliRelay` / `CLIProxyAPI` /

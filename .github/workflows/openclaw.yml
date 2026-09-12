@@ -1989,6 +1989,7 @@ jobs:
           sleep "${KEEPALIVE_MINUTES}m"
 
       - name: Stop OpenClaw and Final Archive
+        id: final_archive
         env:
           # send_archive_alert 同上：未注入时约 15 处最终归档告警静默不发
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -2058,6 +2059,22 @@ jobs:
             fi
           }
 
+          # 归档结果累积（供收尾的「最终归档结果」通知读取）：对象 \t 结论 \t 字节 \t 备注
+          # 结论由各归档分支当场判定（ok / fail / skip）——临时包成功上传后即被删除，
+          # 事后无法再测大小，所以只能边归档边记，不能等收尾时反推。
+          # 单独落文件而不是靠步骤内变量：通知在下一个 step，两者不共享 shell 作用域。
+          FINAL_ARCHIVE_RESULTS="/tmp/openclaw-final-archive-results.tsv"
+          : > "$FINAL_ARCHIVE_RESULTS"
+          # 记录失败不得影响归档本身：本步骤是 set -e，写结果只是旁路副作用，
+          # 磁盘写不进去时留一行日志继续（归档成功与否不该被一条统计记录左右）
+          record_archive_result() {
+            printf '%s\t%s\t%s\t%s\n' "$1" "$2" "${3:-0}" "${4:-}" >> "$FINAL_ARCHIVE_RESULTS" 2>/dev/null \
+              || echo "⚠️ 归档结果记录失败（不影响归档）: $1 $2" >&2
+          }
+          # 快照名单独记（它是主包的副本，混进明细会与主包重复计数）
+          FINAL_ARCHIVE_SNAPSHOT="/tmp/openclaw-final-snapshot-name"
+          rm -f "$FINAL_ARCHIVE_SNAPSHOT"
+
           echo "4. Performing final archive to Dropbox..."
           cleanup_archive_outputs() {
             rm -f /tmp/openclaw-final.tar.gz /tmp/rsstt.tar.gz /tmp/CliRelay.tar.gz /tmp/zcode-final.tar.gz 2>/dev/null || true
@@ -2113,12 +2130,16 @@ jobs:
             fi
             if openclaw_final_upload_output=$(rclone copyto "$TMP_OPENCLAW_TAR" "$ARCHIVE_DEST" -v 2>&1); then
               echo "final openclaw archive/upload ok → $ARCHIVE_DEST: ${openclaw_final_output}"
+              # 大小必须在 rm 之前取——成功上传后临时包即被删除，事后测不到
+              openclaw_final_size=$(stat -c%s "$TMP_OPENCLAW_TAR" 2>/dev/null || echo 0)
               if [ "$HEALTHY_RUN" = "1" ]; then
+                record_archive_result "openclaw.tar.gz" ok "$openclaw_final_size" "覆盖主包"
                 echo "6. Versioned snapshot (every healthy run, keep 3)..."
                 SNAP_VERSION="$(grep '^RECORDED_SUCCESSFUL_OPENCLAW_VERSION=' /tmp/run-openclaw-meta.env | tail -n 1 | cut -d= -f2-)"
                 SNAP_NAME="openclaw-$(date -u +%Y%m%d-%H%M)-v${SNAP_VERSION}.tar.gz"
                 if rclone copyto "$TMP_OPENCLAW_TAR" "dropbox:self-hosted/snapshots/${SNAP_NAME}" -v 2>&1; then
                   echo "✅ Versioned snapshot uploaded: dropbox:self-hosted/snapshots/${SNAP_NAME}"
+                  printf '%s\n' "$SNAP_NAME" > "$FINAL_ARCHIVE_SNAPSHOT"
                 else
                   echo "⚠️ Versioned snapshot upload failed (non-fatal)."
                 fi
@@ -2126,6 +2147,7 @@ jobs:
                   rclone deletefile "dropbox:self-hosted/snapshots/${OLD_SNAP}" 2>/dev/null || true
                 done
               else
+                record_archive_result "openclaw.tar.gz" ok "$openclaw_final_size" "写入失败现场 · 主包未覆盖"
                 rclone lsf dropbox:self-hosted/failed/ --files-only 2>/dev/null | sort -r | tail -n +3 | while read -r OLD_FAILED; do
                   rclone deletefile "dropbox:self-hosted/failed/${OLD_FAILED}" 2>/dev/null || true
                 done
@@ -2135,11 +2157,13 @@ jobs:
             else
               rc=$?
               echo "⚠️ final openclaw.tar.gz upload failed (rc=$rc): ${openclaw_final_upload_output}"
+              record_archive_result "openclaw.tar.gz" fail 0 "上传失败 · 退出码 $rc"
               send_archive_alert "openclaw.tar.gz" "上传失败 · 退出码 $rc" "rclone 上传失败" "${openclaw_final_upload_output:-无输出}"
             fi
           else
             rc=$?
             echo "⚠️ final openclaw.tar.gz archive failed (rc=$rc): ${openclaw_final_output}"
+            record_archive_result "openclaw.tar.gz" fail 0 "归档失败 · 退出码 $rc"
             send_archive_alert "openclaw.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${openclaw_final_output:-归档脚本无输出}"
           fi
 
@@ -2157,19 +2181,23 @@ jobs:
               zcode_final_upload_output=""
               if zcode_final_upload_output=$(rclone copyto "$TMP_ZCODE_FINAL_TAR" "dropbox:self-hosted/zcode.tar.gz" -v 2>&1); then
                 echo "final zcode archive/upload ok: ${zcode_final_output}"
+                record_archive_result "zcode.tar.gz" ok "$zcode_final_new_size"
                 rm -f "$TMP_ZCODE_FINAL_TAR"
               else
                 rc=$?
                 echo "⚠️ final zcode.tar.gz upload failed (rc=$rc): ${zcode_final_upload_output}"
+                record_archive_result "zcode.tar.gz" fail 0 "上传失败 · 退出码 $rc"
                 send_archive_alert "zcode.tar.gz" "上传失败 · 退出码 $rc" "rclone 上传失败" "${zcode_final_upload_output:-无输出}"
               fi
             else
               rc=$?
               echo "⚠️ final zcode.tar.gz archive failed (rc=$rc): ${zcode_final_output}"
+              record_archive_result "zcode.tar.gz" fail 0 "归档失败 · 退出码 $rc"
               send_archive_alert "zcode.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${zcode_final_output:-归档脚本无输出}"
             fi
           else
             echo "ℹ️ ~/.zcode/cli 不存在（本机从未部署 ZCode），跳过 ZCode 最终归档"
+            record_archive_result "zcode.tar.gz" skip 0 "本机未部署 ZCode"
           fi
 
           MIN_SIZE=$((5 * 1024))
@@ -2192,25 +2220,30 @@ jobs:
                   clirelay_final_upload_output=""
                   if clirelay_final_upload_output=$(rclone copyto /tmp/CliRelay.tar.gz dropbox:self-hosted/CliRelay.tar.gz -v 2>&1); then
                     echo "final CliRelay archive/upload ok: ${clirelay_final_output}"
+                    record_archive_result "CliRelay.tar.gz" ok "$actual_size"
                     rm -f /tmp/CliRelay.tar.gz
                   else
                     rc=$?
                     echo "⚠️ final CliRelay.tar.gz upload failed (rc=$rc): ${clirelay_final_upload_output}"
+                    record_archive_result "CliRelay.tar.gz" fail 0 "上传失败 · 退出码 $rc"
                     send_archive_alert "CliRelay.tar.gz" "上传失败 · 退出码 $rc" "rclone 上传失败" "${clirelay_final_upload_output:-无输出}"
                   fi
                 else
                   echo "⚠️ CliRelay 压缩包小于 5KB，放弃覆盖云端数据: size=${actual_size}"
+                  record_archive_result "CliRelay.tar.gz" fail 0 "压缩包小于最小阈值"
                   send_archive_alert "CliRelay.tar.gz" "归档失败" "压缩包小于最小阈值 · 放弃覆盖云端数据" "size=$actual_size min=$MIN_SIZE output=/tmp/CliRelay.tar.gz"
                 fi
               else
                 rc=$?
                 echo "⚠️ final CliRelay.tar.gz archive failed (rc=$rc): ${clirelay_final_output}"
+                record_archive_result "CliRelay.tar.gz" fail 0 "归档失败 · 退出码 $rc"
                 send_archive_alert "CliRelay.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${clirelay_final_output:-归档脚本无输出}"
               fi
               echo "Stopping CliRelay compose stack after final archive..."
               docker compose -p clirelay -f /tmp/local_CliRelay/docker-compose.yml --project-directory /tmp/local_CliRelay down 2>/dev/null || true
             else
               echo "⚠️ /tmp/local_CliRelay 不存在，跳过 CliRelay 归档"
+              record_archive_result "CliRelay.tar.gz" fail 0 "部署目录未初始化"
               send_archive_alert "CliRelay.tar.gz" "归档失败 · 退出码 3" "CliRelay 本地部署目录未初始化 · /tmp/local_CliRelay 不存在 · 通常表示 CliRelay 启动步骤被跳过或失败" "CliRelay 本地部署目录未初始化"
             fi
           elif [ -d /tmp/local_CLIPProxyAPI ]; then
@@ -2231,23 +2264,28 @@ jobs:
                 cliproxyapi_final_upload_output=""
                 if cliproxyapi_final_upload_output=$(rclone copyto /tmp/CLIProxyAPI.tar.gz dropbox:self-hosted/CLIProxyAPI.tar.gz -v 2>&1); then
                   echo "final CLIProxyAPI archive/upload ok: ${cliproxyapi_final_output}"
+                  record_archive_result "CLIProxyAPI.tar.gz" ok "$actual_size"
                   sudo rm -f /tmp/CLIProxyAPI.tar.gz
                 else
                   rc=$?
                   echo "⚠️ final CLIProxyAPI.tar.gz upload failed (rc=$rc): ${cliproxyapi_final_upload_output}"
+                  record_archive_result "CLIProxyAPI.tar.gz" fail 0 "上传失败 · 退出码 $rc"
                   send_archive_alert "CLIProxyAPI.tar.gz" "上传失败 · 退出码 $rc" "rclone 上传失败" "${cliproxyapi_final_upload_output:-无输出}"
                 fi
               else
                 echo "⚠️ CLIProxyAPI 压缩包小于 10KB，放弃覆盖云端数据: size=${actual_size} min=${MIN_SIZE}"
+                record_archive_result "CLIProxyAPI.tar.gz" fail 0 "压缩包小于最小阈值"
                 send_archive_alert "CLIProxyAPI.tar.gz" "归档失败" "压缩包小于最小阈值 · 放弃覆盖云端数据" "size=$actual_size min=$MIN_SIZE output=/tmp/CLIProxyAPI.tar.gz"
               fi
             else
               rc=$?
               echo "⚠️ final CLIProxyAPI.tar.gz archive failed (rc=$rc): ${cliproxyapi_final_output}"
+              record_archive_result "CLIProxyAPI.tar.gz" fail 0 "归档失败 · 退出码 $rc"
               send_archive_alert "CLIProxyAPI.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${cliproxyapi_final_output:-归档脚本无输出}"
             fi
           else
             echo "⚠️ /tmp/local_CLIPProxyAPI 不存在，跳过 CLIProxyAPI 归档"
+            record_archive_result "CLIProxyAPI.tar.gz" fail 0 "数据目录未初始化"
             send_archive_alert "CLIProxyAPI.tar.gz" "归档失败 · 退出码 3" "CLIProxyAPI 本地数据目录未初始化 · /tmp/local_CLIPProxyAPI 不存在 · 通常表示 CLIProxyAPI 容器启动步骤被跳过或失败" "cliproxyapi_dir_missing"
           fi
 
@@ -2269,6 +2307,7 @@ jobs:
             rsstt_data_files=$(sudo find /tmp/local_rsstt -type f ! -name '.keep' 2>/dev/null | wc -l)
             if [ "$((rsstt_data_files + 0))" -lt 1 ]; then
               echo "⚠️ rss-to-telegram 本轮没有产生数据文件，跳过归档，云端 rsstt.tar.gz 保持原状"
+              record_archive_result "rsstt.tar.gz" skip 0 "本轮未产生数据"
               send_archive_alert "rsstt.tar.gz" "归档跳过" "本轮 rss-to-telegram 未产生数据 · 云端归档保持原状未覆盖" "data_files=0 dir=/tmp/local_rsstt"
             elif rsstt_tar_output=$(sudo tar -czf /tmp/rsstt.tar.gz -C /tmp/local_rsstt . 2>&1); then
               # 同上：root 产出的包由 runner 身份的 rclone 上传，显式放开读权限
@@ -2281,30 +2320,134 @@ jobs:
                   rsstt_upload_output=""
                   if rsstt_upload_output=$(rclone copyto /tmp/rsstt.tar.gz dropbox:self-hosted/rsstt.tar.gz -v 2>&1); then
                     echo "final rsstt archive/upload ok"
+                    record_archive_result "rsstt.tar.gz" ok "$actual_size"
                     sudo rm -f /tmp/rsstt.tar.gz
                   else
                     rc=$?
                     echo "⚠️ final rsstt.tar.gz upload failed (rc=$rc): ${rsstt_upload_output}"
+                    record_archive_result "rsstt.tar.gz" fail 0 "上传失败 · 退出码 $rc"
                     send_archive_alert "rsstt.tar.gz" "上传失败 · 退出码 $rc" "rclone 上传失败" "${rsstt_upload_output:-无输出}"
                   fi
                 else
                   echo "⚠️ rsstt 压缩包小于 10KB，放弃覆盖云端数据: size=${actual_size} min=${MIN_SIZE}"
+                  record_archive_result "rsstt.tar.gz" fail 0 "压缩包小于最小阈值"
                   send_archive_alert "rsstt.tar.gz" "归档失败" "压缩包小于最小阈值 · 放弃覆盖云端数据" "size=$actual_size min=$MIN_SIZE output=/tmp/rsstt.tar.gz"
                 fi
               else
                 rc=$?
                 echo "⚠️ final rsstt.tar.gz validation failed (rc=$rc): ${rsstt_validate_output}"
+                record_archive_result "rsstt.tar.gz" fail 0 "归档校验失败 · 退出码 $rc"
                 send_archive_alert "rsstt.tar.gz" "归档校验失败 · 退出码 $rc" "tar 列表校验失败" "${rsstt_validate_output:-无输出}"
               fi
             else
               rc=$?
               echo "⚠️ final rsstt.tar.gz archive failed (rc=$rc): ${rsstt_tar_output}"
+              record_archive_result "rsstt.tar.gz" fail 0 "归档失败 · 退出码 $rc"
               send_archive_alert "rsstt.tar.gz" "归档失败 · 退出码 $rc" "tar 创建失败" "${rsstt_tar_output:-无输出}"
             fi
           else
             echo "⚠️ /tmp/local_rsstt 不存在，跳过 rss-to-telegram 归档"
+            record_archive_result "rsstt.tar.gz" fail 0 "数据目录未初始化"
             send_archive_alert "rsstt.tar.gz" "归档失败 · 退出码 3" "rss-to-telegram 本地数据目录未初始化 · /tmp/local_rsstt 不存在 · 通常表示 rss-to-telegram 容器启动步骤被跳过或失败" "rsstt_dir_missing"
           fi
+
+      # 最终归档结果汇总（规范 · 结果通知）：归档步骤边归档边把结果写进 /tmp 的结果文件，
+      # 这里统一渲染成一条通知。单独成 step 而不是并进归档步骤——归档步骤多处 exit 1
+      # （预检失败 / 磁盘不足），写在步骤末尾的通知会随之被跳过；always() + 结果文件
+      # 让「没产出明细」也能有交代（那类失败在归档步骤内不产生任何通知）。
+      - name: Notify OpenClaw final archive result
+        if: ${{ always() }}
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TG_RUN_STARTED_AT: ${{ github.run_started_at }}
+          ARCHIVE_STEP_CONCLUSION: ${{ steps.final_archive.conclusion }}
+        run: |
+          # 刻意不用 set -e：本步骤的任务是把已归档的结果送出去，任何一处判断失误都不该
+          # 变成「静默不发」；发送失败由末尾的 || echo ::warning:: 留痕（规范 · 发送层）
+          set -uo pipefail
+          # 凭据校验在 source 之前（规范 · 接线）
+          if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
+            echo "⚠️ Telegram secrets missing, skip final archive result notification."
+            exit 0
+          fi
+          source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+
+          RESULTS_FILE="/tmp/openclaw-final-archive-results.tsv"
+          SNAPSHOT_FILE="/tmp/openclaw-final-snapshot-name"
+
+          msg=""
+          # 归档步骤在记录任何结果前就结束了（预检 exit 1 / 运行被取消）：降级为「未完成」
+          if [ ! -s "$RESULTS_FILE" ]; then
+            case "${ARCHIVE_STEP_CONCLUSION:-}" in
+              success)   _verdict="归档步骤已结束，但未产出归档明细" ;;
+              failure)   _verdict="归档步骤执行失败" ;;
+              cancelled) _verdict="运行已被取消" ;;
+              skipped)   _verdict="归档步骤被跳过" ;;
+              *)         _verdict="归档步骤未执行" ;;
+            esac
+            tg_add_title msg "⚠️ OpenClaw 最终归档未完成"
+            tg_add_kv msg "结论" "$_verdict"
+            tg_add_note msg "本轮没有产出归档明细，云端归档保持上一轮状态。"
+            tg_add_footer msg
+            send_tg "$msg" || echo "::warning::TG 通知发送失败（不影响任务）"
+            exit 0
+          fi
+
+          # 逐条读结果并计数；条目边读边构建。明细是固定几项的结构性清单（最多 5 项），
+          # 全量展示不折叠（规范 · 折叠规则）——折掉任何一项都会让读者误判归档是否完整。
+          ok_n=0; fail_n=0; skip_n=0; total_bytes=0
+          entries=""
+          # read 的退出码兜底（|| [ -n "$_obj" ]）：末行缺尾换行时 read 返回非 0 但变量已赋值，
+          # 只看退出码会静默丢掉最后一个归档对象——而「少一项」正是这条通知要防的误判。
+          while IFS=$'\t' read -r _obj _verdict _bytes _note || [ -n "${_obj:-}" ]; do
+            [ -z "$_obj" ] && continue
+            case "$_bytes" in ''|*[!0-9]*) _bytes=0 ;; esac
+            case "$_verdict" in
+              ok)
+                ok_n=$((ok_n + 1))
+                total_bytes=$((total_bytes + _bytes))
+                tg_add_entry entries "$_obj" "✅ $(format_bytes "$_bytes")" "$_note"
+                ;;
+              skip)
+                skip_n=$((skip_n + 1))
+                tg_add_entry entries "$_obj" "⏭️ 跳过" "$_note"
+                ;;
+              *)
+                fail_n=$((fail_n + 1))
+                tg_add_entry entries "$_obj" "❌ ${_note:-失败}"
+                ;;
+            esac
+          done < "$RESULTS_FILE"
+
+          # 标题按严重度降级（规范 · 状态图标）：全败 ❌ > 有失败 ⚠️ > 全成 ✅
+          if [ "$fail_n" -gt 0 ] && [ "$ok_n" -eq 0 ]; then
+            tg_add_title msg "❌ OpenClaw 最终归档失败"
+          elif [ "$fail_n" -gt 0 ]; then
+            tg_add_title msg "⚠️ OpenClaw 最终归档完成 · 部分失败"
+          else
+            tg_add_title msg "✅ OpenClaw 最终归档完成"
+          fi
+
+          # 计数只列非零项，避免「失败 0」这种与标题自相矛盾的写法（规范 · 计数与量化）
+          result_parts=""
+          if [ "$ok_n" -gt 0 ]; then result_parts="成功 $ok_n"; fi
+          if [ "$fail_n" -gt 0 ]; then result_parts="${result_parts:+${result_parts} · }失败 $fail_n"; fi
+          if [ "$skip_n" -gt 0 ]; then result_parts="${result_parts:+${result_parts} · }跳过 $skip_n"; fi
+          tg_add_kv msg "结果" "$result_parts"
+          if [ "$ok_n" -gt 0 ]; then
+            tg_add_kv msg "大小" "合计 $(format_bytes "$total_bytes")"
+          fi
+          # 快照是主包的副本，单列一行、不并入明细与合计（否则与主包重复计数）
+          if [ -s "$SNAPSHOT_FILE" ]; then
+            tg_add_path msg "快照" "$(cat "$SNAPSHOT_FILE")"
+          fi
+
+          tg_add_section msg "📦 归档明细 · $((ok_n + fail_n + skip_n))"
+          tg_add_block msg "$(tree_lines "$entries")"
+          tg_add_footer msg
+          send_tg "$msg" || echo "::warning::TG 通知发送失败（不影响任务）"
 
       - name: Trigger next OpenClaw run
         if: ${{ always() && steps.keepalive.conclusion == 'success' }}

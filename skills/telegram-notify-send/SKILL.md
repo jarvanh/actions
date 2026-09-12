@@ -46,6 +46,10 @@ agent_created: true
 - bash 真源有 `TG_BOT_TOKEN` / `TG_CHAT_ID` 别名回退（L48-49）；**pwsh 没有**，必须注入 `TELEGRAM_*`。
 - python：凭据从传入的 `env` dict 读，但 `TG_RUN_URL` / `TG_RUN_STARTED_AT` **只读 `os.environ`**，只给 dict 不够。
 - pwsh step 要 `shell: pwsh`。
+- **汇总类通知建议独立成 step**：业务步骤里常有 `exit 1` 早退（预检失败 / 磁盘不足），
+  写在步骤末尾的通知会被一起跳过；跨 step 传结果只能落临时文件（两个 step 不共享 shell
+  作用域）。范例：`openclaw.yml` 的 `Notify OpenClaw final archive result` 读
+  `/tmp/openclaw-final-archive-results.tsv`。
 
 ## 第 3 步：搭消息
 
@@ -124,6 +128,8 @@ send_tg "$msg" || echo "::warning::TG 通知发送失败（不影响任务）"
 7. **`<pre>` 超长**：原始输出取尾部 1200 字节（与 `file_split.sh` 同口径）——超长会让 `<pre>` 跨 4000 分片、标签断开即破版。
 8. **大小口径**：用通知真源的 `format_bytes`（输出 `1.150 GiB`，1024 进制 + 三位小数），**不是** `du -h` 的 `1G`，也不要裸字节。python 侧两处同义实现改口径时要同步。
 9. **内嵌 python 段漏实现助手**：bash 里的 python 段无法 import 共享层，用到 `tg_entry` 却没在本文件定义 → NameError → 连整轮汇总通知一起丢。
+10. **通知写在会 `exit 1` 的步骤末尾**：步骤级 `always()` 只保证「任务失败时本步骤仍执行」，挡不住步骤**内部**早退——业务步骤在通知之前 `exit 1`，通知就整条不发。汇总类通知独立成 step，业务步骤只负责把结果落文件（`openclaw.yml` 的归档结果即此形态）。
+11. **`while read` 读结果文件丢掉最后一条**：末行缺尾换行时 `read` 返回非 0（变量已赋值），只写 `while IFS=$'\t' read -r a b c d` 会静默少一项。写成 `while IFS=$'\t' read -r a b c d || [ -n "${a:-}" ]`。
 
 ## 参考文件
 
