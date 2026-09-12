@@ -103,6 +103,10 @@ send_tg "$msg" || echo "::warning::TG 通知发送失败（不影响任务）"
 
 ## 第 5 步：写完自检
 
+> 用户报某条通知「坏了」并贴出内容时：先**本地复现**那条通知再动手改，别凭代码推断——
+> mock 掉协作者、把渲染结果捕获下来，自相矛盾的行会自己浮出来。手法见
+> `skills/telegram-notify-audit/SKILL.md` 的「复现」一节。
+
 1. **渲染预览**（能抓到纯代码审查漏掉的问题）：
    `bash skills/telegram-notify-audit/scripts/render_preview.sh`
    它会跑 16 项校验（分隔线 18 条、转义是否二次处理、树形前缀、折叠行、说明段空行、二层列表子行是否与条目正文同列等）。
@@ -121,7 +125,7 @@ send_tg "$msg" || echo "::warning::TG 通知发送失败（不影响任务）"
 
 1. **二次转义**：`tree_code_fold` 收**裸文本**（一站式转义 + `<code>` + 折叠）；`tree_fold` 收**已构建条目流**（只截断）。对已含 `<code>` 的条目流用 `tree_code_fold` → `&` 变 `&amp;amp;`、整条 400 丢失。同理，`tg_add_entry` 的第二参是**裸主体**，预先包 `<code>` 也会被二次转义。
 2. **尾换行被吃掉**：`$(tg_entry …)` 不输出换行，命令替换又会吃掉它 → 累积多行列表一律用 `tg_add_entry`。
-3. **footer 两步写法**：`tg_add_footer` 必须原地追加到**已积累正文**的变量。先接在空变量上再拼正文 → 空行丢失（真源 L131-132 注释）。
+3. **footer 两步写法**：`tg_add_footer` 必须原地追加到**已积累正文**的变量。先接在空变量上再拼正文 → 空行丢失（真源 `tg_add_footer` 上方注释）。
 4. **通知写在业务块末尾且无 `always()`**：任务失败时反而收不到通知——全库最常被忽略的接线坑。
 5. **pwsh 不自检**：dot-source 后要 `if (-not (Get-Command Send-TgMessage -ErrorAction SilentlyContinue)) { throw ... }`。调用未定义函数是终止错误，step 带 `continue-on-error` 时表现为**通知静默消失**。
 6. **python 兜底分支吞异常**：`try: send_telegram(...) except: pass` 会同时吞掉异常和返回值，400/429 完全没有痕迹。用 `notify_best_effort(stage, msg)`。
