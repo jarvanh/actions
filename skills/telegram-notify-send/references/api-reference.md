@@ -85,7 +85,7 @@ tree_code_fold <多行裸文本> [上限=8]          # 转义 + <code> + 截断
 
 已知例外：测速指标串里的延迟用紧凑 `NNms`（要和 `↑`/`↓` 并排）。
 
-**大小**：1024 进制 + 三位小数 + IEC 单位 → `1.150 GiB` / `800 MiB`。三处实现必须同口径：`format_bytes`（`openlist/utils.sh`）、`human_bytes`（tg-channel 两个 dedupe 脚本）、`human_size`（`sync_to_tg.sh` 内嵌 python）。**不要用 `du -h` 的 `1G`，也不要输出裸字节。**
+**大小**：1024 进制 + 三位小数 + IEC 单位 → `1.150 GiB` / `800 MiB`。bash 侧唯一实现是通知真源 `tg_notify.sh` 的 `format_bytes`，source 真源后直接用；python 侧仍有两处同义实现（`add_uploaded_video.py`、`sync_to_tg.sh` 内嵌段），改口径时要同步。**不要用 `du -h` 的 `1G`，也不要输出裸字节。**
 
 **日期**：`YYYY-MM-DD HH:MM UTC` + ` · N 小时前`（解析失败保留原值）。
 

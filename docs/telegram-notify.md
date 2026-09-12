@@ -863,13 +863,13 @@ run 已结束，以上任务本轮未执行完
 1024 进制 + 三位小数 + IEC 单位：`1.150 GiB`、`800 MiB`、`12.00 KiB`。
 不要用 `du -h` 的 `1G` 口径，也不要输出裸字节（`1234567890 字节`）。
 
-三处实现必须同口径，改一处要同步另两处：`format_bytes`（openlist 域）、`human_bytes`
-（tg-channel 两个 dedupe 脚本内的同义实现）、`human_size`（`sync_to_tg.sh` 内嵌 python）。
-workflow 内联的 step 拿不到这些函数，就在 step 内写同义的 awk 实现（如 `ph-dl.yml`），
-口径保持一致——这是「统一优先于个性」的代价，别图省事直接输出 `du -h` 的结果。
+**bash 侧只有一份实现**：通知真源 `tg_notify.sh` 的 `format_bytes`。凡是 source 了
+真源的通知点直接用它——openlist 域经 `load_all.sh` 注入，tg-channel 各脚本与 workflow
+内联各自 source 真源。此前 openlist / tg-channel / workflow 内联各有一份同义实现，
+改口径要四处同步极易漏改，已收敛。
 
-> 已知不一致：媒体 caption 里的大小仍走 `du -h`，是全库唯一没收敛到 1024 进制的大小
-> 输出。
+python 侧拿不到 bash 函数，仍有两处同义实现（`add_uploaded_video.py` 与
+`sync_to_tg.sh` 内嵌段），改口径时这两处要跟着改。
 
 ### 5.3 日期与相对时间
 
@@ -961,6 +961,7 @@ workflow 内联的 step 拿不到这些函数，就在 step 内写同义的 awk 
 | 多行块 | `tg_add_pre` | — | `tg_pre_block(text)` |
 | 说明段 | `tg_add_note` | 手拼 | 手拼 |
 | 树形 / 折叠 | `tree_conn` `tree_sub` `tree_lines` `tree_code_fold`（裸文本）/ `tree_fold`（已构建条目流） | 手拼 | 手拼 |
+| 大小格式化 | `format_bytes` | 手算 | 手算（python 侧同义实现） |
 | 转义 | `escape_html` | `Esc-Html` | `html.escape` |
 | 收尾 | `tg_add_footer` | `Get-TgFooter` | `tg_footer_line` / `tg_format_elapsed` |
 | 发送 | `send_tg` / `send_tg_chunked` | `Send-TgMessage` | `send_telegram` / `send_telegram_chunked` |

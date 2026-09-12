@@ -127,14 +127,17 @@ get_transferred_bytes_from_log() {
 }
 
 # 格式化字节数为人类可读字符串（如 "1.234 GiB"）
-format_bytes() {
-  awk -v b="$1" 'BEGIN {
-    split("B KiB MiB GiB TiB PiB", u)
-    for(i=1; b>=1024 && i<6; i++) b/=1024
-    if(i==1) printf "%d %s\n", b, u[i]
-    else printf "%.3f %s\n", b, u[i]
-  }'
-}
+# 实现已收敛到通知真源 `telegram/tg_notify.sh` 的 format_bytes（全库唯一）——
+# tg-channel 与 workflow 内联也要用同一口径，放这里它们拿不到。
+# load_all.sh 的 L0 已先 source 真源；但部分测试与脚本会直接 source 本文件，
+# 那种情况在下面补加载一次，避免 format_bytes 未定义。
+if ! declare -F format_bytes >/dev/null 2>&1; then
+  _utils_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  for _utils_tg in "$_utils_dir/telegram/tg_notify.sh" "$_utils_dir/../telegram/tg_notify.sh"; do
+    if [ -f "$_utils_tg" ]; then source "$_utils_tg"; break; fi
+  done
+  unset _utils_tg
+fi
 
 # IEC 格式字节数（等价 numfmt --to=iec-i --suffix=B，失败回退 "${bytes}B"）
 # 与 format_bytes 的 "1.000 GiB" 风格不同，本函数输出 "1.0GiB"，用于既有日志格式
