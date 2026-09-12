@@ -260,6 +260,258 @@ _sync_fixed_files_exclusion() {
   fi
 }
 
+# 确保目标目录真实存在（rclone mkdir + lsd 复核 + OpenList API 兜底）
+# 与 file_fix.sh _fix_switch_to_hash_dir 内的建目录段同口径: WebDAV 的 mkdir
+# 会静默失败（返回 0 但目录不存在），必须 lsd 复核；复核不过再走 OpenList API。
+# 单独抽出来是因为目录折叠、短哈希切换两处都要用，各写一套必然漂移。
+# 用法: _bulk_fold_ensure_dir <dst_remote> <ol_internal_path> → 0=目录已就绪
+_bulk_fold_ensure_dir() {
+  local dst_dir="$1" ol_dir="$2"
+  rclone mkdir "$dst_dir" "${RCLONE_RETRY_FLAGS[@]}" --timeout "${OPENLIST_MKDIR_TIMEOUT:-120}s" >/dev/null 2>&1
+  local mkdir_status=$?
+  if [ "$mkdir_status" -eq 0 ] && rclone lsd "$dst_dir" "${RCLONE_RETRY_FLAGS[@]}" \
+       --timeout "${OPENLIST_MKDIR_TIMEOUT:-120}s" >/dev/null 2>&1; then
+    return 0
+  fi
+  local ol_token
+  ol_token=$(_get_openlist_token 2>/dev/null) || ol_token=""
+  [ -n "$ol_token" ] || return 1
+  local mkdir_resp mkdir_http
+  mkdir_resp=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST "http://127.0.0.1:5244/api/fs/mkdir" \
+    -H "Authorization: $ol_token" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -n --arg path "$ol_dir" '{path:$path}')" 2>&1)
+  mkdir_http=$(echo "$mkdir_resp" | tail -n 1)
+  echo "$mkdir_http" | grep -qE 'HTTP_CODE:(200|201|204)'
+}
+
+# ===== 目录级批量折叠（快路径）=====
+# 为什么需要这一段: 短哈希目录兜底此前只在**逐文件修复管线**里触发
+#   （file_fix.sh _fix_switch_to_hash_dir），而批量 rclone sync 阶段对每个文件
+#   按原路径 PUT，没有 per-file 决策能力。run 34674196629 实测: 1051 个文件里
+#   1050 个因加密后路径过长被后端 405 全拒，批量阶段白烧 69min（外加 3 次
+#   整批重跑共 ~4h），最后只剩 52min 给修复管线，逐文件修好 73 个
+#   （~30s/个 ≈ 29 KiB/s）；而同一批文件切到短哈希目录后立刻可写、批量速率
+#   2-3 MiB/s —— 慢路径与快路径差约 100 倍。
+#
+# 做法: 把"整目录折叠为短哈希目录"搬到批量通道 —— 缺失文件按目录分组，
+#   整组一次 rclone sync 到短哈希目录，再按**目标端实际落盘结果**逐条补 marker。
+#   marker 结构与逐文件修复完全一致（method_id=copyto_original、method 文本含
+#   "短哈希目录 <hash>"），restore_info.jq 的 hash_dir 分支照常消费，还原链路零改动。
+#
+# 为什么不复用 _fix_switch_to_hash_dir: 它切换后还会对短哈希目录再探一次
+#   可写性，探测可能触发容器重启（单次 ~80s，本轮预算只有 3 次）。快路径的
+#   立身之本就是少探测 —— 这里改用"sync 完按落盘清单校验"来兜底:
+#   一个文件都没落盘就当折叠失败，文件留在缺失清单里退回逐文件修复，不丢东西。
+#
+# 为什么按目录分组而不是逐文件: 小文件场景下开销几乎全在往返而非字节数
+#   （下载 + PUT + 落盘校验各一次），rclone sync 是批量管道，多文件共享一次
+#   列表与连接。
+#
+# 依赖调用方作用域: source_path / dest_path / task_name / missing_list /
+#   fix_list / fix_log / LOG_FILENAME / incr_state / incr_marker_path
+# 副作用: 折叠成功的文件从 missing_list 移除，写入 fix_list / FIXED_THIS_RUN / marker
+# 开关: OPENLIST_BULK_HASH_FOLD=0 关闭（回退到纯逐文件修复）
+# 环境变量:
+#   OPENLIST_BULK_FOLD_MIN_FILES  目录内缺失文件数达到此值才折叠（默认 2；
+#                                 只有 1 个文件时不值得为它开一次批量 sync）
+#   OPENLIST_BULK_FOLD_MAX_DIRS   单轮最多折叠的目录数（默认 40。按真实数据定:
+#                                 run 34674196629 的 1050 个缺失文件散在 43 个
+#                                 长路径目录里，取 8 只能覆盖 29%、16 覆盖 50%、
+#                                 32 覆盖 87% —— 目录级开销远小于文件级，
+#                                 上限给足，真正兜底的是时间预算闸）
+# 用法: _sync_bulk_hash_dir_fold
+_sync_bulk_hash_dir_fold() {
+  [ "${OPENLIST_BULK_HASH_FOLD:-1}" = "0" ] && return 0
+  [ "${OPENLIST_HASH_DIR_FALLBACK:-1}" = "0" ] && return 0
+  [[ "$dest_path" == openlist:* ]] || return 0
+  [ -s "$missing_list" ] || return 0
+  [ -n "${fix_log:-}" ] || return 0
+
+  local min_files="${OPENLIST_BULK_FOLD_MIN_FILES:-2}"
+  local max_dirs="${OPENLIST_BULK_FOLD_MAX_DIRS:-40}"
+  # 最小工作片: 剩余预算不足它就在下一个目录前收摊（与逐文件循环/任务级同口径）
+  local _fold_slice="${OPENLIST_FIX_MIN_SLICE_SECONDS:-${OPENLIST_SYNC_MIN_SLICE_SECONDS:-600}}"
+  local ol_dst_base="${dest_path#openlist:}"
+  ol_dst_base="${ol_dst_base#/}"
+
+  # 目录分组: dirname → 该目录直属缺失文件数，按文件数降序（先啃最划算的）
+  # 只取直属文件（子目录的文件归它自己那组，分组与 sync 的目录级粒度一致）
+  local dir_counts="/tmp/${task_name}_bulkfold_dirs_$$.txt"
+  awk '{
+    n = split($0, p, "/")
+    if (n <= 1) next
+    d = p[1]
+    for (i = 2; i < n; i++) d = d "/" p[i]
+    print d
+  }' "$missing_list" | sort | uniq -c | sed 's/^ *//' | sort -rn > "$dir_counts"
+  [ -s "$dir_counts" ] || { rm -f "$dir_counts"; return 0; }
+
+  # _fix_probe_dir_writable 依赖调用方作用域的探针目录与日志文件
+  local temp_dir="temp_bulkfold_$$"
+  mkdir -p "$temp_dir" 2>/dev/null || true
+
+  local folded_files="/tmp/${task_name}_bulkfold_done_$$.txt"
+  : > "$folded_files"
+  local dirs_done=0
+
+  while read -r cnt dir_rel; do
+    [ -n "${dir_rel:-}" ] || continue
+    [ "${cnt:-0}" -ge "$min_files" ] || break
+    [ "$dir_rel" = "." ] && continue
+    [ "$dirs_done" -ge "$max_dirs" ] && break
+    # 时间预算: 剩余不足一个工作片就停 —— 用 slice 语义而非"已过期才停"。
+    # 单个目录的 rclone sync 可能跑很久，等到过期再收摊会把后面持久化复核
+    # 与收尾的时间一起吃掉（逐文件循环已改用同一口径，见下方 _fix_slice）
+    if [ -n "${OPENLIST_SYNC_DEADLINE_EPOCH:-}" ] \
+       && [ $(( $(date +%s) + _fold_slice )) -ge "$OPENLIST_SYNC_DEADLINE_EPOCH" ]; then
+      echo "⏰ 折叠预算将尽，停止（剩余目录交下轮，尾部时间留给持久化复核）" | tee -a "$LOG_FILENAME"
+      break
+    fi
+
+    local dst_dir="${dest_path}/${dir_rel}"
+    local ol_dir="/${ol_dst_base}/${dir_rel}"
+
+    # 原目录可写就不动它: 能按原路径写就没必要改目录结构 —— 折叠成短哈希
+    # 会丢掉目录名，只能靠 marker 的 original 字段还原，是不可逆操作
+    if _fix_probe_dir_writable "$dst_dir" "$ol_dir"; then
+      continue
+    fi
+    # 后端已整体熔断时连短哈希目录也写不进，继续折叠只是白跑
+    # 取后端根单独赋值（与 file_fix.sh 同写法）: 内联命令替换做数组下标
+    # 会走进算术上下文，带 ':' 的远端名会被当成变量名解析
+    local be_root
+    be_root=$(_fix_backend_root_of "$dst_dir" 2>/dev/null || echo "$dst_dir")
+    if [ "${_BACKEND_DEAD[$be_root]:-0}" = "1" ]; then
+      echo "🚫 后端已熔断，停止目录折叠（剩余交下轮）" | tee -a "$LOG_FILENAME"
+      break
+    fi
+
+    local hash8
+    hash8=$(_hash_dir_rel_for "$dir_rel")
+    [ -n "$hash8" ] || continue
+    local hash_dst="${dest_path}/${hash8}"
+    local hash_ol="/${ol_dst_base}/${hash8}"
+
+    echo "🔀 目录级批量折叠 · $(_short_path "$dir_rel")（${cnt} 个文件）→ 短哈希目录 ${hash8}" | tee -a "$LOG_FILENAME"
+    log_fix "$fix_log" "── 目录级批量折叠: ${dir_rel} → 短哈希目录 ${hash8}（${cnt} 个文件）"
+
+    if ! _bulk_fold_ensure_dir "$hash_dst" "$hash_ol"; then
+      echo "  ❌ 短哈希目录建不出来，该目录退回逐文件修复" | tee -a "$LOG_FILENAME"
+      continue
+    fi
+
+    local fold_log="/tmp/${task_name}_bulkfold_${hash8}_$$.log"
+    # --max-depth 1 不能省: 递归会把子目录也搬进短哈希目录（hash/sub/003.jpg），
+    # 但记账只认本目录的直属文件 —— 那些子目录文件会变成"落了盘却没 marker 记录"
+    # 的幽灵条目，还原时无从映射。子目录由它自己那一组负责折叠（文件数不达标
+    # 的走逐文件修复，会在它自己的目录上切短哈希）
+    rclone sync "${source_path}/${dir_rel}/" "${hash_dst}/" \
+      "${RCLONE_DEFAULT_FLAGS[@]}" \
+      --max-depth 1 \
+      --transfers "${OPENLIST_TRANSFERS:-1}" \
+      --checkers "${OPENLIST_CHECKERS:-8}" \
+      --timeout 30m --contimeout 30s > "$fold_log" 2>&1
+    local fold_rc=$?
+    tail -n 3 "$fold_log" | tee -a "$LOG_FILENAME"
+
+    # 落盘校验以目标端实际列出的文件为准，不认 rclone 退出码:
+    # 假成功是这套体系的头号敌人（sync 报成功但后端没落盘实测多次）
+    local landed="/tmp/${task_name}_bulkfold_land_${hash8}_$$.txt"
+    rclone lsf "$hash_dst" --files-only --retries 1 \
+      --timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900}" > "$landed" 2>/dev/null || : > "$landed"
+    local landed_n
+    landed_n=$(wc -l < "$landed" | tr -d ' ')
+    # 落盘清单进关联数组后查表: 逐文件 grep 是 N 次进程启动，千级文件（run
+    # 34674196629 单目录 1051 个）光这个就是几秒到几十秒的纯开销，查表是零成本
+    local -A _landed_set=()
+    local _lf
+    while IFS= read -r _lf; do
+      [ -n "${_lf:-}" ] && _landed_set["$_lf"]=1
+    done < "$landed"
+    if [ "${landed_n:-0}" -eq 0 ]; then
+      echo "  ❌ 批量折叠零落盘（rc=${fold_rc}），该目录退回逐文件修复" | tee -a "$LOG_FILENAME"
+      rm -f "$landed" "$fold_log"
+      continue
+    fi
+
+    # 源端尺寸一次取回（逐文件 rclone size 会退化成 N 次往返，正是要避免的）
+    local size_json="/tmp/${task_name}_bulkfold_size_${hash8}_$$.json"
+    rclone lsjson "${source_path}/${dir_rel}" --files-only --no-mimetype --no-modtime \
+      --retries 1 --timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900}" > "$size_json" 2>/dev/null \
+      || echo '[]' > "$size_json"
+    # 尺寸进关联数组再查表: 逐文件调 jq 在千级文件下是几十秒的纯进程启动开销
+    # （run 34674196629 单目录就有 1051 个文件），一次 jq 摊平 + bash 查表才是零成本
+    local -A _size_of=()
+    local _sm_nm _sm_sz
+    while IFS=$'\t' read -r _sm_nm _sm_sz; do
+      [ -n "${_sm_nm:-}" ] && _size_of["$_sm_nm"]="${_sm_sz:-0}"
+    done < <(jq -r '.[] | "\(.Name)\t\(.Size)"' "$size_json" 2>/dev/null || true)
+
+    local ok_n=0
+    while IFS= read -r mf; do
+      [ -n "$mf" ] || continue
+      case "$mf" in "$dir_rel"/*) ;; *) continue ;; esac
+      local rel="${mf#"$dir_rel"/}"
+      case "$rel" in */*) continue ;; esac      # 子目录文件归它自己那组
+      [ -n "${_landed_set[$rel]:-}" ] || continue
+
+      local fbytes="${_size_of[$rel]:-0}"
+      [[ "$fbytes" =~ ^[0-9]+$ ]] || fbytes=0
+      local fsize
+      fsize=$(format_bytes "$fbytes")
+
+      # marker 结构与逐文件修复完全一致: method_id=copyto_original，
+      # method 文本含"短哈希目录 <hash>" → restore_info.jq 判为 hash_dir 类型
+      local alt="${hash8}/${rel}"
+      local method="rclone copyto（短哈希目录 ${hash8} + 原文件名）"
+      local restore="rclone move '${dest_path}/${alt}' '${dest_path}/${mf}'"
+
+      echo "  ✅ 折叠落盘 · ${rel} (${fsize})" | tee -a "$LOG_FILENAME"
+      echo "${mf}|${alt}|${method}|${restore}|${fsize}|${fbytes}|copyto_original|" >> "$fix_list"
+      FIXED_THIS_RUN["$mf"]="$alt"
+      echo "$mf" >> "$folded_files"
+      # md5 留空: 批量折叠不经本地副本，无法算内容指纹；marker 的 md5 是可选
+      # 字段（还原时按 size_bytes 校验，缺 md5 只降级为大小校验）
+      _persist_fix_entry_now "$incr_marker_path" "$incr_state" "$source_path" "$dest_path" \
+        "$mf" "$alt" "$method" "$restore" "$fsize" "$fbytes" "copyto_original" "" 2>&1 \
+        | tee -a "$LOG_FILENAME" || true
+      ok_n=$((ok_n + 1))
+    done < "$missing_list"
+
+    # 折叠落盘成功 = 后端写得进，原路径不可写只是那条超长路径的问题。
+    # 必须清掉探测阶段累积的熔断计数: 否则连续 3 个长路径目录探测失败就置
+    # _BACKEND_DEAD（阈值 OPENLIST_BACKEND_DEAD_THRESHOLD=3），把其余几十个
+    # 同样能救的目录一并放弃 —— 真实数据正是这种形态: 43 个目录 1050 个文件
+    # 全部因长路径 405，但后端健康、短哈希目录可写（run 34674196629）。
+    if [ "$ok_n" -gt 0 ]; then
+      _BACKEND_DIR_FAIL_STREAK["$be_root"]=0
+      [ -n "${_BACKEND_DEAD[$be_root]:-}" ] && unset "_BACKEND_DEAD[$be_root]"
+    fi
+
+    dirs_done=$((dirs_done + 1))
+    echo "  ↳ 折叠完成: ${ok_n}/${cnt} 个文件已落盘到短哈希目录 ${hash8}" | tee -a "$LOG_FILENAME"
+    rm -f "$landed" "$fold_log" "$size_json"
+  done < "$dir_counts"
+
+  rm -rf "$temp_dir" 2>/dev/null || true
+  rm -f "$dir_counts"
+
+  if [ -s "$folded_files" ]; then
+    local folded_n
+    folded_n=$(wc -l < "$folded_files" | tr -d ' ')
+    grep -vxF -f "$folded_files" "$missing_list" > "${missing_list}.fold" 2>/dev/null || true
+    if [ -s "${missing_list}.fold" ]; then
+      mv "${missing_list}.fold" "$missing_list"
+    else
+      : > "$missing_list"
+    fi
+    echo "🔀 目录级批量折叠小结: ${dirs_done} 个目录 / ${folded_n} 个文件已落盘，剩余缺失 $(wc -l < "$missing_list" | tr -d ' ') 个" | tee -a "$LOG_FILENAME"
+  fi
+  rm -f "$folded_files"
+  return 0
+}
+
 # 收集并修复缺失文件（依赖调用方作用域）:
 #   LAST_ATTEMPT_LOG / task_name / source_path / dest_path / extra_args /
 #   fail_list / fix_list / fix_log / LOG_FILENAME
@@ -443,18 +695,8 @@ _sync_fix_missing_files() {
     fi
 
     if [ -s "$missing_list" ]; then
-      # 单次修复数量上限（防止首次部署时积压大量缺失文件导致单次运行过久）
-      local fix_max="${OPENLIST_MISSING_FIX_MAX:-200}"
-      local missing_total
-      missing_total=$(wc -l < "$missing_list" | tr -d ' ')
-      if [ "$missing_total" -gt "$fix_max" ]; then
-        echo "⚠️ 缺失文件 ${missing_total} 个超过单次上限 ${fix_max}（可用 OPENLIST_MISSING_FIX_MAX 调整），本次只修复前 ${fix_max} 个" | tee -a "$LOG_FILENAME"
-        head -n "$fix_max" "$missing_list" > "${missing_list}.cut"
-        mv "${missing_list}.cut" "$missing_list"
-      fi
-
-      _log_section "$LOG_FILENAME" "${task_name} 缺失文件修复 · 共 $(wc -l < "$missing_list" | tr -d ' ') 个"
-
+      # 修复日志与增量持久化状态: 提前到截断之前初始化 —— 下面的目录级批量
+      # 折叠也要用（它必须跑在截断之前，见其调用处注释）
       fix_log="file_fix_${task_name}_$(date +%Y%m%d_%H%M%S).log"
       echo "=== 缺失文件修复日志 - $(date) ===" > "$fix_log"
 
@@ -469,6 +711,29 @@ _sync_fix_missing_files() {
       fi
       echo "$incr_base" > "$incr_state"
 
+      # ===== 目录级批量折叠（快路径）=====
+      # 整目录写不进（加密后路径超长 → 后端 405）时，把整组文件一次 rclone sync
+      # 到短哈希目录，比逐文件修复快约两个数量级。成功的条目在这里就进了
+      # fix_list / marker / FIXED_THIS_RUN，下面的循环不会再碰它们。
+      #
+      # 必须跑在 fix_max 截断**之前**: 折叠是批量通道（2-3 MiB/s），一轮能解决
+      # 上千个文件；截断到 200 再折叠，等于把批量通道也按 200 封顶，剩下的
+      # 850 个全部推给 30s/个的逐文件慢路径（run 34674196629 就是这么被卡死的）
+      _sync_bulk_hash_dir_fold
+
+      # 单次修复数量上限（防止首次部署时积压大量缺失文件导致单次运行过久）
+      # 只约束下面的逐文件慢路径，折叠已解决的文件不占这个额度
+      local fix_max="${OPENLIST_MISSING_FIX_MAX:-200}"
+      local missing_total
+      missing_total=$(wc -l < "$missing_list" | tr -d ' ')
+      if [ "$missing_total" -gt "$fix_max" ]; then
+        echo "⚠️ 缺失文件 ${missing_total} 个超过单次上限 ${fix_max}（可用 OPENLIST_MISSING_FIX_MAX 调整），本次只修复前 ${fix_max} 个" | tee -a "$LOG_FILENAME"
+        head -n "$fix_max" "$missing_list" > "${missing_list}.cut"
+        mv "${missing_list}.cut" "$missing_list"
+      fi
+
+      _log_section "$LOG_FILENAME" "${task_name} 缺失文件修复 · 共 $(wc -l < "$missing_list" | tr -d ' ') 个"
+
       # 统一错误熔断器: 连续多个文件全方法失败且主导错误一致（如后端 405
       # 全拒）→ 后端级故障，继续逐文件跑 4 种方法只会空转烧时间
       # （run 32904752243 实锤: wopan175 后端全拒，69 个顽固缺失逐个全方法
@@ -478,12 +743,28 @@ _sync_fix_missing_files() {
       # 短名类方法直接成功。
       # 开关: OPENLIST_FIX_CB_FILES=0 关闭
       local _cb_consec=0 _cb_sig=""
+      # 修复管线专属最小工作片: 剩余预算不足它就在下一个文件前收摊，把尾部时间
+      # 留给后面的持久化复核与收尾。默认沿用全局 600s（可单独调小以压榨尾部，
+      # 但要给 _sync_persist_verify_and_retry 留够时间，否则复核被截断会丢条目）
+      local _fix_slice="${OPENLIST_FIX_MIN_SLICE_SECONDS:-${OPENLIST_SYNC_MIN_SLICE_SECONDS:-600}}"
       local _cb_threshold="${OPENLIST_FIX_CB_FILES:-3}"
       local _cb_done=0 _cb_total
       _cb_total=$(wc -l < "$missing_list" | tr -d ' ')
 
       while IFS= read -r failed_line; do
         [ -z "$failed_line" ] && continue
+
+        # 时间预算: 到点即停。修复管线此前**完全不看预算**——
+        # OPENLIST_MISSING_FIX_MAX 一旦调大，step 很容易撞 330min 被强杀，
+        # 在途 marker 与 fix_list 全丢（run 34674196629 就是被超时收掉的）。
+        # 有了这道闸，上限才可以放心调大: 到点停在下个文件前，状态已增量持久化。
+        # 预算未设置（调试/还原模式）→ 永不触发，行为与旧版一致。
+        if [ -n "${OPENLIST_SYNC_DEADLINE_EPOCH:-}" ] \
+           && [ $(( $(date +%s) + _fix_slice )) -ge "$OPENLIST_SYNC_DEADLINE_EPOCH" ]; then
+          echo "⏳ 修复管线预算将尽，优雅收摊: 剩余 $((_cb_total - _cb_done)) 个文件交下轮接力（状态已增量持久化）" | tee -a "$LOG_FILENAME"
+          SYNC_TIME_EXHAUSTED=1
+          break
+        fi
 
         local file_size="未知"
         local file_size_bytes=0

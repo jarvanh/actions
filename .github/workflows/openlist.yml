@@ -55,10 +55,15 @@ on:
           - "2"
           - "3"
       session_hold:
-        description: "同步模式: 同步完成后保持会话 5 小时并周期热备 db（关闭后同步结束立即回传收摊，适合全量冲刺期提升运行密度）"
+        # 默认改为 false: 同步 step 预算 320min 常态跑满（近 15 轮 duration_s 普遍
+        # 19000-19800s），job 随之撞 6h 上限或被 330min 超时收掉，本 step 实测从未
+        # 真正执行过（run 34660149180 cancelled / 34674196629 skipped）。开着只是
+        # 白占 6h 窗口；关掉后同步结束立即 Persist 回传收摊，窗口全部给同步。
+        # db 周期热备的兜底是 always() 的 Persist 回传，不依赖本 step。
+        description: "同步模式: 同步完成后保持会话 5 小时并周期热备 db（默认关闭: 跑满 320min 预算时本 step 从未执行到，关闭可把 6h 窗口全部让给同步）"
         required: false
         type: boolean
-        default: true
+        default: false
       self_retrigger:
         description: "同步模式: 本轮收场后立即自动触发下一轮接力（时间预算优雅到站/正常收摊后触发；人工取消且未到 6h 上限时不接力）"
         required: false
@@ -83,8 +88,12 @@ on:
         default: "all"
   schedule:
     # 兜底触发（自续触发是主接力机制，见「自续触发」step）。
-    # GitHub 对高频 cron 限流严重（实测 */5 曾 4.5h 零触发），降为 */30
-    - cron: "*/30 * * * *"
+    # GitHub 对高频 cron 限流严重（实测 */5 曾 4.5h 零触发）。
+    # 频率取 1h 而非 30min: 单轮 job 上限 6h + concurrency 单例，30min 一次会在
+    # 一个 job 周期内堆出 ~12 个 waiting run（run 34685067684 实测排队 3h27m 才
+    # 启动），既让「已有排队/等待中的运行」护栏长期命中、自续触发几乎永不生效，
+    # 也让 run 列表塞满空转的过时排队。1h 折中: 堆 6 个，兜底延迟 ≤1h。
+    - cron: "0 * * * *"
   watch:
     types: started
 
@@ -125,13 +134,27 @@ jobs:
       # 重试/轮询
       # 注: 熔断阈值实际生效变量是 OPENLIST_FIX_CB_FILES（sync_engine.sh，默认3）；
       #     轮转上限实际生效变量是 ROTATION_MAX_CONSECUTIVE_ATTEMPTS（task_engine.sh，默认8）
-      OPENLIST_8005_RETRY_ATTEMPTS: "3"
+      # 8005（OpenList 把 wopan176 的写失败包装成 HTTP 405 给 rclone）重试次数。
+      # 取 1 而非 3: 405 常常是路径/后端层面的确定性拒写，刷新 token 重跑整批不会
+      # 有第二种结果 —— run 34674196629 实测 3 次重试全是同样的 405，整批 1051 个
+      # 文件每次 ~45-69min，单轮烧掉约 3.5h 而净传输为 0（trend transferred_bytes=0）。
+      # 1 次保留「刷新 token 后补偿一次」的能力；缺失项由 truth-check + 修复管线
+      # 的 diff 兜底，不依赖批量重试成功。
+      OPENLIST_8005_RETRY_ATTEMPTS: "1"
       OPENLIST_423_RETRY_ATTEMPTS: "3"
       OPENLIST_423_RETRY_SLEEP_SECONDS: "300"
       OPENLIST_PERSIST_RETRY_ROUNDS: "11"
       OPENLIST_RAW_CHECK_BUDGET: "40"
       OPENLIST_RAW_COUNT_TIMEOUT: "240"
-      OPENLIST_MISSING_FIX_MAX: "200"
+      # 逐文件修复的单次条数上限（只约束慢路径，批量折叠不占这个额度）。
+      # 400 而非 200: 修复管线现已受 OPENLIST_SYNC_DEADLINE_EPOCH 预算约束（到点停在
+      # 下一个文件前、状态已增量持久化），调大不会再有"撞 330min 被强杀丢 marker"
+      # 的风险；而 200 在 run 34674196629 那种"批量阶段烧光 4h、只剩 50min 修复"
+      # 的局面下反而够用，真正的浪费在批量阶段（已由目录级批量折叠解决）。
+      OPENLIST_MISSING_FIX_MAX: "400"
+      # 修复管线的"最小工作片": 剩余预算不足它就在下一个文件前收摊，把尾部时间
+      # 留给持久化复核与收尾（默认继承 OPENLIST_SYNC_MIN_SLICE_SECONDS=600s）
+      OPENLIST_FIX_MIN_SLICE_SECONDS: "600"
       OPENLIST_TOKEN_REFRESH_SECS: "240"
 
       # 后端级熔断（读预检放行了"写不进"的后端是 5h 零产出的根因，见
@@ -139,6 +162,21 @@ jobs:
       OPENLIST_BACKEND_WRITE_PROBE: "1"
       OPENLIST_BACKEND_WRITE_PROBE_TIMEOUT: "60"
       OPENLIST_BACKEND_DEAD_THRESHOLD: "3"
+
+      # 目录级批量折叠（快路径，见 file_fix_pipeline.sh _sync_bulk_hash_dir_fold）:
+      # 整目录写不进（加密后路径超长 → 后端 405）时，把整组缺失文件一次
+      # rclone sync 到短哈希目录，替代逐文件修复。逐文件 ~30s/个 ≈ 29 KiB/s，
+      # 批量 2-3 MiB/s —— 差约 100 倍（run 34674196629 实测，该轮 5.5h 只修 73 个）。
+      # 折叠只动"原目录已探明不可写"的目录，且以目标端实际落盘清单为准校验，
+      # 零落盘则退回逐文件修复，不会丢条目。
+      OPENLIST_BULK_HASH_FOLD: "1"
+      # 目录内缺失文件数达到此值才折叠（只有 1 个文件时不值得为它开一次批量 sync）
+      OPENLIST_BULK_FOLD_MIN_FILES: "2"
+      # 单轮最多折叠的目录数。40 而非 8: 按 run 34674196629 的真实分布定 ——
+      # 1050 个缺失文件散在 43 个长路径目录里，取 8 只覆盖 29%、16 覆盖 50%、
+      # 32 覆盖 87%。目录级开销（1 探测 + 1 sync + 1 lsf）远小于文件级，
+      # 上限给足；真正兜底的是时间预算闸，不是这个数。
+      OPENLIST_BULK_FOLD_MAX_DIRS: "40"
 
       # OpenList 管理面账密（动态登录换取 token，取代静态 config.json token）
       OPENLIST_ADMIN_PASSWORD: ${{ secrets.OPENLIST_ADMIN_PASSWORD }}
@@ -281,6 +319,11 @@ jobs:
           mkdir -p /tmp/telegram
           cp "$GITHUB_WORKSPACE/.github/scripts/telegram/tg_notify.sh" /tmp/telegram/
           echo "函数库加载完成"
+          # 环境就绪标记: 供「收尾与清理」「自续触发」两个 always() step 判定。
+          # 二者在前置 step 失败时仍会执行，而那时 /tmp/load_all.sh 根本不存在 ——
+          # run 34685067684 就是 rclone-install 挂掉后，收尾 source 不到文件再补一个
+          # exit 1，把真实原因盖掉；自续触发还照常 dispatch 了下一轮，形成空转接力。
+          echo "OL_ENV_READY=1" >> "$GITHUB_ENV"
 
       # ===== 一键还原修复文件 =====
       # 把 marker fixed_files 中的替代文件还原为原路径原文件名:
@@ -439,6 +482,13 @@ jobs:
         # 实测取消后 always() step（Persist）仍会执行，此处同理
         if: ${{ always() && (inputs.run_mode == '' || inputs.run_mode == '同步') }}
         run: |
+          # 环境未就绪（前置 step 失败，函数库没落到 /tmp）时直接退出: 否则
+          # source 报 "No such file or directory" 并把 step 打成 failure，
+          # 把真正的失败原因压在下面（run 34685067684 已实际发生一次）
+          if [ "${OL_ENV_READY:-0}" != "1" ]; then
+            echo "环境未就绪（OL_ENV_READY!=1），跳过收尾。真实失败原因见上方 step"
+            exit 0
+          fi
           source /tmp/load_all.sh
 
           # 本轮修复成效（跨任务累计，见 file_fix_pipeline.sh _ol_round_stats_bump）
@@ -583,6 +633,13 @@ jobs:
           SELF_RETRIGGER: ${{ github.event.inputs.self_retrigger || 'true' }}
         run: |
           set -e
+          # 环境未就绪时不接力: 否则基础设施一挂，就会以「失败 → 接力 → 再失败」
+          # 的节奏持续空转（run 34685067684 在 install 步骤已失败，本 step 仍
+          # dispatch 了下一轮）。先修前置 step，再让接力恢复。
+          if [ "${OL_ENV_READY:-0}" != "1" ]; then
+            echo "环境未就绪（OL_ENV_READY!=1），不接力。请先修复前置 step 的失败"
+            exit 0
+          fi
           if [ "${SELF_RETRIGGER:-true}" != "true" ]; then
             echo "self_retrigger=false，不接力（完全静止）"
             exit 0

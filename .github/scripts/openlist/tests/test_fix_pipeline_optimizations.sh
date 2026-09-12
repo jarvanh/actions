@@ -15,6 +15,13 @@ ok()  { PASS=$((PASS+1)); echo "PASS: $1"; }
 bad() { FAIL=$((FAIL+1)); echo "FAIL: $1"; }
 
 _REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+
+# 关闭目录级批量折叠: 本测试只针对「名长拉黑」与「目标端清单复用」两处优化。
+# 折叠是后加的独立能力（有自己的 tests/test_bulk_hash_fold.sh），不关的话场景4
+# 的 diff 会产出 2 个缺失文件并触发折叠，折叠自身的目标端 lsf（目录可写性探测
+# + 落盘校验）会被这里的计数器算进去，与本用例「复用清单后不应再列目标端」
+# 的意图无关 —— 那是折叠的必要开销，不是清单复用失效。
+OPENLIST_BULK_HASH_FOLD=0
 # 排版助手 + 发送层的唯一真源（openlist 侧已不再自带副本，2026-09-06 收敛）
 source "$_REPO_ROOT/.github/scripts/telegram/tg_notify.sh"
 source "$_REPO_ROOT/.github/scripts/openlist/utils.sh" 2>/dev/null
@@ -173,6 +180,27 @@ run_fix > "$WORK/scene5.log" 2>&1
 N5=$(cat "$LSF_CALLS")
 [ "$N5" = "1" ] && ok "5 无缓存 → 回退列目标端 1 次（行为不变）" || bad "5: 目标端 lsf 调用 ${N5} 次"
 ! grep -q "复用调用方目标端清单" "$WORK/scene5.log" && ok "5b 未误报复用" || bad "5b: 误报复用"
+
+# ===== 场景6: 修复管线时间预算 —— 到点即停，不再开新文件 =====
+# 此前修复管线完全不看 OPENLIST_SYNC_DEADLINE_EPOCH，调大 MISSING_FIX_MAX 会让
+# step 撞 330min 被强杀、在途 marker 全丢。这道闸是安全调大上限的前提。
+LSF_OUT=$'short_a\n'
+printf 'a/one.mp4\na/two.mp4\n' > "$MISSING"
+: > "$TRY_LOG"
+SYNC_TIME_EXHAUSTED=0
+OPENLIST_SYNC_DEADLINE_EPOCH=$(( $(date +%s) + 5 )) \
+  SYNC_FIX_MISSING_OVERRIDE="$MISSING" run_fix > "$WORK/scene6.log" 2>&1
+[ ! -s "$TRY_LOG" ] && ok "6a 预算将尽 → 不再开工新文件" || bad "6a 仍修了 $(wc -l < "$TRY_LOG") 个"
+[ "${SYNC_TIME_EXHAUSTED:-0}" = "1" ] && ok "6b 置 SYNC_TIME_EXHAUSTED=1" || bad "6b 未置位（=${SYNC_TIME_EXHAUSTED:-0}）"
+grep -q "优雅收摊" "$WORK/scene6.log" && ok "6c 日志记录优雅收摊" || bad "6c 无收摊日志"
+
+# 反例: 预算充足时不该误停
+: > "$TRY_LOG"
+SYNC_TIME_EXHAUSTED=0
+OPENLIST_SYNC_DEADLINE_EPOCH=$(( $(date +%s) + 7200 )) \
+  SYNC_FIX_MISSING_OVERRIDE="$MISSING" run_fix > "$WORK/scene6b.log" 2>&1
+[ -s "$TRY_LOG" ] && ok "6d 预算充足 → 正常修复" || bad "6d 预算充足却没修"
+[ "${SYNC_TIME_EXHAUSTED:-0}" = "0" ] && ok "6e 预算充足不置位" || bad "6e 误置位"
 
 echo "-----"
 echo "PASS=$PASS FAIL=$FAIL"
