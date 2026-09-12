@@ -120,7 +120,7 @@ trend_record_and_notify() {
   _trend_send_summary "$_local"
 }
 
-# 通知内时长一律中文形态（规范 4.3 节 时长五层，禁英文紧凑格式 2h15m；
+# 通知内时长一律中文形态（规范 5.1 节 时长五层，禁英文紧凑格式 2h15m；
 # 紧凑写法只留在 RESULT_JSON/日志，不进通知；不足 1 分钟用两位小数秒）
 _trend_fmt_duration() {
   local s="${1:-0}" h m
@@ -215,7 +215,7 @@ PYEOF
         fi
       fi
     else
-      # 说明/备注走 tg_add_note（4.8 节）：tg_add_block 只接已含标签的片段
+      # 说明/备注走 tg_add_note（3.8 节）：tg_add_block 只接已含标签的片段
       tg_add_note msg "剩余未传未知（近期 run 未启用预览，无法估算清零时间）"
     fi
   fi

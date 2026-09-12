@@ -107,7 +107,7 @@ def esc(s) -> str:
     """动态内容进 HTML 消息前必须转义。
 
     quote=True 与 python 共享层 speedtest_common 的 html.escape 默认口径一致
-    （规范 8.1 节：内嵌段与共享层同义实现、三处定义保持一致）。此前本函数用
+    （规范 6.3 节：内嵌段与共享层同义实现、三处定义保持一致）。此前本函数用
     quote=False，只转义 & < >——输出只进正文时够用，但若哪天被拼进 HTML 属性值
     （如 <a href="…">）就会漏；统一取更严格的一侧（2026-09-12 收敛）。
     """
@@ -115,7 +115,7 @@ def esc(s) -> str:
 
 
 def fmt_secs(x: float) -> str:
-    """时长中文形态（规范 4.3 节 时长五层，按量级选，勿自创形态）。
+    """时长中文形态（规范 5.1 节 时长五层，按量级选，勿自创形态）。
 
     ≥1h → X 小时 Y 分（分钟不补零）／≥1min → X 分钟／否则 X.XX 秒（两位小数）。
     禁英文紧凑时长（12.34s → 12.34 秒）。此前本函数恒走秒层，上传耗时 185 秒
@@ -145,7 +145,7 @@ def tg_entry(subject, *meta, code: bool = True):
     """条目行构造器（与 bash 真源 tg_entry、python 共享层同语义）。
 
     本文件是内嵌 python 段、无法 import 共享层，故在此同义实现（保持三者一致）：
-    条目主体 + 元数据统一 " · " 分隔、统一经 esc() 转义、顺序固定（规范 4.5 节）。
+    条目主体 + 元数据统一 " · " 分隔、统一经 esc() 转义、顺序固定（规范 3.5 节）。
     输出: "<code>主体</code> · 元数据"（不含换行，由调用方拼接）
     """
     out = f"<code>{esc(subject)}</code>" if code else esc(subject)
@@ -163,13 +163,13 @@ def build_fail_notify(title: str, file: str, elapsed: float, lines: list):
     （故用 耗时：N 秒 kv 形态，不加 ⏱ 前缀冒充收尾）。动态内容一律 esc()。
     """
     parts = [
-        # 标题 = emoji + 短语（裸文本，规范 2.3 节；此前加粗与 tg_add_title 版式漂移）
-        # 标题（emoji + 短语）裸文本；值/计数按 2.3 节取值行口径
+        # 标题 = emoji + 短语（裸文本，规范 1.3 节；此前加粗与 tg_add_title 版式漂移）
+        # 标题（emoji + 短语）裸文本；值/计数按 1.3 节取值行口径
         f"{esc(title)}",
         TG_SEP,
-        # 文件名属机器值 → <code>；emoji 不套标签（规范 2.3 节）
+        # 文件名属机器值 → <code>；emoji 不套标签（规范 1.3 节）
         f"📁 {tg_entry(shorten_name(os.path.basename(file)))}",
-        f"📦 分组：{tg_entry(CAPTION_PREFIX)}",  # 机器值 → <code>（2.3 节）
+        f"📦 分组：{tg_entry(CAPTION_PREFIX)}",  # 机器值 → <code>（1.3 节）
         f"耗时：{fmt_secs(elapsed)}",
     ]
     parts.extend(lines)
@@ -350,9 +350,9 @@ def get_video_list():
         notify("\n".join([
             "❌ 获取远端文件列表失败",
             TG_SEP,
-            f"📦 分组：{tg_entry(CAPTION_PREFIX)}",  # 机器值 → <code>（2.3 节）
+            f"📦 分组：{tg_entry(CAPTION_PREFIX)}",  # 机器值 → <code>（1.3 节）
             f"⚠️ 原因：rclone lsjson 退出码 {result.returncode}",
-            # 多行日志走 <pre>（与下载失败通知同款口径：5.5 节要求给出原始输出）
+            # 多行日志走 <pre>（与下载失败通知同款口径：4.4 节要求给出原始输出）
             f"📄 stderr：\n{tg_pre_block((result.stderr or '(无错误输出)')[-500:].strip())}",
         ]))
         return [], []
@@ -371,7 +371,7 @@ def get_video_list():
         notify("\n".join([
             "❌ 获取远端文件列表失败",
             TG_SEP,
-            f"📦 分组：{tg_entry(CAPTION_PREFIX)}",  # 机器值 → <code>（2.3 节）
+            f"📦 分组：{tg_entry(CAPTION_PREFIX)}",  # 机器值 → <code>（1.3 节）
             f"⚠️ 原因：lsjson 输出解析失败：{esc(e)}",
         ]))
         return [], []
@@ -660,7 +660,7 @@ source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 # 已上传/失败条目渲染: 每行 "文件名\t备注"（python 侧产出）→ 树形
 # "  ├─ <code>文件名</code> · 备注"。
 # 与 _render_skipped_groups 同款标签（条目主体文件类 <code>、元数据 · ）——此前这两个
-# 列表整行只转义不加标签，与同通知内的跳过明细两种条目风格并存（规范 4.5 节）
+# 列表整行只转义不加标签，与同通知内的跳过明细两种条目风格并存（规范 3.5 节）
 _render_named_entries() {
   local _in="$1" _name _meta _out=""
   [ -z "$_in" ] && return 0
@@ -670,7 +670,7 @@ _render_named_entries() {
     tg_add_entry _out "$_name" "$_meta"
   done <<< "$_in"
   [ -z "$_out" ] && return 0
-  # 超 8 条折叠（4.6 节）：条目已由 tg_add_entry 构建（已转义且含 <code>），
+  # 超 8 条折叠（3.6 节）：条目已由 tg_add_entry 构建（已转义且含 <code>），
   # 走 tree_fold 而非 tree_code_fold（后者会二次转义）
   tree_fold "${_out%$'\n'}"
 }
@@ -691,7 +691,7 @@ _render_skipped_groups() {
     [ -n "$_out" ] && _out+=$'\n'
     _out+="$(escape_html "$_g") · ${_total}"$'\n'
     # 条目统一走真源 tg_add_entry → 已构建条目流（已转义且含 <code>），
-    # 超 max 条折叠交给 tree_fold（4.6 节）：它只截断 + 加折叠行，不再转义。
+    # 超 max 条折叠交给 tree_fold（3.6 节）：它只截断 + 加折叠行，不再转义。
     # 此前这里手写 head -n "$_max" + 拼折叠行，是 tree_fold 的重复实现。
     local _entries=""
     while IFS= read -r _p; do
@@ -705,7 +705,7 @@ _render_skipped_groups() {
 
 # 统一 HTML 排版 + 统一收尾区；明细树形列出（超长自动分片）
 msg=""
-# 状态图标随结论降级（规范 8.2 节）：本次全部失败 → ❌；部分失败 → ⚠️；否则 📺
+# 状态图标随结论降级（规范 5.5 节）：本次全部失败 → ❌；部分失败 → ⚠️；否则 📺
 # （此前恒 📺，任何失败都不降级，读者会把「一条没传成功」误读为正常）
 if [ "${FAILED:-0}" -gt 0 ] && [ "${SENT:-0}" -eq 0 ]; then
   tg_add_title msg "❌ ${CAPTION_PREFIX}"

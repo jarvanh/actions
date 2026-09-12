@@ -38,7 +38,7 @@
 #            ▸ 📊 批次：48/55 | ✅0 ❌47 · 📄 …      d0 统计行
 #            · 传输中: 2.469 GiB / 4.976 GiB        d0 note（rt 线程实时状态，注记不占树节点）
 #            ├─ ❌#42 ✅00 🔧00 ❗33 ⏭️00 ♻️00 ⏱01:15 ⬆️4.79G
-#            └─ ❌#47 ✅00 🔧00 ❗22 ⏭️00 ♻️00 ⏱00:58 ⬆️4.72G    批次历史（tree_lines，字段表见 docs 8.3 节）
+#            └─ ❌#47 ✅00 🔧00 ❗22 ⏭️00 ♻️00 ⏱00:58 ⬆️4.72G    批次历史（tree_lines，字段表见 docs 5.4 节）
 # 阶段行两种形态由渲染器按内容判定（生产方无需区分）:
 #   标签型 全部行以 "▸" 开头 → 说明"本层在做什么"，与统计行同列、排在统计行之前
 #   树型   其余（子目录等状态条目）→ 统计行是它的表头，排在其后并缩进 2 格
@@ -333,7 +333,7 @@ _progress_active_last() {
 #   条目经 tree_lines 加 ├─/└─ 连接符（telegram/tg_notify.sh）; 目标端 openlist: 前缀
 #   冗余（所有目标均为 openlist 远端），统一裁剪缩短行宽。
 # 无 " → " 结构的显示名（调试任务等）退化为无组头的平铺条目，同样走 tree_lines
-# 树形 —— 同一面板内不得 "• " 与 "├─" 并存（规范 4.5 节）。
+# 树形 —— 同一面板内不得 "• " 与 "├─" 并存（规范 3.5 节）。
 # 输入: 每行 "display_name\tsize\tdetail"（size/detail 可空）
 _progress_render_task_list() {
   local lines="$1"
@@ -467,7 +467,7 @@ _progress_render() {
   fi
   tg_add_title msg "$title"
   [ -n "$subtitle" ] && tg_add_kv msg "状态" "$subtitle"
-  # 计数行字段图标同样裸置（规范 2.3 节：emoji 一律不套标签，无例外）
+  # 计数行字段图标同样裸置（规范 1.3 节：emoji 一律不套标签，无例外）
   tg_append msg "📊 总 ${total} · 待处理 ${pending} · 进行中 ${running} · 完成 ${completed} · 跳过 ${skipped} · 失败 ${failed}"$'\n'
 
   # 进行中任务块: 任务条目（分组渲染）+ 多层级阶段行/统计信息/细粒度状态
@@ -482,8 +482,8 @@ _progress_render() {
     [ "$finalized" -eq 1 ] && _running_title="🔄 进行中 · ${running}"
     tg_add_section msg "$_running_title"
     tg_add_block msg "$(_progress_render_task_list "$running_lines")"
-    # 「未执行完」是说明而不是计数的一部分（4.2 节：分节标题 = emoji 分节 · N），
-    # 故下沉为说明段——与 4.6 节「缺失的目录 · 可能被删除 · N」的收敛方式同款
+    # 「未执行完」是说明而不是计数的一部分（3.4 节：分节标题 = emoji 分节 · N），
+    # 故下沉为说明段——与 3.6 节「缺失的目录 · 可能被删除 · N」的收敛方式同款
     [ "$finalized" -eq 1 ] && tg_add_note msg "run 已结束，以上任务本轮未执行完"
 
     if [ "$finalized" -ne 1 ]; then

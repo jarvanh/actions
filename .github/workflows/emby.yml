@@ -209,7 +209,7 @@ jobs:
           # secret 必须经环境变量注入——直接文本注入 run: 脚本时，密码里含
           # $xxx 片段会被 bash 当未定义变量展开成空（如 @$TM3@ 变 @$TM3@ 骨架）。
           OPENLIST_ADMIN_PASSWORD: ${{ secrets.OPENLIST_ADMIN_PASSWORD }}
-          # 收尾区接线（规范 4.9 节）：本 step 有 OpenList 凭据通知，需要运行日志链接
+          # 收尾区接线（规范 3.9 节）：本 step 有 OpenList 凭据通知，需要运行日志链接
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
           TG_RUN_STARTED_AT: ${{ github.run_started_at }}
         run: |
@@ -355,11 +355,11 @@ jobs:
               tg_add_kv PW_MSG "场景" "⚠️ $PW_DESC · 本条仅本轮有效"
               tg_add_path PW_MSG "用户名" "admin"
               tg_add_path PW_MSG "密码" "$PW_VAL"
-              # 入口是**链接** → <a>（2.3 节）：套 <code> 会让它不可点击，只能手抄域名。
+              # 入口是**链接** → <a>（1.3 节）：套 <code> 会让它不可点击，只能手抄域名。
               # tg_add_kv 会转义整值、把标签变成 &lt;a&gt;，故这里用 tg_append 自行转义
               tg_append PW_MSG "入口：🔗 <a href=\"$(escape_html "https://oe.${{ secrets.VD }}.eu.org")\">OpenList 后台</a>"$'\n'
               tg_add_note PW_MSG "长期有效密码 = OPENLIST_ADMIN_PASSWORD · 下轮自动恢复为它 · 本条不会出现在公开日志"
-              # 统一收尾区（规范 4.9 节）：凭据消息没有特殊通道，照常 tg_add_* 构建 + 收尾 + send_tg。
+              # 统一收尾区（规范 3.9 节）：凭据消息没有特殊通道，照常 tg_add_* 构建 + 收尾 + send_tg。
               # TG_RUN_URL 由本 step env 注入；TG_RUN_STARTED_AT 平台已移除表达式上下文（注入为空），
               # 时长走 /proc/1 兜底（本 step 靠 job 头部，误差秒级）。两者皆无时整行自动跳过。
               tg_add_footer PW_MSG
@@ -829,8 +829,8 @@ jobs:
           # 统一 HTML 通知 + 统一收尾区（tg_notify.sh，checkout 后可用）
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
           START_MSG=""
-          # 状态图标随结论降级（规范 8.2 节）：取链自检未通过时标题不能还是「启动成功」的口吻。
-          # 细节照旧下沉到 kv（5.1 节），标题只换图标、不塞原因
+          # 状态图标随结论降级（规范 5.5 节）：取链自检未通过时标题不能还是「启动成功」的口吻。
+          # 细节照旧下沉到 kv（4.1 节），标题只换图标、不塞原因
           if [ "${MAP_OK:-?}" = "0" ]; then
             tg_add_title START_MSG "⚠️ Emby 服务启动"
           else
@@ -897,7 +897,7 @@ jobs:
               tg_add_kv WD_MSG "事件" "连续 3 次链路自检失败"
               tg_add_kv WD_MSG "动作" "已自动切到中转模式（视频经服务器转发）"
               tg_add_footer WD_MSG
-              # 不再吞 stderr：发送失败原因（429 重试耗尽 / 400 解析失败）必须可见（规范 第 6 章）
+              # 不再吞 stderr：发送失败原因（429 重试耗尽 / 400 解析失败）必须可见（规范 第 7 章）
               send_tg "$WD_MSG" || true
               exit 0
             fi
@@ -1177,7 +1177,7 @@ jobs:
             if [ -n "$season" ]; then se="S$(two_digit "$season" || printf '?')"; fi
             if [ -n "$episode" ]; then se="${se}E$(two_digit "$episode" || printf '?')"; fi
             if [ "$type" = "Episode" ] && [ -n "$series" ]; then
-              # emoji 一律不套标签（规范 2.3 节）
+              # emoji 一律不套标签（规范 1.3 节）
               title="🎬 $(escape_html "$series")"
               [ -n "$se" ] && title="${title} ${se}"
             else
@@ -1198,7 +1198,7 @@ jobs:
               "$(fmt_size "$size_b")")
 
             # 第 3 行：链路。302 时把直链剩余有效期说清楚——链接不是永久的
-            # emoji 不套标签，剩余有效期是元数据 → · （规范 2.3 节 + 4.5 节）
+            # emoji 不套标签，剩余有效期是元数据 → · （规范 1.3 节 + 3.5 节）
             if [ "$kind" = "302直链" ]; then
               l3="⚡ 302直连 OneDrive"
               case "$remain_s" in
@@ -1211,7 +1211,7 @@ jobs:
 
             # 第 4 行：客户端。IP 来自 ge2o 访问日志（谁在播）
             IFS=$'\037' read -r cname dev <<<"$(client_meta "$iid")"
-            # 字段序与规范 3.5 节示例一致：IP（谁）在前，客户端与设备在后
+            # 字段序与规范 2.6 节示例一致：IP（谁）在前，客户端与设备在后
             client=$(join_parts "$(escape_html "$cip")" "$(escape_html "$cname")" "$(escape_html "$dev")")
 
             # 第 5 行起：起播等待（KV 树，与测速四套「📍 测速点网络」同款，tree_lines 渲染）。
@@ -1256,9 +1256,9 @@ jobs:
             [ -n "$seek" ] && waitline="${waitline}拖动进度条（Emby → OneDrive 重取直链）：$(fmt_ms "$seek")"$'\n'
             if [ -n "$waitline" ]; then
               # 末项固定交代"还有一段测不到"，避免把上面几项加起来当成总共等了多久。
-              # 形态按规范 4.5 节：末条主体后接 " · 备注"，并入条目流由
-              # tree_lines 统一决定末条（2.3 节）。不写成全角冒号 kv —— 值位只分
-              # <code>/裸文本两档（2.3 节取值行口径）。
+              # 形态按规范 3.5 节：末条主体后接 " · 备注"，并入条目流由
+              # tree_lines 统一决定末条（1.3 节）。不写成全角冒号 kv —— 值位只分
+              # <code>/裸文本两档（1.3 节取值行口径）。
               waitline="${waitline}你 → OneDrive 拉流缓冲 · 这段服务器测不到"$'\n'
               # tree_lines 只调用一次：重复调用会把已带 "  ├─/└─" 前缀的行再前缀一层。
               # （此前这里有两个 if，第二个恒真 → 产出 "  ├─   ├─" 双层树 + 标题行重复）
@@ -1268,15 +1268,15 @@ jobs:
             # 日志侧只记片名（公开仓库，绝不落直链）；TG 私密消息里才附带直链
             echo "🎬 播放 [$kind] ${n:-未知} (item $iid)"
             text="${title}"$'\n'"${TG_SEP}"
-            # kv 值按 2.3 节取值行口径（机器返回值 → <code>；
+            # kv 值按 1.3 节取值行口径（机器返回值 → <code>；
             # 结论值/状态/计数/数值 → 裸文本 + 转义）
             [ -n "$meta" ] && text="${text}"$'\n'"规格：${meta}"
             text="${text}"$'\n'"链路：${l3}"
             [ -n "$client" ] && text="${text}"$'\n'"客户端：${client}"
-            # 分节标题交给 tg_add_section：emoji 不套标签（规范 2.3 节）、段前空行自动补全。
+            # 分节标题交给 tg_add_section：emoji 不套标签（规范 1.3 节）、段前空行自动补全。
             # waitline 只含树形条目，不要再自带"⏳ 起播等待"标题行，也不要再套"等待："标签
             if [ -n "$waitline" ]; then
-              # 列表分节带计数（规范 4.2 节：分节后跟条目列表必须 · N）
+              # 列表分节带计数（规范 3.4 节：分节后跟条目列表必须 · N）
               tg_add_section text "⏳ 起播等待 · $(printf '%s' "$waitline" | grep -c .)"
               tg_add_block text "$waitline"
             fi
@@ -2165,7 +2165,7 @@ jobs:
             success) STATUS_EMOJI="✅";;
             failure) STATUS_EMOJI="❌";;
             cancelled) STATUS_EMOJI="⛔";;
-            # 未知状态用 ⚠️（❓ 不在规范 8.2 节 状态图标内，属自造前缀）
+            # 未知状态用 ⚠️（❓ 不在规范 5.5 节 状态图标内，属自造前缀）
             *) STATUS_EMOJI="⚠️";;
           esac
           # 运行时长不再在本 step 自算（旧 '%dh %dm' 写法与全库收尾区不一致）：
@@ -2237,7 +2237,7 @@ jobs:
           # 统一收尾区（⏱ 已运行 X · 🔗 运行日志；读 step env 的 TG_RUN_URL / TG_RUN_STARTED_AT）
           tg_add_footer msg
           echo "TG(收尾): 已构建统一版式消息"
-          # 走发送层而非 curl 直发：429 重试已内建，HTML 解析失败直接报错（规范 第 6 章），
+          # 走发送层而非 curl 直发：429 重试已内建，HTML 解析失败直接报错（规范 第 7 章），
           # 429 限流自动等待重试，disable_web_page_preview 内置
           send_tg "$msg" || echo "::warning::收尾 TG 通知发送失败"
 

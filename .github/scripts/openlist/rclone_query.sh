@@ -43,8 +43,8 @@ _get_path_stats() {
 }
 
 # 运行 rclone check 并构建差异文件列表（按状态分组: 新增/仅目标存在/不一致，
-# 每组上限 8 条，超出折叠"还有 N 条…"——与规范 4.6 节 一致）
-# 返回多行 HTML: 组头 "状态 · N"（计数裸文本，全库无粗体，规范 2.3 节）+ tree_code_fold 树形条目
+# 每组上限 8 条，超出折叠"还有 N 条…"——与规范 3.6 节 一致）
+# 返回多行 HTML: 组头 "状态 · N"（计数裸文本，全库无粗体，规范 1.3 节）+ tree_code_fold 树形条目
 _build_diff_files_list() {
   local source_path="$1"
   local dest_path="$2"
