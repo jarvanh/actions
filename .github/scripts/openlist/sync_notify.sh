@@ -165,10 +165,9 @@ _send_sync_result_notification() {
   local fix_total=0
   if [ -s "$fix_list" ]; then
     fix_total=$(grep -c . "$fix_list" 2>/dev/null || true)
-    local _fix_entries="" _fix_shown=0
+    local _fix_entries=""
     while IFS='|' read -r f_original f_alternative f_method f_restore f_size f_bytes f_mid; do
       [ -z "$f_original" ] && continue
-      [ "$_fix_shown" -ge 8 ] && continue
       local f_method_tag _entry
       f_method_tag=$(_fix_method_short "$f_mid")
       # 双机器值条目（原名 → 替代名）走 tg_entry_pair；同名修复时第二主体为空自动省略
@@ -178,12 +177,11 @@ _send_sync_result_notification() {
         _entry="$(tg_entry "$f_original" "$f_size" "$f_method_tag")"
       fi
       _fix_entries+="${_entry}"$'\n'
-      _fix_shown=$((_fix_shown + 1))
     done < "$fix_list"
-    if [ "$fix_total" -gt 8 ]; then
-      _fix_entries+="还有 $((fix_total - 8)) 条…"$'\n'
-    fi
-    fix_summary="$(tree_lines "$_fix_entries")"$'\n'
+    # 超 8 条折叠交给真源 tree_fold（4.6 节）：条目流已由 tg_entry* 构建（已转义、
+    # 已含 <code>），tree_fold 只截断 + 加折叠行；不能再走 tree_code_fold（二次转义），
+    # 也不再自己手写 head -n 8 + 折叠行（此前是 tree_fold 的重复实现）
+    fix_summary="$(tree_fold "${_fix_entries%$'\n'}")"$'\n'
   fi
   [ -z "$fix_summary" ] && fix_summary="无"$'\n'
 
@@ -193,6 +191,10 @@ _send_sync_result_notification() {
 
   # 构建 fail_summary（无法修复的文件树形列表: 条目行 + tree_sub 缩进的"修复过程"子行；
   # 风格与 fix_summary 一致；每组上限 8 个文件，超出折叠"还有 N 个文件…"）
+  # **这里不走 tree_fold**（与上面的 fix_summary 不同）：tree_fold 按"行"截断，
+  # 而本列表的截断单位是"文件条目"（每条 = 1 条目行 + N 行修复过程子行），
+  # 按行截断会把修复过程子行切在半路。故由调用方按条目计数，
+  # 折叠行仍并入条目流作末条（禁双 └─ 同级）——二层列表的折叠例外，见 4.6 节。
   local fail_summary=""
   local fail_total=0
   if [ -s "$fail_list" ]; then
