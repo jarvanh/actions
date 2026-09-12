@@ -1487,14 +1487,16 @@ jobs:
           STAGE_DIR=$(mktemp -d /tmp/zcode-archive-stage.XXXXXX)
           mkdir -p "$STAGE_DIR/.zcode"
 
-          # 只备个人数据：db（会话库，连 -wal/-shm 一起打包保证一致性）、rollout（对话原始流）、memories（持久记忆）。
-          # log/exec/plugins 均可再生；server/ 运行时由桌面客户端自动重新部署，不备份。
+          # 只备个人数据：db（会话库，连 -wal/-shm 一起打包保证一致性）、rollout（对话原始流）、
+          # memories（持久记忆）、plugins/data + marketplaces（插件运行数据与市场配置）。
+          # 排除 plugins/cache（13MB 插件缓存，可按需重新下载）与 log/exec（运行日志，可再生）。
+          # server/ 运行时由桌面客户端自动重新部署，不备份。
           # rsync 返回 24 表示活动会话文件复制中消失，属预期，仍校验最终包。
           set +e
           rsync -a --delete \
             --exclude 'log/**' \
             --exclude 'exec/**' \
-            --exclude 'plugins/**' \
+            --exclude 'plugins/cache/**' \
             --exclude '*.lock' \
             --exclude '*.pid' \
             "$SRC_DIR"/ "$STAGE_DIR/.zcode/cli"/
