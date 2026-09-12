@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Telegram 通知渲染预览（对应 docs/telegram-notify.md 7.3 节）
 #
-# 用法:
-#   bash .workbuddy-ai/skills/telegram-notify-audit/scripts/render_preview.sh [仓库根目录]
+# 用法（skill 真身在仓库根的 skills/ 下，供所有 AI 工具共用）:
+#   bash skills/telegram-notify-audit/scripts/render_preview.sh [仓库根目录]
 #
 # 用真源助手构造数据渲染一遍，能抓到纯代码审查漏掉的三类问题：
 #   1. 转义被二次处理（& → &amp;amp;）
@@ -11,7 +11,19 @@
 # 本脚本自带这三项的机器校验，输出末尾会打印 PASS/FAIL。
 set -uo pipefail
 
-ROOT="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+# 本文件可能经符号链接被调用（例如 WorkBuddy 从 .workbuddy-ai/skills/ 链接过来），
+# 此时 dirname 返回的是链接所在目录、按固定级数上溯会算错 → 先用 `cd -P` 取物理路径，
+# 再逐级向上找含真源的目录，不依赖上溯级数。
+_script_dir="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="${1:-}"
+if [ -z "$ROOT" ]; then
+  _d="$_script_dir"
+  while [ "$_d" != "/" ]; do
+    if [ -f "$_d/.github/scripts/telegram/tg_notify.sh" ]; then ROOT="$_d"; break; fi
+    _d="$(dirname "$_d")"
+  done
+fi
+[ -n "$ROOT" ] || ROOT="$_script_dir/../../.."
 SOURCE="$ROOT/.github/scripts/telegram/tg_notify.sh"
 
 if [ ! -f "$SOURCE" ]; then
