@@ -1,6 +1,6 @@
 # 通知构件速查
 
-真源行号取自 2026-09-12 的版本，**改真源时同步更新本表**。
+真源行号取自 2026-09-12 的版本，**改真源时同步更新本表**。bash 列漂过一次（`tg_notify.sh` 在 `TG_SEP` 与 `tg_add_title` 之间插过代码，其后整列偏 14 行，已修正）——核对方式：`grep -nE '^函数名\(\)' 真源`。
 
 ## 1. 三套实现对照
 
@@ -8,26 +8,26 @@
 |---|---|---|---|
 | 转义 | `escape_html` (L54) | `Esc-Html` (L17) | `html.escape` |
 | 分隔线 18 条 | `TG_SEP` (L63) | `$TG_SEP` (L15) | `TG_SEP` (L560) |
-| 标题 | `tg_add_title` (L72) | 手拼 | 手拼 |
-| kv（裸文本值） | `tg_add_kv` (L78) | 手拼 | 手拼 |
-| kv（机器值 `<code>`） | `tg_add_path` (L83) | 手拼 | 手拼 |
-| 分节 | `tg_add_section` (L94) | 手拼 | 手拼 |
-| 说明段 | `tg_add_note` (L105) | 手拼 | 手拼 |
-| 多行块（原样） | `tg_add_block` (L115) | — | — |
-| 多行块（`<pre>`） | `tg_add_pre` (L309) | — | `tg_pre_block` (L658) |
-| 收尾区 | `tg_add_footer` (L133) | `Get-TgFooter` (L39) | `tg_footer_line` (L663) |
-| 条目（单行，无尾换行） | `tg_entry` (L249) | — | `tg_entry` (L617) |
-| 条目（累积，含尾换行） | `tg_add_entry` (L267) | — | 自己 join |
-| 条目（文字主体） | `tg_entry_text` (L258) / `tg_add_entry_text` (L272) | — | `tg_entry(..., code=False)` |
-| 条目（双机器值 `→`） | `tg_entry_pair` (L293) / `tg_add_entry_pair` (L297) | — | `tg_entry_pair` (L642) |
-| 条目（双机器值 `·`） | `tg_entry_codes` (L295) / `tg_add_entry_codes` (L302) | — | `tg_entry_codes` (L650) |
-| 树形前缀 | `tree_conn` (L180) / `tree_sub` (L185) | 手写 `  ├─ ` `  └─ ` | 手写 |
-| 多行 → 树形 | `tree_lines` (L191) | — | — |
-| 折叠（裸文本） | `tree_code_fold` (L209) | — | — |
-| 折叠（已构建条目流） | `tree_fold` (L233) | — | — |
+| 标题 | `tg_add_title` (L86) | 手拼 | 手拼 |
+| kv（裸文本值） | `tg_add_kv` (L92) | 手拼 | 手拼 |
+| kv（机器值 `<code>`） | `tg_add_path` (L97) | 手拼 | 手拼 |
+| 分节 | `tg_add_section` (L108) | 手拼 | 手拼 |
+| 说明段 | `tg_add_note` (L119) | 手拼 | 手拼 |
+| 多行块（原样） | `tg_add_block` (L129) | — | — |
+| 多行块（`<pre>`） | `tg_add_pre` (L325) | — | `tg_pre_block` (L658) |
+| 收尾区 | `tg_add_footer` (L147) | `Get-TgFooter` (L39) | `tg_footer_line` (L663) |
+| 条目（单行，无尾换行） | `tg_entry` (L265) | — | `tg_entry` (L617) |
+| 条目（累积，含尾换行） | `tg_add_entry` (L283) | — | 自己 join |
+| 条目（文字主体） | `tg_entry_text` (L274) / `tg_add_entry_text` (L288) | — | `tg_entry(..., code=False)` |
+| 条目（双机器值 `→`） | `tg_entry_pair` (L309) / `tg_add_entry_pair` (L313) | — | `tg_entry_pair` (L642) |
+| 条目（双机器值 `·`） | `tg_entry_codes` (L311) / `tg_add_entry_codes` (L318) | — | `tg_entry_codes` (L650) |
+| 树形前缀 | `tree_conn` (L194) / `tree_sub` (L201) | 手写 `  ├─ ` `  └─ ` | 手写 |
+| 多行 → 树形 | `tree_lines` (L207) | — | — |
+| 折叠（裸文本） | `tree_code_fold` (L225) | — | — |
+| 折叠（已构建条目流） | `tree_fold` (L249) | — | — |
 | 时长格式化 | `tg_add_footer` 内置 | `Format-TgDuration` (L23) | `tg_format_elapsed` (L599) |
-| 发送 | `send_tg` (L357) / `send_tg_chunked` (L364) | `Send-TgMessage` (L61) | `send_telegram` (L507) / `send_telegram_chunked` (L565) |
-| 原样追加（**不转义**） | `tg_append` (L66) | — | — |
+| 发送 | `send_tg` (L373) / `send_tg_chunked` (L380) | `Send-TgMessage` (L61) | `send_telegram` (L507) / `send_telegram_chunked` (L565) |
+| 原样追加（**不转义**） | `tg_append` (L80) | — | — |
 
 pwsh 侧**只有 5 个成员**（`$TG_SEP` / `Esc-Html` / `Format-TgDuration` / `Get-TgFooter` / `Send-TgMessage`），没有第六个。全库 dot-source 它的只有 `rdp.yml:86` 与 `tailscale-windows.yml:119`。
 

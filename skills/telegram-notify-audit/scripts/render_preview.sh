@@ -4,11 +4,12 @@
 # 用法（skill 真身在仓库根的 skills/ 下，供所有 AI 工具共用）:
 #   bash skills/telegram-notify-audit/scripts/render_preview.sh [仓库根目录]
 #
-# 用真源助手构造数据渲染一遍，能抓到纯代码审查漏掉的三类问题：
+# 用真源助手构造数据渲染一遍，能抓到纯代码审查漏掉的四类问题：
 #   1. 转义被二次处理（& → &amp;amp;）
 #   2. 空行数量不对（双空行 / 该有空行却没有）
 #   3. $( ) 吃掉尾换行导致条目粘连
-# 本脚本自带这三项的机器校验，输出末尾会打印 PASS/FAIL。
+#   4. 二层列表的子行与条目正文不同列（tree_sub 与 tree_conn 不等宽）
+# 本脚本自带这四项的机器校验，输出末尾会打印 PASS/FAIL。
 set -uo pipefail
 
 # 本文件可能经符号链接被调用（例如 WorkBuddy 从 .workbuddy-ai/skills/ 链接过来），
@@ -83,6 +84,20 @@ folded="$(tree_fold "$big")"
 printf '%s\n' "$folded"
 
 echo ""
+echo "=== 4. 二层列表（条目 + 子行 + 子树；子行正文须与条目正文同列）==="
+sub=""
+# 首条（非末条）：子行前缀走 │ 形态；排除 ≥2 时挂一层子树
+sub+="$(tree_conn 0)$(tg_entry "dsta" "源端 36.065 GiB / 1415 文件" "+7.268 GiB / +2 文件")"$'\n'
+sub+="$(tree_sub 0)差异构成：新增 1 · 同名更新 1"$'\n'
+sub+="$(tree_sub 0)排除 · 2"$'\n'
+sub+="$(tree_sub 0)$(tree_conn 0)$(tg_entry 'notion/**')"$'\n'
+sub+="$(tree_sub 0)$(tree_conn 1)$(tg_entry 'self-hosted_latest.tar.gz')"$'\n'
+# 末条：子行前缀走 5 空格形态；单条排除并入子行（不扩树）
+sub+="$(tree_conn 1)$(tg_entry "dstb" "无变动")"$'\n'
+sub+="$(tree_sub 1)排除：$(tg_entry '*.tmp')"$'\n'
+printf '%s\n' "${sub%$'\n'}"
+
+echo ""
 echo "=== 自动校验 ==="
 sep_len=$(printf '%s' "$TG_SEP" | wc -m | tr -d ' ')
 [ "$sep_len" -eq 18 ]; check "分隔线为 18 条（实测 ${sep_len}）" $?
@@ -102,6 +117,20 @@ esac
 printf '%s' "$m2" | grep -q '<pre>2026/09/12 ERROR: Failed to copy &lt;a&gt; &amp;'; check "<pre> 内已转义" $?
 printf '%s' "$folded" | grep -q '└─ 还有 4 条…'; check "12 条折叠为 8 条 + 「还有 4 条…」" $?
 printf '%s' "$folded" | grep -c '└─' | grep -q '^1$'; check "折叠后只有一个 └─" $?
+
+# 宽度比对必须在「把多字节制表符折成 1 字节」之后用字节数比 —— 否则 │(3B) 与 ├─(6B)
+# 本就不同字节数，且 wc -m / ${#} 在 C locale 下按字节计，会假 FAIL。
+_asciify() { sed -e 's/│/X/' -e 's/├/X/' -e 's/└/X/' -e 's/─/X/'; }   # 四个制表符都要折，漏一个就按 3 字节计
+_prefix_w() { { "$1" "$2"; } | _asciify | wc -c | tr -d ' '; }
+[ "$(_prefix_w tree_sub 0)" -eq "$(_prefix_w tree_conn 0)" ] \
+  && check "子行前缀与条目前缀等宽（非末条 5 字符）" 0 \
+  || check "子行前缀与条目前缀等宽（非末条 5 字符）" 1
+[ "$(_prefix_w tree_sub 1)" -eq "$(_prefix_w tree_conn 1)" ] \
+  && check "子行前缀与条目前缀等宽（末条 5 字符）" 0 \
+  || check "子行前缀与条目前缀等宽（末条 5 字符）" 1
+printf '%s' "$sub" | grep -q '^  │  排除 · 2'; check "非末条目子行前缀 = │ + 2 空格" $?
+printf '%s' "$sub" | grep -q '^     排除：<code>\*.tmp</code>'; check "末条目子行前缀 = 5 空格" $?
+printf '%s' "$sub" | grep -q '^  │    ├─ <code>notion/\*\*</code>'; check "子树缩进 = 子行前缀 + 2 空格" $?
 
 echo ""
 if [ "$FAIL" -eq 0 ]; then echo "全部校验通过"; else echo "存在 FAIL，逐条看上面"; fi
