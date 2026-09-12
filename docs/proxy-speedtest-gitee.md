@@ -13,7 +13,7 @@
 | `proxy-speedtest-cdn` | 国内 CDN/镜像站 + baidu/taobao | 经代理单连接 curl 下载 + HTTP 计时延迟 | `speedtest.py` | [cdn](proxy-speedtest-cdn.md) |
 | `proxy-speedtest-taier` | 泰尔三网（电信/联通/移动测速服务器） | taierspeedtest 延迟 + 单/多线程上下行 | `taier_speedtest.py` + mihomo TUN | [taier](proxy-speedtest-taier.md) |
 
-调度：UTC 02/08/14/20（北京 10/16/22/04），与 cdn（03/09/15/21）、taier（04/10/16/22）错峰。
+调度：UTC 21/01/05/09（北京 05/09/13/17），与 cdn（UTC 22/02/06/10 → 京 06/10/14/18）、taier（UTC 23/03/07/11 → 京 07/11/15/19）各错开 1 小时；三套都只排在北京时间 05:00–21:00（夜间 runner 排队 + 出口拥塞会让读数失真）。
 
 ## 双重角色
 
