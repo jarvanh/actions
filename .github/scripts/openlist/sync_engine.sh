@@ -296,7 +296,7 @@ sync_with_logging() {
   _send_sync_result_notification \
     "$source_path" "$dest_path" "$task_name" "$SYNC_STATUS" \
     "$LOG_FILENAME" "$LAST_ATTEMPT_LOG" \
-    "$fail_list" "$fix_list" "$fix_log" \
+    "$fail_list" "$fix_list" \
     "$HAS_OBJECT_NOT_FOUND" \
     "${extra_args[@]}"
 

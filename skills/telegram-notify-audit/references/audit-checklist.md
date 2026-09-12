@@ -33,6 +33,9 @@
 - 收尾区 `⏱ 已运行 X · 🔗 运行日志` 必须走 `tg_add_footer` / `Get-TgFooter` / `tg_footer_line`
 - 时长五层：`X 小时 Y 分`（分钟不补零）/ `X 分钟` / `X.XX 秒` / `X 毫秒` / 面板 `⏱mm:ss`
 - 动态内容必须转义，无豁免
+- 读者要「看懂」的字段说人话（规范 · 说人话）：失败原因/状态/结论里的内部机制
+  （熔断、探测、哈希目录、base64URL、重启复核）一律翻译成日常说法；运行日志不搬进
+  通知，尤其不搬成条目子行（单文件能撑出十几行）
 - 空行只来自：section 段前、note 段前、footer 前、正文与动作行之间、多组列表组间
   （组间空行必须带「前面已有组」的条件，首组前不补）
 
@@ -60,8 +63,8 @@ bash -c 'rm -f /tmp/x_*.log 2>/dev/null; for t in test_*.sh; do bash "$t" </dev/
 grep -l "command not found" /tmp/x_*.log   # 必须为空（硬要求）
 ```
 
-- 全量约 8–12 分钟，后台跑；**跑期间不要并发跑单个测试**。
-- 判定基线：**17 套 EXIT=0** + 2 个已知失败：
+- 全量约 5–12 分钟（随套件数与机器负载变化），后台跑；**跑期间不要并发跑单个测试**。
+- 判定基线：**18 套 EXIT=0** + 2 个已知失败：
   - `test_truth.sh`（依赖 docker / 真实 OpenList 服务）
   - `test_marker_skip_guards.sh` 1b（macOS BSD `date` 无 `-d`）
 - `command not found` 扫描**必须为空**——套件 PASS 不等于通过。
