@@ -112,6 +112,11 @@ env:
   # （零流量、覆盖率越高越好，保持 30），头尾预热对 302 直连基本无效、只当挂载
   # 冷读探针用，3 条即可——原先跟着 WU_ITEMS=30 走，每轮白烧 1.9GB 流量。
   WU_EDGE_ITEMS: ${{ vars.WU_EDGE_ITEMS || '3' }}
+  # 跨 run 海报档位保底数：历史档位按半衰期衰减（WW_DECAY=0.5）后若不足这个数，
+  # 从衰减前的 Top-N 补足。避免长时间没人访问就把已学到的尺寸全淘汰干净
+  # （每轮 ×0.5，几轮就 <1 淘汰），下次访问第一轮只能冷启动、要等第二轮才热。
+  # 补足的仍是历史实测过的尺寸，不是默认档；真实流量一来就会被挤下去。
+  WW_KEEP_MIN: ${{ vars.WW_KEEP_MIN || '5' }}
 
 jobs:
   build:
@@ -1738,7 +1743,20 @@ jobs:
           if [ -z "$BASE" ] && jq -e 'has("sizes")' "$STATE" >/dev/null 2>&1; then
             BASE=$(jq -r '.sizes[]? | "\(.) 10"' "$STATE" 2>/dev/null || true)
           fi
-          BASE=$(printf '%s' "$BASE" | awk -v d="$WW_DECAY" 'NF>=2 {s=$2*d; if(s>=1) printf "%s %.1f\n", $1, s}')
+          DECAYED=$(printf '%s' "$BASE" | awk -v d="$WW_DECAY" 'NF>=2 {s=$2*d; if(s>=1) printf "%s %.1f\n", $1, s}')
+          # 保底：衰减后不足 WW_KEEP_MIN 档时，从衰减前的 Top-N 补足（得分按 1.0 记）。
+          # 没有这条，长时间没人访问会把历史档位全部淘汰干净（0.5 连乘几轮就 <1），
+          # 下次访问的第一轮只能冷启动、要等第二轮才热——等于把学到的东西忘掉。
+          # 补足的仍是历史实测过的尺寸，不是凭空给的默认档；真实流量一来就会被挤掉。
+          WW_KEEP_MIN=${WW_KEEP_MIN:-5}
+          if [ "$(printf '%s' "$DECAYED" | grep -c .)" -lt "$WW_KEEP_MIN" ] && [ -n "$BASE" ]; then
+            FILL=$(printf '%s\n' "$BASE" | sort -k2,2gr | head -"$WW_KEEP_MIN" \
+                   | awk '{printf "%s 1.0\n", $1}')
+            # DECAYED 优先、FILL 只补缺口：按宽度去重，先出现的取胜
+            BASE=$(printf '%s\n%s' "$DECAYED" "$FILL" | awk 'NF>=2 && !seen[$1]++')
+          else
+            BASE="$DECAYED"
+          fi
           export BASE   # merged_sizes 的 awk 经 ENVIRON["BASE"] 读取（变量须导出）
 
           # 合并得分 = 历史衰减分 + 本轮 ge2o 实测计数（排除 127.0.0.1：warmup.sh 的
