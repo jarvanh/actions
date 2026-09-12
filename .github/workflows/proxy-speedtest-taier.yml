@@ -17,9 +17,11 @@ name: proxy-speedtest-taier
 # 开 TUN 需要 CAP_NET_ADMIN，脚本会在非 root 时自动加 sudo。
 on:
   schedule:
-    # 每 6 小时测一次：UTC 04:00, 10:00, 16:00, 22:00（北京 12:00, 18:00, 00:00, 06:00）
-    # 与 proxy-speedtest-gitee（02/08/14/20）、proxy-speedtest-cdn（03/09/15/21）错峰
-    - cron: "0 4,10,16,22 * * *"
+    # 每天 4 次、间隔 4 小时：UTC 23:00, 03:00, 07:00, 11:00（北京 07:00, 11:00, 15:00, 19:00）。
+    # 与 gitee（京 05/09/13/17）、cdn（京 06/10/14/18）各错开 1 小时，避免共用订阅源互相抢带宽；
+    # 全部落在北京时间 05:00–21:00（夜间不测：runner 排队 + 出口拥塞会让读数失真）。
+    # 本套耗时最长（测速点多时尤甚），4 小时间隔若撞车由 concurrency singleton 排队，不会并发。
+    - cron: "0 23,3,7,11 * * *"
   workflow_dispatch:
     inputs:
       points:
