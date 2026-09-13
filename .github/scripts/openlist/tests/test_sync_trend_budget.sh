@@ -89,6 +89,16 @@ declare -A PREVIEW_PENDING_MAP=( ["k1"]="100 1" ["k2"]="200 2" )
 trend_capture_remaining
 v=$(cat /tmp/ol_trend_remaining.txt 2>/dev/null || echo 0)
 [ "$v" = "300" ] && ok "trend_capture: 合计 300" || bad "trend_capture: 期望300实得$v"
+# 3b) 任一源端列举失败 → 写 unknown（jsonl 落 null），不拿"按 0 求和"的假
+#     进展污染趋势曲线（源端失败时该对待同步量是未知，不是 0）
+PREVIEW_FAIL_SRC_PAIRS=1
+trend_capture_remaining >/dev/null
+v=$(cat /tmp/ol_trend_remaining.txt 2>/dev/null || echo 0)
+[ "$v" = "unknown" ] && ok "trend_capture: 源端失败 → 记 unknown" || bad "trend_capture: 期望unknown实得$v"
+PREVIEW_FAIL_SRC_PAIRS=0
+trend_capture_remaining >/dev/null
+v=$(cat /tmp/ol_trend_remaining.txt 2>/dev/null || echo 0)
+[ "$v" = "300" ] && ok "trend_capture: 无源端失败 → 恢复求和" || bad "trend_capture: 期望300实得$v"
 
 # --- 4. trend.jsonl 三情形 ---
 trend_capture_start

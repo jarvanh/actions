@@ -47,7 +47,16 @@ trend_record_transferred() {
 
 # 预览 pass 结束后调用: 全量未传量 = PREVIEW_PENDING_MAP 各对 bytes 合计
 # （与预览通知"合计预估待同步"同口径，零额外列举）
+# 任一源端列举失败 → 本轮 remaining 记 unknown（不参与求和、jsonl 写 null）:
+#   源端失败时该对的待同步量是"未知"而非 0，把它按 0 加进合计会让曲线出现
+#   假进展（实测单轮假降 2.49TB，见 2026-09-13 评估）。宁可本轮没有剩余量
+#   数据点，也不要一个方向错、数量级还错的数字。
 trend_capture_remaining() {
+  if [ "${PREVIEW_FAIL_SRC_PAIRS:-0}" -gt 0 ]; then
+    echo "⚠️ ${PREVIEW_FAIL_SRC_PAIRS} 个同步对源端列举失败，本轮剩余量记为未知（不写入趋势）"
+    echo "unknown" > "$TREND_REMAINING_FILE" 2>/dev/null || true
+    return 0
+  fi
   local _sum=0 _v
   if declare -p PREVIEW_PENDING_MAP >/dev/null 2>&1; then
     for _v in "${PREVIEW_PENDING_MAP[@]}"; do

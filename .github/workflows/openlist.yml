@@ -496,12 +496,21 @@ jobs:
           # 5 小时零产出 —— 不打印就只能在 5 万行日志里翻。
           ROUND_FIXED_OK=0
           ROUND_MISSING=0
+          ROUND_REUSED=0
           if [ -f /tmp/ol_round_stats.env ]; then . /tmp/ol_round_stats.env; fi
+          [[ "$ROUND_FIXED_OK" =~ ^[0-9]+$ ]] || ROUND_FIXED_OK=0
+          [[ "$ROUND_MISSING" =~ ^[0-9]+$ ]] || ROUND_MISSING=0
+          [[ "$ROUND_REUSED" =~ ^[0-9]+$ ]] || ROUND_REUSED=0
+          # 新落盘 = 成功 - 沿用上轮: 沿用条目是上轮成果，不算本轮产出。
+          # 不拆开的话"本轮零产出"永远查不出来 —— run 34752801560 报成功 183，
+          # 其中 183 全是沿用上轮，本轮真实落盘 0，而告警判据被这个数顶掉。
+          ROUND_FIXED_NEW=$(( ROUND_FIXED_OK - ROUND_REUSED ))
+          [ "$ROUND_FIXED_NEW" -lt 0 ] && ROUND_FIXED_NEW=0
           ROUND_FAILED=$(( ROUND_MISSING - ROUND_FIXED_OK ))
           [ "$ROUND_FAILED" -lt 0 ] && ROUND_FAILED=0
-          echo "本轮修复成效: 成功 ${ROUND_FIXED_OK} · 缺失 ${ROUND_MISSING} · 未修复 ${ROUND_FAILED}"
-          if [ "$ROUND_MISSING" -gt 0 ] && [ "$ROUND_FIXED_OK" -eq 0 ]; then
-            echo "🚨 本轮零成功: ${ROUND_MISSING} 个缺失文件全部修复失败（典型成因: 目标后端写不进/驱动失效）—— 本 run 可能仍以 success 收场，但实际没有任何数据落盘"
+          echo "本轮修复成效: 成功 ${ROUND_FIXED_OK}（新落盘 ${ROUND_FIXED_NEW} · 沿用上轮 ${ROUND_REUSED}） · 缺失 ${ROUND_MISSING} · 未修复 ${ROUND_FAILED}"
+          if [ "$ROUND_MISSING" -gt 0 ] && [ "$ROUND_FIXED_NEW" -eq 0 ]; then
+            echo "🚨 本轮零新增落盘: ${ROUND_MISSING} 个缺失文件本轮一个都没真正落盘（成功数 ${ROUND_FIXED_OK} 中 ${ROUND_REUSED} 个是沿用上轮成果）（典型成因: 目标后端写不进/驱动失效）—— 本 run 可能仍以 success 收场，但实际没有任何数据落盘"
           fi
 
           actual_entries=0
@@ -562,7 +571,10 @@ jobs:
         # 值，再由 bash 字符串比较决定是否执行。
         if: ${{ inputs.run_mode == '' || inputs.run_mode == '同步' }}
         env:
-          SESSION_HOLD: ${{ github.event.inputs.session_hold || 'true' }}
+          # 兜底值必须与输入默认（false）一致: schedule 触发时 inputs.* 为空串，
+          # 这里取 'true' 会让所有定时轮在同步 step 一旦以 success 收场时真去
+          # hold 5h（冲刺期窗口应全给同步）——冲刺期结束、需要会话保持时再手动开。
+          SESSION_HOLD: ${{ github.event.inputs.session_hold || 'false' }}
         run: |
           if [ "${SESSION_HOLD:-true}" != "true" ]; then
             echo "session_hold=false，跳过会话保持（同步结束立即回传收摊，6h 窗口全部让给同步）"

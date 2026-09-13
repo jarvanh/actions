@@ -140,6 +140,13 @@ add_preview_pair "onedrive:srcfail" "openlist:dst" --delete-before >/dev/null
   && ok "3a 源端清单失败 → 待同步 0（无变动）" || bad "3a: [$PREVIEW_TOTAL_SYNC_COUNT/$PREVIEW_TOTAL_SYNC_BYTES]"
 flush_task_preview >/dev/null
 echo "$SEND_CAPTURE" | grep -q '无变动' && ok "3b 渲染无变动" || bad "3b: $SEND_CAPTURE"
+# F8: 源端失败必须留痕 —— 旧实现静默把该对按 0 计入合计，剩余量出现 TB 级
+# 假降（2026-09-13 实测单轮假降 2.49TB），趋势给出假的乐观结论
+[ "${PREVIEW_FAIL_SRC_PAIRS:-0}" = "1" ] && ok "3c 源端失败计数 = 1" || bad "3c: [${PREVIEW_FAIL_SRC_PAIRS:-0}]"
+[ "${PREVIEW_PENDING_MAP[srcfail|openlist:dst]:-}" = "unknown 0" ] \
+  && ok "3d 该对待同步量记 unknown（不按 0 参与求和）" || bad "3d: [${PREVIEW_PENDING_MAP[srcfail|openlist:dst]:-}]"
+echo "$SEND_CAPTURE" | grep -q '源端列举失败，待同步量未知' \
+  && ok "3e 合计附注提示源端失败" || bad "3e: $SEND_CAPTURE"
 
 # ===== 场景 4: 目标端清单失败 → 重试 3 次后全量估算 + 预览明示 ⚠️ =====
 # 源端 5 文件全部视为新增，fixed1.bin 仍被 marker 剔除 → 4 文件 / 1050 B

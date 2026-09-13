@@ -634,6 +634,8 @@ _sync_fix_missing_files() {
               prev_shuman=$(echo "$prev_entry" | jq -r '.size_human // "未知"')
               prev_sbytes=$(echo "$prev_entry" | jq -r '.size_bytes // 0')
               echo "♻ 沿用上轮修复 · $(_fix_method_short "$prev_mid") · $(_short_path "$mf")" | tee -a "$LOG_FILENAME"
+              # 沿用 = 上轮成果，不是本轮产出；单列计数，供收尾区分"新落盘"与"沿用"
+              ROUND_REUSED_TOTAL=$((ROUND_REUSED_TOTAL + 1))
               echo "${mf}|${prev_alt}|${prev_method}|${prev_restore}|${prev_shuman}|${prev_sbytes}|${prev_mid}" >> "$fix_list"
               FIXED_THIS_RUN["$mf"]="$prev_alt"
               continue
@@ -1142,9 +1144,14 @@ _sync_serialize_fixed_files() {
 # 为什么落文件而不是靠全局变量: 收尾 step 是独立 shell，全局变量传不过去；
 # 而"本轮修复成功 0 个"这类信号必须在收尾一眼可见 —— run #12616 结论是
 # success，实际 394 次修复全败、5 小时零产出，除翻日志外无任何提示。
-# 用法: _ol_round_stats_bump <本次新增 fixed_files JSON> <本轮累计缺失数>
+# 本轮"沿用上轮修复"累计（run 级，不在 flush/任务边界清零）
+# 为什么单列: 沿用条目是上轮的成果，不是本轮产出。混在 ROUND_FIXED_OK 里会让
+# "本轮零产出"告警永远不响 —— run 34752801560 报"成功 183"，实际 183 全是
+# 沿用上轮、本轮新落盘 0，告警判据 ROUND_FIXED_OK=0 被恒顶掉。
+ROUND_REUSED_TOTAL=0
+# 用法: _ol_round_stats_bump <本次新增 fixed_files JSON> <本轮累计缺失数> [本轮累计沿用数]
 _ol_round_stats_bump() {
-  local fixed_json="$1" missing_total="${2:-0}"
+  local fixed_json="$1" missing_total="${2:-0}" reused_total="${3:-0}"
   local f="/tmp/ol_round_stats.env"
   local cur_ok=0 add_ok=0
   [ -f "$f" ] && cur_ok=$(sed -n 's/^ROUND_FIXED_OK=//p' "$f" 2>/dev/null)
@@ -1152,7 +1159,9 @@ _ol_round_stats_bump() {
   add_ok=$(printf '%s' "$fixed_json" | jq 'length' 2>/dev/null)
   [[ "$add_ok" =~ ^[0-9]+$ ]] || add_ok=0
   [[ "$missing_total" =~ ^[0-9]+$ ]] || missing_total=0
-  printf 'ROUND_FIXED_OK=%s\nROUND_MISSING=%s\n' "$((cur_ok + add_ok))" "$missing_total" > "$f"
+  [[ "$reused_total" =~ ^[0-9]+$ ]] || reused_total=0
+  printf 'ROUND_FIXED_OK=%s\nROUND_MISSING=%s\nROUND_REUSED=%s\n' \
+    "$((cur_ok + add_ok))" "$missing_total" "$reused_total" > "$f"
 }
 
 # 累计到全局变量（供 auto-split 拆分模式下顶级 save_sync_marker 收集所有子目录的修复）
@@ -1192,5 +1201,5 @@ _sync_accumulate_fixed_results() {
   fi
 
   # 本轮修复成效累计（收尾告警口径，见 _ol_round_stats_bump 注释）
-  _ol_round_stats_bump "${LAST_SYNC_FIXED_FILES_JSON:-[]}" "${SYNC_MISSING_TOTAL_RUN:-0}"
+  _ol_round_stats_bump "${LAST_SYNC_FIXED_FILES_JSON:-[]}" "${SYNC_MISSING_TOTAL_RUN:-0}" "${ROUND_REUSED_TOTAL:-0}"
 }
