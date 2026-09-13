@@ -499,7 +499,21 @@ def main():
         print(f"✅ 下载完成: {file} (大小 {human_size(file_size)} / {file_size} bytes, 耗时 {dl_elapsed:.2f}s)")
 
         # 预处理 + 上传到 Telegram
-        proc_one = os.path.join(GITHUB_WORKSPACE, ".github", "scripts", "telegram", "transcode_and_send.sh")
+        # 与 notify() 里的 tg_notify.sh 不同目录：通知真源留在 scripts/telegram/，
+        # 本脚本属 tg-channel/ 域（d068d03 迁移时此处漏改，导致每个文件都以
+        # "No such file or directory" 失败、耗时恒为 0.00 秒）
+        proc_one = os.path.join(GITHUB_WORKSPACE, ".github", "scripts", "tg-channel", "transcode_and_send.sh")
+        # 路径漂移时直接暴露为清晰错误，避免又变成一句难查的 bash 报错
+        if not os.path.isfile(proc_one):
+            print(f"❌ FAILED: 处理脚本不存在: {proc_one}")
+            failed += 1
+            failed_list.append(f"{file}\t处理脚本缺失 · {proc_one}")
+            notify(build_fail_notify(
+                "❌ 处理/上传失败",
+                file, 0.0,
+                [f"📄 原因：处理脚本不存在\n{tg_pre_block(proc_one)}"],
+            ))
+            continue
         print(f"🎬 开始处理/上传: {file}")
         up_start = time.time()
         # 透传输出：转码/上传进度实时进 Actions 日志；同时 tee 到日志文件，失败时把尾部附进通知
