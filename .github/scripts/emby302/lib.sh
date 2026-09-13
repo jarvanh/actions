@@ -95,6 +95,23 @@ redact_urls() {
   sed -E 's#https?://[^ "]*#<url>#g'
 }
 
+# ge2o.log 归档：取最近 N 行**真实客户端请求**，而不是纯 tail。
+# 为什么不能纯 tail：watchdog 每分钟对服务做一次自探针（来源 127.0.0.1），
+# 一轮下来上千行，纯 tail -n 60/80 拿到的一屏全是探针噪声，真正的播放/取链
+# 请求一行都看不到（odlink.log 已按同样思路改过，ge2o.log 之前漏了）。
+# 先按耗时列挑出请求行、再排掉本机探针；若本轮确实没有客户端访问（全被排空）
+# 则回退纯 tail，保证归档不空、可观测性不降低。
+ge2o_archive() { # $1=保留行数（默认 60）
+  local n="${1:-60}" body
+  body=$(grep -aE '\| [0-9.]+(µs|ms|s) \|' /opt/logs/ge2o.log 2>/dev/null \
+         | grep -av '127\.0\.0\.1' | tail -n "$n" || true)
+  if [ -n "$body" ]; then
+    printf '%s\n' "$body" | redact_log
+  else
+    tail -n "$n" /opt/logs/ge2o.log 2>/dev/null | redact_log || echo "(无 ge2o.log)"
+  fi
+}
+
 # ---------- 直链源的"唯一真相" ----------
 # host 与 token 由 start odlink 步骤写入这两个文件，ge2o 配置、启动探活、
 # 运行中 watchdog 全部从这里读，保证三者打到同一个源——否则会出现

@@ -1044,21 +1044,23 @@ jobs:
 
           # Emby API 请求：优先用自检选出的认证方式，失败自动回退另一种，返回 http 码
           emby_get() { # $1=路径(含前导 /) $2=输出文件
-            local path=$1 out=$2 code
+            # 单次超时（秒）可覆盖：默认 8s 对元数据查询足够，但 Sessions 轮询在 Emby
+            # 刚恢复/重建索引时不够（见下方数据源 B，放宽到 20s 并首败重试）
+            local path=$1 out=$2 code tmo="${EMBY_GET_TIMEOUT:-8}"
             if [ "$AUTH_MODE" = "query" ]; then
               case "$path" in
-                *\?*) code=$(curl -s -m 8 -o "$out" -w '%{http_code}' "$EMBY$path&api_key=$EMBY_API_KEY");;
-                *)    code=$(curl -s -m 8 -o "$out" -w '%{http_code}' "$EMBY$path?api_key=$EMBY_API_KEY");;
+                *\?*) code=$(curl -s -m "$tmo" -o "$out" -w '%{http_code}' "$EMBY$path&api_key=$EMBY_API_KEY");;
+                *)    code=$(curl -s -m "$tmo" -o "$out" -w '%{http_code}' "$EMBY$path?api_key=$EMBY_API_KEY");;
               esac
               if [ "$code" = "200" ]; then printf '%s' "$code"; return 0; fi
-              code=$(curl -s -m 8 -o "$out" -w '%{http_code}' -H "X-Emby-Token: $EMBY_API_KEY" "$EMBY$path")
+              code=$(curl -s -m "$tmo" -o "$out" -w '%{http_code}' -H "X-Emby-Token: $EMBY_API_KEY" "$EMBY$path")
             else
-              code=$(curl -s -m 8 -o "$out" -w '%{http_code}' \
+              code=$(curl -s -m "$tmo" -o "$out" -w '%{http_code}' \
                        -H "X-Emby-Token: $EMBY_API_KEY" "$EMBY$path")
               if [ "$code" = "200" ]; then printf '%s' "$code"; return 0; fi
               case "$path" in
-                *\?*) code=$(curl -s -m 8 -o "$out" -w '%{http_code}' "$EMBY$path&api_key=$EMBY_API_KEY");;
-                *)    code=$(curl -s -m 8 -o "$out" -w '%{http_code}' "$EMBY$path?api_key=$EMBY_API_KEY");;
+                *\?*) code=$(curl -s -m "$tmo" -o "$out" -w '%{http_code}' "$EMBY$path&api_key=$EMBY_API_KEY");;
+                *)    code=$(curl -s -m "$tmo" -o "$out" -w '%{http_code}' "$EMBY$path?api_key=$EMBY_API_KEY");;
               esac
             fi
             printf '%s' "$code"
@@ -1531,15 +1533,26 @@ jobs:
 
           # 数据源 B：Emby Sessions 轮询（ge2o 覆盖不到的播放：direct 模式 / 日志格式变化）
           (
+            # 轮询比元数据查询更怕偶发抖动：Emby 刚恢复/重建索引时 8s 超时会把整轮
+            # 播放事件丢掉（direct A/B 完全依赖这条数据源），故放宽超时并首败重试一次
+            EMBY_GET_TIMEOUT=20
             while true; do
               sleep 10
               MODE=$(cat /tmp/PLAYBACK_MODE 2>/dev/null || echo 302)
               SC=$(emby_get /emby/Sessions /tmp/pl-sessions.json)
               if [ "$SC" != "200" ]; then
+                sleep 2
+                SC=$(emby_get /emby/Sessions /tmp/pl-sessions.json)
+              fi
+              if [ "$SC" != "200" ]; then
                 SFAIL=$((SFAIL+1))
                 [ $((SFAIL % 10)) -eq 1 ] && echo "[WARN] Sessions 查询失败 http=$SC（第 $SFAIL 次）"
                 continue
               fi
+              # 恢复行：失败计数归零前打一次，便于事后判断"播了却没通知"是不是这
+              # 条数据源整段掉线（此前只有失败日志、没有恢复日志，看不出断多久）
+              [ "$SFAIL" -gt 0 ] && echo "[INFO] Sessions 查询已恢复（此前连续失败 ${SFAIL} 次）"
+              SFAIL=0
               jq -c 'if type=="array" then . else (.Items // []) end
                      | .[]
                      | select(.NowPlayingItem != null)
@@ -1937,7 +1950,11 @@ jobs:
             { printf '{"updated":%s,"scores":[%s],"recent":%s}' "$(date +%s)" "$entries" "$recent"
             } | sudo tee "$STATE" >/dev/null 2>&1 || true
           }
-          persist_state "$BASE"   # 启动即落盘衰减结果：哪怕本轮中途被杀，衰减也已生效
+          # ⚠️ 换序：BASE 是"宽度 得分"（:1876 从 scores 的 [宽度,得分] 读出），而
+          # persist_state 的契约是"得分 宽度"（:1920 按 `read -r s w` 拆）——此前直接
+          # 把 BASE 喂进去，宽度被当成得分、得分被当成宽度写回，海报预热实际拿
+          # "得分"（小数/个位数）当 maxWidth 请求，预热尺寸全错。
+          persist_state "$(printf '%s' "$BASE" | awk 'NF>=2 {print $2, $1}')"   # 启动即落盘衰减结果
 
           echo "=== wallwarmer 启动 $(date '+%F %T')（并发=$WW_WORKERS 最长=${WW_MAX_MIN}min）==="
           # 让 warmup.sh 的首屏预热先跑完（约 2-4 分钟），避免同时抢 OneDrive
@@ -2230,8 +2247,8 @@ jobs:
             }
             END { for (k in n) printf "  %s: n=%d 均值 %dms 最大 %dms\n", k, n[k], s[k] / n[k], mx[k] }' \
             | sort
-          echo "--- ge2o.log (tail 80, 脱敏) ---"
-          tail -n 80 /opt/logs/ge2o.log 2>/dev/null | redact_log || echo "(无 ge2o.log)"
+          echo "--- ge2o.log（客户端请求 80, 脱敏）---"
+          ge2o_archive 80
           echo "--- odlink.log（解析关键行 40, 脱敏）---"
           # 纯 tail 会被 watchdog 每分钟一次的目录探针淹没，只取真正有信息量的行
           grep -aE '段数=|解析失败|取直链失败|回退 OpenList|bootstrap 失败|列目录失败' \
@@ -2525,8 +2542,8 @@ jobs:
             | sort || echo "(无可用 ge2o 访问日志)"
           # ge2o 自身日志归档：定位播放走中转而非 302 直链的原因。
           # redact_log 会整行丢掉 ge2o 的 cacheKey 调试行（内含完整请求头与 cf_clearance Cookie）
-          echo "--- ge2o.log (tail 60, 脱敏) ---"
-          tail -n 60 /opt/logs/ge2o.log 2>/dev/null | redact_log || echo "(无 ge2o.log)"
+          echo "--- ge2o.log（客户端请求 60, 脱敏）---"
+          ge2o_archive 60
           # 拖动进度条（seek）的取链耗时：起播之后的成本，通知里只带"最近一次"，
           # 全量与均值在这里——拖一次卡一次的话，这里能直接看出量级。
           echo "--- seek.log（拖动取链统计）---"
