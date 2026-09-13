@@ -381,7 +381,8 @@ HTML 解析失败不重发、429 限流保留重试——与全库其余通知�
 
 ```
 ① 增量目录：onedrive:backup/emby/live —— 上一轮运行期持续同步、收尾又补过一次的
-      最新关键数据（data / config / plugins / metadata），不含图片缓存。体量小、恢复快，
+      最新关键数据（data / config / plugins / metadata），不含图片缓存，
+      也不含 metadata/library（海报/背景图原图，见下）。体量小、恢复快，
       是最新的，所以排在最前
 ② OneDrive 流式：rclone cat onedrive:backup/emby/emby-backup.tar.zst | tar -I zstd -xf -
       （30GB 级 tarball 不落本地盘，流式解压；**含图片缓存**，但关键数据往往比 ① 旧）
@@ -423,7 +424,8 @@ HTML 解析失败不重发、429 限流保留重试——与全库其余通知�
 ```
 运行期（每 EMBY_BACKUP_EVERY_MIN=25 分钟，后台常驻 /opt/emby_incbak.sh）
    SQLite 用 VACUUM INTO 做一致性快照（Emby 运行中直接 cp 可能拿到撕裂页）
-   → rclone copy 到 onedrive:backup/emby/live（排除 cache / logs / transcoding-temp）
+   → rclone copy 到 onedrive:backup/emby/live
+     （排除 cache / logs / transcoding-temp / metadata/library）
 收尾（Emby 优雅停机后，/opt/emby_incbak.sh once）
    ① 增量同步（必做）：此时 Emby 已停，这份快照最一致，只补最后一轮差量
    ② 全量打包（可选）：仅当剩余时间预算够（EMBY_JOB_BUDGET − 已运行 − ETA > 0）
@@ -432,6 +434,27 @@ HTML 解析失败不重发、429 限流保留重试——与全库其余通知�
 ```
 
 用 `rclone copy` 而非 `sync`：远端不会被"本轮快照恰好缺失"误删。
+
+#### 为什么增量备份排除 metadata/library（2026-09-14 改）
+
+实测快照 2823 文件 / 1038MB 里，**2666 个文件 878MB 是 `metadata/library/**` 下的
+海报/背景图原图**（jpg 2358 + png 75 + fp 233），占 95% 的文件数、83% 的体积。
+它们全部可由 Emby 按需重建，代价却是每轮恢复在 OneDrive 的小文件请求延迟上白等
+约 17 分钟（瓶颈是逐个请求延迟而非带宽）。排除后：
+
+- 快照降到约 160 个文件（data 下的 db 占 155MB），收尾增量与启动恢复都显著变快
+- 已上云的旧图需一次性清理：`rclone delete onedrive:backup/emby/live
+  --include '**/metadata/library/**'`（用 copy 而非 sync，远端不会自动消失）
+- 已知代价：海报/背景图原图每轮按需重建（首轮首访偏慢），由全量包里的
+  `./cache`（`/mnt/emby-cache` 缩放图）兜底大部分命中；如体验明显变差，
+  回滚这一项即可（独立 commit）
+
+#### 全量打包的时间闸门（2026-09-14 改）
+
+`EMBY_FULL_BACKUP_ETA` 由 2400s 提到 2700s（实测 16.6GB 包整包上传 42min），
+`EMBY_JOB_BUDGET` 由 20400s 收到 19200s（5h20m）——旧值 5h40m 本身就超出
+「保留 270min + 备份 < 5h30m」红线，实测整轮跑到 5h39m。现在常规 270min 轮
+会跳过全量打包（收尾只剩增量同步），只有短轮/调试轮才会刷新全量包。
 
 - **OpenList**：`config.json` + `data.db` 同步到 `dropbox:self-hosted/openlist-emby/`，
   且**仅当 `fs/list` 实测通过**才回传，防止空数据覆盖远端
