@@ -42,6 +42,7 @@ POST /api/fs/other 转码预览，未启用：返回 HTTP 200 + 响应体 code=5
 import json
 import os
 import re
+import signal
 import socket
 import subprocess
 import sys
@@ -67,6 +68,22 @@ LOG_PATH = os.environ.get("ODLINK_LOG", "/opt/logs/odlink.log")
 # 最近一次成功取到的直链落盘位置，供 playlog 的 TG 通知附上直链。
 # 只写在 runner 本地、不进 workflow 日志（公开仓库），TG 侧是私密 chat。
 LAST_LINK_FILE = os.environ.get("ODLINK_LAST", "/opt/odlink-last.json")
+
+# ---- dir_cache 跨 run 持久化 ----
+# 目录解析结果（"3/电影" -> 网盘坐标）此前是纯进程内 dict，run 一结束就蒸发：
+# 每轮启动都从 0 爬，实测覆盖率只有约 1/3（26,360/83,464 文件），冷解析 1.75s
+# 对热命中 0.29s。这里让它随增量备份跨轮传递：
+#   装载 = 备份恢复落地的 /var/lib/emby/odlink-dir-cache.json（emby 属主，只读）
+#   落盘 = /tmp/odlink-dir-cache.json（runner 用户可写），由 emby_incbak.sh
+#          连同快照一起上云，下一轮再被恢复到装载路径
+# 两端都做严格降级：读不到/损坏/schema 不符 = 现状冷启动；写失败只记日志。
+DIR_CACHE_IN = os.environ.get("ODLINK_DIR_CACHE_IN",
+                              "/var/lib/emby/odlink-dir-cache.json")
+DIR_CACHE_OUT = os.environ.get("ODLINK_DIR_CACHE_OUT",
+                               "/tmp/odlink-dir-cache.json")
+DIR_CACHE_SCHEMA = 1
+DIR_CACHE_MAX = int(os.environ.get("ODLINK_DIR_CACHE_MAX", "50000"))  # 条目上限，防膨胀
+DIR_CACHE_DUMP_SEC = 600     # 定时落盘间隔（秒）
 
 # ge2o 用 Go 把 modified 当 time.Time 解析，空字符串会导致整个响应解析失败并回源中转，
 # 因此任何情况下都必须给出合法 RFC3339 时间戳。
@@ -286,12 +303,81 @@ class Resolver(object):
         self.root_items = []    # 根目录条目（bootstrap 一次拿全，列根不再依赖上游）
         self.dir_cache = {}     # "3/电影" -> (driveId, itemId, is_dir, modified)
         # dir_cache 无 TTL：本轮 run 内路径不会自己搬家，命中即用，减少 Graph 往返
+        self._dir_loaded = False   # 上轮 dir_cache 是否已装载（延迟到首次解析）
         self.link_cache = {}    # "3/电影/x.mkv" -> (url, size, expire_ts, modified)
         # 计数器：供 /stats 与收尾 TG 通知汇总本轮 302 链路运行情况
         self.stats = {"get": 0, "list": 0, "link_ok": 0, "link_miss": 0,
                       "resolve_err": 0, "fallback": 0, "cross_drive": 0,
                       "fast_path": 0}
         self._lock = threading.Lock()
+
+    # ---- dir_cache 跨 run 持久化 ----
+    def _ensure_dir_cache(self):
+        """延迟到**首次解析**才装载：odlink（step 10）比 install emby（step 11）先启动，
+        那时 /var/lib/emby 还没从备份恢复、甚至正被 rm -rf 重建，提前装载只能读到
+        空文件或被删掉的旧文件。真正的解析请求都发生在服务就绪之后。"""
+        with self._lock:
+            if self._dir_loaded:
+                return
+            self._dir_loaded = True
+        self._load_dir_cache()
+
+    def _load_dir_cache(self):
+        """装载上轮 dir_cache。任何异常都降级为冷启动（= 本次改动前的行为）。"""
+        try:
+            with open(DIR_CACHE_IN, "r", encoding="utf-8") as f:
+                blob = json.load(f)
+            if not isinstance(blob, dict) or blob.get("schema") != DIR_CACHE_SCHEMA:
+                log("dir_cache 装载：schema 不符，冷启动")
+                return
+            entries = blob.get("entries")
+            if not isinstance(entries, dict):
+                log("dir_cache 装载：格式不符，冷启动")
+                return
+            n = 0
+            with self._lock:
+                for k, v in entries.items():
+                    # 条目必须是 4 元组；坏条目跳过而不是整份作废
+                    if isinstance(v, list) and len(v) == 4:
+                        self.dir_cache[k] = (v[0], v[1], bool(v[2]), v[3])
+                        n += 1
+            log("dir_cache 装载：%d 条（上限 %d）" % (n, DIR_CACHE_MAX))
+        except (IOError, OSError):
+            log("dir_cache 装载：无历史文件，冷启动")
+        except Exception as e:
+            log("dir_cache 装载失败，冷启动: %s" % type(e).__name__)
+
+    def dump_dir_cache(self):
+        """落盘当前 dir_cache（定时 / 收到终止信号 / 退出前）。失败不影响服务。"""
+        try:
+            with self._lock:
+                snapshot = dict(self.dir_cache)
+            if len(snapshot) > DIR_CACHE_MAX:
+                # 超上限按插入顺序丢最旧的（dict 保序），防止文件无限膨胀
+                for k in list(snapshot.keys())[:len(snapshot) - DIR_CACHE_MAX]:
+                    snapshot.pop(k, None)
+            tmp = DIR_CACHE_OUT + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"schema": DIR_CACHE_SCHEMA,
+                           "updated": int(time.time()),
+                           "entries": {k: list(v) for k, v in snapshot.items()}}, f)
+            os.replace(tmp, DIR_CACHE_OUT)
+            log("dir_cache 落盘：%d 条" % len(snapshot))
+        except Exception as e:
+            log("dir_cache 落盘失败（忽略）: %s" % type(e).__name__)
+
+    def invalidate(self, key):
+        """失效钩子：解析/取链失败时删掉该条目，逼下次重走冷解析。
+
+        跨 run 缓存最大的风险是 stale：用户在网盘里改名/移动了目录，而缓存还在
+        指老坐标。命中老坐标的后果是取链失败或拿到错误文件——所以一旦失败就
+        立刻失效，宁可多花一次冷解析。
+        """
+        if not key:
+            return
+        with self._lock:
+            self.dir_cache.pop(key, None)
+            self.link_cache.pop(key, None)
 
     def bump(self, key, n=1):
         """累加计数。与 stats_snapshot 共用同一把锁，保证读到的快照不自相矛盾。"""
@@ -364,6 +450,7 @@ class Resolver(object):
            冷解析数秒，是 302 起播慢的服务端主因）；
         3. 寻址失败（中段快捷方式未被路径寻址跟随等）→ 逐段下钻兜底。
         """
+        self._ensure_dir_cache()
         key = "/".join(segments)
         with self._lock:
             cached = self.dir_cache.get(key)
@@ -643,7 +730,10 @@ class Handler(BaseHTTPRequestHandler):
 
         drive, item_id, is_dir, crossed, err, modified = res.resolve(segments)
         if err or not item_id:
-            # Graph 解析失败 → 转发兜底，不把故障放大给用户
+            # Graph 解析失败 → 转发兜底，不把故障放大给用户。
+            # 顺带失效该路径的缓存条目：跨 run 的 dir_cache 指到的坐标可能已失效
+            # （网盘里改名/移动过），让它下次重走冷解析而不是一直命中错误坐标
+            res.invalidate("/".join(segments))
             res.bump("resolve_err")
             res.bump("fallback")
             status, body = forward_upstream(
@@ -681,6 +771,8 @@ class Handler(BaseHTTPRequestHandler):
         url, size, modified = res.download_url(drive, item_id, key)
         res.bump("get")
         if not url:
+            # 取链失败同样失效条目：坐标可能已过期（跨 run 缓存的主要风险）
+            res.invalidate(key)
             res.bump("link_miss")
             self._send(200, openlist_err(500, "no downloadUrl"))
             log("get 文件 段数=%d 跨盘=%d 未取到直链" % (len(segments), crossed))
@@ -726,6 +818,19 @@ def bootstrap_loop(resolver, stop):
         stop.wait(BOOTSTRAP_RETRY_SEC)
 
 
+def dump_loop(resolver, stop):
+    """定时落盘 dir_cache。
+
+    为什么需要定时而不只在退出时落盘：runner 收尾的增量备份发生在进程被杀之前，
+    退出时才写的文件根本来不及上云。每 10 分钟写一次，最坏只丢最后 10 分钟的
+    条目（本轮已解析的目录仍在本进程内存里，只是下一轮要重新爬）。
+    """
+    while not stop.is_set():
+        stop.wait(DIR_CACHE_DUMP_SEC)
+        if not stop.is_set():
+            resolver.dump_dir_cache()
+
+
 def main():
     tokens = TokenStore()
     graph = Graph(tokens)
@@ -734,6 +839,19 @@ def main():
     stop = threading.Event()
     t = threading.Thread(target=bootstrap_loop, args=(resolver, stop), daemon=True)
     t.start()
+    d = threading.Thread(target=dump_loop, args=(resolver, stop), daemon=True)
+    d.start()
+
+    def _on_exit(signum, _frame):
+        log("odlink 收到信号 %s，落盘 dir_cache 后退出" % signum)
+        resolver.dump_dir_cache()
+        sys.exit(0)
+
+    for _sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(_sig, _on_exit)
+        except Exception:
+            pass
 
     log("odlink 启动 端口=%d 上游=%s root前缀=%s 日志=%s"
         % (PORT, UPSTREAM, ROOT_PREFIX, LOG_PATH))
@@ -750,6 +868,7 @@ def main():
         pass
     finally:
         stop.set()
+        resolver.dump_dir_cache()
         srv.server_close()
 
 
