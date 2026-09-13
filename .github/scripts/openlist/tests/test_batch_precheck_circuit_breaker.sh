@@ -12,6 +12,8 @@
 #   G3 openlist 目标 + 预检全通过 -> 3 批照常 + 每批一次预检 + 最终 sync_with_logging
 #   G4 非 openlist 目标 -> 预检零调用
 #   G5 openlist 目标 + 批次传输真失败（exit≠4）-> 最终同步照跑, 尾部归并 SYNC_FAILED=1
+#   G6 批次循环预算闸: 剩余预算不足一个批次工作片 -> 零批次传输, SYNC_TIME_EXHAUSTED=1,
+#      return 0（优雅收摊；近几轮 330min 硬杀的直接根因）
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK_DIR="$(mktemp -d)"
@@ -64,6 +66,14 @@ tg_add_block() { tg_append "$1" "$2"; case "$2" in *$'\n') ;; *) tg_append "$1" 
 # 与批次熔断断言无关，补 stub 以消除 "command not found" 噪音
 # （门禁：测试日志不得出现 command not found，否则会掩盖真实的未定义函数）
 _render_batch_stats_line() { echo "批次统计"; }
+# tg_add_entry_text（失败批次条目）: 真源在 telegram/tg_notify.sh，本测试不 source
+tg_add_entry_text() {
+  local v="$1"; shift
+  tg_append "$v" "├─$(escape_html "$1")"$'\n'
+}
+# 批次循环预算闸: 真身在 task_engine.sh 顶层（sed 单函数抽取不含它）。
+# 默认返回 1（不闸，保持既有场景行为），G6 用 BATCH_BUDGET_STOP_RC=0 置"预算将尽"
+_batch_budget_stop() { return "${BATCH_BUDGET_STOP_RC:-1}"; }
 
 SYNC_WITH_LOGGING_CALLS=0
 sync_with_logging() { SYNC_WITH_LOGGING_CALLS=$((SYNC_WITH_LOGGING_CALLS + 1)); }
@@ -197,6 +207,24 @@ chk "G5 每批一次预检(3)" "$CHECK_CALLS" "3"
 chk "G5 最终全量同步照跑" "$SYNC_WITH_LOGGING_CALLS" "1"
 chk "G5 尾部归并 SYNC_FAILED=1" "${SYNC_FAILED}" "1"
 unset COPY_FAIL_RC_OVERRIDE
+
+# ---------- G6: 批次循环预算闸（近几轮 330min 硬杀的直接根因） ----------
+# 旧行为: 批次循环完全不看 OPENLIST_SYNC_DEADLINE_EPOCH，只剩十几分钟也照开新批
+# → 320min 优雅到站永远拿不到，全被 timeout-minutes: 330 硬杀（run 34723502766 /
+#   34728107625 / 34740440666 / 34752801560 同步 step 恒 330m±12s）。
+# 新行为: 剩余预算不足一个批次工作片（默认 3600s）→ 不开新批、SYNC_TIME_EXHAUSTED=1。
+CHECK_FAIL_FROM_OVERRIDE=99999
+prepare_case
+BATCH_BUDGET_STOP_RC=0
+SYNC_TIME_EXHAUSTED=0
+capture_rc "openlist:crypt" "t_g6"
+chk "G6 return 0（优雅收摊，不判失败）" "$RC" "0"
+chk "G6 预算将尽 → 零批次传输" "$(copy_count)" "0"
+chk "G6 置 SYNC_TIME_EXHAUSTED=1" "${SYNC_TIME_EXHAUSTED}" "1"
+chk "G6 预检零调用（批次根本没开）" "$CHECK_CALLS" "0"
+chk "G6 巩固零调用" "$CONSOLIDATE_CALLS" "0"
+chk "G6 仍走最终同步检查（通知不丢）" "$SYNC_WITH_LOGGING_CALLS" "1"
+unset BATCH_BUDGET_STOP_RC
 
 clean_batch_dirs
 echo ""
