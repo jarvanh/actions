@@ -11,6 +11,13 @@ GitHub Actions 工作流与脚本集合：OpenList 网盘同步、Emby 302 直�
 - **没有任何 workflow 监听 `push` / `pull_request`**，全是 `schedule` + `workflow_dispatch`：推送不会触发运行；判断某分支会不会产出通知，只看它是否支持 `workflow_dispatch`。
 - main 会被并行推送，push 前先 `git fetch` 确认落后数。
 
+## 进行中的修复计划
+
+仓库根 `*-remediation-plan-*.md` 是长周期修复的执行蓝图，也是**唯一的跨会话进度真源**（复选框 + 进度日志；`.codebuddy/memory/` 是本机私有、不在 git 里，别的 AI 读不到）：
+
+- `openlist-sync-remediation-plan-2026-09-13.md` — OpenList 网盘同步（Phase 1 已落地，Phase 2 进行中）。**接手先读它的 §0「AI 接手须知」**：当前阶段、开工四步、红线、必须问用户的事都在那里，§10 是可直接粘用的接手指令模板。
+- 续做时：先核对 run 的 `headSha` 是不是你要验证的那版代码（schedule 轮钉的是创建时刻的 main sha），收尾更新该文档的复选框与进度日志再 commit。
+
 ## Telegram 通知
 
 - **规范真源 `docs/telegram-notify.md`：动通知前必读，实现必须与它一致。**
@@ -33,4 +40,4 @@ GitHub Actions 工作流与脚本集合：OpenList 网盘同步、Emby 302 直�
 ## 改完必验
 
 - 通知：`bash skills/telegram-notify-audit/scripts/render_preview.sh`（渲染预览 + 16 项自动校验）。
-- openlist 域：跑回归套件，基线 18 套 `EXIT=0` + 2 个已知环境失败，且 `command not found` 扫描必须为空（命令与 flake 名单见规范 · 回归套件）。
+- openlist 域：跑回归套件，基线 22 套中 19 套 `EXIT=0`；非 0 的只有已知环境/flake 项（`marker_skip_guards`（无 `date -d`）、`progress_no_orphans`（T5 时序，单独重跑即过）、`sync_trend_budget`（macOS `wc` 前导空格）、`truth`（7 FAIL，环境性）），且 `command not found` 扫描必须为空（命令与 flake 名单见规范 · 回归套件）。
