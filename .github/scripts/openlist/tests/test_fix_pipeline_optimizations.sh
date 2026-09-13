@@ -227,6 +227,26 @@ SYNC_FIX_MISSING_OVERRIDE="$MISSING" run_fix > "$WORK/scene7b.log" 2>&1
 [ -s "$TRY_LOG" ] && ok "7e 未熔断 → 正常修复" || bad "7e: 未熔断却被短路"
 [ "${SYNC_BACKEND_DEAD:-0}" = "0" ] && ok "7f 未熔断不置位" || bad "7f 误置位"
 
+# ===== 场景8: 修复成效拆分（新落盘 vs 沿用上轮）=====
+# 收尾告警若只看 ROUND_FIXED_OK，"本轮零产出"永远查不出来: run 34752801560
+# 报"成功 183"，其中 183 全是沿用上轮，本轮真实落盘 0 —— 必须把沿用数单列，
+# 新落盘 = 成功 − 沿用（收尾用这个数判零产出）。
+jq() { echo "${JQ_LEN:-0}"; }        # 临时替换: 本场景只需要 jq length 的返回值
+rm -f /tmp/ol_round_stats.env
+JQ_LEN=2
+_ol_round_stats_bump '["a","b"]' 10 2
+. /tmp/ol_round_stats.env
+[ "$ROUND_FIXED_OK" = "2" ] && ok "8a 成功总数落盘（2）" || bad "8a: ${ROUND_FIXED_OK}"
+[ "$ROUND_REUSED" = "2" ] && ok "8b 沿用数落盘（2）" || bad "8b: ${ROUND_REUSED}"
+[ "$ROUND_MISSING" = "10" ] && ok "8c 缺失总数落盘（10）" || bad "8c: ${ROUND_MISSING}"
+JQ_LEN=1
+_ol_round_stats_bump '["c"]' 10 2
+. /tmp/ol_round_stats.env
+[ "$ROUND_FIXED_OK" = "3" ] && ok "8d 成功数跨任务累加（2+1）" || bad "8d: ${ROUND_FIXED_OK}"
+[ "$ROUND_REUSED" = "2" ] && ok "8e 沿用数按 run 级绝对值写（不重复累加）" || bad "8e: ${ROUND_REUSED}"
+rm -f /tmp/ol_round_stats.env
+jq() { echo '{}'; }
+
 echo "-----"
 echo "PASS=$PASS FAIL=$FAIL"
 # $WORK 交给 EXIT trap 清理：此处删掉自身 CWD 会让后续 shell 报 getcwd 错误

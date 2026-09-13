@@ -49,6 +49,11 @@ _get_listing_json() {
 # 每次统计都重新拉清单）。真正的落盘由 add_preview_pair 在主 shell 执行。
 declare -A PREVIEW_SRC_LIST_CACHE
 
+# 源端列举失败的同步对数（run 级累计，不在 flush 清零:
+# trend_capture_remaining 在所有预览 flush 之后才读它）。非 0 时本轮
+# remaining 记 unknown，详见 sync_trend.sh trend_capture_remaining。
+PREVIEW_FAIL_SRC_PAIRS=0
+
 # 同步对 → 待同步量缓存（键 "<task_name>|<dest_path>"，值 "bytes count"）
 # 供同步 pass 的跳过通知直接复用 —— 预览 pass 与同步 pass 同处 openlist.yml
 # 的"任务预览与全量同步"step（同一 shell，全局变量跨 pass 有效），
@@ -128,6 +133,7 @@ add_preview_pair() {
 
   # 源端清单 + 缓存（主 shell 内读写: 命令替换子 shell 里的数组赋值
   # 回不到父进程，缓存必须由本函数落盘，供 task_engine.sh 进度注册等复用）
+  local src_fail=0
   _extract_filter_args "${extra_args[@]}"
   local _src_cache_key="${source_path} ${FILTER_ARGS[*]}"
   local src_json
@@ -136,7 +142,13 @@ add_preview_pair() {
   else
     src_json=$(_get_listing_json "$source_path" "${FILTER_ARGS[@]}")
     if [ -z "$src_json" ]; then
-      echo "⚠️ add_preview_pair: 源端清单获取失败 (${source_path})" >&2
+      # 源端列举失败 = 这对的待同步量**未知**，绝不能当成 0 计入合计:
+      # 一个 2.5TB 的源端列举失败会让剩余量瞬间"降"2.49TB，趋势曲线出现
+      # 假进展（run 34728107625 / 34752801560 实锤）。计入 PREVIEW_FAIL_SRC_PAIRS，
+      # 由 trend_capture_remaining 把本轮 remaining 写成 null（不参与求和）。
+      echo "⚠️ add_preview_pair: 源端清单获取失败 (${source_path})，本对待同步量记为未知（不计入合计）" >&2
+      PREVIEW_FAIL_SRC_PAIRS=$((PREVIEW_FAIL_SRC_PAIRS + 1))
+      src_fail=1
       src_json="[]"
     fi
     PREVIEW_SRC_LIST_CACHE[$_src_cache_key]="$src_json"
@@ -236,7 +248,12 @@ add_preview_pair() {
   local _excl_ph="${exclude_summary:--}"
   local _fnote_ph="${fixed_note:--}"
   PREVIEW_PAIRS_TSV+="${PREVIEW_TASK_NAME}"$'\t'"${source_path}"$'\t'"${_excl_ph}"$'\t'"${src_bytes}"$'\t'"${src_count}"$'\t'"${dest_path}"$'\t'"${sync_bytes}"$'\t'"${sync_count}"$'\t'"${new_count}"$'\t'"${upd_count}"$'\t'"${_fnote_ph}"$'\t'"${dst_fail}"$'\t'"${pskip}"$'\n'
-  PREVIEW_PENDING_MAP["${PREVIEW_TASK_NAME}|${dest_path}"]="${sync_bytes} ${sync_count}"
+  # 源端列举失败 → 记为 unknown（非数字，求和循环自然跳过，见 trend_capture_remaining）
+  if [ "$src_fail" -eq 1 ]; then
+    PREVIEW_PENDING_MAP["${PREVIEW_TASK_NAME}|${dest_path}"]="unknown 0"
+  else
+    PREVIEW_PENDING_MAP["${PREVIEW_TASK_NAME}|${dest_path}"]="${sync_bytes} ${sync_count}"
+  fi
 }
 
 # 同步对详情渲染: 仅按源端分组（同源端多目标一组的树形列表）
@@ -407,6 +424,11 @@ flush_task_preview() {
     local _fail_note=""
     if [ "${PREVIEW_FAIL_PAIRS:-0}" -gt 0 ]; then
       _fail_note=$'\n'"⚠️ ${PREVIEW_FAIL_PAIRS} 个同步对目标端列举失败，按全量估算，实际待同步可能更少"
+    fi
+    # 源端失败 = 该对待同步量未知且按 0 计 → 合计偏小；不给具体数字，避免
+    # 被当成"已同步掉了一部分"（本轮 remaining 因此记 null，见 sync_trend.sh）
+    if [ "${PREVIEW_FAIL_SRC_PAIRS:-0}" -gt 0 ]; then
+      _fail_note="${_fail_note}"$'\n'"⚠️ ${PREVIEW_FAIL_SRC_PAIRS} 个同步对源端列举失败，待同步量未知（合计偏小）"
     fi
     # 预计跳过附注: 有同步对落在 --Nd-skip 窗口内时才出现，直接给出
     # "预计实际传输"，避免用户拿合计待同步量去核对实际传输量（两者本就不等）
