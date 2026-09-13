@@ -795,6 +795,9 @@ _sync_fix_missing_files() {
 
         # 名长诊断: 本地探针实测该文件密文名长（rclone 无 cryptencode 命令，
         # 旧代码调用不存在的命令一直静默失败——诊断从未真正生效过）
+        # _FIX_NAMELEN_CONTENT: 命中"密文名 > 后端已接受最长"时置 1，供
+        # file_fix.sh 把这类内容性失败与后端级熔断解耦（不短路、不计入死亡计数）
+        _FIX_NAMELEN_CONTENT=0
         if [ -n "${_CRYPT_ONTHEFLY:-}" ]; then
           local _nl_fn _nl_enc_len _nl_orig_len _nl_flag=""
           _nl_fn="$(basename -- "$failed_line")"
@@ -819,6 +822,7 @@ _sync_fix_missing_files() {
               # copyto_shorthash / zip_split_shorthash 用短哈希名，密文名远低于上限
               _blacklist_add "$failed_line" copyto_original
               _blacklist_add "$failed_line" zip_split_original
+              _FIX_NAMELEN_CONTENT=1
               echo "  ⏭ 名长注定失败 → 跳过 $(_fix_method_short copyto_original) / $(_fix_method_short zip_split_original)，直接试短哈希名方法" | tee -a "$LOG_FILENAME"
             fi
             echo "  📏 名长: 原名 ${_nl_orig_len}B → 密文名 ${_nl_enc_len}B${_nl_flag}" | tee -a "$LOG_FILENAME"
@@ -832,6 +836,7 @@ _sync_fix_missing_files() {
 
         try_fix_failed_file "$source_path" "$dest_path" "$task_name" "$failed_line" "$fix_log" || true
         _cb_done=$((_cb_done + 1))
+        _FIX_NAMELEN_CONTENT=0
 
         if [ "$TRY_FIX_STATUS" = "success" ]; then
           echo "✅ 修复成功 · $(_fix_method_short "${TRY_FIX_METHOD_ID:-}") · $(_short_path "$failed_line")" | tee -a "$LOG_FILENAME"

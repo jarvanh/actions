@@ -747,10 +747,16 @@ _fix_probe_dir_writable() {
     return $?
   fi
 
-  # 后端已熔断 → 直接判不可写，省掉探测与容器重启
+  # 后端已熔断 → 直接判不可写，省掉探测与容器重启。
+  # 例外（名长解耦）: 名长类内容性失败由修复管线置 _FIX_NAMELEN_CONTENT=1
+  #   （密文名 > 后端已接受最长）——它失败的原因是名字太长，不是后端不收，
+  #   短哈希目录 / 短名分卷这类替代形态必须允许试。被后端级熔断一并短路的话，
+  #   超名文件（文件级 24% / 目录级 74%）的兜底全废: run 34752801560 熔断后
+  #   短哈希目录全部"未试写"，整轮新落盘 0。
   local be_root
   be_root=$(_fix_backend_root_of "$dir_remote")
-  if [[ "$dir_remote" == openlist:* ]] && [ "${_BACKEND_DEAD[$be_root]:-0}" = "1" ]; then
+  if [[ "$dir_remote" == openlist:* ]] && [ "${_BACKEND_DEAD[$be_root]:-0}" = "1" ] \
+     && [ "${_FIX_NAMELEN_CONTENT:-0}" != "1" ]; then
     log_fix "$fix_log" "   🔎 目录可写性（后端 ${be_root} 本轮已熔断，直接判不可写: 不探测、不重启）"
     _DIR_WRITE_CACHE["$dir_remote"]="0|后端熔断"
     return 1
@@ -826,12 +832,18 @@ _fix_probe_dir_writable() {
       _BACKEND_DIR_FAIL_STREAK["$be_root"]=0
       [ -n "${_BACKEND_DEAD[$be_root]:-}" ] && unset "_BACKEND_DEAD[$be_root]"
     elif [ "$note" = "已重启确认" ]; then
-      local streak=$(( ${_BACKEND_DIR_FAIL_STREAK[$be_root]:-0} + 1 ))
-      _BACKEND_DIR_FAIL_STREAK["$be_root"]=$streak
-      local dead_threshold="${OPENLIST_BACKEND_DEAD_THRESHOLD:-3}"
-      if [ "$streak" -ge "$dead_threshold" ]; then
-        _BACKEND_DEAD["$be_root"]=1
-        log_fix "$fix_log" "🚫 后端 ${be_root} 连续 ${streak} 个目录不可写（阈值 ${dead_threshold}）→ 判定后端级故障，本轮该后端剩余目录一律直接判不可写（不再逐个探测/重启）"
+      if [ "${_FIX_NAMELEN_CONTENT:-0}" = "1" ]; then
+        # 名长解耦: 内容性失败（名字太长）不代表后端不收，计入连续计数会让
+        # 一批超名文件把健康后端判死——判死后连短哈希兜底都走不了
+        log_fix "$fix_log" "   ↷ 名长类内容性失败，不计入后端熔断连续计数（短哈希兜底仍需试）"
+      else
+        local streak=$(( ${_BACKEND_DIR_FAIL_STREAK[$be_root]:-0} + 1 ))
+        _BACKEND_DIR_FAIL_STREAK["$be_root"]=$streak
+        local dead_threshold="${OPENLIST_BACKEND_DEAD_THRESHOLD:-3}"
+        if [ "$streak" -ge "$dead_threshold" ]; then
+          _BACKEND_DEAD["$be_root"]=1
+          log_fix "$fix_log" "🚫 后端 ${be_root} 连续 ${streak} 个目录不可写（阈值 ${dead_threshold}）→ 判定后端级故障，本轮该后端剩余目录一律直接判不可写（不再逐个探测/重启）"
+        fi
       fi
     fi
   fi
