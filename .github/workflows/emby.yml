@@ -1861,7 +1861,12 @@ jobs:
           WW_PAGE=500                                   # 每页条目数
           WW_WORKERS=${WW_WORKERS:-2}                   # 并发数
           WW_GAP=${WW_GAP:-0.2}                         # 每批间隔（秒）
-          WW_MAX_MIN=${WW_MAX_MIN:-300}                 # 最长预热时长（分钟）
+          # 最长预热时长（分钟）。默认 = 本轮保留时长 - 30：旧值写死 300min，大于保留
+          # 270min ⇒ wallwarmer 永远跑不到自然结束、打不出"共 N 次图片请求"结束行，
+          # 收尾通知的海报预热统计只能退回进度行（不足 200 请求时直接显示"未运行"）。
+          WW_MAX_MIN=${WW_MAX_MIN:-$(( ${EMBY_RUN_MINUTES:-270} - 30 ))}
+          # 调试短轮（保留 8min 等）时上式会变负，兜一个下限
+          [ "$WW_MAX_MIN" -ge 10 ] || WW_MAX_MIN=10
           WW_SIZES_MAX=${WW_SIZES_MAX:-10}              # 访问尺寸上限：客户端用了几档就预热几档，超过则取得分最高的 Top-N
           WW_DECAY=${WW_DECAY:-0.5}                     # 跨 run 衰减系数：每轮历史得分×0.5，无人消费的档位按半衰期退出
           STATE=/var/lib/emby/warm-state.json           # 统计文件（随备份跨 run 传递），只存 Top-N 条 [宽度,得分]
@@ -2382,9 +2387,12 @@ jobs:
           # 退回每 200 请求的进度行；不足 200 请求（基本没跑起来）就显示未运行。
           WW_SUMMARY="未运行"
           if [ -f /opt/logs/wallwarm.log ]; then
-            WW_N=$(grep -oE '共 [0-9]+ 次图片请求' /opt/logs/wallwarm.log 2>/dev/null | tail -1 | grep -oE '[0-9]+')
-            [ -n "$WW_N" ] || WW_N=$(grep -oE '已预热 [0-9]+ 请求' /opt/logs/wallwarm.log 2>/dev/null | tail -1 | grep -oE '[0-9]+')
-            WW_TOP=$(grep '宽度档:' /opt/logs/wallwarm.log 2>/dev/null | tail -1 | sed -E 's/.*宽度档: ([^（]*).*/\1/' | tr -s ' ')
+            # ⚠️ 本 step 跑在 `bash -e` 下：`VAR=$(… | grep …)` 无匹配即返回 1，整个通知
+            # step 静默 exit 1（收尾通知直接消失）。而 `A=$(…) || A=$(…)` 的"兜底"在这
+            # 里永不可达——前者先死。故每条管道都自己吃掉失败（|| true）。
+            WW_N=$(grep -oE '共 [0-9]+ 次图片请求' /opt/logs/wallwarm.log 2>/dev/null | tail -1 | grep -oE '[0-9]+' || true)
+            [ -n "$WW_N" ] || WW_N=$(grep -oE '已预热 [0-9]+ 请求' /opt/logs/wallwarm.log 2>/dev/null | tail -1 | grep -oE '[0-9]+' || true)
+            WW_TOP=$(grep '宽度档:' /opt/logs/wallwarm.log 2>/dev/null | tail -1 | sed -E 's/.*宽度档: ([^（]*).*/\1/' | tr -s ' ' || true)
             case "$WW_N" in ''|0) ;; *) WW_SUMMARY="${WW_N} 次请求 / 宽度档 ${WW_TOP:-?}";; esac
           fi
           # 本轮活跃客户端：authentication.db 登态表中本轮有活动的 AppName（去重）。
@@ -2452,6 +2460,10 @@ jobs:
           # 步骤之间不共享 shell，此前漏了这句 → 归档时整段报
           # "redact_log: command not found"、四段日志全空（2026-09-13 实测两轮）。
           source "$EMBY302_DIR/lib.sh"
+          # run_elapsed_seconds 同样在这里被调用（人工取消判定）：此前本步骤只 source 了
+          # lib.sh → command not found → exit 127，接力链断在本步骤，且下面 playlog/ge2o
+          # 等归档全部跟着丢（同一轮里 backup 步骤两处 source 是齐的，只有这里漏了）。
+          source "$GITHUB_WORKSPACE/.github/scripts/lib/run_elapsed.sh"
           # 护栏结论先记下来、不早退：本步骤同时承载播放事件日志与各服务日志的归档，
           # 而"跳过接力"恰恰是健康接力链里的常态（上一轮还没结束，队列里有 run）。
           # 此前三个分支都是直接 exit 0 → playlog.log 大多数轮次根本没归档过。
