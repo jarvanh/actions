@@ -631,8 +631,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SELF_RETRIGGER: ${{ github.event.inputs.self_retrigger || 'true' }}
+          # 供 run_elapsed_seconds 首选；该上下文已被平台移除、这里恒为空串，
+          # 实际会走 /proc/1 兜底（见 .github/scripts/lib/run_elapsed.sh）
+          TG_RUN_STARTED_AT: ${{ github.run_started_at }}
         run: |
           set -e
+          source "$GITHUB_WORKSPACE/.github/scripts/lib/run_elapsed.sh"
           # 环境未就绪时不接力: 否则基础设施一挂，就会以「失败 → 接力 → 再失败」
           # 的节奏持续空转（run 34685067684 在 install 步骤已失败，本 step 仍
           # dispatch 了下一轮）。先修前置 step，再让接力恢复。
@@ -646,7 +650,10 @@ jobs:
           fi
           REPO="${{ github.repository }}"
           SYNC_CONCLUSION="${{ steps.sync.conclusion }}"
-          ELAPSED=$(( $(date +%s) - $(date -d "${{ github.run_started_at }}" +%s) ))
+          # ⚠️ 不要用 ${{ github.run_started_at }} 做算术：该表达式上下文已被平台移除
+          # （展开成空串 → date -d "" 退化成"北京时间当天零点"），下面这道护栏会变成
+          # "现在是不是 05:50 之前"而不是"本轮跑了多久"。
+          ELAPSED=$(run_elapsed_seconds)
 
           # 护栏2: 人工取消不接力（6h 上限的取消表现为 elapsed ≈ 21600s）
           if [ "$SYNC_CONCLUSION" = "cancelled" ] && [ "$ELAPSED" -lt 21000 ]; then
