@@ -349,7 +349,7 @@ _check_openlist_backend_connectivity() {
   return 0
 }
 
-# ===== 后端级写探针（整轮一次，按挂载根缓存）=====
+# ===== 后端级写探针（每个目标路径一次，按「后端 × 路径」缓存）=====
 # 为什么必须有这一层（run #12616 实锤，2026-09-11）:
 #   上面两层预检（lsd + API list refresh=true）**全是读操作**。wopan175 那轮
 #   读全部正常、写入却恒定 `Update mkParentDir failed: Conflict: 409 Conflict`
@@ -357,9 +357,12 @@ _check_openlist_backend_connectivity() {
 #   结果: 一轮 394 次修复全败、769 次"目录不可写"、231 次容器重启/缓存刷新，
 #   5 小时零产出。读探针放行了根本写不进的后端，整轮预算全烧在"逐目录、
 #   逐文件证明写不了"上——失败是注定的，代价却是全额的。
-# 做法: 每个挂载根（openlist:wopan175 / openlist:wopan176Crypt …）**只做一次**
-#   写探针: 写几字节 → 复核可见 → 删除。不可见即假成功，与写入报错同判 dead。
-#   判定结果整轮缓存，命中即短路（不重复探测、不重启容器）。
+# 做法: 每个目标路径**只做一次**写探针: 写几字节 → 刷新服务端缓存 → 复核可见
+#   → 删除。不可见即假成功，与写入报错同判 dead。
+#   探针写在任务子路径（不是挂载根）、结论按「后端 × 路径」缓存: wopan176 的
+#   405 是路径特异性的（父目录密文名超长连坐短名文件），挂载根能写完全不能
+#   说明深层任务目录能写——旧版按挂载根探测+缓存，正是"探针通过 89s 后即大量
+#   405"的来源（run 34728107625）。命中缓存即短路（不重复探测、不重启容器）。
 # 成本: 一次 copyto + 一次 lsf + 一次 deletefile，秒级。与之相比，漏检的代价
 #   是整轮 5 小时。
 # 开关: OPENLIST_BACKEND_WRITE_PROBE=0 关闭（回退纯读预检）
@@ -377,6 +380,26 @@ _backend_root_of() {
   fi
 }
 
+# 让 OpenList 服务端目录缓存失效（写探针复核用）
+# PUT 假成功的文件活在 OpenList 的目录缓存里，不刷新就读，lsf 会把缓存里的
+# 幽灵条目当真 → 写探针恒"通过"（run 34728107625: 探针通过后 89s 即大量 405）。
+# 比 _refresh_openlist_cache 轻: 只刷一个目录（非递归）、等待可配（默认 5s），
+# 因为写探针整体只有 60s 超时预算，扛不住那个函数的无条件 sleep 60。
+_ol_refresh_path_cache() {
+  local dest="$1"
+  [[ "$dest" == openlist:* ]] || return 0
+  local ol_path="/${dest#openlist:}"
+  local ol_token
+  ol_token=$(_get_openlist_token 2>/dev/null || true)
+  [ -n "$ol_token" ] || return 0
+  curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh" \
+    -H "Authorization: $ol_token" \
+    -H "Content-Type: application/json" \
+    -d "{\"path\":\"$ol_path\",\"recursive\":false}" \
+    >/dev/null 2>&1 || true
+  sleep "${OPENLIST_FS_REFRESH_WAIT:-5}"
+}
+
 _backend_write_probe() {
   [ "${OPENLIST_BACKEND_WRITE_PROBE:-1}" = "0" ] && return 0
   [[ "$1" == openlist:* ]] || return 0
@@ -384,29 +407,34 @@ _backend_write_probe() {
   local root
   root=$(_backend_root_of "$dest")
 
-  # 整轮缓存: 同一挂载根只探一次（结论不会在几分钟内翻转）
-  if [ -n "${_BACKEND_WRITE_PROBE_CACHE[$root]:-}" ]; then
-    if [ "${_BACKEND_WRITE_PROBE_CACHE[$root]}" = "1" ]; then
+  # 整轮缓存: 按「后端 × 路径」分层（结论不会在几分钟内翻转）。
+  # 旧版按挂载根缓存 + 探针写在挂载根，把"某个深层目录拒写"当成整个后端
+  # 可用/不可用: wopan176 的 405 是路径特异性的（父目录密文名超长连坐），
+  # 挂载根能写 ≠ 任务子路径能写（run 34728107625 实锤）。
+  if [ -n "${_BACKEND_WRITE_PROBE_CACHE[$dest]:-}" ]; then
+    if [ "${_BACKEND_WRITE_PROBE_CACHE[$dest]}" = "1" ]; then
       return 0
     fi
-    echo "🚫 目标端 $dest 所属后端 $root 本轮写探针已判不可用，跳过（不再重复探测/重启）" | tee ${log_file:+-a "$log_file"}
+    echo "🚫 目标端 $dest 本轮写探针已判不可用，跳过（不再重复探测/重启）" | tee ${log_file:+-a "$log_file"}
     return 1
   fi
 
-  local probe_name="olwprobe_$(printf '%s' "${root}$$" | md5sum | cut -c1-8).txt"
+  local probe_name="olwprobe_$(printf '%s' "${dest}$$" | md5sum | cut -c1-8).txt"
   local probe_local="${TMPDIR:-/tmp}/${probe_name}"
-  local probe_dst="${root}/${probe_name}"
+  # 探针写在真实任务子路径而非挂载根: 只有任务真正要写的那一层才知道能不能写
+  local probe_dst="${dest}/${probe_name}"
   local probe_timeout="${OPENLIST_BACKEND_WRITE_PROBE_TIMEOUT:-60}s"
   printf '%s' "openlist backend write probe" > "$probe_local" 2>/dev/null || true
 
-  echo "💉 后端写探针: $root" | tee ${log_file:+-a "$log_file"}
+  echo "💉 后端写探针: $dest" | tee ${log_file:+-a "$log_file"}
   local out rc=0 seen=0
   out=$(rclone copyto "$probe_local" "$probe_dst" \
     --retries 1 --low-level-retries 3 --contimeout 30s --timeout "$probe_timeout" 2>&1) || rc=$?
   if [ "$rc" -eq 0 ]; then
     # rc=0 只说明 rclone 认为成功: PUT 假成功在缓存里与真文件无异，
-    # 必须再读一次确认探针真的在后端（run 31951008332 同口径）
-    if rclone lsf "$root" --files-only --retries 1 --timeout "$probe_timeout" 2>/dev/null \
+    # 必须刷新服务端缓存后再读一次确认探针真的在后端（run 31951008332 同口径）
+    _ol_refresh_path_cache "$dest"
+    if rclone lsf "$dest" --files-only --retries 1 --timeout "$probe_timeout" 2>/dev/null \
        | grep -qxF "$probe_name"; then
       seen=1
     fi
@@ -416,12 +444,12 @@ _backend_write_probe() {
   rm -f "$probe_local" 2>/dev/null || true
 
   if [ "$rc" -eq 0 ] && [ "$seen" -eq 1 ]; then
-    _BACKEND_WRITE_PROBE_CACHE["$root"]=1
+    _BACKEND_WRITE_PROBE_CACHE["$dest"]=1
     echo "   ✅ 后端可写" | tee ${log_file:+-a "$log_file"}
     return 0
   fi
 
-  _BACKEND_WRITE_PROBE_CACHE["$root"]=0
+  _BACKEND_WRITE_PROBE_CACHE["$dest"]=0
   local reason
   if [ "$rc" -ne 0 ]; then
     reason="写入失败 (exit=${rc})"

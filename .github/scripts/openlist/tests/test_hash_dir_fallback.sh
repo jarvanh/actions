@@ -116,6 +116,9 @@ reset_state() {
   # 前面几个用例故意造的不可写目录会把后端判死，后续用例直接短路）
   _BACKEND_DEAD=()
   _BACKEND_DIR_FAIL_STREAK=()
+  # 名长解耦标记（_FIX_NAMELEN_CONTENT）: 不清会跨用例泄漏，把普通失败误当
+  # 内容性失败而不计入熔断
+  _FIX_NAMELEN_CONTENT=0
   : > "$DST_FILES_FILE"
   RESTART_CALLS=0
   RESTART_OK=1
@@ -292,6 +295,30 @@ run_fix "$REL"
 printf '%s' "$TRY_FIX_MESSAGE" | grep -q "存储端本轮整体故障，未试写；备用目录也写不进去" \
   && ok "12h 换过目录时原因同时点明两段" || bad "12h: msg=${TRY_FIX_MESSAGE}"
 [ "$RESTART_CALLS" -eq 0 ] && ok "12i 换目录后仍未重启" || bad "12i: 重启 ${RESTART_CALLS} 次"
+
+# ===== 场景13: 名长类内容性失败与后端级熔断解耦（F3）=====
+# 名长诊断命中"密文名 > 后端已接受最长"时修复管线置 _FIX_NAMELEN_CONTENT=1:
+# 这类失败的根因是名字太长，不是后端不收——
+#   1) 不短路: 短哈希目录仍要探测（能证明"后端死"的只有"短名也写不进"）
+#   2) 不计数: 不进连续失败计数，否则一批超名文件就能把健康后端判死，
+#      判死后连短哈希兜底都走不了（run 34752801560: 熔断后短哈希目录全部
+#      "未试写"，整轮新落盘 0）
+reset_state
+_BACKEND_DIR_FAIL_STREAK["openlist:wopan176Crypt"]=2   # 差 1 个到阈值 3
+_FIX_NAMELEN_CONTENT=1
+run_fix "$REL"
+[ -z "${_BACKEND_DEAD[openlist:wopan176Crypt]:-}" ] \
+  && ok "13a 名长类失败不计数 → 不判后端死（计数停在 2）" || bad "13a: 后端被超名文件判死"
+grep -q "名长类内容性失败，不计入后端熔断连续计数" "$FIX_LOG" \
+  && ok "13b 日志记录解耦依据" || bad "13b: 无解耦日志"
+[ "$RESTART_CALLS" -ge 1 ] && ok "13c 仍正常探测（未被熔断短路）" || bad "13c: 重启 ${RESTART_CALLS} 次"
+
+# 反例: 同样形态但不带名长标记 → 照常计数并判死（解耦只针对名长类）
+reset_state
+_BACKEND_DIR_FAIL_STREAK["openlist:wopan176Crypt"]=2
+run_fix "$REL"
+[ "${_BACKEND_DEAD[openlist:wopan176Crypt]:-0}" = "1" ] \
+  && ok "13d 非名长类失败仍照常判死（解耦未泛化）" || bad "13d: 熔断被误关"
 
 echo "-----"
 echo "PASS=$PASS FAIL=$FAIL"
