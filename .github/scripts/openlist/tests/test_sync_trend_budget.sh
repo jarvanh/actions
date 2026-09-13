@@ -2,6 +2,7 @@
 # P0 传输趋势 + P2 优雅到站——逻辑验证（mock rclone/telegram，python3 真实执行）
 # 验证:
 #   1. sync_budget_stop 三态: 未设锚点不停止 / 预算耗尽停止 / 预算充足不停止
+#   1b. _batch_budget_stop 三态（批次循环专用闸，最小工作片 60min）
 #   2. trend_record_transferred 只累计正数字节，非法输入忽略
 #   3. trend_capture_remaining 汇总 PREVIEW_PENDING_MAP（"bytes count" 口径）
 #   4. trend.jsonl 三情形: 远端不存在→创建上传 / 存在→追加 / 读取失败→放弃
@@ -63,6 +64,16 @@ OPENLIST_SYNC_DEADLINE_EPOCH=$(( $(date +%s) - 5 ))
 if sync_budget_stop 2>/dev/null; then ok "预算: 耗尽→停止"; else bad "预算: 耗尽却不停"; fi
 OPENLIST_SYNC_DEADLINE_EPOCH=$(( $(date +%s) + 7200 ))
 if sync_budget_stop 2>/dev/null; then bad "预算: 充足却停止"; else ok "预算: 充足→不停止"; fi
+
+# --- 1b. _batch_budget_stop 三态（批次循环专用闸，工作片 60min 远大于全局 600s）---
+# 一批 = copy + 巩固 + 修复管线 ≈ 1h+，用全局最小片判会在只剩十几分钟时照开新批
+# → 320min 优雅到站永不到来，全部被 timeout-minutes: 330 硬杀（近几轮 failure 实锤）
+unset OPENLIST_SYNC_DEADLINE_EPOCH
+if _batch_budget_stop 2>/dev/null; then bad "批次预算: 未设锚点不应停止"; else ok "批次预算: 未设锚点→不停止"; fi
+OPENLIST_SYNC_DEADLINE_EPOCH=$(( $(date +%s) + 7200 ))   # 剩 2h > 60min 片 → 可开批
+if _batch_budget_stop 2>/dev/null; then bad "批次预算: 充足却停止"; else ok "批次预算: 剩 2h→仍可开批"; fi
+OPENLIST_SYNC_DEADLINE_EPOCH=$(( $(date +%s) + 1800 ))   # 剩 30min < 60min 片 → 停
+if _batch_budget_stop 2>/dev/null; then ok "批次预算: 剩 30min→不再开新批"; else bad "批次预算: 剩余不足一片却仍开批"; fi
 
 # --- 2. trend_record_transferred ---
 rm -f /tmp/ol_trend_transferred.log

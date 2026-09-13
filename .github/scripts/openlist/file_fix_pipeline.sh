@@ -766,6 +766,21 @@ _sync_fix_missing_files() {
           break
         fi
 
+        # 后端熔断短路: 本轮该后端已被判不可写（连续 N 个目录重启后探针仍消失）
+        # 时，剩余文件逐个走「探测 + 重启容器」只是空转——run 34752801560 熔断后
+        # 1943 个文件全部"未试写"，每个仍要付一次目标端读列表的开销，5h 零产出。
+        # 只置 SYNC_BACKEND_DEAD（后端故障出口），不置 SYNC_TIME_EXHAUSTED
+        # （预算到点出口）——两种语义下游含义不同，不得混用。
+        if declare -F _fix_backend_root_of >/dev/null 2>&1; then
+          local _cb_be_root
+          _cb_be_root=$(_fix_backend_root_of "$dest_path")
+          if [ "${_BACKEND_DEAD[$_cb_be_root]:-0}" = "1" ]; then
+            echo "🛑 后端 ${_cb_be_root} 本轮已熔断，跳过剩余 $((_cb_total - _cb_done)) 个文件（不再逐个探测/重启）" | tee -a "$LOG_FILENAME"
+            SYNC_BACKEND_DEAD=1
+            break
+          fi
+        fi
+
         local file_size="未知"
         local file_size_bytes=0
         local size_json

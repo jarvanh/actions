@@ -9,6 +9,8 @@
 #   2. 目标端清单复用（SYNC_FIX_LIST_CACHE）
 #      背景: 批次巩固 _batch_consolidate 刚做过 lsf 取真值，修复管线又全量
 #      列一次目标端，同一轮内重复递归大目录数分钟。现在把清单递进去复用。
+#   3. 后端本轮已熔断 → 逐文件修复循环立即短路（熔断是后端级结论，逐文件
+#      重试改变不了它；只置 SYNC_BACKEND_DEAD，不置 SYNC_TIME_EXHAUSTED）
 set -u
 PASS=0; FAIL=0
 ok()  { PASS=$((PASS+1)); echo "PASS: $1"; }
@@ -201,6 +203,29 @@ OPENLIST_SYNC_DEADLINE_EPOCH=$(( $(date +%s) + 7200 )) \
   SYNC_FIX_MISSING_OVERRIDE="$MISSING" run_fix > "$WORK/scene6b.log" 2>&1
 [ -s "$TRY_LOG" ] && ok "6d 预算充足 → 正常修复" || bad "6d 预算充足却没修"
 [ "${SYNC_TIME_EXHAUSTED:-0}" = "0" ] && ok "6e 预算充足不置位" || bad "6e 误置位"
+
+# ===== 场景7: 后端本轮已熔断 → 逐文件循环立即短路（不再逐个探测/重启）=====
+# 背景: run 34752801560 熔断后 1943 个文件全部"未试写"，每个仍要付一次目标端
+# 读列表开销，5h 零产出。熔断是后端级结论，逐文件重试改变不了它。
+_BACKEND_DEAD["openlist:wopan176Crypt"]=1
+: > "$TRY_LOG"
+SYNC_BACKEND_DEAD=0
+SYNC_TIME_EXHAUSTED=0
+printf 'a/one.mp4\na/two.mp4\n' > "$MISSING"
+OPENLIST_SYNC_DEADLINE_EPOCH=$(( $(date +%s) + 7200 )) \
+  SYNC_FIX_MISSING_OVERRIDE="$MISSING" run_fix > "$WORK/scene7.log" 2>&1
+[ ! -s "$TRY_LOG" ] && ok "7a 后端已熔断 → 不再开工新文件" || bad "7a 仍修了 $(wc -l < "$TRY_LOG") 个"
+[ "${SYNC_BACKEND_DEAD:-0}" = "1" ] && ok "7b 置 SYNC_BACKEND_DEAD=1" || bad "7b: =${SYNC_BACKEND_DEAD:-0}"
+[ "${SYNC_TIME_EXHAUSTED:-0}" = "0" ] && ok "7c 不置 SYNC_TIME_EXHAUSTED（两种出口语义不得混用）" || bad "7c 误置位"
+grep -q "本轮已熔断" "$WORK/scene7.log" && ok "7d 日志记录熔断短路" || bad "7d: 无熔断日志"
+
+# 反例: 未熔断 → 正常修复（短路不能常态化）
+unset "_BACKEND_DEAD[openlist:wopan176Crypt]"
+: > "$TRY_LOG"
+SYNC_BACKEND_DEAD=0
+SYNC_FIX_MISSING_OVERRIDE="$MISSING" run_fix > "$WORK/scene7b.log" 2>&1
+[ -s "$TRY_LOG" ] && ok "7e 未熔断 → 正常修复" || bad "7e: 未熔断却被短路"
+[ "${SYNC_BACKEND_DEAD:-0}" = "0" ] && ok "7f 未熔断不置位" || bad "7f 误置位"
 
 echo "-----"
 echo "PASS=$PASS FAIL=$FAIL"

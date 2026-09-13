@@ -133,6 +133,18 @@ sync_budget_stop() {
   [ $(( $(date +%s) + OPENLIST_SYNC_MIN_SLICE_SECONDS )) -ge "$OPENLIST_SYNC_DEADLINE_EPOCH" ]
 }
 
+# 批次循环专用预算闸（近几轮 330min 硬杀的直接根因）:
+# 一个批次的真实粒度是「copy + 巩固 + 修复管线」，实测批次 1 = 1h17m，而全局
+# 最小工作片只有 600s——用 sync_budget_stop 判，剩余十几分钟时照样开新批，
+# 于是 320min 优雅到站永远拿不到，全被 timeout-minutes: 330 硬杀。
+# 单独留一片 60min 的批次工作片（OPENLIST_BATCH_MIN_SLICE_SECONDS），
+# 320min 预算下不会误伤正常批次。
+OPENLIST_BATCH_MIN_SLICE_SECONDS="${OPENLIST_BATCH_MIN_SLICE_SECONDS:-3600}"  # 60min
+_batch_budget_stop() {
+  [ -n "${OPENLIST_SYNC_DEADLINE_EPOCH:-}" ] || return 1
+  [ $(( $(date +%s) + OPENLIST_BATCH_MIN_SLICE_SECONDS )) -ge "$OPENLIST_SYNC_DEADLINE_EPOCH" ]
+}
+
 # 顺序执行清单中的全部任务（支持同步对轮转，防饿死，见上方说明）
 run_all_tasks() {
   local n=${#SYNC_TASK_REGISTRY[@]}
@@ -315,7 +327,15 @@ _sync_task_finalize() {
   if [ "${SYNC_SKIPPED:-0}" != "1" ]; then
     trend_record_transferred "${SYNC_TRANSFERRED_BYTES:-0}"
   fi
-  if [ "$SYNC_FAILED" = "0" ] && [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
+  if [ "$SYNC_FAILED" != "0" ]; then
+    [ "$current_depth" -eq 0 ] && split_on_sync_failure "$source_path" "$task_name"
+  elif [ "${SYNC_TIME_EXHAUSTED:-0}" = "1" ]; then
+    # 预算耗尽优雅收摊: 任务没有跑完，绝不写成功 marker——写了会被 --Nd-skip
+    # 当成"N 小时内已同步"整对跳过，等于把未完成的任务判成已完成。
+    # （批次循环加上预算闸后这条分支才真正可达: 此前全被 330min 硬杀，
+    #   根本走不到 finalize。下轮由 marker/游标接力继续。）
+    :
+  elif [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
     save_sync_marker "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
   elif [ "$current_depth" -eq 0 ]; then
     split_on_sync_failure "$source_path" "$task_name"
@@ -531,8 +551,11 @@ _sync_task_impl() {
   # 按 rclone 远端类型分路由（整合自 task0 专项验证结论）:
   #   openlist:* 目标（wopan176Crypt/baidupanCrypt/wopan175/aliyundriveCrypt 等全部
   #   OpenList 挂载盘）: 批次阈值 5GiB（可 OPENLIST_BATCH_BYTES 覆盖）、
-  #   并发 transfers=OPENLIST_TARGET_TRANSFERS（默认 4）
+  #   并发 transfers=OPENLIST_TRANSFERS（默认 1，与初始 sync 同口径）
   #   非 openlist 目标: 阈值 20GB、并发 transfers=RCLONE_TRANSFERS（默认 2）
+  #   注意: 批次路径曾误读 OPENLIST_TARGET_TRANSFERS（全库无人设置，默认 4），
+  #   低并发保护形同虚设且日志硬编码打印 transfers=1 掩盖真相，是整批假成功
+  #   的主源（run 34728107625 / 34752801560 顽固缺失恒为 1037）
 
   local current_depth=${SYNC_AUTO_SPLIT_DEPTH:-0}
 
@@ -1092,7 +1115,7 @@ _batch_consolidate() {
     --files-from "$retry_list" \
     --size-only \
     --no-traverse \
-    --transfers "$( [[ "$dest_path" == openlist:* ]] && echo "${OPENLIST_TARGET_TRANSFERS:-4}" || echo "${RCLONE_TRANSFERS:-2}" )" \
+    --transfers "$( [[ "$dest_path" == openlist:* ]] && echo "${OPENLIST_TRANSFERS:-1}" || echo "${RCLONE_TRANSFERS:-2}" )" \
     --checkers "${OPENLIST_CHECKERS:-8}" \
     --timeout 30m \
     --retries 1 \
@@ -1115,22 +1138,12 @@ _batch_consolidate() {
   CONSOLIDATE_RETRY_COPIED=$retry_copied
   echo "${label} 巩固: 串行重试完成，重传 ${retry_copied}/${missing_n}"
 
-  # ===== 后端写入全拒检测（中止剩余批次，止损）=====
-  # 本批全部触碰文件未落盘 + 串行重试 0 成功（重试前已刷新驱动 + 跑保鲜
-  # token）→ 后端级写入故障（如 wopan175 全量 405: OpenList WebDAV 层拒收
-  # PUT，rclone 报 "unchunked simple update failed: Method Not Allowed"）。
-  # 置 BATCH_BACKEND_DEAD 由调用方 sync_by_file_batches 中止剩余批次并标记
-  # 同步对失败，避免每批烧数十分钟（run 32904752243 实锤）。
-  # 门槛: 缺失 ≥3 且占触碰文件 100%（部分落盘 = 后端还活着，不触发）。
-  # 注意: 熔断只中止"剩余批次"——本批顽固缺失仍转修复管线换方法（2026-08-31
-  # 用户规格: 直接传输没成功就要进修复管线，不因后端级拒收豁免; 方法黑名单
-  # 自带全拉黑重置兑底，死后端误拉黑不会永久锁死方法）。
+  # 触碰文件数（后端写入全拒判据的输入之一；判据本体在顽固缺失算出之后，见下）
   local touched_n=0
   touched_n=$(wc -l < "$touched" 2>/dev/null | tr -d ' ')
-  if [ "$missing_n" -ge 3 ] && [ "$retry_copied" -eq 0 ] && [ "$touched_n" -gt 0 ] && [ "$missing_n" -ge "$touched_n" ]; then
-    BATCH_BACKEND_DEAD=1
-    echo "🛑 ${label} 巩固: 后端写入全拒（${missing_n}/${touched_n} 个触碰文件 0 落盘、串行重试 0 成功）→ 已请求中止剩余批次"
-  fi
+  # 顽固缺失是否经真值复核确认: 复核列表/重启失败时清单是"宁重复勿遗漏"的
+  # 兜底拷贝，不能拿来判后端死（宁可多跑一批，不可误杀一个健康后端）
+  local _truth_confirmed=1
 
   # ===== 顽固缺失 → 修复管线（换方法兜底）=====
   # 普通重传后仍未落盘 = 后端内容性拒收（如密文文件名超长），原名重试永远失败
@@ -1148,10 +1161,12 @@ _batch_consolidate() {
       else
         echo "⚠️ ${label} 巩固: 复核列表获取失败，重试清单全部转交修复管线（宁重复勿遗漏）"
         cp "$retry_list" "$stubborn"
+        _truth_confirmed=0
       fi
     else
       echo "⚠️ ${label} 巩固: 复核重启失败，重试清单全部转交修复管线（宁重复勿遗漏）"
       cp "$retry_list" "$stubborn"
+      _truth_confirmed=0
     fi
   else
     # 一个都没重传成功 → 全部是顽固缺失
@@ -1163,6 +1178,23 @@ _batch_consolidate() {
   if [ "$stubborn_n" -eq 0 ]; then
     echo "✅ ${label} 巩固: 重试后顽固缺失 0 个，本批全部真实落盘"
     return 0
+  fi
+
+  # ===== 后端写入全拒检测（中止剩余批次，止损）=====
+  # 判据下移到顽固缺失算出之后: 旧判据要求「串行重试 0 成功」，而假成功形态下
+  # rclone 照报 Copied（retry_copied=1037），重启复核后仍 1037 个未落盘——
+  # 恒不触发（run 34728107625/34752801560 grep「后端写入全拒」= 0 条），
+  # 批次 2/3 照开，整轮白烧。新判据看真值: 本批触碰文件里 ≥3 个且 100% 转成
+  # 顽固缺失 ⇒ 后端级写入故障（如 wopan175 全量 405: OpenList WebDAV 层拒收
+  # PUT，rclone 报 "unchunked simple update failed: Method Not Allowed"）。
+  # 置 BATCH_BACKEND_DEAD 由调用方 sync_by_file_batches 中止剩余批次并标记
+  # 同步对失败，避免每批烧数十分钟（run 32904752243 实锤）。
+  # 注意: 熔断只中止"剩余批次"——本批顽固缺失仍转修复管线换方法（2026-08-31
+  # 用户规格: 直接传输没成功就要进修复管线，不因后端级拒收豁免; 方法黑名单
+  # 自带全拉黑重置兑底，死后端误拉黑不会永久锁死方法）。
+  if [ "$_truth_confirmed" -eq 1 ] && [ "$stubborn_n" -ge 3 ] && [ "$touched_n" -gt 0 ] && [ "$stubborn_n" -ge "$touched_n" ]; then
+    BATCH_BACKEND_DEAD=1
+    echo "🛑 ${label} 巩固: 后端写入全拒（${stubborn_n}/${touched_n} 个触碰文件经复核全部未落盘）→ 已请求中止剩余批次"
   fi
 
   echo "⚠️ ${label} 巩固: ${stubborn_n} 个顽固缺失（后端内容性拒收，如密文名超长），转修复管线换方法落盘..."
@@ -1457,6 +1489,18 @@ sync_by_file_batches() {
   progress_update_force "拆分为 ${total_batches} 个批次" "$(_render_batch_stats_line)"
 
   for i in $(seq 0 $batch_num); do
+    # P2 优雅到站（批次级）: 批内修复管线置位的 SYNC_TIME_EXHAUSTED 必须阻止
+    # 下一批开启——批次循环此前完全不看预算，是 330min 硬杀的直接根因
+    if [ "${SYNC_TIME_EXHAUSTED:-0}" = "1" ]; then
+      echo "⏳ 批次循环: 批内已置预算耗尽，不再开启后续批次（已完成批次的成果已各自落盘）"
+      break
+    fi
+    if _batch_budget_stop; then
+      local _left_batches=$((total_batches - batch_idx))
+      echo "⏳ 时间预算将尽，优雅收摊: 剩余 ${_left_batches} 个批次留给下轮接力（marker/游标已持久化）"
+      SYNC_TIME_EXHAUSTED=1
+      break
+    fi
     local bf="${batch_dir}/batch_${i}.txt"
     if [ -s "$bf" ]; then
       batch_idx=$((batch_idx + 1))
@@ -1486,13 +1530,15 @@ sync_by_file_batches() {
       if [[ "$dest_path" == openlist:* ]]; then
         local _ol_transfers
         if [[ "$dest_path" == openlist:* ]]; then
-          _ol_transfers="${OPENLIST_TARGET_TRANSFERS:-4}"
+          _ol_transfers="${OPENLIST_TRANSFERS:-1}"
         else
           _ol_transfers="${RCLONE_TRANSFERS:-2}"
         fi
         batch_guard_flags=("--transfers" "$_ol_transfers" "--checkers" "${OPENLIST_CHECKERS:-8}")
         batch_timeout="30m"
-        echo "OpenList 目标端：批次上传启用低并发保护 (transfers=1, checkers=8, timeout=30m)"
+        # 打印实际生效值: 旧版这里硬编码 transfers=1，而实际读的是无人设置的
+        # OPENLIST_TARGET_TRANSFERS（默认 4）——日志与实际不符，掩盖了整批假成功
+        echo "OpenList 目标端：批次上传启用低并发保护 (transfers=${_ol_transfers}, checkers=${OPENLIST_CHECKERS:-8}, timeout=${batch_timeout})"
         # 长批次开始前主动刷新驱动 token（wopan OAuth access token 有效期约 5
         # 分钟；批次循环没有 8005 重试兜底，驱动坏状态 = 整批 exit 4）。
         # 仅传前刷一次撑不过 5 分钟 token 窗口——批次动辄数小时，中途必须
