@@ -104,6 +104,8 @@ cron 退回 6 小时一档只做兜底。三道护栏：
 | `EMBY_RUN_MINUTES` | 本轮保留时长（默认 `270`），手动触发可用 `run_minutes` 覆盖（调试填 8） |
 | `EMBY_BACKUP_EVERY_MIN` | 运行期增量备份间隔（默认 `25` 分钟） |
 | `EMBY_BACKUP_DEST` | 增量备份远端目录（默认 `onedrive:backup/emby/live`），同时是恢复侧第 ① 级来源 |
+| `EMBY_CACHE_RESTORE` | 启动时是否从全量包补齐图片缓存（默认 `1`）。设 `0` 省下整包解压那几分钟，代价是首轮海报/背景图冷读 |
+| `EMBY_IMAGES_QUALITY` | ge2o 请求 Emby 图片的质量（默认 `100` = 原图）。海报墙/详情页背景图都经隧道传，上游建议 70~90 |
 | `EMBY_FULL_BACKUP` | 收尾全量打包：`auto`（按剩余预算决定，默认）/ `0`（永远关） |
 | `EMBY_FULL_BACKUP_ETA` | 全量打包预计耗时（默认 `2400`s），收尾据此判断预算够不够 |
 | `EMBY_JOB_BUDGET` | job 总预算（默认 `20400`s = 5h40m），超过就不再启动任何耗时操作 |
@@ -342,7 +344,7 @@ HTML 解析失败不重发、429 限流保留重试——与全库其余通知�
 ⏳ 起播等待 · 7                                      ← 第 6 行起：等待（访问链 KV 树，同测速套件）
   ├─ 你 → Cloudflare hkg01（香港） → Emby（预估值）：120 毫秒   ← 你 → 隧道 → 服务器
   ├─ Emby → OneDrive 读文件头（走挂载）：27 毫秒        ← Emby 打开视频前读文件头
-  ├─ Emby → OneDrive 取直链：1.40 秒                   ← 服务器去要下载直链
+  ├─ Emby → OneDrive 取直链：440 毫秒                  ← 服务器去要下载直链
   ├─ 你 → OneDrive 拉首字节（预估值）：200 毫秒         ← 直链拿到第一个字节
   ├─ Emby → OneDrive 抽字幕：2.80 秒                   ← 抽内封字幕（首次最慢）
   ├─ 拖动进度条（Emby → OneDrive 重取直链）：880 毫秒   ← 该条目最近一次 seek
@@ -375,19 +377,29 @@ HTML 解析失败不重发、429 限流保留重试——与全库其余通知�
 
 ## 8. 数据与备份
 
-### 恢复（四级降级，任一通过即止）
+### 恢复（① 与 ② 互补，③④ 才是降级）
 
 ```
 ① 增量目录：onedrive:backup/emby/live —— 上一轮运行期持续同步、收尾又补过一次的
       最新关键数据（data / config / plugins / metadata），不含图片缓存。体量小、恢复快，
       是最新的，所以排在最前
 ② OneDrive 流式：rclone cat onedrive:backup/emby/emby-backup.tar.zst | tar -I zstd -xf -
-      （30GB 级 tarball 不落本地盘，流式解压；含图片缓存，但可能已是几轮之前的进度）
-② Dropbox 流式：rclone cat dropbox:self-hosted/emby-backup.tar.zst | tar -I zstd -xf -
+      （30GB 级 tarball 不落本地盘，流式解压；**含图片缓存**，但关键数据往往比 ① 旧）
+③ Dropbox 流式：rclone cat dropbox:self-hosted/emby-backup.tar.zst | tar -I zstd -xf -
       （同样不落本地盘——根分区 ≈14GB 容不下 30GB 级 tarball）
-③ Dropbox 目录：dropbox:self-hosted/emby → 整目录拷贝（**唯一会落盘的兜底**，
+④ Dropbox 目录：dropbox:self-hosted/emby → 整目录拷贝（**唯一会落盘的兜底**，
   需先按远端体量预检 /tmp；恢复后必须重建 `cache` 软链，否则缓存会写进根分区）
 ```
+
+⚠️ **① 成功后 ② 不是“再来一遍”**：全量包是 `/mnt/emby-cache`（图片缓存）的唯一载体
+（打包用 `tar -h` 解引用软链），但它的 `data`/`config`/`plugins`/`metadata` 通常比 ① 旧。
+所以 ① 成功时 ② 只解出 `./cache` 一个成员（解到 `/mnt` 下临时目录再 `mv` 就位，
+不经过 `/var/lib/emby/cache` 那个软链），**不碰关键数据**；只有 ① 失败时才走整包恢复。
+`EMBY_CACHE_RESTORE=0` 可整段跳过。
+
+> 历史事故（2026-09-13 复核，4 轮日志全部复现）：这里曾有一行**无条件** `RESTORED_FROM=`，
+> 把 ① 的结果抹掉，使后面的 `if [ -z "$RESTORED_FROM" ]` 恒真 —— 每轮都白做一次
+> 11.5GB 整包流式恢复（3~6 分钟），**并用旧包把刚恢复的新数据覆盖掉**。
 
 **每级恢复后都必须过 `emby_guard.py` 校验闸**，不通过就拒绝启动——残库会被 Emby
 当成空库重建，比本轮直接失败更糟。
@@ -578,11 +590,11 @@ sudo EMBY_USER="$EMBY_USER" python3 emby_guard.py <emby-data-root>   # 例：/va
 
 | 日志 | 看什么 |
 |---|---|
-| `/opt/logs/odlink.log` | 直链解析：段数、是否跨盘、Graph 码、是否取到直链 |
+| `/opt/logs/odlink.log` | 直链解析：段数、是否跨盘、Graph 码、是否取到直链。⚠️ watchdog 每 5 分钟打一次目录探针，纯 tail 会被它淹没——归档侧按 `段数=`/`解析失败`/`回退 OpenList` 等关键行筛 |
 | `/opt/logs/ge2o.log` | 播放走直链还是中转、路径换算是否命中 |
 | 收尾归档的「ge2o 请求耗时统计」 | 按类型（起播准备 / 视频流 / 字幕 / 图片）汇总的均值与最大耗时——一次看清"点播放"的等待落哪类请求 |
 | `/opt/logs/seek.log` | 拖动进度条 / 续播的重新取链耗时（同一条目的第 2 次起 stream 请求），收尾归档带均值与最大值 |
-| `/opt/logs/playlog.log` | 播放事件监听、Emby 认证矩阵、TG 通道自检 |
+| `/opt/logs/playlog.log` | 播放事件监听、Emby 认证矩阵、TG 通道自检；`[起播等待]`（起播各段耗时原文）与 `[起播]`（客户端出画耗时，唯一客户端侧读数） |
 | `/opt/logs/watchdog.log` | 探活失败计数与回退记录 |
 | `/opt/logs/openlist.log` | OpenList 启动与存储状态 |
 | `/opt/logs/odprobe.log` | 快捷方式探测结论 |
@@ -594,9 +606,13 @@ sudo EMBY_USER="$EMBY_USER" python3 emby_guard.py <emby-data-root>   # 例：/va
 | `/opt/logs/odwarm.log` | 直链预热器：目录回填进度（个/累计秒）、详情页预取命中 |
 | `/opt/logs/cloudflared.log` | 隧道 e 的运行日志（回退后另写 `cloudflared-direct.log`） |
 
-收尾步骤会把 `playlog.log`（80 行）、`ge2o.log`（60 行 + 按类型的耗时统计）、`odlink.log`（60 行）、
-`rclone-mount.log`（关键行 40）、`emby-console.log`（60 行）、`warmup.log`（汇总行 + 尾部 40 行）、
-`wallwarm.log`（15 行）脱敏后归档进 workflow 日志。
+收尾步骤会把 `playlog.log`（80 行）、`ge2o.log`（60 行 + 按类型的耗时统计）、
+`odlink.log`（关键行 40）、`rclone-mount.log`（关键行 40）、`emby-console.log`（60 行）、
+`warmup.log`（汇总行 + 尾部 40 行）、`wallwarm.log`（15 行）脱敏后归档进 workflow 日志。
+
+> 归档在「自续触发」步骤里**无条件执行**（2026-09-13 修）：此前它在“开关关闭 / 人工取消 /
+> 已有排队运行”三个分支里直接 `exit 0`，而“跳过接力”恰恰是健康接力链里的常态 ——
+> 实测多数轮次根本没归档过 `playlog.log`。
 
 > `rclone-mount.log` 用 `grep` 筛关键行而非纯 `tail`：缓存清理类输出每 15s 一条，
 > 5.7 小时上千行，纯 tail 只会被它们占满、看不到真正的异常。
@@ -641,7 +657,7 @@ sudo EMBY_USER="$EMBY_USER" python3 emby_guard.py <emby-data-root>   # 例：/va
 | 读数 | 怎么测 | 回答什么问题 |
 |---|---|---|
 | 隧道边缘机房 | 从 `cloudflared.log` 抓 `location=XXX` | cloudflared 连到哪个 Cloudflare 机房。离你越远，客户端每次 API 往返越贵——而这段**完全不进服务器日志** |
-| 隧道往返 TTFB | 经公网域名打一次 `/emby/System/Info/Public` 测首字节（域名默认由 `VD` secret 拼成 `e.<VD>.eu.org`，可用仓库 Variables `EMBY_PUBLIC_HOST` 覆盖） | ≈ 客户端到服务器的单程基线，解释"为什么起播 1.4 + 准备 5.3，实际却等了 10 秒" |
+| 隧道往返 TTFB | 经公网域名打一次 `/emby/System/Info/Public` 测首字节（域名默认由 `VD` secret 拼成 `e.<VD>.eu.org`，可用仓库 Variables `EMBY_PUBLIC_HOST` 覆盖） | ⚠️ **这是从 runner 上 curl 出来的、不是你客户端的网络**，只能当“服务器 ↔ Cloudflare”的参考值 |
 
 日志里这几个**均值**就是判断依据：
 
@@ -651,10 +667,15 @@ sudo EMBY_USER="$EMBY_USER" python3 emby_guard.py <emby-data-root>   # 例：/va
 - **头尾均值** —— 冷读 `WU_EDGE_MB × 2` 的成本，换算成 MB/s 可反推 ffprobe 会花多久
 - **直链 TTFB** —— 302 之后取第一个字节要多久（1 字节 Range 实测）。它慢说明 OneDrive 侧响应慢，
   与本仓库链路无关，且是"点播放到出画面"里服务端唯一能近似的客户端成本
-- **隧道边缘机房 / 隧道往返 TTFB**（第 2 段）—— 网络侧的基线。服务器耗时加起来只有 6.7 秒、
-  你却等了 10 秒时，差额基本就在这里：客户端 → Cloudflare 边缘 → runner 的往返，
-  且 `PlaybackInfo` 这类接口往往要往返好几次。边缘机房会漂移（实测出现过 sjc01 / iad14），
-  通知里带中文城市（`edge_cn` 映射表，IATA 机场码 → 中文，未收录回退原代码）
+- **隧道边缘机房 / 隧道往返 TTFB**（第 2 段）—— 网络侧的基线。⚠️ **两者都是 runner 侧读数**
+  （`curl` 从 runner 出发），不代表你客户端的真实往返；客户端那一侧只能靠 `[起播]` 出画探针。
+  边缘机房会漂移（实测出现过 sjc01 / iad14 / lax11），通知里带中文城市（`edge_cn` 映射表，
+  IATA 机场码 → 中文，未收录回退原代码）
+
+> **服务器侧实测总量级（2026-09-13，4 轮一致）**：取直链均值 **438ms**（35 条）、
+> `PlaybackInfo` 冷 23ms / 热 7ms、直链 TTFB 0.23s、隧道往返 0.179s —— 一次播放的
+> 服务器成本**不到 1 秒**。所以“起播要等 10 秒”里 ≥9 秒不在这套链路的服务器侧。
+> 旧文档里“起播 1.4 + 准备 5.3”是加路径寻址/目录回填之前的数字，已失效，别再照它判断。
 
 > ⚠️ **ge2o 日志的耗时列单位不固定**：同一列会出现 `152.244µs` / `90.36ms` / `1.4s` 三种单位，
 > 只认 "数字s" 会漏掉全部毫秒级请求——`PlaybackInfo` 实测全是 ms 级（冷 22~27ms），
@@ -662,10 +683,19 @@ sudo EMBY_USER="$EMBY_USER" python3 emby_guard.py <emby-data-root>   # 例：/va
 > 另外 ge2o 对同一请求打两行：带路由的那行是完整耗时，紧随其后的空路由行是 µs 级上游子请求，
 > 取数要认带路由的（小写 `playbackinfo` / `subtitles`）。
 
-> 想定位单次播放：直接看**播放通知的「起播等待」段**（访问链写法，一行 = 谁访问哪里 + 耗时）——
-> 「Emby → OneDrive 取直链」是服务器去拿下载链接的时间（未命中 `dir_cache` 冷解析 1.75s，
-> 命中后几十毫秒）；「Emby → OneDrive 读文件头」是 Emby 打开视频前读文件头的时间；
-> 剩下的都在你播放器自己身上（联网 + 缓冲），服务器测不到。
+> 想定位单次播放，看两处：
+>
+> 1. **播放通知的「起播等待」段**（访问链写法，一行 = 谁访问哪里 + 耗时）。
+>    「Emby → OneDrive 取直链」= 服务器去拿下载链接的时间（未命中 `dir_cache` 冷解析
+>    实测均值 438ms，命中后几十毫秒）；「Emby → OneDrive 读文件头」= Emby 打开视频前
+>    读文件头的时间。
+> 2. **`/opt/logs/playlog.log` 的 `[起播等待]` 与 `[起播]` 两行**（2026-09-13 加）：
+>    `[起播等待] item=N …` 是上面那棵树的原文（此前只进 TG 私信，事后完全无法复核）；
+>    `[起播] item=N 客户端出画 +Xs` 是**唯一能拿到的客户端侧数字** —— 302 之后播放器
+>    直连网盘、服务器再也看不到它的请求，但播放器会向 Emby 上报进度，所以
+>    「Sessions 里 `PositionTicks` 首次 >0」减「`/videos/` 请求到达时刻」就是
+>    “建连 + 取首字节 + 缓冲 + 解码”这整段的成本（1 秒精度，最长观测 45 秒）。
+>    这条慢而服务器各段都快 ⇒ 瓶颈在你的网络到 OneDrive，不在本仓库链路。
 
 > **头尾预热对 302 直连播放基本没用**：302 模式下播放器拿到重定向后直连 OneDrive CDN
 > 拉 Range，全程不经过挂载，VFS 缓存根本不参与。它真正兜住的是四类"仍会读挂载"的场景：
