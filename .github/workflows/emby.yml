@@ -1281,13 +1281,17 @@ jobs:
           # JSON 损坏时 jq 失败 → 不写（绝不能拿空输出覆盖掉海报档位统计）。
           # flock 与 wallwarmer 的整体覆盖写共用一把锁，缩小互踩窗口。
           STATE_PATH=/var/lib/emby/warm-state.json
-          record_recent() { # $1=媒体路径
-            local p=$1 new
+          # $2=条目 Id（可空）：一并记下来，下轮 warmup 才能对"最近播过的条目"做
+          # 字幕预热（只有路径的话拿不到 ItemId，请求不了字幕流）。
+          record_recent() { # $1=媒体路径 [$2=条目 Id]
+            local p=$1 iid=${2:-} new
             case "$p" in /onedrive/*) ;; *) return 0;; esac
             (
               flock 9 2>/dev/null || :
-              new=$(sudo jq -c --arg p "$p" --argjson now "$(date +%s)" '
-                     .recent = (([(.recent // [])[]? | select(.path != $p)] + [{path:$p, ts:$now}])[-12:])' \
+              new=$(sudo jq -c --arg p "$p" --arg id "$iid" --argjson now "$(date +%s)" '
+                     .recent = (([(.recent // [])[]? | select(.path != $p)]
+                                 + [{path:$p, ts:$now}
+                                    + (if ($id | length) > 0 then {id: ($id | tonumber)} else {} end)])[-12:])' \
                      "$STATE_PATH" 2>/dev/null) || return 0
               [ -n "$new" ] && printf '%s' "$new" | sudo tee "$STATE_PATH" >/dev/null 2>&1
               return 0
@@ -1304,7 +1308,7 @@ jobs:
             IFS=$'\037' read -r n year type series season episode mins hgt codec mpath <<<"$(item_meta "$iid")"
             [ -n "$name" ] && n="$name"   # 数据源 B 自带片名，优先用它（少一次不可靠依赖）
             # 回看预热记录：取不到路径时静默跳过（不影响通知）
-            [ -n "$mpath" ] && record_recent "$mpath"
+            [ -n "$mpath" ] && record_recent "$mpath" "$iid"
 
             # 直链信息：url | size(bytes) | 剩余有效秒数
             # 2400 = odlink.py 的 LINK_TTL（40 分钟）；改直链缓存时长时这里要同步
@@ -1849,6 +1853,33 @@ jobs:
             echo "起播准备预热完成: ${PI_N} 条 / $(awk '{c += $1; h += $2} END {printf "冷均值 %dms 热均值 %dms", c / NR, h / NR}' /tmp/wu-pi.txt) $(date '+%T')"
           fi
           rm -f /tmp/wu-pi.txt
+
+          # ---------- 5b. 回看条目的字幕预热（warm-state recent 带 id 的条目） ----------
+          # 首次播放带内封字幕的文件时，Emby 要现场跑一次 ffmpeg 把字幕抽出来
+          # （0.5~1.0s，是"点开到出画面"里唯一能提前干掉的一段）。对最近播过的条目
+          # 提前请求一次字幕流，把抽取结果塞进缓存；请求失败/该文件没有内封字幕都
+          # 无所谓——纯旁路，不影响任何播放链路。
+          SUB_N=0; SUB_MS=0
+          while IFS= read -r ID; do
+            case "$ID" in ''|*[!0-9]*) continue;; esac
+            BODY=$(jq -nc --arg u "$USER_ID" '{UserId:$u}')
+            PI_JSON=$(curl -s -m 60 -X POST "$GE2O/emby/Items/$ID/PlaybackInfo?api_key=$KEY" \
+                      -H 'Content-Type: application/json' -d "$BODY")
+            MSID=$(printf '%s' "$PI_JSON" | jq -r '.MediaSources[0].Id // empty' 2>/dev/null)
+            [ -n "$MSID" ] || continue
+            # 只预热内封字幕（IsExternal 为真的是外挂字幕文件，本来就直接读）
+            IDX=$(printf '%s' "$PI_JSON" | jq -r '.MediaSources[0].MediaStreams[]?
+                   | select(.Type=="Subtitle" and ((.IsExternal // false) | not))
+                   | .Index' 2>/dev/null | head -1)
+            case "$IDX" in ''|*[!0-9]*) continue;; esac
+            T0=$(date +%s%N)
+            SC=$(curl -s -o /dev/null -w '%{http_code}' -m 120 \
+                 "$EMBY/emby/Videos/$ID/$MSID/Subtitles/$IDX/Stream.srt?api_key=$KEY")
+            SUB_MS=$(( SUB_MS + ( $(date +%s%N) - T0 ) / 1000000 ))
+            SUB_N=$((SUB_N + 1))
+            echo "字幕预热 item=$ID 字幕流=$IDX http=$SC 耗时 $(( ( $(date +%s%N) - T0 ) / 1000000 ))ms"
+          done < <(jq -r '(.recent // [])[]?.id // empty' /var/lib/emby/warm-state.json 2>/dev/null | head -6)
+          [ "$SUB_N" -gt 0 ] && echo "字幕预热完成: ${SUB_N} 条 / 合计 ${SUB_MS}ms / 均值 $((SUB_MS / SUB_N))ms $(date '+%T')"
           WU_EOF
           EMBY_API_KEY="${{ secrets.EMBY_API_TOKEN }}" nohup bash /opt/warmup.sh > /opt/logs/warmup.log 2>&1 &
 
@@ -2077,6 +2108,13 @@ jobs:
               done
             fi
             sudo chown -R "$(id -u):$(id -g)" "$STAGE" 2>/dev/null || true
+            # odlink 的 dir_cache 跨 run 持久化：它每 10 分钟把目录解析缓存 dump 到
+            # /tmp，这里顺带带上云，下一轮随快照恢复到 /var/lib/emby 后被装载——
+            # 目录解析就不必每轮从零爬（冷解析 1.75s vs 热命中 0.29s）。
+            # ⚠️ 必须在 chown 之后拷：这之前 STAGE 还归 root，runner 写不进去。
+            if [ -f /tmp/odlink-dir-cache.json ]; then
+              cp /tmp/odlink-dir-cache.json "$STAGE/odlink-dir-cache.json" 2>/dev/null || true
+            fi
           }
 
           sync_up() {  # 用 copy 而非 sync：远端不会被"本轮快照缺失"误删（安全优先）
@@ -2171,9 +2209,33 @@ jobs:
           ) &
 
           # ---- A) dir_cache 批量回填（主进程）----
+          # 并发化：串行时每个 fs/list 约 2.6s（OneDrive 往返），400 个目录要 17 分钟，
+          # 服务刚起来的头十几分钟里 dir_cache 覆盖率极低、首播全走冷解析。改成攒批后
+          # 由 xargs -P 并发回填；并发度默认 8（保守起步，按 /stats 的 graph.err 与
+          # 429 反馈再逐步上调，用 EMBY_PREFETCH_PAR 覆盖，无需改代码）。
+          PAR=${EMBY_PREFETCH_PAR:-8}
+          FLUSH_AT=$(( PAR * 2 ))
+          export LK_HOST LK_TOKEN
+          cat > /tmp/odwarm_list.sh <<'L_EOF'
+          #!/bin/bash
+          # 单目录 fs/list：xargs 拉起的子进程看不到父 shell 的函数，故独立成脚本
+          curl -s -m 30 -o /dev/null -X POST "$LK_HOST/api/fs/list" \
+            -H "Authorization: $LK_TOKEN" -H 'Content-Type: application/json' \
+            -d "$(jq -nc --arg p "$1" '{path:$p}')"
+          L_EOF
+          chmod +x /tmp/odwarm_list.sh
+          BATCH=()
+          flush_batch() {   # 并发回填一批并刷新进度；空批直接返回
+            local n=${#BATCH[@]}
+            [ "$n" -gt 0 ] || return 0
+            printf '%s\n' "${BATCH[@]}" | xargs -P "$PAR" -n1 -I{} /tmp/odwarm_list.sh {}
+            DIRS=$((DIRS + n))
+            echo "目录回填 ${DIRS}/${MAX_DIRS}（并发 ${PAR}）累计 $(( $(date +%s) - T_START ))s $(date '+%T')"
+            BATCH=()
+          }
           IDX=0; DIRS=0; BAD_ROUNDS=0
           declare -A DSEEN=()
-          echo "=== dir_cache 回填启动 上限 ${MAX_DIRS} 个目录 $(date '+%F %T')"
+          echo "=== dir_cache 回填启动 上限 ${MAX_DIRS} 个目录 并发 ${PAR} $(date '+%F %T')"
           while [ "$DIRS" -lt "$MAX_DIRS" ]; do
             JSON=$(curl -s -m 30 "$EMBY/emby/Users/$USER_ID/Items?Recursive=true&SortBy=DateCreated&SortOrder=Descending&Limit=200&StartIndex=$IDX&Fields=Path,MediaSources&api_key=$KEY")
             # Emby 偶发返回非 JSON（限流 / 500 / 半截响应）。此时 PATHS 也为空，
@@ -2197,12 +2259,12 @@ jobs:
               case "$D" in /onedrive/*) ;; *) continue;; esac
               [ -z "${DSEEN[$D]:-}" ] || continue
               DSEEN[$D]=1
-              T0=$(date +%s)
-              fs_list "$D"
-              DIRS=$((DIRS + 1))
-              [ $((DIRS % 20)) -ne 0 ] || echo "目录回填 ${DIRS}/${MAX_DIRS} 累计 $(( $(date +%s) - T_START ))s $(date '+%T')"
-              [ "$DIRS" -lt "$MAX_DIRS" ] || break
+              BATCH+=("$D")
+              [ "${#BATCH[@]}" -lt "$FLUSH_AT" ] || flush_batch
+              # 计数含未flush的批次，避免单页超额太多
+              [ "$(( DIRS + ${#BATCH[@]} ))" -lt "$MAX_DIRS" ] || break
             done <<< "$PATHS"
+            flush_batch   # 收尾：不满一批的剩余目录
             IDX=$((IDX + 200))
             sleep 1
           done
