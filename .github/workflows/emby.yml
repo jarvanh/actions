@@ -107,10 +107,16 @@ env:
   # 收尾是否再做一次全量打包（含图片缓存）：auto = 按剩余时间预算决定，
   # 预算不够就跳过——宁可丢缓存，也不能让关键数据卡在 6h 上限里。
   EMBY_FULL_BACKUP: ${{ vars.EMBY_FULL_BACKUP || 'auto' }}
-  # 全量打包预计耗时（秒），收尾据此判断剩余预算够不够
-  EMBY_FULL_BACKUP_ETA: "2400"
-  # job 总预算（秒）：超过就不再启动任何耗时操作。6h 上限 21600s 减 20 分钟余量
-  EMBY_JOB_BUDGET: "20400"
+  # 全量打包预计耗时（秒），收尾据此判断剩余预算够不够。
+  # ⚠️ 实测整包流式上传 25~47min（16.6GB 包实测 42min），旧值 2400s(40min) 偏乐观，
+  # 导致"预算算下来还够"→ 开跑 → 整轮 5h39m，逼近 6h 硬上限。取实测上沿 45min。
+  EMBY_FULL_BACKUP_ETA: "2700"
+  # job 总预算（秒）：超过就不再启动任何耗时操作。
+  # 硬约束「保留时长 270min + 备份 < 5h30m」，故闸门取 5h20m 留 10 分钟余量
+  # （旧值 20400s=5h40m 本身就超出红线）。配合上面的 ETA，常规 270min 轮会跳过
+  # 全量打包，只有短轮/调试轮（elapsed 小）才会刷新全量包——包里躺着图片缓存，
+  # 偶尔刷新一次就够，不必每轮都赌 6h 上限。
+  EMBY_JOB_BUDGET: "19200"
   # 直链预热器：详情页预取（抓 ge2o.log 的 Items 请求）+ dir_cache 批量回填
   EMBY_PREFETCH: ${{ vars.EMBY_PREFETCH || '1' }}
   EMBY_PREFETCH_MAX_DIRS: ${{ vars.EMBY_PREFETCH_MAX_DIRS || '400' }}
@@ -530,10 +536,11 @@ jobs:
             echo "✅ 发现增量备份目录（$(( LIVE_BYTES / 1048576 ))MB），优先恢复关键数据..."
             require_free_kb /tmp $(( LIVE_BYTES / 1024 + 2 * 1024 * 1024 )) "emby live-restore preflight (/tmp)"
             rm -rf /tmp/emby-live-restore && mkdir -p /tmp/emby-live-restore
-            # 并发刻意调高：这份快照 2820 个文件里 95% 是 metadata 下的小图，
-            # 瓶颈不是带宽而是 OneDrive 对小文件的逐个请求延迟——实测 8 并发时有
-            # 8 个文件同时卡住数分钟（速率掉到 8.7 KiB/s、ETA 3h40m），
+            # 并发刻意调高：OneDrive 对小文件的逐个请求延迟才是瓶颈，不是带宽——
+            # 实测 8 并发时有 8 个文件同时卡住数分钟（速率掉到 8.7 KiB/s、ETA 3h40m），
             # 整轮 1044s 里 772s 花在 9 处 ≥20s 的停顿上。提到 16/32 让停顿互相重叠。
+            # （快照原为 2820 个文件 / 95% 是 metadata 小图；增量备份排除
+            #  metadata/library 后只剩 ~160 个文件，并发配置保持不变作余量。）
             # --onedrive-no-versions 省掉每个文件的版本查询请求。
             if rclone copy "$LIVE_DEST" /tmp/emby-live-restore --fast-list \
                  --transfers 16 --checkers 32 --low-level-retries 20 \
@@ -2026,7 +2033,9 @@ jobs:
         # 现在关键数据在运行时就已经传完，收尾只剩一次差量同步（秒级到几分钟）。
         # 一致性：SQLite 在 Emby 运行中直接 cp 可能拿到撕裂页，故优先 VACUUM INTO
         # 做快照（不阻塞读写、不复制 -wal），失败才回退 cp。
-        # 排除：cache（软链到 /mnt 的图片缓存，体积大且可重建）、logs、transcoding-temp。
+        # 排除：cache（软链到 /mnt 的图片缓存，体积大且可重建）、logs、transcoding-temp，
+        # 以及 metadata/library（Emby 下载的海报/背景图原图，2666 文件 / 878MB，
+        # 占快照 95% 文件数，可按需重建——带上它每轮恢复要多花 ~17min）。
         env:
           EMBY_API_KEY: ${{ secrets.EMBY_API_TOKEN }}
         run: |
@@ -2052,9 +2061,15 @@ jobs:
               fi
             done
             # 其余关键数据：config / plugins / metadata / root / 非 db 文件
+            # ⚠️ metadata/library 是 Emby 下载的海报/背景图原图（实测 2666 个文件 /
+            # 878MB，占整份快照 95% 的文件数与 83% 的体积），全部可按需重建——
+            # 带着它每轮恢复要多花 ~17 分钟（OneDrive 逐文件请求延迟，不是带宽）。
+            # 排除后首轮海报按需重建（风险见 docs/emby.md），缩略图由全量包与
+            # /mnt/emby-cache 兜底。
             if command -v rsync >/dev/null 2>&1; then
               sudo rsync -a --exclude 'cache/' --exclude 'logs/' --exclude 'transcoding-temp/' \
                 --exclude 'data/*.db' --exclude 'data/*.db-wal' --exclude 'data/*.db-shm' \
+                --exclude 'metadata/library/' \
                 "$SRC"/ "$STAGE"/ 2>/dev/null || true
             else
               for d in config plugins metadata root; do
@@ -2066,9 +2081,12 @@ jobs:
 
           sync_up() {  # 用 copy 而非 sync：远端不会被"本轮快照缺失"误删（安全优先）
             # 与启动恢复侧同口径：小文件多，瓶颈在 OneDrive 的逐文件请求延迟而非带宽
+            # metadata/library 同样在这里再排一道：rsync 不可用时的 cp 兜底分支
+            # （只拷 config/plugins/metadata/root）不会经过上面的 exclude
             rclone copy "$STAGE" "$DEST" --fast-list --transfers 16 --checkers 32 \
               --low-level-retries 20 --onedrive-no-versions \
-              --exclude 'cache/**' --exclude 'logs/**' --exclude 'transcoding-temp/**' -v
+              --exclude 'cache/**' --exclude 'logs/**' --exclude 'transcoding-temp/**' \
+              --exclude 'metadata/library/**' -v
           }
 
           once() {
