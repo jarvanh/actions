@@ -24,8 +24,7 @@
 | Restore skill symlink for proactivity | proactivity 真实状态落 `~/.openclaw/workspace/skills-data/proactivity`，`~/proactivity` 只是兼容软链 | — |
 | Setup / Enable Tailscale | ephemeral 节点、固定主机名 `openclaw`、开启 SSH 与 Exit Node | `ssh runner@openclaw` |
 | Prepare runtime env | 生成 `~/runtime-env.sh` 并设为 `BASH_ENV`：加载 `~/.openclaw/.env`、继承 runner add_path、本地化 gh/git 认证 | — |
-| Install / Run Cloudflared Tunnel | 命名隧道 `oc`、`sub-store`（`ai-api` 在网关步骤起） | `oc.<VD>.eu.org`→18789；`sub-store.<VD>.eu.org`→3001 |
-| Run sub-store container | `xream/sub-store:http-meta`，后端同步 cron `50 * * * *`，CORS 白名单 `SUB_STORE_CORS_ALLOWED_ORIGINS=https://sub-store.<VD>.eu.org`（不配则浏览器 POST/PUT/DELETE 被 403 `CORS origin not allowed`，界面能看、一改订阅就报错） | 9876 + 127.0.0.1:3001，数据 `/dropbox/self-hosted/sub-store` |
+| Install / Run Cloudflared Tunnel | 命名隧道 `oc`（`ai-api` 在网关步骤起） | `oc.<VD>.eu.org`→18789 |
 | Run rss-to-telegram container | `rongronggg9/rss-to-telegram:latest`，启动门禁 = 独立 bot secret `TELEGRAM_BOT_TOKEN_RSS_SB_BOT`（未配置则跳过启动，本轮不产生数据、最终归档也跳过上传） | 数据 `/tmp/local_rsstt`（config + data） |
 | Run AI API gateway | CliRelay 全栈优先 / CLIProxyAPI 回退 | 8317 → 隧道 `ai-api` |
 | Run OpenClaw | 自愈主流程（本文第三、四章） | 18789 |
@@ -33,6 +32,7 @@
 | Keep alive → Stop OpenClaw and Final Archive → Notify OpenClaw final archive result → Trigger next OpenClaw run | 收尾与自我接力 | — |
 
 > rss-to-telegram 带一层自愈：登录被 `AuthKeyDuplicatedError` 判废时删掉 `bot.session*` 重启一次并立即归档。
+> Sub-Store 不在本 workflow 内运行（2026-09-13 移除）：本 workflow 无任何步骤消费它，原先只是借这台 runner 当第二宿主；服务由 `sub-store.yml` 单宿主提供。
 
 ## 一、设计目标
 

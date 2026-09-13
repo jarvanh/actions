@@ -389,60 +389,9 @@ jobs:
             > ~/.openclaw/logs/cloudflared_oc.log 2>&1 &
           echo $! > ~/.openclaw/logs/cloudflared_oc.pid
 
-          cloudflared tunnel route dns sub-store sub-store.'${{ secrets.VD }}'.eu.org || true
-
-          nohup cloudflared tunnel run --url http://127.0.0.1:3001 sub-store \
-            > ~/.openclaw/logs/cloudflared_sub_store.log 2>&1 &
-          echo $! > ~/.openclaw/logs/cloudflared_sub_store.pid
-
           sleep 10
-          echo "OpenClaw and Sub-Store tunnels started."
+          echo "OpenClaw tunnel started."
           
-      - name: Run sub-store container
-        # CORS 白名单：Sub-Store 自 2026-09-04 起在 Node/Docker 端改为 allowlist，不配
-        # SUB_STORE_CORS_ALLOWED_ORIGINS 时只放行 sub-store.vercel.app / substore.stash，
-        # 其余 Origin 一律 403 "CORS origin not allowed"（浏览器 POST/PUT/DELETE 必带
-        # Origin，表现为「界面能看、一改订阅就报 403」）。域名由 VD 拼出，不写死。
-        env:
-          SUB_STORE_FRONTEND_BACKEND_PATH: ${{ secrets.SUB_STORE_FRONTEND_BACKEND_PATH }}
-          SUB_STORE_CORS_ALLOWED_ORIGINS: "https://sub-store.${{ secrets.VD }}.eu.org"
-        run: |
-          set -euo pipefail
-
-          echo "Starting Sub-Store container from Dropbox persistent data..."
-          mkdir -p /dropbox/self-hosted/sub-store ~/.openclaw/logs
-
-          docker rm -f sub-store 2>/dev/null || true
-          docker run -d \
-            --restart=always \
-            -e "SUB_STORE_BACKEND_SYNC_CRON=50 * * * *" \
-            -e SUB_STORE_FRONTEND_BACKEND_PATH="$SUB_STORE_FRONTEND_BACKEND_PATH" \
-            -e SUB_STORE_CORS_ALLOWED_ORIGINS="$SUB_STORE_CORS_ALLOWED_ORIGINS" \
-            -p 9876:9876 \
-            -p 127.0.0.1:3001:3001 \
-            -v /dropbox/self-hosted/sub-store:/opt/app/data \
-            --name sub-store \
-            xream/sub-store:http-meta
-
-          echo "Waiting for Sub-Store backend/frontend to become reachable..."
-          ready=false
-          for i in {1..60}; do
-            if curl -fsS http://127.0.0.1:3001/ >/dev/null 2>&1 || curl -fsS http://127.0.0.1:9876/ >/dev/null 2>&1; then
-              ready=true
-              echo "✅ Sub-Store is reachable"
-              break
-            fi
-            echo "⏳ Waiting for Sub-Store... ${i}/60"
-            sleep 2
-          done
-
-          docker ps -a --filter name=sub-store
-          if [ "$ready" != true ]; then
-            echo "❌ Sub-Store did not become reachable in time"
-            docker logs sub-store || true
-            exit 1
-          fi
-
       - name: Run rss-to-telegram container
         env:
           # rsstt 服务使用独立 bot，token 经同名 secret 注入（此前未接线导致容器 TOKEN 恒空）
@@ -2019,7 +1968,6 @@ jobs:
 
           echo "3. Stopping service containers before final archive..."
           docker stop rss-to-telegram 2>/dev/null || echo "rss-to-telegram already stopped or missing."
-          docker stop sub-store 2>/dev/null || echo "sub-store already stopped or missing."
           # CliRelay 主容器名为 cli-proxy-api（compose 固定 container_name）；postgres 保持运行，
           # 最终 pg_dump 在归档脚本内执行完成后才 compose down
           docker stop clirelay cli-proxy-api 2>/dev/null || true
