@@ -102,14 +102,18 @@ redact_urls() {
 # 先按耗时列挑出请求行、再排掉本机探针；若本轮确实没有客户端访问（全被排空）
 # 则回退纯 tail，保证归档不空、可观测性不降低。
 ge2o_archive() { # $1=保留行数（默认 60）
-  local n="${1:-60}" body
+  local n="${1:-60}" body probes
   body=$(grep -aE '\| [0-9.]+(µs|ms|s) \|' /opt/logs/ge2o.log 2>/dev/null \
          | grep -av '127\.0\.0\.1' | tail -n "$n" || true)
   if [ -n "$body" ]; then
     printf '%s\n' "$body" | redact_log
-  else
-    tail -n "$n" /opt/logs/ge2o.log 2>/dev/null | redact_log || echo "(无 ge2o.log)"
+    return 0
   fi
+  # 排空 = 本轮没有客户端请求（夜里无人播放是常态）。此时**不能**回退纯 tail：
+  # 吐出来的全是自探针，等于把问题原样保留。只报一行计数即可。
+  [ -s /opt/logs/ge2o.log ] || { echo "(无 ge2o.log)"; return 0; }
+  probes=$(grep -ac '127\.0\.0\.1' /opt/logs/ge2o.log 2>/dev/null || echo 0)
+  echo "(本轮无客户端请求行；自探针 ${probes} 行已省略)"
 }
 
 # ---------- 直链源的"唯一真相" ----------
