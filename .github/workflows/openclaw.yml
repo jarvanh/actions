@@ -399,8 +399,13 @@ jobs:
           echo "OpenClaw and Sub-Store tunnels started."
           
       - name: Run sub-store container
+        # CORS 白名单：Sub-Store 自 2026-09-04 起在 Node/Docker 端改为 allowlist，不配
+        # SUB_STORE_CORS_ALLOWED_ORIGINS 时只放行 sub-store.vercel.app / substore.stash，
+        # 其余 Origin 一律 403 "CORS origin not allowed"（浏览器 POST/PUT/DELETE 必带
+        # Origin，表现为「界面能看、一改订阅就报 403」）。域名由 VD 拼出，不写死。
         env:
           SUB_STORE_FRONTEND_BACKEND_PATH: ${{ secrets.SUB_STORE_FRONTEND_BACKEND_PATH }}
+          SUB_STORE_CORS_ALLOWED_ORIGINS: "https://sub-store.${{ secrets.VD }}.eu.org"
         run: |
           set -euo pipefail
 
@@ -412,6 +417,7 @@ jobs:
             --restart=always \
             -e "SUB_STORE_BACKEND_SYNC_CRON=50 * * * *" \
             -e SUB_STORE_FRONTEND_BACKEND_PATH="$SUB_STORE_FRONTEND_BACKEND_PATH" \
+            -e SUB_STORE_CORS_ALLOWED_ORIGINS="$SUB_STORE_CORS_ALLOWED_ORIGINS" \
             -p 9876:9876 \
             -p 127.0.0.1:3001:3001 \
             -v /dropbox/self-hosted/sub-store:/opt/app/data \
