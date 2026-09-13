@@ -109,6 +109,69 @@ _rotation_load() {
   ROTATION_ATTEMPTS=$attempts
 }
 
+# ===== 后端熔断跨轮持久化（F6）=====
+# 轮转游标只能让"这一对"让路，让不了"这个后端": 同一后端有多对时游标后移
+# 一位，下轮照样撞上它的下一对；而 attempts 上限 8 次 ≈ 44h（实测
+# task_rotation.json cursor=8 attempts=6 钉死在 wopan176Crypt，其余 15 对
+# 近四轮零执行）。本轮判死的后端连同时间戳写进 backend_dead.json，下轮直接
+# 跳过它的全部同步对，把预算让给健康后端。
+# 死后端常是暂态（登录失效/限流/配额），故带 TTL，过期即重新参战。
+OPENLIST_BACKEND_DEAD_TTL="${OPENLIST_BACKEND_DEAD_TTL:-43200}"   # 12h
+declare -A _BACKEND_DEAD_ROUND=()
+
+_backend_dead_state_path() {
+  echo "${SYNC_STATE_DIR}/backend_dead.json"
+}
+
+# 读入 → 全局 _BACKEND_DEAD_ROUND[root]=判死时刻（epoch）；已过期/非法条目丢弃
+_backend_dead_load() {
+  _BACKEND_DEAD_ROUND=()
+  local json
+  json=$(rclone cat "$(_backend_dead_state_path)" 2>/dev/null) || return 0
+  [ -n "$json" ] || return 0
+  local now _k _v
+  now=$(date +%s)
+  while IFS=$'\t' read -r _k _v; do
+    [ -n "$_k" ] || continue
+    [[ "$_v" =~ ^[0-9]+$ ]] || continue
+    [ $(( _v + OPENLIST_BACKEND_DEAD_TTL )) -ge "$now" ] || continue
+    _BACKEND_DEAD_ROUND["$_k"]="$_v"
+  done < <(printf '%s' "$json" \
+    | jq -r 'to_entries[] | [.key, ((.value.dead_at // .value) | tostring)] | @tsv' 2>/dev/null)
+}
+
+# 标记一个后端本轮判死（合并写回，保留其它后端与未过期条目）
+_backend_dead_mark() {
+  local root="$1"
+  [ -n "$root" ] || return 0
+  local now _k _tsv="" json
+  now=$(date +%s)
+  _BACKEND_DEAD_ROUND["$root"]="$now"
+  for _k in "${!_BACKEND_DEAD_ROUND[@]}"; do
+    _tsv+="${_k}"$'\t'"${_BACKEND_DEAD_ROUND[$_k]}"$'\n'
+  done
+  json=$(printf '%s' "$_tsv" | jq -R -s '
+    split("\n") | map(select(length > 0) | split("\t") | select(length == 2))
+    | map({(.[0]): {dead_at: (.[1] | tonumber)}}) | add // {}' 2>/dev/null) || return 0
+  [ -n "$json" ] || return 0
+  _marker_write "$json" "$(_backend_dead_state_path)" >/dev/null 2>&1 || true
+}
+
+# 取后端挂载根（优先用 openlist_driver.sh 的实现；单独 source 本文件时内联兜底，
+# 否则测试里会出现 command not found）
+_task_backend_root_of() {
+  if declare -F _backend_root_of >/dev/null 2>&1; then
+    _backend_root_of "$1"
+    return 0
+  fi
+  local p="$1"
+  if [[ "$p" == openlist:* ]]; then
+    printf 'openlist:%s' "${p#openlist:}" | cut -d/ -f1
+  else
+    printf '%s' "$p"
+  fi
+}
+
 # 写游标（_marker_write 负责校验与 pretty-print；失败静默保留旧值，不影响同步）
 _rotation_save() {
   local cursor="$1" attempts="$2"
@@ -173,6 +236,32 @@ run_all_tasks() {
   [ -n "${TASK_PREVIEW_ONLY:-}" ] && real_pass=0
   [ "${TASK_REGISTER_ONLY:-0}" = "1" ] && real_pass=0
 
+  # F6: 上轮判死但仍在 TTL 内的后端（本轮直接跳过它的同步对）
+  if [ "$real_pass" -eq 1 ]; then
+    _backend_dead_load
+  fi
+  # 全线皆死保护: 清单里所有后端都被判死时忽略跳过标记并告警——不许因为
+  # 一份过期的熔断记录让整轮什么都不做（宁可重试死后端，不可全线停摆）
+  local _all_backends="" _e0 _d0 _r0 _backend_total=0
+  for _e0 in "${SYNC_TASK_REGISTRY[@]}"; do
+    IFS='|' read -r _ _ _d0 _ _ <<< "$_e0"
+    _r0=$(_task_backend_root_of "$_d0")
+    case "|$_all_backends|" in
+      *"|$_r0|"*) : ;;
+      *) _all_backends="${_all_backends:+$_all_backends|}$_r0"; _backend_total=$((_backend_total + 1)) ;;
+    esac
+  done
+  local _dead_backend_n=0
+  for _r0 in "${!_BACKEND_DEAD_ROUND[@]}"; do
+    case "|$_all_backends|" in *"|$_r0|"*) _dead_backend_n=$((_dead_backend_n + 1)) ;; esac
+  done
+  if [ "$_dead_backend_n" -gt 0 ] && [ "$_dead_backend_n" -ge "$_backend_total" ]; then
+    echo "⚠️ 后端跨轮熔断: 清单内 ${_backend_total} 个后端全部在 TTL 内被判死，本轮忽略熔断记录照常尝试（宁可重试死后端，不可全线停摆）"
+    _BACKEND_DEAD_ROUND=()
+  elif [ "$_dead_backend_n" -gt 0 ]; then
+    echo "后端跨轮熔断: ${_dead_backend_n}/${_backend_total} 个后端在 TTL（${OPENLIST_BACKEND_DEAD_TTL}s）内被判死，本轮跳过它们的同步对"
+  fi
+
   local i idx _e
   local _rot_attempts="${ROTATION_ATTEMPTS:-0}"
   for ((i = 0; i < n; i++)); do
@@ -187,6 +276,20 @@ run_all_tasks() {
     fi
     # 非起点同步对在本 run 内是首次尝试（连续尝试数从 1 重新计）
     [ "$i" -gt 0 ] && _rot_attempts=0
+
+    # F6: 该同步对所属后端在 TTL 内被判死 → 跳过让路（游标后移，不等满
+    # ROTATION_MAX_CONSECUTIVE_ATTEMPTS；全线皆死的情况已在上层清空记录）
+    if [ "$real_pass" -eq 1 ] && [ "${#_BACKEND_DEAD_ROUND[@]}" -gt 0 ]; then
+      local _skip_dst _skip_root
+      IFS='|' read -r _ _ _skip_dst _ _ <<< "$_e"
+      _skip_root=$(_task_backend_root_of "$_skip_dst")
+      if [ -n "${_BACKEND_DEAD_ROUND[$_skip_root]:-}" ]; then
+        echo "⏭ 同步对轮转: 第 $((idx + 1))/${n} 个同步对所属后端 ${_skip_root} 上轮判死（熔断剩余 $(( ( ${_BACKEND_DEAD_ROUND[$_skip_root]} + OPENLIST_BACKEND_DEAD_TTL - $(date +%s) ) / 60 )) 分钟），跳过让路"
+        [ "$rotation_enabled" -eq 1 ] && _rotation_save "$(( (idx + 1) % n ))" 0
+        _rot_attempts=0
+        continue
+      fi
+    fi
 
     if [ "$rotation_enabled" -eq 1 ] && [ "$real_pass" -eq 1 ]; then
       # 执行前先落盘"正在尝试第 idx 个（第 N 次）"—— run 在执行中被取消时
@@ -219,7 +322,13 @@ run_all_tasks() {
         # ROTATION_MAX_CONSECUTIVE_ATTEMPTS 次——死后端重试多少次都一样，
         # 立即让路，把剩余预算交给健康后端（run #12615/#12616 连续两轮
         # 烧在同一个 wopan175 同步对上，各 5h 零产出）
+        local _dead_dst _dead_root
+        IFS='|' read -r _ _ _dead_dst _ _ <<< "$_e"
+        _dead_root=$(_task_backend_root_of "$_dead_dst")
         echo "⚠️ 同步对轮转: 第 $((idx + 1))/${n} 个同步对所属后端本轮已判不可用，立即后移游标（把剩余时间让给健康后端，下个循环再试它）"
+        # 跨轮持久化: 下轮直接跳过该后端的全部同步对（F6，带 TTL；同样死后端
+        # 常是暂态，过期自动重新参战）
+        _backend_dead_mark "$_dead_root"
         _rotation_save "$(( (idx + 1) % n ))" 0
         _rot_attempts=0
       elif [ "$_rot_attempts" -ge "$ROTATION_MAX_CONSECUTIVE_ATTEMPTS" ]; then

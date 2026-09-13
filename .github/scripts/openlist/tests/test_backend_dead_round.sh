@@ -1,0 +1,121 @@
+#!/bin/bash
+# 后端熔断跨轮持久化（F6）——逻辑验证（mock rclone/_marker_write/_run_registry_entry）
+# 背景: 轮转游标只能让"这一对"让路，让不了"这个后端"——同一后端有多对时游标
+#   后移一位，下轮照样撞上它的下一对；而 attempts 上限 8 次 ≈ 44h（实测
+#   task_rotation.json cursor=8 attempts=6 钉死在 wopan176Crypt，其余 15 对
+#   近四轮零执行）。F6 把本轮判死的后端连同时间戳写进 backend_dead.json，
+#   下轮直接跳过它的全部同步对；死后端常是暂态（登录失效/限流），故带 TTL。
+# 验证:
+#   1. 无状态文件 → 载入为空，不跳过任何同步对
+#   2. mark → 落盘含 dead_at；重新 load 命中
+#   3. TTL 过期 → 不再命中（死后端自动重新参战）
+#   4. run_all_tasks 跳过判死后端的同步对，健康的照常执行
+#   5. 判死后端会随 SYNC_BACKEND_DEAD=1 自动标记（跨轮生效）
+#   6. 全线皆死 → 忽略熔断记录并告警（宁可重试死后端，不可全线停摆）
+set -u
+PASS=0; FAIL=0
+ok()  { PASS=$((PASS+1)); echo "PASS: $1"; }
+bad() { FAIL=$((FAIL+1)); echo "FAIL: $1"; }
+
+_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+source "$_REPO_ROOT/.github/scripts/openlist/task_engine.sh" 2>/dev/null
+
+WORK="/tmp/backend_dead_test"
+rm -rf "$WORK"; mkdir -p "$WORK"
+trap 'rm -rf "$WORK"' EXIT
+SYNC_STATE_DIR="$WORK"
+
+# --- mocks ---
+# rclone cat 按路径读本地文件（SYNC_STATE_DIR 用的就是本地目录）
+rclone() { case "$1" in cat) cat "$2" 2>/dev/null ;; *) return 0 ;; esac; }
+_marker_write() { printf '%s' "$1" > "$2"; return 0; }
+
+SYNC_TASK_REGISTRY=(
+  "p0|src0|openlist:wopan176Crypt/0|task0|--auto-split"
+  "p1|src1|openlist:baidupanCrypt/1|task1|--auto-split"
+  "p2|src2|openlist:wopan176Crypt/2|task2|--auto-split"
+)
+EXEC_LOG=()
+declare -A FAKE_DEAD_MAP=()
+declare -A FAKE_FAIL_MAP=()
+_run_registry_entry() {
+  local _p="${1%%|*}"
+  EXEC_LOG+=("$_p")
+  SYNC_SKIPPED=0
+  SYNC_FAILED="${FAKE_FAIL_MAP[$_p]:-0}"
+  SYNC_BACKEND_DEAD="${FAKE_DEAD_MAP[$_p]:-0}"
+}
+OPENLIST_TASK_ROTATION=1
+ROTATION_MAX_CONSECUTIVE_ATTEMPTS=8
+reset_case() {
+  rm -f "$WORK"/backend_dead.json "$WORK"/task_rotation.json
+  EXEC_LOG=()
+  FAKE_DEAD_MAP=()
+  FAKE_FAIL_MAP=()
+  _BACKEND_DEAD_ROUND=()
+  SYNC_TIME_EXHAUSTED=0
+}
+
+# --- 1. 无状态文件 → 载入为空 ---
+reset_case
+_backend_dead_load
+[ "${#_BACKEND_DEAD_ROUND[@]}" -eq 0 ] && ok "1 无状态文件 → 熔断表为空" || bad "1: ${#_BACKEND_DEAD_ROUND[@]} 条"
+
+# --- 2. mark → 落盘 + 重新 load 命中 ---
+reset_case
+_backend_dead_mark "openlist:wopan176Crypt"
+[ -s "$WORK/backend_dead.json" ] && ok "2a mark 落盘 backend_dead.json" || bad "2a: 文件未生成"
+_DEAD_AT=$(jq -r '.["openlist:wopan176Crypt"].dead_at // empty' "$WORK/backend_dead.json" 2>/dev/null)
+case "$_DEAD_AT" in
+  ''|*[!0-9]*) bad "2b dead_at 非整数时间戳: [$_DEAD_AT]" ;;
+  *) ok "2b dead_at 为整数时间戳" ;;
+esac
+_BACKEND_DEAD_ROUND=()
+_backend_dead_load
+[ -n "${_BACKEND_DEAD_ROUND[openlist:wopan176Crypt]:-}" ] \
+  && ok "2c 重新 load 命中判死后端" || bad "2c: 未命中"
+
+# --- 3. TTL 过期 → 不再命中 ---
+reset_case
+OPENLIST_BACKEND_DEAD_TTL=1
+_backend_dead_mark "openlist:wopan176Crypt"
+sleep 2
+_BACKEND_DEAD_ROUND=()
+_backend_dead_load
+[ -z "${_BACKEND_DEAD_ROUND[openlist:wopan176Crypt]:-}" ] \
+  && ok "3 TTL 过期 → 自动重新参战" || bad "3: 过期条目仍生效"
+OPENLIST_BACKEND_DEAD_TTL=43200
+
+# --- 4. run_all_tasks 跳过判死后端的同步对 ---
+reset_case
+_backend_dead_mark "openlist:wopan176Crypt"
+_BACKEND_DEAD_ROUND=()
+run_all_tasks >/dev/null 2>&1
+[ "${#EXEC_LOG[@]}" -eq 1 ] && [ "${EXEC_LOG[0]}" = "p1" ] \
+  && ok "4a wopan176Crypt 两对被跳过，只执行 baidupanCrypt 的 p1" \
+  || bad "4a: 执行序列 [${EXEC_LOG[*]}]"
+
+# --- 5. 本轮判死 → 自动落盘供下轮跳过 ---
+reset_case
+# 生产形态: 后端判死的同步对同时以 SYNC_FAILED=1 收场（先失败再让路）
+FAKE_DEAD_MAP["p0"]=1
+FAKE_FAIL_MAP["p0"]=1
+run_all_tasks >/dev/null 2>&1
+[ -s "$WORK/backend_dead.json" ] \
+  && ok "5a 本轮判死 → 写入 backend_dead.json" || bad "5a: 未落盘"
+[ -n "$(jq -r '.["openlist:wopan176Crypt"].dead_at // empty' "$WORK/backend_dead.json" 2>/dev/null)" ] \
+  && ok "5b 落盘记录的是该同步对的后端挂载根" || bad "5b: 根不正确"
+
+# --- 6. 全线皆死 → 忽略熔断记录照常执行 ---
+reset_case
+_backend_dead_mark "openlist:wopan176Crypt"
+_backend_dead_mark "openlist:baidupanCrypt"
+_BACKEND_DEAD_ROUND=()
+run_all_tasks > "$WORK/all_dead.log" 2>&1
+[ "${#EXEC_LOG[@]}" -eq 3 ] && ok "6a 全线皆死 → 三对全部照常执行" || bad "6a: [${EXEC_LOG[*]}]"
+grep -q "宁可重试死后端，不可全线停摆" "$WORK/all_dead.log" \
+  && ok "6b 全线皆死有告警" || bad "6b: 无告警"
+
+echo "-----"
+echo "PASS=$PASS FAIL=$FAIL"
+[ $FAIL -eq 0 ]
