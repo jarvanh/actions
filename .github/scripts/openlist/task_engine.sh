@@ -1065,13 +1065,25 @@ _sync_task_impl() {
   local failed_list=""
   local skipped_list=""
   local subtask_idx=0
-  # ===== 并行子目录同步分支（默认关闭，行为不变）=====
-  # 启用条件: OPENLIST_SUBDIR_PARALLEL>=2 且 仅顶层拆分（depth=0，递归层
-  # 仍串行避免锁嵌套）且 子目录数>=2。默认串行，开启前见
-  # _sync_subdirs_parallel_run 头注释
+  # ===== 并行子目录同步分支 =====
+  # 启用条件: OPENLIST_SUBDIR_PARALLEL>=2 且 depth ≤ 1 且 本层还没并行过
+  # 且 子目录数>=2。
+  # **depth 放宽到 ≤1 的原因（run 34826097133 实测）**: 生产里多对的结构是
+  # 「顶层只有 1 个子目录（如 1024j），第二层才有 ≥2 个」—— 旧条件 depth=0
+  # 在这种结构下永远不成立，subdir_parallel=2 形同虚设（并行标记 0 次出现）。
+  # 防级联: 已并行过的层用 SUBDIR_PARALLEL_DONE 挡住更深层（worker 子 shell
+  # 会继承该标记），避免 depth1 并行 × depth2 又并行把并发数乘爆。
+  # 代价: depth1 层的进度树由 depth0 的 worker 渲染（其自身被 MUTE），
+  # 面板上看不到 depth1 的子树明细 —— 通知不受影响。
+  if [ "$current_depth" -eq 0 ]; then
+    SUBDIR_PARALLEL_DONE=0        # 每对重置一次: 串行轮询里不能让上一对挡住本对
+  fi
   if [ "${OPENLIST_SUBDIR_PARALLEL:-1}" -ge 2 ] \
-     && [ "$current_depth" -eq 0 ] \
+     && [ "$current_depth" -le 1 ] \
+     && [ "${SUBDIR_PARALLEL_DONE:-0}" = "0" ] \
      && [ "${total_subdirs_count:-0}" -ge 2 ]; then
+    SUBDIR_PARALLEL_DONE=1
+    export SUBDIR_PARALLEL_DONE
     _sync_subdirs_parallel_run
   else
   while IFS= read -r subdir; do

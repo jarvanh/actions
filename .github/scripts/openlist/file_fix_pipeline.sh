@@ -423,21 +423,26 @@ _sync_bulk_hash_dir_fold() {
     #   run 34779382573 里报"批量折叠零落盘（rc=0）"的 5b32587f，事后读该目录
     #   **有 18 个文件且可写** —— 折叠其实落盘了，是校验读早了。
     # 误判的代价是双重的: 退回逐文件修复白跑一遍，且成果不进 marker（后端有文件、
-    # 账上没有 = 幽灵落盘），下一轮又从头折一次。所以这里刷缓存重试 3 次再定论。
-    local landed_n=0 _land_try
-    for _land_try in 1 2 3; do
+    # 账上没有 = 幽灵落盘），下一轮又从头折一次。
+    # **窗口实测（run 34826097133）**: 刷缓存 ×2（间隔 5s）不够 —— 仍判零落盘，
+    #   而同目录 11 小时后 diag 读到 18 个文件 ⇒ 可见性延迟远大于 15s。
+    #   故把窗口拉长为「N 次 × 间隔 W 秒」（默认 4×15s = 60s+），可配。
+    #   注意这是"延迟可见"而非"读太早就没了"——文件不会因此消失，等得起。
+    local landed_n=0 _land_try=0
+    local _land_tries="${OPENLIST_FOLD_VERIFY_TRIES:-4}"
+    local _land_wait="${OPENLIST_FOLD_VERIFY_WAIT:-15}"
+    while [ "$_land_try" -lt "$_land_tries" ]; do
+      _land_try=$((_land_try + 1))
       rclone lsf "$hash_dst" --files-only --retries 1 \
         --timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900}" > "$landed" 2>/dev/null || : > "$landed"
       landed_n=$(wc -l < "$landed" | tr -d ' ')
       [ "${landed_n:-0}" -gt 0 ] && break
-      if [ "$_land_try" -lt 3 ]; then
-        echo "  ↻ 折叠落盘校验读空（第 ${_land_try} 次），刷新服务端缓存后重读" | tee -a "$LOG_FILENAME"
-        if declare -F _ol_refresh_path_cache >/dev/null 2>&1; then
-          _ol_refresh_path_cache "$hash_dst" >/dev/null 2>&1 || true
-        else
-          sleep 5
-        fi
+      [ "$_land_try" -lt "$_land_tries" ] || break
+      echo "  ↻ 折叠落盘校验读空（第 ${_land_try}/${_land_tries} 次），刷新服务端缓存后 ${_land_wait}s 重读" | tee -a "$LOG_FILENAME"
+      if declare -F _ol_refresh_path_cache >/dev/null 2>&1; then
+        _ol_refresh_path_cache "$hash_dst" >/dev/null 2>&1 || true
       fi
+      sleep "$_land_wait"
     done
     # 落盘清单进关联数组后查表: 逐文件 grep 是 N 次进程启动，千级文件（run
     # 34674196629 单目录 1051 个）光这个就是几秒到几十秒的纯开销，查表是零成本

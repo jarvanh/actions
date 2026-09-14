@@ -13,6 +13,10 @@
 set -u
 # 同 test_hash_dir_fallback: 探针可见性重试留 1 次，避免兜底 sleep 拖慢套件
 OPENLIST_PROBE_READ_RETRY=1
+# 折叠落盘校验重试只留 1 次 + 不等待: 否则"始终读空"的场景会各等 15s×4（测试里
+# rclone lsf 的 mock 返回固定内容，无法模拟"延迟可见"）
+OPENLIST_FOLD_VERIFY_TRIES=1
+OPENLIST_FOLD_VERIFY_WAIT=0
 PASS=0; FAIL=0
 ok()  { PASS=$((PASS+1)); echo "PASS: $1"; }
 bad() { FAIL=$((FAIL+1)); echo "FAIL: $1"; }
