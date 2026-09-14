@@ -735,6 +735,34 @@ _fix_backend_root_of() {
   fi
 }
 
+# 探针可见性判定（带"刷缓存 + 重读"重试）
+# OpenList 对新建/刚变更目录的列表有缓存延迟: 一次 lsf 读空就下结论，会把**可写**
+# 目录误判成不可写。2026-09-14 已用诊断实测反证同类误判（报"批量折叠零落盘"的短哈希
+# 目录事后读到 18 个文件）。误判代价: 可写目录被跳过 → 该目录所有文件转去换目录/折叠，
+# 白跑一轮且成果不进 marker。故读空时先刷服务端缓存（_ol_refresh_path_cache）再读，
+# 最多 3 次；每次都仍不可见才判不可写。
+_probe_file_visible() {
+  local dir_remote="$1" want="$2" tmo="${3:-120s}"
+  # 重试次数可配: 单测里没有 _ol_refresh_path_cache（openlist_driver.sh 未 source），
+  # 兜底等待会把每个"不可写"目录拖慢好几秒 × 十余个场景 → 套件从秒级变分钟级。
+  # 生产保持 3 次；单测设 OPENLIST_PROBE_READ_RETRY=1 跳过重试。
+  local _tries="${OPENLIST_PROBE_READ_RETRY:-3}" _try
+  for _try in 1 2 3; do
+    [ "$_try" -le "$_tries" ] || break
+    if rclone lsf "$dir_remote" --files-only --retries 1 --timeout "$tmo" 2>/dev/null \
+       | grep -qxF "$want"; then
+      return 0
+    fi
+    [ "$_try" -lt "$_tries" ] || break
+    if declare -F _ol_refresh_path_cache >/dev/null 2>&1; then
+      _ol_refresh_path_cache "$dir_remote" >/dev/null 2>&1 || true
+    else
+      sleep "${OPENLIST_PROBE_REFRESH_WAIT:-5}"
+    fi
+  done
+  return 1
+}
+
 _fix_probe_dir_writable() {
   local dir_remote="$1" ol_dir="${2:-}"
   local probe_timeout="${OPENLIST_DIR_PROBE_TIMEOUT:-120}s"
@@ -776,8 +804,7 @@ _fix_probe_dir_writable() {
   local prc=${PIPESTATUS[0]}
   local seen_cache=0
   if [ "$prc" -eq 0 ]; then
-    if rclone lsf "$dir_remote" --files-only --retries 1 --timeout "$probe_timeout" 2>/dev/null \
-       | grep -qxF "$probe_name"; then
+    if _probe_file_visible "$dir_remote" "$probe_name" "$probe_timeout"; then
       seen_cache=1
     fi
   fi
@@ -793,8 +820,7 @@ _fix_probe_dir_writable() {
     # 虚高 → 后续真实落盘的方法全被判"未增长"级联拉黑，必须重建
     _fix_rebase_after_restart "$fix_log"
     local seen_truth=0
-    if rclone lsf "$dir_remote" --files-only --retries 1 --timeout "$probe_timeout" 2>/dev/null \
-       | grep -qxF "$probe_name"; then
+    if _probe_file_visible "$dir_remote" "$probe_name" "$probe_timeout"; then
       seen_truth=1
     fi
     writable="$seen_truth"
