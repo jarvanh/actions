@@ -378,6 +378,37 @@ rclone purge "$DEEP_DIR" --retries 1 --timeout "$PROBE_TIMEOUT" >/dev/null 2>&1 
   || say "   ⚠️ 路径探针目录未能清除: $DEEP_DIR（以 oldiag_ 前缀可辨识）"
 
 # ────────────────────────────────────────────────────────────
+sec "11 · 重启后立即写探针（复现生产的「重启 → 预检 → 405」序列）"
+# 为什么补这一组（2026-09-14 生产取证驱动）:
+#   生产里每个目录可写性预检（_fix_probe_dir_writable）之前，几乎都刚重启过容器
+#   ——truth-check、持久化复核都会重启。run 34779382573 里连续 3 次预检全部
+#   405 `unchunked simple update failed`，而同一目录下有 1004 个真实文件落盘。
+#   第 10 组已排除「路径长度/深度」，第 6-8 组排除了「名长/覆盖写/子目录」，
+#   剩下的解释就是**时序**: 驱动在容器重启后需要一段时间才真正可写，而预检
+#   没有等待/重试就直接判"目录不可写"，进而触发无谓的目录折叠与逐文件修复。
+#   判读: 若 +0s/+10s 失败而 +30s/+60s 成功 ⇒ 预检必须加重试/等待；
+#         若全部成功 ⇒ 时序不是原因，回去查那批文件本身的差异。
+if docker restart "$CONTAINER" >/dev/null 2>&1; then
+  RST_RESULT=""
+  for _w in 0 10 30 60; do
+    [ "$_w" -gt 0 ] && sleep "$_w"
+    _o=$(rclone copyto /tmp/ol_diag/pp "$TARGET/oldiag_afterrestart.txt" \
+      --retries 1 --low-level-retries 1 --contimeout 20s --timeout "$PROBE_TIMEOUT" 2>&1)
+    if [ $? -eq 0 ]; then
+      RST_RESULT="$RST_RESULT +${_w}s=OK"
+    else
+      RST_RESULT="$RST_RESULT +${_w}s=FAIL($(http_code_of "$_o"))"
+    fi
+  done
+  say "重启后写入（累计等待）:$RST_RESULT"
+  rclone deletefile "$TARGET/oldiag_afterrestart.txt" --retries 1 --timeout "$PROBE_TIMEOUT" \
+    >/dev/null 2>&1 || true
+else
+  say "（docker restart 不可用，跳过重启后写入探针）"
+  RST_RESULT="SKIPPED"
+fi
+
+# ────────────────────────────────────────────────────────────
 sec "诊断结论"
 say "目标路径: $TARGET"
 say "短名写:   $short_result"
@@ -386,6 +417,7 @@ say "覆盖写:   $OVERWRITE"
 say "子目录写: $SUBDIR"
 say "父目录名长阶梯:${LADDER_P:-SKIPPED}"
 say "路径深度阶梯: ${DEEP_R:-SKIPPED}"
+say "重启后写入:   ${RST_RESULT:-SKIPPED}"
 say "持续写:   $BURST_RESULT"
 say "并发写:   ${CONC_RESULT:-SKIPPED}（transfers=4，三态见上）"
 say "容器日志 8005 命中: $(count_of '8005|rsp_code|rep_desc' "$CONTAINER_LOG") 行"
@@ -404,6 +436,8 @@ say "  · 父目录名长阶梯在某档断           → 父目录名长阈值�
 say "                                      修法: 目录级折叠/短哈希目录（已实现，但要确认落盘）"
 say "  · 深度阶梯在某层断                 → 与路径总长/深度相关，修法同上"
 say "  · 两组阶梯全过                     → 405 与路径长度/深度无关，回到密文文件名长度假设"
+say "  · 重启后 +0s/+10s FAIL、+30s/+60s OK → 预检时序问题: _fix_probe_dir_writable"
+say "                                      必须加重试/等待，否则刚重启完的目录一律误判不可写"
 say "  · 新目录并发 FAIL、retries3 也 FAIL → 并发确实触发后端锁，transfers 保持 1"
 say "  · 全部 OK                          → 此刻后端完全可写（含并发），失败属时段性/外部条件"
 say ""
