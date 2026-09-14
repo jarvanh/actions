@@ -599,6 +599,33 @@ _ol_lock_exclusive_release() {
   return 0
 }
 
+# 重启后等待驱动就绪（自适应轮询，上界 = 旧的无条件 sleep）
+# 为什么不再盲等 60s: 一轮里有 ~10 次容器重启（truth-check / 持久化复核），
+# 每次盲等 60s 就是约 10 分钟，占 334min 轮次的 ~3%（2026-09-14 静默间隔分析:
+# 全轮 ≥60s 无输出的空转合计 145min，其中「等待驱动重新初始化 (60s)」出现 9 次）。
+# 而实际就绪通常只要几秒 —— 用"目标路径可列出"作为就绪信号轮询即可。
+# 上界保留 60s（可配）: 超时也照旧往下走，**最坏情况与旧行为一致**，不会更慢。
+# 用法: _wait_driver_ready <ol_path 不带 openlist: 前缀> [log_file]
+_wait_driver_ready() {
+  local ol_path="${1#/}" log_file="${2:-/dev/null}"
+  local max="${OPENLIST_DRIVER_READY_WAIT:-60}" t0 now
+  t0=$(date +%s)
+  [ -n "$ol_path" ] || { sleep "$max"; return 0; }
+  while :; do
+    if timeout 20 rclone lsf "openlist:${ol_path}" --max-depth 1 --files-only \
+         >/dev/null 2>&1; then
+      now=$(date +%s)
+      echo "  驱动就绪（等了 $((now - t0))s，上限 ${max}s）" | tee -a "$log_file"
+      return 0
+    fi
+    now=$(date +%s)
+    [ $((now - t0)) -ge "$max" ] && break
+    sleep 3
+  done
+  echo "  ⚠️ 驱动 ${max}s 内未确认就绪，按旧行为继续（最坏情况不变）" | tee -a "$log_file"
+  return 0
+}
+
 # 重启 OpenList 容器并等待驱动就绪——为拿到"后端真实列表"
 # （PUT 假成功条目只存在于 OpenList 缓存/后端可见列表，容器重启即消失；
 #   持久化验证/假成功重试一直在用这个口径，此处抽出复用）
@@ -632,8 +659,8 @@ _restart_openlist_for_truth_impl() {
     echo "  ⚠️ 重启后 HTTP 60s 内未就绪" | tee -a "$log_file"
     return 1
   }
-  echo "  等待驱动重新初始化 (60s)..." | tee -a "$log_file"
-  sleep 60
+  echo "  等待驱动重新初始化（自适应轮询，上限 60s）..." | tee -a "$log_file"
+  _wait_driver_ready "$ol_path" "$log_file"
   if [ -n "$ol_path" ]; then
     local t
     t=$(_get_openlist_token) || true
@@ -751,8 +778,8 @@ _sync_restart_for_verify() {
     sleep 2
   done
   curl -sf http://127.0.0.1:5244/ping >/dev/null 2>&1 || return 1
-  echo "  等待驱动重新初始化 (60s) ..." | tee -a "$log_file"
-  sleep 60
+  echo "  等待驱动重新初始化（自适应轮询，上限 60s）..." | tee -a "$log_file"
+  _wait_driver_ready "$ol_path" "$log_file"
   local t
   t=$(_get_openlist_token)
   if [ -n "$t" ]; then
