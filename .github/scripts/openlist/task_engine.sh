@@ -70,6 +70,156 @@ _run_registry_entry() {
   sync_task "$_src" "$_dst" "$_name" "${_flag_arr[@]}"
 }
 
+# ===== 并行同步对（可选: OPENLIST_PAIR_PARALLEL>=2，默认关闭 = 行为不变）=====
+# 动机（2026-09-14 诊断实测，不是推测）:
+#   后端有**总量带宽上限**——同一目标下 transfers 1→4 只把吞吐从 0.60 提到
+#   1.00 MiB/s（1.67×，不是 4×），单流与整轮的有效吞吐都稳定在 ≈0.6 MB/s。
+#   ⇒ 在**同一个后端**上加并发收益有限；真正的杠杆是**同时使用多个后端各自的
+#   额度**（wopan176Crypt / wopan175 / baidupanCrypt / aliyundriveCrypt 是四个
+#   独立挂载，诊断证明四个都可写）。
+# 做法（与 transfer 并发正交，可叠加）:
+#   - 按「挂载根（后端）」分组调度: **同一后端同一时刻只跑一个 worker**（否则
+#     两个 worker 自相抢那 1 MiB/s），不同后端并行。
+#   - worker = 子 shell 跑 _run_registry_entry，结果经 .done 文件回传
+#     （idx/后端/状态/字节），父级合并计数。
+#   - worker 全程 PROGRESS_WORKER_MUTE=1（进度槽位是跨 worker 共享文件，worker
+#     互写会打碎父级渲染）；各自的任务通知照常由 worker 自己发（不受该开关影响）。
+#   - marker 天然并行安全: 每个同步对的 marker 以 (source,dest) 为键，互不相干。
+#   - 轮转游标: 并行模式下写序不再线性，故**不再逐对写游标**；改为整批结束后把
+#     游标推进到「本轮未启动的第一个同步对」，保证下轮从没做过的地方继续。
+#     代价: attempts 计数在并行模式下不再累计（防饿死阀门失效），由跨轮后端熔断
+#     （F6）与预算闸兜底。硬杀时游标本轮未推进 → 下轮重做本批（幂等）。
+OPENLIST_PAIR_PARALLEL="${OPENLIST_PAIR_PARALLEL:-1}"   # 1=串行（默认，行为不变）
+
+# 收割一个完成的同步对 worker（阻塞轮询；结果文件为准 + kill -0 兜底，
+# 与 _sync_par_reap_one 同策略: wait -n -p 对被杀子进程不回填 pid）
+_pairs_parallel_reap_one() {
+  # 依赖调用方（_run_registry_pairs_parallel）作用域:
+  #   _pp_dir / _pp_pid[idx] / _pp_be[idx] / _pp_dst[idx] / _busy_be / _done_n / _failed_n
+  local _pp_dir="$1" _tries=0 _idx _pid _f
+  while :; do
+    _tries=$((_tries + 1))
+    for _idx in "${!_pp_pid[@]}"; do
+      _pid=${_pp_pid[$_idx]:-}
+      _f="$_pp_dir/$_idx.done"
+      if [ -f "$_f" ]; then
+        [ -n "$_pid" ] && wait "$_pid" 2>/dev/null || true
+        local _be="${_pp_be[$_idx]:-}" _st _tr
+        _st=$(sed -n 's/^status=//p' "$_f" | head -1)
+        _tr=$(sed -n 's/^transferred=//p' "$_f" | head -1)
+        [[ "$_tr" =~ ^[0-9]+$ ]] || _tr=0
+        rm -f "$_f"
+        unset "_pp_pid[$_idx]" "_pp_be[$_idx]" "_pp_dst[$_idx]"
+        [ -n "$_be" ] && unset "_busy_be[$_be]"
+        _done_n=$((_done_n + 1))
+        total_transferred=$((total_transferred + _tr))
+        case "$_st" in
+          failed|partial) _failed_n=$((_failed_n + 1)) ;;
+        esac
+        echo "✅ 并行同步对完成: 第 $((_idx + 1))/${_pp_n} 个（后端 ${_be:-?} · ${_st:-?} · $(format_bytes "$_tr")）"
+        return 0
+      fi
+      if [ -n "$_pid" ] && ! kill -0 "$_pid" 2>/dev/null; then
+        wait "$_pid" 2>/dev/null || true
+        local _be2="${_pp_be[$_idx]:-}"
+        unset "_pp_pid[$_idx]" "_pp_be[$_idx]" "_pp_dst[$_idx]"
+        [ -n "$_be2" ] && unset "_busy_be[$_be2]"
+        _done_n=$((_done_n + 1))
+        _failed_n=$((_failed_n + 1))
+        echo "⚠️ 并行同步对 worker 异常退出（无结果文件），按失败计: 第 $((_idx + 1))/${_pp_n} 个"
+        return 0
+      fi
+    done
+    sleep 2
+  done
+}
+
+_run_registry_pairs_parallel() {
+  # 依赖调用方（run_all_tasks）作用域: SYNC_TASK_REGISTRY / start / n /
+  #   rotation_enabled / real_pass / _rot_attempts
+  # 写: total_transferred / SYNC_TIME_EXHAUSTED
+  local _par="$OPENLIST_PAIR_PARALLEL"
+  [ "$_par" -lt 2 ] && _par=2
+  local _pp_dir="/tmp/ol_pairs_$(date +%s)_$$"
+  mkdir -p "$_pp_dir"
+  declare -A _pp_pid=() _pp_be=() _pp_dst=() _busy_be=() _started=()
+  # 这几个是"调用方局部": _pairs_parallel_reap_one 靠 bash 动态作用域改它们，
+  # 因此既不能声明在 reap 内部（改了看不见），也不能不声明（会污染全局）
+  local _pp_n="$n" _done_n=0 _failed_n=0 total_transferred=0
+  local _k idx _e _dst _be _pick _pick_be _running=0
+  echo "🔀 并行同步对: 上限 ${_par} 个（同一后端不并行），本轮候选 ${n} 个"
+  while :; do
+    # 选中下一个可分发的位置: 未启动 + 其后端当前空闲（按游标序扫描）
+    _pick=-1; _pick_be=""
+    for ((_k = 0; _k < n; _k++)); do
+      idx=$(( (start + _k) % n ))
+      [ -n "${_started[$idx]:-}" ] && continue
+      _e="${SYNC_TASK_REGISTRY[$idx]}"
+      IFS='|' read -r _ _ _dst _ _ <<< "$_e"
+      _be=$(_task_backend_root_of "$_dst")
+      if [ -z "${_busy_be[$_be]:-}" ]; then _pick=$idx; _pick_be="$_be"; break; fi
+    done
+    if [ "$_pick" -ge 0 ] && [ "$_running" -ge "$_par" ]; then
+      _pairs_parallel_reap_one "$_pp_dir"; _running=$((_running - 1)); continue
+    fi
+    if [ "$_pick" -ge 0 ] && sync_budget_stop; then
+      echo "⏳ 时间预算将尽，不再分发新同步对（在途的等待完成）"
+      SYNC_TIME_EXHAUSTED=1
+      if [ "$_running" -eq 0 ]; then break; fi
+      _pairs_parallel_reap_one "$_pp_dir"; _running=$((_running - 1)); continue
+    fi
+    if [ "$_pick" -ge 0 ]; then
+      # 分发
+      _started[$_pick]=1
+      _busy_be[$_pick_be]=1
+      idx=$_pick
+      _e="${SYNC_TASK_REGISTRY[$idx]}"
+      IFS='|' read -r _ _ _dst _ _ <<< "$_e"
+      echo "=== 同步对(并行) ${_pick_be} · 第 $((idx + 1))/${n} 个 ==="
+      (
+        PROGRESS_WORKER_MUTE=1
+        _rot_attempts=0
+        SYNC_BACKEND_DEAD=0
+        _run_registry_entry "$_e" || true
+        _st=""
+        if [ "${SYNC_SKIPPED:-0}" = "1" ]; then _st="skipped"
+        elif [ "${SYNC_FAILED:-0}" = "0" ]; then _st="synced"
+        elif [ "${SYNC_PARTIAL:-0}" = "1" ]; then _st="partial"
+        else _st="failed"; fi
+        {
+          printf 'status=%s\n' "$_st"
+          printf 'transferred=%s\n' "${SYNC_TRANSFERRED_BYTES:-0}"
+          printf 'backend=%s\n' "$_pick_be"
+        } > "${_pp_dir}/${idx}.done" 2>/dev/null || true
+        exit 0
+      ) &
+      _pp_pid[$idx]=$!
+      _pp_be[$idx]="$_pick_be"
+      _pp_dst[$idx]="$_dst"
+      _running=$((_running + 1))
+      continue
+    fi
+    # 没有可分发的位置: 有在跑就等一个，否则收工
+    if [ "$_running" -gt 0 ]; then
+      _pairs_parallel_reap_one "$_pp_dir"; _running=$((_running - 1)); continue
+    fi
+    break
+  done
+  rm -rf "$_pp_dir"
+  # 游标推进: 指向本轮未启动的第一个同步对（全启动过则回到起点）
+  local _resume=-1
+  for ((_k = 0; _k < n; _k++)); do
+    idx=$(( (start + _k) % n ))
+    [ -z "${_started[$idx]:-}" ] && { _resume=$idx; break; }
+  done
+  [ "$_resume" -lt 0 ] && _resume=$start
+  if [ "$rotation_enabled" -eq 1 ] && [ "$real_pass" -eq 1 ]; then
+    _rotation_save "$_resume" 0
+    echo "并行同步对完成: 本轮 ${_done_n} 个（失败 ${_failed_n}）· 传输 $(format_bytes "$total_transferred") · 下轮游标 → 第 $((_resume + 1))/${n} 个"
+  fi
+  return 0
+}
+
 # ===== 同步对轮转（防饿死）=====
 # 问题: run_all_tasks 按清单固定顺序执行，排在前面的大同步对（如 task0 的
 #       wopan176Crypt/0，200GB+）常态吃满 6h job 上限，后面的同步对
@@ -277,6 +427,15 @@ run_all_tasks() {
     _BACKEND_DEAD_ROUND=()
   elif [ "$_dead_backend_n" -gt 0 ]; then
     echo "后端跨轮熔断: ${_dead_backend_n}/${_backend_total} 个后端在 TTL（${OPENLIST_BACKEND_DEAD_TTL}s）内被判死，本轮跳过它们的同步对"
+  fi
+
+  # 并行同步对分支（OPENLIST_PAIR_PARALLEL>=2 且正式执行）:
+  # 按后端分组调度，跨后端并行、同后端串行 —— 依据是"后端有总量带宽上限"
+  # 的诊断结论（见 _run_registry_pairs_parallel 头注释）。预览/仅注册 pass
+  # 不并行（只读、顺序无关紧要，且要复用串行路径的注册渲染）。
+  if [ "$real_pass" -eq 1 ] && [ "${OPENLIST_PAIR_PARALLEL:-1}" -ge 2 ]; then
+    _run_registry_pairs_parallel
+    return 0
   fi
 
   local i idx _e

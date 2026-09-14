@@ -80,6 +80,23 @@ on:
           - "1"
           - "2"
           - "3"
+      pair_parallel:
+        # 默认仍 1（关闭 = 行为不变）: 2026-09-14 诊断实测**后端有总量带宽上限**
+        # （同目标 transfers 1→4 只把吞吐从 0.60 提到 1.00 MiB/s，1.67×），所以
+        # 单后端加并发收益有限；真正的杠杆是**同时使用多个后端各自的额度**。
+        # >=2 时按挂载根分组调度: 同一后端同一时刻只跑一个同步对，不同后端并行。
+        # 前提假设"不同后端的上限相互独立"——wopan175 与 wopan176 是否同一账号
+        # 尚未验证（若同一账号则两者并行无益）。验证方法: 对两个后端同时跑吞吐
+        # 阶梯，各自速率不下降即独立。
+        description: "同步模式: 并行同步对上限（默认 1 串行。>=2 时按后端分组，同后端串行、跨后端并行；用于同时吃多个后端的带宽额度）"
+        required: false
+        type: choice
+        default: "1"
+        options:
+          - "1"
+          - "2"
+          - "3"
+          - "4"
       session_hold:
         # 默认改为 false: 同步 step 预算 320min 常态跑满（近 15 轮 duration_s 普遍
         # 19000-19800s），job 随之撞 6h 上限或被 330min 超时收掉，本 step 实测从未
@@ -216,6 +233,7 @@ jobs:
       # 兜底值必须与入参默认一致（2）: schedule 触发时 inputs.subdir_parallel
       # 为空串，兜底留 1 会让定时轮退回串行，并发提速只在手动轮生效。
       OPENLIST_SUBDIR_PARALLEL: ${{ inputs.subdir_parallel || '2' }}
+      OPENLIST_PAIR_PARALLEL: ${{ inputs.pair_parallel || '1' }}
     concurrency: openlist-singleton
     runs-on: ubuntu-latest
     # actions:write 供「自续触发」step 用 GITHUB_TOKEN dispatch 下一轮
