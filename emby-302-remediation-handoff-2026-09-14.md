@@ -68,6 +68,44 @@ Phase 1 / 2 / 3 全部落地、已提交并 push main、各跑过验证轮验收
 4. 若 4.3 想继续调并发：`EMBY_PREFETCH_PAR`（默认 8）与 `MAX_DIRS` 用 Variables 调，
    盯 `/stats` 的 `graph.err`（当前 12/1126 ≈ 1%，无 429 风暴）。
 
+## 新发现：dir_cache 首轮落盘会用「只有 8 条」的快照覆盖云端缓存（2026-09-14 08:20 观察，**待用户决策**）
+
+**现象（实测，run 34790305626）**：远端 `onedrive:backup/emby/live/odlink-dir-cache.json`
+在 **07:55:33 → 08:20:53（25m20s）** 期间只有 **797 字节 / 8 条**（正好是 8 个顶层
+快捷方式，`updated=07:49:39`），之后才恢复成 **10,055,924 字节 / 43,925 条**
+（`updated=08:19:39`）。即：上一轮累积的 4.4 万条缓存，每轮开头都会被一份「只装了
+bootstrap 快捷方式」的小文件覆盖约 25 分钟。
+
+**根因（已在本地用 odlink.py 复现）**：落盘是**无条件定时**的，装载是**惰性**的
+（只有 `resolve()` 会调 `_ensure_dir_cache()`），而 odlink（step 10）比 install emby
+（step 11）先启动：
+
+| 时刻 | 事件 |
+|---|---|
+| T+0 | odlink 启动；`bootstrap()` 把 8 个快捷方式**直接写进** `dir_cache`（不经 resolve） |
+| T+600 | `dump_loop` 第一次落盘 → 写出 8 条（此刻 `/var/lib/emby` 还没恢复，无从装载） |
+| T+840 | install emby 把 10MB 缓存恢复到 `/var/lib/emby/odlink-dir-cache.json` |
+| T+845 | 回填的 `/api/fs/list` 走 `resolve()` → 装载 43,925 条（**内存里是对的**） |
+| T+960 | `emby_incbak.snapshot()` 无条件用 `/tmp/odlink-dir-cache.json` 覆盖 STAGE → 8 条上云 |
+
+本地复现（造 43,925 条 in.json，bootstrap 后未 resolve 直接落盘）：写出 **8 条**；
+先 `_ensure_dir_cache()` 再落盘：写出 **43,925 条**。
+
+**影响**：正常运行轮会在第 2 次快照（T+25min）后自愈；但在这个 25 分钟窗口内
+若轮次被取消 / runner 被 TERM / 轮次短于 ~20min（收尾 `once` 会拷走那份 8 条文件），
+**累积缓存即永久丢失**，下一轮回到 0 冷启动。本仓库取消/顶轮很常见（09-13 一天 4 次）。
+
+**未决**：`dir_cache 装载：N 条`（dd7c045 新增的独立行）要到本轮归档才能看到，
+目前只能确认「第 1 次落盘早于装载」这一事实；装载是否真的生效仍待核对。
+
+**建议修法（未实施，等用户拍板）**：
+
+1. `odlink.py`：`dump_dir_cache()` 在 `_dir_loaded == False` 时**直接跳过落盘**
+   （还没装载过 = 内存里一定不完整，宁可让云端留着上一轮那份）。
+   注意**不能**改成「先调 `_ensure_dir_cache()` 再落盘」——那会在 T+600 就把
+   `_dir_loaded` 置真（当时文件还没恢复），反而把后面的真装载永久挡掉。
+2. `emby.yml` 快照侧加固：拷进 STAGE 前比较条目数，只在新快照 ≥ 已恢复那份时才覆盖。
+
 ## 验证命令（给下一个 AI）
 
 ```bash
