@@ -8,6 +8,18 @@ on:
     # 同时跑会互相抢节点带宽，读数彼此污染。
     - cron: "0 21,1,5,9 * * *"
   workflow_dispatch:
+  # 被 proxy-speedtest-gistnodes 当子流程复用（gist 抓来的节点当订阅源）。
+  # 子流程与定时运行共用同一 job 级 concurrency，所以复用不会和定时轮次并发。
+  workflow_call:
+    inputs:
+      sub_urls:
+        description: '订阅源覆盖（逗号分隔 URL）；留空用仓库 secret PROXY_SPEEDTEST_SUB_URLS'
+        required: false
+        type: string
+      max_nodes:
+        description: '最多测几个节点（0 = 不限）'
+        required: false
+        type: string
 
 jobs:
   speedtest:
@@ -29,9 +41,12 @@ jobs:
         env:
           PROXY_SPEEDTEST_DETACH: '0'
           GITEE_PRIVATE_TOKEN: ${{ secrets.GITEE_PRIVATE_TOKEN }}
-          PROXY_SPEEDTEST_SUB_URLS: ${{ secrets.PROXY_SPEEDTEST_SUB_URLS }}
+          # 订阅源：workflow_call 传入的 sub_urls 优先（gist 抓取编排用），否则走仓库 secret
+          PROXY_SPEEDTEST_SUB_URLS: ${{ inputs.sub_urls || secrets.PROXY_SPEEDTEST_SUB_URLS }}
           PROXY_SPEEDTEST_GITEE_OWNER: ${{ secrets.PROXY_SPEEDTEST_GITEE_OWNER }}
           PROXY_SPEEDTEST_GITEE_REPO: proxy-speedtest-temp
+          # 节点上限：编排按抓取量传入；定时运行不传 = 0 = 不限（与既有行为一致）
+          PROXY_SPEEDTEST_MAX_NODES: ${{ inputs.max_nodes || '0' }}
           PROXY_SPEEDTEST_SIZE_MIB: '10'
           PROXY_SPEEDTEST_PUSH_TIMEOUT: '30'
           PROXY_SPEEDTEST_CLONE_TIMEOUT: '30'

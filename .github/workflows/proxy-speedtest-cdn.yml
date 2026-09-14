@@ -6,6 +6,8 @@ name: proxy-speedtest-cdn
 #                           npmmirror；延迟目标 baidu/taobao）：经代理 HTTP 计时 +
 #                           单连接 curl 下载，生成 HTML 报告 + 达标节点订阅导出 Gist
 #   proxy-speedtest-taier = 测速点泰尔三网（电信/联通/移动）：taierspeedtest + mihomo TUN
+#   proxy-speedtest-gistnodes = 编排层，自己不测速：先从 gist.github.com 抓公开节点交给
+#                            Sub-Store 去重出 mihomo YAML，再按 env/vars 选择上面三套之一来测
 # 本工作流：测量节点延迟 + 下载速度 + 经代理上行速度，生成可交互 HTML 报告。
 # 上行测速复用 speedtest_gitee 的「经 mihomo 代理 git push」方案向 Gitee 私有仓库推送测速文件。
 on:
@@ -15,6 +17,17 @@ on:
     # 全部落在北京时间 05:00–21:00（夜间不测：runner 排队 + 出口拥塞会让读数失真）。
     - cron: "0 22,2,6,10 * * *"
   workflow_dispatch:
+  # 被 proxy-speedtest-gistnodes 当子流程复用（gist 抓来的节点当订阅源）。
+  workflow_call:
+    inputs:
+      sub_urls:
+        description: '订阅源覆盖（逗号分隔 URL）；留空用仓库 secret PROXY_SPEEDTEST_SUB_URLS'
+        required: false
+        type: string
+      max_nodes:
+        description: '最多测几个节点（0 = 不限）'
+        required: false
+        type: string
 
 jobs:
   speedtest:
@@ -35,7 +48,8 @@ jobs:
       - name: Run node speedtest (latency + download + upload)
         env:
           PROXY_SPEEDTEST_DETACH: '0'
-          PROXY_SPEEDTEST_SUB_URLS: ${{ secrets.PROXY_SPEEDTEST_SUB_URLS }}
+          # 订阅源：workflow_call 传入的 sub_urls 优先（gist 抓取编排用），否则走仓库 secret
+          PROXY_SPEEDTEST_SUB_URLS: ${{ inputs.sub_urls || secrets.PROXY_SPEEDTEST_SUB_URLS }}
           # 自定义测试参数（可按需修改）
           PROXY_SPEEDTEST_LATENCY_TARGETS: 'https://www.baidu.com,https://www.taobao.com'
           PROXY_SPEEDTEST_LATENCY_SAMPLES: '4'
@@ -52,7 +66,8 @@ jobs:
           PROXY_SPEEDTEST_SIZE_MIB: '10'
           PROXY_SPEEDTEST_DOWNLOAD_TIMEOUT: '30'
           PROXY_SPEEDTEST_SWITCH_SETTLE_SECONDS: '1.5'
-          PROXY_SPEEDTEST_MAX_NODES: '0'
+          # 节点上限：编排按抓取量传入；定时运行不传 = 0 = 不限（与既有行为一致）
+          PROXY_SPEEDTEST_MAX_NODES: ${{ inputs.max_nodes || '0' }}
           # 上行测速：默认开启，复用 speedtest_gitee 的「经 mihomo 代理 git push」方案，
           # 携带代理环境变量向 Gitee 私有仓库 push 测速文件（反映代理节点上行带宽）。
           # 需先在仓库 Secrets 配置 GITEE_PRIVATE_TOKEN 与 PROXY_SPEEDTEST_GITEE_OWNER，

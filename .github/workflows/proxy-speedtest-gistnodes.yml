@@ -1,0 +1,201 @@
+name: proxy-speedtest-gistnodes
+
+# 从 gist.github.com 抓公开节点订阅 → 临时起一个 Sub-Store 去重并产出 mihomo YAML →
+# 发布到本工作流专属 Gist → 把该 Gist 的 raw URL 当订阅源，交给选定的测速工作流测速。
+#
+# 与三套测速工作流的分工：本工作流自己**不测速**，只做「换一个节点来源」这一件事。
+# 测速、达标筛选、结果订阅上传各自 Gist、Telegram 通知，全部由被复用的那套完成——
+# 所以这里不发通知，否则同一轮会出现两条通知（而通知版式有规范约束，见
+# docs/telegram-notify.md）。抓取情况走 job 摘要与 artifact，不进通知。
+#
+# 引擎选择（环境变量，两者取其一，dispatch 优先）：
+#   仓库 Variable PROXY_SPEEDTEST_ENGINE = taier|gitee|cdn   定时运行的默认值
+#   workflow_dispatch 的 engine 入参                          单次运行的覆盖值
+#   两处都没设 = taier
+#
+# 为什么用 workflow_call 复用而不是 gh workflow run 另起一轮：单轮内串起来跑，
+# 日志/耗时/失败原因都在同一个 run 里；另起一轮还要 PAT 具备 Actions 写权限，
+# 且抓取结果与测速轮次之间会脱钩。
+on:
+  schedule:
+    # 每天 4 次、间隔 5 小时：UTC 21:00, 02:00, 07:00, 12:00 = 北京 05:00, 10:00, 15:00, 20:00。
+    # 与三套测速的定时轮（gitee 京 05/09/13/17、cdn 06/10/14/18、taier 07/11/15/19）
+    # 刻意**不**错开：本工作流自己只抓节点，真正测速交给被复用的那一套，撞上时由被调
+    # job 的 concurrency singleton 排队，不会并发抢带宽。仍只排在北京 05:00–20:00：
+    # 夜间 runner 排队 + 出口拥塞会让测速读数失真。
+    - cron: "0 21,2,7,12 * * *"
+  workflow_dispatch:
+    inputs:
+      engine:
+        description: '用哪套测速：taier（泰尔三网）/ gitee（Gitee 上行下行）/ cdn（国内镜像站）'
+        required: false
+        type: choice
+        default: '(用仓库 Variable)'
+        options:
+          - '(用仓库 Variable)'
+          - 'taier'
+          - 'gitee'
+          - 'cdn'
+      queries:
+        description: '搜索关键词（逗号分隔；留空用脚本默认：ss://,vless://,vmess://,trojan://,hysteria2://,tuic://）'
+        required: false
+        type: string
+      max_nodes:
+        description: '最终订阅保留多少节点（留空 = 300；0 = 不限。下游 mihomo 会按 provider 全量做健康检查，别轻易放开）'
+        required: false
+        type: string
+      test_nodes:
+        description: '交给测速引擎实测多少个节点（留空 = 60；0 = 不限）'
+        required: false
+        type: string
+      max_gists:
+        description: '最多解析多少个 Gist（留空 = 100，名额按关键词均分）'
+        required: false
+        type: string
+      max_age_hours:
+        description: '只要最近多少小时内更新过的 Gist（留空 = 24；0 = 不限）'
+        required: false
+        type: string
+
+concurrency:
+  # 只管住「编排自己」不并发；被复用的测速工作流沿用它们各自的 job 级 singleton。
+  # 不要在这里再加被调工作流的同名 group：官方文档明确警告 caller 与 called 用同一个
+  # group 值会互相影响（cancel-in-progress: true 时会把 caller 取消；false 时 caller
+  # 持着 group 等被调 job、被调 job 又在等同一个 group，互等到超时）。
+  group: proxy-speedtest-gistnodes-singleton
+  cancel-in-progress: false
+
+jobs:
+  fetch-nodes:
+    runs-on: ubuntu-latest
+    # 30 分钟而不是 20：搜索页会 429，重试带退避（5s/10s × 3 次）会把单页拖到十几秒，
+    # 十几页下来搜索阶段本身就可能吃掉好几分钟，再叠加取文与 Sub-Store 解析。
+    timeout-minutes: 30
+    outputs:
+      engine: ${{ steps.engine.outputs.engine }}
+      sub_url: ${{ steps.fetch.outputs.sub_url }}
+      count: ${{ steps.fetch.outputs.count }}
+      parsed_count: ${{ steps.fetch.outputs.parsed_count }}
+      gists_scanned: ${{ steps.fetch.outputs.gists_scanned }}
+      gist_html_url: ${{ steps.fetch.outputs.gist_html_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      - name: Resolve engine
+        id: engine
+        env:
+          # 经 env 传入而不是拼进脚本：Variable 是仓库可写值，拼字符串会被引号破坏语法
+          INPUT_ENGINE: ${{ inputs.engine }}
+          VAR_ENGINE: ${{ vars.PROXY_SPEEDTEST_ENGINE }}
+        run: |
+          set -euo pipefail
+          ENGINE="$INPUT_ENGINE"
+          case "$ENGINE" in
+            ''|'(用仓库 Variable)') ENGINE="$VAR_ENGINE" ;;
+          esac
+          ENGINE="${ENGINE:-taier}"
+          case "$ENGINE" in
+            taier|gitee|cdn) ;;
+            *) echo "::error::未知测速引擎 '$ENGINE'（只支持 taier / gitee / cdn）"; exit 1 ;;
+          esac
+          echo "engine=$ENGINE" >> "$GITHUB_OUTPUT"
+          echo "本次测速引擎：**$ENGINE**" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Start Sub-Store backend
+        # 只跑在本机回环上（-p 127.0.0.1），容器用完即删：不需要隧道、不需要 CORS 白名单、
+        # 也不碰仓库里那套常驻 sub-store（那是给网页端用的，单宿主，会互相抢隧道）。
+        # 端口显式指定：镜像默认没设 SUB_STORE_BACKEND_API_PORT，不指定就得猜。
+        run: |
+          set -euo pipefail
+          docker run -d --name sub-store \
+            -e SUB_STORE_BACKEND_API_PORT=3001 \
+            -e SUB_STORE_BACKEND_API_HOST=0.0.0.0 \
+            -p 127.0.0.1:3001:3001 \
+            xream/sub-store:http-meta
+          for i in $(seq 1 30); do
+            if curl -fsS -o /dev/null http://127.0.0.1:3001/api/subs; then
+              echo "Sub-Store 后端就绪（第 $i 次探测）"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::Sub-Store 后端 60 秒内未就绪"
+          docker logs --tail 80 sub-store || true
+          exit 1
+
+      - name: Fetch nodes and dedupe via Sub-Store
+        id: fetch
+        env:
+          SUB_STORE_BACKEND_URL: http://127.0.0.1:3001
+          # 抓取范围与产出（dispatch 可覆盖；这里的默认值与脚本默认值一致）
+          GIST_NODES_QUERIES: ${{ inputs.queries }}
+          GIST_NODES_MAX_GISTS: ${{ inputs.max_gists || '100' }}
+          GIST_NODES_MAX_AGE_HOURS: ${{ inputs.max_age_hours || '24' }}
+          GIST_NODES_MAX_NODES: ${{ inputs.max_nodes || '300' }}
+          GIST_NODES_WORKDIR: ${{ github.workspace }}/gist-nodes
+          # GitHub API 认证：匿名 60 次/h，一轮要拉上百个 Gist（每个至少一次 API 调用），
+          # 不带 token 会被限流截断
+          GH_TOKEN: ${{ secrets.PAT }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 订阅导出：本工作流专属 Gist（与三套测速结果 Gist 分开，互不覆盖）。
+          # 留空则首次运行自动新建，job 摘要会给链接；拿到 id 后回填此 secret 避免每轮新建
+          PROXY_SPEEDTEST_GIST_ID: ${{ secrets.PROXY_SPEEDTEST_GISTNODES_GIST_ID }}
+          PROXY_SPEEDTEST_GIST_FILENAME: proxy_speedtest_gistnodes_providers.yaml
+          PROXY_SPEEDTEST_GIST_DESCRIPTION: 'proxy speedtest source nodes (gist 搜索 + Sub-Store 去重)'
+        run: python .github/scripts/proxy-speedtest/gist_nodes.py
+
+      - name: Dump Sub-Store log and remove container
+        # always：抓取失败时最需要看的就是 Sub-Store 侧的解析/去重日志
+        if: ${{ always() }}
+        run: |
+          mkdir -p gist-nodes
+          docker logs --tail 200 sub-store > gist-nodes/sub-store.log 2>&1 || true
+          docker rm -f sub-store || true
+
+      - name: Upload node snapshot
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          # 内容含节点凭据，保留期压到 7 天
+          name: gist-nodes-${{ github.run_id }}
+          path: gist-nodes/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # 三个引擎各一个条件 job：GitHub 不支持动态的 uses:，只能写三条并按 engine 选一条。
+  # secrets: inherit 把仓库 secrets 透传给被调工作流（它们内部照旧读自己的 secret）。
+  speedtest-taier:
+    needs: fetch-nodes
+    if: needs.fetch-nodes.outputs.engine == 'taier'
+    uses: ./.github/workflows/proxy-speedtest-taier.yml
+    with:
+      sub_urls: ${{ needs.fetch-nodes.outputs.sub_url }}
+      max_nodes: ${{ inputs.test_nodes || '60' }}
+    secrets: inherit
+
+  speedtest-gitee:
+    needs: fetch-nodes
+    if: needs.fetch-nodes.outputs.engine == 'gitee'
+    uses: ./.github/workflows/proxy-speedtest-gitee.yml
+    with:
+      sub_urls: ${{ needs.fetch-nodes.outputs.sub_url }}
+      max_nodes: ${{ inputs.test_nodes || '60' }}
+    secrets: inherit
+
+  speedtest-cdn:
+    needs: fetch-nodes
+    if: needs.fetch-nodes.outputs.engine == 'cdn'
+    uses: ./.github/workflows/proxy-speedtest-cdn.yml
+    with:
+      sub_urls: ${{ needs.fetch-nodes.outputs.sub_url }}
+      max_nodes: ${{ inputs.test_nodes || '60' }}
+    secrets: inherit
