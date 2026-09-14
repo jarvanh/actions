@@ -74,6 +74,9 @@ tg_add_entry_text() {
 # 批次循环预算闸: 真身在 task_engine.sh 顶层（sed 单函数抽取不含它）。
 # 默认返回 1（不闸，保持既有场景行为），G6 用 BATCH_BUDGET_STOP_RC=0 置"预算将尽"
 _batch_budget_stop() { return "${BATCH_BUDGET_STOP_RC:-1}"; }
+# 在途传输硬上限: 默认空串 = 不套 timeout 包装（与未设预算锚点的生产行为一致），
+# G7 用 BUDGET_SLICE_OVERRIDE 给出秒数，验证包装确实生效
+_budget_slice_seconds() { echo "${BUDGET_SLICE_OVERRIDE:-}"; }
 
 SYNC_WITH_LOGGING_CALLS=0
 sync_with_logging() { SYNC_WITH_LOGGING_CALLS=$((SYNC_WITH_LOGGING_CALLS + 1)); }
@@ -140,6 +143,8 @@ prepare_case() {
   STOP_TR_CALLS=0
   CONSOLIDATE_CALLS=0
   AUTO_SPLIT_INFO=""
+  # 预算耗尽是跨批次持久位（G6 会置 1），不清会污染后续场景（G7 直接零批次）
+  SYNC_TIME_EXHAUSTED=0
   rm -f "$RCLONE_COPY_CALLS_FILE"
   clean_batch_dirs
 }
@@ -225,6 +230,23 @@ chk "G6 预检零调用（批次根本没开）" "$CHECK_CALLS" "0"
 chk "G6 巩固零调用" "$CONSOLIDATE_CALLS" "0"
 chk "G6 仍走最终同步检查（通知不丢）" "$SYNC_WITH_LOGGING_CALLS" "1"
 unset BATCH_BUDGET_STOP_RC
+
+# ---------- G7: 在途批次的硬上限（预算剩余 − 尾部预留）----------
+# 预算闸只拦得住"新开的工作"，拦不住"已在途的传输": batch copy 动辄 1-2h，会一路
+# 跑过 320min 预算，直到 step 的 330min 超时把整轮杀掉（run 34779382573: 批次 1
+# 在只剩 2h3m 时开启、自身跑 2h14m 仍未完成）。这里断言它确实被套上 timeout。
+CHECK_FAIL_FROM_OVERRIDE=99999
+prepare_case
+BUDGET_SLICE_OVERRIDE=120
+# 只为让 `${_b_to} rclone ...` 里的 timeout 能驱动 mock rclone（真 timeout 是外部
+# 二进制，无法执行 shell 函数）；场景内单独定义，避免影响 G1-G6 的既有行为
+timeout() { shift; "$@"; }
+G7_OUT=$(sync_by_file_batches "/src" "openlist:crypt" "t_g7" 2>&1 || true)
+unset -f timeout
+chk "G7 三批照常传输（包装不改变流程）" "$(copy_count)" "3"
+chk "G7 每批 copy 都套上预算内硬上限" \
+  "$(echo "$G7_OUT" | grep -c '本轮剩余预算内最多传输 120s' || true)" "3"
+unset BUDGET_SLICE_OVERRIDE
 
 clean_batch_dirs
 echo ""

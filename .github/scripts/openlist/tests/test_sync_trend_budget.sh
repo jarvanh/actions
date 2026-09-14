@@ -65,15 +65,26 @@ if sync_budget_stop 2>/dev/null; then ok "预算: 耗尽→停止"; else bad "�
 OPENLIST_SYNC_DEADLINE_EPOCH=$(( $(date +%s) + 7200 ))
 if sync_budget_stop 2>/dev/null; then bad "预算: 充足却停止"; else ok "预算: 充足→不停止"; fi
 
-# --- 1b. _batch_budget_stop 三态（批次循环专用闸，工作片 60min 远大于全局 600s）---
-# 一批 = copy + 巩固 + 修复管线 ≈ 1h+，用全局最小片判会在只剩十几分钟时照开新批
-# → 320min 优雅到站永不到来，全部被 timeout-minutes: 330 硬杀（近几轮 failure 实锤）
+# --- 1b. _batch_budget_stop 三态（批次循环专用闸，工作片 120min 远大于全局 600s）---
+# 一批 = copy + 巩固 + 修复管线；实测 wopan175 上 3178 个文件跑 2h14m 仍未完成
+# （run 34779382573 在只剩 2h3m 时开批 → 又撞 330min 硬杀），故片长取 2h
 unset OPENLIST_SYNC_DEADLINE_EPOCH
 if _batch_budget_stop 2>/dev/null; then bad "批次预算: 未设锚点不应停止"; else ok "批次预算: 未设锚点→不停止"; fi
-OPENLIST_SYNC_DEADLINE_EPOCH=$(( $(date +%s) + 7200 ))   # 剩 2h > 60min 片 → 可开批
-if _batch_budget_stop 2>/dev/null; then bad "批次预算: 充足却停止"; else ok "批次预算: 剩 2h→仍可开批"; fi
-OPENLIST_SYNC_DEADLINE_EPOCH=$(( $(date +%s) + 1800 ))   # 剩 30min < 60min 片 → 停
-if _batch_budget_stop 2>/dev/null; then ok "批次预算: 剩 30min→不再开新批"; else bad "批次预算: 剩余不足一片却仍开批"; fi
+OPENLIST_SYNC_DEADLINE_EPOCH=$(( $(date +%s) + 10800 ))  # 剩 3h > 2h 片 → 可开批
+if _batch_budget_stop 2>/dev/null; then bad "批次预算: 充足却停止"; else ok "批次预算: 剩 3h→仍可开批"; fi
+OPENLIST_SYNC_DEADLINE_EPOCH=$(( $(date +%s) + 5400 ))   # 剩 90min < 2h 片 → 停
+if _batch_budget_stop 2>/dev/null; then ok "批次预算: 剩 90min→不再开新批"; else bad "批次预算: 剩余不足一片却仍开批"; fi
+
+# --- 1c. _budget_slice_seconds 三态（在途传输的硬上限 = 剩余预算 − 尾部预留）---
+unset OPENLIST_SYNC_DEADLINE_EPOCH
+[ -z "$(_budget_slice_seconds)" ] && ok "传输上限: 无预算锚点→空（不加 timeout 包装）" || bad "传输上限: 无锚点却给值"
+OPENLIST_SYNC_DEADLINE_EPOCH=$(( $(date +%s) + 7200 ))
+_v=$(_budget_slice_seconds 2700)
+[ "$_v" -gt 4200 ] && [ "$_v" -le 4500 ] && ok "传输上限: 剩 2h − 45min 预留 ≈ 75min" || bad "传输上限: 期望≈4500 实得 ${_v:-空}"
+OPENLIST_SYNC_DEADLINE_EPOCH=$(( $(date +%s) + 100 ))
+_v=$(_budget_slice_seconds 2700)
+[ "$_v" = "60" ] && ok "传输上限: 已过点→兜底 60s（不出现 0/负）" || bad "传输上限: 期望60实得 ${_v:-空}"
+unset OPENLIST_SYNC_DEADLINE_EPOCH
 
 # --- 2. trend_record_transferred ---
 rm -f /tmp/ol_trend_transferred.log
