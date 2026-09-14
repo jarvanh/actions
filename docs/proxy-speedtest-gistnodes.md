@@ -193,7 +193,7 @@ Gist 分工：`gitee` / `cdn` / `taier` 三套各自的 Gist 只装**它们定�
 | `GIST_NODES_PAGE_DELAY` | `3` | 搜索页翻页的**基础**间隔（秒，另加 0–1 秒随机抖动；`0` = 不间隔） |
 | `GIST_NODES_PACING_CEILING` | `60` | 被限流时间隔自动拉长的上限（秒） |
 | `GIST_NODES_WORKERS` | `8` | 并发取 Gist 的线程数 |
-| `SUB_STORE_BACKEND_URL` | `http://127.0.0.1:3001` | Sub-Store 后端地址 |
+| `SUB_STORE_BACKEND_URL` | `http://127.0.0.1:3000` | Sub-Store **后端 API** 地址。是 **3000** 不是 3001：镜像 `xream/sub-store:http-meta` 的默认布局是「后端 3000 / 前端 http-meta 3001」，指到 3001 会打到前端上并拿到 Express 的 404 `Cannot GET /api/subs` |
 | `SUB_STORE_TIMEOUT` | `300` | **单次**调用 Sub-Store 的超时（秒）。**刻意保持不动**：没有真实的 Sub-Store 分段耗时，压小它只会误杀「合法但慢」的取回；这一段的总时长由下面那行负责 |
 | `SUB_STORE_BUDGET_SECONDS` | `300` | 整个 Sub-Store 阶段的**墙钟预算**（秒，`0` = 不限）。一半给投喂、一半留给产出 |
 | `SUB_STORE_COLLECTION` | `gist-nodes` | 组合订阅名前缀 |
@@ -238,7 +238,8 @@ Sub-Store 产出与发布。为什么必须把这两者分开：job 超时是 Gi
 | 节点数比预期少 | 先看 `non_sub_files`（判据挡掉了多少）与 `over_quota`（配额挡掉了多少），再看限量 |
 | 候选 Gist 太少 | 看 `gist_nodes_search_age_filtered`（时间窗口挡掉多少）与 `gist_nodes_search_stale_stop`（哪个关键词翻到整页超龄）。窗口设太窄时前几页就被判超龄 |
 | Sub-Store 侧到底做了什么 | artifact `gist-nodes-<run_id>/sub-store.log`（容器日志尾巴 200 行）与 `nodes.json`（含处理链、计数） |
-| 容器起不来 | 该步骤会直接 `docker logs` 打出来；镜像 `xream/sub-store:http-meta`，端口显式指定 3001（镜像默认没设该 env） |
+| 容器起不来 | 该步骤会直接 `docker ps -a` / `docker port` / `docker logs` 打出来。镜像 `xream/sub-store:http-meta` 的默认布局是「后端 3000 / 前端 http-meta 3001」，我们只发布后端 3000、**不设** `SUB_STORE_BACKEND_API_PORT`/`_HOST`（设成 3001 会让后端去抢前端已占的端口，`EADDRINUSE` 起来就死） |
+| 就绪探测失败（`HTTP 000` 或非 200） | 探测要求 `GET /api/subs` **恰好 200**，判据与脚本一致（早先用 `curl -fsS`，302 也算通过 ⇒ 探测绿了脚本红）。`000` = 连不上（容器没起来），`404` = 端口指到了前端 |
 
 ## 自检
 

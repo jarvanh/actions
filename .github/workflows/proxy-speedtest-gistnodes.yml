@@ -124,25 +124,37 @@ jobs:
         # 只跑在本机回环上（-p 127.0.0.1），容器用完即删：不需要隧道、不需要 CORS 白名单、
         # 也不碰仓库里那套常驻 sub-store（那是给网页端用的，单宿主，会互相抢隧道）。
         #
-        # **不要设 SUB_STORE_BACKEND_API_PORT / _HOST**：实测设了会让容器里的 http-meta
-        # 和后端抢同一个端口 —— 日志是「HTTP-META is running...」之后紧接
-        # `listen EADDRINUSE: address already in use 0.0.0.0:3001`，后端起来就死，
-        # 于是探测循环空转 60 秒（本工作流首次运行就栽在这）。
-        # 镜像自带默认值（后端 3001、http-meta 9876），仓库里常驻那套 sub-store.yml
-        # 就是不设这两个变量跑通的，照抄它的写法即可。
+        # **只暴露后端 API 的 3000**。镜像 `xream/sub-store:http-meta` 的默认布局是
+        # 「后端 3000 / 前端 http-meta 3001」，容器启动日志写得很清楚：
+        #   [BACKEND] listening on :::3000
+        #   [FRONTEND] :::3001
+        # 我们只用后端，前端不必发布到宿主上。
+        #
+        # **不要设 SUB_STORE_BACKEND_API_PORT / _HOST**：后端默认已是 3000 且绑在 `::` 上，
+        # 不需要覆盖；而设成 3001 会让它去抢前端已经占着的 3001 —— 日志是
+        # 「HTTP-META is running...」之后紧接 `listen EADDRINUSE: address already in use
+        # 0.0.0.0:3001`，后端起来就死（本工作流首次运行就栽在这；当时以为「镜像没默认端口
+        # env」，其实默认有，只是把号记反了）。
         run: |
           set -euo pipefail
           docker run -d --name sub-store \
-            -p 127.0.0.1:3001:3001 \
+            -p 127.0.0.1:3000:3000 \
             xream/sub-store:http-meta
+          # 探测判据必须**与消费者一致**：脚本的就绪探活要求恰好 200（gist_nodes.py 里
+          # `GET /api/subs` 只要 status != 200 就直接失败）。早先这里用 `curl -fsS`，而 `-f`
+          # 只对 ≥400 报错、302 一律算「就绪」⇒ 探测绿了、脚本红了，白烧一轮
+          # （2026-09-14 run 34831792493：探测第 2 次通过，5 分钟后脚本拿到 404）。
+          code=000
           for i in $(seq 1 30); do
-            if curl -fsS -o /dev/null http://127.0.0.1:3001/api/subs; then
-              echo "Sub-Store 后端就绪（第 $i 次探测）"
+            code=$(curl -s -o /dev/null -w '%{http_code}' \
+                     http://127.0.0.1:3000/api/subs 2>/dev/null || true)
+            if [ "$code" = "200" ]; then
+              echo "Sub-Store 后端就绪（第 $i 次探测，HTTP $code）"
               exit 0
             fi
             sleep 2
           done
-          echo "::error::Sub-Store 后端 60 秒内未就绪"
+          echo "::error::Sub-Store 后端 60 秒内未就绪（最后一次 GET /api/subs → HTTP $code）"
           # 失败时把容器状态与端口映射一并打出来：只看日志分不清「没起来」和「起来了但
           # 端口不对」（首次运行就吃了这个亏 —— 日志里有 EADDRINUSE，却看不出谁占了端口）
           docker ps -a --filter name=sub-store || true
@@ -153,7 +165,7 @@ jobs:
       - name: Fetch nodes and dedupe via Sub-Store
         id: fetch
         env:
-          SUB_STORE_BACKEND_URL: http://127.0.0.1:3001
+          SUB_STORE_BACKEND_URL: http://127.0.0.1:3000
           # 抓取范围与产出（dispatch 可覆盖；这里的默认值与脚本默认值一致）
           GIST_NODES_QUERIES: ${{ inputs.queries }}
           GIST_NODES_TARGET_SUBS: ${{ inputs.target_subs || '100' }}

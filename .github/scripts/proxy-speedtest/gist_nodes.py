@@ -64,7 +64,9 @@ Sub-Store 接口（读 backend/src/restful/*.js 得到，全部是无需鉴权�
   GIST_NODES_WORKERS       并发取 Gist 的线程数（默认 8，1 = 串行）
   GIST_NODES_DRY_RUN       1 = 只抓取不发布（本地验证用）
   GIST_NODES_WORKDIR       产物目录（默认 ~/proxy-speedtest/gist-nodes）
-  SUB_STORE_BACKEND_URL    Sub-Store 后端地址（默认 http://127.0.0.1:3001）
+  SUB_STORE_BACKEND_URL    Sub-Store **后端 API** 地址（默认 http://127.0.0.1:3000）。
+                           注意是 3000：镜像是「后端 3000 / 前端 3001」，指到 3001 会
+                           打到前端上并得到 404，详见 DEFAULT_SUB_STORE 处的注释
   SUB_STORE_TIMEOUT        单次调用 Sub-Store 的超时秒数（默认 300，全量解析 + 去重耗时
                            较长）。**刻意保持不动**：我们没有真实的 Sub-Store 分段耗时，
                            压小它只会误杀「合法但慢」的取回；「这一段最多能拖多久」由
@@ -120,7 +122,12 @@ SEARCH_URL = 'https://gist.github.com/search'
 GIST_API = 'https://api.github.com/gists/{gist_id}'
 
 DEFAULT_QUERIES = 'ss://,vless://,vmess://,trojan://,hysteria2://,tuic://'
-DEFAULT_SUB_STORE = 'http://127.0.0.1:3001'
+# Sub-Store **后端 API** 的地址，3000 而不是 3001。镜像 `xream/sub-store:http-meta` 的默认
+# 布局是「后端 3000 / 前端 http-meta 3001」（容器启动日志：`[BACKEND] listening on :::3000`
+# + `[FRONTEND] :::3001`）。指到 3001 等于打到前端上，`GET /api/subs` 会拿到 Express 的
+# 404 `Cannot GET /api/subs` —— 2026-09-14 run 34831792493 就栽在这（那是抓取段收口修好
+# 之后，这条链路**第一次**真正走到 Sub-Store 段）。
+DEFAULT_SUB_STORE = 'http://127.0.0.1:3000'
 # 单次调用超时。**刻意保持 300 不动**：我们没有任何一次真实的 Sub-Store 分段耗时
 # （这条链路至今没跑完整过），压小它只是把「合法但慢」的取回误杀成失败，而「一次调用
 # 最多能拖多久」这个上界已经由下面的阶段预算兜住了。留着大值反而更好：取回的解析工作
