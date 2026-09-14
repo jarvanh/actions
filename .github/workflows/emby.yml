@@ -2269,9 +2269,10 @@ jobs:
           chmod +x /opt/emby_incbak.sh
           nohup bash /opt/emby_incbak.sh loop > /opt/logs/incbackup.log 2>&1 &
           # ---- 轻观测通道：小状态文件每 10 分钟上云（KB 级），与 25 分钟核心备份解耦 ----
-          # 让"回填进度 / 起播读数"最迟 10 分钟可查，而不是等核心快照。目标路径与核心
-          # 快照相同（live/ 下同名覆盖），读取入口不变。playlog 先截断到 512KB（只留
-          # 最近十几轮播放读数），文件尺寸恒定；odwarm-status.txt 本身只有十几行。
+          # 让"回填进度 / 起播读数 / 海报补回结果"最迟 10 分钟可查，而不是等核心快照。
+          # 目标路径与核心快照相同（live/ 下同名覆盖），读取入口不变。playlog 截断到
+          # 512KB、img-restore 截断到 4KB（只留最近的，尺寸恒定）；odwarm-status.txt
+          # 本身只有十几行。
           cat > /opt/emby_status_sync.sh <<'SS_EOF'
           #!/bin/bash
           # 轻观测通道。任何失败只记日志，绝不影响备份与播放。
@@ -2283,6 +2284,9 @@ jobs:
             rm -rf "$T" && mkdir -p "$T"
             [ -f /opt/logs/playlog.log ] && tail -c 524288 /opt/logs/playlog.log > "$T/playlog.log" || true
             [ -f /tmp/odwarm-status.txt ] && cp /tmp/odwarm-status.txt "$T/odwarm-status.txt" || true
+            # 海报原图后台补回的结果：补没补成功只有这里能看到（它不进核心快照，
+            # 失败也不影响播放），顺手带上云，最迟 10 分钟可查
+            [ -f /opt/logs/img-restore.log ] && tail -c 4096 /opt/logs/img-restore.log > "$T/img-restore.log" || true
             if rclone copy "$T" "$DEST" --fast-list --low-level-retries 10 \
                  >> /opt/logs/status-sync.log 2>&1; then
               echo "$(date '+%F %T') 状态上云完成"
