@@ -593,18 +593,20 @@ class Resolver(object):
     def download_url(self, drive, item_id, cache_key):
         """取预授权直链。不带 $select 取完整对象，确保含 @microsoft.graph.downloadUrl。
 
-        返回 (url, size, modified)；失败时 url 为空串。
+        返回 (url, size, modified, from_cache)；失败时 url 为空串、from_cache=False。
+        from_cache 供通知/日志区分「缓存命中（等于没花时间）」与「冷解析（真花
+        了这段时间）」——这是起播归因里判断那 0.4~1.3 秒值不值得优化的唯一依据。
         """
         now = time.time()
         with self._lock:
             hit = self.link_cache.get(cache_key)
         if hit and hit[2] > now:
-            return hit[0], hit[1], hit[3]
+            return hit[0], hit[1], hit[3], True
 
         st, body, err = self.graph.req("%s/drives/%s/items/%s" % (GRAPH, enc(drive), enc(item_id)))
         if st != 200 or not body:
             log("取直链失败 http=%s err=%s" % (st, err))
-            return "", 0, FALLBACK_TIME
+            return "", 0, FALLBACK_TIME, False
         url = body.get("@microsoft.graph.downloadUrl") or \
             (body.get("content") or {}).get("downloadUrl") or ""
         size = body.get("size", 0)
@@ -612,7 +614,7 @@ class Resolver(object):
         if url:
             with self._lock:
                 self.link_cache[cache_key] = (url, size, now + LINK_TTL, modified)
-        return url, size, modified
+        return url, size, modified, False
 
     def list_children(self, drive, item_id, cache_prefix=None):
         """列目录。cache_prefix 给定时把子条目回填 dir_cache——列过的目录，
@@ -825,7 +827,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         key = "/".join(segments)
-        url, size, modified = res.download_url(drive, item_id, key)
+        url, size, modified, from_cache = res.download_url(drive, item_id, key)
         res.bump("get")
         if not url:
             # 取链失败同样失效条目：坐标可能已过期（跨 run 缓存的主要风险）
@@ -841,15 +843,19 @@ class Handler(BaseHTTPRequestHandler):
         # 不进 workflow 日志；TG 侧为私密 chat）
         try:
             with open(LAST_LINK_FILE, "w", encoding="utf-8") as f:
+                # cached 供 playlog 在通知里标「缓存命中 / 冷解析」：它按 ts 判断
+                # 新鲜度（60 秒内才算本次播放），所以这里必须带上真实时间戳
                 json.dump({"name": name, "url": url, "host": host,
-                           "size": size, "ts": time.time()}, f)
+                           "size": size, "ts": time.time(),
+                           "cached": bool(from_cache)}, f)
         except Exception:
             pass
         self._send(200, openlist_ok({
             "name": name, "size": size, "is_dir": False, "modified": modified,
             "raw_url": url, "provider": "OneDrive"}))
-        log("get 文件 段数=%d 跨盘=%d 直链 host=%s 长度=%d" % (
-            len(segments), crossed, host, len(url)))
+        log("get 文件 段数=%d 跨盘=%d 直链 host=%s 长度=%d 命中=%s" % (
+            len(segments), crossed, host, len(url),
+            "缓存" if from_cache else "新取"))
 
 
 class Server(ThreadingHTTPServer):
