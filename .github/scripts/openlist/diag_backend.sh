@@ -440,6 +440,35 @@ done
 say "吞吐阶梯（6×1MiB）:${THRU_RESULT}"
 rclone purge "$THRU_DIR" --retries 1 --timeout "$PROBE_TIMEOUT" >/dev/null 2>&1 || true
 
+# 跨后端独立性（决定"并行同步对"这个提速手段成不成立）:
+#   两个**不同挂载**同时各跑一条 transfers=4 的流。
+#   · 各自速率与单跑时相当（≈1.00 MiB/s）⇒ 两个后端的上限**互相独立**，
+#     并行同步对可以直接叠加速度（这是它的全部依据）；
+#   · 各自速率腰斩（≈0.5 MiB/s）⇒ 两个挂载共享同一个账号/总带宽上限
+#     （wopan175 与 wopan176 很可能是同一账号），并行无益。
+if [ -n "${DIAG_TARGET2:-}" ]; then
+  say "跨后端并发: ${TARGET} 与 ${DIAG_TARGET2} 各跑一条 transfers=4（各 6 MiB）..."
+  _t2dir="$TARGET/oldiag_thru2_$(date +%s)_$$"
+  _t2dir_b="$DIAG_TARGET2/oldiag_thru2_$(date +%s)_$$"
+  _ct0=$(date +%s)
+  rclone copy "$THRU_SRC" "$_t2dir/c_a" --transfers 4 --checkers 8 --stats-one-line \
+    --contimeout 20s --timeout "$PROBE_TIMEOUT" > /tmp/ol_diag/thru2a.log 2>&1 &
+  _cpa=$!
+  rclone copy "$THRU_SRC" "$_t2dir_b/c_b" --transfers 4 --checkers 8 --stats-one-line \
+    --contimeout 20s --timeout "$PROBE_TIMEOUT" > /tmp/ol_diag/thru2b.log 2>&1 &
+  _cpb=$!
+  wait "$_cpa"; _rca=$?
+  wait "$_cpb"; _rcb=$?
+  _cdt=$(( $(date +%s) - _ct0 ))
+  [ "$_cdt" -le 0 ] && _cdt=1
+  _each=$(awk "BEGIN{printf \"%.2f\", 6/${_cdt}}")
+  _sum=$(awk "BEGIN{printf \"%.2f\", 12/${_cdt}}")
+  say "跨后端并发: 各 ${_each} MiB/s · 合计 ${_sum} MiB/s（${_cdt}s，rc=${_rca}/${_rcb}）"
+  say "  判读: 各 ≈1.00 ⇒ 两后端上限独立（并行有效）；各 ≈0.5 ⇒ 共享上限（并行无益）"
+  rclone purge "$_t2dir" --retries 1 --timeout "$PROBE_TIMEOUT" >/dev/null 2>&1 || true
+  rclone purge "$_t2dir_b" --retries 1 --timeout "$PROBE_TIMEOUT" >/dev/null 2>&1 || true
+fi
+
 # ────────────────────────────────────────────────────────────
 sec "11 · 重启后立即写探针（复现生产的「重启 → 预检 → 405」序列）"
 # 为什么补这一组（2026-09-14 生产取证驱动）:
