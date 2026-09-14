@@ -10,7 +10,7 @@
 #   2. mark → 落盘含 dead_at；重新 load 命中
 #   3. TTL 过期 → 不再命中（死后端自动重新参战）
 #   4. run_all_tasks 跳过判死后端的同步对，健康的照常执行
-#   5. 判死后端会随 SYNC_BACKEND_DEAD=1 自动标记（跨轮生效）
+#   5. 判死后端会随 SYNC_BACKEND_DEAD=1 自动标记（跨轮生效 + 同轮即让路）
 #   6. 全线皆死 → 忽略熔断记录并告警（宁可重试死后端，不可全线停摆）
 set -u
 PASS=0; FAIL=0
@@ -95,16 +95,26 @@ run_all_tasks >/dev/null 2>&1
   && ok "4a wopan176Crypt 两对被跳过，只执行 baidupanCrypt 的 p1" \
   || bad "4a: 执行序列 [${EXEC_LOG[*]}]"
 
-# --- 5. 本轮判死 → 自动落盘供下轮跳过 ---
+# --- 5. 本轮判死 → 自动落盘供下轮跳过 + 同轮即让路 ---
 reset_case
 # 生产形态: 后端判死的同步对同时以 SYNC_FAILED=1 收场（先失败再让路）
 FAKE_DEAD_MAP["p0"]=1
 FAKE_FAIL_MAP["p0"]=1
-run_all_tasks >/dev/null 2>&1
+run_all_tasks > "$WORK/same_round.log" 2>&1
 [ -s "$WORK/backend_dead.json" ] \
   && ok "5a 本轮判死 → 写入 backend_dead.json" || bad "5a: 未落盘"
 [ -n "$(jq -r '.["openlist:wopan176Crypt"].dead_at // empty' "$WORK/backend_dead.json" 2>/dev/null)" ] \
   && ok "5b 落盘记录的是该同步对的后端挂载根" || bad "5b: 根不正确"
+# 5c/5d 同轮传播: _backend_dead_mark 在写文件之前先把 root 记进内存熔断表
+# （task_engine.sh 的 _BACKEND_DEAD_ROUND["$root"]="$now"），所以同一轮里排在
+# 该后端后面的 p2 必须**当场**被跳过，不能等下轮才让路。
+# 为什么单列这一条: 退出标准 D（非 wopan176 的同步对开始被执行）正是靠这条性质
+# 在同一轮成立——只看 5a/5b 的落盘断言，把内存那行删掉测试照样全绿（假通过）。
+[ "${#EXEC_LOG[@]}" -eq 2 ] && [ "${EXEC_LOG[0]}" = "p0" ] && [ "${EXEC_LOG[1]}" = "p1" ] \
+  && ok "5c 同轮传播: p0 判死后 p2（同后端）当场被跳过，只跑 p0 p1" \
+  || bad "5c: 执行序列 [${EXEC_LOG[*]}]"
+grep -q "跳过让路" "$WORK/same_round.log" \
+  && ok "5d 同轮跳过有「跳过让路」提示" || bad "5d: 无跳过提示"
 
 # --- 6. 全线皆死 → 忽略熔断记录照常执行 ---
 reset_case
