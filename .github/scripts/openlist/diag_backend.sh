@@ -451,23 +451,57 @@ if [ -n "${DIAG_TARGET2:-}" ]; then
   _t2dir="$TARGET/oldiag_thru2_$(date +%s)_$$"
   _t2dir_b="$DIAG_TARGET2/oldiag_thru2_$(date +%s)_$$"
   _ct0=$(date +%s)
-  rclone copy "$THRU_SRC" "$_t2dir/c_a" --transfers 4 --checkers 8 --stats-one-line \
-    --contimeout 20s --timeout "$PROBE_TIMEOUT" > /tmp/ol_diag/thru2a.log 2>&1 &
+  # 每条流各自计时（此前用"总耗时"给两条流算速率，快的那条被慢的拖低，
+  # 会把"独立"误判成"共享"——2026-09-14 首测踩到，故改为各写各的 elapsed）
+  (
+    _s0=$(date +%s)
+    rclone copy "$THRU_SRC" "$_t2dir/c_a" --transfers 4 --checkers 8 --stats-one-line \
+      --contimeout 20s --timeout "$PROBE_TIMEOUT" > /tmp/ol_diag/thru2a.log 2>&1; _ra=$?
+    echo "$(( $(date +%s) - _s0 )) $_ra" > /tmp/ol_diag/thru2a.elapsed
+  ) &
   _cpa=$!
-  rclone copy "$THRU_SRC" "$_t2dir_b/c_b" --transfers 4 --checkers 8 --stats-one-line \
-    --contimeout 20s --timeout "$PROBE_TIMEOUT" > /tmp/ol_diag/thru2b.log 2>&1 &
+  (
+    _s0=$(date +%s)
+    rclone copy "$THRU_SRC" "$_t2dir_b/c_b" --transfers 4 --checkers 8 --stats-one-line \
+      --contimeout 20s --timeout "$PROBE_TIMEOUT" > /tmp/ol_diag/thru2b.log 2>&1; _rb=$?
+    echo "$(( $(date +%s) - _s0 )) $_rb" > /tmp/ol_diag/thru2b.elapsed
+  ) &
   _cpb=$!
-  wait "$_cpa"; _rca=$?
-  wait "$_cpb"; _rcb=$?
+  wait "$_cpa" || true
+  wait "$_cpb" || true
   _cdt=$(( $(date +%s) - _ct0 ))
   [ "$_cdt" -le 0 ] && _cdt=1
-  _each=$(awk "BEGIN{printf \"%.2f\", 6/${_cdt}}")
+  _ea=$(awk '{print $1}' /tmp/ol_diag/thru2a.elapsed 2>/dev/null || echo 1)
+  _eb=$(awk '{print $1}' /tmp/ol_diag/thru2b.elapsed 2>/dev/null || echo 1)
+  [[ "$_ea" =~ ^[0-9]+$ ]] && [ "$_ea" -gt 0 ] || _ea=1
+  [[ "$_eb" =~ ^[0-9]+$ ]] && [ "$_eb" -gt 0 ] || _eb=1
+  _ra=$(awk '{print $2}' /tmp/ol_diag/thru2a.elapsed 2>/dev/null || echo 0)
+  _rb=$(awk '{print $2}' /tmp/ol_diag/thru2b.elapsed 2>/dev/null || echo 0)
+  _rate_a=$(awk "BEGIN{printf \"%.2f\", 6/${_ea}}")
+  _rate_b=$(awk "BEGIN{printf \"%.2f\", 6/${_eb}}")
   _sum=$(awk "BEGIN{printf \"%.2f\", 12/${_cdt}}")
-  say "跨后端并发: 各 ${_each} MiB/s · 合计 ${_sum} MiB/s（${_cdt}s，rc=${_rca}/${_rcb}）"
-  say "  判读: 各 ≈1.00 ⇒ 两后端上限独立（并行有效）；各 ≈0.5 ⇒ 共享上限（并行无益）"
+  say "跨后端并发: A(${TARGET##*/})=${_rate_a} MiB/s(${_ea}s,rc=${_ra}) · B(${DIAG_TARGET2##*/})=${_rate_b} MiB/s(${_eb}s,rc=${_rb}) · 合计 ${_sum} MiB/s(${_cdt}s)"
+  say "  判读: 合计 ≈ 单流独占（0.86）⇒ 跨后端无增益；合计 < 单流 ⇒ 共享瓶颈（并行有害）"
   rclone purge "$_t2dir" --retries 1 --timeout "$PROBE_TIMEOUT" >/dev/null 2>&1 || true
   rclone purge "$_t2dir_b" --retries 1 --timeout "$PROBE_TIMEOUT" >/dev/null 2>&1 || true
 fi
+
+# 出口带宽基准（把同样的 6 MiB 传到中立端点）: 用来区分瓶颈在下游后端还是在
+# **runner 的出口/国际路由**。这一条决定"提速还有没有别的路"：
+#   · 中立端点也慢（≈1 MiB/s 量级）⇒ 出口/路由才是天花板，改管线无用，
+#     有效手段是换 runner 区域、走代理、或用自建 runner（用户有 RDP/Tailscale 那台）
+#   · 中立端点很快（≫1 MiB/s）⇒ 瓶颈在目标后端，只能靠多后端/错峰
+EGRESS_RESULT="SKIPPED"
+if command -v curl >/dev/null 2>&1 && [ -s /tmp/ol_diag/thru/t01.bin ]; then
+  _cf=$(curl -s -o /dev/null -w '%{speed_upload}' --max-time 90 \
+    -F 'file=@/tmp/ol_diag/thru/t01.bin' https://speed.cloudflare.com/__up 2>/dev/null || true)
+  if [ -n "$_cf" ] && [ "$_cf" != "0" ]; then
+    EGRESS_RESULT="$(awk "BEGIN{printf \"%.2f\", ${_cf}/1048576}") MiB/s"
+  else
+    EGRESS_RESULT="取不到（端点不可达或被限）"
+  fi
+fi
+say "出口带宽基准（Cloudflare speedtest 上传 1MiB）: $EGRESS_RESULT"
 
 # ────────────────────────────────────────────────────────────
 sec "11 · 重启后立即写探针（复现生产的「重启 → 预检 → 405」序列）"
@@ -512,6 +546,7 @@ say "字符集阶梯:  ${CHARSET_R:-SKIPPED}"
 say "路径深度阶梯: ${DEEP_R:-SKIPPED}"
 say "重启后写入:   ${RST_RESULT:-SKIPPED}"
 say "吞吐阶梯:${THRU_RESULT:-SKIPPED}"
+say "出口带宽基准: ${EGRESS_RESULT:-SKIPPED}"
 say "持续写:   $BURST_RESULT"
 say "并发写:   ${CONC_RESULT:-SKIPPED}（transfers=4，三态见上）"
 say "容器日志 8005 命中: $(count_of '8005|rsp_code|rep_desc' "$CONTAINER_LOG") 行"
