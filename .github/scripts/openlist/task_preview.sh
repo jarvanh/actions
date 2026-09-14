@@ -64,6 +64,46 @@ declare -A PREVIEW_PENDING_MAP
 # 用法: _get_source_size_with_excludes <source_path> [原始 extra_args...]
 #   （可含 --delete-* 等非过滤参数，内部会剥离，仅保留过滤口径）
 # 返回: "bytes count"
+# ===== 跨轮源端大小缓存（仅注册模式用）=====
+# 背景（run 34826097133 实测）: skip_preview=true 后，"仅注册"阶段仍要对全部 16 对的
+#   源端做一次全量递归列举（算"源端 X GB"给进度面板），实测 **31min/轮**——
+#   大源（925GiB）单次 7-9min，占轮次 ~10%。
+# 而源端大小变化缓慢（同步的是源端快照 + 少量新增），TTL 内直接用上一轮的值即可。
+# 只缓存「bytes/count」**不缓存逐文件清单**: skip_preview=false 的预览 diff 需要
+#   逐文件清单，那份必须现场拉（缓存过期清单会造成待同步量错算，风险不对称）。
+OPENLIST_SRC_SIZE_TTL="${OPENLIST_SRC_SIZE_TTL:-86400}"   # 24h
+_src_size_cache_file() { echo "${SYNC_STATE_DIR}/src_size_cache.json"; }
+
+_src_size_cache_get() {
+  [ -n "${SYNC_STATE_DIR:-}" ] || return 1
+  local _key="$1" _f _hash _now
+  _f=$(_src_size_cache_file)
+  _hash=$(printf '%s' "$_key" | md5sum | cut -c1-12)
+  _now=$(date +%s)
+  rclone cat "$_f" 2>/dev/null | jq -r --arg k "$_hash" --argjson now "$_now" \
+    --argjson ttl "$OPENLIST_SRC_SIZE_TTL" \
+    '.[$k] as $e | select($e != null) | select((($e.ts // 0) + $ttl) > $now) |
+     "\($e.bytes) \($e.count)"' 2>/dev/null
+}
+
+_src_size_cache_put() {
+  [ -n "${SYNC_STATE_DIR:-}" ] || return 1
+  local _key="$1" _listing="$2" _f _hash _bytes _count _merged
+  _f=$(_src_size_cache_file)
+  _hash=$(printf '%s' "$_key" | md5sum | cut -c1-12)
+  _bytes=$(printf '%s' "$_listing" | jq -r '(map(.Size // 0) | add // 0)' 2>/dev/null || echo 0)
+  _count=$(printf '%s' "$_listing" | jq -r 'length' 2>/dev/null || echo 0)
+  [[ "$_bytes" =~ ^[0-9]+$ ]] || return 1
+  local _old
+  _old=$(rclone cat "$_f" 2>/dev/null || echo '{}')
+  echo "$_old" | jq -e 'type == "object"' >/dev/null 2>&1 || _old='{}'
+  _merged=$(printf '%s' "$_old" | jq -c --arg k "$_hash" --arg key "$_key" \
+    --argjson b "$_bytes" --argjson c "$_count" --arg ts "$(date +%s)" \
+    '. + {($k): {key:$key, bytes:$b, count:$c, ts:($ts|tonumber)}}' 2>/dev/null) || return 1
+  [ -n "$_merged" ] && _marker_write "$_merged" "$(_src_size_cache_file)" >/dev/null 2>&1 || true
+  return 0
+}
+
 _get_source_size_with_excludes() {
   local source_path="$1"
   shift
@@ -73,10 +113,20 @@ _get_source_size_with_excludes() {
   if [ -n "${PREVIEW_SRC_LIST_CACHE[$cache_key]:-}" ]; then
     listing="${PREVIEW_SRC_LIST_CACHE[$cache_key]}"
   else
+    # 跨轮缓存命中 → 直接用上一轮的"大小/条数"（本轮只注册，不发预览通知，
+    # 也就不需要逐文件清单）。**不能**把空清单塞回 PREVIEW_SRC_LIST_CACHE:
+    # skip_preview=false 的预览 diff 会把它当真实源端清单，待同步量全错。
+    local _hit
+    _hit=$(_src_size_cache_get "$cache_key") || true
+    if [ -n "$_hit" ]; then
+      echo "$_hit"
+      return 0
+    fi
     listing=$(_get_listing_json "$source_path" "${FILTER_ARGS[@]}")
     [ -z "$listing" ] && listing="[]"
     # 尽力写缓存（子 shell 场景写不回父进程，主流程由 add_preview_pair 落盘）
     PREVIEW_SRC_LIST_CACHE[$cache_key]="$listing"
+    _src_size_cache_put "$cache_key" "$listing" || true
   fi
   local out
   out=$(echo "$listing" | jq -r '"\((map(.Size // 0) | add // 0)) \(length)"' 2>/dev/null) || out=""
