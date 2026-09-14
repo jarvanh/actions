@@ -2131,6 +2131,15 @@ jobs:
                 echo "dir_cache: 本轮快照 ${NEW_N} 条 < 已恢复 ${OLD_N} 条，保留云端更完整的那份"
               fi
             fi
+            # 播放事件日志也带上云：`[起播] item=N 客户端出画 +Xs` 是客户端侧**唯一**
+            # 的量化读数，而它此前只在 run 收尾才归档——想知道"这次播了多久"要么等
+            # 4.5 小时，要么取消轮（取消会中断用户正在看的片，2026-09-14 已经这么丢过
+            # 一次数据）。随快照上云后，最迟 25 分钟就能读到。文件只有几十 KB。
+            # 恢复侧会把它落到 /var/lib/emby/playlog.log（无副作用，Emby 不读它），
+            # 下一轮 rsync 带回来、再被这里覆盖成新的那份，不会累积。
+            if [ -f /opt/logs/playlog.log ]; then
+              cp /opt/logs/playlog.log "$STAGE/playlog.log" 2>/dev/null || true
+            fi
           }
 
           sync_up() {  # 用 copy 而非 sync：远端不会被"本轮快照缺失"误删（安全优先）
