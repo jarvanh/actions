@@ -29,6 +29,22 @@
 5. 全部节点完成：Telegram 推 `✅ 泰尔三网测速`（TOP5 ↓↑Mbps + 延迟），达标节点订阅导出到
    本工作流专属 Gist，结果 JSON 落盘 `~/proxy-speedtest/taier_speedtest_result.json`。
 
+## 吞吐与 job 上限
+
+**逐节点串行，且每节点的成本基本固定**（切换节点 → 跑 taierspeedtest → 解析）。脚本自己在
+`taier_speedtest.py` 里给了算式：耗时约 `节点数 × (2 × duration + 5)` 秒，默认 `duration=10`
+⇒ **25 秒/节点**。也就是说这个 job 的时长**线性取决于订阅里有多少节点**，而
+`proxy-speedtest-gistnodes` 一次会交接几千个（2026-09-14 那轮交接 3284 个 ≈ 22.8 小时）。
+
+**所以刻意不给这个 job 设 `timeout-minutes`**，与 gitee / cdn 两套一致（走 GitHub 的 job 默认
+360 分钟）。原先写死 45 分钟，等于把「无界的串行测速」交给一个拍出来的天花板，必然撞硬取消：
+45 分钟只够约 **108 个节点**，整轮白烧，而且被硬取消时连正常通知都发不出去，只能靠 SIGTERM
+兜底那条 `⛔ 泰尔三网测速异常终止`。
+
+⚠️ **不设 ≠ 没有上限**，默认 360 分钟。要让长轮真正跑完，得靠脚本自己的墙钟预算到点收摊、
+拿已测节点出订阅，而不是靠抬天花板——**该预算尚未实现**，是这条链路下一个该补的收口
+（做法同 `proxy-speedtest-gistnodes` 里那三段预算）。
+
 ## 为什么必须 mihomo TUN
 
 taierspeedtest 是原生 TCP/ICMP 客户端：没有 `--proxy` 参数；Go 的 `net.Dialer` 直接发

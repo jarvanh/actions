@@ -107,7 +107,13 @@ jobs:
   speedtest:
     concurrency: proxy-speedtest-taier-singleton
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # **刻意不设 `timeout-minutes`**，与 gitee / cdn 两套一致（走 GitHub 的 job 默认 360 分钟）。
+    # 原先写死 45 分钟，等于把「无界的串行测速」交给一个拍出来的天花板，必撞硬取消：
+    # 测速是逐节点串行的、每节点 ≈ `2 × duration + 5` = 25 秒（见 taier_speedtest.py 里
+    # `TAIER_MAX_NODES` 的注释），**45 分钟只够约 108 个节点**；而 proxy-speedtest-gistnodes
+    # 一次会交接几千个（2026-09-14 那轮交接 3284 个 ≈ 22.8 小时），于是整轮白烧。
+    # ⚠️ 不设 ≠ 没有上限，默认 360 分钟。**要让长轮真正跑完，得靠脚本自己的墙钟预算到点
+    # 收摊、拿已测节点出订阅，而不是靠抬天花板**（该预算尚未实现）。
     steps:
       - name: Checkout
         uses: actions/checkout@v7

@@ -54,6 +54,12 @@ Sub-Store 接口（读 backend/src/restful/*.js 得到，全部是无需鉴权�
   GIST_NODES_MAX_SUBS      最多投喂多少个订阅（默认 0 = 不限）
   GIST_NODES_MAX_TOTAL_MB  投喂内容总量上限（默认 0 = 不限）
   GIST_NODES_MAX_FILE_MB   单个 Gist 文件超过多少 MB 跳过（默认 2；工程保护，不是配额）
+  GIST_NODES_CARRYOVER     1 = 把**上一轮发布到本工作流专属 Gist 的订阅**也当一路输入喂回
+                           Sub-Store（默认 1）。抓取段的池子每轮都在重算：上一轮捞到、这一轮
+                           掉出搜索窗口的节点会直接消失。带上它，去重后就是「历史 ∪ 本轮」。
+                           首次运行还没有这个文件，自动跳过
+  GIST_NODES_CARRYOVER_MAX_MB 累积订阅的大小上限（默认 8）。超了整段跳过并记日志——宁可
+                           不累积，也不能把**截断过的** YAML 当完整订阅喂进去
   GIST_NODES_MAX_NODES     最终订阅最多保留多少节点（默认 0 = 不限）
   GIST_NODES_TIMEOUT       单次 HTTP 超时秒数（默认 30）
   GIST_NODES_RETRIES       单页搜索失败（含 429）时的重试次数（默认 4）
@@ -156,6 +162,17 @@ DEFAULT_NO_PROGRESS_ROUNDS = 4
 # 顶到封顶值，补一轮的每页还要先等一次 60 秒。实测某一批 10 个页全中，单批吃掉 988 秒
 # （16.5 分钟，占 job 预算一半）。连续 3 页全中已经足够说明是限流窗口而不是随机命中。
 DEFAULT_MAX_CONSECUTIVE_LIMITED = 3
+
+# 跨轮累积：把上一轮发布到本工作流专属 Gist 的订阅（就是上一轮的 providers.yaml）也当一路
+# 输入喂回 Sub-Store。为什么要它：抓取段的池子**每轮都在重算**，上一轮捞到、这一轮掉出
+# 「最近 N 小时更新」窗口或搜索排名的节点会直接消失——累积让去重后的结果是「历史 ∪ 本轮」。
+# 依据：Sub-Store 的输入格式明确支持 `Clash Proxies YAML` / `mihomo(Clash.Meta) Compatible`，
+# 所以上一轮产出的 clash YAML 可以直接当本地订阅内容回喂，不需要转成 URI。
+DEFAULT_CARRYOVER = 1
+# 累积订阅的大小上限。为什么要单独一个上限而不是复用 MAX_FILE_MB：那个默认 2MB 是给
+# 搜索到的单个 Gist 文件用的，而累积文件会**随轮次长大**（本轮已 1.07MB），拿 2MB 当界
+# 等于给它埋了个会静默到点的天花板。超限时整段跳过并打日志，绝不截断后喂进去。
+DEFAULT_CARRYOVER_MAX_MB = 8
 
 # 抓取阶段的收口原因 → 人话。写进 job 摘要，也方便按 gist_nodes_gather_stop 排查。
 STOP_REASON_NOTES = {
@@ -693,8 +710,53 @@ def build_process(max_nodes):
     return process
 
 
+def fetch_carryover(env, timeout, max_bytes):
+    """取**上一轮**发布到本工作流专属 Gist 的订阅正文（就是上一轮的 providers.yaml）。
+
+    返回正文文本或 None。**任何失败都只记日志、返回 None**：累积是增益项，拿不到就当没有，
+    绝不能因为它把整轮拖垮——首次运行本来就没有这个文件，Gist 探测失败也只该影响累积。
+
+    为什么用 `raw_url` 而不是 Gist API 里的 `files[..].content`：后者对大于 1MB 的文件会
+    **截断**并置 `truncated: true`，而我们的订阅现在就有 1.07MB。宁可多一次请求，也不要拿
+    半个 YAML 去喂 Sub-Store（截断的 YAML 要么解析失败，要么静默少一批节点）。
+    """
+    gist_id = env_str(env, 'PROXY_SPEEDTEST_GIST_ID', '')
+    filename = env_str(env, 'PROXY_SPEEDTEST_GIST_FILENAME', '')
+    if not (gist_id and filename):
+        log_progress('gist_nodes_carryover_skipped', reason='missing_gist_id_or_filename')
+        return None
+    try:
+        res = github_api_request(GIST_API.format(gist_id=gist_id), env.get('GH_TOKEN', ''),
+                                 timeout=timeout)
+    except Exception as e:
+        log_progress('gist_nodes_carryover_skipped', reason='gist_probe_failed', error=str(e))
+        return None
+    meta = ((res or {}).get('files') or {}).get(filename) or {}
+    raw_url = (meta.get('raw_url') or '').strip()
+    if not raw_url:
+        log_progress('gist_nodes_carryover_skipped', reason='no_previous_file', filename=filename)
+        return None
+    # 多读 1 字节：read(N) 到顶就返回 N 字节，拿返回值与上限比即可判断有没有被截断。
+    # 少了这个 +1，正好等于上限的文件会被误判成超限。
+    try:
+        text = http_get(raw_url, timeout=timeout, max_bytes=max_bytes + 1)
+    except Exception as e:
+        log_progress('gist_nodes_carryover_skipped', reason='fetch_failed', error=str(e))
+        return None
+    size = len(text.encode('utf-8'))
+    if size > max_bytes:
+        log_progress('gist_nodes_carryover_skipped', reason='oversize',
+                     bytes=size, limit_bytes=max_bytes)
+        return None
+    if not text.strip():
+        log_progress('gist_nodes_carryover_skipped', reason='empty')
+        return None
+    log_progress('gist_nodes_carryover', bytes=size, filename=filename)
+    return text
+
+
 def push_to_substore(base, files, prefix, max_subs, max_total_bytes, timeout, stats,
-                     deadline=None):
+                     deadline=None, carryover=None):
     """把抓到的订阅正文逐个建成 Sub-Store 本地订阅，返回订阅名列表。
 
     `deadline` 是这一段自己的墙钟截止点（不是整个 Sub-Store 阶段的）：到点就**停止投喂**、
@@ -703,14 +765,23 @@ def push_to_substore(base, files, prefix, max_subs, max_total_bytes, timeout, st
 
     单次调用的超时也被剩余额度夹住（`min(timeout, 剩余)`），否则最后一个 POST 还能在
     到点之后再拖满一整个 `timeout`，「到点」就成了空话。
+
+    `carryover`（上一轮的订阅正文）**排在最前面**、名字固定 `{prefix}-000`：万一预算被
+    截断，先保住的是跨轮累积的那一份——它是唯一无法从本轮的搜索结果里补回来的东西。
     """
+    queue = []
+    if carryover:
+        queue.append((f'{prefix}-000', carryover))
+    # 订阅名不能含 '/'（Sub-Store 明确拒绝），故不用 owner/id，只用序号。
+    queue.extend((f'{prefix}-{i:03d}', text) for i, (_name, text) in enumerate(files, 1))
+
     subnames = []
-    for idx, (name, text) in enumerate(files, 1):
+    for idx, (sub_name, text) in enumerate(queue, 1):
         if deadline is not None:
             left = deadline - time.monotonic()
             if left <= 0:
                 log_progress('gist_nodes_push_budget_stop', pushed=len(subnames),
-                             remaining=len(files) - idx + 1)
+                             remaining=len(queue) - idx + 1)
                 break
             call_timeout = max(1, min(timeout, left))
         else:
@@ -722,8 +793,6 @@ def push_to_substore(base, files, prefix, max_subs, max_total_bytes, timeout, st
         if max_total_bytes and stats['bytes_pushed'] + size > max_total_bytes:
             stats['over_quota'] += 1
             continue
-        # 订阅名不能含 '/'（Sub-Store 明确拒绝），故不用 owner/id，只用序号。
-        sub_name = f'{prefix}-{idx:03d}'
         try:
             ss_create_sub(base, sub_name, text, call_timeout)
         except SubStoreError as e:
@@ -788,6 +857,10 @@ def main():
     ss_timeout = max(10, env_int(env, 'SUB_STORE_TIMEOUT', DEFAULT_SUB_STORE_TIMEOUT))
     ss_budget = max(0, env_int(env, 'SUB_STORE_BUDGET_SECONDS', DEFAULT_SUB_STORE_BUDGET_SECONDS))
     collection = env_str(env, 'SUB_STORE_COLLECTION', 'gist-nodes')
+    carryover_on = env_str(env, 'GIST_NODES_CARRYOVER',
+                           str(DEFAULT_CARRYOVER)).lower() not in ('0', 'false', 'no')
+    carryover_max_bytes = max(0, env_int(env, 'GIST_NODES_CARRYOVER_MAX_MB',
+                                         DEFAULT_CARRYOVER_MAX_MB)) * 1024 * 1024
     workdir = pathlib.Path(env_str(
         env, 'GIST_NODES_WORKDIR', str(pathlib.Path.home() / 'proxy-speedtest' / 'gist-nodes')))
     workdir.mkdir(parents=True, exist_ok=True)
@@ -907,9 +980,21 @@ def main():
     if status != 200:
         fail(f'Sub-Store 后端异常：GET /api/subs → HTTP {status} {body[:200]}')
 
+    # 跨轮累积：把上一轮发布到本工作流专属 Gist 的订阅也当一路输入喂给 Sub-Store。
+    # **必须在发布之前取**——发布之后 Gist 里就是本轮产物了，再读就成了自己喂自己。
+    # 顺序上先取、再投喂：这样即便后面投喂/产出失败，日志里也已经留下了「取到没取到」。
+    carryover = None
+    if carryover_on and not dry_run:
+        carryover = fetch_carryover(env, timeout, carryover_max_bytes)
+    elif carryover_on:
+        log_progress('gist_nodes_carryover_skipped', reason='dry_run')
+
     subnames = push_to_substore(ss_base, files, collection, max_subs, max_total_bytes,
-                                ss_timeout, stats, deadline=push_deadline)
-    log_progress('gist_nodes_pushed', subs=len(subnames), files=len(files),
+                                ss_timeout, stats, deadline=push_deadline,
+                                carryover=carryover)
+    log_progress('gist_nodes_pushed', subs=len(subnames),
+                 files=len(files) + (1 if carryover else 0),
+                 carryover=bool(carryover),
                  **{k: stats[k] for k in
                     ('subs_created', 'subs_failed', 'bytes_pushed', 'over_quota')})
     if not subnames:
@@ -966,7 +1051,12 @@ def main():
                    'max_consecutive_limited': max_consecutive_limited},
         'substore': {'elapsed_seconds': ss_elapsed, 'budget_seconds': ss_budget,
                      'per_call_timeout_seconds': ss_timeout, 'subs_pushed': len(subnames),
-                     'files_found': len(files)},
+                     'files_found': len(files) + (1 if carryover else 0),
+                     'files_gathered': len(files),
+                     'carryover': {'enabled': carryover_on,
+                                   'used': bool(carryover),
+                                   'bytes': len(carryover.encode('utf-8')) if carryover else 0,
+                                   'max_bytes': carryover_max_bytes}},
         'collection': collection,
         'process': process,
         'stats': stats,
