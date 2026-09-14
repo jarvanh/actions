@@ -37,6 +37,11 @@ on:
         required: false
         type: string
         default: "150"
+      target2:
+        description: "第二个后端（可选）: 填了就做「跨后端并发」测试——两个挂载同时各跑一条 transfers=4，判断两边带宽上限是否独立（决定并行同步对是否有效）"
+        required: false
+        type: string
+        default: ""
 
 concurrency: openlist-diag
 
@@ -110,6 +115,7 @@ jobs:
           DIAG_PROBE_GAP: ${{ inputs.probe_gap }}
           DIAG_BURST_N: ${{ inputs.burst_n }}
           DIAG_TARGET: ${{ inputs.target }}
+          DIAG_TARGET2: ${{ inputs.target2 }}
           OL_CONTAINER: ${{ inputs.container }}
         run: |
           # 恒 exit 0: 诊断结果写在报告里，探针失败不该让 step 变红（否则
