@@ -14,8 +14,10 @@
   4. 边界：GIST_NODES_MAX_NODES=0 时 process 里不应出现限量算子；
   5. 负向：Sub-Store 不可达必须失败退出；
   6. 判据：明文链接 / Clash YAML / base64 订阅放行，XML plist / 数据 JSON 挡掉；
-  7. 时间窗口：超龄 Gist 被挡掉、MAX_AGE_HOURS=0 时不过滤、整页超龄即停止翻页
-     （不再白挨 429）、候选配额按关键词均分、时间戳缺失或异常时不算超龄。
+  7. 时间窗口：超龄 Gist 被挡掉、MAX_AGE_HOURS=0 时不过滤、整页超龄即停止翻页、
+     时间戳缺失或异常时不算超龄；
+  8. 搜索收口：整页超龄 / 翻到末页 → 该关键词判为「到头」退出轮转；被限流（429）
+     只跳过本页、不放弃整个关键词（实测限流是短窗口突发型，隔几秒就恢复）。
 
 跑法：python .github/scripts/proxy-speedtest/tests/test_gist_nodes_substore.py
 退出码 0 = 全部通过。
@@ -28,6 +30,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import urllib.error
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 
@@ -121,8 +124,11 @@ def run_main(gist_nodes, tmpdir, extra_env):
                 'yaml': {'filename': 'x.yaml', 'raw_url': 'https://gist.githubusercontent.com/x'}}
 
     orig = (gist_nodes.search_gists, gist_nodes.collect_all, gist_nodes.update_gist)
-    gist_nodes.search_gists = lambda *a, **k: [
-        {'id': 'a' * 32, 'owner': 'o1', 'updated': '', 'url': 'https://gist.github.com/o1/' + 'a' * 32}]
+    # 第一轮就给 1 个候选，并把**传入的所有关键词**都标成「到头」——否则主循环会
+    # 一轮轮翻下去（每轮都重复投喂同样的 3 个订阅），把「投喂 3 个」的断言冲掉。
+    gist_nodes.search_gists = lambda queries, *a, **k: (
+        [{'id': 'a' * 32, 'owner': 'o1', 'updated': '',
+          'url': 'https://gist.github.com/o1/' + 'a' * 32}], set(queries))
     gist_nodes.collect_all = lambda *a, **k: (
         [('f1', 'ss://x@1.1.1.1:1#a'), ('f2', 'vless://y@2.2.2.2:2#b'), ('f3', 'trojan://z@3.3.3.3:3#c')],
         dict.fromkeys(gist_nodes.STAT_KEYS, 0) | {'gists_scanned': 1, 'files_kept': 3},
@@ -275,12 +281,15 @@ def main():
                                   ('o2', hexid(2), stale_30h),
                                   ('o3', hexid(3), fresh_23h)])
         gist_nodes.http_get = lambda url, **kw: mixed
-        got = gist_nodes.search_gists(['ss://'], 1, 'updated', 30, retries=1, max_age_hours=24)
+        got, exhausted = gist_nodes.search_gists(['ss://'], 1, 'updated', 30, retries=1,
+                                                 max_age_hours=24, page_delay=0)
         check(len(got) == 2, f'24h 窗口内只留 2 个（实际 {len(got)}）')
         check({g['id'] for g in got} == {hexid(1), hexid(3)}, '留下的正是两个新鲜的')
+        check(exhausted == set(), '整页有新鲜条目 → 关键词不算到头')
 
         print('== 8. 边界：MAX_AGE_HOURS=0 时不过滤 ==')
-        got0 = gist_nodes.search_gists(['ss://'], 1, 'updated', 30, retries=1, max_age_hours=0)
+        got0, _ = gist_nodes.search_gists(['ss://'], 1, 'updated', 30, retries=1,
+                                          max_age_hours=0, page_delay=0)
         check(len(got0) == 3, f'0 = 不限，三个全留（实际 {len(got0)}）')
 
         print('== 9. 整页超龄即停止翻页（不再白挨 429）==')
@@ -293,16 +302,27 @@ def main():
             return make_search_page([('o3', hexid(3), fresh_1h)])
 
         gist_nodes.http_get = stale_then_fresh
-        got_stale = gist_nodes.search_gists(['ss://'], 5, 'updated', 30, retries=1, max_age_hours=24)
+        got_stale, exhausted_stale = gist_nodes.search_gists(
+            ['ss://'], 5, 'updated', 30, retries=1, max_age_hours=24, page_delay=0)
         check(got_stale == [], '整页超龄时一个候选都不留')
         check(seen_pages == [1], f'第 1 页全超龄后不再翻第 2 页（实际翻页 {seen_pages}）')
+        check(exhausted_stale == {'ss://'}, '整页超龄的关键词被判为到头')
 
-        print('== 10. 候选配额按关键词均分（避免首个关键词吃光名额）==')
-        gist_nodes.http_get = lambda url, **kw: make_search_page(
-            [(f'o{i}', hexid(i), fresh_1h) for i in range(1, 11)])
-        got_q = gist_nodes.search_gists(['ss://', 'vless://', 'vmess://'], 5, 'updated', 30,
-                                        retries=1, max_age_hours=24, per_query_limit=3)
-        check(len(got_q) == 9, f'3 个关键词各收 3 个 = 9（实际 {len(got_q)}）')
+        print('== 10. 翻到末页（正常返回但没有结果块）判为到头 ==')
+        asked = []
+
+        def empty_from_second(url, **kw):
+            asked.append(page_number(url))
+            if page_number(url) == 1:
+                return make_search_page([('o1', hexid(1), fresh_1h)])
+            return '<html><body>no results</body></html>'
+
+        gist_nodes.http_get = empty_from_second
+        got_e, exhausted_e = gist_nodes.search_gists(['ss://'], 4, 'updated', 30, retries=1,
+                                                     max_age_hours=24, page_delay=0)
+        check(len(got_e) == 1, f'第 1 页拿到 1 个（实际 {len(got_e)}）')
+        check(asked == [1, 2], f'第 2 页无结果块即停、不白翻 3-4 页（实际翻页 {asked}）')
+        check(exhausted_e == {'ss://'}, '到头的关键词被标记出来')
 
         print('== 11. 判据细节：时间戳缺失/异常一律不算超龄 ==')
         now_utc = datetime.now(timezone.utc)
@@ -312,28 +332,26 @@ def main():
         check(gist_nodes.is_too_old(stale_30h, now_utc, 24) is True, '30 小时前 = 超龄')
         check(gist_nodes.is_too_old(stale_30h, now_utc, 0) is False, '窗口为 0 = 不限')
 
-        print('== 12. 页间间隔：只在真要翻下一页时才等 ==')
-        slept = []
+        print('== 12. 429 只跳过本页，不放弃整个关键词 ==')
+        asked_rl = []
 
-        def fresh_pages(url, **kw):
-            # 每页给不同 id：若各页返回同一批，后续页会被 seen 全跳过，就测不出间隔。
-            base = (page_number(url) - 1) * 10
-            return make_search_page(
-                [(f'o{base + i}', hexid(base + i), fresh_1h) for i in range(1, 11)])
+        def rate_limited_first_page(url, **kw):
+            asked_rl.append(page_number(url))
+            if page_number(url) == 1:
+                raise urllib.error.HTTPError(url, 429, 'Too Many Requests', {}, None)
+            return make_search_page([('o2', hexid(2), fresh_1h)])
 
         real_sleep = gist_nodes.time.sleep
-        gist_nodes.http_get = fresh_pages
+        gist_nodes.http_get = rate_limited_first_page
         try:
-            gist_nodes.time.sleep = lambda sec: slept.append(sec)
-            gist_nodes.search_gists(['ss://'], 3, 'updated', 30, retries=1, max_age_hours=24,
-                                    per_query_limit=5, page_delay=7)
-            check(slept == [], f'第 1 页就收够配额，不再空等（实际 {slept}）')
-            slept.clear()
-            gist_nodes.search_gists(['ss://'], 3, 'updated', 30, retries=1, max_age_hours=24,
-                                    per_query_limit=15, page_delay=7)
-            check(slept == [7], f'第 1 页收 10 个不够、翻第 2 页前等一次（实际 {slept}）')
+            gist_nodes.time.sleep = lambda sec: None
+            got_rl, exhausted_rl = gist_nodes.search_gists(
+                ['ss://'], 2, 'updated', 30, retries=2, max_age_hours=24, page_delay=0)
         finally:
             gist_nodes.time.sleep = real_sleep
+        check(len(got_rl) == 1, f'第 1 页被限流后，第 2 页仍取到 1 个（实际 {len(got_rl)}）')
+        check(asked_rl == [1, 1, 2], f'第 1 页重试 2 次后跳过、继续第 2 页（实际 {asked_rl}）')
+        check(exhausted_rl == set(), '被限流不算「到头」（否则整类节点会被静默丢掉）')
         gist_nodes.http_get = real_http_get
     finally:
         server.shutdown()

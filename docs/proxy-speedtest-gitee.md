@@ -78,6 +78,11 @@
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | 通知 |
 | `GITHUB_TOKEN` | GitHub API 匿名限流时的认证回退 |
 
+被 `proxy-speedtest-gistnodes` 当子流程调用时，结果 Gist 与通知标题可被入参覆盖：
+`gist_id` / `gist_filename` / `gist_description` 把结果写进调用方的 Gist，
+`label` 给通知标题加来源前缀（如 `✅ gist 节点 · Gitee 测速完成`）。
+四个入参留空时行为与定时轮完全一致（写本工作流 Gist、标题不带前缀）。
+
 ### 可调参数（workflow 注入）
 
 | env | 默认 | 说明 |

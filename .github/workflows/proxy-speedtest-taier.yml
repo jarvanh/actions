@@ -84,6 +84,24 @@ on:
         description: '最多测几个节点（0 = 不限）'
         required: false
         type: string
+      # 下面四个供编排层（proxy-speedtest-gistnodes）覆盖：让同一套测速既能写自己的 Gist，
+      # 也能把结果写进调用方指定的 Gist，并让通知标题带上来源标签
+      gist_id:
+        description: '结果 Gist 的 id 覆盖；留空用本工作流自己的 secret'
+        required: false
+        type: string
+      gist_filename:
+        description: '结果 Gist 的文件名覆盖'
+        required: false
+        type: string
+      gist_description:
+        description: '结果 Gist 的描述覆盖'
+        required: false
+        type: string
+      label:
+        description: '通知标题前缀，用于区分同一套测速的不同来源（留空则不显示）'
+        required: false
+        type: string
 
 jobs:
   speedtest:
@@ -128,9 +146,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # 订阅导出：本工作流专属 Gist（三个测速工作流各用各的，互不覆盖）。
           # 留空则首次运行自动新建，TG 通知会给链接；拿到 id 后回填此 secret 避免每轮新建
-          PROXY_SPEEDTEST_GIST_ID: ${{ secrets.PROXY_SPEEDTEST_TAIER_GIST_ID }}
-          PROXY_SPEEDTEST_GIST_FILENAME: proxy_speedtest_taier_subscription.yaml
-          PROXY_SPEEDTEST_GIST_DESCRIPTION: 'proxy speedtest subscription (taier 三网)'
+          PROXY_SPEEDTEST_GIST_ID: ${{ inputs.gist_id || secrets.PROXY_SPEEDTEST_TAIER_GIST_ID }}
+          PROXY_SPEEDTEST_GIST_FILENAME: ${{ inputs.gist_filename || 'proxy_speedtest_taier_subscription.yaml' }}
+          PROXY_SPEEDTEST_GIST_DESCRIPTION: ${{ inputs.gist_description || 'proxy speedtest subscription (taier 三网)' }}
+          # 通知标题前缀：编排层传入时标题变成「gist 节点 · 泰尔三网测速」，便于分辨来源
+          PROXY_SPEEDTEST_LABEL: ${{ inputs.label }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           # 统一收尾区（footer）: 运行日志链接 + 已运行时长

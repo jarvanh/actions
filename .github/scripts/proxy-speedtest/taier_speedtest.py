@@ -460,9 +460,13 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
     top = sorted(ok_results, key=lambda r: r.get(top_sort_key) or 0.0, reverse=True)[:5]
     # 标题状态随结论降级（规范 · 状态图标语义）：0 成功 / 命中「疑似未走代理」→ ⚠️，
     # 不再恒 ✅（此前 ✅ 标题下写着 ⚠️ 疑似未走代理，与 rc=1 的失败判定自相矛盾）
-    _title_emoji = '⚠️' if (not ok_results or bypass_hits) else '✅'
+    # 来源标签（PROXY_SPEEDTEST_LABEL）：编排层 proxy-speedtest-gistnodes 调用时传
+    # 「gist 节点」，标题变成「gist 节点 · 泰尔三网测速」。同一套测速会被定时轮和 gist 抓取轮
+    # 分别触发，标题不区分的话读者分不清通知来自哪一轮（规范 · 3.1 允许标题带区分词）。
+    _label = (merged_env().get('PROXY_SPEEDTEST_LABEL') or '').strip()
+    _title_prefix = f'{_label} · ' if _label else ''
     lines = [
-        f'{_title_emoji} 泰尔三网测速',
+        f'{_title_emoji} {_title_prefix}泰尔三网测速',
         sep,
         f"🕒 起止：{esc(meta['started_text'])} ~ {esc(meta['ended_text'])} · 耗时 {esc(meta['duration_text'])}",
         # 计数口径与 cdn/gitee 统一用「可用」（成功=功能可用，含节点连接成功但速度偏低）

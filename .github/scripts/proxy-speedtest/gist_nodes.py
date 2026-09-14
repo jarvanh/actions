@@ -36,17 +36,20 @@ Sub-Store 接口（读 backend/src/restful/*.js 得到，全部是无需鉴权�
 
 环境变量（除 token 外全部可选）：
   GIST_NODES_QUERIES       搜索关键词，逗号分隔（默认 ss://,vless://,vmess://,trojan://,hysteria2://,tuic://）
-  GIST_NODES_PAGES         每个关键词翻几页（默认 5，每页 10 条；收够配额即停，通常只翻 2 页）
+  GIST_NODES_TARGET_SUBS   目标：凑够多少个「像订阅」的文件（默认 100，0 = 不限）
+  GIST_NODES_MAX_PAGES     每个关键词最多翻几页（默认 40；安全上限，正常靠凑够目标或
+                           整页超龄提前停）
+  GIST_NODES_PAGES_PER_ROUND 每轮每个关键词翻几页（默认 2）
   GIST_NODES_SORT          搜索排序（默认 updated = 最近更新）
   GIST_NODES_MAX_AGE_HOURS 只收最近 N 小时内更新过的 Gist（默认 24，0 = 不限）
-  GIST_NODES_MAX_GISTS     最多解析多少个 Gist（默认 100，名额按关键词均分）
-  GIST_NODES_MAX_SUBS      最多投喂多少个订阅（默认 120，一个 Gist 的多个文件各算一个）
-  GIST_NODES_MAX_TOTAL_MB  投喂内容总量上限（默认 24 MB）
-  GIST_NODES_MAX_FILE_MB   单个 Gist 文件超过多少 MB 跳过（默认 2）
-  GIST_NODES_MAX_NODES     最终订阅最多保留多少节点（默认 300，0 = 不限）
+  GIST_NODES_MAX_SUBS      最多投喂多少个订阅（默认 0 = 不限）
+  GIST_NODES_MAX_TOTAL_MB  投喂内容总量上限（默认 0 = 不限）
+  GIST_NODES_MAX_FILE_MB   单个 Gist 文件超过多少 MB 跳过（默认 2；工程保护，不是配额）
+  GIST_NODES_MAX_NODES     最终订阅最多保留多少节点（默认 0 = 不限）
   GIST_NODES_TIMEOUT       单次 HTTP 超时秒数（默认 30）
-  GIST_NODES_RETRIES       搜索页返回空结果块时的重试次数（默认 3）
-  GIST_NODES_PAGE_DELAY    搜索页翻页之间的间隔秒数（默认 2，0 = 不间隔）
+  GIST_NODES_RETRIES       单页搜索失败（含 429）时的重试次数（默认 4）
+  GIST_NODES_BACKOFF_BASE  重试退避基数秒数（默认 5，按 5/10/20/40 指数增长 + 抖动）
+  GIST_NODES_PAGE_DELAY    搜索页翻页之间的间隔秒数（默认 3，0 = 不间隔）
   GIST_NODES_WORKERS       并发取 Gist 的线程数（默认 8，1 = 串行）
   GIST_NODES_DRY_RUN       1 = 只抓取不发布（本地验证用）
   GIST_NODES_WORKDIR       产物目录（默认 ~/proxy-speedtest/gist-nodes）
@@ -69,6 +72,7 @@ import html as html_lib
 import json
 import os
 import pathlib
+import random
 import re
 import sys
 import time
@@ -90,6 +94,8 @@ GIST_API = 'https://api.github.com/gists/{gist_id}'
 DEFAULT_QUERIES = 'ss://,vless://,vmess://,trojan://,hysteria2://,tuic://'
 DEFAULT_SUB_STORE = 'http://127.0.0.1:3001'
 DEFAULT_MAX_AGE_HOURS = 24
+DEFAULT_TARGET_SUBS = 100
+DEFAULT_MAX_PAGES = 40
 
 # 搜索结果块：服务端渲染的 HTML，每块一个 Gist。
 SNIPPET_MARK = '<div class="gist-snippet">'
@@ -262,54 +268,79 @@ def is_too_old(updated, now, max_age_hours):
     return (now - dt).total_seconds() > max_age_hours * 3600
 
 
+def fetch_search_page(query, page, sort, timeout, retries, backoff_base):
+    """取一页搜索结果，返回 (items, status)。
+
+    status 三态，调用方据此决定「继续翻下一页」还是「这个关键词到头了」：
+      ok           解析到结果块；
+      empty        正常返回但一块都没有 —— 该关键词翻到末页了；
+      rate_limited 重试用尽仍是 429。**限流是短窗口突发型**：实测被限后隔 3 秒再请求
+                   就恢复 200，所以这不该判成「关键词到头」，跳过本页继续下一页更划算。
+    """
+    status = 'empty'
+    for attempt in range(1, max(1, retries) + 1):
+        qs = urllib.parse.urlencode({'q': query, 's': sort, 'page': page})
+        try:
+            body = http_get(f'{SEARCH_URL}?{qs}', timeout=timeout)
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                status = 'rate_limited'
+                log_progress('gist_nodes_search_rate_limited', query=query, page=page,
+                             attempt=attempt, retries=retries)
+            else:
+                log_progress('gist_nodes_search_failed', query=query, page=page,
+                             attempt=attempt, error=str(e))
+            if attempt < retries:
+                # 指数退避 + 抖动。抖动是必要的：固定节奏的多页请求会踩在同一个限流窗口上，
+                # 实测「2 秒固定间隔」连翻十几页必被限，「指数 + 抖动」能自己错开。
+                time.sleep(backoff_base * (2 ** (attempt - 1)) + random.uniform(0, 1.5))
+            continue
+        except Exception as e:
+            log_progress('gist_nodes_search_failed', query=query, page=page,
+                         attempt=attempt, error=str(e))
+            if attempt < retries:
+                time.sleep(backoff_base * (2 ** (attempt - 1)) + random.uniform(0, 1.5))
+            continue
+        items = parse_search_results(body)
+        return items, ('ok' if items else 'empty')
+    return [], status
+
+
 def search_gists(queries, pages, sort, timeout, retries=3,
-                 max_age_hours=DEFAULT_MAX_AGE_HOURS, per_query_limit=0, page_delay=0):
-    """按关键词逐个翻页收集候选 Gist，跨关键词去重（先到先得 = 最近更新优先）。
+                 max_age_hours=DEFAULT_MAX_AGE_HOURS, page_from=1,
+                 page_delay=0, backoff_base=5, seen=None):
+    """翻 `[page_from, page_from+pages)` 这几页，返回 (candidates, exhausted)。
 
-    每个页面都重试：搜索页会偶发返回不含结果块的降级页面（实测同一 URL 两次请求
-    一次 10 块、一次 0 块）。若不重试，这种抖动会被当成「该关键词没有结果」而静默
-    丢掉整类节点（实测 ss:// 整条关键词命中 0）。
+    exhausted = 该关键词已经到头（正常返回却没有任何结果块，或整页全部超龄）。
+    被限流不算到头 —— 短窗口限流过后还能继续翻，所以只跳过本页。
 
-    三道收口：
+    两道收口：
       * max_age_hours：丢掉超龄条目；**整页全部超龄就停止该关键词翻页**——排序是
         `s=updated`（降序），这一页都旧了，后面的页只会更旧，继续翻纯属白挨 429。
-      * per_query_limit：每个关键词的候选配额（由 max_gists 按关键词数均分），收够
-        就停。不均分的话第一个关键词会吃光全部名额，后面几个关键词一个都搜不到。
-      * page_delay：页与页之间的固定间隔。搜索页对高频请求会 429（实测连续抓几十页
-        就被限死），退避只治已经发生的 429，间隔是从源头降低它发生的概率。
+      * page_delay：页与页之间的间隔（另加随机抖动）。搜索页对高频请求会 429，
+        退避只治已经发生的 429，间隔是从源头降低它发生的概率。
+
+    `seen` 跨轮传入，保证同一个 Gist 不会被两轮重复解析。
     """
     now = datetime.now(timezone.utc)
     results = []
-    seen = set()
+    exhausted = set()
+    seen = seen if seen is not None else set()
     stale_total = 0
+    skipped = 0
     for query in queries:
-        hits = 0
-        for page in range(1, max(1, pages) + 1):
-            found = []
-            for attempt in range(1, max(1, retries) + 1):
-                qs = urllib.parse.urlencode({'q': query, 's': sort, 'page': page})
-                try:
-                    found = parse_search_results(http_get(f'{SEARCH_URL}?{qs}', timeout=timeout))
-                except Exception as e:
-                    found = []
-                    log_progress('gist_nodes_search_failed', query=query, page=page,
-                                 attempt=attempt, error=str(e))
-                if found:
-                    break
-                if attempt < retries:
-                    # 退避给足：搜索页被限流时返回的是 429，短退避重试基本必败
-                    # （实测 2s 退避连试三次全 429，整页结果就丢了）。
-                    time.sleep(attempt * 5)
-            if not found:
-                log_progress('gist_nodes_search_empty', query=query, page=page, attempts=retries)
+        for page in range(page_from, page_from + max(1, pages)):
+            items, status = fetch_search_page(query, page, sort, timeout, retries, backoff_base)
+            if status == 'empty':
+                exhausted.add(query)
                 break
+            if status == 'rate_limited':
+                skipped += 1
+                log_progress('gist_nodes_search_page_skipped', query=query, page=page)
+                continue
             page_fresh = 0
             page_stale = 0
-            for item in found:
-                # 配额按条目判，不按页判：一页 10 条而配额只剩 3 个时，只该收 3 个，
-                # 否则每翻一页都会超收（3 个关键词 × 超 4 个 = 多解析十几个 Gist）。
-                if per_query_limit and hits >= per_query_limit:
-                    break
+            for item in items:
                 if item['id'] in seen:
                     continue
                 if is_too_old(item['updated'], now, max_age_hours):
@@ -318,22 +349,21 @@ def search_gists(queries, pages, sort, timeout, retries=3,
                 seen.add(item['id'])
                 item['query'] = query
                 results.append(item)
-                hits += 1
                 page_fresh += 1
             stale_total += page_stale
             if page_stale and not page_fresh:
                 log_progress('gist_nodes_search_stale_stop', query=query, page=page,
                              stale=page_stale, max_age_hours=max_age_hours)
-                break
-            if per_query_limit and hits >= per_query_limit:
+                exhausted.add(query)
                 break
             if page_delay:
-                time.sleep(page_delay)
-        log_progress('gist_nodes_search_query', query=query, hits=hits)
+                time.sleep(page_delay + random.uniform(0, 1.0))
     if stale_total:
         log_progress('gist_nodes_search_age_filtered', stale=stale_total,
                      max_age_hours=max_age_hours)
-    return results
+    if skipped:
+        log_progress('gist_nodes_search_skipped_total', skipped=skipped)
+    return results, exhausted
 
 
 def looks_like_subscription(text):
@@ -479,7 +509,7 @@ def push_to_substore(base, files, prefix, max_subs, max_total_bytes, timeout, st
     """把抓到的订阅正文逐个建成 Sub-Store 本地订阅，返回订阅名列表。"""
     subnames = []
     for idx, (name, text) in enumerate(files, 1):
-        if len(subnames) >= max_subs:
+        if max_subs and len(subnames) >= max_subs:
             stats['over_quota'] += 1
             continue
         size = len(text.encode('utf-8'))
@@ -527,17 +557,19 @@ def main():
     env = merged_env()
     token = (env.get('GH_TOKEN') or env.get('GITHUB_TOKEN') or '').strip()
     queries = [q.strip() for q in env_str(env, 'GIST_NODES_QUERIES', DEFAULT_QUERIES).split(',') if q.strip()]
-    pages = max(1, env_int(env, 'GIST_NODES_PAGES', 5))
     sort = env_str(env, 'GIST_NODES_SORT', 'updated')
     max_age_hours = max(0, env_int(env, 'GIST_NODES_MAX_AGE_HOURS', DEFAULT_MAX_AGE_HOURS))
-    max_gists = max(1, env_int(env, 'GIST_NODES_MAX_GISTS', 100))
-    max_subs = max(1, env_int(env, 'GIST_NODES_MAX_SUBS', 120))
-    max_total_bytes = max(0, env_int(env, 'GIST_NODES_MAX_TOTAL_MB', 24)) * 1024 * 1024
+    target_subs = max(0, env_int(env, 'GIST_NODES_TARGET_SUBS', DEFAULT_TARGET_SUBS))
+    max_pages = max(1, env_int(env, 'GIST_NODES_MAX_PAGES', DEFAULT_MAX_PAGES))
+    pages_per_round = max(1, env_int(env, 'GIST_NODES_PAGES_PER_ROUND', 2))
+    max_subs = max(0, env_int(env, 'GIST_NODES_MAX_SUBS', 0))
+    max_total_bytes = max(0, env_int(env, 'GIST_NODES_MAX_TOTAL_MB', 0)) * 1024 * 1024
     max_file_bytes = max(0, env_int(env, 'GIST_NODES_MAX_FILE_MB', 2)) * 1024 * 1024
-    max_nodes = max(0, env_int(env, 'GIST_NODES_MAX_NODES', 300))
+    max_nodes = max(0, env_int(env, 'GIST_NODES_MAX_NODES', 0))
     timeout = max(5, env_int(env, 'GIST_NODES_TIMEOUT', 30))
-    retries = max(1, env_int(env, 'GIST_NODES_RETRIES', 3))
-    page_delay = max(0, env_int(env, 'GIST_NODES_PAGE_DELAY', 2))
+    retries = max(1, env_int(env, 'GIST_NODES_RETRIES', 4))
+    page_delay = max(0, env_int(env, 'GIST_NODES_PAGE_DELAY', 3))
+    backoff_base = max(1, env_int(env, 'GIST_NODES_BACKOFF_BASE', 5))
     workers = max(1, env_int(env, 'GIST_NODES_WORKERS', 8))
     dry_run = env_str(env, 'GIST_NODES_DRY_RUN', '0').lower() not in ('0', 'false', 'no')
     ss_base = env_str(env, 'SUB_STORE_BACKEND_URL', DEFAULT_SUB_STORE)
@@ -552,22 +584,43 @@ def main():
     if not token:
         log_progress('gist_nodes_no_token', note='匿名调用 GitHub API 限流 60 次/h，可能中途被截断')
 
-    # 候选配额按关键词均分：不均分的话第一个关键词（ss://）会把 max_gists 名额吃光，
-    # 后面 vless / vmess / … 一个都轮不到，最后整批节点只来自一个关键词。
-    per_query_limit = -(-max_gists // len(queries)) if queries else 0
-    candidates = search_gists(queries, pages, sort, timeout, retries,
-                              max_age_hours=max_age_hours, per_query_limit=per_query_limit,
-                              page_delay=page_delay)
-    log_progress('gist_nodes_candidates', count=len(candidates), queries=len(queries),
-                 sort=sort, max_age_hours=max_age_hours)
-    if not candidates:
+    # 边搜边取：搜索与取文交织，直到凑够 target_subs 个「像订阅」的文件。
+    # 为什么不先搜完再取：一轮能翻多少页受 429 限制，而搜索结果前排混着大量噪声 Gist
+    # （正文是 JSON 统计，只因为含 ss:// 字样被搜到），它们产出 0 个订阅文件。固定
+    # 「先搜 N 个 Gist」的配额要么拿不满、要么白搜一堆；只有取文后数真订阅才知道够没够。
+    # 每轮每个关键词翻 pages_per_round 页（轮转，保证各协议都有机会），取文后不够就
+    # 继续下一轮；整页超龄或翻到末页的关键词退出轮转。
+    active = list(queries)
+    seen_ids = set()
+    files = []
+    stats = dict.fromkeys(STAT_KEYS, 0)
+    candidates_total = 0
+    page_from = 1
+    while active and page_from <= max_pages:
+        cands, exhausted = search_gists(active, pages_per_round, sort, timeout, retries,
+                                        max_age_hours, page_from=page_from,
+                                        page_delay=page_delay, backoff_base=backoff_base,
+                                        seen=seen_ids)
+        active = [q for q in active if q not in exhausted]
+        candidates_total += len(cands)
+        if cands:
+            new_files, local = collect_all(cands, token, timeout, max_file_bytes, workers)
+            files.extend(new_files)
+            for k in STAT_KEYS:
+                stats[k] += local[k]
+        log_progress('gist_nodes_gather_round', page_from=page_from, active=len(active),
+                     candidates=len(cands), files=len(files), target=target_subs)
+        if target_subs and len(files) >= target_subs:
+            break
+        page_from += pages_per_round
+
+    log_progress('gist_nodes_sources', **stats, files=len(files),
+                 candidates=candidates_total, target=target_subs)
+    if not candidates_total:
         if max_age_hours:
             fail(f'没有解析出任何「最近 {max_age_hours} 小时内更新」的 Gist'
                  f'（窗口太窄，或搜索页结构已变）')
         fail('搜索页一个 Gist 都没解析出来（页面结构可能已变，或网络被拦）')
-
-    files, stats = collect_all(candidates[:max_gists], token, timeout, max_file_bytes, workers)
-    log_progress('gist_nodes_sources', **stats, files=len(files))
     if not files:
         fail(f'扫了 {stats["gists_scanned"]} 个 Gist 但没找到任何像订阅的文件')
 
@@ -620,7 +673,8 @@ def main():
         'queries': queries,
         'sort': sort,
         'max_age_hours': max_age_hours,
-        'max_gists': max_gists,
+        'target_subs': target_subs,
+        'max_pages': max_pages,
         'collection': collection,
         'process': process,
         'stats': stats,
@@ -656,9 +710,10 @@ def main():
     write_step_summary([
         '### gist 节点抓取（Sub-Store 去重）',
         '',
-        f'- 关键词：`{", ".join(queries)}`（排序 `{sort}`，每个最多 {pages} 页）',
+        f'- 关键词：`{", ".join(queries)}`（排序 `{sort}`，每个最多翻 {max_pages} 页）',
         f'- 时间窗口：{"最近 " + str(max_age_hours) + " 小时内更新" if max_age_hours else "不限"}；'
-        f'候选 Gist：{len(candidates)}，实际解析：{stats["gists_scanned"]}（失败 {stats["gist_errors"]}）',
+        f'候选 Gist：{candidates_total}，实际解析：{stats["gists_scanned"]}（失败 {stats["gist_errors"]}）',
+        f'- 真订阅：目标 {target_subs or "不限"}，实际拿到 **{len(files)}** 个订阅文件',
         f'- 投喂订阅：{stats["subs_created"]} 个（失败 {stats["subs_failed"]}，'
         f'{round(stats["bytes_pushed"] / 1048576, 1)} MB）',
         f'- Sub-Store 解析：{parsed_count} 个节点 → 去重/清理后：**{len(proxies)}**'

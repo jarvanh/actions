@@ -59,6 +59,11 @@ TUN 起来后 DNS 会被 mihomo 劫持，必须显式给可达的公共解析器
 | `PAT` | gist 写权限（默认 GITHUB_TOKEN 无 gist scope 会 403） |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | 通知 |
 
+被 `proxy-speedtest-gistnodes` 当子流程调用时，结果 Gist 与通知标题可被入参覆盖：
+`gist_id` / `gist_filename` / `gist_description` 把结果写进调用方的 Gist，
+`label` 给通知标题加来源前缀（如 `✅ gist 节点 · 泰尔三网测速`）。
+四个入参留空时行为与定时轮完全一致（写本工作流 Gist、标题不带前缀）。
+
 ### 可调参数（均有默认值）
 
 | env | 默认 | 说明 |
