@@ -1297,12 +1297,21 @@ _batch_consolidate() {
   # 顽固缺失 ⇒ 后端级写入故障（如 wopan175 全量 405: OpenList WebDAV 层拒收
   # PUT，rclone 报 "unchunked simple update failed: Method Not Allowed"）。
   # 置 BATCH_BACKEND_DEAD 由调用方 sync_by_file_batches 中止剩余批次并标记
-  # 同步对失败，避免每批烧数十分钟（run 32904752243 实锤）。
+  # 同步对失败，避免每批烧数十分钟（run 32904752243 实锤）；同时置
+  # SYNC_BACKEND_DEAD 让 run_all_tasks 立即让路并经 F6 跨轮跳过该后端。
   # 注意: 熔断只中止"剩余批次"——本批顽固缺失仍转修复管线换方法（2026-08-31
   # 用户规格: 直接传输没成功就要进修复管线，不因后端级拒收豁免; 方法黑名单
   # 自带全拉黑重置兑底，死后端误拉黑不会永久锁死方法）。
   if [ "$_truth_confirmed" -eq 1 ] && [ "$stubborn_n" -ge 3 ] && [ "$touched_n" -gt 0 ] && [ "$stubborn_n" -ge "$touched_n" ]; then
     BATCH_BACKEND_DEAD=1
+    # 同时置 SYNC_BACKEND_DEAD: 这是全库可信度最高的"后端本轮不可写"证据
+    # （容器重启后复核，本批触碰文件 100% 未落盘），比入口写探针更硬——run
+    # 34770092689 实锤探针通过而整批 1036 个触碰文件零落盘。置位后 run_all_tasks
+    # 立即后移游标，并经 F6 写入 backend_dead.json，让后续轮次直接跳过该后端的
+    # 全部同步对。不置位时 F6 只能等修复管线的目录级熔断，而同轮实测它晚至
+    # 19:39（开跑 ~2.5h 后）才触发——死后端照样把本轮大半预算吃掉。
+    # 不改 F5 既有语义: 本批顽固缺失仍转修复管线（下方），不因后端级拒收豁免。
+    SYNC_BACKEND_DEAD=1
     echo "🛑 ${label} 巩固: 后端写入全拒（${stubborn_n}/${touched_n} 个触碰文件经复核全部未落盘）→ 已请求中止剩余批次"
   fi
 

@@ -12,7 +12,8 @@
 #   8. 重试后仍未落盘（后端内容性拒收）→ 顽固缺失转修复管线（换方法）
 #   9. 重试一个都没成功 → 全部直接转修复管线（不二次重启复核）
 #   10. 后端写入全拒（≥3 触碰文件 0 落盘 + 重试 0 成功）→ 置 BATCH_BACKEND_DEAD
-#       （中止剩余批次；本批顽固缺失仍进修复管线）
+#       （中止剩余批次；本批顽固缺失仍进修复管线）+ SYNC_BACKEND_DEAD
+#       （run_all_tasks 立即让路并经 F6 跨轮跳过该后端）
 #   11. 修复管线后重启复核: 假成功剔除 + 方法拉黑
 #   12. 复核重启失败 → 保留修复成果不误删
 #   13. 全批 405 直接失败（0 Copied、≥3 文件）→ 不再跳过巩固: 重启复核+串行重试,
@@ -125,8 +126,10 @@ run_consolidate() {
   local batch_dir="$BC_DIR"
   local extra_args=(--delete-before)
   BATCH_BACKEND_DEAD=0
+  SYNC_BACKEND_DEAD=0
   _batch_consolidate "$1" "$2"
   echo "${BATCH_BACKEND_DEAD:-0}" > /tmp/bc_backend_dead
+  echo "${SYNC_BACKEND_DEAD:-0}" > /tmp/bc_sync_backend_dead
 }
 
 setup() {
@@ -287,6 +290,7 @@ RETRY_COPY_OK=0         # 串行重试全部 405
 OUT=$(run_consolidate 0 "$LOG")
 [ "$(calls /tmp/bc_copy_calls)" = "1" ] && ok "10a 串行重试执行" || bad "10a: copy=$(calls /tmp/bc_copy_calls)"
 [ "$(cat /tmp/bc_backend_dead 2>/dev/null)" = "1" ] && ok "10b 全拒 → 置 BATCH_BACKEND_DEAD" || bad "10b: dead=$(cat /tmp/bc_backend_dead 2>/dev/null)"
+[ "$(cat /tmp/bc_sync_backend_dead 2>/dev/null)" = "1" ] && ok "10f 全拒 → 置 SYNC_BACKEND_DEAD（供 F6 跨轮熔断）" || bad "10f: sync_dead=$(cat /tmp/bc_sync_backend_dead 2>/dev/null)"
 [ "$(calls /tmp/bc_fixpipe_calls)" = "1" ] && ok "10c 全拒熔断 → 本批顽固缺失仍进修复管线" || bad "10c: fixpipe=$(calls /tmp/bc_fixpipe_calls)"
 echo "$OUT" | grep -q "后端写入全拒" && ok "10d 全拒提示" || bad "10d: $OUT"
 echo "$OUT" | grep -q "已请求中止剩余批次" && ok "10e 中止剩余批次提示" || bad "10e: $OUT"
@@ -368,6 +372,7 @@ OUT=$(run_consolidate 0 "$LOG")
 [ "$(calls /tmp/bc_copy_calls)" = "1" ] && ok "13b 刷新驱动后串行重试执行" || bad "13b: copy=$(calls /tmp/bc_copy_calls)"
 [ "$(cat /tmp/bc_backend_dead 2>/dev/null)" = "1" ] && ok "13c 100% 缺失+重试 0 成功 → 后端全拒熔断" || bad "13c: dead=$(cat /tmp/bc_backend_dead 2>/dev/null)"
 [ "$(calls /tmp/bc_fixpipe_calls)" = "1" ] && ok "13d 熔断 → 本批顽固缺失仍进修复管线" || bad "13d: fixpipe=$(calls /tmp/bc_fixpipe_calls)"
+[ "$(cat /tmp/bc_sync_backend_dead 2>/dev/null)" = "1" ] && ok "13f 全拒 → 置 SYNC_BACKEND_DEAD" || bad "13f: sync_dead=$(cat /tmp/bc_sync_backend_dead 2>/dev/null)"
 echo "$OUT" | grep -q "直接失败 4 个" && ok "13e 巩固入口提示含直接失败数" || bad "13e: $OUT"
 
 # --- 场景14: 全批 405 但不足熔断门槛（<3 文件）→ 顽固缺失转修复管线 ---
@@ -402,6 +407,7 @@ RETRY_COPY_OK=0
 OUT=$(run_consolidate 0 "$LOG")
 [ "$(cat /tmp/bc_backend_dead 2>/dev/null)" = "1" ] && ok "15a 100% 缺失+重试 0 成功 → 熔断触发（不再区分错误类型）" || bad "15a: dead=$(cat /tmp/bc_backend_dead 2>/dev/null)"
 [ "$(calls /tmp/bc_fixpipe_calls)" = "1" ] && ok "15b 熔断下本批仍转修复管线" || bad "15b: fixpipe=$(calls /tmp/bc_fixpipe_calls)"
+[ "$(cat /tmp/bc_sync_backend_dead 2>/dev/null)" = "1" ] && ok "15d 全拒 → 置 SYNC_BACKEND_DEAD" || bad "15d: sync_dead=$(cat /tmp/bc_sync_backend_dead 2>/dev/null)"
 echo "$OUT" | grep -q "后端写入全拒" && ok "15c 全拒提示" || bad "15c: $OUT"
 
 echo "-----"
