@@ -41,10 +41,23 @@ on:
         type: boolean
         default: true
       transfers:
-        description: "同步模式: OpenList 目标端 rclone 并发上传数（默认 1 串行=最保守；wopan176 保持 1——run 32749862280 整批假成功事故后端。baidupan/wopan175 可先在调试模式单任务试 2，truth-check 会兜底暴露假成功）"
+        # 默认 1 → 4（2026-09-14 用户批准并发提速 + 诊断给出可行条件）:
+        #   诊断实测（openlist-diag 34814298033，wopan176Crypt/2）:
+        #     · 新目录 × transfers=4 × retries=1 → 失败，`Update mkParentDir failed:
+        #       Locked: 423 Locked`（多个 worker 同时 mkdir 同一个新目录的竞争锁）
+        #     · 已存在目录 × transfers=4 × retries=1 → **通过**
+        #     · 新目录 × transfers=4 × retries=3 → **通过**
+        #   ⇒ 并发本身可用，前提是给足重试（已在 rclone_flags.sh 把
+        #   --retries 1→3、--low-level-retries 3→5 统一抬升）。
+        #   串行基线仅 ≈1.07 文件/s（0.93s/文件），并发上限按 ×4 计。
+        #   历史包袱: run 32749862280 的 wopan176 整批假成功事故是"并发=1"的依据，
+        #   但那次的成因一直未定位；现在有 truth-check（重启取真值）+ F5 全拒熔断
+        #   + F6 跨轮熔断 兜底，假成功会被当场暴露并熔断，不再是静默事故。
+        #   某后端若仍出现假成功，用本入参单独降回 1。
+        description: "同步模式: OpenList 目标端 rclone 并发上传数（默认 4；诊断证明 423 只发生在“新目录+重试不足”的组合，已把重试抬到 retries=3/low-level=5。某后端若现假成功，单独降回 1）"
         required: false
         type: choice
-        default: "1"
+        default: "4"
         options:
           - "1"
           - "2"
@@ -187,7 +200,9 @@ jobs:
       OPENLIST_ADMIN_PASSWORD: ${{ secrets.OPENLIST_ADMIN_PASSWORD }}
 
       # 并发参数
-      OPENLIST_TRANSFERS: ${{ inputs.transfers || '1' }}
+      # 兜底值必须与入参默认一致（4）: schedule 触发时 inputs.transfers 为空串，
+      # 兜底留 1 会让定时轮又退回串行（并发提速只在手动轮生效）。
+      OPENLIST_TRANSFERS: ${{ inputs.transfers || '4' }}
       OPENLIST_CHECKERS: "8"
       # auto-split 顶层子目录并行数（1=串行，行为与历史版本一致）
       OPENLIST_SUBDIR_PARALLEL: ${{ inputs.subdir_parallel || '1' }}

@@ -208,12 +208,12 @@ sync_with_logging() {
     local openlist_guard_flags=()
     if [[ "$dest_path" == openlist:* ]]; then
       openlist_guard_flags=(
-        "--transfers" "${OPENLIST_TRANSFERS:-1}"
+        "--transfers" "${OPENLIST_TRANSFERS:-4}"
         "--checkers" "${OPENLIST_CHECKERS:-8}"
         "--contimeout" "30s"
         "--timeout" "30m"
       )
-      echo "OpenList 目标端：启用低并发保护 (transfers=${OPENLIST_TRANSFERS:-1}, checkers=${OPENLIST_CHECKERS:-8}, timeout=30m)" | tee -a "$LOG_FILENAME"
+      echo "OpenList 目标端：启用低并发保护 (transfers=${OPENLIST_TRANSFERS:-4}, checkers=${OPENLIST_CHECKERS:-8}, timeout=30m)" | tee -a "$LOG_FILENAME"
 
       # 同步前主动刷新 OpenList 驱动 token
       # wopan176 的 OAuth access token 有效期约 5 分钟，长时间同步会过期
