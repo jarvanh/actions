@@ -34,12 +34,16 @@ job，gistnodes 侧拿不到测速结果。抓取情况走 job 摘要与 artifac
    解析服务端渲染的 `.gist-snippet` 块拿 owner / gist id / 最后活跃时间，只保留最近
    `GIST_NODES_MAX_AGE_HOURS` 小时（默认 24）内更新过的；取文并数出「像订阅」的文件，
    不够 `GIST_NODES_TARGET_SUBS`（默认 100）就继续下一轮，直到凑够、或所有关键词都
-   到头、或翻满 `GIST_NODES_MAX_PAGES`（默认 40，安全上限）。
+   到头、或翻满 `GIST_NODES_MAX_PAGES`（默认 40，安全上限）、或撞上下面两条收口。
    **为什么要交织而不是先搜完再取**：搜索结果前排混着大量噪声 Gist（正文是 JSON 统计，
    只因含 `ss://` 字样被搜到），它们产出 0 个订阅文件；只有取文后数真订阅才知道够没够，
    固定「先搜 N 个 Gist」的配额要么拿不满、要么白搜一堆。
    关键词「到头」有两个判据：正常返回却一块都没有（翻到末页），或整页全部超龄
-   （排序是 `s=updated` 降序，这一页都旧了，后面只会更旧）。**被限流不算到头**；
+   （排序是 `s=updated` 降序，这一页都旧了，后面只会更旧）。**被限流不算到头**。
+   **另有两条收口，保证一轮不会拖垮 job**：`GIST_NODES_BUDGET_SECONDS`（默认 900 =
+   15 分钟）的墙钟预算到点即停；`GIST_NODES_NO_PROGRESS_ROUNDS`（默认 4）轮订阅文件数
+   零增长即停。两者都只意味着「抓到的比目标少」，会拿已抓到的文件继续走完 Sub-Store
+   产出与发布——**不是失败**（见「失败语义」）；
 2. **取文**：GitHub API `GET /gists/{id}` 拿各文件 `raw_url` 再取正文（并发 8 路；
    匿名 60 次/h 会被限流，故带 `PAT`）；
 3. **过滤**：只放行「像订阅」的文件——含协议 scheme（`ss://` 等）或 Clash 的 `proxies:` 段，
@@ -103,7 +107,7 @@ GET 即可（secret Gist 的 raw URL 无需鉴权——不可猜的 URL 本身�
 而是「当前窗口内按请求随机拒」**——实测连打 12 次得到 `429,200,200,429,429,200,...`，
 同一个 URL 上一秒被拒、下一秒就成功。它同时也是**唯一**的发现入口
 （`github.com/search?type=gists` 是登录墙，带 token 请求搜索页也没有特殊配额）。
-据此分四层应对：
+据此分五层应对：
 
 | 层 | 机制 | 作用 |
 |---|---|---|
@@ -111,6 +115,7 @@ GET 即可（secret Gist 的 raw URL 无需鉴权——不可猜的 URL 本身�
 | 2 | 单页重试 `GIST_NODES_RETRIES`（默认 4）次，退避 `GIST_NODES_BACKOFF_BASE` 指数增长（5/10/20/40 秒）+ 抖动 | 随机限流下重试命中率很高 |
 | 3 | **补一轮**：本批被限流跳过的页，批末立刻再试一次 | 调用方下一轮会把 `page_from` 翻过去，不补这一页的结果就永远丢了 |
 | 4 | 两轮都失败的页记进 `gist_nodes_search_page_dropped` | 不静默丢：日志能看出丢了哪几页 |
+| 5 | **批内熔断** `GIST_NODES_MAX_CONSECUTIVE_LIMITED`（默认 3）：同一批里连续这么多页都是 429，就中止本批剩余页、**并跳过「补一轮」** | 限流按出口 IP、是全局状态，连续多页全中说明正处在窗口期，此时再打就是撞同一堵墙。这一层是纯止血：实测某批 10 页全中，单批吃掉 **988 秒**（16.5 分钟，占 job 预算一半），其中约 850 秒花在重试退避与「补一轮」里那个被封顶到 60 秒的节流等待上 |
 
 **`Retry-After` 只记不用**：429 响应确实带这个头，但实测值**恒为 `3600`**，而紧接着的
 下一个请求就 200——它是静态默认值，不是真实建议。照它睡 1 小时会让 job 直接超时，
@@ -153,6 +158,9 @@ Gist 分工：`gitee` / `cdn` / `taier` 三套各自的 Gist 只装**它们定�
 | `GIST_NODES_TARGET_SUBS` | `100` | 目标：凑够多少个「像订阅」的文件（`0` = 不限） |
 | `GIST_NODES_MAX_PAGES` | `40` | 每个关键词最多翻几页（安全上限） |
 | `GIST_NODES_PAGES_PER_ROUND` | `2` | 每轮每个关键词翻几页 |
+| `GIST_NODES_BUDGET_SECONDS` | `900` | 抓取阶段的**墙钟预算**（秒，`0` = 不限）。到点收摊、拿已抓到的文件继续产出。**与 job 的 `timeout-minutes`（30 分钟）成对**，改一个要回头看另一个 |
+| `GIST_NODES_NO_PROGRESS_ROUNDS` | `4` | 连续多少轮订阅文件数零增长就收摊（`0` = 不限） |
+| `GIST_NODES_MAX_CONSECUTIVE_LIMITED` | `3` | 同一批连续多少页被限流就熔断本批、并跳过「补一轮」（`0` = 不限） |
 | `GIST_NODES_SORT` | `updated` | 搜索排序 |
 | `GIST_NODES_MAX_AGE_HOURS` | `24` | 只收最近 N 小时内更新过的 Gist（`0` = 不限） |
 | `GIST_NODES_MAX_SUBS` | `0` | 最多投喂多少个订阅（`0` = 不限） |
@@ -179,11 +187,19 @@ dispatch 入参 `queries` / `max_nodes` / `test_nodes` / `target_subs` / `max_ag
 没有文件像订阅、Sub-Store 不可达、投喂全部失败、产出的不是 YAML、产出零节点、发布 Gist 失败。
 **与其让下游拿空订阅跑一轮 45 分钟测速，不如就地失败。**
 
+**但「到点收摊」不是失败。** 墙钟预算耗尽（`gist_nodes_gather_stop` 的 `reason=budget`）
+或连续多轮零增长（`reason=stall`）都只是「抓到的比目标少」，仍会拿已有的文件走完
+Sub-Store 产出与发布。为什么必须把这两者分开：job 超时是 GitHub **硬取消**，被取消时
+连已经抓到的几十个订阅文件也一起作废、下游三个测速 job 全 `skipped`，一次运行白跑；
+宁可少几个节点，也不要整轮报废。
+
 ## 运维与排查
 
 | 现象 | 看哪里 |
 |---|---|
 | 抓取阶段失败 | 日志里 `gist_nodes_*` 结构化行；`gist_nodes_search_empty` = 某关键词整页没解析出结果 |
+| 没凑够目标就收摊 | `gist_nodes_gather_stop`（`reason=budget` = 墙钟预算耗尽；`reason=stall` = 连续多轮零增长）。**这是正常收尾，不是故障**——`GIST_NODES_TARGET_SUBS` 是目标不是保证；先看 `gist_nodes_sources` 的 `stop_reason` / `rounds` / `elapsed` / `files` |
+| 一整批页被跳过 | `gist_nodes_search_batch_aborted`（连续 N 页被限流触发熔断，本批剩余页一个都不打）/ `gist_nodes_search_deferred_skipped`（`reason=batch_aborted` = 熔断不补一轮，`reason=budget` = 预算到点不补）。见到它们说明那一轮正处在限流窗口里，别当成抓取失败 |
 | 搜索页 429 | `gist_nodes_search_rate_limited`（含 `retry_after` 字段，只作诊断）/ `gist_nodes_search_deferred_total`（本批被限流跳过的页数 + `recovered` 补回来几个）/ `gist_nodes_search_page_dropped`（两轮都没捞回来，会列出 `ss://#3` 这样的具体页）。`gist_nodes_gather_round` 每轮打一次 `page_delay`，能直接看出节流器把间隔拉到了多少。**它是「一轮能抓多少」的主要瓶颈**——`GIST_NODES_TARGET_SUBS` 是目标不是保证 |
 | 某个关键词没产出 | `gist_nodes_search_stale_stop` = 整页超龄（该关键词到头）；`gist_nodes_search_empty` 已不再单独打点，末页由 `gist_nodes_gather_round` 的 `active` 计数下降体现 |
 | 去重没生效 | `gist_nodes_dedupe_no_effect`（解析数 ≥ 去重后数）。Sub-Store 对**未知算子只记日志不报错**，先查 `process` 里的算子名拼写 |
@@ -200,5 +216,7 @@ python .github/scripts/proxy-speedtest/tests/test_gist_nodes_substore.py
 
 用本地假 Sub-Store 跑通「投喂 → 组合 → 取回 → 发布」并做负向验证（409 / 非 YAML / 不可达必须失败）、
 边界验证（`MAX_NODES=0` 不出现限量算子；`MAX_AGE_HOURS=0` 不过滤）、判据验证（明文、base64 放行，
-XML plist、数据 JSON 挡掉）与时间窗口验证（超龄挡掉、整页超龄即停止翻页、配额按关键词均分）。
+XML plist、数据 JSON 挡掉）、时间窗口验证（超龄挡掉、整页超龄即停止翻页）与**抓取收口验证**
+（墙钟预算 / 零增长 / 批内熔断各自生效；三者都配了「关闭该收口 → 一路翻满 `GIST_NODES_MAX_PAGES`」
+的负向对照，否则判据恒真也看不出来）。
 真实容器只在 runner 上起，本地改完靠它兜底；退出码 0 = 全过。

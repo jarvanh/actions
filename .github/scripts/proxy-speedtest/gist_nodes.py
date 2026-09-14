@@ -40,6 +40,15 @@ Sub-Store 接口（读 backend/src/restful/*.js 得到，全部是无需鉴权�
   GIST_NODES_MAX_PAGES     每个关键词最多翻几页（默认 40；安全上限，正常靠凑够目标或
                            整页超龄提前停）
   GIST_NODES_PAGES_PER_ROUND 每轮每个关键词翻几页（默认 2）
+  GIST_NODES_BUDGET_SECONDS 抓取阶段的墙钟预算（默认 900 = 15 分钟；0 = 不限）。**必须
+                           显著小于 job 的 timeout-minutes**：到点就收摊，带着已经抓到
+                           的文件继续走 Sub-Store 产出，而不是等 GitHub 硬取消把整轮
+                           （含下游测速）一起废掉
+  GIST_NODES_NO_PROGRESS_ROUNDS 连续多少轮「订阅文件数零增长」就收摊（默认 4；0 = 不限）
+  GIST_NODES_MAX_CONSECUTIVE_LIMITED 同一批里连续多少页被限流就熔断本批、且跳过补一轮
+                           （默认 3；0 = 不限）。限流是按出口 IP 的全局状态，连续多页全中
+                           说明正处在限流窗口里，这时再打（尤其批末的「补一轮」）纯属白烧
+                           时间——实测一轮 988 秒里约 850 秒花在这里
   GIST_NODES_SORT          搜索排序（默认 updated = 最近更新）
   GIST_NODES_MAX_AGE_HOURS 只收最近 N 小时内更新过的 Gist（默认 24，0 = 不限）
   GIST_NODES_MAX_SUBS      最多投喂多少个订阅（默认 0 = 不限）
@@ -67,6 +76,11 @@ Sub-Store 接口（读 backend/src/restful/*.js 得到，全部是无需鉴权�
 
 失败语义：单个 Gist / 单个订阅失败只跳过它；Sub-Store 不可达、组合订阅产出失败、
 或最终一个节点都没有 → exit 1。与其让下游拿空订阅跑一轮 45 分钟测速，不如就地失败。
+
+**「到点收摊」不是失败**：墙钟预算耗尽、或连续多轮零增长而主动停止翻页，都只是
+「抓到的比目标少」，仍会拿已有的文件走完 Sub-Store 产出与发布。区分这两者的理由：
+job 超时是 GitHub 硬取消，被取消时连已经抓到的几十个订阅文件也一起作废、下游三个
+测速 job 全 skipped——一次运行白跑。宁可少几个节点，也不要整轮报废。
 """
 import base64
 import concurrent.futures
@@ -98,6 +112,29 @@ DEFAULT_SUB_STORE = 'http://127.0.0.1:3001'
 DEFAULT_MAX_AGE_HOURS = 24
 DEFAULT_TARGET_SUBS = 100
 DEFAULT_MAX_PAGES = 40
+# 抓取阶段的墙钟预算（秒）。为什么是 900：job 的 timeout-minutes 是 30 分钟，扣掉
+# 检出/装依赖约 1 分钟、Sub-Store 投喂+解析+发布最坏几分钟，留 15 分钟给抓取比较稳。
+# 这个数字与 workflow 里的 timeout-minutes 是**成对**的，改一个要回头看另一个。
+DEFAULT_BUDGET_SECONDS = 900
+# 连续多少轮「订阅文件数零增长」就收摊。为什么不是「一轮零增长就停」：深层页返回的
+# 常是已经见过的 Gist（fresh=0 且 stale=0，既不算「到头」也没产出），而下一轮仍可能
+# 有收获；但实测连续十几轮零增长是常态，所以 4 轮（= 每个关键词又白翻 8 页）足够
+# 判定「这个搜索面已经挖干了」。
+DEFAULT_NO_PROGRESS_ROUNDS = 4
+# 同一批里连续多少页被限流就熔断本批、并跳过批末的「补一轮」。为什么需要它：429 的
+# 重试成本是 35 秒/页（5/10/20 指数退避）+ 补一轮再来一遍，而节流器的额外间隔会被
+# 顶到封顶值，补一轮的每页还要先等一次 60 秒。实测某一批 10 个页全中，单批吃掉 988 秒
+# （16.5 分钟，占 job 预算一半）。连续 3 页全中已经足够说明是限流窗口而不是随机命中。
+DEFAULT_MAX_CONSECUTIVE_LIMITED = 3
+
+# 抓取阶段的收口原因 → 人话。写进 job 摘要，也方便按 gist_nodes_gather_stop 排查。
+STOP_REASON_NOTES = {
+    'target': '凑够目标',
+    'budget': '墙钟预算耗尽，停止翻页，拿已抓到的文件继续产出',
+    'stall': '连续多轮零增长，判定搜索面已挖干',
+    'active': '所有关键词都到头（翻到末页或整页超龄）',
+    'pages': '翻满 GIST_NODES_MAX_PAGES 上限',
+}
 
 # 搜索结果块：服务端渲染的 HTML，每块一个 Gist。
 SNIPPET_MARK = '<div class="gist-snippet">'
@@ -359,17 +396,26 @@ def fetch_search_page(query, page, sort, timeout, retries, backoff_base, pacer=N
 
 def search_gists(queries, pages, sort, timeout, retries=3,
                  max_age_hours=DEFAULT_MAX_AGE_HOURS, page_from=1,
-                 page_delay=0, backoff_base=5, seen=None, pacer=None):
+                 page_delay=0, backoff_base=5, seen=None, pacer=None,
+                 deadline=None,
+                 max_consecutive_limited=DEFAULT_MAX_CONSECUTIVE_LIMITED):
     """翻 `[page_from, page_from+pages)` 这几页，返回 (candidates, exhausted, dropped)。
 
     exhausted = 该关键词已经到头（正常返回却没有任何结果块，或整页全部超龄）。
     被限流不算到头 —— 限流是按请求随机的，所以本批内先补一轮，仍失败才记进 dropped。
 
-    三道收口：
+    五道收口：
       * max_age_hours：丢掉超龄条目；**整页全部超龄就停止该关键词翻页**——排序是
         `s=updated`（降序），这一页都旧了，后面的页只会更旧，继续翻纯属白挨 429。
       * pacer / page_delay：页与页之间的间隔，被限流时由 pacer 自动拉长、成功后回落。
       * 补一轮：本批被限流跳过的页立刻重试一次，只有两轮都失败的才进 dropped。
+      * **批内熔断** `max_consecutive_limited`：连续这么多页都是 429 就中止本批的
+        剩余页，**并且跳过补一轮**。判据是「限流按出口 IP，是全局状态」——连续多页
+        全中就不是随机命中而是窗口期，此时立刻再打（补一轮）恰好撞同一堵墙，而它的
+        成本极高（每页 35 秒退避 + 一次封顶 60 秒的节流等待）。熔断只记日志、不把这
+        些页塞进 dropped：dropped 的含义仍是「认真试过两轮还是失败」。
+      * **deadline**：墙钟预算，页与页之间、关键词与关键词之间都查一次。到点就停，
+        已拿到的结果照常返回——预算耗尽不该变成「这一轮白跑」。
 
     `seen` 跨轮传入，保证同一个 Gist 不会被两轮重复解析。
     """
@@ -382,6 +428,12 @@ def search_gists(queries, pages, sort, timeout, retries=3,
         pacer = SearchPacer(base=page_delay, ceiling=page_delay * 8)
     stale_total = 0
     skipped = []
+    consecutive_limited = 0
+    aborted = False
+
+    def expired():
+        """墙钟预算是否已耗尽。deadline=None（不限）时恒 False。"""
+        return bool(deadline) and time.monotonic() >= deadline
 
     def scan(query, page):
         """取一页并过滤，返回 (fresh 数, stale 数, status)；fresh 已并入 results。"""
@@ -403,14 +455,27 @@ def search_gists(queries, pages, sort, timeout, retries=3,
         return fresh, stale, status
 
     for query in queries:
+        if aborted or expired():
+            break
         for page in range(page_from, page_from + max(1, pages)):
+            if expired():
+                break
             fresh, stale, status = scan(query, page)
             if status == 'empty':
                 exhausted.add(query)
                 break
             if status == 'rate_limited':
                 skipped.append((query, page))
+                consecutive_limited += 1
+                if (max_consecutive_limited
+                        and consecutive_limited >= max_consecutive_limited):
+                    # 本批剩下的页一个都不打了：限流是出口 IP 的全局状态，不是按页的。
+                    aborted = True
+                    log_progress('gist_nodes_search_batch_aborted', query=query, page=page,
+                                 consecutive=consecutive_limited, limited=len(skipped))
+                    break
                 continue
+            consecutive_limited = 0
             stale_total += stale
             if stale and not fresh:
                 log_progress('gist_nodes_search_stale_stop', query=query, page=page,
@@ -423,22 +488,32 @@ def search_gists(queries, pages, sort, timeout, retries=3,
     # 为什么必须有这一轮：429 是按请求随机的（同一 URL 上一秒被拒、下一秒就成功），
     # 隔一会儿再打命中率很高；而调用方下一轮会把 page_from 翻过去，不补的话这一页的
     # 10 条结果就永远丢了 —— 实测那种「跳过就算了」的写法每轮会静默丢几页。
+    # **熔断后不补**：刚刚才连着 3 页全中，说明正处在限流窗口里，立刻重打就是撞同一
+    # 堵墙（节流器的额外间隔此时已被顶到封顶，补一轮的每页还要先白等一次）。
     dropped = []
-    for query, page in skipped:
-        pacer.wait()
-        fresh, stale, status = scan(query, page)
-        if status == 'rate_limited':
-            dropped.append((query, page))
-            continue
-        if status == 'empty':
-            exhausted.add(query)
-            continue
-        stale_total += stale
+    if aborted:
+        log_progress('gist_nodes_search_deferred_skipped', pages=len(skipped),
+                     reason='batch_aborted')
+    else:
+        for idx, (query, page) in enumerate(skipped):
+            if expired():
+                log_progress('gist_nodes_search_deferred_skipped', pages=len(skipped) - idx,
+                             reason='budget')
+                break
+            pacer.wait()
+            fresh, stale, status = scan(query, page)
+            if status == 'rate_limited':
+                dropped.append((query, page))
+                continue
+            if status == 'empty':
+                exhausted.add(query)
+                continue
+            stale_total += stale
 
     if stale_total:
         log_progress('gist_nodes_search_age_filtered', stale=stale_total,
                      max_age_hours=max_age_hours)
-    if skipped:
+    if skipped and not aborted:
         # 字段名避开 'skipped'：共享层 log_progress 的 _redact_value 按**子串**匹配敏感名，
         # 'ip' 是其中之一，任何含 'skipped' 的键都会被整条打成 ***（实测踩过）。
         log_progress('gist_nodes_search_deferred_total', deferred=len(skipped),
@@ -645,6 +720,11 @@ def main():
     target_subs = max(0, env_int(env, 'GIST_NODES_TARGET_SUBS', DEFAULT_TARGET_SUBS))
     max_pages = max(1, env_int(env, 'GIST_NODES_MAX_PAGES', DEFAULT_MAX_PAGES))
     pages_per_round = max(1, env_int(env, 'GIST_NODES_PAGES_PER_ROUND', 2))
+    budget = max(0, env_int(env, 'GIST_NODES_BUDGET_SECONDS', DEFAULT_BUDGET_SECONDS))
+    no_progress_limit = max(0, env_int(env, 'GIST_NODES_NO_PROGRESS_ROUNDS',
+                                       DEFAULT_NO_PROGRESS_ROUNDS))
+    max_consecutive_limited = max(0, env_int(env, 'GIST_NODES_MAX_CONSECUTIVE_LIMITED',
+                                             DEFAULT_MAX_CONSECUTIVE_LIMITED))
     max_subs = max(0, env_int(env, 'GIST_NODES_MAX_SUBS', 0))
     max_total_bytes = max(0, env_int(env, 'GIST_NODES_MAX_TOTAL_MB', 0)) * 1024 * 1024
     max_file_bytes = max(0, env_int(env, 'GIST_NODES_MAX_FILE_MB', 2)) * 1024 * 1024
@@ -674,6 +754,14 @@ def main():
     # 「先搜 N 个 Gist」的配额要么拿不满、要么白搜一堆；只有取文后数真订阅才知道够没够。
     # 每轮每个关键词翻 pages_per_round 页（轮转，保证各协议都有机会），取文后不够就
     # 继续下一轮；整页超龄或翻到末页的关键词退出轮转。
+    #
+    # 四个出口，前三个都是「收摊但不算失败」——继续拿已抓到的文件走完 Sub-Store：
+    #   target  凑够目标（正常收工）
+    #   budget  墙钟预算耗尽。**必须有**：只有「凑够」和「翻满 max_pages」两个出口时，
+    #           池子不够大的轮次会一路空翻到撞上 job 的 timeout-minutes，而 GitHub 超时
+    #           是硬取消 —— 已经抓到的几十个文件一起作废，下游三个测速 job 全 skipped
+    #   stall   连续 no_progress_limit 轮文件数零增长（深层页返回的全是见过的 Gist）
+    #   active / pages  所有关键词到头 / 翻满 max_pages（正常收工）
     active = list(queries)
     seen_ids = set()
     files = []
@@ -683,16 +771,28 @@ def main():
     # 跨轮共用一个 pacer：限流状态是全局的（按出口 IP），不该每轮从零开始学。
     pacer = SearchPacer(base=page_delay, ceiling=pacing_ceiling)
     page_from = 1
+    rounds = 0
+    no_progress = 0
+    stop_reason = ''
+    gather_started = time.monotonic()
+    deadline = (gather_started + budget) if budget else None
     while active and page_from <= max_pages:
+        if deadline and time.monotonic() >= deadline:
+            stop_reason = 'budget'
+            break
+        rounds += 1
         cands, exhausted, dropped = search_gists(
             active, pages_per_round, sort, timeout, retries, max_age_hours,
             page_from=page_from, page_delay=page_delay, backoff_base=backoff_base,
-            seen=seen_ids, pacer=pacer)
+            seen=seen_ids, pacer=pacer, deadline=deadline,
+            max_consecutive_limited=max_consecutive_limited)
         active = [q for q in active if q not in exhausted]
         candidates_total += len(cands)
         dropped_total += len(dropped)
+        grew = 0
         if cands:
             new_files, local = collect_all(cands, token, timeout, max_file_bytes, workers)
+            grew = len(new_files)
             files.extend(new_files)
             for k in STAT_KEYS:
                 stats[k] += local[k]
@@ -700,12 +800,25 @@ def main():
                      candidates=len(cands), files=len(files), target=target_subs,
                      page_delay=round(pacer.delay, 1), dropped=dropped_total)
         if target_subs and len(files) >= target_subs:
+            stop_reason = 'target'
+            break
+        no_progress = 0 if grew else no_progress + 1
+        if no_progress_limit and no_progress >= no_progress_limit:
+            stop_reason = 'stall'
             break
         page_from += pages_per_round
 
+    gather_elapsed = round(time.monotonic() - gather_started, 1)
+    if not stop_reason:
+        stop_reason = 'active' if not active else 'pages'
+    if stop_reason in ('budget', 'stall'):
+        log_progress('gist_nodes_gather_stop', reason=stop_reason, rounds=rounds,
+                     elapsed=gather_elapsed, files=len(files), target=target_subs,
+                     no_progress=no_progress, page_from=page_from, budget=budget)
     log_progress('gist_nodes_sources', **stats, files=len(files),
                  candidates=candidates_total, target=target_subs,
-                 dropped_pages=dropped_total, final_page_delay=round(pacer.delay, 1))
+                 dropped_pages=dropped_total, final_page_delay=round(pacer.delay, 1),
+                 rounds=rounds, elapsed=gather_elapsed, stop_reason=stop_reason)
     if not candidates_total:
         if max_age_hours:
             fail(f'没有解析出任何「最近 {max_age_hours} 小时内更新」的 Gist'
@@ -765,6 +878,10 @@ def main():
         'max_age_hours': max_age_hours,
         'target_subs': target_subs,
         'max_pages': max_pages,
+        'gather': {'rounds': rounds, 'elapsed_seconds': gather_elapsed,
+                   'stop_reason': stop_reason, 'budget_seconds': budget,
+                   'no_progress_rounds': no_progress_limit,
+                   'max_consecutive_limited': max_consecutive_limited},
         'collection': collection,
         'process': process,
         'stats': stats,
@@ -804,6 +921,10 @@ def main():
         f'- 时间窗口：{"最近 " + str(max_age_hours) + " 小时内更新" if max_age_hours else "不限"}；'
         f'候选 Gist：{candidates_total}，实际解析：{stats["gists_scanned"]}（失败 {stats["gist_errors"]}）',
         f'- 真订阅：目标 {target_subs or "不限"}，实际拿到 **{len(files)}** 个订阅文件',
+        f'- 抓取收口：`{stop_reason}`（{rounds} 轮 / {gather_elapsed} 秒'
+        + (f'，预算 {budget} 秒' if budget else '，预算不限') + '）'
+        + ('' if stop_reason == 'target' else ' —— 未凑够目标是正常的：'
+           f'`{STOP_REASON_NOTES.get(stop_reason, stop_reason)}`'),
         f'- 投喂订阅：{stats["subs_created"]} 个（失败 {stats["subs_failed"]}，'
         f'{round(stats["bytes_pushed"] / 1048576, 1)} MB）',
         f'- Sub-Store 解析：{parsed_count} 个节点 → 去重/清理后：**{len(proxies)}**'

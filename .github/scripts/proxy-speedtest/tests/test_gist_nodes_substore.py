@@ -20,6 +20,11 @@
      不算到头（限流是按请求随机的）；
   9. 429 抗性：本批内「补一轮」把被限流的页捞回来、两轮都失败才记进 dropped；
      节流器被限流翻倍 / 成功折半 / 封顶 / base=0 时不引入等待。
+ 10. 抓取收口（15–17，用真实 search_gists 驱动主循环）：
+     * 墙钟预算到点收摊，仍拿已抓到的文件走完产出（退出码 0，不是失败）；
+     * 连续 N 轮文件数零增长即停；
+     * 同一批连续 3 页被限流就熔断本批、且不补一轮。
+     三者都配了「关闭该收口 → 一路翻满 max_pages」的负向对照，否则判据恒真也看不出来。
 
 跑法：python .github/scripts/proxy-speedtest/tests/test_gist_nodes_substore.py
 退出码 0 = 全部通过。
@@ -32,6 +37,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -159,6 +165,51 @@ def run_main(gist_nodes, tmpdir, extra_env):
     if path.exists():
         nodes_json = json.loads(path.read_text(encoding='utf-8'))
     return code, uploaded.get('text', ''), nodes_json
+
+
+def run_main_real_search(gist_nodes, tmpdir, extra_env):
+    """跑一次 main()，但**保留真实的 search_gists**（页面由调用方 mock 的 http_get 供）。
+
+    用途：15–17 验的是主循环的收口逻辑（墙钟预算 / 无进展 / 批内熔断），它长在 main()
+    里、又依赖真实的 search_gists 才能被驱动，所以不能像 run_main 那样把 search_gists
+    换成假实现——那等于把被测对象本身 mock 掉了。这里只换 collect_all（把候选 Gist 直接
+    折算成订阅文件，不真的取文）与 update_gist（不真的发布）。
+
+    返回 (退出码, 上传的 YAML, 真实搜索页请求次数由调用方的 mock 记录)。
+    """
+    uploaded = {}
+
+    def fake_update_gist(env, yaml_text=''):
+        uploaded['text'] = yaml_text
+        return {'ok': True, 'id': 'fakeid', 'html_url': 'https://gist.github.com/fake',
+                'yaml': {'filename': 'x.yaml', 'raw_url': 'https://gist.githubusercontent.com/x'}}
+
+    def fake_collect(cands, *a, **k):
+        n = len(cands)
+        return ([('f%d-%d' % (len(cands), i), 'ss://x@1.1.1.1:1#n') for i in range(n)],
+                dict.fromkeys(gist_nodes.STAT_KEYS, 0) | {'gists_scanned': n, 'files_kept': n})
+
+    orig = (gist_nodes.collect_all, gist_nodes.update_gist)
+    gist_nodes.collect_all = fake_collect
+    gist_nodes.update_gist = fake_update_gist
+
+    env = dict(os.environ)
+    env.update({'GIST_NODES_WORKDIR': str(tmpdir), 'GIST_NODES_DRY_RUN': '0',
+                'GH_TOKEN': 'fake', 'GIST_NODES_PAGE_DELAY': '0',
+                'GIST_NODES_MAX_NODES': '0', 'GIST_NODES_QUERIES': 'ss://'})
+    env.update(extra_env)
+    saved = dict(os.environ)
+    os.environ.update(env)
+    try:
+        gist_nodes.main()
+        code = 0
+    except SystemExit as e:
+        code = e.code or 0
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+        gist_nodes.collect_all, gist_nodes.update_gist = orig
+    return code, uploaded.get('text', '')
 
 
 def posts(kind):
@@ -405,6 +456,130 @@ def main():
         pc0 = gist_nodes.SearchPacer(base=0, ceiling=0)
         pc0.penalty()
         check(pc0.delay == 0, f'base=0 时不引入等待（{pc0.delay}）')
+
+        # ---- 15–17：主循环的三个收口。用真实 search_gists 驱动，页面由 mock 的
+        # http_get 供；断言落在「翻到第几页」「请求了几次」上——那是收口是否真的
+        # 生效的直接证据，比对耗时断言稳（不受机器快慢影响）。
+        print('== 15. 墙钟预算：到点收摊，但拿已抓到的文件走完产出 ==')
+        base_env = {'SUB_STORE_BACKEND_URL': base, 'GIST_NODES_MAX_PAGES': '40',
+                    'GIST_NODES_MAX_AGE_HOURS': '24'}
+        asked_budget = []
+
+        def slow_pages(url, **kw):
+            n = page_number(url)
+            asked_budget.append(n)
+            time.sleep(1.2)  # 每页 1.2 秒 > 预算 1 秒 → 第 2 页起必然已过期
+            return make_search_page([('o%d' % n, hexid(n), fresh_1h)])
+
+        gist_nodes.http_get = slow_pages
+        code, uploaded = run_main_real_search(
+            gist_nodes, tmpdir, base_env | {'GIST_NODES_BUDGET_SECONDS': '1'})
+        check(code == 0, '退出码 0（预算耗尽 ≠ 失败）')
+        check(asked_budget == [1], f'预算 1 秒只翻到第 1 页就收摊（实际 {asked_budget}）')
+        check(uploaded == YAML_BODY, '仍拿已抓到的文件走完了 Sub-Store 产出与发布')
+
+        print('== 15b. 负向对照：预算不限时必须一路翻满 max_pages ==')
+        asked_free = []
+
+        def fast_pages(url, **kw):
+            n = page_number(url)
+            asked_free.append(n)
+            return make_search_page([('o%d' % n, hexid(n), fresh_1h)])
+
+        gist_nodes.http_get = fast_pages
+        code, _ = run_main_real_search(
+            gist_nodes, tmpdir, base_env | {'GIST_NODES_BUDGET_SECONDS': '0'})
+        check(code == 0, '退出码 0')
+        check(asked_free == list(range(1, 41)),
+              f'预算 0 = 不限，翻满 40 页（实际 {len(asked_free)} 页）')
+
+        print('== 16. 连续 N 轮零增长即收摊（深层页只剩见过的 Gist）==')
+        asked_stall = []
+
+        def dup_deep(url, **kw):
+            n = page_number(url)
+            asked_stall.append(n)
+            if n <= 2:
+                return make_search_page([('o1', hexid(1), fresh_1h), ('o2', hexid(2), fresh_1h)])
+            return make_search_page([('o1', hexid(1), fresh_1h)])  # 老面孔，seen 会滤掉
+
+        gist_nodes.http_get = dup_deep
+        code, _ = run_main_real_search(
+            gist_nodes, tmpdir, base_env | {'GIST_NODES_BUDGET_SECONDS': '0',
+                                            'GIST_NODES_NO_PROGRESS_ROUNDS': '4'})
+        check(code == 0, '退出码 0')
+        check(asked_stall == list(range(1, 11)),
+              f'零增长满 4 轮即停（第 5 轮 page_from=9 → 最远第 10 页；实际 {asked_stall}）')
+
+        print('== 16b. 负向对照：关闭该收口时必须一路翻满 max_pages ==')
+        asked_stall2 = []
+
+        def dup_deep2(url, **kw):
+            n = page_number(url)
+            asked_stall2.append(n)
+            if n <= 2:
+                return make_search_page([('o1', hexid(1), fresh_1h), ('o2', hexid(2), fresh_1h)])
+            return make_search_page([('o1', hexid(1), fresh_1h)])
+
+        gist_nodes.http_get = dup_deep2
+        code, _ = run_main_real_search(
+            gist_nodes, tmpdir, base_env | {'GIST_NODES_BUDGET_SECONDS': '0',
+                                            'GIST_NODES_NO_PROGRESS_ROUNDS': '0'})
+        check(code == 0, '退出码 0')
+        check(max(asked_stall2) == 40, f'零增长收口关闭后翻满 40 页（实际最远 {max(asked_stall2)}）')
+
+        print('== 17. 批内熔断：连续 3 页被限流就中止本批且不补一轮 ==')
+        # 必须两个关键词：pages_per_round=2 时单关键词一批只有 2 页，连续计数到不了 3。
+        two_q_env = {'SUB_STORE_BACKEND_URL': base, 'GIST_NODES_MAX_PAGES': '40',
+                     'GIST_NODES_MAX_AGE_HOURS': '24', 'GIST_NODES_BUDGET_SECONDS': '0',
+                     'GIST_NODES_NO_PROGRESS_ROUNDS': '4', 'GIST_NODES_QUERIES': 'ss://,vless://'}
+        qid = {'ss://': 1, 'vless://': 2}
+        reqs = []
+
+        def limited_deep(url, **kw):
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+            q = qs.get('q', [''])[0]
+            n = int(qs.get('page', ['1'])[0])
+            reqs.append((q, n))
+            if n <= 2:
+                return make_search_page([('o', hexid(qid[q] * 10 + n), fresh_1h)])
+            raise urllib.error.HTTPError(url, 429, 'Too Many Requests', {}, None)
+
+        gist_nodes.http_get = limited_deep
+        try:
+            gist_nodes.time.sleep = lambda sec: None  # 退避是 5/10/20 秒，不能真等
+            code, _ = run_main_real_search(gist_nodes, tmpdir, two_q_env)
+        finally:
+            gist_nodes.time.sleep = real_sleep
+        check(code == 0, '退出码 0')
+        check(('vless://', 4) not in reqs,
+              f'熔断后本批剩余页一个都不打（vless:// 第 4 页被跳过；实际请求 {sorted(set(reqs))[:6]}…）')
+        check(reqs.count(('ss://', 3)) == 4,
+              f'只跑满 4 次重试、没有补一轮（否则是 8 次；实际 {reqs.count(("ss://", 3))}）')
+
+        print('== 17b. 负向对照：关闭熔断时会补一轮（请求数翻倍）==')
+        reqs2 = []
+
+        def limited_deep2(url, **kw):
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+            q = qs.get('q', [''])[0]
+            n = int(qs.get('page', ['1'])[0])
+            reqs2.append((q, n))
+            if n <= 2:
+                return make_search_page([('o', hexid(qid[q] * 10 + n), fresh_1h)])
+            raise urllib.error.HTTPError(url, 429, 'Too Many Requests', {}, None)
+
+        gist_nodes.http_get = limited_deep2
+        try:
+            gist_nodes.time.sleep = lambda sec: None
+            code, _ = run_main_real_search(
+                gist_nodes, tmpdir, two_q_env | {'GIST_NODES_MAX_CONSECUTIVE_LIMITED': '0'})
+        finally:
+            gist_nodes.time.sleep = real_sleep
+        check(code == 0, '退出码 0')
+        check(reqs2.count(('vless://', 4)) == 8,
+              f'熔断关闭 → 该页被请求 4（本批）+ 4（补一轮）次（实际 {reqs2.count(("vless://", 4))}）')
+        gist_nodes.http_get = real_http_get
     finally:
         server.shutdown()
         shutil.rmtree(tmpdir, ignore_errors=True)
