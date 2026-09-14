@@ -113,12 +113,16 @@ jobs:
       - name: Start Sub-Store backend
         # 只跑在本机回环上（-p 127.0.0.1），容器用完即删：不需要隧道、不需要 CORS 白名单、
         # 也不碰仓库里那套常驻 sub-store（那是给网页端用的，单宿主，会互相抢隧道）。
-        # 端口显式指定：镜像默认没设 SUB_STORE_BACKEND_API_PORT，不指定就得猜。
+        #
+        # **不要设 SUB_STORE_BACKEND_API_PORT / _HOST**：实测设了会让容器里的 http-meta
+        # 和后端抢同一个端口 —— 日志是「HTTP-META is running...」之后紧接
+        # `listen EADDRINUSE: address already in use 0.0.0.0:3001`，后端起来就死，
+        # 于是探测循环空转 60 秒（本工作流首次运行就栽在这）。
+        # 镜像自带默认值（后端 3001、http-meta 9876），仓库里常驻那套 sub-store.yml
+        # 就是不设这两个变量跑通的，照抄它的写法即可。
         run: |
           set -euo pipefail
           docker run -d --name sub-store \
-            -e SUB_STORE_BACKEND_API_PORT=3001 \
-            -e SUB_STORE_BACKEND_API_HOST=0.0.0.0 \
             -p 127.0.0.1:3001:3001 \
             xream/sub-store:http-meta
           for i in $(seq 1 30); do
@@ -129,7 +133,11 @@ jobs:
             sleep 2
           done
           echo "::error::Sub-Store 后端 60 秒内未就绪"
-          docker logs --tail 80 sub-store || true
+          # 失败时把容器状态与端口映射一并打出来：只看日志分不清「没起来」和「起来了但
+          # 端口不对」（首次运行就吃了这个亏 —— 日志里有 EADDRINUSE，却看不出谁占了端口）
+          docker ps -a --filter name=sub-store || true
+          docker port sub-store || true
+          docker logs --tail 200 sub-store || true
           exit 1
 
       - name: Fetch nodes and dedupe via Sub-Store
