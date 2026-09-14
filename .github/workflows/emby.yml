@@ -2299,8 +2299,25 @@ jobs:
           declare -A DSEEN=()
           declare -A SEG2=()   # 诊断用：拿得到 Path 的条目按「前两级目录」计数（只进私有状态文件）
           echo "=== dir_cache 回填启动 上限 ${MAX_DIRS} 个目录 并发 ${PAR}（播放中 ${PAR_BUSY}）$(date '+%F %T')"
+          # 条目来源用 admin 级 /emby/Items，而不是 /Users/{id}/Items：
+          # 后者只返回**该用户可见**的库。EMBY_USER 是给探活/校验用的账号，用户客户端
+          # 登的是另一个账号——被单独授权的那个库整库都不会出现在它的结果里。实测：
+          # 遍历走完全部 83,310 条（834 页、无空页），唯一目录数却只有 1,734，用户实际
+          # 播放的那几个片源目录 0 命中；而缓存里 `3/av` 那几十个演员目录是「回看预热」
+          # 顺着 recent 路径一个个攒出来的，不是回填产物。
+          # admin 查询只取 Path/MediaSources，不需要用户上下文（playlog 取元数据
+          # 用的就是 /emby/Items?Ids=…）。保留原 user 查询作兜底。
+          ITEMS_URL="$EMBY/emby/Items?Recursive=true&SortBy=DateCreated&SortOrder=Descending&Limit=200&Fields=Path,MediaSources&api_key=$KEY"
+          USER_URL="$EMBY/emby/Users/$USER_ID/Items?Recursive=true&SortBy=DateCreated&SortOrder=Descending&Limit=200&Fields=Path,MediaSources&api_key=$KEY"
+          ITEMS_SRC=admin
           while [ "$DIRS" -lt "$MAX_DIRS" ]; do
-            JSON=$(curl -s -m 30 "$EMBY/emby/Users/$USER_ID/Items?Recursive=true&SortBy=DateCreated&SortOrder=Descending&Limit=200&StartIndex=$IDX&Fields=Path,MediaSources&api_key=$KEY")
+            JSON=$(curl -s -m 30 "$ITEMS_URL&StartIndex=$IDX")
+            # admin 接口不可用（老版本 / 权限受限）时回退到原来的 user 查询
+            if [ "$ITEMS_SRC" = "admin" ] && ! printf '%s' "$JSON" | jq -e '.Items' >/dev/null 2>&1; then
+              echo "目录回填: admin 条目接口不可用，回退 /Users/{id}/Items $(date '+%T')"
+              ITEMS_SRC=user
+              JSON=$(curl -s -m 30 "$USER_URL&StartIndex=$IDX")
+            fi
             # Emby 偶发返回非 JSON（限流 / 500 / 半截响应）。此时 PATHS 也为空，
             # 与"真的翻到最后一页"无法区分——原写法直接 break，实测 60/400 就提前
             # 收工且不留任何结束行。这里单独识别：异常响应重试，连续 3 次才放弃。
@@ -2390,6 +2407,7 @@ jobs:
             echo "reason=${REASON:-达到上限 $MAX_DIRS}"
             echo "dirs_backfilled=${DIRS} max_dirs=${MAX_DIRS} pages=${IDX} empty_pages=${EMPTY_PAGES}"
             echo "graph_err_seen=${ERR_SEEN} gap=${GAP} par=${PAR}/${PAR_BUSY}"
+            echo "items_source=${ITEMS_SRC}"
             echo "items_with_path=${WITH_PATH} items_no_path=${NO_PATH} items_scanned=${IDX}"
             # 拿得到 Path 的条目按前两级目录的分布（最多 8 项，只进这个私有文件）
             for k in "${!SEG2[@]}"; do printf '%s %s\n' "${SEG2[$k]}" "$k"; done \
