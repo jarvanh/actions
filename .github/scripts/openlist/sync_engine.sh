@@ -62,6 +62,19 @@ _sync_retry_8005() {
       # 等待 token 生效
       sleep 10
 
+      # 刷新驱动后先用一次**便宜**的写探针决定要不要跑整次重传。
+      # 为什么必须先探: 后端真死时 run_rclone_sync_once 会把每个文件都试一遍才
+      # 报 8005——实测单次重试烧 48min（18:41→19:29，450MiB 重传、xfr#0 零落盘），
+      # 而探针 60s 内就能给出同样结论。探针通过才值得花那 48min。
+      # 必须清缓存: 同步前的入口探针已把 cache[$dest_path] 置 1（可写），
+      # 不清就会命中缓存直接返回"可写"，等于没探（键口径同 F21 修复）。
+      unset "_BACKEND_WRITE_PROBE_CACHE[$dest_path]"
+      if ! _backend_write_probe "$dest_path" "$LOG_FILENAME"; then
+        SYNC_BACKEND_DEAD=1
+        echo "  ▸ 刷新驱动后写探针仍失败: 判定该后端本轮不可写，跳过整次重传" | tee -a "$LOG_FILENAME"
+        break
+      fi
+
       # 刷新 OpenList 缓存
       _refresh_openlist_cache "$dest_path"
 
@@ -146,10 +159,13 @@ sync_with_logging() {
     SYNC_SKIPPED=0
     SYNC_TRANSFERRED_BYTES=0
     # 后端级熔断（写探针判定该后端本轮不可写）→ 置位供 run_all_tasks
-    # 立即后移轮转游标，而不是连续多轮把预算烧在同一个死后端上
-    local _be_root
-    _be_root=$(_backend_root_of "$dest_path" 2>/dev/null || echo "$dest_path")
-    [ "${_BACKEND_WRITE_PROBE_CACHE[$_be_root]:-}" = "0" ] && SYNC_BACKEND_DEAD=1
+    # 立即后移轮转游标，而不是连续多轮把预算烧在同一个死后端上。
+    # ⚠️ 键必须是 $dest_path（同步对路径），不能是 _backend_root_of 的结果:
+    #   _backend_write_probe 按「后端 × 路径」分层缓存（F4），写的是 cache[$dest_path]；
+    #   此处曾按后端根读，键对不上 ⇒ 判死信号恒丢 ⇒ SYNC_BACKEND_DEAD 永不置位
+    #   ⇒ 既不立即后移游标、也不调 _backend_dead_mark ⇒ 死后端只能靠
+    #   ROTATION_MAX_CONSECUTIVE_ATTEMPTS 阀门脱身（8 × 5.5h ≈ 44h，实测症状）。
+    [ "${_BACKEND_WRITE_PROBE_CACHE[$dest_path]:-}" = "0" ] && SYNC_BACKEND_DEAD=1
     return 0
   fi
 
@@ -264,9 +280,8 @@ sync_with_logging() {
     SYNC_FAILED=1
     SYNC_SKIPPED=0
     SYNC_TRANSFERRED_BYTES=0
-    local _be_root
-    _be_root=$(_backend_root_of "$dest_path" 2>/dev/null || echo "$dest_path")
-    [ "${_BACKEND_WRITE_PROBE_CACHE[$_be_root]:-}" = "0" ] && SYNC_BACKEND_DEAD=1
+    # 键口径与入口预检同（见上文注释）: 写探针按 $dest_path 缓存
+    [ "${_BACKEND_WRITE_PROBE_CACHE[$dest_path]:-}" = "0" ] && SYNC_BACKEND_DEAD=1
     return 0
   fi
 

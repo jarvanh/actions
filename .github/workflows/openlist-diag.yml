@@ -1,0 +1,137 @@
+# OpenList 后端可写性诊断（独立于主同步管线）
+#
+# 为什么单独一个 workflow:
+#   主 run 单轮 5.5h、且被 concurrency 单例串行化，任何"换个探针再跑一次"的
+#   验证都要排到几小时后；更要命的是主 run 日志里后端写失败只有包装后的
+#   "405 Method Not Allowed"，容器日志里的原始 rsp_code/rep_desc 从不落进
+#   run 日志 —— 于是「登录令牌失效」与「路径/名长被拒」在日志里长得一模一样。
+#   本 workflow 只做最小 setup（不装 cloudflared、不接管隧道、不回传数据库），
+#   单次约 4 分钟，专门用来把这几类失败形态分开。
+#
+# 与主 workflow 的隔离:
+#   - concurrency 用独立组名 openlist-diag，绝不与 openlist-singleton 互等；
+#   - 不安装 cloudflared、不碰隧道 → 不会把正在服务的实例挤下线；
+#   - 诊断用的 data.db 是从 dropbox 拉的一次性副本，全程不回传。
+name: openlist-diag
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "诊断目标路径（openlist: 前缀，默认 wopan176Crypt/2）"
+        required: false
+        type: string
+        default: "openlist:wopan176Crypt/2"
+      container:
+        description: "OpenList 容器名"
+        required: false
+        type: string
+        default: "openlist"
+      probe_gap:
+        description: "探针间隔秒数（后端限流时调大）"
+        required: false
+        type: string
+        default: "2"
+
+concurrency: openlist-diag
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    # 最小 setup ≈ 6 分钟 + 探针 ≈ 4 分钟；给足余量但不占用主轮预算
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      OPENLIST_ADMIN_PASSWORD: ${{ secrets.OPENLIST_ADMIN_PASSWORD }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: rclone-install
+        run: |
+          set -e
+          bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" install
+
+      - name: rclone-config
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE }}
+        run: |
+          set -e
+          # 与主 workflow 同一套配置来源: 本步骤会把远端写回 dropbox，
+          # 是幂等的（配置一致时无变更），且主 run 每轮都在做同一件事。
+          bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" config
+
+      - name: 验证远端连通
+        run: |
+          rclone lsf dropbox: | head -5
+
+      - name: 拉起 OpenList 容器（诊断副本）
+        env:
+          # inputs 一律经 env 传入（README「注入面」: 不做 ${{ }} 直接内插 bash）
+          OL_CONTAINER: ${{ inputs.container }}
+        run: |
+          set -e
+          docker rm -f "$OL_CONTAINER" 2>/dev/null || true
+          sudo mkdir -p /opt/openlist-data
+          sudo chmod 0777 /opt/openlist-data
+          # 与主 workflow 完全相同的拉库口径（含排除项），保证诊断对象就是生产
+          # 实际加载的那份配置 —— 用不同的库诊断等于测了个别的东西。
+          rclone copy dropbox:self-hosted/openlist/data /opt/openlist-data \
+            --exclude "data.db-wal" --exclude "data.db-shm" --exclude "data.db-journal" \
+            --exclude "log/**" --exclude "temp/**"
+          echo "拉取完成: $(ls -la /opt/openlist-data/ | tail -n +2 | wc -l) 个条目"
+          docker run -d --restart=no -v /opt/openlist-data:/opt/openlist/data \
+            -p 5244:5244 -e PUID=0 -e PGID=0 -e UMASK=022 \
+            --name="$OL_CONTAINER" openlistteam/openlist:latest
+
+      - name: 校验 OpenList 容器运行状态
+        run: |
+          set -e
+          source "$GITHUB_WORKSPACE/.github/scripts/openlist/load_all.sh"
+          echo "等待 OpenList 就绪..."
+          if wait_openlist_ready; then
+            echo "✅ OpenList 容器及 HTTP 服务正常就绪"
+          else
+            echo "❌ OpenList 容器未能就绪"
+            exit 1
+          fi
+
+      - name: 运行后端诊断探针
+        env:
+          DIAG_REPORT: /tmp/ol_diag/report.txt
+          DIAG_PROBE_GAP: ${{ inputs.probe_gap }}
+          DIAG_TARGET: ${{ inputs.target }}
+          OL_CONTAINER: ${{ inputs.container }}
+        run: |
+          # 恒 exit 0: 诊断结果写在报告里，探针失败不该让 step 变红（否则
+          # artifact 上传被跳过，最需要看的那份报告反而拿不到）
+          bash "$GITHUB_WORKSPACE/.github/scripts/openlist/diag_backend.sh" \
+            "$DIAG_TARGET" "$OL_CONTAINER" || true
+          echo ""
+          echo "=========== 报告尾部 ==========="
+          tail -40 /tmp/ol_diag/report.txt 2>/dev/null || echo "(无报告文件)"
+
+      - name: 上传诊断报告
+        if: always()
+        # 报告已全量 tee 进 run 日志，artifact 只是方便取用；该 action 不可用时
+        # 不该把整次诊断判失败
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ol-diag-report
+          path: |
+            /tmp/ol_diag/report.txt
+            /tmp/ol_diag/container.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: 收尾（容器日志兜底 + 打印）
+        if: always()
+        env:
+          OL_CONTAINER: ${{ inputs.container }}
+        run: |
+          docker logs "$OL_CONTAINER" 2>&1 | tail -60 || true
+          docker rm -f "$OL_CONTAINER" 2>/dev/null || true
