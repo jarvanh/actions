@@ -49,7 +49,9 @@ job，gistnodes 侧拿不到测速结果。抓取情况走 job 摘要与 artifac
 3. **过滤**：只放行「像订阅」的文件——含协议 scheme（`ss://` 等）或 Clash 的 `proxies:` 段，
    或整段 base64 且解出来含 scheme。README / XML plist / 数据 JSON 挡在外面（实测一批
    10 个 Gist 的 50 个文件里只有 16 个是订阅），省下投喂配额与解析时间；
-4. **投喂**：每个文件建成一个 Sub-Store **本地内容订阅**（`POST /api/subs`，`source: 'local'`）；
+4. **投喂**：每个文件建成一个 Sub-Store **本地内容订阅**（`POST /api/subs`，`source: 'local'`）。
+   若开启跨轮累积（`GIST_NODES_CARRYOVER`，默认开），**上一轮发布到本 Gist 的那份订阅**也作为
+   一路输入，排在所有抓到的文件**之前**、名字固定 `<名>-000`（理由见「为什么跨轮累积」）；
 5. **去重**：建两个组合订阅（`POST /api/collections`）——
    `<名>-raw` 不带处理链（作为「解析后有多少」的参照），`<名>` 带处理链：
    | 顺序 | 算子 | 作用 |
@@ -155,6 +157,23 @@ run 34834036756 —— 这条链路第一次跑通）：抓取 **323.4 秒**，�
 caller 与 called 用同一个 group 值会互相影响：`cancel-in-progress: true` 时会把 caller 取消；
 `false` 时 caller 持着 group 等被调 job、被调 job 又在等同一个 group，互等到超时。
 
+**为什么跨轮累积。** 抓到的订阅只在当轮有效：Gist 里的搜索结果是别人维护的，一轮抓到的
+几十个文件下一轮未必还落在时间窗口里；若某一轮恰好抓得少（被限流、预算到点），**被测节点集合
+就会凭空缩水**——而上一轮明明已经产出了一份去重好的 `providers.yaml`。所以默认把**上一轮发布到
+本 Gist 的那份订阅**也当一路输入喂回 Sub-Store，与当轮抓到的文件一起参与去重与取回。
+
+几条约束是刻意的：
+
+- **累积排在所有抓到的文件之前**（名字固定 `<名>-000`）。投喂有预算、可能被截断
+  （`gist_nodes_push_budget_stop`），排在前面才能保证「最该在的那份」不被截掉。
+- **必须在发布之前取**。`update_gist` 会覆盖同一个文件，取晚了拿到的是**本轮**的产物，
+  累积就退化成「原样再喂一遍」。
+- **走 `raw_url` 而不是 Gist API 的 `files[..].content`**：后者对大于 1MB 的文件会**截断**
+  并置 `truncated: true`，而这份订阅现在就有 1.07MB。截断的 YAML 要么解析失败、要么静默少一批节点。
+- **超上限整段跳过**（`GIST_NODES_CARRYOVER_MAX_MB`，默认 8MB）。宁可这一轮不累积，也不能把
+  截断过的 YAML 当完整订阅喂进去——那会让「累积」变成悄悄丢节点。
+- **任何失败都只跳过、不失败**（首次运行本来就没有这个文件）。累积是增益项，不能因为它把整轮拖垮。
+
 ## 环境变量
 
 ### secrets
@@ -196,6 +215,8 @@ Gist 分工：`gitee` / `cdn` / `taier` 三套各自的 Gist 只装**它们定�
 | `GIST_NODES_MAX_TOTAL_MB` | `0` | 投喂内容总量上限（`0` = 不限） |
 | `GIST_NODES_MAX_FILE_MB` | `2` | 单个文件超过则跳过（工程保护，不是配额） |
 | `GIST_NODES_MAX_NODES` | `0` | 最终订阅保留多少节点（`0` = 不限） |
+| `GIST_NODES_CARRYOVER` | `1` | 是否把**上一轮发布到本 Gist 的订阅**也当一路输入喂回 Sub-Store。首次运行还没有这个文件时自动跳过 |
+| `GIST_NODES_CARRYOVER_MAX_MB` | `8` | 累积订阅的大小上限（MB）。超了整段跳过并记日志——宁可这一轮不累积，也不把**截断过的** YAML 当完整订阅喂进去 |
 | `GIST_NODES_TIMEOUT` | `30` | 单次 HTTP 超时（秒） |
 | `GIST_NODES_RETRIES` | `4` | 单页搜索失败（含 429）时的重试次数 |
 | `GIST_NODES_BACKOFF_BASE` | `5` | 重试退避基数（秒），按 5/10/20/40 指数增长 + 抖动 |
@@ -215,7 +236,7 @@ dispatch 入参 `queries` / `max_nodes` / `test_nodes` / `target_subs` / `max_ag
 
 单个 Gist、单个订阅失败只跳过它（统计进日志）；以下情况直接 exit 1：搜索页一个 Gist 都解析不出来、
 没有文件像订阅、Sub-Store 不可达、投喂全部失败、产出的不是 YAML、产出零节点、发布 Gist 失败。
-**与其让下游拿空订阅跑一轮 45 分钟测速，不如就地失败。**
+**与其让下游拿空订阅白跑一轮长测速（几小时起），不如就地失败。**
 
 **但「到点收摊」不是失败。** 墙钟预算耗尽（`gist_nodes_gather_stop` 的 `reason=budget`）
 或连续多轮零增长（`reason=stall`）都只是「抓到的比目标少」，仍会拿已有的文件走完
@@ -246,6 +267,7 @@ Sub-Store 产出与发布。为什么必须把这两者分开：job 超时是 Gi
 | 去重没生效 | `gist_nodes_dedupe_no_effect`（解析数 ≥ 去重后数）。Sub-Store 对**未知算子只记日志不报错**，先查 `process` 里的算子名拼写 |
 | 节点数比预期少 | 先看 `non_sub_files`（判据挡掉了多少）与 `over_quota`（配额挡掉了多少），再看限量 |
 | 候选 Gist 太少 | 看 `gist_nodes_search_age_filtered`（时间窗口挡掉多少）与 `gist_nodes_search_stale_stop`（哪个关键词翻到整页超龄）。窗口设太窄时前几页就被判超龄 |
+| 累积没生效 | `gist_nodes_carryover`（取到了，带 `bytes` / `filename`）/ `gist_nodes_carryover_skipped`（带 `reason`：`missing_gist_id_or_filename` 缺 env、`gist_probe_failed` Gist 探测失败、`no_previous_file` 上一轮还没发布过、`fetch_failed` 取文失败、`oversize` 超 `GIST_NODES_CARRYOVER_MAX_MB`、`empty` 正文为空）。**首次运行必然是 `no_previous_file`，不是故障**；`nodes.json` 的 `substore.carryover` 也记了 `enabled` / `used` / `bytes` / `max_bytes` |
 | Sub-Store 侧到底做了什么 | artifact `gist-nodes-<run_id>/sub-store.log`（容器日志尾巴 200 行）与 `nodes.json`（含处理链、计数） |
 | 容器起不来 | 该步骤会直接 `docker ps -a` / `docker port` / `docker logs` 打出来。镜像 `xream/sub-store:http-meta` 的默认布局是「后端 3000 / 前端 http-meta 3001」，我们只发布后端 3000、**不设** `SUB_STORE_BACKEND_API_PORT`/`_HOST`（设成 3001 会让后端去抢前端已占的端口，`EADDRINUSE` 起来就死） |
 | 就绪探测失败（`HTTP 000` 或非 200） | 探测要求 `GET /api/subs` **恰好 200**，判据与脚本一致（早先用 `curl -fsS`，302 也算通过 ⇒ 探测绿了脚本红）。`000` = 连不上（容器没起来），`404` = 端口指到了前端 |
@@ -261,5 +283,8 @@ python .github/scripts/proxy-speedtest/tests/test_gist_nodes_substore.py
 XML plist、数据 JSON 挡掉）、时间窗口验证（超龄挡掉、整页超龄即停止翻页）与**抓取收口验证**
 （墙钟预算 / 零增长 / 批内熔断各自生效；三者都配了「关闭该收口 → 一路翻满 `GIST_NODES_MAX_PAGES`」
 的负向对照，否则判据恒真也看不出来）与 **Sub-Store 阶段预算验证**（投喂预算耗尽 → 截断投喂但仍
-产出、退出码 0；产出预算耗尽 → 退出码 1 且失败文案指向预算；两者各配负向对照）。
+产出、退出码 0；产出预算耗尽 → 退出码 1 且失败文案指向预算；两者各配负向对照）与
+**跨轮累积验证**（累积以 `-000` 先投喂并进组合、`files_found` 含它而 `files_gathered` 只算抓到的；
+负向对照：关掉累积 / 上一轮没文件时都不多投喂；并直接调真实的 `fetch_carryover` 覆盖成功与五条
+跳过分支，含「正文正好等于上限必须放行、多 1 字节必须挡下」的大小边界）。
 真实容器只在 runner 上起，本地改完靠它兜底；退出码 0 = 全过。

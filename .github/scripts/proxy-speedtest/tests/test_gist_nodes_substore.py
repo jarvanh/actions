@@ -132,11 +132,15 @@ def start_server():
     return server, f'http://127.0.0.1:{server.server_address[1]}'
 
 
-def run_main(gist_nodes, tmpdir, extra_env):
+def run_main(gist_nodes, tmpdir, extra_env, carryover_text=None):
     """跑一次 main()，返回 (退出码, 上传到 Gist 的 YAML, nodes.json 内容)。
 
-    三个被替换的模块级函数在退出时**必须还原**：后面的用例（7–11）要直接调真实的
+    四个被替换的模块级函数在退出时**必须还原**：后面的用例（7–11）要直接调真实的
     search_gists 来验时间窗口，mock 留在原地会让它们静默拿到假数据。
+
+    `carryover_text` 是 stub 掉的「上一轮发布到 Gist 的订阅正文」：默认 None = 上一轮还没有
+    这个文件（首次运行）。**必须 stub**——真实的 fetch_carryover 会去打 api.github.com，
+    本机 .env 里恰好有 PROXY_SPEEDTEST_GIST_ID 时就会真的发请求，自检就不再离线了。
     """
     uploaded = {}
 
@@ -145,7 +149,8 @@ def run_main(gist_nodes, tmpdir, extra_env):
         return {'ok': True, 'id': 'fakeid', 'html_url': 'https://gist.github.com/fake',
                 'yaml': {'filename': 'x.yaml', 'raw_url': 'https://gist.githubusercontent.com/x'}}
 
-    orig = (gist_nodes.search_gists, gist_nodes.collect_all, gist_nodes.update_gist)
+    orig = (gist_nodes.search_gists, gist_nodes.collect_all, gist_nodes.update_gist,
+            gist_nodes.fetch_carryover)
     # 第一轮就给 1 个候选，并把**传入的所有关键词**都标成「到头」——否则主循环会
     # 一轮轮翻下去（每轮都重复投喂同样的 3 个订阅），把「投喂 3 个」的断言冲掉。
     gist_nodes.search_gists = lambda queries, *a, **k: (
@@ -156,6 +161,7 @@ def run_main(gist_nodes, tmpdir, extra_env):
         dict.fromkeys(gist_nodes.STAT_KEYS, 0) | {'gists_scanned': 1, 'files_kept': 3},
     )
     gist_nodes.update_gist = fake_update_gist
+    gist_nodes.fetch_carryover = lambda env, timeout, max_bytes: carryover_text
 
     env = dict(os.environ)
     env.update({'GIST_NODES_WORKDIR': str(tmpdir), 'GIST_NODES_MAX_NODES': '5',
@@ -171,7 +177,8 @@ def run_main(gist_nodes, tmpdir, extra_env):
     finally:
         os.environ.clear()
         os.environ.update(saved)
-        gist_nodes.search_gists, gist_nodes.collect_all, gist_nodes.update_gist = orig
+        gist_nodes.search_gists, gist_nodes.collect_all, gist_nodes.update_gist, \
+            gist_nodes.fetch_carryover = orig
 
     nodes_json = {}
     path = tmpdir / 'nodes.json'
@@ -656,6 +663,158 @@ def main():
         check(any('预算' in str(e) for e in errs19),
               f'失败原因指向预算耗尽（实际 {errs19}）')
         check(len(posts('/api/subs')) == 3, '失败发生在投喂之后（投喂段不受产出预算影响）')
+        print('== 20. 跨轮累积：上一轮的订阅以 -000 先投喂，并进组合 ==')
+        FakeSubStore.requests.clear()
+        prev_yaml = ('proxies:\n'
+                     '  - {name: prev, type: ss, server: 9.9.9.9, port: 9,'
+                     ' cipher: aes-128-gcm, password: p}\n')
+        prev_bytes = len(prev_yaml.encode('utf-8'))
+        (code, _, nj20), _ = capture_events(
+            gist_nodes, run_main, gist_nodes, tmpdir, {'SUB_STORE_BACKEND_URL': base},
+            carryover_text=prev_yaml)
+        subs20 = posts('/api/subs')
+        first_name = subs20[0][2]['name'] if subs20 else '无'
+        check(code == 0, '退出码 0')
+        check(len(subs20) == 4, f'3 个抓到的 + 1 个累积 = 4 次投喂（实际 {len(subs20)}）')
+        check(subs20 and first_name == 'gist-nodes-000',
+              f'累积排在最前面且名字固定 -000（实际 {first_name}）')
+        check(subs20 and subs20[0][2]['content'] == prev_yaml, '累积投喂的就是上一轮的正文')
+        cols20 = [p for _, _, p in posts('/api/collections') if p['name'] == 'gist-nodes']
+        check(len(cols20) == 1 and 'gist-nodes-000' in cols20[0]['subscriptions'],
+              '组合订阅里包含累积那一份')
+        co20 = nj20['substore']['carryover']
+        check(co20['enabled'] is True and co20['used'] is True,
+              f'nodes.json 记录累积已启用且取到（实际 {co20}）')
+        check(co20['bytes'] == prev_bytes, f'nodes.json 记录累积字节数（实际 {co20["bytes"]}）')
+        n_found = nj20['substore']['files_found']
+        n_gathered = nj20['substore']['files_gathered']
+        check(n_found == 4 and n_gathered == 3,
+              f'files_found 含累积、files_gathered 只算抓到的（实际 {n_found}/{n_gathered}）')
+
+        print('== 20b. 负向对照：关掉累积 / 上一轮没有文件 → 都不多投喂 ==')
+        FakeSubStore.requests.clear()
+        (code, _, nj20b), _ = capture_events(
+            gist_nodes, run_main, gist_nodes, tmpdir,
+            {'SUB_STORE_BACKEND_URL': base, 'GIST_NODES_CARRYOVER': '0'},
+            carryover_text=prev_yaml)
+        n20b = len(posts('/api/subs'))
+        check(code == 0, '退出码 0')
+        check(n20b == 3, f'关掉累积 → 只投喂抓到的 3 个（实际 {n20b}）')
+        check(nj20b['substore']['carryover']['enabled'] is False, 'nodes.json 记录累积已关掉')
+        check(nj20b['substore']['files_found'] == 3, 'files_found 不含累积')
+
+        FakeSubStore.requests.clear()
+        (code, _, nj20c), _ = capture_events(
+            gist_nodes, run_main, gist_nodes, tmpdir, {'SUB_STORE_BACKEND_URL': base})
+        n20c = len(posts('/api/subs'))
+        check(code == 0, '退出码 0（取不到累积不算失败）')
+        check(n20c == 3, f'首次运行取不到 → 不多投喂（实际 {n20c}）')
+        check(nj20c['substore']['carryover']['used'] is False, 'nodes.json 记录 used=False')
+
+        print('== 21. 真 fetch_carryover：成功 + 各跳过分支 + 大小上限边界 ==')
+        # 20/20b 必须把 fetch_carryover 整个 stub 掉（真实现会去打 api.github.com），
+        # 于是「取到累积」那条日志从没被真代码走过、五条跳过分支也没被覆盖。这里只替换
+        # 两个网络原语，让真实现跑起来，逐条验它的跳过原因与大小边界。
+        real_api, real_get = gist_nodes.github_api_request, gist_nodes.http_get
+        net = {'api': None, 'api_exc': None, 'get': None, 'get_exc': None,
+               'api_calls': 0, 'get_calls': 0, 'api_url': ''}
+
+        def fake_api(url, token, payload=None, method='GET', timeout=60):
+            net['api_calls'] += 1
+            net['api_url'] = url
+            if net['api_exc']:
+                raise net['api_exc']
+            return net['api']
+
+        def fake_get(url, token='', timeout=30, max_bytes=0):
+            # 忠实模拟 `resp.read(max_bytes)`：到顶就截断，这样「正好等于上限」与
+            # 「超上限」才能被区分开（真实现正是靠多读 1 字节来判的）。
+            net['get_calls'] += 1
+            net['get_url'] = url
+            if net['get_exc']:
+                raise net['get_exc']
+            body = net['get'] or ''
+            return body[:max_bytes] if max_bytes > 0 else body
+
+        def reset_net(api=None, body=None, api_exc=None, get_exc=None):
+            net.update({'api': api, 'get': body, 'api_exc': api_exc,
+                        'get_exc': get_exc, 'api_calls': 0, 'get_calls': 0})
+
+        def carry_env(**extra):
+            env = {'PROXY_SPEEDTEST_GIST_ID': 'a' * 32,
+                   'PROXY_SPEEDTEST_GIST_FILENAME': 'providers.yaml',
+                   'GH_TOKEN': 'fake'}
+            env.update(extra)
+            return env
+
+        def run_carry(env, max_bytes=1024):
+            return capture_events(gist_nodes, gist_nodes.fetch_carryover, env, 5, max_bytes)
+
+        gist_nodes.github_api_request = fake_api
+        gist_nodes.http_get = fake_get
+        try:
+            raw_url = 'https://gist.githubusercontent.com/u/aaa/raw/hash/providers.yaml'
+            ok_files = {'files': {'providers.yaml': {'raw_url': raw_url}}}
+            body21 = ('proxies:\n'
+                      '  - {name: prev, type: ss, server: 9.9.9.9, port: 9,'
+                      ' cipher: aes-128-gcm, password: p}\n')
+            nbytes21 = len(body21.encode('utf-8'))
+
+            reset_net(api=ok_files, body=body21)
+            got, ev = run_carry(carry_env())
+            check(got == body21, '成功：取回上一轮正文')
+            check(net['api_calls'] == 1 and net['api_url'].endswith('a' * 32),
+                  f'探测打的是 env 里那个 Gist（实际 {net["api_url"]}）')
+            check(net['get_url'] == raw_url,
+                  '取文走 raw_url（不用大于 1MB 会被截断的 files[].content）')
+            ok_log = [e for e in ev if e['stage'] == 'gist_nodes_carryover']
+            check(len(ok_log) == 1 and ok_log[0]['bytes'] == nbytes21
+                  and ok_log[0]['filename'] == 'providers.yaml',
+                  f'成功时打「取到累积」日志并带字节数（实际 {ev}）')
+
+            reset_net(api=ok_files, body=body21)
+            got, ev = run_carry(carry_env(PROXY_SPEEDTEST_GIST_FILENAME=''))
+            check(got is None and [e.get('reason') for e in ev] == ['missing_gist_id_or_filename'],
+                  f'缺 Gist id / 文件名 → 跳过（实际 {ev}）')
+            check(net['api_calls'] == 0 and net['get_calls'] == 0,
+                  '缺 env 时一次网络都不打')
+
+            reset_net(api={'files': {'other.yaml': {'raw_url': 'https://x/y'}}}, body=body21)
+            got, ev = run_carry(carry_env())
+            check(got is None and [e.get('reason') for e in ev] == ['no_previous_file'],
+                  f'Gist 在但没这个文件 → 跳过（实际 {ev}）')
+            check(net['get_calls'] == 0, '没拿到 raw_url 就不去取文')
+
+            reset_net(api_exc=RuntimeError('api 挂了'))
+            got, ev = run_carry(carry_env())
+            check(got is None and [e.get('reason') for e in ev] == ['gist_probe_failed'],
+                  f'Gist 探测抛异常 → 跳过且不冒泡（实际 {ev}）')
+
+            reset_net(api=ok_files, get_exc=RuntimeError('raw 挂了'))
+            got, ev = run_carry(carry_env())
+            check(got is None and [e.get('reason') for e in ev] == ['fetch_failed'],
+                  f'取文抛异常 → 跳过且不冒泡（实际 {ev}）')
+
+            # 上限边界：正好等于上限必须放行（靠多读 1 字节判），多 1 字节必须挡下。
+            exact = 'x' * 1024
+            reset_net(api=ok_files, body=exact)
+            got, ev = run_carry(carry_env())
+            check(got == exact and ev and ev[0]['stage'] == 'gist_nodes_carryover',
+                  f'正文正好等于上限 → 放行（实际 {ev}）')
+
+            reset_net(api=ok_files, body='x' * 1025)
+            got, ev = run_carry(carry_env())
+            check(got is None and [e.get('reason') for e in ev] == ['oversize'],
+                  f'超上限 1 字节 → 跳过（实际 {ev}）')
+            check([e.get('limit_bytes') for e in ev] == [1024], '跳过日志带上限值便于排查')
+
+            reset_net(api=ok_files, body='   \n\n')
+            got, ev = run_carry(carry_env())
+            check(got is None and [e.get('reason') for e in ev] == ['empty'],
+                  f'空白正文 → 跳过（实际 {ev}）')
+        finally:
+            gist_nodes.github_api_request, gist_nodes.http_get = real_api, real_get
+
     finally:
         server.shutdown()
         shutil.rmtree(tmpdir, ignore_errors=True)
