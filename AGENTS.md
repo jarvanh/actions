@@ -40,4 +40,4 @@ GitHub Actions 工作流与脚本集合：OpenList 网盘同步、Emby 302 直�
 ## 改完必验
 
 - 通知：`bash skills/telegram-notify-audit/scripts/render_preview.sh`（渲染预览 + 16 项自动校验）。
-- openlist 域：跑回归套件，基线 **22 套中 20 套 `EXIT=0`**；非 0 的只有 2 项环境性失败（`marker_skip_guards`（无 `date -d`）、`truth`（需 docker）），另有 2 项 flaky 单独重跑即过（`progress_no_orphans`（T5 时序）、`sync_trend_budget`（macOS `wc` 前导空格）），且 `command not found` 扫描必须为空（命令与 flake 名单见规范 · 回归套件）。
+- openlist 域：跑回归套件，基线 **24 套中 22 套 `EXIT=0`**；非 0 的只有 2 项环境性失败（`marker_skip_guards`（无 `date -d`）、`truth`（需 docker）），另有 flaky 单独重跑即过（`progress_no_orphans`（T5 时序）、`sync_trend_budget`（macOS `wc` 前导空格）；**套件运行期偶见沙箱拦子进程导致假红**，日志里会出现 `Brokered program policy check unavailable`，见到该标记即单独复跑复核——2026-09-14 `batch_consolidate` / `bulk_hash_fold` 即此形态，单跑分别 61/0、29/0），且 `command not found` 扫描必须为空（命令与 flake 名单见规范 · 回归套件）。

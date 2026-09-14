@@ -34,6 +34,7 @@ proxy-speedtest/            测速结果数据
 | 工作流 | 用途 |
 |---|---|
 | `openlist.yml` | OneDrive → OpenList 网盘同步（**本文档重点**） |
+| `openlist-diag.yml` | OpenList 后端可写性诊断（独立 concurrency，单次 ~4min；**不搬数据**，见下文「后端可写性诊断」） |
 | `self-hosted_backup.yml` | 自建服务备份到 OneDrive |
 | `github_backup_all.yml` | 备份全部 GitHub 仓库到 OneDrive |
 | `emby.yml` | Emby 媒体服务器 + 302 直链 —— 详见 [`docs/emby.md`](docs/emby.md) |
@@ -70,6 +71,7 @@ proxy-speedtest/            测速结果数据
 | | `rclone_query.sh` | 131 | 查询与过滤解析（`size --json`、`check`、exclude 提取） |
 | **openlist** | `openlist_api.sh` | 89 | 管理面登录换 token、服务就绪等待 |
 | | `openlist_driver.sh` | 581 | 驱动刷新、健康预检、缓存刷新、truth-check |
+| | `diag_backend.sh` | 255 | **诊断专用**（不进 `load_all.sh` 加载链）：四组写探针 + 容器日志原始 `rsp_code` dump，由 `openlist-diag.yml` 调用 |
 | **sync** | `sync_engine.sh` | 298 | 核心同步引擎（编排 + 423/8005 重试） |
 | | `sync_marker.sh` | 907 | 同步标记持久化（跳过、黑名单、修复清单） |
 | | `sync_notify.sh` | 355 | 同步结果通知构建（统一 Telegram HTML 排版） |
@@ -314,8 +316,13 @@ API list），读得通但写不进的后端会被整轮放行——run #12616 �
 写入恒定 `409 Conflict`，结果一轮 394 次修复全败、769 次「目录不可写」、231 次容器
 重启/缓存刷新，5 小时零产出。现在两级拦截：
 
-1. **写探针**（`openlist_driver.sh` `_backend_write_probe`）：每个挂载根整轮只探一次
-   （写几字节 → 复核可见 → 删除），不可写即熔断该后端的全部同步对，把 6h 让给健康后端。
+1. **写探针**（`openlist_driver.sh` `_backend_write_probe`）：按**「后端 × 路径」**分层缓存
+   （2026-09-13 改；此前探在挂载根，而"挂载根能写 ≠ 任务子路径能写"，run 34728107625 实锤），
+   探针落在**真实任务子路径**上（写几字节 → 刷服务端目录缓存 → 复核可见 → 删除），
+   不可写即熔断该后端的全部同步对，把 6h 让给健康后端。
+   ⚠️ 缓存键是**同步对路径**（如 `openlist:wopan176Crypt/2`），读取方必须用同一个键——
+   曾按"后端根"读，键对不上导致判死信号**静默丢失**、死后端只能靠 8 次轮转上限脱身
+   （≈44h）；2026-09-14 修（`sync_engine.sh` 两处读取 + `tests/test_backend_dead_signal.sh` 反向锁死）。
 2. **目录连续不可写计数**（`file_fix.sh` `_BACKEND_DEAD`）：开跑后才暴露的后端
    （预检偶发放行）由「同一挂载根连续 N 个目录被**重启确认**判不可写」捕获；判定后该后端
    剩余目录一律直接判不可写 —— 不探测、不重启、不跑 4 种方法。只认「已重启确认」的
@@ -336,7 +343,24 @@ API list），读得通但写不进的后端会被整轮放行——run #12616 �
 **吞吐调优（P1）**：`transfers`（默认 1 串行）与 `subdir_parallel`（默认 1 串行）
 均可按 run 调整，但两者都会提高对同一后端的并发 PUT 数——与 run 32749862280
 整批假成功事故的规避方向相悖。启用前先用调试模式单任务观察一轮
-"object not found" 率与修复管线触发量；wopan176 的 `transfers` 保持 1。
+"object not found" 率与修复管线触发量。2026-09-14 用户授权「transfers 可根据情况调整」，
+但**前置依赖未解**：wopan176 当前驱动登录令牌失效（8005）、写入全拒，此时调 transfers
+测不出吞吐差异——先解登录再调。
+
+**后端可写性诊断（2026-09-14 加）**：主 run 单轮 5.5h、且被 `concurrency` 单例串行化，
+"换个探针再跑一次"要排到几小时后；更要命的是主 run 日志里后端写失败只呈现为 OpenList
+**包装后**的 `405 Method Not Allowed`（驱动层真实错误如 wopan 的 `8005 登录失败` 只落在
+**容器日志**里，而容器日志从不进 run 日志）——于是「登录令牌失效」与「路径/名长被拒」
+在 run 日志里长得一模一样。`openlist-diag.yml`（`workflow_dispatch`，**独立 concurrency
+`openlist-diag`**，绝不与 `openlist-singleton` 互等）只做最小 setup：不装 cloudflared、
+不接管隧道、不回传数据库，单次 ~4 分钟，跑四组探针：
+
+1. **短名基线**（1 字节文件，写在真实任务子路径）；
+2. **名长阶梯**（32/64/80/100/112/128 B，定位长度阈值）；
+3. **覆盖写**（对应 rclone 的 `unchunked simple update`，与"新建文件"是不同代码路径）；
+4. **子目录写**（验证"父目录名长连坐"假设）。
+
+并把容器日志里的**原始 `rsp_code`/`rep_desc`** dump 出来。报告随 artifact `ol-diag-report` 上传。
 
 ---
 
@@ -364,7 +388,8 @@ cd .github/scripts/openlist
 for t in tests/*.sh; do bash "$t"; done
 ```
 
-18 个测试，覆盖轮转、批次巩固、修复管线优化、修复日志区段头提取、
+24 个测试，覆盖轮转、批次巩固、修复管线优化、修复日志区段头提取、写探针判死信号键口径、
+8005 重试前的写探针短路、
 目录可写性预检（含假成功目录）与短哈希目录兜底、预览 diff、跳过窗口的预览
 预判与跳过通知"本次未传"（含现场估算与宁缺毋滥分支）、truth-check、
 token 登录、marker、收尾标题四态、进度阶段区排版（子目录树/文件批次的层级
