@@ -54,6 +54,8 @@ from speedtest_common import (
     resolve_host_ipv4, resolve_subscription_policy,
     send_telegram, send_telegram_chunked, tg_entry, tg_entry_codes, tg_footer_line,
     tg_format_elapsed, tg_pre_block, update_gist,
+    # 到点收摊判据由共享层提供（四套测速同一份实现，避免各写一遍后漂移）
+    should_stop_for_budget, speedtest_budget_deadline,
     TG_SEP,
 )
 
@@ -1342,6 +1344,11 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
         sep,
         f'🕒 起止：{esc(started_text)} ~ {esc(ended_text)} · 耗时 {esc(duration_cn)}',
         f'📊 节点：共 {len(speed_results)} 个 · 可用 {len(ok_results)} 个',
+        # 到点收摊 / 运行中中止：**不是失败**（退出码仍 0），但必须说清「本轮没测完」。
+        # 位置紧跟「📊 节点」：与 taier / CDN 两套一致（三套通知是同一份交付物，
+        # 同一条信息落在不同位置会让读者以为自己看漏了）。放在测速点区块之前，
+        # 是因为它修饰的正是上面那行「共 N 个 · 可用 M 个」的读数。
+        *([f'⚠️ 本轮已中止：{esc(runtime_abort_reason)}'] if aborted_due_to_runtime else []),
         '',
     ]
     # 测速点（Gitee push 目标）的网络归属：域名解析 IP 后查 ISP/ASN/位置
@@ -1349,9 +1356,6 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
     gitee_info = fetch_ip_network_info(gitee_ip) if gitee_ip else None
     summary_lines.extend(build_target_network_section([(gitee_ip or '', 'gitee.com', gitee_info)]))
     summary_lines.append('')
-    if aborted_due_to_runtime:
-        summary_lines.append(f'⚠️ 本轮已中止：{esc(runtime_abort_reason)}')
-        summary_lines.append('')
     if ok_results_by_download:
         top = ok_results_by_download[:5]
         # 四套统一三项指标（↑上传 · ↓下载 · 延迟ms）：条目复用共享的
@@ -1518,6 +1522,15 @@ def main():
     direct_baseline_max_attempts = int(env.get('PROXY_SPEEDTEST_DIRECT_BASELINE_MAX_ATTEMPTS', '5'))
     max_nodes = int(env.get('PROXY_SPEEDTEST_MAX_NODES', '0'))
     switch_settle_seconds = float(env.get('PROXY_SPEEDTEST_SWITCH_SETTLE_SECONDS', '1.5'))
+    # 墙钟预算（秒，0 = 不限）。**必须显著小于 job 的 timeout-minutes（默认 360 分钟）**，
+    # 留出前置准备（订阅拉取 / mihomo / 直连基线 / Gitee 准备）与收尾（通知 / Gist 上传）
+    # 的余量：默认 5 小时。为什么需要它：逐节点串行、单节点几十秒，而 gistnodes 一轮可能
+    # 交接几千个节点；撞 GitHub 的**硬取消**会把整轮工作全废且订阅来不及提交，到点收摊则
+    # 退出码仍 0、能拿已测节点出订阅（见 should_stop_for_budget）。
+    budget_seconds = int(env.get('PROXY_SPEEDTEST_BUDGET_SECONDS', '18000') or 0)
+    # 预算从**进程启动**起算（不是从节点循环起算）：job 的 timeout-minutes 也把前置阶段
+    # 算在内，从启动起算才能保证「到点」一定早于硬取消。
+    budget_deadline = speedtest_budget_deadline(budget_seconds, now=started_ts)
     # 默认 both = 上行 + clone 下行 + 延迟（2026-09-08 用户拍板：四套指标口径对齐）；
     # push-only = 只测上行（历史模式，可用 env 退回）
     speedtest_mode = (env.get('PROXY_SPEEDTEST_MODE', 'both') or 'both').strip().lower()
@@ -1525,7 +1538,7 @@ def main():
     if max_nodes > 0:
         alive_items = alive_items[:max_nodes]
 
-    log_progress('speedtest_plan_ready', speedtest_mode=speedtest_mode, size_mib=size_mib, push_timeout=push_timeout, clone_timeout=clone_timeout, direct_baseline_timeout=direct_baseline_timeout, direct_baseline_max_attempts=direct_baseline_max_attempts, total_nodes=len(alive_items))
+    log_progress('speedtest_plan_ready', speedtest_mode=speedtest_mode, size_mib=size_mib, push_timeout=push_timeout, clone_timeout=clone_timeout, direct_baseline_timeout=direct_baseline_timeout, direct_baseline_max_attempts=direct_baseline_max_attempts, total_nodes=len(alive_items), budget_seconds=budget_seconds)
     test_file = run_stage('测速文件准备', ensure_test_file, size_mib)
     log_progress('test_file_ready', path=str(test_file), size_mib=size_mib)
     direct_baseline = None
@@ -1567,6 +1580,16 @@ def main():
 
     for index, item in enumerate(alive_items, 1):
         touch_lock_file()
+        # 判据放在**开下一个节点之前**：单节点几十秒，所以超发最多一个节点。
+        # 放在 check_mihomo_runtime() 之前：预算到点与 mihomo 健康是两回事，前者不应被
+        # 后者的检查顺序掩盖（mihomo 恰好也挂了时，通知里该说「到点收摊」而不是「运行中中止」）。
+        if should_stop_for_budget(budget_deadline):
+            aborted_due_to_runtime = True
+            runtime_abort_reason = (f'到点收摊：预算 {tg_format_elapsed(budget_seconds)}，'
+                                    f'已测 {len(speed_results)}/{len(alive_items)} 个节点')
+            log_progress('speedtest_budget_stop', index=index, total=len(alive_items),
+                         tested=len(speed_results), budget_seconds=budget_seconds)
+            break
         runtime_status = check_mihomo_runtime()
         if not runtime_status['ok']:
             aborted_due_to_runtime = True

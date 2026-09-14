@@ -214,6 +214,52 @@ def build_node_metric_prefix(item: dict, speedtest_mode: str, order: str = 'down
 
 
 # ---------------------------------------------------------------------------
+# 墙钟预算（四套测速共用）——到点收摊，绝不撞 GitHub 的硬取消
+# ---------------------------------------------------------------------------
+# 默认 5 小时：**必须显著小于 job 的 `timeout-minutes`（现行 360 分钟 = 6 小时）**，
+# 留出前置准备（mihomo 下载 / TUN / 抓取交接）与收尾（通知 / Gist 上传）的余量。
+#
+# 为什么四套都要有：三套引擎（gitee / cdn / taier）与调用它们的编排层
+# （proxy-speedtest-gistnodes，一轮抓取 → 一轮测速 → 把订阅链接提交回 Gist）都是**逐节点
+# 串行**，单节点 20~60 秒，而编排层一轮可能交接几千个节点（2026-09-14 那轮 3284 个）。
+# 不设预算时 job 会撞 `timeout-minutes` 的**硬取消**：整轮工作全废、下游 job 全 skipped、
+# 订阅链接根本来不及提交。到点收摊则退出码仍是 0，能拿已测节点出订阅。
+DEFAULT_BUDGET_SECONDS = 18000
+
+
+def speedtest_budget_deadline(budget_seconds, now=None):
+    """把「预算秒数」换算成 `time.monotonic()` 的截止点；`0` / 负数 / None = 不限（返回 None）。
+
+    用 `time.monotonic()` 而非墙钟：NTP 校时或宿主机时间跳变不该让预算提前/延后触发。
+    """
+    try:
+        seconds = int(budget_seconds or 0)
+    except (TypeError, ValueError):
+        seconds = 0
+    if seconds <= 0:
+        return None
+    return (time.monotonic() if now is None else now) + seconds
+
+
+def should_stop_for_budget(deadline, now=None):
+    """到点收摊判据。`deadline` 为 None / `0` / 负数表示不限（永远不因预算停）。
+
+    抽成纯函数是为了能被自检直接驱动：墙钟类判据最典型的坏法是**恒真**（一到点就立刻收摊）
+    或**恒假**（预算形同虚设），两者都只能在边界上才看得出来。
+
+    ⚠️ 非正数一律按「不限」处理，与 `speedtest_budget_deadline()` 的归一化**保持同一口径**。
+    若这里按 truthy 判，`-5` 会被当成「已过期」而立刻收摊——同一份配置经 deadline 是
+    「不限」、直接传进来却是「立即停」，两边不一致就是下一次踩的坑。
+    """
+    try:
+        if not deadline or float(deadline) <= 0:
+            return False
+    except (TypeError, ValueError):
+        return False
+    return (time.monotonic() if now is None else now) >= deadline
+
+
+# ---------------------------------------------------------------------------
 # 订阅导出策略（阈值 / 判定指标 / 最少节点数，双向回退）
 # ---------------------------------------------------------------------------
 def _env_int(env, key: str, default, minimum=0):

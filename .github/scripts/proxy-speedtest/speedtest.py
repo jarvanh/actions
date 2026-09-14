@@ -56,6 +56,9 @@ from speedtest_common import (
     resolve_subscription_policy,
     send_telegram,
     send_telegram_chunked,
+    # 到点收摊判据由共享层提供（四套测速同一份实现，避免各写一遍后漂移）
+    should_stop_for_budget,
+    speedtest_budget_deadline,
     tg_entry,
     tg_entry_codes,
     tg_footer_line,
@@ -129,6 +132,13 @@ CONFIG = {
         float(os.environ.get('PROXY_SPEEDTEST_SWITCH_SETTLE_SECONDS', '1.5')),
     'PROXY_SPEEDTEST_MAX_NODES':
         int(os.environ.get('PROXY_SPEEDTEST_MAX_NODES', '0')),  # 0=不限
+    # 墙钟预算（秒，0 = 不限）。**必须显著小于 job 的 timeout-minutes（默认 360 分钟）**，
+    # 留出前置准备（mihomo / 节点快照）与收尾（报告 / 通知 / Gist 上传）的余量：默认 5 小时。
+    # 为什么需要它：逐节点串行、单节点几十秒，而 gistnodes 一轮可能交接几千个节点；撞
+    # GitHub 的**硬取消**会把整轮工作全废且订阅来不及提交，到点收摊则退出码仍 0、
+    # 能拿已测节点出订阅（见 should_stop_for_budget）。
+    'PROXY_SPEEDTEST_BUDGET_SECONDS':
+        int(os.environ.get('PROXY_SPEEDTEST_BUDGET_SECONDS', '18000') or 0),
     # 下载测速点：是否经 npmmirror 自动发现最新版 node 直链（与滚动 ISO 合并）
     'PROXY_SPEEDTEST_NPMMIRROR_ENABLED':
         (os.environ.get('PROXY_SPEEDTEST_NPMMIRROR_ENABLED', '1').strip().lower() not in ('0', 'false', 'no', 'off')),
@@ -757,11 +767,16 @@ def main():
     signal.signal(signal.SIGTERM, handle_termination_signal)
     signal.signal(signal.SIGINT, handle_termination_signal)
     started_at = datetime.now().isoformat()
+    # 预算从**进程启动**起算（不是从节点循环起算）：job 的 timeout-minutes 也把前置阶段
+    # （mihomo 启动 / 订阅抓取 / 节点快照）算在内，从启动起算才能保证「到点」早于硬取消。
+    budget_seconds = CONFIG['PROXY_SPEEDTEST_BUDGET_SECONDS']
+    budget_deadline = speedtest_budget_deadline(budget_seconds)
     log_progress('speedtest_started', started_at=started_at, config={
         'latency_samples': CONFIG['PROXY_SPEEDTEST_LATENCY_SAMPLES'],
         'size_mib': CONFIG['PROXY_SPEEDTEST_SIZE_MIB'],
         'download_timeout': CONFIG['PROXY_SPEEDTEST_DOWNLOAD_TIMEOUT'],
         'push_enabled': CONFIG['PROXY_SPEEDTEST_ENABLE_PUSH'],
+        'budget_seconds': budget_seconds,
     })
     env = merged_env()
     try:
@@ -812,10 +827,21 @@ def main():
     if max_nodes and max_nodes > 0:
         alive_items = alive_items[:max_nodes]
 
-    log_progress('nodes_collected', count=len(alive_items))
+    log_progress('nodes_collected', count=len(alive_items), budget_seconds=budget_seconds)
     settle = CONFIG['PROXY_SPEEDTEST_SWITCH_SETTLE_SECONDS']
     results = []
-    for item in alive_items:
+    # 到点收摊状态：非失败（退出码仍 0），但通知里必须说清「本轮没测完」
+    aborted_due_to_runtime = False
+    runtime_abort_reason = ''
+    for index, item in enumerate(alive_items, 1):
+        # 判据放在**开下一个节点之前**：单节点几十秒，所以超发最多一个节点
+        if should_stop_for_budget(budget_deadline):
+            aborted_due_to_runtime = True
+            runtime_abort_reason = (f'到点收摊：预算 {tg_format_elapsed(budget_seconds)}，'
+                                    f'已测 {len(results)}/{len(alive_items)} 个节点')
+            log_progress('speedtest_budget_stop', index=index, total=len(alive_items),
+                         tested=len(results), budget_seconds=budget_seconds)
+            break
         name = item.get('name', '')
         try:
             switch_proxy(name, settle)
@@ -859,6 +885,9 @@ def main():
         'mode': meta['mode'],
         'node_count': len(results),
         'results': results,
+        # 到点收摊判据（供下游/事后分析区分「测完」与「没测完但不算失败」）
+        'aborted_due_to_runtime': aborted_due_to_runtime,
+        'runtime_abort_reason': runtime_abort_reason,
     }
     try:
         RESULT_JSON.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding='utf-8')
@@ -929,7 +958,9 @@ def main():
     try:
         # 长消息分片发送（多测速点 + TOP5 + Gist 段容易超 4000 字符，单发会被整条拒收）
         tg_res = send_telegram_chunked(env, '\n'.join(build_telegram_lines(
-            results, meta=meta, gist_res=gist_res, bundle=bundle)))
+            results, meta=meta, gist_res=gist_res, bundle=bundle,
+            aborted_due_to_runtime=aborted_due_to_runtime,
+            runtime_abort_reason=runtime_abort_reason)))
         # 发送层不写 stderr（python 侧靠返回值），失败原因必须回传日志，否则
         # 400 解析失败/限流会表现为「通知静默消失」（规范 · 发送层）
         log_progress('telegram_send_finished', sent=bool(tg_res.get('sent')),
@@ -938,6 +969,7 @@ def main():
         log_progress('telegram_send_failed', error=str(e))
 
     log_progress('speedtest_done', node_count=len(results),
+                 aborted_due_to_runtime=aborted_due_to_runtime,
                  json_path=str(RESULT_JSON), html_path=str(RESULT_HTML))
     return 0
 
@@ -951,7 +983,8 @@ def _result_metric_item(r):
     }
 
 
-def build_telegram_lines(results, *, meta, gist_res, bundle=None):
+def build_telegram_lines(results, *, meta, gist_res, bundle=None,
+                         aborted_due_to_runtime=False, runtime_abort_reason=''):
     """生成人性化 Telegram 通知（统一 HTML 版式，对齐全库通知模板）：
     emoji 标题 + ━━━ 分隔线 + 键值概览（数值裸文本）+ 树形 TOP5（节点 <code>）+
     订阅状态 + 统一收尾区（⏱ 已运行 · 🔗 运行日志，读 TG_RUN_URL 环境变量）。"""
@@ -990,7 +1023,7 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None):
     # 分别触发，标题不区分的话读者分不清通知来自哪一轮（规范 · 3.1 允许标题带区分词）。
     # ⚠️ 同 taier：注释与 f-string 都在，赋值行漏了 ⇒ 标题渲染即 NameError、通知静默发不出。
     # 判据与注释、规范（规范 · 3.x CDN 测速：0 可用节点降级 ⚠️）一致。
-    _title_emoji = '⚠️' if not ok_results else '✅'
+    _title_emoji = '⚠️' if (not ok_results or aborted_due_to_runtime) else '✅'
     _label = (merged_env().get('PROXY_SPEEDTEST_LABEL') or '').strip()
     _title_prefix = f'{_label} · ' if _label else ''
     lines = [
@@ -998,6 +1031,9 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None):
         sep,
         f'🕒 起止：{esc(started)} ~ {esc(ended)} · 耗时 {esc(duration_text)}',
         f'📊 节点：共 {len(results)} 个 · 可用 {len(ok_results)} 个',
+        # 到点收摊：**不是失败**（退出码仍 0），但必须说清「本轮没测完」，否则读者会
+        # 以为拿到的就是全部节点的结论
+        *([f'⚠️ 本轮已中止：{esc(runtime_abort_reason)}'] if aborted_due_to_runtime else []),
         '',
     ]
     # 测速点（下载镜像/软件源）的网络归属：域名 → 解析 IP → ipwho.is 查 ISP/ASN/位置；

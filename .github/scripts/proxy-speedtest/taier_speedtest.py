@@ -55,6 +55,9 @@ from speedtest_common import (
     resolve_subscription_policy,
     send_telegram,
     send_telegram_chunked,
+    # 到点收摊判据由共享层提供（四套测速同一份实现，避免各写一遍后漂移）
+    should_stop_for_budget,
+    speedtest_budget_deadline,
     tg_entry, tg_entry_codes,
     tg_footer_line,
     tg_format_elapsed,
@@ -64,6 +67,7 @@ from speedtest_common import (
 )
 from speedtest_gitee import (
     MIHOMO,
+    MIHOMO_API,
     MIHOMO_CONFIG,
     MIHOMO_LOG,
     build_mihomo_config,
@@ -83,6 +87,15 @@ TAIER = HOME_RUNTIME / 'taierspeedtest'
 TAIER_LOG = HOME_RUNTIME / 'taier_speedtest.log'
 RESULT_JSON = HOME_RUNTIME / 'taier_speedtest_result.json'
 
+# 泰尔控制服务器（引擎 fetchClient 的降级链，原样照抄）。
+# ⚠️ 位置必须在 CONFIG 之前：CONFIG 里的测活默认 URL 引用了它，而 CONFIG 是**导入时**求值的，
+# 定义在后面会直接 NameError（pyflakes F821 能抓到，`py_compile` 抓不到）。
+_TAIER_CTRL_SERVERS = [
+    'https://dlcv2.cnspeedtest.cn:8443',
+    'http://dlc.duoweisoft.com:8096',
+    'http://dlcv2.duoweisoft.com:8088',
+]
+
 CONFIG = {
     # 测速点：单个点即可（每点 = 一次完整上下行），多点会成倍拉长单节点耗时
     'TAIER_POINTS': (os.environ.get('TAIER_POINTS', '') or '广东联通').strip(),
@@ -93,6 +106,21 @@ CONFIG = {
     'TAIER_DURATION': min(max(int(os.environ.get('TAIER_DURATION', '10') or 10), 5), 13),
     # 0 = 不限（默认）；节点多时整体耗时 ≈ 节点数 × (2×duration + 5)s
     'TAIER_MAX_NODES': int(os.environ.get('TAIER_MAX_NODES', '0') or 0),
+    # 墙钟预算（秒，0 = 不限）。**必须显著小于 job 的 timeout-minutes（默认 360 分钟）**，
+    # 留出前置准备（mihomo 下载 / TUN）与收尾（通知 / Gist 上传）的余量：默认 5 小时。
+    # 为什么需要它：测速逐节点串行、每节点 ≈ 25 秒，而订阅里可能有几千个节点
+    # （proxy-speedtest-gistnodes 2026-09-14 那轮交接 3284 个 ≈ 22.8 小时），
+    # 撞 GitHub 的**硬取消**会把整轮工作全废；到点收摊则能拿已测节点出订阅。
+    'TAIER_BUDGET_SECONDS': int(os.environ.get('TAIER_BUDGET_SECONDS', '18000') or 0),
+    # 测速前先测活：死节点别再烧掉一整个测速窗口（≈25 秒）。探测目标默认是**泰尔自己的
+    # 控制面**（`_TAIER_CTRL_SERVERS[0]`）——测的是「这个节点到底能不能跑泰尔」，而不是
+    # 泛泛的连通性；探测 URL 可覆盖。判死只认 mihomo 的明确结论，机制出错一律 fail-open
+    # （见 probe_node_alive）。
+    'TAIER_ALIVE_PROBE': (os.environ.get('TAIER_ALIVE_PROBE', '1').strip().lower()
+                          not in ('0', 'false', 'no', 'off')),
+    'TAIER_ALIVE_PROBE_URL': ((os.environ.get('TAIER_ALIVE_PROBE_URL', '') or '').strip()
+                              or _TAIER_CTRL_SERVERS[0]),
+    'TAIER_ALIVE_PROBE_TIMEOUT_MS': int(os.environ.get('TAIER_ALIVE_PROBE_TIMEOUT_MS', '3000') or 3000),
     'TAIER_TIMEOUT': int(os.environ.get('TAIER_TIMEOUT', '120') or 120),
     'TAIER_SWITCH_SETTLE': float(os.environ.get('TAIER_SWITCH_SETTLE_SECONDS', '1.5') or 1.5),
     # 每节点是否出结果图（上传图床）：默认关，避免 N 个节点刷 N 张图
@@ -100,6 +128,50 @@ CONFIG = {
     # 默认不测 IPv6：TUN 下客户端会误判 v6 可用而把单节点耗时翻倍，且多数节点无 v6
     'TAIER_NO_IPV6': (os.environ.get('TAIER_NO_IPV6', '1').strip().lower() not in ('0', 'false', 'no', 'off')),
 }
+
+# `should_stop_for_budget` 由 speedtest_common 提供（四套测速共用一份判据），见文件头 import。
+
+def probe_node_alive(name, url, timeout_ms):
+    """经 mihomo 的 `GET /proxies/{name}/delay` 测活：连得通才去跑那 25 秒的测速。
+
+    返回 `(alive, delay_ms, error)`。
+
+    ⚠️ **只有 mihomo 明确判「连不上」才算死；探测机制本身出错一律 fail-open（按存活处理）。**
+    为什么：探测挂了（mihomo API 抖动、URL 配错、本机超时）若被当成「节点死了」，整轮会
+    **一个节点都不测**——那比在死节点上多花 25 秒糟得多。宁可多烧时间，也不能零产出。
+    """
+    path = ('/proxies/' + urllib.parse.quote(str(name), safe='')
+            + '/delay?url=' + urllib.parse.quote(str(url), safe='')
+            + '&timeout=' + str(max(1, int(timeout_ms))))
+    # ⚠️ 必须走**绕过代理**的 opener：mihomo API 是本机回环（127.0.0.1），而 `urlopen` 会
+    # 尊重环境里的 HTTP_PROXY —— 不少机器（含 macOS 开系统代理时）连 127.0.0.1 都被送进
+    # 代理，于是拿到的是代理的错误页。那会被下面的分支当成「mihomo 判死」，进而整轮
+    # 一个节点都不测。本机回环永远不该经代理。
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        # 外层超时给「mihomo 自己的超时 + 余量」：短了会在 mihomo 给结论前就断开
+        with opener.open(MIHOMO_API + path,
+                         timeout=max(10.0, timeout_ms / 1000.0 + 10)) as r:
+            data = json.loads(r.read().decode('utf-8', 'ignore') or '{}')
+    except urllib.error.HTTPError as e:
+        # mihomo 对连不上的节点返回 4xx/5xx 并带 {"message": "..."}——这是它给出的**判死**结论
+        try:
+            raw = e.read().decode('utf-8', 'ignore')
+        except Exception:
+            raw = ''
+        try:
+            msg = (json.loads(raw) or {}).get('message') or raw
+        except Exception:
+            msg = raw
+        return False, None, (str(msg)[:200] or f'HTTP {e.code}')
+    except Exception as e:
+        # 探测机制不可用 → fail-open
+        return True, None, f'探测不可用（按存活处理）：{e}'
+    delay = data.get('delay')
+    if isinstance(delay, int) and delay > 0:
+        return True, delay, ''
+    return False, None, str(data.get('message') or '无延迟值（连不上）')[:200]
+
 
 MODE_LABELS = {'single': '只测单线程', 'multi': '只测多线程', 'both': '单线程 + 多线程对照'}
 ANSI_RE = re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
@@ -326,12 +398,6 @@ def parse_taier_output(text: str):
 # ---------------------------------------------------------------------------
 # 测速点定位（复刻 taierspeedtest 的 match 协议，protocol.go/main.go）
 # ---------------------------------------------------------------------------
-# 泰尔控制服务器（引擎 fetchClient 的降级链，原样照抄）
-_TAIER_CTRL_SERVERS = [
-    'https://dlcv2.cnspeedtest.cn:8443',
-    'http://dlc.duoweisoft.com:8096',
-    'http://dlcv2.duoweisoft.com:8088',
-]
 _TAIER_PKG = 'com.cnspeedtest.globalspeed'
 _TAIER_UA_DALVIK = 'Dalvik/2.1.0 (Linux; U; Android 14; NE2210 Build/TP1A.220624.014)'
 # 省 → 省会城市（main.go provinceCity，match API 的 city 参数用）
@@ -442,7 +508,8 @@ def taier_target_network_lines(points, client_ip):
     return build_target_network_section([(server, label, info)])
 
 
-def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle, gist_error=''):
+def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle, gist_error='',
+                         aborted_due_to_runtime=False, runtime_abort_reason=''):
     def esc(s):
         return html.escape(str(s))
     # 订阅策略（阈值 / 实际采用的判定指标 / 达标数 / 最少节点数）
@@ -467,7 +534,7 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
     # 于是标题一渲染就 `NameError: name '_title_emoji' is not defined`，整条通知发不出去
     # （`telegram_send_failed`，而 job 照样「成功」——通知失败不改 exit code，所以静默了）。
     # 判据与注释、规范（规范 · 3.x 测速三套：0 成功 / 疑似未走代理降级 ⚠️）一致。
-    _title_emoji = '⚠️' if (not ok_results or bypass_hits) else '✅'
+    _title_emoji = '⚠️' if (not ok_results or bypass_hits or aborted_due_to_runtime) else '✅'
     _label = (merged_env().get('PROXY_SPEEDTEST_LABEL') or '').strip()
     _title_prefix = f'{_label} · ' if _label else ''
     lines = [
@@ -476,6 +543,9 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
         f"🕒 起止：{esc(meta['started_text'])} ~ {esc(meta['ended_text'])} · 耗时 {esc(meta['duration_text'])}",
         # 计数口径与 cdn/gitee 统一用「可用」（成功=功能可用，含节点连接成功但速度偏低）
         f"📊 节点：共 {len(results)} 个 · 可用 {len(ok_results)} 个",
+        # 到点收摊 / 运行中中止：**不是失败**（退出码仍 0），但必须说清，否则读者会以为
+        # 「只测了这么几个」是订阅本身的问题（规范 · 2.7 测速三套）
+        *([f'⚠️ 本轮已中止：{esc(runtime_abort_reason)}'] if aborted_due_to_runtime else []),
         # 取值行口径（规范 · 取值行口径）：测速点与模式都取自引擎参数（机器返回值），整行同为等宽
         # 不用 📍：紧随其后的「📍 测速点网络」分节（共享层）已占用该 emoji，
         # 同一条通知两个 📍 会让读者以为是同一块的两个小组
@@ -634,11 +704,16 @@ def handle_termination_signal(signum, frame):
 # ---------------------------------------------------------------------------
 def _run():
     started_at = datetime.now()
+    # 预算从**进程启动**起算（不是从节点循环起算）：job 的 timeout-minutes 也把前置准备
+    # （mihomo 下载 / TUN / 节点快照）算在内，从启动起算才能保证「到点」一定早于硬取消。
+    _budget_seconds = CONFIG['TAIER_BUDGET_SECONDS']
+    _budget_deadline = speedtest_budget_deadline(_budget_seconds)
     log_progress('taier_speedtest_started', started_at=started_at.isoformat(), config={
         'points': CONFIG['TAIER_POINTS'],
         'mode': CONFIG['TAIER_MODE'],
         'duration': CONFIG['TAIER_DURATION'],
         'max_nodes': CONFIG['TAIER_MAX_NODES'],
+        'budget_seconds': _budget_seconds,
     })
     env = merged_env()
 
@@ -677,8 +752,51 @@ def _run():
 
     results = []
     bypass_hits = 0
+    # 「到点收摊」与「运行中中止」共用这一对标志：通知降 ⚠️ + 正文补一行，但**都不算失败**
+    # （退出码仍 0），拿已测节点照常出订阅（规范 · 2.7 测速三套）
+    aborted_due_to_runtime = False
+    runtime_abort_reason = ''
+    # 测活的熔断：开头连续这么多个都没通过、且一个成功的都没有 ⇒ 更可能是**探测目标本身
+    # 不可达**（控制面挂了 / URL 配错），而不是这些节点恰好都死了。继续判死会让整轮零产出。
+    _probe_guard_n = 8
+    _probe_enabled = CONFIG['TAIER_ALIVE_PROBE']
+    _probe_alive = 0
+    _probe_dead_streak = 0
     for item in alive_items:
+        # 判据放在**开下一个节点之前**：单节点 ≈ 25 秒，所以超发最多一个节点
+        if should_stop_for_budget(_budget_deadline):
+            aborted_due_to_runtime = True
+            runtime_abort_reason = (f'到点收摊：预算 {tg_format_elapsed(_budget_seconds)}，'
+                                    f'已测 {len(results)}/{len(alive_items)} 个节点')
+            log_progress('taier_budget_stop', tested=len(results), total=len(alive_items),
+                         budget_seconds=_budget_seconds)
+            break
         name = str(item.get('name') or '')
+        # 先测活，再测速：死节点不再占用一整个测速窗口（≈25 秒/个）
+        if _probe_enabled:
+            _alive, _delay, _perr = probe_node_alive(
+                name, CONFIG['TAIER_ALIVE_PROBE_URL'], CONFIG['TAIER_ALIVE_PROBE_TIMEOUT_MS'])
+            if _alive:
+                _probe_alive += 1
+                _probe_dead_streak = 0
+            else:
+                _probe_dead_streak += 1
+                log_progress('taier_node_probe_failed', name=name, error=_perr,
+                             url=CONFIG['TAIER_ALIVE_PROBE_URL'])
+                if _probe_dead_streak >= _probe_guard_n and _probe_alive == 0:
+                    _probe_enabled = False
+                    log_progress('taier_probe_disabled', consecutive_dead=_probe_dead_streak,
+                                 url=CONFIG['TAIER_ALIVE_PROBE_URL'],
+                                 reason='开头连续多个均未通过且无一成功，怀疑探测目标不可达')
+                results.append({
+                    'name': name,
+                    'type': item.get('type', ''),
+                    'source_entry': item.get('source_entry', {}) or {},
+                    'mode': 'download',
+                    'ok': False,
+                    'error': f'测活未通过：{_perr}',
+                })
+                continue
         try:
             switch_proxy(name, CONFIG['TAIER_SWITCH_SETTLE'])
         except Exception as e:
@@ -789,6 +907,8 @@ def _run():
         'direct_egress_ip': direct_ip,
         'bypass_hits': bypass_hits,
         'node_count': len(results),
+        'aborted_due_to_runtime': aborted_due_to_runtime,
+        'runtime_abort_reason': runtime_abort_reason,
         'results': results,
     }
     try:
@@ -799,7 +919,9 @@ def _run():
     try:
         # 长消息分片发送（失败列表 + Gist 段容易超 4000 字符，单发会被整条拒收）
         tg_res = send_telegram_chunked(env, '\n'.join(build_telegram_lines(
-            results, meta, direct_ip, bypass_hits, gist_res, bundle, gist_error)))
+            results, meta, direct_ip, bypass_hits, gist_res, bundle, gist_error,
+            aborted_due_to_runtime=aborted_due_to_runtime,
+            runtime_abort_reason=runtime_abort_reason)))
         # 发送层不写 stderr（python 侧靠返回值），失败原因必须回传日志（规范 · 发送层）
         log_progress('telegram_send_finished', sent=bool(tg_res.get('sent')),
                      reason=tg_res.get('reason', ''))
@@ -807,6 +929,9 @@ def _run():
         log_progress('telegram_send_failed', error=str(e))
 
     log_progress('taier_speedtest_done', node_count=len(results), bypass_hits=bypass_hits,
+                 aborted_due_to_runtime=aborted_due_to_runtime,
+                 probe_alive=_probe_alive, probe_dead=len(results) - _probe_alive
+                 if CONFIG['TAIER_ALIVE_PROBE'] else 0,
                  json_path=str(RESULT_JSON))
     # 全部节点都命中 bypass ⇒ 结果不可信，判失败便于在 Actions 上看见
     return 1 if (bypass_hits and bypass_hits >= max(1, len(results))) else 0

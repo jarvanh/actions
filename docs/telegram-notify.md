@@ -449,12 +449,25 @@ Run ID：<code>12345678</code>
 
 | 通知 | 在哪 | 何时发 |
 |---|---|---|
-| ✅ / ⚠️ CDN 测速完成 | `speedtest.py` | 主报告（0 可用节点降级 ⚠️） |
-| ✅ / ⚠️ Gitee 测速完成 | `speedtest_gitee.py` | 主报告（中止 / 0 可用降级） |
-| ✅ / ⚠️ 泰尔三网测速 | `taier_speedtest.py` | 主报告（0 成功 / 疑似未走代理降级） |
+| ✅ / ⚠️ CDN 测速完成 | `speedtest.py` | 主报告（0 可用节点 / **到点收摊**降级） |
+| ✅ / ⚠️ Gitee 测速完成 | `speedtest_gitee.py` | 主报告（运行中中止 / 0 可用 / **到点收摊**降级） |
+| ✅ / ⚠️ 泰尔三网测速 | `taier_speedtest.py` | 主报告（0 成功 / 疑似未走代理 / **到点收摊**降级） |
 | ❌ …异常退出 / ⛔ …异常终止 | 三套各自 | 可控退出、未捕获异常、信号终止 |
 
 三套里多数通知是异常与信号兜底——这是最容易写坏、也最容易静默丢失的一块，写法见 4.4。
+
+**三套的「到点收摊」口径与位置完全一致**（2026-09-14 统一）：标题由 ✅ 降为 ⚠️，并在
+「📊 节点：共 N 个 · 可用 M 个」这行的**下一行**补一行
+`⚠️ 本轮已中止：<原因>`。放在紧跟节点行是为了先看到「测了多少」，再看到「为什么停」；
+三套位置不同会让读者以为自己看漏了（gitee 原先放在测速点区块**之后**，已挪齐）。
+
+**「到点收摊」与「运行中中止」都走这条降级**。前者是脚本自己的墙钟预算到点
+（三套共用 `speedtest_common.should_stop_for_budget`，默认 5 小时；gitee/cdn 的 env 是
+`PROXY_SPEEDTEST_BUDGET_SECONDS`，taier 是 `TAIER_BUDGET_SECONDS`），后者是内核/端口挂了
+（`check_mihomo_runtime` 失败，仅 gitee 有）。**两者都不是失败，退出码仍为 0**，拿已测节点
+照常出订阅——理由同「到点收摊 ≠ 失败」：撞 GitHub 的硬取消会让整轮工作全废。判定字段是
+RESULT_JSON 的 `aborted_due_to_runtime` / `runtime_abort_reason`
+（`speedtest_gitee.py` 早已有这两个字段，`taier_speedtest.py` / `speedtest.py` 2026-09-14 起对齐）。
 
 **示例：测速主报告**
 

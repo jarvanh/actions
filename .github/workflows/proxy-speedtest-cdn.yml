@@ -86,6 +86,11 @@ jobs:
           PROXY_SPEEDTEST_SWITCH_SETTLE_SECONDS: '1.5'
           # 节点上限：编排按抓取量传入；定时运行不传 = 0 = 不限（与既有行为一致）
           PROXY_SPEEDTEST_MAX_NODES: ${{ inputs.max_nodes || '0' }}
+          # 墙钟预算（秒，0 = 不限）：到点不再开下一个节点，拿已测节点照常出订阅（退出码 0），
+          # 目的是**不撞 job 的 360 分钟硬取消**（撞上则整轮白烧、订阅来不及提交 Gist）。
+          # 默认 18000 秒 = 5 小时，比硬上限少 1 小时留给前置准备与收尾。**与 job 的
+          # timeout-minutes 成对，改一个要回看另一个。** 可在仓库 Variables 覆盖。
+          PROXY_SPEEDTEST_BUDGET_SECONDS: ${{ vars.PROXY_SPEEDTEST_BUDGET_SECONDS || '18000' }}
           # 上行测速：默认开启，复用 speedtest_gitee 的「经 mihomo 代理 git push」方案，
           # 携带代理环境变量向 Gitee 私有仓库 push 测速文件（反映代理节点上行带宽）。
           # 需先在仓库 Secrets 配置 GITEE_PRIVATE_TOKEN 与 PROXY_SPEEDTEST_GITEE_OWNER，

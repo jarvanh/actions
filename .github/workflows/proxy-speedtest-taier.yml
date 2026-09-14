@@ -112,8 +112,11 @@ jobs:
     # 测速是逐节点串行的、每节点 ≈ `2 × duration + 5` = 25 秒（见 taier_speedtest.py 里
     # `TAIER_MAX_NODES` 的注释），**45 分钟只够约 108 个节点**；而 proxy-speedtest-gistnodes
     # 一次会交接几千个（2026-09-14 那轮交接 3284 个 ≈ 22.8 小时），于是整轮白烧。
-    # ⚠️ 不设 ≠ 没有上限，默认 360 分钟。**要让长轮真正跑完，得靠脚本自己的墙钟预算到点
-    # 收摊、拿已测节点出订阅，而不是靠抬天花板**（该预算尚未实现）。
+    # ⚠️ 不设 ≠ 没有上限，默认 360 分钟。**要让长轮真正跑完，靠的是脚本自己的墙钟预算
+    # 到点收摊、拿已测节点出订阅，而不是靠抬天花板**（2026-09-14 已实现：
+    # `TAIER_BUDGET_SECONDS`，默认 18000 秒 = 5 小时，比 360 分钟少 1 小时留给前置准备
+    # 与收尾/**Gist 提交**）。改了 `TAIER_BUDGET_SECONDS` 或将来加回 `timeout-minutes`，
+    # 都要回头确认「预算 + 收尾余量 < 硬上限」这个关系没被破。
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -137,6 +140,11 @@ jobs:
           TAIER_MODE: ${{ inputs.mode || github.event.inputs.mode || 'single' }}
           TAIER_DURATION: ${{ inputs.duration || github.event.inputs.duration || '10' }}
           TAIER_MAX_NODES: ${{ inputs.max_nodes || github.event.inputs.max_nodes || '0' }}
+          # 墙钟预算（秒，0 = 不限）：到点不再开下一个节点，拿已测节点照常出订阅（退出码 0），
+          # 目的是**不撞 job 的 360 分钟硬取消**（撞上则整轮白烧、订阅来不及提交 Gist）。
+          # 默认 18000 秒 = 5 小时，比硬上限少 1 小时留给前置准备与收尾。**与 job 的
+          # timeout-minutes 成对，改一个要回看另一个。** 可在仓库 Variables 覆盖。
+          TAIER_BUDGET_SECONDS: ${{ vars.TAIER_BUDGET_SECONDS || '18000' }}
           # 订阅导出策略（四套共用；可在仓库 Settings → Secrets and variables → Actions
           # → Variables 里覆盖，留空走脚本默认值）：
           #   PROXY_SPEEDTEST_MIN_MEGABIT  达标阈值（兆，默认 10）

@@ -78,6 +78,7 @@
 | `PROXY_SPEEDTEST_UPLOAD_VIA_PROXY` | 1 | 1=经代理（节点上行）；0=直连（家庭宽带上行） |
 | `PROXY_SPEEDTEST_SWITCH_SETTLE_SECONDS` | 1.5 | 切节点后等待 |
 | `PROXY_SPEEDTEST_MAX_NODES` | 0 | 0 = 不限 |
+| `PROXY_SPEEDTEST_BUDGET_SECONDS` | `18000` | **墙钟预算**（秒，`0` = 不限），从进程启动起算。到点不再开下一个节点，拿已测节点照常出订阅（退出码 0）。**与 job 的 `timeout-minutes` 成对**：默认 5 小时 < 360 分钟 |
 | `PROXY_SPEEDTEST_NPMMIRROR_ENABLED` | 1 | 是否合并 npmmirror 最新版测速点 |
 | `PROXY_SPEEDTEST_GIST_FILENAME` / `_DESCRIPTION` | 见 workflow | Gist 文件名/描述（三套区分） |
 | `PROXY_SPEEDTEST_MIN_MEGABIT` | 10 | 达标阈值（兆），三套共用 |
@@ -92,8 +93,21 @@
 | 标题 | 触发 |
 |---|---|
 | `✅ CDN 测速完成` | 正常完成（TOP5 + 订阅 Gist 状态） |
+| `⚠️ CDN 测速完成` | 0 可用节点，或**到点收摊**（预算用完、本轮没测完） |
 | `⛔ CDN 测速异常终止` | 收到 SIGTERM/SIGINT（run 被取消/超时），handler 兜底 |
 | `❌ CDN 测速异常退出 · <原因>` | mihomo 启动失败 / 节点快照失败（`write_termination`）或未捕获异常，标题带原因首行 |
+
+### 墙钟预算（到点收摊，与 gitee / taier 共用同一判据）
+
+`PROXY_SPEEDTEST_BUDGET_SECONDS`（默认 5 小时）在每个节点**开始之前**检查一次
+（`speedtest_common.should_stop_for_budget`）；超预算就 `break`，**退出码仍 0**，照常出报告、
+导订阅、发通知。目的是不撞 job 的 360 分钟**硬取消**（那会整轮工作全废、下游全 `skipped`、
+订阅来不及提交 Gist）。起算点是**进程启动**，与 `timeout-minutes` 的口径一致。
+
+收摊时通知标题降 `⚠️`，并在「📊 节点」行**紧跟**一行
+`⚠️ 本轮已中止：到点收摊：预算 <时长>，已测 N/M 个节点`；`RESULT_JSON` 里对应
+`aborted_due_to_runtime` / `runtime_abort_reason`。细则见
+[gitee 文档 · 墙钟预算](proxy-speedtest-gitee.md#墙钟预算到点收摊三套共用)。
 
 ## 兜底行为（与 gitee/taier 对齐）
 

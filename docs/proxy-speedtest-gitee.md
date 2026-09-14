@@ -93,11 +93,33 @@
 | `PROXY_SPEEDTEST_LATENCY_SAMPLES` / `_TIMEOUT` | 4 / 8 | gitee.com 延迟采样次数 / 单次超时 |
 | `PROXY_SPEEDTEST_DIRECT_BASELINE_TIMEOUT` / `_MAX_ATTEMPTS` | 60 / 5 | 直连基线 |
 | `PROXY_SPEEDTEST_SWITCH_SETTLE_SECONDS` | 1.5 | 切节点后等待 |
+| `PROXY_SPEEDTEST_BUDGET_SECONDS` | `18000` | **墙钟预算**（秒，`0` = 不限），从进程启动起算。到点不再开下一个节点，拿已测节点照常出订阅（退出码 0）。**与 job 的 `timeout-minutes` 成对**：默认 5 小时 < 360 分钟 |
 | `PROXY_SPEEDTEST_DETACH` | 0（workflow 注入） | 1 = detach 后台自跑（本地手跑用） |
 | `PROXY_SPEEDTEST_GIST_FILENAME` / `_DESCRIPTION` | 见 workflow | Gist 文件名/描述 |
 | `PROXY_SPEEDTEST_MIN_MEGABIT` | 10 | 达标阈值（兆） |
 | `PROXY_SPEEDTEST_SPEED_METRIC` | upload | 判定指标 `upload`/`download`；达标数 < 最少节点数时自动改用另一指标（双向对称） |
 | `PROXY_SPEEDTEST_MIN_NODES` | 1 | 上传订阅的最少节点数，不足则不上传（通知显示「达标不足 N 个」） |
+
+### 墙钟预算（到点收摊，三套共用）
+
+测速**逐节点串行**，单节点几十秒，而 `proxy-speedtest-gistnodes` 一轮交接过来的订阅可能有
+几千个节点（2026-09-14 那轮 3284 个，按 gitee 口径远超 6 小时）。job 不设 `timeout-minutes`
+时 GitHub 默认 **360 分钟**——撞上去是**硬取消**：整轮工作全废、下游 job 全 `skipped`，
+订阅链接根本来不及提交到 Gist。
+
+所以三套引擎都有 `PROXY_SPEEDTEST_BUDGET_SECONDS` 墙钟预算（默认 5 小时）：
+
+- **判据**：`speedtest_common.should_stop_for_budget`（四套共用一份实现，单一来源）；
+- **检查点**：每个节点**开始之前**，超预算则 `break`；单节点几十秒，所以最多超发一个节点；
+- **不是失败**：退出码仍是 `0`，照常出报告、导订阅、发通知——只是通知里会说明「本轮没测完」；
+- **起算点**：**进程启动**（不是节点循环），因为 job 的 `timeout-minutes` 也把前置准备算在内；
+- **与硬上限成对**：默认 `18000` 秒 = 5 小时，留 1 小时给前置准备（订阅拉取 / mihomo /
+  直连基线 / Gitee 准备）与收尾（报告 / 通知 / Gist 提交）。**改 `timeout-minutes` 前先确认
+  这个关系没被破**。
+
+通知表现：标题由 `✅` 降为 `⚠️`，并在「📊 节点」行**紧跟**一行
+`⚠️ 本轮已中止：到点收摊：预算 <时长>，已测 N/M 个节点`。`RESULT_JSON` 里对应
+`aborted_due_to_runtime` / `runtime_abort_reason` 两个字段。
 
 ### 订阅导出策略（三套共用）
 
