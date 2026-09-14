@@ -77,6 +77,8 @@ LAST_LINK_FILE = os.environ.get("ODLINK_LAST", "/opt/odlink-last.json")
 #   落盘 = /tmp/odlink-dir-cache.json（runner 用户可写），由 emby_incbak.sh
 #          连同快照一起上云，下一轮再被恢复到装载路径
 # 两端都做严格降级：读不到/损坏/schema 不符 = 现状冷启动；写失败只记日志。
+# ⚠️ 落盘有前置守卫：未装载过（_dir_loaded 假）时跳过落盘——odlink 比 install emby
+#    先启动，T+600s 的第一次定时落盘早于备份恢复，写出去会把云端累积的几万条冲掉。
 DIR_CACHE_IN = os.environ.get("ODLINK_DIR_CACHE_IN",
                               "/var/lib/emby/odlink-dir-cache.json")
 DIR_CACHE_OUT = os.environ.get("ODLINK_DIR_CACHE_OUT",
@@ -315,11 +317,15 @@ class Resolver(object):
     def _ensure_dir_cache(self):
         """延迟到**首次解析**才装载：odlink（step 10）比 install emby（step 11）先启动，
         那时 /var/lib/emby 还没从备份恢复、甚至正被 rm -rf 重建，提前装载只能读到
-        空文件或被删掉的旧文件。真正的解析请求都发生在服务就绪之后。"""
+        空文件或被删掉的旧文件。真正的解析请求都发生在服务就绪之后。
+
+        `_dir_loaded` 由 `_load_dir_cache()` 在**装载结束时**置真，不在这里置——
+        `dump_dir_cache()` 要靠它区分「内存这份还没包含上轮历史」与「装载已结束」。
+        在这里提前置真会让第一次定时落盘（T+600s，备份恢复还没完成）把只含 8 个
+        顶层快捷方式的快照写出去，覆盖云端累积的几万条。"""
         with self._lock:
             if self._dir_loaded:
                 return
-            self._dir_loaded = True
         self._load_dir_cache()
 
     def _load_dir_cache(self):
@@ -346,12 +352,29 @@ class Resolver(object):
             log("dir_cache 装载：无历史文件，冷启动")
         except Exception as e:
             log("dir_cache 装载失败，冷启动: %s" % type(e).__name__)
+        finally:
+            # 只有"装载已结束"（成功或降级都算）才置真：dump 靠它判断内存这份
+            # 是否已经包含上轮历史。见 _ensure_dir_cache() 的说明。
+            with self._lock:
+                self._dir_loaded = True
 
     def dump_dir_cache(self):
-        """落盘当前 dir_cache（定时 / 收到终止信号 / 退出前）。失败不影响服务。"""
+        """落盘当前 dir_cache（定时 / 收到终止信号 / 退出前）。失败不影响服务。
+
+        未装载就落盘 = 用一份不完整的快照覆盖云端完整的那份：odlink（step 10）比
+        install emby（step 11）先启动，第一次定时落盘（T+600s）必然早于备份恢复
+        （T+~840s），此刻内存里只有 bootstrap 写进去的 8 个顶层快捷方式。
+        **不能**改成"先调 `_ensure_dir_cache()` 再落盘"：那会在 T+600 就把
+        `_dir_loaded` 置真，反而把恢复完成后的真装载永久挡掉。
+        """
         try:
             with self._lock:
-                snapshot = dict(self.dir_cache)
+                ready = self._dir_loaded
+                snapshot = dict(self.dir_cache) if ready else {}
+            if not ready:
+                log("dir_cache 落盘跳过：尚未装载上轮缓存（备份恢复未完成），"
+                    "不用不完整快照覆盖云端")
+                return
             if len(snapshot) > DIR_CACHE_MAX:
                 # 超上限按插入顺序丢最旧的（dict 保序），防止文件无限膨胀
                 for k in list(snapshot.keys())[:len(snapshot) - DIR_CACHE_MAX]:
