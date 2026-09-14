@@ -609,30 +609,19 @@ _ol_lock_exclusive_release() {
   return 0
 }
 
-# 重启后等待驱动就绪（自适应轮询，上界 = 旧的无条件 sleep）
-# 为什么不再盲等 60s: 一轮里有 ~10 次容器重启（truth-check / 持久化复核），
-# 每次盲等 60s 就是约 10 分钟，占 334min 轮次的 ~3%（2026-09-14 静默间隔分析:
-# 全轮 ≥60s 无输出的空转合计 145min，其中「等待驱动重新初始化 (60s)」出现 9 次）。
-# 而实际就绪通常只要几秒 —— 用"目标路径可列出"作为就绪信号轮询即可。
-# 上界保留 60s（可配）: 超时也照旧往下走，**最坏情况与旧行为一致**，不会更慢。
+# 重启后等待驱动就绪 —— **必须盲等 OPENLIST_DRIVER_READY_WAIT 秒（默认 60s）**。
+# 2026-09-14 曾改成「自适应轮询: 目标路径可列出即就绪」（4af1cbc），已回滚 —— 实测是回归:
+#   A 轮（盲等 60s）: Copied 817 · 传输 13.08GB · 「列表获取不完整」0 次 · 「重启后列表未就绪」0 次
+#   B‘ 轮（自适应）: Copied 39 · 传输 148MB · 「列表获取不完整」30 次 · 「重启后列表未就绪」29 次
+# 原因: 容器重启后 `rclone lsf` 很快返回**成功但内容为空/不完整**（驱动在补水）。
+#   ⇒ "可列出" ≠ "列表完整"。拿不完整清单去做 diff 会跳过修复管线（661 缺失 0 修复）。
+#   诊断单次测到 12s 完整（新容器+小目录），不代表生产中运行中的容器+大目录。
+# 想再优化只能换**更强的就绪信号**（如 OpenList API 的 raw 计数达到预期值），不能只凭 lsf 成功。
 # 用法: _wait_driver_ready <ol_path 不带 openlist: 前缀> [log_file]
 _wait_driver_ready() {
-  local ol_path="${1#/}" log_file="${2:-/dev/null}"
-  local max="${OPENLIST_DRIVER_READY_WAIT:-60}" t0 now
-  t0=$(date +%s)
-  [ -n "$ol_path" ] || { sleep "$max"; return 0; }
-  while :; do
-    if timeout 20 rclone lsf "openlist:${ol_path}" --max-depth 1 --files-only \
-         >/dev/null 2>&1; then
-      now=$(date +%s)
-      echo "  驱动就绪（等了 $((now - t0))s，上限 ${max}s）" | tee -a "$log_file"
-      return 0
-    fi
-    now=$(date +%s)
-    [ $((now - t0)) -ge "$max" ] && break
-    sleep 3
-  done
-  echo "  ⚠️ 驱动 ${max}s 内未确认就绪，按旧行为继续（最坏情况不变）" | tee -a "$log_file"
+  local _w="${OPENLIST_DRIVER_READY_WAIT:-60}" log_file="${2:-/dev/null}"
+  echo "  驱动就绪等待 ${_w}s（盲等；自适应轮询已回滚，见函数头注释）" | tee -a "$log_file"
+  sleep "$_w"
   return 0
 }
 
