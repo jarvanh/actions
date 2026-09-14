@@ -56,7 +56,7 @@
 ### 并发与时长
 
 - `concurrency: emby-singleton` —— 同时只允许一个 run，后来的排队而不打断（自续触发正是靠它排成一条链）
-- 保留时长由 `EMBY_RUN_MINUTES` 控制（默认 `270`）。⚠️ **GitHub job 硬上限 6 小时**（含 5 分钟宽限）：保留时长 + 启动恢复 + 收尾备份必须全部留在 6h 内
+- 保留时长由 `EMBY_RUN_MINUTES` 控制（默认 `300` = 5 小时）。⚠️ **GitHub job 硬上限 6 小时**（含 5 分钟宽限）：保留时长 + 启动恢复 + 收尾备份必须全部留在 6h 内；把三者相加可以倒推出「保留时长最大约 305 分钟」，默认取 300 是为收尾留真实余量（总时长 ≈ 5h20m）
 - run 结束即销毁 runner，所有状态靠云端备份延续
 
 ### 流式接力（为什么改成自续触发）
@@ -101,14 +101,15 @@ cron 退回 6 小时一档只做兜底。三道护栏：
 | `PLAYBACK_MODE_INPUT` | 归一化后的模式入参（手动输入优先，其次仓库变量，最后 `302`） |
 | `TZ` | 固定 `Asia/Shanghai`，统一所有日志与通知的时间戳 |
 | `EMBY302_DIR` | 脚本目录，各步骤 `source $EMBY302_DIR/lib.sh` 复用公共函数 |
-| `EMBY_RUN_MINUTES` | 本轮保留时长（默认 `270`），手动触发可用 `run_minutes` 覆盖（调试填 8） |
+| `EMBY_RUN_MINUTES` | 本轮保留时长（默认 `300` = 5 小时；上限 ≈305 见上），手动触发可用 `run_minutes` 覆盖（调试填 8） |
 | `EMBY_BACKUP_EVERY_MIN` | 运行期增量备份间隔（默认 `25` 分钟） |
 | `EMBY_BACKUP_DEST` | 增量备份远端目录（默认 `onedrive:backup/emby/live`），同时是恢复侧第 ① 级来源 |
 | `EMBY_CACHE_RESTORE` | 启动时是否从全量包补齐图片缓存（默认 `1`）。设 `0` 省下整包解压那几分钟，代价是首轮海报/背景图冷读 |
 | `EMBY_IMAGES_QUALITY` | ge2o 请求 Emby 图片的质量（默认 `100` = 原图）。海报墙/详情页背景图都经隧道传，上游建议 70~90 |
 | `EMBY_FULL_BACKUP` | 收尾全量打包：`auto`（按剩余预算决定，默认）/ `0`（永远关） |
 | `EMBY_FULL_BACKUP_ETA` | 全量打包预计耗时（默认 `2400`s），收尾据此判断预算够不够 |
-| `EMBY_JOB_BUDGET` | job 总预算（默认 `20400`s = 5h40m），超过就不再启动任何耗时操作 |
+| `EMBY_JOB_BUDGET` | job 总预算（默认 `19800`s = 5h30m，即红线本身），超过就不再启动任何耗时操作 |
+| `EMBY_IMAGE_SYNC_BUDGET` | 收尾图像归档的预算缓冲（默认 `600`s）：剩余不足就不启动最终归档 |
 | `EMBY_PREFETCH` | 直链预热器开关（默认 `1`），见[起播慢怎么定位](#起播慢怎么定位) |
 | `EMBY_PREFETCH_MAX_DIRS` | 目录回填上限（默认 `400` 个目录）。2026-09-14 实测：800 目录 → `dirs_cached` 43,925、`graph.err` 仅 12/1126，故已把变量设为 `1837`（全量）。盯 `/stats` 的 `graph.err` 与 429 |
 | `EMBY_PREFETCH_PAR` | 目录回填并发度（空闲时，默认 `8`）。串行时每目录约 2.6s，并发后回填窗口大幅收窄 |
@@ -426,7 +427,7 @@ HTML 解析失败不重发、429 限流保留重试——与全库其余通知�
 | 3 规格 | Emby `Items` 一次取全 + odlink | 集名（剧集）/ 类型 / 时长 / 分辨率 / 编码 / 体积；体积来自 `odlink-last.json`（仅 302 有）——**任一项取不到就整项省略**，不会出现 `null · · 0` |
 | 4 链路 | 模式 + `odlink-last.json` | 302 = `⚡ 302直连 OneDrive` + 直链剩余有效期；中转 = `🔁 视频流经 runner 中转到网盘`。`2400s` = `odlink.py` 的 `LINK_TTL`，改缓存时长需同步 `playlog.sh` 的 `notify()` |
 | 5 客户端 | Emby `Sessions` + ge2o 日志 | 客户端名 / 设备名来自 Sessions；IP 来自 ge2o 访问日志（数据源 A 才有，用于"谁在播"） |
-| 6 起播等待 | ge2o 访问日志 + warmup 探针 | **访问链 KV 树版式**（与测速套件「📍 测速点网络」同款，`tree_lines` 渲染），每行 = 谁访问哪里 + 耗时，**按点播放后的先后顺序排**：`你 → Cloudflare hkg01（香港） → Emby`（预估值，含边缘机房）→ `Emby → OneDrive 读文件头（走挂载）`（`PlaybackInfo` 里的 `ffprobe`）→ `Emby → OneDrive 取直链`（ge2o + odlink）→ `你 → OneDrive 拉首字节`（预估值，直链 TTFB）→ `Emby → OneDrive 抽字幕`（首次最慢，常是隐藏大头）→ `拖动进度条（Emby → OneDrive 重取直链）`（该条目最近一次 seek）→ 末行固定提示**还有一段在你播放器侧、服务器测不到**，避免把上面几项加起来当成总耗时。耗时 <1 秒用整数毫秒、≥1 秒用两位小数秒（`fmt_ms`）；「你 → Cloudflare → Emby」与「你 → OneDrive 拉首字节」两行来自 warmup 启动探测、**不是本次播放实测**，故标`（预估值）`。措辞按"读通知的人不懂内部术语"写。**取不到的项整行省略**，全都没有则整段不出现 |
+| 6 起播等待 | ge2o 访问日志 + warmup 探针 | **访问链 KV 树版式**（与测速套件「📍 测速点网络」同款，`tree_lines` 渲染），每行 = 谁访问哪里 + 耗时，**按点播放后的先后顺序排**：`你 → Cloudflare hkg01（香港） → Emby`（预估值，含边缘机房）→ `Emby → OneDrive 读文件头（走挂载）`（`PlaybackInfo` 里的 `ffprobe`）→ `Emby → OneDrive 取直链（缓存命中|冷解析）`（ge2o + odlink；括号标本次是否真花了这段时间，判据见 `docs/telegram-notify.md`）→ `你 → OneDrive 拉首字节`（预估值，直链 TTFB）→ `Emby → OneDrive 抽字幕`（首次最慢，常是隐藏大头）→ `拖动进度条（Emby → OneDrive 重取直链）`（该条目最近一次 seek）→ 末行固定提示**还有一段在你播放器侧、服务器测不到**，避免把上面几项加起来当成总耗时。耗时 <1 秒用整数毫秒、≥1 秒用两位小数秒（`fmt_ms`）；「你 → Cloudflare → Emby」与「你 → OneDrive 拉首字节」两行来自 warmup 启动探测、**不是本次播放实测**，故标`（预估值）`。措辞按"读通知的人不懂内部术语"写。**取不到的项整行省略**，全都没有则整段不出现 |
 | 7 直链 | `odlink-last.json` | 3 分钟内才视为本次播放所用；HTML `<a>` 折叠，段前空一行 |
 | 8 收尾区 | `tg_notify.sh` 的 `tg_add_footer` | 读 `TG_RUN_URL` / `TG_RUN_STARTED_AT`，缺席时优雅降级跳过 |
 
@@ -536,6 +537,25 @@ HTML 解析失败不重发、429 限流保留重试——与全库其余通知�
   回滚这一项即可（独立 commit）
   **后续（同日晚）**：这个代价已由上面的「图像归档独立通道 + 开机后台补回」
   基本消除——原图随独立通道跨轮传递，开机后台补回后首访用本地原图缩放
+
+#### 保留时长提到 300 分钟 + 闸门重调（2026-09-15 改）
+
+红线是「保留 + 备份 < 5h30m」，而 GitHub 硬上限 6h。原先保留 270min 时闸门取
+`EMBY_JOB_BUDGET=19200s`（5h20m）。保留提到 **300min（5h）** 后，收尾处的 elapsed
+≈ 315~320min，若沿用 19200s 会**连图像最终归档一起误跳过**，故：
+
+- `EMBY_JOB_BUDGET` 19200 → **19800s（5h30m，即红线本身）**
+- `EMBY_IMAGE_SYNC_BUDGET` 900 → **600s**（图像归档实测 33s，600s 是 10 倍余量）
+- 结果：300min 轮仍照跑图像最终归档；全量打包（ETA 2700s）必然不足 → 常规轮一律跳过
+
+**上限怎么来的**：保留时长 ≤ 360min（硬上限）− 启动恢复（最坏 ~15min）− 收尾必做
+（核心增量 + 图像归档 ~4~8min）− 缓冲 → **约 305min**。取 300 是留真实余量
+（总时长 ≈ 5h20m）。想再长就得先动红线，而不是只调这个数字。
+
+> 代价：常规轮不再刷新全量包（`/mnt/emby-cache` 缩放图会变旧）。原图已走图像通道
+> 跨轮传递，缩放在本地做；需要刷新全量包时手测一轮短的即可
+> （`gh workflow run emby.yml -f run_minutes=45 -f self_retrigger=false`，
+> 那时 elapsed 小，闸门放行全量打包）。
 
 #### 全量打包的时间闸门（2026-09-14 改）
 
@@ -872,7 +892,7 @@ sudo EMBY_USER="$EMBY_USER" python3 emby_guard.py <emby-data-root>   # 例：/va
 | 想改什么 | 改哪里 |
 |---|---|
 | 播放模式默认值 | workflow `env.PLAYBACK_MODE_INPUT` 的兜底值 / 仓库变量 `EMBY_PLAYBACK_MODE` |
-| 保留时长 | workflow `env.EMBY_RUN_MINUTES`（默认 270；手测可用 `run_minutes` 覆盖）。⚠️ 总时长必须留在 6h 内 |
+| 保留时长 | workflow `env.EMBY_RUN_MINUTES`（默认 300 = 5 小时，上限 ≈305；手测可用 `run_minutes` 覆盖）。⚠️ 总时长必须留在 6h 内 |
 | 增量备份（间隔/远端） | `EMBY_BACKUP_EVERY_MIN` / `EMBY_BACKUP_DEST`；脚本 `start incremental backup` 步骤的 `/opt/emby_incbak.sh` |
 | 全量打包是否做 | `EMBY_FULL_BACKUP`（auto/0）、`EMBY_FULL_BACKUP_ETA`、`EMBY_JOB_BUDGET`；判断逻辑在 `backup emby data` 步骤 |
 | 直链预热器 | `EMBY_PREFETCH` / `EMBY_PREFETCH_MAX_DIRS`；脚本 `start link prefetcher` 步骤的 `/opt/odwarm.sh` |

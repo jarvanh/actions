@@ -30,7 +30,7 @@ on:
     inputs:
       run_minutes:
         description: >-
-          本轮保留时长（分钟）。留空则用仓库变量 EMBY_RUN_MINUTES 或默认 270。
+          本轮保留时长（分钟）。留空则用仓库变量 EMBY_RUN_MINUTES 或默认 300。
           调小可快速跑完一轮用于调试（如 8），不影响其余步骤。
         type: string
         default: ""
@@ -91,9 +91,11 @@ env:
   WU_PI_ITEMS: "6"
   # 本轮保留时长（分钟）。⚠️ GitHub job 硬上限 6h（含 5 分钟宽限），实测两轮都
   # 精确死在 6h05m：`sleep 340m` + 启动 ~5min + 30GB 级打包上传必然超限，
-  # 于是备份 step 被 SIGTERM、收尾通知 skipped。现在备份改成运行期增量，
-  # 收尾只剩一次差量同步，270 + 启动/收尾 ≈ 5h，留足一小时余量。
-  EMBY_RUN_MINUTES: ${{ github.event.inputs.run_minutes || vars.EMBY_RUN_MINUTES || '270' }}
+  # 于是备份 step 被 SIGTERM、收尾通知 skipped。现在备份改成运行期增量
+  # （收尾只剩一次差量同步）且快照瘦到 ~160 文件，启动恢复 3~14 分钟：
+  # 300 + 启动/收尾 ≈ 5h20m，仍在「保留 + 备份 < 5h30m」红线内、距 6h 上限 40 分钟。
+  # 想再长只能动红线——这是「尽可能长但收尾必定跑得完」的取值。
+  EMBY_RUN_MINUTES: ${{ github.event.inputs.run_minutes || vars.EMBY_RUN_MINUTES || '300' }}
   # 运行期增量备份：间隔（分钟）与远端目录。只同步关键数据（data/config/plugins/
   # metadata），排除图片缓存软链 cache（/mnt/emby-cache，体积大且可重建）。
   EMBY_BACKUP_EVERY_MIN: ${{ vars.EMBY_BACKUP_EVERY_MIN || '25' }}
@@ -111,12 +113,12 @@ env:
   # ⚠️ 实测整包流式上传 25~47min（16.6GB 包实测 42min），旧值 2400s(40min) 偏乐观，
   # 导致"预算算下来还够"→ 开跑 → 整轮 5h39m，逼近 6h 硬上限。取实测上沿 45min。
   EMBY_FULL_BACKUP_ETA: "2700"
-  # job 总预算（秒）：超过就不再启动任何耗时操作。
-  # 硬约束「保留时长 270min + 备份 < 5h30m」，故闸门取 5h20m 留 10 分钟余量
-  # （旧值 20400s=5h40m 本身就超出红线）。配合上面的 ETA，常规 270min 轮会跳过
-  # 全量打包，只有短轮/调试轮（elapsed 小）才会刷新全量包——包里躺着图片缓存，
-  # 偶尔刷新一次就够，不必每轮都赌 6h 上限。
-  EMBY_JOB_BUDGET: "19200"
+  # job 总预算（秒）：超过就不再启动任何耗时操作。它就是「红线 5h30m」本身。
+  # 300min 轮在收尾处的 elapsed ≈ 315~320min(18900~19200s)，于是：
+  #   图像最终归档（缓冲 EMBY_IMAGE_SYNC_BUDGET=600s）→ 有余量，照跑（实测 33s）
+  #   全量打包（ETA 2700s）→ 必然不足，常规轮一律跳过（只有短轮/调试轮会刷新）
+  # 若沿用旧值 19200s（5h20m），300min 轮的图像归档会被一起误跳过。
+  EMBY_JOB_BUDGET: "19800"
   # 直链预热器：详情页预取（抓 ge2o.log 的 Items 请求）+ dir_cache 批量回填
   EMBY_PREFETCH: ${{ vars.EMBY_PREFETCH || '1' }}
   # 取直链冷/热标注的耗时分界（毫秒）：热命中 3~6ms、冷解析 0.4~1.3s，200ms 可分。
@@ -1992,7 +1994,7 @@ jobs:
           # 最长预热时长（分钟）。默认 = 本轮保留时长 - 30：旧值写死 300min，大于保留
           # 270min ⇒ wallwarmer 永远跑不到自然结束、打不出"共 N 次图片请求"结束行，
           # 收尾通知的海报预热统计只能退回进度行（不足 200 请求时直接显示"未运行"）。
-          WW_MAX_MIN=${WW_MAX_MIN:-$(( ${EMBY_RUN_MINUTES:-270} - 30 ))}
+          WW_MAX_MIN=${WW_MAX_MIN:-$(( ${EMBY_RUN_MINUTES:-300} - 30 ))}
           # 调试短轮（保留 8min 等）时上式会变负，兜一个下限
           [ "$WW_MAX_MIN" -ge 10 ] || WW_MAX_MIN=10
           WW_SIZES_MAX=${WW_SIZES_MAX:-10}              # 访问尺寸上限：客户端用了几档就预热几档，超过则取得分最高的 Top-N
@@ -2561,8 +2563,8 @@ jobs:
           # 保留时长由 EMBY_RUN_MINUTES 控制（默认 270；调试时可手填 8 分钟）。
           # ⚠️ 加上启动恢复与收尾增量备份，总时长必须留在 6h 以内——超过就又是
           # "备份被 SIGTERM + 通知 skipped"。
-          MIN="${EMBY_RUN_MINUTES:-270}"
-          case "$MIN" in ''|*[!0-9]*) MIN=270;; esac
+          MIN="${EMBY_RUN_MINUTES:-300}"
+          case "$MIN" in ''|*[!0-9]*) MIN=300;; esac
           echo "本轮保留 ${MIN} 分钟（至 $(date -d "+${MIN} minutes" '+%F %T')）"
           sleep "${MIN}m"
       - name: archive diagnostics
@@ -2706,7 +2708,7 @@ jobs:
               #    为它把整个 step 拖向 6h 上限（历史事故：备份被 TERM、通知 skipped）。
               #    flock 与运行期的定时归档互斥，不会叠罗汉。
               ELAPSED=$(run_elapsed_seconds)
-              IMG_LEFT=$(( ${EMBY_JOB_BUDGET:-20400} - ELAPSED - ${EMBY_IMAGE_SYNC_BUDGET:-900} ))
+              IMG_LEFT=$(( ${EMBY_JOB_BUDGET:-19800} - ELAPSED - ${EMBY_IMAGE_SYNC_BUDGET:-600} ))
               if [ -x /opt/emby_incbak.sh ] && [ "$IMG_LEFT" -ge 0 ] \
                  && bash /opt/emby_incbak.sh images 900; then
                 echo "✅ 海报原图已最终归档（剩余预算 $((IMG_LEFT / 60)) 分钟）"
@@ -2718,8 +2720,8 @@ jobs:
               #    关键数据已经安全，缓存丢了只是重新冷读，绝不能为了它把
               #    整个 step 拖过 6h 上限（历史事故：备份被 TERM、通知 skipped）。
               ELAPSED=$(run_elapsed_seconds)
-              ETA=${EMBY_FULL_BACKUP_ETA:-2400}
-              LEFT=$(( ${EMBY_JOB_BUDGET:-20400} - ELAPSED - ETA ))
+              ETA=${EMBY_FULL_BACKUP_ETA:-2700}
+              LEFT=$(( ${EMBY_JOB_BUDGET:-19800} - ELAPSED - ETA ))
               case "${EMBY_FULL_BACKUP:-auto}" in
                 0|false|no)
                   echo "⏭️ 全量打包已关闭（EMBY_FULL_BACKUP=${EMBY_FULL_BACKUP}）"
