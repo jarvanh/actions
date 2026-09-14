@@ -32,6 +32,11 @@ on:
         required: false
         type: string
         default: "2"
+      burst_n:
+        description: "持续写入探针的文件数（复现生产的「量/时长」维度；0=跳过）"
+        required: false
+        type: string
+        default: "150"
 
 concurrency: openlist-diag
 
@@ -103,6 +108,7 @@ jobs:
         env:
           DIAG_REPORT: /tmp/ol_diag/report.txt
           DIAG_PROBE_GAP: ${{ inputs.probe_gap }}
+          DIAG_BURST_N: ${{ inputs.burst_n }}
           DIAG_TARGET: ${{ inputs.target }}
           OL_CONTAINER: ${{ inputs.container }}
         run: |
