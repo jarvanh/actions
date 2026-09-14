@@ -556,8 +556,12 @@ if docker restart "$CONTAINER" >/dev/null 2>&1; then
   docker restart "$CONTAINER" >/dev/null 2>&1 || true
   _lsc_t0=$(date +%s)
   LSC_FIRST="" LSC_FULL="" _lsc_i=0
-  while [ $(( $(date +%s) - _lsc_t0 )) -lt 60 ]; do
-    sleep 2
+  # 窗口放大到 600s（默认，可配）: 上一版只等 60s 就放弃，得到的结论是
+  # "不可见"，但给不出**到底多久可见** —— 而生产折叠校验的窗口（6×30s=3min）
+  # 正需要这个数字来定。可见性是"延迟"不是"丢失"，必须量出延迟量级。
+  local _lsc_max="${OPENLIST_VISIBILITY_MAX:-600}"
+  while [ $(( $(date +%s) - _lsc_t0 )) -lt "$_lsc_max" ]; do
+    sleep 5
     _lsc_i=$((_lsc_i + 1))
     _c=$(rclone lsf "$LSC_DIR" --files-only --retries 1 --timeout "$PROBE_TIMEOUT" 2>/dev/null | grep -c . || true)
     if [ -z "$LSC_FIRST" ] && [ "${_c:-0}" -gt 0 ]; then
@@ -568,7 +572,8 @@ if docker restart "$CONTAINER" >/dev/null 2>&1; then
       break
     fi
   done
-  say "列表完整性: 首次成功=${LSC_FIRST:-60s内无} · 凑齐20=${LSC_FULL:-60s内未}"
+  say "列表可见性: 首次非空=${LSC_FIRST:-${_lsc_max}s内无} · 凑齐20=${LSC_FULL:-${_lsc_max}s内未}"
+  say "  对照: 生产折叠校验（0a27089）的上界 = OPENLIST_FOLD_VERIFY_TRIES×WAIT = 6×30s = 180s ⇒ 实测凑齐时间若超过 180s 就仍需调大"
   say "  判读: 首次成功==凑齐 ⇒ 就绪信号充分（4af1cbc 安全）；首次成功但凑齐更晚 ⇒"
   say "        生产 truth-check 需在就绪后加数量校验，否则会大规模误判假成功"
   rclone purge "$LSC_DIR" --retries 1 --timeout "$PROBE_TIMEOUT" >/dev/null 2>&1 || true
