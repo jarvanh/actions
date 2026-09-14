@@ -119,7 +119,13 @@ env:
   EMBY_JOB_BUDGET: "19200"
   # 直链预热器：详情页预取（抓 ge2o.log 的 Items 请求）+ dir_cache 批量回填
   EMBY_PREFETCH: ${{ vars.EMBY_PREFETCH || '1' }}
+  # 回填上限 = 每轮后台 Graph 工作的**硬上限**（不是覆盖率目标）：回填对每个目录都要
+  # 重新 fs/list 一次，与播放时的取链共享 Graph 配额。回填按 DateCreated 倒序遍历，
+  # 所以只要上限 ≥ 目录总数就是全量覆盖；库变大时它退化成"覆盖最新 N 个目录"。
   EMBY_PREFETCH_MAX_DIRS: ${{ vars.EMBY_PREFETCH_MAX_DIRS || '400' }}
+  # 回填并发：空闲时用它；检测到真实播放时降到 _PAR_BUSY，给取链让路
+  EMBY_PREFETCH_PAR: ${{ vars.EMBY_PREFETCH_PAR || '8' }}
+  EMBY_PREFETCH_PAR_BUSY: ${{ vars.EMBY_PREFETCH_PAR_BUSY || '2' }}
   # 头尾预热条目数（真实 OneDrive 流量）。与 WU_ITEMS 分开：WU_ITEMS 管直链预热
   # （零流量、覆盖率越高越好，保持 30），头尾预热对 302 直连基本无效、只当挂载
   # 冷读探针用，3 条即可——原先跟着 WU_ITEMS=30 走，每轮白烧 1.9GB 流量。
@@ -2238,7 +2244,16 @@ jobs:
           # 服务刚起来的头十几分钟里 dir_cache 覆盖率极低、首播全走冷解析。改成攒批后
           # 由 xargs -P 并发回填；并发度默认 8（保守起步，按 /stats 的 graph.err 与
           # 429 反馈再逐步上调，用 EMBY_PREFETCH_PAR 覆盖，无需改代码）。
+          #
+          # 这是**后台优化**，绝不能抢真实播放的 Graph 配额（播放取链走同一个 token、
+          # 同一份配额），所以两条让路机制：
+          #   ① 播放让路：检测到有人在放（且 90 秒内还在上报进度）→ 并发降到
+          #      PAR_BUSY，并加宽批次间隔（缓存在跨轮持久化，本轮少填不会丢，下轮继续）
+          #   ② 限流退避：每批后读 odlink /stats 的 graph.err，涨了就说明在撞限流 →
+          #      批次间隔翻倍（上限 GAP_MAX），连续无新增错误再逐步收回
           PAR=${EMBY_PREFETCH_PAR:-8}
+          PAR_BUSY=${EMBY_PREFETCH_PAR_BUSY:-2}
+          GAP_MAX=60
           FLUSH_AT=$(( PAR * 2 ))
           export LK_HOST LK_TOKEN
           cat > /tmp/odwarm_list.sh <<'L_EOF'
@@ -2249,18 +2264,34 @@ jobs:
             -d "$(jq -nc --arg p "$1" '{path:$p}')"
           L_EOF
           chmod +x /tmp/odwarm_list.sh
+          # 有人在放吗：必须"有 NowPlayingItem" **且** 最近 90 秒还在上报播放进度。
+          # 只看 NowPlayingItem 会把"暂停后扔在那儿的会话"也算成播放中，回填就永远
+          # 让路、一点也不填了。LastPlaybackCheckIn 带 7 位小数秒，直接字符串比会错，
+          # 故截掉小数部分再转 epoch。
+          playing() {
+            curl -s -m 10 "$EMBY/emby/Sessions?api_key=$KEY" 2>/dev/null | jq -e '
+              (now - 90) as $cut
+              | [ .[]? | select(.NowPlayingItem != null)
+                  | ((.LastPlaybackCheckIn // "") | split(".")[0] + "Z"
+                     | try fromdateiso8601 catch 0)
+                  | select(. > $cut) ]
+              | length > 0' >/dev/null 2>&1
+          }
+          stats_err() { curl -s -m 5 "$LK_HOST/stats" 2>/dev/null \
+                          | jq -r '.graph.err // 0' 2>/dev/null || echo 0; }
           BATCH=()
           flush_batch() {   # 并发回填一批并刷新进度；空批直接返回
-            local n=${#BATCH[@]}
+            local n=${#BATCH[@]} par=$PAR
             [ "$n" -gt 0 ] || return 0
-            printf '%s\n' "${BATCH[@]}" | xargs -P "$PAR" -n1 -I{} /tmp/odwarm_list.sh {}
+            playing && par=$PAR_BUSY      # 播放中降并发，给取链让路
+            printf '%s\n' "${BATCH[@]}" | xargs -P "$par" -n1 -I{} /tmp/odwarm_list.sh {}
             DIRS=$((DIRS + n))
-            echo "目录回填 ${DIRS}/${MAX_DIRS}（并发 ${PAR}）累计 $(( $(date +%s) - T_START ))s $(date '+%T')"
+            echo "目录回填 ${DIRS}/${MAX_DIRS}（并发 ${par}）累计 $(( $(date +%s) - T_START ))s $(date '+%T')"
             BATCH=()
           }
-          IDX=0; DIRS=0; BAD_ROUNDS=0
+          IDX=0; DIRS=0; BAD_ROUNDS=0; GAP=1; ERR_SEEN=$(stats_err)
           declare -A DSEEN=()
-          echo "=== dir_cache 回填启动 上限 ${MAX_DIRS} 个目录 并发 ${PAR} $(date '+%F %T')"
+          echo "=== dir_cache 回填启动 上限 ${MAX_DIRS} 个目录 并发 ${PAR}（播放中 ${PAR_BUSY}）$(date '+%F %T')"
           while [ "$DIRS" -lt "$MAX_DIRS" ]; do
             JSON=$(curl -s -m 30 "$EMBY/emby/Users/$USER_ID/Items?Recursive=true&SortBy=DateCreated&SortOrder=Descending&Limit=200&StartIndex=$IDX&Fields=Path,MediaSources&api_key=$KEY")
             # Emby 偶发返回非 JSON（限流 / 500 / 半截响应）。此时 PATHS 也为空，
@@ -2291,7 +2322,23 @@ jobs:
             done <<< "$PATHS"
             flush_batch   # 收尾：不满一批的剩余目录
             IDX=$((IDX + 200))
-            sleep 1
+            # 限流退避：Graph 错误计数涨了就翻倍间隔，连续无新增再逐步收回
+            NOW_ERR=$(stats_err)
+            if [ "$NOW_ERR" -gt "$ERR_SEEN" ]; then
+              ERR_SEEN=$NOW_ERR
+              GAP=$((GAP * 2)); [ "$GAP" -le "$GAP_MAX" ] || GAP=$GAP_MAX
+              echo "目录回填退避：Graph 错误计数升至 ${NOW_ERR}，批次间隔 → ${GAP}s $(date '+%T')"
+            elif [ "$GAP" -gt 1 ]; then
+              GAP=$((GAP / 2)); [ "$GAP" -ge 1 ] || GAP=1
+            fi
+            # 播放中额外放宽（至少 12s）：后台优化没必要和用户正在看的片抢配额
+            if playing; then
+              SLEEP_GAP=$((GAP * 4)); [ "$SLEEP_GAP" -ge 12 ] || SLEEP_GAP=12
+            else
+              SLEEP_GAP=$GAP
+            fi
+            [ "$SLEEP_GAP" -le "$GAP_MAX" ] || SLEEP_GAP=$GAP_MAX
+            sleep "$SLEEP_GAP"
           done
           echo "=== dir_cache 回填完成: ${DIRS} 个目录 $(date '+%F %T')"
           wait
