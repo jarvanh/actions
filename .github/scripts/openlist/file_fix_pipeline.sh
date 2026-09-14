@@ -418,27 +418,28 @@ _sync_bulk_hash_dir_fold() {
     # 落盘校验以目标端实际列出的文件为准，不认 rclone 退出码:
     # 假成功是这套体系的头号敌人（sync 报成功但后端没落盘实测多次）
     local landed="/tmp/${task_name}_bulkfold_land_${hash8}_$$.txt"
-    # 读空必须重试，不能一次读空就判"零落盘": OpenList 对**新建目录**的列表有缓存
-    # 延迟，折叠刚写完立刻 lsf 会返回 0 条。2026-09-14 用诊断实测反证:
-    #   run 34779382573 里报"批量折叠零落盘（rc=0）"的 5b32587f，事后读该目录
-    #   **有 18 个文件且可写** —— 折叠其实落盘了，是校验读早了。
+    # 落盘校验以目标端实际列出的文件为准，不认 rclone 退出码:
+    # 假成功是这套体系的头号敌人（sync 报成功但后端没落盘实测多次）
+    # 但**读的时机要给足**: 实测该后端写入后的「列表可见性延迟」远超 60s ——
+    #   run 34826097133 报"批量折叠零落盘（rc=0）"的 5b32587f，11 小时后 diag
+    #   读到 18 个文件；且新探针显示「重启前列表数 0、重启后 60s 内仍 0」。
+    #   ⇒ 不是假成功，是**列表可见性延迟**（后端/驱动异步落盘 + 列表缓存）。
+    # 因此轮询条件改为「**凑齐期望条数**」（本目录的文件数），而不是"非空"；
+    # 上界可配（默认 6 次 × 30s = 3min），到上界仍不足才判零落盘/部分落盘。
     # 误判的代价是双重的: 退回逐文件修复白跑一遍，且成果不进 marker（后端有文件、
-    # 账上没有 = 幽灵落盘），下一轮又从头折一次。
-    # **窗口实测（run 34826097133）**: 刷缓存 ×2（间隔 5s）不够 —— 仍判零落盘，
-    #   而同目录 11 小时后 diag 读到 18 个文件 ⇒ 可见性延迟远大于 15s。
-    #   故把窗口拉长为「N 次 × 间隔 W 秒」（默认 4×15s = 60s+），可配。
-    #   注意这是"延迟可见"而非"读太早就没了"——文件不会因此消失，等得起。
+    # 账上没有 = 幽灵落盘），下一轮又从头折一次——修复率长期 8.6% 的真因。
     local landed_n=0 _land_try=0
-    local _land_tries="${OPENLIST_FOLD_VERIFY_TRIES:-4}"
-    local _land_wait="${OPENLIST_FOLD_VERIFY_WAIT:-15}"
+    local _land_tries="${OPENLIST_FOLD_VERIFY_TRIES:-6}"
+    local _land_wait="${OPENLIST_FOLD_VERIFY_WAIT:-30}"
     while [ "$_land_try" -lt "$_land_tries" ]; do
       _land_try=$((_land_try + 1))
       rclone lsf "$hash_dst" --files-only --retries 1 \
         --timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900}" > "$landed" 2>/dev/null || : > "$landed"
       landed_n=$(wc -l < "$landed" | tr -d ' ')
-      [ "${landed_n:-0}" -gt 0 ] && break
+      [ "${landed_n:-0}" -ge "${cnt:-0}" ] && [ "${cnt:-0}" -gt 0 ] && break
+      [ "${landed_n:-0}" -gt 0 ] && [ "${_land_try}" -ge "$_land_tries" ] && break
       [ "$_land_try" -lt "$_land_tries" ] || break
-      echo "  ↻ 折叠落盘校验读空（第 ${_land_try}/${_land_tries} 次），刷新服务端缓存后 ${_land_wait}s 重读" | tee -a "$LOG_FILENAME"
+      echo "  ↻ 折叠落盘校验不足（第 ${_land_try}/${_land_tries} 次，${landed_n:-0}/${cnt}），刷新服务端缓存后 ${_land_wait}s 重读" | tee -a "$LOG_FILENAME"
       if declare -F _ol_refresh_path_cache >/dev/null 2>&1; then
         _ol_refresh_path_cache "$hash_dst" >/dev/null 2>&1 || true
       fi
