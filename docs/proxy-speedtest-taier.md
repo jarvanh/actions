@@ -93,19 +93,21 @@ TUN 起来后 DNS 会被 mihomo 劫持，必须显式给可达的公共解析器
 | `TAIER_DURATION` | `10` | 每方向秒数；**上游二进制硬钳制 5-13**，>13 被压到 13 |
 | `TAIER_MAX_NODES` | `0` | 最多测几个节点，0 = 不限 |
 | `TAIER_BUDGET_SECONDS` | `18000` | **墙钟预算**（秒，`0` = 不限），从进程启动起算。到点不再开下一个节点，拿已测节点照常出订阅（退出码 0）。**与 job 的 `timeout-minutes` 成对**：默认 5 小时 < 360 分钟 |
+| `TAIER_ALIVE_PROBE` | `0` | 测速前先测活（跳过连不上的节点，省下一个 ≈25 秒的测速窗口）。**默认关**：run 34859505000 实测 27 个节点全部 `Resource not found`（探测用的节点名在 mihomo 里对不上），前 8 个被误杀。查清名字为什么对不上之前保持关闭；置 `1` 可开启 |
 | `TAIER_TIMEOUT` | `120` | 单节点子进程超时秒 |
 | `TAIER_SWITCH_SETTLE_SECONDS` | `1.5` | 切节点后等待 |
 | `TAIER_IMAGE` | `0` | 每节点出结果图（上传图床），默认关避免刷图 |
 | `TAIER_NO_IPV6` | `1` | TUN 下客户端易误判 v6 可用导致耗时翻倍，默认关 |
 | `TAIER_REPO` | `MiaM1ku/taierspeedtest` | 引擎仓库 |
 | `PROXY_SPEEDTEST_MIN_MEGABIT` | 10 | 达标阈值（兆），三套共用 |
-| `PROXY_SPEEDTEST_SPEED_METRIC` | upload | 判定指标 `upload`/`download`；达标数 < 最少节点数时自动改用另一指标 |
+| `PROXY_SPEEDTEST_SPEED_METRIC` | upload | 判定指标 `upload`/`download`；另一指标达标数明显更多时自动改用另一指标（倍率见下） |
 | `PROXY_SPEEDTEST_MIN_NODES` | 1 | 上传订阅的最少节点数，不足则不上传 |
+| `PROXY_SPEEDTEST_METRIC_FALLBACK_RATIO` | 1.5 | 回退倍率：另一指标达标数 ≥ 主指标 × 该值才切换 |
 
-订阅导出策略（阈值/判定指标/最少节点数，含双向回退规则）详见
+订阅导出策略（阈值/判定指标/最少节点数，含回退规则）详见
 [gitee 文档 · 订阅导出策略](proxy-speedtest-gitee.md#订阅导出策略三套共用)。
-注意 taier **上行常测不出**（CDN 类测速点拒绝上传包，引擎渲染 failed → 0），默认按上行
-判定时通常达标 0 个 → 自动落到下行判定，通知会显示实际采用的指标。
+注意 taier **上行常测不出**（CDN 类测速点拒绝上传包，引擎渲染 failed → 0），此时上行达标数
+远少于下行 ⇒ 自动落到下行判定，通知会显示实际采用的指标。
 
 ### Gist 文件名/描述（三套区分）
 

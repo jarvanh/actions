@@ -97,8 +97,9 @@
 | `PROXY_SPEEDTEST_DETACH` | 0（workflow 注入） | 1 = detach 后台自跑（本地手跑用） |
 | `PROXY_SPEEDTEST_GIST_FILENAME` / `_DESCRIPTION` | 见 workflow | Gist 文件名/描述 |
 | `PROXY_SPEEDTEST_MIN_MEGABIT` | 10 | 达标阈值（兆） |
-| `PROXY_SPEEDTEST_SPEED_METRIC` | upload | 判定指标 `upload`/`download`；达标数 < 最少节点数时自动改用另一指标（双向对称） |
+| `PROXY_SPEEDTEST_SPEED_METRIC` | upload | 判定指标 `upload`/`download`；另一指标达标数明显更多时自动改用另一指标（双向对称） |
 | `PROXY_SPEEDTEST_MIN_NODES` | 1 | 上传订阅的最少节点数，不足则不上传（通知显示「达标不足 N 个」） |
+| `PROXY_SPEEDTEST_METRIC_FALLBACK_RATIO` | 1.5 | 判定指标回退的「明显更好」倍率：另一指标达标数 ≥ 主指标 × 该值才切换。`1` = 只要更多就换 |
 
 ### 墙钟预算（到点收摊，三套共用）
 
@@ -129,13 +130,22 @@ variables → Actions → Variables 可随时改，留空走默认）：
 
 1. **阈值**：`兆 = round(MiB/s × 8)`，≥ `PROXY_SPEEDTEST_MIN_MEGABIT`（默认 10）为达标；
 2. **判定指标**：`PROXY_SPEEDTEST_SPEED_METRIC`（默认 `upload` 按上行）；
-3. **双向回退**：主指标达标数 < `PROXY_SPEEDTEST_MIN_NODES` 时自动改用另一指标重新判定
-   （例：默认按上行，上行达标 0 个 → 改按下行）；另一指标也不更多时维持主指标；
-4. **最少节点数**：最终达标数仍 < `PROXY_SPEEDTEST_MIN_NODES` 就不上传订阅
+3. **回退**：另一指标达标数**明显更多**时才改用另一指标——`secondary > primary` 且
+   `secondary ≥ ceil(primary × PROXY_SPEEDTEST_METRIC_FALLBACK_RATIO)`（默认 `1.5`）。
+   双向对称，容忍小幅差距（尊重你显式配置的指标），差距够大才换（典型场景：公开节点
+   上行普遍测不出，下行却全部达标）；
+4. **最少节点数**：最终达标数 < `PROXY_SPEEDTEST_MIN_NODES`（默认 1）就不上传订阅
    （日志 `gist_skipped`，通知显示「达标不足 N 个 · 阈值 ≥X兆（按上行/下行）」）。
 
-实际采用的指标会写进日志（`subscription_policy` / `subscription_metric_fallback`）与
-TG 通知文案。节点必须有原始配置（`source_entry.proxy`）才计入达标——否则导不进订阅。
+⚠️ **回退判据不能拿 `min_nodes` 当门槛**（2026-09-14 修）。原先写成「主指标达标数 <
+`min_nodes` 才回退」，而 `min_nodes` 默认 1 ⇒ 只要主指标有 1 个达标就永不回退。
+实测 run 34859505000：19 个节点里上行只有 1 个测得出，下行 19 个全部达标，却因
+`1 ≥ 1` 不回退 ⇒ **订阅里只剩 1 个节点**。`min_nodes` 的本意是「不足则不上传订阅」，
+两个语义绑在一起就会出这种事故。
+
+实际采用的指标会写进日志（`subscription_policy` / `subscription_metric_fallback` /
+`subscription_metric_kept`）与 TG 通知文案。节点必须有原始配置（`source_entry.proxy`）
+才计入达标——否则导不进订阅。
 
 **TOP5 排序与判定指标一致**：三套的 TOP 榜都按实际采用的指标排序，通知标题标注
 `🏆 最快节点 · N · 按上传/按下载`，避免出现「按上传导出订阅、却按下行排 TOP」的自相矛盾。

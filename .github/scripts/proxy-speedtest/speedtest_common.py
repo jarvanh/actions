@@ -19,6 +19,7 @@
 """
 import html
 import json
+import math
 import os
 import pathlib
 import re
@@ -156,6 +157,10 @@ DEFAULT_MIN_MEGABIT = 10
 #   阈值（兆） / 判定指标（upload|download） / 上传订阅的最少节点数
 DEFAULT_MIN_NODES = 1
 DEFAULT_SPEED_METRIC = 'upload'
+# 判定指标回退的「明显更好」倍率：另一指标达标数需 ≥ 主指标 × 该倍率才切换。
+# 为什么要倍率而不是「多一点就换」：主指标是用户显式配置的偏好，小幅差距该尊重配置；
+# 只有当差距足够大（典型是「上行普遍测不出」）才该换。1 = 只要更多就换（最激进）。
+DEFAULT_METRIC_FALLBACK_RATIO = 1.5
 # 判定指标 → build_mihomo_yaml_text 的 speedtest_mode（push-only = 按上行判定）
 METRIC_MODES = {'upload': 'push-only', 'download': 'download'}
 METRIC_LABELS = {'upload': '上传', 'download': '下载'}
@@ -271,12 +276,26 @@ def _env_int(env, key: str, default, minimum=0):
     return max(minimum, value)
 
 
+def _env_float(env, key: str, default, minimum=0.0):
+    """浮点版 `_env_int`：非法值退回默认，且不小于 minimum（≤0 的倍率会让回退判据失真）。"""
+    raw = str((env or {}).get(key, '') or '').strip()
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = float(default)
+    if not math.isfinite(value):
+        return float(default)
+    return max(minimum, value)
+
+
 def resolve_subscription_policy(env=None):
     """订阅导出策略（四套共用，全部经 env 覆盖，workflow 里接仓库 Variables）：
 
       PROXY_SPEEDTEST_MIN_MEGABIT   达标阈值（兆），默认 10
       PROXY_SPEEDTEST_SPEED_METRIC  判定指标：upload（默认，按上行）/ download（按下行）
       PROXY_SPEEDTEST_MIN_NODES     上传订阅的最少节点数，默认 1
+      PROXY_SPEEDTEST_METRIC_FALLBACK_RATIO
+                                    判定指标回退的「明显更好」倍率，默认 1.5（1 = 更多就换）
 
     非法值一律退回默认值（不因配置写错而静默改变口径）。
     """
@@ -284,10 +303,13 @@ def resolve_subscription_policy(env=None):
     metric = str(env.get('PROXY_SPEEDTEST_SPEED_METRIC') or '').strip().lower()
     if metric not in METRIC_MODES:
         metric = DEFAULT_SPEED_METRIC
+    ratio = _env_float(env, 'PROXY_SPEEDTEST_METRIC_FALLBACK_RATIO',
+                       DEFAULT_METRIC_FALLBACK_RATIO, minimum=1.0)
     return {
         'min_megabit': _env_int(env, 'PROXY_SPEEDTEST_MIN_MEGABIT', DEFAULT_MIN_MEGABIT, 0),
         'min_nodes': _env_int(env, 'PROXY_SPEEDTEST_MIN_NODES', DEFAULT_MIN_NODES, 1),
         'metric': metric,
+        'metric_fallback_ratio': ratio,
     }
 
 
@@ -302,24 +324,32 @@ def count_qualified_nodes(results: list, metric: str, min_megabit):
 
 
 def resolve_subscription_metric(results: list, policy: dict):
-    """判定指标选择：主指标达标数 < 最少节点数时改用另一指标（双向对称）。
+    """判定指标选择：**另一指标达标数明显更多**时才改用另一指标（双向对称）。
 
-    例：默认按 upload 判定，达标 0 个（<min_nodes）→ 改用 download 判定；反之若配置
-    metric=download 而下行达标不足，则改用 upload。另一指标也不更多时维持主指标
-    （最终仍不足 min_nodes 就不上传订阅）。
+    例：默认按 upload 判定，上行只达标 1 个、下行达标 19 个 → 改用 download。
+
+    ⚠️ **回退判据不能拿 `min_nodes` 当阈值**（2026-09-14 修）。原实现是
+    「主指标达标数 < min_nodes 才回退」，而 min_nodes 默认 1 ⇒ 只要主指标有 1 个达标就**永不
+    回退**。实测 run 34859505000：19 个节点里上行只有 1 个测得出（公开节点上行被限），
+    下行 19 个全部达标，却因 `1 >= 1` 不回退 ⇒ **订阅里只剩 1 个节点**。
+    `min_nodes` 的本意是「不足则不上传订阅」，它不该同时充当「是否换指标」的门槛——
+    两个语义绑在一起，下限设小了永不回退、设大了又变成「达标不足就不上传」。
+
+    现在的判据只问一件事：**另一指标是不是明显更好**（`secondary > primary` 且
+    `secondary >= ceil(primary × ratio)`，ratio 默认 1.5）。容忍小幅差距，尊重配置的主指标。
     """
     metric = policy.get('metric') or DEFAULT_SPEED_METRIC
     other = 'download' if metric == 'upload' else 'upload'
     min_megabit = policy.get('min_megabit', DEFAULT_MIN_MEGABIT)
-    min_nodes = policy.get('min_nodes', DEFAULT_MIN_NODES)
+    ratio = policy.get('metric_fallback_ratio') or DEFAULT_METRIC_FALLBACK_RATIO
     primary = count_qualified_nodes(results, metric, min_megabit)
-    if primary >= min_nodes:
-        return metric, primary, False
     secondary = count_qualified_nodes(results, other, min_megabit)
-    if secondary > primary:
+    if secondary > primary and secondary >= math.ceil(primary * ratio):
         log_progress('subscription_metric_fallback', from_metric=metric, to_metric=other,
-                     primary=primary, secondary=secondary, min_nodes=min_nodes)
+                     primary=primary, secondary=secondary, ratio=ratio)
         return other, secondary, True
+    log_progress('subscription_metric_kept', metric=metric, primary=primary,
+                 secondary=secondary, ratio=ratio)
     return metric, primary, False
 
 
