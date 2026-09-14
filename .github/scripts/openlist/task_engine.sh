@@ -197,15 +197,32 @@ sync_budget_stop() {
 }
 
 # 批次循环专用预算闸（近几轮 330min 硬杀的直接根因）:
-# 一个批次的真实粒度是「copy + 巩固 + 修复管线」，实测批次 1 = 1h17m，而全局
-# 最小工作片只有 600s——用 sync_budget_stop 判，剩余十几分钟时照样开新批，
-# 于是 320min 优雅到站永远拿不到，全被 timeout-minutes: 330 硬杀。
-# 单独留一片 60min 的批次工作片（OPENLIST_BATCH_MIN_SLICE_SECONDS），
-# 320min 预算下不会误伤正常批次。
-OPENLIST_BATCH_MIN_SLICE_SECONDS="${OPENLIST_BATCH_MIN_SLICE_SECONDS:-3600}"  # 60min
+# 一个批次的真实粒度是「copy + 巩固 + 修复管线」，而全局最小工作片只有 600s
+# ——用 sync_budget_stop 判，剩余十几分钟时照样开新批，320min 优雅到站永远
+# 拿不到，全被 timeout-minutes: 330 硬杀。
+# 片长按实测取: 批次 1 在 wopan176 上 1h17m 跑完，在 wopan175 上 3178 个文件
+# 跑了 2h14m 仍未完成（run 34779382573 —— 该轮预算前段已被预览 36min +
+# wopan175 各子目录同步/truth-check 2h36m 吃掉，批次 1 在只剩 2h3m 时开启，
+# 于是又撞 330min 硬杀）。留 2h 片长: 剩余不足 2h 就不开新批，宁可本轮少开
+# 一批、把成果留给接力，也不要撞超时。
+OPENLIST_BATCH_MIN_SLICE_SECONDS="${OPENLIST_BATCH_MIN_SLICE_SECONDS:-7200}"  # 120min
 _batch_budget_stop() {
   [ -n "${OPENLIST_SYNC_DEADLINE_EPOCH:-}" ] || return 1
   [ $(( $(date +%s) + OPENLIST_BATCH_MIN_SLICE_SECONDS )) -ge "$OPENLIST_SYNC_DEADLINE_EPOCH" ]
+}
+
+# 单次传输可用的秒数 = 预算剩余 − 尾部预留；无预算（调试/还原）时输出空串
+# （调用方据此不加 timeout 包装，行为与旧版一致）。
+# 为什么要它: 预算闸只能拦住"新开的工作"，拦不住"已在途的传输"——在途批次
+# copy / 巩固串行重试动辄 1-2h，会一路跑过 320min 预算，直到 step 的 330min
+# 超时把整轮杀掉（run 34779382573 实锤）。给这两处套硬上限，保证预算到点前
+# 一定回到循环里走优雅收摊。
+_budget_slice_seconds() {
+  local reserve="${1:-${OPENLIST_BATCH_TAIL_RESERVE:-2700}}"
+  [ -n "${OPENLIST_SYNC_DEADLINE_EPOCH:-}" ] || { echo ""; return 0; }
+  local secs=$(( OPENLIST_SYNC_DEADLINE_EPOCH - $(date +%s) - reserve ))
+  [ "$secs" -lt 60 ] && secs=60
+  echo "$secs"
 }
 
 # 顺序执行清单中的全部任务（支持同步对轮转，防饿死，见上方说明）
@@ -1219,10 +1236,18 @@ _batch_consolidate() {
   _start_token_refresher
 
   local retry_log="${batch_dir}/retry_${batch_idx}.log"
+  # 同批次 copy: 串行重试也是"单次可能跑几小时"的在途工作，套上预算内的硬上限，
+  # 否则它会一路跑过 320min 预算直到 step 330min 超时（run 34779382573 形态）
+  local _r_tmo="" _r_to=""
+  _r_tmo=$(_budget_slice_seconds)
+  if [ -n "$_r_tmo" ]; then
+    _r_to="timeout ${_r_tmo}"
+    echo "${label} 巩固: 串行重试最多 ${_r_tmo}s（超出由 timeout 收掉，剩余转修复管线/下轮接力）"
+  fi
   set +e
   # 容器共享锁（与并行 worker 的传输窗口互斥容器重启，见 openlist_driver.sh）
   _ol_lock_shared
-  rclone copy "$source_path" "$dest_path" \
+  ${_r_to} rclone copy "$source_path" "$dest_path" \
     --files-from "$retry_list" \
     --size-only \
     --no-traverse \
@@ -1696,8 +1721,16 @@ sync_by_file_batches() {
 
       # set -e 下 rclone 非零退出（如 exit 4 部分失败）会直接终止 step，
       # 导致后续 sync_with_logging 通知无法发出。此处需捕获退出码，临时关闭 set -e。
+      # 硬上限: 本次 copy 最多用到「预算剩余 − 尾部预留」，到点由 timeout 收掉
+      # （rc=124 走失败分支 → 巩固 → 循环闸优雅收摊），不再拖到 330min 整轮被杀
+      local _b_tmo="" _b_to=""
+      _b_tmo=$(_budget_slice_seconds)
+      if [ -n "$_b_tmo" ]; then
+        _b_to="timeout ${_b_tmo}"
+        echo "批次 $((i+1)): 本轮剩余预算内最多传输 ${_b_tmo}s（超出由 timeout 收掉后走优雅收摊）"
+      fi
       set +e
-      rclone copy "$source_path" "$dest_path" \
+      ${_b_to} rclone copy "$source_path" "$dest_path" \
         --files-from "$bf" \
         --size-only \
         --no-traverse \
