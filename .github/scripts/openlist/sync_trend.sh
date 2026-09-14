@@ -57,11 +57,20 @@ trend_capture_remaining() {
     echo "unknown" > "$TREND_REMAINING_FILE" 2>/dev/null || true
     return 0
   fi
-  local _sum=0 _v
+  local _sum=0 _v _n=0
   if declare -p PREVIEW_PENDING_MAP >/dev/null 2>&1; then
+    # 空 map = 根本没跑预览（skip_preview 的"仅注册"模式，或预览整段失败）。
+    # 此时写 0 会让趋势显示"剩余量清零"——最危险的假信号（看起来像同步完成），
+    # 必须按未知处理。
+    _n=${#PREVIEW_PENDING_MAP[@]}
     for _v in "${PREVIEW_PENDING_MAP[@]}"; do
       [[ "$_v" =~ ^[0-9]+ ]] && _sum=$((_sum + ${_v%% *}))
     done
+  fi
+  if [ "$_n" -eq 0 ]; then
+    echo "⚠️ 无预览数据（skip_preview 仅注册模式或预览未产出），本轮剩余量记为未知"
+    echo "unknown" > "$TREND_REMAINING_FILE" 2>/dev/null || true
+    return 0
   fi
   echo "$_sum" > "$TREND_REMAINING_FILE" 2>/dev/null || true
 }

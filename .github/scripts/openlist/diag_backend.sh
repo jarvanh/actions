@@ -278,22 +278,53 @@ else
 fi
 
 # 并发维度: 生产用 transfers=1 串行，但"并发 PUT"是另一条可能的限流触发路径
-mkdir -p /tmp/ol_diag/burstdir 2>/dev/null || true
-for pi in $(seq 1 20); do
-  printf 'oldiag' > "/tmp/ol_diag/burstdir/oldiag_p$(printf '%02d' "$pi").txt" 2>/dev/null || true
+# 并发维度（细化，2026-09-14 第二轮诊断驱动）:
+#   首轮并发探针（transfers=4 / 20 文件 / 新目录）失败 7/20，错误是
+#   「Update mkParentDir failed: Locked: 423 Locked」——423 是 WebDAV 的资源锁，
+#   而报错点是**父目录创建**，不是文件写：4 个 worker 同时在同一个还不存在的
+#   目录上 mkdir 才会互相锁。若真如此，并发本身可用，只要消除 mkdir 竞争。
+#   于是拆成三态判据（每态 30 个小文件，秒级）:
+#     a) 新目录 + transfers=4            → 复现首轮形态（预期 423）
+#     b) 目录已存在 + transfers=4        → 去掉 mkdir 竞争是否就干净
+#     c) 新目录 + transfers=4 + --retries 3 → 靠重试兜过竞争（生产的可用修法）
+CONC_DIR="$TARGET/$BURST_DIR/conc"
+CONC_RESULT=""
+mkdir -p /tmp/ol_diag/concdir 2>/dev/null || true
+for pi in $(seq 1 30); do
+  printf 'oldiag' > "/tmp/ol_diag/concdir/oldiag_c$(printf '%02d' "$pi").txt" 2>/dev/null || true
 done
+
+run_conc() {  # <标签> <目标子目录> <retries>
+  local _tag="$1" _dst="$2" _rt="$3" _out _rc
+  _out=$(rclone copy /tmp/ol_diag/concdir "$_dst" \
+    --transfers 4 --retries "$_rt" --low-level-retries 1 --contimeout 20s --timeout "$PROBE_TIMEOUT" 2>&1)
+  _rc=$?
+  if [ "$_rc" -eq 0 ]; then
+    say "✅ 并发写 ${_tag}: 被受理"
+    CONC_RESULT="${CONC_RESULT}${_tag}:OK "
+  else
+    say "❌ 并发写 ${_tag}: 失败 (exit=${_rc}, http=$(http_code_of "$_out"))"
+    say "$_out" | grep -E "ERROR|Failed" | tail -2 | sed 's/^/   ▸ /' | tee -a "$REPORT"
+    CONC_RESULT="${CONC_RESULT}${_tag}:FAIL "
+  fi
+}
+
 sleep "$PROBE_GAP"
-PAR_OUT=$(rclone copy /tmp/ol_diag/burstdir "$TARGET/$BURST_DIR/parallel" \
-  --transfers 4 --retries 1 --low-level-retries 1 --contimeout 20s --timeout "$PROBE_TIMEOUT" 2>&1)
-PAR_RC=$?
-if [ "$PAR_RC" -eq 0 ]; then
-  say "✅ 并发写 (transfers=4, 20 文件): 被受理"
-  PARALLEL=OK
-else
-  say "❌ 并发写 (transfers=4, 20 文件): 失败 (exit=${PAR_RC}, http=$(http_code_of "$PAR_OUT"))"
-  say "$PAR_OUT" | tail -3 | sed 's/^/   ▸ /' | tee -a "$REPORT"
-  PARALLEL=FAIL
-fi
+# a) 新目录 + transfers=4（首轮形态）
+run_conc "新目录×4并发×retries1" "$CONC_DIR/new_a" 1
+# b) 目录已存在 + transfers=4
+rclone mkdir "$CONC_DIR/ready" >/dev/null 2>&1 || true
+sleep "$PROBE_GAP"
+run_conc "已存在目录×4并发×retries1" "$CONC_DIR/ready" 1
+# c) 新目录 + transfers=4 + retries 3（生产可用的兜底修法）
+sleep "$PROBE_GAP"
+run_conc "新目录×4并发×retries3" "$CONC_DIR/new_c" 3
+
+# 兼容旧变量: 任一并发形态通过即认为并发可用
+case "$CONC_RESULT" in
+  *":OK "*) PARALLEL=OK ;;
+  *)        PARALLEL=FAIL ;;
+esac
 
 # 清理（尽力）: 集中在一个子目录里，purge 一次即可，残留也便于辨识
 rclone purge "$TARGET/$BURST_DIR" --retries 1 --timeout "$PROBE_TIMEOUT" >/dev/null 2>&1 \
@@ -308,7 +339,7 @@ say "名长阶梯:$LADDER"
 say "覆盖写:   $OVERWRITE"
 say "子目录写: $SUBDIR"
 say "持续写:   $BURST_RESULT"
-say "并发写:   $PARALLEL (transfers=4)"
+say "并发写:   ${CONC_RESULT:-SKIPPED}（transfers=4，三态见上）"
 say "容器日志 8005 命中: $(count_of '8005|rsp_code|rep_desc' "$CONTAINER_LOG") 行"
 say ""
 say "判读指引:"
@@ -319,8 +350,10 @@ say "  · 短名写 OK、子目录写 FAIL         → 父目录名长连坐成�
 say "  · 单发全 OK、**持续写在第 K 个断** → 失效与**量/时长**相关（限流/风控/会话被踢），"
 say "                                      修法应落在「同步中周期性重探 + 退避」，"
 say "                                      而不是名长或登录令牌"
-say "  · 单发全 OK、并发写 FAIL          → 并发是触发条件，降 transfers 即可绕开"
-say "  · 全部 OK                          → 此刻后端完全可写，失败属时段性/外部条件"
+say "  · 新目录并发 FAIL、已存在目录 OK   → 423 是**父目录 mkdir 竞争**，并发可用:"
+say "                                      生产侧先建目录或给足重试即可提 transfers"
+say "  · 新目录并发 FAIL、retries3 也 FAIL → 并发确实触发后端锁，transfers 保持 1"
+say "  · 全部 OK                          → 此刻后端完全可写（含并发），失败属时段性/外部条件"
 say ""
 say "结束时间: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 say "报告文件: $REPORT"
