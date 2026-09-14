@@ -180,6 +180,7 @@ _run_registry_pairs_parallel() {
         PROGRESS_WORKER_MUTE=1
         _rot_attempts=0
         SYNC_BACKEND_DEAD=0
+        SYNC_BACKEND_DEAD_STRONG=0
         _run_registry_entry "$_e" || true
         _st=""
         if [ "${SYNC_SKIPPED:-0}" = "1" ]; then _st="skipped"
@@ -266,7 +267,11 @@ _rotation_load() {
 # 近四轮零执行）。本轮判死的后端连同时间戳写进 backend_dead.json，下轮直接
 # 跳过它的全部同步对，把预算让给健康后端。
 # 死后端常是暂态（登录失效/限流/配额），故带 TTL，过期即重新参战。
-OPENLIST_BACKEND_DEAD_TTL="${OPENLIST_BACKEND_DEAD_TTL:-43200}"   # 12h
+# TTL 12h → 4h（2026-09-15 加固）: 实测发生过**误判污染**——4af1cbc 回归期间
+# 健康后端 wopan175（A 轮刚真实搬了 13.08GB）被判死，经本文件跨轮传播后
+# 其 6 个同步对被整体跳过；TTL 越长，一次误判的代价越大。4h 足够覆盖
+# "暂态故障 + 一轮观察"（一轮 5.5h，误判最多影响下一轮的前半段）。
+OPENLIST_BACKEND_DEAD_TTL="${OPENLIST_BACKEND_DEAD_TTL:-14400}"   # 4h
 declare -A _BACKEND_DEAD_ROUND=()
 
 _backend_dead_state_path() {
@@ -291,12 +296,29 @@ _backend_dead_load() {
 }
 
 # 标记一个后端本轮判死（合并写回，保留其它后端与未过期条目）
+#
+# **判死信号分级（2026-09-15 加固）**: 跨轮熔断的影响面是「TTL 内跳过该后端的所有
+# 同步对」，代价很大，所以只允许**强证据**持久化:
+#   强 = ①写探针判不可用（真实 PUT + 刷新服务端缓存后复核，或重启后复核）
+#        ②批次巩固的「后端写入全拒」F5（容器重启后复核，本批触碰文件 100% 未落盘）
+#   弱 = 修复管线的目录级熔断（连续 N 个目录不可写）—— 它依赖"探针文件可见性"，
+#        而列表未就绪时可见性会假阴性。实测（2026-09-14）: 4af1cbc 回归期间它把
+#        健康后端 wopan175 判死（同一后端 A 轮刚真实搬了 13.08GB），并经由本函数
+#        污染跨轮状态、让该后端 6 个同步对整体被跳过。
+# 弱证据仍在本轮熔断（本轮让路给健康后端，符合原设计），但**不写 backend_dead.json**。
+# `OPENLIST_BACKEND_DEAD_PERSIST=all` 可强制持久化（排查用）。
 _backend_dead_mark() {
   local root="$1"
   [ -n "$root" ] || return 0
-  local now _k _tsv="" json
+  local now
   now=$(date +%s)
   _BACKEND_DEAD_ROUND["$root"]="$now"
+  if [ "${SYNC_BACKEND_DEAD_STRONG:-0}" != "1" ] \
+     && [ "${OPENLIST_BACKEND_DEAD_PERSIST:-strong}" != "all" ]; then
+    echo "ℹ️ 跨轮熔断: 后端 ${root} 本轮判死，但证据为弱信号（非写探针/全拒复核）→ 只在本轮熔断让路，不写入 backend_dead.json（防误判污染后续轮次）"
+    return 0
+  fi
+  local _k _tsv="" json
   for _k in "${!_BACKEND_DEAD_ROUND[@]}"; do
     _tsv+="${_k}"$'\t'"${_BACKEND_DEAD_ROUND[$_k]}"$'\n'
   done
@@ -483,7 +505,10 @@ run_all_tasks() {
     fi
 
     # 每个同步对开始前置位重置: 由 sync_engine 在"后端级熔断"时置 1
+    # STRONG 也要重置 —— 它是"本次判死的证据强度"，跨对泄漏会让弱证据借
+    # 上一对的强证据写入跨轮熔断（正是要防的误判路径）
     SYNC_BACKEND_DEAD=0
+    SYNC_BACKEND_DEAD_STRONG=0
     _run_registry_entry "$_e" || true
 
     if [ "$real_pass" -eq 0 ]; then
@@ -1517,6 +1542,8 @@ _batch_consolidate() {
     # 19:39（开跑 ~2.5h 后）才触发——死后端照样把本轮大半预算吃掉。
     # 不改 F5 既有语义: 本批顽固缺失仍转修复管线（下方），不因后端级拒收豁免。
     SYNC_BACKEND_DEAD=1
+    # 强证据（容器重启后复核、触碰文件 100% 未落盘）⇒ 允许跨轮持久化（F6）
+    SYNC_BACKEND_DEAD_STRONG=1
     echo "🛑 ${label} 巩固: 后端写入全拒（${stubborn_n}/${touched_n} 个触碰文件经复核全部未落盘）→ 已请求中止剩余批次"
   fi
 

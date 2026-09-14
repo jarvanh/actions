@@ -71,6 +71,8 @@ _sync_retry_8005() {
       unset "_BACKEND_WRITE_PROBE_CACHE[$dest_path]"
       if ! _backend_write_probe "$dest_path" "$LOG_FILENAME"; then
         SYNC_BACKEND_DEAD=1
+        # 写探针判死 = 强证据（真实 PUT + 刷新缓存复核），可跨轮持久化（F6）
+        SYNC_BACKEND_DEAD_STRONG=1
         echo "  ▸ 刷新驱动后写探针仍失败: 判定该后端本轮不可写，跳过整次重传" | tee -a "$LOG_FILENAME"
         break
       fi
@@ -165,7 +167,11 @@ sync_with_logging() {
     #   此处曾按后端根读，键对不上 ⇒ 判死信号恒丢 ⇒ SYNC_BACKEND_DEAD 永不置位
     #   ⇒ 既不立即后移游标、也不调 _backend_dead_mark ⇒ 死后端只能靠
     #   ROTATION_MAX_CONSECUTIVE_ATTEMPTS 阀门脱身（8 × 5.5h ≈ 44h，实测症状）。
-    [ "${_BACKEND_WRITE_PROBE_CACHE[$dest_path]:-}" = "0" ] && SYNC_BACKEND_DEAD=1
+    if [ "${_BACKEND_WRITE_PROBE_CACHE[$dest_path]:-}" = "0" ]; then
+      SYNC_BACKEND_DEAD=1
+      # 写探针（真实 PUT + 刷新缓存复核）判死属**强证据**，允许跨轮持久化（F6）
+      SYNC_BACKEND_DEAD_STRONG=1
+    fi
     return 0
   fi
 
@@ -281,7 +287,11 @@ sync_with_logging() {
     SYNC_SKIPPED=0
     SYNC_TRANSFERRED_BYTES=0
     # 键口径与入口预检同（见上文注释）: 写探针按 $dest_path 缓存
-    [ "${_BACKEND_WRITE_PROBE_CACHE[$dest_path]:-}" = "0" ] && SYNC_BACKEND_DEAD=1
+    if [ "${_BACKEND_WRITE_PROBE_CACHE[$dest_path]:-}" = "0" ]; then
+      SYNC_BACKEND_DEAD=1
+      # 写探针（真实 PUT + 刷新缓存复核）判死属**强证据**，允许跨轮持久化（F6）
+      SYNC_BACKEND_DEAD_STRONG=1
+    fi
     return 0
   fi
 
