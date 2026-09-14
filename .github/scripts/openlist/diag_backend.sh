@@ -234,12 +234,81 @@ SUBDIR="$WRITE_PROBE_RESULT"
 rclone purge "$TARGET/$sub_name" --retries 1 --timeout "$PROBE_TIMEOUT" >/dev/null 2>&1 || true
 
 # ────────────────────────────────────────────────────────────
+sec "9 · 持续写入探针（复现生产的「量 / 时长」维度）"
+# 为什么需要这一组（2026-09-14 首轮诊断的结论驱动）:
+#   前四组都是「单文件、顺序、极低量」——实测 wopan176Crypt/2 **全 OK**
+#   （含 128B 长名、覆盖写、子目录写），而生产在同一路径上是 1034 个文件 /
+#   48 分钟 / 全部 405。两者可以同时成立，只要失效是**随时间或量累积**发生的
+#   （后端限流、风控踢会话、token 在长同步中途失效）。F4 的写探针只在同步
+#   **开跑前**跑一次，天然测不到这个维度——这就是「探针 ✅ 与真实写入 405 并存」
+#   最可能的解释。这里连续写 N 个小文件，记录**第几个开始失败**：失败点位置
+#   就是复现生产形态的直接证据（全成功则说明量/时长也不是原因，得往并发看）。
+BURST_N="${DIAG_BURST_N:-150}"
+BURST_DIR="oldiag_burst_$(date +%s)_$$"
+BURST_OK=0
+BURST_FAIL_AT=""
+BURST_FAIL_OUT=""
+if [ "${BURST_N:-0}" = "0" ]; then
+  say "（DIAG_BURST_N=0，跳过持续写入探针）"
+  BURST_RESULT="SKIPPED"
+  PARALLEL="SKIPPED"
+else
+say "连续写 ${BURST_N} 个小文件（目标 $TARGET/${BURST_DIR}）..."
+rclone mkdir "$TARGET/$BURST_DIR" >/dev/null 2>&1 || true
+BURST_T0=$(date +%s)
+for ((bi = 1; bi <= BURST_N; bi++)); do
+  bname=$(printf 'oldiag_b%04d.txt' "$bi")
+  printf 'oldiag' > /tmp/ol_diag/burst 2>/dev/null || true
+  if ! BURST_FAIL_OUT=$(rclone copyto /tmp/ol_diag/burst "$TARGET/$BURST_DIR/$bname" \
+        --retries 1 --low-level-retries 1 --contimeout 20s --timeout "$PROBE_TIMEOUT" 2>&1); then
+    BURST_FAIL_AT="$bi"
+    break
+  fi
+  BURST_OK=$((BURST_OK + 1))
+done
+BURST_SECS=$(( $(date +%s) - BURST_T0 ))
+if [ -z "$BURST_FAIL_AT" ]; then
+  say "✅ 连续写: ${BURST_OK}/${BURST_N} 全部被受理（耗时 ${BURST_SECS}s）"
+  BURST_RESULT="OK(${BURST_OK}/${BURST_N})"
+else
+  say "❌ 连续写: 第 ${BURST_FAIL_AT} 个开始失败（前 $((BURST_FAIL_AT - 1)) 个被受理，耗时 ${BURST_SECS}s）"
+  say "   http=$(http_code_of "$BURST_FAIL_OUT")"
+  say "$BURST_FAIL_OUT" | tail -3 | sed 's/^/   ▸ /' | tee -a "$REPORT"
+  BURST_RESULT="FAIL@${BURST_FAIL_AT}"
+fi
+
+# 并发维度: 生产用 transfers=1 串行，但"并发 PUT"是另一条可能的限流触发路径
+mkdir -p /tmp/ol_diag/burstdir 2>/dev/null || true
+for pi in $(seq 1 20); do
+  printf 'oldiag' > "/tmp/ol_diag/burstdir/oldiag_p$(printf '%02d' "$pi").txt" 2>/dev/null || true
+done
+sleep "$PROBE_GAP"
+PAR_OUT=$(rclone copy /tmp/ol_diag/burstdir "$TARGET/$BURST_DIR/parallel" \
+  --transfers 4 --retries 1 --low-level-retries 1 --contimeout 20s --timeout "$PROBE_TIMEOUT" 2>&1)
+PAR_RC=$?
+if [ "$PAR_RC" -eq 0 ]; then
+  say "✅ 并发写 (transfers=4, 20 文件): 被受理"
+  PARALLEL=OK
+else
+  say "❌ 并发写 (transfers=4, 20 文件): 失败 (exit=${PAR_RC}, http=$(http_code_of "$PAR_OUT"))"
+  say "$PAR_OUT" | tail -3 | sed 's/^/   ▸ /' | tee -a "$REPORT"
+  PARALLEL=FAIL
+fi
+
+# 清理（尽力）: 集中在一个子目录里，purge 一次即可，残留也便于辨识
+rclone purge "$TARGET/$BURST_DIR" --retries 1 --timeout "$PROBE_TIMEOUT" >/dev/null 2>&1 \
+  || say "   ⚠️ 持续写探针目录未能清除: $TARGET/${BURST_DIR}（以 oldiag_ 前缀可辨识，不影响同步数据）"
+fi
+
+# ────────────────────────────────────────────────────────────
 sec "诊断结论"
 say "目标路径: $TARGET"
 say "短名写:   $short_result"
 say "名长阶梯:$LADDER"
 say "覆盖写:   $OVERWRITE"
 say "子目录写: $SUBDIR"
+say "持续写:   $BURST_RESULT"
+say "并发写:   $PARALLEL (transfers=4)"
 say "容器日志 8005 命中: $(count_of '8005|rsp_code|rep_desc' "$CONTAINER_LOG") 行"
 say ""
 say "判读指引:"
@@ -247,7 +316,11 @@ say "  · 短名写 FAIL 且日志有 8005        → 登录令牌失效（账�
 say "  · 短名写 OK、覆盖写 FAIL           → 后端拒绝「更新」，与登录无关"
 say "  · 短名写 OK、名长阶梯在某 N 处断   → 名长阈值成立，修法落在文件名长度"
 say "  · 短名写 OK、子目录写 FAIL         → 父目录名长连坐成立，修法落在目录名"
-say "  · 全部 OK                          → 此刻后端可写，失败属时段性/并发性"
+say "  · 单发全 OK、**持续写在第 K 个断** → 失效与**量/时长**相关（限流/风控/会话被踢），"
+say "                                      修法应落在「同步中周期性重探 + 退避」，"
+say "                                      而不是名长或登录令牌"
+say "  · 单发全 OK、并发写 FAIL          → 并发是触发条件，降 transfers 即可绕开"
+say "  · 全部 OK                          → 此刻后端完全可写，失败属时段性/外部条件"
 say ""
 say "结束时间: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 say "报告文件: $REPORT"
