@@ -409,7 +409,7 @@ _sync_bulk_hash_dir_fold() {
     rclone sync "${source_path}/${dir_rel}/" "${hash_dst}/" \
       "${RCLONE_DEFAULT_FLAGS[@]}" \
       --max-depth 1 \
-      --transfers "${OPENLIST_TRANSFERS:-1}" \
+      --transfers "${OPENLIST_TRANSFERS:-4}" \
       --checkers "${OPENLIST_CHECKERS:-8}" \
       --timeout 30m --contimeout 30s > "$fold_log" 2>&1
     local fold_rc=$?

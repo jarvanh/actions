@@ -679,7 +679,8 @@ _sync_task_impl() {
   # 按 rclone 远端类型分路由（整合自 task0 专项验证结论）:
   #   openlist:* 目标（wopan176Crypt/baidupanCrypt/wopan175/aliyundriveCrypt 等全部
   #   OpenList 挂载盘）: 批次阈值 5GiB（可 OPENLIST_BATCH_BYTES 覆盖）、
-  #   并发 transfers=OPENLIST_TRANSFERS（默认 1，与初始 sync 同口径）
+  #   并发 transfers=OPENLIST_TRANSFERS（默认 4，与初始 sync 同口径；
+  #   提高并发的前提是重试给足——423 mkParentDir 竞争靠 retries 兜过，见 rclone_flags.sh）
   #   非 openlist 目标: 阈值 20GB、并发 transfers=RCLONE_TRANSFERS（默认 2）
   #   注意: 批次路径曾误读 OPENLIST_TARGET_TRANSFERS（全库无人设置，默认 4），
   #   低并发保护形同虚设且日志硬编码打印 transfers=1 掩盖真相，是整批假成功
@@ -1251,11 +1252,11 @@ _batch_consolidate() {
     --files-from "$retry_list" \
     --size-only \
     --no-traverse \
-    --transfers "$( [[ "$dest_path" == openlist:* ]] && echo "${OPENLIST_TRANSFERS:-1}" || echo "${RCLONE_TRANSFERS:-2}" )" \
+    --transfers "$( [[ "$dest_path" == openlist:* ]] && echo "${OPENLIST_TRANSFERS:-4}" || echo "${RCLONE_TRANSFERS:-2}" )" \
     --checkers "${OPENLIST_CHECKERS:-8}" \
     --timeout 30m \
-    --retries 1 \
-    --low-level-retries "${OPENLIST_LOW_LEVEL_RETRIES:-3}" \
+    --retries "${OPENLIST_RETRIES:-3}" \
+    --low-level-retries "${OPENLIST_LOW_LEVEL_RETRIES:-5}" \
     --contimeout 30s \
     --ignore-errors \
     --progress \
@@ -1675,7 +1676,7 @@ sync_by_file_batches() {
       if [[ "$dest_path" == openlist:* ]]; then
         local _ol_transfers
         if [[ "$dest_path" == openlist:* ]]; then
-          _ol_transfers="${OPENLIST_TRANSFERS:-1}"
+          _ol_transfers="${OPENLIST_TRANSFERS:-4}"
         else
           _ol_transfers="${RCLONE_TRANSFERS:-2}"
         fi
@@ -1734,8 +1735,8 @@ sync_by_file_batches() {
         --files-from "$bf" \
         --size-only \
         --no-traverse \
-        --retries 1 \
-        --low-level-retries "${OPENLIST_LOW_LEVEL_RETRIES:-3}" \
+        --retries "${OPENLIST_RETRIES:-3}" \
+        --low-level-retries "${OPENLIST_LOW_LEVEL_RETRIES:-5}" \
         --timeout "$batch_timeout" \
         --contimeout 30s \
         --ignore-errors \

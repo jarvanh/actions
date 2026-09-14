@@ -5,6 +5,13 @@
 # workflow 各 step source /tmp/load_all.sh 后自动获得。
 
 # sync_task 共用的默认 rclone 参数
+# --retries 3 / --low-level-retries 5（2026-09-14 由 1/3 抬升）:
+#   提高并发上传后必须给足重试，否则会撞 WebDAV 的 423 Locked——诊断实测
+#   「新目录 × transfers=4 × retries1」失败 8/30，错误是
+#   `Update mkParentDir failed: Locked: 423 Locked`（多个 worker 同时 mkdir
+#   同一个尚不存在的目录，互相锁）；同条件下 retries=3 **全通过**，目录已存在时
+#   retries=1 也全通过。rclone 自身的默认就是 --retries 3，此前的 1 是为了
+#   "失败快暴露"，代价是并发一开就丢文件。
 RCLONE_DEFAULT_FLAGS=(
   --progress
   --stats 15s
@@ -14,8 +21,8 @@ RCLONE_DEFAULT_FLAGS=(
   --size-only
   --timeout 5m
   --contimeout 30s
-  --retries 1
-  --low-level-retries 3
+  --retries 3
+  --low-level-retries 5
 )
 
 # sync_task 特有参数（保留为空数组: 调用方展开 "${RCLONE_SYNC_TASK_FLAGS[@]}"，
@@ -40,7 +47,7 @@ RCLONE_SYNC_TASK_FLAGS=()
 # 一次性操作（修复/还原/切割等散点调用）的统一重试参数
 # --timeout 各场景不同（2m/5m/10m/15m），由调用方追加在最后
 RCLONE_RETRY_FLAGS=(
-  --retries 1
-  --low-level-retries 3
+  --retries 3
+  --low-level-retries 5
   --contimeout 30s
 )
