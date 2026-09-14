@@ -463,6 +463,11 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
     # 来源标签（PROXY_SPEEDTEST_LABEL）：编排层 proxy-speedtest-gistnodes 调用时传
     # 「gist 节点」，标题变成「gist 节点 · 泰尔三网测速」。同一套测速会被定时轮和 gist 抓取轮
     # 分别触发，标题不区分的话读者分不清通知来自哪一轮（规范 · 3.1 允许标题带区分词）。
+    # ⚠️ 这一行是 2026-09-14 补的：上面的注释与下面的 f-string 早就在了，**赋值行却漏了**，
+    # 于是标题一渲染就 `NameError: name '_title_emoji' is not defined`，整条通知发不出去
+    # （`telegram_send_failed`，而 job 照样「成功」——通知失败不改 exit code，所以静默了）。
+    # 判据与注释、规范（规范 · 3.x 测速三套：0 成功 / 疑似未走代理降级 ⚠️）一致。
+    _title_emoji = '⚠️' if (not ok_results or bypass_hits) else '✅'
     _label = (merged_env().get('PROXY_SPEEDTEST_LABEL') or '').strip()
     _title_prefix = f'{_label} · ' if _label else ''
     lines = [
