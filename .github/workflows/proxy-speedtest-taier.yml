@@ -60,6 +60,30 @@ on:
         description: '最多测几个节点（0 = 不限）'
         required: false
         default: '0'
+  # 被 proxy-speedtest-gistnodes 当子流程复用（gist 抓来的节点当订阅源）。
+  # 入参是 workflow_dispatch 那套的超集：不传就走与定时运行完全一样的默认值。
+  workflow_call:
+    inputs:
+      sub_urls:
+        description: '订阅源覆盖（逗号分隔 URL）；留空用仓库 secret PROXY_SPEEDTEST_SUB_URLS'
+        required: false
+        type: string
+      points:
+        description: '测速点（与 workflow_dispatch 同名入参同义）'
+        required: false
+        type: string
+      mode:
+        description: '测速模式 single|multi|both'
+        required: false
+        type: string
+      duration:
+        description: '每个方向测速秒数'
+        required: false
+        type: string
+      max_nodes:
+        description: '最多测几个节点（0 = 不限）'
+        required: false
+        type: string
 
 jobs:
   speedtest:
@@ -80,13 +104,15 @@ jobs:
 
       - name: Run taier speedtest
         env:
-          # 订阅源（与 proxy-speedtest / proxy-speedtest-gitee 同一个 secret）
-          PROXY_SPEEDTEST_SUB_URLS: ${{ secrets.PROXY_SPEEDTEST_SUB_URLS }}
-          # 测速参数（workflow_dispatch 可覆盖；定时运行走默认值）
-          TAIER_POINTS: ${{ github.event.inputs.points || '广东联通' }}
-          TAIER_MODE: ${{ github.event.inputs.mode || 'single' }}
-          TAIER_DURATION: ${{ github.event.inputs.duration || '10' }}
-          TAIER_MAX_NODES: ${{ github.event.inputs.max_nodes || '0' }}
+          # 订阅源（与 proxy-speedtest / proxy-speedtest-gitee 同一个 secret）。
+          # workflow_call 传入的 sub_urls 优先——proxy-speedtest-gistnodes 走这条把
+          # gist 抓来的节点当订阅源。
+          PROXY_SPEEDTEST_SUB_URLS: ${{ inputs.sub_urls || secrets.PROXY_SPEEDTEST_SUB_URLS }}
+          # 测速参数（workflow_call 入参 > workflow_dispatch 入参 > 默认值；定时运行走默认值）
+          TAIER_POINTS: ${{ inputs.points || github.event.inputs.points || '广东联通' }}
+          TAIER_MODE: ${{ inputs.mode || github.event.inputs.mode || 'single' }}
+          TAIER_DURATION: ${{ inputs.duration || github.event.inputs.duration || '10' }}
+          TAIER_MAX_NODES: ${{ inputs.max_nodes || github.event.inputs.max_nodes || '0' }}
           # 订阅导出策略（四套共用；可在仓库 Settings → Secrets and variables → Actions
           # → Variables 里覆盖，留空走脚本默认值）：
           #   PROXY_SPEEDTEST_MIN_MEGABIT  达标阈值（兆，默认 10）
