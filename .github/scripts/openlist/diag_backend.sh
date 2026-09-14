@@ -361,6 +361,29 @@ for _n in 10 20 30 40 50 60; do
 done
 say "长名阶梯(父目录名):$LADDER_P"
 
+# 字符集阶梯: 二分已把范围收敛到"那个具体目录名本身"（真实祖先下写合成长名全 OK），
+# 而合成长名用的是纯中文。真实失败名是「ASCII 括号 + 方括号 + 空格 + 日文假名 + 中文」
+# 的混合体，故这里**等长**换字符集，定位是"空格/括号"还是"长度叠加"。
+# 判读: 某档断 → 该字符集（或形态）就是 405 的触发条件；全过 → 与字符集无关，
+# 回去看该目录在后端的历史状态（可能是早期用不同参数创建、后端留了坏条目）。
+CHARSET_R=""
+_cs_try() {  # <标签> <目录名>
+  local _tag="$1" _nm="$2" _o
+  _o=$(rclone copyto /tmp/ol_diag/pp "$DEEP_DIR/$_nm/probe.txt" \
+    --retries 1 --low-level-retries 1 --contimeout 20s --timeout "$PROBE_TIMEOUT" 2>&1)
+  if [ $? -eq 0 ]; then CHARSET_R="$CHARSET_R ${_tag}=OK"; else
+    CHARSET_R="$CHARSET_R ${_tag}=FAIL($(http_code_of "$_o"))"
+  fi
+  sleep "$PROBE_GAP"
+}
+_cs_try "纯中文40字" "$(printf '测%.0s' $(seq 1 40))"
+_cs_try "中文40+空格" "$(printf '测 %.0s' $(seq 1 20))"
+_cs_try "中文40+圆括号" "$(printf '（测）%.0s' $(seq 1 10))"
+_cs_try "中文40+半角括号" "$(printf '(测)%.0s' $(seq 1 10))"
+_cs_try "中文40+方括号" "$(printf '[测]%.0s' $(seq 1 10))"
+_cs_try "混合(贴近真实)" '(CSP6) [流石堂 (流ひょうご)] 淫らな彼女達の作りかた (冴えない彼女の育てかた) [中国翻訳]'
+say "字符集阶梯:$CHARSET_R"
+
 DEEP_R=""
 _DEEP_P="$DEEP_DIR"
 for _d in 1 2 3 4 5; do
@@ -416,6 +439,7 @@ say "名长阶梯:$LADDER"
 say "覆盖写:   $OVERWRITE"
 say "子目录写: $SUBDIR"
 say "父目录名长阶梯:${LADDER_P:-SKIPPED}"
+say "字符集阶梯:  ${CHARSET_R:-SKIPPED}"
 say "路径深度阶梯: ${DEEP_R:-SKIPPED}"
 say "重启后写入:   ${RST_RESULT:-SKIPPED}"
 say "持续写:   $BURST_RESULT"
