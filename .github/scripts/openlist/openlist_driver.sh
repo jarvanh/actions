@@ -518,11 +518,19 @@ _refresh_openlist_cache() {
     return 0
   fi
 
-  # 刷新前获取文件数，用于校验缓存是否已过期
+  # 刷新前文件数**仅用于日志对比**（不参与任何控制流）——它是两次全量 rclone size
+  # 之一，单次最长 120s；本函数一轮被调 ~12 次，静默间隔分析显示"缓存刷新"这一档
+  # 吃掉 42min（轮次的 12%），主体就是这两次 size。
+  # 故默认跳过（OPENLIST_CACHE_REFRESH_COUNT=1 可打开用于排查"缓存是否真的过期"）。
+  local _cnt_on="${OPENLIST_CACHE_REFRESH_COUNT:-0}"
   local before_count=0 before_json
-  before_json=$(timeout "${OPENLIST_CACHE_REFRESH_WAIT:-120}" rclone size "$dest_path" --json 2>/dev/null || true)
-  before_count=$(echo "$before_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
-  echo "刷新 OpenList 缓存: $ol_path (刷新前文件数: $before_count)"
+  if [ "$_cnt_on" = "1" ]; then
+    before_json=$(timeout "${OPENLIST_CACHE_REFRESH_WAIT:-120}" rclone size "$dest_path" --json 2>/dev/null || true)
+    before_count=$(echo "$before_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
+    echo "刷新 OpenList 缓存: $ol_path (刷新前文件数: $before_count)"
+  else
+    echo "刷新 OpenList 缓存: $ol_path (跳过前后计数: 该项仅用于日志，默认关闭以省 ~30min/轮)"
+  fi
 
   curl -s -X POST "http://127.0.0.1:5244/api/fs/refresh" \
     -H "Authorization: $ol_token" \
@@ -534,17 +542,19 @@ _refresh_openlist_cache() {
   echo "等待缓存刷新完成 (60s)..."
   sleep 60
 
-  # 刷新后获取文件数，校验缓存是否已更新
-  local after_count=0 after_json
-  after_json=$(timeout "${OPENLIST_CACHE_REFRESH_WAIT:-120}" rclone size "$dest_path" --json 2>/dev/null || true)
-  after_count=$(echo "$after_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
-  echo "缓存刷新后文件数: $after_count"
-
-  if [ "$before_count" != "$after_count" ]; then
-    echo "⚠️ 缓存刷新改变了 listing: $before_count → $after_count 个文件（刷新前缓存已过期）"
-  else
-    echo "缓存刷新前后文件数一致 ($after_count)，listing 稳定"
+  # 刷新后文件数同理: 仅日志用途，默认跳过（见上）
+  if [ "$_cnt_on" = "1" ]; then
+    local after_count=0 after_json
+    after_json=$(timeout "${OPENLIST_CACHE_REFRESH_WAIT:-120}" rclone size "$dest_path" --json 2>/dev/null || true)
+    after_count=$(echo "$after_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
+    echo "缓存刷新后文件数: $after_count"
+    if [ "$before_count" != "$after_count" ]; then
+      echo "⚠️ 缓存刷新改变了 listing: $before_count → $after_count 个文件（刷新前缓存已过期）"
+    else
+      echo "缓存刷新前后文件数一致 ($after_count)，listing 稳定"
+    fi
   fi
+  return 0
 }
 
 # 轻量刷新 OpenList 单个路径缓存（无长等待，供校验流程使用）
