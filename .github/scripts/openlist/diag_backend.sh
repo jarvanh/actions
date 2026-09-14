@@ -401,6 +401,46 @@ rclone purge "$DEEP_DIR" --retries 1 --timeout "$PROBE_TIMEOUT" >/dev/null 2>&1 
   || say "   ⚠️ 路径探针目录未能清除: $DEEP_DIR（以 oldiag_ 前缀可辨识）"
 
 # ────────────────────────────────────────────────────────────
+sec "12 · 吞吐阶梯（并发到底加不加带宽——决定提速走哪条路）"
+# 为什么要这一组（2026-09-14）:
+#   生产单流的 rclone 进度行实测稳定在 **374 KiB/s**，而真实文件均值约 1.3 MB
+#   （1004 个文件跑了 58 min）—— 说明瓶颈可能是**带宽**而不是往返延迟。
+#   这直接决定提速策略:
+#     · 若 transfers=1 → 4 的吞吐近似 **线性增长** ⇒ 后端按"每流"限速，
+#       提并发（以及 job 内多同步对并行）就是有效杠杆；
+#     · 若吞吐基本 **不变** ⇒ 后端按"账号总带宽"限速，提并发毫无意义，
+#       只能换手段（多后端分摊、错峰、或接受这个上限重算工期）。
+#   此前所有并发探针（9b）只测"能不能被受理"，**没测聚合吞吐**，所以这个问题
+#   一直是空的。这里用 6 × 1 MiB（贴近生产均值）分别跑 transfers=1 与 4。
+THRU_SRC="/tmp/ol_diag/thru"
+mkdir -p "$THRU_SRC" 2>/dev/null || true
+if command -v dd >/dev/null 2>&1; then
+  for _ti in 1 2 3 4 5 6; do
+    dd if=/dev/urandom of="$THRU_SRC/t$(printf '%02d' "$_ti").bin" bs=1024 count=1024 status=none 2>/dev/null || true
+  done
+fi
+THRU_DIR="$TARGET/oldiag_thru_$(date +%s)_$$"
+THRU_RESULT=""
+for _tk in 1 4; do
+  _t0=$(date +%s)
+  rclone copy "$THRU_SRC" "$THRU_DIR/k${_tk}" --transfers "$_tk" --checkers 8 \
+    --stats-one-line --contimeout 20s --timeout "$PROBE_TIMEOUT" > /tmp/ol_diag/thru_k${_tk}.log 2>&1
+  _rc=$?
+  _dt=$(( $(date +%s) - _t0 ))
+  [ "$_dt" -le 0 ] && _dt=1
+  # 6 MiB / 秒数 → MiB/s（两位小数；awk 避免 bash 无浮点）
+  _rate=$(awk "BEGIN{printf \"%.2f\", 6/${_dt}}")
+  if [ "$_rc" -eq 0 ]; then
+    THRU_RESULT="${THRU_RESULT} transfers=${_tk}:${_rate}MiB/s(${_dt}s)"
+  else
+    THRU_RESULT="${THRU_RESULT} transfers=${_tk}:FAIL(exit=${_rc},$(http_code_of "$(cat /tmp/ol_diag/thru_k${_tk}.log 2>/dev/null)"),${_dt}s)"
+  fi
+  sleep "$PROBE_GAP"
+done
+say "吞吐阶梯（6×1MiB）:${THRU_RESULT}"
+rclone purge "$THRU_DIR" --retries 1 --timeout "$PROBE_TIMEOUT" >/dev/null 2>&1 || true
+
+# ────────────────────────────────────────────────────────────
 sec "11 · 重启后立即写探针（复现生产的「重启 → 预检 → 405」序列）"
 # 为什么补这一组（2026-09-14 生产取证驱动）:
 #   生产里每个目录可写性预检（_fix_probe_dir_writable）之前，几乎都刚重启过容器
@@ -442,6 +482,7 @@ say "父目录名长阶梯:${LADDER_P:-SKIPPED}"
 say "字符集阶梯:  ${CHARSET_R:-SKIPPED}"
 say "路径深度阶梯: ${DEEP_R:-SKIPPED}"
 say "重启后写入:   ${RST_RESULT:-SKIPPED}"
+say "吞吐阶梯:${THRU_RESULT:-SKIPPED}"
 say "持续写:   $BURST_RESULT"
 say "并发写:   ${CONC_RESULT:-SKIPPED}（transfers=4，三态见上）"
 say "容器日志 8005 命中: $(count_of '8005|rsp_code|rep_desc' "$CONTAINER_LOG") 行"
@@ -462,6 +503,9 @@ say "  · 深度阶梯在某层断                 → 与路径总长/深度相
 say "  · 两组阶梯全过                     → 405 与路径长度/深度无关，回到密文文件名长度假设"
 say "  · 重启后 +0s/+10s FAIL、+30s/+60s OK → 预检时序问题: _fix_probe_dir_writable"
 say "                                      必须加重试/等待，否则刚重启完的目录一律误判不可写"
+say "  · 吞吐 transfers=4 ≈ 4×transfers=1   → 后端按每流限速，**提并发线性提速**（有效）"
+say "  · 吞吐 transfers=4 ≈ 1×transfers=1   → 后端按账号总带宽限速，**提并发无用**，"
+say "                                        必须换手段（多后端分摊/错峰/重算工期）"
 say "  · 新目录并发 FAIL、retries3 也 FAIL → 并发确实触发后端锁，transfers 保持 1"
 say "  · 全部 OK                          → 此刻后端完全可写（含并发），失败属时段性/外部条件"
 say ""
