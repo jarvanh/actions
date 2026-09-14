@@ -504,7 +504,16 @@ fi
 say "出口带宽基准（Cloudflare speedtest 上传 1MiB）: $EGRESS_RESULT"
 
 # ────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────
 sec "11 · 重启后立即写探针（复现生产的「重启 → 预检 → 405」序列）"
+# 附: 列表完整性验证（验证 _wait_driver_ready 的就绪信号是否充分）
+#   背景: 生产把容器重启后的「盲等 60s」改成了自适应轮询（4af1cbc）——以
+#   「目标路径可列出」为就绪信号。风险: 若重启后第一次 lsf 成功但**内容不完整**
+#   （驱动还在补水），truth-check 的 diff 会把真实文件误判成假成功 → 大规模重传。
+#   本节在容器重启后每 2s lsf 一次已知 20 文件的目录，记录「首次成功」与「凑齐 20」
+#   的时间差；两者重合 ⇒ 就绪信号充分，改动安全。
+
+
 # 为什么补这一组（2026-09-14 生产取证驱动）:
 #   生产里每个目录可写性预检（_fix_probe_dir_writable）之前，几乎都刚重启过容器
 #   ——truth-check、持久化复核都会重启。run 34779382573 里连续 3 次预检全部
@@ -529,6 +538,40 @@ if docker restart "$CONTAINER" >/dev/null 2>&1; then
   say "重启后写入（累计等待）:$RST_RESULT"
   rclone deletefile "$TARGET/oldiag_afterrestart.txt" --retries 1 --timeout "$PROBE_TIMEOUT" \
     >/dev/null 2>&1 || true
+
+  # 列表完整性验证（对应生产 4af1cbc 的「自适应就绪轮询」）:
+  # 先造一个已知 20 文件的目录 → docker restart → 每 2s lsf 一次，记录
+  # 「首次 lsf 成功」与「文件数凑齐 20」的时间。两者重合 ⇒ 就绪信号充分
+  # （4af1cbc 安全）；首次成功但数量不足 ⇒ 生产 truth-check 会读到不完整
+  # 列表（把真实文件误判假成功 → 大规模重传），必须回盲等或加数量校验。
+  LSC_DIR="$TARGET/oldiag_lscheck_$(date +%s)_$$"
+  mkdir -p /tmp/ol_diag/lscheck 2>/dev/null || true
+  for _li in $(seq 1 20); do
+    printf 'oldiag' > "/tmp/ol_diag/lscheck/l$(printf '%02d' "$_li").txt" 2>/dev/null || true
+  done
+  rclone copy /tmp/ol_diag/lscheck "$LSC_DIR" --transfers 4 --checkers 8 \
+    --contimeout 20s --timeout "$PROBE_TIMEOUT" >/dev/null 2>&1 || true
+  _pre=$(rclone lsf "$LSC_DIR" --files-only 2>/dev/null | grep -c . || true)
+  say "重启前列表数: ${_pre}（期望 20）"
+  docker restart "$CONTAINER" >/dev/null 2>&1 || true
+  _lsc_t0=$(date +%s)
+  LSC_FIRST="" LSC_FULL="" _lsc_i=0
+  while [ $(( $(date +%s) - _lsc_t0 )) -lt 60 ]; do
+    sleep 2
+    _lsc_i=$((_lsc_i + 1))
+    _c=$(rclone lsf "$LSC_DIR" --files-only --retries 1 --timeout "$PROBE_TIMEOUT" 2>/dev/null | grep -c . || true)
+    if [ -z "$LSC_FIRST" ] && [ "${_c:-0}" -gt 0 ]; then
+      LSC_FIRST="$(awk "BEGIN{printf \"%.0f\", $(date +%s) - $_lsc_t0}")s(${_c}个)"
+    fi
+    if [ "${_c:-0}" -ge 20 ]; then
+      LSC_FULL="$(awk "BEGIN{printf \"%.0f\", $(date +%s) - $_lsc_t0}")s"
+      break
+    fi
+  done
+  say "列表完整性: 首次成功=${LSC_FIRST:-60s内无} · 凑齐20=${LSC_FULL:-60s内未}"
+  say "  判读: 首次成功==凑齐 ⇒ 就绪信号充分（4af1cbc 安全）；首次成功但凑齐更晚 ⇒"
+  say "        生产 truth-check 需在就绪后加数量校验，否则会大规模误判假成功"
+  rclone purge "$LSC_DIR" --retries 1 --timeout "$PROBE_TIMEOUT" >/dev/null 2>&1 || true
 else
   say "（docker restart 不可用，跳过重启后写入探针）"
   RST_RESULT="SKIPPED"
