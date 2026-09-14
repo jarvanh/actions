@@ -19,6 +19,9 @@
 # 本测试覆盖: 预检先于下载、重启后真值口径定论、假成功目录、重启预算与结论
 #   缓存、目录切换与黑名单重置、根目录文件跳过、开关、以及还原元数据分类。
 set -u
+# 探针可见性重试只留 1 次: 本测试没有 _ol_refresh_path_cache（openlist_driver.sh
+# 未 source），兜底等待会把十余个"不可写目录"场景各拖慢数秒 → 套件从秒级变分钟级
+OPENLIST_PROBE_READ_RETRY=1
 PASS=0; FAIL=0
 ok()  { PASS=$((PASS+1)); echo "PASS: $1"; }
 bad() { FAIL=$((FAIL+1)); echo "FAIL: $1"; }
@@ -61,6 +64,9 @@ PROBE_ONLY=0
 # 跑在子 shell，shell 变量累加不会写回父 shell
 DST_FILES_FILE="$WORK/dst_files.txt"
 : > "$DST_FILES_FILE"
+LSF_COUNT_FILE="$WORK/lsf_calls.count"
+: > "$LSF_COUNT_FILE"
+LSF_HIDE_FIRST=0                 # 前 N 次 lsf 读空（列表缓存延迟模拟）
 RESTART_CALLS=0
 RESTART_OK=1
 CLEAR_ON_RESTART=0               # 下一次重启时清掉清单（模拟假成功条目消失）
@@ -91,7 +97,17 @@ rclone() {
       grep -vxF "$(basename "$3")" "$DST_FILES_FILE" > "${DST_FILES_FILE}.tmp" 2>/dev/null || true
       mv "${DST_FILES_FILE}.tmp" "$DST_FILES_FILE" 2>/dev/null || true
       return 0 ;;
-    lsf) cat "$DST_FILES_FILE" 2>/dev/null ;;
+    lsf)
+      # LSF_HIDE_FIRST>0: 前 N 次 lsf 读空（模拟 OpenList 对新建目录的列表缓存延迟）。
+      # 计数必须落文件: rclone 调用大多在管道里（| grep），子 shell 变量累加不回写。
+      if [ "${LSF_HIDE_FIRST:-0}" -gt 0 ]; then
+        local _c
+        _c=$(cat "$LSF_COUNT_FILE" 2>/dev/null || echo 0)
+        _c=$((_c + 1))
+        echo "$_c" > "$LSF_COUNT_FILE"
+        [ "$_c" -le "$LSF_HIDE_FIRST" ] && return 0
+      fi
+      cat "$DST_FILES_FILE" 2>/dev/null ;;
     mkdir|lsd) return 0 ;;                                # 目录创建/复核恒成功
     *) return 0 ;;
   esac
@@ -122,6 +138,8 @@ reset_state() {
   : > "$DST_FILES_FILE"
   RESTART_CALLS=0
   RESTART_OK=1
+  : > "$LSF_COUNT_FILE"
+  LSF_HIDE_FIRST=0
   WRITABLE_DIR=""
   FAKE_WRITE=0
   PROBE_ONLY=0
@@ -319,6 +337,35 @@ _BACKEND_DIR_FAIL_STREAK["openlist:wopan176Crypt"]=2
 run_fix "$REL"
 [ "${_BACKEND_DEAD[openlist:wopan176Crypt]:-0}" = "1" ] \
   && ok "13d 非名长类失败仍照常判死（解耦未泛化）" || bad "13d: 熔断被误关"
+
+# ===== 场景14: 探针可见性读空 → 刷缓存重读（一次读空不得判"不可写"）=====
+# OpenList 对新建目录的列表有缓存延迟: 折叠/探针刚写完立刻 lsf 会读空。
+# 实测反证（2026-09-14）: run 34779382573 里报"批量折叠零落盘（rc=0）"的短哈希目录
+# 5b32587f，事后读到 **18 个文件且可写** —— 折叠其实落盘了，是校验读早了。
+reset_state
+OPENLIST_PROBE_READ_RETRY=3
+printf 'target.txt\n' > "$DST_FILES_FILE"
+LSF_HIDE_FIRST=1                       # 第 1 次 lsf 读空，第 2 次可见
+_ol_refresh_path_cache() { echo refresh >> "$WORK/refresh_calls"; }
+: > "$WORK/refresh_calls"
+if _probe_file_visible "openlist:wopan175Crypt/0" "target.txt"; then
+  ok "14a 读空→刷缓存重读→第 2 次可见即判可写"
+else
+  bad "14a 一次读空就被判不可见（假阴性）"
+fi
+[ "$(grep -c refresh "$WORK/refresh_calls" 2>/dev/null || echo 0)" = "1" ] \
+  && ok "14b 读空时确实刷了一次服务端缓存" || bad "14b: 刷缓存 $(grep -c refresh "$WORK/refresh_calls" 2>/dev/null || echo 0) 次"
+# 反例: 始终读不到 → 仍须判不可见（重试不能变成"总能通过"）
+reset_state
+OPENLIST_PROBE_READ_RETRY=3
+: > "$DST_FILES_FILE"
+unset -f _ol_refresh_path_cache 2>/dev/null || true
+if _probe_file_visible "openlist:wopan175Crypt/0" "target.txt"; then
+  bad "14c 始终不可见却判可写"
+else
+  ok "14c 重试后仍不可见 → 判不可见"
+fi
+OPENLIST_PROBE_READ_RETRY=1
 
 echo "-----"
 echo "PASS=$PASS FAIL=$FAIL"

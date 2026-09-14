@@ -11,6 +11,8 @@
 # 本测试锁住"把整目录折叠搬到批量通道"后的判定与记账行为:
 #   该折叠的折叠、不该动的一个不许动、没落盘的一个不许记。
 set -u
+# 同 test_hash_dir_fallback: 探针可见性重试留 1 次，避免兜底 sleep 拖慢套件
+OPENLIST_PROBE_READ_RETRY=1
 PASS=0; FAIL=0
 ok()  { PASS=$((PASS+1)); echo "PASS: $1"; }
 bad() { FAIL=$((FAIL+1)); echo "FAIL: $1"; }
