@@ -2358,6 +2358,17 @@ jobs:
           grep -aE 'dir_cache 落盘' /opt/logs/odlink.log 2>/dev/null | tail -n 6 || echo "(无 dir_cache 落盘记录)"
           echo "--- emby-console.log (tail 40, 脱敏) ---"
           tail -n 40 /opt/logs/emby-console.log 2>/dev/null | redact_urls || echo "(无 emby-console.log)"
+          # 播放事件日志（playlog.log）：`[起播] item=N 客户端出画 +Xs` 是客户端侧
+          # 唯一的量化读数，必须在这里也归档一次。
+          # 为什么不能只靠末尾的自续触发 step：它在**取消轮**里会被跳过（实测
+          # 2026-09-14 取消 34810198024 时 24/25 两个 step 都是 skipped），而本 step
+          # 的 if: always() 在取消时照跑——只挂末尾等于把客户端侧数据押在一个
+          # 可能不执行的 step 上，那次取消就这么把读数弄丢了。
+          # [起播] 单列一段（tail 80 会被后续播放的其它日志挤掉，参考 dir_cache 的教训）。
+          echo "--- playlog.log [起播] 出画探针 ---"
+          grep -aF '[起播]' /opt/logs/playlog.log 2>/dev/null | tail -n 8 || echo "(无 [起播] 记录)"
+          echo "--- playlog.log (tail 60) ---"
+          tail -n 60 /opt/logs/playlog.log 2>/dev/null || echo "(无 playlog.log)"
       - name: backup emby data
         if: always()
         run: |
