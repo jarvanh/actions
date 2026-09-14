@@ -2345,10 +2345,13 @@ jobs:
           # 纯 tail 会被 watchdog 每分钟一次的目录探针淹没，只取真正有信息量的行
           grep -aE '段数=|解析失败|取直链失败|回退 OpenList|bootstrap 失败|列目录失败' \
             /opt/logs/odlink.log 2>/dev/null | tail -n 40 | redact_urls || echo "(无 odlink.log)"
-          echo "--- odlink dir_cache 装载/落盘 ---"
-          # 单独一行：dir_cache 装载/落盘是跨 run 持久化是否生效的直接证据，
-          # 混进上面的 grep 会被海量「段数=」行挤到 tail 之外看不到
-          grep -aE 'dir_cache 装载|dir_cache 落盘' /opt/logs/odlink.log 2>/dev/null | tail -n 8 || echo "(无 dir_cache 记录)"
+          echo "--- odlink dir_cache 装载 ---"
+          # 装载行只在首次解析时出现一次；落盘每 10 分钟一行（4.5h 轮约 29 行）。
+          # 两者混在一起 tail，装载行必然被落盘行挤出窗口——跨 run 持久化是否生效
+          # 就看不到直接证据，只能靠 fast_path/graph.ok/dirs_cached 间接推断。
+          grep -aE 'dir_cache 装载' /opt/logs/odlink.log 2>/dev/null | tail -n 3 || echo "(无 dir_cache 装载记录)"
+          echo "--- odlink dir_cache 落盘（末 6 条）---"
+          grep -aE 'dir_cache 落盘' /opt/logs/odlink.log 2>/dev/null | tail -n 6 || echo "(无 dir_cache 落盘记录)"
           echo "--- emby-console.log (tail 40, 脱敏) ---"
           tail -n 40 /opt/logs/emby-console.log 2>/dev/null | redact_urls || echo "(无 emby-console.log)"
       - name: backup emby data
@@ -2659,8 +2662,10 @@ jobs:
           echo "--- odlink.log（解析关键行 40, 脱敏）---"
           grep -aE '段数=|解析失败|取直链失败|回退 OpenList|bootstrap 失败|列目录失败' \
             /opt/logs/odlink.log 2>/dev/null | tail -n 40 | redact_urls || echo "(无 odlink.log)"
-          echo "--- odlink dir_cache 装载/落盘 ---"
-          grep -aE 'dir_cache 装载|dir_cache 落盘' /opt/logs/odlink.log 2>/dev/null | tail -n 8 || echo "(无 dir_cache 记录)"
+          echo "--- odlink dir_cache 装载 ---"
+          grep -aE 'dir_cache 装载' /opt/logs/odlink.log 2>/dev/null | tail -n 3 || echo "(无 dir_cache 装载记录)"
+          echo "--- odlink dir_cache 落盘（末 6 条）---"
+          grep -aE 'dir_cache 落盘' /opt/logs/odlink.log 2>/dev/null | tail -n 6 || echo "(无 dir_cache 落盘记录)"
           # rclone 挂载日志：VFS 缓存逐出、429/403 限流、seek 后的重取。
           # 必须 grep 筛关键行而不是纯 tail——缓存清理类输出每 15s 一条，
           # 5.7 小时上千行，纯 tail 只会被它们占满，看不到真正的异常。
