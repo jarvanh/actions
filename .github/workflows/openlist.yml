@@ -31,10 +31,15 @@ on:
         type: boolean
         default: false
       skip_preview:
-        description: "同步模式: 跳过任务预览通知（直接开始同步）"
+        # 默认 true（2026-09-14 用户决定）: 预览 16 对实测耗 36min/轮 ≈ 预算 11%，
+        # 而它只产出通知里的一段信息，对同步本身没有贡献。代价: 通知失去
+        # "待同步量/预计跳过"，且本轮 remaining 记为未知（trend_capture_remaining
+        # 对空 PREVIEW_PENDING_MAP 写 unknown，见 sync_trend.sh —— 写 0 会伪装成
+        # "剩余清零"）。需要看差值时手动传 skip_preview=false。
+        description: "同步模式: 跳过任务预览通知（默认跳过以省 ~11% 预算；设为 false 时恢复预览与待同步量通知）"
         required: false
         type: boolean
-        default: false
+        default: true
       transfers:
         description: "同步模式: OpenList 目标端 rclone 并发上传数（默认 1 串行=最保守；wopan176 保持 1——run 32749862280 整批假成功事故后端。baidupan/wopan175 可先在调试模式单任务试 2，truth-check 会兜底暴露假成功）"
         required: false
@@ -435,7 +440,10 @@ jobs:
         timeout-minutes: 330
         if: ${{ inputs.run_mode == '' || inputs.run_mode == '同步' }}
         env:
-          SKIP_PREVIEW: ${{ inputs.skip_preview || 'false' }}
+          # 取值必须走 github.event.inputs（字符串上下文）: 用 inputs.skip_preview 时
+          # boolean false 会被 `||` 当成假值 → 永远落到兜底值，手动传 false 也会被跳过
+          # （与 session_hold 同一个坑，见其注释）。schedule 触发时为 null → 取兜底。
+          SKIP_PREVIEW: ${{ github.event.inputs.skip_preview || 'true' }}
         run: |
           source /tmp/load_all.sh
           # P0 趋势: 记录同步工作开始时间（收尾时算本轮历时）

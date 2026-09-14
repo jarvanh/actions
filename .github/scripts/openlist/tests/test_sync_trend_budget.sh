@@ -110,6 +110,13 @@ PREVIEW_FAIL_SRC_PAIRS=0
 trend_capture_remaining >/dev/null
 v=$(cat /tmp/ol_trend_remaining.txt 2>/dev/null || echo 0)
 [ "$v" = "300" ] && ok "trend_capture: 无源端失败 → 恢复求和" || bad "trend_capture: 期望300实得$v"
+# 3c) 空 map（skip_preview 仅注册模式 / 预览未产出）→ 必须记 unknown，不能写 0:
+#     写 0 会让趋势显示"剩余量清零"，是最危险的假信号（看起来像同步完成）
+declare -A PREVIEW_PENDING_MAP=()
+trend_capture_remaining >/dev/null
+v=$(cat /tmp/ol_trend_remaining.txt 2>/dev/null || echo 0)
+[ "$v" = "unknown" ] && ok "trend_capture: 无预览数据 → 记 unknown（不写 0）" || bad "trend_capture: 空 map 期望unknown实得$v"
+declare -A PREVIEW_PENDING_MAP=( ["k1"]="100 1" ["k2"]="200 2" )
 
 # --- 4. trend.jsonl 三情形 ---
 trend_capture_start
