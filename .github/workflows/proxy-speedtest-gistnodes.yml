@@ -18,12 +18,11 @@ name: proxy-speedtest-gistnodes
 # 且抓取结果与测速轮次之间会脱钩。
 on:
   schedule:
-    # 每天 4 次、间隔 5 小时：UTC 21:00, 02:00, 07:00, 12:00 = 北京 05:00, 10:00, 15:00, 20:00。
-    # 与三套测速的定时轮（gitee 京 05/09/13/17、cdn 06/10/14/18、taier 07/11/15/19）
-    # 刻意**不**错开：本工作流自己只抓节点，真正测速交给被复用的那一套，撞上时由被调
-    # job 的 concurrency singleton 排队，不会并发抢带宽。仍只排在北京 05:00–20:00：
-    # 夜间 runner 排队 + 出口拥塞会让测速读数失真。
-    - cron: "0 21,2,7,12 * * *"
+    # 每天 4 次：UTC 00/04/08/12 = 北京 08:00 / 12:00 / 16:00 / 20:00。
+    # 刻意避开三套测速的定时轮（gitee 京 05/09/13/17、cdn 06/10/14/18、taier 07/11/15/19）：
+    # 本工作流抓完节点会**直接调用**其中一套来测速，撞点会互相抢节点带宽、读数彼此污染。
+    # 仍只排在北京 05:00–20:00：夜间 runner 排队 + 出口拥塞会让测速读数失真。
+    - cron: "0 0,4,8,12 * * *"
   workflow_dispatch:
     inputs:
       engine:
@@ -41,15 +40,15 @@ on:
         required: false
         type: string
       max_nodes:
-        description: '最终订阅保留多少节点（留空 = 300；0 = 不限。下游 mihomo 会按 provider 全量做健康检查，别轻易放开）'
+        description: '最终订阅保留多少节点（留空 = 0 = 不限。下游 mihomo 按 provider 全量做健康检查，节点多会拖长启动）'
         required: false
         type: string
       test_nodes:
-        description: '交给测速引擎实测多少个节点（留空 = 60；0 = 不限）'
+        description: '交给测速引擎实测多少个节点（留空 = 0 = 不限）'
         required: false
         type: string
-      max_gists:
-        description: '最多解析多少个 Gist（留空 = 100，名额按关键词均分）'
+      target_subs:
+        description: '目标：凑够多少个「像订阅」的文件（留空 = 100；0 = 不限，翻到没有 24h 内更新的为止）'
         required: false
         type: string
       max_age_hours:
@@ -78,6 +77,7 @@ jobs:
       parsed_count: ${{ steps.fetch.outputs.parsed_count }}
       gists_scanned: ${{ steps.fetch.outputs.gists_scanned }}
       gist_html_url: ${{ steps.fetch.outputs.gist_html_url }}
+      gist_id: ${{ steps.fetch.outputs.gist_id }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -138,9 +138,9 @@ jobs:
           SUB_STORE_BACKEND_URL: http://127.0.0.1:3001
           # 抓取范围与产出（dispatch 可覆盖；这里的默认值与脚本默认值一致）
           GIST_NODES_QUERIES: ${{ inputs.queries }}
-          GIST_NODES_MAX_GISTS: ${{ inputs.max_gists || '100' }}
+          GIST_NODES_TARGET_SUBS: ${{ inputs.target_subs || '100' }}
           GIST_NODES_MAX_AGE_HOURS: ${{ inputs.max_age_hours || '24' }}
-          GIST_NODES_MAX_NODES: ${{ inputs.max_nodes || '300' }}
+          GIST_NODES_MAX_NODES: ${{ inputs.max_nodes || '0' }}
           GIST_NODES_WORKDIR: ${{ github.workspace }}/gist-nodes
           # GitHub API 认证：匿名 60 次/h，一轮要拉上百个 Gist（每个至少一次 API 调用），
           # 不带 token 会被限流截断
@@ -179,7 +179,14 @@ jobs:
     uses: ./.github/workflows/proxy-speedtest-taier.yml
     with:
       sub_urls: ${{ needs.fetch-nodes.outputs.sub_url }}
-      max_nodes: ${{ inputs.test_nodes || '60' }}
+      # 不限节点数：抓来多少就测多少（用户要求；节点多会让 mihomo 启动健康检查变慢）
+      max_nodes: ${{ inputs.test_nodes || '0' }}
+      # 测速结果写进**本工作流专属 Gist**（与源节点订阅同库、不同文件名），
+      # 而不是三套测速各自的 Gist —— 这样一轮 gist 抓取的产物集中在一处
+      gist_id: ${{ needs.fetch-nodes.outputs.gist_id }}
+      gist_filename: proxy_speedtest_gistnodes_result_taier.yaml
+      gist_description: 'proxy speedtest result (gist 抓节点 · taier 三网)'
+      label: 'gist 节点'
     secrets: inherit
 
   speedtest-gitee:
@@ -188,7 +195,14 @@ jobs:
     uses: ./.github/workflows/proxy-speedtest-gitee.yml
     with:
       sub_urls: ${{ needs.fetch-nodes.outputs.sub_url }}
-      max_nodes: ${{ inputs.test_nodes || '60' }}
+      # 不限节点数：抓来多少就测多少（用户要求；节点多会让 mihomo 启动健康检查变慢）
+      max_nodes: ${{ inputs.test_nodes || '0' }}
+      # 测速结果写进**本工作流专属 Gist**（与源节点订阅同库、不同文件名），
+      # 而不是三套测速各自的 Gist —— 这样一轮 gist 抓取的产物集中在一处
+      gist_id: ${{ needs.fetch-nodes.outputs.gist_id }}
+      gist_filename: proxy_speedtest_gistnodes_result_gitee.yaml
+      gist_description: 'proxy speedtest result (gist 抓节点 · gitee 上下行)'
+      label: 'gist 节点'
     secrets: inherit
 
   speedtest-cdn:
@@ -197,5 +211,12 @@ jobs:
     uses: ./.github/workflows/proxy-speedtest-cdn.yml
     with:
       sub_urls: ${{ needs.fetch-nodes.outputs.sub_url }}
-      max_nodes: ${{ inputs.test_nodes || '60' }}
+      # 不限节点数：抓来多少就测多少（用户要求；节点多会让 mihomo 启动健康检查变慢）
+      max_nodes: ${{ inputs.test_nodes || '0' }}
+      # 测速结果写进**本工作流专属 Gist**（与源节点订阅同库、不同文件名），
+      # 而不是三套测速各自的 Gist —— 这样一轮 gist 抓取的产物集中在一处
+      gist_id: ${{ needs.fetch-nodes.outputs.gist_id }}
+      gist_filename: proxy_speedtest_gistnodes_result_cdn.yaml
+      gist_description: 'proxy speedtest result (gist 抓节点 · cdn 镜像站)'
+      label: 'gist 节点'
     secrets: inherit

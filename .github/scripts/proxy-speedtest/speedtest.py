@@ -985,9 +985,13 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None):
 
     sep = TG_SEP
     # 标题状态随结论降级（规范 · 状态图标语义）：0 可用节点 → ⚠️，不再恒 ✅
-    _title_emoji = '⚠️' if not ok_results else '✅'
+    # 来源标签（PROXY_SPEEDTEST_LABEL）：编排层 proxy-speedtest-gistnodes 调用时传
+    # 「gist 节点」，标题变成「gist 节点 · CDN 测速完成」。同一套测速会被定时轮和 gist 抓取轮
+    # 分别触发，标题不区分的话读者分不清通知来自哪一轮（规范 · 3.1 允许标题带区分词）。
+    _label = (merged_env().get('PROXY_SPEEDTEST_LABEL') or '').strip()
+    _title_prefix = f'{_label} · ' if _label else ''
     lines = [
-        f'{_title_emoji} CDN 测速完成',
+        f'{_title_emoji} {_title_prefix}CDN 测速完成',
         sep,
         f'🕒 起止：{esc(started)} ~ {esc(ended)} · 耗时 {esc(duration_text)}',
         f'📊 节点：共 {len(results)} 个 · 可用 {len(ok_results)} 个',

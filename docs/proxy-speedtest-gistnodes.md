@@ -10,9 +10,13 @@
 原本只吃仓库 secret `PROXY_SPEEDTEST_SUB_URLS` 里的固定订阅源。本工作流给它们**换一个节点来源**：
 从 `gist.github.com` 搜索公开节点订阅，去重后产出 mihomo YAML，再交给选定的那套测速。
 
-它自己**不测速、不发通知**——测速、达标筛选、结果订阅上传 Gist、Telegram 通知全部由被复用的
-那套完成（否则同一轮会出现两条通知，而通知版式有规范约束，见 [telegram-notify.md](telegram-notify.md)）。
-抓取情况走 job 摘要与 artifact。
+它自己**不测速、也不发自己的通知**——测速、达标筛选、结果订阅上传 Gist、Telegram 通知全部由
+被复用的那套完成。**通知只有一条**（就是被调测速工作流发的那条），但标题会带上来源标签
+`gist 节点 · <引擎>测速`，读者能分辨这一轮是谁触发的；标签来自 `PROXY_SPEEDTEST_LABEL`，
+不传时标题与定时轮完全一致（规范 · 3.1 允许标题带区分词，见
+[telegram-notify.md](telegram-notify.md)）。
+**为什么不自己再发一条**：同一轮会出现两条通知，且抓取统计与被调 job 的测速结果分属两个
+job，gistnodes 侧拿不到测速结果。抓取情况走 job 摘要与 artifact。
 
 ## 引擎选择（环境变量）
 
@@ -26,11 +30,16 @@
 
 ## 链路
 
-1. **搜索**：对每个关键词取 `s=updated`（最近更新）排序的前 N 页，解析服务端渲染的
-   `.gist-snippet` 块，拿 owner / gist id / 最后活跃时间；只保留最近
-   `GIST_NODES_MAX_AGE_HOURS` 小时（默认 24）内更新过的，每个关键词的候选配额按
-   `GIST_NODES_MAX_GISTS` 均分（收够即停）。排序是降序，某页整页都超龄就直接停止该
-   关键词翻页——后面的页只会更旧，继续翻只会白挨 429；
+1. **搜索 + 取文交织**：每轮对每个关键词翻 `GIST_NODES_PAGES_PER_ROUND` 页（默认 2），
+   解析服务端渲染的 `.gist-snippet` 块拿 owner / gist id / 最后活跃时间，只保留最近
+   `GIST_NODES_MAX_AGE_HOURS` 小时（默认 24）内更新过的；取文并数出「像订阅」的文件，
+   不够 `GIST_NODES_TARGET_SUBS`（默认 100）就继续下一轮，直到凑够、或所有关键词都
+   到头、或翻满 `GIST_NODES_MAX_PAGES`（默认 40，安全上限）。
+   **为什么要交织而不是先搜完再取**：搜索结果前排混着大量噪声 Gist（正文是 JSON 统计，
+   只因含 `ss://` 字样被搜到），它们产出 0 个订阅文件；只有取文后数真订阅才知道够没够，
+   固定「先搜 N 个 Gist」的配额要么拿不满、要么白搜一堆。
+   关键词「到头」有两个判据：正常返回却一块都没有（翻到末页），或整页全部超龄
+   （排序是 `s=updated` 降序，这一页都旧了，后面只会更旧）。**被限流不算到头**；
 2. **取文**：GitHub API `GET /gists/{id}` 拿各文件 `raw_url` 再取正文（并发 8 路；
    匿名 60 次/h 会被限流，故带 `PAT`）；
 3. **过滤**：只放行「像订阅」的文件——含协议 scheme（`ss://` 等）或 Clash 的 `proxies:` 段，
@@ -85,10 +94,18 @@ GET 即可（secret Gist 的 raw URL 无需鉴权——不可猜的 URL 本身�
 `sla_data.json` 这种，只因为碰巧含 `ss://` 字样就被搜到，而且它们更新最勤、永远排在最前。
 这类噪声靠第 3 步的订阅判据挡掉，时间窗口对它无效。
 
-**调度为什么是每天 4 次、京 05/10/15/20。** 与三套测速的定时轮（gitee 京 05/09/13/17、
-cdn 06/10/14/18、taier 07/11/15/19）**不**错开：本工作流自己只抓节点，真正测速交给被复用的
-那一套，撞上时由被调 job 的 concurrency singleton 排队，不会并发抢带宽。仍只排在北京
-05:00–20:00：夜间 runner 排队 + 出口拥塞会让测速读数失真。
+**调度为什么是每天 4 次、京 08/12/16/20。** 刻意避开三套测速的定时轮（gitee 京
+05/09/13/17、cdn 06/10/14/18、taier 07/11/15/19）：本工作流抓完节点会**直接调用**其中
+一套来测速，撞点会互相抢节点带宽、读数彼此污染。仍只排在北京 05:00–20:00：夜间 runner
+排队 + 出口拥塞会让测速读数失真。
+
+**怎么扛搜索页 429。** 限流是**短窗口突发型**：实测被限后隔 3 秒再请求就恢复 200，
+但它同时也是**唯一**的发现入口——`github.com/search?type=gists` 是登录墙（0 个结果块），
+带 token 请求搜索页也没有特殊配额（响应 etag 差异只是页面动态内容）。所以策略是：
+页间固定间隔（`GIST_NODES_PAGE_DELAY`，默认 3 秒）+ 随机抖动；单页失败按
+`GIST_NODES_BACKOFF_BASE` 指数退避（5/10/20/40 秒）+ 抖动，重试 `GIST_NODES_RETRIES`
+次；**重试用尽仍 429 时只跳过本页、继续下一页**，不把整个关键词判死——否则一次突发限流
+就会静默丢掉整类节点。实测「2 秒固定间隔连翻十几页必被限」，抖动 + 指数退避能自己错开。
 
 **并发。** 编排自己有 workflow 级 `proxy-speedtest-gistnodes-singleton`；被复用的测速工作流沿用它们
 各自的 job 级 singleton。**不要**在 caller job 上再加被调工作流的同名 group——GitHub 文档明确警告
@@ -105,32 +122,45 @@ caller 与 called 用同一个 group 值会互相影响：`cancel-in-progress: t
 | `PROXY_SPEEDTEST_GISTNODES_GIST_ID` | 本工作流专属 Gist 的 id。留空则首次运行自动新建，job 摘要给链接，拿到 id 后回填 |
 | 其余 | 由被复用的测速工作流自己读（`PROXY_SPEEDTEST_SUB_URLS` 会被 `sub_urls` 覆盖） |
 
-四个 Gist 各用各的，互不覆盖：`gitee` / `cdn` / `taier` 三套是**测速结果**订阅，
-本工作流是**抓来的源节点**订阅（`proxy_speedtest_gistnodes_providers.yaml`）。
+Gist 分工：`gitee` / `cdn` / `taier` 三套各自的 Gist 只装**它们定时轮**的测速结果；
+本工作流专属的那个 Gist 装**这一轮 gist 抓取的全部产物**，靠文件名区分，互不覆盖：
+
+| 文件 | 谁写 | 内容 |
+|---|---|---|
+| `proxy_speedtest_gistnodes_providers.yaml` | 本工作流 | 抓来 + 去重后的**源节点**订阅（作为 `sub_urls` 传给被调测速工作流） |
+| `proxy_speedtest_gistnodes_result_<引擎>.yaml` | 被调测速工作流 | 该轮**达标节点**的测速结果订阅 |
+
+被调工作流怎么写进别人的 Gist：三套的 `workflow_call` 都有 `gist_id` / `gist_filename` /
+`gist_description` / `label` 四个入参，本工作流在 `with:` 里传本 Gist 的 id（来自
+`fetch-nodes` 的 `gist_id` output）。留空时它们照旧写自己的 secret 指向的 Gist——
+所以**三套测速的定时轮完全不受影响**，仍吃仓库 secret `PROXY_SPEEDTEST_SUB_URLS`
+里的固定订阅源、仍写各自的 Gist。
 
 ### 可调参数（均有默认值）
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `GIST_NODES_QUERIES` | `ss://,vless://,vmess://,trojan://,hysteria2://,tuic://` | 搜索关键词 |
-| `GIST_NODES_PAGES` | `5` | 每个关键词翻几页（每页 10 条；收够配额即停，通常只翻 2 页） |
+| `GIST_NODES_TARGET_SUBS` | `100` | 目标：凑够多少个「像订阅」的文件（`0` = 不限） |
+| `GIST_NODES_MAX_PAGES` | `40` | 每个关键词最多翻几页（安全上限） |
+| `GIST_NODES_PAGES_PER_ROUND` | `2` | 每轮每个关键词翻几页 |
 | `GIST_NODES_SORT` | `updated` | 搜索排序 |
 | `GIST_NODES_MAX_AGE_HOURS` | `24` | 只收最近 N 小时内更新过的 Gist（`0` = 不限） |
-| `GIST_NODES_MAX_GISTS` | `100` | 最多解析多少个 Gist（名额按关键词均分） |
-| `GIST_NODES_MAX_SUBS` | `120` | 最多投喂多少个订阅 |
-| `GIST_NODES_MAX_TOTAL_MB` | `24` | 投喂内容总量上限 |
-| `GIST_NODES_MAX_FILE_MB` | `2` | 单个文件超过则跳过 |
-| `GIST_NODES_MAX_NODES` | `300` | 最终订阅保留多少节点（`0` = 不限） |
+| `GIST_NODES_MAX_SUBS` | `0` | 最多投喂多少个订阅（`0` = 不限） |
+| `GIST_NODES_MAX_TOTAL_MB` | `0` | 投喂内容总量上限（`0` = 不限） |
+| `GIST_NODES_MAX_FILE_MB` | `2` | 单个文件超过则跳过（工程保护，不是配额） |
+| `GIST_NODES_MAX_NODES` | `0` | 最终订阅保留多少节点（`0` = 不限） |
 | `GIST_NODES_TIMEOUT` | `30` | 单次 HTTP 超时（秒） |
-| `GIST_NODES_RETRIES` | `3` | 搜索页返回空结果块时的重试次数（退避 5s/10s） |
-| `GIST_NODES_PAGE_DELAY` | `2` | 搜索页翻页之间的间隔秒数（`0` = 不间隔；从源头降低被 429 的概率） |
+| `GIST_NODES_RETRIES` | `4` | 单页搜索失败（含 429）时的重试次数 |
+| `GIST_NODES_BACKOFF_BASE` | `5` | 重试退避基数（秒），按 5/10/20/40 指数增长 + 抖动 |
+| `GIST_NODES_PAGE_DELAY` | `3` | 搜索页翻页间隔（秒，另加 0–1 秒随机抖动；`0` = 不间隔） |
 | `GIST_NODES_WORKERS` | `8` | 并发取 Gist 的线程数 |
 | `SUB_STORE_BACKEND_URL` | `http://127.0.0.1:3001` | Sub-Store 后端地址 |
 | `SUB_STORE_TIMEOUT` | `300` | 调用 Sub-Store 的超时（秒） |
 | `SUB_STORE_COLLECTION` | `gist-nodes` | 组合订阅名前缀 |
 | `GIST_NODES_DRY_RUN` | `0` | `1` = 只抓取不发布（本地验证用） |
 
-dispatch 入参 `queries` / `max_nodes` / `test_nodes` / `max_gists` / `max_age_hours`
+dispatch 入参 `queries` / `max_nodes` / `test_nodes` / `target_subs` / `max_age_hours`
 分别覆盖对应项。
 
 ## 失败语义
@@ -144,7 +174,8 @@ dispatch 入参 `queries` / `max_nodes` / `test_nodes` / `max_gists` / `max_age_
 | 现象 | 看哪里 |
 |---|---|
 | 抓取阶段失败 | 日志里 `gist_nodes_*` 结构化行；`gist_nodes_search_empty` = 某关键词整页没解析出结果 |
-| 搜索页 429 | `gist_nodes_search_failed ... HTTP Error 429`：搜索页有频率限制，重试带退避、页间有 `GIST_NODES_PAGE_DELAY` 间隔；频繁手动重跑会加重。**这是「一轮能抓到多少个 Gist」的主要瓶颈**——`GIST_NODES_MAX_GISTS` 是上限不是保证，被限流时单轮只拿得到几十个候选 |
+| 搜索页 429 | `gist_nodes_search_rate_limited`（重试中）/ `gist_nodes_search_page_skipped`（放弃本页、继续下一页）。限流是**短窗口突发型**，重试退避 + 页间间隔就能过；`gist_nodes_search_skipped_total` 汇总一轮跳了多少页。**它是「一轮能抓多少」的主要瓶颈**——`GIST_NODES_TARGET_SUBS` 是目标不是保证，被限流时可能只凑到几十个 |
+| 某个关键词没产出 | `gist_nodes_search_stale_stop` = 整页超龄（该关键词到头）；`gist_nodes_search_empty` 已不再单独打点，末页由 `gist_nodes_gather_round` 的 `active` 计数下降体现 |
 | 去重没生效 | `gist_nodes_dedupe_no_effect`（解析数 ≥ 去重后数）。Sub-Store 对**未知算子只记日志不报错**，先查 `process` 里的算子名拼写 |
 | 节点数比预期少 | 先看 `non_sub_files`（判据挡掉了多少）与 `over_quota`（配额挡掉了多少），再看限量 |
 | 候选 Gist 太少 | 看 `gist_nodes_search_age_filtered`（时间窗口挡掉多少）与 `gist_nodes_search_stale_stop`（哪个关键词翻到整页超龄）。窗口设太窄时前几页就被判超龄 |

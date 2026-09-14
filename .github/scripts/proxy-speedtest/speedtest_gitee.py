@@ -1332,8 +1332,13 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
     # 标题状态随结论降级（规范 · 状态图标语义）：0 节点测速成功 / 本轮中止 → ⚠️，
     # 不再恒 ✅（此前「✅ 完成」下面写着「⚠️ 没有节点测速成功」，自相矛盾）
     _title_emoji = '⚠️' if (aborted_due_to_runtime or not ok_results_by_download) else '✅'
+    # 来源标签（PROXY_SPEEDTEST_LABEL）：编排层 proxy-speedtest-gistnodes 调用时传
+    # 「gist 节点」，标题变成「gist 节点 · Gitee 测速完成」。同一套测速会被定时轮和 gist
+    # 抓取轮分别触发，标题不区分的话读者分不清通知来自哪一轮（规范 · 3.1）。
+    _label = (merged_env().get('PROXY_SPEEDTEST_LABEL') or '').strip()
+    _title_prefix = f'{_label} · ' if _label else ''
     summary_lines = [
-        f'{_title_emoji} Gitee 测速完成',
+        f'{_title_emoji} {_title_prefix}Gitee 测速完成',
         sep,
         f'🕒 起止：{esc(started_text)} ~ {esc(ended_text)} · 耗时 {esc(duration_cn)}',
         f'📊 节点：共 {len(speed_results)} 个 · 可用 {len(ok_results)} 个',
