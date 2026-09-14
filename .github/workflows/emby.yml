@@ -718,6 +718,42 @@ jobs:
             fi
 
             sudo nohup /opt/emby-server/bin/emby-server > /opt/logs/emby-console.log 2>&1 &
+            # ---- 海报原图后台补回（不阻塞开机，机制见 docs/emby.md §8）----
+            # 核心恢复刻意不含 metadata/library（~1GB / 2600+ 文件，会把开机拖慢 17 分钟）；
+            # 上一轮已把原图单独归档到 onedrive:backup/emby/images，这里在 Emby 起来之后
+            # 由后台补缺：先下到 /tmp 再 sudo cp -rn（只补缺、不覆盖本轮 Emby 新写的），
+            # 约 10~17 分钟；首次部署云端无归档时自动跳过。失败只告警：海报永远可以由
+            # Emby 重新生成，不影响播放。
+            cat > /opt/emby_img_restore.sh <<'IR_EOF'
+          #!/bin/bash
+          # 海报原图后台补回。任何失败都只告警：原图可由 Emby 重新生成，绝不影响播放。
+          set -u
+          RST=/tmp/emby-images-restore
+          DST=/var/lib/emby/metadata/library
+          rm -rf "$RST" && mkdir -p "$RST"
+          if ! rclone copy "onedrive:backup/emby/images" "$RST" --fast-list \
+               --transfers 16 --checkers 32 --low-level-retries 20 \
+               --onedrive-no-versions --ignore-existing -v; then
+            echo "::warning::海报原图下载失败（不影响播放，Emby 会按需重新生成）"
+            rm -rf "$RST"; exit 0
+          fi
+          if [ -z "$(ls -A "$RST" 2>/dev/null)" ]; then
+            echo "云端尚无图像归档（首次部署），跳过——海报由 Emby 按需重新生成"
+            rm -rf "$RST"; exit 0
+          fi
+          sudo mkdir -p "$DST"
+          # cp -rn = 递归 + 不覆盖已存在文件：本轮 Emby 新写的图（可能更新）优先保留
+          if sudo cp -rn -a "$RST/." "$DST/" 2>/dev/null || sudo cp -rn -r "$RST/." "$DST/"; then
+            sudo chown -R emby:emby "$DST" 2>/dev/null || true
+            N=$(sudo find "$DST" -type f 2>/dev/null | wc -l | tr -d ' ')
+            echo "✅ 海报原图补回完成：本地现有 $N 个文件 $(date '+%F %T')"
+          else
+            echo "::warning::海报原图补回失败（本地写入失败）——海报由 Emby 按需重新生成，不影响播放"
+          fi
+          rm -rf "$RST"
+          IR_EOF
+            chmod +x /opt/emby_img_restore.sh
+            nohup bash /opt/emby_img_restore.sh > /opt/logs/img-restore.log 2>&1 &
             # 只有 install emby 阶段完成了数据完整性校验，才允许后续备份步骤执行。
             touch /tmp/EMBY_READY_FOR_BACKUP
           }
@@ -2083,6 +2119,10 @@ jobs:
           STAGE=/tmp/emby-incbak
           EVERY=${EMBY_BACKUP_EVERY_MIN:-25}
           INTERVAL=$(( (EVERY > 0 ? EVERY : 25) * 60 ))
+          # 海报原图走独立通道（与核心快照互补：核心不含图像、图像通道只收图像），
+          # 目标目录取核心通道的上一级（…/emby/live → …/emby/images），互不覆盖
+          IMAGES_DEST="${DEST%/*}/images"
+          RCONF=$(rclone config file 2>/dev/null | tail -n1)
           command -v sqlite3 >/dev/null 2>&1 || sudo apt-get install -y -qq sqlite3 >/dev/null 2>&1 || true
 
           snapshot() {
@@ -2178,17 +2218,83 @@ jobs:
             return 1
           }
 
-          if [ "${1:-loop}" = "once" ]; then once; exit $?; fi
+          sync_images() { # $1=等待锁的秒数（0=拿不到就跳过）
+            # 海报原图独立归档：copy 语义（云端始终保留最新一份），只传增量——
+            # 首轮约 1GB，稳态只有当轮新增的海报（秒级~分钟级）。
+            # /var/lib/emby 归 emby 用户，runner 读不了 → sudo + 显式 --config
+            # （sudo 会重置环境，不指配置的话 root 找不到 OneDrive remote）。
+            # --min-age 2m：跳过 2 分钟内仍在写入的文件，避免传半张图。
+            local WAIT="${1:-0}"
+            local SRC_IMG="$SRC/metadata/library"
+            local LOG=/tmp/emby-images-sync.log
+            [ -d "$SRC_IMG" ] || { echo "图像归档: 无 $SRC_IMG，跳过"; return 0; }
+            exec 9>/tmp/emby-images-sync.lock
+            flock -w "$WAIT" 9 || { echo "图像归档: 已有同步在进行，跳过本次"; return 0; }
+            local T0=$(date +%s)
+            echo "=== 图像归档开始 $(date '+%F %T') dest=$IMAGES_DEST"
+            if sudo rclone --config "${RCONF}" copy "$SRC_IMG" "$IMAGES_DEST/" \
+                 --fast-list --transfers 16 --checkers 32 --low-level-retries 20 \
+                 --onedrive-no-versions --min-age 2m -v > "$LOG" 2>&1; then
+              tail -n 3 "$LOG"
+              echo "=== 图像归档完成 耗时 $(( $(date +%s) - T0 ))s $(date '+%T')"
+              return 0
+            fi
+            tail -n 8 "$LOG"
+            echo "[WARNING] 图像归档上传失败（耗时 $(( $(date +%s) - T0 ))s）"
+            return 1
+          }
+
+          case "${1:-loop}" in
+            once)   once; exit $?;;
+            images) sync_images "${2:-0}"; exit $?;;
+          esac
           # 首轮先报一下各目录体量，便于后续调参（metadata 大的话就要考虑排除它）
           sudo du -sh "$SRC"/data "$SRC"/config "$SRC"/metadata "$SRC"/plugins "$SRC"/root 2>/dev/null || true
           sleep 120   # 让 Emby 完成启动与 warmup 的冷读，避免首轮同步抢占带宽
+          # 图像定时归档的触发时刻（T+EMBY_IMAGE_SYNC_MIN，默认 60 分钟，每轮一次）
+          IMG_AT=$(( $(date +%s) + ${EMBY_IMAGE_SYNC_MIN:-60} * 60 ))
+          IMG_DONE=""
           while :; do
             once || true
+            # 到点后把图像归档丢到后台：首轮约 1GB（2~6 分钟），不能挡住下一轮核心快照；
+            # 与收尾的最终归档共用 flock，不会互相叠罗汉
+            if [ -z "$IMG_DONE" ] && [ "$(date +%s)" -ge "$IMG_AT" ]; then
+              IMG_DONE=1
+              nohup bash /opt/emby_incbak.sh images 300 >> /opt/logs/images-sync.log 2>&1 &
+              echo "图像归档（定时）已后台启动 $(date '+%T')"
+            fi
             sleep "$INTERVAL"
           done
           IB_EOF
           chmod +x /opt/emby_incbak.sh
           nohup bash /opt/emby_incbak.sh loop > /opt/logs/incbackup.log 2>&1 &
+          # ---- 轻观测通道：小状态文件每 10 分钟上云（KB 级），与 25 分钟核心备份解耦 ----
+          # 让"回填进度 / 起播读数"最迟 10 分钟可查，而不是等核心快照。目标路径与核心
+          # 快照相同（live/ 下同名覆盖），读取入口不变。playlog 先截断到 512KB（只留
+          # 最近十几轮播放读数），文件尺寸恒定；odwarm-status.txt 本身只有十几行。
+          cat > /opt/emby_status_sync.sh <<'SS_EOF'
+          #!/bin/bash
+          # 轻观测通道。任何失败只记日志，绝不影响备份与播放。
+          set -u
+          DEST="${EMBY_BACKUP_DEST:?EMBY_BACKUP_DEST 未设置}"
+          EVERY=$(( ( ${EMBY_STATUS_SYNC_MIN:-10} > 0 ? ${EMBY_STATUS_SYNC_MIN:-10} : 10 ) * 60 ))
+          T=/tmp/emby-status-sync
+          while :; do
+            rm -rf "$T" && mkdir -p "$T"
+            [ -f /opt/logs/playlog.log ] && tail -c 524288 /opt/logs/playlog.log > "$T/playlog.log" || true
+            [ -f /tmp/odwarm-status.txt ] && cp /tmp/odwarm-status.txt "$T/odwarm-status.txt" || true
+            if rclone copy "$T" "$DEST" --fast-list --low-level-retries 10 \
+                 >> /opt/logs/status-sync.log 2>&1; then
+              echo "$(date '+%F %T') 状态上云完成"
+            else
+              echo "$(date '+%F %T') 状态上云失败" >> /opt/logs/status-sync.log
+            fi
+            rm -rf "$T"
+            sleep "$EVERY"
+          done
+          SS_EOF
+          chmod +x /opt/emby_status_sync.sh
+          nohup bash /opt/emby_status_sync.sh > /opt/logs/status-sync.log 2>&1 &
 
       - name: start link prefetcher
         # 把"取直链"从起播关键路径挪走（302 起播慢的主力：冷解析实测 0.65~0.86s）：
@@ -2285,6 +2391,21 @@ jobs:
           stats_err() { curl -s -m 5 "$LK_HOST/stats" 2>/dev/null \
                           | jq -r '.graph.err // 0' 2>/dev/null || echo 0; }
           BATCH=()
+          # 回填状态写 /tmp/odwarm-status.txt：随 10 分钟轻观测通道上云，"填到哪了"
+          # 最迟 10 分钟可查，不必等收尾归档或取消轮。$1=当前原因（进行中/完成/中断）。
+          write_status() {
+            {
+              echo "updated=$(date '+%F %T')"
+              echo "reason=${1:-进行中}"
+              echo "dirs_backfilled=${DIRS} max_dirs=${MAX_DIRS} pages=${IDX} empty_pages=${EMPTY_PAGES}"
+              echo "graph_err_seen=${ERR_SEEN} gap=${GAP} par=${PAR}/${PAR_BUSY}"
+              echo "items_with_path=${WITH_PATH} items_no_path=${NO_PATH} items_scanned=${IDX}"
+              # 拿得到 Path 的条目按前两级目录的分布（最多 8 项，只进这个私有文件）
+              for k in "${!SEG2[@]}"; do printf '%s %s\n' "${SEG2[$k]}" "$k"; done \
+                | sort -rn | head -8 | sed 's/^/seg2 /'
+              echo "dirs_cached=$(curl -s -m 5 "$LK_HOST/stats" 2>/dev/null | jq -r '.dirs_cached // 0')"
+            } > /tmp/odwarm-status.txt 2>/dev/null || true
+          }
           flush_batch() {   # 并发回填一批并刷新进度；空批直接返回
             local n=${#BATCH[@]} par=$PAR
             [ "$n" -gt 0 ] || return 0
@@ -2293,6 +2414,7 @@ jobs:
             DIRS=$((DIRS + n))
             echo "目录回填 ${DIRS}/${MAX_DIRS}（并发 ${par}）累计 $(( $(date +%s) - T_START ))s $(date '+%T')"
             BATCH=()
+            write_status "进行中"
           }
           IDX=0; DIRS=0; BAD_ROUNDS=0; EMPTY_PAGES=0; GAP=1; ERR_SEEN=$(stats_err)
           NO_PATH=0; WITH_PATH=0
@@ -2388,20 +2510,7 @@ jobs:
             sleep "$SLEEP_GAP"
           done
           echo "=== dir_cache 回填完成: ${DIRS} 个目录 $(date '+%F %T')"
-          # 回填状态小文件（随增量快照上云）：以前"回填到底填到哪、为什么停"
-          # 只能等整轮收尾读归档，想提前看就得取消轮——这个文件让它最迟 25 分钟
-          # 就能从云端读到，和 playlog 一个路子。
-          {
-            echo "updated=$(date '+%F %T')"
-            echo "reason=${REASON:-达到上限 $MAX_DIRS}"
-            echo "dirs_backfilled=${DIRS} max_dirs=${MAX_DIRS} pages=${IDX} empty_pages=${EMPTY_PAGES}"
-            echo "graph_err_seen=${ERR_SEEN} gap=${GAP} par=${PAR}/${PAR_BUSY}"
-            echo "items_with_path=${WITH_PATH} items_no_path=${NO_PATH} items_scanned=${IDX}"
-            # 拿得到 Path 的条目按前两级目录的分布（最多 8 项，只进这个私有文件）
-            for k in "${!SEG2[@]}"; do printf '%s %s\n' "${SEG2[$k]}" "$k"; done \
-              | sort -rn | head -8 | sed 's/^/seg2 /'
-            echo "dirs_cached=$(curl -s -m 5 "$LK_HOST/stats" 2>/dev/null | jq -r '.dirs_cached // 0')"
-          } > /tmp/odwarm-status.txt 2>/dev/null || true
+          write_status "${REASON:-达到上限 $MAX_DIRS}"
           wait
           OW_EOF
           T_START=$(date +%s)   # 供脚本内进度行读取（export 让 nohup 子进程可见）
@@ -2547,6 +2656,19 @@ jobs:
               else
                 echo "::warning::收尾增量备份失败（关键数据本轮未落云端）"
                 echo "增量失败" > /tmp/emby-backup-result
+              fi
+
+              # ①b 海报原图最终归档（可再生成，优先级最低）：排在核心增量之后，
+              #    剩余预算不足 15 分钟就跳过——原图丢了 Emby 会重新下载，绝不能
+              #    为它把整个 step 拖向 6h 上限（历史事故：备份被 TERM、通知 skipped）。
+              #    flock 与运行期的定时归档互斥，不会叠罗汉。
+              ELAPSED=$(run_elapsed_seconds)
+              IMG_LEFT=$(( ${EMBY_JOB_BUDGET:-20400} - ELAPSED - ${EMBY_IMAGE_SYNC_BUDGET:-900} ))
+              if [ -x /opt/emby_incbak.sh ] && [ "$IMG_LEFT" -ge 0 ] \
+                 && bash /opt/emby_incbak.sh images 900; then
+                echo "✅ 海报原图已最终归档（剩余预算 $((IMG_LEFT / 60)) 分钟）"
+              else
+                echo "⏭️ 海报原图归档跳过或失败（剩余预算 $((IMG_LEFT / 60)) 分钟）——原图可由 Emby 重新生成，不影响播放"
               fi
 
               # ② 全量打包（含图片缓存）：只在剩余预算够的时候做。
