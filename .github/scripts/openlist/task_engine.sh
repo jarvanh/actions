@@ -13,14 +13,14 @@
 # 依赖环境变量:
 #   RCLONE_SYNC_TASK_FLAGS          — sync_task 特有 rclone 参数（在 rclone_flags.sh 中定义；
 #                                     已移除全部 --delete-*，目标端只增不减）
-#   SYNC_SPLIT_THRESHOLD_BYTES      — auto-split 阈值（默认 50GB）
+#   SYNC_SPLIT_THRESHOLD_BYTES      — 拆分/批次阈值（workflow 已设 20GB；脚本兜底默认 50GB）
 #   OPENLIST_TASK_ROTATION          — 同步对轮转开关（=0 关闭，见下方说明）
 #   ROTATION_MAX_CONSECUTIVE_ATTEMPTS — 轮转阀门上限（默认 8）
 #   OPENLIST_FIX_TEST_MODE / OPENLIST_MISSING_FIX_MAX / OPENLIST_BATCH_CONSOLIDATE 等
 #   TASK_PREVIEW_ONLY / TASK_REGISTER_ONLY — 预览/仅注册 pass 标记（由 workflow 设置）
 
 # 常量定义
-readonly DEFAULT_SPLIT_THRESHOLD_BYTES="${SYNC_SPLIT_THRESHOLD_BYTES:-50000000000}" # 50GB 自动拆分阈值
+readonly DEFAULT_SPLIT_THRESHOLD_BYTES="${SYNC_SPLIT_THRESHOLD_BYTES:-50000000000}" # 兜底 50GB；workflow 已设 20GB（拆分/批次统一阈值）
 
 # ===== 同步任务清单（单点定义，增减任务只需在此添加/删除一行）=====
 # 格式: "id|源端|目标端|任务名|附加参数"
@@ -568,9 +568,16 @@ _preview_register() {
   # 显示名: 源端 → 目标端完整路径；附源端大小提示（add_preview_pair 刚算过，缓存命中）
   local _task_id _src_bytes _size_hint
   _task_id=$(_derive_task_id "$task_name" "$dest_path")
-  _src_bytes=$(_get_source_size_with_excludes "$source_path" "${extra_args[@]}" | awk '{print $1}')
+  # 仅注册模式跳过源端列举: 该结果只用于面板"源端 X GB"展示，零控制流依赖，
+  # 而对大源（925GiB 级）做一次全量递归列举要 7-9min，16 对就是 31min/轮
+  # （run 34826097133 实测，占轮次 ~10%）—— skip_preview 提速的本意就是省掉这类
+  # 非传输开销，不能在注册阶段又花回去。预览模式（skip_preview=false）保留:
+  # add_preview_pair 刚填过 PREVIEW_SRC_LIST_CACHE，此处是零成本缓存命中。
   _size_hint=""
-  [[ "$_src_bytes" =~ ^[0-9]+$ ]] && [ "$_src_bytes" -gt 0 ] && _size_hint=$(format_bytes "$_src_bytes")
+  if [ "${TASK_REGISTER_ONLY:-0}" != "1" ]; then
+    _src_bytes=$(_get_source_size_with_excludes "$source_path" "${extra_args[@]}" | awk '{print $1}')
+    [[ "$_src_bytes" =~ ^[0-9]+$ ]] && [ "$_src_bytes" -gt 0 ] && _size_hint=$(format_bytes "$_src_bytes")
+  fi
   progress_register_task "$_task_id" "${source_path} → ${dest_path}" "$_size_hint"
 }
 
@@ -837,7 +844,7 @@ _sync_task_impl() {
 
   # 按 rclone 远端类型分路由（整合自 task0 专项验证结论）:
   #   openlist:* 目标（wopan176Crypt/baidupanCrypt/wopan175/aliyundriveCrypt 等全部
-  #   OpenList 挂载盘）: 批次阈值 5GiB（可 OPENLIST_BATCH_BYTES 覆盖）、
+  #   OpenList 挂载盘）: 拆分/批次阈值 20GB（workflow SYNC_SPLIT_THRESHOLD_BYTES）、
   #   并发 transfers=OPENLIST_TRANSFERS（默认 4，与初始 sync 同口径；
   #   提高并发的前提是重试给足——423 mkParentDir 竞争靠 retries 兜过，见 rclone_flags.sh）
   #   非 openlist 目标: 阈值 20GB、并发 transfers=RCLONE_TRANSFERS（默认 2）
@@ -900,13 +907,12 @@ _sync_task_impl() {
     return "$_rc"
   fi
 
-  # 根据阈值判断是否拆分: openlist 系目标用独立阈值（默认 5GiB），其他沿用 env
-  local threshold
-  if [[ "$dest_path" == openlist:* ]]; then
-    threshold="${OPENLIST_BATCH_BYTES:-5368709120}"
-  else
-    threshold="${SYNC_SPLIT_THRESHOLD_BYTES:-$DEFAULT_SPLIT_THRESHOLD_BYTES}"
-  fi
+  # 拆分/批次阈值统一 20GB（2026-09-14 用户指定）: 子目录拆分与文件批次同档，
+  # 避免 >5GiB 的小目录被逐层下钻（每层重新列举/truth-check 重启/写 marker 的
+  # 固定开销占一轮比重过高，见计划 §11.12 静默间隔分析）。
+  # 副作用（已确认可接受）: 拆分/批次单元变大 ⇒ 巩固与进度粒度变粗，
+  # direct 路径同样有 truth-check/修复管线兜底，正确性不受影响。
+  local threshold="${SYNC_SPLIT_THRESHOLD_BYTES:-$DEFAULT_SPLIT_THRESHOLD_BYTES}"
 
   # 检查源端大小
   local source_size_bytes=0
@@ -1682,12 +1688,9 @@ sync_by_file_batches() {
     esac
   fi
 
-  local threshold
-  if [[ "$dest_path" == openlist:* ]]; then
-    threshold="${OPENLIST_BATCH_BYTES:-5368709120}"
-  else
-    threshold="${SYNC_SPLIT_THRESHOLD_BYTES:-$DEFAULT_SPLIT_THRESHOLD_BYTES}"
-  fi
+  # 批次阈值与子目录拆分阈值统一 20GB（用户指定）: 批次变大 ⇒ 批次间巩固
+  # （含容器重启）同比例减少，也是提速项
+  local threshold="${SYNC_SPLIT_THRESHOLD_BYTES:-$DEFAULT_SPLIT_THRESHOLD_BYTES}"
   local batch_dir="/tmp/file_batches_${task_name}"
   mkdir -p "$batch_dir"
 

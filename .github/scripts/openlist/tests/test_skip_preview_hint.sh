@@ -229,6 +229,34 @@ sync_task "onedrive:0" "openlist:d/0" "task0" --auto-split >/dev/null 2>&1
   || bad "S10b: [$_CAP_SKIP_DAYS]"
 rm -rf "$_S10_DIR"
 
+# ===== S12: 仅注册模式跳过源端列举（31min/轮 的固定开销）=====
+# 背景: 注册阶段算"源端 X GB"要对源端做**全量递归列举**（大源 925GiB 单次 7-9min，
+# 16 对 31min，run 34826097133 实测占轮次 ~10%），而该结果只用于面板展示、
+# 零控制流依赖 —— skip_preview 提速的本意就是省这类非传输开销。
+_S12_DIR="$(mktemp -d)"
+# 计数落文件: _get_source_size_with_excludes 在命令替换 $(...|awk) 的子 shell 里跑，
+# 变量自增不会回写父 shell（与 test_preview_diff 的 lsjson 计数同款手法）
+_get_source_size_with_excludes() {
+  echo call >> "$_S12_DIR/size_calls"
+  echo "12345 3"
+}
+progress_register_task() { :; }
+_derive_task_id() { echo "t12"; }
+add_preview_pair() { :; }
+# S10 给 _preview_register 打过 stub，这里要恢复真函数（S12 测的就是真函数的分支）
+unset -f _preview_register 2>/dev/null || true
+source "$_REPO_ROOT/.github/scripts/openlist/task_engine.sh" 2>/dev/null || true
+TASK_REGISTER_ONLY=1
+_preview_register "t12" "onedrive:x" "openlist:wopan175/x" >/dev/null 2>&1
+[ ! -s "$_S12_DIR/size_calls" ] && ok "S12a 仅注册模式不触发源端列举" \
+  || bad "S12a: 列举 $(wc -l < "$_S12_DIR/size_calls") 次"
+TASK_REGISTER_ONLY=0
+_preview_register "t12b" "onedrive:x" "openlist:wopan175/x" >/dev/null 2>&1
+[ "$(wc -l < "$_S12_DIR/size_calls" | tr -d ' ')" = "1" ] \
+  && ok "S12b 预览模式保留源端大小（零成本缓存命中）" || bad "S12b: 非一次"
+rm -rf "$_S12_DIR"
+TASK_REGISTER_ONLY=1
+
 echo "-----"
 echo "PASS=$PASS FAIL=$FAIL"
 rm -f "$LSJSON_CALLS"
