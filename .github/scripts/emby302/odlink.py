@@ -84,7 +84,11 @@ DIR_CACHE_IN = os.environ.get("ODLINK_DIR_CACHE_IN",
 DIR_CACHE_OUT = os.environ.get("ODLINK_DIR_CACHE_OUT",
                                "/tmp/odlink-dir-cache.json")
 DIR_CACHE_SCHEMA = 1
-DIR_CACHE_MAX = int(os.environ.get("ODLINK_DIR_CACHE_MAX", "50000"))  # 条目上限，防膨胀
+# 条目上限（防膨胀）。取 12 万是因为回填推到全量 1837 个目录时约 10 万条
+# （800 目录实测 43,925 条 → 约 55 条/目录；800 目录的文件 10MB → 约 230B/条）。
+# 上限若低于实际条目数，落盘会按**插入顺序**丢最旧的，而最旧的恰好是最先回填的
+# 那批（按 DateCreated 倒序 = 最新入库、最可能被点开的内容），丢错方向。
+DIR_CACHE_MAX = int(os.environ.get("ODLINK_DIR_CACHE_MAX", "120000"))
 DIR_CACHE_DUMP_SEC = 600     # 定时落盘间隔（秒）
 
 # ge2o 用 Go 把 modified 当 time.Time 解析，空字符串会导致整个响应解析失败并回源中转，
