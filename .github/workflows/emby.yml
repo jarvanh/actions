@@ -2112,8 +2112,20 @@ jobs:
             # /tmp，这里顺带带上云，下一轮随快照恢复到 /var/lib/emby 后被装载——
             # 目录解析就不必每轮从零爬（冷解析 1.75s vs 热命中 0.29s）。
             # ⚠️ 必须在 chown 之后拷：这之前 STAGE 还归 root，runner 写不进去。
+            # ⚠️ 只在新快照**不比已恢复的那份少**时才覆盖：STAGE 里这份来自上面的
+            # rsync，就是本轮刚恢复出来的上轮缓存。若装载没成功（恢复没落地）或
+            # 落盘早于装载，/tmp 里的条目会远少于它——直接覆盖等于把跨轮传递链
+            # 自己掐断（odlink 侧也做了「未装载不落盘」的守卫，这里是第二道）。
             if [ -f /tmp/odlink-dir-cache.json ]; then
-              cp /tmp/odlink-dir-cache.json "$STAGE/odlink-dir-cache.json" 2>/dev/null || true
+              # 单行 jq：多行 python -c 会让 YAML 块标量的续行掉到第 1 列，直接把 workflow 写坏
+              dc_count() { jq -r '(.entries // {}) | length' "$1" 2>/dev/null || echo 0; }
+              NEW_N=$(dc_count /tmp/odlink-dir-cache.json)
+              OLD_N=$(dc_count "$STAGE/odlink-dir-cache.json")
+              if [ "${NEW_N:-0}" -ge "${OLD_N:-0}" ]; then
+                cp /tmp/odlink-dir-cache.json "$STAGE/odlink-dir-cache.json" 2>/dev/null || true
+              else
+                echo "dir_cache: 本轮快照 ${NEW_N} 条 < 已恢复 ${OLD_N} 条，保留云端更完整的那份"
+              fi
             fi
           }
 
