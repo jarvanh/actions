@@ -64,10 +64,18 @@ on:
           - "3"
           - "4"
       subdir_parallel:
-        description: "同步模式: auto-split 子目录并行数（默认 1 串行。>=2 时顶层子目录并行同步，对同一后端并发 PUT 翻倍——启用前先用调试模式观察一轮 object not found 率；递归层始终串行）"
+        # 默认 1 → 2（2026-09-14 提速）: 单个同步对的一条串行流实测只有
+        # ≈1.07 文件/s（0.93s/文件，与文件大小无关，是往返延迟主导），
+        # 10.1TB 靠一条流要按年算 —— 必须靠并发数把它摊开。
+        # 安全依据（同日诊断）: 并发本身可用，只要重试给足（423 mkdir 竞争靠
+        # --retries 3 兜过，已全局抬升）；且现在有 truth-check + F5 全拒熔断 +
+        # F6 跨轮熔断兜底，假成功会被当场暴露并熔断，不再是静默事故。
+        # 与 transfers 相乘: 2 × 4 = 同一后端 8 个并发 PUT。
+        # 若某轮出现 object not found / 假成功抬升，把本项降回 1 再看。
+        description: "同步模式: auto-split 子目录并行数（默认 2；与 transfers 相乘即为单后端并发 PUT 数。>=2 时顶层子目录并行同步，递归层始终串行。出现 object not found 或假成功抬升就降回 1）"
         required: false
         type: choice
-        default: "1"
+        default: "2"
         options:
           - "1"
           - "2"
@@ -205,7 +213,9 @@ jobs:
       OPENLIST_TRANSFERS: ${{ inputs.transfers || '4' }}
       OPENLIST_CHECKERS: "8"
       # auto-split 顶层子目录并行数（1=串行，行为与历史版本一致）
-      OPENLIST_SUBDIR_PARALLEL: ${{ inputs.subdir_parallel || '1' }}
+      # 兜底值必须与入参默认一致（2）: schedule 触发时 inputs.subdir_parallel
+      # 为空串，兜底留 1 会让定时轮退回串行，并发提速只在手动轮生效。
+      OPENLIST_SUBDIR_PARALLEL: ${{ inputs.subdir_parallel || '2' }}
     concurrency: openlist-singleton
     runs-on: ubuntu-latest
     # actions:write 供「自续触发」step 用 GITHUB_TOKEN dispatch 下一轮
