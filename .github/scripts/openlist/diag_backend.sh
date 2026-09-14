@@ -559,7 +559,9 @@ if docker restart "$CONTAINER" >/dev/null 2>&1; then
   # 窗口放大到 600s（默认，可配）: 上一版只等 60s 就放弃，得到的结论是
   # "不可见"，但给不出**到底多久可见** —— 而生产折叠校验的窗口（6×30s=3min）
   # 正需要这个数字来定。可见性是"延迟"不是"丢失"，必须量出延迟量级。
-  local _lsc_max="${OPENLIST_VISIBILITY_MAX:-600}"
+  # 注意: 本脚本是顶层脚本（不在函数内），此处不能用 local —— 实测踩到
+  # "local: can only be used in a function" 并使变量未绑定、整个探针块跳过
+  _lsc_max="${OPENLIST_VISIBILITY_MAX:-600}"
   while [ $(( $(date +%s) - _lsc_t0 )) -lt "$_lsc_max" ]; do
     sleep 5
     _lsc_i=$((_lsc_i + 1))
