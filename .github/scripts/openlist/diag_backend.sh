@@ -335,12 +335,57 @@ rclone purge "$TARGET/$BURST_DIR" --retries 1 --timeout "$PROBE_TIMEOUT" >/dev/n
   || say "   ⚠️ 探针目录未能清除: $TARGET/${BURST_DIR}（以 oldiag_ 前缀可辨识，不影响同步数据）"
 
 # ────────────────────────────────────────────────────────────
+sec "10 · 路径长度 / 深度探针（定位生产中 405 的路径特异性）"
+# 为什么补这一组（2026-09-14 生产取证驱动）:
+#   run 34779382573 里对 `wopan175/2/1024j/动漫本子/路人女主/已解压/(CSP6) [流石堂
+#   (流ひょうご)] 淫らな彼女達の作りかた (冴えない彼女の育てかた) [中国翻訳]/` 的写入
+#   恒定 405 `unchunked simple update failed`，而同一对里 1004 个文件在上一层目录
+#   正常落盘。前几组探针只测了「挂载根」和「根下一层短名子目录」，**没测深路径 +
+#   长祖先目录**，所以既不能证伪也不能证实"路径特异性"。这里做两组阶梯:
+#     长名阶梯: 父目录名 10/20/30/40/50/60 个中文字（密文更长）各写一个探针
+#     深度阶梯: d1/d2/d3/d4/d5 逐层加深（各层短名）各写一个探针
+#   判读: 长名阶梯在某档断 → 父目录名长阈值；深度阶梯在某层断 → 路径总长/深度阈值；
+#         两组全过 → 405 与路径长度/深度无关，得回去查文件名本身（密文名长度）。
+DEEP_DIR="$TARGET/oldiag_deep_$(date +%s)_$$"
+printf 'oldiag' > /tmp/ol_diag/pp 2>/dev/null || true
+LADDER_P=""
+for _n in 10 20 30 40 50 60; do
+  _nm=$(printf '测%.0s' $(seq 1 "$_n"))
+  _out=$(rclone copyto /tmp/ol_diag/pp "$DEEP_DIR/$_nm/probe.txt" \
+    --retries 1 --low-level-retries 1 --contimeout 20s --timeout "$PROBE_TIMEOUT" 2>&1)
+  if [ $? -eq 0 ]; then LADDER_P="$LADDER_P ${_n}字=OK"; else
+    LADDER_P="$LADDER_P ${_n}字=FAIL($(http_code_of "$_out"))"
+    say "   ▸ 父目录 ${_n} 字失败: $(printf '%s' "$_out" | grep -oE 'ERROR.*' | head -1)"
+  fi
+  sleep "$PROBE_GAP"
+done
+say "长名阶梯(父目录名):$LADDER_P"
+
+DEEP_R=""
+_DEEP_P="$DEEP_DIR"
+for _d in 1 2 3 4 5; do
+  _DEEP_P="$_DEEP_P/d$_d"
+  _out=$(rclone copyto /tmp/ol_diag/pp "$_DEEP_P/probe.txt" \
+    --retries 1 --low-level-retries 1 --contimeout 20s --timeout "$PROBE_TIMEOUT" 2>&1)
+  if [ $? -eq 0 ]; then DEEP_R="$DEEP_R d$_d=OK"; else
+    DEEP_R="$DEEP_R d$_d=FAIL($(http_code_of "$_out"))"
+    say "   ▸ 深度 $_d 失败: $(printf '%s' "$_out" | grep -oE 'ERROR.*' | head -1)"
+  fi
+  sleep "$PROBE_GAP"
+done
+say "深度阶梯(各层短名):$DEEP_R"
+rclone purge "$DEEP_DIR" --retries 1 --timeout "$PROBE_TIMEOUT" >/dev/null 2>&1 \
+  || say "   ⚠️ 路径探针目录未能清除: $DEEP_DIR（以 oldiag_ 前缀可辨识）"
+
+# ────────────────────────────────────────────────────────────
 sec "诊断结论"
 say "目标路径: $TARGET"
 say "短名写:   $short_result"
 say "名长阶梯:$LADDER"
 say "覆盖写:   $OVERWRITE"
 say "子目录写: $SUBDIR"
+say "父目录名长阶梯:${LADDER_P:-SKIPPED}"
+say "路径深度阶梯: ${DEEP_R:-SKIPPED}"
 say "持续写:   $BURST_RESULT"
 say "并发写:   ${CONC_RESULT:-SKIPPED}（transfers=4，三态见上）"
 say "容器日志 8005 命中: $(count_of '8005|rsp_code|rep_desc' "$CONTAINER_LOG") 行"
@@ -355,6 +400,10 @@ say "                                      修法应落在「同步中周期性�
 say "                                      而不是名长或登录令牌"
 say "  · 新目录并发 FAIL、已存在目录 OK   → 423 是**父目录 mkdir 竞争**，并发可用:"
 say "                                      生产侧先建目录或给足重试即可提 transfers"
+say "  · 父目录名长阶梯在某档断           → 父目录名长阈值成立（生产 405 的路径特异性），"
+say "                                      修法: 目录级折叠/短哈希目录（已实现，但要确认落盘）"
+say "  · 深度阶梯在某层断                 → 与路径总长/深度相关，修法同上"
+say "  · 两组阶梯全过                     → 405 与路径长度/深度无关，回到密文文件名长度假设"
 say "  · 新目录并发 FAIL、retries3 也 FAIL → 并发确实触发后端锁，transfers 保持 1"
 say "  · 全部 OK                          → 此刻后端完全可写（含并发），失败属时段性/外部条件"
 say ""
