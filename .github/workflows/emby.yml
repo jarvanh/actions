@@ -2603,6 +2603,10 @@ jobs:
           grep -aE '回填启动|回填完成|遍历完成|无更多条目|响应异常|退避|让路' \
             /opt/logs/odwarm.log 2>/dev/null | tail -n 12 || echo "(无 odwarm.log)"
           grep -aE '^目录回填 ' /opt/logs/odwarm.log 2>/dev/null | tail -n 3 || true
+          echo "--- img-restore.log（海报原图后台补回）---"
+          # 后台补回的成败只能从这份日志看：它不进核心快照、也不影响播放，
+          # 没有归档就等于"补没补成功"永远无人知晓
+          grep -aE '海报原图|补回|warning|ERROR' /opt/logs/img-restore.log 2>/dev/null | tail -n 6 || echo "(无 img-restore.log)"
           echo "--- warmup.log（字幕预热 + 四个均值）---"
           grep -aE '字幕预热|预热完成|均值' /opt/logs/warmup.log 2>/dev/null | tail -n 10 || echo "(无 warmup.log)"
       - name: backup emby data
