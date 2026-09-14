@@ -1308,20 +1308,32 @@ jobs:
           # （/opt/odlink-last.json 的 cached，60 秒内才算本次播放的），拿不到就按耗时
           # 兜底（热 3~6ms、冷 0.4~1.3s，阈值 EMBY_LINK_HOT_MS 默认 200ms 可分）；
           # 两者都取不到则留空——宁可不标，也不猜。
-          link_tag() { # $1=耗时（秒，小数或空）→ "（缓存命中）" / "（冷解析）" / 空
-            local f=/opt/odlink-last.json hot=${EMBY_LINK_HOT_MS:-200} cached=""
+          #
+          # 位置与同树其它括号说明一致：**紧跟被测量的对象、在冒号之前**（对照
+          # 「…Emby（预估值）：627 毫秒」「…读文件头（走挂载）：237 毫秒」）。
+          # $2 形态：p=独立括号（默认）→「取直链（缓存命中）：5 毫秒」；
+          #           i=并入既有括号（对象本身已有括号说明时，避免双括号）→
+          #             「拖动进度条（Emby → OneDrive 重取直链 · 缓存命中）：2.46 秒」
+          link_tag() { # $1=耗时（秒，小数或空）$2=形态 p|i → 标注串或空
+            local f=/opt/odlink-last.json hot=${EMBY_LINK_HOT_MS:-200} cached="" label=""
             # ⚠️ 不能用 `.cached // empty`：jq 的 // 把 false 当空值，冷解析会被漏标
             [ -f "$f" ] && cached=$(jq -r 'select((.ts // 0) > (now - 60) and (.cached != null)) | .cached' "$f" 2>/dev/null) || true
             case "$cached" in
-              true)  printf '（缓存命中）'; return 0;;
-              false) printf '（冷解析）';   return 0;;
+              true)  label="缓存命中";;
+              false) label="冷解析";;
             esac
-            case "$1" in ''|*[!0-9.]*) return 0;; esac
-            if [ "$(awk -v v="$1" -v h="$hot" 'BEGIN { print (v * 1000 < h) ? 1 : 0 }')" = "1" ]; then
-              printf '（缓存命中）'
-            else
-              printf '（冷解析）'
+            if [ -z "$label" ]; then
+              case "$1" in ''|*[!0-9.]*) return 0;; esac
+              if [ "$(awk -v v="$1" -v h="$hot" 'BEGIN { print (v * 1000 < h) ? 1 : 0 }')" = "1" ]; then
+                label="缓存命中"
+              else
+                label="冷解析"
+              fi
             fi
+            case "${2:-p}" in
+              i) printf ' · %s' "$label";;
+              *) printf '（%s）' "$label";;
+            esac
           }
 
           # Cloudflare 边缘机房代码 → 中文城市。代码是 IATA 机场码（iad=华盛顿杜勒斯、
@@ -1461,11 +1473,11 @@ jobs:
               waitline="${waitline}${wt} → Emby（预估值）：$(fmt_ms "${TUNNEL_TTFB}")"$'\n'
             fi
             [ -n "$prep" ] && waitline="${waitline}Emby → OneDrive 读文件头（走挂载）：$(fmt_ms "$prep")"$'\n'
-            [ -n "$dur" ]  && waitline="${waitline}Emby → OneDrive 取直链：$(fmt_ms "$dur")$(link_tag "$dur")"$'\n'
+            [ -n "$dur" ]  && waitline="${waitline}Emby → OneDrive 取直链$(link_tag "$dur")：$(fmt_ms "$dur")"$'\n'
             [ -n "${LINK_TTFB:-}" ] && \
               waitline="${waitline}你 → OneDrive 拉首字节（预估值）：$(fmt_ms "${LINK_TTFB}")"$'\n'
             [ -n "$sub" ]  && waitline="${waitline}Emby → OneDrive 抽字幕：$(fmt_ms "$sub")"$'\n'
-            [ -n "$seek" ] && waitline="${waitline}拖动进度条（Emby → OneDrive 重取直链）：$(fmt_ms "$seek")$(link_tag "$seek")"$'\n'
+            [ -n "$seek" ] && waitline="${waitline}拖动进度条（Emby → OneDrive 重取直链$(link_tag "$seek" i)）：$(fmt_ms "$seek")"$'\n'
             if [ -n "$waitline" ]; then
               # 同一棵树同时落日志：它此前只进 TG 私信，事后完全无法复核"上次起播为什么慢"。
               # 内容只有"谁在等什么 + 耗时"，无片名/路径/URL，进公开日志安全。
