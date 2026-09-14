@@ -84,11 +84,13 @@ DIR_CACHE_IN = os.environ.get("ODLINK_DIR_CACHE_IN",
 DIR_CACHE_OUT = os.environ.get("ODLINK_DIR_CACHE_OUT",
                                "/tmp/odlink-dir-cache.json")
 DIR_CACHE_SCHEMA = 1
-# 条目上限（防膨胀）。取 12 万是因为回填推到全量 1837 个目录时约 10 万条
-# （800 目录实测 43,925 条 → 约 55 条/目录；800 目录的文件 10MB → 约 230B/条）。
+# 条目上限（防膨胀）。全量回填 1837 个目录约 10 万条（800 目录实测 43,925 条
+# → 约 55 条/目录、约 230B/条），这里留一倍余量到 20 万。
 # 上限若低于实际条目数，落盘会按**插入顺序**丢最旧的，而最旧的恰好是最先回填的
-# 那批（按 DateCreated 倒序 = 最新入库、最可能被点开的内容），丢错方向。
-DIR_CACHE_MAX = int(os.environ.get("ODLINK_DIR_CACHE_MAX", "120000"))
+# 那批（按 DateCreated 倒序 = 最新入库、最可能被点开的内容），丢错方向——所以
+# 宁可给足余量：有了「内容不变不落盘」+ 快照侧 `cp -p`，稳态下这份文件根本不进
+# 上传量，上限给大的代价只剩文件体积与装载时的一次解析（20 万条约 46MB）。
+DIR_CACHE_MAX = int(os.environ.get("ODLINK_DIR_CACHE_MAX", "200000"))
 DIR_CACHE_DUMP_SEC = 600     # 定时落盘间隔（秒）
 
 # ge2o 用 Go 把 modified 当 time.Time 解析，空字符串会导致整个响应解析失败并回源中转，
@@ -310,6 +312,10 @@ class Resolver(object):
         self.dir_cache = {}     # "3/电影" -> (driveId, itemId, is_dir, modified)
         # dir_cache 无 TTL：本轮 run 内路径不会自己搬家，命中即用，减少 Graph 往返
         self._dir_loaded = False   # 上轮 dir_cache 是否已装载（延迟到首次解析）
+        # 内容自上次落盘以来是否变过。每轮启动的目录回填会把同样的条目再写一遍，
+        # 若无脑标脏，落盘就会每 10 分钟重写一份几十 MB 的文件、并让云端那份的
+        # mtime 每次都变（rclone 据此判断要不要重传）。见 _cache_set()/dump_dir_cache()。
+        self._dirty = False
         self.link_cache = {}    # "3/电影/x.mkv" -> (url, size, expire_ts, modified)
         # 计数器：供 /stats 与收尾 TG 通知汇总本轮 302 链路运行情况
         self.stats = {"get": 0, "list": 0, "link_ok": 0, "link_miss": 0,
@@ -362,6 +368,17 @@ class Resolver(object):
             with self._lock:
                 self._dir_loaded = True
 
+    def _cache_set(self, key, val):
+        """写 dir_cache 条目，只有**内容真的变了**才标脏。
+
+        每轮启动的目录回填会对同一个目录再列一次、把同样的子条目再写一遍；
+        若一律标脏，落盘就永远无法跳过（每 10 分钟重写一份几十 MB 的文件，
+        云端那份的 mtime 也跟着每次都变，rclone 每轮都要重传）。
+        """
+        if self.dir_cache.get(key) != val:
+            self.dir_cache[key] = val
+            self._dirty = True
+
     def dump_dir_cache(self):
         """落盘当前 dir_cache（定时 / 收到终止信号 / 退出前）。失败不影响服务。
 
@@ -370,14 +387,21 @@ class Resolver(object):
         （T+~840s），此刻内存里只有 bootstrap 写进去的 8 个顶层快捷方式。
         **不能**改成"先调 `_ensure_dir_cache()` 再落盘"：那会在 T+600 就把
         `_dir_loaded` 置真，反而把恢复完成后的真装载永久挡掉。
+
+        内容没变就不重写：文件 mtime 不变，emby_incbak.sh 用 cp -p 保持它，
+        rclone 比对 mtime 后直接跳过 → 稳态下这份文件不再进入每轮上传量。
         """
         try:
             with self._lock:
                 ready = self._dir_loaded
+                dirty = self._dirty
                 snapshot = dict(self.dir_cache) if ready else {}
             if not ready:
                 log("dir_cache 落盘跳过：尚未装载上轮缓存（备份恢复未完成），"
                     "不用不完整快照覆盖云端")
+                return
+            if not dirty and os.path.exists(DIR_CACHE_OUT):
+                log("dir_cache 落盘跳过：内容无变化（%d 条）" % len(snapshot))
                 return
             if len(snapshot) > DIR_CACHE_MAX:
                 # 超上限按插入顺序丢最旧的（dict 保序），防止文件无限膨胀
@@ -389,6 +413,8 @@ class Resolver(object):
                            "updated": int(time.time()),
                            "entries": {k: list(v) for k, v in snapshot.items()}}, f)
             os.replace(tmp, DIR_CACHE_OUT)
+            with self._lock:
+                self._dirty = False
             log("dir_cache 落盘：%d 条" % len(snapshot))
         except Exception as e:
             log("dir_cache 落盘失败（忽略）: %s" % type(e).__name__)
@@ -403,7 +429,8 @@ class Resolver(object):
         if not key:
             return
         with self._lock:
-            self.dir_cache.pop(key, None)
+            if self.dir_cache.pop(key, None) is not None:
+                self._dirty = True
             self.link_cache.pop(key, None)
 
     def bump(self, key, n=1):
@@ -451,8 +478,8 @@ class Resolver(object):
             iid = ri.get("id", "")
             if drive and iid:
                 shortcuts[name] = (drive, iid)
-                self.dir_cache[name] = (drive, iid, True,
-                                        ts(it.get("lastModifiedDateTime")))
+                self._cache_set(name, (drive, iid, True,
+                                       ts(it.get("lastModifiedDateTime"))))
 
         with self._lock:
             self.shortcuts = shortcuts
@@ -504,7 +531,7 @@ class Resolver(object):
                     if item_id:
                         self.bump("fast_path")
                         with self._lock:
-                            self.dir_cache[key] = (drive, item_id, is_dir, modified)
+                            self._cache_set(key, (drive, item_id, is_dir, modified))
                         return drive, item_id, is_dir, 1, None, modified
                 # 终点是快捷方式（remoteItem）时也走兜底：下钻逻辑对 remoteItem
                 # 的跨盘换算更完整，不值得为这个罕见场景复制一份
@@ -559,7 +586,7 @@ class Resolver(object):
             if not item_id:
                 return None, None, None, crossed, (st, "no-item-id"), modified
             with self._lock:
-                self.dir_cache[key] = (drive, item_id, is_dir, modified)
+                self._cache_set(key, (drive, item_id, is_dir, modified))
 
         return drive, item_id, is_dir, crossed, None, modified
 
@@ -621,7 +648,10 @@ class Resolver(object):
             url = body.get("@odata.nextLink", "")
         if new_cache:
             with self._lock:
-                self.dir_cache.update(new_cache)
+                # 逐条比对而非 update()：同样的子条目每轮都会被重新列一次，
+                # 只有内容真的变了才该标脏（否则落盘永远无法跳过）
+                for k, v in new_cache.items():
+                    self._cache_set(k, v)
         return items
 
 
