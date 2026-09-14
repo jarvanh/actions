@@ -116,8 +116,15 @@ CONFIG = {
     # 控制面**（`_TAIER_CTRL_SERVERS[0]`）——测的是「这个节点到底能不能跑泰尔」，而不是
     # 泛泛的连通性；探测 URL 可覆盖。判死只认 mihomo 的明确结论，机制出错一律 fail-open
     # （见 probe_node_alive）。
-    'TAIER_ALIVE_PROBE': (os.environ.get('TAIER_ALIVE_PROBE', '1').strip().lower()
-                          not in ('0', 'false', 'no', 'off')),
+    #
+    # ⚠️ **默认关闭（2026-09-14，真机验证后改）**：run 34859505000 里 27 个节点**全部**
+    # 探测失败，错误是 mihomo 的 `Resource not found`——不是「连不上」，而是**探测请求里的
+    # 节点名在 mihomo 里找不到**（名字对不上，多半是 mihomo 侧重名去重/改名）。于是前 8 个
+    # 节点被判死跳过，熔断到第 8 个才关掉探测，白白丢掉 8/27 ≈ 30% 的节点。
+    # 熔断兜住了大盘，但「宁可多烧 25 秒也不能误杀活节点」，所以在查清名字为什么对不上之前
+    # 默认关掉；`TAIER_ALIVE_PROBE=1` 可显式开启。
+    'TAIER_ALIVE_PROBE': (os.environ.get('TAIER_ALIVE_PROBE', '0').strip().lower()
+                          in ('1', 'true', 'yes', 'on')),
     'TAIER_ALIVE_PROBE_URL': ((os.environ.get('TAIER_ALIVE_PROBE_URL', '') or '').strip()
                               or _TAIER_CTRL_SERVERS[0]),
     'TAIER_ALIVE_PROBE_TIMEOUT_MS': int(os.environ.get('TAIER_ALIVE_PROBE_TIMEOUT_MS', '3000') or 3000),
@@ -761,6 +768,7 @@ def _run():
     _probe_guard_n = 8
     _probe_enabled = CONFIG['TAIER_ALIVE_PROBE']
     _probe_alive = 0
+    _probe_dead = 0
     _probe_dead_streak = 0
     for item in alive_items:
         # 判据放在**开下一个节点之前**：单节点 ≈ 25 秒，所以超发最多一个节点
@@ -781,6 +789,7 @@ def _run():
                 _probe_dead_streak = 0
             else:
                 _probe_dead_streak += 1
+                _probe_dead += 1
                 log_progress('taier_node_probe_failed', name=name, error=_perr,
                              url=CONFIG['TAIER_ALIVE_PROBE_URL'])
                 if _probe_dead_streak >= _probe_guard_n and _probe_alive == 0:
@@ -928,10 +937,12 @@ def _run():
     except Exception as e:
         log_progress('telegram_send_failed', error=str(e))
 
+    # ⚠️ probe_dead 必须是**真正探测过**的计数，不能用 `len(results) - probe_alive`——
+    # 那会把「熔断后压根没探测」的节点也算成「探测判死」（run 34859505000 里 27 个节点
+    # 只探测了 8 个，日志却报 probe_dead=27，误导事后分析）。探测关闭时两者都该是 0。
     log_progress('taier_speedtest_done', node_count=len(results), bypass_hits=bypass_hits,
                  aborted_due_to_runtime=aborted_due_to_runtime,
-                 probe_alive=_probe_alive, probe_dead=len(results) - _probe_alive
-                 if CONFIG['TAIER_ALIVE_PROBE'] else 0,
+                 probe_alive=_probe_alive, probe_dead=_probe_dead,
                  json_path=str(RESULT_JSON))
     # 全部节点都命中 bypass ⇒ 结果不可信，判失败便于在 Actions 上看见
     return 1 if (bypass_hits and bypass_hits >= max(1, len(results))) else 0
