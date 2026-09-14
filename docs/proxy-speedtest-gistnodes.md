@@ -99,13 +99,22 @@ GET 即可（secret Gist 的 raw URL 无需鉴权——不可猜的 URL 本身�
 一套来测速，撞点会互相抢节点带宽、读数彼此污染。仍只排在北京 05:00–20:00：夜间 runner
 排队 + 出口拥塞会让测速读数失真。
 
-**怎么扛搜索页 429。** 限流是**短窗口突发型**：实测被限后隔 3 秒再请求就恢复 200，
-但它同时也是**唯一**的发现入口——`github.com/search?type=gists` 是登录墙（0 个结果块），
-带 token 请求搜索页也没有特殊配额（响应 etag 差异只是页面动态内容）。所以策略是：
-页间固定间隔（`GIST_NODES_PAGE_DELAY`，默认 3 秒）+ 随机抖动；单页失败按
-`GIST_NODES_BACKOFF_BASE` 指数退避（5/10/20/40 秒）+ 抖动，重试 `GIST_NODES_RETRIES`
-次；**重试用尽仍 429 时只跳过本页、继续下一页**，不把整个关键词判死——否则一次突发限流
-就会静默丢掉整类节点。实测「2 秒固定间隔连翻十几页必被限」，抖动 + 指数退避能自己错开。
+**怎么扛搜索页 429。** 先纠正一个容易想错的前提：搜索页的 429 **不是「封禁一段时间」，
+而是「当前窗口内按请求随机拒」**——实测连打 12 次得到 `429,200,200,429,429,200,...`，
+同一个 URL 上一秒被拒、下一秒就成功。它同时也是**唯一**的发现入口
+（`github.com/search?type=gists` 是登录墙，带 token 请求搜索页也没有特殊配额）。
+据此分四层应对：
+
+| 层 | 机制 | 作用 |
+|---|---|---|
+| 1 | `SearchPacer`：页间间隔从 `GIST_NODES_PAGE_DELAY`（默认 3 秒）起，**每被限流一次翻倍**，成功一次折半回落，封顶 `GIST_NODES_PACING_CEILING`（默认 60 秒） | 被限时自动慢下来、恢复后自动提速；跨轮共用同一个实例（限流按出口 IP，是全局状态） |
+| 2 | 单页重试 `GIST_NODES_RETRIES`（默认 4）次，退避 `GIST_NODES_BACKOFF_BASE` 指数增长（5/10/20/40 秒）+ 抖动 | 随机限流下重试命中率很高 |
+| 3 | **补一轮**：本批被限流跳过的页，批末立刻再试一次 | 调用方下一轮会把 `page_from` 翻过去，不补这一页的结果就永远丢了 |
+| 4 | 两轮都失败的页记进 `gist_nodes_search_page_dropped` | 不静默丢：日志能看出丢了哪几页 |
+
+**`Retry-After` 只记不用**：429 响应确实带这个头，但实测值**恒为 `3600`**，而紧接着的
+下一个请求就 200——它是静态默认值，不是真实建议。照它睡 1 小时会让 job 直接超时，
+所以退避一律走自己的指数曲线，头里的值只打进日志（`retry_after` 字段）作诊断。
 
 **并发。** 编排自己有 workflow 级 `proxy-speedtest-gistnodes-singleton`；被复用的测速工作流沿用它们
 各自的 job 级 singleton。**不要**在 caller job 上再加被调工作流的同名 group——GitHub 文档明确警告
@@ -153,7 +162,8 @@ Gist 分工：`gitee` / `cdn` / `taier` 三套各自的 Gist 只装**它们定�
 | `GIST_NODES_TIMEOUT` | `30` | 单次 HTTP 超时（秒） |
 | `GIST_NODES_RETRIES` | `4` | 单页搜索失败（含 429）时的重试次数 |
 | `GIST_NODES_BACKOFF_BASE` | `5` | 重试退避基数（秒），按 5/10/20/40 指数增长 + 抖动 |
-| `GIST_NODES_PAGE_DELAY` | `3` | 搜索页翻页间隔（秒，另加 0–1 秒随机抖动；`0` = 不间隔） |
+| `GIST_NODES_PAGE_DELAY` | `3` | 搜索页翻页的**基础**间隔（秒，另加 0–1 秒随机抖动；`0` = 不间隔） |
+| `GIST_NODES_PACING_CEILING` | `60` | 被限流时间隔自动拉长的上限（秒） |
 | `GIST_NODES_WORKERS` | `8` | 并发取 Gist 的线程数 |
 | `SUB_STORE_BACKEND_URL` | `http://127.0.0.1:3001` | Sub-Store 后端地址 |
 | `SUB_STORE_TIMEOUT` | `300` | 调用 Sub-Store 的超时（秒） |
@@ -174,7 +184,7 @@ dispatch 入参 `queries` / `max_nodes` / `test_nodes` / `target_subs` / `max_ag
 | 现象 | 看哪里 |
 |---|---|
 | 抓取阶段失败 | 日志里 `gist_nodes_*` 结构化行；`gist_nodes_search_empty` = 某关键词整页没解析出结果 |
-| 搜索页 429 | `gist_nodes_search_rate_limited`（重试中）/ `gist_nodes_search_page_skipped`（放弃本页、继续下一页）。限流是**短窗口突发型**，重试退避 + 页间间隔就能过；`gist_nodes_search_skipped_total` 汇总一轮跳了多少页。**它是「一轮能抓多少」的主要瓶颈**——`GIST_NODES_TARGET_SUBS` 是目标不是保证，被限流时可能只凑到几十个 |
+| 搜索页 429 | `gist_nodes_search_rate_limited`（含 `retry_after` 字段，只作诊断）/ `gist_nodes_search_deferred_total`（本批被限流跳过的页数 + `recovered` 补回来几个）/ `gist_nodes_search_page_dropped`（两轮都没捞回来，会列出 `ss://#3` 这样的具体页）。`gist_nodes_gather_round` 每轮打一次 `page_delay`，能直接看出节流器把间隔拉到了多少。**它是「一轮能抓多少」的主要瓶颈**——`GIST_NODES_TARGET_SUBS` 是目标不是保证 |
 | 某个关键词没产出 | `gist_nodes_search_stale_stop` = 整页超龄（该关键词到头）；`gist_nodes_search_empty` 已不再单独打点，末页由 `gist_nodes_gather_round` 的 `active` 计数下降体现 |
 | 去重没生效 | `gist_nodes_dedupe_no_effect`（解析数 ≥ 去重后数）。Sub-Store 对**未知算子只记日志不报错**，先查 `process` 里的算子名拼写 |
 | 节点数比预期少 | 先看 `non_sub_files`（判据挡掉了多少）与 `over_quota`（配额挡掉了多少），再看限量 |

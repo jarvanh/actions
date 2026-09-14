@@ -49,7 +49,9 @@ Sub-Store 接口（读 backend/src/restful/*.js 得到，全部是无需鉴权�
   GIST_NODES_TIMEOUT       单次 HTTP 超时秒数（默认 30）
   GIST_NODES_RETRIES       单页搜索失败（含 429）时的重试次数（默认 4）
   GIST_NODES_BACKOFF_BASE  重试退避基数秒数（默认 5，按 5/10/20/40 指数增长 + 抖动）
-  GIST_NODES_PAGE_DELAY    搜索页翻页之间的间隔秒数（默认 3，0 = 不间隔）
+  GIST_NODES_PAGE_DELAY    搜索页翻页之间的基础间隔秒数（默认 3，0 = 不间隔）
+  GIST_NODES_PACING_CEILING 被限流时间隔自动拉长的上限（默认 60 秒；间隔从 PAGE_DELAY
+                           起按被限流次数翻倍，成功后折半回落）
   GIST_NODES_WORKERS       并发取 Gist 的线程数（默认 8，1 = 串行）
   GIST_NODES_DRY_RUN       1 = 只抓取不发布（本地验证用）
   GIST_NODES_WORKDIR       产物目录（默认 ~/proxy-speedtest/gist-nodes）
@@ -268,14 +270,54 @@ def is_too_old(updated, now, max_age_hours):
     return (now - dt).total_seconds() > max_age_hours * 3600
 
 
-def fetch_search_page(query, page, sort, timeout, retries, backoff_base):
+class SearchPacer:
+    """页间节流器：被限流就慢下来，连续成功再逐步提速。
+
+    为什么不能只靠固定间隔：搜索页的 429 是**按请求随机触发**的 —— 实测连打 12 次得到
+    `429,200,200,429,429,200,...`（同一个 URL 上一秒被拒、下一秒就成功），说明它不是
+    「封禁一段时间」而是「当前窗口内按概率拒」。固定间隔适应不了这种状态：被限时仍按
+    原节奏打，只会持续踩限流。Pacer 把「连续被限」翻译成「间隔翻倍」，成功后再折半回落。
+    """
+
+    def __init__(self, base=0.0, ceiling=60.0):
+        self.base = base
+        self.ceiling = ceiling
+        self.extra = 0.0
+
+    @property
+    def delay(self):
+        return self.base + self.extra
+
+    def penalty(self):
+        """被限流一次：额外间隔从 base 起翻倍，封顶 ceiling。返回新间隔。"""
+        self.extra = min(self.ceiling, self.base if self.extra <= 0 else self.extra * 2)
+        return self.delay
+
+    def relief(self):
+        """成功一次：额外间隔折半回落（掉到 0.1 秒以下就归零）。返回新间隔。"""
+        self.extra = self.extra / 2 if self.extra > 0.1 else 0.0
+        return self.delay
+
+    def wait(self, jitter=1.0):
+        """按当前间隔等待（另加随机抖动）。返回实际等待秒数。"""
+        delay = self.delay
+        if delay > 0:
+            time.sleep(delay + random.uniform(0, jitter))
+        return delay
+
+
+def fetch_search_page(query, page, sort, timeout, retries, backoff_base, pacer=None):
     """取一页搜索结果，返回 (items, status)。
 
     status 三态，调用方据此决定「继续翻下一页」还是「这个关键词到头了」：
       ok           解析到结果块；
       empty        正常返回但一块都没有 —— 该关键词翻到末页了；
-      rate_limited 重试用尽仍是 429。**限流是短窗口突发型**：实测被限后隔 3 秒再请求
-                   就恢复 200，所以这不该判成「关键词到头」，跳过本页继续下一页更划算。
+      rate_limited 重试用尽仍是 429。限流是按请求随机的，所以这不该判成「关键词到头」；
+                   调用方会先把本页记下来，等一轮再补。
+
+    **`Retry-After` 只记不用**：429 响应确实带这个头，但实测值恒为 `3600`，而紧接着的
+    下一个请求就 200 —— 它是个静态默认值，不是真实建议。照它睡 1 小时会让 job 直接超时，
+    所以退避一律走我们自己的指数曲线，把头里的值打进日志只作诊断。
     """
     status = 'empty'
     for attempt in range(1, max(1, retries) + 1):
@@ -285,8 +327,15 @@ def fetch_search_page(query, page, sort, timeout, retries, backoff_base):
         except urllib.error.HTTPError as e:
             if e.code == 429:
                 status = 'rate_limited'
+                hint = ''
+                try:
+                    hint = (e.headers.get('Retry-After') or '').strip()
+                except Exception:
+                    hint = ''
                 log_progress('gist_nodes_search_rate_limited', query=query, page=page,
-                             attempt=attempt, retries=retries)
+                             attempt=attempt, retries=retries, retry_after=hint)
+                if pacer is not None:
+                    pacer.penalty()
             else:
                 log_progress('gist_nodes_search_failed', query=query, page=page,
                              attempt=attempt, error=str(e))
@@ -301,6 +350,8 @@ def fetch_search_page(query, page, sort, timeout, retries, backoff_base):
             if attempt < retries:
                 time.sleep(backoff_base * (2 ** (attempt - 1)) + random.uniform(0, 1.5))
             continue
+        if pacer is not None:
+            pacer.relief()
         items = parse_search_results(body)
         return items, ('ok' if items else 'empty')
     return [], status
@@ -308,17 +359,17 @@ def fetch_search_page(query, page, sort, timeout, retries, backoff_base):
 
 def search_gists(queries, pages, sort, timeout, retries=3,
                  max_age_hours=DEFAULT_MAX_AGE_HOURS, page_from=1,
-                 page_delay=0, backoff_base=5, seen=None):
-    """翻 `[page_from, page_from+pages)` 这几页，返回 (candidates, exhausted)。
+                 page_delay=0, backoff_base=5, seen=None, pacer=None):
+    """翻 `[page_from, page_from+pages)` 这几页，返回 (candidates, exhausted, dropped)。
 
     exhausted = 该关键词已经到头（正常返回却没有任何结果块，或整页全部超龄）。
-    被限流不算到头 —— 短窗口限流过后还能继续翻，所以只跳过本页。
+    被限流不算到头 —— 限流是按请求随机的，所以本批内先补一轮，仍失败才记进 dropped。
 
-    两道收口：
+    三道收口：
       * max_age_hours：丢掉超龄条目；**整页全部超龄就停止该关键词翻页**——排序是
         `s=updated`（降序），这一页都旧了，后面的页只会更旧，继续翻纯属白挨 429。
-      * page_delay：页与页之间的间隔（另加随机抖动）。搜索页对高频请求会 429，
-        退避只治已经发生的 429，间隔是从源头降低它发生的概率。
+      * pacer / page_delay：页与页之间的间隔，被限流时由 pacer 自动拉长、成功后回落。
+      * 补一轮：本批被限流跳过的页立刻重试一次，只有两轮都失败的才进 dropped。
 
     `seen` 跨轮传入，保证同一个 Gist 不会被两轮重复解析。
     """
@@ -326,44 +377,76 @@ def search_gists(queries, pages, sort, timeout, retries=3,
     results = []
     exhausted = set()
     seen = seen if seen is not None else set()
+    # 不传 pacer 时按 page_delay 就地造一个（page_delay=0 → 间隔恒 0，等于不等）。
+    if pacer is None:
+        pacer = SearchPacer(base=page_delay, ceiling=page_delay * 8)
     stale_total = 0
-    skipped = 0
+    skipped = []
+
+    def scan(query, page):
+        """取一页并过滤，返回 (fresh 数, stale 数, status)；fresh 已并入 results。"""
+        items, status = fetch_search_page(query, page, sort, timeout, retries,
+                                          backoff_base, pacer)
+        if status != 'ok':
+            return 0, 0, status
+        fresh = stale = 0
+        for item in items:
+            if item['id'] in seen:
+                continue
+            if is_too_old(item['updated'], now, max_age_hours):
+                stale += 1
+                continue
+            seen.add(item['id'])
+            item['query'] = query
+            results.append(item)
+            fresh += 1
+        return fresh, stale, status
+
     for query in queries:
         for page in range(page_from, page_from + max(1, pages)):
-            items, status = fetch_search_page(query, page, sort, timeout, retries, backoff_base)
+            fresh, stale, status = scan(query, page)
             if status == 'empty':
                 exhausted.add(query)
                 break
             if status == 'rate_limited':
-                skipped += 1
-                log_progress('gist_nodes_search_page_skipped', query=query, page=page)
+                skipped.append((query, page))
                 continue
-            page_fresh = 0
-            page_stale = 0
-            for item in items:
-                if item['id'] in seen:
-                    continue
-                if is_too_old(item['updated'], now, max_age_hours):
-                    page_stale += 1
-                    continue
-                seen.add(item['id'])
-                item['query'] = query
-                results.append(item)
-                page_fresh += 1
-            stale_total += page_stale
-            if page_stale and not page_fresh:
+            stale_total += stale
+            if stale and not fresh:
                 log_progress('gist_nodes_search_stale_stop', query=query, page=page,
-                             stale=page_stale, max_age_hours=max_age_hours)
+                             stale=stale, max_age_hours=max_age_hours)
                 exhausted.add(query)
                 break
-            if page_delay:
-                time.sleep(page_delay + random.uniform(0, 1.0))
+            pacer.wait()
+
+    # 补一轮：本批被限流跳过的页再试一次。
+    # 为什么必须有这一轮：429 是按请求随机的（同一 URL 上一秒被拒、下一秒就成功），
+    # 隔一会儿再打命中率很高；而调用方下一轮会把 page_from 翻过去，不补的话这一页的
+    # 10 条结果就永远丢了 —— 实测那种「跳过就算了」的写法每轮会静默丢几页。
+    dropped = []
+    for query, page in skipped:
+        pacer.wait()
+        fresh, stale, status = scan(query, page)
+        if status == 'rate_limited':
+            dropped.append((query, page))
+            continue
+        if status == 'empty':
+            exhausted.add(query)
+            continue
+        stale_total += stale
+
     if stale_total:
         log_progress('gist_nodes_search_age_filtered', stale=stale_total,
                      max_age_hours=max_age_hours)
     if skipped:
-        log_progress('gist_nodes_search_skipped_total', skipped=skipped)
-    return results, exhausted
+        # 字段名避开 'skipped'：共享层 log_progress 的 _redact_value 按**子串**匹配敏感名，
+        # 'ip' 是其中之一，任何含 'skipped' 的键都会被整条打成 ***（实测踩过）。
+        log_progress('gist_nodes_search_deferred_total', deferred=len(skipped),
+                     recovered=len(skipped) - len(dropped))
+    if dropped:
+        log_progress('gist_nodes_search_page_dropped', pages=len(dropped),
+                     targets=[f'{q}#{pg}' for q, pg in dropped])
+    return results, exhausted, dropped
 
 
 def looks_like_subscription(text):
@@ -570,6 +653,7 @@ def main():
     retries = max(1, env_int(env, 'GIST_NODES_RETRIES', 4))
     page_delay = max(0, env_int(env, 'GIST_NODES_PAGE_DELAY', 3))
     backoff_base = max(1, env_int(env, 'GIST_NODES_BACKOFF_BASE', 5))
+    pacing_ceiling = max(0, env_int(env, 'GIST_NODES_PACING_CEILING', 60))
     workers = max(1, env_int(env, 'GIST_NODES_WORKERS', 8))
     dry_run = env_str(env, 'GIST_NODES_DRY_RUN', '0').lower() not in ('0', 'false', 'no')
     ss_base = env_str(env, 'SUB_STORE_BACKEND_URL', DEFAULT_SUB_STORE)
@@ -595,27 +679,33 @@ def main():
     files = []
     stats = dict.fromkeys(STAT_KEYS, 0)
     candidates_total = 0
+    dropped_total = 0
+    # 跨轮共用一个 pacer：限流状态是全局的（按出口 IP），不该每轮从零开始学。
+    pacer = SearchPacer(base=page_delay, ceiling=pacing_ceiling)
     page_from = 1
     while active and page_from <= max_pages:
-        cands, exhausted = search_gists(active, pages_per_round, sort, timeout, retries,
-                                        max_age_hours, page_from=page_from,
-                                        page_delay=page_delay, backoff_base=backoff_base,
-                                        seen=seen_ids)
+        cands, exhausted, dropped = search_gists(
+            active, pages_per_round, sort, timeout, retries, max_age_hours,
+            page_from=page_from, page_delay=page_delay, backoff_base=backoff_base,
+            seen=seen_ids, pacer=pacer)
         active = [q for q in active if q not in exhausted]
         candidates_total += len(cands)
+        dropped_total += len(dropped)
         if cands:
             new_files, local = collect_all(cands, token, timeout, max_file_bytes, workers)
             files.extend(new_files)
             for k in STAT_KEYS:
                 stats[k] += local[k]
         log_progress('gist_nodes_gather_round', page_from=page_from, active=len(active),
-                     candidates=len(cands), files=len(files), target=target_subs)
+                     candidates=len(cands), files=len(files), target=target_subs,
+                     page_delay=round(pacer.delay, 1), dropped=dropped_total)
         if target_subs and len(files) >= target_subs:
             break
         page_from += pages_per_round
 
     log_progress('gist_nodes_sources', **stats, files=len(files),
-                 candidates=candidates_total, target=target_subs)
+                 candidates=candidates_total, target=target_subs,
+                 dropped_pages=dropped_total, final_page_delay=round(pacer.delay, 1))
     if not candidates_total:
         if max_age_hours:
             fail(f'没有解析出任何「最近 {max_age_hours} 小时内更新」的 Gist'
