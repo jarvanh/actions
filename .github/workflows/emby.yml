@@ -2146,6 +2146,11 @@ jobs:
             if [ -f /opt/logs/playlog.log ]; then
               cp /opt/logs/playlog.log "$STAGE/playlog.log" 2>/dev/null || true
             fi
+            # 回填状态（dirs_cached / 停止原因）：dir_cache 覆盖率是起播取链的
+            # 唯一大项，"填到哪了"不该只能靠取消轮才能看——同 playlog 一个路子。
+            if [ -f /tmp/odwarm-status.txt ]; then
+              cp /tmp/odwarm-status.txt "$STAGE/odwarm-status.txt" 2>/dev/null || true
+            fi
           }
 
           sync_up() {  # 用 copy 而非 sync：远端不会被"本轮快照缺失"误删（安全优先）
@@ -2289,7 +2294,7 @@ jobs:
             echo "目录回填 ${DIRS}/${MAX_DIRS}（并发 ${par}）累计 $(( $(date +%s) - T_START ))s $(date '+%T')"
             BATCH=()
           }
-          IDX=0; DIRS=0; BAD_ROUNDS=0; GAP=1; ERR_SEEN=$(stats_err)
+          IDX=0; DIRS=0; BAD_ROUNDS=0; EMPTY_PAGES=0; GAP=1; ERR_SEEN=$(stats_err)
           declare -A DSEEN=()
           echo "=== dir_cache 回填启动 上限 ${MAX_DIRS} 个目录 并发 ${PAR}（播放中 ${PAR_BUSY}）$(date '+%F %T')"
           while [ "$DIRS" -lt "$MAX_DIRS" ]; do
@@ -2301,14 +2306,33 @@ jobs:
               BAD_ROUNDS=$((BAD_ROUNDS + 1))
               echo "目录回填: 第 $IDX 条起响应异常（非 JSON）重试 $BAD_ROUNDS/3 $(date '+%T')"
               if [ "$BAD_ROUNDS" -ge 3 ]; then
-                echo "目录回填: 连续 3 次响应异常，提前结束（已回填 $DIRS 个目录）"
+                REASON="响应异常中断"; echo "目录回填: 连续 3 次响应异常，提前结束（已回填 $DIRS 个目录）"
                 break
               fi
               sleep 10; continue
             fi
             BAD_ROUNDS=0
+            # 终止判据必须看「本页有没有条目」，不能看「本页有没有解析出 Path」：
+            # 有些页整页都是没 Path 的条目（虚拟条目 / 剧集壳等），原写法把这种页
+            # 当成"翻到底了"直接 break——实测覆盖率就卡在 1851 个目录上不去，
+            # 夜里播的老片（排在 DateCreated 列表后段）目录 0 命中、每次首播都要
+            # 现走冷解析。这里改成：整页无条目才收工；有条目但无 Path 只跳过该页。
+            NITEMS=$(printf '%s' "$JSON" | jq -r '(.Items // []) | length' 2>/dev/null || echo 0)
+            TOTAL=$(printf '%s' "$JSON" | jq -r '.TotalRecordCount // 0' 2>/dev/null || echo 0)
+            case "$NITEMS" in ''|*[!0-9]*) NITEMS=0;; esac
+            case "$TOTAL"  in ''|*[!0-9]*) TOTAL=0;;  esac
+            if [ "$NITEMS" -eq 0 ]; then
+              REASON="遍历完成"; echo "目录回填: 第 $IDX 条起无更多条目，遍历完成（共 $DIRS 个目录）"
+              break
+            fi
             PATHS=$(printf '%s' "$JSON" | jq -r '.Items[]? | (.MediaSources[0].Path // .Path // empty)' 2>/dev/null)
-            [ -n "$PATHS" ] || { echo "目录回填: 第 $IDX 条起无更多条目，遍历完成"; break; }
+            if [ -z "$PATHS" ]; then
+              EMPTY_PAGES=$((EMPTY_PAGES + 1))
+              echo "目录回填: 第 $IDX 条起本页 ${NITEMS} 条无 Path，跳过该页（连续 ${EMPTY_PAGES}/5）$(date '+%T')"
+              [ "$EMPTY_PAGES" -lt 5 ] || { REASON="连续 5 页无 Path"; echo "目录回填: 连续 5 页无 Path，放弃（已回填 $DIRS 个目录）"; break; }
+            else
+              EMPTY_PAGES=0
+            fi
             while IFS= read -r P; do
               [ -n "$P" ] || continue
               D=$(dirname -- "$P")
@@ -2322,6 +2346,12 @@ jobs:
             done <<< "$PATHS"
             flush_batch   # 收尾：不满一批的剩余目录
             IDX=$((IDX + 200))
+            # 第二个终止判据：Emby 每条 Items 响应都带 TotalRecordCount，用它兜底，
+            # 免得个别页异常（假的分页游标）让循环空转到 MAX_DIRS。
+            if [ "$TOTAL" -gt 0 ] && [ "$IDX" -ge "$TOTAL" ]; then
+              REASON="遍历完 $TOTAL 条"; echo "目录回填: 已遍历全部 ${TOTAL} 条条目（共 $DIRS 个目录）"
+              break
+            fi
             # 限流退避：Graph 错误计数涨了就翻倍间隔，连续无新增再逐步收回
             NOW_ERR=$(stats_err)
             if [ "$NOW_ERR" -gt "$ERR_SEEN" ]; then
@@ -2341,6 +2371,16 @@ jobs:
             sleep "$SLEEP_GAP"
           done
           echo "=== dir_cache 回填完成: ${DIRS} 个目录 $(date '+%F %T')"
+          # 回填状态小文件（随增量快照上云）：以前"回填到底填到哪、为什么停"
+          # 只能等整轮收尾读归档，想提前看就得取消轮——这个文件让它最迟 25 分钟
+          # 就能从云端读到，和 playlog 一个路子。
+          {
+            echo "updated=$(date '+%F %T')"
+            echo "reason=${REASON:-达到上限 $MAX_DIRS}"
+            echo "dirs_backfilled=${DIRS} max_dirs=${MAX_DIRS} pages=${IDX} empty_pages=${EMPTY_PAGES}"
+            echo "graph_err_seen=${ERR_SEEN} gap=${GAP} par=${PAR}/${PAR_BUSY}"
+            echo "dirs_cached=$(curl -s -m 5 "$LK_HOST/stats" 2>/dev/null | jq -r '.dirs_cached // 0')"
+          } > /tmp/odwarm-status.txt 2>/dev/null || true
           wait
           OW_EOF
           T_START=$(date +%s)   # 供脚本内进度行读取（export 让 nohup 子进程可见）
