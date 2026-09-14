@@ -69,6 +69,11 @@ jobs:
     runs-on: ubuntu-latest
     # 30 分钟而不是 20：搜索页会 429，重试带退避（5s/10s × 3 次）会把单页拖到十几秒，
     # 十几页下来搜索阶段本身就可能吃掉好几分钟，再叠加取文与 Sub-Store 解析。
+    #
+    # ⚠️ 这个数字与脚本的 GIST_NODES_BUDGET_SECONDS（默认 900 = 15 分钟）是**成对的**，
+    # 改一个要回头看另一个。脚本自己按预算收摊、拿已抓到的文件继续产出；这里是最后兜底
+    # ——超时是硬取消，被取消时连抓到的文件也一起作废、下游三个测速 job 全 skipped。
+    # 2026-09-14 两次运行就是这么废掉的（抓取阶段空转到 30 分钟被取消）。
     timeout-minutes: 30
     outputs:
       engine: ${{ steps.engine.outputs.engine }}
