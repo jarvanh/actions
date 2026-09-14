@@ -251,7 +251,6 @@ BURST_FAIL_OUT=""
 if [ "${BURST_N:-0}" = "0" ]; then
   say "（DIAG_BURST_N=0，跳过持续写入探针）"
   BURST_RESULT="SKIPPED"
-  PARALLEL="SKIPPED"
 else
 say "连续写 ${BURST_N} 个小文件（目标 $TARGET/${BURST_DIR}）..."
 rclone mkdir "$TARGET/$BURST_DIR" >/dev/null 2>&1 || true
@@ -276,8 +275,13 @@ else
   say "$BURST_FAIL_OUT" | tail -3 | sed 's/^/   ▸ /' | tee -a "$REPORT"
   BURST_RESULT="FAIL@${BURST_FAIL_AT}"
 fi
+fi
 
-# 并发维度: 生产用 transfers=1 串行，但"并发 PUT"是另一条可能的限流触发路径
+# ────────────────────────────────────────────────────────────
+sec "9b · 并发写探针（transfers=4，三态判别）"
+# 与持续写解耦：持续写可以 DIAG_BURST_N=0 关掉，并发三态永远跑（它决定 transfers
+# 能不能提，是最关键的判据；此前误把它放在 burst 的 else 分支里，burst_n=0 会连它
+# 一起跳过——2026-09-14 实测踩到）。
 # 并发维度（细化，2026-09-14 第二轮诊断驱动）:
 #   首轮并发探针（transfers=4 / 20 文件 / 新目录）失败 7/20，错误是
 #   「Update mkParentDir failed: Locked: 423 Locked」——423 是 WebDAV 的资源锁，
@@ -328,8 +332,7 @@ esac
 
 # 清理（尽力）: 集中在一个子目录里，purge 一次即可，残留也便于辨识
 rclone purge "$TARGET/$BURST_DIR" --retries 1 --timeout "$PROBE_TIMEOUT" >/dev/null 2>&1 \
-  || say "   ⚠️ 持续写探针目录未能清除: $TARGET/${BURST_DIR}（以 oldiag_ 前缀可辨识，不影响同步数据）"
-fi
+  || say "   ⚠️ 探针目录未能清除: $TARGET/${BURST_DIR}（以 oldiag_ 前缀可辨识，不影响同步数据）"
 
 # ────────────────────────────────────────────────────────────
 sec "诊断结论"
