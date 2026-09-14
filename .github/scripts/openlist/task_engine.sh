@@ -284,7 +284,9 @@ run_all_tasks() {
       IFS='|' read -r _ _ _skip_dst _ _ <<< "$_e"
       _skip_root=$(_task_backend_root_of "$_skip_dst")
       if [ -n "${_BACKEND_DEAD_ROUND[$_skip_root]:-}" ]; then
-        echo "⏭ 同步对轮转: 第 $((idx + 1))/${n} 个同步对所属后端 ${_skip_root} 上轮判死（熔断剩余 $(( ( ${_BACKEND_DEAD_ROUND[$_skip_root]} + OPENLIST_BACKEND_DEAD_TTL - $(date +%s) ) / 60 )) 分钟），跳过让路"
+        # 文案不写"上轮": F6 触发源接线（F5 全拒同时置 SYNC_BACKEND_DEAD）落地后，
+        # 判死也可能发生在**同一轮**的批次巩固里，此时"上轮判死"与事实相反。
+        echo "⏭ 同步对轮转: 第 $((idx + 1))/${n} 个同步对所属后端 ${_skip_root} 已在熔断期内被判死（剩余 $(( ( ${_BACKEND_DEAD_ROUND[$_skip_root]} + OPENLIST_BACKEND_DEAD_TTL - $(date +%s) ) / 60 )) 分钟），跳过让路"
         [ "$rotation_enabled" -eq 1 ] && _rotation_save "$(( (idx + 1) % n ))" 0
         _rot_attempts=0
         continue
