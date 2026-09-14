@@ -2560,7 +2560,7 @@ jobs:
 
       - name: sleep
         run: |
-          # 保留时长由 EMBY_RUN_MINUTES 控制（默认 270；调试时可手填 8 分钟）。
+          # 保留时长由 EMBY_RUN_MINUTES 控制（默认 300 = 5 小时；调试时可手填 8 分钟）。
           # ⚠️ 加上启动恢复与收尾增量备份，总时长必须留在 6h 以内——超过就又是
           # "备份被 SIGTERM + 通知 skipped"。
           MIN="${EMBY_RUN_MINUTES:-300}"
