@@ -121,6 +121,26 @@ GET 即可（secret Gist 的 raw URL 无需鉴权——不可猜的 URL 本身�
 下一个请求就 200——它是静态默认值，不是真实建议。照它睡 1 小时会让 job 直接超时，
 所以退避一律走自己的指数曲线，头里的值只打进日志（`retry_after` 字段）作诊断。
 
+**为什么每个阶段都要有自己的墙钟预算，而 `timeout-minutes` 只是最后兜底。** 三段各有一个
+预算，都显著小于 job 的 30 分钟：
+
+| 段 | 预算 | 到点怎么办 |
+|---|---|---|
+| 抓取 | `GIST_NODES_BUDGET_SECONDS`（默认 900 秒） | 停翻页，拿已抓到的文件继续走产出 |
+| Sub-Store 投喂 | `SUB_STORE_BUDGET_SECONDS` 的**一半**（默认 150 秒） | 停投喂，拿已投喂的继续走产出 |
+| Sub-Store 产出 | 同上的**另一半**（默认 150 秒） | exit 1（建组合/取回省掉就没有产物） |
+
+于是最坏 `0.4（检出）+ 15（抓取）+ 5（Sub-Store）≈ 20.4 分钟 < 30`。
+**为什么不能只靠 `timeout-minutes`**：它是 GitHub 的**硬取消**，被取消时整个 job 的工作全废
+——抓取到的几十个订阅文件、Sub-Store 已投喂的订阅、以及下游三个测速 job（全部 `skipped`）。
+2026-09-14 有两次运行就是这么废掉的（抓取阶段空转到 30 分钟被取消）。所以天花板只当兜底，
+真正的收口放在每个阶段的预算里，并且**优先降级、其次才失败**。
+
+顺带一个教训：`timeout-minutes: 30` 当初是按「20 不够」反推的量级估计，**没有任何一次成功的
+分段耗时做支撑**（这条链路当时还没跑完整过）。「无界的阶段 + 拍出来的天花板」这个组合必然撞车
+——所以给阶段加预算的同时，也让脚本把每段的真实耗时打进日志（`gist_nodes_gather_stop` 的
+`elapsed` / `gist_nodes_substore_phase` 的 `elapsed`），下次调这几个数字就有依据了。
+
 **并发。** 编排自己有 workflow 级 `proxy-speedtest-gistnodes-singleton`；被复用的测速工作流沿用它们
 各自的 job 级 singleton。**不要**在 caller job 上再加被调工作流的同名 group——GitHub 文档明确警告
 caller 与 called 用同一个 group 值会互相影响：`cancel-in-progress: true` 时会把 caller 取消；
@@ -174,7 +194,8 @@ Gist 分工：`gitee` / `cdn` / `taier` 三套各自的 Gist 只装**它们定�
 | `GIST_NODES_PACING_CEILING` | `60` | 被限流时间隔自动拉长的上限（秒） |
 | `GIST_NODES_WORKERS` | `8` | 并发取 Gist 的线程数 |
 | `SUB_STORE_BACKEND_URL` | `http://127.0.0.1:3001` | Sub-Store 后端地址 |
-| `SUB_STORE_TIMEOUT` | `300` | 调用 Sub-Store 的超时（秒） |
+| `SUB_STORE_TIMEOUT` | `300` | **单次**调用 Sub-Store 的超时（秒）。**刻意保持不动**：没有真实的 Sub-Store 分段耗时，压小它只会误杀「合法但慢」的取回；这一段的总时长由下面那行负责 |
+| `SUB_STORE_BUDGET_SECONDS` | `300` | 整个 Sub-Store 阶段的**墙钟预算**（秒，`0` = 不限）。一半给投喂、一半留给产出 |
 | `SUB_STORE_COLLECTION` | `gist-nodes` | 组合订阅名前缀 |
 | `GIST_NODES_DRY_RUN` | `0` | `1` = 只抓取不发布（本地验证用） |
 
@@ -193,11 +214,22 @@ Sub-Store 产出与发布。为什么必须把这两者分开：job 超时是 Gi
 连已经抓到的几十个订阅文件也一起作废、下游三个测速 job 全 `skipped`，一次运行白跑；
 宁可少几个节点，也不要整轮报废。
 
+**Sub-Store 阶段的降级方向相反，要分两段看**（`SUB_STORE_BUDGET_SECONDS`）：
+
+| 段 | 预算耗尽时 | 为什么 |
+|---|---|---|
+| 投喂（逐个 `POST /api/subs`） | **停投喂，拿已投喂的继续走产出**（退出码 0） | 少几个订阅文件只是少几个节点，日志 `gist_nodes_push_budget_stop` 会给出截断计数 |
+| 建组合 / 取回（各一次调用） | **就地 exit 1** | 这两步省掉就完全没有产物，失败是对的——同下面「不如就地失败」 |
+
+不给产出留额度的话，投喂（全段唯一无界的部分）能把预算吃光，然后卡在建组合上 →
+「投喂成功却产不出订阅」，比少投喂几个更糟。所以预算**一半给投喂、一半留给产出**。
+
 ## 运维与排查
 
 | 现象 | 看哪里 |
 |---|---|
 | 抓取阶段失败 | 日志里 `gist_nodes_*` 结构化行；`gist_nodes_search_empty` = 某关键词整页没解析出结果 |
+| Sub-Store 阶段到点 | `gist_nodes_substore_phase`（本段耗时 / 预算 / 投喂数，**这一段以前完全没有耗时数据**）/ `gist_nodes_push_budget_stop`（投喂被截断：`pushed` 已投喂数 + `remaining` 没投的数量）。退出码 1 且 `gist_nodes_failed` 的文案含「预算」= 产出段（建组合/取回）预算耗尽，不是后端故障 |
 | 没凑够目标就收摊 | `gist_nodes_gather_stop`（`reason=budget` = 墙钟预算耗尽；`reason=stall` = 连续多轮零增长）。**这是正常收尾，不是故障**——`GIST_NODES_TARGET_SUBS` 是目标不是保证；先看 `gist_nodes_sources` 的 `stop_reason` / `rounds` / `elapsed` / `files` |
 | 一整批页被跳过 | `gist_nodes_search_batch_aborted`（连续 N 页被限流触发熔断，本批剩余页一个都不打）/ `gist_nodes_search_deferred_skipped`（`reason=batch_aborted` = 熔断不补一轮，`reason=budget` = 预算到点不补）。见到它们说明那一轮正处在限流窗口里，别当成抓取失败 |
 | 搜索页 429 | `gist_nodes_search_rate_limited`（含 `retry_after` 字段，只作诊断）/ `gist_nodes_search_deferred_total`（本批被限流跳过的页数 + `recovered` 补回来几个）/ `gist_nodes_search_page_dropped`（两轮都没捞回来，会列出 `ss://#3` 这样的具体页）。`gist_nodes_gather_round` 每轮打一次 `page_delay`，能直接看出节流器把间隔拉到了多少。**它是「一轮能抓多少」的主要瓶颈**——`GIST_NODES_TARGET_SUBS` 是目标不是保证 |
@@ -218,5 +250,6 @@ python .github/scripts/proxy-speedtest/tests/test_gist_nodes_substore.py
 边界验证（`MAX_NODES=0` 不出现限量算子；`MAX_AGE_HOURS=0` 不过滤）、判据验证（明文、base64 放行，
 XML plist、数据 JSON 挡掉）、时间窗口验证（超龄挡掉、整页超龄即停止翻页）与**抓取收口验证**
 （墙钟预算 / 零增长 / 批内熔断各自生效；三者都配了「关闭该收口 → 一路翻满 `GIST_NODES_MAX_PAGES`」
-的负向对照，否则判据恒真也看不出来）。
+的负向对照，否则判据恒真也看不出来）与 **Sub-Store 阶段预算验证**（投喂预算耗尽 → 截断投喂但仍
+产出、退出码 0；产出预算耗尽 → 退出码 1 且失败文案指向预算；两者各配负向对照）。
 真实容器只在 runner 上起，本地改完靠它兜底；退出码 0 = 全过。
