@@ -988,6 +988,9 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None):
     # 来源标签（PROXY_SPEEDTEST_LABEL）：编排层 proxy-speedtest-gistnodes 调用时传
     # 「gist 节点」，标题变成「gist 节点 · CDN 测速完成」。同一套测速会被定时轮和 gist 抓取轮
     # 分别触发，标题不区分的话读者分不清通知来自哪一轮（规范 · 3.1 允许标题带区分词）。
+    # ⚠️ 同 taier：注释与 f-string 都在，赋值行漏了 ⇒ 标题渲染即 NameError、通知静默发不出。
+    # 判据与注释、规范（规范 · 3.x CDN 测速：0 可用节点降级 ⚠️）一致。
+    _title_emoji = '⚠️' if not ok_results else '✅'
     _label = (merged_env().get('PROXY_SPEEDTEST_LABEL') or '').strip()
     _title_prefix = f'{_label} · ' if _label else ''
     lines = [
