@@ -65,7 +65,15 @@ Sub-Store 接口（读 backend/src/restful/*.js 得到，全部是无需鉴权�
   GIST_NODES_DRY_RUN       1 = 只抓取不发布（本地验证用）
   GIST_NODES_WORKDIR       产物目录（默认 ~/proxy-speedtest/gist-nodes）
   SUB_STORE_BACKEND_URL    Sub-Store 后端地址（默认 http://127.0.0.1:3001）
-  SUB_STORE_TIMEOUT        调用 Sub-Store 的超时秒数（默认 300，全量解析 + 去重耗时较长）
+  SUB_STORE_TIMEOUT        单次调用 Sub-Store 的超时秒数（默认 300，全量解析 + 去重耗时
+                           较长）。**刻意保持不动**：我们没有真实的 Sub-Store 分段耗时，
+                           压小它只会误杀「合法但慢」的取回；「这一段最多能拖多久」由
+                           下面的阶段预算负责
+  SUB_STORE_BUDGET_SECONDS 整个 Sub-Store 阶段的墙钟预算（默认 300 = 5 分钟；0 = 不限）。
+                           **没有它这一段就是无界的**：投喂是逐个 POST（订阅多时几十次）、
+                           建组合与取回各一次，全是「单次超时」而没有聚合预算，最坏情况能
+                           冲出 job 的 timeout-minutes —— 而且这次是在**抓取已经完成之后**
+                           被硬取消，损失比抓取段超时更大。预算一半给投喂、一半留给产出
   SUB_STORE_COLLECTION     组合订阅名前缀（默认 gist-nodes）
   GH_TOKEN / GITHUB_TOKEN  GitHub API 认证（缺失时匿名调用，易被限流）
   PROXY_SPEEDTEST_GIST_ID / _FILENAME / _DESCRIPTION
@@ -81,6 +89,10 @@ Sub-Store 接口（读 backend/src/restful/*.js 得到，全部是无需鉴权�
 「抓到的比目标少」，仍会拿已有的文件走完 Sub-Store 产出与发布。区分这两者的理由：
 job 超时是 GitHub 硬取消，被取消时连已经抓到的几十个订阅文件也一起作废、下游三个
 测速 job 全 skipped——一次运行白跑。宁可少几个节点，也不要整轮报废。
+
+Sub-Store 阶段同理，但**降级方向相反**：投喂预算耗尽可以停投喂、拿已投喂的继续产出
+（少几个订阅文件而已）；而建组合 / 取回预算耗尽就只能 exit 1——那两个步骤省掉就没有
+产物了，此时失败是对的（同「与其让下游拿空订阅跑一轮测速，不如就地失败」）。
 """
 import base64
 import concurrent.futures
@@ -109,6 +121,17 @@ GIST_API = 'https://api.github.com/gists/{gist_id}'
 
 DEFAULT_QUERIES = 'ss://,vless://,vmess://,trojan://,hysteria2://,tuic://'
 DEFAULT_SUB_STORE = 'http://127.0.0.1:3001'
+# 单次调用超时。**刻意保持 300 不动**：我们没有任何一次真实的 Sub-Store 分段耗时
+# （这条链路至今没跑完整过），压小它只是把「合法但慢」的取回误杀成失败，而「一次调用
+# 最多能拖多久」这个上界已经由下面的阶段预算兜住了。留着大值反而更好：取回的解析工作
+# 本来就集中在两次 download 上，允许单次调用吃掉剩余额度，比强行均分更容易跑成。
+DEFAULT_SUB_STORE_TIMEOUT = 300
+# Sub-Store 阶段的墙钟预算。为什么要它：投喂是**逐个** POST（订阅多时几十次），
+# 建组合与取回各一次，全是单次超时、没有聚合预算 —— 这一段在没有它的时候是无界的，
+# 最坏情况能冲出 job 的 timeout-minutes。而那时抓取已经完成，被硬取消的损失比抓取段
+# 超时更大（几十个订阅全白喂）。300 秒的一半给投喂、一半留给产出；加上检出 0.4 分钟
+# + 抓取预算 15 分钟 ≈ 20.4 分钟，稳在 30 分钟以内。
+DEFAULT_SUB_STORE_BUDGET_SECONDS = 300
 DEFAULT_MAX_AGE_HOURS = 24
 DEFAULT_TARGET_SUBS = 100
 DEFAULT_MAX_PAGES = 40
@@ -663,10 +686,28 @@ def build_process(max_nodes):
     return process
 
 
-def push_to_substore(base, files, prefix, max_subs, max_total_bytes, timeout, stats):
-    """把抓到的订阅正文逐个建成 Sub-Store 本地订阅，返回订阅名列表。"""
+def push_to_substore(base, files, prefix, max_subs, max_total_bytes, timeout, stats,
+                     deadline=None):
+    """把抓到的订阅正文逐个建成 Sub-Store 本地订阅，返回订阅名列表。
+
+    `deadline` 是这一段自己的墙钟截止点（不是整个 Sub-Store 阶段的）：到点就**停止投喂**、
+    把已投喂的返回给调用方继续走产出。为什么投喂可以半途而废而建组合/取回不行：少几个
+    订阅文件只是少几个节点，而建组合/取回省掉就完全没有产物了（见模块头的失败语义）。
+
+    单次调用的超时也被剩余额度夹住（`min(timeout, 剩余)`），否则最后一个 POST 还能在
+    到点之后再拖满一整个 `timeout`，「到点」就成了空话。
+    """
     subnames = []
     for idx, (name, text) in enumerate(files, 1):
+        if deadline is not None:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                log_progress('gist_nodes_push_budget_stop', pushed=len(subnames),
+                             remaining=len(files) - idx + 1)
+                break
+            call_timeout = max(1, min(timeout, left))
+        else:
+            call_timeout = timeout
         if max_subs and len(subnames) >= max_subs:
             stats['over_quota'] += 1
             continue
@@ -677,7 +718,7 @@ def push_to_substore(base, files, prefix, max_subs, max_total_bytes, timeout, st
         # 订阅名不能含 '/'（Sub-Store 明确拒绝），故不用 owner/id，只用序号。
         sub_name = f'{prefix}-{idx:03d}'
         try:
-            ss_create_sub(base, sub_name, text, timeout)
+            ss_create_sub(base, sub_name, text, call_timeout)
         except SubStoreError as e:
             stats['subs_failed'] += 1
             log_progress('gist_nodes_sub_failed', sub=sub_name, error=str(e))
@@ -737,7 +778,8 @@ def main():
     workers = max(1, env_int(env, 'GIST_NODES_WORKERS', 8))
     dry_run = env_str(env, 'GIST_NODES_DRY_RUN', '0').lower() not in ('0', 'false', 'no')
     ss_base = env_str(env, 'SUB_STORE_BACKEND_URL', DEFAULT_SUB_STORE)
-    ss_timeout = max(10, env_int(env, 'SUB_STORE_TIMEOUT', 300))
+    ss_timeout = max(10, env_int(env, 'SUB_STORE_TIMEOUT', DEFAULT_SUB_STORE_TIMEOUT))
+    ss_budget = max(0, env_int(env, 'SUB_STORE_BUDGET_SECONDS', DEFAULT_SUB_STORE_BUDGET_SECONDS))
     collection = env_str(env, 'SUB_STORE_COLLECTION', 'gist-nodes')
     workdir = pathlib.Path(env_str(
         env, 'GIST_NODES_WORKDIR', str(pathlib.Path.home() / 'proxy-speedtest' / 'gist-nodes')))
@@ -827,17 +869,42 @@ def main():
     if not files:
         fail(f'扫了 {stats["gists_scanned"]} 个 Gist 但没找到任何像订阅的文件')
 
+    # Sub-Store 阶段：整段有个墙钟预算（ss_budget），并且**一半留给产出**。
+    # 为什么必须给产出留额度：投喂是逐个 POST、订阅多时几十次，是全段唯一无界的部分；
+    # 不给它设上限，它能把整段预算吃光，然后建组合/取回拿不到时间 —— 投喂成功却产不出
+    # 订阅，等于白跑一轮，比少投喂几个订阅糟得多。
+    ss_started = time.monotonic()
+    ss_deadline = (ss_started + ss_budget) if ss_budget else None
+    push_deadline = (ss_started + ss_budget / 2) if ss_budget else None
+
+    def ss_call_timeout(label):
+        """单次调用超时 = min(单次上限, 剩余预算)。预算已耗尽 → 直接失败。
+
+        为什么耗尽要失败而不是「再等一会」：这里已经是「产出」步骤，等下去就是撞 job 的
+        timeout-minutes，而被硬取消时连已投喂的订阅也一起废掉——不如就地失败，日志清楚。
+        """
+        if ss_deadline is None:
+            return ss_timeout
+        left = ss_deadline - time.monotonic()
+        if left <= 0:
+            fail(f'Sub-Store 阶段预算（{ss_budget} 秒）耗尽，放弃「{label}」：'
+                 '继续等会撞 job 的 timeout-minutes，被硬取消时连已投喂的订阅也一起废掉')
+        return max(1, min(ss_timeout, left))
+
     # Sub-Store 就绪性：先探一次，把「容器没起来」和「订阅内容有问题」两类失败分开。
     try:
-        status, body = ss_request(ss_base, 'GET', '/api/subs', None, min(ss_timeout, 30))
+        status, body = ss_request(ss_base, 'GET', '/api/subs', None,
+                                  min(ss_call_timeout('就绪探活'), 30))
     except SubStoreError as e:
         fail(f'Sub-Store 后端不可达（{ss_base}）：{e}')
     if status != 200:
         fail(f'Sub-Store 后端异常：GET /api/subs → HTTP {status} {body[:200]}')
 
-    subnames = push_to_substore(ss_base, files, collection, max_subs, max_total_bytes, ss_timeout, stats)
-    log_progress('gist_nodes_pushed', subs=len(subnames), **{k: stats[k] for k in
-                 ('subs_created', 'subs_failed', 'bytes_pushed', 'over_quota')})
+    subnames = push_to_substore(ss_base, files, collection, max_subs, max_total_bytes,
+                                ss_timeout, stats, deadline=push_deadline)
+    log_progress('gist_nodes_pushed', subs=len(subnames), files=len(files),
+                 **{k: stats[k] for k in
+                    ('subs_created', 'subs_failed', 'bytes_pushed', 'over_quota')})
     if not subnames:
         fail('没有一个订阅成功投喂进 Sub-Store')
 
@@ -845,12 +912,20 @@ def main():
     try:
         # 参照组：同样的订阅但不带去重，用来给出「解析后 N → 去重后 M」这个可核对的口径。
         # Sub-Store 对未知算子只记日志、不报错，没有这个参照组就无从判断去重是否真生效。
-        ss_create_collection(ss_base, f'{collection}-raw', subnames, [], ss_timeout)
-        ss_create_collection(ss_base, collection, subnames, process, ss_timeout)
-        yaml_text = ss_download(ss_base, collection, 'ClashMeta', ss_timeout)
-        raw_json = ss_download(ss_base, f'{collection}-raw', 'JSON', ss_timeout)
+        ss_create_collection(ss_base, f'{collection}-raw', subnames, [],
+                             ss_call_timeout('建 -raw 参照组'))
+        ss_create_collection(ss_base, collection, subnames, process,
+                             ss_call_timeout('建主组合'))
+        yaml_text = ss_download(ss_base, collection, 'ClashMeta',
+                                ss_call_timeout('取回 ClashMeta YAML'))
+        raw_json = ss_download(ss_base, f'{collection}-raw', 'JSON',
+                               ss_call_timeout('取回参照组 JSON'))
     except SubStoreError as e:
         fail(str(e))
+
+    ss_elapsed = round(time.monotonic() - ss_started, 1)
+    log_progress('gist_nodes_substore_phase', elapsed=ss_elapsed, budget=ss_budget,
+                 per_call_timeout=ss_timeout, subs=len(subnames), files=len(files))
 
     if 'proxies:' not in yaml_text:
         fail(f'Sub-Store 产出的不是 mihomo YAML，前 300 字：{yaml_text[:300]}')
@@ -882,6 +957,9 @@ def main():
                    'stop_reason': stop_reason, 'budget_seconds': budget,
                    'no_progress_rounds': no_progress_limit,
                    'max_consecutive_limited': max_consecutive_limited},
+        'substore': {'elapsed_seconds': ss_elapsed, 'budget_seconds': ss_budget,
+                     'per_call_timeout_seconds': ss_timeout, 'subs_pushed': len(subnames),
+                     'files_found': len(files)},
         'collection': collection,
         'process': process,
         'stats': stats,
@@ -926,7 +1004,8 @@ def main():
         + ('' if stop_reason == 'target' else ' —— 未凑够目标是正常的：'
            f'`{STOP_REASON_NOTES.get(stop_reason, stop_reason)}`'),
         f'- 投喂订阅：{stats["subs_created"]} 个（失败 {stats["subs_failed"]}，'
-        f'{round(stats["bytes_pushed"] / 1048576, 1)} MB）',
+        f'{round(stats["bytes_pushed"] / 1048576, 1)} MB）'
+        f'，Sub-Store 阶段耗时 {ss_elapsed} 秒 / 预算 {ss_budget or "不限"} 秒',
         f'- Sub-Store 解析：{parsed_count} 个节点 → 去重/清理后：**{len(proxies)}**'
         + (f'（限量 {max_nodes}）' if max_nodes else ''),
         f'- 订阅 Gist：{gist_html_url or "(dry-run 未发布)"}',

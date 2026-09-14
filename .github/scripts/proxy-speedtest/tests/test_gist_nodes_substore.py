@@ -25,6 +25,9 @@
      * 连续 N 轮文件数零增长即停；
      * 同一批连续 3 页被限流就熔断本批、且不补一轮。
      三者都配了「关闭该收口 → 一路翻满 max_pages」的负向对照，否则判据恒真也看不出来。
+ 11. Sub-Store 阶段预算（18–19）：投喂预算耗尽 → 截断投喂、仍用已投喂的产出（退出码 0，
+     组合只引用已投喂的）；产出预算耗尽 → 就地失败（退出码 1，省掉建组合/取回就没有产物）。
+     两者方向相反，各配负向对照。
 
 跑法：python .github/scripts/proxy-speedtest/tests/test_gist_nodes_substore.py
 退出码 0 = 全部通过。
@@ -66,6 +69,11 @@ class FakeSubStore(http.server.BaseHTTPRequestHandler):
     subs_status = 200
     yaml_status = 200
     yaml_body = YAML_BODY
+    # 分段模拟耗时（秒）。为什么要按路由分开：投喂是**逐个** POST，而建组合/取回各一次，
+    # 两者要能独立变慢才能分别验「投喂预算耗尽可降级」与「产出预算耗尽必须失败」。
+    subs_delay = 0.0
+    collection_delay = 0.0
+    download_delay = 0.0
 
     def log_message(self, *args):  # 静音
         pass
@@ -91,7 +99,8 @@ class FakeSubStore(http.server.BaseHTTPRequestHandler):
         if self.path.startswith('/api/subs'):
             return self._json(200, [])
         if '/download/collection/' in self.path:
-            name = self.path.split('/download/collection/', 1)[1].split('/', 1)[0]
+            if FakeSubStore.download_delay:
+                time.sleep(FakeSubStore.download_delay)
             target = self.path.split('/')[-1].split('?')[0]
             if target == 'ClashMeta':
                 if FakeSubStore.yaml_status != 200:
@@ -105,10 +114,14 @@ class FakeSubStore(http.server.BaseHTTPRequestHandler):
         payload = json.loads(self.rfile.read(length).decode() or '{}')
         FakeSubStore.requests.append(('POST', self.path, payload))
         if self.path == '/api/subs':
+            if FakeSubStore.subs_delay:
+                time.sleep(FakeSubStore.subs_delay)
             if FakeSubStore.subs_status != 200:
                 return self._json(FakeSubStore.subs_status, {'error': 'duplicate'})
             return self._json(200, {'name': payload.get('name')})
         if self.path == '/api/collections':
+            if FakeSubStore.collection_delay:
+                time.sleep(FakeSubStore.collection_delay)
             return self._json(200, {'name': payload.get('name')})
         return self._text(404, 'not found')
 
@@ -210,6 +223,22 @@ def run_main_real_search(gist_nodes, tmpdir, extra_env):
         os.environ.update(saved)
         gist_nodes.collect_all, gist_nodes.update_gist = orig
     return code, uploaded.get('text', '')
+
+
+def capture_events(gist_nodes, fn, *args, **kwargs):
+    """跑 fn，返回 (fn 的返回值, 本次记录到的 log_progress 事件列表)。
+
+    为什么需要它：Sub-Store 预算耗尽走的是 `fail()` → `sys.exit(1)`，光看退出码分不清
+    「预算耗尽」和「后端 500」；截断投喂则是**静默降级**（退出码还是 0），只能靠日志点
+    （`gist_nodes_push_budget_stop` 的截断计数、`gist_nodes_failed` 的 error 文案）来断言。
+    """
+    events = []
+    orig = gist_nodes.log_progress
+    gist_nodes.log_progress = lambda stage, **fields: events.append(dict(fields, stage=stage))
+    try:
+        return fn(*args, **kwargs), events
+    finally:
+        gist_nodes.log_progress = orig
 
 
 def posts(kind):
@@ -580,6 +609,53 @@ def main():
         check(reqs2.count(('vless://', 4)) == 8,
               f'熔断关闭 → 该页被请求 4（本批）+ 4（补一轮）次（实际 {reqs2.count(("vless://", 4))}）')
         gist_nodes.http_get = real_http_get
+
+        # ---- 18–19：Sub-Store 阶段的预算。投喂可降级（少几个订阅），产出必须失败
+        # （省掉就没有产物）。两者方向相反，所以要分别验，且各自配负向对照。
+        print('== 18. Sub-Store 投喂预算耗尽 → 截断投喂，仍用已投喂的产出 ==')
+        FakeSubStore.requests.clear()
+        FakeSubStore.subs_delay = 0.6
+        (code, _, _), ev18 = capture_events(
+            gist_nodes, run_main, gist_nodes, tmpdir,
+            {'SUB_STORE_BACKEND_URL': base, 'SUB_STORE_BUDGET_SECONDS': '2'})
+        FakeSubStore.subs_delay = 0.0
+        stops18 = [e for e in ev18 if e['stage'] == 'gist_nodes_push_budget_stop']
+        check(code == 0, '退出码 0（投喂被截断 ≠ 失败）')
+        check(len(stops18) == 1 and 1 <= stops18[0]['pushed'] <= 2,
+              f'投喂被预算截断（实际 {stops18[0] if stops18 else "未触发"}）')
+        subs18 = posts('/api/subs')
+        check(len(subs18) == (stops18[0]['pushed'] if stops18 else -1),
+              f'POST /api/subs 次数 = 截断时已投喂数（实际 {len(subs18)}）')
+        cols18 = [p for _, _, p in posts('/api/collections') if p['name'] == 'gist-nodes']
+        check(len(cols18) == 1
+              and cols18[0]['subscriptions'] == [p['name'] for _, _, p in subs18],
+              '组合订阅只引用已投喂的那几个 —— 截断之后仍然产出了订阅')
+
+        print('== 18b. 负向对照：预算 0 = 不限时必须全部投喂 ==')
+        FakeSubStore.requests.clear()
+        FakeSubStore.subs_delay = 0.6
+        (code, _, _), ev18b = capture_events(
+            gist_nodes, run_main, gist_nodes, tmpdir,
+            {'SUB_STORE_BACKEND_URL': base, 'SUB_STORE_BUDGET_SECONDS': '0'})
+        FakeSubStore.subs_delay = 0.0
+        check(code == 0, '退出码 0')
+        check(len(posts('/api/subs')) == 3,
+              f'预算不限 → 3 个全投喂（实际 {len(posts("/api/subs"))}）')
+        check(not [e for e in ev18b if e['stage'] == 'gist_nodes_push_budget_stop'],
+              '预算不限时不该出现截断日志')
+
+        print('== 19. Sub-Store 产出预算耗尽 → 就地失败，不硬等到 job 超时 ==')
+        FakeSubStore.requests.clear()
+        FakeSubStore.collection_delay = 0.6
+        (code, _, _), ev19 = capture_events(
+            gist_nodes, run_main, gist_nodes, tmpdir,
+            {'SUB_STORE_BACKEND_URL': base, 'SUB_STORE_BUDGET_SECONDS': '1'})
+        FakeSubStore.collection_delay = 0.0
+        check(code == 1, '退出码 1（建组合/取回省掉就没有产物，失败是对的）')
+        errs19 = [e.get('error', '') for e in ev19 if e['stage'] == 'gist_nodes_failed']
+        check(any('预算' in str(e) for e in errs19),
+              f'失败原因指向预算耗尽（实际 {errs19}）')
+        check(len(posts('/api/subs')) == 3, '失败发生在投喂之后（投喂段不受产出预算影响）')
     finally:
         server.shutdown()
         shutil.rmtree(tmpdir, ignore_errors=True)
