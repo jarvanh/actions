@@ -1,6 +1,6 @@
 # openlist.yml 同步修复实施计划（2026-09-13）
 
-- 代码基线：起步于 `5c01d32`（`task_engine.sh` 与被剖析的 run 34728107625 所在 commit 零差异，结论可平移）；**现已落地到 `e5296ed`**（Phase 1 全量 + Phase 2 第一批，见 §进度日志）
+- 代码基线：起步于 `5c01d32`（`task_engine.sh` 与被剖析的 run 34728107625 所在 commit 零差异，结论可平移）；**现已落地到 `acbbff5`**（Phase 1 全量 + Phase 2 第一批，见 §进度日志）
 - 依据：仓库根报告三份（`openlist-sync-glm-f-report` / `openlist-sync-feasibility-report` / `openlist-sync-assessment-ds4.1-report`，均为 2026-09-13）+ 对 HEAD 的代码核验 + 审核新发现（§1.4）
 - **本文档是执行蓝图：与报告冲突时以本文档为准；本文档与代码冲突时现场查证并更新本文档进度。**
 
@@ -17,7 +17,8 @@
 | Phase 0 解堵 + 基线 | ✅ 完成 |
 | Phase 1（F0–F5） | ✅ 全部落地并 push，**已在生产验证**: run 34770092689 首次拿到非硬杀的 success，F1/F5/F0/F4 实锤生效（逐条证据见 §6） |
 | Phase 2 第一批（F6/F7/F8/F11） | ✅ 落地（`e5296ed` / `3737688`），**尚未被任何一轮跑过** |
-| Phase 2 剩余 | F9 字节计数落盘、F10 405 fail-fast、F12 sleep 60 条件化、F13 僵尸 run 心跳 |
+| F6 触发源接线（F5 全拒 → `SYNC_BACKEND_DEAD`） | ✅ 落地 `acbbff5`（**2026-09-14 补 push**，此前只在本机 commit、origin/main 没有，见进度日志），未跑过；把熔断点从 ~2.5h 提前到批次 1 巩固结束，见 §4 · F6 |
+| Phase 2 剩余 | F9 **前提已核实、范围收窄**（见 §4 · F9）；F10 / F12 / F13 **本轮评估后推迟**（理由见 §4 · F10/F12/F13） |
 | F3 第二步 | 根目录文件的短哈希兜底（第一步「不短路 + 不计数」已落地） |
 | Phase 3 | F14 三后端写入自检起；**Gate 1 已逼近**（见 §7） |
 
@@ -144,6 +145,8 @@ wopan176 账号本身的配额/限流/封禁/token 状态——需用户登 Open
 ### F6 后端熔断跨轮持久化 ✅ 已落地（e5296ed）
 `sync_state/backend_dead.json`：熔断时写挂载根+时间戳+TTL（默认 12h，死后端常是暂态：登录/限流）；下轮 task_engine 入口读取、跳过该后端的同步对（游标后移）。边界：全部 OpenList 后端都死 → 忽略跳过标记并告警（不许全线停摆）。收益：游标从「44h 才让路」降到 1 轮。
 
+**F6 补充 · 触发源接线（本轮落地，未跑过）**：F6 原先只认 `SYNC_BACKEND_DEAD=1`，而该标志的两个来源都不好用——① 入口写探针（`sync_engine.sh:152`）在 run 34770092689 里**通过**了（探针打的是任务子路径、后端仍照收 405/假成功）；② 修复管线的目录级熔断（`file_fix_pipeline.sh:781`）同轮实测晚至 19:39、开跑约 2.5h 后才触发。于是"整批 1036 个触碰文件零落盘"这种最硬的证据反而不会让后端进入跨轮熔断。现把 F5 的「后端写入全拒」判据（`task_engine.sh` `_batch_consolidate`，`_truth_confirmed` + `stubborn_n >= touched_n >= 3`，即容器重启复核后本批 100% 未落盘）同时置 `SYNC_BACKEND_DEAD=1`，熔断点从 ~2.5h 提前到批次 1 巩固结束（实测 1h17m）。语义不变：本批顽固缺失仍转修复管线（F5 既有用户规格）。
+
 ### F7 修复成效拆分（让零产出告警真正生效）✅ 已落地（3737688）
 `file_fix_pipeline.sh:1126-1136` 的 `add_ok` 含「沿用上轮修复」→ 拆 `ROUND_FIXED_NEW`（本轮新落盘）/ `ROUND_REUSED`（沿用）；`openlist.yml:503` 告警判据只看 NEW。收尾通知两数分列展示。
 
@@ -153,8 +156,21 @@ wopan176 账号本身的配额/限流/封禁/token 状态——需用户登 Open
 ### F9 字节计数落盘
 记账点 `task_engine.sh:316`、`:869` 改为即时追加 `/tmp` 计数文件（强杀后收尾仍可读）；顺带排查同值重传 churn（同批内容轮轮重传）。
 
+**前提已核实（2026-09-14，部分不成立，改动范围需收窄）**：趋势口径的记账**本来就是即时落盘**——`sync_trend.sh:42-46` `trend_record_transferred` 每次调用即 `echo >> /tmp/ol_trend_transferred.log`，收尾 `trend_record_and_notify` 只做 `awk` 求和（`sync_trend.sh:81-84`），所以"强杀丢内存计数"对 trend 这条链**不成立**（硬杀轮的 trend 样本确实写出来了，见 §6 · C）。F9 真正剩两件：
+1. **核对覆盖面**：确认所有传输路径都调了 `trend_record_transferred`（已知 `task_engine.sh:437`、`:1001`；批次路径 `:1738` 只把字节累加进 `batch_transferred_bytes` 供进度行展示，是否另需记入趋势待查）。
+2. **churn 已确诊（新证据）**：`trend.jsonl` 里 `transferred_bytes` 出现**逐字相同的重复值**——`18282971` 连续三轮（09-11 11:36 / 09-11 21:45 / 09-12 06:22）、`171257627` 连续三轮（09-13 05:18 / 10:53 / 16:17），而同期 `remaining_bytes` 摆动达 2.5TB。被 330min 硬杀的三轮不可能凑出字节级完全一致的真测量 ⇒ **同一批内容每轮被重新"传输"一次**（rclone 照报 Copied、后端零落盘），与 §6 · C「transferred 2.08GB vs 真实落盘 0」同一根因。**结论：`transferred_bytes` 是"rclone 声称量"，不是"落盘量"**，C 达标必须换判据（如用巩固/修复管线的新落盘计数），不能靠修 F9 的落盘时机。
+
+**覆盖面已核实（2026-09-14 第三轮；结论：批次路径整体不计入趋势）**：
+
+- 全库 `trend_record_transferred` 调用点只有两处：`task_engine.sh:437`（`_sync_task_finalize` 尾部，取 `SYNC_TRANSFERRED_BYTES`）与 `:1001`（顶层最终完整同步尾部）。**批次路径没有任何一处调用它。**
+- 机制（已核到行）：`sync_by_file_batches` 把每批字节累加进 `batch_transferred_bytes`（`:1749`），但**只**喂给进度行的 `⬆️` 字段（`:1820-1823`），从不回写 `SYNC_TRANSFERRED_BYTES`；函数尾部（`:1855-1862`）为省一次全量扫描把 `OPENLIST_FIX_TEST_MODE` 临时置 1 再调 `sync_with_logging`，而该模式会 `: > "$LAST_ATTEMPT_LOG"` 跳过真实传输（`sync_engine.sh:170-174`）→ 日志为空 → `SYNC_TRANSFERRED_BYTES=0`（`sync_notify.sh:197`）→ `_sync_task_finalize` 记 0。
+- 结论：趋势里的 `transferred_bytes` 只反映"未经批次的直接 sync 路径"，而**批次路径正是本域的主传输通道** ⇒ 该数字同时具备「含假成功（偏高）」与「漏批次量（偏低）」两种失真，双重不可用。
+- **不改代码**：本项属"指标定义"而非"失败形状"，且本节已定「C 达标必须换判据」。若将来要保留该指标，最小改法是让 `sync_by_file_batches` 把 `batch_transferred_bytes` 并入 `SYNC_TRANSFERRED_BYTES` 再返回——**必须在尾部那次 fix_test `sync_with_logging` 之后赋值**，否则被其 0 覆盖。
+
 ### F10 405 fail-fast
 初始 sync / 批次阶段：同一目录连续 N（默认 20）个 `405 Method Not Allowed` → 中止该目录本轮尝试（marker 置失败、留给修复管线换形态），不再 2103 个逐个烧完（34728107625 烧了 115min）。监控线程可仿 `_start_batch_progress_thread` 模式。
+
+**本轮推迟（2026-09-14）**：属热路径改动（新增监控线程 + 改「中止该目录」语义），而下一轮要干净地验证 F6/F5 接线（Gate 1 的唯一输入）。且 405 的根因路径已被 F3（名长解耦）+ F6（跨轮跳过死后端）覆盖，先看它们的效果，避免多个热路径改动同轮落地导致归因失真——§6 迭代纪律「失败形状复现优先于新功能」。
 
 ### F11 SESSION_HOLD 兜底 ✅ 已落地（3737688）
 `openlist.yml:565` `|| 'true'` → `|| 'false'`，与声明默认（false、冲刺期窗口全给同步）一致。现状是颗雷：同步 step 一旦以 success 收场，schedule 轮会真执行 hold 5h。
@@ -162,8 +178,12 @@ wopan176 账号本身的配额/限流/封禁/token 状态——需用户登 Open
 ### F12 `_refresh_openlist_cache` 的无条件 sleep 60 条件化
 每子目录前后各一次、一轮 ≈85 次纯 sleep（~85min，预算 26%）→ 改「驱动未就绪时才等待」。落手前先核实现场行数与调用次数。
 
+**本轮推迟 + 计数待实测（2026-09-14）**：静态调用点只有 **3 处**（`sync_engine.sh:66` 8005 重试内、`sync_engine.sh:157` 每次 `sync_with_logging` 一次、`sync_notify.sh:112`），并非「每子目录前后各一次」；「≈85 次/轮」取决于 `sync_with_logging` 一轮被调多少次，**需从真实日志数一遍再动手**（本节自己写的「落手前先核实」）。推迟的另一理由：`/api/fs/refresh` 是异步接口、**没有完成信号**，「条件化」只能靠启发式（轮询 listing 是否稳定），改错会让 rclone 读到未刷新的 stale listing → 重传风暴，代价远大于省下的 85min。
+
 ### F13 僵尸 run 心跳检测
 自续触发 step 或轮入口：存在 in_progress 且 >45min 无更新的 run → `gh run cancel`。34752801560 形态（step 超时是 330min 后的兜底，不是主防）。
+
+**本轮推迟（2026-09-14）**：自然落点「自续触发 step」被 §8 红线 4 明令禁止改动（接力逻辑已验证健康），只能改走「轮入口新增 step」；且当前**没有**僵尸（在跑的 `34779382573` step 正常推进）。等真正复现僵尸形态再落地，不为不存在的问题加 step。
 
 ---
 
@@ -191,7 +211,7 @@ F0 落地后，对 wopan176 用 `transfers=2` 调试模式试一批，观察 obj
 每轮观察动作（AI 可全权执行）：
 
 1. `gh run list --workflow=openlist.yml --limit 5` 看 conclusion。
-2. `gh run view <id> --log | grep -E "优雅收摊|后端写入全拒|熔断|修复成功 ·|顽固缺失|transfers=|同步时间预算"`。
+2. `gh run view <id> --log | grep -E "优雅收摊|后端写入全拒|熔断|后端跨轮熔断|跳过让路|修复成功 ·|顽固缺失|transfers=|同步时间预算"`。
 3. 本机 rclone 读 `onedrive:/logs/sync_state/`：task_rotation.json 游标移动、trend.jsonl 末条、backend_dead.json 命中情况。
 4. 对照 0.2 基线记录增量，更新本文档复选框。
 
@@ -212,6 +232,47 @@ F0 落地后，对 wopan176 用 `transfers=2` 调试模式试一批，观察 obj
 - [ ] E · 零真实落盘轮次能触发零产出告警 —— 该轮未触发（收尾报「成功 183」含沿用上轮，
       当时尚未部署 F7）；F7 已落地，下轮起看「新落盘」口径。
 
+**2026-09-14 08:05 +08 观察快照（无新完成轮，A–E 无变化）**：
+
+- 最新**完成**轮仍是 `34770092689`（2f60f26，Phase 1）⇒ A–E 证据同上，本轮**无新增数据点**。
+- 在跑 `34779382573`（`06cc0df`，**Phase 1 代码**，schedule）：run 创建 09-13 20:00:11Z，
+  job 22:14:04Z 才拿到 concurrency 锁开跑（排队 2h14m）；08:05 +08 时 step 18「任务预览与全量同步」
+  已跑 1h48m，330min 上限 ⇒ 预计 11:40 +08 前后收场。**它跑的是 Phase 1，不含 Phase 2**，
+  观测价值 = 又一个已知形状样本。
+- 排队 `34787645966`（`0eef148`，**同为 Phase 1**，06:43 +08 创建，已 pending 1h22m）——
+  两个在队轮次都钉在 Phase 2 之前的 sha 上。**但不必人工干预**：在跑轮正常收场后自续触发
+  `gh workflow run` 会用「触发那一刻」的 main，届时 Phase 2 全量进入下一轮（同 concurrency 组内
+  较旧的 pending 会被顶掉）。
+- 本机 rclone 状态：`task_rotation.json` = `{cursor: 9, attempts: 1, updated: 2026-09-13T22:55:23Z}`
+  —— 22:55 的写入正是 `34779382573` 的"执行前落盘"（idx 9），即**这一轮又回到上一轮同一对
+  wopan176Crypt 上重试**，是 F6 尚未生效的预期形态。`backend_dead.json` **不存在**（F6 从未被
+  任何一轮执行过，符合预期）。
+- 结论：**Gate 1 仍未到**（要求 Phase 1+2 落地后观察 2 轮，目前 Phase 2 观察 0 轮）。本轮不再
+  追加同形状样本的推断，等下一条完整日志。
+
+**2026-09-14 09:10 +08 观察快照（无新完成轮；两项既有认知被实测推翻）**：
+
+- **轮次盘点**（`gh run list`）：最新**完成**轮仍是 `34770092689`（2f60f26，Phase 1，success）⇒ **A–E 无新增数据点**。
+  - `34772641066`（2f60f26，Phase 1）→ cancelled；`34787645966`（0eef148，Phase 1）→ cancelled（被更晚的 pending 顶掉）。
+  - **在跑** `34779382573`（`06cc0df`，Phase 1）：job 22:14:04Z 拿到 concurrency 锁，同步 step 22:16:54Z 起；320min 预算 ⇒ 预计 **03:36Z ≈ 11:36 +08** 收场。
+  - **排队** `34793014398`（`8acfc6f`，含 Phase 2 第一批 F6/F7/F8/F11，**不含 F6 触发源接线**）——它是 Gate 1 的第一个 Phase 2 数据点，会在在跑轮收场后立即开跑（约 03:36Z 起、5.5h 后 ≈ 17:00 +08 收场）。
+- **推翻①：`task_rotation.json` cursor=9 不是"又回到 wopan176Crypt"**。注册表索引已逐条导出核对（`SYNC_TASK_REGISTRY` 共 16 对）：
+  idx 8 = `task2 → openlist:wopan176Crypt/2`（上一轮实执行的那一对），**idx 9 = `task2-wopan175 → openlist:wopan175/2`**。
+  运行日志实锤：`同步对轮转: 本轮从第 9/16 个同步对开始（已连续尝试 6 次）`（17:01:44Z 预览 pass、17:30:32Z 真实 pass 各一次）+ 预览 pass 的 `注册进度: 2/16 onedrive:2 → openlist:wopan175/2`。
+  ⇒ 上一轮 §0 写的"cursor 9 = 回到同一对 wopan176Crypt 重试"是**索引误读**；cursor 9 是一个 **wopan175** 对。
+- **推翻②：自续触发没有接力**。`34770092689` 尾部实锤 `已有 1 个排队/等待中的运行，跳过接力`（22:13:57Z，护栏 3）。cron `0 * * * *` 会持续把 run 塞进队列，所以"在跑轮收场后自续触发用触发那一刻的 main"**不成立**——接力被护栏跳过，队列里那个**旧 sha 的 pending** 才是下一轮。
+  ⇒ **新代码进生产的延迟 ≈ 2 轮（约 11h）**：push 只影响"之后新建的 run"，而队列里已排队的旧 sha pending 会先跑。这正是 `acbbff5`（08:28 +08 commit）至今未被任何一轮执行的原因。**不要再按"push 完下一轮就生效"安排验证节奏。**
+- **A–E 逐条（新增实测细节，结论不变）**：
+  - A 达标 1/3（证据同上）。新细节：`34770092689` 的**真实 pass 只执行了 1 个同步对**（idx 8）——22:12:09Z `⏳ 时间预算将尽，优雅收摊: 剩余 15 个同步对`（n−i=15 ⇒ i=1）。预览/注册 pass 覆盖全部 16 对但只读。
+  - B/C/D/E 全部未达标，证据同下。D 的精确表述：**真实 pass 未执行任何非 wopan176 对**（预览 pass 的 16 对注册不算"执行"）。
+- **F6 静态链已复核到行（含两条此前未记录的有利性质）**：
+  1. `_backend_dead_mark`（`task_engine.sh:149`）在写文件前**先把 root 塞进内存 `_BACKEND_DEAD_ROUND`** ⇒ 同一轮内后续的 wopan176Crypt 对会被 `:286` 直接跳过，**不必等下轮**（D 有机会在同一轮达标）。
+  2. "全线皆死"保护不会误伤 F6：注册表只有 **4 个后端**（aliyundriveCrypt / wopan176Crypt / baidupanCrypt / wopan175），判死 1 个 → `1/4` → 走"跳过让路"分支（`:258` 要求 `_dead_backend_n ≥ _backend_total` 才清空）。
+  3. 链路无子 shell：`_batch_consolidate`（`:1755` 直调）→ `sync_by_file_batches` `return 1` 并置 `SYNC_FAILED=1`（`:1780`）→ `_run_registry_entry`（`:309` 直调 `|| true`）→ `run_all_tasks` 的 `elif [ "${SYNC_BACKEND_DEAD:-0}" = "1" ]`（`:320`）→ `_backend_dead_mark`。`SYNC_BACKEND_DEAD` 全库只有 `:308` 一处归零（每对开始前），执行期间无覆盖点。
+- **顺带记录（不修）**：`⚠️ raw 计数持续为 0（容器重启后列表未就绪），本轮禁用落盘即时校验` 出现 6 次；`34770092689` 的修复持久化汇总 = `复核 183/183 / 通过 183 / 失败 0`，其中 181 条是 `♻ 沿用上轮修复`（F7 已针对此落地，下轮起看"新落盘"口径）。
+- **在跑轮很可能正在执行 `wopan175/2`（待收场日志确认）**：推理链——`34770092689` 收场时游标停在 8/attempts 7（i=0 落盘 `save(8,7)`，i=1 被预算闸 break，未再落盘）；`34779382573` 起手 start=8，i=0 的 idx 8 失败后 `_rot_attempts` 达 8 → 阀门（`:334`）→ `save(9,0)`，i=1 的 idx 9 = `task2-wopan175` → `save(9,1)`（22:55:23Z，与实测 `cursor 9 / attempts 1` 完全吻合）。若成立，则**真实 pass 首次落到非 wopan176 后端**，D 有机会在该轮达标——但它是"轮转自然轮到"而非 F6 之功（该轮不含 F6 接线），**记录时不要把它算成 F6 的功劳**。
+- **本轮结论：Gate 1 仍未到**（要求 Phase 1+2 落地后观察 2 轮；目前 Phase 1 观察 1 轮、Phase 2 观察 0 轮）。等 `34793014398` 收场后才有第一个 Phase 2 数据点。
+
 迭代纪律：一轮观察周期 5.5-6h；每轮最多一批修复，push 前过 §8 回归；失败形状复现优先于新功能。
 
 ## 7. 决策门
@@ -223,7 +284,7 @@ F0 落地后，对 wopan176 用 `transfers=2` 调试模式试一批，观察 obj
 ## 8. 工程红线（每次改动，无例外）
 
 1. **通知**：动通知文案/版式必遵 `docs/telegram-notify.md`；改完跑 `bash skills/telegram-notify-audit/scripts/render_preview.sh`（16 项校验）。排版/发送一律 source `tg_notify.sh`，不得 curl 直发。
-2. **回归**：19 个测试**串行**跑（`bash test_x.sh </dev/null`），基线 16 EXIT=0 + test_truth.sh 7 FAIL（环境性）；全部日志 `grep "command not found"` 为空。已知 flaky 单独重跑：progress_no_orphans T5、marker_skip_guards、sync_trend_budget。
+2. **回归**：`tests/` 下全部 `test_*.sh` **串行**跑（`bash test_x.sh </dev/null`）。**2026-09-14 实测基线：22 套 / 20 EXIT=0 / 2 非 0**——`test_marker_skip_guards.sh`（macOS `date` 无 `-d`，环境性）、`test_truth.sh`（需 docker，环境性）；全部日志 `grep "command not found"` 为空。已知 flaky 单独重跑即过：`progress_no_orphans`（T5 时序）、`sync_trend_budget`（macOS `wc` 前导空格）。跑法注意：zsh 下 `rm -f /tmp/x_*.log` 无匹配会中断整条命令链，日志请写进新建目录。
 3. **Git**：push 前先 `git fetch`（main 有并行推送）；commit `fix(openlist): 中文描述` + `- ` 列表正文；禁 force / --no-verify；不 commit 除非任务需要（本计划授权提交）。
 4. **不许动**：接力 step 逻辑（已验证健康）、truth-check 重启取真值机制、marker/游标增量持久化设计、「熔断不豁免修复管线」用户规格。
 5. **注释**写「为什么」；实现改了同步文件头注释与相关 docs。
@@ -268,8 +329,68 @@ F0 落地后，对 wopan176 用 `transfers=2` 调试模式试一批，观察 obj
   - 注意: 观察轮用的是 2f60f26（Phase 1），F7/F8/F11/F6 要等后续轮次（当前在跑的
     `34779382573` = 06cc0df、排队 `34787645966` = 0eef148，均只含 Phase 1）。
   - 计划文件 §6 · 退出标准处已按轮次逐条记录实测证据。
-- 待办/未做: F3 第二步（根目录文件短哈希兜底）、Phase 2 剩余（F9 字节计数落盘、F10 405
-  fail-fast、F12 sleep 60 条件化、F13 僵尸 run 心跳）、Phase 3（F14 起，含 Gate 1/2）。
-  **Gate 1 已逼近**: 连续两轮 wopan176Crypt 整批零真实落盘 + 熔断/轮转工作正常 ⇒ 下轮
-  若复现同形状，按 Gate 1 判账号级死亡并转 Phase 3 后端切换（但 F6 刚落地，先看它把
-  熔断跨轮传播后的效果再判）。
+
+- 2026-09-14（+08，第二轮）· 观察快照 + F6 触发源接线落地。
+  - **无新完成轮**: 最新完成轮仍是 `34770092689`（Phase 1），A–E 无新增数据点（逐条证据
+    见 §6 末尾的「2026-09-14 08:05 观察快照」）。在跑 `34779382573` = `06cc0df`（Phase 1，
+    step 18 已 1h48m，330min 上限 ⇒ 约 11:40 +08 收场），排队 `34787645966` = `0eef148`
+    （同为 Phase 1）。**两个在队轮次都钉在 Phase 2 之前的 sha**，但无需人工干预: 在跑轮正常
+    收场后自续触发会用「触发那一刻」的 main，Phase 2 全量进下一轮。
+  - rclone 侧: `task_rotation.json` = `cursor 9 / attempts 1 / updated 22:55:23Z` —— 该写入正是
+    在跑轮的"执行前落盘"（idx 9），即本轮又回到上一轮同一对 wopan176Crypt 重试；
+    `backend_dead.json` **不存在**（F6 从未被执行过，符合预期）。
+  - **落地 `acbbff5`**（F6 触发源接线，见 §4 · F6 补充）: F5「后端写入全拒」同时置
+    `SYNC_BACKEND_DEAD=1`，把 F6 的熔断点从 ~2.5h 提前到批次 1 巩固结束。**这是本轮唯一的
+    代码改动**——F10/F12/F13 评估后推迟（理由写进各自小节），因为下一轮要干净地验证
+    F6/F5 接线（Gate 1 的唯一输入），再塞热路径改动会让归因失真。
+  - **F9 前提已核实、范围收窄**（见 §4 · F9）: 趋势记账本来就是即时落盘（`sync_trend.sh:42-46`
+    每次调用即追加 `/tmp` 文件），「强杀丢内存计数」对 trend 这条链不成立；**新证据**是
+    `transferred_bytes` 出现逐字相同的重复值（`18282971`×3、`171257627`×3）而同期 remaining
+    摆动 2.5TB ⇒ 同一批内容每轮被重新"传输"，`transferred_bytes` 是「rclone 声称量」而非
+    「落盘量」，C 达标必须换判据。
+  - **静态核验（待下轮实测确认）**: F6 的信号链能穿过函数边界——`_fix_probe_dir_writable`
+    （`file_fix.sh:738`）在 `file_fix_pipeline.sh:377`、`file_fix.sh:1101/1276` 都是普通调用
+    （无管道/命令替换），`while ... done < <(...)` 走进程替换在主 shell 执行，故
+    `_BACKEND_DEAD` / `SYNC_BACKEND_DEAD` 能传到 `run_all_tasks` 的 `elif`；批次路径
+    `sync_by_file_batches`（`task_engine.sh:755/769`）同样无子 shell，中止出口置 `SYNC_FAILED=1`
+    后走 `_backend_dead_mark`。**串行（默认 subdir_parallel=1）成立；并行 worker 是子 shell，
+    标志传不回父级**，与既有认知一致。
+  - 回归: 22 套串行 / 20 EXIT=0；非 0 仅 `marker_skip_guards`（macOS 无 `date -d`）、
+    `truth`（需 docker）；`command not found` 扫描为空。§8 · 回归基线数字已按实测更新
+    （旧文写「19 个测试 / 16 EXIT=0」与现场对不上）。
+
+- 待办/未做（2026-09-14 第二轮更新）:
+  - **等观测（最高优先）**: 下一轮（首次含 Phase 2 全量代码）是 Gate 1 的唯一输入——看 F6 是否
+    写入 `sync_state/backend_dead.json`、`run_all_tasks` 是否打印「后端跨轮熔断: N/M 个后端在
+    TTL 内被判死」与「⏭ 同步对轮转…跳过让路」，以及退出标准 D（非 wopan176 的同步对开始被执行）
+    能否首次达标。`gh run view <id> --log` 后按 §6 关键词 grep。
+  - F3 第二步（根目录文件的短哈希兜底）。
+  - Phase 2 剩余: F9（范围已收窄，见 §4 · F9）、F10 / F12 / F13（推迟理由已写进各自小节）。
+  - Phase 3: F14 三后端写入自检起（含 Gate 1/2）。
+  - **Gate 1 判据提醒**: 要求 Phase 1+2 落地后**观察 2 轮**。目前 Phase 1 观察 1 轮、Phase 2
+    观察 0 轮，**未到**；下一轮若仍复现「wopan176 整批零真实落盘 + 熔断/轮转工作正常」，
+    才可判账号级死亡并转 Phase 3 后端切换。
+
+- 2026-09-14（+08，第三轮）· 观察快照 + 两项认知纠正 + 补 push 滞留 commit。
+  - **无新完成轮**，A–E 无新增数据点（逐条证据见 §6 · 「2026-09-14 09:10 观察快照」）。
+    轮次盘点: 在跑 `34779382573`（`06cc0df`，Phase 1）、排队 `34793014398`（`8acfc6f`，**Phase 2 第一批**，
+    即 Gate 1 的第一个 Phase 2 数据点）、`34772641066`/`34787645966` 已 cancelled。
+  - **发现并修复一个流程缺陷**: `acbbff5`（F6 触发源接线）**只在本机 commit、从未 push**——
+    上一轮日志写"落地"但 origin/main 上没有它（`git rev-list --left-right --count origin/main...HEAD` = `0 1`）。
+    本轮已补 push，并把上一轮遗留未提交的计划文档改动一并入库。**教训: 收尾务必核对 push 真的成功
+    （沙箱会拦 push），别只写"已落地"。**
+  - **纠正①**: cursor=9 不是"回到同一对 wopan176Crypt 重试"，而是 `task2-wopan175 → openlist:wopan175/2`
+    （注册表 16 对索引逐条导出核对 + 日志 `注册进度: 2/16 onedrive:2 → openlist:wopan175/2` 实锤）。
+  - **纠正②**: 自续触发**没有**接力——`34770092689` 尾部实锤「已有 1 个排队/等待中的运行，跳过接力」（护栏 3）。
+    ⇒ 新代码进生产延迟 ≈ 2 轮（~11h），"push 完下一轮就生效"的假设不成立。
+  - **F9 覆盖面已核实**（写进 §4 · F9）: `trend_record_transferred` 全库只有两处调用点，**批次路径整体
+    不计入趋势**（`batch_transferred_bytes` 只喂进度行；尾部那次 `sync_with_logging` 跑在
+    `OPENLIST_FIX_TEST_MODE=1` 下、日志被置空 ⇒ 记 0）⇒ 该指标同时偏高（含假成功）与偏低（漏批次量）。
+    **不改代码**（属指标定义问题，且 C 达标已定要换判据）。
+  - **F6 链路复核到行**（写进 §6）: `_backend_dead_mark` 会同步更新内存熔断表 ⇒ 同轮即可跳过后续同后端对；
+    注册表 4 个后端 ⇒「全线皆死」保护不误伤；链路无子 shell；`SYNC_BACKEND_DEAD` 无执行期覆盖点。
+  - **本轮零代码改动**（§6 迭代纪律: 失败形状复现优先于新功能；下一轮要干净验证 F6/F5 接线）。
+  - 回归（§8）: 22 套串行 / **20 EXIT=0 / 2 非 0**（`marker_skip_guards` 无 `date -d`、`truth` 需 docker，
+    均为既有环境性失败）；`progress_no_orphans` 单跑即过（PASS=16 FAIL=0，确认 flake）；
+    **全部日志 `grep "command not found"` = 0 命中**。基线数字与 §8 一致，无需修订。
+  - 待办不变: 等 `34793014398`（Phase 2 第一批）收场 → 再等一轮含 `acbbff5` 的 → 才够 Gate 1 的"观察 2 轮"。
