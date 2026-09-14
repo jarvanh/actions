@@ -87,7 +87,7 @@ Sub-Store 接口（读 backend/src/restful/*.js 得到，全部是无需鉴权�
   PROXY_SPEEDTEST_GIST_ID / _FILENAME / _DESCRIPTION
                            发布目标 Gist（复用共享层 update_gist 的既有约定）
 
-输出（写入 $GITHUB_OUTPUT，供编排工作流传给测速工作流）：
+输出（写入 ${GITHUB_OUTPUT}，供编排工作流传给测速工作流）：
   sub_url / count / parsed_count / gists_scanned / gist_html_url / gist_id
 
 失败语义：单个 Gist / 单个订阅失败只跳过它；Sub-Store 不可达、组合订阅产出失败、

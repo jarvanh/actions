@@ -216,7 +216,7 @@ Gist 分工：`gitee` / `cdn` / `taier` 三套各自的 Gist 只装**它们定�
 | `GIST_NODES_MAX_FILE_MB` | `2` | 单个文件超过则跳过（工程保护，不是配额） |
 | `GIST_NODES_MAX_NODES` | `0` | 最终订阅保留多少节点（`0` = 不限） |
 | `GIST_NODES_CARRYOVER` | `1` | 是否把**上一轮发布到本 Gist 的订阅**也当一路输入喂回 Sub-Store。首次运行还没有这个文件时自动跳过 |
-| `GIST_NODES_CARRYOVER_MAX_MB` | `8` | 累积订阅的大小上限（MB）。超了整段跳过并记日志——宁可这一轮不累积，也不把**截断过的** YAML 当完整订阅喂进去 |
+| `GIST_NODES_CARRYOVER_MAX_MB` | `8` | 累积订阅的大小上限（MB）。超了整段跳过并记日志——宁可这一轮不累积，也不把**截断过的** YAML 当完整订阅喂进去。**与容器的 `SUB_STORE_BODY_JSON_LIMIT`（16mb）成对**：投喂是「整份正文塞进 JSON」，把它抬过 ~14 就会撞 413 |
 | `GIST_NODES_TIMEOUT` | `30` | 单次 HTTP 超时（秒） |
 | `GIST_NODES_RETRIES` | `4` | 单页搜索失败（含 429）时的重试次数 |
 | `GIST_NODES_BACKOFF_BASE` | `5` | 重试退避基数（秒），按 5/10/20/40 指数增长 + 抖动 |
@@ -269,7 +269,9 @@ Sub-Store 产出与发布。为什么必须把这两者分开：job 超时是 Gi
 | 候选 Gist 太少 | 看 `gist_nodes_search_age_filtered`（时间窗口挡掉多少）与 `gist_nodes_search_stale_stop`（哪个关键词翻到整页超龄）。窗口设太窄时前几页就被判超龄 |
 | 累积没生效 | `gist_nodes_carryover`（取到了，带 `bytes` / `filename`）/ `gist_nodes_carryover_skipped`（带 `reason`：`missing_gist_id_or_filename` 缺 env、`gist_probe_failed` Gist 探测失败、`no_previous_file` 上一轮还没发布过、`fetch_failed` 取文失败、`oversize` 超 `GIST_NODES_CARRYOVER_MAX_MB`、`empty` 正文为空）。**首次运行必然是 `no_previous_file`，不是故障**；`nodes.json` 的 `substore.carryover` 也记了 `enabled` / `used` / `bytes` / `max_bytes` |
 | Sub-Store 侧到底做了什么 | artifact `gist-nodes-<run_id>/sub-store.log`（容器日志尾巴 200 行）与 `nodes.json`（含处理链、计数） |
-| 容器起不来 | 该步骤会直接 `docker ps -a` / `docker port` / `docker logs` 打出来。镜像 `xream/sub-store:http-meta` 的默认布局是「后端 3000 / 前端 http-meta 3001」，我们只发布后端 3000、**不设** `SUB_STORE_BACKEND_API_PORT`/`_HOST`（设成 3001 会让后端去抢前端已占的端口，`EADDRINUSE` 起来就死） |
+| 容器起不来 | 该步骤会直接 `docker ps -a` / `docker port` / `docker logs` 打出来。镜像 `xream/sub-store:http-meta` 的默认布局是「后端 3000 / 前端 http-meta 3001」，我们只发布后端 3000、**不设** `SUB_STORE_BACKEND_API_PORT`/`_HOST`（设成 3001 会让后端去抢前端已占的端口，`EADDRINUSE` 起来就死）。该步骤另外**要设** `SUB_STORE_BODY_JSON_LIMIT=16mb` 与 `SUB_STORE_FRONTEND_BACKEND_PATH=/`，理由见下面两行 |
+| 投喂时成片 `HTTP 413 PayloadTooLargeError` | 撞了 Sub-Store 的请求体上限，即 `SUB_STORE_BODY_JSON_LIMIT`——**默认只有 `1mb`**（见 `backend/src/vendor/express.js`），workflow 里已抬到 `16mb`。就绪探测还会核对容器日志里的 `[BACKEND] body JSON limit: 16mb`，对不上直接失败（env 名来自第三方镜像，被改名只会静默退回 1mb，而 413 只记进 `subs_failed` 计数、job 照样「成功」）。若只是个别订阅 413：看 `gist_nodes_sub_failed` 是哪几个（`gist-nodes-000` 就是累积那份） |
+| 取回组合时 `HTTP 500 … 必须设置 SUB_STORE_FRONTEND_BACKEND_PATH` | 组合里带了 Script Operator（限量算子，**仅当 `GIST_NODES_MAX_NODES > 0` 才生成**）而容器没设 `SUB_STORE_FRONTEND_BACKEND_PATH`——Node 下的硬前置，见 `backend/src/core/proxy-utils/index.js` 的 `loadScriptItem`。只在本机回环上跑、不对外暴露，直接设 `/`。⚠️ `GIST_NODES_MAX_NODES=0` 的轮次根本不生成脚本算子，**所以这条路径很容易被漏测**（2026-09-14 run 34840068571 带 `max_nodes=100` 才炸出来） |
 | 就绪探测失败（`HTTP 000` 或非 200） | 探测要求 `GET /api/subs` **恰好 200**，判据与脚本一致（早先用 `curl -fsS`，302 也算通过 ⇒ 探测绿了脚本红）。`000` = 连不上（容器没起来），`404` = 端口指到了前端 |
 
 ## 自检

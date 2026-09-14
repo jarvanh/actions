@@ -135,10 +135,30 @@ jobs:
         # 「HTTP-META is running...」之后紧接 `listen EADDRINUSE: address already in use
         # 0.0.0.0:3001`，后端起来就死（本工作流首次运行就栽在这；当时以为「镜像没默认端口
         # env」，其实默认有，只是把号记反了）。
+        #
+        # **另外两个 env 必须设，理由都在 sub-store 源码里**：
+        #
+        #   1) `SUB_STORE_BODY_JSON_LIMIT`（默认 `'1mb'`）。出处 `backend/src/vendor/express.js`：
+        #      `const limit = eval('process.env.SUB_STORE_BODY_JSON_LIMIT') || '1mb';`
+        #      投喂是「整份订阅正文塞进 JSON」POST 到 `/api/subs`，累积那份已 1.07MB，
+        #      转义后必超 1mb ⇒ `413 PayloadTooLargeError`。实测 run 34840068571：
+        #      `gist-nodes-000`（累积）+ 3 个较大抓取文件被拒，`subs_failed=4`。抬到 16mb，
+        #      给 `GIST_NODES_CARRYOVER_MAX_MB`（8）与 `GIST_NODES_MAX_FILE_MB`（2）都留足余量。
+        #      ⚠️ **这两个数字成对**：谁把 CARRYOVER_MAX_MB 抬过 ~14 就要回头抬这里。
+        #
+        #   2) `SUB_STORE_FRONTEND_BACKEND_PATH`。出处 `backend/src/core/proxy-utils/index.js`
+        #      的 `loadScriptItem`：`isNode && !process.env.SUB_STORE_FRONTEND_BACKEND_PATH
+        #      ?.startsWith('/') && !process.env.SUB_STORE_BACKEND_CUSTOM_NAME` 就直接 throw。
+        #      不设 ⇒ 组合里只要带 Script Operator（限量算子），取回就 HTTP 500。
+        #      而 `GIST_NODES_MAX_NODES=0` 时脚本**根本不生成** Script Operator，所以这条
+        #      路径此前每轮都被绕过、一直没暴露（run 34840068571 带 `max_nodes=100` 才炸出来）。
+        #      只在本机回环上跑、不对外暴露，按官方提示直接给 `/` 即可。
         run: |
           set -euo pipefail
           docker run -d --name sub-store \
             -p 127.0.0.1:3000:3000 \
+            -e SUB_STORE_BODY_JSON_LIMIT=16mb \
+            -e SUB_STORE_FRONTEND_BACKEND_PATH=/ \
             xream/sub-store:http-meta
           # 探测判据必须**与消费者一致**：脚本的就绪探活要求恰好 200（gist_nodes.py 里
           # `GET /api/subs` 只要 status != 200 就直接失败）。早先这里用 `curl -fsS`，而 `-f`
@@ -149,12 +169,23 @@ jobs:
             code=$(curl -s -o /dev/null -w '%{http_code}' \
                      http://127.0.0.1:3000/api/subs 2>/dev/null || true)
             if [ "$code" = "200" ]; then
-              echo "Sub-Store 后端就绪（第 $i 次探测，HTTP $code）"
+              # 就绪之后还要确认「抬上限」**真的生效**：env 名来自第三方镜像，被上游改名或
+              # 忽略时**不会报错**，只会静默退回 1mb —— 那时症状是若干较大订阅 413，而 job
+              # 依然「成功」（413 只记进 subs_failed 计数）。后端启动时会打这一行，且与
+              # `[BACKEND] listening on` 走同一个 logger，所以一定在容器日志里。
+              # 另一条 env（SUB_STORE_FRONTEND_BACKEND_PATH）不设的后果是 HTTP 500 + job 失败，
+              # 是**响亮**的失败，不需要守卫。
+              if ! docker logs sub-store 2>&1 | grep -q 'body JSON limit: 16mb'; then
+                echo "::error::Sub-Store 后端没报告 body JSON limit: 16mb（SUB_STORE_BODY_JSON_LIMIT 可能已被上游改名或忽略）。实际启动日志："
+                docker logs --tail 40 sub-store || true
+                exit 1
+              fi
+              echo "Sub-Store 后端就绪（第 $i 次探测，HTTP ${code}）；body JSON limit 已确认 16mb"
               exit 0
             fi
             sleep 2
           done
-          echo "::error::Sub-Store 后端 60 秒内未就绪（最后一次 GET /api/subs → HTTP $code）"
+          echo "::error::Sub-Store 后端 60 秒内未就绪（最后一次 GET /api/subs → HTTP ${code}）"
           # 失败时把容器状态与端口映射一并打出来：只看日志分不清「没起来」和「起来了但
           # 端口不对」（首次运行就吃了这个亏 —— 日志里有 EADDRINUSE，却看不出谁占了端口）
           docker ps -a --filter name=sub-store || true
