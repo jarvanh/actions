@@ -2122,7 +2122,11 @@ jobs:
               NEW_N=$(dc_count /tmp/odlink-dir-cache.json)
               OLD_N=$(dc_count "$STAGE/odlink-dir-cache.json")
               if [ "${NEW_N:-0}" -ge "${OLD_N:-0}" ]; then
-                cp /tmp/odlink-dir-cache.json "$STAGE/odlink-dir-cache.json" 2>/dev/null || true
+                # cp -p 保留 mtime：odlink 侧「内容没变就不重写」，mtime 因此不变；
+                # 保留它后 rclone 比对即可跳过 → 稳态下这份文件不再占每轮上传量。
+                # 用普通 cp 会把 mtime 刷成当前时间，等于每轮强制重传几十 MB。
+                cp -p /tmp/odlink-dir-cache.json "$STAGE/odlink-dir-cache.json" 2>/dev/null || \
+                  cp /tmp/odlink-dir-cache.json "$STAGE/odlink-dir-cache.json" 2>/dev/null || true
               else
                 echo "dir_cache: 本轮快照 ${NEW_N} 条 < 已恢复 ${OLD_N} 条，保留云端更完整的那份"
               fi
