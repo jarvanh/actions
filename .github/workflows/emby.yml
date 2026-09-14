@@ -2425,6 +2425,16 @@ jobs:
           grep -aF '[起播]' /opt/logs/playlog.log 2>/dev/null | tail -n 8 || echo "(无 [起播] 记录)"
           echo "--- playlog.log (tail 60) ---"
           tail -n 60 /opt/logs/playlog.log 2>/dev/null || echo "(无 playlog.log)"
+          # 回填自己的日志：dir_cache 覆盖率是起播取链的唯一大项，而"填到哪了/
+          # 为什么没填完"只有这里知道——是「遍历完成」（全库都覆盖了）还是
+          # 「连续 3 次响应异常」（提前中断）或「达到上限」（MAX_DIRS 卡住），
+          # 三种情形的后续动作完全不同。进度行只取末 3 条，避免刷屏。
+          echo "--- odwarm.log（回填关键行）---"
+          grep -aE '回填启动|回填完成|遍历完成|无更多条目|响应异常|退避|让路' \
+            /opt/logs/odwarm.log 2>/dev/null | tail -n 12 || echo "(无 odwarm.log)"
+          grep -aE '^目录回填 ' /opt/logs/odwarm.log 2>/dev/null | tail -n 3 || true
+          echo "--- warmup.log（字幕预热 + 四个均值）---"
+          grep -aE '字幕预热|预热完成|均值' /opt/logs/warmup.log 2>/dev/null | tail -n 10 || echo "(无 warmup.log)"
       - name: backup emby data
         if: always()
         run: |
