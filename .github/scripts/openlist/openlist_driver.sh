@@ -432,11 +432,33 @@ _backend_write_probe() {
     --retries 1 --low-level-retries 3 --contimeout 30s --timeout "$probe_timeout" 2>&1) || rc=$?
   if [ "$rc" -eq 0 ]; then
     # rc=0 只说明 rclone 认为成功: PUT 假成功在缓存里与真文件无异，
-    # 必须刷新服务端缓存后再读一次确认探针真的在后端（run 31951008332 同口径）
-    _ol_refresh_path_cache "$dest"
-    if rclone lsf "$dest" --files-only --retries 1 --timeout "$probe_timeout" 2>/dev/null \
-       | grep -qxF "$probe_name"; then
-      seen=1
+    # 必须刷新服务端缓存后再读一次确认探针真的在后端（run 31951008332 同口径）。
+    # 读空要重试: OpenList 对新建目录的列表有缓存延迟，一次读空就判死后端代价极大
+    # （整个后端本轮被熔断），2026-09-14 已实测同类误判（折叠校验读空 → 误判零落盘）。
+    local _rt
+    for _rt in 1 2; do
+      _ol_refresh_path_cache "$dest"
+      if rclone lsf "$dest" --files-only --retries 1 --timeout "$probe_timeout" 2>/dev/null \
+         | grep -qxF "$probe_name"; then
+        seen=1
+        break
+      fi
+    done
+  fi
+  # 写入失败时先在挂载根再探一次: 405 是**路径特异性**的（同一后端的挂载根与多数目录
+  # 都正常，只有个别目录名写不进 —— 2026-09-14 诊断坐实: 真实祖先下写任意长名/深路径
+  # 全 OK，唯那个具体目录名稳定 405）。单点失败就熔断整个后端，等于把"路径特异性"
+  # 又提升成"后端级"，会把健康后端误判为死。两侧都写不进才认后端故障。
+  if [ "$rc" -ne 0 ]; then
+    local _root_probe="${root}/${probe_name}" _root_rc=0
+    rclone copyto "$probe_local" "$_root_probe" \
+      --retries 1 --low-level-retries 3 --contimeout 30s --timeout "$probe_timeout" >/dev/null 2>&1 || _root_rc=$?
+    rclone deletefile "$_root_probe" --retries 1 --low-level-retries 3 --timeout "$probe_timeout" >/dev/null 2>&1
+    if [ "$_root_rc" -eq 0 ]; then
+      _BACKEND_WRITE_PROBE_CACHE["$dest"]=1
+      echo "   ⚠️ 目标路径写不进但挂载根可写 ⇒ 判定为路径特异性（非后端故障），按可写放行（该目录交给折叠/换目录兜底）" | tee ${log_file:+-a "$log_file"}
+      rm -f "$probe_local" 2>/dev/null || true
+      return 0
     fi
   fi
   rclone deletefile "$probe_dst" --retries 1 --low-level-retries 3 --timeout "$probe_timeout" >/dev/null 2>&1
