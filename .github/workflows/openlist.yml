@@ -97,6 +97,19 @@ on:
           - "2"
           - "3"
           - "4"
+      sync_budget_min:
+        # 唯一影响"一轮跑多久"的旋钮（2026-09-15 加）。
+        # 调短 = 快速迭代: 完整日志/结论从 5.5h 降到 e.g. 30–90min；生产跑量用默认 320。
+        # 代价: setup（等待驱动初始化 ~4min）与收尾（持久化复核/通知/接力 ~8min）的
+        # 固定开销占比升高 —— 60min 轮约 20%，320min 轮约 4%。
+        # ⚠️ 上限 320: 同步 step 的 timeout-minutes 是 330，给更大只会被硬杀（脚本里
+        # 有 clamp + 告警）。
+        # ⚠️ 派生阈值（批次最小片长 / 尾部预留）会随预算等比缩放，见 task_engine.sh
+        # _budget_scaled —— 否则短预算 + 固定 120min 片长会让批次一个都不开。
+        description: "同步模式: 时间预算（分钟，默认 320）。调短用于快速取日志/结论（如 30/60/90）；上限 320（同步 step 超时 330min）"
+        required: false
+        type: number
+        default: 320
       session_hold:
         # 默认改为 false: 同步 step 预算 320min 常态跑满（近 15 轮 duration_s 普遍
         # 19000-19800s），job 随之撞 6h 上限或被 330min 超时收掉，本 step 实测从未
@@ -487,14 +500,26 @@ jobs:
           # boolean false 会被 `||` 当成假值 → 永远落到兜底值，手动传 false 也会被跳过
           # （与 session_hold 同一个坑，见其注释）。schedule 触发时为 null → 取兜底。
           SKIP_PREVIEW: ${{ github.event.inputs.skip_preview || 'true' }}
+          # 预算（分钟）: 调短即可"快速取日志/结论"（完整一轮 5.5h → 如 60min），
+          # 生产跑量仍用默认 320。见下方 clamp 与 _budget_scaled 的说明。
+          SYNC_BUDGET_MIN: ${{ github.event.inputs.sync_budget_min || '320' }}
         run: |
           source /tmp/load_all.sh
           # P0 趋势: 记录同步工作开始时间（收尾时算本轮历时）
           trend_capture_start
-          # P2 优雅到站: 预算锚点 = 本 step 启动 + 320min（6h 上限留出
-          # setup/收尾/Persist/接力余量；超预算后不再开新工作，做完当前即退）
-          export OPENLIST_SYNC_DEADLINE_EPOCH=$(( $(date +%s) + ${OPENLIST_SYNC_BUDGET_SECONDS:-19200} ))
-          echo "同步时间预算: 320min（至 $(date -d "@$OPENLIST_SYNC_DEADLINE_EPOCH" '+%H:%M') UTC，超时优雅收摊）"
+          # P2 优雅到站: 预算锚点 = 本 step 启动 + BUDGET_MIN
+          # 上限保护: 本 step timeout-minutes 是 330，预算给到 ≥330 会被超时硬杀
+          # （优雅到站就白设计了）⇒ 超过 320 一律按 320 执行并告警。
+          case "${SYNC_BUDGET_MIN}" in
+            ''|*[!0-9]*) echo "⚠️ sync_budget_min=[${SYNC_BUDGET_MIN}] 非正整数，按默认 320 执行"; SYNC_BUDGET_MIN=320 ;;
+          esac
+          if [ "${SYNC_BUDGET_MIN}" -gt 320 ]; then
+            echo "⚠️ sync_budget_min=${SYNC_BUDGET_MIN} 超过上限 320（step 超时 330min），按 320 执行"
+            SYNC_BUDGET_MIN=320
+          fi
+          export OPENLIST_SYNC_BUDGET_SECONDS=$(( SYNC_BUDGET_MIN * 60 ))
+          export OPENLIST_SYNC_DEADLINE_EPOCH=$(( $(date +%s) + OPENLIST_SYNC_BUDGET_SECONDS ))
+          echo "同步时间预算: ${SYNC_BUDGET_MIN}min（至 $(date -d "@$OPENLIST_SYNC_DEADLINE_EPOCH" '+%H:%M') UTC，超时优雅收摊）"
 
           # 等待 OpenList 就绪（容器刚启动时如果尚未就绪会导致预览为空及无谓的同步重传）
           echo "等待 OpenList 就绪..."
