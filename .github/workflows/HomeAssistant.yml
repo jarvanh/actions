@@ -1,9 +1,23 @@
 name: HomeAssistant
 
+# 自续触发（收尾用 gh workflow run 起下一轮）需要 actions:write，其余只读
+permissions:
+  contents: read
+  actions: write
+
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    # 兜底触发（自续触发是主接力机制，见收尾「自续触发（下轮接力）」步骤）。
+    # 频率取 1h 而非 */5：高频 cron 会被 GitHub 限流（实测 */5 曾 4.5h 零触发），
+    # 且每 5 分钟造一个被单例挡掉的排队运行、把 run 列表塞满；交接本身由"队列里
+    # pending 运行在上一轮结束瞬间接管"完成——零空档不靠频率。
+    - cron: "0 * * * *"
   workflow_dispatch:
+    inputs:
+      self_retrigger:
+        description: "收尾是否自动起下一轮（关掉则本轮结束后静止）"
+        type: boolean
+        default: true
   watch:
     # types: started
 
@@ -225,3 +239,17 @@ jobs:
             --include "home-assistant_v2.db-wal" --include "home-assistant_v2.db-shm" \
             --include "home-assistant_v2.db-journal" 2>/dev/null || true
           echo "回传完成: $(rclone lsf --files-only --recursive dropbox:self-hosted/HomeAssistant 2>/dev/null | wc -l) 个文件"
+
+      # ===== 自续触发（下轮接力）=====
+      # 放在最后一步：数据已回传完才派下一轮，避免下一轮开机时读到半份数据。
+      # 三条判据（人工取消不接力 / 已有排队则跳过 / 开关关闭不接力）与统一日志都在
+      # .github/scripts/lib/self_retrigger.sh 里，与 emby 同源。
+      - name: 自续触发（下轮接力）
+        if: ${{ always() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SR_STATUS: ${{ job.status }}
+          SR_ENABLED: ${{ github.event.inputs.self_retrigger || 'true' }}
+        run: |
+          source "$GITHUB_WORKSPACE/.github/scripts/lib/self_retrigger.sh"
+          self_retrigger HomeAssistant.yml || true
