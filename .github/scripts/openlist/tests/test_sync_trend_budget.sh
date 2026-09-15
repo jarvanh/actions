@@ -7,6 +7,8 @@
 #   1d. 预算派生阈值（2026-09-15）: 默认预算下精确还原原值 / 短轮按比例缩放 + 下限 /
 #       **运行期惰性求值回归锁**（workflow 是先 source 再 export 预算，source 时求值
 #       会让短轮拿到 7200s 片长 ⇒ 一个批次都不开）
+#   1e. 修复管线的预算尾段（2026-09-15, C 判据专项）: 同一剩余预算下新闸必须比旧闸
+#       **更早**收摊，把尾部留给修复管线（否则修复被饿死、长尾不收敛）
 #   2. trend_record_transferred 只累计正数字节，非法输入忽略
 #   3. trend_capture_remaining 汇总 PREVIEW_PENDING_MAP（"bytes count" 口径）
 #      3b/3c. 三条 unknown 路径（2026-09-15）: 源端列举失败 / 空 map（skip_preview
@@ -125,6 +127,21 @@ _v=$(bash -c "source '$_REPO_ROOT/.github/scripts/openlist/task_engine.sh' >/dev
   OPENLIST_SYNC_DEADLINE_EPOCH=\$(( \$(date +%s) + 3600 ))
   echo \"\$(_budget_slice_seconds)\"")
 [ "${_v:-0}" -gt 2500 ] && ok "派生: 传输上限也按运行期预算算（尾部预留缩到下限 600）" || bad "派生: 传输上限实得 ${_v:-空}（期望>2500）"
+
+# --- 1e. 修复管线的预算尾段（2026-09-15，C 判据专项）---
+# 背景: 子目录循环原本用 sync_budget_stop（600s 片）——每轮把预算吃到只剩 10min，
+#   而修复管线紧跟在每个子目录的 sync 之后 ⇒ 最后一个子目录的修复必然被切在尾部
+#   （run 34985212438: 收尾 `新落盘 1 · 未修复 985`）。改闸后尾部整段留给修复。
+OPENLIST_SYNC_BUDGET_SECONDS=3600          # 60min 轮 ⇒ 预留 25% = 900s
+OPENLIST_SYNC_DEADLINE_EPOCH=$(( $(date +%s) + 800 ))
+if sync_budget_stop 2>/dev/null; then bad "预留: 剩 800s 时旧闸不该停（600s 片）"; else ok "预留: 旧闸在剩 800s 时仍继续（对照组）" ; fi
+if _subdir_budget_stop 2>/dev/null; then ok "预留: 新闸在剩 800s 时停下（900s 尾段留给修复管线）"; else bad "预留: 新闸未生效" ; fi
+OPENLIST_SYNC_DEADLINE_EPOCH=$(( $(date +%s) + 1200 ))
+if _subdir_budget_stop 2>/dev/null; then bad "预留: 剩 1200s > 900s 预留 → 不该停"; else ok "预留: 剩 1200s 时继续（未过早收摊）" ; fi
+# 默认档位: 320min 预算 → 25% = 4800s 预留
+OPENLIST_SYNC_BUDGET_SECONDS=19200
+[ "$(_repair_reserve_seconds)" = "4800" ] && ok "预留: 320min 轮预留 4800s" || bad "预留: 期望 4800 实得 $(_repair_reserve_seconds)"
+unset OPENLIST_SYNC_DEADLINE_EPOCH OPENLIST_SYNC_BUDGET_SECONDS
 
 # --- 2. trend_record_transferred ---
 rm -f /tmp/ol_trend_transferred.log

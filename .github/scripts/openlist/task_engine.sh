@@ -376,6 +376,32 @@ sync_budget_stop() {
   [ $(( $(date +%s) + OPENLIST_SYNC_MIN_SLICE_SECONDS )) -ge "$OPENLIST_SYNC_DEADLINE_EPOCH" ]
 }
 
+# ===== 修复管线的预算尾段（2026-09-15，C 判据专项）=====
+# 问题: 子目录循环的闸是"全局最小片 600s" —— 于是每轮都把预算一路吃到只剩 10 分钟，
+#   而**修复管线是在每个子目录的 sync 之后紧接着跑的** ⇒ 最后一个子目录的修复只剩几分钟，
+#   必然被切在尾部（run 34940234180: 3 处顺延 37+10+11；run 34985212438: 收尾
+#   `成功 136（新落盘 1 · 沿用上轮 135）· 缺失 1121 · 未修复 985`）。
+#   后果: 已知缺失的文件每轮被 sync 重传一遍，却永远轮不到用别的方法修 ⇒ 长尾不收敛。
+# 做法: 子目录循环（串行与并行派发）改用 `_subdir_budget_stop` —— 预留
+#   「预算 × OPENLIST_REPAIR_RESERVE_PCT%」（默认 25%，上限 60%）给尾部，
+#   这样**最后一个子目录的修复**能拿到整段预留时间。
+_repair_reserve_seconds() {
+  local pct="${OPENLIST_REPAIR_RESERVE_PCT:-25}" budget r
+  [[ "$pct" =~ ^[0-9]+$ ]] || pct=25
+  [ "$pct" -gt 60 ] && pct=60
+  budget="${OPENLIST_SYNC_BUDGET_SECONDS:-19200}"
+  [[ "$budget" =~ ^[0-9]+$ ]] || budget=19200
+  r=$(( budget * pct / 100 ))
+  [ "$r" -lt "${OPENLIST_SYNC_MIN_SLICE_SECONDS:-600}" ] && r="${OPENLIST_SYNC_MIN_SLICE_SECONDS:-600}"
+  echo "$r"
+}
+_subdir_budget_stop() {
+  [ -n "${OPENLIST_SYNC_DEADLINE_EPOCH:-}" ] || return 1
+  local r
+  r=$(_repair_reserve_seconds)
+  [ $(( $(date +%s) + r )) -ge "$OPENLIST_SYNC_DEADLINE_EPOCH" ]
+}
+
 # 预算派生阈值：按预算**成比例缩放**（2026-09-15 加，支持"短轮快速迭代"）
 # 为什么需要: 下面这些阈值原本是写死的绝对秒数，只在 320min 预算下自洽。一旦把
 #   预算调短（为了快速拿日志/结论，见 workflow 入参 sync_budget_min），绝对阈值
@@ -841,8 +867,9 @@ _sync_subdirs_parallel_run() {
   local _idx=0 _running=0 _pid
   while IFS= read -r subdir || [ -n "$subdir" ]; do
     [ -z "$subdir" ] && continue
-    # P2 优雅到站: 预算将尽不再分发新 worker（在途的等待自然完成）
-    if sync_budget_stop; then
+    # P2 优雅到站: 预算将尽不再分发新 worker（在途的等待自然完成）。
+    # 同串行循环: 用预留修复尾段的口径，而不是全局最小片（见 `_subdir_budget_stop` 注释）。
+    if _subdir_budget_stop; then
       echo "⏳ 时间预算将尽，停止分发新子目录（未分发的留给下轮接力）"
       SYNC_TIME_EXHAUSTED=1
       break
@@ -1167,9 +1194,11 @@ _sync_task_impl() {
   else
   while IFS= read -r subdir; do
     [ -z "$subdir" ] && continue
-    # P2 优雅到站: 预算将尽不再开新子目录（已完成的子目录 marker 已各自落盘）
-    if sync_budget_stop; then
-      echo "⏳ 时间预算将尽，停止开新子目录（未同步的留给下轮接力）"
+    # P2 优雅到站: 预算将尽不再开新子目录（已完成的子目录 marker 已各自落盘）。
+    # 用 `_subdir_budget_stop`（预留修复尾段）而不是 `sync_budget_stop`: 见其注释 ——
+    # 修复管线紧跟在每个子目录的 sync 之后，不给它留预算就等于让长尾永远不收敛。
+    if _subdir_budget_stop; then
+      echo "⏳ 时间预算将尽，停止开新子目录（未同步的留给下轮接力；尾部 $(_repair_reserve_seconds)s 留给修复管线）"
       SYNC_TIME_EXHAUSTED=1
       break
     fi
