@@ -29,9 +29,10 @@
      组合只引用已投喂的）；产出预算耗尽 → 就地失败（退出码 1，省掉建组合/取回就没有产物）。
      两者方向相反，各配负向对照。
 
-**不覆盖健康检查过滤**：它要另下一份 mihomo（几十 MB）并等一个 10 分钟预算，本机跑只会
-一路超时。这里统一用 `GIST_NODES_ALIVE_FILTER=0` 关掉（过滤语义由
-`tests/test_alive_filter.py` 用假 mihomo 专测）；顺带也证明了这个开关真的能关掉过滤。
+**不覆盖健康检查过滤与试装排雷**：两者都要另起 mihomo（几十 MB 下载 + 每轮几十秒等待），
+本机跑只会一路超时。这里统一用 `GIST_NODES_ALIVE_FILTER=0` / `GIST_NODES_TRIAL_LOAD=0`
+关掉（过滤语义由 `tests/test_alive_filter.py` 专测，试装由 `tests/test_trial_load.py` 专测）；
+顺带也证明了这两个开关真的能关掉。
 
 跑法：python .github/scripts/proxy-speedtest/tests/test_gist_nodes_substore.py
 退出码 0 = 全部通过。
@@ -169,10 +170,11 @@ def run_main(gist_nodes, tmpdir, extra_env, carryover_text=None):
 
     env = dict(os.environ)
     env.update({'GIST_NODES_WORKDIR': str(tmpdir), 'GIST_NODES_MAX_NODES': '5',
-                # 关掉健康检查过滤：本自检验的是 Sub-Store 那条链路，而过滤要另下一份
-                # mihomo（几十 MB）再等 10 分钟预算，本机只会一路超时失败。过滤本身
-                # 由 tests/test_alive_filter.py 专测；这里只要它不干扰断言。
-                'GIST_NODES_ALIVE_FILTER': '0',
+                # 关掉健康检查过滤与试装排雷：本自检验的是 Sub-Store 那条链路，而这两层
+                # 都要另起 mihomo（几十 MB 下载 + 每轮几十秒等待），本机只会一路超时失败。
+                # 过滤由 tests/test_alive_filter.py 专测、试装由 tests/test_trial_load.py 专测；
+                # 这里只要它们不干扰断言（顺带也证明这两个开关真的能关掉）。
+                'GIST_NODES_ALIVE_FILTER': '0', 'GIST_NODES_TRIAL_LOAD': '0',
                 'GIST_NODES_DRY_RUN': '0', 'GH_TOKEN': 'fake'})
     env.update(extra_env)
     saved = dict(os.environ)
@@ -224,8 +226,8 @@ def run_main_real_search(gist_nodes, tmpdir, extra_env):
     env = dict(os.environ)
     env.update({'GIST_NODES_WORKDIR': str(tmpdir), 'GIST_NODES_DRY_RUN': '0',
                 'GH_TOKEN': 'fake', 'GIST_NODES_PAGE_DELAY': '0',
-                # 同 run_main：过滤另测，这里关掉以免拖时间
-                'GIST_NODES_ALIVE_FILTER': '0',
+                # 同 run_main：过滤与试装另测，这里关掉以免拖时间（两者都要起 mihomo）
+                'GIST_NODES_ALIVE_FILTER': '0', 'GIST_NODES_TRIAL_LOAD': '0',
                 'GIST_NODES_MAX_NODES': '0', 'GIST_NODES_QUERIES': 'ss://'})
     env.update(extra_env)
     saved = dict(os.environ)

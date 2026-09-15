@@ -39,6 +39,17 @@ fail-open 的边界（与 `taier_speedtest.probe_node_alive` 同一原则）：�
 并有明确死结论」才丢节点。mihomo 起不来、超时到点仍有节点没出结论、API 报错——一律原样
 放行全部并打 `alive_filter_skipped`，宁可让下游去扛大规模，也不能因为本层故障把整轮变成
 零节点发布。
+
+---
+
+本模块还负责第二件事：**发布前的试装排雷**（`trial_load`）。过滤只解决「节点活不活」，
+不解决「节点能不能被 mihomo 装上」——而后者会**整片废掉订阅**：mihomo 对 provider 是
+「全有或全无」，片里有一个解析不了的节点，整个 provider 的 `proxies` 就是 `[]`。分片只能
+把损失压到 1/片数，不能消除；只要坏节点够多，下游照样可能拿到远小于发布的节点数。
+
+所以发布前先自己把这份 YAML 完整喂给 mihomo 试装一遍：装得上就直接发；装不上就**二分**
+定位到具体是哪几个节点（而不是整片丢掉），只摘掉它们。判据、代价与 fail-open 边界见
+`trial_load` 的 docstring。
 """
 import pathlib
 import sys
@@ -93,6 +104,42 @@ FILTER_SHARD_SIZE = 200
 # `_snapshot` 过滤掉全部 provider，表现为「loaded=0、所有节点都查不到结论」——
 # 不报错、不 fail-open，只是静默变成一个纯摆设（实测踩过）。
 SHARD_PREFIX = 'shard-'
+
+# ---------------------------------------------------------------------------
+# 试装（trial_load）：发布前排掉「mihomo 装不上」的节点
+# ---------------------------------------------------------------------------
+# 试装 provider 的固定文件名与 provider 名。**每轮全量重写、不需要清理**（同分片），
+# 且**绝不能按通配符删这里**：调用方是先写文件、再起 mihomo，删掉输入会让 mihomo
+# 报一片 `no such file or directory` 而让整层 fail-open。
+TRIAL_FILE_NAME = 'trial.yaml'
+TRIAL_PROVIDER_NAME = 'trial'
+
+# 单个节点占一行 base64 的换算（明文 ≈ 3/4 行宽）。**不能按明文长度估**：mihomo
+# 装 provider 时对 `proxies` 整段做 base64 解压再解析，超过 3MB 直接报
+# `proxy 0 error: ... larger than 2.99MB, maybe base64 encoded` —— 那个形态与「真坏节点」
+# 一模一样，会把整块误判成坏块、白跑一轮二分。每行按 120 估（实际行宽由节点名长度决定，
+# 往往更短），则 2000 个 ≈ 180KB，距 3MB 有 16 倍余量，且留在 `TRIAL_MAX_NODES_PER_BATCH`。
+B64_LINE_WIDTH = 120
+# 一次试装最多塞多少个节点。超过就切块——切块**不引入误报**（上面那个上限是解码后的
+# 字节数，不是节点数），代价只是多起几次 mihomo；而块内节点少还让二分更省。
+TRIAL_MAX_NODES_PER_BATCH = 2000
+# 二分细到「块内还剩几个就不再往下钻、整块摘掉」的门槛。取 8：块内 8 个全坏才丢 8 个，
+# 而继续二分的代价是 num_rounds 次 mihomo 起停。另外，**单节点装不上时二分必须收敛**：
+# 靠 `_trial_isolate` 里「坏了还要按二分丢一半」那条分支，最坏会走到这里兜底。
+TRIAL_BISECT_FLOOR = 8
+# 一个坏块最多试装多少次。**必须是有限的**：区间队列的做法下，一个块里节点全坏时
+# 队列会一路切到 floor，试装次数约为 2·(块内节点数/floor)。全坏是极端情况（那样直接
+# 摘光就好，本来也不指望精确定位），但上限仍要足够大才不至于把「全坏」误判成「归因失败」
+# 而 fail-open。取 400：正常形态（1-2 个坏节点、块 2000 个）在 ~30 次内结束，
+# 400 能容下「块内 2000 个里有几十个坏节点」，同时把病态形态挡在有限次内。
+# 顶到上限即归为「归因失败」，由调用方 fail-open，绝不无限循环。
+TRIAL_MAX_ISOLATE_ROUNDS = 400
+# 每轮试装重起 mihomo 的等待上限。单轮就绪远快于 60（那是过滤层的保守值），
+# 折中取 30：异常时少空等，正常时绰绰有余。
+TRIAL_WAIT_TIMEOUT = 30
+# mihomo 日志里「provider 初始化失败」的特征串。用于把「节点被 mihomo 判非法」
+# 与「进程根本没起来 / 别的原因 fatal」分开——后者绝不能当成分辨出坏节点。
+TRIAL_ERROR_MARKERS = ('initial proxy provider', 'error: proxy')
 
 
 def _safe_home_dir(base):
@@ -219,13 +266,17 @@ def _dump_mihomo_log(tail=1500):
         log_progress('alive_filter_mihomo_log_read_failed', error=str(e))
 
 
-def _start_mihomo():
+def _start_mihomo(wait_timeout=60):
     """起一个全新的 mihomo（先收掉同命令行的旧进程，与 taier 的 TUN 版本同一手法）。
 
-    **不要在这里清理 `shard-*.yaml`**：调用方是「先写分片、再起 mihomo」，任何按
-    `shard-*.yaml` 通配的删除都会把刚写好的输入删掉，mihomo 随即报一片
+    `wait_timeout` 由调用方给：过滤层用 60（万级节点、几十个分片 provider，建 provider
+    本身就要时间），试装层用 `TRIAL_WAIT_TIMEOUT`（单 provider、且要反复起停，异常时
+    少空等比多等更值）。
+
+    **不要在这里清理 `shard-*.yaml` / `trial.yaml`**：调用方是「先写输入、再起 mihomo」，
+    任何按通配符的删除都会把刚写好的输入删掉，mihomo 随即报一片
     `no such file or directory` 而让整层 fail-open（实测 2026-09-15 加清理时就是这个症状）。
-    分片本来每轮全量重写，不存在需要清理的残留。
+    这些文件本来每轮全量重写，不存在需要清理的残留。
     """
     import os
     import signal
@@ -233,6 +284,7 @@ def _start_mihomo():
 
     ensure_local_mihomo()
 
+    killed = []
     try:
         out = subprocess.run(['pgrep', '-af', f'{MIHOMO} -d'], text=True,
                              capture_output=True, timeout=10)
@@ -248,15 +300,36 @@ def _start_mihomo():
                 continue
             try:
                 os.kill(pid, signal.SIGTERM)
+                killed.append(pid)
             except OSError as e:
                 log_progress('alive_filter_terminate_skipped', pid=pid, error=str(e))
     except Exception as e:
         log_progress('alive_filter_process_scan_failed', error=str(e))
 
+    # **必须等旧进程真的退出**：只发 SIGTERM 不等的话，下一次 Popen 会和它抢
+    # 19090 控制器端口，新进程报 `External controller listen error: bind: address
+    # already in use` 后**静默不监听**，`wait_mihomo` 只能等到超时——而试装层要反复
+    # 起停几十次，这个竞态会稳定复现（沙箱实测 test_gist_nodes_substore 里就是这么
+    # 空转了 30 秒 × N 次）。等待上限 10 秒，超时了也继续（进程可能已经退出但未被
+    # reaped，真正的判据是端口能不能 bind，交给下面的 Popen 去发现）。
+    if killed:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            still = []
+            for pid in killed:
+                try:
+                    os.kill(pid, 0)
+                    still.append(pid)
+                except OSError:
+                    continue
+            if not still:
+                break
+            time.sleep(0.2)
+
     with MIHOMO_LOG.open('a', encoding='utf-8') as lf:
         subprocess.Popen([str(MIHOMO), '-d', str(MIHOMO_CONFIG.parent), '-f', str(MIHOMO_CONFIG)],
                          stdout=lf, stderr=subprocess.STDOUT, start_new_session=True)
-    return wait_mihomo(timeout=60)
+    return wait_mihomo(timeout=wait_timeout)
 
 
 def filter_alive(env, proxies, budget_seconds=DEFAULT_FILTER_BUDGET_SECONDS,
@@ -406,3 +479,279 @@ def filter_alive(env, proxies, budget_seconds=DEFAULT_FILTER_BUDGET_SECONDS,
         log_progress('alive_filter_dead_samples', count=len(dead_names),
                      samples=dead_names[:20])
     return alive_bodies, report
+
+
+# ---------------------------------------------------------------------------
+# 试装（trial_load）
+# ---------------------------------------------------------------------------
+def _trial_load_config(path):
+    """生成「一个 file provider + 全量健康检查」的试装配置。
+
+    与 `_build_filter_config` 的差别只有两点，都是有意的：
+
+    1. provider 名/文件名固定（`trial`），不是按序号分片——这里要的是**一个** provider
+       来当判据：装得上 = 这批节点全部合法。
+    2. 健康检查开着是为了与下游**逐字一致**（下游也是 `lazy: false` + `expected-status:
+       204`），但本层**从不读结论**：装不装得上在配置解析那一刻就已决定，`/version` 一
+       就绪即可判定（见 `trial_load`）。开着也让「同一份节点在这里能装、在下游也能装」
+       这个等价关系成立。
+    """
+    cfg = {
+        'port': 17890,
+        'socks-port': 17891,
+        'mixed-port': MIHOMO_MIXED_PORT,
+        'allow-lan': False,
+        'mode': 'global',
+        'log-level': 'info',
+        'external-controller': '127.0.0.1:19090',
+        'secret': '',
+        'proxy-groups': [
+            {
+                'name': 'AUTO',
+                'type': 'select',
+                'use': [TRIAL_PROVIDER_NAME],
+                'proxies': ['DIRECT'],
+            }
+        ],
+        'proxy-providers': {
+            TRIAL_PROVIDER_NAME: {
+                'type': 'file',
+                'path': str(path),
+                'health-check': {
+                    'enable': True,
+                    'url': DEFAULT_HEALTHCHECK_URL,
+                    'interval': 86400,
+                    'timeout': 5000,
+                    'lazy': False,
+                    'expected-status': 204,
+                },
+            }
+        },
+        'rules': ['MATCH,AUTO'],
+    }
+    MIHOMO_CONFIG.write_text(yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False),
+                             encoding='utf-8')
+    return cfg
+
+
+def _trial_install(proxies, workdir):
+    """把 `proxies` 整批写成一个 file provider，起 mihomo 试装。
+
+    返回 `(ok, err)`：`ok=True` = 装机成功；`ok=False, err=''` = 装机失败且**无法归因**
+    （mihomo 没起来、日志里没有 provider 失败特征）——调用方必须把它当「自己故障」而
+    不是「这批节点有问题」；`ok=False, err=真因` = mihomo 明确拒绝了这份 provider。
+
+    **判定时机是「控制器就绪」而不是「健康检查跑完」**：provider 的解析发生在配置装载
+    阶段，装不上时 mihomo 写 `level=error … error: proxy N error: …` 然后跳过该 provider
+    继续起控制器。所以 `wait_mihomo` 一返回就能下结论——**不必**为每次试装再花一轮探活
+    （那是 2000 个节点 × 每块一轮，会吃掉整个预算）。
+    """
+    path = workdir / TRIAL_FILE_NAME
+    path.write_text(yaml.safe_dump({'proxies': list(proxies)}, allow_unicode=True,
+                                   sort_keys=False), encoding='utf-8')
+    _trial_load_config(path)
+    try:
+        MIHOMO_LOG.write_text('', encoding='utf-8')
+    except Exception as e:
+        log_progress('trial_load_log_truncate_failed', error=str(e))
+    try:
+        _start_mihomo(wait_timeout=TRIAL_WAIT_TIMEOUT)
+    except Exception as e:
+        # 起不来 ≠ 节点有问题：归因失败（err=''），由调用方决定整层 fail-open。
+        log_progress('trial_load_start_failed', error=str(e))
+        return False, ''
+    try:
+        text = MIHOMO_LOG.read_text(encoding='utf-8', errors='ignore')
+    except Exception as e:
+        log_progress('trial_load_log_read_failed', error=str(e))
+        return False, ''
+    for line in text.splitlines():
+        if any(marker in line for marker in TRIAL_ERROR_MARKERS):
+            return False, line.strip()
+    return True, ''
+
+
+def _trial_isolate(chunk, workdir, bisect_floor=TRIAL_BISECT_FLOOR):
+    """把一个**已知装不上**的块摘到「剩下的能装上」为止，返回 `(done, removed, rounds)`。
+
+    返回 `done=False` = 归因失败（mihomo 起不来 / 报错对不上 provider），调用方据此把
+    这块排除在外并继续跑其余块——绝不因此整层 fail-open。
+
+    做法：维护一个**还没查清的区间队列**，每轮取一个区间试装。
+
+      * 装得上 ⇒ 这个区间没有问题，丢掉它；
+      * 装不上且区间内 ≤ `bisect_floor` 个 ⇒ 整块摘掉（兜底出口）；
+      * 装不上且区间更大 ⇒ 对半切开，**两半都入队**（还不知道坏在哪半）。
+
+    为什么「两半都入队」而不是只追一支：只追一支就必须在摘掉一个坏节点后回头复验原区间，
+    而「有它参与才装不上」这类坏法会反复触发同一条探针链——实测那版顶到轮数上限、
+    一个节点都摘不出来。两半都入队没有这个问题：每个区间**只试装一次**就被替换成它的两半，
+    区间总数与节点数同阶，坏节点 m 个时总试装 O(m·log n + n/floor)，且**必然终止**。
+
+    「装不上且更大 ⇒ 切两半」是**无损**的：两半合起来就是原区间，不会漏掉任何节点，只是把
+    「坏在哪里」继续往下问。所以不需要「父子复验」那套状态。
+
+    与「逐节点判定」的关键差别（也是它便宜的原因）：这里**只摘能证明是坏的**。全好时一个
+    都不摘；只有 1 个坏节点时摘它一个，不整片丢。
+    """
+    removed = []
+    removed_names = set()
+    rounds = 0
+    pending = [list(chunk)]
+    while pending:
+        if rounds >= TRIAL_MAX_ISOLATE_ROUNDS:
+            # 顶到上限：归为「归因失败」，由调用方 fail-open，绝不无限循环。
+            return False, removed, rounds
+        cur = pending.pop()
+        if not cur:
+            continue
+        if all(str((p or {}).get('name') or '') in removed_names for p in cur):
+            continue
+        ok, err = _trial_install(cur, workdir)
+        rounds += 1
+        if ok:
+            continue
+        if not err:
+            return False, removed, rounds
+        if len(cur) <= bisect_floor or len(cur) == 1:
+            # 兜底出口：无法再往下钻，整块摘掉（见 docstring）。
+            for i, p in enumerate(cur):
+                name = str((p or {}).get('name') or f'#{i}')
+                if name in removed_names:
+                    continue
+                removed.append(name)
+                removed_names.add(name)
+            continue
+        mid = len(cur) // 2
+        pending.append(cur[:mid])
+        pending.append(cur[mid:])
+    return True, removed, rounds
+
+
+def trial_load(proxies, workdir=None, max_nodes_per_batch=TRIAL_MAX_NODES_PER_BATCH,
+               bisect_floor=TRIAL_BISECT_FLOOR):
+    """把 `proxies` 交给本机 mihomo 试装，返回 `(保留的节点, 报告 dict)`。
+
+    为什么需要它：mihomo 对 provider 是**全有或全无**——片里一个节点解析失败（实测
+    2026-09-15：`invalid REALITY short ID`），整个 provider 的 `proxies` 就是 `[]`。
+    过滤层的分片只把损失压到 1/片数，坏节点多起来下游照样会大幅缩水。这一层在发布前
+    把「装不上」的节点拎出来摘掉，**其余原样保留**——不是整片丢。
+
+    粒度与代价：二分定位到单个节点（复杂节点图才退化成摘掉一小块 ≤ `bisect_floor`
+    个）。代价是每次试装都要重起一次 mihomo（内核已在本地，不必重新下载；一次就绪
+    通常几秒）。所以先按 `max_nodes_per_batch` 切块**只定位坏块**，再对坏块二分——
+    全好时总代价只有「块数」那么几次。
+
+    两条硬约束（都踩过）：
+
+      * **provider 文件必须写在 home 内**，否则 mihomo `level=fatal` 直接退出，
+        「装不上」会被误读成「节点非法」而**误删好节点**。这里同样过 `_safe_home_dir`。
+      * **判据必须排除「自己故障」**：mihomo 起不来、日志里没有 provider 失败特征时
+        返回 `skipped`，原样放行全部。宁可下游去扛坏节点，也不能凭一次起不来的日志删节点。
+
+    与 `filter_alive` 同一降级原则：这一层故障**不失败**，只是退回「不做试装」。
+    """
+    total = len(proxies)
+    report = {
+        'enabled': True,
+        'total': total,
+        'kept': total,
+        'removed': 0,
+        'removed_names': [],
+        'batches': 0,
+        'bad_batches': 0,
+        'rounds': 0,
+        'elapsed_seconds': 0.0,
+        'batches_failed': 0,
+        'skipped': False,
+        'skip_reason': '',
+        'first_error': '',
+    }
+    started = time.monotonic()
+    if total == 0:
+        return [], report
+    workdir = _safe_home_dir(workdir or (MIHOMO_CONFIG.parent / 'trial-load'))
+    workdir.mkdir(parents=True, exist_ok=True)
+
+    def give_up(reason, note):
+        report.update({'kept': total, 'removed': 0, 'removed_names': [], 'skipped': True,
+                       'skip_reason': reason,
+                       'elapsed_seconds': round(time.monotonic() - started, 1)})
+        log_progress('trial_load_skipped', reason=reason, note=note, total=total)
+        _dump_mihomo_log()
+        return list(proxies), report
+
+    try:
+        ensure_local_mihomo()
+    except Exception as e:
+        return give_up('mihomo_ensure_failed', f'准备 mihomo 内核失败：{e}')
+    batch_size = max(1, min(int(max_nodes_per_batch or total), TRIAL_MAX_NODES_PER_BATCH))
+    removed_set = set()
+    batches = 0
+    bad = 0
+    rounds = 0
+    failed = 0
+    first_error = ''
+    try:
+        for start in range(0, total, batch_size):
+            chunk = proxies[start:start + batch_size]
+            if not chunk:
+                continue
+            batches += 1
+            # 先试装。装得上就是最好情况——**不记进 bad_batches**，也不进二分。
+            ok, err = _trial_install(chunk, workdir)
+            rounds += 1
+            if ok or not err:
+                # ok=True：这一块干净；ok=False 且 err=''：归因不了（mihomo 起不来等），
+                # 同样不能当坏块——见 `_trial_install` 的返回约定。
+                if not ok:
+                    failed += 1
+                    if not first_error:
+                        first_error = err or 'mihomo 起不来'
+                    log_progress('trial_load_batch_unresolved', start=start,
+                                 size=len(chunk), error=err)
+                continue
+            # 装机失败且 mihomo 明确指向 provider：二分定位并摘掉真正的坏节点。
+            bad += 1
+            done, removed, used = _trial_isolate(chunk, workdir, bisect_floor=bisect_floor)
+            rounds += used
+            if not done:
+                failed += 1
+                if not first_error:
+                    first_error = 'mihomo 二分途中无法归因'
+                log_progress('trial_load_batch_unresolved', start=start, size=len(chunk),
+                             error=first_error)
+                continue
+            removed_set.update(removed)
+            log_progress('trial_load_batch_isolated', start=start, size=len(chunk),
+                         removed=len(removed))
+    except Exception as e:
+        return give_up('trial_load_error', f'试装过程中异常：{e}')
+
+    if failed and failed == batches:
+        return give_up('all_batches_unresolved', first_error or 'mihomo 无法完成任何一次试装')
+
+    kept = [p for p in proxies
+            if str((p or {}).get('name') or '') not in removed_set]
+    # 只按名字摘节点，名字缺失/重复的不会被摘掉——如实反映在报告里，免得读者以为
+    # 「removed 数」就等于「订阅少了多少」。
+    dropped = total - len(kept)
+    report.update({
+        'kept': len(kept),
+        'removed': dropped,
+        'removed_names': sorted(removed_set)[:200],
+        'batches': batches,
+        'bad_batches': bad,
+        'rounds': rounds,
+        'batches_failed': failed,
+        'first_error': first_error,
+        'elapsed_seconds': round(time.monotonic() - started, 1),
+    })
+    log_progress('trial_load_done', total=total, kept=len(kept), removed=dropped,
+                 batches=batches, bad_batches=bad, rounds=rounds, failed=failed,
+                 elapsed=report['elapsed_seconds'])
+    if dropped:
+        log_progress('trial_load_removed_samples', count=dropped,
+                     samples=report['removed_names'][:20])
+    return kept, report
+

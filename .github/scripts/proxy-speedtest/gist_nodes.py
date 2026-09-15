@@ -101,6 +101,9 @@ Sub-Store 接口（读 backend/src/restful/*.js 得到，全部是无需鉴权�
                            这一层是降级手段，它自己故障不该把整轮变成零节点
   GIST_NODES_ALIVE_TIMEOUT 单次读 /providers/proxies 的超时秒数（默认 120）——上面那个
                            budget 才是本阶段的墙钟上界，这个只管单次请求
+  GIST_NODES_TRIAL_LOAD   1 = 发布前把这份 YAML 交给本机 mihomo **试装一遍**，把
+                           「mihomo 装不上」的节点二分定位并摘掉（默认 1）。见文件头
+                           「发布前还要试装排雷」——这一层与健康检查是两件事
   PROXY_SPEEDTEST_HEALTHCHECK_URL
                            健康检查目标（默认 https://www.gstatic.com/generate_204）。
                            **必须与下游测速的同一变量一致**，否则这里判活、下游判死
@@ -139,6 +142,22 @@ Sub-Store 阶段同理，但**降级方向相反**：投喂预算耗尽可以停
 健康检查阶段同样是「降级不失败」，但降级方向是**放行全部**：这一层存在的意义是把规模
 压下去，它自己起不来 / 跑不完时，退回到「不做过滤」正是过滤开启之前的既有行为——下游
 当然可能重演 12635 个节点那种事，但那比**零节点发布**好得多（后者让下游连测都没得测）。
+
+## 发布前还要试装排雷（与健康检查是两件事）
+
+健康检查筛的是「节点活不活」，试装筛的是「**能不能被 mihomo 装进 provider**」。后者更
+致命，因为 mihomo 对 provider 是「全有或全无」：片里一个节点解析失败，整个 provider 的
+`proxies` 直接是 `[]`。实测 2026-09-15：那份 13210 个节点的订阅里有一个 `short-id` 让
+mihomo 报 `invalid REALITY short ID`，于是**整份订阅在下游归零**——`provider_snapshot_
+collected providers: 1, total: 0`、`nodes_collected: 0`，整轮零产出且不报错。
+
+健康检查那一层的分片只是把这类损失压到「一片（200 个）」，不能消除；坏节点多起来下游
+照样大幅缩水。所以发布前把这份 YAML 完整喂给本机 mihomo 试装一遍：装得上直接发；装不上
+就**二分**定位到具体节点，只摘掉它，其余全留（`GIST_NODES_TRIAL_LOAD=1`，默认开）。
+代价是几次 mihomo 起停（内核已在本地，不必重新下载），换来的是下游拿到的订阅**必定装得上**。
+
+同一条降级原则：试装层自己起不来 / 日志里读不出「provider 被拒」时，原样发布并记
+`trial_load_skipped`——宁可下游去扛坏节点，也不能凭一次起不来的日志误删好节点。
 """
 import base64
 import concurrent.futures
@@ -167,6 +186,7 @@ from alive_filter import (  # noqa: E402
     DEFAULT_FILTER_BUDGET_SECONDS,
     SNAPSHOT_TIMEOUT_SECONDS,
     filter_alive,
+    trial_load,
 )
 
 SEARCH_URL = 'https://gist.github.com/search'
@@ -869,6 +889,34 @@ def _alive_filter_summary_line(report, deduped_count):
     return line
 
 
+def _trial_load_summary_line(report, published_count):
+    """把试装结果写成人话摘要行。
+
+    关掉试装时 `report` 为 None：**不写「剔除 0 个」**，而是明写「未执行」——否则读者
+    会把「没做这件事」误读成「做了但一个坏节点都没有」。
+    """
+    if not report:
+        return ('- 试装排雷：未执行（`GIST_NODES_TRIAL_LOAD=0`），'
+                '未剔除任何「mihomo 装不上」的节点')
+    if report.get('skipped'):
+        return (f'- 试装排雷：**未完成，原样发布全部 {published_count} 个节点**'
+                f'（`{report.get("skip_reason", "")}`）'
+                f'{"，真因：" + report["first_error"] if report.get("first_error") else ""}'
+                '—— 排雷层故障不该让下游零节点可用')
+    line = (f'- 试装排雷：装得上 **{report["kept"]}** 个，剔除 '
+            f'**{report["removed"]}** 个 mihomo 装不上的节点'
+            f'（{report["batches"]} 块中 {report["bad_batches"]} 块有问题，'
+            f'共试装 {report["rounds"]} 次 / {report["elapsed_seconds"]} 秒）')
+    if report.get('batches_failed'):
+        line += (f'；另有 {report["batches_failed"]} 块**分辨失败**（未剔除其中任何节点）')
+    if report.get('removed_names'):
+        shown = '、'.join(f'`{n}`' for n in report['removed_names'][:10])
+        line += f'\n  - 被剔除的节点：{shown}'
+        if report['removed'] > len(report['removed_names'][:10]):
+            line += f' 等 {report["removed"]} 个'
+    return line
+
+
 def write_github_output(pairs):
     path = os.environ.get('GITHUB_OUTPUT', '')
     if not path:
@@ -929,6 +977,7 @@ def main():
     alive_budget = max(0, env_int(env, 'GIST_NODES_ALIVE_BUDGET_SECONDS',
                                   DEFAULT_FILTER_BUDGET_SECONDS))
     alive_timeout = max(10, env_int(env, 'GIST_NODES_ALIVE_TIMEOUT', SNAPSHOT_TIMEOUT_SECONDS))
+    trial_on = env_str(env, 'GIST_NODES_TRIAL_LOAD', '1').lower() not in ('0', 'false', 'no')
     # 显式传给过滤层而不是让它自己从 env 读：env 里有没有这个键、值合不合法，
     # 由这里一处决定，过滤层只认参数字符串（空串 = 用它的默认目标）。
     health_url_override = env_str(env, 'PROXY_SPEEDTEST_HEALTHCHECK_URL', '')
@@ -1109,9 +1158,10 @@ def main():
 
     if dry_run:
         # dry-run 的真实用途是「验 Sub-Store 那条链路」（见 GIST_NODES_DRY_RUN 注释），
-        # 而健康检查要另下一份 mihomo（几十 MB）再占 10 分钟，与「本地快速验证」相悖。
-        # 想在这里也验过滤，就单独用 GIST_NODES_ALIVE_FILTER=1 打开。
+        # 而健康检查与试装都要另起 mihomo（几十 MB 下载 + 反复起停），与「本地快速验证」
+        # 相悖。想在这里也验它们，就单独用 GIST_NODES_ALIVE_FILTER=1 / GIST_NODES_TRIAL_LOAD=1。
         alive_on = False
+        trial_on = False
 
     deduped_count = len(proxies)
     log_progress('gist_nodes_deduped', parsed=parsed_count, deduped=deduped_count,
@@ -1136,6 +1186,27 @@ def main():
             proxies = all_proxies
             alive_report = dict(alive_report or {}, skipped=True,
                                 skip_reason='all_dead', alive=deduped_count, dead=0)
+
+    # 试装排雷：把「mihomo 装不上」的节点摘掉再发布。
+    # 与健康检查是两件事——上面筛「活不活」，这里筛「能不能被装进 provider」。后者更致命：
+    # mihomo 对 provider 是「全有或全无」，一个解析失败的节点就让整片的 `proxies` 变 `[]`。
+    # 注意它**放在健康检查之后**：过滤已经把节点压到几百个，试装只需一两次 mihomo 起停；
+    # 而且只对「值得发布」的节点做二分，不会为已经要丢的节点白费一轮。
+    trial_report = None
+    if trial_on and proxies:
+        proxies, trial_report = trial_load(proxies, workdir=workdir / 'trial-load')
+        if not proxies and trial_report.get('removed'):
+            # 摘光了极可能是判据本身出了问题（比如 mihomo 内核换了报错格式），
+            # 零节点发布比发布未排雷的订阅糟得多，退回不排雷。
+            log_progress('trial_load_all_removed_fallback', removed=trial_report['removed'],
+                         note='试装把全部节点判成坏节点，怀疑判据失效，原样发布不排雷')
+            proxies = all_proxies if alive_report is None else list(
+                p for p in all_proxies
+                if str((p or {}).get('name') or '') not in set(trial_report['removed_names']))
+            if alive_report is not None:
+                alive_report = dict(alive_report, alive=len(proxies))
+            trial_report = dict(trial_report, skipped=True, skip_reason='all_removed',
+                                removed=0, removed_names=[], kept=len(proxies))
 
     if proxies is all_proxies:
         yaml_text = original_yaml_text
@@ -1168,6 +1239,7 @@ def main():
         'deduped_count': deduped_count,
         'node_count': len(proxies),
         'alive_filter': alive_report,
+        'trial_load': trial_report,
     }, ensure_ascii=False, indent=2), encoding='utf-8')
 
     sub_url = ''
@@ -1214,10 +1286,13 @@ def main():
         f'- Sub-Store 解析：{parsed_count} 个节点 → 去重/清理后：**{deduped_count}**'
         + (f'（限量 {max_nodes}）' if max_nodes else ''),
         _alive_filter_summary_line(alive_report, deduped_count),
+        _trial_load_summary_line(trial_report, len(proxies)),
         f'- 订阅 Gist：{gist_html_url or "(dry-run 未发布)"}',
     ])
     print(f'OK: {len(proxies)} 个节点（解析 {parsed_count}）'
           + (f'（去重 {deduped_count} → 测活 {len(proxies)}）' if alive_report else '')
+          + (f'（试装剔除 {trial_report["removed"]}）'
+             if trial_report and trial_report.get('removed') else '')
           + f'，{stats["subs_created"]} 个订阅经 Sub-Store 去重，'
           f'订阅 raw: {sub_url or "(dry-run)"}')
 
