@@ -838,6 +838,25 @@ def push_to_substore(base, files, prefix, max_subs, max_total_bytes, timeout, st
     return subnames
 
 
+def _alive_filter_summary_line(report, deduped_count):
+    """把健康检查结果写成人话摘要行。
+
+    关掉过滤时 `report` 为 None：这时**不写「0 个通过」之类的行**，而是明写「未测活」——
+    否则读者会把「没做这件事」误读成「做了但一个都没活」。
+    """
+    if not report:
+        return '- 健康检查：未执行（`GIST_NODES_ALIVE_FILTER=0`，原样发布全部节点）'
+    if report.get('skipped'):
+        return (f'- 健康检查：**未完成，原样发布全部 {deduped_count} 个节点**'
+                f'（`{report.get("skip_reason", "")}`）—— 过滤层故障不该让下游零节点可用')
+    line = (f'- 健康检查：{deduped_count} → **{report["alive"]}** 个活节点'
+            f'（判死 {report["dead"]}，耗时 {report["elapsed_seconds"]} 秒 / 预算 '
+            f'{report["budget_seconds"] or "不限"} 秒，目标 `{report["healthcheck_url"]}`）')
+    if report.get('unmatched'):
+        line += (f'；另有 {report["unmatched"]} 个查不到结论（重名或被改名）**保留**')
+    return line
+
+
 def write_github_output(pairs):
     path = os.environ.get('GITHUB_OUTPUT', '')
     if not path:
