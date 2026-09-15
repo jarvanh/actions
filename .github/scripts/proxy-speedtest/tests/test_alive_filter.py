@@ -100,7 +100,8 @@ def nodes(names):
              'password': 'p'} for n in names]
 
 
-def run_filter(af, base, proxies, plan, tmpdir, health_env=True, **kw):
+def run_filter(af, base, proxies, plan, tmpdir, health_env=True,
+               _preserve_status=False, **kw):
     """跑一次 filter_alive，返回 (活节点, 报告, 事件列表)。
 
     mihomo 的启动被整体 stub 掉（`_start_mihomo` 换空实现）：本自检验的是**过滤语义**，
@@ -108,6 +109,9 @@ def run_filter(af, base, proxies, plan, tmpdir, health_env=True, **kw):
 
     `health_env=False` 时不注入 `PROXY_SPEEDTEST_HEALTHCHECK_URL` —— 用于验「env 缺失时
     落到与下游同一个默认目标」。默认注入是为了让绝大多数用例有一个可断言的已知值。
+
+    `_preserve_status=True` 时不重置假 mihomo 的 HTTP 状态 —— 只有「验 API 报错」那一类
+    用例需要它，其余用例都该从干净的 200 起步。
     """
     events = []
     saved = (af._start_mihomo, af.MIHOMO_API, af.log_progress)
@@ -116,8 +120,9 @@ def run_filter(af, base, proxies, plan, tmpdir, health_env=True, **kw):
     af.log_progress = lambda stage, **fields: events.append(dict(fields, stage=stage))
     FakeMihomo.plan = plan
     FakeMihomo.calls = 0
-    FakeMihomo.version_ok = True
-    FakeMihomo.snapshot_status = 200
+    if not _preserve_status:
+        FakeMihomo.version_ok = True
+        FakeMihomo.snapshot_status = 200
     env = {'PROXY_SPEEDTEST_HEALTHCHECK_URL': 'http://hc/'} if health_env else {}
     try:
         alive, report = af.filter_alive(env, proxies, workdir=tmpdir, **kw)
@@ -226,9 +231,11 @@ def main():
         check([p['name'] for p in alive] == ['a', 'b'], '起不来时原样放行全部')
 
         print('== 7. fail-open：API 报错 → 原样放行全部 ==')
+        # 必须在 run_filter **之前**置好状态：run_filter 会把 snapshot_status 重置为 200
+        # （它负责给每个用例一个干净起点），置在后面等于没置。
         FakeMihomo.snapshot_status = 500
         alive, rep, _ = run_filter(af, base, nodes(['a']), [providers_payload({'a': True})],
-                                   tmpdir, budget_seconds=30)
+                                   tmpdir, budget_seconds=30, _preserve_status=True)
         check(rep['skipped'] is True and rep['skip_reason'] == 'snapshot_failed',
               f'API 500 → skipped/snapshot_failed（实际 {rep}）')
         check(len(alive) == 1, 'API 报错时原样放行全部')
@@ -265,10 +272,21 @@ def main():
 
         print('== 11. 过滤后产出的 YAML 可被 mihomo 再读回（格式不得被破坏）==')
         import yaml
-        out = tmpdir / 'alive-filter' / 'alive-filter-proxies.yaml'
+        # 这一用例自带一次运行，不依赖前面用例留下的临时文件：那些用例各写各的，
+        # 谁最后跑谁覆盖（本题曾因此读到 test 10 的 1 个节点而假失败）。
+        four = nodes(['a', 'b', 'c', 'd'])
+        sub = tmpdir / 'shape'
+        run_filter(af, base, four,
+                   [providers_payload({'a': True, 'b': False, 'c': True, 'd': None})],
+                   sub, budget_seconds=30)
+        # 路径与 gist_nodes 的调用口径一致：过滤层只在自己收到的 workdir 下写文件，
+        # 不再自作主张加一层子目录（`gist_nodes` 传的就是 `workdir/'alive-filter'`）。
+        out = sub / 'alive-filter-proxies.yaml'
         check(out.exists(), f'写了 provider 用的 YAML（{out}）')
         loaded = (yaml.safe_load(out.read_text(encoding='utf-8')) or {}).get('proxies') or []
-        check(len(loaded) == 4, f'写进去的是**过滤前**的全量（实际 {len(loaded)}）')
+        # 写进 provider 的必须是**过滤前**的全量：mihomo 要自己给每个节点出结论，
+        # 若只喂「已判活」的子集，就等于用过滤结果当输入，循环论证。
+        check(len(loaded) == 4, f'写进去的是过滤前的全量（实际 {len(loaded)}）')
         check(all('name' in p and 'server' in p for p in loaded), '节点字段完整')
         cfg = yaml.safe_load(af.MIHOMO_CONFIG.read_text(encoding='utf-8')) or {}
         hc = ((cfg.get('proxy-providers') or {}).get('alive-filter') or {}).get('health-check') or {}
