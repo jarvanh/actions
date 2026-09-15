@@ -12,6 +12,10 @@
 #   4. run_all_tasks 跳过判死后端的同步对，健康的照常执行
 #   5. 判死后端会随 SYNC_BACKEND_DEAD=1 自动标记（跨轮生效 + 同轮即让路）
 #   6. 全线皆死 → 忽略熔断记录并告警（宁可重试死后端，不可全线停摆）
+#   7. **判死信号分级**（2026-09-15 加固）: 只有强证据（写探针 / F5 全拒复核）才写
+#      backend_dead.json；弱证据（修复管线目录级熔断）只在本轮让路。逃生口
+#      OPENLIST_BACKEND_DEAD_PERSIST=all。起因: 一次误判让健康后端停摆 12h。
+#   8. TTL 默认 4h（12h → 4h，缩小误判影响面）
 set -u
 PASS=0; FAIL=0
 ok()  { PASS=$((PASS+1)); echo "PASS: $1"; }

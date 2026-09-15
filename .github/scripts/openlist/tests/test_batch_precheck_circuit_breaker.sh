@@ -12,6 +12,11 @@
 #   G3 openlist 目标 + 预检全通过 -> 3 批照常 + 每批一次预检 + 最终 sync_with_logging
 #   G4 非 openlist 目标 -> 预检零调用
 #   G5 openlist 目标 + 批次传输真失败（exit≠4）-> 最终同步照跑, 尾部归并 SYNC_FAILED=1
+#   G6 批次循环预算闸（2026-09-15）: 剩余预算不足一个批次工作片 -> 零批次传输,
+#      SYNC_TIME_EXHAUSTED=1, return 0（优雅收摊；近几轮 330min 硬杀的直接根因）
+#   G7 在途批次的硬上限（2026-09-15）: 每批 copy 都套上"预算剩余 − 尾部预留"的 timeout
+#   G8/G8b 批次字节并入趋势口径（F9 最小修复，2026-09-15）: 3 批 × 1.5MiB → 4718592；
+#      解析不到字节 → 记 0（不凭空造数）
 #   G6 批次循环预算闸: 剩余预算不足一个批次工作片 -> 零批次传输, SYNC_TIME_EXHAUSTED=1,
 #      return 0（优雅收摊；近几轮 330min 硬杀的直接根因）
 set -euo pipefail

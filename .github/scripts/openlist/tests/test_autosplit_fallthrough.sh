@@ -7,6 +7,15 @@
 #   3. "源端大小 0B 超过 50GB 阈值" 这类自相矛盾日志
 # 本测试 mock rclone/sync_with_logging/sync_by_file_batches 等，统计各分支
 # 的实际调用次数与穿透行为
+#
+# 场景 9/10/11（2026-09-15 加）: **批次路径失败必须传到父级**
+#   背景 run 34926236845: 批次 1 被预算截断（成功 0/4），子任务却报成功、游标前移、
+#   251 个缺失文件被当"已同步"交给下轮。两处根因:
+#     · 递归收尾无条件用 failed_subtasks 重算 SYNC_FAILED（批次失败不体现在
+#       failed_subtasks 里 —— 叶子任务没有子目录）；
+#     · SYNC_FAILED 会被**后续 sync 尝试**清零（sync_notify 开头重置为"这一次的结果"）。
+#   ⇒ 改用独立标志 SYNC_FAILED_BATCH（子任务作用域）/ SYNC_FAILED_BATCH_PAIR（同步对
+#   粘性作用域），并给父级分类与 sync_task 尾部加兜底。
 set -u
 # 本测试验证**串行**子目录循环的调用次数/穿透行为 ⇒ 显式关掉子目录并行
 # （默认值一改，断言就全错位；2026-09-15 把 subdir_parallel 默认对齐到 2 时踩到，
