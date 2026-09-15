@@ -42,6 +42,19 @@ on:
         required: false
         type: string
         default: ""
+      thru_mb:
+        # 载荷太小会让噪声盖过信号: 6 MiB 在 1 MiB/s 下只有 6 秒，连接建立占比过大 ——
+        # 实测给出"4× 并发只 1.67×"，而同期的真实轮次是 4.15×，对不上就是载荷太小的锅。
+        # 64 MiB（64 个 1 MiB 文件，贴近生产小文件混合形态）≈ 每档 1 分钟。
+        description: "吞吐阶梯载荷（MiB，默认 64 = 64 个 1MiB 文件）。太小噪声盖信号，太大耗时"
+        required: false
+        type: string
+        default: "64"
+      thru_levels:
+        description: "吞吐阶梯档位（空格分隔的 transfers 值，默认 1 4 8；用来找拐点——拐点处再提并发无益）"
+        required: false
+        type: string
+        default: "1 4 8"
 
 concurrency: openlist-diag
 
@@ -116,6 +129,8 @@ jobs:
           DIAG_BURST_N: ${{ inputs.burst_n }}
           DIAG_TARGET: ${{ inputs.target }}
           DIAG_TARGET2: ${{ inputs.target2 }}
+          DIAG_THRU_MB: ${{ inputs.thru_mb }}
+          DIAG_THRU_LEVELS: ${{ inputs.thru_levels }}
           OL_CONTAINER: ${{ inputs.container }}
         run: |
           # 恒 exit 0: 诊断结果写在报告里，探针失败不该让 step 变红（否则
