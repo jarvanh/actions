@@ -224,7 +224,7 @@ jobs:
 
       - name: Upload node snapshot
         if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           # 内容含节点凭据，保留期压到 7 天
           name: gist-nodes-${{ github.run_id }}
