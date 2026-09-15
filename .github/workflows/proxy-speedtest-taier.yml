@@ -61,13 +61,13 @@ on:
         required: false
         default: '0'
       alive_probe:
-        description: '测活开关（skip = 跳过连不上的节点省下 ≈25 秒窗口 / off = 默认，直接测速）'
+        description: '测活开关（on = 默认，跳过连不上的节点省下 ≈25 秒窗口 / off = 关闭，直接测速）'
         required: false
         type: choice
-        default: 'off'
+        default: 'on'
         options:
+          - 'on'
           - 'off'
-          - 'skip'
   # 被 proxy-speedtest-gistnodes 当子流程复用（gist 抓来的节点当订阅源）。
   # 入参是 workflow_dispatch 那套的超集：不传就走与定时运行完全一样的默认值。
   workflow_call:
@@ -93,7 +93,7 @@ on:
         required: false
         type: string
       alive_probe:
-        description: '测活覆盖（skip|off）；留空走默认值 off'
+        description: '测活覆盖（on|off）；留空走默认值 on'
         required: false
         type: string
       # 下面四个供编排层（proxy-speedtest-gistnodes）覆盖：让同一套测速既能写自己的 Gist，
@@ -152,12 +152,12 @@ jobs:
           TAIER_MODE: ${{ inputs.mode || github.event.inputs.mode || 'single' }}
           TAIER_DURATION: ${{ inputs.duration || github.event.inputs.duration || '10' }}
           TAIER_MAX_NODES: ${{ inputs.max_nodes || github.event.inputs.max_nodes || '0' }}
-          # 测活开关：默认**关**（脚本层默认 `0`，这里不传即关）。run 34859505000 实测
-          # 27 个节点全部 `Resource not found`（探测用的节点名在 mihomo 里对不上），
-          # 前 8 个被误杀；查清名字为什么对不上之前不默认开启。
-          # 不接仓库 Variables（这个开关是排查现场用的，不适合当成长期仓库配置）；
-          # 需要时从 dispatch 选 `skip`，或给 gistnodes 传 alive_probe。
-          TAIER_ALIVE_PROBE: ${{ (inputs.alive_probe || github.event.inputs.alive_probe) == 'skip' && '1' || '0' }}
+          # 测活开关：默认**开**（跳过连不上泰尔控制面的死节点，省下每个 ≈25 秒的测速窗口）。
+          # 误杀风险由熔断（开头连续 8 个未通过且无一成功就关掉探测）与 fail-open（探测机制
+          # 出错按存活处理）兜住；run 34859505000 那次 27 个节点全 `Resource not found`
+          # （探测用的节点名在 mihomo 里对不上）属已知代价，真要规避就从 dispatch 选 `off`。
+          # 不接仓库 Variables（排查现场的开关，不适合当成长期仓库配置）。
+          TAIER_ALIVE_PROBE: ${{ (inputs.alive_probe || github.event.inputs.alive_probe) == 'off' && '0' || '1' }}
           # 墙钟预算（秒，0 = 不限）：到点不再开下一个节点，拿已测节点照常出订阅（退出码 0），
           # 目的是**不撞 job 的 360 分钟硬取消**（撞上则整轮白烧、订阅来不及提交 Gist）。
           # 默认 18000 秒 = 5 小时，比硬上限少 1 小时留给前置准备与收尾。**与 job 的

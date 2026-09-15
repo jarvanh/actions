@@ -117,14 +117,14 @@ CONFIG = {
     # 泛泛的连通性；探测 URL 可覆盖。判死只认 mihomo 的明确结论，机制出错一律 fail-open
     # （见 probe_node_alive）。
     #
-    # ⚠️ **默认关闭（2026-09-14，真机验证后改）**：run 34859505000 里 27 个节点**全部**
-    # 探测失败，错误是 mihomo 的 `Resource not found`——不是「连不上」，而是**探测请求里的
-    # 节点名在 mihomo 里找不到**（名字对不上，多半是 mihomo 侧重名去重/改名）。于是前 8 个
-    # 节点被判死跳过，熔断到第 8 个才关掉探测，白白丢掉 8/27 ≈ 30% 的节点。
-    # 熔断兜住了大盘，但「宁可多烧 25 秒也不能误杀活节点」，所以在查清名字为什么对不上之前
-    # 默认关掉；`TAIER_ALIVE_PROBE=1` 可显式开启。
-    'TAIER_ALIVE_PROBE': (os.environ.get('TAIER_ALIVE_PROBE', '0').strip().lower()
-                          in ('1', 'true', 'yes', 'on')),
+    # ⚠️ **默认开启（2026-09-15 改回）**：曾因 run 34859505000 里 27 个节点**全部**探测失败
+    # （mihomo 的 `Resource not found`——不是「连不上」，而是探测请求里的节点名在 mihomo 里
+    # 找不到，多半是重名去重/改名）而临时默认关闭，避免误杀。既然要的是「死节点别占窗口」，
+    # 就该默认开：误杀风险由**熔断**（开头连续 8 个未通过且无一成功即关掉探测）与
+    # **fail-open**（机制出错按存活处理）双重兜住，代价可控——真要规避误杀可设
+    # `TAIER_ALIVE_PROBE=0` 显式关闭。
+    'TAIER_ALIVE_PROBE': (os.environ.get('TAIER_ALIVE_PROBE', '1').strip().lower()
+                          not in ('0', 'false', 'no', 'off')),
     'TAIER_ALIVE_PROBE_URL': ((os.environ.get('TAIER_ALIVE_PROBE_URL', '') or '').strip()
                               or _TAIER_CTRL_SERVERS[0]),
     'TAIER_ALIVE_PROBE_TIMEOUT_MS': int(os.environ.get('TAIER_ALIVE_PROBE_TIMEOUT_MS', '3000') or 3000),
