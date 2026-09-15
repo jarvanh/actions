@@ -517,16 +517,23 @@ fi
 #     有效手段是换 runner 区域、走代理、或用自建 runner（用户有 RDP/Tailscale 那台）
 #   · 中立端点很快（≫1 MiB/s）⇒ 瓶颈在目标后端，只能靠多后端/错峰
 EGRESS_RESULT="SKIPPED"
-if command -v curl >/dev/null 2>&1 && [ -s /tmp/ol_diag/thru/t01.bin ]; then
-  _cf=$(curl -s -o /dev/null -w '%{speed_upload}' --max-time 90 \
-    -F 'file=@/tmp/ol_diag/thru/t01.bin' https://speed.cloudflare.com/__up 2>/dev/null || true)
+# ⚠️ 载荷文件名不要硬编码: 2026-09-15 阶梯改造把 t01.bin 改成 t001.bin（三位补零）
+# 时，这里仍找旧名 ⇒ 探针静默 SKIPPED（正是本次修复点）。改用 glob 取首个文件，
+# 并用 8 MiB 独立载荷（1 MiB 在高速率下握手占比过大，噪声盖信号）。
+_egress_src="/tmp/ol_diag/egress8m.bin"
+if [ ! -s "$_egress_src" ]; then
+  head -c 8388608 /dev/urandom > "$_egress_src" 2>/dev/null || true
+fi
+if command -v curl >/dev/null 2>&1 && [ -s "$_egress_src" ]; then
+  _cf=$(curl -s -o /dev/null -w '%{speed_upload}' --max-time 120 \
+    -F "file=@${_egress_src}" https://speed.cloudflare.com/__up 2>/dev/null || true)
   if [ -n "$_cf" ] && [ "$_cf" != "0" ]; then
     EGRESS_RESULT="$(awk "BEGIN{printf \"%.2f\", ${_cf}/1048576}") MiB/s"
   else
     EGRESS_RESULT="取不到（端点不可达或被限）"
   fi
 fi
-say "出口带宽基准（Cloudflare speedtest 上传 1MiB）: $EGRESS_RESULT"
+say "出口带宽基准（Cloudflare speedtest 上传 8MiB）: $EGRESS_RESULT"
 
 # ────────────────────────────────────────────────────────────
 # ────────────────────────────────────────────────────────────
