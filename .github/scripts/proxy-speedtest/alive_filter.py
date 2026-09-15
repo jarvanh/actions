@@ -141,6 +141,19 @@ TRIAL_WAIT_TIMEOUT = 30
 # 与「进程根本没起来 / 别的原因 fatal」分开——后者绝不能当成分辨出坏节点。
 TRIAL_ERROR_MARKERS = ('initial proxy provider', 'error: proxy')
 
+# 整个试装阶段的墙钟预算。**必须有**（实测 2026-09-15 run 34989917789 就是没它出的
+# 事故）：单次试装的成本是「重起一次 mihomo + wait_mihomo 轮询」≈ 11 秒，与节点多少
+# 关系不大（已实测：把健康检查关掉也还是 11 秒，所以这不是探测耗时，是进程冷启动）。
+# 而一个坏块的二分要触及 O(m·log n) 个区间 —— 那轮 2000 个节点的块里有 24 个坏节点，
+# 单块就要 ~500 次试装 ≈ 90 分钟。7 个块下去，job 撞上 timeout-minutes 被 GitHub
+# **硬取消**：已抓到的 65 个订阅、已投喂的 Sub-Store、下游三个测速 job（全 skipped）
+# 一起报废 —— 这正是本仓库「宁可降级也不被硬取消」那条原则要防的形态。
+#
+# 取 420 秒：够正常的轮次走完（全好时 7 块只需 7 次试装 ≈ 80 秒；即使有一两个块带了
+# 几个坏节点也够）。到点的降级方向是「停止排雷」——**已摘的照摘、还没测的块原样放行**，
+# 让下游去扛那部分坏节点，而不是让整轮变成零产出。
+DEFAULT_TRIAL_BUDGET_SECONDS = 420
+
 
 def _safe_home_dir(base):
     """把一个目录钉到 mihomo 的 home 之内。
@@ -571,7 +584,7 @@ def _trial_install(proxies, workdir):
     return True, ''
 
 
-def _trial_isolate(chunk, workdir, bisect_floor=TRIAL_BISECT_FLOOR):
+def _trial_isolate(chunk, workdir, bisect_floor=TRIAL_BISECT_FLOOR, deadline=None):
     """把一个**已知装不上**的块摘到「剩下的能装上」为止，返回 `(done, removed, rounds)`。
 
     返回 `done=False` = 归因失败（mihomo 起不来 / 报错对不上 provider），调用方据此把
@@ -599,6 +612,11 @@ def _trial_isolate(chunk, workdir, bisect_floor=TRIAL_BISECT_FLOOR):
     rounds = 0
     pending = [list(chunk)]
     while pending:
+        # 墙钟预算优先于轮数上限：到点就把**已摘到的名字**带回去（外层会保留这部分收益），
+        # 而不是当成「归因失败」把整块作废。返回 done=False 但 removed 非空，调用方按
+        # 「摘到了一些、没摘完」处理，绝不当失败。
+        if deadline is not None and should_stop_for_budget(deadline):
+            return False, removed, rounds
         if rounds >= TRIAL_MAX_ISOLATE_ROUNDS:
             # 顶到上限：归为「归因失败」，由调用方 fail-open，绝不无限循环。
             return False, removed, rounds
@@ -629,7 +647,9 @@ def _trial_isolate(chunk, workdir, bisect_floor=TRIAL_BISECT_FLOOR):
 
 
 def trial_load(proxies, workdir=None, max_nodes_per_batch=TRIAL_MAX_NODES_PER_BATCH,
-               bisect_floor=TRIAL_BISECT_FLOOR):
+               bisect_floor=TRIAL_BISECT_FLOOR,
+               budget_seconds=DEFAULT_TRIAL_BUDGET_SECONDS):
+    # 下面这段 docstring 里讲预算
     """把 `proxies` 交给本机 mihomo 试装，返回 `(保留的节点, 报告 dict)`。
 
     为什么需要它：mihomo 对 provider 是**全有或全无**——片里一个节点解析失败（实测
@@ -649,7 +669,23 @@ def trial_load(proxies, workdir=None, max_nodes_per_batch=TRIAL_MAX_NODES_PER_BA
       * **判据必须排除「自己故障」**：mihomo 起不来、日志里没有 provider 失败特征时
         返回 `skipped`，原样放行全部。宁可下游去扛坏节点，也不能凭一次起不来的日志删节点。
 
-    与 `filter_alive` 同一降级原则：这一层故障**不失败**，只是退回「不做试装」。
+    **墙钟预算（`budget_seconds`）**：每次试装都要重起一次 mihomo（≈11 秒，实测关掉健康
+    检查也一样，那是进程冷启动而不是探测耗时），而一个坏块的二分要触及 O(m·log n) 个区间。
+    两者一乘就能轻易吃掉整个 job —— 2026-09-15 run 34989917789 就因为没有它而撞上
+    `timeout-minutes` 被**硬取消**，下游三个测速 job 全 skipped。
+    到点的降级方向是**停止排雷**：已经摘掉的名字照摘，剩下还没测的块**原样放行**
+    （记 `trial_load_budget_stop`）。这比「跳过整层」好——已经排掉的那部分是实打实的收益；
+    也比「继续排」好——继续排会撞硬取消，连已抓到的订阅一起报废。
+
+    三条硬约束（都踩过）：
+
+      * **provider 文件必须写在 home 内**，否则 mihomo `level=fatal` 直接退出，
+        「装不上」会被误读成「节点非法」而**误删好节点**。这里同样过 `_safe_home_dir`。
+      * **判据必须排除「自己故障」**：mihomo 起不来、日志里没有 provider 失败特征时
+        返回 `skipped`，原样放行全部。宁可下游去扛坏节点，也不能凭一次起不来的日志删节点。
+      * **必须有墙钟预算**（见上）。
+
+    与 `filter_alive` 同一降级原则：这一层故障**不失败**，只是退回「少排一点雷」。
     """
     total = len(proxies)
     report = {
@@ -663,6 +699,8 @@ def trial_load(proxies, workdir=None, max_nodes_per_batch=TRIAL_MAX_NODES_PER_BA
         'rounds': 0,
         'elapsed_seconds': 0.0,
         'batches_failed': 0,
+        'budget_seconds': budget_seconds,
+        'budget_stopped': False,
         'skipped': False,
         'skip_reason': '',
         'first_error': '',
@@ -692,12 +730,19 @@ def trial_load(proxies, workdir=None, max_nodes_per_batch=TRIAL_MAX_NODES_PER_BA
     rounds = 0
     failed = 0
     first_error = ''
+    budget_stopped = False
+    deadline = speedtest_budget_deadline(budget_seconds)
     try:
         for start in range(0, total, batch_size):
             chunk = proxies[start:start + batch_size]
             if not chunk:
                 continue
             batches += 1
+            # 进块之前先看预算。放在这里（而不是只在块结束时看）才能拦住「上一个块把
+            # 预算吃光、下一个块还要再起一次 mihomo」——那是 11 秒 × 剩余块数的白烧。
+            if should_stop_for_budget(deadline):
+                budget_stopped = True
+                break
             # 先试装。装得上就是最好情况——**不记进 bad_batches**，也不进二分。
             ok, err = _trial_install(chunk, workdir)
             rounds += 1
@@ -713,23 +758,27 @@ def trial_load(proxies, workdir=None, max_nodes_per_batch=TRIAL_MAX_NODES_PER_BA
                 continue
             # 装机失败且 mihomo 明确指向 provider：二分定位并摘掉真正的坏节点。
             bad += 1
-            done, removed, used = _trial_isolate(chunk, workdir, bisect_floor=bisect_floor)
+            # 二分是唯一可能失控的地方，它自己也要看预算：到点就带着已摘到的名字返回，
+            # 剩下的交由外层「原样放行」——而不是把它算成失败。
+            done, removed, used = _trial_isolate(chunk, workdir, bisect_floor=bisect_floor,
+                                                 deadline=deadline)
             rounds += used
-            if not done:
+            removed_set.update(removed)
+            if not should_stop_for_budget(deadline):
+                log_progress('trial_load_batch_isolated', start=start, size=len(chunk),
+                             removed=len(removed))
+            if not done and not removed:
+                # 一个都没摘出来且归因不了：这一块没法分辨，记进 failed 让摘要如实反映。
                 failed += 1
                 if not first_error:
                     first_error = 'mihomo 二分途中无法归因'
                 log_progress('trial_load_batch_unresolved', start=start, size=len(chunk),
                              error=first_error)
-                continue
-            removed_set.update(removed)
-            log_progress('trial_load_batch_isolated', start=start, size=len(chunk),
-                         removed=len(removed))
+            if should_stop_for_budget(deadline):
+                budget_stopped = True
+                break
     except Exception as e:
         return give_up('trial_load_error', f'试装过程中异常：{e}')
-
-    if failed and failed == batches:
-        return give_up('all_batches_unresolved', first_error or 'mihomo 无法完成任何一次试装')
 
     kept = [p for p in proxies
             if str((p or {}).get('name') or '') not in removed_set]
@@ -744,12 +793,20 @@ def trial_load(proxies, workdir=None, max_nodes_per_batch=TRIAL_MAX_NODES_PER_BA
         'bad_batches': bad,
         'rounds': rounds,
         'batches_failed': failed,
+        'budget_stopped': budget_stopped,
         'first_error': first_error,
         'elapsed_seconds': round(time.monotonic() - started, 1),
     })
+    if budget_stopped:
+        # 到点停止排雷：已摘的照摘、没测到的块原样放行。**不是 skipped**——排雷确实
+        # 做了，只是没做完；摘要要如实说「没排完」，而不是说「没排」。
+        log_progress('trial_load_budget_stop', batches=batches, bad_batches=bad,
+                     removed=dropped, elapsed=report['elapsed_seconds'],
+                     budget=budget_seconds,
+                     note='预算到点，未测的块原样放行（不是整层 skipped）')
     log_progress('trial_load_done', total=total, kept=len(kept), removed=dropped,
                  batches=batches, bad_batches=bad, rounds=rounds, failed=failed,
-                 elapsed=report['elapsed_seconds'])
+                 budget_stopped=budget_stopped, elapsed=report['elapsed_seconds'])
     if dropped:
         log_progress('trial_load_removed_samples', count=dropped,
                      samples=report['removed_names'][:20])
