@@ -6,8 +6,8 @@
 按关键词搜索 Gist、取「最近更新」（`s=updated`）排序的前若干页，只保留最近
 `GIST_NODES_MAX_AGE_HOURS` 小时（默认 24）内更新过的，把命中的订阅正文原样丢进
 一个临时 Sub-Store 后端，让 Sub-Store 自己解析 + 去重 + 产出 mihomo（ClashMeta）YAML，
-再把这个 YAML 发布到本工作流专属 Gist；编排工作流把 Gist 的 raw URL 当 `sub_urls`
-传给选定的测速工作流。
+再把这个 YAML 发布到本工作流专属 Gist；被调测速工作流拿 gist id **自己现取** raw URL
+当订阅源（为什么不经 job output 传：见下面「输出」一节的警告）。
 
 为什么要卡「最近 N 小时」这个窗口：Gist 搜索命中的很多是**早已停更的旧订阅**，
 里面的节点多半已经失效，测一轮纯属浪费；卡住窗口就只拿最近还在更新的源。
@@ -118,8 +118,11 @@ Sub-Store 接口（读 backend/src/restful/*.js 得到，全部是无需鉴权�
   `Skip output 'X' since it may contain secret.`。所以这三个 output 名义上存在、实际恒为空，
   下游拿到空值就会 fallback 到仓库 secret（实测 run 34956069334：订阅源退回用户自己的机场、
   结果写进另一个泰尔测速的 Gist）。
-  编排工作流因此**不读这三个 output**，改用 secret 直传（见 proxy-speedtest-gistnodes.yml
-  的「接线」注释）；这里保留写入只是给需要就地观察的场景留个痕。
+  编排工作流因此**不读这三个 output**，改为传布尔开关 `use_gistnodes_source` /
+  `result_gist_id_from_gistnodes`，由被调工作流从自己的 secrets 取 gist id 并调
+  `speedtest_common.resolve_gist_raw_url()` 现取 raw URL（见 proxy-speedtest-gistnodes.yml
+  的「接线」注释与 docs/proxy-speedtest-gistnodes.md）；
+  这里保留写入只是给需要就地观察的场景留个痕。
 
 失败语义：单个 Gist / 单个订阅失败只跳过它；Sub-Store 不可达、组合订阅产出失败、
 或最终一个节点都没有 → exit 1。与其让下游拿空订阅跑一轮 45 分钟测速，不如就地失败。
