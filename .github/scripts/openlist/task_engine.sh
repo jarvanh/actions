@@ -2177,4 +2177,19 @@ sync_by_file_batches() {
   if [ "$failed_batches" -gt 0 ]; then
     SYNC_FAILED=1
   fi
+
+  # ===== 批次字节并入趋势口径（F9 最小修复，2026-09-15）=====
+  # 批次路径是本域的**主传输通道**，但它此前从不喂 SYNC_TRANSFERRED_BYTES（只累进
+  # batch_transferred_bytes 供进度行展示）⇒ trend 里的 transferred_bytes 只反映
+  # "未经批次的直接 sync"，批次重的轮次会恒为 0 —— run 34920298417 实锤: 实际落盘
+  # 51 个文件，trend 记 0（短轮下几乎每轮都是批次路径，趋势会一直空转）。
+  # 两处都要写:
+  #   ① total_transferred: 递归子任务收尾会用它覆盖 SYNC_TRANSFERRED_BYTES（:1286），
+  #      只写后者会被清零；
+  #   ② SYNC_TRANSFERRED_BYTES: 顶层（depth=0）不走 :1286，趋势直接读本值。
+  # 必须在尾部那次 fix_test sync_with_logging **之后**赋值 —— 它会把该值置 0。
+  # 口径仍是"rclone 声称量"（含假成功），不是落盘量：趋势的 C 判据不能只看它，
+  # 必须配 truth-check（见 §6 · C）。
+  total_transferred=$(( ${total_transferred:-0} + ${batch_transferred_bytes:-0} ))
+  SYNC_TRANSFERRED_BYTES="${batch_transferred_bytes:-0}"
 }
