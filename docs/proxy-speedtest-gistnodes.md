@@ -172,7 +172,7 @@ GET 即可（secret Gist 的 raw URL 无需鉴权——不可猜的 URL 本身�
 下一个请求就 200——它是静态默认值，不是真实建议。照它睡 1 小时会让 job 直接超时，
 所以退避一律走自己的指数曲线，头里的值只打进日志（`retry_after` 字段）作诊断。
 
-**为什么每个阶段都要有自己的墙钟预算，而 `timeout-minutes` 只是最后兜底。** 三段各有一个
+**为什么每个阶段都要有自己的墙钟预算，而 `timeout-minutes` 只是最后兜底。** 四段各有一个
 预算，都显著小于 job 的 30 分钟：
 
 | 段 | 预算 | 到点怎么办 |
@@ -180,8 +180,11 @@ GET 即可（secret Gist 的 raw URL 无需鉴权——不可猜的 URL 本身�
 | 抓取 | `GIST_NODES_BUDGET_SECONDS`（默认 900 秒） | 停翻页，拿已抓到的文件继续走产出 |
 | Sub-Store 投喂 | `SUB_STORE_BUDGET_SECONDS` 的**一半**（默认 150 秒） | 停投喂，拿已投喂的继续走产出 |
 | Sub-Store 产出 | 同上的**另一半**（默认 150 秒） | exit 1（建组合/取回省掉就没有产物） |
+| 健康检查 | `GIST_NODES_ALIVE_BUDGET_SECONDS`（默认 600 秒） | 原样发布全部节点（过滤层是降级手段，不该让下游零节点） |
 
-于是最坏 `0.4（检出）+ 15（抓取）+ 5（Sub-Store）≈ 20.4 分钟 < 30`。
+于是最坏 `0.4（检出）+ 15（抓取）+ 5（Sub-Store）+ 10（健康检查）≈ 30.4 分钟` —— **已经贴着
+`timeout-minutes: 30`**，改任何一个都要回头看这两个数字（顺带：健康检查段只在
+`GIST_NODES_ALIVE_FILTER=1` 时才占时间）。
 
 **两个阶段的实测值**（`gist_nodes_gather_stop` / `gist_nodes_substore_phase`，2026-09-14
 run 34834036756 —— 这条链路第一次跑通）：抓取 **323.4 秒**，由「连续零增长」提前收口，
@@ -330,15 +333,25 @@ Sub-Store 产出与发布。为什么必须把这两者分开：job 超时是 Gi
 
 ```bash
 python .github/scripts/proxy-speedtest/tests/test_gist_nodes_substore.py
+python .github/scripts/proxy-speedtest/tests/test_alive_filter.py
 ```
 
-用本地假 Sub-Store 跑通「投喂 → 组合 → 取回 → 发布」并做负向验证（409 / 非 YAML / 不可达必须失败）、
-边界验证（`MAX_NODES=0` 不出现限量算子；`MAX_AGE_HOURS=0` 不过滤）、判据验证（明文、base64 放行，
-XML plist、数据 JSON 挡掉）、时间窗口验证（超龄挡掉、整页超龄即停止翻页）与**抓取收口验证**
-（墙钟预算 / 零增长 / 批内熔断各自生效；三者都配了「关闭该收口 → 一路翻满 `GIST_NODES_MAX_PAGES`」
-的负向对照，否则判据恒真也看不出来）与 **Sub-Store 阶段预算验证**（投喂预算耗尽 → 截断投喂但仍
-产出、退出码 0；产出预算耗尽 → 退出码 1 且失败文案指向预算；两者各配负向对照）与
-**跨轮累积验证**（累积以 `-000` 先投喂并进组合、`files_found` 含它而 `files_gathered` 只算抓到的；
-负向对照：关掉累积 / 上一轮没文件时都不多投喂；并直接调真实的 `fetch_carryover` 覆盖成功与五条
-跳过分支，含「正文正好等于上限必须放行、多 1 字节必须挡下」的大小边界）。
+**`test_gist_nodes_substore.py`** 用本地假 Sub-Store 跑通「投喂 → 组合 → 取回 → 发布」并做负向验证
+（409 / 非 YAML / 不可达必须失败）、边界验证（`MAX_NODES=0` 不出现限量算子；`MAX_AGE_HOURS=0` 不过滤）、
+判据验证（明文、base64 放行，XML plist、数据 JSON 挡掉）、时间窗口验证（超龄挡掉、整页超龄即停止翻页）
+与**抓取收口验证**（墙钟预算 / 零增长 / 批内熔断各自生效；三者都配了「关闭该收口 → 一路翻满
+`GIST_NODES_MAX_PAGES`」的负向对照，否则判据恒真也看不出来）与 **Sub-Store 阶段预算验证**
+（投喂预算耗尽 → 截断投喂但仍产出、退出码 0；产出预算耗尽 → 退出码 1 且失败文案指向预算；两者各配
+负向对照）与**跨轮累积验证**（累积以 `-000` 先投喂并进组合、`files_found` 含它而 `files_gathered`
+只算抓到的；负向对照：关掉累积 / 上一轮没文件时都不多投喂；并直接调真实的 `fetch_carryover` 覆盖
+成功与五条跳过分支，含「正文正好等于上限必须放行、多 1 字节必须挡下」的大小边界）。
 真实容器只在 runner 上起，本地改完靠它兜底；退出码 0 = 全过。
+**它不覆盖健康检查过滤**（要另下几十 MB 的 mihomo 并等一个 10 分钟预算），那些轮次统一用
+`GIST_NODES_ALIVE_FILTER=0` 关掉——顺带也证明这个开关真的能关掉过滤。
+
+**`test_alive_filter.py`** 用假 mihomo 专测过滤层的四类隐蔽坏法：判据反了（把「还没出结论」
+当「死」，静默丢掉一大半活节点）、fail-open 失效（起不来/超时/API 报错时抛异常 ⇒ 零节点发布）、
+全判死没兜底、稳定判据过早（mihomo 刚起来就 break ⇒ 等于没过滤）。覆盖：只丢明确判死的、
+没结论的保留、结论不增长即收尾、冷启动宽限、三种 fail-open 各自的 `skip_reason`、
+全判死如实上报（让 `gist_nodes` 的 `all_dead` 回退能触发）、空输入不启动 mihomo、
+`AUTO`/`default` 不算数、以及写进 provider 的必须是**过滤前**的全量且 `lazy: false`。
