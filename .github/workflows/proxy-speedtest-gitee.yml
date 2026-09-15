@@ -16,6 +16,27 @@ on:
         description: '订阅源覆盖（逗号分隔 URL）；留空用仓库 secret PROXY_SPEEDTEST_SUB_URLS'
         required: false
         type: string
+      source_gist_id:
+        # 与 sub_urls 二选一：手动覆盖用。编排层（proxy-speedtest-gistnodes）走下面的
+        # `use_gistnodes_source` 开关——`secrets` 上下文在 job 级 `with:` 里不可用
+        # （报 `Unrecognized named-value: 'secrets'`），编排层传不了 id。
+        description: '源订阅 Gist 的 id（手动覆盖用）；设了它就由本工作流解析 raw URL'
+        required: false
+        type: string
+      source_gist_filename:
+        description: '源订阅在 Gist 里的文件名（与 source_gist_id 配对）'
+        required: false
+        type: string
+      use_gistnodes_source:
+        # 编排层专用开关：置 '1' 表示「把 gistnodes 抓来的节点当订阅源」，本工作流从
+        # **自己的** secrets 读 `PROXY_SPEEDTEST_GISTNODES_GIST_ID` 并解析其 raw URL。
+        description: '置 1 = 用 gistnodes 抓来的节点当订阅源（从本工作流 secrets 取 Gist id）'
+        required: false
+        type: string
+      result_gist_id_from_gistnodes:
+        description: '置 1 = 结果写进 secrets.PROXY_SPEEDTEST_GISTNODES_GIST_ID（而非本工作流自己的）'
+        required: false
+        type: string
       max_nodes:
         description: '最多测几个节点（0 = 不限）'
         required: false
@@ -55,12 +76,62 @@ jobs:
       - name: Install dependencies
         run: pip install pyyaml
 
+      - name: Resolve source subscription
+        # 为什么要有这一步：gistnodes 编排把「源节点订阅」传给本工作流，但那个订阅的 raw URL
+        # 里含 gist id —— gist id 本身是注册过的 secret，GitHub 会把含它的 job output
+        # **整个丢掉**（`Skip output 'sub_url' since it may contain secret.`）。下游拿到空值
+        # 就 fallback 到仓库 secret（实测 run 34956069334 因此测的是用户自己的机场订阅，
+        # 且零报错）。所以改由本步骤按 id 现取 raw URL。
+        #
+        # id 从**本工作流的 secrets** 取 —— `secrets` 上下文在 job 级 `with:` 里不可用，
+        # 编排层只能传布尔开关。
+        #
+        # 两种触发都走这里，统一把最终订阅地址写进 $GITHUB_ENV，下一步只读不覆盖。
+        env:
+          USE_GISTNODES: ${{ inputs.use_gistnodes_source }}
+          SOURCE_GIST_ID_IN: ${{ inputs.source_gist_id }}
+          SOURCE_GIST_ID_SECRET: ${{ secrets.PROXY_SPEEDTEST_GISTNODES_GIST_ID }}
+          SOURCE_GIST_FILENAME: ${{ inputs.source_gist_filename || 'proxy_speedtest_gistnodes_providers.yaml' }}
+          SUB_URLS_IN: ${{ inputs.sub_urls }}
+          SUB_URLS_SECRET: ${{ secrets.PROXY_SPEEDTEST_SUB_URLS }}
+          GH_TOKEN: ${{ secrets.PAT }}
+        run: |
+          set -euo pipefail
+          want_gist=0
+          [ "$USE_GISTNODES" = "1" ] && want_gist=1
+          [ -n "$SOURCE_GIST_ID_IN" ] && want_gist=1
+
+          if [ "$want_gist" = "1" ]; then
+            export SOURCE_GIST_ID="${SOURCE_GIST_ID_IN:-$SOURCE_GIST_ID_SECRET}"
+            url=$(python -c "
+          import os, sys
+          sys.path.insert(0, '.github/scripts/proxy-speedtest')
+          from speedtest_common import resolve_gist_raw_url
+          print(resolve_gist_raw_url(os.environ['SOURCE_GIST_ID'],
+                                     os.environ['SOURCE_GIST_FILENAME'],
+                                     os.environ.get('GH_TOKEN', '')))
+          ")
+            if [ -z "$url" ]; then
+              echo "::error::按 gist id 解析源订阅 raw URL 失败（文件=$SOURCE_GIST_FILENAME）"
+              exit 1
+            fi
+            echo "已解析源订阅 raw URL（长度 ${#url}）"
+          else
+            url="${SUB_URLS_IN:-$SUB_URLS_SECRET}"
+            echo "未走 gistnodes 源，沿用既有订阅源配置（长度 ${#url}）"
+          fi
+          if [ -z "$url" ]; then
+            echo "::error::订阅源为空：既没解析出源 Gist raw URL，inputs.sub_urls 与仓库 secret 也都是空"
+            exit 1
+          fi
+          echo "PROXY_SPEEDTEST_SUB_URLS=$url" >> "$GITHUB_ENV"
+
       - name: Run proxy speedtest
+        # 订阅源**不在 env 里设**：上面那步已经把最终值写进 $GITHUB_ENV，这里再设一次会
+        # 把它覆盖掉（步骤级 env 优先级高于 GITHUB_ENV）。
         env:
           PROXY_SPEEDTEST_DETACH: '0'
           GITEE_PRIVATE_TOKEN: ${{ secrets.GITEE_PRIVATE_TOKEN }}
-          # 订阅源：workflow_call 传入的 sub_urls 优先（gist 抓取编排用），否则走仓库 secret
-          PROXY_SPEEDTEST_SUB_URLS: ${{ inputs.sub_urls || secrets.PROXY_SPEEDTEST_SUB_URLS }}
           PROXY_SPEEDTEST_GITEE_OWNER: ${{ secrets.PROXY_SPEEDTEST_GITEE_OWNER }}
           PROXY_SPEEDTEST_GITEE_REPO: proxy-speedtest-temp
           # 节点上限：编排按抓取量传入；定时运行不传 = 0 = 不限（与既有行为一致）
@@ -97,7 +168,9 @@ jobs:
           # 首次留空会自动新建；到 Gist 页面复制 URL 末尾的 id 回填到 Secrets 即可。
           # 注意：这是 gitee 专属 Gist —— cdn / taier 分别用 PROXY_SPEEDTEST_CDN_GIST_ID /
           # PROXY_SPEEDTEST_TAIER_GIST_ID，三个测速工作流各用各的，互不覆盖。
-          PROXY_SPEEDTEST_GIST_ID: ${{ inputs.gist_id || secrets.PROXY_SPEEDTEST_GIST_ID }}
+          # 编排层（gistnodes）触发时改成写进 gistnodes 的 Gist —— id 从本工作流 secrets 取，
+          # 因为编排层传不进来（`secrets` 上下文在 job 级 `with:` 里不可用）。
+          PROXY_SPEEDTEST_GIST_ID: ${{ (inputs.result_gist_id_from_gistnodes == '1' && secrets.PROXY_SPEEDTEST_GISTNODES_GIST_ID) || inputs.gist_id || secrets.PROXY_SPEEDTEST_GIST_ID }}
           # Gist 文件名/描述：四套各不相同，便于在 Gist 列表里分辨
           PROXY_SPEEDTEST_GIST_FILENAME: ${{ inputs.gist_filename || 'proxy_speedtest_gitee_subscription.yaml' }}
           PROXY_SPEEDTEST_GIST_DESCRIPTION: ${{ inputs.gist_description || 'proxy speedtest subscription (gitee 上行/下行/延迟)' }}
