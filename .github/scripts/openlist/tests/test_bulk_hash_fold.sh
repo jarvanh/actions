@@ -67,9 +67,25 @@ _fix_probe_dir_writable() {
 LAND_OUT="001.jpg
 002.jpg"
 SYNC_CALLS=""
+# LSF_HIDE_FIRST>0: 前 N 次 lsf 读空（模拟「列表可见性延迟」——折叠时读空、
+# 延迟复核时可见）。计数必须落文件: rclone 调用大多在管道里，子 shell 变量累加不回写
+LSF_COUNT_FILE="/tmp/bulkfold_lsf.count"
+: > "$LSF_COUNT_FILE"
+LSF_HIDE_FIRST=0
 rclone() {
   case "$1" in
-    lsf)    printf '%s\n' "$LAND_OUT" ;;
+    lsf)
+      if [ "${LSF_HIDE_FIRST:-0}" -gt 0 ]; then
+        local _c
+        _c=$(cat "$LSF_COUNT_FILE" 2>/dev/null || echo 0)
+        _c=$((_c + 1))
+        echo "$_c" > "$LSF_COUNT_FILE"
+        [ "$_c" -le "$LSF_HIDE_FIRST" ] && return 0
+      fi
+      # 空 LAND_OUT 必须**零输出**（真 rclone 无文件时什么都不打印）:
+      # `printf '%s\n' ""` 会打一个空行，被 wc -l 记成 1 条 → "零落盘"场景
+      # 会走成"可见"分支（假通过）
+      [ -n "$LAND_OUT" ] && printf '%s\n' "$LAND_OUT" ;;
     lsjson) echo '[{"Name":"001.jpg","Size":100},{"Name":"002.jpg","Size":200},{"Name":"003.jpg","Size":300}]' ;;
     sync)   SYNC_CALLS="${SYNC_CALLS} $2->$3"; SYNC_ARGS="$*" ;;
     mkdir|lsd) return 0 ;;
@@ -92,6 +108,8 @@ reset_state() {
   _DIR_WRITE_CACHE=()
   PROBE_CALLS=""
   SYNC_CALLS=""
+  : > "$LSF_COUNT_FILE"
+  LSF_HIDE_FIRST=0
   : > "$_PERSIST_LOG"
   : > "$_fixlist"
   LOG_FILENAME="/tmp/bulkfold_main.log"; : > "$LOG_FILENAME"
@@ -293,6 +311,42 @@ _sync_bulk_hash_dir_fold
 if [ "$(lines "$_missing")" = "0" ]; then ok "T13a 5 个连续长路径目录全部折叠（熔断未中断）"; else bad "T13a 剩 $(lines "$_missing") 个未被折叠: $(tr '\n' ' ' < "$_missing")"; fi
 if [ "$(lines "$_fixlist")" = "10" ]; then ok "T13b 10 个文件全部记账"; else bad "T13b fix_list $(lines "$_fixlist") 条（应为 10）"; fi
 if [ -z "${_BACKEND_DEAD["openlist:wopan176Crypt"]:-}" ]; then ok "T13c 折叠成功后后端熔断已清除"; else bad "T13c 熔断未清除"; fi
+
+# ============================================================
+# T14: 列表可见性延迟 —— 折叠时读空、延迟复核时可见 ⇒ 必须补记（不是判失败）
+#  实测: run 34826097133 判"零落盘"的短哈希目录 5b32587f 在 11h 后才读到 18 个
+#  文件；6×30s 轮询对部分目录仍不够。旧行为直接退回逐文件修复 = 双重损失:
+#   · 逐文件修复打的是**原目录**（正是 405 写不进的那条路径），大概率全失败
+#   · 折叠成果不进 marker ⇒ 后端有文件、账上没有 = 幽灵落盘，下轮再折一次
+# ============================================================
+reset_state
+PROBE_WRITABLE=0
+LAND_OUT="001.jpg
+002.jpg"
+LSF_HIDE_FIRST=1                     # 折叠校验那次读空；末尾延迟复核那次可见
+set_missing "d/001.jpg" "d/002.jpg"
+# 日志断言看 stdout: 本测试把 tee mock 成 cat，日志不落 $LOG_FILENAME。
+# 用重定向而非 $(...) 捕获 —— 命令替换会开子 shell，函数里的 FIXED_THIS_RUN 等
+# 内存副作用会丢（文件类副作用才活得下来）。
+_sync_bulk_hash_dir_fold > "$WORK/t14.log" 2>&1
+if [ "$(lines "$_missing")" = "0" ]; then ok "T14a 延迟复核确认落盘 → 文件从缺失清单移除（不退回逐文件修复）"; else bad "T14a 仍剩 $(lines "$_missing") 条"; fi
+if [ "$(lines "$_fixlist")" = "2" ]; then ok "T14b 延迟复核补记 2 条 fix_list"; else bad "T14b fix_list $(lines "$_fixlist") 条（应为 2）"; fi
+if [ "$(lines "$_PERSIST_LOG")" = "2" ]; then ok "T14c 延迟复核补记 marker（不再是幽灵落盘）"; else bad "T14c marker $(lines "$_PERSIST_LOG") 条（应为 2）"; fi
+grep -q "延迟复核确认落盘" "$WORK/t14.log" && ok "T14d 日志记录延迟复核结论" || bad "T14d 无延迟复核日志"
+grep -q "登记延迟复核" "$WORK/t14.log" && ok "T14e 折叠时读空登记了延迟复核（不是当场判失败）" || bad "T14e 无登记日志"
+
+# ============================================================
+# T15: 复核仍不可见 —— 才真正退回逐文件修复（不丢条目、不误记账）
+# ============================================================
+reset_state
+PROBE_WRITABLE=0
+LAND_OUT=""
+set_missing "d/001.jpg" "d/002.jpg"
+_sync_bulk_hash_dir_fold > "$WORK/t15.log" 2>&1
+if [ "$(lines "$_missing")" = "2" ]; then ok "T15a 复核仍不可见 → 文件留在缺失清单（退回逐文件修复）"; else bad "T15a 剩 $(lines "$_missing") 条"; fi
+if [ "$(lines "$_fixlist")" = "0" ]; then ok "T15b 复核仍不可见 → 不记账"; else bad "T15b 误记 $(lines "$_fixlist") 条"; fi
+[ ! -s "$_PERSIST_LOG" ] && ok "T15c 复核仍不可见 → 不写 marker" || bad "T15c 误写 marker"
+grep -q "延迟复核仍不可见" "$WORK/t15.log" && ok "T15d 日志记录仍不可见" || bad "T15d 无日志"
 
 echo "-----------------------------"
 echo "PASS=$PASS FAIL=$FAIL"

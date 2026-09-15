@@ -285,6 +285,72 @@ _bulk_fold_ensure_dir() {
   echo "$mkdir_http" | grep -qE 'HTTP_CODE:(200|201|204)'
 }
 
+# 折叠落盘记账（正常路径与延迟复核共用；依赖调用方作用域）
+#   作用域依赖: dir_rel / hash8 / hash_dst / source_path / dest_path / task_name /
+#               missing_list / fix_list / folded_files / incr_marker_path /
+#               incr_state / LOG_FILENAME
+#   入参: <目标端落盘清单文件>（lsf 输出，一行一个文件名）
+#   出参: 全局 _BULK_FOLD_OK_N = 成功记账的文件数
+# 为什么用全局出参而不是命令替换: `ok_n=$(...)` 会开子 shell，函数里对
+#   FIXED_THIS_RUN（内存数组）的赋值会丢在子 shell 里 —— 调用方拿不到"本轮
+#   修好了哪些文件"，最终 marker/通知都会少记。
+_bulk_fold_record_landed() {
+  local _land_file="$1"
+  # 落盘清单进关联数组后查表: 逐文件 grep 是 N 次进程启动，千级文件（run
+  # 34674196629 单目录 1051 个）光这个就是几秒到几十秒的纯开销，查表是零成本
+  local -A _landed_set=()
+  local _lf
+  while IFS= read -r _lf; do
+    [ -n "${_lf:-}" ] && _landed_set["$_lf"]=1
+  done < "$_land_file"
+
+  # 源端尺寸一次取回（逐文件 rclone size 会退化成 N 次往返，正是要避免的）
+  local size_json="/tmp/${task_name}_bulkfold_size_${hash8}_$$.json"
+  rclone lsjson "${source_path}/${dir_rel}" --files-only --no-mimetype --no-modtime \
+    --retries 1 --timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900}" > "$size_json" 2>/dev/null \
+    || echo '[]' > "$size_json"
+  # 尺寸进关联数组再查表: 逐文件调 jq 在千级文件下是几十秒的纯进程启动开销
+  # （run 34674196629 单目录就有 1051 个文件），一次 jq 摊平 + bash 查表才是零成本
+  local -A _size_of=()
+  local _sm_nm _sm_sz
+  while IFS=$'\t' read -r _sm_nm _sm_sz; do
+    [ -n "${_sm_nm:-}" ] && _size_of["$_sm_nm"]="${_sm_sz:-0}"
+  done < <(jq -r '.[] | "\(.Name)\t\(.Size)"' "$size_json" 2>/dev/null || true)
+  rm -f "$size_json"
+
+  local ok_n=0 mf
+  while IFS= read -r mf; do
+    [ -n "$mf" ] || continue
+    case "$mf" in "$dir_rel"/*) ;; *) continue ;; esac
+    local rel="${mf#"$dir_rel"/}"
+    case "$rel" in */*) continue ;; esac      # 子目录文件归它自己那组
+    [ -n "${_landed_set[$rel]:-}" ] || continue
+
+    local fbytes="${_size_of[$rel]:-0}"
+    [[ "$fbytes" =~ ^[0-9]+$ ]] || fbytes=0
+    local fsize
+    fsize=$(format_bytes "$fbytes")
+
+    # marker 结构与逐文件修复完全一致: method_id=copyto_original，
+    # method 文本含"短哈希目录 <hash>" → restore_info.jq 判为 hash_dir 类型
+    local alt="${hash8}/${rel}"
+    local method="rclone copyto（短哈希目录 ${hash8} + 原文件名）"
+    local restore="rclone move '${dest_path}/${alt}' '${dest_path}/${mf}'"
+
+    echo "  ✅ 折叠落盘 · ${rel} (${fsize})" | tee -a "$LOG_FILENAME"
+    echo "${mf}|${alt}|${method}|${restore}|${fsize}|${fbytes}|copyto_original|" >> "$fix_list"
+    FIXED_THIS_RUN["$mf"]="$alt"
+    echo "$mf" >> "$folded_files"
+    # md5 留空: 批量折叠不经本地副本，无法算内容指纹；marker 的 md5 是可选
+    # 字段（还原时按 size_bytes 校验，缺 md5 只降级为大小校验）
+    _persist_fix_entry_now "$incr_marker_path" "$incr_state" "$source_path" "$dest_path" \
+      "$mf" "$alt" "$method" "$restore" "$fsize" "$fbytes" "copyto_original" "" 2>&1 \
+      | tee -a "$LOG_FILENAME" || true
+    ok_n=$((ok_n + 1))
+  done < "$missing_list"
+  _BULK_FOLD_OK_N=$ok_n
+}
+
 # ===== 目录级批量折叠（快路径）=====
 # 为什么需要这一段: 短哈希目录兜底此前只在**逐文件修复管线**里触发
 #   （file_fix.sh _fix_switch_to_hash_dir），而批量 rclone sync 阶段对每个文件
@@ -353,6 +419,9 @@ _sync_bulk_hash_dir_fold() {
 
   local folded_files="/tmp/${task_name}_bulkfold_done_$$.txt"
   : > "$folded_files"
+  # 折叠时列表读空的目录（dir_rel / hash8 / hash_dst / 期望条数），供末尾延迟复核
+  local pending_fold="/tmp/${task_name}_bulkfold_pending_$$.txt"
+  : > "$pending_fold"
   local dirs_done=0
 
   while read -r cnt dir_rel; do
@@ -418,8 +487,6 @@ _sync_bulk_hash_dir_fold() {
     # 落盘校验以目标端实际列出的文件为准，不认 rclone 退出码:
     # 假成功是这套体系的头号敌人（sync 报成功但后端没落盘实测多次）
     local landed="/tmp/${task_name}_bulkfold_land_${hash8}_$$.txt"
-    # 落盘校验以目标端实际列出的文件为准，不认 rclone 退出码:
-    # 假成功是这套体系的头号敌人（sync 报成功但后端没落盘实测多次）
     # 但**读的时机要给足**: 实测该后端写入后的「列表可见性延迟」远超 60s ——
     #   run 34826097133 报"批量折叠零落盘（rc=0）"的 5b32587f，11 小时后 diag
     #   读到 18 个文件；且新探针显示「重启前列表数 0、重启后 60s 内仍 0」。
@@ -445,62 +512,18 @@ _sync_bulk_hash_dir_fold() {
       fi
       sleep "$_land_wait"
     done
-    # 落盘清单进关联数组后查表: 逐文件 grep 是 N 次进程启动，千级文件（run
-    # 34674196629 单目录 1051 个）光这个就是几秒到几十秒的纯开销，查表是零成本
-    local -A _landed_set=()
-    local _lf
-    while IFS= read -r _lf; do
-      [ -n "${_lf:-}" ] && _landed_set["$_lf"]=1
-    done < "$landed"
     if [ "${landed_n:-0}" -eq 0 ]; then
-      echo "  ❌ 批量折叠零落盘（rc=${fold_rc}），该目录退回逐文件修复" | tee -a "$LOG_FILENAME"
+      # 不立刻判"零落盘"退回逐文件修复 —— 那是双重损失（见本函数末尾的延迟复核
+      # 说明）。先登记，处理完全部目录后统一复核一次。
+      echo "  ⏳ 折叠落盘列表读空（rc=${fold_rc}，${_land_tries}×${_land_wait}s 轮询仍 0）→ 登记延迟复核" | tee -a "$LOG_FILENAME"
+      printf '%s\t%s\t%s\t%s\n' "$dir_rel" "$hash8" "$hash_dst" "$cnt" >> "$pending_fold"
       rm -f "$landed" "$fold_log"
       continue
     fi
 
-    # 源端尺寸一次取回（逐文件 rclone size 会退化成 N 次往返，正是要避免的）
-    local size_json="/tmp/${task_name}_bulkfold_size_${hash8}_$$.json"
-    rclone lsjson "${source_path}/${dir_rel}" --files-only --no-mimetype --no-modtime \
-      --retries 1 --timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900}" > "$size_json" 2>/dev/null \
-      || echo '[]' > "$size_json"
-    # 尺寸进关联数组再查表: 逐文件调 jq 在千级文件下是几十秒的纯进程启动开销
-    # （run 34674196629 单目录就有 1051 个文件），一次 jq 摊平 + bash 查表才是零成本
-    local -A _size_of=()
-    local _sm_nm _sm_sz
-    while IFS=$'\t' read -r _sm_nm _sm_sz; do
-      [ -n "${_sm_nm:-}" ] && _size_of["$_sm_nm"]="${_sm_sz:-0}"
-    done < <(jq -r '.[] | "\(.Name)\t\(.Size)"' "$size_json" 2>/dev/null || true)
-
-    local ok_n=0
-    while IFS= read -r mf; do
-      [ -n "$mf" ] || continue
-      case "$mf" in "$dir_rel"/*) ;; *) continue ;; esac
-      local rel="${mf#"$dir_rel"/}"
-      case "$rel" in */*) continue ;; esac      # 子目录文件归它自己那组
-      [ -n "${_landed_set[$rel]:-}" ] || continue
-
-      local fbytes="${_size_of[$rel]:-0}"
-      [[ "$fbytes" =~ ^[0-9]+$ ]] || fbytes=0
-      local fsize
-      fsize=$(format_bytes "$fbytes")
-
-      # marker 结构与逐文件修复完全一致: method_id=copyto_original，
-      # method 文本含"短哈希目录 <hash>" → restore_info.jq 判为 hash_dir 类型
-      local alt="${hash8}/${rel}"
-      local method="rclone copyto（短哈希目录 ${hash8} + 原文件名）"
-      local restore="rclone move '${dest_path}/${alt}' '${dest_path}/${mf}'"
-
-      echo "  ✅ 折叠落盘 · ${rel} (${fsize})" | tee -a "$LOG_FILENAME"
-      echo "${mf}|${alt}|${method}|${restore}|${fsize}|${fbytes}|copyto_original|" >> "$fix_list"
-      FIXED_THIS_RUN["$mf"]="$alt"
-      echo "$mf" >> "$folded_files"
-      # md5 留空: 批量折叠不经本地副本，无法算内容指纹；marker 的 md5 是可选
-      # 字段（还原时按 size_bytes 校验，缺 md5 只降级为大小校验）
-      _persist_fix_entry_now "$incr_marker_path" "$incr_state" "$source_path" "$dest_path" \
-        "$mf" "$alt" "$method" "$restore" "$fsize" "$fbytes" "copyto_original" "" 2>&1 \
-        | tee -a "$LOG_FILENAME" || true
-      ok_n=$((ok_n + 1))
-    done < "$missing_list"
+    # 记账走 _bulk_fold_record_landed（延迟复核复用同一段实现，避免两套漂移）
+    _bulk_fold_record_landed "$landed"
+    local ok_n="${_BULK_FOLD_OK_N:-0}"
 
     # 折叠落盘成功 = 后端写得进，原路径不可写只是那条超长路径的问题。
     # 必须清掉探测阶段累积的熔断计数: 否则连续 3 个长路径目录探测失败就置
@@ -514,8 +537,46 @@ _sync_bulk_hash_dir_fold() {
 
     dirs_done=$((dirs_done + 1))
     echo "  ↳ 折叠完成: ${ok_n}/${cnt} 个文件已落盘到短哈希目录 ${hash8}" | tee -a "$LOG_FILENAME"
-    rm -f "$landed" "$fold_log" "$size_json"
+    rm -f "$landed" "$fold_log"
   done < "$dir_counts"
+
+  # ===== 折叠落盘延迟复核（本轮登记的"列表读空"目录）=====
+  # 为什么就地再等没用: 可见性延迟实测远超分钟级 —— run 34826097133 判"零落盘"的
+  #   5b32587f 在 11h 后才读到 18 个文件；6×30s 轮询对部分目录仍不够。
+  # 为什么也不能直接退回逐文件修复（旧行为）: 双重损失 ——
+  #   · 逐文件修复打的是**原目录**（正是写不进的那条路径，405），大概率全失败；
+  #   · 折叠成果不进 marker ⇒ 后端有文件、账上没有 = 幽灵落盘，下一轮再折一次。
+  #   （修复率长期 8.6% 的真因之一）
+  # 故: 折叠时只登记，处理完全部目录后（已过去数分钟）统一复核一次；可见即补记
+  #   marker 并把文件从缺失清单移除（走同一段记账实现），仍不可见才真正退回
+  #   逐文件修复 —— 即"宁可晚一轮认账，不可错判失败"。
+  if [ -s "$pending_fold" ]; then
+    local _rv_n _rv_ok=0 _rv_back=0 p_dir p_hash p_dst p_cnt
+    echo "🔁 折叠落盘延迟复核: $(wc -l < "$pending_fold" | tr -d ' ') 个目录（折叠时列表读空）" | tee -a "$LOG_FILENAME"
+    while IFS=$'\t' read -r p_dir p_hash p_dst p_cnt; do
+      [ -n "${p_dir:-}" ] || continue
+      local p_list="/tmp/${task_name}_reverify_${p_hash}_$$.txt"
+      rclone lsf "$p_dst" --files-only --retries 1 \
+        --timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900}" > "$p_list" 2>/dev/null || : > "$p_list"
+      # 按**非空行**计数: 空白输出（只有换行）不能算"已可见"，否则会把空列表
+      # 当成落盘成功（记账循环本身有 -n 保护，但"可见/不可见"的判定会走错分支）
+      _rv_n=$(grep -c '[^[:space:]]' "$p_list" 2>/dev/null || true)
+      [[ "$_rv_n" =~ ^[0-9]+$ ]] || _rv_n=0
+      if [ "${_rv_n:-0}" -gt 0 ]; then
+        # 记账复用同一实现: 覆写这三个局部变量（dir 循环已结束，不影响别处）
+        dir_rel="$p_dir"; hash8="$p_hash"; hash_dst="$p_dst"
+        _bulk_fold_record_landed "$p_list"
+        _rv_ok=$((_rv_ok + ${_BULK_FOLD_OK_N:-0}))
+        echo "  ✅ 延迟复核确认落盘: $(_short_path "$p_dir")（补记 ${_BULK_FOLD_OK_N:-0}/${p_cnt} 个文件）" | tee -a "$LOG_FILENAME"
+      else
+        _rv_back=$((_rv_back + 1))
+        echo "  ⏳ 延迟复核仍不可见: $(_short_path "$p_dir")（${p_cnt} 个文件退回逐文件修复，下轮可再折）" | tee -a "$LOG_FILENAME"
+      fi
+      rm -f "$p_list"
+    done < "$pending_fold"
+    echo "🔁 延迟复核小结: 补记 ${_rv_ok} 个文件 / ${_rv_back} 个目录仍不可见" | tee -a "$LOG_FILENAME"
+  fi
+  rm -f "$pending_fold"
 
   rm -rf "$temp_dir" 2>/dev/null || true
   rm -f "$dir_counts"
