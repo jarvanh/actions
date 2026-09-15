@@ -411,33 +411,58 @@ sec "12 · 吞吐阶梯（并发到底加不加带宽——决定提速走哪条
 #     · 若吞吐基本 **不变** ⇒ 后端按"账号总带宽"限速，提并发毫无意义，
 #       只能换手段（多后端分摊、错峰、或接受这个上限重算工期）。
 #   此前所有并发探针（9b）只测"能不能被受理"，**没测聚合吞吐**，所以这个问题
-#   一直是空的。这里用 6 × 1 MiB（贴近生产均值）分别跑 transfers=1 与 4。
+#   一直是空的。
+#
+# 2026-09-15 改造（原版载荷 6 MiB、只测 1/4 两档，噪声盖过信号）:
+#   6 MiB 在 1 MiB/s 下只有 6 秒，连接建立/握手占比过大 —— 实测给出"4× 并发只
+#   1.67×"，而同期的真实轮次显示 4.15×，两者对不上就是载荷太小的锅。
+#   现在: 载荷可配（DIAG_THRU_MB，默认 64 MiB = 64 个 1 MiB 文件，贴近生产
+#   小文件混合形态）、档位可配（DIAG_THRU_LEVELS，默认 "1 4 8"）、每档独立超时
+#   （DIAG_THRU_TIMEOUT，默认 900s，不能用 45s 的探针超时）。
+#   输出每档 MiB/s + 耗时 + **单流速率**，末尾给"是否已饱和"的判读。
+THRU_MB="${DIAG_THRU_MB:-64}"
+THRU_LEVELS="${DIAG_THRU_LEVELS:-1 4 8}"
+THRU_TIMEOUT="${DIAG_THRU_TIMEOUT:-900s}"
+[[ "$THRU_MB" =~ ^[0-9]+$ ]] && [ "$THRU_MB" -gt 0 ] || THRU_MB=64
 THRU_SRC="/tmp/ol_diag/thru"
+rm -rf "$THRU_SRC" 2>/dev/null || true
 mkdir -p "$THRU_SRC" 2>/dev/null || true
-if command -v dd >/dev/null 2>&1; then
-  for _ti in 1 2 3 4 5 6; do
-    dd if=/dev/urandom of="$THRU_SRC/t$(printf '%02d' "$_ti").bin" bs=1024 count=1024 status=none 2>/dev/null || true
-  done
-fi
+# 1 MiB/文件（贴近生产均值）: 用 head -c 读 /dev/urandom 比 dd 循环快得多
+for _ti in $(seq 1 "$THRU_MB"); do
+  head -c 1048576 /dev/urandom > "$THRU_SRC/t$(printf '%03d' "$_ti").bin" 2>/dev/null || true
+done
 THRU_DIR="$TARGET/oldiag_thru_$(date +%s)_$$"
 THRU_RESULT=""
-for _tk in 1 4; do
+THRU_RATES=""
+for _tk in $THRU_LEVELS; do
   _t0=$(date +%s)
   rclone copy "$THRU_SRC" "$THRU_DIR/k${_tk}" --transfers "$_tk" --checkers 8 \
-    --stats-one-line --contimeout 20s --timeout "$PROBE_TIMEOUT" > /tmp/ol_diag/thru_k${_tk}.log 2>&1
+    --stats-one-line --contimeout 20s --timeout "$THRU_TIMEOUT" > /tmp/ol_diag/thru_k${_tk}.log 2>&1
   _rc=$?
   _dt=$(( $(date +%s) - _t0 ))
   [ "$_dt" -le 0 ] && _dt=1
-  # 6 MiB / 秒数 → MiB/s（两位小数；awk 避免 bash 无浮点）
-  _rate=$(awk "BEGIN{printf \"%.2f\", 6/${_dt}}")
+  # MiB / 秒数 → MiB/s（两位小数；awk 避免 bash 无浮点）
+  _rate=$(awk "BEGIN{printf \"%.2f\", ${THRU_MB}/${_dt}}")
+  _per=$(awk "BEGIN{printf \"%.2f\", ${THRU_MB}/${_dt}/${_tk}}")
   if [ "$_rc" -eq 0 ]; then
-    THRU_RESULT="${THRU_RESULT} transfers=${_tk}:${_rate}MiB/s(${_dt}s)"
+    THRU_RESULT="${THRU_RESULT} transfers=${_tk}:${_rate}MiB/s(单流 ${_per}, ${_dt}s)"
+    THRU_RATES="${THRU_RATES} ${_tk}:${_rate}"
   else
     THRU_RESULT="${THRU_RESULT} transfers=${_tk}:FAIL(exit=${_rc},$(http_code_of "$(cat /tmp/ol_diag/thru_k${_tk}.log 2>/dev/null)"),${_dt}s)"
   fi
   sleep "$PROBE_GAP"
 done
-say "吞吐阶梯（6×1MiB）:${THRU_RESULT}"
+say "吞吐阶梯（${THRU_MB}×1MiB，档位: ${THRU_LEVELS}）:${THRU_RESULT}"
+# 饱和判读: 相邻档位的吞吐比 < 1.2 视为已到平台（再提并发只增加 423 碰撞风险）
+if [ -n "$THRU_RATES" ]; then
+  _knee=$(awk -v s="$THRU_RATES" 'BEGIN{
+    n=split(s,a," "); prev=0; prevk=0; res="未饱和（可继续提并发）";
+    for(i=1;i<=n;i++){ split(a[i],b,":"); k=b[1]+0; r=b[2]+0;
+      if(prev>0 && r>0){ g=r/prev; if(g<1.2){ res="已饱和（" prevk "→" k " 仅 ×" sprintf("%.2f",g) "，再提并发无益）"; break } }
+      prev=r; prevk=k }
+    print res }')
+  say "吞吐拐点判读: ${_knee}"
+fi
 rclone purge "$THRU_DIR" --retries 1 --timeout "$PROBE_TIMEOUT" >/dev/null 2>&1 || true
 
 # 跨后端独立性（决定"并行同步对"这个提速手段成不成立）:
@@ -447,7 +472,7 @@ rclone purge "$THRU_DIR" --retries 1 --timeout "$PROBE_TIMEOUT" >/dev/null 2>&1 
 #   · 各自速率腰斩（≈0.5 MiB/s）⇒ 两个挂载共享同一个账号/总带宽上限
 #     （wopan175 与 wopan176 很可能是同一账号），并行无益。
 if [ -n "${DIAG_TARGET2:-}" ]; then
-  say "跨后端并发: ${TARGET} 与 ${DIAG_TARGET2} 各跑一条 transfers=4（各 6 MiB）..."
+  say "跨后端并发: ${TARGET} 与 ${DIAG_TARGET2} 各跑一条 transfers=4（各 ${THRU_MB} MiB）..."
   _t2dir="$TARGET/oldiag_thru2_$(date +%s)_$$"
   _t2dir_b="$DIAG_TARGET2/oldiag_thru2_$(date +%s)_$$"
   _ct0=$(date +%s)
@@ -456,14 +481,14 @@ if [ -n "${DIAG_TARGET2:-}" ]; then
   (
     _s0=$(date +%s)
     rclone copy "$THRU_SRC" "$_t2dir/c_a" --transfers 4 --checkers 8 --stats-one-line \
-      --contimeout 20s --timeout "$PROBE_TIMEOUT" > /tmp/ol_diag/thru2a.log 2>&1; _ra=$?
+      --contimeout 20s --timeout "$THRU_TIMEOUT" > /tmp/ol_diag/thru2a.log 2>&1; _ra=$?
     echo "$(( $(date +%s) - _s0 )) $_ra" > /tmp/ol_diag/thru2a.elapsed
   ) &
   _cpa=$!
   (
     _s0=$(date +%s)
     rclone copy "$THRU_SRC" "$_t2dir_b/c_b" --transfers 4 --checkers 8 --stats-one-line \
-      --contimeout 20s --timeout "$PROBE_TIMEOUT" > /tmp/ol_diag/thru2b.log 2>&1; _rb=$?
+      --contimeout 20s --timeout "$THRU_TIMEOUT" > /tmp/ol_diag/thru2b.log 2>&1; _rb=$?
     echo "$(( $(date +%s) - _s0 )) $_rb" > /tmp/ol_diag/thru2b.elapsed
   ) &
   _cpb=$!
@@ -477,11 +502,11 @@ if [ -n "${DIAG_TARGET2:-}" ]; then
   [[ "$_eb" =~ ^[0-9]+$ ]] && [ "$_eb" -gt 0 ] || _eb=1
   _ra=$(awk '{print $2}' /tmp/ol_diag/thru2a.elapsed 2>/dev/null || echo 0)
   _rb=$(awk '{print $2}' /tmp/ol_diag/thru2b.elapsed 2>/dev/null || echo 0)
-  _rate_a=$(awk "BEGIN{printf \"%.2f\", 6/${_ea}}")
-  _rate_b=$(awk "BEGIN{printf \"%.2f\", 6/${_eb}}")
-  _sum=$(awk "BEGIN{printf \"%.2f\", 12/${_cdt}}")
+  _rate_a=$(awk "BEGIN{printf \"%.2f\", ${THRU_MB}/${_ea}}")
+  _rate_b=$(awk "BEGIN{printf \"%.2f\", ${THRU_MB}/${_eb}}")
+  _sum=$(awk "BEGIN{printf \"%.2f\", 2*${THRU_MB}/${_cdt}}")
   say "跨后端并发: A(${TARGET##*/})=${_rate_a} MiB/s(${_ea}s,rc=${_ra}) · B(${DIAG_TARGET2##*/})=${_rate_b} MiB/s(${_eb}s,rc=${_rb}) · 合计 ${_sum} MiB/s(${_cdt}s)"
-  say "  判读: 合计 ≈ 单流独占（0.86）⇒ 跨后端无增益；合计 < 单流 ⇒ 共享瓶颈（并行有害）"
+  say "  判读: 合计 ≈ 本次阶梯 transfers=4 档 ⇒ 跨后端无增益（共享上限）；合计 < 该档 ⇒ 共享瓶颈（并行有害）"
   rclone purge "$_t2dir" --retries 1 --timeout "$PROBE_TIMEOUT" >/dev/null 2>&1 || true
   rclone purge "$_t2dir_b" --retries 1 --timeout "$PROBE_TIMEOUT" >/dev/null 2>&1 || true
 fi
@@ -596,6 +621,7 @@ say "字符集阶梯:  ${CHARSET_R:-SKIPPED}"
 say "路径深度阶梯: ${DEEP_R:-SKIPPED}"
 say "重启后写入:   ${RST_RESULT:-SKIPPED}"
 say "吞吐阶梯:${THRU_RESULT:-SKIPPED}"
+say "吞吐拐点: ${_knee:-SKIPPED}"
 say "出口带宽基准: ${EGRESS_RESULT:-SKIPPED}"
 say "持续写:   $BURST_RESULT"
 say "并发写:   ${CONC_RESULT:-SKIPPED}（transfers=4，三态见上）"
@@ -617,9 +643,10 @@ say "  · 深度阶梯在某层断                 → 与路径总长/深度相
 say "  · 两组阶梯全过                     → 405 与路径长度/深度无关，回到密文文件名长度假设"
 say "  · 重启后 +0s/+10s FAIL、+30s/+60s OK → 预检时序问题: _fix_probe_dir_writable"
 say "                                      必须加重试/等待，否则刚重启完的目录一律误判不可写"
-say "  · 吞吐 transfers=4 ≈ 4×transfers=1   → 后端按每流限速，**提并发线性提速**（有效）"
-say "  · 吞吐 transfers=4 ≈ 1×transfers=1   → 后端按账号总带宽限速，**提并发无用**，"
-say "                                        必须换手段（多后端分摊/错峰/重算工期）"
+say "  · 吞吐拐点「未饱和」                  → 后端按每流限速，**提并发有效**（按阶梯最后一档定 transfers）"
+say "  · 吞吐拐点「已饱和」                  → 后端按账号/出口总带宽限速，**提并发无用**，"
+say "                                        必须换手段（换网络路径/错峰/重算工期）"
+say "  · 单流速率（括号内）≈ 0.6–1.2 MiB/s   → 与生产单流一致 ⇒ 阶梯可信；差很多 ⇒ 载荷仍偏小"
 say "  · 新目录并发 FAIL、retries3 也 FAIL → 并发确实触发后端锁，transfers 保持 1"
 say "  · 全部 OK                          → 此刻后端完全可写（含并发），失败属时段性/外部条件"
 say ""
