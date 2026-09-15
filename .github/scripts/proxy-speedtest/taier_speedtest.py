@@ -123,6 +123,10 @@ CONFIG = {
     # 就该默认开：误杀风险由**熔断**（开头连续 8 个未通过且无一成功即关掉探测）与
     # **fail-open**（机制出错按存活处理）双重兜住，代价可控——真要规避误杀可设
     # `TAIER_ALIVE_PROBE=0` 显式关闭。
+    #
+    # 这一层现在是**唯一的准入关口**：`collect_provider_snapshot` 已不再按 provider 的
+    # `alive` 预筛（那条路在订阅大时会把节点收成 0 个，见其 docstring），收集来的节点
+    # 全量进循环，由这里逐个判「值不值得烧 25 秒」。
     'TAIER_ALIVE_PROBE': (os.environ.get('TAIER_ALIVE_PROBE', '1').strip().lower()
                           not in ('0', 'false', 'no', 'off')),
     'TAIER_ALIVE_PROBE_URL': ((os.environ.get('TAIER_ALIVE_PROBE_URL', '') or '').strip()

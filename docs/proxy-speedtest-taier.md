@@ -17,7 +17,9 @@
 
 ## 功能与链路
 
-对订阅 `PROXY_SPEEDTEST_SUB_URLS` 的每个可用节点串行执行：
+对订阅 `PROXY_SPEEDTEST_SUB_URLS` 里 provider 解析出的**每个节点**串行执行（不按健康检查
+`alive` 预筛，逐节点测活才是准入关口，见
+[gitee 文档 · 为什么节点收集不等健康检查](proxy-speedtest-gitee.md#为什么节点收集不等健康检查)）：
 
 1. 下载 `MiaM1ku/taierspeedtest` 最新 Release 二进制（固定文件名 `~/proxy-speedtest/taierspeedtest`，供进程规则匹配）；
 2. mihomo 以 **TUN 模式**启动：`tun.enable + auto-route` 接管整机出向，规则
@@ -93,7 +95,7 @@ TUN 起来后 DNS 会被 mihomo 劫持，必须显式给可达的公共解析器
 | `TAIER_DURATION` | `10` | 每方向秒数；**上游二进制硬钳制 5-13**，>13 被压到 13 |
 | `TAIER_MAX_NODES` | `0` | 最多测几个节点，0 = 不限 |
 | `TAIER_BUDGET_SECONDS` | `18000` | **墙钟预算**（秒，`0` = 不限），从进程启动起算。到点不再开下一个节点，拿已测节点照常出订阅（退出码 0）。**与 job 的 `timeout-minutes` 成对**：默认 5 小时 < 360 分钟。workflow 里写死，不接仓库 Variables |
-| `TAIER_ALIVE_PROBE` | `1` | 测速前先测活（跳过连不上的节点，省下一个 ≈25 秒的测速窗口）。**默认开**：误杀风险由熔断（开头连续 8 个未通过且无一成功即关掉探测）与 fail-open（探测机制出错按存活处理）兜住。run 34859505000 曾 27 个节点全 `Resource not found`（探测用的节点名在 mihomo 里对不上）属已知代价，要规避就 dispatch 选 `alive_probe=off`（或给本工作流传 `alive_probe: off`）；**不接仓库 Variables** |
+| `TAIER_ALIVE_PROBE` | `1` | 测速前先测活（跳过连不上的节点，省下一个 ≈25 秒的测速窗口）。**默认开**：误杀风险由熔断（开头连续 8 个未通过且无一成功即关掉探测）与 fail-open（探测机制出错按存活处理）兜住。run 34859505000 曾 27 个节点全 `Resource not found`（探测用的节点名在 mihomo 里对不上）属已知代价，要规避就 dispatch 选 `alive_probe=off`（或给本工作流传 `alive_probe: off`）；**不接仓库 Variables**。**这是本工作流唯一的准入关口**——节点收集层已不再按 provider 的 `alive` 预筛（见 [gitee 文档 · 为什么节点收集不等健康检查](proxy-speedtest-gitee.md#为什么节点收集不等健康检查)），收集来的节点全量进循环 |
 | `TAIER_TIMEOUT` | `120` | 单节点子进程超时秒 |
 | `TAIER_SWITCH_SETTLE_SECONDS` | `1.5` | 切节点后等待 |
 | `TAIER_IMAGE` | `0` | 每节点出结果图（上传图床），默认关避免刷图 |
