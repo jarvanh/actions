@@ -98,10 +98,10 @@ on:
         # 前提假设"不同后端的上限相互独立"——wopan175 与 wopan176 是否同一账号
         # 尚未验证（若同一账号则两者并行无益）。验证方法: 对两个后端同时跑吞吐
         # 阶梯，各自速率不下降即独立。
-        description: "同步模式: 并行同步对上限（默认 1 串行。>=2 时按后端分组，同后端串行、跨后端并行；2026-09-15 隔离实测证明两挂载额度独立——两侧各 12 流合计 3.37 MiB/s vs 单后端 1.78 ≈1.9×，但并行路径未在生产验证过，验证通过后再改默认）"
+        description: "同步模式: 并行同步对上限（默认 2。>=2 时按后端分组，同后端串行、跨后端并行；依据: 隔离实测两挂载额度独立——两侧各 12 流合计 3.37 MiB/s vs 单后端 1.78 ≈1.9×，且已用显式 2 跑过验证轮无异常）"
         required: false
         type: choice
-        default: "1"
+        default: "2"
         options:
           - "1"
           - "2"
@@ -266,7 +266,7 @@ jobs:
       # 兜底值必须与入参默认一致（2）: schedule 触发时 inputs.subdir_parallel
       # 为空串，兜底留 1 会让定时轮退回串行，并发提速只在手动轮生效。
       OPENLIST_SUBDIR_PARALLEL: ${{ inputs.subdir_parallel || '2' }}
-      OPENLIST_PAIR_PARALLEL: ${{ inputs.pair_parallel || '1' }}
+      OPENLIST_PAIR_PARALLEL: ${{ inputs.pair_parallel || '2' }}
     concurrency: openlist-singleton
     runs-on: ubuntu-latest
     # actions:write 供「自续触发」step 用 GITHUB_TOKEN dispatch 下一轮
