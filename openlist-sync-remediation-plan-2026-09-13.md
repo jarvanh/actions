@@ -568,13 +568,20 @@ wopan176 账号本身的配额/限流/封禁/token 状态——需用户登 Open
 
 ## 10. 接手指令模板（可直接粘给另一个 AI）
 
-> 继续跟进 openlist 同步修复。先读仓库根 `openlist-sync-remediation-plan-2026-09-13.md` 的 §0（AI 接手须知）、§8（红线）、§9（需用户协助）与文末进度日志，再读 `.github/scripts/openlist/` 的代码。
+> 继续跟进 openlist 同步修复。先读仓库根 `openlist-sync-remediation-plan-2026-09-13.md` 的 §0（AI 接手须知，含当前旋钮默认值与实测天花板）、§6（退出标准 A–E 现状）、§8（红线）、§9（需用户协助）与文末进度日志，再读 `.github/scripts/openlist/` 的代码。
 > 然后：
-> 1. `gh run list --workflow=openlist.yml --limit 5 --json databaseId,status,conclusion,event,createdAt,headSha` 看最新轮 conclusion，**并用 headSha 确认它跑的是哪版代码**；`gh run view <id> --log` 按 §6 关键词 grep。
-> 2. 对照 §6 退出标准 A–E 记录进度（把实测证据写进对应条目，别只打勾）；出现新失败形状就地定位修复，遵守 §8 红线。
-> 3. 满足当前阶段退出标准就推进下一阶段；到 §7 决策门（Gate 1/2/3）停下问用户。
-> 4. 收尾前：更新本计划文档的复选框、进度日志与阶段表，跑 §8 回归套件（24 套串行 + `command not found` 扫描为空）再 push。
-> 5. 需要用户做的事只有 §9 那几项，别自行代答。
+> 1. `gh run list --workflow=openlist.yml --limit 5 --json databaseId,status,conclusion,event,createdAt,headSha` 看最新轮 conclusion，**并用 headSha 确认它跑的是哪版代码**（schedule/自续轮钉的是"创建那一刻"的 main sha）；`gh run view <id> --log` 按 §6 关键词 grep。
+> 2. **验证一律用短轮，别等 5.5h**：`sync_budget_min=60`（完整链路、预算缩短）或
+>    `run_mode=调试 · 修复管线测试` + `fix_test_task=<窄任务>` + `force_sync=true`（直达修复管线）。
+>    要立刻验新代码就先 `gh run cancel <在跑轮>` 腾并发位（队列恒 1 深）。
+> 3. **测量纪律（踩过）**：吞吐/并发类测量必须**与主轮互斥**（两个 runner 各起自己的容器但打同一网盘账号，
+>    主轮在传会把各档位压平而误判"已饱和"）；诊断 workflow 是独立的 `openlist-diag.yml`，
+>    用 `thru_mb`/`thru_levels`/`xback_transfers` 取数。
+> 4. 对照 §6 退出标准 A–E 记录进度（把实测证据写进对应条目，别只打勾）；出现新失败形状就地定位修复，遵守 §8 红线。
+>    **当前唯一还在浪费带宽的已知问题**: C 的"同一批 ~1.8GB 每轮重传但未落盘"长尾 —— 优先查它。
+> 5. **改默认值前必须显式验证**：把 `pair_parallel` 之类直接改默认曾导致回归报警（只验证串行语义的测试失败 + `command not found`）⇒ 先显式参数跑一轮验证，通过再翻默认，并把依赖旧默认的测试显式声明。
+> 6. 收尾前：更新本计划文档的复选框、进度日志与阶段表，跑 §8 回归套件（26 套串行 + `command not found` 扫描为空）再 push。
+> 7. 需要用户做的事只有 §9 那几项，别自行代答。
 
 ---
 
