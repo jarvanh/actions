@@ -43,6 +43,14 @@ on:
         description: '最终订阅保留多少节点（留空 = 0 = 不限。下游 mihomo 按 provider 全量做健康检查，节点多会拖长启动）'
         required: false
         type: string
+      alive_filter:
+        description: '发布前先做一轮健康检查、只发布活节点（留空 = 1 = 开）。关掉则原样发布全部节点'
+        required: false
+        type: choice
+        default: '1'
+        options:
+          - '1'
+          - '0'
       test_nodes:
         description: '交给测速引擎实测多少个节点（留空 = 0 = 不限）'
         required: false
@@ -67,19 +75,20 @@ concurrency:
 jobs:
   fetch-nodes:
     runs-on: ubuntu-latest
-    # 30 分钟而不是 20：搜索页会 429，重试带退避（5s/10s × 3 次）会把单页拖到十几秒，
-    # 十几页下来搜索阶段本身就可能吃掉好几分钟，再叠加取文与 Sub-Store 解析。
+    # 40 分钟：搜索页会 429，重试带退避（5s/10s × 3 次）会把单页拖到十几秒，
+    # 十几页下来搜索阶段本身就可能吃掉好几分钟，再叠加取文、Sub-Store 解析与健康检查。
     #
-    # ⚠️ 这个数字是**最后兜底**，不是预算。真正的收口在脚本的三个阶段预算里，它们都显著
+    # ⚠️ 这个数字是**最后兜底**，不是预算。真正的收口在脚本的四个阶段预算里，它们都显著
     # 小于这里：抓取 GIST_NODES_BUDGET_SECONDS（默认 900 秒）+ Sub-Store 阶段
-    # SUB_STORE_BUDGET_SECONDS（默认 300 秒）⇒ 最坏 0.4 + 15 + 5 ≈ 20.4 分钟 < 30。
-    # 改任何一个都要回头看其余的。
+    # SUB_STORE_BUDGET_SECONDS（默认 300 秒）+ 健康检查 GIST_NODES_ALIVE_BUDGET_SECONDS
+    # （默认 600 秒）⇒ 最坏 0.4 + 15 + 5 + 10 ≈ 30.4 分钟 < 40。
+    # 改任何一个都要回头看其余的（40 这个数字是 2026-09-15 为健康检查段留出余量而从 30 抬上来的）。
     #
     # 为什么必须这样分工：超时是 GitHub **硬取消**，被取消时整个 job 的工作全废——抓到的
     # 订阅文件、Sub-Store 已投喂的订阅、下游三个测速 job（全 skipped）。2026-09-14 三次运行
     # 就是这么废掉的（34800369606 / 34808992495 / 34827324756，都是抓取阶段空转到 30 分钟被
     # 取消，最后一轮单独吃掉 1250 秒）。阶段预算则优先降级、其次才失败。
-    timeout-minutes: 30
+    timeout-minutes: 40
     outputs:
       engine: ${{ steps.engine.outputs.engine }}
       sub_url: ${{ steps.fetch.outputs.sub_url }}
@@ -202,6 +211,11 @@ jobs:
           GIST_NODES_TARGET_SUBS: ${{ inputs.target_subs || '100' }}
           GIST_NODES_MAX_AGE_HOURS: ${{ inputs.max_age_hours || '24' }}
           GIST_NODES_MAX_NODES: ${{ inputs.max_nodes || '0' }}
+          # 发布前的健康检查：只把活节点交出去。为什么必须有——下游三套测速会拿这份订阅
+          # 各自起 mihomo 做**非惰性**全量健康检查，上万节点时跑不完（实测发布 12635 个、
+          # 下游只认到 14 个，见 docs/proxy-speedtest-gistnodes.md）。这里先筛，下游就是
+          # 几百个活节点，秒级探完。失败/超时一律降级为「原样发布全部」，不会零产出。
+          GIST_NODES_ALIVE_FILTER: ${{ inputs.alive_filter || '1' }}
           GIST_NODES_WORKDIR: ${{ github.workspace }}/gist-nodes
           # GitHub API 认证：匿名 60 次/h，一轮要拉上百个 Gist（每个至少一次 API 调用），
           # 不带 token 会被限流截断
