@@ -541,6 +541,56 @@ fi
 say "出口带宽基准（Cloudflare speedtest 上传 8MiB）: $EGRESS_RESULT"
 
 # ────────────────────────────────────────────────────────────
+sec "13 · 大文件落盘阶梯（定位「重传但未落盘」的长尾）"
+# 背景（2026-09-15 生产取证，C 判据迟迟不达标的直接原因）:
+#   run 34940234180 日志:
+#     「本轮传输 15 个文件，目标视图 4（缓存口径）—— 重启容器取后端真值」
+#     「重启后目标视图: 13 → 3」
+#     「⚠️ 检测到 10 个假成功文件（重启后从列表消失 → 未持久化）」
+#   —— rclone 报 Copied、后端实际没留 ⇒ 下一轮 diff 又把它们当缺失**重传**，
+#      每轮白烧 ~1.8GB 带宽，且修复管线每次都被预算切在尾部 ⇒ 长尾无限循环。
+#   该批文件的名长诊断「密文名均未超限」（排除名长/路径因素），剩下的差异就是
+#   **文件大小**（该批平均 ~166MB）。
+# 做法: 逐个上传 N MiB（DIAG_BIG_MB，默认 "16 64 256"），每个都做两步校验:
+#   ① 上传后 lsf（缓存口径）② **重启容器**后再 lsf（后端真值口径）
+#   ①可见而②消失 ⇒ 该尺寸的「假成功」实锤。
+# 并发影响: DIAG_BIG_TRANSFERS（默认 1；设 6 可对比"并发是否推高假成功率"）。
+BIG_RESULT=""
+BIG_SIZES="${DIAG_BIG_MB:-16 64 256}"
+BIG_T="${DIAG_BIG_TRANSFERS:-1}"
+for _bigmb in $BIG_SIZES; do
+  [[ "$_bigmb" =~ ^[0-9]+$ ]] || continue
+  _big_bytes=$(( _bigmb * 1048576 ))
+  _big_f="/tmp/ol_diag/big_${_bigmb}m.bin"
+  [ -s "$_big_f" ] || head -c "$_big_bytes" /dev/urandom > "$_big_f" 2>/dev/null || true
+  _big_name="oldiag_big_${_bigmb}m_$(date +%s)_$$.bin"
+  echo "上传 ${_bigmb} MiB（transfers=${BIG_T}）..."
+  rclone copyto "$_big_f" "$TARGET/${_big_name}" --transfers "$BIG_T" \
+    --retries 3 --low-level-retries 5 --contimeout 30s --timeout "${DIAG_BIG_TIMEOUT:-1200s}" \
+    > "/tmp/ol_diag/big_${_bigmb}m.log" 2>&1
+  _big_rc=$?
+  # ① 缓存口径
+  _big_v1=0
+  rclone lsf "$TARGET" --files-only --retries 1 --timeout "$PROBE_TIMEOUT" 2>/dev/null \
+    | grep -qxF "$_big_name" && _big_v1=1
+  # ② 重启容器取后端真值（清掉假成功污染的列表）
+  docker restart "$CONTAINER" >/dev/null 2>&1 || true
+  sleep "${DIAG_BIG_RESTART_WAIT:-45}"
+  _big_v2=0
+  rclone lsf "$TARGET" --files-only --retries 3 --timeout "$PROBE_TIMEOUT" 2>/dev/null \
+    | grep -qxF "$_big_name" && _big_v2=1
+  if [ "$_big_rc" -ne 0 ]; then
+    BIG_RESULT="${BIG_RESULT} ${_bigmb}MiB:上传失败(rc=${_big_rc},$(http_code_of "$(cat "/tmp/ol_diag/big_${_bigmb}m.log" 2>/dev/null)"))"
+  elif [ "$_big_v2" -eq 1 ]; then
+    BIG_RESULT="${BIG_RESULT} ${_bigmb}MiB:OK"
+  else
+    BIG_RESULT="${BIG_RESULT} ${_bigmb}MiB:❌假成功(缓存可见=${_big_v1},重启后消失)"
+  fi
+  rclone deletefile "$TARGET/${_big_name}" --retries 1 --timeout "$PROBE_TIMEOUT" >/dev/null 2>&1 || true
+done
+say "大文件落盘阶梯（transfers=${BIG_T}）:${BIG_RESULT}"
+
+# ────────────────────────────────────────────────────────────
 # ────────────────────────────────────────────────────────────
 sec "11 · 重启后立即写探针（复现生产的「重启 → 预检 → 405」序列）"
 # 附: 列表完整性验证（验证 _wait_driver_ready 的就绪信号是否充分）
@@ -635,6 +685,7 @@ say "重启后写入:   ${RST_RESULT:-SKIPPED}"
 say "吞吐阶梯:${THRU_RESULT:-SKIPPED}"
 say "吞吐拐点: ${_knee:-SKIPPED}"
 say "出口带宽基准: ${EGRESS_RESULT:-SKIPPED}"
+say "大文件落盘阶梯: ${BIG_RESULT:-SKIPPED}"
 say "持续写:   $BURST_RESULT"
 say "并发写:   ${CONC_RESULT:-SKIPPED}（transfers=4，三态见上）"
 say "容器日志 8005 命中: $(count_of '8005|rsp_code|rep_desc' "$CONTAINER_LOG") 行"
@@ -659,6 +710,10 @@ say "  · 吞吐拐点「未饱和」                  → 后端按每流限速
 say "  · 吞吐拐点「已饱和」                  → 后端按账号/出口总带宽限速，**提并发无用**，"
 say "                                        必须换手段（换网络路径/错峰/重算工期）"
 say "  · 单流速率（括号内）≈ 0.6–1.2 MiB/s   → 与生产单流一致 ⇒ 阶梯可信；差很多 ⇒ 载荷仍偏小"
+say "  · 大文件阶梯某档「❌假成功」            → 该尺寸上传后端不落盘（生产重传长尾的成因）:"
+say "                                          修法方向 = 该尺寸以上强制走分卷/短哈希，或降并发后重试"
+say "  · 大文件阶梯全 OK                       → 尺寸不是原因，回去查那批文件的**名称/目录**特异性"
+say "  · 同尺寸 transfers=6 比 =1 假成功更多    → 并发推高假成功率（须在吞吐与可靠性间取平衡）"
 say "  · 新目录并发 FAIL、retries3 也 FAIL → 并发确实触发后端锁，transfers 保持 1"
 say "  · 全部 OK                          → 此刻后端完全可写（含并发），失败属时段性/外部条件"
 say ""
