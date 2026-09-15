@@ -40,6 +40,9 @@
      crypt）本身就要十几到几十分钟，且会遍历该任务的**全部**子同步对（`fix_max` 只约束
      逐文件条数，不限子同步对数量；step 超时 120min）。强项是跳过 initial sync 传输直达修复，
      适合验证修复管线/折叠/落盘记账；**拿不到**批次/吞吐/熔断数据（`OPENLIST_FIX_TEST_MODE=1`）。
+     **要真正的分钟级就选窄任务**: 注册表里有单子目录对（如 `task0-wopan175` =
+     `onedrive:0/j-1024j-视频-pornhub-favorites` → `openlist:wopan175/0/...`），列举量小、
+     几分钟出结论；大任务（task3/task4）光列举就 30-60min+。
    - **小时级**: `sync_budget_min=<分钟>`（默认 320，上限 320）—— 完整链路、预算缩短（如 60）。
      派生阈值（批次最小片长 / 尾部预留）随预算等比缩放（`task_engine.sh _budget_scaled`），
      所以短轮仍会正常开批次、走完整链路。代价: setup(~4min) + 收尾(~8min) 固定开销占比升高
