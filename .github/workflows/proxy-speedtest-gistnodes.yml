@@ -215,6 +215,10 @@ jobs:
           # 各自起 mihomo 做**非惰性**全量健康检查，上万节点时跑不完（实测发布 12635 个、
           # 下游只认到 14 个，见 docs/proxy-speedtest-gistnodes.md）。这里先筛，下游就是
           # 几百个活节点，秒级探完。失败/超时一律降级为「原样发布全部」，不会零产出。
+          #
+          # 注意 `GIST_NODES_WORKDIR` **不能**直接当过滤层的 provider 目录：mihomo 拒绝
+          # 加载 home 之外的 provider 文件（`SAFE_PATHS`，level=fatal 直接退出）。过滤层
+          # 自己会把越界路径改落回 home 内（`_safe_home_dir`），这里不必特殊处理。
           GIST_NODES_ALIVE_FILTER: ${{ inputs.alive_filter || '1' }}
           GIST_NODES_WORKDIR: ${{ github.workspace }}/gist-nodes
           # GitHub API 认证：匿名 60 次/h，一轮要拉上百个 Gist（每个至少一次 API 调用），
