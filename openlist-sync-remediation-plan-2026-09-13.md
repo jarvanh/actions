@@ -1185,3 +1185,16 @@ POST 刷新 + 等待语义不变，预计省 ~30min/轮。
   - **顺带发现（待办）**: 该轮 trend `transferred_bytes=0` 而实际落了 51 个文件 ——
     正是 §F9 记录的"批次路径不喂 SYNC_TRANSFERRED_BYTES"，短轮下会让趋势恒为 0，
     优先级应上调（否则短轮拿不到吞吐数据）。
+- **2026-09-15 · F9 最小修复（`6056952`）**: 短轮 `34920298417` 实锤 trend `transferred_bytes=0`
+  而该轮 51 个文件经批次路径真实落盘。根因就是 §F9 早记录的那条（批次路径从不喂
+  `SYNC_TRANSFERRED_BYTES`），但**短轮让它的严重性上升**：短轮几乎每轮都走批次路径 ⇒ 趋势
+  恒为 0、拿不到吞吐数据（长轮里批次比重低时不明显，所以之前优先级被低估）。
+  修法: `sync_by_file_batches` 尾部两处赋值（必须在尾部那次 fix_test `sync_with_logging`
+  **之后**，它会清零）—— `total_transferred += batch_transferred_bytes`（递归收尾会用它
+  覆盖 SYNC_TRANSFERRED_BYTES）+ `SYNC_TRANSFERRED_BYTES = batch_transferred_bytes`（顶层用）。
+  口径仍是"rclone 声称量"（含假成功），C 判据必须配 truth-check。
+  测试: `test_batch_precheck_circuit_breaker` 新增 G8/G8b（3 批 × 1.5MiB → 4718592 / 解析不到 → 0）。
+- **待办（新，优先级上调）**: ① §11.6 的"吞吐阶梯"仍只有 1/4 两档、6 MiB 载荷太小
+  （噪声盖信号），要拿到"transfers 能不能再提"的结论需改成 64–128 MiB + 多档（1/2/4/8/12/16）；
+  ② 自续接力**不传预算**（红线禁止改自续 step）⇒ 短轮之后会接一个默认 320min 轮，
+  要连续短轮得手动 dispatch（或在 §0 第 6 条里注明）。
