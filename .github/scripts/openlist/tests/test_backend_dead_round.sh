@@ -49,6 +49,9 @@ _run_registry_entry() {
   SYNC_BACKEND_DEAD="${FAKE_DEAD_MAP[$_p]:-0}"
   SYNC_BACKEND_DEAD_STRONG="${FAKE_STRONG_MAP[$_p]:-0}"
 }
+# 本测试验证**串行**轮转语义: 显式关掉并行同步对
+OPENLIST_PAIR_PARALLEL=1
+
 OPENLIST_TASK_ROTATION=1
 ROTATION_MAX_CONSECUTIVE_ATTEMPTS=8
 reset_case() {
