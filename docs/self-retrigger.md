@@ -33,7 +33,7 @@
 
 | 类型 | 特征 | 要不要接力 | 本仓库的成员 |
 |---|---|---|---|
-| **保活型（服务型）** | 内部长 sleep（数小时）、单例并发、服务需要 24/7 在线 | ✅ 要 | `emby` `openlist` `openclaw` `p` `ql` `sub-store` `teslamate` `HomeAssistant` `jellyfin` |
+| **保活型（服务型）** | 内部长 sleep（数小时）、单例并发、服务需要 24/7 在线 | ✅ 要 | `emby` `openlist` `openclaw` `p` `ql` `sub-store` `teslamate` `HomeAssistant` `jellyfin` `tailscale-windows`（常驻 Windows 远程入口） |
 | **周期性任务** | 跑完即结束（备份、下载、签到、测速、清理） | ❌ 不要 | `github_backup_all` `self-hosted_backup` `icloud-photos-downloader` `ph-dl` `pixivutil2` `eshop` `upload-video-to-tg` `delete-workflow-runs` `subs-check` `proxy-speedtest-*`（4 个）`openlist-diag` `rdp` |
 
 判据就一句：**"这个 workflow 的产物是『一直在线』还是『跑完一份东西』"**。周期性任务加接力
@@ -103,9 +103,17 @@ jobs:
    "每小时一条 + 正常轮次"
 4. **无并行**：同一 workflow 任何时刻只应有 1 个 in_progress（靠 `*-singleton` 并发组）
 
-## 6. 还没接的两个
+## 6. 平台注意点
 
-- `tailscale-windows.yml`：它的 `*/5` cron **本来就是注释掉的**（手动触发、6h 窗口即结束）。
-  接上接力 = 变成"永不结束的常驻 Windows runner"，语义变化较大，**待定**（见仓库 issue/对话记录）
-- `emby.yml` / `openlist.yml`：早已有内联实现且稳定运行。它们与新共享脚本语义一致，
-  可选迁移（单独一轮做，不与其它改动混在一起，降低回归面）
+- **Windows runner（`tailscale-windows.yml`）**：脚本里用 `gh` 自带的 `--jq`（Go 实现），
+  **不要**管道给外部 `jq`——Windows 镜像上没有 jq 二进制，管道版会静默退化成"排队数=0"，
+  「已有排队」判据就白设了。该步骤要显式 `shell: bash`（runner 自带 git-bash）。
+- **排队判据取不到时是"放行派发"**（fail-open）：保活型服务可用性优先，宁可多派一轮
+  （单例并发会把它变成 pending，不会并行），也不因为一次 API 抖动让服务断档。
+- **保留时长要留出收尾余量**：`tailscale-windows` 的 keep-alive 从 21000s 收到 19000s——
+  原值加上启动会把整轮顶到 `timeout-minutes: 360` 边缘，被超时杀掉时收尾的接力步骤不会执行，链就断了。
+
+## 7. 还没接的
+
+`emby.yml` / `openlist.yml` 早已有内联实现且稳定运行，与新共享脚本语义一致；
+可选迁移（单独一轮做，不与其它改动混在一起，降低回归面）。
