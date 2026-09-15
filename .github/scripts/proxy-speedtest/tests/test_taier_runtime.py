@@ -37,6 +37,15 @@ def check(cond, label):
         FAILURES.append(label)
 
 
+def _parse_alive_probe(raw):
+    """按脚本同一口径解析测活开关：只有 0/false/no/off 才算关。
+
+    真源是 `taier_speedtest.CONFIG['TAIER_ALIVE_PROBE']` 里那行黑名单判断；这里复刻一份
+    是为了能验「显式关闭」——CONFIG 是导入时求值的，改不了 env 重算。
+    """
+    return raw.strip().lower() not in ('0', 'false', 'no', 'off')
+
+
 def main():
     import speedtest_common as c
     import speedtest_gitee as g
@@ -146,11 +155,15 @@ def main():
     # 提交到 Gist —— 那和撞硬取消没区别。
     check(budget < 21600, '预算 < job 默认上限 360 分钟')
     check(21600 - budget >= 3600, '预算与上限之间留够 ≥1 小时（前置准备 + 订阅导出/通知/Gist）')
-    # 测活**默认关闭**：run 34859505000 真机验证过，27 个节点全部 `Resource not found`
-    # （节点名在 mihomo 里对不上），前 8 个被误杀。在查清名字为什么对不上之前保持关闭。
-    check(t.CONFIG['TAIER_ALIVE_PROBE'] is False, '默认关闭测活（真机验证：会误杀活节点）')
+    # 测活**默认开启**（2026-09-15 改回）：目的就是「死节点别占掉 25 秒窗口」。
+    # run 34859505000 曾出现 27 个节点全部误杀（节点名在 mihomo 里对不上），
+    # 但那条路径由熔断（连续 8 个未通过即关探测）与 fail-open 兜住，不值得为此默认牺牲收益。
+    check(t.CONFIG['TAIER_ALIVE_PROBE'] is True, '默认开启测活（省下死节点的 25 秒窗口）')
     check('cnspeedtest' in t.CONFIG['TAIER_ALIVE_PROBE_URL'],
-          f"开启时探测目标默认对准泰尔控制面（实际 {t.CONFIG['TAIER_ALIVE_PROBE_URL']}）")
+          f"默认探测目标对准泰尔控制面（实际 {t.CONFIG['TAIER_ALIVE_PROBE_URL']}）")
+    # 显式关闭仍须生效（误杀现场要能一键退回纯测速）
+    check(_parse_alive_probe('0') is False, 'TAIER_ALIVE_PROBE=0 可显式关闭')
+    check(_parse_alive_probe('off') is False, 'TAIER_ALIVE_PROBE=off 可显式关闭')
 
     print('== 5. 四套共用同一份判据（单一来源，防各写一遍后漂移）==')
     # 用户诉求是「这 4 个测速任务都不触及 360 分钟」，所以三套引擎必须**同一口径**。

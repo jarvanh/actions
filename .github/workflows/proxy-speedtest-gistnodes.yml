@@ -242,9 +242,8 @@ jobs:
       sub_urls: ${{ needs.fetch-nodes.outputs.sub_url }}
       # 不限节点数：抓来多少就测多少（用户要求；节点多会让 mihomo 启动健康检查变慢）
       max_nodes: ${{ inputs.test_nodes || '0' }}
-      # 测活开关显式传 off：被调工作流的测活**默认关**（真机会误杀活节点），
-      # 编排交接几千个节点时更要避免误杀，这里写明不随 dispatch 参数漂移
-      alive_probe: 'off'
+      # 测活开关显式传 on：被调工作流测活**默认开**，编排不覆盖，这里写明让它不随 dispatch 漂移
+      alive_probe: 'on'
       # 测速结果写进**本工作流专属 Gist**（与源节点订阅同库、不同文件名），
       # 而不是三套测速各自的 Gist —— 这样一轮 gist 抓取的产物集中在一处
       gist_id: ${{ needs.fetch-nodes.outputs.gist_id }}
