@@ -586,7 +586,11 @@ jobs:
           [ "$ROUND_FAILED" -lt 0 ] && ROUND_FAILED=0
           echo "本轮修复成效: 成功 ${ROUND_FIXED_OK}（新落盘 ${ROUND_FIXED_NEW} · 沿用上轮 ${ROUND_REUSED}） · 缺失 ${ROUND_MISSING} · 未修复 ${ROUND_FAILED}"
           if [ "$ROUND_MISSING" -gt 0 ] && [ "$ROUND_FIXED_NEW" -eq 0 ]; then
-            echo "🚨 本轮零新增落盘: ${ROUND_MISSING} 个缺失文件本轮一个都没真正落盘（成功数 ${ROUND_FIXED_OK} 中 ${ROUND_REUSED} 个是沿用上轮成果）（典型成因: 目标后端写不进/驱动失效）—— 本 run 可能仍以 success 收场，但实际没有任何数据落盘"
+            # 口径必须写清（2026-09-15 修）: 本判据只看**修复管线**（逐文件 + 目录折叠），
+            # 批次/直传路径的落盘不在统计内。run 34920298417 就出现"告警说没有任何数据
+            # 落盘，而同一轮另有 51 个文件经批次路径真实落盘"的误导 —— 会让接手方
+            # 误判后端已死。故明确口径并指向整轮真值来源。
+            echo "🚨 修复管线零新增落盘: ${ROUND_MISSING} 个缺失文件本轮未修复成功（成功数 ${ROUND_FIXED_OK} 中 ${ROUND_REUSED} 个是沿用上轮成果）（典型成因: 后端写不进/驱动失效/预算将尽）—— 口径仅覆盖修复管线，批次与直传路径的落盘不计入；整轮是否零落盘请看 trend 与 truth-check"
           fi
 
           actual_entries=0

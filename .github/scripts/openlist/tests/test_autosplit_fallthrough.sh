@@ -25,6 +25,7 @@ SBB_CALLS=0
 SSM_CALLS=0   # save_sync_marker
 SOSF_CALLS=0  # split_on_sync_failure
 SWL_FAIL=0
+SBB_FAIL=0
 sync_with_logging() {
   SWL_CALLS=$((SWL_CALLS+1))
   SWL_LOG+="sync: $1"$'\n'
@@ -34,7 +35,9 @@ sync_with_logging() {
 }
 sync_by_file_batches() {
   SBB_CALLS=$((SBB_CALLS+1))
-  SYNC_FAILED=0
+  # 生产里批次路径在**函数尾部**按 failed_batches 置 SYNC_FAILED（见
+  # sync_by_file_batches 尾注释），失败不体现在 failed_subtasks 里
+  SYNC_FAILED=$SBB_FAIL
   SYNC_TRANSFERRED_BYTES=456
   return 0
 }
@@ -49,6 +52,8 @@ send_sync_warning() { :; }
 # rclone mock: size 按 path 映射（R_SIZE_<sfx>=bytes），lsf 返回 R_LSF 内容
 # 注意用 printf 避免 echo 的换行混进变量名后缀
 R_LSF=""
+# 1 = 非顶层路径的 lsf 返回空（模拟"子目录内没有更深一层子目录"= 叶子）
+R_LSF_SUBDIR_EMPTY=0
 rclone() {
   case "$1" in
     size)
@@ -57,7 +62,9 @@ rclone() {
       [ -z "$v" ] && v=0
       echo "{\"bytes\":${v},\"count\":1}"
       ;;
-    lsf) printf '%s' "$R_LSF" ;;
+    lsf)
+      if [ "${R_LSF_SUBDIR_EMPTY:-0}" = "1" ] && [ "$2" != "src" ]; then :; else printf '%s' "$R_LSF"; fi
+      ;;
     *) return 0 ;;
   esac
 }
@@ -130,6 +137,32 @@ R_SIZE_src=45000000000; SWL_FAIL=0
 run_impl 1 1 src dst t8 > "$OUT" 2>&1
 [ "$SSM_CALLS" = "1" ] && ok "8a skip marker 恰好保存 1 次（实际 ${SSM_CALLS}）" || bad "8a: marker=${SSM_CALLS}"
 [ "$SOSF_CALLS" = "0" ] && ok "8b skip 模式不走切割检查" || bad "8b: sosf=${SOSF_CALLS}"
+
+# --- 场景9: 叶子子任务的**文件批次路径失败**必须传到父级（run 34920298417 实锤）---
+# 旧行为: 递归收尾无条件用 failed_subtasks 重算 SYNC_FAILED，而批次路径的失败不体现
+# 在 failed_subtasks 里（叶子任务没有子目录）⇒ 批次级失败被洗成成功，后果三重:
+#   ① 父级不聚合失败 → 整轮报 success；
+#   ② 本层写成功 marker → 被 --1d-skip 跳过一整天；
+#   ③ run_all_tasks 的 SYNC_BACKEND_DEAD 分支永不求值 ⇒ F6 跨轮熔断彻底失效。
+R_LSF=$'a/\n'
+R_LSF_SUBDIR_EMPTY=1
+R_SIZE_src=60000000000; R_SIZE_src_a=60000000000
+SBB_FAIL=1
+run_impl 1 1 src dst t9 > "$OUT" 2>&1
+rc=$?
+[ "$SBB_CALLS" = "1" ] && ok "9a 叶子子任务走文件批次路径" || bad "9a: batch=${SBB_CALLS}"
+[ "$SSM_CALLS" = "0" ] && ok "9b 批次失败 → 不写成功 marker（否则被 1d-skip 跳过一天）" || bad "9b: marker=${SSM_CALLS}"
+# 9c: 顶层也按失败处理（走切割检查而非写 marker）。注意**不能断言 rc** ——
+# 该函数没有显式 return，rc 取自最后一条命令，本 harness 的最终同步 mock 恒成功。
+[ "$SOSF_CALLS" -ge 1 ] && ok "9c 失败传播到顶层（按失败走切割检查）" || bad "9c: sosf=${SOSF_CALLS}"
+
+# --- 场景10: 反例 —— 批次成功时照常写 marker（修法不能把正常路径一并堵死）---
+SBB_FAIL=0
+run_impl 1 1 src dst t10 > "$OUT" 2>&1
+rc=$?
+[ "$SSM_CALLS" = "1" ] && ok "10a 批次成功 → 照常写 marker" || bad "10a: marker=${SSM_CALLS}"
+[ "$rc" = "0" ] && ok "10b 批次成功 → rc=0" || bad "10b: rc=$rc"
+R_LSF_SUBDIR_EMPTY=0
 
 rm -f "$OUT"
 echo "=== 结果: PASS=$PASS FAIL=$FAIL ==="

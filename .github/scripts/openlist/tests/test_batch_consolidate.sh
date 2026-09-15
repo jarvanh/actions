@@ -127,7 +127,8 @@ run_consolidate() {
   local extra_args=(--delete-before)
   BATCH_BACKEND_DEAD=0
   SYNC_BACKEND_DEAD=0
-  _batch_consolidate "$1" "$2"
+  # 第 3 参 = 本批 copy 的退出码（124 = 被预算硬上限 timeout 截断）
+  _batch_consolidate "$1" "$2" "${3:-}"
   echo "${BATCH_BACKEND_DEAD:-0}" > /tmp/bc_backend_dead
   echo "${SYNC_BACKEND_DEAD:-0}" > /tmp/bc_sync_backend_dead
 }
@@ -294,6 +295,45 @@ OUT=$(run_consolidate 0 "$LOG")
 [ "$(calls /tmp/bc_fixpipe_calls)" = "1" ] && ok "10c 全拒熔断 → 本批顽固缺失仍进修复管线" || bad "10c: fixpipe=$(calls /tmp/bc_fixpipe_calls)"
 echo "$OUT" | grep -q "后端写入全拒" && ok "10d 全拒提示" || bad "10d: $OUT"
 echo "$OUT" | grep -q "已请求中止剩余批次" && ok "10e 中止剩余批次提示" || bad "10e: $OUT"
+
+# --- 场景10g: 预算截断（rc=124）→ **不做**全拒判定 ---
+# 背景（run 34920298417 实锤）: 短轮里批次 copy 被预算硬上限 timeout 掉（2670s 处），
+# 40/40 "未落盘"被旧判据读成"后端写入全拒"，而同一后端本轮另有 51 个文件真实落盘。
+# 不排除截断的后果: 经 F6 写进 backend_dead.json，让健康后端在 TTL 内被整轮跳过。
+setup
+BC_DEST="openlist:wopan175/0/j-1024j-视频-pornhub-favorites"
+cat > "$LOG" <<'EOF'
+INFO  : dead/file1.mp4: Copied (new)
+INFO  : dead/file2.mp4: Copied (new)
+INFO  : dead/file3.mp4: Copied (new)
+ERROR : dead/file4.mp4: Failed to copy: 405 Method Not Allowed
+EOF
+printf 'other/old.mp4\n' > "$LSF_OUT"
+RETRY_COPY_OK=0
+OUT=$(run_consolidate 0 "$LOG" 124)      # ← 被 timeout 截断
+[ "$(cat /tmp/bc_backend_dead 2>/dev/null)" = "0" ] && ok "10g1 传输被预算截断 → 不判后端全拒" || bad "10g1: dead=$(cat /tmp/bc_backend_dead 2>/dev/null)"
+[ "$(cat /tmp/bc_sync_backend_dead 2>/dev/null)" = "0" ] && ok "10g2 不置 SYNC_BACKEND_DEAD（不污染 F6 跨轮熔断）" || bad "10g2: sync_dead=$(cat /tmp/bc_sync_backend_dead 2>/dev/null)"
+echo "$OUT" | grep -q "被预算硬上限截断" && ok "10g3 日志说明跳过判定的原因" || bad "10g3: $OUT"
+[ "$(calls /tmp/bc_fixpipe_calls)" = "1" ] && ok "10g4 顽固缺失仍进修复管线（不因截断豁免）" || bad "10g4: fixpipe=$(calls /tmp/bc_fixpipe_calls)"
+
+# --- 场景10h: 预算将尽（可用工作片 ≤ 阈值）→ **不做**全拒判定 ---
+# 与 10g 同类: 重试被压到 60s 兜底时"重试 0 成功"不构成后端拒收证据
+setup
+BC_DEST="openlist:wopan175/0/j-1024j-视频-pornhub-favorites"
+cat > "$LOG" <<'EOF'
+INFO  : dead/file1.mp4: Copied (new)
+INFO  : dead/file2.mp4: Copied (new)
+INFO  : dead/file3.mp4: Copied (new)
+ERROR : dead/file4.mp4: Failed to copy: 405 Method Not Allowed
+EOF
+printf 'other/old.mp4\n' > "$LSF_OUT"
+RETRY_COPY_OK=0
+OPENLIST_SYNC_BUDGET_SECONDS=19200
+OPENLIST_SYNC_DEADLINE_EPOCH=$(( $(date +%s) + 2900 ))   # 剩 48min − 45min 预留 → 可用片 200s ≤ 300 阈值
+OUT=$(run_consolidate 0 "$LOG")
+unset OPENLIST_SYNC_DEADLINE_EPOCH
+[ "$(cat /tmp/bc_backend_dead 2>/dev/null)" = "0" ] && ok "10h1 预算将尽 → 不判后端全拒" || bad "10h1: dead=$(cat /tmp/bc_backend_dead 2>/dev/null)"
+echo "$OUT" | grep -q "预算将尽" && ok "10h2 日志说明跳过判定的原因" || bad "10h2: $OUT"
 
 # --- 场景11: 修复管线后重启复核 — 假成功条目被剔除，真成果保留 ---
 # 背景: 修复方法返回成功只代表 PUT 被接受，与批次传输假成功同源。修复
