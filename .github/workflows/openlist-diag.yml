@@ -50,6 +50,11 @@ on:
         required: false
         type: string
         default: "64"
+      xback_transfers:
+        description: "跨后端测试每条流的 transfers（默认 4）。用于判别「账号级天花板」: 两侧各抬到 12 流，若合计不再涨即为账号级共享上限"
+        required: false
+        type: string
+        default: "4"
       thru_levels:
         description: "吞吐阶梯档位（空格分隔的 transfers 值，默认 1 4 8；用来找拐点——拐点处再提并发无益）"
         required: false
@@ -131,6 +136,7 @@ jobs:
           DIAG_TARGET2: ${{ inputs.target2 }}
           DIAG_THRU_MB: ${{ inputs.thru_mb }}
           DIAG_THRU_LEVELS: ${{ inputs.thru_levels }}
+          DIAG_XBACK_TRANSFERS: ${{ inputs.xback_transfers }}
           OL_CONTAINER: ${{ inputs.container }}
         run: |
           # 恒 exit 0: 诊断结果写在报告里，探针失败不该让 step 变红（否则
