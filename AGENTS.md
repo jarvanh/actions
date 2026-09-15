@@ -10,6 +10,7 @@ GitHub Actions 工作流与脚本集合：OpenList 网盘同步、Emby 302 直�
 - 提交信息：`type(scope): 中文描述`，正文用 `- ` 列表说清「改了什么 + 为什么」。
 - **没有任何 workflow 监听 `push` / `pull_request`**，全是 `schedule` + `workflow_dispatch`：推送不会触发运行；判断某分支会不会产出通知，只看它是否支持 `workflow_dispatch`。
 - main 会被并行推送，push 前先 `git fetch` 确认落后数。
+- **长跑（保活型）workflow 的交接走共享接力脚本** `.github/scripts/lib/self_retrigger.sh`：判据（人工取消不接力 / 已有排队则跳过 / 开关关闭不接力）、cron 频率取舍（别用 `*/5`，会被限流）与接入配方见 `docs/self-retrigger.md`。周期性任务**不要**接（会把任务变常驻）。
 
 ## 进行中的修复计划
 
