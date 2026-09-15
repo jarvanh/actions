@@ -32,8 +32,18 @@
 3. 本机 `rclone cat onedrive:/logs/sync_state/{task_rotation.json,trend.jsonl,backend_dead.json}` 看游标 / 趋势 / 跨轮熔断命中。
 4. 对照 §6 记录增量 → **更新本文档的复选框与 §进度日志**。这是唯一的跨会话进度真源（`.codebuddy/memory/` 是本机私有记忆，不在 git 里，别的 AI 读不到）。
 5. **验证起跑规程（要立刻验新代码时用）**：GitHub 的 concurrency **会自动取消被顶替的 pending 轮**（实测 `34787645966` 被 `34793014398` 顶掉即此行为）⇒ 队列**恒为 1 深、且总是最新创建的那个**，不会积压成"落后 N 轮"。新代码进生产的真实延迟 = **下一次 cron（≤1h）＋ 在跑轮剩余时间（≤5.3h）**，上限约 6.3h。要压到分钟级就主动干预：先 `gh run list --workflow=openlist.yml --status pending --json databaseId` 取 id 逐个 `gh run cancel`，必要时再 `gh run cancel <在跑的 id>`（在跑轮若正烧在死后端，取消它损失极小），最后 `gh workflow run openlist.yml` 用"此刻"的 main 起跑。注意取消在跑轮会丢掉该轮已完成但未持久化的进度（游标/marker 是增量持久化，损失有限）。
+6. **两种"不等 5.5h"的取日志方式（2026-09-15 起，用户要求）**——验证一律先用它们，长轮只用于跑量：
+   - **分钟级**: `run_mode=调试 · 修复管线测试` + `fix_test_task=<task>` + `fix_test_max=<n>` + `force_sync=true`
+     —— 只跑单任务的 diff → 修复管线（**含目录级批量折叠**，它跑在 fix_max 截断之前），
+     几分钟出日志。覆盖: 折叠/延迟复核、逐文件修复、落盘校验、marker 记账。
+     拿不到: 批次/吞吐/熔断数据（`OPENLIST_FIX_TEST_MODE=1` 跳过实际传输）。
+   - **小时级**: `sync_budget_min=<分钟>`（默认 320，上限 320）—— 完整链路、预算缩短（如 60）。
+     派生阈值（批次最小片长 / 尾部预留）随预算等比缩放（`task_engine.sh _budget_scaled`），
+     所以短轮仍会正常开批次、走完整链路。代价: setup(~4min) + 收尾(~8min) 固定开销占比升高
+     （60min 轮约 20%，320min 轮约 4%）⇒ **跑量用 320，验证用短轮**。
+   - 两者都先 `gh run cancel <在跑轮>` 腾并发位，否则会 pending 到长轮结束。
 
-**红线**（§8，无例外）：run_mode 只允许「同步」与「调试 · 修复管线测试」；动通知必跑 `bash skills/telegram-notify-audit/scripts/render_preview.sh`；改完跑 24 套串行回归 + 全部日志 `grep "command not found"` 必须为空；push 前 `git fetch` 并更新本文档。
+**红线**（§8，无例外）：run_mode 只允许「同步」与「调试 · 修复管线测试」；动通知必跑 `bash skills/telegram-notify-audit/scripts/render_preview.sh`；改完跑 26 套串行回归 + 全部日志 `grep "command not found"` 必须为空；push 前 `git fetch` 并更新本文档。
 
 **必须问用户的**（AI 权限外，见 §9）：**wopan176 的 OpenList 驱动登录令牌是否需要人工重抓**——2026-09-14 用户已答「账号状态正常」，但 8005 是 **OpenList 驱动层登录令牌**失效，与网盘账号是两回事（详见 §4 · F19 与 §9 第 1 项）。原 §9 的 F16 主副本选型**已取消**（用户要求后端一个都不削减），F15 `transfers` **已授权自行调整**。
 
@@ -1118,3 +1128,15 @@ POST 刷新 + 等待语义不变，预计省 ~30min/轮。
     纯 sleep；有了延迟复核后，就地轮询的边际价值只剩"提前记账"，而复核（数分钟后）能
     覆盖同样的情况 ⇒ 可降到 2×30s，每轮省 ~10min（4 个读空目录 × 2.5min ≈ 3.6% 预算）。
     暂不改的理由: 保持本轮改动集最小、归因干净；等下一轮看延迟复核的实际命中率再定。
+- **2026-09-15 · 短轮快速迭代（`db77d72`，用户要求"不要每轮跑那么久"）**:
+  - workflow 新增入参 **`sync_budget_min`**（默认 320，上限 320=step 超时 330min 留余量；
+    非正整数回落默认并告警）。原先预算锚点是硬编码 19200s、日志也硬编码"320min"。
+  - **派生阈值随预算等比缩放**（`task_engine.sh _budget_scaled`）: 批次最小片长
+    = budget×3/8（19200→7200 精确还原原值）、尾部预留 = budget×9/64（19200→2700 精确还原），
+    下限 900s / 600s；显式环境变量优先。**不改会怎样**: 45min 预算 + 固定 120min 片长 ⇒
+    `_batch_budget_stop` 恒真 ⇒ 一个批次都不开，而折叠/修复管线/熔断都在批次之后 ⇒
+    短轮退化成空轮；尾部预留按 45min 算则吃掉整个预算、每次传输被压到 60s 兜底。
+  - §0 新增第 6 条「两种不等 5.5h 的取日志方式」: 分钟级（`调试 · 修复管线测试` +
+    `fix_test_task` + `force_sync=true`，覆盖折叠/修复/记账）+ 小时级（`sync_budget_min`）。
+  - 测试新增 7 项（默认预算精确还原 / 60min 与 30min 缩放与下限 / 超长预算不超原默认 /
+    显式设置优先）。回归 26 套 23 EXIT=0、cnf=0。
