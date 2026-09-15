@@ -33,10 +33,13 @@
 4. 对照 §6 记录增量 → **更新本文档的复选框与 §进度日志**。这是唯一的跨会话进度真源（`.codebuddy/memory/` 是本机私有记忆，不在 git 里，别的 AI 读不到）。
 5. **验证起跑规程（要立刻验新代码时用）**：GitHub 的 concurrency **会自动取消被顶替的 pending 轮**（实测 `34787645966` 被 `34793014398` 顶掉即此行为）⇒ 队列**恒为 1 深、且总是最新创建的那个**，不会积压成"落后 N 轮"。新代码进生产的真实延迟 = **下一次 cron（≤1h）＋ 在跑轮剩余时间（≤5.3h）**，上限约 6.3h。要压到分钟级就主动干预：先 `gh run list --workflow=openlist.yml --status pending --json databaseId` 取 id 逐个 `gh run cancel`，必要时再 `gh run cancel <在跑的 id>`（在跑轮若正烧在死后端，取消它损失极小），最后 `gh workflow run openlist.yml` 用"此刻"的 main 起跑。注意取消在跑轮会丢掉该轮已完成但未持久化的进度（游标/marker 是增量持久化，损失有限）。
 6. **两种"不等 5.5h"的取日志方式（2026-09-15 起，用户要求）**——验证一律先用它们，长轮只用于跑量：
-   - **分钟级**: `run_mode=调试 · 修复管线测试` + `fix_test_task=<task>` + `fix_test_max=<n>` + `force_sync=true`
-     —— 只跑单任务的 diff → 修复管线（**含目录级批量折叠**，它跑在 fix_max 截断之前），
-     几分钟出日志。覆盖: 折叠/延迟复核、逐文件修复、落盘校验、marker 记账。
-     拿不到: 批次/吞吐/熔断数据（`OPENLIST_FIX_TEST_MODE=1` 跳过实际传输）。
+   - **调试轮（视任务规模，10min–2h）**: `run_mode=调试 · 修复管线测试` + `fix_test_task=<task>` +
+     `fix_test_max=<n>` + `force_sync=true` —— 只跑单任务: 逐子同步对 diff → 修复管线
+     （**含目录级批量折叠**，它跑在 fix_max 截断之前）。
+     **实测（2026-09-15 · task3）: 不是"几分钟"** —— 两侧递归列举（源端 OneDrive + 目标端
+     crypt）本身就要十几到几十分钟，且会遍历该任务的**全部**子同步对（`fix_max` 只约束
+     逐文件条数，不限子同步对数量；step 超时 120min）。强项是跳过 initial sync 传输直达修复，
+     适合验证修复管线/折叠/落盘记账；**拿不到**批次/吞吐/熔断数据（`OPENLIST_FIX_TEST_MODE=1`）。
    - **小时级**: `sync_budget_min=<分钟>`（默认 320，上限 320）—— 完整链路、预算缩短（如 60）。
      派生阈值（批次最小片长 / 尾部预留）随预算等比缩放（`task_engine.sh _budget_scaled`），
      所以短轮仍会正常开批次、走完整链路。代价: setup(~4min) + 收尾(~8min) 固定开销占比升高
