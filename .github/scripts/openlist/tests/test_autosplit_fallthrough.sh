@@ -38,6 +38,16 @@ sync_by_file_batches() {
   # 生产里批次路径在**函数尾部**按 failed_batches 置 SYNC_FAILED（见
   # sync_by_file_batches 尾注释），失败不体现在 failed_subtasks 里
   SYNC_FAILED=$SBB_FAIL
+  SYNC_FAILED_BATCH=0
+  if [ "$SBB_FAIL" = "1" ]; then
+    # 独立标志（批次函数尾部置位）: 不被后续 sync 尝试清零
+    SYNC_FAILED_BATCH=1
+    SYNC_FAILED_BATCH_PAIR=1
+    # SBB_CLOBBER=1 模拟"SYNC_FAILED 被后续 sync 尝试清零"（run 34926236845 形态:
+    # 批次尾部那次 fix_test sync_with_logging 与 finalize 的最终完整同步都会经
+    # sync_notify 重置它）——此时只剩独立标志能证明批次失败过
+    [ "${SBB_CLOBBER:-0}" = "1" ] || SYNC_FAILED=1
+  fi
   SYNC_TRANSFERRED_BYTES=456
   return 0
 }
@@ -163,6 +173,18 @@ rc=$?
 [ "$SSM_CALLS" = "1" ] && ok "10a 批次成功 → 照常写 marker" || bad "10a: marker=${SSM_CALLS}"
 [ "$rc" = "0" ] && ok "10b 批次成功 → rc=0" || bad "10b: rc=$rc"
 R_LSF_SUBDIR_EMPTY=0
+
+# --- 场景11: 批次失败信号被后续 sync 尝试清零 → 独立标志必须救回来 ---
+# 生产形态（run 34926236845）: 批次 1 被预算截断（成功 0/4、failed_batches=1），
+# 但 SYNC_FAILED 被后续 sync 尝试重置为 0 ⇒ 子任务被判成功、游标前移、251 个
+# 缺失文件被当"已同步"交给下轮。这里锁"清零后仍必须判失败"。
+R_LSF=$'a/\n'; R_LSF_SUBDIR_EMPTY=1
+R_SIZE_src=60000000000; R_SIZE_src_a=60000000000
+SBB_FAIL=1; SBB_CLOBBER=1
+run_impl 1 1 src dst t11 > "$OUT" 2>&1
+SBB_CLOBBER=0
+[ "$SSM_CALLS" = "0" ] && ok "11a SYNC_FAILED 被清零后仍不写成功 marker" || bad "11a: marker=${SSM_CALLS}"
+[ "$SOSF_CALLS" -ge 1 ] && ok "11b SYNC_FAILED 被清零后仍按失败走切割检查" || bad "11b: sosf=${SOSF_CALLS}"
 
 rm -f "$OUT"
 echo "=== 结果: PASS=$PASS FAIL=$FAIL ==="
