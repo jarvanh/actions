@@ -134,6 +134,12 @@ copy_count() {
   [ -f "$RCLONE_COPY_CALLS_FILE" ] && wc -l < "$RCLONE_COPY_CALLS_FILE" | tr -d ' ' || echo 0
 }
 
+# 批次字节解析（真源 utils.sh get_transferred_bytes_from_log，本测试不 source 它）:
+# 直接给固定值，让「每批累加 → 并入 SYNC_TRANSFERRED_BYTES」这条链路可断言 ——
+# 解析本身的正确性属 utils.sh 的职责，不在这里重复测。
+BYTES_PER_BATCH=0
+get_transferred_bytes_from_log() { echo "${BYTES_PER_BATCH:-0}"; }
+
 clean_batch_dirs() { rm -rf /tmp/file_batches_t_* || true; }
 prepare_case() {
   CHECK_CALLS=0
@@ -154,7 +160,9 @@ prepare_case() {
 # 第一个经历过传输路径的熔断分支 (G2) 会静默杀死整个 harness
 capture_rc() {
   RC=0
+  RC_BYTES=0
   sync_by_file_batches "/src" "$1" "$2" || RC=$?
+  RC_BYTES="${SYNC_TRANSFERRED_BYTES:-0}"
 }
 
 # ---------- G1: openlist 目标 + 首批预检失败 ----------
@@ -247,6 +255,21 @@ chk "G7 三批照常传输（包装不改变流程）" "$(copy_count)" "3"
 chk "G7 每批 copy 都套上预算内硬上限" \
   "$(echo "$G7_OUT" | grep -c '本轮剩余预算内最多传输 120s' || true)" "3"
 unset BUDGET_SLICE_OVERRIDE
+
+# ---------- G8: 批次字节并入趋势口径（F9 最小修复）----------
+# 批次路径是主传输通道，此前从不喂 SYNC_TRANSFERRED_BYTES ⇒ trend 的
+# transferred_bytes 只反映"未经批次的直接 sync"，批次重的轮次恒为 0
+# （run 34920298417 实锤: 实际落盘 51 个文件，trend 记 0）。短轮下几乎每轮都走
+# 批次路径，趋势会一直空转 ⇒ 必须并入。3 批 × 1.5 MiB = 4.5 MiB。
+prepare_case
+BYTES_PER_BATCH=1572864          # 1.5 MiB/批
+capture_rc "openlist:crypt" "t_g8"
+BYTES_PER_BATCH=0
+chk "G8 批次字节并入 SYNC_TRANSFERRED_BYTES（3 批 × 1.5MiB）" "$RC_BYTES" "4718592"
+# 反例: 解析不到字节 → 仍为 0（不能凭空造数）
+prepare_case
+capture_rc "openlist:crypt" "t_g8b"
+chk "G8b 解析不到字节 → 记 0（不凭空造数）" "$RC_BYTES" "0"
 
 clean_batch_dirs
 echo ""
