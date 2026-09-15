@@ -71,11 +71,14 @@ class FakeMihomo(http.server.BaseHTTPRequestHandler):
         return self._send(404, {'message': 'not found'})
 
 
-def providers_payload(states, extra_unloaded=0):
+def providers_payload(states, extra_unloaded=0, shard='shard-0000'):
     """造一份 /providers/proxies 响应：`states` 是 {名字: alive 值 or None}。
 
     `alive=None` 表示 mihomo 还没给这个节点结论（字段缺失），这是与 `alive=False`
     **必须区分**的两种状态——前者要保留，后者才能丢。
+
+    provider 名默认用**分片名**（`alive-filter-NNNN`）：本层只认这个名字前缀，把节点挂在
+    `AUTO`/`default` 这类 mihomo 内置 provider 下的响应会被整体忽略（有专门用例验这一点）。
     """
     proxies = []
     for name, alive in states.items():
@@ -83,9 +86,7 @@ def providers_payload(states, extra_unloaded=0):
         if alive is not None:
             item['alive'] = alive
         proxies.append(item)
-    return {'providers': {'alive-filter': {'name': 'alive-filter',
-                                           'proxies': proxies,
-                                           'updatedAt': 'now'},
+    return {'providers': {shard: {'name': shard, 'proxies': proxies, 'updatedAt': 'now'},
                           'AUTO': {'name': 'AUTO', 'proxies': []}}}
 
 
@@ -114,10 +115,17 @@ def run_filter(af, base, proxies, plan, tmpdir, health_env=True,
     用例需要它，其余用例都该从干净的 200 起步。
     """
     events = []
-    saved = (af._start_mihomo, af.MIHOMO_API, af.log_progress)
-    af._start_mihomo = lambda: {'version': 'fake'}
+    saved = (af._start_mihomo, af.MIHOMO_API, af.log_progress, af._safe_home_dir)
+    af._start_mihomo = lambda *a, **k: {'version': 'fake'}
     af.MIHOMO_API = base
     af.log_progress = lambda stage, **fields: events.append(dict(fields, stage=stage))
+
+    def fake_home_dir(base_dir):
+        p = pathlib.Path(base_dir)
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    af._safe_home_dir = fake_home_dir
     FakeMihomo.plan = plan
     FakeMihomo.calls = 0
     if not _preserve_status:
@@ -127,7 +135,7 @@ def run_filter(af, base, proxies, plan, tmpdir, health_env=True,
     try:
         alive, report = af.filter_alive(env, proxies, workdir=tmpdir, **kw)
     finally:
-        af._start_mihomo, af.MIHOMO_API, af.log_progress = saved
+        (af._start_mihomo, af.MIHOMO_API, af.log_progress, af._safe_home_dir) = saved
     return alive, report, events
 
 
@@ -205,12 +213,12 @@ def main():
         check(rep['skip_reason'] == 'budget_exhausted',
               f'原因写明 budget_exhausted（实际 {rep["skip_reason"]}）')
         check([p['name'] for p in alive] == ['a', 'b'], '原样放行全部（不是空订阅）')
-        check([e['stage'] for e in ev] == ['alive_filter_skipped'],
+        check('alive_filter_skipped' in [e['stage'] for e in ev],
               f'打了 skipped 日志（实际 {[e["stage"] for e in ev]}）')
 
         print('== 6. fail-open：mihomo 起不来 → 原样放行全部 ==')
 
-        def boom():
+        def boom(*a, **k):
             raise RuntimeError('cannot start')
 
         saved_start = af._start_mihomo
@@ -229,6 +237,10 @@ def main():
         check(rep['skipped'] is True and rep['skip_reason'] == 'mihomo_start_failed',
               f'起不来 → skipped/mihomo_start_failed（实际 {rep}）')
         check([p['name'] for p in alive] == ['a', 'b'], '起不来时原样放行全部')
+        # 起不来时把 mihomo 日志尾部吐出来：SAFE_PATHS 越界、provider 解析失败这些
+        # **只在日志里**（进程是静默退出的），不吐就只能看到 "Connection refused" 干瞪眼。
+        check(any(e['stage'] == 'alive_filter_mihomo_log' for e in events),
+              f'失败时吐出 mihomo 日志真因（实际 {[e["stage"] for e in events]}）')
 
         print('== 7. fail-open：API 报错 → 原样放行全部 ==')
         # 必须在 run_filter **之前**置好状态：run_filter 会把 snapshot_status 重置为 200
@@ -253,7 +265,7 @@ def main():
         print('== 9. 边界：空输入不炸、也不必起 mihomo ==')
         started = []
         saved_start = af._start_mihomo
-        af._start_mihomo = lambda: started.append(1)
+        af._start_mihomo = lambda *a, **k: started.append(1)
         try:
             alive, rep = af.filter_alive({}, [], workdir=tmpdir, budget_seconds=30)
         finally:
@@ -261,16 +273,37 @@ def main():
         check(alive == [] and rep['total'] == 0, '空输入返回空')
         check(started == [], '空输入不启动 mihomo（省掉一次几十 MB 下载）')
 
-        print('== 10. 排除项：AUTO / default 这类非节点 provider 不进结论集 ==')
-        payload = {'providers': {'alive-filter': {'proxies': [
+        print('== 10. 排除项：AUTO / default 这类非分片 provider 不进结论集 ==')
+        # 只认 `alive-filter-` 前缀。mihomo 的 `default` provider 里确实塞着几个内置条目，
+        # 混进来会污染「多少节点出了结论」的计数（实测沙箱里 default 有 3 个）。
+        payload = {'providers': {'shard-0000': {'proxies': [
             {'name': 'a', 'alive': True}]},
             'AUTO': {'proxies': [{'name': 'AUTO', 'alive': True}]},
             'default': {'proxies': [{'name': 'default', 'alive': False}]}}}
         alive, rep, _ = run_filter(af, base, nodes(['a']), [payload], tmpdir, budget_seconds=30)
-        check([p['name'] for p in alive] == ['a'], f'只认自建 provider（实际 {[p["name"] for p in alive]}）')
+        check([p['name'] for p in alive] == ['a'], f'只认自建分片 provider（实际 {[p["name"] for p in alive]}）')
         check(rep['dead'] == 0, 'AUTO/default 的结论不算数（否则会误判死）')
 
-        print('== 11. 过滤后产出的 YAML 可被 mihomo 再读回（格式不得被破坏）==')
+        print('== 11. 分片：坏片（整片加载失败）不影响其余片的过滤 ==')
+        # 这是本层**必须分片**的原因：mihomo 对 provider 是「全有或全无」，一个畸形节点
+        # 让整个 provider 的 proxies 变成 []（实测 run 34949717315 的真实 13620 节点里，
+        # proxy 11 报 `invalid REALITY short ID`，单 provider 方案下整层归零）。
+        # 分片后坏片消失于快照 ⇒ 那片节点按「查不到结论」保留，其余片照常判死。
+        many = nodes([f'n{i}' for i in range(5)])
+        plan = [
+            # 第一轮：只有 0000 片在，里面 a 活 b 死；0001 片整片缺席（坏片）
+            {'providers': {'shard-0000': {'proxies': [
+                {'name': 'n0', 'alive': True}, {'name': 'n1', 'alive': False}]}}},
+        ]
+        alive, rep, _ = run_filter(af, base, many, plan, tmpdir, budget_seconds=30)
+        got = [p['name'] for p in alive]
+        check(got == ['n0', 'n2', 'n3', 'n4'],
+              f'坏片的节点保留、好片的死节点丢掉（实际 {got}）')
+        check(rep['dead'] == 1, f'只统计明确判死的（实际 dead={rep["dead"]}）')
+        check(rep['unmatched'] == 3, f'坏片节点记进 unmatched（实际 {rep["unmatched"]}）')
+        check(rep['shards'] == 1, f'5 个节点 = 1 片（FILTER_SHARD_SIZE=200，实际 {rep["shards"]}）')
+
+        print('== 12. 过滤后产出的 YAML 可被 mihomo 再读回（格式不得被破坏）==')
         import yaml
         # 这一用例自带一次运行，不依赖前面用例留下的临时文件：那些用例各写各的，
         # 谁最后跑谁覆盖（本题曾因此读到 test 10 的 1 个节点而假失败）。
@@ -281,20 +314,52 @@ def main():
                    sub, budget_seconds=30)
         # 路径与 gist_nodes 的调用口径一致：过滤层只在自己收到的 workdir 下写文件，
         # 不再自作主张加一层子目录（`gist_nodes` 传的就是 `workdir/'alive-filter'`）。
-        out = sub / 'alive-filter-proxies.yaml'
-        check(out.exists(), f'写了 provider 用的 YAML（{out}）')
+        # 分片后文件名是 `shard-NNNN.yaml`（见 FILTER_SHARD_SIZE 上方注释）。
+        out = sub / 'shard-0000.yaml'
+        check(out.exists(), f'写了分片 provider 用的 YAML（{out}）')
         loaded = (yaml.safe_load(out.read_text(encoding='utf-8')) or {}).get('proxies') or []
         # 写进 provider 的必须是**过滤前**的全量：mihomo 要自己给每个节点出结论，
         # 若只喂「已判活」的子集，就等于用过滤结果当输入，循环论证。
         check(len(loaded) == 4, f'写进去的是过滤前的全量（实际 {len(loaded)}）')
         check(all('name' in p and 'server' in p for p in loaded), '节点字段完整')
         cfg = yaml.safe_load(af.MIHOMO_CONFIG.read_text(encoding='utf-8')) or {}
-        hc = ((cfg.get('proxy-providers') or {}).get('alive-filter') or {}).get('health-check') or {}
+        providers = cfg.get('proxy-providers') or {}
+        check(list(providers) == ['shard-0000'], f'配置里只有本层建的分片 provider（实际 {list(providers)}）')
+        hc = (providers.get('shard-0000') or {}).get('health-check') or {}
         check(hc.get('lazy') is False,
               'lazy 必须 false（true 的话 alive 永远缺失，本层永远等不到结论）')
         check(hc.get('expected-status') == 204, f'expected-status=204（实际 {hc.get("expected-status")}）')
         check(hc.get('url') == 'http://hc/' or hc.get('url') == g.DEFAULT_HEALTHCHECK_URL,
               f'健康检查目标写进配置（实际 {hc.get("url")}）')
+
+        print('== 13. 路径守卫：workdir 在 mihomo home 之外时改落 home 内 ==')
+        # 本层必须自己钉住这件事，不能靠调用方传对：实测 run 34949717315 就是因为在
+        # home 外写 provider 文件 ⇒ mihomo `level=fatal` 秒退 ⇒ 空等 60 秒 fail-open。
+        home = pathlib.Path(tempfile.mkdtemp(prefix='af-home-'))
+        outside = pathlib.Path(tempfile.mkdtemp(prefix='af-outside-')) / 'alive-filter'
+        saved_cfg = af.MIHOMO_CONFIG
+        af.MIHOMO_CONFIG = home / 'config.yaml'
+        try:
+            events = []
+            saved_log = af.log_progress
+            af.log_progress = lambda stage, **fields: events.append(dict(fields, stage=stage))
+            try:
+                got = af._safe_home_dir(outside)
+            finally:
+                af.log_progress = saved_log
+            check(home in got.parents or got.parent == home,
+                  f'home 外的 workdir 被改落 home 内（实际 {got}）')
+            check(any(e['stage'] == 'alive_filter_workdir_relocated' for e in events),
+                  f'换地方时打日志说明原因（实际 {[e["stage"] for e in events]}）')
+            inside = home / 'alive-filter'
+            saved_log = af.log_progress
+            af.log_progress = lambda stage, **fields: events.append(dict(fields, stage=stage))
+            try:
+                check(af._safe_home_dir(inside) == inside, 'home 内的 workdir 原样保留')
+            finally:
+                af.log_progress = saved_log
+        finally:
+            af.MIHOMO_CONFIG = saved_cfg
 
     finally:
         server.shutdown()

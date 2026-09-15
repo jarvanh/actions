@@ -64,9 +64,9 @@ job，gistnodes 侧拿不到测速结果。抓取情况走 job 摘要与 artifac
 6. **取回**：`GET /download/collection/<名>/ClashMeta` 拿 mihomo YAML；同时取 `<名>-raw` 的
    `JSON` 只用来数节点，得到「解析后 N → 去重后 M」这个可核对口径；
 7. **健康检查**（`GIST_NODES_ALIVE_FILTER`，默认开）：在发布**之前**起一个本地 mihomo
-   （独立端口 19090 / 17892，与测速共用同一份内核二进制与配置语义），把去重后的节点当一个
-   `type: file` 的 provider 载入、`lazy: false` 全量探测，只保留判活的节点再发布。
-   详见下面「为什么发布前必须自己先测活」；
+   （独立端口 19090 / 17892，与测速共用同一份内核二进制与配置语义），把去重后的节点切成
+   **分片 provider**（每片 `FILTER_SHARD_SIZE` = 200 个，`shard-NNNN.yaml`）载入、
+   `lazy: false` 全量探测，只保留判活的节点再发布。详见下面「为什么发布前必须自己先测活」；
 8. **发布**：YAML 写进本工作流专属 Gist（`update_gist`），raw URL 作为 `sub_urls` 传给
    选定的测速工作流（`workflow_call` + `secrets: inherit`）。
 
@@ -94,6 +94,25 @@ job，gistnodes 侧拿不到测速结果。抓取情况走 job 摘要与 artifac
 **为什么 `lazy: false` 必须是这个值**（这一层自己生成的那份 config）：`lazy: true` 的
 provider 只在被显式请求时才探活，`/providers/proxies` 里所有节点的 `alive` 会**一直缺失**，
 这一层就永远等不到结论、只能 fail-open 放行全部——等于白跑。
+
+**为什么必须分片，不能只建一个 provider。** mihomo 对 provider 是「全有或全无」：片里
+只要有一个节点解析失败，整个 provider 的 `proxies` 就变成 `[]`。这不是理论风险——2026-09-15
+首次实跑（run 34949717315）发布的那份 13620 节点里，proxy 11 就是 `invalid REALITY short
+ID`，单 provider 方案下**整层过滤归零**。切 200 一片后，实测坏片只剩 3/69（`shard-0040` /
+`shard-0038` / `shard-0015`），其余照常判活。
+
+坏片的节点在快照里**根本不出现**，于是按名字匹配不上 → 归入 `unmatched` → **保留**。
+这与「只丢明确死结论」是同一原则：查不到结论 ≠ 判死。
+
+**为什么 provider 文件必须写在当前用户的 home 内。** mihomo 拒绝加载 home 之外的 provider
+文件，报 `path is not subpath of home directory or SAFE_PATHS`，而且是 `level=fatal` ——
+**进程直接退出、控制器根本不监听**。同一次 run 就是因为本层把 provider 写进了
+`GIST_NODES_WORKDIR`（= 仓库工作区，在 home 外），于是 `wait_mihomo` 空等 60 秒、报成
+`mihomo_start_failed: Connection refused`，真因（配置被拒）被完全掩盖。
+
+两处加固：`_safe_home_dir` 不信任调用方传进来的路径、越界就改落 home 内并打
+`alive_filter_workdir_relocated`；`_dump_mihomo_log` 在**任何** fail-open 时把 mihomo 日志
+尾部吐进 progress 流——否则这类「进程静默退出」的真因只能靠猜。
 
 **降级方向是「放行全部」，不是「失败」**：mihomo 起不来、预算耗尽、API 报错一律原样
 发布全部节点并记 `alive_filter_skipped`。这一层存在的意义是把规模压下去，它自己故障时
@@ -349,9 +368,12 @@ python .github/scripts/proxy-speedtest/tests/test_alive_filter.py
 **它不覆盖健康检查过滤**（要另下几十 MB 的 mihomo 并等一个 10 分钟预算），那些轮次统一用
 `GIST_NODES_ALIVE_FILTER=0` 关掉——顺带也证明这个开关真的能关掉过滤。
 
-**`test_alive_filter.py`** 用假 mihomo 专测过滤层的四类隐蔽坏法：判据反了（把「还没出结论」
+**`test_alive_filter.py`** 用假 mihomo 专测过滤层的隐蔽坏法：判据反了（把「还没出结论」
 当「死」，静默丢掉一大半活节点）、fail-open 失效（起不来/超时/API 报错时抛异常 ⇒ 零节点发布）、
 全判死没兜底、稳定判据过早（mihomo 刚起来就 break ⇒ 等于没过滤）。覆盖：只丢明确判死的、
 没结论的保留、结论不增长即收尾、冷启动宽限、三种 fail-open 各自的 `skip_reason`、
 全判死如实上报（让 `gist_nodes` 的 `all_dead` 回退能触发）、空输入不启动 mihomo、
-`AUTO`/`default` 不算数、以及写进 provider 的必须是**过滤前**的全量且 `lazy: false`。
+`AUTO`/`default` 不算数、写进 provider 的必须是**过滤前**的全量且 `lazy: false`、
+**坏片不影响好片**（整片加载失败时那片节点按 `unmatched` 保留）、
+**fail-open 时必须吐出 mihomo 日志真因**、以及
+**workdir 越界改落 home 内**（这条是首次实跑翻车后补的回归）。
