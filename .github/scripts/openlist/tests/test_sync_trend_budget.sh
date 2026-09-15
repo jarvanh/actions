@@ -86,24 +86,39 @@ _v=$(_budget_slice_seconds 2700)
 [ "$_v" = "60" ] && ok "传输上限: 已过点→兜底 60s（不出现 0/负）" || bad "传输上限: 期望60实得 ${_v:-空}"
 unset OPENLIST_SYNC_DEADLINE_EPOCH
 
-# --- 1d. _budget_scaled 预算派生阈值（支持"短轮快速迭代"，2026-09-15）---
+# --- 1d. 预算派生阈值（支持"短轮快速迭代"，2026-09-15）---
 # 绝对阈值只在 320min 预算下自洽: 45min 预算 + 120min 批次片长 ⇒ 一个批次都不开，
 # 短轮退化成空轮（拿不到折叠/修复管线的日志）。故按比例缩放，且默认预算下精确还原。
+unset OPENLIST_BATCH_MIN_SLICE_SECONDS
 OPENLIST_SYNC_BUDGET_SECONDS=19200
-[ "$(_budget_scaled 3 8 7200 900)" = "7200" ] && ok "派生: 默认 320min → 批次片长 7200（原值不变）" || bad "派生: 期望7200 实得 $(_budget_scaled 3 8 7200 900)"
+[ "$(_batch_slice_effective)" = "7200" ] && ok "派生: 默认 320min → 批次片长 7200（原值不变）" || bad "派生: 期望7200 实得 $(_batch_slice_effective)"
 [ "$(_budget_scaled 9 64 2700 600)" = "2700" ] && ok "派生: 默认 320min → 尾部预留 2700（原值不变）" || bad "派生: 期望2700 实得 $(_budget_scaled 9 64 2700 600)"
 OPENLIST_SYNC_BUDGET_SECONDS=3600   # 60min 短轮
-[ "$(_budget_scaled 3 8 7200 900)" = "1350" ] && ok "派生: 60min 轮 → 批次片长 1350（仍开得起批次）" || bad "派生: 期望1350 实得 $(_budget_scaled 3 8 7200 900)"
+[ "$(_batch_slice_effective)" = "1350" ] && ok "派生: 60min 轮 → 批次片长 1350（仍开得起批次）" || bad "派生: 期望1350 实得 $(_batch_slice_effective)"
 [ "$(_budget_scaled 9 64 2700 600)" = "600" ] && ok "派生: 60min 轮 → 尾部预留受下限保护 600" || bad "派生: 期望600 实得 $(_budget_scaled 9 64 2700 600)"
 OPENLIST_SYNC_BUDGET_SECONDS=1800   # 30min 短轮
-[ "$(_budget_scaled 3 8 7200 900)" = "900" ] && ok "派生: 30min 轮 → 片长受下限保护 900" || bad "派生: 期望900 实得 $(_budget_scaled 3 8 7200 900)"
+[ "$(_batch_slice_effective)" = "900" ] && ok "派生: 30min 轮 → 片长受下限保护 900" || bad "派生: 期望900 实得 $(_batch_slice_effective)"
 OPENLIST_SYNC_BUDGET_SECONDS=999999
-[ "$(_budget_scaled 3 8 7200 900)" = "7200" ] && ok "派生: 超长预算 → 不超过原默认（min 语义）" || bad "派生: 期望7200 实得 $(_budget_scaled 3 8 7200 900)"
+[ "$(_batch_slice_effective)" = "7200" ] && ok "派生: 超长预算 → 不超过原默认（min 语义）" || bad "派生: 期望7200 实得 $(_batch_slice_effective)"
 OPENLIST_SYNC_BUDGET_SECONDS=19200
-# 显式设置必须优先于缩放（否则调参失效）: 重开一个 shell source 验证 `:-` 语义
-_v=$(OPENLIST_BATCH_MIN_SLICE_SECONDS=1800 OPENLIST_SYNC_BUDGET_SECONDS=3600 \
-  bash -c "source '$_REPO_ROOT/.github/scripts/openlist/task_engine.sh' >/dev/null 2>&1; echo \"\$OPENLIST_BATCH_MIN_SLICE_SECONDS\"")
-[ "$_v" = "1800" ] && ok "派生: 显式 OPENLIST_BATCH_MIN_SLICE_SECONDS 优先（不被缩放覆盖）" || bad "派生: 显式值被覆盖为 [$_v]"
+# 显式设置必须优先于缩放（否则调参失效）
+OPENLIST_BATCH_MIN_SLICE_SECONDS=1800
+[ "$(_batch_slice_effective)" = "1800" ] && ok "派生: 显式 OPENLIST_BATCH_MIN_SLICE_SECONDS 优先" || bad "派生: 显式值被覆盖为 $(_batch_slice_effective)"
+unset OPENLIST_BATCH_MIN_SLICE_SECONDS
+
+# **回归锁（2026-09-15 实测踩到的真 bug）**: workflow 的真实顺序是「先 source
+# load_all.sh，再 export OPENLIST_SYNC_BUDGET_SECONDS」——若缩放值在 source 时就算进
+# 变量，短轮会永远拿到默认 320min 对应的 7200s 片长 ⇒ 一个批次都不开（短轮空转，
+# 且日志上看不出来）。故断言: **source 之后**改预算，派生值必须跟着变。
+_v=$(bash -c "source '$_REPO_ROOT/.github/scripts/openlist/task_engine.sh' >/dev/null 2>&1
+  OPENLIST_SYNC_BUDGET_SECONDS=3600
+  echo \"\$(_batch_slice_effective)\"")
+[ "$_v" = "1350" ] && ok "派生: 预算在 source 之后设置仍生效（回归锁）" || bad "派生: source 后改预算无效，实得 [$_v]（短轮会一个批次都不开）"
+_v=$(bash -c "source '$_REPO_ROOT/.github/scripts/openlist/task_engine.sh' >/dev/null 2>&1
+  OPENLIST_SYNC_BUDGET_SECONDS=3600
+  OPENLIST_SYNC_DEADLINE_EPOCH=\$(( \$(date +%s) + 3600 ))
+  echo \"\$(_budget_slice_seconds)\"")
+[ "${_v:-0}" -gt 2500 ] && ok "派生: 传输上限也按运行期预算算（尾部预留缩到下限 600）" || bad "派生: 传输上限实得 ${_v:-空}（期望>2500）"
 
 # --- 2. trend_record_transferred ---
 rm -f /tmp/ol_trend_transferred.log

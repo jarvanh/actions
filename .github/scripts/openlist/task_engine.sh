@@ -396,10 +396,20 @@ _budget_scaled() {  # <分子> <分母> <原默认值> <下限>
 # wopan175 各子目录同步/truth-check 2h36m 吃掉，批次 1 在只剩 2h3m 时开启，
 # 于是又撞 330min 硬杀）。留 2h 片长: 剩余不足 2h 就不开新批，宁可本轮少开
 # 一批、把成果留给接力，也不要撞超时。短轮下按比例缩小（见 _budget_scaled）。
-OPENLIST_BATCH_MIN_SLICE_SECONDS="${OPENLIST_BATCH_MIN_SLICE_SECONDS:-$(_budget_scaled 3 8 7200 900)}"
+#
+# ⚠️ **必须运行期惰性求值，不能在 source 时算**（2026-09-15 实测踩到）:
+#   预算锚点 `OPENLIST_SYNC_BUDGET_SECONDS` 由 workflow 在 `source /tmp/load_all.sh`
+#   **之后**才 export（sync step 里先 source 再 export）。若在 source 时就把缩放值
+#   算进变量，永远按默认 320min 缩放 ⇒ 短轮拿到 7200s 片长 ⇒ _batch_budget_stop
+#   恒真 ⇒ **一个批次都不开**，短轮退化成空轮（正是要防的失效模式，而且日志上看不出来）。
+#   故这里只认"显式设置"，未设置时每次调用按**当时**的预算算。
+_batch_slice_effective() {
+  [ -n "${OPENLIST_BATCH_MIN_SLICE_SECONDS:-}" ] && { echo "$OPENLIST_BATCH_MIN_SLICE_SECONDS"; return 0; }
+  _budget_scaled 3 8 7200 900
+}
 _batch_budget_stop() {
   [ -n "${OPENLIST_SYNC_DEADLINE_EPOCH:-}" ] || return 1
-  [ $(( $(date +%s) + OPENLIST_BATCH_MIN_SLICE_SECONDS )) -ge "$OPENLIST_SYNC_DEADLINE_EPOCH" ]
+  [ $(( $(date +%s) + $(_batch_slice_effective) )) -ge "$OPENLIST_SYNC_DEADLINE_EPOCH" ]
 }
 
 # 单次传输可用的秒数 = 预算剩余 − 尾部预留；无预算（调试/还原）时输出空串
