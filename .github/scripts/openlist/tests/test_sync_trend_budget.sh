@@ -2,9 +2,15 @@
 # P0 传输趋势 + P2 优雅到站——逻辑验证（mock rclone/telegram，python3 真实执行）
 # 验证:
 #   1. sync_budget_stop 三态: 未设锚点不停止 / 预算耗尽停止 / 预算充足不停止
-#   1b. _batch_budget_stop 三态（批次循环专用闸，最小工作片 60min）
+#   1b. _batch_budget_stop 三态（批次循环专用闸；片长按预算缩放，320min 下为 120min）
+#   1c. _budget_slice_seconds 三态（在途传输硬上限 = 预算剩余 − 尾部预留）
+#   1d. 预算派生阈值（2026-09-15）: 默认预算下精确还原原值 / 短轮按比例缩放 + 下限 /
+#       **运行期惰性求值回归锁**（workflow 是先 source 再 export 预算，source 时求值
+#       会让短轮拿到 7200s 片长 ⇒ 一个批次都不开）
 #   2. trend_record_transferred 只累计正数字节，非法输入忽略
 #   3. trend_capture_remaining 汇总 PREVIEW_PENDING_MAP（"bytes count" 口径）
+#      3b/3c. 三条 unknown 路径（2026-09-15）: 源端列举失败 / 空 map（skip_preview
+#      仅注册模式）—— 都不能写 0（写 0 会让趋势显示"剩余量清零"，最危险的假信号）
 #   4. trend.jsonl 三情形: 远端不存在→创建上传 / 存在→追加 / 读取失败→放弃
 #      回传只发通知（宁丢样本不覆盖历史）
 #   5. run_all_tasks 优雅中断: 预算将尽在首个任务前即停 / 中途耗尽停在下个
