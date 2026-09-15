@@ -78,7 +78,7 @@
 | `PROXY_SPEEDTEST_UPLOAD_VIA_PROXY` | 1 | 1=经代理（节点上行）；0=直连（家庭宽带上行） |
 | `PROXY_SPEEDTEST_SWITCH_SETTLE_SECONDS` | 1.5 | 切节点后等待 |
 | `PROXY_SPEEDTEST_MAX_NODES` | 0 | 0 = 不限 |
-| `PROXY_SPEEDTEST_BUDGET_SECONDS` | `18000` | **墙钟预算**（秒，`0` = 不限），从进程启动起算。到点不再开下一个节点，拿已测节点照常出订阅（退出码 0）。**与 job 的 `timeout-minutes` 成对**：默认 5 小时 < 360 分钟 |
+| `PROXY_SPEEDTEST_BUDGET_SECONDS` | `18000` | **墙钟预算**（秒，`0` = 不限），从进程启动起算。到点不再开下一个节点，拿已测节点照常出订阅（退出码 0）。**与 job 的 `timeout-minutes` 成对**：默认 5 小时 < 360 分钟。workflow 里写死，不接仓库 Variables |
 | `PROXY_SPEEDTEST_NPMMIRROR_ENABLED` | 1 | 是否合并 npmmirror 最新版测速点 |
 | `PROXY_SPEEDTEST_GIST_FILENAME` / `_DESCRIPTION` | 见 workflow | Gist 文件名/描述（三套区分） |
 | `PROXY_SPEEDTEST_MIN_MEGABIT` | 10 | 达标阈值（兆），三套共用 |

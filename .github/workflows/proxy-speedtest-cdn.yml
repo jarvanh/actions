@@ -89,8 +89,8 @@ jobs:
           # 墙钟预算（秒，0 = 不限）：到点不再开下一个节点，拿已测节点照常出订阅（退出码 0），
           # 目的是**不撞 job 的 360 分钟硬取消**（撞上则整轮白烧、订阅来不及提交 Gist）。
           # 默认 18000 秒 = 5 小时，比硬上限少 1 小时留给前置准备与收尾。**与 job 的
-          # timeout-minutes 成对，改一个要回看另一个。** 可在仓库 Variables 覆盖。
-          PROXY_SPEEDTEST_BUDGET_SECONDS: ${{ vars.PROXY_SPEEDTEST_BUDGET_SECONDS || '18000' }}
+          # timeout-minutes 成对，改一个要回看另一个。**
+          PROXY_SPEEDTEST_BUDGET_SECONDS: '18000'
           # 上行测速：默认开启，复用 speedtest_gitee 的「经 mihomo 代理 git push」方案，
           # 携带代理环境变量向 Gitee 私有仓库 push 测速文件（反映代理节点上行带宽）。
           # 需先在仓库 Secrets 配置 GITEE_PRIVATE_TOKEN 与 PROXY_SPEEDTEST_GITEE_OWNER，
@@ -103,16 +103,15 @@ jobs:
           PROXY_SPEEDTEST_GITEE_OWNER: ${{ secrets.PROXY_SPEEDTEST_GITEE_OWNER }}
           PROXY_SPEEDTEST_GITEE_REPO: proxy-speedtest-temp
           PROXY_SPEEDTEST_PUSH_TIMEOUT: '30'
-          # 订阅导出策略（四套共用；可在仓库 Settings → Secrets and variables → Actions
-          # → Variables 里覆盖，留空走脚本默认值）：
+          # 订阅导出策略（四套共用，脚本默认值；各脚本消费）：
           #   PROXY_SPEEDTEST_MIN_MEGABIT  达标阈值（兆，默认 10）
           #   PROXY_SPEEDTEST_SPEED_METRIC 判定指标 upload|download（默认 upload 按上行判定；
           #                                另一指标达标数「明显更多」时自动改用另一指标）
           #   PROXY_SPEEDTEST_MIN_NODES    上传订阅的最少节点数（默认 1，不足则不上传）
-          PROXY_SPEEDTEST_MIN_MEGABIT: ${{ vars.PROXY_SPEEDTEST_MIN_MEGABIT || '10' }}
-          PROXY_SPEEDTEST_SPEED_METRIC: ${{ vars.PROXY_SPEEDTEST_SPEED_METRIC || 'upload' }}
-          PROXY_SPEEDTEST_MIN_NODES: ${{ vars.PROXY_SPEEDTEST_MIN_NODES || '1' }}
-          PROXY_SPEEDTEST_METRIC_FALLBACK_RATIO: ${{ vars.PROXY_SPEEDTEST_METRIC_FALLBACK_RATIO || '1.5' }}
+          PROXY_SPEEDTEST_MIN_MEGABIT: '10'
+          PROXY_SPEEDTEST_SPEED_METRIC: 'upload'
+          PROXY_SPEEDTEST_MIN_NODES: '1'
+          PROXY_SPEEDTEST_METRIC_FALLBACK_RATIO: '1.5'
           # 订阅导出 + 上传 Gist：脚本复用 speedtest_gitee 的 build_subscription_yaml_text /
           # update_gist，把达标节点整理成可用订阅并发布到 GitHub 私有 Gist。
           #   PROXY_SPEEDTEST_SUB_URLS : 见上方同步骤 env 的原始订阅源定义，用于解析节点原始配置；留空则不上传 gist
