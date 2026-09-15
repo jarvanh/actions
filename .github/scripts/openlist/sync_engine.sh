@@ -250,7 +250,21 @@ sync_with_logging() {
     # 并行子目录同步（OPENLIST_SUBDIR_PARALLEL>=2）时防止重启打断在途上传。
     # 锁在心跳/token 保鲜线程全部停止后释放（子进程不持有 fd 7）
     _ol_lock_shared
-    rclone sync "$source_path" "$dest_path" \
+    # 硬上限（2026-09-15 补，F23 的最后一处漏网）: 本次 sync 最多用「预算剩余 −
+    # 尾部预留」，到点由 timeout 收掉（rc=124 → 失败分支 → 巩固/各级预算闸优雅收摊）。
+    # 为什么必须加: 批次 copy 与巩固重试早已包装，**唯独子目录级 sync 没有** ——
+    # run 34967321544 在 60min 预算下**超预算 12+ 分钟仍在跑**（状态文件 59min 无写入），
+    # 长尾叠加就会撞 step 的 330min 硬杀（正是"预算闸只拦得住新开的工作、拦不住在途"
+    # 那条教训的最后一处）。无预算锚点（调试/还原）时输出空串 = 不包装，行为不变。
+    local _st_tmo="" _st_to=""
+    if declare -F _budget_slice_seconds >/dev/null 2>&1; then
+      _st_tmo=$(_budget_slice_seconds)
+    fi
+    if [ -n "$_st_tmo" ]; then
+      _st_to="timeout ${_st_tmo}"
+      echo "本次 sync 硬上限 ${_st_tmo}s（预算剩余 − 尾部预留；超出由 timeout 收掉后走优雅收摊）" | tee -a "$LOG_FILENAME"
+    fi
+    ${_st_to} rclone sync "$source_path" "$dest_path" \
       "${RCLONE_DEFAULT_FLAGS[@]}" \
       "${openlist_guard_flags[@]}" \
       "${extra_args[@]}" \
