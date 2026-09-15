@@ -472,7 +472,12 @@ rclone purge "$THRU_DIR" --retries 1 --timeout "$PROBE_TIMEOUT" >/dev/null 2>&1 
 #   · 各自速率腰斩（≈0.5 MiB/s）⇒ 两个挂载共享同一个账号/总带宽上限
 #     （wopan175 与 wopan176 很可能是同一账号），并行无益。
 if [ -n "${DIAG_TARGET2:-}" ]; then
-  say "跨后端并发: ${TARGET} 与 ${DIAG_TARGET2} 各跑一条 transfers=4（各 ${THRU_MB} MiB）..."
+  # 档位可配（默认 4）: 用来判别"账号级天花板"——若两侧各 4 流的合计(2.78)与
+  # **单后端 12 流**的合计相同，就要再抬档位看合计是否继续涨: 涨 ⇒ 两挂载额度独立
+  # （pair_parallel 有效）；不涨 ⇒ 账号级共享天花板（pair_parallel 无增益）。
+  XBACK_T="${DIAG_XBACK_TRANSFERS:-4}"
+  [[ "$XBACK_T" =~ ^[0-9]+$ ]] && [ "$XBACK_T" -gt 0 ] || XBACK_T=4
+  say "跨后端并发: ${TARGET} 与 ${DIAG_TARGET2} 各跑一条 transfers=${XBACK_T}（各 ${THRU_MB} MiB）..."
   _t2dir="$TARGET/oldiag_thru2_$(date +%s)_$$"
   _t2dir_b="$DIAG_TARGET2/oldiag_thru2_$(date +%s)_$$"
   _ct0=$(date +%s)
@@ -480,14 +485,14 @@ if [ -n "${DIAG_TARGET2:-}" ]; then
   # 会把"独立"误判成"共享"——2026-09-14 首测踩到，故改为各写各的 elapsed）
   (
     _s0=$(date +%s)
-    rclone copy "$THRU_SRC" "$_t2dir/c_a" --transfers 4 --checkers 8 --stats-one-line \
+    rclone copy "$THRU_SRC" "$_t2dir/c_a" --transfers "$XBACK_T" --checkers 8 --stats-one-line \
       --contimeout 20s --timeout "$THRU_TIMEOUT" > /tmp/ol_diag/thru2a.log 2>&1; _ra=$?
     echo "$(( $(date +%s) - _s0 )) $_ra" > /tmp/ol_diag/thru2a.elapsed
   ) &
   _cpa=$!
   (
     _s0=$(date +%s)
-    rclone copy "$THRU_SRC" "$_t2dir_b/c_b" --transfers 4 --checkers 8 --stats-one-line \
+    rclone copy "$THRU_SRC" "$_t2dir_b/c_b" --transfers "$XBACK_T" --checkers 8 --stats-one-line \
       --contimeout 20s --timeout "$THRU_TIMEOUT" > /tmp/ol_diag/thru2b.log 2>&1; _rb=$?
     echo "$(( $(date +%s) - _s0 )) $_rb" > /tmp/ol_diag/thru2b.elapsed
   ) &
@@ -506,7 +511,7 @@ if [ -n "${DIAG_TARGET2:-}" ]; then
   _rate_b=$(awk "BEGIN{printf \"%.2f\", ${THRU_MB}/${_eb}}")
   _sum=$(awk "BEGIN{printf \"%.2f\", 2*${THRU_MB}/${_cdt}}")
   say "跨后端并发: A(${TARGET##*/})=${_rate_a} MiB/s(${_ea}s,rc=${_ra}) · B(${DIAG_TARGET2##*/})=${_rate_b} MiB/s(${_eb}s,rc=${_rb}) · 合计 ${_sum} MiB/s(${_cdt}s)"
-  say "  判读: 合计 ≈ 本次阶梯 transfers=4 档 ⇒ 跨后端无增益（共享上限）；合计 < 该档 ⇒ 共享瓶颈（并行有害）"
+  say "  判读（档位 ${XBACK_T}/侧，合计 $((XBACK_T*2)) 流）: 合计 ≈ 单后端**同档两倍** ⇒ 挂载额度独立（pair_parallel 有效）；合计 ≈ 单后端单档 ⇒ 账号级共享天花板（pair_parallel 无增益）"
   rclone purge "$_t2dir" --retries 1 --timeout "$PROBE_TIMEOUT" >/dev/null 2>&1 || true
   rclone purge "$_t2dir_b" --retries 1 --timeout "$PROBE_TIMEOUT" >/dev/null 2>&1 || true
 fi
