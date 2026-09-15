@@ -133,6 +133,7 @@ TUN 起来后 DNS 会被 mihomo 劫持，必须显式给可达的公共解析器
 
 | 现象 | 原因 / 处置 |
 |---|---|
+| `nodes_collected: 0` 但 `source_mapping_built` 有值 | 2026-09-15 run 34969408908 的形态：收集层曾只收 provider 里 `alive` 为真的节点，而 `wait_mihomo` 不等健康检查出结论。现已改为全量收集，见 [gitee 文档 · 为什么节点收集不等健康检查](proxy-speedtest-gitee.md#为什么节点收集不等健康检查)；先看 `provider_snapshot_collected` 的 `total` / `collected` 是否相等 |
 | 通知出现 `⚠️ 疑似未走代理` | TUN 没起来或 `PROCESS-NAME` 规则未命中；查 `mihomo.log` 与 `/dev/net/tun`；结果不可信，整轮判失败 |
 | 节点全部「连不上测速点」 | 控制面 `*.cnspeedtest.cn` 经该节点不可达；换节点或检查 mihomo DNS 配置 |
 | **run 卡在 in_progress、取消也无效** | TUN 未撤（历史事故）：脚本退出前必须 `stop_mihomo_tun()`；workflow 里有 `always()` 兜底步骤 `pkill "mihomo -d"` |

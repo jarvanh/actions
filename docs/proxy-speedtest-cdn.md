@@ -17,7 +17,9 @@
 
 ## 功能与链路
 
-对订阅 `PROXY_SPEEDTEST_SUB_URLS` 的每个可用节点串行执行（共享 mihomo 内核，切换后 settle）：
+对订阅 `PROXY_SPEEDTEST_SUB_URLS` 里 provider 解析出的**每个节点**串行执行（共享 mihomo 内核，
+切换后 settle）。不按健康检查 `alive` 预筛——那个判据在订阅大时会读到一个结论都还没有的快照，
+把节点收成 0 个，见 [gitee 文档 · 为什么节点收集不等健康检查](proxy-speedtest-gitee.md#为什么节点收集不等健康检查)：
 
 1. **延迟** `latency_probe`（实现在 `speedtest_common.py`，与 gitee 的 gitee.com 延迟探测共用）：
    经代理对 `baidu.com` / `taobao.com` 做 HTTP 完整请求计时，多次采样取中位数
