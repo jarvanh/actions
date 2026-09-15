@@ -54,15 +54,25 @@ on:
         #   但那次的成因一直未定位；现在有 truth-check（重启取真值）+ F5 全拒熔断
         #   + F6 跨轮熔断 兜底，假成功会被当场暴露并熔断，不再是静默事故。
         #   某后端若仍出现假成功，用本入参单独降回 1。
-        description: "同步模式: OpenList 目标端 rclone 并发上传数（默认 4；诊断证明 423 只发生在“新目录+重试不足”的组合，已把重试抬到 retries=3/low-level=5。某后端若现假成功，单独降回 1）"
+        # 默认 4 → 6（2026-09-15）: **隔离条件下的吞吐阶梯实测**（diag 64 MiB 载荷、
+        # 无主轮争用，两次运行取同一档位的一致性）:
+        #   transfers: 1→0.51 · 4→1.33 · 8→1.78~2.13 · **12→2.78** · 16→2.78 · 24→3.05 MiB/s
+        # ⇒ 拐点在 **12 流**（4 流的 2.1×）；12→16 零增益、16→24 只 +10%（且 423 碰撞
+        #   风险随并发上升）⇒ 生产把「本项 × subdir_parallel」提到约 12 流即可:
+        #   6 × 2 = 12。再高没有收益，只有碰撞与内存开销。
+        description: "同步模式: OpenList 目标端 rclone 并发上传数（默认 6；与 subdir_parallel 相乘即单后端并发 PUT 数，实测拐点在 12 流。423 只发生在“新目录+重试不足”组合，重试已抬到 retries=3/low-level=5；某后端若现假成功，单独降回 1）"
         required: false
         type: choice
-        default: "4"
+        default: "6"
         options:
           - "1"
           - "2"
           - "3"
           - "4"
+          - "5"
+          - "6"
+          - "8"
+          - "12"
       subdir_parallel:
         # 默认 1 → 2（2026-09-14 提速）: 单个同步对的一条串行流实测只有
         # ≈1.07 文件/s（0.93s/文件，与文件大小无关，是往返延迟主导），
@@ -70,7 +80,7 @@ on:
         # 安全依据（同日诊断）: 并发本身可用，只要重试给足（423 mkdir 竞争靠
         # --retries 3 兜过，已全局抬升）；且现在有 truth-check + F5 全拒熔断 +
         # F6 跨轮熔断兜底，假成功会被当场暴露并熔断，不再是静默事故。
-        # 与 transfers 相乘: 2 × 4 = 同一后端 8 个并发 PUT。
+        # 与 transfers 相乘: 2 × 6 = 同一后端 12 个并发 PUT（= 2026-09-15 实测拐点）。
         # 若某轮出现 object not found / 假成功抬升，把本项降回 1 再看。
         description: "同步模式: auto-split 子目录并行数（默认 2；与 transfers 相乘即为单后端并发 PUT 数。>=2 时顶层子目录并行同步，递归层始终串行。出现 object not found 或假成功抬升就降回 1）"
         required: false
@@ -238,9 +248,9 @@ jobs:
       OPENLIST_ADMIN_PASSWORD: ${{ secrets.OPENLIST_ADMIN_PASSWORD }}
 
       # 并发参数
-      # 兜底值必须与入参默认一致（4）: schedule 触发时 inputs.transfers 为空串，
-      # 兜底留 1 会让定时轮又退回串行（并发提速只在手动轮生效）。
-      OPENLIST_TRANSFERS: ${{ inputs.transfers || '4' }}
+      # 兜底值必须与入参默认一致（6）: schedule 触发时 inputs.transfers 为空串，
+      # 兜底留旧值会让定时轮退回低并发（并发提速只在手动轮生效）。
+      OPENLIST_TRANSFERS: ${{ inputs.transfers || '6' }}
       OPENLIST_CHECKERS: "8"
       # auto-split 顶层子目录并行数（1=串行，行为与历史版本一致）
       # 兜底值必须与入参默认一致（2）: schedule 触发时 inputs.subdir_parallel
