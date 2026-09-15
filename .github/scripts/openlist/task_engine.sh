@@ -96,13 +96,17 @@ _run_registry_entry() {
 #     出口带宽基准 25.86 MiB/s 也排除"runner 出口是瓶颈"。）
 # 代价（见下方设计说明）: 并行模式下不再逐对写游标、attempts 不再累计，
 #   由 F6 跨轮熔断 + 预算闸兜底 ✓ 设计已按此写好。
-# 默认**仍 1（串行，行为不变）** —— 尽管 2026-09-15 隔离实测证明两挂载额度独立
-# （两侧各 12 流合计 3.37 MiB/s vs 单后端 1.78，≈1.9×，值得启用），但并行路径
-# **从未在生产跑过**，且把它设成默认会连带打破多个只验证串行语义的回归测试
-# （实测: test_backend_dead_round / test_rotation 直接失败 + command not found 20 条）
-# ⇒ 纪律: 先 `pair_parallel=2` 显式跑一轮验证（含进度渲染/容器锁/marker 并行安全），
-#   验证通过再改默认值。架构变更不许"改完默认值就算上线"。
-OPENLIST_PAIR_PARALLEL="${OPENLIST_PAIR_PARALLEL:-1}"   # 1=串行（默认）；>=2=按后端分组并行
+# 默认 1 → **2**（2026-09-15，按纪律走完"先验证再翻默认"）:
+#   ① 依据: 隔离实测两挂载额度独立（两侧各 12 流合计 3.37 MiB/s vs 单后端 1.78 ≈1.9×）；
+#   ② 验证轮 `34959561878`（显式 pair_parallel=2，60min，success）: 并行路径正常 ——
+#      「🔀 并行同步对: 上限 2 个（同一后端不并行）」+ 两对同秒起跑（wopan176Crypt 第 15、
+#      wopan175 第 16），marker 层面两个挂载的同一子目录并行推进，无报错、游标按并行语义
+#      推进（→ 第 1/16 个 = 本轮未启动的第一个）；
+#   ③ 同轮暴露并已修 对级字节记账（depth=0 从不设 SYNC_TRANSFERRED_BYTES ⇒ 一对回传 0 B）
+#      ⇒ 下一轮起"合计传输量"才可信（增益的最终确认看它）。
+# 代价（设计已按此写好）: 并行模式下不再逐对写游标、attempts 不再累计，由 F6 跨轮熔断
+#   + 预算闸兜底；同后端仍串行（不会把单挂载的并发压过其额度）。
+OPENLIST_PAIR_PARALLEL="${OPENLIST_PAIR_PARALLEL:-2}"   # 1=串行；>=2=按后端分组并行
 
 # 收割一个完成的同步对 worker（阻塞轮询；结果文件为准 + kill -0 兜底，
 # 与 _sync_par_reap_one 同策略: wait -n -p 对被杀子进程不回填 pid）
@@ -500,7 +504,7 @@ run_all_tasks() {
   # 按后端分组调度，跨后端并行、同后端串行 —— 依据是"后端有总量带宽上限"
   # 的诊断结论（见 _run_registry_pairs_parallel 头注释）。预览/仅注册 pass
   # 不并行（只读、顺序无关紧要，且要复用串行路径的注册渲染）。
-  if [ "$real_pass" -eq 1 ] && [ "${OPENLIST_PAIR_PARALLEL:-1}" -ge 2 ]; then
+  if [ "$real_pass" -eq 1 ] && [ "${OPENLIST_PAIR_PARALLEL:-2}" -ge 2 ]; then
     _run_registry_pairs_parallel
     return 0
   fi
