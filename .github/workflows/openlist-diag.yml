@@ -42,6 +42,16 @@ on:
         required: false
         type: string
         default: ""
+      big_mb:
+        description: "大文件落盘阶梯（MiB，空格分隔；默认 16 64 256）。用来定位「重传但未落盘」: 生产里 ~166MB 的文件 rclone 报 Copied 但重启容器后消失（假成功）"
+        required: false
+        type: string
+        default: "16 64 256"
+      big_transfers:
+        description: "大文件阶梯的 transfers（默认 1）。设 6 可对比「并发是否推高假成功率」"
+        required: false
+        type: string
+        default: "1"
       thru_mb:
         # 载荷太小会让噪声盖过信号: 6 MiB 在 1 MiB/s 下只有 6 秒，连接建立占比过大 ——
         # 实测给出"4× 并发只 1.67×"，而同期的真实轮次是 4.15×，对不上就是载荷太小的锅。
@@ -135,6 +145,8 @@ jobs:
           DIAG_TARGET: ${{ inputs.target }}
           DIAG_TARGET2: ${{ inputs.target2 }}
           DIAG_THRU_MB: ${{ inputs.thru_mb }}
+          DIAG_BIG_MB: ${{ inputs.big_mb }}
+          DIAG_BIG_TRANSFERS: ${{ inputs.big_transfers }}
           DIAG_THRU_LEVELS: ${{ inputs.thru_levels }}
           DIAG_XBACK_TRANSFERS: ${{ inputs.xback_transfers }}
           OL_CONTAINER: ${{ inputs.container }}
