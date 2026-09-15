@@ -70,8 +70,11 @@ self_retrigger() {
     reason="本轮失败且未开启失败接力"
   fi
   if [ -z "$reason" ]; then
-    pending=$(gh run list -R "$repo" --workflow="$wf" --limit "$limit" --json status 2>/dev/null \
-      | jq '[.[] | select(.status == "queued" or .status == "waiting" or .status == "pending")] | length' 2>/dev/null || echo 0)
+    # ⚠️ 用 gh 自带的 --jq（Go 实现的 jq），不要管道给外部 jq：
+    #    Windows runner 没有 jq 二进制，管道版本会静默退化成"排队数=0"，
+    #    这条判据就白设了（叠罗汉只剩单例并发兜着）。
+    pending=$(gh run list -R "$repo" --workflow="$wf" --limit "$limit" --json status \
+      --jq '[.[] | select(.status == "queued" or .status == "waiting" or .status == "pending")] | length' 2>/dev/null || echo 0)
     case "$pending" in ''|*[!0-9]*) pending=0;; esac
     [ "$pending" -eq 0 ] || reason="队列里已有 ${pending} 个排队运行"
   fi
