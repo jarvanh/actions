@@ -4,6 +4,7 @@
 > 入口：`.github/workflows/proxy-speedtest-gistnodes.yml`
 > 自检：`.github/scripts/proxy-speedtest/tests/test_gist_nodes_substore.py`
 > 　　　`.github/scripts/proxy-speedtest/tests/test_alive_filter.py`（过滤层专测）
+> 　　　`.github/scripts/proxy-speedtest/tests/test_resolve_gist_raw_url.py`（源 raw URL 解析专测）
 
 ## 定位
 
@@ -17,7 +18,7 @@
 不传时标题与定时轮完全一致（规范 · 3.1 允许标题带区分词，见
 [telegram-notify.md](telegram-notify.md)）。
 **为什么不自己再发一条**：同一轮会出现两条通知，且抓取统计与被调 job 的测速结果分属两个
-job，gistnodes 侧拿不到测速结果。抓取情况走 job 摘要与 artifact。
+job，gistnodes 侧拿不到测速结果。抓取情况走 job 摘要与 progress 日志。
 
 ## 引擎选择（环境变量）
 
@@ -67,8 +68,8 @@ job，gistnodes 侧拿不到测速结果。抓取情况走 job 摘要与 artifac
    （独立端口 19090 / 17892，与测速共用同一份内核二进制与配置语义），把去重后的节点切成
    **分片 provider**（每片 `FILTER_SHARD_SIZE` = 200 个，`shard-NNNN.yaml`）载入、
    `lazy: false` 全量探测，只保留判活的节点再发布。详见下面「为什么发布前必须自己先测活」；
-8. **发布**：YAML 写进本工作流专属 Gist（`update_gist`），raw URL 作为 `sub_urls` 传给
-   选定的测速工作流（`workflow_call` + `secrets: inherit`）。
+8. **发布**：YAML 写进本工作流专属 Gist（`update_gist`）。被调测速工作流**自己**按 gist id
+   现取 raw URL 当订阅源（见「为什么不能把 gist id 塞进 job output」）。
 
 ## 为什么发布前必须自己先测活
 
@@ -123,6 +124,64 @@ ID`，单 provider 方案下**整层过滤归零**。切 200 一片后，实测�
 
 判据上只有「mihomo 给出明确死结论」才丢节点；**查不到结论的（重名、被改名、还没探完）
 一律保留**——过滤只该丢明确判死的，不该丢「说不清」的。
+
+## 为什么不能把 gist id 塞进 job output
+
+被调测速工作流要知道「拿哪个 Gist 当订阅源、测速结果写回哪个 Gist」。最自然的做法是
+`fetch-nodes` job 把 gist id / raw URL 当 output 传下去——**这条路是坏的，而且是静默坏的**。
+
+`PROXY_SPEEDTEST_GISTNODES_GIST_ID` 是一个**注册过的仓库 secret**，它的值就是那个 gist id。
+GitHub 在写 job output 时会拿每个值去比对已注册 secret 的**完整字符串**，命中就把整个
+output 丢掉，只在日志里留一行警告：
+
+```
+##[warning]Skip output 'sub_url' since it may contain secret.
+##[warning]Skip output 'gist_html_url' since it may contain secret.
+##[warning]Skip output 'gist_id' since it may contain secret.
+```
+
+实测 2026-09-15 run 34956069334 三个全中被丢。下游拿到的是**空值**，于是走了各自的
+`inputs.X || secrets.X` 回退：
+
+| 下游变量 | 回退到 | 后果 |
+|---|---|---|
+| `PROXY_SPEEDTEST_SUB_URLS` | 仓库 secret（用户自己的机场订阅） | 测的是**用户自己的节点**，不是刚抓来的 |
+| `PROXY_SPEEDTEST_GIST_ID` | `secrets.PROXY_SPEEDTEST_TAIER_GIST_ID` | 结果写进**另一个泰尔 Gist** |
+
+两件事叠起来，这一轮的表现就是「收到泰尔测速通知，但订阅里的节点不是采集的」——
+**整轮零报错**，只有人去比对节点来源才看得出来。
+
+**不要用 base64 之类的编码绕过。** 那是在规避一个安全控制，而且解码步骤自己产出的 output
+会被**再扫一遍**、同样被丢，等于换个地方踩同一个坑。
+
+**现在的做法：编排只传布尔开关，被调工作流自己解析。**
+
+- `fetch-nodes` 的 outputs 只留 `engine` / `count` / `parsed_count` / `gists_scanned`，
+  不含任何跟 gist id 有关的字符串；
+- `with:` 里**也不能**写 `${{ secrets.PROXY_SPEEDTEST_GISTNODES_GIST_ID }}`——`secrets`
+  上下文在 job 级 `with:` 里不可用，会报 `Unrecognized named-value: 'secrets'`；
+- 所以传两个开关 `use_gistnodes_source: '1'` / `result_gist_id_from_gistnodes: '1'`，
+  被调工作流读到开关后，从**自己的** secrets 里取 gist id，再调
+  `speedtest_common.resolve_gist_raw_url()` 现取 raw URL，写进 `$GITHUB_ENV`。
+
+`resolve_gist_raw_url` 必须拿**当前** raw URL，不能用
+`https://gist.githubusercontent.com/<owner>/<id>/raw/<filename>` 这种省略写法代替：
+raw URL 里那段 commit sha 每次写入都会变，省略写法虽然能重定向，但会缓存、不保证拿到
+最新一轮写入的内容。
+
+**解析出空串时调用方必须 exit 1**，不能当成「没配 gist」静默走 passthrough——那正是上面
+那次事故的形态。这一步在 `Resolve source subscription` 里写死。
+
+## 为什么不上传 artifact
+
+`gist-nodes/` 里是 `providers.yaml`：上万个节点的 server / uuid / password。而本仓库是
+**public**——artifact 对任何登录 GitHub 的人可下载，等于把节点凭据公开发布一份。
+Sub-Store 日志、计数、各阶段耗时这些排查真正需要的东西，都已经在 job 摘要与 progress
+日志里了，不必再单独留一份含凭据的快照。
+
+（顺带：源 Gist 虽然是 secret / `"public": false`，但它的 raw URL 匿名请求即 200——
+不可猜的 URL 本身就是凭据。所以「节点凭据在哪份产物里」这件事要按**谁能拿到 URL** 来看，
+不能按 Gist 的 public 标志来看。）
 
 ## 过滤相关环境变量
 
@@ -253,21 +312,22 @@ caller 与 called 用同一个 group 值会互相影响：`cancel-in-progress: t
 |---|---|
 | `PAT` | GitHub API 认证（拉 Gist 正文）+ Gist 写入（默认 `GITHUB_TOKEN` 无 gist 作用域） |
 | `PROXY_SPEEDTEST_GISTNODES_GIST_ID` | 本工作流专属 Gist 的 id。留空则首次运行自动新建，job 摘要给链接，拿到 id 后回填 |
-| 其余 | 由被复用的测速工作流自己读（`PROXY_SPEEDTEST_SUB_URLS` 会被 `sub_urls` 覆盖） |
+| 其余 | 由被复用的测速工作流自己读（走 gistnodes 源时它改为按本 Gist 的 id 现取 raw URL，见「为什么不能把 gist id 塞进 job output」） |
 
 Gist 分工：`gitee` / `cdn` / `taier` 三套各自的 Gist 只装**它们定时轮**的测速结果；
 本工作流专属的那个 Gist 装**这一轮 gist 抓取的全部产物**，靠文件名区分，互不覆盖：
 
 | 文件 | 谁写 | 内容 |
 |---|---|---|
-| `proxy_speedtest_gistnodes_providers.yaml` | 本工作流 | 抓来 + 去重后的**源节点**订阅（作为 `sub_urls` 传给被调测速工作流） |
+| `proxy_speedtest_gistnodes_providers.yaml` | 本工作流 | 抓来 + 去重后的**源节点**订阅（被调测速工作流按 gist id 现取它的 raw URL 当订阅源） |
 | `proxy_speedtest_gistnodes_result_<引擎>.yaml` | 被调测速工作流 | 该轮**达标节点**的测速结果订阅 |
 
 被调工作流怎么写进别人的 Gist：三套的 `workflow_call` 都有 `gist_id` / `gist_filename` /
-`gist_description` / `label` 四个入参，本工作流在 `with:` 里传本 Gist 的 id（来自
-`fetch-nodes` 的 `gist_id` output）。留空时它们照旧写自己的 secret 指向的 Gist——
-所以**三套测速的定时轮完全不受影响**，仍吃仓库 secret `PROXY_SPEEDTEST_SUB_URLS`
-里的固定订阅源、仍写各自的 Gist。
+`gist_description` / `label` / `use_gistnodes_source` / `result_gist_id_from_gistnodes` 入参，
+本工作流在 `with:` 里把两个开关置 `'1'`（**不传 id**，理由见「为什么不能把 gist id 塞进
+job output」），被调工作流据此从自己的 secrets 取 id。开关不置位（`0` / 留空）时它们照旧写
+自己的 secret 指向的 Gist——所以**三套测速的定时轮完全不受影响**，仍吃仓库 secret
+`PROXY_SPEEDTEST_SUB_URLS` 里的固定订阅源、仍写各自的 Gist。
 
 ### 可调参数（均有默认值）
 
@@ -341,8 +401,9 @@ Sub-Store 产出与发布。为什么必须把这两者分开：job 超时是 Gi
 | 去重没生效 | `gist_nodes_dedupe_no_effect`（解析数 ≥ 去重后数）。Sub-Store 对**未知算子只记日志不报错**，先查 `process` 里的算子名拼写 |
 | 节点数比预期少 | 先看 `non_sub_files`（判据挡掉了多少）与 `over_quota`（配额挡掉了多少），再看限量 |
 | 候选 Gist 太少 | 看 `gist_nodes_search_age_filtered`（时间窗口挡掉多少）与 `gist_nodes_search_stale_stop`（哪个关键词翻到整页超龄）。窗口设太窄时前几页就被判超龄 |
-| 累积没生效 | `gist_nodes_carryover`（取到了，带 `bytes` / `filename`）/ `gist_nodes_carryover_skipped`（带 `reason`：`missing_gist_id_or_filename` 缺 env、`gist_probe_failed` Gist 探测失败、`no_previous_file` 上一轮还没发布过、`fetch_failed` 取文失败、`oversize` 超 `GIST_NODES_CARRYOVER_MAX_MB`、`empty` 正文为空）。**首次运行必然是 `no_previous_file`，不是故障**；`nodes.json` 的 `substore.carryover` 也记了 `enabled` / `used` / `bytes` / `max_bytes` |
-| Sub-Store 侧到底做了什么 | artifact `gist-nodes-<run_id>/sub-store.log`（容器日志尾巴 200 行）与 `nodes.json`（含处理链、计数） |
+| 累积没生效 | `gist_nodes_carryover`（取到了，带 `bytes` / `filename`）/ `gist_nodes_carryover_skipped`（带 `reason`：`missing_gist_id_or_filename` 缺 env、`gist_probe_failed` Gist 探测失败、`no_previous_file` 上一轮还没发布过、`fetch_failed` 取文失败、`oversize` 超 `GIST_NODES_CARRYOVER_MAX_MB`、`empty` 正文为空）。**首次运行必然是 `no_previous_file`，不是故障** |
+| Sub-Store 侧到底做了什么 | 容器日志尾巴 200 行落在 `gist-nodes/sub-store.log`（`Dump Sub-Store log` 步骤），处理链与计数在 progress 日志的 `gist_nodes_dedupe_*` / `gist_nodes_substore_phase`。**不再上传 artifact**（含节点凭据，见「为什么不上传 artifact」），失败时该步骤本身会打印 `docker logs` |
+| 收到通知但订阅里不是采集的节点 | 先看 `fetch-nodes` 日志有没有 `Skip output '...' since it may contain secret.`，再看被调工作流的 `Resolve source subscription` 有没有打错退出。这类事故**整轮零报错**，只能靠比对节点来源发现——判据与修法见「为什么不能把 gist id 塞进 job output」 |
 | 容器起不来 | 该步骤会直接 `docker ps -a` / `docker port` / `docker logs` 打出来。镜像 `xream/sub-store:http-meta` 的默认布局是「后端 3000 / 前端 http-meta 3001」，我们只发布后端 3000、**不设** `SUB_STORE_BACKEND_API_PORT`/`_HOST`（设成 3001 会让后端去抢前端已占的端口，`EADDRINUSE` 起来就死）。该步骤另外**要设** `SUB_STORE_BODY_JSON_LIMIT=16mb` 与 `SUB_STORE_FRONTEND_BACKEND_PATH=/`，理由见下面两行 |
 | 投喂时成片 `HTTP 413 PayloadTooLargeError` | 撞了 Sub-Store 的请求体上限，即 `SUB_STORE_BODY_JSON_LIMIT`——**默认只有 `1mb`**（见 `backend/src/vendor/express.js`），workflow 里已抬到 `16mb`。就绪探测还会核对容器日志里的 `[BACKEND] body JSON limit: 16mb`，对不上直接失败（env 名来自第三方镜像，被改名只会静默退回 1mb，而 413 只记进 `subs_failed` 计数、job 照样「成功」）。若只是个别订阅 413：看 `gist_nodes_sub_failed` 是哪几个（`gist-nodes-000` 就是累积那份） |
 | 取回组合时 `HTTP 500 … 必须设置 SUB_STORE_FRONTEND_BACKEND_PATH` | 组合里带了 Script Operator（限量算子，**仅当 `GIST_NODES_MAX_NODES > 0` 才生成**）而容器没设 `SUB_STORE_FRONTEND_BACKEND_PATH`——Node 下的硬前置，见 `backend/src/core/proxy-utils/index.js` 的 `loadScriptItem`。只在本机回环上跑、不对外暴露，直接设 `/`。⚠️ `GIST_NODES_MAX_NODES=0` 的轮次根本不生成脚本算子，**所以这条路径很容易被漏测**（2026-09-14 run 34840068571 带 `max_nodes=100` 才炸出来） |
@@ -353,6 +414,7 @@ Sub-Store 产出与发布。为什么必须把这两者分开：job 超时是 Gi
 ```bash
 python .github/scripts/proxy-speedtest/tests/test_gist_nodes_substore.py
 python .github/scripts/proxy-speedtest/tests/test_alive_filter.py
+python .github/scripts/proxy-speedtest/tests/test_resolve_gist_raw_url.py
 ```
 
 **`test_gist_nodes_substore.py`** 用本地假 Sub-Store 跑通「投喂 → 组合 → 取回 → 发布」并做负向验证
@@ -377,3 +439,12 @@ python .github/scripts/proxy-speedtest/tests/test_alive_filter.py
 **坏片不影响好片**（整片加载失败时那片节点按 `unmatched` 保留）、
 **fail-open 时必须吐出 mihomo 日志真因**、以及
 **workdir 越界改落 home 内**（这条是首次实跑翻车后补的回归）。
+
+**`test_resolve_gist_raw_url.py`** 专测「按 gist id 现取 raw URL」这一层的取数口。它出过
+一次真实事故（run 34956069334：job output 被 secret 扫描丢掉 → 下游静默退回用户自己的机场
+订阅），而**坏法同样是静默的**——取不到时返回空串，调用方若把空串当成「没配 gist」就会
+重演那次事故。覆盖：命中时返回 raw URL 且只发一次 API 请求、raw URL 必须保留 commit sha
+（不退回会缓存的省略写法）、七种取不到（文件不在 gist 里 / gist id 空或全空白 / 文件名空 /
+token 空或全空白 / API 抛异常）都返回空串且**不抛异常**、空入参秒退不发请求、
+文件名是精确匹配而非前缀匹配、失败日志按 `resolve_failed` / `resolve_missing` 分流
+（否则会去查文件名而不是查网络/权限）、token 原样透传。

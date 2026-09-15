@@ -6,7 +6,7 @@ name: proxy-speedtest-gistnodes
 # 与三套测速工作流的分工：本工作流自己**不测速**，只做「换一个节点来源」这一件事。
 # 测速、达标筛选、结果订阅上传各自 Gist、Telegram 通知，全部由被复用的那套完成——
 # 所以这里不发通知，否则同一轮会出现两条通知（而通知版式有规范约束，见
-# docs/telegram-notify.md）。抓取情况走 job 摘要与 artifact，不进通知。
+# docs/telegram-notify.md）。抓取情况走 job 摘要与 progress 日志，不进通知。
 #
 # 引擎选择（环境变量，两者取其一，dispatch 优先）：
 #   仓库 Variable PROXY_SPEEDTEST_ENGINE = taier|gitee|cdn   定时运行的默认值

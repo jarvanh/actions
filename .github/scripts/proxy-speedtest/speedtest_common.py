@@ -834,6 +834,7 @@ def resolve_gist_raw_url(gist_id, filename, token, timeout=30):
     """
     gist_id = (gist_id or '').strip()
     filename = (filename or '').strip()
+    token = (token or '').strip()
     if not (gist_id and filename and token):
         return ''
     try:
