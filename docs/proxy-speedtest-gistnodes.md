@@ -68,7 +68,10 @@ job，gistnodes 侧拿不到测速结果。抓取情况走 job 摘要与 progres
    （独立端口 19090 / 17892，与测速共用同一份内核二进制与配置语义），把去重后的节点切成
    **分片 provider**（每片 `FILTER_SHARD_SIZE` = 200 个，`shard-NNNN.yaml`）载入、
    `lazy: false` 全量探测，只保留判活的节点再发布。详见下面「为什么发布前必须自己先测活」；
-8. **发布**：YAML 写进本工作流专属 Gist（`update_gist`）。被调测速工作流**自己**按 gist id
+8. **试装排雷**（`GIST_NODES_TRIAL_LOAD`，默认开）：把上面产出的节点再交给本机 mihomo
+   **完整装一遍**；装不上就二分定位到具体节点、只摘它，其余全留。与健康检查是两件事
+   （一个筛「活不活」、一个筛「能不能被装进 provider」）。详见下面「为什么还要试装」；
+9. **发布**：YAML 写进本工作流专属 Gist（`update_gist`）。被调测速工作流**自己**按 gist id
    现取 raw URL 当订阅源（见「为什么不能把 gist id 塞进 job output」）。
 
 ## 为什么发布前必须自己先测活
@@ -130,6 +133,38 @@ ID`，单 provider 方案下**整层过滤归零**。切 200 一片后，实测�
 
 判据上只有「mihomo 给出明确死结论」才丢节点；**查不到结论的（重名、被改名、还没探完）
 一律保留**——过滤只该丢明确判死的，不该丢「说不清」的。
+
+## 为什么还要试装（与「测活」是两件事）
+
+健康检查筛的是**节点活不活**，试装筛的是**能不能被 mihomo 装进 provider**。后者更致命：
+mihomo 对 provider 是「全有或全无」，片里一个节点解析失败，整个 provider 的 `proxies` 直接
+是 `[]`——**不是少一个节点，是整份订阅归零**。
+
+实测 2026-09-15（run 34974423756）：本层发布 13210 个节点，泰尔侧
+`provider_snapshot_collected providers: 1, total: 0` → `nodes_collected: 0`，整轮零产出
+且**不报错**。逐节点复现后定位到：那份订阅里有一个 `short-id: 87991e38`，mihomo 报
+`invalid REALITY short ID`。去掉它一个，其余 13620 个照常装载。
+
+分片（第 7 步那个 200 一片）只能把这类损失压到「一片」，不能消除——坏节点够多时下游照样
+大幅缩水。所以发布前把这份 YAML 完整喂给本机 mihomo 试装一遍：
+
+| 结果 | 处理 |
+|---|---|
+| 装得上 | 直接发布，一个都不动 |
+| 装不上、且日志里是 provider 初始化失败 | **二分**定位到具体节点，只摘它，其余全留 |
+| mihomo 起不来 / 日志里读不出「provider 被拒」 | 原样发布全部并记 `trial_load_skipped` |
+
+**二分为什么能精确到单个节点**：维护一个「还没查清的区间队列」，每轮取一个区间试装——装得
+上就丢掉（这段没问题）；装不上就对半切开、两半都入队。缩到 ≤ `TRIAL_BISECT_FLOOR` 个还装
+不上才整块摘掉。所以**只摘能证明是坏的**：全好时一个都不摘（1 次试装）；1 个坏节点时摘它
+一个（O(log n) 次）；m 个坏节点时摘那 m 个。真机实测（真实 mihomo 二进制）：6 个节点里
+1 个坏 ⇒ 摘 `node-003` 一个；8 个里 2 个坏 ⇒ 摘 `node-001`/`node-006` 两个。
+
+**为什么放在健康检查之后**：过滤已经把节点压到几百个，试装只需一两次起停；而且只对「值得
+发布」的节点做二分，不会为已经要丢的节点白费一轮。
+
+同一条降级原则：排雷层自己故障**不失败**，只是退回「不做排雷」并记 `trial_load_skipped`
+——宁可下游去扛坏节点，也不能凭一次起不来的日志**误删好节点**。
 
 ## 为什么不能把 gist id 塞进 job output
 
@@ -197,6 +232,7 @@ Sub-Store 日志、计数、各阶段耗时这些排查真正需要的东西，�
 | `GIST_NODES_ALIVE_BUDGET_SECONDS` | `600` | 过滤阶段墙钟预算；到点未跑完 → 原样发布全部 |
 | `GIST_NODES_ALIVE_TIMEOUT` | `120` | 单次读 `/providers/proxies` 的超时（上界由上面的预算兜） |
 | `PROXY_SPEEDTEST_HEALTHCHECK_URL` | `https://www.gstatic.com/generate_204` | 探测目标。**必须与下游测速同值**，否则这里判活、下游判死 |
+| `GIST_NODES_TRIAL_LOAD` | `1` | `0` = 关掉试装排雷，原样发布（回退到引入排雷之前的行为） |
 
 ## 为什么这么设计
 
@@ -410,6 +446,8 @@ Sub-Store 产出与发布。为什么必须把这两者分开：job 超时是 Gi
 | 累积没生效 | `gist_nodes_carryover`（取到了，带 `bytes` / `filename`）/ `gist_nodes_carryover_skipped`（带 `reason`：`missing_gist_id_or_filename` 缺 env、`gist_probe_failed` Gist 探测失败、`no_previous_file` 上一轮还没发布过、`fetch_failed` 取文失败、`oversize` 超 `GIST_NODES_CARRYOVER_MAX_MB`、`empty` 正文为空）。**首次运行必然是 `no_previous_file`，不是故障** |
 | Sub-Store 侧到底做了什么 | 容器日志尾巴 200 行落在 `gist-nodes/sub-store.log`（`Dump Sub-Store log` 步骤），处理链与计数在 progress 日志的 `gist_nodes_dedupe_*` / `gist_nodes_substore_phase`。**不再上传 artifact**（含节点凭据，见「为什么不上传 artifact」），失败时该步骤本身会打印 `docker logs` |
 | 收到通知但订阅里不是采集的节点 | 先看 `fetch-nodes` 日志有没有 `Skip output '...' since it may contain secret.`，再看被调工作流的 `Resolve source subscription` 有没有打错退出。这类事故**整轮零报错**，只能靠比对节点来源发现——判据与修法见「为什么不能把 gist id 塞进 job output」 |
+| 订阅里节点数比发布时少 | 先看 `trial_load_done` 的 `removed`：那是**被摘掉的坏节点**（mihomo 装不上），不是丢了。被摘的名字在 `trial_load_removed_samples` / 摘要里。`trial_load_skipped` 则是排雷层自己故障、原样放行（不会少） |
+| 试装把好节点也摘了 | 只可能是判据误判：看 `trial_load_skipped` 的 `skip_reason` 与 `first_error`。**provider 文件写在 home 外**会让 mihomo `level=fatal` 秒退、「装不上」被误读成节点非法——`_safe_home_dir` 专门兜这个，见到 `alive_filter_workdir_relocated` 说明它生效了 |
 | 容器起不来 | 该步骤会直接 `docker ps -a` / `docker port` / `docker logs` 打出来。镜像 `xream/sub-store:http-meta` 的默认布局是「后端 3000 / 前端 http-meta 3001」，我们只发布后端 3000、**不设** `SUB_STORE_BACKEND_API_PORT`/`_HOST`（设成 3001 会让后端去抢前端已占的端口，`EADDRINUSE` 起来就死）。该步骤另外**要设** `SUB_STORE_BODY_JSON_LIMIT=16mb` 与 `SUB_STORE_FRONTEND_BACKEND_PATH=/`，理由见下面两行 |
 | 投喂时成片 `HTTP 413 PayloadTooLargeError` | 撞了 Sub-Store 的请求体上限，即 `SUB_STORE_BODY_JSON_LIMIT`——**默认只有 `1mb`**（见 `backend/src/vendor/express.js`），workflow 里已抬到 `16mb`。就绪探测还会核对容器日志里的 `[BACKEND] body JSON limit: 16mb`，对不上直接失败（env 名来自第三方镜像，被改名只会静默退回 1mb，而 413 只记进 `subs_failed` 计数、job 照样「成功」）。若只是个别订阅 413：看 `gist_nodes_sub_failed` 是哪几个（`gist-nodes-000` 就是累积那份） |
 | 取回组合时 `HTTP 500 … 必须设置 SUB_STORE_FRONTEND_BACKEND_PATH` | 组合里带了 Script Operator（限量算子，**仅当 `GIST_NODES_MAX_NODES > 0` 才生成**）而容器没设 `SUB_STORE_FRONTEND_BACKEND_PATH`——Node 下的硬前置，见 `backend/src/core/proxy-utils/index.js` 的 `loadScriptItem`。只在本机回环上跑、不对外暴露，直接设 `/`。⚠️ `GIST_NODES_MAX_NODES=0` 的轮次根本不生成脚本算子，**所以这条路径很容易被漏测**（2026-09-14 run 34840068571 带 `max_nodes=100` 才炸出来） |
@@ -422,6 +460,7 @@ python .github/scripts/proxy-speedtest/tests/test_gist_nodes_substore.py
 python .github/scripts/proxy-speedtest/tests/test_alive_filter.py
 python .github/scripts/proxy-speedtest/tests/test_resolve_gist_raw_url.py
 python .github/scripts/proxy-speedtest/tests/test_collect_provider_snapshot.py
+python .github/scripts/proxy-speedtest/tests/test_trial_load.py
 ```
 
 **`test_gist_nodes_substore.py`** 用本地假 Sub-Store 跑通「投喂 → 组合 → 取回 → 发布」并做负向验证
@@ -464,3 +503,15 @@ token 空或全空白 / API 抛异常）都返回空串且**不抛异常**、空
 `alive` 状态原样带出且缺失时归一为 False（不谎报为活）、`AUTO`/`default` 组名不算节点、
 跨 provider 重名去重、`proxy_obj` 剔除 `alive`/`history` 这类运行时字段、空输入返回空、
 API 报错要抛异常（而不是「安静地收集到 0 个」）。
+
+**`test_trial_load.py`** 专测发布前的试装排雷层（2026-09-15 那份 13210 节点订阅在下游归零
+后加的）。它的坏法都很隐蔽，固化成断言：**判据反了**（把「mihomo 起不来」当「节点有问题」
+⇒ 凭一次故障误删好节点）、**二分不收敛**（块内 ≤ floor 个还装不上时必须整块摘掉，否则在最后
+两个节点上无限对折）、**误伤**（摘掉整个坏块而不是块内那一个——用户明确要求精确到单个节点）、
+**全好时乱剔**（判据恒真）、**摘光了不兜底**、**归因不了必须 fail-open**（日志里没有 provider
+失败特征时不得当节点有问题）、**空输入不起 mihomo**、以及**试装配置与下游逐字一致**
+（`lazy: false` / `expected-status: 204` / 同值健康检查目标）。
+
+假 mihomo 是**行为模型**而不是 HTTP 服务：它检查「当前写进 `trial.yaml` 的节点集合里有没有
+被标记为坏的」，有就写出一行 mihomo 真实格式的报错——本层就是靠读日志判定的。
+定位精度另有真机验证（真实 mihomo 二进制 + 真实非法 `short-id`）：6 个里 1 个坏 ⇒ 摘它一个。
