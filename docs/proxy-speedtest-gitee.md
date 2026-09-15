@@ -31,8 +31,9 @@
 ## 功能与链路
 
 1. 拉取并解析订阅（base64 自动解码），写成本地 provider 文件；
-2. 下载/启动 mihomo（HTTP 17890 / SOCKS 17891 / mixed 17892，控制器 19090），provider
-   健康检查后 `collect_provider_snapshot` 取存活节点；
+2. 下载/启动 mihomo（HTTP 17890 / SOCKS 17891 / mixed 17892，控制器 19090），
+   `collect_provider_snapshot` **全量**取 provider 解析出的节点（**不按 `alive` 预筛**，
+   理由见[为什么节点收集不等健康检查](#为什么节点收集不等健康检查)）；
 3. 准备 Gitee 私有仓库（`ensure_gitee_remote`：不存在则创建，超限自动 `rebuild_gitee_repo`）；
 4. 生成 `PROXY_SPEEDTEST_SIZE_MIB` MiB 测速文件；
 5. 逐节点：切换 AUTO → 经代理 HTTP 计时测 gitee.com 延迟（`latency_probe`，采样
@@ -161,10 +162,46 @@ variables → Actions → Variables 可随时改，留空走默认）：
 辅助机制：`/tmp/proxy_speedtest.lock` 每轮循环 touch（供外部心跳判 stale）；
 `maybe_detach_self` 支持 detach 后台自跑（CI 里固定关闭）。
 
+## 为什么节点收集不等健康检查
+
+`collect_provider_snapshot` **全量**返回 provider 解析出的节点，`alive` 字段只作为附加
+信息带出（日志里的 `alive` / `dead` 计数），**不再决定去留**。
+
+原来它只收 `alive` 为真的节点，前提是「非惰性健康检查会在读快照前跑完」。这个前提不成立：
+`wait_mihomo` 只等控制器 `/version` 就绪，**不等健康检查出结论**。订阅一大，读快照时
+`alive` 可能一个都还没置位，于是「筛出活节点」退化成「一个节点都没有」。
+
+实测 2026-09-15 run 34969408908（gistnodes 交接 13346 个节点）：
+
+| 时间 | 事件 |
+|---|---|
+| 12:37:50 | `mihomo_tun_config_built`（mihomo 刚起来） |
+| 12:38:05 | `source_mapping_built entries: 13136`（订阅原文解析出 13136 条） |
+| 12:38:05 | `nodes_collected count: 0`（同一秒读快照，`alive` 全为假） |
+
+配置就绪到读快照只隔 **15 秒**，13346 个节点的非惰性健康检查不可能在 15 秒内出结论。
+结果是整轮零产出，而且**没有任何报错**——只有 `nodes_collected: 0` 这一行。
+
+这与 `proxy-speedtest-gistnodes` 里 `alive_filter` 那次是同一个机理（下游读快照时还没探完），
+只是那次在上游、这次在下游。
+
+现在的判据：
+
+- **到底哪些节点可用，交给逐节点那一步判**——taier 有 `probe_node_alive`，gitee / cdn 靠
+  实测成败，它们本来就是更准的判据；
+- 上游 gistnodes 在过滤层已经筛过一遍活节点（见
+  [gistnodes 文档](proxy-speedtest-gistnodes.md#为什么发布前必须自己先测活)），这里再筛是重复劳动；
+- 真全死时也不会「零产出」，而是每个节点各自失败并如实记进结果与通知。
+
+⚠️ 副作用：坏节点会真的进循环、占掉一个测速窗口（gitee ≈ 数十秒、taier ≈ 25 秒）。这正是
+taier 侧 `TAIER_ALIVE_PROBE`（默认开）存在的意义——它按节点逐个探测，判死只认 mihomo 的
+明确结论、机制出错一律 fail-open。若要限制总量用 `PROXY_SPEEDTEST_MAX_NODES`。
+
 ## 运维与排查
 
 | 现象 | 原因 / 处置 |
 |---|---|
+| `nodes_collected: 0` 但 `source_mapping_built` 有值 | 见[为什么节点收集不等健康检查](#为什么节点收集不等健康检查)。`provider_snapshot_collected` 会给出 `total` / `alive` / `collected` 三个数，`collected == total` 即为正常（`alive` 为 0 只是还没探完） |
 | GitHub API 403/限流 | 匿名调用共享出口 IP 60 次/h；workflow 已带 `GITHUB_TOKEN`/`GH_TOKEN` 回退 |
 | Gitee 仓库体积超限 | `rebuild_gitee_repo` 自动重建私有仓库 `proxy-speedtest-temp` |
 | **节点 push 全部超时**（连直连基线也超时） | Gitee 仓库超限/被回收时 git 常表现为**挂起超时**而非明确报错（2026-09-08 实测连续三轮 0 成功）。引擎已自愈：本轮尚无成功 push 且节点失败为超时/被拒/size limit 时，自动 `rebuild_gitee_repo` 一次并重试该节点（日志 `repo_rebuild_on_push_timeout`，每轮限一次）；若重建后仍失败，多为 Gitee 账号级限流，等下一轮即可 |

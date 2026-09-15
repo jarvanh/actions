@@ -824,9 +824,27 @@ def ensure_mihomo_running(env):
     return raw_proxy_map
 
 def collect_provider_snapshot(source_mapping=None, raw_proxy_map=None):
+    """取 provider 里解析出的节点，**全量**返回（不做 alive 准入门槛）。
+
+    为什么不再拿 `alive` 当准入判据：provider 配的是**非惰性**健康检查，而
+    `wait_mihomo` 只等控制器 `/version` 就绪、**不等健康检查跑完**。订阅一大，
+    读快照时 `alive` 可能一个都还没置位，于是「全量收集」退化成「收集到 0 个」。
+
+    实测 2026-09-15 run 34969408908（gistnodes 交接 13346 个节点）：配置就绪到读
+    快照只隔 15 秒，`source_mapping_built entries: 13136` 而 `nodes_collected
+    count: 0` —— 整轮零产出，且**没有报错**。这与 `alive_filter` 那次是同一个机理
+    （下游读快照时还没探完），只是那次在上游、这次在下游。
+
+    alive 字段仅作为附加信息带出（`alive_count` / `dead_count`），不再决定去留：
+
+    * 到底哪些节点可用，交给**逐节点**那一步去判——taier 有 `probe_node_alive`，
+      gitee / cdn 靠实测成败，它们本来就是更准的判据；
+    * 上游 gistnodes 在过滤层已经筛过一遍活节点，这里是重复劳动；
+    * 真全死时也不会「零产出」，而是每个节点各自失败并如实记进结果与通知。
+    """
     data = mihomo_api_get('/providers/proxies')
     providers = {}
-    alive_items = []
+    items = []
     seen = set()
     source_mapping = source_mapping or {}
     raw_proxy_map = raw_proxy_map or {}
@@ -835,40 +853,43 @@ def collect_provider_snapshot(source_mapping=None, raw_proxy_map=None):
             continue
         proxies = info.get('proxies', [])
         alive = 0
-        dead = 0
         for p in proxies:
             if p.get('alive'):
                 alive += 1
-                name = p.get('name')
-                if name and name not in seen:
-                    seen.add(name)
-                    fallback_proxy_obj = raw_proxy_map.get(name) or {
-                        k: v for k, v in p.items()
-                        if k not in ('alive', 'history', 'id', 'tfo', 'xudp')
-                    }
-                    source_entry, share_link_match = resolve_source_entry_for_node(name, source_mapping, fallback_proxy_obj)
-                    share_link = str((source_entry or {}).get('share_link') or '').strip()
-                    source_proxy = deep_copy_json((source_entry or {}).get('proxy') or {})
-                    proxy_obj = source_proxy or fallback_proxy_obj
-                    alive_items.append({
-                        'provider': provider_name,
-                        'name': name,
-                        'type': p.get('type'),
-                        'history': p.get('history', []),
-                        'share_link': share_link,
-                        'share_link_match': share_link_match,
-                        'proxy_obj': deep_copy_json(proxy_obj or {}),
-                        'source_entry': deep_copy_json(source_entry or {}),
-                        'source_id': str((source_entry or {}).get('source_id') or ''),
-                    })
-            else:
-                dead += 1
+            name = p.get('name')
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            fallback_proxy_obj = raw_proxy_map.get(name) or {
+                k: v for k, v in p.items()
+                if k not in ('alive', 'history', 'id', 'tfo', 'xudp')
+            }
+            source_entry, share_link_match = resolve_source_entry_for_node(
+                name, source_mapping, fallback_proxy_obj)
+            share_link = str((source_entry or {}).get('share_link') or '').strip()
+            source_proxy = deep_copy_json((source_entry or {}).get('proxy') or {})
+            proxy_obj = source_proxy or fallback_proxy_obj
+            items.append({
+                'provider': provider_name,
+                'name': name,
+                'type': p.get('type'),
+                'history': p.get('history', []),
+                'alive': bool(p.get('alive')),
+                'share_link': share_link,
+                'share_link_match': share_link_match,
+                'proxy_obj': deep_copy_json(proxy_obj or {}),
+                'source_entry': deep_copy_json(source_entry or {}),
+                'source_id': str((source_entry or {}).get('source_id') or ''),
+            })
         providers[provider_name] = {
             'total': len(proxies),
             'alive': alive,
-            'dead': dead,
+            'dead': len(proxies) - alive,
         }
-    return providers, alive_items
+    log_progress('provider_snapshot_collected',
+                 providers=len(providers), total=sum(v['total'] for v in providers.values()),
+                 alive=sum(v['alive'] for v in providers.values()), collected=len(items))
+    return providers, items
 
 def build_proxy_env(env):
     local_env = dict(env)
@@ -1379,10 +1400,12 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
         summary_lines.append('')
     elif alive_probe_count > 0:
         summary_lines.append('⚠️ 没有节点测速成功')
-        summary_lines.append('  └─ 有节点通过 provider 健康检查，但正式 Gitee 推送/拉取测速全部失败')
+        summary_lines.append('  └─ provider 健康检查有节点通过，但正式 Gitee 推送/拉取测速全部失败')
         summary_lines.append('')
     else:
-        summary_lines.append('⚠️ 没有节点通过 provider 健康检查')
+        # 健康检查结论不再决定放行，所以这里说的是「本轮没有可达节点」，不是「被预筛挡掉了」
+        summary_lines.append('⚠️ 没有节点测速成功')
+        summary_lines.append('  └─ provider 健康检查无节点通过，且逐节点实测也无成功')
         summary_lines.append('')
     # 失败节点明细（与 taier 对齐：原因可见，便于区分拒测/超时/鉴权失败）
     _failed = [r for r in speed_results if not r.get('ok')]
@@ -1507,8 +1530,10 @@ def main():
     )
     raw_proxy_map = run_stage('mihomo 启动/配置', ensure_mihomo_running, env)
     log_progress('mihomo_ready', api=MIHOMO_API, mixed_port=MIHOMO_MIXED_PORT)
-    provider_snapshot, alive_items = run_stage('provider 健康检查', collect_provider_snapshot, source_mapping=source_mapping, raw_proxy_map=raw_proxy_map)
-    log_progress('provider_snapshot_ready', provider_count=len(provider_snapshot), alive_count=len(alive_items))
+    provider_snapshot, alive_items = run_stage('provider 节点收集', collect_provider_snapshot, source_mapping=source_mapping, raw_proxy_map=raw_proxy_map)
+    log_progress('provider_snapshot_ready', provider_count=len(provider_snapshot),
+                 collected_count=len(alive_items),
+                 probe_alive_count=sum(v['alive'] for v in provider_snapshot.values()))
     gitee = run_stage('Gitee 仓库准备', ensure_gitee_remote, env)
     log_progress('gitee_ready', owner=gitee['owner'], repo=gitee['repo'], remote_public=gitee['remote_public'])
     push_target_info = run_stage('Gitee 目标解析', resolve_push_target_info, gitee['remote_public'])
