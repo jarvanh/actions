@@ -91,12 +91,16 @@ jobs:
     timeout-minutes: 40
     outputs:
       engine: ${{ steps.engine.outputs.engine }}
-      sub_url: ${{ steps.fetch.outputs.sub_url }}
+      # 注意：**没有** sub_url / gist_id / gist_html_url。脚本写出的这三个值里含 gist id，
+      # 而 `PROXY_SPEEDTEST_GISTNODES_GIST_ID` 是个注册过的 secret（值就是这个 id），
+      # GitHub 见到 output 里出现已注册 secret 的完整字符串就把整个 output 丢掉
+      # （日志留 `Skip output 'X' since it may contain secret.`）。实测 run 34956069334
+      # 三个全中被丢，下游拿空值 → fallback 到仓库 secret → 订阅源退回用户自己的机场、
+      # 结果写进另一个泰尔测速的 Gist（整轮 gist 抓节点名存实亡，且零报错）。
+      # 需要那三个值的下游改用 secret 直传，见下面各 speedtest job 的 gist_id 参数。
       count: ${{ steps.fetch.outputs.count }}
       parsed_count: ${{ steps.fetch.outputs.parsed_count }}
       gists_scanned: ${{ steps.fetch.outputs.gists_scanned }}
-      gist_html_url: ${{ steps.fetch.outputs.gist_html_url }}
-      gist_id: ${{ steps.fetch.outputs.gist_id }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -240,15 +244,10 @@ jobs:
           docker logs --tail 200 sub-store > gist-nodes/sub-store.log 2>&1 || true
           docker rm -f sub-store || true
 
-      - name: Upload node snapshot
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v7
-        with:
-          # 内容含节点凭据，保留期压到 7 天
-          name: gist-nodes-${{ github.run_id }}
-          path: gist-nodes/
-          retention-days: 7
-          if-no-files-found: ignore
+      # 这里**刻意不上传 artifact**。原本传 `gist-nodes/`（含 providers.yaml：12783 个
+      # 节点的 server/uuid/password），而本仓库是 **public** —— artifact 对任何登录 GitHub 的
+      # 人都可下载，等于把节点凭据公开发布一份。排查需要的东西（Sub-Store 日志、计数、
+      # 各阶段耗时）都已经在 job 摘要与 progress 日志里，不必再单独留一份含凭据的快照。
 
   # 三个引擎各一个条件 job：GitHub 不支持动态的 uses:，只能写三条并按 engine 选一条。
   # secrets: inherit 把仓库 secrets 透传给被调工作流（它们内部照旧读自己的 secret）。

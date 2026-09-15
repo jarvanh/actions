@@ -112,6 +112,15 @@ Sub-Store 接口（读 backend/src/restful/*.js 得到，全部是无需鉴权�
   sub_url / count / parsed_count / deduped_count / alive_count / gists_scanned /
   gist_html_url / gist_id
 
+  ⚠️ `sub_url` / `gist_html_url` / `gist_id` 的实际值里含 gist id，而
+  `PROXY_SPEEDTEST_GISTNODES_GIST_ID` 正是一个**注册过的 secret**（其值就是这个 id）——
+  GitHub 见到 output 里出现与已注册 secret 相同的字符串，会**把整个 output 丢掉**并留
+  `Skip output 'X' since it may contain secret.`。所以这三个 output 名义上存在、实际恒为空，
+  下游拿到空值就会 fallback 到仓库 secret（实测 run 34956069334：订阅源退回用户自己的机场、
+  结果写进另一个泰尔测速的 Gist）。
+  编排工作流因此**不读这三个 output**，改用 secret 直传（见 proxy-speedtest-gistnodes.yml
+  的「接线」注释）；这里保留写入只是给需要就地观察的场景留个痕。
+
 失败语义：单个 Gist / 单个订阅失败只跳过它；Sub-Store 不可达、组合订阅产出失败、
 或最终一个节点都没有 → exit 1。与其让下游拿空订阅跑一轮 45 分钟测速，不如就地失败。
 

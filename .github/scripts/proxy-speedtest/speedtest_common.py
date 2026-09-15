@@ -816,6 +816,40 @@ GIST_DEFAULT_FILENAME = 'proxy_speedtest_subscription.yaml'
 GIST_DEFAULT_DESCRIPTION = 'proxy speedtest subscription result'
 
 
+def resolve_gist_raw_url(gist_id, filename, token, timeout=30):
+    """按 gist id + 文件名取当前 raw_url（拿到失败时返回空串）。
+
+    **为什么需要它**：`proxy-speedtest-gistnodes` 抓完节点后要把源订阅的 raw URL 传给
+    被复用的测速工作流，但那个 URL 里含 gist id，而 gist id 本身是一个注册过的 secret
+    （`PROXY_SPEEDTEST_GISTNODES_GIST_ID`）——GitHub 见到 job output 里出现与已注册 secret
+    相同的字符串，会把**整个 output 丢掉**（`Skip output 'X' since it may contain secret.`）。
+    实测 2026-09-15 run 34956069334：`sub_url` / `gist_html_url` / `gist_id` 三个全被丢，
+    下游拿到空值就 fallback 到仓库 secret ⇒ 订阅源退回了用户自己的机场订阅、测速结果写进
+    另一个泰尔 Gist，而整轮**零报错**。
+
+    所以改由下游自己解析：编排层只传 gist id 与文件名（这两者本来就在被调工作流的
+    secret / 入参里），raw URL 在这里现取。raw URL 里那段 commit sha 每次写入都会变，
+    **不能**用 `https://gist.githubusercontent.com/<owner>/<id>/raw/<filename>` 这种省略
+    写法代替——那虽然能重定向，但会缓存、且拿到的不保证是最新一轮写入的内容。
+    """
+    gist_id = (gist_id or '').strip()
+    filename = (filename or '').strip()
+    if not (gist_id and filename and token):
+        return ''
+    try:
+        res = github_api_request(f'https://api.github.com/gists/{gist_id}', token,
+                                 timeout=timeout)
+    except Exception as e:
+        log_progress('gist_raw_url_resolve_failed', gist_id=gist_id, error=str(e))
+        return ''
+    files = res.get('files') or {}
+    raw = ((files.get(filename) or {}).get('raw_url') or '').strip()
+    if not raw:
+        log_progress('gist_raw_url_resolve_missing', gist_id=gist_id, filename=filename,
+                     available=sorted(files.keys()))
+    return raw
+
+
 def _gist_identity(env):
     """Gist 文件名/描述，允许各测速工作流经 env 覆盖（四套各用各的 Gist，便于区分）。"""
     filename = (env.get('PROXY_SPEEDTEST_GIST_FILENAME') or '').strip() or GIST_DEFAULT_FILENAME
