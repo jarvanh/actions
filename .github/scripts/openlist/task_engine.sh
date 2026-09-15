@@ -1270,6 +1270,9 @@ _sync_task_impl() {
     if sync_budget_stop; then
       echo "⏳ 时间预算将尽，跳过最终完整同步（子目录 marker 已落盘，下轮接力）"
       SYNC_TIME_EXHAUSTED=1
+      # 同步对级传输量: 没有最终同步，直接给"各子同步累加值"（否则本变量停在
+      # 最后一个子同步的值上，见下条注释）
+      SYNC_TRANSFERRED_BYTES=$total_transferred
     else
     echo "=== 最终完整同步: ${task_name} ==="
     PROGRESS_PHASE_INFO="$(_render_subdir_phase_tree)"
@@ -1278,6 +1281,12 @@ _sync_task_impl() {
     # P0 趋势: 最终完整同步的净传字节（此前各子目录已各自记录，这里只
     # 记本调用自己的 sync_with_logging，二者相加无重复）
     trend_record_transferred "${SYNC_TRANSFERRED_BYTES:-0}"
+    # 同步对级传输量 = 各子同步累加 + 本次最终同步自身的值。
+    # 为什么必须显式设置（2026-09-15 并行验证轮实测）: depth=0 收尾此前**不设置**
+    # 本变量 ⇒ 并行 worker 回传的 `transferred=` 取到"最后一个子同步的值"，
+    # 实测 wopan175 那对明明传了 10 个文件却回传 **0 B**，整轮合计被低估一半
+    # （父级"并行同步对完成: 传输 X"直接影响趋势样本与工期估算）。
+    SYNC_TRANSFERRED_BYTES=$(( ${total_transferred:-0} + ${SYNC_TRANSFERRED_BYTES:-0} ))
     AUTO_SPLIT_INFO=""
     if [ "$SYNC_FAILED" = "0" ] && [ "${SYNC_FAILED_BATCH:-0}" != "1" ] \
        && [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
