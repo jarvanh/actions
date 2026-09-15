@@ -143,6 +143,12 @@ def probe_node_alive(name, url, timeout_ms):
 
     返回 `(alive, delay_ms, error)`。
 
+    ⚠️ **只能对节点名探测，不能对组名探测。** mihomo 的 `/proxies/{name}/delay` 里
+    `name` 必须是**节点（proxy）**的名字——测速时真正承载流量的是 `AUTO` 这个 select 组，
+    当前指向谁由 `switch_proxy` 决定，但 `AUTO` 本身不是节点，对它探测只会拿到
+    `Resource not found`（2026-09-15 实测：编排轮 8/8 全失败即此形态）。测活必须用
+    `name`，与 `switch_proxy(name, ...)` 保持同一个标识。
+
     ⚠️ **只有 mihomo 明确判「连不上」才算死；探测机制本身出错一律 fail-open（按存活处理）。**
     为什么：探测挂了（mihomo API 抖动、URL 配错、本机超时）若被当成「节点死了」，整轮会
     **一个节点都不测**——那比在死节点上多花 25 秒糟得多。宁可多烧时间，也不能零产出。
@@ -781,6 +787,8 @@ def _run():
             break
         name = str(item.get('name') or '')
         # 先测活，再测速：死节点不再占用一整个测速窗口（≈25 秒/个）
+        # ⚠️ 探测用 `name`（节点名），不是 AUTO 组名——组名会让 mihomo 回 `Resource not found`，
+        # 判死全部节点（2026-09-15 实测）。切节点与探测必须同一个标识，见 probe_node_alive。
         if _probe_enabled:
             _alive, _delay, _perr = probe_node_alive(
                 name, CONFIG['TAIER_ALIVE_PROBE_URL'], CONFIG['TAIER_ALIVE_PROBE_TIMEOUT_MS'])
