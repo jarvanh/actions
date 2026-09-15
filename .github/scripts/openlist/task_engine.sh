@@ -181,6 +181,7 @@ _run_registry_pairs_parallel() {
         _rot_attempts=0
         SYNC_BACKEND_DEAD=0
         SYNC_BACKEND_DEAD_STRONG=0
+        SYNC_FAILED_BATCH=0
         _run_registry_entry "$_e" || true
         _st=""
         if [ "${SYNC_SKIPPED:-0}" = "1" ]; then _st="skipped"
@@ -540,6 +541,9 @@ run_all_tasks() {
     # 上一对的强证据写入跨轮熔断（正是要防的误判路径）
     SYNC_BACKEND_DEAD=0
     SYNC_BACKEND_DEAD_STRONG=0
+    # 批次失败标志也是"每对"作用域: 不重置会让上一对的批次失败把本对判成失败
+    SYNC_FAILED_BATCH=0
+    SYNC_FAILED_BATCH_PAIR=0
     _run_registry_entry "$_e" || true
 
     if [ "$real_pass" -eq 0 ]; then
@@ -547,6 +551,9 @@ run_all_tasks() {
     fi
 
     if [ "$rotation_enabled" -eq 1 ] && [ "$real_pass" -eq 1 ]; then
+      # 决策输入落到日志（排查"失败却没让路/游标前移"用）: 没有这行只能靠反推，
+      # 2026-09-15 为查 run 34926236845 的游标前移耗了很久
+      echo "同步对轮转判据: idx=${idx} SKIPPED=${SYNC_SKIPPED:-0} FAILED=${SYNC_FAILED:-0} PARTIAL=${SYNC_PARTIAL:-0} BACKEND_DEAD=${SYNC_BACKEND_DEAD:-0} BATCH_FAILED=${SYNC_FAILED_BATCH:-0} BATCH_FAILED_PAIR=${SYNC_FAILED_BATCH_PAIR:-0} attempts=${_rot_attempts}"
       if [ "${SYNC_SKIPPED:-0}" = "1" ] || [ "${SYNC_FAILED:-0}" = "0" ]; then
         # 完成/跳过 → 游标后移，连续尝试数清零
         _rotation_save "$(( (idx + 1) % n ))" 0
@@ -1175,6 +1182,9 @@ _sync_task_impl() {
     # 链路里任何误读 stdin 的命令（jq/rclone rcat 等）会把本循环的子目录
     # 列表吃掉，剩余子任务被静默跳过（run 31954162437 实锤: 只同步了
     # archive 就跳去最终完整同步，照片/j-1024j 两个子任务丢失）
+    # 每个子任务开始前重置批次失败标志: 它由子任务自己的批次路径置位，
+    # 不重置会让"上一个子任务的批次失败"把本子任务也判成失败（兄弟串味）
+    SYNC_FAILED_BATCH=0
     _sync_task_impl "${source_path}/${subdir}" "${dest_path}/${subdir}" "${safe_subtask}" "${extra_args[@]}" < /dev/null || true
     SYNC_AUTO_SPLIT_DEPTH=$current_depth
     # 子任务已收尾: 清掉它那一层（及更深）的阶段行/统计/细粒度状态。
@@ -1186,7 +1196,7 @@ _sync_task_impl() {
       skipped_subtasks=$((skipped_subtasks + 1))
       subdir_status_map["$subdir"]="skipped"
       tg_add_entry skipped_list "$subdir" "$(format_bytes "${subdir_size_map[$subdir]:-0}")"
-    elif [ "$SYNC_FAILED" = "0" ]; then
+    elif [ "$SYNC_FAILED" = "0" ] && [ "${SYNC_FAILED_BATCH:-0}" != "1" ]; then
       synced_subtasks=$((synced_subtasks + 1))
       subdir_status_map["$subdir"]="synced"
       total_transferred=$((total_transferred + SYNC_TRANSFERRED_BYTES))
@@ -1253,7 +1263,8 @@ _sync_task_impl() {
     # 记本调用自己的 sync_with_logging，二者相加无重复）
     trend_record_transferred "${SYNC_TRANSFERRED_BYTES:-0}"
     AUTO_SPLIT_INFO=""
-    if [ "$SYNC_FAILED" = "0" ] && [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
+    if [ "$SYNC_FAILED" = "0" ] && [ "${SYNC_FAILED_BATCH:-0}" != "1" ] \
+       && [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
       save_sync_marker "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
     else
       split_on_sync_failure "$source_path" "$task_name"
@@ -1277,7 +1288,8 @@ _sync_task_impl() {
     #   （SYNC_FAILED 无残留风险: 每次 sync 尝试在 sync_notify.sh 开头重置为 0，
     #     批次路径在尾部按 failed_batches 置位。）
     SYNC_SKIPPED=0
-    if [ "$failed_subtasks" -gt 0 ] || [ "${SYNC_FAILED:-0}" != "0" ]; then
+    if [ "$failed_subtasks" -gt 0 ] || [ "${SYNC_FAILED:-0}" != "0" ] \
+       || [ "${SYNC_FAILED_BATCH:-0}" = "1" ]; then
       SYNC_FAILED=1
     else
       SYNC_FAILED=0
@@ -1290,6 +1302,12 @@ _sync_task_impl() {
       save_sync_marker "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
     fi
   fi
+
+  # 批次维度失败并入任务级标志（最后一步，覆盖 depth=0 与 depth>0）:
+  #   放在最末尾是因为它必须**跨过**后续 sync 尝试 —— 那些调用会把 SYNC_FAILED
+  #   重置为它们自己那一次的结果（见 SYNC_FAILED_BATCH 注释），只有独立标志能留下。
+  #   父级循环按 SYNC_FAILED 分类子目录，所以这里必须并进去。
+  [ "${SYNC_FAILED_BATCH:-0}" = "1" ] && SYNC_FAILED=1
 }
 
 # sync_task: rclone sync 模式（删除目标端多余文件）
@@ -1365,6 +1383,12 @@ sync_task() {
     # sync_with_logging 契约是恒返回 0、经 SYNC_FAILED 报告失败（见其函数头），
     # 正常成功路径 rc=0 不受影响；被跳过的任务 rc 可能为 0/1 均不算失败
     if [ "$_rc" -ne 0 ] && [ "${SYNC_SKIPPED:-0}" != "1" ]; then
+      SYNC_FAILED=1
+    fi
+    # 粘性批次失败兜底: 中间任何一次 sync 尝试都可能把 SYNC_FAILED 重置为 0
+    # （sync_notify 开头重置），只有独立标志能跨过它们 —— 这一行保证"批次里
+    # 有失败 ⇒ 同步对必判失败"，游标不会当成功前移、也不会写成功 marker。
+    if [ "${SYNC_FAILED_BATCH_PAIR:-0}" = "1" ] && [ "${SYNC_SKIPPED:-0}" != "1" ]; then
       SYNC_FAILED=1
     fi
     if [ "$SYNC_SKIPPED" = "1" ]; then
@@ -1758,6 +1782,9 @@ _render_batch_stats_line() {
 # 按 ~50GB 拆分为多个批次，每批用 rclone copy --files-from 同步
 # 用法: sync_by_file_batches <source_path> <dest_path> <task_name> [rclone_extra_args...]
 sync_by_file_batches() {
+  # 本层文件批次路径是否失败（独立标志，见函数尾注释: 不能只写 SYNC_FAILED，
+  # 它会被后续 sync 尝试清零）
+  SYNC_FAILED_BATCH=0
   local source_path="$1"
   local dest_path="$2"
   local task_name="$3"
@@ -2176,6 +2203,19 @@ sync_by_file_batches() {
   # 但紧跟尾部赋值最不易随下游改动被扰动
   if [ "$failed_batches" -gt 0 ]; then
     SYNC_FAILED=1
+    # 独立标志（2026-09-15 第二轮修，run 34926236845 实锤）:
+    #   只写 SYNC_FAILED 会被后续 sync 尝试清零 —— 尾部那次 fix_test
+    #   `sync_with_logging`、以及 finalize 里的最终完整同步，都会经 sync_notify
+    #   把 SYNC_FAILED 重置为"它自己那一次的结果"（fix_test 模式 = 0）⇒ 批次失败
+    #   被洗白。实测: 批次 1 被预算截断（成功 0/4），子任务仍报成功、游标前移，
+    #   251 个缺失文件被当成"已同步"交给下轮。
+    #   SYNC_FAILED_BATCH 由本函数置位；由调用方在**每对/每子任务开始前**重置；
+    #   在 _sync_task_impl 收尾时并入 SYNC_FAILED（那一步不会被 sync 尝试影响）。
+    SYNC_FAILED_BATCH=1
+    # 粘性（整对作用域）: SYNC_FAILED_BATCH 会在"父级进入下一个子任务"时被重置，
+    # 若失败的子任务不是最后一个，信号就传不到同步对级 ⇒ 再记一个只在
+    # run_all_tasks 每对开始前重置的粘性标志，供 sync_task 尾部兜底。
+    SYNC_FAILED_BATCH_PAIR=1
   fi
 
   # ===== 批次字节并入趋势口径（F9 最小修复，2026-09-15）=====
