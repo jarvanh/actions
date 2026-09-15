@@ -12,6 +12,8 @@
 #   9. OPENLIST_TASK_ROTATION=0 → 回退固定顺序且不读写游标
 set -u
 PASS=0; FAIL=0
+# 本测试验证**串行**语义: 显式关掉并行同步对（否则默认值一变，断言全错位）
+OPENLIST_PAIR_PARALLEL=1
 ok()  { PASS=$((PASS+1)); echo "PASS: $1"; }
 bad() { FAIL=$((FAIL+1)); echo "FAIL: $1"; }
 
