@@ -1263,11 +1263,30 @@ _sync_task_impl() {
     # 递归子任务收尾：把聚合状态传回父级（父循环依据 SYNC_FAILED/SYNC_SKIPPED
     # 对本子目录分类）。失败子目录数 > 0 时必须保持 SYNC_FAILED=1，否则父级
     # 会把本任务误判为"已同步"，深层失败被静默吞掉
+    #
+    # ⚠️ **不能无条件用 failed_subtasks 重算**（2026-09-15 修，run 34920298417 实锤）:
+    #   **文件批次路径的失败不体现在 failed_subtasks 里** —— 叶子任务（无子目录，
+    #   `=== 按文件批次拆分 ===`）的 failed_subtasks 恒为 0。无条件重算会把批次级
+    #   失败洗成成功，后果三重:
+    #     ① 父级不聚合失败 → 整轮报 success；
+    #     ② 本层写**成功 marker** → 被 --1d-skip 跳过一整天（失败数据被推迟 24h）；
+    #     ③ run_all_tasks 的 `elif SYNC_BACKEND_DEAD` 分支永不求值 → 既不让路、
+    #        也不调 _backend_dead_mark ⇒ **F6 跨轮熔断彻底失效**（backend_dead.json
+    #        长期为空，实测该轮 40/40 未落盘 + 后端写入全拒却什么都没记）。
+    #   故: 子目录维度有失败 **或** 本层工作已记录失败（批次路径在尾部置位）→ 保持失败。
+    #   （SYNC_FAILED 无残留风险: 每次 sync 尝试在 sync_notify.sh 开头重置为 0，
+    #     批次路径在尾部按 failed_batches 置位。）
     SYNC_SKIPPED=0
-    if [ "$failed_subtasks" -gt 0 ]; then SYNC_FAILED=1; else SYNC_FAILED=0; fi
+    if [ "$failed_subtasks" -gt 0 ] || [ "${SYNC_FAILED:-0}" != "0" ]; then
+      SYNC_FAILED=1
+    else
+      SYNC_FAILED=0
+    fi
     if [ "$partial_subtasks" -gt 0 ]; then SYNC_PARTIAL=1; else SYNC_PARTIAL=0; fi
     SYNC_TRANSFERRED_BYTES=$total_transferred
-    if [ "$failed_subtasks" -eq 0 ] && [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
+    # marker 写入门槛必须用重算后的 SYNC_FAILED，而不是 failed_subtasks ——
+    # 否则批次级失败照样写成功 marker（同上第 ②）
+    if [ "$SYNC_FAILED" = "0" ] && [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
       save_sync_marker "$source_path" "$dest_path" "$task_name" "${extra_args[@]}"
     fi
   fi
@@ -1392,6 +1411,9 @@ sync_task() {
 _batch_consolidate() {
   local batch_idx="$1"
   local batch_log="$2"
+  # 本批 copy 的退出码（可选）: 124 = 被预算硬上限 timeout 掉 → 本批"未落盘"
+  # 是预算截断造成的，不能当"后端拒收"的证据（见下方 _judge_dead）
+  local batch_rc="${3:-}"
   local label="批次 $((batch_idx + 1))"
 
   # 本批巩固产出（供调用方累加进进度行的 ⚠️ 未落盘 / 🔁 重传 / 🔧 修复）:
@@ -1563,7 +1585,26 @@ _batch_consolidate() {
   # 注意: 熔断只中止"剩余批次"——本批顽固缺失仍转修复管线换方法（2026-08-31
   # 用户规格: 直接传输没成功就要进修复管线，不因后端级拒收豁免; 方法黑名单
   # 自带全拉黑重置兑底，死后端误拉黑不会永久锁死方法）。
-  if [ "$_truth_confirmed" -eq 1 ] && [ "$stubborn_n" -ge 3 ] && [ "$touched_n" -gt 0 ] && [ "$stubborn_n" -ge "$touched_n" ]; then
+  # 判死前置条件（2026-09-15 修，run 34920298417 实锤）:
+  #   "未落盘"只有在**传输本身跑完了**的前提下才是后端拒收的证据。两种截断必须排除:
+  #     ① 本批 copy 被预算硬上限 timeout 掉（rc=124）—— 文件只是没传完；
+  #     ② 预算将尽（可用工作片 ≤ 阈值）—— 串行重试被压到 60s 兜底、根本没机会跑。
+  #   该轮实测: 批次 copy 在 2670s 处被 timeout 截断 → 40/40 "未落盘" → 判"后端写入
+  #   全拒"；而同一后端本轮另有 51 个文件真实落盘 ⇒ 纯属**预算截断的假判死**。
+  #   不排除的后果: 经 F6 写进 backend_dead.json，让健康后端在 TTL(4h) 内被整轮跳过。
+  local _judge_dead=1 _f5_slice
+  if [ "$batch_rc" = "124" ]; then
+    _judge_dead=0
+    echo "⚠️ ${label} 巩固: 本批传输被预算硬上限截断（timeout rc=124）→ 跳过「后端写入全拒」判定（未落盘不构成后端拒收证据）"
+  else
+    _f5_slice=$(_budget_slice_seconds)
+    if [ -n "$_f5_slice" ] && [ "$_f5_slice" -le "${OPENLIST_F5_MIN_SLICE:-300}" ]; then
+      _judge_dead=0
+      echo "⚠️ ${label} 巩固: 预算将尽（可用工作片 ${_f5_slice}s）→ 跳过「后端写入全拒」判定（串行重试无机会跑，证据不足）"
+    fi
+  fi
+
+  if [ "$_judge_dead" -eq 1 ] && [ "$_truth_confirmed" -eq 1 ] && [ "$stubborn_n" -ge 3 ] && [ "$touched_n" -gt 0 ] && [ "$stubborn_n" -ge "$touched_n" ]; then
     BATCH_BACKEND_DEAD=1
     # 同时置 SYNC_BACKEND_DEAD: 这是全库可信度最高的"后端本轮不可写"证据
     # （容器重启后复核，本批触碰文件 100% 未落盘），比入口写探针更硬——run
@@ -2020,7 +2061,7 @@ sync_by_file_batches() {
       # （把巩固单元从"整个任务"缩小到"单个批次"，run 被取消也锁住进度；
       #   详见 _batch_consolidate 函数头注释）
       BATCH_BACKEND_DEAD=0
-      _batch_consolidate "$i" "$batch_log" || true
+      _batch_consolidate "$i" "$batch_log" "${rc:-}" || true
       # 巩固产出并入累计（CONSOLIDATE_* 由 _batch_consolidate 每次进入时归零，
       # 未跑巩固的批次全为 0，累加安全）
       consolidate_missing_total=$((consolidate_missing_total + ${CONSOLIDATE_MISSING:-0}))
