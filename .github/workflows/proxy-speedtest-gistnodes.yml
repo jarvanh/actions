@@ -51,6 +51,14 @@ on:
         options:
           - '1'
           - '0'
+      trial_load:
+        description: '发布前把订阅交给本机 mihomo 试装一遍，摘掉装不上的节点（留空 = 1 = 开）。关掉则不做排雷'
+        required: false
+        type: choice
+        default: '1'
+        options:
+          - '1'
+          - '0'
       test_nodes:
         description: '交给测速引擎实测多少个节点（留空 = 0 = 不限）'
         required: false
@@ -224,6 +232,11 @@ jobs:
           # 加载 home 之外的 provider 文件（`SAFE_PATHS`，level=fatal 直接退出）。过滤层
           # 自己会把越界路径改落回 home 内（`_safe_home_dir`），这里不必特殊处理。
           GIST_NODES_ALIVE_FILTER: ${{ inputs.alive_filter || '1' }}
+          # 试装排雷：把「mihomo 装不上」的节点二分定位并摘掉。与健康检查是两件事——
+          # mihomo 对 provider 是「全有或全无」，一个非法节点会让整份订阅在下游归零
+          # （实测 2026-09-15：13210 个节点 → 下游 total: 0，见 docs 的「为什么还要试装」）。
+          # 排雷层自己故障同样只降级为「原样发布」，绝不零节点。
+          GIST_NODES_TRIAL_LOAD: ${{ inputs.trial_load || '1' }}
           GIST_NODES_WORKDIR: ${{ github.workspace }}/gist-nodes
           # GitHub API 认证：匿名 60 次/h，一轮要拉上百个 Gist（每个至少一次 API 调用），
           # 不带 token 会被限流截断

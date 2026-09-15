@@ -266,7 +266,6 @@ def main():
             af.MIHOMO_CONFIG = saved_cfg
 
         print('== 11. 试装配置与下游逐字一致（lazy/expected-status/health url）==')
-        cfg_path = af.MIHOMO_CONFIG
         saved_cfg = af.MIHOMO_CONFIG
         saved_home = tmp / 't11'
         saved_home.mkdir(parents=True, exist_ok=True)
