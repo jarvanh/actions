@@ -25,6 +25,16 @@
 workflow_dispatch 的入参不适合承载大文本；raw URL 是一个短字符串，下游 `fetch_text`
 直接 GET 即可（secret Gist 的 raw URL 无需鉴权——不可猜的 URL 本身就是凭据）。
 
+**发布前必须过一轮健康检查（见 alive_filter.py），只发布活节点。** 为什么这步不能省：
+下游三套测速拿这份 Gist 当订阅源后，会各自起 mihomo、按 provider **非惰性**健康检查所有
+节点。实测 2026-09-15 run 34928929882：这里发布了 12635 个节点（raw 匿名可读、
+`yaml.safe_load` 也是 12635 个），但泰尔那轮只认到 `source_mapping_built entries: 14`——
+从开跑到 mihomo 配好只有 1.67 秒，根本来不及下完 4.27MB 并给 12635 个节点逐一出结论，
+于是下游读到的是一个「才刚探了几个」的快照。**瓶颈是规模，不是下载/鉴权/TUN。**
+在这里先筛一遍，下游拿到的就是几百个活节点，它自己的健康检查能在秒级完成。
+
+---
+
 Sub-Store 接口（读 backend/src/restful/*.js 得到，全部是无需鉴权的本机 HTTP）：
   POST /api/subs                            建订阅；本地内容订阅用 {name, source:'local', content}
   POST /api/collections                     建组合订阅 {name, subscriptions:[订阅名...], process:[...]}
@@ -83,12 +93,24 @@ Sub-Store 接口（读 backend/src/restful/*.js 得到，全部是无需鉴权�
                            冲出 job 的 timeout-minutes —— 而且这次是在**抓取已经完成之后**
                            被硬取消，损失比抓取段超时更大。预算一半给投喂、一半留给产出
   SUB_STORE_COLLECTION     组合订阅名前缀（默认 gist-nodes）
+  GIST_NODES_ALIVE_FILTER  1 = 发布前先起本地 mihomo 做一轮健康检查，只发布活节点
+                           （默认 1）。见文件头「发布前必须过一轮健康检查」
+  GIST_NODES_ALIVE_BUDGET_SECONDS
+                           健康检查阶段的墙钟预算（默认 600 = 10 分钟；0 = 不限）。
+                           到点仍未跑完 → **原样发布全部**并记 `alive_filter_skipped`：
+                           这一层是降级手段，它自己故障不该把整轮变成零节点
+  GIST_NODES_ALIVE_TIMEOUT 单次读 /providers/proxies 的超时秒数（默认 120）——上面那个
+                           budget 才是本阶段的墙钟上界，这个只管单次请求
+  PROXY_SPEEDTEST_HEALTHCHECK_URL
+                           健康检查目标（默认 https://www.gstatic.com/generate_204）。
+                           **必须与下游测速的同一变量一致**，否则这里判活、下游判死
   GH_TOKEN / GITHUB_TOKEN  GitHub API 认证（缺失时匿名调用，易被限流）
   PROXY_SPEEDTEST_GIST_ID / _FILENAME / _DESCRIPTION
                            发布目标 Gist（复用共享层 update_gist 的既有约定）
 
 输出（写入 ${GITHUB_OUTPUT}，供编排工作流传给测速工作流）：
-  sub_url / count / parsed_count / gists_scanned / gist_html_url / gist_id
+  sub_url / count / parsed_count / deduped_count / alive_count / gists_scanned /
+  gist_html_url / gist_id
 
 失败语义：单个 Gist / 单个订阅失败只跳过它；Sub-Store 不可达、组合订阅产出失败、
 或最终一个节点都没有 → exit 1。与其让下游拿空订阅跑一轮 45 分钟测速，不如就地失败。
@@ -101,6 +123,10 @@ job 超时是 GitHub 硬取消，被取消时连已经抓到的几十个订阅�
 Sub-Store 阶段同理，但**降级方向相反**：投喂预算耗尽可以停投喂、拿已投喂的继续产出
 （少几个订阅文件而已）；而建组合 / 取回预算耗尽就只能 exit 1——那两个步骤省掉就没有
 产物了，此时失败是对的（同「与其让下游拿空订阅跑一轮测速，不如就地失败」）。
+
+健康检查阶段同样是「降级不失败」，但降级方向是**放行全部**：这一层存在的意义是把规模
+压下去，它自己起不来 / 跑不完时，退回到「不做过滤」正是过滤开启之前的既有行为——下游
+当然可能重演 12635 个节点那种事，但那比**零节点发布**好得多（后者让下游连测都没得测）。
 """
 import base64
 import concurrent.futures
@@ -123,6 +149,13 @@ import yaml
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 from speedtest_common import github_api_request, log_progress, merged_env, update_gist  # noqa: E402
+# 健康检查过滤独立成模块：它要 mihomo 的启动/等待/配置语义（与下游三套测速**同一份实现**，
+# 见 alive_filter.py 文件头的「为什么复用 speedtest_gitee」）。gist_nodes 本身不需要 mihomo。
+from alive_filter import (  # noqa: E402
+    DEFAULT_FILTER_BUDGET_SECONDS,
+    SNAPSHOT_TIMEOUT_SECONDS,
+    filter_alive,
+)
 
 SEARCH_URL = 'https://gist.github.com/search'
 GIST_API = 'https://api.github.com/gists/{gist_id}'
@@ -861,6 +894,13 @@ def main():
                            str(DEFAULT_CARRYOVER)).lower() not in ('0', 'false', 'no')
     carryover_max_bytes = max(0, env_int(env, 'GIST_NODES_CARRYOVER_MAX_MB',
                                          DEFAULT_CARRYOVER_MAX_MB)) * 1024 * 1024
+    alive_on = env_str(env, 'GIST_NODES_ALIVE_FILTER', '1').lower() not in ('0', 'false', 'no')
+    alive_budget = max(0, env_int(env, 'GIST_NODES_ALIVE_BUDGET_SECONDS',
+                                  DEFAULT_FILTER_BUDGET_SECONDS))
+    alive_timeout = max(10, env_int(env, 'GIST_NODES_ALIVE_TIMEOUT', SNAPSHOT_TIMEOUT_SECONDS))
+    # 显式传给过滤层而不是让它自己从 env 读：env 里有没有这个键、值合不合法，
+    # 由这里一处决定，过滤层只认参数字符串（空串 = 用它的默认目标）。
+    health_url_override = env_str(env, 'PROXY_SPEEDTEST_HEALTHCHECK_URL', '')
     workdir = pathlib.Path(env_str(
         env, 'GIST_NODES_WORKDIR', str(pathlib.Path.home() / 'proxy-speedtest' / 'gist-nodes')))
     workdir.mkdir(parents=True, exist_ok=True)
@@ -1027,16 +1067,49 @@ def main():
         fail(f'Sub-Store 产出的 YAML 解析失败：{e}')
     if not proxies:
         fail('Sub-Store 产出的订阅里一个节点都没有')
+    # 原样留一份：过滤后的 YAML 若被判「不该动」就要回退到它，而 `yaml.safe_dump`
+    # 与原文本不可能逐字相同（注释、引号风格、键序都变了）。见下面 `proxies is all_proxies`。
+    all_proxies = proxies
+    original_yaml_text = yaml_text
     try:
         parsed_count = len(json.loads(raw_json))
     except Exception:
         parsed_count = 0
 
-    log_progress('gist_nodes_deduped', parsed=parsed_count, deduped=len(proxies),
+    if dry_run:
+        # dry-run 的真实用途是「验 Sub-Store 那条链路」（见 GIST_NODES_DRY_RUN 注释），
+        # 而健康检查要另下一份 mihomo（几十 MB）再占 10 分钟，与「本地快速验证」相悖。
+        # 想在这里也验过滤，就单独用 GIST_NODES_ALIVE_FILTER=1 打开。
+        alive_on = False
+
+    deduped_count = len(proxies)
+    log_progress('gist_nodes_deduped', parsed=parsed_count, deduped=deduped_count,
                  max_nodes=max_nodes, bytes=len(yaml_text.encode('utf-8')))
-    if parsed_count and len(proxies) >= parsed_count:
+    if parsed_count and deduped_count >= parsed_count:
         # 去重没生效通常是 process 里的 type 名写错了（Sub-Store 只记日志、不报错）。
-        log_progress('gist_nodes_dedupe_no_effect', parsed=parsed_count, deduped=len(proxies))
+        log_progress('gist_nodes_dedupe_no_effect', parsed=parsed_count, deduped=deduped_count)
+
+    # 发布前过一轮健康检查：下游三套测速会拿这份订阅各自起 mihomo 做非惰性健康检查，
+    # 节点上万时那一步根本跑不完（下游只认到十来个节点，见文件头）。这里先筛。
+    alive_report = None
+    if alive_on:
+        proxies, alive_report = filter_alive(
+            env, proxies, budget_seconds=alive_budget,
+            workdir=workdir / 'alive-filter', health_url=health_url_override,
+            snapshot_timeout=alive_timeout)
+        if not proxies:
+            # 全判死极可能是探测目标不可达（把「目标挂了」错读成「节点都死了」），
+            # 零节点发布会让下游一个都测不了——比不过滤糟得多，所以退回不过滤。
+            log_progress('alive_filter_all_dead_fallback', deduped=deduped_count,
+                         note='全部判死，怀疑探测目标不可达，原样发布不过滤')
+            proxies = all_proxies
+            alive_report = dict(alive_report or {}, skipped=True,
+                                skip_reason='all_dead', alive=deduped_count, dead=0)
+
+    if proxies is all_proxies:
+        yaml_text = original_yaml_text
+    else:
+        yaml_text = yaml.safe_dump({'proxies': proxies}, allow_unicode=True, sort_keys=False)
 
     (workdir / 'providers.yaml').write_text(yaml_text, encoding='utf-8')
     (workdir / 'nodes.json').write_text(json.dumps({
@@ -1061,7 +1134,9 @@ def main():
         'process': process,
         'stats': stats,
         'parsed_count': parsed_count,
+        'deduped_count': deduped_count,
         'node_count': len(proxies),
+        'alive_filter': alive_report,
     }, ensure_ascii=False, indent=2), encoding='utf-8')
 
     sub_url = ''
@@ -1085,6 +1160,8 @@ def main():
         'sub_url': sub_url,
         'count': len(proxies),
         'parsed_count': parsed_count,
+        'deduped_count': deduped_count,
+        'alive_count': len(proxies) if alive_report else '',
         'gists_scanned': stats['gists_scanned'],
         'gist_html_url': gist_html_url,
         'gist_id': gist_id,
@@ -1103,12 +1180,15 @@ def main():
         f'- 投喂订阅：{stats["subs_created"]} 个（失败 {stats["subs_failed"]}，'
         f'{round(stats["bytes_pushed"] / 1048576, 1)} MB）'
         f'，Sub-Store 阶段耗时 {ss_elapsed} 秒 / 预算 {ss_budget or "不限"} 秒',
-        f'- Sub-Store 解析：{parsed_count} 个节点 → 去重/清理后：**{len(proxies)}**'
+        f'- Sub-Store 解析：{parsed_count} 个节点 → 去重/清理后：**{deduped_count}**'
         + (f'（限量 {max_nodes}）' if max_nodes else ''),
+        _alive_filter_summary_line(alive_report, deduped_count),
         f'- 订阅 Gist：{gist_html_url or "(dry-run 未发布)"}',
     ])
-    print(f'OK: {len(proxies)} 个节点（解析 {parsed_count}），'
-          f'{stats["subs_created"]} 个订阅经 Sub-Store 去重，订阅 raw: {sub_url or "(dry-run)"}')
+    print(f'OK: {len(proxies)} 个节点（解析 {parsed_count}）'
+          + (f'（去重 {deduped_count} → 测活 {len(proxies)}）' if alive_report else '')
+          + f'，{stats["subs_created"]} 个订阅经 Sub-Store 去重，'
+          f'订阅 raw: {sub_url or "(dry-run)"}')
 
 
 if __name__ == '__main__':
