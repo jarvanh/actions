@@ -251,19 +251,31 @@ jobs:
 
   # 三个引擎各一个条件 job：GitHub 不支持动态的 uses:，只能写三条并按 engine 选一条。
   # secrets: inherit 把仓库 secrets 透传给被调工作流（它们内部照旧读自己的 secret）。
+  #
+  # ⚠️ 这里**不能**再传 `sub_url` / `gist_id`：gist id 是注册过的 secret
+  # （`PROXY_SPEEDTEST_GISTNODES_GIST_ID`），GitHub 见到 job output 里出现与已注册 secret
+  # 相同的字符串就把整个 output 丢掉（`Skip output 'X' since it may contain secret.`）。
+  # 实测 2026-09-15 run 34956069334：sub_url / gist_html_url / gist_id 三个全被丢，下游拿到
+  # 空值就 fallback 到各自 secret ⇒ 订阅源退回用户自己的机场订阅、结果写进另一个泰尔 Gist，
+  # 整轮「gist 抓节点」名存实亡且零报错。
+  #
+  # 也不能在 `with:` 里写 `${{ secrets.X }}`——`secrets` 上下文在 job 级 `with:` 里不可用
+  # （会报 `Unrecognized named-value: 'secrets'`）。所以只传一个**布尔开关**，叫被调工作流
+  # 从它自己的 secrets 里取 `PROXY_SPEEDTEST_GISTNODES_GIST_ID`，并自行按 id 解析订阅
+  # raw URL（见各工作流的「Resolve source subscription」步骤）。
   speedtest-taier:
     needs: fetch-nodes
     if: needs.fetch-nodes.outputs.engine == 'taier'
     uses: ./.github/workflows/proxy-speedtest-taier.yml
     with:
-      sub_urls: ${{ needs.fetch-nodes.outputs.sub_url }}
+      use_gistnodes_source: '1'
+      result_gist_id_from_gistnodes: '1'
       # 不限节点数：抓来多少就测多少（用户要求；节点多会让 mihomo 启动健康检查变慢）
       max_nodes: ${{ inputs.test_nodes || '0' }}
       # 测活开关显式传 on：被调工作流测活**默认开**，编排不覆盖，这里写明让它不随 dispatch 漂移
       alive_probe: 'on'
       # 测速结果写进**本工作流专属 Gist**（与源节点订阅同库、不同文件名），
       # 而不是三套测速各自的 Gist —— 这样一轮 gist 抓取的产物集中在一处
-      gist_id: ${{ needs.fetch-nodes.outputs.gist_id }}
       gist_filename: proxy_speedtest_gistnodes_result_taier.yaml
       gist_description: 'proxy speedtest result (gist 抓节点 · taier 三网)'
       label: 'gist 节点'
@@ -274,12 +286,12 @@ jobs:
     if: needs.fetch-nodes.outputs.engine == 'gitee'
     uses: ./.github/workflows/proxy-speedtest-gitee.yml
     with:
-      sub_urls: ${{ needs.fetch-nodes.outputs.sub_url }}
+      use_gistnodes_source: '1'
+      result_gist_id_from_gistnodes: '1'
       # 不限节点数：抓来多少就测多少（用户要求；节点多会让 mihomo 启动健康检查变慢）
       max_nodes: ${{ inputs.test_nodes || '0' }}
       # 测速结果写进**本工作流专属 Gist**（与源节点订阅同库、不同文件名），
       # 而不是三套测速各自的 Gist —— 这样一轮 gist 抓取的产物集中在一处
-      gist_id: ${{ needs.fetch-nodes.outputs.gist_id }}
       gist_filename: proxy_speedtest_gistnodes_result_gitee.yaml
       gist_description: 'proxy speedtest result (gist 抓节点 · gitee 上下行)'
       label: 'gist 节点'
@@ -290,12 +302,12 @@ jobs:
     if: needs.fetch-nodes.outputs.engine == 'cdn'
     uses: ./.github/workflows/proxy-speedtest-cdn.yml
     with:
-      sub_urls: ${{ needs.fetch-nodes.outputs.sub_url }}
+      use_gistnodes_source: '1'
+      result_gist_id_from_gistnodes: '1'
       # 不限节点数：抓来多少就测多少（用户要求；节点多会让 mihomo 启动健康检查变慢）
       max_nodes: ${{ inputs.test_nodes || '0' }}
       # 测速结果写进**本工作流专属 Gist**（与源节点订阅同库、不同文件名），
       # 而不是三套测速各自的 Gist —— 这样一轮 gist 抓取的产物集中在一处
-      gist_id: ${{ needs.fetch-nodes.outputs.gist_id }}
       gist_filename: proxy_speedtest_gistnodes_result_cdn.yaml
       gist_description: 'proxy speedtest result (gist 抓节点 · cdn 镜像站)'
       label: 'gist 节点'
