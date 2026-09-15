@@ -113,10 +113,10 @@ on:
         # ⚠️ 调小前必须对比"缺失文件数 / 修复触发量 / 重传量"——这个 sleep 在赌
         # "递归刷新 N 秒内完成"，赌错会让 diff 读到 stale 列表、把已落盘文件当缺失
         # 而白重传。0 = 不等（仅调试）。
-        description: "同步模式: 缓存刷新等待秒数（默认 60）。调小属实验: 需对比缺失数/修复量是否上升"
+        description: "同步模式: 缓存刷新等待秒数（默认 40；实测 30s 无 stale 症状、取 40 留余量。调到 30 以下需在高写入轮对比缺失数/修复量）"
         required: false
         type: number
-        default: 60
+        default: 40
       sync_budget_min:
         # 唯一影响"一轮跑多久"的旋钮（2026-09-15 加）。
         # 调短 = 快速迭代: 完整日志/结论从 5.5h 降到 e.g. 30–90min；生产跑量用默认 320。
@@ -523,8 +523,8 @@ jobs:
           # 预算（分钟）: 调短即可"快速取日志/结论"（完整一轮 5.5h → 如 60min），
           # 生产跑量仍用默认 320。见下方 clamp 与 _budget_scaled 的说明。
           SYNC_BUDGET_MIN: ${{ github.event.inputs.sync_budget_min || '320' }}
-          # 缓存刷新等待（默认 60）: 见入参说明，调小属实验
-          FS_REFRESH_SLEEP: ${{ github.event.inputs.fs_refresh_sleep || '60' }}
+          # 缓存刷新等待（默认 40）: 见入参说明
+          FS_REFRESH_SLEEP: ${{ github.event.inputs.fs_refresh_sleep || '40' }}
         run: |
           source /tmp/load_all.sh
           # P0 趋势: 记录同步工作开始时间（收尾时算本轮历时）
