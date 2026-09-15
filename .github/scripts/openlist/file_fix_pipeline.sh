@@ -1088,6 +1088,15 @@ _sync_persist_verify_and_retry() {
           local retry_pending=("${PERSIST_FAILED_ORIGS[@]}")
 
           while [ "${#retry_pending[@]}" -gt 0 ] && [ "$retry_round" -lt "$retry_rounds_max" ]; do
+            # 预算闸（2026-09-15 加）: 本循环每轮 = 逐文件"换方法重试" + 一次容器重启复核，
+            # 实测单轮十几分钟，且**原本完全没有预算约束** —— 是"超预算仍在跑"的最后一处
+            # 无界阶段（run 34975551022 在 60min 预算下超 16min+ 仍在跑，而此前无界可达小时级）。
+            # 提前 break 安全: 剩余 pending 会走循环后同款清理（移出 marker + 记失败清单 +
+            # 黑名单），下一轮从剩余方法继续 —— 与既有的"重启失败 break"语义完全一致。
+            if declare -F sync_budget_stop >/dev/null 2>&1 && sync_budget_stop; then
+              echo "⏳ 时间预算将尽，结束假成功重试（剩余 ${#retry_pending[@]} 个转失败清单，下轮从剩余方法继续）" | tee -a "$LOG_FILENAME"
+              break
+            fi
             retry_round=$((retry_round + 1))
             _log_section "$LOG_FILENAME" "假成功重试 ${retry_round}/${retry_rounds_max} · 待重试 ${#retry_pending[@]} 个"
 
