@@ -108,8 +108,14 @@ _send_sync_result_notification() {
   # 同步后刷新 OpenList 缓存，确保 _get_path_stats 拿到真实文件数
   # 避免 stale 缓存里残留"幽灵文件"导致 dest_count 虚高，误报同步成功
   if [[ "$dest_path" == openlist:* ]]; then
-    echo "同步后刷新 OpenList 缓存以获取真实文件数..." | tee -a "$log_filename"
-    _refresh_openlist_cache "$dest_path"
+    # 本次同步**零传输** ⇒ 后端没被写入，列表不可能因为我们的写入而 stale
+    # ⇒ 跳过刷新（含 60s 等待）。一轮 ~14 次刷心里通常有几处属于这种场合。
+    if [ "${SYNC_TRANSFERRED_BYTES:-0}" = "0" ]; then
+      echo "本次同步无传输，跳过同步后缓存刷新（无新写入 ⇒ 无 stale 风险）" | tee -a "$log_filename"
+    else
+      echo "同步后刷新 OpenList 缓存以获取真实文件数..." | tee -a "$log_filename"
+      _refresh_openlist_cache "$dest_path"
+    fi
   fi
 
   dst_stats=$(_get_path_stats "$dest_path" "${extra_args[@]}")

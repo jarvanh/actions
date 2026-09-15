@@ -538,9 +538,17 @@ _refresh_openlist_cache() {
     -d "{\"path\":\"$ol_path\",\"recursive\":true}" \
     >/dev/null 2>&1 || true
 
-  # 等待缓存刷新完成（60s，确保递归刷新大目录完成）
-  echo "等待缓存刷新完成 (60s)..."
-  sleep 60
+  # 等待缓存刷新完成（默认 60s，确保递归刷新大目录完成）
+  # ✅ 可配: OPENLIST_FS_REFRESH_SLEEP（2026-09-15 加）。
+  # 为什么值得关注: 静态间隔分析显示一轮被调 ~14 次 ⇒ 60s × 14 = **14min**，
+  # 占 72min 短轮的 **19%**（长轮里也有 7%）。这个 sleep 是在赌"递归刷新在 N 秒内
+  # 完成"，赌错会让 diff 读到 stale 列表、把已落盘文件当缺失 → 白重传 + 修复管线空跑，
+  # 所以**不要默默调小**: 要跑一轮对比"缺失文件数 / 修复触发量 / 重传量"再定。
+  # 0 = 不等（仅调试用）。
+  local _rsleep="${OPENLIST_FS_REFRESH_SLEEP:-60}"
+  [[ "$_rsleep" =~ ^[0-9]+$ ]] || _rsleep=60
+  echo "等待缓存刷新完成 (${_rsleep}s)..."
+  [ "$_rsleep" -gt 0 ] && sleep "$_rsleep"
 
   # 刷新后文件数同理: 仅日志用途，默认跳过（见上）
   if [ "$_cnt_on" = "1" ]; then
