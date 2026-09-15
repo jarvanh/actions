@@ -1,8 +1,9 @@
 # gist 抓节点 → Sub-Store 去重 → 选一套测速（proxy-speedtest-gistnodes）
 
-> 代码：`.github/scripts/proxy-speedtest/gist_nodes.py`
+> 代码：`.github/scripts/proxy-speedtest/gist_nodes.py`（健康检查过滤：`alive_filter.py`）
 > 入口：`.github/workflows/proxy-speedtest-gistnodes.yml`
 > 自检：`.github/scripts/proxy-speedtest/tests/test_gist_nodes_substore.py`
+> 　　　`.github/scripts/proxy-speedtest/tests/test_alive_filter.py`（过滤层专测）
 
 ## 定位
 
@@ -62,8 +63,56 @@ job，gistnodes 侧拿不到测速结果。抓取情况走 job 摘要与 artifac
    | 4 | `Script Operator` | `proxies.slice(0, N)` 限量（仅当 `GIST_NODES_MAX_NODES > 0`） |
 6. **取回**：`GET /download/collection/<名>/ClashMeta` 拿 mihomo YAML；同时取 `<名>-raw` 的
    `JSON` 只用来数节点，得到「解析后 N → 去重后 M」这个可核对口径；
-7. **发布**：YAML 写进本工作流专属 Gist（`update_gist`），raw URL 作为 `sub_urls` 传给
+7. **健康检查**（`GIST_NODES_ALIVE_FILTER`，默认开）：在发布**之前**起一个本地 mihomo
+   （独立端口 19090 / 17892，与测速共用同一份内核二进制与配置语义），把去重后的节点当一个
+   `type: file` 的 provider 载入、`lazy: false` 全量探测，只保留判活的节点再发布。
+   详见下面「为什么发布前必须自己先测活」；
+8. **发布**：YAML 写进本工作流专属 Gist（`update_gist`），raw URL 作为 `sub_urls` 传给
    选定的测速工作流（`workflow_call` + `secrets: inherit`）。
+
+## 为什么发布前必须自己先测活
+
+下游三套测速拿到这份 Gist 当订阅源后，会各自起 mihomo、按 provider **非惰性**健康检查
+所有节点。节点上万时那一步根本跑不完。实测 2026-09-15 run 34928929882：
+
+| 证据 | 值 |
+|---|---|
+| 本工作流发布 | `gist_nodes_published bytes: 4278592`（12635 个节点，raw 匿名可读、`yaml.safe_load` 也是 12635） |
+| 泰尔侧认到的节点 | `source_mapping_built entries: 14` |
+| 从开跑到 mihomo 配好 | `taier_speedtest_started 04:44:05.25` → `mihomo_tun_config_built 04:44:07.75` = **1.67 秒** |
+
+1.67 秒不可能下完 4.27MB、载入 12635 个节点、再给每个节点跑完一轮健康检查。也就是说
+**瓶颈是规模，不是下载 / 鉴权 / TUN**：下游读快照时只看到最先出结论的一小撮节点。
+
+（附带排除掉的两个猜测：「TUN 破坏健康检查」不成立——不带 TUN 的 gitee 定时轮同样只认到
+13 个；而泰尔那轮反而拿到 53 个，比 gitee / cdn 都多。「secret Gist 需要鉴权」也不成立
+——匿名请求带 User-Agent 即 200。）
+
+所以把规模压在上游：这里先筛一遍，下游 Gist 里就是几百个活节点，它自己的健康检查能在
+秒级完成。
+
+**为什么 `lazy: false` 必须是这个值**（这一层自己生成的那份 config）：`lazy: true` 的
+provider 只在被显式请求时才探活，`/providers/proxies` 里所有节点的 `alive` 会**一直缺失**，
+这一层就永远等不到结论、只能 fail-open 放行全部——等于白跑。
+
+**降级方向是「放行全部」，不是「失败」**：mihomo 起不来、预算耗尽、API 报错一律原样
+发布全部节点并记 `alive_filter_skipped`。这一层存在的意义是把规模压下去，它自己故障时
+退回到「不做过滤」正是过滤引入之前的既有行为——那当然可能重演 12635 个节点，但比
+**零节点发布**（下游连测都没得测）好得多。同理，若**全部节点都判死**，脚本会记
+`alive_filter_all_dead_fallback` 并原样发布：全死极可能是探测目标本身不可达，把
+「目标挂了」错读成「节点都死了」不该导致零产出。
+
+判据上只有「mihomo 给出明确死结论」才丢节点；**查不到结论的（重名、被改名、还没探完）
+一律保留**——过滤只该丢明确判死的，不该丢「说不清」的。
+
+## 过滤相关环境变量
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `GIST_NODES_ALIVE_FILTER` | `1` | `0` = 关掉过滤，原样发布（回退到引入过滤之前的行为） |
+| `GIST_NODES_ALIVE_BUDGET_SECONDS` | `600` | 过滤阶段墙钟预算；到点未跑完 → 原样发布全部 |
+| `GIST_NODES_ALIVE_TIMEOUT` | `120` | 单次读 `/providers/proxies` 的超时（上界由上面的预算兜） |
+| `PROXY_SPEEDTEST_HEALTHCHECK_URL` | `https://www.gstatic.com/generate_204` | 探测目标。**必须与下游测速同值**，否则这里判活、下游判死 |
 
 ## 为什么这么设计
 
@@ -227,7 +276,10 @@ Gist 分工：`gitee` / `cdn` / `taier` 三套各自的 Gist 只装**它们定�
 | `SUB_STORE_TIMEOUT` | `300` | **单次**调用 Sub-Store 的超时（秒）。**刻意保持不动**：没有真实的 Sub-Store 分段耗时，压小它只会误杀「合法但慢」的取回；这一段的总时长由下面那行负责 |
 | `SUB_STORE_BUDGET_SECONDS` | `300` | 整个 Sub-Store 阶段的**墙钟预算**（秒，`0` = 不限）。一半给投喂、一半留给产出 |
 | `SUB_STORE_COLLECTION` | `gist-nodes` | 组合订阅名前缀 |
-| `GIST_NODES_DRY_RUN` | `0` | `1` = 只抓取不发布（本地验证用） |
+| `GIST_NODES_ALIVE_FILTER` | `1` | 发布前是否先做健康检查、只发布活节点（见「为什么发布前必须自己先测活」） |
+| `GIST_NODES_ALIVE_BUDGET_SECONDS` | `600` | 健康检查阶段的**墙钟预算**（秒，`0` = 不限）。到点未跑完 → 原样发布全部 |
+| `GIST_NODES_ALIVE_TIMEOUT` | `120` | 单次读 `/providers/proxies` 的超时（秒）。上界由上面的预算兜 |
+| `GIST_NODES_DRY_RUN` | `0` | `1` = 只抓取不发布（本地验证用）。**dry-run 会同时关掉健康检查**（那要另下几十 MB 的 mihomo 再占 10 分钟，与「本地快速验证」相悖）；想单独验过滤用 `GIST_NODES_ALIVE_FILTER=1` |
 
 dispatch 入参 `queries` / `max_nodes` / `test_nodes` / `target_subs` / `max_age_hours`
 分别覆盖对应项。
