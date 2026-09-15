@@ -89,8 +89,14 @@ job，gistnodes 侧拿不到测速结果。抓取情况走 job 摘要与 progres
 13 个；而泰尔那轮反而拿到 53 个，比 gitee / cdn 都多。「secret Gist 需要鉴权」也不成立
 ——匿名请求带 User-Agent 即 200。）
 
-所以把规模压在上游：这里先筛一遍，下游 Gist 里就是几百个活节点，它自己的健康检查能在
-秒级完成。
+所以把规模压在上游：这里先筛一遍，下游 Gist 里就是几百个活节点。
+
+⚠️ **但这层过滤不等于下游可以直接拿 `alive` 当准入门槛。** 下游 `collect_provider_snapshot`
+曾只收 provider 里 `alive` 为真的节点，而 `wait_mihomo` 并不等健康检查出结论——订阅一大就
+「收集到 0 个」。2026-09-15 run 34969408908 就踩了这个：本层交出 13346 个节点，下游
+`nodes_collected: 0`，整轮零产出且无报错。现在收集层改为**全量**接收，逐节点判活才是准入关口，
+见 [gitee 文档 · 为什么节点收集不等健康检查](proxy-speedtest-gitee.md#为什么节点收集不等健康检查)。
+也就是说这一层是「省下游的时间」，不是「下游的正确性前提」。
 
 **为什么 `lazy: false` 必须是这个值**（这一层自己生成的那份 config）：`lazy: true` 的
 provider 只在被显式请求时才探活，`/providers/proxies` 里所有节点的 `alive` 会**一直缺失**，
@@ -415,6 +421,7 @@ Sub-Store 产出与发布。为什么必须把这两者分开：job 超时是 Gi
 python .github/scripts/proxy-speedtest/tests/test_gist_nodes_substore.py
 python .github/scripts/proxy-speedtest/tests/test_alive_filter.py
 python .github/scripts/proxy-speedtest/tests/test_resolve_gist_raw_url.py
+python .github/scripts/proxy-speedtest/tests/test_collect_provider_snapshot.py
 ```
 
 **`test_gist_nodes_substore.py`** 用本地假 Sub-Store 跑通「投喂 → 组合 → 取回 → 发布」并做负向验证
@@ -448,3 +455,12 @@ python .github/scripts/proxy-speedtest/tests/test_resolve_gist_raw_url.py
 token 空或全空白 / API 抛异常）都返回空串且**不抛异常**、空入参秒退不发请求、
 文件名是精确匹配而非前缀匹配、失败日志按 `resolve_failed` / `resolve_missing` 分流
 （否则会去查文件名而不是查网络/权限）、token 原样透传。
+
+**`test_collect_provider_snapshot.py`** 专测共享引擎的节点收集层（三套测速都用它）。它出过
+一次真实事故（run 34969408908：gistnodes 交接 13346 个节点，下游 `nodes_collected: 0`，
+整轮零产出且无报错）——根因是只收 provider 里 `alive` 为真的节点，而 `wait_mihomo` 不等
+健康检查出结论。覆盖：**健康检查一个结论都没有时仍必须全量收集**（第 1 组即事故复现，
+为 0 就说明退化回来了）、部分出结论时不能只收判活的、明确判死的也要收（本层不做准入）、
+`alive` 状态原样带出且缺失时归一为 False（不谎报为活）、`AUTO`/`default` 组名不算节点、
+跨 provider 重名去重、`proxy_obj` 剔除 `alive`/`history` 这类运行时字段、空输入返回空、
+API 报错要抛异常（而不是「安静地收集到 0 个」）。
