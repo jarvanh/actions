@@ -107,6 +107,16 @@ on:
           - "2"
           - "3"
           - "4"
+      fs_refresh_sleep:
+        # 缓存刷新等待秒数（默认 60）。可调是为了**可测量地**优化: 静态间隔分析
+        # 显示一轮被调 ~14 次 ⇒ 60s × 14 = 14min，占 72min 短轮的 19%。
+        # ⚠️ 调小前必须对比"缺失文件数 / 修复触发量 / 重传量"——这个 sleep 在赌
+        # "递归刷新 N 秒内完成"，赌错会让 diff 读到 stale 列表、把已落盘文件当缺失
+        # 而白重传。0 = 不等（仅调试）。
+        description: "同步模式: 缓存刷新等待秒数（默认 60）。调小属实验: 需对比缺失数/修复量是否上升"
+        required: false
+        type: number
+        default: 60
       sync_budget_min:
         # 唯一影响"一轮跑多久"的旋钮（2026-09-15 加）。
         # 调短 = 快速迭代: 完整日志/结论从 5.5h 降到 e.g. 30–90min；生产跑量用默认 320。
@@ -513,6 +523,8 @@ jobs:
           # 预算（分钟）: 调短即可"快速取日志/结论"（完整一轮 5.5h → 如 60min），
           # 生产跑量仍用默认 320。见下方 clamp 与 _budget_scaled 的说明。
           SYNC_BUDGET_MIN: ${{ github.event.inputs.sync_budget_min || '320' }}
+          # 缓存刷新等待（默认 60）: 见入参说明，调小属实验
+          FS_REFRESH_SLEEP: ${{ github.event.inputs.fs_refresh_sleep || '60' }}
         run: |
           source /tmp/load_all.sh
           # P0 趋势: 记录同步工作开始时间（收尾时算本轮历时）
@@ -528,6 +540,11 @@ jobs:
             SYNC_BUDGET_MIN=320
           fi
           export OPENLIST_SYNC_BUDGET_SECONDS=$(( SYNC_BUDGET_MIN * 60 ))
+          # 缓存刷新等待秒数（默认 60；非正整数回落 60）
+          case "${FS_REFRESH_SLEEP}" in
+            ''|*[!0-9]*) FS_REFRESH_SLEEP=60 ;;
+          esac
+          export OPENLIST_FS_REFRESH_SLEEP="${FS_REFRESH_SLEEP}"
           export OPENLIST_SYNC_DEADLINE_EPOCH=$(( $(date +%s) + OPENLIST_SYNC_BUDGET_SECONDS ))
           echo "同步时间预算: ${SYNC_BUDGET_MIN}min（至 $(date -d "@$OPENLIST_SYNC_DEADLINE_EPOCH" '+%H:%M') UTC，超时优雅收摊）"
 
