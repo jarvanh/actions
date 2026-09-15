@@ -384,7 +384,8 @@ _backend_root_of() {
 # PUT 假成功的文件活在 OpenList 的目录缓存里，不刷新就读，lsf 会把缓存里的
 # 幽灵条目当真 → 写探针恒"通过"（run 34728107625: 探针通过后 89s 即大量 405）。
 # 比 _refresh_openlist_cache 轻: 只刷一个目录（非递归）、等待可配（默认 5s），
-# 因为写探针整体只有 60s 超时预算，扛不住那个函数的无条件 sleep 60。
+# 因为写探针整体只有 60s 超时预算，扛不住那个函数的等待（默认 40s，
+# `OPENLIST_FS_REFRESH_SLEEP` 可调；见 _refresh_openlist_cache 注释）。
 _ol_refresh_path_cache() {
   local dest="$1"
   [[ "$dest" == openlist:* ]] || return 0

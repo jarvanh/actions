@@ -244,8 +244,9 @@ workflow 会把 `*.sh` `*.py` `*.jq` 拷到 `/tmp` 再 `source /tmp/load_all.sh`
 `OPENLIST_BACKEND_WRITE_PROBE_TIMEOUT`(60s) · `OPENLIST_BACKEND_DEAD_THRESHOLD`(3，同挂载根连续几个目录判不可写即判后端死) ·
 `OPENLIST_DIR_PROBE_MAX_RESTART`(3，目录探测的每轮重启预算)
 
-**并发**：`OPENLIST_TRANSFERS`（workflow 输入 `transfers` 可调，默认 1；wopan176 保持 1——run 32749862280 整批假成功事故后端）· `OPENLIST_CHECKERS` ·
-`OPENLIST_SUBDIR_PARALLEL`（workflow 输入 `subdir_parallel`，默认 1 串行；≥2 时顶层 auto-split 子目录并行同步，递归层始终串行）·
+**并发**：`OPENLIST_TRANSFERS`（workflow 输入 `transfers`，**默认 6**——2026-09-15 隔离实测拐点在 12 流）· `OPENLIST_CHECKERS` ·
+`OPENLIST_SUBDIR_PARALLEL`（workflow 输入 `subdir_parallel`，**默认 2**；≥2 时顶层 auto-split 子目录并行同步，递归层始终串行）·
+`OPENLIST_PAIR_PARALLEL`（workflow 输入 `pair_parallel`，**默认 2**；≥2 时按挂载根分组、跨后端并行同步对，同后端仍串行）·
 `OPENLIST_SUBDIR_LIST_PARALLEL`（子目录大小列举并行度，默认 8）·
 `OPENLIST_CONTAINER_LOCK`（容器读写锁文件，默认 /tmp/ol_container.lock——传输持共享锁、容器重启持独占锁）
 
@@ -340,9 +341,10 @@ API list），读得通但写不进的后端会被整轮放行——run #12616 �
 文件就会被逐个删空、目录随之消失，保护形同虚设。备份语义下目标端是灾备副本，误删代价
 远大于残留。
 
-**吞吐调优（P1）**：`transfers`（默认 1 串行）与 `subdir_parallel`（默认 1 串行）
-均可按 run 调整，但两者都会提高对同一后端的并发 PUT 数——与 run 32749862280
-整批假成功事故的规避方向相悖。启用前先用调试模式单任务观察一轮
+**吞吐调优（P1）**：`transfers`（**默认 6**）、`subdir_parallel`（**默认 2**）、
+`pair_parallel`（**默认 2**）三者相乘即"单后端并发 PUT 数"（6×2=12，正好落在实测拐点；
+跨后端那一路由 `pair_parallel` 另开一条挂载的额度）。三者都可按 run 调低：
+若某轮出现 `object not found` / 假成功抬升，先降 `transfers` 或 `subdir_parallel` 回 1 观察一轮
 "object not found" 率与修复管线触发量。2026-09-14 用户授权「transfers 可根据情况调整」，
 但**前置依赖未解**：wopan176 当前驱动登录令牌失效（8005）、写入全拒，此时调 transfers
 测不出吞吐差异——先解登录再调。

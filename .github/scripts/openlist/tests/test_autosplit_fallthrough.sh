@@ -8,6 +8,11 @@
 # 本测试 mock rclone/sync_with_logging/sync_by_file_batches 等，统计各分支
 # 的实际调用次数与穿透行为
 set -u
+# 本测试验证**串行**子目录循环的调用次数/穿透行为 ⇒ 显式关掉子目录并行
+# （默认值一改，断言就全错位；2026-09-15 把 subdir_parallel 默认对齐到 2 时踩到，
+#   与 pair_parallel 翻默认时的形态完全一样）
+OPENLIST_SUBDIR_PARALLEL=1
+OPENLIST_PAIR_PARALLEL=1
 PASS=0; FAIL=0
 ok()  { PASS=$((PASS+1)); echo "PASS: $1"; }
 bad() { FAIL=$((FAIL+1)); echo "FAIL: $1"; }
