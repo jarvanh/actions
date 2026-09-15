@@ -368,6 +368,25 @@ sync_budget_stop() {
   [ $(( $(date +%s) + OPENLIST_SYNC_MIN_SLICE_SECONDS )) -ge "$OPENLIST_SYNC_DEADLINE_EPOCH" ]
 }
 
+# 预算派生阈值：按预算**成比例缩放**（2026-09-15 加，支持"短轮快速迭代"）
+# 为什么需要: 下面这些阈值原本是写死的绝对秒数，只在 320min 预算下自洽。一旦把
+#   预算调短（为了快速拿日志/结论，见 workflow 入参 sync_budget_min），绝对阈值
+#   就会互相打架 —— 最典型的：45min 预算 + 120min 批次片长 ⇒ _batch_budget_stop
+#   恒真 ⇒ **一个批次都不开**，短轮退化成"只注册 + 初始同步"的空轮，拿不到要
+#   验证的日志（折叠/修复管线/熔断都在批次之后）。
+# 缩放系数在默认预算（19200s）下**精确还原**原值，所以默认行为零变化:
+#   批次片长 = budget × 3/8   （19200 → 7200）
+#   尾部预留 = budget × 9/64  （19200 → 2700）
+# 下限保护: 片长 ≥900s（批次至少要能开起来）、预留 ≥600s（持久化复核+收尾够用）。
+_budget_scaled() {  # <分子> <分母> <原默认值> <下限>
+  local num="$1" den="$2" orig="$3" floor="${4:-0}"
+  local b="${OPENLIST_SYNC_BUDGET_SECONDS:-19200}"
+  local v=$(( b * num / den ))
+  [ "$v" -gt "$orig" ] && v="$orig"
+  [ "$v" -lt "$floor" ] && v="$floor"
+  echo "$v"
+}
+
 # 批次循环专用预算闸（近几轮 330min 硬杀的直接根因）:
 # 一个批次的真实粒度是「copy + 巩固 + 修复管线」，而全局最小工作片只有 600s
 # ——用 sync_budget_stop 判，剩余十几分钟时照样开新批，320min 优雅到站永远
@@ -376,8 +395,8 @@ sync_budget_stop() {
 # 跑了 2h14m 仍未完成（run 34779382573 —— 该轮预算前段已被预览 36min +
 # wopan175 各子目录同步/truth-check 2h36m 吃掉，批次 1 在只剩 2h3m 时开启，
 # 于是又撞 330min 硬杀）。留 2h 片长: 剩余不足 2h 就不开新批，宁可本轮少开
-# 一批、把成果留给接力，也不要撞超时。
-OPENLIST_BATCH_MIN_SLICE_SECONDS="${OPENLIST_BATCH_MIN_SLICE_SECONDS:-7200}"  # 120min
+# 一批、把成果留给接力，也不要撞超时。短轮下按比例缩小（见 _budget_scaled）。
+OPENLIST_BATCH_MIN_SLICE_SECONDS="${OPENLIST_BATCH_MIN_SLICE_SECONDS:-$(_budget_scaled 3 8 7200 900)}"
 _batch_budget_stop() {
   [ -n "${OPENLIST_SYNC_DEADLINE_EPOCH:-}" ] || return 1
   [ $(( $(date +%s) + OPENLIST_BATCH_MIN_SLICE_SECONDS )) -ge "$OPENLIST_SYNC_DEADLINE_EPOCH" ]
@@ -389,8 +408,10 @@ _batch_budget_stop() {
 # copy / 巩固串行重试动辄 1-2h，会一路跑过 320min 预算，直到 step 的 330min
 # 超时把整轮杀掉（run 34779382573 实锤）。给这两处套硬上限，保证预算到点前
 # 一定回到循环里走优雅收摊。
+# 尾部预留同样随预算缩放（短轮按 45min 预留会把整个预算吃掉 ⇒ 每次传输被压到
+# 60s 兜底，短轮反而什么都传不完）。
 _budget_slice_seconds() {
-  local reserve="${1:-${OPENLIST_BATCH_TAIL_RESERVE:-2700}}"
+  local reserve="${1:-${OPENLIST_BATCH_TAIL_RESERVE:-$(_budget_scaled 9 64 2700 600)}}"
   [ -n "${OPENLIST_SYNC_DEADLINE_EPOCH:-}" ] || { echo ""; return 0; }
   local secs=$(( OPENLIST_SYNC_DEADLINE_EPOCH - $(date +%s) - reserve ))
   [ "$secs" -lt 60 ] && secs=60
