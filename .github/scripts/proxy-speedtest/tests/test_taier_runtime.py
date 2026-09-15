@@ -103,6 +103,11 @@ def main():
         check(okv is False and 'timeout' in err, f'mihomo 判连不上 → 死（实际 {okv}/{err}）')
         okv, _d, err = t.probe_node_alive('nodelay', 'http://x', 3000)
         check(okv is False, f'200 但没有 delay → 死（实际 {okv}/{err}）')
+        # 组名（AUTO）不是节点：mihomo 回 404 `Resource not found`，会被当成「判死」。
+        # 2026-09-15 编排轮就是这么把 8/8 节点全跳过、整轮零产出的——探测必须传节点名。
+        okv, _d, err = t.probe_node_alive('AUTO', 'http://x', 3000)
+        check(okv is False and 'not found' in err.lower(),
+              f'对 AUTO 组名探测 → mihomo 回 not found（反证必须用节点名，实际 {okv}/{err}）')
 
         # ⚠️ 最关键的一条：探测机制本身挂了必须**按存活处理**（fail-open）。
         # 判反了会让整轮一个节点都不测——比在死节点上多花 25 秒糟得多。
