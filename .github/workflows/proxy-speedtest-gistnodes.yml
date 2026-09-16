@@ -277,6 +277,9 @@ jobs:
           # 订阅导出：本工作流专属 Gist（与三套测速结果 Gist 分开，互不覆盖）。
           # 留空则首次运行自动新建，job 摘要会给链接；拿到 id 后回填此 secret 避免每轮新建
           PROXY_SPEEDTEST_GIST_ID: ${{ secrets.PROXY_SPEEDTEST_GISTNODES_GIST_ID }}
+          # 新建 gist 后自动回填到哪个 secret（治「每轮新建 ⇒ 旧链接 404」的自续循环，
+          # 见 speedtest_common._backfill_gist_secret）。本域 Gist 恒归自己，无条件回填。
+          PROXY_SPEEDTEST_GIST_SECRET_NAME: PROXY_SPEEDTEST_GISTNODES_GIST_ID
           PROXY_SPEEDTEST_GIST_FILENAME: proxy_speedtest_gistnodes_providers.yaml
           PROXY_SPEEDTEST_GIST_DESCRIPTION: 'proxy speedtest source nodes (gist 搜索 + Sub-Store 去重)'
         run: python .github/scripts/proxy-speedtest/gist_nodes.py

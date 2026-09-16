@@ -25,6 +25,7 @@ import pathlib
 import re
 import socket
 import statistics
+import subprocess
 import time
 import urllib.error
 import urllib.parse
@@ -874,6 +875,45 @@ def resolve_gist_raw_url_cli():
     return 0
 
 
+def _backfill_gist_secret(gist_id, reason=''):
+    """把新建出来的 gist id **写回仓库 secret**，让下一轮能复用而不是再建一个。
+
+    **为什么必须做**: `create_gist` 只把 id 写进 `$GITHUB_ENV`，那东西**只活当前 job**，
+    job 一结束就没了。而仓库 secret（`PROXY_SPEEDTEST_*_GIST_ID`）才是跨轮持久的唯一
+    载体——它不更新，下一轮就还从旧 id 起手：旧 id 已失效 ⇒ 再次 404 ⇒ 再次新建
+    ⇒ 「每轮一个新 gist、旧链接全部 404」的自续循环。实测三次（gistnodes 2026-09-16、
+    taier 2026-09-16、以及更早的 cdn/gitee 迁移期）都是同一个形态，且**只能靠人工发现**：
+    代码自己打印「请把 Gist id 回填到 Secrets」的告警，但没人盯着通知就不会去做。
+
+    写法用 runner 自带的 `gh`（不引入 nacl/pynacl 依赖去做 libsodium 密封）；
+    幂等（重复写同值无害），失败**只记日志不抛异常**——回填是优化，
+    不该因为它失败而让本轮订阅发布判失败。
+    """
+    gist_id = (gist_id or '').strip()
+    repo = (os.environ.get('GITHUB_REPOSITORY') or '').strip()
+    secret_name = (os.environ.get('PROXY_SPEEDTEST_GIST_SECRET_NAME') or '').strip()
+    if not (gist_id and repo and secret_name):
+        log_progress('gist_secret_backfill_skipped', gist_id=gist_id, repo=repo,
+                     secret_name=secret_name, reason='缺少 repo / secret 名或 gist id')
+        return False
+    try:
+        proc = subprocess.run(
+            ['gh', 'secret', 'set', secret_name, '--repo', repo, '--body', gist_id],
+            capture_output=True, text=True, timeout=120)
+    except Exception as e:
+        # gh 不在 PATH、或沙箱环境 → 记录即可，订阅本身已经发布成功
+        log_progress('gist_secret_backfill_failed', secret_name=secret_name,
+                     gist_id=gist_id, error=f'{type(e).__name__}: {e}')
+        return False
+    if proc.returncode == 0:
+        log_progress('gist_secret_backfilled', secret_name=secret_name, gist_id=gist_id,
+                     reason=reason or 'gist 新建后自动回填')
+        return True
+    log_progress('gist_secret_backfill_failed', secret_name=secret_name, gist_id=gist_id,
+                 error=(proc.stderr or proc.stdout or '').strip()[:200])
+    return False
+
+
 def _gist_identity(env):
     """Gist 文件名/描述，允许各测速工作流经 env 覆盖（四套各用各的 Gist，便于区分）。"""
     filename = (env.get('PROXY_SPEEDTEST_GIST_FILENAME') or '').strip() or GIST_DEFAULT_FILENAME
@@ -904,6 +944,9 @@ def create_gist(env, yaml_text=''):
     if gist_id:
         env['PROXY_SPEEDTEST_GIST_ID'] = gist_id
         set_env_value(ENV_PATH, 'PROXY_SPEEDTEST_GIST_ID', gist_id)
+        # 新建即回填 secret: 只写 $GITHUB_ENV 的话 id 活不过当前 job，
+        # 下一轮又从失效的旧 id 起手 → 每轮新建一个 gist（见 _backfill_gist_secret 的说明）
+        _backfill_gist_secret(gist_id, reason='gist 新建')
     return {
         'ok': True,
         'id': gist_id,
@@ -961,6 +1004,9 @@ def update_gist(env, yaml_text=''):
         res = _patch_gist(gist_id, token, payload)
     except urllib.error.HTTPError as e:
         if e.code == 404:
+            # 旧 id 已失效（被删 / 从未回填）→ 新建。新建路径会自动回填 secret，
+            # 所以这个循环**最多再发生一次**（下一轮起就复用新 id），不会无限新建。
+            log_progress('gist_patch_404_recreate', gist_id=gist_id)
             return create_gist(env, yaml_text)
         if e.code == 422 and GIST_DEFAULT_FILENAME in files_payload and files_payload[GIST_DEFAULT_FILENAME] is None:
             # 兜底：删除项引发 422（旧文件其实已不存在 / API 口径变动）→ 去掉删除项重试一次

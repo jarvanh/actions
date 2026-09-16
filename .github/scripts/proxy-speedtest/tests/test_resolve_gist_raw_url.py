@@ -32,6 +32,16 @@
   * 原先 `fetch_text` **没有任何重试**。现在钉住三件事：抖动要能自愈、真故障要抛
     （不能吞成空串再被当成「没节点」）、健康路径只请求一次（重试不许拖慢正常情况）。
 
+第 13 组守**发布端**的 gist id 回填。事故形态（2026-09-16，taier 订阅链接 404）：
+
+  * `create_gist` 只把新 id 写进 `$GITHUB_ENV`——那东西**只活当前 job**；跨轮持久的
+    唯一载体是仓库 secret，而 secret 从来没人去写。
+  * 于是下一轮仍从已失效的旧 id 起手 ⇒ 再次 404 ⇒ 再次新建 ⇒ 「每轮一个新 gist、
+    旧链接全部 404」，且代码只会打印一句「请把 Gist id 回填到 Secrets」的告警，
+    没人盯着通知就永远发现不了。
+  * 这里钉住：新建必须回填、404→新建 那条路也要回填、**写别人的 Gist 时不许回填**
+    （编排层/手动 gist_id 场景）、回填失败只记日志不影响本轮发布。
+
 跑法：python .github/scripts/proxy-speedtest/tests/test_resolve_gist_raw_url.py
 退出码 0 = 全部通过。
 """
@@ -41,6 +51,8 @@ import json
 import os
 import pathlib
 import sys
+import tempfile
+import urllib.error
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
@@ -51,6 +63,7 @@ RAW = ('https://gist.githubusercontent.com/jarvanh/'
        'proxy_speedtest_gistnodes_providers.yaml')
 FILENAME = 'proxy_speedtest_gistnodes_providers.yaml'
 GIST_ID = 'fed0982fad16e10134d9ae587f7b57b4'
+NEW_GIST_ID = 'a1b2c3d4e5f60718293a4b5c6d7e8f90'
 
 
 def check(cond, label):
@@ -262,6 +275,132 @@ def main():
         C.log_progress = orig_common_log
         C.github_api_request = orig_api
         for k in ('SOURCE_GIST_ID', 'SOURCE_GIST_FILENAME', 'GH_TOKEN'):
+            os.environ.pop(k, None)
+
+    print('== 13. gist 新建后自动回填 secret（治「每轮新建 ⇒ 旧链接 404」自续循环）==')
+    orig_request13 = C.github_api_request
+    orig_log13 = C.log_progress
+    orig_run = C.subprocess.run
+    orig_env_path = C.ENV_PATH
+    events13 = []
+    gh_calls = []
+    tmp_env = pathlib.Path(tempfile.mkdtemp()) / 'env'
+    C.ENV_PATH = tmp_env
+    C.log_progress = lambda stage, **kw: events13.append(dict(stage=stage, **kw))
+
+    def created_request(url, token, payload=None, method='GET', timeout=60):
+        return {'id': NEW_GIST_ID, 'html_url': 'https://gist.github.com/x',
+                'files': {C.GIST_DEFAULT_FILENAME: {'raw_url': RAW}}}
+
+    class _Proc:
+        def __init__(self, rc, err=''):
+            self.returncode = rc
+            self.stderr = err
+            self.stdout = ''
+
+    def gh_ok(cmd, **kw):
+        gh_calls.append(list(cmd))
+        return _Proc(0)
+
+    def gh_fail(cmd, **kw):
+        gh_calls.append(list(cmd))
+        return _Proc(1, 'HTTP 403: Resource not accessible')
+
+    def _set(**over):
+        for k in ('GITHUB_REPOSITORY', 'PROXY_SPEEDTEST_GIST_SECRET_NAME'):
+            os.environ.pop(k, None)
+        for k, v in over.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def _run(**over):
+        events13.clear()
+        gh_calls.clear()
+        _set(**over)
+        return C.create_gist({'GH_TOKEN': 'ghp_fake'}, 'proxies:\n  - name: a\n')
+
+    try:
+        C.github_api_request = created_request
+        C.subprocess.run = gh_ok
+
+        # 13a. 正常回填：gh 命令参数必须完整（repo + secret 名 + 新建出来的 id）
+        res = _run(GITHUB_REPOSITORY='jarvanh/actions',
+                   PROXY_SPEEDTEST_GIST_SECRET_NAME='PROXY_SPEEDTEST_TAIER_GIST_ID')
+        check(res.get('id') == NEW_GIST_ID, f'create_gist 正常返回新 id（实际 {res.get("id")!r}）')
+        check(len(gh_calls) == 1, f'恰好调用一次 gh secret set（实际 {len(gh_calls)}）')
+        cmd = gh_calls[0] if gh_calls else []
+        check(cmd[:3] == ['gh', 'secret', 'set'], f'调的是 gh secret set（实际 {cmd[:3]}）')
+        check('PROXY_SPEEDTEST_TAIER_GIST_ID' in cmd, f'写入的是指定的 secret 名（实际 {cmd}）')
+        check(NEW_GIST_ID in cmd, f'写入的是新建出来的 gist id（实际 {cmd}）')
+        check('--repo' in cmd and 'jarvanh/actions' in cmd, f'带 --repo（实际 {cmd}）')
+        backed = [e for e in events13 if e['stage'] == 'gist_secret_backfilled']
+        check(len(backed) == 1 and backed[0].get('gist_id') == NEW_GIST_ID,
+              f'记一条 gist_secret_backfilled（实际 {len(backed)}）')
+        check(tmp_env.exists() and f'PROXY_SPEEDTEST_GIST_ID={NEW_GIST_ID}' in tmp_env.read_text(),
+              '新 id 同时写进 env 文件（本轮下游步骤要用）')
+
+        # 13b. 护栏：编排层/手动 gist_id 时 secret 名为空 ⇒ 不许碰别人的 secret
+        res = _run(GITHUB_REPOSITORY='jarvanh/actions', PROXY_SPEEDTEST_GIST_SECRET_NAME='')
+        check(res.get('ok') is True, '没配 secret 名时 create_gist 依旧成功（回填只是优化）')
+        check(gh_calls == [], f'secret 名为空 ⇒ 一次 gh 都不许调（实际 {len(gh_calls)} 次）')
+        skip = [e for e in events13 if e['stage'] == 'gist_secret_backfill_skipped']
+        check(len(skip) == 1, f'记一条 backfill_skipped 便于排查（实际 {len(skip)}）')
+
+        # 13c. 护栏：非 Actions 环境（无 GITHUB_REPOSITORY）也不许瞎调 gh
+        res = _run(GITHUB_REPOSITORY=None,
+                   PROXY_SPEEDTEST_GIST_SECRET_NAME='PROXY_SPEEDTEST_TAIER_GIST_ID')
+        check(gh_calls == [] and res.get('ok') is True,
+              f'缺 GITHUB_REPOSITORY ⇒ 跳过回填且不影响发布（实际 {len(gh_calls)} 次）')
+
+        # 13d. gh 失败（权限不足/没登录）⇒ 只记日志，不能把整轮订阅发布判失败
+        C.subprocess.run = gh_fail
+        res = _run(GITHUB_REPOSITORY='jarvanh/actions',
+                   PROXY_SPEEDTEST_GIST_SECRET_NAME='PROXY_SPEEDTEST_TAIER_GIST_ID')
+        check(res.get('ok') is True, 'gh 回填失败不影响本轮订阅发布（否则每轮都白跑）')
+        failed = [e for e in events13 if e['stage'] == 'gist_secret_backfill_failed']
+        check(len(failed) == 1 and '403' in str(failed[0].get('error', '')),
+              f'失败要记日志并带上 gh 的真实报错（实际 {failed}）')
+
+        # 13e. 幂等：重复写同一个值无害（每轮都写一次，不能因为「已存在」报错）
+        # 注意: 这里不能走 _run（它每次都会清空计数），直接连调两次只清一次计数
+        C.subprocess.run = gh_ok
+        events13.clear()
+        gh_calls.clear()
+        _set(GITHUB_REPOSITORY='jarvanh/actions',
+             PROXY_SPEEDTEST_GIST_SECRET_NAME='PROXY_SPEEDTEST_TAIER_GIST_ID')
+        C.create_gist({'GH_TOKEN': 'ghp_fake'}, 'proxies:\n  - name: a\n')
+        C.create_gist({'GH_TOKEN': 'ghp_fake'}, 'proxies:\n  - name: a\n')
+        check(len(gh_calls) == 2 and all(c[-1] == NEW_GIST_ID for c in gh_calls),
+              f'连续两轮都写同一个值，不报错（实际 {len(gh_calls)} 次）')
+
+        # 13f. update_gist 撞上 404（旧 id 失效）⇒ 新建路径必须同样回填
+        events13.clear()
+        gh_calls.clear()
+        _set(GITHUB_REPOSITORY='jarvanh/actions',
+             PROXY_SPEEDTEST_GIST_SECRET_NAME='PROXY_SPEEDTEST_TAIER_GIST_ID')
+
+        def patch_404(url, token, payload=None, method='GET', timeout=60):
+            if method == 'PATCH':
+                raise urllib.error.HTTPError(url, 404, 'Not Found', {}, None)
+            return {'id': NEW_GIST_ID, 'html_url': 'https://gist.github.com/x',
+                    'files': {C.GIST_DEFAULT_FILENAME: {'raw_url': RAW}}}
+
+        C.github_api_request = patch_404
+        res = C.update_gist({'GH_TOKEN': 'ghp_fake',
+                             'PROXY_SPEEDTEST_GIST_ID': 'deadbeef'}, 'proxies:\n  - name: a\n')
+        check(res.get('created') is True, f'404 后转为新建（实际 created={res.get("created")}）')
+        check(len(gh_calls) == 1 and NEW_GIST_ID in gh_calls[0],
+              f'404→新建 这条路径也要回填，否则循环不断（实际 {gh_calls}）')
+        recreated = [e for e in events13 if e['stage'] == 'gist_patch_404_recreate']
+        check(len(recreated) == 1, f'记一条 404_recreate（实际 {len(recreated)}）')
+    finally:
+        C.github_api_request = orig_request13
+        C.log_progress = orig_log13
+        C.subprocess.run = orig_run
+        C.ENV_PATH = orig_env_path
+        for k in ('GITHUB_REPOSITORY', 'PROXY_SPEEDTEST_GIST_SECRET_NAME'):
             os.environ.pop(k, None)
 
     print()
