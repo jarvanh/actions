@@ -26,6 +26,9 @@
 #                     （V3 教训: run 35085545044 用逗号拼成一行，候选匹配按行比对 → not_found）
 #   DIAG_REJECT_MAX   最多取前 N 个源文件（默认 1；每个源文件上传两份 ≈ 2×大小，控时长）
 #   DIAG_REJECT_WAIT  上传完成后、重启前的等待秒数（默认 120）
+#   DIAG_REJECT_NAME_MODE  改名组命名形态: ts（默认，oldiag_ren_<i>_<ts>）|
+#                          shorthash（<md5前8位>，与生产方法2 copyto_shorthash 同形态；
+#                          用于判决"方法2 的确切名字能否落盘"，见 R2 段注释）
 #   DIAG_REPORT       报告路径（默认 /tmp/ol_diag/reject_report.txt，独立于 diag_backend.sh）
 #
 # ⚠️ 副作用: 会在目标下创建 oldiag_reject_<ts>/ 目录并尽力删除（A/B/C 产物一律删除，
@@ -107,7 +110,20 @@ for _i in "${!SOURCES[@]}"; do
   _src="${SOURCES[$_i]}"
   _base="${_src##*/}"
   case "$_base" in *.*) _ext=".${_base##*.}";; *) _ext="";; esac
-  _ren="oldiag_ren_${_i}_${TS}${_ext}"
+  # 改名组的命名形态（DIAG_REJECT_NAME_MODE）:
+  #   ts（默认）     → oldiag_ren_<i>_<ts><ext>，纯中性名，用于证明"改名可绕"
+  #   shorthash      → <md5前8位><ext>，**与生产方法2 copyto_shorthash 完全同形态**
+  # 为什么需要 shorthash 档: D2/§12.13.6 证明的是"换个中性名就能落盘"，但生产真正
+  #   要走的是方法2 的 8 位 hex 名。若后端按"名字模式/长度"拒收，8 位 hex 未必与
+  #   时间戳名等价 —— 必须**用方法2 的确切形态**验一次，才能说"方法2 能修好"。
+  if [ "${DIAG_REJECT_NAME_MODE:-ts}" = "shorthash" ]; then
+    _sum=$(printf '%s' "$_base" | md5sum 2>/dev/null | cut -c1-8)
+    [ -n "$_sum" ] || _sum="deadbeef"
+    _ren="${_sum}${_ext}"
+  else
+    _ren="oldiag_ren_${_i}_${TS}${_ext}"
+  fi
+  say "   （改名形态: ${DIAG_REJECT_NAME_MODE:-ts}）"
 
   # A 组 · 原名
   _out=$(rclone copyto "$_src" "$DIAGDIR/$_base" \
