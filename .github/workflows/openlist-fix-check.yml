@@ -1,0 +1,228 @@
+# openlist 修复能力定点验证（独立于主同步轮与后端诊断）
+#
+# 为什么单独一个 workflow（与 openlist-diag 分开）:
+#   · **副作用边界不同**: 主轮写目标端 + 发通知 + 自续接力；openlist-diag 只读探针；
+#     本 workflow 会**真写目标端**（修复文件）并**写 marker 记账**，但不发通知、不接力。
+#     混在一起就没法用 concurrency 表达"这个能并行、那个必须独占"。
+#   · **运行时机约束不同**: 吞吐类测量必须与主轮互斥（两个 runner 各起容器却打同一个
+#     网盘账号，主轮在传会把档位压平 —— 这正是"跨后端共享瓶颈"那个错误结论的成因）；
+#     本项不必独占，但主轮在传时会偏慢（同一账号带宽），见下方说明。
+#   · **失败语义不同**: "诊断探针失败"与"修复能力失败"混在一起会互相污染结论。
+#
+# 它回答什么: 对历史日志里"确认修不好"的文件（清单由入参给出，默认是 run 34940234180
+#   的 5 个真·方法耗尽文件），直接跑**生产同款修复管线**，逐文件给出
+#   `VERDICT|<状态>|<方法>|<文件>|<替代路径>|<原因>`：
+#     fixed        真值复核通过（重启容器后仍可见），已按生产口径写 marker
+#     fake_success rclone 报成功但重启后消失（未落盘）
+#     failed       4 种方法 + 换目录兜底全试过仍失败（原因在第 6 段）
+#     already_ok   目标端原路径已存在（幂等跳过）
+#     not_found    清单条目在源端匹配不到（清单需修正）
+#
+# 与生产的**有意差异**（细节见 fix_check.sh 头部注释）:
+#   · 默认**重置历史失败记忆**（测"能力上限"，不是"生产实际会走的那条路"）
+#   · **先验后写**: 只给真值复核通过的条目写 marker（生产是"先写后删"）
+#
+# 安全边界: 只做 copyto / move 到正确路径，**绝不删除**任何文件；不装 cloudflared、
+#   不碰隧道、不回传 DB（与 openlist-diag.yml 同口径）。
+#   容器名固定 openlist: 真值复核用的 `_sync_restart_for_verify` 硬编码该名字。
+#
+# 带宽纪律: 主轮正在传时跑会明显偏慢（同一条账号带宽），需要干净的速率数据请走
+#   openlist-diag；本 workflow 只关心"能不能修好"，不测吞吐。
+name: openlist-fix-check
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "取文件模式: list=指定清单（快，按文件名/密文名后缀定点定位）；diff=任务 diff 自动推导（全，但大任务两侧递归列举 30-60min）"
+        required: false
+        type: choice
+        default: "list"
+        options:
+          - "list"
+          - "diff"
+      task:
+        description: "任务 id（SYNC_TASK_REGISTRY 的 id，如 task5 / task5-wopan175；完整清单见 task_engine.sh）"
+        required: false
+        type: string
+        default: "task5"
+      subdir:
+        description: "任务根下的子路径（可选，缩小列举范围；默认 1024j-视频-pornhub-channel 即那 5 个顽固文件所在目录。清空=列举整个任务）"
+        required: false
+        type: string
+        default: "1024j-视频-pornhub-channel"
+      files:
+        description: "list 模式的清单（每行一个文件名或密文名后缀，如 ph5ebc05eca6793；默认=run 34940234180 的 5 个真·方法耗尽文件）"
+        required: false
+        type: string
+        default: |
+          ph5ebc05eca6793
+          ph5f12b2166785f
+          ph5c947a5f33a9f
+          ph59c40cb5598b1
+          ph60a8026e45d5e
+      max:
+        description: "单次处理文件数上限（默认 10；每个文件含一次整文件下载+上传，按时间预算调）"
+        required: false
+        type: string
+        default: "10"
+      reset_blacklist:
+        description: "重置历史失败记忆（marker 的 fix_blacklist）: 是=测能力上限（4 方法+换目录全试）；否=测生产实际会走的那条路"
+        required: false
+        type: choice
+        default: "是"
+        options:
+          - "是"
+          - "否"
+      truth_restart:
+        description: "真值复核（重启容器后确认文件真落盘）: 是=默认（这批文件的失败形态正是\"假成功\"，不重启看不出来）；否=仅缓存口径，结论会偏乐观"
+        required: false
+        type: choice
+        default: "是"
+        options:
+          - "是"
+          - "否"
+
+# 独立并发组: 不与 openlist-singleton（主轮）互等，也不与 openlist-diag 互等
+concurrency: openlist-fix-check
+
+jobs:
+  fixcheck:
+    runs-on: ubuntu-latest
+    # setup ≈ 6 分钟 + 每文件 1-3 分钟（含容器重启复核）；默认 5 个文件约 15-25 分钟
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      OPENLIST_ADMIN_PASSWORD: ${{ secrets.OPENLIST_ADMIN_PASSWORD }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: rclone-install
+        run: |
+          set -e
+          bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" install
+
+      - name: rclone-config
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE }}
+        run: |
+          set -e
+          # 与主 workflow / openlist-diag 同一套配置来源: 本步骤会把远端写回 dropbox，
+          # 是幂等的（配置一致时无变更），且主 run 每轮都在做同一件事。
+          bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" config
+
+      - name: 验证远端连通
+        run: |
+          rclone lsf dropbox: | head -5
+
+      # ⚠️ 本段与 openlist-diag.yml 的「拉起 OpenList 容器」+「校验容器运行状态」
+      #    **同源**（逐行等价）—— 两处都改时必须同步，否则两个 workflow 诊断/验证的
+      #    就不是同一份配置（"用不同的库验证等于测了个别的东西"）。
+      #    容器名固定 openlist: 真值复核走的 _sync_restart_for_verify 硬编码该名字。
+      - name: 拉起 OpenList 容器（验证副本）
+        env:
+          OL_CONTAINER: openlist
+        run: |
+          set -e
+          docker rm -f "$OL_CONTAINER" 2>/dev/null || true
+          sudo mkdir -p /opt/openlist-data
+          sudo chmod 0777 /opt/openlist-data
+          # 与主 workflow 完全相同的拉库口径（含排除项），保证验证对象就是生产
+          # 实际加载的那份配置。
+          rclone copy dropbox:self-hosted/openlist/data /opt/openlist-data \
+            --exclude "data.db-wal" --exclude "data.db-shm" --exclude "data.db-journal" \
+            --exclude "log/**" --exclude "temp/**"
+          echo "拉取完成: $(ls -la /opt/openlist-data/ | tail -n +2 | wc -l) 个条目"
+          docker run -d --restart=no -v /opt/openlist-data:/opt/openlist/data \
+            -p 5244:5244 -e PUID=0 -e PGID=0 -e UMASK=022 \
+            --name="$OL_CONTAINER" openlistteam/openlist:latest
+
+      - name: 校验 OpenList 容器运行状态
+        run: |
+          set -e
+          source "$GITHUB_WORKSPACE/.github/scripts/openlist/load_all.sh"
+          echo "等待 OpenList 就绪..."
+          if wait_openlist_ready; then
+            echo "✅ OpenList 容器及 HTTP 服务正常就绪"
+          else
+            echo "❌ OpenList 容器未能就绪"
+            exit 1
+          fi
+
+      - name: 运行修复能力验证（fix_check.sh）
+        env:
+          # inputs 一律经 env 传入（README「注入面」: 不做 ${{ }} 直接内插 bash）
+          FC_MODE_INPUT: ${{ inputs.mode }}
+          FC_TASK_INPUT: ${{ inputs.task }}
+          FC_SUBDIR_INPUT: ${{ inputs.subdir }}
+          FC_FILES_INPUT: ${{ inputs.files }}
+          FC_MAX_INPUT: ${{ inputs.max }}
+          FC_RESET_INPUT: ${{ inputs.reset_blacklist }}
+          FC_TRUTH_INPUT: ${{ inputs.truth_restart }}
+        run: |
+          # 中文选项 → 脚本口径的映射放在 bash 里做（不在 YAML 里内插）
+          case "$FC_MODE_INPUT" in
+            diff|"任务 diff") export FIXCHECK_MODE=diff ;;
+            *)                 export FIXCHECK_MODE=list ;;
+          esac
+          export FIXCHECK_TASK="$FC_TASK_INPUT"
+          export FIXCHECK_SUBDIR="$FC_SUBDIR_INPUT"
+          export FIXCHECK_FILES="$FC_FILES_INPUT"
+          export FIXCHECK_MAX="$FC_MAX_INPUT"
+          case "$FC_RESET_INPUT" in
+            否|0|no) export FIXCHECK_RESET_BLACKLIST=0 ;;
+            *)       export FIXCHECK_RESET_BLACKLIST=1 ;;
+          esac
+          case "$FC_TRUTH_INPUT" in
+            否|0|no) export FIXCHECK_TRUTH_RESTART=0 ;;
+            *)       export FIXCHECK_TRUTH_RESTART=1 ;;
+          esac
+          export FIXCHECK_CONTAINER=openlist
+
+          # 恒不因"有修不好的文件"把 step 判红: 结论就在报告里，红了会让 artifact
+          # 上传被跳过（同 openlist-diag 的取舍）。退出码经 $GITHUB_ENV 传给收尾步骤。
+          set +e
+          bash "$GITHUB_WORKSPACE/.github/scripts/openlist/fix_check.sh"
+          _rc=$?
+          set -e
+          echo "FIXCHECK_EXIT=$_rc" >> "$GITHUB_ENV"
+          echo ""
+          echo "退出码 ${_rc}（0=全部修好/已存在 · 1=有修不好的文件 · 2=清单或环境问题）"
+          echo "=========== VERDICT 汇总 ==========="
+          grep -h '^VERDICT|' /tmp/fixcheck/verdicts.txt 2>/dev/null || echo "(无结论行)"
+          echo "=========== 报告尾部 ==========="
+          tail -25 /tmp/fixcheck/fixcheck.log 2>/dev/null || echo "(无报告文件)"
+
+      - name: 上传验证报告
+        if: always()
+        # 报告已全量 tee 进 run 日志，artifact 只是方便取用；该 action 不可用时
+        # 不该把整次验证判失败
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ol-fix-check-report
+          path: |
+            /tmp/fixcheck/fixcheck.log
+            /tmp/fixcheck/verdicts.txt
+            /tmp/fixcheck/fix_detail.log
+            /tmp/fixcheck/fix_list.txt
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: 收尾（容器日志兜底 + 结论）
+        if: always()
+        env:
+          OL_CONTAINER: openlist
+        run: |
+          docker logs "$OL_CONTAINER" 2>&1 | tail -60 || true
+          docker rm -f "$OL_CONTAINER" 2>/dev/null || true
+          case "${FIXCHECK_EXIT:-unknown}" in
+            0) echo "✅ 结论: 全部文件修复成功或目标端已存在（能力上限口径）" ;;
+            1) echo "⚠️ 结论: 存在修不好的文件 —— 看 VERDICT 的 failed / fake_success 行（第 6 段是原因）" ;;
+            2) echo "⚠️ 结论: 清单未命中源端或环境问题 —— 修正 task / subdir / files 后重跑" ;;
+            *) echo "⚠️ 结论: 脚本未产出退出码（可能 setup 阶段就失败）—— 看上方日志" ;;
+          esac
