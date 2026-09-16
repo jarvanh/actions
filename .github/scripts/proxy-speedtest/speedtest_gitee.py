@@ -667,8 +667,19 @@ def mihomo_api_put(path: str, payload: dict):
     return raw
 
 def wait_mihomo(timeout=40):
+    """等 mihomo 控制器就绪（`/version` 有响应）。
+
+    **轮询间隔用 0.2 秒 + 渐变，不是固定 1 秒**：控制器实测 0.05 秒就监听上了（日志里
+    `RESTful API listening at` 在进程起来后毫秒级出现），固定 1 秒只会让每次等待都白搭
+    最多整整 1 秒。单次调用看不出来，但试装层一次运行要起停几十次，那就是几十秒的纯浪费
+    （实测：40 个节点时「1 个节点 1.0 秒 / 40 个节点 11 秒」，其中 10 秒是别处的等待，
+    剩下这 1 秒×N 也是真实开销）。
+
+    前几轮用 0.05 秒抢「其实马上就绪」的绝大多数情况，随后退到 0.5 秒避免空转烧 CPU。
+    """
     start = time.time()
     last_error = ''
+    attempt = 0
     while time.time() - start < timeout:
         try:
             data = mihomo_api_get('/version')
@@ -676,7 +687,8 @@ def wait_mihomo(timeout=40):
                 return data
         except Exception as e:
             last_error = str(e)
-            time.sleep(1)
+        attempt += 1
+        time.sleep(0.05 if attempt <= 20 else 0.5)
     raise RuntimeError(f'mihomo controller not ready: {last_error}')
 
 def resolve_mihomo_download_url():
