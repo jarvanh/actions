@@ -103,14 +103,14 @@ jobs:
 
           if [ "$want_gist" = "1" ]; then
             export SOURCE_GIST_ID="${SOURCE_GIST_ID_IN:-$SOURCE_GIST_ID_SECRET}"
+            # 只认哨兵那一行拿 URL，理由见 proxy-speedtest-taier.yml 同步骤的注释
+            # （resolve_gist_raw_url 的 progress JSON 会污染 $( ) 整段 stdout）。
             url=$(python -c "
           import os, sys
           sys.path.insert(0, '.github/scripts/proxy-speedtest')
-          from speedtest_common import resolve_gist_raw_url
-          print(resolve_gist_raw_url(os.environ['SOURCE_GIST_ID'],
-                                     os.environ['SOURCE_GIST_FILENAME'],
-                                     os.environ.get('GH_TOKEN', '')))
-          ")
+          from speedtest_common import resolve_gist_raw_url_cli
+          sys.exit(resolve_gist_raw_url_cli())
+          " | sed -n 's/^__GIST_RAW_URL__//p')
             if [ -z "$url" ]; then
               echo "::error::按 gist id 解析源订阅 raw URL 失败（文件=$SOURCE_GIST_FILENAME）"
               exit 1

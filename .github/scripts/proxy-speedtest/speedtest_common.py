@@ -815,6 +815,14 @@ def github_api_request(url: str, token: str, payload=None, method='GET', timeout
 GIST_DEFAULT_FILENAME = 'proxy_speedtest_subscription.yaml'
 GIST_DEFAULT_DESCRIPTION = 'proxy speedtest subscription result'
 
+# CLI 出口的哨兵：`resolve_gist_raw_url` 自带 `log_progress`（写 stdout 的 JSON 行），
+# 而调用方是 workflow 里的 `url=$(python -c ...)` —— 把 stdout **整段**当 URL。
+# 两者一撞，取不到时 `$url` 拿到的是那行 JSON 而不是空串，于是 `[ -z "$url" ]` 判空失效、
+# 畸形值被写进 `$GITHUB_ENV`，错误被推迟到下一步且完全变形
+# （实测 2026-09-16 run 35082354560：`bootstrap_failed: unknown url type: {"kind"`）。
+# 所以 CLI 出口只认这一行，日志再怎么变都污染不到取值。
+GIST_RAW_URL_MARKER = '__GIST_RAW_URL__'
+
 
 def resolve_gist_raw_url(gist_id, filename, token, timeout=30):
     """按 gist id + 文件名取当前 raw_url（拿到失败时返回空串）。
@@ -849,6 +857,21 @@ def resolve_gist_raw_url(gist_id, filename, token, timeout=30):
         log_progress('gist_raw_url_resolve_missing', gist_id=gist_id, filename=filename,
                      available=sorted(files.keys()))
     return raw
+
+
+def resolve_gist_raw_url_cli():
+    """CLI 出口：把 `resolve_gist_raw_url` 的结果**单独打在有哨兵的那一行**上。
+
+    workflow 侧只 `grep '^<哨兵>'` 取值，就与 stdout 上的 progress JSON 彻底解耦
+    ——哪怕将来有人在 `resolve_gist_raw_url` 里加日志、或底层库往 stdout 写东西，
+    也污染不到 URL。用法见三套测速 workflow 的 `Resolve source subscription` 步骤。
+    """
+    gist_id = (os.environ.get('SOURCE_GIST_ID') or '').strip()
+    filename = (os.environ.get('SOURCE_GIST_FILENAME') or '').strip()
+    token = (os.environ.get('GH_TOKEN') or '').strip()
+    url = resolve_gist_raw_url(gist_id, filename, token)
+    print(f'{GIST_RAW_URL_MARKER}{url}', flush=True)
+    return 0
 
 
 def _gist_identity(env):
