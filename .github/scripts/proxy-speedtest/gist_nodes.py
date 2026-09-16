@@ -913,7 +913,7 @@ def _trial_load_summary_line(report, published_count):
     line = (f'- 试装排雷：装得上 **{report["kept"]}** 个，剔除 '
             f'**{report["removed"]}** 个 mihomo 装不上的节点'
             f'（{report["batches"]} 块中 {report["bad_batches"]} 块有问题，'
-            f'共试装 {report["rounds"]} 次 / {report["elapsed_seconds"]} 秒）')
+            f'共试装 {report["probes"]} 次 / {report["elapsed_seconds"]} 秒）')
     if report.get('batches_failed'):
         line += (f'；另有 {report["batches_failed"]} 块**分辨失败**（未剔除其中任何节点）')
     if report.get('removed_names'):
