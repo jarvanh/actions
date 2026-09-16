@@ -171,6 +171,9 @@ jobs:
           # 编排层（gistnodes）触发时改成写进 gistnodes 的 Gist —— id 从本工作流 secrets 取，
           # 因为编排层传不进来（`secrets` 上下文在 job 级 `with:` 里不可用）。
           PROXY_SPEEDTEST_GIST_ID: ${{ (inputs.result_gist_id_from_gistnodes == '1' && secrets.PROXY_SPEEDTEST_GISTNODES_GIST_ID) || inputs.gist_id || secrets.PROXY_SPEEDTEST_GIST_ID }}
+          # 新建 gist 后自动回填到哪个 secret（治「每轮新建 ⇒ 旧链接 404」的自续循环，
+          # 见 speedtest_common._backfill_gist_secret）。写别人的 Gist（编排层/手动 id）时不回填。
+          PROXY_SPEEDTEST_GIST_SECRET_NAME: ${{ (inputs.result_gist_id_from_gistnodes == '1' || inputs.gist_id) && '' || 'PROXY_SPEEDTEST_GIST_ID' }}
           # Gist 文件名/描述：四套各不相同，便于在 Gist 列表里分辨
           PROXY_SPEEDTEST_GIST_FILENAME: ${{ inputs.gist_filename || 'proxy_speedtest_gitee_subscription.yaml' }}
           PROXY_SPEEDTEST_GIST_DESCRIPTION: ${{ inputs.gist_description || 'proxy speedtest subscription (gitee 上行/下行/延迟)' }}
