@@ -14,6 +14,10 @@
 #   8. 修复成效拆分（ROUND_REUSED / 新落盘 = 成功 − 沿用上轮，2026-09-15）:
 #      沿用条目是上轮成果、不是本轮产出；混在一起会让"本轮零产出"告警永远不响
 #      （run 34752801560 报"成功 183"，183 全是沿用、本轮真实落盘 0）。
+#   9. 修复管线事件日志（2026-09-16）: ATTEMPT/FAIL/EXHAUSTED/DEFERRED 四类事件，
+#      收尾据此打印「尝试 N · 失败 F（其中方法耗尽 E · 顺延下轮 D）· 成功率 P%」。
+#      **方法耗尽单列**是关键 —— 它是"文件修不好、同步永远完不成"的唯一证据；
+#      落文件而非全局计数，因为并行 worker 是子 shell（全局计数会丢）。
 set -u
 PASS=0; FAIL=0
 ok()  { PASS=$((PASS+1)); echo "PASS: $1"; }
@@ -249,6 +253,36 @@ _ol_round_stats_bump '["c"]' 10 2
 [ "$ROUND_REUSED" = "2" ] && ok "8e 沿用数按 run 级绝对值写（不重复累加）" || bad "8e: ${ROUND_REUSED}"
 rm -f /tmp/ol_round_stats.env
 jq() { echo '{}'; }
+
+# ===== 场景9: 修复管线事件日志（成功率/方法耗尽的唯一数据源，2026-09-16）=====
+# 为什么要落文件而不是全局计数: 并行 worker 是**子 shell**，全局计数在并行模式下
+# 会丢 —— 收尾统计会静默失真。这里锁住"事件分类正确 + 方法耗尽单独归类"。
+#   ATTEMPT   尝试修复
+#   FAIL      尝试失败
+#   EXHAUSTED 失败且原因为"所有修复方法均失败" ⇒ **永久性失败**（修不好的证据）
+#   DEFERRED  轮数/预算耗尽未修完 ⇒ "没轮到"，与方法耗尽语义不同、不混算
+_FIX_EVENT_LOG="$WORK/fix_events.log"
+: > "$_FIX_EVENT_LOG"
+_fix_event ATTEMPT "d/1.mp4"
+_fix_event_fail "d/1.mp4" "目标目录不可写（已复核确认写不进去；无目录可换）"
+_fix_event ATTEMPT "d/2.mp4"
+_fix_event_fail "d/2.mp4" "所有修复方法均失败"
+_fix_event ATTEMPT "d/3.mp4"
+_fix_event DEFERRED "d/3.mp4" "重试轮数耗尽"
+[ "$(grep -c '^ATTEMPT|' "$_FIX_EVENT_LOG")" = "3" ] && ok "9a 尝试数 3" || bad "9a: $(grep -c '^ATTEMPT|' "$_FIX_EVENT_LOG")"
+[ "$(grep -c '^FAIL|' "$_FIX_EVENT_LOG")" = "2" ] && ok "9b 失败数 2" || bad "9b: $(grep -c '^FAIL|' "$_FIX_EVENT_LOG")"
+[ "$(grep -c '^EXHAUSTED|' "$_FIX_EVENT_LOG")" = "1" ] && ok "9c 方法耗尽单列（仅'所有修复方法均失败'计入）" || bad "9c: $(grep -c '^EXHAUSTED|' "$_FIX_EVENT_LOG")"
+[ "$(grep -c '^DEFERRED|' "$_FIX_EVENT_LOG")" = "1" ] && ok "9d 顺延下轮单列（不混入方法耗尽）" || bad "9d: $(grep -c '^DEFERRED|' "$_FIX_EVENT_LOG")"
+grep -q '^FAIL|d/1.mp4|目标目录不可写' "$_FIX_EVENT_LOG" && ok "9e 失败原因随事件落盘（可归类取证）" || bad "9e: 原因未落盘"
+
+# 9f~9j 埋点接线（防重构时把埋点删掉而统计静默归零）
+_SRC="$_REPO_ROOT/.github/scripts/openlist/file_fix_pipeline.sh"
+grep -q '_fix_event ATTEMPT "$failed_line"' "$_SRC" && ok "9f 逐文件循环埋点（尝试）" || bad "9f: 逐文件 ATTEMPT 埋点缺失"
+grep -q '_fix_event_fail "$failed_line"' "$_SRC" && ok "9g 逐文件失败分支埋点" || bad "9g: 逐文件 FAIL 埋点缺失"
+grep -q '_fix_event ATTEMPT "$retry_orig"' "$_SRC" && ok "9h 假成功重试循环埋点（尝试）" || bad "9h: 重试 ATTEMPT 埋点缺失"
+grep -q '_fix_event_fail "$retry_orig"' "$_SRC" && ok "9i 重试失败分支埋点（方法耗尽在此归类）" || bad "9i: 重试 FAIL 埋点缺失"
+grep -q '_fix_event DEFERRED "$leftover_orig"' "$_SRC" && ok "9j 轮数耗尽埋点（顺延）" || bad "9j: DEFERRED 埋点缺失"
+rm -f "$_FIX_EVENT_LOG"
 
 echo "-----"
 echo "PASS=$PASS FAIL=$FAIL"
