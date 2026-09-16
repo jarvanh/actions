@@ -252,6 +252,7 @@ workflow 会把 `*.sh` `*.py` `*.jq` 拷到 `/tmp` 再 `source /tmp/load_all.sh`
 
 **时间预算（优雅到站）**：`OPENLIST_SYNC_BUDGET_SECONDS`(19200=320min，同步 step 启动锚点) ·
 `OPENLIST_SYNC_MIN_SLICE_SECONDS`(600=10min，剩余预算低于此不再开新工作) ·
+`OPENLIST_REPAIR_RESERVE_PCT`(25，上限 60；子目录循环预留"预算×此比例"给修复管线尾段——不预留则修复被饿死、长尾不收敛，见计划文档 §12.9) ·
 `OPENLIST_SYNC_DEADLINE_EPOCH`（由 workflow 计算，调试/还原模式不设置=不干预）
 
 **开关**：`FORCE_SYNC` · `OPENLIST_SPLIT_ON_SYNC_FAILURE` · `OPENLIST_TASK_ROTATION` ·
