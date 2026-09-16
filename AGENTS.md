@@ -41,4 +41,10 @@ GitHub Actions 工作流与脚本集合：OpenList 网盘同步、Emby 302 直�
 ## 改完必验
 
 - 通知：`bash skills/telegram-notify-audit/scripts/render_preview.sh`（渲染预览 + 16 项自动校验）。
-- openlist 域：跑回归套件，基线 **26 套中 23 套 `EXIT=0`**；非 0 的只有 2 项环境性失败（`marker_skip_guards`（无 `date -d`）、`truth`（需 docker）），另有 flaky 单独重跑即过（`progress_no_orphans`（T5 时序）、`sync_trend_budget`（macOS `wc` 前导空格）；**套件运行期偶见沙箱拦子进程导致假红**，日志里会出现 `Brokered program policy check unavailable`，见到该标记即单独复跑复核——2026-09-14 `batch_consolidate` / `bulk_hash_fold` 即此形态，单跑分别 61/0、29/0），且 `command not found` 扫描必须为空（命令与 flake 名单见规范 · 回归套件）。
+- openlist 域：**测试在 CI 跑，不在本机跑**（2026-09-16 起，用户要求"避免消耗本机资源"）：
+  `gh workflow run tests.yml`（独立测试载体，按域分组，见 `.github/workflows/tests.yml`），
+  跑完 `gh run list --workflow=tests.yml --limit 1 --json databaseId,status,conclusion` 看结论；
+  失败时 `gh run view <id> --log` 取失败套件的输出尾部。**CI 基线: 26 套全绿（26/26）** ——
+  本机那 4 项非 0 全是环境假红（无 `date -d`、`wc` 前导空格、无 docker、沙箱拦子进程），
+  ubuntu runner 上不存在。本机只做秒级静态检查（`bash -n` / YAML 解析）。
+- openlist 域（历史本机口径，保留供追溯）：跑回归套件，基线 **26 套中 23 套 `EXIT=0`**；非 0 的只有 2 项环境性失败（`marker_skip_guards`（无 `date -d`）、`truth`（需 docker）），另有 flaky 单独重跑即过（`progress_no_orphans`（T5 时序）、`sync_trend_budget`（macOS `wc` 前导空格）；**套件运行期偶见沙箱拦子进程导致假红**，日志里会出现 `Brokered program policy check unavailable`，见到该标记即单独复跑复核——2026-09-14 `batch_consolidate` / `bulk_hash_fold` 即此形态，单跑分别 61/0、29/0），且 `command not found` 扫描必须为空（命令与 flake 名单见规范 · 回归套件）。
