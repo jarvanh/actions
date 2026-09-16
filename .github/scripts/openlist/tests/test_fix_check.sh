@@ -107,7 +107,11 @@ rclone() {
   case "$1" in
     lsf)
       case "$*" in
-        *"$FC_MOCK_SRC"*) cat "$FC_MOCK_SRC_LIST" 2>/dev/null ;;
+        *"$FC_MOCK_SRC"*)
+          case "$*" in
+            *"-R"*) cat "$FC_MOCK_SRC_LIST" 2>/dev/null ;;
+            *)      cat "$FC_MOCK_SRC_LIST_NONREC" 2>/dev/null ;;
+          esac ;;
         *"$FC_MOCK_DST"*) cat "$FC_MOCK_DST_LIST" 2>/dev/null ;;
         # state 目录在测试里是**真实本地目录**（marker 文件真的建在那里）⇒ 直接列它
         *) ls -1 "$2" 2>/dev/null ;;
@@ -128,9 +132,11 @@ export -f rclone
 reset_case() {
   rm -rf "$OUT" "$STATE"; mkdir -p "$OUT" "$STATE"
   : > "$MOCK/src.lsf"; : > "$MOCK/dst.lsf"; : > "$MOCK/sizes.tsv"
+  : > "$MOCK/src_nonrec.lsf"
   : > "$MOCK/try_calls"; : > "$MOCK/marker_writes"
   export FC_MOCK_SRC="$SRC_BASE" FC_MOCK_DST="$DST_BASE"
   export FC_MOCK_SRC_LIST="$MOCK/src.lsf" FC_MOCK_DST_LIST="$MOCK/dst.lsf"
+  export FC_MOCK_SRC_LIST_NONREC="$MOCK/src_nonrec.lsf"
   export FC_MOCK_SIZES="$MOCK/sizes.tsv"
   export FC_TEST_TRY_CALLS="$MOCK/try_calls" FC_TEST_MARKER_WRITES="$MOCK/marker_writes"
   export FIXCHECK_WORK_DIR="$OUT" GITHUB_WORKSPACE="$WS" FIXCHECK_CONTAINER=openlist
@@ -310,6 +316,24 @@ export FIXCHECK_TASK=no-such-task FIXCHECK_FILES="x"
 run_case
 [ "$RC" = "2" ] && ok "8a 未知任务 id ⇒ 退出码 2" || bad "8a: rc=$RC"
 grep -q "未知任务 id" "$WORK/run.log" && ok "8b 日志列出可用 id（便于修正）" || bad "8b: $(tail -3 "$WORK/run.log")"
+
+# ============================================================
+# 场景9: 源端列举为空时必须能区分"列举失败"与"路径不存在"
+#   2026-09-16 实测: 主轮同时在读同一 OneDrive 时列举被限流，错误被 /dev/null 吞掉，
+#   表现为"0 个文件"，与"路径写错"长得一模一样，白排查一轮 ⇒ 锁住这个可观测性
+# ============================================================
+reset_case
+printf '%s\n' "$LEAF_DIR" > "$MOCK/src_nonrec.lsf"      # 非递归有内容 ⇒ 列举失败
+export FIXCHECK_FILES="ph5ebc05eca6793"
+run_case
+[ "$RC" = "2" ] && ok "9a 递归列举为空 ⇒ 退出码 2" || bad "9a: rc=$RC"
+grep -q "列举失败" "$WORK/run.log" && ok "9b 报"列举失败"并给处置建议（不是静默 0 命中）" || bad "9b: $(grep -m1 源端 "$WORK/run.log")"
+
+reset_case
+export FIXCHECK_FILES="ph5ebc05eca6793"                   # 非递归也空 ⇒ 路径不对
+run_case
+[ "$RC" = "2" ] && ok "9c 路径不存在 ⇒ 退出码 2" || bad "9c: rc=$RC"
+grep -q "源端路径不存在或不可读" "$WORK/run.log" && ok "9d 明确指向路径拼写" || bad "9d: $(grep -m1 源端 "$WORK/run.log")"
 
 echo "-----------------------------"
 echo "PASS=$PASS FAIL=$FAIL"
