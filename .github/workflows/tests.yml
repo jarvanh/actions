@@ -75,18 +75,21 @@ jobs:
       - name: openlist 回归套件（串行）
         run: |
           set -u
-          cd .github/scripts/openlist/tests
+          cd .github/scripts/openlist/tests || { echo "❌ 测试目录不存在"; exit 1; }
           WORK=/tmp/ol_tests
           rm -rf "$WORK"; mkdir -p "$WORK"
           pass=0; fail=0; failed=""
           # 串行是硬要求: 并行会多出已知的 T5 时序假红（progress_no_orphans）
+          # ⚠️ runner 的 bash 带 -e: 命令替换必须用 if 包住，否则**第一套失败就直接终止
+          #    整个 step**，而且因为输出还没刷出，日志里一片空白（2026-09-16 实测踩到，
+          #    表现为"74 秒后 exit 1 且零输出"）。
           for f in test_*.sh; do
-            out=$(bash "$f" </dev/null 2>&1); rc=$?
+            if out=$(bash "$f" </dev/null 2>&1); then rc=0; else rc=$?; fi
             printf '%s\n' "$out" > "$WORK/$f.out"
-            printf '%-46s EXIT=%s\n' "$f" "$rc" >> "$WORK/summary.txt"
+            # 边跑边打: 万一中途异常退出，至少能看到已跑完的部分
+            printf '%-46s EXIT=%s\n' "$f" "$rc" | tee -a "$WORK/summary.txt"
             if [ "$rc" -eq 0 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); failed="$failed $f"; fi
           done
-          cat "$WORK/summary.txt"
           echo "=== 汇总: PASS=$pass FAIL=$fail（共 $((pass + fail)) 套）==="
 
           # 红线: 任何测试输出里出现 command not found 即失败（说明测试在调不存在的命令）
