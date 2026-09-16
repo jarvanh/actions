@@ -70,6 +70,21 @@ on:
         required: false
         type: string
         default: "1 4 8"
+      reject_src:
+        description: "拒收归因专项: 换行分隔的源端文件路径（如 onedrive:0/xx/file.mp4，必须换行分隔）。填了就走专项（跳过常规 13 组探针）——同内容改名 + 随机对照三组直传，重启取真值，区分「按内容拒收」vs「按文件名/状态拒收」（2026-09-16 V3 复验后的定向诊断，见计划文档 §12.13.4）"
+        required: false
+        type: string
+        default: ""
+      reject_max:
+        description: "专项最多取前 N 个源文件（默认 1；每个源上传两份 ≈ 2×大小，控时长）"
+        required: false
+        type: string
+        default: "1"
+      reject_wait:
+        description: "专项上传完成后、重启前的等待秒数（默认 120；观察「延迟落盘」，立即重启会把异步推送未完成误判成拒收）"
+        required: false
+        type: string
+        default: "120"
 
 concurrency: openlist-diag
 
@@ -149,15 +164,29 @@ jobs:
           DIAG_BIG_TRANSFERS: ${{ inputs.big_transfers }}
           DIAG_THRU_LEVELS: ${{ inputs.thru_levels }}
           DIAG_XBACK_TRANSFERS: ${{ inputs.xback_transfers }}
+          DIAG_REJECT_SRC: ${{ inputs.reject_src }}
+          DIAG_REJECT_MAX: ${{ inputs.reject_max }}
+          DIAG_REJECT_WAIT: ${{ inputs.reject_wait }}
           OL_CONTAINER: ${{ inputs.container }}
         run: |
           # 恒 exit 0: 诊断结果写在报告里，探针失败不该让 step 变红（否则
           # artifact 上传被跳过，最需要看的那份报告反而拿不到）
-          bash "$GITHUB_WORKSPACE/.github/scripts/openlist/diag_backend.sh" \
-            "$DIAG_TARGET" "$OL_CONTAINER" || true
-          echo ""
-          echo "=========== 报告尾部 ==========="
-          tail -40 /tmp/ol_diag/report.txt 2>/dev/null || echo "(无报告文件)"
+          # reject_src 非空 ⇒ 走拒收归因专项（脚本自带报告路径 reject_report.txt），
+          # 与常规 13 组互斥——专项要的是「内容变量」的干净归因，混跑常规探针
+          # 的写入会让三时点判读失真
+          if [ -n "$DIAG_REJECT_SRC" ]; then
+            bash "$GITHUB_WORKSPACE/.github/scripts/openlist/diag_reject.sh" \
+              "$DIAG_TARGET" "$OL_CONTAINER" || true
+            echo ""
+            echo "=========== 拒收归因报告尾部 ==========="
+            tail -40 /tmp/ol_diag/reject_report.txt 2>/dev/null || echo "(无报告文件)"
+          else
+            bash "$GITHUB_WORKSPACE/.github/scripts/openlist/diag_backend.sh" \
+              "$DIAG_TARGET" "$OL_CONTAINER" || true
+            echo ""
+            echo "=========== 报告尾部 ==========="
+            tail -40 /tmp/ol_diag/report.txt 2>/dev/null || echo "(无报告文件)"
+          fi
 
       - name: 上传诊断报告
         if: always()
@@ -169,6 +198,7 @@ jobs:
           name: ol-diag-report
           path: |
             /tmp/ol_diag/report.txt
+            /tmp/ol_diag/reject_report.txt
             /tmp/ol_diag/container.log
           if-no-files-found: warn
           retention-days: 7
