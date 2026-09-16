@@ -58,19 +58,32 @@ if ! declare -F _blacklist_add >/dev/null 2>&1; then
 fi
 
 FILE="dir/原文件名被后端拒收.mp4"
+
+# ★ 第二轮回填的是 marker 里持久化后的形态: 命名统一前写下的旧全名
+#   （见 file_fix.sh:404-406），不是内存里归一后的短 ID。
+#   断言必须用旧全名，否则"归一被去掉"这条回归会静默通过 —— 2026-09-16 负向验证
+#   实测: 用内存短 ID 断言时，去掉 _fix_method_norm 后 C3/C5 仍 PASS ⇒ 假绿灯。
+#   故 C3/C4 段刻意绕开内存写入，直接种 marker 形态的旧全名。
+OLD_FULL="文件修复方法1 copyto_original: 原名直传（原路径 + 原文件名）"
+
+# ── 第一轮（内存形态）: 方法1 判成功但复核失败 → 拉黑 ──
 _blacklist_add "$FILE" copyto_original
 BL1="${FIX_METHOD_BLACKLIST[$FILE]:-}"
 
 echo "$BL1" | grep -q "copyto_original" \
-  && ok "C1 方法1假成功复核失败 → 拉黑条目含 copyto_original" \
+  && ok "C1 第一轮: 方法1假成功复核失败 → 拉黑条目含 copyto_original" \
   || bad "C1: 拉黑条目不含 copyto_original（BL=[$BL1]）"
 
 # C2: 只拉黑失败的那个方法，不得株连改名类方法
 if echo "$BL1" | grep -q "copyto_shorthash"; then
   bad "C2: 不该拉黑 copyto_shorthash（改名路线被堵死 = D2 结论白测）"
 else
-  ok "C2 对症方法 copyto_shorthash 未被株连拉黑"
+  ok "C2 第一轮: 对症方法 copyto_shorthash 未被株连拉黑"
 fi
+
+# ── 切到第二轮的 marker 回填形态（用 OLD_FULL 覆写，理由见上）──
+FIX_METHOD_BLACKLIST["$FILE"]="$OLD_FULL"
+TRY_FIX_ORIGINAL="$FILE"
 
 # ── C5: 存的是归一语义 ID，跨命名版本可命中 ──
 # 历史 marker 里存的是旧全名（如 "文件修复方法1 copyto_original: 原名直传（…）"），
