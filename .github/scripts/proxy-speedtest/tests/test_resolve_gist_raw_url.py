@@ -20,6 +20,18 @@
   * 文件名匹配是**精确**的：前缀相同但不同名（如 `..._providers.yaml.bak`）不算命中，
     否则会拿错文件。
 
+第 9–11 组守**下一环** `speedtest_gitee.fetch_text`。它接在 resolve 之后（拿到 raw URL
+就去取正文），同样出过一次真实事故（2026-09-16 run 35042828032）：
+
+  * 发布的订阅是好的（`gist_nodes_published nodes: 14124 bytes: 4829159`，手工 curl
+    同一 URL 得到 `http=200` 且 14124 个节点），但 runner 上取文途中被
+    `gist.githubusercontent.com` 掐断了 TLS：
+    `subscription_fetch_skipped error: [SSL: UNEXPECTED_EOF_WHILE_READING]`。
+  * `build_source_mapping` 对 fetch 异常一律 `subscription_fetch_skipped` + `continue`，
+    于是**一次抖动 = 整份订阅静默消失** ⇒ `nodes_collected: 0`，而 job 照样报成功。
+  * 原先 `fetch_text` **没有任何重试**。现在钉住三件事：抖动要能自愈、真故障要抛
+    （不能吞成空串再被当成「没节点」）、健康路径只请求一次（重试不许拖慢正常情况）。
+
 跑法：python .github/scripts/proxy-speedtest/tests/test_resolve_gist_raw_url.py
 退出码 0 = 全部通过。
 """
@@ -127,6 +139,87 @@ def main():
     finally:
         C.github_api_request = orig_request
         C.log_progress = orig_log
+
+    import speedtest_gitee as G
+
+    class _Resp:
+        def __init__(self, body):
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return self.body
+
+    orig_urlopen = G.urllib.request.urlopen
+    orig_sleep = G.time.sleep
+    orig_glog = G.log_progress
+    sleeps = []
+    git_events = []
+    G.time.sleep = lambda s: sleeps.append(s)
+    G.log_progress = lambda stage, **kw: git_events.append(dict(stage=stage, **kw))
+    try:
+        print('== 9. 抖动要能自愈：前 2 次 SSL EOF、第 3 次成功 ⇒ 必须返回正文 ==')
+        state = {'n': 0}
+
+        def flaky(req, timeout=None):
+            state['n'] += 1
+            if state['n'] < 3:
+                raise OSError('[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol')
+            return _Resp(b'proxies:\n  - name: a\n')
+
+        G.urllib.request.urlopen = flaky
+        sleeps.clear()
+        git_events.clear()
+        out = G.fetch_text('https://example.invalid/flaky')
+        check('proxies:' in out, f'抖动后仍拿到正文（实际 {out[:20]!r}）')
+        check(state['n'] == 3, f'恰好请求 3 次（实际 {state["n"]}）')
+        check(len(sleeps) == 2, f'失败之间退避 2 次（实际 {len(sleeps)}）')
+        check(all(s >= 0 for s in sleeps) and sleeps == sorted(sleeps),
+              f'退避是递增的指数曲线（实际 {[round(s, 2) for s in sleeps]}）')
+        retry_events = [e for e in git_events if e['stage'] == 'subscription_fetch_retry']
+        check(len(retry_events) == 2, f'每次失败记一条 fetch_retry（实际 {len(retry_events)}）')
+        check(retry_events and 'UNEXPECTED_EOF' in str(retry_events[0].get('error', '')),
+              '重试日志里带上真实错误，便于区分「抖动」与「真故障」')
+
+        print('== 10. 真故障要抛：重试耗尽必须抛异常，不能吞成空串 ==')
+        state['n'] = 0
+
+        def dead(req, timeout=None):
+            state['n'] += 1
+            raise OSError(f'boom-{state["n"]}')
+
+        G.urllib.request.urlopen = dead
+        sleeps.clear()
+        try:
+            G.fetch_text('https://example.invalid/dead')
+            check(False, '重试耗尽却没抛异常（会静默退化成「零节点且不报错」）')
+        except OSError as e:
+            check('boom-' in str(e), f'抛出的是最后一次的真实错误（实际 {e}）')
+        check(state['n'] == G.DEFAULT_FETCH_RETRIES,
+              f'恰好尝试 DEFAULT_FETCH_RETRIES 次（实际 {state["n"]} / {G.DEFAULT_FETCH_RETRIES}）')
+
+        print('== 11. 健康路径只请求一次（重试不许拖慢正常情况）==')
+        state['n'] = 0
+
+        def healthy(req, timeout=None):
+            state['n'] += 1
+            return _Resp(b'ok\n')
+
+        G.urllib.request.urlopen = healthy
+        sleeps.clear()
+        out = G.fetch_text('https://example.invalid/ok')
+        check(out == 'ok\n', f'正文原样返回（实际 {out!r}）')
+        check(state['n'] == 1, f'只请求一次（实际 {state["n"]}）')
+        check(sleeps == [], f'成功路径不引入任何等待（实际 {len(sleeps)} 次）')
+    finally:
+        G.urllib.request.urlopen = orig_urlopen
+        G.time.sleep = orig_sleep
+        G.log_progress = orig_glog
 
     print()
     if FAILURES:

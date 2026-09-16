@@ -19,6 +19,12 @@
   push-only  只测经代理上行（历史模式，可用 env 退回）
   直连基线（git_direct_speedtest）不受模式影响，作为「家庭宽带上行」对照单独执行
 
+订阅拉取（`fetch_text`）**带指数退避重试**：几 MB 的订阅体会在
+`gist.githubusercontent.com` 上被中途掐断 TLS，而调用方对取文异常一律
+`subscription_fetch_skipped` + `continue`——不重试就等于「一次抖动 ⇒ 整份订阅静默消失
+⇒ nodes_collected: 0」，且 job 仍报成功。语义边界：重试耗尽**仍抛异常**（真故障要吵），
+绝不吞成空串（那会被下游读成「节点都判死了」）。
+
 Gist 约定（四套各用各的，互不覆盖）：
   secret PROXY_SPEEDTEST_GIST_ID / PROXY_SPEEDTEST_CDN_GIST_ID / PROXY_SPEEDTEST_TAIER_GIST_ID
   分别注入各 workflow 的 PROXY_SPEEDTEST_GIST_ID env；文件名/描述经
@@ -28,6 +34,7 @@ import base64
 import json
 import os
 import pathlib
+import random
 import re
 import shutil
 import signal
@@ -73,6 +80,11 @@ MIHOMO_API = 'http://127.0.0.1:19090'
 MIHOMO_MIXED_PORT = 17892
 MIHOMO_RELEASE_API = 'https://api.github.com/repos/MetaCubeX/mihomo/releases/latest'
 DEFAULT_HEALTHCHECK_URL = 'https://www.gstatic.com/generate_204'
+# 订阅拉取的重试参数。几 MB 的订阅体在 `gist.githubusercontent.com` 上会被中途掐断 TLS
+# （见 fetch_text 的说明），所以取一次不算数；退避曲线与 gist_nodes 的搜索重试同形。
+DEFAULT_FETCH_RETRIES = 4
+DEFAULT_FETCH_TIMEOUT = 60
+DEFAULT_FETCH_BACKOFF_BASE = 2.0
 CURRENT_RUN_STARTED_AT = ''
 TERMINATION_NOTICE_SENT = False
 
@@ -216,14 +228,34 @@ def parse_sub_urls(env):
         raise RuntimeError('PROXY_SPEEDTEST_SUB_URLS is empty after parsing')
     return urls
 
-def fetch_text(url: str):
-    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-    with urllib.request.urlopen(req, timeout=60) as r:
-        raw = r.read()
-    try:
-        return raw.decode('utf-8')
-    except UnicodeDecodeError:
-        return raw.decode('utf-8', 'ignore')
+def fetch_text(url: str, retries=DEFAULT_FETCH_RETRIES, timeout=DEFAULT_FETCH_TIMEOUT):
+    """取一份文本订阅，带指数退避重试。
+
+    必须重试：Gist raw 上的订阅体常有几 MB，而 `gist.githubusercontent.com` 会在传输
+    途中直接掐断 TLS（实测 2026-09-16 run 35042828032：
+    `UNEXPECTED_EOF_WHILE_READING`）。调用方 `build_source_mapping` 对异常一律
+    `subscription_fetch_skipped` + `continue`，所以**一次抖动就等于整份订阅静默消失**、
+    下游 `nodes_collected: 0`，而 job 仍然报成功——正是本仓库反复踩到的「静默归零」形态。
+    退避曲线与 `gist_nodes.fetch_search_page` 一致（指数 + 抖动，抖动用来错开共享出口 IP
+    上的限流窗口）。
+    """
+    last_error = None
+    for attempt in range(1, retries + 1):
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                raw = r.read()
+            try:
+                return raw.decode('utf-8')
+            except UnicodeDecodeError:
+                return raw.decode('utf-8', 'ignore')
+        except Exception as e:
+            last_error = e
+            log_progress('subscription_fetch_retry', source_url=url, attempt=attempt,
+                         retries=retries, error=str(e))
+            if attempt < retries:
+                time.sleep(DEFAULT_FETCH_BACKOFF_BASE * (2 ** (attempt - 1)) + random.uniform(0, 1.5))
+    raise last_error
 
 def maybe_decode_base64_subscription(text: str):
     import base64
@@ -549,7 +581,10 @@ def build_source_mapping(env):
             snapshot_path.write_text(text, encoding='utf-8')
             snapshot_meta.append({'index': idx, 'url': url, 'path': str(snapshot_path), 'size': len(text.encode('utf-8'))})
         except Exception as e:
-            log_progress('subscription_fetch_skipped', source_url=url, error=str(e))
+            # 「取不到」与「取到了但没节点」必须分得开：前者说明是网络/订阅源的问题，
+            # 后者要去看解析与判据。否则一次取文失败会被读成「节点都判死了」。
+            log_progress('subscription_fetch_skipped', source_url=url, index=idx,
+                         error=f'{type(e).__name__}: {e}')
             continue
 
         added_raw = False
