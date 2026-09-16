@@ -43,7 +43,7 @@ on:
         type: string
         default: ""
       big_mb:
-        description: "大文件落盘阶梯（MiB，空格分隔；默认 16 64 256）。用来定位「重传但未落盘」: 生产里 ~166MB 的文件 rclone 报 Copied 但重启容器后消失（假成功）"
+        description: "大文件落盘阶梯（MiB，空格分隔；默认 16 64 256）。原用于定位「重传但未落盘」（该长尾已于 2026-09-15 收口）: 生产里 ~166MB 的文件 rclone 报 Copied 但重启容器后消失（假成功）"
         required: false
         type: string
         default: "16 64 256"
