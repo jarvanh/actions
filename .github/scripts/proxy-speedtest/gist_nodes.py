@@ -104,6 +104,12 @@ Sub-Store 接口（读 backend/src/restful/*.js 得到，全部是无需鉴权�
   GIST_NODES_TRIAL_LOAD   1 = 发布前把这份 YAML 交给本机 mihomo **试装一遍**，把
                            「mihomo 装不上」的节点二分定位并摘掉（默认 1）。见文件头
                            「发布前还要试装排雷」——这一层与健康检查是两件事
+  GIST_NODES_TRIAL_BUDGET_SECONDS
+                           试装阶段的墙钟预算（默认 1500 = 25 分钟；0 = 不限）。**必须有**：
+                           单次试装 ~1.2 秒（mihomo 冷启动），坏节点多时二分要跑很多层。
+                           到点就**停止排雷**——已摘的照摘、未测的块原样放行并记
+                           `trial_load_budget_stop`，而不是拖到 job 被硬取消（那会连
+                           已抓到的订阅一起报废）
   PROXY_SPEEDTEST_HEALTHCHECK_URL
                            健康检查目标（默认 https://www.gstatic.com/generate_204）。
                            **必须与下游测速的同一变量一致**，否则这里判活、下游判死
@@ -184,6 +190,7 @@ from speedtest_common import github_api_request, log_progress, merged_env, updat
 # 见 alive_filter.py 文件头的「为什么复用 speedtest_gitee」）。gist_nodes 本身不需要 mihomo。
 from alive_filter import (  # noqa: E402
     DEFAULT_FILTER_BUDGET_SECONDS,
+    DEFAULT_TRIAL_BUDGET_SECONDS,
     SNAPSHOT_TIMEOUT_SECONDS,
     filter_alive,
     trial_load,
@@ -978,6 +985,8 @@ def main():
                                   DEFAULT_FILTER_BUDGET_SECONDS))
     alive_timeout = max(10, env_int(env, 'GIST_NODES_ALIVE_TIMEOUT', SNAPSHOT_TIMEOUT_SECONDS))
     trial_on = env_str(env, 'GIST_NODES_TRIAL_LOAD', '1').lower() not in ('0', 'false', 'no')
+    trial_budget = max(0, env_int(env, 'GIST_NODES_TRIAL_BUDGET_SECONDS',
+                                  DEFAULT_TRIAL_BUDGET_SECONDS))
     # 显式传给过滤层而不是让它自己从 env 读：env 里有没有这个键、值合不合法，
     # 由这里一处决定，过滤层只认参数字符串（空串 = 用它的默认目标）。
     health_url_override = env_str(env, 'PROXY_SPEEDTEST_HEALTHCHECK_URL', '')
@@ -1194,7 +1203,8 @@ def main():
     # 而且只对「值得发布」的节点做二分，不会为已经要丢的节点白费一轮。
     trial_report = None
     if trial_on and proxies:
-        proxies, trial_report = trial_load(proxies, workdir=workdir / 'trial-load')
+        proxies, trial_report = trial_load(proxies, workdir=workdir / 'trial-load',
+                                           budget_seconds=trial_budget)
         if not proxies and trial_report.get('removed'):
             # 摘光了极可能是判据本身出了问题（比如 mihomo 内核换了报错格式），
             # 零节点发布比发布未排雷的订阅糟得多，退回不排雷。
