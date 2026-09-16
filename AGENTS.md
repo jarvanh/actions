@@ -47,4 +47,7 @@ GitHub Actions 工作流与脚本集合：OpenList 网盘同步、Emby 302 直�
   失败时 `gh run view <id> --log` 取失败套件的输出尾部。**CI 基线: 26 套全绿（26/26）** ——
   本机那 4 项非 0 全是环境假红（无 `date -d`、`wc` 前导空格、无 docker、沙箱拦子进程），
   ubuntu runner 上不存在。本机只做秒级静态检查（`bash -n` / YAML 解析）。
+- **修复能力验证**（"某个文件到底能不能修好"）：走 `gh workflow run openlist-fix-check.yml`
+  （独立 workflow，定点、分钟级、真值复核 + 逐文件 `VERDICT` 行），规程见计划文档 §12.11；
+  后端诊断/吞吐测量走 `openlist-diag.yml`（**两者都必须与主轮错开**，同一网盘账号会互相干扰）。
 - openlist 域（历史本机口径，保留供追溯）：跑回归套件，基线 **26 套中 23 套 `EXIT=0`**；非 0 的只有 2 项环境性失败（`marker_skip_guards`（无 `date -d`）、`truth`（需 docker）），另有 flaky 单独重跑即过（`progress_no_orphans`（T5 时序）、`sync_trend_budget`（macOS `wc` 前导空格）；**套件运行期偶见沙箱拦子进程导致假红**，日志里会出现 `Brokered program policy check unavailable`，见到该标记即单独复跑复核——2026-09-14 `batch_consolidate` / `bulk_hash_fold` 即此形态，单跑分别 61/0、29/0），且 `command not found` 扫描必须为空（命令与 flake 名单见规范 · 回归套件）。

@@ -36,7 +36,10 @@
 3. 本机 `rclone cat onedrive:/logs/sync_state/{task_rotation.json,trend.jsonl,backend_dead.json}` 看游标 / 趋势 / 跨轮熔断命中。
 4. 对照 §6 记录增量 → **更新本文档的复选框与 §进度日志**。这是唯一的跨会话进度真源（`.codebuddy/memory/` 是本机私有记忆，不在 git 里，别的 AI 读不到）。
 5. **验证起跑规程（要立刻验新代码时用）**：GitHub 的 concurrency **会自动取消被顶替的 pending 轮**（实测 `34787645966` 被 `34793014398` 顶掉即此行为）⇒ 队列**恒为 1 深、且总是最新创建的那个**，不会积压成"落后 N 轮"。新代码进生产的真实延迟 = **下一次 cron（≤1h）＋ 在跑轮剩余时间（≤5.3h）**，上限约 6.3h。要压到分钟级就主动干预：先 `gh run list --workflow=openlist.yml --status pending --json databaseId` 取 id 逐个 `gh run cancel`，必要时再 `gh run cancel <在跑的 id>`（在跑轮若正烧在死后端，取消它损失极小），最后 `gh workflow run openlist.yml` 用"此刻"的 main 起跑。注意取消在跑轮会丢掉该轮已完成但未持久化的进度（游标/marker 是增量持久化，损失有限）。
-6. **两种"不等 5.5h"的取日志方式（2026-09-15 起，用户要求）**——验证一律先用它们，长轮只用于跑量：
+6. **修复能力验证载体（2026-09-16 起）**：要回答"某个文件到底能不能修好"，走
+   `gh workflow run openlist-fix-check.yml`（独立 workflow，见 §12.11）—— 定点、分钟级、
+   真值复核、逐文件 `VERDICT` 行；回归测试仍走 `tests.yml`，后端诊断仍走 `openlist-diag.yml`。
+7. **两种"不等 5.5h"的取日志方式（2026-09-15 起，用户要求）**——验证一律先用它们，长轮只用于跑量：
    - **调试轮（视任务规模，10min–2h）**: `run_mode=调试 · 修复管线测试` + `fix_test_task=<task>` +
      `fix_test_max=<n>` + `force_sync=true` —— 只跑单任务: 逐子同步对 diff → 修复管线
      （**含目录级批量折叠**，它跑在 fix_max 截断之前）。
@@ -1577,3 +1580,56 @@ POST 刷新 + 等待语义不变，预计省 ~30min/轮。
 因为根目录文件现在与子目录文件**同口径**、会真去建+探备用目录；按规范先改文档）；
 测试补 5i~5k 覆盖 Step 5 那条路径（原测试只覆盖 Step 2 ⇒ 第一版漏改才没被本地发现，
 是 CI 的 12f 文案断言兜住的）。
+
+
+## 12.11 修复能力定点验证规程（openlist-fix-check，2026-09-16 建）
+
+**载体**: `.github/workflows/openlist-fix-check.yml`（仅手动 · concurrency 独立组 `openlist-fix-check`
+· job 40min · 自带容器副本、不装 cloudflared/不碰隧道/不回传 DB）+ 驱动脚本
+`.github/scripts/openlist/fix_check.sh` + 测试 `tests/test_fix_check.sh`（32 项，被 CI glob 自动纳入）。
+与 `openlist-diag` 的容器 setup 段**同源内联**（不抽 composite action —— 抽取要改已在工作的诊断链路，
+收益只是省 30 行复制；两处都加了"改一处需同步"注释）。
+
+**它回答什么**: 对指定文件跑**生产同款修复管线**，逐文件输出
+`VERDICT|<状态>|<方法>|<文件>|<替代路径>|<原因>`：
+
+| 状态 | 含义 |
+|---|---|
+| `fixed` | 真值复核通过（重启容器后仍可见），已按生产口径写 marker |
+| `fake_success` | rclone 报成功但重启后消失（未落盘） |
+| `failed` | 4 种方法 + 换目录兜底全试过仍失败（原因在第 6 段） |
+| `already_ok` | 原路径已在 / marker 已记账（文件以替代形态落盘） |
+| `not_found` | 清单条目在源端匹配不到（清单需修正） |
+
+**退出码**（可当"修复能力回归门"）: 0=全 fixed/already_ok · 1=有 failed/fake_success · 2=有 not_found 或环境问题。
+
+**两种模式**: `mode=list`（指定清单: `task` + `subdir` + `files` 每行一个文件名/密文名后缀，分钟级）
+与 `mode=diff`（两侧递归列举求差集，覆盖全但大任务 30–60min）。
+
+**口径要点（写清避免误读）**:
+- **默认重置历史黑名单**（`reset_blacklist=是`）⇒ 测的是**能力上限**（4 方法 + 换目录全试），
+  不是"生产下一轮会走的那条路"（生产会跳过历史上被拉黑的方法）。
+- **真值复核是唯一判据**（`truth_restart=是`，重启容器后再列一次）—— 这批文件的失败形态正是
+  "rclone 报成功但后端没落盘"，只看 rc 会把假成功记成 fixed。
+- **叶子同步单元**（★ 最容易搞错）: 修复与 marker 记账都落在"生产实际用的叶子单元"上
+  （`task` 逐层 `_${subdir//\//_}` + dest 逐级拼接；脚本按**已有 marker 反查**，无 marker 时按最深目录推定），
+  否则"真修了"下一轮仍会被当缺失重传（幽灵落盘）。
+- **真修并记账**（用户确认）: 复核通过的条目按生产口径写 marker ⇒ 验证即产出，下轮不重传。
+- **带宽纪律**: 主轮在传时跑会偏慢（同一网盘账号），OneDrive 列举还可能被限流 —— 脚本会把列举
+  错误**显式打出来**并区分"列举失败 vs 路径不存在"（不再吞成"0 个文件"）。
+
+**首次实测（`35053515218`，2026-09-16；对象 = run 34940234180 那 5 个"真·方法耗尽"文件）**:
+
+| 结果 | 文件 | 说明 |
+|---|---|---|
+| `already_ok` ×3 | `kate-bloom/OnlyTeenBlowjobs…ph5ebc05eca6793.mp4` · `aeon-marks/AVN.footpunkz…ph60a8026e45d5e.mp4` · `kenneth-play/…ph59c40cb5598b1-poster.jpg` | **已经修好并记账**（marker 里有替代形态）⇒ 那批"方法耗尽"已被后续轮次解决 |
+| `fake_success` ×3 | `rolakiki/A cute maid…ph5f12b2166785f.mp4` · `rustudio/Cute Petite Brunette…ph5c947a5f33a9f.mp4` · `kenneth-play/Anal Play 101…ph59c40cb5598b1.mp4` | 全部是**方法 3 `zip_split_original`（分卷）**，真值复核判定 `分卷缺失` |
+
+⇒ **可执行结论**: 剩下的"修不好"形态是**分卷上传的持久化失败**（分卷 parts 上传后重启即消失），
+既不是"方法全都试过"（`failed=0`）也不是"清单对不上"（`not_found=0`）。
+下一步取证方向: 分卷粒度/分卷数（`OPENLIST_SPLIT_PART_BYTES` 默认 1GB）与该形态是否应直接跳过方法 3 走方法 4。
+
+**顺带产出（重要）**: 首次实跑暴露并修掉两个 rclone 参数 bug —— 其中 `OPENLIST_RCLONE_LISTING_TIMEOUT`
+注入裸数字 `900` 被传给 rclone 的 `--timeout`（要求带单位）⇒ **生产的折叠落盘列举一直静默失败**
+（三轮日志 `✅ 折叠落盘` 出现 0 次 = 折叠成果从未记账）。已修（注入 `900s`）并加回归锁；
+折叠"零落盘"的成因判断也随之更正（主因是参数错误，可见性延迟是第二成因）。
