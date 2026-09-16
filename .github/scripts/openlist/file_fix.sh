@@ -1008,7 +1008,9 @@ _try_fix_methods_round() {
 #   2. Step 5 原目录 4 种方法全败 → 兜底切换（预检只能证明几字节探针能写，
 #      证明不了这个文件能写: 内容级拒收、文件名/密文名超限等都可能）
 # 两个入口共用本函数，切换后一律对新目录做可写性预检
-# 不适用: file_dir_rel = "." （目标端根目录的文件无目录可换）
+# **目标端根目录的文件同样适用**（2026-09-16 放开，见函数内注释）: 折叠目标是
+#   "目标端根目录下的短哈希子目录" dest_path/<hash8>/<file> —— 与子目录折叠同构。
+#   （此前这里写着"不适用: 根目录文件无目录可换"，实测该判断造成修复失败的主导原因。）
 #
 # 为什么必须有这一级（既有链路的死角）:
 #   Step 1 的 base64URL 编码目录只在"目录创建失败"时降级，是被动兜底。
@@ -1036,8 +1038,9 @@ _try_fix_methods_round() {
 #   失败原因文案，规范 · 说人话）。技术细节由各分支自己的 log_fix 负责（"短哈希
 #   目录创建失败" 这类术语留在日志里，通知读者不需要知道内部机制）
 #   为什么要有它: 调用方此前一律把"切换失败"写成「短哈希目录同样不可写」，
-#   但"文件在目标端根目录、无目录可换"等分支**根本没探过短哈希目录**，
-#   文案与事实相反（2026-09-12 修，同批修正预检依据文案）
+#   但**根本没探过短哈希目录**的分支（如"已降级到 base64URL 目录"）文案与事实相反
+#   （2026-09-12 修，同批修正预检依据文案）。
+#   注: "无目录可换"（根目录文件直接放弃）这一支已于 2026-09-16 放开，不再产生。
 # 用法: _fix_switch_to_hash_dir → 0=已切到可写的短哈希目录，1=未能切换
 _HASH_DIR_FAIL_REASON=""
 _fix_switch_to_hash_dir() {
@@ -1046,10 +1049,25 @@ _fix_switch_to_hash_dir() {
     _HASH_DIR_FAIL_REASON="备用目录兜底已关闭"
     return 1
   fi
+  # 根目录文件也折叠（2026-09-16 放开）。折叠目标是**目标端根目录下的短哈希子目录**
+  #   `dest_path/<hash8>/<file>`，与子目录折叠完全同构:
+  #     · alternative 都是"相对 dest_path 的 <hash8>/<文件名>"（见方法2/4 的
+  #       `${m2sh_dst#${dest_path}/}`）⇒ 防删除的 `--filter-from`（`- /<hash8>/<文件>`）
+  #       天然覆盖根目录情形（实现前已核实，这是本项最大回归风险）；
+  #     · restore 用绝对路径 `dest_path/<hash8>/<文件>` ⇒ 还原照旧。
+  # 为什么必须放开（实测）: run 34959561878 一轮里「无目录可换」出现 **150 次**
+  #   （失败清单 100 条纯此项 + 50 条「目标目录不可写…无目录可换」），而该轮
+  #   修复成功 29 / 失败 49 ⇒ **修复失败的主导原因**就是这批根目录文件。它们此前
+  #   只有 4 次尝试且**全在同一路径上**（只换名字/形式、路径不变）⇒ 若根因在路径本身
+  #   （§11.8 已证路径可因"特定字符串"被拒），这类文件数学上必然修不好，且不会被
+  #   后续轮次自动救回 ⇒ 同步永远差这一批。
+  local _hash_src="$file_dir_rel"
   if [ "$file_dir_rel" = "." ] || [ -z "$file_dir_rel" ]; then
-    log_fix "$fix_log" "⏭ 文件位于目标端根目录，无目录可换，跳过短哈希目录兜底"
-    _HASH_DIR_FAIL_REASON="无目录可换"
-    return 1
+    # 根目录没有"目录名"可哈希 ⇒ 用固定串作源。选 "." 是因为它**不可能是合法目录名**
+    # （"." 与 ".." 为保留名），故 md5(".") 只可能对应"根目录"这一种情形，不会与任何
+    # 真实子目录的折叠目录撞车。**不需要按同步对加盐**: 折叠目标本身带 dest_path 前缀
+    # （dest_path/<hash8>），不同同步对天然落在不同父目录下。
+    _hash_src="."
   fi
   if [ "${used_base64_dir:-0}" -eq 1 ]; then
     log_fix "$fix_log" "⏭ 已降级到 base64URL 编码目录，不再叠加短哈希目录"
@@ -1057,7 +1075,7 @@ _fix_switch_to_hash_dir() {
     return 1
   fi
 
-  HASH_DIR_REL=$(_hash_dir_rel_for "$file_dir_rel")
+  HASH_DIR_REL=$(_hash_dir_rel_for "$_hash_src")
   if [ -z "$HASH_DIR_REL" ]; then
     log_fix "$fix_log" "⚠ 短哈希目录名计算失败，跳过兜底"
     _HASH_DIR_FAIL_REASON="备用目录名算不出来"
@@ -1065,8 +1083,12 @@ _fix_switch_to_hash_dir() {
   fi
   local hash_dst_dir="${dest_path}/${HASH_DIR_REL}"
   local hash_ol_dir="/${ol_dst_base}/${HASH_DIR_REL}"
-  log_fix "$fix_log" "🔀 目录级兜底: 整条目录折叠为短哈希目录 ${HASH_DIR_REL}"
-  log_fix "$fix_log" "   原目录: ${file_dir_rel}"
+  if [ "$file_dir_rel" = "." ] || [ -z "$file_dir_rel" ]; then
+    log_fix "$fix_log" "🔀 目录级兜底: 目标端根目录折叠为短哈希目录 ${HASH_DIR_REL}（根目录无目录名可折，改为在根下新建）"
+  else
+    log_fix "$fix_log" "🔀 目录级兜底: 整条目录折叠为短哈希目录 ${HASH_DIR_REL}"
+    log_fix "$fix_log" "   原目录: ${file_dir_rel}"
+  fi
 
   # 创建 + lsd 复核（同 Step 1 口径: mkdir 返回 0 也必须复核，防 WebDAV 静默失败）
   local hash_dir_ok=0
