@@ -827,6 +827,49 @@ def main():
         finally:
             gist_nodes.github_api_request, gist_nodes.http_get = real_api, real_get
 
+        print('== 22. 试装摘要渲染：字段名必须与 trial_load 的报告键一致 ==')
+        # 这里守的是一个**真发生过的崩溃**：`_trial_load_summary_line` 曾引用
+        # `report["rounds"]`，而报告里那个字段叫 `probes`（切块/热重载改造时改了名但
+        # 漏改这里）⇒ 真机上试装一跑完，摘要渲染就 KeyError、整轮产出报废。
+        # 单测 `trial_load` 抓不到它（报告本身是对的），必须拿**真实报告**过一遍渲染。
+        # 所以这里不写死字典，而是真的调 `trial_load`（数据全好、不必装任何节点）。
+        import alive_filter as af22
+        saved_home22 = af22._safe_home_dir
+        saved_start22 = af22._start_mihomo
+        tmp22 = pathlib.Path(tempfile.mkdtemp(prefix='summary-render-'))
+        af22._safe_home_dir = lambda base: (pathlib.Path(base).mkdir(parents=True,
+                                                                    exist_ok=True),
+                                            pathlib.Path(base))[1]
+        af22._start_mihomo = lambda *a, **k: (_ for _ in ()).throw(
+            RuntimeError('本用例只验摘要渲染，不需要真起 mihomo'))
+        try:
+            # 起不来 ⇒ 报告走 skipped 分支，但**字段仍然齐全**；再用一份手工补全的
+            # 正常报告覆盖另一条分支（两条分支的键都要对得上）。
+            _, rep22 = af22.trial_load([{'name': 'a', 'type': 'ss', 'server': '1.1.1.1',
+                                         'port': 443, 'cipher': 'aes-128-gcm',
+                                         'password': 'p'}], workdir=tmp22)
+        finally:
+            af22._safe_home_dir = saved_home22
+            af22._start_mihomo = saved_start22
+            shutil.rmtree(tmp22, ignore_errors=True)
+        # 正常完成分支：用 trial_load 真实产出的键集合，只把值改成「装上了 2 个、剔了 1 个」。
+        normal22 = dict(rep22)
+        normal22.update({'skipped': False, 'skip_reason': '', 'kept': 2, 'removed': 1,
+                         'removed_names': ['bad-one'], 'batches': 3, 'bad_batches': 1,
+                         'batches_failed': 0, 'elapsed_seconds': 1.2, 'probes': 7})
+        for label, record in (('正常完成', normal22), ('fail-open', rep22), ('未执行', None)):
+            try:
+                line22 = gist_nodes._trial_load_summary_line(record, 3)
+            except KeyError as e:
+                check(False, f'{label}分支渲染不能 KeyError（实际缺字段 {e}）')
+                continue
+            check(isinstance(line22, str) and line22.startswith('- 试装排雷：'),
+                  f'{label}分支渲染出摘要行（实际 {line22[:30]!r}）')
+        check('7 次' in gist_nodes._trial_load_summary_line(normal22, 3),
+              '正常分支要写出探针次数——它取自 report["probes"]')
+        check('bad-one' in gist_nodes._trial_load_summary_line(normal22, 3),
+              '正常分支要列出被剔节点名')
+
     finally:
         server.shutdown()
         shutil.rmtree(tmpdir, ignore_errors=True)
