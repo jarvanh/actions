@@ -333,7 +333,7 @@ _bulk_fold_record_landed() {
   # 源端尺寸一次取回（逐文件 rclone size 会退化成 N 次往返，正是要避免的）
   local size_json="/tmp/${task_name}_bulkfold_size_${hash8}_$$.json"
   rclone lsjson "${source_path}/${dir_rel}" --files-only --no-mimetype --no-modtime \
-    --retries 1 --timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900}" > "$size_json" 2>/dev/null \
+    --retries 1 --timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900s}" > "$size_json" 2>/dev/null \
     || echo '[]' > "$size_json"
   # 尺寸进关联数组再查表: 逐文件调 jq 在千级文件下是几十秒的纯进程启动开销
   # （run 34674196629 单目录就有 1051 个文件），一次 jq 摊平 + bash 查表才是零成本
@@ -527,7 +527,7 @@ _sync_bulk_hash_dir_fold() {
     while [ "$_land_try" -lt "$_land_tries" ]; do
       _land_try=$((_land_try + 1))
       rclone lsf "$hash_dst" --files-only --retries 1 \
-        --timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900}" > "$landed" 2>/dev/null || : > "$landed"
+        --timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900s}" > "$landed" 2>/dev/null || : > "$landed"
       landed_n=$(wc -l < "$landed" | tr -d ' ')
       [ "${landed_n:-0}" -ge "${cnt:-0}" ] && [ "${cnt:-0}" -gt 0 ] && break
       [ "${landed_n:-0}" -gt 0 ] && [ "${_land_try}" -ge "$_land_tries" ] && break
@@ -567,8 +567,13 @@ _sync_bulk_hash_dir_fold() {
   done < "$dir_counts"
 
   # ===== 折叠落盘延迟复核（本轮登记的"列表读空"目录）=====
-  # 为什么就地再等没用: 可见性延迟实测远超分钟级 —— run 34826097133 判"零落盘"的
-  #   5b32587f 在 11h 后才读到 18 个文件；6×30s 轮询对部分目录仍不够。
+  # ⚠️ **2026-09-16 更正**: 折叠"零落盘"的**主因不是可见性延迟，而是列举调用一直失败** ——
+  #   `--timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900}"` 传的是**裸数字**，而 rclone 的
+  #   `--timeout` 要求带单位（`900s`）⇒ 每次列举都以 `missing unit in duration` 失败，
+  #   且 stderr 被 2>/dev/null 吞掉 ⇒ 落盘清单恒为空 ⇒ 折叠成果从未被记账
+  #   （旁证: 三轮生产日志里 `✅ 折叠落盘` 出现 **0 次**）。已修（workflow 注入 `900s`）。
+  # 可见性延迟**确实存在**（run 34826097133 判"零落盘"的 5b32587f 在 11h 后才读到 18 个
+  #   文件），所以本段延迟复核仍有价值；但它是第二位的成因，别再把它当主因。
   # 为什么也不能直接退回逐文件修复（旧行为）: 双重损失 ——
   #   · 逐文件修复打的是**原目录**（正是写不进的那条路径，405），大概率全失败；
   #   · 折叠成果不进 marker ⇒ 后端有文件、账上没有 = 幽灵落盘，下一轮再折一次。
@@ -583,7 +588,7 @@ _sync_bulk_hash_dir_fold() {
       [ -n "${p_dir:-}" ] || continue
       local p_list="/tmp/${task_name}_reverify_${p_hash}_$$.txt"
       rclone lsf "$p_dst" --files-only --retries 1 \
-        --timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900}" > "$p_list" 2>/dev/null || : > "$p_list"
+        --timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900s}" > "$p_list" 2>/dev/null || : > "$p_list"
       # 按**非空行**计数: 空白输出（只有换行）不能算"已可见"，否则会把空列表
       # 当成落盘成功（记账循环本身有 -n 保护，但"可见/不可见"的判定会走错分支）
       _rv_n=$(grep -c '[^[:space:]]' "$p_list" 2>/dev/null || true)
@@ -661,7 +666,7 @@ _sync_fix_missing_files() {
       local src_ls="/tmp/${task_name}_src_ls_$$.txt"
       local dst_ls="/tmp/${task_name}_dst_ls_$$.txt"
       local src_ls_ok=0 dst_ls_ok=0
-      timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900}" rclone lsf "$source_path" -R --files-only "${FILTER_ARGS[@]}" > "$src_ls" 2>/dev/null && src_ls_ok=1 || true
+      timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900s}" rclone lsf "$source_path" -R --files-only "${FILTER_ARGS[@]}" > "$src_ls" 2>/dev/null && src_ls_ok=1 || true
       # 目标端清单复用: 调用方（如批次巩固 _batch_consolidate）刚做过 lsf 的
       # 话直接沿用，省掉一次全量递归（大目录数分钟）。缓存须非空才算有效，
       # 空/缺失仍回退到现场 lsf（宁慢勿漏）
@@ -670,7 +675,7 @@ _sync_fix_missing_files() {
         dst_ls_ok=1
         echo "  复用调用方目标端清单（$(wc -l < "$dst_ls" | tr -d ' ') 项），跳过重复 lsf" | tee -a "$LOG_FILENAME"
       else
-        timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900}" rclone lsf "$dest_path" -R --files-only > "$dst_ls" 2>/dev/null && dst_ls_ok=1 || true
+        timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900s}" rclone lsf "$dest_path" -R --files-only > "$dst_ls" 2>/dev/null && dst_ls_ok=1 || true
       fi
       if [ "$src_ls_ok" -eq 1 ] && [ "$dst_ls_ok" -eq 1 ]; then
         # 仅当两端列表都完整获取时才做 diff，避免半截列表产生误报触发无谓修复
@@ -801,7 +806,7 @@ _sync_fix_missing_files() {
     local _NAMELEN_OVER_255=0
     local _NAMELEN_OVER_RAWMAX=0
     if [[ "$dest_path" == openlist:wopan176Crypt/* ]] && [ -s "$missing_list" ] && _ensure_crypt_config "$dest_path"; then
-      _NAMELEN_RAW_MAX=$(timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900}" rclone lsf "${_CRYPT_REMOTE}" -R --files-only 2>/dev/null \
+      _NAMELEN_RAW_MAX=$(timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900s}" rclone lsf "${_CRYPT_REMOTE}" -R --files-only 2>/dev/null \
         | awk -F/ '{ n=length($NF); if (n>m) m=n } END { print m+0 }')
       echo "名长诊断已启用: crypt=${_CRYPT_REMOTE}, 后端已接受最长密文名 ${_NAMELEN_RAW_MAX} 字节" | tee -a "$LOG_FILENAME"
     fi

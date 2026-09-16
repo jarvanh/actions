@@ -175,14 +175,23 @@ FC_SUB_PATH=""
 FC_CAND="$FC_WORK/candidates.txt"
 : > "$FC_CAND"
 
+# rclone `--timeout` 的取值归一化: 环境变量若被设成裸数字（历史坑）补上 `s`，
+# 否则 rclone 会以 `missing unit in duration` 失败 —— 而失败常被 2>/dev/null 吞掉
+_fc_timeout_arg() {
+  local t="${OPENLIST_RCLONE_LISTING_TIMEOUT:-900s}"
+  case "$t" in *[a-zA-Z]*) printf '%s' "$t" ;; *) printf '%ss' "$t" ;; esac
+}
 # 列举远端目录（**不吞错误**: 失败与"目录为空"必须能区分开 —— 2026-09-16 实测踩到:
 # 主轮同时在读同一 OneDrive 时列举被限流，错误被 /dev/null 吞掉后表现为"0 个文件"，
 # 与"路径写错"长得一模一样，白排查一轮）
 _fc_list_remote() {  # <remote 路径> <输出文件> <标签>
   local path="$1" out="$2" label="${3:-列表}" t0 t1 rc
   t0=$(date +%s)
-  rclone lsf -R --files-only --retry 3 --low-level-retries 5 --contimeout 30s \
-    --timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900}" "$path" > "$out" 2> "${out}.err"
+  # flag 名与取值都要小心（2026-09-16 实跑踩到两个）:
+  #   · `--retry` **不是** rclone 的 flag，正确是 `--retries`（写错直接 rc=2 unknown flag）
+  #   · `--timeout` 要求**带单位**（`900s`），裸数字会 `missing unit in duration` 而失败
+  rclone lsf -R --files-only --retries 3 --low-level-retries 5 --contimeout 30s \
+    --timeout "$(_fc_timeout_arg)" "$path" > "$out" 2> "${out}.err"
   rc=$?
   t1=$(date +%s)
   _fc_log "  📋 ${label}: ${path} → $(grep -c . "$out" 2>/dev/null || true) 个文件（rc=${rc}，$((t1 - t0))s）"
@@ -193,7 +202,7 @@ _fc_list_remote() {  # <remote 路径> <输出文件> <标签>
 # 源端列举为空时的定性: 非递归列举有内容 ⇒ 是列举失败（多为限流/超时）；也空 ⇒ 路径不对
 _fc_diagnose_empty_src() {  # <remote 路径>
   local path="$1" probe="$FC_WORK/probe_nonrec.lsf"
-  rclone lsf "$path" --files-only --retry 1 --timeout 120s > "$probe" 2> "${probe}.err"
+  rclone lsf "$path" --files-only --retries 1 --timeout 120s > "$probe" 2> "${probe}.err"
   if [ -s "$probe" ]; then
     _fc_log "❌ 源端递归列举为空，但非递归列举有内容 ⇒ **列举失败**（常见成因: 主轮同时在读同一网盘被限流/超时）"
     _fc_log "   ↳ 处置: 避开主轮（或先取消主轮）后重跑；错误尾部: $(tail -2 "${probe}.err" 2>/dev/null | tr '\n' ' ' | cut -c1-200)"
@@ -264,8 +273,8 @@ FC_STATE_LIST=""
 _fc_state_list() {
   [ -n "$FC_STATE_LIST" ] && return 0
   FC_STATE_LIST="$FC_WORK/state.lsf"
-  rclone lsf "${SYNC_STATE_DIR:-onedrive:/logs/sync_state}" --files-only --retry 1 \
-    --timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900}" > "$FC_STATE_LIST" 2>/dev/null || : > "$FC_STATE_LIST"
+  rclone lsf "${SYNC_STATE_DIR:-onedrive:/logs/sync_state}" --files-only --retries 1 \
+    --timeout "$(_fc_timeout_arg)" > "$FC_STATE_LIST" 2>/dev/null || : > "$FC_STATE_LIST"
 }
 _fc_resolve_leaf() {  # <rel 相对任务根> → 设置 FC_LEAF_TASK/DST/SRC/REL/MARKER/DIR
   local rel="$1" dir d
