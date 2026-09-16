@@ -202,6 +202,7 @@ taier 侧 `TAIER_ALIVE_PROBE`（默认开）存在的意义——它按节点逐
 | 现象 | 原因 / 处置 |
 |---|---|
 | `nodes_collected: 0` 但 `source_mapping_built` 有值 | 见[为什么节点收集不等健康检查](#为什么节点收集不等健康检查)。`provider_snapshot_collected` 会给出 `total` / `alive` / `collected` 三个数，`collected == total` 即为正常（`alive` 为 0 只是还没探完） |
+| `nodes_collected: 0` 且 **`source_mapping_built entries: 0`** | 先找 `subscription_fetch_skipped` —— 那是**订阅根本没取到**（不是节点都判死了），`source_url` + `index` + `error` 三样齐；若 `error` 是 `SSL: UNEXPECTED_EOF_WHILE_READING` 一类，就是取文途中被掐断。几 MB 的订阅体（Gist raw）上这很常见，`fetch_text` 已带 4 次指数退避重试，中间会打 `subscription_fetch_retry`；**见到 retry 后成功属正常自愈**。重试全失败才 `skipped`，此时该 `exit`/产出的方向是「定位网络或订阅源」，不要去查解析与判据（判据没参与）。**这条以前是静默的**：一次抖动 = 整份订阅消失 = 零节点 + job 仍报成功 |
 | GitHub API 403/限流 | 匿名调用共享出口 IP 60 次/h；workflow 已带 `GITHUB_TOKEN`/`GH_TOKEN` 回退 |
 | Gitee 仓库体积超限 | `rebuild_gitee_repo` 自动重建私有仓库 `proxy-speedtest-temp` |
 | **节点 push 全部超时**（连直连基线也超时） | Gitee 仓库超限/被回收时 git 常表现为**挂起超时**而非明确报错（2026-09-08 实测连续三轮 0 成功）。引擎已自愈：本轮尚无成功 push 且节点失败为超时/被拒/size limit 时，自动 `rebuild_gitee_repo` 一次并重试该节点（日志 `repo_rebuild_on_push_timeout`，每轮限一次）；若重建后仍失败，多为 Gitee 账号级限流，等下一轮即可 |
