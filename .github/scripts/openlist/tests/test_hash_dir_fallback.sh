@@ -17,7 +17,8 @@
 #      目录，连整文件下载都省掉；预检通过但 4 方法仍全败时再兜底切一次。
 #
 # 本测试覆盖: 预检先于下载、重启后真值口径定论、假成功目录、重启预算与结论
-#   缓存、目录切换与黑名单重置、根目录文件跳过、开关、以及还原元数据分类。
+#   缓存、目录切换与黑名单重置、**根目录文件折叠到「根下短哈希子目录」**（2026-09-16
+#   放开，此前是直接放弃）、开关、以及还原元数据分类。
 set -u
 # 探针可见性重试只留 1 次: 本测试没有 _ol_refresh_path_cache（openlist_driver.sh
 # 未 source），兜底等待会把十余个"不可写目录"场景各拖慢数秒 → 套件从秒级变分钟级
@@ -64,6 +65,9 @@ PROBE_ONLY=0
 # 跑在子 shell，shell 变量累加不会写回父 shell
 DST_FILES_FILE="$WORK/dst_files.txt"
 : > "$DST_FILES_FILE"
+# mkdir 目标记录（场景5 断言"根目录折叠"落点用）
+MKDIR_LOG="$WORK/mkdir_targets.txt"
+: > "$MKDIR_LOG"
 LSF_COUNT_FILE="$WORK/lsf_calls.count"
 : > "$LSF_COUNT_FILE"
 LSF_HIDE_FIRST=0                 # 前 N 次 lsf 读空（列表缓存延迟模拟）
@@ -108,7 +112,10 @@ rclone() {
         [ "$_c" -le "$LSF_HIDE_FIRST" ] && return 0
       fi
       cat "$DST_FILES_FILE" 2>/dev/null ;;
-    mkdir|lsd) return 0 ;;                                # 目录创建/复核恒成功
+    mkdir)
+      printf '%s\n' "$2" >> "$MKDIR_LOG"                  # 记录目标: 断言折叠目录的落点
+      return 0 ;;
+    lsd) return 0 ;;                                      # 目录创建/复核恒成功
     *) return 0 ;;
   esac
 }
@@ -136,6 +143,7 @@ reset_state() {
   # 内容性失败而不计入熔断
   _FIX_NAMELEN_CONTENT=0
   : > "$DST_FILES_FILE"
+  : > "$MKDIR_LOG"
   RESTART_CALLS=0
   RESTART_OK=1
   : > "$LSF_COUNT_FILE"
@@ -202,18 +210,38 @@ run_fix "$REL"
 grep -q "预检目录可写性" "$FIX_LOG" && ok "4b 原目录预检判为可写（探针确实落盘）" || bad "4b: 未走预检"
 grep -q "兜底换短哈希目录" "$FIX_LOG" && ok "4c 走了 Step 5 兜底入口（预检通过 ≠ 文件能落盘）" || bad "4c: 未走兜底入口"
 
-# ===== 场景5: 目标端根目录的文件无目录可换 → 不切换 =====
+# ===== 场景5: 目标端根目录的文件 → 折叠到「根目录下的短哈希子目录」 =====
+# 2026-09-16 放开: 此前该情形直接 early return（"无目录可换"），使这类文件只有
+#   4 次尝试、且**全在同一路径上**（只换名字/形式、路径不变）—— 若根因在路径本身
+#   就数学上必然修不好。实测 run 34959561878 一轮里「无目录可换」150 次记录
+#   （失败清单 100 条纯此项 + 50 条「目标目录不可写…无目录可换」），而该轮修复
+#   成功 29 / 失败 49 ⇒ 它是**修复失败的主导原因**。根目录无目录名可折，故改为
+#   在**目标端根目录下新建**短哈希子目录（dest_path/<hash8>/）。
+HASH_ROOT=$(printf '%s' "." | md5sum | cut -c1-8)
 reset_state
-WRITABLE_DIR=""                  # 全拒
+WRITABLE_DIR=""                  # 全拒: 折叠后仍写不进
 run_fix "options.xml"
-[ "$TRY_FIX_STATUS" = "failed" ] && ok "5a 根目录文件修复失败（预期）" || bad "5a: 不该成功"
-grep -q "无目录可换" "$FIX_LOG" && ok "5b 根目录文件跳过目录切换" || bad "5b: 未跳过（根目录无目录可换）"
-! grep -q "🔀 目录级兜底" "$FIX_LOG" && ok "5c 未创建无谓的短哈希目录" || bad "5c: 根目录文件不该建短哈希目录"
-# 根目录场景**没探过**短哈希目录，失败原因就不能写它不可写
-printf '%s' "$TRY_FIX_MESSAGE" | grep -q "无目录可换" \
-  && ok "5d 失败原因点明是无目录可换" || bad "5d: msg=${TRY_FIX_MESSAGE}"
-! printf '%s' "$TRY_FIX_MESSAGE" | grep -q "短哈希目录" \
-  && ok "5e 失败原因不谎报短哈希目录不可写" || bad "5e: msg=${TRY_FIX_MESSAGE}"
+[ "$TRY_FIX_STATUS" = "failed" ] && ok "5a 根目录文件在全拒时仍失败（预期）" || bad "5a: 不该成功"
+grep -qF "目标端根目录折叠为短哈希目录 ${HASH_ROOT}" "$FIX_LOG" \
+  && ok "5b 根目录文件也会尝试折叠（不再 early return）" || bad "5b: 未尝试折叠"
+grep -qxF "${DEST}/${HASH_ROOT}" "$MKDIR_LOG" \
+  && ok "5c 折叠目录建在目标端根下（dest_path/<hash8>）" || bad "5c: mkdir 目标=[$(tr '\n' ' ' < "$MKDIR_LOG")]"
+! printf '%s' "$TRY_FIX_MESSAGE" | grep -q "无目录可换" \
+  && ok "5d 失败原因不再谎报「无目录可换」（该分支已不存在）" || bad "5d: msg=${TRY_FIX_MESSAGE}"
+
+# 5e~5g: 根下短哈希子目录可写 → 折叠成功，且替代路径与子目录折叠同构
+#   （同构是关键: 防删除的 --filter-from 用 `- /<alternative>`，根目录情形天然被覆盖）
+reset_state
+WRITABLE_DIR="$HASH_ROOT"
+run_fix "options.xml"
+[ "$TRY_FIX_STATUS" = "success" ] && ok "5e 根目录文件折叠后修复成功" || bad "5e: status=${TRY_FIX_STATUS} msg=${TRY_FIX_MESSAGE}"
+[ "$TRY_FIX_ALTERNATIVE" = "${HASH_ROOT}/options.xml" ] \
+  && ok "5f 替代路径为 <hash8>/<文件名>（相对 dest_path，与子目录折叠同构）" \
+  || bad "5f: alt=${TRY_FIX_ALTERNATIVE}"
+printf '%s' "$TRY_FIX_RESTORE" | grep -qF "options.xml" \
+  && ok "5g 还原说明含原文件名（哈希不可逆，只能靠它归位）" || bad "5g: restore=${TRY_FIX_RESTORE}"
+# 5h: 根目录折叠的哈希源是常量 "." ⇒ 与任何真实子目录名的折叠值无关
+[ "$HASH_ROOT" != "$HASH" ] && ok "5h 根目录哈希与子目录哈希不同（不会互相撞车）" || bad "5h: 撞车"
 
 # ===== 场景6: 短哈希目录同样不可写 → 收尾消息准确 =====
 reset_state
