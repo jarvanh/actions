@@ -35,6 +35,10 @@
 跑法：python .github/scripts/proxy-speedtest/tests/test_resolve_gist_raw_url.py
 退出码 0 = 全部通过。
 """
+import contextlib
+import io
+import json
+import os
 import pathlib
 import sys
 
@@ -205,7 +209,6 @@ def main():
 
         print('== 11. 健康路径只请求一次（重试不许拖慢正常情况）==')
         state['n'] = 0
-
         def healthy(req, timeout=None):
             state['n'] += 1
             return _Resp(b'ok\n')
@@ -220,6 +223,46 @@ def main():
         G.urllib.request.urlopen = orig_urlopen
         G.time.sleep = orig_sleep
         G.log_progress = orig_glog
+
+    print('== 12. CLI 出口把结果打在哨兵行上（workflow 用 $( ) 取值，日志不得污染）==')
+    orig_common_log = C.log_progress
+    orig_api = C.github_api_request
+    try:
+        # 12a. 失败路径：函数会 log_progress 一行 JSON，但哨兵行必须是空值行
+        C.log_progress = lambda stage, **kw: print(
+            json.dumps({'kind': 'progress', 'stage': stage, **kw}), flush=True)
+        C.github_api_request = lambda *a, **k: (_ for _ in ()).throw(
+            RuntimeError('HTTP Error 404: Not Found'))
+        buf = io.StringIO()
+        os.environ['SOURCE_GIST_ID'] = 'deadbeef'
+        os.environ['SOURCE_GIST_FILENAME'] = FILENAME
+        os.environ['GH_TOKEN'] = 'ghp_fake'
+        with contextlib.redirect_stdout(buf):
+            C.resolve_gist_raw_url_cli()
+        lines = buf.getvalue().splitlines()
+        marked = [l for l in lines if l.startswith(C.GIST_RAW_URL_MARKER)]
+        check(len(marked) == 1, f'恰好一行带哨兵（实际 {len(marked)}，总 {len(lines)} 行）')
+        check(marked == [C.GIST_RAW_URL_MARKER],
+              f'失败时哨兵行是「哨兵 + 空串」（实际 {marked!r}）')
+        check(len(lines) > 1, '确实还有别的日志行——证明这个用例真的在测「日志掺进 stdout」')
+        check(all(not l.startswith('http') for l in lines),
+              'stdout 上没有任何以 http 开头的裸行（否则 $( ) 的判空仍会失效）')
+
+        # 12b. 成功路径：哨兵行带上完整 URL，且它是唯一可取到的值
+        C.github_api_request = lambda *a, **k: {'files': {FILENAME: {'raw_url': RAW}}}
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            C.resolve_gist_raw_url_cli()
+        lines = buf.getvalue().splitlines()
+        marked = [l for l in lines if l.startswith(C.GIST_RAW_URL_MARKER)]
+        check(marked == [C.GIST_RAW_URL_MARKER + RAW],
+              f'成功时哨兵行 = 哨兵 + raw_url（实际 {marked!r}）')
+        check(len(lines) == 1, f'成功且无失败日志时只有一行（实际 {len(lines)} 行）')
+    finally:
+        C.log_progress = orig_common_log
+        C.github_api_request = orig_api
+        for k in ('SOURCE_GIST_ID', 'SOURCE_GIST_FILENAME', 'GH_TOKEN'):
+            os.environ.pop(k, None)
 
     print()
     if FAILURES:

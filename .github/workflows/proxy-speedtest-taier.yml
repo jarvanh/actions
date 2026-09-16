@@ -201,14 +201,18 @@ jobs:
           if [ "$want_gist" = "1" ]; then
             # 手动给了 id 就优先用它，否则用仓库 secret 里那个（编排层的常规路径）
             export SOURCE_GIST_ID="${SOURCE_GIST_ID_IN:-$SOURCE_GIST_ID_SECRET}"
+            # 只认哨兵那一行拿 URL。**不能**直接 `url=$(python -c 'print(resolve...)')`：
+            # `resolve_gist_raw_url` 失败时会 `log_progress` 往 stdout 写一行 JSON，而
+            # `$( )` 把 stdout 整段当值 ⇒ 取不到时 `$url` 是那行 JSON 而不是空串，
+            # 下面的判空失效、畸形值被写进 $GITHUB_ENV，错误被推迟到下一步且完全变形
+            # （实测 2026-09-16 run 35082354560：`bootstrap_failed: unknown url type: {"kind"`）
+            # —— 本该「响亮地报解析失败」，变成了「拿到了一个畸形 URL」。
             url=$(python -c "
           import os, sys
           sys.path.insert(0, '.github/scripts/proxy-speedtest')
-          from speedtest_common import resolve_gist_raw_url
-          print(resolve_gist_raw_url(os.environ['SOURCE_GIST_ID'],
-                                     os.environ['SOURCE_GIST_FILENAME'],
-                                     os.environ.get('GH_TOKEN', '')))
-          ")
+          from speedtest_common import resolve_gist_raw_url_cli
+          sys.exit(resolve_gist_raw_url_cli())
+          " | sed -n 's/^__GIST_RAW_URL__//p')
             if [ -z "$url" ]; then
               echo "::error::按 gist id 解析源订阅 raw URL 失败（文件=$SOURCE_GIST_FILENAME）"
               exit 1
