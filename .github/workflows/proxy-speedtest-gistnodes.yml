@@ -179,6 +179,30 @@ jobs:
         #      只在本机回环上跑、不对外暴露，按官方提示直接给 `/` 即可。
         run: |
           set -euo pipefail
+          # 先拉镜像再起容器，且**拉取带重试**。
+          #
+          # 为什么不能直接 `docker run`：它把「拉镜像」和「起容器」合成一步，而拉取失败
+          # 会以 exit 125 把整个 step 打死、连重试的机会都没有。Docker Hub 侧
+          # `auth.docker.io` / `registry-1.docker.io` 的瞬时重置很常见——实测 2026-09-16
+          # run 35046469047（schedule 轮）：
+          #   Head ".../manifests/http-meta": read tcp ...->104.18.43.178:443:
+          #   read: connection reset by peer   ⇒ exit 125
+          # 同一镜像在 33 分钟前的 run 35044338569 拉得好好的，仓库侧没有任何改动。
+          # 一次瞬时重置就报废整轮（含已抓到的订阅），与 `fetch_text` 那次是同一类
+          # 「单次网络抖动 ⇒ 静默/剧烈失败」形态，所以同样用指数退避重试兜住。
+          for attempt in $(seq 1 4); do
+            if docker pull xream/sub-store:http-meta; then
+              echo "镜像拉取成功（第 $attempt 次尝试）"
+              break
+            fi
+            if [ "$attempt" = "4" ]; then
+              echo "::error::xream/sub-store:http-meta 拉取失败且重试已用尽（4 次，Docker Hub 侧不可达？）"
+              exit 1
+            fi
+            wait_s=$((5 * 2 ** (attempt - 1)))
+            echo "::warning::镜像拉取失败（第 $attempt 次），${wait_s} 秒后重试"
+            sleep "$wait_s"
+          done
           docker run -d --name sub-store \
             -p 127.0.0.1:3000:3000 \
             -e SUB_STORE_BODY_JSON_LIMIT=16mb \
