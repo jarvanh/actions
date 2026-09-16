@@ -1,0 +1,112 @@
+# 测试载体（独立于所有业务 workflow）
+#
+# 为什么单独一个 workflow:
+#   · 业务 workflow（openlist / emby / proxy-speedtest …）跑真实任务、动辄数小时，
+#     把测试塞进去等于"想跑测试就得跑一遍业务"；
+#   · 本机跑测试要吃 CPU（openlist 26 套串行约 1–2 分钟），而且 macOS / 本机沙箱会带来
+#     4 项**环境假红**：无 `date -d`（marker_skip_guards）、`wc` 前导空格（sync_trend_budget）、
+#     无 docker（truth）、沙箱拦子进程（progress_no_orphans）。ubuntu runner 上这四项都不存在，
+#     基线因此更硬（预期 26/26 全绿）。
+# 结构: 按「域」分组，每域一个 job；新增域照抄同构 job 即可（域内一律串行）。
+# 触发: 只 workflow_dispatch —— 仓库既有约定是「无任何 workflow 监听 push/pull_request」
+#       （main 有并行推送，加了会产生大量冗余运行）。需要验证时手动 dispatch。
+name: tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      domain:
+        description: "只跑指定域（留空 = 全部）：openlist"
+        required: false
+        type: string
+        default: ""
+
+# 独立并发组: 绝不与 openlist-singleton / openlist-diag 等业务组互等
+concurrency: tests
+
+permissions:
+  contents: read
+
+jobs:
+  openlist:
+    if: ${{ github.event.inputs.domain == '' || github.event.inputs.domain == 'openlist' }}
+    runs-on: ubuntu-latest
+    # 26 套串行；本机约 1–2 分钟，runner 上含 setup 给足余量
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: 静态检查（bash -n 全部脚本 + workflow YAML 解析）
+        run: |
+          set -u
+          fail=0
+          n=0
+          while IFS= read -r f; do
+            n=$((n + 1))
+            bash -n "$f" || { echo "❌ bash -n 失败: $f"; fail=1; }
+          done < <(find .github/scripts -name '*.sh' -type f | sort)
+          echo "bash -n 通过 $n 个脚本"
+          # 注意: 块标量内的多行代码必须整段缩进到块层级（否则 YAML 在顶格处断句）——
+          # 块标量会剥掉最小公共缩进，所以 python 代码传进去后仍是顶格的。
+          python3 -c "
+          import glob, sys, yaml
+          bad = 0
+          for f in sorted(glob.glob('.github/workflows/*.yml')):
+              try:
+                  yaml.safe_load(open(f, encoding='utf-8'))
+              except Exception as e:
+                  print('❌ YAML 解析失败: ' + f + ': ' + str(e)); bad = 1
+          print('YAML 全部通过' if not bad else 'YAML 有失败')
+          sys.exit(bad)
+          "
+          [ "$fail" -eq 0 ] || exit 1
+
+      - name: 环境自检（测试依赖是否齐备）
+        run: |
+          set -u
+          echo "bash:    $(bash --version | head -1)"
+          echo "python3: $(python3 --version 2>&1)"
+          echo "jq:      $(jq --version 2>&1 || echo 不可用)"
+          echo "md5sum:  $(md5sum --version 2>&1 | head -1)"
+          echo "docker:  $(docker --version 2>&1 || echo '不可用（truth 套件会红）')"
+          echo "date -d: $(date -d '@0' '+%Y-%m-%d' 2>/dev/null || echo '不可用（marker_skip_guards 会红）')"
+
+      - name: openlist 回归套件（串行）
+        run: |
+          set -u
+          cd .github/scripts/openlist/tests
+          WORK=/tmp/ol_tests
+          rm -rf "$WORK"; mkdir -p "$WORK"
+          pass=0; fail=0; failed=""
+          # 串行是硬要求: 并行会多出已知的 T5 时序假红（progress_no_orphans）
+          for f in test_*.sh; do
+            out=$(bash "$f" </dev/null 2>&1); rc=$?
+            printf '%s\n' "$out" > "$WORK/$f.out"
+            printf '%-46s EXIT=%s\n' "$f" "$rc" >> "$WORK/summary.txt"
+            if [ "$rc" -eq 0 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); failed="$failed $f"; fi
+          done
+          cat "$WORK/summary.txt"
+          echo "=== 汇总: PASS=$pass FAIL=$fail（共 $((pass + fail)) 套）==="
+
+          # 红线: 任何测试输出里出现 command not found 即失败（说明测试在调不存在的命令）
+          cnf=$(grep -h "command not found" "$WORK"/*.out 2>/dev/null | wc -l | tr -d ' ')
+          echo "=== command not found 命中: $cnf（必须为 0）==="
+          if [ "$cnf" -ne 0 ]; then
+            echo "❌ 出现 command not found:"
+            grep -h "command not found" "$WORK"/*.out | sort -u | head -20
+            exit 1
+          fi
+
+          # 失败套件: 打印输出尾部便于直接定位
+          if [ "$fail" -ne 0 ]; then
+            for f in $failed; do
+              echo ""
+              echo "########## $f 输出尾部（最后 30 行）##########"
+              tail -30 "$WORK/$f.out"
+            done
+            echo ""
+            echo "❌ 有 $fail 套失败"
+            exit 1
+          fi
+          echo "✅ openlist 回归套件全绿（$pass/$pass）"
