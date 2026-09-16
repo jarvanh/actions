@@ -718,6 +718,9 @@ _sync_fix_missing_files() {
           # 无法重试，只能重置（若确属真失败，本轮会重新逐方法拉黑，代价可控）。
           # run 32904752243 实锤: task0_照片 3 个名长文件全方法拉黑，修复
           # 管线对每个文件白下载 300MB 后直接放弃。
+          # 计数口径: 2026-09-16 起黑名单条目存**归一语义 ID**（见 file_fix.sh
+          #   _fix_method_norm），| 分隔仍是 4 条上限；历史 marker 里的旧全名条目
+          #   也含 | 分隔，计数同样成立。
           local bl_cnt
           bl_cnt=$(printf '%s' "$bl_m" | awk -F'|' 'NF > n { n = NF } END { print n + 0 }')
           if [ "$bl_cnt" -ge 4 ]; then

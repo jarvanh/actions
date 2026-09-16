@@ -165,11 +165,14 @@ workflow 会把 `*.sh` `*.py` `*.jq` 拷到 `/tmp` 再 `source /tmp/load_all.sh`
 
 | 体系 | 位置 | 内容 | 命名要求 |
 |---|---|---|---|
-| **文件修复方法 1-4** | `file_fix.sh` | `copyto_original` / `copyto_shorthash` / `zip_split_original` / `zip_split_shorthash` | 函数与文案带 `fix`：`_fix_method_desc`、`文件修复方法1` |
+| **文件修复方法 1-4** | `file_fix.sh` | `copyto_original` / `copyto_shorthash` / `zip_split_original` / `zip_split_shorthash` | 展示层 `方法N·动作·变体`（`_fix_method_short`）；持久化层 `_fix_method_desc` 必须保留 `restore_info.jq` 依赖的分类子串（`分卷切割` / `短哈希文件名`） |
 | **驱动刷新方法 1-3** | `openlist_driver.sh` | `storage/load_all` 重载 / 重启容器 / `storage/list` 探测 | 文案带领域词：`驱动刷新方法1` |
 
 两者完全无关。历史教训：旧端点 `/api/driver/update` 恒失败，其失败 **≠ 驱动坏**，
 不能当驱动状态信号（run 32749862280 实锤）。
+
+文件修复方法的**黑名单条目存归一语义 ID**（`copyto_original` 等）而非描述文本，
+以便命名口径演进后历史 marker 仍能命中（见 `_fix_method_norm`）。
 
 ### 2. 两个"split"
 
