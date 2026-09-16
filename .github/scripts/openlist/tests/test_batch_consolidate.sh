@@ -61,7 +61,7 @@ _sync_fix_missing_files() {
   if [ -n "${SYNC_FIX_MISSING_OVERRIDE:-}" ] && [ -s "$SYNC_FIX_MISSING_OVERRIDE" ]; then
     while IFS= read -r _f; do
       [ -z "$_f" ] && continue
-      echo "${_f}|${_f}|修复mock|restore|1B|1|文件修复方法3 zip_split_original: zip 压缩 + 分卷上传（原文件名基底，默认 1GB 分卷）" >> "$fix_list"
+      echo "${_f}|${_f}|修复mock|restore|1B|1|方法3·分卷·原名（zip 压缩 + 分卷切割，原文件名基底，默认 1GB 分卷）" >> "$fix_list"
     done < "$SYNC_FIX_MISSING_OVERRIDE"
   fi
   return 0

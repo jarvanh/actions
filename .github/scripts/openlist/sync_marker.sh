@@ -297,9 +297,12 @@ save_fix_state_marker() {
 # 记录: 时间戳、源端路径、目标路径、源端大小/文件数、顶层目录列表、已修复文件列表
 # 已修复文件列表 (fixed_files): 通过缺失文件修复机制以非原名上传的文件
 #   预览时从差异中扣减这部分，避免显示"虚假缺失"
-# 文件修复方法假成功黑名单 (fix_blacklist): {文件: 全名集合}（文件修复方法全名，
-# 形如 "文件修复方法1 copyto_original: ..."，| 分隔），跨轮失败记忆，
-#   下一轮修复时跳过已判定假成功的方法
+# 文件修复方法假成功黑名单 (fix_blacklist): {文件: 方法条目集合}
+#   （2026-09-16 起条目为**归一语义 ID**，形如 "copyto_original" 或
+#    "copyto_original|zip_split_original"，| 分隔；此前存冗长全名）
+#   跨轮失败记忆，下一轮修复时跳过已判定假成功的方法。
+#   读取侧 _fix_method_norm 会把新旧两种写法都归一到语义 ID，
+#   故历史 marker 条目不会因命名口径变更而失效。
 # 用法: save_sync_marker <source_path> <dest_path> <task_name> [rclone_extra_args...]
 # 额外参数用于统一源端统计口径: 应用任务的 --exclude/--include 过滤规则，
 # 否则被排除路径（如 notion/）计入源端却不计入目标端，会造成永久性假缺失

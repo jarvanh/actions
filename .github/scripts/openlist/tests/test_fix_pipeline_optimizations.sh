@@ -2,9 +2,9 @@
 # 修复管线两处优化 —— 逻辑验证
 #   1. 密文名注定超限时跳过带原名的方法（copyto_original / zip_split_original）
 #      背景: 名长诊断此前只打日志不驱动决策，密文名 150B 超过后端已接受
-#      最长 100B 的文件照样先跑文件修复方法1·copyto 原名 —— 整文件下载 + PUT 全白
+#      最长 100B 的文件照样先跑方法1·copyto 原名 —— 整文件下载 + PUT 全白
 #      费（后端内容性拒收，重试多少次都一样）。现在诊断命中即拉黑带原名的
-#      文件修复方法（copyto_original / zip_split_original），直接从对症的
+#      方法（copyto_original / zip_split_original），直接从对症的
 #      短哈希名方法（copyto_shorthash / zip_split_shorthash）开始。
 #   2. 目标端清单复用（SYNC_FIX_LIST_CACHE）
 #      背景: 批次巩固 _batch_consolidate 刚做过 lsf 取真值，修复管线又全量
@@ -136,7 +136,7 @@ echo "$BL" | grep -q "zip_split_original" && ok "1b 名长超限 → 拉黑 zip_
 ! echo "$BL" | grep -q "zip_split_shorthash" && ok "1d zip_split_shorthash 未被拉黑" || bad "1d: 不该拉黑短哈希分卷"
 grep -q "跳过" "$WORK/scene1.log" && ok "1e 日志注明跳过注定失败的方法" || bad "1e: 无跳过提示"
 
-# ===== 场景2: 密文名未超后端已接受最长 → 不拉黑，正常从文件修复方法1 开始 =====
+# ===== 场景2: 密文名未超后端已接受最长 → 不拉黑，正常从方法1 开始 =====
 LSF_OUT=$'a-very-long-encrypted-name-that-is-200-bytes-long-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n'
 printf 'path/to/normal.mp4\n' > "$MISSING"
 : > "$TRY_LOG"

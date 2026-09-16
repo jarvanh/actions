@@ -7,19 +7,21 @@
 #      —— 避免在同一条死路上白跑"整文件下载 + 4 次上传"；
 #      可写目录跑一轮全败后再兜底切一次（见 _fix_probe_dir_writable /
 #      _fix_switch_to_hash_dir 头部注释）
-#      文件修复方法1 copyto_original:      直接 rclone copyto（原路径 + 原文件名）
-#      文件修复方法2 copyto_shorthash:     短哈希文件名直传（<md5前8位>.<扩展名>，
-#                                          密文名必然不超长，对症"加密后文件名
-#                                          超长"/敏感字符根因）
-#      文件修复方法3 zip_split_original:   zip 压缩 + 分卷上传（原文件名作基底名，
-#                                          粒度默认 1GB，OPENLIST_SPLIT_PART_BYTES 可调）
-#      文件修复方法4 zip_split_shorthash:  zip 压缩 + 短哈希文件名 + 分卷上传
+#      方法1 copyto_original:      直接 rclone copyto（原路径 + 原文件名）
+#      方法2 copyto_shorthash:     短哈希文件名直传（<md5前8位>.<扩展名>，
+#                                  密文名必然不超长，对症"加密后文件名超长"/敏感字符根因）
+#      方法3 zip_split_original:   zip 压缩 + 分卷上传（原文件名作基底名，
+#                                  粒度默认 1GB，OPENLIST_SPLIT_PART_BYTES 可调）
+#      方法4 zip_split_shorthash:  zip 压缩 + 短哈希文件名 + 分卷上传
 #   历史版本的低效冗余方法已全部下线，现行仅上述 4 种。
 #   方法 ID 用语义名（copyto_original 等）而非 m1/m2 序号: 序号在代码里无法
 #   自解释，且方法增删时会漂移。
-# 命名口径: 全名带"文件修复"限定词——仓库里另有多处独立的"方法N"编号体系
-#   （最易混的是 openlist_driver.sh _refresh_ol_drivers 的驱动刷新三招），不带限定词
-#   无法区分。本文件内部的"方法1/2/3/4"简写均指上述文件修复方法。
+# 命名口径（2026-09-16 统一，单一事实源 = _fix_method_short / _fix_method_desc）:
+#   展示层统一为 `方法N·动作·变体`（中文可读，如 `方法3·分卷·原名`），
+#   持久化层（marker 黑名单 / method_id）用 _fix_method_desc 输出，必须保留
+#   restore_info.jq 依赖的分类子串（见该文件注释），否则还原元数据会退化成
+#   copy 类型。此前"日志一套、marker 一套"的双口径已废除。
+#   来源: §12.12 实测 —— 假成功判据与命名口径都属"说不清用了哪种方法"的根因。
 #
 # 假成功防护（两层）:
 #   1. 落盘即时校验（_confirm_persist_by_count）: 修复方法返回成功后，对比
@@ -89,7 +91,7 @@ _crypt_diag() {
 # 注: 本函数现供名长诊断 / raw 计数视图使用。早期版本曾有一种"rclone crypt
 #     直写裸存储"的修复方法（当时的编号也是方法2），已随方法精简下线；
 #     本文件里"方法2"若出现在旧 run 实锤的注释中，指的可能是那个已下线的
-#     方法，而非现行文件修复方法2 copyto_shorthash。
+#     方法，而非现行 方法2 copyto_shorthash。
 # 用法: _get_crypt_config <mount_path 如 /wopan176Crypt>
 _get_crypt_config() {
   local mount="$1"
@@ -313,44 +315,49 @@ _raw_count_view_for() {
   fi
 }
 
-# 方法 ID → 可读描述（单一事实源: 日志显示 / marker 记录 / 黑名单均用此全名）
-# 保持与各方法实现处的描述一致；已是全名或未知 ID 原样返回（幂等）
+# 方法 ID → 持久化描述（单一事实源: marker 记录 / 黑名单 / 日志均用这一个函数）
+#
+# ★ 这是**持久化身份**，不是日志文案 —— 改了它 = 改了 marker 里存的东西。
+#   · 写进 marker 的 fix_blacklist（值为此函数的输出），跨轮读回**精确比对**；
+#   · 写进 marker 的 method_id 字段；
+#   · restore_info.jq 对**文本做子串匹配**来生成还原元数据（见该文件顶注）。
+#   ⇒ 改动时必须保留 restore_info.jq 依赖的子串：
+#        "分卷切割" / "短哈希文件名" / "短哈希目录 " / "base64URL 编码目录 "
+#     丢了它们，对应形态会分类失败并退化成 kind=copy（还原脚本错误）。
 #
 # ID 用语义名而非 m1/m2 这类序号: 序号在代码里无法自解释（读
 #   _fix_method_gate zip_split_original 一眼可辨，换成 m3 就得回查本表），
 #   且方法增删时序号会漂移。
-#   文件修复方法1 copyto_original      — 原路径 + 原文件名直接 copyto
-#   文件修复方法2 copyto_shorthash     — 短哈希文件名（<md5前8位>.<扩展名>）直传
-#   文件修复方法3 zip_split_original   — zip 压缩 + 分卷上传（原文件名作基底名）
-#   文件修复方法4 zip_split_shorthash  — zip 压缩 + 分卷上传（短哈希名作基底名）
+#   方法1 copyto_original      — 原路径 + 原文件名直接 copyto
+#   方法2 copyto_shorthash     — 短哈希文件名（<md5前8位>.<扩展名>）直传
+#   方法3 zip_split_original   — zip 压缩 + 分卷上传（原文件名作基底名）
+#   方法4 zip_split_shorthash  — zip 压缩 + 分卷上传（短哈希名作基底名）
 #
-# 全名必须带"文件修复"限定词: 仓库里另有多处独立的"方法N"编号体系，
-#   同名会让人误以为是一套东西——最易混的是 openlist_driver.sh _refresh_ol_drivers 的
-#   驱动刷新三招（方法1 load_all / 方法2 重启容器 / 方法3 storage 探测），
-#   它与文件修复毫无关系。限定词让 marker/日志里的全名自带领域归属。
-# 不兼容历史全名: marker 里旧写法（"方法1: ..."、"m1"）不再被识别，按未知
-#   方法原样保留——其黑名单条目因此失效，对应文件最多重跑一轮已判定的方法
-#   即会重新拉黑，不修复的代价可控；换来的是命名不再背历史包袱。
+# 命名口径（2026-09-16 统一）: `方法N·动作·变体`，正文里保留 restore_info.jq 子串。
+#   此前是"文件修复方法N <id>: <说明>"的冗长全名，且日志另有一套短标签（双口径），
+#   已废除。历史 marker 条目由 _fix_method_blocked 兼容识别（见该函数）。
 # 用法: _fix_method_desc <method_id 如 copyto_shorthash>
 _fix_method_desc() {
   case "$1" in
-    copyto_original)     echo "文件修复方法1 copyto_original: 直接 rclone copyto（原路径 + 原文件名）" ;;
-    copyto_shorthash)    echo "文件修复方法2 copyto_shorthash: 短哈希文件名直传（<md5前8位>.<扩展名>）" ;;
-    zip_split_original)  echo "文件修复方法3 zip_split_original: zip 压缩 + 分卷上传（原文件名基底，默认 1GB 分卷）" ;;
-    zip_split_shorthash) echo "文件修复方法4 zip_split_shorthash: zip 压缩 + 短哈希文件名 + 分卷上传" ;;
+    copyto_original)     echo "方法1·原名直传（原路径 + 原文件名）" ;;
+    copyto_shorthash)    echo "方法2·短名直传（短哈希文件名）" ;;
+    zip_split_original)  echo "方法3·分卷·原名（zip 压缩 + 分卷切割，原文件名基底，默认 1GB 分卷）" ;;
+    zip_split_shorthash) echo "方法4·分卷·短名（zip 压缩 + 分卷切割，短哈希文件名）" ;;
     "")  echo "未知方法" ;;
     *)   echo "$1" ;;
   esac
 }
 
-# 方法短标签（仅日志展示用；marker/黑名单仍存 _fix_method_desc 全名）
-# 输入语义 ID 或全名均可
+# 方法展示标签（日志/通知用）—— 与 _fix_method_desc 同源，二者不得各自演化。
+# 为什么单列一个函数: 展示要短（一行里塞得下），持久化要含 restore 分类子串。
+#   此前两者各写一套 case，正是"双口径"的来源。
+# 输入: 语义 ID / _fix_method_desc 输出 / 历史全名（三种都接受，便于消费历史 marker）
 _fix_method_short() {
   case "$1" in
-    copyto_original|文件修复方法1*)      echo "修复方法1·copyto 原名" ;;
-    copyto_shorthash|文件修复方法2*)     echo "修复方法2·短哈希名" ;;
-    zip_split_original|文件修复方法3*)   echo "修复方法3·zip 分卷" ;;
-    zip_split_shorthash|文件修复方法4*)  echo "修复方法4·短哈希分卷" ;;
+    copyto_original|*原名直传*|*copyto_original*)          echo "方法1·原名直传" ;;
+    copyto_shorthash|*短名直传*|*copyto_shorthash*)        echo "方法2·短名直传" ;;
+    zip_split_original|*分卷·原名*|*zip_split_original*)   echo "方法3·分卷·原名" ;;
+    zip_split_shorthash|*分卷·短名*|*zip_split_shorthash*) echo "方法4·分卷·短名" ;;
     "") echo "未知方法" ;;
     *) _fix_method_desc "$1" ;;
   esac
@@ -377,9 +384,9 @@ _cmd_log() {
   done
 }
 
-# 文件修复方法假成功黑名单: <文件相对路径> -> 全名集合（| 分隔，形如
-# "文件修复方法1 copyto_original: ...|文件修复方法3 zip_split_original: ..."；
-# 全名含空格所以不能用空格分隔）
+# 文件修复方法假成功黑名单: <文件相对路径> -> 方法条目集合（| 分隔）
+# 条目形如 "方法1·原名直传（原路径 + 原文件名）"（2026-09-16 命名统一后的口径）；
+# 条目含空格所以不能用空格分隔，用 | 分隔。
 # 由 file_fix_pipeline.sh 修复管线每轮从 marker 加载/重建，并在轮内即时检测时追加
 declare -A FIX_METHOD_BLACKLIST=()
 # 本轮已修复文件: <原始路径> -> <替代路径>（同一轮内避免 auto-split 子任务与最终
@@ -392,11 +399,36 @@ declare -A _DIR_WRITE_CACHE=()
 # 本轮目录探测已用掉的容器重启次数（预算 OPENLIST_DIR_PROBE_MAX_RESTART）
 _DIR_PROBE_RESTARTS=0
 
-# 向黑名单追加方法（参数可以是短 ID 或全名，统一转全名存储）
+# 把方法条目归一到"语义 ID"，用于黑名单比对（跨命名版本兼容）
+# 为什么需要: 黑名单条目是**跨轮持久化**的（写进 marker 的 fix_blacklist）。
+#   2026-09-16 命名统一后，新条目形如 "方法2·短名直传（短哈希文件名）"，
+#   而历史 marker 里存的是 "文件修复方法2 copyto_shorthash: 短哈希文件名直传（…）"。
+#   若只做精确字符串比对，所有历史条目会**静默失效** ⇒ 那些文件重新尝试已被
+#   判定假成功的方法（最坏效果: 多跑一轮后被重新拉黑，代价可控，但不能是"没察觉"）。
+#   故此处按语义 ID 归一后比对，新旧条目都能命中。
+# 用法: _fix_method_norm <method_id / 新描述 / 历史全名> → stdout: 语义 ID（识别不出则原样输出）
+_fix_method_norm() {
+  case "$1" in
+    *copyto_original*)     echo "copyto_original" ;;
+    *copyto_shorthash*)    echo "copyto_shorthash" ;;
+    *zip_split_original*)  echo "zip_split_original" ;;
+    *zip_split_shorthash*) echo "zip_split_shorthash" ;;
+    *原名直传*)            echo "copyto_original" ;;
+    *短名直传*)            echo "copyto_shorthash" ;;
+    *分卷·原名*)           echo "zip_split_original" ;;
+    *分卷·短名*)           echo "zip_split_shorthash" ;;
+    *)                     echo "$1" ;;
+  esac
+}
+
+# 向黑名单追加方法（参数可以是短 ID / 新描述 / 历史全名，统一以**归一 ID** 存储）
+# 为什么存归一 ID 而不是描述: 描述会随命名口径变化，归一 ID 是稳定身份；
+#   且描述里含空格与括号，存 ID 让 marker 内容更短、更易人工核对。
 # 用法: _blacklist_add <file_rel> <method_id_or_full_name>
 _blacklist_add() {
   local entry
-  entry=$(_fix_method_desc "$2")
+  entry=$(_fix_method_norm "$2")
+  [ -n "$entry" ] || return 0
   local cur="${FIX_METHOD_BLACKLIST[$1]:-}"
   case "|$cur|" in
     *"|$entry|"*) return 0 ;;
@@ -405,14 +437,19 @@ _blacklist_add() {
 }
 
 # 判断当前文件（TRY_FIX_ORIGINAL）的某方法是否被黑名单
+# 两侧都归一到语义 ID 再比 —— 历史条目（旧全名）与新条目（新描述）都能命中
 # 用法: _fix_method_blocked <method_id>  返回 0=被拉黑应跳过
 _fix_method_blocked() {
-  local entry
-  entry=$(_fix_method_desc "$1")
-  case "|${FIX_METHOD_BLACKLIST[${TRY_FIX_ORIGINAL:-}]:-}|" in
-    *"|$entry|"*) return 0 ;;
-    *) return 1 ;;
-  esac
+  local want
+  want=$(_fix_method_norm "$1")
+  local cur="${FIX_METHOD_BLACKLIST[${TRY_FIX_ORIGINAL:-}]:-}"
+  [ -n "$cur" ] || return 1
+  local item
+  while IFS= read -r item; do
+    [ -n "$item" ] || continue
+    [ "$(_fix_method_norm "$item")" = "$want" ] && return 0
+  done < <(printf '%s\n' "$cur" | tr '|' '\n')
+  return 1
 }
 
 # ===== 修复方法表驱动框架 =====
@@ -632,10 +669,12 @@ _raw_dir_count() {
 # 用法: _confirm_persist_by_count <method_id> <file_rel> <log_file>
 # 示例:
 #   if [ "$copy_rc" -eq 0 ] && _confirm_persist_by_count copyto_original "$rel" "$log"; then
-#     echo "文件修复方法1 真实落盘"   # 计数增长（或计数不可用已信任放行）
+#     echo "方法1 真实落盘"   # 计数增长（或计数不可用已信任放行）
 #   else
-#     echo "换下一方法"               # 假成功（文件修复方法1 已拉黑）或校验未启用
+#     echo "换下一方法"       # 假成功（方法1 已拉黑）或校验未启用
 #   fi
+# ⚠️ 本函数**单独使用会误杀**（§12.12 实测三次）: 调用方应与 _confirm_persist_by_size
+#   取"或"。方法 1/2 已改为该形态，见 _try_fix_methods_round。
 _confirm_persist_by_count() {
   local method_id="$1" rel_path="$2" log_file="$3"
   # 未初始化即未启用（file_fix_pipeline.sh 修复管线仅对 openlist: 目标初始化）
@@ -664,6 +703,50 @@ _confirm_persist_by_count() {
   fi
   log_fix "$log_file" "  🔴 假成功 raw 未增长 ${_RAW_VERIFY_LAST}→${count} → 拉黑 ${m_short}，换下一方法"
   _blacklist_add "$rel_path" "$method_id"
+  return 1
+}
+
+# 落盘确认（大小精确匹配口径）—— 写入类方法的主判据
+#
+# 为什么需要它（2026-09-16，§12.12 实测）:
+#   `_confirm_persist_by_count` 的"目录文件计数是否增长"在本形态上是**不可信的**
+#   判据，实测三次 fix-check 逐字同构:
+#     · 方法 1 真上传 64s，计数 52→52 不动 → 被判假成功 + 拉黑
+#     · 方法 2 只跑 5.3s（200MB 不可能传完，实为幂等跳过/立即失败），计数同样不动
+#     计数不动是这两种情形的**必然结果**，不构成"假成功"的证据；而误判的代价是
+#     级联拉黑真实有效的方法（同一类事故已有记录: run 31928671112 同文件连传 9 个
+#     方法全部真实落盘又全部被误判）。
+#
+# 口径: 目标端实际字节数 == 期望字节数（**精确相等**，非"非空"）。
+#   与 file_fix_pipeline.sh `_persist_verify_entries` 的 is_transformed=0 分支同款，
+#   即"权威复核用什么口径，轮内快筛就用什么口径"，避免两层结论互相打架。
+#
+# 为什么"尺寸匹配 或 计数增长"取或（调用方按此使用）:
+#   本层的目标是消除**假阴性**（该判成功却判失败 → 误杀好方法）。
+#   假阳性（该判失败却判成功）由**重启容器真值复核**兜底
+#   （file_fix_pipeline.sh `_persist_verify_entries`），那是既有设计且口径更强。
+#   取"且"会把两层风险叠加、反而放大假阴性。
+#
+# 用法: _confirm_persist_by_size <method_id> <目标远端全路径> <期望字节数> <log_file>
+#   返回 0=尺寸匹配（或无法判定时信任放行），1=尺寸不符
+_confirm_persist_by_size() {
+  local method_id="$1" target_full="$2" expect_bytes="$3" log_file="$4"
+  [[ "$expect_bytes" =~ ^[0-9]+$ ]] && [ "$expect_bytes" -gt 0 ] || return 0
+  local m_short
+  m_short=$(_fix_method_short "$method_id")
+  local got_bytes
+  got_bytes=$(rclone size --json "$target_full" 2>/dev/null | jq -r '.bytes // empty' 2>/dev/null) || got_bytes=""
+  if ! [[ "$got_bytes" =~ ^[0-9]+$ ]]; then
+    log_fix "$log_file" "  ⚠️ 尺寸校验读不到目标大小 → 信任返回值（${m_short}）"
+    return 0
+  fi
+  if [ "$got_bytes" = "$expect_bytes" ]; then
+    log_fix "$log_file" "  ✅ 落盘确认 尺寸匹配 ${got_bytes}B（${m_short}）"
+    return 0
+  fi
+  # 0 字节单独提示: "读到 0" 既可能是真没落盘，也可能是驱动未就绪的"成功的空"，
+  # 后者不该被当成假成功（同 _confirm_persist_by_count 的处理哲学）
+  log_fix "$log_file" "  ⚠️ 尺寸不符 期望${expect_bytes}B 实际${got_bytes}B（${m_short}）"
   return 1
 }
 
@@ -943,8 +1026,11 @@ _try_fix_methods_round() {
     rclone copyto "$src_file" "$round_file" "${RCLONE_RETRY_FLAGS[@]}" --timeout "${OPENLIST_UPLOAD_TIMEOUT:-300}s" 2>&1 | \
       _cmd_log copyto_original "$fix_log"
     m1_status=${PIPESTATUS[0]}
-    if [ "$m1_status" -eq 0 ] && _confirm_persist_by_count copyto_original "$failed_file_rel" "$fix_log"; then
-      log_fix "$fix_log" "  ✅ 文件修复方法1 成功"
+    # 落盘确认取"尺寸匹配 或 计数增长"（或语义，见 _confirm_persist_by_size 头注）:
+    #   单一计数口径在本形态上会误杀（§12.12 实测三次，方法 1 真上传 64s 而计数不动）。
+    if [ "$m1_status" -eq 0 ] && { _confirm_persist_by_size copyto_original "$round_file" "$src_expect_bytes" "$fix_log" \
+         || _confirm_persist_by_count copyto_original "$failed_file_rel" "$fix_log"; }; then
+      log_fix "$fix_log" "  ✅ $(_fix_method_short copyto_original) 成功"
       local m1_alt m1_restore
       if [ "${used_hash_dir:-0}" -eq 1 ] || [ "$used_base64_dir" -eq 1 ]; then
         m1_alt="${round_file#${dest_path}/}"
@@ -957,7 +1043,7 @@ _try_fix_methods_round() {
         "$m1_alt" "$m1_restore" "$file_md5"
       return 0
     fi
-    log_fix "$fix_log" "  ❌ 文件修复方法1 失败 exit=$m1_status"
+    log_fix "$fix_log" "  ❌ $(_fix_method_short copyto_original) 失败 exit=$m1_status"
   fi
 
   # 方法 2 copyto_shorthash：短哈希文件名直传
@@ -975,8 +1061,9 @@ _try_fix_methods_round() {
     rclone copyto "$local_file" "$m2sh_dst" "${RCLONE_RETRY_FLAGS[@]}" --timeout "${OPENLIST_UPLOAD_TIMEOUT:-300}s" 2>&1 | \
       _cmd_log copyto_shorthash "$fix_log"
     m2sh_status=${PIPESTATUS[0]}
-    if [ "$m2sh_status" -eq 0 ] && _confirm_persist_by_count copyto_shorthash "$failed_file_rel" "$fix_log"; then
-      log_fix "$fix_log" "  ✅ 文件修复方法2 成功"
+    if [ "$m2sh_status" -eq 0 ] && { _confirm_persist_by_size copyto_shorthash "$m2sh_dst" "$local_file_bytes" "$fix_log" \
+         || _confirm_persist_by_count copyto_shorthash "$failed_file_rel" "$fix_log"; }; then
+      log_fix "$fix_log" "  ✅ $(_fix_method_short copyto_shorthash) 成功"
       _fix_succeed copyto_shorthash \
         "rclone copyto（$(_fix_dir_desc) + 短哈希文件名 ${sh_hash}）" \
         "${m2sh_dst#${dest_path}/}" \
@@ -984,13 +1071,13 @@ _try_fix_methods_round() {
         "$file_md5"
       return 0
     fi
-    log_fix "$fix_log" "  ❌ 文件修复方法2 失败 exit=$m2sh_status"
+    log_fix "$fix_log" "  ❌ $(_fix_method_short copyto_shorthash) 失败 exit=$m2sh_status"
   fi
 
   # ============================================================
   # 方法 3/4：压缩并分卷上传（粒度默认 1GB）
-  #   文件修复方法3 zip_split_original  — 基底名用原文件名
-  #   文件修复方法4 zip_split_shorthash — 基底名用短哈希名（encode_name=1）
+  #   方法3 zip_split_original  — 基底名用原文件名
+  #   方法4 zip_split_shorthash — 基底名用短哈希名（encode_name=1）
   # ============================================================
   local SPLIT_LIMIT_BYTES="${OPENLIST_SPLIT_PART_BYTES:-1073741824}"
   local SPLIT_PART_HUMAN
@@ -1365,6 +1452,16 @@ try_fix_failed_file() {
   local file_size
   file_size=$(stat -c%s "$local_file" 2>/dev/null || echo 0)
   log_fix "$fix_log" "✅ 已下载 $(format_bytes_iec "$file_size")"
+
+  # 落盘尺寸校验的两个期望值（供 _confirm_persist_by_size 用；见其头注）:
+  #   local_file_bytes — 本地副本字节数，方法 2/4（源=本地副本）的期望值
+  #   src_expect_bytes — 源端字节数，方法 1（源=源端直读）的期望值。
+  #     方法 1 走的是 "$src_file"，与本地副本理论上同内容，但**不假设相等**：
+  #     源端在下载与上传之间可能被改动，用源端自己的大小才是一致的口径。
+  local local_file_bytes="$file_size"
+  local src_expect_bytes=""
+  src_expect_bytes=$(rclone size --json "$src_file" 2>/dev/null | jq -r '.bytes // empty' 2>/dev/null) || src_expect_bytes=""
+  [[ "$src_expect_bytes" =~ ^[0-9]+$ ]] || src_expect_bytes="$file_size"
 
   # 原文件内容指纹: 本地副本在此统一计算一次（下载失败早已短路），
   # 四种方法共享；写进 marker 后供还原时做内容级硬校验。
