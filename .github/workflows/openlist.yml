@@ -627,6 +627,38 @@ jobs:
             echo "🚨 修复管线零新增落盘: ${ROUND_MISSING} 个缺失文件本轮未修复成功（成功数 ${ROUND_FIXED_OK} 中 ${ROUND_REUSED} 个是沿用上轮成果）（典型成因: 后端写不进/驱动失效/预算将尽）—— 口径仅覆盖修复管线，批次与直传路径的落盘不计入；整轮是否零落盘请看 trend 与 truth-check"
           fi
 
+          # ===== 修复管线事件统计（2026-09-16 加）: 回答"文件到底修不修得成功" =====
+          # 数据源是修复管线**即时 append** 的事件日志（/tmp/ol_fix_events.log，见
+          # file_fix_pipeline.sh 的 `_fix_event`）。为什么用文件而不是全局计数: 并行模式
+          # （pair_parallel / subdir_parallel）的 worker 是**子 shell**，全局计数的修改
+          # 回不到父进程 —— 那样统计在并行下会静默失真（与 trend_record_transferred 同思路）。
+          # 口径（与文档 §12 一致）:
+          #   成功率 = 新落盘 /(新落盘 + 未修复)，按文件去重、不含"沿用上轮"；
+          #   **方法耗尽单列**（4 种方法 × 原目录与兜底目录全试过仍失败 = 永久性失败，
+          #   这才是"同步永远完不成"的真实风险来源）；DEFERRED 是"轮数/预算耗尽没轮到"，
+          #   语义不同、不与方法耗尽混算。
+          FIX_ATTEMPT=0; FIX_FAIL=0; FIX_EXHAUSTED=0; FIX_DEFERRED=0
+          if [ -f /tmp/ol_fix_events.log ]; then
+            FIX_ATTEMPT=$(grep -c '^ATTEMPT|' /tmp/ol_fix_events.log || true)
+            FIX_FAIL=$(grep -c '^FAIL|' /tmp/ol_fix_events.log || true)
+            FIX_EXHAUSTED=$(grep -c '^EXHAUSTED|' /tmp/ol_fix_events.log || true)
+            FIX_DEFERRED=$(grep -c '^DEFERRED|' /tmp/ol_fix_events.log || true)
+          fi
+          [[ "$FIX_ATTEMPT" =~ ^[0-9]+$ ]] || FIX_ATTEMPT=0
+          [[ "$FIX_FAIL" =~ ^[0-9]+$ ]] || FIX_FAIL=0
+          [[ "$FIX_EXHAUSTED" =~ ^[0-9]+$ ]] || FIX_EXHAUSTED=0
+          [[ "$FIX_DEFERRED" =~ ^[0-9]+$ ]] || FIX_DEFERRED=0
+          FIX_DENOM=$(( ROUND_FIXED_NEW + ROUND_FAILED ))
+          FIX_RATE=100
+          if [ "$FIX_DENOM" -gt 0 ]; then FIX_RATE=$(( ROUND_FIXED_NEW * 100 / FIX_DENOM )); fi
+          echo "修复管线: 尝试 ${FIX_ATTEMPT} · 失败 ${FIX_FAIL}（其中方法耗尽 ${FIX_EXHAUSTED} · 顺延下轮 ${FIX_DEFERRED}） · 成功率 ${FIX_RATE}%（新落盘 ${ROUND_FIXED_NEW}/${FIX_DENOM}）"
+          if [ "${FIX_EXHAUSTED:-0}" -gt 0 ]; then
+            echo "🚨 ${FIX_EXHAUSTED} 个文件用尽全部修复方法仍未落盘（永久性失败）—— 这类文件不会被后续轮次自动修好，需人工看 fail_list 的原因（文件路径见 /tmp/ol_fix_events.log 的 EXHAUSTED 行）"
+            grep '^EXHAUSTED|' /tmp/ol_fix_events.log 2>/dev/null | head -5 | cut -c1-200 || true
+          elif [ "$FIX_DENOM" -gt 0 ] && [ "$FIX_RATE" -lt "${OPENLIST_FIX_RATE_WARN_PCT:-50}" ]; then
+            echo "⚠️ 修复成功率偏低（${FIX_RATE}% < ${OPENLIST_FIX_RATE_WARN_PCT:-50}%）: 本轮新落盘 ${ROUND_FIXED_NEW} / 需修 ${FIX_DENOM} —— 看 fail_list 的原因分布（可用 openlist-diag 的 big_mb 阶梯排查落盘形态）"
+          fi
+
           actual_entries=0
           total_lines=0
 

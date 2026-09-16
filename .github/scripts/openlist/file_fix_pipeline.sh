@@ -229,6 +229,32 @@ _escape_filter_glob() { printf '%s' "$1" | sed -e 's/[][*?{}]/[&]/g'; }
 #   - lsf diff 不带 filter-from，缺失文件照常进修复管线复核
 #   - 文件名 glob 特殊字符 [ ] * ? { } 转成字符类
 # 依赖调用方（sync_with_logging）作用域: source_path / dest_path / task_name / LOG_FILENAME；追加 extra_args
+# ===== 修复管线事件日志（成功率与取证的唯一数据源，2026-09-16 加）=====
+# 为什么落文件而不是全局计数: 并行模式（pair_parallel / subdir_parallel）的 worker 是
+# **子 shell**，全局变量的修改回不到父进程 —— 全局计数在并行下会丢（ROUND_REUSED_TOTAL
+# 今天就有这个缺陷）。append 到 /tmp 文件则父子进程都可见，与 trend_record_transferred
+# 同一思路。
+# 格式: <事件>|<文件>|<原因>，事件取值:
+#   ATTEMPT   本次尝试修复一个文件（逐文件路径 + 假成功重试路径）
+#   FAIL      该次尝试失败（原因见第三列）
+#   EXHAUSTED 失败且原因为"所有修复方法均失败" ⇒ **永久性失败**，这才是"文件修不好、
+#             同步永远完不成"的证据（4 种方法 × 原目录 + 兜底目录都试过了）
+#   DEFERRED  因轮数/预算耗尽未修完 ⇒ 语义是"没轮到"，不是"修不好"，故与 EXHAUSTED 分开
+_FIX_EVENT_LOG="/tmp/ol_fix_events.log"
+_fix_event() {
+  printf '%s|%s|%s\n' "$1" "${2:-}" "${3:-}" >> "$_FIX_EVENT_LOG" 2>/dev/null || true
+}
+# 失败事件统一入口: 自动判定是否属"方法耗尽"。
+# 判据用 TRY_FIX_MESSAGE 文案（file_fix.sh 的取值集合: 目标目录建不出来 / 目标目录不可写 /
+# 无法从源端下载文件 / 所有修复方法均失败）—— 文案改动时这里必须同步。
+_fix_event_fail() {
+  local _f="$1" _msg="${2:-}"
+  _fix_event FAIL "$_f" "$_msg"
+  case "$_msg" in
+    *所有修复方法均失败*) _fix_event EXHAUSTED "$_f" "方法耗尽" ;;
+  esac
+}
+
 _sync_fixed_files_exclusion() {
   if [[ "$dest_path" == openlist:* ]]; then
     _load_marker_fixed_files "$source_path" "$dest_path" "$task_name"
@@ -920,6 +946,7 @@ _sync_fix_missing_files() {
         _fix_pos_before=$(wc -c < "$fix_log" 2>/dev/null | tr -d ' ')
         [ -n "$_fix_pos_before" ] || _fix_pos_before=0
 
+        _fix_event ATTEMPT "$failed_line"
         try_fix_failed_file "$source_path" "$dest_path" "$task_name" "$failed_line" "$fix_log" || true
         _cb_done=$((_cb_done + 1))
         _FIX_NAMELEN_CONTENT=0
@@ -938,6 +965,7 @@ _sync_fix_missing_files() {
         else
           echo "❌ 修复失败 · $(_short_path "$failed_line") · ${TRY_FIX_MESSAGE}" | tee -a "$LOG_FILENAME"
           echo "${failed_line}|${file_size}|${TRY_FIX_MESSAGE}" >> "$fail_list"
+          _fix_event_fail "$failed_line" "${TRY_FIX_MESSAGE:-}"
 
           # 熔断器累计: 提取本文件修复区段的主导错误（出现 ≥2 次的同文错误）
           if [ "$_cb_threshold" -gt 0 ] 2>/dev/null; then
@@ -1118,6 +1146,7 @@ _sync_persist_verify_and_retry() {
               # 先从 fix_list 移除旧假成功条目（无论重试成败都不保留）
               RO="$retry_orig" awk 'BEGIN{FS="|"} $1 != ENVIRON["RO"]' "$fix_list" > "${fix_list}.tmp" && mv "${fix_list}.tmp" "$fix_list"
 
+              _fix_event ATTEMPT "$retry_orig"
               try_fix_failed_file "$source_path" "$dest_path" "$task_name" "$retry_orig" "$fix_log" || true
 
               if [ "$TRY_FIX_STATUS" = "success" ]; then
@@ -1139,6 +1168,7 @@ _sync_persist_verify_and_retry() {
               else
                 echo "❌ 重试失败（方法耗尽）· $(_short_path "$retry_orig") · ${TRY_FIX_MESSAGE}" | tee -a "$LOG_FILENAME"
                 echo "${retry_orig}|未知|重试修复失败: ${TRY_FIX_MESSAGE:-所有修复方法均失败}" >> "$fail_list"
+                _fix_event_fail "$retry_orig" "${TRY_FIX_MESSAGE:-所有修复方法均失败}"
                 unset "FIXED_THIS_RUN[$retry_orig]" 2>/dev/null || true
                 # 从 marker 移除假成功条目，避免下一轮作为"沿用上轮修复"空转
                 _remove_fix_entry_from_state "$incr_state" "$incr_marker_path" "$retry_orig" 2>&1 | tee -a "$LOG_FILENAME" || true
@@ -1177,6 +1207,7 @@ _sync_persist_verify_and_retry() {
             echo "  ⚠️ 轮数耗尽 → 失败清单 · $(_short_path "$leftover_orig")" | tee -a "$LOG_FILENAME"
             RO="$leftover_orig" awk 'BEGIN{FS="|"} $1 != ENVIRON["RO"]' "$fix_list" > "${fix_list}.tmp" && mv "${fix_list}.tmp" "$fix_list"
             echo "${leftover_orig}|未知|重试轮数耗尽仍未持久化（黑名单已记录，下一轮从剩余方法继续）" >> "$fail_list"
+            _fix_event DEFERRED "$leftover_orig" "重试轮数耗尽"
             unset "FIXED_THIS_RUN[$leftover_orig]" 2>/dev/null || true
             _remove_fix_entry_from_state "$incr_state" "$incr_marker_path" "$leftover_orig" 2>&1 | tee -a "$LOG_FILENAME" || true
             retry_perm_fail=$((retry_perm_fail + 1))
