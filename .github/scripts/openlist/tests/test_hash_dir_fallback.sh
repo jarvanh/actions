@@ -243,6 +243,24 @@ printf '%s' "$TRY_FIX_RESTORE" | grep -qF "options.xml" \
 # 5h: 根目录折叠的哈希源是常量 "." ⇒ 与任何真实子目录名的折叠值无关
 [ "$HASH_ROOT" != "$HASH" ] && ok "5h 根目录哈希与子目录哈希不同（不会互相撞车）" || bad "5h: 撞车"
 
+# 5i~5k: **Step 5 兜底那道闸**也必须对根目录放开（与内层闸是同一次改动的两半）
+#   原代码在 Step 5 的进入条件里也有 `file_dir_rel != "." && -n` —— 重复且**静默跳过**
+#   （连日志都没有），于是根目录文件"4 方法全败"后根本不会试换路径，日志只留一句
+#   聚合文案「全部修复方法（1-4）均失败（含短哈希目录兜底）」= 文案与事实相反。
+#   实测 run 34940234180 的 5 个顽固文件（子任务根目录、.mp4、200–250MB）全因此
+#   从未试过"换路径"这一维。
+#   构造: 预检判**可写**（PROBE_ONLY=1 让探针能写）⇒ 不进 Step 2 切换；
+#   4 方法全败（真实文件写不进原目录）⇒ 必须由 Step 5 折叠到根下短哈希目录后成功。
+reset_state
+WRITABLE_DIR="$HASH_ROOT"        # 只有"根下短哈希目录"能真正写进文件
+PROBE_ONLY=1                     # 原目录探针可写 ⇒ 预检判可写，Step 2 不切换
+run_fix "options.xml"
+[ "$TRY_FIX_STATUS" = "success" ] && ok "5i 根目录文件经 Step 5 兜底换目录后成功" || bad "5i: status=${TRY_FIX_STATUS} msg=${TRY_FIX_MESSAGE}"
+grep -q "4 种方法全败，兜底换短哈希目录再试一轮" "$FIX_LOG" \
+  && ok "5j Step 5 兜底对根目录文件已放开（不再静默跳过）" || bad "5j: 未走 Step 5 兜底"
+[ "$TRY_FIX_ALTERNATIVE" = "${HASH_ROOT}/options.xml" ] \
+  && ok "5k 兜底后的替代路径仍是 <hash8>/<文件名>" || bad "5k: alt=${TRY_FIX_ALTERNATIVE}"
+
 # ===== 场景6: 短哈希目录同样不可写 → 收尾消息准确 =====
 reset_state
 WRITABLE_DIR=""                  # 全拒
@@ -324,8 +342,11 @@ grep -q "本轮已熔断，直接判不可写: 不探测、不重启" "$FIX_LOG"
   && ok "12d 不再谎报「已重启容器复核」" || bad "12d: 未重启却写已重启复核"
 printf '%s' "$TRY_FIX_MESSAGE" | grep -q "存储端本轮整体故障，未试写" \
   && ok "12e 失败原因点明存储端整体故障未试写" || bad "12e: msg=${TRY_FIX_MESSAGE}"
-printf '%s' "$TRY_FIX_MESSAGE" | grep -q "无目录可换" \
-  && ok "12f 失败原因点明无目录可换" || bad "12f: msg=${TRY_FIX_MESSAGE}"
+# 12f: 2026-09-16 起**根目录文件也会真去试备用目录** ⇒ 熔断下的文案是
+#   "备用目录也写不进去"（与子目录文件完全同口径）；"无目录可换"这一支已随
+#   根目录折叠放开而消失（原先根目录文件在这里是"没探过就说不能换"）
+printf '%s' "$TRY_FIX_MESSAGE" | grep -q "备用目录也写不进去" \
+  && ok "12f 失败原因点明备用目录也写不进去（与子目录同口径）" || bad "12f: msg=${TRY_FIX_MESSAGE}"
 ! printf '%s' "$TRY_FIX_MESSAGE" | grep -q "均未通过可写性预检" \
   && ok "12g 失败原因不再笼统归为「均未通过可写性预检」" || bad "12g: msg=${TRY_FIX_MESSAGE}"
 # 规范 · 说人话: 通知里的失败原因不得出现内部机制术语（日志里可以有）。
