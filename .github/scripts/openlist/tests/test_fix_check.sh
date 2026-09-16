@@ -335,6 +335,21 @@ run_case
 [ "$RC" = "2" ] && ok "9c 路径不存在 ⇒ 退出码 2" || bad "9c: rc=$RC"
 grep -q "源端路径不存在或不可读" "$WORK/run.log" && ok "9d 明确指向路径拼写" || bad "9d: $(grep -m1 源端 "$WORK/run.log")"
 
+# ============================================================
+# 场景10: rclone 参数形态回归锁（2026-09-16 实跑踩到两个真 bug）
+#   · `--retry` **不是** rclone 的 flag（正确 `--retries`）⇒ 列举 rc=2 静默失败
+#   · `--timeout` 要求**带单位**；workflow 注入的 OPENLIST_RCLONE_LISTING_TIMEOUT
+#     曾是裸 "900" ⇒ 生产的折叠落盘列举**全部失败**、折叠成果从未记账（幽灵落盘）
+# ============================================================
+grep -q 'OPENLIST_RCLONE_LISTING_TIMEOUT: "900s"' "$_REPO_ROOT/.github/workflows/openlist.yml" \
+  && ok "10a workflow 注入值带单位（900s）" || bad "10a: $(grep -n OPENLIST_RCLONE_LISTING_TIMEOUT "$_REPO_ROOT/.github/workflows/openlist.yml" | head -2 | tr '\n' ' ')"
+# 只查**非注释行**（沿革注释里会引用旧写法），并排除本测试自身（断言里含这些字符串）
+_n=$(grep -rn 'LISTING_TIMEOUT:-900}' "$_REPO_ROOT/.github/scripts/openlist/" 2>/dev/null \
+     | grep -v 'tests/test_fix_check.sh' | grep -vE ':[0-9]+: *#' | wc -l | tr -d ' ')
+[ "$_n" = "0" ] && ok "10b 脚本内无裸数字兜底（rclone --timeout 会失败）" || bad "10b: ${_n} 处裸数字（$(grep -rn 'LISTING_TIMEOUT:-900}' "$_REPO_ROOT/.github/scripts/openlist/" | grep -v test_fix_check | head -2 | tr '\n' ' ')）"
+_bad=$(grep -nE -- '--retry [0-9]' "$SCRIPT" | grep -vE '^[0-9]+: *#' | head -2 | tr '\n' ' ')
+[ -z "$_bad" ] && ok "10c 用 --retries（合法 flag），无 --retry" || bad "10c 仍用 --retry: ${_bad}"
+
 echo "-----------------------------"
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]

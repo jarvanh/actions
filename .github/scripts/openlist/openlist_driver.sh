@@ -751,7 +751,7 @@ _openlist_truth_check() {
 
   # 有传输 → 列表可能含"PUT 假成功"条目，重启容器取后端真值
   local pre_count=0 dest_json
-  dest_json=$(timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900}" rclone size "$dest_path" --json 2>/dev/null || true)
+  dest_json=$(timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900s}" rclone size "$dest_path" --json 2>/dev/null || true)
   pre_count=$(echo "$dest_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
   [[ "$pre_count" =~ ^[0-9]+$ ]] || pre_count=0
   echo "  本轮传输 ${uploaded} 个文件，目标视图 ${pre_count}（缓存口径）—— 重启容器取后端真值" | tee -a "$log_file"
@@ -763,7 +763,7 @@ _openlist_truth_check() {
 
   # 重启后重新计数（此即后端真值）; pre-post 差 = 假成功文件数（供通知）
   local post_json post_count
-  post_json=$(timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900}" rclone size "$dest_path" --json 2>/dev/null || true)
+  post_json=$(timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900s}" rclone size "$dest_path" --json 2>/dev/null || true)
   post_count=$(echo "$post_json" | jq -r '.count // 0' 2>/dev/null || echo 0)
   [[ "$post_count" =~ ^[0-9]+$ ]] || post_count=0
   echo "  重启后目标视图: ${pre_count} → ${post_count}" | tee -a "$log_file"

@@ -209,7 +209,12 @@ jobs:
       OPENLIST_PROBE_TIMEOUT: "15"
       OPENLIST_CACHE_REFRESH_WAIT: "60"
       # 注: 驱动初始化等待 120s 硬编码在 openlist_api.sh wait_openlist_ready 阶段3，未参数化
-      OPENLIST_RCLONE_LISTING_TIMEOUT: "900"
+      # ⚠️ 必须**带单位**: 该值既给 coreutils `timeout`（接受 900s）也给 rclone 的
+      # `--timeout`（**要求带单位**，裸 "900" 会报 `missing unit in duration` 并让调用失败）。
+      # 2026-09-16 实测: 裸数字导致 `_bulk_fold_record_landed` 的落盘列举与延迟复核的列举
+      # **全部静默失败**（stderr 被 2>/dev/null 吞掉）⇒ 折叠成果从未被记账（三轮日志里
+      # `✅ 折叠落盘` 出现 0 次），表现为"幽灵落盘 + 下轮重传"。
+      OPENLIST_RCLONE_LISTING_TIMEOUT: "900s"
       OPENLIST_MKDIR_TIMEOUT: "120"
       OPENLIST_DOWNLOAD_TIMEOUT: "300"
       OPENLIST_UPLOAD_TIMEOUT: "300"
