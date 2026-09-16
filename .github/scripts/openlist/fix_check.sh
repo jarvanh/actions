@@ -175,16 +175,40 @@ FC_SUB_PATH=""
 FC_CAND="$FC_WORK/candidates.txt"
 : > "$FC_CAND"
 
-_fc_list_remote() {  # <remote 路径> <输出文件>
-  rclone lsf -R --files-only --retry 1 --timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900}" \
-    "$1" > "$2" 2>/dev/null || : > "$2"
+# 列举远端目录（**不吞错误**: 失败与"目录为空"必须能区分开 —— 2026-09-16 实测踩到:
+# 主轮同时在读同一 OneDrive 时列举被限流，错误被 /dev/null 吞掉后表现为"0 个文件"，
+# 与"路径写错"长得一模一样，白排查一轮）
+_fc_list_remote() {  # <remote 路径> <输出文件> <标签>
+  local path="$1" out="$2" label="${3:-列表}" t0 t1 rc
+  t0=$(date +%s)
+  rclone lsf -R --files-only --retry 3 --low-level-retries 5 --contimeout 30s \
+    --timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900}" "$path" > "$out" 2> "${out}.err"
+  rc=$?
+  t1=$(date +%s)
+  _fc_log "  📋 ${label}: ${path} → $(grep -c . "$out" 2>/dev/null || true) 个文件（rc=${rc}，$((t1 - t0))s）"
+  if [ "$rc" -ne 0 ]; then
+    _fc_log "  ⚠️ ${label}失败（rc=${rc}）: $(tail -3 "${out}.err" 2>/dev/null | tr '\n' ' ' | cut -c1-300)"
+  fi
+}
+# 源端列举为空时的定性: 非递归列举有内容 ⇒ 是列举失败（多为限流/超时）；也空 ⇒ 路径不对
+_fc_diagnose_empty_src() {  # <remote 路径>
+  local path="$1" probe="$FC_WORK/probe_nonrec.lsf"
+  rclone lsf "$path" --files-only --retry 1 --timeout 120s > "$probe" 2> "${probe}.err"
+  if [ -s "$probe" ]; then
+    _fc_log "❌ 源端递归列举为空，但非递归列举有内容 ⇒ **列举失败**（常见成因: 主轮同时在读同一网盘被限流/超时）"
+    _fc_log "   ↳ 处置: 避开主轮（或先取消主轮）后重跑；错误尾部: $(tail -2 "${probe}.err" 2>/dev/null | tr '\n' ' ' | cut -c1-200)"
+  else
+    _fc_log "❌ 源端路径不存在或不可读: ${path}"
+    _fc_log "   ↳ 处置: 检查 FIXCHECK_TASK / FIXCHECK_SUBDIR 拼写；错误尾部: $(tail -2 "${probe}.err" 2>/dev/null | tr '\n' ' ' | cut -c1-200)"
+  fi
+  exit 2
 }
 
 if [ "$FIXCHECK_MODE" = "diff" ]; then
   _fc_log "🔍 diff 模式: 两侧递归列举（源 ${FC_SRC}${FC_SUB_PATH} vs 目标 ${FC_DST}${FC_SUB_PATH}）..."
-  _fc_list_remote "${FC_SRC}${FC_SUB_PATH}" "$FC_WORK/src.lsf"
-  _fc_list_remote "${FC_DST}${FC_SUB_PATH}" "$FC_WORK/dst.lsf"
-  _fc_log "  源端 $(grep -c . "$FC_WORK/src.lsf" || true) 个文件 / 目标端 $(grep -c . "$FC_WORK/dst.lsf" || true) 个文件"
+  _fc_list_remote "${FC_SRC}${FC_SUB_PATH}" "$FC_WORK/src.lsf" "源端"
+  _fc_list_remote "${FC_DST}${FC_SUB_PATH}" "$FC_WORK/dst.lsf" "目标端"
+  [ -s "$FC_WORK/src.lsf" ] || _fc_diagnose_empty_src "${FC_SRC}${FC_SUB_PATH}"
   # grep -v 无输出时退出码为 1 ⇒ 必须 `|| true`，否则会把已写好的候选清单当成失败处理
   { comm -23 <(sort -u "$FC_WORK/src.lsf") <(sort -u "$FC_WORK/dst.lsf") || true; } > "$FC_CAND" 2>/dev/null
   _fc_log "  缺失（源端有·目标端无）: $(grep -c . "$FC_CAND" || true) 个"
@@ -192,8 +216,8 @@ if [ "$FIXCHECK_MODE" = "diff" ]; then
   # 先解析出叶子单元才能读到对应的 marker（任务根 marker 在生产里并不用于叶子文件）
 else
   _fc_log "🔍 list 模式: 列举源端 ${FC_SRC}${FC_SUB_PATH} 以定位清单中的文件..."
-  _fc_list_remote "${FC_SRC}${FC_SUB_PATH}" "$FC_WORK/src.lsf"
-  _fc_log "  源端候选池 $(grep -c . "$FC_WORK/src.lsf" || true) 个文件"
+  _fc_list_remote "${FC_SRC}${FC_SUB_PATH}" "$FC_WORK/src.lsf" "源端候选池"
+  [ -s "$FC_WORK/src.lsf" ] || _fc_diagnose_empty_src "${FC_SRC}${FC_SUB_PATH}"
   # 末尾补换行: `while read` 对"最后一行没有换行符"会**丢掉该行**（经典坑），
   # 用户粘贴的清单通常没有尾换行 ⇒ 不补就会静默漏掉最后一条
   printf '%s\n' "${FIXCHECK_FILES:-}" > "$FC_WORK/wanted.txt"
