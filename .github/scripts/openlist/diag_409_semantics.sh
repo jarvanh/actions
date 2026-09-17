@@ -22,13 +22,15 @@
 #     三时点复核（即时→延迟→重启真值）。
 #     为什么重要: 修复管线走的是"改名绕过"（短名直传），若改回原名就蒸发，
 #       说明**还原步骤（restore）本身有风险** —— 后端有文件、但还原后消失。
+#     载荷来源: **本地自造**（默认 4 MiB 随机 + 中性长名），不依赖生产文件。
+#       见脚本 E2 段落开头的设计变更说明。
 #
 # 用法: bash diag_409_semantics.sh [目标父目录] [容器名]
 #   默认: openlist:wopan176Crypt/2  openlist
 # 环境变量:
-#   DIAG_409_SRC       E2 用的**源端**文件路径（如 onedrive:2/xx/原名.mp4，换行分隔，取第 1 个）。
-#                      必须给: E2 要"同内容 + 原名"，只能从源端重传一份原名版本。
-#                      未提供 ⇒ E2 跳过（E1 仍完整执行，E1 才是判决性的）。
+#   DIAG_409_SRC       （**已废弃**，保留兼容）旧设计要的源端路径；现 E2 用本地载荷，无需提供。
+#   DIAG_409_ORIG_NAME E2 的"原名"形态（默认为中性长名，带空格与括号）
+#   DIAG_409_E2_BYTES  E2 本地载荷字节数（默认 4194304 = 4 MiB）
 #   DIAG_409_SKIP_E1   1=跳过 E1（只做 E2）
 #   DIAG_409_SKIP_E2   1=跳过 E2（只做 E1，纯只读更快）
 #   DIAG_REPORT        报告路径（默认 /tmp/ol_diag/diag409_report.txt）
@@ -165,102 +167,114 @@ fi
 # ────────────────────────────────────────────────────────────
 # E2 · 短名改回原名是否蒸发
 # ────────────────────────────────────────────────────────────
+# 设计变更（2026-09-17）：不再要求调用方手给源端路径。
+#   为什么：① 手给路径要先知道确切文件名，而 run 日志里的路径是**截断展示**的
+#   （`onedrive:4/1024j-…/Kitty In Bed [ph5c345ea989221].mp4`），从日志反推
+#   不可靠；② 生产目录里的真实文件名多为敏感词，不适合写进 workflow 输入。
+#   ⇒ 改为**自发现**：从 diag 自己的隔离目录里挑一个既有文件做改名实验。
+#   代价：E2 测的是"后端在隔离目录里对短名→原名的改名行为"，与生产文件内容
+#   无关（E2 关心的是**改名这个操作**会不会让条目蒸发，不是内容审核）。
+#   ⇒ 若需在生产语义（真实长名 + crypt 挂载）下复测，再手工给 DIAG_409_SRC。
 E2_STATUS="skipped"
 if [ "${DIAG_409_SKIP_E2:-0}" = "1" ]; then
   say ""
   say "（E2 已按 DIAG_409_SKIP_E2=1 跳过）"
-elif [ -z "${DIAG_409_SRC:-}" ]; then
-  say ""
-  say "（E2 跳过: 未提供 DIAG_409_SRC —— 该实验需要源端文件做「同内容+原名」重传）"
 else
   sec "E2 · 短名改回原名是否蒸发"
 
-  # 取第一个源（换行分隔，剥空行）
-  _src="$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<<"$DIAG_409_SRC" | grep -v '^$' | head -1)"
-  if [ -z "$_src" ]; then
-    say "❌ DIAG_409_SRC 解析后为空 —— E2 跳过"
+  # 造一个"类生产形态"的载荷: 短名（8 位 hex）与"原名"（长且带敏感形态）
+  # 为什么用本地生成的载荷而不是拉生产文件: 见上方设计变更说明——E2 的变量是
+  #   **改名操作**，不是文件内容。用本地载荷还能控制大小（快）且不含敏感名。
+  E2_DIR="$BASE/e2"
+  rclone mkdir "$E2_DIR" --timeout "$MKDIR_TIMEOUT" >/dev/null 2>&1 || true
+
+  ORIG_NAME="${DIAG_409_ORIG_NAME:-e2-original-name-with-some-length-and spaces (1).bin}"
+  HASH8=$(printf '%s' "$ORIG_NAME" | md5sum 2>/dev/null | cut -c1-8)
+  [ -n "$HASH8" ] || HASH8="deadbeef"
+  SHORT_NAME="${HASH8}.bin"
+
+  _payload="/tmp/ol_diag/e2_payload.bin"
+  _pl_bytes="${DIAG_409_E2_BYTES:-4194304}"   # 4 MiB 默认，够触发真实落盘又够快
+  head -c "$_pl_bytes" /dev/urandom > "$_payload" 2>/dev/null || true
+  if [ ! -s "$_payload" ]; then
+    say "❌ 本地载荷生成失败 —— E2 跳过"
   else
-    _base="${_src##*/}"
-    case "$_base" in *.*) _ext=".${_base##*.}";; *) _ext="";; esac
-    _hash8=$(printf '%s' "$_base" | md5sum 2>/dev/null | cut -c1-8)
-    [ -n "$_hash8" ] || _hash8="deadbeef"
-    SHORT_NAME="${_hash8}${_ext}"          # 方法2 产物形态（短名）
-    ORIG_NAME="$_base"                     # 原名
+    say "载荷: ${_pl_bytes} B（本地随机，内容中性）"
+    say "短名形态: $SHORT_NAME"
+    say "原名形态: $ORIG_NAME"
 
-    _sz=$(rclone size --json "$_src" --retries 1 --timeout "$PROBE_TIMEOUT" 2>/dev/null | jq -r '.bytes // empty' 2>/dev/null)
-    if [ -z "$_sz" ] || ! [[ "$_sz" =~ ^[0-9]+$ ]]; then
-      say "❌ 源文件 size 拿不到: $_src —— E2 跳过"
+    say ""
+    say "步骤1 · 先以**短名**上传（模拟方法2 产物）"
+    _out=$(rclone copyto "$_payload" "$E2_DIR/$SHORT_NAME" \
+      --retries 3 --low-level-retries 5 --contimeout 30s --timeout "$SOURCE_TIMEOUT" 2>&1)
+    if [ "$?" -eq 0 ]; then
+      say "  ✅ 短名上传被受理"
     else
-      say "源: $_src（${_sz} B）"
-      say "短名形态: $SHORT_NAME"
-      say "原名形态: $ORIG_NAME"
+      say "  ❌ 短名上传失败 (http=$(http_code_of "$_out"))"
+      say "$_out" | tail -2 | sed 's/^/     ▸ /' | tee -a "$REPORT"
+    fi
+
+    LSDIR=/tmp/ol_diag/e2_lsf; mkdir -p "$LSDIR"
+    lsf_now() { rclone lsf "$1" --files-only --retries 1 --timeout "$PROBE_TIMEOUT" 2>/dev/null > "$2" || true; }
+    in_snap() { [ -n "$1" ] && grep -qxF "$1" "$2" 2>/dev/null && return 0 || return 1; }
+
+    lsf_now "$E2_DIR" "$LSDIR/s_t1"
+    say "  ① 即时: 短名可见=$(in_snap "$SHORT_NAME" "$LSDIR/s_t1" && echo 是 || echo 否)"
+
+    say ""
+    say "步骤2 · **改名回原名**（模拟 restore 还原步骤）"
+    _out=$(rclone moveto "$E2_DIR/$SHORT_NAME" "$E2_DIR/$ORIG_NAME" \
+      --retries 3 --low-level-retries 5 --contimeout 30s --timeout "$SOURCE_TIMEOUT" 2>&1)
+    _mv_rc=$?
+    if [ "$_mv_rc" -eq 0 ]; then
+      say "  ✅ 改名被受理（rc=0）"
+    else
+      say "  ⚠️ 改名失败 (rc=$_mv_rc, http=$(http_code_of "$_out")) —— 记录并继续"
+      say "$_out" | tail -3 | sed 's/^/     ▸ /' | tee -a "$REPORT"
+    fi
+
+    lsf_now "$E2_DIR" "$LSDIR/t1_immediate"
+    _i_orig=$(in_snap "$ORIG_NAME" "$LSDIR/t1_immediate" && echo 是 || echo 否)
+    _i_short=$(in_snap "$SHORT_NAME" "$LSDIR/t1_immediate" && echo 是 || echo 否)
+    say "  ① 改名后即时: 原名可见=$_i_orig · 短名残留=$_i_short"
+
+    say "  ② 等待 ${DELAY_WAIT}s（观察延迟落盘）..."
+    sleep "$DELAY_WAIT"
+    lsf_now "$E2_DIR" "$LSDIR/t2_delayed"
+    _d_orig=$(in_snap "$ORIG_NAME" "$LSDIR/t2_delayed" && echo 是 || echo 否)
+    say "    延迟后: 原名可见=$_d_orig"
+
+    say "  ↻ 重启容器取后端真值..."
+    if docker restart "$CONTAINER" >/dev/null 2>&1; then
+      sleep "$RESTART_WAIT"
+      lsf_now "$E2_DIR" "$LSDIR/t0_truth"
+      _t_orig=$(in_snap "$ORIG_NAME" "$LSDIR/t0_truth" && echo 是 || echo 否)
+      _t_short=$(in_snap "$SHORT_NAME" "$LSDIR/t0_truth" && echo 是 || echo 否)
+      say "  ③ 真值（重启后）: 原名可见=$_t_orig · 短名残留=$_t_short"
       say ""
-      say "步骤1 · 以**短名**上传（模拟方法2 的修复产物）"
-      _d="$BASE/e2"
-      rclone mkdir "$_d" --timeout "$MKDIR_TIMEOUT" >/dev/null 2>&1 || true
-      _out=$(rclone copyto "$_src" "$_d/$SHORT_NAME" \
-        --retries 3 --low-level-retries 5 --contimeout 30s --timeout "$SOURCE_TIMEOUT" 2>&1)
-      if [ $? -eq 0 ]; then
-        say "  ✅ 短名上传被受理"
+      say "── E2 判读（三时点: 即时→延迟→真值）──"
+      if [ "$_i_short" = "是" ] && [ "$_i_orig" = "否" ] && [ "$_t_short" = "否" ]; then
+        E2_STATUS="改名后条目蒸发（真丢失）"
+        say "🔒 **改名导致条目蒸发** —— 短名可见但改名后原名与短名**都消失**。"
+        say "   ⇒ 该后端的 **moveto/改名操作本身不可靠**（不是「原名」这个字符串的问题，"
+        say "     因为连短名也一起没了）。⇒ 还原步骤有真风险，修复产物应尽量少改名。"
+      elif [ "$_t_orig" = "是" ]; then
+        E2_STATUS="改回原名后真值存活"
+        say "✅ **改回原名后真值存活** ⇒ 改名安全，「改回原名会消失」不成立。"
+        say "   ⇒ 修复产物可正常还原成原名；restore 步骤风险低。"
+        say "     注: 本判读基于隔离目录 + 中性载荷；生产语义（长敏感名 + crypt 挂载）如需复测，再手工给 DIAG_409_SRC。"
+      elif [ "$_t_short" = "是" ] && [ "$_t_orig" = "否" ]; then
+        E2_STATUS="改名未生效（条目留在短名）"
+        say "⚠️ 真值里只有**短名**存活、原名没有 ⇒ 改名请求没真正生效。"
+        say "   ⇒ 后果: 名字与 marker 记录不一致（账实不符），但**不丢数据**。"
       else
-        say "  ❌ 短名上传失败 (http=$(http_code_of "$_out"))"
-        say "$_out" | tail -2 | sed 's/^/     ▸ /' | tee -a "$REPORT"
+        E2_STATUS="两者都消失（通路异常）"
+        say "❌ 原名与短名在真值里**都不存在** ⇒ 通路/目录异常，本实验不成立。"
+        say "   先确认该目录可写性（E1/常规探针），再重跑本组。"
       fi
-
-      # 三时点复核: 即时 → 延迟 → 重启真值（与 diag_reject.sh 同哲学）
-      LSDIR=/tmp/ol_diag/e2_lsf; mkdir -p "$LSDIR"
-      lsf_now() { rclone lsf "$_d" --files-only --retries 1 --timeout "$PROBE_TIMEOUT" 2>/dev/null > "$1" || true; }
-      in_snap() { [ -n "$1" ] && grep -qxF "$1" "$2" 2>/dev/null && return 0 || return 1; }
-
-      lsf_now "$LSDIR/s_t1"
-      say "  ① 即时（缓存口径）: 短名可见=$(in_snap "$SHORT_NAME" "$LSDIR/s_t1" && echo 是 || echo 否)"
-
-      say ""
-      say "步骤2 · **改名回原名**（模拟 restore 还原步骤）"
-      _out=$(rclone moveto "$_d/$SHORT_NAME" "$_d/$ORIG_NAME" \
-        --retries 3 --low-level-retries 5 --contimeout 30s --timeout "$SOURCE_TIMEOUT" 2>&1)
-      _mv_rc=$?
-      if [ $_mv_rc -eq 0 ]; then
-        say "  ✅ 改名回原名被受理"
-      else
-        say "  ⚠️ 改名失败 (rc=$_mv_rc, http=$(http_code_of "$_out")) —— 记录并继续（这本身也是结论）"
-        say "$_out" | tail -3 | sed 's/^/     ▸ /' | tee -a "$REPORT"
-      fi
-
-      lsf_now "$LSDIR/t1_immediate"
-      say "  ① 改名后即时: 原名可见=$(in_snap "$ORIG_NAME" "$LSDIR/t1_immediate" && echo 是 || echo 否) · 短名残留=$(in_snap "$SHORT_NAME" "$LSDIR/t1_immediate" && echo 是 || echo 否)"
-
-      say "  ② 等待 ${DELAY_WAIT}s（观察延迟落盘）..."
-      sleep "$DELAY_WAIT"
-      lsf_now "$LSDIR/t2_delayed"
-      say "    延迟后: 原名可见=$(in_snap "$ORIG_NAME" "$LSDIR/t2_delayed" && echo 是 || echo 否)"
-
-      say "  ↻ 重启容器取后端真值..."
-      if docker restart "$CONTAINER" >/dev/null 2>&1; then
-        sleep "$RESTART_WAIT"
-        lsf_now "$LSDIR/t0_truth"
-        _t_orig=$(in_snap "$ORIG_NAME" "$LSDIR/t0_truth" && echo 是 || echo 否)
-        _t_short=$(in_snap "$SHORT_NAME" "$LSDIR/t0_truth" && echo 是 || echo 否)
-        say "  ③ 真值（重启后）: 原名可见=$_t_orig · 短名残留=$_t_short"
-        say ""
-        say "── E2 判读 ──"
-        if [ "$_t_orig" = "是" ]; then
-          E2_STATUS="原名存活"
-          say "✅ **改回原名后真值存活** ⇒ 还原步骤安全，'改回原名会消失'不成立。"
-          say "   ⇒ 修复产物可以正常还原成原名（或保留短名，两者都不会丢）。"
-        elif [ "$_t_short" = "是" ]; then
-          E2_STATUS="改成短名后蒸发"
-          say "⚠️ 原名为空、短名也蒸发——改名操作本身触发了丢失（非'原名'问题）。"
-        else
-          E2_STATUS="改回原名后蒸发"
-          say "🔒 **改回原名后真值蒸发** ⇒ 还原步骤有风险！"
-          say "   ⇒ 短名产物在、改回原名就消失 ⇒ 后端对**原名**有拒收/覆盖问题。"
-          say "   ⇒ 与 §12.13.6「按原名拒收」结论一致：**保留短名、不要还原原名**是更安全的选择。"
-        fi
-      else
-        E2_STATUS="重启失败（真值口径退化）"
-        say "  ⚠️ docker restart 失败——真值口径退化为重启前列表，结论不成立。"
-      fi
+    else
+      E2_STATUS="重启失败（真值口径退化）"
+      say "  ⚠️ docker restart 失败——真值口径退化为重启前列表，结论不成立。"
     fi
   fi
 fi
