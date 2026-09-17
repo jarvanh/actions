@@ -11,6 +11,13 @@ run 34859505000 里 19 个测过的节点**下行全部达标**，订阅里却**
 现在的判据只问一件事：**另一指标是不是明显更好**（`secondary > primary` 且
 `secondary >= ceil(primary × ratio)`，ratio 默认 1.5）。
 
+第 7–9 组守**另一条更隐蔽的路**——「可导出配置」的取值来源。2026-09-16 的编排轮
+`35116972319` 里 206 个节点实测有速度（最高上传 245 Mbps），订阅却判「达标不足 1 个」：
+`source_entry.proxy` 只在节点名匹配上订阅 source_mapping 时才有值，而编排轮的 8326 个
+节点由 gistnodes 经 provider 直接喂入、source_mapping 只有 4 条 ⇒ 配置全在 `proxy_obj`
+里却没人读。现在钉住：`source_entry.proxy` 优先、缺失回落 `proxy_obj`、**两者皆空仍须挡住**
+（回落不能变成「什么都算数」，否则会导出空壳节点）。
+
 跑法：`python .github/scripts/proxy-speedtest/tests/test_subscription_metric.py`
 退出码 0 = 全过。
 """
@@ -90,6 +97,47 @@ def main():
         p = C.resolve_subscription_policy({'PROXY_SPEEDTEST_METRIC_FALLBACK_RATIO': raw})
         check(p['metric_fallback_ratio'] >= 1.0,
               f'非法倍率 {raw!r} → 退回且不小于 1（实际 {p["metric_fallback_ratio"]}）')
+
+    print('== 7. 可导出配置回落 proxy_obj（run 35116972319：206 个达标节点被判 0）==')
+    # 编排轮形态：节点由 gistnodes 经 provider 直接喂进来，source_mapping 只有 4 条 ⇒
+    # source_entry 匹配不上为空，配置全在 proxy_obj 里。旧实现只认 source_entry.proxy
+    # ⇒ 206 个实测有速度的节点（最高 245 Mbps）全被判「无可用配置」⇒ 达标 0 ⇒ 不上传。
+    def orch_node(up_mbps, down_mbps, has_proxy_obj=True):
+        return {'name': 'n', 'source_entry': {},
+                'proxy_obj': {'type': 'vless', 'server': 'x.com', 'port': 443}
+                if has_proxy_obj else {},
+                'upload_mibs': up_mbps / 8.388608, 'download_mibs': down_mbps / 8.388608}
+
+    orch = [orch_node(245.24, 130.53) for _ in range(206)]
+    check(C.count_qualified_nodes(orch, 'upload', 10) == 206,
+          f'编排轮 206 个有速度节点全部计入达标（实际 {C.count_qualified_nodes(orch, "upload", 10)}）')
+    b7 = C.build_subscription_bundle(orch, pol)
+    check(b7['qualified'] == 206 and bool(b7['text']),
+          f'订阅文本正常生成（实际 qualified={b7["qualified"]}, text空={not b7["text"].strip()}）')
+    check(b7['text'].count('name:') == 206,
+          f'导出的 YAML 含 206 个节点（实际 {b7["text"].count("name:")}）')
+
+    print('== 8. source_entry.proxy 优先于 proxy_obj（前者是更权威的来源）==')
+    both = {'name': 'n',
+            'source_entry': {'proxy': {'type': 'trojan', 'server': 'from-entry.com', 'port': 443}},
+            'proxy_obj': {'type': 'vless', 'server': 'from-obj.com', 'port': 80},
+            'upload_mibs': 20.0 / 8.388608, 'download_mibs': 20.0 / 8.388608}
+    picked = C.node_proxy_config(both)
+    check(picked.get('server') == 'from-entry.com',
+          f'source_entry 存在时用它（实际 {picked.get("server")}）')
+    only_obj = dict(both); only_obj['source_entry'] = {}
+    check(C.node_proxy_config(only_obj).get('server') == 'from-obj.com',
+          'source_entry 为空时回落到 proxy_obj')
+    neither = dict(both); neither['source_entry'] = {}; neither['proxy_obj'] = {}
+    check(C.node_proxy_config(neither) == {}, '两者都空 ⇒ 返回空（调用方据此跳过）')
+
+    print('== 9. 反向：两者皆空仍必须判「不可导出」==')
+    # 回落不能变成「什么都算数」——配置真的缺失时依然要挡住，否则会导出空壳节点
+    empty = [orch_node(50, 50, has_proxy_obj=False) for _ in range(5)]
+    check(C.count_qualified_nodes(empty, 'upload', 10) == 0,
+          f'无配置的节点不计达标（实际 {C.count_qualified_nodes(empty, "upload", 10)}）')
+    check(C.build_subscription_bundle(empty, pol)['text'] == '',
+          '无配置 ⇒ 订阅文本为空，不上传空壳')
 
     print()
     if FAILURES:
