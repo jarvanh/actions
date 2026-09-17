@@ -98,9 +98,18 @@ job，gistnodes 侧拿不到测速结果。抓取情况走 job 摘要与 progres
 ## 为什么剔掉 Cloudflare 节点
 
 在 Sub-Store 处理链第 3 步用 `proxies.filter(...)` 剔除 **`server` 落在 Cloudflare 官方 IP
-段**里的节点。判定表 `CF_IPV4_CIDRS` / `CF_IPV6_CIDRS` 照抄官方 API
-`https://api.cloudflare.com/client/v4/ips`（15 个 v4 段 + 7 个 v6 段），实测 2026-09-17
-一轮 11973 个节点里命中 1857 个（约 15.5%）。
+段**里的节点。实测 2026-09-17 一轮 11973 个节点里命中 1857 个（约 15.5%）。
+
+**段表运行时实时拉取**：每轮打一次 `https://api.cloudflare.com/client/v4/ips`（`fetch_cf_cidrs`），
+用返回的 `ipv4_cidrs` / `ipv6_cidrs` 生成算子——这样 CF 新增段不用改代码就能覆盖。
+拉取结果与来源（`api` / `fallback`）记进 `gist_nodes_deduped` 进度日志，便于事后核对。
+
+**任何失败都回退到内置快照**（`CF_IPV4_CIDRS_FALLBACK` / `CF_IPV6_CIDRS_FALLBACK`，
+2026-09-17 官方快照），且**绝不中断整轮**。为什么必须回退而不是放弃过滤：过滤失效 =
+整批 CF 节点原样发布，等于悄悄退回改动前的行为；而旧表是「宁漏勿错」的安全侧（最多漏剔
+新段，绝不会误伤非 CF 节点）。回退触发条件覆盖：网络异常 / 非 JSON / `success` 非真 /
+段表为空 / 字段缺失 / CIDR 非法——宁可退回已知正确的旧表，也不拿「结构对了但内容可疑」
+的响应去生成算子（拿到空表会让判据变成「谁都剔不掉」，比不做还隐蔽）。
 
 **判定只看 `server`，不碰名称、不碰 servername** —— 这不是保守，是唯一可靠的口径：
 
@@ -120,8 +129,9 @@ CIDR 归属判断在 Script Operator 里手搓位运算（Sub-Store 算子沙箱
 
 验证：JS 算子在全量 11973 个真实节点上与 Python `ipaddress` 独立实现**逐节点比对，零分歧**
 （移除 1857 / 保留 10116）；另跑 88 个段边界用例（每段首末地址 + 前后各一个邻居）全部一致。
-测试断言 `tests/test_gist_nodes_substore.py` 里把官方段表**独立写成字面量**核对，避免自我指涉
-（读常量会让「把段表删到只剩一段」也照样全绿）。
+测试断言 `tests/test_gist_nodes_substore.py` 里把官方回退段表**独立写成字面量**核对，避免
+自我指涉（读常量会让「把段表删到只剩一段」也照样全绿）；实时拉取的成功与六类失败回退
+（非 JSON / `success=false` / 空表 / 缺字段 / CIDR 非法 / 网络异常）各有用例。
 
 ## 为什么发布前必须自己先测活
 
