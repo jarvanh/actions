@@ -68,7 +68,7 @@ grep -l "command not found" /tmp/x_*.log   # 必须为空（硬要求）
 ```
 
 - 全量约 5–12 分钟（随套件数与机器负载变化），后台跑；**跑期间不要并发跑单个测试**。
-- 判定基线：**18 套 EXIT=0** + 2 个已知失败：
+- 判定基线：**除环境假红外全部 `EXIT=0`**（套件数会变，别记数字）；已知环境假红固定为：
   - `test_truth.sh`（依赖 docker / 真实 OpenList 服务）
   - `test_marker_skip_guards.sh` 1b（macOS BSD `date` 无 `-d`）
 - `command not found` 扫描**必须为空**——套件 PASS 不等于通过。
@@ -80,3 +80,5 @@ grep -l "command not found" /tmp/x_*.log   # 必须为空（硬要求）
 - `test_get_openlist_token_login.sh`：sandbox broker IPC `ETIMEDOUT`
 - `test_batch_precheck_circuit_breaker.sh`：回归期间被并发跑过会出现假的
   `command not found`（共用 `tests/extracted.sh`）
+- `test_pair_parallel.sh`：`wc` 前导空白使 `[: 0\n0: integer expression expected`，
+  场景 3a 误报「仍执行 4 个」，单独复跑 `PASS=11 FAIL=0`（2026-09-17 CI 实测一次）

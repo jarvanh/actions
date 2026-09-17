@@ -3,11 +3,13 @@
 # 为什么单独一个 workflow:
 #   · 业务 workflow（openlist / emby / proxy-speedtest …）跑真实任务、动辄数小时，
 #     把测试塞进去等于"想跑测试就得跑一遍业务"；
-#   · 本机跑测试要吃 CPU（openlist 26 套串行约 1–2 分钟），而且 macOS / 本机沙箱会带来
-#     4 项**环境假红**：无 `date -d`（marker_skip_guards）、`wc` 前导空格（sync_trend_budget）、
-#     无 docker（truth）、沙箱拦子进程（progress_no_orphans）。ubuntu runner 上这四项都不存在，
-#     基线因此更硬（预期 26/26 全绿）。
+#   · 本机跑测试要吃 CPU（openlist 全套串行约 1–2 分钟），而且 macOS / 本机沙箱会带来
+#     一批**环境假红**：无 `date -d`（marker_skip_guards）、`wc` 前导空格
+#     （sync_trend_budget）、无 docker（truth）、沙箱拦子进程（progress_no_orphans）。
+#     ubuntu runner 上这些都不存在，基线因此更硬（本域套件全绿）。
 # 结构: 按「域」分组，每域一个 job；新增域照抄同构 job 即可（域内一律串行）。
+# 现状: 目前**只有 openlist 一个 job**，即本载体当前只服务 openlist 域；
+#       proxy-speedtest 等域仍在各域本机/自查脚本里跑，未接入本载体。
 # 触发: 只 workflow_dispatch —— 仓库既有约定是「无任何 workflow 监听 push/pull_request」
 #       （main 有并行推送，加了会产生大量冗余运行）。需要验证时手动 dispatch。
 name: tests
@@ -16,7 +18,7 @@ on:
   workflow_dispatch:
     inputs:
       domain:
-        description: "只跑指定域（留空 = 全部）：openlist"
+        description: "只跑指定域（留空 = 全部；当前仅 openlist）"
         required: false
         type: string
         default: ""
@@ -31,7 +33,7 @@ jobs:
   openlist:
     if: ${{ github.event.inputs.domain == '' || github.event.inputs.domain == 'openlist' }}
     runs-on: ubuntu-latest
-    # 26 套串行；本机约 1–2 分钟，runner 上含 setup 给足余量
+    # 全套串行；本机约 1–2 分钟，runner 上含 setup 给足余量
     timeout-minutes: 30
     steps:
       - name: Checkout repository
