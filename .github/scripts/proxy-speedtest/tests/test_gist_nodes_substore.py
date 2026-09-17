@@ -28,8 +28,12 @@
      * 同一批连续 3 页被限流就熔断本批、且不补一轮。
      三者都配了「关闭该收口 → 一路翻满 max_pages」的负向对照，否则判据恒真也看不出来。
  11. Sub-Store 阶段预算（18–19）：投喂预算耗尽 → 截断投喂、仍用已投喂的产出（退出码 0，
-     组合只引用已投喂的）；产出预算耗尽 → 就地失败（退出码 1，省掉建组合/取回就没有产物）。
-     两者方向相反，各配负向对照。
+    组合只引用已投喂的）；产出预算耗尽 → 就地失败（退出码 1，省掉建组合/取回就没有产物）。
+    两者方向相反，各配负向对照。
+12. CF 段表实时拉取（23）：成功 → 用线上表且标 `api`；非 JSON / `success=false` / 列表为空 /
+    缺字段 / CIDR 非法 / 网络异常 → 一律回退内置快照且标 `fallback`、绝不冒泡；
+    另验算子内嵌的是**传进来的**段表、不是偷偷读常量。
+    主流程（1–5）里 `fetch_cf_cidrs` 被 stub 成回退表，保证自检离线且不随线上段表漂移。
 
 **不覆盖健康检查过滤与试装排雷**：两者都要另起 mihomo（几十 MB 下载 + 每轮几十秒等待），
 本机跑只会一路超时。这里统一用 `GIST_NODES_ALIVE_FILTER=0` / `GIST_NODES_TRIAL_LOAD=0`
@@ -148,6 +152,10 @@ def run_main(gist_nodes, tmpdir, extra_env, carryover_text=None):
     `carryover_text` 是 stub 掉的「上一轮发布到 Gist 的订阅正文」：默认 None = 上一轮还没有
     这个文件（首次运行）。**必须 stub**——真实的 fetch_carryover 会去打 api.github.com，
     本机 .env 里恰好有 PROXY_SPEEDTEST_GIST_ID 时就会真的发请求，自检就不再离线了。
+
+    `fetch_cf_cidrs` 同样 **必须 stub**：真实的它去拉 api.cloudflare.com，自检要离线且
+    结果确定；拉了真表反而会让「内嵌哪份段表」随线上变化而漂移。真实拉取逻辑（成功/
+    各种失败回退）由用例 23 用假 HTTP 层单独验。
     """
     uploaded = {}
 
@@ -157,7 +165,7 @@ def run_main(gist_nodes, tmpdir, extra_env, carryover_text=None):
                 'yaml': {'filename': 'x.yaml', 'raw_url': 'https://gist.githubusercontent.com/x'}}
 
     orig = (gist_nodes.search_gists, gist_nodes.collect_all, gist_nodes.update_gist,
-            gist_nodes.fetch_carryover)
+            gist_nodes.fetch_carryover, gist_nodes.fetch_cf_cidrs)
     # 第一轮就给 1 个候选，并把**传入的所有关键词**都标成「到头」——否则主循环会
     # 一轮轮翻下去（每轮都重复投喂同样的 3 个订阅），把「投喂 3 个」的断言冲掉。
     gist_nodes.search_gists = lambda queries, *a, **k: (
@@ -169,6 +177,9 @@ def run_main(gist_nodes, tmpdir, extra_env, carryover_text=None):
     )
     gist_nodes.update_gist = fake_update_gist
     gist_nodes.fetch_carryover = lambda env, timeout, max_bytes: carryover_text
+    # 固定成内置回退表：断言里比对的就是这份，跑起来与线上段表无关。
+    gist_nodes.fetch_cf_cidrs = lambda env, timeout: (
+        gist_nodes.CF_IPV4_CIDRS_FALLBACK, gist_nodes.CF_IPV6_CIDRS_FALLBACK, 'fallback')
 
     env = dict(os.environ)
     env.update({'GIST_NODES_WORKDIR': str(tmpdir), 'GIST_NODES_MAX_NODES': '5',
@@ -190,7 +201,7 @@ def run_main(gist_nodes, tmpdir, extra_env, carryover_text=None):
         os.environ.clear()
         os.environ.update(saved)
         gist_nodes.search_gists, gist_nodes.collect_all, gist_nodes.update_gist, \
-            gist_nodes.fetch_carryover = orig
+            gist_nodes.fetch_carryover, gist_nodes.fetch_cf_cidrs = orig
 
     nodes_json = {}
     path = tmpdir / 'nodes.json'
@@ -207,6 +218,11 @@ def run_main_real_search(gist_nodes, tmpdir, extra_env):
     换成假实现——那等于把被测对象本身 mock 掉了。这里只换 collect_all（把候选 Gist 直接
     折算成订阅文件，不真的取文）与 update_gist（不真的发布）。
 
+    `fetch_cf_cidrs` **必须一起 stub**：调用方用 mock 的 http_get 供搜索页并按 URL 数
+    「翻到第几页」，而真实的 fetch_cf_cidrs 也打 http_get ⇒ 会被这个 mock 当成一次翻页
+    计数，把 `asked_*` 序列多插一项、断言全乱。这里它也不是被测对象（拉取逻辑由用例 23
+    专测），固定成回退表即可。
+
     返回 (退出码, 上传的 YAML, 真实搜索页请求次数由调用方的 mock 记录)。
     """
     uploaded = {}
@@ -221,9 +237,11 @@ def run_main_real_search(gist_nodes, tmpdir, extra_env):
         return ([('f%d-%d' % (len(cands), i), 'ss://x@1.1.1.1:1#n') for i in range(n)],
                 dict.fromkeys(gist_nodes.STAT_KEYS, 0) | {'gists_scanned': n, 'files_kept': n})
 
-    orig = (gist_nodes.collect_all, gist_nodes.update_gist)
+    orig = (gist_nodes.collect_all, gist_nodes.update_gist, gist_nodes.fetch_cf_cidrs)
     gist_nodes.collect_all = fake_collect
     gist_nodes.update_gist = fake_update_gist
+    gist_nodes.fetch_cf_cidrs = lambda env, timeout: (
+        gist_nodes.CF_IPV4_CIDRS_FALLBACK, gist_nodes.CF_IPV6_CIDRS_FALLBACK, 'fallback')
 
     env = dict(os.environ)
     env.update({'GIST_NODES_WORKDIR': str(tmpdir), 'GIST_NODES_DRY_RUN': '0',
@@ -242,7 +260,7 @@ def run_main_real_search(gist_nodes, tmpdir, extra_env):
     finally:
         os.environ.clear()
         os.environ.update(saved)
-        gist_nodes.collect_all, gist_nodes.update_gist = orig
+        gist_nodes.collect_all, gist_nodes.update_gist, gist_nodes.fetch_cf_cidrs = orig
     return code, uploaded.get('text', '')
 
 
@@ -359,10 +377,10 @@ def main():
         OFFICIAL_V6 = ['2400:cb00::/32', '2606:4700::/32', '2803:f800::/32',
                        '2405:b500::/32', '2405:8100::/32', '2a06:98c0::/29',
                        '2c0f:f248::/32']
-        check(list(gist_nodes.CF_IPV4_CIDRS) == OFFICIAL_V4,
-              f'CF v4 段表与官方一致（实际 {list(gist_nodes.CF_IPV4_CIDRS)}）')
-        check(list(gist_nodes.CF_IPV6_CIDRS) == OFFICIAL_V6,
-              f'CF v6 段表与官方一致（实际 {list(gist_nodes.CF_IPV6_CIDRS)}）')
+        check(list(gist_nodes.CF_IPV4_CIDRS_FALLBACK) == OFFICIAL_V4,
+              f'CF v4 回退段表与官方一致（实际 {list(gist_nodes.CF_IPV4_CIDRS_FALLBACK)}）')
+        check(list(gist_nodes.CF_IPV6_CIDRS_FALLBACK) == OFFICIAL_V6,
+              f'CF v6 回退段表与官方一致（实际 {list(gist_nodes.CF_IPV6_CIDRS_FALLBACK)}）')
         for cidr in OFFICIAL_V4:
             net, prefix = cidr.split('/')
             check(f'["{net}", {prefix}]' in cf_js, f'CF 算子内嵌官方 v4 段 {cidr}')
@@ -918,6 +936,65 @@ def main():
               '正常分支要写出探针次数——它取自 report["probes"]')
         check('bad-one' in gist_nodes._trial_load_summary_line(normal22, 3),
               '正常分支要列出被剔节点名')
+
+        print('== 23. CF 段表实时拉取：成功走线上表，任何异常回退内置快照 ==')
+        # 用假 http_get 驱动真实的 fetch_cf_cidrs（不打真网络）。
+        saved_get = gist_nodes.http_get
+        tries = []
+
+        def fake_get(url, token='', timeout=30, max_bytes=0):
+            tries.append(url)
+            return fake_get.payload
+
+        gist_nodes.http_get = fake_get
+        try:
+            # 23.1 成功：解析出官方 v4/v6，来源标 api
+            fake_get.payload = json.dumps({
+                'success': True, 'result': {
+                    'etag': 'deadbeef',
+                    'ipv4_cidrs': ['203.0.113.0/24', '198.51.100.0/24'],
+                    'ipv6_cidrs': ['2001:db8::/32']}})
+            v4, v6, src = gist_nodes.fetch_cf_cidrs({}, 5)
+            check((v4, v6, src) == (('203.0.113.0/24', '198.51.100.0/24'),
+                                    ('2001:db8::/32',), 'api'),
+                  f'拉取成功用线上表且标 api（实际 {v4} {v6} {src}）')
+            check(tries and tries[-1] == gist_nodes.CF_IPS_API_URL,
+                  '打的是官方 ips 端点')
+
+            # 23.2 各种失败都必须回退到内置快照、且不冒泡
+            bad_payloads = [
+                ('非 JSON', '<html>502 Bad Gateway</html>'),
+                ('success=false', json.dumps({'success': False, 'result': {}})),
+                ('列表为空', json.dumps({'success': True, 'result': {
+                    'ipv4_cidrs': [], 'ipv6_cidrs': []}})),
+                ('缺字段', json.dumps({'success': True, 'result': {'ipv4_cidrs': ['1.2.3.0/24']}})),
+                ('CIDR 非法', json.dumps({'success': True, 'result': {
+                    'ipv4_cidrs': ['999.1.1.0/24'], 'ipv6_cidrs': ['2001:db8::/32']}})),
+            ]
+            for label, payload in bad_payloads:
+                fake_get.payload = payload
+                v4b, v6b, srcb = gist_nodes.fetch_cf_cidrs({}, 5)
+                check((v4b, v6b, srcb) == (gist_nodes.CF_IPV4_CIDRS_FALLBACK,
+                                          gist_nodes.CF_IPV6_CIDRS_FALLBACK, 'fallback'),
+                      f'{label} → 回退内置快照且标 fallback')
+
+            # 23.3 抛异常（超时 / DNS 挂了）同样回退，不冒泡
+            def boom(url, token='', timeout=30, max_bytes=0):
+                raise urllib.error.URLError('DNS 挂了')
+
+            gist_nodes.http_get = boom
+            v4c, v6c, srcc = gist_nodes.fetch_cf_cidrs({}, 5)
+            check((v4c, v6c, srcc) == (gist_nodes.CF_IPV4_CIDRS_FALLBACK,
+                                      gist_nodes.CF_IPV6_CIDRS_FALLBACK, 'fallback'),
+                  '网络异常 → 回退内置快照且不冒泡')
+
+            # 23.4 上传的段表真的跟着传进来的段表走（不是偷偷读常量）
+            op_custom = gist_nodes._exclude_cf_operator(('203.0.113.0/24',), ())
+            check('203.0.113.0' in op_custom['args']['content'] and
+                  '104.16.0.0' not in op_custom['args']['content'],
+                  '算子内嵌的是传入的段表，不是内置常量')
+        finally:
+            gist_nodes.http_get = saved_get
 
     finally:
         server.shutdown()

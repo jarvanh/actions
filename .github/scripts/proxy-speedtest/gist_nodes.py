@@ -45,6 +45,8 @@ Sub-Store 接口（读 backend/src/restful/*.js 得到，全部是无需鉴权�
   'Script Operator'             自定义过滤/裁剪：剔明文协议、剔 CF 节点、限量
                                 （脚本文本须定义名为 operator 的函数，Sub-Store 会拼上
                                 `return operator` 再执行；见 _exclude_types_operator）
+CF 段表在每轮**运行时实时拉取**（fetch_cf_cidrs 打官方 ips API），失败回退内置快照——
+段表会新增，硬编码会随时间漏判；详见该函数与 CF_IPV4_CIDRS_FALLBACK 的注释。
 
 环境变量（除 token 外全部可选）：
   GIST_NODES_QUERIES       搜索关键词，逗号分隔（默认 ss://,vless://,vmess://,trojan://,hysteria2://,tuic://）
@@ -170,6 +172,7 @@ collected providers: 1, total: 0`、`nodes_collected: 0`，整轮零产出且不
 import base64
 import concurrent.futures
 import html as html_lib
+import ipaddress
 import json
 import os
 import pathlib
@@ -852,24 +855,23 @@ def _exclude_types_operator():
     }
 
 
-def _exclude_cf_operator():
+def _exclude_cf_operator(v4_cidrs, v6_cidrs):
     """剔掉 server 落在 Cloudflare 官方 IP 段里的节点（即 CF 部署/回源的节点）。
 
-    判定只看 `p.server`，**不碰名称、不碰 servername**——理由见 CF_IPV4_CIDRS 上方的注释。
-    只处理「server 直接是 IP 字面量」的情况：域名要做 DNS 解析才知道归属，Script Operator
-    是纯 JS 文本处理、没有解析能力，故按「宁漏勿错」放弃域名形态，不做任何猜测性匹配。
+    段表由调用方传入（运行时实时拉取的结果，见 fetch_cf_cidrs），不在函数里读常量——
+    这样测试能塞任意段表进来验证判定逻辑，也避免「改了常量忘了改算子」的暗坑。
+
+    判定只看 `p.server`，**不碰名称、不碰 servername**——理由见 CF_IPV4_CIDRS_FALLBACK
+    上方的注释。只处理「server 直接是 IP 字面量」的情况：域名要做 DNS 解析才知道归属，
+    Script Operator 是纯 JS 文本处理、没有解析能力，故按「宁漏勿错」放弃域名形态。
 
     CIDR 归属判断在 JS 里手搓：Sub-Store 的算子沙箱只保证有标准内建对象，不保证有 Node 的
     `net` 模块，所以自己把 IPv4 段（唯一会命中的形态）展开成 [网络地址, 掩码] 做位运算比较。
     IPv6 段同样带上——虽然当前订阅里 CF 节点几乎都是 v4，但段表要与官方一致，避免日后漏判
     （IPv6 字面量含 `:`，用 BigInt 解析，超出 Number 安全整数范围也能算准）。
     """
-    v4 = json.dumps([list(c) for c in (
-        (str(n), int(m)) for n, m in (
-            (c.split('/')[0], int(c.split('/')[1])) for c in CF_IPV4_CIDRS
-        )
-    )])
-    v6 = json.dumps(list(CF_IPV6_CIDRS))
+    v4 = json.dumps([[c.split('/')[0], int(c.split('/')[1])] for c in v4_cidrs])
+    v6 = json.dumps(list(v6_cidrs))
     content = (
         f'var __cf4 = {v4};\n'
         f'var __cf6 = {v6};\n'
@@ -934,7 +936,7 @@ def _exclude_cf_operator():
     return {'type': 'Script Operator', 'args': {'mode': 'script', 'content': content}}
 
 
-def build_process(max_nodes):
+def build_process(max_nodes, cf_v4, cf_v6):
     """清理 / 剔除不要的节点 / 去重 / 限量，全部用 Sub-Store 内置算子
     （名字即 process 里的 type）。
 
@@ -944,11 +946,13 @@ def build_process(max_nodes):
 
     两个剔除算子都必须在去重**之前**：它们是「不要的节点」的定义，先剔干净，去重结果
     才是真正保留集的口径（否则被剔掉的节点会参与去重、污染「去重后 M 个」这个对数）。
+
+    cf_v4 / cf_v6 是 CF 段表，由调用方实时拉取后传入（见 fetch_cf_cidrs）。
     """
     process = [
         {'type': 'Useless Filter'},
         _exclude_types_operator(),
-        _exclude_cf_operator(),
+        _exclude_cf_operator(cf_v4, cf_v6),
         {'type': 'Handle Duplicate Operator',
          'args': {'action': 'delete', 'field': DEDUPE_FIELDS}},
         {'type': 'Handle Duplicate Operator', 'args': {'action': 'rename'}},
@@ -1317,7 +1321,10 @@ def main():
     if not subnames:
         fail('没有一个订阅成功投喂进 Sub-Store')
 
-    process = build_process(max_nodes)
+    # CF 段表实时拉取（失败回退内置快照）。放在建组合之前：拉取只要几秒，但拿到最新
+    # 段表能让过滤覆盖到新段；失败也不中断，只是这轮退回旧口径。
+    cf_v4, cf_v6, cf_source = fetch_cf_cidrs(env, timeout)
+    process = build_process(max_nodes, cf_v4, cf_v6)
     try:
         # 参照组：同样的订阅但不带去重，用来给出「解析后 N → 去重后 M」这个可核对的口径。
         # Sub-Store 对未知算子只记日志、不报错，没有这个参照组就无从判断去重是否真生效。
@@ -1362,7 +1369,8 @@ def main():
 
     deduped_count = len(proxies)
     log_progress('gist_nodes_deduped', parsed=parsed_count, deduped=deduped_count,
-                 max_nodes=max_nodes, bytes=len(yaml_text.encode('utf-8')))
+                 max_nodes=max_nodes, bytes=len(yaml_text.encode('utf-8')),
+                 cf_cidr_source=cf_source, cf_v4=len(cf_v4), cf_v6=len(cf_v6))
     if parsed_count and deduped_count >= parsed_count:
         # 去重没生效通常是 process 里的 type 名写错了（Sub-Store 只记日志、不报错）。
         log_progress('gist_nodes_dedupe_no_effect', parsed=parsed_count, deduped=deduped_count)
