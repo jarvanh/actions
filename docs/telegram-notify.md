@@ -430,9 +430,11 @@ Run ID：<code>12345678</code>
 
 💳 账号池 · 2
   ├─ <code>workbuddy.json</code> · 国内站 · 可用
-  │  额度剩 59.64 · 免费 · 免费模型 1 · 过期 2026-09-21 08:32
+  │  额度剩 59.64 · 免费 · 过期 2026-09-21 08:32
+  │  免费模型 2 · <code>deepseek-v4.1-flash</code> · <code>hy3</code>
   └─ <code>workbuddy-intl.json</code> · 国际站 · 付费耗尽
-     额度剩 0 · 免费 · 模型冷却 2 · 过期 2027-06-07 04:32
+     额度剩 0 · 免费 · 过期 2027-06-07 04:32
+     免费模型 1 · <code>glm-5.2</code> · 模型冷却 2
 
 数据目录：<code>/dropbox/self-hosted/workbuddy-gateway</code>
 
@@ -451,8 +453,9 @@ Run ID：<code>12345678</code>
 - **凭据**只列 `workbuddy*.json` 的**文件名**（`├─/└─` 树形，分节带 ` · N`）。
   **绝不回显文件内容**——那是真实 Access/Refresh Token。`workbuddy-status.json`
   是 serve 写的状态快照，不算凭据，必须排除。
-- **账号池**逐账号给：`凭据文件 · 站点 · 状态`，子行给 `额度 · 免费模型 · 模型冷却 · Token 过期`
-  （各项非空才并进子行）。数据源是 serve 写出的 **`workbuddy-status.json`**（jq 取）。
+- **账号池**逐账号给：`凭据文件 · 站点 · 状态`，子行给 `额度 · 免费/付费 · Token 过期`
+  与 `免费模型 N · <具体模型名> · 模型冷却 N`（各项非空才并进子行；**免费模型名很多时
+  拆成独立子行，避免单行过长**）。数据源是 serve 写出的 **`workbuddy-status.json`**（jq 取）。
 
   > **更正（2026-09-17）**：此前本节写「不要解析 workbuddy-status.json，其键名上游未文档化」——
   > 这个判断是错的。该文件的键名由上游 Go 结构体 `accountSnapshot` / `statusSnapshot`
@@ -466,20 +469,58 @@ Run ID：<code>12345678</code>
   > | `tokenExpiresAt` | Access Token 过期**时间戳**（秒；0 表示无） |
   > | `quotaRemaining` / `quotaKnown` | 剩余额度 / 是否已成功查询过额度 |
   > | `isPaidUser` | 是否付费用户 |
-  > | `freeModels` / `modelCooldowns` | 已确认免费的模型数 / 当前冷却中的模型数 |
+  > | `freeModels` / `modelCooldowns` | 已确认免费的模型**数** / 当前冷却中的模型**数** |
+  > | `modelStates` | 逐模型账本：键是模型名，值含 `costClass`（`free`/`paid`/`unknown`）等 |
   >
   > 中文状态名照上游 `monitor` 表格的映射（`paid_exhausted` → 付费耗尽等）；
   > 额度格式照上游 `formatQuota`（|v|<0.005 归零，两位小数去尾零）。
   > **`quotaKnown` 为 false 时不要显示额度数字**——那只是「还没查到」，
   > 显示 0 会与「额度耗尽」混淆，写「额度未获取」。
-  > 快照里还有 `nickname` / `uid` / `modelStates` 明细，都**不进通知**
-  > （隐私 + 与本条通知目的无关）。
+  > 快照里还有 `nickname` / `uid`，都**不进通知**（隐私 + 与本条通知目的无关）。
   >
   > serve 每 3 秒重写该文件，**可能读到半截导致 jq 失败**：失败就本轮账号池整段跳过，
   > 不发半条、也不据此判定服务未就绪（下一轮接力会补上）。
   >
   > 「剩余积分 / 免费模型 / 模型冷却」原本以为只能从 `monitor` 的交互式表格取，
   > 实际快照里就有（`quotaRemaining` / `freeModels` / `modelCooldowns`）。
+
+- **免费模型要列具体模型名，不能只给计数**：`freeModels` 只是个数，读者据此无法知道
+  到底哪个模型免费 —— 于是必须把 `modelStates` 里 `costClass == "free"` 的**键名**列出来。
+  `modelStates` 的键就是模型名（上游 `normalizeModelName` 已小写化）。
+
+  > **`modelStates` 只记「已实测过」的模型**（2026-09-17 核实上游 `probe.go` / `main.go`）：
+  > 键在 `modelStateLocked` 里按需创建（默认 `costClass = unknown`），只有真实请求
+  > 返回的 `usage.credit` 才能把它学成 `free` / `paid`。
+  > 因此**光读快照拿不到完整免费目录**，必须在通知前主动探测。
+
+  **探测走上游自带的 probe 接口**，不要手搓请求逻辑：
+
+  | 用途 | 接口 / 命令 |
+  |---|---|
+  | 取全量模型目录 | `GET /v1/models`（返回目录里所有模型 id） |
+  | 主动探测免费/收费 | `POST /admin/probe`，body `{"auth":"<凭据文件名>","models":[...]}` |
+  | CLI 包装 | `workbuddy-gateway probe -auth <文件名> -models a,b,c` |
+
+  - **探测是「对上游发一次真实 chat 请求」**：`probe` 用固定 prompt 要一段约 150 词正文，
+    `max_tokens=300`，再按返回的 `usage.credit` 判定 —— `credit > 0` → `paid`；
+    `credit == 0` 且 `total_tokens ≥ 100`（上游 `modelFreeMinTokens`）→ `free`；
+    样本不足或没返回 `credit` → `unknown`（**不判定免费**，别把 unknown 当 free）。
+  - **`/admin/probe` 只接受回环来源**，且服务设了 `-api-key` 时仍需带密钥；
+    本仓库不设密钥，直接调本地端口即可。
+  - **单次上限 50 个模型**（body 里 `limit > 50` 被上游截断）：要探更多得自己分批。
+  - **结果会落进快照**：`/admin/probe` 结束前调 `writeStatusSnapshot()`，
+    探测结论写进 `modelStates`，随 `workbuddy-status.json` 回推 Dropbox；
+    serve 下轮启动时 `restoreAccountRuntimeStateLocked` 会恢复这份账本
+    —— 所以**首轮探过就不用再探**，后续轮次直接读快照即得结论。
+  - **探测可能改变账号状态**：命中额度耗尽会调 `markModelQuotaBlocked`（记为该账号收费模型），
+    命中模型级限流会调 `markModelCooldown`（该模型进冷却）—— 通知里的「模型冷却」计数
+    可能因本轮探测而升高，属预期而非故障。
+  - 探测失败/超时不阻塞通知：拿不到名字就退回只给 `免费模型 N` 计数（降级，不编造名字）。
+
+- **免费模型名清单属「结构性清单」，全量展示、不折叠**：读者要逐条核对哪些模型免费，
+  折叠成「还有 N 个…」等于把最需要看的部分藏起来（规范 · 折叠规则：判据是「折掉会不会
+  误判」，不是「列表长不长」）。名字多时拆到独立子行，靠 `免费模型 N` 交代规模。
+  单个模型名是机器值 → 套 `<code>`。
 
 - 「数据目录」指 Dropbox 上的**持久数据目录**，不是本轮本地运行目录 —— 两者分离，
   但读者要照着去放凭据的地方是 Dropbox 那个（本地运行目录每轮重建）。
