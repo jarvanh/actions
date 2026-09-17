@@ -578,6 +578,63 @@ def main():
     check("'download_seconds': round(download_s, 3)" in _g_src,
           'download_seconds 取的是纯传输耗时（同一个 download_s）')
 
+    print('== 12. 节点名优先级排序 + duration 默认 5（2026-09-17）==')
+    # 诉求：把 duration 从 10 降到 5（单节点 25s→15s），并让名字命中
+    # IPLC|IPEL|IEPL|专线|HK|Hong|港|TW|Taiwan|台|SG|新加坡 的节点优先测速。
+    # 反证：把 prioritize_nodes 换成普通 sorted()（不稳定）/退回只取命中集（会丢节点），
+    # 12b/12c 变红。
+
+    # 12a. duration 默认值：env 未设时必须是 5，且仍在 5-13 钳制区间内
+    _t_src = pathlib.Path(t.__file__).read_text(encoding='utf-8')
+    check("os.environ.get('TAIER_DURATION', '5')" in _t_src,
+          "duration 默认 5（env 未设时取 5）")
+    check(t.CONFIG['TAIER_DURATION'] == 5,
+          f"CONFIG 解析为 5（实际 {t.CONFIG['TAIER_DURATION']}）")
+    # 钳制仍生效：上游二进制硬钳 5-13，越界值要被压回来（不能因为改了默认值就丢掉钳制）
+    check(min(max(1, 5), 13) == 5 and min(max(99, 5), 13) == 13,
+          'duration 钳制区间 5-13 仍生效')
+
+    # 12b. 命中者前置、未命中者不丢、且各自保持原相对顺序（稳定分区）
+    nodes = [
+        {'name': '日本 JP-01'}, {'name': 'IPLC-HK-01'}, {'name': '美国 US-02'},
+        {'name': 'IEPL-SG'}, {'name': '韩国 KR-03'}, {'name': '香港04'},
+    ]
+    ordered, hits = t.prioritize_nodes(nodes, t.CONFIG['TAIER_PRIORITY_REGEX'])
+    check(hits == 3, f'命中 3 个（实际 {hits}）')
+    check(len(ordered) == len(nodes),
+          f'不丢节点：总数不变（实际 {len(ordered)} vs {len(nodes)}）')
+    check([x['name'] for x in ordered[:3]] == ['IPLC-HK-01', 'IEPL-SG', '香港04'],
+          f'命中者按原序前置（实际 {[x["name"] for x in ordered[:3]]}）')
+    check([x['name'] for x in ordered[3:]] == ['日本 JP-01', '美国 US-02', '韩国 KR-03'],
+          f'未命中者按原序留在队尾（实际 {[x["name"] for x in ordered[3:]]}）')
+
+    # 12c. 大小写不敏感 + 中文关键词 + 专线
+    low = [{'name': 'hk-01'}, {'name': 'tw-02'}, {'name': 'iplc 专线'}, {'name': 'japan'}]
+    o2, h2 = t.prioritize_nodes(low, t.CONFIG['TAIER_PRIORITY_REGEX'])
+    check(h2 == 3, f'小写 hk/tw 与中文「专线」都命中（实际 {h2}）')
+    check(o2[-1]['name'] == 'japan', '未命中的 japan 落到队尾')
+
+    # 12d. 空输入 / 空正则 / 非法正则 → 原样返回、不抛（一个配置写错不该让整轮零产出）
+    same, h3 = t.prioritize_nodes(nodes, '')
+    check(same is nodes and h3 == 0, '空正则 → 原样返回、命中 0')
+    empty, h4 = t.prioritize_nodes([], 'HK')
+    check(empty == [] and h4 == 0, '空列表 → 返回空、命中 0')
+    import re as _re
+    bad_nodes = [{'name': 'HK-01'}, {'name': 'US-01'}]
+    bad_out, bad_hits = t.prioritize_nodes(bad_nodes, 'HK|(')  # 括号不闭合 ⇒ re.error
+    check(bad_out == bad_nodes and bad_hits == 0,
+          f'非法正则 → 原序返回、不抛（实际 {[x["name"] for x in bad_out]}）')
+
+    # 12e. 排序发生在 max_nodes 截断**之前**（否则命中者可能被截在门外，排序白做）
+    norm_t = _re.sub(r'\s+', '', _t_src)
+    check('prioritize_nodes(alive_items,CONFIG[\'TAIER_PRIORITY_REGEX\'])' in norm_t,
+          'alive_items 确实过了 prioritize_nodes')
+    _pi = norm_t.find("prioritize_nodes(alive_items")
+    _tr = norm_t.find("alive_items=alive_items[:max_nodes]")
+    check(_pi != -1 and _tr != -1 and _pi < _tr,
+          f'排序在 max_nodes 截断之前（prioritize@{_pi} < truncate@{_tr}）')
+    check('nodes_prioritized' in _t_src, '有 nodes_prioritized 日志（可核对命中数）')
+
     print()
     if FAILURES:
         print(f'FAILED: {len(FAILURES)} 项未通过')

@@ -104,10 +104,21 @@ CONFIG = {
     # 默认 single = 单连接：与 proxy-speedtest 系列的单流口径可比，也更贴近日常
     # 单流体验；multi（下 8 + 上 4 连接）看节点带宽上限，both 两者对照
     'TAIER_MODE': (os.environ.get('TAIER_MODE', '') or 'single').strip(),
-    # 上游二进制把 --duration 硬钳制在 5-13（main.go），>13 会被压到 13
-    'TAIER_DURATION': min(max(int(os.environ.get('TAIER_DURATION', '10') or 10), 5), 13),
+    # 上游二进制把 --duration 硬钳制在 5-13（main.go），>13 会被压到 13。
+    # 默认 5（2026-09-17 从 10 下调）：节点数远超 5 小时预算（8326 个 ÷ 19.6s ≈ 45 小时），
+    # 单节点成本 2×duration+5 里 duration 是最大且唯一可调的杠杆——10→5 把单节点从
+    # ≈25 秒压到 ≈15 秒，同等预算能覆盖的节点数从 ~900 提到 ~1500（约 +67%）。
+    # 代价是每方向采样窗口减半、读数更抖；配合下面的「优先测速」把窗口留给值得的节点。
+    'TAIER_DURATION': min(max(int(os.environ.get('TAIER_DURATION', '5') or 5), 5), 13),
     # 0 = 不限（默认）；节点多时整体耗时 ≈ 节点数 × (2×duration + 5)s
     'TAIER_MAX_NODES': int(os.environ.get('TAIER_MAX_NODES', '0') or 0),
+    # 节点名优先级正则（不区分大小写）：命中者**排到队首先测**，其余按原序追加。
+    # 为什么需要它：节点数远超预算时，测速顺序 = 谁进订阅名单的顺序，原序是 provider 的
+    # 声明序（与质量无关），等于把宝贵的测速窗口随机撒给几千个节点。专线/常见优质地区
+    # （IPLC/IEPL 专线、HK/TW/SG 低延迟区）命中率高得多，让它们先测，预算耗尽时至少
+    # 订阅里留下的是这些。**只排序、不丢弃**：未命中的节点仍在队尾照常参与（测得到就测）。
+    'TAIER_PRIORITY_REGEX': ((os.environ.get('TAIER_PRIORITY_REGEX', '') or '').strip()
+                             or 'IPLC|IPEL|IEPL|专线|HK|Hong|港|TW|Taiwan|台|SG|新加坡'),
     # 墙钟预算（秒，0 = 不限）。**必须显著小于 job 的 timeout-minutes（默认 360 分钟）**，
     # 留出前置准备（mihomo 下载 / TUN）与收尾（通知 / Gist 上传）的余量：默认 5 小时。
     # 为什么需要它：测速逐节点串行、每节点 ≈ 25 秒，而订阅里可能有几千个节点
@@ -219,6 +230,30 @@ def is_unknown_proxy_error(err):
     if 'host not found' in text or 'name or service not known' in text:
         return False
     return 'resource not found' in text or 'no such proxy' in text
+
+
+def prioritize_nodes(items: list, pattern: str):
+    """把节点名命中 `pattern` 的排到队首，其余保持原相对顺序。返回 `(排序后列表, 命中数)`。
+
+    **只重排、不丢弃**：未命中的节点仍在队尾，预算够就照测。这样「优先」是软保证——
+    命中节点先拿到测速窗口，但不会因为不命中就被排除出订阅候选。
+
+    **必须是稳定分区而不是排序**：命中集与未命中集内部都保持 provider 的原序，
+    否则同一份订阅每轮的测速顺序会漂移，历史对照数据就失去可比性。
+
+    `pattern` 非法（正则语法错）时**原样返回、不抛**——一个配置写错不该让整轮零产出，
+    与测活层的 fail-open 同一原则。
+    """
+    if not items or not pattern:
+        return items, 0
+    try:
+        rx = re.compile(pattern, re.IGNORECASE)
+    except re.error as e:
+        log_progress('priority_regex_invalid', pattern=pattern, error=str(e))
+        return items, 0
+    hit = [x for x in items if rx.search(str(x.get('name') or ''))]
+    miss = [x for x in items if not rx.search(str(x.get('name') or ''))]
+    return hit + miss, len(hit)
 
 
 def _revive_probe_failed(results, alive_items, retry_queue):
@@ -843,6 +878,12 @@ def _run():
         log_progress('snapshot_failed', error=str(e))
         notify_failure(f'节点快照失败：{e}')
         return 1
+
+    # 优先级排序必须在 **max_nodes 截断之前**：否则截断先按 provider 原序砍掉了尾巴，
+    # 命中优先级的节点可能根本不在「前 N 个」里，排序就白做了。
+    alive_items, priority_hits = prioritize_nodes(alive_items, CONFIG['TAIER_PRIORITY_REGEX'])
+    log_progress('nodes_prioritized', total=len(alive_items), hits=priority_hits,
+                 pattern=CONFIG['TAIER_PRIORITY_REGEX'])
 
     max_nodes = CONFIG['TAIER_MAX_NODES']
     if max_nodes and max_nodes > 0:
