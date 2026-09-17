@@ -2001,6 +2001,28 @@ jobs:
           nohup bash /tmp/workbuddy-cred-sync.sh 300 > /tmp/workbuddy-cred-sync.log 2>&1 &
           echo $! > /tmp/workbuddy-cred-sync.pid
 
+          # 立即同步执行一次并打印结果：后台循环的 stdout 只进 /tmp/workbuddy-cred-sync.log，
+          # 不进 step 日志，而该 log 又只存在于 runner 上 —— 收尾打印只覆盖"跑满一整轮"的场景，
+          # 被取消的轮次收尾步骤会被跳过，那就完全看不到证据。这里同步跑一次，
+          # 让「凭据同步是否真的工作」在 step 日志里永远有据可查。
+          echo "--- initial workbuddy credential sync probe ---"
+          # 不能写成 `if rclone ... | tail`：那测的是 tail 的退出码，rclone 失败也会报 ✅。
+          # 先落变量再判 rc，保留 tail 的截断展示。
+          probe_out=""
+          probe_rc=0
+          probe_out="$(rclone sync "dropbox:self-hosted/workbuddy-gateway" /tmp/local_workbuddy/data \
+            --filter '- workbuddy-status.json' \
+            --filter '+ workbuddy*.json' \
+            --filter '- **' -v 2>&1)" || probe_rc=$?
+          printf '%s\n' "$probe_out" | tail -n 15
+          if [ "$probe_rc" -eq 0 ]; then
+            echo "✅ probe ok"
+          else
+            echo "⚠️ probe failed (rc=$probe_rc)（不阻塞；后台循环会继续重试）"
+          fi
+          echo "--- credentials now in run dir ---"
+          ls -la /tmp/local_workbuddy/data/workbuddy*.json 2>/dev/null || echo "<none>"
+
       - name: Keep alive
         id: keepalive
         if: ${{ always() }}
