@@ -766,6 +766,12 @@ jobs:
         run: |
           set -uo pipefail
 
+          # 通知真源在 step 顶层 source 一次。**不要挪进 wb_notify 函数体**：
+          # 该函数在 $( ) / 管道里跑（子 shell），子 shell 内 source 不影响父 shell 的
+          # 函数表，会把调用点对 send_tg 的本地覆写还原掉；而且子 shell 里 `local`
+          # 管不住父 shell 的变量（规范 4.4）。
+          source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+
           # workbuddy-gateway（CangShui/workbuddy-gateway）：纯 Go 单二进制的本地 AI 代理网关。
           # 运行目录整体落本地盘，Dropbox 只做持久化存放 —— 与 OpenClaw/CliRelay 同口径。
           # 两处刻意分离的原因：
@@ -785,19 +791,83 @@ jobs:
           WB_LOG="$WB_RUN_DIR/logs/serve.log"
           : > "$WB_META"
 
+          # workbuddy 通知的版式真源（docs/telegram-notify.md 2.5 workbuddy 段）。
+          # 三个调用点（step 内就绪/失败、收尾停止）在同一作业但不同 shell，函数无法跨 step
+          # 共享，故版式在两处各存一份；改版式必须同时改两处，否则停止通知会掉队。
+          #
+          # 用法: wb_notify <标题> <结论> <版本> <更新说明> <原因> <原始输出> [<接口/鉴权 kv>]
+          # 第 7 参 = 网关就绪态，取 "1" 才补「接口 / 鉴权」两行：失败或收尾停止时服务已不在，
+          # 展示一个指向已停进程的地址会误导读者。
+          #
+          # 取值口径（逐条见规范）：
+          #   结论/更新/原因 → 人写的自然语言 → 裸文本 kv；版本/路径/端口 → 机器值 → <code>；
+          #   原始输出 → <pre>，恒为正文最后一块（其后只跟收尾区）。空值整行跳过、空分节整段跳过。
+          #   鉴权恒写「仅回环监听，无需密钥」：不传 -api-key 且只绑 127.0.0.1，网关不做鉴权，
+          #   绝不编造密钥值。凭据段只列 workbuddy*.json 的文件名，绝不回显内容（真实 Token）。
+          #   账号池取自 `status` 子命令的文本输出（字段有上游文档），不解析 workbuddy-status.json
+          #   （内部键名未文档化）。
           wb_notify() {
-            # 用法: wb_notify <标题> <结论> <版本> <更新说明> <原因> <原始输出>
-            # 版式（docs/telegram-notify.md 2.5 告警 / 4.7）：标题带状态 emoji 且与结论一致；
-            # 结论/更新说明/原因是人写的自然语言 → 裸文本 kv，版本/路径是机器值 → <code>，
-            # 原始输出 → <pre>（正文最后一块，其后只跟收尾区）。空值整行跳过。
             if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
-              source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
               local _msg=""
               tg_add_title _msg "$1"
               tg_add_kv _msg "结论" "$2"
               [ -n "$3" ] && tg_add_path _msg "版本" "$3"
               [ -n "$4" ] && tg_add_kv _msg "更新" "$4"
+              if [ "${7:-0}" = "1" ]; then
+                tg_add_path _msg "接口" "http://127.0.0.1:${WB_PORT}/v1"
+                tg_add_kv _msg "鉴权" "仅回环监听，无需密钥"
+              fi
               [ -n "$5" ] && tg_add_kv _msg "原因" "$5"
+              if [ -n "${WB_CREDS:-}" ]; then
+                local _n_creds _ent
+                _n_creds="$(printf '%s\n' "$WB_CREDS" | grep -c . || true)"
+                tg_add_section _msg "🔑 凭据 · ${_n_creds}"
+                _ent=""
+                while IFS= read -r _c; do
+                  [ -n "$_c" ] && tg_add_entry _ent "$_c"
+                done <<< "$WB_CREDS"
+                tg_add_block _msg "$(tree_lines "${_ent%$'\n'}")"
+              fi
+              # 账号池：逐账号「一条目 + 一子行」。`status` 的文本输出按 "--- 账号 #N ---"
+              # 分块，块内取 凭据文件 / 站点 / 冷却状态 / Token 状态；缺凭据文件或站点的块整块丢弃。
+              # 子行必须用 tree_sub 前缀手拼 —— tree_lines 把每行都当兄弟条目，
+              # 子行经它渲染会得到 ├─/└─，与条目平级（规范 · 二层列表要求子行与条目正文同列）。
+              if [ -n "${WB_STATUS_OUT:-}" ]; then
+                local _pool=""
+                _pool="$(printf '%s\n' "$WB_STATUS_OUT" | awk '
+                  function flush() {
+                    if (cf != "" && st != "") {
+                      printf "%s\t%s\t%s\t%s\n", cf, st, cd, tok
+                    }
+                    cf=""; st=""; cd=""; tok=""
+                  }
+                  /^---[[:space:]]*账号/ { flush(); next }
+                  /^凭据文件:/ { v=$0; sub(/^凭据文件:[[:space:]]*/, "", v); cf=v; next }
+                  /^站点:/     { v=$0; sub(/^站点:[[:space:]]*/, "", v); st=v; next }
+                  /^冷却状态:/ { v=$0; sub(/^冷却状态:[[:space:]]*/, "", v); cd=v; next }
+                  /^Token 状态:/ { v=$0; sub(/^Token 状态:[[:space:]]*/, "", v); tok=v; next }
+                  END { flush() }
+                ' || true)"
+                if [ -n "$_pool" ]; then
+                  local _n_acc _rows _i _cf _st _cd _tok _last
+                  _n_acc="$(printf '%s\n' "$_pool" | grep -c . || true)"
+                  tg_add_section _msg "💳 账号池 · ${_n_acc}"
+                  _rows=""
+                  _i=0
+                  while IFS="$(printf '\t')" read -r _cf _st _cd _tok; do
+                    [ -z "$_cf" ] && continue
+                    _i=$((_i + 1))
+                    _last=0
+                    [ "$_i" -eq "$_n_acc" ] && _last=1
+                    _rows+="$(tree_conn "$_last")$(tg_entry "$_cf" "$_st" "$_cd")"$'\n'
+                    [ -n "$_tok" ] && _rows+="$(tree_sub "$_last")$(escape_html "$_tok")"$'\n'
+                  done <<< "$_pool"
+                  tg_add_block _msg "${_rows%$'\n'}"
+                  # 块尾补一个空行：tg_add_block 不补尾空行，下一个 kv（数据目录）会紧贴
+                  # 末条子行渲染，版式与规范示例（块与 kv 区之间空一行）不一致。
+                  tg_append _msg $'\n'
+                fi
+              fi
               tg_add_path _msg "数据目录" "$WB_DIR"
               if [ -n "$6" ]; then
                 tg_add_section _msg "🧾 原始输出"
@@ -948,14 +1018,50 @@ jobs:
           echo "WB_READY=${WB_READY}" >> "$WB_META"
           printf 'WB_ACCOUNTS=%s\n' "$WB_ACCOUNTS" >> "$WB_META"
 
+          # 凭据清单：只取文件名（真实 token 绝不回显）。serve 自动发现 cwd 下
+          # workbuddy*.json 组池，这份清单就是它实际加载的凭据集合。
+          WB_CREDS="$(cd "$WB_RUN_DIR" 2>/dev/null && ls -1 workbuddy*.json 2>/dev/null \
+            | grep -v '^workbuddy-status\.json$' || true)"
+
+          # 逐账号明细（站点/状态/剩余积分/免费模型/模型冷却）走官方的 `status` 子命令：
+          # 它的文本输出在 README 里有文档、字段稳定；而 workbuddy-status.json 的
+          # 内部键名上游未文档化，直接解析会在改版时静默失效。
+          # status 读的是运行目录（与 serve 同 cwd），失败只记日志、不进通知。
+          WB_STATUS_OUT=""
           if [ "$WB_READY" = "1" ]; then
+            WB_STATUS_OUT="$(cd "$WB_RUN_DIR" 2>/dev/null && "$WB_BIN" status 2>/dev/null || true)"
+            if [ -z "$WB_STATUS_OUT" ]; then
+              echo "⚠️ workbuddy-gateway status 无输出（账号池明细本轮留空）"
+            fi
+          fi
+
+          # 接力轮次的判据：本文件由「Trigger next OpenClaw run」在上一轮收尾时以
+          # workflow_dispatch 接力启动（长跑保活标准形态），但接力轮同样会跑一遍本步骤，
+          # 于是同一份 service 同一份账号池会**每个 run 各推一条**已就绪通知。
+          # 用本步骤自己的结果文件区分（本步骤无 id、幂等引用 steps.run_workbuddy 不安全，
+          # 且其结果在本步骤内不可读）：文件在 → 上一轮启动过 = 接力轮，不再发就绪通知。
+          # 探测失败按首轮处理（多发一条好过漏发；下次重装后自然收敛）。
+          WB_RUN_TAG_FILE="/tmp/workbuddy-serve-run-tag"
+          WB_RELAUNCH=0
+          WB_PREV_TAG=""
+          if [ -s "$WB_RUN_TAG_FILE" ]; then
+            WB_RELAUNCH=1
+            WB_PREV_TAG="$(head -n 1 "$WB_RUN_TAG_FILE" 2>/dev/null || true)"
+          fi
+          if [ "$WB_READY" = "1" ]; then
+            printf '%s\n' "${GITHUB_RUN_ID:-manual}" > "$WB_RUN_TAG_FILE"
             if [ -n "$WB_ACCOUNTS" ]; then
-              wb_notify "🟢 workbuddy-gateway 已就绪" "$WB_ACCOUNTS" "$WB_VER" "$WB_UPDATE" "$WB_REASON" ""
-            else
+              if [ "$WB_RELAUNCH" = "1" ]; then
+                # 接力轮安静续跑：不重复推版式完全相同的「已就绪」，让唯一那条待在本轮顶部。
+                echo "ℹ️ [workbuddy-gateway] 接力轮（上一 run ${WB_PREV_TAG} 已启动），跳过重复的就绪通知"
+              else
+                wb_notify "🟢 workbuddy-gateway 已就绪" "$WB_ACCOUNTS" "$WB_VER" "$WB_UPDATE" "$WB_REASON" "" 1
+              fi
+            elif [ "$WB_RELAUNCH" != "1" ]; then
               # 网关自己起来了、但账号池为空：多半是数据目录里还没有 workbuddy*.json
               # （二维码登录只能人工做），如实标注为可用性问题，不假装就绪。
               wb_notify "⚠️ workbuddy-gateway 已启动 · 无可用账号" \
-                "账号池为空 · 需人工扫码登录" "$WB_VER" "$WB_UPDATE" "$WB_REASON" ""
+                "账号池为空 · 需人工扫码登录" "$WB_VER" "$WB_UPDATE" "$WB_REASON" "" 1
             fi
           else
             WB_TAIL="$(tail -c 1200 "$WB_LOG" 2>/dev/null || true)"
@@ -984,7 +1090,7 @@ jobs:
             # WB_REASON 可能为空，拼串前先规整，避免出现「原因： serve …」的前导空格
             _wb_fail_reason="${WB_REASON:+${WB_REASON} · }${_wb_fail_reason}"
             wb_notify "❌ workbuddy-gateway 启动失败" "未监听 ${WB_PORT} · 退出码 1" "$WB_VER" \
-              "$WB_UPDATE" "$_wb_fail_reason" "$WB_TAIL"
+              "$WB_UPDATE" "$_wb_fail_reason" "$WB_TAIL" 0
           fi
 
       - name: Notify Tailscale SSH entry
@@ -2069,6 +2175,8 @@ jobs:
         if: ${{ always() }}
         run: |
           set -euo pipefail
+          # 通知真源在 step 顶层 source 一次（勿挪进下面的函数体，理由见启动步骤同名注释 / 规范 4.4）
+          source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
           echo "1. Stopping OpenClaw gateway..."
           openclaw gateway stop || echo "OpenClaw already stopped or command failed."
           sleep 1m
@@ -2137,9 +2245,12 @@ jobs:
           ls -la "$WB_RUN_DIR"/workbuddy*.json 2>/dev/null | head -10 || true
 
           wb_stop_notify() {
-            # 版式（规范 · 告警/结果通知）：标题 emoji 与结论一致；机器值走 <code>。
+            # 收尾停止通知。版式与运行步骤里的 wb_notify 同源（docs/telegram-notify.md
+            # 2.5 workbuddy 段）——两者分处不同 step、shell 不共享，只能各存一份副本，
+            # 改版式必须两处一起改，这是这类双份实现最容易「改一处漏一处」的地方。
+            # 收尾没有 WB_CREDS / WB_STATUS_OUT（那是启动步骤的局部变量），本函数只出
+            # 结论 + 版本 + 数据目录：网关已停，再列账号池会让人以为服务还在跑。
             if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
-              source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
               local _msg=""
               tg_add_title _msg "$1"
               tg_add_kv _msg "结论" "$2"
@@ -2174,9 +2285,8 @@ jobs:
             local obj="$1" verdict="$2" reason="${3:-}" detail="${4:-}"
             if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
               local run_id="${GITHUB_RUN_ID:-manual}"
-              # 统一 HTML 版式（emoji 标题 + ━━━ 分隔线 + 键值区 + 收尾区）；
-              # source 幂等可重复；收尾区由 tg_add_footer 统一产出（勿自造时长/链接格式）
-              source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+              # 真源已在 step 顶层 source（规范 4.4）：本函数被收尾 step 在主 shell 里直接调用，
+              # 函数体内再 source 一次会覆盖调用点的本地覆写（此前靠 source 幂等侥幸无碍）
               local full_msg=""
               # 标题区分阶段：周期归档与最终归档走两个函数，此前标题完全相同，
               # 读者分不清告警来自哪一轮（调用点里的 "final" 前缀已由本标题承担）

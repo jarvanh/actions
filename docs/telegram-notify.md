@@ -326,7 +326,7 @@ HTML 变复杂。
 | 通知 | 在哪 | 何时发 |
 |---|---|---|
 | 🟢 OpenClaw Runner 已就绪 | `openclaw.yml` | Tailscale SSH 就绪，推 SSH / RustDesk / 出口网络 / 出口节点 / AI 网关 |
-| 🟢 / ⚠️ workbuddy-gateway 已就绪 · 无可用账号 | `openclaw.yml` | 本地代理网关启动自检后（账号池为空时降级 ⚠️） |
+| 🟢 / ⚠️ workbuddy-gateway 已就绪 · 无可用账号 | `openclaw.yml` | 本地代理网关启动自检后（账号池为空时降级 ⚠️）。字段口径见 2.5 节 |
 | 🟢 Windows runner 已就绪 | `tailscale-windows.yml` | 同上（Windows，pwsh 手拼） |
 | 🖥️ Windows RDP 已就绪 | `rdp.yml` | 隧道地址拿到后推 RDP 凭据（pwsh 手拼） |
 | 🔐 OpenList 凭据 | `emby.yml` | OpenList 改密后私信凭据 |
@@ -412,6 +412,48 @@ Run ID：<code>12345678</code>
 
 ⏱ 已运行 12 分钟 · 🔗 运行日志
 ```
+
+**示例：workbuddy-gateway 已就绪**（`openclaw.yml`）
+
+```
+🟢 workbuddy-gateway 已就绪
+━━━━━━━━━━━━━━━━━━
+结论：2 个账号 (有效 2, 失效 0)
+版本：<code>v1.11.0</code>
+更新：从 v1.11.0 更新到 v1.11.0
+接口：<code>http://127.0.0.1:8318/v1</code>
+鉴权：仅回环监听，无需密钥
+
+🔑 凭据 · 2
+  ├─ <code>workbuddy.json</code>
+  └─ <code>workbuddy-intl.json</code>
+
+💳 账号池 · 2
+  ├─ <code>workbuddy.json</code> · 国内站 · 可用
+  │  过期时间 2026-09-22 12:32:07 (剩余 119h30m0s)
+  └─ <code>workbuddy-intl.json</code> · 国际站 · 可用
+     过期时间 2027-09-05 01:57:00 (剩余 8280h0m0s)
+
+数据目录：<code>/dropbox/self-hosted/workbuddy-gateway</code>
+
+⏱ 已运行 24 分钟 · 🔗 运行日志
+```
+
+**workbuddy 通知的字段口径**（改这条通知时逐条对齐）：
+
+- **结论**取自 serve 日志的`账号池`行（`有效 N, 失效 M`），**接口**是 `http://127.0.0.1:<端口>/v1`，
+  端口取启动时的 `WB_PORT`（当前 8318；8317 归 CliRelay）。
+- **鉴权一行固定写「仅回环监听，无需密钥」**：启动命令不传 `-api-key`、且只绑 `127.0.0.1`，
+  此时网关不做任何鉴权。**不得编造密钥值**——上游 `-api-key` 默认空，本仓库也从未设置。
+- **凭据**只列 `workbuddy*.json` 的**文件名**（`├─/└─` 树形，分节带 ` · N`）。
+  **绝不回显文件内容**——那是真实 Access/Refresh Token。`workbuddy-status.json`
+  是 serve 写的状态快照，不算凭据，必须排除。
+- **账号池**逐账号给：`凭据文件 · 站点 · 冷却状态`，次行给 `Token 状态 / 过期时间`。
+  数据源是 `workbuddy-gateway status`（README 有文档、字段稳定）。
+  **不要解析 `workbuddy-status.json`**——其内部键名上游未文档化，猜键名会在上游改版时
+  静默失效；「剩余积分 / 免费模型 / 模型冷却」只出现在 `monitor` 的交互式表格里，
+  非脚本可取，故本通知不展示。
+  取不到的账号整条省略，且**整个账号池分节无数据时整段跳过**，不留空分节。
 
 - 「数据目录」指 Dropbox 上的**持久数据目录**，不是本轮本地运行目录 —— 两者分离，
   但读者要照着去放凭据的地方是 Dropbox 那个（本地运行目录每轮重建）。
@@ -914,6 +956,56 @@ send_tg "$msg" || echo "::warning::TG 通知发送失败（不影响任务）"
   限流与 400 时完全没有痕迹。
 - 发送前先恢复环境（例如先撤 TUN 再发），否则连 API 都送不出去。
 
+### 4.4 通知函数的正确接法（子 shell 陷阱与接力轮去重）
+
+**真源只在顶层 source 一次。** `tg_notify.sh` 的头部写着「source 幂等、可重复」，
+这只保证**不会重复定义出错**，不代表在函数体内 source 等价。函数体往往在**子 shell**
+里执行——`m=$(fn)`、`fn | …`、`fn &` 都会 fork：
+
+- 子 shell 内 `source` 只改子 shell 的函数表，**父 shell 里调用点做的覆写不会被还原**
+  （反过来也成立：子 shell 里的覆写出了子 shell 就没了）；
+- 子 shell 里 `local` 只对**子 shell 的调用栈**有意义，父 shell 看到的是全局变量——
+  「函数内 `local` 就不会污染全局」在这类函数里不成立。
+
+这两条合起来会产出非常难查的 bug：调用点 `send_tg() { … }` 想拦下发送做本地预览，
+函数体内再 source 一次真源，定义就被**还原成真发**，于是预览脚本真的往 Telegram 发了消息，
+而且 `$( )` 把 stderr 也吞掉，只看得到一句「发送失败」。正确写法是：
+
+```bash
+source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"   # step 顶层，一次
+
+wb_notify() {                    # 函数体只用助手，不再 source
+  local _msg=""
+  tg_add_title _msg "$1"
+  …
+  send_tg "$_msg" || echo "::warning::TG 通知发送失败（不影响任务）"
+}
+
+wb_notify …                      # 顶层调用；要改行为就在顶层覆写 send_tg
+```
+
+**同一份 service 由接力 run 反复启动时，同一条通知只推一次。** 长跑 workflow 收尾时用
+`gh workflow run …` 接力启动新 run，新 run 会把同一套启动逻辑原样再跑一遍——同一个服务、
+同一份账号池，通知内容与上一条完全相同，只是把消息列表刷屏。判据放在 `/tmp` 下的标记文件
+（runner 生命周期内有效，每个 run 一台新 runner）：
+
+```bash
+TAG_FILE="/tmp/workbuddy-serve-run-tag"
+RELAUNCH=0
+if [ -s "$TAG_FILE" ]; then RELAUNCH=1; fi        # 文件在 → 上一轮已启动过 = 接力轮
+if [ "$READY" = "1" ]; then
+  printf '%s\n' "${GITHUB_RUN_ID:-manual}" > "$TAG_FILE"
+  if [ "$RELAUNCH" = "1" ]; then
+    echo "ℹ️ 接力轮（上一 run ${PREV_TAG} 已启动），跳过重复的就绪通知"
+  else
+    send_readiness_notify
+  fi
+fi
+```
+
+标记文件**只在服务真的起来时写**：启动失败的回退/重试路径不会被记成「已启动」。
+文件被 runner 回收后探测自然归零，按首轮处理——多发一条好过漏发。
+
 ### 4.5 凭据与入口通知
 
 按套分节（SSH / RDP / 出口网络），每套内的取值行**整节同为 `标签：<code>值</code>`**
@@ -1069,6 +1161,8 @@ python 侧拿不到 bash 函数，仍有两处同义实现（`add_uploaded_video
 | 把运行日志搬进通知当条目子行 | 想省一次点链接 | 子行只补一句话，过程走运行日志链接 | `  └─ <code>f.mp4</code> · 目标目录不可写（…）` |
 | 子行前缀比条目前缀宽一格（6 vs 5 字符） | `tree_sub` 比 `tree_conn` 多写一个空格 | 两者定宽必须相等（4.2 节） | `  │  差异构成：…` 与 `  ├─ <code>dst</code>` 正文同列 |
 | 单独列 rclone 差异清单（新增 / 仅目标存在 / 不一致） | 想交代「还差多少」 | 不列：与失败清单、已修复清单重复，且把已处理的也算进差异 | 规模由文件数行交代：`文件数：差异 3 · 源端 1415 / 目标 1412` |
+| 函数体内 `source` 真源 | 以为可重复 source、想每个调用点自带一份 | 只在顶层/step 顶层 source 一次：函数体在**子 shell 里执行**（`$( )` / 管道 / 后台），子 shell 内 source 不改变父 shell 里的定义，于是调用点对 `send_tg` 的本地覆写被静默还原、`local` 失效（4.4 节） | 顶层 `source .../tg_notify.sh`，函数只用助手 |
+| 长跑接力轮重复推同一条通知 | 新 run 是上一轮 `workflow_dispatch` 接力启动，服务与账号池都没变，却又跑一遍同样的判断 | 用 `/tmp` 下的标记文件区分首轮与接力轮，接力轮只记日志不发通知（4.4 节） | CI 日志 `ℹ️ 接力轮（上一 run N 已启动），跳过重复通知` |
 
 ---
 
