@@ -96,12 +96,12 @@ on:
         type: string
         default: "0"
       diag_409_src:
-        description: "E2 用的源端文件路径（如 onedrive:2/xx/原名.mp4，必须换行分隔，取第 1 个）。不给则只做 E1（E1 才是判决性的）"
+        description: "【已废弃】旧设计里 E2 的源端路径。现 E2 改用本地自造中性载荷（规避生产敏感文件名 + 日志路径截断），无需提供；保留仅为兼容旧调用"
         required: false
         type: string
         default: ""
       diag_409_skip_e2:
-        description: "1=只做 E1（纯读+建目录，最快）；0=两组都做"
+        description: "1=只做 E1（纯读+建目录，最快）；0=两组都做（E1 判决性 + E2 改名实验）"
         required: false
         type: string
         default: "0"
