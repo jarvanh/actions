@@ -212,7 +212,15 @@ jobs:
           # `GET /api/subs` 只要 status != 200 就直接失败）。早先这里用 `curl -fsS`，而 `-f`
           # 只对 ≥400 报错、302 一律算「就绪」⇒ 探测绿了、脚本红了，白烧一轮
           # （2026-09-14 run 34831792493：探测第 2 次通过，5 分钟后脚本拿到 404）。
+          #
+          # 另一个坑（2026-09-17 修）：**200 与容器日志之间有竞态**。/api/subs 一开始响应
+          # 200，body JSON limit 那行可能还没被刷进 `docker logs` —— 实测 run 35203699226：
+          # 镜像拉取完 09:11:02.7，第 **1** 次探测 09:11:04.97 就拿到 200，紧跟着 grep
+          # 落空、job 判失败；而成功轮（35199572284）在第 2 次探测才 200，多出约 2 秒就躲过了。
+          # 所以这里**不能一探到 200 就立刻断言**：把「日志里有没有这行」也当成就绪条件之一，
+          # 未见到就继续下一轮探测（同一个 30 次 × 2 秒的上限），只有逐轮都见不到才算真失败。
           code=000
+          limit_ok=0
           for i in $(seq 1 30); do
             code=$(curl -s -o /dev/null -w '%{http_code}' \
                      http://127.0.0.1:3000/api/subs 2>/dev/null || true)
@@ -223,16 +231,20 @@ jobs:
               # `[BACKEND] listening on` 走同一个 logger，所以一定在容器日志里。
               # 另一条 env（SUB_STORE_FRONTEND_BACKEND_PATH）不设的后果是 HTTP 500 + job 失败，
               # 是**响亮**的失败，不需要守卫。
-              if ! docker logs sub-store 2>&1 | grep -q 'body JSON limit: 16mb'; then
-                echo "::error::Sub-Store 后端没报告 body JSON limit: 16mb（SUB_STORE_BODY_JSON_LIMIT 可能已被上游改名或忽略）。实际启动日志："
-                docker logs --tail 40 sub-store || true
-                exit 1
+              if docker logs sub-store 2>&1 | grep -q 'body JSON limit: 16mb'; then
+                limit_ok=1
+                echo "Sub-Store 后端就绪（第 $i 次探测，HTTP ${code}）；body JSON limit 已确认 16mb"
+                exit 0
               fi
-              echo "Sub-Store 后端就绪（第 $i 次探测，HTTP ${code}）；body JSON limit 已确认 16mb"
-              exit 0
+              echo "第 $i 次探测 HTTP 200，但容器日志还没出现 body JSON limit 行，继续等（日志刷写滞后于端口就绪）"
             fi
             sleep 2
           done
+          if [ "$limit_ok" = "0" ] && [ "$code" = "200" ]; then
+            echo "::error::Sub-Store 后端响应 200 但始终没报告 body JSON limit: 16mb（SUB_STORE_BODY_JSON_LIMIT 可能已被上游改名或忽略）。实际启动日志："
+            docker logs --tail 40 sub-store || true
+            exit 1
+          fi
           echo "::error::Sub-Store 后端 60 秒内未就绪（最后一次 GET /api/subs → HTTP ${code}）"
           # 失败时把容器状态与端口映射一并打出来：只看日志分不清「没起来」和「起来了但
           # 端口不对」（首次运行就吃了这个亏 —— 日志里有 EADDRINUSE，却看不出谁占了端口）
