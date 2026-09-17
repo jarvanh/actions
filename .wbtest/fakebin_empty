@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+for a in "$@"; do [ "$a" = "serve" ] && MODE=serve; done
+[ "${MODE:-}" = "serve" ] || exit 0
+echo "   账号池:        0 个账号 (有效 0, 失效 0)"
+exec python3 - <<'PY'
+import http.server, socketserver
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200); self.end_headers(); self.wfile.write(b'ok')
+    def log_message(self, *a): pass
+socketserver.TCPServer.allow_reuse_address = True
+socketserver.TCPServer(('127.0.0.1', 8318), H).serve_forever()
+PY

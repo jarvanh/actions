@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+for a in "$@"; do case "$a" in *api.github.com*) echo '{"tag_name": "v1.2.3"}'; exit 0;; esac; done
+for a in "$@"; do case "$a" in *workbuddy-gateway/releases/*)
+  out=""; prev=""
+  for b in "$@"; do [ "$prev" = "-o" ] && out="$b"; prev="$b"; done
+  [ -n "$out" ] && { cp "${WB_FAKEBIN:-/workspace/.wbtest/fakebin_empty}" "$out"; exit 0; };;
+esac; done
+exec /usr/bin/curl "$@"

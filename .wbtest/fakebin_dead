@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+echo "警告: 未检测到有效凭据"
+echo "请先执行: workbuddy-gateway login 扫码登录"
+exit 1
