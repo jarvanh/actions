@@ -846,6 +846,22 @@ _probe_file_visible() {
   return 1
 }
 
+# 409 Conflict 语义判定: 「目录已存在」还是「后端故障」
+# 为什么需要（2026-09-17，run 35186977864 实锤）:
+#   该轮 2062 次 `Conflict: 409 Conflict`、1088 次 `Update mkParentDir failed`，
+#   4 种修复方法全撞同一堵墙、整轮零落盘。根因是**语义缺失**:
+#   WebDAV 的 MKCOL 对"已存在"资源按 RFC 4918 也应回 405/409，而 rclone 的
+#   mkParentDir 在并发下同样会 409 —— 但全库把 409 一律归为「后端死」
+#   （openlist_driver.sh 的 _classify_probe_failure → backend），
+#   于是"目录其实已存在"被判成"后端不能用"，跳过整轮。
+#   二者必须靠**读操作**区分: 目录在 ⇒ 已存在（幂等成功，继续写）；
+#   目录不在 ⇒ 后端确实建不出来（沿用原有失败处理）。
+# 用法: _fix_dir_exists_or_conflict <远端目录> <超时> → 0=已存在 1=不存在/不确定
+_fix_dir_exists_or_conflict() {
+  local dir_remote="$1" tmo="${2:-${OPENLIST_DIR_PROBE_TIMEOUT:-120s}}"
+  rclone lsd "$dir_remote" --retries 1 --timeout "$tmo" >/dev/null 2>&1
+}
+
 _fix_probe_dir_writable() {
   local dir_remote="$1" ol_dir="${2:-}"
   local probe_timeout="${OPENLIST_DIR_PROBE_TIMEOUT:-120}s"
@@ -1194,6 +1210,16 @@ _fix_switch_to_hash_dir() {
     log_fix "$fix_log" "   ⚠ rclone mkdir 失败 exit=${mkdir_status}，尝试 OpenList API..."
   fi
 
+  # 409 已存在语义: 短哈希目录名是确定性的（目录路径 md5 前 8 位），
+  # 上轮修过同目录时它**必然已存在** ⇒ mkdir 报错几乎总是"已存在"而非故障。
+  if [ "$hash_dir_ok" -ne 1 ] && [ "$mkdir_status" -ne 0 ] \
+     && [ "${_FIX_MKDIR_409_SEMANTICS:-1}" != "0" ]; then
+    if _fix_dir_exists_or_conflict "$hash_dst_dir" "${OPENLIST_MKDIR_TIMEOUT:-120}s"; then
+      hash_dir_ok=1
+      log_fix "$fix_log" "   ✅ mkdir 报错但短哈希目录实际存在（409 已存在语义）→ 按幂等成功处理"
+    fi
+  fi
+
   if [ "$hash_dir_ok" -ne 1 ]; then
     local ol_token
     ol_token=$(_get_openlist_token 2>/dev/null) || ol_token=""
@@ -1208,6 +1234,12 @@ _fix_switch_to_hash_dir() {
       if echo "$mkdir_http" | grep -qE 'HTTP_CODE:(200|201|204)'; then
         hash_dir_ok=1
         log_fix "$fix_log" "   ✅ 短哈希目录创建成功 (API)"
+      elif echo "$mkdir_http" | grep -qE 'HTTP_CODE:409' \
+           && [ "${_FIX_MKDIR_409_SEMANTICS:-1}" != "0" ]; then
+        if _fix_dir_exists_or_conflict "$hash_dst_dir" "${OPENLIST_MKDIR_TIMEOUT:-120}s"; then
+          hash_dir_ok=1
+          log_fix "$fix_log" "   ✅ 短哈希目录 API 报 409 但实际存在 → 按幂等成功处理"
+        fi
       fi
     fi
   fi
@@ -1318,6 +1350,20 @@ try_fix_failed_file() {
     log_fix "$fix_log" "⚠ mkdir 失败 exit=${mkdir_status}，尝试 OpenList API..."
   fi
 
+  # mkdir 失败若是 409 Conflict，先判"目录是否已存在"再决定是否降级。
+  # 为什么必须判: 409 在并发 mkdir / MKCOL 语义下最常见的原因是**资源已存在**
+  # （RFC 4918: MKCOL 对已存在资源返回 405/409），是幂等成功而非故障。
+  # 旧行为把它一律当失败 → 降级到 base64URL→短哈希，把本来好用的原目录
+  # 白白换掉（可能丢目录名、只能靠 marker 还原），最坏还因备用目录也 409
+  # 而整文件判死。判据用**读操作**（lsd），与"后端真建不出来"可区分。
+  if [ "$dir_ok" -ne 1 ] && [ "$mkdir_status" -ne 0 ] \
+     && [ "${_FIX_MKDIR_409_SEMANTICS:-1}" != "0" ]; then
+    if _fix_dir_exists_or_conflict "$dst_dir" "${OPENLIST_MKDIR_TIMEOUT:-120}s"; then
+      dir_ok=1
+      log_fix "$fix_log" "✅ mkdir 报错但目录实际存在（409 已存在语义）→ 按幂等成功处理，沿用原目录"
+    fi
+  fi
+
   # 降级处理：mkdir 失败或 lsd 验证失败时执行（OpenList API + base64URL）
   if [ "$dir_ok" -ne 1 ]; then
     local ol_token
@@ -1333,6 +1379,14 @@ try_fix_failed_file() {
       if echo "$mkdir_http" | grep -qE 'HTTP_CODE:(200|201|204)'; then
         dir_ok=1
         log_fix "$fix_log" "OpenList API mkdir 成功"
+      elif echo "$mkdir_http" | grep -qE 'HTTP_CODE:409' \
+           && [ "${_FIX_MKDIR_409_SEMANTICS:-1}" != "0" ]; then
+        # 409 在 fs/mkdir 上同样优先解读为"目录已存在"（幂等），用读操作复核。
+        # 旧行为只认 200|201|204 ⇒ 已存在的目录被判失败，一路降级到 base64URL/短哈希。
+        if _fix_dir_exists_or_conflict "$dst_dir" "${OPENLIST_MKDIR_TIMEOUT:-120}s"; then
+          dir_ok=1
+          log_fix "$fix_log" "OpenList API mkdir 报 409 但目录实际存在 → 按幂等成功处理"
+        fi
       fi
     fi
 
@@ -1375,6 +1429,17 @@ try_fix_failed_file() {
         fi
       fi
 
+      # 与 Step 1 同口径: mkdir 报错时先判"是否已存在"，409 且目录在 ⇒ 幂等成功
+      if [ "$dir_ok" -ne 1 ] && [ "$mkdir_status" -ne 0 ] \
+         && [ "${_FIX_MKDIR_409_SEMANTICS:-1}" != "0" ]; then
+        if _fix_dir_exists_or_conflict "$actual_dst_dir" "${OPENLIST_MKDIR_TIMEOUT:-120}s"; then
+          dir_ok=1
+          used_base64_dir=1
+          dst_file="${actual_dst_dir}/${file_name}"
+          log_fix "$fix_log" "✅ mkdir 报错但 base64URL 目录实际存在（409 已存在语义）→ 按幂等成功处理"
+        fi
+      fi
+
       if [ "$dir_ok" -ne 1 ] && [ -n "$ol_token" ] && [ "$ol_token" != "null" ]; then
         mkdir_resp=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST "http://127.0.0.1:5244/api/fs/mkdir" \
           -H "Authorization: $ol_token" \
@@ -1387,6 +1452,14 @@ try_fix_failed_file() {
           used_base64_dir=1
           dst_file="${actual_dst_dir}/${file_name}"
           log_fix "$fix_log" "base64URL 目录创建成功 (API)"
+        elif echo "$mkdir_http" | grep -qE 'HTTP_CODE:409' \
+             && [ "${_FIX_MKDIR_409_SEMANTICS:-1}" != "0" ]; then
+          if _fix_dir_exists_or_conflict "$actual_dst_dir" "${OPENLIST_MKDIR_TIMEOUT:-120}s"; then
+            dir_ok=1
+            used_base64_dir=1
+            dst_file="${actual_dst_dir}/${file_name}"
+            log_fix "$fix_log" "base64URL 目录 API 报 409 但实际存在 → 按幂等成功处理"
+          fi
         fi
       fi
     fi

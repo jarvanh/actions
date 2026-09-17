@@ -240,8 +240,16 @@ workflow 会把 `*.sh` `*.py` `*.jq` 拷到 `/tmp` 再 `source /tmp/load_all.sh`
 `OPENLIST_DOWNLOAD_TIMEOUT` · `OPENLIST_UPLOAD_TIMEOUT` · `OPENLIST_TOKEN_REFRESH_SECS`
 
 **重试与阀门**：`OPENLIST_8005_RETRY_ATTEMPTS` · `OPENLIST_423_RETRY_ATTEMPTS` ·
+`OPENLIST_409_RETRY_ATTEMPTS`（2026-09-17 加，与 423 同款：409/mkParentDir 失败重跑整次 sync）·
 `OPENLIST_PERSIST_RETRY_ROUNDS` · `OPENLIST_MISSING_FIX_MAX`(200) ·
 `OPENLIST_MAX_SPLIT_ATTEMPTS` · `ROTATION_MAX_CONSECUTIVE_ATTEMPTS`(8)
+
+**409 语义开关**（2026-09-17 加）: `_FIX_MKDIR_409_SEMANTICS`（默认 1=开；0=回退旧行为）。
+开启时 mkdir 报 409 会先用 `lsd` 读操作复核目录是否**已存在**，存在即按幂等成功放行 ——
+409 在 MKCOL 语义下常见含义就是"资源已存在"，旧行为一律判失败会导致整轮零落盘
+（run `35186977864` 实测：2062 次 409、成功率 0%）。
+`OPENLIST_MKDIR_FAIL_STREAK`（默认 3，0=关）: 同一后端**目录层**连续 N 个文件建不出目录
+即收手跳过剩余文件（区别于方法层失败，不会误伤健康后端）。
 
 **后端级熔断**（2026-09-12 加，见下方「后端级熔断」）: `OPENLIST_BACKEND_WRITE_PROBE`(1=开启) ·
 `OPENLIST_BACKEND_WRITE_PROBE_TIMEOUT`(60s) · `OPENLIST_BACKEND_DEAD_THRESHOLD`(3，同挂载根连续几个目录判不可写即判后端死) ·
@@ -332,6 +340,14 @@ API list），读得通但写不进的后端会被整轮放行——run #12616 �
    （预检偶发放行）由「同一挂载根连续 N 个目录被**重启确认**判不可写」捕获；判定后该后端
    剩余目录一律直接判不可写 —— 不探测、不重启、不跑 4 种方法。只认「已重启确认」的
    结论，缓存口径（预算耗尽/容器不可重启）不计入，避免误伤健康后端。
+
+> **409 语义修正（2026-09-17，见上方「409 语义开关」）**：上面第 1 条提到的
+> 「写入恒定 `409 Conflict`」此后被证明**有相当一部分是误判** —— 409 在 MKCOL 语义下
+> 常见含义是**资源已存在**（幂等成功），而旧代码一律归为「后端异常」并跳过整轮。
+> run `35186977864` 复现同形态（2062 次 409、1088 次 `mkParentDir failed`、
+> 成功率 0%、330min 超时），而**用户后台看驱动是正常的** —— 失败点在目录创建层，
+> 预检与管理后台都不区分这一层。现已改为「409 先用 `lsd` 复核目录是否已存在，
+> 存在即放行」，并给 409 补上与 423 同款的整轮重试、给目录层补上连续失败收手。
 
 被熔断的同步对会让轮转游标**立即后移**（不等 `ROTATION_MAX_CONSECUTIVE_ATTEMPTS` 次），
 死后端重试多少次都一样。收尾 step 打印 `本轮修复成效: 成功 X · 缺失 Y · 未修复 Z`，

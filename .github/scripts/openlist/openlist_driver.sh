@@ -182,12 +182,24 @@ _has_wopan_login_failure() {
 # 教训（run 33026674750）: baidupan 登录失效时 OpenList 层报的是
 # "Conflict: 409 Conflict"/mkParentDir failed 这类非典型形态，
 # 旧版关键词规则匹配不上会静默放行，直接带着死驱动进入写流程。
+#
+# 2026-09-17 修正（run 35186977864）: 409 不能再一律归 backend。
+#   该轮 2062 次 409 / 1088 次 mkParentDir failed 被整轮判"后端异常"跳过，
+#   但用户后台看驱动是好的 —— 因为 409 的主因是**目录已存在**（MKCOL 语义）
+#   或并发 mkdir 争用，而非驱动故障。判据是**读操作**: 这里本身就是一次
+#   lsd 探测，探测失败的路径下无法再区分"目录在/不在"，故把 409 从
+#   backend 里拆出来交给调用方做二次判定（见 _pre_webdav_health_check 的
+#   conflict 分支），只有连二次判定都失败才当后端异常。
 _classify_probe_failure() {
   local out="$1"
   if echo "$out" | grep -Eqi 'unauthorized|permission denied|not authenticated|login|登录失败|登录失效|登录已过期|授权|token.*(expired|invalidated|invalid)|invalidated|auth.*fail|auth.*error|credential|identity|invalid_grant|401|403|Method Not Allowed'; then
     echo auth
   elif echo "$out" | grep -Eqi 'connection refused|connection timed out|no such host|network unreachable|dial tcp|i/o timeout|couldn.t connect|8005'; then
     echo unreachable
+  elif echo "$out" | grep -Eqi 'conflict|mkParentDir' \
+       && [ "${_FIX_MKDIR_409_SEMANTICS:-1}" != "0" ]; then
+    # 409/mkParentDir 单独成一类: 调用方会先判"目录是否已存在"，存在即放行
+    echo conflict
   elif echo "$out" | grep -Eqi 'conflict|mkParentDir|internal server error|bad gateway|service unavailable|gateway timeout|too many requests|failed get storage|failed to reload.*storage|storage.*(not found|not exist)|存储不存在|存储加载失败|HTTP/[0-9.]+ 5[0-9][0-9]'; then
     echo backend
   elif echo "$out" | grep -Eqi 'directory not found|file does not exist|no such file|object not found|目录不存在|路径不存在|没有找到文件'; then
@@ -223,6 +235,22 @@ _pre_webdav_health_check() {
   [ "$rc" -eq 0 ] && return 0
   # 目录尚未创建属于首次同步的正常状态，放行由后续流程建目录
   [ "$kind" = "notfound" ] && return 0
+
+  # 409/mkParentDir: 先做**二次判定**——目录是否其实已存在。
+  # 已存在 ⇒ 放行（409 是 MKCOL 幂等语义，不是故障）；探测不到才当后端异常。
+  # 为什么必须放行而不是跳过: 旧行为把这种"目录在、只是 mkdir 报了 409"整轮跳过，
+  #   代价是整轮零落盘（run 35186977864 实测），而放行的最坏代价只是后续写入
+  #   真失败时转修复管线 —— 后者本就有完整的失败处理。
+  if [ "$kind" = "conflict" ]; then
+    if rclone lsd "$probe_path" --max-depth 1 --retries 1 \
+         --contimeout "${OPENLIST_PROBE_TIMEOUT:-15}s" \
+         --timeout "${OPENLIST_PROBE_TIMEOUT:-15}s" >/dev/null 2>&1; then
+      echo "✅ $label 409/mkParentDir 但目录实际存在 → 按幂等成功放行（非后端故障）" | tee ${log_file:+-a "$log_file"}
+      return 0
+    fi
+    # 二次判定仍失败: 退回 backend 语义（可能是并发争用，交由 409 重试链处理）
+    kind=backend
+  fi
 
   local reason
   case "$kind" in
