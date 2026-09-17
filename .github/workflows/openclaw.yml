@@ -153,51 +153,6 @@ jobs:
           stat -c '%s bytes  %n' ~/.openclaw/openclaw.json 2>/dev/null || echo "⚠️ openclaw.json 不存在"
           ls -l ~/.openclaw/state 2>/dev/null || echo "⚠️ state/ 不存在"
 
-          # ZCode 数据恢复：~/.zcode/cli（会话库/rollout/记忆）在 runner 重置后会丢，从 Dropbox 主包还原。
-          # 只覆盖 cli/ 子树：server/ 等运行时由桌面客户端自动重新部署，不入包也不被还原触碰
-          TMP_ZCODE_TAR="/tmp/zcode-restore.tar.gz"
-          ZCODE_RESTORE_DIR="/tmp/zcode-restore"
-          rm -rf "$ZCODE_RESTORE_DIR" 2>/dev/null || true
-          if rclone ls dropbox:self-hosted/zcode.tar.gz > /dev/null 2>&1; then
-            echo "📦 Found zcode.tar.gz! Downloading and extracting..."
-            rclone copyto dropbox:self-hosted/zcode.tar.gz "$TMP_ZCODE_TAR"
-            if [ -s "$TMP_ZCODE_TAR" ] && tar -tzf "$TMP_ZCODE_TAR" >/dev/null 2>&1; then
-              mkdir -p "$ZCODE_RESTORE_DIR"
-              tar -xzf "$TMP_ZCODE_TAR" -C "$ZCODE_RESTORE_DIR"
-              if [ -d "$ZCODE_RESTORE_DIR/.zcode/cli" ]; then
-                mkdir -p ~/.zcode
-                rm -rf ~/.zcode/cli
-                cp -a "$ZCODE_RESTORE_DIR/.zcode/cli" ~/.zcode/cli
-                echo "✅ Restored ~/.zcode/cli from archive"
-              else
-                echo "⚠️ Archive does not contain .zcode/cli, skipping ZCode restore."
-              fi
-              # 还原 server 设备身份（v2/certs CA + deviceMid）。每次重新部署 server 都会重新
-              # 生成身份，客户端把归档等本地 UI 状态 keyed 到该身份上；身份一变，客户端里
-              # 已归档会话全部复活（2026-09-12 排查结论：归档动作在 runner 侧零落盘）。复用
-              # 身份后客户端跨重置认得同一个 server。tasks-index.sqlite 是可再生索引，不备份。
-              if [ -d "$ZCODE_RESTORE_DIR/.zcode/v2/certs" ]; then
-                mkdir -p ~/.zcode/v2/certs
-                cp -a "$ZCODE_RESTORE_DIR/.zcode/v2/certs/." ~/.zcode/v2/certs/
-                if [ -f "$ZCODE_RESTORE_DIR/.zcode/v2/telemetry-state.json" ]; then
-                  cp -a "$ZCODE_RESTORE_DIR/.zcode/v2/telemetry-state.json" ~/.zcode/v2/
-                fi
-                echo "✅ Restored ~/.zcode/v2 server identity (certs + deviceMid)"
-              else
-                echo "ℹ️ Archive has no .zcode/v2 identity (old package), server will generate a fresh one."
-              fi
-            else
-              echo "⚠️ zcode.tar.gz validation failed, skipping ZCode restore."
-            fi
-            rm -f "$TMP_ZCODE_TAR" 2>/dev/null || true
-            rm -rf "$ZCODE_RESTORE_DIR" 2>/dev/null || true
-            echo "=== restored ~/.zcode/cli ==="
-            du -sh ~/.zcode/cli 2>/dev/null || true
-            ls ~/.zcode/cli/db/db.sqlite ~/.zcode/cli/rollout 2>/dev/null | head -5 || echo "⚠️ 还原后未见 db.sqlite/rollout"
-          else
-            echo "ℹ️ No zcode.tar.gz found on Dropbox (first run), skipping ZCode restore."
-          fi
-
           npm i -g @google/gemini-cli
           npm i -g clawhub
 
@@ -800,6 +755,195 @@ jobs:
           echo $! > ~/.openclaw/logs/cloudflared_CLIPProxyAPI.pid
 
           echo "ai-api 命名隧道已启动（固定地址模式），当前后端: ${ACTIVE_BACKEND}"
+
+      - name: Run workbuddy-gateway (check update first, then serve)
+        id: run_workbuddy
+        env:
+          # send_tg 发送闸 + 收尾区接线（缺任一则本步骤通知静默跳过）
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TG_RUN_STARTED_AT: ${{ github.run_started_at }}
+        run: |
+          set -uo pipefail
+
+          # workbuddy-gateway（CangShui/workbuddy-gateway）：纯 Go 单二进制的本地 AI 代理网关，
+          # 数据（凭据 workbuddy*.json、状态/日志）全部落在自托管目录 /dropbox/self-hosted/workbuddy-gateway，
+          # 与 OpenClaw 主包同宿主、随 Dropbox 跨轮持久化。
+          WB_DIR="/dropbox/self-hosted/workbuddy-gateway"
+          WB_BIN="$WB_DIR/workbuddy-gateway"
+          WB_RELEASE_BASE="https://github.com/CangShui/workbuddy-gateway/releases/latest/download"
+          WB_VER_FILE="$WB_DIR/.installed-version"
+          WB_META="/tmp/run-workbuddy-meta.env"
+          WB_LOG="$WB_DIR/logs/serve.log"
+          : > "$WB_META"
+
+          wb_notify() {
+            # 用法: wb_notify <标题> <结论> <版本> <更新说明> <原因> <原始输出>
+            # 版式（docs/telegram-notify.md 2.5 告警 / 4.7）：标题带状态 emoji 且与结论一致；
+            # 结论/更新说明/原因是人写的自然语言 → 裸文本 kv，版本/路径是机器值 → <code>，
+            # 原始输出 → <pre>（正文最后一块，其后只跟收尾区）。空值整行跳过。
+            if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+              source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+              local _msg=""
+              tg_add_title _msg "$1"
+              tg_add_kv _msg "结论" "$2"
+              [ -n "$3" ] && tg_add_path _msg "版本" "$3"
+              [ -n "$4" ] && tg_add_kv _msg "更新" "$4"
+              [ -n "$5" ] && tg_add_kv _msg "原因" "$5"
+              tg_add_path _msg "数据目录" "$WB_DIR"
+              if [ -n "$6" ]; then
+                tg_add_section _msg "🧾 原始输出"
+                tg_add_pre _msg "$(printf '%s' "$6" | tail -c 1200)"
+              fi
+              tg_add_footer _msg
+              send_tg "$_msg" || echo "::warning::TG 通知发送失败（不影响任务）"
+            else
+              echo "⚠️ Telegram secrets missing, skip workbuddy-gateway notification."
+            fi
+          }
+
+          mkdir -p "$WB_DIR" "$WB_DIR/logs"
+
+          # ---------- 1. 检查更新：比对 GitHub Releases 的 latest 版本号与本地记录 ----------
+          # GitHub API 匿名限流（60 次/小时/出口 IP）对每轮一次足够；失败时按"保持现状"处理，
+          # 不因查版本失败而少启一个服务。
+          echo "1. Checking workbuddy-gateway release..."
+          WB_REMOTE_VER=""
+          _release_json="$(curl -fsSL --max-time 20 \
+            -H 'Accept: application/vnd.github+json' \
+            https://api.github.com/repos/CangShui/workbuddy-gateway/releases/latest 2>/dev/null || true)"
+          if [ -n "$_release_json" ]; then
+            WB_REMOTE_VER="$(printf '%s' "$_release_json" \
+              | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n 1 \
+              | sed 's/.*"\([^"]*\)"$/\1/' || true)"
+          fi
+          WB_LOCAL_VER="$(head -n 1 "$WB_VER_FILE" 2>/dev/null || true)"
+
+          # WB_STATE = 部署结论（是否发生了更新），WB_REASON = 只在异常/降级时给的原因，
+          # WB_UPDATE = 更新说明（「已在最新版」这类正常结论不写进「原因」，避免
+          # 「原因：已在最新版」这种把正常状态说成故障的写法）。
+          WB_STATE=""
+          WB_REASON=""
+          WB_UPDATE=""
+          if [ -n "$WB_REMOTE_VER" ] && [ "$WB_REMOTE_VER" = "$WB_LOCAL_VER" ] && [ -x "$WB_BIN" ]; then
+            WB_STATE="已就绪"
+            WB_UPDATE="已在最新版 ${WB_LOCAL_VER} · 跳过下载"
+            echo "✅ 本地已是最新版（${WB_LOCAL_VER}），跳过下载"
+          else
+            if [ -n "$WB_REMOTE_VER" ]; then
+              echo "⬇️ 发现新版本 ${WB_REMOTE_VER}（本地 ${WB_LOCAL_VER:-未安装}），开始下载..."
+            else
+              echo "⚠️ 无法读取 release 版本（GitHub API 不可达或限流），按当前可用版本部署"
+            fi
+            # 下载到临时文件再原子替换：中途失败不会留下半个二进制
+            WB_TMP_BIN="$WB_DIR/.workbuddy-gateway.new"
+            if curl -fsSL --max-time 300 -o "$WB_TMP_BIN" "$WB_RELEASE_BASE/workbuddy-gateway-linux-amd64"; then
+              chmod 755 "$WB_TMP_BIN"
+              if [ -s "$WB_TMP_BIN" ]; then
+                mv -f "$WB_TMP_BIN" "$WB_BIN"
+                if [ -n "$WB_REMOTE_VER" ]; then
+                  printf '%s\n' "$WB_REMOTE_VER" > "$WB_VER_FILE"
+                  if [ -n "$WB_LOCAL_VER" ]; then
+                    WB_STATE="已更新"
+                    WB_UPDATE="从 ${WB_LOCAL_VER} 更新到 ${WB_REMOTE_VER}"
+                  else
+                    WB_STATE="已安装"
+                    WB_UPDATE="首次安装 ${WB_REMOTE_VER}"
+                  fi
+                else
+                  WB_STATE="已就绪"
+                  WB_REASON="版本号查询失败（GitHub API 不可达或限流），以现有二进制运行"
+                fi
+              else
+                WB_STATE="下载失败"
+                WB_REASON="下载产物为空"
+              fi
+            else
+              rm -f "$WB_TMP_BIN" 2>/dev/null || true
+              WB_STATE="下载失败"
+              WB_REASON="GitHub Releases 下载失败"
+            fi
+            rm -f "$WB_TMP_BIN" 2>/dev/null || true
+          fi
+
+          WB_VER="$(head -n 1 "$WB_VER_FILE" 2>/dev/null || true)"
+          echo "WB_STATE=${WB_STATE:-未知}" >> "$WB_META"
+          echo "WB_VERSION=${WB_VER}" >> "$WB_META"
+          printf 'WB_UPDATE=%s\n' "$WB_UPDATE" >> "$WB_META"
+          printf 'WB_REASON=%s\n' "$WB_REASON" >> "$WB_META"
+
+          # ---------- 2. 启动 serve ----------
+          # 绑 8318 而非 8317：8317 已被 CliRelay/CLIProxyAPI 占用（OpenClaw 主 AI 网关），
+          # workbuddy-gateway 是并列的第二个本地网关，独立端口便于排查与收尾停止。
+          WB_PORT="8318"
+          WB_API="http://127.0.0.1:${WB_PORT}"
+          echo "2. Starting workbuddy-gateway serve on ${WB_PORT}..."
+          pkill -f "$WB_BIN serve" 2>/dev/null || true
+          sleep 1
+          # serve 的工作目录必须是数据目录：凭据靠"自动发现当前目录下 workbuddy*.json"入池，
+          # 状态文件 workbuddy-status.json 与 logs/ 也都写在同目录，随 Dropbox 持久化。
+          # 凭据文件由用户另行放入该目录（二维码登录需人工扫码，workflow 内无法完成）。
+          (
+            cd "$WB_DIR" || exit 1
+            nohup "$WB_BIN" serve -addr 127.0.0.1 -port "$WB_PORT" \
+              > "$WB_LOG" 2>&1 &
+            echo $! > /tmp/workbuddy-serve.pid
+          )
+
+          # 健康检查：GET /health 返回任意 HTTP 响应码即视为已监听。
+          # 就绪后再校验进程是否还在：进程若已崩，端口可能短暂由 TIME_WAIT/旧进程占用，
+          # 只看 HTTP 会把「刚起来就退出」判成成功（凭据缺失时网关会打警告并退出）。
+          WB_READY=0
+          WB_API_DEAD=0
+          for i in $(seq 1 60); do
+            _code="$(curl -s --connect-timeout 2 -o /dev/null -w '%{http_code}' "${WB_API}/health" || true)"
+            if [ -n "$_code" ] && [ "$_code" -ge 100 ] && [ "$_code" -lt 600 ]; then
+              WB_READY=1
+              echo "✅ [workbuddy-gateway] ${WB_PORT} 已就绪 (HTTP ${_code})"
+              break
+            fi
+            # 进程已不在（二进制缺失 / 启动即退出）→ 早退，不再空等满 120 秒
+            if ! pgrep -f "$WB_BIN serve" >/dev/null 2>&1; then
+              WB_API_DEAD=1
+              echo "❌ [workbuddy-gateway] serve 进程已退出，停止等待"
+              break
+            fi
+            echo "⏳ [workbuddy-gateway] 等待中... ${i}/60"
+            sleep 2
+          done
+
+          WB_ACCOUNTS=""
+          WB_STATUS_RAW="$(grep -a '账号池' "$WB_LOG" 2>/dev/null | tail -n 1 || true)"
+          if [ -n "$WB_STATUS_RAW" ]; then
+            WB_ACCOUNTS="$(printf '%s' "$WB_STATUS_RAW" | sed 's/.*账号池[:：][[:space:]]*//' || true)"
+          fi
+          echo "WB_READY=${WB_READY}" >> "$WB_META"
+          printf 'WB_ACCOUNTS=%s\n' "$WB_ACCOUNTS" >> "$WB_META"
+
+          if [ "$WB_READY" = "1" ]; then
+            if [ -n "$WB_ACCOUNTS" ]; then
+              wb_notify "🟢 workbuddy-gateway 已就绪" "$WB_ACCOUNTS" "$WB_VER" "$WB_UPDATE" "$WB_REASON" ""
+            else
+              # 网关自己起来了、但账号池为空：多半是数据目录里还没有 workbuddy*.json
+              # （二维码登录只能人工做），如实标注为可用性问题，不假装就绪。
+              wb_notify "⚠️ workbuddy-gateway 已启动 · 无可用账号" \
+                "账号池为空 · 需人工扫码登录" "$WB_VER" "$WB_UPDATE" "$WB_REASON" ""
+            fi
+          else
+            WB_TAIL="$(tail -c 1200 "$WB_LOG" 2>/dev/null || true)"
+            if [ "$WB_API_DEAD" = "1" ]; then
+              _wb_fail_reason="serve 进程启动后立即退出（多为二进制缺失或凭据/参数错误）"
+              echo "❌ workbuddy-gateway serve 进程启动后立即退出" >&2
+            else
+              _wb_fail_reason="serve 未在 120 秒内监听 ${WB_PORT}"
+              echo "❌ workbuddy-gateway 未能在 120 秒内监听 ${WB_PORT}" >&2
+            fi
+            # WB_REASON 可能为空，拼串前先规整，避免出现「原因： serve …」的前导空格
+            _wb_fail_reason="${WB_REASON:+${WB_REASON} · }${_wb_fail_reason}"
+            wb_notify "❌ workbuddy-gateway 启动失败" "未监听 ${WB_PORT} · 退出码 1" "$WB_VER" \
+              "$WB_UPDATE" "$_wb_fail_reason" "$WB_TAIL"
+          fi
 
       - name: Notify Tailscale SSH entry
         if: ${{ always() && steps.ts_ssh.outcome == 'success' }}
@@ -1455,106 +1599,6 @@ jobs:
           EOF
           chmod +x /tmp/create-openclaw-archive.sh
 
-          cat > /tmp/create-zcode-archive.sh <<'EOF'
-          #!/usr/bin/env bash
-          set -euo pipefail
-
-          OUTPUT_TAR="${1:-}"
-          if [ -z "$OUTPUT_TAR" ]; then
-            echo "Usage: $0 /path/to/output.tar.gz" >&2
-            exit 2
-          fi
-
-          MIN_SIZE=$((5 * 1024))
-          SRC_DIR="/home/runner/.zcode/cli"
-          STAGE_DIR=""
-
-          cleanup() {
-            if [ -n "${STAGE_DIR:-}" ] && [ -d "$STAGE_DIR" ]; then
-              rm -rf "$STAGE_DIR"
-            fi
-          }
-          trap cleanup EXIT
-
-          rm -f "$OUTPUT_TAR"
-
-          if [ ! -d "$SRC_DIR" ]; then
-            echo "zcode_dir_missing"
-            exit 3
-          fi
-
-          STAGE_DIR=$(mktemp -d /tmp/zcode-archive-stage.XXXXXX)
-          mkdir -p "$STAGE_DIR/.zcode"
-
-          # 只备个人数据：db（会话库，连 -wal/-shm 一起打包保证一致性）、rollout（对话原始流）、
-          # memories（持久记忆）、plugins/data + marketplaces（插件运行数据与市场配置）。
-          # 排除 plugins/cache（13MB 插件缓存，可按需重新下载）与 log/exec（运行日志，可再生）。
-          # 排除 rollout/model-io-*：模型请求/响应调试转储，单文件可膨胀到 64MB+，
-          # 且会被 ZCode 随时轮转清零，进出归档会让包体积剧烈波动、误触缩水保护（2026-09-12 假警报）。
-          # server/ 运行时由桌面客户端自动重新部署，不备份。
-          # rsync 返回 24 表示活动会话文件复制中消失，属预期，仍校验最终包。
-          set +e
-          rsync -a --delete \
-            --exclude 'log/**' \
-            --exclude 'exec/**' \
-            --exclude 'plugins/cache/**' \
-            --exclude 'rollout/model-io-*.jsonl' \
-            --exclude '*.lock' \
-            --exclude '*.pid' \
-            "$SRC_DIR"/ "$STAGE_DIR/.zcode/cli"/
-          rsync_rc=$?
-          set -e
-
-          if [ "$rsync_rc" -ne 0 ] && [ "$rsync_rc" -ne 24 ]; then
-            echo "zcode_snapshot_failed rc=$rsync_rc" >&2
-            exit "$rsync_rc"
-          fi
-
-          if [ "$rsync_rc" -eq 24 ]; then
-            echo "zcode_snapshot_partial_live_changes"
-          fi
-
-          # 一并备份 server 设备身份（v2/certs CA + telemetry-state.json 的 deviceMid），
-          # 供下次还原后 server 复用，客户端跨重置保持同一实例认知（详见还原步骤注释）。
-          if [ -d /home/runner/.zcode/v2/certs ]; then
-            mkdir -p "$STAGE_DIR/.zcode/v2/certs"
-            cp -a /home/runner/.zcode/v2/certs/. "$STAGE_DIR/.zcode/v2/certs"/
-            [ -f /home/runner/.zcode/v2/telemetry-state.json ] && \
-              cp -a /home/runner/.zcode/v2/telemetry-state.json "$STAGE_DIR/.zcode/v2"/
-          fi
-
-          # 完整性校验（口径同 openclaw 主包，取代体积基准）：db.sqlite 是会话真实
-          # 状态，缺它说明本轮没有可恢复状态，宁可不覆盖云端。排除 model-io 之类的
-          # 调试转储不影响此判据 —— 主动瘦身不再被误判为状态丢失。
-          missing=""
-          for f in db/db.sqlite; do
-            if [ ! -s "$STAGE_DIR/.zcode/cli/$f" ]; then
-              missing="$missing $f"
-            fi
-          done
-          if [ -n "$missing" ]; then
-            echo "zcode_archive_incomplete missing=$missing" >&2
-            exit 4
-          fi
-
-          tar -C "$STAGE_DIR" -czf "$OUTPUT_TAR" .zcode
-
-          actual_size=$(stat -c%s "$OUTPUT_TAR" 2>/dev/null || echo 0)
-          if [ ! -s "$OUTPUT_TAR" ]; then
-            echo "zcode_archive_empty output=$OUTPUT_TAR"
-            exit 1
-          elif [ "$actual_size" -lt "$MIN_SIZE" ]; then
-            echo "zcode_archive_too_small size=${actual_size} min=${MIN_SIZE} output=$OUTPUT_TAR"
-            exit 1
-          elif ! tar -tzf "$OUTPUT_TAR" >/dev/null 2>&1; then
-            echo "zcode_archive_tar_validation_failed output=$OUTPUT_TAR"
-            exit 1
-          else
-            echo "archive_ready size=${actual_size} output=$OUTPUT_TAR"
-          fi
-          EOF
-          chmod +x /tmp/create-zcode-archive.sh
-
           cat > /tmp/create-cliproxyapi-archive.sh <<'EOF'
           #!/usr/bin/env bash
           set -euo pipefail
@@ -1704,18 +1748,15 @@ jobs:
           TMP_OPENCLAW_TAR="/tmp/openclaw.tar.gz"
           TMP_CLIPROXYAPI_TAR="/tmp/CLIProxyAPI.tar.gz"
           TMP_CLIRELAY_TAR="/tmp/CliRelay.tar.gz"
-          TMP_ZCODE_TAR="/tmp/zcode.tar.gz"
           LOCK_FILE="/tmp/openclaw-archive.lock"
 
           cleanup_archive_outputs() {
             rm -f "$TMP_OPENCLAW_TAR" 2>/dev/null || true
             sudo rm -f "$TMP_CLIPROXYAPI_TAR" 2>/dev/null || true
             rm -f "$TMP_CLIRELAY_TAR" 2>/dev/null || true
-            rm -f "$TMP_ZCODE_TAR" 2>/dev/null || true
             rm -rf /tmp/openclaw-archive-stage.* 2>/dev/null || true
             sudo rm -rf /tmp/cliproxyapi-archive-stage.* 2>/dev/null || true
             rm -rf /tmp/clirelay-archive-stage.* 2>/dev/null || true
-            rm -rf /tmp/zcode-archive-stage.* 2>/dev/null || true
           }
           cleanup_archive_outputs
           PID_FILE="/tmp/openclaw-archive.pid"
@@ -1725,12 +1766,11 @@ jobs:
           # 结论与原因是人写的自然语言 → 裸文本 kv；rclone/tar 的原始输出 → <pre>。
           # 此前四者拼成一整串塞进单个 <pre>，自然语言被一并等宽化，与全库
           # 「kv 区 + 明细分节」形态不一致。
-          # 对象 → 标题短名：五种归档曾共用「OpenClaw 归档告警」这一个标题，读者无法
-          # 从标题判断是哪个包出问题（看到标题会以为是主包，实际可能是 ZCode）。
+          # 对象 → 标题短名：五类归档曾共用「OpenClaw 归档告警」这一个标题，读者无法
+          # 从标题判断是哪个包出问题（看到标题会以为是主包）。
           obj_label() {
             case "$1" in
               openclaw.tar.gz)                  echo "OpenClaw 主包" ;;
-              zcode.tar.gz)                     echo "ZCode" ;;
               CliRelay|CliRelay.tar.gz)         echo "CliRelay" ;;
               CLIProxyAPI|CLIProxyAPI.tar.gz)   echo "CLIProxyAPI" ;;
               rsstt|rsstt.tar.gz)               echo "rss-to-telegram" ;;
@@ -1859,42 +1899,6 @@ jobs:
                 send_telegram_alert "${AI_LABEL}.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${ai_archive_output:-归档脚本无输出}"
               fi
             fi
-            # ZCode 个人数据归档：~/.zcode/cli → dropbox:self-hosted/zcode.tar.gz（带完整性校验）
-            if [ -d "$HOME/.zcode/cli" ]; then
-              zcode_archive_output=""
-              if zcode_archive_output=$(flock -E 200 -n "$LOCK_FILE" bash /tmp/create-zcode-archive.sh "$TMP_ZCODE_TAR" 2>&1); then
-                echo "[$(date '+%F %T')] zcode archive ok, uploading... ${zcode_archive_output}"
-                zcode_new_size=$(stat -c%s "$TMP_ZCODE_TAR" 2>/dev/null || echo 0)
-                zcode_remote_size=$(rclone ls "dropbox:self-hosted/zcode.tar.gz" 2>/dev/null | awk '{s+=$1} END {print s+0}')
-                # 体积骤降只记录、不拦截（口径同 openclaw 主包）：完整性由
-                # create-zcode-archive.sh 的 db.sqlite 校验把关。原先的缩水保护
-                # 在排除 model-io 调试转储后把正常瘦身判成状态丢失，主包冻结。
-                if [ "$zcode_remote_size" -gt 0 ] && [ "$zcode_new_size" -lt "$((zcode_remote_size * 60 / 100))" ]; then
-                  echo "[$(date '+%F %T')] ℹ️ zcode 体积较云端下降超 40%（new=${zcode_new_size}B remote=${zcode_remote_size}B），已通过完整性校验，正常覆盖"
-                fi
-                zcode_upload_output=""
-                if zcode_upload_output=$(rclone copyto "$TMP_ZCODE_TAR" "dropbox:self-hosted/zcode.tar.gz" 2>&1); then
-                  echo "[$(date '+%F %T')] zcode upload ok"
-                  rm -f "$TMP_ZCODE_TAR"
-                else
-                  rc=$?
-                  echo "[$(date '+%F %T')] ⚠️ zcode.tar.gz upload failed (rc=$rc): ${zcode_upload_output}"
-                  send_telegram_alert "zcode.tar.gz" "上传失败 · 退出码 $rc" "rclone 上传失败" "${zcode_upload_output:-无输出}"
-                fi
-              else
-                rc=$?
-                if [ "$rc" -eq 200 ]; then
-                  echo "[$(date '+%F %T')] ⏭️ previous archive still running, skip zcode archive"
-                elif [ "$rc" -eq 3 ]; then
-                  echo "[$(date '+%F %T')] ⏭️ zcode data dir missing, skip zcode archive (rc=3)"
-                else
-                  echo "[$(date '+%F %T')] ⚠️ zcode.tar.gz archive failed in periodic archive (rc=$rc): ${zcode_archive_output}"
-                  send_telegram_alert "zcode.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${zcode_archive_output:-归档脚本无输出}"
-                fi
-              fi
-            else
-              echo "[$(date '+%F %T')] ℹ️ ~/.zcode/cli 不存在，跳过 zcode 归档"
-            fi
 
             sleep 1200
           done
@@ -1973,6 +1977,54 @@ jobs:
           docker stop clirelay cli-proxy-api 2>/dev/null || true
           docker stop cliproxyapi 2>/dev/null || echo "cliproxyapi already stopped or missing."
 
+          # workbuddy-gateway 是宿主进程（非容器），必须显式停：它不会随 job 结束自动退出，
+          # 留在后台会继续持凭据轮询上游。数据目录在 Dropbox 挂载点上，serve 停止后
+          # 状态文件是已落盘的完整状态，无需额外回传动作（归档只针对宿主侧的 OpenClaw/AI 网关）。
+          echo "3b. Stopping workbuddy-gateway..."
+          WB_DIR="/dropbox/self-hosted/workbuddy-gateway"
+          WB_BIN="$WB_DIR/workbuddy-gateway"
+          if [ -f /tmp/workbuddy-serve.pid ]; then
+            kill "$(cat /tmp/workbuddy-serve.pid)" 2>/dev/null || true
+          fi
+          pkill -f "$WB_BIN serve" 2>/dev/null || true
+          # 给进程 30 秒优雅退出（写完状态快照），仍在则强杀
+          WB_STOPPED=0
+          for _ in $(seq 1 30); do
+            if ! pgrep -f "$WB_BIN serve" >/dev/null 2>&1; then
+              WB_STOPPED=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$WB_STOPPED" != "1" ]; then
+            echo "⚠️ workbuddy-gateway 未在 30 秒内退出，强制结束"
+            pkill -9 -f "$WB_BIN serve" 2>/dev/null || true
+          fi
+          WB_STILL_RUNNING=0
+          pgrep -f "$WB_BIN serve" >/dev/null 2>&1 && WB_STILL_RUNNING=1
+          WB_VER="$(head -n 1 "$WB_DIR/.installed-version" 2>/dev/null || true)"
+
+          wb_stop_notify() {
+            # 版式（规范 · 告警/结果通知）：标题 emoji 与结论一致；机器值走 <code>。
+            if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+              source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+              local _msg=""
+              tg_add_title _msg "$1"
+              tg_add_kv _msg "结论" "$2"
+              [ -n "${WB_VER:-}" ] && tg_add_path _msg "版本" "$WB_VER"
+              tg_add_path _msg "数据目录" "$WB_DIR"
+              tg_add_footer _msg
+              send_tg "$_msg" || echo "::warning::TG 通知发送失败（不影响任务）"
+            else
+              echo "⚠️ Telegram secrets missing, skip workbuddy-gateway stop notification."
+            fi
+          }
+          if [ "$WB_STILL_RUNNING" = "1" ]; then
+            wb_stop_notify "⚠️ workbuddy-gateway 已停止 · 进程残留" "强制结束后仍有进程残留"
+          else
+            wb_stop_notify "⛔ workbuddy-gateway 已停止" "服务已退出 · 数据目录保持原状"
+          fi
+
           # 用法与版式同 send_telegram_alert（<对象> <结论> <原因> [原始输出]）；
           # 两个函数分处不同 step、无法共享定义，改版式时两处要一起改
           # （此前一个用 <i> 说明段、一个用 <b> kv，同一标题两种形态）
@@ -1980,7 +2032,6 @@ jobs:
           obj_label() {
             case "$1" in
               openclaw.tar.gz)                  echo "OpenClaw 主包" ;;
-              zcode.tar.gz)                     echo "ZCode" ;;
               CliRelay|CliRelay.tar.gz)         echo "CliRelay" ;;
               CLIProxyAPI|CLIProxyAPI.tar.gz)   echo "CLIProxyAPI" ;;
               rsstt|rsstt.tar.gz)               echo "rss-to-telegram" ;;
@@ -2031,12 +2082,11 @@ jobs:
 
           echo "4. Performing final archive to Dropbox..."
           cleanup_archive_outputs() {
-            rm -f /tmp/openclaw-final.tar.gz /tmp/rsstt.tar.gz /tmp/CliRelay.tar.gz /tmp/zcode-final.tar.gz 2>/dev/null || true
+            rm -f /tmp/openclaw-final.tar.gz /tmp/rsstt.tar.gz /tmp/CliRelay.tar.gz 2>/dev/null || true
             sudo rm -f /tmp/CLIProxyAPI.tar.gz 2>/dev/null || true
             rm -rf /tmp/openclaw-archive-stage.* 2>/dev/null || true
             sudo rm -rf /tmp/cliproxyapi-archive-stage.* 2>/dev/null || true
             rm -rf /tmp/clirelay-archive-stage.* 2>/dev/null || true
-            rm -rf /tmp/zcode-archive-stage.* 2>/dev/null || true
           }
           free_kb() { df -Pk "${1:-/tmp}" | awk 'NR==2 {print $4}'; }
           require_free_kb() {
@@ -2119,39 +2169,6 @@ jobs:
             echo "⚠️ final openclaw.tar.gz archive failed (rc=$rc): ${openclaw_final_output}"
             record_archive_result "openclaw.tar.gz" fail 0 "归档失败 · 退出码 $rc"
             send_archive_alert "openclaw.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${openclaw_final_output:-归档脚本无输出}"
-          fi
-
-          echo "4b. Final archive of ZCode personal data (~/.zcode/cli)..."
-          if [ -d "$HOME/.zcode/cli" ]; then
-            TMP_ZCODE_FINAL_TAR="/tmp/zcode-final.tar.gz"
-            if zcode_final_output=$(bash /tmp/create-zcode-archive.sh "$TMP_ZCODE_FINAL_TAR" 2>&1); then
-              zcode_final_new_size=$(stat -c%s "$TMP_ZCODE_FINAL_TAR" 2>/dev/null || echo 0)
-              zcode_final_remote_size=$(rclone ls "dropbox:self-hosted/zcode.tar.gz" 2>/dev/null | awk '{s+=$1} END {print s+0}')
-              # 体积骤降只记录、不拦截（口径同周期归档）：完整性由 create-zcode-archive.sh
-              # 的 db.sqlite 校验把关，不再拿云端现有包当基准。
-              if [ "$zcode_final_remote_size" -gt 0 ] && [ "$zcode_final_new_size" -lt "$((zcode_final_remote_size * 60 / 100))" ]; then
-                echo "ℹ️ zcode 体积较云端下降超 40%（new=${zcode_final_new_size}B remote=${zcode_final_remote_size}B），已通过完整性校验，正常覆盖"
-              fi
-              zcode_final_upload_output=""
-              if zcode_final_upload_output=$(rclone copyto "$TMP_ZCODE_FINAL_TAR" "dropbox:self-hosted/zcode.tar.gz" -v 2>&1); then
-                echo "final zcode archive/upload ok: ${zcode_final_output}"
-                record_archive_result "zcode.tar.gz" ok "$zcode_final_new_size"
-                rm -f "$TMP_ZCODE_FINAL_TAR"
-              else
-                rc=$?
-                echo "⚠️ final zcode.tar.gz upload failed (rc=$rc): ${zcode_final_upload_output}"
-                record_archive_result "zcode.tar.gz" fail 0 "上传失败 · 退出码 $rc"
-                send_archive_alert "zcode.tar.gz" "上传失败 · 退出码 $rc" "rclone 上传失败" "${zcode_final_upload_output:-无输出}"
-              fi
-            else
-              rc=$?
-              echo "⚠️ final zcode.tar.gz archive failed (rc=$rc): ${zcode_final_output}"
-              record_archive_result "zcode.tar.gz" fail 0 "归档失败 · 退出码 $rc"
-              send_archive_alert "zcode.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${zcode_final_output:-归档脚本无输出}"
-            fi
-          else
-            echo "ℹ️ ~/.zcode/cli 不存在（本机从未部署 ZCode），跳过 ZCode 最终归档"
-            record_archive_result "zcode.tar.gz" skip 0 "本机未部署 ZCode"
           fi
 
           MIN_SIZE=$((5 * 1024))
