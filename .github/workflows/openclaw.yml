@@ -2001,7 +2001,8 @@ jobs:
             pkill -9 -f "$WB_BIN serve" 2>/dev/null || true
           fi
           WB_STILL_RUNNING=0
-          pgrep -f "$WB_BIN serve" >/dev/null 2>&1 && WB_STILL_RUNNING=1
+          # 末尾 || true：本步骤是 set -e，pgrep 无匹配返回 1 会让整段提前退出、通知发不出去
+          pgrep -f "$WB_BIN serve" >/dev/null 2>&1 && WB_STILL_RUNNING=1 || true
           WB_VER="$(head -n 1 "$WB_DIR/.installed-version" 2>/dev/null || true)"
 
           wb_stop_notify() {
