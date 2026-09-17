@@ -15,9 +15,11 @@
 #   全量打包永远跳过。**别再照这些数调预算。**
 #
 # 降级链（与 docs/telegram-notify.md 的收尾区口径一致）：
-#   ① TG_RUN_STARTED_AT（非空且能被 date 解析时才用）
+#   ① TG_RUN_STARTED_AT（非空且能被 date 解析为 >0 的时间戳时才用；现仅作本地测试
+#      覆写口，平台不提供 github.run_started_at 上下文，workflow 注入恒为空串）
 #   ② /proc/1 的启动时刻 —— hosted runner 的 PID 1 随 job 启动，误差秒级。
 #      job 硬上限 6h 正是按 job 计时的，所以拿它算预算比 run_started_at 更贴切。
+#   解析失败/未来时间都取到 ≤0，继续往下一档走，不会 pin 死在错误值上。
 # 两者都拿不到时返回 0（调用方需自行决定 0 的含义，别拿 0 当"刚启动"）。
 #
 # 用法：

@@ -33,15 +33,20 @@ function Format-TgDuration([int]$totalSec) {
 }
 
 # 收尾区（与 bash tg_add_footer 同形态同降级链）:
-#   TG_RUN_STARTED_AT → 时长；解析失败 → 系统 uptime 兜底（GitHub 平台已移除
-#   github.run_started_at 表达式上下文，2026-09-05 验证；hosted runner VM 随 job
-#   启动，误差秒级）；仍取不到 → 无时长；TG_RUN_URL 缺失 → 无链接；两者皆无 → 空串
+#   ① TG_RUN_STARTED_AT（仅兼容历史注入/本地测试覆写）—— 平台不提供
+#      github.run_started_at 表达式上下文，workflow 注入恒为空串；
+#   ② 系统 uptime 兜底（hosted runner VM 随 job 启动，误差秒级）；
+#   ③ 仍取不到 → 无时长；TG_RUN_URL 缺失 → 无链接；两者皆无 → 空串
+# ① 算得 ≤0（空值 / 解析失败 / 未来时间）都继续往 ② 走——不得出现「有值但算出 0
+# 就把时长显示成 0.00 秒」，与 bash/python 侧口径一致
 function Get-TgFooter {
-  $dur = ""
+  $startedSec = 0
   try {
     $started = [DateTime]::Parse($Env:TG_RUN_STARTED_AT, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
-    $dur = Format-TgDuration ([int][math]::Max(0, [math]::Round(((Get-Date).ToUniversalTime() - $started.ToUniversalTime()).TotalSeconds)))
-  } catch { }
+    $startedSec = [int][math]::Round(((Get-Date).ToUniversalTime() - $started.ToUniversalTime()).TotalSeconds)
+  } catch { $startedSec = 0 }
+  $dur = ""
+  if ($startedSec -gt 0) { $dur = Format-TgDuration $startedSec }
   if (-not $dur) {
     try {
       $up = [int][math]::Round(((Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime).TotalSeconds)

@@ -756,9 +756,13 @@ def tg_footer_line():
     """全库唯一收尾行: "⏱ 已运行 X · 🔗 <a>运行日志</a>"
 
     与 tg_add_footer（telegram/tg_notify.sh）同形态、同降级链:
-      无 TG_RUN_STARTED_AT → 兜底 /proc/1 启动时刻（hosted runner PID 1 随 job
-      启动，误差秒级——GitHub 平台已于 2026-09-05 移除 github.run_started_at 上下文）；
-      仍取不到 → 不显示时长；无 TG_RUN_URL → 整行跳过
+      ① TG_RUN_STARTED_AT（仅兼容历史注入/本地测试覆写）—— 平台不提供
+         github.run_started_at 表达式上下文，workflow 注入恒为空串；
+      ② /proc/1 启动时刻兜底（hosted runner PID 1 随 job 启动，误差秒级，
+         与 job 硬上限 6h 同口径）；
+      ③ 仍取不到 → 不显示时长；无 TG_RUN_URL → 整行跳过
+    ① 取到非正数（空值 / 解析失败 / 未来时间）都继续往 ② 走——两边口径必须一致，
+    不得出现「有值但解析失败就把时长丢掉」。
     时长 = run 已运行时长，非测速耗时
     """
     line = ''

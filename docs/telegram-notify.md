@@ -730,16 +730,26 @@ parse_mode**，否则文件名里的 `& < >` 会 400、markdown 语法字符会�
 降级与链接。附加链接可用 `tg_add_footer <var> "标签" "URL"` 追加多个 `· 🔗 <a>`。
 
 - 语义是 **run 已运行时长**，不是步骤自身耗时；格式见 5.1 节的时长五层。
-- 降级链：`TG_RUN_STARTED_AT` → runner 开机时刻 → 不显示时长；`TG_RUN_URL` 缺失则整行
-  跳过。平台目前不注入 `TG_RUN_STARTED_AT` 的值，多数情况下走开机时刻兜底（误差秒级）。
+- 降级链（三套实现一致）：`TG_RUN_STARTED_AT` → runner 开机时刻 → 不显示时长；
+  `TG_RUN_URL` 缺失则整行跳过。**`TG_RUN_STARTED_AT` 有值但解析失败时也回落开机时刻**
+  （不会出现「有值却把时长弄丢」）。
+  - 时长唯一来源是**开机时刻兜底**：GitHub 平台不提供 `github.run_started_at` 上下文
+    （见下），`TG_RUN_STARTED_AT` 这个名字保留仅为兼容历史注入与本地测试覆写。
+  - 兜底口径按 **job** 计时（hosted runner 的 PID 1 随 job 启动，误差秒级），
+    与 job 硬上限 6h 同口径。
 
-**接线（硬要求）**：workflow 必须在 job 或 step 级 env 注入，否则通知没有日志入口：
+**接线（硬要求）**：workflow 必须在 job 或 step 级 env 注入 `TG_RUN_URL`，否则通知没有
+日志入口：
 
 ```yaml
 env:
   TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-  TG_RUN_STARTED_AT: ${{ github.run_started_at }}
 ```
+
+- **不要再注入 `TG_RUN_STARTED_AT: ${{ github.run_started_at }}`**。`github` 上下文没有
+  `run_started_at` 属性（官方属性表只有 `run_id` / `run_number` / `run_attempt`），
+  表达式对不存在的属性求值为**空串**，注入即等于声明一个永远取不到的源，属于死配置。
+  2026-09 已从全库 workflow 移除；助手侧的 `/proc/1` 兜底无需任何注入即可工作。
 
 配合 `if: ${{ always() }}`——通知写在业务块末尾而没有 `always()`，任务失败时反而收不到
 通知。
@@ -1084,9 +1094,10 @@ python 侧拿不到 bash 函数，仍有两处同义实现（`add_uploaded_video
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          TG_RUN_STARTED_AT: ${{ github.run_started_at }}
 ```
 
+- **只有 `TG_RUN_URL` 需要注入**；`TG_RUN_STARTED_AT` 不要注入（见 3.9 节，平台无此
+  上下文、恒为空串），助手侧走 `/proc/1` 兜底。
 - 凭据校验在**调用方**，且放在引入真源**之前**：`if [ -z "$TELEGRAM_BOT_TOKEN" ] …exit 0`。
   真源本身不校验。
 - bash 真源兼容历史变量名 `TG_BOT_TOKEN` / `TG_CHAT_ID`；**pwsh 侧没有这层回退**，
@@ -1149,7 +1160,6 @@ bash 里内嵌的 python 段（`python3 - <<'PY'`）无法 import 共享层，�
 
 - pwsh 侧无分片实现，超长消息会被 Telegram 直接拒。
 - python 侧 429 耗尽路径是抛异常而非返回字典。
-- bash 侧 `TG_RUN_STARTED_AT` 有值但解析失败时，不再回落开机时刻，时长直接消失。
 
 ---
 
