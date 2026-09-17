@@ -526,7 +526,8 @@ def taier_target_network_lines(points, client_ip):
 
 
 def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle, gist_error='',
-                         aborted_due_to_runtime=False, runtime_abort_reason=''):
+                         aborted_due_to_runtime=False, runtime_abort_reason='',
+                         collected_total=0):
     def esc(s):
         return html.escape(str(s))
     # 订阅策略（阈值 / 实际采用的判定指标 / 达标数 / 最少节点数）
@@ -605,6 +606,16 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
         lines.append('')
 
     failed = [r for r in results if not r.get('ok')]
+    # 测活探测失败单独成节：它不是「节点失败」，而是「探测机制没跑通」。
+    # 混进 ❌ 失败清单会让读者以为这些节点是坏的（2026-09-16 run 35116972319 的
+    # 8 条 Resource not found 就是这么被误读的：实测它们根本没被真正探测过）。
+    probe_failed = [r for r in failed if r.get('probe_failed')]
+    failed = [r for r in failed if not r.get('probe_failed')]
+    if probe_failed:
+        lines.append(f'⚠️ 测活探测异常 · {len(probe_failed)}')
+        lines.append(f'  └─ 探测接口本轮不可用（{tg_entry((probe_failed[0].get("error") or "").split("：")[-1][:60])}），'
+                     '这些节点未真正探测，不计入失败')
+        lines.append('')
     if failed:
         lines.append(f'❌ 失败 · {len(failed)}')
         _failed_entries = []
@@ -640,7 +651,26 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
         # 上传阶段抛异常（HTTP 4xx 等）≠ 没有达标节点，文案必须区分
         lines.append(f'  └─ ⚠️ 上传失败：{tg_entry(gist_error[:120])}')
     else:
-        lines.append(f'  └─ ⚠️ 达标不足 {min_nodes} 个 · 阈值 ≥{min_megabit}兆（按{esc(metric_label)}）· 未更新订阅')
+        # ⚠️ 「没上传」有三种完全不同的原因，混成一句会误导（2026-09-16 run 35116972319：
+        # 206 个节点实测有速度、最高 245 Mbps，却报「达标不足 1 个」，读者只会去怀疑节点）。
+        # 按真因分文案，并交代「测了多少 / 共多少」——否则预算内只测了 919/8326 会被
+        # 读成「8326 个都不达标」。
+        _tested_n = len([r for r in results if not r.get('probe_failed')])
+        _scope = ''
+        if aborted_due_to_runtime and collected_total > len(results):
+            _scope = f'（预算内仅测完 {_tested_n}/{collected_total} 个）'
+        # 判据是「有没有可导出配置」，不是「有没有速度」：节点慢（0.5 兆）但有配置 ⇒
+        # 那是真的达标不足；节点快（245 兆）却两者皆空 ⇒ 才是实现层丢配置。
+        _no_config = [r for r in results
+                      if not ((r.get('source_entry') or {}).get('proxy') or r.get('proxy_obj'))]
+        _measured = [r for r in results
+                     if (r.get('up') or 0) > 0 or (r.get('down') or 0) > 0]
+        if qualified_count <= 0 and _measured and _no_config and len(_no_config) >= len(_measured):
+            lines.append(f'  └─ ⚠️ 未更新订阅：本有节点测出速度，但缺少可导出配置'
+                         f'（达标判定按{esc(metric_label)} ≥{min_megabit}兆）')
+        else:
+            lines.append(f'  └─ ⚠️ 达标不足 {min_nodes} 个 · 阈值 ≥{min_megabit}兆'
+                         f'（按{esc(metric_label)}）· 未更新订阅{esc(_scope)}')
     # 统一收尾区（收尾区与正文间固定**一个**空行）：此前连写两个 append('') 变双空行
     lines.append('')
     footer = tg_footer_line()
@@ -780,6 +810,11 @@ def _run():
     _probe_alive = 0
     _probe_dead = 0
     _probe_dead_streak = 0
+    # 探测失败**待定**的节点：熔断时它们是「机制故障的受害者」，不是「节点死了」——
+    # 必须撤销判死、放回测速队列，否则通知里会出现 N 条伪造的「测活未通过」。
+    # 见 2026-09-16 run 35116972319：8 条 Resource not found 塞在 0.13 秒内，
+    # 是 mihomo 控制面调用失败，节点本身没被真正探测过。
+    _probe_retry_queue = []
     for item in alive_items:
         # 判据放在**开下一个节点之前**：单节点 ≈ 25 秒，所以超发最多一个节点
         if should_stop_for_budget(_budget_deadline):
@@ -799,6 +834,11 @@ def _run():
             if _alive:
                 _probe_alive += 1
                 _probe_dead_streak = 0
+                # 探测恢复正常 ⇒ 之前待定的节点是同一次机制故障的误伤，放回队列重测
+                if _probe_retry_queue:
+                    log_progress('taier_probe_retry_restored', count=len(_probe_retry_queue))
+                    alive_items = alive_items + _probe_retry_queue
+                    _probe_retry_queue = []
             else:
                 _probe_dead_streak += 1
                 _probe_dead += 1
@@ -808,16 +848,35 @@ def _run():
                     _probe_enabled = False
                     log_progress('taier_probe_disabled', consecutive_dead=_probe_dead_streak,
                                  url=CONFIG['TAIER_ALIVE_PROBE_URL'],
+                                 revived=len(_probe_retry_queue),
                                  reason='开头连续多个均未通过且无一成功，怀疑探测目标不可达')
-                results.append({
-                    'name': name,
-                    'type': item.get('type', ''),
-                    'source_entry': item.get('source_entry', {}) or {},
-                    'mode': 'download',
-                    'ok': False,
-                    'error': f'测活未通过：{_perr}',
-                })
-                continue
+                    if _probe_retry_queue:
+                        # 撤销判死：这些节点从未被真正探测过，不该算「测活未通过」。
+                        # 放回队列末尾（它们是靠后才发现机制不可用的，测试先后不乱）；
+                        # 同时把它们从 results 里摘掉，否则通知会出现伪造的失败条目
+                        _revived_names = {str(x.get('name') or '') for x in _probe_retry_queue}
+                        _revived = [i for i in alive_items
+                                    if str(i.get('name') or '') in _revived_names]
+                        results = [r for r in results
+                                   if not (r.get('probe_failed') and
+                                           str(r.get('name') or '') in _revived_names)]
+                        alive_items = alive_items + _revived
+                        _probe_dead -= len(_probe_retry_queue)
+                        _probe_retry_queue = []
+                else:
+                    # 未熔断 ⇒ 真判死；但先挂进待定队列，熔断时可整体撤销
+                    _probe_retry_queue.append(item)
+                    results.append({
+                        'name': name,
+                        'type': item.get('type', ''),
+                        'source_entry': item.get('source_entry', {}) or {},
+                        'proxy_obj': item.get('proxy_obj', {}) or {},
+                        'mode': 'download',
+                        'ok': False,
+                        'probe_failed': True,
+                        'error': f'测活未通过：{_perr}',
+                    })
+                    continue
         try:
             switch_proxy(name, CONFIG['TAIER_SWITCH_SETTLE'])
         except Exception as e:
@@ -835,6 +894,9 @@ def _run():
             'name': name,
             'type': item.get('type', ''),
             'source_entry': item.get('source_entry', {}) or {},
+            # 从 provider 快照带出的完整配置：source_entry 匹配不上时的唯一可用来源，
+            # 订阅导出与达标判定都要它（见 gist_results 处的说明）
+            'proxy_obj': item.get('proxy_obj', {}) or {},
             'mode': 'download',
             'ok': rc == 0 and bool(parsed['region']) and has_speed,
             'exit_ip': parsed['exit_ip'],
@@ -887,6 +949,11 @@ def _run():
     gist_results = [{
         'name': r.get('name', ''),
         'source_entry': r.get('source_entry') or {},
+        # proxy_obj 必须带上：编排轮（gistnodes 交 8326 个节点）里 source_entry 匹配不上
+        # 订阅 source_mapping（只有 4 条），配置全在 proxy_obj 里。丢了它 ⇒ 有速度的节点
+        # 也被判「无可用配置」⇒ 达标 0 ⇒ 订阅不上传（2026-09-16 run 35116972319）。
+        # 见 speedtest_common.node_proxy_config 的说明。
+        'proxy_obj': r.get('proxy_obj') or {},
         'mode': 'download',
         'download_mibs': (r.get('down') or 0) / 8.388608,
         'upload_mibs': (r.get('up') or 0) / 8.388608,
@@ -942,7 +1009,8 @@ def _run():
         tg_res = send_telegram_chunked(env, '\n'.join(build_telegram_lines(
             results, meta, direct_ip, bypass_hits, gist_res, bundle, gist_error,
             aborted_due_to_runtime=aborted_due_to_runtime,
-            runtime_abort_reason=runtime_abort_reason)))
+            runtime_abort_reason=runtime_abort_reason,
+            collected_total=len(alive_items))))
         # 发送层不写 stderr（python 侧靠返回值），失败原因必须回传日志（规范 · 发送层）
         log_progress('telegram_send_finished', sent=bool(tg_res.get('sent')),
                      reason=tg_res.get('reason', ''))

@@ -314,13 +314,33 @@ def resolve_subscription_policy(env=None):
     }
 
 
+def node_proxy_config(item: dict):
+    """取节点的**可导出配置**：`source_entry.proxy` 优先，缺失时回落到 `proxy_obj`。
+
+    **为什么必须有回落**（2026-09-16 run 35116972319，编排轮 8326 个节点）：
+    `source_entry.proxy` 只在「节点名能匹配上订阅 source_mapping」时才有值。
+    编排轮里节点是 gistnodes 通过 provider 直接喂进来的（8326 个），而 source_mapping
+    只有 4 条 ⇒ 绝大多数节点 `source_entry` 为 `{}`。旧实现只认 `source_entry.proxy`，
+    于是 206 个**实测有速度**的节点（最高上传 245 Mbps）全被判「无可用配置」⇒
+    达标数 0 ⇒ 订阅被判「达标不足」不上传。整轮零产出，且日志零报错。
+
+    而 `proxy_obj` 是 `collect_provider_snapshot` 从 mihomo provider 直接读出的
+    **完整节点配置**（协议/地址/端口/密钥齐全），与 `source_entry.proxy` 语义等价
+    ——都是「能写回订阅的原始 proxy 字典」，所以回落不会引入脏数据。
+    """
+    source_proxy = (item.get('source_entry') or {}).get('proxy') or {}
+    if source_proxy:
+        return deep_copy_json(source_proxy)
+    return deep_copy_json(item.get('proxy_obj') or {})
+
+
 def count_qualified_nodes(results: list, metric: str, min_megabit):
-    """按指定指标统计达标节点数（须同时有原始配置 source_entry.proxy，否则导不进订阅）。"""
+    """按指定指标统计达标节点数（须同时有可导出配置，否则导不进订阅）。"""
     mode = METRIC_MODES.get(metric, METRIC_MODES[DEFAULT_SPEED_METRIC])
     return sum(
         1 for item in results
         if get_item_megabits(item, mode) >= int(min_megabit)
-        and (item.get('source_entry') or {}).get('proxy')
+        and node_proxy_config(item)
     )
 
 
@@ -387,8 +407,9 @@ def build_mihomo_yaml_text(results: list, speedtest_mode: str, min_megabit: int 
         if get_item_megabits(item, speedtest_mode) < int(min_megabit):
             continue
         source_entry = item.get('source_entry') or {}
-        proxy = deep_copy_json(source_entry.get('proxy') or {})
+        proxy = node_proxy_config(item)
         if not proxy:
+            # 两者都取不到才算「无可用配置」：source_entry.proxy 缺、proxy_obj 也缺
             log_progress('subscription_yaml_source_missing', name=item.get('name', ''), share_link_match=item.get('share_link_match', ''), source_id=item.get('source_id', ''))
             continue
         name = str(proxy.get('name') or item.get('name') or '').strip()

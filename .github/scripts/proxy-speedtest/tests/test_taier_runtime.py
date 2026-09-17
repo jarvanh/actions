@@ -232,6 +232,55 @@ def main():
           not any('<b>x</b>' in str(x) for x in c_esc),
           'cdn 中止原因经过 HTML 转义')
 
+    print('== 7. 测活探测失败不得混进「❌ 失败」（与节点故障区分）==')
+    # 2026-09-16 编排轮 35116972319：8 条 `Resource not found` 全挤在 0.13 秒内，
+    # 是 mihomo 控制面调用失败、节点根本没被真正探测过。旧实现把它们塞进 ❌ 失败清单，
+    # 读者只会以为 8 个节点是坏的。现在必须单独成节、且明确说「不计入失败」。
+    probe_dead = [{'ok': False, 'bypass': False, 'up': 0.0, 'down': 0.0, 'name': f'p{i}',
+                   'probe_failed': True, 'error': '测活未通过：Resource not found'}
+                  for i in range(8)]
+    real_dead = [{'ok': False, 'bypass': False, 'up': 0.0, 'down': 0.0, 'name': f'd{i}',
+                  'error': '连不上测速点 广东联通（延迟/上下行全空）'} for i in range(3)]
+    mixed = render(probe_dead + real_dead)
+    joined = '\n'.join(str(x) for x in mixed)
+    check('⚠️ 测活探测异常 · 8' in joined, f'探测失败单独成节（实际标题缺失）')
+    check('不计入失败' in joined, '明确交代「不计入失败」')
+    check('❌ 失败 · 3' in joined,
+          f'❌ 失败只数真正的失败（实际应为 3，即 {[x for x in mixed if "❌ 失败" in str(x)]}）')
+    check(not any('Resource not found' in str(x) and str(x).strip().startswith('├─')
+                  for x in mixed), '误报条目不再出现在树形清单里')
+
+    # 负向对照：没有探测失败时，不得凭空出现该分节
+    only_real = render(real_dead)
+    check(not any('测活探测异常' in str(x) for x in only_real),
+          '无探测失败 → 不出现该分节（负向对照）')
+
+    print('== 8. 「未更新订阅」按真因分文案（不把实现故障说成节点不达标）==')
+    # 同样来自 run 35116972319：206 个节点实测有速度（最高 245 Mbps）却报「达标不足」。
+    # 三种真因必须分开：真达标不足 / 有速度但缺可导出配置 / 达标不足+到点收摊（带范围）。
+    cfg = {'proxy': {'type': 'vless', 'server': 'x.com'}}
+
+    def sub_line(results, ctotal=0, aborted=False, rsn=''):
+        ls = t.build_telegram_lines(results, meta, '1.2.3.4', 0, None, {}, {},
+                                    aborted_due_to_runtime=aborted,
+                                    runtime_abort_reason=rsn, collected_total=ctotal)
+        return [str(x) for x in ls if '未更新订阅' in str(x)][0]
+
+    slow_ok = [{'ok': True, 'bypass': False, 'up': 0.5, 'down': 0.5, 'name': f's{i}',
+                'source_entry': cfg, 'proxy_obj': {}} for i in range(10)]
+    check('达标不足' in sub_line(slow_ok), '慢但有配置 ⇒ 报「达标不足」（真·节点不行）')
+
+    fast_noconf = [{'ok': True, 'bypass': False, 'up': 245.24, 'down': 130.53, 'name': f'c{i}',
+                    'source_entry': {}, 'proxy_obj': {}} for i in range(10)]
+    l2 = sub_line(fast_noconf)
+    check('缺少可导出配置' in l2, f'快但无配置 ⇒ 报「缺少可导出配置」（实现层问题，实际 {l2}）')
+    check('达标不足' not in l2, '这条不得再写「达标不足」误导读者去怀疑节点')
+
+    l3 = sub_line(slow_ok, ctotal=8326, aborted=True,
+                  rsn='到点收摊：预算 5 小时 0 分，已测 10/8326 个节点')
+    check('预算内仅测完 10/8326' in l3, f'到点收摊时交代「测了多少/共多少」（实际 {l3}）')
+    check('未达' not in l3 or '达标不足' in l3, '中止范围是补充说明，不改变原结论')
+
     print()
     if FAILURES:
         print(f'FAILED: {len(FAILURES)} 项未通过')
