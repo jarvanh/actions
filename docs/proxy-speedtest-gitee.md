@@ -34,6 +34,8 @@
 2. 下载/启动 mihomo（HTTP 17890 / SOCKS 17891 / mixed 17892，控制器 19090），
    `collect_provider_snapshot` **全量**取 provider 解析出的节点（**不按 `alive` 预筛**，
    理由见[为什么节点收集不等健康检查](#为什么节点收集不等健康检查)）；
+   随后 `wait_provider_ready` 等 provider **真正注册进 `/proxies`** 再开测
+   （理由见[为什么开测前要等 provider 展开](#为什么开测前要等-provider-展开三套共用)）；
 3. 准备 Gitee 私有仓库（`ensure_gitee_remote`：不存在则创建，超限自动 `rebuild_gitee_repo`）；
 4. 生成 `PROXY_SPEEDTEST_SIZE_MIB` MiB 测速文件；
 5. 逐节点：切换 AUTO → 经代理 HTTP 计时测 gitee.com 延迟（`latency_probe`，采样
@@ -204,6 +206,36 @@ variables → Actions → Variables 可随时改，留空走默认）：
 ⚠️ 副作用：坏节点会真的进循环、占掉一个测速窗口（gitee ≈ 数十秒、taier ≈ 25 秒）。这正是
 taier 侧 `TAIER_ALIVE_PROBE`（默认开）存在的意义——它按节点逐个探测，判死只认 mihomo 的
 明确结论、机制出错一律 fail-open。若要限制总量用 `PROXY_SPEEDTEST_MAX_NODES`。
+
+## 为什么开测前要等 provider 展开（三套共用）
+
+`wait_provider_ready(names, timeout=60)` 在**逐节点循环之前**跑：拿头尾各两个节点名探
+`/proxies/{name}`，**第一个能查到**就认为 provider 已展开（展开是整体行为，不会只注册一部分；
+用哨兵比轮询几千个名字便宜得多）。超时返回 `False`、**不抛异常**，照常往下走。
+
+**为什么不能只等 `/version`**：`wait_mihomo()` 只等控制器 HTTP 监听到来（毫秒级），
+而 `/providers/proxies` 给出的是**声明清单**，不等于节点已注册进 `/proxies/{name}` 路由表。
+不等就往下走，三套各有各的坏法：
+
+| 套 | 未展开时的表现 | 可见性 |
+|---|---|---|
+| taier | 探活拿到本地 404（`Resource not found`），节点被误判为死 | **报错**，8 条假失败 + 熔断 |
+| gitee / cdn | `switch_proxy` 切 `AUTO` 组时对未注册成员名**不报错、静默保持原选择**，测的其实是上一个节点的链路 | **静默失真**，结果照常记成功 |
+
+taier 的事故取证（run 35116972319）：读快照 `16:13:31.996` 后 **20ms** 就开始探测，
+8 条 `Resource not found` 间隔恒为 **~18.7ms**（远小于 3000ms 探测超时 ⇒ 本地 HTTP 往返，
+mihomo 压根没去连节点），而第一个测速结果要到 `16:13:48.712`（16 秒后）才出现。
+
+CDN 的窗口同样危险（run 35164561624）：读快照 `23:58:30.528` → 首个 `node_test_start`
+`23:58:32.041`，**仅 1.5 秒**。它没炸纯粹因为 `AUTO` 组静默兜底。
+
+⚠️ 由此派生的一条已存在隐患：`switch_proxy` 只看 `mihomo_api_put` 是否抛异常；若将来
+mihomo 对「组里不存在的成员」改为报错，gitee / cdn 会立刻把整轮记成 `ok: False`
+⇒ 通知全是 `❌ 失败`。等展开后这个窗口被关掉，两条路都绕过了。
+
+实现放在**引擎层** `speedtest_gitee.py`（与 `switch_proxy` / `collect_provider_snapshot` 同处），
+taier 与 cdn 以 import 复用——**不得留本地副本**，否则修一处漏两处。测试第 9 组用
+对象同一性 + 调用点存在性双重钉住。
 
 ## 运维与排查
 

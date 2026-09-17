@@ -28,6 +28,7 @@ taier 的测活、以及 **taier / gitee / cdn 三套**通知的降级渲染。
 """
 import http.server
 import pathlib
+import re
 import sys
 import threading
 
@@ -298,19 +299,26 @@ def main():
             super().__init__('u', 404, 'Not Found', {}, None)
 
     # 9a. 判据：认「不认识这个名字」，不认「连不上」
+    #     `host not found` 是**真·网络故障**（DNS 解析失败），绝不能归进「机制故障」，
+    #     否则真连不上的节点会被 fail-open 判成存活、还绕过熔断（噪声换成漏判）。
     for err, exp in [('Resource not found', True), ('no such proxy', True),
                      ('timeout', False), ('connection refused', False),
+                     ('host not found', False),
+                     ('Name or service not known', False),
                      ('无延迟值（连不上）', False), ('', False)]:
         check(t.is_unknown_proxy_error(err) is exp,
               f'unknown 判据 {err!r} → {exp}（实际 {t.is_unknown_proxy_error(err)}）')
 
     # 9b. 等就绪：前 2 次 404、第 3 次查到 ⇒ 就绪
-    _orig_get, _orig_sleep, _orig_log = t.mihomo_api_get, t.time.sleep, t.log_progress
+    #     实现已抽到共享层 speedtest_gitee（CDN / Gitee / taier 三套共用），
+    #     函数体里的 `mihomo_api_get` 是在 **speedtest_gitee 命名空间**解析的，
+    #     所以要打桩 `g.mihomo_api_get`（打 `t.` 那份不起作用）。
+    _orig_get, _orig_sleep, _orig_log = g.mihomo_api_get, g.time.sleep, g.log_progress
     st = {'n': 0}
     ev9 = []
     try:
-        t.time.sleep = lambda s: None
-        t.log_progress = lambda stage, **kw: ev9.append((stage, kw))
+        g.time.sleep = lambda s: None
+        g.log_progress = lambda stage, **kw: ev9.append((stage, kw))
 
         def flaky_get(path):
             st['n'] += 1
@@ -318,30 +326,30 @@ def main():
                 raise _404()
             return {'name': 'n0'}
 
-        t.mihomo_api_get = flaky_get
+        g.mihomo_api_get = flaky_get
         ready, _waited, probed = t.wait_provider_ready(['n0', 'n1', 'n2', 'n3'], timeout=10)
         check(ready is True, '未就绪→就绪时返回 True')
         check(probed in ('n0', 'n1', 'n2', 'n3'), f'报出探测用的哨兵名（实际 {probed!r}）')
-        check([e[0] for e in ev9] == ['taier_provider_ready'],
+        check([e[0] for e in ev9] == ['provider_ready'],
               f'记一条 provider_ready 便于观测（实际 {[e[0] for e in ev9]}）')
 
         # 9c. 超时：始终 404 ⇒ False，且不抛异常（调用方据此降级）
-        t.mihomo_api_get = lambda path: (_ for _ in ()).throw(_404())
+        g.mihomo_api_get = lambda path: (_ for _ in ()).throw(_404())
         ev9.clear()
         ready, _w, probed = t.wait_provider_ready(['a', 'b'], timeout=0.3)
         check(ready is False and probed == '', '始终未就绪 → False（不抛异常）')
-        check([e[0] for e in ev9] == ['taier_provider_ready_timeout'],
+        check([e[0] for e in ev9] == ['provider_ready_timeout'],
               '超时要留痕，否则「等过但没等到」看不出来')
 
         # 9d. 空名单：不等待、不请求
         calls9 = []
-        t.mihomo_api_get = lambda path: calls9.append(path) or {}
+        g.mihomo_api_get = lambda path: calls9.append(path) or {}
         check(t.wait_provider_ready([], timeout=5) == (False, 0.0, '')
               and t.wait_provider_ready(['', '  '], timeout=5) == (False, 0.0, ''),
               '空/空白名单直接返回 False')
         check(calls9 == [], '空名单不发任何请求（省掉必然失败的调用）')
     finally:
-        t.mihomo_api_get, t.time.sleep, t.log_progress = _orig_get, _orig_sleep, _orig_log
+        g.mihomo_api_get, g.time.sleep, g.log_progress = _orig_get, _orig_sleep, _orig_log
 
     # 9e. 撤销判死：原地改 results / alive_items，返回条数
     r9 = [{'name': 'p0', 'probe_failed': True, 'ok': False},
@@ -357,6 +365,31 @@ def main():
           f'撤销的节点回到测速队列（实际 {[x["name"] for x in a9]}）')
     check(q9 == [], '队列清空（避免下一轮重复撤销）')
     check(t._revive_probe_failed(r9, a9, []) == 0, '空队列 → 返回 0、不改动')
+
+    # 9f. 三套共用**同一份** wait_provider_ready（防某一套留了本地副本、修这边漏那边）
+    #     判据用对象同一性（`is`），不是「都能调」——后者对副本也成立，抓不到漂移。
+    cdn = __import__('speedtest')
+    check(t.wait_provider_ready is g.wait_provider_ready,
+          'taier 用的就是 gitee 里那份（import 而非本地重定义）')
+    check(cdn.wait_provider_ready is g.wait_provider_ready,
+          'cdn 用的也是 gitee 里那份')
+    check('def wait_provider_ready' not in
+          pathlib.Path(t.__file__).read_text(encoding='utf-8'),
+          'taier 不得再留本地副本')
+    check('def wait_provider_ready' not in
+          pathlib.Path(cdn.__file__).read_text(encoding='utf-8'),
+          'cdn 不得再留本地副本')
+
+    # 9g. 三套都**真的调了**它（共用一份实现 ≠ 装了保险；删掉调用点同样等于没修）
+    #     反证：只留 9f 的话，把三处调用点删掉测试仍全绿——必须钉住调用点。
+    for mod_name, mod in (('taier', t), ('gitee', g), ('cdn', cdn)):
+        src = pathlib.Path(mod.__file__).read_text(encoding='utf-8')
+        check('wait_provider_ready(' in src,
+              f'{mod_name} 主流程必须调用 wait_provider_ready')
+        # 参数按「去换行 + 压空白」后匹配：taier 的调用跨行写，逐字匹配会误报
+        norm = re.sub(r'\s+', '', src)
+        check("wait_provider_ready([i.get('name')foriinalive_items]" in norm,
+              f'{mod_name} 用的是节点名列表（不是别的参数）')
 
     print()
     if FAILURES:
