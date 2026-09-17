@@ -768,18 +768,22 @@ jobs:
           set -uo pipefail
 
           # workbuddy-gateway（CangShui/workbuddy-gateway）：纯 Go 单二进制的本地 AI 代理网关。
-          # 数据（凭据 workbuddy*.json、状态/日志）落在自托管目录 /dropbox/self-hosted/workbuddy-gateway，
-          # 随 Dropbox 跨轮持久化；但**二进制必须落本地盘**：
-          # rclone 挂载点按 --file-perms 合成权限（默认 0644），chmod +x 在挂载点上是空操作，
-          # 从挂载点执行一律 "nohup: failed to run command ...: Permission denied"。
-          # 因此与 OpenClaw/CliRelay 同口径 —— 代码在本地盘、数据在 Dropbox，二进制每轮按版本按需下载。
+          # 运行目录整体落本地盘，Dropbox 只做持久化存放 —— 与 OpenClaw/CliRelay 同口径。
+          # 两处刻意分离的原因：
+          #   1. 二进制不能放挂载点：rclone 按 --file-perms 合成权限（默认 0644），chmod +x 是空操作，
+          #      从挂载点执行一律 "Permission denied"。
+          #   2. 工作目录也不能直接用挂载点：serve 会在 cwd 下高频读写 logs/ 与 workbuddy-status.json，
+          #      在 --vfs-cache-mode full 的 FUSE 挂载点上会卡住/被 runner 清理，表现为
+          #      「进程已退出且 serve.log 为空」。
+          # 所以：WB_RUN_DIR（本地盘）跑服务，起前 rclone 拉数据、停后回推 Dropbox。
           WB_DIR="/dropbox/self-hosted/workbuddy-gateway"
+          WB_RUN_DIR="/tmp/local_workbuddy/data"
           WB_BIN_DIR="/tmp/local_workbuddy"
           WB_BIN="$WB_BIN_DIR/workbuddy-gateway"
           WB_RELEASE_BASE="https://github.com/CangShui/workbuddy-gateway/releases/latest/download"
           WB_VER_FILE="$WB_DIR/.installed-version"
           WB_META="/tmp/run-workbuddy-meta.env"
-          WB_LOG="$WB_DIR/logs/serve.log"
+          WB_LOG="$WB_RUN_DIR/logs/serve.log"
           : > "$WB_META"
 
           wb_notify() {
@@ -807,7 +811,16 @@ jobs:
             fi
           }
 
-          mkdir -p "$WB_DIR" "$WB_DIR/logs" "$WB_BIN_DIR"
+          mkdir -p "$WB_DIR" "$WB_DIR/logs" "$WB_RUN_DIR/logs" "$WB_BIN_DIR"
+
+          # 把 Dropbox 上的持久数据拉进本地运行目录（凭据、状态快照；logs 不拉，用本轮新写的）。
+          # rclone copy 单向拉取、不删本地多余文件，缺失也不报错 —— 首轮目录为空是正常情况。
+          echo "0. Syncing workbuddy data from Dropbox to local run dir..."
+          rclone copy "dropbox:self-hosted/workbuddy-gateway" "$WB_RUN_DIR" \
+            --exclude 'logs/**' --exclude '*.new' \
+            --retries 5 --low-level-retries 10 --timeout 1m --contimeout 15s 2>/dev/null || \
+            echo "⚠️ workbuddy 数据拉取失败/为空，按空账号池启动（凭据可由 serve 启动后热加载）"
+          ls -la "$WB_RUN_DIR" 2>/dev/null | head -20 || true
 
           # ---------- 1. 检查更新：比对 GitHub Releases 的 latest 版本号与本地记录 ----------
           # GitHub API 匿名限流（60 次/小时/出口 IP）对每轮一次足够；失败时按"保持现状"处理，
@@ -885,26 +898,21 @@ jobs:
           echo "2. Starting workbuddy-gateway serve on ${WB_PORT}..."
           pkill -f "$WB_BIN serve" 2>/dev/null || true
           sleep 1
-          # 启动前置检查：这三项任一不成立都会导致"起来就退且日志为空"，
-          # 而空日志无法区分原因，所以先逐项探明并打到 stdout 再启动。
           echo "   preflight: binary=$WB_BIN"
           ls -l "$WB_BIN" 2>&1 || true
           if [ ! -x "$WB_BIN" ]; then
             echo "❌ 二进制不可执行：$WB_BIN（下载失败或权限位丢失）"
           fi
-          # serve 的工作目录必须是数据目录：凭据靠"自动发现当前目录下 workbuddy*.json"入池，
-          # 状态文件 workbuddy-status.json 与 logs/ 也都写在同目录，随 Dropbox 持久化。
-          # 二进制在本地盘（$WB_BIN），执行它不受挂载点 noexec 影响；两者路径刻意分离。
-          # 凭据文件由用户另行放入数据目录（二维码登录需人工扫码，workflow 内无法完成）。
-          # 不用「子 shell + exit 1」：cd 失败时子 shell 悄悄退出、外层拿不到状态，
-          # 表现为「进程已退出但 serve.log 为空」而无法归因。改为子 shell 内显式写日志，
-          # 且不改变外层 cwd（后续 grep/curl 都用绝对路径，但保持 cwd 不变更稳）。
-          if ! ( cd "$WB_DIR" ); then
-            echo "❌ 无法进入数据目录 $WB_DIR（Dropbox 挂载点未就绪？）" >&2
-            printf '%s\n' "cd $WB_DIR failed: Dropbox mount not ready" > "$WB_LOG"
+          # serve 的工作目录是本地运行目录（WB_RUN_DIR），不是 Dropbox 挂载点：
+          # 凭据靠"自动发现当前目录下 workbuddy*.json"入池、状态与 logs/ 也都写同目录，
+          # 这些高频小文件读写放本地盘才不会被 FUSE 卡住。数据已在第 0 步从 Dropbox 拉齐，
+          # 收尾会回推（见 3b）。
+          if ! ( cd "$WB_RUN_DIR" ); then
+            echo "❌ 无法进入运行目录 $WB_RUN_DIR" >&2
+            printf '%s\n' "cd $WB_RUN_DIR failed" > "$WB_LOG"
           else
             (
-              cd "$WB_DIR" || exit 1
+              cd "$WB_RUN_DIR" || exit 1
               nohup "$WB_BIN" serve -addr 127.0.0.1 -port "$WB_PORT" \
                 > "$WB_LOG" 2>&1 &
               echo $! > /tmp/workbuddy-serve.pid
@@ -2013,11 +2021,11 @@ jobs:
           docker stop cliproxyapi 2>/dev/null || echo "cliproxyapi already stopped or missing."
 
           # workbuddy-gateway 是宿主进程（非容器），必须显式停：它不会随 job 结束自动退出，
-          # 留在后台会继续持凭据轮询上游。数据目录在 Dropbox 挂载点上，serve 停止后
-          # 状态文件是已落盘的完整状态，无需额外回传动作（归档只针对宿主侧的 OpenClaw/AI 网关）。
+          # 留在后台会继续持凭据轮询上游。运行目录在本地盘，停止后需回推 Dropbox 才算落盘。
           # 二进制路径须与启动步骤一致（本地盘 /tmp/local_workbuddy），否则 pkill -f 匹配不到。
           echo "3b. Stopping workbuddy-gateway..."
           WB_DIR="/dropbox/self-hosted/workbuddy-gateway"
+          WB_RUN_DIR="/tmp/local_workbuddy/data"
           WB_BIN="/tmp/local_workbuddy/workbuddy-gateway"
           if [ -f /tmp/workbuddy-serve.pid ]; then
             kill "$(cat /tmp/workbuddy-serve.pid)" 2>/dev/null || true
@@ -2039,6 +2047,12 @@ jobs:
           WB_STILL_RUNNING=0
           # 末尾 || true：本步骤是 set -e，pgrep 无匹配返回 1 会让整段提前退出、通知发不出去
           pgrep -f "$WB_BIN serve" >/dev/null 2>&1 && WB_STILL_RUNNING=1 || true
+          # 回推运行目录到 Dropbox（含 serve 写出的 workbuddy-status.json 与本轮 logs/）；
+          # 只 copy 不 sync：远端的历史日志不该被本轮删掉。失败不阻塞收尾通知。
+          echo "3b-1. Syncing workbuddy data back to Dropbox..."
+          rclone copy "$WB_RUN_DIR" "dropbox:self-hosted/workbuddy-gateway" \
+            --retries 5 --low-level-retries 10 --timeout 1m --contimeout 15s 2>/dev/null || \
+            echo "⚠️ workbuddy 数据回推失败（状态快照可能落后一轮）"
           WB_VER="$(head -n 1 "$WB_DIR/.installed-version" 2>/dev/null || true)"
 
           wb_stop_notify() {
