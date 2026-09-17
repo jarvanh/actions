@@ -1155,37 +1155,98 @@ def wait_provider_ready(names, timeout=60.0):
     return False, waited, ''
 
 def git_direct_speedtest(env, gitee, test_file: pathlib.Path, push_timeout: int, clone_timeout: int, speedtest_mode: str, max_attempts: int = 5):
+    """直连基线（本套的调用入口）。实现已抽到 `run_direct_baseline`，三套共用。
+
+    保留本名是因为 workflow / 通知 / 文档都按它引用；行为与分目录前缀（无 label）
+    保持不变，避免历史对照数据与新数据混不上。
+    """
+    return run_direct_baseline(
+        env=env, gitee=gitee, test_file=test_file, push_timeout=push_timeout,
+        clone_timeout=clone_timeout, speedtest_mode=speedtest_mode,
+        max_attempts=max_attempts, label='')
+
+def strip_proxy_env(env):
+    """剥掉全部代理变量，返回新 dict（不改原对象）。
+
+    为什么单独一个函数：直连路径有**三处**都要做同一件事（直连基线、直连上行、CDN 的
+    直连切换），各写一遍必然漂移——漏一个变量（`all_proxy` 小写那对最容易被漏）就会
+    发现「直连」其实还在走代理，测出来的是节点带宽而非家庭宽带，且**看不出异常**。
+    """
     local_env = dict(env)
-    for k in ['ALL_PROXY', 'all_proxy', 'HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY', 'https_proxy']:
+    for k in ['ALL_PROXY', 'all_proxy', 'HTTP_PROXY', 'http_proxy',
+              'HTTPS_PROXY', 'https_proxy']:
         local_env.pop(k, None)
     local_env['GIT_TERMINAL_PROMPT'] = '0'
-    branch_name = f'{TEST_BRANCH}-direct'
-    target_filename = TEST_FILE_NAME
-    repo_dir = HOME_RUNTIME / 'upload-direct-baseline'
-    clone_dir = HOME_RUNTIME / 'download-direct-baseline'
-    attempt_errors = []
-    max_attempts = max(1, int(max_attempts))
+    return local_env
 
+def upload_speedtest(env, gitee, test_file: pathlib.Path, push_timeout: int,
+                     branch_name: str, via_proxy: bool = True, repo_dir=None):
+    """向 Gitee 私有仓库 push 一个固定大小文件测**上行**，返回 `(秒数, 字节数)`。
+
+    **CDN 与 Gitee 共用这一份**（2026-09-17 统一）：两边原本各有一套等价实现
+    （CDN 的 `gitee_push_speedtest` / `_gitee_push_direct`，Gitee 直接内联调
+    `git_force_push_testfile`），口径靠人工对齐，改一处漏一处。
+
+    * `via_proxy=True`（默认）：带 mihomo 混合端口代理变量 push ⇒ 测**节点上行**；
+    * `via_proxy=False`：`strip_proxy_env` 剥净代理变量 ⇒ 测**家庭宽带直连上行**。
+
+    两边的差别只剩「用不用代理」，其余（文件大小、计时区间、单位换算）完全同一份代码，
+    因此**两种模式的数值可比**——这正是要切直连做对照的前提。
+
+    计时口径与 `git_force_push_testfile` 一致：只包住 `git push` 一条命令，
+    不含 clone / add / commit。返回原始秒数与字节数，由调用方换算 MiB/s。
+    """
+    local_env = build_proxy_env(env) if via_proxy else strip_proxy_env(env)
+    # env 可能是 CONFIG（含 list 字段），非 str 值会让 subprocess 报错，先滤掉
+    local_env = {k: v for k, v in local_env.items() if isinstance(v, str)}
+    local_env['GIT_TERMINAL_PROMPT'] = '0'
+    repo_dir = repo_dir or (HOME_RUNTIME / 'speedtest-upload-repo')
+    seconds = git_force_push_testfile(
+        repo_dir=repo_dir,
+        remote=gitee['remote_with_token'],
+        env=local_env,
+        file_path=test_file,
+        commit_message='speedtest upload benchmark',
+        push_timeout=push_timeout,
+        branch_name=branch_name,
+        target_filename=TEST_FILE_NAME,
+        gitee=gitee,
+    )
+    return seconds, test_file.stat().st_size
+
+def run_direct_baseline(env, gitee, test_file, push_timeout, clone_timeout,
+                        speedtest_mode, max_attempts=5, label=''):
+    """直连基线：不经代理 push(+clone)，作为「家庭宽带」对照。**三套共用**。
+
+    CDN 与 Gitee 都要这个对照（只测代理节点带宽，不知道家庭宽带是多少，就看不出
+    「节点比直连还慢」）。失败**重试 `max_attempts` 次**：直连 Git push 偶发超时较常见，
+    一次抖动不该让整轮基线缺失。全部失败才抛异常。
+
+    返回 `{ok, attempt, max_attempts, upload_mibs, upload_seconds[, download_mibs,
+    download_seconds]}`；`push-only` 模式跳过 clone。
+    """
+    local_env = strip_proxy_env(env)
+    local_env = {k: v for k, v in local_env.items() if isinstance(v, str)}
+    local_env['GIT_TERMINAL_PROMPT'] = '0'
+    dir_suffix = f'-{label}' if label else ''
+    branch_name = f'{TEST_BRANCH}-direct{dir_suffix}'
+    repo_dir = HOME_RUNTIME / f'upload-direct-baseline{dir_suffix}'
+    clone_dir = HOME_RUNTIME / f'download-direct-baseline{dir_suffix}'
+    max_attempts = max(1, int(max_attempts))
+    attempt_errors = []
     for attempt in range(1, max_attempts + 1):
         try:
-            log_progress('direct_baseline_attempt_started', attempt=attempt, max_attempts=max_attempts)
-            upload_s = git_force_push_testfile(
-                repo_dir=repo_dir,
-                remote=gitee['remote_with_token'],
-                env=local_env,
-                file_path=test_file,
-                commit_message='speedtest direct baseline',
-                push_timeout=push_timeout,
-                branch_name=branch_name,
-                target_filename=target_filename,
-                gitee=gitee,
-            )
-            size_mib = test_file.stat().st_size / 1024 / 1024
+            log_progress('direct_baseline_attempt_started', attempt=attempt,
+                         max_attempts=max_attempts)
+            upload_s, total = upload_speedtest(
+                env=env, gitee=gitee, test_file=test_file, push_timeout=push_timeout,
+                branch_name=branch_name, via_proxy=False, repo_dir=repo_dir)
+            size_mib = total / 1024 / 1024
             result = {
                 'ok': True,
                 'mode': speedtest_mode,
                 'branch_name': branch_name,
-                'target_filename': target_filename,
+                'target_filename': TEST_FILE_NAME,
                 'attempt': attempt,
                 'max_attempts': max_attempts,
                 'upload_mibs': round(size_mib / upload_s, 2),
@@ -1198,27 +1259,26 @@ def git_direct_speedtest(env, gitee, test_file: pathlib.Path, push_timeout: int,
                     env=local_env,
                     timeout=clone_timeout,
                     branch_name=branch_name,
-                    target_filename=target_filename,
+                    target_filename=TEST_FILE_NAME,
                 )
-                size_mib = pulled.stat().st_size / 1024 / 1024
                 result.update({
-                    'download_mibs': round(size_mib / download_s, 2),
+                    'download_mibs': round(pulled.stat().st_size / 1024 / 1024 / download_s, 2),
                     'download_seconds': round(download_s, 3),
                 })
-            log_progress('direct_baseline_attempt_finished', attempt=attempt, max_attempts=max_attempts, ok=True)
+            log_progress('direct_baseline_attempt_finished', attempt=attempt,
+                         max_attempts=max_attempts, ok=True)
             return result
         except Exception as e:
             reason = str(e)
             attempt_errors.append(reason)
-            log_progress('direct_baseline_attempt_finished', attempt=attempt, max_attempts=max_attempts, ok=False, reason=reason)
+            log_progress('direct_baseline_attempt_finished', attempt=attempt,
+                         max_attempts=max_attempts, ok=False, reason=reason)
             if attempt < max_attempts:
-                # 直连 Git push 偶发超时较常见；短暂停顿后重试，避免一次抖动导致整轮基线缺失。
                 time.sleep(min(2 * attempt, 10))
+    joined = ' | '.join(f'第{i}次: {e}' for i, e in enumerate(attempt_errors, 1))
+    raise RuntimeError(f'本机直连基线测速连续 {max_attempts} 次失败: {joined[-1500:]}')
 
-    joined_errors = ' | '.join(f'第{i}次: {err}' for i, err in enumerate(attempt_errors, 1))
-    raise RuntimeError(f'本机直连基线测速连续 {max_attempts} 次失败: {joined_errors[-1500:]}')
-
-def speedtest_single_item(env, gitee, item: dict, test_file: pathlib.Path, push_timeout: int, clone_timeout: int, switch_settle_seconds: float, speedtest_mode: str):
+def speedtest_single_item(env, gitee, item: dict, test_file: pathlib.Path, push_timeout: int, clone_timeout: int, switch_settle_seconds: float, speedtest_mode: str, via_proxy: bool = True):
     name = item['name']
     local_env = build_proxy_env(env)
     branch_name = TEST_BRANCH
@@ -1237,18 +1297,11 @@ def speedtest_single_item(env, gitee, item: dict, test_file: pathlib.Path, push_
 
     repo_dir = HOME_RUNTIME / f'upload-{sanitize_name(name)}'
     clone_dir = HOME_RUNTIME / f'download-{sanitize_name(name)}'
-    upload_s = git_force_push_testfile(
-        repo_dir=repo_dir,
-        remote=gitee['remote_with_token'],
-        env=local_env,
-        file_path=test_file,
-        commit_message=f'speedtest {sanitize_name(name)}',
-        push_timeout=push_timeout,
-        branch_name=branch_name,
-        target_filename=target_filename,
-        gitee=gitee,
-    )
-    size_mib = test_file.stat().st_size / 1024 / 1024
+    # 上行经共享实现（与 CDN 同一份）；`via_proxy=False` 时测的是家庭宽带直连上行
+    upload_s, total = upload_speedtest(
+        env=env, gitee=gitee, test_file=test_file, push_timeout=push_timeout,
+        branch_name=branch_name, via_proxy=via_proxy, repo_dir=repo_dir)
+    size_mib = total / 1024 / 1024
     result = {
         'name': name,
         'provider': item['provider'],
@@ -1659,6 +1712,12 @@ def main():
     # 默认 both = 上行 + clone 下行 + 延迟（2026-09-08 用户拍板：四套指标口径对齐）；
     # push-only = 只测上行（历史模式，可用 env 退回）
     speedtest_mode = (env.get('PROXY_SPEEDTEST_MODE', 'both') or 'both').strip().lower()
+    # 上行是否经代理（与 CDN 同名同默认，2026-09-17 统一）。
+    # `False` ⇒ 剥净代理变量直连 Gitee push，测的是**家庭宽带直连上行**而非节点带宽。
+    # 默认 True 保持既有口径不变：历史通知里的「上传」都指节点上行，改默认会让新旧不可比。
+    upload_via_proxy = (env.get('PROXY_SPEEDTEST_UPLOAD_VIA_PROXY', '1')
+                        or '1').strip().lower() not in ('0', 'false', 'no', 'off')
+    log_progress('upload_path_ready', via_proxy=upload_via_proxy)
 
     if max_nodes > 0:
         alive_items = alive_items[:max_nodes]
@@ -1732,6 +1791,7 @@ def main():
                 clone_timeout=clone_timeout,
                 switch_settle_seconds=switch_settle_seconds,
                 speedtest_mode=speedtest_mode,
+                via_proxy=upload_via_proxy,
             ), index, item)
         except Exception as e:
             err_text = str(e)
@@ -1755,6 +1815,7 @@ def main():
                         clone_timeout=clone_timeout,
                         switch_settle_seconds=switch_settle_seconds,
                         speedtest_mode=speedtest_mode,
+                        via_proxy=upload_via_proxy,
                     ), index, item)
                 except Exception as e2:
                     err_text = f'{err_text} | rebuild retry: {str(e2)[:300]}'

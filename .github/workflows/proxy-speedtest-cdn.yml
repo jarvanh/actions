@@ -174,6 +174,12 @@ jobs:
           PROXY_SPEEDTEST_GITEE_OWNER: ${{ secrets.PROXY_SPEEDTEST_GITEE_OWNER }}
           PROXY_SPEEDTEST_GITEE_REPO: proxy-speedtest-temp
           PROXY_SPEEDTEST_PUSH_TIMEOUT: '30'
+          # 直连基线（家庭宽带对照，2026-09-17 与 gitee 统一）：不经代理 push 一次，
+          # 给出「家庭宽带 vs 节点」的可比数字——只看节点带宽无法判断节点是否还不如直连。
+          # 失败不打死整轮（基线是参考值）：拿不到只记 direct_baseline.ok=false。
+          PROXY_SPEEDTEST_DIRECT_BASELINE: '1'
+          PROXY_SPEEDTEST_DIRECT_BASELINE_TIMEOUT: '60'
+          PROXY_SPEEDTEST_DIRECT_BASELINE_MAX_ATTEMPTS: '5'
           # 订阅导出策略（四套共用，脚本默认值；各脚本消费）：
           #   PROXY_SPEEDTEST_MIN_MEGABIT  达标阈值（兆，默认 10）
           #   PROXY_SPEEDTEST_SPEED_METRIC 判定指标 upload|download（默认 upload 按上行判定；

@@ -391,6 +391,114 @@ def main():
         check("wait_provider_ready([i.get('name')foriinalive_items]" in norm,
               f'{mod_name} 用的是节点名列表（不是别的参数）')
 
+    print('== 10. 上行测速统一：CDN 与 Gitee 同一份实现 + 都能切直连 ==')
+    # 诉求（2026-09-17）：CDN / Gitee 的上行要么都经代理、要么都直连，且都能用直连基线对照。
+    # 此前 CDN 自带 gitee_push_speedtest/_gitee_push_direct 两份等价实现，靠人工与 Gitee
+    # 对齐口径——改一处漏一处，且两套数值不可比（下的功夫都在「对齐」上）。
+
+    # 10a. 同一份实现：断言函数对象相同，不是「行为相同」
+    check(g.upload_speedtest is not None, 'gitee 导出 upload_speedtest')
+    check(d.upload_speedtest is g.upload_speedtest, 'cdn 用的就是 gitee 那份')
+    check('def upload_speedtest' not in pathlib.Path(d.__file__).read_text(encoding='utf-8'),
+          'cdn 不得再留本地副本')
+    check(d.run_direct_baseline is g.run_direct_baseline, 'cdn 与 gitee 共用直连基线')
+    check(not hasattr(d, '_gitee_push_direct'),
+          'CDN 的旧直连分支已删除（避免与新实现并存漂移）')
+
+    # 10b. strip_proxy_env 必须剥干净（漏一个小写变量 ⇒「直连」其实还在走代理，且看不出异常）
+    probe_env = {'ALL_PROXY': 'a', 'all_proxy': 'b', 'HTTP_PROXY': 'c', 'http_proxy': 'd',
+                 'HTTPS_PROXY': 'e', 'https_proxy': 'f', 'PATH': '/usr/bin',
+                 'GIT_TERMINAL_PROMPT': '1'}
+    stripped = g.strip_proxy_env(probe_env)
+    leaked = [k for k in ('ALL_PROXY', 'all_proxy', 'HTTP_PROXY', 'http_proxy',
+                          'HTTPS_PROXY', 'https_proxy') if k in stripped]
+    check(leaked == [], f'6 个代理变量全剥净（残留 {leaked}）')
+    check(stripped.get('PATH') == '/usr/bin', '非代理变量原样保留')
+    check(stripped.get('GIT_TERMINAL_PROMPT') == '0', '强制非交互，避免卡在凭据提示')
+    check('all_proxy' in probe_env, '不修改入参（返回新 dict）')
+
+    # 10c. run_direct_baseline 的重试语义：一次抖动不该让整轮基线缺失
+    _orig_upload = g.upload_speedtest
+    _orig_sleep, _orig_log = g.time.sleep, g.log_progress
+    _orig_clone = g.git_clone_testbranch
+    attempts = []
+    ev10 = []
+    try:
+        g.time.sleep = lambda s: None
+        g.log_progress = lambda stage, **kw: ev10.append((stage, kw))
+        g.git_clone_testbranch = lambda **kw: (2.0, pathlib.Path('/dev/null'))
+
+        class _FakeFile:
+            def stat(self):
+                class _S:
+                    st_size = 10 * 1024 * 1024
+                return _S()
+
+        def flaky_upload(**kw):
+            attempts.append(kw.get('via_proxy'))
+            if len(attempts) < 3:
+                raise RuntimeError('timed out')
+            return 5.0, 10 * 1024 * 1024
+
+        g.upload_speedtest = flaky_upload
+        res = g.run_direct_baseline(env={}, gitee={'remote_with_token': 'x'},
+                                    test_file=_FakeFile(), push_timeout=60,
+                                    clone_timeout=60, speedtest_mode='push-only',
+                                    max_attempts=5, label='cdn')
+        check(len(attempts) == 3, f'失败重试直到成功（实际 {len(attempts)} 次）')
+        check(all(v is False for v in attempts), '基线始终走直连（via_proxy=False）')
+        check(res['ok'] is True and res['attempt'] == 3, '返回成功的尝试序号')
+        check(res['upload_mibs'] == 2.0, f'10MiB/5s = 2.0 MiB/s（实际 {res.get("upload_mibs")}）')
+        check('download_mibs' not in res, 'push-only 模式不 clone')
+
+        # 10d. 全部失败 ⇒ 抛异常（调用方据此记 ok=False），错误里带每次原因
+        attempts.clear()
+
+        def always_fail(**kw):
+            attempts.append(1)
+            raise RuntimeError('push timeout')
+
+        g.upload_speedtest = always_fail
+        raised = None
+        try:
+            g.run_direct_baseline(env={}, gitee={'remote_with_token': 'x'},
+                                  test_file=_FakeFile(), push_timeout=60,
+                                  clone_timeout=60, speedtest_mode='push-only',
+                                  max_attempts=3)
+        except Exception as e:
+            raised = str(e)
+        check(raised is not None and '连续 3 次失败' in raised,
+              f'全失败 ⇒ 抛异常并报次数（实际 {raised!r}）')
+        check(len(attempts) == 3, f'重试次数 = max_attempts（实际 {len(attempts)}）')
+    finally:
+        g.upload_speedtest = _orig_upload
+        g.time.sleep, g.log_progress = _orig_sleep, _orig_log
+        g.git_clone_testbranch = _orig_clone
+
+    # 10e. 两套都能切直连：开关名与默认值必须一致（同名同默认才不会「一套切了另一套没切」）
+    def _via_proxy_default(src_text, mod_name):
+        norm = re.sub(r'\s+', '', src_text)
+        return "PROXY_SPEEDTEST_UPLOAD_VIA_PROXY','1'" in norm
+
+    for mod_name, mod in (('gitee', g), ('cdn', d)):
+        src = pathlib.Path(mod.__file__).read_text(encoding='utf-8')
+        check(_via_proxy_default(src, mod_name),
+              f'{mod_name} 的 UPLOAD_VIA_PROXY 默认 1（保持既有口径不变）')
+    check(d.CONFIG['PROXY_SPEEDTEST_UPLOAD_VIA_PROXY'] is True,
+          'cdn 配置项解析为 True（默认经代理）')
+    check(d.CONFIG['PROXY_SPEEDTEST_DIRECT_BASELINE'] is True,
+          'cdn 默认开启直连基线（与 gitee 一致）')
+
+    # 10f. 两套都真的调了共享上行实现（共用一份 ≠ 装了开关；不接调用点等于没统一）
+    for mod_name, mod, marker in (('gitee', g, 'upload_speedtest('),
+                                  ('cdn', d, 'upload_speedtest(')):
+        src = pathlib.Path(mod.__file__).read_text(encoding='utf-8')
+        check(marker in src, f'{mod_name} 主流程调用了共享 upload_speedtest')
+    check('via_proxy=upload_via_proxy' in pathlib.Path(g.__file__).read_text(encoding='utf-8'),
+          'gitee 把开关接到了调用的 via_proxy 参数上')
+    check('via_proxy=via_proxy' in pathlib.Path(d.__file__).read_text(encoding='utf-8'),
+          'cdn 把开关接到了调用的 via_proxy 参数上')
+
     print()
     if FAILURES:
         print(f'FAILED: {len(FAILURES)} 项未通过')
