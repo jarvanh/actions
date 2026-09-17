@@ -57,6 +57,8 @@ _fix_method_short() { echo "未知"; }
 SYNC_SKIP_QUIET=0
 AUTO_SPLIT_INFO=""
 export TG_RUN_URL="https://github.com/example/repo/actions/runs/123"
+# 显式置空起始时间：走 tg_add_footer 的开机时刻兜底路径，让断言只依赖版式
+# 而不依赖「当前宿主机开机多久」。真实 workflow 已不再注入该变量（平台无此上下文）
 export TG_RUN_STARTED_AT=""
 
 captured=""
