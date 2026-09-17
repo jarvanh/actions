@@ -805,7 +805,7 @@ jobs:
           #   鉴权恒写「仅回环监听，无需密钥」：不传 -api-key 且只绑 127.0.0.1，网关不做鉴权，
           #   绝不编造密钥值。凭据段只列 workbuddy*.json 的文件名，绝不回显内容（真实 Token）。
           #   账号池取自 workbuddy-status.json（键名由上游 Go 结构体固定，见采集处注释）；
-          #   免费模型列**具体模型名**（取自 modelStates 里 costClass=="free" 的键），
+          #   免费模型列**具体模型名**（取自上游模型目录接口，见采集处注释），
           #   全量展示不折叠 —— 只给「免费模型 N」读者不知道是哪个，等于没说。
           wb_notify() {
             if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
@@ -831,21 +831,21 @@ jobs:
               fi
               # 账号池：逐账号「一条目 + 多子行」。数据源是函数外的 WB_POOL —— 采集处
               # （启动步骤）已用 jq 解析 workbuddy-status.json 成 8 列 TSV：
-              #     探测标记 \t 凭据文件名 \t 站点 \t 状态 \t 额度 \t 免费模型名 \t 模型冷却 \t Token 过期
-              # 第 1 列（探测标记）刻意放最前，理由见采集处注释（挡 read 的空白折叠错位）。
+              #     名录可信标记 \t 凭据文件名 \t 站点 \t 状态 \t 额度 \t 免费模型名 \t 模型冷却 \t Token 过期
+              # 第 1 列（名录可信标记）刻意放最前，理由见采集处注释（挡 read 的空白折叠错位）。
               # 凭据名/站点/状态进条目行，第 5/7/8 列并成第一个子行，第 6 列（免费模型名，
               # 可能很长）另起一个独立子行「免费模型 N · <code>名</code> · <code>名</code>」——
               # 与额度等短字段混在一行会被撑爆。
               # 子行必须用 tree_sub 前缀手拼 —— tree_lines 把每行都当兄弟条目，
               # 子行经它会渲染成 ├─/└─，与条目平级（规范 4.2 二层列表：子行与条目正文同列）。
               if [ -n "${WB_POOL:-}" ]; then
-                local _probed _cf _st _state _quota _fm _cdl _tok _n_acc _rows _i _sub _x _last
+                local _readyflag _cf _st _state _quota _fm _cdl _tok _n_acc _rows _i _sub _x _last
                 local _names _n_names _m _mline
                 _n_acc="$(printf '%s\n' "$WB_POOL" | grep -c . || true)"
                 tg_add_section _msg "💳 账号池 · ${_n_acc}"
                 _rows=""
                 _i=0
-                while IFS="$(printf '\t')" read -r _probed _cf _st _state _quota _fm _cdl _tok; do
+                while IFS="$(printf '\t')" read -r _readyflag _cf _st _state _quota _fm _cdl _tok; do
                   [ -z "$_cf" ] && continue
                   _i=$((_i + 1))
                   _last=0
@@ -861,8 +861,9 @@ jobs:
                   [ -n "$_sub" ] && _rows+="$(tree_sub "$_last")$(escape_html "$_sub")"$'\n'
                   # 第二个子行：免费模型清单。全量展示、不折叠（规范 · 折叠规则：读者要逐条
                   # 核对哪些模型免费，折叠等于把最需要看的部分藏起来）。模型名是机器值 → <code>，
-                  # 逐个转义。「免费模型 0」只在真探过（_probed=1）时显示 —— 没探过就什么都不说，
-                  # 不把「没探」谎报成「没有免费模型」。
+                  # 逐个转义。名单来自上游模型目录接口 → 格式是「名 · 名 · …」。
+                  # 「免费模型 0」只在名录确实取到（_readyflag=1）时才显示 ——
+                  # 接口失败时什么都不说，不把「没取到」谎报成「没有免费模型」。
                   _n_names=0
                   _mline=""
                   if [ -n "$_fm" ]; then
@@ -875,7 +876,7 @@ jobs:
                   fi
                   if [ "$_n_names" -gt 0 ]; then
                     _rows+="$(tree_sub "$_last")$(escape_html "免费模型 ${_n_names}") · ${_mline}"$'\n'
-                  elif [ "${_probed:-0}" = "1" ]; then
+                  elif [ "${_readyflag:-0}" = "1" ]; then
                     _rows+="$(tree_sub "$_last")$(escape_html "免费模型 0")"$'\n'
                   fi
                 done <<< "$WB_POOL"
@@ -1053,56 +1054,114 @@ jobs:
           #   quotaRemaining 按上游 formatQuota（两位小数、去尾零）
           WB_STATUS_JSON="$WB_RUN_DIR/workbuddy-status.json"
 
-          # 主动探测，换取具体免费模型名。为什么必须探（2026-09-17 核实上游 probe.go/main.go）：
-          #   modelStates 的键是「按需创建」的（modelStateLocked 默认 costClass=unknown），
-          #   只有真实请求返回 usage.credit 才能学成 free/paid —— 光读快照拿不到完整免费目录，
-          #   freeModels 只是个计数、读者据此不知道哪个模型免费。
-          # 走 serve 自带的 /admin/probe（仅回环可调）：它是唯一能安全写账本的入口，
-          # 独立进程直连上游会被运行中的 serve 覆盖（上游注释即此意）。
-          # 预算：取 /v1/models 目录前 50 个（上游单次上限，limit>50 会被截断）。
-          # 只在本轮「服务是新起的」时探（WB_PREV_TAG 为空 = 非接力轮）：探测结论会经
-          # writeStatusSnapshot 落进快照并回推 Dropbox，下轮 serve 启动时
-          # restoreAccountRuntimeStateLocked 会恢复账本，无需重复消耗额度。
-          # 探测失败/超时一律不阻塞：拿不到名字就退回只给计数（降级，绝不编造）。
-          WB_PROBE_TAG_FILE="/tmp/workbuddy-serve-run-tag"
-          WB_PROBE_DONE=0
-          if [ "$WB_READY" = "1" ] && [ ! -f "$WB_PROBE_TAG_FILE" ]; then
-            WB_MODEL_IDS="$(curl -s --connect-timeout 5 --max-time 20 "${WB_API}/v1/models" 2>/dev/null \
-              | jq -r '(.data // [])[] | .id' 2>/dev/null | grep . | head -n 50 || true)"
-            if [ -n "$WB_MODEL_IDS" ]; then
-              WB_PROBE_MODELS="$(printf '%s\n' "$WB_MODEL_IDS" | paste -sd, -)"
-              echo "3c. Probing $(printf '%s\n' "$WB_MODEL_IDS" | grep -c .) models for free/paid cost class..."
-              # /admin/probe 逐账号 × 逐模型各发一次真实请求，50 个模型可能耗时数分钟
-              # （单模型上游超时 60 秒）；整体再给 15 分钟上限，超时按未探测处理。
-              WB_PROBE_OUT="$(curl -s --connect-timeout 5 --max-time 900 \
-                -H 'Content-Type: application/json' \
-                -d "$(jq -nc --arg m "$WB_PROBE_MODELS" '{models: ($m | split(","))}')" \
-                "${WB_API}/admin/probe" 2>/dev/null || true)"
-              if printf '%s' "$WB_PROBE_OUT" | jq -e '.results' >/dev/null 2>&1; then
-                WB_PROBE_DONE=1
-                printf '%s' "$WB_PROBE_OUT" | jq -r '
-                  .summary // {} | to_entries[] | "   \(.key)=\(.value)"' 2>/dev/null || true
-              else
-                echo "⚠️ /admin/probe 调用失败或返回异常（免费模型名本轮退回只给计数）"
+          # 免费模型名单取自上游「模型目录」接口（只读、不耗额度），不靠探测。
+          # 为什么不能用 modelStates / freeModels：前者只记「已实测过」的模型
+          # （键在 modelStateLocked 里按需创建、默认 unknown），后者只是个计数 ——
+          # 两者都拿不到完整免费目录。
+          # 接口：GET {Base}/v2/enterprises/personal/models
+          #   国内站 Base=https://copilot.tencent.com，国际站 Base=https://www.workbuddy.ai
+          #   站点由凭据文件的 edition 决定（cn/缺失 → 国内，intl → 国际），必须逐账号分别请求。
+          # 免费判据照上游 siteKnownFree：credits 能解析出倍率，且生效倍率为 0 且促销未过期
+          #   （multiplier == 0 && !promoExpired）。生效倍率 = credits（baseMultiplier），
+          #   命中**有效**促销再乘 factor（factor == 0 即 promoFree）。
+          #   解析不出或倍率 > 0 → 不算免费（别把未知当免费）。
+          # 这条接口只读：不产生真实 chat 请求、不消耗额度、不改变账号状态
+          #   （与已废弃的 /admin/probe 相反 —— 它逐账号×逐模型串行发真实请求，
+          #    44 模型 × 4 账号实测 634 秒，超过 serve 的 WriteTimeout=300 秒而被截断）。
+          # 结果只用于展示，不写回快照（快照由 serve 独占重写，外部写会被覆盖）。
+          # 失败不阻塞：拿不到名单就退回快照的免费模型计数（降级，绝不编造名字）。
+          # 凭据直读凭据文件取 accessToken（serve 的加载源就是同一批文件），不落盘、不回显。
+          # 逐账号记录「目录接口是否取到」：静默失败与「确实没有免费模型」必须区分，
+          # 否则接口一挂就会把每个账号都渲染成「免费模型 0」，把故障谎报成结论。
+          # 用「已成功拉取过目录的账号数 == 凭据数」判定名录是否完整可信。
+          WB_FREEMAP="$(mktemp)"
+          WB_FREE_OK_ACC=0
+          WB_FREE_TOTAL_ACC=0
+          if [ "$WB_READY" = "1" ]; then
+            while IFS= read -r _cf; do
+              [ -z "$_cf" ] && continue
+              WB_FREE_TOTAL_ACC=$((WB_FREE_TOTAL_ACC + 1))
+              _fp="$WB_RUN_DIR/$_cf"
+              [ -r "$_fp" ] || continue
+              _tok="$(jq -r '.auth.accessToken // ""' "$_fp" 2>/dev/null || true)"
+              [ -z "$_tok" ] && continue
+              _uid="$(jq -r '.account.uid // ""' "$_fp" 2>/dev/null || true)"
+              _eid="$(jq -r '.account.enterpriseId // ""' "$_fp" 2>/dev/null || true)"
+              _dom="$(jq -r '.auth.domain // ""' "$_fp" 2>/dev/null || true)"
+              _ed="$(jq -r '.edition // "cn"' "$_fp" 2>/dev/null || true)"
+              case "$(printf '%s' "$_ed" | tr 'A-Z' 'a-z')" in
+                intl|international|global|workbuddy.ai) _base="https://www.workbuddy.ai" ;;
+                *) _base="https://copilot.tencent.com" ;;
+              esac
+              _hdr=(-H "Authorization: Bearer ${_tok}"
+                    -H 'X-Client-ID: codebuddy-cli'
+                    -H 'X-Client-Version: 2.143.1'
+                    -H 'X-Product: SaaS')
+              [ -n "$_uid" ] && _hdr+=(-H "X-User-Id: ${_uid}")
+              [ -n "$_eid" ] && _hdr+=(-H "X-Enterprise-Id: ${_eid}")
+              [ -n "$_dom" ] && _hdr+=(-H "X-Domain: ${_dom}")
+              _cat="$(curl -s --connect-timeout 5 --max-time 30 "${_hdr[@]}" \
+                "${_base}/v2/enterprises/personal/models" 2>/dev/null || true)"
+              if ! printf '%s' "$_cat" | jq -e '.models' >/dev/null 2>&1; then
+                echo "⚠️ ${_cf}: 模型目录接口无有效响应（本账号免费名单留空）"
+                continue
               fi
-            else
-              echo "⚠️ /v1/models 未取到模型目录（免费模型名本轮退回只给计数）"
-            fi
+              WB_FREE_OK_ACC=$((WB_FREE_OK_ACC + 1))
+              # 免费判据（照上游 parseLiveCatalog + siteKnownFree 逐条对齐）：
+              #   credits 解析出 base 倍率；命中「已启用且在有效期内」的促销则乘 factor；
+              #   最终倍率为 0 才计入免费名单。促销过期/未生效都不算免费。
+              printf '%s' "$_cat" | jq -r --arg fn "$_cf" '
+                def parse_credits:
+                  if . == null then null
+                  elif type == "number" then .
+                  elif type == "string" then
+                    (gsub("^[xX]"; "") | gsub("[Cc]redits?"; "") | gsub("\\s"; "")
+                     | (try tonumber catch null))
+                  else null end;
+                (.modelPromotions // []) as $promos
+                | (.models // [])[]
+                | (.id // "") as $_raw
+                | ($_raw | ascii_downcase | gsub("^\\s+|\\s+$"; "")) as $_id
+                | select($_id != "")
+                | (parse_credits(.credits)) as $_base
+                | ( $promos
+                    | map(select(.enabled == true))
+                    | map(select(((.modelIDs // []) | map(ascii_downcase) | index($_id)) != null))
+                    | map(select(
+                        ((.schedule.validFrom // "") == "" or .schedule.validFrom <= (now | todate))
+                        and ((.schedule.validUntil // "") == "" or .schedule.validUntil >= (now | todate))))
+                    | .[0] ) as $_promo
+                | ( if $_base == null then null
+                    elif $_promo == null then $_base
+                    else ($_promo.factor // 1) as $_f
+                         | (if $_f == 0 then 0 else ($_base * $_f) end)
+                    end ) as $_mult
+                | select($_mult != null and $_mult == 0)
+                | "\($fn)\t\($_id)"
+              ' 2>/dev/null >> "$WB_FREEMAP" || true
+            done <<< "$WB_CREDS"
           fi
-
+          # 名录完整可信 ⇔ 每个凭据都成功取到目录（含「成功但 0 个免费」的账号）
+          WB_FREE_READY=0
+          if [ "$WB_READY" = "1" ] && [ "$WB_FREE_TOTAL_ACC" -gt 0 ] \
+             && [ "$WB_FREE_OK_ACC" -eq "$WB_FREE_TOTAL_ACC" ]; then
+            WB_FREE_READY=1
+          fi
           WB_POOL=""
           if [ "$WB_READY" = "1" ]; then
             if [ -r "$WB_STATUS_JSON" ]; then
               # serve 每 3 秒重写该文件，读到半截会解析失败 —— 失败就本轮留空，
               # 不发半条（下一轮接力会自动补上），也绝不因此判定服务未就绪。
-              # 8 列 TSV：探测标记 凭据文件名 站点 状态 额度 免费模型名(· 分隔) 模型冷却 Token 过期
-              # 第 1 列即 WB_PROBE_DONE（"1"/"0"），刻意放**最前**：`read` 会把连续制表符
-              # 折叠成一个（制表符属 IFS 空白），中间列一旦为空，后面的列就整体左移、
-              # 错位嫁接到前一个变量上。第 1 列恒非空，就把错位挡在门外。
-              # 第 6 列是逐账号的免费模型名清单（jq 侧只取 costClass=="free" 的键名）；
-              # 探测标记记「本轮是否真的探过」—— 探过却空清单说明该账号确实没有免费模型
-              # （显示「免费模型 0」），没探过则什么都不显示（不谎报 0）。
-              WB_POOL="$(jq -r --argjson probed "${WB_PROBE_DONE:-0}" '
+              # 8 列 TSV：名录可信标记 凭据文件名 站点 状态 额度 免费模型名(· 分隔) 模型冷却 Token 过期
+              # 第 1 列刻意放**最前**且恒非空：`read` 会把连续制表符折叠成一个
+              # （制表符属 IFS 空白），中间列一旦为空，后面的列就整体左移、
+              # 错位嫁接到前一个变量上。第 1 列就把错位挡在门外。
+              # 第 6 列是逐账号的免费模型名清单（来自上一段的模型目录接口，按凭据文件名关联）；
+              # 标记记「本账号的名录是否取到」—— 取到却空清单说明确实没有免费模型
+              # （显示「免费模型 0」），取不到则退回快照计数、不谎报 0。
+              # 名录按「凭据文件名 → 免费模型名（· 分隔）」建索引后与快照账号对齐；
+              # 不用 modelStates：那是 serve 的内存账本，只含「已实测」的模型、不完整。
+              WB_POOL="$(jq -r --argjson ready "${WB_FREE_READY:-0}" '
                 def fq: if . > -0.005 and . < 0.005 then "0"
                         else (. * 100 | round / 100 | tostring) end;
                 def state_cn:
@@ -1112,22 +1171,28 @@ jobs:
                   elif . == "expired"        then "已过期"
                   elif . == "disabled"       then "失效"
                   else . end;
-                .accounts[]
+                ( [ .[] | split("\t")
+                    | select(length >= 2)
+                    | { key: .[0], value: .[1] } ]
+                  | group_by(.key)
+                  | map({ key: .[0].key, value: (map(.value) | join(" · ")) })
+                  | from_entries ) as $free
+                | .accounts[]
+                | (.path | split("/") | last) as $_fn
                 | [
-                    ($probed | tostring),
-                    (.path | split("/") | last),
+                    ($ready | tostring),
+                    $_fn,
                     (if .edition == "intl" then "国际站" else "国内站" end),
                     (.state | state_cn),
                     (if .quotaKnown then ("额度剩 " + (.quotaRemaining | fq)
                        + (if .isPaidUser then " · 付费" else " · 免费" end))
                      else "额度未获取" end),
-                    ([.modelStates // {} | to_entries[]
-                      | select(.value.costClass == "free") | .key] | join(" · ")),
+                    ($free[$_fn] // ""),
                     (if (.modelCooldowns // 0) > 0 then ("模型冷却 " + (.modelCooldowns | tostring)) else "" end),
                     (if (.tokenExpiresAt // 0) > 0 then ("过期 " + (.tokenExpiresAt | strftime("%Y-%m-%d %H:%M"))) else "" end)
                   ]
                 | @tsv
-              ' "$WB_STATUS_JSON" 2>/dev/null || true)"
+              ' --slurpfile WBFREE "$WB_FREEMAP" "$WB_STATUS_JSON" 2>/dev/null || true)"
               if [ -z "$WB_POOL" ]; then
                 echo "⚠️ workbuddy-status.json 解析失败（多为读到 serve 正在重写的半截文件），本轮账号池明细留空"
               fi
@@ -1141,7 +1206,7 @@ jobs:
           # 于是同一份 service 同一份账号池会**每个 run 各推一条**已就绪通知。
           # 用本步骤自己的结果文件区分（本步骤无 id、幂等引用 steps.run_workbuddy 不安全，
           # 且其结果在本步骤内不可读）：文件在 → 上一轮启动过 = 接力轮，不再发就绪通知。
-          # 探测失败按首轮处理（多发一条好过漏发；下次重装后自然收敛）。
+          # 按标记文件失败处理（多发一条好过漏发；下次重装后自然收敛）。
           WB_RUN_TAG_FILE="/tmp/workbuddy-serve-run-tag"
           WB_RELAUNCH=0
           WB_PREV_TAG=""
