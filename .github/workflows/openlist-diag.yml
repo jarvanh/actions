@@ -105,6 +105,21 @@ on:
         required: false
         type: string
         default: "0"
+      diag_writeprobe:
+        description: "目录可写性判据验证（2026-09-17，run 35239780581 驱动）。填 1 走本专项。回答「探针写失败 == 目录不可写吗」：在真实故障目录上做 W1 复现（lsd 判存在 + mkdir 409 + copyto 探针 409）→ W2 显式 API mkdir 后再写 → W3 用 --no-check-dest 绕开隐式 mkParentDir 直写；W3 成功而 W1 失败 ⇒ 预检是假阴性，须把「存在性」与「可写性」拆成两个判据"
+        required: false
+        type: string
+        default: "0"
+      diag_wp_dir:
+        description: "W1-W3 用的**真实故障目录**（挂载根下的相对路径，如 5/1024j-视频-pornhub-channel/aeon-marks）。不给则只做隔离目录机制自测（结论弱）"
+        required: false
+        type: string
+        default: ""
+      diag_wp_bytes:
+        description: "W3 写入载荷字节数（默认 1048576 = 1 MiB；够触发真实落盘又够快）"
+        required: false
+        type: string
+        default: "1048576"
 
 concurrency: openlist-diag
 
@@ -191,13 +206,22 @@ jobs:
           DIAG_409_ENABLE: ${{ inputs.diag_409 }}
           DIAG_409_SRC: ${{ inputs.diag_409_src }}
           DIAG_409_SKIP_E2: ${{ inputs.diag_409_skip_e2 }}
+          DIAG_WP_ENABLE: ${{ inputs.diag_writeprobe }}
+          DIAG_WP_DIR: ${{ inputs.diag_wp_dir }}
+          DIAG_WP_BYTES: ${{ inputs.diag_wp_bytes }}
           OL_CONTAINER: ${{ inputs.container }}
         run: |
           # 恒 exit 0: 诊断结果写在报告里，探针失败不该让 step 变红（否则
           # artifact 上传被跳过，最需要看的那份报告反而拿不到）
-          # 优先级: 409 专项 > 拒收专项 > 常规 13 组（三者互斥——专项要的是
-          # 「单一变量」的干净归因，混跑其它探针的写入会让判读失真）
-          if [ "$DIAG_409_ENABLE" = "1" ]; then
+          # 优先级: 可写性判据验证 > 409 专项 > 拒收专项 > 常规 13 组（互斥——
+          # 专项要的是「单一变量」的干净归因，混跑其它探针的写入会让判读失真）
+          if [ "$DIAG_WP_ENABLE" = "1" ]; then
+            bash "$GITHUB_WORKSPACE/.github/scripts/openlist/diag_write_probe.sh" \
+              "$DIAG_TARGET" "$OL_CONTAINER" "$DIAG_WP_DIR" || true
+            echo ""
+            echo "=========== 可写性判据报告尾部 ==========="
+            tail -40 /tmp/ol_diag/writeprobe_report.txt 2>/dev/null || echo "(无报告文件)"
+          elif [ "$DIAG_409_ENABLE" = "1" ]; then
             bash "$GITHUB_WORKSPACE/.github/scripts/openlist/diag_409_semantics.sh" \
               "$DIAG_TARGET" "$OL_CONTAINER" || true
             echo ""
@@ -229,6 +253,7 @@ jobs:
             /tmp/ol_diag/report.txt
             /tmp/ol_diag/reject_report.txt
             /tmp/ol_diag/diag409_report.txt
+            /tmp/ol_diag/writeprobe_report.txt
             /tmp/ol_diag/container.log
           if-no-files-found: warn
           retention-days: 7
