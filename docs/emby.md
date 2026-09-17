@@ -429,7 +429,7 @@ HTML 解析失败不重发、429 限流保留重试——与全库其余通知�
 | 5 客户端 | Emby `Sessions` + ge2o 日志 | 客户端名 / 设备名来自 Sessions；IP 来自 ge2o 访问日志（数据源 A 才有，用于"谁在播"） |
 | 6 起播等待 | ge2o 访问日志 + warmup 探针 | **访问链 KV 树版式**（与测速套件「📍 测速点网络」同款，`tree_lines` 渲染），每行 = 谁访问哪里 + 耗时，**按点播放后的先后顺序排**：`你 → Cloudflare hkg01（香港） → Emby`（预估值，含边缘机房）→ `Emby → OneDrive 读文件头（走挂载）`（`PlaybackInfo` 里的 `ffprobe`）→ `Emby → OneDrive 取直链（缓存命中|冷解析）`（ge2o + odlink；括号标本次是否真花了这段时间，判据见 `docs/telegram-notify.md`）→ `你 → OneDrive 拉首字节`（预估值，直链 TTFB）→ `Emby → OneDrive 抽字幕`（首次最慢，常是隐藏大头）→ `拖动进度条（Emby → OneDrive 重取直链）`（该条目最近一次 seek）→ 末行固定提示**还有一段在你播放器侧、服务器测不到**，避免把上面几项加起来当成总耗时。耗时 <1 秒用整数毫秒、≥1 秒用两位小数秒（`fmt_ms`）；「你 → Cloudflare → Emby」与「你 → OneDrive 拉首字节」两行来自 warmup 启动探测、**不是本次播放实测**，故标`（预估值）`。措辞按"读通知的人不懂内部术语"写。**取不到的项整行省略**，全都没有则整段不出现 |
 | 7 直链 | `odlink-last.json` | 3 分钟内才视为本次播放所用；HTML `<a>` 折叠，段前空一行 |
-| 8 收尾区 | `tg_notify.sh` 的 `tg_add_footer` | 读 `TG_RUN_URL` / `TG_RUN_STARTED_AT`，缺席时优雅降级跳过 |
+| 8 收尾区 | `tg_notify.sh` 的 `tg_add_footer` | 读 `TG_RUN_URL`；时长走 runner 开机时刻兜底，缺席时优雅降级跳过 |
 
 **HTML 解析失败（400 can't parse entities）不重发**：发送层 `send_tg` 直接输出错误并返回非 0；
 只有 **429 限流保留重试**（最多 5 次，按 `retry_after` 等待）。解析失败说明版式有 bug，

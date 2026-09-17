@@ -248,7 +248,6 @@ jobs:
           OPENLIST_ADMIN_PASSWORD: ${{ secrets.OPENLIST_ADMIN_PASSWORD }}
           # 收尾区接线（规范 · 收尾区）：本 step 有 OpenList 凭据通知，需要运行日志链接
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          TG_RUN_STARTED_AT: ${{ github.run_started_at }}
         run: |
           main() {
             sudo mkdir -p /opt/openlist
@@ -397,8 +396,8 @@ jobs:
               tg_append PW_MSG "入口：🔗 <a href=\"$(escape_html "https://oe.${{ secrets.VD }}.eu.org")\">OpenList 后台</a>"$'\n'
               tg_add_note PW_MSG "长期有效密码 = OPENLIST_ADMIN_PASSWORD · 下轮自动恢复为它 · 本条不会出现在公开日志"
               # 统一收尾区（规范 · 收尾区）：凭据消息没有特殊通道，照常 tg_add_* 构建 + 收尾 + send_tg。
-              # TG_RUN_URL 由本 step env 注入；TG_RUN_STARTED_AT 平台已移除表达式上下文（注入为空），
-              # 时长走 /proc/1 兜底（本 step 靠 job 头部，误差秒级）。两者皆无时整行自动跳过。
+              # TG_RUN_URL 由本 step env 注入；时长走 /proc/1 兜底（平台无运行起始时间上下文，
+              # 本 step 靠 job 头部，误差秒级）。两者皆无时整行自动跳过。
               tg_add_footer PW_MSG
               send_tg "$PW_MSG" \
                 && echo "已通过 TG 私信发送 OpenList 凭据（不落公开日志）" \
@@ -844,7 +843,6 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           EMBY_API_KEY: ${{ secrets.EMBY_API_TOKEN }}
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          TG_RUN_STARTED_AT: ${{ github.run_started_at }}
         run: |
           source "$EMBY302_DIR/lib.sh"
           # 取值统一去空白转小写，仓库变量写成 "Direct" / "DIRECT" 也能识别
@@ -1048,7 +1046,7 @@ jobs:
               sleep 3
               nohup cloudflared tunnel run --url http://127.0.0.1:8096 e > /opt/logs/cloudflared-direct.log 2>&1 &
               echo direct > /tmp/PLAYBACK_MODE
-              # 统一 HTML 通知 + 统一收尾区（TG_RUN_* 由 step env 透传）
+              # 统一 HTML 通知 + 统一收尾区（TG_RUN_URL 由 step env 透传，时长走 /proc/1 兜底）
               WD_MSG=""
               tg_add_title WD_MSG "⚠️ Emby 直链已回退"
               tg_add_kv WD_MSG "事件" "连续 3 次链路自检失败"
@@ -1061,7 +1059,7 @@ jobs:
           done
           WD_EOF
           MEDIA_DIR="$MEDIA_DIR" TELEGRAM_BOT_TOKEN="$TG_BOT_TOKEN" TG_CHAT_ID="$TG_CHAT_ID" \
-            GITHUB_WORKSPACE="$GITHUB_WORKSPACE" TG_RUN_URL="$TG_RUN_URL" TG_RUN_STARTED_AT="$TG_RUN_STARTED_AT" \
+            GITHUB_WORKSPACE="$GITHUB_WORKSPACE" TG_RUN_URL="$TG_RUN_URL" \
             nohup bash /opt/watchdog.sh > /opt/logs/watchdog.log 2>&1 &
       - name: start playlog
         # 从 "run cloudflared" 拆出：该 step 的 run 块必须远离 GitHub 的 21000 字符
@@ -1072,7 +1070,6 @@ jobs:
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           EMBY_API_KEY: ${{ secrets.EMBY_API_TOKEN }}
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          TG_RUN_STARTED_AT: ${{ github.run_started_at }}
         run: |
           # 播放事件监听：
           #   302 模式主源    = ge2o 访问日志（3xx → [302直链]，2xx → [中转]）
@@ -2778,7 +2775,6 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          TG_RUN_STARTED_AT: ${{ github.run_started_at }}
         run: |
           source "$EMBY302_DIR/lib.sh"
           STATUS="${{ job.status }}"
@@ -2791,7 +2787,7 @@ jobs:
             *) STATUS_EMOJI="⚠️";;
           esac
           # 运行时长不再在本 step 自算（旧 '%dh %dm' 写法与全库收尾区不一致）：
-          # 统一交给 tg_add_footer 读 step env 的 TG_RUN_STARTED_AT
+          # 统一交给 tg_add_footer（读 step env 的 TG_RUN_URL；时长走开机时刻兜底）
           # 302 链路统计：直链命中/未取到/解析失败/回落 OpenList 次数（odlink /stats）
           # 文案面向非技术读者：不出现服务代号/internal 术语，专有名词另配说明行
           OD_SUMMARY="直链服务未运行"
@@ -2859,7 +2855,7 @@ jobs:
           tg_add_kv msg "时间" "$(date '+%Y-%m-%d %H:%M:%S %Z')"
           # 说明行（tg_add_note，段前空行）：统计里的两个内部口径补一句人话
           if [ -n "$OD_NOTE" ]; then tg_add_note msg "$OD_NOTE"; fi
-          # 统一收尾区（⏱ 已运行 X · 🔗 运行日志；读 step env 的 TG_RUN_URL / TG_RUN_STARTED_AT）
+          # 统一收尾区（⏱ 已运行 X · 🔗 运行日志；读 step env 的 TG_RUN_URL，时长走开机时刻兜底）
           tg_add_footer msg
           echo "TG(收尾): 已构建统一版式消息"
           # 走发送层而非 curl 直发：429 重试已内建，HTML 解析失败直接报错（规范 · 发送层），
@@ -2876,9 +2872,8 @@ jobs:
           # ⚠️ 不能写成 inputs.self_retrigger != false：schedule 触发时 inputs.x 为空串，
           # GitHub 松比较下 '' == false → 定时运行永远跳不过这道判断（全库已踩过一次）
           EMBY_SELF_RETRIGGER: ${{ github.event.inputs.self_retrigger || 'true' }}
-          # 供 run_elapsed_seconds 首选；该上下文已被平台移除、这里恒为空串，
-          # 实际会走 /proc/1 兜底（见 .github/scripts/lib/run_elapsed.sh）
-          TG_RUN_STARTED_AT: ${{ github.run_started_at }}
+          # 不注入 TG_RUN_STARTED_AT：平台无 github.run_started_at 上下文，注入恒为空串；
+          # run_elapsed_seconds 直接走 /proc/1 兜底（见 .github/scripts/lib/run_elapsed.sh）
         run: |
           set -e
           # redact_log / redact_urls 来自 emby302/lib.sh。**必须 source**：
