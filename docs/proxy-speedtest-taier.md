@@ -111,6 +111,20 @@ TUN 起来后 DNS 会被 mihomo 劫持，必须显式给可达的公共解析器
 注意 taier **上行常测不出**（CDN 类测速点拒绝上传包，引擎渲染 failed → 0），此时上行达标数
 远少于下行 ⇒ 自动落到下行判定，通知会显示实际采用的指标。
 
+⚠️ **编排轮（gistnodes 交接）必须靠 `proxy_obj` 回落才能导出订阅**（2026-09-17 修）。
+`source_entry.proxy` 只在节点名匹配上订阅 source_mapping 时才有值；编排轮的几千个节点由
+gistnodes 经 provider 直接喂入，source_mapping 只有个位数条 ⇒ 绝大多数节点 `source_entry`
+为空。实测 run 35116972319：8326 个节点里 206 个测出了速度（最高上传 245 Mbps），却因旧实现
+只认 `source_entry.proxy` 全被判「无可用配置」⇒ 达标 0 ⇒ **订阅不上传**。现在
+`gist_results` 会带上 `proxy_obj`（来自 `collect_provider_snapshot` 的完整节点配置），
+判定与导出都经 `speedtest_common.node_proxy_config` 取「`source_entry.proxy` 优先、
+缺失回落 `proxy_obj`」。细节见 [gitee 文档 · 订阅导出策略](proxy-speedtest-gitee.md#订阅导出策略三套共用)。
+
+**测活探测失败 ≠ 节点失败**：探测失败（mihomo 返回 `Resource not found` 等）记的是「机制
+没跑通」。熔断触发时会把已判死的节点**撤销判死、放回测速队列**（它们从未被真正探测过），
+通知里单独成节 `⚠️ 测活探测异常 · N`、不计入 `❌ 失败`。版式约定见
+[通知规范 · 2.7 测速三套](telegram-notify.md#27-测速三套githubscriptsproxy-speedtest)。
+
 ### Gist 文件名/描述（三套区分）
 
 `PROXY_SPEEDTEST_GIST_FILENAME` = `proxy_speedtest_taier_subscription.yaml`、
