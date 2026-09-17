@@ -82,7 +82,7 @@ SEND_CAPTURE=""
 tg_add_title()   { local _n="$1"; printf -v "$_n" '%s%s' "${!_n}" "TITLE:$2"$'\n'; }
 tg_add_section() { local _n="$1"; printf -v "$_n" '%s%s' "${!_n}" "SECTION:$2"$'\n'; }
 tg_append()      { local _n="$1"; printf -v "$_n" '%s%s' "${!_n}" "$2"; }
-tg_add_footer()  { :; }  # 收尾区接线（TG_RUN_URL/TG_RUN_STARTED_AT）不在本测试范围
+tg_add_footer()  { :; }  # 收尾区接线（TG_RUN_URL）不在本测试范围
 send_telegram_message() { SEND_CAPTURE="$1"; }
 
 lsjson_call_count() { cat "$LSJSON_CALLS"; }

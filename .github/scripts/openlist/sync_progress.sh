@@ -384,7 +384,7 @@ _progress_render() {
   local finalized=0
   [ -f "$PROGRESS_FINALIZED_FILE" ] && finalized=1
 
-  # 已用时长不再在此计算——收尾区统一走 tg_add_footer（读 TG_RUN_STARTED_AT）
+  # 已用时长不再在此计算——收尾区统一走 tg_add_footer（读 TG_RUN_URL，时长走开机时刻兜底）
 
   # 统计各状态任务数；条目按 "名\t大小\t详情" 暂存，
   # 渲染时经 _progress_render_task_list 按源端分组（大小为源端大小，
