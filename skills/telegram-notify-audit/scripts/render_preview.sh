@@ -43,6 +43,8 @@ fi
 
 # 让收尾区显示出来（不设 TG_RUN_URL 时会走降级、整行跳过，看不到收尾区版式）
 export TG_RUN_URL="${TG_RUN_URL:-https://github.com/example/repo/actions/runs/123456}"
+# TG_RUN_STARTED_AT 现仅作本地测试覆写口（平台已无该上下文，workflow 不再注入）：
+# 显式给一个固定时间戳，让预览里的时长稳定可复现、不受运行宿主机开机时刻影响
 export TG_RUN_STARTED_AT="${TG_RUN_STARTED_AT:-2026-09-12T04:00:00Z}"
 
 FAIL=0

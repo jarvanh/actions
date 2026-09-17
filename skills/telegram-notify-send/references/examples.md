@@ -27,7 +27,6 @@
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          TG_RUN_STARTED_AT: ${{ github.run_started_at }}
         run: |
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
           case "${{ job.status }}" in
@@ -44,7 +43,7 @@
           send_tg "$msg" || echo "::warning::iCloud 通知发送失败（不影响任务）"
 ```
 
-**学什么**：全库最短完整闭环。① 接线四件套 + `always()` 一个不少；② 状态语义只由标题 emoji 承担；③ `|| echo "::warning::"` 是「通知失败不把任务判红」的标准写法。
+**学什么**：全库最短完整闭环。① 接线三件套（两凭据 + `TG_RUN_URL`）+ `always()` 一个不少；② 状态语义只由标题 emoji 承担；③ `|| echo "::warning::"` 是「通知失败不把任务判红」的标准写法。
 
 多分支版本看 `github_backup_all.yml:117-154`：四态（⛔中断 / ⚠️异常 / ✅成功 / ❌失败）共用一条 `tg_add_footer + send_tg` 出口，⛔ 分支提前 `exit 0` 避免二次追加；凭据缺失静默 `exit 0`。
 

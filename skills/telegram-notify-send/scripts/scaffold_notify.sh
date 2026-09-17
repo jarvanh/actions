@@ -29,14 +29,13 @@ USAGE
 
 emit_simple() {
   cat <<'EOF'
-# ===== workflow step（接线四件套 + always 缺一不可）=====
+# ===== workflow step（接线三件套：两凭据 + TG_RUN_URL；always 缺一不可）=====
       - name: "Notify: <任务名> 结果"
         if: ${{ always() }}
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          TG_RUN_STARTED_AT: ${{ github.run_started_at }}
         run: |
           if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
             echo "Telegram 凭证未配置，跳过发送通知。"; exit 0
@@ -124,7 +123,6 @@ emit_pwsh() {
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        TG_RUN_STARTED_AT: ${{ github.run_started_at }}
       run: |
         . "$env:GITHUB_WORKSPACE\.github\scripts\telegram\tg_notify.ps1"
         # 自检: dot-source 失败会静默无通知（调用未定义函数是终止错误）

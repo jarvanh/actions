@@ -39,12 +39,14 @@ agent_created: true
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          TG_RUN_STARTED_AT: ${{ github.run_started_at }}
 ```
 
+- **只注入 `TG_RUN_URL`**。不要注入 `TG_RUN_STARTED_AT: ${{ github.run_started_at }}`——
+  平台没有该上下文（官方属性表只有 `run_id` / `run_number` / `run_attempt`），表达式对
+  不存在的属性求值为空串；时长由助手侧的 `/proc/1` 开机时刻兜底，无需注入。
 - 凭据校验在**调用方**、且要放在 `source` **之前**：`if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then echo "未配置，跳过"; exit 0; fi`。真源本身不校验。
 - bash 真源有 `TG_BOT_TOKEN` / `TG_CHAT_ID` 别名回退（L48-49）；**pwsh 没有**，必须注入 `TELEGRAM_*`。
-- python：凭据从传入的 `env` dict 读，但 `TG_RUN_URL` / `TG_RUN_STARTED_AT` **只读 `os.environ`**，只给 dict 不够。
+- python：凭据从传入的 `env` dict 读，但 `TG_RUN_URL` **只读 `os.environ`**，只给 dict 不够。
 - pwsh step 要 `shell: pwsh`。
 - **汇总类通知建议独立成 step**：业务步骤里常有 `exit 1` 早退（预检失败 / 磁盘不足），
   写在步骤末尾的通知会被一起跳过；跨 step 传结果只能落临时文件（两个 step 不共享 shell
