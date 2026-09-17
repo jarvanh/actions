@@ -291,8 +291,9 @@ DEDUPE_FIELDS = ['type', 'server', 'port', 'uuid', 'password', 'cipher',
 # Sub-Store 生成，不会因脚本侧改动而触发 yaml.safe_dump 重写、丢掉原文格式。
 EXCLUDE_NODE_TYPES = ('http', 'socks5')
 
-# Cloudflare 官方公布的 IPv4/IPv6 段，来源 https://api.cloudflare.com/client/v4/ips
-# （2026-09-17 取，etag 38f79d050aa027e3be3865e495dcc9bc）。
+# Cloudflare 官方公布的 IPv4/IPv6 段。**运行时实时拉取**（见 fetch_cf_cidrs），
+# 下面这份是**拉取失败时的内置回退表**，照抄 https://api.cloudflare.com/client/v4/ips
+# 在 2026-09-17 的快照（etag 38f79d050aa027e3be3865e495dcc9bc）。
 #
 # 为什么用「server 落 CF 官方 IP 段」判「Cloudflare 部署的节点」，而不是按名称/servername：
 # 名称完全不可靠——实测一轮 1857 个 CF 节点里只有 64 个名字带 cf/cloudflare 字样，其余
@@ -304,14 +305,19 @@ EXCLUDE_NODE_TYPES = ('http', 'socks5')
 #
 # 判断逻辑放进 Script Operator 而不是 Python 侧：与既有剔除/限量写法一致，产出仍完全由
 # Sub-Store 生成，不会因脚本侧改动触发 yaml.safe_dump 重写、丢掉原文格式。
-CF_IPV4_CIDRS = ('173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/22',
-                 '103.31.4.0/22', '141.101.64.0/18', '108.162.192.0/18',
-                 '190.93.240.0/20', '188.114.96.0/20', '197.234.240.0/22',
-                 '198.41.128.0/17', '162.158.0.0/15', '104.16.0.0/13',
-                 '104.24.0.0/14', '172.64.0.0/13', '131.0.72.0/22')
-CF_IPV6_CIDRS = ('2400:cb00::/32', '2606:4700::/32', '2803:f800::/32',
-                 '2405:b500::/32', '2405:8100::/32', '2a06:98c0::/29',
-                 '2c0f:f248::/32')
+CF_IPV4_CIDRS_FALLBACK = ('173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/22',
+                          '103.31.4.0/22', '141.101.64.0/18', '108.162.192.0/18',
+                          '190.93.240.0/20', '188.114.96.0/20', '197.234.240.0/22',
+                          '198.41.128.0/17', '162.158.0.0/15', '104.16.0.0/13',
+                          '104.24.0.0/14', '172.64.0.0/13', '131.0.72.0/22')
+CF_IPV6_CIDRS_FALLBACK = ('2400:cb00::/32', '2606:4700::/32', '2803:f800::/32',
+                          '2405:b500::/32', '2405:8100::/32', '2a06:98c0::/29',
+                          '2c0f:f248::/32')
+
+# 官方段表端点。为什么不用第三方镜像（如 cloudflare.com/ips-v4 文本端点）：JSON 端点
+# 一次给全 v4+v6 且带 success 字段可校验，文本端点要两次请求、也无法区分「真返回空」
+# 与「返回了错误页」。
+CF_IPS_API_URL = 'https://api.cloudflare.com/client/v4/ips'
 
 # 统计口径（贯穿日志与 nodes.json）。键名刻意避开共享层 _redact_value 的敏感子串：
 # 'ip' 是模糊匹配项，任何含 skipped 的键名（如 file_skipped）都会被整条打成 ***。
@@ -333,6 +339,47 @@ def env_int(env, key, default):
     except ValueError:
         log_progress('gist_nodes_bad_int', key=key, value=raw, fallback=default)
         return default
+
+
+def fetch_cf_cidrs(env, timeout):
+    """实时拉 Cloudflare 官方段表；任何失败都回退到内置快照。
+
+    返回 `(v4, v6, source)`，source 取 `'api'`（拉取成功）或 `'fallback'`（用内置表）。
+
+    为什么要实时拉：段表会随时间新增（新增意味着新区间的 CF 节点暂时漏剔）。宁可每次
+    多打一个请求，也不让判据随代码老化。
+
+    **为什么失败必须回退而不是放弃过滤**：过滤失效 = 整批 CF 节点原样发布，等于悄悄退回
+    改动前的行为；而回退表是「宁漏勿错」的安全侧（旧表最多漏剔新段，绝不会误伤非 CF 节点）。
+    所以任何异常——超时、DNS 失败、非 200、JSON 解析失败、字段缺失、列表为空——都只记
+    日志然后回退，绝不冒泡中断整轮。
+
+    校验为什么这么严：宁可回退到已知正确的旧表，也不要拿一个「结构对了但内容可疑」的
+    响应去生成算子——比如拿到空列表会把判据变成「谁都剔不掉」，比不做还隐蔽。
+    逐条校验落在 `ipaddress` 能解析、且是合法网络对象，挡住错误页/HTML 混入。
+    """
+    try:
+        text = http_get(CF_IPS_API_URL, timeout=timeout, max_bytes=64 * 1024)
+        data = json.loads(text)
+        if not data.get('success'):
+            raise ValueError(f"success={data.get('success')!r}")
+        result = data.get('result') or {}
+        v4 = [str(c) for c in (result.get('ipv4_cidrs') or [])]
+        v6 = [str(c) for c in (result.get('ipv6_cidrs') or [])]
+        if not v4 or not v6:
+            raise ValueError(f'段表为空 v4={len(v4)} v6={len(v6)}')
+        for c in v4:
+            ipaddress.ip_network(c, strict=True)
+        for c in v6:
+            ipaddress.ip_network(c, strict=True)
+    except Exception as e:
+        log_progress('cf_cidrs_fetch_failed', error=str(e),
+                     fallback_v4=len(CF_IPV4_CIDRS_FALLBACK),
+                     fallback_v6=len(CF_IPV6_CIDRS_FALLBACK))
+        return CF_IPV4_CIDRS_FALLBACK, CF_IPV6_CIDRS_FALLBACK, 'fallback'
+    log_progress('cf_cidrs_fetched', v4=len(v4), v6=len(v6),
+                 etag=result.get('etag'))
+    return tuple(v4), tuple(v6), 'api'
 
 
 def http_get(url, token='', timeout=30, max_bytes=0):
