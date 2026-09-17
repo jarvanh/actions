@@ -90,6 +90,21 @@ on:
         required: false
         type: string
         default: "120"
+      diag_409:
+        description: "409 语义验证 + 短名改回原名实验（2026-09-17，方案 B 验证环）。填 1 走本专项（跳过常规 13 组与拒收专项）——做两件事: E1 对「已存在/不存在」目录分别 mkdir，判决 409 是否等于「已存在」（决定 commit 2bf7836 的修复是否成立）；E2 把短名产物改名回原名，重启取真值看是否蒸发（回答「改回原名会消失吗」）"
+        required: false
+        type: string
+        default: "0"
+      diag_409_src:
+        description: "E2 用的源端文件路径（如 onedrive:2/xx/原名.mp4，必须换行分隔，取第 1 个）。不给则只做 E1（E1 才是判决性的）"
+        required: false
+        type: string
+        default: ""
+      diag_409_skip_e2:
+        description: "1=只做 E1（纯读+建目录，最快）；0=两组都做"
+        required: false
+        type: string
+        default: "0"
 
 concurrency: openlist-diag
 
@@ -173,14 +188,22 @@ jobs:
           DIAG_REJECT_MAX: ${{ inputs.reject_max }}
           DIAG_REJECT_WAIT: ${{ inputs.reject_wait }}
           DIAG_REJECT_NAME_MODE: ${{ inputs.reject_name_mode }}
+          DIAG_409_ENABLE: ${{ inputs.diag_409 }}
+          DIAG_409_SRC: ${{ inputs.diag_409_src }}
+          DIAG_409_SKIP_E2: ${{ inputs.diag_409_skip_e2 }}
           OL_CONTAINER: ${{ inputs.container }}
         run: |
           # 恒 exit 0: 诊断结果写在报告里，探针失败不该让 step 变红（否则
           # artifact 上传被跳过，最需要看的那份报告反而拿不到）
-          # reject_src 非空 ⇒ 走拒收归因专项（脚本自带报告路径 reject_report.txt），
-          # 与常规 13 组互斥——专项要的是「内容变量」的干净归因，混跑常规探针
-          # 的写入会让三时点判读失真
-          if [ -n "$DIAG_REJECT_SRC" ]; then
+          # 优先级: 409 专项 > 拒收专项 > 常规 13 组（三者互斥——专项要的是
+          # 「单一变量」的干净归因，混跑其它探针的写入会让判读失真）
+          if [ "$DIAG_409_ENABLE" = "1" ]; then
+            bash "$GITHUB_WORKSPACE/.github/scripts/openlist/diag_409_semantics.sh" \
+              "$DIAG_TARGET" "$OL_CONTAINER" || true
+            echo ""
+            echo "=========== 409 专项报告尾部 ==========="
+            tail -40 /tmp/ol_diag/diag409_report.txt 2>/dev/null || echo "(无报告文件)"
+          elif [ -n "$DIAG_REJECT_SRC" ]; then
             bash "$GITHUB_WORKSPACE/.github/scripts/openlist/diag_reject.sh" \
               "$DIAG_TARGET" "$OL_CONTAINER" || true
             echo ""
@@ -205,6 +228,7 @@ jobs:
           path: |
             /tmp/ol_diag/report.txt
             /tmp/ol_diag/reject_report.txt
+            /tmp/ol_diag/diag409_report.txt
             /tmp/ol_diag/container.log
           if-no-files-found: warn
           retention-days: 7
