@@ -15,6 +15,11 @@ taier 的测活、以及 **taier / gitee / cdn 三套**通知的降级渲染。
   经 deadline 是「不限」、直接传进来却是「立即停」。
 - **测活**：最危险的是 **fail-open 写反**——把「探测机制挂了」当成「节点死了」，
   整轮会一个节点都不测。那比在死节点上多花 25 秒糟得多，所以单独验。
+  另有一类更隐蔽的：**mihomo 的 provider 是惰性展开的**——`/providers/proxies` 给的是
+  声明清单，节点尚未注册进 `/proxies/{name}` 时探测会拿到 `Resource not found`
+  （本地 404，实测间隔 ~18.7ms，远小于 3000ms 超时）。run 35116972319 里这被误判成
+  「前 8 个节点都死了」并触发熔断。第 9 组钉住两件事：开测前 `wait_provider_ready()`
+  等展开、以及 `is_unknown_proxy_error()` 把这类错误与「真连不上」分开（fail-open 放行）。
 - **通知降级**：`aborted_due_to_runtime` 传错、或标题降级写反，会让「到点收摊」看起来
   像一次正常完成，读者无从判断这轮到底测完了没有。三套的**行位置也必须一致**。
 
@@ -280,6 +285,78 @@ def main():
                   rsn='到点收摊：预算 5 小时 0 分，已测 10/8326 个节点')
     check('预算内仅测完 10/8326' in l3, f'到点收摊时交代「测了多少/共多少」（实际 {l3}）')
     check('未达' not in l3 or '达标不足' in l3, '中止范围是补充说明，不改变原结论')
+
+    print('== 9. provider 惰性展开：等就绪 + 404 不判死（方案 C，run 35116972319 根因）==')
+    # 事故取证：那 8 条 `Resource not found` 每两次间隔恒为 ~18.7ms（`.016`→`.147`），
+    # 远小于 3000ms 的探测超时 ⇒ 是本地 HTTP 往返，mihomo 压根没连节点、只是
+    # `/proxies/{name}` 里查不到名字。根因是读 `/providers/proxies`（声明清单）后
+    # 仅 20ms 就开始探测，而节点尚未注册进路由表（16 秒后第一个测速结果才出现）。
+    import urllib.error
+
+    class _404(urllib.error.HTTPError):
+        def __init__(self):
+            super().__init__('u', 404, 'Not Found', {}, None)
+
+    # 9a. 判据：认「不认识这个名字」，不认「连不上」
+    for err, exp in [('Resource not found', True), ('no such proxy', True),
+                     ('timeout', False), ('connection refused', False),
+                     ('无延迟值（连不上）', False), ('', False)]:
+        check(t.is_unknown_proxy_error(err) is exp,
+              f'unknown 判据 {err!r} → {exp}（实际 {t.is_unknown_proxy_error(err)}）')
+
+    # 9b. 等就绪：前 2 次 404、第 3 次查到 ⇒ 就绪
+    _orig_get, _orig_sleep, _orig_log = t.mihomo_api_get, t.time.sleep, t.log_progress
+    st = {'n': 0}
+    ev9 = []
+    try:
+        t.time.sleep = lambda s: None
+        t.log_progress = lambda stage, **kw: ev9.append((stage, kw))
+
+        def flaky_get(path):
+            st['n'] += 1
+            if st['n'] < 3:
+                raise _404()
+            return {'name': 'n0'}
+
+        t.mihomo_api_get = flaky_get
+        ready, _waited, probed = t.wait_provider_ready(['n0', 'n1', 'n2', 'n3'], timeout=10)
+        check(ready is True, '未就绪→就绪时返回 True')
+        check(probed in ('n0', 'n1', 'n2', 'n3'), f'报出探测用的哨兵名（实际 {probed!r}）')
+        check([e[0] for e in ev9] == ['taier_provider_ready'],
+              f'记一条 provider_ready 便于观测（实际 {[e[0] for e in ev9]}）')
+
+        # 9c. 超时：始终 404 ⇒ False，且不抛异常（调用方据此降级）
+        t.mihomo_api_get = lambda path: (_ for _ in ()).throw(_404())
+        ev9.clear()
+        ready, _w, probed = t.wait_provider_ready(['a', 'b'], timeout=0.3)
+        check(ready is False and probed == '', '始终未就绪 → False（不抛异常）')
+        check([e[0] for e in ev9] == ['taier_provider_ready_timeout'],
+              '超时要留痕，否则「等过但没等到」看不出来')
+
+        # 9d. 空名单：不等待、不请求
+        calls9 = []
+        t.mihomo_api_get = lambda path: calls9.append(path) or {}
+        check(t.wait_provider_ready([], timeout=5) == (False, 0.0, '')
+              and t.wait_provider_ready(['', '  '], timeout=5) == (False, 0.0, ''),
+              '空/空白名单直接返回 False')
+        check(calls9 == [], '空名单不发任何请求（省掉必然失败的调用）')
+    finally:
+        t.mihomo_api_get, t.time.sleep, t.log_progress = _orig_get, _orig_sleep, _orig_log
+
+    # 9e. 撤销判死：原地改 results / alive_items，返回条数
+    r9 = [{'name': 'p0', 'probe_failed': True, 'ok': False},
+          {'name': 'p1', 'probe_failed': True, 'ok': False},
+          {'name': 'real', 'ok': False}]
+    a9 = [{'name': 'p0'}, {'name': 'p1'}, {'name': 'other'}]
+    q9 = [{'name': 'p0'}, {'name': 'p1'}]
+    n9 = t._revive_probe_failed(r9, a9, q9)
+    check(n9 == 2, f'返回撤销条数（实际 {n9}）')
+    check([x['name'] for x in r9] == ['real'],
+          f'伪造的「测活未通过」条目被摘掉、真失败保留（实际 {[x["name"] for x in r9]}）')
+    check([x['name'] for x in a9] == ['p0', 'p1', 'other', 'p0', 'p1'],
+          f'撤销的节点回到测速队列（实际 {[x["name"] for x in a9]}）')
+    check(q9 == [], '队列清空（避免下一轮重复撤销）')
+    check(t._revive_probe_failed(r9, a9, []) == 0, '空队列 → 返回 0、不改动')
 
     print()
     if FAILURES:

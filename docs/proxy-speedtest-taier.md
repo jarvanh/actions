@@ -120,10 +120,26 @@ gistnodes 经 provider 直接喂入，source_mapping 只有个位数条 ⇒ 绝�
 判定与导出都经 `speedtest_common.node_proxy_config` 取「`source_entry.proxy` 优先、
 缺失回落 `proxy_obj`」。细节见 [gitee 文档 · 订阅导出策略](proxy-speedtest-gitee.md#订阅导出策略三套共用)。
 
-**测活探测失败 ≠ 节点失败**：探测失败（mihomo 返回 `Resource not found` 等）记的是「机制
-没跑通」。熔断触发时会把已判死的节点**撤销判死、放回测速队列**（它们从未被真正探测过），
-通知里单独成节 `⚠️ 测活探测异常 · N`、不计入 `❌ 失败`。版式约定见
+**测活探测失败 ≠ 节点失败**：探测失败分两类，必须分开——一类是**机制没跑通**
+（mihomo 返回 `Resource not found`，即 `/proxies/{name}` 里查不到这个名字），一类是节点
+真连不上。前者不计入 `❌ 失败`，通知里单独成节 `⚠️ 测活探测异常 · N`。版式约定见
 [通知规范 · 2.7 测速三套](telegram-notify.md#27-测速三套githubscriptsproxy-speedtest)。
+
+⚠️ **`Resource not found` 的根因是 mihomo 的 provider 惰性展开**（2026-09-17 修）。
+`/providers/proxies` 给出的是**声明清单**，不等于节点已注册进 `/proxies/{name}` 路由表；
+而 `wait_mihomo()` 只等 `/version`（控制器监听，毫秒级），**不保证 provider 已展开**。
+事故取证（run 35116972319）：读快照 `16:13:31.996` 后仅 **20ms** 就开始探测，8 条
+`Resource not found` 的间隔恒为 **~18.7ms**（远小于 3000ms 探测超时 ⇒ 是本地 HTTP 往返，
+mihomo 压根没去连节点），而第一个测速结果要到 `16:13:48.712`（16 秒后）才出现。
+
+现在两道防线（缺一不可）：
+
+1. **开测前等就绪**：`wait_provider_ready()` 拿头尾各两个节点名探 `/proxies/{name}`，
+   探到即认为 provider 已展开（展开是整体行为，用哨兵比轮询几千个名字便宜）；
+   超时 60 秒后照常往下走（不阻塞整轮）。
+2. **`Resource not found` 不参与判死**：`is_unknown_proxy_error()` 把它与「真连不上」分开，
+   这类直接 **fail-open 放行去测速**（真连不上时测速那步自然失败，代价一个 25 秒窗口，
+   远小于误杀一批好节点）。连续 8 个「不认识」则停用测活（说明 provider 还没展开完）。
 
 ### Gist 文件名/描述（三套区分）
 
