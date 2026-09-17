@@ -145,8 +145,16 @@ variables → Actions → Variables 可随时改，留空走默认）：
 两个语义绑在一起就会出这种事故。
 
 实际采用的指标会写进日志（`subscription_policy` / `subscription_metric_fallback` /
-`subscription_metric_kept`）与 TG 通知文案。节点必须有原始配置（`source_entry.proxy`）
-才计入达标——否则导不进订阅。
+`subscription_metric_kept`）与 TG 通知文案。节点必须有**可导出配置**才计入达标——否则导不进
+订阅。取值顺序是 `source_entry.proxy` 优先、缺失时回落到 `proxy_obj`
+（`speedtest_common.node_proxy_config`）。
+
+⚠️ **回落这一层是 2026-09-17 补的，缺了它会整轮零产出。** `source_entry.proxy` 只在
+「节点名匹配上订阅 source_mapping」时才有值；编排轮（gistnodes 把节点经 provider 直接喂入）
+里 source_mapping 可能只有个位数条，而节点是几千个 ⇒ 绝大多数节点 `source_entry` 为空。
+实测 run 35116972319：8326 个节点里 206 个**测出了速度**（最高上传 245 Mbps），却因只认
+`source_entry.proxy` 全被判「无可用配置」⇒ 达标 0 ⇒ 订阅不上传。`proxy_obj` 是
+`collect_provider_snapshot` 从 mihomo provider 直接读出的完整节点配置，与前者语义等价。
 
 **TOP5 排序与判定指标一致**：三套的 TOP 榜都按实际采用的指标排序，通知标题标注
 `🏆 最快节点 · N · 按上传/按下载`，避免出现「按上传导出订阅、却按下行排 TOP」的自相矛盾。
