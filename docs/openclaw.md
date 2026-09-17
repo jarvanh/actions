@@ -428,6 +428,11 @@ serve 根本看不到，最快也要等下一轮（≈5.7 小时）。为此在�
 - **用 per-file 锁，不共用归档锁**：本循环周期短，与每 20 分钟的归档抢同一把锁会互相拖慢。
 - **失败不发通知**：抢不到锁跳过本轮、rclone 失败只记日志 —— 你随时可以重试，下一 tick 就同步，
   且收尾 3b 仍会把运行目录整体回推。
+- **拉起循环后立即同步跑一次探针**（`--- initial workbuddy credential sync probe ---`）：
+  后台循环的 stdout 只进 `/tmp/workbuddy-cred-sync.log`（在 runner 上，随轮次销毁），
+  而收尾打印只在**跑满一整轮**时才执行 —— 被取消的轮次收尾步骤会被跳过，等于看不到任何证据。
+  探针把同参数的 sync 结果直接打进 step 日志，任何轮次都留证：
+  `Checks: N/N` 即纳入同步的凭据数，`✅ probe ok` 表示连上 Dropbox 且成功。
 - **收尾会打印循环日志尾部**（`--- workbuddy-cred-sync.log tail ---`）与运行目录下的
   `workbuddy*.json` 清单，用来确认这段时间里同步是否真的在发生。
 
