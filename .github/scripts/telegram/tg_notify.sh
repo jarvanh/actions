@@ -16,8 +16,8 @@
 #   （历史名 TG_BOT_TOKEN / TG_CHAT_ID 自动兼容——见下方别名回退）
 # 收尾接线（可选，缺席时 tg_add_footer 优雅降级）:
 #   TG_RUN_URL        运行日志链接（workflow 注入 https://github.com/<repo>/actions/runs/<id>）
-#   TG_RUN_STARTED_AT run 起始 ISO 时间（历史由 workflow 注入 ${{ github.run_started_at }}；
-#     该表达式上下文已从平台移除，注入后通常为空值，故时长实际走 /proc/1 兜底）
+#   TG_RUN_STARTED_AT  历史注入名，平台无 github.run_started_at 上下文、注入恒为空；
+#     现仅作本地测试覆写口，时长实际走 /proc/1 兜底（详见 tg_add_footer 注释）
 # 版式规范（openlist 侧经 load_all.sh L0 层 source 本文件，不再自带副本）:
 #   ★ 2026-09-10 终版：全库无 <b>——一切信息文字裸文本，仅 <code>（机器值）、
 #     <pre>（日志/命令）、<a>（链接）有标签；层级由分隔线/空行/emoji/等宽承担。
@@ -137,26 +137,32 @@ tg_add_block() {
 # 统一收尾区（全库唯一收尾形态，自带与正文间的空行）:
 #   "\n⏱ 已运行 X 小时 Y 分 · 🔗 <a href="TG_RUN_URL">运行日志</a>\n"
 # 时长来源优先级:
-#   1. TG_RUN_STARTED_AT（workflow 注入，精确）
-#   2. /proc/1 启动时刻兜底 —— GitHub 平台已于 2026-09-05 移除 github.run_started_at
-#      表达式上下文（API 字段仍在），hosted runner 的 PID 1 随 job 启动，误差秒级
-# 降级链: 无 TG_RUN_STARTED_AT 且无 /proc/1 → 不显示时长；无 TG_RUN_URL → 整行跳过
+#   1. TG_RUN_STARTED_AT（仅兼容历史注入/本地测试覆写；值可解析为时间戳时采用）
+#   2. /proc/1 启动时刻兜底 —— GitHub 平台不提供 github.run_started_at 表达式上下文
+#      （2026-09-05 起，官方属性表无此项），workflow 注入恒为空串，故实际走本兜底；
+#      hosted runner 的 PID 1 随 job 启动，误差秒级，与 job 硬上限 6h 同口径
+#   取到 0（空值 / 解析失败 / 不可读）都继续往下一档走——「有值但解析失败」不得
+# pin 死 elapsed=0 而丢掉兜底（此前 elif 写法即此 bug，与 python 侧口径不一致）
+# 降级链: 两档都拿不到 → 不显示时长；无 TG_RUN_URL → 整行跳过
 # 附加链接: tg_add_footer <var> ["标签" "URL"]... → 追加 " · 🔗 <a>标签</a>"
 # 注意: <var> 必须是已积累正文的消息变量（原地追加）。勿用"中间空变量接 footer 再拼到
 # 正文"的两步写法——补尾换行检查的是 <var> 自身，空变量会跳过补换行，空行丢失。
 tg_add_footer() {
   local var="$1"
   shift
-  local line="" elapsed=0
+  local line="" elapsed=0 started=0
   if [ -n "${TG_RUN_STARTED_AT:-}" ]; then
-    local started
     started=$(date -d "${TG_RUN_STARTED_AT}" +%s 2>/dev/null || echo 0)
+    case "$started" in ''|*[!0-9]*) started=0;; esac
     [ "$started" -gt 0 ] && elapsed=$(( $(date +%s) - started ))
-  elif [ -r /proc/1 ]; then
+  fi
+  if [ "$elapsed" -le 0 ] && [ -r /proc/1 ]; then
     local p1ts
     p1ts=$(stat -c %Y /proc/1 2>/dev/null || echo 0)
-    [ "${p1ts:-0}" -gt 0 ] && elapsed=$(( $(date +%s) - p1ts ))
+    case "$p1ts" in ''|*[!0-9]*) p1ts=0;; esac
+    [ "$p1ts" -gt 0 ] && elapsed=$(( $(date +%s) - p1ts ))
   fi
+  [ "$elapsed" -ge 0 ] || elapsed=0
   if [ "$elapsed" -gt 0 ]; then
     local mins=$((elapsed / 60)) dur
     if [ "$mins" -ge 60 ]; then
