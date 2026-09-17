@@ -59,9 +59,13 @@ job，gistnodes 侧拿不到测速结果。抓取情况走 job 摘要与 progres
    | 顺序 | 算子 | 作用 |
    |---|---|---|
    | 1 | `Useless Filter` | 清掉「剩余流量/到期时间」这类信息节点与非 ASCII 凭据 |
-   | 2 | `Handle Duplicate Operator`（`action: delete`） | 按 `field` 组合去重 |
-   | 3 | `Handle Duplicate Operator`（`action: rename`） | 重名节点加后缀，保证名字唯一 |
-   | 4 | `Script Operator` | `proxies.slice(0, N)` 限量（仅当 `GIST_NODES_MAX_NODES > 0`） |
+   | 2 | `Script Operator` | `proxies.filter(...)` 剔掉 `EXCLUDE_NODE_TYPES` 里的协议（`http` / `socks5`，见下「为什么剔掉明文代理」） |
+   | 3 | `Handle Duplicate Operator`（`action: delete`） | 按 `field` 组合去重 |
+   | 4 | `Handle Duplicate Operator`（`action: rename`） | 重名节点加后缀，保证名字唯一 |
+   | 5 | `Script Operator` | `proxies.slice(0, N)` 限量（仅当 `GIST_NODES_MAX_NODES > 0`） |
+
+   剔除算子**必须排在去重之前**：先剔掉不要的协议，去重才有意义（否则会拿它们的去重结果
+   污染「去重后 M 个」这个口径）。
 6. **取回**：`GET /download/collection/<名>/ClashMeta` 拿 mihomo YAML；同时取 `<名>-raw` 的
    `JSON` 只用来数节点，得到「解析后 N → 去重后 M」这个可核对口径；
 7. **健康检查**（`GIST_NODES_ALIVE_FILTER`，默认开）：在发布**之前**起一个本地 mihomo
@@ -73,6 +77,22 @@ job，gistnodes 侧拿不到测速结果。抓取情况走 job 摘要与 progres
    （一个筛「活不活」、一个筛「能不能被装进 provider」）。详见下面「为什么还要试装」；
 9. **发布**：YAML 写进本工作流专属 Gist（`update_gist`）。被调测速工作流**自己**按 gist id
    现取 raw URL 当订阅源（见「为什么不能把 gist id 塞进 job output」）。
+
+## 为什么剔掉明文代理（http / socks5）
+
+`EXCLUDE_NODE_TYPES = ('http', 'socks5')`，在 Sub-Store 处理链第 2 步用
+`proxies.filter(...)` 剔除。理由：
+
+- 两者都是**无加密层的明文代理**（`http` 连凭据都是明文 `Basic`），拿来做翻墙订阅没有意义；
+- 实测占比不低：2026-09-17 一轮 13721 个节点里 `http` 1752 + `socks5` 236（约 14%），
+  剔掉后剩 11733。这些节点本来就要过一遍健康检查与试装，白烧 mihomo 的探测时间。
+
+**`https` 不需要单独列**：Clash / mihomo schema 里没有独立的 `https` 类型，HTTPS 代理也是
+`type: http` 加 `tls: true`（该轮 1752 个 `http` 里有 1083 个是这种）⇒ 排除 `http` 即同时
+排除 HTTP 与 HTTPS 代理。
+
+比对时统一 `String(p.type || "").toLowerCase()`：订阅来自各家转换器，`HTTP` / `Http` 都见过，
+不做大小写归一会漏网。
 
 ## 为什么发布前必须自己先测活
 
