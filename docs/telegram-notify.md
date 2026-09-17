@@ -433,8 +433,8 @@ Run ID：<code>12345678</code>
   │  额度剩 59.64 · 免费 · 过期 2026-09-21 08:32
   │  免费模型 2 · <code>deepseek-v4.1-flash</code> · <code>hy3</code>
   └─ <code>workbuddy-intl.json</code> · 国际站 · 付费耗尽
-     额度剩 0 · 免费 · 过期 2027-06-07 04:32
-     免费模型 1 · <code>glm-5.2</code> · 模型冷却 2
+     额度剩 0 · 免费 · 过期 2027-06-07 04:32 · 模型冷却 2
+     免费模型 1 · <code>glm-5.2</code>
 
 数据目录：<code>/dropbox/self-hosted/workbuddy-gateway</code>
 
@@ -454,8 +454,9 @@ Run ID：<code>12345678</code>
   **绝不回显文件内容**——那是真实 Access/Refresh Token。`workbuddy-status.json`
   是 serve 写的状态快照，不算凭据，必须排除。
 - **账号池**逐账号给：`凭据文件 · 站点 · 状态`，子行给 `额度 · 免费/付费 · Token 过期`
-  与 `免费模型 N · <具体模型名> · 模型冷却 N`（各项非空才并进子行；**免费模型名很多时
-  拆成独立子行，避免单行过长**）。数据源是 serve 写出的 **`workbuddy-status.json`**（jq 取）。
+  与 `免费模型 N · <具体模型名>`（各项非空才并进子行；**免费模型名很多时
+  拆成独立子行，避免单行过长**）。额度/状态/冷却取自 serve 写出的
+  **`workbuddy-status.json`**（jq 取），**免费模型名单另走上游模型目录接口**（见下条）。
 
   > **更正（2026-09-17）**：此前本节写「不要解析 workbuddy-status.json，其键名上游未文档化」——
   > 这个判断是错的。该文件的键名由上游 Go 结构体 `accountSnapshot` / `statusSnapshot`
@@ -472,6 +473,10 @@ Run ID：<code>12345678</code>
   > | `freeModels` / `modelCooldowns` | 已确认免费的模型**数** / 当前冷却中的模型**数** |
   > | `modelStates` | 逐模型账本：键是模型名，值含 `costClass`（`free`/`paid`/`unknown`）等 |
   >
+  > `freeModels` 是**降级兜底**用的计数（目录接口取不到名单时显示它）；
+  > 正式的免费模型**名单**走上游模型目录接口，见下条。
+  > `modelStates` **不进通知**——它只含「已实测过」的模型，既不完整、口径也与目录接口不同。
+  >
   > 中文状态名照上游 `monitor` 表格的映射（`paid_exhausted` → 付费耗尽等）；
   > 额度格式照上游 `formatQuota`（|v|<0.005 归零，两位小数去尾零）。
   > **`quotaKnown` 为 false 时不要显示额度数字**——那只是「还没查到」，
@@ -484,38 +489,41 @@ Run ID：<code>12345678</code>
   > 「剩余积分 / 免费模型 / 模型冷却」原本以为只能从 `monitor` 的交互式表格取，
   > 实际快照里就有（`quotaRemaining` / `freeModels` / `modelCooldowns`）。
 
-- **免费模型要列具体模型名，不能只给计数**：`freeModels` 只是个数，读者据此无法知道
-  到底哪个模型免费 —— 于是必须把 `modelStates` 里 `costClass == "free"` 的**键名**列出来。
-  `modelStates` 的键就是模型名（上游 `normalizeModelName` 已小写化）。
+- **免费模型名取自上游「模型目录」接口，不靠探测**：`freeModels` 只是个计数、`modelStates`
+  只记「已实测过」的模型（键在 `modelStateLocked` 里按需创建、默认 `unknown`），
+  两者都拿不到完整免费目录。完整口径在上游的模型目录接口里：
 
-  > **`modelStates` 只记「已实测过」的模型**（2026-09-17 核实上游 `probe.go` / `main.go`）：
-  > 键在 `modelStateLocked` 里按需创建（默认 `costClass = unknown`），只有真实请求
-  > 返回的 `usage.credit` 才能把它学成 `free` / `paid`。
-  > 因此**光读快照拿不到完整免费目录**，必须在通知前主动探测。
-
-  **探测走上游自带的 probe 接口**，不要手搓请求逻辑：
-
-  | 用途 | 接口 / 命令 |
+  | 项目 | 值 |
   |---|---|
-  | 取全量模型目录 | `GET /v1/models`（返回目录里所有模型 id） |
-  | 主动探测免费/收费 | `POST /admin/probe`，body `{"auth":"<凭据文件名>","models":[...]}` |
-  | CLI 包装 | `workbuddy-gateway probe -auth <文件名> -models a,b,c` |
+  | 路径 | `GET {Base}/v2/enterprises/personal/models` |
+  | 国内站 `Base` | `https://copilot.tencent.com` |
+  | 国际站 `Base` | `https://www.workbuddy.ai` |
+  | 认证 | 该账号的 `auth.accessToken` → `Authorization: Bearer <token>` |
 
-  - **探测是「对上游发一次真实 chat 请求」**：`probe` 用固定 prompt 要一段约 150 词正文，
-    `max_tokens=300`，再按返回的 `usage.credit` 判定 —— `credit > 0` → `paid`；
-    `credit == 0` 且 `total_tokens ≥ 100`（上游 `modelFreeMinTokens`）→ `free`；
-    样本不足或没返回 `credit` → `unknown`（**不判定免费**，别把 unknown 当 free）。
-  - **`/admin/probe` 只接受回环来源**，且服务设了 `-api-key` 时仍需带密钥；
-    本仓库不设密钥，直接调本地端口即可。
-  - **单次上限 50 个模型**（body 里 `limit > 50` 被上游截断）：要探更多得自己分批。
-  - **结果会落进快照**：`/admin/probe` 结束前调 `writeStatusSnapshot()`，
-    探测结论写进 `modelStates`，随 `workbuddy-status.json` 回推 Dropbox；
-    serve 下轮启动时 `restoreAccountRuntimeStateLocked` 会恢复这份账本
-    —— 所以**首轮探过就不用再探**，后续轮次直接读快照即得结论。
-  - **探测可能改变账号状态**：命中额度耗尽会调 `markModelQuotaBlocked`（记为该账号收费模型），
-    命中模型级限流会调 `markModelCooldown`（该模型进冷却）—— 通知里的「模型冷却」计数
-    可能因本轮探测而升高，属预期而非故障。
-  - 探测失败/超时不阻塞通知：拿不到名字就退回只给 `免费模型 N` 计数（降级，不编造名字）。
+  - **站点由凭据文件的 `edition` 字段决定**：`cn`（或缺失）→ 国内站，`intl` → 国际站。
+    两个站点域名不同，**必须按账号各自的 edition 分别请求**，不能只调一个。
+  - 请求头按上游 `fetchLiveCatalogByAuth` 原样带齐（`X-Client-ID` / `X-Client-Version` /
+    `X-Product` / `X-User-Id` / `X-Enterprise-Id` / `X-Domain`，值取自凭据文件的
+    `account.uid` / `account.enterpriseId` / `auth.domain` 与站点 profile 常量）。
+  - **这条接口只读、不消耗额度**，不产生真实 chat 请求，也不改变账号状态
+    （与已废弃的 `/admin/probe` 相反，后者每模型发一次真实请求、可能触发
+    `markModelQuotaBlocked` / `markModelCooldown`）。
+  - **免费判据照上游 `siteKnownFree` 的口径**：`credits` 能解析成倍率、且
+    **生效倍率为 0 且促销未过期**（`multiplier == 0 && !promoExpired`）。
+    生效倍率 = `baseMultiplier`，若命中促销再乘促销 `factor`（`factor == 0` 即 `promoFree`）。
+    `credits` 解析不出来或倍率 > 0 → **不算免费**（别把未知当免费）。
+  - 结论**只用于展示**，不写回快照：`modelStates` 是 serve 的内存账本，快照由 serve 独占重写，
+    外部批量写入会被覆盖（这也是当初不自己写账本的原因）。
+  - 接口失败/超时不阻塞通知：拿不到名单就只给计数（降级，不编造名字）。
+    降级时**只给计数、不给名单**，避免两种口径混在一行里。
+
+  > 为什么不沿用探测：`/admin/probe` 是**逐账号 × 逐模型串行**发真实请求、且**全部跑完才写响应**，
+  > 而 serve 的 `WriteTimeout` 只有 300 秒（2026-09-17 实测 44 模型 × 4 账号耗时 634 秒），
+  > 请求会被服务端写超时截断、拿不到 `.results`。目录接口一次 GET 即得全量，无此问题。
+
+- **`免费模型 N` 的 N 与后面名单的数量必须一致**：N 是**名单长度**，不是快照的 `freeModels`。
+  两者数值不同（`freeModels` 是「已实测」数），**以名单为准** —— 否则会出现
+  「免费模型 2 · 只有一个名字」的自相矛盾。只有降级（拿不到名单）时才用快照计数。
 
 - **免费模型名清单属「结构性清单」，全量展示、不折叠**：读者要逐条核对哪些模型免费，
   折叠成「还有 N 个…」等于把最需要看的部分藏起来（规范 · 折叠规则：判据是「折掉会不会
