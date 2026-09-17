@@ -375,7 +375,7 @@ def main():
         check(len(gh_calls) == 2 and all(c[-1] == NEW_GIST_ID for c in gh_calls),
               f'连续两轮都写同一个值，不报错（实际 {len(gh_calls)} 次）')
 
-        # 13f. update_gist 撞上 404（旧 id 失效）⇒ 新建路径必须同样回填
+        # 13f. update_gist 撞上 404 —— 真失效（重试仍 404 且 GET 读不到）⇒ 新建并回填
         events13.clear()
         gh_calls.clear()
         _set(GITHUB_REPOSITORY='jarvanh/actions',
@@ -384,17 +384,100 @@ def main():
         def patch_404(url, token, payload=None, method='GET', timeout=60):
             if method == 'PATCH':
                 raise urllib.error.HTTPError(url, 404, 'Not Found', {}, None)
-            return {'id': NEW_GIST_ID, 'html_url': 'https://gist.github.com/x',
-                    'files': {C.GIST_DEFAULT_FILENAME: {'raw_url': RAW}}}
+            if method == 'POST':
+                return {'id': NEW_GIST_ID, 'html_url': 'https://gist.github.com/x',
+                        'files': {C.GIST_DEFAULT_FILENAME: {'raw_url': RAW}}}
+            # GET 也 404 ⇒ id 确实死了
+            raise urllib.error.HTTPError(url, 404, 'Not Found', {}, None)
 
         C.github_api_request = patch_404
         res = C.update_gist({'GH_TOKEN': 'ghp_fake',
                              'PROXY_SPEEDTEST_GIST_ID': 'deadbeef'}, 'proxies:\n  - name: a\n')
-        check(res.get('created') is True, f'404 后转为新建（实际 created={res.get("created")}）')
+        check(res.get('created') is True, f'真失效时 404 转新建（实际 created={res.get("created")}）')
         check(len(gh_calls) == 1 and NEW_GIST_ID in gh_calls[0],
               f'404→新建 这条路径也要回填，否则循环不断（实际 {gh_calls}）')
         recreated = [e for e in events13 if e['stage'] == 'gist_patch_404_recreate']
         check(len(recreated) == 1, f'记一条 404_recreate（实际 {len(recreated)}）')
+        check(len([e for e in events13 if e['stage'] == 'gist_patch_404_retry']) == 1,
+              '真失效也要先重试一次再判死（不能见 404 就新建）')
+
+        # 13g. 回归 2026-09-17 事故：PATCH 瞬时 404 但 GET 可见 ⇒ 必须复用、绝不许新建
+        #      （原实现制造了孤儿 gist 279597be，页面上一模一样的两个文件）
+        events13.clear()
+        gh_calls.clear()
+        _set(GITHUB_REPOSITORY='jarvanh/actions',
+             PROXY_SPEEDTEST_GIST_SECRET_NAME='PROXY_SPEEDTEST_TAIER_GIST_ID')
+        LIVE_ID = 'livegist'
+
+        def patch_flaky_404(url, token, payload=None, method='GET', timeout=60):
+            if method == 'PATCH':
+                raise urllib.error.HTTPError(url, 404, 'Not Found', {}, None)
+            # GET 能读到 ⇒ id 活着，404 是抖的
+            return {'id': LIVE_ID, 'files': {C.GIST_DEFAULT_FILENAME: {'raw_url': RAW}}}
+
+        C.github_api_request = patch_flaky_404
+        try:
+            C.update_gist({'GH_TOKEN': 'ghp_fake',
+                           'PROXY_SPEEDTEST_GIST_ID': LIVE_ID}, 'proxies:\n  - name: a\n')
+            check(False, 'PATCH 404 但 GET 可见 ⇒ 必须抛错（暴露出来），不许静默新建')
+        except urllib.error.HTTPError as ex:
+            check('拒绝新建' in str(ex), f'抛出的错误要说明拒绝新建的原因（实际 {ex}）')
+        check(gh_calls == [], f'抖动导致的 404 绝不许回填 secret（实际 {gh_calls}）')
+        check(not [e for e in events13 if e['stage'] == 'gist_patch_404_recreate'],
+              '抖动路径不许记 404_recreate（记了就是又新建了）')
+        check(len([e for e in events13 if e['stage'] == 'gist_patch_404_retry']) == 1,
+              '抖动路径也要记录先重试过')
+
+        # 13h. 重试即成功（真·瞬时抖动）⇒ 正常返回，created=False，不新建
+        events13.clear()
+        gh_calls.clear()
+        _set(GITHUB_REPOSITORY='jarvanh/actions',
+             PROXY_SPEEDTEST_GIST_SECRET_NAME='PROXY_SPEEDTEST_TAIER_GIST_ID')
+        calls18 = {'n': 0}
+
+        def patch_once_404(url, token, payload=None, method='GET', timeout=60):
+            if method == 'PATCH':
+                calls18['n'] += 1
+                if calls18['n'] == 1:
+                    raise urllib.error.HTTPError(url, 404, 'Not Found', {}, None)
+                return {'id': LIVE_ID, 'html_url': 'https://gist.github.com/x',
+                        'files': {C.GIST_DEFAULT_FILENAME: {'raw_url': RAW}}}
+            return {'id': LIVE_ID, 'files': {C.GIST_DEFAULT_FILENAME: {'raw_url': RAW}}}
+
+        C.github_api_request = patch_once_404
+        res = C.update_gist({'GH_TOKEN': 'ghp_fake',
+                             'PROXY_SPEEDTEST_GIST_ID': LIVE_ID}, 'proxies:\n  - name: a\n')
+        check(res.get('ok') is True and res.get('created') is False,
+              f'重试成功即复用，created 必须为 False（实际 {res.get("created")}）')
+        check(calls18['n'] == 2, f'恰好 PATCH 两次（首败 + 重试，实际 {calls18["n"]}）')
+        check(gh_calls == [], '复用路径不许回填 secret')
+        check(len([e for e in events13 if e['stage'] == 'gist_patch_404_recovered']) == 1,
+              f'记一条 404_recovered（实际 {len([e for e in events13 if e["stage"] == "gist_patch_404_recovered"])}）')
+
+        # 13i. 重试拿到非 404 的错（如 500/403）⇒ 原样抛，不降级成新建
+        events13.clear()
+        gh_calls.clear()
+        _set(GITHUB_REPOSITORY='jarvanh/actions',
+             PROXY_SPEEDTEST_GIST_SECRET_NAME='PROXY_SPEEDTEST_TAIER_GIST_ID')
+
+        calls19 = {'n': 0}
+
+        def patch_then_500(url, token, payload=None, method='GET', timeout=60):
+            if method == 'PATCH':
+                calls19['n'] += 1
+                if calls19['n'] == 1:
+                    raise urllib.error.HTTPError(url, 404, 'Not Found', {}, None)
+                raise urllib.error.HTTPError(url, 500, 'Server Error', {}, None)
+            return {'id': LIVE_ID, 'files': {}}
+
+        C.github_api_request = patch_then_500
+        try:
+            C.update_gist({'GH_TOKEN': 'ghp_fake',
+                           'PROXY_SPEEDTEST_GIST_ID': LIVE_ID}, 'proxies:\n  - name: a\n')
+            check(False, '重试拿到 500 ⇒ 必须原样抛出，不许吞掉')
+        except urllib.error.HTTPError as ex:
+            check(ex.code == 500, f'抛出的应是重试遇到的那个错（实际 {ex.code}）')
+        check(gh_calls == [], '非 404 的错误路径不许回填 secret（那是别人的 gist）')
     finally:
         C.github_api_request = orig_request13
         C.log_progress = orig_log13

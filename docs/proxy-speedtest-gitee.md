@@ -152,8 +152,19 @@
 - 文件名/描述经 `PROXY_SPEEDTEST_GIST_FILENAME` / `PROXY_SPEEDTEST_GIST_DESCRIPTION`
   覆盖（`_gist_identity`，实现在 speedtest_common.py），本工作流为
   `proxy_speedtest_gitee_subscription.yaml` / `proxy speedtest subscription (gitee 上行/下行/延迟)`；
-- id 缺失或 404 时自动新建（`update_gist` → `create_gist`），新 id 写回
+- id 缺失时自动新建（`update_gist` → `create_gist`），新 id 写回
   `~/.openclaw/.env`（runner 上不跨 run 持久）+ TG 通知给链接，需回填 secret。
+- **id 存在但 PATCH 撞 404 时，先重试再判死**（2026-09-17 修，事故见下）：
+  真·失效是**稳定**的、API 抖动是**瞬时**的 ⇒ 原样重试一次；仍 404 再 GET 复核
+  （PATCH 与 GET 是两条独立路径，GET 能读到目标文件即证明 id 还活着），
+  只有「重试仍 404 **且** GET 也读不到」才新建。
+  - 事故：2026-09-17 run 35160462273 对一枚正常在用的 taier gist 拿到一次瞬时 404，
+    旧实现见 404 就新建并回填 secret；而并发的另一轮仍用旧 id 正常更新、又把 secret
+    覆盖回去 ⇒ 页面上出现**两个描述与文件名完全相同**的订阅 gist，新那个只活了 1 个
+    修订就成孤儿，只能靠人肉发现（2026-09-17 已删除孤儿 `279597be`）。
+  - 日志：`gist_patch_404_retry`（重试）→ `gist_patch_404_recovered`（重试即成功，正常）
+    / `gist_patch_404_recreate`（确认失效，新建）。若看到抛错文案带「拒绝新建」，
+    说明 PATCH 404 但 GET 可见、判定为抖动——**这是有意的**，暴露出来比静默建垃圾好。
 
 ## 环境变量
 
@@ -341,7 +352,7 @@ taier 与 cdn 以 import 复用——**不得留本地副本**，否则修一处
 | GitHub API 403/限流 | 匿名调用共享出口 IP 60 次/h；workflow 已带 `GITHUB_TOKEN`/`GH_TOKEN` 回退 |
 | Gitee 仓库体积超限 | `rebuild_gitee_repo` 自动重建私有仓库 `proxy-speedtest-temp` |
 | **节点 push 全部超时**（连直连基线也超时） | Gitee 仓库超限/被回收时 git 常表现为**挂起超时**而非明确报错（2026-09-08 实测连续三轮 0 成功）。引擎已自愈：本轮尚无成功 push 且节点失败为超时/被拒/size limit 时，自动 `rebuild_gitee_repo` 一次并重试该节点（日志 `repo_rebuild_on_push_timeout`，每轮限一次）；若重建后仍失败，多为 Gitee 账号级限流，等下一轮即可 |
-| Gist 404 | id 失效 → 自动新建新 Gist，TG 给链接后回填 secret |
+| Gist 404 | **分两种**：真失效（重试仍 404 且 GET 也读不到）→ 新建并回填 secret；瞬时抖动（重试成功，或 404 但 GET 可见）→ 复用原 gist，绝不再建。见 [Gist 约定](#gist-约定三套各用各的)。日志 `gist_patch_404_retry` / `_recovered` / `_recreate` 三选一可定位 |
 | Gist 422（`missing_field: files`） | 2026-09-08 修：`update_gist` 曾在旧文件已删除后每轮仍发 `旧文件名: null`，GitHub 判 files 无有效字段。现在先 GET 探测旧文件是否存在才发删除项，且 422 会去掉删除项重试一次 |
 | 订阅可用性存疑 | 本工作流只负责导出达标节点、不做可用性回拉验证（2026-09-10 移除：抽检信息量低于本轮 push/clone 实测，且失败只制造误导性告警）。订阅端导入失败的排查重心回到「节点是否达标、订阅源本身是否可用」 |
 | 该工作流当前在 Actions 里被手动禁用 | 重新启用后按计划运行 |

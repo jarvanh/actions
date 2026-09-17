@@ -1019,11 +1019,34 @@ def update_gist(env, yaml_text=''):
         res = _patch_gist(gist_id, token, payload)
     except urllib.error.HTTPError as e:
         if e.code == 404:
-            # 旧 id 已失效（被删 / 从未回填）→ 新建。新建路径会自动回填 secret，
-            # 所以这个循环**最多再发生一次**（下一轮起就复用新 id），不会无限新建。
-            log_progress('gist_patch_404_recreate', gist_id=gist_id)
-            return create_gist(env, yaml_text)
-        if e.code == 422 and GIST_DEFAULT_FILENAME in files_payload and files_payload[GIST_DEFAULT_FILENAME] is None:
+            # 404 有两种成因，必须区分开（2026-09-17 实测踩坑）：
+            #   a) id 真失效（被删 / 从未回填）→ 应该新建；
+            #   b) GitHub API 瞬时抽风 / 最终一致性延迟 → **不该新建**。
+            # 原实现不区分、见 404 就新建，实测制造出孤儿 gist：run 35160462273 在
+            # 2026-09-17 00:16 对还在正常使用的 gist 拿到一次 404，于是新建了
+            # 279597be 并回填 secret；而并发的另一轮仍用旧 id 正常更新、又把 secret
+            # 覆盖回去 ⇒ 新 gist 只活了 1 个修订就成了没人引用的垃圾（页面上一模一样
+            # 的两个文件，只能靠人肉发现）。
+            # 判据：真失效是**稳定**的，抖动是**瞬时**的 ⇒ 先原样重试一次；仍 404 还要
+            # 用 GET 复核（PATCH 与 GET 是两条独立路径，GET 通即证明 id 还活着）。
+            log_progress('gist_patch_404_retry', gist_id=gist_id)
+            try:
+                res = _patch_gist(gist_id, token, payload)
+                log_progress('gist_patch_404_recovered', gist_id=gist_id)
+            except urllib.error.HTTPError as e2:
+                if e2.code != 404:
+                    raise
+                if gist_has_file(env, gist_id, yaml_filename, token):
+                    # GET 能读到目标文件 ⇒ id 没失效，404 是假的 ⇒ 不许新建
+                    raise urllib.error.HTTPError(
+                        e2.url, e2.code,
+                        f'gist {gist_id} PATCH 404 但 GET 可见，判定为瞬时抖动，拒绝新建',
+                        e2.hdrs, e2.fp)
+                # 重试仍 404 且 GET 也读不到 ⇒ 确认真失效 → 新建。
+                # 新建路径会自动回填 secret，所以这个循环**最多再发生一次**。
+                log_progress('gist_patch_404_recreate', gist_id=gist_id)
+                return create_gist(env, yaml_text)
+        elif e.code == 422 and GIST_DEFAULT_FILENAME in files_payload and files_payload[GIST_DEFAULT_FILENAME] is None:
             # 兜底：删除项引发 422（旧文件其实已不存在 / API 口径变动）→ 去掉删除项重试一次
             log_progress('gist_patch_retry_without_delete', gist_id=gist_id, error=str(e))
             files_payload.pop(GIST_DEFAULT_FILENAME, None)
