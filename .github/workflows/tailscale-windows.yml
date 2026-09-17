@@ -123,7 +123,6 @@ jobs:
           # 与 Enable SSH 步骤同一取值，密码明文只出现在 Telegram 通知里（不打印到 Actions 日志）
           RUNNER_PASSWORD: ${{ secrets.RUNNER_PASSWORD }}
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          TG_RUN_STARTED_AT: ${{ github.run_started_at }}
         run: |
           # 每次 runner 就绪都推送 SSH/RDP 入口；通知失败不影响主流程
           # 排版助手 + 发送层真源（pwsh 版，与 bash tg_notify.sh 同语义: 429 重试、解析失败抛出）
