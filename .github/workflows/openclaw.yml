@@ -2094,13 +2094,19 @@ jobs:
           WB_STILL_RUNNING=0
           # 末尾 || true：本步骤是 set -e，pgrep 无匹配返回 1 会让整段提前退出、通知发不出去
           pgrep -f "$WB_BIN serve" >/dev/null 2>&1 && WB_STILL_RUNNING=1 || true
-          # 回推运行目录到 Dropbox（含 serve 写出的 workbuddy-status.json 与本轮 logs/）；
+          # workbuddy 进程已停 → 回推运行目录（含 serve 写出的 workbuddy-status.json 与 logs/）。
           # 只 copy 不 sync：远端的历史日志不该被本轮删掉。失败不阻塞收尾通知。
+          # 周期回推循环（每 5 分钟）此时已被 kill，这里做的是最终兜底 + 让 logs/ 也落盘。
           echo "3b-1. Syncing workbuddy data back to Dropbox..."
           rclone copy "$WB_RUN_DIR" "dropbox:self-hosted/workbuddy-gateway" \
             --retries 5 --low-level-retries 10 --timeout 1m --contimeout 15s 2>/dev/null || \
             echo "⚠️ workbuddy 数据回推失败（状态快照可能落后一轮）"
           WB_VER="$(head -n 1 "$WB_DIR/.installed-version" 2>/dev/null || true)"
+          # 把周期回推循环的日志尾部打出来：它跑在后台，日志只在 runner 上，
+          # 不打印就无从确认「每 5 分钟回推」是否真的在发生（本轮次次同步成功/跳过/失败）。
+          echo "--- workbuddy-status-sync.log tail ---"
+          tail -n 10 /tmp/workbuddy-status-sync.log 2>/dev/null || echo "<no sync log>"
+          echo "--- end workbuddy-status-sync.log tail ---"
 
           wb_stop_notify() {
             # 版式（规范 · 告警/结果通知）：标题 emoji 与结论一致；机器值走 <code>。
