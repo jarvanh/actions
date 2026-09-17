@@ -885,16 +885,31 @@ jobs:
           echo "2. Starting workbuddy-gateway serve on ${WB_PORT}..."
           pkill -f "$WB_BIN serve" 2>/dev/null || true
           sleep 1
+          # 启动前置检查：这三项任一不成立都会导致"起来就退且日志为空"，
+          # 而空日志无法区分原因，所以先逐项探明并打到 stdout 再启动。
+          echo "   preflight: binary=$WB_BIN"
+          ls -l "$WB_BIN" 2>&1 || true
+          if [ ! -x "$WB_BIN" ]; then
+            echo "❌ 二进制不可执行：$WB_BIN（下载失败或权限位丢失）"
+          fi
           # serve 的工作目录必须是数据目录：凭据靠"自动发现当前目录下 workbuddy*.json"入池，
           # 状态文件 workbuddy-status.json 与 logs/ 也都写在同目录，随 Dropbox 持久化。
           # 二进制在本地盘（$WB_BIN），执行它不受挂载点 noexec 影响；两者路径刻意分离。
           # 凭据文件由用户另行放入数据目录（二维码登录需人工扫码，workflow 内无法完成）。
-          (
-            cd "$WB_DIR" || exit 1
-            nohup "$WB_BIN" serve -addr 127.0.0.1 -port "$WB_PORT" \
-              > "$WB_LOG" 2>&1 &
-            echo $! > /tmp/workbuddy-serve.pid
-          )
+          # 不用「子 shell + exit 1」：cd 失败时子 shell 悄悄退出、外层拿不到状态，
+          # 表现为「进程已退出但 serve.log 为空」而无法归因。改为子 shell 内显式写日志，
+          # 且不改变外层 cwd（后续 grep/curl 都用绝对路径，但保持 cwd 不变更稳）。
+          if ! ( cd "$WB_DIR" ); then
+            echo "❌ 无法进入数据目录 $WB_DIR（Dropbox 挂载点未就绪？）" >&2
+            printf '%s\n' "cd $WB_DIR failed: Dropbox mount not ready" > "$WB_LOG"
+          else
+            (
+              cd "$WB_DIR" || exit 1
+              nohup "$WB_BIN" serve -addr 127.0.0.1 -port "$WB_PORT" \
+                > "$WB_LOG" 2>&1 &
+              echo $! > /tmp/workbuddy-serve.pid
+            )
+          fi
 
           # 健康检查：GET /health 返回任意 HTTP 响应码即视为已监听。
           # 就绪后再校验进程是否还在：进程若已崩，端口可能短暂由 TIME_WAIT/旧进程占用，
