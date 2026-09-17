@@ -150,6 +150,12 @@ jobs:
           # 延迟探测参数（经代理对 gitee.com HTTP 计时，与 cdn 的 latency_probe 同实现）
           PROXY_SPEEDTEST_LATENCY_SAMPLES: '4'
           PROXY_SPEEDTEST_LATENCY_TIMEOUT: '8'
+          # 上行是否经代理（2026-09-17 与 cdn 统一，同名同默认）：
+          # 1=经代理（测代理节点上行质量，默认，保持既有口径不变）；
+          # 0=剥净代理变量直连 Gitee（测家庭宽带直连上行）。
+          # 与下面直连基线配套：切直连后两者应接近，偏差大说明有别的瓶颈。
+          PROXY_SPEEDTEST_UPLOAD_VIA_PROXY: '1'
+          # 直连基线（家庭宽带对照）：不经代理 push+clone 一次，给出可比的家庭宽带数字
           PROXY_SPEEDTEST_DIRECT_BASELINE_TIMEOUT: '60'
           PROXY_SPEEDTEST_DIRECT_BASELINE_MAX_ATTEMPTS: '5'
           # 订阅导出策略（四套共用，脚本默认值；各脚本消费）：

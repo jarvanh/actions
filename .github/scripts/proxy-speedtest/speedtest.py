@@ -78,9 +78,12 @@ from speedtest_gitee import (
     ensure_test_file,
     format_duration,
     git_force_push_testfile,
+    # 上行测速与直连基线（与 Gitee 共用同一份实现）
+    run_direct_baseline,
     switch_proxy,
     # 开测前等 provider 展开（否则切节点会静默作用于上一个节点）
     wait_provider_ready,
+    upload_speedtest,
 )
 
 # ----------------------------------------------------------------------------
@@ -160,6 +163,14 @@ CONFIG = {
         os.environ.get('PROXY_SPEEDTEST_GITEE_REPO', 'proxy-speedtest-temp').strip() or 'proxy-speedtest-temp',
     'PROXY_SPEEDTEST_GITEE_BRANCH':
         os.environ.get('PROXY_SPEEDTEST_GITEE_BRANCH', DEFAULT_GITEE_BRANCH).strip() or DEFAULT_GITEE_BRANCH,
+    # 直连基线（家庭宽带对照，与 Gitee 同名同默认）。默认**开**：有些对照才有意义。
+    # 单列开关，因为直连 push 会往 Gitee 仓库推东西，偶发超时较常见，必要时可关掉。
+    'PROXY_SPEEDTEST_DIRECT_BASELINE':
+        (os.environ.get('PROXY_SPEEDTEST_DIRECT_BASELINE', '1').strip().lower() not in ('0', 'false', 'no', 'off')),
+    'PROXY_SPEEDTEST_DIRECT_BASELINE_TIMEOUT':
+        int(os.environ.get('PROXY_SPEEDTEST_DIRECT_BASELINE_TIMEOUT', '60')),
+    'PROXY_SPEEDTEST_DIRECT_BASELINE_MAX_ATTEMPTS':
+        int(os.environ.get('PROXY_SPEEDTEST_DIRECT_BASELINE_MAX_ATTEMPTS', '5')),
 }
 
 RESULT_JSON = HOME_RUNTIME / 'speedtest_result.json'
@@ -306,25 +317,27 @@ def download_speedtest(urls, proxy_env, timeout=30.0, size_hint_mib=10, max_dura
 
 
 # ----------------------------------------------------------------------------
-# 可选 Gitee 上行测速（经 mihomo 代理 git push，反映代理节点上行带宽）
+# 上行测速（经 mihomo 代理 git push，反映代理节点上行带宽）
+#
+# 实现已统一到 speedtest_gitee（2026-09-17）：`upload_speedtest` 一份代码同时支持
+# 「经代理」与「直连」两种模式，CDN 与 Gitee 都调它。此前 CDN 自带
+# `gitee_push_speedtest` / `_gitee_push_direct` 两份等价实现，靠人工与 Gitee 对齐口径，
+# 改一处漏一处——现在删掉，避免再次漂移。
 # ----------------------------------------------------------------------------
 
 
 def gitee_push_speedtest(env, size_mib, push_timeout, branch, via_proxy=True):
     """向 Gitee 私有仓库上行一个固定大小文件，按耗时换算上行 MiB/s。
 
-    - via_proxy=True（默认）：复用 speedtest_gitee 的「经代理 git push」方案，
-      携带 mihomo 混合端口代理环境变量调用 git push，**真正反映代理节点的
-      上行带宽**（端点位于中国，符合国内测速要求）。
-    - via_proxy=False（向后兼容）：直连 Gitee 用 git push（已剥离代理变量），
-      反映家庭宽带直连上行。
+    - via_proxy=True（默认）：经 mihomo 代理 push，**真正反映代理节点的上行带宽**
+      （端点位于中国，符合国内测速要求）；
+    - via_proxy=False：直连 Gitee，反映**家庭宽带直连上行**。
     返回 {ok, mibps, bytes, seconds, error}。
     """
     token = env.get('GITEE_PRIVATE_TOKEN', '').strip()
     if not token:
         return {'ok': False, 'mibps': None, 'error': 'missing GITEE_PRIVATE_TOKEN'}
     owner = env.get('PROXY_SPEEDTEST_GITEE_OWNER', '').strip()
-    repo = env.get('PROXY_SPEEDTEST_GITEE_REPO', 'proxy-speedtest-temp').strip()
     if not owner:
         try:
             req = urllib.request.Request(
@@ -338,98 +351,28 @@ def gitee_push_speedtest(env, size_mib, push_timeout, branch, via_proxy=True):
     if not owner:
         return {'ok': False, 'mibps': None, 'error': 'failed to resolve Gitee owner'}
 
-    if not via_proxy:
-        return _gitee_push_direct(env, token, owner, repo, size_mib, push_timeout, branch)
-
-    # 经代理上行：复用 speedtest_gitee 的「经代理 git push」方案——
-    # 携带 mihomo 代理环境变量调用 git push，真正反映代理节点的上行带宽。
     try:
         gitee = ensure_gitee_remote(env)
         test_file = ensure_test_file(int(size_mib))
     except Exception as e:
         return {'ok': False, 'mibps': None, 'error': f'prepare gitee/ test file failed: {e}'}
 
-    # 注意：env 实为 CONFIG（含 PROXY_SPEEDTEST_DOWNLOAD_URLS 等 list 字段），
-    # 直接作为 subprocess 的 env 会因非 str 值触发异常。构造干净环境：仅保留 str
-    # 值并覆盖代理变量，确保 git 经 mihomo 代理上行。
-    local_env = {k: v for k, v in build_proxy_env(env).items() if isinstance(v, str)}
-    local_env['GIT_TERMINAL_PROMPT'] = '0'
-    repo_dir = HOME_RUNTIME / 'speedtest-upload-repo'
-    total = test_file.stat().st_size
     try:
-        t0 = time.perf_counter()
-        dur = git_force_push_testfile(
-            repo_dir=repo_dir,
-            remote=gitee['remote_with_token'],
-            env=local_env,
-            file_path=test_file,
-            commit_message='proxy-speedtest upload benchmark',
+        measured, total = upload_speedtest(
+            env=env,
+            gitee=gitee,
+            test_file=test_file,
             push_timeout=push_timeout,
             branch_name=branch,
-            target_filename=TEST_FILE_NAME,
-            gitee=gitee,
+            via_proxy=via_proxy,
+            repo_dir=HOME_RUNTIME / 'speedtest-upload-repo',
         )
-        dt = time.perf_counter() - t0
-        # 优先用 git_force_push_testfile 内置的 time.time() 计时，为 0/缺失时回退本地计时
-        measured = dur if dur and dur > 0 else dt
-        if measured <= 0:
+        if not measured or measured <= 0:
             return {'ok': False, 'mibps': None, 'error': 'upload too fast to measure'}
-        mibps = total / 1024 / 1024 / measured
-        return {'ok': True, 'mibps': round(mibps, 2), 'bytes': total,
-                'seconds': round(measured, 2), 'error': None}
+        return {'ok': True, 'mibps': round(total / 1024 / 1024 / measured, 2),
+                'bytes': total, 'seconds': round(measured, 2), 'error': None}
     except Exception as e:
         return {'ok': False, 'mibps': None, 'error': str(e)[:200]}
-
-
-def _gitee_push_direct(env, token, owner, repo, size_mib, push_timeout, branch):
-    """直连分支（via_proxy=False）：直连 Gitee 用 git push（反映家庭宽带直连上行）。
-
-    已剥离代理变量，且同样过滤非 str 的环境值，避免 subprocess 因 list 值报错。
-    """
-    remote_with_token = f'https://oauth2:{token}@gitee.com/{owner}/{repo}.git'
-    work = HOME_RUNTIME / 'speedtest-upload-tmp'
-    work.mkdir(parents=True, exist_ok=True)
-    test_file = work / 'speedtest.bin'
-    total = int(size_mib * 1024 * 1024)
-    try:
-        with test_file.open('wb') as f:
-            f.write(os.urandom(min(total, 8 * 1024 * 1024)))
-            remaining = total - min(total, 8 * 1024 * 1024)
-            while remaining > 0:
-                chunk = min(remaining, 8 * 1024 * 1024)
-                f.write(os.urandom(chunk))
-                remaining -= chunk
-    except Exception as e:
-        return {'ok': False, 'mibps': None, 'error': f'create test file failed: {e}'}
-    local_env = {k: v for k, v in env.items() if isinstance(v, str)}
-    for k in ['ALL_PROXY', 'all_proxy', 'HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY', 'https_proxy']:
-        local_env.pop(k, None)
-    local_env['GIT_TERMINAL_PROMPT'] = '0'
-    try:
-        subprocess.run(['git', '-C', str(work), 'init', '-q'], env=local_env, check=True, capture_output=True, timeout=60)
-        subprocess.run(['git', '-C', str(work), 'config', 'user.email', 'speedtest@local'], env=local_env, check=True, capture_output=True, timeout=60)
-        subprocess.run(['git', '-C', str(work), 'config', 'user.name', 'speedtest'], env=local_env, check=True, capture_output=True, timeout=60)
-        subprocess.run(['git', '-C', str(work), 'remote', 'remove', 'origin'], env=local_env, capture_output=True, timeout=60)
-        subprocess.run(['git', '-C', str(work), 'remote', 'add', 'origin', remote_with_token], env=local_env, check=True, capture_output=True, timeout=60)
-        subprocess.run(['git', '-C', str(work), 'checkout', '-B', branch], env=local_env, check=True, capture_output=True, timeout=60)
-        subprocess.run(['git', '-C', str(work), 'add', '-A'], env=local_env, check=True, capture_output=True, timeout=60)
-        subprocess.run(['git', '-C', str(work), 'commit', '-q', '-m', 'speedtest upload'], env=local_env, check=True, capture_output=True, timeout=60)
-        t0 = time.perf_counter()
-        p = subprocess.run(['git', '-C', str(work), 'push', '-f', 'origin', branch], env=local_env, capture_output=True, timeout=push_timeout + 30)
-        dt = time.perf_counter() - t0
-        if p.returncode != 0:
-            return {'ok': False, 'mibps': None, 'error': (p.stderr or p.stdout).decode('utf-8', 'ignore').strip()[:200]}
-        if dt <= 0:
-            return {'ok': False, 'mibps': None, 'error': 'push too fast to measure'}
-        return {'ok': True, 'mibps': round(size_mib / dt, 2), 'error': None}
-    except Exception as e:
-        return {'ok': False, 'mibps': None, 'error': str(e)[:200]}
-    finally:
-        try:
-            subprocess.run(['git', '-C', str(work), 'push', '-f', 'origin', ':refs/heads/' + branch],
-                           env=local_env, capture_output=True, timeout=push_timeout + 30)
-        except Exception:
-            pass
 
 
 # ----------------------------------------------------------------------------
@@ -837,6 +780,32 @@ def main():
     # 链路，结果静默失真（比报错更隐蔽）。见 speedtest_gitee.wait_provider_ready。
     wait_provider_ready([i.get('name') for i in alive_items], timeout=60.0)
     results = []
+
+    # 直连基线（家庭宽带对照）：只测代理节点带宽、不知道家庭宽带是多少，就看不出
+    # 「节点比直连还慢」。与 Gitee 共用 run_direct_baseline。失败**不打死整轮**——
+    # 基线是参考值，不是交付物；拿不到就记 ok=False，主体测速照常。
+    direct_baseline = None
+    if CONFIG['PROXY_SPEEDTEST_DIRECT_BASELINE']:
+        log_progress('direct_baseline_started', timeout=CONFIG['PROXY_SPEEDTEST_DIRECT_BASELINE_TIMEOUT'],
+                     max_attempts=CONFIG['PROXY_SPEEDTEST_DIRECT_BASELINE_MAX_ATTEMPTS'])
+        try:
+            gitee = ensure_gitee_remote(CONFIG)
+            baseline_file = ensure_test_file(int(CONFIG['PROXY_SPEEDTEST_SIZE_MIB']))
+            direct_baseline = run_direct_baseline(
+                env=CONFIG, gitee=gitee, test_file=baseline_file,
+                push_timeout=CONFIG['PROXY_SPEEDTEST_DIRECT_BASELINE_TIMEOUT'],
+                clone_timeout=CONFIG['PROXY_SPEEDTEST_DIRECT_BASELINE_TIMEOUT'],
+                speedtest_mode='push-only' if CONFIG['PROXY_SPEEDTEST_ENABLE_PUSH'] else 'download',
+                max_attempts=CONFIG['PROXY_SPEEDTEST_DIRECT_BASELINE_MAX_ATTEMPTS'],
+                label='cdn')
+            log_progress('direct_baseline_finished', ok=True,
+                         upload_mibs=direct_baseline.get('upload_mibs'),
+                         download_mibs=direct_baseline.get('download_mibs'))
+        except Exception as e:
+            direct_baseline = {'ok': False, 'reason': str(e)[:400],
+                               'mode': 'download'}
+            log_progress('direct_baseline_finished', ok=False, reason=str(e)[:400])
+
     # 到点收摊状态：非失败（退出码仍 0），但通知里必须说清「本轮没测完」
     aborted_due_to_runtime = False
     runtime_abort_reason = ''
@@ -892,6 +861,8 @@ def main():
         'mode': meta['mode'],
         'node_count': len(results),
         'results': results,
+        # 直连基线：供通知展示「家庭宽带 vs 节点」对照（拿不到时 ok=False，不带数字）
+        'direct_baseline': direct_baseline,
         # 到点收摊判据（供下游/事后分析区分「测完」与「没测完但不算失败」）
         'aborted_due_to_runtime': aborted_due_to_runtime,
         'runtime_abort_reason': runtime_abort_reason,

@@ -13,7 +13,28 @@
 | `proxy-speedtest-cdn` | 国内 CDN/镜像站 + baidu/taobao | 经代理单连接 curl 下载 + HTTP 计时延迟 | `speedtest.py` | [cdn](proxy-speedtest-cdn.md) |
 | `proxy-speedtest-taier` | 泰尔三网（电信/联通/移动测速服务器） | taierspeedtest 延迟 + 单/多线程上下行 | `taier_speedtest.py` + mihomo TUN | [taier](proxy-speedtest-taier.md) |
 
+另有上游编排 `proxy-speedtest-gistnodes`（搜 gist + Sub-Store 去重 + `alive_filter` 探活后
+发订阅，再 `workflow_call` 三选一），本身不测速。
+
 调度：UTC 21/01/05/09（北京 05/09/13/17），与 cdn（UTC 22/02/06/10 → 京 06/10/14/18）、taier（UTC 23/03/07/11 → 京 07/11/15/19）各错开 1 小时；三套都只排在北京时间 05:00–21:00（夜间 runner 排队 + 出口拥塞会让读数失真）。
+
+### 四项测量口径速查（四套对照）
+
+容易被误读的三点写在最前：**① 只有 taier 与 gistnodes 真探活**（CDN/Gitee 的「活」是测量
+成功的副产品）；**② taier 的「兆」与另外三套的 MiB/s 不是同一把尺子**（见下方换算）；
+**③ CDN 与 Gitee 的下行口径不同**（纯传输 vs 含 git 元数据协商），数值不适合横向比。
+
+| 项 | CDN | Gitee | taier | gistnodes |
+|---|---|---|---|---|
+| **探活** | ❌ 无（`ok = 延迟成功 or 下载成功`） | ❌ 无（push 成功即活） | ✅ `/proxies/{名}/delay`，探第三方控制面 | ✅ 非惰性健康检查 + 轮询等结论 |
+| **延迟** | `latency_probe`：baidu+taobao，各 4 次，8s，**HTTP 首字节** | 同实现，目标只有 `gitee.com` | 引擎对运营商服务器打**原生 TCP** | — |
+| **上传** | git push→Gitee，**可切直连** | git push→Gitee，**可切直连** | 引擎发流（single/multi） | — |
+| **下载** | curl 单连接 Range 10MiB，多镜像取最优 | `git clone --depth 1`（含元数据） | 同一次引擎调用的「↓」列 | — |
+| **单位** | MiB/s | MiB/s | 原始 Mbps | — |
+
+⚠️ **taier 的单位陷阱**：引擎输出 Mbps，导出时 ÷8.388608 转 MiB/s、展示时 ×8 转回「兆」，
+净效果 ≈ ×0.9537 ⇒ **展示值基本等于引擎原始 Mbps**。所以 taier 通知里的「兆」与 CDN/Gitee
+的 MiB/s 不能直接比，跨套比较要先统一到 MiB/s。
 
 ## 双重角色
 
@@ -56,6 +77,40 @@
 - `git_direct_speedtest`：不经代理直连 Gitee push/clone，作为「家庭宽带上行」基线对比
   （`PROXY_SPEEDTEST_DIRECT_BASELINE_TIMEOUT` / `_MAX_ATTEMPTS` 控制），不受模式影响。
 
+## 上行测速：CDN 与 Gitee 已统一（2026-09-17）
+
+**诉求**：两套的上行要么都经代理、要么都直连，且都能用直连基线做对照——否则「节点带宽」
+与「家庭宽带」两套数字混在一起，无法判断节点是否还不如直连。
+
+**改法**：实现收敛到本文件的 `upload_speedtest`，CDN 不再自带副本。一次调用由
+`via_proxy` 决定走哪条路：
+
+| 模式 | 环境 | 测的是 |
+|---|---|---|
+| `via_proxy=True`（**默认**） | 带 mihomo 混合端口代理变量 | **代理节点上行** |
+| `via_proxy=False` | `strip_proxy_env` 剥净 6 个代理变量 | **家庭宽带直连上行** |
+
+两套共用**同一份代码**（`speedtest_gitee.upload_speedtest` / `run_direct_baseline`），
+差别只剩「用不用代理」，因此**两种模式的数值可比**——这正是切直连做对照的前提。
+测试第 10 组断言的是**函数对象同一性**（`cdn.upload_speedtest is gitee.upload_speedtest`），
+不是「行为相同」：行为相同的两份实现，下一次改一处就会漂。
+
+配套开关（两套**同名同默认**）：
+
+| env | 默认 | 作用 |
+|---|---|---|
+| `PROXY_SPEEDTEST_UPLOAD_VIA_PROXY` | `1` | 上行经代理（`0` = 直连）。CDN 原有；Gitee 2026-09-17 补上 |
+| `PROXY_SPEEDTEST_DIRECT_BASELINE` | `1` | 是否跑直连基线（CDN 原有开关语义；Gitee 恒跑） |
+| `PROXY_SPEEDTEST_DIRECT_BASELINE_TIMEOUT` | `60` | 基线单次 push/clone 超时 |
+| `PROXY_SPEEDTEST_DIRECT_BASELINE_MAX_ATTEMPTS` | `5` | 基线重试次数（直连 Git push 偶发超时，一次抖动不该让整轮基线缺失） |
+
+⚠️ **默认保持「经代理」**：历史通知里的「上传」都指节点上行，改默认会让新旧数据不可比。
+要测家庭宽带，显式设 `PROXY_SPEEDTEST_UPLOAD_VIA_PROXY=0`。
+
+⚠️ **`strip_proxy_env` 必须剥净 6 个变量**（含小写的 `all_proxy`/`http_proxy`/`https_proxy`）：
+漏一个就会「直连」其实还在走代理，测出来是节点带宽而非家庭宽带，**且看不出任何异常**。
+测试第 10 组对此有专门断言，并已反向验证（漏掉 `all_proxy` 即变红）。
+
 ## Gist 约定（三套各用各的）
 
 - secret：`PROXY_SPEEDTEST_GIST_ID`（本工作流）、`PROXY_SPEEDTEST_CDN_GIST_ID`（cdn）、
@@ -94,6 +149,7 @@
 | `PROXY_SPEEDTEST_SIZE_MIB` | 10 | 测速文件大小 |
 | `PROXY_SPEEDTEST_PUSH_TIMEOUT` / `CLONE_TIMEOUT` | 30 / 30 | 单次 push / clone 超时 |
 | `PROXY_SPEEDTEST_LATENCY_SAMPLES` / `_TIMEOUT` | 4 / 8 | gitee.com 延迟采样次数 / 单次超时 |
+| `PROXY_SPEEDTEST_UPLOAD_VIA_PROXY` | 1 | 上行经代理（`0` = 直连 Gitee 测家庭宽带）。与 cdn 同名同默认 |
 | `PROXY_SPEEDTEST_DIRECT_BASELINE_TIMEOUT` / `_MAX_ATTEMPTS` | 60 / 5 | 直连基线 |
 | `PROXY_SPEEDTEST_SWITCH_SETTLE_SECONDS` | 1.5 | 切节点后等待 |
 | `PROXY_SPEEDTEST_BUDGET_SECONDS` | `18000` | **墙钟预算**（秒，`0` = 不限），从进程启动起算。到点不再开下一个节点，拿已测节点照常出订阅（退出码 0）。**与 job 的 `timeout-minutes` 成对**：默认 5 小时 < 360 分钟。workflow 里写死，不接仓库 Variables |

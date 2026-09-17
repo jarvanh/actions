@@ -26,10 +26,18 @@
    （反映"打开网页"的真实握手+响应体验）；
 2. **下载** `download_speedtest`：经 mixed-port（`127.0.0.1:17892`）**单连接** curl Range
    拉取国内测速点，按耗时换算 MiB/s，多 URL 串行取最优；
-3. **上行**（`PROXY_SPEEDTEST_ENABLE_PUSH=1` 时）：复用 gitee 的「经 mihomo 代理 git push」
-   方案，单流上传测速文件到 Gitee 私有仓库；
-4. 每节点结果写 JSON/HTML，全部完成后 Telegram 推 `✅ CDN 测速完成`（TOP5），
+3. **上行**（`PROXY_SPEEDTEST_ENABLE_PUSH=1` 时）：经共享实现
+   `speedtest_gitee.upload_speedtest` 单流上传测速文件到 Gitee 私有仓库。可用
+   `PROXY_SPEEDTEST_UPLOAD_VIA_PROXY=0` 切成**直连**（测家庭宽带而非节点上行）；
+4. **直连基线**（`PROXY_SPEEDTEST_DIRECT_BASELINE=1`，默认开）：不经代理 push 一次，
+   给出「家庭宽带 vs 节点」的可比数字。失败**不打死整轮**，只记
+   `direct_baseline.ok=false`；
+5. 每节点结果写 JSON/HTML，全部完成后 Telegram 推 `✅ CDN 测速完成`（TOP5），
    达标节点订阅导出到本工作流专属 Gist。
+
+上行与直连基线的实现**与 Gitee 共用同一份**（2026-09-17 统一，此前 CDN 自带
+`gitee_push_speedtest`/`_gitee_push_direct` 两份等价实现）。开关名、默认值、计时口径
+两套完全一致，详见 [gitee 文档 · 上行测速已统一](proxy-speedtest-gitee.md#上行测速cdn-与-gitee-已统一2026-09-17)。
 
 ### 下载测速点自动发现（规避版本号失效）
 
@@ -77,7 +85,9 @@
 | `PROXY_SPEEDTEST_SIZE_MIB` | 10 | 单次下载字节数（Range 精确拉取） |
 | `PROXY_SPEEDTEST_DOWNLOAD_TIMEOUT` / `_DURATION` | 30 / 0 | 单 URL 超时 / 单节点总时长上限 |
 | `PROXY_SPEEDTEST_ENABLE_PUSH` | 1（workflow 注入） | 是否测经代理上行 |
-| `PROXY_SPEEDTEST_UPLOAD_VIA_PROXY` | 1 | 1=经代理（节点上行）；0=直连（家庭宽带上行） |
+| `PROXY_SPEEDTEST_UPLOAD_VIA_PROXY` | 1 | 1=经代理（节点上行）；0=直连（家庭宽带上行）。与 gitee 同名同默认 |
+| `PROXY_SPEEDTEST_DIRECT_BASELINE` | 1 | 是否跑直连基线（家庭宽带对照）。失败不影响整轮 |
+| `PROXY_SPEEDTEST_DIRECT_BASELINE_TIMEOUT` / `_MAX_ATTEMPTS` | 60 / 5 | 基线单次超时 / 重试次数（与 gitee 同名同默认） |
 | `PROXY_SPEEDTEST_SWITCH_SETTLE_SECONDS` | 1.5 | 切节点后等待 |
 | `PROXY_SPEEDTEST_MAX_NODES` | 0 | 0 = 不限 |
 | `PROXY_SPEEDTEST_BUDGET_SECONDS` | `18000` | **墙钟预算**（秒，`0` = 不限），从进程启动起算。到点不再开下一个节点，拿已测节点照常出订阅（退出码 0）。**与 job 的 `timeout-minutes` 成对**：默认 5 小时 < 360 分钟。workflow 里写死，不接仓库 Variables |
