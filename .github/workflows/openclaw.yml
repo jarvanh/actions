@@ -1784,42 +1784,42 @@ jobs:
           EOF
           chmod +x /tmp/create-clirelay-archive.sh
 
-          # workbuddy 账号池状态回推：serve 的工作目录在本地盘（避开挂载点高频写小文件，
-          # 见第 17 步），状态快照因此只存在于 runner 上 —— 不推的话外部要等到收尾 3b 才看得到，
-          # 最长滞后一整轮（≈5.7 小时）。这里每 WB_STATUS_SYNC_SECONDS 秒推一份快照到 Dropbox，
-          # 让账号池变化在几分钟内可见。
-          # 只推 workbuddy-status.json，且用 per-file 锁：本循环周期短，若归档那侧正忙，
-          # 等锁即可，绝不与每 20 分钟的归档循环抢同一把锁（会连带拖慢归档）。
-          # 源文件缺失（serve 未起来 / 已停）→ 静默跳过，非故障；rclone 失败只记日志，
-          # 不打断循环、也不发通知（状态快照滞后不是需要人工介入的异常，收尾 3b 仍会兜底回推）。
-          cat > /tmp/workbuddy-status-sync.sh <<'EOF'
+          # workbuddy 凭据增量拉取：serve 只把「启动时那份快照」读进内存，且只扫描 cwd ——
+          # 运行期在 Dropbox 上新增/替换 workbuddy*.json，serve 看不到，最快也要等下一轮
+          # （≈5.7 小时）。这里每 WB_CRED_SYNC_SECONDS 秒把 Dropbox 上的凭据增量拉进运行目录，
+          # serve 每 5 秒扫描 cwd 热加载，于是「你上传凭据」到「凭据生效」缩短到几分钟。
+          # 用 --update（只拉比本地更新的）：绝不覆盖 serve 或人工在本地改过的同版本文件；
+          # 只匹配 workbuddy*.json，不碰二进制/状态快照/logs。
+          # 源目录不存在（首轮）→ 静默跳过；rclone 失败只记日志，不打断循环、也不发通知。
+          cat > /tmp/workbuddy-cred-sync.sh <<'EOF'
           #!/usr/bin/env bash
           set -uo pipefail
 
-          SRC="/tmp/local_workbuddy/data/workbuddy-status.json"
-          DEST="dropbox:self-hosted/workbuddy-gateway/workbuddy-status.json"
-          LOCK_FILE="/tmp/workbuddy-status-sync.lock"
+          SRC="dropbox:self-hosted/workbuddy-gateway"
+          DEST="/tmp/local_workbuddy/data"
+          LOCK_FILE="/tmp/workbuddy-cred-sync.lock"
           INTERVAL_SECONDS="${1:-300}"
 
           while true; do
-            if [ -f "$SRC" ]; then
+            if [ -d "$DEST" ]; then
               if flock -E 200 -n "$LOCK_FILE" \
-                rclone copyto "$SRC" "$DEST" \
+                rclone copy "$SRC" "$DEST" \
+                  --include 'workbuddy*.json' --update \
                   --retries 3 --low-level-retries 5 --timeout 1m --contimeout 15s 2>/dev/null; then
-                echo "[$(date '+%F %T')] workbuddy-status.json synced"
+                echo "[$(date '+%F %T')] workbuddy credentials pulled from Dropbox"
               else
                 rc=$?
                 if [ "$rc" -eq 200 ]; then
-                  echo "[$(date '+%F %T')] ⏭️ previous workbuddy-status sync still running, skip this round"
+                  echo "[$(date '+%F %T')] ⏭️ previous credential pull still running, skip this round"
                 else
-                  echo "[$(date '+%F %T')] ⚠️ workbuddy-status.json sync failed (rc=$rc)"
+                  echo "[$(date '+%F %T')] ⚠️ workbuddy credential pull failed (rc=$rc)"
                 fi
               fi
             fi
             sleep "$INTERVAL_SECONDS"
           done
           EOF
-          chmod +x /tmp/workbuddy-status-sync.sh
+          chmod +x /tmp/workbuddy-cred-sync.sh
 
           cat > /tmp/openclaw-archive-loop.sh <<'EOF'
           #!/usr/bin/env bash
@@ -1987,10 +1987,11 @@ jobs:
           nohup bash /tmp/openclaw-archive-loop.sh > /tmp/openclaw-archive-loop.log 2>&1 &
           echo $! > /tmp/openclaw-archive-loop.launcher.pid
 
-          # 账号池快照回推循环（每 5 分钟）。workbuddy 步骤已结束，其状态快照此刻已落盘；
-          # 若该步骤失败/被跳过则源文件不存在，循环只是空转（可忽略），收尾会kill掉。
-          nohup bash /tmp/workbuddy-status-sync.sh 300 > /tmp/workbuddy-status-sync.log 2>&1 &
-          echo $! > /tmp/workbuddy-status-sync.pid
+          # 凭据增量拉取循环（每 5 分钟）：让运行期在 Dropbox 新增/替换的 workbuddy*.json
+          # 在几分钟内被 serve 热加载，而不是等下一轮。serve 未起来时源目录已存在，
+          # 循环只是把凭据摆好，等 serve 一起来就能发现。
+          nohup bash /tmp/workbuddy-cred-sync.sh 300 > /tmp/workbuddy-cred-sync.log 2>&1 &
+          echo $! > /tmp/workbuddy-cred-sync.pid
 
       - name: Keep alive
         id: keepalive
@@ -2054,11 +2055,11 @@ jobs:
           if [ -f /tmp/openclaw-archive.pid ]; then
             kill "$(cat /tmp/openclaw-archive.pid)" 2>/dev/null || true
           fi
-          # 账号池快照回推循环：先停它再停 serve，避免它抓着已删的源文件继续推
-          if [ -f /tmp/workbuddy-status-sync.pid ]; then
-            kill "$(cat /tmp/workbuddy-status-sync.pid)" 2>/dev/null || true
+          # 凭据拉取循环：先停它再停 serve，避免它在本轮收尾期间又拉进新凭据
+          if [ -f /tmp/workbuddy-cred-sync.pid ]; then
+            kill "$(cat /tmp/workbuddy-cred-sync.pid)" 2>/dev/null || true
           fi
-          pkill -f "workbuddy-status-sync.sh" 2>/dev/null || true
+          pkill -f "workbuddy-cred-sync.sh" 2>/dev/null || true
 
           echo "3. Stopping service containers before final archive..."
           docker stop rss-to-telegram 2>/dev/null || echo "rss-to-telegram already stopped or missing."
@@ -2102,11 +2103,13 @@ jobs:
             --retries 5 --low-level-retries 10 --timeout 1m --contimeout 15s 2>/dev/null || \
             echo "⚠️ workbuddy 数据回推失败（状态快照可能落后一轮）"
           WB_VER="$(head -n 1 "$WB_DIR/.installed-version" 2>/dev/null || true)"
-          # 把周期回推循环的日志尾部打出来：它跑在后台，日志只在 runner 上，
-          # 不打印就无从确认「每 5 分钟回推」是否真的在发生（本轮次次同步成功/跳过/失败）。
-          echo "--- workbuddy-status-sync.log tail ---"
-          tail -n 10 /tmp/workbuddy-status-sync.log 2>/dev/null || echo "<no sync log>"
-          echo "--- end workbuddy-status-sync.log tail ---"
+          # 把凭据拉取循环的日志尾部打出来：它跑在后台，日志只在 runner 上，
+          # 不打印就无从确认「每 5 分钟拉凭据」是否真的在发生（本轮次次成功/跳过/失败）。
+          echo "--- workbuddy-cred-sync.log tail ---"
+          tail -n 10 /tmp/workbuddy-cred-sync.log 2>/dev/null || echo "<no cred sync log>"
+          echo "--- end workbuddy-cred-sync.log tail ---"
+          # 顺带核对凭据是否已进运行目录（运行期新上传的凭据应出现在这里）
+          ls -la "$WB_RUN_DIR"/workbuddy*.json 2>/dev/null | head -10 || true
 
           wb_stop_notify() {
             # 版式（规范 · 告警/结果通知）：标题 emoji 与结论一致；机器值走 <code>。
