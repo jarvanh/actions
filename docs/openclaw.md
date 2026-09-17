@@ -27,6 +27,7 @@
 | Install / Run Cloudflared Tunnel | 命名隧道 `oc`（`ai-api` 在网关步骤起） | `oc.<VD>.eu.org`→18789 |
 | Run rss-to-telegram container | `rongronggg9/rss-to-telegram:latest`，启动门禁 = 独立 bot secret `TELEGRAM_BOT_TOKEN_RSS_SB_BOT`（未配置则跳过启动，本轮不产生数据、最终归档也跳过上传） | 数据 `/tmp/local_rsstt`（config + data） |
 | Run AI API gateway | CliRelay 全栈优先 / CLIProxyAPI 回退 | 8317 → 隧道 `ai-api` |
+| Run workbuddy-gateway | 先查 GitHub Releases 决定是否更新二进制，再 `serve`（见第八节） | 8318（仅本机） |
 | Run OpenClaw | 自愈主流程（本文第三、四章） | 18789 |
 | Start background archive loop | 每 20 分钟归档 `~/.openclaw` + AI 网关数据（`flock` 防重入） | Dropbox |
 | Keep alive → Stop OpenClaw and Final Archive → Notify OpenClaw final archive result → Trigger next OpenClaw run | 收尾与自我接力 | — |
@@ -123,7 +124,7 @@
 - rsstt 归档带空数据保护：数据目录内只有占位 `.keep`（本轮容器没起来）时不打包、不上传，
   只发一条「归档跳过」告警——空包上传会用几百字节的 tar 覆盖掉云端正常归档。
 - **完整性校验（取代缩水保护）**：打包前校验关键文件必须存在且非空 —— 主包是
-  `.openclaw/openclaw.json`，zcode 是 `.zcode/cli/db/db.sqlite`。缺失即判「状态不全」，
+  `.openclaw/openclaw.json`。缺失即判「状态不全」，
   以退出码 4 中止本次归档、不覆盖云端（判据在归档脚本内，周期与最终归档共用）。
   早先的判据是「新包不足云端现有包 60% 则拒绝覆盖」（缩水保护），已废止：体积本就不是
   「状态全不全」的判据，且以云端现有包为基准会被主动瘦身永久卡死 —— 排除调试转储后
@@ -198,10 +199,14 @@ tar -xzf /tmp/restore.tar.gz -C /tmp/restore .openclaw/openclaw.json
 | `⚠️ 最终归档告警 · <对象>` | 最终归档失败 | 同上；标题以「最终归档」区分阶段 |
 | `✅ / ⚠️ / ❌ OpenClaw 最终归档结果` | 最终归档之后（`Notify OpenClaw final archive result`） | 结果计数（成功 / 失败 / 跳过）+ 合计大小 + 快照名 + 📦 归档明细（每个包一行：结论 + 大小 + 去向）；未产出明细时降级为「⚠️ 最终归档未完成」 |
 | `⚠️ OpenClaw 即将进入最终归档` | keepalive 第 325 分钟 | 约 15 分钟后执行 `Stop OpenClaw and Final Archive` |
+| `🟢 workbuddy-gateway 已就绪` | 启动步骤自检通过且账号池非空 | 账号池构成、版本、更新说明、数据目录 |
+| `⚠️ workbuddy-gateway 已启动 · 无可用账号` | 服务已监听但账号池为空 | 提示需人工扫码登录（`login` 无法在 workflow 内完成） |
+| `❌ workbuddy-gateway 启动失败` | 进程启动即退，或 120 秒内未监听 8318 | 失败原因 + 🧾 原始输出（日志尾部 1200 字节） |
+| `⛔ / ⚠️ workbuddy-gateway 已停止` | 收尾停止段落执行后 | 版本与数据目录；仍有进程残留时降级 ⚠️ |
 
-> `<对象>` 为归档短名：`OpenClaw 主包` / `ZCode` / `CliRelay` / `CLIProxyAPI` /
-> `rss-to-telegram`。此前五种归档共用「OpenClaw 归档告警」一个标题，无法从标题
-> 判断是哪个包出问题（看到标题会以为是主包，实际可能是 ZCode）。
+> `<对象>` 为归档短名：`OpenClaw 主包` / `CliRelay` / `CLIProxyAPI` / `rss-to-telegram`。
+> 此前四类归档共用「OpenClaw 归档告警」一个标题，无法从标题判断是哪个包出问题
+> （看到标题会以为是主包）。
 
 全部通知为全库统一 HTML 版式（规范唯一真源见 [`telegram-notify.md`](telegram-notify.md)：
 emoji 标题 + ━━━ 分隔线 + 键值/分节区 + 统一收尾行 `⏱ 已运行 X · 🔗 运行日志`），
@@ -321,3 +326,68 @@ runner 以 `tailscale set --ssh --hostname=openclaw --advertise-exit-node` 广�
 | 管理页手动 | `login.tailscale.com/admin/machines` → `openclaw` → Edit route settings → 勾选 `0.0.0.0/0`、`::/0`（每轮重批） |
 | ACL 自动批准（推荐） | ACL 的 `autoApprovers.routes` 加 `"0.0.0.0/0": ["tag:ci"]`、`"::/0": ["tag:ci"]` |
 | Tailscale API | `POST /api/v2/device/{device_id}/routes`，body `{"routes":["0.0.0.0/0","::/0"]}`（需 `TS_API_KEY`，节点 id 每轮变化） |
+
+## 八、workbuddy-gateway（本机 AI 代理网关，独立于 OpenClaw 主网关）
+
+> 对应步骤：「Run workbuddy-gateway (check update first, then serve)」与收尾的 `3b. Stopping workbuddy-gateway`。
+> 上游：[`CangShui/workbuddy-gateway`](https://github.com/CangShui/workbuddy-gateway)（纯 Go 单二进制，
+> 基于腾讯 CodeBuddy 协议的 OpenAI 兼容本地代理）。
+
+### 数据落点
+
+全部状态落在 Dropbox 挂载点下的自托管目录，跨轮持久化：
+
+| 路径 | 内容 |
+|---|---|
+| `/dropbox/self-hosted/workbuddy-gateway/workbuddy-gateway` | 二进制（按 GitHub Releases 的 `latest` 更新） |
+| `/dropbox/self-hosted/workbuddy-gateway/workbuddy*.json` | 凭据文件（**需人工 `login` 扫码生成**，见下） |
+| `/dropbox/self-hosted/workbuddy-gateway/.installed-version` | 已安装版本号（用于比对是否需要更新） |
+| `/dropbox/self-hosted/workbuddy-gateway/workbuddy-status.json` | 运行期账号池状态快照（由 serve 自己写） |
+| `/dropbox/self-hosted/workbuddy-gateway/logs/serve.log` | serve 的 stdout/stderr |
+
+### 启动链路
+
+```
+查 GitHub Releases latest tag（匿名 API，每轮一次；失败则按现有二进制运行）
+    ├─ 版本一致且二进制可执行 → 跳过下载
+    └─ 否则下载 workbuddy-gateway-linux-amd64 → 临时文件 → chmod 755 → 原子 mv 替换
+→ pkill 掉上一轮可能残留的 serve → 在数据目录内 nohup serve -addr 127.0.0.1 -port 8318
+→ /health 探活（60×2s）
+    ├─ 就绪且日志里账号池非空 → 🟢 已就绪
+    ├─ 就绪但账号池为空       → ⚠️ 已启动 · 无可用账号（需人工扫码登录）
+    ├─ 进程已退出             → ❌ 启动失败（提前结束等待，不空等满 120 秒）
+    └─ 120 秒未监听           → ❌ 启动失败（附日志尾部 1200 字节）
+```
+
+- **端口 8318**：8317 已被 CliRelay / CLIProxyAPI 占用（OpenClaw 主 AI 网关），
+  二者并列互不干扰；本步骤**不**为本服务起 cloudflared 隧道，仅本机可达。
+- **工作目录必须是数据目录**：`serve` 靠「读取当前目录下所有 `workbuddy*.json`」组建账号池，
+  状态文件与 `logs/` 也写在同目录 —— 因此启动时先 `cd "$WB_DIR"`。
+- **凭据只能人工准备**：`login` 是终端内嵌二维码扫码（或浏览器内完成登录），
+  workflow 内无法完成。把凭据文件放进数据目录即可被自动发现（serve 每 5 秒热加载，
+  增删改凭据免重启）。
+- 更新失败（查询或下载失败）**不阻塞启动**：沿用现有二进制起服务，原因写进通知的「原因」行。
+
+### 停止（收尾）
+
+`workbuddy-gateway` 是**宿主进程而非容器**，不会随 job 结束自动退出，故收尾步骤显式停止：
+
+```
+kill $(cat /tmp/workbuddy-serve.pid)  →  pkill -f "<bin> serve" 兜底
+→ 轮询 30 秒等优雅退出（写完状态快照）
+→ 仍未退出则 pkill -9
+→ 复检残留：无残留发 ⛔ 已停止；仍有残留发 ⚠️ 已停止 · 进程残留
+```
+
+数据目录在 Dropbox 挂载点上，serve 停止后状态文件即为完整落盘状态，收尾**无需额外回传动作**
+（归档循环与最终归档只覆盖 OpenClaw 主包、AI 网关与 rsstt）。
+
+### 排障入口
+
+- 实时日志：`/dropbox/self-hosted/workbuddy-gateway/logs/serve.log`。
+- 账号池状态：`workbuddy-status.json`（同目录），或 `workbuddy-gateway monitor` 前台刷新。
+- 本步骤元数据：`/tmp/run-workbuddy-meta.env`（`WB_STATE` / `WB_VERSION` / `WB_UPDATE` /
+  `WB_REASON` / `WB_READY` / `WB_ACCOUNTS`）。
+
+> 说明：OpenClaw 主网关（CliRelay `:8317` → cloudflared `ai-api` 隧道）见第六节；
+> 本节服务是**并列的第二网关**，对外入口与归档一律互不涉及。

@@ -326,6 +326,7 @@ HTML 变复杂。
 | 通知 | 在哪 | 何时发 |
 |---|---|---|
 | 🟢 OpenClaw Runner 已就绪 | `openclaw.yml` | Tailscale SSH 就绪，推 SSH / RustDesk / 出口网络 / 出口节点 / AI 网关 |
+| 🟢 / ⚠️ workbuddy-gateway 已就绪 · 无可用账号 | `openclaw.yml` | 本地代理网关启动自检后（账号池为空时降级 ⚠️） |
 | 🟢 Windows runner 已就绪 | `tailscale-windows.yml` | 同上（Windows，pwsh 手拼） |
 | 🖥️ Windows RDP 已就绪 | `rdp.yml` | 隧道地址拿到后推 RDP 凭据（pwsh 手拼） |
 | 🔐 OpenList 凭据 | `emby.yml` | OpenList 改密后私信凭据 |
@@ -371,6 +372,8 @@ Telegram 收到，放弃重试只会让凭据彻底丢失。
 | ⚠️ OpenClaw 最终归档告警 | `openclaw.yml` | 最终归档失败（标题带「最终」区分阶段） |
 | ✅ OpenClaw 最终归档结果 | `openclaw.yml` | 最终归档收尾，按对象汇总结果（有失败 / 全失败降级 ⚠️ / ❌） |
 | ⚠️ OpenClaw 即将进入最终归档 | `openclaw.yml` | keepalive 剩余约 15 分钟时预警 |
+| ❌ workbuddy-gateway 启动失败 | `openclaw.yml` | serve 启动即退或超时未监听 8318 |
+| ⛔ / ⚠️ workbuddy-gateway 已停止 | `openclaw.yml` | 收尾停止本地代理网关（仍有进程残留时降级 ⚠️） |
 | ⚠️ Emby 直链已回退 | `emby.yml` | 探活连续失败切直连 |
 
 **示例：归档告警**
@@ -392,20 +395,44 @@ Run ID：<code>12345678</code>
 周期归档与最终归档的两个告警函数分处不同 step、定义无法共享，**改版式时两处要一起改**；
 二者标题需区分，否则读者分不清告警来自哪一轮。
 
+**示例：workbuddy-gateway 启动失败**（本地代理网关，`openclaw.yml`）
+
+```
+❌ workbuddy-gateway 启动失败
+━━━━━━━━━━━━━━━━━━
+结论：未监听 8318 · 退出码 1
+版本：<code>v1.2.3</code>
+更新：首次安装 v1.2.3
+原因：serve 进程启动后立即退出（多为二进制缺失或凭据/参数错误）
+数据目录：<code>/dropbox/self-hosted/workbuddy-gateway</code>
+
+🧾 原始输出
+<pre>警告: 未检测到有效凭据
+请先执行: workbuddy-gateway login 扫码登录</pre>
+
+⏱ 已运行 12 分钟 · 🔗 运行日志
+```
+
+- 「更新」只在真的发生了版本变化（或首次安装）时出现，「已在最新版」属正常结论，
+  不写进「原因」——否则会渲染出「原因：已在最新版」这种把正常状态说成故障的行
+  （规范 · 说人话）。
+- 与归档告警同款：对象（版本 / 数据目录）是机器值 → `<code>`，结论与原因是自然语言 → 裸文本，
+  原始日志 → `<pre>` 且是正文最后一块。
+
 **示例：最终归档结果**
 
 ```
 ✅ OpenClaw 最终归档完成
 ━━━━━━━━━━━━━━━━━━
-结果：成功 4
-大小：合计 1.140 GiB
+结果：成功 3
+大小：合计 1.128 GiB
 快照：<code>openclaw-20260912-1330-v1.2.3.tar.gz</code>
 
 📦 归档明细 · 4
   ├─ <code>openclaw.tar.gz</code> · ✅ 28.000 MiB · 覆盖主包
-  ├─ <code>zcode.tar.gz</code> · ✅ 12.000 MiB
   ├─ <code>CliRelay.tar.gz</code> · ✅ 1.100 GiB
-  └─ <code>rsstt.tar.gz</code> · ⏭️ 跳过 · 本轮未产生数据
+  ├─ <code>rsstt.tar.gz</code> · ✅ 12.000 MiB
+  └─ <code>CLIProxyAPI.tar.gz</code> · ⏭️ 跳过 · 本轮未生效（回退后端未启用）
 
 ⏱ 已运行 5 小时 46 分 · 🔗 运行日志
 ```
