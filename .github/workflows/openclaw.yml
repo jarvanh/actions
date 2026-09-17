@@ -937,6 +937,11 @@ jobs:
             fi
           else
             WB_TAIL="$(tail -c 1200 "$WB_LOG" 2>/dev/null || true)"
+            # 把日志尾部同时打到 stdout：<pre> 只进 Telegram，CI 日志里看不到，
+            # 排查时不得不再跑一轮才能拿到真实报错。
+            echo "--- serve.log tail (1200B) ---"
+            printf '%s\n' "${WB_TAIL:-<empty>}"
+            echo "--- end serve.log tail ---"
             if [ "$WB_API_DEAD" = "1" ]; then
               # 从日志尾部区分三种"起来就退"，避免一律写成"凭据/参数错误"误导排查：
               # Permission denied → 二进制不可执行（放错到非 exec 的文件系统）；
