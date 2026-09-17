@@ -767,11 +767,15 @@ jobs:
         run: |
           set -uo pipefail
 
-          # workbuddy-gateway（CangShui/workbuddy-gateway）：纯 Go 单二进制的本地 AI 代理网关，
-          # 数据（凭据 workbuddy*.json、状态/日志）全部落在自托管目录 /dropbox/self-hosted/workbuddy-gateway，
-          # 与 OpenClaw 主包同宿主、随 Dropbox 跨轮持久化。
+          # workbuddy-gateway（CangShui/workbuddy-gateway）：纯 Go 单二进制的本地 AI 代理网关。
+          # 数据（凭据 workbuddy*.json、状态/日志）落在自托管目录 /dropbox/self-hosted/workbuddy-gateway，
+          # 随 Dropbox 跨轮持久化；但**二进制必须落本地盘**：
+          # rclone 挂载点按 --file-perms 合成权限（默认 0644），chmod +x 在挂载点上是空操作，
+          # 从挂载点执行一律 "nohup: failed to run command ...: Permission denied"。
+          # 因此与 OpenClaw/CliRelay 同口径 —— 代码在本地盘、数据在 Dropbox，二进制每轮按版本按需下载。
           WB_DIR="/dropbox/self-hosted/workbuddy-gateway"
-          WB_BIN="$WB_DIR/workbuddy-gateway"
+          WB_BIN_DIR="/tmp/local_workbuddy"
+          WB_BIN="$WB_BIN_DIR/workbuddy-gateway"
           WB_RELEASE_BASE="https://github.com/CangShui/workbuddy-gateway/releases/latest/download"
           WB_VER_FILE="$WB_DIR/.installed-version"
           WB_META="/tmp/run-workbuddy-meta.env"
@@ -803,7 +807,7 @@ jobs:
             fi
           }
 
-          mkdir -p "$WB_DIR" "$WB_DIR/logs"
+          mkdir -p "$WB_DIR" "$WB_DIR/logs" "$WB_BIN_DIR"
 
           # ---------- 1. 检查更新：比对 GitHub Releases 的 latest 版本号与本地记录 ----------
           # GitHub API 匿名限流（60 次/小时/出口 IP）对每轮一次足够；失败时按"保持现状"处理，
@@ -836,8 +840,8 @@ jobs:
             else
               echo "⚠️ 无法读取 release 版本（GitHub API 不可达或限流），按当前可用版本部署"
             fi
-            # 下载到临时文件再原子替换：中途失败不会留下半个二进制
-            WB_TMP_BIN="$WB_DIR/.workbuddy-gateway.new"
+            # 下载到本地盘的临时文件再原子替换：中途失败不会留下半个二进制
+            WB_TMP_BIN="$WB_BIN_DIR/.workbuddy-gateway.new"
             if curl -fsSL --max-time 300 -o "$WB_TMP_BIN" "$WB_RELEASE_BASE/workbuddy-gateway-linux-amd64"; then
               chmod 755 "$WB_TMP_BIN"
               if [ -s "$WB_TMP_BIN" ]; then
@@ -883,7 +887,8 @@ jobs:
           sleep 1
           # serve 的工作目录必须是数据目录：凭据靠"自动发现当前目录下 workbuddy*.json"入池，
           # 状态文件 workbuddy-status.json 与 logs/ 也都写在同目录，随 Dropbox 持久化。
-          # 凭据文件由用户另行放入该目录（二维码登录需人工扫码，workflow 内无法完成）。
+          # 二进制在本地盘（$WB_BIN），执行它不受挂载点 noexec 影响；两者路径刻意分离。
+          # 凭据文件由用户另行放入数据目录（二维码登录需人工扫码，workflow 内无法完成）。
           (
             cd "$WB_DIR" || exit 1
             nohup "$WB_BIN" serve -addr 127.0.0.1 -port "$WB_PORT" \
@@ -933,7 +938,17 @@ jobs:
           else
             WB_TAIL="$(tail -c 1200 "$WB_LOG" 2>/dev/null || true)"
             if [ "$WB_API_DEAD" = "1" ]; then
-              _wb_fail_reason="serve 进程启动后立即退出（多为二进制缺失或凭据/参数错误）"
+              # 从日志尾部区分三种"起来就退"，避免一律写成"凭据/参数错误"误导排查：
+              # Permission denied → 二进制不可执行（放错到非 exec 的文件系统）；
+              # 未检测到有效凭据 → 账号池为空；其余归为启动即退。
+              case "$WB_TAIL" in
+                *"Permission denied"*)
+                  _wb_fail_reason="二进制不可执行（Permission denied）：须落在本地盘，rclone 挂载点无法执行文件" ;;
+                *"未检测到有效凭据"*|*"login"*)
+                  _wb_fail_reason="未检测到有效凭据：需人工执行 login 扫码后把凭据放入数据目录" ;;
+                *)
+                  _wb_fail_reason="serve 进程启动后立即退出（多为参数错误或上游不可达）" ;;
+              esac
               echo "❌ workbuddy-gateway serve 进程启动后立即退出" >&2
             else
               _wb_fail_reason="serve 未在 120 秒内监听 ${WB_PORT}"
@@ -1980,9 +1995,10 @@ jobs:
           # workbuddy-gateway 是宿主进程（非容器），必须显式停：它不会随 job 结束自动退出，
           # 留在后台会继续持凭据轮询上游。数据目录在 Dropbox 挂载点上，serve 停止后
           # 状态文件是已落盘的完整状态，无需额外回传动作（归档只针对宿主侧的 OpenClaw/AI 网关）。
+          # 二进制路径须与启动步骤一致（本地盘 /tmp/local_workbuddy），否则 pkill -f 匹配不到。
           echo "3b. Stopping workbuddy-gateway..."
           WB_DIR="/dropbox/self-hosted/workbuddy-gateway"
-          WB_BIN="$WB_DIR/workbuddy-gateway"
+          WB_BIN="/tmp/local_workbuddy/workbuddy-gateway"
           if [ -f /tmp/workbuddy-serve.pid ]; then
             kill "$(cat /tmp/workbuddy-serve.pid)" 2>/dev/null || true
           fi
