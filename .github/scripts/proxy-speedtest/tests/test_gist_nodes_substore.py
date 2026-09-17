@@ -9,9 +9,11 @@
 覆盖：
   1. 正向：3 个订阅正文被投喂 → 两个组合订阅（-raw 无 process / 主组合带完整链）→
      取回 YAML → 限量生效 → 上传内容与取回内容一致；
+     并核对算子链：两个剔除算子（协议 / Cloudflare 段）都排在去重之前、CF 算子内嵌的
+     v4/v6 段表与官方清单逐条一致、判定只读 server 不碰 name/servername；
   2. 负向：投喂遇 409（非全新容器）必须失败退出，且提示指向容器不干净；
   3. 负向：Sub-Store 产出的不是 YAML 必须失败退出；
-  4. 边界：GIST_NODES_MAX_NODES=0 时 process 里不应出现限量算子；
+  4. 边界：GIST_NODES_MAX_NODES=0 时 process 里不应出现限量算子（剔除算子仍在）；
   5. 负向：Sub-Store 不可达必须失败退出；
   6. 判据：明文链接 / Clash YAML / base64 订阅放行，XML plist / 数据 JSON 挡掉；
   7. 时间窗口：超龄 Gist 被挡掉、MAX_AGE_HOURS=0 时不过滤、整页超龄即停止翻页、
@@ -319,14 +321,15 @@ def main():
         check(by_name.get('gist-nodes-raw', {}).get('process') == [], '-raw 参照组不带 process')
         main_col = by_name.get('gist-nodes') or {}
         types = [p.get('type') for p in main_col.get('process') or []]
-        check(types == ['Useless Filter', 'Script Operator', 'Handle Duplicate Operator',
-                        'Handle Duplicate Operator', 'Script Operator'],
+        check(types == ['Useless Filter', 'Script Operator', 'Script Operator',
+                        'Handle Duplicate Operator', 'Handle Duplicate Operator',
+                        'Script Operator'],
               f'主组合算子链正确（实际 {types}）')
         check(main_col.get('subscriptions') == [p['name'] for _, _, p in subs],
               '主组合引用全部订阅名')
-        # 剔除算子必须排在去重之前：先剔掉不要的协议，去重才有意义
-        check(types.index('Script Operator') < types.index('Handle Duplicate Operator'),
-              '剔除算子排在去重之前')
+        # 两个剔除算子都必须排在去重之前：先剔掉不要的节点，去重才有意义
+        check(types.index('Handle Duplicate Operator') == 3,
+              '两个剔除算子都排在去重之前（去重从第 4 个算子才开始）')
         excl_op = (main_col.get('process') or [{}])[1]
         excl_js = (excl_op.get('args') or {}).get('content', '')
         check('proxies.filter' in excl_js, f'剔除算子用 filter（实际 {excl_js!r}）')
@@ -334,7 +337,39 @@ def main():
               f'剔除 http 与 socks5（实际 {excl_js!r}）')
         check('toLowerCase' in excl_js,
               '大小写归一后再比对，避免 HTTP/Http 漏网')
-        delete_op = (main_col.get('process') or [{}])[2]
+        # CF 剔除算子：判定只看 server，且必须带上官方 v4/v6 段表
+        cf_op = (main_col.get('process') or [{}])[2]
+        cf_js = (cf_op.get('args') or {}).get('content', '')
+        check('function operator' in cf_js,
+              'CF 剔除算子定义了名为 operator 的函数（Sub-Store 靠这个名字取函数）')
+        check('p.server' in cf_js or 'p && p.server' in cf_js,
+              f'CF 判定读 server 字段（实际 {cf_js[:120]!r}）')
+        check('servername' not in cf_js and 'name' not in cf_js.replace('function', ''),
+              'CF 判定不碰 servername / name（按名筛会误伤，实测 1857 个 CF 节点里仅 64 个名字带 cf）')
+        # v4 段在算子里是 [网络地址, 前缀长度] 拆分形式（不是 "x.x.x.x/nn" 字符串），
+        # 断言必须照实际格式来，否则判据恒假。
+        # **段表在这里写成字面量、不从 gist_nodes 读**：读常量的话断言会自我指涉——
+        # 把常量删到只剩一段，测试照样全绿，等于没护栏。这里独立复刻云官方 API 的清单，
+        # 常量被改窄/改错就会立刻红。
+        OFFICIAL_V4 = ['173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/22',
+                       '103.31.4.0/22', '141.101.64.0/18', '108.162.192.0/18',
+                       '190.93.240.0/20', '188.114.96.0/20', '197.234.240.0/22',
+                       '198.41.128.0/17', '162.158.0.0/15', '104.16.0.0/13',
+                       '104.24.0.0/14', '172.64.0.0/13', '131.0.72.0/22']
+        OFFICIAL_V6 = ['2400:cb00::/32', '2606:4700::/32', '2803:f800::/32',
+                       '2405:b500::/32', '2405:8100::/32', '2a06:98c0::/29',
+                       '2c0f:f248::/32']
+        check(list(gist_nodes.CF_IPV4_CIDRS) == OFFICIAL_V4,
+              f'CF v4 段表与官方一致（实际 {list(gist_nodes.CF_IPV4_CIDRS)}）')
+        check(list(gist_nodes.CF_IPV6_CIDRS) == OFFICIAL_V6,
+              f'CF v6 段表与官方一致（实际 {list(gist_nodes.CF_IPV6_CIDRS)}）')
+        for cidr in OFFICIAL_V4:
+            net, prefix = cidr.split('/')
+            check(f'["{net}", {prefix}]' in cf_js, f'CF 算子内嵌官方 v4 段 {cidr}')
+        for cidr in OFFICIAL_V6:
+            check(f'"{cidr}"' in cf_js, f'CF 算子内嵌官方 v6 段 {cidr}')
+        check('proxies.filter' in cf_js, 'CF 剔除算子用 filter')
+        delete_op = (main_col.get('process') or [{}])[3]
         check('server' in (delete_op.get('args') or {}).get('field', []),
               '去重字段包含 server（按节点身份判重，不是按名字）')
         check('name' not in (delete_op.get('args') or {}).get('field', []),
@@ -369,9 +404,9 @@ def main():
         cols4 = [p for _, _, p in posts('/api/collections') if p['name'] == 'gist-nodes']
         check(len(cols4) == 1, f'主组合只建了一次（实际 {len(cols4)}）')
         types = [t.get('type') for t in (cols4[0].get('process') or [])]
-        check(types == ['Useless Filter', 'Script Operator', 'Handle Duplicate Operator',
-                        'Handle Duplicate Operator'],
-              f'MAX_NODES=0 时只有剔除算子、无限量算子（实际 {types}）')
+        check(types == ['Useless Filter', 'Script Operator', 'Script Operator',
+                        'Handle Duplicate Operator', 'Handle Duplicate Operator'],
+              f'MAX_NODES=0 时只有两个剔除算子、无限量算子（实际 {types}）')
         check('slice(0, 0)' not in json.dumps(cols4[0].get('process') or []),
               'MAX_NODES=0 时不许生成 slice 算子')
 
