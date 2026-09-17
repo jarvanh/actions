@@ -199,7 +199,7 @@ tar -xzf /tmp/restore.tar.gz -C /tmp/restore .openclaw/openclaw.json
 | `⚠️ 最终归档告警 · <对象>` | 最终归档失败 | 同上；标题以「最终归档」区分阶段 |
 | `✅ / ⚠️ / ❌ OpenClaw 最终归档结果` | 最终归档之后（`Notify OpenClaw final archive result`） | 结果计数（成功 / 失败 / 跳过）+ 合计大小 + 快照名 + 📦 归档明细（每个包一行：结论 + 大小 + 去向）；未产出明细时降级为「⚠️ 最终归档未完成」 |
 | `⚠️ OpenClaw 即将进入最终归档` | keepalive 第 325 分钟 | 约 15 分钟后执行 `Stop OpenClaw and Final Archive` |
-| `🟢 workbuddy-gateway 已就绪` | **首轮**启动步骤自检通过且账号池非空（接力轮不重复推，见下） | 账号池结论、版本、更新说明、接口地址、鉴权说明、🔑 凭据文件名、💳 逐账号（站点 / 冷却状态 / Token 状态）、数据目录 |
+| `🟢 workbuddy-gateway 已就绪` | **首轮**启动步骤自检通过且账号池非空（接力轮不重复推，见下） | 账号池结论、版本、更新说明、接口地址、鉴权说明、🔑 凭据文件名、💳 逐账号（站点(含域名) / 冷却状态 / Token 状态 · 过期时间）、数据目录 |
 | `⚠️ workbuddy-gateway 已启动 · 无可用账号` | 服务已监听但账号池为空 | 提示需人工扫码登录（`login` 无法在 workflow 内完成） |
 | `❌ workbuddy-gateway 启动失败` | 进程启动即退，或 120 秒内未监听 8318 | 失败原因 + 🧾 原始输出（日志尾部 1200 字节） |
 | `⛔ / ⚠️ workbuddy-gateway 已停止` | 收尾停止段落执行后 | 版本与数据目录；仍有进程残留时降级 ⚠️ |
@@ -210,7 +210,10 @@ tar -xzf /tmp/restore.tar.gz -C /tmp/restore .openclaw/openclaw.json
 > 仅在服务真的起来时写；接力轮只往 CI 日志打一行 `ℹ️ …跳过重复的就绪通知`。
 > 判定规则与写法见 [`telegram-notify.md`](telegram-notify.md) 4.4 节。
 
-> 「接口」写 `http://127.0.0.1:8318/v1`（8317 归 CliRelay），「鉴权」恒写
+> 「接口」写 `http://127.0.0.1:8318/v1`。**注意区分两个「默认」**：workbuddy-gateway
+> 上游 `-port` 默认值是 **8317**，与 CliRelay/CLIProxyAPI（OpenClaw 主网关）撞车，
+> 故本步骤启动时显式传 `-port 8318` 覆盖 —— 通知里的端口是**实际绑定端口**，
+> 不是上游默认值。「鉴权」恒写
 > **仅回环监听，无需密钥** —— 启动命令不传 `-api-key` 且只绑 `127.0.0.1`，网关不做鉴权；
 > 上游该参数默认空、本仓库也从未设置，**不得编造密钥值**。
 > 「🔑 凭据」只列 `workbuddy*.json` 的**文件名**（真实 Access/Refresh Token 绝不上通知），

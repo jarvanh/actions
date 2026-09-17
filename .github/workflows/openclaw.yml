@@ -828,24 +828,40 @@ jobs:
                 done <<< "$WB_CREDS"
                 tg_add_block _msg "$(tree_lines "${_ent%$'\n'}")"
               fi
-              # 账号池：逐账号「一条目 + 一子行」。`status` 的文本输出按 "--- 账号 #N ---"
-              # 分块，块内取 凭据文件 / 站点 / 冷却状态 / Token 状态；缺凭据文件或站点的块整块丢弃。
+              # 账号池：逐账号「一条目 + 一子行」。数据源是 `status` 的文本输出，按
+              # "--- 账号 #N ---" 分块，取 凭据文件 / 站点 / 冷却状态 / Token 状态 / 过期时间。
+              # 真实格式（上游 README · status 输出示例）——字段名后是**对齐用的多个空格**，
+              # 且 `过期时间` 是**独立一行**、不在 `Token 状态` 行里：
+              #     凭据文件:     workbuddy.json
+              #     站点:         国内站 (copilot.tencent.com)
+              #     冷却状态:     可用
+              #     Token 状态:   有效
+              #     过期时间:     2026-09-22 12:32:07 (剩余 119h30m0s)
+              # 故去前缀后必须 trim 首尾空白；Token 状态与过期时间并成一句放子行。
+              # 缺凭据文件或站点的块整块丢弃，不留半条。
+              # 变量名用 ex 不用 exp —— `exp` 是 awk 内置函数（指数），当变量名是语法错误。
               # 子行必须用 tree_sub 前缀手拼 —— tree_lines 把每行都当兄弟条目，
-              # 子行经它渲染会得到 ├─/└─，与条目平级（规范 · 二层列表要求子行与条目正文同列）。
+              # 子行经它会渲染成 ├─/└─，与条目平级（规范 4.2 二层列表：子行与条目正文同列）。
               if [ -n "${WB_STATUS_OUT:-}" ]; then
                 local _pool=""
                 _pool="$(printf '%s\n' "$WB_STATUS_OUT" | awk '
+                  function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
                   function flush() {
                     if (cf != "" && st != "") {
+                      # 子行 = Token 状态 + 过期时间，合成一句人话。裸时间戳读者不知道是什么，
+                      # 故过期时间带前缀「过期时间」；只有其一时照出。
+                      if (tok != "" && ex != "") { tok = tok " · 过期时间 " ex }
+                      else if (ex != "") { tok = "过期时间 " ex }
                       printf "%s\t%s\t%s\t%s\n", cf, st, cd, tok
                     }
-                    cf=""; st=""; cd=""; tok=""
+                    cf=""; st=""; cd=""; tok=""; ex=""
                   }
                   /^---[[:space:]]*账号/ { flush(); next }
-                  /^凭据文件:/ { v=$0; sub(/^凭据文件:[[:space:]]*/, "", v); cf=v; next }
-                  /^站点:/     { v=$0; sub(/^站点:[[:space:]]*/, "", v); st=v; next }
-                  /^冷却状态:/ { v=$0; sub(/^冷却状态:[[:space:]]*/, "", v); cd=v; next }
-                  /^Token 状态:/ { v=$0; sub(/^Token 状态:[[:space:]]*/, "", v); tok=v; next }
+                  /^凭据文件:/ { v=$0; sub(/^凭据文件:[[:space:]]*/, "", v); cf=trim(v); next }
+                  /^站点:/     { v=$0; sub(/^站点:[[:space:]]*/, "", v); st=trim(v); next }
+                  /^冷却状态:/ { v=$0; sub(/^冷却状态:[[:space:]]*/, "", v); cd=trim(v); next }
+                  /^Token 状态:/ { v=$0; sub(/^Token 状态:[[:space:]]*/, "", v); tok=trim(v); next }
+                  /^过期时间:/ { v=$0; sub(/^过期时间:[[:space:]]*/, "", v); ex=trim(v); next }
                   END { flush() }
                 ' || true)"
                 if [ -n "$_pool" ]; then
@@ -960,8 +976,9 @@ jobs:
           printf 'WB_REASON=%s\n' "$WB_REASON" >> "$WB_META"
 
           # ---------- 2. 启动 serve ----------
-          # 绑 8318 而非 8317：8317 已被 CliRelay/CLIProxyAPI 占用（OpenClaw 主 AI 网关），
-          # workbuddy-gateway 是并列的第二个本地网关，独立端口便于排查与收尾停止。
+          # 注意：workbuddy-gateway 上游 -port 默认值是 8317，但 8317 已被本文件上一步起的
+          # CliRelay/CLIProxyAPI 占用（OpenClaw 主 AI 网关）。两者并列跑在同一 runner 上，
+          # 用默认值必定撞端口，故这里显式传 -port 8318 覆盖。通知里的「接口」写实际绑定端口。
           WB_PORT="8318"
           WB_API="http://127.0.0.1:${WB_PORT}"
           echo "2. Starting workbuddy-gateway serve on ${WB_PORT}..."
