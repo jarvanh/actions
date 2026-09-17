@@ -199,7 +199,7 @@ tar -xzf /tmp/restore.tar.gz -C /tmp/restore .openclaw/openclaw.json
 | `⚠️ 最终归档告警 · <对象>` | 最终归档失败 | 同上；标题以「最终归档」区分阶段 |
 | `✅ / ⚠️ / ❌ OpenClaw 最终归档结果` | 最终归档之后（`Notify OpenClaw final archive result`） | 结果计数（成功 / 失败 / 跳过）+ 合计大小 + 快照名 + 📦 归档明细（每个包一行：结论 + 大小 + 去向）；未产出明细时降级为「⚠️ 最终归档未完成」 |
 | `⚠️ OpenClaw 即将进入最终归档` | keepalive 第 325 分钟 | 约 15 分钟后执行 `Stop OpenClaw and Final Archive` |
-| `🟢 workbuddy-gateway 已就绪` | **首轮**启动步骤自检通过且账号池非空（接力轮不重复推，见下） | 账号池结论、版本、更新说明、接口地址、鉴权说明、🔑 凭据文件名、💳 逐账号（站点 / 状态 / 额度 · 免费模型 · 模型冷却 · Token 过期）、数据目录 |
+| `🟢 workbuddy-gateway 已就绪` | **首轮**启动步骤自检通过且账号池非空（接力轮不重复推，见下） | 账号池结论、版本、更新说明、接口地址、鉴权说明、🔑 凭据文件名、💳 逐账号（站点 / 状态 / 额度 · 免费模型具体名称 · 模型冷却 · Token 过期）、数据目录 |
 | `⚠️ workbuddy-gateway 已启动 · 无可用账号` | 服务已监听但账号池为空 | 提示需人工扫码登录（`login` 无法在 workflow 内完成） |
 | `❌ workbuddy-gateway 启动失败` | 进程启动即退，或 120 秒内未监听 8318 | 失败原因 + 🧾 原始输出（日志尾部 1200 字节） |
 | `⛔ / ⚠️ workbuddy-gateway 已停止` | 收尾停止段落执行后 | 版本与数据目录；仍有进程残留时降级 ⚠️ |
@@ -221,13 +221,15 @@ tar -xzf /tmp/restore.tar.gz -C /tmp/restore .openclaw/openclaw.json
 > 「💳 账号池」取自 serve 写出的 `workbuddy-status.json`（**jq 解析**）。
 > 该文件的键名由上游 Go 结构体 `accountSnapshot` / `statusSnapshot` 的 json tag 固定
 > （`path` / `edition` / `state` / `tokenExpiresAt` / `quotaRemaining` / `quotaKnown` /
-> `isPaidUser` / `freeModels` / `modelCooldowns`），比 `status` 子命令给人类看的
-> 对齐表格更可靠 —— 后者字段名后跟多个空格、`过期时间` 还独立成行，解析脆且易漏。
+> `isPaidUser` / `freeModels` / `modelCooldowns` / `modelStates`），比 `status` 子命令
+> 给人类看的对齐表格更可靠 —— 后者字段名后跟多个空格、`过期时间` 还独立成行，解析脆且易漏。
 > 中文状态名照上游 `monitor` 表格映射；额度格式照上游 `formatQuota`；
 > `quotaKnown` 为 false 时写「额度未获取」而非 0（那只是还没查到，不是耗尽）；
-> 快照里的 `nickname` / `uid` / `modelStates` 明细不进通知。
+> 快照里的 `nickname` / `uid` 不进通知。
+> **免费模型列具体模型名**（`modelStates` 里 `costClass == "free"` 的键），不只给计数
+> —— 只写「免费模型 1」读者不知道是哪个。名字清单属**结构性清单，全量展示不折叠**。
 > serve 每 3 秒重写该文件，可能读到半截导致 jq 失败 —— 失败即本轮账号池整段跳过。
-> 字段口径逐条见 [`telegram-notify.md`](telegram-notify.md) 2.5 节。
+> 字段口径与探测机制逐条见 [`telegram-notify.md`](telegram-notify.md) 2.5 节。
 
 > `<对象>` 为归档短名：`OpenClaw 主包` / `CliRelay` / `CLIProxyAPI` / `rss-to-telegram`。
 > 此前四类归档共用「OpenClaw 归档告警」一个标题，无法从标题判断是哪个包出问题
