@@ -8,8 +8,9 @@ run 34859505000 里 19 个测过的节点**下行全部达标**，订阅里却**
 ⇒ 只要主指标有 1 个达标就**永不回退**。`min_nodes` 的本意是「不足则不上传订阅」，
 它不该同时充当「是否换指标」的门槛（详见 speedtest_common 里的注释）。
 
-现在的判据只问一件事：**另一指标是不是明显更好**（`secondary > primary` 且
-`secondary >= ceil(primary × ratio)`，ratio 默认 1.5）。
+现在的判据：**主指标达标数 < 回退门槛**（`PROXY_SPEEDTEST_METRIC_FALLBACK_MIN_NODES`，
+默认 3）**且另一指标更多**时才改判另一指标。门槛单列、与 `min_nodes` 彻底脱钩
+（2026-09-17 从倍率制改回计数制并按此解耦）。
 
 第 7–9 组守**另一条更隐蔽的路**——「可导出配置」的取值来源。2026-09-16 的编排轮
 `35116972319` 里 206 个节点实测有速度（最高上传 245 Mbps），订阅却判「达标不足 1 个」：
@@ -53,29 +54,41 @@ def main():
     pol = C.resolve_subscription_policy({})
 
     check(pol['metric'] == 'upload', '默认判定指标是 upload')
-    check(pol['metric_fallback_ratio'] == 1.5, f"默认回退倍率 1.5（实际 {pol['metric_fallback_ratio']}）")
+    check(pol['metric_fallback_min_nodes'] == 3,
+          f"默认回退门槛 3（实际 {pol['metric_fallback_min_nodes']}）")
 
     m, q, fb = C.resolve_subscription_metric(results, pol)
-    check(m == 'download', f'上行只有 1 个达标 → 回退到 download（实际 {m}）')
+    check(m == 'download', f'上行只有 1 个达标（< 3）⇒ 回退到 download（实际 {m}）')
     check(q == 19, f'回退后达标 19 个，而不是 1 个（实际 {q}）')
     check(fb is True, '标记为已回退（fallback=True）')
     bundle = C.build_subscription_bundle(results, pol)
     check(bundle['qualified'] == 19 and bool(bundle['text']),
           f'订阅文本按 19 个节点生成（实际 {bundle["qualified"]}）')
 
-    print('== 2. 反向：主指标明显更好时不回退 ==')
+    print('== 2. 反向：主指标达标数 ≥ 门槛 ⇒ 维持配置的主指标 ==')
     up_good = [node(50, 5) for _ in range(10)]
     m2, q2, fb2 = C.resolve_subscription_metric(up_good, pol)
-    check((m2, fb2) == ('upload', False), f'上行 10 / 下行 0 ⇒ 维持 upload（实际 {m2}/{fb2}）')
+    check((m2, fb2) == ('upload', False), f'上行 10（≥ 3）/ 下行 0 ⇒ 维持 upload（实际 {m2}/{fb2}）')
     check(q2 == 10, f'达标数取主指标（实际 {q2}）')
 
-    print('== 3. 差距不大时尊重配置的主指标（ratio=1.5）==')
-    close = [node(50, 5)] * 3 + [node(1, 50)] * 4
+    print('== 3. 门槛之上即使另一指标更多也不换（尊重配置的主指标）==')
+    close = [node(50, 5)] * 3 + [node(1, 50)] * 10
     m3, q3, fb3 = C.resolve_subscription_metric(close, pol)
-    check((m3, fb3) == ('upload', False), f'3 vs 4 未达 1.5 倍 ⇒ 维持 upload（实际 {m3}/{fb3}）')
-    pol1 = dict(pol, metric_fallback_ratio=1.0)
+    check((m3, fb3) == ('upload', False),
+          f'上行 3（= 门槛，未「小于」）/ 下行 10 ⇒ 维持 upload（实际 {m3}/{fb3}）')
+    check(q3 == 3, f'达标数仍是主指标的 3（实际 {q3}）')
+    pol1 = dict(pol, metric_fallback_min_nodes=4)
     m5, _q5, fb5 = C.resolve_subscription_metric(close, pol1)
-    check((m5, fb5) == ('download', True), f'ratio=1（更多就换）⇒ 回退 download（实际 {m5}）')
+    check((m5, fb5) == ('download', True),
+          f'门槛提到 4 后 3 < 4 ⇒ 回退 download（实际 {m5}）')
+
+    print('== 3b. 门槛达标但另一指标更少 ⇒ 绝不回退（换了反而更差）==')
+    fewer = [node(50, 5)] * 2 + [node(1, 50)] * 1
+    pol2 = dict(pol, metric_fallback_min_nodes=5)
+    m7, q7, fb7 = C.resolve_subscription_metric(fewer, pol2)
+    check((m7, fb7) == ('upload', False),
+          f'上行 2 < 5 但下行只有 1 ⇒ 维持 upload（实际 {m7}/{fb7}）')
+    check(q7 == 2, f'达标数取主指标（实际 {q7}）')
 
     print('== 4. 全不达标 ⇒ 不上传（min_nodes 仍守着「不足不上传」）==')
     zero = [node(0, 0)] * 5
@@ -85,7 +98,7 @@ def main():
     check(fb4 is False, '无达标时不做无意义的回退')
 
     print('== 5. min_nodes 回归本意：只管「传不传」，不管「换不换」==')
-    # min_nodes=5 时：达标 3 个 < 5 ⇒ 不上传；但回退与否仍由倍率决定，与 min_nodes 无关
+    # min_nodes=5 时：达标 3 个 < 5 ⇒ 不上传；回退判据仍只看门槛（默认 3，3 不小于 3）⇒ 维持 upload
     pol5 = dict(pol, min_nodes=5)
     b5 = C.build_subscription_bundle(close, pol5)
     check(b5['text'] == '', f'达标 3 < min_nodes 5 ⇒ 不上传（实际 {b5["qualified"]}）')
@@ -93,10 +106,10 @@ def main():
     check(m6 == 'upload', 'min_nodes 提高不改变回退判据（仍是 upload）')
 
     print('== 6. 配置健壮性 ==')
-    for raw in ('abc', '', '0', '-3', 'nan', 'inf'):
-        p = C.resolve_subscription_policy({'PROXY_SPEEDTEST_METRIC_FALLBACK_RATIO': raw})
-        check(p['metric_fallback_ratio'] >= 1.0,
-              f'非法倍率 {raw!r} → 退回且不小于 1（实际 {p["metric_fallback_ratio"]}）')
+    for raw, want in (('abc', 3), ('', 3), ('0', 1), ('-3', 1), ('7', 7)):
+        p = C.resolve_subscription_policy({'PROXY_SPEEDTEST_METRIC_FALLBACK_MIN_NODES': raw})
+        check(p['metric_fallback_min_nodes'] == want,
+              f'门槛 {raw!r} → {want}（实际 {p["metric_fallback_min_nodes"]}）')
 
     print('== 7. 可导出配置回落 proxy_obj（run 35116972319：206 个达标节点被判 0）==')
     # 编排轮形态：节点由 gistnodes 经 provider 直接喂进来，source_mapping 只有 4 条 ⇒

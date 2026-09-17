@@ -19,7 +19,6 @@
 """
 import html
 import json
-import math
 import os
 import pathlib
 import re
@@ -158,10 +157,13 @@ DEFAULT_MIN_MEGABIT = 10
 #   阈值（兆） / 判定指标（upload|download） / 上传订阅的最少节点数
 DEFAULT_MIN_NODES = 1
 DEFAULT_SPEED_METRIC = 'upload'
-# 判定指标回退的「明显更好」倍率：另一指标达标数需 ≥ 主指标 × 该倍率才切换。
-# 为什么要倍率而不是「多一点就换」：主指标是用户显式配置的偏好，小幅差距该尊重配置；
-# 只有当差距足够大（典型是「上行普遍测不出」）才该换。1 = 只要更多就换（最激进）。
-DEFAULT_METRIC_FALLBACK_RATIO = 1.5
+# 判定指标回退的门槛（达标数）：**主指标达标数 < 该值**才改判另一指标。
+# 为什么是独立配置而不是复用 min_nodes（2026-09-17 改回并解耦）：
+#   min_nodes 语义是「不足则不上传订阅」，默认 1。拿它当回退门槛 ⇒ 只要主指标有 1 个达标
+#   就永不回退，正好退回 run 34859505000 的事故（19 个节点下行全达标、上行只 1 个，
+#   却因 1 >= 1 不回退 ⇒ 订阅里只剩 1 个节点）。两个语义必须分开。
+#   默认 3 是「主指标只剩零星几个时才算不可信」：既能触发回退，又不至于有 1 个就换。
+DEFAULT_METRIC_FALLBACK_MIN_NODES = 3
 # 判定指标 → build_mihomo_yaml_text 的 speedtest_mode（push-only = 按上行判定）
 METRIC_MODES = {'upload': 'push-only', 'download': 'download'}
 METRIC_LABELS = {'upload': '上传', 'download': '下载'}
@@ -277,26 +279,15 @@ def _env_int(env, key: str, default, minimum=0):
     return max(minimum, value)
 
 
-def _env_float(env, key: str, default, minimum=0.0):
-    """浮点版 `_env_int`：非法值退回默认，且不小于 minimum（≤0 的倍率会让回退判据失真）。"""
-    raw = str((env or {}).get(key, '') or '').strip()
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        value = float(default)
-    if not math.isfinite(value):
-        return float(default)
-    return max(minimum, value)
-
-
 def resolve_subscription_policy(env=None):
     """订阅导出策略（四套共用，全部经 env 覆盖，workflow 里接仓库 Variables）：
 
       PROXY_SPEEDTEST_MIN_MEGABIT   达标阈值（兆），默认 10
       PROXY_SPEEDTEST_SPEED_METRIC  判定指标：upload（默认，按上行）/ download（按下行）
       PROXY_SPEEDTEST_MIN_NODES     上传订阅的最少节点数，默认 1
-      PROXY_SPEEDTEST_METRIC_FALLBACK_RATIO
-                                    判定指标回退的「明显更好」倍率，默认 1.5（1 = 更多就换）
+      PROXY_SPEEDTEST_METRIC_FALLBACK_MIN_NODES
+                                    判定指标回退的达标数门槛，默认 3：**主指标达标数 < 该值**
+                                    且另一指标达标数更多时，改判另一指标
 
     非法值一律退回默认值（不因配置写错而静默改变口径）。
     """
@@ -304,13 +295,13 @@ def resolve_subscription_policy(env=None):
     metric = str(env.get('PROXY_SPEEDTEST_SPEED_METRIC') or '').strip().lower()
     if metric not in METRIC_MODES:
         metric = DEFAULT_SPEED_METRIC
-    ratio = _env_float(env, 'PROXY_SPEEDTEST_METRIC_FALLBACK_RATIO',
-                       DEFAULT_METRIC_FALLBACK_RATIO, minimum=1.0)
     return {
         'min_megabit': _env_int(env, 'PROXY_SPEEDTEST_MIN_MEGABIT', DEFAULT_MIN_MEGABIT, 0),
         'min_nodes': _env_int(env, 'PROXY_SPEEDTEST_MIN_NODES', DEFAULT_MIN_NODES, 1),
         'metric': metric,
-        'metric_fallback_ratio': ratio,
+        'metric_fallback_min_nodes': _env_int(
+            env, 'PROXY_SPEEDTEST_METRIC_FALLBACK_MIN_NODES',
+            DEFAULT_METRIC_FALLBACK_MIN_NODES, 1),
     }
 
 
@@ -345,32 +336,35 @@ def count_qualified_nodes(results: list, metric: str, min_megabit):
 
 
 def resolve_subscription_metric(results: list, policy: dict):
-    """判定指标选择：**另一指标达标数明显更多**时才改用另一指标（双向对称）。
+    """判定指标选择：**主指标达标数 < 门槛**且另一指标达标数更多时才改判另一指标。
 
-    例：默认按 upload 判定，上行只达标 1 个、下行达标 19 个 → 改用 download。
+    例：默认按 upload 判定、门槛 3；上行只达标 1 个、下行达标 19 个 → 改用 download。
+    上行达标 5 个（≥ 门槛）→ 维持 upload，哪怕下行更多——门槛之上说明主指标是可用的。
 
-    ⚠️ **回退判据不能拿 `min_nodes` 当阈值**（2026-09-14 修）。原实现是
-    「主指标达标数 < min_nodes 才回退」，而 min_nodes 默认 1 ⇒ 只要主指标有 1 个达标就**永不
-    回退**。实测 run 34859505000：19 个节点里上行只有 1 个测得出（公开节点上行被限），
-    下行 19 个全部达标，却因 `1 >= 1` 不回退 ⇒ **订阅里只剩 1 个节点**。
-    `min_nodes` 的本意是「不足则不上传订阅」，它不该同时充当「是否换指标」的门槛——
-    两个语义绑在一起，下限设小了永不回退、设大了又变成「达标不足就不上传」。
+    判据共两条，缺一不可：
+      1. `primary < metric_fallback_min_nodes`（主指标达标数 < 门槛，默认 3）
+      2. `secondary > primary`（另一指标确实更多，避免「换了反而更少」）
 
-    现在的判据只问一件事：**另一指标是不是明显更好**（`secondary > primary` 且
-    `secondary >= ceil(primary × ratio)`，ratio 默认 1.5）。容忍小幅差距，尊重配置的主指标。
+    ⚠️ **门槛不能复用 `min_nodes`**（2026-09-14 事故 + 2026-09-17 解耦为独立配置）。
+    `min_nodes` 的语义是「不足则不上传订阅」、默认 1；一旦拿它当回退门槛，就会变成
+    「主指标有 1 个达标就永不回退」——实测 run 34859505000：19 个节点里上行只有 1 个测得出
+    （公开节点上行被限），下行 19 个全部达标，却因 `1 >= 1` 不回退 ⇒ **订阅里只剩 1 个节点**。
+    所以回退门槛单列 `PROXY_SPEEDTEST_METRIC_FALLBACK_MIN_NODES`（默认 3），
+    与「传不传订阅」彻底脱钩：下限设小了永不回退、设大了又变成「达标不足就不上传」，
+    两个语义绑在一起怎么调都是错的。
     """
     metric = policy.get('metric') or DEFAULT_SPEED_METRIC
     other = 'download' if metric == 'upload' else 'upload'
     min_megabit = policy.get('min_megabit', DEFAULT_MIN_MEGABIT)
-    ratio = policy.get('metric_fallback_ratio') or DEFAULT_METRIC_FALLBACK_RATIO
+    threshold = policy.get('metric_fallback_min_nodes', DEFAULT_METRIC_FALLBACK_MIN_NODES)
     primary = count_qualified_nodes(results, metric, min_megabit)
     secondary = count_qualified_nodes(results, other, min_megabit)
-    if secondary > primary and secondary >= math.ceil(primary * ratio):
+    if primary < threshold and secondary > primary:
         log_progress('subscription_metric_fallback', from_metric=metric, to_metric=other,
-                     primary=primary, secondary=secondary, ratio=ratio)
+                     primary=primary, secondary=secondary, threshold=threshold)
         return other, secondary, True
     log_progress('subscription_metric_kept', metric=metric, primary=primary,
-                 secondary=secondary, ratio=ratio)
+                 secondary=secondary, threshold=threshold)
     return metric, primary, False
 
 

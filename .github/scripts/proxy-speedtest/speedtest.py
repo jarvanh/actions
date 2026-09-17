@@ -899,7 +899,7 @@ def main():
                 'latency_ms': lat if isinstance(lat, (int, float)) else 0,
             })
         # 达标策略（阈值 / 判定指标 / 最少节点数）与四套共用，见 resolve_subscription_policy：
-        # 默认按上行判定，达标不足 min_nodes 时自动改用下行（反之亦然）。
+        # 默认按上行判定；上行达标数 < 回退门槛（默认 3）且下行更多时自动改用下行。
         bundle = build_subscription_bundle(gist_results, resolve_subscription_policy(env))
         log_progress('subscription_policy', metric=bundle['metric'], qualified=bundle['qualified'],
                      min_megabit=bundle['min_megabit'], min_nodes=bundle['min_nodes'],

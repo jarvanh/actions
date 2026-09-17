@@ -29,6 +29,7 @@ taier 的测活、以及 **taier / gitee / cdn 三套**通知的降级渲染。
 import http.server
 import pathlib
 import re
+import shutil
 import sys
 import threading
 
@@ -498,6 +499,84 @@ def main():
           'gitee 把开关接到了调用的 via_proxy 参数上')
     check('via_proxy=via_proxy' in pathlib.Path(d.__file__).read_text(encoding='utf-8'),
           'cdn 把开关接到了调用的 via_proxy 参数上')
+
+    print('== 11. 下载计时只包住文件内容传输（纯传输时间）==')
+    # 诉求（2026-09-17）：原实现 t0=time.time() 包住整条 git clone，量到的是
+    # 「仓库元数据协商 + 内容传输 + 本地 checkout」的墙钟时间 ⇒ 高速节点上固定开销占比大，
+    # MiB/s 被系统性低估，且与只包住 git push 的上行侧口径不对称。
+    # 现在两段：--filter=blob:none 的 metadata clone（不计时）+ checkout 取内容（计时）。
+    # 反证：把 t0 挪回 clone 之前，11c 会把 metadata clone 的 5s 也算进去而变红。
+    _g_src = pathlib.Path(g.__file__).read_text(encoding='utf-8')
+    check('--filter=blob:none' in _g_src,
+          'clone 用 blob:none 只取元数据（不把内容传输混进元数据阶段）')
+
+    # 打在真正的进程边界（subprocess.run）上，而不是 g.run：这样实现里的
+    # shutil.rmtree / 文件落地都不受影响，命令序列也能按「clone → checkout」精确推进。
+    import subprocess as _sp
+    _orig_sp_run = _sp.run
+    monkey = [800.0]
+    cmd_seq = []
+
+    def _fake_subprocess_run(cmd, **kw):
+        cmd_seq.append(list(cmd))
+        if cmd[:2] == ['git', 'clone']:
+            # metadata clone 阶段：伪造耗时 5s，并只造一个**空壳**仓库目录
+            monkey[0] += 5.0
+            clone_dir = pathlib.Path(cmd[-1])
+            clone_dir.mkdir(parents=True, exist_ok=True)
+            return _sp.CompletedProcess(cmd, 0, '', '')
+        if cmd[:2] == ['git', 'checkout']:
+            # 内容传输阶段：伪造耗时 2s，再把文件真的写到工作区
+            monkey[0] += 2.0
+            (pathlib.Path(kw['cwd']) / cmd[-1]).write_bytes(b'x' * 10)
+            return _sp.CompletedProcess(cmd, 0, '', '')
+        return _orig_sp_run(cmd, **kw)
+
+    _orig_time = g.time.time
+    _sp_run = _sp.run
+    tmp_clone = pathlib.Path('/tmp/_t11_dl')
+    try:
+        _sp.run = _fake_subprocess_run
+        g.time.time = lambda: monkey[0]
+        elapsed, pulled = g.git_clone_testbranch(
+            clone_dir=tmp_clone, remote='r', env={}, timeout=60,
+            branch_name='b', target_filename='speed.bin')
+    finally:
+        _sp.run = _sp_run
+        g.time.time = _orig_time
+
+    # 11c. 只有 checkout 那一段（2s）被计时，metadata clone 的 5s 必须被排除
+    check(abs(elapsed - 2.0) < 1e-6,
+          f'只用 checkout 段计时，不含 metadata clone（实际 {elapsed}s，期望 2.0）')
+    # 11d. 两段命令都在，且各自只跑一次
+    clones = [c for c in cmd_seq if c[:2] == ['git', 'clone']]
+    checkouts = [c for c in cmd_seq if c[:2] == ['git', 'checkout']]
+    check(len(clones) == 1, f'clone 只调一次（实际 {len(clones)}）')
+    check(len(checkouts) == 1, f'checkout 只调一次（实际 {len(checkouts)}）')
+    check(clones and '--filter=blob:none' in clones[0],
+          'clone 命令确实带 blob:none 过滤')
+    check(checkouts and 'speed.bin' in checkouts[0],
+          'checkout 只取测速文件（不整树 checkout，否则又会掺入别的开销）')
+
+    # 11e. 内容没落地（blob 没取到）⇒ 必须报错，不能把「空文件 + 极短耗时」当日志成功
+    try:
+        _sp.run = lambda cmd, **kw: _sp.CompletedProcess(cmd, 0, '', '')
+        raised = None
+        try:
+            g.git_clone_testbranch(clone_dir=tmp_clone, remote='r', env={}, timeout=60,
+                                   branch_name='b', target_filename='missing.bin')
+        except Exception as e:
+            raised = str(e)
+        check(raised is not None, f'文件未落地 ⇒ 抛错（实际 {raised!r}）')
+    finally:
+        _sp.run = _sp_run
+        shutil.rmtree(tmp_clone, ignore_errors=True)
+
+    # 11f. 两处调用点都改用返回值当 download_seconds（删掉一处就少一组数据）
+    check(_g_src.count('git_clone_testbranch(') == 3,
+          f'gitee 内 2 处调用 + 1 处定义（实际 {_g_src.count("git_clone_testbranch(")}）')
+    check("'download_seconds': round(download_s, 3)" in _g_src,
+          'download_seconds 取的是纯传输耗时（同一个 download_s）')
 
     print()
     if FAILURES:

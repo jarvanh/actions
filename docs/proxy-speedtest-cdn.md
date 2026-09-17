@@ -94,9 +94,9 @@
 | `PROXY_SPEEDTEST_NPMMIRROR_ENABLED` | 1 | 是否合并 npmmirror 最新版测速点 |
 | `PROXY_SPEEDTEST_GIST_FILENAME` / `_DESCRIPTION` | 见 workflow | Gist 文件名/描述（三套区分） |
 | `PROXY_SPEEDTEST_MIN_MEGABIT` | 10 | 达标阈值（兆），三套共用 |
-| `PROXY_SPEEDTEST_SPEED_METRIC` | upload | 判定指标 `upload`/`download`；另一指标达标数明显更多时自动改用另一指标（倍率见下） |
+| `PROXY_SPEEDTEST_SPEED_METRIC` | upload | 判定指标 `upload`/`download`；主指标达标数 < 回退门槛且另一指标更多时自动改用另一指标（门槛见下） |
 | `PROXY_SPEEDTEST_MIN_NODES` | 1 | 上传订阅的最少节点数，不足则不上传 |
-| `PROXY_SPEEDTEST_METRIC_FALLBACK_RATIO` | 1.5 | 回退倍率：另一指标达标数 ≥ 主指标 × 该值才切换 |
+| `PROXY_SPEEDTEST_METRIC_FALLBACK_MIN_NODES` | 3 | 判定指标回退门槛：主指标达标数 **< 该值** 且另一指标更多才改判 |
 
 订阅导出策略（阈值/判定指标/最少节点数，含回退规则）详见
 [gitee 文档 · 订阅导出策略](proxy-speedtest-gitee.md#订阅导出策略三套共用)。
