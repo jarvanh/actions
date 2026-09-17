@@ -1106,6 +1106,54 @@ def switch_proxy(name: str, settle_seconds: float):
     mihomo_api_put(f'/proxies/{urllib.parse.quote("AUTO", safe="")}', {'name': name})
     time.sleep(settle_seconds)
 
+def wait_provider_ready(names, timeout=60.0):
+    """等 mihomo 把 provider 里的节点**真正注册进 `/proxies`**，返回 `(ready, waited, probed)`。
+
+    **四套共用**（CDN / Gitee / taier 都调它；taier 另有自己的测活层，靠它开测前兜底）。
+
+    为什么需要它：`wait_mihomo()` 只等 `/version`（控制器 HTTP 监听到来，毫秒级），
+    **完全不保证 provider 已展开**。而 `/providers/proxies` 给出的是**声明清单**，
+    不等于节点已注册进 `/proxies/{name}` 路由表。不等就往下走，会撞上这个窗口：
+
+    * taier 会立刻拿到本地 404（`Resource not found`）并把节点误判为死——实测 8 条失败
+      间隔恒为 ~18.7 毫秒（远小于 3000ms 探测超时 ⇒ 根本没去连节点），见 run 35116972319；
+    * CDN / Gitee 走 `switch_proxy` 切的是 `AUTO` 组，mihomo 对「组里还没注册的成员名」
+      不报错、**静默保持原选择**——于是它们不报错，但测的是**上一个**节点的链路，
+      结果静默失真（比 taier 报错更隐蔽）。
+
+    做法：拿候选节点名逐个探 `/proxies/{name}`，**第一个能查到**就认为 provider 已展开。
+    单点探测足够——展开是整体行为，不会只注册一部分；用哨兵比轮询几千个名字便宜得多。
+
+    返回的 `ready=False`（超时）**不抛异常**：调用方照常往下走，由各自的判据兜底
+    （taier 有 `is_unknown_proxy_error` fail-open；CDN / Gitee 没有探活层，
+    所以这里超时只是少了一道保险，不会把整轮打死）。
+    """
+    candidates = [str(n or '').strip() for n in (names or []) if str(n or '').strip()]
+    if not candidates:
+        return False, 0.0, ''
+    # 取头尾各两个做哨兵：单取首个万一是脏名字（已在 provider 里但状态异常）会白等
+    probes = candidates[:2] + candidates[-2:]
+    start = time.time()
+    attempt = 0
+    while time.time() - start < timeout:
+        attempt += 1
+        for name in probes:
+            try:
+                mihomo_api_get('/proxies/' + urllib.parse.quote(name, safe=''))
+            except Exception:
+                # 404 = 还没展开；其它异常（鉴权/5xx）同样不能据此判定「已就绪」
+                continue
+            ready = time.time() - start
+            log_progress('provider_ready', waited=round(ready, 3), attempts=attempt,
+                         probed=name, candidates=len(candidates))
+            return True, ready, name
+        # 前几轮抢「其实马上就绪」（实测 16 秒量级），随后退到 0.5 秒避免空转
+        time.sleep(0.05 if attempt <= 20 else 0.5)
+    waited = time.time() - start
+    log_progress('provider_ready_timeout', waited=round(waited, 3),
+                 attempts=attempt, candidates=len(candidates))
+    return False, waited, ''
+
 def git_direct_speedtest(env, gitee, test_file: pathlib.Path, push_timeout: int, clone_timeout: int, speedtest_mode: str, max_attempts: int = 5):
     local_env = dict(env)
     for k in ['ALL_PROXY', 'all_proxy', 'HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY', 'https_proxy']:
@@ -1581,6 +1629,11 @@ def main():
     log_progress('provider_snapshot_ready', provider_count=len(provider_snapshot),
                  collected_count=len(alive_items),
                  probe_alive_count=sum(v['alive'] for v in provider_snapshot.values()))
+    # ⚠️ 开测之前先等 provider 真正展开。`wait_mihomo()` 只等 `/version`，
+    # `/providers/proxies` 给的又是**声明清单**——不等就切，`switch_proxy` 对「组里
+    # 还没注册的成员名」**不报错、静默保持原选择**，于是前几个节点测的是上一个节点的
+    # 链路，结果静默失真（比报错更隐蔽）。见 wait_provider_ready 的说明。
+    wait_provider_ready([i.get('name') for i in alive_items], timeout=60.0)
     gitee = run_stage('Gitee 仓库准备', ensure_gitee_remote, env)
     log_progress('gitee_ready', owner=gitee['owner'], repo=gitee['repo'], remote_public=gitee['remote_public'])
     push_target_info = run_stage('Gitee 目标解析', resolve_push_target_info, gitee['remote_public'])

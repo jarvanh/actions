@@ -79,6 +79,8 @@ from speedtest_gitee import (
     format_duration,
     git_force_push_testfile,
     switch_proxy,
+    # 开测前等 provider 展开（否则切节点会静默作用于上一个节点）
+    wait_provider_ready,
 )
 
 # ----------------------------------------------------------------------------
@@ -829,6 +831,11 @@ def main():
 
     log_progress('nodes_collected', count=len(alive_items), budget_seconds=budget_seconds)
     settle = CONFIG['PROXY_SPEEDTEST_SWITCH_SETTLE_SECONDS']
+    # ⚠️ 开测之前先等 provider 真正展开。`wait_mihomo()` 只等 `/version`，
+    # `/providers/proxies` 给的又是**声明清单**——不等就切，`switch_proxy` 对「组里
+    # 还没注册的成员名」**不报错、静默保持原选择**，于是前几个节点测的是上一个节点的
+    # 链路，结果静默失真（比报错更隐蔽）。见 speedtest_gitee.wait_provider_ready。
+    wait_provider_ready([i.get('name') for i in alive_items], timeout=60.0)
     results = []
     # 到点收摊状态：非失败（退出码仍 0），但通知里必须说清「本轮没测完」
     aborted_due_to_runtime = False

@@ -134,12 +134,38 @@ mihomo 压根没去连节点），而第一个测速结果要到 `16:13:48.712`�
 
 现在两道防线（缺一不可）：
 
-1. **开测前等就绪**：`wait_provider_ready()` 拿头尾各两个节点名探 `/proxies/{name}`，
-   探到即认为 provider 已展开（展开是整体行为，用哨兵比轮询几千个名字便宜）；
-   超时 60 秒后照常往下走（不阻塞整轮）。
+1. **开测前等就绪**：`speedtest_gitee.wait_provider_ready()` 拿头尾各两个节点名探
+   `/proxies/{name}`，探到即认为 provider 已展开（展开是整体行为，用哨兵比轮询几千个
+   名字便宜）；超时 60 秒后照常往下走（不阻塞整轮）。**它是共享层的，三套都调**
+   （taier 在 `nodes_collected` 之后、gitee 在 `provider_snapshot_ready` 之后、
+   cdn 在 `nodes_collected` 之后），留在任一套的本地副本都算回归——测试第 9 组用
+   对象同一性 + 调用点存在性双重钉住。
 2. **`Resource not found` 不参与判死**：`is_unknown_proxy_error()` 把它与「真连不上」分开，
    这类直接 **fail-open 放行去测速**（真连不上时测速那步自然失败，代价一个 25 秒窗口，
    远小于误杀一批好节点）。连续 8 个「不认识」则停用测活（说明 provider 还没展开完）。
+   判据只认 `resource not found` / `no such proxy`，**不得放宽成 `'not found'` 子串**——
+   那会把 `host not found`（DNS 解析失败，是真·节点问题）也吞进来，真死节点被 fail-open
+   判成存活还绕过熔断，噪声换成了漏判。
+
+### 为什么 CDN / Gitee 也要等 provider 展开（2026-09-17 补）
+
+taier 是**报错**，CDN / Gitee 是**静默失真**，后者更隐蔽。它们不探活、走 `switch_proxy`
+切节点，而 `switch_proxy` PUT 的是 **`AUTO` 这个 select 组**、节点名放在 body 里：
+
+```python
+mihomo_api_put(f'/proxies/{quote("AUTO")}', {'name': name})
+```
+
+`AUTO` 组一定存在，mihomo 对「组里还没注册的成员名」**不报错、静默保持原选择**——于是
+provider 未展开时，前几个节点测的其实是**上一个**节点的链路，而结果照常记成功、照常进
+通知，没有任何痕迹。实测两套的窗口（线上日志）：
+gitee 读快照 `23:32:05.426` → 首个 `node_start` `23:32:48.907`（43 秒，安全）；
+**cdn 读快照 `23:58:30.528` → 首个 `node_test_start` `23:58:32.041`（仅 1.5 秒）**——
+正是 taier 出事的那个时间窗量级。这次没炸只是因为 `AUTO` 组静默兜底。
+
+⚠️ 另有一条已存在的隐患：`switch_proxy` 只看 `mihomo_api_put` 是否抛异常；若将来 mihomo
+对「组里不存在的成员」改为报错，两套会立刻把整轮记成 `ok: False` ⇒ 通知全是 `❌ 失败`。
+`wait_provider_ready` 把窗口关掉后，这条也一并绕过了。
 
 ### Gist 文件名/描述（三套区分）
 

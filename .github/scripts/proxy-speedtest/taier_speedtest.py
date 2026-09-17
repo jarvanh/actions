@@ -74,10 +74,10 @@ from speedtest_gitee import (
     build_source_mapping,
     collect_provider_snapshot,
     ensure_local_mihomo,
-    # 供 wait_provider_ready 探 `/proxies/{name}` 判 provider 是否已展开
-    mihomo_api_get,
     switch_proxy,
     wait_mihomo,
+    # 开测前等 provider 展开（四套共用；见 speedtest_gitee.wait_provider_ready）
+    wait_provider_ready,
 )
 
 # ---------------------------------------------------------------------------
@@ -206,61 +206,19 @@ def is_unknown_proxy_error(err):
     而第一个测速结果要到 `16:13:48.712`（16 秒后）才出现，那时 provider 早就绪了。
 
     所以这类错误**不能当成「节点死了」**：它不是节点的属性，是 mihomo 的加载状态。
-    判据同时认 mihomo 的 `Resource not found` 与等价措辞（不同版本文案略有差异）。
+
+    **判据只认「这个节点名不存在」的措辞，不要放宽成 `'not found'` 子串**：那样会把
+    `host not found` / `URL not found`（真·网络故障）一并吞成「机制故障 → fail-open」，
+    于是真连不上的节点被判成存活、还绕过熔断，噪声换成了漏判。mihomo 的实际文案是
+    `Resource not found`（`/proxies/{name}` 查不到），不同版本偶有 `no such proxy`。
     """
     text = str(err or '').strip().lower()
     if not text:
         return False
-    return ('resource not found' in text
-            or 'not found' in text
-            or 'no such proxy' in text)
-
-
-def wait_provider_ready(names, timeout=60.0):
-    """等 mihomo 把 provider 里的节点**真正注册进 `/proxies`**，再开始探测。
-
-    为什么需要它（规范 · 方案 C 的治本那一半）：
-    `wait_mihomo()` 只等 `/version`（控制器 HTTP 监听到来，毫秒级），**完全不保证
-    节点已展开**。而测活与切节点都走 `/proxies/{name}`，未展开时 mihomo 秒回
-    `Resource not found`——于是开头几个节点被误判为死，熔断器再把剩下几千个一起
-    跳过探测（歪打正着地躲过了这个窗口，但前 8 条误报已经产生了）。
-
-    做法：拿候选节点名逐个探 `/proxies/{name}`，**第一个能查到**就认为 provider 已展开。
-    单点探测足够——provider 展开是整体行为，不会只注册一部分；用一个名字做哨兵，
-    比轮询几千个名字便宜得多。
-
-    返回 `(ready, waited_seconds, probed_name)`；超时仍返回 False（调用方据此降级：
-    照常往下走，但配合 `is_unknown_proxy_error` 不让这类失败污染熔断判据）。
-    """
-    candidates = [str(n or '').strip() for n in (names or []) if str(n or '').strip()]
-    if not candidates:
-        return False, 0.0, ''
-    # 取头尾各两个做哨兵：单取首个万一是脏名字（已在 provider 里但状态异常）会白等
-    probes = candidates[:2] + candidates[-2:]
-    start = time.time()
-    attempt = 0
-    while time.time() - start < timeout:
-        attempt += 1
-        for name in probes:
-            try:
-                mihomo_api_get('/proxies/' + urllib.parse.quote(name, safe=''))
-            except urllib.error.HTTPError as e:
-                if e.code == 404:
-                    continue
-                # 非 404（鉴权/5xx）⇒ 是别的机制问题，不能据此判定「没就绪」
-                continue
-            except Exception:
-                continue
-            ready = time.time() - start
-            log_progress('taier_provider_ready', waited=round(ready, 3),
-                         attempts=attempt, probed=name, candidates=len(candidates))
-            return True, ready, name
-        # 前几轮抢「其实马上就绪」（实测 16 秒量级），随后退到 0.5 秒避免空转
-        time.sleep(0.05 if attempt <= 20 else 0.5)
-    waited = time.time() - start
-    log_progress('taier_provider_ready_timeout', waited=round(waited, 3),
-                 attempts=attempt, candidates=len(candidates))
-    return False, waited, ''
+    # 先挡掉真·网络故障：DNS 解析失败也含 "not found"，但它是节点问题、不是加载状态
+    if 'host not found' in text or 'name or service not known' in text:
+        return False
+    return 'resource not found' in text or 'no such proxy' in text
 
 
 def _revive_probe_failed(results, alive_items, retry_queue):

@@ -514,7 +514,10 @@ RESULT_JSON 的 `aborted_due_to_runtime` / `runtime_abort_reason`
   `⚠️ 测活探测异常 · N`，并说明「这些节点未真正探测，不计入失败」；
   `❌ 失败 · N` 只数真正的测速失败。混在一起会让读者去排查一批其实没问题的节点。
   根因与两道防线（`wait_provider_ready` 等 provider 展开 + `is_unknown_proxy_error`
-  不判死）见 `docs/proxy-speedtest-taier.md`。
+  不判死）见 `docs/proxy-speedtest-taier.md`。注意这道防线是**三套共用**的
+  （gitee / cdn 也要等 provider 展开，只是它们不探活、坏法是静默测错节点而非报错），
+  所以 gitee / cdn 的日志里同样会出现 `provider_ready` / `provider_ready_timeout`——
+  **那是正常的等待记录，不是告警**。
 - **`📦 订阅 · Gist` 的「未更新订阅」必须按真因分文案。** 三种情况形态完全不同：
   真·达标不足（节点慢）→ `达标不足 N 个 · 阈值 ≥X兆（按指标）· 未更新订阅`；
   有速度但缺可导出配置（实现层丢失 `proxy_obj`）→ `未更新订阅：本有节点测出速度，但缺少
