@@ -397,7 +397,19 @@ runner 以 `tailscale set --ssh --hostname=openclaw --advertise-exit-node` 广�
     ├─ 就绪但账号池为空       → ⚠️ 已启动 · 无可用账号（需人工扫码登录）
     ├─ 进程已退出             → ❌ 启动失败（提前结束等待，不空等满 120 秒）
     └─ 120 秒未监听           → ❌ 启动失败（附日志尾部 1200 字节）
+→ 【仅首轮】GET /v1/models 取目录前 50 个 → POST /admin/probe 逐一探免费/收费（约数分钟）
+→ jq 解析 workbuddy-status.json → 账号池明细（含 costClass=="free" 的模型名）→ 🟢/⚠️/❌ 通知
 ```
+
+- **免费模型名要靠主动探测拿**：快照里的 `modelStates` 只在「该模型被真实请求过」时才有键
+  （默认 `unknown`），光读快照只能拿到计数、拿不到名字。故首轮先 `GET /v1/models` 取目录
+  前 50 个（上游 `/admin/probe` 单次上限 50），再 `POST /admin/probe` 逐账号 × 逐模型探一轮。
+  探测走 serve 自带接口（**只接受回环来源**）而非另起进程 —— 账本在 serve 内存里，
+  独立进程写的状态文件会被它覆盖（上游 `probe.go` 注释即此意）。
+  **只在首轮探**：结论经 `writeStatusSnapshot` 落进快照并回推 Dropbox，下轮 serve 启动时
+  `restoreAccountRuntimeStateLocked` 会恢复账本，无需再探。探测失败/超时**不阻塞通知**：
+  退回只给「免费模型 N」计数，绝不编造名字。
+  注意探测会真实消耗额度，且命中限流会给该模型打上冷却（通知里「模型冷却」计数因此升高属预期）。
 
 - **端口 8318**：8317 已被 CliRelay / CLIProxyAPI 占用（OpenClaw 主 AI 网关），
   二者并列互不干扰；本步骤**不**为本服务起 cloudflared 隧道，仅本机可达。
@@ -467,6 +479,9 @@ serve 根本看不到，最快也要等下一轮（≈5.7 小时）。为此在�
 
 - 本轮实时日志：`/tmp/local_workbuddy/data/logs/serve.log`（停止后回推到 Dropbox 同路径）。
 - 账号池状态：运行目录下 `workbuddy-status.json`，或 `workbuddy-gateway monitor` 前台刷新。
+  想看某账号某个模型到底免费还是收费：读快照 `accounts[].modelStates` 里那个模型的
+  `costClass`（`free`/`paid`/`unknown`）；要补测就跑 `workbuddy-gateway probe -auth <凭据文件名>
+  -models <模型>`（需 serve 在跑，结论写回账本）。
 - 凭据同步日志：`/tmp/workbuddy-cred-sync.log`（每轮成功/跳过/失败各一行）。
 - 本步骤元数据：`/tmp/run-workbuddy-meta.env`（`WB_STATE` / `WB_VERSION` / `WB_UPDATE` /
   `WB_REASON` / `WB_READY` / `WB_ACCOUNTS`）。
