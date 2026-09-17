@@ -42,12 +42,17 @@ GitHub Actions 工作流与脚本集合：OpenList 网盘同步、Emby 302 直�
 
 - 通知：`bash skills/telegram-notify-audit/scripts/render_preview.sh`（渲染预览 + 16 项自动校验）。
 - openlist 域：**测试在 CI 跑，不在本机跑**（2026-09-16 起，用户要求"避免消耗本机资源"）：
-  `gh workflow run tests.yml`（独立测试载体，按域分组，见 `.github/workflows/tests.yml`），
+  `gh workflow run tests.yml`（独立测试载体，见 `.github/workflows/tests.yml`；**目前只有 openlist 一个 job，
+  即该载体当前只服务 openlist 域**，proxy-speedtest 等域未接入、仍在各域本机自查），
   跑完 `gh run list --workflow=tests.yml --limit 1 --json databaseId,status,conclusion` 看结论；
-  失败时 `gh run view <id> --log` 取失败套件的输出尾部。**CI 基线: 26 套全绿（26/26）** ——
-  本机那 4 项非 0 全是环境假红（无 `date -d`、`wc` 前导空格、无 docker、沙箱拦子进程），
-  ubuntu runner 上不存在。本机只做秒级静态检查（`bash -n` / YAML 解析）。
+  失败时 `gh run view <id> --log` 取失败套件的输出尾部。**CI 基线: 本域套件全绿** ——
+  本机那批非 0 全是环境假红（无 `date -d`、`wc` 前导空格、无 docker、沙箱拦子进程），
+  ubuntu runner 上都不存在。本机只做秒级静态检查（`bash -n` / YAML 解析）。
 - **修复能力验证**（"某个文件到底能不能修好"）：走 `gh workflow run openlist-fix-check.yml`
   （独立 workflow，定点、分钟级、真值复核 + 逐文件 `VERDICT` 行），规程见计划文档 §12.11；
   后端诊断/吞吐测量走 `openlist-diag.yml`（**两者都必须与主轮错开**，同一网盘账号会互相干扰）。
-- openlist 域（历史本机口径，保留供追溯）：跑回归套件，基线 **26 套中 23 套 `EXIT=0`**；非 0 的只有 2 项环境性失败（`marker_skip_guards`（无 `date -d`）、`truth`（需 docker）），另有 flaky 单独重跑即过（`progress_no_orphans`（T5 时序）、`sync_trend_budget`（macOS `wc` 前导空格）；**套件运行期偶见沙箱拦子进程导致假红**，日志里会出现 `Brokered program policy check unavailable`，见到该标记即单独复跑复核——2026-09-14 `batch_consolidate` / `bulk_hash_fold` 即此形态，单跑分别 61/0、29/0），且 `command not found` 扫描必须为空（命令与 flake 名单见规范 · 回归套件）。
+- openlist 域（历史本机口径，保留供追溯）：跑回归套件，本机达标线为「**除环境假红外全 `EXIT=0`**」；
+  环境假红固定 2 项（`marker_skip_guards`（无 `date -d`）、`truth`（需 docker）），另有 flaky 单独重跑即过
+  （`progress_no_orphans`（T5 时序）、`sync_trend_budget`（macOS `wc` 前导空格）、
+  `test_pair_parallel.sh`（`wc` 前导空白导致 `[: 0\n0: integer expression expected`，本机 11/11 全过）；
+  **套件运行期偶见沙箱拦子进程导致假红**，日志里会出现 `Brokered program policy check unavailable`，见到该标记即单独复跑复核——2026-09-14 `batch_consolidate` / `bulk_hash_fold` 即此形态，单跑分别 61/0、29/0），且 `command not found` 扫描必须为空（命令与 flake 名单见规范 · 回归套件）。
