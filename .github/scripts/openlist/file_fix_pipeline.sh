@@ -290,6 +290,9 @@ _sync_fixed_files_exclusion() {
 # 与 file_fix.sh _fix_switch_to_hash_dir 内的建目录段同口径: WebDAV 的 mkdir
 # 会静默失败（返回 0 但目录不存在），必须 lsd 复核；复核不过再走 OpenList API。
 # 单独抽出来是因为目录折叠、短哈希切换两处都要用，各写一套必然漂移。
+# 409 语义（2026-09-17 加，与 file_fix.sh 同口径）: mkdir 报 409 优先解读为
+#   "目录已存在"（幂等成功）——短哈希目录名确定性，上轮折叠过必然已存在。
+#   旧行为只认 200|201|204 ⇒ 已存在的目录被判失败、整目录退回逐文件修复白跑。
 # 用法: _bulk_fold_ensure_dir <dst_remote> <ol_internal_path> → 0=目录已就绪
 _bulk_fold_ensure_dir() {
   local dst_dir="$1" ol_dir="$2"
@@ -298,6 +301,14 @@ _bulk_fold_ensure_dir() {
   if [ "$mkdir_status" -eq 0 ] && rclone lsd "$dst_dir" "${RCLONE_RETRY_FLAGS[@]}" \
        --timeout "${OPENLIST_MKDIR_TIMEOUT:-120}s" >/dev/null 2>&1; then
     return 0
+  fi
+  # 409 已存在语义: mkdir 报错但目录其实在 ⇒ 幂等成功
+  if [ "$mkdir_status" -ne 0 ] && [ "${_FIX_MKDIR_409_SEMANTICS:-1}" != "0" ]; then
+    if declare -F _fix_dir_exists_or_conflict >/dev/null 2>&1 \
+       && _fix_dir_exists_or_conflict "$dst_dir" "${OPENLIST_MKDIR_TIMEOUT:-120}s"; then
+      echo "  ✅ mkdir 报错但目录实际存在（409 已存在语义）→ 按幂等成功处理" | tee -a "$LOG_FILENAME"
+      return 0
+    fi
   fi
   local ol_token
   ol_token=$(_get_openlist_token 2>/dev/null) || ol_token=""
@@ -308,8 +319,21 @@ _bulk_fold_ensure_dir() {
     -H "Content-Type: application/json" \
     -d "$(jq -n --arg path "$ol_dir" '{path:$path}')" 2>&1)
   mkdir_http=$(echo "$mkdir_resp" | tail -n 1)
-  echo "$mkdir_http" | grep -qE 'HTTP_CODE:(200|201|204)'
+  if echo "$mkdir_http" | grep -qE 'HTTP_CODE:(200|201|204)'; then
+    return 0
+  fi
+  # API 报 409 同样先判"是否已存在"
+  if echo "$mkdir_http" | grep -qE 'HTTP_CODE:409' \
+     && [ "${_FIX_MKDIR_409_SEMANTICS:-1}" != "0" ]; then
+    if declare -F _fix_dir_exists_or_conflict >/dev/null 2>&1 \
+       && _fix_dir_exists_or_conflict "$dst_dir" "${OPENLIST_MKDIR_TIMEOUT:-120}s"; then
+      echo "  ✅ 目录 API 报 409 但实际存在 → 按幂等成功处理" | tee -a "$LOG_FILENAME"
+      return 0
+    fi
+  fi
+  return 1
 }
+
 
 # 折叠落盘记账（正常路径与延迟复核共用；依赖调用方作用域）
 #   作用域依赖: dir_rel / hash8 / hash_dst / source_path / dest_path / task_name /
@@ -863,6 +887,9 @@ _sync_fix_missing_files() {
       # 短名类方法直接成功。
       # 开关: OPENLIST_FIX_CB_FILES=0 关闭
       local _cb_consec=0 _cb_sig=""
+      # 目录创建层连续失败计数（跨文件累积；成功一次归零）。用于在"后端整个
+      # 建不出目录"时尽早收手，而不是逐个文件重复失败——见循环内判据注释。
+      _FIX_MKDIR_FAIL_STREAK=0
       # 修复管线专属最小工作片: 剩余预算不足它就在下一个文件前收摊，把尾部时间
       # 留给后面的持久化复核与收尾。默认沿用全局 600s（可单独调小以压榨尾部，
       # 但要给 _sync_persist_verify_and_retry 留够时间，否则复核被截断会丢条目）
@@ -898,6 +925,21 @@ _sync_fix_missing_files() {
             echo "🛑 后端 ${_cb_be_root} 本轮已熔断，跳过剩余 $((_cb_total - _cb_done)) 个文件（不再逐个探测/重启）" | tee -a "$LOG_FILENAME"
             SYNC_BACKEND_DEAD=1
             break
+          fi
+          # 目录建不出来 ⇒ 后续文件同样建不出来，继续跑只是逐个重复失败。
+          # 为什么单列（2026-09-17，run 35186977864 实测）: 该轮 mkdir 持续
+          #   409/mkParentDir failed，却仍逐个文件走完"建目录→探测→重启容器→
+          #   4 方法全败"，257 次尝试 / 6 小时零落盘。判据取**目录创建层**
+          #   的连续失败（而非方法失败）——它能区分"这个文件修不好"和
+          #   "这个后端现在建不出目录"，后者必须尽早收手把时间让给别的后端。
+          # 阈值可配；只认连续失败，成功一次即归零（后端恢复即放行）。
+          local _mkdir_fail_threshold="${OPENLIST_MKDIR_FAIL_STREAK:-3}"
+          if [ "$_mkdir_fail_threshold" -gt 0 ] 2>/dev/null; then
+            if [ "${_FIX_MKDIR_FAIL_STREAK:-0}" -ge "$_mkdir_fail_threshold" ]; then
+              echo "🛑 连续 ${_FIX_MKDIR_FAIL_STREAK} 个文件的目标目录建不出来（mkParentDir/409 类）→ 判定 ${_cb_be_root} 目录层不可用，跳过剩余 $((_cb_total - _cb_done)) 个文件的修复（交下轮，避免逐个重复失败）" | tee -a "$LOG_FILENAME"
+              SYNC_BACKEND_DEAD=1
+              break
+            fi
           fi
         fi
 
@@ -970,10 +1012,20 @@ _sync_fix_missing_files() {
             "$file_size" "$file_size_bytes" "${TRY_FIX_METHOD_ID:-}" "${TRY_FIX_MD5:-}" 2>&1 | tee -a "$LOG_FILENAME" || true
           _cb_consec=0
           _cb_sig=""
+          # 成功一次即证明目录层可用 → 归零连续失败计数（后端恢复立即放行）
+          _FIX_MKDIR_FAIL_STREAK=0
         else
           echo "❌ 修复失败 · $(_short_path "$failed_line") · ${TRY_FIX_MESSAGE}" | tee -a "$LOG_FILENAME"
           echo "${failed_line}|${file_size}|${TRY_FIX_MESSAGE}" >> "$fail_list"
           _fix_event_fail "$failed_line" "${TRY_FIX_MESSAGE:-}"
+
+          # 目录创建层连续失败计数（见循环开头 _FIX_MKDIR_FAIL_STREAK 的收手判据）。
+          # 只认"目录建不出来"这一类消息: 方法层失败（分卷未传完、上传 exit≠0）
+          # 是另一回事，把它们也计入会让健康后端被误判成目录层不可用。
+          case "${TRY_FIX_MESSAGE:-}" in
+            *目标目录建不出来*|*目标目录不可写*)
+              _FIX_MKDIR_FAIL_STREAK=$(( ${_FIX_MKDIR_FAIL_STREAK:-0} + 1 )) ;;
+          esac
 
           # 熔断器累计: 提取本文件修复区段的主导错误（出现 ≥2 次的同文错误）
           if [ "$_cb_threshold" -gt 0 ] 2>/dev/null; then

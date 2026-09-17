@@ -119,6 +119,36 @@ _sync_retry_423() {
 }
 
 
+# ===== HTTP 409 Conflict 重试（2026-09-17 加，与 423 同款）=====
+# 为什么需要: run 35186977864 单轮 2062 次 409 Conflict / 1088 次 mkParentDir failed，
+#   整轮零落盘。409 有两个来源: ① 目录已存在（MKCOL 语义，本该幂等成功）
+#   ② 并发 mkdir 竞争（与 423 同因，多个 worker 同时建同一父目录）。
+#   两者都是**重试可自愈**的，但此前只有 423 有重试、409 直接走熔断判死，
+#   于是一次竞争冲突就赔掉整轮。这里给 409 与 423 同等的机会。
+#   注: "目录已存在"的更优解是在建目录处直接判存在（见 file_fix.sh
+#   _fix_dir_exists_or_conflict），本函数兜的是**rclone 内部 mkParentDir**
+#   那条代码里碰不到的路径。
+# 依赖调用方作用域: dest_path / LOG_FILENAME / SYNC_STATUS；调用嵌套函数 run_rclone_sync_once
+_sync_retry_409() {
+  if [[ "$dest_path" == openlist:* ]] && grep -Eqi 'Conflict:[[:space:]]*409|409[[:space:]]+Conflict|mkParentDir failed' "$LAST_ATTEMPT_LOG"; then
+    local conflict_retry_attempts="${OPENLIST_409_RETRY_ATTEMPTS:-3}"
+    local conflict_retry_sleep="${OPENLIST_409_RETRY_SLEEP_SECONDS:-300}"
+    local conflict_retry_index
+
+    for ((conflict_retry_index = 1; conflict_retry_index <= conflict_retry_attempts; conflict_retry_index++)); do
+      echo "检测到 OpenList 409 Conflict/mkParentDir 失败，等待 ${conflict_retry_sleep}s 后重试 ${conflict_retry_index}/${conflict_retry_attempts}（目录已存在或并发争用，均可自愈）。" | tee -a "$LOG_FILENAME"
+      sleep "$conflict_retry_sleep"
+      SYNC_STATUS=0
+      run_rclone_sync_once "409 retry ${conflict_retry_index}/${conflict_retry_attempts}" || SYNC_STATUS=$?
+
+      if ! grep -Eqi 'Conflict:[[:space:]]*409|409[[:space:]]+Conflict|mkParentDir failed' "$LAST_ATTEMPT_LOG"; then
+        break
+      fi
+    done
+  fi
+}
+
+
 # ===== object not found 错误解析（源文件不存在）=====
 # 依赖调用方作用域: LAST_ATTEMPT_LOG / fail_list / LOG_FILENAME / task_name / HAS_OBJECT_NOT_FOUND
 _sync_parse_object_not_found() {
@@ -312,6 +342,10 @@ sync_with_logging() {
   _sync_retry_8005
 
   _sync_retry_423
+
+  # 409 与 423 同因（并发 mkdir 竞争 / 目录已存在），2026-09-17 起同等对待。
+  # 顺序放在 423 之后: 先走完已有重试链，再对 409 兜一轮，避免两者互相等待。
+  _sync_retry_409
 
   # ===== truth-check（任意 openlist: 目标端通用）=====
   # 放在缺失文件 diff 之前：本轮有传输则重启 OpenList 容器取后端真值列表，
