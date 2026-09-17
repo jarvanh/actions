@@ -1788,10 +1788,15 @@ jobs:
           # 运行期在 Dropbox 上新增/替换 workbuddy*.json，serve 看不到，最快也要等下一轮
           # （≈5.7 小时）。这里每 INTERVAL_SECONDS 秒把 Dropbox 上的凭据同步进运行目录，
           # serve 每 5 秒扫描 cwd 热加载，于是「你上传凭据」到「凭据生效」缩短到几分钟。
-          # 用 sync + --include 'workbuddy*.json'：Dropbox 是凭据的唯一真源，
-          # 你在那边删掉的凭据这里会同步移除（账号随之退出池）；
-          # include 同时把 serve 自产文件挡在同步范围外 —— workbuddy-status.json / 模型缓存 / logs
-          # 都不匹配该 glob，--delete 绝不会碰它们（否则会删掉 serve 正在写的文件）。
+          # 用 sync 让 Dropbox 成为凭据唯一真源：你在那边删掉的凭据这里同步移除（账号退出池）。
+          #
+          # 用 --filter 而非 --include + --exclude：rclone 明确警告混用 include/exclude 结果
+          # 不可预期，--filter 按序求值才是确定的。规则从上到下首个命中即定：
+          #   1) - workbuddy-status.json  排除 serve 自建的状态快照。
+          #      必须显式排除 —— 'workbuddy*.json' 这个 glob 会把它一起匹配进来，
+          #      而它是 serve 运行期高频重写的文件，sync --delete 会在每轮把它删掉。
+          #   2) + workbuddy*.json        凭据（唯一进入同步的文件）
+          #   3) - **                     其余一律排除（二进制、模型缓存、logs/ 等）
           # 源目录不存在（首轮）→ 静默跳过；rclone 失败只记日志，不打断循环、也不发通知。
           cat > /tmp/workbuddy-cred-sync.sh <<'EOF'
           #!/usr/bin/env bash
@@ -1806,7 +1811,9 @@ jobs:
             if [ -d "$DEST" ]; then
               if flock -E 200 -n "$LOCK_FILE" \
                 rclone sync "$SRC" "$DEST" \
-                  --include 'workbuddy*.json' \
+                  --filter '- workbuddy-status.json' \
+                  --filter '+ workbuddy*.json' \
+                  --filter '- **' \
                   --retries 3 --low-level-retries 5 --timeout 1m --contimeout 15s 2>/dev/null; then
                 echo "[$(date '+%F %T')] workbuddy credentials synced from Dropbox"
               else
