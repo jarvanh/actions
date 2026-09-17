@@ -60,12 +60,13 @@ job，gistnodes 侧拿不到测速结果。抓取情况走 job 摘要与 progres
    |---|---|---|
    | 1 | `Useless Filter` | 清掉「剩余流量/到期时间」这类信息节点与非 ASCII 凭据 |
    | 2 | `Script Operator` | `proxies.filter(...)` 剔掉 `EXCLUDE_NODE_TYPES` 里的协议（`http` / `socks5`，见下「为什么剔掉明文代理」） |
-   | 3 | `Handle Duplicate Operator`（`action: delete`） | 按 `field` 组合去重 |
-   | 4 | `Handle Duplicate Operator`（`action: rename`） | 重名节点加后缀，保证名字唯一 |
-   | 5 | `Script Operator` | `proxies.slice(0, N)` 限量（仅当 `GIST_NODES_MAX_NODES > 0`） |
+   | 3 | `Script Operator` | `proxies.filter(...)` 剔掉 `server` 落在 Cloudflare 官方 IP 段里的节点（见下「为什么剔掉 Cloudflare 节点」） |
+   | 4 | `Handle Duplicate Operator`（`action: delete`） | 按 `field` 组合去重 |
+   | 5 | `Handle Duplicate Operator`（`action: rename`） | 重名节点加后缀，保证名字唯一 |
+   | 6 | `Script Operator` | `proxies.slice(0, N)` 限量（仅当 `GIST_NODES_MAX_NODES > 0`） |
 
-   剔除算子**必须排在去重之前**：先剔掉不要的协议，去重才有意义（否则会拿它们的去重结果
-   污染「去重后 M 个」这个口径）。
+   两个剔除算子**都必须排在去重之前**：先剔掉不要的节点，去重才有意义（否则会拿被剔节点的
+   去重结果污染「去重后 M 个」这个口径）。
 6. **取回**：`GET /download/collection/<名>/ClashMeta` 拿 mihomo YAML；同时取 `<名>-raw` 的
    `JSON` 只用来数节点，得到「解析后 N → 去重后 M」这个可核对口径；
 7. **健康检查**（`GIST_NODES_ALIVE_FILTER`，默认开）：在发布**之前**起一个本地 mihomo
@@ -93,6 +94,34 @@ job，gistnodes 侧拿不到测速结果。抓取情况走 job 摘要与 progres
 
 比对时统一 `String(p.type || "").toLowerCase()`：订阅来自各家转换器，`HTTP` / `Http` 都见过，
 不做大小写归一会漏网。
+
+## 为什么剔掉 Cloudflare 节点
+
+在 Sub-Store 处理链第 3 步用 `proxies.filter(...)` 剔除 **`server` 落在 Cloudflare 官方 IP
+段**里的节点。判定表 `CF_IPV4_CIDRS` / `CF_IPV6_CIDRS` 照抄官方 API
+`https://api.cloudflare.com/client/v4/ips`（15 个 v4 段 + 7 个 v6 段），实测 2026-09-17
+一轮 11973 个节点里命中 1857 个（约 15.5%）。
+
+**判定只看 `server`，不碰名称、不碰 servername** —— 这不是保守，是唯一可靠的口径：
+
+| 旁证口径 | 覆盖率 | 为什么不用 |
+|---|---|---|
+| 节点名含 `cf` / `cloudflare` | 1857 个 CF 节点里只有 **64** 个命中 | 名字是 `🇩🇪DE_4|5.3MB/s` 这类测速命名，筛不全且会误伤同名普通节点 |
+| `servername = www.cloudflare.com` | 329 个 | 部分**非 CF 回源**的正常节点也拿它当优选 SNI ⇒ 直接误伤 |
+| `servername = www.tesla.com` | 948 个 | 同上，且这已是「CF 优选」惯用假 SNI，判据不成立 |
+| **`server` 落官方 IP 段** | 1857 个，**零假阳性** | 段表是官方固定公布的，落进去只能是 CF 承载 |
+
+CIDR 归属判断在 Script Operator 里手搓位运算（Sub-Store 算子沙箱不保证有 Node 的 `net`
+模块）：v4 展开成 `[网络地址, 掩码]` 比较；v6 用 `BigInt` 解析后右移比前缀。
+
+**已知取舍（宁漏勿错）**：`server` 是**域名**、实际回源 CF 的节点判不出来——那要 DNS 解析，
+而算子链是纯文本处理、没有解析能力。这部分如实放弃，不做任何猜测性匹配。非 IP 字面量
+（域名、非法 IP、`None`、空串）一律**保留**。
+
+验证：JS 算子在全量 11973 个真实节点上与 Python `ipaddress` 独立实现**逐节点比对，零分歧**
+（移除 1857 / 保留 10116）；另跑 88 个段边界用例（每段首末地址 + 前后各一个邻居）全部一致。
+测试断言 `tests/test_gist_nodes_substore.py` 里把官方段表**独立写成字面量**核对，避免自我指涉
+（读常量会让「把段表删到只剩一段」也照样全绿）。
 
 ## 为什么发布前必须自己先测活
 

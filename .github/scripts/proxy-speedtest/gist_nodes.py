@@ -42,7 +42,9 @@ Sub-Store 接口（读 backend/src/restful/*.js 得到，全部是无需鉴权�
 去重与清理都用它的内置算子（名字即 process 里的 type）：
   'Useless Filter'              清掉「剩余流量/到期时间」这类信息节点与非 ASCII 凭据
   'Handle Duplicate Operator'   去重（action=delete 按 field 组合判重）与重名重命名
-  'Script Operator'             限量（只在需要限节点数时追加）
+  'Script Operator'             自定义过滤/裁剪：剔明文协议、剔 CF 节点、限量
+                                （脚本文本须定义名为 operator 的函数，Sub-Store 会拼上
+                                `return operator` 再执行；见 _exclude_types_operator）
 
 环境变量（除 token 外全部可选）：
   GIST_NODES_QUERIES       搜索关键词，逗号分隔（默认 ss://,vless://,vmess://,trojan://,hysteria2://,tuic://）
@@ -288,6 +290,28 @@ DEDUPE_FIELDS = ['type', 'server', 'port', 'uuid', 'password', 'cipher',
 # 为什么在 Sub-Store 里筛而不是 Python 侧：与既有 `slice` 限量写法一致，产出仍完全由
 # Sub-Store 生成，不会因脚本侧改动而触发 yaml.safe_dump 重写、丢掉原文格式。
 EXCLUDE_NODE_TYPES = ('http', 'socks5')
+
+# Cloudflare 官方公布的 IPv4/IPv6 段，来源 https://api.cloudflare.com/client/v4/ips
+# （2026-09-17 取，etag 38f79d050aa027e3be3865e495dcc9bc）。
+#
+# 为什么用「server 落 CF 官方 IP 段」判「Cloudflare 部署的节点」，而不是按名称/servername：
+# 名称完全不可靠——实测一轮 1857 个 CF 节点里只有 64 个名字带 cf/cloudflare 字样，其余
+# 是 `🇩🇪DE_4|5.3MB/s` 这类测速命名；按名字筛既覆盖不全又会误伤。servername 同理
+# （`www.cloudflare.com` 只有 329 个，且部分正常节点也拿它当优选 SNI）。
+# **IP 段判定是唯一零歧义的**：CF 的段表是官方固定公布的，server 落进去只能是 CF 承载，
+# 无假阳性。代价是「server 是域名、实际回源 CF」的节点判不出来（需 DNS 解析，算子链
+# 是纯 JS 文本处理、没有解析能力），这部分如实放弃，宁漏勿错。
+#
+# 判断逻辑放进 Script Operator 而不是 Python 侧：与既有剔除/限量写法一致，产出仍完全由
+# Sub-Store 生成，不会因脚本侧改动触发 yaml.safe_dump 重写、丢掉原文格式。
+CF_IPV4_CIDRS = ('173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/22',
+                 '103.31.4.0/22', '141.101.64.0/18', '108.162.192.0/18',
+                 '190.93.240.0/20', '188.114.96.0/20', '197.234.240.0/22',
+                 '198.41.128.0/17', '162.158.0.0/15', '104.16.0.0/13',
+                 '104.24.0.0/14', '172.64.0.0/13', '131.0.72.0/22')
+CF_IPV6_CIDRS = ('2400:cb00::/32', '2606:4700::/32', '2803:f800::/32',
+                 '2405:b500::/32', '2405:8100::/32', '2a06:98c0::/29',
+                 '2c0f:f248::/32')
 
 # 统计口径（贯穿日志与 nodes.json）。键名刻意避开共享层 _redact_value 的敏感子串：
 # 'ip' 是模糊匹配项，任何含 skipped 的键名（如 file_skipped）都会被整条打成 ***。
@@ -781,17 +805,103 @@ def _exclude_types_operator():
     }
 
 
+def _exclude_cf_operator():
+    """剔掉 server 落在 Cloudflare 官方 IP 段里的节点（即 CF 部署/回源的节点）。
+
+    判定只看 `p.server`，**不碰名称、不碰 servername**——理由见 CF_IPV4_CIDRS 上方的注释。
+    只处理「server 直接是 IP 字面量」的情况：域名要做 DNS 解析才知道归属，Script Operator
+    是纯 JS 文本处理、没有解析能力，故按「宁漏勿错」放弃域名形态，不做任何猜测性匹配。
+
+    CIDR 归属判断在 JS 里手搓：Sub-Store 的算子沙箱只保证有标准内建对象，不保证有 Node 的
+    `net` 模块，所以自己把 IPv4 段（唯一会命中的形态）展开成 [网络地址, 掩码] 做位运算比较。
+    IPv6 段同样带上——虽然当前订阅里 CF 节点几乎都是 v4，但段表要与官方一致，避免日后漏判
+    （IPv6 字面量含 `:`，用 BigInt 解析，超出 Number 安全整数范围也能算准）。
+    """
+    v4 = json.dumps([list(c) for c in (
+        (str(n), int(m)) for n, m in (
+            (c.split('/')[0], int(c.split('/')[1])) for c in CF_IPV4_CIDRS
+        )
+    )])
+    v6 = json.dumps(list(CF_IPV6_CIDRS))
+    content = (
+        f'var __cf4 = {v4};\n'
+        f'var __cf6 = {v6};\n'
+        'function __cfv4(s) {\n'
+        '  var p = s.split(".");\n'
+        '  if (p.length !== 4) return -1;\n'
+        '  var n = 0;\n'
+        '  for (var i = 0; i < 4; i++) {\n'
+        '    if (!/^\\d{1,3}$/.test(p[i])) return -1;\n'
+        '    var o = Number(p[i]);\n'
+        '    if (o > 255) return -1;\n'
+        '    n = n * 256 + o;\n'
+        '  }\n'
+        '  return n;\n'
+        '}\n'
+        'function __cfv6(s) {\n'
+        '  if (s.indexOf(":") < 0) return null;\n'
+        '  var dbl = s.split("::");\n'
+        '  if (dbl.length > 2) return null;\n'
+        '  function parts(x) { return x ? x.split(":") : []; }\n'
+        '  var head = parts(dbl[0]), tail = dbl.length === 2 ? parts(dbl[1]) : [];\n'
+        '  var fill = 8 - head.length - tail.length;\n'
+        '  if (dbl.length === 1 && head.length !== 8) return null;\n'
+        '  if (dbl.length === 2 && fill < 1) return null;\n'
+        '  var g = head.concat(new Array(fill).fill("0")).concat(tail);\n'
+        '  if (g.length !== 8) return null;\n'
+        '  var n = 0n;\n'
+        '  for (var i = 0; i < 8; i++) {\n'
+        '    if (!/^[0-9a-fA-F]{1,4}$/.test(g[i])) return null;\n'
+        '    n = (n << 16n) + BigInt(parseInt(g[i], 16));\n'
+        '  }\n'
+        '  return n;\n'
+        '}\n'
+        'function __cfin(server) {\n'
+        '  var s = String(server == null ? "" : server).trim();\n'
+        '  if (s.indexOf(":") >= 0) {\n'
+        '    var a6 = __cfv6(s);\n'
+        '    if (a6 === null) return false;\n'
+        '    for (var i = 0; i < __cf6.length; i++) {\n'
+        '      var c6 = __cf6[i].split("/"), m6 = BigInt(parseInt(c6[1], 10));\n'
+        '      var b6 = __cfv6(c6[0]);\n'
+        '      if (b6 === null) continue;\n'
+        '      if ((a6 >> (128n - m6)) === (b6 >> (128n - m6))) return true;\n'
+        '    }\n'
+        '    return false;\n'
+        '  }\n'
+        '  var a4 = __cfv4(s);\n'
+        '  if (a4 < 0) return false;\n'
+        '  for (var j = 0; j < __cf4.length; j++) {\n'
+        '    var m4 = __cf4[j][1];\n'
+        '    if (m4 === 0) continue;\n'
+        '    var mask = (0xffffffff << (32 - m4)) >>> 0;\n'
+        '    if ((a4 & mask) === (__cfv4(__cf4[j][0]) & mask)) return true;\n'
+        '  }\n'
+        '  return false;\n'
+        '}\n'
+        'function operator(proxies) {\n'
+        '  if (!Array.isArray(proxies)) return proxies;\n'
+        '  return proxies.filter(function (p) { return !__cfin(p && p.server); });\n'
+        '}'
+    )
+    return {'type': 'Script Operator', 'args': {'mode': 'script', 'content': content}}
+
+
 def build_process(max_nodes):
-    """清理 / 剔除不要的协议 / 去重 / 限量，全部用 Sub-Store 内置算子
+    """清理 / 剔除不要的节点 / 去重 / 限量，全部用 Sub-Store 内置算子
     （名字即 process 里的 type）。
 
-    顺序有讲究：先 Useless Filter 清掉信息节点，再剔掉明文协议，然后按字段去重，
+    顺序有讲究：先 Useless Filter 清掉信息节点，再剔掉明文协议与 CF 节点，然后按字段去重，
     最后处理重名——重命名只对「名字重复」的节点加后缀，放在去重之后剩下的才是真重名
     （同一节点的多次出现已被上一步删掉）。
+
+    两个剔除算子都必须在去重**之前**：它们是「不要的节点」的定义，先剔干净，去重结果
+    才是真正保留集的口径（否则被剔掉的节点会参与去重、污染「去重后 M 个」这个对数）。
     """
     process = [
         {'type': 'Useless Filter'},
         _exclude_types_operator(),
+        _exclude_cf_operator(),
         {'type': 'Handle Duplicate Operator',
          'args': {'action': 'delete', 'field': DEDUPE_FIELDS}},
         {'type': 'Handle Duplicate Operator', 'args': {'action': 'rename'}},
