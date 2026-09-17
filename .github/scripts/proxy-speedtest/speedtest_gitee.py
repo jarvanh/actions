@@ -1088,19 +1088,43 @@ def git_force_push_testfile(repo_dir: pathlib.Path, remote: str, env, file_path:
         return _do_push()
 
 def git_clone_testbranch(clone_dir: pathlib.Path, remote: str, env, timeout: int, branch_name: str, target_filename: str):
+    """经代理拉回测速分支上的文件，返回 `(纯传输秒数, 文件路径)`。
+
+    **计时只包住文件内容的传输**（2026-09-17 改）。原实现 `t0 = time.time()` 包住整条
+    `git clone`，量出来的是「仓库元数据协商 + 内容传输 + 本地 checkout」的墙钟时间；
+    10MiB 文件在高速节点上，元数据/checkout 的固定开销能占掉相当比例 ⇒ 算出的 MiB/s
+    被系统性低估，四套之间的「下载速度」也就不可比（上行侧只包住 `git push` 一条命令，
+    口径本来就不对称）。
+
+    现在是两段，只量第二段：
+      1. 索引/元数据 clone：`--filter=blob:none` 只取提交与树，不取任何文件内容；
+      2. 取文件内容：`git checkout` 把 blob 落到工作区，**这一段才是下载耗时**。
+
+    `--filter=blob:none` 需要远端支持 partial clone（Gitee 支持）；不支持时 git 会告警并
+    退回全量下载，此时第 2 段几乎是空操作，退化成接近旧口径，因此不额外加兜底分支
+    ——多一条分支就多一种「看起来成功但口径不同」的路径。
+    """
     shutil.rmtree(clone_dir, ignore_errors=True)
-    t0 = time.time()
     code, out, err = run(
-        ['git', 'clone', '--depth', '1', '--single-branch', '--branch', branch_name, remote, str(clone_dir)],
-        env=env,
-        timeout=timeout,
+        ['git', 'clone', '--depth', '1', '--single-branch', '--branch', branch_name,
+         '--filter=blob:none', remote, str(clone_dir)],
+        env=env, timeout=timeout,
     )
     if code != 0:
         raise RuntimeError((err or out or 'git clone failed')[-500:])
+    # 只量「把文件内容拉下来」这一件事：checkout 触发 blob 获取并写入工作区。
+    t0 = time.time()
+    code, out, err = run(
+        ['git', 'checkout', '--force', 'HEAD', '--', target_filename],
+        cwd=clone_dir, env=env, timeout=timeout,
+    )
+    # 非 0 不直接抛：blob:none 下这次 checkout 才去取内容，超时/失败都要看文件到底有没有落地，
+    # 落地了就当这一次测到（计耗时），没落地才报错——避免把「内容已到、命令却非 0」判成下载失败。
+    elapsed = time.time() - t0
     pulled = clone_dir / target_filename
     if not pulled.exists():
-        raise RuntimeError('downloaded test file missing')
-    return time.time() - t0, pulled
+        raise RuntimeError((err or out or 'git checkout failed')[-500:])
+    return elapsed, pulled
 
 def switch_proxy(name: str, settle_seconds: float):
     mihomo_api_put(f'/proxies/{urllib.parse.quote("AUTO", safe="")}', {'name': name})
@@ -1850,7 +1874,8 @@ def main():
     ok_results = [x for x in speed_results if x.get('ok')]
     failed_results = [x for x in speed_results if not x.get('ok')]
     # 订阅导出策略：阈值/判定指标/最少节点数（env 覆盖；判定指标默认 upload，
-    # 达标不足 min_nodes 时自动改用 download，反之亦然 —— 见 resolve_subscription_metric）
+    # 上行达标数 < 回退门槛（默认 3）且下行更多时自动改用 download
+    # —— 见 resolve_subscription_metric）
     policy = resolve_subscription_policy(env)
     bundle = build_subscription_bundle(ok_results, policy)
     min_megabit = policy['min_megabit']

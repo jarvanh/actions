@@ -1014,7 +1014,7 @@ def _run():
     # 三个测速工作流各用各的 Gist，互不覆盖。taier 数值是 Mbps，导出字段是 MiB/s（÷8.388608），
     # 阈值/前缀沿用 speedtest_gitee 的 ×8 折算，展示值与 Mbps 基本一致。
     # 达标策略（阈值 / 判定指标 / 最少节点数）与四套共用，见 resolve_subscription_policy：
-    # 默认按上行判定，达标不足 min_nodes 时自动改用下行（反之亦然）。
+    # 默认按上行判定；上行达标数 < 回退门槛（默认 3）且下行更多时自动改用下行。
     gist_res = None
     gist_error = ''
     gist_results = [{

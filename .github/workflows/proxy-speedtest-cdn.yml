@@ -183,12 +183,15 @@ jobs:
           # 订阅导出策略（四套共用，脚本默认值；各脚本消费）：
           #   PROXY_SPEEDTEST_MIN_MEGABIT  达标阈值（兆，默认 10）
           #   PROXY_SPEEDTEST_SPEED_METRIC 判定指标 upload|download（默认 upload 按上行判定；
-          #                                另一指标达标数「明显更多」时自动改用另一指标）
+          #                                主指标达标数 < 下面回退门槛且另一指标更多时改用另一指标）
           #   PROXY_SPEEDTEST_MIN_NODES    上传订阅的最少节点数（默认 1，不足则不上传）
+          #   PROXY_SPEEDTEST_METRIC_FALLBACK_MIN_NODES
+          #                                判定指标回退门槛（默认 3）：主指标达标数 < 该值且
+          #                                另一指标更多才改判。与 MIN_NODES 是两回事，别混用
           PROXY_SPEEDTEST_MIN_MEGABIT: '10'
           PROXY_SPEEDTEST_SPEED_METRIC: 'upload'
           PROXY_SPEEDTEST_MIN_NODES: '1'
-          PROXY_SPEEDTEST_METRIC_FALLBACK_RATIO: '1.5'
+          PROXY_SPEEDTEST_METRIC_FALLBACK_MIN_NODES: '3'
           # 订阅导出 + 上传 Gist：脚本复用 speedtest_gitee 的 build_subscription_yaml_text /
           # update_gist，把达标节点整理成可用订阅并发布到 GitHub 私有 Gist。
           #   PROXY_SPEEDTEST_SUB_URLS : 见上方同步骤 env 的原始订阅源定义，用于解析节点原始配置；留空则不上传 gist

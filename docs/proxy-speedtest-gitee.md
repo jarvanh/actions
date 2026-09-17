@@ -22,14 +22,15 @@
 
 容易被误读的三点写在最前：**① 只有 taier 与 gistnodes 真探活**（CDN/Gitee 的「活」是测量
 成功的副产品）；**② taier 的「兆」与另外三套的 MiB/s 不是同一把尺子**（见下方换算）；
-**③ CDN 与 Gitee 的下行口径不同**（纯传输 vs 含 git 元数据协商），数值不适合横向比。
+**③ 上行与下行都只计「数据在链路上跑」的那一段**（CDN 的 curl Range、Gitee 的 git blob
+传输；仓库元数据协商、checkout、commit 等固定开销一律排除，见下方「下载计时」）。
 
 | 项 | CDN | Gitee | taier | gistnodes |
 |---|---|---|---|---|
 | **探活** | ❌ 无（`ok = 延迟成功 or 下载成功`） | ❌ 无（push 成功即活） | ✅ `/proxies/{名}/delay`，探第三方控制面 | ✅ 非惰性健康检查 + 轮询等结论 |
 | **延迟** | `latency_probe`：baidu+taobao，各 4 次，8s，**HTTP 首字节** | 同实现，目标只有 `gitee.com` | 引擎对运营商服务器打**原生 TCP** | — |
 | **上传** | git push→Gitee，**可切直连** | git push→Gitee，**可切直连** | 引擎发流（single/multi） | — |
-| **下载** | curl 单连接 Range 10MiB，多镜像取最优 | `git clone --depth 1`（含元数据） | 同一次引擎调用的「↓」列 | — |
+| **下载** | curl 单连接 Range 10MiB，多镜像取最优 | `blob:none` clone + checkout 取文件，**只计传输** | 同一次引擎调用的「↓」列 | — |
 | **单位** | MiB/s | MiB/s | 原始 Mbps | — |
 
 ⚠️ **taier 的单位陷阱**：引擎输出 Mbps，导出时 ÷8.388608 转 MiB/s、展示时 ×8 转回「兆」，
@@ -62,7 +63,8 @@
 5. 逐节点：切换 AUTO → 经代理 HTTP 计时测 gitee.com 延迟（`latency_probe`，采样
    `PROXY_SPEEDTEST_LATENCY_SAMPLES` × 超时 `PROXY_SPEEDTEST_LATENCY_TIMEOUT`）
    → 经代理 `git push`（单流 HTTPS，超时 `PROXY_SPEEDTEST_PUSH_TIMEOUT`）按推送耗时
-   换算上行 → `git clone` 拉回（超时 `PROXY_SPEEDTEST_CLONE_TIMEOUT`）换算下行；
+   换算上行 → `git clone` + `checkout` 取文件（超时 `PROXY_SPEEDTEST_CLONE_TIMEOUT`）
+   换算下行（只计 blob 传输，见[下载计时](#下载计时只计-blob-传输2026-09-17)）；
 6. 汇总 → 按**订阅导出策略**判定达标节点（见[订阅导出策略](#订阅导出策略三套共用)）导出到专属 Gist
    （`update_gist`，只上传不回拉；2026-09-10 已移除原先「第二个 mihomo 实例（19690/19691）
    回拉 Gist raw + 抽样验证」的步骤，见[运维与排查](#运维与排查)）；
@@ -106,6 +108,37 @@
 
 ⚠️ **默认保持「经代理」**：历史通知里的「上传」都指节点上行，改默认会让新旧数据不可比。
 要测家庭宽带，显式设 `PROXY_SPEEDTEST_UPLOAD_VIA_PROXY=0`。
+
+## 下载计时：只计 blob 传输（2026-09-17）
+
+**原口径**：`t0 = time.time()` 包住整条 `git clone --depth 1 --single-branch`，量到的是
+「远端仓库元数据协商 + 文件内容传输 + 本地 checkout」的总墙钟时间。10MiB 文件在高速节点上，
+元数据/checkout 的固定开销能占掉相当比例 ⇒ 算出的 MiB/s 被**系统性低估**；且上行侧只包住
+`git push` 一条命令，两侧口径本就不对称。
+
+**现口径**：拆成两段，只量第二段：
+
+| 段 | 命令 | 是否计时 |
+|---|---|---|
+| ① 元数据 clone | `git clone --depth 1 --single-branch --branch <b> --filter=blob:none <remote>` | ❌ 不计 |
+| ② 内容传输 | `git checkout --force HEAD -- <file>`（触发 blob 获取并写入工作区） | ✅ **计** |
+
+`--filter=blob:none` 是 partial clone：只取提交与树、不取任何文件内容，因此第 ① 段几乎不含
+数据流量；第 ② 段的 `checkout` 才真正把 10MiB blob 拉下来——**这一段才是「下载」**。
+测试第 11 组用「clone 阶段伪造 5s、checkout 阶段伪造 2s」的伪造时钟钉住：返回的
+`download_seconds` 必须是 2s 而不是 7s；把 `t0` 挪回 clone 之前会立刻变红。
+
+两点约定：
+
+- **checkout 非 0 不直接抛**：`blob:none` 下这次 checkout 才去取内容，超时/失败都要看文件
+  到底有没有落地——落地了就当这次测到（计耗时），没落地才 `RuntimeError`。避免把
+  「内容已到、命令却非 0」误判成下载失败。
+- **不做「远端不支持 partial clone」的兜底分支**：Gitee 支持；万一不支持，git 会告警并退回
+  全量下载，此时第 ② 段几乎是空操作、退化成接近旧口径。多一条兜底就多一种「看起来成功但
+  口径不同」的路径，宁可让它自然退化。
+
+`download_seconds`（RESULT_JSON / `direct_baseline_finished` 日志）**整个替换**为这个纯传输
+耗时，不并存两个口径——并存迟早有人拿错那个字段。
 
 ⚠️ **`strip_proxy_env` 必须剥净 6 个变量**（含小写的 `all_proxy`/`http_proxy`/`https_proxy`）：
 漏一个就会「直连」其实还在走代理，测出来是节点带宽而非家庭宽带，**且看不出任何异常**。
@@ -156,9 +189,9 @@
 | `PROXY_SPEEDTEST_DETACH` | 0（workflow 注入） | 1 = detach 后台自跑（本地手跑用） |
 | `PROXY_SPEEDTEST_GIST_FILENAME` / `_DESCRIPTION` | 见 workflow | Gist 文件名/描述 |
 | `PROXY_SPEEDTEST_MIN_MEGABIT` | 10 | 达标阈值（兆） |
-| `PROXY_SPEEDTEST_SPEED_METRIC` | upload | 判定指标 `upload`/`download`；另一指标达标数明显更多时自动改用另一指标（双向对称） |
+| `PROXY_SPEEDTEST_SPEED_METRIC` | upload | 判定指标 `upload`/`download`；主指标达标数 < 回退门槛且另一指标更多时自动改用另一指标（双向对称） |
 | `PROXY_SPEEDTEST_MIN_NODES` | 1 | 上传订阅的最少节点数，不足则不上传（通知显示「达标不足 N 个」） |
-| `PROXY_SPEEDTEST_METRIC_FALLBACK_RATIO` | 1.5 | 判定指标回退的「明显更好」倍率：另一指标达标数 ≥ 主指标 × 该值才切换。`1` = 只要更多就换 |
+| `PROXY_SPEEDTEST_METRIC_FALLBACK_MIN_NODES` | 3 | 判定指标回退门槛：主指标达标数 **< 该值** 且另一指标更多才改判。与 `MIN_NODES` 是两回事（后者只管传不传），别混用 |
 
 ### 墙钟预算（到点收摊，三套共用）
 
@@ -189,18 +222,24 @@ variables → Actions → Variables 可随时改，留空走默认）：
 
 1. **阈值**：`兆 = round(MiB/s × 8)`，≥ `PROXY_SPEEDTEST_MIN_MEGABIT`（默认 10）为达标；
 2. **判定指标**：`PROXY_SPEEDTEST_SPEED_METRIC`（默认 `upload` 按上行）；
-3. **回退**：另一指标达标数**明显更多**时才改用另一指标——`secondary > primary` 且
-   `secondary ≥ ceil(primary × PROXY_SPEEDTEST_METRIC_FALLBACK_RATIO)`（默认 `1.5`）。
-   双向对称，容忍小幅差距（尊重你显式配置的指标），差距够大才换（典型场景：公开节点
-   上行普遍测不出，下行却全部达标）；
+3. **回退**：**主指标达标数 < `PROXY_SPEEDTEST_METRIC_FALLBACK_MIN_NODES`（默认 3）**
+   且**另一指标达标数更多**（`secondary > primary`）时，才改用另一指标。两条缺一不可——
+   只按门槛会在「换了反而更少」时误换，只按「更多」会在主指标只有 1 个时丢掉用户显式
+   配置的偏好（典型场景：公开节点上行普遍测不出，下行却全部达标）；
 4. **最少节点数**：最终达标数 < `PROXY_SPEEDTEST_MIN_NODES`（默认 1）就不上传订阅
    （日志 `gist_skipped`，通知显示「达标不足 N 个 · 阈值 ≥X兆（按上行/下行）」）。
 
-⚠️ **回退判据不能拿 `min_nodes` 当门槛**（2026-09-14 修）。原先写成「主指标达标数 <
-`min_nodes` 才回退」，而 `min_nodes` 默认 1 ⇒ 只要主指标有 1 个达标就永不回退。
-实测 run 34859505000：19 个节点里上行只有 1 个测得出，下行 19 个全部达标，却因
-`1 ≥ 1` 不回退 ⇒ **订阅里只剩 1 个节点**。`min_nodes` 的本意是「不足则不上传订阅」，
-两个语义绑在一起就会出这种事故。
+⚠️ **回退门槛不能复用 `min_nodes`**（2026-09-14 事故 + 2026-09-17 解耦为独立配置）。
+`min_nodes` 的语义是「不足则不上传订阅」、默认 1；拿它当回退门槛就会变成「主指标有 1 个
+达标就永不回退」。实测 run 34859505000：19 个节点里上行只有 1 个测得出，下行 19 个全部
+达标，却因 `1 ≥ 1` 不回退 ⇒ **订阅里只剩 1 个节点**。两个语义必须分开：
+门槛单列 `PROXY_SPEEDTEST_METRIC_FALLBACK_MIN_NODES`（默认 3）——下限设小了永不回退、
+设大了又变成「达标不足就不上传」，绑在一起怎么调都是错的。
+
+> 判据形式在 2026-09-17 从「倍率制」（`secondary ≥ ceil(primary × 1.5)`）改成「计数制」
+> （`primary < 门槛 且 secondary > primary`）：倍率制在 `primary` 很小时（如 1）要求
+> `secondary ≥ 2` 才换，与「计数制门槛 3」相比更宽松；两者都修掉了 `min_nodes` 事故，
+> 计数制的好处是门槛语义直白、可直接按「想让几个达标才算主指标可信」来调。
 
 实际采用的指标会写进日志（`subscription_policy` / `subscription_metric_fallback` /
 `subscription_metric_kept`）与 TG 通知文案。节点必须有**可导出配置**才计入达标——否则导不进
