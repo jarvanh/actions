@@ -343,7 +343,7 @@ runner 以 `tailscale set --ssh --hostname=openclaw --advertise-exit-node` 广�
 | `/tmp/local_workbuddy/data/` | **本轮运行目录**（`serve` 的 cwd），起前从 Dropbox 拉、停后回推 |
 | `/dropbox/self-hosted/workbuddy-gateway/workbuddy*.json` | 凭据文件（**需人工 `login` 扫码生成**，见下）——Dropbox 侧为持久副本 |
 | `/dropbox/self-hosted/workbuddy-gateway/.installed-version` | 已安装版本号（用于比对是否需要更新） |
-| `/dropbox/self-hosted/workbuddy-gateway/workbuddy-status.json` | 账号池状态快照（serve 写进运行目录，停止时回推） |
+| `/dropbox/self-hosted/workbuddy-gateway/workbuddy-status.json` | 账号池状态快照（serve 写进运行目录，**运行期每 5 分钟回推一次**） |
 | `/dropbox/self-hosted/workbuddy-gateway/logs/` | 历轮 serve 日志留档（**只回推本轮新写的 `serve.log`**） |
 
 > **两处刻意分离，各修一次线上故障**：
@@ -354,7 +354,8 @@ runner 以 `tailscale set --ssh --hostname=openclaw --advertise-exit-node` 广�
 >    `workbuddy-status.json`，在 `--vfs-cache-mode full` 的挂载点上会卡住/被 runner 清理，
 >    表现为「进程 2 秒内退出且 `serve.log` 为空」（run 35185511971）。
 >
-> 因此把整个运行目录挪到本地盘，靠 `rclone copy` 双向搬运数据（见启动链路第 0 步与收尾第 1 步）。
+> 因此把整个运行目录挪到本地盘，靠 `rclone` 在 run 边界搬运数据（启动第 0 步拉、收尾 3b-1 推），
+> 另有一个每 5 分钟的循环单独回推账号池快照（见下文「账号池快照的周期回推」）。
 
 ### 启动链路
 
@@ -401,10 +402,31 @@ kill $(cat /tmp/workbuddy-serve.pid)  →  pkill -f "<bin> serve" 兜底
 历轮日志；回推失败只发 ⚠️ 提示，不影响停止结论。归档循环与最终归档只覆盖 OpenClaw 主包、
 AI 网关与 rsstt，不涉及本服务。
 
+### 账号池快照的周期回推（每 5 分钟）
+
+状态快照是唯一需要"运行期就可见"的数据，靠上面的收尾回推最长会滞后一整轮（≈5.7 小时）。
+为此在「Start background archive loop」里额外起一个常驻循环
+（`/tmp/workbuddy-status-sync.sh`，日志 `/tmp/workbuddy-status-sync.log`）：
+
+```
+每 300 秒 → 源文件存在则 rclone copyto 单个 workbuddy-status.json 到 Dropbox
+（per-file flock：抢不到锁 → 跳过本轮；源文件不存在 → 静默跳过；rclone 失败 → 只记日志）
+```
+
+- **只碰 `workbuddy-status.json` 一个文件**，不碰凭据、不碰 `logs/` —— 回推面越小越不会
+  和人工编辑 Dropbox 上的凭据相撞。
+- **用 per-file 锁，不共用归档循环的锁**：本循环周期短，若与每 20 分钟的归档抢同一把锁，
+  会互相拖慢（归档那侧拿到锁前会被本循环反复插队）。
+- **失败不发通知**：快照滞后属于可自愈状态（下一 tick 会重试，收尾 3b 也会兜底回推），
+  不是需要人工介入的异常 —— 发通知只会制造噪音。日志里留 `⚠️ ... sync failed (rc=N)`。
+- **首推时刻**：workbuddy 步骤结束时快照已落盘，所以循环起来后第一个 tick 就能推，
+  不等 5 分钟。
+
 ### 排障入口
 
 - 本轮实时日志：`/tmp/local_workbuddy/data/logs/serve.log`（停止后回推到 Dropbox 同路径）。
 - 账号池状态：运行目录下 `workbuddy-status.json`，或 `workbuddy-gateway monitor` 前台刷新。
+- 周期回推的日志：`/tmp/workbuddy-status-sync.log`（每轮成功/跳过/失败各一行）。
 - 本步骤元数据：`/tmp/run-workbuddy-meta.env`（`WB_STATE` / `WB_VERSION` / `WB_UPDATE` /
   `WB_REASON` / `WB_READY` / `WB_ACCOUNTS`）。
 - 失败时日志尾部会**同时打到 stdout**（`--- serve.log tail (1200B) ---`），
