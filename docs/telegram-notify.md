@@ -429,10 +429,10 @@ Run ID：<code>12345678</code>
   └─ <code>workbuddy-intl.json</code>
 
 💳 账号池 · 2
-  ├─ <code>workbuddy.json</code> · 国内站 (copilot.tencent.com) · 可用
-  │  有效 · 过期时间 2026-09-22 12:32:07 (剩余 119h30m0s)
-  └─ <code>workbuddy-intl.json</code> · 国际站 (www.workbuddy.ai) · 可用
-     有效 · 过期时间 2027-09-05 01:57:00 (剩余 8280h0m0s)
+  ├─ <code>workbuddy.json</code> · 国内站 · 可用
+  │  额度剩 59.64 · 免费 · 免费模型 1 · 过期 2026-09-21 08:32
+  └─ <code>workbuddy-intl.json</code> · 国际站 · 付费耗尽
+     额度剩 0 · 免费 · 模型冷却 2 · 过期 2027-06-07 04:32
 
 数据目录：<code>/dropbox/self-hosted/workbuddy-gateway</code>
 
@@ -451,27 +451,35 @@ Run ID：<code>12345678</code>
 - **凭据**只列 `workbuddy*.json` 的**文件名**（`├─/└─` 树形，分节带 ` · N`）。
   **绝不回显文件内容**——那是真实 Access/Refresh Token。`workbuddy-status.json`
   是 serve 写的状态快照，不算凭据，必须排除。
-- **账号池**逐账号给：`凭据文件 · 站点 · 冷却状态`，次行给 `Token 状态 · 过期时间`。
-  数据源是 `workbuddy-gateway status`（README 有文档、字段稳定）。
-  **不要解析 `workbuddy-status.json`**——其内部键名上游未文档化，猜键名会在上游改版时
-  静默失效；「剩余积分 / 免费模型 / 模型冷却」只出现在 `monitor` 的交互式表格里，
-  非脚本可取，故本通知不展示。
-  取不到的账号整条省略，且**整个账号池分节无数据时整段跳过**，不留空分节。
+- **账号池**逐账号给：`凭据文件 · 站点 · 状态`，子行给 `额度 · 免费模型 · 模型冷却 · Token 过期`
+  （各项非空才并进子行）。数据源是 serve 写出的 **`workbuddy-status.json`**（jq 取）。
 
-  解析 `status` 输出时注意它**不是**「字段名: 值」的紧凑格式，两个坑：
-  ```text
-  凭据文件:     workbuddy.json
-  站点:         国内站 (copilot.tencent.com)
-  冷却状态:     可用
-  Token 状态:   有效
-  过期时间:     2026-09-22 12:32:07 (剩余 119h30m0s)
-  ```
-  1. 字段名后是**对齐用的多个空格**（非单个），去前缀后必须 trim 首尾空白；
-  2. **`过期时间` 是独立一行**，不在 `Token 状态` 行里——只取 `Token 状态` 会把过期
-     时间整条丢掉。
-  另：`站点` 自带域名（`国内站 (copilot.tencent.com)`），原样展示即可；
-  `用户昵称 / 用户 UID / 企业 ID / 认证域名` 不进通知（隐私 + 与本条通知目的无关）。
-  awk 里**不要用 `exp` 当变量名**——它是内置函数（指数），作变量名是语法错误。
+  > **更正（2026-09-17）**：此前本节写「不要解析 workbuddy-status.json，其键名上游未文档化」——
+  > 这个判断是错的。该文件的键名由上游 Go 结构体 `accountSnapshot` / `statusSnapshot`
+  > 的 json tag **固定**，比 `status` 子命令给人类看的对齐表格更可靠：
+  >
+  > | 快照字段 | 含义 |
+  > |---|---|
+  > | `path` | 凭据文件路径（取 basename） |
+  > | `edition` | `cn`（国内站，默认）/ `intl`（国际站） |
+  > | `state` | `active` / `cooldown` / `paid_exhausted` / `expired` / `disabled` |
+  > | `tokenExpiresAt` | Access Token 过期**时间戳**（秒；0 表示无） |
+  > | `quotaRemaining` / `quotaKnown` | 剩余额度 / 是否已成功查询过额度 |
+  > | `isPaidUser` | 是否付费用户 |
+  > | `freeModels` / `modelCooldowns` | 已确认免费的模型数 / 当前冷却中的模型数 |
+  >
+  > 中文状态名照上游 `monitor` 表格的映射（`paid_exhausted` → 付费耗尽等）；
+  > 额度格式照上游 `formatQuota`（|v|<0.005 归零，两位小数去尾零）。
+  > **`quotaKnown` 为 false 时不要显示额度数字**——那只是「还没查到」，
+  > 显示 0 会与「额度耗尽」混淆，写「额度未获取」。
+  > 快照里还有 `nickname` / `uid` / `modelStates` 明细，都**不进通知**
+  > （隐私 + 与本条通知目的无关）。
+  >
+  > serve 每 3 秒重写该文件，**可能读到半截导致 jq 失败**：失败就本轮账号池整段跳过，
+  > 不发半条、也不据此判定服务未就绪（下一轮接力会补上）。
+  >
+  > 「剩余积分 / 免费模型 / 模型冷却」原本以为只能从 `monitor` 的交互式表格取，
+  > 实际快照里就有（`quotaRemaining` / `freeModels` / `modelCooldowns`）。
 
 - 「数据目录」指 Dropbox 上的**持久数据目录**，不是本轮本地运行目录 —— 两者分离，
   但读者要照着去放凭据的地方是 Dropbox 那个（本地运行目录每轮重建）。

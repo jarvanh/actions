@@ -804,8 +804,7 @@ jobs:
           #   原始输出 → <pre>，恒为正文最后一块（其后只跟收尾区）。空值整行跳过、空分节整段跳过。
           #   鉴权恒写「仅回环监听，无需密钥」：不传 -api-key 且只绑 127.0.0.1，网关不做鉴权，
           #   绝不编造密钥值。凭据段只列 workbuddy*.json 的文件名，绝不回显内容（真实 Token）。
-          #   账号池取自 `status` 子命令的文本输出（字段有上游文档），不解析 workbuddy-status.json
-          #   （内部键名未文档化）。
+          #   账号池取自 workbuddy-status.json（键名由上游 Go 结构体固定，见采集处注释）。
           wb_notify() {
             if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
               local _msg=""
@@ -828,61 +827,37 @@ jobs:
                 done <<< "$WB_CREDS"
                 tg_add_block _msg "$(tree_lines "${_ent%$'\n'}")"
               fi
-              # 账号池：逐账号「一条目 + 一子行」。数据源是 `status` 的文本输出，按
-              # "--- 账号 #N ---" 分块，取 凭据文件 / 站点 / 冷却状态 / Token 状态 / 过期时间。
-              # 真实格式（上游 README · status 输出示例）——字段名后是**对齐用的多个空格**，
-              # 且 `过期时间` 是**独立一行**、不在 `Token 状态` 行里：
-              #     凭据文件:     workbuddy.json
-              #     站点:         国内站 (copilot.tencent.com)
-              #     冷却状态:     可用
-              #     Token 状态:   有效
-              #     过期时间:     2026-09-22 12:32:07 (剩余 119h30m0s)
-              # 故去前缀后必须 trim 首尾空白；Token 状态与过期时间并成一句放子行。
-              # 缺凭据文件或站点的块整块丢弃，不留半条。
-              # 变量名用 ex 不用 exp —— `exp` 是 awk 内置函数（指数），当变量名是语法错误。
+              # 账号池：逐账号「一条目 + 一子行」。数据源是函数外的 WB_POOL —— 采集处
+              # （启动步骤）已用 jq 解析 workbuddy-status.json 成 7 列 TSV：
+              #     凭据文件名 \t 站点 \t 状态 \t 额度 \t 免费模型 \t 模型冷却 \t Token 过期
+              # 前 3 列进条目行，第 4 列起（非空的）并成子行。缺凭据文件名或站点的行整条丢弃。
               # 子行必须用 tree_sub 前缀手拼 —— tree_lines 把每行都当兄弟条目，
               # 子行经它会渲染成 ├─/└─，与条目平级（规范 4.2 二层列表：子行与条目正文同列）。
-              if [ -n "${WB_STATUS_OUT:-}" ]; then
-                local _pool=""
-                _pool="$(printf '%s\n' "$WB_STATUS_OUT" | awk '
-                  function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
-                  function flush() {
-                    if (cf != "" && st != "") {
-                      # 子行 = Token 状态 + 过期时间，合成一句人话。裸时间戳读者不知道是什么，
-                      # 故过期时间带前缀「过期时间」；只有其一时照出。
-                      if (tok != "" && ex != "") { tok = tok " · 过期时间 " ex }
-                      else if (ex != "") { tok = "过期时间 " ex }
-                      printf "%s\t%s\t%s\t%s\n", cf, st, cd, tok
-                    }
-                    cf=""; st=""; cd=""; tok=""; ex=""
-                  }
-                  /^---[[:space:]]*账号/ { flush(); next }
-                  /^凭据文件:/ { v=$0; sub(/^凭据文件:[[:space:]]*/, "", v); cf=trim(v); next }
-                  /^站点:/     { v=$0; sub(/^站点:[[:space:]]*/, "", v); st=trim(v); next }
-                  /^冷却状态:/ { v=$0; sub(/^冷却状态:[[:space:]]*/, "", v); cd=trim(v); next }
-                  /^Token 状态:/ { v=$0; sub(/^Token 状态:[[:space:]]*/, "", v); tok=trim(v); next }
-                  /^过期时间:/ { v=$0; sub(/^过期时间:[[:space:]]*/, "", v); ex=trim(v); next }
-                  END { flush() }
-                ' || true)"
-                if [ -n "$_pool" ]; then
-                  local _n_acc _rows _i _cf _st _cd _tok _last
-                  _n_acc="$(printf '%s\n' "$_pool" | grep -c . || true)"
-                  tg_add_section _msg "💳 账号池 · ${_n_acc}"
-                  _rows=""
-                  _i=0
-                  while IFS="$(printf '\t')" read -r _cf _st _cd _tok; do
-                    [ -z "$_cf" ] && continue
-                    _i=$((_i + 1))
-                    _last=0
-                    [ "$_i" -eq "$_n_acc" ] && _last=1
-                    _rows+="$(tree_conn "$_last")$(tg_entry "$_cf" "$_st" "$_cd")"$'\n'
-                    [ -n "$_tok" ] && _rows+="$(tree_sub "$_last")$(escape_html "$_tok")"$'\n'
-                  done <<< "$_pool"
-                  tg_add_block _msg "${_rows%$'\n'}"
-                  # 块尾补一个空行：tg_add_block 不补尾空行，下一个 kv（数据目录）会紧贴
-                  # 末条子行渲染，版式与规范示例（块与 kv 区之间空一行）不一致。
-                  tg_append _msg $'\n'
-                fi
+              if [ -n "${WB_POOL:-}" ]; then
+                local _n_acc _rows _i _cf _st _state _quota _free _cdl _tok _sub _x _last
+                _n_acc="$(printf '%s\n' "$WB_POOL" | grep -c . || true)"
+                tg_add_section _msg "💳 账号池 · ${_n_acc}"
+                _rows=""
+                _i=0
+                while IFS="$(printf '\t')" read -r _cf _st _state _quota _free _cdl _tok; do
+                  [ -z "$_cf" ] && continue
+                  _i=$((_i + 1))
+                  _last=0
+                  [ "$_i" -eq "$_n_acc" ] && _last=1
+                  _rows+="$(tree_conn "$_last")$(tg_entry "$_cf" "$_st" "$_state")"$'\n'
+                  # 子行拼装：逐项非空才并入，任一项缺都不留空分隔符。
+                  # 过期时间在 jq 侧已带「过期 」前缀（裸时间戳读者不知道是什么）。
+                  _sub=""
+                  for _x in "$_quota" "$_free" "$_cdl" "$_tok"; do
+                    [ -z "$_x" ] && continue
+                    _sub="${_sub:+${_sub} · }${_x}"
+                  done
+                  [ -n "$_sub" ] && _rows+="$(tree_sub "$_last")$(escape_html "$_sub")"$'\n'
+                done <<< "$WB_POOL"
+                tg_add_block _msg "${_rows%$'\n'}"
+                # 块尾补一个空行：tg_add_block 不补尾空行，下一个 kv（数据目录）会紧贴
+                # 末条子行渲染，版式与规范示例（块与 kv 区之间空一行）不一致。
+                tg_append _msg $'\n'
               fi
               tg_add_path _msg "数据目录" "$WB_DIR"
               if [ -n "$6" ]; then
@@ -1040,15 +1015,52 @@ jobs:
           WB_CREDS="$(cd "$WB_RUN_DIR" 2>/dev/null && ls -1 workbuddy*.json 2>/dev/null \
             | grep -v '^workbuddy-status\.json$' || true)"
 
-          # 逐账号明细（站点/状态/剩余积分/免费模型/模型冷却）走官方的 `status` 子命令：
-          # 它的文本输出在 README 里有文档、字段稳定；而 workbuddy-status.json 的
-          # 内部键名上游未文档化，直接解析会在改版时静默失效。
-          # status 读的是运行目录（与 serve 同 cwd），失败只记日志、不进通知。
-          WB_STATUS_OUT=""
+          # 逐账号明细走 serve 写出的状态快照 workbuddy-status.json（JSON，jq 直接取）。
+          # 此前用 `status` 子命令的文本输出，理由是「有 README 文档」——那个判断是错的：
+          #   1. 文本输出是对齐排版的给人看的表格，字段名后跟多个空格、`过期时间` 独立成行，
+          #      解析要靠 trim + 逐行匹配，脆且易漏（本轮已踩过）；
+          #   2. 快照的键名其实**是稳定的**——它由上游 Go 结构体 accountSnapshot 的
+          #      json tag 固定（path/edition/state/tokenExpiresAt/quotaRemaining/
+          #      isPaidUser/quotaKnown/freeModels/modelCooldowns…），比文本表格更可靠。
+          # 故改用 jq 取快照。字段语义照 accountSnapshot 与 monitor 表格：
+          #   state: active|cooldown|paid_exhausted|expired|disabled → 可用/冷却/付费耗尽/已过期/失效
+          #   quotaKnown 为 false 时额度三项无意义（monitor 显示 "-"），此处显示「未获取」
+          #   quotaRemaining 按上游 formatQuota（两位小数、去尾零）
+          WB_STATUS_JSON="$WB_RUN_DIR/workbuddy-status.json"
+          WB_POOL=""
           if [ "$WB_READY" = "1" ]; then
-            WB_STATUS_OUT="$(cd "$WB_RUN_DIR" 2>/dev/null && "$WB_BIN" status 2>/dev/null || true)"
-            if [ -z "$WB_STATUS_OUT" ]; then
-              echo "⚠️ workbuddy-gateway status 无输出（账号池明细本轮留空）"
+            if [ -r "$WB_STATUS_JSON" ]; then
+              # serve 每 3 秒重写该文件，读到半截会解析失败 —— 失败就本轮留空，
+              # 不发半条（下一轮接力会自动补上），也绝不因此判定服务未就绪。
+              WB_POOL="$(jq -r '
+                def fq: if . > -0.005 and . < 0.005 then "0"
+                        else (. * 100 | round / 100 | tostring) end;
+                def state_cn:
+                  if   . == "active"         then "可用"
+                  elif . == "cooldown"       then "冷却"
+                  elif . == "paid_exhausted" then "付费耗尽"
+                  elif . == "expired"        then "已过期"
+                  elif . == "disabled"       then "失效"
+                  else . end;
+                .accounts[]
+                | [
+                    (.path | split("/") | last),
+                    (if .edition == "intl" then "国际站" else "国内站" end),
+                    (.state | state_cn),
+                    (if .quotaKnown then ("额度剩 " + (.quotaRemaining | fq)
+                       + (if .isPaidUser then " · 付费" else " · 免费" end))
+                     else "额度未获取" end),
+                    (if (.freeModels // 0) > 0 then ("免费模型 " + (.freeModels | tostring)) else "" end),
+                    (if (.modelCooldowns // 0) > 0 then ("模型冷却 " + (.modelCooldowns | tostring)) else "" end),
+                    (if (.tokenExpiresAt // 0) > 0 then ("过期 " + (.tokenExpiresAt | strftime("%Y-%m-%d %H:%M"))) else "" end)
+                  ]
+                | @tsv
+              ' "$WB_STATUS_JSON" 2>/dev/null || true)"
+              if [ -z "$WB_POOL" ]; then
+                echo "⚠️ workbuddy-status.json 解析失败（多为读到 serve 正在重写的半截文件），本轮账号池明细留空"
+              fi
+            else
+              echo "⚠️ 未找到 $WB_STATUS_JSON（账号池明细本轮留空）"
             fi
           fi
 
@@ -2265,7 +2277,7 @@ jobs:
             # 收尾停止通知。版式与运行步骤里的 wb_notify 同源（docs/telegram-notify.md
             # 2.5 workbuddy 段）——两者分处不同 step、shell 不共享，只能各存一份副本，
             # 改版式必须两处一起改，这是这类双份实现最容易「改一处漏一处」的地方。
-            # 收尾没有 WB_CREDS / WB_STATUS_OUT（那是启动步骤的局部变量），本函数只出
+            # 收尾没有 WB_CREDS / WB_POOL（那是启动步骤的局部变量），本函数只出
             # 结论 + 版本 + 数据目录：网关已停，再列账号池会让人以为服务还在跑。
             if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
               local _msg=""
