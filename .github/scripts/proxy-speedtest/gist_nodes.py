@@ -280,6 +280,15 @@ B64_ALPHABET = frozenset('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz01
 DEDUPE_FIELDS = ['type', 'server', 'port', 'uuid', 'password', 'cipher',
                  'network', 'path', 'host', 'servername', 'sni', 'plugin']
 
+# 剔除的协议类型：http / socks5 都是**明文**代理（无加密层），拿来当翻墙订阅意义不大，
+# 却实测占全量约 14%（2026-09-17 一轮 13721 个节点里 http 1752 + socks5 236）。
+# 注意 Clash / mihomo schema 里**没有独立的 https 类型**：HTTPS 代理也是 `type: http`
+# 加 `tls: true`（该轮 1752 个 http 里有 1083 个是这种），所以排除 http 即同时排除
+# HTTP 与 HTTPS 代理，不需要额外列 https。
+# 为什么在 Sub-Store 里筛而不是 Python 侧：与既有 `slice` 限量写法一致，产出仍完全由
+# Sub-Store 生成，不会因脚本侧改动而触发 yaml.safe_dump 重写、丢掉原文格式。
+EXCLUDE_NODE_TYPES = ('http', 'socks5')
+
 # 统计口径（贯穿日志与 nodes.json）。键名刻意避开共享层 _redact_value 的敏感子串：
 # 'ip' 是模糊匹配项，任何含 skipped 的键名（如 file_skipped）都会被整条打成 ***。
 STAT_KEYS = ('gists_scanned', 'gist_errors', 'oversize_files', 'file_errors',
@@ -752,15 +761,37 @@ def collect_all(candidates, token, timeout, max_file_bytes, workers):
 # ---------------------------------------------------------------------------
 # Sub-Store 处理链
 # ---------------------------------------------------------------------------
-def build_process(max_nodes):
-    """去重 / 清理 / 限量，全部用 Sub-Store 内置算子（名字即 process 里的 type）。
+def _exclude_types_operator():
+    """剔掉 EXCLUDE_NODE_TYPES 里的协议（明文 http / socks5）。
 
-    顺序有讲究：先 Useless Filter 清掉信息节点，再按字段去重，最后处理重名——
-    重命名只对「名字重复」的节点加后缀，放在去重之后剩下的才是真重名（同一节点
-    的多次出现已被上一步删掉）。
+    实现用 Script Operator（同限量那条的理由）：产出保持完全由 Sub-Store 生成。
+    脚本文本被 Sub-Store 拼成 `... \\n return operator` 再执行，须定义名为 operator
+    的函数。按 `String(p.type).toLowerCase()` 比对，避免大小写差异漏网（订阅来自
+    各家转换器，`HTTP` / `Http` 都见过）。
+    """
+    types_js = ', '.join(json.dumps(t) for t in EXCLUDE_NODE_TYPES)
+    return {
+        'type': 'Script Operator',
+        'args': {
+            'mode': 'script',
+            'content': (f'function operator(proxies) {{ return proxies.filter('
+                        f'p => ![{(types_js)}].includes(String(p.type || "").toLowerCase())'
+                        f'); }}'),
+        },
+    }
+
+
+def build_process(max_nodes):
+    """清理 / 剔除不要的协议 / 去重 / 限量，全部用 Sub-Store 内置算子
+    （名字即 process 里的 type）。
+
+    顺序有讲究：先 Useless Filter 清掉信息节点，再剔掉明文协议，然后按字段去重，
+    最后处理重名——重命名只对「名字重复」的节点加后缀，放在去重之后剩下的才是真重名
+    （同一节点的多次出现已被上一步删掉）。
     """
     process = [
         {'type': 'Useless Filter'},
+        _exclude_types_operator(),
         {'type': 'Handle Duplicate Operator',
          'args': {'action': 'delete', 'field': DEDUPE_FIELDS}},
         {'type': 'Handle Duplicate Operator', 'args': {'action': 'rename'}},

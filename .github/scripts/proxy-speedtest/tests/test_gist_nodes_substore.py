@@ -319,12 +319,22 @@ def main():
         check(by_name.get('gist-nodes-raw', {}).get('process') == [], '-raw 参照组不带 process')
         main_col = by_name.get('gist-nodes') or {}
         types = [p.get('type') for p in main_col.get('process') or []]
-        check(types == ['Useless Filter', 'Handle Duplicate Operator',
+        check(types == ['Useless Filter', 'Script Operator', 'Handle Duplicate Operator',
                         'Handle Duplicate Operator', 'Script Operator'],
               f'主组合算子链正确（实际 {types}）')
         check(main_col.get('subscriptions') == [p['name'] for _, _, p in subs],
               '主组合引用全部订阅名')
-        delete_op = (main_col.get('process') or [{}])[1]
+        # 剔除算子必须排在去重之前：先剔掉不要的协议，去重才有意义
+        check(types.index('Script Operator') < types.index('Handle Duplicate Operator'),
+              '剔除算子排在去重之前')
+        excl_op = (main_col.get('process') or [{}])[1]
+        excl_js = (excl_op.get('args') or {}).get('content', '')
+        check('proxies.filter' in excl_js, f'剔除算子用 filter（实际 {excl_js!r}）')
+        check('"http"' in excl_js and '"socks5"' in excl_js,
+              f'剔除 http 与 socks5（实际 {excl_js!r}）')
+        check('toLowerCase' in excl_js,
+              '大小写归一后再比对，避免 HTTP/Http 漏网')
+        delete_op = (main_col.get('process') or [{}])[2]
         check('server' in (delete_op.get('args') or {}).get('field', []),
               '去重字段包含 server（按节点身份判重，不是按名字）')
         check('name' not in (delete_op.get('args') or {}).get('field', []),
@@ -359,7 +369,11 @@ def main():
         cols4 = [p for _, _, p in posts('/api/collections') if p['name'] == 'gist-nodes']
         check(len(cols4) == 1, f'主组合只建了一次（实际 {len(cols4)}）')
         types = [t.get('type') for t in (cols4[0].get('process') or [])]
-        check('Script Operator' not in types, f'无限量算子（实际 {types}）')
+        check(types == ['Useless Filter', 'Script Operator', 'Handle Duplicate Operator',
+                        'Handle Duplicate Operator'],
+              f'MAX_NODES=0 时只有剔除算子、无限量算子（实际 {types}）')
+        check('slice(0, 0)' not in json.dumps(cols4[0].get('process') or []),
+              'MAX_NODES=0 时不许生成 slice 算子')
 
         print('== 5. 负向：Sub-Store 不可达必须失败 ==')
         code, _, _ = run_main(gist_nodes, tmpdir, {'SUB_STORE_BACKEND_URL': 'http://127.0.0.1:1'})
