@@ -335,28 +335,35 @@ runner 以 `tailscale set --ssh --hostname=openclaw --advertise-exit-node` 广�
 
 ### 数据落点
 
-**二进制在本地盘、数据在 Dropbox**（与 OpenClaw / CliRelay 同口径）：
+**运行整体落本地盘，Dropbox 只做持久化存放**（与 OpenClaw / CliRelay 同口径）：
 
 | 路径 | 内容 |
 |---|---|
 | `/tmp/local_workbuddy/workbuddy-gateway` | 二进制（**本地盘**，每轮按 GitHub Releases 的 `latest` 按需下载） |
-| `/dropbox/self-hosted/workbuddy-gateway/workbuddy*.json` | 凭据文件（**需人工 `login` 扫码生成**，见下） |
+| `/tmp/local_workbuddy/data/` | **本轮运行目录**（`serve` 的 cwd），起前从 Dropbox 拉、停后回推 |
+| `/dropbox/self-hosted/workbuddy-gateway/workbuddy*.json` | 凭据文件（**需人工 `login` 扫码生成**，见下）——Dropbox 侧为持久副本 |
 | `/dropbox/self-hosted/workbuddy-gateway/.installed-version` | 已安装版本号（用于比对是否需要更新） |
-| `/dropbox/self-hosted/workbuddy-gateway/workbuddy-status.json` | 运行期账号池状态快照（由 serve 自己写） |
-| `/dropbox/self-hosted/workbuddy-gateway/logs/serve.log` | serve 的 stdout/stderr |
+| `/dropbox/self-hosted/workbuddy-gateway/workbuddy-status.json` | 账号池状态快照（serve 写进运行目录，停止时回推） |
+| `/dropbox/self-hosted/workbuddy-gateway/logs/` | 历轮 serve 日志留档（**只回推本轮新写的 `serve.log`**） |
 
-> **二进制为什么不能放 Dropbox**：`/dropbox` 是 rclone FUSE 挂载点，文件权限由
-> `--file-perms` 合成（默认 `0644`），`chmod +x` 在挂载点上是空操作 —— 从挂载点执行
-> 一律 `nohup: failed to run command ...: Permission denied`。这是本服务首次上线时的
-> 实际故障（run 35177995322），修复即把二进制改落本地盘、只留数据在挂载点。
+> **两处刻意分离，各修一次线上故障**：
+> 1. **二进制不能放 Dropbox**：`/dropbox` 是 rclone FUSE 挂载点，文件权限由
+>    `--file-perms` 合成（默认 `0644`），`chmod +x` 在挂载点上是空操作 —— 从挂载点执行
+>    一律 `nohup: failed to run command ...: Permission denied`（run 35177995322）。
+> 2. **工作目录也不能直接用 Dropbox**：`serve` 会在 cwd 下高频读写 `logs/` 与
+>    `workbuddy-status.json`，在 `--vfs-cache-mode full` 的挂载点上会卡住/被 runner 清理，
+>    表现为「进程 2 秒内退出且 `serve.log` 为空」（run 35185511971）。
+>
+> 因此把整个运行目录挪到本地盘，靠 `rclone copy` 双向搬运数据（见启动链路第 0 步与收尾第 1 步）。
 
 ### 启动链路
 
 ```
+0. rclone copy dropbox:self-hosted/workbuddy-gateway → 本地运行目录（排除 logs/**、*.new；拉不到按空账号池启动）
 查 GitHub Releases latest tag（匿名 API，每轮一次；失败则按现有二进制运行）
     ├─ 版本一致且二进制可执行 → 跳过下载
     └─ 否则下载 workbuddy-gateway-linux-amd64 到本地盘临时文件 → chmod 755 → 原子 mv 替换
-→ pkill 掉上一轮可能残留的 serve → cd 到数据目录后 nohup 执行本地盘二进制 serve -addr 127.0.0.1 -port 8318
+→ pkill 掉上一轮可能残留的 serve → cd 到本地运行目录后 nohup 执行本地盘二进制 serve -addr 127.0.0.1 -port 8318
 → /health 探活（60×2s）
     ├─ 就绪且日志里账号池非空 → 🟢 已就绪
     ├─ 就绪但账号池为空       → ⚠️ 已启动 · 无可用账号（需人工扫码登录）
@@ -366,12 +373,13 @@ runner 以 `tailscale set --ssh --hostname=openclaw --advertise-exit-node` 广�
 
 - **端口 8318**：8317 已被 CliRelay / CLIProxyAPI 占用（OpenClaw 主 AI 网关），
   二者并列互不干扰；本步骤**不**为本服务起 cloudflared 隧道，仅本机可达。
-- **执行与工作目录刻意分离**：二进制取自本地盘 `$WB_BIN`，而 `serve` 的**工作目录**
-  必须是数据目录 —— 它靠「读取当前目录下所有 `workbuddy*.json`」组建账号池，
-  状态文件与 `logs/` 也写在同目录，因此启动时先 `cd "$WB_DIR"` 再执行 `$WB_BIN`。
+- **执行与工作目录都在本地盘**：`serve` 的**工作目录**必须是数据目录 —— 它靠
+  「读取当前目录下所有 `workbuddy*.json`」组建账号池，状态文件与 `logs/` 也写在同目录。
+  因此启动前先把 Dropbox 数据 `rclone copy` 成本地运行目录，再 `cd` 进去执行本地盘二进制：
+  既拿到凭据，又避开在 FUSE 挂载点上高频写小文件。
 - **凭据只能人工准备**：`login` 是终端内嵌二维码扫码（或浏览器内完成登录），
-  workflow 内无法完成。把凭据文件放进数据目录即可被自动发现（serve 每 5 秒热加载，
-  增删改凭据免重启）。
+  workflow 内无法完成。**要把凭据放进 Dropbox 的数据目录**（不要只放运行目录——
+  运行目录每轮重建，只有回推才会落到 Dropbox）。serve 每 5 秒热加载，增删改凭据免重启。
 - 更新失败（查询或下载失败）**不阻塞启动**：沿用现有二进制起服务，原因写进通知的「原因」行。
 - 失败原因按日志尾部区分「二进制不可执行 / 无有效凭据 / 其他启动即退」，
   不一律写成「凭据或参数错误」，便于照着通知直接定位。
@@ -385,19 +393,25 @@ kill $(cat /tmp/workbuddy-serve.pid)  →  pkill -f "<bin> serve" 兜底
 → 轮询 30 秒等优雅退出（写完状态快照）
 → 仍未退出则 pkill -9
 → 复检残留：无残留发 ⛔ 已停止；仍有残留发 ⚠️ 已停止 · 进程残留
+→ rclone copy 本地运行目录 → dropbox:self-hosted/workbuddy-gateway（回推状态快照与本轮日志）
 ```
 
-数据目录在 Dropbox 挂载点上，serve 停止后状态文件即为完整落盘状态，收尾**无需额外回传动作**
-（归档循环与最终归档只覆盖 OpenClaw 主包、AI 网关与 rsstt）。
+运行目录在本地盘、每轮重建，所以停止后必须**回推**一次，否则状态快照与本轮 `serve.log`
+随 runner 销毁。回推用 `rclone copy`（单向、只增不删）而非 `sync` —— 保留 Dropbox 上的
+历轮日志；回推失败只发 ⚠️ 提示，不影响停止结论。归档循环与最终归档只覆盖 OpenClaw 主包、
+AI 网关与 rsstt，不涉及本服务。
 
 ### 排障入口
 
-- 实时日志：`/dropbox/self-hosted/workbuddy-gateway/logs/serve.log`。
-- 账号池状态：`workbuddy-status.json`（同目录），或 `workbuddy-gateway monitor` 前台刷新。
+- 本轮实时日志：`/tmp/local_workbuddy/data/logs/serve.log`（停止后回推到 Dropbox 同路径）。
+- 账号池状态：运行目录下 `workbuddy-status.json`，或 `workbuddy-gateway monitor` 前台刷新。
 - 本步骤元数据：`/tmp/run-workbuddy-meta.env`（`WB_STATE` / `WB_VERSION` / `WB_UPDATE` /
   `WB_REASON` / `WB_READY` / `WB_ACCOUNTS`）。
+- 失败时日志尾部会**同时打到 stdout**（`--- serve.log tail (1200B) ---`），
+  不必重跑一轮就能在 CI 日志里看到真实报错；`<pre>` 只进 Telegram。
 - `Permission denied` 又出现时，先确认二进制路径不在 `/dropbox` 下
   （`ls -l /tmp/local_workbuddy/workbuddy-gateway`），挂载点上永远执行不了。
+- 日志为空且进程秒退时，先确认 `cd` 的是本地运行目录而非 `/dropbox/...`。
 
 > 说明：OpenClaw 主网关（CliRelay `:8317` → cloudflared `ai-api` 隧道）见第六节；
 > 本节服务是**并列的第二网关**，对外入口与归档一律互不涉及。
