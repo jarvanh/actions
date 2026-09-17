@@ -1102,7 +1102,7 @@ python 侧拿不到 bash 函数，仍有两处同义实现（`add_uploaded_video
   真源本身不校验。
 - bash 真源兼容历史变量名 `TG_BOT_TOKEN` / `TG_CHAT_ID`；**pwsh 侧没有这层回退**，
   必须注入 `TELEGRAM_*`。
-- python 侧凭据从传入的 `env` 读，但 `TG_RUN_URL` / `TG_RUN_STARTED_AT` 只读
+- python 侧凭据从传入的 `env` 读，但 `TG_RUN_URL` 只读
   `os.environ`，只给 dict 不够。
 - pwsh 的 step 要 `shell: pwsh`；引入真源后建议加 `Get-Command Send-TgMessage` 自检——
   调用未定义函数是终止错误，step 带 `continue-on-error` 时会表现为通知静默消失。
