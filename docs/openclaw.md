@@ -341,9 +341,9 @@ runner 以 `tailscale set --ssh --hostname=openclaw --advertise-exit-node` 广�
 |---|---|
 | `/tmp/local_workbuddy/workbuddy-gateway` | 二进制（**本地盘**，每轮按 GitHub Releases 的 `latest` 按需下载） |
 | `/tmp/local_workbuddy/data/` | **本轮运行目录**（`serve` 的 cwd），起前从 Dropbox 拉、停后回推 |
-| `/dropbox/self-hosted/workbuddy-gateway/workbuddy*.json` | 凭据文件（**需人工 `login` 扫码生成**，见下）——Dropbox 侧为持久副本 |
+| `/dropbox/self-hosted/workbuddy-gateway/workbuddy*.json` | 凭据文件（**需人工 `login` 扫码生成**，见下）——Dropbox 侧为唯一真源，**运行期每 5 分钟增量拉进运行目录** |
 | `/dropbox/self-hosted/workbuddy-gateway/.installed-version` | 已安装版本号（用于比对是否需要更新） |
-| `/dropbox/self-hosted/workbuddy-gateway/workbuddy-status.json` | 账号池状态快照（serve 写进运行目录，**运行期每 5 分钟回推一次**） |
+| `/dropbox/self-hosted/workbuddy-gateway/workbuddy-status.json` | 账号池状态快照（serve 写进运行目录，停止时回推） |
 | `/dropbox/self-hosted/workbuddy-gateway/logs/` | 历轮 serve 日志留档（**只回推本轮新写的 `serve.log`**） |
 
 > **两处刻意分离，各修一次线上故障**：
@@ -355,7 +355,7 @@ runner 以 `tailscale set --ssh --hostname=openclaw --advertise-exit-node` 广�
 >    表现为「进程 2 秒内退出且 `serve.log` 为空」（run 35185511971）。
 >
 > 因此把整个运行目录挪到本地盘，靠 `rclone` 在 run 边界搬运数据（启动第 0 步拉、收尾 3b-1 推），
-> 另有一个每 5 分钟的循环单独回推账号池快照（见下文「账号池快照的周期回推」）。
+> 另有一个每 5 分钟的循环把 Dropbox 上的凭据增量拉进运行目录（见下文「凭据的周期拉取」）。
 
 ### 启动链路
 
@@ -378,9 +378,10 @@ runner 以 `tailscale set --ssh --hostname=openclaw --advertise-exit-node` 广�
   「读取当前目录下所有 `workbuddy*.json`」组建账号池，状态文件与 `logs/` 也写在同目录。
   因此启动前先把 Dropbox 数据 `rclone copy` 成本地运行目录，再 `cd` 进去执行本地盘二进制：
   既拿到凭据，又避开在 FUSE 挂载点上高频写小文件。
-- **凭据只能人工准备**：`login` 是终端内嵌二维码扫码（或浏览器内完成登录），
-  workflow 内无法完成。**要把凭据放进 Dropbox 的数据目录**（不要只放运行目录——
-  运行目录每轮重建，只有回推才会落到 Dropbox）。serve 每 5 秒热加载，增删改凭据免重启。
+- **凭据只能人工准备，但放进 Dropbox 后约 5 分钟自动生效**：`login` 是终端内嵌二维码扫码
+  （或浏览器内完成登录），workflow 内无法完成。把凭据文件放到 **Dropbox** 的
+  `self-hosted/workbuddy-gateway/` 即可 —— 运行期的每 5 分钟拉取循环会把它拉进运行目录，
+  serve 再热加载（每 5 秒扫描 cwd），无需等下一轮；增删改凭据都免重启。
 - 更新失败（查询或下载失败）**不阻塞启动**：沿用现有二进制起服务，原因写进通知的「原因」行。
 - 失败原因按日志尾部区分「二进制不可执行 / 无有效凭据 / 其他启动即退」，
   不一律写成「凭据或参数错误」，便于照着通知直接定位。
@@ -402,31 +403,32 @@ kill $(cat /tmp/workbuddy-serve.pid)  →  pkill -f "<bin> serve" 兜底
 历轮日志；回推失败只发 ⚠️ 提示，不影响停止结论。归档循环与最终归档只覆盖 OpenClaw 主包、
 AI 网关与 rsstt，不涉及本服务。
 
-### 账号池快照的周期回推（每 5 分钟）
+### 凭据的周期拉取（每 5 分钟）
 
-状态快照是唯一需要"运行期就可见"的数据，靠上面的收尾回推最长会滞后一整轮（≈5.7 小时）。
-为此在「Start background archive loop」里额外起一个常驻循环
-（`/tmp/workbuddy-status-sync.sh`，日志 `/tmp/workbuddy-status-sync.log`）：
+`serve` 只扫描**自己的 cwd**，且启动后只认当时那份快照 —— 你在运行期往 Dropbox 上传新凭据，
+serve 根本看不到，最快也要等下一轮（≈5.7 小时）。为此在「Start background archive loop」里
+额外起一个常驻循环（`/tmp/workbuddy-cred-sync.sh`，日志 `/tmp/workbuddy-cred-sync.log`）：
 
 ```
-每 300 秒 → 源文件存在则 rclone copyto 单个 workbuddy-status.json 到 Dropbox
-（per-file flock：抢不到锁 → 跳过本轮；源文件不存在 → 静默跳过；rclone 失败 → 只记日志）
+每 300 秒 → rclone copy dropbox:self-hosted/workbuddy-gateway → 本地运行目录
+           --include 'workbuddy*.json' --update
 ```
 
-- **只碰 `workbuddy-status.json` 一个文件**，不碰凭据、不碰 `logs/` —— 回推面越小越不会
-  和人工编辑 Dropbox 上的凭据相撞。
-- **用 per-file 锁，不共用归档循环的锁**：本循环周期短，若与每 20 分钟的归档抢同一把锁，
-  会互相拖慢（归档那侧拿到锁前会被本循环反复插队）。
-- **失败不发通知**：快照滞后属于可自愈状态（下一 tick 会重试，收尾 3b 也会兜底回推），
-  不是需要人工介入的异常 —— 发通知只会制造噪音。日志里留 `⚠️ ... sync failed (rc=N)`。
-- **首推时刻**：workbuddy 步骤结束时快照已落盘，所以循环起来后第一个 tick 就能推，
-  不等 5 分钟。
+- **只拉凭据、只拉更新的**：`--include 'workbuddy*.json'` 把二进制、`workbuddy-status.json`、
+  `logs/` 全挡在外；`--update` 只覆盖比本地新的文件，绝不回退 serve 正在用的版本。
+- **拉完即生效，无需重启**：serve 每 5 秒扫描 cwd 热加载凭据。所以「你上传」到「凭据进池」
+  最坏约 5 分钟（循环周期）+ 5 秒（serve 扫描），通知里的账号池构成下一轮会体现。
+- **用 per-file 锁，不共用归档锁**：本循环周期短，与每 20 分钟的归档抢同一把锁会互相拖慢。
+- **失败不发通知**：抢不到锁跳过本轮、rclone 失败只记日志 —— 凭据没及时同步不会自愈成
+  故障（你随时可以补传，下一 tick 就拉），且收尾 3b 仍会把运行目录整体回推。
+- **收尾会打印循环日志尾部**（`--- workbuddy-cred-sync.log tail ---`）与运行目录下的
+  `workbuddy*.json` 清单，用来确认这段时间里拉取是否真的在发生。
 
 ### 排障入口
 
 - 本轮实时日志：`/tmp/local_workbuddy/data/logs/serve.log`（停止后回推到 Dropbox 同路径）。
 - 账号池状态：运行目录下 `workbuddy-status.json`，或 `workbuddy-gateway monitor` 前台刷新。
-- 周期回推的日志：`/tmp/workbuddy-status-sync.log`（每轮成功/跳过/失败各一行）。
+- 凭据拉取日志：`/tmp/workbuddy-cred-sync.log`（每轮成功/跳过/失败各一行）。
 - 本步骤元数据：`/tmp/run-workbuddy-meta.env`（`WB_STATE` / `WB_VERSION` / `WB_UPDATE` /
   `WB_REASON` / `WB_READY` / `WB_ACCOUNTS`）。
 - 失败时日志尾部会**同时打到 stdout**（`--- serve.log tail (1200B) ---`），
