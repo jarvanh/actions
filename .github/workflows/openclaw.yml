@@ -918,8 +918,12 @@ jobs:
                 while IFS="$(printf '\t')" read -r _readyflag _cf _st _state _acdl _quota _fm _cdl _tok; do
                   [ -z "$_cf" ] && continue
                   # 哨兵「-」还原成空串（采集处保证列非空，故此处不可能因还原再产生空列错位）
+                  # 不要用 `eval "[ ... ] && x="`：本 step 跑在 Actions 默认的 `bash -e` 下
+                  # （`set -uo pipefail` 不会关掉 -e），A && B 里 A 为假时整条返回 1，
+                  # 循环体末条命令返回 1 会直接终止整个 step —— 只要有任何一列是哨兵「-」
+                  # 就会 exit 1。改成 if 语句：无论分支走哪边，返回值恒为 0。
                   for _x in _acdl _quota _fm _cdl _tok; do
-                    eval "[ \"\${$_x}\" = \"-\" ] && $_x=\"\""
+                    if [ "${!_x}" = "-" ]; then printf -v "$_x" '%s' ""; fi
                   done
                   _i=$((_i + 1))
                   _last=0
@@ -1177,7 +1181,7 @@ jobs:
               [ -n "$_dom" ] && _hdr+=(-H "X-Domain: ${_dom}")
               _cat="$(curl -s --connect-timeout 5 --max-time 30 "${_hdr[@]}" \
                 "${_base}/v2/enterprises/personal/models" 2>/dev/null || true)"
-              if ! printf '%s' "$_cat" | jq -e '.models' >/dev/null 2>&1; then
+              if ! printf '%s' "$_cat" | jq -e '.data.models' >/dev/null 2>&1; then
                 echo "⚠️ ${_cf}: 模型目录接口无有效响应（本账号免费名单留空）"
                 continue
               fi
@@ -1185,9 +1189,13 @@ jobs:
               # 免费判据（照上游 parseLiveCatalog + siteKnownFree 逐条对齐）：
               #   credits 解析出 base 倍率；命中「已启用且在有效期内」的促销则乘 factor；
               #   最终倍率为 0 才计入免费名单。促销过期/未生效都不算免费。
+              # 字段名照**实测**响应逐条核过，别照文档/直觉写：
+              #   响应带信封 → 目录在 .data.models / .data.modelPromotions（顶层取不到）；
+              #   credits 形如 "x0.79 credits" / "x0.00"，前缀是 x 不是后缀；
+              #   促销的模型列表是 modelIds（小写 d），倍率在 discount.factor（不在顶层）。
               printf '%s' "$_cat" | jq -r --arg fn "$_cf" '
-                (.modelPromotions // []) as $promos
-                | (.models // [])[]
+                (.data.modelPromotions // []) as $promos
+                | (.data.models // [])[]
                 | (.id // "") as $_raw
                 | ($_raw | ascii_downcase | gsub("^[[:space:]]+|[[:space:]]+$"; "")) as $_id
                 | select($_id != "")
@@ -1195,20 +1203,31 @@ jobs:
                     | if . == null then null
                       elif type == "number" then .
                       elif type == "string" then
-                        ( gsub("[Cc]redits?"; "") | gsub("[[:blank:]]"; "") | sub("[xX]$"; "")
+                        ( gsub("[Cc]redits?"; "") | gsub("[[:blank:]]"; "") | sub("^[xX]"; "")
                           | try tonumber catch null )
                       else null end ) as $_base
                 | ( $promos
+                    | map(select(((.modelIds // []) | map(ascii_downcase) | index($_id)) != null)) ) as $_mine
+                | ( $_mine
                     | map(select(.enabled == true))
-                    | map(select(((.modelIDs // []) | map(ascii_downcase) | index($_id)) != null))
                     | map(select(
                         ((.schedule.validFrom // "") == "" or .schedule.validFrom <= (now | todate))
                         and ((.schedule.validUntil // "") == "" or .schedule.validUntil >= (now | todate))))
-                    | .[0] ) as $_promo
-                | ( if $_base == null then null
-                    elif $_promo == null then $_base
-                    else (($_promo.factor // 1) as $_f
-                          | if $_f == 0 then 0 else ($_base * $_f) end)
+                    | sort_by(.discount.factor // 1) | .[0] ) as $_active
+                # 生效倍率照上游 parseLiveCatalog 逐条对齐：
+                #   命中**生效**促销 → 乘 factor；factor == 0 即免费（此时 credits 解析不出也算免费，
+                #   上游此时直接取 factor 作倍率，故不能因 base 为 null 就判未知）；
+                #   有促销但**未生效/已过期/已停用** → 上游一律记 PromoExpired，而 siteKnownFree
+                #   要求 !PromoExpired，故都不算免费（上游常把促销价固化在 credits 里，
+                #   过期后 credits 不可信）。注意判据要拿**全部**促销比，不能只看 enabled 的。
+                #   无促销 → 用 credits 原价，解析不出即未知。
+                | ( if $_active != null then
+                      (($_active.discount.factor // 1) as $_f
+                       | if $_f == 0 then 0
+                         elif $_base == null then null
+                         else ($_base * $_f) end)
+                    elif ($_mine | length) > 0 then null
+                    else $_base
                     end ) as $_mult
                 | select($_mult != null and $_mult == 0)
                 | "\($fn)\t\($_id)"
