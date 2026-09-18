@@ -1075,7 +1075,7 @@ jobs:
           else
             (
               cd "$WB_RUN_DIR" || exit 1
-              nohup "$WB_BIN" serve -addr 127.0.0.1 -port "$WB_PORT" \
+              nohup "$WB_BIN" serve -addr 0.0.0.0 -port "$WB_PORT" \
                 > "$WB_LOG" 2>&1 &
               echo $! > /tmp/workbuddy-serve.pid
             )
