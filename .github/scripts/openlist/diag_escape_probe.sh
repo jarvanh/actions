@@ -307,13 +307,25 @@ else
   rclone lsf "$E3_DIR" --files-only --retries 1 --timeout "$PROBE_TIMEOUT" 2>/dev/null \
     | grep -qxF "ol2e_move_${TS}.bin" && _src_left=1
   say "   跳出层源文件仍在=${_src_left}"
+  # ★ 直接对**目标全路径**取元数据（不经目录列举）——这是比"列表里有没有"更强的判据:
+  #   列列举受缓存影响，而按全路径 stat 直接问后端"这个对象在不在"。
+  #   若这条也说"不在"，才谈得上"静默丢文件"。
+  _stat_ok=0; _stat_size=""
+  if _sj=$(rclone lsjson "$_mv_dst" --retries 1 --timeout "$PROBE_TIMEOUT" 2>&1); then
+    _stat_ok=1
+    _stat_size=$(printf '%s' "$_sj" | grep -oE '"Size":[0-9]+' | head -1 | cut -d: -f2)
+  fi
+  say "   目标全路径 stat: 在=${_stat_ok} · Size=${_stat_size:-无}"
   if [ "$_rc" -eq 0 ] && [ "$_at_dst" -eq 1 ]; then
     say "🔒 **跳出后仍可一步归位**（跨层 move 成功，且目标位已复核可见）"
     say "   ⇒ restore_info.jq 只需把「落点」如实写成跳出后的路径即可"
+  elif [ "$_rc" -eq 0 ] && [ "$_stat_ok" -eq 1 ]; then
+    say "🔒 **归位其实成功**（目标全路径 stat 存在；仅目录列举未及时刷新）"
+    say "   ⇒ 印证「列表可见性滞后」大于 ${E4_WAIT}s，判读应以 stat 为准、不以列列举为准"
   elif [ "$_rc" -eq 0 ] && [ "$_src_left" -eq 0 ]; then
-    say "⚠️ **可疑：move 报成功、源已消失、但目标位等 ${E4_WAIT}s 后仍不可见**"
+    say "⚠️ **可疑：move 报成功、源已消失、目标全路径 stat 也不存在**"
     say "   ⇒ 符合「静默丢文件」特征（源没了、目标没有），但**仍需重启真值复核**才能定性："
-    say "      列表缓存可能只是更慢。在坐实前**不要**据此改 restore_info.jq。"
+    say "      在坐实前**不要**据此改 restore_info.jq。"
   elif [ "$_rc" -eq 0 ] && [ "$_src_left" -eq 1 ]; then
     say "⚠️ **move 报成功但源文件还在** ⇒ 未真正移动（幂等假成功形态）"
   else
