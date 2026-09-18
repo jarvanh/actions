@@ -135,6 +135,26 @@ on:
         required: false
         type: string
         default: ""
+      diag_l2:
+        description: "L2 级「mkdir 假成功」普遍性实验（2026-09-18，run 35291770701 驱动）。填 1 走本专项。回答「新建顶层目录的假成功是通用缺陷还是个例」：P1 在 L1 下新建 N 个互不相关的顶层目录做同构矩阵；P2 判「异步延迟落盘 vs 根本不落」；P3 判「重复 mkdir 能否自愈」；P4 对照「已存在目录可写」。⚠️ 会在 L1 下新建 ol2p_<ts>_ 前缀测试目录（收尾尽力 purge）"
+        required: false
+        type: string
+        default: "0"
+      diag_l2_l1:
+        description: "L2 实验的 L1 层相对路径（在它下面建测试目录），默认 5"
+        required: false
+        type: string
+        default: "5"
+      diag_l2_n:
+        description: "P1 测试目录个数（默认 4，2~8 合理；名字刻意异构以分离长度/字符集因素）"
+        required: false
+        type: string
+        default: "4"
+      diag_l2_wait:
+        description: "P2 等待秒数（默认 30；用来区分「异步延迟落盘」与「根本不落」）"
+        required: false
+        type: string
+        default: "30"
 
 concurrency: openlist-diag
 
@@ -227,13 +247,23 @@ jobs:
           DIAG_DN_ENABLE: ${{ inputs.diag_dirname }}
           DIAG_DN_DIR: ${{ inputs.diag_dn_dir }}
           DIAG_DN_SIBS: ${{ inputs.diag_dn_sibs }}
+          DIAG_L2_ENABLE: ${{ inputs.diag_l2 }}
+          DIAG_L2_L1: ${{ inputs.diag_l2_l1 }}
+          DIAG_L2_N: ${{ inputs.diag_l2_n }}
+          DIAG_L2_WAIT: ${{ inputs.diag_l2_wait }}
           OL_CONTAINER: ${{ inputs.container }}
         run: |
           # 恒 exit 0: 诊断结果写在报告里，探针失败不该让 step 变红（否则
           # artifact 上传被跳过，最需要看的那份报告反而拿不到）
-          # 优先级: 目录名变量 > 可写性判据 > 409 专项 > 拒收专项 > 常规 13 组
+          # 优先级: L2 普遍性 > 目录名变量 > 可写性判据 > 409 专项 > 拒收专项 > 常规 13 组
           # （互斥——专项要的是「单一变量」的干净归因，混跑其它探针会让判读失真）
-          if [ "$DIAG_DN_ENABLE" = "1" ]; then
+          if [ "$DIAG_L2_ENABLE" = "1" ]; then
+            bash "$GITHUB_WORKSPACE/.github/scripts/openlist/diag_l2_probe.sh" \
+              "$DIAG_TARGET" "$OL_CONTAINER" "$DIAG_L2_L1" "$DIAG_L2_N" "$DIAG_L2_WAIT" || true
+            echo ""
+            echo "=========== L2 普遍性报告尾部 ==========="
+            tail -40 /tmp/ol_diag/l2_report.txt 2>/dev/null || echo "(无报告文件)"
+          elif [ "$DIAG_DN_ENABLE" = "1" ]; then
             bash "$GITHUB_WORKSPACE/.github/scripts/openlist/diag_dirname_probe.sh" \
               "$DIAG_TARGET" "$OL_CONTAINER" "$DIAG_DN_DIR" "$DIAG_DN_SIBS" || true
             echo ""
@@ -279,6 +309,7 @@ jobs:
             /tmp/ol_diag/diag409_report.txt
             /tmp/ol_diag/writeprobe_report.txt
             /tmp/ol_diag/dirname_report.txt
+            /tmp/ol_diag/l2_report.txt
             /tmp/ol_diag/container.log
           if-no-files-found: warn
           retention-days: 7
