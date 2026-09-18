@@ -120,6 +120,21 @@ on:
         required: false
         type: string
         default: "1048576"
+      diag_dirname:
+        description: "目录名/路径变量实验（2026-09-18，run 35289924584 驱动）。填 1 走本专项。回答「为什么这个特定目录建不出来」：D1 逐级 mkdir+lsd 找第一失败层；D2 在同级用「原样/+后缀/ASCII/短哈希」4 种名字对比；D3 探测生产同级兄弟目录。区分「名字相关 / 路径相关 / 后端残留」"
+        required: false
+        type: string
+        default: "0"
+      diag_dn_dir:
+        description: "故障目录相对路径（如 5/1024j-...-channel/aeon-marks），D1/D2 用"
+        required: false
+        type: string
+        default: ""
+      diag_dn_sibs:
+        description: "同级兄弟目录相对路径（空格分隔，多个），D3 用；如 '5/x/chilibomba 5/x/rolakiki'"
+        required: false
+        type: string
+        default: ""
 
 concurrency: openlist-diag
 
@@ -209,13 +224,22 @@ jobs:
           DIAG_WP_ENABLE: ${{ inputs.diag_writeprobe }}
           DIAG_WP_DIR: ${{ inputs.diag_wp_dir }}
           DIAG_WP_BYTES: ${{ inputs.diag_wp_bytes }}
+          DIAG_DN_ENABLE: ${{ inputs.diag_dirname }}
+          DIAG_DN_DIR: ${{ inputs.diag_dn_dir }}
+          DIAG_DN_SIBS: ${{ inputs.diag_dn_sibs }}
           OL_CONTAINER: ${{ inputs.container }}
         run: |
           # 恒 exit 0: 诊断结果写在报告里，探针失败不该让 step 变红（否则
           # artifact 上传被跳过，最需要看的那份报告反而拿不到）
-          # 优先级: 可写性判据验证 > 409 专项 > 拒收专项 > 常规 13 组（互斥——
-          # 专项要的是「单一变量」的干净归因，混跑其它探针的写入会让判读失真）
-          if [ "$DIAG_WP_ENABLE" = "1" ]; then
+          # 优先级: 目录名变量 > 可写性判据 > 409 专项 > 拒收专项 > 常规 13 组
+          # （互斥——专项要的是「单一变量」的干净归因，混跑其它探针会让判读失真）
+          if [ "$DIAG_DN_ENABLE" = "1" ]; then
+            bash "$GITHUB_WORKSPACE/.github/scripts/openlist/diag_dirname_probe.sh" \
+              "$DIAG_TARGET" "$OL_CONTAINER" "$DIAG_DN_DIR" "$DIAG_DN_SIBS" || true
+            echo ""
+            echo "=========== 目录名变量报告尾部 ==========="
+            tail -40 /tmp/ol_diag/dirname_report.txt 2>/dev/null || echo "(无报告文件)"
+          elif [ "$DIAG_WP_ENABLE" = "1" ]; then
             bash "$GITHUB_WORKSPACE/.github/scripts/openlist/diag_write_probe.sh" \
               "$DIAG_TARGET" "$OL_CONTAINER" "$DIAG_WP_DIR" || true
             echo ""
@@ -254,6 +278,7 @@ jobs:
             /tmp/ol_diag/reject_report.txt
             /tmp/ol_diag/diag409_report.txt
             /tmp/ol_diag/writeprobe_report.txt
+            /tmp/ol_diag/dirname_report.txt
             /tmp/ol_diag/container.log
           if-no-files-found: warn
           retention-days: 7
