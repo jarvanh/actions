@@ -65,11 +65,6 @@ on:
         required: false
         type: string
         default: "4"
-      reject_name_mode:
-        description: "改名组命名形态: ts=中性时间戳名（默认，证明改名可绕）；shorthash=<md5前8位>，与生产方法2 copyto_shorthash 完全同形态，用于判决「方法2 的确切名字能否落盘」"
-        required: false
-        type: string
-        default: "ts"
       thru_levels:
         description: "吞吐阶梯档位（空格分隔的 transfers 值，默认 1 4 8；用来找拐点——拐点处再提并发无益）"
         required: false
@@ -95,11 +90,6 @@ on:
         required: false
         type: string
         default: "0"
-      diag_409_src:
-        description: "【已废弃】旧设计里 E2 的源端路径。现 E2 改用本地自造中性载荷（规避生产敏感文件名 + 日志路径截断），无需提供；保留仅为兼容旧调用"
-        required: false
-        type: string
-        default: ""
       diag_409_skip_e2:
         description: "1=只做 E1（纯读+建目录，最快）；0=两组都做（E1 判决性 + E2 改名实验）"
         required: false
@@ -237,9 +227,7 @@ jobs:
           DIAG_REJECT_SRC: ${{ inputs.reject_src }}
           DIAG_REJECT_MAX: ${{ inputs.reject_max }}
           DIAG_REJECT_WAIT: ${{ inputs.reject_wait }}
-          DIAG_REJECT_NAME_MODE: ${{ inputs.reject_name_mode }}
           DIAG_409_ENABLE: ${{ inputs.diag_409 }}
-          DIAG_409_SRC: ${{ inputs.diag_409_src }}
           DIAG_409_SKIP_E2: ${{ inputs.diag_409_skip_e2 }}
           DIAG_WP_ENABLE: ${{ inputs.diag_writeprobe }}
           DIAG_WP_DIR: ${{ inputs.diag_wp_dir }}
