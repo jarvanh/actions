@@ -831,11 +831,11 @@ jobs:
               fi
               # 账号池：逐账号「一条目 + 多子行」。数据源是函数外的 WB_POOL —— 采集处
               # （启动步骤）已用 jq 解析 workbuddy-status.json 成 9 列 TSV：
-              #     名录可信标记 \t 凭据文件名 \t 站点 \t 状态 \t 账号解封 \t 额度 \t 免费模型名 \t 模型冷却 \t Token 过期
+              #     名录可信标记 \t 凭据文件名 \t 站点 \t 状态 \t 账号冷却 \t 额度 \t 免费模型名 \t 模型冷却 \t Token 过期
               # 采集处保证**每列都不为空**（空值填哨兵「-」），否则 read 的空白折叠会让
               # 中段空列后面的值整体左移（实测会把冷却数当模型名渲染）。故这里先把「-」
               # 还原成空串，再按原来的「非空才并入」逻辑处理，读者看不到哨兵。
-              # 凭据名/站点/状态进条目行，第 5/6/8/9 列（账号解封 / 额度 / 模型冷却 / Token 过期）
+              # 凭据名/站点/状态进条目行，第 5/6/8/9 列（账号冷却 / 额度 / 模型冷却 / Token 过期）
               # 并成第一个子行，第 7 列（免费模型名，可能很长）另起一个独立子行
               # 「免费模型 N · <code>名</code> · <code>名</code>」—— 与额度等短字段混在一行会被撑爆。
               # 子行必须用 tree_sub 前缀手拼 —— tree_lines 把每行都当兄弟条目，
@@ -857,8 +857,8 @@ jobs:
                   _last=0
                   [ "$_i" -eq "$_n_acc" ] && _last=1
                   _rows+="$(tree_conn "$_last")$(tg_entry "$_cf" "$_st" "$_state")"$'\n'
-                  # 第一个子行：账号解封 / 额度 / 模型冷却 / Token 过期，逐项非空才并入。
-                  # 账号解封只在 state=cooldown 时有值（采集处已按状态过滤）；
+                  # 第一个子行：账号冷却 / 额度 / 模型冷却 / Token 过期，逐项非空才并入。
+                  # 账号冷却只在 state=cooldown 时有值（采集处已按状态过滤）；
                   # 过期时间在 jq 侧已带「过期 」前缀（裸时间戳读者不知道是什么）。
                   _sub=""
                   for _x in "$_acdl" "$_quota" "$_cdl" "$_tok"; do
@@ -1196,10 +1196,10 @@ jobs:
                     ($_fn | or_dash),
                     (if .edition == "intl" then "国际站" else "国内站" end),
                     (.state | state_cn | or_dash),
-                    # 账号级冷却解封时刻：只在 state=cooldown 时展示。cooldownUntil 是
+                    # 账号级冷却时刻：只在 state=cooldown 时展示。cooldownUntil 是
                     # omitempty，其他状态下即便残留也不展示 —— 免得与「可用」自相矛盾。
                     (if .state == "cooldown" and ((.cooldownUntil // 0) > 0)
-                       then ("解封 " + (.cooldownUntil | strftime("%Y-%m-%d %H:%M")))
+                       then ("冷却 " + (.cooldownUntil | strftime("%Y-%m-%d %H:%M")))
                      else "" end | or_dash),
                     (if .quotaKnown then ("额度剩 " + (.quotaRemaining | fq)
                        + (if .isPaidUser then " · 付费" else " · 免费" end))

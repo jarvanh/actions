@@ -199,7 +199,7 @@ tar -xzf /tmp/restore.tar.gz -C /tmp/restore .openclaw/openclaw.json
 | `⚠️ 最终归档告警 · <对象>` | 最终归档失败 | 同上；标题以「最终归档」区分阶段 |
 | `✅ / ⚠️ / ❌ OpenClaw 最终归档结果` | 最终归档之后（`Notify OpenClaw final archive result`） | 结果计数（成功 / 失败 / 跳过）+ 合计大小 + 快照名 + 📦 归档明细（每个包一行：结论 + 大小 + 去向）；未产出明细时降级为「⚠️ 最终归档未完成」 |
 | `⚠️ OpenClaw 即将进入最终归档` | keepalive 第 325 分钟 | 约 15 分钟后执行 `Stop OpenClaw and Final Archive` |
-| `🟢 workbuddy-gateway 已就绪` | **首轮**启动步骤自检通过且账号池非空（接力轮不重复推，见下） | 账号池结论、版本、更新说明、接口地址、鉴权说明、🔑 凭据文件名、💳 逐账号（站点 / 状态 / 解封时刻 · 额度 · 免费模型具体名称 · 模型冷却 N · 最早恢复 · Token 过期）、数据目录 |
+| `🟢 workbuddy-gateway 已就绪` | **首轮**启动步骤自检通过且账号池非空（接力轮不重复推，见下） | 账号池结论、版本、更新说明、接口地址、鉴权说明、🔑 凭据文件名、💳 逐账号（站点 / 状态 / 冷却时刻 · 额度 · 免费模型具体名称 · 模型冷却 N · 最早恢复 · Token 过期）、数据目录 |
 | `⚠️ workbuddy-gateway 已启动 · 无可用账号` | 服务已监听但账号池为空 | 提示需人工扫码登录（`login` 无法在 workflow 内完成） |
 | `❌ workbuddy-gateway 启动失败` | 进程启动即退，或 120 秒内未监听 8318 | 失败原因 + 🧾 原始输出（日志尾部 1200 字节） |
 | `⛔ / ⚠️ workbuddy-gateway 已停止` | 收尾停止段落执行后 | 版本与数据目录；仍有进程残留时降级 ⚠️ |
@@ -229,7 +229,7 @@ tar -xzf /tmp/restore.tar.gz -C /tmp/restore .openclaw/openclaw.json
 > 快照里的 `nickname` / `uid` 不进通知。
 > serve 每 3 秒重写该文件，可能读到半截导致 jq 失败 —— 失败即本轮账号池整段跳过。
 > **冷却给「什么时候恢复」，账号级与模型级两层都给**：账号级取 `cooldownUntil`
-> （只在 `state=cooldown` 时展示，写 `解封 YYYY-MM-DD HH:MM`）；模型级取
+> （只在 `state=cooldown` 时展示，写 `冷却 YYYY-MM-DD HH:MM`）；模型级取
 > `modelStates[].cooldownUntil` 的**最小值**（`模型冷却 N · 最早 HH:MM 恢复`）。
 > 一律给绝对时刻、不折算「还剩多久」—— 通知是快照，读者看到时相对时长已不准。
 > `cooldownMsg` 与 `nickname` / `uid` 一样**不进通知**。
