@@ -830,37 +830,38 @@ jobs:
                 tg_add_block _msg "$(tree_lines "${_ent%$'\n'}")"
               fi
               # 账号池：逐账号「一条目 + 多子行」。数据源是函数外的 WB_POOL —— 采集处
-              # （启动步骤）已用 jq 解析 workbuddy-status.json 成 8 列 TSV：
-              #     名录可信标记 \t 凭据文件名 \t 站点 \t 状态 \t 额度 \t 免费模型名 \t 模型冷却 \t Token 过期
+              # （启动步骤）已用 jq 解析 workbuddy-status.json 成 9 列 TSV：
+              #     名录可信标记 \t 凭据文件名 \t 站点 \t 状态 \t 账号解封 \t 额度 \t 免费模型名 \t 模型冷却 \t Token 过期
               # 采集处保证**每列都不为空**（空值填哨兵「-」），否则 read 的空白折叠会让
               # 中段空列后面的值整体左移（实测会把冷却数当模型名渲染）。故这里先把「-」
               # 还原成空串，再按原来的「非空才并入」逻辑处理，读者看不到哨兵。
-              # 凭据名/站点/状态进条目行，第 5/7/8 列并成第一个子行，第 6 列（免费模型名，
-              # 可能很长）另起一个独立子行「免费模型 N · <code>名</code> · <code>名</code>」——
-              # 与额度等短字段混在一行会被撑爆。
+              # 凭据名/站点/状态进条目行，第 5/6/8/9 列（账号解封 / 额度 / 模型冷却 / Token 过期）
+              # 并成第一个子行，第 7 列（免费模型名，可能很长）另起一个独立子行
+              # 「免费模型 N · <code>名</code> · <code>名</code>」—— 与额度等短字段混在一行会被撑爆。
               # 子行必须用 tree_sub 前缀手拼 —— tree_lines 把每行都当兄弟条目，
               # 子行经它会渲染成 ├─/└─，与条目平级（规范 4.2 二层列表：子行与条目正文同列）。
               if [ -n "${WB_POOL:-}" ]; then
-                local _readyflag _cf _st _state _quota _fm _cdl _tok _n_acc _rows _i _sub _x _last
+                local _readyflag _cf _st _state _acdl _quota _fm _cdl _tok _n_acc _rows _i _sub _x _last
                 local _names _n_names _m _mline
                 _n_acc="$(printf '%s\n' "$WB_POOL" | grep -c . || true)"
                 tg_add_section _msg "💳 账号池 · ${_n_acc}"
                 _rows=""
                 _i=0
-                while IFS="$(printf '\t')" read -r _readyflag _cf _st _state _quota _fm _cdl _tok; do
+                while IFS="$(printf '\t')" read -r _readyflag _cf _st _state _acdl _quota _fm _cdl _tok; do
                   [ -z "$_cf" ] && continue
                   # 哨兵「-」还原成空串（采集处保证列非空，故此处不可能因还原再产生空列错位）
-                  for _x in _quota _fm _cdl _tok; do
+                  for _x in _acdl _quota _fm _cdl _tok; do
                     eval "[ \"\${$_x}\" = \"-\" ] && $_x=\"\""
                   done
                   _i=$((_i + 1))
                   _last=0
                   [ "$_i" -eq "$_n_acc" ] && _last=1
                   _rows+="$(tree_conn "$_last")$(tg_entry "$_cf" "$_st" "$_state")"$'\n'
-                  # 第一个子行：额度 / 模型冷却 / Token 过期，逐项非空才并入。
+                  # 第一个子行：账号解封 / 额度 / 模型冷却 / Token 过期，逐项非空才并入。
+                  # 账号解封只在 state=cooldown 时有值（采集处已按状态过滤）；
                   # 过期时间在 jq 侧已带「过期 」前缀（裸时间戳读者不知道是什么）。
                   _sub=""
-                  for _x in "$_quota" "$_cdl" "$_tok"; do
+                  for _x in "$_acdl" "$_quota" "$_cdl" "$_tok"; do
                     [ -z "$_x" ] && continue
                     _sub="${_sub:+${_sub} · }${_x}"
                   done
@@ -1185,16 +1186,32 @@ jobs:
                   | from_entries ) as $free
                 | .accounts[]
                 | (.path | split("/") | last) as $_fn
+                # 模型级冷却的「最早恢复」时刻：遍历 modelStates 取所有 cooldownUntil 的
+                # 最小值（= 至少有一个模型先可用）。换算成本地时区的 HH:MM。
+                # 冷却普遍是分钟级，跨天时只给 HH:MM 也够用，故不标日期（标了会把子行撑爆）。
+                | ( [ (.modelStates // {}) | to_entries[]
+                      | .value.cooldownUntil // 0 | select(. > 0) ] | min ) as $_mc
                 | [
                     ($ready | tostring),
                     ($_fn | or_dash),
                     (if .edition == "intl" then "国际站" else "国内站" end),
                     (.state | state_cn | or_dash),
+                    # 账号级冷却解封时刻：只在 state=cooldown 时展示。cooldownUntil 是
+                    # omitempty，其他状态下即便残留也不展示 —— 免得与「可用」自相矛盾。
+                    (if .state == "cooldown" and ((.cooldownUntil // 0) > 0)
+                       then ("解封 " + (.cooldownUntil | strftime("%Y-%m-%d %H:%M")))
+                     else "" end | or_dash),
                     (if .quotaKnown then ("额度剩 " + (.quotaRemaining | fq)
                        + (if .isPaidUser then " · 付费" else " · 免费" end))
                      else "额度未获取" end),
                     ($free[$_fn] // "" | or_dash),
-                    (if (.modelCooldowns // 0) > 0 then ("模型冷却 " + (.modelCooldowns | tostring)) else "" end | or_dash),
+                    # 模型冷却：数量 + 最早恢复时刻（两者同时有才写后半段，缺一不写半截）
+                    (if (.modelCooldowns // 0) > 0
+                       then ("模型冷却 " + (.modelCooldowns | tostring)
+                             + (if ($_mc // 0) > 0
+                                  then (" · 最早 " + ($_mc | strftime("%H:%M")) + " 恢复")
+                                else "" end))
+                     else "" end | or_dash),
                     (if (.tokenExpiresAt // 0) > 0 then ("过期 " + (.tokenExpiresAt | strftime("%Y-%m-%d %H:%M"))) else "" end | or_dash)
                   ]
                 | @tsv

@@ -424,16 +424,19 @@ Run ID：<code>12345678</code>
 接口：<code>http://127.0.0.1:8318/v1</code>
 鉴权：仅回环监听，无需密钥
 
-🔑 凭据 · 2
+🔑 凭据 · 3
   ├─ <code>workbuddy.json</code>
+  ├─ <code>workbuddy-cn2.json</code>
   └─ <code>workbuddy-intl.json</code>
 
-💳 账号池 · 2
+💳 账号池 · 3
   ├─ <code>workbuddy.json</code> · 国内站 · 可用
   │  额度剩 59.64 · 免费 · 过期 2026-09-21 08:32
   │  免费模型 2 · <code>deepseek-v4.1-flash</code> · <code>hy3</code>
+  ├─ <code>workbuddy-cn2.json</code> · 国内站 · 冷却
+  │  解封 2026-09-18 00:12 · 额度剩 12.30 · 免费 · 过期 2026-09-21 08:32
   └─ <code>workbuddy-intl.json</code> · 国际站 · 付费耗尽
-     额度剩 0 · 免费 · 过期 2027-06-07 04:32 · 模型冷却 2
+     额度剩 0 · 免费 · 过期 2027-06-07 04:32 · 模型冷却 2 · 最早 00:47 恢复
      免费模型 1 · <code>glm-5.2</code>
 
 数据目录：<code>/dropbox/self-hosted/workbuddy-gateway</code>
@@ -453,10 +456,12 @@ Run ID：<code>12345678</code>
 - **凭据**只列 `workbuddy*.json` 的**文件名**（`├─/└─` 树形，分节带 ` · N`）。
   **绝不回显文件内容**——那是真实 Access/Refresh Token。`workbuddy-status.json`
   是 serve 写的状态快照，不算凭据，必须排除。
-- **账号池**逐账号给：`凭据文件 · 站点 · 状态`，子行给 `额度 · 免费/付费 · Token 过期`
+- **账号池**逐账号给：`凭据文件 · 站点 · 状态`，子行给 `解封时刻（仅冷却中） · 额度 ·
+  免费/付费 · Token 过期 · 模型冷却 N · 最早 HH:MM 恢复`
   与 `免费模型 N · <具体模型名>`（各项非空才并进子行；**免费模型名很多时
   拆成独立子行，避免单行过长**）。额度/状态/冷却取自 serve 写出的
   **`workbuddy-status.json`**（jq 取），**免费模型名单另走上游模型目录接口**（见下条）。
+  冷却两层写法（账号级 `解封 …`、模型级 `模型冷却 N · 最早 … 恢复`）见下条。
 
   > **更正（2026-09-17）**：此前本节写「不要解析 workbuddy-status.json，其键名上游未文档化」——
   > 这个判断是错的。该文件的键名由上游 Go 结构体 `accountSnapshot` / `statusSnapshot`
@@ -470,8 +475,9 @@ Run ID：<code>12345678</code>
   > | `tokenExpiresAt` | Access Token 过期**时间戳**（秒；0 表示无） |
   > | `quotaRemaining` / `quotaKnown` | 剩余额度 / 是否已成功查询过额度 |
   > | `isPaidUser` | 是否付费用户 |
+  > | `cooldownUntil` / `cooldownMsg` | 账号级冷却解封**时间戳**（秒）/ 触发原因（仅 `state=cooldown`） |
   > | `freeModels` / `modelCooldowns` | 已确认免费的模型**数** / 当前冷却中的模型**数** |
-  > | `modelStates` | 逐模型账本：键是模型名，值含 `costClass`（`free`/`paid`/`unknown`）等 |
+  > | `modelStates` | 逐模型账本：键是模型名，值含 `costClass`（`free`/`paid`/`unknown`）、`cooldownUntil` 等 |
   >
   > `freeModels` 是**降级兜底**用的计数（目录接口取不到名单时显示它）；
   > 正式的免费模型**名单**走上游模型目录接口，见下条。
@@ -488,6 +494,28 @@ Run ID：<code>12345678</code>
   >
   > 「剩余积分 / 免费模型 / 模型冷却」原本以为只能从 `monitor` 的交互式表格取，
   > 实际快照里就有（`quotaRemaining` / `freeModels` / `modelCooldowns`）。
+
+- **冷却要给出「什么时候恢复」，且账号级与模型级两层都要给**。上游有两套独立的冷却
+  （`markCooldown` 屏蔽整账号 / `markModelCooldown` 只屏蔽单个模型），恢复时刻互不相同，
+  只给一个数读者没法判断该等还是该换账号：
+
+  | 层级 | 快照字段 | 通知写法 |
+  |---|---|---|
+  | 账号级 | `cooldownUntil`（秒时间戳）+ `cooldownMsg` | 子行 `解封 YYYY-MM-DD HH:MM`（`state=cooldown` 才写） |
+  | 模型级 | `modelStates[模型名].cooldownUntil` | 子行 `模型冷却 N · 最早 HH:MM 恢复`（N>0 才写） |
+
+  - **时间一律给绝对时刻，不折算「还剩多久」**：通知是**某一时刻的快照**，
+    读者几分钟后才看到，「约 12 分钟后恢复」到那时已经不准，反而误导。
+    绝对时刻便于对表，且与既有 `过期 YYYY-MM-DD HH:MM` 写法一致。
+  - 账号级写**完整日期时间**（跨天时只给时分会有歧义）；模型级数量可能很多、
+    写完整日期会把子行撑爆，故只给 **`HH:MM`**，且取**所有冷却中模型里最早的那个**
+    （「最早恢复」= 至少有一个模型会先可用）。跨天时上游给出的时刻可能就是次日，
+    只给 `HH:MM` 不标日期在当前场景可接受（冷却普遍是分钟级）。
+  - `cooldownUntil` 为 0 或缺失（字段 `omitempty`）→ 整项跳过，**不写「解封 -」**。
+  - 账号级冷却**只在 `state=cooldown` 时才有意义**：`cooldownUntil` 是 `omitempty`，
+    其他状态下通常不出现；即便出现也**不展示**（避免与「可用」自相矛盾）。
+  - `cooldownMsg`（上游原始提示，如 429 文案）**不跟进通知**：一句话可能上百字符，
+    撑爆子行，且读者需要的是「何时恢复」而非上游原文。排障时看 `status` 子命令。
 
 - **免费模型名取自上游「模型目录」接口，不靠探测**：`freeModels` 只是个计数、`modelStates`
   只记「已实测过」的模型（键在 `modelStateLocked` 里按需创建、默认 `unknown`），
