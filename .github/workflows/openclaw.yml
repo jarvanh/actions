@@ -832,7 +832,9 @@ jobs:
               # 账号池：逐账号「一条目 + 多子行」。数据源是函数外的 WB_POOL —— 采集处
               # （启动步骤）已用 jq 解析 workbuddy-status.json 成 8 列 TSV：
               #     名录可信标记 \t 凭据文件名 \t 站点 \t 状态 \t 额度 \t 免费模型名 \t 模型冷却 \t Token 过期
-              # 第 1 列（名录可信标记）刻意放最前，理由见采集处注释（挡 read 的空白折叠错位）。
+              # 采集处保证**每列都不为空**（空值填哨兵「-」），否则 read 的空白折叠会让
+              # 中段空列后面的值整体左移（实测会把冷却数当模型名渲染）。故这里先把「-」
+              # 还原成空串，再按原来的「非空才并入」逻辑处理，读者看不到哨兵。
               # 凭据名/站点/状态进条目行，第 5/7/8 列并成第一个子行，第 6 列（免费模型名，
               # 可能很长）另起一个独立子行「免费模型 N · <code>名</code> · <code>名</code>」——
               # 与额度等短字段混在一行会被撑爆。
@@ -847,6 +849,10 @@ jobs:
                 _i=0
                 while IFS="$(printf '\t')" read -r _readyflag _cf _st _state _quota _fm _cdl _tok; do
                   [ -z "$_cf" ] && continue
+                  # 哨兵「-」还原成空串（采集处保证列非空，故此处不可能因还原再产生空列错位）
+                  for _x in _quota _fm _cdl _tok; do
+                    eval "[ \"\${$_x}\" = \"-\" ] && $_x=\"\""
+                  done
                   _i=$((_i + 1))
                   _last=0
                   [ "$_i" -eq "$_n_acc" ] && _last=1
@@ -1155,11 +1161,10 @@ jobs:
               # 第 1 列刻意放**最前**且恒非空：`read` 会把连续制表符折叠成一个
               # （制表符属 IFS 空白），中间列一旦为空，后面的列就整体左移、
               # 错位嫁接到前一个变量上。第 1 列就把错位挡在门外。
-              # 第 6 列是逐账号的免费模型名清单（来自上一段的模型目录接口，按凭据文件名关联）；
-              # 标记记「本账号的名录是否取到」—— 取到却空清单说明确实没有免费模型
-              # （显示「免费模型 0」），取不到则退回快照计数、不谎报 0。
-              # 名录按「凭据文件名 → 免费模型名（· 分隔）」建索引后与快照账号对齐；
-              # 不用 modelStates：那是 serve 的内存账本，只含「已实测」的模型、不完整。
+              # 但「首列非空」**不足以**保护中间列：第 6 列（免费模型名）与第 7 列（模型冷却）
+              # 都可能为空且相邻，一旦如此，后面的值会整体左移、把「模型冷却」当成模型名渲染
+              # （已实测复现：输出「免费模型 1 · <code>2</code>」，2 是冷却数不是模型）。
+              # 故**所有列一律不留空**：空值统一填哨兵「-」，渲染层再把哨兵还原成「跳过」。
               WB_POOL="$(jq -r --argjson ready "${WB_FREE_READY:-0}" '
                 def fq: if . > -0.005 and . < 0.005 then "0"
                         else (. * 100 | round / 100 | tostring) end;
@@ -1170,6 +1175,7 @@ jobs:
                   elif . == "expired"        then "已过期"
                   elif . == "disabled"       then "失效"
                   else . end;
+                def or_dash: if . == null or . == "" then "-" else . end;
                 ( $wbraw | split("\n")
                   | map(split("\t"))
                   | map(select(length >= 2))
@@ -1181,15 +1187,15 @@ jobs:
                 | (.path | split("/") | last) as $_fn
                 | [
                     ($ready | tostring),
-                    $_fn,
+                    ($_fn | or_dash),
                     (if .edition == "intl" then "国际站" else "国内站" end),
-                    (.state | state_cn),
+                    (.state | state_cn | or_dash),
                     (if .quotaKnown then ("额度剩 " + (.quotaRemaining | fq)
                        + (if .isPaidUser then " · 付费" else " · 免费" end))
                      else "额度未获取" end),
-                    ($free[$_fn] // ""),
-                    (if (.modelCooldowns // 0) > 0 then ("模型冷却 " + (.modelCooldowns | tostring)) else "" end),
-                    (if (.tokenExpiresAt // 0) > 0 then ("过期 " + (.tokenExpiresAt | strftime("%Y-%m-%d %H:%M"))) else "" end)
+                    ($free[$_fn] // "" | or_dash),
+                    (if (.modelCooldowns // 0) > 0 then ("模型冷却 " + (.modelCooldowns | tostring)) else "" end | or_dash),
+                    (if (.tokenExpiresAt // 0) > 0 then ("过期 " + (.tokenExpiresAt | strftime("%Y-%m-%d %H:%M"))) else "" end | or_dash)
                   ]
                 | @tsv
               ' --rawfile wbraw "$WB_FREEMAP" "$WB_STATUS_JSON" 2>/dev/null || true)"
