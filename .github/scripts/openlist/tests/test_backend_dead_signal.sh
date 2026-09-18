@@ -1,5 +1,5 @@
 #!/bin/bash
-# 写探针判死信号键错位（F21）—— 逻辑验证（mock 预检层与 rclone）
+# 写探针判死信号键错位（F21）+ 写探针结论失效（F22）—— 逻辑验证（mock 预检层与 rclone）
 #
 # 背景: _backend_write_probe 按「后端 × 路径」分层缓存（F4），写的是
 #   _BACKEND_WRITE_PROBE_CACHE[$dest_path]（如 openlist:wopan176Crypt/2）；
@@ -15,6 +15,8 @@
 #   3. 反向锁死: 只把后端根键置 0 → 必须**仍为 0**（防有人改回按根读）
 #   4. 后端可写（同步对键=1）→ 不误置位
 #   5. rc=88 二次预检熔断路径同口径（该路径也读同一个键）
+#   6. F22 _backend_write_probe_invalidate: 按**同步对路径**清键、不动根键、
+#      空参安全、清后缓存 miss（下次真探）；键口径错 = 清了不存在的键 = 等于没探
 set -u
 PASS=0; FAIL=0
 ok()  { PASS=$((PASS+1)); echo "PASS: $1"; }
