@@ -136,7 +136,7 @@ on:
         type: string
         default: "5"
       diag_l2_n:
-        description: "复用位（不加新 input —— workflow_dispatch 硬上限 25，已占满）。默认走 L2 专项；填 e 走「跳出故障子树」专项（判「换到更上层是否真能写」，回答修法方向是否成立）"
+        description: "复用位（不加新 input —— workflow_dispatch 硬上限 25，已占满）。默认走 L2 专项；填 e 走「跳出故障子树」专项（判「换到更上层是否真能写」，回答修法方向是否成立）；填 d 走「层级/深度 vs 健康窗口」同构分离专项（判 §0 待解矛盾：§12.14.3 的 5/ol2p_* 能建 vs §12.14.6 的 5/5058f1af 建不出，是同深度同形状，只差「名字内容/是否被建过」与「时间窗口」）"
         required: false
         type: string
         default: "4"
@@ -215,7 +215,7 @@ jobs:
       - name: 运行后端诊断探针
         env:
           # ⚠️ 各专项脚本各自带默认报告名（report/reject_report/diag409_report/
-          #   writeprobe_report/dirname_report/l2_report/escape_report），**不要**在这里统一设
+          #   writeprobe_report/dirname_report/l2_report/escape_report/depth_report），**不要**在这里统一设
           #   DIAG_REPORT —— 它会被所有专项继承，把本专项的报告也写进 report.txt，
           #   导致 `tail <专项>_report.txt` 取不到文件（artifact 里也串了名）。
           #   常规 13 组默认即 report.txt，无需在此指定。
@@ -247,12 +247,12 @@ jobs:
         run: |
           # 恒 exit 0: 诊断结果写在报告里，探针失败不该让 step 变红（否则
           # artifact 上传被跳过，最需要看的那份报告反而拿不到）
-          # 优先级: 跳出专项 > L2 普遍性 > 目录名变量 > 可写性判据 > 409 专项 > 拒收专项 > 常规 13 组
+          # 优先级: 跳出专项 > 深度分层专项 > L2 普遍性 > 目录名变量 > 可写性判据 > 409 专项 > 拒收专项 > 常规 13 组
           # （互斥——专项要的是「单一变量」的干净归因，混跑其它探针会让判读失真）
           #
-          # 「跳出故障子树」专项的启动开关复用 diag_l2_n（workflow_dispatch 已到 25 个 input
-          # 的硬上限，新增会 HTTP 422）: 填 `e`/`escape` 走该专项；其余值仍按 L2 的个数解析，
-          # 保持既有调用方式不变。
+          # 「跳出故障子树」/「深度分层」专项的启动开关复用 diag_l2_n（workflow_dispatch 已到 25 个
+          # input 的硬上限，新增会 HTTP 422）: 填 `e`/`escape` 走跳出专项、`d`/`depth` 走深度分层专项；
+          # 其余值仍按 L2 的个数解析，保持既有调用方式不变。
           if [ "$DIAG_L2_ENABLE" = "1" ] && { [ "$DIAG_L2_N" = "e" ] || [ "$DIAG_L2_N" = "escape" ]; }; then
             # 跳出专项要的是「已知坏的那个 dest_path」（生产 task5-wopan175 即 5），
             # 故它用 diag_l2_l1 作 dest_path、默认上跳 3 层，与 L2 专项的 L1 语义一致。
@@ -261,6 +261,15 @@ jobs:
             echo ""
             echo "=========== 跳出故障子树报告尾部 ==========="
             tail -50 /tmp/ol_diag/escape_report.txt 2>/dev/null || echo "(无报告文件)"
+          elif [ "$DIAG_L2_ENABLE" = "1" ] && { [ "$DIAG_L2_N" = "d" ] || [ "$DIAG_L2_N" = "depth" ]; }; then
+            # 深度分层专项: 回答 §0 的待解矛盾「层级/深度 vs 健康窗口」。
+            # 复用 diag_l2_n（input 已满 25）、diag_l2_l1 作 dest_path、diag_l2_wait 作等待。
+            # L2 段名 / 叶子段名取生产真实故障路径（本轮主轮日志逐字确认）
+            bash "$GITHUB_WORKSPACE/.github/scripts/openlist/diag_depth_probe.sh" \
+              "$DIAG_TARGET" "$OL_CONTAINER" "$DIAG_L2_L1" "1024j-视频-pornhub-channel" 3 || true
+            echo ""
+            echo "=========== 深度分层报告尾部 ==========="
+            tail -60 /tmp/ol_diag/depth_report.txt 2>/dev/null || echo "(无报告文件)"
           elif [ "$DIAG_L2_ENABLE" = "1" ]; then
             bash "$GITHUB_WORKSPACE/.github/scripts/openlist/diag_l2_probe.sh" \
               "$DIAG_TARGET" "$OL_CONTAINER" "$DIAG_L2_L1" "$DIAG_L2_N" "$DIAG_L2_WAIT" || true
@@ -315,6 +324,7 @@ jobs:
             /tmp/ol_diag/dirname_report.txt
             /tmp/ol_diag/l2_report.txt
             /tmp/ol_diag/escape_report.txt
+            /tmp/ol_diag/depth_report.txt
             /tmp/ol_diag/container.log
           if-no-files-found: warn
           retention-days: 7
