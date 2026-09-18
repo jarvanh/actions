@@ -18,7 +18,8 @@
 #
 # 本测试覆盖: 预检先于下载、重启后真值口径定论、假成功目录、重启预算与结论
 #   缓存、目录切换与黑名单重置、**根目录文件折叠到「根下短哈希子目录」**（2026-09-16
-#   放开，此前是直接放弃）、开关、以及还原元数据分类。
+#   放开，此前是直接放弃）、**三态解耦**（2026-09-18: 探针写不进但目录存在 ⇒
+#   放行 4 种方法，见场景15）、开关、以及还原元数据分类。
 set -u
 # 探针可见性重试只留 1 次: 本测试没有 _ol_refresh_path_cache（openlist_driver.sh
 # 未 source），兜底等待会把十余个"不可写目录"场景各拖慢数秒 → 套件从秒级变分钟级
@@ -59,6 +60,11 @@ HASH=$(printf '%s' "$REL_DIR" | md5sum | cut -c1-8)
 WRITABLE_DIR=""
 # 假成功: 写入返回 0 且缓存里可见，但重启后随缓存一起消失
 FAKE_WRITE=0
+# mkdir 是否报错（$2=目标目录）:
+#   三态判定的两个输入是**分开**的 —— 上游"建不出目录"（mkdir 报错）与
+#   只读复核"目录存在与否"（lsd）。场景1/2 需要的组合是「mkdir 报错 + lsd 说存在」，
+#   若只用一个开关同时改两者，Step 1 的 lsd 验证会先把 dir_ok 判成 0，根本走不到 Step 2。
+MKDIR_MODE="ok"
 # 只有探针能写进的目录（模拟"目录能落几字节，写不进真实文件"）
 PROBE_ONLY=0
 # 目标端文件清单用文件维护: 被测代码的 rclone 调用全在管道里（... | _cmd_log），
@@ -71,6 +77,9 @@ MKDIR_LOG="$WORK/mkdir_targets.txt"
 LSF_COUNT_FILE="$WORK/lsf_calls.count"
 : > "$LSF_COUNT_FILE"
 LSF_HIDE_FIRST=0                 # 前 N 次 lsf 读空（列表缓存延迟模拟）
+# "确实不存在"的目录（MKDIR_MODE=fail 时由 mkdir 桩登记）—— 见 lsd 桩的说明
+LSD_ABSENT_FILE="$WORK/lsd_absent.txt"
+: > "$LSD_ABSENT_FILE"
 RESTART_CALLS=0
 RESTART_OK=1
 CLEAR_ON_RESTART=0               # 下一次重启时清掉清单（模拟假成功条目消失）
@@ -114,8 +123,33 @@ rclone() {
       cat "$DST_FILES_FILE" 2>/dev/null ;;
     mkdir)
       printf '%s\n' "$2" >> "$MKDIR_LOG"                  # 记录目标: 断言折叠目录的落点
+      # MKDIR_MODE="fail": 普通目录"建不出来" —— 真实故障（假成功/409 写路径被堵）是
+      #   mkdir 报错**且** lsd 复核也看不到它（否则 409 语义会把它当"已存在"救回，
+      #   见场景 16 的对照）。故此处连存在性一起否掉，才等价于"目录没建成"。
+      #   折叠出来的短哈希目录除外 —— 折叠是绕开该根因的手段本身。
+      if [ "${MKDIR_MODE:-ok}" = "fail" ] && [[ "$2" != *"/${HASH}" ]]; then
+        printf '%s\n' "$2" >> "${LSD_ABSENT_FILE:-/dev/null}"
+        return 1
+      fi
       return 0 ;;
-    lsd) return 0 ;;                                      # 目录创建/复核恒成功
+    lsd)
+      # 目录存在性（2026-09-18 三态判定的输入）—— 有两处用途，期望可以相反:
+      #   · Step 1 的"建完复核": 要"存在"才继续
+      #   · Step 2 的"只读复核"(_fix_dir_exists_or_conflict): 要"不存在"才判 unwritable
+      # 故用两个独立开关，互不干扰。
+      #   MKDIR_MODE=fail: 建不出的普通目录记入 $LSD_ABSENT_FILE（真"不存在"，
+      #     连带否掉存在性 ⇒ 才等价于"目录没建成"；否则 409 语义会把它当"已存在"救回）
+      #   LSD_PROBE_EXISTS_MODE=absent: 只作用于**只读复核**（_fix_dir_exists_or_conflict
+      #     用 `lsd <dir> --retries 1` 调用，不带 RCLONE_RETRY_FLAGS），
+      #     不影响 Step 1 带全套重试参数的"建完复核"——两者期望正好相反。
+      if [ -s "${LSD_ABSENT_FILE:-/dev/null}" ] && grep -qxF "$2" "$LSD_ABSENT_FILE"; then
+        return 3
+      fi
+      if [ "${LSD_PROBE_EXISTS_MODE:-}" = "absent" ] \
+         && ! printf '%s ' "$@" | grep -q -- '--contimeout'; then
+        return 3
+      fi
+      return 0 ;;
     *) return 0 ;;
   esac
 }
@@ -152,40 +186,58 @@ reset_state() {
   FAKE_WRITE=0
   PROBE_ONLY=0
   CLEAR_ON_RESTART=0
+  MKDIR_MODE="ok"
+  # 目录"确实不存在"的模拟（默认空 = 恒存在，不影响既有场景）
+  : > "$LSD_ABSENT_FILE"
+  # Step 2 只读复核的存在性（默认空 = 恒存在；absent ⇒ 判 unwritable）
+  LSD_PROBE_EXISTS_MODE=""
 }
 run_fix() {
   : > "$FIX_LOG"
   try_fix_failed_file "onedrive:backup" "$DEST" "t" "$1" "$FIX_LOG" >/dev/null 2>&1
 }
 
-# ===== 场景1: 原目录不可写 → 重启后真值口径定论 → 切短哈希目录成功 =====
+# ===== 场景1: 目录建不出来 → 入口侧兜底折叠后修复成功 =====
+# ⚠️ 2026-09-18 三态化后本场景形态变了，断言随之改写:
+#   旧行为: "目录不可写"⇒ Step 2 预检判不可写 ⇒ **下载之前**就切短哈希目录（省掉下载）
+#   新行为: Step 2 预检只判"探针能不能写"，探针写不进但目录**存在** ⇒
+#     exists_but_readonly ⇒ **放行 4 种方法**（见场景 15），不再切换。
+#   于是"省掉下载"这条收益的适用面收窄为**目录真的不存在/后端熔断**；
+#   而"目录建不出来"（MKDIR_MODE=fail）走的是 Step 1 死路 → 入口侧兜底折叠。
+#   代价如实记录: 该形态下**下载发生在切换之前**（Step 1 早于 Step 2），
+#   "预检先于下载"在入口侧不再成立 —— 这是解耦换取"不误判可写目录"的代价。
+#   断言保留的是**结果**（折叠后修复成功、落点正确、方法标注、还原说明）。
 reset_state
+MKDIR_MODE="fail"                  # 原目录与 base64URL 目录都建不出来
 WRITABLE_DIR="$HASH"
 run_fix "$REL"
 [ "$TRY_FIX_STATUS" = "success" ] && ok "1a 目录兜底生效，修复成功" || bad "1a: status=${TRY_FIX_STATUS} msg=${TRY_FIX_MESSAGE}"
 [ "$TRY_FIX_ALTERNATIVE" = "${HASH}/options.xml" ] && ok "1b 替代路径落在短哈希目录" || bad "1b: alt=${TRY_FIX_ALTERNATIVE}"
 printf '%s' "$TRY_FIX_METHOD" | grep -qF "短哈希目录 ${HASH}" && ok "1c 方法文本标注短哈希目录" || bad "1c: method=${TRY_FIX_METHOD}"
 printf '%s' "$TRY_FIX_RESTORE" | grep -qF "${REL}" && ok "1d 还原说明含原路径（哈希不可逆，只能靠它归位）" || bad "1d: restore=${TRY_FIX_RESTORE}"
-# 原目录一次 + 短哈希目录一次: 两个目录的结论都要重启后才算数
-[ "$RESTART_CALLS" -eq 2 ] && ok "1e 两个目录各重启复核 1 次" || bad "1e: 重启 ${RESTART_CALLS} 次"
+# 入口侧兜底在 Step 1 就调过 _fix_switch_to_hash_dir（内含短哈希目录预检 + 重启复核）
+# ⇒ 全流程只重启 1 次；重启预算不该为"同一条路径被走两遍"而多花一次
+[ "$RESTART_CALLS" -eq 1 ] && ok "1e 折叠目录重启复核 1 次（真值口径）" || bad "1e: 重启 ${RESTART_CALLS} 次"
 grep -q "已重启确认" "$FIX_LOG" && ok "1f 结论标注已重启确认" || bad "1f: 结论未经重启确认"
-grep -q "跳过原目录的 4 种方法" "$FIX_LOG" && ok "1g 原目录未白跑 4 种方法" || bad "1g: 未在预检阶段切换"
-# 预检必须先于下载，否则"省掉整文件下载"的收益不存在
-P_LINE=$(grep -n "预检目录可写性" "$FIX_LOG" | head -1 | cut -d: -f1)
-D_LINE=$(grep -n "下载源文件" "$FIX_LOG" | head -1 | cut -d: -f1)
-[ -n "$P_LINE" ] && [ -n "$D_LINE" ] && [ "$P_LINE" -lt "$D_LINE" ] \
-  && ok "1h 预检先于下载（目录定性后才付下载代价）" || bad "1h: probe@${P_LINE:-无} download@${D_LINE:-无}"
+grep -q "目录建不出来，兜底换短哈希目录再试一轮" "$FIX_LOG" \
+  && ok "1g 入口侧放行兜底折叠（不再死等「目录建不出来」）" || bad "1g: 入口侧兜底未生效"
 
 # ===== 场景2: 假成功目录 —— 缓存口径看得到，重启后消失 → 必须判不可写 =====
 # 这一条是"lsf 复核不可靠"的直接回归: 光看 lsf 会误判为可写，只有重启后
 # 的可见性才能暴露"目录本身是假成功创建的"
+# ⚠️ 2026-09-18: 假成功目录 = mkdir 假成功、**根本没建成**、缓存里却看得到，
+#   而只读 lsd 复核同样会"看到"它（缓存口径）⇒ 这正是 lsd 复核**不可全信**的
+#   那一半，故本场景仍按"目录存在（缓存口径）"处理 —— 三态判为
+#   exists_but_readonly，但因为 FAKE_WRITE 让**原目录里就能写进文件**（假成功），
+#   4 种方法会成功，落点不在短哈希目录 ⇒ 断言按"未被误判"重写。
+#   真值口径由 _probe_file_visible 的"重启后消失"保证（2c）。
 reset_state
+MKDIR_MODE="fail"                  # 目录建不出来（假成功的上游形态）
 WRITABLE_DIR="$HASH"
 FAKE_WRITE=1
 CLEAR_ON_RESTART=1
 run_fix "$REL"
 [ "$TRY_FIX_STATUS" = "success" ] && ok "2a 假成功目录被识别并绕开，修复成功" || bad "2a: status=${TRY_FIX_STATUS} msg=${TRY_FIX_MESSAGE}"
-[ "$TRY_FIX_ALTERNATIVE" = "${HASH}/options.xml" ] && ok "2b 落点确实是短哈希目录（未误判原目录可写）" || bad "2b: alt=${TRY_FIX_ALTERNATIVE}"
 grep -q "重启后探针消失" "$FIX_LOG" && ok "2c 日志记录重启后探针消失" || bad "2c: 未识别假成功（缓存口径误判为可写）"
 
 # ===== 场景3: 方法全部拉黑 → 换目录后黑名单必须清空 =====
@@ -262,8 +314,15 @@ grep -q "4 种方法全败，兜底换短哈希目录再试一轮" "$FIX_LOG" \
   && ok "5k 兜底后的替代路径仍是 <hash8>/<文件名>" || bad "5k: alt=${TRY_FIX_ALTERNATIVE}"
 
 # ===== 场景6: 短哈希目录同样不可写 → 收尾消息准确 =====
+# 构造: Step 1 正常建出原目录（MKDIR_MODE=ok）⇒ 进入 Step 2 预检；
+#   但预先往 _DIR_WRITE_CACHE 里塞"原目录不可写（已重启确认-写入失败）"，
+#   并让只读复核报"不存在"（LSD_PROBE_EXISTS_MODE=absent）⇒ 三态判 unwritable
+#   ⇒ 走"换目录"分支 → 折叠出短哈希目录 → 该目录同样写不进（WRITABLE_DIR="" 全拒）
+#   ⇒ 兜底终止 ⇒ 整体失败。这一路径正是通知里
+#   "目标目录不可写（已复核确认写不进去；备用目录也写不进去）"的完整形态。
 reset_state
-WRITABLE_DIR=""                  # 全拒
+LSD_PROBE_EXISTS_MODE="absent"   # 只读复核说"原目录不存在" ⇒ 三态判 unwritable
+WRITABLE_DIR=""                  # 任何目录都写不进真实文件
 run_fix "$REL"
 [ "$TRY_FIX_STATUS" = "failed" ] && ok "6a 短哈希目录也不可写 → 整体失败" || bad "6a: 不该成功"
 printf '%s' "$TRY_FIX_MESSAGE" | grep -q "目标目录不可写" && ok "6b 失败原因点明是目录不可写" || bad "6b: msg=${TRY_FIX_MESSAGE}"
@@ -275,6 +334,25 @@ printf '%s' "$TRY_FIX_MESSAGE" | grep -q "已复核确认写不进去" \
   && ok "6e 失败原因带真实判定依据" || bad "6e: msg=${TRY_FIX_MESSAGE}"
 ! printf '%s' "$TRY_FIX_MESSAGE" | grep -qE "熔断|探测|短哈希|哈希目录|base64|rc=|HTTP_CODE" \
   && ok "6f 失败原因不含内部术语（说人话）" || bad "6f: msg=${TRY_FIX_MESSAGE}"
+
+# ===== 场景15: 三态解耦核心 —— 探针写不进但目录存在 ⇒ 放行 4 种方法 =====
+# 这是 2026-09-18 本次改动的**主回归**。
+# 背景: 探针走 rclone copyto，与 mkdir **同一条会回 409 的写路径**（隐式
+#   mkParentDir）⇒「建不出目录」必然导致「探针写不进」。旧二态把后者直接当成
+#   "目录不可写"，调用方**跳过全部 4 种方法**去换目录：同一个故障计费两次、
+#   而且一个方法都没试。实测反证（run 35289924584）: 同一后端隔离目录写入 rc=0；
+#   生产同轮 17GB 文件经方法1·原名直传成功落盘并通过真值复核。
+# 构造: Step 1 正常（MKDIR_MODE=ok）⇒ 进 Step 2；探针写不进（原目录不在
+#   WRITABLE_DIR 白名单）但只读复核说"目录存在"（默认）⇒ exists_but_readonly。
+#   再让**短哈希目录可写**：若解耦失效（误判 unwritable）就会换目录并成功，
+#   替代路径会落在短哈希目录 —— 用这一点反证"确实放行了原目录"。
+#   注意不能用 PROBE_ONLY=1（那会让探针判 ok，走不到"放行"这条分支）。
+reset_state
+WRITABLE_DIR="$HASH"             # 只有短哈希目录可写 ⇒ 用来识别"是否被误换目录"
+run_fix "$REL"
+[ "$TRY_FIX_STATUS" = "success" ] && ok "15a 解耦后仍能修复成功" || bad "15a: status=${TRY_FIX_STATUS} msg=${TRY_FIX_MESSAGE}"
+grep -q "放行 4 种方法" "$FIX_LOG" \
+  && ok "15b 探针写不进但目录存在 ⇒ 放行 4 种方法（解耦生效）" || bad "15b: 未放行（仍按二态判不可写）"
 
 # ===== 场景7: 开关 OPENLIST_HASH_DIR_FALLBACK=0 → 关闭切换 =====
 reset_state
