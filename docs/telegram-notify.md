@@ -583,12 +583,13 @@ Run ID：<code>12345678</code>
 ```
 ✅ OpenClaw 最终归档完成
 ━━━━━━━━━━━━━━━━━━
-结果：成功 3
-大小：合计 1.128 GiB
+结果：成功 4
+大小：合计 1.140 GiB
 快照：<code>openclaw-20260912-1330-v1.2.3.tar.gz</code>
 
-📦 归档明细 · 4
+📦 归档明细 · 5
   ├─ <code>openclaw.tar.gz</code> · ✅ 28.000 MiB · 覆盖主包
+  ├─ <code>zcode.tar.gz</code> · ✅ 12.000 MiB
   ├─ <code>CliRelay.tar.gz</code> · ✅ 1.100 GiB
   ├─ <code>rsstt.tar.gz</code> · ✅ 12.000 MiB
   └─ <code>CLIProxyAPI.tar.gz</code> · ⏭️ 跳过 · 本轮未生效（回退后端未启用）

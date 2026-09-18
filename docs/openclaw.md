@@ -124,7 +124,7 @@
 - rsstt 归档带空数据保护：数据目录内只有占位 `.keep`（本轮容器没起来）时不打包、不上传，
   只发一条「归档跳过」告警——空包上传会用几百字节的 tar 覆盖掉云端正常归档。
 - **完整性校验（取代缩水保护）**：打包前校验关键文件必须存在且非空 —— 主包是
-  `.openclaw/openclaw.json`。缺失即判「状态不全」，
+  `.openclaw/openclaw.json`，zcode 是 `.zcode/cli/db/db.sqlite`。缺失即判「状态不全」，
   以退出码 4 中止本次归档、不覆盖云端（判据在归档脚本内，周期与最终归档共用）。
   早先的判据是「新包不足云端现有包 60% 则拒绝覆盖」（缩水保护），已废止：体积本就不是
   「状态全不全」的判据，且以云端现有包为基准会被主动瘦身永久卡死 —— 排除调试转储后
@@ -235,9 +235,9 @@ tar -xzf /tmp/restore.tar.gz -C /tmp/restore .openclaw/openclaw.json
 > `cooldownMsg` 与 `nickname` / `uid` 一样**不进通知**。
 > 字段口径、目录接口与免费判据逐条见 [`telegram-notify.md`](telegram-notify.md) 2.5 节。
 
-> `<对象>` 为归档短名：`OpenClaw 主包` / `CliRelay` / `CLIProxyAPI` / `rss-to-telegram`。
-> 此前四类归档共用「OpenClaw 归档告警」一个标题，无法从标题判断是哪个包出问题
-> （看到标题会以为是主包）。
+> `<对象>` 为归档短名：`OpenClaw 主包` / `ZCode` / `CliRelay` / `CLIProxyAPI` /
+> `rss-to-telegram`。此前五类归档共用「OpenClaw 归档告警」一个标题，无法从标题
+> 判断是哪个包出问题（看到标题会以为是主包，实际可能是 ZCode）。
 
 全部通知为全库统一 HTML 版式（规范唯一真源见 [`telegram-notify.md`](telegram-notify.md)：
 emoji 标题 + ━━━ 分隔线 + 键值/分节区 + 统一收尾行 `⏱ 已运行 X · 🔗 运行日志`），

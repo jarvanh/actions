@@ -153,6 +153,51 @@ jobs:
           stat -c '%s bytes  %n' ~/.openclaw/openclaw.json 2>/dev/null || echo "⚠️ openclaw.json 不存在"
           ls -l ~/.openclaw/state 2>/dev/null || echo "⚠️ state/ 不存在"
 
+          # ZCode 数据恢复：~/.zcode/cli（会话库/rollout/记忆）在 runner 重置后会丢，从 Dropbox 主包还原。
+          # 只覆盖 cli/ 子树：server/ 等运行时由桌面客户端自动重新部署，不入包也不被还原触碰
+          TMP_ZCODE_TAR="/tmp/zcode-restore.tar.gz"
+          ZCODE_RESTORE_DIR="/tmp/zcode-restore"
+          rm -rf "$ZCODE_RESTORE_DIR" 2>/dev/null || true
+          if rclone ls dropbox:self-hosted/zcode.tar.gz > /dev/null 2>&1; then
+            echo "📦 Found zcode.tar.gz! Downloading and extracting..."
+            rclone copyto dropbox:self-hosted/zcode.tar.gz "$TMP_ZCODE_TAR"
+            if [ -s "$TMP_ZCODE_TAR" ] && tar -tzf "$TMP_ZCODE_TAR" >/dev/null 2>&1; then
+              mkdir -p "$ZCODE_RESTORE_DIR"
+              tar -xzf "$TMP_ZCODE_TAR" -C "$ZCODE_RESTORE_DIR"
+              if [ -d "$ZCODE_RESTORE_DIR/.zcode/cli" ]; then
+                mkdir -p ~/.zcode
+                rm -rf ~/.zcode/cli
+                cp -a "$ZCODE_RESTORE_DIR/.zcode/cli" ~/.zcode/cli
+                echo "✅ Restored ~/.zcode/cli from archive"
+              else
+                echo "⚠️ Archive does not contain .zcode/cli, skipping ZCode restore."
+              fi
+              # 还原 server 设备身份（v2/certs CA + deviceMid）。每次重新部署 server 都会重新
+              # 生成身份，客户端把归档等本地 UI 状态 keyed 到该身份上；身份一变，客户端里
+              # 已归档会话全部复活（2026-09-12 排查结论：归档动作在 runner 侧零落盘）。复用
+              # 身份后客户端跨重置认得同一个 server。tasks-index.sqlite 是可再生索引，不备份。
+              if [ -d "$ZCODE_RESTORE_DIR/.zcode/v2/certs" ]; then
+                mkdir -p ~/.zcode/v2/certs
+                cp -a "$ZCODE_RESTORE_DIR/.zcode/v2/certs/." ~/.zcode/v2/certs/
+                if [ -f "$ZCODE_RESTORE_DIR/.zcode/v2/telemetry-state.json" ]; then
+                  cp -a "$ZCODE_RESTORE_DIR/.zcode/v2/telemetry-state.json" ~/.zcode/v2/
+                fi
+                echo "✅ Restored ~/.zcode/v2 server identity (certs + deviceMid)"
+              else
+                echo "ℹ️ Archive has no .zcode/v2 identity (old package), server will generate a fresh one."
+              fi
+            else
+              echo "⚠️ zcode.tar.gz validation failed, skipping ZCode restore."
+            fi
+            rm -f "$TMP_ZCODE_TAR" 2>/dev/null || true
+            rm -rf "$ZCODE_RESTORE_DIR" 2>/dev/null || true
+            echo "=== restored ~/.zcode/cli ==="
+            du -sh ~/.zcode/cli 2>/dev/null || true
+            ls ~/.zcode/cli/db/db.sqlite ~/.zcode/cli/rollout 2>/dev/null | head -5 || echo "⚠️ 还原后未见 db.sqlite/rollout"
+          else
+            echo "ℹ️ No zcode.tar.gz found on Dropbox (first run), skipping ZCode restore."
+          fi
+
           npm i -g @google/gemini-cli
           npm i -g clawhub
 
@@ -1934,6 +1979,106 @@ jobs:
           EOF
           chmod +x /tmp/create-openclaw-archive.sh
 
+          cat > /tmp/create-zcode-archive.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          OUTPUT_TAR="${1:-}"
+          if [ -z "$OUTPUT_TAR" ]; then
+            echo "Usage: $0 /path/to/output.tar.gz" >&2
+            exit 2
+          fi
+
+          MIN_SIZE=$((5 * 1024))
+          SRC_DIR="/home/runner/.zcode/cli"
+          STAGE_DIR=""
+
+          cleanup() {
+            if [ -n "${STAGE_DIR:-}" ] && [ -d "$STAGE_DIR" ]; then
+              rm -rf "$STAGE_DIR"
+            fi
+          }
+          trap cleanup EXIT
+
+          rm -f "$OUTPUT_TAR"
+
+          if [ ! -d "$SRC_DIR" ]; then
+            echo "zcode_dir_missing"
+            exit 3
+          fi
+
+          STAGE_DIR=$(mktemp -d /tmp/zcode-archive-stage.XXXXXX)
+          mkdir -p "$STAGE_DIR/.zcode"
+
+          # 只备个人数据：db（会话库，连 -wal/-shm 一起打包保证一致性）、rollout（对话原始流）、
+          # memories（持久记忆）、plugins/data + marketplaces（插件运行数据与市场配置）。
+          # 排除 plugins/cache（13MB 插件缓存，可按需重新下载）与 log/exec（运行日志，可再生）。
+          # 排除 rollout/model-io-*：模型请求/响应调试转储，单文件可膨胀到 64MB+，
+          # 且会被 ZCode 随时轮转清零，进出归档会让包体积剧烈波动、误触缩水保护（2026-09-12 假警报）。
+          # server/ 运行时由桌面客户端自动重新部署，不备份。
+          # rsync 返回 24 表示活动会话文件复制中消失，属预期，仍校验最终包。
+          set +e
+          rsync -a --delete \
+            --exclude 'log/**' \
+            --exclude 'exec/**' \
+            --exclude 'plugins/cache/**' \
+            --exclude 'rollout/model-io-*.jsonl' \
+            --exclude '*.lock' \
+            --exclude '*.pid' \
+            "$SRC_DIR"/ "$STAGE_DIR/.zcode/cli"/
+          rsync_rc=$?
+          set -e
+
+          if [ "$rsync_rc" -ne 0 ] && [ "$rsync_rc" -ne 24 ]; then
+            echo "zcode_snapshot_failed rc=$rsync_rc" >&2
+            exit "$rsync_rc"
+          fi
+
+          if [ "$rsync_rc" -eq 24 ]; then
+            echo "zcode_snapshot_partial_live_changes"
+          fi
+
+          # 一并备份 server 设备身份（v2/certs CA + telemetry-state.json 的 deviceMid），
+          # 供下次还原后 server 复用，客户端跨重置保持同一实例认知（详见还原步骤注释）。
+          if [ -d /home/runner/.zcode/v2/certs ]; then
+            mkdir -p "$STAGE_DIR/.zcode/v2/certs"
+            cp -a /home/runner/.zcode/v2/certs/. "$STAGE_DIR/.zcode/v2/certs"/
+            [ -f /home/runner/.zcode/v2/telemetry-state.json ] && \
+              cp -a /home/runner/.zcode/v2/telemetry-state.json "$STAGE_DIR/.zcode/v2"/
+          fi
+
+          # 完整性校验（口径同 openclaw 主包，取代体积基准）：db.sqlite 是会话真实
+          # 状态，缺它说明本轮没有可恢复状态，宁可不覆盖云端。排除 model-io 之类的
+          # 调试转储不影响此判据 —— 主动瘦身不再被误判为状态丢失。
+          missing=""
+          for f in db/db.sqlite; do
+            if [ ! -s "$STAGE_DIR/.zcode/cli/$f" ]; then
+              missing="$missing $f"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            echo "zcode_archive_incomplete missing=$missing" >&2
+            exit 4
+          fi
+
+          tar -C "$STAGE_DIR" -czf "$OUTPUT_TAR" .zcode
+
+          actual_size=$(stat -c%s "$OUTPUT_TAR" 2>/dev/null || echo 0)
+          if [ ! -s "$OUTPUT_TAR" ]; then
+            echo "zcode_archive_empty output=$OUTPUT_TAR"
+            exit 1
+          elif [ "$actual_size" -lt "$MIN_SIZE" ]; then
+            echo "zcode_archive_too_small size=${actual_size} min=${MIN_SIZE} output=$OUTPUT_TAR"
+            exit 1
+          elif ! tar -tzf "$OUTPUT_TAR" >/dev/null 2>&1; then
+            echo "zcode_archive_tar_validation_failed output=$OUTPUT_TAR"
+            exit 1
+          else
+            echo "archive_ready size=${actual_size} output=$OUTPUT_TAR"
+          fi
+          EOF
+          chmod +x /tmp/create-zcode-archive.sh
+
           cat > /tmp/create-cliproxyapi-archive.sh <<'EOF'
           #!/usr/bin/env bash
           set -euo pipefail
@@ -2129,15 +2274,18 @@ jobs:
           TMP_OPENCLAW_TAR="/tmp/openclaw.tar.gz"
           TMP_CLIPROXYAPI_TAR="/tmp/CLIProxyAPI.tar.gz"
           TMP_CLIRELAY_TAR="/tmp/CliRelay.tar.gz"
+          TMP_ZCODE_TAR="/tmp/zcode.tar.gz"
           LOCK_FILE="/tmp/openclaw-archive.lock"
 
           cleanup_archive_outputs() {
             rm -f "$TMP_OPENCLAW_TAR" 2>/dev/null || true
             sudo rm -f "$TMP_CLIPROXYAPI_TAR" 2>/dev/null || true
             rm -f "$TMP_CLIRELAY_TAR" 2>/dev/null || true
+            rm -f "$TMP_ZCODE_TAR" 2>/dev/null || true
             rm -rf /tmp/openclaw-archive-stage.* 2>/dev/null || true
             sudo rm -rf /tmp/cliproxyapi-archive-stage.* 2>/dev/null || true
             rm -rf /tmp/clirelay-archive-stage.* 2>/dev/null || true
+            rm -rf /tmp/zcode-archive-stage.* 2>/dev/null || true
           }
           cleanup_archive_outputs
           PID_FILE="/tmp/openclaw-archive.pid"
@@ -2148,10 +2296,11 @@ jobs:
           # 此前四者拼成一整串塞进单个 <pre>，自然语言被一并等宽化，与全库
           # 「kv 区 + 明细分节」形态不一致。
           # 对象 → 标题短名：五类归档曾共用「OpenClaw 归档告警」这一个标题，读者无法
-          # 从标题判断是哪个包出问题（看到标题会以为是主包）。
+          # 从标题判断是哪个包出问题（看到标题会以为是主包，实际可能是 ZCode）。
           obj_label() {
             case "$1" in
               openclaw.tar.gz)                  echo "OpenClaw 主包" ;;
+              zcode.tar.gz)                     echo "ZCode" ;;
               CliRelay|CliRelay.tar.gz)         echo "CliRelay" ;;
               CLIProxyAPI|CLIProxyAPI.tar.gz)   echo "CLIProxyAPI" ;;
               rsstt|rsstt.tar.gz)               echo "rss-to-telegram" ;;
@@ -2279,6 +2428,43 @@ jobs:
                 echo "[$(date '+%F %T')] ⚠️ ${AI_LABEL} archive failed in periodic archive (rc=$rc): ${ai_archive_output}"
                 send_telegram_alert "${AI_LABEL}.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${ai_archive_output:-归档脚本无输出}"
               fi
+            fi
+
+            # ZCode 个人数据归档：~/.zcode/cli → dropbox:self-hosted/zcode.tar.gz（带完整性校验）
+            if [ -d "$HOME/.zcode/cli" ]; then
+              zcode_archive_output=""
+              if zcode_archive_output=$(flock -E 200 -n "$LOCK_FILE" bash /tmp/create-zcode-archive.sh "$TMP_ZCODE_TAR" 2>&1); then
+                echo "[$(date '+%F %T')] zcode archive ok, uploading... ${zcode_archive_output}"
+                zcode_new_size=$(stat -c%s "$TMP_ZCODE_TAR" 2>/dev/null || echo 0)
+                zcode_remote_size=$(rclone ls "dropbox:self-hosted/zcode.tar.gz" 2>/dev/null | awk '{s+=$1} END {print s+0}')
+                # 体积骤降只记录、不拦截（口径同 openclaw 主包）：完整性由
+                # create-zcode-archive.sh 的 db.sqlite 校验把关。原先的缩水保护
+                # 在排除 model-io 调试转储后把正常瘦身判成状态丢失，主包冻结。
+                if [ "$zcode_remote_size" -gt 0 ] && [ "$zcode_new_size" -lt "$((zcode_remote_size * 60 / 100))" ]; then
+                  echo "[$(date '+%F %T')] ℹ️ zcode 体积较云端下降超 40%（new=${zcode_new_size}B remote=${zcode_remote_size}B），已通过完整性校验，正常覆盖"
+                fi
+                zcode_upload_output=""
+                if zcode_upload_output=$(rclone copyto "$TMP_ZCODE_TAR" "dropbox:self-hosted/zcode.tar.gz" 2>&1); then
+                  echo "[$(date '+%F %T')] zcode upload ok"
+                  rm -f "$TMP_ZCODE_TAR"
+                else
+                  rc=$?
+                  echo "[$(date '+%F %T')] ⚠️ zcode.tar.gz upload failed (rc=$rc): ${zcode_upload_output}"
+                  send_telegram_alert "zcode.tar.gz" "上传失败 · 退出码 $rc" "rclone 上传失败" "${zcode_upload_output:-无输出}"
+                fi
+              else
+                rc=$?
+                if [ "$rc" -eq 200 ]; then
+                  echo "[$(date '+%F %T')] ⏭️ previous archive still running, skip zcode archive"
+                elif [ "$rc" -eq 3 ]; then
+                  echo "[$(date '+%F %T')] ⏭️ zcode data dir missing, skip zcode archive (rc=3)"
+                else
+                  echo "[$(date '+%F %T')] ⚠️ zcode.tar.gz archive failed in periodic archive (rc=$rc): ${zcode_archive_output}"
+                  send_telegram_alert "zcode.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${zcode_archive_output:-归档脚本无输出}"
+                fi
+              fi
+            else
+              echo "[$(date '+%F %T')] ℹ️ ~/.zcode/cli 不存在，跳过 zcode 归档"
             fi
 
             sleep 1200
@@ -2464,6 +2650,7 @@ jobs:
           obj_label() {
             case "$1" in
               openclaw.tar.gz)                  echo "OpenClaw 主包" ;;
+              zcode.tar.gz)                     echo "ZCode" ;;
               CliRelay|CliRelay.tar.gz)         echo "CliRelay" ;;
               CLIProxyAPI|CLIProxyAPI.tar.gz)   echo "CLIProxyAPI" ;;
               rsstt|rsstt.tar.gz)               echo "rss-to-telegram" ;;
@@ -2513,11 +2700,12 @@ jobs:
 
           echo "4. Performing final archive to Dropbox..."
           cleanup_archive_outputs() {
-            rm -f /tmp/openclaw-final.tar.gz /tmp/rsstt.tar.gz /tmp/CliRelay.tar.gz 2>/dev/null || true
+            rm -f /tmp/openclaw-final.tar.gz /tmp/rsstt.tar.gz /tmp/CliRelay.tar.gz /tmp/zcode-final.tar.gz 2>/dev/null || true
             sudo rm -f /tmp/CLIProxyAPI.tar.gz 2>/dev/null || true
             rm -rf /tmp/openclaw-archive-stage.* 2>/dev/null || true
             sudo rm -rf /tmp/cliproxyapi-archive-stage.* 2>/dev/null || true
             rm -rf /tmp/clirelay-archive-stage.* 2>/dev/null || true
+            rm -rf /tmp/zcode-archive-stage.* 2>/dev/null || true
           }
           free_kb() { df -Pk "${1:-/tmp}" | awk 'NR==2 {print $4}'; }
           require_free_kb() {
@@ -2600,6 +2788,39 @@ jobs:
             echo "⚠️ final openclaw.tar.gz archive failed (rc=$rc): ${openclaw_final_output}"
             record_archive_result "openclaw.tar.gz" fail 0 "归档失败 · 退出码 $rc"
             send_archive_alert "openclaw.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${openclaw_final_output:-归档脚本无输出}"
+          fi
+
+          echo "4b. Final archive of ZCode personal data (~/.zcode/cli)..."
+          if [ -d "$HOME/.zcode/cli" ]; then
+            TMP_ZCODE_FINAL_TAR="/tmp/zcode-final.tar.gz"
+            if zcode_final_output=$(bash /tmp/create-zcode-archive.sh "$TMP_ZCODE_FINAL_TAR" 2>&1); then
+              zcode_final_new_size=$(stat -c%s "$TMP_ZCODE_FINAL_TAR" 2>/dev/null || echo 0)
+              zcode_final_remote_size=$(rclone ls "dropbox:self-hosted/zcode.tar.gz" 2>/dev/null | awk '{s+=$1} END {print s+0}')
+              # 体积骤降只记录、不拦截（口径同周期归档）：完整性由 create-zcode-archive.sh
+              # 的 db.sqlite 校验把关，不再拿云端现有包当基准。
+              if [ "$zcode_final_remote_size" -gt 0 ] && [ "$zcode_final_new_size" -lt "$((zcode_final_remote_size * 60 / 100))" ]; then
+                echo "ℹ️ zcode 体积较云端下降超 40%（new=${zcode_final_new_size}B remote=${zcode_final_remote_size}B），已通过完整性校验，正常覆盖"
+              fi
+              zcode_final_upload_output=""
+              if zcode_final_upload_output=$(rclone copyto "$TMP_ZCODE_FINAL_TAR" "dropbox:self-hosted/zcode.tar.gz" -v 2>&1); then
+                echo "final zcode archive/upload ok: ${zcode_final_output}"
+                record_archive_result "zcode.tar.gz" ok "$zcode_final_new_size"
+                rm -f "$TMP_ZCODE_FINAL_TAR"
+              else
+                rc=$?
+                echo "⚠️ final zcode.tar.gz upload failed (rc=$rc): ${zcode_final_upload_output}"
+                record_archive_result "zcode.tar.gz" fail 0 "上传失败 · 退出码 $rc"
+                send_archive_alert "zcode.tar.gz" "上传失败 · 退出码 $rc" "rclone 上传失败" "${zcode_final_upload_output:-无输出}"
+              fi
+            else
+              rc=$?
+              echo "⚠️ final zcode.tar.gz archive failed (rc=$rc): ${zcode_final_output}"
+              record_archive_result "zcode.tar.gz" fail 0 "归档失败 · 退出码 $rc"
+              send_archive_alert "zcode.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${zcode_final_output:-归档脚本无输出}"
+            fi
+          else
+            echo "ℹ️ ~/.zcode/cli 不存在（本机从未部署 ZCode），跳过 ZCode 最终归档"
+            record_archive_result "zcode.tar.gz" skip 0 "本机未部署 ZCode"
           fi
 
           MIN_SIZE=$((5 * 1024))
