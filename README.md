@@ -441,20 +441,21 @@ API list），读得通但写不进的后端会被整轮放行——run #12616 �
 并把容器日志里的**原始 `rsp_code`/`rep_desc`** dump 出来。报告随 artifact `ol-diag-report` 上传。
 
 **专项诊断（互斥，优先级从高到低；一次只跑一个，要的是"单一变量"的干净归因）**：
-除常规 13 组探针外，`openlist-diag.yml` 还挂了 6 个专项入口，各自独立报告文件：
+除常规 13 组探针外，`openlist-diag.yml` 还挂了 7 个专项入口，各自独立报告文件：
 
 | 开关 | 脚本 | 回答什么 |
 |---|---|---|
 | `diag_l2` + `diag_l2_n=e` | `diag_escape_probe.sh` | 「兜底目录**跳出故障子树**是否真的可写」（E1 祖先层阶梯找最深可写层 / E2 同层对照**核心判决项** / E3 跳出层写文件 / E4 还原路径可行性） |
+| `diag_l2` + `diag_l2_n=d` | `diag_depth_probe.sh` | **「层级/深度 vs 健康窗口」同构分离**（E1 同深度同形状对照：历史名 `5058f1af` vs 同深度全新名 / E2 沿生产真实故障路径的深度阶梯 / E3 **同轮内复测**历史名 → 窗口漂移自证 / E4 已存在目录可写性）|
 | `diag_l2` | `diag_l2_probe.sh` | 新建顶层目录的 **mkdir 假成功**是通用缺陷还是个例（P1 普遍性矩阵 / P2 延迟落盘 / P3 重试自愈 / P4 已存在目录可写） |
 | `diag_dirname` | `diag_dirname_probe.sh` | 「为什么这个特定目录建不出来」（D1 父层递进定位首失败层 / D2 末层名字 4 形态 / D3 同级兄弟） |
 | `diag_writeprobe` | `diag_write_probe.sh` | 「探针写失败 == 目录不可写吗」（W1 复现 / W2 显式 API mkdir / W3 绕隐式 mkParentDir / W4 隔离目录） |
 | `diag_409` | `diag_409_semantics.sh` | 409 是否等于「已存在」+ 改名回原名会不会蒸发 |
 | `reject_src` | `diag_reject.sh` | 按内容拒收 vs 按文件名/状态拒收 |
 
-⚠️ **`diag_escape_probe.sh` 的启动开关复用 `diag_l2_n`（填 `e`/`escape`）**：
-因为 inputs 已达 25 个硬上限（见下坑 1），无法新增独立开关。其余取值仍按 L2 的
-"测试目录个数"解析，既有调用方式不变。
+⚠️ **`diag_escape_probe.sh` / `diag_depth_probe.sh` 的启动开关复用 `diag_l2_n`**
+（分别填 `e`/`escape`、`d`/`depth`）：因为 inputs 已达 25 个硬上限（见下坑 1），
+无法新增独立开关。其余取值仍按 L2 的"测试目录个数"解析，既有调用方式不变。
 
 ⚠️ **三个已踩过的坑（改本 workflow 前必读）**：
 1. **`workflow_dispatch` 的 inputs 硬上限是 25 个** —— 超了不是"警告"而是派发直接
