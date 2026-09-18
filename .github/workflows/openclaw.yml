@@ -1719,58 +1719,99 @@ jobs:
 
                 echo "FAIL_STAGE=snapshot_restore" >> "$RUN_OPENCLAW_META"
                 echo "🔁 Fallback reinstall did not become healthy. Trying automatic snapshot rollback (state + version pair from the healthy snapshot pool)..."
-                SNAPSHOT_TGZ="$(rclone lsf dropbox:self-hosted/snapshots/ --files-only 2>/dev/null | grep -- "-v${TARGET_VERSION}.tar.gz" | sort | tail -n 1 || true)"
+                # 候选：版本匹配的优先，其余依次；一律新→旧。
+                # 关键：**逐个校验包内配置**，通过才采用。快照池的「健康」是产出时贴的标签，
+                # 而健康检查只看进程、不看磁盘配置 —— 配置被改坏后热重载会拒绝它并继续用内存
+                # 里的旧配置服务，/health 照常 200，坏配置就这样顶着「健康」标签进了池。
+                # 只取最新一份必然把同一故障原样恢复（2026-09-18 事故：回滚"成功"却原地失败），
+                # 故必须逐个验、跳过坏的、往前找更旧的。
+                SNAP_POOL_ALL="$(rclone lsf dropbox:self-hosted/snapshots/ --files-only 2>/dev/null | grep "openclaw-.*-v" | sort -r || true)"
+                SNAP_MATCHED="$(printf '%s\n' "$SNAP_POOL_ALL" | grep -- "-v${TARGET_VERSION}.tar.gz" || true)"
+                SNAP_OTHERS="$(printf '%s\n' "$SNAP_POOL_ALL" | grep -v -- "-v${TARGET_VERSION}.tar.gz" || true)"
+                SNAP_CANDIDATES="$(printf '%s\n%s\n' "$SNAP_MATCHED" "$SNAP_OTHERS")"
+                SNAPSHOT_TGZ=""
+                SNAP_CHECK_DIR="$(mktemp -d /tmp/snapshot-check.XXXXXX)"
+                while IFS= read -r _cand; do
+                  [ -z "$_cand" ] && continue
+                  echo "🔎 Checking snapshot candidate: $_cand"
+                  if ! rclone copyto "dropbox:self-hosted/snapshots/${_cand}" /tmp/snapshot-restore.tar.gz -v 2>&1 | tail -n 1; then
+                    echo "⚠️ Download failed; skipping: $_cand"
+                    continue
+                  fi
+                  rm -rf "$SNAP_CHECK_DIR/.openclaw"
+                  if ! tar -xzf /tmp/snapshot-restore.tar.gz -C "$SNAP_CHECK_DIR" .openclaw/openclaw.json 2>/dev/null; then
+                    echo "⚠️ Cannot extract openclaw.json; skipping: $_cand"
+                    continue
+                  fi
+                  if OPENCLAW_CONFIG_PATH="$SNAP_CHECK_DIR/.openclaw/openclaw.json" openclaw config validate >/dev/null 2>&1; then
+                    SNAPSHOT_TGZ="$_cand"
+                    echo "✅ Snapshot config is valid; selected: $_cand"
+                    break
+                  fi
+                  echo "⚠️ Snapshot carries an invalid config (restoring it would reproduce the failure); skipping: $_cand"
+                done <<< "$SNAP_CANDIDATES"
                 if [ -n "$SNAPSHOT_TGZ" ]; then
-                  echo "✅ Found version-matched snapshot: $SNAPSHOT_TGZ"
-                else
-                  echo "ℹ️ No snapshot for known-good version $TARGET_VERSION. Adopting the newest pool snapshot and its version instead (snapshot pool only contains verified-healthy pairs)..."
-                  SNAPSHOT_TGZ="$(rclone lsf dropbox:self-hosted/snapshots/ --files-only 2>/dev/null | grep "openclaw-.*-v" | sort | tail -n 1 || true)"
-                  if [ -n "$SNAPSHOT_TGZ" ]; then
-                    ADOPTED_VERSION="$(printf '%s\n' "$SNAPSHOT_TGZ" | sed -n 's/.*-v\([0-9]\{4\}\.[0-9]*\.[0-9]*\)\.tar\.gz/\1/p')"
-                    if [ -n "$ADOPTED_VERSION" ] && [ "$ADOPTED_VERSION" != "$TARGET_VERSION" ]; then
-                      echo "🔄 Adopting snapshot version $ADOPTED_VERSION: installing openclaw@$ADOPTED_VERSION before restore..."
-                      npm i -g "openclaw@$ADOPTED_VERSION"
-                      fix_openclaw_permissions
-                      TARGET_VERSION="$ADOPTED_VERSION"
-                      echo "SNAPSHOT_ADOPTED_VERSION=$ADOPTED_VERSION" >> "$RUN_OPENCLAW_META"
-                    fi
+                  # 版本成对：采用快照自带版本。放在**选定之后**——为坏快照白装一次版本毫无意义。
+                  ADOPTED_VERSION="$(printf '%s\n' "$SNAPSHOT_TGZ" | sed -n 's/.*-v\([0-9]\{4\}\.[0-9]*\.[0-9]*\)\.tar\.gz/\1/p')"
+                  if [ -n "$ADOPTED_VERSION" ] && [ "$ADOPTED_VERSION" != "$TARGET_VERSION" ]; then
+                    echo "🔄 Adopting snapshot version $ADOPTED_VERSION: installing openclaw@$ADOPTED_VERSION before restore..."
+                    npm i -g "openclaw@$ADOPTED_VERSION"
+                    fix_openclaw_permissions
+                    TARGET_VERSION="$ADOPTED_VERSION"
+                    echo "SNAPSHOT_ADOPTED_VERSION=$ADOPTED_VERSION" >> "$RUN_OPENCLAW_META"
+                  fi
+                  # 换版本后 schema 可能不同：用**装好的**二进制再验一次，避免采用版本之后才失败
+                  if ! OPENCLAW_CONFIG_PATH="$SNAP_CHECK_DIR/.openclaw/openclaw.json" openclaw config validate >/dev/null 2>&1; then
+                    echo "❌ Selected snapshot's config is invalid under openclaw@$TARGET_VERSION; aborting snapshot rollback."
+                    SNAPSHOT_TGZ=""
                   fi
                 fi
+                rm -rf "$SNAP_CHECK_DIR"
                 if [ -z "$SNAPSHOT_TGZ" ]; then
-                  echo "ℹ️ Snapshot pool empty or unusable; snapshot rollback unavailable."
+                  echo "ℹ️ Snapshot rollback unavailable (pool empty / unusable / every candidate carries an invalid config)."
                 else
-                  echo "⬇️ Downloading snapshot: $SNAPSHOT_TGZ ..."
-                  if rclone copyto "dropbox:self-hosted/snapshots/${SNAPSHOT_TGZ}" /tmp/snapshot-restore.tar.gz -v 2>&1 | tail -n 2; then
-                    echo "🛑 Stopping gateway (cancels the systemd auto-restart loop)..."
-                    systemctl --user stop openclaw-gateway.service 2>/dev/null || true
-                    openclaw gateway stop 2>/dev/null || true
-                    sleep 3
-                    BAK_TS="$(date +%Y%m%d-%H%M%S)"
-                    mv "$HOME/.openclaw" "$HOME/.openclaw.broken-bak-$BAK_TS"
-                    if tar -xzf /tmp/snapshot-restore.tar.gz -C "$HOME" && [ -s "$HOME/.openclaw/openclaw.json" ]; then
-                      echo "✅ State restored from snapshot (broken state kept at ~/.openclaw.broken-bak-$BAK_TS)."
-                      fix_openclaw_permissions
-                      if openclaw gateway install --force && openclaw gateway restart && wait_for_openclaw_health "snapshot_restore" 180 5; then
-                        record_successful_openclaw_version "$TARGET_VERSION"
-                        echo "✅ OpenClaw is healthy after automatic snapshot rollback!"
-                      else
-                        dump_openclaw_diagnostics
-                        err="快照回滚（状态+版本成对恢复）后仍无法启动；损坏状态保留于 ~/.openclaw.broken-bak-$BAK_TS"
-                        fail_startup "$err"
-                      fi
+                  # 选中的快照已在候选校验时下到 /tmp/snapshot-restore.tar.gz，不再重复下载
+                  echo "🛑 Stopping gateway (cancels the systemd auto-restart loop)..."
+                  systemctl --user stop openclaw-gateway.service 2>/dev/null || true
+                  openclaw gateway stop 2>/dev/null || true
+                  sleep 3
+                  BAK_TS="$(date +%Y%m%d-%H%M%S)"
+                  mv "$HOME/.openclaw" "$HOME/.openclaw.broken-bak-$BAK_TS"
+                  if tar -xzf /tmp/snapshot-restore.tar.gz -C "$HOME" && [ -s "$HOME/.openclaw/openclaw.json" ]; then
+                    echo "✅ State restored from snapshot (broken state kept at ~/.openclaw.broken-bak-$BAK_TS)."
+                    fix_openclaw_permissions
+                    if openclaw gateway install --force && openclaw gateway restart && wait_for_openclaw_health "snapshot_restore" 180 5; then
+                      record_successful_openclaw_version "$TARGET_VERSION"
+                      echo "✅ OpenClaw is healthy after automatic snapshot rollback!"
+                      # 回滚成功 ⇒ 本步整体成功。置标志跳过块尾的失败判定：此前没有这一步，
+                      # 回滚明明救回来了也照样落到 fail_startup 被判 exit 1（既有缺陷）。
+                      SNAPSHOT_ROLLBACK_OK=1
                     else
-                      echo "❌ Snapshot extraction failed; restoring the previous state and giving up."
-                      rm -rf "$HOME/.openclaw"
-                      mv "$HOME/.openclaw.broken-bak-$BAK_TS" "$HOME/.openclaw"
-                      err="快照解包失败，已还原现场"
+                      dump_openclaw_diagnostics
+                      err="快照回滚（状态+版本成对恢复）后仍无法启动；损坏状态保留于 ~/.openclaw.broken-bak-$BAK_TS"
                       fail_startup "$err"
                     fi
                   else
-                    echo "⚠️ Snapshot download failed; skipping automatic snapshot rollback."
+                    echo "❌ Snapshot extraction failed; restoring the previous state and giving up."
+                    rm -rf "$HOME/.openclaw"
+                    mv "$HOME/.openclaw.broken-bak-$BAK_TS" "$HOME/.openclaw"
+                    err="快照解包失败，已还原现场"
+                    fail_startup "$err"
                   fi
                 fi
-                err="回退到最近记录版本后，OpenClaw 依然无法启动（健康检查失败）"
-                fail_startup "$err"
+                # 走到这里有两种情况，必须分开说，别把「没回滚」谎报成「回滚了还失败」：
+                #   池空/候选全坏 → 回滚根本没发生；
+                #   其余（选中并恢复后健康检查仍不过）→ 回滚确实做了但没救回来。
+                # 回滚成功时 SNAPSHOT_ROLLBACK_OK=1，此处整段跳过（本步已成功）。
+                if [ "${SNAPSHOT_ROLLBACK_OK:-0}" = "1" ]; then
+                  :
+                elif [ -z "$SNAPSHOT_TGZ" ]; then
+                  err="回退到最近记录版本后，OpenClaw 依然无法启动；且快照池无可用的健康快照（池空或候选配置均无效），快照回滚未执行"
+                  fail_startup "$err"
+                else
+                  err="回退到最近记录版本后，OpenClaw 依然无法启动（健康检查失败）"
+                  fail_startup "$err"
+                fi
               fi
           fi
 
@@ -2001,6 +2042,23 @@ jobs:
           if [ -n "$missing" ]; then
             echo "openclaw_archive_incomplete missing=$missing" >&2
             exit 4
+          fi
+
+          # 配置可用性校验：包内 openclaw.json 必须是**当前版本能接受**的配置。
+          # 为什么必须卡在这里：网关的「健康」只反映**运行中的进程**，不反映**磁盘上的配置**。
+          # 配置被改坏后热重载会拒绝它、继续用内存里的旧配置服务，/health 照常 200，
+          # 于是本脚本会把磁盘上那份坏配置打进包、顶着「健康」标签进主包与快照池；
+          # 下轮启动读到的就是坏配置，回滚又把同一份坏配置恢复一遍 —— 故障自我复现。
+          # （2026-09-18 事故即此形态：heartbeat 写了无效键 enabled，回滚"成功"却原地失败。）
+          # 退出码 5 = 配置不可用，调用方按归档失败处理：不覆盖云端、不入快照池。
+          if command -v openclaw >/dev/null 2>&1; then
+            if ! OPENCLAW_CONFIG_PATH="$STAGE_DIR/.openclaw/openclaw.json" openclaw config validate >/dev/null 2>&1; then
+              echo "openclaw_archive_config_invalid path=openclaw.json" >&2
+              exit 5
+            fi
+          else
+            # 校验器不可得时不拦（拦了会让主包永久冻结、风险更大），但明确留痕
+            echo "openclaw_archive_config_check_skipped (openclaw not on PATH)" >&2
           fi
 
           tar -C "$STAGE_DIR" -czf "$OUTPUT_TAR" .openclaw
