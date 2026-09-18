@@ -1111,19 +1111,18 @@ jobs:
               #   credits 解析出 base 倍率；命中「已启用且在有效期内」的促销则乘 factor；
               #   最终倍率为 0 才计入免费名单。促销过期/未生效都不算免费。
               printf '%s' "$_cat" | jq -r --arg fn "$_cf" '
-                def parse_credits:
-                  if . == null then null
-                  elif type == "number" then .
-                  elif type == "string" then
-                    (gsub("^[xX]"; "") | gsub("[Cc]redits?"; "") | gsub("\\s"; "")
-                     | (try tonumber catch null))
-                  else null end;
                 (.modelPromotions // []) as $promos
                 | (.models // [])[]
                 | (.id // "") as $_raw
-                | ($_raw | ascii_downcase | gsub("^\\s+|\\s+$"; "")) as $_id
+                | ($_raw | ascii_downcase | gsub("^[[:space:]]+|[[:space:]]+$"; "")) as $_id
                 | select($_id != "")
-                | (parse_credits(.credits)) as $_base
+                | ( .credits
+                    | if . == null then null
+                      elif type == "number" then .
+                      elif type == "string" then
+                        ( gsub("[Cc]redits?"; "") | gsub("[[:blank:]]"; "") | sub("[xX]$"; "")
+                          | try tonumber catch null )
+                      else null end ) as $_base
                 | ( $promos
                     | map(select(.enabled == true))
                     | map(select(((.modelIDs // []) | map(ascii_downcase) | index($_id)) != null))
@@ -1133,8 +1132,8 @@ jobs:
                     | .[0] ) as $_promo
                 | ( if $_base == null then null
                     elif $_promo == null then $_base
-                    else ($_promo.factor // 1) as $_f
-                         | (if $_f == 0 then 0 else ($_base * $_f) end)
+                    else (($_promo.factor // 1) as $_f
+                          | if $_f == 0 then 0 else ($_base * $_f) end)
                     end ) as $_mult
                 | select($_mult != null and $_mult == 0)
                 | "\($fn)\t\($_id)"
@@ -1171,9 +1170,10 @@ jobs:
                   elif . == "expired"        then "已过期"
                   elif . == "disabled"       then "失效"
                   else . end;
-                ( [ .[] | split("\t")
-                    | select(length >= 2)
-                    | { key: .[0], value: .[1] } ]
+                ( $wbraw | split("\n")
+                  | map(split("\t"))
+                  | map(select(length >= 2))
+                  | map({ key: .[0], value: .[1] })
                   | group_by(.key)
                   | map({ key: .[0].key, value: (map(.value) | join(" · ")) })
                   | from_entries ) as $free
@@ -1192,7 +1192,7 @@ jobs:
                     (if (.tokenExpiresAt // 0) > 0 then ("过期 " + (.tokenExpiresAt | strftime("%Y-%m-%d %H:%M"))) else "" end)
                   ]
                 | @tsv
-              ' --slurpfile WBFREE "$WB_FREEMAP" "$WB_STATUS_JSON" 2>/dev/null || true)"
+              ' --rawfile wbraw "$WB_FREEMAP" "$WB_STATUS_JSON" 2>/dev/null || true)"
               if [ -z "$WB_POOL" ]; then
                 echo "⚠️ workbuddy-status.json 解析失败（多为读到 serve 正在重写的半截文件），本轮账号池明细留空"
               fi

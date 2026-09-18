@@ -218,18 +218,17 @@ tar -xzf /tmp/restore.tar.gz -C /tmp/restore .openclaw/openclaw.json
 > 上游该参数默认空、本仓库也从未设置，**不得编造密钥值**。
 > 「🔑 凭据」只列 `workbuddy*.json` 的**文件名**（真实 Access/Refresh Token 绝不上通知），
 > 且排除 serve 自己写的状态快照 `workbuddy-status.json`。
-> 「💳 账号池」取自 serve 写出的 `workbuddy-status.json`（**jq 解析**）。
-> 该文件的键名由上游 Go 结构体 `accountSnapshot` / `statusSnapshot` 的 json tag 固定
+> 「💳 账号池」的额度/状态/冷却取自 serve 写出的 `workbuddy-status.json`（**jq 解析**），
+> **免费模型名单另走上游「模型目录」接口**（不读快照的 `modelStates`，理由见下）。
+> 快照键名由上游 Go 结构体 `accountSnapshot` / `statusSnapshot` 的 json tag 固定
 > （`path` / `edition` / `state` / `tokenExpiresAt` / `quotaRemaining` / `quotaKnown` /
 > `isPaidUser` / `freeModels` / `modelCooldowns` / `modelStates`），比 `status` 子命令
 > 给人类看的对齐表格更可靠 —— 后者字段名后跟多个空格、`过期时间` 还独立成行，解析脆且易漏。
 > 中文状态名照上游 `monitor` 表格映射；额度格式照上游 `formatQuota`；
 > `quotaKnown` 为 false 时写「额度未获取」而非 0（那只是还没查到，不是耗尽）；
 > 快照里的 `nickname` / `uid` 不进通知。
-> **免费模型列具体模型名**（`modelStates` 里 `costClass == "free"` 的键），不只给计数
-> —— 只写「免费模型 1」读者不知道是哪个。名字清单属**结构性清单，全量展示不折叠**。
 > serve 每 3 秒重写该文件，可能读到半截导致 jq 失败 —— 失败即本轮账号池整段跳过。
-> 字段口径与探测机制逐条见 [`telegram-notify.md`](telegram-notify.md) 2.5 节。
+> 字段口径、目录接口与免费判据逐条见 [`telegram-notify.md`](telegram-notify.md) 2.5 节。
 
 > `<对象>` 为归档短名：`OpenClaw 主包` / `CliRelay` / `CLIProxyAPI` / `rss-to-telegram`。
 > 此前四类归档共用「OpenClaw 归档告警」一个标题，无法从标题判断是哪个包出问题
@@ -397,19 +396,22 @@ runner 以 `tailscale set --ssh --hostname=openclaw --advertise-exit-node` 广�
     ├─ 就绪但账号池为空       → ⚠️ 已启动 · 无可用账号（需人工扫码登录）
     ├─ 进程已退出             → ❌ 启动失败（提前结束等待，不空等满 120 秒）
     └─ 120 秒未监听           → ❌ 启动失败（附日志尾部 1200 字节）
-→ 【仅首轮】GET /v1/models 取目录前 50 个 → POST /admin/probe 逐一探免费/收费（约数分钟）
-→ jq 解析 workbuddy-status.json → 账号池明细（含 costClass=="free" 的模型名）→ 🟢/⚠️/❌ 通知
+→ 【仅首轮】逐凭据 GET {Base}/v2/enterprises/personal/models 取免费模型名 → 🟢/⚠️/❌ 通知
 ```
 
-- **免费模型名要靠主动探测拿**：快照里的 `modelStates` 只在「该模型被真实请求过」时才有键
-  （默认 `unknown`），光读快照只能拿到计数、拿不到名字。故首轮先 `GET /v1/models` 取目录
-  前 50 个（上游 `/admin/probe` 单次上限 50），再 `POST /admin/probe` 逐账号 × 逐模型探一轮。
-  探测走 serve 自带接口（**只接受回环来源**）而非另起进程 —— 账本在 serve 内存里，
-  独立进程写的状态文件会被它覆盖（上游 `probe.go` 注释即此意）。
-  **只在首轮探**：结论经 `writeStatusSnapshot` 落进快照并回推 Dropbox，下轮 serve 启动时
-  `restoreAccountRuntimeStateLocked` 会恢复账本，无需再探。探测失败/超时**不阻塞通知**：
-  退回只给「免费模型 N」计数，绝不编造名字。
-  注意探测会真实消耗额度，且命中限流会给该模型打上冷却（通知里「模型冷却」计数因此升高属预期）。
+- **免费模型名取自上游「模型目录」接口，不靠探测**：`GET {Base}/v2/enterprises/personal/models`
+  一次性返回全量模型的 `credits` 与促销，**只读、不耗额度、无回环限制**。
+  国内站 Base `https://copilot.tencent.com`、国际站 Base `https://www.workbuddy.ai`，
+  站点由凭据文件的 `edition` 决定，故**逐账号**各请求一次。
+  免费判据照上游 `siteKnownFree`：倍率能解析出、且生效倍率为 0、且促销未过期。
+  **只在首轮取**（结果不写回快照，纯展示）。
+  任一账号取不到目录（超时/非 200/JSON 无 `models`）即整段降级为「免费模型 N」计数，
+  绝不编造名字；取到但清单为空则如实写「免费模型 0」。
+  > 早前版本用 serve 自带的 `POST /admin/probe` 逐账号 × 逐模型真实请求探测，
+  > 实测 44 模型 × 4 账号耗时 **634 秒**，超过 serve 的 `WriteTimeout: 300s`
+  > 而必然被截断，且真实消耗额度、可能触发限流冷却。已废弃。
+  > 也不读快照 `modelStates` —— 它只在模型被真实请求过时才有键，默认 `unknown`，
+  > 光读快照拿不到名字。
 
 - **端口 8318**：8317 已被 CliRelay / CLIProxyAPI 占用（OpenClaw 主 AI 网关），
   二者并列互不干扰；本步骤**不**为本服务起 cloudflared 隧道，仅本机可达。
@@ -479,9 +481,11 @@ serve 根本看不到，最快也要等下一轮（≈5.7 小时）。为此在�
 
 - 本轮实时日志：`/tmp/local_workbuddy/data/logs/serve.log`（停止后回推到 Dropbox 同路径）。
 - 账号池状态：运行目录下 `workbuddy-status.json`，或 `workbuddy-gateway monitor` 前台刷新。
-  想看某账号某个模型到底免费还是收费：读快照 `accounts[].modelStates` 里那个模型的
-  `costClass`（`free`/`paid`/`unknown`）；要补测就跑 `workbuddy-gateway probe -auth <凭据文件名>
-  -models <模型>`（需 serve 在跑，结论写回账本）。
+  想看某账号某个模型到底免费还是收费：直接 `curl` 上游模型目录接口
+  （`GET {Base}/v2/enterprises/personal/models`，带凭据文件里的 `accessToken`），
+  看该模型的 `credits` 与 `modelPromotions` —— 口径与通知里的免费名单一致，且不耗额度。
+  快照 `accounts[].modelStates` 只在模型被真实请求过时才有键（默认 `unknown`），
+  只适合查「实际用过的」模型。
 - 凭据同步日志：`/tmp/workbuddy-cred-sync.log`（每轮成功/跳过/失败各一行）。
 - 本步骤元数据：`/tmp/run-workbuddy-meta.env`（`WB_STATE` / `WB_VERSION` / `WB_UPDATE` /
   `WB_REASON` / `WB_READY` / `WB_ACCOUNTS`）。
