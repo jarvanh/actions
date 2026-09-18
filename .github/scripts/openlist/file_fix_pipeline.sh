@@ -320,7 +320,17 @@ _bulk_fold_ensure_dir() {
     -d "$(jq -n --arg path "$ol_dir" '{path:$path}')" 2>&1)
   mkdir_http=$(echo "$mkdir_resp" | tail -n 1)
   if echo "$mkdir_http" | grep -qE 'HTTP_CODE:(200|201|204)'; then
-    return 0
+    # ⚠️ API 报 200 不等于建成（2026-09-18 §12.14.8）: 坏子树上 API 报 200
+    #   而 rclone/WebDAV 报 409，两通路回报矛盾。不改的话，折叠会把
+    #   "目录已就绪"当真、后续写入全落到不存在的目录上白跑。
+    #   ⚠️ 用 declare -F 探测（本函数在 _fix_dir_exists_or_conflict 可能在的
+    #   上下文里被调用，也可能不在）—— 与上面 409 分支同写法，保持一致。
+    if declare -F _fix_dir_exists_or_conflict >/dev/null 2>&1 \
+       && _fix_dir_exists_or_conflict "$dst_dir" "${OPENLIST_MKDIR_TIMEOUT:-120}s"; then
+      echo "  ✅ 目录创建成功 (API · 已复核存在)" | tee -a "$LOG_FILENAME"
+      return 0
+    fi
+    echo "  ⚠ 目录 API 报 200 但不存在（假成功）" | tee -a "$LOG_FILENAME"
   fi
   # API 报 409 同样先判"是否已存在"
   if echo "$mkdir_http" | grep -qE 'HTTP_CODE:409' \

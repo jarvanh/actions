@@ -15,6 +15,10 @@
 #   D2 分类器把 409/mkParentDir 归为 `conflict`（不再一律 `backend`）
 #   D3 目录层连续失败计数达阈值即收手（_FIX_MKDIR_FAIL_STREAK + 阈值判据存在）
 #   D4 开关 _FIX_MKDIR_409_SEMANTICS=0 可回退旧行为（逃生口必须保留）
+#   D5 各建目录点都接上 409 语义（Step1 / API / base64URL / 短哈希 / 折叠）
+#   D6 整轮 409 重试（与 423 同款）
+#   D7 **API 报 200 必须复核存在性**（2026-09-18 §12.14.8 补：
+#     坏子树上 API 报 200、WebDAV 报 409，两通路矛盾 ⇒ 只看 HTTP 码会被假成功骗过）
 #
 # 用法: bash test_mkdir_409_semantics.sh   （退出码 0=全过）
 
@@ -187,6 +191,111 @@ if grep -q 'OPENLIST_409_RETRY_ATTEMPTS' "$SYNC_ENGINE"; then
   ok "D6c 409 重试次数可配"
 else
   bad "D6c 409 重试次数不可配"
+fi
+
+# ────────────────────────────────────────────────────────────
+# D7 · API 报 200 必须复核存在性（2026-09-18 §12.14.8）
+# 为什么加这一组（本套件此前**完全没覆盖 API 200 分支** → 缺陷得以长期存活）:
+#   实测同一条坏子树上，OpenList 原生 API 报 `HTTP_CODE:200`，
+#   而 rclone/WebDAV 的 mkdir 报 `409 Conflict` —— 两通路回报互相矛盾。
+#   旧行为在 API 分支**只看 HTTP 码**就置 ok=1，生产实证（主轮 35308273431）:
+#     06:10:10 ✅ 短哈希目录创建成功 (API)   ← 在此就认定建成
+#     06:13:26 ❌ 短哈希目录不可写…兜底终止  ← 2 分钟后才发现根本没建成
+#   ⇒ 契约: 凡是 `HTTP_CODE:(200|201|204)` 分支，**必须**紧跟一次
+#     `_fix_dir_exists_or_conflict`（读操作）复核，且"复核不过"不得置 ok。
+#
+# D7a 静态: file_fix.sh 的每个 200|201|204 分支**自己的 if 块内**都出现复核调用。
+#   ⚠️ 不能用"该行之后 N 行内出现"—— 会串到**后面 409 分支**的复核调用上，
+#   于是旧代码（API-200 分支无复核）也能假过（本测试初版就踩了这个坑，已修）。
+#   正确切法: 从 200 判定行起，**缩进更深的**连续行才属于本分支块；
+#   遇到缩进 <= 分支体的行即认为块结束。用 awk 逐行算缩进实现。
+_hash_200_bad=$(awk '
+  function indent(s,   i) { i=0; while (i<length(s) && substr(s,i+1,1)==" ") i++; return i }
+  {
+    line[NR]=$0
+  }
+  END {
+    bad=0; total=0
+    for (n=1; n<=NR; n++) {
+      if (line[n] !~ /HTTP_CODE:\(200\|201\|204\)/) continue
+      total++
+      base=indent(line[n])          # 判定行自身缩进（与 if 同级）
+      found=0
+      for (m=n+1; m<=NR; m++) {
+        if (line[m] ~ /^[[:space:]]*$/) continue
+        ind=indent(line[m])
+        if (ind <= base) break      # 块已结束（回到同级或更外层）
+        if (line[m] ~ /_fix_dir_exists_or_conflict/) { found=1; break }
+      }
+      if (!found) bad++
+    }
+    printf "%d %d\n", bad, total
+  }
+' "$FILE_FIX")
+_d7_missing=${_hash_200_bad%% *}
+_d7_total=${_hash_200_bad##* }
+if [ "${_d7_total:-0}" -gt 0 ] && [ "${_d7_missing:-1}" -eq 0 ]; then
+  ok "D7a file_fix.sh ${_d7_total} 处 API-200 分支**块内**均已接存在性复核"
+else
+  bad "D7a file_fix.sh 有 ${_d7_missing}/${_d7_total} 处 API-200 分支块内无复核（假成功会骗过管线）"
+fi
+
+# D7b 静态: 批量折叠（file_fix_pipeline.sh）同样接入（同样的块内切法）
+_pipe_200_bad=$(awk '
+  function indent(s,   i) { i=0; while (i<length(s) && substr(s,i+1,1)==" ") i++; return i }
+  { line[NR]=$0 }
+  END {
+    bad=0; total=0
+    for (n=1; n<=NR; n++) {
+      if (line[n] !~ /HTTP_CODE:\(200\|201\|204\)/) continue
+      total++
+      base=indent(line[n])
+      found=0
+      for (m=n+1; m<=NR; m++) {
+        if (line[m] ~ /^[[:space:]]*$/) continue
+        if (indent(line[m]) <= base) break
+        if (line[m] ~ /_fix_dir_exists_or_conflict/) { found=1; break }
+      }
+      if (!found) bad++
+    }
+    printf "%d %d\n", bad, total
+  }
+' "$PIPELINE")
+_p_200_missing=${_pipe_200_bad%% *}
+_p_200_total=${_pipe_200_bad##* }
+if [ "${_p_200_total:-0}" -gt 0 ] && [ "${_p_200_missing:-1}" -eq 0 ]; then
+  ok "D7b 批量折叠的 API-200 分支块内已接存在性复核"
+else
+  bad "D7b 批量折叠有 ${_p_200_missing}/${_p_200_total} 处 API-200 分支块内无复核"
+fi
+
+# D7c 行为: 用桩把「API 报 200 但目录不存在」跑一遍，必须判为未建成
+#   抽出短哈希段所在函数体不可行（依赖过多）⇒ 直接对着**真实分支写法**做等价验证:
+#   构造与代码同形的判定逻辑，喂入 mkdir_http=HTTP_CODE:200 + lsd 不存在，
+#   确认复核调用返回非 0（即不会被置 ok）。
+if declare -F _fix_dir_exists_or_conflict >/dev/null 2>&1; then
+  PATH="$TMPDIR_T/bin:$PATH"
+  _resp=$'{"code":200}\nHTTP_CODE:200'
+  _http=$(printf '%s' "$_resp" | tail -n 1)
+  _ok=0
+  if echo "$_http" | grep -qE 'HTTP_CODE:(200|201|204)'; then
+    if LSD_EXIST=0 _fix_dir_exists_or_conflict "openlist:wopan175/5/5058f1af" "5s"; then
+      _ok=1
+    fi
+  fi
+  [ "$_ok" -eq 0 ] \
+    && ok "D7c 行为: API 报 200 且目录不存在 ⇒ 复核拦住（不置 ok）" \
+    || bad "D7c 行为: API 报 200 且目录不存在时仍被放行（假成功未被拦住）"
+  # 反向对照: 目录确实存在时，复核必须放行（否则会把成功误判成失败）
+  _ok2=0
+  if LSD_EXIST=1 _fix_dir_exists_or_conflict "openlist:wopan175/5/5058f1af" "5s"; then
+    _ok2=1
+  fi
+  [ "$_ok2" -eq 1 ] \
+    && ok "D7d 反向对照: API 报 200 且目录确实存在 ⇒ 复核放行" \
+    || bad "D7d 反向对照: 目录存在却被复核拒绝（会把成功判成失败）"
+else
+  bad "D7c/D7d 无法执行: _fix_dir_exists_or_conflict 未定义"
 fi
 
 echo ""

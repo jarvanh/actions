@@ -1338,8 +1338,20 @@ _fix_switch_to_hash_dir() {
       mkdir_http=$(echo "$mkdir_resp" | tail -n 1)
       log_fix "$fix_log" "   OpenList API mkdir (短哈希) 响应: ${mkdir_http}"
       if echo "$mkdir_http" | grep -qE 'HTTP_CODE:(200|201|204)'; then
-        hash_dir_ok=1
-        log_fix "$fix_log" "   ✅ 短哈希目录创建成功 (API)"
+        # ⚠️ API 报 200 **不等于建成**（2026-09-18 §12.14.8 实测）: 同一条坏子树上
+        #   OpenList 原生 API 报 HTTP_CODE:200，而 rclone/WebDAV 的 mkdir 报
+        #   409 Conflict —— 两条通路回报互相矛盾。生产实证主轮 35308273431:
+        #     06:10:10 ✅ 短哈希目录创建成功 (API)   ← 旧行为在此就认定建成
+        #     06:13:26 ❌ 短哈希目录不可写…兜底终止  ← 2 分钟后才发现根本没建成
+        #   ⇒ 必须与其他三条分支同口径: 用**读操作**复核后再认定。
+        #   不这么改的代价: 白等 ~2 分钟、日志给出"创建成功"的假象、
+        #   且后续所有"换目录"修法都建立在不可信的判据上。
+        if _fix_dir_exists_or_conflict "$hash_dst_dir" "${OPENLIST_MKDIR_TIMEOUT:-120}s"; then
+          hash_dir_ok=1
+          log_fix "$fix_log" "   ✅ 短哈希目录创建成功 (API · 已复核存在)"
+        else
+          log_fix "$fix_log" "   ⚠ API 报 200 但短哈希目录不存在（假成功），继续尝试其它通路"
+        fi
       elif echo "$mkdir_http" | grep -qE 'HTTP_CODE:409' \
            && [ "${_FIX_MKDIR_409_SEMANTICS:-1}" != "0" ]; then
         if _fix_dir_exists_or_conflict "$hash_dst_dir" "${OPENLIST_MKDIR_TIMEOUT:-120}s"; then
@@ -1490,8 +1502,16 @@ try_fix_failed_file() {
       mkdir_http=$(echo "$mkdir_resp" | tail -n 1)
       log_fix "$fix_log" "OpenList API mkdir 响应: ${mkdir_http}"
       if echo "$mkdir_http" | grep -qE 'HTTP_CODE:(200|201|204)'; then
-        dir_ok=1
-        log_fix "$fix_log" "OpenList API mkdir 成功"
+        # ⚠️ 同短哈希分支（2026-09-18 §12.14.8）: API 报 200 不等于建成 ——
+        #   坏子树上 API 报 200 而 rclone/WebDAV 报 409，两通路回报矛盾。
+        #   必须用读操作复核后再认定，否则"目录已就绪"是假象，
+        #   后续 4 种方法会在这个并不存在的目录上白跑。
+        if _fix_dir_exists_or_conflict "$actual_dst_dir" "${OPENLIST_MKDIR_TIMEOUT:-120}s"; then
+          dir_ok=1
+          log_fix "$fix_log" "OpenList API mkdir 成功（已复核存在）"
+        else
+          log_fix "$fix_log" "⚠ OpenList API 报 200 但目录不存在（假成功），继续降级"
+        fi
       elif echo "$mkdir_http" | grep -qE 'HTTP_CODE:409' \
            && [ "${_FIX_MKDIR_409_SEMANTICS:-1}" != "0" ]; then
         # 409 在 fs/mkdir 上同样优先解读为"目录已存在"（幂等），用读操作复核。
@@ -1561,10 +1581,17 @@ try_fix_failed_file() {
         mkdir_http=$(echo "$mkdir_resp" | tail -n 1)
         log_fix "$fix_log" "OpenList API mkdir (base64URL) 响应: ${mkdir_http}"
         if echo "$mkdir_http" | grep -qE 'HTTP_CODE:(200|201|204)'; then
-          dir_ok=1
-          used_base64_dir=1
-          dst_file="${actual_dst_dir}/${file_name}"
-          log_fix "$fix_log" "base64URL 目录创建成功 (API)"
+          # ⚠️ 同 Step 1 / 短哈希分支（2026-09-18 §12.14.8）: API 报 200 不等于建成。
+          #   不复核就把"base64URL 目录创建成功"写进日志、并把 dir_ok 置 1，
+          #   后续方法会在不存在的目录上白跑一遍。
+          if _fix_dir_exists_or_conflict "$actual_dst_dir" "${OPENLIST_MKDIR_TIMEOUT:-120}s"; then
+            dir_ok=1
+            used_base64_dir=1
+            dst_file="${actual_dst_dir}/${file_name}"
+            log_fix "$fix_log" "base64URL 目录创建成功 (API · 已复核存在)"
+          else
+            log_fix "$fix_log" "⚠ base64URL 目录 API 报 200 但不存在（假成功）"
+          fi
         elif echo "$mkdir_http" | grep -qE 'HTTP_CODE:409' \
              && [ "${_FIX_MKDIR_409_SEMANTICS:-1}" != "0" ]; then
           if _fix_dir_exists_or_conflict "$actual_dst_dir" "${OPENLIST_MKDIR_TIMEOUT:-120}s"; then
