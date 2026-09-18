@@ -214,6 +214,18 @@ jobs:
       # **全部静默失败**（stderr 被 2>/dev/null 吞掉）⇒ 折叠成果从未被记账（三轮日志里
       # `✅ 折叠落盘` 出现 0 次），表现为"幽灵落盘 + 下轮重传"。
       OPENLIST_RCLONE_LISTING_TIMEOUT: "900s"
+      # F17 预览 listing 短超时: 预览只做粗粒度估算，失败对在 900s 上白等无产出
+      # （预览总耗 30m41s / 占预算 9.6%）。给预览单独一个更短的上限，配合
+      # add_preview_pair 的失败快弃（单次耗时 ≥ 本值即不再重试）。必须带单位。
+      OPENLIST_PREVIEW_LISTING_TIMEOUT: "240s"
+      # F22 写探针周期性重探间隔（秒）: 批次循环每开一批前检查，距上次真探
+      # 超此间隔就清缓存重探。探针的"可写"结论只对 t=0 有效（实测同一路径单文件
+      # 顺序写全过、生产同路径 1034 文件全 405），不重探则一条中途坏窗口沿用到轮末。
+      OPENLIST_WRITE_REPROBE_INTERVAL: "1800"
+      # F10 405 快速失败阈值: 单批日志里 405 Method Not Allowed 计数达此值即判
+      # "该目录本轮写不进"，先于巩固中止剩余批次（历史一个坏目录逐文件烧 115min）。
+      # 20 留足噪声余量（坏目录实测累积上千条，个别长名文件只有几条）。
+      OPENLIST_405_FAST_FAIL_MIN: "20"
       OPENLIST_MKDIR_TIMEOUT: "120"
       OPENLIST_DOWNLOAD_TIMEOUT: "300"
       OPENLIST_UPLOAD_TIMEOUT: "300"

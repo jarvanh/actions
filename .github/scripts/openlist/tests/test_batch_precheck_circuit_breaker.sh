@@ -19,6 +19,9 @@
 #      解析不到字节 → 记 0（不凭空造数）
 #   G6 批次循环预算闸: 剩余预算不足一个批次工作片 -> 零批次传输, SYNC_TIME_EXHAUSTED=1,
 #      return 0（优雅收摊；近几轮 330min 硬杀的直接根因）
+#   G10 写探针周期性重探（F22，2026-09-19）: 到期 → 清缓存 + 打时间戳；未到期 → 不动缓存
+#   G11 405 快速失败（F10，2026-09-19）: 单批 405 计数达阈值 → 复用 F5 中止出口，
+#      剩余批次计失败、reason 为「405 拒写」而非「后端写入全拒」
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK_DIR="$(mktemp -d)"
@@ -82,6 +85,13 @@ _batch_budget_stop() { return "${BATCH_BUDGET_STOP_RC:-1}"; }
 # 在途传输硬上限: 默认空串 = 不套 timeout 包装（与未设预算锚点的生产行为一致），
 # G7 用 BUDGET_SLICE_OVERRIDE 给出秒数，验证包装确实生效
 _budget_slice_seconds() { echo "${BUDGET_SLICE_OVERRIDE:-}"; }
+# F22 写探针周期性重探: 真身在 task_engine.sh 顶层（sed 单函数抽取不含它）。
+# 默认返回 1（不重探，保持既有场景的预检调用次数不变）；G10 用 REPROBE_DUE=0
+# 置"已到期"，验证清缓存 + 时间戳确实发生
+_write_reprobe_due() { return "${REPROBE_DUE:-1}"; }
+_backend_write_probe_invalidate() { echo "invalidate:$1" >> "${REPROBE_INVALIDATE_FILE:-/dev/null}"; }
+# F10 405 快速失败: 真身同属顶层。默认 1（非洪泛）；G11 用 FLOOD_RC=0 置洪泛
+_batch_405_flood() { return "${FLOOD_RC:-1}"; }
 
 SYNC_WITH_LOGGING_CALLS=0
 sync_with_logging() { SYNC_WITH_LOGGING_CALLS=$((SYNC_WITH_LOGGING_CALLS + 1)); }
@@ -275,6 +285,63 @@ chk "G8 批次字节并入 SYNC_TRANSFERRED_BYTES（3 批 × 1.5MiB）" "$RC_BYT
 prepare_case
 capture_rc "openlist:crypt" "t_g8b"
 chk "G8b 解析不到字节 → 记 0（不凭空造数）" "$RC_BYTES" "0"
+
+# ---------- G10: 写探针周期性重探（F22）----------
+# 探针"可写"结论只对 t=0 有效（实测同一路径单文件顺序写全过、生产同路径 1034
+# 文件全 405）。不重探则一条中途坏窗口沿用到轮末 ⇒ 到期必须清缓存再探。
+CHECK_FAIL_FROM_OVERRIDE=99999
+prepare_case
+REPROBE_DUE=0
+REPROBE_INVALIDATE_FILE="/tmp/reprobe_inv_$$"
+: > "$REPROBE_INVALIDATE_FILE"
+capture_rc "openlist:crypt" "t_g10"
+chk "G10 到期 → 三批各清缓存一次" "$(wc -l < "$REPROBE_INVALIDATE_FILE" | tr -d ' ')" "3"
+chk "G10 清的是目标路径（非挂载根）" \
+  "$(grep -c '^invalidate:openlist:crypt$' "$REPROBE_INVALIDATE_FILE" || true)" "3"
+chk "G10 重探后预检照跑（3 批 3 次）" "$CHECK_CALLS" "3"
+rm -f "$REPROBE_INVALIDATE_FILE"
+# 未到期 → 不清缓存（保持既有预检调用次数不变）
+prepare_case
+REPROBE_DUE=1
+REPROBE_INVALIDATE_FILE="/tmp/reprobe_inv2_$$"
+: > "$REPROBE_INVALIDATE_FILE"
+capture_rc "openlist:crypt" "t_g10b"
+chk "G10b 未到期 → 零次清缓存" "$(wc -l < "$REPROBE_INVALIDATE_FILE" | tr -d ' ')" "0"
+rm -f "$REPROBE_INVALIDATE_FILE"
+unset REPROBE_DUE
+
+# ---------- G11: 405 快速失败（F10）----------
+# 单批 405 达阈值 ⇒ 该目录本轮确定性拒写，复用 F5 中止出口提前收摊，
+# 不再逐文件烧完（历史一个坏目录 1034 文件烧 115min）。
+# 与 F5 共用出口但 reason 必须区分：405 是目录级，不能说成"后端写入全拒"。
+CHECK_FAIL_FROM_OVERRIDE=99999
+prepare_case
+FLOOD_RC=0
+G11_OUT_FILE="g11_out.txt"
+# AUTO_SPLIT_INFO 在函数内赋值且需回传父 shell，故直接调用（非命令替换）；
+# 命令替换属于子 shell，变量赋值无法穿透（G1/G2 用 capture_rc 直接调用同因）。
+# stdout 落文件用于断言日志文案。
+RC=0
+sync_by_file_batches "/src" "openlist:crypt" "t_g11" > "$G11_OUT_FILE" 2>&1 || RC=$?
+G11_SPLIT="$AUTO_SPLIT_INFO"
+chk "G11 首批 405 洪泛 → return 1" "$RC" "1"
+chk "G11 仅第 1 批尝试传输（剩余批次不跑）" "$(copy_count)" "1"
+chk "G11 跳过本批巩固（先于 _batch_consolidate 中止）" "$CONSOLIDATE_CALLS" "0"
+chk "G11 置 SYNC_FAILED=1" "${SYNC_FAILED}" "1"
+chk "G11 中止原因标为「405 拒写」（非后端写入全拒）" \
+  "$(grep -c '405 拒写，中止剩余' "$G11_OUT_FILE" || true)" "1"
+chk "G11 统计块含「405 拒写中止」" \
+  "$(echo "$G11_SPLIT" | grep -c '405 拒写中止' || true)" "1"
+chk "G11 不误报「后端写入全拒」" \
+  "$(echo "$G11_SPLIT" | grep -c '后端写入全拒' || true)" "0"
+rm -f "$G11_OUT_FILE"
+# 反例: 未达阈值 → 照常跑完三批，不中止
+prepare_case
+FLOOD_RC=1
+capture_rc "openlist:crypt" "t_g11b"
+chk "G11b 未达阈值 → 三批照常传输" "$(copy_count)" "3"
+chk "G11b 未达阈值 → 巩固三次" "$CONSOLIDATE_CALLS" "3"
+unset FLOOD_RC
 
 clean_batch_dirs
 echo ""

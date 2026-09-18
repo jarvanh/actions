@@ -103,6 +103,31 @@ sync_with_logging "src" "$DEST" "task2" >/dev/null 2>&1
   && ok "5b rc=88 路径同样反向锁死（仅根键=0 不置位）" \
   || bad "5b: 误置位"
 
+# --- 6. F22 写探针结论失效（_backend_write_probe_invalidate）---
+# 探针"可写"结论只对 t=0 有效；不重探则一条中途坏窗口沿用到轮末。
+# 失效必须打在**同步对路径键**上（与 F21 同口径），否则清了个不存在的键、
+# 下一次 _backend_write_probe 照样命中缓存返回"可写" = 等于没探。
+declare -A _BACKEND_WRITE_PROBE_CACHE=(["$DEST"]=1 ["$ROOT"]=1)
+_backend_write_probe_invalidate "$DEST"
+[ -z "${_BACKEND_WRITE_PROBE_CACHE[$DEST]:-}" ] \
+  && ok "6a 失效清除同步对路径键" \
+  || bad "6a: 键未清 = ${_BACKEND_WRITE_PROBE_CACHE[$DEST]:-<空>}"
+[ "${_BACKEND_WRITE_PROBE_CACHE[$ROOT]:-}" = "1" ] \
+  && ok "6b 失效不动后端根键（键口径必须是同步对路径）" \
+  || bad "6b: 根键被误清"
+# 空参安全: 无参数不得报错、不得清任何键（set -u 下 prev 为空的常见形态）
+declare -A _BACKEND_WRITE_PROBE_CACHE=(["$DEST"]=0)
+_backend_write_probe_invalidate "" && \
+  [ "${_BACKEND_WRITE_PROBE_CACHE[$DEST]:-}" = "0" ] \
+  && ok "6c 空参不报错且不清键" \
+  || bad "6c: 空参处理异常"
+# 清后重探: 结构上确实会走真探（缓存 miss → 不复用旧结论）
+declare -A _BACKEND_WRITE_PROBE_CACHE=(["$DEST"]=0)
+_backend_write_probe_invalidate "$DEST"
+[ -z "${_BACKEND_WRITE_PROBE_CACHE[$DEST]:-}" ] \
+  && ok "6d 清后缓存 miss（下次调用真探，不再复用\"不可用\"）" \
+  || bad "6d: 缓存未清"
+
 echo ""
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
