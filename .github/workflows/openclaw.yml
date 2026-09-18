@@ -154,9 +154,11 @@ jobs:
           ls -l ~/.openclaw/state 2>/dev/null || echo "⚠️ state/ 不存在"
 
           # ZCode 数据恢复：~/.zcode 下的个人数据在 runner 重置后会丢，从 Dropbox 主包还原。
-          # 覆盖 cli/ 与 v2/ 两棵子树；server/ 不在包内（桌面客户端每轮自动重新部署），不触碰。
           # v2/tasks-index.sqlite 是侧栏会话列表（标题/置顶/归档/未读/删除），不是可再生索引 ——
           # 它只由在线 sessions-index 订阅播种，本地 db 重建不出来，丢了侧栏就是空的。
+          # server/ 也入包：它是桌面客户端连接时下载铺开的运行时（约 326MB，含 116MB node），
+          # 有包在手就能省掉每轮重新下载。但只在本地**不存在**时铺开 —— 本地已有说明客户端
+          # 已部署好（比包内新），覆盖只会把新版本降级成旧版本。
           TMP_ZCODE_TAR="/tmp/zcode-restore.tar.gz"
           ZCODE_RESTORE_DIR="/tmp/zcode-restore"
           rm -rf "$ZCODE_RESTORE_DIR" 2>/dev/null || true
@@ -188,13 +190,26 @@ jobs:
               else
                 echo "ℹ️ Archive has no .zcode/v2 identity (old package), server will generate a fresh one."
               fi
+              # server/：仅当本地没有时铺开（省一次完整下载）。本地已有则保留 —— 那是客户端
+              # 本轮刚部署的版本，可能比包内新，覆盖等于降级。
+              if [ -d "$ZCODE_RESTORE_DIR/.zcode/server" ]; then
+                if [ -d ~/.zcode/server ]; then
+                  echo "ℹ️ ~/.zcode/server 已存在（客户端已部署），保留本地版本、不用包内副本覆盖"
+                else
+                  mkdir -p ~/.zcode
+                  cp -a "$ZCODE_RESTORE_DIR/.zcode/server" ~/.zcode/server
+                  echo "✅ Restored ~/.zcode/server from archive (skips this run's re-download)"
+                fi
+              else
+                echo "ℹ️ Archive has no .zcode/server (old package), client will deploy it fresh."
+              fi
             else
               echo "⚠️ zcode.tar.gz validation failed, skipping ZCode restore."
             fi
             rm -f "$TMP_ZCODE_TAR" 2>/dev/null || true
             rm -rf "$ZCODE_RESTORE_DIR" 2>/dev/null || true
             echo "=== restored ~/.zcode ==="
-            du -sh ~/.zcode/cli ~/.zcode/v2 2>/dev/null || true
+            du -sh ~/.zcode/cli ~/.zcode/v2 ~/.zcode/server 2>/dev/null || true
             ls ~/.zcode/cli/db/db.sqlite ~/.zcode/v2/tasks-index.sqlite 2>/dev/null \
               || echo "⚠️ 还原后未见 db.sqlite/tasks-index.sqlite"
             if command -v sqlite3 >/dev/null 2>&1; then
@@ -2010,7 +2025,7 @@ jobs:
 
           rm -f "$OUTPUT_TAR"
 
-          if [ ! -d "$SRC_ROOT/cli" ] && [ ! -d "$SRC_ROOT/v2" ]; then
+          if [ ! -d "$SRC_ROOT/cli" ] && [ ! -d "$SRC_ROOT/v2" ] && [ ! -d "$SRC_ROOT/server" ]; then
             echo "zcode_dir_missing"
             exit 3
           fi
@@ -2018,33 +2033,45 @@ jobs:
           STAGE_DIR=$(mktemp -d /tmp/zcode-archive-stage.XXXXXX)
           mkdir -p "$STAGE_DIR/.zcode"
 
-          # 快照 cli/ 与 v2/ 两棵子树（server/ 是每轮重新部署的运行时，不入包）。
-          # 只排除真正可再生的两类：plugins/cache（13MB 插件包缓存，可重新下载）与
-          # cli/log（运行日志）。其余一律入包 —— 此前把 rollout/exec 也当「调试转储」
-          # 排除，等于把会话相关内容切掉，这是 2026-09-18 排查「备份不齐全、会话仍丢」
-          # 的根因之一。宁可包大，不可少数据。
+          # 快照 cli/ + v2/ + server/ 三棵子树，只排除真正的垃圾：
+          #   - cli/log/**：运行日志（zcode-*.jsonl，纯遥测，可再生）
+          #   - server/asset-cache/staging：下载暂存目录，恒空
+          #   - *.lock / *.pid：进程锁与 pid 文件，跨机还原无意义
+          # 不排除 cli/plugins/cache —— 名字像缓存，实为插件的**运行位置**（skill/命令/脚本
+          # 都从那里加载），ZCode 自己的存储分类表也把 cli/plugins 归 runtimes（不可清理）。
+          # 同理不再排除 rollout/exec：早先当「调试转储」排除等于切掉会话内容
+          # （2026-09-18 排查「备份不齐全、会话仍丢」的根因之一）。宁可包大，不可少数据。
           # rsync 返回 24 表示活动会话文件复制中消失，属预期，仍校验最终包。
+          # 用 helper 收口：24 视为成功（只记一行），其余非零才是真失败。
+          snapshot_tree() {
+            local src="$1" dst="$2"
+            shift 2
+            [ -d "$src" ] || return 0
+            local rc=0
+            rsync -a --delete "$@" "$src/" "$dst/" || rc=$?
+            if [ "$rc" -eq 24 ]; then
+              echo "zcode_snapshot_partial_live_changes src=$src"
+              return 0
+            fi
+            return "$rc"
+          }
+
           set +e
-          if [ -d "$SRC_ROOT/cli" ]; then
-            rsync -a --delete \
-              --exclude 'log/**' \
-              --exclude 'plugins/cache/**' \
-              --exclude '*.lock' \
-              --exclude '*.pid' \
-              "$SRC_ROOT/cli/" "$STAGE_DIR/.zcode/cli/"
-            rsync_rc=$?
-          else
-            rsync_rc=0
-          fi
+          snapshot_tree "$SRC_ROOT/cli" "$STAGE_DIR/.zcode/cli/" \
+            --exclude 'log/**' \
+            --exclude '*.lock' \
+            --exclude '*.pid'
+          cli_rc=$?
+          snapshot_tree "$SRC_ROOT/server" "$STAGE_DIR/.zcode/server/" \
+            --exclude 'asset-cache/staging' \
+            --exclude '*.lock' \
+            --exclude '*.pid'
+          server_rc=$?
           set -e
 
-          if [ "$rsync_rc" -ne 0 ] && [ "$rsync_rc" -ne 24 ]; then
-            echo "zcode_snapshot_failed rc=$rsync_rc" >&2
-            exit "$rsync_rc"
-          fi
-
-          if [ "$rsync_rc" -eq 24 ]; then
-            echo "zcode_snapshot_partial_live_changes"
+          if [ "$cli_rc" -ne 0 ] || [ "$server_rc" -ne 0 ]; then
+            echo "zcode_snapshot_failed cli=$cli_rc server=$server_rc" >&2
+            exit 1
           fi
 
           # v2/ 整棵入包：tasks-index.sqlite 是侧栏会话列表（标题/置顶/归档/未读/删除），
@@ -2079,16 +2106,17 @@ jobs:
                 rm -f "$staged.tmp" 2>/dev/null || true
                 echo "sqlite_snapshot_fallback $rel (kept rsync copy)"
               fi
-            done < <(find "$SRC_ROOT/cli" "$SRC_ROOT/v2" -name '*.sqlite' -type f 2>/dev/null)
+            done < <(find "$SRC_ROOT/cli" "$SRC_ROOT/v2" "$SRC_ROOT/server" -name '*.sqlite' -type f 2>/dev/null)
           else
             echo "sqlite_snapshot_skipped (sqlite3 not found; using rsync copies)"
           fi
 
-          # 完整性校验（取代体积基准）：两项都是「没有就说明状态不全」的判据 ——
-          # db.sqlite 是会话正文与消息树，tasks-index.sqlite 是侧栏列表。
+          # 完整性校验（取代体积基准）：三项都是「没有就说明状态不全」的判据 ——
+          # db.sqlite 是会话正文与消息树，tasks-index.sqlite 是侧栏列表，
+          # server/zcode-server.cjs 是服务端 bundle（缺它就得整包重下）。
           # 缺任一项即以退出码 4 中止、不覆盖云端。
           missing=""
-          for f in cli/db/db.sqlite v2/tasks-index.sqlite; do
+          for f in cli/db/db.sqlite v2/tasks-index.sqlite server/zcode-server.cjs; do
             if [ ! -s "$STAGE_DIR/.zcode/$f" ]; then
               missing="$missing $f"
             fi
@@ -2468,7 +2496,7 @@ jobs:
             fi
 
             # ZCode 个人数据归档：~/.zcode 的 cli/ + v2/ → dropbox:self-hosted/zcode.tar.gz（带完整性校验）
-            if [ -d "$HOME/.zcode/cli" ] || [ -d "$HOME/.zcode/v2" ]; then
+            if [ -d "$HOME/.zcode/cli" ] || [ -d "$HOME/.zcode/v2" ] || [ -d "$HOME/.zcode/server" ]; then
               zcode_archive_output=""
               if zcode_archive_output=$(flock -E 200 -n "$LOCK_FILE" bash /tmp/create-zcode-archive.sh "$TMP_ZCODE_TAR" 2>&1); then
                 echo "[$(date '+%F %T')] zcode archive ok, uploading... ${zcode_archive_output}"
@@ -2501,7 +2529,7 @@ jobs:
                 fi
               fi
             else
-              echo "[$(date '+%F %T')] ℹ️ ~/.zcode/{cli,v2} 均不存在，跳过 zcode 归档"
+              echo "[$(date '+%F %T')] ℹ️ ~/.zcode/{cli,v2,server} 均不存在，跳过 zcode 归档"
             fi
 
             sleep 1200
@@ -2828,7 +2856,7 @@ jobs:
           fi
 
           echo "4b. Final archive of ZCode personal data (~/.zcode cli/ + v2/)..."
-          if [ -d "$HOME/.zcode/cli" ] || [ -d "$HOME/.zcode/v2" ]; then
+          if [ -d "$HOME/.zcode/cli" ] || [ -d "$HOME/.zcode/v2" ] || [ -d "$HOME/.zcode/server" ]; then
             TMP_ZCODE_FINAL_TAR="/tmp/zcode-final.tar.gz"
             if zcode_final_output=$(bash /tmp/create-zcode-archive.sh "$TMP_ZCODE_FINAL_TAR" 2>&1); then
               zcode_final_new_size=$(stat -c%s "$TMP_ZCODE_FINAL_TAR" 2>/dev/null || echo 0)
@@ -2856,7 +2884,7 @@ jobs:
               send_archive_alert "zcode.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${zcode_final_output:-归档脚本无输出}"
             fi
           else
-            echo "ℹ️ ~/.zcode/{cli,v2} 均不存在（本机从未部署 ZCode），跳过 ZCode 最终归档"
+            echo "ℹ️ ~/.zcode/{cli,v2,server} 均不存在（本机从未部署 ZCode），跳过 ZCode 最终归档"
             record_archive_result "zcode.tar.gz" skip 0 "本机未部署 ZCode"
           fi
 
