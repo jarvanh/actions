@@ -831,6 +831,10 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # GitHub API 认证（配额 5000/h，而非匿名 60/h/出口 IP）。runner 出口 IP 是共享的，
+          # 匿名配额会被同 IP 的其他 job 吃光 —— 本步骤查 release 版本即因此偶发失败。
+          # 与 emby.yml / proxy-speedtest-gitee.yml 同口径。缺失时退回匿名 + 重定向兜底。
+          WB_GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -uo pipefail
 
@@ -988,17 +992,29 @@ jobs:
           ls -la "$WB_RUN_DIR" 2>/dev/null | head -20 || true
 
           # ---------- 1. 检查更新：比对 GitHub Releases 的 latest 版本号与本地记录 ----------
-          # GitHub API 匿名限流（60 次/小时/出口 IP）对每轮一次足够；失败时按"保持现状"处理，
-          # 不因查版本失败而少启一个服务。
+          # 查版本失败按"保持现状"处理，不因查版本失败而少启一个服务。
+          # 走两条路，任一成功即可（此前只有 ①，runner 共享出口 IP 撞上匿名配额就整轮降级）：
+          #   ① GitHub API（带 token 认证，配额 5000/h 而非匿名 60/h）；
+          #   ② releases/latest 的 302 重定向取 tag（**不消耗 API 配额**，纯网页跳转）。
+          # ② 是兜底：即便 token 缺失或 API 抖动，仍能拿到版本号，不必把失败暴露给读者。
           echo "1. Checking workbuddy-gateway release..."
           WB_REMOTE_VER=""
           _release_json="$(curl -fsSL --max-time 20 \
             -H 'Accept: application/vnd.github+json' \
+            ${WB_GH_TOKEN:+-H "Authorization: Bearer ${WB_GH_TOKEN}"} \
             https://api.github.com/repos/CangShui/workbuddy-gateway/releases/latest 2>/dev/null || true)"
           if [ -n "$_release_json" ]; then
             WB_REMOTE_VER="$(printf '%s' "$_release_json" \
               | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n 1 \
               | sed 's/.*"\([^"]*\)"$/\1/' || true)"
+          fi
+          if [ -z "$WB_REMOTE_VER" ]; then
+            echo "ℹ️ GitHub API 未取到版本（限流或不可达），改用 releases/latest 重定向兜底..."
+            _eff_url="$(curl -sL -o /dev/null -w '%{url_effective}' --max-time 20 \
+              https://github.com/CangShui/workbuddy-gateway/releases/latest 2>/dev/null || true)"
+            WB_REMOTE_VER="$(printf '%s' "$_eff_url" \
+              | sed -n 's#.*/releases/tag/##p' | head -n 1 || true)"
+            [ -n "$WB_REMOTE_VER" ] && echo "✅ 重定向兜底取到版本：${WB_REMOTE_VER}"
           fi
           WB_LOCAL_VER="$(head -n 1 "$WB_VER_FILE" 2>/dev/null || true)"
 
@@ -1133,16 +1149,19 @@ jobs:
           #   quotaRemaining 按上游 formatQuota（两位小数、去尾零）
           WB_STATUS_JSON="$WB_RUN_DIR/workbuddy-status.json"
 
-          # 免费模型名单取自上游「模型目录」接口（只读、不耗额度），不靠探测。
-          # 为什么不能用 modelStates / freeModels：前者只记「已实测过」的模型
-          # （键在 modelStateLocked 里按需创建、默认 unknown），后者只是个计数 ——
-          # 两者都拿不到完整免费目录。
-          # 接口：GET {Base}/v2/enterprises/personal/models
+          # 免费模型名单：三路并集（见下方 siteKnownFree 说明），目录接口只是其中一路。
+          # 目录接口：GET {Base}/v2/enterprises/personal/models
           #   国内站 Base=https://copilot.tencent.com，国际站 Base=https://www.workbuddy.ai
           #   站点由凭据文件的 edition 决定（cn/缺失 → 国内，intl → 国际），必须逐账号分别请求。
-          # 免费判据照上游 siteKnownFree：credits 能解析出倍率，且生效倍率为 0 且促销未过期
-          #   （multiplier == 0 && !promoExpired）。生效倍率 = credits（baseMultiplier），
-          #   命中**有效**促销再乘 factor（factor == 0 即 promoFree）。
+          # 免费判据照上游 siteKnownFree —— 它是**三路并集**，缺一路就会漏报：
+          #   ① 实测 verdict=free（wb-models-cache.json 的 probes）
+          #   ② 运行时 modelStates[model].costClass == free（快照里，探针观测落库）
+          #   ③ 目录接口明确 0.00x（credits 解析出倍率、生效倍率 0、促销未过期）
+          # 此前只实现了 ③：实测免费但**不在目录里**的模型就永远不显示
+          # （deepseek-v4.1-flash 即此形态 —— 被探针标 free，却不在
+          #  /v2/enterprises/personal/models 返回的 18 个模型里）。
+          # ②① 都取自 serve 写出的快照/缓存，无需额外请求，故直接补进名录。
+          # 生效倍率 = credits（baseMultiplier），命中**有效**促销再乘 factor（factor == 0 即 promoFree）。
           #   解析不出或倍率 > 0 → 不算免费（别把未知当免费）。
           # 这条接口只读：不产生真实 chat 请求、不消耗额度、不改变账号状态
           #   （与已废弃的 /admin/probe 相反 —— 它逐账号×逐模型串行发真实请求，
@@ -1233,6 +1252,43 @@ jobs:
                 | "\($fn)\t\($_id)"
               ' 2>/dev/null >> "$WB_FREEMAP" || true
             done <<< "$WB_CREDS"
+
+            # 补齐 siteKnownFree 的另外两路（② 运行时实测、① 探针 verdict）。
+            # 这两路都取自 serve 自己写出的文件，不需要额外请求、不消耗额度：
+            #   ② modelStates[model].costClass == free —— 逐账号的实测观测；
+            #   ① wb-models-cache.json 的 probes[site|model].verdict == free —— 逐站点的实测结论，
+            #      站点级，需按账号 edition 展开到该站点的每个账号（上游 siteKnownFree 正是按站点判）。
+            # 为什么必须补：目录接口只返回**当前在售**的模型，实测免费但已下架/未在列的模型
+            # （deepseek-v4.1-flash）在目录里根本取不到，只走 ③ 就会漏报（本轮实测少报一半）。
+            WB_CACHE="$WB_RUN_DIR/wb-models-cache.json"
+            # 缓存缺失时 jq --slurpfile 会报错（且引用未定义的 $cache 会直接编译失败），
+            # 故缺失就用一个临时空对象顶上：只走 ②（modelStates 在快照里，仍覆盖实测免费），
+            # 探针那一路自然为空，而不是整段不产出。
+            WB_CACHE_SRC="$WB_CACHE"
+            if [ ! -r "$WB_CACHE_SRC" ]; then
+              WB_CACHE_SRC="$(mktemp)"
+              printf '{}' > "$WB_CACHE_SRC"
+            fi
+            if [ -r "$WB_STATUS_JSON" ]; then
+              jq -r --slurpfile cache "$WB_CACHE_SRC" '
+                ((($cache[0].probes) // {}) | to_entries
+                  | map(select(.value.verdict == "free"))
+                  | map({ key: (.key | split("|") | .[0]), value: (.key | split("|") | .[1]) })
+                  | group_by(.key)
+                  | map({ key: .[0].key, value: [.[].value] })
+                  | from_entries) as $probesBySite
+                | .accounts[]?
+                | (.path | split("/") | last) as $fn
+                | (.edition // "cn") as $site
+                | [ (.modelStates // {}) | to_entries[] | select(.value.costClass == "free") | .key ]
+                  + ($probesBySite[$site] // [])
+                | unique[]
+                | "\($fn)\t\(.)"
+              ' "$WB_STATUS_JSON" 2>/dev/null >> "$WB_FREEMAP" || true
+            fi
+            # 三路可能命中同一模型（如 hy3 同时被目录与实测判定），按 (账号, 模型) 去重，
+            # 否则渲染层会输出「hy3 · hy3」。
+            sort -u -o "$WB_FREEMAP" "$WB_FREEMAP" 2>/dev/null || true
           fi
           # 名录完整可信 ⇔ 每个凭据都成功取到目录（含「成功但 0 个免费」的账号）
           WB_FREE_READY=0
