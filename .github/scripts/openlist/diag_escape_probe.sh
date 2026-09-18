@@ -38,6 +38,10 @@
 #   E4 · 还原路径可行性（顺带）: 在 E1 的可写层里模拟还原动作
 #        （rclone move 到 dest_path 下的原路径），确认"跳出后还能不能归位"。
 #        这直接决定 restore_info.jq 要改成什么形态。
+#        ⚠️ 可见性复核**必须带等待**（E4_WAIT，默认 15s）：§12.14.4 实测列表
+#           首次可见要 ~10s，立刻 lsf 会把"还没刷新"误读成"没到位"⇒ 假成功误报。
+#        判读区分三态: 目标可见(成功/真归位) · 源已消失但目标仍不可见(疑静默丢文件，
+#           仍需重启真值复核才能定性) · 源仍在(未真正移动)。
 #
 # ⚠️ 安全约定（同 diag_l2_probe.sh）:
 #   · 只在**祖先层的自建目录**（前缀 `ol2e_<ts>_`，可辨识）里操作，
@@ -51,6 +55,7 @@
 #   DIAG_ESC_UP       E1 祖先阶梯最大上跳层数（默认 3，1~4 合理）
 #   DIAG_ESC_BYTES    E3 载荷字节数（默认 65536）
 #   DIAG_ESC_SKIP_E4  1=跳过 E4
+#   DIAG_ESC_E4_WAIT  E4 归位后的等待秒数（默认 15；§12.14.4 实测列表可见性 ~10s）
 #   DIAG_REPORT       报告路径（默认 /tmp/ol_diag/escape_report.txt）
 #
 # 退出码恒为 0（诊断工具；非 0 会掩盖报告——同 diag_backend.sh）
@@ -65,6 +70,9 @@ REPORT="${DIAG_REPORT:-/tmp/ol_diag/escape_report.txt}"
 PROBE_TIMEOUT="${DIAG_PROBE_TIMEOUT:-45s}"
 MKDIR_TIMEOUT="${DIAG_MKDIR_TIMEOUT:-120s}"
 BYTES="${DIAG_ESC_BYTES:-65536}"
+# E4 归位后的等待秒数：§12.14.4 实测「列表可见性 首次非空=10s」，取 15s 留余量。
+# 不设这个等待，就会把"列表还没刷新"误读成"没到位"，把成功判成假成功。
+E4_WAIT="${DIAG_ESC_E4_WAIT:-15}"
 
 mkdir -p "$(dirname "$REPORT")" /tmp/ol_diag
 : > "$REPORT"
@@ -280,13 +288,34 @@ else
   _409=0; is_409 "$_out" && _409=1
   say "   move 跳出层 → dest_path 下: rc=${_rc} · 409特征=${_409}"
   [ "$_rc" -ne 0 ] && say "$_out" | tail -3 | sed 's/^/        ▸ /' | tee -a "$REPORT"
-  _at_dst=0
+  # ⚠️ 可见性复核**必须带等待**：§12.14.4 实测「列表可见性: 首次非空=10s」——
+  #   move 后立刻 lsf 会把"还没刷新"读成"没到位"，从而把成功误判成假成功。
+  #   故这里先立即读一次，等 WAIT 秒再读一次，只要有一次可见即算到位。
+  _at_dst=0; _at_dst_now=0
   rclone lsf "$TARGET/${DEST_REL}" --files-only --retries 1 --timeout "$PROBE_TIMEOUT" 2>/dev/null \
-    | grep -qxF "ol2e_moved_${TS}.bin" && _at_dst=1
-  say "   归位后目标位可见=${_at_dst}"
+    | grep -qxF "ol2e_moved_${TS}.bin" && { _at_dst_now=1; _at_dst=1; }
+  say "   归位后目标位可见: 立即=${_at_dst_now}"
+  if [ "$_at_dst_now" -eq 0 ]; then
+    say "   等待 ${E4_WAIT}s 后复核（避免把「列表未刷新」误读成「没到位」）..."
+    sleep "$E4_WAIT"
+    rclone lsf "$TARGET/${DEST_REL}" --files-only --retries 1 --timeout "$PROBE_TIMEOUT" 2>/dev/null \
+      | grep -qxF "ol2e_moved_${TS}.bin" && _at_dst=1
+    say "   归位后目标位可见: 等待后=${_at_dst}"
+  fi
+  # 跳出层是否还留着源文件（真 move 会移走；假成功往往两边都不在，或仍在原地）
+  _src_left=0
+  rclone lsf "$E3_DIR" --files-only --retries 1 --timeout "$PROBE_TIMEOUT" 2>/dev/null \
+    | grep -qxF "ol2e_move_${TS}.bin" && _src_left=1
+  say "   跳出层源文件仍在=${_src_left}"
   if [ "$_rc" -eq 0 ] && [ "$_at_dst" -eq 1 ]; then
-    say "🔒 **跳出后仍可一步归位**（跨层 move 成功）"
+    say "🔒 **跳出后仍可一步归位**（跨层 move 成功，且目标位已复核可见）"
     say "   ⇒ restore_info.jq 只需把「落点」如实写成跳出后的路径即可"
+  elif [ "$_rc" -eq 0 ] && [ "$_src_left" -eq 0 ]; then
+    say "⚠️ **可疑：move 报成功、源已消失、但目标位等 ${E4_WAIT}s 后仍不可见**"
+    say "   ⇒ 符合「静默丢文件」特征（源没了、目标没有），但**仍需重启真值复核**才能定性："
+    say "      列表缓存可能只是更慢。在坐实前**不要**据此改 restore_info.jq。"
+  elif [ "$_rc" -eq 0 ] && [ "$_src_left" -eq 1 ]; then
+    say "⚠️ **move 报成功但源文件还在** ⇒ 未真正移动（幂等假成功形态）"
   else
     say "⚠️ **跨层归位失败**（rc=${_rc}）"
     say "   ⇒ 若 dest_path 下确实写不进（正是故障层），归位失败是**预期**行为:"
