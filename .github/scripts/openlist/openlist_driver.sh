@@ -398,6 +398,22 @@ _check_openlist_backend_connectivity() {
 # 用法: _backend_write_probe <dest_path> [log_file] → 0=可写, 1=该后端本轮不可用
 declare -A _BACKEND_WRITE_PROBE_CACHE=()
 
+# 清掉某目标路径的写探针结论，强制下一次 _backend_write_probe 真探（F22）。
+# 为什么需要（F4 的固有缺口）: 探针现状是「整轮只跑一次」，结论被缓存后整轮复用；
+#   但"探针 ✅ 与真实写入 405 并存"的长期悖论（diagnose 已定案）恰恰说明**探针的
+#   可写结论只对 t=0 那一瞬有效** —— openlist-diag 首跑证明同一路径单文件顺序写
+#   ~10 次全过（含 128B 长名与覆盖写），而生产在同一路径上 1034 文件/48 分钟全 405。
+#   ⇒ 失效是**随时间/量累积**发生的，开跑前跑一次天然测不到。批次循环里按时间
+#   周期性清缓存再探，才能把「跑着跑着后端才变坏」这种情况重新探测出来。
+# 键口径与 F21 修复一致: 必须按 $dest_path 清，不能按挂载根清（否则清了个不存在
+#   的键，探针照样命中缓存返回可写 = 等于没探）。
+# 用法: _backend_write_probe_invalidate <dest_path>
+_backend_write_probe_invalidate() {
+  local dest="${1:-}"
+  [ -n "$dest" ] || return 0
+  unset "_BACKEND_WRITE_PROBE_CACHE[$dest]"
+}
+
 # 挂载根: openlist:wopan175/1/1024j → openlist:wopan175
 _backend_root_of() {
   local p="$1"

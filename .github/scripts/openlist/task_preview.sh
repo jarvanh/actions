@@ -27,15 +27,25 @@
 # 输出: lsjson JSON 数组（空目录为 []）; 失败/非数组输出空串
 # 注意: 只传纯 filter 参数（--exclude/--include），调用方须先用
 # _extract_filter_args 剥离 --delete-* 等 sync 特有参数
+#
+# F17 预览短超时: 预览只做**粗粒度待同步估算**，不需要 sync pass 那种 900s 的
+# 精确列举预算。历史实测单轮预览 listing 失败拖满 OPENLIST_RCLONE_LISTING_TIMEOUT
+# = 900s（预览总耗 30m41s，占预算 9.6%），其中失败对在 900s 超时上白等完全
+# 无产出（预览本就允许"列不出来 → 按未知/全量估算 + 明示 ⚠️"）。故预览路径
+# 用 OPENLIST_PREVIEW_LISTING_TIMEOUT（默认 240s，短于 sync 的 900s）：
+# 单次失败最多等 240s，且 dst 侧重试循环在"超时型失败"上只跑一次（见
+# add_preview_pair 的 _dst_t0 判据）⇒ 最坏 ~240s + 一次重试而不是 ~1800s。
+# 注意: 必须**带单位**（rclone --timeout 要求），沿用 sync 侧的 "900s" 惯例。
 _get_listing_json() {
   local remote_path="$1"
   shift
   local -a filter_args=("$@")
   local listing
+  local _tmo="${OPENLIST_PREVIEW_LISTING_TIMEOUT:-240s}"
   if [ ${#filter_args[@]} -gt 0 ]; then
-    listing=$(timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900s}" rclone lsjson "$remote_path" --recursive --files-only "${filter_args[@]}" 2>/dev/null || true)
+    listing=$(timeout "$_tmo" rclone lsjson "$remote_path" --recursive --files-only "${filter_args[@]}" 2>/dev/null || true)
   else
-    listing=$(timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900s}" rclone lsjson "$remote_path" --recursive --files-only 2>/dev/null || true)
+    listing=$(timeout "$_tmo" rclone lsjson "$remote_path" --recursive --files-only 2>/dev/null || true)
   fi
   if [ -n "$listing" ] && printf '%s' "$listing" | jq -e 'type == "array"' >/dev/null 2>&1; then
     printf '%s' "$listing"
@@ -168,15 +178,22 @@ add_preview_pair() {
   # 目标端清单（与源端同一 exclude 口径，避免被排除路径/历史残留混入比对）
   # 失败重试: OpenList 刚启动时驱动懒加载、网盘限流等瞬时错误常见（线上实测
   # baidupan/wopan175 目标端已有大半文件，却因列举失败被按空目标端全量估算，
-  # 合计虚高近 3 倍）。快速失败（<300s，是错误而非超时）间隔 20s 重试至多 3 次;
-  # 超时型失败重试大概率继续超时（最长 900s/次），不重试
+  # 合计虚高近 3 倍）。快速失败（<预览超时，是错误而非超时）间隔 20s 重试至多 3 次;
+  # 超时型失败重试大概率继续超时（每次最长 = 预览超时），不重试
   # 注意: 空目录 lsjson 返回 "[]"（非空串），不会误触发重试
+  # F17 失败快弃: 判据由"固定 300s"改为"单次尝试耗时 ≥ 预览 listing 超时"
+  #   —— 预览超时现为 240s（OPENLIST_PREVIEW_LISTING_TIMEOUT），固定 300s 会让
+  #   每次 240s 超时都落在 300s 以下 ⇒ 3 次全跑 = 720s 白等，与"超时型不重试"
+  #   的意图正好相反（旧 900s 超时下 300s 判据恰好能命中，改短超时后必须同步改，
+  #   否则 F17 只减了单次等待却把重试次数从 1 涨到 3，净效果反而更差）。
   local dst_json="" _dst_try _dst_t0
+  local _pv_tmo_s="${OPENLIST_PREVIEW_LISTING_TIMEOUT:-240s}"
+  _pv_tmo_s="${_pv_tmo_s%s}"; [[ "$_pv_tmo_s" =~ ^[0-9]+$ ]] || _pv_tmo_s=240
   for _dst_try in 1 2 3; do
     _dst_t0=$SECONDS
     dst_json=$(_get_listing_json "$dest_path" "${FILTER_ARGS[@]}")
     [ -n "$dst_json" ] && break
-    [ $((SECONDS - _dst_t0)) -ge 300 ] && break
+    [ $((SECONDS - _dst_t0)) -ge "$_pv_tmo_s" ] && break
     [ "$_dst_try" -lt 3 ] && sleep 20
   done
   local dst_fail=0

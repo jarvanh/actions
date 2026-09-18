@@ -463,6 +463,50 @@ _budget_slice_seconds() {
   echo "$secs"
 }
 
+# ===== F22 写探针周期性重探 =====
+# 见 openlist_driver.sh · _backend_write_probe_invalidate 的完整动因。
+# 批次循环每开一批前调用: 距上次真探已隔 ≥OPENLIST_WRITE_REPROBE_INTERVAL（默认
+# 1800s = 30min）就清缓存，让紧随其后的批次预检（内含 _backend_write_probe）真正
+# 重探一次；否则沿用整轮缓存 = 一条坏窗口永远沿用到轮末（F4 的固有缺口）。
+# 未设时间戳（本轮首次调用）视为"已到期"：入口预检刚探过，重探一次成本秒级、
+# 幂等无害，而漏探的代价是整轮白烧。
+# 返回: 0=应重探（调用方负责清缓存 + 打时间戳）, 1=未到间隔
+_WRITE_PROBE_LAST_TS=""
+_write_reprobe_due() {
+  local now prev interval
+  now=$(date +%s)
+  interval="${OPENLIST_WRITE_REPROBE_INTERVAL:-1800}"
+  [[ "$interval" =~ ^[0-9]+$ ]] || interval=1800
+  [ "$interval" -le 0 ] && return 1
+  prev="${_WRITE_PROBE_LAST_TS:-}"
+  [[ "$prev" =~ ^[0-9]+$ ]] || return 0
+  [ $(( now - prev )) -ge "$interval" ]
+}
+
+# ===== F10 405 快速失败 =====
+# 判据: 本批日志里 `405 Method Not Allowed` 计数 ≥ OPENLIST_405_FAST_FAIL_MIN（默认 20）
+# 即认定"该目录本轮写不进"，提前中止剩余批次，不再逐文件烧完。
+# 为什么要它（F22 的结论把 F10 从优化提升为止损）: 405 是**路径/目录级**的确定性
+#   拒写（§11.8 归因: 特定目录名本身触发），同目录内逐文件重试结果必然相同。历史
+#   实测一个坏目录把 1034 个文件逐个烧完用了 115min（run 34728107625）；而兜底路径
+#   （短哈希折叠 + 延迟复核）已能稳定救回这类目录 ⇒ 提前中止**只损失重试次数、
+#   不损失数据**，省下的是整轮预算。与 F5（后端写入全拒）的区别: F5 要**本批触碰
+#   文件 100% 未落盘**（后端级），F10 只看 405 计数（目录级），二者互补不重叠。
+# 计数口径: 只数 `Method Not Allowed` / `405`，不数 409/423（那两类是重试可自愈的
+#   竞争冲突，已在 _sync_retry_409/423 覆盖，纳入会把自愈形态误判成死目录）。
+# 用法: _batch_405_flood <batch_log> → 0=判定为 405 洪泛
+_batch_405_flood() {
+  local batch_log="$1"
+  [ -f "$batch_log" ] || return 1
+  local min="${OPENLIST_405_FAST_FAIL_MIN:-20}"
+  [[ "$min" =~ ^[0-9]+$ ]] || min=20
+  [ "$min" -le 0 ] && return 1
+  local n=0
+  n=$(grep -acE 'Method Not Allowed|405 Method Not Allowed' "$batch_log" 2>/dev/null || true)
+  [[ "$n" =~ ^[0-9]+$ ]] || n=0
+  [ "$n" -ge "$min" ]
+}
+
 # 顺序执行清单中的全部任务（支持同步对轮转，防饿死，见上方说明）
 run_all_tasks() {
   local n=${#SYNC_TASK_REGISTRY[@]}
@@ -2039,6 +2083,14 @@ sync_by_file_batches() {
         # 仅传前刷一次撑不过 5 分钟 token 窗口——批次动辄数小时，中途必须
         # 保鲜（run 32749862280: 3 小时批次 139/139 假成功实锤）
         _refresh_ol_drivers "$batch_log" || true
+        # F22 写探针周期性重探: 距上次真探已隔 ≥ 间隔就清缓存，让紧随其后的
+        # 预检（内含 _backend_write_probe）真正重探一次 —— 否则整轮沿用 t=0 的
+        # 「可写」结论，一条中途出现的坏窗口永远沿用不到头（见 _write_reprobe_due）。
+        if _write_reprobe_due; then
+          _backend_write_probe_invalidate "$dest_path"
+          _WRITE_PROBE_LAST_TS=$(date +%s)
+          echo "♻️ 批次 $((i+1)): 写探针结论已过期，清缓存后重探（间隔 ${OPENLIST_WRITE_REPROBE_INTERVAL:-1800}s）"
+        fi
         # 批次级三层预检熔断: sync_with_logging 的入口预检覆盖不到本循环内
         # 的 rclone copy --files-from，登录失效后端会把第一个大批次（≤50GB）
         # 全额烧完才由 _batch_consolidate 行为启发式止损。此处与
@@ -2136,8 +2188,28 @@ sync_by_file_batches() {
       # 批次级巩固: 重启容器取后端真值 → 校验本批落盘 → 串行重试缺失
       # （把巩固单元从"整个任务"缩小到"单个批次"，run 被取消也锁住进度；
       #   详见 _batch_consolidate 函数头注释）
-      BATCH_BACKEND_DEAD=0
-      _batch_consolidate "$i" "$batch_log" "${rc:-}" || true
+      # F10 405 快速失败: 本批 405 计数达阈值 ⇒ 该目录本轮确定性写不进，先于
+      # 巩固中止剩余批次。放在 _batch_consolidate **之前**是有意的: 巩固自己还要
+      # 重启容器 + 全量 lsf + 串行重试 + 修复管线（动辄数十分钟），对一个已判定
+      # 写不进的目录跑完整套纯属白烧（本批顽固缺失仍由 F5 的下轮/修复管线兜底）。
+      # 复用 F5 的中止出口: 同一个 BATCH_BACKEND_DEAD 标志，语义完全一致
+      # （中止剩余批次 + 标失败 + 让路轮转 + 经 F6 跨轮跳过），只是判据更早、更便宜。
+      # 阈值默认 20: 单个坏目录在 1034 文件批里会稳定累积上千条 405，而偶发几条
+      # （如个别长名文件）不该触发 —— 20 条留足噪声余量（run 34728107625 实测
+      # 坏目录 2103 个文件重复报 405，远高于阈值）。
+      if [ "$rc" -ne 124 ] && _batch_405_flood "$batch_log"; then
+        BATCH_BACKEND_DEAD=1
+        BATCH_ABORT_REASON="405 拒写"
+        _n405=$(grep -acE 'Method Not Allowed' "$batch_log" 2>/dev/null || true)
+        [[ "$_n405" =~ ^[0-9]+$ ]] || _n405=0
+        tg_add_entry_text failed_batch_list "批次 $((i+1))/${total_batches}" \
+          "405 拒写 ${_n405} 次" "目录本轮写不进，快速失败"
+        echo "🛑 批次 $((i+1)): 检测到 ${_n405} 次 405 Method Not Allowed（阈值 ${OPENLIST_405_FAST_FAIL_MIN:-20}）→ 该目录本轮确定性拒写，中止剩余批次（下轮经折叠/换目录兜底）"
+      else
+        BATCH_BACKEND_DEAD=0
+        BATCH_ABORT_REASON=""
+        _batch_consolidate "$i" "$batch_log" "${rc:-}" || true
+      fi
       # 巩固产出并入累计（CONSOLIDATE_* 由 _batch_consolidate 每次进入时归零，
       # 未跑巩固的批次全为 0，累加安全）
       consolidate_missing_total=$((consolidate_missing_total + ${CONSOLIDATE_MISSING:-0}))
@@ -2148,19 +2220,23 @@ sync_by_file_batches() {
       # 继续跑只会每批烧数十分钟产出假成功/失败，且最终 sync_with_logging
       # 的全量重传同样全拒（run 32904752243: wopan175 批次 1 全拒后修复
       # 管线又烧 45 分钟）。直接标记失败返回，轮转机制下轮给其他同步对让路。
+      # 本出口现由两个判据共用（BATCH_ABORT_REASON 区分，避免通知里把目录级
+      # 405 说成后端级全拒）: F5=后端写入全拒（_batch_consolidate 内部置位，
+      # reason 为空时取默认文案）、F10=405 拒写快速失败（本循环置位时已写 reason）。
       if [ "${BATCH_BACKEND_DEAD:-0}" = "1" ]; then
+        local _abort_reason="${BATCH_ABORT_REASON:-后端写入全拒}"
         local remaining_batches=$((total_batches - batch_idx))
         [ "$remaining_batches" -gt 0 ] && failed_batches=$((failed_batches + remaining_batches))
-        tg_add_entry_text failed_batch_list "剩余 ${remaining_batches} 批" "后端写入全拒，中止"
-        echo "🛑 后端写入全拒，中止剩余 ${remaining_batches} 个批次，本同步对标记失败（后端恢复后轮转回来重试）"
+        tg_add_entry_text failed_batch_list "剩余 ${remaining_batches} 批" "${_abort_reason}，中止"
+        echo "🛑 ${_abort_reason}，中止剩余 ${remaining_batches} 个批次，本同步对标记失败（后端恢复后轮转回来重试）"
         _stop_batch_progress_thread
         # 统一走 tg_* 助手构建（与预检熔断出口同款；手拼 HTML = 版式漂移根源）
         AUTO_SPLIT_INFO=""
         tg_add_section AUTO_SPLIT_INFO "🔀 文件批次拆分统计"
         tg_add_kv AUTO_SPLIT_INFO "总批次" "${total_batches}"
         tg_add_kv AUTO_SPLIT_INFO "文件数" "${batch_total_files}"
-        tg_add_block AUTO_SPLIT_INFO "✅ ${synced_batches} · ❌ ${failed_batches} 后端写入全拒中止"
-        progress_update_force "后端写入全拒，中止同步" "$(_render_batch_stats_line)"
+        tg_add_block AUTO_SPLIT_INFO "✅ ${synced_batches} · ❌ ${failed_batches} ${_abort_reason}中止"
+        progress_update_force "${_abort_reason}，中止同步" "$(_render_batch_stats_line)"
         # 同预检熔断出口: 失败状态经 SYNC_FAILED 全局标志传递（见上注释）
         SYNC_FAILED=1
         rm -rf "$batch_dir"

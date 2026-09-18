@@ -325,6 +325,9 @@ workflow 会把 `*.sh` `*.py` `*.jq` 拷到 `/tmp` 再 `source /tmp/load_all.sh`
 `OPENLIST_BATCH_CONSOLIDATE` · `OPENLIST_HASH_DIR_FALLBACK`（=0 关闭短哈希目录兜底）·
 `OPENLIST_DIR_PROBE_MAX_RESTART`（目录可写性预检的每轮重启预算，默认 3）·
 `OPENLIST_DIR_PROBE_TIMEOUT`（预检探针超时，默认 120s）·
+`OPENLIST_WRITE_REPROBE_INTERVAL`（F22 写探针周期性重探间隔，默认 1800s；≤0 关闭）·
+`OPENLIST_405_FAST_FAIL_MIN`（F10 单批 405 计数阈值，默认 20；=0 关闭）·
+`OPENLIST_PREVIEW_LISTING_TIMEOUT`（F17 预览 listing 短超时，默认 240s，**必须带单位**）·
 `TASK_PREVIEW_ONLY` / `TASK_REGISTER_ONLY`（由 workflow 设置）
 
 ---
@@ -390,6 +393,14 @@ API list），读得通但写不进的后端会被整轮放行——run #12616 �
    ⚠️ 缓存键是**同步对路径**（如 `openlist:wopan176Crypt/2`），读取方必须用同一个键——
    曾按"后端根"读，键对不上导致判死信号**静默丢失**、死后端只能靠 8 次轮转上限脱身
    （≈44h）；2026-09-14 修（`sync_engine.sh` 两处读取 + `tests/test_backend_dead_signal.sh` 反向锁死）。
+   ⏱ **探针结论有时效（2026-09-19 补，F22）**：探针只在同步**开跑前**跑一次，而「可写」
+   结论**只对那一刻有效** —— 实测同一路径单文件顺序写 10 次全过、生产同路径 1034 文件
+   全 405（失效随时间/量累积）。批次循环现已按时间（`OPENLIST_WRITE_REPROBE_INTERVAL`，
+   默认 30min）`_backend_write_probe_invalidate` 清缓存再探（复用预检里那次探测，不新增次数）。
+   🔪 **同时补上止损（F10）**：单批日志 `405 Method Not Allowed` 计数达
+   `OPENLIST_405_FAST_FAIL_MIN`（默认 20）即判"该目录本轮写不进"，**先于批次巩固**中止
+   剩余批次（历史一个坏目录逐文件烧 115min）。只数 405，**不数 409/423**（那两类重试可自愈）。
+   与 F5「后端写入全拒」（后端级、需触碰文件 100% 未落盘）互补：F10 目录级、更早更便宜。
 2. **目录连续不可写计数**（`file_fix.sh` `_BACKEND_DEAD`）：开跑后才暴露的后端
    （预检偶发放行）由「同一挂载根连续 N 个目录被**重启确认**判不可写」捕获；判定后该后端
    剩余目录一律直接判不可写 —— 不探测、不重启、不跑 4 种方法。只认「已重启确认」的
@@ -501,7 +512,8 @@ cd .github/scripts/openlist
 for t in tests/*.sh; do bash "$t"; done
 ```
 
-24 个测试，覆盖轮转、批次巩固、修复管线优化、修复日志区段头提取、写探针判死信号键口径、
+25 个测试，覆盖轮转、批次巩固、修复管线优化、修复日志区段头提取、写探针判死信号键口径
+与周期性重探（F22：到期/未到期/关闭/脏值）、405 快速失败（F10：阈值边界/409 不误计）、
 8005 重试前的写探针短路、
 目录可写性预检（含假成功目录）与短哈希目录兜底、预览 diff、跳过窗口的预览
 预判与跳过通知"本次未传"（含现场估算与宁缺毋滥分支）、truth-check、
