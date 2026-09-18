@@ -2609,3 +2609,37 @@ P2/P3 因 P1 无假成功样本而跳过（设计如此，非缺失）；这也�
   - **修法优先级（按证据）**：① 把"目录建不出"与"目录不可写"解耦（最高，§12.14.1）；
     ② 兜底目录跳出故障子树（§12.14.3）；③ 不要把 `OPENLIST_DRIVER_READY_WAIT` 调短；
     ④ 混合字符集 405 先诊断再定（不在本轮）。
+
+- 2026-09-18（+08）· **修法 ①「建不出目录 ≠ 目录不可写」解耦已落地**（改动 1+1c+3+4）。
+  - **改动 1（`_fix_probe_dir_writable` 三态化）**：预检结论由二态 `0/1` 改为
+    `ok` / `exists_but_readonly` / `unwritable`，经全局 `_DIR_PROBE_STATE` 透出；
+    探针失败时补一次**只读** `lsd` 复核存在性。缓存格式随之变为
+    `"<三态>|<可信度标注>"`，读取处兼容旧 `0/1`（`1→ok`；`0→exists_but_readonly`，
+    取保守侧：宁可白试一次方法，不可误判"目录不存在"而放弃原路径）。
+    开关 `OPENLIST_DIR_PROBE_DECOUPLE`（默认 1；`0` 回退旧二态）。
+  - **改动 1c（两个调用方）**：
+    · `try_fix_failed_file` Step 2 —— `exists_but_readonly` 时**放行 4 种方法**
+      （不再跳过），让方法用落盘结果定论；
+    · `_fix_switch_to_hash_dir` 的短哈希目录预检 —— 同态放行，避免把原目录的
+      误判复制到兜底目录上；
+    · **新增入口侧兜底**：Step 1「目录建不出来」的死路原先直接 return，
+      现在也放行一次短哈希兜底（`_fix_switch_to_hash_dir` + 下载 + 跑方法）。
+    · `file_fix_pipeline.sh` 的批量折叠调用点 —— `exists_but_readonly` 视为"不动它"
+      （折叠不可逆，保守处理）。
+  - **改动 3（note 语义分档）**：`已重启确认` 拆为 `-可写` / `-写入失败` / `-读取失败`；
+    **后端熔断只认 `-写入失败`**（"读取失败"可能只是重启后列表未就绪；
+    `exists_but_readonly` 更不该计入——它是"建不出目录"而非"后端不可用"）。
+  - **改动 4**：`openlist_driver.sh` 的 `_wait_driver_ready` 头注加警告——
+    不要调短该等待（run `35296822507` 实测「重启后立即写 FAIL → +10s OK」）。
+  - **顺带修掉一个真实缺陷（测试逼出来的）**：入口侧兜底在 Step 3 之前跑，
+    导致 `_try_fix_methods_round` 读不到 `src_expect_bytes` / `file_md5` ——
+    `set -u` 下**整个修复流程当场中止**（测试首次实跑即复现），`set +u` 下则方法 2/3/4
+    全空跑。修法：把下载段抽成 `_fix_download_source`，两条路径统一调用。
+  - **回归**：`test_hash_dir_fallback.sh` 62 PASS / 0 FAIL（含**新增场景15**：
+    探针写不进但目录存在 ⇒ 放行 4 种方法，本次改动的主回归）；关联套件
+    `test_bulk_hash_fold` 38 / `test_fix_pipeline_optimizations` 38 /
+    `test_mkdir_409_semantics` 19 / `test_backend_dead_round` 17 /
+    `test_batch_consolidate` 67 / `test_fix_check` 32 全绿；openlist 全域套件本机全绿
+    （仅剩 AGENTS.md 记录的 2 项环境假红）。
+  - **未做（按 §12.14.4 优先级）**：② 兜底目录跳出故障子树（§12.14.3 判决的根因，
+    现有短哈希目录仍落在同一棵坏子树里）；④ 混合字符集 405。

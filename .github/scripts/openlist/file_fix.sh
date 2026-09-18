@@ -392,10 +392,20 @@ declare -A FIX_METHOD_BLACKLIST=()
 # 本轮已修复文件: <原始路径> -> <替代路径>（同一轮内避免 auto-split 子任务与最终
 # 完整同步重复修复同一文件）
 declare -A FIXED_THIS_RUN=()
-# 本轮目录可写性结论: <目录远端路径> -> 1 可写 / 0 不可写
+# 本轮目录可写性结论: <目录远端路径> -> <三态>|<可信度标注>
 # （_fix_probe_dir_writable 的结论缓存: 同一目录整轮只探一次，避免同一目录下
 #  的多个缺失文件各自触发一次 2 分钟的容器重启）
+#
+# 三态（2026-09-18 起；旧格式只有 0/1 两态，读取处兼容）:
+#   ok                    可写（探针写入且可见）
+#   exists_but_readonly   目录**存在**但探针写不进 —— 建目录失败 ≠ 目录不可写，
+#                         调用方**不应**据此跳过 4 种方法（见 _DIR_WRITE_CACHE 说明）
+#   unwritable            目录不存在且建不出（或后端已熔断）
+# ⚠️ 契约: 只有 ok 视为"可写"。两个失败态都让 `_fix_probe_dir_writable` 返回非 0
+#   （保持旧调用方的 if 语义不变），区别靠全局 _DIR_PROBE_STATE 透出。
 declare -A _DIR_WRITE_CACHE=()
+# _fix_probe_dir_writable 最近一次的三态结论（供调用方在不改 if 结构的前提下分档处理）
+_DIR_PROBE_STATE=""
 # 本轮目录探测已用掉的容器重启次数（预算 OPENLIST_DIR_PROBE_MAX_RESTART）
 _DIR_PROBE_RESTARTS=0
 
@@ -790,7 +800,21 @@ _confirm_persist_by_size() {
 #
 # 依赖: utils.sh (log_fix) / openlist_driver.sh (_restart_openlist_for_truth)
 # 用法: _fix_probe_dir_writable <dir_remote> <ol_dir 以 / 开头>
-#   返回 0=可写，1=不可写
+#   返回 0=可写；非 0=不可写（两种失败态都返回非 0，保持旧 if 语义）
+#   三态结论经全局 _DIR_PROBE_STATE 透出: ok / exists_but_readonly / unwritable
+#
+# ★★ 为什么必须分三态（2026-09-18，run 35289924584 / 35239780581 实证）:
+#   探针用的是 `rclone copyto` —— 与 mkdir **同一条会回 409 的写路径**
+#   （rclone 上传要确保父目录存在，隐式 mkParentDir）。于是「目录建不出来」
+#   必然导致「探针写不进」，进而被判成「目录不可写」，调用方据此
+#   **跳过全部 4 种修复方法** —— 同一个故障被计费两次，且一个方法都没试。
+#   实测反证（run 35289924584）: 同一后端上，隔离目录写入 rc=0；生产同轮
+#   17GB 的 emby-backup 经方法1·原名直传成功落盘并通过真值复核。
+#   ⇒ 「建不出目录」≠「写不进文件」，两者必须解耦（本次改动核心）。
+#   判据: 探针失败后用**只读** lsd 复核目录是否存在;
+#         存在 ⇒ exists_but_readonly（调用方应照常试 4 种方法）
+#         不存在 ⇒ unwritable（调用方走换目录兜底）
+#   开关: OPENLIST_DIR_PROBE_DECOUPLE（默认 1=新三态；0=回退旧的二态行为）
 # 后端级"目录连续不可写"熔断（配合 openlist_driver.sh 的 _backend_write_probe）:
 #   写探针拦的是"整轮开始前就写不进"的后端；本表拦的是"开跑后才暴露"的后端
 #   （预检偶发放行、或探测期间后端刚好还能写）。判据是同一挂载根下连续
@@ -867,10 +891,20 @@ _fix_probe_dir_writable() {
   local probe_timeout="${OPENLIST_DIR_PROBE_TIMEOUT:-120}s"
 
   # 整轮缓存: 同一目录只探一次（同一目录的结论不会在几分钟内翻转）
+  # 兼容旧格式: 历史缓存值可能是 "0"/"1"（二态）——
+  #   1 → ok；0 → 无法区分两种失败态，保守取 exists_but_readonly
+  #   （宁可照常试 4 种方法白跑一次，也不可误判为"目录不存在"而放弃原路径）
   local cached="${_DIR_WRITE_CACHE[$dir_remote]:-}"
   if [ -n "$cached" ]; then
-    log_fix "$fix_log" "   🔎 目录可写性（沿用本轮结论 ${cached%%|*}，${cached#*|}）"
-    [ "${cached%%|*}" = "1" ]
+    local _c_state="${cached%%|*}" _c_note="${cached#*|}"
+    case "$_c_state" in
+      ok|exists_but_readonly|unwritable) ;;
+      1) _c_state="ok" ;;
+      *) _c_state="exists_but_readonly" ;;
+    esac
+    _DIR_PROBE_STATE="$_c_state"
+    log_fix "$fix_log" "   🔎 目录可写性（沿用本轮结论 ${_c_state}，${_c_note}）"
+    [ "$_c_state" = "ok" ]
     return $?
   fi
 
@@ -885,7 +919,8 @@ _fix_probe_dir_writable() {
   if [[ "$dir_remote" == openlist:* ]] && [ "${_BACKEND_DEAD[$be_root]:-0}" = "1" ] \
      && [ "${_FIX_NAMELEN_CONTENT:-0}" != "1" ]; then
     log_fix "$fix_log" "   🔎 目录可写性（后端 ${be_root} 本轮已熔断，直接判不可写: 不探测、不重启）"
-    _DIR_WRITE_CACHE["$dir_remote"]="0|后端熔断"
+    _DIR_WRITE_CACHE["$dir_remote"]="unwritable|后端熔断"
+    _DIR_PROBE_STATE="unwritable"
     return 1
   fi
 
@@ -923,16 +958,41 @@ _fix_probe_dir_writable() {
       seen_truth=1
     fi
     writable="$seen_truth"
-    note="已重启确认"
+    # 可信度分档（2026-09-18 改动 3）: 旧口径一律写"已重启确认"，但它**只表示
+    #   重启过**、不等于"结论可信"。当失败原因是"重启后列表尚未就绪导致读不到"时，
+    #   把"读不到"标成"确认不可写"会误导后端熔断计数（熔断只认这个词）。
+    #   ⇒ 按**失败形态**分档，熔断只认"写入失败"这一档。
     if [ "$seen_truth" -eq 1 ]; then
-      log_fix "$fix_log" "   ✅ 目录可写（重启后探针仍在）"
+      note="已重启确认-可写"
+    elif [ "$prc" -ne 0 ]; then
+      # 写探针本身就没提交成功（409/mkParentDir 等）⇒ 这是"写不进"
+      note="已重启确认-写入失败"
+      log_fix "$fix_log" "   ❌ 目录不可写（重启后探针消失: 写入未真正落盘）"
     else
-      # 目录是假成功创建的、或写入根本没落盘——都是"这个目录写不进去"
+      # 写 rc=0 但重启后读不到 ⇒ 可能"写入未持久化"，也可能是"列表未就绪"
+      note="已重启确认-读取失败"
       log_fix "$fix_log" "   ❌ 目录不可写（重启后探针消失: 写入未真正落盘）"
     fi
   else
     log_fix "$fix_log" "   ⚠️ 容器重启不可用，退回缓存口径"
   fi
+
+  # ★ 三态判定（2026-09-18 改动 1）: 上面得到的是"探针能不能写"，而调用方真正要
+  #   知道的是"这个目录能不能用"。探针失败**只证明写路径被堵**，不证明目录不存在。
+  #   ⇒ 失败时补一次**只读** lsd 复核存在性，把"建不出目录"与"目录不可写"解耦。
+  local probe_state
+  if [ "$writable" -eq 1 ]; then
+    probe_state="ok"
+  elif [ "${OPENLIST_DIR_PROBE_DECOUPLE:-1}" != "0" ] \
+       && _fix_dir_exists_or_conflict "$dir_remote" "$probe_timeout"; then
+    probe_state="exists_but_readonly"
+    writable=0
+    log_fix "$fix_log" "   ↷ 但目录**存在**（只读 lsd 复核）⇒ 判 exists_but_readonly: 「建不出目录」≠「目录不可用」，调用方应照常试 4 种方法"
+  else
+    probe_state="unwritable"
+    writable=0
+  fi
+  _DIR_PROBE_STATE="$probe_state"
 
   # 探针清理: 残留会污染目标端，且会永久抬高 raw 计数基准
   rclone deletefile "$probe_dst" "${RCLONE_RETRY_FLAGS[@]}" --timeout "$probe_timeout" >/dev/null 2>&1
@@ -942,21 +1002,23 @@ _fix_probe_dir_writable() {
     [ "${_RAW_VERIFY_LAST:-0}" -gt 0 ] && _RAW_VERIFY_LAST=$((_RAW_VERIFY_LAST + 1))
   fi
 
-  # 结论带上可信度标注: 排查时一眼能看出这条判定是否经过重启确认，
-  # 避免把缓存口径的结论当真值用
-  log_fix "$fix_log" "   结论: 可写=${writable}（${note}）"
-  _DIR_WRITE_CACHE["$dir_remote"]="${writable}|${note}"
+  # 结论带上三态与可信度标注: 排查时一眼能看出这条判定是否经过重启确认、
+  # 以及是"建不出目录"还是"目录根本不存在"，避免把缓存口径的结论当真值用
+  log_fix "$fix_log" "   结论: ${probe_state}（可写=${writable} · ${note}）"
+  _DIR_WRITE_CACHE["$dir_remote"]="${probe_state}|${note}"
 
   # 后端级熔断计数（见上方 _BACKEND_DEAD 说明）: 同一挂载根下连续 N 个
   # 目录不可写 ⇒ 后端级故障，本轮剩余目录全部直接判不可写。
-  # 只认"已重启确认"的不可写结论: 预算耗尽/容器不可重启时退回的缓存口径
-  # 本身标注了"不可信"（可能是驱动临时抖动），拿它判死整个后端会误伤
-  # （宁可多探几个目录，不可放弃一个可能健康的后端）
+  # 只认"已重启确认-写入失败"这一档（2026-09-18 改动 3 收窄）:
+  #   · 预算耗尽/容器不可重启时退回的缓存口径标注了"不可信"（可能是驱动临时抖动）
+  #   · "已重启确认-读取失败"可能只是"重启后列表未就绪"，不是后端真写不进
+  #   · exists_but_readonly 更不该计入 —— 它是"建不出目录"而非"后端不可用"
+  #   拿这些判死整个后端会误伤（宁可多探几个目录，不可放弃一个可能健康的后端）
   if [[ "$dir_remote" == openlist:* ]]; then
     if [ "$writable" -eq 1 ]; then
       _BACKEND_DIR_FAIL_STREAK["$be_root"]=0
       [ -n "${_BACKEND_DEAD[$be_root]:-}" ] && unset "_BACKEND_DEAD[$be_root]"
-    elif [ "$note" = "已重启确认" ]; then
+    elif [ "$note" = "已重启确认-写入失败" ]; then
       if [ "${_FIX_NAMELEN_CONTENT:-0}" = "1" ]; then
         # 名长解耦: 内容性失败（名字太长）不代表后端不收，计入连续计数会让
         # 一批超名文件把健康后端判死——判死后连短哈希兜底都走不了
@@ -1022,13 +1084,57 @@ _fix_dir_desc() {
   fi
 }
 
+# ===== 下载源文件到本地 + 备齐 4 种方法要用的三个期望值 =====
+# 为什么抽成独立函数（2026-09-18）: 入口侧兜底（Step 1 建不出目录时直接换短哈希
+#   目录）与常规 Step 3 都要跑 4 种方法，两处各写一份必然漂移；而这两条路径的
+#   变量依赖（local_file / file_size / local_file_bytes / src_expect_bytes /
+#   file_md5）**确实**在测试里暴露过一次真实缺陷 —— 兜底路径绕过 Step 3 后，
+#   `set -u` 下 `src_expect_bytes` / `file_md5` 相继 unbound，整个修复流程当场中止。
+# 依赖调用方作用域（bash 动态作用域）: fix_log / src_file / file_name / temp_dir
+# 产出: local_file / file_size / local_file_bytes / src_expect_bytes / file_md5
+# 用法: _fix_download_source → 0=就绪 1=失败（下载日志已写，失败文案由调用方定）
+_fix_download_source() {
+  local_file="$temp_dir/$file_name"
+  log_fix "$fix_log" "⬇ 下载源文件到本地..."
+  rclone copyto "$src_file" "$local_file" "${RCLONE_RETRY_FLAGS[@]}" --timeout "${OPENLIST_UPLOAD_TIMEOUT:-300}s" 2>&1 | \
+    _cmd_log 下载 "$fix_log"
+  local copy_status=${PIPESTATUS[0]}
+  if [ "$copy_status" -ne 0 ] || [ ! -f "$local_file" ]; then
+    return 1
+  fi
+  file_size=$(stat -c%s "$local_file" 2>/dev/null || echo 0)
+  log_fix "$fix_log" "✅ 已下载 $(format_bytes_iec "$file_size")"
+  # 落盘尺寸校验的两个期望值（供 _confirm_persist_by_size 用；见其头注）:
+  #   local_file_bytes — 本地副本字节数，方法 2/4（源=本地副本）的期望值
+  #   src_expect_bytes — 源端字节数，方法 1（源=源端直读）的期望值。
+  #     方法 1 走的是 "$src_file"，与本地副本理论上同内容，但**不假设相等**：
+  #     源端在下载与上传之间可能被改动，用源端自己的大小才是一致的口径。
+  local_file_bytes="$file_size"
+  src_expect_bytes=""
+  src_expect_bytes=$(rclone size --json "$src_file" 2>/dev/null | jq -r '.bytes // empty' 2>/dev/null) || src_expect_bytes=""
+  [[ "$src_expect_bytes" =~ ^[0-9]+$ ]] || src_expect_bytes="$file_size"
+  # 原文件内容指纹: 本地副本在此统一计算一次（下载失败早已短路），
+  # 四种方法共享；写进 marker 后供还原时做内容级硬校验。
+  # temp_dir 会被 _fix_succeed 清理，但 md5 值已捕获，不受影响。
+  file_md5=$(md5sum "$local_file" 2>/dev/null | awk '{print $1}')
+  [[ "$file_md5" =~ ^[0-9a-f]{32}$ ]] || file_md5=""
+  [ -n "$file_md5" ] && log_fix "$fix_log" "  md5: $file_md5"
+  return 0
+}
+
 # ===== 目录内的方法轮换（一轮 = 4 种文件修复方法各试一次）=====
 # try_fix_failed_file 最多调用两次: 先在 Step 1 定下的目录跑一轮，全败后由
 # _fix_switch_to_hash_dir 换到短哈希目录再跑一轮。抽成函数保证两轮的行为与
 # 文案完全一致（两条路径各自演化必然漂移，历史已多次吃过这个亏）。
 # 依赖调用方作用域（bash 动态作用域）: fix_log / src_file / local_file /
 #   file_name / actual_dst_dir / used_base64_dir / used_hash_dir / HASH_DIR_REL /
-#   dest_path / failed_file_rel / file_md5 / temp_dir
+#   dest_path / failed_file_rel / file_md5 / temp_dir / src_expect_bytes
+#   ⚠️ src_expect_bytes（方法 1 的落盘尺寸期望值）必须由调用方**先算好**。
+#   它原先只在 Step 3 的下载段就地计算 —— 入口侧兜底（Step 1 建不出目录时直接
+#   换短哈希目录）会绕过那段，方法 1 便读到一个未定义的变量：`set -u` 下整个
+#   修复流程当场中止（实测 2026-09-18: src_expect_bytes / file_md5 相继 unbound），
+#   `set +u` 下则退化成"拿空期望值去比尺寸"⇒ 落盘校验恒判失败 ⇒ 真修好的文件被误报失败。
+#   ⇒ 两条路径统一经 _fix_download_source 准备这些变量（见该函数）。
 # 用法: _try_fix_methods_round
 #   返回 0=某方法成功（TRY_FIX_* 已由 _fix_succeed 就绪），1=本轮全败
 _try_fix_methods_round() {
@@ -1264,14 +1370,21 @@ _fix_switch_to_hash_dir() {
 
   # 短哈希目录同样要先过可写性预检: 建得出目录 ≠ 写得进文件。
   # 不过就立刻返回失败，省掉一趟整文件下载 + 4 次上传
+  #
+  # ⚠️ exists_but_readonly 要放行（2026-09-18 改动 1c）: 该态只说明"探针写不进"
+  #   （探针与 mkdir 同一条 409 写路径），不说明文件写不进 —— 生产实证同轮
+  #   17GB 文件在同类目录里直传成功。在此处判死会让**兜底目录也白废**，
+  #   等于把"原目录"的误判复制到兜底目录上。真正的最终判据是方法本身的落盘结果。
   log_fix "$fix_log" "   🔎 预检短哈希目录可写性..."
   if ! _fix_probe_dir_writable "$actual_dst_dir" "$actual_ol_dir"; then
-    # 依据取本轮缓存标注（后端熔断 / 已重启确认 / 未经重启确认…），
-    # 不再一律写「已重启容器复核」——熔断与缓存命中两条路径都不重启
     local _h_basis="${_DIR_WRITE_CACHE[$actual_dst_dir]#*|}"
-    log_fix "$fix_log" "   ❌ 短哈希目录不可写（${_h_basis:-依据未知}），兜底终止"
-    _HASH_DIR_FAIL_REASON="备用目录也写不进去"
-    return 1
+    if [ "$_DIR_PROBE_STATE" = "exists_but_readonly" ]; then
+      log_fix "$fix_log" "   ↷ 短哈希目录**存在**但探针写不进（${_h_basis:-依据未知}）⇒ 放行，由 4 种方法的落盘结果定论"
+    else
+      log_fix "$fix_log" "   ❌ 短哈希目录不可写（${_h_basis:-依据未知}），兜底终止"
+      _HASH_DIR_FAIL_REASON="备用目录也写不进去"
+      return 1
+    fi
   fi
   log_fix "$fix_log" "   ✅ 短哈希目录可写，4 种文件修复方法将在此目录执行"
   return 0
@@ -1465,11 +1578,41 @@ try_fix_failed_file() {
     fi
   fi
 
+  # ===== 目录基本就绪标记（供入口侧兜底与 Step 2 共享）=====
+  # used_hash_dir 必须在 Step 1 之前声明: 入口侧兜底会调 _fix_switch_to_hash_dir，
+  # 该函数按动态作用域写回 used_hash_dir / actual_dst_dir（见其头注），
+  # 若在此处声明为 local，兜底路径的写回会落到一个不存在的变量上。
+  local used_hash_dir=0
+  local HASH_DIR_REL=""
+
   if [ "$dir_ok" -ne 1 ]; then
+    # ★ 建不出目录 ≠ 这个文件没救（2026-09-18 改动 1c 的入口侧）:
+    #   假成功目录（mkdir 报错 + lsd 看不到，但写路径其实"半通"）在过去直接死在这里，
+    #   连短哈希兜底都不进 —— 场景2 的回归期望（落点 ${HASH}/options.xml）就是这么来的。
+    #   更关键的是与 Step 2 的三态判定口径一致: 探针与 mkdir 走**同一条 409 写路径**
+    #   （rclone 上传隐式 mkParentDir）⇒ 上游"建不出目录"同样不能证明"文件写不进"。
+    #   故此处也放行一次短哈希兜底（建新目录 + 4 种方法实测落盘结果定论）。
+    #   注: 非 openlist 远端没有短哈希兜底语义，_fix_switch_to_hash_dir 会直接拒，
+    #   行为与旧版一致（仍返回"建不出来"）。
+    local _fs_fb_msg="目标目录建不出来（换用编码目录后仍失败）"
+    if _fix_switch_to_hash_dir; then
+      log_fix "$fix_log" "🔀 目录建不出来，兜底换短哈希目录再试一轮"
+      # ⚠️ 必须在这里补做 Step 3 的下载段 —— 本分支在 Step 3 **之前**，而
+      #   _try_fix_methods_round 依赖 local_file / local_file_bytes /
+      #   src_expect_bytes / file_md5（原名直传用 src_file，但短名直传与分卷
+      #   都要读本地副本）。少了这段: set -u 下当场中止（实测 line 1127
+      #   file_md5 unbound），set +u 下则方法 2/3/4 全空跑 ⇒ 兜底形同虚设。
+      if _fix_download_source; then
+        _try_fix_methods_round && return 0
+      else
+        log_fix "$fix_log" "❌ 下载源文件失败，兜底终止"
+        _fs_fb_msg="无法从源端下载文件"
+      fi
+    fi
     log_fix "$fix_log" "目录创建最终失败（含 base64URL 编码后），无法修复文件"
     # 通知口径说人话（规范 · 说人话）: base64URL 是内部机制，读者只要知道
     # "目录建不出来、换过编码目录也不行"
-    TRY_FIX_MESSAGE="目标目录建不出来（换用编码目录后仍失败）"
+    TRY_FIX_MESSAGE="$_fs_fb_msg"
     rm -rf "$temp_dir" 2>/dev/null || true
     return 1
   fi
@@ -1477,22 +1620,32 @@ try_fix_failed_file() {
   # ===== Step 2: 目录可写性预检（跑 4 种方法之前先给目录定性）=====
   # 目录不可写时直接在下方换短哈希目录，连整文件下载都省掉——
   # 否则每个顽固文件都要在同一条死路上白跑"下载 + 4 次上传/打包"
-  local used_hash_dir=0
-  local HASH_DIR_REL=""
   log_fix "$fix_log" "📁 目标目录已就绪: $(_short_path "$actual_dst_dir")"
 
   if ! _fix_probe_dir_writable "$actual_dst_dir" "$actual_ol_dir"; then
+    local _probe_basis="${_DIR_WRITE_CACHE[$actual_dst_dir]#*|}"
+    # ★ exists_but_readonly 放行（2026-09-18 改动 1c，本项核心）:
+    #   探针写失败只证明"写探针这条路被堵"，而探针走的是与 mkdir **同一条**
+    #   409 写路径（rclone 上传隐式 mkParentDir）⇒ 建不出目录必然导致探针写不进，
+    #   但**不代表文件写不进**。实测反证（run 35289924584）: 同一后端隔离目录
+    #   写入 rc=0；生产同轮 17GB 文件经方法1·原名直传成功并通过真值复核。
+    #   所以这里**不再跳过 4 种方法** —— 让方法自己用落盘结果定论；若真写不进，
+    #   方法层本就有完整失败处理（判假成功→拉黑→换方法），代价只是一次尝试。
+    if [ "$_DIR_PROBE_STATE" = "exists_but_readonly" ]; then
+      log_fix "$fix_log" "🔎 原目录探针写不进（${_probe_basis:-依据未知}），但目录**存在** ⇒ 放行 4 种方法（「建不出目录」≠「写不进文件」）"
+    else
     # 判定依据如实透出: 日志取本轮缓存里的技术标注（后端熔断 / 已重启确认 /
     # 未经重启确认（缓存口径）…）——此前一律写「已重启容器复核」，但后端级写熔断
     # 与缓存命中两条路径都不探测、不重启，文案与上一行日志自相矛盾。
-    local _probe_basis="${_DIR_WRITE_CACHE[$actual_dst_dir]#*|}"
     log_fix "$fix_log" "🔀 原目录不可写（${_probe_basis:-依据未知}）→ 跳过原目录的 4 种方法"
     # 通知里的失败原因另走人话口径（规范 · 说人话）: 熔断/探测/重启复核都是
     # 内部机制，读者只要知道"哪一步没成立、还能不能救"
     local _probe_human
     case "$_probe_basis" in
       后端熔断)   _probe_human="存储端本轮整体故障，未试写" ;;
-      已重启确认) _probe_human="已复核确认写不进去" ;;
+      已重启确认-写入失败) _probe_human="已复核确认写不进去" ;;
+      已重启确认-读取失败) _probe_human="已复核但读不到（可能刚重启列表未就绪）" ;;
+      已重启确认|已重启确认-可写) _probe_human="已复核确认写不进去" ;;
       '')         _probe_human="原因未知" ;;
       *)          _probe_human="判定未经复核，可能不准" ;;
     esac
@@ -1506,43 +1659,19 @@ try_fix_failed_file() {
       rm -rf "$temp_dir" 2>/dev/null || true
       return 1
     fi
+    fi
   fi
 
   # ===== Step 3: 目录已定性，下载源文件到本地 =====
-  local local_file="$temp_dir/$file_name"
-  log_fix "$fix_log" "⬇ 下载源文件到本地..."
-  rclone copyto "$src_file" "$local_file" "${RCLONE_RETRY_FLAGS[@]}" --timeout "${OPENLIST_UPLOAD_TIMEOUT:-300}s" 2>&1 | \
-    _cmd_log 下载 "$fix_log"
-  local copy_status=${PIPESTATUS[0]}
-
-  if [ "$copy_status" -ne 0 ] || [ ! -f "$local_file" ]; then
+  # 抽成函数（2026-09-18）: 入口侧兜底（Step 1 建不出目录）在 Step 3 之前就要跑
+  # 4 种方法，同样需要本地副本与三个期望值。两处各写一份必然漂移。
+  local local_file
+  if ! _fix_download_source; then
     log_fix "$fix_log" "❌ 下载源文件失败，跳过修复"
     TRY_FIX_MESSAGE="无法从源端下载文件"
     rm -rf "$temp_dir" 2>/dev/null || true
     return 1
   fi
-
-  local file_size
-  file_size=$(stat -c%s "$local_file" 2>/dev/null || echo 0)
-  log_fix "$fix_log" "✅ 已下载 $(format_bytes_iec "$file_size")"
-
-  # 落盘尺寸校验的两个期望值（供 _confirm_persist_by_size 用；见其头注）:
-  #   local_file_bytes — 本地副本字节数，方法 2/4（源=本地副本）的期望值
-  #   src_expect_bytes — 源端字节数，方法 1（源=源端直读）的期望值。
-  #     方法 1 走的是 "$src_file"，与本地副本理论上同内容，但**不假设相等**：
-  #     源端在下载与上传之间可能被改动，用源端自己的大小才是一致的口径。
-  local local_file_bytes="$file_size"
-  local src_expect_bytes=""
-  src_expect_bytes=$(rclone size --json "$src_file" 2>/dev/null | jq -r '.bytes // empty' 2>/dev/null) || src_expect_bytes=""
-  [[ "$src_expect_bytes" =~ ^[0-9]+$ ]] || src_expect_bytes="$file_size"
-
-  # 原文件内容指纹: 本地副本在此统一计算一次（下载失败早已短路），
-  # 四种方法共享；写进 marker 后供还原时做内容级硬校验。
-  # temp_dir 会被 _fix_succeed 清理，但 md5 值已捕获，不受影响。
-  local file_md5
-  file_md5=$(md5sum "$local_file" 2>/dev/null | awk '{print $1}')
-  [[ "$file_md5" =~ ^[0-9a-f]{32}$ ]] || file_md5=""
-  [ -n "$file_md5" ] && log_fix "$fix_log" "  md5: $file_md5"
 
   # ===== Step 4: 在已定性的目录跑 4 种方法 =====
   log_fix "$fix_log" "开始尝试多种方式同步到: ${actual_dst_dir}/${file_name}"

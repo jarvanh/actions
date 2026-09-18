@@ -493,7 +493,13 @@ _sync_bulk_hash_dir_fold() {
 
     # 原目录可写就不动它: 能按原路径写就没必要改目录结构 —— 折叠成短哈希
     # 会丢掉目录名，只能靠 marker 的 original 字段还原，是不可逆操作
-    if _fix_probe_dir_writable "$dst_dir" "$ol_dir"; then
+    #
+    # ⚠️ exists_but_readonly 同样视为"不动它"（2026-09-18 改动 1c）: 该态只说明
+    #   探针写不进（探针与 mkdir 同一条 409 写路径），不说明目录不可用。
+    #   折叠是**不可逆**操作，若因误判而去折叠一个其实能写的目录，代价远大于
+    #   多试一次原路径 ⇒ 此处保守：只有确认"目录不存在/后端熔断"才折叠。
+    if _fix_probe_dir_writable "$dst_dir" "$ol_dir" \
+       || [ "$_DIR_PROBE_STATE" = "exists_but_readonly" ]; then
       continue
     fi
     # 后端已整体熔断时连短哈希目录也写不进，继续折叠只是白跑
