@@ -68,6 +68,10 @@ _sync_retry_8005() {
       # 而探针 60s 内就能给出同样结论。探针通过才值得花那 48min。
       # 必须清缓存: 同步前的入口探针已把 cache[$dest_path] 置 1（可写），
       # 不清就会命中缓存直接返回"可写"，等于没探（键口径同 F21 修复）。
+      # 注: 这里**手写 unset 而非调 _backend_write_probe_invalidate** —— 本文件
+      # 会被部分 source（只加载 sync_engine.sh 的测试，如 test_8005_probe_gate.sh），
+      # 该助手定义在 openlist_driver.sh 里，改用函数会让那些测试报 command not found。
+      # 键口径必须与助手一致（按同步对路径），改一处要同时核对另一处。
       unset "_BACKEND_WRITE_PROBE_CACHE[$dest_path]"
       if ! _backend_write_probe "$dest_path" "$LOG_FILENAME"; then
         SYNC_BACKEND_DEAD=1
