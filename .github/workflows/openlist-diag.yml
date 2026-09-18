@@ -214,7 +214,11 @@ jobs:
 
       - name: 运行后端诊断探针
         env:
-          DIAG_REPORT: /tmp/ol_diag/report.txt
+          # ⚠️ 各专项脚本各自带默认报告名（report/reject_report/diag409_report/
+          #   writeprobe_report/dirname_report/l2_report），**不要**在这里统一设
+          #   DIAG_REPORT —— 它会被所有专项继承，把本专项的报告也写进 report.txt，
+          #   导致 `tail <专项>_report.txt` 取不到文件（artifact 里也串了名）。
+          #   常规 13 组默认即 report.txt，无需在此指定。
           DIAG_PROBE_GAP: ${{ inputs.probe_gap }}
           DIAG_BURST_N: ${{ inputs.burst_n }}
           DIAG_TARGET: ${{ inputs.target }}
