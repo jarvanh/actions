@@ -49,6 +49,26 @@ _tryr_rclone_read() {
   rclone "$@"
 }
 
+# 预演侧的存在性判定: 走**目录清单缓存**，不做"每次一条 lsf"
+# 为什么: 生产 _dst_file_exists 每次列举一个目录（1 次 rclone 进程）。逐条核对时
+#   4500 条 ≈ 9000 次远端列举 —— run 35474941314 实测仅"纯推导不带核对"就 26 分钟，
+#   再叠上万次列举必然撞 timeout。故按目录缓存清单（同一目录下的条目共享一次列举）。
+# ⚠️ 仍受 OpenList 列表缓存延迟影响（§0 2026-09-18: 新建文件首次可见约 10s）。
+#   对**预演**可接受：预演是"看会怎么走"，不是"判成败"；真跑的判据在生产侧。
+#   ⇒ 因此"不存在"在本模块只记为风险提示，绝不作为删除/跳过的依据。
+# 用法: _tryr_exists <full_remote_path>
+declare -gA _TRYR_DIR_CACHE=()
+_tryr_exists() {
+  local full="$1" d b listing
+  d="$(dirname "$full")"; b="$(basename "$full")"
+  if [ -z "${_TRYR_DIR_CACHE[$d]+x}" ]; then
+    listing=$(_tryr_rclone_read lsf "$d" --files-only --retries 1 --low-level-retries 2 \
+      --timeout 2m 2>/dev/null)
+    _TRYR_DIR_CACHE[$d]="$listing"
+  fi
+  printf '%s\n' "${_TRYR_DIR_CACHE[$d]}" | grep -qxF "$b"
+}
+
 # 目标端根可读性探测（避免把"我没起容器"伪装成"备份全丢了"，见 _tryr_plan_one 注释）
 # 判据: 对 dest 做一次 lsf（返回码为准 —— 空目录也可能 rc=0，空结果不算不可读）
 # 每个 dest 只探一次（结果缓存，避免 N 条条目打 N 次远端列举）
@@ -111,16 +131,16 @@ _tryr_plan_one() {
       dest_note="⚠️ 目标端 ${dest} 不可读（容器未拉起或远端不可达）⇒ 存在性未核对，请用开启容器的 workflow 轮次复核"
     elif [ "$kind" = "noop" ]; then
       # 原路径原名: 没有替代文件，只核对原路径本身在不在
-      _dst_file_exists "$orig_full" && oe="已存在" || oe="不存在"
+      _tryr_exists "$orig_full" && oe="已存在" || oe="不存在"
       be="（无需替代文件）"
     else
       if [ "$kind" = "split" ]; then
         # 分卷只核对首卷: 首卷在即视为备份在（真跑时缺任一卷会在合卷阶段失败）
-        _dst_file_exists "$backup" && be="存在（首卷）" || be="缺失"
+        _tryr_exists "$backup" && be="存在（首卷）" || be="缺失"
       else
-        _dst_file_exists "$backup" && be="存在" || be="缺失"
+        _tryr_exists "$backup" && be="存在" || be="缺失"
       fi
-      _dst_file_exists "$orig_full" && oe="已存在" || oe="不存在"
+      _tryr_exists "$orig_full" && oe="已存在" || oe="不存在"
     fi
   fi
 
@@ -168,9 +188,13 @@ restore_try_run() {
   TRYRUN_UNVERIFIED=0; TRYRUN_UNVERIFIED_DESTS=""
   declare -gA TRYRUN_KIND_COUNT=()
   _TRYR_DST_READABLE=()
+  _TRYR_DIR_CACHE=()
   TRYRUN_ENTRY_LIST=""
 
-  _tryr_log() { printf '%s\n' "$*" | tee -a "$TRYRUN_LOG"; }
+  # 日志写入用 >> 重定向而不是 `| tee -a`: 每条 7 行 × 4500+ 条 = 3 万次 fork，
+  # 实测把本该秒级的预演拖到 26 分钟（run 35474941314），而 check_exists=是 要在此基础上
+  # 再加逐条 lsf，必然撞 timeout。人类看的 stdout 由入口末尾统一 cat 出来，不逐行 tee。
+  _tryr_log() { printf '%s\n' "$*" >> "$TRYRUN_LOG"; }
 
   _tryr_log "=== 一键还原 try run（只读预演）==="
   _tryr_log "  任务过滤=${task_filter} · marker 目录=${SYNC_STATE_DIR}"

@@ -188,6 +188,50 @@ COLS=$(head -1 "$TSV" | awk -F'\t' '{print NF}')
 ROWS=$(grep -c . "$TSV")
 [ "$ROWS" = "2" ] && ok "8c tsv 行数 = 条目数" || bad "8c tsv 行数 = 条目数（实际 ${ROWS}）"
 
+echo "=== 场景8b: 目录清单缓存（核对模式下不得逐条 lsf）==="
+# 4500 条目若每条 2 次 lsf ≈ 9000 次远端列举，必然撞 timeout（run 35474941314 教训）。
+# 同一目录的多个条目必须共享一次列举。用计数桩验证: 3 条同目录条目 ⇒ 该目录只被 lsf 一次。
+LSF_COUNT=0; LSF_DIRS=""
+printf '{"dest_path":"openlist:wopan176Crypt/0","source_path":"onedrive:0","fixed_files":[' > "$STATE/task0_test.json"
+printf '{"original":"a/x1.mp4","alternative":"deadbeef/x1.mp4","method":"m1","md5":""},' >> "$STATE/task0_test.json"
+printf '{"original":"a/x2.mp4","alternative":"deadbeef/x2.mp4","method":"m1","md5":""},' >> "$STATE/task0_test.json"
+printf '{"original":"a/x3.mp4","alternative":"deadbeef/x3.mp4","method":"m1","md5":""}' >> "$STATE/task0_test.json"
+printf ']}' >> "$STATE/task0_test.json"
+# 计数替身: 每次 lsf 把目录**追加到文件**（不能累加进 shell 变量 —— 预演跑在
+#   while 管道的子进程里，父 shell 读不到它的变量改动）
+#   其余分支与上面的原 mock 完全一致（只读/写判定不变）
+LSF_LOG="$WORK/lsf.log"; : > "$LSF_LOG"
+rclone() {
+  if [ "$1" = "lsf" ]; then printf '%s\n' "$2" >> "$LSF_LOG"; fi
+  case "$1" in
+    lsf)
+      local p="$2"
+      if [ "$DST_READABLE" = "0" ] && [[ "$p" == openlist:* ]]; then return 1; fi
+      case "$p" in
+        openlist:wopan176Crypt/0) (cd "$DST" && ls) ;;
+        openlist:*) (cd "$DST/${p#openlist:wopan176Crypt/0/}" 2>/dev/null && ls) ;;
+        *) (cd "$p" 2>/dev/null && ls) ;;
+      esac ;;
+    cat) cat "$2" ;;
+    size) echo '{"bytes":1}' ;;
+    *) WRITE_CALLS+="$1"$'\n'; return 1 ;;
+  esac
+  return 0
+}
+export -f rclone
+OUT5="$WORK/out5"; mkdir -p "$OUT5"
+TRYRUN_SEND_TG=0 TRYRUN_WORK="$OUT5" restore_try_run task0 > "$OUT5/stdout.txt" 2>&1
+# 三个条目: 备份都在 deadbeef/（应只列举 1 次），原路径都在 a/（同样 1 次）
+DEADBEEF_HITS=$(grep -cx "openlist:wopan176Crypt/0/deadbeef" "$LSF_LOG")
+[ "$DEADBEEF_HITS" = "1" ] && ok "8d 同目录只列举一次（缓存生效，实际 ${DEADBEEF_HITS} 次）" \
+  || bad "8d 同目录只列举一次（实际 ${DEADBEEF_HITS} 次）"
+A_HITS=$(grep -cx "openlist:wopan176Crypt/0/a" "$LSF_LOG")
+[ "$A_HITS" = "1" ] && ok "8e 原路径目录同样只列举一次" || bad "8e 原路径目录同样只列举一次（实际 ${A_HITS} 次）"
+# 缓存命中率直接决定能不能在 timeout 内跑完 4500 条: 总列举次数必须远小于条目数×2
+TOTAL_LSF=$(grep -c . "$LSF_LOG")
+[ "$TOTAL_LSF" -le 6 ] && ok "8f 3 条目的总列举次数 ${TOTAL_LSF} ≤ 6（缓存有效抑制放大）" \
+  || bad "8f 3 条目的总列举次数 ${TOTAL_LSF} > 6（缓存未生效）"
+
 echo "=== 场景9: 任务过滤（同生产 restore_task 口径）==="
 OUT4="$WORK/out4"; mkdir -p "$OUT4"
 printf '{"dest_path":"openlist:wopan176Crypt/0","source_path":"onedrive:0","fixed_files":[{"original":"q/w.mp4","alternative":"deadbeef/w.mp4","method":"rclone copyto（短哈希文件名 9999）","md5":""}]}' > "$STATE/task1_other.json"
