@@ -16,6 +16,10 @@ jobs:
     env:
       TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
       TS_OAUTH_CLIENT_SECRET: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
+      # 本机两个自建 AI 网关（glm-proxy 8787 / workbuddy-gateway 8318）共用同一把访问 key，
+      # 客户端只需记一个。定义在 job 级供两个 step 复用，避免两处各写一份而写歪。
+      # 注：这是本机网关的访问口令，不是任何上游服务的凭据；两者都不对外暴露公网。
+      AI_GATEWAY_API_KEY: sk-lksdfhwkdsfhu783758sdjf
     steps:
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -874,8 +878,10 @@ jobs:
           # 取值口径（逐条见规范）：
           #   结论/更新/原因 → 人写的自然语言 → 裸文本 kv；版本/路径/端口 → 机器值 → <code>；
           #   原始输出 → <pre>，恒为正文最后一块（其后只跟收尾区）。空值整行跳过、空分节整段跳过。
-          #   鉴权恒写「仅回环监听，无需密钥」：不传 -api-key 且只绑 127.0.0.1，网关不做鉴权，
-          #   绝不编造密钥值。凭据段只列 workbuddy*.json 的文件名，绝不回显内容（真实 Token）。
+          #   鉴权写实际形态：serve 以 -addr 0.0.0.0 监听（对 Tailscale/局域网开放），
+          #   故显式传 -api-key 做客户端 Bearer 校验，取值与 glm-proxy 同为 AI_GATEWAY_API_KEY。
+          #   （此前注释写「仅回环监听，无需密钥」，与 -addr 0.0.0.0 的实际启动参数不符，已订正）
+          #   绝不编造密钥值，也不在通知里回显 key 本身。凭据段只列 workbuddy*.json 的文件名，绝不回显内容（真实 Token）。
           #   账号池取自 workbuddy-status.json（键名由上游 Go 结构体固定，见采集处注释）；
           #   免费模型列**具体模型名**（取自上游模型目录接口，见采集处注释），
           #   全量展示不折叠 —— 只给「免费模型 N」读者不知道是哪个，等于没说。
@@ -888,7 +894,7 @@ jobs:
               [ -n "$4" ] && tg_add_kv _msg "更新" "$4"
               if [ "${7:-0}" = "1" ]; then
                 tg_add_path _msg "接口" "http://127.0.0.1:${WB_PORT}/v1"
-                tg_add_kv _msg "鉴权" "仅回环监听，无需密钥"
+                tg_add_kv _msg "鉴权" "需 API Key（与 glm-proxy 同值）"
               fi
               [ -n "$5" ] && tg_add_kv _msg "原因" "$5"
               if [ -n "${WB_CREDS:-}" ]; then
@@ -1096,6 +1102,7 @@ jobs:
             (
               cd "$WB_RUN_DIR" || exit 1
               nohup "$WB_BIN" serve -addr 0.0.0.0 -port "$WB_PORT" \
+                -api-key "$AI_GATEWAY_API_KEY" \
                 > "$WB_LOG" 2>&1 &
               echo $! > /tmp/workbuddy-serve.pid
             )
@@ -1452,6 +1459,15 @@ jobs:
           GLM_LOG="$GLM_RUN_DIR/logs/glm-proxy.log"
           mkdir -p "$GLM_RUN_DIR/logs"
 
+          # 访问 key：与 workbuddy-gateway 同为 job 级 AI_GATEWAY_API_KEY。
+          # 注意 glm-proxy.sh 会 source .env，而 .env 里也写了 PROXY_API_KEY —— 实测 .env
+          # 会覆盖外部 export（脚本内 set -a 后 source），所以不能靠 export 纠偏，
+          # 只能校验两份是否一致，不一致就如实报出来（不静默用其中某一个）。
+          GLM_ENV_KEY="$(grep -m1 '^PROXY_API_KEY=' "$GLM_DIR/.env" 2>/dev/null | cut -d= -f2- || true)"
+          if [ -n "$GLM_ENV_KEY" ] && [ "$GLM_ENV_KEY" != "$AI_GATEWAY_API_KEY" ]; then
+            echo "⚠️ [glm-proxy] .env 的 PROXY_API_KEY 与 AI_GATEWAY_API_KEY 不一致，以 .env 为准"
+          fi
+
           GLM_OK=0
           GLM_REASON=""
           if curl -fsS --max-time 3 "http://127.0.0.1:${GLM_PORT}/healthz" >/dev/null 2>&1; then
@@ -1478,7 +1494,18 @@ jobs:
             fi
           fi
 
-          # 通知口径：成功不打扰（接力轮每轮都跑本步骤，逐轮推送会刷屏），仅失败告警
+          # 通知口径：与 workbuddy-gateway 一致，成功也推「已就绪」。
+          # 接力轮每轮都会跑本步骤，为免逐轮刷屏，用本步骤自己的标记文件区分：
+          # 文件在 → 上一轮已启动过 = 接力轮，不重复推「已就绪」（与 workbuddy 的
+          # WB_RUN_TAG_FILE 同款做法）。按标记失败处理（多发一条好过漏发）。
+          GLM_RUN_TAG_FILE="/tmp/glm-proxy-serve-run-tag"
+          GLM_RELAUNCH=0
+          GLM_PREV_TAG=""
+          if [ -s "$GLM_RUN_TAG_FILE" ]; then
+            GLM_RELAUNCH=1
+            GLM_PREV_TAG="$(head -n 1 "$GLM_RUN_TAG_FILE" 2>/dev/null || true)"
+          fi
+
           if [ "$GLM_OK" != "1" ]; then
             GLM_TAIL="$(tail -n 15 "$GLM_LOG" 2>/dev/null || true)"
             # 日志尾部同时打到 stdout：<pre> 只进 Telegram，CI 日志里看不到
@@ -1486,8 +1513,9 @@ jobs:
             printf '%s\n' "${GLM_TAIL:-<empty>}"
             echo "--- end glm-proxy.log tail ---"
             _m=""
-            tg_add_title _m "⚠️ glm-proxy 未就绪"
-            tg_add_kv _m "端口" "$GLM_PORT"
+            tg_add_title _m "❌ glm-proxy 启动失败"
+            tg_add_kv _m "结论" "未就绪 · 退出码 1"
+            tg_add_path _m "端口" "$GLM_PORT"
             tg_add_kv _m "原因" "$GLM_REASON"
             tg_add_path _m "代码目录" "$GLM_DIR"
             if [ -n "$GLM_TAIL" ]; then
@@ -1498,6 +1526,21 @@ jobs:
             send_tg "$_m"
           else
             echo "✅ [glm-proxy] ${GLM_PORT} 已就绪（${GLM_REASON}）"
+            printf '%s\n' "${GITHUB_RUN_ID:-manual}" > "$GLM_RUN_TAG_FILE"
+            if [ "$GLM_RELAUNCH" = "1" ]; then
+              echo "ℹ️ [glm-proxy] 接力轮（上一 run ${GLM_PREV_TAG} 已启动），跳过重复的就绪通知"
+            else
+              # 版式对齐 wb_notify 的就绪态分支：补「接口 / 鉴权 / 模型」三行
+              _m=""
+              tg_add_title _m "🟢 glm-proxy 已就绪"
+              tg_add_kv _m "结论" "$GLM_REASON"
+              tg_add_path _m "接口" "http://127.0.0.1:${GLM_PORT}/v1"
+              tg_add_kv _m "鉴权" "需 API Key（与 workbuddy-gateway 同值）"
+              tg_add_kv _m "模型" "GLM-5.3-Flash"
+              tg_add_path _m "代码目录" "$GLM_DIR"
+              tg_add_footer _m
+              send_tg "$_m"
+            fi
           fi
 
       - name: Notify Tailscale SSH entry
