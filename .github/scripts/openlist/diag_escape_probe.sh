@@ -19,7 +19,7 @@
 #   在改动还原链（restore_info.jq 的 hash_dir 分支）之前必须先坐实前提。
 #
 # 为什么必须改还原链: alternative 现在被当作 dest_path 的**相对路径**使用
-#   （`--filter-from` 的 `- /<alt>`、以及还原脚本 `rclone move "$DST/$ALT" "$DST/$ORIG"`）。
+#   （`--filter-from` 的 `- /<alt>`、以及还原脚本 `rclone moveto "$DST/$ALT" "$DST/$ORIG"`）。
 #   落点一旦跳到 dest_path 之外，`$DST/$ALT` 就指错位置 ⇒ 还原会失败。
 #   故本实验还要顺带确认「祖先层 candidate 里，哪一级是可写的最小上跳量」，
 #   好让改动面尽可能小（能只跳一层就不跳两层）。
@@ -275,7 +275,9 @@ if [ "${DIAG_ESC_SKIP_E4:-0}" = "1" ]; then
 elif [ -z "$E3_DIR" ]; then
   say "（无可写层 ⇒ E4 跳过）"
 else
-  # 模拟 restore_info.jq 的 hash_dir 还原: rclone move <跳出落点> <dest_path 下原路径>
+  # 模拟 restore_info.jq 的 hash_dir 还原: rclone moveto <跳出落点> <dest_path 下原路径>
+  # 用 moveto 而非 move: move 的 dst 会被当目录，目标文件不存在时建出以目标文件名
+  # 命名的目录 ⇒ 会把"能归位"误判成"归位了"（其实落点错一层），见 file_restore.sh 注释
   # 这一步决定"跳出后还能不能归位"，也就是 restore_info.jq 要改成什么形态
   _mv_src="$E3_DIR/ol2e_move_${TS}.bin"
   _mv_dst="$TARGET/${DEST_REL}/ol2e_moved_${TS}.bin"
@@ -284,7 +286,7 @@ else
          --timeout "$MKDIR_TIMEOUT" --retries 1 2>&1); _rc=$?
   say "   准备: copyto 到跳出层 rc=${_rc}（$(_short_ol "$_mv_src")）"
   # 关键动作: 从跳出层 move 回 dest_path 下的目标路径
-  _out=$(rclone move "$_mv_src" "$_mv_dst" --timeout "$MKDIR_TIMEOUT" --retries 1 2>&1); _rc=$?
+  _out=$(rclone moveto "$_mv_src" "$_mv_dst" --timeout "$MKDIR_TIMEOUT" --retries 1 2>&1); _rc=$?
   _409=0; is_409 "$_out" && _409=1
   say "   move 跳出层 → dest_path 下: rc=${_rc} · 409特征=${_409}"
   [ "$_rc" -ne 0 ] && say "$_out" | tail -3 | sed 's/^/        ▸ /' | tee -a "$REPORT"

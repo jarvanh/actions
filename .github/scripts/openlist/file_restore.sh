@@ -135,8 +135,16 @@ _restore_one_entry() {
   if [ "$kind" = "move" ]; then
     # 改名类: 服务端移动回原路径（目标端为 crypt，明文 md5 无从比对，
     # 内容级校验只在分卷类的本地解压产物上做，此处以存在性为验收）
-    if ! rclone move "$src_full" "$dst_full" "${rflags[@]}" >/dev/null 2>&1; then
-      echo "FAIL: rclone move 失败（替代文件可能已不存在）"
+    #
+    # ⚠️ 必须用 moveto 而不是 move（2026-09-19 本地真 rclone 实测）:
+    #   `rclone move <src文件> <dst文件>` 的 dst 会被当成**目录**——目标文件不存在时
+    #   它会建出一个**以目标文件名命名的目录**再把文件放进去，即落点变成
+    #   `<原文件名>.mp4/<短哈希名>.mp4`，**不是**我们要的 `<原文件名>.mp4`。
+    #   还原的目标路径恰恰就是"此前同步失败、因而一定不存在"的原路径 ⇒ 稳定踩中
+    #   这条语义（实测 local 与 crypt 远端均如此）。moveto 才是"文件→文件"的改名。
+    #   反例佐证: diag_409_semantics.sh 的改名复核用的就是 moveto。
+    if ! rclone moveto "$src_full" "$dst_full" "${rflags[@]}" >/dev/null 2>&1; then
+      echo "FAIL: rclone moveto 失败（替代文件可能已不存在）"
       return 0
     fi
     if _dst_file_exists "$dst_full"; then

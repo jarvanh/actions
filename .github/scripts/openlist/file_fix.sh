@@ -1156,7 +1156,7 @@ _try_fix_methods_round() {
       local m1_alt m1_restore
       if [ "${used_hash_dir:-0}" -eq 1 ] || [ "$used_base64_dir" -eq 1 ]; then
         m1_alt="${round_file#${dest_path}/}"
-        m1_restore="rclone move '${round_file}' '${dest_path}/${failed_file_rel}'"
+        m1_restore="rclone moveto '${round_file}' '${dest_path}/${failed_file_rel}'"
       else
         m1_alt="$failed_file_rel"
         m1_restore="无需还原（文件已在正确路径）"
@@ -1189,7 +1189,7 @@ _try_fix_methods_round() {
       _fix_succeed copyto_shorthash \
         "rclone copyto（$(_fix_dir_desc) + 短哈希文件名 ${sh_hash}）" \
         "${m2sh_dst#${dest_path}/}" \
-        "rclone move '${m2sh_dst}' '${dest_path}/${failed_file_rel}'  # 原文件名: ${file_name}" \
+        "rclone moveto '${m2sh_dst}' '${dest_path}/${failed_file_rel}'  # 原文件名: ${file_name}" \
         "$file_md5"
       return 0
     fi
