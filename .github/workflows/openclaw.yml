@@ -1856,7 +1856,7 @@ jobs:
                 # 里的旧配置服务，/health 照常 200，坏配置就这样顶着「健康」标签进了池。
                 # 只取最新一份必然把同一故障原样恢复（2026-09-18 事故：回滚"成功"却原地失败），
                 # 故必须逐个验、跳过坏的、往前找更旧的。
-                SNAP_POOL_ALL="$(rclone lsf dropbox:self-hosted/snapshots/ --files-only 2>/dev/null | grep "openclaw-.*-v" | sort -r || true)"
+                SNAP_POOL_ALL="$(rclone lsf dropbox:self-hosted/ --files-only 2>/dev/null | grep "^openclaw-snapshot-.*-v" | sort -r || true)"
                 SNAP_MATCHED="$(printf '%s\n' "$SNAP_POOL_ALL" | grep -- "-v${TARGET_VERSION}.tar.gz" || true)"
                 SNAP_OTHERS="$(printf '%s\n' "$SNAP_POOL_ALL" | grep -v -- "-v${TARGET_VERSION}.tar.gz" || true)"
                 SNAP_CANDIDATES="$(printf '%s\n%s\n' "$SNAP_MATCHED" "$SNAP_OTHERS")"
@@ -1865,7 +1865,7 @@ jobs:
                 while IFS= read -r _cand; do
                   [ -z "$_cand" ] && continue
                   echo "🔎 Checking snapshot candidate: $_cand"
-                  if ! rclone copyto "dropbox:self-hosted/snapshots/${_cand}" /tmp/snapshot-restore.tar.gz -v 2>&1 | tail -n 1; then
+                  if ! rclone copyto "dropbox:self-hosted/${_cand}" /tmp/snapshot-restore.tar.gz -v 2>&1 | tail -n 1; then
                     echo "⚠️ Download failed; skipping: $_cand"
                     continue
                   fi
@@ -2615,7 +2615,7 @@ jobs:
 
           ARCHIVE_DEST="dropbox:self-hosted/openclaw.tar.gz"
           if [ -f /tmp/run-openclaw-meta.env ] && ! grep -q '^RECORDED_SUCCESSFUL_OPENCLAW_VERSION=' /tmp/run-openclaw-meta.env; then
-            ARCHIVE_DEST="dropbox:self-hosted/failed/openclaw-failed-$(date -u +%Y%m%d-%H%M).tar.gz"
+            ARCHIVE_DEST="dropbox:self-hosted/openclaw-failed-$(date -u +%Y%m%d-%H%M).tar.gz"
             echo "openclaw-failed-$(date -u +%Y%m%d-%H%M).tar.gz" > /tmp/failed-archive-name
             echo "ℹ️ Unhealthy run detected: background archive targets $ARCHIVE_DEST (main package keeps the last healthy state)."
           fi
@@ -3027,14 +3027,14 @@ jobs:
           openclaw_final_output=""
           if openclaw_final_output=$(bash /tmp/create-openclaw-archive.sh "$TMP_OPENCLAW_TAR" 2>&1); then
             openclaw_final_upload_output=""
-            echo "5. Resolving archive destination (healthy → main package; unhealthy → failed/ isolate)..."
+            echo "5. Resolving archive destination (healthy → main package; unhealthy → openclaw-failed-* isolate)..."
             ARCHIVE_DEST="dropbox:self-hosted/openclaw.tar.gz"
             HEALTHY_RUN=0
             if [ -f /tmp/run-openclaw-meta.env ] && grep -q '^RECORDED_SUCCESSFUL_OPENCLAW_VERSION=' /tmp/run-openclaw-meta.env; then
               HEALTHY_RUN=1
             else
               FAILED_NAME="$(cat /tmp/failed-archive-name 2>/dev/null || echo "openclaw-failed-$(date -u +%Y%m%d-%H%M).tar.gz")"
-              ARCHIVE_DEST="dropbox:self-hosted/failed/${FAILED_NAME}"
+              ARCHIVE_DEST="dropbox:self-hosted/${FAILED_NAME}"
               echo "ℹ️ Unhealthy run: main package will NOT be overwritten; failed state goes to $ARCHIVE_DEST"
             fi
             # 体积骤降只记录、不拦截（口径同周期归档）：完整性已由归档脚本的关键文件
@@ -3055,22 +3055,24 @@ jobs:
                 record_archive_result "openclaw.tar.gz" ok "$openclaw_final_size" "覆盖主包"
                 echo "6. Versioned snapshot (every healthy run, keep 3)..."
                 SNAP_VERSION="$(grep '^RECORDED_SUCCESSFUL_OPENCLAW_VERSION=' /tmp/run-openclaw-meta.env | tail -n 1 | cut -d= -f2-)"
-                SNAP_NAME="openclaw-$(date -u +%Y%m%d-%H%M)-v${SNAP_VERSION}.tar.gz"
-                if rclone copyto "$TMP_OPENCLAW_TAR" "dropbox:self-hosted/snapshots/${SNAP_NAME}" -v 2>&1; then
-                  echo "✅ Versioned snapshot uploaded: dropbox:self-hosted/snapshots/${SNAP_NAME}"
+                SNAP_NAME="openclaw-snapshot-$(date -u +%Y%m%d-%H%M)-v${SNAP_VERSION}.tar.gz"
+                if rclone copyto "$TMP_OPENCLAW_TAR" "dropbox:self-hosted/${SNAP_NAME}" -v 2>&1; then
+                  echo "✅ Versioned snapshot uploaded: dropbox:self-hosted/${SNAP_NAME}"
                   printf '%s\n' "$SNAP_NAME" > "$FINAL_ARCHIVE_SNAPSHOT"
                 else
                   echo "⚠️ Versioned snapshot upload failed (non-fatal)."
                 fi
-                rclone lsf dropbox:self-hosted/snapshots/ --files-only 2>/dev/null | sort -r | tail -n +4 | while read -r OLD_SNAP; do
-                  rclone deletefile "dropbox:self-hosted/snapshots/${OLD_SNAP}" 2>/dev/null || true
+                # 保留清理**必须按前缀过滤**：本目录是 self-hosted/ 根，同层还有
+                # rsstt/zcode/CLIProxyAPI/CliRelay 等别人的归档，直接 lsf|tail 会误删。
+                rclone lsf dropbox:self-hosted/ --files-only 2>/dev/null | grep '^openclaw-snapshot-' | sort -r | tail -n +4 | while read -r OLD_SNAP; do
+                  rclone deletefile "dropbox:self-hosted/${OLD_SNAP}" 2>/dev/null || true
                 done
               else
                 record_archive_result "openclaw.tar.gz" ok "$openclaw_final_size" "写入失败现场 · 主包未覆盖"
-                rclone lsf dropbox:self-hosted/failed/ --files-only 2>/dev/null | sort -r | tail -n +3 | while read -r OLD_FAILED; do
-                  rclone deletefile "dropbox:self-hosted/failed/${OLD_FAILED}" 2>/dev/null || true
+                rclone lsf dropbox:self-hosted/ --files-only 2>/dev/null | grep '^openclaw-failed-' | sort -r | tail -n +3 | while read -r OLD_FAILED; do
+                  rclone deletefile "dropbox:self-hosted/${OLD_FAILED}" 2>/dev/null || true
                 done
-                echo "ℹ️ Failed-run archive kept (2 max) in failed/; main package untouched."
+                echo "ℹ️ Failed-run archive kept (2 max, openclaw-failed-*); main package untouched."
               fi
               rm -f "$TMP_OPENCLAW_TAR"
             else
