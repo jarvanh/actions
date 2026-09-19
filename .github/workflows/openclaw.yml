@@ -2436,10 +2436,14 @@ jobs:
           SRC_DIR="/tmp/local_CliRelay"
           COMPOSE="docker compose -p clirelay -f $SRC_DIR/docker-compose.yml --project-directory $SRC_DIR"
           STAGE_DIR=""
+          SQL_TMP=""
 
           cleanup() {
             if [ -n "${STAGE_DIR:-}" ] && [ -d "$STAGE_DIR" ]; then
               rm -rf "$STAGE_DIR"
+            fi
+            if [ -n "${SQL_TMP:-}" ]; then
+              rm -f "$SQL_TMP"
             fi
           }
           trap cleanup EXIT
@@ -2454,18 +2458,39 @@ jobs:
           STAGE_DIR=$(mktemp -d /tmp/clirelay-archive-stage.XXXXXX)
 
           # 1. pg_dump 刷新 SQL（postgres 数据卷不入包，恢复时 psql 导入；容器仍在运行时执行）
+          #
+          # 必须先落临时文件、成功后再 mv 覆盖 —— 直接重定向到 clirelay-latest.sql 的话，
+          # shell 在 pg_dump 启动前就已把旧 SQL 截断；pg_dump 中途失败时磁盘上剩下的是
+          # 半截 dump，而旧的那份好 SQL 已经被毁。半截 dump 照样能过体积校验并上传，
+          # 下轮 psql -v ON_ERROR_STOP=1 导入失败 → start_clirelay 返回 1 → 回退
+          # CLIProxyAPI → 回退后 postgres 不启动，归档又切去 CLIProxyAPI 脚本，
+          # CliRelay.tar.gz 从此不再刷新，永久锁死在回退态。
           . "$SRC_DIR/.env"
           mkdir -p "$SRC_DIR/sql"
-          if $COMPOSE exec -T postgres sh -c '. /clirelay-deploy/.env; exec pg_dump -U "$CLIRELAY_POSTGRES_USER" -d "$CLIRELAY_POSTGRES_DB" --no-owner' > "$SRC_DIR/sql/clirelay-latest.sql" 2>/tmp/clirelay-pgdump.err; then
-            pg_size=$(stat -c%s "$SRC_DIR/sql/clirelay-latest.sql" 2>/dev/null || echo 0)
-            echo "pg_dump ok size=${pg_size}"
+          # 临时文件放 SRC_DIR 根而非 sql/：sql/ 整个目录会被打进包，失败残留的半截
+          # dump 混进去就污染了归档（trap 只在脚本退出时清，而 tar 在那之前执行）
+          SQL_TARGET="$SRC_DIR/sql/clirelay-latest.sql"
+          SQL_TMP="$(mktemp "$SRC_DIR/.clirelay-pgdump.XXXXXX")"
+          if $COMPOSE exec -T postgres sh -c '. /clirelay-deploy/.env; exec pg_dump -U "$CLIRELAY_POSTGRES_USER" -d "$CLIRELAY_POSTGRES_DB" --no-owner' > "$SQL_TMP" 2>/tmp/clirelay-pgdump.err; then
+            pg_size=$(stat -c%s "$SQL_TMP" 2>/dev/null || echo 0)
             if [ "$pg_size" -lt 200 ]; then
-              echo "⚠️ pg_dump 输出过小（${pg_size} bytes），可能为空库，仅告警不中断"
+              # 空库/异常小的 dump 同样不覆盖：宁可沿用上一轮的好 SQL，也不要用可疑输出
+              # 换掉它（旧实现在这里也照样覆盖了）
+              echo "⚠️ pg_dump 输出过小（${pg_size} bytes），可能为空库或异常输出，保留旧 SQL"
+            else
+              mv -f "$SQL_TMP" "$SQL_TARGET"
+              SQL_TMP=""
+              echo "pg_dump ok size=${pg_size}"
             fi
           else
             echo "⚠️ pg_dump 失败（非致命，保留旧 SQL 继续）: $(tail -n 3 /tmp/clirelay-pgdump.err 2>/dev/null || true)"
           fi
           rm -f /tmp/clirelay-pgdump.err
+          # 磁盘上无 SQL 可打（首轮 bootstrap 且本轮 dump 未成功）→ 明确记一句，
+          # 否则归档只有「打包了什么」没有「缺了什么」，排障时看不出数据库是空的
+          if [ ! -s "$SQL_TARGET" ]; then
+            echo "⚠️ 归档内不含可用 SQL 快照（sql/clirelay-latest.sql 缺失或为空）"
+          fi
 
           # 2. 打包：auths + config.yaml + .env + compose 文件 + sql/（跳过 postgres-data/redis-data/logs/data 原始目录）
           mkdir -p "$STAGE_DIR"
@@ -2477,6 +2502,14 @@ jobs:
 
           tar -C "$STAGE_DIR" -czf "$OUTPUT_TAR" .
           chmod 644 "$OUTPUT_TAR" 2>/dev/null || true
+
+          # 把归档内容打进日志：CliRelay 的统计/用量数据在 sql/*.sql 里而不像 CLIProxyAPI
+          # 那样有个 stats.json，光看目录结构看不出统计到底在不在包里（2026-09-19 为此
+          # 专门查过一轮）。有清单后这类问题直接读日志即可，不必再靠包体积反推。
+          # sql/ 可能有多份（保留旧 SQL 策略下不会，但手动放过就会），逐份列大小。
+          echo "📦 CliRelay 归档内容:"
+          tar -tzvf "$OUTPUT_TAR" 2>/dev/null | awk '{printf "  %s  %s\n", $3, $6}' | \
+            grep -v '^ *0  \./sql/$' | head -n 40 || true
 
           actual_size=$(stat -c%s "$OUTPUT_TAR" 2>/dev/null || echo 0)
           if [ ! -s "$OUTPUT_TAR" ]; then
