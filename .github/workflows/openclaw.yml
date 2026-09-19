@@ -1459,13 +1459,14 @@ jobs:
           GLM_LOG="$GLM_RUN_DIR/logs/glm-proxy.log"
           mkdir -p "$GLM_RUN_DIR/logs"
 
-          # 访问 key：与 workbuddy-gateway 同为 job 级 AI_GATEWAY_API_KEY。
-          # 注意 glm-proxy.sh 会 source .env，而 .env 里也写了 PROXY_API_KEY —— 实测 .env
-          # 会覆盖外部 export（脚本内 set -a 后 source），所以不能靠 export 纠偏，
-          # 只能校验两份是否一致，不一致就如实报出来（不静默用其中某一个）。
-          GLM_ENV_KEY="$(grep -m1 '^PROXY_API_KEY=' "$GLM_DIR/.env" 2>/dev/null | cut -d= -f2- || true)"
+          # 访问 key：与 workbuddy-gateway 同为 job 级 AI_GATEWAY_API_KEY，.env 里同名存放。
+          # 注意 glm-proxy.sh 会 source .env，而 .env 里的值会覆盖外部 export
+          # （脚本内 set -a 后 source），所以不能靠 export 纠偏，只能校验两份是否一致，
+          # 不一致就如实报出来（不静默用其中某一个）。
+          # server.mjs 对新名 AI_GATEWAY_API_KEY 与旧名 PROXY_API_KEY 都认，故两个都取来比对。
+          GLM_ENV_KEY="$(grep -m1 -E '^(AI_GATEWAY_API_KEY|PROXY_API_KEY)=' "$GLM_DIR/.env" 2>/dev/null | cut -d= -f2- || true)"
           if [ -n "$GLM_ENV_KEY" ] && [ "$GLM_ENV_KEY" != "$AI_GATEWAY_API_KEY" ]; then
-            echo "⚠️ [glm-proxy] .env 的 PROXY_API_KEY 与 AI_GATEWAY_API_KEY 不一致，以 .env 为准"
+            echo "⚠️ [glm-proxy] .env 里的访问 key 与 AI_GATEWAY_API_KEY 不一致，以 .env 为准"
           fi
 
           GLM_OK=0
