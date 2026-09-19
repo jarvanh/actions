@@ -340,7 +340,7 @@ workflow 的 `run_mode` 单选互斥：
 |---|---|
 | `同步` | 预览（可 `skip_preview` 跳过）→ 全量同步 |
 | `调试 · 修复管线测试` | 只跑指定任务的修复管线 |
-| `⚠️ 还原 · 修复文件还原为原路径` | `restore_fixed_files` |
+| `⚠️ 还原 · 修复文件还原为原路径` | `restore_fixed_files`（改名类走 `rclone moveto`：**必须**用 moveto，move 会把 dst 当目录、建出以目标文件名命名的目录） |
 | `⚠️ 灾难恢复 · 目标端→源端` | `restore_source_from_target`（非破坏性） |
 | `⚠️ 灾难恢复 · 目标端→源端（删除源端多余文件）` | `rebuild_source_from_target`（**破坏性**） |
 
