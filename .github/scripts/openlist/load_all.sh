@@ -54,6 +54,7 @@ source "$_OPENLIST_SCRIPT_DIR/sync_engine.sh"   # 核心同步引擎（编排 + 
 
 # --- L6 任务层与运维 ---
 source "$_OPENLIST_SCRIPT_DIR/file_restore.sh"  # 修复文件一键还原（restore_fixed_files）
+source "$_OPENLIST_SCRIPT_DIR/restore_tryrun.sh" # 一键还原 try run（只读预演，restore_try_run）[file_restore: _restore_classify_kind]
 source "$_OPENLIST_SCRIPT_DIR/task_preview.sh"  # 任务预览（大小估算 + 流量图）
 source "$_OPENLIST_SCRIPT_DIR/task_engine.sh"   # 任务编排（sync_task / run_all_tasks）
 

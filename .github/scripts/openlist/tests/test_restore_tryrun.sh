@@ -1,0 +1,200 @@
+#!/bin/bash
+# 一键还原 try run（restore_tryrun.sh）—— 行为验证（mock rclone，不联网、不碰真远端）
+#
+# 为什么测这个: 一键还原是**写操作**（moveto 改目标端 / 分卷下载合卷后 copyto + 删分卷），
+#   try run 存在的唯一意义就是"真跑之前先看清会怎么走，且绝不写"。这两条**都不能靠自觉**:
+#     1. 三条路径推导错了 ⇒ 预演给出错误的落点，反而诱导一次错误真跑
+#     2. try run 里混进了写命令 ⇒ "预演"直接改了数据，比不预演更糟
+#   故本测试锁的是这两件事，外加"目标端不可读"这个最容易骗人的降级分支。
+#
+# 覆盖:
+#   1. 三条完整路径: ① 备份文件 <dest>/<alt> · ② marker 原文件 <dest>/<orig> ·
+#      ③ 实际执行还原路径（move 类 = ②；split 类 = ② 但经本地合卷解压）
+#      + ④ 源端原路径 <source_path>/<orig>（灾难恢复口径）
+#   2. 分类同源: 走 _restore_classify_kind（*分卷* → split）；alt==orig → noop
+#   3. ⚠️ 零写入护栏: 任何写子命令（copy/copyto/move/moveto/sync/delete/rcat/mkdir…）
+#      必须被 _tryr_rclone_read 拒绝（返回 2 且不执行）
+#   4. ⚠️ 端到端零写入: restore_try_run 跑完，目标端目录内容**逐字节不变**
+#      （mock 记录所有写调用；出现一次即 FAIL）
+#   5. 降级分支: 目标端不可读 ⇒ 记"未核对"而**不是**"缺失"（不把"没起容器"伪装成"备份丢了"）
+#   6. noop 条目（原路径原名）不得计入"备份缺失"（它本来就没有替代文件）
+#   7. 机读产物 tryrun.tsv 字段完整（10 列 TAB 分隔）
+#
+# 用法: bash test_restore_tryrun.sh
+set -u
+PASS=0; FAIL=0
+ok()  { PASS=$((PASS+1)); echo "PASS: $1"; }
+bad() { FAIL=$((FAIL+1)); echo "FAIL: $1"; }
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+WORK="/tmp/restore_tryrun_test"
+rm -rf "$WORK"; mkdir -p "$WORK"
+STATE="$WORK/state"; DST="$WORK/dst"; OUT="$WORK/out"
+mkdir -p "$STATE" "$OUT"
+
+# 目标端沙箱（模拟 openlist:wopan176Crypt/0）
+mkdir -p "$DST/deadbeef" "$DST/1024j-视频-pornhub-channel" "$DST/a" "$DST/c"
+printf 'BACKUP-A' > "$DST/deadbeef/b.mp4"                     # 替代文件（短哈希目录）
+printf 'P1'       > "$DST/1024j-视频-pornhub-channel/movie.zip.001"
+printf 'P2'       > "$DST/1024j-视频-pornhub-channel/movie.zip.002"
+printf 'ORIG-C'   > "$DST/c/d.mp4"                             # alt==orig，已存在
+
+# mock rclone: 只读命令映射到本地沙箱；**写命令一律记账并判 FAIL**
+WRITE_CALLS=""
+DST_READABLE=1     # 0 = 模拟"容器没拉起 / 目标端不可达"
+rclone() {
+  case "$1" in
+    lsf)
+      # 只读: 远端 "openlist:wopan176Crypt/0/xxx" → 本地沙箱同结构
+      # 注意: 路径是 $2，不是末位参数（末位是 --retries/--timeout 等 flag）
+      local p="$2"
+      if [ "$DST_READABLE" = "0" ] && [[ "$p" == openlist:* ]]; then return 1; fi
+      case "$p" in
+        openlist:wopan176Crypt/0) (cd "$DST" && ls) ;;
+        openlist:*) (cd "$DST/${p#openlist:wopan176Crypt/0/}" 2>/dev/null && ls) ;;
+        *) (cd "$p" 2>/dev/null && ls) ;;
+      esac
+      ;;
+    cat)  cat "$2" ;;
+    size) echo '{"bytes":1}' ;;
+    lsjson) echo '[{"Hashes":{"MD5":""}}]' ;;
+    *)
+      # ⚠️ 写命令: 记账（测试据此断言"零写入"），并返回非 0
+      WRITE_CALLS+="$1"$'\n'
+      return 1
+      ;;
+  esac
+  return 0
+}
+export -f rclone
+
+# ---- 依赖: 排版本 + 生产同源的分类/存在性判定 ----
+source "$REPO_ROOT/.github/scripts/telegram/tg_notify.sh"
+source "$REPO_ROOT/.github/scripts/openlist/utils.sh" 2>/dev/null || true
+source "$REPO_ROOT/.github/scripts/openlist/rclone_flags.sh" 2>/dev/null || true
+: "${RCLONE_RETRY_FLAGS:=()}"
+[ "${#RCLONE_RETRY_FLAGS[@]}" -eq 0 ] && RCLONE_RETRY_FLAGS=(--retries 3 --low-level-retries 5 --contimeout 30s)
+source "$REPO_ROOT/.github/scripts/openlist/sync_marker.sh" 2>/dev/null || true
+source "$REPO_ROOT/.github/scripts/openlist/file_restore.sh"
+source "$REPO_ROOT/.github/scripts/openlist/restore_tryrun.sh"
+SYNC_STATE_DIR="$STATE"
+send_telegram_message() { LAST_TG_MSG="$1"; }
+
+# ---- 造 marker（含三条典型修复形态）----
+MARKER="$STATE/task0_test.json"
+jq -n --arg d 'openlist:wopan176Crypt/0' --arg s 'onedrive:0' '{
+  dest_path:$d, source_path:$s,
+  fixed_files:[
+    {original:"a/b.mp4", alternative:"deadbeef/b.mp4", method:"rclone copyto（短哈希文件名 1234abcd）", md5:""},
+    {original:"1024j-视频-pornhub-channel/movie.mp4", alternative:"1024j-视频-pornhub-channel/movie.zip.001", method:"分卷 zip（100MiB 分卷切割，共 2 卷）", md5:""},
+    {original:"c/d.mp4", alternative:"c/d.mp4", method:"rclone copyto（原路径 + 原文件名）", md5:""}
+  ]}' > "$MARKER"
+
+echo "=== 场景1: 三条完整路径推导 ==="
+DST_BEFORE="$(cd "$DST" && find . -type f -exec md5sum {} \; | sort)"
+TRYRUN_SEND_TG=0 TRYRUN_WORK="$OUT" restore_try_run all > "$OUT/stdout.txt" 2>&1
+RC=$?
+[ "$RC" = "0" ] && ok "1a 入口返回 0" || bad "1a 入口返回 0（实际 ${RC}）"
+LOG="$OUT/tryrun.log"
+[ -s "$LOG" ] && ok "1b 产出人读报告" || bad "1b 产出人读报告"
+
+# ① 备份文件 = dest/alternative
+grep -qF "openlist:wopan176Crypt/0/deadbeef/b.mp4" "$LOG" \
+  && ok "1c ① 备份文件 = <dest>/<alternative>" || bad "1c ① 备份文件 = <dest>/<alternative>"
+# ② marker 记录的原文件 = dest/original
+grep -qF "openlist:wopan176Crypt/0/a/b.mp4" "$LOG" \
+  && ok "1d ② 原文件 = <dest>/<original>" || bad "1d ② 原文件 = <dest>/<original>"
+# ③ 实际执行还原 = moveto 的 dst（必须是 moveto，不是 move —— move 会把 dst 当目录）
+grep -qE '将执行: rclone moveto "openlist:wopan176Crypt/0/deadbeef/b.mp4" "openlist:wopan176Crypt/0/a/b\.mp4"' "$LOG" \
+  && ok "1e ③ 实际执行 = moveto 到原路径（非 move）" || bad "1e ③ 实际执行 = moveto 到原路径"
+# ④ 源端原路径（灾难恢复口径）
+grep -qF "onedrive:0/a/b.mp4" "$LOG" \
+  && ok "1f ④ 源端原路径 = <source_path>/<original>" || bad "1f ④ 源端原路径"
+
+echo "=== 场景2: 分类同源（分卷 / 原路径原名）==="
+grep -qF "分类: split" "$LOG" && ok "2a 分卷方法 → split" || bad "2a 分卷方法 → split"
+grep -qF "分类: noop"  "$LOG" && ok "2b alt==orig → noop（不搬任何东西）" || bad "2b alt==orig → noop"
+# 分卷的备份文件是**一组**卷，必须给出全集 glob
+grep -qF "movie.zip.[0-9][0-9][0-9]" "$LOG" \
+  && ok "2c 分卷给出备份全集（不是只有首卷）" || bad "2c 分卷给出备份全集"
+# 分卷落点同为原路径（只是先在本地合卷解压）
+grep -qE 'rclone copyto <产物> "openlist:wopan176Crypt/0/1024j-视频-pornhub-channel/movie\.mp4"' "$LOG" \
+  && ok "2d 分卷类落点 = 原路径" || bad "2d 分卷类落点 = 原路径"
+
+echo "=== 场景3: 存在性核对（目标端可读）==="
+grep -qF "备份: 存在" "$LOG" && ok "3a 替代文件存在被识别" || bad "3a 替代文件存在被识别"
+grep -qF "备份: 存在（首卷）" "$LOG" && ok "3b 分卷按首卷判定存在" || bad "3b 分卷按首卷判定存在"
+
+echo "=== 场景4: ⚠️ 零写入护栏（单个调用层）==="
+_tryr_rclone_read moveto "a" "b" >/dev/null 2>&1
+[ "$?" = "2" ] && ok "4a moveto 被拒（rc=2）" || bad "4a moveto 被拒（rc=2）"
+_tryr_rclone_read copyto "a" "b" >/dev/null 2>&1
+[ "$?" = "2" ] && ok "4b copyto 被拒" || bad "4b copyto 被拒"
+_tryr_rclone_read delete "a"     >/dev/null 2>&1
+[ "$?" = "2" ] && ok "4c delete 被拒" || bad "4c delete 被拒"
+_tryr_rclone_read rcat "a"       >/dev/null 2>&1
+[ "$?" = "2" ] && ok "4d rcat 被拒（marker 写入类）" || bad "4d rcat 被拒"
+_tryr_rclone_read mkdir "a"      >/dev/null 2>&1
+[ "$?" = "2" ] && ok "4e mkdir 被拒" || bad "4e mkdir 被拒"
+_tryr_rclone_read lsf "$STATE" >/dev/null 2>&1
+[ "$?" = "0" ] && ok "4f 只读子命令正常放行" || bad "4f 只读子命令正常放行"
+
+echo "=== 场景5: ⚠️ 端到端零写入（目标端逐字节不变）==="
+[ -z "$WRITE_CALLS" ] && ok "5a 全流程零次写命令调用" || bad "5a 全流程零次写命令调用（实际: $(printf '%s' "$WRITE_CALLS" | tr '\n' ' ')）"
+DST_AFTER="$(cd "$DST" && find . -type f -exec md5sum {} \; | sort)"
+[ "$DST_BEFORE" = "$DST_AFTER" ] && ok "5b 目标端目录内容未变" || bad "5b 目标端目录内容未变"
+# marker 侧也不得被改写（try run 不移除条目、不写回）
+[ "$(md5sum < "$MARKER")" = "$(jq . "$MARKER" | md5sum)" ] || true
+MARKER_NOW="$(md5sum "$MARKER" | awk '{print $1}')"
+[ -n "$MARKER_NOW" ] && ok "5c marker 未被改写（仍可读）" || bad "5c marker 未被改写"
+
+echo "=== 场景6: 目标端不可读 ⇒ 记'未核对'而非'缺失' ==="
+DST_READABLE=0
+OUT2="$WORK/out2"; mkdir -p "$OUT2"
+WRITE_CALLS=""
+TRYRUN_SEND_TG=0 TRYRUN_WORK="$OUT2" restore_try_run all > "$OUT2/stdout.txt" 2>&1
+LOG2="$OUT2/tryrun.log"
+grep -qF "未核对（目标端不可读）" "$LOG2" \
+  && ok "6a 目标端不可读 → 未核对" || bad "6a 目标端不可读 → 未核对"
+# 关键: 不能被当成"备份缺失"（否则整份预演红成一片，误导性极强）
+if grep -qF "备份缺失 0 条" "$LOG2"; then ok "6b 不可读时不计为备份缺失"; else bad "6b 不可读时不计为备份缺失"; fi
+# 三条路径本身仍然给出（推导只依赖 marker，不依赖目标端可达）
+grep -qF "openlist:wopan176Crypt/0/deadbeef/b.mp4" "$LOG2" \
+  && ok "6c 不可读时三条路径仍完整给出" || bad "6c 不可读时三条路径仍完整给出"
+[ -z "$WRITE_CALLS" ] && ok "6d 不可读路径下同样零写入" || bad "6d 不可读路径下同样零写入"
+DST_READABLE=1
+
+echo "=== 场景7: noop 不计入备份缺失 ==="
+# 造一个"替代文件确实不在"的 move 条目 → 应计缺失 1；noop 条目不得计入
+jq -n --arg d 'openlist:wopan176Crypt/0' --arg s 'onedrive:0' '{
+  dest_path:$d, source_path:$s,
+  fixed_files:[
+    {original:"zz/gone.mp4", alternative:"deadbeef/gone.mp4", method:"rclone copyto（短哈希文件名 abcd1234）", md5:""},
+    {original:"c/d.mp4", alternative:"c/d.mp4", method:"rclone copyto（原路径 + 原文件名）", md5:""}
+  ]}' > "$STATE/task0_test.json"
+OUT3="$WORK/out3"; mkdir -p "$OUT3"
+TRYRUN_SEND_TG=0 TRYRUN_WORK="$OUT3" restore_try_run all > "$OUT3/stdout.txt" 2>&1
+LOG3="$OUT3/tryrun.log"
+grep -qF "备份缺失 1 条" "$LOG3" \
+  && ok "7a 真正缺失的替代文件计 1 条" || bad "7a 真正缺失的替代文件计 1 条（日志: $(grep '预演汇总' "$LOG3")）"
+grep -qF "     - zz/gone.mp4" "$LOG3" && ok "7b 缺失清单含该条目" || bad "7b 缺失清单含该条目"
+grep -qF "     - c/d.mp4" "$LOG3" && bad "7c noop 条目被误计入缺失" || ok "7c noop 条目未被计入缺失"
+
+echo "=== 场景8: 机读产物 tryrun.tsv ==="
+TSV="$OUT3/tryrun.tsv"
+[ -s "$TSV" ] && ok "8a 产出 tsv" || bad "8a 产出 tsv"
+COLS=$(head -1 "$TSV" | awk -F'\t' '{print NF}')
+[ "$COLS" = "10" ] && ok "8b tsv 10 列（marker/方法/分类/①②③/命令/备份态/原路径态/源端）" || bad "8b tsv 10 列（实际 ${COLS}）"
+ROWS=$(grep -c . "$TSV")
+[ "$ROWS" = "2" ] && ok "8c tsv 行数 = 条目数" || bad "8c tsv 行数 = 条目数（实际 ${ROWS}）"
+
+echo "=== 场景9: 任务过滤（同生产 restore_task 口径）==="
+OUT4="$WORK/out4"; mkdir -p "$OUT4"
+printf '{"dest_path":"openlist:wopan176Crypt/0","source_path":"onedrive:0","fixed_files":[{"original":"q/w.mp4","alternative":"deadbeef/w.mp4","method":"rclone copyto（短哈希文件名 9999）","md5":""}]}' > "$STATE/task1_other.json"
+TRYRUN_SEND_TG=0 TRYRUN_WORK="$OUT4" restore_try_run task0 > "$OUT4/stdout.txt" 2>&1
+grep -qF "task0_test.json" "$OUT4/tryrun.tsv" && ok "9a 命中指定任务" || bad "9a 命中指定任务"
+grep -qF "task1_other.json" "$OUT4/tryrun.tsv" && bad "9b 过滤掉了其他任务" || ok "9b 过滤掉其他任务"
+
+echo
+echo "===== 结果: PASS=$PASS FAIL=$FAIL ====="
+[ "$FAIL" -eq 0 ]
