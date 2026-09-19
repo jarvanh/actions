@@ -73,7 +73,7 @@ proxy-speedtest/            测速结果数据
 | | `openlist_driver.sh` | 841 | 驱动刷新、健康预检、缓存刷新、truth-check |
 | | `diag_backend.sh` | 724 | **诊断专用**（不进 `load_all.sh` 加载链）：四组写探针 + 容器日志原始 `rsp_code` dump，由 `openlist-diag.yml` 调用 |
 | **sync** | `sync_engine.sh` | 392 | 核心同步引擎（编排 + 423/8005 重试） |
-| | `sync_marker.sh` | 941 | 同步标记持久化（跳过、黑名单、修复清单） |
+| | `sync_marker.sh` | 1058 | 同步标记持久化（跳过、黑名单、修复清单）+ **marker 打包外置备份**（`backup_sync_state_to_dropbox`） |
 | | `sync_notify.sh` | 341 | 同步结果通知构建（统一 Telegram HTML 排版） |
 | | `sync_trend.sh` | 242 | 跨 run 传输趋势（P0 可见化：剩余未传/净传速率/预计清零，收尾发「📈 同步趋势」通知） |
 | | `sync_progress.sh` | 820 | 全局进度通知系统（含收尾四态标题、多层级阶段区） |
@@ -499,6 +499,14 @@ API list），读得通但写不进的后端会被整轮放行——run #12616 �
   全部云端联动失守。这是接受的设计决策（换取 runner 无状态 + conf 变更自动持久化）；
   爆炸半径的收敛依赖 Dropbox 账号本身的 2FA/密码强度，若需进一步收敛，可把 conf
   副本迁至独立账号或加密存储后再上传。
+- **⚠️ marker 是还原链路唯一无法自愈的单点（已外置备份）**：短哈希目录/文件名是
+  `md5(相对路径)` 前 8 位，**不可逆** ⇒ marker 的 `original` 字段一丢，短哈希目录里的
+  文件就只剩密文名、**自愈不回原路径**。marker 与源端同在 OneDrive，账号级故障会一并
+  带走 ⇒ 收尾每轮打包到 `dropbox:self-hosted/openlist/sync_state_backup/`
+  （只增不删、保留 30 份、含 `MANIFEST.txt`、两道"拒上传空包"门）。
+  **注意既有 `dropbox:sync_state_mirror` 不算备份**：它是 `rclone sync` 镜像，
+  删除会传播，挡不住"源端被删"——两者互补、都要留。风险说明与恢复步骤见
+  计划文档 §13。
 - **注入面**：workflow 的 string/number inputs（`restore_task` / `fix_test_task` /
   `fix_test_max`）一律经 step 级 `env:` 传入 `run:`，不做 `${{ }}` 直接内插 bash
   （GitHub 官方反模式清单）；`watch` 触发有 actor 守卫，公开仓库 star 不触发。
@@ -517,7 +525,8 @@ for t in tests/*.sh; do bash "$t"; done
 8005 重试前的写探针短路、
 目录可写性预检（含假成功目录）与短哈希目录兜底、预览 diff、跳过窗口的预览
 预判与跳过通知"本次未传"（含现场估算与宁缺毋滥分支）、truth-check、
-token 登录、marker、收尾标题四态、进度阶段区排版（子目录树/文件批次的层级
+token 登录、marker、marker 打包备份（拒上传空包 / 只增不删 / 保留期 / 隔离性）、
+收尾标题四态、进度阶段区排版（子目录树/文件批次的层级
 与缩进）等。均为纯 bash + stub（mock 掉 rclone/curl/docker），无需真实网盘。
 
 **注意两点**：

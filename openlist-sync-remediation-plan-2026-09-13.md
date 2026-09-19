@@ -49,6 +49,10 @@
      **不计算、不解析**哈希值 ⇒ 任意 8 位 hex 目录都能归位到任意原路径。
      ⚠️ 推论：**marker 丢了，短哈希目录里的文件就只剩密文名，无法自愈回原路径**
      ⇒ marker 备份（与源端同在 OneDrive）是这条兜底链路的单点依赖。
+     **★ 已按用户指示落地外置备份（2026-09-19）**：收尾每轮把 `sync_state` 打包到
+     `dropbox:self-hosted/openlist/sync_state_backup/`（只增不删 + 保留 30 份 +
+     两道"拒上传空包"门）。⚠️ 注意既有 `dropbox:sync_state_mirror` 是 **`sync` 镜像、
+     删除会传播**，挡不住"源端被删"，两者互补、都要留 —— 完整风险说明与恢复步骤见 **§13**。
   ④ **【2026-09-18 新增】「mkdir 假成功」已定性为「特定路径个体问题」，非通用缺陷** ——
      这是本轮最重要的新增事实，它**改变了修法方向**（见下"下一步"）。
 
@@ -3702,4 +3706,69 @@ mkdir 409(原目录 kate-bloom) → API 200 → 复核不存在（假成功，§
   - **结论与推论**：短哈希目录/文件名**可以** 100% 还原回原目录原文件名，
     但**唯一前提是 marker 的 `original` 字段还在**。⇒ marker（与源端同在 OneDrive）
     是这条兜底链路的**单点依赖**；marker 丢了，短哈希目录里的文件只剩密文名，无法自愈。
-    已写入 §0 ③ 与 `file_restore.sh` 文件头注释。
+    已写入 §0 ③ 与 `file_restore.sh` 文件头注释；**外置备份方案见 §13**（用户据本条风险
+    指示落地）。
+
+---
+
+## 13. marker 丢失风险与外置备份（2026-09-19，用户指示落地）
+
+### 13.1 风险定性：这是全链路**唯一**无法自愈的单点
+
+由 §进度日志 2026-09-19「短哈希不可逆」那条推导出来的**结论级**风险：
+
+| 环节 | 丢了会怎样 | 能否自愈 |
+|---|---|---|
+| 目标端某文件 | 下轮同步重传 | ✅ 自动 |
+| marker 里的某条 `fixed_files` 条目 | `scan_fix_signatures.py` 扫特征反推（仅 b64 目录/方法3 分卷，**方法2/4 短哈希名反推不出来**） | ⚠️ 部分 |
+| **整个 `sync_state` 目录** | 短哈希目录里的文件只剩 8 位密文名，**无任何路径可以反推原路径** | ❌ **不能** |
+
+叠加两个既有事实，风险被放大到"账号级"：
+
+1. marker 与源端**同在 OneDrive**（`onedrive:/logs/sync_state`）—— 误删 / 封号 / 回收站
+   过清空，会**同时带走数据本体与索引**。
+2. `sync_state` 里不只有 `*_<hash>.json`，还有 `task_rotation.json`（游标）、
+   `backend_dead.json`（跨轮熔断）、`trend.jsonl`（趋势）—— 它们共同构成
+   "下轮从哪继续"的状态，一起没了就得从头发现一遍坏后端。
+
+### 13.2 既有 `dropbox:sync_state_mirror` **不算**备份（关键澄清）
+
+收尾里本就有一句 `rclone sync onedrive:/logs/sync_state dropbox:sync_state_mirror`。
+它**解决不了**本节的风险，原因是 **`sync` 的删除会传播**：
+
+- 源端 marker 被删/被清空 → 下一轮镜像**同步删掉** Dropbox 上的副本 → 两边几乎同时丢。
+- 它解决的是"OneDrive **读不到**（临时故障）"，解决不了"OneDrive 上的数据**没了**"。
+
+⇒ 需要的是**追加式时间点快照**，而不是镜像。两者互补，都要留。
+
+### 13.3 落地方案（`sync_marker.sh · backup_sync_state_to_dropbox`）
+
+- **落点**：`dropbox:self-hosted/openlist/sync_state_backup/`
+- **产物**：每轮 `sync_state_<UTC时间戳>.tar.gz` + 一份 `sync_state_latest.tar.gz`（方便直接取用）
+- **只增不删**：一律 `copyto`，从不 `sync` / `purge`；清理只删**本函数命名正则锁定**的
+  `sync_state_[0-9]{8}-[0-9]{6}.tar.gz`，保留最近 `MARKER_BACKUP_KEEP=30` 份，
+  **绝不整目录操作**（防误删他人文件）。
+- **两道"拒上传"门**（比"备份了"更重要的是"别备份空的"）：
+  1. 源端列表为空 → 拒上传（读都读不到，别拿空包盖掉好备份）
+  2. 列表非空但下载后文件数 < `MARKER_BACKUP_MIN_FILES` → 判读取异常，拒上传
+  （与 `sync_trend.sh`「宁丢一条样本，不覆盖历史」同一原则）
+- **可自证**：包内附 `MANIFEST.txt`（时间/来源/列表数/归档数），拿到包就能验完整性。
+- **不阻断收尾**：失败只打 ⚠️，不影响 trend/通知/接力。
+
+### 13.4 恢复方法（真丢数据时照做）
+
+```bash
+# 1) 取最新一份
+rclone copyto dropbox:self-hosted/openlist/sync_state_backup/sync_state_latest.tar.gz /tmp/m.tgz
+# 2) 看清单自证（时间、文件数是否符合预期）
+tar -xzOf /tmp/m.tgz sync_state/MANIFEST.txt
+# 3) 解出来核对条目数
+tar -xzf /tmp/m.tgz -C /tmp && ls /tmp/sync_state/
+# 4) 确认无误后回填源端（这一步会覆盖 onedrive 上的 sync_state，务必先看 MANIFEST）
+rclone copy /tmp/sync_state onedrive:/logs/sync_state
+```
+
+### 13.5 验证
+
+`test_marker_backup.sh`（18 断言）锁住：正常路径产出归档+latest+MANIFEST、
+两道拒上传门、只增不删（存量历史不被删）、保留期只删该删的、目标端他人文件永不删。

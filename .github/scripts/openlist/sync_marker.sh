@@ -10,6 +10,11 @@
 #            top_dirs, stats_filtered, fixed_files, fixed_count, fixed_bytes,
 #            fix_blacklist（详见 save_sync_marker / save_fix_state_marker）
 #
+# ⚠️ marker 是**修复文件还原链路的唯一索引**（短哈希不可逆，见 backup_sync_state_to_dropbox
+#    头部注释）——目录里除 `*_<hash>.json` 外还有 `task_rotation.json` / `backend_dead.json`
+#    / `trend.jsonl`，它们共同构成"下轮从哪继续"的状态。OneDrive 账号级故障会一并带走
+#    ⇒ 收尾必须打包外置备份（dropbox，只增不删，与 sync_state_mirror 的 sync 镜像互补）。
+#
 # 依赖: utils.sh (format_bytes), telegram.sh (send_telegram_message)
 # 依赖: telegram/tg_notify.sh (escape_html, tree_* — 排版助手真源，L0 层 source)
 # 依赖环境变量: FORCE_SYNC — 为 "true" 时跳过所有标记检查
@@ -518,6 +523,119 @@ save_sync_marker() {
   [ "$carried_count" -gt 0 ] && summary+=" 继承上轮 ${carried_count} 个;"
   [ "${fb_count:-0}" -gt 0 ] && summary+=" fallback扫描反推 ${fb_count} 个;"
   echo "已保存同步标记: $marker_path (源端 $(format_bytes "$source_bytes"), ${source_count} 文件, 修复合计 ${fixed_count} 个${summary})"
+}
+
+# ===== marker 打包备份到 Dropbox（外置、只增不删、带保留期）=====
+# 为什么需要它（2026-09-19，由「短哈希不可逆」这条性质推导出的单点依赖）:
+#   短哈希目录/文件名是 `md5(相对路径)` 前 8 位 —— **单向且截断**，不存在反推路径
+#   （见 file_restore.sh 文件头注释）。还原 100% 依赖 marker 的 `original` 字段
+#   ⇒ **marker 丢了，短哈希目录里的文件就只剩密文名，无法自愈回原路径**。
+#   而 marker 与源端同在 OneDrive（`onedrive:/logs/sync_state`），账号级故障
+#   （误删 / 封号 / 回收站清空）会**同时带走数据本体与索引**。
+#
+# 为什么现成的 `dropbox:sync_state_mirror` **不算**备份:
+#   它是 `rclone sync` 镜像 —— **删除会传播**。源端 marker 被删/被清空后，
+#   下一轮镜像会同步删掉 Dropbox 上的副本，两边几乎同时丢。
+#   镜像解决的是"OneDrive **读不到**"，解决不了"OneDrive 上的数据**没了**"。
+#
+# 本函数的定位: 追加式的**时间点快照** ——
+#   · 每轮产出 `sync_state_<UTC时间戳>.tar.gz`（只读上传，从不 sync/purge）
+#   · 另维护一份 `sync_state_latest.tar.gz` 方便直接取用
+#   · 按保留期清理**且只清理由本函数命名的过期归档**，绝不整目录操作
+#   · 源端读空（列表为空 / 下载后文件数不足）时**拒绝上传**，绝不拿空包覆盖好备份
+#     （与 sync_trend.sh「宁丢一条样本，不覆盖历史」同一原则）
+#   · 归档内含 `MANIFEST.txt`（时间/来源/文件数），拿到包就能自证完整
+#
+# 用法: backup_sync_state_to_dropbox [dest_remote]
+# 依赖: rclone, tar；SYNC_STATE_DIR 与下列 MARKER_BACKUP_* 可被环境变量覆盖
+# 返回: 0 = 已备份；1 = 跳过/失败（调用方应告警，但不应阻断收尾）
+MARKER_BACKUP_REMOTE="${MARKER_BACKUP_REMOTE:-dropbox:self-hosted/openlist/sync_state_backup}"
+MARKER_BACKUP_KEEP="${MARKER_BACKUP_KEEP:-30}"
+MARKER_BACKUP_MIN_FILES="${MARKER_BACKUP_MIN_FILES:-1}"
+
+backup_sync_state_to_dropbox() {
+  local dest_remote="${1:-${MARKER_BACKUP_REMOTE}}"
+  local state_dir="${SYNC_STATE_DIR:-onedrive:/logs/sync_state}"
+  local keep="${MARKER_BACKUP_KEEP:-30}"
+  local min_files="${MARKER_BACKUP_MIN_FILES:-1}"
+  [[ "$keep" =~ ^[0-9]+$ ]] || keep=30
+  [[ "$min_files" =~ ^[0-9]+$ ]] || min_files=1
+
+  # 判据 1: 远端列表非空 —— 读都读不到时不上传（空包覆盖 = 把好备份变成坏备份）
+  local remote_files
+  remote_files=$(rclone lsf "$state_dir" --files-only --retries 2 2>/dev/null | grep -c . || true)
+  [[ "$remote_files" =~ ^[0-9]+$ ]] || remote_files=0
+  if [ "$remote_files" -eq 0 ]; then
+    echo "🚨 marker 备份跳过: ${state_dir} 列表为空（读不到 marker），不上传以免覆盖好备份"
+    return 1
+  fi
+
+  local tmp
+  tmp=$(mktemp -d /tmp/marker_backup_XXXXXX) || return 1
+
+  rclone copy "$state_dir" "$tmp/sync_state" \
+    --retries 2 --low-level-retries 5 --timeout 10m >/dev/null 2>&1
+  local local_n
+  local_n=$(find "$tmp/sync_state" -type f 2>/dev/null | wc -l | tr -d ' ')
+  [[ "$local_n" =~ ^[0-9]+$ ]] || local_n=0
+  # 判据 2: 真下到了文件 —— 列表非空但下载为 0 是另一类读取异常，同样拒上传
+  if [ "$local_n" -lt "$min_files" ]; then
+    echo "🚨 marker 备份跳过: 下载后仅 ${local_n} 个文件（远端列表 ${remote_files} 个），判定读取异常，不上传"
+    rm -rf "$tmp"
+    return 1
+  fi
+
+  local ts arc
+  ts=$(date -u +%Y%m%d-%H%M%S)
+  {
+    echo "created_utc: ${ts}"
+    echo "source: ${state_dir}"
+    echo "listed_files: ${remote_files}"
+    echo "archived_files: ${local_n}"
+    echo "note: ${MARKER_BACKUP_NOTE:-}"
+  } > "$tmp/sync_state/MANIFEST.txt"
+
+  arc="$tmp/sync_state_${ts}.tar.gz"
+  if ! tar -czf "$arc" -C "$tmp" sync_state 2>/dev/null; then
+    echo "🚨 marker 备份失败: tar 打包失败"
+    rm -rf "$tmp"
+    return 1
+  fi
+
+  rclone mkdir "$dest_remote" >/dev/null 2>&1 || true
+  # 只增不删: copyto 覆盖同名（同秒重复执行）而不动其余历史归档
+  if ! rclone copyto "$arc" "${dest_remote}/sync_state_${ts}.tar.gz" \
+       --retries 3 --low-level-retries 5 --timeout 15m >/dev/null 2>&1; then
+    echo "🚨 marker 备份失败: 上传 ${dest_remote}/sync_state_${ts}.tar.gz 失败"
+    rm -rf "$tmp"
+    return 1
+  fi
+  # latest 只在"本包确实有货"之后才覆盖（上面的两道判据已保证）
+  rclone copyto "$arc" "${dest_remote}/sync_state_latest.tar.gz" \
+    --retries 3 --low-level-retries 5 --timeout 15m >/dev/null 2>&1 \
+    || echo "⚠️ marker 备份: latest 副本更新失败（本期归档 ${ts} 已落盘，不影响可用性）"
+
+  # 保留最近 keep 份: 只删**本函数命名的**过期归档（正则锁定），不整目录 sync/purge
+  # 不用 `head -n -N`（GNU-only，macOS 无），改为先数总数再取前 N 条
+  local all_dated total
+  all_dated=$(rclone lsf "$dest_remote" --files-only --retries 2 2>/dev/null \
+    | grep -E '^sync_state_[0-9]{8}-[0-9]{6}\.tar\.gz$' | sort || true)
+  total=$(printf '%s\n' "$all_dated" | grep -c . || true)
+  [[ "$total" =~ ^[0-9]+$ ]] || total=0
+  local pruned=0 drop_n dated
+  if [ "$total" -gt "$keep" ]; then
+    drop_n=$((total - keep))
+    while IFS= read -r dated; do
+      [ -n "$dated" ] || continue
+      rclone deletefile "${dest_remote}/${dated}" \
+        --retries 2 --low-level-retries 5 --timeout 5m >/dev/null 2>&1 \
+        && pruned=$((pruned + 1))
+    done < <(printf '%s\n' "$all_dated" | awk -v n="$drop_n" 'NR<=n')
+  fi
+
+  echo "✅ marker 打包备份完成: ${dest_remote}/sync_state_${ts}.tar.gz（${local_n} 个文件，保留 ${keep} 份，清理过期 ${pruned} 份）"
+  rm -rf "$tmp"
+  return 0
 }
 
 # ISO 8601 → epoch 秒（解析失败回退 0，调用方按"未知"处理 = 不跳过）
