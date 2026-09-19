@@ -14,6 +14,14 @@
 #   3. copy (alt==orig)   — 方法1: 原路径原名，仅验存在
 #   4. split_zip          — 方法3/4: 分卷 zip（需 7z；本环境无则标记跳过）
 #
+# 短哈希「不可逆」这件事由场景 6b 正反两面锁住:
+#   正 —— 只要 marker 有 original，任意 8 位 hex 目录都能还原到任意原路径，
+#         因为还原侧**根本不计算也不解析**短哈希（6b-1/6b-2）
+#   反 —— 8 位 hex 推不出原目录名（md5 单向 + 截断到 32bit），故还原侧
+#         不允许出现任何短哈希计算/解码分支（6b-3/6b-4）
+#   ⇒ 结论: 能还原，但**成立的唯一前提是 marker 的 original 字段还在**；
+#     marker 丢了，短哈希目录里的文件就只剩密文名，无法自愈回原路径。
+#
 # ⚠️ 安全约束（用户明确要求）:
 #   - **绝对不碰 rclone 源端**: SYNC_STATE_DIR 与 dest 全部指向 /tmp 临时目录，
 #     本脚本只 source file_restore.sh 的**纯函数**并显式传 dest，
@@ -74,8 +82,19 @@ mkdir -p "$DEST"
 TMP_BASE="$SANDBOX/tmpbase"
 mkdir -p "$TMP_BASE"
 
-# 计算短哈希（与 file_fix.sh 口径一致: md5(相对路径) 前 8 位）
+# 计算短哈希（口径必须与 file_fix.sh 一致: md5(相对路径) 前 8 位）
 sh8() { printf '%s' "$1" | md5sum | cut -c1-8; }
+
+# 防漂移自检: 上面这个 sh8 是"测试自己写的一份"，与生产 `_hash_dir_rel_for`
+#   一旦写歪，本测试会拿错哈希去还原、结果照样 PASS（因为 alt 与还原用的是
+#   同一个错值），问题只在生产才暴露 ⇒ 直接从生产文件里抽出真函数来比对，
+#   不一致就立刻 FAIL（不 source 整个 file_fix.sh 是因为它有大量作用域副作用）
+eval "$(sed -n '/^_hash_dir_rel_for() {/,/^}/p' "$REPO_ROOT/.github/scripts/openlist/file_fix.sh")"
+if [ "$(_hash_dir_rel_for 'movies/成人/2024 - Best Collection [4K]')" = "$(sh8 'movies/成人/2024 - Best Collection [4K]')" ]; then
+  ok "0a 短哈希口径与生产 _hash_dir_rel_for 一致（防测试自写哈希漂移）"
+else
+  bad "0a 短哈希口径与生产 _hash_dir_rel_for 一致（防漂移）"
+fi
 
 echo "=== 沙箱: $SANDBOX ==="
 echo
@@ -179,6 +198,40 @@ if command -v 7z >/dev/null 2>&1 || command -v 7za >/dev/null 2>&1; then
   fi
 else
   skip "6a-c 分卷 zip 还原（本机无 7z）"
+fi
+
+# ────────────────────────────────────────────────────────────
+# 场景 6b: 短哈希「不可逆」的正反两面
+#   正: 只要 marker 有 original，任意 8 位 hex 目录都能还原到任意原路径
+#       （还原全程不解析/不反推目录名 —— 哈希值本身不参与决策）
+#   反: 没有 marker 的 original 时，光看 8 位 hex **推不出**原目录名
+#       （md5 单向 + 截断到 32bit ⇒ 不存在解码路径）
+# ────────────────────────────────────────────────────────────
+echo "--- 场景6b: 短哈希不可逆 —— 还原只认 marker 的 original ---"
+HASH_ANY="deadbeef"   # 故意用与任何真实目录都不对应的哈希值
+ORIG6B="any/where/完全无关的原名.mkv"
+mkdir -p "$DEST/$HASH_ANY"
+printf 'CONTENT-SIX-B' > "$DEST/$HASH_ANY/whatever.mkv"
+st=$(_restore_one_entry "$DEST" "$ORIG6B" "$HASH_ANY/whatever.mkv" \
+      "rclone copyto（短哈希目录 ${HASH_ANY} + 原文件名）" "$TMP_BASE" "")
+[ "$st" = "OK" ] && ok "6b-1 任意 8 位 hex 目录 → 任意原路径均可还原（哈希不参与决策）" \
+                 || bad "6b-1 任意 8 位 hex 目录可还原（实际: $st）"
+[ "$(cat "$DEST/$ORIG6B" 2>/dev/null)" = "CONTENT-SIX-B" ] \
+  && ok "6b-2 还原落点与原内容都对" || bad "6b-2 还原落点与原内容都对"
+# 反面: 8 位 hex 无法反推（md5 单向 + 截断到 32bit）⇒ 还原路径里**一次都不该出现**
+#   短哈希计算。这里断言的正是这条不变量: file_restore.sh 与 restore_info.jq
+#   全程不计算 md5 短名（它们只有临时目录名与内容指纹用到 md5）。
+#   ⇒ 一旦有人在还原侧加"反推目录名"，本断言立刻红。
+if grep -n "md5sum" "$REPO_ROOT/.github/scripts/openlist/file_restore.sh" \
+     | grep -qE 'cut -c1-8'; then
+  bad "6b-3 还原侧不应出现短哈希计算（发现 cut -c1-8 的 md5 用法）"
+else
+  ok "6b-3 还原侧零短哈希计算（还原 100% 依赖 marker 的 original 字段）"
+fi
+if grep -q 'base64 -d' "$REPO_ROOT/.github/scripts/openlist/file_restore.sh"; then
+  bad "6b-4 短哈希目录不应有 base64 解码分支（不可逆，仅 base64URL 目录可解）"
+else
+  ok "6b-4 还原侧无短哈希解码分支（与 base64URL 目录区别对待正确）"
 fi
 
 echo
