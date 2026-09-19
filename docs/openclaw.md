@@ -330,6 +330,18 @@ emoji 标题 + ━━━ 分隔线 + 键值/分节区 + 统一收尾行 `⏱ 已
 - **主用（clirelay）**：`create-clirelay-archive.sh` —— postgres 运行中 `pg_dump` 刷新
   `sql/clirelay-latest.sql` → tar 打包 `auths/ + config.yaml + .env + docker-compose.yml + sql/`
   （**跳过 postgres-data/ redis-data 原始目录**：Redis 可重建，PG 走 SQL 导入恢复）→ `CliRelay.tar.gz`。
+  - **统计/用量数据没有 `stats.json` 那样的独立文件，全在 `sql/*.sql` 里**（CliRelay 的运行时主库是
+    PostgreSQL，请求日志由 `request-log-storage` 落库）。因此「统计到底在不在包里」不能靠目录结构判断，
+    脚本会把归档内容清单（含每份文件大小）打进日志，直接读日志即可。
+  - **pg_dump 必须先落临时文件、成功后再 `mv` 覆盖**，且输出过小（<200B）时同样不覆盖。
+    > 旧实现直接重定向到 `clirelay-latest.sql`：shell 在 pg_dump 启动前就已截断旧 SQL，
+    > 中途失败时磁盘上剩半截 dump、旧的好 SQL 已毁，日志却说「保留旧 SQL 继续」。
+    > 半截 dump 仍能过体积校验并上传 → 下轮 `psql -v ON_ERROR_STOP=1` 导入失败 →
+    > `start_clirelay` 返回 1 → 回退 CLIProxyAPI → 回退后 postgres 不启动、归档切去
+    > CLIProxyAPI 脚本，**`CliRelay.tar.gz` 从此不再刷新，永久锁死在回退态**。一次瞬时
+    > dump 失败即可触发（2026-09-19 修复）。
+  - 临时 dump 文件放在部署目录根（不在 `sql/` 内）：`sql/` 整个目录会被打进包，
+    失败残留混进去就污染了归档（`trap` 只在脚本退出时清，而 `tar` 在那之前执行）。
 - **回退态（cliproxyapi）**：现有 `create-cliproxyapi-archive.sh` 逻辑不变，
   额外把 `/tmp/local_CliRelay/auths` 打进包内 `clirelay-auths/`（token 双保险，恢复侧忽略未知目录）。
 - 20 分钟后台归档循环与最终归档（Stop OpenClaw and Final Archive）均按 `ACTIVE_BACKEND` 分支；
