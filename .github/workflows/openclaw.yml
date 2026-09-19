@@ -1425,6 +1425,81 @@ jobs:
               "$WB_UPDATE" "$_wb_fail_reason" "$WB_TAIL" 0
           fi
 
+      # glm-proxy：BigModel/GLM 本地反代（Anthropic ↔ OpenAI 协议转换）。
+      # 位置紧跟 workbuddy-gateway：两者同为「宿主进程 + 本地盘运行目录」形态，
+      # 且都要在 Notify Tailscale SSH entry 之前起来（该步骤会读 AI 网关状态）。
+      # 收尾停止见 Stop OpenClaw and Final Archive 的 3c 步（在 workbuddy 的 3b 之后）。
+      - name: Run glm-proxy (GLM reverse proxy)
+        id: run_glm_proxy
+        continue-on-error: true
+        env:
+          # send_tg 发送闸 + 收尾区接线（缺任一则本步骤通知静默跳过）
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          # 通知真源在 step 顶层 source 一次（勿挪进函数体，理由见 workbuddy 步骤同名注释 / 规范 4.4）
+          source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+
+          # 代码/脚本持久化在 Dropbox，运行目录落本地盘 —— 与 workbuddy-gateway 同口径：
+          #   1. rclone 挂载点无法执行文件（权限位由 --file-perms 合成，chmod +x 是空操作），
+          #      故必须用 bash 显式调用，直接 ./glm-proxy.sh 会报 bad interpreter。
+          #   2. 服务日志/pid 也写本地盘，避免 FUSE 挂载点上高频读写卡住。
+          GLM_DIR="/dropbox/self-hosted/glm-proxy"
+          GLM_RUN_DIR="/tmp/local_glm_proxy"
+          GLM_PORT="8787"
+          GLM_LOG="$GLM_RUN_DIR/logs/glm-proxy.log"
+          mkdir -p "$GLM_RUN_DIR/logs"
+
+          GLM_OK=0
+          GLM_REASON=""
+          if curl -fsS --max-time 3 "http://127.0.0.1:${GLM_PORT}/healthz" >/dev/null 2>&1; then
+            # 端口已有实例在响应：多为上一轮残留进程，直接复用，不重复起
+            GLM_OK=1
+            GLM_REASON="端口 ${GLM_PORT} 已有实例在响应（复用）"
+          elif [ ! -f "$GLM_DIR/glm-proxy.sh" ]; then
+            GLM_REASON="脚本缺失：$GLM_DIR/glm-proxy.sh"
+          elif [ ! -f "$GLM_DIR/server.mjs" ]; then
+            GLM_REASON="代码缺失：$GLM_DIR/server.mjs"
+          else
+            echo "Starting glm-proxy on ${GLM_PORT}..."
+            if bash "$GLM_DIR/glm-proxy.sh" start 2>&1 | tail -n 20; then
+              # 启动脚本已探过 healthz；这里再用真实消息做端到端闸门，
+              # 避免「进程活着但上游不可用」被判成成功
+              if bash "$GLM_DIR/glm-proxy.sh" selftest 2>&1 | tail -n 10; then
+                GLM_OK=1
+                GLM_REASON="已就绪 · 自检消息已收到回答"
+              else
+                GLM_REASON="自检未通过：未收到有效回答（多为上游 429/凭据过期）"
+              fi
+            else
+              GLM_REASON="启动脚本返回非 0（未在 30 秒内就绪）"
+            fi
+          fi
+
+          # 通知口径：成功不打扰（接力轮每轮都跑本步骤，逐轮推送会刷屏），仅失败告警
+          if [ "$GLM_OK" != "1" ]; then
+            GLM_TAIL="$(tail -n 15 "$GLM_LOG" 2>/dev/null || true)"
+            # 日志尾部同时打到 stdout：<pre> 只进 Telegram，CI 日志里看不到
+            echo "--- glm-proxy.log tail ---"
+            printf '%s\n' "${GLM_TAIL:-<empty>}"
+            echo "--- end glm-proxy.log tail ---"
+            _m=""
+            tg_add_title _m "⚠️ glm-proxy 未就绪"
+            tg_add_kv _m "端口" "$GLM_PORT"
+            tg_add_kv _m "原因" "$GLM_REASON"
+            tg_add_path _m "代码目录" "$GLM_DIR"
+            if [ -n "$GLM_TAIL" ]; then
+              tg_add_note _m "日志尾部"
+              tg_add_block _m "<pre>$(escape_html "$GLM_TAIL")</pre>"
+            fi
+            tg_add_footer _m
+            send_tg "$_m"
+          else
+            echo "✅ [glm-proxy] ${GLM_PORT} 已就绪（${GLM_REASON}）"
+          fi
+
       - name: Notify Tailscale SSH entry
         if: ${{ always() && steps.ts_ssh.outcome == 'success' }}
         continue-on-error: true
@@ -2839,6 +2914,29 @@ jobs:
             wb_stop_notify "⚠️ workbuddy-gateway 已停止 · 进程残留" "强制结束后仍有进程残留"
           else
             wb_stop_notify "⛔ workbuddy-gateway 已停止" "服务已退出 · 数据目录保持原状"
+          fi
+
+          # 3c. glm-proxy：同为宿主进程（非容器），不会随 job 结束自动退出，
+          # 必须显式停，否则残留进程会一直持有 8787 并继续转发请求。
+          # 顺序在 workbuddy（3b）之后：两者互不依赖，但 3c 之后就是容器归档，
+          # 宿主进程清理集中放在 3b/3c 两段便于对照。
+          echo "3c. Stopping glm-proxy..."
+          GLM_DIR="/dropbox/self-hosted/glm-proxy"
+          if [ -f "$GLM_DIR/glm-proxy.sh" ]; then
+            # 脚本自带优雅退出 + 20 秒后强杀 + pkill 兜底，这里不再重复实现
+            bash "$GLM_DIR/glm-proxy.sh" stop 2>&1 | tail -n 5 || \
+              echo "⚠️ glm-proxy 停止脚本返回非 0"
+          else
+            echo "⚠️ 未找到 $GLM_DIR/glm-proxy.sh，按命令行兜底清理"
+          fi
+          # 兜底：按命令行匹配清残留（脚本未覆盖到的情形，如手动起的实例）
+          pkill -f "glm-proxy/server.mjs" 2>/dev/null || true
+          GLM_STILL_RUNNING=0
+          if curl -fsS --max-time 3 "http://127.0.0.1:8787/healthz" >/dev/null 2>&1; then
+            GLM_STILL_RUNNING=1
+            echo "⚠️ glm-proxy 仍在监听 8787"
+          else
+            echo "✅ glm-proxy 已停止"
           fi
 
           # 用法与版式同 send_telegram_alert（<对象> <结论> <原因> [原始输出]）；
