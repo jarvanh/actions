@@ -431,8 +431,10 @@ jobs:
 
       # ===== 一键还原修复文件 =====
       # 把 marker fixed_files 中的替代文件还原为原路径原文件名:
-      #   改名类 → rclone move 服务端移动；压缩/分卷类 → 下载还原后回传
-      #   原路径；成功后清理目标端替代文件并从 marker 移除条目。
+      #   改名类 → rclone moveto 服务端移动（**必须 moveto**: move 的 dst 被当目录，
+      #     会建出以目标文件名命名的目录 —— 见 file_restore.sh 内注释）；
+      #     压缩/分卷类 → 下载还原后回传原路径；
+      #     成功后清理目标端替代文件并从 marker 移除条目。
       # 完成后发送 Telegram 汇总。restore_task 指定任务名（backup/task0-5，
       # 即 marker 文件名前缀）或 all。
       - name: "⚠️ Restore: 一键还原修复文件"
@@ -455,7 +457,8 @@ jobs:
       #      按 marker size_bytes 校验
       # 全程不删改目标端，可重复执行补齐失败条目。
       # 依赖 marker（与源端同在 OneDrive；极端情况 OneDrive 整体丢失时
-      # 需外置的 marker 备份才能映射修复条目）。
+      # 需外置的 marker 备份才能映射修复条目 —— 收尾每轮打包到
+      # dropbox:self-hosted/openlist/sync_state_backup/，见 §13）。
       - name: "⚠️ Restore: 灾难恢复 目标端→源端"
         if: ${{ inputs.run_mode == '⚠️ 灾难恢复 · 目标端→源端' }}
         timeout-minutes: 240
@@ -701,6 +704,17 @@ jobs:
           echo "镜像 sync_state → dropbox..."
           rclone sync onedrive:/logs/sync_state dropbox:sync_state_mirror --create-empty-src-dirs 2>&1 | tail -2 || true
           echo "sync_state 镜像完成: $(rclone lsf dropbox:sync_state_mirror 2>/dev/null | wc -l | tr -d ' ') 个文件"
+
+          # ⚠️ 镜像是 sync（**删除会传播**），源端 marker 被删/被清空时副本会一起没，
+          # 挡不住"OneDrive 上的数据没了" ⇒ 另做一份**打包归档**（只增不删、带保留期）。
+          # 短哈希不可逆 ⇒ 丢 marker = 短哈希目录里的文件只剩密文名、无法自愈回原路径，
+          # 这是这条兜底链路唯一无法自愈的单点（详见 §13）。
+          echo "打包备份 sync_state → dropbox..."
+          if backup_sync_state_to_dropbox; then
+            echo "marker 打包备份成功"
+          else
+            echo "⚠️ marker 打包备份未成功（不阻断收尾，见上方原因；持续失败需人工介入）"
+          fi
 
           # P0 趋势: 追加本轮 {历时/净传/剩余} 到 trend.jsonl 并回传，
           # 发送 "📈 同步趋势" 通知（近 5 轮速率 + 剩余 + 预计清零时间）。
