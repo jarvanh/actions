@@ -3709,6 +3709,25 @@ mkdir 409(原目录 kate-bloom) → API 200 → 复核不存在（假成功，§
     已写入 §0 ③ 与 `file_restore.sh` 文件头注释；**外置备份方案见 §13**（用户据本条风险
     指示落地）。
 
+- 2026-09-19（+08）· **给一键还原加 try run（只读预演）—— 独立 workflow + 只读白名单护栏**
+  用户要求："给出备份文件的完整路径和名称、marker 记录的原文件完整路径和名称、实际执行
+  还原的完整路径和名称。只是 try run，不能修改任何源端、目标端数据。"
+  - 落地: `restore_tryrun.sh`（281 行，`restore_try_run`）+ `openlist-restore-tryrun.yml`
+    （独立 workflow，concurrency `openlist-restore-tryrun`）+ `test_restore_tryrun.sh`
+    （33 断言，本机 33/33）。模块已接进 `load_all.sh` L6。
+  - 三条路径: ① 备份 `<dest>/<alternative>` · ② marker 原文件 `<dest>/<original>` ·
+    ③ 实际执行落点（move 类 = `moveto` 的 dst = ②；分卷类 = 本地产物 `copyto` 的 dst = ②；
+    `alt==orig` 记 noop）· 另附 ④ 源端原路径 `<source_path>/<original>`。
+    分类**复用生产** `_restore_classify_kind`，不另写判定（防口径漂移）。
+  - 零写入做成**结构性**护栏（不是靠自觉，见 §14.3）：所有远端调用走 `_tryr_rclone_read()`
+    只读白名单，写子命令一律拒绝执行 return 2；测试场景 4（单调用）与场景 5（端到端
+    目标端逐字节不变）双重锁住。
+  - 一个易骗人的分支已处理（§14.4）: `openlist:` 是容器内 WebDAV，容器没拉起就连不上；
+    若按"列不到=不在"判，会把"我没起容器"伪装成"备份全丢了"（§0 2026-09-18 同型教训）。
+    现降级为「未核对」且不计入缺失，三条路径照给。
+  - 未生产轮验证（本轮只是新增独立 workflow，不改动主轮 openlist.yml 的任何代码路径；
+    主轮无 push 触发，故既有在跑轮不受影响）。
+
 ---
 
 ## 13. marker 丢失风险与外置备份（2026-09-19，用户指示落地）
@@ -3772,3 +3791,49 @@ rclone copy /tmp/sync_state onedrive:/logs/sync_state
 
 `test_marker_backup.sh`（18 断言）锁住：正常路径产出归档+latest+MANIFEST、
 两道拒上传门、只增不删（存量历史不被删）、保留期只删该删的、目标端他人文件永不删。
+
+---
+
+## 14. 一键还原 try run（只读预演，2026-09-19 用户指示落地）
+
+### 14.1 它解决什么
+
+一键还原（`restore_fixed_files`）是**写操作**：改名类用 `rclone moveto` 在目标端把替代文件
+真的搬回原路径；分卷类下载合卷解压后 `copyto` 回原路径，并删除目标端分卷；成功后还会
+从 marker 移除条目。真跑之前只能"读 marker 脑补"，而脑补错了的代价是**目标端文件被搬到
+错位置** —— 叠加 §13「短哈希不可逆」，搬错就再也回不去。
+
+`openlist-restore-tryrun.yml` + `restore_tryrun.sh` 把"会怎么走"算出来，**一个字节都不写**。
+
+### 14.2 三条路径（交付物）
+
+| 字段 | 取值 | 说明 |
+|---|---|---|
+| ① 备份文件 | `<dest_path>/<alternative>` | 目标端现存形态（短哈希名 / 编码目录 / 分卷首卷） |
+| ② marker 记录的原文件 | `<dest_path>/<original>` | marker `fixed_files[].original` —— 短哈希不可逆，这是**唯一**来源 |
+| ③ 实际执行还原的完整路径 | move 类 = `moveto` 的 dst（= ②）；分卷类 = 本地产物 `copyto` 的 dst（= ②）；`alt==orig` = noop（只校验存在） | 分卷类与改名类**落点相同**，差别只在"先在本地还原出内容" |
+| ④ 源端原路径 | `<source_path>/<original>` | 灾难恢复口径，交叉核对用 |
+
+### 14.3 零写入是结构性的，不是"小心一点"
+
+§0 教训（2026-09-18）：靠自觉的只读约束迟早被下一个加功能的人破坏。故预演模块**所有**
+远端调用一律经 `_tryr_rclone_read()`，白名单只放行 `ls/lsd/lsf/lsl/lsjson/cat/size/version`，
+命中 `copy/copyto/move/moveto/sync/delete/deletefile/purge/rcat/mkdir/rmdirs` 等**一律拒绝
+执行并 return 2**。谁往里加写命令都会被护栏当场挡下。
+
+### 14.4 一个易骗人的分支：目标端不可读 ≠ 备份缺失
+
+`openlist:` 是容器内 WebDAV，容器没拉起就**连不上**。若直接按"列不到 = 不在"判，
+整份预演会红成一片，把"我没起容器"伪装成"备份全丢了"（§0 教训：以列表为准的判据
+会把成功判成失败）。
+
+故加一层 `_tryr_dst_readable()`：目标端整体不可读时降级为**「未核对」**，且**不计入
+备份缺失**；三条路径由 marker 推导，不受影响，仍然准确。`check_exists=否` 时干脆
+不访问目标端（秒级出结果、不起容器）。
+
+### 14.5 验证
+
+`test_restore_tryrun.sh`（33 断言）锁住：三条路径推导正确（含"必须是 moveto 不是 move"）、
+分类与生产同源（分卷→split、alt==orig→noop、分卷给出全集 glob）、**零写入护栏**
+（单调用层 + 端到端目标端逐字节不变）、不可读降级为"未核对"而非"缺失"、noop 不计入
+缺失、tsv 10 列、任务过滤与生产 `restore_task` 同口径。

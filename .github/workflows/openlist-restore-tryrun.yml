@@ -1,0 +1,189 @@
+# openlist 一键还原 try run（只读预演）
+#
+# 为什么单独一个 workflow（不塞进 openlist.yml 的 run_mode）:
+#   · **副作用边界完全不同**: 主轮会写目标端（moveto / copyto / 删分卷）、发通知、
+#     自续接力；本 workflow **一个字节都不写**。混在同一个 run_mode 里，"这次到底写不写"
+#     就全靠记住选了哪个选项 —— 而这种事迟早记错一次。
+#   · **并发语义不同**: 它是只读的，可以同时跑（独立 concurrency 组），不必像主轮那样
+#     单例串行；也不该占用主轮的 6h 预算（单次分钟级）。
+#   · **使用时机不同**: 真跑一键还原之前先看一眼，或 marker 攒了一段时间想核对
+#     "这些条目会被还原到哪"，都不该触发一整个同步轮次。
+#
+# 它回答什么（每条修复条目给出三条完整路径 + 一条交叉核对路径）:
+#   ① 备份文件（目标端现存形态）      = <dest_path>/<alternative>
+#   ② marker 记录的原文件             = <dest_path>/<original>
+#   ③ 实际执行还原的完整路径           = 生产那条命令真正落地的路径
+#        move 类  → rclone moveto 的 dst（= ②，服务端一步改名归位）
+#        split 类 → 本地合卷解压产物 rclone copyto 的 dst（= ②，落点不变）
+#        noop     → 原路径原名，只校验存在，不搬任何东西
+#   ④ 源端原路径（灾难恢复口径）       = <source_path>/<original>
+#   另给出"备份文件在不在"、"原路径是不是已经存在"的核对结果。
+#
+# 零写入是**结构性**的，不是"小心一点": 预演模块所有远端调用走只读白名单
+#   （只放行 ls/lsd/lsf/lsl/lsjson/cat/size/version），写子命令一律被拒绝执行，
+#   由 test_restore_tryrun.sh 场景 4/5 锁住。
+#
+# 安全边界（与 openlist-diag.yml 同口径）: 不装 cloudflared、不碰隧道、不回传 DB；
+#   容器名固定 openlist，拉的是 dropbox 上的生产配置副本（`--restart=no`，用完即删）。
+#
+# 什么时候可以不起容器: check_exists=否 时只做 marker 推导（秒级），不访问目标端
+#   ⇒ 三条路径照样准确，只是"在不在"会显示"未核对"。
+name: openlist-restore-tryrun
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "任务名（marker 文件名前缀，同生产 restore_task；留空/all = 全部 marker）"
+        required: false
+        type: string
+        default: "all"
+      check_exists:
+        description: "核对目标端文件在不在（需拉起 OpenList 容器，约 +6 分钟）: 否 = 只做 marker 推导，秒级出结果、不起容器"
+        required: false
+        type: choice
+        default: "是"
+        options:
+          - "是"
+          - "否"
+      send_tg:
+        description: "发送 Telegram 汇总"
+        required: false
+        type: choice
+        default: "是"
+        options:
+          - "是"
+          - "否"
+
+# 独立并发组: 只读预演可与主轮并行，不与 openlist-singleton / -diag / -fix-check 互等
+concurrency: openlist-restore-tryrun
+
+jobs:
+  tryrun:
+    runs-on: ubuntu-latest
+    # 拉库 + 就绪 ≈ 6 分钟 + 逐条 lsf 核对（每条目 1-2 次列举）；给足余量
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      OPENLIST_ADMIN_PASSWORD: ${{ secrets.OPENLIST_ADMIN_PASSWORD }}
+      TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: rclone-install
+        run: |
+          set -e
+          bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" install
+
+      - name: rclone-config
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE }}
+        run: |
+          set -e
+          # 与主 workflow 同一套配置来源: 幂等（配置一致时无变更），主 run 每轮都在做
+          bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" config
+
+      - name: 验证远端连通
+        run: |
+          rclone lsf dropbox: | head -5
+
+      # ⚠️ 本段与 openlist-diag.yml / openlist-fix-check.yml 的「拉起 OpenList 容器」
+      #    **同源**（逐行等价）—— 三处都改时必须同步，否则各自读的不是同一份配置
+      #    （"用不同的库验证等于测了个别的东西"）。
+      #    只在 check_exists=是 时执行: 预演的三条路径只依赖 marker，核对存在性才需要
+      #    访问 openlist: 远端（该远端是容器内 WebDAV，容器不在就连不上）。
+      - name: 拉起 OpenList 容器（只读核对副本）
+        if: ${{ inputs.check_exists != '否' }}
+        env:
+          OL_CONTAINER: openlist
+        run: |
+          set -e
+          docker rm -f "$OL_CONTAINER" 2>/dev/null || true
+          sudo mkdir -p /opt/openlist-data
+          sudo chmod 0777 /opt/openlist-data
+          # 与主 workflow 完全相同的拉库口径（含排除项）
+          rclone copy dropbox:self-hosted/openlist/data /opt/openlist-data \
+            --exclude "data.db-wal" --exclude "data.db-shm" --exclude "data.db-journal" \
+            --exclude "log/**" --exclude "temp/**"
+          echo "拉取完成: $(ls -la /opt/openlist-data/ | tail -n +2 | wc -l) 个条目"
+          docker run -d --restart=no -v /opt/openlist-data:/opt/openlist/data \
+            -p 5244:5244 -e PUID=0 -e PGID=0 -e UMASK=022 \
+            --name="$OL_CONTAINER" openlistteam/openlist:latest
+
+      - name: 校验 OpenList 容器运行状态
+        if: ${{ inputs.check_exists != '否' }}
+        run: |
+          set -e
+          source "$GITHUB_WORKSPACE/.github/scripts/openlist/load_all.sh"
+          echo "等待 OpenList 就绪..."
+          if wait_openlist_ready; then
+            echo "✅ OpenList 容器及 HTTP 服务正常就绪"
+          else
+            echo "❌ OpenList 容器未能就绪（预演仍会给出三条路径，但存在性会显示'未核对'）"
+          fi
+
+      - name: 运行一键还原 try run（只读预演）
+        env:
+          # inputs 一律经 env 传入（README「注入面」: 不做 ${{ }} 直接内插 bash）
+          TRYRUN_TASK_INPUT: ${{ inputs.task }}
+          TRYRUN_CHECK_INPUT: ${{ inputs.check_exists }}
+          TRYRUN_TG_INPUT: ${{ inputs.send_tg }}
+        run: |
+          # 中文选项 → 脚本口径的映射放在 bash 里做（不在 YAML 里内插）
+          export TRYRUN_TASK="${TRYRUN_TASK_INPUT:-all}"
+          [ -z "$TRYRUN_TASK" ] && export TRYRUN_TASK=all
+          case "$TRYRUN_CHECK_INPUT" in
+            否|0|no) export TRYRUN_CHECK_EXISTS=0 ;;
+            *)       export TRYRUN_CHECK_EXISTS=1 ;;
+          esac
+          case "$TRYRUN_TG_INPUT" in
+            否|0|no) export TRYRUN_SEND_TG=0 ;;
+            *)       export TRYRUN_SEND_TG=1 ;;
+          esac
+          export TRYRUN_WORK=/tmp/restore_tryrun
+
+          source "$GITHUB_WORKSPACE/.github/scripts/openlist/load_all.sh"
+
+          # 恒不因"有备份缺失"把 step 判红: 缺失是**预演结论**之一，红了会跳过
+          # artifact 上传（同 openlist-diag / -fix-check 的取舍）
+          set +e
+          restore_try_run "$TRYRUN_TASK"
+          _rc=$?
+          set -e
+          echo "TRYRUN_EXIT=$_rc" >> "$GITHUB_ENV"
+          echo ""
+          echo "退出码 ${_rc}（0=正常产出预演 · 2=marker 读不到等环境问题）"
+          echo "=========== 预演报告（逐条三路径）==========="
+          cat /tmp/restore_tryrun/tryrun.log 2>/dev/null || echo "(无报告文件)"
+
+      - name: 上传预演报告
+        if: always()
+        # 报告已全量打印进 run 日志，artifact 只是方便取用；该 action 不可用时
+        # 不该把整次预演判失败
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ol-restore-tryrun-report
+          path: |
+            /tmp/restore_tryrun/tryrun.log
+            /tmp/restore_tryrun/tryrun.tsv
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: 收尾（容器日志兜底 + 结论）
+        if: always()
+        env:
+          OL_CONTAINER: openlist
+        run: |
+          docker logs "$OL_CONTAINER" 2>&1 | tail -40 || true
+          docker rm -f "$OL_CONTAINER" 2>/dev/null || true
+          case "${TRYRUN_EXIT:-unknown}" in
+            0) echo "✅ 结论: 预演已产出 —— 看上方逐条三路径（① 备份文件 / ② marker 原文件 / ③ 实际落点）" ;;
+            2) echo "⚠️ 结论: 环境问题（marker 目录读不到）—— 检查 rclone 配置与 onedrive:/logs/sync_state" ;;
+            *) echo "⚠️ 结论: 脚本未产出退出码（可能 setup 阶段就失败）—— 看上方日志" ;;
+          esac
+          echo "ℹ️ 本轮全程只读: 源端与目标端均未写入/移动/删除任何数据"

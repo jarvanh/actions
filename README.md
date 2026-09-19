@@ -35,6 +35,7 @@ proxy-speedtest/            测速结果数据
 |---|---|
 | `openlist.yml` | OneDrive → OpenList 网盘同步（**本文档重点**） |
 | `openlist-diag.yml` | OpenList 后端可写性诊断（独立 concurrency，单次 ~4min；**不搬数据**，见下文「后端可写性诊断」） |
+| `openlist-restore-tryrun.yml` | 一键还原 **try run（只读预演）**：逐条给出「备份文件 / marker 原文件 / 实际执行还原」三条完整路径，**不写任何数据**（见下文「一键还原 try run」） |
 | `self-hosted_backup.yml` | 自建服务备份到 OneDrive |
 | `github_backup_all.yml` | 备份全部 GitHub 仓库到 OneDrive |
 | `emby.yml` | Emby 媒体服务器 + 302 直链 —— 详见 [`docs/emby.md`](docs/emby.md) |
@@ -81,6 +82,7 @@ proxy-speedtest/            测速结果数据
 | | `file_fix.sh` | 1705 | 单文件修复的 4 种方法 + 目录可写性三态预检 + 短哈希目录兜底 |
 | | `file_fix_pipeline.sh` | 1395 | 修复管线编排（方法轮换 + 增量持久化） |
 | | `file_restore.sh` | 655 | 修复文件还原（目标端 → 原路径 / 源端） |
+| | `restore_tryrun.sh` | 281 | 一键还原 **try run**（只读预演：三条完整路径推导 + 只读白名单护栏；`restore_try_run`） |
 | **task** | `task_preview.sh` | 526 | 任务预览（大小估算、跳过预判、未传量估算） |
 | | `task_engine.sh` | 2284 | 任务注册表与编排（分批、轮转、阶段行生产） |
 | **基础** | `utils.sh` | 152 | 通用工具（格式化、日志判定；转义/树形渲染已收敛到 `telegram/tg_notify.sh`） |
@@ -345,6 +347,24 @@ workflow 的 `run_mode` 单选互斥：
 | `⚠️ 灾难恢复 · 目标端→源端（删除源端多余文件）` | `rebuild_source_from_target`（**破坏性**） |
 
 带 ⚠️ 的三项会改写目标端或回传/删改源端，运行前核对 `restore_task` 任务名。
+
+### 一键还原 try run（只读预演）
+
+真跑「⚠️ 还原」之前先看一眼会怎么走，走 **`openlist-restore-tryrun.yml`**（独立 workflow，
+独立 concurrency，分钟级，**一个字节都不写**）。逐条给出三条完整路径 + 一条交叉核对路径：
+
+| 字段 | 取值 |
+|---|---|
+| ① 备份文件（目标端现存形态） | `<dest_path>/<alternative>` |
+| ② marker 记录的原文件 | `<dest_path>/<original>` |
+| ③ 实际执行还原的完整路径 | move 类 = `rclone moveto` 的 dst（= ②）；分卷类 = 本地合卷解压产物 `copyto` 的 dst（= ②）；`alt==orig` 记为 noop（只校验存在，不搬） |
+| ④ 源端原路径（灾难恢复口径） | `<source_path>/<original>` |
+
+另核对「备份文件在不在 / 原路径是否已存在」。零写入是**结构性**保证：预演模块所有远端
+调用走只读白名单（只放行 `ls/lsd/lsf/lsl/lsjson/cat/size/version`），写子命令一律拒绝执行
+（`test_restore_tryrun.sh` 场景 4/5 锁住）。入参 `check_exists=否` 时只做 marker 推导、
+不拉起容器（秒级），三条路径照样准确，仅存在性显示「未核对」——**不会**把"没起容器"
+误报成"备份丢了"。
 
 ---
 
