@@ -395,7 +395,7 @@ _bulk_fold_record_landed() {
     # method 文本含"短哈希目录 <hash>" → restore_info.jq 判为 hash_dir 类型
     local alt="${hash8}/${rel}"
     local method="rclone copyto（短哈希目录 ${hash8} + 原文件名）"
-    local restore="rclone move '${dest_path}/${alt}' '${dest_path}/${mf}'"
+    local restore="rclone moveto '${dest_path}/${alt}' '${dest_path}/${mf}'"
 
     echo "  ✅ 折叠落盘 · ${rel} (${fsize})" | tee -a "$LOG_FILENAME"
     echo "${mf}|${alt}|${method}|${restore}|${fsize}|${fbytes}|copyto_original|" >> "$fix_list"

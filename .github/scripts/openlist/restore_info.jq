@@ -34,8 +34,8 @@ def restore_info($orig; $alt; $method; $src; $dst):
       # 对象值不能裸用 + 拼接（{a: "x" + "y"} 非法），必须括号包裹——见文件头注释
       summary: ("整条目录路径折叠为 8 位 md5 短哈希目录（规避目录名过长/敏感词/整条加密路径超后端上限）" + (if $has_short_hash then "，文件名也替换为短哈希名" else "，文件名保持原样" end)),
       steps:   ["短哈希不可逆: 原目录名只能从 marker 的 original 字段取，勿试图反推",
-                ("服务端一步归位: rclone move \"${DST}/" + $alt + "\" \"${DST}/" + $orig + "\"（目录与文件名同时复原）")],
-      script:  ("set -euo pipefail\nSRC=\"" + $src + "\"\nDST=\"" + $dst + "\"\nORIG=\"" + $orig + "\"\nALT=\"" + $alt + "\"\n# 短哈希目录名不可逆，原路径以 marker 的 original 为准\necho \"替代路径: $ALT\"\necho \"原路径:   $ORIG\"\nrclone move \"${DST}/${ALT}\" \"${DST}/${ORIG}\" --progress\n# 如需回传源端: rclone copyto \"${DST}/${ORIG}\" \"${SRC}/${ORIG}\"")}
+                ("服务端一步归位: rclone moveto \"${DST}/" + $alt + "\" \"${DST}/" + $orig + "\"（目录与文件名同时复原；必须用 moveto: move 会把 dst 当目录，建出以目标文件名命名的目录）")],
+      script:  ("set -euo pipefail\nSRC=\"" + $src + "\"\nDST=\"" + $dst + "\"\nORIG=\"" + $orig + "\"\nALT=\"" + $alt + "\"\n# 短哈希目录名不可逆，原路径以 marker 的 original 为准\necho \"替代路径: $ALT\"\necho \"原路径:   $ORIG\"\nrclone moveto \"${DST}/${ALT}\" \"${DST}/${ORIG}\" --progress\n# 如需回传源端: rclone copyto \"${DST}/${ORIG}\" \"${SRC}/${ORIG}\"")}
     elif $has_short_hash then {kind:"short_hash_rename",
       summary: "文件名替换为 8 位 md5 前缀（规避密文名超长），内容未变",
       steps:   ["下载目标端 " + $alt, "重命名为原文件名: " + $orig_name],
