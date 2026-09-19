@@ -363,7 +363,8 @@ emoji 标题 + ━━━ 分隔线 + 键值/分节区 + 统一收尾行 `⏱ 已
   （≥12 字符 + 大小写 + 非字母数字），不合规会被 `clirelay-init` 替换。
 - Dropbox 的 `CLIProxyAPI.tar.gz` 内 config.yaml 的 secret-key 也保持同步，
   保证回退恢复后的管理 API 密钥不回退到旧值。
-- 统计/用量/审计数据存 postgres（本地 `data/` SQLite 为空），随 pg_dump 进入归档，不丢失。
+- 统计/用量/审计数据存 postgres（本地 `data/` SQLite 为空），随 pg_dump 进入归档，不丢失
+  —— 前提是 dump 成功，失败/异常小时会保留上一轮的 SQL（见上「归档双轨」）。
 
 ### clirelay-updater 版本提示（已知现象）
 
