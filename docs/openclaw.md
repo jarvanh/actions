@@ -110,15 +110,24 @@
 
 ### 机制③：存储三区（主包 / 失败隔离 / 快照池）
 
+三区**全部平铺在 `self-hosted/` 根目录、靠文件名前缀区分**，与同层的
+`rsstt.tar.gz` / `zcode.tar.gz` / `CLIProxyAPI.tar.gz` / `CliRelay.tar.gz` 风格一致 ——
+不再用 `snapshots/` / `failed/` 这类无前缀子目录（看不出归属，且清理时容易误伤他物）。
+
 | 路径（Dropbox `self-hosted/` 下） | 内容 | 写入者 | 保留 |
 |---|---|---|---|
 | `openclaw.tar.gz` | 主状态包，**永远是最后一次健康状态** | 仅健康运行 | 永久覆盖更新 |
-| `failed/openclaw-failed-<UTC时间>.tar.gz` | 失败运行现场 | 仅失败运行 | 最新 2 份 |
-| `snapshots/openclaw-<UTC日期-时分>-v<版本>.tar.gz` | 版本化健康快照 | 仅健康运行 | 最新 3 份 |
+| `openclaw-failed-<UTC时间>.tar.gz` | 失败运行现场 | 仅失败运行 | 最新 2 份 |
+| `openclaw-snapshot-<UTC日期-时分>-v<版本>.tar.gz` | 版本化健康快照 | 仅健康运行 | 最新 3 份 |
 
 - 快照文件名内嵌版本号（`v<版本>` = 实际通过健康检查的二进制），可按版本检索。
 - 失败运行不覆盖主包、不进快照池；归档循环（每 20 分钟）与最终归档写入同一份 failed 文件
   （循环把名字写进 `/tmp/failed-archive-name`，最终归档复用它，避免同一轮产生两份）。
+- **保留清理必须按前缀过滤后再排序删除**：这三区与 rsstt/zcode 等归档同处根目录，
+  直接 `lsf | tail -n +4` 会把别人的包删掉。快照按 `openclaw-snapshot-` 前缀取，
+  失败包按 `openclaw-failed-` 前缀取，各留 3 / 2 份。
+  > 旧实现（子目录时期）的清理没加前缀过滤，列快照的另一处却加了 —— 两处口径不一致。
+  > 当时目录里只有 openclaw 的东西所以没暴露，扁平化后必须补上，否则会误删同层归档。
 - 除这三区外，最终归档还上传 `dropbox:self-hosted/rsstt.tar.gz`（rss-to-telegram 数据）
   与 AI 网关归档（见第六节）。
 - rsstt 归档带空数据保护：数据目录内只有占位 `.keep`（本轮容器没起来）时不打包、不上传，
@@ -198,14 +207,14 @@ openclaw gateway restart
 ### 从快照恢复（手动）
 
 ```bash
-# 1. 列出快照
-rclone lsf dropbox:self-hosted/snapshots/ --files-only
+# 1. 列出快照（按前缀过滤，同层还有 rsstt/zcode 等别的归档）
+rclone lsf dropbox:self-hosted/ --files-only | grep '^openclaw-snapshot-'
 
 # 2a. 整包回滚：覆盖主包，下一轮运行自动恢复
-rclone copyto "dropbox:self-hosted/snapshots/<快照名>.tar.gz" dropbox:self-hosted/openclaw.tar.gz
+rclone copyto "dropbox:self-hosted/<快照名>.tar.gz" dropbox:self-hosted/openclaw.tar.gz
 
 # 2b. 只取单个文件
-rclone copyto "dropbox:self-hosted/snapshots/<快照名>.tar.gz" /tmp/restore.tar.gz
+rclone copyto "dropbox:self-hosted/<快照名>.tar.gz" /tmp/restore.tar.gz
 tar -xzf /tmp/restore.tar.gz -C /tmp/restore .openclaw/openclaw.json
 ```
 
