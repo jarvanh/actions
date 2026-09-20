@@ -288,9 +288,12 @@ DEADBEEF_HITS=$(grep -cx "openlist:wopan176Crypt/0/deadbeef" "$LSF_LOG")
 A_HITS=$(grep -cx "openlist:wopan176Crypt/0/a" "$LSF_LOG")
 [ "$A_HITS" = "1" ] && ok "8e 原路径目录同样只列举一次" || bad "8e 原路径目录同样只列举一次（实际 ${A_HITS} 次）"
 # 缓存命中率直接决定能不能在 timeout 内跑完 4500 条: 总列举次数必须远小于条目数×2
+# 上限 7 而不是 6（2026-09-20）: 源端原路径核对新增**每 src 一次**可读性探测
+#   （_tryr_src_readable，同样带缓存）—— 它是 Q3 判据的必要成本，不是缓存失效。
+# ⚠️ 别把它当成"缓存退化"去改实现: 探测只读一次、按 src 缓存，与逐条列举有本质区别。
 TOTAL_LSF=$(grep -c . "$LSF_LOG")
-[ "$TOTAL_LSF" -le 6 ] && ok "8f 3 条目的总列举次数 ${TOTAL_LSF} ≤ 6（缓存有效抑制放大）" \
-  || bad "8f 3 条目的总列举次数 ${TOTAL_LSF} > 6（缓存未生效）"
+[ "$TOTAL_LSF" -le 7 ] && ok "8f 3 条目的总列举次数 ${TOTAL_LSF} ≤ 7（缓存有效抑制放大）" \
+  || bad "8f 3 条目的总列举次数 ${TOTAL_LSF} > 7（缓存未生效）"
 
 # ⚠️ 存在性判定不得用 `printf | grep -q`: grep -q 命中即退出 → 管道断裂，
 #   每条 2 次 × 4674 条 = 上万次 "printf: write error: Broken pipe"，实测把核对模式
@@ -421,15 +424,22 @@ MISS_ROWS=$(awk -F'\t' '$8=="缺失"' "$OUT6/tryrun.tsv" | grep -c 'real/r.mp4' 
 #   早先只复核备份侧 ⇒ 原路径侧纯靠列列举，与 fix-check 的递归列举同刻互相矛盾
 #   （run 35502528927）。改断言时不要只把 2 改成 4 —— 要按侧分开数，否则
 #   "某一侧被悄悄去掉复核"不会红。
+# ⚠️ 再 +1 = 5: 源端原路径核对（Q3）对备份缺失的条目打 1 次 lsjson（场景 18）。
+#   三条判据打的是**三个不同 remote**（备份/原路径在 openlist:，源端在 onedrive:），
+#   故下面按 remote 分别计数 —— 不然"源端那次"会被误并进"原路径侧"，看不出新增。
 LSJSON_N=$(grep -c . "$LSJSON_LOG")
-[ "$LSJSON_N" = "4" ] && ok "11c 只复核判缺/判不在的 2 条 × 2 侧（未对全量打 stat，实际 ${LSJSON_N}）" \
-  || bad "11c 只复核判缺/判不在的（实际 ${LSJSON_N} 次 lsjson，应为 4）"
+[ "$LSJSON_N" = "5" ] && ok "11c 只复核判缺/判不在的（备份2+原路径2+源端1，实际 ${LSJSON_N}）" \
+  || bad "11c 只复核判缺/判不在的（实际 ${LSJSON_N} 次 lsjson，应为 5）"
 LSJSON_BAK=$(grep -c '/ghost/g.mp4\|/real/r.mp4' "$LSJSON_LOG")
-LSJSON_ORIG=$(grep -c '/a/g.mp4\|/a/r.mp4' "$LSJSON_LOG")
+# 原路径侧必须**排除源端**（onedrive:）的调用，否则两侧的计数会互相污染
+LSJSON_ORIG=$(grep '/a/g.mp4\|/a/r.mp4' "$LSJSON_LOG" | grep -vc 'onedrive:')
+LSJSON_SRC=$(grep -c 'onedrive:' "$LSJSON_LOG")
 [ "$LSJSON_BAK" = "2" ] && ok "11c2 备份侧复核 2 次（${LSJSON_BAK}）" \
   || bad "11c2 备份侧应复核 2 次（实际 ${LSJSON_BAK}）"
-[ "$LSJSON_ORIG" = "2" ] && ok "11c3 原路径侧复核 2 次（${LSJSON_ORIG}）" \
+[ "$LSJSON_ORIG" = "2" ] && ok "11c3 原路径侧复核 2 次（${LSJSON_ORIG}，已排除源端调用）" \
   || bad "11c3 原路径侧应复核 2 次（实际 ${LSJSON_ORIG}）"
+[ "$LSJSON_SRC" = "1" ] && ok "11c4 源端侧核对 1 次（${LSJSON_SRC}，Q3 只核备份缺失的那批）" \
+  || bad "11c4 源端侧应核对 1 次（实际 ${LSJSON_SRC}）"
 # 翻案后统计口径必须跟着变: 翻案的那条算"存在"，且**不**计入缺失
 PRESENT_N=$(awk -F'\t' '$8 ~ /^存在/' "$OUT6/tryrun.tsv" | wc -l | tr -d ' ')
 [ "$PRESENT_N" = "1" ] && ok "11d 翻案计入存在、不计入缺失（存在 ${PRESENT_N} 条）" \
@@ -717,6 +727,89 @@ grep -qF "**空目录**" "$OUT17/tryrun.log" && ok "17g 替代目录为空 ⇒ �
   || bad "17g 替代目录为空时应报「空目录」（caseB 的 6c73a635 无文件）"
 rm -f "$STATE"/task17_struct.json
 rm -rf "$DST/caseA" "$DST/caseB"
+eval "$RCLONE_BASE_FN"; export -f rclone
+
+# ============================================================================
+# 场景 18: 源端原路径核对（Q3: 能否还原回**源端原路径**）
+#   为什么: marker 的 original 是还原落点的唯一依据。若**源端根本没有这个原路径**，
+#   落点即失效 —— 这是用户三问里 Q3 的失败形态，必须能看见。
+#   ⚠️ 关键陷阱: 直读对"远端不可达"与"文件真不在"**都返回非 0**；不先判源端可读性
+#   就会把"源端连不上"谎报成"源端没有"（谎报 Q3 结论，比不测更糟）⇒ 必须有未核对态。
+# ============================================================================
+eval "$RCLONE_BASE_FN"; export -f rclone
+OUT18="$WORK/out18"; mkdir -p "$OUT18"
+mkdir -p "$DST/q3dir/6c73a635" "$DST/q3dir/orig"
+printf 'S' > "$DST/q3dir/orig/keep.jpg"    # 源端**有**的原文件
+printf '{"dest_path":"openlist:wopan176Crypt/0","source_path":"onedrive:0","fixed_files":[' > "$STATE/task18_q3.json"
+printf '{"original":"q3dir/orig/keep.jpg","alternative":"q3dir/6c73a635/keep.jpg","method":"m1","md5":""},' >> "$STATE/task18_q3.json"
+printf '{"original":"q3dir/orig/gone.jpg","alternative":"q3dir/6c73a635/gone.jpg","method":"m1","md5":""}' >> "$STATE/task18_q3.json"
+printf ']}' >> "$STATE/task18_q3.json"
+# 桩: 源端 onedrive:0/... 映射到 $SRC18；备份侧一律缺失（这样两条都会走源端核对）
+SRC18="$WORK/src18"; mkdir -p "$SRC18/q3dir/orig"
+printf 'S' > "$SRC18/q3dir/orig/keep.jpg"   # gone.jpg 故意不建 ⇒ 源端不在
+export SRC18
+rclone() {
+  case "$1" in
+    lsf)
+      local p="$2"
+      case "$p" in
+        "$STATE") (cd "$STATE" && ls) ;;
+        onedrive:0) (cd "$SRC18" && ls) ;;   # 根: 可读性探测走这里
+        onedrive:0/*) (cd "$SRC18/${p#onedrive:0/}" 2>/dev/null && ls) || return 1 ;;
+        onedrive:*) return 1 ;;              # 源端整体不可读
+        *6c73a635*) return 0 ;;   # 备份目录列空 ⇒ 判缺失
+        *) (cd "$DST/${p#openlist:wopan176Crypt/0/}" 2>/dev/null && ls) ;;
+      esac ;;
+    lsjson)
+      case "$2" in
+        onedrive:0/*) [ -f "$SRC18/${2#onedrive:0/}" ] && { echo '[{}]'; return 0; } || return 1 ;;
+        *) [ -f "$DST/${2#openlist:wopan176Crypt/0/}" ] && { echo '[{}]'; return 0; } || return 1 ;;
+      esac ;;
+    cat) cat "$2" ;;
+    size) echo '{"bytes":1}' ;;
+    *) WRITE_CALLS+="$1"$'\n'; return 1 ;;
+  esac
+  return 0
+}
+export -f rclone
+TRYRUN_SEND_TG=0 TRYRUN_WORK="$OUT18" restore_try_run task18 > "$OUT18/stdout.txt" 2>&1
+grep -qF "源端: 在" "$OUT18/tryrun.log" && ok "18a 源端有该原路径 ⇒ 报在" \
+  || bad "18a 源端应报在（keep.jpg 在源端）"
+grep -qF "源端: 不在" "$OUT18/tryrun.log" && ok "18b 源端无该原路径 ⇒ 报不在（Q3 落点失效）" \
+  || bad "18b 源端应报不在（gone.jpg 源端没有）"
+grep -qF "源端原路径核对（Q3" "$OUT18/tryrun.log" && ok "18c 报告含 Q3 源端核对段" \
+  || bad "18c 报告应含 Q3 源端核对段"
+grep -qF "源端**不在** 1 条" "$OUT18/tryrun.log" && ok "18d 报告写明源端不在条数" \
+  || bad "18d 报告应写明源端不在条数"
+# ★ 陷阱: 源端不可读时必须是"未核对"，绝不能谎报"不在"
+rclone() {
+  case "$1" in
+    lsf)
+      local p="$2"
+      case "$p" in
+        "$STATE") (cd "$STATE" && ls) ;;
+        onedrive:*) return 1 ;;            # 源端整体不可读
+        *6c73a635*) return 0 ;;
+        *) (cd "$DST/${p#openlist:wopan176Crypt/0/}" 2>/dev/null && ls) ;;
+      esac ;;
+    lsjson) return 1 ;;
+    cat) cat "$2" ;;
+    size) echo '{"bytes":1}' ;;
+    *) WRITE_CALLS+="$1"$'\n'; return 1 ;;
+  esac
+  return 0
+}
+export -f rclone
+OUT18B="$WORK/out18b"; mkdir -p "$OUT18B"
+TRYRUN_SEND_TG=0 TRYRUN_WORK="$OUT18B" restore_try_run task18 > "$OUT18B/stdout.txt" 2>&1
+grep -qF "未核对（源端不可读）" "$OUT18B/tryrun.log" \
+  && ok "18e 源端不可读 ⇒ 标未核对，不谎报不在" \
+  || bad "18e 源端不可读应标未核对（直读不可达与真不在必须分开）"
+grep -q "源端: 不在" "$OUT18B/tryrun.log" \
+  && bad "18f 源端不可读时不得出现「不在」（会谎报 Q3 结论）" \
+  || ok "18f 源端不可读时不出现「不在」"
+rm -f "$STATE"/task18_q3.json
+rm -rf "$DST/q3dir"
 eval "$RCLONE_BASE_FN"; export -f rclone
 
 echo

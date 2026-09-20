@@ -145,6 +145,22 @@ _tryr_dst_readable() {
   return "$rc"
 }
 
+# 源端根可读性探测（与上面目标端同构，2026-09-20 V5 续新增）
+# 为什么必须有: _tryr_stat_exists 对"远端不可达"和"文件真不在"**都返回非 0**，
+#   不先判可读性就会把"源端连不上"谎报成"源端没有这个文件" —— 那正是 Q3 的结论，
+#   谎报不得。每个 src 只探一次（缓存）。
+# 用法: _tryr_src_readable <src>
+declare -gA _TRYR_SRC_READABLE=()
+_tryr_src_readable() {
+  local src="$1"
+  [ -n "${_TRYR_SRC_READABLE[$src]:-}" ] && return "${_TRYR_SRC_READABLE[$src]}"
+  local rc=0
+  _tryr_rclone_read lsf "$src" --dirs-only --retries 1 --low-level-retries 2 \
+    --timeout 2m >/dev/null 2>&1 || rc=$?
+  _TRYR_SRC_READABLE[$src]="$rc"
+  return "$rc"
+}
+
 # 分卷形态的"备份文件"是**一组**卷: 由首卷名推前缀，返回 "<目录>/<前缀>.[0-9][0-9][0-9]"
 # 用法: _tryr_split_glob <alt>
 _tryr_split_glob() {
@@ -234,12 +250,36 @@ _tryr_plan_one() {
     fi
   fi
 
+  # ④ 源端原路径**直读核对**（2026-09-20 V5 续，直接服务 Q3「能否还原回原路径源文件」）:
+  #   marker 的 original 是"还原落点"的唯一依据；若**源端根本没有这个原路径**，
+  #   说明 marker 记的落点已失效（源端被改过 / 当初就记错），真跑会把文件还原到
+  #   一个"源端不存在"的路径上 —— 这是 Q3 的失败形态，必须能看见。
+  #   判据用直读（lsjson）而非列列举: 源端是 OneDrive，§14 已实测其 `lsl` 可能返回
+  #   0 行，列表类判据在本远端上不可信。源端不可读时标"未核对"，不谎报"不存在"。
+  local se="-"
+  # 只对**备份判缺失**的条目核源端: 它们才是"真跑会 FAIL"的那批，也是 Q3 要定案的
+  #   那批；对全部 300 条逐条直读源端既慢又无必要（备份在的手里有货，落点失不失效
+  #   不影响"能不能还原"）。源端可读性先判，不可读 ⇒ 标"未核对"，绝不谎报"不在"。
+  if [ "${TRYRUN_CHECK_EXISTS:-1}" = "1" ] && [ -n "$src_full" ] \
+     && [ "$be" = "缺失" ]; then
+    if ! _tryr_src_readable "$src"; then
+      se="未核对（源端不可读）"
+    elif _tryr_stat_exists "$src_full"; then
+      se="在"
+    else
+      se="不在"
+      TRYRUN_SRC_MISSING=$((TRYRUN_SRC_MISSING + 1))
+      TRYRUN_SRC_MISSING_LIST+="${orig}"$'\n'
+    fi
+    TRYRUN_SRC_CHECKED=$((TRYRUN_SRC_CHECKED + 1))
+  fi
+
   _tryr_log "  [${idx}] ${orig}"
   _tryr_log "      ① 备份文件（目标端现存）      : ${backup}"
   _tryr_log "      ② marker 记录的原文件         : ${orig_full}"
   _tryr_log "      ③ 实际执行还原的完整路径      : ${exec_path}"
   _tryr_log "      ④ 源端原路径（灾难恢复口径）  : ${src_full:-（marker 无 source_path）}"
-  _tryr_log "      分类: ${kind} · 备份: ${be} · 原路径: ${oe}"
+  _tryr_log "      分类: ${kind} · 备份: ${be} · 原路径: ${oe} · 源端: ${se}"
   _tryr_log "      将执行: ${exec_cmd}"
   if [ "$kind" = "split" ]; then
     _tryr_log "      备份文件全集: ${dest}$(_tryr_split_glob "$alt")"
@@ -301,8 +341,10 @@ restore_try_run() {
   TRYRUN_ORIG_RECHECK_TOTAL=0; TRYRUN_ORIG_FLIPPED=0
   TRYRUN_UNVERIFIED=0; TRYRUN_UNVERIFIED_DESTS=""
   TRYRUN_MISSING_DIRS=""
+  TRYRUN_SRC_CHECKED=0; TRYRUN_SRC_MISSING=0; TRYRUN_SRC_MISSING_LIST=""
   # 备份缺失目录 → 源端同层目录（供结构探针打两侧形状对照）
   declare -gA _TRYR_SRC_OF_MDIR=()
+  _TRYR_SRC_READABLE=()
   declare -gA TRYRUN_KIND_COUNT=()
   _TRYR_DST_READABLE=()
   _TRYR_DIR_CACHE=()
@@ -574,6 +616,17 @@ restore_try_run() {
       fi
     done
   fi
+  if [ "$TRYRUN_SRC_CHECKED" -gt 0 ]; then
+    # Q3 专用段: 备份缺失的这批，"源端还有没有这个原路径"决定 marker 的落点是否失效
+    _tryr_log "  🎯 源端原路径核对（Q3: 只核备份缺失的那批）: 核 ${TRYRUN_SRC_CHECKED} 条，" \
+              "源端**不在** ${TRYRUN_SRC_MISSING} 条（不在 ⇒ marker 记的落点已失效，" \
+              "真跑会把文件还原到一个源端并不存在的路径上）"
+    if [ "$TRYRUN_SRC_MISSING" -gt 0 ]; then
+      printf '%s' "$TRYRUN_SRC_MISSING_LIST" | sort -u | head -10 | while IFS= read -r l; do
+        [ -n "$l" ] && _tryr_log "     - ${l}"
+      done
+    fi
+  fi
   if [ "$TRYRUN_UNVERIFIED" -gt 0 ]; then
     _tryr_log "  ⚠️ 存在性未核对（目标端不可读，通常是 OpenList 容器没拉起）:"
     printf '%s' "$TRYRUN_UNVERIFIED_DESTS" | sort -u | while IFS= read -r l; do [ -n "$l" ] && _tryr_log "     - ${l}"; done
@@ -620,6 +673,8 @@ restore_try_run() {
     fi
     [ "$TRYRUN_ORIG_RECHECK_TOTAL" -gt 0 ] && tg_add_kv msg "直读复核（原路径）" \
       "${TRYRUN_ORIG_RECHECK_TOTAL} 条中翻案 ${TRYRUN_ORIG_FLIPPED} 条"
+    [ "$TRYRUN_SRC_CHECKED" -gt 0 ] && tg_add_kv msg "源端原路径（Q3）" \
+      "${TRYRUN_SRC_CHECKED} 条中源端不在 ${TRYRUN_SRC_MISSING} 条"
     if [ "$TRYRUN_MISSING" -gt 0 ]; then
       # 缺失清单同样限量（8 条）—— 它才是真跑会 FAIL 的部分，但 777 条全列依旧会爆
       tg_add_section msg "⚠️ 备份缺失 · ${TRYRUN_MISSING}"
@@ -659,3 +714,6 @@ TRYRUN_RECHECK_FLIPPED=0
 TRYRUN_FLIPPED_LIST=""
 TRYRUN_ORIG_RECHECK_TOTAL=0
 TRYRUN_ORIG_FLIPPED=0
+TRYRUN_SRC_CHECKED=0
+TRYRUN_SRC_MISSING=0
+TRYRUN_SRC_MISSING_LIST=""
