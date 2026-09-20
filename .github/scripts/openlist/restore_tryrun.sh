@@ -24,12 +24,18 @@
 #
 # 用法: restore_try_run [task_name|all]   （task_name = marker 文件名前缀，同生产 restore_task）
 #   环境变量:
-#   TRYRUN_WITHIN_DAYS=N  只预演**最近 N 天**产生的 marker（marker 用 rcat 上传，
-#       远端 ModTime 即其产生时间）。0/空 = 全量（默认）。
+#   TRYRUN_WITHIN_DAYS=N  只预演**最近 N 天**产生的 marker。0/空 = 全量（默认）。
 #       ⚠️ 为什么需要这个口径: 还原失败的条目会**留在 marker 里不删**，marker 因此
 #       只增不减；攒了几周后全量预演里绝大多数是**早已失效的旧记录**（对应文件在
 #       目标端早就不在了），把"备份缺失"数抬得很高却不是当前问题。按时间窗筛才能
 #       看出"最近这几轮到底有没有真缺"。
+#   TRYRUN_SINCE=<UTC 时间下界，如 2026-09-19T11:03:00 或 2026-09-19>
+#       只预演**该时刻之后**产生的 marker。为什么需要**绝对**下界而不是只靠
+#       WITHIN_DAYS: 判定"新旧 marker 是否兼容"要看**语义变更提交**的那个时间点
+#       （最近一次改写 marker 语义的是 e90118e，2026-09-19T11:03:00Z，move→moveto），
+#       而"最近 3 天"是相对天数，会把该时刻**之前**的旧语义 marker 一起放进来
+#       ⇒ 结论样本不纯。绝对下界才能切出"全都是新语义写的"这一批。
+#       与 WITHIN_DAYS 同时给时取**更严**（两个下界都满足才放行）。
 # 入参（一律 env；workflow 侧禁止 ${{ }} 内插 bash，见 README「注入面」）:
 #   TRYRUN_CHECK_EXISTS=1|0  是否做远端存在性核对（1=默认；0=纯 marker 推导，秒级、
 #                            且**不需要 OpenList 容器** —— openlist: 远端只有容器内可访问）
@@ -273,9 +279,13 @@ restore_try_run() {
   # 再加逐条 lsf，必然撞 timeout。人类看的 stdout 由入口末尾统一 cat 出来，不逐行 tee。
   _tryr_log() { printf '%s\n' "$*" >> "$TRYRUN_LOG"; }
 
+  # 时间下界的**原始入参**先声明（头部日志要用，故必须早于下面的解析）
+  local since_raw="${TRYRUN_SINCE:-}"
+  local since_epoch=0
+
   _tryr_log "=== 一键还原 try run（只读预演）==="
   _tryr_log "  任务过滤=${task_filter} · marker 目录=${SYNC_STATE_DIR}"
-  _tryr_log "  时间窗=${TRYRUN_WITHIN_DAYS:-0} 天（0 = 全量）"
+  _tryr_log "  时间窗=最近 ${TRYRUN_WITHIN_DAYS:-0} 天 · 绝对下界=${since_raw:-（无）}（0/空 = 全量）"
   _tryr_log "  存在性核对=${TRYRUN_CHECK_EXISTS:-1}（0=纯 marker 推导，不访问目标端）"
   _tryr_log "  报告: ${TRYRUN_LOG} / ${tsv}"
   _tryr_log ""
@@ -303,6 +313,26 @@ restore_try_run() {
   if [[ "$within_days" =~ ^[0-9]+$ ]] && [ "$within_days" -gt 0 ]; then
     # 同样不用 date +%s（见下方时间戳解析处的说明）
     cutoff=$(( $(printf '%(%s)T' -1) - within_days * 86400 ))
+  fi
+  # TRYRUN_SINCE: **绝对**时间下界（"只看某次语义变更之后写的 marker"）。
+  #   两个下界同时给时取**更严**者 —— 否则"最近 3 天"会把语义变更前的旧 marker
+  #   也放进来，样本不纯、结论不可比（§15.2）。
+  #   解析失败必须**大声报错并回落**，绝不静默忽略: 静默忽略 = 用户以为按某个
+  #   时间点筛了，实际是全量（§0 判据静默失败 ⇒ 错误结论）。
+  #   （解析失败会在此处告警并回落；具体格式见文件头 TRYRUN_SINCE 说明）
+  if [ -n "$since_raw" ]; then
+    local sd="${since_raw%%T*}"; st="${since_raw#*T}"
+    [ "$st" = "$since_raw" ] && st="00:00:00"
+    st="${st%%.*}"; st="${st%%+*}"; st="${st%Z}"
+    if [[ "$sd" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] \
+       && [[ "$st" =~ ^[0-9]{2}:[0-9]{2}(:[0-9]{2})?$ ]]; then
+      [[ "$st" =~ ^[0-9]{2}:[0-9]{2}$ ]] && st="${st}:00"
+      since_epoch=$(_tryr_epoch_utc "$sd" "$st")
+      [ "$since_epoch" -gt "$cutoff" ] && cutoff="$since_epoch"
+    else
+      _tryr_log "  ❌ TRYRUN_SINCE 无法解析（${since_raw}）: 需 YYYY-MM-DD 或 " \
+                "YYYY-MM-DDTHH:MM:SS ⇒ 本次**不看时间窗**（宁可全量，也不假装筛过）"
+    fi
   fi
   # 兜底时间源: lsl 的 ModTime（last_success 缺失时才用）
   declare -gA _TRYR_MARKER_TS=()
@@ -425,8 +455,11 @@ restore_try_run() {
   _tryr_log "=== 预演汇总: 条目 ${total} 条 · 备份缺失 ${TRYRUN_MISSING} 条 · 存在性未核对 ${TRYRUN_UNVERIFIED} 条 ==="
   # 跳过数必须明示: 否则"筛完缺失变少了"会被误读成"问题消失了"，实际只是样本变小了
   if [ "$cutoff" -gt 0 ]; then
-    _tryr_log "  ⏱️ 时间窗=${within_days} 天: 扫描 marker ${scanned} 个 · " \
-              "跳过超窗 ${skipped_old} 个 · 跳过无时间戳 ${skipped_nots} 个"
+    # 生效下界要**连时间点一起**写明: "最近 3 天"是相对的，读报告的人无法据此
+    # 判断"这批是不是都在某次语义变更之后写的"，而这正是结论可不可比的关键（§15.2）
+    _tryr_log "  ⏱️ 时间窗=最近 ${within_days} 天 · 绝对下界 ${since_raw:-（无）}" \
+              "（生效下界 $(printf '%(%Y-%m-%d %H:%M:%S)T' "$cutoff") UTC）: " \
+              "扫描 marker ${scanned} 个 · 跳过超窗 ${skipped_old} 个 · 跳过无时间戳 ${skipped_nots} 个"
   fi
   if [ "$ts_fallback" -eq 1 ]; then
     # 时间窗没生效这件事本身必须进结论: 否则读者会以为"最近 3 天零缺失"
@@ -465,7 +498,10 @@ restore_try_run() {
     # 时间窗必须进通知: 不看它，"缺失 30"和"缺失 777"会被当成同一个问题的两种结论，
     # 实际只是样本从 5194 缩到了最近 3 天
     if [ "$cutoff" -gt 0 ]; then
-      tg_add_kv msg "时间窗" "最近 ${within_days} 天（跳过超窗 ${skipped_old} 个 marker）"
+      # 生效下界要连时刻一起给: "最近 3 天"是相对的，看通知的人无法据此判断
+      # "这批是不是都在某次语义变更之后写的"，而这正是结论可不可比的关键（§15.2）
+      tg_add_kv msg "时间窗" "最近 ${within_days} 天 · 下界 $(printf '%(%Y-%m-%d %H:%M:%S)T' "$cutoff") UTC（跳过超窗 ${skipped_old} 个 marker）"
+      [ -n "$since_raw" ] && tg_add_kv msg "绝对下界" "${since_raw}"
     fi
     [ "$ts_fallback" -eq 1 ] && tg_add_kv msg "时间窗" "❌ 未生效（取不到 ModTime）⇒ 回落全量"
     tg_add_kv msg "预演条目" "${total} 个"

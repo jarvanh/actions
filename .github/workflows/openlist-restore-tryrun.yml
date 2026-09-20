@@ -39,10 +39,15 @@ on:
         type: string
         default: "all"
       within_days:
-        description: "只预演最近 N 天产生的 marker（0/留空 = 全量，默认）。还原失败的条目会留在 marker 里不删，攒久了全量里大多是已失效的旧记录，按时间窗筛才看得出最近几轮有没有真缺"
+        description: "只预演最近 N 天产生的 marker（0/留空 = 全量，默认）。这是相对天数，会混入语义变更提交之前写的 marker；要切出全都是新语义写的那批，请用下面的 since"
         required: false
         type: string
         default: "0"
+      since:
+        description: "绝对时间下界（UTC，YYYY-MM-DD 或 YYYY-MM-DDTHH:MM:SS；留空 = 不限）。只看该时刻之后产生的 marker —— 判新旧 marker 是否不兼容必须用这个: 最近一次改写 marker 语义的是 e90118e 2026-09-19T11:03:00Z（move 改 moveto），之前的 marker 其还原脚本是错的 move。与 within_days 同时给时取更严者"
+        required: false
+        type: string
+        default: ""
       check_exists:
         description: "核对目标端文件在不在（需拉起 OpenList 容器，约 +6 分钟）: 否 = 只做 marker 推导，秒级出结果、不起容器"
         required: false
@@ -145,6 +150,7 @@ jobs:
           # inputs 一律经 env 传入（README「注入面」: 不做 ${{ }} 直接内插 bash）
           TRYRUN_TASK_INPUT: ${{ inputs.task }}
           TRYRUN_DAYS_INPUT: ${{ inputs.within_days }}
+          TRYRUN_SINCE_INPUT: ${{ inputs.since }}
           TRYRUN_CHECK_INPUT: ${{ inputs.check_exists }}
           TRYRUN_TG_INPUT: ${{ inputs.send_tg }}
         run: |
@@ -157,6 +163,9 @@ jobs:
             ''|*[!0-9]*) export TRYRUN_WITHIN_DAYS=0 ;;
             *)           export TRYRUN_WITHIN_DAYS="${TRYRUN_DAYS_INPUT}" ;;
           esac
+          # 绝对下界: 原样传给脚本，由脚本解析并（解析失败时）大声告警回落
+          # —— 不在 YAML 里校验格式，避免"这里静默吞掉、那里以为筛过了"
+          export TRYRUN_SINCE="${TRYRUN_SINCE_INPUT:-}"
           case "$TRYRUN_CHECK_INPUT" in
             否|0|no) export TRYRUN_CHECK_EXISTS=0 ;;
             *)       export TRYRUN_CHECK_EXISTS=1 ;;

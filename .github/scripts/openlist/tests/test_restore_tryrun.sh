@@ -458,7 +458,7 @@ N_UND=$(awk -F'\t' '$1=="task9_undated.json"' "$OUT7/tryrun.tsv" | wc -l | tr -d
 [ "$N_STALE" = "0" ] && ok "12b 超窗 marker 跳过（${N_STALE} 条）" || bad "12b 超窗应跳过（实际 ${N_STALE}）"
 [ "$N_UND" = "0" ] && ok "12c 无时间戳 marker 跳过（不可证明新 = 不放行，实际 ${N_UND}）" \
   || bad "12c 无时间戳应跳过（实际 ${N_UND}）"
-grep -qF "时间窗=3 天" "$OUT7/tryrun.log" && ok "12d 报告明示时间窗" || bad "12d 报告明示时间窗"
+grep -qF "时间窗=最近 3 天" "$OUT7/tryrun.log" && ok "12d 报告明示时间窗" || bad "12d 报告明示时间窗"
 # 跳过数必须明示: 否则"筛完缺失变少"会被误读成"问题消失"
 grep -qE "跳过超窗 1 个" "$OUT7/tryrun.log" && ok "12e 报告明示跳过超窗数" || bad "12e 报告明示跳过超窗数"
 grep -qE "跳过无时间戳 1 个" "$OUT7/tryrun.log" && ok "12f 报告明示跳过无时间戳数" || bad "12f 报告明示无时间戳数"
@@ -468,7 +468,7 @@ TRYRUN_SEND_TG=0 TRYRUN_WORK="$OUT8" restore_try_run task9 > "$OUT8/stdout.txt" 
 # tsv **没有表头**（每行一条预演），故全量 = 全部行数；写成 NR>1 会白丢一行、把 3 数成 2
 N_ALL=$(awk -F'\t' 'NF' "$OUT8/tryrun.tsv" | wc -l | tr -d ' ')
 [ "$N_ALL" = "3" ] && ok "12g 默认全量（${N_ALL} 条，含旧与无时间戳）" || bad "12g 默认应全量（实际 ${N_ALL}）"
-grep -qF "时间窗=0 天（0 = 全量）" "$OUT8/tryrun.log" && ok "12h 默认报告标注全量" || bad "12h 默认报告标注全量"
+grep -qF "绝对下界=（无）" "$OUT8/tryrun.log" && ok "12h 默认报告标注全量" || bad "12h 默认报告标注全量"
 # 通知里必须带时间窗: 否则"缺失 30"和"缺失 777"会被当成同一问题的两种结论
 # 恢复通知替身: 场景 10 把它重定义成写 TG_CAPTURE，该定义会一直生效到本场景
 #   （不恢复 ⇒ LAST_TG_MSG 恒空，12i 会假红，症状却像"生产没写时间窗 kv"）
@@ -505,8 +505,8 @@ grep -qE "时间窗\*\*未生效|时间窗未生效" "$OUT10/tryrun.log" \
   && ok "13b 报告明示时间窗未生效" || bad "13b 报告应明示时间窗未生效"
 grep -qF "全量" "$OUT10/tryrun.log" && ok "13c 报告标明本次实为全量" || bad "13c 报告应标明本次实为全量"
 # 决不能留下"最近 3 天"的字样当结论 —— 那正是误读的来源
-if grep -qE "时间窗=3 天: 扫描" "$OUT10/tryrun.log"; then
-  bad "13d 未生效时不得仍报'时间窗=3 天'（会误导）"
+if grep -qE "生效下界" "$OUT10/tryrun.log"; then
+  bad "13d 未生效时不得仍报生效下界（会误导）"
 else
   ok "13d 未生效时不再报时间窗生效"
 fi
@@ -536,6 +536,62 @@ grep -qE "跳过无时间戳 0 个" "$OUT11/tryrun.log" \
   && ok "14c 有 ModTime 就不该记成无时间戳" || bad "14c 有 ModTime 却记了无时间戳"
 rm -f "$STATE"/task9_*.json
 : > "$MARKER_TS_FILE"
+
+echo "=== 场景15: 绝对时间下界 TRYRUN_SINCE（只看某次语义变更之后写的 marker）==="
+# 为什么需要**绝对**下界: 判定"新旧 marker 不兼容"要看语义变更提交的时间点
+#   （最近一次是 e90118e 2026-09-19T11:03:00Z，move→moveto）。"最近 3 天"是相对
+#   天数，会把该时刻**之前**的旧语义 marker 一起放进来 ⇒ 样本不纯、结论不可比。
+# 三条 marker: 变更**之前**(09-18) / 变更**之后**(09-19 12:00) / 更早(09-10)。
+OUT12="$WORK/out12"; mkdir -p "$OUT12"
+mk_task9() {
+  local n="$1" ls="$2"
+  printf '{"dest_path":"openlist:wopan176Crypt/0","source_path":"onedrive:0",%s"fixed_files":[' "$ls" > "$STATE/task9_${n}.json"
+  printf '{"original":"c/d.mp4","alternative":"deadbeef/b.mp4","method":"m1","md5":""}' >> "$STATE/task9_${n}.json"
+  printf ']}' >> "$STATE/task9_${n}.json"
+}
+mk_task9 before '"last_success":"2026-09-18T09:00:00Z",'
+mk_task9 after  '"last_success":"2026-09-19T12:00:00Z",'
+mk_task9 older  '"last_success":"2026-09-10T09:00:00Z",'
+# 下界取语义变更时刻: 只有 after 该进来（before 差 1 天、older 差 9 天）
+TRYRUN_SINCE="2026-09-19T11:03:00" TRYRUN_SEND_TG=0 TRYRUN_WORK="$OUT12" \
+  restore_try_run task9 > "$OUT12/stdout.txt" 2>&1
+N_A=$(awk -F'\t' '$1=="task9_after.json"'  "$OUT12/tryrun.tsv" | wc -l | tr -d ' ')
+N_B=$(awk -F'\t' '$1=="task9_before.json"' "$OUT12/tryrun.tsv" | wc -l | tr -d ' ')
+N_O=$(awk -F'\t' '$1=="task9_older.json"'  "$OUT12/tryrun.tsv" | wc -l | tr -d ' ')
+[ "$N_A" = "1" ] && ok "15a 下界之后的 marker 保留（${N_A} 条）" || bad "15a 下界之后应保留（实际 ${N_A}）"
+[ "$N_B" = "0" ] && ok "15b 下界之前的 marker 跳过（${N_B} 条）" || bad "15b 下界之前应跳过（实际 ${N_B}）"
+[ "$N_O" = "0" ] && ok "15c 更早的 marker 跳过（${N_O} 条）" || bad "15c 更早的应跳过（实际 ${N_O}）"
+grep -qF "绝对下界 2026-09-19T11:03:00" "$OUT12/tryrun.log" \
+  && ok "15d 报告写明绝对下界" || bad "15d 报告应写明绝对下界"
+# 生效下界必须落成 UTC 时间点: 否则读者无法判断这批是否都在语义变更之后
+grep -qF "生效下界 2026-09-19 11:03:00 UTC" "$OUT12/tryrun.log" \
+  && ok "15e 报告写明生效下界时刻" || bad "15e 报告应写明生效下界时刻（UTC）"
+# 与 WITHIN_DAYS 同时给时取**更严**者: 最近 30 天（松）+ 下界 09-19（严）⇒ 仍只留 after
+OUT13="$WORK/out13"; mkdir -p "$OUT13"
+TRYRUN_WITHIN_DAYS=30 TRYRUN_SINCE="2026-09-19T11:03:00" TRYRUN_SEND_TG=0 TRYRUN_WORK="$OUT13" \
+  restore_try_run task9 > "$OUT13/stdout.txt" 2>&1
+N_BOTH=$(awk -F'\t' 'NF' "$OUT13/tryrun.tsv" | wc -l | tr -d ' ')
+[ "$N_BOTH" = "1" ] && ok "15f 双下界取更严者（${N_BOTH} 条）" \
+  || bad "15f 双下界应取更严者（实际 ${N_BOTH} 条）"
+# 解析失败必须**大声告警并回落**，绝不静默当成"没给"（否则用户以为筛了、实际全量）
+OUT14="$WORK/out14"; mkdir -p "$OUT14"
+TRYRUN_SINCE="not-a-date" TRYRUN_SEND_TG=0 TRYRUN_WORK="$OUT14" \
+  restore_try_run task9 > "$OUT14/stdout.txt" 2>&1
+N_BAD=$(awk -F'\t' 'NF' "$OUT14/tryrun.tsv" | wc -l | tr -d ' ')
+[ "$N_BAD" = "3" ] && ok "15g 下界解析失败 ⇒ 回落全量（${N_BAD} 条）" \
+  || bad "15g 下界解析失败应回落全量（实际 ${N_BAD}）"
+grep -qF "TRYRUN_SINCE 无法解析" "$OUT14/tryrun.log" \
+  && ok "15h 下界解析失败要告警（不静默）" || bad "15h 下界解析失败应告警"
+# 通知同样要带绝对下界: 报告在 artifact 里，通知才是手机上第一眼看到的口径说明
+OUT15="$WORK/out15"; mkdir -p "$OUT15"
+TRYRUN_SINCE="2026-09-19T11:03:00" TRYRUN_SEND_TG=1 TRYRUN_WORK="$OUT15" \
+  restore_try_run task9 > "$OUT15/stdout.txt" 2>&1
+if printf '%s' "${LAST_TG_MSG:-}" | grep -qF "2026-09-19T11:03:00"; then
+  ok "15i 通知含绝对下界 kv"
+else
+  bad "15i 通知应含绝对下界 kv（消息体里没有）"
+fi
+rm -f "$STATE"/task9_*.json
 
 echo
 echo "===== 结果: PASS=$PASS FAIL=$FAIL ====="

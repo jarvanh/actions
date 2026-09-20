@@ -35,7 +35,7 @@ proxy-speedtest/            测速结果数据
 |---|---|
 | `openlist.yml` | OneDrive → OpenList 网盘同步（**本文档重点**） |
 | `openlist-diag.yml` | OpenList 后端可写性诊断（独立 concurrency，单次 ~4min；**不搬数据**，见下文「后端可写性诊断」） |
-| `openlist-restore-tryrun.yml` | 一键还原 **try run（只读预演）**：逐条给出「备份文件 / marker 原文件 / 实际执行还原」三条完整路径，**不写任何数据**（见下文「一键还原 try run」） |
+| `openlist-restore-tryrun.yml` | 一键还原 **try run（只读预演）**：逐条给出「备份文件 / marker 原文件 / 实际执行还原」三条完整路径，**不写任何数据**；支持全量 / 最近 N 天（`within_days`）/ 某时刻之后（`since`）三种样本口径（见下文「一键还原 try run」） |
 | `self-hosted_backup.yml` | 自建服务备份到 OneDrive |
 | `github_backup_all.yml` | 备份全部 GitHub 仓库到 OneDrive |
 | `emby.yml` | Emby 媒体服务器 + 302 直链 —— 详见 [`docs/emby.md`](docs/emby.md) |
@@ -82,7 +82,7 @@ proxy-speedtest/            测速结果数据
 | | `file_fix.sh` | 1705 | 单文件修复的 4 种方法 + 目录可写性三态预检 + 短哈希目录兜底 |
 | | `file_fix_pipeline.sh` | 1395 | 修复管线编排（方法轮换 + 增量持久化） |
 | | `file_restore.sh` | 655 | 修复文件还原（目标端 → 原路径 / 源端） |
-| | `restore_tryrun.sh` | 526 | 一键还原 **try run**（只读预演：三条完整路径推导 + 只读白名单护栏；`restore_try_run`） |
+| | `restore_tryrun.sh` | 562 | 一键还原 **try run**（只读预演：三条完整路径推导 + 只读白名单护栏 + 时间窗 `within_days` / 绝对下界 `since`；`restore_try_run`） |
 | **task** | `task_preview.sh` | 526 | 任务预览（大小估算、跳过预判、未传量估算） |
 | | `task_engine.sh` | 2284 | 任务注册表与编排（分批、轮转、阶段行生产） |
 | **基础** | `utils.sh` | 152 | 通用工具（格式化、日志判定；转义/树形渲染已收敛到 `telegram/tg_notify.sh`） |
@@ -380,6 +380,15 @@ workflow 的 `run_mode` 单选互斥：
 会让筛选在生产上整体失效。
 ⚠️ **一个时间戳都取不到时视为机制失效 ⇒ 回落全量并告警**，绝不产出「条目 0」——那个"零"会被
 读成"最近没缺"，实际是根本没测。
+
+**绝对下界（入参 `since`）**：`YYYY-MM-DD` 或 `YYYY-MM-DDTHH:MM:SS`（UTC），只看该时刻
+**之后**产生的 marker。为什么 `within_days` 不够：判「新旧 marker 是否不兼容」要切出
+**全都是新语义写的**那一批，而语义变更是一个**时刻**（最近一次改写 marker 语义的是
+`e90118e` 2026-09-19T11:03:00Z，还原命令 `move`→`moveto`；更早 `137c005` 2026-09-16
+统一方法命名），相对天数会把该时刻**之前**的旧语义 marker 一起放进来 ⇒ 样本不纯、结论不可判。
+与 `within_days` 同时给时**取更严者**（两个下界都满足才放行）；解析不出格式 ⇒ 大声告警并
+**回落全量**（宁可多跑，也不假装筛过）。报告头与汇总行都会打印「绝对下界」与
+「生效下界 `<ts>` UTC」，方便核对这一轮到底看了哪些 marker。
 
 ---
 
