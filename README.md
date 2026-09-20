@@ -352,7 +352,7 @@ workflow 的 `run_mode` 单选互斥：
 
 真跑「⚠️ 还原」之前先看一眼会怎么走，走 **`openlist-restore-tryrun.yml`**（独立 workflow，
 独立 concurrency，**一个字节都不写**）。全量核对（`check_exists=是`）实测约 40 分钟
-（4684 条 × 逐条真实远端列举 ≈ 0.48s/条），故 job 上限给到 150 分钟；`check_exists=否` 时
+（4684 条 × 逐条真实远端列举 ≈ 0.48s/条），故 job 上限给到 300 分钟；`check_exists=否` 时
 不拉容器、纯 marker 推导，分钟级。逐条给出三条完整路径 + 一条交叉核对路径：
 
 | 字段 | 取值 |
