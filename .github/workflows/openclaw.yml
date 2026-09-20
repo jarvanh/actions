@@ -1554,12 +1554,16 @@ jobs:
           GLM_PROBE_JSON="$GLM_RUN_DIR/upstream-probe.json"
           GLM_PROBE_TEXT=""
           if [ "$GLM_WILL_NOTIFY" = "1" ] && [ -f "$GLM_DIR/probe.mjs" ] && [ -f "$GLM_DIR/render-probe.py" ]; then
-            echo "Probing upstream endpoints (this takes a minute)..."
+            echo "Probing upstream endpoints (this takes a few minutes)..."
             rm -f "$GLM_PROBE_JSON"
-            # timeout 兜底：探测自身有全局预算（PROBE_DEADLINE_MS），但解析/写盘若卡住
-            # 也要有个硬上限，别让整个 CI 步骤挂在这。探测非 0 不当作步骤失败。
-            PROBE_DEADLINE_MS="${GLM_PROBE_DEADLINE_MS:-150000}" \
-              timeout 240 bash "$GLM_DIR/glm-proxy.sh" probe "$GLM_PROBE_JSON" 2>&1 | tail -n 5 || true
+            # 预算必须大于实测耗时，否则末尾模型被标成「未探测」，通知里就少一档
+            # （实测 24 个模型 × 逐条真发请求要 146~184s；曾把预算写成 150s，
+            #   每次运行都截断——2026-09-20 本机真跑暴露）。
+            # 300s 给足余量：探测有并发上限（2）且两条端点串行，正常不会到这个数。
+            # 外层 timeout 再兜一层（比内层预算多 120s），防解析/写盘卡死拖住步骤。
+            # 探测自身非 0 不当作步骤失败。
+            PROBE_DEADLINE_MS="${GLM_PROBE_DEADLINE_MS:-300000}" \
+              timeout 420 bash "$GLM_DIR/glm-proxy.sh" probe "$GLM_PROBE_JSON" 2>&1 | tail -n 5 || true
             if [ -s "$GLM_PROBE_JSON" ]; then
               GLM_PROBE_TEXT="$(python3 "$GLM_DIR/render-probe.py" "$GLM_PROBE_JSON" 2>/dev/null || true)"
               printf '%s\n' "$GLM_PROBE_TEXT"
