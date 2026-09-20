@@ -633,7 +633,7 @@ Run ID：<code>12345678</code>
      ✅ 可用·免费：<code>glm-4.7-flash</code> · <code>glm-4-flash-250414</code>
      ❌ 余额不足/无资源包·付费：<code>glm-5.3-flash</code> · <code>glm-5.3</code>
 
-当前 bridge 模式：/v1/messages 走 OpenAI 端点；换另一条用 /native/v1/messages（不自动回退）
+Anthropic 协议 /v1/messages → Anthropic 端点；OpenAI 协议 /v1/chat/completions → OpenAI 端点；不自动回退
 上游凭据来源：<code>zcode-credentials</code>
 代码目录：<code>/dropbox/self-hosted/glm-proxy</code>
 
@@ -668,12 +668,12 @@ Run ID：<code>12345678</code>
   完整可用清单在上游端点分节里。
 - **鉴权固定写「需 API Key（与 workbuddy-gateway 同值）」**：`HOST=0.0.0.0` 且设了
   `AI_GATEWAY_API_KEY`，两个网关共用同一把。**不得回显 key 本身**。
-- **结尾那句模式说明反映真实路由**（`当前 X 模式：/v1/messages 走 A 端点；换另一条用 /Y/v1/messages（不自动回退）`）：
-  两条端点计费后端不同（`api/anthropic` 走 Coding Plan 订阅、`api/paas/v4` 走按量余额），
-  但**不自动回退** —— 同一条路径固定打到同一条端点，失败即原样回传上游错误。
-  隐式换端点会让同一个请求时好时坏：既掩盖真实故障（明明欠费却偶发成功），
-  也让日志里的失败原因无法对应到端点。换端点靠改 `ANTHROPIC_MODE` 或走 `/native/`、`/bridge/`
-  专属路径。这句话改过两次（「仅作参考」→「自动回退」→ 现状），**以服务端实际行为为准**。
+- **结尾那句路由说明反映真实映射**（`Anthropic 协议 /v1/messages → Anthropic 端点；OpenAI 协议 /v1/chat/completions → OpenAI 端点；不自动回退`）：
+  **讲什么协议就打哪条端点**。`/v1/messages` 默认原样直通 `api/anthropic`（Coding Plan 订阅），
+  `/v1/chat/completions` 打 `api/paas/v4`（按量余额）。`ANTHROPIC_MODE=bridge` 时才把
+  `/v1/messages` 翻译成 OpenAI 协议 —— 那是历史兼容开关，此时说明句会改说落到了 OpenAI 端点。
+  **不自动回退**：失败原样回传上游错误。这句话改过三次（「另一条仅作参考」→「自动回退」→ 现状），
+  **以服务端实际行为为准**，别照抄历史文案。
 - **失败态不给「接口 / 鉴权 / 模型」三行**：服务已不在，展示指向已停进程的地址会误导。
 - **日志尾部进「🧾 原始输出」的 `<pre>`**（尾部 15 行）：`<pre>` 只给原始输出，
   结构化数据（端点/模型/计费）一律走上面的树形条目 —— 把结构化数据塞进 `<pre>`
