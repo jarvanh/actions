@@ -259,7 +259,9 @@ _tryr_plan_one() {
     *) case "$be" in 存在*) TRYRUN_PRESENT=$((TRYRUN_PRESENT + 1)) ;; esac ;;
   esac
   case "$be" in
-    缺失) TRYRUN_MISSING=$((TRYRUN_MISSING + 1)); TRYRUN_MISSING_LIST+="${orig}"$'\n' ;;
+    缺失) TRYRUN_MISSING=$((TRYRUN_MISSING + 1)); TRYRUN_MISSING_LIST+="${orig}"$'\n'
+          # 记下"备份所在目录"，供汇总段的父目录实况探针用（去重在汇总段做）
+          TRYRUN_MISSING_DIRS+="${backup%/*}"$'\n' ;;
     存在（*直读复核翻案）) TRYRUN_FLIPPED_LIST+="${backup}"$'\n' ;;
   esac
   # 翻案后的字面值是"已存在（直读复核翻案）"，不能只判"已存在"——那样翻案件会被漏计
@@ -290,6 +292,7 @@ restore_try_run() {
   # 原路径侧的直读复核计数（与备份侧对称: 两条判据各自记，别混成一个数）
   TRYRUN_ORIG_RECHECK_TOTAL=0; TRYRUN_ORIG_FLIPPED=0
   TRYRUN_UNVERIFIED=0; TRYRUN_UNVERIFIED_DESTS=""
+  TRYRUN_MISSING_DIRS=""
   declare -gA TRYRUN_KIND_COUNT=()
   _TRYR_DST_READABLE=()
   _TRYR_DIR_CACHE=()
@@ -509,6 +512,33 @@ restore_try_run() {
   if [ "$TRYRUN_ORIG_RECHECK_TOTAL" -gt 0 ]; then
     _tryr_log "  🔍 直读复核（原路径）: 对列列举判不存在的 ${TRYRUN_ORIG_RECHECK_TOTAL} 条逐条 lsjson stat，" \
               "翻案 ${TRYRUN_ORIG_FLIPPED} 条（翻案 ⇒ 原路径其实已被占，真跑前须先处理）"
+  fi
+  # ---- 缺失目录的结构探针（只读，2026-09-20 V5 驱动）----
+  # 为什么需要它: "备份文件不在"有两种截然不同的成因，只报"缺失"分不开 ——
+  #   (a) 短哈希目录本身没建成（替代路径的父目录都没出现 ⇒ 修复根本没落盘）；
+  #   (b) 目录建成了、但文件没进去（或进去又被清 ⇒ 与后端落盘/清理有关）。
+  # 判法: 对缺失目录的**父目录**做一次 lsd（只读，已在白名单内），把真实子目录名
+  #   打出来 —— 期望的替代目录名（如 6c73a635）在不在里面，一眼可判。
+  # 成本: 每个去重后的父目录 1 次远端调用，与逐条 stat 相比可忽略。
+  if [ -n "$TRYRUN_MISSING_DIRS" ]; then
+    _tryr_log "  🗂️ 缺失目录结构探针（只读 lsd，看替代目录到底建没建）:"
+    printf '%s' "$TRYRUN_MISSING_DIRS" | sort -u | while IFS= read -r md; do
+      [ -z "$md" ] && continue
+      parent="${md%/*}"; [ "$parent" = "$md" ] && parent="$md"
+      want="${md##*/}"
+      # 用 lsf --dirs-only（每行一个目录名）而不是 lsd: lsd 的输出是"多列 + 名字在
+      # 末列"，目录名带空格时 $NF 只取得到最后一段（这里的目录名正是中文短名，必须整取）
+      subs=$(_tryr_rclone_read lsf "$parent" --dirs-only --retries 1 --timeout 2m 2>/dev/null \
+             | sed 's#/$##' | tr '\n' ' ')
+      if [ -z "$subs" ]; then
+        _tryr_log "     - ${parent}: （列举无输出/不可读 ⇒ 无法判，需另取判据）"
+      else
+        case " $subs " in
+          *" $want "*) _tryr_log "     - ${parent}: 替代目录 ${want} **在**（子目录: ${subs})" ;;
+          *)           _tryr_log "     - ${parent}: 替代目录 ${want} **不在**（子目录: ${subs})" ;;
+        esac
+      fi
+    done
   fi
   if [ "$TRYRUN_UNVERIFIED" -gt 0 ]; then
     _tryr_log "  ⚠️ 存在性未核对（目标端不可读，通常是 OpenList 容器没拉起）:"

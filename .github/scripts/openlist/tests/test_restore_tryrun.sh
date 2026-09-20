@@ -52,12 +52,29 @@ rclone() {
     lsf)
       # 只读: 远端 "openlist:wopan176Crypt/0/xxx" → 本地沙箱同结构
       # 注意: 路径是 $2，不是末位参数（末位是 --retries/--timeout 等 flag）
+      # --dirs-only（缺失目录结构探针用）: 只列目录，且复刻真机形态 ——
+      #   rclone 的 lsf --dirs-only 输出**带尾随斜杠**，名字含空格也是整行一整段
       local p="$2"
       if [ "$DST_READABLE" = "0" ] && [[ "$p" == openlist:* ]]; then return 1; fi
       case "$p" in
-        openlist:wopan176Crypt/0) (cd "$DST" && ls) ;;
-        openlist:*) (cd "$DST/${p#openlist:wopan176Crypt/0/}" 2>/dev/null && ls) ;;
-        *) (cd "$p" 2>/dev/null && ls) ;;
+        openlist:wopan176Crypt/0)
+          if [ "${3:-}" = "--dirs-only" ] || [[ " $* " == *" --dirs-only "* ]]; then
+            (cd "$DST" && ls -d */ 2>/dev/null)
+          else
+            (cd "$DST" && ls)
+          fi ;;
+        openlist:*)
+          if [ "${3:-}" = "--dirs-only" ] || [[ " $* " == *" --dirs-only "* ]]; then
+            (cd "$DST/${p#openlist:wopan176Crypt/0/}" 2>/dev/null && ls -d */ 2>/dev/null)
+          else
+            (cd "$DST/${p#openlist:wopan176Crypt/0/}" 2>/dev/null && ls)
+          fi ;;
+        *)
+          if [ "${3:-}" = "--dirs-only" ] || [[ " $* " == *" --dirs-only "* ]]; then
+            (cd "$p" 2>/dev/null && ls -d */ 2>/dev/null)
+          else
+            (cd "$p" 2>/dev/null && ls)
+          fi ;;
       esac
       ;;
     cat)  cat "$2" ;;
@@ -658,6 +675,38 @@ grep -qF "直读复核（原路径）" "$OUT16/tryrun.log" && ok "16d 报告含�
 grep -qF "翻案 1 条" "$OUT16/tryrun.log" && ok "16e 报告写明原路径翻案数" \
   || bad "16e 报告应写明原路径翻案数"
 rm -f "$STATE"/task16_orig.json
+eval "$RCLONE_BASE_FN"; export -f rclone
+
+# ============================================================================
+# 场景 17: 缺失目录结构探针（2026-09-20 V5 驱动）
+#   为什么: "备份文件不在"有两种成因，只报"缺失"分不开 ——
+#     (a) 替代目录（短哈希目录）**根本没建成** ⇒ 修复压根没落盘；
+#     (b) 目录建成了、但文件没进去（或被清）⇒ 与后端清理/落盘有关。
+#   两者对应的修法完全不同，故必须能在报告里一眼区分。
+#   本场景: A 目录缺替代目录（应报"不在"）；B 目录有替代目录但文件不在（应报"在"）。
+# ============================================================================
+OUT17="$WORK/out17"; mkdir -p "$OUT17"
+mkdir -p "$DST/caseA/origA" "$DST/caseB/origB" "$DST/caseB/6c73a635"
+printf 'X' > "$DST/caseA/origA/f1.jpg"
+printf 'Y' > "$DST/caseB/origB/f2.jpg"
+# caseB 的替代目录**存在但为空**（文件没进去）；caseA 的替代目录压根不存在
+printf '{"dest_path":"openlist:wopan176Crypt/0","source_path":"onedrive:0","fixed_files":[' > "$STATE/task17_struct.json"
+printf '{"original":"caseA/origA/f1.jpg","alternative":"caseA/deadbeef/f1.jpg","method":"m1","md5":""},' >> "$STATE/task17_struct.json"
+printf '{"original":"caseB/origB/f2.jpg","alternative":"caseB/6c73a635/f2.jpg","method":"m1","md5":""}' >> "$STATE/task17_struct.json"
+printf ']}' >> "$STATE/task17_struct.json"
+TRYRUN_SEND_TG=0 TRYRUN_WORK="$OUT17" restore_try_run task17 > "$OUT17/stdout.txt" 2>&1
+grep -qF "缺失目录结构探针" "$OUT17/tryrun.log" && ok "17a 报告含缺失目录结构探针段" \
+  || bad "17a 报告应含缺失目录结构探针段"
+grep -qF "替代目录 deadbeef **不在**" "$OUT17/tryrun.log" \
+  && ok "17b 替代目录没建成 ⇒ 报不在" || bad "17b 应报替代目录 deadbeef 不在"
+grep -qF "替代目录 6c73a635 **在**" "$OUT17/tryrun.log" \
+  && ok "17c 替代目录建成但文件不在 ⇒ 报在（区分两种成因）" \
+  || bad "17c 应报替代目录 6c73a635 在"
+# 探针必须只走只读命令: 全程零写入
+[ -z "$WRITE_CALLS" ] && ok "17d 结构探针全程只读（零写入）" \
+  || bad "17d 结构探针不得写任何数据（实际: ${WRITE_CALLS//$'\n'/ }）"
+rm -f "$STATE"/task17_struct.json
+rm -rf "$DST/caseA" "$DST/caseB"
 eval "$RCLONE_BASE_FN"; export -f rclone
 
 echo
