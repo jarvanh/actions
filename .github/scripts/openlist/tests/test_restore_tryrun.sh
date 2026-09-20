@@ -42,6 +42,11 @@ printf 'ORIG-C'   > "$DST/c/d.mp4"                             # alt==orig，已
 # mock rclone: 只读命令映射到本地沙箱；**写命令一律记账并判 FAIL**
 WRITE_CALLS=""
 DST_READABLE=1     # 0 = 模拟"容器没拉起 / 目标端不可达"
+# marker 文件名 → epoch（时间窗测试用；未列出的 = 取不到时间戳，必须被跳过）。
+# ⚠️ 用**文件**而不是关联数组传递: rclone 是被子进程调用的（`export -f`），
+#   而 bash 的关联数组**无法经环境导出**到子进程（export -A 无效），
+#   子进程里只会看到空数组 ⇒ 时间戳恒为空、marker 全被跳过，测试却会假绿。
+MARKER_TS_FILE="$WORK/marker_ts.txt"; : > "$MARKER_TS_FILE"
 rclone() {
   case "$1" in
     lsf)
@@ -57,6 +62,27 @@ rclone() {
       ;;
     cat)  cat "$2" ;;
     size) echo '{"bytes":1}' ;;
+    # 时间窗用: lsl 返回 "<size> <YYYY-MM-DD HH:MM:SS.mmm> <name>"（rclone 实际格式）
+    # 时间戳取自 $MARKER_TS（文件名 → epoch），测不出时间戳的条目就**不给它**，
+    # 用以验证"无时间戳者一律跳过、绝不静默放过"。
+    lsl)
+      case "$2" in
+        "$STATE")
+          local f b ts
+          for f in "$STATE"/*.json; do
+            [ -e "$f" ] || continue
+            b="${f##*/}"
+            ts=$(awk -F'\t' -v k="$b" '$1==k{print $2; exit}' "$MARKER_TS_FILE" 2>/dev/null)
+            if [ -n "$ts" ]; then
+              printf '%s %(%Y-%m-%d %H:%M:%S)T.000000000 %s\n' "1234" "$ts" "$b"
+            else
+              # 无时间戳: 模拟该远端不支持 ModTime —— 照样出现在 lsf 里（考察是否被跳过）
+              printf '%s %s %s\n' "1234" "- -" "$b"
+            fi
+          done
+          return 0 ;;
+      esac
+      return 1 ;;
     # 直读判据（_tryr_stat_exists 用）: 按**全路径 stat** 的返回码判定。
     # 不能恒返回 0 —— 那会把"真缺失"也翻案成存在，掩盖场景 7 要验证的行为。
     lsjson)
@@ -71,6 +97,16 @@ rclone() {
   return 0
 }
 export -f rclone
+# ⚠️ 桩是**在子进程里执行**的（生产代码在 <(...) 进程替换里调 rclone），而 `export -f`
+#   只导出函数、不导出普通变量 ⇒ 桩里引用 $STATE/$DST/$MARKER_TS_FILE 会全部是空串，
+#   表现为"分支匹配不上 → 静默返回空/1"，而测试只会看到"时间戳取不到"这种**像被测代码错**
+#   的症状（真实踩过: 12a/12g 就是这么红的）。故这几个必须显式 export。
+export STATE DST MARKER_TS_FILE DST_READABLE
+# 保留基础桩的函数体: 后面几个场景要换桩（计数桩等），换过之后**不会自动换回来**
+#   （场景 11 的计数桩一直生效到场景 12，它没有 lsl 分支 ⇒ 时间窗取不到时间戳，
+#   症状却像"生产代码算错时间"，极易误诊）。故需要时用它显式恢复，而不是再抄一份
+#   桩逻辑（抄两份必然漂移）。
+RCLONE_BASE_FN=$(declare -f rclone)
 
 # ---- 依赖: 排版本 + 生产同源的分类/存在性判定 ----
 source "$REPO_ROOT/.github/scripts/telegram/tg_notify.sh"
@@ -381,6 +417,62 @@ else
   bad "11f 复核判据必须是 lsjson 直读"
 fi
 rm -f "$STATE/task2_ghost.json"
+
+echo "=== 场景12: 时间窗（最近 N 天；默认全量）==="
+# 换回**基础桩**: 上面场景 11 的计数桩没有 lsl 分支，会一直生效到本场景
+eval "$RCLONE_BASE_FN"; export -f rclone
+# 为什么要有: 还原失败的条目会**留在 marker 里不删**，marker 只增不减。攒了几周后
+#   全量预演里绝大多数是早已失效的旧记录（对应文件早就不在目标端），把"备份缺失"
+#   抬得很高却不是当前问题 ⇒ 必须能按 marker 产生时间筛，才看得出最近几轮有没有真缺。
+# 本场景三条 marker: 新(1天前) / 旧(30天前) / 无时间戳。窗=3 天 ⇒ 只该看新的那条。
+OUT7="$WORK/out7"; mkdir -p "$OUT7"
+NOW=$(printf '%(%s)T' -1)          # 同样不用 date +%s（macOS 无 -d，本机套件已登记）
+NEW_TS=$((NOW - 1 * 86400))
+OLD_TS=$((NOW - 30 * 86400))
+# 三条 marker 内容相同（各 1 条 move 条目），只有时间不同 —— 只有一个变量
+for n in fresh stale undated; do
+  printf '{"dest_path":"openlist:wopan176Crypt/0","source_path":"onedrive:0","fixed_files":[' > "$STATE/task9_${n}.json"
+  printf '{"original":"c/d.mp4","alternative":"deadbeef/b.mp4","method":"m1","md5":""}' >> "$STATE/task9_${n}.json"
+  printf ']}' >> "$STATE/task9_${n}.json"
+done
+printf '%s\t%s\n' "task9_fresh.json" "$NEW_TS" >> "$MARKER_TS_FILE"
+printf '%s\t%s\n' "task9_stale.json" "$OLD_TS" >> "$MARKER_TS_FILE"
+# task9_undated.json **故意不给**时间戳 ⇒ 必须被跳过（无法证明它新 = 不能放行）
+TRYRUN_WITHIN_DAYS=3 TRYRUN_SEND_TG=0 TRYRUN_WORK="$OUT7" restore_try_run task9 > "$OUT7/stdout.txt" 2>&1
+N_FRESH=$(awk -F'\t' '$1=="task9_fresh.json"' "$OUT7/tryrun.tsv" | wc -l | tr -d ' ')
+N_STALE=$(awk -F'\t' '$1=="task9_stale.json"' "$OUT7/tryrun.tsv" | wc -l | tr -d ' ')
+N_UND=$(awk -F'\t' '$1=="task9_undated.json"' "$OUT7/tryrun.tsv" | wc -l | tr -d ' ')
+[ "$N_FRESH" = "1" ] && ok "12a 窗内 marker 保留（${N_FRESH} 条）" || bad "12a 窗内应保留（实际 ${N_FRESH}）"
+[ "$N_STALE" = "0" ] && ok "12b 超窗 marker 跳过（${N_STALE} 条）" || bad "12b 超窗应跳过（实际 ${N_STALE}）"
+[ "$N_UND" = "0" ] && ok "12c 无时间戳 marker 跳过（不可证明新 = 不放行，实际 ${N_UND}）" \
+  || bad "12c 无时间戳应跳过（实际 ${N_UND}）"
+grep -qF "时间窗=3 天" "$OUT7/tryrun.log" && ok "12d 报告明示时间窗" || bad "12d 报告明示时间窗"
+# 跳过数必须明示: 否则"筛完缺失变少"会被误读成"问题消失"
+grep -qE "跳过超窗 1 个" "$OUT7/tryrun.log" && ok "12e 报告明示跳过超窗数" || bad "12e 报告明示跳过超窗数"
+grep -qE "跳过无时间戳 1 个" "$OUT7/tryrun.log" && ok "12f 报告明示跳过无时间戳数" || bad "12f 报告明示无时间戳数"
+# 默认（不给 TRYRUN_WITHIN_DAYS）必须全量 —— 三个 marker 都该进来
+OUT8="$WORK/out8"; mkdir -p "$OUT8"
+TRYRUN_SEND_TG=0 TRYRUN_WORK="$OUT8" restore_try_run task9 > "$OUT8/stdout.txt" 2>&1
+# tsv **没有表头**（每行一条预演），故全量 = 全部行数；写成 NR>1 会白丢一行、把 3 数成 2
+N_ALL=$(awk -F'\t' 'NF' "$OUT8/tryrun.tsv" | wc -l | tr -d ' ')
+[ "$N_ALL" = "3" ] && ok "12g 默认全量（${N_ALL} 条，含旧与无时间戳）" || bad "12g 默认应全量（实际 ${N_ALL}）"
+grep -qF "时间窗=0 天（0 = 全量）" "$OUT8/tryrun.log" && ok "12h 默认报告标注全量" || bad "12h 默认报告标注全量"
+# 通知里必须带时间窗: 否则"缺失 30"和"缺失 777"会被当成同一问题的两种结论
+# 恢复通知替身: 场景 10 把它重定义成写 TG_CAPTURE，该定义会一直生效到本场景
+#   （不恢复 ⇒ LAST_TG_MSG 恒空，12i 会假红，症状却像"生产没写时间窗 kv"）
+send_telegram_message() { LAST_TG_MSG="$1"; }
+LAST_TG_MSG=""
+OUT9="$WORK/out9"; mkdir -p "$OUT9"; export TG_RUN_URL="https://example.invalid/r"
+TRYRUN_WITHIN_DAYS=3 TRYRUN_SEND_TG=1 TRYRUN_WORK="$OUT9" restore_try_run task9 > "$OUT9/stdout.txt" 2>&1
+# 断言**通知消息体**（不是日志）: 时间窗是"这次结论覆盖多大样本"的唯一说明，
+# 不看它，"缺失 30"和"缺失 777"会被当成同一个问题的两种结论
+if printf '%s' "${LAST_TG_MSG:-}" | grep -qF "最近 3 天"; then
+  ok "12i 通知含时间窗 kv"
+else
+  bad "12i 通知含时间窗 kv（消息体里没有）"
+fi
+rm -f "$STATE"/task9_*.json
+: > "$MARKER_TS_FILE"
 
 echo
 echo "===== 结果: PASS=$PASS FAIL=$FAIL ====="
