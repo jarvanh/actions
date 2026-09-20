@@ -83,6 +83,7 @@ proxy-speedtest/            测速结果数据
 | | `file_fix_pipeline.sh` | 1395 | 修复管线编排（方法轮换 + 增量持久化） |
 | | `file_restore.sh` | 655 | 修复文件还原（目标端 → 原路径 / 源端） |
 | | `restore_tryrun.sh` | 859 | 一键还原 **try run**（只读预演：三条完整路径推导 + 只读白名单护栏 + 时间窗 `within_days` / 绝对下界 `since` + 双直读复核 + 缺失目录结构探针 + 源端原路径核对与阳性对照 + **marker 原文探针**（dump 归属/时间/源端直读，查"这条记录由谁、何时写下"）；`restore_try_run`） |
+| | `reset_markers.sh` | 120 | marker **归档 + 清空**（一次性运维：先打包归档到 dropbox、归档失败拒绝清空、两道读取判据、默认 dry-run 需 `--commit`；`reset_markers` 入参） |
 | **task** | `task_preview.sh` | 526 | 任务预览（大小估算、跳过预判、未传量估算） |
 | | `task_engine.sh` | 2284 | 任务注册表与编排（分批、轮转、阶段行生产） |
 | **基础** | `utils.sh` | 152 | 通用工具（格式化、日志判定；转义/树形渲染已收敛到 `telegram/tg_notify.sh`） |
@@ -400,6 +401,13 @@ workflow 的 `run_mode` 单选互斥：
 与 `within_days` 同时给时**取更严者**（两个下界都满足才放行）；解析不出格式 ⇒ 大声告警并
 **回落全量**（宁可多跑，也不假装筛过）。报告头与汇总行都会打印「绝对下界」与
 「生效下界 `<ts>` UTC」，方便核对这一轮到底看了哪些 marker。
+
+**⚠️ 唯一的例外入参 `reset_markers`（关 / dry / commit）**：会**删** `onedrive:/logs/sync_state`
+下的 marker —— 先打包归档到 dropbox（`sync_state_reset_<时间戳>.tar.gz` + `MANIFEST.txt` 自证），
+**归档失败即拒绝清空**；两道判据（列表非空 + 下载数 ≥ 列表数）与 `backup_sync_state_to_dropbox`
+同口径，避免"空包覆盖好备份"。默认 `dry`（只打印将删多少、归档到哪），必须显式选 `commit` 才真删。
+它不是预演的一部分：选中后**独占本次运行**并提前退出（也不拉容器），日志形态与只读轮完全不同 ——
+"这轮到底删没删"不该靠回忆当时选了什么。
 
 ---
 
