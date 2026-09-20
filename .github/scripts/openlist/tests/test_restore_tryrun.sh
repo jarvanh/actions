@@ -711,6 +711,10 @@ grep -qF "源端同层:" "$OUT17/tryrun.log" && ok "17e 探针同屏给出源端
   || bad "17e 探针应同屏给出源端同层形状（marker 有 source_path 时）"
 grep -qF "caseB" "$OUT17/tryrun.log" && ok "17f 源端同层按 marker 的 source_path 推导" \
   || bad "17f 源端同层应由 source_path 推导（实际未见 caseB）"
+# 替代目录建成却判缺失时，必须进一步说清"里面有什么":
+#   空目录 ⇒ 文件压根没落；非空 ⇒ 落盘了但名字对不上（修法完全不同）
+grep -qF "**空目录**" "$OUT17/tryrun.log" && ok "17g 替代目录为空 ⇒ 报文件压根没落" \
+  || bad "17g 替代目录为空时应报「空目录」（caseB 的 6c73a635 无文件）"
 rm -f "$STATE"/task17_struct.json
 rm -rf "$DST/caseA" "$DST/caseB"
 eval "$RCLONE_BASE_FN"; export -f rclone
