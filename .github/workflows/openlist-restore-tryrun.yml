@@ -64,6 +64,11 @@ on:
         options:
           - "是"
           - "否"
+      dump_marker:
+        description: "marker 原文探针（只读，填了就只做它、不做预演）: 给出 marker 名的关键字（子串匹配），dump 其 source_path / dest_path / last_success / 远端 ModTime / 前几条 original —— 回答「这条修复记录是什么时候、由哪个目录对写下的」（marker 只增不减，老记录会一直躺在里面）"
+        required: false
+        type: string
+        default: ""
 
 # 独立并发组: 只读预演可与主轮并行，不与 openlist-singleton / -diag / -fix-check 互等。
 # 「与主轮错开」那条纪律是为**吞吐测量**与**在途 sync / 容器重启窗口**立的（主轮在传会把
@@ -153,6 +158,7 @@ jobs:
           TRYRUN_SINCE_INPUT: ${{ inputs.since }}
           TRYRUN_CHECK_INPUT: ${{ inputs.check_exists }}
           TRYRUN_TG_INPUT: ${{ inputs.send_tg }}
+          TRYRUN_DUMP_INPUT: ${{ inputs.dump_marker }}
         run: |
           # 中文选项 → 脚本口径的映射放在 bash 里做（不在 YAML 里内插）
           export TRYRUN_TASK="${TRYRUN_TASK_INPUT:-all}"
@@ -174,6 +180,8 @@ jobs:
             否|0|no) export TRYRUN_SEND_TG=0 ;;
             *)       export TRYRUN_SEND_TG=1 ;;
           esac
+          # marker 原文探针: 原样传给脚本（空 = 不做，走常规预演）
+          export TRYRUN_DUMP_MARKER="${TRYRUN_DUMP_INPUT:-}"
           export TRYRUN_WORK=/tmp/restore_tryrun
 
           source "$GITHUB_WORKSPACE/.github/scripts/openlist/load_all.sh"
