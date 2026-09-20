@@ -1469,11 +1469,36 @@ jobs:
             echo "⚠️ [glm-proxy] .env 里的访问 key 与 AI_GATEWAY_API_KEY 不一致，以 .env 为准"
           fi
 
-          GLM_OK=0
+          # 上游不可用的原因细分函数（在判定之后用日志尾部调用）。
+          # BigModel 把「余额不足或无可用资源包」也包在 HTTP 429 里返回（错误码 1113），
+          # 只写「429」会被读成限流，或顺着旧文案读成「凭据过期」——而凭据其实还在生效
+          # （日志里 coding-plan key 已加载成功），白换一轮 key 也解决不了。
+          # 按日志尾部的错误码/中文提示区分，让读者直接知道该充值、该等还是该换凭据。
+          glm_upstream_reason() {
+            case "$1" in
+              *1113*|*"余额不足"*|*"无可用资源包"*)
+                echo "上游配额耗尽（1113 · 余额不足或无可用资源包）· 充值或等配额重置后自动恢复" ;;
+              *"-> 401"*|*"-> 403"*|*"invalid api key"*|*"Invalid APIKey"*|*"凭据"*|*"凭证"*)
+                echo "上游凭据无效或已过期 · 需更换 credentials.json" ;;
+              *"超时"*|*"timeout"*|*"ETIMEDOUT"*)
+                echo "上游请求超时" ;;
+              *429*)
+                echo "上游限流（429）· 稍后自动恢复" ;;
+              *)
+                echo "自检未收到有效回答（详见下方日志尾部）" ;;
+            esac
+          }
+
+          # 判据拆两层（2026-09-20）：GLM_UP = 进程有没有起来；GLM_API = 上游能不能用。
+          # 此前两者并成一个 GLM_OK，自检没过就整条算「启动失败」——但上游不可用几乎都是
+          # 暂时状态（配额耗尽 / 限流），服务本身照常在 8787 监听，等上游恢复即可继续用，
+          # 把它报成 ❌ 启动失败会让读者去排查一个根本没坏的东西。
+          GLM_UP=0
+          GLM_API=0
           GLM_REASON=""
           if curl -fsS --max-time 3 "http://127.0.0.1:${GLM_PORT}/healthz" >/dev/null 2>&1; then
             # 端口已有实例在响应：多为上一轮残留进程，直接复用，不重复起
-            GLM_OK=1
+            GLM_UP=1
             GLM_REASON="端口 ${GLM_PORT} 已有实例在响应（复用）"
           elif [ ! -f "$GLM_DIR/glm-proxy.sh" ]; then
             GLM_REASON="脚本缺失：$GLM_DIR/glm-proxy.sh"
@@ -1482,23 +1507,34 @@ jobs:
           else
             echo "Starting glm-proxy on ${GLM_PORT}..."
             if bash "$GLM_DIR/glm-proxy.sh" start 2>&1 | tail -n 20; then
-              # 启动脚本已探过 healthz；这里再用真实消息做端到端闸门，
-              # 避免「进程活着但上游不可用」被判成成功
-              if bash "$GLM_DIR/glm-proxy.sh" selftest 2>&1 | tail -n 10; then
-                GLM_OK=1
-                GLM_REASON="已就绪 · 自检消息已收到回答"
-              else
-                GLM_REASON="自检未通过：未收到有效回答（多为上游 429/凭据过期）"
-              fi
+              # 启动脚本已探过 healthz，走到这里即进程已在监听
+              GLM_UP=1
+              GLM_REASON="已监听 ${GLM_PORT}"
             else
               GLM_REASON="启动脚本返回非 0（未在 30 秒内就绪）"
             fi
           fi
 
+          # 服务起来了才探上游：用真实消息做端到端闸门，结果只决定「能不能用」，
+          # 不再回头改写「起没起来」（见上面 GLM_UP/GLM_API 的拆分说明）。
+          # 复用的旧实例同样要探：它很可能是上一轮上游已经坏了的那一个，
+          # 而 healthz 只反映进程活着、不反映上游通不通（复用分支此前从不自检）。
+          if [ "$GLM_UP" = "1" ]; then
+            if bash "$GLM_DIR/glm-proxy.sh" selftest 2>&1 | tail -n 10; then
+              GLM_API=1
+              GLM_REASON="已就绪 · 自检消息已收到回答"
+            fi
+          fi
+
+          GLM_TAIL="$(tail -n 15 "$GLM_LOG" 2>/dev/null || true)"
+
           # 通知口径：与 workbuddy-gateway 一致，成功也推「已就绪」。
           # 接力轮每轮都会跑本步骤，为免逐轮刷屏，用本步骤自己的标记文件区分：
           # 文件在 → 上一轮已启动过 = 接力轮，不重复推「已就绪」（与 workbuddy 的
           # WB_RUN_TAG_FILE 同款做法）。按标记失败处理（多发一条好过漏发）。
+          # 注：标记文件在 /tmp 下，每 run 一台新 runner 故只在**同一轮内**有效 ——
+          # 上游不可用这类跨轮持续的状态无法靠它降频，本步骤不假装能降频（每轮都推，
+          # 但原因细分保证每条都是可照做的事实，而非重复噪音）。
           GLM_RUN_TAG_FILE="/tmp/glm-proxy-serve-run-tag"
           GLM_RELAUNCH=0
           GLM_PREV_TAG=""
@@ -1507,18 +1543,42 @@ jobs:
             GLM_PREV_TAG="$(head -n 1 "$GLM_RUN_TAG_FILE" 2>/dev/null || true)"
           fi
 
-          if [ "$GLM_OK" != "1" ]; then
-            GLM_TAIL="$(tail -n 15 "$GLM_LOG" 2>/dev/null || true)"
+          # 通知分三态（❌ 未监听 / ⚠️ 已监听但上游不可用 / 🟢 已就绪），与上面
+          # GLM_UP / GLM_API 的两层判据一一对应。
+          if [ "$GLM_UP" != "1" ]; then
             # 日志尾部同时打到 stdout：<pre> 只进 Telegram，CI 日志里看不到
             echo "--- glm-proxy.log tail ---"
             printf '%s\n' "${GLM_TAIL:-<empty>}"
             echo "--- end glm-proxy.log tail ---"
             _m=""
             tg_add_title _m "❌ glm-proxy 启动失败"
-            tg_add_kv _m "结论" "未就绪 · 退出码 1"
+            tg_add_kv _m "结论" "未监听 ${GLM_PORT} · 退出码 1"
             tg_add_path _m "端口" "$GLM_PORT"
             tg_add_kv _m "原因" "$GLM_REASON"
             tg_add_path _m "代码目录" "$GLM_DIR"
+            if [ -n "$GLM_TAIL" ]; then
+              tg_add_note _m "日志尾部"
+              tg_add_block _m "<pre>$(escape_html "$GLM_TAIL")</pre>"
+            fi
+            tg_add_footer _m
+            send_tg "$_m"
+          elif [ "$GLM_API" != "1" ]; then
+            # 服务在监听、上游答不了：服务本身没坏，按可用性问题降级 ⚠️ 而非 ❌ 启动失败。
+            # 判据详见本步骤上半段的 GLM_UP / GLM_API 拆分说明；结论必须与标题一致地表达
+            # 「已监听但暂不可用」，否则读者会去排查一个没坏的进程。
+            echo "⚠️ [glm-proxy] ${GLM_PORT} 已监听，但上游不可用"
+            # 日志尾部同样打到 stdout：<pre> 只进 Telegram，CI 日志里看不到
+            echo "--- glm-proxy.log tail ---"
+            printf '%s\n' "${GLM_TAIL:-<empty>}"
+            echo "--- end glm-proxy.log tail ---"
+            _m=""
+            tg_add_title _m "⚠️ glm-proxy 已启动 · 上游不可用"
+            tg_add_kv _m "结论" "已监听 ${GLM_PORT} · 自检消息未收到有效回答"
+            tg_add_kv _m "原因" "$(glm_upstream_reason "$GLM_TAIL")"
+            tg_add_path _m "接口" "http://127.0.0.1:${GLM_PORT}/v1"
+            tg_add_path _m "代码目录" "$GLM_DIR"
+            # 说明段作末段（规范 · 说明段）：上游是暂时状态，服务无需重启即会自愈
+            tg_add_note _m "服务本身正常，上游恢复后无需重启即可继续使用"
             if [ -n "$GLM_TAIL" ]; then
               tg_add_note _m "日志尾部"
               tg_add_block _m "<pre>$(escape_html "$GLM_TAIL")</pre>"

@@ -28,6 +28,7 @@
 | Run rss-to-telegram container | `rongronggg9/rss-to-telegram:latest`，启动门禁 = 独立 bot secret `TELEGRAM_BOT_TOKEN_RSS_SB_BOT`（未配置则跳过启动，本轮不产生数据、最终归档也跳过上传） | 数据 `/tmp/local_rsstt`（config + data） |
 | Run AI API gateway | CliRelay 全栈优先 / CLIProxyAPI 回退 | 8317 → 隧道 `ai-api` |
 | Run workbuddy-gateway | 先查 GitHub Releases 决定是否更新二进制，再 `serve`（见第八节） | 8318（仅本机） |
+| Run glm-proxy | BigModel/GLM 本地反代（Anthropic ↔ OpenAI 协议转换），自检分「起没起来 / 能不能用」两层（见第九节） | 8787（仅本机） |
 | Run OpenClaw | 自愈主流程（本文第三、四章） | 18789 |
 | Start background archive loop | 每 20 分钟归档 `~/.openclaw` + AI 网关数据（`flock` 防重入） | Dropbox |
 | Keep alive → Stop OpenClaw and Final Archive → Notify OpenClaw final archive result → Trigger next OpenClaw run | 收尾与自我接力 | — |
@@ -234,6 +235,9 @@ tar -xzf /tmp/restore.tar.gz -C /tmp/restore .openclaw/openclaw.json
 | `⚠️ workbuddy-gateway 已启动 · 无可用账号` | 服务已监听但账号池为空 | 提示需人工扫码登录（`login` 无法在 workflow 内完成） |
 | `❌ workbuddy-gateway 启动失败` | 进程启动即退，或 120 秒内未监听 8318 | 失败原因 + 🧾 原始输出（日志尾部 1200 字节） |
 | `⛔ / ⚠️ workbuddy-gateway 已停止` | 收尾停止段落执行后 | 版本与数据目录；仍有进程残留时降级 ⚠️ |
+| `🟢 glm-proxy 已就绪` | 已监听 8787 且自检消息收到回答（**仅首轮推**，接力轮不重复） | 结论、接口、鉴权、模型、代码目录 |
+| `⚠️ glm-proxy 已启动 · 上游不可用` | 已监听 8787 但自检未收到有效回答 | 结论（已监听 · 不可用）、**细分后的上游原因**、接口、代码目录、日志尾部 |
+| `❌ glm-proxy 启动失败` | 进程未在 8787 监听（脚本/代码缺失、启动脚本非 0） | 结论（未监听 · 退出码 1）、端口、原因、代码目录、日志尾部 |
 
 > workbuddy 的就绪通知**只在首轮发**。本 workflow 由收尾步骤 `gh workflow run` 接力启动，
 > 接力轮会把同一套启动逻辑再跑一遍——同一个服务、同一份账号池，通知内容与上一条完全相同。
@@ -244,9 +248,11 @@ tar -xzf /tmp/restore.tar.gz -C /tmp/restore .openclaw/openclaw.json
 > 「接口」写 `http://127.0.0.1:8318/v1`。**注意区分两个「默认」**：workbuddy-gateway
 > 上游 `-port` 默认值是 **8317**，与 CliRelay/CLIProxyAPI（OpenClaw 主网关）撞车，
 > 故本步骤启动时显式传 `-port 8318` 覆盖 —— 通知里的端口是**实际绑定端口**，
-> 不是上游默认值。「鉴权」恒写
-> **仅回环监听，无需密钥** —— 启动命令不传 `-api-key` 且只绑 `127.0.0.1`，网关不做鉴权；
-> 上游该参数默认空、本仓库也从未设置，**不得编造密钥值**。
+> 不是上游默认值。「鉴权」写
+> **需 API Key（与 glm-proxy 同值）** —— serve 以 `-addr 0.0.0.0` 监听（对 Tailscale/
+> 局域网开放），故启动时显式传 `-api-key` 做客户端 Bearer 校验，取值同为 job 级
+> `AI_GATEWAY_API_KEY`；**不得编造密钥值**，通知里也不回显 key 本身。
+> （此前本节写「仅回环监听，无需密钥」，与实际启动参数不符，已订正）
 > 「🔑 凭据」只列 `workbuddy*.json` 的**文件名**（真实 Access/Refresh Token 绝不上通知），
 > 且排除 serve 自己写的状态快照 `workbuddy-status.json`。
 > 「💳 账号池」的额度/状态/冷却取自 serve 写出的 `workbuddy-status.json`（**jq 解析**），
@@ -546,3 +552,64 @@ serve 根本看不到，最快也要等下一轮（≈5.7 小时）。为此在�
 
 > 说明：OpenClaw 主网关（CliRelay `:8317` → cloudflared `ai-api` 隧道）见第六节；
 > 本节服务是**并列的第二网关**，对外入口与归档一律互不涉及。
+
+## 九、glm-proxy（BigModel/GLM 本地反代，并列第三网关）
+
+> 对应步骤：「Run glm-proxy (GLM reverse proxy)」与收尾的 `3c. Stopping glm-proxy`。
+> 代码不在本仓库：持久化在 Dropbox 的 `self-hosted/glm-proxy`（`glm-proxy.sh` + `server.mjs`），
+> 运行时以 `bash "$GLM_DIR/glm-proxy.sh" start|selftest|stop` 调用 —— 与 workbuddy 同因
+> （rclone 挂载点合成权限位，`chmod +x` 是空操作，必须显式用 `bash`）。
+
+### 判据分两层：起没起来 / 能不能用
+
+```
+/healthz 探活（3s）
+  ├─ 已有实例在响应 → 复用（GLM_UP=1，原因记「复用」）
+  └─ 无 → 脚本/代码缺失？→ 否则 bash glm-proxy.sh start（自带 healthz，30s）
+        ├─ 非 0 → ❌ 启动失败
+        └─ 0   → GLM_UP=1
+GLM_UP=1 → bash glm-proxy.sh selftest（真实消息端到端）
+  ├─ 收到回答 → GLM_API=1 → 🟢 已就绪（仅首轮推）
+  └─ 未收到   → ⚠️ 已启动 · 上游不可用
+```
+
+**这两层不能合并。** 反代进程活着只说明它在监听；上游配额耗尽、限流时服务本身完全
+正常、等一等就能继续用，若并成一个 `OK` 就会报成 ❌ 启动失败，读者去排查一个没坏的
+进程。历史教训：2026-09-20 上游 `1113`（余额不足）被整条判成「启动失败」，而实际
+进程在 8787 正常监听。
+
+「复用」分支**同样要跑自检**：残留的旧实例很可能就是上一轮上游已经坏了的那一个，
+而 `/healthz` 只反映进程活着、不反映上游通不通。
+
+### 上游原因细分
+
+「上游 429/凭据过期」这种笼统文案会误导排查 —— 按日志尾部匹配后写具体事实
+（判据表见 [`telegram-notify.md`](telegram-notify.md) 2.5 节）：
+
+| 日志特征 | 通知里的「原因」 | 该做什么 |
+|---|---|---|
+| `1113` / `余额不足` / `无可用资源包` | 上游配额耗尽 · 充值或等配额重置后自动恢复 | 充值，或等配额重置 |
+| `-> 401` / `-> 403` / `invalid api key` | 上游凭据无效或已过期 · 需更换凭据文件 | 换 `credentials.json` |
+| `超时` / `timeout` / `ETIMEDOUT` | 上游请求超时 | 重跑即可 |
+| `429`（前几项都不命中时） | 上游限流（429）· 稍后自动恢复 | 等 |
+
+> BigModel 把「余额不足或无可用资源包」也包在 HTTP 429 里返回（错误码 `1113`），
+> 此时凭据其实**还在生效**（日志里 coding-plan key 已加载成功）—— 报成「凭据过期」
+> 会让人白换一轮 key。故 `1113` 的匹配必须排在裸 `429` 之前。
+
+### 凭据与降频
+
+- **上游凭据不在本仓库**：来自 runner 上 `~/.zcode/v2/credentials.json`（zcode 的
+  coding-plan，每轮由 ZCode 恢复步骤从 `zcode.tar.gz` 还原）。仓库侧换不了它；
+  Dropbox `.env` 里的 `AI_GATEWAY_API_KEY` / `PROXY_API_KEY` 是**客户端访问本反代的口令**，
+  不是上游凭据 —— 两者不要混。
+- **上游不可用每轮都推，不做降频**：判据用的标记文件在 `/tmp` 下，每个 run 一台新
+  runner，跨轮计数根本不成立（写降频逻辑等于自欺）。重复噪音靠「原因细分」化解 ——
+  每条都是可照做的事实，而不是同一句模糊告警的复读。
+
+### 排障入口
+
+- 本轮日志：`/tmp/local_glm_proxy/logs/glm-proxy.log`（失败时尾部同时打到 stdout，
+  `--- glm-proxy.log tail ---`）。
+- 收尾 `3c` 段显式停（`stop` + `pkill -f "glm-proxy/server.mjs"` 兜底 + `/healthz` 复检残留），
+  否则残留进程会一直持有 8787。
