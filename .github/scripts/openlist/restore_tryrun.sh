@@ -280,29 +280,36 @@ restore_try_run() {
   _tryr_log "  报告: ${TRYRUN_LOG} / ${tsv}"
   _tryr_log ""
 
-  # 时间窗（0/空 = 全量）。一次 lsl 把目录的时间戳全取回来再本地比较 —— 绝不能对
-  # 每个 marker 单独 lsl（几百个 marker × 一次往返，和逐条 lsf 是同一类 fork 风暴）。
-  # lsl 输出形如: "<size> <YYYY-MM-DD HH:MM:SS.mmmmmmm> <name>"
-  # ⚠️ 取时间窗前的两条纪律（都是真踩出来的）:
-  #   1) 名字按**基名**匹配: lsf 给的是基名，而 ls/lsl 给的是**从远端根算起的完整
-  #      相对路径**（logs/sync_state/task_x.json），两者口径不同 —— 直接用 $NF 会
-  #      与 marker 名对不上，422 个 marker 全被判"无时间戳"（run 35488836925 实测）。
+  # 时间窗（0/空 = 全量）。
+  #
+  # 时间源优先级（run 35489237518 实测定下来的）:
+  #   **1) marker 自带的 last_success**（UTC，写 marker 时落盘，见 sync_marker.sh:498）
+  #   **2) 远端 ModTime**（一次 lsl 取全目录后本地比较，绝不逐个 lsl —— 几百次往返
+  #      和逐条 lsf 是同一类风暴）
+  #   为什么 1 优先: OneDrive 的 `rclone lsl` **返回 0 行**（该后端不吐 ModTime 列表），
+  #   纯按 ModTime 实现 ⇒ 生产上 422 个 marker 全被判"无时间戳"，条目 0（run
+  #   35488836925）。而 last_success 是 marker 内容自带的，**零额外往返**（cat 本来
+  #   就要读全文），且与"这个 marker 是哪一轮产生的"语义完全一致。
+  #
+  # ⚠️ 两条纪律（都是真踩出来的）:
+  #   1) lsl 的名字要按**基名**匹配: lsf 给基名、lsl 给从远端根算起的完整相对路径。
   #   2) **"整体取不到"必须与"个别没有"区分开**: 混为一谈会把"时间窗机制失效"
   #      静默翻译成"条目 0 / 缺失 0"，看着像"最近 3 天没缺"，实际是**根本没测**
   #      （§0: 判据静默失败 ⇒ 错误结论）。故一个时间戳都解析不出来时**回落全量
   #      并大声告警**，绝不产出"空结论"。
   local within_days="${TRYRUN_WITHIN_DAYS:-0}"
   local cutoff=0
-  local ts_lines=0 ts_parsed=0 ts_fallback=0
+  local ts_parsed=0 ts_fallback=0
   if [[ "$within_days" =~ ^[0-9]+$ ]] && [ "$within_days" -gt 0 ]; then
     # 同样不用 date +%s（见下方时间戳解析处的说明）
     cutoff=$(( $(printf '%(%s)T' -1) - within_days * 86400 ))
   fi
+  # 兜底时间源: lsl 的 ModTime（last_success 缺失时才用）
   declare -gA _TRYR_MARKER_TS=()
   if [ "$cutoff" -gt 0 ]; then
+    local ts_lines=0 lsl_line fts fname fdate ftime
     local lsl_file="${TRYRUN_WORK}/tryrun_lsl.txt"
     _tryr_rclone_read lsl "$SYNC_STATE_DIR" --files-only --retries 2 >"$lsl_file" 2>/dev/null
-    local lsl_line fts fname fdate ftime
     while IFS= read -r lsl_line; do
       [ -z "$lsl_line" ] && continue
       ts_lines=$((ts_lines + 1))
@@ -319,17 +326,7 @@ restore_try_run() {
       fts=$(_tryr_epoch_utc "$fdate" "$ftime")
       [ -n "$fts" ] || continue
       _TRYR_MARKER_TS["$fname"]="$fts"
-      ts_parsed=$((ts_parsed + 1))
     done < "$lsl_file"
-    # 一个都解析不出来 = 时间窗机制本身没生效（远端不支持 ModTime / lsl 失败 /
-    # 格式不符）⇒ 回落全量并告警，绝不用"条目 0"冒充"最近没缺"
-    if [ "$ts_parsed" -eq 0 ]; then
-      ts_fallback=1
-      cutoff=0; within_days=0
-      _tryr_log "  ❌ 时间窗未生效: lsl 返回 ${ts_lines} 行但解析出 0 个时间戳 ⇒ " \
-                "**回落全量**（不能用'条目 0'冒充'最近没缺'）。原始前 3 行:"
-      head -n 3 "$lsl_file" 2>/dev/null | while IFS= read -r l; do _tryr_log "     | ${l}"; done
-    fi
   fi
 
   local markers
@@ -339,28 +336,71 @@ restore_try_run() {
     return 2
   fi
 
-  local m task marker_path json dest src count idx
+  # ---- 阶段一: 逐 marker 读全文 + 解析时间戳（只 cat 一次，结果缓存在内存）----
+  # 为什么要先全量读完再筛: "时间窗机制是否整体失效"只有读完后才知道，而知道了
+  #   还必须能**立刻用缓存重跑全量**（否则就得再 cat 一遍 422 个 marker，几十分钟）。
+  local m task marker_path json dest src count idx mts mts_date mts_time mts_epoch
   local scanned=0 skipped_old=0 skipped_nots=0
+  # m=marker 名 → 拼成 "epoch\tjson" 存数组（marker 里含中文/空格，故按行读取）
+  local -a _mk_names=()
+  local -A _mk_epoch=() _mk_json=()
   for m in $markers; do
     [[ "$m" == *.json ]] || continue
     task="${m%%_*}"
     if [ "$task_filter" != "all" ] && [ "$task" != "$task_filter" ]; then
       continue
     fi
-    # 时间窗过滤: 取不到时间戳的**按旧的处理还是新的处理**是个取舍 —— 取不到意味着
-    # 我们无法证明它新，若放进来就等于"时间窗失效"，故计入 skipped_nots 跳过并明示，
-    # 绝不静默放过一个可能是旧的 marker（这条会被测试锁住）。
+    marker_path="${SYNC_STATE_DIR}/${m}"
+    json=$(_tryr_rclone_read cat "$marker_path" --retries 2 2>/dev/null) || continue
+    [ -z "$json" ] && continue
+    _mk_names+=("$m"); _mk_json["$m"]="$json"
+    [ "$cutoff" -eq 0 ] && continue
+    # 时间源: ① marker 自带的 last_success（UTC，见上）；② 兜底 lsl 的 ModTime
+    mts=$(printf '%s' "$json" | jq -r '.last_success // empty' 2>/dev/null)
+    if [ -n "$mts" ]; then
+      mts="${mts%%.*}"; mts="${mts%%+*}"; mts="${mts%Z}"
+      mts_date="${mts%%T*}"; mts_time="${mts#*T}"
+      if [[ "$mts_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] \
+         && [[ "$mts_time" =~ ^[0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]; then
+        _mk_epoch["$m"]=$(_tryr_epoch_utc "$mts_date" "$mts_time")
+      fi
+    elif [ -n "${_TRYR_MARKER_TS[$m]:-}" ]; then
+      _mk_epoch["$m"]="${_TRYR_MARKER_TS[$m]}"
+    fi
+  done
+
+  # ---- 阶段一·半: 机制是否整体失效 ⇒ 决定要不要回落全量 ----
+  if [ "$cutoff" -gt 0 ]; then
+    local n_with=0
+    for m in "${_mk_names[@]}"; do
+      [ -n "${_mk_epoch[$m]:-}" ] && n_with=$((n_with + 1))
+    done
+    # 一个时间戳都解析不出来 = 时间窗根本没生效 ⇒ 回落全量并大声告警，
+    # 绝不用"条目 0"冒充"最近没缺"（§0: 判据静默失败 ⇒ 错误结论）
+    if [ "$n_with" -eq 0 ]; then
+      ts_fallback=1
+      cutoff=0; within_days=0
+      _tryr_log "  ❌ 时间窗未生效: ${#_mk_names[@]} 个 marker 里 0 个取到时间 ⇒ " \
+                "**回落全量**（不能用'条目 0'冒充'最近没缺'）。" \
+                "（last_success 缺失 + lsl 无 ModTime，多为后端不支持）"
+    fi
+  fi
+
+  # ---- 阶段二: 按窗筛 + 预演（用的是缓存的 json，不重复下载）----
+  for m in "${_mk_names[@]}"; do
+    json="${_mk_json[$m]}"
     if [ "$cutoff" -gt 0 ]; then
       scanned=$((scanned + 1))
-      if [ -z "${_TRYR_MARKER_TS[$m]:-}" ]; then
+      mts_epoch="${_mk_epoch[$m]:-}"
+      # 取不到时间戳的**按旧的处理还是新的处理**是个取舍 —— 取不到意味着我们无法
+      # 证明它新，放进来就等于"时间窗失效"，故跳过并明示（测试锁住）。
+      if [ -z "$mts_epoch" ]; then
         skipped_nots=$((skipped_nots + 1)); continue
       fi
-      if [ "${_TRYR_MARKER_TS[$m]}" -lt "$cutoff" ]; then
+      if [ "$mts_epoch" -lt "$cutoff" ]; then
         skipped_old=$((skipped_old + 1)); continue
       fi
     fi
-    marker_path="${SYNC_STATE_DIR}/${m}"
-    json=$(_tryr_rclone_read cat "$marker_path" --retries 2 2>/dev/null) || continue
     dest=$(printf '%s' "$json" | jq -r '.dest_path // empty' 2>/dev/null)
     src=$(printf '%s' "$json" | jq -r '.source_path // empty' 2>/dev/null)
     [ -z "$dest" ] && continue

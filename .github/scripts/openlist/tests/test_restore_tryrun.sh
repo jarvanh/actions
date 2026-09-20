@@ -62,10 +62,12 @@ rclone() {
       ;;
     cat)  cat "$2" ;;
     size) echo '{"bytes":1}' ;;
-    # 时间窗用: lsl 返回 "<size> <YYYY-MM-DD HH:MM:SS.mmm> <path>"（rclone 实际格式）
-    # ⚠️ path 是**从远端根算起的完整相对路径**，不是基名（run 35488836925 实测:
-    #   生产侧 422 个 marker 全被判"无时间戳"，就是因为 lsl 给全路径、lsf 给基名，
-    #   两边口径对不上）。桩必须复刻这个形态，否则测试永远测不到该类 bug。
+    # 时间窗兜底用: lsl 返回 "<size> <YYYY-MM-DD HH:MM:SS.mmm> <path>"（rclone 格式）
+    # ⚠️ 两处真机形态必须复刻，否则测试测不到真 bug:
+    #   1) path 是**从远端根算起的完整相对路径**，不是基名（lsf 给基名、lsl 给全路径）；
+    #   2) **取不到 ModTime 的条目压根不出现**（run 35489237518 实测: OneDrive 的
+    #      `rclone lsl` 直接返回 **0 行**）。早先的桩给它打 "- -" 占位行，反倒掩盖了
+    #      "整个后端不支持"这个生产上的真实形态。
     lsl)
       case "$2" in
         "$STATE")
@@ -74,12 +76,8 @@ rclone() {
             [ -e "$f" ] || continue
             b="${f##*/}"
             ts=$(awk -F'\t' -v k="$b" '$1==k{print $2; exit}' "$MARKER_TS_FILE" 2>/dev/null)
-            if [ -n "$ts" ]; then
-              printf '%s %(%Y-%m-%d %H:%M:%S)T.000000000 %s\n' "1234" "$ts" "logs/sync_state/$b"
-            else
-              # 无时间戳: 模拟该远端不支持 ModTime —— 照样出现在 lsf 里（考察是否被跳过）
-              printf '%s %s %s\n' "1234" "- -" "logs/sync_state/$b"
-            fi
+            [ -z "$ts" ] && continue     # 无 ModTime ⇒ 不出现（OneDrive 真机口径）
+            printf '%s %(%Y-%m-%d %H:%M:%S)T.000000000 %s\n' "1234" "$ts" "logs/sync_state/$b"
           done
           return 0 ;;
       esac
@@ -430,15 +428,28 @@ OUT7="$WORK/out7"; mkdir -p "$OUT7"
 NOW=$(printf '%(%s)T' -1)          # 同样不用 date +%s（macOS 无 -d，本机套件已登记）
 NEW_TS=$((NOW - 1 * 86400))
 OLD_TS=$((NOW - 30 * 86400))
-# 三条 marker 内容相同（各 1 条 move 条目），只有时间不同 —— 只有一个变量
+# 三条 marker 内容相同（各 1 条 move 条目），只有时间不同 —— 只有一个变量。
+# 时间按生产真实形态写进 **marker 内容自带的 last_success**（UTC，见 sync_marker.sh:498）
+#   —— 它才是主时间源: OneDrive 的 `rclone lsl` 实测返回 0 行（run 35489237518），
+#   纯靠 ModTime 的筛选在生产上直接失效。MARKER_TS_FILE（lsl 的 ModTime）只作兜底。
+NOW=$(printf '%(%s)T' -1)          # 同样不用 date +%s（macOS 无 -d，本机套件已登记）
+NEW_TS=$((NOW - 1 * 86400))
+OLD_TS=$((NOW - 30 * 86400))
+NEW_UTC=$(printf '%(%Y-%m-%dT%H:%M:%S)T' "$NEW_TS")
+OLD_UTC=$(printf '%(%Y-%m-%dT%H:%M:%S)T' "$OLD_TS")
 for n in fresh stale undated; do
-  printf '{"dest_path":"openlist:wopan176Crypt/0","source_path":"onedrive:0","fixed_files":[' > "$STATE/task9_${n}.json"
+  case "$n" in
+    fresh) _ls="\"last_success\":\"${NEW_UTC}Z\"," ;;
+    stale) _ls="\"last_success\":\"${OLD_UTC}Z\"," ;;
+    *)     _ls="" ;;       # 无 last_success ⇒ 只能指望 lsl，而 lsl 也没有
+  esac
+  printf '{"dest_path":"openlist:wopan176Crypt/0","source_path":"onedrive:0",%s"fixed_files":[' "$_ls" > "$STATE/task9_${n}.json"
   printf '{"original":"c/d.mp4","alternative":"deadbeef/b.mp4","method":"m1","md5":""}' >> "$STATE/task9_${n}.json"
   printf ']}' >> "$STATE/task9_${n}.json"
 done
+# lsl 兜底时间源: 只给 fresh/stale（undated 两条时间源都没有 ⇒ 必须跳过）
 printf '%s\t%s\n' "task9_fresh.json" "$NEW_TS" >> "$MARKER_TS_FILE"
 printf '%s\t%s\n' "task9_stale.json" "$OLD_TS" >> "$MARKER_TS_FILE"
-# task9_undated.json **故意不给**时间戳 ⇒ 必须被跳过（无法证明它新 = 不能放行）
 TRYRUN_WITHIN_DAYS=3 TRYRUN_SEND_TG=0 TRYRUN_WORK="$OUT7" restore_try_run task9 > "$OUT7/stdout.txt" 2>&1
 N_FRESH=$(awk -F'\t' '$1=="task9_fresh.json"' "$OUT7/tryrun.tsv" | wc -l | tr -d ' ')
 N_STALE=$(awk -F'\t' '$1=="task9_stale.json"' "$OUT7/tryrun.tsv" | wc -l | tr -d ' ')
@@ -500,6 +511,31 @@ else
   ok "13d 未生效时不再报时间窗生效"
 fi
 rm -f "$STATE"/task9_*.json
+: > "$MARKER_TS_FILE"
+
+echo "=== 场景14: 兜底时间源（marker 无 last_success ⇒ 用 lsl 的 ModTime）==="
+# 生产真实形态: 很旧的 marker 没有 last_success 字段，此时若能拿到 ModTime 就该用上，
+#   不能因为换了主时间源就把这部分 marker 全判"无时间戳"（那会让时间窗悄悄筛掉它们）。
+OUT11="$WORK/out11"; mkdir -p "$OUT11"
+for n in fresh stale; do
+  printf '{"dest_path":"openlist:wopan176Crypt/0","source_path":"onedrive:0","fixed_files":[' > "$STATE/task9_${n}.json"
+  printf '{"original":"c/d.mp4","alternative":"deadbeef/b.mp4","method":"m1","md5":""}' >> "$STATE/task9_${n}.json"
+  printf ']}' >> "$STATE/task9_${n}.json"
+done
+# 两个 marker 都**不带** last_success；时间只由 lsl 提供（fresh 新 / stale 旧）
+printf '%s\t%s\n' "task9_fresh.json" "$NEW_TS" >> "$MARKER_TS_FILE"
+printf '%s\t%s\n' "task9_stale.json" "$OLD_TS" >> "$MARKER_TS_FILE"
+TRYRUN_WITHIN_DAYS=3 TRYRUN_SEND_TG=0 TRYRUN_WORK="$OUT11" restore_try_run task9 > "$OUT11/stdout.txt" 2>&1
+N_F=$(awk -F'\t' '$1=="task9_fresh.json"' "$OUT11/tryrun.tsv" | wc -l | tr -d ' ')
+N_S=$(awk -F'\t' '$1=="task9_stale.json"' "$OUT11/tryrun.tsv" | wc -l | tr -d ' ')
+[ "$N_F" = "1" ] && ok "14a 无 last_success 时回落到 lsl 时间戳（窗内 ${N_F} 条）" \
+  || bad "14a 应回落到 lsl 时间戳（窗内实际 ${N_F}，0 = 兜底链路没生效）"
+[ "$N_S" = "0" ] && ok "14b 兜底来源同样按窗筛掉超窗者（${N_S} 条）" \
+  || bad "14b 兜底来源也应筛掉超窗者（实际 ${N_S}）"
+grep -qE "跳过无时间戳 0 个" "$OUT11/tryrun.log" \
+  && ok "14c 有 ModTime 就不该记成无时间戳" || bad "14c 有 ModTime 却记了无时间戳"
+rm -f "$STATE"/task9_*.json
+: > "$MARKER_TS_FILE"
 
 echo
 echo "===== 结果: PASS=$PASS FAIL=$FAIL ====="
