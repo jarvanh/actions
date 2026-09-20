@@ -6,8 +6,10 @@
 # 三条判据（顺序固定，任一命中即跳过，且必须把原因写进日志——"跳过"是健康接力链的常态，
 # 不是异常，不能静默）：
 #   ① 开关关闭（SR_ENABLED=false）
-#   ② 人工取消（status=cancelled 且 elapsed < SR_CANCEL_MIN，默认 21000s）：
-#      6h 上限触发的取消 elapsed ≈ 21600s，远小于它说明是人手动停的，不该替他续上
+#   ② 人工取消（status=cancelled 且 0 < elapsed < SR_CANCEL_MIN，默认 21000s）：
+#      6h 上限触发的取消 elapsed ≈ 21600s，远小于它说明是人手动停的，不该替他续上。
+#      ⚠️ elapsed 取不到（==0，Windows runner 无 /proc/1 时的历史形态）**不判人工取消**，
+#      否则每轮取消都会被当成人工取消、链永久断掉；此时放行派发（fail-open）。
 #   ③ 队列里已有 queued/waiting/pending 的运行：说明下一轮已经排上了（cron 兜底留下的
 #      pending，或上一次派发），再派一轮就是叠罗汉
 #
@@ -63,8 +65,16 @@ self_retrigger() {
   fi
   case "$elapsed" in ''|*[!0-9]*) elapsed=0;; esac
 
-  if [ "$status" = "cancelled" ] && [ "$elapsed" -lt "$cancel_min" ]; then
+  # ⚠️ elapsed==0 表示"取不到"（不是"刚启动"）：Windows runner 无 /proc/1 时恒为 0
+  #    （run_elapsed.sh 第 ③ 档），此时若照旧判 `0 < cancel_min` 会把每轮取消都当成
+  #    人工取消 → 链永久断掉，只剩 cron 兜底。判据②只在拿得到真实 elapsed 时才生效，
+  #    否则放行派发（fail-open，与「排队判据取不到时放行」同一取向：保活型服务可用性
+  #    优先，宁可多派一轮让单例并发把它变 pending，也不让服务断档）。
+  if [ "$elapsed" -gt 0 ] && [ "$status" = "cancelled" ] && [ "$elapsed" -lt "$cancel_min" ]; then
     reason="人工取消（仅运行 $((elapsed / 60)) 分钟）"
+  fi
+  if [ "$elapsed" -le 0 ] && [ "$status" = "cancelled" ]; then
+    echo "::warning::本轮已运行秒数取不到（elapsed=0），跳过人工取消判定，按接力处理"
   fi
   if [ -z "$reason" ] && [ "$status" = "failure" ] && [ "$on_failure" != "1" ]; then
     reason="本轮失败且未开启失败接力"

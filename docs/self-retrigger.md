@@ -23,7 +23,7 @@
 | # | 判据 | 为什么 |
 |---|---|---|
 | ① | 开关关闭（`SR_ENABLED != true`） | 对应 workflow 的 `self_retrigger` 输入：保留"能停"的能力 |
-| ② | 人工取消（`job.status=cancelled` 且 elapsed < 21000s） | 6h 上限触发的取消 elapsed ≈ 21600s，远小于它说明是人手动停的，**不该替他续上** |
+| ② | 人工取消（`job.status=cancelled` 且 `0 < elapsed < 21000s`） | 6h 上限触发的取消 elapsed ≈ 21600s，远小于它说明是人手动停的，**不该替他续上**。⚠️ `elapsed == 0` 表示**取不到**（不是"刚启动"），此时**不判人工取消**、放行派发 —— 详见 §7 |
 | ③ | 队列里已有 `queued/waiting/pending` | 下一轮已经排上了，再派就是叠罗汉（叠罗汉会同时占两个 runner、抢同一份数据） |
 
 三条都不命中才派发。**跳过是健康接力链的常态**，所以每条跳过都必须把原因写进日志
@@ -108,6 +108,13 @@ jobs:
 - **Windows runner（`tailscale-windows.yml`）**：脚本里用 `gh` 自带的 `--jq`（Go 实现），
   **不要**管道给外部 `jq`——Windows 镜像上没有 jq 二进制，管道版会静默退化成"排队数=0"，
   「已有排队」判据就白设了。该步骤要显式 `shell: bash`（runner 自带 git-bash）。
+- **Windows runner 还要埋 job 起点**：`run_elapsed_seconds` 的第 ② 档靠 `/proc/1`，
+  Windows 上不存在 → elapsed 恒 0 → 收尾把跑满 6h49m 的轮报成"运行 0 分钟"，且判据 ②
+  会把每轮取消都误判成人工取消（0 < 21000）→ **取消后永不接力**。修法两层：
+  ① job 首个步骤调 `run_elapsed_mark_start` 写起点文件（第 ③ 档降级，见
+  `.github/scripts/lib/run_elapsed.sh`）；② 判据 ② 在 `elapsed == 0` 时 fail-open
+  （取不到就不判人工取消，优先保活）。两层都上了才叫"确保接力"——只埋点而不改判据，
+  旧日志/埋点失败时仍会断链。
 - **排队判据取不到时是"放行派发"**（fail-open）：保活型服务可用性优先，宁可多派一轮
   （单例并发会把它变成 pending，不会并行），也不因为一次 API 抖动让服务断档。
 - **保留时长要留出收尾余量**：`tailscale-windows` 的 keep-alive 从 21000s 收到 19000s——
