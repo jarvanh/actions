@@ -38,6 +38,11 @@ on:
         required: false
         type: string
         default: "all"
+      within_days:
+        description: "只预演最近 N 天产生的 marker（0/留空 = 全量，默认）。还原失败的条目会留在 marker 里不删，攒久了全量里大多是已失效的旧记录，按时间窗筛才看得出最近几轮有没有真缺"
+        required: false
+        type: string
+        default: "0"
       check_exists:
         description: "核对目标端文件在不在（需拉起 OpenList 容器，约 +6 分钟）: 否 = 只做 marker 推导，秒级出结果、不起容器"
         required: false
@@ -139,12 +144,19 @@ jobs:
         env:
           # inputs 一律经 env 传入（README「注入面」: 不做 ${{ }} 直接内插 bash）
           TRYRUN_TASK_INPUT: ${{ inputs.task }}
+          TRYRUN_DAYS_INPUT: ${{ inputs.within_days }}
           TRYRUN_CHECK_INPUT: ${{ inputs.check_exists }}
           TRYRUN_TG_INPUT: ${{ inputs.send_tg }}
         run: |
           # 中文选项 → 脚本口径的映射放在 bash 里做（不在 YAML 里内插）
           export TRYRUN_TASK="${TRYRUN_TASK_INPUT:-all}"
           [ -z "$TRYRUN_TASK" ] && export TRYRUN_TASK=all
+          # 时间窗: 默认 0（全量）；只认非负整数，其它输入一律回落全量
+          # （宁可多跑，也不要因为一个拼错的数字静默筛掉 marker）
+          case "${TRYRUN_DAYS_INPUT:-0}" in
+            ''|*[!0-9]*) export TRYRUN_WITHIN_DAYS=0 ;;
+            *)           export TRYRUN_WITHIN_DAYS="${TRYRUN_DAYS_INPUT}" ;;
+          esac
           case "$TRYRUN_CHECK_INPUT" in
             否|0|no) export TRYRUN_CHECK_EXISTS=0 ;;
             *)       export TRYRUN_CHECK_EXISTS=1 ;;

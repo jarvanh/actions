@@ -23,6 +23,13 @@
 #   ⇒ 谁往本文件里加写命令都会被护栏当场挡下（test_restore_tryrun.sh 场景 4/5 锁住）。
 #
 # 用法: restore_try_run [task_name|all]   （task_name = marker 文件名前缀，同生产 restore_task）
+#   环境变量:
+#   TRYRUN_WITHIN_DAYS=N  只预演**最近 N 天**产生的 marker（marker 用 rcat 上传，
+#       远端 ModTime 即其产生时间）。0/空 = 全量（默认）。
+#       ⚠️ 为什么需要这个口径: 还原失败的条目会**留在 marker 里不删**，marker 因此
+#       只增不减；攒了几周后全量预演里绝大多数是**早已失效的旧记录**（对应文件在
+#       目标端早就不在了），把"备份缺失"数抬得很高却不是当前问题。按时间窗筛才能
+#       看出"最近这几轮到底有没有真缺"。
 # 入参（一律 env；workflow 侧禁止 ${{ }} 内插 bash，见 README「注入面」）:
 #   TRYRUN_CHECK_EXISTS=1|0  是否做远端存在性核对（1=默认；0=纯 marker 推导，秒级、
 #                            且**不需要 OpenList 容器** —— openlist: 远端只有容器内可访问）
@@ -39,6 +46,26 @@
 
 # 只读子命令白名单（见文件头「零写入是结构性保证」）
 _TRYR_READ_SUBCMDS=" ls lsd lsf lsl lsjson cat size version "
+
+# UTC 日期时间 → epoch（纯 bash 算术，零 fork、跨平台）
+# ⚠️ 为什么自己算而不用 `date -d`: 两处硬约束 ——
+#   1) 本库回归套件已登记 macOS 的 date 无 -d（marker_skip_guards 等 2 项环境假红即由此起）；
+#   2) bash 的 `printf '%(%s)T'` **只接受 epoch、不接受日期字符串**（实测 "2026-09-19T03:00:00"
+#      报 invalid number），所以它只能做反向格式化、不能当解析器。
+#   故按 Howard Hinnant 的 days_from_civil 算法用整数运算实现，且**按 UTC 解释**
+#   （rclone lsl 的时间戳是 UTC 口径），不受 runner 本机时区影响。
+# 用法: _tryr_epoch_utc "YYYY-MM-DD" "HH:MM:SS"
+_tryr_epoch_utc() {
+  local y=$((10#${1:0:4})) mo=$((10#${1:5:2})) d=$((10#${1:8:2}))
+  local h=$((10#${2:0:2})) mi=$((10#${2:3:2})) s=$((10#${2:6:2}))
+  # 前导 0 必须经 10# interpret（否则 08/09 被当八进制直接报错）
+  [ "$mo" -le 2 ] && y=$((y - 1))
+  local era=$(( (y >= 0 ? y : y - 399) / 400 ))
+  local yoe=$(( y - era * 400 ))
+  local doy=$(( (153 * (mo + (mo > 2 ? -3 : 9)) + 2) / 5 + d - 1 ))
+  local doe=$(( yoe * 365 + yoe / 4 - yoe / 100 + doy ))
+  echo $(( (era * 146097 + doe - 719468) * 86400 + h * 3600 + mi * 60 + s ))
+}
 
 # 只读 rclone 包装: 写子命令直接拒绝并返回 2，同时留 stderr 痕迹便于排查
 # 用法: _tryr_rclone_read <rclone 参数...>
@@ -248,9 +275,38 @@ restore_try_run() {
 
   _tryr_log "=== 一键还原 try run（只读预演）==="
   _tryr_log "  任务过滤=${task_filter} · marker 目录=${SYNC_STATE_DIR}"
+  _tryr_log "  时间窗=${TRYRUN_WITHIN_DAYS:-0} 天（0 = 全量）"
   _tryr_log "  存在性核对=${TRYRUN_CHECK_EXISTS:-1}（0=纯 marker 推导，不访问目标端）"
   _tryr_log "  报告: ${TRYRUN_LOG} / ${tsv}"
   _tryr_log ""
+
+  # 时间窗（0/空 = 全量）。一次 lsl 把目录的时间戳全取回来再本地比较 —— 绝不能对
+  # 每个 marker 单独 lsl（几百个 marker × 一次往返，和逐条 lsf 是同一类 fork 风暴）。
+  # lsl 输出形如: "<size> <YYYY-MM-DD HH:MM:SS.mmmmmmm> <name>"
+  local within_days="${TRYRUN_WITHIN_DAYS:-0}"
+  local cutoff=0
+  if [[ "$within_days" =~ ^[0-9]+$ ]] && [ "$within_days" -gt 0 ]; then
+    # 同样不用 date +%s（见下方时间戳解析处的说明）
+    cutoff=$(( $(printf '%(%s)T' -1) - within_days * 86400 ))
+  fi
+  declare -gA _TRYR_MARKER_TS=()
+  if [ "$cutoff" -gt 0 ]; then
+    local lsl_line fts fname fdate ftime
+    while IFS= read -r lsl_line; do
+      [ -z "$lsl_line" ] && continue
+      # 取后三字段: 日期、时间、文件名（文件名可能含空格，故按行尾取而非 cut 固定列）
+      fdate=$(printf '%s' "$lsl_line" | awk '{print $(NF-2)}')
+      ftime=$(printf '%s' "$lsl_line" | awk '{print $(NF-1)}')
+      fname=$(printf '%s' "$lsl_line" | awk '{print $NF}')
+      [ -z "$fdate" ] || [ -z "$fname" ] && continue
+      ftime="${ftime%%.*}"            # 去掉小数秒
+      ftime="${ftime%%+*}"            # 去掉可能的时区后缀
+      [[ "$fdate" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || continue
+      [[ "$ftime" =~ ^[0-9]{2}:[0-9]{2}:[0-9]{2}$ ]] || continue
+      fts=$(_tryr_epoch_utc "$fdate" "$ftime")
+      [ -n "$fts" ] && _TRYR_MARKER_TS["$fname"]="$fts"
+    done < <(_tryr_rclone_read lsl "$SYNC_STATE_DIR" --files-only --retries 2 2>/dev/null)
+  fi
 
   local markers
   markers=$(_tryr_rclone_read lsf "$SYNC_STATE_DIR" --files-only --retries 2 2>/dev/null | sort)
@@ -260,11 +316,24 @@ restore_try_run() {
   fi
 
   local m task marker_path json dest src count idx
+  local scanned=0 skipped_old=0 skipped_nots=0
   for m in $markers; do
     [[ "$m" == *.json ]] || continue
     task="${m%%_*}"
     if [ "$task_filter" != "all" ] && [ "$task" != "$task_filter" ]; then
       continue
+    fi
+    # 时间窗过滤: 取不到时间戳的**按旧的处理还是新的处理**是个取舍 —— 取不到意味着
+    # 我们无法证明它新，若放进来就等于"时间窗失效"，故计入 skipped_nots 跳过并明示，
+    # 绝不静默放过一个可能是旧的 marker（这条会被测试锁住）。
+    if [ "$cutoff" -gt 0 ]; then
+      scanned=$((scanned + 1))
+      if [ -z "${_TRYR_MARKER_TS[$m]:-}" ]; then
+        skipped_nots=$((skipped_nots + 1)); continue
+      fi
+      if [ "${_TRYR_MARKER_TS[$m]}" -lt "$cutoff" ]; then
+        skipped_old=$((skipped_old + 1)); continue
+      fi
     fi
     marker_path="${SYNC_STATE_DIR}/${m}"
     json=$(_tryr_rclone_read cat "$marker_path" --retries 2 2>/dev/null) || continue
@@ -290,6 +359,11 @@ restore_try_run() {
 
   _tryr_log ""
   _tryr_log "=== 预演汇总: 条目 ${total} 条 · 备份缺失 ${TRYRUN_MISSING} 条 · 存在性未核对 ${TRYRUN_UNVERIFIED} 条 ==="
+  # 跳过数必须明示: 否则"筛完缺失变少了"会被误读成"问题消失了"，实际只是样本变小了
+  if [ "$cutoff" -gt 0 ]; then
+    _tryr_log "  ⏱️ 时间窗=${within_days} 天: 扫描 marker ${scanned} 个 · " \
+              "跳过超窗 ${skipped_old} 个 · 跳过无时间戳 ${skipped_nots} 个"
+  fi
   for k in "${!TRYRUN_KIND_COUNT[@]}"; do
     _tryr_log "  ${k}: ${TRYRUN_KIND_COUNT[$k]} 条"
   done
@@ -319,6 +393,11 @@ restore_try_run() {
     tg_add_title msg "🧪 一键还原 try run（只读预演）"
     tg_add_kv msg "模式" "只读预演 · 未修改任何数据"
     tg_add_kv msg "任务过滤" "${task_filter}"
+    # 时间窗必须进通知: 不看它，"缺失 30"和"缺失 777"会被当成同一个问题的两种结论，
+    # 实际只是样本从 5194 缩到了最近 3 天
+    if [ "$cutoff" -gt 0 ]; then
+      tg_add_kv msg "时间窗" "最近 ${within_days} 天（跳过超窗 ${skipped_old} 个 marker）"
+    fi
     tg_add_kv msg "预演条目" "${total} 个"
     local kinds="" k
     for k in $(printf '%s\n' "${!TRYRUN_KIND_COUNT[@]}" | sort); do
