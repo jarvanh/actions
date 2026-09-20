@@ -705,6 +705,12 @@ grep -qF "替代目录 6c73a635 **在**" "$OUT17/tryrun.log" \
 # 探针必须只走只读命令: 全程零写入
 [ -z "$WRITE_CALLS" ] && ok "17d 结构探针全程只读（零写入）" \
   || bad "17d 结构探针不得写任何数据（实际: ${WRITE_CALLS//$'\n'/ }）"
+# 有 source_path 时必须把源端同层形状一并打出 —— 两侧形状同屏才判得了
+#   "fix-check 报差集 0" 与 "目标端看不到原目录" 这类矛盾（V5 实测出现过）
+grep -qF "源端同层:" "$OUT17/tryrun.log" && ok "17e 探针同屏给出源端同层形状" \
+  || bad "17e 探针应同屏给出源端同层形状（marker 有 source_path 时）"
+grep -qF "caseB" "$OUT17/tryrun.log" && ok "17f 源端同层按 marker 的 source_path 推导" \
+  || bad "17f 源端同层应由 source_path 推导（实际未见 caseB）"
 rm -f "$STATE"/task17_struct.json
 rm -rf "$DST/caseA" "$DST/caseB"
 eval "$RCLONE_BASE_FN"; export -f rclone

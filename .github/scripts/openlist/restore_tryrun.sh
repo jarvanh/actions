@@ -261,7 +261,15 @@ _tryr_plan_one() {
   case "$be" in
     缺失) TRYRUN_MISSING=$((TRYRUN_MISSING + 1)); TRYRUN_MISSING_LIST+="${orig}"$'\n'
           # 记下"备份所在目录"，供汇总段的父目录实况探针用（去重在汇总段做）
-          TRYRUN_MISSING_DIRS+="${backup%/*}"$'\n' ;;
+          TRYRUN_MISSING_DIRS+="${backup%/*}"$'\n'
+          # 顺带记"该备份目录对应的源端同层": 目标端 <dest>/<orig目录上级> 对应
+          #   源端 <src>/<同相对路径>；探针要用它打源端形状做对照（V5 矛盾: fix-check
+          #   报两侧 529/529 差集 0，本探针却看不到 蓝白碗 —— 需两侧形状同屏才判得了）
+          if [ -n "$src" ]; then
+            # orig=蓝白碗/x.jpg ⇒ orig%/*=蓝白碗 ⇒ 再取一次上级才是"与备份目录同层的源端目录"
+            local _src_dir="${src}/${orig%/*}"; _src_dir="${_src_dir%/*}"
+            _TRYR_SRC_OF_MDIR["${backup%/*}"]="$_src_dir"
+          fi ;;
     存在（*直读复核翻案）) TRYRUN_FLIPPED_LIST+="${backup}"$'\n' ;;
   esac
   # 翻案后的字面值是"已存在（直读复核翻案）"，不能只判"已存在"——那样翻案件会被漏计
@@ -293,6 +301,8 @@ restore_try_run() {
   TRYRUN_ORIG_RECHECK_TOTAL=0; TRYRUN_ORIG_FLIPPED=0
   TRYRUN_UNVERIFIED=0; TRYRUN_UNVERIFIED_DESTS=""
   TRYRUN_MISSING_DIRS=""
+  # 备份缺失目录 → 源端同层目录（供结构探针打两侧形状对照）
+  declare -gA _TRYR_SRC_OF_MDIR=()
   declare -gA TRYRUN_KIND_COUNT=()
   _TRYR_DST_READABLE=()
   _TRYR_DIR_CACHE=()
@@ -541,10 +551,15 @@ restore_try_run() {
       if [ -z "$subs" ]; then
         _tryr_log "     - ${parent}: （列举无输出/不可读 ⇒ 无法判，需另取判据）"
       else
-        case " $subs " in
-          *" $want "*) _tryr_log "     - ${parent}: 替代目录 ${want} **在**（子目录: ${subs})" ;;
-          *)           _tryr_log "     - ${parent}: 替代目录 ${want} **不在**（子目录: ${subs})" ;;
-        esac
+        local shape="替代目录 ${want} **在**"
+        case " $subs " in *" $want "*) ;; *) shape="替代目录 ${want} **不在**" ;; esac
+        if [ -n "$ssubs" ]; then
+          _tryr_log "     - ${parent}: ${shape}（目标端子目录: ${subs}｜源端同层: ${ssubs}）"
+        elif [ -n "$sp" ]; then
+          _tryr_log "     - ${parent}: ${shape}（目标端子目录: ${subs}｜源端同层: 列举无输出）"
+        else
+          _tryr_log "     - ${parent}: ${shape}（子目录: ${subs})"
+        fi
       fi
     done
   fi
