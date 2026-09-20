@@ -192,7 +192,18 @@ _tryr_plan_one() {
       dest_note="⚠️ 目标端 ${dest} 不可读（容器未拉起或远端不可达）⇒ 存在性未核对，请用开启容器的 workflow 轮次复核"
     elif [ "$kind" = "noop" ]; then
       # 原路径原名: 没有替代文件，只核对原路径本身在不在
+      # ⚠️ 「原路径不存在」同样要直读复核（2026-09-20，run 35502528927 驱动）:
+      #   此前只给"备份缺失"加了直读复核，原路径仍**纯靠列列举** ⇒ 与 fix-check 的
+      #   递归列举同刻互相矛盾（fix-check 说 529/529 都在，这边说原路径不存在）。
+      #   两边都是"列表"，而列表有缓存延迟（§0: 新建首次可见 ~10s，等 15s 仍可能不可见）
+      #   ⇒ 不一致时必须有一个**非列表**判据才能定案。原路径是"真跑的落点"，
+      #   判错会直接导致"该还原的判成不用还原"，风险不比备份侧低。
       _tryr_exists "$orig_full" && oe="已存在" || oe="不存在"
+      if [ "$oe" = "不存在" ] && _tryr_stat_exists "$orig_full"; then
+        oe="已存在（直读复核翻案）"
+        TRYRUN_ORIG_FLIPPED=$((TRYRUN_ORIG_FLIPPED + 1))
+      fi
+      [ "$oe" = "不存在" ] && TRYRUN_ORIG_RECHECK_TOTAL=$((TRYRUN_ORIG_RECHECK_TOTAL + 1))
       be="（无需替代文件）"
     else
       if [ "$kind" = "split" ]; then
@@ -211,7 +222,15 @@ _tryr_plan_one() {
         fi
         TRYRUN_RECHECK_TOTAL=$((TRYRUN_RECHECK_TOTAL + 1))
       fi
+      # 同上面的备份侧: 原路径同样只复核"列列举判不存在"的那些
       _tryr_exists "$orig_full" && oe="已存在" || oe="不存在"
+      if [ "$oe" = "不存在" ]; then
+        if _tryr_stat_exists "$orig_full"; then
+          oe="已存在（直读复核翻案）"
+          TRYRUN_ORIG_FLIPPED=$((TRYRUN_ORIG_FLIPPED + 1))
+        fi
+        TRYRUN_ORIG_RECHECK_TOTAL=$((TRYRUN_ORIG_RECHECK_TOTAL + 1))
+      fi
     fi
   fi
 
@@ -243,7 +262,8 @@ _tryr_plan_one() {
     缺失) TRYRUN_MISSING=$((TRYRUN_MISSING + 1)); TRYRUN_MISSING_LIST+="${orig}"$'\n' ;;
     存在（*直读复核翻案）) TRYRUN_FLIPPED_LIST+="${backup}"$'\n' ;;
   esac
-  [ "$oe" = "已存在" ] && TRYRUN_ORIG_EXISTS=$((TRYRUN_ORIG_EXISTS + 1))
+  # 翻案后的字面值是"已存在（直读复核翻案）"，不能只判"已存在"——那样翻案件会被漏计
+  case "$oe" in 已存在*) TRYRUN_ORIG_EXISTS=$((TRYRUN_ORIG_EXISTS + 1)) ;; esac
   if [ -n "$dest_note" ]; then
     TRYRUN_UNVERIFIED=$((TRYRUN_UNVERIFIED + 1))
     TRYRUN_UNVERIFIED_DESTS+="${dest}"$'\n'
@@ -267,6 +287,8 @@ restore_try_run() {
   TRYRUN_MISSING=0; TRYRUN_MISSING_LIST=""
   TRYRUN_PRESENT=0; TRYRUN_ORIG_EXISTS=0
   TRYRUN_RECHECK_TOTAL=0; TRYRUN_RECHECK_FLIPPED=0; TRYRUN_FLIPPED_LIST=""
+  # 原路径侧的直读复核计数（与备份侧对称: 两条判据各自记，别混成一个数）
+  TRYRUN_ORIG_RECHECK_TOTAL=0; TRYRUN_ORIG_FLIPPED=0
   TRYRUN_UNVERIFIED=0; TRYRUN_UNVERIFIED_DESTS=""
   declare -gA TRYRUN_KIND_COUNT=()
   _TRYR_DST_READABLE=()
@@ -482,6 +504,12 @@ restore_try_run() {
       printf '%s' "$TRYRUN_FLIPPED_LIST" | while IFS= read -r l; do [ -n "$l" ] && _tryr_log "     ↳ 实为存在: ${l}"; done
     fi
   fi
+  # 原路径侧的复核**单独成行**（不与备份侧合并计数）: 两者判的是不同的东西
+  #   （备份在不在 / 落点是否已占），混成一个数就无法判断"哪一侧的列表不可信"
+  if [ "$TRYRUN_ORIG_RECHECK_TOTAL" -gt 0 ]; then
+    _tryr_log "  🔍 直读复核（原路径）: 对列列举判不存在的 ${TRYRUN_ORIG_RECHECK_TOTAL} 条逐条 lsjson stat，" \
+              "翻案 ${TRYRUN_ORIG_FLIPPED} 条（翻案 ⇒ 原路径其实已被占，真跑前须先处理）"
+  fi
   if [ "$TRYRUN_UNVERIFIED" -gt 0 ]; then
     _tryr_log "  ⚠️ 存在性未核对（目标端不可读，通常是 OpenList 容器没拉起）:"
     printf '%s' "$TRYRUN_UNVERIFIED_DESTS" | sort -u | while IFS= read -r l; do [ -n "$l" ] && _tryr_log "     - ${l}"; done
@@ -526,6 +554,8 @@ restore_try_run() {
       # 直读复核对"备份缺失"这个结论本身定性: 翻案多 ⇒ 列列举不可信，缺失数是虚高
       tg_add_kv msg "直读复核" "${TRYRUN_RECHECK_TOTAL} 条中翻案 ${TRYRUN_RECHECK_FLIPPED} 条"
     fi
+    [ "$TRYRUN_ORIG_RECHECK_TOTAL" -gt 0 ] && tg_add_kv msg "直读复核（原路径）" \
+      "${TRYRUN_ORIG_RECHECK_TOTAL} 条中翻案 ${TRYRUN_ORIG_FLIPPED} 条"
     if [ "$TRYRUN_MISSING" -gt 0 ]; then
       # 缺失清单同样限量（8 条）—— 它才是真跑会 FAIL 的部分，但 777 条全列依旧会爆
       tg_add_section msg "⚠️ 备份缺失 · ${TRYRUN_MISSING}"
@@ -560,3 +590,8 @@ TRYRUN_UNVERIFIED=0
 TRYRUN_MISSING_LIST=""
 TRYRUN_UNVERIFIED_DESTS=""
 TRYRUN_ENTRY_LIST=""
+TRYRUN_RECHECK_TOTAL=0
+TRYRUN_RECHECK_FLIPPED=0
+TRYRUN_FLIPPED_LIST=""
+TRYRUN_ORIG_RECHECK_TOTAL=0
+TRYRUN_ORIG_FLIPPED=0
