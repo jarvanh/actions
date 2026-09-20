@@ -41,6 +41,12 @@
 #                            且**不需要 OpenList 容器** —— openlist: 远端只有容器内可访问）
 #   TRYRUN_WORK=<报告目录，默认 /tmp/restore_tryrun>
 #   TRYRUN_SEND_TG=1|0       是否发 Telegram 汇总（默认 1）
+#   TRYRUN_DUMP_MARKER=<marker 名或关键字，留空 = 不做>
+#       只读 dump marker 原文的关键字段（source_path / dest_path / last_success /
+#       fixed_count / 前若干条 original），并附远端 ModTime —— 用来回答
+#       "这条修复记录**是什么时候、由哪个 task/dest 写下的**"（marker 只增不减，
+#       记录可能是很早以前别的目录串写进来的）。dump 完即退出，不做预演。
+#       用子串匹配 marker 名（中文名在传参时容易变形，精确匹配反而打不中）。
 # 产物: <work>/tryrun.tsv（机读，TAB 分隔）+ <work>/tryrun.log（人读；也打 stdout）
 # 返回: 0 = 正常产出预演（"备份缺失"是**风险结论**、记在报告里，不判失败）
 #       2 = 环境/参数问题（marker 目录列举不到等）
@@ -159,6 +165,77 @@ _tryr_src_readable() {
     --timeout 2m >/dev/null 2>&1 || rc=$?
   _TRYR_SRC_READABLE[$src]="$rc"
   return "$rc"
+}
+
+# ===== marker 原文探针（2026-09-20，用户质疑「这条记录是什么时候写下的」驱动）=====
+# 为什么需要: marker **只增不减**（还原失败的条目留在 marker 里不删，见文件头），
+#   所以"marker 里有一条记录"**不等于**"这一轮刚产生的"。要回答"这条记录什么时候、
+#   由哪个 task/dest 写下的"，只能直接看 marker 原文字段 + 远端 ModTime ——
+#   预演报告里的三条路径是**推导产物**，推不出来源。
+# 判据的三层（缺一层都可能误判）:
+#   ① marker 内的 last_success（写 marker 那一刻落盘，见 sync_marker.sh:498）
+#   ② 远端 ModTime（marker 文件本身最后被改的时间；比 last_success 更"物理"）
+#   ③ source_path / dest_path（判定这条记录**归属哪个目录对** —— 如果 dest_path 是
+#      neko 而文件实际住在网易摄影，那就是**串写/继承**，不是源端被改过）
+# 只读: 只走 lsl / cat，全部经 _tryr_rclone_read 白名单。
+# 用法: _tryr_dump_marker <关键字>   （子串匹配 marker 名）
+_tryr_dump_marker() {
+  local kw="$1"
+  local ms m json mt
+  ms=$(_tryr_rclone_read lsf "$SYNC_STATE_DIR" --files-only --retries 2 2>/dev/null | sort)
+  if [ -z "$ms" ]; then
+    printf '❌ marker 目录读不到: %s\n' "$SYNC_STATE_DIR"; return 2
+  fi
+  # 远端 ModTime: 一次 lsl 取全目录（§14 实测 OneDrive 的 lsl **返回 0 行**，
+  # 故取不到时如实标注"后端不吐 ModTime"，绝不拿它当判据）
+  local -A mtime=()
+  local lsl_out line fdate ftime fname
+  lsl_out=$(_tryr_rclone_read lsl "$SYNC_STATE_DIR" --files-only --retries 2 2>/dev/null)
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    fdate=$(printf '%s' "$line" | awk '{print $(NF-2)}')
+    ftime=$(printf '%s' "$line" | awk '{print $(NF-1)}')
+    fname=$(printf '%s' "$line" | awk '{print $NF}')
+    [ -z "$fdate" ] || [ -z "$fname" ] && continue
+    fname="${fname##*/}"
+    [[ "$fdate" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || continue
+    mtime["$fname"]="${fdate} ${ftime%%.*}"
+  done <<< "$lsl_out"
+  local lsl_n=${#mtime[@]}
+
+  local hit=0
+  for m in $ms; do
+    [[ "$m" == *.json ]] || continue
+    case "$m" in *"$kw"*) ;; *) continue ;; esac
+    hit=$((hit + 1))
+    json=$(_tryr_rclone_read cat "${SYNC_STATE_DIR}/${m}" --retries 2 2>/dev/null) || json=""
+    [ -z "$json" ] && { printf '⚠️ %s: 读不到内容\n' "$m"; continue; }
+    printf '════════ marker: %s ════════\n' "$m"
+    printf '  last_success（marker 内记录，写盘时刻 UTC）: %s\n' \
+      "$(printf '%s' "$json" | jq -r '.last_success // "（无）"' 2>/dev/null)"
+    mt="${mtime[$m]:-}"
+    if [ -n "$mt" ]; then
+      printf '  远端 ModTime（marker 文件最后修改）        : %s\n' "$mt"
+    elif [ "$lsl_n" -eq 0 ]; then
+      printf '  远端 ModTime                               : （该后端 lsl 不吐 ModTime，取不到）\n'
+    else
+      printf '  远端 ModTime                               : （本文件未取到）\n'
+    fi
+    printf '  source_path: %s\n' "$(printf '%s' "$json" | jq -r '.source_path // "（无）"' 2>/dev/null)"
+    printf '  dest_path  : %s\n' "$(printf '%s' "$json" | jq -r '.dest_path // "（无）"' 2>/dev/null)"
+    printf '  fixed_count: %s · source_count: %s\n' \
+      "$(printf '%s' "$json" | jq -r '.fixed_count // "（无）"' 2>/dev/null)" \
+      "$(printf '%s' "$json" | jq -r '.source_count // "（无）"' 2>/dev/null)"
+    printf '  fixed_files 实际条数: %s\n' \
+      "$(printf '%s' "$json" | jq -r '(.fixed_files // []) | length' 2>/dev/null)"
+    printf '  前 3 条 original（判这批到底归哪个目录）:\n'
+    printf '%s' "$json" | jq -r '(.fixed_files // [])[0:3][] | "     - " + (.original // "")' 2>/dev/null
+    printf '  顶层目录 top_dirs: %s\n' \
+      "$(printf '%s' "$json" | jq -r '(.top_dirs // []) | join(" / ")' 2>/dev/null)"
+    printf '\n'
+  done
+  [ "$hit" -eq 0 ] && printf '⚠️ 没有 marker 名包含关键字「%s」\n' "$kw"
+  return 0
 }
 
 # 分卷形态的"备份文件"是**一组**卷: 由首卷名推前缀，返回 "<目录>/<前缀>.[0-9][0-9][0-9]"
@@ -348,6 +425,12 @@ restore_try_run() {
   TRYRUN_LOG="$TRYRUN_WORK/tryrun.log"
   local tsv="$TRYRUN_WORK/tryrun.tsv"
   : > "$TRYRUN_LOG"; : > "$tsv"
+
+  # marker 原文探针: 早于预演，dump 完直接返回（回答"这条记录什么时候、由谁写下的"）
+  if [ -n "${TRYRUN_DUMP_MARKER:-}" ]; then
+    _tryr_dump_marker "$TRYRUN_DUMP_MARKER" | tee -a "$TRYRUN_LOG"
+    return 0
+  fi
 
   local total=0
   TRYRUN_MISSING=0; TRYRUN_MISSING_LIST=""

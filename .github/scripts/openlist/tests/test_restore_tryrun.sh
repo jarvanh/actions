@@ -884,6 +884,70 @@ rm -f "$STATE"/task19_ctrl.json
 rm -rf "$DST/c19" "$SRC18/c19"
 eval "$RCLONE_BASE_FN"; export -f rclone
 
+# ============================================================================
+# 场景 20: marker 原文探针（2026-09-20，用户质疑「这条记录是什么时候写下的」驱动）
+#   为什么: try run 报告里的三条路径是**推导产物**，推不出"这条记录什么时候、由
+#   哪个目录对写下的"。而 marker **只增不减** ⇒ "marker 里有一条" ≠ "本轮刚产生"。
+#   要回答归属与时间，只能直接看 marker 原文字段 + 远端 ModTime。
+#   锁三件事: ① dump 出归属字段（source_path / dest_path）
+#             ② dump 出时间（last_success + 远端 ModTime）
+#             ③ **只读**（lsl/cat 之外的写命令一个都不许有）
+# ============================================================================
+OUT20="$WORK/out20"; mkdir -p "$OUT20"
+printf '%s' '{"last_success":"2026-09-14T03:12:45Z","source_path":"onedrive:1/1024j/套图/网易摄影","dest_path":"openlist:wopan175/1/1024j/套图/neko","source_count":529,"fixed_count":19,"top_dirs":["蓝白碗"],"fixed_files":[{"original":"蓝白碗/6608451911027290782.jpg","alternative":"6c73a635/6608451911027290782.jpg","method":"copyto_shorthash"},{"original":"蓝白碗/2.jpg","alternative":"6c73a635/2.jpg","method":"copyto_shorthash"}]}' > "$STATE/task20_dump.json"
+# 给它一个 ModTime: 2026-09-14 03:12:45 → epoch
+MT20=$(printf '%(%s)T' -1)
+printf '%s\t%s\n' "task20_dump.json" "$MT20" >> "$MARKER_TS_FILE"
+rclone() {
+  case "$1" in
+    lsf)
+      case "$2" in
+        "$STATE") (cd "$STATE" && ls) ;;
+        *) (cd "$2" 2>/dev/null && ls) || return 1 ;;
+      esac ;;
+    lsl)
+      local f b ts
+      for f in "$STATE"/*.json; do
+        [ -e "$f" ] || continue
+        b="${f##*/}"
+        ts=$(awk -F'\t' -v k="$b" '$1==k{print $2; exit}' "$MARKER_TS_FILE" 2>/dev/null)
+        [ -z "$ts" ] && continue
+        printf '%s %(%Y-%m-%d %H:%M:%S)T.000000000 %s\n' "1234" "$ts" "logs/sync_state/$b"
+      done
+      return 0 ;;
+    cat) cat "$2" ;;
+    size) echo '{"bytes":1}' ;;
+    *) WRITE_CALLS+="$1"$'\n'; return 1 ;;
+  esac
+  return 0
+}
+export -f rclone
+W20_BEFORE="$WRITE_CALLS"
+TRYRUN_SEND_TG=0 TRYRUN_WORK="$OUT20" TRYRUN_DUMP_MARKER="task20_dump" restore_try_run all > "$OUT20/stdout.txt" 2>&1
+D20="$OUT20/tryrun.log"
+grep -qF "marker: task20_dump.json" "$D20" && ok "20a 探针命中目标 marker（子串匹配）" \
+  || bad "20a 探针应命中 task20_dump.json（日志: $(cat "$D20" 2>/dev/null | head -5)）"
+grep -qF "source_path: onedrive:1/1024j/套图/网易摄影" "$D20" && ok "20b dump 出 source_path（判归属）" \
+  || bad "20b 应 dump source_path"
+grep -qF "dest_path  : openlist:wopan175/1/1024j/套图/neko" "$D20" && ok "20c dump 出 dest_path（判归属）" \
+  || bad "20c 应 dump dest_path"
+grep -qF "last_success" "$D20" && grep -qF "2026-09-14T03:12:45Z" "$D20" \
+  && ok "20d dump 出 last_success（marker 内记录的写盘时刻）" || bad "20d 应 dump last_success"
+grep -qF "远端 ModTime" "$D20" && ok "20e dump 出远端 ModTime（文件最后修改时间）" \
+  || bad "20e 应 dump 远端 ModTime"
+grep -qF "蓝白碗/6608451911027290782.jpg" "$D20" && ok "20f dump 出前几条 original（判这批归哪）" \
+  || bad "20f 应 dump original"
+grep -qF "fixed_files 实际条数: 2" "$D20" && ok "20g fixed_files 实际条数按原文字段算" \
+  || bad "20g 应给 fixed_files 实际条数"
+[ "$WRITE_CALLS" = "$W20_BEFORE" ] && ok "20h ⚠️ 探针全程只读（零写入）" \
+  || bad "20h 探针不得有任何写调用（新增: $(printf '%s' "$WRITE_CALLS" | grep -vFx -f <(printf '%s' "$W20_BEFORE"))）"
+# 反向: 关键字打不中时必须说"没命中"，而不是静默空输出（§0: 静默失败 ⇒ 错误结论）
+TRYRUN_SEND_TG=0 TRYRUN_WORK="$OUT20" TRYRUN_DUMP_MARKER="不存在的关键字" restore_try_run all > "$OUT20/stdout2.txt" 2>&1
+grep -qF "没有 marker 名包含关键字" "$OUT20/tryrun.log" && ok "20i 关键字打不中时显式告知（不静默空输出）" \
+  || bad "20i 打不中时应显式告知"
+rm -f "$STATE"/task20_dump.json
+eval "$RCLONE_BASE_FN"; export -f rclone
+
 echo
 echo "===== 结果: PASS=$PASS FAIL=$FAIL ====="
 [ "$FAIL" -eq 0 ]
