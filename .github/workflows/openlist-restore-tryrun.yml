@@ -55,14 +55,22 @@ on:
           - "是"
           - "否"
 
-# 独立并发组: 只读预演可与主轮并行，不与 openlist-singleton / -diag / -fix-check 互等
+# 独立并发组: 只读预演可与主轮并行，不与 openlist-singleton / -diag / -fix-check 互等。
+# 「与主轮错开」那条纪律是为**吞吐测量**与**在途 sync / 容器重启窗口**立的（主轮在传会把
+# 各档位压平、容器重启会挂起在途同步），try run 不测速、不传数据、不动任何共享容器
+# （起的是自己的 data.db 副本且从不回传），故不适用。唯一代价是共享网盘账号的列举限流，
+# 靠下面 job 里「不并发列举」的取舍压到最低。
 concurrency: openlist-restore-tryrun
 
 jobs:
   tryrun:
     runs-on: ubuntu-latest
-    # 拉库 + 就绪 ≈ 6 分钟 + 逐条 lsf 核对（每条目 1-2 次列举）；给足余量
-    timeout-minutes: 40
+    # 实测（run 35478771033，4684 条）: 拉库+容器就绪 2.5 分钟 + 主循环 37.5 分钟
+    # （逐条真实远端列举，约 0.48s/条）。40 分钟是 diag/fix-check 的定点诊断口径，
+    # 照搬到全量核对会正好卡在边界被硬杀（连 artifact 与 TG 汇总都来不及产出），
+    # 故按全量条目数给 2.5 倍余量。刻意**不**用并发列举提速：会把共享网盘账号的
+    # 限流压力翻几倍，拖慢并行中的主轮。
+    timeout-minutes: 150
     permissions:
       contents: read
     env:
