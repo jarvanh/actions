@@ -232,6 +232,50 @@ TOTAL_LSF=$(grep -c . "$LSF_LOG")
 [ "$TOTAL_LSF" -le 6 ] && ok "8f 3 条目的总列举次数 ${TOTAL_LSF} ≤ 6（缓存有效抑制放大）" \
   || bad "8f 3 条目的总列举次数 ${TOTAL_LSF} > 6（缓存未生效）"
 
+# ⚠️ 存在性判定不得用 `printf | grep -q`: grep -q 命中即退出 → 管道断裂，
+#   每条 2 次 × 4674 条 = 上万次 "printf: write error: Broken pipe"，实测把核对模式
+#   拖过 36 分钟、撞 40 分钟 timeout 被取消（run 35476841345）。
+# 只看代码行: 排除注释（第 59 行那句警示语本身含 "printf | grep -q" 字样）
+if grep -nE 'printf .*\| *grep -q' "$REPO_ROOT/.github/scripts/openlist/restore_tryrun.sh" \
+   | grep -vE '^\s*[0-9]+:\s*(#|\*|//)' >/dev/null; then
+  bad "8g 存在性判定不得用 printf | grep -q（会 broken pipe 刷爆）"
+else
+  ok "8g 存在性判定未使用 printf | grep -q"
+fi
+# 同理 dirname/basename: 只禁**热路径**（_tryr_exists 每条都跑）；
+# _tryr_split_glob 仅分卷条目调用（245/4674），不在热路径
+if sed -n '/^_tryr_exists()/,/^}/p' "$REPO_ROOT/.github/scripts/openlist/restore_tryrun.sh" \
+   | grep -E '\$\((dirname|basename) ' >/dev/null; then
+  bad "8h 热路径不得调用 dirname/basename（每条 fork ×2）"
+else
+  ok "8h 热路径未调用 dirname/basename"
+fi
+# 吞吐: 纯本地（mock）跑 300 条必须在数秒内完成 —— 拦住"每条目成本失控"的回归
+BIG="$WORK/big"; mkdir -p "$BIG"
+{
+  printf '{"dest_path":"openlist:wopan176Crypt/0","source_path":"onedrive:0","fixed_files":['
+  i=0
+  while [ $i -lt 300 ]; do
+    [ $i -gt 0 ] && printf ','
+    printf '{"original":"a/f%d.mp4","alternative":"deadbeef/f%d.mp4","method":"m1","md5":""}' "$i" "$i"
+    i=$((i+1))
+  done
+  printf ']}'
+} > "$STATE/task0_test.json"
+T0=$(date +%s)
+TRYRUN_SEND_TG=0 TRYRUN_WORK="$BIG" restore_try_run task0 > "$BIG/stdout.txt" 2>&1
+T1=$(date +%s)
+ELAPSED=$((T1-T0))
+[ "$ELAPSED" -le 20 ] && ok "8i 300 条吞吐 ${ELAPSED}s ≤ 20s（每条目成本受控）" \
+  || bad "8i 300 条吞吐 ${ELAPSED}s > 20s（每条目成本失控）"
+# 计数用 grep -c 的**退出码**判定: 直接取 stdout 会带 macOS wc 前导空格
+# （规范「回归套件」里记过的 flake 形态）
+if grep -q "Broken pipe" "$BIG/stdout.txt" 2>/dev/null; then
+  bad "8j 无 Broken pipe 错误输出"
+else
+  ok "8j 无 Broken pipe 错误输出"
+fi
+
 echo "=== 场景9: 任务过滤（同生产 restore_task 口径）==="
 OUT4="$WORK/out4"; mkdir -p "$OUT4"
 printf '{"dest_path":"openlist:wopan176Crypt/0","source_path":"onedrive:0","fixed_files":[{"original":"q/w.mp4","alternative":"deadbeef/w.mp4","method":"rclone copyto（短哈希文件名 9999）","md5":""}]}' > "$STATE/task1_other.json"
