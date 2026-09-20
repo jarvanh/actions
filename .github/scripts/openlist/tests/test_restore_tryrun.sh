@@ -62,9 +62,10 @@ rclone() {
       ;;
     cat)  cat "$2" ;;
     size) echo '{"bytes":1}' ;;
-    # 时间窗用: lsl 返回 "<size> <YYYY-MM-DD HH:MM:SS.mmm> <name>"（rclone 实际格式）
-    # 时间戳取自 $MARKER_TS（文件名 → epoch），测不出时间戳的条目就**不给它**，
-    # 用以验证"无时间戳者一律跳过、绝不静默放过"。
+    # 时间窗用: lsl 返回 "<size> <YYYY-MM-DD HH:MM:SS.mmm> <path>"（rclone 实际格式）
+    # ⚠️ path 是**从远端根算起的完整相对路径**，不是基名（run 35488836925 实测:
+    #   生产侧 422 个 marker 全被判"无时间戳"，就是因为 lsl 给全路径、lsf 给基名，
+    #   两边口径对不上）。桩必须复刻这个形态，否则测试永远测不到该类 bug。
     lsl)
       case "$2" in
         "$STATE")
@@ -74,10 +75,10 @@ rclone() {
             b="${f##*/}"
             ts=$(awk -F'\t' -v k="$b" '$1==k{print $2; exit}' "$MARKER_TS_FILE" 2>/dev/null)
             if [ -n "$ts" ]; then
-              printf '%s %(%Y-%m-%d %H:%M:%S)T.000000000 %s\n' "1234" "$ts" "$b"
+              printf '%s %(%Y-%m-%d %H:%M:%S)T.000000000 %s\n' "1234" "$ts" "logs/sync_state/$b"
             else
               # 无时间戳: 模拟该远端不支持 ModTime —— 照样出现在 lsf 里（考察是否被跳过）
-              printf '%s %s %s\n' "1234" "- -" "$b"
+              printf '%s %s %s\n' "1234" "- -" "logs/sync_state/$b"
             fi
           done
           return 0 ;;
@@ -473,6 +474,32 @@ else
 fi
 rm -f "$STATE"/task9_*.json
 : > "$MARKER_TS_FILE"
+
+echo "=== 场景13: 时间窗取不到时间戳 ⇒ 必须回落全量（不得产出空结论）==="
+# run 35488836925 实测: 生产侧 422 个 marker **全部**解析不出时间戳 ⇒ 条目 0 / 缺失 0。
+#   这个"零"会被读成"最近 3 天没缺"，实际是**根本没测**（lsl 全路径 vs lsf 基名对不上）。
+#   §0 纪律: 判据静默失败 ⇒ 错误结论。故一个都取不到时必须**回落全量并大声告警**。
+OUT10="$WORK/out10"; mkdir -p "$OUT10"
+for n in fresh stale undated; do
+  printf '{"dest_path":"openlist:wopan176Crypt/0","source_path":"onedrive:0","fixed_files":[' > "$STATE/task9_${n}.json"
+  printf '{"original":"c/d.mp4","alternative":"deadbeef/b.mp4","method":"m1","md5":""}' >> "$STATE/task9_${n}.json"
+  printf ']}' >> "$STATE/task9_${n}.json"
+done
+# marker_ts.txt 留空 = 全部取不到时间戳
+TRYRUN_WITHIN_DAYS=3 TRYRUN_SEND_TG=0 TRYRUN_WORK="$OUT10" restore_try_run task9 > "$OUT10/stdout.txt" 2>&1
+N_FB=$(awk -F'\t' 'NF' "$OUT10/tryrun.tsv" | wc -l | tr -d ' ')
+[ "$N_FB" = "3" ] && ok "13a 取不到时间戳 ⇒ 回落全量（${N_FB} 条，不是 0）" \
+  || bad "13a 取不到时间戳应回落全量（实际 ${N_FB} 条，0 = 空结论）"
+grep -qE "时间窗\*\*未生效|时间窗未生效" "$OUT10/tryrun.log" \
+  && ok "13b 报告明示时间窗未生效" || bad "13b 报告应明示时间窗未生效"
+grep -qF "全量" "$OUT10/tryrun.log" && ok "13c 报告标明本次实为全量" || bad "13c 报告应标明本次实为全量"
+# 决不能留下"最近 3 天"的字样当结论 —— 那正是误读的来源
+if grep -qE "时间窗=3 天: 扫描" "$OUT10/tryrun.log"; then
+  bad "13d 未生效时不得仍报'时间窗=3 天'（会误导）"
+else
+  ok "13d 未生效时不再报时间窗生效"
+fi
+rm -f "$STATE"/task9_*.json
 
 echo
 echo "===== 结果: PASS=$PASS FAIL=$FAIL ====="
