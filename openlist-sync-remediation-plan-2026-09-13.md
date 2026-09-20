@@ -4288,6 +4288,41 @@ run `35516272044`（sha `aff690f`，marker 原文探针）三组**互相独立**
 
 ---
 
+### 14.16 串写根因定位 + 修复 + 历史数据清洗（2026-09-20，`2852b30` / `292b9dd` / `bec113d`）
+
+**根因（代码级，已定位）**: `GLOBAL_FIXED_FILES_JSON` 是**全局**变量，只在
+`current_depth -eq 0` 时初始化一次（`task_engine.sh` 约 1003 行）。**子目录递归是
+depth≥1 ⇒ 不重置**；于是子目录 A 修好的条目会残留下来，被子目录 B 的
+`save_sync_marker` 写进 **B 的 marker**。
+对照: **并行** worker（`_sync_subdirs_parallel_run`）早就在子 shell 里显式重置过 ——
+这个不对称就是"串写只在串行路径出现"的原因。
+
+**修法（两处成对，缺一即错）**:
+1. 每个子目录 `→ _sync_task_impl` 之前 `GLOBAL_FIXED_FILES_JSON="[]"` +
+   `GLOBAL_FIX_BLACKLIST_JSON="{}"`（切断串路）；
+2. 递归返回后先把结果**收进父级专用变量** `_PAR_FIXED_ACC`，再**把全局清回空**，
+   最后在 `current_depth -eq 0` 的最终同步前装回全局 —— 不装回则父 marker 一条都没有。
+
+**回归锁**: `test_marker_crosstalk.sh`（11 断言）。场景 1/3 是判决性的: 只有 wangyi 修好
+2 条、neko 一条没修 ⇒ neko 的 marker 里**不得出现** wangyi 的条目（修前 1c/1d/3a/3b 红）；
+场景 4 反过来锁"防串写不能把记录丢了"（父 marker 必须收集到两个子目录的修复）。
+
+**历史脏数据已清洗（用户决策: 放弃全部旧 marker，先归档再清空）**:
+- 归档 2 份到 `dropbox:self-hosted/openlist/sync_state_reset_archive/`
+  （`sync_state_reset_20260920-161059.tar.gz`，426 个 marker，606 KB，含 MANIFEST 自证）；
+- `onedrive:/logs/sync_state` 已清空（剩余 0）。
+- 载入器: `reset_markers.sh` + try run workflow 的 `reset_markers` 入参（关/dry/commit，
+  选中即独占本次运行），默认 dry、归档失败拒绝清空。
+
+**⚠️ 这一轮踩的第三个坑（run `35521483745`）**: `rclone delete` **没有 `--files-only`**
+（那是 `lsf`/`copy` 的 flag）⇒ `unknown flag`，一条都没删；而 `rclone ... | tail -3`
+又把真实 rc 吞成 tail 的 0 ⇒ 两层掩盖叠加，日志上只剩"清空后仍剩 426 个"一句人肉可辨。
+修法: 去掉该 flag + `PIPESTATUS[0]` 取真实 rc；`test_reset_markers.sh` 场景 5 锁住
+（16 断言：mock 的 delete 遇过滤 flag 硬失败）。
+**教训: 不可逆动作的结果必须由退出码自证，不能靠人读日志里的数字。**
+
+---
+
 ## 15. 端到端正确性验证方案（2026-09-20，用户「别走偏」+「不兼容旧 marker」）
 
 ### 15.0 目标重设: 从"追结论"回到"验能力"
@@ -4403,18 +4438,21 @@ marker 语义的提交:
         源端直读: 网易摄影**在** ×3、另三个**不在** ×3；`top_dirs` 只有网易摄影
         含 `蓝白碗`；19 条文件名 4 个 marker 逐字节相同。
         ⇒ 源端**一直都在**（与用户说法一致），Q3 **未被证否**；被证否的是
-        **marker 的归属正确性**。⚠️ 串写发生在哪个环节仍未定位（需在写入侧加面包屑）。
+        **marker 的归属正确性**。串写环节**已定位并修复**（§14.16，`2852b30`）。
 
-- [ ] **V6（新增，由 §14.15 串写发现驱动，未开工）marker 归属正确性**
+- [x] **V6（由 §14.15 串写发现驱动）marker 归属正确性 —— 根因已修（2026-09-20）**
       - 要回答: 一条 fixed_files 记录**该不该出现在这个 marker 里** ——
         现有核对全部只验"路径在不在"，验不了归属，串写因此一直没被发现。
-      - 最小判据（两条都要）: ① `<source_path>/<original>` 源端直读在不在；
-        ② 该 original 的**顶层目录**是否出现在 marker 的 `top_dirs` 里。
-        两者都否 ⇒ 该条目**不属于**这个 marker（串写/残留），应标记而非照常还原。
-      - 定位串写环节需在写入侧加面包屑: marker 条目补 `written_by_task` /
-        `written_at` 字段（当前 marker 没有"本条由哪个 task 写入"的信息）。
-      - ⚠️ 修法未定: 先确认**串写范围**（只有这 4 个？还是全局？）——
-        可用现有探针全量扫一遍 marker（只读、分钟级），不必先改生产代码。
+      - 根因与修法见 §14.16: 串行子目录递归前未重置 `GLOBAL_FIXED_FILES_JSON`
+        （并行路径早已重置 ⇒ 只有串行串写）。回归锁: `test_marker_crosstalk.sh` 11 断言。
+      - **历史 marker 已全部清空**（先归档 2 份：426 个、606 KB，dropbox
+        `sync_state_reset_archive/`），故"先确认串写范围"这一步**作废** ——
+        旧记录不再需要兼容，也不需要逐条甄别。
+      - 保留待办（不再阻塞主线）: marker 条目补 `written_by_task` / `written_at`
+        面包屑。修法已验证有效后，面包屑只用于**下次再出问题时能当场定位**；
+        在新一轮 marker 生成后按需加，当前不加。
+      - **下一步由 V0/V3 承接**: 用新代码跑一轮同步，看新生成的 marker 归属是否干净
+        （新 marker 里若再出现跨目录条目，即为修法未生效的实锤）。
 
 ### 15.5 顺序原则（不再走偏的约束）
 
