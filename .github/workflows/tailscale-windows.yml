@@ -12,6 +12,8 @@ on:
     # 2026-09-15 起本 workflow 改为常驻：接力负责交接，cron 1h 兜底（别用 */5：
     # 高频 cron 会被 GitHub 限流、且每 5 分钟造一个被单例挡掉的排队运行）。
     # 要停：取消当前轮（接力判"人工取消"不复活）并 disable workflow。
+    # ⚠️ 该"取消即停"依赖接力能算出真实 elapsed；Windows 无 /proc/1 时曾恒为 0
+    #    （见「Mark job start」步骤），判据已随 run_elapsed/self_retrigger 一并修。
     - cron: "0 * * * *"
 
 permissions:
@@ -32,6 +34,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+      # 记录 job 起点：Windows 没有 /proc/1，run_elapsed_seconds 拿不到"本轮跑了多久"，
+      # 会退化成 0 → 接力步骤把跑满的轮报成"运行 0 分钟"，且人工取消判定会误命中
+      # （0 < 21000）导致取消后永不接力。写这个标记供降级链第 ③ 档读取。
+      # 用 bash：与收尾接力步骤同 shell（runner 自带 git-bash），不另写 pwsh 版。
+      - name: Mark job start
+        shell: bash
+        run: |
+          source "$GITHUB_WORKSPACE/.github/scripts/lib/run_elapsed.sh"
+          run_elapsed_mark_start
 
       - name: Setup Tailscale (SSH 调试入口)
         id: ts
