@@ -548,17 +548,6 @@ restore_try_run() {
       sp="${_TRYR_SRC_OF_MDIR[$md]:-}"
       [ -n "$sp" ] && ssubs=$(_tryr_rclone_read lsf "$sp" --dirs-only --retries 1 \
                               --timeout 2m 2>/dev/null | sed 's#/$##' | tr '\n' ' ')
-      # 目录建成了却判"文件缺失"时，还得看它**里面有什么**: 全空 ⇒ 文件压根没落；
-      #   装着别的文件 ⇒ 落盘了但名字/路径对不上（两种成因的修法完全不同）
-      if [ -n "$want" ] && [ "${_TRYR_DIR_CACHE[$md]+x}" ]; then
-        local inner="${_TRYR_DIR_CACHE[$md]}"
-        if [ -z "$inner" ]; then
-          _tryr_log "        ↳ ${md}: **空目录**（文件压根没落）"
-        else
-          _tryr_log "        ↳ ${md}: 非空，内含 $(printf '%s' "$inner" | grep -c .) 个条目" \
-                    "⇒ 落盘了但名字对不上: $(printf '%s' "$inner" | head -5 | tr '\n' ' ')"
-        fi
-      fi
       if [ -z "$subs" ]; then
         _tryr_log "     - ${parent}: （列举无输出/不可读 ⇒ 无法判，需另取判据）"
       else
@@ -570,6 +559,17 @@ restore_try_run() {
           _tryr_log "     - ${parent}: ${shape}（目标端子目录: ${subs}｜源端同层: 列举无输出）"
         else
           _tryr_log "     - ${parent}: ${shape}（子目录: ${subs})"
+        fi
+        # 目录建成了却判"文件缺失"时，还得看它**里面有什么**（紧随父目录行，成对易读）:
+        #   全空 ⇒ 文件压根没落；装着别的文件 ⇒ 落盘了但名字/路径对不上（修法完全不同）
+        if [ "${_TRYR_DIR_CACHE[$md]+x}" ]; then
+          local inner="${_TRYR_DIR_CACHE[$md]}"
+          if [ -z "$inner" ]; then
+            _tryr_log "        ↳ ${md}: **空目录**（文件压根没落）"
+          else
+            _tryr_log "        ↳ ${md}: 非空，内含 $(printf '%s' "$inner" | grep -c .) 个条目" \
+                      "⇒ 落盘了但名字对不上: $(printf '%s' "$inner" | head -5 | tr '\n' ' ')"
+          fi
         fi
       fi
     done
