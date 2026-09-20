@@ -15,7 +15,7 @@
 #
 # ⚠️ 安全边界:
 #   - 归档**先于**清空，且归档失败 ⇒ **拒绝清空**（没有退路就不许动手）
-#   - 清空用 rclone delete（只删文件，保留 sync_state 目录本身）
+#   - 清空用 rclone delete（它本身只删文件、保留 sync_state 目录，不加任何 filter flag）
 #   - 默认 **dry-run**: 必须显式给 --commit 才真的删
 #
 # 用法: bash reset_markers.sh [--commit]
@@ -87,13 +87,24 @@ else
   echo "  [dry-run] 将上传归档到 ${ARCHIVE_REMOTE}/sync_state_reset_${ts}.tar.gz"
 fi
 
-# ---- 清空（只删文件，保留目录本身）----
+# ---- 清空 ----
+# ⚠️ 两个踩过的坑:
+#   1. `rclone delete` **没有 --files-only 这个 flag**（那是 lsf/copy 的）—— 加上它
+#      是 "Fatal error: unknown flag"，一次删除都不会发生（run 35521483745 实况）。
+#      delete 的语义本来就是"只删文件、留目录"，不需要额外 flag。
+#   2. 退出码不能过管道: `rclone ... | tail -3` 拿到的是 tail 的 0，"删没删成"就
+#      永远看不出来。用 PIPESTATUS 取真实 rc。
 if [ "$COMMIT" = "1" ]; then
   echo ""
   echo "  正在清空 ${STATE_DIR} ..."
-  rclone delete "$STATE_DIR" --files-only --retries 3 --low-level-retries 5 --timeout 15m 2>&1 | tail -3
+  rclone delete "$STATE_DIR" --retries 3 --low-level-retries 5 --timeout 15m 2>&1 | tail -3
+  del_rc=${PIPESTATUS[0]}
   left=$(rclone lsf "$STATE_DIR" --files-only --retries 2 2>/dev/null | grep -c . || true)
   [[ "$left" =~ ^[0-9]+$ ]] || left=0
+  if [ "$del_rc" -ne 0 ]; then
+    echo "❌ rclone delete 返回非零（${del_rc}）⇒ 剩余 ${left} 个，请人工核对"
+    exit 1
+  fi
   if [ "$left" -eq 0 ]; then
     echo "✅ 已清空（剩余 ${left} 个）"
     echo ""
