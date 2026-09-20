@@ -530,6 +530,14 @@ restore_try_run() {
       # 末列"，目录名带空格时 $NF 只取得到最后一段（这里的目录名正是中文短名，必须整取）
       subs=$(_tryr_rclone_read lsf "$parent" --dirs-only --retries 1 --timeout 2m 2>/dev/null \
              | sed 's#/$##' | tr '\n' ' ')
+      # 源端同层形状对照（V5 矛盾驱动）: fix-check 曾报"源 529 / 目标 529 / 差集 0"，
+      #   与本探针"目标端没有蓝白碗"看着冲突。差集 0 只要求**相对路径字符串**相同，
+      #   不说明形状 ⇒ 把源端同层子目录一并打出，两侧形状是否一致才能一眼看清。
+      #   映射用的是"替代目录 → 源端同层"表（逐 marker 循环里记，见 _tryr_plan_one）
+      ssubs=""
+      sp="${_TRYR_SRC_OF_MDIR[$md]:-}"
+      [ -n "$sp" ] && ssubs=$(_tryr_rclone_read lsf "$sp" --dirs-only --retries 1 \
+                              --timeout 2m 2>/dev/null | sed 's#/$##' | tr '\n' ' ')
       if [ -z "$subs" ]; then
         _tryr_log "     - ${parent}: （列举无输出/不可读 ⇒ 无法判，需另取判据）"
       else
