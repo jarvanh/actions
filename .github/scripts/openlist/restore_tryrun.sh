@@ -170,8 +170,13 @@ _tryr_plan_one() {
 
   # 统计与清单回传给调用方（bash 无返回值，用约定的全局变量）
   TRYRUN_KIND_COUNT[$kind]=$(( ${TRYRUN_KIND_COUNT[$kind]:-0} + 1 ))
-  # kind=noop（原路径原名）没有替代文件，本来就不存在"备份缺失"，不计入缺失统计
+  # kind=noop 没有替代文件，本来就不存在"备份缺失"，不计入缺失统计
+  case "$kind" in
+    noop) ;;
+    *) [ "$be" = "存在" ] || [ "$be" = "存在（首卷）" ] && TRYRUN_PRESENT=$((TRYRUN_PRESENT + 1)) ;;
+  esac
   [ "$be" = "缺失" ] && TRYRUN_MISSING=$((TRYRUN_MISSING + 1)) && TRYRUN_MISSING_LIST+="${orig}"$'\n'
+  [ "$oe" = "已存在" ] && TRYRUN_ORIG_EXISTS=$((TRYRUN_ORIG_EXISTS + 1))
   if [ -n "$dest_note" ]; then
     TRYRUN_UNVERIFIED=$((TRYRUN_UNVERIFIED + 1))
     TRYRUN_UNVERIFIED_DESTS+="${dest}"$'\n'
@@ -193,6 +198,7 @@ restore_try_run() {
 
   local total=0
   TRYRUN_MISSING=0; TRYRUN_MISSING_LIST=""
+  TRYRUN_PRESENT=0; TRYRUN_ORIG_EXISTS=0
   TRYRUN_UNVERIFIED=0; TRYRUN_UNVERIFIED_DESTS=""
   declare -gA TRYRUN_KIND_COUNT=()
   _TRYR_DST_READABLE=()
@@ -276,16 +282,23 @@ restore_try_run() {
     [ -n "$kinds" ] && tg_add_kv msg "分类" "${kinds% · }"
     tg_add_kv msg "备份缺失" "${TRYRUN_MISSING} 个"
     [ "$TRYRUN_UNVERIFIED" -gt 0 ] && tg_add_kv msg "存在性未核对" "${TRYRUN_UNVERIFIED} 个"
-    if [ "$total" -gt 0 ]; then
-      tg_add_section msg "📋 条目 · ${total}"
-      tg_add_block msg "$(tree_fold "$TRYRUN_ENTRY_LIST" "$total")"
-      tg_add_note msg "完整三条路径见 run 日志 / artifact（tryrun.tsv）；此处只列原文件名"
+    if [ "${TRYRUN_CHECK_EXISTS:-1}" = "1" ] && [ "$total" -gt 0 ]; then
+      # 核对模式下这几个占比才是"真跑会发生什么"的摘要，比列文件名有用
+      tg_add_kv msg "备份在" "${TRYRUN_PRESENT} 个"
+      tg_add_kv msg "原路径已存在" "${TRYRUN_ORIG_EXISTS} 个"
     fi
+    # ⚠️ 通知**只发摘要**，不列条目清单: 4684 条全塞进去会被切成 97 个分片，
+    #   Telegram 限速下光发送就要 5 分钟，把整轮拖过 40 分钟 timeout 被取消
+    #   （run 35478771033 实测: 预演本身跑完了，死在发通知上）。
+    #   三条完整路径属于"要看再取"的细节 → 交给 artifact（tryrun.tsv）+ run 日志。
+    #   条目数只作为一行 kv 呈现，不做树形清单。
     if [ "$TRYRUN_MISSING" -gt 0 ]; then
+      # 缺失清单同样限量（8 条）—— 它才是真跑会 FAIL 的部分，但 777 条全列依旧会爆
       tg_add_section msg "⚠️ 备份缺失 · ${TRYRUN_MISSING}"
-      tg_add_block msg "$(tree_fold "$TRYRUN_MISSING_LIST" "$TRYRUN_MISSING")"
+      tg_add_block msg "$(tree_fold "$TRYRUN_MISSING_LIST" 8)"
       tg_add_note msg "目标端找不到替代文件，真跑会判 FAIL（条目保留在 marker，不会丢）"
     fi
+    tg_add_note msg "三条完整路径（① 备份 / ② marker 原文件 / ③ 实际落点）见 artifact tryrun.tsv 与 run 日志。"
     if [ "$TRYRUN_UNVERIFIED" -gt 0 ]; then
       tg_add_note msg "存在性未核对 ${TRYRUN_UNVERIFIED} 条: 目标端不可读（多为容器未拉起），三条路径仍准确但'在不在'未验证"
     fi
@@ -307,6 +320,8 @@ _tryr_log() { printf '%s\n' "$*"; }
 declare -gA TRYRUN_KIND_COUNT=()
 declare -gA _TRYR_DST_READABLE=()
 TRYRUN_MISSING=0
+TRYRUN_PRESENT=0
+TRYRUN_ORIG_EXISTS=0
 TRYRUN_UNVERIFIED=0
 TRYRUN_MISSING_LIST=""
 TRYRUN_UNVERIFIED_DESTS=""
