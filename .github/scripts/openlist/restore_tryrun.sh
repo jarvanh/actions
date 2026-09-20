@@ -56,17 +56,25 @@ _tryr_rclone_read() {
 # ⚠️ 仍受 OpenList 列表缓存延迟影响（§0 2026-09-18: 新建文件首次可见约 10s）。
 #   对**预演**可接受：预演是"看会怎么走"，不是"判成败"；真跑的判据在生产侧。
 #   ⇒ 因此"不存在"在本模块只记为风险提示，绝不作为删除/跳过的依据。
+#   清单匹配用 bash 自身的前后换行包裹比较，**不用 `printf | grep -qxF`**:
+#   grep -q 一命中就退出 → 管道断裂，每条 2 次 ⇒ 4674 条上万次 "printf: write error:
+#   Broken pipe"（run 35476841345 实测: 光刷这些错误就把核对模式拖过 36 分钟、撞 40 分钟
+#   timeout 被取消）。fork 才是这里的时间账，远端列举次数是次要项。
 # 用法: _tryr_exists <full_remote_path>
 declare -gA _TRYR_DIR_CACHE=()
 _tryr_exists() {
   local full="$1" d b listing
-  d="$(dirname "$full")"; b="$(basename "$full")"
+  # 用 bash 参数展开剥目录/文件名，不用 dirname/basename —— 每条 2 次 fork × 4674 条
+  # 又是一万次进程创建（同上: fork 才是核对模式的时间账）
+  d="${full%/*}"; b="${full##*/}"
+  [ "$d" = "$full" ] && d=""
   if [ -z "${_TRYR_DIR_CACHE[$d]+x}" ]; then
     listing=$(_tryr_rclone_read lsf "$d" --files-only --retries 1 --low-level-retries 2 \
       --timeout 2m 2>/dev/null)
     _TRYR_DIR_CACHE[$d]="$listing"
   fi
-  printf '%s\n' "${_TRYR_DIR_CACHE[$d]}" | grep -qxF "$b"
+  # 前后换行包裹后做子串匹配 —— 等价于 grep -qxF 但零 fork
+  [[ $'\n'"${_TRYR_DIR_CACHE[$d]}"$'\n' == *$'\n'"$b"$'\n'* ]]
 }
 
 # 目标端根可读性探测（避免把"我没起容器"伪装成"备份全丢了"，见 _tryr_plan_one 注释）
