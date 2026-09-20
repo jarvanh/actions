@@ -374,6 +374,8 @@ Telegram 收到，放弃重试只会让凭据彻底丢失。
 | ⚠️ OpenClaw 即将进入最终归档 | `openclaw.yml` | keepalive 剩余约 15 分钟时预警 |
 | ❌ workbuddy-gateway 启动失败 | `openclaw.yml` | serve 启动即退或超时未监听 8318 |
 | ⛔ / ⚠️ workbuddy-gateway 已停止 | `openclaw.yml` | 收尾停止本地代理网关（仍有进程残留时降级 ⚠️） |
+| 🟢 glm-proxy 已就绪 | `openclaw.yml` | 本地 GLM 反代（8787）启动自检后。字段口径见 2.6 节 |
+| ❌ glm-proxy 启动失败 | `openclaw.yml` | 启动脚本非 0，或自检候选模型全部无有效回答 |
 | ⚠️ Emby 直链已回退 | `emby.yml` | 探活连续失败切直连 |
 
 **示例：归档告警**
@@ -604,7 +606,74 @@ Run ID：<code>12345678</code>
 - 归档步骤没产出明细（预检 `exit 1` / 运行被取消）时降级为 `⚠️ … 最终归档未完成`，
   这类失败在归档步骤内不产生任何通知，全靠这条兜底。
 
-### 2.6 Emby 服务
+### 2.6 glm-proxy（本地 GLM 反代，8787）
+
+`glm-proxy` 是与 workbuddy-gateway 并列的第二个本地 AI 网关，版式同源（2.5 节）。
+
+**示例：glm-proxy 已就绪**（`openclaw.yml`）
+
+```
+🟢 glm-proxy 已就绪
+━━━━━━━━━━━━━━━━━━
+结论：已就绪 · 自检消息已收到回答（model=glm-4.7）
+接口：<code>http://127.0.0.1:8787/v1</code>
+鉴权：需 API Key（与 workbuddy-gateway 同值）
+模型：<code>glm-4.7</code>
+
+🌐 上游端点 · 2
+  ├─ Anthropic 端点 · 可用 1/12
+  │  <code>https://open.bigmodel.cn/api/anthropic</code>
+  │  ✅ 可用·免费：<code>glm-4-flash-250414</code>
+  │  ❌ 余额不足/无资源包·付费：<code>glm-5.3-flash</code> · <code>glm-5.3</code>
+  │  ❌ 套餐已到期·付费：<code>glm-4.7</code> · <code>glm-4.5-air</code>
+
+  └─ OpenAI 端点 · 可用 5/12
+     <code>https://open.bigmodel.cn/api/paas/v4</code>
+     ✅ 可用·付费：<code>glm-4.7</code> · <code>glm-4.5-air</code>
+     ✅ 可用·免费：<code>glm-4.7-flash</code> · <code>glm-4-flash-250414</code>
+     ❌ 余额不足/无资源包·付费：<code>glm-5.3-flash</code> · <code>glm-5.3</code>
+
+当前为 bridge 模式：/v1/messages 实际走 OpenAI 端点，Anthropic 端点仅作套餐状态参考
+上游凭据来源：<code>zcode-credentials</code>
+代码目录：<code>/dropbox/self-hosted/glm-proxy</code>
+
+⏱ 已运行 3 小时 44 分 · 🔗 运行日志
+```
+
+**glm-proxy 通知的字段口径**（改这条通知时逐条对齐）：
+
+- **上游端点分节**（`🌐 上游端点 · N`，N = 端点数）由 `render-probe.py` 渲染，
+  数据来自 `probe.mjs`（真发请求探测两条端点 × 逐模型）。**这是唯一一处把上游
+  可用性搬进通知的地方**，因为"为什么不能用"无法从代理自身状态推出来。
+  - **端点是条目行、可用性档位是子行**（与账号池同形）：`<code>端点名</code> · 可用 N/M`，
+    子行给「图标 + 原因·计费档：模型清单」。子行前缀手拼 `│  `/空格，
+    **不能走 `tree_lines`**（它把每行都当兄弟条目，子行会被渲染成平级）。
+  - **计费档（付费/免费）必须逐行给出**：读者要一眼看出哪些模型免费、哪些消耗资源包。
+    这是"收费情况"的落点，不写等于没说。
+  - **模型名是机器值 → 逐个 `<code>`**；原因与计费档是自然语言 → 裸文本。
+  - **两条端点探同一份模型名单**：实测同一条端点会因模型而异（Anthropic 端点
+    `glm-4.7` 回 1309 套餐到期、`glm-5.3-flash` 回 1113 余额不足、免费模型 200），
+    只探一个模型会把多因误报成单因。
+  - 分节标题的计数由渲染脚本给出（第 1 行），正文在其余行 —— CI 侧只做
+    `head -n 1` / `tail -n +2` 拆分，不解析 JSON。
+  - **渲染脚本输出的 `<code>` 已转义**，CI 侧直接 `tg_add_block` 整段插入；
+    再套 `escape_html` 会二次转义成 `&amp;amp;`。
+- **结论**含自检实际用上的模型（`model=<名>`）——**不写死**。自检判据是
+  「上游端点能返回正确信息」：按 `DEFAULT_MODEL` → 探测可用清单 → 内置兜底逐个试，
+  任一模型答上来即通过。上游按模型分档供额（某代次欠费、另一代次仍有资源包）时，
+  网关整体仍可用，不该判失败。
+- **`DEFAULT_MODEL` 自身不可用**时结论里明说（`但默认模型 X 不可用`）：网关仍服务，
+  但不写 `model` 的客户端会全部 429 —— 不能让「已就绪」掩盖这个事实。
+- **「模型」行是机器值**（模型名）→ `<code>`。它报自检实际用上的那个模型，
+  完整可用清单在上游端点分节里。
+- **鉴权固定写「需 API Key（与 workbuddy-gateway 同值）」**：`HOST=0.0.0.0` 且设了
+  `AI_GATEWAY_API_KEY`，两个网关共用同一把。**不得回显 key 本身**。
+- **失败态不给「接口 / 鉴权 / 模型」三行**：服务已不在，展示指向已停进程的地址会误导。
+- **日志尾部进「🧾 原始输出」的 `<pre>`**（尾部 15 行）：`<pre>` 只给原始输出，
+  结构化数据（端点/模型/计费）一律走上面的树形条目 —— 把结构化数据塞进 `<pre>`
+  是这条通知最容易犯的版式错误（信息在，但读者扫不出来）。
+
+### 2.7 Emby 服务
 
 | 通知 | 在哪 | 何时发 |
 |---|---|---|
@@ -642,7 +711,7 @@ Run ID：<code>12345678</code>
 > **两者都取不到时省略标注，不猜**。括号内容是自然语言，裸文本，不套 `<code>`。
 > 取值与兜底规则见 `docs/emby.md`「起播等待」一节。
 
-### 2.7 测速三套（`.github/scripts/proxy-speedtest/`）
+### 2.8 测速三套（`.github/scripts/proxy-speedtest/`）
 
 | 通知 | 在哪 | 何时发 |
 |---|---|---|
@@ -710,7 +779,7 @@ RESULT_JSON 的 `aborted_due_to_runtime` / `runtime_abort_reason`
 ⏱ 已运行 20 分钟 · 🔗 运行日志
 ```
 
-### 2.8 媒体 caption（特殊形态）
+### 2.9 媒体 caption（特殊形态）
 
 随视频发出的 caption，**没有标题、没有分隔线、没有收尾区**——它是 3.9 收尾区唯一的
 固有例外，拼完即随媒体发出：
@@ -736,7 +805,7 @@ parse_mode**，否则文件名里的 `& < >` 会 400、markdown 语法字符会�
 > 别把两种「caption」搞混：2.2 节频道同步汇总里的 `CAPTION_PREFIX` 是**普通消息**，
 > 走 `tg_add_title` + 发送层；本节说的才是随媒体发出的 caption。
 
-### 2.9 没有通知的 workflow
+### 2.10 没有通知的 workflow
 
 `subs-check.yml` 等一批 workflow 当前不发通知。要补的话，照 2.3 节备份类的形态即可
 （标题 + 关键 kv + 收尾区），并把 `TG_RUN_*` 接上（3.9 节）。
@@ -878,7 +947,7 @@ parse_mode**，否则文件名里的 `& < >` 会 400、markdown 语法字符会�
 ⏱ 已运行 22 分钟 · 🔗 <a href="…">运行日志</a>
 ```
 
-**硬要求**：所有通知都要有收尾区，唯一例外是媒体 caption（2.8 节）。进度面板每次刷新
+**硬要求**：所有通知都要有收尾区，唯一例外是媒体 caption（2.9 节）。进度面板每次刷新
 都带收尾区，时长只从这里出。
 
 必须用 `tg_add_footer` / `Get-TgFooter` / `tg_footer_line`，不要手拼——助手已处理空行、
