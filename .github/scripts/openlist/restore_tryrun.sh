@@ -270,6 +270,44 @@ _tryr_split_glob() {
 }
 
 # 预演单条: 输出三行（① ② ③）+ 执行形态说明，并把机读行写进 tsv
+# ★ 归属判据（2026-09-20 串写修复后新增，服务 V6「marker 归属正确性」）:
+#   一条 fixed_files 记录**该不该出现在这个 marker 里** —— 现有核对全部只验"路径在
+#   不在"，验不了归属，串写因此一直没被发现（§14.15）。
+#   判据取 marker 自记的 `top_dirs`（写盘时源端顶层目录快照）: 条目的 original 若带
+#   目录（a/b.jpg），其**第一层**必须是 top_dirs 之一 —— 否则该 marker 的源端根下
+#   根本没有这个顶层目录，这条就是**从别处串/继承来的**。
+#   ⚠️ 只报**可疑**、不当定案: top_dirs 是快照，源端事后新增目录会误报；故措辞是
+#   "与 top_dirs 不符"，不下"串写"结论 —— 定性要由直读等更硬的判据来做。
+#   无目录的条目（original 直接是文件名，属该 marker 根层）恒判 OK。
+#   入参: <original>（查表前须先 _tryr_owner_prepare <top_dirs文本>）
+#   出参: stdout = "OK" 或 "⚠️ 顶层 X 不在 top_dirs（疑似串写/继承）"
+# ⚠️ 实现两条硬约束:
+#   1. **不得用 `printf | grep -q`**（热路径禁令，见 test 场景 8g）: grep -q 命中即退出
+#      ⇒ 管道断裂，4500 条会刷出上万次 "Broken pipe"（实测把核对模式拖过 36 分钟撞
+#      timeout，run 35476841345）。故判"在不在"用**关联数组查表**，O(1) 且无子进程。
+#   2. 表**每个 marker 建一次**（_tryr_owner_prepare），不每条重建 —— 归属核对是
+#      逐条跑的，重建就是 O(条目 × top_dirs)。
+_tryr_owner_prepare() {
+  _TRYR_OWNER_SET=()
+  local l
+  while IFS= read -r l; do
+    [ -n "$l" ] && _TRYR_OWNER_SET["$l"]=1
+  done <<< "${1:-}"
+}
+
+_tryr_owner_check() {
+  local orig="$1" top
+  case "$orig" in
+    */*) top="${orig%%/*}" ;;
+    *)   printf 'OK\n'; return 0 ;;
+  esac
+  [ "${#_TRYR_OWNER_SET[@]}" -eq 0 ] \
+    && { printf '（无 top_dirs，无法判）\n'; return 0; }
+  [ -n "${_TRYR_OWNER_SET[$top]:-}" ] \
+    && printf 'OK\n' \
+    || printf '⚠️ 顶层 %s 不在 top_dirs（疑似串写/继承）\n' "$top"
+}
+
 # 用法: _tryr_plan_one <tsv> <marker名> <dest> <src> <orig> <alt> <method> <序号>
 _tryr_plan_one() {
   local tsv="$1" marker="$2" dest="$3" src="$4" orig="$5" alt="$6" method="$7" idx="$8"
@@ -396,6 +434,19 @@ _tryr_plan_one() {
   _tryr_log "      ③ 实际执行还原的完整路径      : ${exec_path}"
   _tryr_log "      ④ 源端原路径（灾难恢复口径）  : ${src_full:-（marker 无 source_path）}"
   _tryr_log "      分类: ${kind} · 备份: ${be} · 原路径: ${oe} · 源端: ${se}"
+  # 归属判据（V6）: 只在**可疑**时打印一行 —— 合格的条目不刷屏，
+  # 但一旦有串写，它会逐条出现在报告里并进汇总计数
+  local own=""
+  if [ "${#_TRYR_OWNER_SET[@]}" -gt 0 ]; then
+    TRYRUN_OWNER_CHECKED=$((TRYRUN_OWNER_CHECKED + 1))
+    own=$(_tryr_owner_check "$orig")
+    case "$own" in
+      OK) own="" ;;
+      *)  _tryr_log "      ${own}"
+          TRYRUN_OWNER_SUSPECT=$((TRYRUN_OWNER_SUSPECT + 1))
+          TRYRUN_OWNER_LIST+="${orig}"$'\n' ;;
+    esac
+  fi
   _tryr_log "      将执行: ${exec_cmd}"
   if [ "$kind" = "split" ]; then
     _tryr_log "      备份文件全集: ${dest}$(_tryr_split_glob "$alt")"
@@ -465,6 +516,8 @@ restore_try_run() {
   TRYRUN_MISSING_DIRS=""
   TRYRUN_SRC_CHECKED=0; TRYRUN_SRC_MISSING=0; TRYRUN_SRC_MISSING_LIST=""
   TRYRUN_SRC_CTRL_POS=0; TRYRUN_SRC_CTRL_NEG=0; TRYRUN_SRC_CTRL_LIST=""
+  # 归属可疑计数（V6）: 条目顶层目录不在本 marker 的 top_dirs 里
+  TRYRUN_OWNER_SUSPECT=0; TRYRUN_OWNER_LIST=""; TRYRUN_OWNER_CHECKED=0
   # 备份缺失目录 → 源端同层目录（供结构探针打两侧形状对照）
   declare -gA _TRYR_SRC_OF_MDIR=()
   _TRYR_SRC_READABLE=()
@@ -642,6 +695,12 @@ restore_try_run() {
     _tryr_log "  dest_path=${dest}"
     _tryr_log "  source_path=${src:-（无）}"
     _tryr_log "  待还原条目: ${count} 条"
+    # top_dirs 一次取出（marker 自记的源端顶层目录快照），逐条做归属判据。
+    # 用 TSV 取而不是 join: 目录名可能含空格，join 出来的串没法再安全切分。
+    local top_dirs_txt
+    top_dirs_txt=$(printf '%s' "$json" \
+      | jq -r '(.top_dirs // [])[] | (. // "")' 2>/dev/null)
+    _tryr_owner_prepare "$top_dirs_txt"
 
     idx=0
     while IFS=$'\t' read -r orig alt method fmd5; do
@@ -670,6 +729,21 @@ restore_try_run() {
   for k in "${!TRYRUN_KIND_COUNT[@]}"; do
     _tryr_log "  ${k}: ${TRYRUN_KIND_COUNT[$k]} 条"
   done
+  # ---- 归属核对（V6，串写修复后的验收判据）----
+  # 为什么必须显式打印"判了多少条": "0 条可疑"与"根本没判"在报告上长得一样
+  # （marker 无 top_dirs 时一条都判不了）—— 不写分母，"干净"就是假的。
+  if [ "$TRYRUN_OWNER_CHECKED" -gt 0 ]; then
+    if [ "$TRYRUN_OWNER_SUSPECT" -gt 0 ]; then
+      _tryr_log "  🚨 归属可疑 ${TRYRUN_OWNER_SUSPECT}/${TRYRUN_OWNER_CHECKED} 条" \
+                "（顶层目录不在本 marker 的 top_dirs 里 ⇒ 疑似串写/继承，" \
+                "真跑会把别处的文件搬进本目录，先看 marker 原文探针定案）:"
+      printf '%s' "$TRYRUN_OWNER_LIST" | while IFS= read -r l; do [ -n "$l" ] && _tryr_log "     - ${l}"; done
+    else
+      _tryr_log "  ✅ 归属核对: ${TRYRUN_OWNER_CHECKED} 条顶层目录均在本 marker 的 top_dirs 内（未见串写迹象）"
+    fi
+  else
+    _tryr_log "  ⚠️ 归属核对: 0 条可判（marker 缺 top_dirs 字段）⇒ **未验证**，不可当作'归属干净'"
+  fi
   if [ "$TRYRUN_MISSING" -gt 0 ]; then
     _tryr_log "  ⚠️ 备份缺失清单（真跑会 FAIL: 替代文件可能已不存在）:"
     printf '%s' "$TRYRUN_MISSING_LIST" | while IFS= read -r l; do [ -n "$l" ] && _tryr_log "     - ${l}"; done
@@ -839,6 +913,7 @@ _tryr_log() { printf '%s\n' "$*"; }
 # 避免 set -u 下 `_tryr_plan_one` 引用未定义变量直接退出）
 declare -gA TRYRUN_KIND_COUNT=()
 declare -gA _TRYR_DST_READABLE=()
+declare -gA _TRYR_OWNER_SET=()
 TRYRUN_MISSING=0
 TRYRUN_PRESENT=0
 TRYRUN_ORIG_EXISTS=0

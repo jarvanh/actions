@@ -958,6 +958,44 @@ grep -qF "没有 marker 名包含关键字" "$OUT20/tryrun.log" && ok "20i 关�
 rm -f "$STATE"/task20_dump.json
 eval "$RCLONE_BASE_FN"; export -f rclone
 
+# ============================================================================
+# 场景 21: 归属判据（V6，2026-09-20 串写修复后新增）
+#   为什么: 串写把**别处目录**的修复记录写进了本 marker，真跑会把 A 的备份搬到 B
+#   名下（短哈希不可逆，搬错回不去）。现有核对只验"路径在不在"，验不出归属。
+#   判据用 marker 自记的 top_dirs: 条目的顶层目录必须是其中之一。
+#   锁三态: ① 可疑 ⇒ 必须报（否则串写永远看不见）
+#           ② 干净 ⇒ 不得误报（否则每轮都是噪音，很快没人看）
+#           ③ 缺 top_dirs ⇒ **说未验证**，不得显示成"归属干净"（§0: 判不了≠没问题）
+# ============================================================================
+OUT21="$WORK/out21"; mkdir -p "$OUT21"
+# 21-A: 可疑 —— top_dirs 只有 neko，但条目属于 蓝白碗（复刻真机串写形态）
+printf '%s' '{"last_success":"2026-09-19T19:39:07Z","source_path":"SRC/套图/neko","dest_path":"DST/套图/neko","top_dirs":["neko普通"],"fixed_files":[{"original":"蓝白碗/1.jpg","alternative":"6c73a635/1.jpg","method":"copyto_shorthash"}]}' > "$STATE/task21a.json"
+# 21-B: 干净 —— 条目顶层 neko普通 在 top_dirs 里
+printf '%s' '{"last_success":"2026-09-19T19:39:07Z","source_path":"SRC/套图/neko","dest_path":"DST/套图/neko","top_dirs":["neko普通"],"fixed_files":[{"original":"neko普通/9.jpg","alternative":"ff980203/9.jpg","method":"copyto_shorthash"}]}' > "$STATE/task21b.json"
+TRYRUN_SEND_TG=0 TRYRUN_CHECK_EXISTS=0 TRYRUN_WORK="$OUT21" restore_try_run all > "$OUT21/stdout.txt" 2>&1
+L21="$OUT21/tryrun.log"
+grep -qF "归属可疑 1/2" "$L21" \
+  && ok "21a 归属可疑必须报（含分母: 判了多少条）" \
+  || bad "21a 应报归属可疑 1/2（汇总: $(grep '归属' "$L21" | head -2)）"
+grep -qF "蓝白碗/1.jpg" "$L21" && grep -qF "疑似串写/继承" "$L21" \
+  && ok "21b 可疑条目点名 + 说明后果（不是只给个数）" \
+  || bad "21b 应点名可疑条目（日志: $(grep -A3 '归属可疑' "$L21" | head -4)）"
+# 干净的那条不得出现在可疑清单里
+grep -F "     - neko普通/9.jpg" "$L21" \
+  && bad "21c 干净条目被误报为可疑" || ok "21c 干净条目不误报（判据不过度报警）"
+rm -f "$STATE"/task21a.json "$STATE"/task21b.json
+
+# 21-D: 无 top_dirs ⇒ 必须说"未验证"，不得显示成"归属干净"
+printf '%s' '{"last_success":"2026-09-19T19:39:07Z","source_path":"SRC/x","dest_path":"DST/x","fixed_files":[{"original":"蓝白碗/1.jpg","alternative":"6c73a635/1.jpg","method":"copyto_shorthash"}]}' > "$STATE/task21d.json"
+TRYRUN_SEND_TG=0 TRYRUN_CHECK_EXISTS=0 TRYRUN_WORK="$OUT21" restore_try_run all > "$OUT21/stdout2.txt" 2>&1
+grep -qF "0 条可判" "$L21" && grep -qF "未验证" "$L21" \
+  && ok "21d 缺 top_dirs ⇒ 明示未验证（不得假装'归属干净'）" \
+  || bad "21d 缺 top_dirs 时应说未验证（汇总: $(grep '归属' "$L21" | tail -1)）"
+! grep -qF "未见串写迹象" "$L21" \
+  && ok "21e 未验证时不得输出『未见串写迹象』（否则从没判过也说干净）" \
+  || bad "21e 未验证时不得说未见串写迹象"
+rm -f "$STATE"/task21d.json
+
 echo
 echo "===== 结果: PASS=$PASS FAIL=$FAIL ====="
 [ "$FAIL" -eq 0 ]
