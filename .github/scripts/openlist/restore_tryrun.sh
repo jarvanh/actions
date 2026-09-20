@@ -13,6 +13,8 @@
 #   ② marker 记录的原文件       = <dest_path>/<original>
 #   ③ 实际执行还原的完整路径     = 生产那条命令**真正落地的**完整路径
 #   另附 ④ 源端原路径 <source_path>/<original>（灾难恢复口径，便于交叉核对）
+#   存在性给两套判据: 列列举（目录清单）+ **直读**（lsjson 全路径 stat）；两者分歧时
+#   以直读为准（§0 纪律: 只以列列举为准会把成功判成失败，见 _tryr_stat_exists 注释）。
 #
 # 零写入是**结构性**保证，不是"小心一点"（2026-09-19 教训: 靠自觉的只读约束迟早被
 #   下一个加功能的人破坏）: 本模块所有远端调用一律经 _tryr_rclone_read()，
@@ -55,7 +57,7 @@ _tryr_rclone_read() {
 #   再叠上万次列举必然撞 timeout。故按目录缓存清单（同一目录下的条目共享一次列举）。
 # ⚠️ 仍受 OpenList 列表缓存延迟影响（§0 2026-09-18: 新建文件首次可见约 10s）。
 #   对**预演**可接受：预演是"看会怎么走"，不是"判成败"；真跑的判据在生产侧。
-#   ⇒ 因此"不存在"在本模块只记为风险提示，绝不作为删除/跳过的依据。
+#   ⇒ "缺失"必须再经 _tryr_stat_exists() 直读复核才进结论（见该处注释）。
 #   清单匹配用 bash 自身的前后换行包裹比较，**不用 `printf | grep -qxF`**:
 #   grep -q 一命中就退出 → 管道断裂，每条 2 次 ⇒ 4674 条上万次 "printf: write error:
 #   Broken pipe"（run 35476841345 实测: 光刷这些错误就把核对模式拖过 36 分钟、撞 40 分钟
@@ -75,6 +77,24 @@ _tryr_exists() {
   fi
   # 前后换行包裹后做子串匹配 —— 等价于 grep -qxF 但零 fork
   [[ $'\n'"${_TRYR_DIR_CACHE[$d]}"$'\n' == *$'\n'"$b"$'\n'* ]]
+}
+
+# ⚠️ 直读判据（独立于上面的列列举）: 按**全路径 stat**，返回码即"在不在"。
+# 为什么必须两套判据并存（§0 2026-09-18 教训）: 以"列列举里有没有"判"文件在不在"，
+#   会把**成功判成失败** —— 列举取空/被限流/缓存滞后时，目录下**所有**条目一起变
+#   "缺失"，而直读是逐文件 stat，不依赖目录清单。故结论分歧时以**直读为准**。
+#   形状诊断: 若某目录下同时存在"存在"和"缺失"，那是逐文件的差异（真缺/改名）；
+#   若**整目录一律缺失**，那是清单取空，直读复核必然翻案（run 35482750267 实测
+#   167 个缺失目录 **0 个混合** ⇒ 高度指向清单取空，故必须复核才敢下结论）。
+# 用法: _tryr_stat_exists <full_remote_path>
+declare -gA _TRYR_STAT_CACHE=()
+_tryr_stat_exists() {
+  local full="$1"
+  [ -n "${_TRYR_STAT_CACHE[$full]:-}" ] && return "${_TRYR_STAT_CACHE[$full]}"
+  local rc=0
+  _tryr_rclone_read lsjson "$full" --retries 1 --timeout 2m >/dev/null 2>&1 || rc=$?
+  _TRYR_STAT_CACHE[$full]="$rc"
+  return "$rc"
 }
 
 # 目标端根可读性探测（避免把"我没起容器"伪装成"备份全丢了"，见 _tryr_plan_one 注释）
@@ -148,6 +168,16 @@ _tryr_plan_one() {
       else
         _tryr_exists "$backup" && be="存在" || be="缺失"
       fi
+      # 列列举判"缺失" → 再走一次**直读**复核（纪律见 _tryr_stat_exists 注释）:
+      # 只复核判缺失的那些（判"存在"是列列举命中的，无假阴性风险），代价可控。
+      if [ "$be" = "缺失" ]; then
+        if _tryr_stat_exists "$backup"; then
+          be="存在（直读复核翻案）"
+          [ "$kind" = "split" ] && be="存在（首卷·直读复核翻案）"
+          TRYRUN_RECHECK_FLIPPED=$((TRYRUN_RECHECK_FLIPPED + 1))
+        fi
+        TRYRUN_RECHECK_TOTAL=$((TRYRUN_RECHECK_TOTAL + 1))
+      fi
       _tryr_exists "$orig_full" && oe="已存在" || oe="不存在"
     fi
   fi
@@ -171,11 +201,15 @@ _tryr_plan_one() {
   # 统计与清单回传给调用方（bash 无返回值，用约定的全局变量）
   TRYRUN_KIND_COUNT[$kind]=$(( ${TRYRUN_KIND_COUNT[$kind]:-0} + 1 ))
   # kind=noop 没有替代文件，本来就不存在"备份缺失"，不计入缺失统计
+  # "存在（…直读复核翻案）"也算存在 —— 直读是更可靠的判据，不因字面值差异漏计
   case "$kind" in
     noop) ;;
-    *) [ "$be" = "存在" ] || [ "$be" = "存在（首卷）" ] && TRYRUN_PRESENT=$((TRYRUN_PRESENT + 1)) ;;
+    *) case "$be" in 存在*) TRYRUN_PRESENT=$((TRYRUN_PRESENT + 1)) ;; esac ;;
   esac
-  [ "$be" = "缺失" ] && TRYRUN_MISSING=$((TRYRUN_MISSING + 1)) && TRYRUN_MISSING_LIST+="${orig}"$'\n'
+  case "$be" in
+    缺失) TRYRUN_MISSING=$((TRYRUN_MISSING + 1)); TRYRUN_MISSING_LIST+="${orig}"$'\n' ;;
+    存在（*直读复核翻案）) TRYRUN_FLIPPED_LIST+="${backup}"$'\n' ;;
+  esac
   [ "$oe" = "已存在" ] && TRYRUN_ORIG_EXISTS=$((TRYRUN_ORIG_EXISTS + 1))
   if [ -n "$dest_note" ]; then
     TRYRUN_UNVERIFIED=$((TRYRUN_UNVERIFIED + 1))
@@ -199,10 +233,12 @@ restore_try_run() {
   local total=0
   TRYRUN_MISSING=0; TRYRUN_MISSING_LIST=""
   TRYRUN_PRESENT=0; TRYRUN_ORIG_EXISTS=0
+  TRYRUN_RECHECK_TOTAL=0; TRYRUN_RECHECK_FLIPPED=0; TRYRUN_FLIPPED_LIST=""
   TRYRUN_UNVERIFIED=0; TRYRUN_UNVERIFIED_DESTS=""
   declare -gA TRYRUN_KIND_COUNT=()
   _TRYR_DST_READABLE=()
   _TRYR_DIR_CACHE=()
+  _TRYR_STAT_CACHE=()
   TRYRUN_ENTRY_LIST=""
 
   # 日志写入用 >> 重定向而不是 `| tee -a`: 每条 7 行 × 4500+ 条 = 3 万次 fork，
@@ -261,6 +297,15 @@ restore_try_run() {
     _tryr_log "  ⚠️ 备份缺失清单（真跑会 FAIL: 替代文件可能已不存在）:"
     printf '%s' "$TRYRUN_MISSING_LIST" | while IFS= read -r l; do [ -n "$l" ] && _tryr_log "     - ${l}"; done
   fi
+  if [ "$TRYRUN_RECHECK_TOTAL" -gt 0 ]; then
+    # 直读复核结论单独成段: 它是"777 到底是真缺还是清单取空"的唯一判据
+    _tryr_log "  🔍 直读复核: 对列列举判缺失的 ${TRYRUN_RECHECK_TOTAL} 条逐条 lsjson stat，" \
+              "翻案 ${TRYRUN_RECHECK_FLIPPED} 条（列列举判缺、直读判定在 ⇒ 清单取空/滞后，" \
+              "以直读为准）"
+    if [ "$TRYRUN_RECHECK_FLIPPED" -gt 0 ]; then
+      printf '%s' "$TRYRUN_FLIPPED_LIST" | while IFS= read -r l; do [ -n "$l" ] && _tryr_log "     ↳ 实为存在: ${l}"; done
+    fi
+  fi
   if [ "$TRYRUN_UNVERIFIED" -gt 0 ]; then
     _tryr_log "  ⚠️ 存在性未核对（目标端不可读，通常是 OpenList 容器没拉起）:"
     printf '%s' "$TRYRUN_UNVERIFIED_DESTS" | sort -u | while IFS= read -r l; do [ -n "$l" ] && _tryr_log "     - ${l}"; done
@@ -292,6 +337,10 @@ restore_try_run() {
     #   （run 35478771033 实测: 预演本身跑完了，死在发通知上）。
     #   三条完整路径属于"要看再取"的细节 → 交给 artifact（tryrun.tsv）+ run 日志。
     #   条目数只作为一行 kv 呈现，不做树形清单。
+    if [ "$TRYRUN_RECHECK_TOTAL" -gt 0 ]; then
+      # 直读复核对"备份缺失"这个结论本身定性: 翻案多 ⇒ 列列举不可信，缺失数是虚高
+      tg_add_kv msg "直读复核" "${TRYRUN_RECHECK_TOTAL} 条中翻案 ${TRYRUN_RECHECK_FLIPPED} 条"
+    fi
     if [ "$TRYRUN_MISSING" -gt 0 ]; then
       # 缺失清单同样限量（8 条）—— 它才是真跑会 FAIL 的部分，但 777 条全列依旧会爆
       tg_add_section msg "⚠️ 备份缺失 · ${TRYRUN_MISSING}"
