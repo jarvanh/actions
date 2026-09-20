@@ -283,6 +283,28 @@ TRYRUN_SEND_TG=0 TRYRUN_WORK="$OUT4" restore_try_run task0 > "$OUT4/stdout.txt" 
 grep -qF "task0_test.json" "$OUT4/tryrun.tsv" && ok "9a 命中指定任务" || bad "9a 命中指定任务"
 grep -qF "task1_other.json" "$OUT4/tryrun.tsv" && bad "9b 过滤掉了其他任务" || ok "9b 过滤掉其他任务"
 
+echo "=== 场景10: 通知体量（不得把整份条目清单塞进 Telegram）==="
+# run 35478771033 实测: 4684 条全量入通知 ⇒ 97 个分片，Telegram 限速下光发送 5 分钟，
+# 把整轮拖过 40 分钟 timeout 被取消（预演本身已跑完，死在发通知上）。
+# 通知只发摘要 + 限量缺失清单；三条完整路径交给 artifact。
+TG_CAPTURE=""
+send_telegram_message() { TG_CAPTURE="$1"; }
+# 收尾区的运行日志链接依赖 TG_RUN_URL（生产由 workflow job env 注入）
+TG_RUN_URL="https://github.com/jarvanh/actions/actions/runs/35478771033"
+export TG_RUN_URL
+# 造 300 条（含缺失），走核对模式
+TRYRUN_SEND_TG=1 TRYRUN_WORK="$BIG" restore_try_run task0 > "$BIG/stdout.txt" 2>&1
+MSG_LEN=${#TG_CAPTURE}
+[ "$MSG_LEN" -lt 4000 ] && ok "10a 通知单条不分片（${MSG_LEN} 字符 < 4000）" \
+  || bad "10a 通知单条不分片（${MSG_LEN} 字符 ≥ 4000 ⇒ 会分片拖垮整轮）"
+printf '%s' "$TG_CAPTURE" | grep -q "备份缺失" && ok "10b 摘要含备份缺失计数" || bad "10b 摘要含备份缺失计数"
+printf '%s' "$TG_CAPTURE" | grep -q "备份在" && ok "10c 摘要含备份在计数" || bad "10c 摘要含备份在计数"
+printf '%s' "$TG_CAPTURE" | grep -q "运行日志" && ok "10d 收尾区完整" || bad "10d 收尾区完整"
+# 条目数只作为 kv 呈现，不得出现逐条树形清单
+ENTRY_LINES=$(printf '%s' "$TG_CAPTURE" | grep -cE '^├─|^└─' || true)
+[ "$ENTRY_LINES" -le 10 ] && ok "10e 未逐条列条目（树形行 ${ENTRY_LINES} ≤ 10）" \
+  || bad "10e 未逐条列条目（树形行 ${ENTRY_LINES} > 10 ⇒ 会分片）"
+
 echo
 echo "===== 结果: PASS=$PASS FAIL=$FAIL ====="
 [ "$FAIL" -eq 0 ]
