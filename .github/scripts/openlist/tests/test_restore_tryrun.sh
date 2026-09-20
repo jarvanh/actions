@@ -57,7 +57,11 @@ rclone() {
       ;;
     cat)  cat "$2" ;;
     size) echo '{"bytes":1}' ;;
-    lsjson) echo '[{"Hashes":{"MD5":""}}]' ;;
+    # 直读判据（_tryr_stat_exists 用）: 按**全路径 stat** 的返回码判定。
+    # 不能恒返回 0 —— 那会把"真缺失"也翻案成存在，掩盖场景 7 要验证的行为。
+    lsjson)
+      [ -f "$DST/${2#openlist:wopan176Crypt/0/}" ] \
+        && { echo '[{"Hashes":{"MD5":""}}]'; return 0; } || return 1 ;;
     *)
       # ⚠️ 写命令: 记账（测试据此断言"零写入"），并返回非 0
       WRITE_CALLS+="$1"$'\n'
@@ -214,6 +218,10 @@ rclone() {
       esac ;;
     cat) cat "$2" ;;
     size) echo '{"bytes":1}' ;;
+    lsjson)
+      # 直读判据: 同基础 mock（全路径 stat）；此处文件都在，故恒 rc=0
+      [ -f "$DST/${2#openlist:wopan176Crypt/0/}" ] \
+        && { echo '[{"Hashes":{"MD5":""}}]'; return 0; } || return 1 ;;
     *) WRITE_CALLS+="$1"$'\n'; return 1 ;;
   esac
   return 0
@@ -304,6 +312,75 @@ printf '%s' "$TG_CAPTURE" | grep -q "运行日志" && ok "10d 收尾区完整" |
 ENTRY_LINES=$(printf '%s' "$TG_CAPTURE" | grep -cE '^├─|^└─' || true)
 [ "$ENTRY_LINES" -le 10 ] && ok "10e 未逐条列条目（树形行 ${ENTRY_LINES} ≤ 10）" \
   || bad "10e 未逐条列条目（树形行 ${ENTRY_LINES} > 10 ⇒ 会分片）"
+
+echo "=== 场景11: ⚠️ 直读复核（列列举判缺 → 必须再直读一次，分歧以直读为准）==="
+# 为什么必须有这一层（§0 2026-09-18 教训 + run 35482750267 的 777 条缺失）:
+#   只以"目录清单里有没有"判"文件在不在"，会把**成功判成失败** —— 清单取空/被限流/
+#   缓存滞后时，整个目录下的条目**一起**变缺失，且加等待也未必够（实测等 15s 仍不可见）。
+#   形状证据: 那轮 167 个缺失目录里 **0 个**是"同目录既存在又缺失"，全是整目录缺失
+#   ⇒ 指向清单取空，而非个别文件真丢。故"缺失"必须经 lsjson 全路径 stat 复核才敢下结论。
+# 本场景造出两种分歧:
+#   · A: 列列举取空（lsf 返回空）但文件**实际存在**（lsjson rc=0）⇒ 必须翻案为"存在"
+#   · B: 列列举取空且文件**真的不在**（lsjson rc≠0）⇒ 保持"缺失"
+OUT6="$WORK/out6"; mkdir -p "$OUT6"
+mkdir -p "$DST/ghost" "$DST/real"
+printf 'G' > "$DST/ghost/g.mp4"    # A: 真实存在，但 lsf 列举取空
+# B: real/ 下**不建**文件 ⇒ 两判据都判缺
+# 计数桩: 记录 lsjson 被调用了几次、对谁调用
+LSJSON_LOG="$WORK/lsjson.log"; : > "$LSJSON_LOG"
+rclone() {
+  if [ "$1" = "lsjson" ]; then printf '%s\n' "$2" >> "$LSJSON_LOG"; fi
+  case "$1" in
+    lsf)
+      local p="$2"
+      # 关键: ghost 目录**列举取空**（模拟清单滞后/限流），但文件其实在
+      case "$p" in
+        */ghost) return 0 ;;
+        openlist:wopan176Crypt/0) (cd "$DST" && ls) ;;
+        openlist:*) (cd "$DST/${p#openlist:wopan176Crypt/0/}" 2>/dev/null && ls) ;;
+        *) (cd "$p" 2>/dev/null && ls) ;;
+      esac ;;
+    lsjson)
+      # 直读: 按全路径 stat。ghost 的文件**在**（rc=0），real 的文件**不在**（rc=1）
+      case "$2" in
+        */ghost/g.mp4) return 0 ;;
+        *) [ -f "$DST/${2#openlist:wopan176Crypt/0/}" ] && return 0 || return 1 ;;
+      esac ;;
+    cat) cat "$2" ;;
+    size) echo '{"bytes":1}' ;;
+    *) WRITE_CALLS+="$1"$'\n'; return 1 ;;
+  esac
+  return 0
+}
+export -f rclone
+printf '{"dest_path":"openlist:wopan176Crypt/0","source_path":"onedrive:0","fixed_files":[' > "$STATE/task2_ghost.json"
+printf '{"original":"a/g.mp4","alternative":"ghost/g.mp4","method":"m1","md5":""},' >> "$STATE/task2_ghost.json"
+printf '{"original":"a/r.mp4","alternative":"real/r.mp4","method":"m1","md5":""}' >> "$STATE/task2_ghost.json"
+printf ']}' >> "$STATE/task2_ghost.json"
+TRYRUN_SEND_TG=0 TRYRUN_WORK="$OUT6" restore_try_run task2 > "$OUT6/stdout.txt" 2>&1
+# A: 列列举判缺 → 直读翻案
+grep -qF "存在（直读复核翻案）" "$OUT6/tryrun.tsv" \
+  && ok "11a 列列举判缺但直读判定在 ⇒ 翻案为存在" || bad "11a 应翻案为存在"
+# B: 两判据都缺 ⇒ 保持缺失
+MISS_ROWS=$(awk -F'\t' '$8=="缺失"' "$OUT6/tryrun.tsv" | grep -c 'real/r.mp4' || true)
+[ "$MISS_ROWS" = "1" ] && ok "11b 直读也判不在 ⇒ 保持缺失" || bad "11b 应保持缺失（实际 ${MISS_ROWS} 行）"
+# 只复核判缺失的（判"存在"无假阴性风险），不得对全量条目打 lsjson
+LSJSON_N=$(grep -c . "$LSJSON_LOG")
+[ "$LSJSON_N" = "2" ] && ok "11c 只直读复核判缺失的 2 条（未对全量打 stat，实际 ${LSJSON_N}）" \
+  || bad "11c 只复核判缺失的（实际 ${LSJSON_N} 次 lsjson）"
+# 翻案后统计口径必须跟着变: 翻案的那条算"存在"，且**不**计入缺失
+PRESENT_N=$(awk -F'\t' '$8 ~ /^存在/' "$OUT6/tryrun.tsv" | wc -l | tr -d ' ')
+[ "$PRESENT_N" = "1" ] && ok "11d 翻案计入存在、不计入缺失（存在 ${PRESENT_N} 条）" \
+  || bad "11d 翻案后统计口径（存在 ${PRESENT_N} 条，应为 1）"
+grep -qF "🔍 直读复核" "$OUT6/tryrun.log" && ok "11e 报告含直读复核段" || bad "11e 报告含直读复核段"
+# 直读判据必须是 lsjson（全路径 stat），不能退化成 lsf 列列举
+if sed -n '/^_tryr_stat_exists()/,/^}/p' "$REPO_ROOT/.github/scripts/openlist/restore_tryrun.sh" \
+   | grep -qE 'lsjson'; then
+  ok "11f 复核判据是 lsjson 直读（非列列举）"
+else
+  bad "11f 复核判据必须是 lsjson 直读"
+fi
+rm -f "$STATE/task2_ghost.json"
 
 echo
 echo "===== 结果: PASS=$PASS FAIL=$FAIL ====="
