@@ -1552,6 +1552,7 @@ jobs:
             GLM_WILL_NOTIFY=1
           fi
           GLM_PROBE_JSON="$GLM_RUN_DIR/upstream-probe.json"
+          GLM_PROBE_TITLE=""
           GLM_PROBE_TEXT=""
           if [ "$GLM_WILL_NOTIFY" = "1" ] && [ -f "$GLM_DIR/probe.mjs" ] && [ -f "$GLM_DIR/render-probe.py" ]; then
             echo "Probing upstream endpoints (this takes a few minutes)..."
@@ -1565,8 +1566,13 @@ jobs:
             PROBE_DEADLINE_MS="${GLM_PROBE_DEADLINE_MS:-300000}" \
               timeout 420 bash "$GLM_DIR/glm-proxy.sh" probe "$GLM_PROBE_JSON" 2>&1 | tail -n 5 || true
             if [ -s "$GLM_PROBE_JSON" ]; then
-              GLM_PROBE_TEXT="$(python3 "$GLM_DIR/render-probe.py" "$GLM_PROBE_JSON" 2>/dev/null || true)"
-              printf '%s\n' "$GLM_PROBE_TEXT"
+              # render-probe.py 输出两段：第 1 行 = 分节标题（含条目计数），其余 = 正文。
+              # 计数这类渲染细节由脚本决定，这里不再解析 JSON（与 wb_notify 的
+              # 「分节标题自带 · N」同口径，只是计数在渲染侧算）。
+              GLM_PROBE_ALL="$(python3 "$GLM_DIR/render-probe.py" "$GLM_PROBE_JSON" 2>/dev/null || true)"
+              GLM_PROBE_TITLE="$(printf '%s\n' "$GLM_PROBE_ALL" | head -n 1)"
+              GLM_PROBE_TEXT="$(printf '%s\n' "$GLM_PROBE_ALL" | tail -n +2)"
+              printf '%s\n' "$GLM_PROBE_ALL"
             else
               echo "⚠️ [glm-proxy] 未产出探测报告，通知里将省略上游端点一节"
             fi
@@ -1578,6 +1584,8 @@ jobs:
             echo "--- glm-proxy.log tail ---"
             printf '%s\n' "${GLM_TAIL:-<empty>}"
             echo "--- end glm-proxy.log tail ---"
+            # 版式对齐 wb_notify 的失败态分支：结论/端口/原因 → 探测分节 → 原始输出 → 收尾。
+            # 失败时不给「接口 / 鉴权 / 模型」三行 —— 服务不在，展示指向已停进程的地址会误导。
             _m=""
             tg_add_title _m "❌ glm-proxy 启动失败"
             tg_add_kv _m "结论" "未就绪 · 退出码 1"
@@ -1585,36 +1593,36 @@ jobs:
             tg_add_kv _m "原因" "$GLM_REASON"
             tg_add_path _m "代码目录" "$GLM_DIR"
             if [ -n "$GLM_PROBE_TEXT" ]; then
-              tg_add_section _m "🌐 上游端点探测"
-              tg_add_block _m "<pre>$(escape_html "$GLM_PROBE_TEXT")</pre>"
+              tg_add_section _m "$GLM_PROBE_TITLE"
+              tg_add_block _m "$GLM_PROBE_TEXT"
             fi
             if [ -n "$GLM_TAIL" ]; then
-              tg_add_note _m "日志尾部"
-              tg_add_block _m "<pre>$(escape_html "$GLM_TAIL")</pre>"
+              tg_add_section _m "🧾 原始输出"
+              tg_add_pre _m "$GLM_TAIL"
             fi
             tg_add_footer _m
-            send_tg "$_m"
+            send_tg "$_m" || echo "::warning::TG 通知发送失败（不影响任务）"
           else
             echo "✅ [glm-proxy] ${GLM_PORT} 已就绪（${GLM_REASON}）"
             printf '%s\n' "${GITHUB_RUN_ID:-manual}" > "$GLM_RUN_TAG_FILE"
             if [ "$GLM_RELAUNCH" = "1" ]; then
               echo "ℹ️ [glm-proxy] 接力轮（上一 run ${GLM_PREV_TAG} 已启动），跳过重复的就绪通知"
             else
-              # 版式对齐 wb_notify 的就绪态分支：补「接口 / 鉴权 / 模型」三行
+              # 版式对齐 wb_notify 的就绪态分支：结论 → 接口/鉴权/模型 → 探测分节 → 代码目录。
+              # 「模型」是机器值（模型名），按规范 · 取值行口径走 <code>。
               _m=""
               tg_add_title _m "🟢 glm-proxy 已就绪"
               tg_add_kv _m "结论" "$GLM_REASON"
               tg_add_path _m "接口" "http://127.0.0.1:${GLM_PORT}/v1"
               tg_add_kv _m "鉴权" "需 API Key（与 workbuddy-gateway 同值）"
-              # 「模型」行报自检实际用上的模型；探测报告里另有完整可用清单
-              tg_add_kv _m "模型" "${GLM_SELFTEST_MODEL:-未知}"
-              tg_add_path _m "代码目录" "$GLM_DIR"
+              [ -n "${GLM_SELFTEST_MODEL:-}" ] && tg_add_path _m "模型" "$GLM_SELFTEST_MODEL"
               if [ -n "$GLM_PROBE_TEXT" ]; then
-                tg_add_section _m "🌐 上游端点探测"
-                tg_add_block _m "<pre>$(escape_html "$GLM_PROBE_TEXT")</pre>"
+                tg_add_section _m "$GLM_PROBE_TITLE"
+                tg_add_block _m "$GLM_PROBE_TEXT"
               fi
+              tg_add_path _m "代码目录" "$GLM_DIR"
               tg_add_footer _m
-              send_tg "$_m"
+              send_tg "$_m" || echo "::warning::TG 通知发送失败（不影响任务）"
             fi
           fi
 
