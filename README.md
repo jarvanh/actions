@@ -82,7 +82,7 @@ proxy-speedtest/            测速结果数据
 | | `file_fix.sh` | 1705 | 单文件修复的 4 种方法 + 目录可写性三态预检 + 短哈希目录兜底 |
 | | `file_fix_pipeline.sh` | 1395 | 修复管线编排（方法轮换 + 增量持久化） |
 | | `file_restore.sh` | 655 | 修复文件还原（目标端 → 原路径 / 源端） |
-| | `restore_tryrun.sh` | 562 | 一键还原 **try run**（只读预演：三条完整路径推导 + 只读白名单护栏 + 时间窗 `within_days` / 绝对下界 `since`；`restore_try_run`） |
+| | `restore_tryrun.sh` | 597 | 一键还原 **try run**（只读预演：三条完整路径推导 + 只读白名单护栏 + 时间窗 `within_days` / 绝对下界 `since` + 双直读复核；`restore_try_run`） |
 | **task** | `task_preview.sh` | 526 | 任务预览（大小估算、跳过预判、未传量估算） |
 | | `task_engine.sh` | 2284 | 任务注册表与编排（分批、轮转、阶段行生产） |
 | **基础** | `utils.sh` | 152 | 通用工具（格式化、日志判定；转义/树形渲染已收敛到 `telegram/tg_notify.sh`） |
@@ -362,9 +362,13 @@ workflow 的 `run_mode` 单选互斥：
 | ③ 实际执行还原的完整路径 | move 类 = `rclone moveto` 的 dst（= ②）；分卷类 = 本地合卷解压产物 `copyto` 的 dst（= ②）；`alt==orig` 记为 noop（只校验存在，不搬） |
 | ④ 源端原路径（灾难恢复口径） | `<source_path>/<original>` |
 
-另核对「备份文件在不在 / 原路径是否已存在」。零写入是**结构性**保证：预演模块所有远端
-调用走只读白名单（只放行 `ls/lsd/lsf/lsl/lsjson/cat/size/version`），写子命令一律拒绝执行
-（`test_restore_tryrun.sh` 场景 4/5 锁住）。入参 `check_exists=否` 时只做 marker 推导、
+另核对「备份文件在不在 / 原路径是否已存在」。**两个"在不在"都各走两条判据**：列列举
+（目录清单缓存）为初判，判"缺/不在"时再逐条 `lsjson` **直读**复核，分歧以直读为准
+（OpenList 对新建目录/文件有列表缓存延迟，§0：只靠列表会把成功判成失败）。报告分两行记
+「直读复核」与「直读复核（原路径）」各自的翻案数 —— 混成一个数就分不清是哪一侧的列表
+不可信（`test_restore_tryrun.sh` 场景 11 / 16 锁住）。零写入是**结构性**保证：预演模块所有
+远端调用走只读白名单（只放行 `ls/lsd/lsf/lsl/lsjson/cat/size/version`），写子命令一律拒绝
+执行（`test_restore_tryrun.sh` 场景 4/5 锁住）。入参 `check_exists=否` 时只做 marker 推导、
 不拉起容器（秒级），三条路径照样准确，仅存在性显示「未核对」——**不会**把"没起容器"
 误报成"备份丢了"。
 

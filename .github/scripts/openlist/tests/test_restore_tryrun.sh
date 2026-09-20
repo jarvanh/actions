@@ -399,10 +399,20 @@ grep -qF "存在（直读复核翻案）" "$OUT6/tryrun.tsv" \
 # B: 两判据都缺 ⇒ 保持缺失
 MISS_ROWS=$(awk -F'\t' '$8=="缺失"' "$OUT6/tryrun.tsv" | grep -c 'real/r.mp4' || true)
 [ "$MISS_ROWS" = "1" ] && ok "11b 直读也判不在 ⇒ 保持缺失" || bad "11b 应保持缺失（实际 ${MISS_ROWS} 行）"
-# 只复核判缺失的（判"存在"无假阴性风险），不得对全量条目打 lsjson
+# 只复核判缺失/判不存在的（判"存在"无假阴性风险），不得对全量条目打 lsjson。
+# ⚠️ 2026-09-20 起**两侧都要复核**（备份 + 原路径）⇒ 2 条 × 2 侧 = 4 次。
+#   早先只复核备份侧 ⇒ 原路径侧纯靠列列举，与 fix-check 的递归列举同刻互相矛盾
+#   （run 35502528927）。改断言时不要只把 2 改成 4 —— 要按侧分开数，否则
+#   "某一侧被悄悄去掉复核"不会红。
 LSJSON_N=$(grep -c . "$LSJSON_LOG")
-[ "$LSJSON_N" = "2" ] && ok "11c 只直读复核判缺失的 2 条（未对全量打 stat，实际 ${LSJSON_N}）" \
-  || bad "11c 只复核判缺失的（实际 ${LSJSON_N} 次 lsjson）"
+[ "$LSJSON_N" = "4" ] && ok "11c 只复核判缺/判不在的 2 条 × 2 侧（未对全量打 stat，实际 ${LSJSON_N}）" \
+  || bad "11c 只复核判缺/判不在的（实际 ${LSJSON_N} 次 lsjson，应为 4）"
+LSJSON_BAK=$(grep -c '/ghost/g.mp4\|/real/r.mp4' "$LSJSON_LOG")
+LSJSON_ORIG=$(grep -c '/a/g.mp4\|/a/r.mp4' "$LSJSON_LOG")
+[ "$LSJSON_BAK" = "2" ] && ok "11c2 备份侧复核 2 次（${LSJSON_BAK}）" \
+  || bad "11c2 备份侧应复核 2 次（实际 ${LSJSON_BAK}）"
+[ "$LSJSON_ORIG" = "2" ] && ok "11c3 原路径侧复核 2 次（${LSJSON_ORIG}）" \
+  || bad "11c3 原路径侧应复核 2 次（实际 ${LSJSON_ORIG}）"
 # 翻案后统计口径必须跟着变: 翻案的那条算"存在"，且**不**计入缺失
 PRESENT_N=$(awk -F'\t' '$8 ~ /^存在/' "$OUT6/tryrun.tsv" | wc -l | tr -d ' ')
 [ "$PRESENT_N" = "1" ] && ok "11d 翻案计入存在、不计入缺失（存在 ${PRESENT_N} 条）" \
@@ -592,6 +602,63 @@ else
   bad "15i 通知应含绝对下界 kv（消息体里没有）"
 fi
 rm -f "$STATE"/task9_*.json
+
+echo "=== 场景16: 「原路径不存在」也必须直读复核（2026-09-20，run 35502528927 驱动）==="
+# 为什么补这一层: 此前**只有备份侧**有直读复核，原路径侧仍纯靠列列举 ⇒ 与 fix-check 的
+#   递归列举同刻互相矛盾（fix-check 说 529/529 都在，try run 说原路径不存在）。
+#   两边都是"列表"，列表有缓存延迟（§0: 新建首次可见 ~10s，等 15s 仍可能不可见）
+#   ⇒ 不一致时必须有**非列表**判据才能定案。而"原路径"是**真跑的落点**，
+#   判错会导致"该还原的被判成不用还原"，风险不比备份侧低。
+# 本场景: 列列举把「蓝白碗」列空（清单滞后），但直读 stat 说文件在 ⇒ 必须翻案。
+eval "$RCLONE_BASE_FN"; export -f rclone
+OUT16="$WORK/out16"; mkdir -p "$OUT16"
+mkdir -p "$DST/6c73a635" "$DST/蓝白碗" "$DST/plain"
+printf 'B1' > "$DST/6c73a635/x.jpg"
+printf 'B2' > "$DST/6c73a635/y.jpg"
+rclone() {
+  case "$1" in
+    lsf)
+      local p="$2"
+      case "$p" in
+        "$STATE") (cd "$STATE" && ls) ;;   # marker 目录是**本地路径**（不是 openlist: 远端）
+        *蓝白碗) return 0 ;;   # 列列举取空（模拟清单滞后/限流），但文件其实在
+        *) (cd "$DST/${p#openlist:wopan176Crypt/0/}" 2>/dev/null && ls) ;;
+      esac ;;
+    lsjson)
+      case "$2" in
+        */蓝白碗/x.jpg) return 0 ;;   # 直读: 在
+        *) [ -f "$DST/${2#openlist:wopan176Crypt/0/}" ] && return 0 || return 1 ;;
+      esac ;;
+    cat) cat "$2" ;;
+    size) echo '{"bytes":1}' ;;
+    *) WRITE_CALLS+="$1"$'\n'; return 1 ;;
+  esac
+  return 0
+}
+export -f rclone
+printf '{"dest_path":"openlist:wopan176Crypt/0","source_path":"onedrive:0","fixed_files":[' > "$STATE/task16_orig.json"
+printf '{"original":"蓝白碗/x.jpg","alternative":"6c73a635/x.jpg","method":"m1","md5":""},' >> "$STATE/task16_orig.json"
+printf '{"original":"plain/y.jpg","alternative":"6c73a635/y.jpg","method":"m1","md5":""}' >> "$STATE/task16_orig.json"
+printf ']}' >> "$STATE/task16_orig.json"
+TRYRUN_SEND_TG=0 TRYRUN_WORK="$OUT16" restore_try_run task16 > "$OUT16/stdout.txt" 2>&1
+# A: 列列举判原路径不存在 → 直读判定在 ⇒ 必须翻案
+FLIP_N=$(awk -F'\t' '$9 ~ /^已存在（直读复核翻案）$/' "$OUT16/tryrun.tsv" | grep -c '蓝白碗/x.jpg' || true)
+[ "$FLIP_N" = "1" ] && ok "16a 原路径列列举判不在·直读判定在 ⇒ 翻案为已存在" \
+  || bad "16a 原路径应翻案为已存在（实际 ${FLIP_N} 行）"
+# B: 两判据都不在 ⇒ 保持不存在（对照组，防"一律翻案"）
+KEEP_N=$(awk -F'\t' '$9=="不存在"' "$OUT16/tryrun.tsv" | grep -c 'plain/y.jpg' || true)
+[ "$KEEP_N" = "1" ] && ok "16b 直读也判不在 ⇒ 保持不存在（${KEEP_N} 行）" \
+  || bad "16b 应保持不存在（实际 ${KEEP_N} 行）"
+# 翻案必须计入"原路径已存在"统计: 否则翻案了却在汇总里消失
+EXIST_N=$(awk -F'\t' '$9 ~ /^已存在/' "$OUT16/tryrun.tsv" | wc -l | tr -d ' ')
+[ "$EXIST_N" = "1" ] && ok "16c 翻案计入原路径已存在统计（${EXIST_N} 条）" \
+  || bad "16c 翻案应计入原路径已存在（实际 ${EXIST_N} 条）"
+grep -qF "直读复核（原路径）" "$OUT16/tryrun.log" && ok "16d 报告含原路径直读复核段" \
+  || bad "16d 报告应含原路径直读复核段"
+grep -qF "翻案 1 条" "$OUT16/tryrun.log" && ok "16e 报告写明原路径翻案数" \
+  || bad "16e 报告应写明原路径翻案数"
+rm -f "$STATE"/task16_orig.json
+eval "$RCLONE_BASE_FN"; export -f rclone
 
 echo
 echo "===== 结果: PASS=$PASS FAIL=$FAIL ====="
