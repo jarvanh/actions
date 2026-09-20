@@ -177,6 +177,34 @@ printf '%s' "$PARENT_FIX" | grep -q 'neko普通/9.jpg' \
   && ok "4b 父 marker 收集到子目录 neko 的修复" \
   || bad "4b 父 marker 丢了 neko 的修复: $PARENT_FIX"
 
+# --- 场景5: ★ 父级条目必须**带子目录前缀**（第二个 bug: 落点错一层）---
+# 真机实证（run 35541800214 归属判据 + 35541982498/35542106950 源端直读）:
+#   父 marker backup_19fd8feb 记 `live/odlink-dir-cache.json` ⇒ 源端直读**不在**；
+#   同一条在子 marker backup_emby_92641159 里 ⇒ 源端直读**在**。
+#   原因: 子任务跑的是 src/emby，它写的 original 相对**子任务根**；父 marker 的
+#   根是 dst（不含子目录），照抄 ⇒ 落点少一层 —— 这正是 Q3 的失败形态，
+#   且比串写更隐蔽（不报错，只是把文件搬到源端根本没有的位置）。
+# 判据（两条都要）:
+#   ① 父条目 = <子目录>/<子任务里的 original>（重定基）
+#   ② 父条目**不得**出现不带前缀的裸 original（漏加前缀即这一条）
+printf '%s' "$PARENT_FIX" | grep -q 'wangyi/蓝白碗/1.jpg' \
+  && ok "5a 父 marker 的条目带子目录前缀（wangyi/蓝白碗/1.jpg）" \
+  || bad "5a 落点错一层: 父条目应为 wangyi/蓝白碗/1.jpg，实际: $PARENT_FIX"
+printf '%s' "$PARENT_FIX" | grep -q 'neko/neko普通/9.jpg' \
+  && ok "5b 父 marker 的条目带子目录前缀（neko/neko普通/9.jpg）" \
+  || bad "5b 落点错一层: 父条目应为 neko/neko普通/9.jpg，实际: $PARENT_FIX"
+# ② 裸 original 检测: 用 jq 精确取 original，避免 grep 子串误命中
+#    （"neko/neko普通/9.jpg" 里也含 "neko普通/9.jpg" ⇒ grep 查不出漏加前缀）
+BARE=$(printf '%s' "$PARENT_FIX" | jq -r '[.[] | .original] | map(select(test("^(蓝白碗|neko普通)/"))) | length' 2>/dev/null)
+[ "$BARE" = "0" ] && ok "5c 父 marker 不含未加前缀的裸 original（jq 精确判，非子串）" \
+  || bad "5c 仍有 ${BARE} 条裸 original（落点会错一层）: $PARENT_FIX"
+# 子 marker **不得**被加前缀 —— 它自己的根就是子目录，加了就错两层
+printf '%s' "$WANGYI_FIX" | grep -q '蓝白碗/1.jpg' \
+  && ok "5d 子 marker 自己的条目保持相对子任务根（不得加前缀）" \
+  || bad "5d 子 marker 条目被误加前缀: $WANGYI_FIX"
+printf '%s' "$WANGYI_FIX" | grep -q 'wangyi/蓝白碗/1.jpg' \
+  && bad "5e 子 marker 被加了前缀（错两层）" || ok "5e 子 marker 未被加前缀"
+
 echo
 echo "===== 结果: PASS=$PASS FAIL=$FAIL ====="
 [ "$FAIL" -eq 0 ]

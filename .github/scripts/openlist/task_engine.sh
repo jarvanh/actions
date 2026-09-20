@@ -778,6 +778,32 @@ _sync_task_finalize() {
   return "$_rc"
 }
 
+# ===== 子目录修复条目 → 父级重定基（串行/并行两条路径共用）=====
+# 为什么必须做: 子目录任务跑的是 `${source_path}/${subdir}`，它写进 marker 的
+#   original/alternative **相对该子任务根**；而父 marker 的根是 `${dest_path}`
+#   （不含子目录）。直接把子目录条目并进父级 ⇒ 落点**少一层子目录**:
+#     子 marker 还原到 <dest>/emby/live/x.json（源端直读: **在**）
+#     父 marker 还原到 <dest>/live/x.json      （源端直读: **不在**）
+#   真机实证（run 35541800214 归属判据 + 35541982498/35542106950 源端直读）:
+#     父 marker backup_19fd8feb 的 live/odlink-dir-cache.json 源端"不在"，
+#     而同一条在子 marker backup_emby_92641159 里源端"在"。
+#   这正是 Q3「落点错一层」，且比串写更隐蔽 —— 它不报错，只是把文件搬到
+#   源端根本没有的位置上（串写至少还指向一个真实存在的文件）。
+# 为什么抽成函数: 串行（_sync_task_impl 子目录循环）与并行（_sync_par_consume）
+#   两条路径都要做同一件事；抄两份必然漂移，而漂移的结果就是"某条路径漏加前缀"。
+# 入参: <fixed_files JSON 数组> <子目录名>
+# 出参: stdout = 已补前缀的数组；jq 失败时输出 "[]"（宁可**丢记录**，也不产出
+#   落点错误的记录 —— 落点错会搬错文件，丢记录只是少还原一条，后者可修复）
+_prefix_fixed_entries() {
+  local cur="$1" sub="$2"
+  [ -z "$sub" ] && { printf '%s' "$cur"; return 0; }
+  jq -scn --argjson cur "$cur" --arg sub "$sub" \
+    '$cur | map(.original = ($sub + "/" + .original)
+              | .alternative = ($sub + "/" + .alternative)
+              | .restore_hint = (.restore_hint // ""))' 2>/dev/null \
+    || printf '[]'
+}
+
 # ===== 并行子目录同步（可选: OPENLIST_SUBDIR_PARALLEL>=2 且 depth=0 启用）=====
 # 设计（与串行路径语义对齐，默认关闭 = 行为不变）:
 #   - worker = 子 shell 跑 _sync_task_impl（递归深度+1，内部仍串行），结果经
@@ -842,8 +868,17 @@ _sync_par_consume() {
   esac
   # 修复累计器合并: fixed_files 是数组（拼接），fix_blacklist 是对象
   # （方法级失败记忆，用 _marker_merge_json 与 save_sync_marker 同口径合并）
+  # ⚠️ **必须补子目录前缀**（2026-09-20 第二个 bug，与串行路径同因）:
+  #   worker 跑的是 `${source_path}/${_subdir}`，它写进 marker 的 original
+  #   **相对该子任务根**；父 marker 的根不含子目录，照抄 ⇒ 落点少一层
+  #   （子 marker: <dest>/emby/live/x.json — 源端在；父 marker: <dest>/live/x.json — 源端不在）。
+  #   这正是 Q3「落点错一层」，且比串写更隐蔽: 它不报错，只是搬到源端根本没有的位置。
+  #   判定与改写都走 _prefix_fixed_entries（与串行路径同一函数，口径不会漂）。
   _fj=$(printf '%s' "$_fb" | base64 -d 2>/dev/null || echo "")
   _bj=$(printf '%s' "$_bb" | base64 -d 2>/dev/null || echo "")
+  if [ -n "$_fj" ] && [ "$_fj" != "[]" ] && [ -n "$_subdir" ]; then
+    _fj=$(_prefix_fixed_entries "$_fj" "$_subdir") || _fj=""
+  fi
   if [ -n "$_fj" ] && [ "$_fj" != "[]" ]; then
     GLOBAL_FIXED_FILES_JSON=$(printf '%s\n%s' "${GLOBAL_FIXED_FILES_JSON:-[]}" "$_fj" | jq -sc 'add' 2>/dev/null) \
       || GLOBAL_FIXED_FILES_JSON="${GLOBAL_FIXED_FILES_JSON:-[]}"
@@ -1293,8 +1328,15 @@ _sync_task_impl() {
     #   合并用 unique_by(.original) 去重，与 _sync_accumulate_fixed_results
     #   同口径；jq 失败时**保留父级已有值**（宁可漏合并，不可清空）。
     if [ -n "${GLOBAL_FIXED_FILES_JSON:-}" ] && [ "$GLOBAL_FIXED_FILES_JSON" != "[]" ]; then
-      _PAR_FIXED_ACC=$(jq -scn --argjson acc "${_PAR_FIXED_ACC:-[]}" --argjson cur "$GLOBAL_FIXED_FILES_JSON" \
-        '($acc + $cur) | unique_by(.original)' 2>/dev/null || echo "${_PAR_FIXED_ACC:-[]}")
+      # ★ 补子目录前缀: 子任务的 original 相对**子任务根**，父 marker 的根不含
+      #   子目录，照抄 ⇒ 落点少一层（Q3「落点错一层」，详见 _prefix_fixed_entries）。
+      #   改写只作用于本层收回来的条目，父级自己的条目本就相对父根，不受影响。
+      local _rebased
+      _rebased=$(_prefix_fixed_entries "$GLOBAL_FIXED_FILES_JSON" "$subdir")
+      if [ -n "$_rebased" ] && [ "$_rebased" != "[]" ]; then
+        _PAR_FIXED_ACC=$(jq -scn --argjson acc "${_PAR_FIXED_ACC:-[]}" --argjson cur "$_rebased" \
+          '($acc + $cur) | unique_by(.original)' 2>/dev/null || echo "${_PAR_FIXED_ACC:-[]}")
+      fi
     fi
     GLOBAL_FIXED_FILES_JSON="[]"
     # 子任务已收尾: 清掉它那一层（及更深）的阶段行/统计/细粒度状态。
