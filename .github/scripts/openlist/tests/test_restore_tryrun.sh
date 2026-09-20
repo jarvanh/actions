@@ -939,6 +939,16 @@ grep -qF "蓝白碗/6608451911027290782.jpg" "$D20" && ok "20f dump 出前几条
   || bad "20f 应 dump original"
 grep -qF "fixed_files 实际条数: 2" "$D20" && ok "20g fixed_files 实际条数按原文字段算" \
   || bad "20g 应给 fixed_files 实际条数"
+# ★ 判决性一项: 源端直读 —— 拿 marker 自记的 source_path 直读 <source_path>/<original>。
+#   它是"这批在源端到底有没有"的直接证据（top_dirs 只是写盘那一刻的快照）。
+grep -qF "源端直读" "$D20" && ok "20j 探针含源端直读（直接证据，不只靠 top_dirs 快照）" \
+  || bad "20j 应含源端直读"
+# 沙箱里 onedrive: 源端不可读 ⇒ 必须标"未核对"，**绝不谎报"不在"**
+# （这条比"报不在"更要紧: 谎报"源端没有"正是 Q3 结论本身，谎报不得）
+grep -qF "不可读 ⇒ 未核对" "$D20" && ok "20k 源端不可读 ⇒ 标未核对，不谎报不在" \
+  || bad "20k 源端不可读时应标未核对（日志: $(grep -A2 源端直读 "$D20" | head -3)）"
+! grep -qF "     - 不在 " "$D20" && ok "20l 源端不可读时不得出现「不在」结论" \
+  || bad "20l 源端不可读时不得谎报不在"
 [ "$WRITE_CALLS" = "$W20_BEFORE" ] && ok "20h ⚠️ 探针全程只读（零写入）" \
   || bad "20h 探针不得有任何写调用（新增: $(printf '%s' "$WRITE_CALLS" | grep -vFx -f <(printf '%s' "$W20_BEFORE"))）"
 # 反向: 关键字打不中时必须说"没命中"，而不是静默空输出（§0: 静默失败 ⇒ 错误结论）

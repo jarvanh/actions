@@ -232,6 +232,29 @@ _tryr_dump_marker() {
     printf '%s' "$json" | jq -r '(.fixed_files // [])[0:3][] | "     - " + (.original // "")' 2>/dev/null
     printf '  顶层目录 top_dirs: %s\n' \
       "$(printf '%s' "$json" | jq -r '(.top_dirs // []) | join(" / ")' 2>/dev/null)"
+    # ★ 源端直读（本探针的**判决性**一项）: 拿 marker 自记的 source_path 去直读
+    #   <source_path>/<original>。这是"这批文件在源端到底有没有"的**直接证据** ——
+    #   top_dirs 只是写盘那一刻的快照，而直读是此刻的真值；两者都不支持时才
+    #   能说"源端确实没有"。不可读 ⇒ 标"未核对"，绝不谎报"不在"。
+    local sp
+    sp=$(printf '%s' "$json" | jq -r '.source_path // empty' 2>/dev/null)
+    if [ -n "$sp" ]; then
+      printf '  源端直读 <source_path>/<original>（判这批在源端到底有没有）:\n'
+      if ! _tryr_src_readable "$sp"; then
+        printf '     - 源端 %s 不可读 ⇒ 未核对（不能据此判"没有"）\n' "$sp"
+      else
+        local o1 p1
+        while IFS= read -r o1; do
+          [ -z "$o1" ] && continue
+          p1="${sp}/${o1}"
+          if _tryr_stat_exists "$p1"; then
+            printf '     - 在   %s\n' "$p1"
+          else
+            printf '     - 不在 %s\n' "$p1"
+          fi
+        done < <(printf '%s' "$json" | jq -r '(.fixed_files // [])[0:3][] | (.original // "")' 2>/dev/null)
+      fi
+    fi
     printf '\n'
   done
   [ "$hit" -eq 0 ] && printf '⚠️ 没有 marker 名包含关键字「%s」\n' "$kw"
