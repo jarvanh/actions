@@ -633,7 +633,7 @@ Run ID：<code>12345678</code>
      ✅ 可用·免费：<code>glm-4.7-flash</code> · <code>glm-4-flash-250414</code>
      ❌ 余额不足/无资源包·付费：<code>glm-5.3-flash</code> · <code>glm-5.3</code>
 
-当前为 bridge 模式：/v1/messages 实际走 OpenAI 端点，Anthropic 端点仅作套餐状态参考
+当前为 bridge 模式：优先 OpenAI 端点，失败时自动回退到另一条（两条都在服务）
 上游凭据来源：<code>zcode-credentials</code>
 代码目录：<code>/dropbox/self-hosted/glm-proxy</code>
 
@@ -668,6 +668,10 @@ Run ID：<code>12345678</code>
   完整可用清单在上游端点分节里。
 - **鉴权固定写「需 API Key（与 workbuddy-gateway 同值）」**：`HOST=0.0.0.0` 且设了
   `AI_GATEWAY_API_KEY`，两个网关共用同一把。**不得回显 key 本身**。
+- **结尾那句模式说明反映真实路由**（`当前为 X 模式：优先 A 端点，失败时自动回退到另一条`）：
+  两条端点**都在服务**，首选由 `ANTHROPIC_MODE` 决定，失败（计费/订阅/限流/5xx/网络）时
+  自动换另一条重试一次。回退上线前这条写的是「另一条仅作套餐状态参考」—— 那是当时的实情，
+  现在已不成立，别再照抄。回退关闭时脚本会改说「端点回退已关闭：只用 X 端点」。
 - **失败态不给「接口 / 鉴权 / 模型」三行**：服务已不在，展示指向已停进程的地址会误导。
 - **日志尾部进「🧾 原始输出」的 `<pre>`**（尾部 15 行）：`<pre>` 只给原始输出，
   结构化数据（端点/模型/计费）一律走上面的树形条目 —— 把结构化数据塞进 `<pre>`
