@@ -273,6 +273,22 @@ _tryr_plan_one() {
     fi
     TRYRUN_SRC_CHECKED=$((TRYRUN_SRC_CHECKED + 1))
   fi
+  # ★ 阳性对照（每个 src 只做一次，2026-09-20 run 35511137266 驱动）:
+  #   上一轮 57 条**全判"不在"、零个"在"** —— 全阴性的结果必须自证判据没坏
+  #   （§0 纪律: 判据若恒阴，"不在"就是假的）。故对**备份存在**的条目也抽核一条:
+  #   它若报"不在" ⇒ 直读判据在本远端上失效，本轮所有"不在"结论作废并显式告警。
+  #   只做一次（对照而已，不为每条都付代价），结果记进 TRYRUN_SRC_CTRL_*。
+  if [ "${TRYRUN_CHECK_EXISTS:-1}" = "1" ] && [ -n "$src_full" ] \
+     && [ "$be" = "存在" ] && [ -z "${_TRYR_SRC_CTRL[$src]:-}" ]; then
+    if _tryr_src_readable "$src"; then
+      if _tryr_stat_exists "$src_full"; then
+        _TRYR_SRC_CTRL[$src]="在"; TRYRUN_SRC_CTRL_POS=$((TRYRUN_SRC_CTRL_POS + 1))
+      else
+        _TRYR_SRC_CTRL[$src]="不在"; TRYRUN_SRC_CTRL_NEG=$((TRYRUN_SRC_CTRL_NEG + 1))
+      fi
+      TRYRUN_SRC_CTRL_LIST+="     - ${src} ⇒ 对照判为 **${_TRYR_SRC_CTRL[$src]}**（样本: ${orig}）"$'\n'
+    fi
+  fi
 
   _tryr_log "  [${idx}] ${orig}"
   _tryr_log "      ① 备份文件（目标端现存）      : ${backup}"
@@ -342,9 +358,11 @@ restore_try_run() {
   TRYRUN_UNVERIFIED=0; TRYRUN_UNVERIFIED_DESTS=""
   TRYRUN_MISSING_DIRS=""
   TRYRUN_SRC_CHECKED=0; TRYRUN_SRC_MISSING=0; TRYRUN_SRC_MISSING_LIST=""
+  TRYRUN_SRC_CTRL_POS=0; TRYRUN_SRC_CTRL_NEG=0; TRYRUN_SRC_CTRL_LIST=""
   # 备份缺失目录 → 源端同层目录（供结构探针打两侧形状对照）
   declare -gA _TRYR_SRC_OF_MDIR=()
   _TRYR_SRC_READABLE=()
+  declare -gA _TRYR_SRC_CTRL=()
   declare -gA TRYRUN_KIND_COUNT=()
   _TRYR_DST_READABLE=()
   _TRYR_DIR_CACHE=()
@@ -627,6 +645,19 @@ restore_try_run() {
       done
     fi
   fi
+  # 阳性对照**独立成段**（不塞进上面的 Q3 段）: 它的价值恰恰在"备份缺失为 0、
+  #   只有对照能证明判据没坏"的情形 —— 跟着 TRYRUN_SRC_CHECKED 一起被跳过就没用了
+  if [ -n "$TRYRUN_SRC_CTRL_LIST" ]; then
+    _tryr_log '  🧪 源端判据阳性对照（备份**存在**的条目也核一次源端，证明判据能判出"在"）:'
+    printf '%s' "$TRYRUN_SRC_CTRL_LIST" | while IFS= read -r l; do [ -n "$l" ] && _tryr_log "$l"; done
+    if [ "$TRYRUN_SRC_CTRL_POS" -eq 0 ] && [ "$TRYRUN_SRC_CTRL_NEG" -gt 0 ]; then
+      _tryr_log "     ❌ 对照**也判不在**（${TRYRUN_SRC_CTRL_NEG} 个 src）⇒ 直读判据在本远端上" \
+                "疑似恒阴，上面 ${TRYRUN_SRC_MISSING} 条「源端不在」**结论作废**，需换判据复核"
+    else
+      _tryr_log "     ✅ 对照判在 ${TRYRUN_SRC_CTRL_POS} 个 ⇒ 判据有效，" \
+                "上面的「不在」是可信的阴性结论"
+    fi
+  fi
   if [ "$TRYRUN_UNVERIFIED" -gt 0 ]; then
     _tryr_log "  ⚠️ 存在性未核对（目标端不可读，通常是 OpenList 容器没拉起）:"
     printf '%s' "$TRYRUN_UNVERIFIED_DESTS" | sort -u | while IFS= read -r l; do [ -n "$l" ] && _tryr_log "     - ${l}"; done
@@ -717,3 +748,6 @@ TRYRUN_ORIG_FLIPPED=0
 TRYRUN_SRC_CHECKED=0
 TRYRUN_SRC_MISSING=0
 TRYRUN_SRC_MISSING_LIST=""
+TRYRUN_SRC_CTRL_POS=0
+TRYRUN_SRC_CTRL_NEG=0
+TRYRUN_SRC_CTRL_LIST=""

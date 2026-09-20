@@ -808,8 +808,80 @@ grep -qF "未核对（源端不可读）" "$OUT18B/tryrun.log" \
 grep -q "源端: 不在" "$OUT18B/tryrun.log" \
   && bad "18f 源端不可读时不得出现「不在」（会谎报 Q3 结论）" \
   || ok "18f 源端不可读时不出现「不在」"
-rm -f "$STATE"/task18_q3.json
-rm -rf "$DST/q3dir"
+# ============================================================================
+# 场景 19: 源端核对的**阳性对照**（§0: 全阴性结果必须自证判据没坏）
+#   为什么: run 35511137266 实测 57 条**全判"不在"、零个"在"**。若直读判据在某个
+#   远端上恒阴（对存在的文件也返回非 0），"源端不在"就是假的 —— 而它正是 Q3 的结论。
+#   ⇒ 对每个 src 抽一条**备份存在**的条目也核源端: 判"在" = 判据有效；判"不在" =
+#   判据失效，本轮所有阴性结论必须显式作废并告警，而不是照常输出。
+# ============================================================================
+eval "$RCLONE_BASE_FN"; export -f rclone
+OUT19="$WORK/out19"; mkdir -p "$OUT19"
+mkdir -p "$DST/c19/6c73a635" "$DST/c19/orig" "$SRC18/c19/orig"
+printf 'A' > "$DST/c19/6c73a635/have.jpg"    # 备份**存在**
+printf 'A' > "$SRC18/c19/orig/have.jpg"      # 源端**也有**（对照应判"在"）
+printf '{"dest_path":"openlist:wopan176Crypt/0","source_path":"onedrive:0","fixed_files":[' > "$STATE/task19_ctrl.json"
+printf '{"original":"c19/orig/have.jpg","alternative":"c19/6c73a635/have.jpg","method":"m1","md5":""}' >> "$STATE/task19_ctrl.json"
+printf ']}' >> "$STATE/task19_ctrl.json"
+rclone() {
+  case "$1" in
+    lsf)
+      local p="$2"
+      case "$p" in
+        "$STATE") (cd "$STATE" && ls) ;;
+        onedrive:0) (cd "$SRC18" && ls) ;;
+        onedrive:0/*) (cd "$SRC18/${p#onedrive:0/}" 2>/dev/null && ls) || return 1 ;;
+        *) (cd "$DST/${p#openlist:wopan176Crypt/0/}" 2>/dev/null && ls) ;;
+      esac ;;
+    lsjson)
+      case "$2" in
+        onedrive:0/*) [ -f "$SRC18/${2#onedrive:0/}" ] && { echo '[{}]'; return 0; } || return 1 ;;
+        *) [ -f "$DST/${2#openlist:wopan176Crypt/0/}" ] && { echo '[{}]'; return 0; } || return 1 ;;
+      esac ;;
+    cat) cat "$2" ;;
+    size) echo '{"bytes":1}' ;;
+    *) WRITE_CALLS+="$1"$'\n'; return 1 ;;
+  esac
+  return 0
+}
+export -f rclone
+TRYRUN_SEND_TG=0 TRYRUN_WORK="$OUT19" restore_try_run task19 > "$OUT19/stdout.txt" 2>&1
+grep -qF "阳性对照" "$OUT19/tryrun.log" && ok "19a 报告含阳性对照段" \
+  || bad "19a 报告应含阳性对照段"
+grep -qF "对照判为 **在**" "$OUT19/tryrun.log" && ok "19b 备份存在且源端有 ⇒ 对照判在" \
+  || bad "19b 对照应判在（源端确实有该文件）"
+grep -qF "✅ 对照判在 1 个" "$OUT19/tryrun.log" && ok "19c 判据有效时明确标注可信" \
+  || bad "19c 应标注判据有效"
+
+# ★ 反向: 源端明明有、直读却恒返回非 0（判据坏）⇒ 必须作废阴性结论并告警
+rclone() {
+  case "$1" in
+    lsf)
+      local p="$2"
+      case "$p" in
+        "$STATE") (cd "$STATE" && ls) ;;
+        onedrive:0) (cd "$SRC18" && ls) ;;
+        onedrive:0/*) (cd "$SRC18/${p#onedrive:0/}" 2>/dev/null && ls) || return 1 ;;
+        *) (cd "$DST/${p#openlist:wopan176Crypt/0/}" 2>/dev/null && ls) ;;
+      esac ;;
+    lsjson) return 1 ;;          # 判据损坏: 恒阴（存在的文件也报不在）
+    cat) cat "$2" ;;
+    size) echo '{"bytes":1}' ;;
+    *) WRITE_CALLS+="$1"$'\n'; return 1 ;;
+  esac
+  return 0
+}
+export -f rclone
+OUT19B="$WORK/out19b"; mkdir -p "$OUT19B"
+TRYRUN_SEND_TG=0 TRYRUN_WORK="$OUT19B" restore_try_run task19 > "$OUT19B/stdout.txt" 2>&1
+grep -qF "对照判为 **不在**" "$OUT19B/tryrun.log" \
+  && ok "19d 判据恒阴时对照判不在（如实反映，不粉饰）" \
+  || bad "19d 判据恒阴时对照应判不在"
+grep -qF "结论作废" "$OUT19B/tryrun.log" \
+  && ok "19e 判据失效 ⇒ 显式作废阴性结论并告警" \
+  || bad "19e 判据失效时必须作废结论（否则会输出假的『源端不在』）"
+rm -f "$STATE"/task19_ctrl.json
+rm -rf "$DST/c19" "$SRC18/c19"
 eval "$RCLONE_BASE_FN"; export -f rclone
 
 echo
