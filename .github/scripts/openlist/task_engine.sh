@@ -1269,8 +1269,34 @@ _sync_task_impl() {
     # 每个子任务开始前重置批次失败标志: 它由子任务自己的批次路径置位，
     # 不重置会让"上一个子任务的批次失败"把本子任务也判成失败（兄弟串味）
     SYNC_FAILED_BATCH=0
+    # ⚠️ **修复累计器也必须按子目录边界重置**（2026-09-20 串写 bug 修复，
+    #   run 35516272044 marker 原文探针实锤）。
+    #   GLOBAL_FIXED_FILES_JSON 是**全局**变量，只在 current_depth=0 时初始化
+    #   一次；子目录递归是 depth≥1 ⇒ **不重置**。于是子目录 A 修好的条目会
+    #   残留下来，被子目录 B 的 save_sync_marker 写进 **B 的 marker**。
+    #   真机形态: 同属 网易摄影/蓝白碗/ 的 19 条被写进了 4 个目录的 marker，
+    #   而其中 3 个目录的源端根本没有 `蓝白碗`（marker 的 top_dirs 为证）。
+    #   后果比"多几条脏记录"严重: 串写进来的 original 指向**别处的文件**，
+    #   一键还原按它会把 A 的备份搬到 B 名下 —— 短哈希不可逆，搬错回不去。
+    #   对照: **并行** worker（_sync_subdirs_parallel_run）早就在子 shell 里
+    #   显式重置过；**串行**路径漏了 —— 这个不对称就是串写只在串行出现的原因。
+    GLOBAL_FIXED_FILES_JSON="[]"
+    GLOBAL_FIX_BLACKLIST_JSON="{}"
     _sync_task_impl "${source_path}/${subdir}" "${dest_path}/${subdir}" "${safe_subtask}" "${extra_args[@]}" < /dev/null || true
     SYNC_AUTO_SPLIT_DEPTH=$current_depth
+    # ★ 子目录的修复成果**收进父级专用变量**后，把全局累计器**清回空**:
+    #   - 收进 _PAR_FIXED_ACC: 父级最终同步后还会写一次**父 marker**，它需要
+    #     收集全部子目录的修复（不收则父 marker 里一条都没有）；
+    #   - 清回空是串写修复的关键: 若让全局累计器持续累积，**下个子目录递归
+    #     时会读到上个子目录的条目**，串写立刻复现。故"收"与"清"必须成对，
+    #     且清的一定是**全局**那个（_PAR_FIXED_ACC 只在本层父作用域内流转）。
+    #   合并用 unique_by(.original) 去重，与 _sync_accumulate_fixed_results
+    #   同口径；jq 失败时**保留父级已有值**（宁可漏合并，不可清空）。
+    if [ -n "${GLOBAL_FIXED_FILES_JSON:-}" ] && [ "$GLOBAL_FIXED_FILES_JSON" != "[]" ]; then
+      _PAR_FIXED_ACC=$(jq -scn --argjson acc "${_PAR_FIXED_ACC:-[]}" --argjson cur "$GLOBAL_FIXED_FILES_JSON" \
+        '($acc + $cur) | unique_by(.original)' 2>/dev/null || echo "${_PAR_FIXED_ACC:-[]}")
+    fi
+    GLOBAL_FIXED_FILES_JSON="[]"
     # 子任务已收尾: 清掉它那一层（及更深）的阶段行/统计/细粒度状态。
     # 不清则已完成子目录下仍挂着它最后一批的 "📦 文件批次拆分 / 📊 批次 n/m"，
     # 看着像还在跑；下一个子任务进入时也会清，但那要等到它自己开口说话，
@@ -1333,6 +1359,10 @@ _sync_task_impl() {
 
   # 最终完整同步（仅在顶层执行，正常通知）
   if [ "$current_depth" -eq 0 ]; then
+    # ★ 把各子目录的修复成果**装回**全局累计器，供本层最终同步后的父 marker
+    #   收集（它们在子目录循环里被"收进 _PAR_FIXED_ACC 后清空"以防串写）。
+    #   不清空会串写、不装回会丢记录 —— 这两步成对出现，缺一即错。
+    [ -n "${_PAR_FIXED_ACC:-}" ] && GLOBAL_FIXED_FILES_JSON="$_PAR_FIXED_ACC"
     # P2 优雅到站: 预算将尽跳过最终完整同步——各子目录 marker 已落盘，
     # 直接收摊不保存 pair 级成功 marker（任务确实未完整，下轮继续）
     if sync_budget_stop; then
