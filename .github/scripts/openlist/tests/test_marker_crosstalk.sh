@@ -37,7 +37,8 @@ source "$_REPO_ROOT/.github/scripts/openlist/rclone_query.sh" 2>/dev/null
 source "$_REPO_ROOT/.github/scripts/openlist/task_engine.sh" 2>/dev/null
 
 # --- mocks（必须在 source 之后定义）---
-# 每个子目录"修好"的文件: 由 SUBDIR_FIX 按子目录名给出（相对路径）
+# 每个子目录"修好"的文件: key 用 **dest_path**（dst/wangyi 形式，与生产
+# 递归传参一致），value 是换行分隔的相对路径列表
 declare -A SUBDIR_FIX=()
 SSM_LOG=""      # save_sync_marker 的 (task|fixed_json) 记录
 FSM_LOG=""      # save_fix_state_marker 的同款记录
@@ -88,11 +89,6 @@ rclone() {
       #   按 $2 取会拿到 "--dirs-only" ⇒ 子目录永远列不出来 ⇒ 测试假绿。
       #   故取**最后一个非 flag 参数**作路径。
       local p=""
-      for a in "$@"; do case "$a" in -*) ;; *) p="$a" ;; esac; donelsf)
-      # ⚠️ 路径不一定在 $2: 生产调用是 `rclone lsf --dirs-only <path>`（flag 在前），
-      #   按 $2 取会拿到 "--dirs-only" ⇒ 子目录永远列不出来 ⇒ 测试**假绿**。
-      #   故取**最后一个非 flag 参数**作路径。
-      local p=""
       for a in "$@"; do case "$a" in -*) ;; *) p="$a" ;; esac; done
       # 顶层返回子目录列表；非顶层（子目录内部）返回空 ⇒ 视为叶子，不再深拆
       [ "$p" = "src" ] && printf '%s' "$R_LSF"
@@ -115,8 +111,8 @@ OUT=$(mktemp)
 # neko 源端没有蓝白碗 ⇒ 它自己一条都没修 ⇒ 它的 marker 不该有任何 fixed_files。
 R_LSF=$'wangyi\nneko\n'
 R_SIZE_src=60000000000; R_SIZE_src_wangyi=1000; R_SIZE_src_neko=2000
-SUBDIR_FIX[src/wangyi]=$'蓝白碗/1.jpg\n蓝白碗/2.jpg'
-SUBDIR_FIX[src/neko]=""
+SUBDIR_FIX[dst/wangyi]=$'蓝白碗/1.jpg\n蓝白碗/2.jpg'
+SUBDIR_FIX[dst/neko]=""
 run_impl src dst task1 > "$OUT" 2>&1
 
 # 子目录递归收尾走的是 save_sync_marker（task_engine.sh 递归分支），
@@ -141,8 +137,8 @@ fi
   || bad "1d 串写了 蓝白碗 进 neko: $NEKO_FIX"
 
 # --- 场景2: 两个子目录**各有**自己的修复 ⇒ 互不混入 ---
-SUBDIR_FIX[src/wangyi]=$'蓝白碗/1.jpg'
-SUBDIR_FIX[src/neko]=$'neko普通/9.jpg'
+SUBDIR_FIX[dst/wangyi]=$'蓝白碗/1.jpg'
+SUBDIR_FIX[dst/neko]=$'neko普通/9.jpg'
 run_impl src dst task2 > "$OUT" 2>&1
 NEKO_FIX2=$(printf '%s' "$SSM_LOG" | awk -F'|' '$1 ~ /neko$/ {print $2}' | head -1)
 printf '%s' "$NEKO_FIX2" | grep -q 'neko普通/9.jpg' \
@@ -153,8 +149,8 @@ printf '%s' "$NEKO_FIX2" | grep -q 'neko普通/9.jpg' \
 
 # --- 场景3: 顺序反转（wangyi 后跑）⇒ 同样不得串写（证明与顺序无关）---
 R_LSF=$'neko\nwangyi\n'
-SUBDIR_FIX[src/wangyi]=$'蓝白碗/1.jpg'
-SUBDIR_FIX[src/neko]=""
+SUBDIR_FIX[dst/wangyi]=$'蓝白碗/1.jpg'
+SUBDIR_FIX[dst/neko]=""
 run_impl src dst task3 > "$OUT" 2>&1
 # 子目录按大小排序（neko 2000 > wangyi 1000）⇒ neko 先跑，wangyi 后跑
 NEKO_FIX3=$(printf '%s' "$SSM_LOG" | awk -F'|' '$1 ~ /neko$/ {print $2}' | head -1)
@@ -165,6 +161,21 @@ else
 fi
 ! printf '%s' "$NEKO_FIX3" | grep -q '蓝白碗' \
   && ok "3b neko 的 marker 不含 蓝白碗（与顺序无关）" || bad "3b 串写: $NEKO_FIX3"
+
+# --- 场景4: 防串写**不得**顺手丢记录 —— 父 marker 要收集全部子目录的修复 ---
+# 这是"收进 _PAR_FIXED_ACC 再清空"那两步的**回归锁**: 只清不收 ⇒ 父 marker 空；
+# 只收不清 ⇒ 串写复现。两边都必锁，缺一就退回到 bug 的某一侧。
+SUBDIR_FIX[dst/wangyi]=$'蓝白碗/1.jpg'
+SUBDIR_FIX[dst/neko]=$'neko普通/9.jpg'
+run_impl src dst task4 > "$OUT" 2>&1
+# 父 marker 的 dest_path 就是 "dst"（不含子目录后缀）
+PARENT_FIX=$(printf '%s' "$SSM_LOG" | awk -F'|' '$1 == "dst" {print $2}' | head -1)
+printf '%s' "$PARENT_FIX" | grep -q '蓝白碗/1.jpg' \
+  && ok "4a 父 marker 收集到子目录 wangyi 的修复（不该因防串写丢失）" \
+  || bad "4a 父 marker 丢了 wangyi 的修复: $PARENT_FIX"
+printf '%s' "$PARENT_FIX" | grep -q 'neko普通/9.jpg' \
+  && ok "4b 父 marker 收集到子目录 neko 的修复" \
+  || bad "4b 父 marker 丢了 neko 的修复: $PARENT_FIX"
 
 echo
 echo "===== 结果: PASS=$PASS FAIL=$FAIL ====="
