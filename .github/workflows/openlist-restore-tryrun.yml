@@ -22,6 +22,9 @@
 # 零写入是**结构性**的，不是"小心一点": 预演模块所有远端调用走只读白名单
 #   （只放行 ls/lsd/lsf/lsl/lsjson/cat/size/version），写子命令一律被拒绝执行，
 #   由 test_restore_tryrun.sh 场景 4/5 锁住。
+#   ⚠️ 唯一的例外是 reset_markers 入参: 它会删 onedrive:/logs/sync_state 下的 marker
+#   （先归档）。它不是预演的一部分 —— 选中后**独占本次运行**并提前退出，日志形态与
+#   只读轮完全不同，避免"这次到底删没删"要靠回忆选项。
 #
 # 安全边界（与 openlist-diag.yml 同口径）: 不装 cloudflared、不碰隧道、不回传 DB；
 #   容器名固定 openlist，拉的是 dropbox 上的生产配置副本（`--restart=no`，用完即删）。
@@ -69,6 +72,15 @@ on:
         required: false
         type: string
         default: ""
+      reset_markers:
+        description: "⚠️ marker 归档 + 清空（**会删数据**，填了就只做它、不做预演）。填 dry = 只打印将做什么；填 commit = 真删（先打包归档到 dropbox、归档失败则拒绝清空）。用于串写修复后的历史脏数据清洗"
+        required: false
+        type: choice
+        default: "关"
+        options:
+          - "关"
+          - "dry"
+          - "commit"
 
 # 独立并发组: 只读预演可与主轮并行，不与 openlist-singleton / -diag / -fix-check 互等。
 # 「与主轮错开」那条纪律是为**吞吐测量**与**在途 sync / 容器重启窗口**立的（主轮在传会把
@@ -120,8 +132,10 @@ jobs:
       #    （"用不同的库验证等于测了个别的东西"）。
       #    只在 check_exists=是 时执行: 预演的三条路径只依赖 marker，核对存在性才需要
       #    访问 openlist: 远端（该远端是容器内 WebDAV，容器不在就连不上）。
+      #    reset_markers 选中时**也不起容器**: 归档+清空只碰 onedrive:/logs/sync_state，
+      #    用不到 OpenList；白等 6 分钟拉库还会让"这轮到底做没做删除"更难一眼看清。
       - name: 拉起 OpenList 容器（只读核对副本）
-        if: ${{ inputs.check_exists != '否' }}
+        if: ${{ inputs.check_exists != '否' && inputs.reset_markers == '关' }}
         env:
           OL_CONTAINER: openlist
         run: |
@@ -139,7 +153,7 @@ jobs:
             --name="$OL_CONTAINER" openlistteam/openlist:latest
 
       - name: 校验 OpenList 容器运行状态
-        if: ${{ inputs.check_exists != '否' }}
+        if: ${{ inputs.check_exists != '否' && inputs.reset_markers == '关' }}
         run: |
           set -e
           source "$GITHUB_WORKSPACE/.github/scripts/openlist/load_all.sh"
@@ -159,7 +173,24 @@ jobs:
           TRYRUN_CHECK_INPUT: ${{ inputs.check_exists }}
           TRYRUN_TG_INPUT: ${{ inputs.send_tg }}
           TRYRUN_DUMP_INPUT: ${{ inputs.dump_marker }}
+          RESET_INPUT: ${{ inputs.reset_markers }}
         run: |
+          # ── marker 归档 + 清空（不可逆运维动作，早于只读预演并直接退出）───────
+          # 为什么"做完就 exit 0": 这次运行到底删不删数据，不能靠事后回忆"我当时
+          # 选的是 dry 还是 commit"。删与不删两种运行必须在日志里长得完全不一样，
+          # 所以 reset 一旦被选中就独占这次运行，绝不和只读预演混在一起。
+          # 为什么默认 dry: 清空 marker = 丢弃全部修复记录的唯一副本，只能靠归档
+          # 兜底；默认演练一遍，让人先看清楚"将要删多少个、归档到哪"。
+          if [ "${RESET_INPUT:-关}" != "关" ]; then
+            echo "=========== marker 归档 + 清空（RESET=${RESET_INPUT}）==========="
+            case "$RESET_INPUT" in
+              commit) bash "$GITHUB_WORKSPACE/.github/scripts/openlist/reset_markers.sh" --commit ;;
+              *)      bash "$GITHUB_WORKSPACE/.github/scripts/openlist/reset_markers.sh" ;;
+            esac
+            echo "RESET_EXIT=$?" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
           # 中文选项 → 脚本口径的映射放在 bash 里做（不在 YAML 里内插）
           export TRYRUN_TASK="${TRYRUN_TASK_INPUT:-all}"
           [ -z "$TRYRUN_TASK" ] && export TRYRUN_TASK=all
@@ -219,6 +250,15 @@ jobs:
         run: |
           docker logs "$OL_CONTAINER" 2>&1 | tail -40 || true
           docker rm -f "$OL_CONTAINER" 2>/dev/null || true
+          # reset 运行（归档+清空）不走预演结论分支 —— 否则"清空成功"会被误报成
+          # "环境问题"，把不可逆动作的结果盖掉
+          if [ -n "${RESET_EXIT:-}" ]; then
+            case "$RESET_EXIT" in
+              0) echo "✅ 结论: marker 归档 + 清空完成（archive=${MARKER_RESET_ARCHIVE:-dropbox 默认路径}）" ;;
+              *) echo "⚠️ 结论: marker 归档/清空未成功（退出码 ${RESET_EXIT}）—— 看上方脚本输出，marker 未被清空或已归档后再查" ;;
+            esac
+            exit 0
+          fi
           case "${TRYRUN_EXIT:-unknown}" in
             0) echo "✅ 结论: 预演已产出 —— 看上方逐条三路径（① 备份文件 / ② marker 原文件 / ③ 实际落点）" ;;
             2) echo "⚠️ 结论: 环境问题（marker 目录读不到）—— 检查 rclone 配置与 onedrive:/logs/sync_state" ;;
