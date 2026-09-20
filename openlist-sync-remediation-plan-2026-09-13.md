@@ -4321,6 +4321,43 @@ depth≥1 ⇒ 不重置**；于是子目录 A 修好的条目会残留下来，�
 （16 断言：mock 的 delete 遇过滤 flag 硬失败）。
 **教训: 不可逆动作的结果必须由退出码自证，不能靠人读日志里的数字。**
 
+### 14.17 第二个 bug: 子目录条目并入父级漏加前缀 —— **落点错一层**（`3831f47`）
+
+**这是 Q3 的失败形态本身**，由归属判据（21 号场景的产物）在真机上抓到 —— 不是推理出来的。
+
+**实证**（三轮探针，逐条源端直读）:
+
+| marker | original | 源端直读 |
+|---|---|---|
+| 子 `backup_emby_92641159`（src=`onedrive:backup/emby`） | `live/odlink-dir-cache.json` | **在** `onedrive:backup/emby/live/…` |
+| 父 `backup_19fd8feb`（src=`onedrive:backup`） | `live/odlink-dir-cache.json` | **不在** `onedrive:backup/live/…` |
+
+**根因**: 子任务跑的是 `${source_path}/${subdir}`，它写进 marker 的 `original`
+**相对子任务根**；父 marker 的根是 `${dest_path}`（不含子目录），照抄 ⇒ **少一层**。
+父/子 marker 的 `top_dirs` 也印证: 父是 `dad / emby / github / …`，子是 `images / live`。
+
+**为什么比串写更隐蔽**: 串写搬的是**别处真实存在**的文件（至少路径真实）；
+漏前缀则把文件搬到**源端根本没有**的位置 —— 不报错、不失败，只是还原完
+"对不上"，且短哈希不可逆，事后无从追溯。
+
+**修法**: 新增 `_prefix_fixed_entries`（重定基 original/alternative），**串行**
+（子目录循环收进 `_PAR_FIXED_ACC` 时）与**并行**（`_sync_par_consume` 回传合并时）
+两条路径共用同一函数 —— 抄两份必然漂移，漂移的结果就是"某条路径漏加前缀"。
+`jq` 失败时输出 `[]` 而非原样透传: **宁可丢记录，也不产出落点错误的记录**
+（落点错会搬错文件，丢记录只是少还原一条）。
+
+**回归锁**: `test_marker_crosstalk.sh` 场景 5（共 16 断言）。判据三条:
+① 父条目须为 `<子目录>/<original>`；② **不得有裸 original**，且用 jq 精确判非
+子串（`neko/neko普通/9.jpg` 里也含 `neko普通/9.jpg`，grep 查不出漏加）；
+③ 子 marker **不得**被加前缀（否则错两层）。
+**回退修法实测 5a/5b/5c 三条红** ⇒ 不是假绿。
+
+**⚠️ 待办（会污染下一轮）**: 上一轮（run `35522671782`）生成的 marker 里**已经**
+写入了漏前缀的条目。修法只保证**新轮次**正确，旧的脏条目要靠
+`carry-forward`（`sync_marker.sh:236`）判断"目标端 `<dest>/<original>` 是否仍不存在"
+来决定继承与否 —— 漏前缀的条目其错一层路径确实不存在 ⇒ **会被继续继承**。
+⇒ 下一轮跑之前再清一次 marker（`reset_markers=commit`），否则脏条目会一直传下去。
+
 ---
 
 ## 15. 端到端正确性验证方案（2026-09-20，用户「别走偏」+「不兼容旧 marker」）
