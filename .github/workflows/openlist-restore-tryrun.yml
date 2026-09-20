@@ -169,6 +169,15 @@ jobs:
 
           source "$GITHUB_WORKSPACE/.github/scripts/openlist/load_all.sh"
 
+          # 时间窗探针（一次性诊断，用完即删）: 看生产 lsl 到底吐什么格式。
+          #   盲改不如先看真格式 —— run 35488836925 里 422 个 marker 全被判"无时间戳"，
+          #   说明我猜的输出形态与真机不一致（lsf 给基名、lsl 可能给完整相对路径）。
+          if [ "${TRYRUN_WITHIN_DAYS:-0}" != "0" ]; then
+            echo "=========== lsl 探针（诊断用）==========="
+            rclone lsl "${SYNC_STATE_DIR}" --files-only --retries 2 2>&1 | head -n 5
+            echo "--- 行数: $(rclone lsl "${SYNC_STATE_DIR}" --files-only --retries 2 2>/dev/null | wc -l) ---"
+          fi
+
           # 恒不因"有备份缺失"把 step 判红: 缺失是**预演结论**之一，红了会跳过
           # artifact 上传（同 openlist-diag / -fix-check 的取舍）
           set +e

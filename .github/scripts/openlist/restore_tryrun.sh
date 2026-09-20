@@ -283,29 +283,53 @@ restore_try_run() {
   # 时间窗（0/空 = 全量）。一次 lsl 把目录的时间戳全取回来再本地比较 —— 绝不能对
   # 每个 marker 单独 lsl（几百个 marker × 一次往返，和逐条 lsf 是同一类 fork 风暴）。
   # lsl 输出形如: "<size> <YYYY-MM-DD HH:MM:SS.mmmmmmm> <name>"
+  # ⚠️ 取时间窗前的两条纪律（都是真踩出来的）:
+  #   1) 名字按**基名**匹配: lsf 给的是基名，而 ls/lsl 给的是**从远端根算起的完整
+  #      相对路径**（logs/sync_state/task_x.json），两者口径不同 —— 直接用 $NF 会
+  #      与 marker 名对不上，422 个 marker 全被判"无时间戳"（run 35488836925 实测）。
+  #   2) **"整体取不到"必须与"个别没有"区分开**: 混为一谈会把"时间窗机制失效"
+  #      静默翻译成"条目 0 / 缺失 0"，看着像"最近 3 天没缺"，实际是**根本没测**
+  #      （§0: 判据静默失败 ⇒ 错误结论）。故一个时间戳都解析不出来时**回落全量
+  #      并大声告警**，绝不产出"空结论"。
   local within_days="${TRYRUN_WITHIN_DAYS:-0}"
   local cutoff=0
+  local ts_lines=0 ts_parsed=0 ts_fallback=0
   if [[ "$within_days" =~ ^[0-9]+$ ]] && [ "$within_days" -gt 0 ]; then
     # 同样不用 date +%s（见下方时间戳解析处的说明）
     cutoff=$(( $(printf '%(%s)T' -1) - within_days * 86400 ))
   fi
   declare -gA _TRYR_MARKER_TS=()
   if [ "$cutoff" -gt 0 ]; then
+    local lsl_file="${TRYRUN_WORK}/tryrun_lsl.txt"
+    _tryr_rclone_read lsl "$SYNC_STATE_DIR" --files-only --retries 2 >"$lsl_file" 2>/dev/null
     local lsl_line fts fname fdate ftime
     while IFS= read -r lsl_line; do
       [ -z "$lsl_line" ] && continue
-      # 取后三字段: 日期、时间、文件名（文件名可能含空格，故按行尾取而非 cut 固定列）
+      ts_lines=$((ts_lines + 1))
+      # 取后三字段: 日期、时间、路径（文件名可能含空格，故按行尾取而非 cut 固定列）
       fdate=$(printf '%s' "$lsl_line" | awk '{print $(NF-2)}')
       ftime=$(printf '%s' "$lsl_line" | awk '{print $(NF-1)}')
       fname=$(printf '%s' "$lsl_line" | awk '{print $NF}')
       [ -z "$fdate" ] || [ -z "$fname" ] && continue
-      ftime="${ftime%%.*}"            # 去掉小数秒
-      ftime="${ftime%%+*}"            # 去掉可能的时区后缀
+      fname="${fname##*/}"        # 基名: lsl 给的是完整相对路径，lsf 给的是基名
+      ftime="${ftime%%.*}"        # 去掉小数秒
+      ftime="${ftime%%+*}"        # 去掉可能的时区后缀
       [[ "$fdate" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || continue
       [[ "$ftime" =~ ^[0-9]{2}:[0-9]{2}:[0-9]{2}$ ]] || continue
       fts=$(_tryr_epoch_utc "$fdate" "$ftime")
-      [ -n "$fts" ] && _TRYR_MARKER_TS["$fname"]="$fts"
-    done < <(_tryr_rclone_read lsl "$SYNC_STATE_DIR" --files-only --retries 2 2>/dev/null)
+      [ -n "$fts" ] || continue
+      _TRYR_MARKER_TS["$fname"]="$fts"
+      ts_parsed=$((ts_parsed + 1))
+    done < "$lsl_file"
+    # 一个都解析不出来 = 时间窗机制本身没生效（远端不支持 ModTime / lsl 失败 /
+    # 格式不符）⇒ 回落全量并告警，绝不用"条目 0"冒充"最近没缺"
+    if [ "$ts_parsed" -eq 0 ]; then
+      ts_fallback=1
+      cutoff=0; within_days=0
+      _tryr_log "  ❌ 时间窗未生效: lsl 返回 ${ts_lines} 行但解析出 0 个时间戳 ⇒ " \
+                "**回落全量**（不能用'条目 0'冒充'最近没缺'）。原始前 3 行:"
+      head -n 3 "$lsl_file" 2>/dev/null | while IFS= read -r l; do _tryr_log "     | ${l}"; done
+    fi
   fi
 
   local markers
@@ -364,6 +388,11 @@ restore_try_run() {
     _tryr_log "  ⏱️ 时间窗=${within_days} 天: 扫描 marker ${scanned} 个 · " \
               "跳过超窗 ${skipped_old} 个 · 跳过无时间戳 ${skipped_nots} 个"
   fi
+  if [ "$ts_fallback" -eq 1 ]; then
+    # 时间窗没生效这件事本身必须进结论: 否则读者会以为"最近 3 天零缺失"
+    _tryr_log "  ❌ 时间窗**未生效**（lsl 取不到 ModTime）⇒ 本次为**全量**预演，" \
+              "结论覆盖全部 marker，不可当作'最近 ${TRYRUN_WITHIN_DAYS} 天'的口径"
+  fi
   for k in "${!TRYRUN_KIND_COUNT[@]}"; do
     _tryr_log "  ${k}: ${TRYRUN_KIND_COUNT[$k]} 条"
   done
@@ -398,6 +427,7 @@ restore_try_run() {
     if [ "$cutoff" -gt 0 ]; then
       tg_add_kv msg "时间窗" "最近 ${within_days} 天（跳过超窗 ${skipped_old} 个 marker）"
     fi
+    [ "$ts_fallback" -eq 1 ] && tg_add_kv msg "时间窗" "❌ 未生效（取不到 ModTime）⇒ 回落全量"
     tg_add_kv msg "预演条目" "${total} 个"
     local kinds="" k
     for k in $(printf '%s\n' "${!TRYRUN_KIND_COUNT[@]}" | sort); do
