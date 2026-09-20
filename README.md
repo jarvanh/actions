@@ -82,7 +82,7 @@ proxy-speedtest/            测速结果数据
 | | `file_fix.sh` | 1705 | 单文件修复的 4 种方法 + 目录可写性三态预检 + 短哈希目录兜底 |
 | | `file_fix_pipeline.sh` | 1395 | 修复管线编排（方法轮换 + 增量持久化） |
 | | `file_restore.sh` | 655 | 修复文件还原（目标端 → 原路径 / 源端） |
-| | `restore_tryrun.sh` | 661 | 一键还原 **try run**（只读预演：三条完整路径推导 + 只读白名单护栏 + 时间窗 `within_days` / 绝对下界 `since` + 双直读复核 + 缺失目录结构探针；`restore_try_run`） |
+| | `restore_tryrun.sh` | 753 | 一键还原 **try run**（只读预演：三条完整路径推导 + 只读白名单护栏 + 时间窗 `within_days` / 绝对下界 `since` + 双直读复核 + 缺失目录结构探针 + 源端原路径核对与阳性对照；`restore_try_run`） |
 | **task** | `task_preview.sh` | 526 | 任务预览（大小估算、跳过预判、未传量估算） |
 | | `task_engine.sh` | 2284 | 任务注册表与编排（分批、轮转、阶段行生产） |
 | **基础** | `utils.sh` | 152 | 通用工具（格式化、日志判定；转义/树形渲染已收敛到 `telegram/tg_notify.sh`） |
