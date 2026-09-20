@@ -3,6 +3,12 @@ name: windows-tailscale
 on:
   workflow_dispatch:
     inputs:
+      run_minutes:
+        description: >-
+          本轮保留时长（分钟）。留空则用仓库变量 TS_RUN_MINUTES 或默认 316。
+          调小可快速跑完一轮用于调试（如 3），不影响其余步骤。
+        type: string
+        default: ""
       self_retrigger:
         description: "收尾是否自动起下一轮（关掉则本轮结束后静止）"
         type: boolean
@@ -187,11 +193,20 @@ jobs:
           Send-TgMessage $msg
           echo "已推送入口通知: ssh $Env:TS_USER@$Env:TS_HOST"
 
-      - name: Keep alive (6h)
+      - name: Keep alive
         shell: pwsh
-        # 21000s(350min) 会把整轮顶到 timeout-minutes:360 的边缘——一旦被超时杀掉，
-        # 收尾的接力步骤就不会执行，链断。留出启动（3~4min）+ 收尾余量，取 19000s。
-        run: Start-Sleep -Seconds 19000
+        env:
+          # 保留时长（分钟）：手动触发看 run_minutes 输入，定时看仓库变量，默认 316。
+          # ⚠️ 默认值的来由（别照感觉调）：21000s(350min) 会把整轮顶到
+          #    timeout-minutes:360 的边缘——一旦被超时杀掉，收尾的接力步骤就不会执行、
+          #    链断。留出启动（3~4min）+ 收尾余量后取 19000s ≈ 316min。
+          TS_RUN_MINUTES: ${{ github.event.inputs.run_minutes || vars.TS_RUN_MINUTES || '316' }}
+        run: |
+          $min = $Env:TS_RUN_MINUTES
+          if ($min -notmatch '^\d+$') { $min = '316' }
+          $sec = [int]$min * 60
+          echo "本轮保留 $min 分钟（$sec 秒），至 $((Get-Date).AddSeconds($sec).ToString('yyyy-MM-dd HH:mm:ss'))"
+          Start-Sleep -Seconds $sec
 
       # ===== 自续触发（下轮接力）=====
       # 放在最后一步：本轮结束后立刻派下一轮，把常驻窗口接上（cron 1h 只作兜底）。
