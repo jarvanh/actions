@@ -996,6 +996,25 @@ grep -qF "0 条可判" "$L21" && grep -qF "未验证" "$L21" \
   || bad "21e 未验证时不得说未见串写迹象"
 rm -f "$STATE"/task21d.json
 
+# 21-F: top_dirs 为空 + 根层文件（源端整目录都是散文件，实测 backup_CloudMusic 即此形态）
+#   ⇒ 根层文件归本根是恒真的，**必须进分母**，不得被当成"判不了"
+#   反例（2026-09-21 主轮）: 80 条只判 54 条，缺的 26 条全是这类根层文件，
+#   报告却显示"54 条均未可疑"，读者会以为覆盖了全部 80 条。
+# 先取基线: 同一批 marker 里"判不了"的条数（测试库里本就有一批无 top_dirs 的旧 marker）
+TRYRUN_SEND_TG=0 TRYRUN_CHECK_EXISTS=0 TRYRUN_WORK="$OUT21" restore_try_run all > "$OUT21/stdout_base.txt" 2>&1
+UJ_BASE=$(sed -n 's/.*另有 \([0-9]*\) 条\*\*判不了.*/\1/p' "$L21" | tail -1)
+printf '%s' '{"last_success":"2026-09-21T00:04:24Z","source_path":"SRC/CloudMusic","dest_path":"DST/CloudMusic","top_dirs":[],"fixed_files":[{"original":"a.flac","alternative":"h/1.flac","method":"copyto_shorthash"},{"original":"b.flac","alternative":"h/2.flac","method":"copyto_shorthash"}]}' > "$STATE/task21f.json"
+TRYRUN_SEND_TG=0 TRYRUN_CHECK_EXISTS=0 TRYRUN_WORK="$OUT21" restore_try_run all > "$OUT21/stdout3.txt" 2>&1
+grep -qF "归属核对: 2 条" "$L21" \
+  && ok "21f top_dirs 为空时根层文件仍须判（进分母，不得整组跳过）" \
+  || bad "21f 根层文件应进分母（汇总: $(grep '归属' "$L21" | tail -2)）"
+# 判不了数不因加入根层文件而增加 ⇒ 它们确实进了分母而非被划入"判不了"
+UJ_AFTER=$(sed -n 's/.*另有 \([0-9]*\) 条\*\*判不了.*/\1/p' "$L21" | tail -1)
+[ "${UJ_AFTER:-0}" = "${UJ_BASE:-0}" ] \
+  && ok "21g 根层文件不计入『判不了』（判不了数不因它增加: ${UJ_BASE:-0}→${UJ_AFTER:-0}）" \
+  || bad "21g 根层文件被算成判不了（${UJ_BASE:-0}→${UJ_AFTER:-0}，应持平）"
+rm -f "$STATE"/task21f.json
+
 echo
 echo "===== 结果: PASS=$PASS FAIL=$FAIL ====="
 [ "$FAIL" -eq 0 ]
