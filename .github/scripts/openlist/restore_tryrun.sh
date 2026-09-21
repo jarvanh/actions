@@ -801,7 +801,10 @@ restore_try_run() {
   #   直读复核翻案不了 —— 它 stat 的还是同一条带 /./ 的路径。若文件其实躺在去掉
   #   /./ 的位置，"缺失"就是**形态假阴性**，且真跑还原（moveto 原样拼 /./ 进参数）
   #   也会一起失败。抽样对照: 同一条备份，带 /./ 与去掉 /./ 各 stat 一次，
-  #   两者分歧 ⇒ 当场定性。抽样 3 条足够（同一形态批内一致）。
+  #   两者分歧 ⇒ 当场定性。抽样按**父目录去重**各取 1 条（最多 3 个）:
+  #   同一形态批内一致，但同一目录可能整目录取空（判据被污染）——只抽一个目录
+  #   会把定性建立在被污染的样本上（2026-09-21 实测: head -3 三条全落 CloudMusic，
+  #   而它恰是整目录列举取空的那个；b60cfabd 13在/26缺的分异形态反而没抽到）。
   if [ "${TRYRUN_DOTSLASH_MISSING:-0}" -gt 0 ]; then
     _tryr_log "  🔬 ./形态对照: ${TRYRUN_DOTSLASH_MISSING} 条缺失条目的备份路径带 '/./'，抽样 A/B（带 /./ vs 去掉 /./ 各 stat 一次）:"
     while IFS= read -r p; do
@@ -816,7 +819,9 @@ restore_try_run() {
         _tryr_log "     - ${p}"
         _tryr_log "       ↳ 去掉 /./ 后: 不在 ⇒ 两种形态都取不到，按真缺失处理"
       fi
-    done < <(printf '%s' "$TRYRUN_DOTSLASH_LIST" | sort -u | head -3)
+    done < <(printf '%s' "$TRYRUN_DOTSLASH_LIST" | sort -u \
+             | awk -F'/' '{key=""; for(i=1;i<NF;i++) key=key"/"$i; if(!(key in seen)){seen[key]=1; print}}' \
+             | head -3)
     if [ "$TRYRUN_DOTSLASH_MISS" -eq 0 ]; then
       _tryr_log "     ⇒ 抽样 ${TRYRUN_DOTSLASH_HIT} 条全「去掉 /./ 后在」: 本批『备份缺失』定性为 **./ 形态假阴性**（文件未丢，在原位）——" \
                 "还原真跑前必须先修路径归一（或写入侧不再产出 ./），否则这批还原必失败"
