@@ -1015,6 +1015,71 @@ UJ_AFTER=$(sed -n 's/.*另有 \([0-9]*\) 条\*\*判不了.*/\1/p' "$L21" | tail 
   || bad "21g 根层文件被算成判不了（${UJ_BASE:-0}→${UJ_AFTER:-0}，应持平）"
 rm -f "$STATE"/task21f.json
 
+# ============================================================================
+# 场景 22: `./` 形态 A/B 对照探针（V2 真数据版，2026-09-21 run 35564160737 驱动）
+#   真机形态: dirname 在"无子目录"时返回 `.` 拼进 alternative ⇒ 备份路径带 /./；
+#   该形态 lsf/lsjson **全阴**（OpenList 按段查路径，`.` 不是合法目录段），且直读
+#   复核翻案不了（stat 的还是同一条带 /./ 的路径）——52 条判缺 100% 带 /./，
+#   28 条不带的全部"在"。桩复刻: 路径含 /. ⇒ lsf 与 lsjson 一起阴；去掉后正常。
+#   探针做的事: 同一条备份，带 /./ 与去掉 /./ 各 stat 一次，分歧 ⇒ 当场定性。
+#   锁三态: 全在 ⇒ 假阴性 / 全不在 ⇒ 真缺失 / 混合 ⇒ 逐条核，不得一概而论。
+# ============================================================================
+OUT22="$WORK/out22"; OUT22B="$WORK/out22b"; mkdir -p "$OUT22" "$OUT22B"
+mkdir -p "$DST/cm"
+: > "$DST/cm/h1.flac"; : > "$DST/cm/h2.flac"; : > "$DST/cm/h3.flac"   # h4 故意不建
+printf '%s' '{"last_success":"2026-09-21T05:00:00Z","source_path":"SRC/cm","dest_path":"openlist:wopan176Crypt/0/cm","top_dirs":[],"fixed_files":[{"original":"a.flac","alternative":"./h1.flac","method":"move"},{"original":"b.flac","alternative":"./h2.flac","method":"move"},{"original":"c.flac","alternative":"h3.flac","method":"move"}]}' > "$STATE/task22a.json"
+rclone() {
+  # ★ 真机复刻: 带 /./ 的路径一律取不到 —— lsf 列举与 lsjson stat **同阴**，
+  #   这正是直读复核翻案不了 52 条的原因（它 stat 的还是带 /./ 的路径）。
+  #   ⚠️ 形态有两种: 中间段（x/./y）与**结尾段**（x/.，目录列举正是这种）都要阴。
+  case "${2:-}" in */./*|*/.) return 1 ;; esac
+  case "$1" in
+    lsf)
+      case "$2" in
+        "$STATE") (cd "$STATE" && ls) ;;
+        openlist:wopan176Crypt/0) (cd "$DST" && ls) ;;
+        openlist:*) (cd "$DST/${2#openlist:wopan176Crypt/0/}" 2>/dev/null && ls) || return 1 ;;
+        *) (cd "$2" 2>/dev/null && ls) || return 1 ;;
+      esac ;;
+    lsl)
+      case "$2" in "$STATE") return 0 ;; esac
+      return 1 ;;   # 无 ModTime ⇒ 0 行（OneDrive 真机口径），时间窗失效转全量
+    cat) cat "$2" ;;
+    lsjson)
+      [ -f "$DST/${2#openlist:wopan176Crypt/0/}" ] \
+        && { echo '[{"Hashes":{"MD5":""}}]'; return 0; } || return 1 ;;
+    *) WRITE_CALLS+="$1"$'\n'; return 1 ;;
+  esac
+  return 0
+}
+export -f rclone
+TRYRUN_SEND_TG=0 TRYRUN_CHECK_EXISTS=1 TRYRUN_WORK="$OUT22" restore_try_run all > "$OUT22/stdout.txt" 2>&1
+L22="$OUT22/tryrun.log"
+grep -qF "./形态对照: 2 条" "$L22" \
+  && ok "22a 带 /./ 的判缺条目被收集并计数（2 条）" \
+  || bad "22a 应报 ./形态对照: 2 条（日志: $(grep -E '形态对照|备份缺失=' "$L22" | head -3)）"
+grep -qF "去掉 /./ 后: **在**" "$L22" \
+  && ok "22b A/B 分歧被抓住: 带 /./ 阴、去掉后在" \
+  || bad "22b 应出现『去掉 /./ 后: 在』（日志: $(grep -A1 './形态对照' "$L22" | head -4)）"
+grep -qF "定性为 **./ 形态假阴性**" "$L22" \
+  && ok "22c 全在 ⇒ 定性假阴性（文件未丢，真跑 moveto 也会失败）" \
+  || bad "22c 应定性为 ./ 形态假阴性"
+grep -qF "备份: 存在" "$L22" \
+  && ok "22d 不带 /./ 的条目正常判存在（阳性对照，判据本身没坏）" \
+  || bad "22d c.flac（h3.flac）应判备份存在"
+rm -f "$STATE"/task22a.json
+# 22-B: 唯一抽样「去掉后也不在」⇒ 维持真缺失，**不得**再报假阴性
+printf '%s' '{"last_success":"2026-09-21T05:00:00Z","source_path":"SRC/cm","dest_path":"openlist:wopan176Crypt/0/cm","top_dirs":[],"fixed_files":[{"original":"d.flac","alternative":"./h4.flac","method":"move"}]}' > "$STATE/task22b.json"
+TRYRUN_SEND_TG=0 TRYRUN_CHECK_EXISTS=1 TRYRUN_WORK="$OUT22B" restore_try_run all > "$OUT22B/stdout2.txt" 2>&1
+L22="$OUT22B/tryrun.log"
+grep -qF "去掉 /./ 后: 不在" "$L22" \
+  && ok "22e 去掉 /./ 后也不在 ⇒ 如实报不在（不得硬掰成假阴性）" \
+  || bad "22e 应报『去掉 /./ 后: 不在』"
+! grep -qF "形态假阴性" "$L22" \
+  && ok "22f 真缺失时不得输出假阴性结论（探针不得和稀泥）" \
+  || bad "22f 真缺失却被定性为假阴性"
+rm -f "$STATE"/task22b.json
+
 echo
 echo "===== 结果: PASS=$PASS FAIL=$FAIL ====="
 [ "$FAIL" -eq 0 ]
