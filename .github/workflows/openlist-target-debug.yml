@@ -38,6 +38,11 @@ on:
         required: false
         type: string
         default: ""
+      moveto_pilot:
+        description: "⚠️ 写操作实验（默认 0=只读）: 填 N = 把目标端多出的短哈希文件按「大小+md5 对回源端同名 original」配对，取前 N 个 rclone moveto 改名回原名。用于验证『还原回原名』能否被后端接受（改名失败原文件不动，可重复跑）"
+        required: false
+        type: string
+        default: "0"
 
 # 只读调试，独立并发组
 concurrency: openlist-target-debug
@@ -92,6 +97,7 @@ jobs:
           DEST_DIR_INPUT: ${{ inputs.dest_dir }}
           SRC_DIR_INPUT: ${{ inputs.src_dir }}
           DEEP_DIR_INPUT: ${{ inputs.deep_dir }}
+          MOVIETO_PILOT: ${{ inputs.moveto_pilot }}
           OL_CONTAINER: openlist
         run: |
           set -e
@@ -192,6 +198,62 @@ jobs:
           cp "$OL_T" "$WORK/openlist_view.tsv" 2>/dev/null || true
           cp "$WORK/rc_files.txt" "$WORK/rclone_view.txt" 2>/dev/null || true
           cp "$WORK/src_files.txt" "$WORK/source_view.txt" 2>/dev/null || true
+
+          echo ""
+          echo "=========== moveto 试点（写操作实验，moveto_pilot=${MOVIETO_PILOT:-0}）==========="
+          # 为什么: 方法2 只写短哈希名，moveto 回原名留给还原步骤且从未跑过 ——
+          #   original 永缺 ⇒ 每轮重新判缺失 ⇒ 无限重复修复（实测短名堆积机制）。
+          #   本实验验证「后端接不接受改名回原名」—— 这是最终目标（目标端还原回
+          #   源端）的胜负手。改名失败原文件不动，可安全重复跑。
+          case "${MOVIETO_PILOT:-0}" in
+            0|''|*[!0-9]*) echo "未启用（本轮只读）" ;;
+            *)
+              LIMIT="$MOVIETO_PILOT"
+              rclone lsjson "onedrive:$SRC" --files-only \
+                | jq -r '.[] | [.name, (.size|tostring)] | @tsv' > "$WORK/src_ns.tsv"
+              rclone lsjson "openlist:wopan176Crypt/$DEST" --files-only \
+                | jq -r '.[] | [.name, (.size|tostring)] | @tsv' > "$WORK/rc_ns.tsv"
+              comm -23 <(cut -f1 "$WORK/src_ns.tsv" | sort -u) <(cut -f1 "$WORK/rc_ns.tsv" | sort -u) > "$WORK/missing_origs.txt"
+              comm -13 <(cut -f1 "$WORK/src_ns.tsv" | sort -u) <(cut -f1 "$WORK/rc_ns.tsv" | sort -u) > "$WORK/extra_copies.txt"
+              # 配对: 缺失 original 与多出副本按**文件大小**精确匹配（同名 md5 复算
+              # 依赖任务 rel 口径，多任务下口径不止一种，大小匹配更鲁棒）
+              : > "$WORK/pairs.tsv"
+              while IFS= read -r mo; do
+                [ -z "$mo" ] && continue
+                osz=$(awk -F'\t' -v n="$mo" '$1==n{print $2; exit}' "$WORK/src_ns.tsv")
+                [ -z "$osz" ] && continue
+                paired=""
+                while IFS= read -r m; do
+                  [ -z "$m" ] && continue
+                  grep -qxF "$m" "$WORK/extra_copies.txt" || continue
+                  msz=$(awk -F'\t' -v n="$m" '$1==n{print $2; exit}' "$WORK/rc_ns.tsv")
+                  [ "$msz" = "$osz" ] && { paired="$m"; break; }
+                done < "$WORK/extra_copies.txt"
+                [ -n "$paired" ] && printf '%s\t%s\t%s\n' "$mo" "$paired" "$osz" >> "$WORK/pairs.tsv"
+              done < "$WORK/missing_origs.txt"
+              echo "配对成功: $(wc -l < "$WORK/pairs.tsv" | tr -d ' ')/$(wc -l < "$WORK/missing_origs.txt" | tr -d ' ') 对（大小唯一匹配）"
+              head -n "$LIMIT" "$WORK/pairs.tsv" | while IFS=$'\t' read -r orig hash osz; do
+                [ -z "$orig" ] && continue
+                echo "▶ moveto: $hash → $orig (${osz}B)"
+                rclone moveto "openlist:wopan176Crypt/$DEST/$hash" "openlist:wopan176Crypt/$DEST/$orig" \
+                  > "$WORK/mv_last.log" 2>&1
+                mrc=$?
+                tail -2 "$WORK/mv_last.log" | sed 's/^/    /'
+                if [ "$mrc" -ne 0 ]; then
+                  echo "  ❌ VERDICT: 后端拒绝改名回原名（rc=$mrc，原短名文件未动）"
+                elif rclone lsjson "openlist:wopan176Crypt/$DEST/$orig" >/dev/null 2>&1; then
+                  echo "  ✅ VERDICT: 成功 —— 原名文件已就位、短名已消失"
+                else
+                  echo "  ⚠️ VERDICT: moveto rc=0 但原名查不到 —— 需人工核（可能是列表缓存滞后，等 15s 再查）"
+                  sleep 15
+                  rclone lsjson "openlist:wopan176Crypt/$DEST/$orig" >/dev/null 2>&1 \
+                    && echo "  ✅ 复查: 原名文件已就位" \
+                    || echo "  ❌ 复查: 仍查不到原名文件"
+                fi
+              done
+              echo "试点完成（$LIMIT 个）。VERDICT 见上。"
+              ;;
+          esac
 
       - name: 上传对比数据
         if: always()
