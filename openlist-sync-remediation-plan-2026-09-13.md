@@ -3825,6 +3825,20 @@ mkdir 409(原目录 kate-bloom) → API 200 → 复核不存在（假成功，§
     128 断言（反转 125/3 红），波及面 38/0、62/0、32/0。
   - **遗留**: marker 丢条目（148b5c87）另案；存量 52 条污染条目待清理（金丝雀核销）；
     端到端复验等修法进生产（主轮 workflow 暂被用户禁用）。
+- 2026-09-21（+08，晚）· **★★★ 永动机双路径全景闭合: 「marker 丢条目」证伪 + B 路径（父修子删）修法落地（§14.20 补充 / §14.19 勘误）**
+  - 主轮日志逐环取证: 23:40 子任务修复 26 个 → **00:04:27.8 父级最终 sync 把它们删了**
+    （A 路径: `./` 规则失配，00:17 修复清单「缺失 39」为证）→ 00:18-00:24 父级重修
+    （92659aaa 系，rel 带前缀 md5 不同）→ 00:55 写进父 marker b60cfabd（39 条完好）。
+  - **「marker 丢条目 / 92659aaa 孤儿」证伪**（marker 探针 run `35586106540`）:
+    148b5c87 是 **aliyundriveCrypt** 目标的 marker（日志原文就是 0 条，完好），
+    99ee711f（wopan176Crypt）fixed_count=26 完好 —— 之前把日志错配到了别的目标的 marker 上。
+  - **B 路径修法落地**: 父级修复的 `子目录/短名` 被子目录 sync 无保护删除（23:05-23:15
+    Deleted 行）—— 新增 `_load_parent_marker_raw` / `_sync_parent_guard_extract`
+    （sync_marker.sh）+ 串行/并行分发点填充 `SYNC_PARENT_GUARD_JSON`（task_engine.sh）
+    + filter 构建器第三来源（file_fix_pipeline.sh）。回归: 场景 10 共 9 断言 47/0
+    （反转 45/2），crosstalk 16/0、autosplit 31/0、no_orphans 18/0。
+  - 下一步: 收尾清理增强（原名落位后删短名+剔记录，治「文件数越堆越多」的根）+
+    端到端复验。
 
 ---
 
@@ -4474,6 +4488,20 @@ wopan 平台侧行为（有「批次性假成功」前科）。
 - CloudMusic 目录列举取空本身不可能为真（该目录有 827 个已同步正常文件）
   ⇒ **该目录的读取视角已被证明不可信**，其 26 条「缺失」暂不可定性。
 
+**⭐⭐ 勘误（2026-09-21 晚，marker 原文探针 run `35586106540` 实锤）**:
+上面「第三个 bug（日志 26 / 盘上 0）」**不成立** —— 是**跨目标错配**的误判。
+backup 源本轮轮转了两个目标，CloudMusic 各跑了一次:
+
+| marker | dest_path | 保存时刻 | 内容 |
+|---|---|---|---|
+| `backup_CloudMusic_148b5c87` | `openlist:aliyundriveCrypt/…` | 23:13:20 | **修复合计 0 个**（日志原文就是 0，不是 26）· fixed_count=0 完好 |
+| `backup_CloudMusic_99ee711f` | `openlist:wopan176Crypt/…` | 00:04:27 | **修复合计 26 个（本次 26 + 继承 26）· fixed_count=26 完好** |
+
+当初把「修复合计 26」的日志错配到 148b5c87 头上。**marker 记录链没有丢条目**。
+「92659aaa 系孤儿」同样证伪: 00:18-00:24 的修复是**父任务 backup（wopan176）**
+修复管线的产出（rel 带子目录前缀 ⇒ md5 不同于子任务批次的 75f2fa56 系），
+记录在**父 marker b60cfabd**（00:55:12 保存，修复合计 39 = 本次 39 + 继承 39）。
+
 **复扫定性指引（主轮结束后）**:
 - CloudMusic: 换真值判据复核（其读取视角已坏）—— 以 fix-check/主轮容器口径
   列举该目录，区分「文件真不在」vs「try run 视角坏了」；
@@ -4538,9 +4566,28 @@ wopan 平台侧行为（有「批次性假成功」前科）。
 - 波及面: `test_fix_pipeline_optimizations` 38/0（沿用计数）、`test_hash_dir_fallback` 62/0
   （方法链）、`test_fix_check` 32/0（落盘复核）；`test_restore_real_local` 本机跳过（CI 有）。
 
+**⭐ 补充: 「重复修复」永动机实为双删除路径（同日晚，主轮日志逐环取证 + marker 探针）**:
+
+| 路径 | 删除者 | 机制 | 修法 |
+|---|---|---|---|
+| **A** | **父级最终完整 sync**（00:04:27.8） | 子任务 23:40 修复的 26 个（alternative `./短名`，rebase 后 `- /CloudMusic/./短名`）规则失配 ⇒ 刚修好的文件被当多余文件删 ⇒ 00:17 父级修复清单「缺失 39」为证 | `_norm_rel_path`（已落地: 归一化后 `- /CloudMusic/短名` 可匹配） |
+| **B** | **子目录 sync**（日志 23:05-23:15 的 Deleted 行） | 父级修复的 `子目录/短名` 记录在**父 marker**，子目录 sync 的 filter 只读子任务 marker ⇒ 无保护被删 | **SYNC_PARENT_GUARD_JSON**: 子任务分发前从父 marker 提取落在本子目录的条目（`_sync_parent_guard_extract`，父 marker 只 cat 一次），rebase 后并入子任务 filter |
+
+- B 路径落地: sync_marker.sh `_load_parent_marker_raw` / `_sync_parent_guard_extract`
+  + task_engine.sh 串行/并行两处分发点（`_PAR_GUARD_RAW` 每层只 cat 一次）+ depth=0 重置
+  + filter 构建器第三来源。回归锁: `test_fix_pipeline_optimizations` 场景 10（9 断言，
+  反转验证 45/2 红）。波及面复跑: crosstalk 16/0、autosplit 31/0、no_orphans 18/0。
+- 语义澄清（重要）: filter 保护替代形态的**前提**是「原名文件目标端还没有」——此时短名
+  是唯一落盘副本，删了就白修；一旦原名落位（sync 补传成功），替代形态变冗余，应该清掉
+  （carry-forward 的「已对齐自动剔除」只清 marker 记录、不清远端短名文件 ⇒ 历史孤儿堆积
+  正是用户最初看到「文件数远超远端」的来源之一）。**收尾清理（原名落位后删短名+剔记录）**
+  是下一步的增强项。
+
 **遗留（另案，不随本项收口）**:
-- marker 丢条目 bug（148b5c87「日志 26 / 盘上 0」，§14.19）——`save_sync_marker` 链路未查完；
-- 存量 52 条污染条目待清理（try run 金丝雀核销）；孤儿产物（92659aaa 系，无 marker 指向）处置待定；
+- ~~marker 丢条目 bug（148b5c87「日志 26 / 盘上 0」，§14.19）~~ **已证伪（同日晚勘误）**:
+  跨目标错配，99ee711f 完好 26 条；「92659aaa 孤儿」亦证伪（在父 marker b60cfabd）；
+- 存量 52 条污染条目待清理（try run 金丝雀核销）+ 历史孤儿短名文件的收尾清理
+  （原名落位后删短名 + 剔记录，见上方「语义澄清」）；
 - 端到端复验（V3 + debug 轮对比: 修后一轮应无 Deleted 修复产物、备份计数稳定）等修法进生产后做。
 
 ---

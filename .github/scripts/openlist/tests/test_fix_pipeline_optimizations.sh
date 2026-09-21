@@ -284,6 +284,40 @@ grep -q '_fix_event_fail "$retry_orig"' "$_SRC" && ok "9i 重试失败分支埋�
 grep -q '_fix_event DEFERRED "$leftover_orig"' "$_SRC" && ok "9j 轮数耗尽埋点（顺延）" || bad "9j: DEFERRED 埋点缺失"
 rm -f "$_FIX_EVENT_LOG"
 
+# ===== 场景10: 父级修复记录守卫（防「父修子删」，B 路径修法，2026-09-21）=====
+# run 35542821449 实锤: 父任务修好的 CloudMusic/92659aaa.flac 记录在**父 marker**，
+# 而子目录 sync 的 filter 只读子任务 marker ⇒ 父级修的短名在子 sync 看来是
+# "源端没有的多余文件"被删 ⇒ 下轮重修（重复修复永动机的 B 路径）。
+# 修法: 子任务分发前把父 marker 里落在本子目录的条目 rebase 成子任务视角
+# （_sync_parent_guard_extract），由 filter 构建器并入（SYNC_PARENT_GUARD_JSON）。
+# 锁: rebase 正确性 / 非本子目录条目不串入 / 空·非法输入不炸 / 规则可匹配实际落点。
+unset -f jq   # 场景 8 换过 jq stub，本场景要真 jq
+source "$_REPO_ROOT/.github/scripts/openlist/sync_marker.sh" 2>/dev/null
+_GUARD_MARKER='{"last_success":"2026-09-21T00:55:00Z","source_path":"onedrive:backup","dest_path":"openlist:wopan176Crypt/backup","fixed_files":[{"original":"CloudMusic/06-song.flac","alternative":"CloudMusic/92659aaa.flac","method":"方法2"},{"original":"巫氏文化/x.doc","alternative":"巫氏文化/d349ecd4.doc","method":"方法2"},{"original":"emby/live/x.json","alternative":"./short.json","method":"方法2"}]}'
+OUT10=$(_sync_parent_guard_extract "$_GUARD_MARKER" "CloudMusic")
+[ "$(echo "$OUT10" | jq 'length')" = "1" ] && ok "10a 只提取落在本子目录的条目（1 条）" || bad "10a: $OUT10"
+[ "$(echo "$OUT10" | jq -r '.[0].alternative')" = "92659aaa.flac" ] && ok "10b alternative 已 rebase 掉子目录前缀" || bad "10b: $(echo "$OUT10" | jq -r '.[0].alternative')"
+[ "$(echo "$OUT10" | jq -r '.[0].original')" = "06-song.flac" ] && ok "10c original 同步 rebase（子任务视角）" || bad "10c"
+OUT10B=$(_sync_parent_guard_extract "$_GUARD_MARKER" "emby")
+[ "$(echo "$OUT10B" | jq 'length')" = "0" ] && ok "10d 非本子目录形态（./short.json）不串入" || bad "10d: $OUT10B"
+[ "$(_sync_parent_guard_extract "" "x")" = "[]" ] && ok "10e 空父 marker → []" || bad "10e"
+[ "$(_sync_parent_guard_extract "not-json" "x")" = "[]" ] && ok "10f 非法 JSON → []（不炸）" || bad "10f"
+
+# 10g~10i filter 构建器并入 guard: 生成规则含 rebase 后的路径（可匹配实际落点）
+_load_marker_fixed_files() { MARKER_FIXED_COUNT=0; MARKER_FIXED_FILES="[]"; MARKER_FIX_BLACKLIST="{}"; }
+source_path="onedrive:backup"
+dest_path="openlist:wopan176Crypt/backup"
+task_name="backup_CloudMusic"
+extra_args=()   # filter 构建器会向它追加 --filter-from（set -u 下必须已定义）
+LOG_FILENAME="$WORK/exc10.log"; : > "$LOG_FILENAME"
+SYNC_PARENT_GUARD_JSON=$(_sync_parent_guard_extract "$_GUARD_MARKER" "CloudMusic")
+_sync_fixed_files_exclusion >/dev/null 2>&1
+_EXC="/tmp/${task_name}_fixed_exclude_$$.txt"
+grep -qF -- "- /92659aaa.flac" "$_EXC" && ok "10g 父级修的短名进了 filter 保护（rebase 后匹配实际落点，子 sync 不再删）" || bad "10g: $(head -3 "$_EXC" 2>/dev/null)"
+grep -qF -- "- /06-song.flac" "$_EXC" && ok "10h original 同样入保护" || bad "10h"
+! grep -qF -- "- /d349ecd4.doc" "$_EXC" && ok "10i 别的子目录条目不进本子任务 filter" || bad "10i"
+rm -f "$_EXC" "$LOG_FILENAME"
+
 echo "-----"
 echo "PASS=$PASS FAIL=$FAIL"
 # $WORK 交给 EXIT trap 清理：此处删掉自身 CWD 会让后续 shell 报 getcwd 错误

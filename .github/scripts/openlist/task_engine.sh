@@ -942,6 +942,9 @@ _sync_subdirs_parallel_run() {
   [ "$_par" -lt 2 ] && _par=2
   local _par_dir="/tmp/ol_par_$(date +%s)_$$"
   mkdir -p "$_par_dir"
+  # 父 marker 原文只 cat 一次，循环内按 subdir 本地筛选（防「父修子删」B 路径修法）
+  local _PAR_GUARD_RAW
+  _PAR_GUARD_RAW=$(_load_parent_marker_raw "$task_name" "$dest_path")
   declare -A _w_subdir=()
   declare -A _w_pid=()
   local _idx=0 _running=0 _pid
@@ -962,6 +965,10 @@ _sync_subdirs_parallel_run() {
     _idx=$((_idx + 1))
     total_subtasks=$((total_subtasks + 1))
     local _safe="${task_name}_${subdir//\//_}"
+    # 父级修复记录守卫（防「父修子删」）: 把父 marker 里落在本子目录的修复条目
+    #   rebase 成子任务视角，供子任务 sync 的 filter 并入保护（B 路径修法）。
+    #   worker 是子 shell，此处赋值后分发的 worker 自动继承
+    SYNC_PARENT_GUARD_JSON=$(_sync_parent_guard_extract "${_PAR_GUARD_RAW:-}" "$subdir")
     echo "=== 子目录同步(并行): ${_safe} ==="
     subdir_status_map["$subdir"]="syncing"
     _sync_par_render
@@ -1045,6 +1052,9 @@ _sync_task_impl() {
     # 方法假成功黑名单累计器（B: 失败记忆）与本轮已修复文件表
     GLOBAL_FIX_BLACKLIST_JSON="{}"
     FIXED_THIS_RUN=()
+    # 父级修复记录守卫（防「父修子删」，见 _load_parent_marker_raw）: 顶级任务无父，
+    #   重置为空防跨对残留；子目录分发处按 subdir 重新填充
+    SYNC_PARENT_GUARD_JSON="[]"
   fi
 
   local max_depth=10
@@ -1272,6 +1282,9 @@ _sync_task_impl() {
     export SUBDIR_PARALLEL_DONE
     _sync_subdirs_parallel_run
   else
+  # 父 marker 原文只 cat 一次，循环内按 subdir 本地筛选（防「父修子删」B 路径修法）
+  local _PAR_GUARD_RAW
+  _PAR_GUARD_RAW=$(_load_parent_marker_raw "$task_name" "$dest_path")
   while IFS= read -r subdir; do
     [ -z "$subdir" ] && continue
     # P2 优雅到站: 预算将尽不再开新子目录（已完成的子目录 marker 已各自落盘）。
@@ -1285,6 +1298,8 @@ _sync_task_impl() {
     total_subtasks=$((total_subtasks + 1))
     subtask_idx=$((subtask_idx + 1))
     local safe_subtask="${task_name}_${subdir//\//_}"
+    # 父级修复记录守卫（防「父修子删」）: 同并行分发处（B 路径修法）
+    SYNC_PARENT_GUARD_JSON=$(_sync_parent_guard_extract "${_PAR_GUARD_RAW:-}" "$subdir")
     echo "=== 子目录同步: ${safe_subtask} ==="
     subdir_status_map["$subdir"]="syncing"
     PROGRESS_PHASE_INFO="$(_render_subdir_phase_tree)"

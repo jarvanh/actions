@@ -284,7 +284,8 @@ _sync_fixed_files_exclusion() {
         fi
       fi
     done < <(jq -rs 'add | unique_by(.original // "") | .[] | [(.original // ""), (.alternative // ""), (.method // "")] | @tsv' \
-      <(echo "${MARKER_FIXED_FILES:-[]}") <(echo "${GLOBAL_FIXED_FILES_JSON:-[]}") 2>/dev/null)
+      <(echo "${MARKER_FIXED_FILES:-[]}") <(echo "${GLOBAL_FIXED_FILES_JSON:-[]}") \
+      <(echo "${SYNC_PARENT_GUARD_JSON:-[]}") 2>/dev/null)
     if [ -s "$fixed_exclude_file" ]; then
       sort -u "$fixed_exclude_file" -o "$fixed_exclude_file"
       extra_args+=("--filter-from" "$fixed_exclude_file")
