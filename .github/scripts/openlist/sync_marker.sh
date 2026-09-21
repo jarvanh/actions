@@ -34,6 +34,42 @@ get_marker_path() {
   echo "${SYNC_STATE_DIR}/${task_name}_${dest_hash}.json"
 }
 
+# ===== 父级修复记录 → 子任务 filter 保护（防「父修子删」，2026-09-21）=====
+# 为什么需要: 父任务修复管线写的 alternative 相对**父根**（如 CloudMusic/92659aaa.flac），
+#   记录在**父 marker**；而子目录 sync 的 filter 只读本子任务 marker —— 父级修好的
+#   短名文件在子 sync 看来是「源端没有的多余文件」，会被 rclone sync 删掉。
+#   run 35542821449 实锤双路径循环（详见计划 §14.20）:
+#     A. 子任务修复的 `./短名` 规则失配 → 父级最终 sync 删 → 已由 _norm_rel_path 修掉；
+#     B. 父级修复的 `子目录/短名` → 子目录 sync 的 filter 不含父 marker 记录 → 删
+#        （日志 23:05-23:15 的 Deleted 行）。本函数即 B 路径的修法。
+# 用法（两步，父 marker 只做一次远端 cat）:
+#   raw=$(_load_parent_marker_raw <父task_name> <父dest_path>)
+#   SYNC_PARENT_GUARD_JSON=$(_sync_parent_guard_extract "$raw" <subdir>)
+_load_parent_marker_raw() {
+  local p_task="$1" p_dest="$2"
+  local mp
+  mp=$(get_marker_path "$p_task" "$p_dest")
+  rclone cat "$mp" 2>/dev/null || true
+}
+
+# 从父 marker 原文筛出 alternative 落在 <subdir>/ 下的条目，rebase 成子任务视角。
+# 只取 alternative（保护的目的是「子 sync 别删父级修的短名」）；original 不取 ——
+# 原名文件源端存在，子 sync 补传它正是想要的收尾，不该排除。
+_sync_parent_guard_extract() {
+  local raw="$1" subdir="$2"
+  local out=""
+  if [ -n "$raw" ]; then
+    out=$(printf '%s' "$raw" | jq -c --arg pre "${subdir}/" '
+      [(.fixed_files // [])[]
+       | select(((.alternative // "") != "") and (.alternative | startswith($pre)))
+       | {original: ((.original // "") | ltrimstr($pre)),
+          alternative: (.alternative | ltrimstr($pre))}]' 2>/dev/null) || out=""
+  fi
+  # 空 marker / jq 解析失败统一兜底成合法空数组，消费方不必判空
+  [ -z "$out" ] && out="[]"
+  printf '%s\n' "$out"
+}
+
 # 统一 marker 落盘: pretty-print（缩进格式化）后再 rcat 上传
 # 中间变量一律 jq -c 紧凑格式（构建/合并省事），只有落盘这一步格式化，
 # 保证 onedrive 上的 marker 始终是人可读的结构化 JSON
