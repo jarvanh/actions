@@ -188,6 +188,49 @@ OPENLIST_CARRY_DELETE_ALIGNED=0 _carry_forward_fixed "openlist:dst" "$M8" >/dev/
 [ ! -s "$DELFILE" ] && ok "8i 开关=0 ⇒ 收尾删除关闭（回退到只剔记录）" || bad "8i: $(cat "$DELFILE")"
 rm -f "$DELFILE"
 
+# ===== 场景 9: 病灶 C——游标拒写时仍持久化修复记录（2026-09-21，§14.21）=====
+# 旧行为: save_sync_marker 拒写（目标端 < 源端，防假成功）直接 return 1，本轮
+# fold/修复落盘记录随内存丢失 → 下轮 initial sync 无 filter 保护 → 产物被删
+# → 重 fold（接力轮 35629676323 实证: fold 97 → 拒写 → 删 → 重 fold 97）。
+# 新行为: 拒写分支立即 save_fix_state_marker——只合并 fixed_files/fix_blacklist，
+# 保留旧 marker 其余字段（游标不被触碰）；无旧 marker 时建不含 last_success 的
+# 骨架（不会误触发 24h 跳过判断）。
+echo 0 > "$RCAT_N"; : > "$RCAP_FILE"
+rclone() {
+  case "$1" in
+    cat) cat "$MARKER_FILE" ;;
+    rcat) cat > "$RCAP_FILE"; _n=$(cat "$RCAT_N"); echo $((_n+1)) > "$RCAT_N" ;;
+    lsjson) echo '[]' ;;
+    size)
+      case "$2" in
+        onedrive:src*) echo '{"bytes":1000,"count":42}' ;;
+        *) echo '{"bytes":900,"count":40}' ;;
+      esac ;;
+    lsf) printf 'dir1/\n' ;;
+    *) return 0 ;;
+  esac
+}
+: > "$MARKER_FILE"
+GLOBAL_FIXED_FILES_JSON='[{"original":"fold/a.jpg","alternative":"f27becd6/0 (1).jpg","method":"batch_fold","size_bytes":1487623}]'
+GLOBAL_FIX_BLACKLIST_JSON='{"fold/a.jpg|copyto_original":1}'
+SR9=$(save_sync_marker "onedrive:src" "openlist:dst" "taskZ" 2>&1); RC9=$?
+[ "$RC9" -ne 0 ] && ok "9a 拒写场景返回非零（游标未写）" || bad "9a: rc=$RC9"
+echo "$SR9" | grep -q "拒绝写入同步标记" && ok "9b 拒写日志在" || bad "9b: $SR9"
+[ "$(rcat_count)" = "1" ] && ok "9c 拒写分支触发修复状态写入（恰好一次）" || bad "9c: [$(rcat_count)]"
+PAY9=$(cat "$RCAP_FILE")
+[ "$(echo "$PAY9" | jq -r '.fixed_count')" = "1" ] && ok "9d fold 记录已持久化" || bad "9d: $PAY9"
+echo "$PAY9" | jq -e 'has("last_success") | not' >/dev/null && ok "9e 骨架不含 last_success（不触发跳过判断）" || bad "9e: $PAY9"
+[ "$(echo "$PAY9" | jq -r '.fixed_files[0].alternative')" = "f27becd6/0 (1).jpg" ] && ok "9f alternative 原样保留（供下轮 filter）" || bad "9f"
+echo "$PAY9" | jq -e '.fix_blacklist | has("fold/a.jpg|copyto_original")' >/dev/null && ok "9g 黑名单一并持久化" || bad "9g"
+echo "$SR9" | grep -q "已保存修复状态" && ok "9h 拒写分支保存日志可见（可观测）" || bad "9h: $SR9"
+# 9i-9j: 有旧 marker——只并修复字段，游标字段（last_success 等）不被触碰
+echo 0 > "$RCAT_N"; : > "$RCAP_FILE"
+printf '%s' '{"last_success":"2020-01-01T00:00:00Z","source_count":18031,"fixed_files":[],"fix_blacklist":{}}' > "$MARKER_FILE"
+save_sync_marker "onedrive:src" "openlist:dst" "taskZ" >/dev/null 2>&1
+PAY9B=$(cat "$RCAP_FILE")
+[ "$(echo "$PAY9B" | jq -r '.last_success')" = "2020-01-01T00:00:00Z" ] && ok "9i 旧 marker last_success 保留（游标不前进）" || bad "9i: $PAY9B"
+[ "$(echo "$PAY9B" | jq -r '.fixed_count')" = "1" ] && ok "9j 修复记录并入旧 marker" || bad "9j"
+
 echo "-----"
 echo "PASS=$PASS FAIL=$FAIL"
 rm -f "$MARKER_FILE" "$RCAP_FILE" "$RCAT_N"

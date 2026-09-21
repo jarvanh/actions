@@ -3883,6 +3883,17 @@ mkdir 409(原目录 kate-bloom) → API 200 → 复核不存在（假成功，§
   - 同轮其余 Deleted 定类为正常: 源端已删清理 ×14、写探针自清理 ×3。
   - 接力轮正面数据: 修复新落盘 343、历史污染记录 313 条全部「已对齐自动剔除」
     （原名落位后清理，A 路径欠账在快速自愈）; failure 仍是 330min step 超时。
+- 2026-09-21（+08，深夜 Ⅴ）· **病灶 C 修法落地: 拒写分支立即持久化修复记录（§14.21）**
+  - 用户拍板「分离持久化」。接线点 = `save_sync_marker` 拒写分支内部调
+    `save_fix_state_marker`（现成函数: 只并 fixed_files/fix_blacklist、保留旧 marker
+    其余字段、无旧 marker 建不含 last_success 的骨架不触发跳过）。**不依赖**
+    `sync_task` 尾部既有兜底（task_engine.sh:1554）——它要等 `_sync_task_impl`
+    返回，330min 超时杀在中途时不可达（两轮生产日志「已保存修复状态」0 次实证）。
+  - 回归: `test_marker_fixed` 场景 9 共 10 断言 51/0（反转撤调用 43/8 红）;
+    波及面 fix_pipeline 47/0、hash_dir_fallback 62/0、restore_tryrun 128/0、
+    crosstalk 16/0。
+  - 效果预期: 下一轮起 fold/修复产物即使遇到拒写也有跨轮 filter 保护，
+    「fold → 拒写 → 删 → 重 fold」循环终止。
 
 ---
 
@@ -4672,7 +4683,16 @@ backup 源本轮轮转了两个目标，CloudMusic 各跑了一次:
 
 **影响面**: 每轮 fold 97 个 → 删 → 重 fold 的纯浪费（传输 + 时间）; 该类任务内走修复管线的文件同理（接力轮 343 个新落盘中部分属此任务者下轮同样裸奔）。
 
-**修法方向（待用户拍板，属 marker 语义变更）**: fixed_files 与同步游标**分离持久化**——拒写游标的分支仍合并保存 fixed_files（marker 的修复记录字段与任务进度字段本就独立; 复用现有 marker 读写与父级守卫链路，改动面小）; 或 fold 记录改走跨轮独立文件（如 `/logs/sync_state/fixed_orphans.jsonl`）。倾向前者。
+**修法（已落地，2026-09-21 深夜，用户拍板「分离持久化」）**: `save_sync_marker` 拒写分支
+立即调用 `save_fix_state_marker` 持久化修复记录——它本就是为「存在缺失的场景」设计的
+（只合并 fixed_files/fix_blacklist，保留旧 marker 其余字段；无旧 marker 时建不含
+last_success 的骨架，不会误触发 24h 跳过判断），与「本次同步未完成」语义不冲突。
+选择在**拒写分支内部立即保存**而非依赖 `sync_task` 尾部的既有兜底（task_engine.sh:1554）:
+后者要等 `_sync_task_impl` 返回才执行，330min step 超时把任务杀在中途时永远轮不到它
+（两轮生产日志「已保存修复状态」0 次即为实证）。回归锁: `test_marker_fixed.sh` 场景 9
+（10 断言: 拒写返回非零 / fold 记录持久化 / 骨架不含 last_success / alternative 原样
+保留 / 黑名单并入 / 旧 marker 游标字段不触碰; 反转验证撤调用 43/8 红）。
+波及面: fix_pipeline 47/0、hash_dir_fallback 62/0、restore_tryrun 128/0、crosstalk 16/0。
 
 **旁证定类（同轮其余 Deleted 均为正常行为）**: 草榴 `IMGho1606N(3).jpg` × 14 = 源端已删的正常同步清理（同秒大量源端 `object not found`，OneDrive 抖动）; `olprobe_*.txt` × 3 = 写探针自清理。
 
