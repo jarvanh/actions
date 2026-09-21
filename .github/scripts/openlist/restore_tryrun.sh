@@ -278,9 +278,13 @@ _tryr_split_glob() {
 #   根本没有这个顶层目录，这条就是**从别处串/继承来的**。
 #   ⚠️ 只报**可疑**、不当定案: top_dirs 是快照，源端事后新增目录会误报；故措辞是
 #   "与 top_dirs 不符"，不下"串写"结论 —— 定性要由直读等更硬的判据来做。
-#   无目录的条目（original 直接是文件名，属该 marker 根层）恒判 OK。
+#   无目录的条目（original 直接是文件名，属该 marker 根层）恒判 OK —— **即便该 marker
+#   的 top_dirs 为空也照样判**: top_dirs 空只是"源端根下没有子目录"（整目录都是散文件，
+#   实测 backup_CloudMusic 就是这种形态），根层文件归本根是恒真的，不该被排除在分母外
+#   （2026-09-21 主轮复扫: 80 条只判了 54 条，缺的 26 条全是这类根层文件）。
 #   入参: <original>（查表前须先 _tryr_owner_prepare <top_dirs文本>）
 #   出参: stdout = "OK" 或 "⚠️ 顶层 X 不在 top_dirs（疑似串写/继承）"
+#      或 "（无 top_dirs，无法判）" —— 只有**带目录且 top_dirs 为空**才是无法判。
 # ⚠️ 实现两条硬约束:
 #   1. **不得用 `printf | grep -q`**（热路径禁令，见 test 场景 8g）: grep -q 命中即退出
 #      ⇒ 管道断裂，4500 条会刷出上万次 "Broken pipe"（实测把核对模式拖过 36 分钟撞
@@ -436,8 +440,15 @@ _tryr_plan_one() {
   _tryr_log "      分类: ${kind} · 备份: ${be} · 原路径: ${oe} · 源端: ${se}"
   # 归属判据（V6）: 只在**可疑**时打印一行 —— 合格的条目不刷屏，
   # 但一旦有串写，它会逐条出现在报告里并进汇总计数
-  local own=""
-  if [ "${#_TRYR_OWNER_SET[@]}" -gt 0 ]; then
+  local own="" _tryr_owner_can=0
+  # 能否判: 根层文件（无目录）恒可判（归本根是恒真的）；带目录的条目才需要 top_dirs
+  # 表非空。旧实现要求"表非空"才判 ⇒ top_dirs 为空的整组根层文件被排除在分母外，
+  # 明明判得了却报成"未验证"（2026-09-21 主轮 80 条只判 54 条）。
+  case "$orig" in
+    */*) [ "${#_TRYR_OWNER_SET[@]}" -gt 0 ] && _tryr_owner_can=1 || _tryr_owner_can=0 ;;
+    *)   _tryr_owner_can=1 ;;
+  esac
+  if [ "$_tryr_owner_can" = "1" ]; then
     TRYRUN_OWNER_CHECKED=$((TRYRUN_OWNER_CHECKED + 1))
     own=$(_tryr_owner_check "$orig")
     case "$own" in
@@ -446,6 +457,8 @@ _tryr_plan_one() {
           TRYRUN_OWNER_SUSPECT=$((TRYRUN_OWNER_SUSPECT + 1))
           TRYRUN_OWNER_LIST+="${orig}"$'\n' ;;
     esac
+  else
+    TRYRUN_OWNER_UNJUDGE=$((TRYRUN_OWNER_UNJUDGE + 1))
   fi
   _tryr_log "      将执行: ${exec_cmd}"
   if [ "$kind" = "split" ]; then
@@ -518,6 +531,9 @@ restore_try_run() {
   TRYRUN_SRC_CTRL_POS=0; TRYRUN_SRC_CTRL_NEG=0; TRYRUN_SRC_CTRL_LIST=""
   # 归属可疑计数（V6）: 条目顶层目录不在本 marker 的 top_dirs 里
   TRYRUN_OWNER_SUSPECT=0; TRYRUN_OWNER_LIST=""; TRYRUN_OWNER_CHECKED=0
+  # 判不了的条数（带目录但 marker 无 top_dirs）: 与"可疑"分开计，否则"未验证"只剩
+  # 一个总数，读者分不清是"全判了且干净"还是"一条都没判"
+  TRYRUN_OWNER_UNJUDGE=0
   # 备份缺失目录 → 源端同层目录（供结构探针打两侧形状对照）
   declare -gA _TRYR_SRC_OF_MDIR=()
   _TRYR_SRC_READABLE=()
@@ -743,6 +759,12 @@ restore_try_run() {
     fi
   else
     _tryr_log "  ⚠️ 归属核对: 0 条可判（marker 缺 top_dirs 字段）⇒ **未验证**，不可当作'归属干净'"
+  fi
+  # 部分判不了也必须说清: "已判 N 条干净"和"另有 M 条根本没判"是两件事，
+  # 只报 N 会让读者以为覆盖完整（2026-09-21 教训: 报了 54 条干净，实为 80 条里
+  # 26 条没判，且没判的那批恰恰全是根层文件）
+  if [ "${TRYRUN_OWNER_UNJUDGE:-0}" -gt 0 ]; then
+    _tryr_log "  ⚠️ 另有 ${TRYRUN_OWNER_UNJUDGE} 条**判不了**（带目录但所属 marker 无 top_dirs）⇒ 未覆盖"
   fi
   if [ "$TRYRUN_MISSING" -gt 0 ]; then
     _tryr_log "  ⚠️ 备份缺失清单（真跑会 FAIL: 替代文件可能已不存在）:"
