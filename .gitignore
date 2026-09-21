@@ -6,3 +6,4 @@ __pycache__/
 # 该目录，子级的否定规则不生效。
 .workbuddy-ai/*
 !.workbuddy-ai/skills/
+.trae/
