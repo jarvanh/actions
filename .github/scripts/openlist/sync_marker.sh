@@ -4,6 +4,11 @@
 # 功能:
 #   - 跳过短期内已成功同步的 task（默认 24 小时）
 #   - 检测源端大小异常减小（可能数据丢失），发送警告并跳过
+#   - 修复记录生命周期管理（fixed_files）:
+#       carry-forward 继承（未对齐条目跨轮保留）→ 已对齐收尾（原名落位且 size
+#       一致 ⇒ 删冗余替代形态 + 剔记录，防短名孤儿无限堆积）→ 父级守卫提取
+#       （子任务 sync 的 filter 并入父 marker 中落在本子目录的记录，防「父修子删」，
+#       见 _load_parent_marker_raw / _sync_parent_guard_extract）
 #
 # 标记存储路径: onedrive:/logs/sync_state/<task_name>_<dest_hash>.json
 # JSON 字段: last_success, source_path, dest_path, source_bytes, source_count,
@@ -18,6 +23,7 @@
 # 依赖: utils.sh (format_bytes), telegram.sh (send_telegram_message)
 # 依赖: telegram/tg_notify.sh (escape_html, tree_* — 排版助手真源，L0 层 source)
 # 依赖环境变量: FORCE_SYNC — 为 "true" 时跳过所有标记检查
+#   OPENLIST_CARRY_DELETE_ALIGNED — 已对齐收尾删除开关（=0 只剔记录不删远端短名，默认开）
 
 # 标记存储目录
 SYNC_STATE_DIR="onedrive:/logs/sync_state"
