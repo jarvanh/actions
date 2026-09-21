@@ -613,6 +613,8 @@ rebuild_source_from_target() {
     while IFS=$'\t' read -r line_orig line_alt; do
       [ -z "$line_orig" ] && continue
       [ "$line_alt" = "null" ] || [ -z "$line_alt" ] && continue
+      # 排除规则与逐条还原都用归一化后的路径（同批量拷回循环处的注释）
+      line_alt=$(_norm_rel_path "$line_alt")
       [ "$line_alt" = "$line_orig" ] && continue
       if echo "$line_alt" | grep -qE '\.zip\.[0-9]{3}$'; then
         # 分卷: 剥掉 .001 后前缀已含 .zip，按前缀通配排除所有卷（glob 转义）
