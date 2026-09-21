@@ -209,10 +209,12 @@ jobs:
             0|''|*[!0-9]*) echo "未启用（本轮只读）" ;;
             *)
               LIMIT="$MOVIETO_PILOT"
+              # ⚠️ lsjson 输出字段是大写 Name/Size（写成小写 .name 会全 null，
+              #   配对静默变 0 对 —— 首跑实测），用 // 双写兜两套口径
               rclone lsjson "onedrive:$SRC" --files-only \
-                | jq -r '.[] | [.name, (.size|tostring)] | @tsv' > "$WORK/src_ns.tsv"
+                | jq -r '.[] | [(.name // .Name), ((.size // .Size)|tostring)] | @tsv' > "$WORK/src_ns.tsv"
               rclone lsjson "openlist:wopan176Crypt/$DEST" --files-only \
-                | jq -r '.[] | [.name, (.size|tostring)] | @tsv' > "$WORK/rc_ns.tsv"
+                | jq -r '.[] | [(.name // .Name), ((.size // .Size)|tostring)] | @tsv' > "$WORK/rc_ns.tsv"
               comm -23 <(cut -f1 "$WORK/src_ns.tsv" | sort -u) <(cut -f1 "$WORK/rc_ns.tsv" | sort -u) > "$WORK/missing_origs.txt"
               comm -13 <(cut -f1 "$WORK/src_ns.tsv" | sort -u) <(cut -f1 "$WORK/rc_ns.tsv" | sort -u) > "$WORK/extra_copies.txt"
               # 配对: 缺失 original 与多出副本按**文件大小**精确匹配（同名 md5 复算
