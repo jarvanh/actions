@@ -1,0 +1,213 @@
+# openlist 目标端实况调试（只读，三视角对比）
+#
+# 为什么单独一个 workflow:
+#   · 用户在 OpenList WebUI 里看到目标端目录的文件数**远超源端**（疑似同一批文件
+#     被重复修复、每次留下不同短哈希副本且从不清理），而 try run 的存在性核对
+#     走的是 rclone → 自己拉的 OpenList 容器，该视角已被证明不可信（CloudMusic
+#     目录列举取空，但目录里有 827 个已同步正常文件——取空不可能是真的）。
+#   · 调试需要一个**专用载体**把「OpenList 自身 API 视角（refresh=true 实时绕缓存）」
+#     「rclone 视角」「源端对照」三方同屏对比 —— 塞进 try run 会污染它的只读预演语义，
+#     塞进 diag 会把它拖成通用诊断。
+#
+# 它回答什么:
+#   1. 目标端目录里到底有多少文件 / 多少短哈希名文件（重复修复产物）/ 多少 original 名文件
+#   2. OpenList API 视角 vs rclone 视角的文件数是否一致（不一致 ⇒ 视角差异实锤）
+#   3. 源端 vs 目标端差集: 目标多出的（重复修复产物清单）/ 源有目标无的（待修清单）
+#   4. 有没有字面 `.` 子目录（`/./` 形态写入的落点疑问）
+#
+# 安全边界（与 openlist-diag.yml 同口径）: 全程只读 —— OpenList API 只用
+#   auth/login + fs/list（读），rclone 只用 lsf；不装 cloudflared、不碰隧道、
+#   不回传 DB；容器名固定 openlist，拉 dropbox 上的生产配置副本，用完即删。
+name: openlist-target-debug
+
+on:
+  workflow_dispatch:
+    inputs:
+      dest_dir:
+        description: "目标端子目录（相对 openlist:wopan176Crypt/）"
+        required: false
+        type: string
+        default: "backup/CloudMusic"
+      src_dir:
+        description: "源端对照子目录（相对 onedrive:/）"
+        required: false
+        type: string
+        default: "backup/CloudMusic"
+      deep_dir:
+        description: "额外探测的子路径（相对目标端目录，留空跳过；试字面点目录填「.」）"
+        required: false
+        type: string
+        default: ""
+
+# 只读调试，独立并发组
+concurrency: openlist-target-debug
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    env:
+      OPENLIST_ADMIN_PASSWORD: ${{ secrets.OPENLIST_ADMIN_PASSWORD }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: rclone-install
+        run: |
+          set -e
+          bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" install
+
+      - name: rclone-config
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE }}
+        run: |
+          set -e
+          bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" config
+
+      - name: 拉起 OpenList 容器（只读调试副本）
+        env:
+          OL_CONTAINER: openlist
+        run: |
+          set -e
+          docker rm -f "$OL_CONTAINER" 2>/dev/null || true
+          sudo mkdir -p /opt/openlist-data
+          sudo chmod 0777 /opt/openlist-data
+          rclone copy dropbox:self-hosted/openlist/data /opt/openlist-data \
+            --exclude "data.db-wal" --exclude "data.db-shm" --exclude "data.db-journal" \
+            --exclude "log/**" --exclude "temp/**"
+          echo "拉取完成: $(ls -la /opt/openlist-data/ | tail -n +2 | wc -l) 个条目"
+          docker run -d --restart=no -v /opt/openlist-data:/opt/openlist/data \
+            -p 5244:5244 -e PUID=0 -e PGID=0 -e UMASK=022 \
+            --name="$OL_CONTAINER" openlistteam/openlist:latest
+          for i in $(seq 1 60); do
+            curl -sf http://localhost:5244/ping >/dev/null 2>&1 && break
+            sleep 2
+          done
+          curl -sf http://localhost:5244/ping && echo " ← OpenList HTTP 就绪"
+
+      - name: 三视角对比（OpenList API / rclone / 源端）
+        env:
+          DEST_DIR_INPUT: ${{ inputs.dest_dir }}
+          SRC_DIR_INPUT: ${{ inputs.src_dir }}
+          DEEP_DIR_INPUT: ${{ inputs.deep_dir }}
+          OL_CONTAINER: openlist
+        run: |
+          set -e
+          WORK=/tmp/target_debug; mkdir -p "$WORK"
+          # inputs 一律经 env 传入，拼路径时只做最小拼接（均来自受控输入）
+          DEST="${DEST_DIR_INPUT:-backup/CloudMusic}"
+          SRC="${SRC_DIR_INPUT:-backup/CloudMusic}"
+          API=http://localhost:5244
+
+          echo "=========== 视角一: OpenList API（refresh=true 实时绕缓存）==========="
+          TOKEN=$(curl -sf -X POST "$API/api/auth/login" \
+            -H 'Content-Type: application/json' \
+            -d "{\"username\":\"admin\",\"password\":\"${OPENLIST_ADMIN_PASSWORD}\"}" \
+            | jq -r '.data.token // empty')
+          [ -n "$TOKEN" ] && echo "✅ OpenList 登录成功" || { echo "❌ OpenList 登录失败"; exit 1; }
+
+          ol_list() { # 分页拉全一个目录，输出 TSV: name<TAB>size<TAB>is_dir
+            local p="$1" page=1 total=-1
+            : > "$WORK/ol_$(echo "$p" | md5sum | cut -c1-8).tsv"
+            while :; do
+              resp=$(curl -sf -X POST "$API/api/fs/list" \
+                -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
+                -d "{\"path\":\"$p\",\"page\":$page,\"per_page\":200,\"refresh\":true}")
+              code=$(printf '%s' "$resp" | jq -r '.code // 500')
+              [ "$code" = "200" ] || { echo "  ⚠️ fs/list code=$code path=$p: $(printf '%s' "$resp" | jq -r '.message // "?"')"; return 1; }
+              total=$(printf '%s' "$resp" | jq -r '.data.total // 0')
+              printf '%s' "$resp" | jq -r '.data.content[]? | [.name, (.size|tostring), (.is_dir|tostring)] | @tsv' \
+                >> "$WORK/ol_$(echo "$p" | md5sum | cut -c1-8).tsv" || true
+              got=$(wc -l < "$WORK/ol_$(echo "$p" | md5sum | cut -c1-8).tsv" | tr -d ' ')
+              [ "$got" -ge "$total" ] && break
+              page=$((page + 1))
+              [ "$page" -gt 200 ] && break
+            done
+            return 0
+          }
+
+          OL_T="$WORK/ol_target.tsv"
+          ol_list "/wopan176Crypt/$DEST" && OL_RC=0 || OL_RC=$?
+          cp "$WORK/ol_$(echo "/wopan176Crypt/$DEST" | md5sum | cut -c1-8).tsv" "$OL_T" 2>/dev/null || : > "$OL_T"
+          if [ "$OL_RC" = "0" ]; then
+            echo "OpenList API 视角 /wopan176Crypt/$DEST:"
+            echo "  条目总数: $(wc -l < "$OL_T" | tr -d ' ')"
+            echo "  其中文件: $(awk -F'\t' '$3=="false"' "$OL_T" | wc -l | tr -d ' ') · 目录: $(awk -F'\t' '$3=="true"' "$OL_T" | wc -l | tr -d ' ')"
+            echo "  短哈希名文件（8位hex.扩展名）: $(awk -F'\t' '$3=="false" && $1 ~ /^[0-9a-f]{8}\.[A-Za-z0-9]+$/ {n++} END{print n+0}' "$OL_T")"
+            echo "  前 10 条: "; head -10 "$OL_T" | sed 's/^/    /'
+          fi
+          # 父目录视图（看有没有奇怪的子目录）
+          echo "── 父目录 /wopan176Crypt/$(dirname "$DEST") 的子目录（OpenList API）:"
+          ol_list "/wopan176Crypt/$(dirname "$DEST")" || true
+          awk -F'\t' '$3=="true"{print "    "$1}' "$WORK/ol_$(echo "/wopan176Crypt/$(dirname "$DEST")" | md5sum | cut -c1-8).tsv" 2>/dev/null | head -30
+
+          # 深入探测（可选，比如试字面「.」目录）
+          if [ -n "${DEEP_DIR_INPUT:-}" ]; then
+            echo "── 深入探测 /wopan176Crypt/$DEST/$DEEP_DIR_INPUT:"
+            ol_list "/wopan176Crypt/$DEST/$DEEP_DIR_INPUT" && \
+              awk -F'\t' '{print "    "$1" ("$2"B)"}' \
+                "$WORK/ol_$(echo "/wopan176Crypt/$DEST/$DEEP_DIR_INPUT" | md5sum | cut -c1-8).tsv" | head -20 \
+              || echo "    （取不到 ⇒ OpenList 视角下该路径不存在）"
+          fi
+
+          echo ""
+          echo "=========== 视角二: rclone（经同一容器 WebDAV）==========="
+          rclone lsf "openlist:wopan176Crypt/$DEST" --files-only > "$WORK/rc_files.txt" 2>"$WORK/rc_err.txt" \
+            && RC_RC=0 || RC_RC=$?
+          if [ "$RC_RC" = "0" ]; then
+            echo "rclone 视角: $(wc -l < "$WORK/rc_files.txt" | tr -d ' ') 个文件"
+            echo "  短哈希名文件: $(grep -cE '^[0-9a-f]{8}\.[A-Za-z0-9]+$' "$WORK/rc_files.txt" || true)"
+          else
+            echo "❌ rclone 列举失败: $(head -3 "$WORK/rc_err.txt")"
+          fi
+
+          echo ""
+          echo "=========== 视角三: 源端对照（onedrive:$SRC）==========="
+          rclone lsf "onedrive:$SRC" --files-only > "$WORK/src_files.txt" 2>/dev/null \
+            && echo "源端: $(wc -l < "$WORK/src_files.txt" | tr -d ' ') 个文件" \
+            || echo "❌ 源端列举失败"
+
+          echo ""
+          echo "=========== 三方对比 ==========="
+          if [ -s "$WORK/src_files.txt" ] && [ "$RC_RC" = "0" ]; then
+            sort -u "$WORK/src_files.txt" > "$WORK/src_s.txt"
+            sort -u "$WORK/rc_files.txt" > "$WORK/rc_s.txt"
+            echo "目标端**多出**的文件（目标有·源端无 ⇒ 重复修复产物候选，前 30）:"
+            comm -13 "$WORK/src_s.txt" "$WORK/rc_s.txt" | head -30 | sed 's/^/    + /'
+            echo "  多出合计: $(comm -13 "$WORK/src_s.txt" "$WORK/rc_s.txt" | wc -l | tr -d ' ')"
+            echo "源端有·目标端无的（待修/未同步，前 20）:"
+            comm -23 "$WORK/src_s.txt" "$WORK/rc_s.txt" | head -20 | sed 's/^/    - /'
+            echo "  缺少合计: $(comm -23 "$WORK/src_s.txt" "$WORK/rc_s.txt" | wc -l | tr -d ' ')"
+          fi
+          if [ "$OL_RC" = "0" ] && [ "$RC_RC" = "0" ]; then
+            OL_N=$(wc -l < "$OL_T" | tr -d ' '); RC_N=$(wc -l < "$WORK/rc_files.txt" | tr -d ' ')
+            if [ "$OL_N" = "$RC_N" ]; then
+              echo "✅ OpenList API 与 rclone 视角条目数一致（$OL_N）"
+            else
+              echo "🚨 视角分歧实锤: OpenList API 看到 $OL_N 条 vs rclone 看到 $RC_N 条 ⇒ try run 之前判缺的可能就是视角差"
+            fi
+          fi
+          cp "$OL_T" "$WORK/openlist_view.tsv" 2>/dev/null || true
+          cp "$WORK/rc_files.txt" "$WORK/rclone_view.txt" 2>/dev/null || true
+          cp "$WORK/src_files.txt" "$WORK/source_view.txt" 2>/dev/null || true
+
+      - name: 上传对比数据
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: target-debug-data
+          path: /tmp/target_debug/
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: 收尾
+        if: always()
+        env:
+          OL_CONTAINER: openlist
+        run: |
+          docker logs "$OL_CONTAINER" 2>&1 | tail -20 || true
+          docker rm -f "$OL_CONTAINER" 2>/dev/null || true
+          echo "ℹ️ 本轮全程只读: 未写入/移动/删除任何源端与目标端数据"
