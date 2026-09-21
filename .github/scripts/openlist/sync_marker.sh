@@ -94,24 +94,27 @@ _marker_write() {
 }
 
 # 从旧 marker 继承仍有效的修复条目（original 在目标端仍不存在 = 未对齐，保留；
-# original 已出现 = 本轮已正常同步对齐，剔除）。输出 carried JSON 数组到 stdout。
+# original 已出现 = 本轮已正常同步对齐，剔除**并删除替代形态文件**——原名落位后
+# 替代形态冗余，只剔记录不删文件会让短名孤儿在目标端无限堆积。删除条件: size
+# 一致 + 非分卷/编码类 + 开关 OPENLIST_CARRY_DELETE_ALIGNED 未关）。
+# 输出 JSON 对象 {"carried":[...], "deleted":N}（N=本次删除的替代形态数）——
+# 函数经命令替换调用（子 shell），计数必须走输出不能走全局变量。
 # 用法: _carry_forward_fixed <dest_path> <old_marker_json>
 _carry_forward_fixed() {
   local dest_path="$1"
   local old_marker="$2"
-  local carried_json="[]"
 
   local old_fixed_count
   old_fixed_count=$(echo "$old_marker" | jq -r '(.fixed_files // []) | length' 2>/dev/null || echo 0)
   # 数值防护: jq 可能输出空/null（旧 marker 非法 JSON 等），非数字一律按 0
   [[ "$old_fixed_count" =~ ^[0-9]+$ ]] || old_fixed_count=0
   if [ "$old_fixed_count" -eq 0 ]; then
-    echo "[]"
+    echo '{"carried":[],"deleted":0}'
     return 0
   fi
 
   local carried_entries=()
-  local idx orig _dummy _size_bytes
+  local idx orig alt size_bytes
   local tsv
   tsv=$(echo "$old_marker" | jq -r '
     (.fixed_files // []) | to_entries[]
@@ -120,7 +123,9 @@ _carry_forward_fixed() {
   local old_fixed_json
   old_fixed_json=$(echo "$old_marker" | jq -c '.fixed_files // []' 2>/dev/null || echo "[]")
 
-  while IFS=$'\t' read -r idx orig _dummy _size_bytes; do
+  # 已对齐收尾计数（原名落位后删除的替代形态数，随返回对象回传）
+  local _deleted_n=0
+  while IFS=$'\t' read -r idx orig alt size_bytes; do
     [ -z "$orig" ] && continue
     # 探测目标端是否已出现原名文件（已存在则无需继承）
     local probe exists
@@ -129,9 +134,34 @@ _carry_forward_fixed() {
     [[ "$exists" =~ ^[0-9]+$ ]] || exists=0
     if [ "$exists" -eq 0 ]; then
       carried_entries+=("$idx")
+      continue
+    fi
+    # ===== 已对齐收尾（2026-09-21，治「目标端文件数越堆越多」）=====
+    # 原名已落位 ⇒ 替代形态（短哈希名）冗余。此前只剔 marker 记录、不删远端
+    # 文件 ⇒ 历史短名孤儿在目标端无限堆积。删除的前提（全部满足才动手）:
+    #   ① size 一致（防半截原名冒充落位，丢掉唯一副本）② 非分卷/编码类
+    #   （多卷与还原形态复杂，第一版放过）③ 开关未关。
+    #   probe 是本循环刚取的新鲜值；删除失败仅警告，不影响剔除语义。
+    [ "${OPENLIST_CARRY_DELETE_ALIGNED:-1}" = "0" ] && continue
+    [ -z "$alt" ] || [ "$alt" = "null" ] && continue
+    case "$alt" in *.zip.[0-9][0-9][0-9]|*.7z.[0-9][0-9][0-9]|*.enc|*.enc.*|*.b64|*.b64.*) continue ;; esac
+    local _alt_norm
+    _alt_norm=$(_norm_rel_path "$alt")
+    local _dst_size
+    _dst_size=$(echo "$probe" | jq -r '.[0].Size // 0' 2>/dev/null || echo 0)
+    [[ "$_dst_size" =~ ^[0-9]+$ ]] || _dst_size=0
+    [[ "$size_bytes" =~ ^[0-9]+$ ]] || size_bytes=0
+    if [ "$_dst_size" -gt 0 ] && [ "$size_bytes" -gt 0 ] && [ "$_dst_size" = "$size_bytes" ]; then
+      if rclone deletefile "${dest_path}/${_alt_norm}" >/dev/null 2>&1; then
+        _deleted_n=$((_deleted_n + 1))
+        echo "🧹 已对齐收尾: 删除替代形态 ${dest_path}/${_alt_norm}（原名已落位，尺寸 ${_dst_size}B 一致）" >&2
+      else
+        echo "⚠️ 已对齐收尾: 删除替代形态失败（保留，下轮再试）: ${dest_path}/${_alt_norm}" >&2
+      fi
     fi
   done <<< "$tsv"
 
+  local carried_json="[]"
   if [ "${#carried_entries[@]}" -gt 0 ]; then
     # 索引走 --argjson 数字数组（极小）; 大清单 old_fixed_json 本就在 stdin，
     # 不拼进 jq 程序文本——程序文本同受单参数 128KB 上限约束
@@ -140,7 +170,7 @@ _carry_forward_fixed() {
     idx_json="[${carried_entries[*]}]"
     carried_json=$(echo "$old_fixed_json" | jq -c --argjson idx "$idx_json" '[.[$idx[]]]' 2>/dev/null || echo "[]")
   fi
-  echo "$carried_json"
+  jq -cn --argjson c "${carried_json:-[]}" --argjson d "$_deleted_n" '{carried:$c, deleted:$d}' 2>/dev/null || echo '{"carried":[],"deleted":0}'
 }
 
 # ===== marker 修复字段读写统一接口 =====
@@ -269,7 +299,11 @@ save_fix_state_marker() {
 
   # carry-forward: 继承旧记录中 original 仍未对齐的条目，与本轮新修复合并（新优先）
   local carried_json="[]"
-  [ "$old_fixed_count" -gt 0 ] && carried_json=$(_carry_forward_fixed "$dest_path" "$old_marker")
+  if [ "$old_fixed_count" -gt 0 ]; then
+    local _carry_out2
+    _carry_out2=$(_carry_forward_fixed "$dest_path" "$old_marker")
+    carried_json=$(echo "$_carry_out2" | jq -c '.carried // []' 2>/dev/null || echo "[]")
+  fi
   local carried_count
   carried_count=$(echo "$carried_json" | jq 'length' 2>/dev/null || echo 0)
   [[ "$carried_count" =~ ^[0-9]+$ ]] || carried_count=0
@@ -417,10 +451,14 @@ save_sync_marker() {
     old_fixed_count=$(echo "$old_marker" | jq -r '(.fixed_files // []) | length' 2>/dev/null || echo 0)
     [[ "$old_fixed_count" =~ ^[0-9]+$ ]] || old_fixed_count=0
     if [ "$old_fixed_count" -gt 0 ]; then
-      carried_json=$(_carry_forward_fixed "$dest_path" "$old_marker")
+      local _carry_out
+      _carry_out=$(_carry_forward_fixed "$dest_path" "$old_marker")
+      carried_json=$(echo "$_carry_out" | jq -c '.carried // []' 2>/dev/null || echo "[]")
+      CARRY_DELETED_N=$(echo "$_carry_out" | jq -r '.deleted // 0' 2>/dev/null || echo 0)
       carried_count=$(echo "$carried_json" | jq 'length' 2>/dev/null || echo 0)
       [[ "$carried_count" =~ ^[0-9]+$ ]] || carried_count=0
       echo "旧标记修复记录: ${old_fixed_count} 条，继承有效 ${carried_count} 条，已对齐自动剔除 $((old_fixed_count - carried_count)) 条"
+      [ "${CARRY_DELETED_N:-0}" -gt 0 ] && echo "🧹 已对齐收尾: 共删除冗余替代形态 ${CARRY_DELETED_N} 个（原名已落位，短名孤儿清理）"
     fi
   fi
 
