@@ -480,14 +480,6 @@ _tryr_plan_one() {
   esac
   case "$be" in
     缺失) TRYRUN_MISSING=$((TRYRUN_MISSING + 1)); TRYRUN_MISSING_LIST+="${orig}"$'\n'
-          # `./` 形态收集（V2 真数据版）: dirname 在"无子目录"时返回 `.` 被拼进
-          #   alternative ⇒ 备份路径带 /./。真机实测（run 35564160737）这类路径
-          #   lsf/lsjson 全阴，不带 /./ 的全部核对为"在" ⇒ 高度疑似形态假阴性。
-          #   收集起来供汇总段做 A/B 对照（带 /./ vs 去掉 /./ 各 stat 一次）。
-          case "$backup" in
-            */./*) TRYRUN_DOTSLASH_MISSING=$((TRYRUN_DOTSLASH_MISSING + 1))
-                   TRYRUN_DOTSLASH_LIST+="${backup}"$'\n' ;;
-          esac
           # 记下"备份所在目录"，供汇总段的父目录实况探针用（去重在汇总段做）
           TRYRUN_MISSING_DIRS+="${backup%/*}"$'\n'
           # 顺带记"该备份目录对应的源端同层": 目标端 <dest>/<orig目录上级> 对应
@@ -535,9 +527,8 @@ restore_try_run() {
   TRYRUN_ORIG_RECHECK_TOTAL=0; TRYRUN_ORIG_FLIPPED=0
   TRYRUN_UNVERIFIED=0; TRYRUN_UNVERIFIED_DESTS=""
   TRYRUN_MISSING_DIRS=""
-  # `./` 形态对照（V2 真数据版）: 判缺条目里备份路径带 '/./' 的计数、抽样与 A/B 结论
-  TRYRUN_DOTSLASH_MISSING=0; TRYRUN_DOTSLASH_LIST=""
-  TRYRUN_DOTSLASH_HIT=0; TRYRUN_DOTSLASH_MISS=0
+  # `./` 污染金丝雀: 读取侧归一化改写过的条目数（>0 = 存量未清，见 load 循环处）
+  TRYRUN_NORM_N=0
   TRYRUN_SRC_CHECKED=0; TRYRUN_SRC_MISSING=0; TRYRUN_SRC_MISSING_LIST=""
   TRYRUN_SRC_CTRL_POS=0; TRYRUN_SRC_CTRL_NEG=0; TRYRUN_SRC_CTRL_LIST=""
   # 归属可疑计数（V6）: 条目顶层目录不在本 marker 的 top_dirs 里
@@ -733,6 +724,14 @@ restore_try_run() {
     while IFS=$'\t' read -r orig alt method fmd5; do
       [ -z "$orig" ] && continue
       [ "$alt" = "null" ] || [ -z "$alt" ] && alt="$orig"
+      # 读取侧归一化（金丝雀）: 写入侧断根（file_fix.sh dst_dir 拼接处）后，存量
+      #   marker 里的 `./` 污染条目在此统一纠正；计数 >0 = 还有未清理的存量
+      local _alt_norm
+      _alt_norm=$(_norm_rel_path "$alt")
+      if [ "$_alt_norm" != "$alt" ]; then
+        TRYRUN_NORM_N=$((TRYRUN_NORM_N + 1))
+        alt="$_alt_norm"
+      fi
       idx=$((idx + 1)); total=$((total + 1))
       _tryr_plan_one "$tsv" "$m" "$dest" "$src" "$orig" "$alt" "$method" "$idx"
     done < <(printf '%s' "$json" | jq -r '(.fixed_files // [])[] | [.original, .alternative, .method, (.md5 // "")] | @tsv' 2>/dev/null)
@@ -796,40 +795,14 @@ restore_try_run() {
     _tryr_log "  🔍 直读复核（原路径）: 对列列举判不存在的 ${TRYRUN_ORIG_RECHECK_TOTAL} 条逐条 lsjson stat，" \
               "翻案 ${TRYRUN_ORIG_FLIPPED} 条（翻案 ⇒ 原路径其实已被占，真跑前须先处理）"
   fi
-  # ---- `./` 形态对照探针（V2 真数据版，只读，2026-09-21 run 35564160737 驱动）----
-  # 为什么: 备份路径形如 `<dest>/./短哈希.扩展名` 时，真机上 lsf/lsjson **全阴**，
-  #   直读复核翻案不了 —— 它 stat 的还是同一条带 /./ 的路径。若文件其实躺在去掉
-  #   /./ 的位置，"缺失"就是**形态假阴性**，且真跑还原（moveto 原样拼 /./ 进参数）
-  #   也会一起失败。抽样对照: 同一条备份，带 /./ 与去掉 /./ 各 stat 一次，
-  #   两者分歧 ⇒ 当场定性。抽样按**父目录去重**各取 1 条（最多 3 个）:
-  #   同一形态批内一致，但同一目录可能整目录取空（判据被污染）——只抽一个目录
-  #   会把定性建立在被污染的样本上（2026-09-21 实测: head -3 三条全落 CloudMusic，
-  #   而它恰是整目录列举取空的那个；b60cfabd 13在/26缺的分异形态反而没抽到）。
-  if [ "${TRYRUN_DOTSLASH_MISSING:-0}" -gt 0 ]; then
-    _tryr_log "  🔬 ./形态对照: ${TRYRUN_DOTSLASH_MISSING} 条缺失条目的备份路径带 '/./'，抽样 A/B（带 /./ vs 去掉 /./ 各 stat 一次）:"
-    while IFS= read -r p; do
-      [ -z "$p" ] && continue
-      norm=$(printf '%s' "$p" | sed 's|/\./|/|g')
-      if _tryr_stat_exists "$norm"; then
-        TRYRUN_DOTSLASH_HIT=$((TRYRUN_DOTSLASH_HIT + 1))
-        _tryr_log "     - ${p}"
-        _tryr_log "       ↳ 去掉 /./ 后: **在** ⇒ 判缺是路径形态假阴性（文件在原位）；真跑 moveto 同样带 /./ ⇒ 也会失败"
-      else
-        TRYRUN_DOTSLASH_MISS=$((TRYRUN_DOTSLASH_MISS + 1))
-        _tryr_log "     - ${p}"
-        _tryr_log "       ↳ 去掉 /./ 后: 不在 ⇒ 两种形态都取不到，按真缺失处理"
-      fi
-    done < <(printf '%s' "$TRYRUN_DOTSLASH_LIST" | sort -u \
-             | awk -F'/' '{key=""; for(i=1;i<NF;i++) key=key"/"$i; if(!(key in seen)){seen[key]=1; print}}' \
-             | head -3)
-    if [ "$TRYRUN_DOTSLASH_MISS" -eq 0 ]; then
-      _tryr_log "     ⇒ 抽样 ${TRYRUN_DOTSLASH_HIT} 条全「去掉 /./ 后在」: 本批『备份缺失』定性为 **./ 形态假阴性**（文件未丢，在原位）——" \
-                "还原真跑前必须先修路径归一（或写入侧不再产出 ./），否则这批还原必失败"
-    elif [ "$TRYRUN_DOTSLASH_HIT" -eq 0 ]; then
-      _tryr_log "     ⇒ 抽样 ${TRYRUN_DOTSLASH_MISS} 条全「去掉 /./ 后也不在」: 维持**真缺失**定性"
-    else
-      _tryr_log "     ⇒ 抽样混合（在 ${TRYRUN_DOTSLASH_HIT} / 不在 ${TRYRUN_DOTSLASH_MISS}）: 不能一概而论，需逐条核"
-    fi
+  # ---- `./` 污染金丝雀 ----
+  # 备份路径带 `/./` 时真机 lsf/lsjson 全阴（2026-09-21 run 35564160737 实锤，曾是
+  #   "52/80 判缺"与"修复产物被最终 sync 删除"的共同根源）。读取侧已在 load 循环
+  #   归一化，本计数 >0 只剩一个含义: marker 里还有未清理的存量污染条目，应随
+  #   marker 清理归零（诊断史见修复计划 §14.19）
+  if [ "${TRYRUN_NORM_N:-0}" -gt 0 ]; then
+    _tryr_log "  🧹 路径归一化: ${TRYRUN_NORM_N} 条条目的备份路径带 './' 污染段，读取时已自动纠正" \
+              "（写入侧已断根；该计数应随存量 marker 清理归零）"
   fi
   # ---- 缺失目录的结构探针（只读，2026-09-20 V5 驱动）----
   # 为什么需要它: "备份文件不在"有两种截然不同的成因，只报"缺失"分不开 ——
@@ -994,10 +967,7 @@ TRYRUN_RECHECK_FLIPPED=0
 TRYRUN_FLIPPED_LIST=""
 TRYRUN_ORIG_RECHECK_TOTAL=0
 TRYRUN_ORIG_FLIPPED=0
-TRYRUN_DOTSLASH_MISSING=0
-TRYRUN_DOTSLASH_LIST=""
-TRYRUN_DOTSLASH_HIT=0
-TRYRUN_DOTSLASH_MISS=0
+TRYRUN_NORM_N=0
 TRYRUN_SRC_CHECKED=0
 TRYRUN_SRC_MISSING=0
 TRYRUN_SRC_MISSING_LIST=""

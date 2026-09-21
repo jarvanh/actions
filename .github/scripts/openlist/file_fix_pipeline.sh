@@ -94,6 +94,9 @@ _persist_verify_entries() {
   local alt_path bytes orig_path f_method f_mid
   while IFS='|' read -r alt_path bytes orig_path f_method f_mid; do
     [ -z "$alt_path" ] && continue
+    # 存量条目的路径可能带 `./` 段（读取侧归一化，见 _norm_rel_path）: 不纠正会让
+    #   刚修好的文件被判"未持久化"而重修
+    alt_path=$(_norm_rel_path "$alt_path")
     PERSIST_IDX=$((PERSIST_IDX + 1))
     [ "$max_sample" -gt 0 ] && [ "$PERSIST_IDX" -gt "$max_sample" ] && break
 
@@ -117,7 +120,9 @@ _persist_verify_entries() {
     local verified=0
     if [ "$is_split" -eq 1 ]; then
       # 分卷：检查同目录下所有编号分卷
-      local alt_dir_alt=$(dirname "$alt_path")
+      local alt_dir_alt
+      alt_dir_alt="$(dirname -- "$alt_path")"
+      [ "$alt_dir_alt" = "." ] && alt_dir_alt=""   # 根层分卷: dirname 返回 `.`，拼进去必取空
       local alt_prefix=$(basename "$alt_path")
       alt_prefix="${alt_prefix%.*}"        # strip ".001"
       alt_prefix="${alt_prefix%.zip}"      # also strip ".zip" if leftover
@@ -263,6 +268,9 @@ _sync_fixed_files_exclusion() {
     local _fx_orig _fx_alt _fx_method
     while IFS=$'\t' read -r _fx_orig _fx_alt _fx_method; do
       [ -z "$_fx_orig" ] && [ -z "$_fx_alt" ] && continue
+      # 存量 marker 的路径可能带 `./` 段: 规则失配 ⇒ 修复产物被最终 sync 当"多余文件"删除
+      _fx_orig=$(_norm_rel_path "$_fx_orig")
+      _fx_alt=$(_norm_rel_path "$_fx_alt")
       if [ -n "$_fx_orig" ]; then
         printf -- "- /%s\n" "$(_escape_filter_glob "$_fx_orig")" >> "$fixed_exclude_file"
       fi
@@ -783,9 +791,14 @@ _sync_fix_missing_files() {
           local prev_entry prev_alt prev_mid prev_method prev_restore prev_shuman prev_sbytes
           prev_entry=$(echo "$MARKER_FIXED_FILES" | jq -c --arg f "$mf" '[.[] | select(.original == $f)] | .[0] // empty' 2>/dev/null)
           if [ -n "$prev_entry" ]; then
-            prev_alt=$(echo "$prev_entry" | jq -r '.alternative // empty')
+            prev_alt=$(_norm_rel_path "$(echo "$prev_entry" | jq -r '.alternative // empty')")
             prev_mid=$(echo "$prev_entry" | jq -r '.method_id // empty')
-            if [ -n "$prev_alt" ] && rclone lsf "${dest_path}/$(dirname -- "$prev_alt")" --files-only 2>/dev/null | grep -qxF "$(basename -- "$prev_alt")"; then
+            # 根层 alternative 无斜杠 ⇒ dirname 返回 `.` ⇒ `${dest_path}/.` 恒取空，
+            #   会被误判"上轮假成功"而每轮重修 —— `.` 归一化为目标根目录本身
+            local prev_dir
+            prev_dir="$(dirname -- "$prev_alt")"
+            [ "$prev_dir" = "." ] && prev_dir=""
+            if [ -n "$prev_alt" ] && rclone lsf "${dest_path}${prev_dir:+/${prev_dir}}" --files-only 2>/dev/null | grep -qxF "$(basename -- "$prev_alt")"; then
               # 替代路径仍存在 → 沿用上轮修复，不重复上传
               prev_method=$(echo "$prev_entry" | jq -r '.method // "沿用上轮修复"')
               prev_restore=$(echo "$prev_entry" | jq -r '.restore_hint // ""')
