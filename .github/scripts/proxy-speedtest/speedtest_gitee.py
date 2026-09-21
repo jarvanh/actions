@@ -85,6 +85,15 @@ DEFAULT_HEALTHCHECK_URL = 'https://www.gstatic.com/generate_204'
 DEFAULT_FETCH_RETRIES = 4
 DEFAULT_FETCH_TIMEOUT = 60
 DEFAULT_FETCH_BACKOFF_BASE = 2.0
+# 5xx 单独一条更宽的预算，理由见下方「5xx 与超时是两种失败动力学」注释
+DEFAULT_FETCH_5XX_RETRIES = 6
+DEFAULT_FETCH_5XX_BACKOFF_BASE = 5.0
+# 5xx（Cloudflare「源站不可达」）与超时是两种失败动力学，不能共用同一条重试预算：
+# 超时一次就吃掉整个 fetch_timeout，四次下来早已耗尽预算；而 5xx 是**立刻返回**的，
+# 退避曲线成了唯一的时间尺度。实测 2026-09-21 run 35615429681（gistnodes 交接后
+# 测泰尔）：15:02:47.5 started → 15:03:04.4 bootstrap_failed，**全程仅 17 秒**，
+# 正好等于 4 次「秒失败 + 2/4/8 秒退避」——即上游连续给了 4 次 504，而重试机制本身没坏。
+# 所以 5xx 单独放宽：次数更多、退避基数更大，让「源站抽风数秒」这类抖动有足够窗口自愈。
 CURRENT_RUN_STARTED_AT = ''
 TERMINATION_NOTICE_SENT = False
 
@@ -228,6 +237,15 @@ def parse_sub_urls(env):
         raise RuntimeError('PROXY_SPEEDTEST_SUB_URLS is empty after parsing')
     return urls
 
+def is_retryable_5xx(exc):
+    """判断异常是否为 HTTP 5xx（Cloudflare/GitHub 侧的瞬时不可用）。
+
+    只认 `urllib.error.HTTPError` 上的 code：5xx 才是「服务器侧、值得再试」；
+    4xx（尤其 404）是确定性失败，多试几次纯属浪费时间，照旧直接抛。
+    """
+    return isinstance(exc, urllib.error.HTTPError) and 500 <= int(exc.code or 0) < 600
+
+
 def fetch_text(url: str, retries=DEFAULT_FETCH_RETRIES, timeout=DEFAULT_FETCH_TIMEOUT):
     """取一份文本订阅，带指数退避重试。
 
@@ -240,7 +258,9 @@ def fetch_text(url: str, retries=DEFAULT_FETCH_RETRIES, timeout=DEFAULT_FETCH_TI
     上的限流窗口）。
     """
     last_error = None
-    for attempt in range(1, retries + 1):
+    max_attempts = retries
+    extended_mode = False
+    for attempt in range(1, max_attempts + 1):
         try:
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
             with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -251,10 +271,20 @@ def fetch_text(url: str, retries=DEFAULT_FETCH_RETRIES, timeout=DEFAULT_FETCH_TI
                 return raw.decode('utf-8', 'ignore')
         except Exception as e:
             last_error = e
+            # 本条 URL 是否按「5xx 加长预算」跑（见上面 DEFAULT_FETCH_5XX_* 的说明）
+            extended = is_retryable_5xx(e)
+            # 这条 URL 第一次遭遇 5xx 时，把本次调用的预算换成更宽的那条
+            # （次数 4→6、退避基数 2→5）：5xx 立刻返回、几乎不耗时间，原预算只够撑
+            # ~14 秒就交枪（run 35615429681 的 17 秒即此）。但只针对本条 URL 生效，
+            # 不污染 multiplex 下其它订阅源的默认行为。
+            if extended and not extended_mode:
+                max_attempts = max(max_attempts, DEFAULT_FETCH_5XX_RETRIES)
+                extended_mode = True
+            base = DEFAULT_FETCH_5XX_BACKOFF_BASE if extended_mode else DEFAULT_FETCH_BACKOFF_BASE
             log_progress('subscription_fetch_retry', source_url=url, attempt=attempt,
-                         retries=retries, error=str(e))
-            if attempt < retries:
-                time.sleep(DEFAULT_FETCH_BACKOFF_BASE * (2 ** (attempt - 1)) + random.uniform(0, 1.5))
+                         retries=max_attempts, error=str(e))
+            if attempt < max_attempts:
+                time.sleep(base * (2 ** (attempt - 1)) + random.uniform(0, 1.5))
     raise last_error
 
 def maybe_decode_base64_subscription(text: str):
