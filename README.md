@@ -79,14 +79,14 @@ proxy-speedtest/            测速结果数据
 | | `sync_trend.sh` | 242 | 跨 run 传输趋势（P0 可见化：剩余未传/净传速率/预计清零，收尾发「📈 同步趋势」通知） |
 | | `sync_progress.sh` | 820 | 全局进度通知系统（含收尾四态标题、多层级阶段区） |
 | **file** | `file_split.sh` | 689 | 大文件分割（ffmpeg 关键帧 / 7z 分卷） |
-| | `file_fix.sh` | 1705 | 单文件修复的 4 种方法 + 目录可写性三态预检 + 短哈希目录兜底 |
+| | `file_fix.sh` | 1705 | 单文件修复的 4 种方法 + 目录可写性三态预检 + 短哈希目录兜底 + 写入侧根层路径断根（防 `./` 污染进 marker） |
 | | `file_fix_pipeline.sh` | 1395 | 修复管线编排（方法轮换 + 增量持久化 + 最终 sync 的 filter 保护构建：marker ∪ 本轮累计 ∪ 父级守卫） |
 | | `file_restore.sh` | 655 | 修复文件还原（目标端 → 原路径 / 源端） |
 | | `restore_tryrun.sh` | 859 | 一键还原 **try run**（只读预演：三条完整路径推导 + 只读白名单护栏 + 时间窗 `within_days` / 绝对下界 `since` + 读取侧路径归一化（`./` 污染金丝雀）+ 双直读复核 + 缺失目录结构探针 + 源端原路径核对与阳性对照 + **marker 原文探针**（dump 归属/时间/源端直读，查"这条记录由谁、何时写下"）；`restore_try_run`） |
 | | `reset_markers.sh` | 120 | marker **归档 + 清空**（一次性运维：先打包归档到 dropbox、归档失败拒绝清空、两道读取判据、默认 dry-run 需 `--commit`；`reset_markers` 入参） |
 | **task** | `task_preview.sh` | 526 | 任务预览（大小估算、跳过预判、未传量估算） |
-| | `task_engine.sh` | 2284 | 任务注册表与编排（分批、轮转、阶段行生产） |
-| **基础** | `utils.sh` | 152 | 通用工具（格式化、日志判定；转义/树形渲染已收敛到 `telegram/tg_notify.sh`） |
+| | `task_engine.sh` | 2284 | 任务注册表与编排（分批、轮转、阶段行生产 + 子任务分发前注入父级守卫，防「父级已修被子目录 sync 删」） |
+| **基础** | `utils.sh` | 152 | 通用工具（格式化、日志判定、`_norm_rel_path` 读取侧路径归一化（`./` 污染兜底）；转义/树形渲染已收敛到 `telegram/tg_notify.sh`） |
 | | `telegram.sh` | 132 | Telegram 进度面板（`send_telegram_message` + 原地编辑；排版/发送 source 真源） |
 | | `load_all.sh` | 61 | 统一加载入口（L0 通知真源 → L6 分层） |
 
