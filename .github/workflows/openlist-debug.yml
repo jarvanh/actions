@@ -1,0 +1,141 @@
+# OpenList 目标端目录实况探针（只读，专用调试）
+#
+# 为什么单独一个 workflow（2026-09-21「重复修复」排查）:
+#   用户在 OpenList 里看到 /wopan176Crypt/backup/CloudMusic/ 文件数远超远端
+#   （疑似修复文件被重复写入），而 restore-tryrun 对同一目录却「整目录列举取空」
+#   —— 两边看到的不是同一个东西。本 workflow 用与主轮/tryrun 完全同源的口径
+#   （dropbox 数据库副本 + 同一套 rclone 配置）拉起容器，只读列出目录实况，
+#   与源端逐项对比，把「目标端现在到底有什么」钉死，再谈重复修复的成因。
+#
+# 全程只读: 只调 lsf/size/lsjson，不出现任何写子命令（与 tryrun 同一纪律）。
+#
+# 与其他 workflow 的隔离:
+#   - concurrency 独立组名 openlist-debug，不与 openlist-singleton 互等；
+#   - 不装 cloudflared、不接管隧道、不回传数据库。
+
+name: openlist-debug
+
+on:
+  workflow_dispatch:
+    inputs:
+      dir:
+        description: "目标端目录（openlist: 前缀）"
+        required: false
+        type: string
+        default: "openlist:wopan176Crypt/backup/CloudMusic"
+      src_dir:
+        description: "源端对照目录"
+        required: false
+        type: string
+        default: "onedrive:backup/CloudMusic"
+
+concurrency:
+  group: openlist-debug
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: rclone-install
+        run: |
+          set -e
+          bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" install
+
+      - name: rclone-config
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE }}
+        run: |
+          set -e
+          bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" config
+
+      - name: 验证远端连通
+        run: |
+          rclone lsf dropbox: | head -5
+
+      # ⚠️ 与 openlist.yml / openlist-restore-tryrun.yml 的「拉起 OpenList 容器」
+      #    同源（逐行等价）——库都是 dropbox:self-hosted/openlist/data 的副本。
+      #    库副本是上一次主轮 Persist 回传的快照: 快照之后主轮新写的文件，
+      #    在本容器的 OpenList 视角里**可能不存在** —— 判断目录实况时必须记住这一点。
+      - name: 拉起 OpenList 容器（数据库本地化，与主轮同源）
+        run: |
+          docker rm -f openlist 2>/dev/null || true
+          sudo mkdir -p /opt/openlist-data
+          sudo chmod 0777 /opt/openlist-data
+          rclone copy dropbox:self-hosted/openlist/data /opt/openlist-data \
+            --exclude "data.db-wal" --exclude "data.db-shm" --exclude "data.db-journal" \
+            --exclude "log/**" --exclude "temp/**"
+          echo "拉取完成: $(ls -la /opt/openlist-data/ | tail -n +2 | wc -l) 个条目"
+          docker run -d --restart=unless-stopped -v /opt/openlist-data:/opt/openlist/data -p 5244:5244 -e PUID=0 -e PGID=0 -e UMASK=022 --name="openlist" openlistteam/openlist:latest
+
+      - name: 校验容器运行状态
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:5244/ >/dev/null 2>&1; then
+              echo "OpenList HTTP 就绪（第 ${i} 次探测）"
+              break
+            fi
+            sleep 2
+            [ "$i" = "30" ] && { echo "❌ OpenList 容器未能就绪"; docker logs openlist --tail 30; exit 1; }
+          done
+          # 驱动初始化需要时间（主轮同款盲等，见其函数头注释）
+          sleep 60
+
+      - name: 只读对比（源端 vs 目标端）
+        env:
+          DEBUG_DIR: ${{ inputs.dir }}
+          DEBUG_SRC: ${{ inputs.src_dir }}
+        run: |
+          set -e
+          mkdir -p /tmp/dbg
+          echo "=========== 目录实况对比（只读）==========="
+          echo "目标端: ${DEBUG_DIR}"
+          echo "源端:   ${DEBUG_SRC}"
+          # ---- 源端 ----
+          rclone lsf "${DEBUG_SRC}" --files-only --retries 2 > /tmp/dbg/src.txt 2>/tmp/dbg/src.err || true
+          src_n=$(wc -l < /tmp/dbg/src.txt | tr -d ' ')
+          src_bytes=$(rclone size "${DEBUG_SRC}" --json 2>/dev/null | jq -r '.bytes' || echo "?")
+          # ---- 目标端 ----
+          rclone lsf "${DEBUG_DIR}" --files-only --retries 2 > /tmp/dbg/dst.txt 2>/tmp/dbg/dst.err || true
+          dst_n=$(wc -l < /tmp/dbg/dst.txt | tr -d ' ')
+          sh_n=$(grep -cE '^[0-9a-f]{8}\.[A-Za-z0-9]+$' /tmp/dbg/dst.txt || true)
+          sh_n=${sh_n:-0}
+          dst_bytes=$(rclone size "${DEBUG_DIR}" --json 2>/dev/null | jq -r '.bytes' || echo "?")
+          # ---- 统计 ----
+          echo ""
+          echo "—— 汇总 ——"
+          echo "源端文件数:   ${src_n}（${src_bytes} bytes）"
+          echo "目标端文件数: ${dst_n}（${dst_bytes} bytes）"
+          echo "  其中 8 位短哈希名: ${sh_n}（重复修复的直接证据）"
+          echo "  其中正常名:       $((dst_n - sh_n))"
+          # ---- 短哈希文件全清单（重复批次聚类: 按扩展名分组计数）----
+          if [ "$sh_n" -gt 0 ]; then
+            echo ""
+            echo "—— 短哈希文件按扩展名分组（多批重复时每批一组）——"
+            grep -E '^[0-9a-f]{8}\.[A-Za-z0-9]+$' /tmp/dbg/dst.txt | sed 's/.*\.//' | sort | uniq -c | sort -rn | head -10
+            echo ""
+            echo "—— 短哈希文件清单（前 60，全量见 artifact）——"
+            grep -E '^[0-9a-f]{8}\.[A-Za-z0-9]+$' /tmp/dbg/dst.txt | head -60
+          fi
+          # ---- 名字重叠（正常名已同步上的比例）----
+          overlap=$(comm -12 <(sort /tmp/dbg/src.txt) <(grep -vE '^[0-9a-f]{8}\.' /tmp/dbg/dst.txt | sort) | wc -l | tr -d ' ')
+          echo ""
+          echo "源端与目标端正常名重叠: ${overlap} 个（源端 ${src_n} 个）"
+          # ---- 列举错误可见性（取空 ≠ 没有文件，错误必须露出来）----
+          echo ""
+          echo "—— 列举 stderr（空=列举干净，有输出=列举本身有问题）——"
+          echo "[目标端 stderr]"; head -3 /tmp/dbg/dst.err
+          echo "[源端 stderr]";   head -3 /tmp/dbg/src.err
+
+      - name: 上传清单 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openlist-debug-listing
+          path: /tmp/dbg/
+          retention-days: 7
