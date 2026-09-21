@@ -74,15 +74,15 @@ proxy-speedtest/            测速结果数据
 | | `openlist_driver.sh` | 841 | 驱动刷新、健康预检、缓存刷新、truth-check |
 | | `diag_backend.sh` | 724 | **诊断专用**（不进 `load_all.sh` 加载链）：四组写探针 + 容器日志原始 `rsp_code` dump，由 `openlist-diag.yml` 调用 |
 | **sync** | `sync_engine.sh` | 392 | 核心同步引擎（编排 + 423/8005 重试） |
-| | `sync_marker.sh` | 1058 | 同步标记持久化（跳过、黑名单、修复清单）+ **marker 打包外置备份**（`backup_sync_state_to_dropbox`） |
+| | `sync_marker.sh` | 1058 | 同步标记持久化（跳过、黑名单、修复清单）+ 修复记录生命周期（carry-forward 继承、已对齐收尾清理、父级守卫提取）+ **marker 打包外置备份**（`backup_sync_state_to_dropbox`） |
 | | `sync_notify.sh` | 341 | 同步结果通知构建（统一 Telegram HTML 排版） |
 | | `sync_trend.sh` | 242 | 跨 run 传输趋势（P0 可见化：剩余未传/净传速率/预计清零，收尾发「📈 同步趋势」通知） |
 | | `sync_progress.sh` | 820 | 全局进度通知系统（含收尾四态标题、多层级阶段区） |
 | **file** | `file_split.sh` | 689 | 大文件分割（ffmpeg 关键帧 / 7z 分卷） |
 | | `file_fix.sh` | 1705 | 单文件修复的 4 种方法 + 目录可写性三态预检 + 短哈希目录兜底 |
-| | `file_fix_pipeline.sh` | 1395 | 修复管线编排（方法轮换 + 增量持久化） |
+| | `file_fix_pipeline.sh` | 1395 | 修复管线编排（方法轮换 + 增量持久化 + 最终 sync 的 filter 保护构建：marker ∪ 本轮累计 ∪ 父级守卫） |
 | | `file_restore.sh` | 655 | 修复文件还原（目标端 → 原路径 / 源端） |
-| | `restore_tryrun.sh` | 859 | 一键还原 **try run**（只读预演：三条完整路径推导 + 只读白名单护栏 + 时间窗 `within_days` / 绝对下界 `since` + 双直读复核 + 缺失目录结构探针 + 源端原路径核对与阳性对照 + **marker 原文探针**（dump 归属/时间/源端直读，查"这条记录由谁、何时写下"）；`restore_try_run`） |
+| | `restore_tryrun.sh` | 859 | 一键还原 **try run**（只读预演：三条完整路径推导 + 只读白名单护栏 + 时间窗 `within_days` / 绝对下界 `since` + 读取侧路径归一化（`./` 污染金丝雀）+ 双直读复核 + 缺失目录结构探针 + 源端原路径核对与阳性对照 + **marker 原文探针**（dump 归属/时间/源端直读，查"这条记录由谁、何时写下"）；`restore_try_run`） |
 | | `reset_markers.sh` | 120 | marker **归档 + 清空**（一次性运维：先打包归档到 dropbox、归档失败拒绝清空、两道读取判据、默认 dry-run 需 `--commit`；`reset_markers` 入参） |
 | **task** | `task_preview.sh` | 526 | 任务预览（大小估算、跳过预判、未传量估算） |
 | | `task_engine.sh` | 2284 | 任务注册表与编排（分批、轮转、阶段行生产） |

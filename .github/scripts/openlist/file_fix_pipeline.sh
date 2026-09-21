@@ -4,6 +4,8 @@
 # 职责边界:
 #   - 修复条目的增量持久化与状态维护（中断可续：每成功一个立即写 marker）
 #   - 缺失文件收集 → 4 种修复方法轮换 → 落盘即时校验 → 重启容器复核
+#   - 最终完整同步的 filter 保护构建（三来源: 本任务 marker ∪ 本轮累计 ∪ 父级守卫，
+#     排除 = 不传输 + 不删除，防修复产物被 sync 当多余文件清掉）
 #   - 修复结果序列化与累计（供 save_sync_marker 与结果通知使用）
 #
 # 拆分缘由: sync_engine.sh 曾同时承担同步编排、驱动维护、修复管线、通知排版四类
@@ -260,6 +262,14 @@ _fix_event_fail() {
   esac
 }
 
+# 构建 sync 的 filter-from 排除清单（排除 = 不传输 + 不删除，防修复产物被 sync
+# 当"多余文件"清掉）。三来源合并（original 去重，marker 优先）:
+#   ① 本任务 marker 的 fixed_files（上轮及更早的记录，经 _load_marker_fixed_files）
+#   ② 本轮已修复的累计（GLOBAL_FIXED_FILES_JSON）
+#   ③ 父级守卫（SYNC_PARENT_GUARD_JSON，子任务视角的父 marker 条目，防「父修子删」，
+#      见 task_engine.sh 分发处 / sync_marker.sh _load_parent_marker_raw）
+# 所有路径经 _norm_rel_path 归一化后才写规则——存量条目的 `./` 段会让规则匹配不上
+# 实际落点，保护失效即「修复→被删→重修」（见 _norm_rel_path 头注释）。
 _sync_fixed_files_exclusion() {
   if [[ "$dest_path" == openlist:* ]]; then
     _load_marker_fixed_files "$source_path" "$dest_path" "$task_name"
