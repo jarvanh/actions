@@ -8,7 +8,9 @@
 #       carry-forward 继承（未对齐条目跨轮保留）→ 已对齐收尾（原名落位且 size
 #       一致 ⇒ 删冗余替代形态 + 剔记录，防短名孤儿无限堆积）→ 父级守卫提取
 #       （子任务 sync 的 filter 并入父 marker 中落在本子目录的记录，防「父修子删」，
-#       见 _load_parent_marker_raw / _sync_parent_guard_extract）
+#       见 _load_parent_marker_raw / _sync_parent_guard_extract）→ 拒写分支兜底
+#       （游标拒写时立即 save_fix_state_marker 持久化修复记录，防「fold 后 marker
+#       被拒写 → 记录丢 → 下轮 initial sync 删产物 → 重 fold」循环，§14.21）
 #
 # 标记存储路径: onedrive:/logs/sync_state/<task_name>_<dest_hash>.json
 # JSON 字段: last_success, source_path, dest_path, source_bytes, source_count,
@@ -421,6 +423,19 @@ save_sync_marker() {
     echo "⚠️ 拒绝写入同步标记: 目标端文件数 ${dest_count} < 源端 ${source_count}（缺失 ${missing_count} 个）"
     echo "  可能原因: OpenList stale 缓存导致 rclone 跳过上传，或部分文件上传失败但未被检测到"
     echo "  本次不写 marker，下次运行将重新同步"
+    # 病灶 C 修法（§14.21，2026-09-21 接力轮 35629676323 实证）: 游标拒写 ≠ 修复记录作废。
+    # 已落盘的 fold/修复产物记录若只留在内存（GLOBAL_FIXED_FILES_JSON），下轮 initial sync
+    # 的 filter 保护（marker ∪ 本轮 ∪ 父级守卫）读不到 ⇒ 产物被当「源端不存在的多余文件」
+    # 删除 ⇒ 重新折叠/重修（实测: fold 97 → 拒写 → 删 10 + 删目录 → 重 fold 97 → 又拒写）。
+    # 大任务（图片 18031 文件）每轮必拒写，其产物在整个追赶期永远裸奔。
+    # 此处立即持久化修复记录的理由: sync_task 尾部的 save_fix_state_marker 兜底要等
+    # _sync_task_impl 返回才执行，330min step 超时把任务杀在中途时永远轮不到它
+    # （两轮生产日志「已保存修复状态」0 次即为实证）。save_fix_state_marker 只合并
+    # 保存 fixed_files/fix_blacklist（保留旧 marker 其余字段；无旧 marker 时建不含
+    # last_success 的骨架，不会误触发跳过判断），与「本次同步未完成」语义不冲突。
+    if ! save_fix_state_marker "$source_path" "$dest_path" "$task_name"; then
+      echo "⚠️ 拒写分支的修复记录保存失败（见上方日志）—— 下轮这些产物将无 filter 保护"
+    fi
     return 1
   fi
 
