@@ -87,6 +87,18 @@ _short_path() {
   echo "${dir:0:$keep}…/$base"
 }
 
+# 归一化修复路径里的 `.` 段（读取侧兜底；写入侧断根在 file_fix.sh dst_dir 拼接处）。
+#   根层文件的 alternative 曾写成 `./短名`（dirname 返回 `.` 被拼进 dst_dir 所致），
+#   而 OpenList 后端不解析 `/./` —— 带污染段的路径 lsf/lsjson/moveto 全取不到，
+#   还会连带 filter 规则失配（最终 sync 把修复产物当多余文件删掉）。存量 marker
+#   里已有这种条目，所有从 marker/fix_list 读回 alternative 的地方一律先过这里。
+_norm_rel_path() {
+  local p="${1:-}"
+  p="${p//\/.\//\/}"
+  p="${p#./}"
+  printf '%s' "$p"
+}
+
 # 从 rclone 日志中解析传输字节数
 # 解析 "Transferred: 1.234 GiB" 格式的行，返回字节数（整数）
 get_transferred_bytes_from_log() {

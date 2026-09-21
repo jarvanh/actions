@@ -257,6 +257,9 @@ restore_fixed_files() {
     while IFS=$'\t' read -r orig alt method fmd5; do
       [ -z "$orig" ] && continue
       [ "$alt" = "null" ] || [ -z "$alt" ] && alt="$orig"
+      # 存量 marker 可能带 `./` 污染段（读取侧归一化，见 _norm_rel_path）:
+      #   moveto 源路径带污染段必取空
+      alt=$(_norm_rel_path "$alt")
 
       echo "还原中: ${orig} ← ${alt} [${method}]"
       local status
@@ -497,6 +500,9 @@ restore_source_from_target() {
     while IFS=$'\t' read -r line_orig line_alt; do
       [ -z "$line_orig" ] && continue
       [ "$line_alt" = "null" ] || [ -z "$line_alt" ] && continue
+      # 排除规则与逐条还原都用归一化后的路径: 带 `./` 段的规则匹配不上实际落点，
+      #   替代形态会漏排进批量拷贝污染源端；还原 moveto 同样会取空
+      line_alt=$(_norm_rel_path "$line_alt")
       [ "$line_alt" = "$line_orig" ] && continue
       if echo "$line_alt" | grep -qE '\.zip\.[0-9]{3}$'; then
         # 分卷: 剥掉 .001 后前缀已含 .zip，按前缀通配排除所有卷（glob 转义）

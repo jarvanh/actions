@@ -1416,7 +1416,15 @@ try_fix_failed_file() {
   file_name="$(basename -- "$failed_file_rel")"
   local file_dir_rel
   file_dir_rel="$(dirname -- "$failed_file_rel")"
-  local dst_dir="${dest_path}/${file_dir_rel}"
+  # ⚠️ `.` 必须归一化（2026-09-21 实锤的全链路病灶，file_fix_pipeline.sh 也有同款）:
+  #   dirname 在"文件就在根层"时返回 `.`，拼出 `${dest_path}/.` ⇒ alternative 带
+  #   `./` 前缀，随后污染全链路: ① lsf/lsjson/moveto 按段解析路径时取不到（run
+  #   35564160737: 带 /./ 的 52 条 stat 全阴）② filter 保护规则 `- /CloudMusic/./短名`
+  #   匹配不上实际路径 ⇒ 最终完整 sync 把修复产物当"多余文件"删掉（Deleted 日志
+  #   实锤，修复→被删→再修的永动机）③ 用户看到的"目标端文件越堆越多"同源。
+  #   归一化后: 根层文件落点 = `${dest_path}/短名`，alternative = `短名`。
+  [ "$file_dir_rel" = "." ] && file_dir_rel=""
+  local dst_dir="${dest_path}${file_dir_rel:+/${file_dir_rel}}"
 
   # OpenList 内部路径（去掉 openlist: 前缀）
   local ol_dst_base="${dest_path#openlist:}"
