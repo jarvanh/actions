@@ -27,6 +27,7 @@ proxy-speedtest/            测速结果数据
 | [`docs/openclaw.md`](docs/openclaw.md) | OpenClaw Runner：自愈五层机制 + 常驻服务（rss-to-telegram / AI 网关）+ Tailscale 远程入口 |
 | [`docs/proxy-speedtest-gitee.md`](docs/proxy-speedtest-gitee.md) / [`-cdn.md`](docs/proxy-speedtest-cdn.md) / [`-taier.md`](docs/proxy-speedtest-taier.md) | 代理测速三套（按测速点命名）：Gitee 上行/下行/延迟 / 国内 CDN 延迟+下载 / 泰尔三网 |
 | [`docs/proxy-speedtest-gistnodes.md`](docs/proxy-speedtest-gistnodes.md) | 从 gist 搜索抓节点 → Sub-Store 去重出 mihomo YAML → 选一套测速（引擎由环境变量切换） |
+| [`docs/reports/`](docs/reports/) | 历史评估报告归档（2026-09-13 三份 emby-302 + 三份 OpenList，是各 `*-remediation-plan` 的输入依据；结论已逐条复核吸收进对应计划，与计划冲突时以计划为准） |
 | 下文「OpenList 同步子系统」 | OpenList 同步工具（内联在本文档） |
 
 ## 工作流清单

@@ -1,7 +1,7 @@
 # emby.yml 修复与调优实施计划
 
 - 日期：2026-09-13
-- 输入：仓库根三份报告（`emby-302-startup-latency-ds4.1-…` / `emby-302-playback-latency-review-hy4-…` / `emby-302-playback-glm-f-…-report-2026-09-13.md`），全部基于 HEAD=216a9b8（main=5c01d32，emby.yml 自此未再改动）
+- 输入：三份评估报告（已归档至 `docs/reports/`：`emby-302-startup-latency-ds4.1-…` / `emby-302-playback-latency-review-hy4-…` / `emby-302-playback-glm-f-…-report-2026-09-13.md`），全部基于 HEAD=216a9b8（main=5c01d32，emby.yml 自此未再改动）
 - 本计划已对当前 main 逐条复核报告结论，复核修正处见 §0.2；行号以 main=5c01d32 为准
 - 执行前提：读 `AGENTS.md`、`docs/emby.md`；改通知相关必读 `docs/telegram-notify.md`
 

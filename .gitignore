@@ -7,3 +7,7 @@ __pycache__/
 .workbuddy-ai/*
 !.workbuddy-ai/skills/
 .trae/
+# 根目录临时实验脚本与产物（AI 会话残留；2026-09-22 清理后加防护，
+# 防外部同步进程再次误入库）
+/.*.py
+/[0-9]*
