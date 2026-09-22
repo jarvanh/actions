@@ -967,7 +967,7 @@ E 未触发零产出告警（因本轮**有**新落盘 266，符合预期）。
 
 ## 10. 接手指令模板（可直接粘给另一个 AI）
 
-> 继续跟进 openlist 同步修复。先读仓库根 `openlist-sync-remediation-plan-2026-09-13.md` 的 §0（AI 接手须知，含当前旋钮默认值与实测天花板）、§6（退出标准 A–E 现状）、§8（红线）、§9（需用户协助）与文末进度日志，再读 `.github/scripts/openlist/` 的代码。
+> 继续跟进 openlist 同步修复。先读本文件第一部分 §0（AI 接手须知，含当前旋钮默认值与实测天花板）、§6（退出标准 A–E 现状）、§8（红线）、§9（需用户协助）与文末进度日志，再读 `.github/scripts/openlist/` 的代码。
 > 然后：
 > 1. `gh run list --workflow=openlist.yml --limit 5 --json databaseId,status,conclusion,event,createdAt,headSha` 看最新轮 conclusion，**并用 headSha 确认它跑的是哪版代码**（schedule/自续轮钉的是"创建那一刻"的 main sha）；`gh run view <id> --log` 按 §6 关键词 grep。
 > 2. **验证一律用短轮，别等 5.5h**：`sync_budget_min=60`（完整链路、预算缩短）或
