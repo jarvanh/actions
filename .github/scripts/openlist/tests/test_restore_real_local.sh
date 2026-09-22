@@ -246,6 +246,8 @@ echo
 #   预检基准重建、OpenList token（mkdir 成功根本走不到 API 分支）。
 # ────────────────────────────────────────────────────────────
 echo "--- 场景7: 修复侧端到端（目录真不可写 → 短哈希目录真落盘）---"
+# 前置头只 source 了 file_restore.sh（还原侧）; 修复侧函数在 file_fix.sh
+source "$REPO_ROOT/.github/scripts/openlist/file_fix.sh" 2>/dev/null || true
 _restart_openlist_for_truth() { return 0; }
 _rebuild_raw_baseline() { return 0; }
 _get_openlist_token() { echo ""; }
