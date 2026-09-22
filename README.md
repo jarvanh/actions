@@ -74,7 +74,7 @@ proxy-speedtest/            测速结果数据
 | | `openlist_driver.sh` | 841 | 驱动刷新、健康预检、缓存刷新、truth-check |
 | | `diag_backend.sh` | 724 | **诊断专用**（不进 `load_all.sh` 加载链）：四组写探针 + 容器日志原始 `rsp_code` dump，由 `openlist-diag.yml` 调用 |
 | **sync** | `sync_engine.sh` | 392 | 核心同步引擎（编排 + 423/8005 重试） |
-| | `sync_marker.sh` | 1058 | 同步标记持久化（跳过、黑名单、修复清单）+ 修复记录生命周期（carry-forward 继承、已对齐收尾清理、父级守卫提取）+ **marker 打包外置备份**（`backup_sync_state_to_dropbox`） |
+| | `sync_marker.sh` | 1058 | 同步标记持久化（跳过、黑名单、修复清单）+ 修复记录生命周期（carry-forward 继承、已对齐收尾清理、父级守卫提取、**游标拒写分支立即持久化修复记录**——防「fold 后拒写丢记录 → 产物被删 → 重 fold」循环）+ **marker 打包外置备份**（`backup_sync_state_to_dropbox`） |
 | | `sync_notify.sh` | 341 | 同步结果通知构建（统一 Telegram HTML 排版） |
 | | `sync_trend.sh` | 242 | 跨 run 传输趋势（P0 可见化：剩余未传/净传速率/预计清零，收尾发「📈 同步趋势」通知） |
 | | `sync_progress.sh` | 820 | 全局进度通知系统（含收尾四态标题、多层级阶段区） |
