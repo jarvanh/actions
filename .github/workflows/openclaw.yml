@@ -1582,29 +1582,15 @@ jobs:
             cp "$TRAE_SRC/config.example.json" "$TRAE_DATA/config.json"
           fi
 
-          echo "3. Writing compose (mounts -> Dropbox data)..."
-          cat > "$TRAE_SRC/docker-compose.yml" <<'EOF'
-          services:
-            trae2api:
-              build: .
-              container_name: trae2api
-              restart: unless-stopped
-              environment:
-                - TZ=Asia/Shanghai
-                - TW2A_API_KEY=${TW2A_API_KEY:?set TW2A_API_KEY in /dropbox/self-hosted/trae2api/.env}
-                - TW2A_WORK_MODE=${TW2A_WORK_MODE:-auto}
-                - TW2A_WORK_BRIDGE_URL=${TW2A_WORK_BRIDGE_URL:-http://host-gateway:7865}
-                - TW2A_WORK_BRIDGE_TOKEN=${TW2A_WORK_BRIDGE_TOKEN:-twbridge-local-7f3a}
-              extra_hosts:
-                - "host-gateway:host-gateway"
-              ports:
-                - "7864:7864"
-                - "18080:18080"
-              volumes:
-                - /dropbox/self-hosted/trae2api/auths:/app/auths
-                - /dropbox/self-hosted/trae2api/data:/app/data
-                - /dropbox/self-hosted/trae2api/config.json:/app/config.json:ro
-          EOF
+          echo "3. Use compose from repo (jarvanh/trae2api, mounts already fixed)..."
+          # 部署直接用仓库 clone 下来的 docker-compose.yml —— 挂载已在 jarvanh/trae2api
+          # eccfc2e 固化为 /dropbox/self-hosted/trae2api/... 绝对路径，不再由本 workflow
+          # 内联 heredoc 生成（此前两套 compose 并存，部署半途中断时会残留旧版）。
+          # 仅做防御校验：仓库 compose 若被回退成相对路径版，显式失败而不是让容器静默崩。
+          if ! grep -q '/dropbox/self-hosted/trae2api' "$TRAE_SRC/docker-compose.yml"; then
+            echo "::error::仓库 compose 未固化 Dropbox 挂载（可能被回退），拒绝部署" >&2
+            exit 1
+          fi
 
           echo "4. Remove stale container & build & start..."
           # 幂等接管：清理同名旧容器（可能来自手工部署或旧 project），再由本 compose 接管
