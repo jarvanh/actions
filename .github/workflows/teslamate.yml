@@ -141,7 +141,11 @@ jobs:
       - name: run cloudflared
         run: |
           cloudflared tunnel route dns t t.'${{ secrets.VD }}'.eu.org
-          nohup cloudflared tunnel run --url http://127.0.0.1:5900 t &
+          if [ -f "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ]; then
+            bash "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ensure t || true
+          else
+            nohup cloudflared tunnel run --url http://127.0.0.1:5900 t &
+          fi
             
       - name: Run teslamate container
         run: |

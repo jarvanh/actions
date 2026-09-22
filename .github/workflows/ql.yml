@@ -153,7 +153,11 @@ jobs:
           # root:600，之后非 root 的 rclone（末尾 ql.tar.gz 回传）读取即 EACCES
           rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
           cloudflared tunnel route dns ql ql.'${{ secrets.VD }}'.eu.org
-          nohup cloudflared tunnel run --url http://127.0.0.1:5700 ql &
+          if [ -f "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ]; then
+            bash "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ensure ql || true
+          else
+            nohup cloudflared tunnel run --url http://127.0.0.1:5700 ql &
+          fi
       - name: sleep
         run: |
           sleep 340m          

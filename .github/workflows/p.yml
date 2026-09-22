@@ -125,7 +125,11 @@ jobs:
       - name: run cloudflared
         run: |
           cloudflared tunnel route dns p p.'${{ secrets.VD }}'.eu.org
-          nohup cloudflared tunnel run --url http://127.0.0.1:5600 p &
+          if [ -f "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ]; then
+            bash "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ensure p || true
+          else
+            nohup cloudflared tunnel run --url http://127.0.0.1:5600 p &
+          fi
       - name: sleep
         run: |
           sleep 350m          

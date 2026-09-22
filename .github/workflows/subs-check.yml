@@ -97,7 +97,11 @@ jobs:
       - name: run cloudflared
         run: |
           cloudflared tunnel route dns subs-check subs-check.'${{ secrets.VD }}'.eu.org
-          nohup cloudflared tunnel run --url http://127.0.0.1:8199 subs-check &
+          if [ -f "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ]; then
+            bash "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ensure subs-check || true
+          else
+            nohup cloudflared tunnel run --url http://127.0.0.1:8199 subs-check &
+          fi
       - name: Run docker container
         run: |
           docker run --name subs-check -p 8199:8199 -v /dropbox/self-hosted/subs-check/config:/app/config -v /dropbox/self-hosted/subs-check/output:/app/output --restart always ghcr.io/beck-8/subs-check:latest

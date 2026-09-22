@@ -401,7 +401,11 @@ jobs:
           fi
           # setsid 脱离会话组: 纯 nohup 在 broken session 下有被连带杀死的
           # 先例；隧道须存活整个 job（~6h），必须最可靠的启动形态
-          setsid nohup cloudflared tunnel run --url http://127.0.0.1:5244 openlist &
+          if [ -f "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ]; then
+            bash "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ensure openlist || true
+          else
+            setsid nohup cloudflared tunnel run --url http://127.0.0.1:5244 openlist &
+          fi
 
       - name: 安装同步依赖（ffmpeg/jq 等）
         run: |
