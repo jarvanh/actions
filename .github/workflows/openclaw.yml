@@ -1541,9 +1541,11 @@ jobs:
           # 「参与用户太多」限流下每 5 分钟空转重试。
           CHECKIN_JSONL=/tmp/trae2api-checkin.jsonl
           CHECKIN_ERR=/tmp/trae2api-checkin.err
-          (cd "$TRAE_SRC" && go build -o /tmp/trae2api-checkin ./cmd/checkin) \
-            && /tmp/trae2api-checkin -dir "$TRAE_DATA/auths" -state "$TRAE_DATA/data/state.json" \
+          PACKS_JSON=/tmp/trae2api-packs.json
+          (cd "$TRAE_SRC" && go build -o /tmp/trae2api-checkin ./cmd/checkin && go build -o /tmp/trae2api-credit ./cmd/credit) || true
+          /tmp/trae2api-checkin -dir "$TRAE_DATA/auths" -state "$TRAE_DATA/data/state.json" \
             > "$CHECKIN_JSONL" 2>"$CHECKIN_ERR" || true
+          /tmp/trae2api-credit -dir "$TRAE_DATA/auths" -packs -json > "$PACKS_JSON" 2>/dev/null || true
           cat "$CHECKIN_JSONL" 2>/dev/null || true
 
           echo "8. Telegram notification (workbuddy-style)..."
@@ -1584,6 +1586,25 @@ jobs:
                 _rows+="$(tree_conn "$_last")${_uid} · ${_nick} · ${_st} · 积分 ${_cr}"$'\n'
               done < "$CHECKIN_JSONL"
               tg_add_block _msg "${_rows%$'\n'}"
+              # ⏳ 积分过期提醒：未用完的包里最早过期的 3 个（跨账号）
+              PACKS_JSON=/tmp/trae2api-packs.json
+              if [ -s "$PACKS_JSON" ]; then
+                _exp=$(jq -r '[.[] | select(.remain > 0 and .expire_at > 0)] | sort_by(.expire_at) | .[:3][] | "\(.nickname) · 剩 \(.remain) 分 · \(.expire_fmt) 过期"' "$PACKS_JSON" 2>/dev/null || true)
+                if [ -n "$_exp" ]; then
+                  _n_exp=$(printf '%s\n' "$_exp" | grep -c . || true)
+                  tg_add_section _msg "⏳ 积分过期 · 最近 ${_n_exp}"
+                  _exp_rows=""
+                  _j=0
+                  while IFS= read -r _eline; do
+                    [ -z "$_eline" ] && continue
+                    _j=$((_j + 1))
+                    _elast=0
+                    [ "$_j" -eq "$_n_exp" ] && _elast=1
+                    _exp_rows+="$(tree_conn "$_elast")$(escape_html "$_eline")"$'\n'
+                  done <<< "$_exp"
+                  tg_add_block _msg "${_exp_rows%$'\n'}"
+                fi
+              fi
               tg_add_path _msg "数据目录" "$TRAE_DATA"
               tg_add_section _msg "🧾 签到原始输出"
               tg_add_pre _msg "$(tail -c 800 "$CHECKIN_ERR" 2>/dev/null || echo '（无 stderr 输出）')"
