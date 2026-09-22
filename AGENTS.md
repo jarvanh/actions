@@ -16,8 +16,8 @@ GitHub Actions 工作流与脚本集合：OpenList 网盘同步、Emby 302 直�
 
 仓库根 `*-remediation-plan-*.md` 是长周期修复的执行蓝图，也是**唯一的跨会话进度真源**（复选框 + 进度日志；`.codebuddy/memory/` 是本机私有、不在 git 里，别的 AI 读不到）：
 
-- `openlist-sync-remediation-plan-2026-09-13.md` — OpenList 网盘同步（Phase 1 已落地，Phase 2 进行中）。**接手先读它的 §0「AI 接手须知」**：当前阶段、开工四步、红线、必须问用户的事都在那里，§10 是可直接粘用的接手指令模板。
-- 续做时：先核对 run 的 `headSha` 是不是你要验证的那版代码（schedule 轮钉的是创建时刻的 main sha），收尾更新该文档的复选框与进度日志再 commit。
+- `remediation-plan-2026-09-13.md` — 长周期修复执行蓝图（2026-09-22 由两份域计划整合而来），
+  含两部分：**第一部分 OpenList 网盘同步**（Phase 1 已落地，Phase 2 进行中。**接手先读它的 §0「AI 接手须知」**：当前阶段、开工四步、红线、必须问用户的事都在那里，§10 是可直接粘用的接手指令模板）、**第二部分 Emby 302**（Phase 1→3 已落地，Phase 4 待用户实验）。续做时：先核对 run 的 `headSha` 是不是你要验证的那版代码（schedule 轮钉的是创建时刻的 main sha），收尾更新该文档的复选框与进度日志再 commit。
 - **⚠️「已修复」必须附证据（2026-09-18 教训）**：凡声称"某修法已生效/已落地"，必须给出
   **含该提交 sha 的生产轮号 + 命中计数**（`git merge-base --is-ancestor <sha> <run_sha>` 核对
   + 在 `gh run view <id> --log` 里 grep 该分支的日志特征）。反例：`296a3c3` 合入近 6 小时、

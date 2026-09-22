@@ -1,6 +1,6 @@
 # emby 302 修复 — 实施交接（2026-09-14，Phase 1→3 已落地）
 
-> 本文件是给下一个 AI/人接手的进度快照。计划真源 `emby-302-remediation-plan-2026-09-13.md`，
+> 本文件是给下一个 AI/人接手的进度快照。计划真源 `remediation-plan-2026-09-13.md`（第二部分 · Emby 302），
 > 实现约定 `AGENTS.md`、通知规范 `docs/telegram-notify.md`、域文档 `docs/emby.md`。
 
 ## 一句话状态
