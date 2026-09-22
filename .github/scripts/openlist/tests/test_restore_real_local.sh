@@ -236,6 +236,92 @@ fi
 
 echo
 # ────────────────────────────────────────────────────────────
+# 场景 7（V3-Q1）: 修复侧端到端 —— 原目录真不可写 → 短哈希目录兜底真建出真落盘
+#   与 mock 版（test_hash_dir_fallback.sh）的本质区别: rclone 是真二进制真搬文件，
+#   「目录不可写」用 chmod 555 真实注入（GH runner 非 root，权限位真实生效）。
+#   mock 版证明"代码会走折叠分支"，本场景证明"折叠之后文件真的传进去了"。
+#   桩只剩与 rclone 无关的三件: 容器重启复核（local 远端无 stale 缓存，恒真）、
+#   预检基准重建、OpenList token（mkdir 成功根本走不到 API 分支）。
+# ────────────────────────────────────────────────────────────
+echo "--- 场景7: 修复侧端到端（目录真不可写 → 短哈希目录真落盘）---"
+_restart_openlist_for_truth() { return 0; }
+_rebuild_raw_baseline() { return 0; }
+_get_openlist_token() { echo ""; }
+# file_fix.sh 的作用域副作用初始化（与 mock 测试 reset_state 同款最小集，
+# 缺了会把上一个用例的状态泄漏进来，最典型是后端熔断把兜底直接短路）
+FIX_METHOD_BLACKLIST=()
+_DIR_WRITE_CACHE=()
+_BACKEND_DEAD=()
+_BACKEND_DIR_FAIL_STREAK=()
+_DIR_PROBE_RESTARTS=0
+_FIX_NAMELEN_CONTENT=0
+
+# 源端放独立目录: SRC_SIM 有护栏快照比对（src_before/after），场景 7 中途加文件
+# 会破坏快照一致性；且护栏语义是"不得修改生产源端"，本目录是测试自建的 local 源端。
+SRC7_BASE="$SANDBOX/src7"
+ORIG7="locked dir/超长目录名-敏感词测试-This Is A Very Long Directory Name For Fold Test/影视文件 (2024) [4K].mkv"
+SRC7="$SRC7_BASE/$ORIG7"
+mkdir -p "$(dirname "$SRC7")"
+printf 'CONTENT-SEVEN' > "$SRC7"
+LOCKED_DIR="$DEST/locked dir/超长目录名-敏感词测试-This Is A Very Long Directory Name For Fold Test"
+mkdir -p "$LOCKED_DIR"
+chmod 555 "$LOCKED_DIR"
+
+FIX_LOG7="$SANDBOX/fix7.log"
+TRY_FIX_STATUS=""
+try_fix_failed_file "$SRC7_BASE" "$DEST" "t" "$ORIG7" "$FIX_LOG7" >/dev/null 2>&1 || true
+
+HD7="$(sh8 "$(dirname "$ORIG7")")"
+ALT7="$HD7/影视文件 (2024) [4K].mkv"
+[ "$TRY_FIX_STATUS" = "success" ] \
+  && ok "7a 修复侧端到端成功（真下载 + 真上传，不可写目录被兜底绕开）" \
+  || bad "7a: status=$TRY_FIX_STATUS msg=$TRY_FIX_MESSAGE"
+[ "$TRY_FIX_ALTERNATIVE" = "$ALT7" ] \
+  && ok "7b 替代路径落在短哈希目录（<hash8>/<原名>）" || bad "7b: alt=$TRY_FIX_ALTERNATIVE"
+[ -f "$DEST/$ALT7" ] && ok "7c 短哈希目录内文件真落盘（真 rclone 写入）" \
+  || bad "7c: 缺 $DEST/$ALT7"
+[ "$(cat "$DEST/$ALT7" 2>/dev/null)" = "CONTENT-SEVEN" ] && ok "7d 落盘内容与源端一致" || bad "7d 内容不一致"
+printf '%s' "${TRY_FIX_METHOD:-}" | grep -qF "短哈希目录 ${HD7}" \
+  && ok "7e 方法文本标注短哈希目录（restore_info.jq 可分类）" || bad "7e: method=${TRY_FIX_METHOD}"
+[ -z "$(ls -A "$LOCKED_DIR" 2>/dev/null)" ] \
+  && ok "7f 原目录全程零写入（555 注入成立，落点确实走了兜底而非原目录）" \
+  || bad "7f 原目录被写入（不可写注入失效）"
+# 还原测试自己造的 555 目录，恢复写权限让 trap 清理不报错
+chmod -R u+w "$DEST/locked dir" 2>/dev/null || true
+
+# ────────────────────────────────────────────────────────────
+# 场景 8（V3-Q2）: 落盘链路三点连通 —— 修复序列化 ↔ 真实落点 ↔ 还原落点
+#   现状"分别测过、未连通": ①fix_list → restore_info.jq 序列化有测试；
+#   ②按 fixed_files 记录还原有测试（场景 1-3）。但"序列化出的记录与磁盘上
+#   真实落点严格一致"没有断言 —— 万一序列化路径拼错一段，两边各自都绿。
+#   短哈希体系里记录就是生命线（不可逆，original 丢了无法自愈），必须锁死。
+# ────────────────────────────────────────────────────────────
+echo "--- 场景8: 落盘链路三点连通（序列化 ↔ 真实落点 ↔ 还原）---"
+# ① 用场景 7 的真实输出按生产格式写 fix_list 行（file_fix_pipeline.sh:420 同款 8 段管道行）
+SIZE7=$(wc -c < "$SRC7" | tr -d ' ')
+FIXLINE7="${ORIG7}|${TRY_FIX_ALTERNATIVE}|${TRY_FIX_METHOD}|${TRY_FIX_RESTORE}|${SIZE7}B|${SIZE7}|${TRY_FIX_METHOD_ID}|${TRY_FIX_MD5}"
+FIXED_JSON7=$(printf '%s\n' "$FIXLINE7" \
+  | jq -R -s --arg sp "$SRC7_BASE" --arg dp "$DEST" \
+      -f "$REPO_ROOT/.github/scripts/openlist/restore_info.jq" 2>/dev/null || echo "[]")
+# ② 序列化结果与修复侧输出一致（kind 正确、original/alternative 逐字一致）
+[ "$(echo "$FIXED_JSON7" | jq -r '.[0].restore.kind // "MISSING"')" = "hash_dir" ] \
+  && ok "8a 序列化 kind=hash_dir（与折叠行为一致）" || bad "8a: kind=$(echo "$FIXED_JSON7" | jq -r '.[0].restore.kind // "MISSING"')"
+[ "$(echo "$FIXED_JSON7" | jq -r '.[0].original')" = "$ORIG7" ] \
+  && ok "8b 记录的 original == 修复侧输入原路径" || bad "8b: original 不一致"
+# ③ 记录 ↔ 真实落点: 记录的 alternative 在 dest 真实存在（不是只写在 JSON 里）
+ALT8="$(echo "$FIXED_JSON7" | jq -r '.[0].alternative')"
+[ -n "$ALT8" ] && [ "$ALT8" = "$TRY_FIX_ALTERNATIVE" ] && [ -f "$DEST/$ALT8" ] \
+  && ok "8c 记录的 alternative 与磁盘真实落点逐字一致" || bad "8c: alt=$ALT8"
+# ④ 记录 ↔ 还原: 按该记录真还原，落点 == original 且内容一致 ⇒ 三点闭环
+st=$(_restore_one_entry "$DEST" "$ORIG7" "$ALT8" "${TRY_FIX_METHOD:-}" "$TMP_BASE" "${TRY_FIX_MD5:-}")
+[ "$st" = "OK" ] && ok "8d 按序列化记录真还原返回 OK" || bad "8d: st=$st"
+[ "$(cat "$DEST/$ORIG7" 2>/dev/null)" = "CONTENT-SEVEN" ] \
+  && ok "8e 还原落点与内容 == 记录的 original（三点连通闭环）" || bad "8e 还原内容不一致"
+[ ! -e "$DEST/$ALT8" ] \
+  && ok "8f 还原是移动不是复制（替代位置已清空，无重复产物）" || bad "8f 替代文件残留"
+
+echo
+# ────────────────────────────────────────────────────────────
 # 收尾: 断言源端零修改（用户硬约束）
 # ────────────────────────────────────────────────────────────
 SRC_AFTER="$(cd "$SRC_SIM" && find . -type f -exec md5sum {} \; | sort)"

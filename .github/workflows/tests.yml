@@ -74,6 +74,14 @@ jobs:
           echo "docker:  $(docker --version 2>&1 || echo '不可用（truth 套件会红）')"
           echo "date -d: $(date -d '@0' '+%Y-%m-%d' 2>/dev/null || echo '不可用（marker_skip_guards 会红）')"
 
+      - name: rclone-install
+        run: |
+          set -e
+          # test_restore_real_local.sh 需要**真 rclone 二进制**（local 远端，真搬文件）。
+          # 它只用 local 远端、不碰任何云凭据 ⇒ 只 install 不 config（无需 RCLONE secret）。
+          # 没有 install 之前该套件在 CI 恒走 SKIP 分支，场景 1-8 从未真跑过。
+          bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" install
+
       - name: openlist 回归套件（串行）
         run: |
           set -u
