@@ -188,7 +188,11 @@ jobs:
           cloudflared tunnel route dns $TUNNEL_NAME home.${DOMAIN_PREFIX}.eu.org
           
           echo "Starting tunnel to expose http://127.0.0.1:8123"
-          nohup cloudflared tunnel run --url http://127.0.0.1:8123 $TUNNEL_NAME &
+          if [ -f "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ]; then
+            bash "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ensure $TUNNEL_NAME || true
+          else
+            nohup cloudflared tunnel run --url http://127.0.0.1:8123 $TUNNEL_NAME &
+          fi
       # 会话保持 + 数据库周期热备：原为纯 sleep 340m，runner 被强杀（VM 销毁/取消超时）时
       # 收尾的回传根本来不及执行，改为每 5 分钟做一次一致性快照并回传变化的 db，
       # 强杀丢失窗口从 5.7 小时压缩到 ≤5 分钟。与 openlist.yml 同一套做法。

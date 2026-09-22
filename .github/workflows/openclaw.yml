@@ -411,14 +411,20 @@ jobs:
           mkdir -p ~/.openclaw/logs
 
           cloudflared tunnel route dns oc oc.'${{ secrets.VD }}'.eu.org || true
-
-          nohup cloudflared tunnel run --url http://127.0.0.1:18789 oc \
-            > ~/.openclaw/logs/cloudflared_oc.log 2>&1 &
-          echo $! > ~/.openclaw/logs/cloudflared_oc.pid
+          # Managed by the unified systemd tunnel manager: tunnels get
+          # Restart=always, so a killed connector comes back on its own.
+          # Falls back to nohup only if the manager is unavailable.
+          if [ -f "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ]; then
+            bash "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ensure oc || true
+          else
+            nohup cloudflared tunnel run --url http://127.0.0.1:18789 oc \
+              > ~/.openclaw/logs/cloudflared_oc.log 2>&1 &
+            echo $! > ~/.openclaw/logs/cloudflared_oc.pid
+          fi
 
           sleep 10
-          echo "OpenClaw tunnel started."
-          
+          echo "OpenClaw tunnel started (systemd-managed)."
+
       - name: Run rss-to-telegram container
         env:
           # rsstt 服务使用独立 bot，token 经同名 secret 注入（此前未接线导致容器 TOKEN 恒空）
@@ -818,15 +824,18 @@ jobs:
             if [ -n "${FALLBACK_REASON:-}" ]; then printf 'FALLBACK_REASON=%s\n' "$FALLBACK_REASON"; fi
           } > "$BACKEND_STATE"
 
-          pkill -f "cloudflared tunnel run --protocol http2 --url http://127.0.0.1:8317 ai-api" || true
+          # Hand off to the systemd unit (Restart=always) instead of a bare
+          # nohup, so the tunnel survives signal sweeps and restarts itself.
+          if [ -f "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ]; then
+            bash "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ensure ai-api || true
+          else
+            nohup cloudflared tunnel run --protocol http2 --url http://127.0.0.1:8317 ai-api \
+              > ~/.openclaw/logs/cloudflared_CLIPProxyAPI.log 2>&1 &
+            sleep 5
+            echo $! > ~/.openclaw/logs/cloudflared_CLIPProxyAPI.pid
+          fi
 
-          nohup cloudflared tunnel run --protocol http2 --url http://127.0.0.1:8317 ai-api \
-            > ~/.openclaw/logs/cloudflared_CLIPProxyAPI.log 2>&1 &
-
-          sleep 5
-          echo $! > ~/.openclaw/logs/cloudflared_CLIPProxyAPI.pid
-
-          echo "ai-api 命名隧道已启动（固定地址模式），当前后端: ${ACTIVE_BACKEND}"
+          echo "ai-api 命名隧道已启动（systemd 托管，固定地址模式），当前后端: ${ACTIVE_BACKEND}"
 
       - name: Run workbuddy-gateway (check update first, then serve)
         id: run_workbuddy

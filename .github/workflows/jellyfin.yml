@@ -179,7 +179,11 @@ jobs:
           # rclone 以 runner 身份运行（与挂载步骤同）：root 运行会在 token 刷新时回写 rclone.conf 属主
           rclone copy i:SyncBack/'${{ secrets.VD }}'/.cloudflared ~/.cloudflared -vv
           cloudflared tunnel route dns j j.'${{ secrets.VD }}'.eu.org
-          nohup cloudflared tunnel run --url http://127.0.0.1:8096 j &
+          if [ -f "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ]; then
+            bash "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ensure j || true
+          else
+            nohup cloudflared tunnel run --url http://127.0.0.1:8096 j &
+          fi
       - name: sleep
         run: |
           sleep 340m && curl -X POST -H "X-Emby-Token: d81ced113e714504aeac7c42d5dbda57" http://127.0.0.1:8096/System/Shutdown

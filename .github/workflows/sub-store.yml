@@ -127,7 +127,11 @@ jobs:
       - name: run cloudflared
         run: |
           cloudflared tunnel route dns sub-store sub-store.'${{ secrets.VD }}'.eu.org
-          nohup cloudflared tunnel run --url http://127.0.0.1:3001 sub-store &
+          if [ -f "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ]; then
+            bash "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ensure sub-store || true
+          else
+            nohup cloudflared tunnel run --url http://127.0.0.1:3001 sub-store &
+          fi
       - name: sleep
         run: |
           sleep 350m          
