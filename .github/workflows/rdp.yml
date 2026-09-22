@@ -90,9 +90,9 @@ jobs:
         $msg = "🖥️ Windows RDP 已就绪`n$TG_SEP`n" +
           # 分节 emoji 不与标题重复（标题已是 🖥️），否则首行与分节视觉粘连
           "🔐 RDP · 3`n" +
-          "  ├─ 地址：<code>$(Esc-Html $address)</code>`n" +
-          "  ├─ 用户名：<code>runneradmin</code>`n" +
-          "  └─ 密码：<code>$(Esc-Html $Env:RDP_PASSWORD)</code>`n" +
+          "<code>  ├─ </code>地址：<code>$(Esc-Html $address)</code>`n" +
+          "<code>  ├─ </code>用户名：<code>runneradmin</code>`n" +
+          "<code>  └─ </code>密码：<code>$(Esc-Html $Env:RDP_PASSWORD)</code>`n" +
           # 措辞与 tailscale-windows.yml 同款（同为 6h 上限）：runner 是被取消而非关机
           "`n有效期：约 6 小时 · 超时自动结束"
         $msg += "`n`nℹ️ 连接方式：Microsoft Remote Desktop / 任何 RDP 客户端，地址填上面这一行"

@@ -720,7 +720,7 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
                 'latency_ms': _rtt_to_ms(r.get('rtt')),
             }, _top_mode, order='up_first')
             # 条目行统一走共享的 tg_entry（主体 + 元数据，转义与分隔符一致）
-            lines.append(f'  {connector} ' + tg_entry(r.get("name", ""), prefix))
+            lines.append(f'<code>  {connector} </code>' + tg_entry(r.get("name", ""), prefix))
         lines.append('')
     else:
         lines.append('⚠️ 没有节点测速成功')
@@ -728,7 +728,7 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
 
     if bypass_hits:
         lines.append('⚠️ 疑似未走代理')
-        lines.append(f"  └─ {bypass_hits} 个节点的出口 IP 与 runner 直连出口（{tg_entry(direct_ip)}）相同，"
+        lines.append(f"<code>  └─ </code>{bypass_hits} 个节点的出口 IP 与 runner 直连出口（{tg_entry(direct_ip)}）相同，"
                      'TUN 进程规则可能未生效，结果不可信')
         lines.append('')
 
@@ -740,7 +740,7 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
     failed = [r for r in failed if not r.get('probe_failed')]
     if probe_failed:
         lines.append(f'⚠️ 测活探测异常 · {len(probe_failed)}')
-        lines.append(f'  └─ 探测接口本轮不可用（{tg_entry((probe_failed[0].get("error") or "").split("：")[-1][:60])}），'
+        lines.append(f'<code>  └─ </code>探测接口本轮不可用（{tg_entry((probe_failed[0].get("error") or "").split("：")[-1][:60])}），'
                      '这些节点未真正探测，不计入失败')
         lines.append('')
     if failed:
@@ -756,7 +756,7 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
             _failed_entries.append(f'还有 {len(failed) - 8} 条…')
         for _i, _l in enumerate(_failed_entries, 1):
             _c = '└─' if _i == len(_failed_entries) else '├─'
-            lines.append(f'  {_c} {_l}')
+            lines.append(f'<code>  {_c} </code>{_l}')
         lines.append('')
 
     lines.append('📦 订阅 · Gist')
@@ -771,12 +771,12 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
             gist_lines.append(f'🔗 <a href="{esc(raw_url)}">订阅源 YAML</a>')
         for _i, _l in enumerate(gist_lines):
             _c = '└─' if _i == len(gist_lines) - 1 else '├─'
-            lines.append(f'  {_c} {_l}')
+            lines.append(f'<code>  {_c} </code>{_l}')
     elif gist_res:
-        lines.append(f"  └─ ⚠️ 上传失败：{tg_entry(gist_res.get('reason', ''))}")
+        lines.append(f"<code>  └─ </code>⚠️ 上传失败：{tg_entry(gist_res.get('reason', ''))}")
     elif gist_error:
         # 上传阶段抛异常（HTTP 4xx 等）≠ 没有达标节点，文案必须区分
-        lines.append(f'  └─ ⚠️ 上传失败：{tg_entry(gist_error[:120])}')
+        lines.append(f'<code>  └─ </code>⚠️ 上传失败：{tg_entry(gist_error[:120])}')
     else:
         # ⚠️ 「没上传」有三种完全不同的原因，混成一句会误导（2026-09-16 run 35116972319：
         # 206 个节点实测有速度、最高 245 Mbps，却报「达标不足 1 个」，读者只会去怀疑节点）。
@@ -793,10 +793,10 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
         _measured = [r for r in results
                      if (r.get('up') or 0) > 0 or (r.get('down') or 0) > 0]
         if qualified_count <= 0 and _measured and _no_config and len(_no_config) >= len(_measured):
-            lines.append(f'  └─ ⚠️ 未更新订阅：本有节点测出速度，但缺少可导出配置'
+            lines.append(f'<code>  └─ </code>⚠️ 未更新订阅：本有节点测出速度，但缺少可导出配置'
                          f'（达标判定按{esc(metric_label)} ≥{min_megabit}兆）')
         else:
-            lines.append(f'  └─ ⚠️ 达标不足 {min_nodes} 个 · 阈值 ≥{min_megabit}兆'
+            lines.append(f'<code>  └─ </code>⚠️ 达标不足 {min_nodes} 个 · 阈值 ≥{min_megabit}兆'
                          f'（按{esc(metric_label)}）· 未更新订阅{esc(_scope)}')
     # 统一收尾区（收尾区与正文间固定**一个**空行）：此前连写两个 append('') 变双空行
     lines.append('')

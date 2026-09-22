@@ -1037,7 +1037,7 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None,
             prefix = build_node_metric_prefix(_result_metric_item(r), mode, order='up_first')
             connector = '└─' if idx == len(top) else '├─'
             # 条目不编号，顺序即名次；条目行统一走 tg_entry（主体 + 元数据，见 规范 · 条目与树形）
-            lines.append(f'  {connector} ' + tg_entry(r.get("name", ""), prefix))
+            lines.append(f'<code>  {connector} </code>' + tg_entry(r.get("name", ""), prefix))
         lines.append('')
     else:
         lines.append('⚠️ 没有节点测速成功')
@@ -1054,7 +1054,7 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None,
             _fe.append(f'还有 {len(_failed) - 8} 条…')
         for _i, _l in enumerate(_fe, 1):
             _c = '└─' if _i == len(_fe) else '├─'
-            lines.append(f'  {_c} {_l}')
+            lines.append(f'<code>  {_c} </code>{_l}')
         lines.append('')
 
     lines.append('📦 订阅 · Gist')
@@ -1071,11 +1071,11 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None,
             gist_lines.append(f'🔗 <a href="{esc(html_url)}">Gist 页面</a>')
         for _i, _l in enumerate(gist_lines):
             _c = '└─' if _i == len(gist_lines) - 1 else '├─'
-            lines.append(f'  {_c} {_l}')
+            lines.append(f'<code>  {_c} </code>{_l}')
     elif gist_res:
-        lines.append(f"  └─ ⚠️ 上传失败：{tg_entry(gist_res.get('reason', ''))}")
+        lines.append(f"<code>  └─ </code>⚠️ 上传失败：{tg_entry(gist_res.get('reason', ''))}")
     else:
-        lines.append(f'  └─ ⚠️ 达标不足 {min_nodes} 个 · 阈值 ≥{min_megabit}兆（按{esc(metric_label)}）· 未更新订阅')
+        lines.append(f'<code>  └─ </code>⚠️ 达标不足 {min_nodes} 个 · 阈值 ≥{min_megabit}兆（按{esc(metric_label)}）· 未更新订阅')
 
     # 统一收尾区（收尾区与正文间固定一个空行；与 tg_add_footer 同形态同降级链）
     # 注: 正文的「耗时 X」是测速自身耗时，收尾区的「已运行 X」是 run 已运行时长，两者语义不同

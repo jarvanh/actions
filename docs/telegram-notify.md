@@ -1086,6 +1086,9 @@ send_tg "$msg" || echo "::warning::TG 通知发送失败（不影响任务）"
 - 组内还有附属明细时降为二层列表（`│ ` 前缀 + 缩进 2 格的 `├─/└─`）：子行前缀必须与
   条目前缀**等宽**（`tree_sub` ≡ `tree_conn`，各 5 字符），否则子行正文比条目正文右移
   一格；子行只补一句话，不搬日志（3.6 节）：
+- 树形前缀统一包等宽 `<code>`（`<code>  ├─ </code>`）：正文区是比例字体，空格与盒线
+  字符宽度各异，裸文本前缀的竖线列必然错位；包进等宽区后 `├─/│/└─` 严格成列
+  （2026-09-22 起；openlist sync_progress.sh 同款先例）。手拼前缀同样包 `<code>`。
 
   ```
   📁 onedrive:backup
@@ -1369,6 +1372,7 @@ python 侧拿不到 bash 函数，仍有两处同义实现（`add_uploaded_video
 | 失败原因写内部机制（熔断 / 探测 / 哈希目录） | 直接透出实现层的判据变量 | 翻成人话（1.5 节），细节留日志 | `目标目录不可写（存储端本轮整体故障，未试写；备用目录也写不进去）` |
 | 把运行日志搬进通知当条目子行 | 想省一次点链接 | 子行只补一句话，过程走运行日志链接 | `  └─ <code>f.mp4</code> · 目标目录不可写（…）` |
 | 子行前缀比条目前缀宽一格（6 vs 5 字符） | `tree_sub` 比 `tree_conn` 多写一个空格 | 两者定宽必须相等（4.2 节） | `  │  差异构成：…` 与 `  ├─ <code>dst</code>` 正文同列 |
+| 树形前缀裸文本发送（不包 `<code>`） | 以为等宽对齐理所当然 | 前缀包进 `<code>`：正文区是比例字体，裸前缀竖线列必歪 | `<code>  ├─ </code><code>dst</code>` 竖线严格成列 |
 | 单独列 rclone 差异清单（新增 / 仅目标存在 / 不一致） | 想交代「还差多少」 | 不列：与失败清单、已修复清单重复，且把已处理的也算进差异 | 规模由文件数行交代：`文件数：差异 3 · 源端 1415 / 目标 1412` |
 | 函数体内 `source` 真源 | 以为可重复 source、想每个调用点自带一份 | 只在顶层/step 顶层 source 一次：函数体在**子 shell 里执行**（`$( )` / 管道 / 后台），子 shell 内 source 不改变父 shell 里的定义，于是调用点对 `send_tg` 的本地覆写被静默还原、`local` 失效（4.4 节） | 顶层 `source .../tg_notify.sh`，函数只用助手 |
 | 长跑接力轮重复推同一条通知 | 新 run 是上一轮 `workflow_dispatch` 接力启动，服务与账号池都没变，却又跑一遍同样的判断 | 用 `/tmp` 下的标记文件区分首轮与接力轮，接力轮只记日志不发通知（4.4 节） | CI 日志 `ℹ️ 接力轮（上一 run N 已启动），跳过重复通知` |
@@ -1422,7 +1426,7 @@ python 侧拿不到 bash 函数，仍有两处同义实现（`add_uploaded_video
 | 条目（双机器值 `·`） | `tg_entry_codes` / `tg_add_entry_codes` | — | `tg_entry_codes(a, b, *meta)` |
 | 多行块 | `tg_add_pre` | — | `tg_pre_block(text)` |
 | 说明段 | `tg_add_note` | 手拼 | 手拼 |
-| 树形 / 折叠 | `tree_conn` `tree_sub` `tree_lines` `tree_code_fold`（裸文本）/ `tree_fold`（已构建条目流） | 手拼 | 手拼 |
+| 树形 / 折叠 | `tree_conn` `tree_sub` `tree_lines` `tree_code_fold`（裸文本）/ `tree_fold`（已构建条目流）；前缀自带等宽 `<code>` | 手拼（前缀同样包 `<code>`） | 手拼（同左） |
 | 大小格式化 | `format_bytes` | 手算 | 手算（python 侧同义实现） |
 | 转义 | `escape_html` | `Esc-Html` | `html.escape` |
 | 收尾 | `tg_add_footer` | `Get-TgFooter` | `tg_footer_line` / `tg_format_elapsed` |

@@ -1598,16 +1598,16 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
             prefix = build_node_metric_prefix(item, speedtest_mode, order='up_first') or '-'
             connector = '└─' if idx == len(top) else '├─'
             # 条目行统一走共享的 tg_entry（主体 + 元数据，转义与分隔符一致）
-            summary_lines.append(f'  {connector} ' + tg_entry(item['name'], prefix))
+            summary_lines.append(f'<code>  {connector} </code>' + tg_entry(item['name'], prefix))
         summary_lines.append('')
     elif alive_probe_count > 0:
         summary_lines.append('⚠️ 没有节点测速成功')
-        summary_lines.append('  └─ provider 健康检查有节点通过，但正式 Gitee 推送/拉取测速全部失败')
+        summary_lines.append('<code>  └─ </code>provider 健康检查有节点通过，但正式 Gitee 推送/拉取测速全部失败')
         summary_lines.append('')
     else:
         # 健康检查结论不再决定放行，所以这里说的是「本轮没有可达节点」，不是「被预筛挡掉了」
         summary_lines.append('⚠️ 没有节点测速成功')
-        summary_lines.append('  └─ provider 健康检查无节点通过，且逐节点实测也无成功')
+        summary_lines.append('<code>  └─ </code>provider 健康检查无节点通过，且逐节点实测也无成功')
         summary_lines.append('')
     # 失败节点明细（与 taier 对齐：原因可见，便于区分拒测/超时/鉴权失败）
     _failed = [r for r in speed_results if not r.get('ok')]
@@ -1620,7 +1620,7 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
             _fe.append(f'还有 {len(_failed) - 8} 条…')
         for _i, _l in enumerate(_fe, 1):
             _c = '└─' if _i == len(_fe) else '├─'
-            summary_lines.append(f'  {_c} {_l}')
+            summary_lines.append(f'<code>  {_c} </code>{_l}')
         summary_lines.append('')
     # 收尾区不在这里追加：finalize_gist_and_notify 还会在正文末尾补「📦 订阅 · Gist」段，
     # 收尾行必须位于所有正文之后（规范 · 收尾区），统一由 finalize 在最后追加
@@ -1666,11 +1666,11 @@ def finalize_gist_and_notify(env, summary, summary_lines, subscription_text, bun
             gist_lines.append(f'🔗 <a href="{html.escape(html_url)}">订阅源 YAML</a>')
         for _i, _l in enumerate(gist_lines):
             _c = '└─' if _i == len(gist_lines) - 1 else '├─'
-            summary_lines.append(f'  {_c} {_l}')
+            summary_lines.append(f'<code>  {_c} </code>{_l}')
     elif (gist_res.get('reason') or '').startswith('empty subscription'):
-        summary_lines.append(f'  └─ ⚠️ 达标不足 {min_nodes} 个 · 阈值 ≥{min_megabit}兆（按{html.escape(metric_label)}）· 未更新订阅')
+        summary_lines.append(f'<code>  └─ </code>⚠️ 达标不足 {min_nodes} 个 · 阈值 ≥{min_megabit}兆（按{html.escape(metric_label)}）· 未更新订阅')
     else:
-        summary_lines.append(f"  └─ ⚠️ 上传失败：{tg_entry(gist_res.get('reason', ''))}")
+        summary_lines.append(f"<code>  └─ </code>⚠️ 上传失败：{tg_entry(gist_res.get('reason', ''))}")
     # 统一收尾区（收尾区与正文间固定一个空行；与 tg_add_footer 同形态同降级链）
     # 必须在所有正文段之后追加（「📦 订阅 · Gist」是正文的最后一段）——此前在
     # build_summary_lines 里加，被此段挤到正文中间，消息末尾反而没有收尾行（规范 · 收尾区）

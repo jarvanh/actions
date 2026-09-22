@@ -25,7 +25,8 @@
 #   ━━━━━━━━━━━━━━━━━━           ← TG_SEP（勿手写分隔线）
 #   标签：值               ← tg_add_kv / 路径 tg_add_path
 #   {emoji} 分节 · N       ← tg_add_section（段前空行，紧跟标题时无；列表分节计数一律 " · N"）
-#   ├─/└─ 树形条目               ← 唯一条目前缀（tree_lines / tree_code_fold，无平铺形态）
+#   <code>├─/└─</code> 树形条目        ← 唯一条目前缀（tree_lines / tree_code_fold，无平铺形态；
+#                                  前缀自带等宽 <code>，比例字体正文区下竖线才能严格成列）
 #   <pre>日志</pre>              ← tg_add_block
 #   {可选 备注}            ← tg_add_note
 #   （空行）⏱ 已运行 X · 🔗 运行日志 ← tg_add_footer（全库唯一收尾形态，自带空行）
@@ -194,21 +195,23 @@ tg_add_footer() {
   tg_append "$var" $'\n'"${line}"$'\n'
 }
 
-# 树形条目前缀: tree_conn <0|1 是否末条> → "  ├─ " / "  └─ "
+# 树形条目前缀: tree_conn <0|1 是否末条> → "<code>  ├─ </code>" / "<code>  └─ </code>"
 # openlist 的 task_preview / sync_progress 等直接调用（2026-09-06 从 openlist/utils.sh
 # 收敛至此——此前 utils.sh 删副本时漏迁，导致任务预览通知树形连接符全丢、粘成一坨）
 tree_conn() {
-  if [ "$1" = "1" ]; then printf '  └─ '; else printf '  ├─ '; fi
+  # 前缀包 <code>：正文区是比例字体，空格与盒线字符宽度各异，裸文本前缀的竖线
+  # 列必然错位；包进等宽区后 ──/│ 严格成列（openlist sync_progress.sh 同款先例）。
+  if [ "$1" = "1" ]; then printf '<code>  └─ </code>'; else printf '<code>  ├─ </code>'; fi
 }
 
-# 树形条目子行前缀（内容对齐条目文本）: tree_sub <0|1 是否末条> → "  │  " / "     "
+# 树形条目子行前缀（内容对齐条目文本）: tree_sub <0|1 是否末条> → "<code>  │  </code>" / "<code>     </code>"
 # 定宽必须与 tree_conn 一致（5 字符）——否则子行正文比条目正文右移一格，
 # 与规范 · 条目与树形的示例不对齐（2026-09-12 修：曾多写一个空格）
 tree_sub() {
-  if [ "$1" = "1" ]; then printf '     '; else printf '  │  '; fi
+  if [ "$1" = "1" ]; then printf '<code>     </code>'; else printf '<code>  │  </code>'; fi
 }
 
-# 多行单行条目 → 树形条目列表（每行 "  ├─/└─ 条目"，末条 └─；输出去尾换行）
+# 多行单行条目 → 树形条目列表（每行 "<code>  ├─/└─ </code>条目"，末条 └─；输出去尾换行）
 # 用法: tree_lines <多行文本>（每行一个条目，条目内容需已转义/含 HTML 标签）
 tree_lines() {
   local _in="$1" _total _n=0 _line _out=""
@@ -219,7 +222,7 @@ tree_lines() {
     _n=$((_n + 1))
     local _last=0
     [ "$_n" -eq "$_total" ] && _last=1
-    if [ "$_last" = "1" ]; then _out+="  └─ ${_line}"$'\n'; else _out+="  ├─ ${_line}"$'\n'; fi
+    if [ "$_last" = "1" ]; then _out+="<code>  └─ </code>${_line}"$'\n'; else _out+="<code>  ├─ </code>${_line}"$'\n'; fi
   done <<< "$_in"
   printf '%s' "${_out%$'\n'}"
 }
