@@ -4890,10 +4890,20 @@ marker 语义的提交:
         重回缺失按新格式重修 —— 「备份缺失」数字一次性抬升属预期，勿误读为回归。
 - [ ] **V3 端到端三问回归（扩 `test_restore_real_local.sh`，真 rclone 不 mock）** —— 照做（2026-09-22 用户确认）
       现有已覆盖: 短哈希文件名 / 短哈希目录 / 双改 / 原路径原名 / 负例 / 分卷（需 7z）
-      / 短哈希不可逆正反两面 / 源端零修改。**缺口**:
-      - Q1 的"目录"那半: 目录名超长/敏感词 → 短哈希目录兜底，目前只有**还原侧**
-        覆盖，**修复侧能否真建出并落盘**没有端到端断言；
-      - Q2 落盘链路: 修复成功 → `fixed_files[]` 与真实落点一致（现为分别测，未连通）。
+      / 短哈希不可逆正反两面 / 源端零修改。**缺口与实施设计（2026-09-22 侦查定稿）**:
+      - Q1 修复侧落盘（新场景 7）: rclone **local 远端** + `chmod 555` 真目录注入
+        「原目录不可写」（GH runner 非 root，权限位真实生效）⇒ 设全局
+        `file_dir_rel`/`failed_file_rel`/`dest_path`/`TRY_FIX_ORIGINAL`/`FIX_METHOD_BLACKLIST`/
+        `_DIR_WRITE_CACHE`/`_BACKEND_DEAD` 后真调 `_fix_switch_to_hash_dir`（file_fix.sh:1255），
+        断言 `dest/<hash8>/<file>` **真落盘**（test -f + rclone lsf 双确认）;
+        保留桩: `_restart_openlist_for_truth`（local 无 stale 缓存，恒真）、
+        `_rebuild_raw_baseline`、`_get_openlist_token`（mkdir 成功走不到 API 分支）;
+      - Q2 落盘链路连通（新场景 8）: 场景 7 产物按 fix_list 管道格式（file_fix_pipeline.sh:420）
+        写行 → 真 `restore_info.jq` 序列化 → 断言每条 alternative 在 dest 真存在 →
+        `_restore_one_entry` 真还原 → 落点 == original ⇒ **修复序列化 ↔ 真实落点 ↔ 还原**
+        三点连通; 文件名避开 `|`（fix_list 分隔符）;
+      - 前置 source 同 restore_real_local 现有头（rclone_flags/tg_notify/utils/file_fix）;
+        真跑只在 CI（本机无 rclone），`bash -n` 本机静态检查。
 - [x] **V4 调整还原测试 workflow（用户明确要求）** —— ✅ 收口（2026-09-22）:
       `since` 绝对下界已落地（§14.11，2026-09-20）；`marker_schema` 入参**随 V1 改版消失**
       （用户决策「旧记录全部清理，以后只有一种 marker 格式」⇒ 不存在混格式样本，筛选
