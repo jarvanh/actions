@@ -1568,7 +1568,7 @@ jobs:
                 _last=0
                 [ "$_i" -eq "$_total" ] && _last=1
                 _uid=$(jq -r '.uid' <<<"$_line")
-                _nick=$(jq -r '(.nickname // "-")' <<<"$_line" | escape_html)
+                _nick=$(escape_html "$(jq -r '(.nickname // "-")' <<<"$_line")")
                 _cr=$(jq -r '.credits' <<<"$_line")
                 _err=$(jq -r '(.err // "")' <<<"$_line")
                 _skipr=$(jq -r '(.skip_reason // "")' <<<"$_line")
