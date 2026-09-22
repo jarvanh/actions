@@ -22,6 +22,9 @@ taier 的测活、以及 **taier / gitee / cdn 三套**通知的降级渲染。
   等展开、以及 `is_unknown_proxy_error()` 把这类错误与「真连不上」分开（fail-open 放行）。
 - **通知降级**：`aborted_due_to_runtime` 传错、或标题降级写反，会让「到点收摊」看起来
   像一次正常完成，读者无从判断这轮到底测完了没有。三套的**行位置也必须一致**。
+- **include 过滤**（2026-09-22，编排轮池子上万远超预算）：最隐蔽的坏法是 **fail-open
+  缺失**——非法正则抛异常、或「全过滤光」被当真返回空列表，编排轮会零节点、整轮白跑。
+  另一处是**接线次序**：过滤必须在 max_nodes 截断之前，否则截断把已过滤节点算进配额。
 
 跑法：`python .github/scripts/proxy-speedtest/tests/test_taier_runtime.py`
 退出码 0 = 全过。
@@ -634,6 +637,70 @@ def main():
     check(_pi != -1 and _tr != -1 and _pi < _tr,
           f'排序在 max_nodes 截断之前（prioritize@{_pi} < truncate@{_tr}）')
     check('nodes_prioritized' in _t_src, '有 nodes_prioritized 日志（可核对命中数）')
+
+    print('== 13. 节点名 include 过滤（2026-09-22，编排轮池子远超 5 小时预算）==')
+    # 诉求：编排轮（gistnodes）交接 15793 个节点、预算只测完 1905 个——优先级排序只能决定
+    # 「先测谁」，决定不了「池子有多大」；include 过滤（命中保留、未命中丢弃）才真正缩短
+    # 运行时长。反证：把 fail-open 删掉（非法正则抛异常 / 全过滤光返回空），13d/13e 变红。
+
+    # 13a/13b/13d/13e 全程捕获 log_progress（还原后再断言），13c/13f/13g 无事件依赖
+    _orig_log13 = t.log_progress
+    ev13 = []
+    try:
+        t.log_progress = lambda stage, **kw: ev13.append((stage, kw))
+        # 13a. 正常过滤：命中保留、未命中丢弃、保持相对序、返回丢弃数
+        inc_nodes = [
+            {'name': '香港-01'}, {'name': '日本 JP-01'},
+            {'name': 'SG-02'}, {'name': '韩国 KR-03'},
+        ]
+        kept13, dropped13 = t.filter_nodes_include(inc_nodes, 'HK|港|SG|新加坡')
+        check([x['name'] for x in kept13] == ['香港-01', 'SG-02'],
+              f'命中保留且保序（实际 {[x["name"] for x in kept13]}）')
+        check(dropped13 == 2, f'丢弃数 = 2（实际 {dropped13}）')
+
+        # 13b. 大小写不敏感 + 中文关键词（与 prioritize 同判据）
+        low13, d13b = t.filter_nodes_include(
+            [{'name': 'hk-01'}, {'name': 'japan'}, {'name': '新加坡-02'}], 'hk|新加坡')
+        check([x['name'] for x in low13] == ['hk-01', '新加坡-02'] and d13b == 1,
+              f'小写 hk 与中文「新加坡」都命中（实际 {[x["name"] for x in low13]}/{d13b}）')
+
+        # 13c. 空正则 / 空列表 → 原样返回、不丢节点（默认不过滤的前提）
+        same13, d0 = t.filter_nodes_include(inc_nodes, '')
+        check(same13 is inc_nodes and d0 == 0, '空正则 → 原样返回、丢弃 0')
+        empty13, d0e = t.filter_nodes_include([], 'HK')
+        check(empty13 == [] and d0e == 0, '空列表 → 返回空、丢弃 0')
+
+        # 13d. 非法正则 → 原样返回、不抛、记 include_regex_invalid
+        bad_out13, bad_d13 = t.filter_nodes_include([{'name': 'HK-01'}], 'HK|(')
+        check(bad_out13 == [{'name': 'HK-01'}] and bad_d13 == 0,
+              '非法正则 → 原样返回、不抛')
+        # 13e. 全过滤光 → fail-open 原样返回（过滤层不得造成零产出）
+        all_out13, all_d13 = t.filter_nodes_include([{'name': 'japan'}], 'HK')
+        check(all_out13 == [{'name': 'japan'}] and all_d13 == 0,
+              '全过滤光 → 原样返回、不丢节点')
+    finally:
+        t.log_progress = _orig_log13
+    stages13 = [s for s, _ in ev13]
+    check('include_regex_invalid' in stages13,
+          f'非法正则记 include_regex_invalid（实际 {stages13}）')
+    check('include_regex_all_dropped_fallback' in stages13,
+          f'全过滤光记 include_regex_all_dropped_fallback（实际 {stages13}）')
+    check('nodes_include_filtered' in stages13,
+          f'正常过滤记 nodes_include_filtered（实际 {stages13}）')
+
+    # 13f. 默认值：CONFIG 里必须是空串（定时轮 / 手动 dispatch 不过滤）
+    check(t.CONFIG['TAIER_INCLUDE_REGEX'] == '',
+          f"默认不过滤（实际 {t.CONFIG['TAIER_INCLUDE_REGEX']!r}）")
+
+    # 13g. 接线次序：排序 → 过滤 → max_nodes 截断（截断必须按过滤后的池子算「前 N 个」）
+    norm13 = _re.sub(r'\s+', '', _t_src)
+    _pp13 = norm13.find("prioritize_nodes(alive_items")
+    _ff13 = norm13.find("filter_nodes_include(alive_items")
+    _tr13 = norm13.find("alive_items=alive_items[:max_nodes]")
+    check(_pp13 != -1 and _ff13 != -1 and _tr13 != -1 and _pp13 < _ff13 < _tr13,
+          f'排序@{_pp13} < 过滤@{_ff13} < 截断@{_tr13}')
+    check("os.environ.get('TAIER_INCLUDE_REGEX'" in norm13,
+          'TAIER_INCLUDE_REGEX 可经 env 覆盖')
 
     print()
     if FAILURES:
