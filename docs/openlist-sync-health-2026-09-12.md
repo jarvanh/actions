@@ -1,7 +1,7 @@
 # OpenList 同步 · 健康诊断（2026-09-12）
 
 > ⚠️ **本文件是 2026-09-12 的快照**（当时的结论"这份同步方案不会完成"已被后续修复推翻）。
-> 当前状态、生效旋钮与退出标准请看仓库根 `remediation-plan-2026-09-13.md`（OpenList 专项）。
+> 当前状态、生效旋钮与退出标准请看仓库根 `openlist-remediation-plan-2026-09-13.md`。
 
 数据源：GitHub Actions 运行记录（近 15 轮）+ 远端 `onedrive:/logs/sync_state/trend.jsonl`
 + run 34674196629 全量日志（12701 行）。本文是一次性诊断快照，不是长期维护的规范。
