@@ -268,14 +268,20 @@ mkdir -p "$LOCKED_DIR"
 chmod 555 "$LOCKED_DIR"
 
 FIX_LOG7="$SANDBOX/fix7.log"
-TRY_FIX_STATUS=""
+# set -u 下断言分支会引用这些变量 —— try_fix_failed_file 若在初始化前崩掉
+# （如某依赖缺失），未定义变量会让测试直接死在断言行而非给出可读失败
+TRY_FIX_STATUS=""; TRY_FIX_ALTERNATIVE=""; TRY_FIX_METHOD=""
+TRY_FIX_METHOD_ID=""; TRY_FIX_RESTORE=""; TRY_FIX_MESSAGE=""; TRY_FIX_MD5=""
 try_fix_failed_file "$SRC7_BASE" "$DEST" "t" "$ORIG7" "$FIX_LOG7" >/dev/null 2>&1 || true
+# 修复日志落 CI 输出（/tmp 沙箱即焚，不打印则失败原因无从排查）
+echo "    [fix7.log 关键行]"
+grep -E '✅|❌|⚠|🔀|兜底|折叠|失败|成功' "$FIX_LOG7" 2>/dev/null | head -12 | sed 's/^/      /' || true
 
 HD7="$(sh8 "$(dirname "$ORIG7")")"
 ALT7="$HD7/影视文件 (2024) [4K].mkv"
 [ "$TRY_FIX_STATUS" = "success" ] \
   && ok "7a 修复侧端到端成功（真下载 + 真上传，不可写目录被兜底绕开）" \
-  || bad "7a: status=$TRY_FIX_STATUS msg=$TRY_FIX_MESSAGE"
+  || { bad "7a: status=$TRY_FIX_STATUS msg=${TRY_FIX_MESSAGE:-}"; tail -25 "$FIX_LOG7" 2>/dev/null | sed 's/^/      /'; }
 [ "$TRY_FIX_ALTERNATIVE" = "$ALT7" ] \
   && ok "7b 替代路径落在短哈希目录（<hash8>/<原名>）" || bad "7b: alt=$TRY_FIX_ALTERNATIVE"
 [ -f "$DEST/$ALT7" ] && ok "7c 短哈希目录内文件真落盘（真 rclone 写入）" \
