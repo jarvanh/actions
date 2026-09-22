@@ -1034,7 +1034,9 @@ _sync_task_impl() {
   #   默认值 4→6 的依据: 2026-09-15 隔离吞吐阶梯实测拐点在 12 流
   #   （1→0.51 / 4→1.33 / 8→1.78~2.13 / 12→2.78 / 16→2.78 / 24→3.05 MiB/s），
   #   而本项与 subdir_parallel 相乘 = 单后端并发 PUT 数，6×2=12 正好落在拐点）
-  #   非 openlist 目标: 阈值 20GB、并发 transfers=RCLONE_TRANSFERS（默认 2）
+  #   非 openlist 目标: 阈值 20GB、并发 transfers=RCLONE_TRANSFERS
+  #   （默认 2→6，2026-09-22 用户决策与 OpenList 目标对齐; 当前生产注册表 16 对
+  #   全是 openlist:* 目标，此分支是未来扩展的预留，改默认值零生产行为变化）
   #   注意: 批次路径曾误读 OPENLIST_TARGET_TRANSFERS（全库无人设置，默认 4），
   #   低并发保护形同虚设且日志硬编码打印 transfers=1 掩盖真相，是整批假成功
   #   的主源（run 34728107625 / 34752801560 顽固缺失恒为 1037）
@@ -1715,7 +1717,7 @@ _batch_consolidate() {
     --files-from "$retry_list" \
     --size-only \
     --no-traverse \
-    --transfers "$( [[ "$dest_path" == openlist:* ]] && echo "${OPENLIST_TRANSFERS:-6}" || echo "${RCLONE_TRANSFERS:-2}" )" \
+    --transfers "$( [[ "$dest_path" == openlist:* ]] && echo "${OPENLIST_TRANSFERS:-6}" || echo "${RCLONE_TRANSFERS:-6}" )" \
     --checkers "${OPENLIST_CHECKERS:-8}" \
     --timeout 30m \
     --retries "${OPENLIST_RETRIES:-3}" \
@@ -2162,7 +2164,7 @@ sync_by_file_batches() {
         if [[ "$dest_path" == openlist:* ]]; then
           _ol_transfers="${OPENLIST_TRANSFERS:-6}"
         else
-          _ol_transfers="${RCLONE_TRANSFERS:-2}"
+          _ol_transfers="${RCLONE_TRANSFERS:-6}"
         fi
         batch_guard_flags=("--transfers" "$_ol_transfers" "--checkers" "${OPENLIST_CHECKERS:-8}")
         batch_timeout="30m"
