@@ -1441,6 +1441,83 @@ jobs:
               "$WB_UPDATE" "$_wb_fail_reason" "$WB_TAIL" 0
           fi
 
+      # trae2api：TRAE SOLO 反代（OpenAI 兼容 API + Web 管理面板 /admin）。
+      # 位置紧跟 workbuddy-gateway / glm-proxy：同为 AI 网关形态服务。
+      # 与 workbuddy 的差异：容器化运行（上游仅提供 go build / docker compose，
+      # 无 release 二进制），数据目录直接 bind mount Dropbox fuse 挂载点
+      # /dropbox/self-hosted/trae2api（实测可写；fuse 权限位恒 666，容器内
+      # uid 10001 与 runner 均可读写，天然绕开 uid 对齐问题）。
+      # 源码每次浅克隆上游重建镜像（纯 Go 标准库，构建约 1 分钟）。
+      # 隧道 trae2api（trae2api.derrick.eu.org → 127.0.0.1:7864）凭证随
+      # /dropbox/self-hosted/.cloudflared 恢复，由 tunnels.conf 纳管。
+      - name: Run trae2api container (TRAE SOLO reverse proxy)
+        run: |
+          set -euo pipefail
+
+          TRAE_DATA=/dropbox/self-hosted/trae2api
+          TRAE_SRC=/tmp/local_trae2api-src
+          mkdir -p "$TRAE_DATA/auths" "$TRAE_DATA/data" ~/.openclaw/logs
+
+          echo "1. Cloning upstream source..."
+          rm -rf "$TRAE_SRC"
+          git clone --depth 1 https://github.com/JeffHu0912/trae2api.git "$TRAE_SRC" 2>&1 | tail -1
+
+          echo "2. Bootstrap data files (idempotent, Dropbox 为准)..."
+          if [ ! -f "$TRAE_DATA/.env" ]; then
+            printf 'TW2A_API_KEY=%s\n' "$(openssl rand -hex 24)" > "$TRAE_DATA/.env"
+          fi
+          if [ ! -f "$TRAE_DATA/config.json" ]; then
+            cp "$TRAE_SRC/config.example.json" "$TRAE_DATA/config.json"
+          fi
+
+          echo "3. Writing compose (mounts -> Dropbox data)..."
+          cat > "$TRAE_SRC/docker-compose.yml" <<'EOF'
+          services:
+            trae2api:
+              build: .
+              container_name: trae2api
+              restart: unless-stopped
+              environment:
+                - TZ=Asia/Shanghai
+                - TW2A_API_KEY=${TW2A_API_KEY:?set TW2A_API_KEY in /dropbox/self-hosted/trae2api/.env}
+                - TW2A_WORK_MODE=${TW2A_WORK_MODE:-auto}
+                - TW2A_WORK_BRIDGE_URL=${TW2A_WORK_BRIDGE_URL:-http://host-gateway:7865}
+                - TW2A_WORK_BRIDGE_TOKEN=${TW2A_WORK_BRIDGE_TOKEN:-twbridge-local-7f3a}
+              extra_hosts:
+                - "host-gateway:host-gateway"
+              ports:
+                - "7864:7864"
+                - "18080:18080"
+              volumes:
+                - /dropbox/self-hosted/trae2api/auths:/app/auths
+                - /dropbox/self-hosted/trae2api/data:/app/data
+                - /dropbox/self-hosted/trae2api/config.json:/app/config.json:ro
+          EOF
+
+          echo "4. Build & start..."
+          docker compose --env-file "$TRAE_DATA/.env" \
+            -f "$TRAE_SRC/docker-compose.yml" \
+            --project-directory "$TRAE_SRC" up -d --build
+
+          echo "5. Health check..."
+          _code=""
+          for i in $(seq 1 60); do
+            _code=$(curl -s --connect-timeout 2 -o /dev/null -w "%{http_code}" http://127.0.0.1:7864/healthz || true)
+            if [ "$_code" = "200" ]; then
+              echo "✅ [trae2api] 7864 已就绪 (HTTP 200)"
+              break
+            fi
+            echo "⏳ [trae2api] 等待中... ${i}/60"
+            sleep 2
+          done
+          if [ "${_code:-}" != "200" ]; then
+            echo "❌ trae2api 未在 120 秒内就绪" >&2
+            exit 1
+          fi
+
+          echo "6. Converge tunnel..."
+          bash "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ensure trae2api || true
+
       # glm-proxy：BigModel/GLM 本地反代（Anthropic ↔ OpenAI 协议转换）。
       # 位置紧跟 workbuddy-gateway：两者同为「宿主进程 + 本地盘运行目录」形态，
       # 且都要在 Notify Tailscale SSH entry 之前起来（该步骤会读 AI 网关状态）。
