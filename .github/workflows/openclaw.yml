@@ -1494,7 +1494,9 @@ jobs:
                 - /dropbox/self-hosted/trae2api/config.json:/app/config.json:ro
           EOF
 
-          echo "4. Build & start..."
+          echo "4. Remove stale container & build & start..."
+          # 幂等接管：清理同名旧容器（可能来自手工部署或旧 project），再由本 compose 接管
+          docker rm -f trae2api >/dev/null 2>&1 || true
           docker compose --env-file "$TRAE_DATA/.env" \
             -f "$TRAE_SRC/docker-compose.yml" \
             --project-directory "$TRAE_SRC" up -d --build
