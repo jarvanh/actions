@@ -117,20 +117,20 @@ jobs:
                 _last=0
                 [ "$_i" -eq "$_total" ] && _last=1
                 _uid=$(jq -r '.uid' <<<"$_line")
-                _nick=$(escape_html "$(jq -r '(.nickname // "-")' <<<"$_line")")
+                _nick=$(jq -r '(.nickname // "-")' <<<"$_line")
                 _cr=$(jq -r '.credits' <<<"$_line")
                 _err=$(jq -r '(.err // "")' <<<"$_line")
                 _skipr=$(jq -r '(.skip_reason // "")' <<<"$_line")
                 if [ -n "$_err" ]; then
-                  _st="⚠️ $(escape_html "$_err")"
+                  _st="⚠️ $_err"
                 elif [ "$(jq -r '.claimed' <<<"$_line")" = "true" ]; then
                   _st="签到 ✓ 本轮领取"
                 elif [ -n "$_skipr" ]; then
-                  _st=$(escape_html "$_skipr")
+                  _st="$_skipr"
                 else
                   _st="今日已签"
                 fi
-                _rows+="$(tree_conn "$_last")${_uid} · ${_nick} · ${_st} · 积分 ${_cr}"$'\n'
+                _rows+="$(tree_conn "$_last")$(tg_entry "$_uid" "$_nick" "$_st" "积分 ${_cr}")"$'\n'
                 # 该账号未用完的包里最早过期的 3 个（子行）
                 _exp3=$(jq -r --arg uid "$_uid" '[.[] | select(.uid == $uid and .remain > 0 and .expire_at > 0)] | sort_by(.expire_at) | .[:3][] | "剩 \(.remain) 分 · \(.expire_fmt) 过期"' "$PACKS_JSON" 2>/dev/null || true)
                 if [ -n "$_exp3" ]; then
