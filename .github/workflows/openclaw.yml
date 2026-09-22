@@ -857,7 +857,7 @@ jobs:
           # 管不住父 shell 的变量（规范 4.4）。
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 
-          # workbuddy-gateway（CangShui/workbuddy-gateway）：纯 Go 单二进制的本地 AI 代理网关。
+          # workbuddy-gateway（jarvanh/workbuddy-gateway）：纯 Go 单二进制的本地 AI 代理网关。
           # 运行目录整体落本地盘，Dropbox 只做持久化存放 —— 与 OpenClaw/CliRelay 同口径。
           # 两处刻意分离的原因：
           #   1. 二进制不能放挂载点：rclone 按 --file-perms 合成权限（默认 0644），chmod +x 是空操作，
@@ -870,7 +870,7 @@ jobs:
           WB_RUN_DIR="/tmp/local_workbuddy/data"
           WB_BIN_DIR="/tmp/local_workbuddy"
           WB_BIN="$WB_BIN_DIR/workbuddy-gateway"
-          WB_RELEASE_BASE="https://github.com/CangShui/workbuddy-gateway/releases/latest/download"
+          WB_RELEASE_BASE="https://github.com/jarvanh/workbuddy-gateway/releases/latest/download"
           WB_VER_FILE="$WB_DIR/.installed-version"
           WB_META="/tmp/run-workbuddy-meta.env"
           WB_LOG="$WB_RUN_DIR/logs/serve.log"
@@ -1017,7 +1017,7 @@ jobs:
           _release_json="$(curl -fsSL --max-time 20 \
             -H 'Accept: application/vnd.github+json' \
             ${WB_GH_TOKEN:+-H "Authorization: Bearer ${WB_GH_TOKEN}"} \
-            https://api.github.com/repos/CangShui/workbuddy-gateway/releases/latest 2>/dev/null || true)"
+            https://api.github.com/repos/jarvanh/workbuddy-gateway/releases/latest 2>/dev/null || true)"
           if [ -n "$_release_json" ]; then
             WB_REMOTE_VER="$(printf '%s' "$_release_json" \
               | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n 1 \
@@ -1026,7 +1026,7 @@ jobs:
           if [ -z "$WB_REMOTE_VER" ]; then
             echo "ℹ️ GitHub API 未取到版本（限流或不可达），改用 releases/latest 重定向兜底..."
             _eff_url="$(curl -sL -o /dev/null -w '%{url_effective}' --max-time 20 \
-              https://github.com/CangShui/workbuddy-gateway/releases/latest 2>/dev/null || true)"
+              https://github.com/jarvanh/workbuddy-gateway/releases/latest 2>/dev/null || true)"
             WB_REMOTE_VER="$(printf '%s' "$_eff_url" \
               | sed -n 's#.*/releases/tag/##p' | head -n 1 || true)"
             [ -n "$WB_REMOTE_VER" ] && echo "✅ 重定向兜底取到版本：${WB_REMOTE_VER}"
