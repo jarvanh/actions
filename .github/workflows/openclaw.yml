@@ -1518,15 +1518,25 @@ jobs:
           done
           if [ "${_code:-}" != "200" ]; then
             echo "❌ trae2api 未在 120 秒内就绪" >&2
-            # 失败也通知（对齐 workbuddy：成功/失败都有声）
+            # 失败也通知（对齐 workbuddy：成功/失败都有声），版式同 wb_notify 失败态：
+            # 标题带 ❌ 状态、容器日志尾部进「🧾 原始输出」（<pre> 只进 Telegram，
+            # 先打到 stdout 一份，排查时不用再跑一轮才能拿到真实报错）。
             source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh" || true
             if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+              _trae_tail="$(docker logs --tail 40 trae2api 2>&1 | tail -c 1200 || true)"
+              echo "--- trae2api container log tail (1200B) ---"
+              printf '%s\n' "${_trae_tail:-<empty>}"
+              echo "--- end container log tail ---"
               _msg=""
-              tg_add_title _msg "🚀 trae2api"
-              tg_add_kv _msg "结论" "❌ 启动失败（120 秒内未就绪）"
+              tg_add_title _msg "❌ trae2api 启动失败"
+              tg_add_kv _msg "结论" "健康检查 120 秒未过 · HTTP ${_code:-000}"
               tg_add_path _msg "数据目录" "$TRAE_DATA"
+              if [ -n "$_trae_tail" ]; then
+                tg_add_section _msg "🧾 原始输出"
+                tg_add_pre _msg "$_trae_tail"
+              fi
               tg_add_footer _msg
-              send_tg "$_msg" || true
+              send_tg "$_msg" || echo "::warning::TG 通知发送失败（不影响任务）"
             fi
             exit 1
           fi
@@ -1547,18 +1557,24 @@ jobs:
             > "$CHECKIN_JSONL" 2>"$CHECKIN_ERR" || true
           /tmp/trae2api-credit -dir "$TRAE_DATA/auths" -packs -json > "$PACKS_JSON" 2>/dev/null || true
           cat "$CHECKIN_JSONL" 2>/dev/null || true
+          # stderr 已重定向进文件、CI 日志里看不到，补一份：排查时不用再翻通知
+          cat "$CHECKIN_ERR" 2>/dev/null || true
 
           echo "8. Telegram notification (workbuddy-style)..."
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
           if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+            # 签到工具 stderr 尾部：成功/失败两个分支都可能进「🧾 原始输出」（非空才
+            # 渲染，同 wb_notify 的 $6 口径；1200 字节上限防 <pre> 跨分片破版）
+            _trae_err_tail="$(tail -c 1200 "$CHECKIN_ERR" 2>/dev/null || true)"
             _msg=""
             if [ -s "$CHECKIN_JSONL" ]; then
               _total=$(wc -l < "$CHECKIN_JSONL" | tr -d ' ')
               _ok=$(jq -s '[.[] | select((.err // "") == "" and (.skipped // "") == "")] | length' "$CHECKIN_JSONL")
               _skip=$(jq -s '[.[] | select((.skipped // "") != "")] | length' "$CHECKIN_JSONL")
               _fail=$(jq -s '[.[] | select((.err // "") != "")] | length' "$CHECKIN_JSONL")
-              tg_add_title _msg "🚀 trae2api"
-              tg_add_kv _msg "结论" "已就绪 · 已签 ${_ok} · 跳过 ${_skip} · 失败 ${_fail}（共 ${_total}）"
+              tg_add_title _msg "🟢 trae2api 已就绪"
+              # 就绪状态在标题里（同 workbuddy），「结论」只留签到汇总
+              tg_add_kv _msg "结论" "已签 ${_ok} · 跳过 ${_skip} · 失败 ${_fail}（共 ${_total}）"
               tg_add_path _msg "接口" "http://127.0.0.1:7864/v1"
               tg_add_kv _msg "鉴权" "需 API Key（面板/CLI 共用）"
               tg_add_section _msg "💳 账号池 · ${_total}"
@@ -1594,13 +1610,25 @@ jobs:
                 fi
               done < "$CHECKIN_JSONL"
               tg_add_block _msg "${_rows%$'\n'}"
+              # 块尾补一个空行（同 wb_notify）：tg_add_block 不补尾空行，数据目录会紧贴末条子行
+              tg_append _msg $'\n'
               tg_add_path _msg "数据目录" "$TRAE_DATA"
-              tg_add_section _msg "🧾 签到原始输出"
-              tg_add_pre _msg "$(tail -c 800 "$CHECKIN_ERR" 2>/dev/null || echo '（无 stderr 输出）')"
+              if [ -n "$_trae_err_tail" ]; then
+                tg_add_section _msg "🧾 原始输出"
+                tg_add_pre _msg "$_trae_err_tail"
+              fi
             else
-              tg_add_title _msg "🚀 trae2api"
-              tg_add_kv _msg "结论" "已就绪 · 签到工具执行失败（详见运行日志）"
+              # 签到输出为空 = 签到工具失败或无账号：服务本身已就绪，照 workbuddy
+              # 「已启动 · 无可用账号」的降级形态保留接口/鉴权，错误详情进原始输出。
+              tg_add_title _msg "⚠️ trae2api 已就绪 · 签到工具执行失败"
+              tg_add_kv _msg "结论" "签到结果未获取（详见运行日志）"
+              tg_add_path _msg "接口" "http://127.0.0.1:7864/v1"
+              tg_add_kv _msg "鉴权" "需 API Key（面板/CLI 共用）"
               tg_add_path _msg "数据目录" "$TRAE_DATA"
+              if [ -n "$_trae_err_tail" ]; then
+                tg_add_section _msg "🧾 原始输出"
+                tg_add_pre _msg "$_trae_err_tail"
+              fi
             fi
             tg_add_footer _msg
             send_tg "$_msg" || echo "::warning::TG 通知发送失败（不影响任务）"
