@@ -234,9 +234,9 @@ tar -xzf /tmp/restore.tar.gz -C /tmp/restore .openclaw/openclaw.json
 | `⚠️ workbuddy-gateway 已启动 · 无可用账号` | 服务已监听但账号池为空 | 提示需人工扫码登录（`login` 无法在 workflow 内完成） |
 | `❌ workbuddy-gateway 启动失败` | 进程启动即退，或 120 秒内未监听 8318 | 失败原因 + 🧾 原始输出（日志尾部 1200 字节） |
 | `⛔ / ⚠️ workbuddy-gateway 已停止` | 收尾停止段落执行后 | 版本与数据目录；仍有进程残留时降级 ⚠️ |
-| `🟢 trae2api 已就绪` | 容器健康检查通过、批量签到完成后 | 签到结论（已签 / 跳过 / 失败 / 共 N）、接口地址、鉴权说明、💳 逐账号（uid / 昵称 / 签到状态，子行为最早过期的 3 个积分包）、数据目录；签到 stderr 非空时附 🧾 原始输出 |
-| `⚠️ trae2api 已就绪 · 签到工具执行失败` | 服务就绪但签到输出为空（工具失败或无账号） | 结论 + 接口 / 鉴权 / 数据目录 + 🧾 原始输出（签到 stderr 尾部） |
-| `❌ trae2api 启动失败` | 容器 120 秒内健康检查未过 7864 | 结论（HTTP 码）+ 数据目录 + 🧾 原始输出（容器日志尾部 1200 字节，同时打到步骤日志） |
+| `🟢 trae2api 已就绪` | 容器健康检查通过、批量签到完成后 | 签到结论（已签 / 跳过 / 失败 / 共 N）、接口地址、鉴权说明、🔑 凭据文件名（auths 目录）、💳 逐账号（uid / 昵称 / 状态，子行为积分与最早过期的积分包）、数据目录 |
+| `⚠️ trae2api 已就绪 · 签到工具执行失败` | 服务就绪但签到输出为空（工具失败或无账号） | 结论 + 接口 / 鉴权 / 🔑 凭据 / 数据目录 + 🧾 原始输出（签到 stderr 尾部） |
+| `❌ trae2api 启动失败` | 容器 120 秒内健康检查未过 7864 | 结论（HTTP 码）+ 数据目录 + 🧾 原始输出（容器日志尾部 1200 字节，同时打到步骤日志）；不给接口/鉴权/凭据/账号池 |
 
 > workbuddy 的就绪通知**只在首轮发**。本 workflow 由收尾步骤 `gh workflow run` 接力启动，
 > 接力轮会把同一套启动逻辑再跑一遍——同一个服务、同一份账号池，通知内容与上一条完全相同。
@@ -269,10 +269,11 @@ tar -xzf /tmp/restore.tar.gz -C /tmp/restore .openclaw/openclaw.json
 > `cooldownMsg` 与 `nickname` / `uid` 一样**不进通知**。
 > 字段口径、目录接口与免费判据逐条见 [`telegram-notify.md`](telegram-notify.md) 2.5 节。
 
-> trae2api 三条通知与 workbuddy-gateway **版式同源**（同为 AI 网关形态），差异只在数据
-> 来源：无版本/凭据段（上游无 release），账号池来自批量签到输出；「原始输出」非空才渲染。
-> `trae2api-notify.yml`（按需手动签到）是同版式的第二份内联副本，**改版式两处一起改**。
-> 字段口径见 [`telegram-notify.md`](telegram-notify.md) 2.5 节末。
+> trae2api 三条通知与 workbuddy-gateway **版式同源**：`trae_notify` 与 `wb_notify`
+> 同构（同一 env 接线、同一发送层、同一版式骨架），通知只从本 workflow 发——曾有
+> 独立 workflow trae2api-notify.yml 走第二条链路，已删除。差异只在数据来源：无
+> 版本/更新段（上游无 release），凭据列 auths 账号文件名，账号池来自批量签到输出，
+> 原始输出仅失败/降级态渲染。字段口径见 [`telegram-notify.md`](telegram-notify.md) 2.5 节末。
 
 > `<对象>` 为归档短名：`OpenClaw 主包` / `ZCode` / `CliRelay` / `CLIProxyAPI` /
 > `rss-to-telegram`。此前五类归档共用「OpenClaw 归档告警」一个标题，无法从标题

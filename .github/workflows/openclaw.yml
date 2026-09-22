@@ -1450,6 +1450,8 @@ jobs:
       # 源码每次浅克隆上游重建镜像（纯 Go 标准库，构建约 1 分钟）。
       # 隧道 trae2api（trae2api.derrick.eu.org → 127.0.0.1:7864）凭证随
       # /dropbox/self-hosted/.cloudflared 恢复，由 tunnels.conf 纳管。
+      # 通知：trae_notify 与 wb_notify 同构（同 env 接线/发送层/版式骨架），
+      # 曾有独立 workflow trae2api-notify.yml 走第二条链路，已删——通知只从本步骤发。
       - name: Run trae2api container (TRAE SOLO reverse proxy)
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -1457,6 +1459,95 @@ jobs:
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
+
+          # 通知真源在 step 顶层 source 一次（规范 4.4：不要挪进 trae_notify 函数体——
+          # 函数体在子 shell 里跑时，函数内 source 不影响父 shell 函数表）。
+          # 缺真源只损失通知、不该炸掉部署：|| true 兜底，trae_notify 内有发送闸与留痕。
+          source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh" || true
+
+          # trae_notify：与 wb_notify（Run workbuddy-gateway 步骤）同构的通知函数——
+          # 同一发送闸 / 收尾区 / 发送层 / 版式骨架（规范 2.5），差异只在数据来源：
+          #   - 无 版本/更新 行：上游无 release（源码浅克隆重建镜像）
+          #   - 🔑 凭据 列 auths 账号文件名（同 wb_notify 口径：只列文件名，绝不回显内容）
+          #   - 💳 账号池 来自批量签到输出：状态进条目行、积分/过期下沉子行（同构）；
+          #     条目计数用 grep -c . 数非空行——wc -l 会把尾空行算进去，末条 └─ 永远轮空
+          #   - 🧾 原始输出 仅失败/降级态渲染（$5 非空）——成功通知不带，同 wb_notify
+          # 用法: trae_notify <标题> <结论> <接口鉴权flag> <原因> <原始输出>
+          trae_notify() {
+            if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+              local _msg=""
+              tg_add_title _msg "$1"
+              tg_add_kv _msg "结论" "$2"
+              if [ "${3:-0}" = "1" ]; then
+                tg_add_path _msg "接口" "http://127.0.0.1:7864/v1"
+                tg_add_kv _msg "鉴权" "需 API Key（面板/CLI 共用）"
+                # 🔑 凭据：auths 目录里的账号文件（只有文件名，真实会话凭据不上通知）
+                local _cf _creds="" _n_creds=0
+                for _cf in "$TRAE_DATA"/auths/*; do
+                  if [ -f "$_cf" ]; then
+                    _n_creds=$((_n_creds + 1))
+                    tg_add_entry _creds "$(basename "$_cf")"
+                  fi
+                done
+                if [ "$_n_creds" -gt 0 ]; then
+                  tg_add_section _msg "🔑 凭据 · ${_n_creds}"
+                  tg_add_block _msg "$(tree_lines "${_creds%$'\n'}")"
+                fi
+                # 💳 账号池：批量签到输出（CHECKIN_JSONL / PACKS_JSON 由调用点准备；
+                # 启动失败分支两者尚不存在，整段自然跳过）
+                if [ -n "${CHECKIN_JSONL:-}" ] && [ -s "$CHECKIN_JSONL" ]; then
+                  local _total _line _uid _nick _cr _err _skipr _st _rows="" _i=0 _last _exp3 _eline
+                  _total="$(grep -c . "$CHECKIN_JSONL" || true)"
+                  tg_add_section _msg "💳 账号池 · ${_total}"
+                  while IFS= read -r _line; do
+                    [ -z "$_line" ] && continue
+                    _i=$((_i + 1))
+                    _last=0
+                    [ "$_i" -eq "$_total" ] && _last=1
+                    _uid=$(jq -r '.uid' <<<"$_line")
+                    _nick=$(jq -r '(.nickname // "-")' <<<"$_line")
+                    _cr=$(jq -r '.credits' <<<"$_line")
+                    _err=$(jq -r '(.err // "")' <<<"$_line")
+                    _skipr=$(jq -r '(.skip_reason // "")' <<<"$_line")
+                    if [ -n "$_err" ]; then
+                      _st="⚠️ $_err"
+                    elif [ "$(jq -r '.claimed' <<<"$_line")" = "true" ]; then
+                      _st="签到 ✓ 本轮领取"
+                    elif [ -n "$_skipr" ]; then
+                      _st="$_skipr"
+                    else
+                      _st="今日已签"
+                    fi
+                    # 条目行 = 主体 · 身份 · 状态（同 wb_notify 的「凭据文件 · 站点 · 状态」）；
+                    # 数字与时刻下沉到子行（同 wb_notify：额度/过期不占条目行）
+                    _rows+="$(tree_conn "$_last")$(tg_entry "$_uid" "$_nick" "$_st")"$'\n'
+                    _rows+="$(tree_sub "$_last")$(escape_html "积分 ${_cr}")"$'\n'
+                    # 子行：该账号未用完的包里最早过期的 3 个
+                    _exp3=$(jq -r --arg uid "$_uid" '[.[] | select(.uid == $uid and .remain > 0 and .expire_at > 0)] | sort_by(.expire_at) | .[:3][] | "剩 \(.remain) 分 · \(.expire_fmt) 过期"' "$PACKS_JSON" 2>/dev/null || true)
+                    if [ -n "$_exp3" ]; then
+                      while IFS= read -r _eline; do
+                        [ -z "$_eline" ] && continue
+                        _rows+="$(tree_sub "$_last")$(escape_html "$_eline")"$'\n'
+                      done <<< "$_exp3"
+                    fi
+                  done < "$CHECKIN_JSONL"
+                  tg_add_block _msg "${_rows%$'\n'}"
+                  # 块尾补一个空行（同 wb_notify）：tg_add_block 不补尾空行，下一个 kv 会紧贴末条子行
+                  tg_append _msg $'\n'
+                fi
+              fi
+              [ -n "$4" ] && tg_add_kv _msg "原因" "$4"
+              tg_add_path _msg "数据目录" "$TRAE_DATA"
+              if [ -n "$5" ]; then
+                tg_add_section _msg "🧾 原始输出"
+                tg_add_pre _msg "$(printf '%s' "$5" | tail -c 1200)"
+              fi
+              tg_add_footer _msg
+              send_tg "$_msg" || echo "::warning::TG 通知发送失败（不影响任务）"
+            else
+              echo "⚠️ Telegram secrets missing, skip trae2api notification."
+            fi
+          }
 
           TRAE_DATA=/dropbox/self-hosted/trae2api
           TRAE_SRC=/tmp/local_trae2api-src
@@ -1518,26 +1609,15 @@ jobs:
           done
           if [ "${_code:-}" != "200" ]; then
             echo "❌ trae2api 未在 120 秒内就绪" >&2
-            # 失败也通知（对齐 workbuddy：成功/失败都有声），版式同 wb_notify 失败态：
-            # 标题带 ❌ 状态、容器日志尾部进「🧾 原始输出」（<pre> 只进 Telegram，
-            # 先打到 stdout 一份，排查时不用再跑一轮才能拿到真实报错）。
-            source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh" || true
-            if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
-              _trae_tail="$(docker logs --tail 40 trae2api 2>&1 | tail -c 1200 || true)"
-              echo "--- trae2api container log tail (1200B) ---"
-              printf '%s\n' "${_trae_tail:-<empty>}"
-              echo "--- end container log tail ---"
-              _msg=""
-              tg_add_title _msg "❌ trae2api 启动失败"
-              tg_add_kv _msg "结论" "健康检查 120 秒未过 · HTTP ${_code:-000}"
-              tg_add_path _msg "数据目录" "$TRAE_DATA"
-              if [ -n "$_trae_tail" ]; then
-                tg_add_section _msg "🧾 原始输出"
-                tg_add_pre _msg "$_trae_tail"
-              fi
-              tg_add_footer _msg
-              send_tg "$_msg" || echo "::warning::TG 通知发送失败（不影响任务）"
-            fi
+            # 失败也通知（对齐 workbuddy：成功/失败都有声）。容器日志尾部先打到 stdout：
+            # <pre> 只进 Telegram，CI 日志里看不到，排查时不用再跑一轮才能拿到真实报错。
+            _trae_tail="$(docker logs --tail 40 trae2api 2>&1 | tail -c 1200 || true)"
+            echo "--- trae2api container log tail (1200B) ---"
+            printf '%s\n' "${_trae_tail:-<empty>}"
+            echo "--- end container log tail ---"
+            # flag=0：失败态不给 接口/鉴权/凭据/账号池（服务已不在，同 wb_notify 失败态）
+            trae_notify "❌ trae2api 启动失败" \
+              "健康检查 120 秒未过 · HTTP ${_code:-000}" 0 "" "$_trae_tail" || true
             exit 1
           fi
 
@@ -1560,80 +1640,20 @@ jobs:
           # stderr 已重定向进文件、CI 日志里看不到，补一份：排查时不用再翻通知
           cat "$CHECKIN_ERR" 2>/dev/null || true
 
-          echo "8. Telegram notification (workbuddy-style)..."
-          source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
-          if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
-            # 签到工具 stderr 尾部：成功/失败两个分支都可能进「🧾 原始输出」（非空才
-            # 渲染，同 wb_notify 的 $6 口径；1200 字节上限防 <pre> 跨分片破版）
-            _trae_err_tail="$(tail -c 1200 "$CHECKIN_ERR" 2>/dev/null || true)"
-            _msg=""
-            if [ -s "$CHECKIN_JSONL" ]; then
-              _total=$(wc -l < "$CHECKIN_JSONL" | tr -d ' ')
-              _ok=$(jq -s '[.[] | select((.err // "") == "" and (.skipped // "") == "")] | length' "$CHECKIN_JSONL")
-              _skip=$(jq -s '[.[] | select((.skipped // "") != "")] | length' "$CHECKIN_JSONL")
-              _fail=$(jq -s '[.[] | select((.err // "") != "")] | length' "$CHECKIN_JSONL")
-              tg_add_title _msg "🟢 trae2api 已就绪"
-              # 就绪状态在标题里（同 workbuddy），「结论」只留签到汇总
-              tg_add_kv _msg "结论" "已签 ${_ok} · 跳过 ${_skip} · 失败 ${_fail}（共 ${_total}）"
-              tg_add_path _msg "接口" "http://127.0.0.1:7864/v1"
-              tg_add_kv _msg "鉴权" "需 API Key（面板/CLI 共用）"
-              tg_add_section _msg "💳 账号池 · ${_total}"
-              _rows=""
-              _i=0
-              while IFS= read -r _line; do
-                [ -z "$_line" ] && continue
-                _i=$((_i + 1))
-                _last=0
-                [ "$_i" -eq "$_total" ] && _last=1
-                _uid=$(jq -r '.uid' <<<"$_line")
-                _nick=$(jq -r '(.nickname // "-")' <<<"$_line")
-                _cr=$(jq -r '.credits' <<<"$_line")
-                _err=$(jq -r '(.err // "")' <<<"$_line")
-                _skipr=$(jq -r '(.skip_reason // "")' <<<"$_line")
-                if [ -n "$_err" ]; then
-                  _st="⚠️ $_err"
-                elif [ "$(jq -r '.claimed' <<<"$_line")" = "true" ]; then
-                  _st="签到 ✓ 本轮领取"
-                elif [ -n "$_skipr" ]; then
-                  _st="$_skipr"
-                else
-                  _st="今日已签"
-                fi
-                _rows+="$(tree_conn "$_last")$(tg_entry "$_uid" "$_nick" "$_st" "积分 ${_cr}")"$'\n'
-                # 该账号未用完的包里最早过期的 3 个（子行）
-                _exp3=$(jq -r --arg uid "$_uid" '[.[] | select(.uid == $uid and .remain > 0 and .expire_at > 0)] | sort_by(.expire_at) | .[:3][] | "剩 \(.remain) 分 · \(.expire_fmt) 过期"' "$PACKS_JSON" 2>/dev/null || true)
-                if [ -n "$_exp3" ]; then
-                  while IFS= read -r _eline; do
-                    [ -z "$_eline" ] && continue
-                    _rows+="$(tree_sub "$_last")$(escape_html "$_eline")"$'\n'
-                  done <<< "$_exp3"
-                fi
-              done < "$CHECKIN_JSONL"
-              tg_add_block _msg "${_rows%$'\n'}"
-              # 块尾补一个空行（同 wb_notify）：tg_add_block 不补尾空行，数据目录会紧贴末条子行
-              tg_append _msg $'\n'
-              tg_add_path _msg "数据目录" "$TRAE_DATA"
-              if [ -n "$_trae_err_tail" ]; then
-                tg_add_section _msg "🧾 原始输出"
-                tg_add_pre _msg "$_trae_err_tail"
-              fi
-            else
-              # 签到输出为空 = 签到工具失败或无账号：服务本身已就绪，照 workbuddy
-              # 「已启动 · 无可用账号」的降级形态保留接口/鉴权，错误详情进原始输出。
-              tg_add_title _msg "⚠️ trae2api 已就绪 · 签到工具执行失败"
-              tg_add_kv _msg "结论" "签到结果未获取（详见运行日志）"
-              tg_add_path _msg "接口" "http://127.0.0.1:7864/v1"
-              tg_add_kv _msg "鉴权" "需 API Key（面板/CLI 共用）"
-              tg_add_path _msg "数据目录" "$TRAE_DATA"
-              if [ -n "$_trae_err_tail" ]; then
-                tg_add_section _msg "🧾 原始输出"
-                tg_add_pre _msg "$_trae_err_tail"
-              fi
-            fi
-            tg_add_footer _msg
-            send_tg "$_msg" || echo "::warning::TG 通知发送失败（不影响任务）"
+          echo "8. Telegram notification (wb_notify 同构)..."
+          if [ -s "$CHECKIN_JSONL" ]; then
+            _total="$(grep -c . "$CHECKIN_JSONL" || true)"
+            _ok=$(jq -s '[.[] | select((.err // "") == "" and (.skipped // "") == "")] | length' "$CHECKIN_JSONL")
+            _skip=$(jq -s '[.[] | select((.skipped // "") != "")] | length' "$CHECKIN_JSONL")
+            _fail=$(jq -s '[.[] | select((.err // "") != "")] | length' "$CHECKIN_JSONL")
+            trae_notify "🟢 trae2api 已就绪" \
+              "已签 ${_ok} · 跳过 ${_skip} · 失败 ${_fail}（共 ${_total}）" 1 "" ""
           else
-            echo "⚠️ Telegram secrets missing, skip trae2api notification."
+            # 签到输出为空 = 签到工具失败或无账号：服务本身已就绪，照 workbuddy
+            # 「已启动 · 无可用账号」的降级形态保留接口/鉴权，错误详情进原始输出。
+            _trae_err_tail="$(tail -c 1200 "$CHECKIN_ERR" 2>/dev/null || true)"
+            trae_notify "⚠️ trae2api 已就绪 · 签到工具执行失败" \
+              "签到结果未获取（详见运行日志）" 1 "" "$_trae_err_tail"
           fi
 
       # glm-proxy：BigModel/GLM 本地反代（Anthropic ↔ OpenAI 协议转换）。

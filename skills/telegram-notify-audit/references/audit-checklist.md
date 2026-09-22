@@ -62,7 +62,7 @@
 | `wb_notify` 账号池的子行不是 `tree_lines` 渲染的 | 子行必须用 `tree_sub` 前缀**手拼**：`tree_lines` 把每行当兄弟条目，子行经它会渲染成 `├─/└─` 与条目平级（规范 4.2 二层列表）。条目行用 `tree_conn`，子行紧接其后用 `tree_sub`，末条索引两处一致 |
 | 收尾停止通知只有结论行、没有账号池 | 收尾 step 里没有 `WB_CREDS` / `WB_POOL`（启动 step 的局部变量），且网关已停——列账号池会让人以为服务还在跑。**不是漏字段** |
 | `tg_append _msg $'\n'` 出现在账号池块之后 | 块尾补空行：`tg_add_block` 不补尾空行，否则下一个 kv（数据目录）会紧贴末条子行，与规范示例的「块与 kv 区之间空一行」不一致 |
-| trae2api 通知（`openclaw.yml` / `trae2api-notify.yml` 两份内联副本）无「版本 / 更新 / 凭据」行、「🧾 原始输出」非空才渲染 | 与 workbuddy 版式同源但数据来源不同：上游无 release（源码浅克隆重建镜像），无可列的凭据文件清单；「原始输出」照 wb_notify 的 $6 口径非空才渲染，启动失败给容器日志尾部、签到分支给签到工具 stderr 尾部（1200 字节）。`trae2api-notify.yml` 不起服务，标题写「签到完成」不写「已就绪」 |
+| trae2api 通知（`trae_notify`，与 `wb_notify` 同构）无「版本 / 更新」行、「🧾 原始输出」仅失败/降级态渲染 | 与 workbuddy 版式同源但数据来源不同：上游无 release（源码浅克隆重建镜像）；凭据列 auths 账号文件名（就绪态才有）；原始输出照 wb_notify 的 $6 口径仅失败态渲染——签到工具会把 `checkin done: N/M ok` 汇总行写进 stderr，成功通知照搬会渲染出一段像报错的「原始输出」。账号池条目计数用 `grep -c .` 而非 `wc -l`：尾空行会让 `_i` 永远追不上 `_total`，末条 `└─` 轮空、整棵树全是 `├─`。通知只从 openclaw.yml 发（独立 workflow trae2api-notify.yml 已删，第二条链路的 bot/版式漂移随之消失） |
 | workbuddy 账号池用 `jq` 解析 `workbuddy-status.json` | **不是**「解析未文档化文件」：键名由上游 Go 结构体 `accountSnapshot` 的 json tag 固定，比 `status` 子命令的对齐文本表格可靠（后者字段名后跟多个空格、`过期时间` 独立成行，解析脆且易漏）。规范 2.5 节有字段表 |
 | `quotaKnown` 为 false 时显示「额度未获取」而不是 0 | 快照里 `quotaRemaining` 此时是无意义的 0（还没查到），显示 0 会与「付费耗尽」混淆。照上游 `monitor` 显示 `-` 的同一判断 |
 | workbuddy 通知里的 `exp` / `awk` 解析残留 | 已全面改用 jq；若再看到 awk 解析 `status` 文本输出即为回退。**另：awk 里 `exp` 是内置函数（指数），不能当变量名**（历史踩坑） |
