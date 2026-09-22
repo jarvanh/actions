@@ -3971,6 +3971,22 @@ mkdir 409(原目录 kate-bloom) → API 200 → 复核不存在（假成功，§
     重修；§14.12 时点旧语义存量约 3844 条（5194−1350），实际以 dry-run 为准。
   - 执行形态倾向方案 B（清理内置主轮起手：下载 sync_state 后对本地副本清理、收尾自然
     上传干净版 ⇒ 零竞态）；dry-run 先行、apply 前过目。
+- 2026-09-22（+08，午后 Ⅱ）· **V1 落地: 旧格式条目 64 条清理完成，marker 只剩一种格式（§15.4）**
+  - 执行形态最终为**方案 A**（独立 workflow，用户拍板「直接取消主轮」让出窗口）:
+    取消在跑主轮 `35672088459` → dry-run `35691869201` → apply `35692756333` →
+    重新 dispatch 主轮 `35693023572`（headSha `7aef332`，含病灶 C 修法，其生产确认顺延本轮）。
+  - dry-run 实测: 77 marker 中仅 2 个含旧条目、共 **64 条**（pornhub-favorites 33/33、
+    社交 31/31，全旧 marker——早期写入后未被重写）——远低于 §14.12 时点估算 ~3844，
+    期间「已对齐收尾清理」与 marker 重写已消化大半。
+  - apply: 改写 5 个 marker、**终检残留 0**；原 marker 整目录备份
+    `onedrive:/logs/sync_state_backup/legacy-cleanup-20260922T055805Z`（78 文件，可回滚）;
+    黑名单 262 条归一重写为语义 ID（不删除）。
+  - 新增载体: `cleanup_legacy_marker_entries.sh`（dry-run/apply 双模式 + 留证 +
+    写回终检）+ `openlist-marker-cleanup.yml`。本机构造混合 marker 全流程验证过
+    （dry-run 不改文件 / apply 清理与黑名单归一正确 / fold 条目 kind=hash_dir 保留）;
+    首版踩 sync_marker.sh 同款 jq 坑（对象值裸 // 编译错误），已修并注释。
+  - 后续观察: 被清 64 条对应产物失去 filter 保护 ⇒ 下轮可能删除 ⇒ 源文件重回缺失
+    重修——「备份缺失」数字一次性抬升属预期，勿误读为回归。
 
 ---
 
@@ -4861,25 +4877,17 @@ marker 语义的提交:
       - 修法按本条处方原文执行: 只修写入侧（file_fix.sh `dst_dir` 归一化，不再产出 `./`）
         + 读取侧路径归一（`_norm_rel_path` 七消费点）；
       - 回归锁: `test_restore_tryrun.sh` 场景 22（128 断言，反转验证 125/3 红）。
-- [ ] **V1 改版 · 旧格式记录一次性清理（2026-09-22 用户改判: 由「识别隔离」改为「全部清理，以后只有一种 marker 格式」）**
-      - **判据（条目级，读现行代码定案）**: `.restore.kind` 缺失或 ∉ {split_zip, hash_dir,
-        short_hash_rename, base64url_dir, copy} ⇒ 旧格式条目（现行写入侧恒带 `restore` 对象，
-        见 sync_marker.sh 修复方式汇总按 `restore.kind` 分组）; `fix_blacklist` 值**不删除**，
-        按 `_fix_method_norm` 同款映射**归一重写**为语义 ID（删除会让文件重新尝试已判
-        假成功的方法，纯浪费）;
-      - **影响面（已向用户交底）**: 被清理条目保护的修复产物失去 filter 保护 ⇒ 下轮被
-        sync 当多余文件删除 ⇒ 源文件重回缺失 ⇒ 按新格式重修。大部分产物疑似早已不在
-        （病灶 A/B 历史删除），清理即纯收益；仍在的产物付一次重修传输（wopan 配额瓶颈下
-        的真实时间）。§14.12 时点旧语义存量约 **3844 条**（全量 5194 − 新语义 1350），
-        实际以 dry-run 实测为准;
-      - **执行形态（倾向 B，待用户确认后实施）**:
-        A. 独立一次性 workflow + 精确窗口 —— 主轮收尾上传 sync_state 后 / 下轮起手下载前，
-        窗口极窄，竞态风险高（主轮收尾上传的是起手快照 + 本轮修改，会覆盖中途清理）;
-        B. **清理内置主轮起手** —— 下载 sync_state 后、同步开始前对本地副本清理，
-        收尾自然上传干净版 ⇒ 零竞态、下轮起手读到即验证，代价是改主轮起手流程 + 回归测试;
-      - 护栏（两案共用）: 清理前把原 marker 打包上传到独立备份目录（可回滚）;
-        **dry-run 先行**实测存量与逐 marker 分布，用户过目后再 apply; 只动
-        `logs/sync_state/` 记账文件，不碰媒体数据。
+- [x] **V1 改版 · 旧格式记录一次性清理（2026-09-22 用户改判: 由「识别隔离」改为「全部清理，以后只有一种 marker 格式」）** —— ✅ 已落地（同日 dry-run + apply，run `35691869201` / `35692756333`）:
+      - **dry-run 实测远好于估算**: 77 个 marker 中仅 **2 个**含旧条目（`task0_j-1024j-视频-pornhub-favorites_85c99cef` 33/33 全旧、`task1_1024j_社交_3fe438d2` 31/31 全旧），**旧格式 64 条**（§14.12 时点估 ~3844 —— 期间收尾清理与 marker 重写已消化大半）；条目总 225 · 保留 161；黑名单 262 条归一重写;
+      - **apply 结果**: 改写 5 个 marker（2 个旧条目 + 3 个黑名单归一变化），**终检残留旧条目 0**；
+        原 marker 整目录备份 → `onedrive:/logs/sync_state_backup/legacy-cleanup-20260922T055805Z`（78 文件，可回滚）;
+      - 判据与实现: 条目级 `.restore.kind` ∈ {split_zip, hash_dir, short_hash_rename,
+        base64url_dir, copy} 才保留（现行写入侧恒带，含批量折叠 kind=hash_dir ——
+        file_fix_pipeline.sh 目录级批量折叠段 method 文本含「短哈希目录」走 restore_info.jq）;
+        脚本 `cleanup_legacy_marker_entries.sh` + 独立 workflow `openlist-marker-cleanup.yml`
+        （dry-run/apply 双模式，apply 前整目录备份，写回后终检）;
+      - 后续观察: 被清 64 条对应产物失去 filter 保护，下轮 initial sync 可能删除 ⇒ 源文件
+        重回缺失按新格式重修 —— 「备份缺失」数字一次性抬升属预期，勿误读为回归。
 - [ ] **V3 端到端三问回归（扩 `test_restore_real_local.sh`，真 rclone 不 mock）** —— 照做（2026-09-22 用户确认）
       现有已覆盖: 短哈希文件名 / 短哈希目录 / 双改 / 原路径原名 / 负例 / 分卷（需 7z）
       / 短哈希不可逆正反两面 / 源端零修改。**缺口**:
