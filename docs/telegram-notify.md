@@ -327,6 +327,7 @@ HTML 变复杂。
 |---|---|---|
 | 🟢 OpenClaw Runner 已就绪 | `openclaw.yml` | Tailscale SSH 就绪，推 SSH / RustDesk / 出口网络 / 出口节点 / AI 网关 |
 | 🟢 / ⚠️ workbuddy-gateway 已就绪 · 无可用账号 | `openclaw.yml` | 本地代理网关启动自检后（账号池为空时降级 ⚠️）。字段口径见 2.5 节 |
+| 🟢 / ⚠️ trae2api 已就绪 | `openclaw.yml` | TRAE SOLO 反代（7864）健康检查通过、批量签到后（签到工具失败降级 ⚠️）。版式同 workbuddy-gateway，差异见 2.5 节末 |
 | 🟢 Windows runner 已就绪 | `tailscale-windows.yml` | 同上（Windows，pwsh 手拼） |
 | 🖥️ Windows RDP 已就绪 | `rdp.yml` | 隧道地址拿到后推 RDP 凭据（pwsh 手拼） |
 | 🔐 OpenList 凭据 | `emby.yml` | OpenList 改密后私信凭据 |
@@ -373,6 +374,7 @@ Telegram 收到，放弃重试只会让凭据彻底丢失。
 | ✅ OpenClaw 最终归档结果 | `openclaw.yml` | 最终归档收尾，按对象汇总结果（有失败 / 全失败降级 ⚠️ / ❌） |
 | ⚠️ OpenClaw 即将进入最终归档 | `openclaw.yml` | keepalive 剩余约 15 分钟时预警 |
 | ❌ workbuddy-gateway 启动失败 | `openclaw.yml` | serve 启动即退或超时未监听 8318 |
+| ❌ trae2api 启动失败 | `openclaw.yml` | 容器健康检查 120 秒未过（7864），原始输出给容器日志尾部 |
 | ⛔ / ⚠️ workbuddy-gateway 已停止 | `openclaw.yml` | 收尾停止本地代理网关（仍有进程残留时降级 ⚠️） |
 | 🟢 glm-proxy 已就绪 | `openclaw.yml` | 本地 GLM 反代（8787）启动自检后。字段口径见 2.6 节 |
 | ❌ glm-proxy 启动失败 | `openclaw.yml` | 启动脚本非 0，或自检候选模型全部无有效回答 |
@@ -579,6 +581,23 @@ Run ID：<code>12345678</code>
   （规范 · 说人话）。
 - 与归档告警同款：对象（版本 / 数据目录）是机器值 → `<code>`，结论与原因是自然语言 → 裸文本，
   原始日志 → `<pre>` 且是正文最后一块。
+
+**trae2api 通知的字段口径**（TRAE SOLO 反代，7864；`openclaw.yml`）——版式**完全同
+workbuddy-gateway**（第三个 AI 网关的对齐实现），差异只在数据来源：
+
+- 标题同形：`🟢 trae2api 已就绪` / `⚠️ trae2api 已就绪 · 签到工具执行失败` /
+  `❌ trae2api 启动失败`。就绪状态在标题里，「结论」只留签到汇总
+  （`已签 X · 跳过 Y · 失败 Z（共 N）`）。
+- 无「版本 / 更新 / 凭据」行：上游无 release（源码浅克隆重建镜像），也没有独立凭据
+  文件清单可列。
+- 「💳 账号池」来自批量签到输出：条目 `uid · 昵称 · 状态`，子行给未用完积分包里
+  最早过期的 3 个（`剩 N 分 · 时刻 过期`）。
+- 「鉴权」写「需 API Key（面板/CLI 共用）」——key 不回显（与 glm-proxy 同口径）。
+- 「🧾 原始输出」**非空才渲染**（同 wb_notify 的 $6 口径）：启动失败给容器日志尾部；
+  签到分支给签到工具 stderr 尾部（均 1200 字节）。
+- `trae2api-notify.yml`（按需手动签到）是同版式的第二份内联副本，标题状态词为
+  `🟢 trae2api 签到完成` / `⚠️ trae2api 签到工具执行失败`（该 workflow 不起服务，
+  不写「已就绪」）；**改版式两处一起改**。
 
 **示例：最终归档结果**
 
