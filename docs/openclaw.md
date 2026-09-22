@@ -270,8 +270,9 @@ tar -xzf /tmp/restore.tar.gz -C /tmp/restore .openclaw/openclaw.json
 > 字段口径、目录接口与免费判据逐条见 [`telegram-notify.md`](telegram-notify.md) 2.5 节。
 
 > trae2api 三条通知与 workbuddy-gateway **版式同源**（同为 AI 网关形态），差异只在数据
-> 来源：无版本/凭据段（上游无 release），账号池来自批量签到输出；「原始输出」非空才渲染。
-> `trae2api-notify.yml`（按需手动签到）是同版式的第二份内联副本，**改版式两处一起改**。
+> 来源：版本写 commit 短 hash（上游无 release），账号池来自批量签到输出；「原始输出」
+> 非空才渲染。版式真源是 trae2api 步骤内的 `trae_notify()` 函数，独立按需签到 workflow
+> `trae2api-notify.yml` 已移除（2026-09-22）。
 > 字段口径见 [`telegram-notify.md`](telegram-notify.md) 2.5 节末。
 
 > `<对象>` 为归档短名：`OpenClaw 主包` / `ZCode` / `CliRelay` / `CLIProxyAPI` /
