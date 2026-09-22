@@ -1,0 +1,145 @@
+name: trae2api-notify
+
+# trae2api 独立签到通知（workflow_dispatch 按需触发）：
+# 与 openclaw.yml 的 trae2api 步骤同版式同逻辑（clone fork → build cmd/checkin →
+# 冷却签到 → tg_notify.sh 组装发送）。用途：
+#   1. 演示/验证通知效果（不依赖 OpenClaw 主 job 的 Keep alive 接棒节奏）
+#   2. 主 job 运行期间的按需手动签到 + 通知
+# 冷却与当日状态由 checkin 工具自行持久化（Dropbox checkin-state.json），
+# 与主 job 的签到调用并发安全（幂等；已签/冷却直接跳过）。
+# 注意：通知版式与 openclaw.yml 的 trae2api 步骤为两处内联副本，改版式需同步两处。
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: trae2api-notify
+  cancel-in-progress: false
+
+jobs:
+  checkin-notify:
+    runs-on: ubuntu-latest
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: rclone-install
+        run: |
+          set -e
+          # 与 openclaw.yml 同口径：GitHub Releases 直下 .deb，失败回退 rclone.org 安装脚本
+          bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" install
+      - name: rclone-config
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE }}
+        run: |
+          set -e
+          bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" config
+      - name: Mount Dropbox
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y fuse3
+          sudo mkdir -p /dropbox /mnt/vfs/dropbox /opt/logs
+          sudo chown runner:runner /dropbox /mnt/vfs/dropbox /opt/logs
+          grep -q '^user_allow_other' /etc/fuse.conf 2>/dev/null || echo user_allow_other | sudo tee -a /etc/fuse.conf >/dev/null
+
+          # 参数与 openclaw.yml 的 Mount Dropbox 保持一致（小文件随机读写画像）
+          nohup rclone mount dropbox: /dropbox \
+            --config /home/runner/.config/rclone/rclone.conf \
+            --cache-dir /mnt/vfs/dropbox \
+            --allow-other --umask 000 --no-gzip-encoding \
+            --attr-timeout 1m \
+            --dir-cache-time 72h --poll-interval 0 \
+            --vfs-cache-mode full \
+            --vfs-cache-max-size 2G --vfs-cache-max-age 1h \
+            --vfs-cache-min-free-space 2G \
+            --vfs-cache-poll-interval 30s \
+            --buffer-size 16M \
+            --log-file /opt/logs/rclone-dropbox.log --log-level INFO &
+
+          echo "Waiting for mount..."
+          for i in {1..30}; do
+            if mount | grep -q " on /dropbox " && ls /dropbox >/dev/null 2>&1; then
+              echo "✅ Dropbox mounted"
+              break
+            fi
+            sleep 2
+          done
+          mount | grep -q " on /dropbox " || { echo "❌ Dropbox mount failed"; exit 1; }
+
+      - name: Bulk check-in + Telegram notification
+        run: |
+          set -euo pipefail
+          TRAE_DATA=/dropbox/self-hosted/trae2api
+          mkdir -p "$TRAE_DATA/auths" "$TRAE_DATA/data" ~/.openclaw/logs
+
+          echo "1. Cloning trae2api fork (has cmd/checkin)..."
+          rm -rf /tmp/trae2api-src
+          git clone --depth 1 https://github.com/jarvanh/trae2api.git /tmp/trae2api-src 2>&1 | tail -1
+
+          echo "2. Build checkin tool..."
+          (cd /tmp/trae2api-src && go build -o /tmp/trae2api-checkin ./cmd/checkin)
+
+          echo "3. Bulk check-in (cooldown-aware)..."
+          CHECKIN_JSONL=/tmp/trae2api-checkin.jsonl
+          CHECKIN_ERR=/tmp/trae2api-checkin.err
+          /tmp/trae2api-checkin -dir "$TRAE_DATA/auths" -state "$TRAE_DATA/data/state.json" \
+            > "$CHECKIN_JSONL" 2>"$CHECKIN_ERR" || true
+          cat "$CHECKIN_JSONL" 2>/dev/null || true
+
+          echo "4. Telegram notification (workbuddy-style)..."
+          source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+          if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+            _msg=""
+            if [ -s "$CHECKIN_JSONL" ]; then
+              _total=$(wc -l < "$CHECKIN_JSONL" | tr -d ' ')
+              _ok=$(jq -s '[.[] | select((.err // "") == "" and (.skipped // "") == "")] | length' "$CHECKIN_JSONL")
+              _skip=$(jq -s '[.[] | select((.skipped // "") != "")] | length' "$CHECKIN_JSONL")
+              _fail=$(jq -s '[.[] | select((.err // "") != "")] | length' "$CHECKIN_JSONL")
+              tg_add_title _msg "🚀 trae2api"
+              tg_add_kv _msg "结论" "已就绪 · 已签 ${_ok} · 跳过 ${_skip} · 失败 ${_fail}（共 ${_total}）"
+              tg_add_path _msg "面板" "https://trae2api.derrick.eu.org/admin"
+              tg_add_kv _msg "鉴权" "需 API Key（面板/CLI 共用）"
+              tg_add_section _msg "💳 账号池 · ${_total}"
+              _rows=""
+              _i=0
+              while IFS= read -r _line; do
+                [ -z "$_line" ] && continue
+                _i=$((_i + 1))
+                _last=0
+                [ "$_i" -eq "$_total" ] && _last=1
+                _uid=$(jq -r '.uid' <<<"$_line")
+                _nick=$(jq -r '(.nickname // "-")' <<<"$_line" | escape_html)
+                _cr=$(jq -r '.credits' <<<"$_line")
+                _err=$(jq -r '(.err // "")' <<<"$_line")
+                _skipr=$(jq -r '(.skip_reason // "")' <<<"$_line")
+                if [ -n "$_err" ]; then
+                  _st="⚠️ $(escape_html "$_err")"
+                elif [ "$(jq -r '.claimed' <<<"$_line")" = "true" ]; then
+                  _st="签到 ✓ 本轮领取"
+                elif [ -n "$_skipr" ]; then
+                  _st=$(escape_html "$_skipr")
+                else
+                  _st="今日已签"
+                fi
+                _rows+="$(tree_conn "$_last")${_uid} · ${_nick} · ${_st} · 积分 ${_cr}"$'\n'
+              done < "$CHECKIN_JSONL"
+              tg_add_block _msg "${_rows%$'\n'}"
+              tg_add_path _msg "数据目录" "$TRAE_DATA"
+              tg_add_section _msg "🧾 签到原始输出"
+              tg_add_pre _msg "$(tail -c 800 "$CHECKIN_ERR" 2>/dev/null || echo '（无 stderr 输出）')"
+            else
+              tg_add_title _msg "🚀 trae2api"
+              tg_add_kv _msg "结论" "签到工具执行失败（详见运行日志）"
+              tg_add_path _msg "面板" "https://trae2api.derrick.eu.org/admin"
+              tg_add_path _msg "数据目录" "$TRAE_DATA"
+            fi
+            tg_add_footer _msg
+            send_tg "$_msg" || echo "::warning::TG 通知发送失败（不影响任务）"
+          else
+            echo "⚠️ Telegram secrets missing, skip trae2api notification."
+          fi
