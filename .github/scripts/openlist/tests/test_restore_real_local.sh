@@ -182,9 +182,11 @@ if command -v 7z >/dev/null 2>&1 || command -v 7za >/dev/null 2>&1; then
   : > "$TMP_BASE/payload.bin"
   head -c 4096 /dev/urandom > "$TMP_BASE/payload.bin"
   FMD5=$(md5sum "$TMP_BASE/payload.bin" | awk '{print $1}')
-  (cd "$TMP_BASE" && rm -rf pk && mkdir pk && cp payload.bin "pk/Big Movie [2160p].mp4" \
-     && cd pk && zip -q -r ../pkg.zip . && cd .. && rm -f pkg.zip.001 pkg.zip.002 \
-     && split -n 2 -d pkg.zip pkg.zip.)
+  (cd "$TMP_BASE" && rm -rf pk pkg.zip* && mkdir pk && cp payload.bin "pk/Big Movie [2160p].mp4" \
+     && cd pk \
+     && { if command -v zip >/dev/null 2>&1; then zip -q -r ../pkg.zip .; \
+          else 7z a -tzip ../pkg.zip . >/dev/null; fi; } \
+     && cd .. && split -n 2 -d pkg.zip pkg.zip.)
   mkdir -p "$DEST/split"
   cp "$TMP_BASE/pkg.zip.001" "$DEST/split/" 2>/dev/null
   cp "$TMP_BASE/pkg.zip.002" "$DEST/split/" 2>/dev/null
@@ -272,8 +274,10 @@ FIX_LOG7="$SANDBOX/fix7.log"
 # （如某依赖缺失），未定义变量会让测试直接死在断言行而非给出可读失败
 TRY_FIX_STATUS=""; TRY_FIX_ALTERNATIVE=""; TRY_FIX_METHOD=""
 TRY_FIX_METHOD_ID=""; TRY_FIX_RESTORE=""; TRY_FIX_MESSAGE=""; TRY_FIX_MD5=""
-try_fix_failed_file "$SRC7_BASE" "$DEST" "t" "$ORIG7" "$FIX_LOG7" >/dev/null 2>&1 || true
-# 修复日志落 CI 输出（/tmp 沙箱即焚，不打印则失败原因无从排查）
+try_fix_failed_file "$SRC7_BASE" "$DEST" "t" "$ORIG7" "$FIX_LOG7" >"$SANDBOX/fix7.out" 2>&1 || true
+# 全量输出落 CI 日志（/tmp 沙箱即焚；吞掉 stderr 的话，函数早期崩掉的原因无从排查）
+echo "    [try_fix_failed_file 输出尾部]"
+tail -30 "$SANDBOX/fix7.out" 2>/dev/null | sed 's/^/      /' || true
 echo "    [fix7.log 关键行]"
 grep -E '✅|❌|⚠|🔀|兜底|折叠|失败|成功' "$FIX_LOG7" 2>/dev/null | head -12 | sed 's/^/      /' || true
 
