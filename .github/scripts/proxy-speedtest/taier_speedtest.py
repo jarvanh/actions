@@ -119,6 +119,13 @@ CONFIG = {
     # 订阅里留下的是这些。**只排序、不丢弃**：未命中的节点仍在队尾照常参与（测得到就测）。
     'TAIER_PRIORITY_REGEX': ((os.environ.get('TAIER_PRIORITY_REGEX', '') or '').strip()
                              or 'IPLC|IPEL|IEPL|专线|HK|Hong|港|TW|Taiwan|台|SG|新加坡'),
+    # 节点名 include 正则（不区分大小写）：命中者**保留**、未命中者**丢弃**——与上面的
+    # 优先级正则（只排序、不丢弃）互补。为什么需要它：排序只能决定「先测谁」，决定不了
+    # 「池子有多大」；编排轮（proxy-speedtest-gistnodes）交接的池子上万（2026-09-22 实测
+    # 15793 个，5 小时预算只测完 1905 个），只有把池子压到预算内每轮才收得了摊。
+    # 留空 = 不过滤（默认）：定时轮吃的是用户自己的机场订阅，不该被正则砍；只有编排轮
+    # 经 workflow_call 入参显式传入。两条 fail-open 见 filter_nodes_include。
+    'TAIER_INCLUDE_REGEX': (os.environ.get('TAIER_INCLUDE_REGEX', '') or '').strip(),
     # 墙钟预算（秒，0 = 不限）。**必须显著小于 job 的 timeout-minutes（默认 360 分钟）**，
     # 留出前置准备（mihomo 下载 / TUN）与收尾（通知 / Gist 上传）的余量：默认 5 小时。
     # 为什么需要它：测速逐节点串行、每节点 ≈ 25 秒，而订阅里可能有几千个节点
@@ -254,6 +261,39 @@ def prioritize_nodes(items: list, pattern: str):
     hit = [x for x in items if rx.search(str(x.get('name') or ''))]
     miss = [x for x in items if not rx.search(str(x.get('name') or ''))]
     return hit + miss, len(hit)
+
+
+def filter_nodes_include(items: list, pattern: str):
+    """把节点名未命中 `pattern` 的**丢弃**，只留命中者。返回 `(保留列表, 丢弃数)`。
+
+    与 `prioritize_nodes`（只排序、不丢弃）互补：排序决定「先测谁」，过滤决定
+    「池子有多大」。编排轮节点数远超预算时，只有后者真正缩短运行时长。
+
+    两条 fail-open（与测活层同一原则——过滤层故障不得造成零产出）：
+
+    - `pattern` 非法（正则语法错）→ 原样返回并记 `include_regex_invalid`，不抛；
+    - 过滤后一个不剩 → 原样返回并记 `include_regex_all_dropped_fallback`。
+      全不剩更可能是**正则词表与当轮节点命名完全错位**，而不是「节点真的一万个都不要」；
+      拿它当真会让整轮零节点，比不过滤糟得多。
+
+    命中判据与 prioritize 同款：`re.IGNORECASE` + 只看 `name`；保留集内保持原相对序
+    （调用方把它放在 prioritize 之后，命中者前置的顺序不会被破坏）。
+    """
+    if not items or not pattern:
+        return items, 0
+    try:
+        rx = re.compile(pattern, re.IGNORECASE)
+    except re.error as e:
+        log_progress('include_regex_invalid', pattern=pattern, error=str(e))
+        return items, 0
+    kept = [x for x in items if rx.search(str(x.get('name') or ''))]
+    if not kept:
+        log_progress('include_regex_all_dropped_fallback', total=len(items), pattern=pattern)
+        return items, 0
+    dropped = len(items) - len(kept)
+    log_progress('nodes_include_filtered', before=len(items), kept=len(kept),
+                 dropped=dropped, pattern=pattern)
+    return kept, dropped
 
 
 def _revive_probe_failed(results, alive_items, retry_queue):
@@ -884,6 +924,12 @@ def _run():
     alive_items, priority_hits = prioritize_nodes(alive_items, CONFIG['TAIER_PRIORITY_REGEX'])
     log_progress('nodes_prioritized', total=len(alive_items), hits=priority_hits,
                  pattern=CONFIG['TAIER_PRIORITY_REGEX'])
+
+    # include 过滤同样必须在 max_nodes 截断之前：截断要按过滤后的最终池子算「前 N 个」，
+    # 先截会把已被过滤的节点算进配额。过滤保相对序，prioritize 的「命中者前置」不受影响。
+    if CONFIG['TAIER_INCLUDE_REGEX']:
+        alive_items, _include_dropped = filter_nodes_include(
+            alive_items, CONFIG['TAIER_INCLUDE_REGEX'])
 
     max_nodes = CONFIG['TAIER_MAX_NODES']
     if max_nodes and max_nodes > 0:

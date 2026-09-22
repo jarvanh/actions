@@ -100,6 +100,35 @@ alive_items, priority_hits = prioritize_nodes(alive_items, CONFIG['TAIER_PRIORIT
 ⚠️ **排序必须在 max_nodes 截断之前**：否则截断先按原序砍掉尾巴，命中节点可能根本不在
 「前 N 个」里，排序白做。测试 12e 断言两者的代码位置顺序（`prioritize@ < truncate@`）。
 
+### include 过滤：真过滤（2026-09-22）
+
+排序只能决定「先测谁」，决定不了「池子有多大」——2026-09-22 编排轮（run 35684842162）
+交接 15793 个节点，5 小时预算只测完 1905 个（单节点 ≈9.5 秒，全测完 ≈41 小时），轮轮撞
+`TAIER_BUDGET_SECONDS` 到点收摊。所以补一层**真过滤**：命中保留、未命中**丢弃**，
+把池子压进预算，每轮才收得了摊。
+
+```python
+if CONFIG['TAIER_INCLUDE_REGEX']:
+    alive_items, _include_dropped = filter_nodes_include(
+        alive_items, CONFIG['TAIER_INCLUDE_REGEX'])
+```
+
+与优先级正则的分工与约束：
+
+1. **两者互补，不是替代**：`TAIER_PRIORITY_REGEX` 只排序不丢弃（软保证），
+   `TAIER_INCLUDE_REGEX` 真丢弃（硬裁剪）。**默认空 = 不过滤**：定时轮 / 手动 dispatch
+   吃的是用户自己的机场订阅，不该被正则砍；只有编排轮经 workflow_call 入参
+   `include_regex` 显式传入（dispatch 刻意不设同名入参，防止误开）。
+2. **两条 fail-open**（与测活层同一原则，过滤层不得造成零产出）：正则非法 → 原样放行并记
+   `include_regex_invalid`；过滤后一个不剩 → 同样原样放行并记
+   `include_regex_all_dropped_fallback`——全不剩更可能是词表与当轮命名完全错位，
+   而不是「节点真的一万个都不要」。
+3. **接线次序必须是 排序 → 过滤 → 截断**：过滤保相对序（命中者前置不受影响）；
+   截断必须按过滤后的最终池子算「前 N 个」。测试 13g 断言三者的代码位置顺序。
+
+编排轮传的词表怎么定的，见
+[gistnodes 文档 · 编排轮 include 过滤词表](proxy-speedtest-gistnodes.md#编排轮-include-过滤词表2026-09-22)。
+
 
 ## 为什么必须 mihomo TUN
 
@@ -133,8 +162,10 @@ TUN 起来后 DNS 会被 mihomo 劫持，必须显式给可达的公共解析器
 
 被 `proxy-speedtest-gistnodes` 当子流程调用时，结果 Gist 与通知标题可被入参覆盖：
 `gist_id` / `gist_filename` / `gist_description` 把结果写进调用方的 Gist，
-`label` 给通知标题加来源前缀（如 `✅ gist 节点 · 泰尔三网测速`）。
-四个入参留空时行为与定时轮完全一致（写本工作流 Gist、标题不带前缀）。
+`label` 给通知标题加来源前缀（如 `✅ gist 节点 · 泰尔三网测速`）；
+`include_regex` 传节点名 include 过滤正则（命中保留、未命中丢弃，见上节——
+只有编排轮传，定时轮与手动 dispatch 为空 = 不过滤）。
+入参留空时行为与定时轮完全一致（写本工作流 Gist、标题不带前缀、不过滤）。
 
 ### 可调参数（均有默认值）
 
@@ -145,6 +176,7 @@ TUN 起来后 DNS 会被 mihomo 劫持，必须显式给可达的公共解析器
 | `TAIER_DURATION` | `5` | 每方向秒数；**上游二进制硬钳制 5-13**，>13 被压到 13。2026-09-17 从 10 下调（单节点 25s→15s，5h 预算覆盖 ~900→~1200 节点；代价是读数更抖） |
 | `TAIER_MAX_NODES` | `0` | 最多测几个节点，0 = 不限 |
 | `TAIER_PRIORITY_REGEX` | 见下 | 节点名优先级正则（不区分大小写），命中者排到队首先测、**不丢弃**未命中者。默认 `IPLC\|IPEL\|IEPL\|专线\|HK\|Hong\|港\|TW\|Taiwan\|台\|SG\|新加坡`；留空或非法 → 原序不报错 |
+| `TAIER_INCLUDE_REGEX` | （空） | 节点名 include 过滤正则（不区分大小写），命中**保留**、未命中**丢弃**——与优先级正则互补、真正缩短运行时长的那层（见上「include 过滤」节）。默认空 = 不过滤；正则非法或过滤后为空 → 原样放行（`include_regex_invalid` / `include_regex_all_dropped_fallback`）。workflow 里不写死，由编排轮经 `include_regex` 入参传入 |
 | `TAIER_BUDGET_SECONDS` | `18000` | **墙钟预算**（秒，`0` = 不限），从进程启动起算。到点不再开下一个节点，拿已测节点照常出订阅（退出码 0）。**与 job 的 `timeout-minutes` 成对**：默认 5 小时 < 360 分钟。workflow 里写死，不接仓库 Variables |
 | `TAIER_ALIVE_PROBE` | `1` | 测速前先测活（跳过连不上的节点，省下一个 ≈25 秒的测速窗口）。**默认开**：误杀风险由熔断（开头连续 8 个未通过且无一成功即关掉探测）与 fail-open（探测机制出错按存活处理）兜住。run 34859505000 曾 27 个节点全 `Resource not found`（探测用的节点名在 mihomo 里对不上）属已知代价，要规避就 dispatch 选 `alive_probe=off`（或给本工作流传 `alive_probe: off`）；**不接仓库 Variables**。**这是本工作流唯一的准入关口**——节点收集层已不再按 provider 的 `alive` 预筛（见 [gitee 文档 · 为什么节点收集不等健康检查](proxy-speedtest-gitee.md#为什么节点收集不等健康检查)），收集来的节点全量进循环 |
 | `TAIER_TIMEOUT` | `120` | 单节点子进程超时秒 |
