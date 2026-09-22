@@ -1546,6 +1546,15 @@ jobs:
                 # 末条子行渲染，版式与 wb_notify（块与 kv 区之间空一行）一致。
                 tg_append _msg $'\n'
               fi
+              # 模型倍率段：数据源是 7.5 生成的 RATES_TXT（/v1/models 的
+              # consumption_rate，倍率降序 3 个/行）；服务未就绪/取数失败时为空，
+              # 整段跳过（与凭据段同口径）。section 计数与「🔑 凭据 · N」同构。
+              if [ -n "${RATES_TXT:-}" ]; then
+                tg_add_section _msg "📊 模型倍率 · ${RATES_N:-0}"
+                tg_add_block _msg "$(escape_html "$RATES_TXT")"
+                # 块尾补空行：下一个 kv（数据目录）不紧贴块尾（对齐账号池段）
+                tg_append _msg $'\n'
+              fi
               tg_add_path _msg "数据目录" "$TRAE_DATA"
               if [ -n "$6" ]; then
                 tg_add_section _msg "🧾 原始输出"
@@ -1640,6 +1649,24 @@ jobs:
             > "$CHECKIN_JSONL" 2>"$CHECKIN_ERR" || true
           /tmp/trae2api-credit -dir "$TRAE_DATA/auths" -packs -json > "$PACKS_JSON" 2>/dev/null || true
           cat "$CHECKIN_JSONL" 2>/dev/null || true
+
+          echo "7.5 Fetch model consumption rates (from live /v1/models)..."
+          # 数据源：本机 trae2api /v1/models 的 consumption_rate 字段（jarvanh/trae2api
+          # 91cb7a5 起提供，与 TRAE 客户端显示的倍率一致）。鉴权用 Dropbox .env 的
+          # TW2A_API_KEY。取数失败/服务未就绪时 RATES_TXT 为空，通知里整段跳过。
+          RATES_TXT=""
+          RATES_N=""
+          _tw2a_key="$(grep -m1 '^TW2A_API_KEY=' "$TRAE_DATA/.env" 2>/dev/null | cut -d= -f2-)"
+          if [ -n "$_tw2a_key" ] && curl -sf -m 10 \
+              -H "Authorization: Bearer ***" \
+              "http://127.0.0.1:${TRAE_PORT}/v1/models" -o /tmp/trae2api-models.json 2>/dev/null \
+              && jq -e '.data | length > 0' /tmp/trae2api-models.json >/dev/null 2>&1; then
+            RATES_N="$(jq -r '[.data[] | select((.consumption_rate // 0) > 0)] | length' /tmp/trae2api-models.json)"
+            # 倍率降序、3 个/行紧凑排版：kimi-k3 1.83x · qwen3.8-max 1.50x · glm-5.3 0.78x
+            RATES_TXT="$(jq -r '.data[] | select((.consumption_rate // 0) > 0) | "\(.id) \(.consumption_rate)"' \
+                /tmp/trae2api-models.json | sort -k2,2 -rn \
+              | awk '{printf "%s%s %sx", (NR%3==1?(NR==1?"":"\n"):" · "), $1, $2}')"
+          fi
 
           echo "8. Telegram notification (workbuddy-format)..."
           # 版式与调用形态对齐 wb_notify（workbuddy 段）：状态 emoji 标题 + 结论/版本/
