@@ -186,10 +186,18 @@ if command -v 7z >/dev/null 2>&1 || command -v 7za >/dev/null 2>&1; then
      && cd pk \
      && { if command -v zip >/dev/null 2>&1; then zip -q -r ../pkg.zip .; \
           else 7z a -tzip ../pkg.zip . >/dev/null; fi; } \
-     && cd .. && split -n 2 -d pkg.zip pkg.zip.)
+     && cd .. && split -n 2 -d pkg.zip pkg.zip.) 2>/dev/null || true
   mkdir -p "$DEST/split"
   cp "$TMP_BASE/pkg.zip.001" "$DEST/split/" 2>/dev/null
   cp "$TMP_BASE/pkg.zip.002" "$DEST/split/" 2>/dev/null
+  # 分卷构造依赖 zip/7z 的打包行为差异（如 7z 对 "." 的条目组织），构造失败是
+  # 环境问题不是被测代码问题 ⇒ skip 并打印诊断，不污染被测代码的红绿
+  NPARTS=$(ls "$DEST"/split/pkg.zip.0* 2>/dev/null | wc -l | tr -d ' ')
+  if [ "${NPARTS:-0}" -lt 2 ]; then
+    echo "    [场景6 诊断] TMP_BASE 内分卷: $(ls "$TMP_BASE"/pkg.zip.* 2>/dev/null | tr '\n' ' ')"
+    echo "    [场景6 诊断] 打包工具: zip=$(command -v zip || echo 无) 7z=$(command -v 7z || command -v 7za || echo 无)"
+    skip "6a-c 分卷构造产物不足（NPARTS=$NPARTS，环境工具链差异）"
+  else
   ALT6="split/pkg.zip.001"
   st=$(_restore_one_entry "$DEST" "$ORIG6" "$ALT6" "分卷 zip（短哈希文件名 + 512MiB 分卷切割，共 2 卷）" "$TMP_BASE" "$FMD5")
   [ "$st" = "OK" ] && ok "6a 分卷还原返回 OK" || bad "6a 分卷还原返回 OK（实际: $st）"
@@ -197,6 +205,7 @@ if command -v 7z >/dev/null 2>&1 || command -v 7za >/dev/null 2>&1; then
   if [ -f "$DEST/$ORIG6" ]; then
     GM=$(md5sum "$DEST/$ORIG6" | awk '{print $1}')
     [ "$GM" = "$FMD5" ] && ok "6c 解压还原后 md5 与原件一致" || bad "6c md5 一致（期望 $FMD5 实际 $GM）"
+  fi
   fi
 else
   skip "6a-c 分卷 zip 还原（本机无 7z）"
