@@ -1,7 +1,7 @@
 # openlist.yml 同步修复实施计划（2026-09-13）
 
 - 代码基线：起步于 `5c01d32`（`task_engine.sh` 与被剖析的 run 34728107625 所在 commit 零差异，结论可平移）；**截至 2026-09-19 已落地到 `0b0a1aa`**（Phase 1 全量 + Phase 2 + 2026-09-15 九项 + 2026-09-19 F22/F10/F17，见 §进度日志）
-- 依据：仓库根报告三份（`openlist-sync-glm-f-report` / `openlist-sync-feasibility-report` / `openlist-sync-assessment-ds4.1-report`，均为 2026-09-13）+ 对 HEAD 的代码核验 + 审核新发现（§1.4）
+- 依据：评估报告三份（已归档至 `docs/reports/`：`openlist-sync-glm-f-report` / `openlist-sync-feasibility-report` / `openlist-sync-assessment-ds4.1-report`，均为 2026-09-13）+ 对 HEAD 的代码核验 + 审核新发现（§1.4）
 - **本文档是执行蓝图：与报告冲突时以本文档为准；本文档与代码冲突时现场查证并更新本文档进度。**
 
 ---
