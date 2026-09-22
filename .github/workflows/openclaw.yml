@@ -1451,6 +1451,10 @@ jobs:
       # 隧道 trae2api（trae2api.derrick.eu.org → 127.0.0.1:7864）凭证随
       # /dropbox/self-hosted/.cloudflared 恢复，由 tunnels.conf 纳管。
       - name: Run trae2api container (TRAE SOLO reverse proxy)
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
 
@@ -1514,11 +1518,162 @@ jobs:
           done
           if [ "${_code:-}" != "200" ]; then
             echo "❌ trae2api 未在 120 秒内就绪" >&2
+            # 失败也通知（对齐 workbuddy：成功/失败都有声）
+            source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh" || true
+            if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+              _msg=""
+              tg_add_title _msg "🚀 trae2api"
+              tg_add_kv _msg "结论" "❌ 启动失败（120 秒内未就绪）"
+              tg_add_path _msg "数据目录" "$TRAE_DATA"
+              tg_add_footer _msg
+              send_tg "$_msg" || true
+            fi
             exit 1
           fi
 
           echo "6. Converge tunnel..."
           bash "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ensure trae2api || true
+
+          echo "7. Bulk check-in all accounts..."
+          # 上游 signin.sh 引用的 ./cmd/signin 在源码树不存在（脚本与源码不同步），
+          # 这里生成等价旁路工具：复用 internal/{auth,pool,upstream}，逻辑与
+          # internal/scheduler.RunCheckinNow 完全一致（CheckinStatus → 未签则
+          # CheckinClaim → UserEntUsage 积分刷新 + 解冻；幂等，已签自动跳过）。
+          # 上游偶发 9074「参与用户太多」为瞬时限流，每轮 cron 重试自然收敛。
+          mkdir -p "$TRAE_SRC/cmd/checkin"
+          cat > "$TRAE_SRC/cmd/checkin/main.go" <<'EOF'
+          package main
+
+          // checkin — 全账号批量签到（旁路工具，与调度器同一条签到路径）。
+
+          import (
+          	"encoding/json"
+          	"flag"
+          	"fmt"
+          	"os"
+
+          	"trae2api/internal/auth"
+          	"trae2api/internal/pool"
+          	"trae2api/internal/upstream"
+          )
+
+          type result struct {
+          	UID       string `json:"uid"`
+          	Nickname  string `json:"nickname"`
+          	CheckedIn bool   `json:"checked_in"`
+          	Claimed   bool   `json:"claimed"`
+          	Credits   int64  `json:"credits"`
+          	Err       string `json:"err,omitempty"`
+          }
+
+          func main() {
+          	dir := flag.String("dir", "auths", "auths 目录")
+          	state := flag.String("state", "data/state.json", "pool 状态文件")
+          	flag.Parse()
+
+          	auths, err := auth.LoadDir(*dir)
+          	if err != nil {
+          		fmt.Fprintln(os.Stderr, "load auths:", err)
+          		os.Exit(1)
+          	}
+          	p := pool.New(*state)
+          	p.SyncToDir(auths)
+          	up := upstream.New()
+
+          	enc := json.NewEncoder(os.Stdout)
+          	total, ok := 0, 0
+          	for _, st := range p.List() {
+          		if st.Disabled {
+          			continue
+          		}
+          		a := p.AuthByUID(st.UID)
+          		if a == nil || a.RefreshTokenValue() == "" {
+          			continue
+          		}
+          		total++
+          		r := result{UID: st.UID, Nickname: a.Nickname}
+          		checkedIn, _, enable, err := up.CheckinStatus(a)
+          		if err != nil {
+          			r.Err = fmt.Sprintf("checkin status: %v", err)
+          		} else if !checkedIn && enable {
+          			if err := up.CheckinClaim(a); err != nil {
+          				r.Err = fmt.Sprintf("checkin claim: %v", err)
+          			} else {
+          				r.Claimed = true
+          			}
+          		} else {
+          			r.CheckedIn = checkedIn
+          		}
+          		remain, err := up.UserEntUsage(a)
+          		if err != nil {
+          			if r.Err == "" {
+          				r.Err = fmt.Sprintf("ent-usage: %v", err)
+          			}
+          		} else {
+          			r.Credits = remain
+          			p.ReenableIfCredits(st.UID, remain)
+          		}
+          		if r.Err == "" {
+          			ok++
+          		}
+          		_ = enc.Encode(r)
+          	}
+          	fmt.Fprintf(os.Stderr, "checkin done: %d/%d ok\n", ok, total)
+          }
+          EOF
+          CHECKIN_JSONL=/tmp/trae2api-checkin.jsonl
+          CHECKIN_ERR=/tmp/trae2api-checkin.err
+          (cd "$TRAE_SRC" && go build -o /tmp/trae2api-checkin ./cmd/checkin) \
+            && /tmp/trae2api-checkin -dir "$TRAE_DATA/auths" -state "$TRAE_DATA/data/state.json" \
+            > "$CHECKIN_JSONL" 2>"$CHECKIN_ERR" || true
+          cat "$CHECKIN_JSONL" 2>/dev/null || true
+
+          echo "8. Telegram notification (workbuddy-style)..."
+          source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+          if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+            _msg=""
+            if [ -s "$CHECKIN_JSONL" ]; then
+              _total=$(wc -l < "$CHECKIN_JSONL" | tr -d ' ')
+              _ok=$(jq -s '[.[] | select((.err // "") == "")] | length' "$CHECKIN_JSONL")
+              tg_add_title _msg "🚀 trae2api"
+              tg_add_kv _msg "结论" "已就绪 · 签到成功 ${_ok}/${_total}"
+              tg_add_path _msg "接口" "http://127.0.0.1:7864/v1"
+              tg_add_kv _msg "鉴权" "需 API Key（面板/CLI 共用）"
+              tg_add_section _msg "💳 账号池 · ${_total}"
+              _rows=""
+              _i=0
+              while IFS= read -r _line; do
+                [ -z "$_line" ] && continue
+                _i=$((_i + 1))
+                _last=0
+                [ "$_i" -eq "$_total" ] && _last=1
+                _uid=$(jq -r '.uid' <<<"$_line")
+                _nick=$(jq -r '(.nickname // "-")' <<<"$_line" | escape_html)
+                _cr=$(jq -r '.credits' <<<"$_line")
+                _err=$(jq -r '(.err // "")' <<<"$_line")
+                if [ -n "$_err" ]; then
+                  _st="⚠️ $(escape_html "$_err")"
+                elif [ "$(jq -r '.claimed' <<<"$_line")" = "true" ]; then
+                  _st="签到 ✓ 本轮领取"
+                else
+                  _st="今日已签"
+                fi
+                _rows+="$(tree_conn "$_last")${_uid} · ${_nick} · ${_st} · 积分 ${_cr}"$'\n'
+              done < "$CHECKIN_JSONL"
+              tg_add_block _msg "${_rows%$'\n'}"
+              tg_add_path _msg "数据目录" "$TRAE_DATA"
+              tg_add_section _msg "🧾 签到原始输出"
+              tg_add_pre _msg "$(tail -c 800 "$CHECKIN_ERR" 2>/dev/null || echo '（无 stderr 输出）')"
+            else
+              tg_add_title _msg "🚀 trae2api"
+              tg_add_kv _msg "结论" "已就绪 · 签到工具执行失败（详见运行日志）"
+              tg_add_path _msg "数据目录" "$TRAE_DATA"
+            fi
+            tg_add_footer _msg
+            send_tg "$_msg" || echo "::warning::TG 通知发送失败（不影响任务）"
+          else
+            echo "⚠️ Telegram secrets missing, skip trae2api notification."
+          fi
 
       # glm-proxy：BigModel/GLM 本地反代（Anthropic ↔ OpenAI 协议转换）。
       # 位置紧跟 workbuddy-gateway：两者同为「宿主进程 + 本地盘运行目录」形态，
