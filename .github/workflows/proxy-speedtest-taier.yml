@@ -126,6 +126,16 @@ on:
         description: '测活覆盖（on|off）；留空走默认值 on'
         required: false
         type: string
+      include_regex:
+        # 节点名 include 正则（不区分大小写）：命中者保留、未命中者**丢弃**——与
+        # TAIER_PRIORITY_REGEX（只排序、不丢弃）互补，是真正能缩短运行时长的那个。
+        # 为什么做成 workflow_call 入参而不是写死 env：**只有编排轮（gistnodes）该过滤**，
+        # 它交接的池子上万、远超 5 小时预算（2026-09-22 实测 15793 个只测完 1905 个）；
+        # 本工作流的定时轮吃的是用户自己的机场订阅，不该被正则砍。默认空 = 不过滤，
+        # 定时轮与手动 dispatch 行为不变；dispatch 也不设同名入参，防止误开。
+        description: '节点名 include 正则（命中保留、未命中丢弃；空 = 不过滤，编排轮专用）'
+        required: false
+        type: string
       # 下面四个供编排层（proxy-speedtest-gistnodes）覆盖：让同一套测速既能写自己的 Gist，
       # 也能把结果写进调用方指定的 Gist，并让通知标题带上来源标签
       gist_id:
@@ -244,6 +254,9 @@ jobs:
           # 它们仍在队尾）。节点数远超 5 小时预算时，测速顺序决定了谁进订阅，
           # 让专线/优质地区先测。留空或正则非法 → 原序、不报错。
           TAIER_PRIORITY_REGEX: 'IPLC|IPEL|IEPL|专线|HK|Hong|港|TW|Taiwan|台|SG|新加坡'
+          # include 过滤正则：workflow_call 入参透传（只有编排轮传，定时轮/手动 dispatch 为
+          # 空 = 不过滤）。命中保留、未命中丢弃；正则非法或过滤后为空时脚本 fail-open 原样放行。
+          TAIER_INCLUDE_REGEX: ${{ inputs.include_regex || '' }}
           # 测活开关：默认**开**（跳过连不上泰尔控制面的死节点，省下每个 ≈15 秒的测速窗口）。
           # 误杀风险由熔断（开头连续 8 个未通过且无一成功就关掉探测）与 fail-open（探测机制
           # 出错按存活处理）兜住；run 34859505000 那次 27 个节点全 `Resource not found`
