@@ -1658,7 +1658,7 @@ jobs:
           RATES_N=""
           _tw2a_key="$(grep -m1 '^TW2A_API_KEY=' "$TRAE_DATA/.env" 2>/dev/null | cut -d= -f2-)"
           if [ -n "$_tw2a_key" ] && curl -sf -m 10 \
-              -H "Authorization: Bearer ***" \
+              -H "Authorization: Bearer ${_tw2a_key}" \
               "http://127.0.0.1:${TRAE_PORT}/v1/models" -o /tmp/trae2api-models.json 2>/dev/null \
               && jq -e '.data | length > 0' /tmp/trae2api-models.json >/dev/null 2>&1; then
             # 过滤内部功能模型（subagent/summary 等），只留用户可用的对话模型
