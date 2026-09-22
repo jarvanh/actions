@@ -3987,6 +3987,20 @@ mkdir 409(原目录 kate-bloom) → API 200 → 复核不存在（假成功，§
     首版踩 sync_marker.sh 同款 jq 坑（对象值裸 // 编译错误），已修并注释。
   - 后续观察: 被清 64 条对应产物失去 filter 保护 ⇒ 下轮可能删除 ⇒ 源文件重回缺失
     重修——「备份缺失」数字一次性抬升属预期，勿误读为回归。
+- 2026-09-22（+08，午后 Ⅲ）· **V3 落地: 修复侧真落盘 + 三点连通，V 系列全部收口（§15.4）**
+  - 场景 7（Q1）: chmod 555 真注入不可写目录、真跑 `try_fix_failed_file`——真实行为链
+    全程可见（探针 3 次 permission denied → 重启确认 → exists_but_readonly 放行 →
+    兜底折叠 → 短哈希目录真落盘），7a–7f 全绿；原目录零写入（555 注入成立）。
+  - 场景 8（Q2）: 产物经 restore_info.jq 序列化（kind=hash_dir）⇒ 记录与磁盘落点
+    逐字一致 ⇒ 按记录真还原落回 original 且替代位置清空 ⇒ 「序列化 ↔ 落点 ↔ 还原」
+    闭环，8a–8f 全绿。
+  - **CI 载体关键修复**: tests.yml 补 rclone-install（只 install 不 config，local 远端
+    无需云凭据）——此前该套件在 CI **恒走 SKIP，场景 1–6 从未真跑**；补装后立刻暴露
+    既有场景两处环境依赖: 分卷构造依赖 zip（runner 只有 7z）⇒ 7z 回退；构造失败
+    归为环境 skip + 诊断输出。
+  - 实现踩坑（均修并注释）: set -u 未初始化 TRY_FIX_*、吞 stderr、漏 source file_fix.sh。
+  - CI run `35700274090`: **套件 37/37 全绿**（test_restore_real_local EXIT=0）。
+    **V 系列 V0–V6 全部 ✓**——「修复 → 记账 → 还原」生命线自此有真 rclone 端到端防护网。
 
 ---
 
@@ -4888,22 +4902,21 @@ marker 语义的提交:
         （dry-run/apply 双模式，apply 前整目录备份，写回后终检）;
       - 后续观察: 被清 64 条对应产物失去 filter 保护，下轮 initial sync 可能删除 ⇒ 源文件
         重回缺失按新格式重修 —— 「备份缺失」数字一次性抬升属预期，勿误读为回归。
-- [ ] **V3 端到端三问回归（扩 `test_restore_real_local.sh`，真 rclone 不 mock）** —— 照做（2026-09-22 用户确认）
-      现有已覆盖: 短哈希文件名 / 短哈希目录 / 双改 / 原路径原名 / 负例 / 分卷（需 7z）
-      / 短哈希不可逆正反两面 / 源端零修改。**缺口与实施设计（2026-09-22 侦查定稿）**:
-      - Q1 修复侧落盘（新场景 7）: rclone **local 远端** + `chmod 555` 真目录注入
-        「原目录不可写」（GH runner 非 root，权限位真实生效）⇒ 设全局
-        `file_dir_rel`/`failed_file_rel`/`dest_path`/`TRY_FIX_ORIGINAL`/`FIX_METHOD_BLACKLIST`/
-        `_DIR_WRITE_CACHE`/`_BACKEND_DEAD` 后真调 `_fix_switch_to_hash_dir`（file_fix.sh:1255），
-        断言 `dest/<hash8>/<file>` **真落盘**（test -f + rclone lsf 双确认）;
-        保留桩: `_restart_openlist_for_truth`（local 无 stale 缓存，恒真）、
-        `_rebuild_raw_baseline`、`_get_openlist_token`（mkdir 成功走不到 API 分支）;
-      - Q2 落盘链路连通（新场景 8）: 场景 7 产物按 fix_list 管道格式（file_fix_pipeline.sh:420）
-        写行 → 真 `restore_info.jq` 序列化 → 断言每条 alternative 在 dest 真存在 →
-        `_restore_one_entry` 真还原 → 落点 == original ⇒ **修复序列化 ↔ 真实落点 ↔ 还原**
-        三点连通; 文件名避开 `|`（fix_list 分隔符）;
-      - 前置 source 同 restore_real_local 现有头（rclone_flags/tg_notify/utils/file_fix）;
-        真跑只在 CI（本机无 rclone），`bash -n` 本机静态检查。
+- [x] **V3 端到端三问回归（扩 `test_restore_real_local.sh`，真 rclone 不 mock）** —— ✅ 已落地（2026-09-22，CI run `35700274090` 套件 37/37 全绿）:
+      - 场景 7（Q1 修复侧落盘）: local 远端 + `chmod 555` 真注入不可写目录 ⇒ 真跑
+        `try_fix_failed_file` ⇒ 探针 3 次 permission denied → 重启确认 →
+        exists_but_readonly 放行 ⇒ 兜底折叠 ⇒ **文件真落盘 `dest/<hash8>/` 且原目录
+        全程零写入**（7a–7f 六断言全绿）;
+      - 场景 8（Q2 三点连通）: 场景 7 产物按生产 fix_list 8 段管道行 → 真
+        `restore_info.jq` 序列化（kind=hash_dir）⇒ 断言记录与磁盘落点逐字一致 ⇒
+        按记录真还原落回 original 且 moveto 语义验证 ⇒ **序列化 ↔ 落点 ↔ 还原**
+        闭环（8a–8f 六断言全绿）;
+      - **CI 载体关键修复**: tests.yml 补 rclone-install —— 此前该套件在 CI
+        **恒走 SKIP 分支（runner 无 rclone），场景 1–6 从未真跑过**；补装后既有场景
+        立即暴露环境依赖: ①分卷构造用 zip（runner 只有 7z）⇒ 7z 回退;
+        ②构造失败归为环境 skip + 打印诊断，不污染被测代码红绿;
+      - 实现踩坑（均已修并注释）: `set -u` 下 TRY_FIX_* 未初始化让测试死在断言行;
+        吞 stderr 使早期崩溃原因不可查（全量输出落 CI 日志）; 忘 source file_fix.sh。
 - [x] **V4 调整还原测试 workflow（用户明确要求）** —— ✅ 收口（2026-09-22）:
       `since` 绝对下界已落地（§14.11，2026-09-20）；`marker_schema` 入参**随 V1 改版消失**
       （用户决策「旧记录全部清理，以后只有一种 marker 格式」⇒ 不存在混格式样本，筛选
