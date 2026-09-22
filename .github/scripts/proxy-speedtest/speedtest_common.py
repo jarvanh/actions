@@ -573,7 +573,7 @@ def build_target_network_section(targets):
             # 同一次归属查询的返回值就该整节同口径。此前 label 裸文本，与同节另四行
             # 形成等宽/正体交错的斑马纹（2026-09-12 修正）。
             fallback = f'（<code>{esc(label)}</code>）' if label else ''
-            lines.append(f'  └─ 归属获取失败{fallback}')
+            lines.append(f'<code>  └─ </code>归属获取失败{fallback}')
             continue
         if multi:
             lines.append(f'[{idx}] <code>{esc(label or server)}</code>')
