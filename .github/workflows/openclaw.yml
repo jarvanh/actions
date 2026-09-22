@@ -1464,7 +1464,7 @@ jobs:
 
           echo "1. Cloning upstream source..."
           rm -rf "$TRAE_SRC"
-          git clone --depth 1 https://github.com/JeffHu0912/trae2api.git "$TRAE_SRC" 2>&1 | tail -1
+          git clone --depth 1 https://github.com/jarvanh/trae2api.git "$TRAE_SRC" 2>&1 | tail -1
 
           echo "2. Bootstrap data files (idempotent, Dropbox 为准)..."
           if [ ! -f "$TRAE_DATA/.env" ]; then
@@ -1534,93 +1534,11 @@ jobs:
           echo "6. Converge tunnel..."
           bash "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ensure trae2api || true
 
-          echo "7. Bulk check-in all accounts..."
-          # 上游 signin.sh 引用的 ./cmd/signin 在源码树不存在（脚本与源码不同步），
-          # 这里生成等价旁路工具：复用 internal/{auth,pool,upstream}，逻辑与
-          # internal/scheduler.RunCheckinNow 完全一致（CheckinStatus → 未签则
-          # CheckinClaim → UserEntUsage 积分刷新 + 解冻；幂等，已签自动跳过）。
-          # 上游偶发 9074「参与用户太多」为瞬时限流，每轮 cron 重试自然收敛。
-          mkdir -p "$TRAE_SRC/cmd/checkin"
-          cat > "$TRAE_SRC/cmd/checkin/main.go" <<'EOF'
-          package main
-
-          // checkin — 全账号批量签到（旁路工具，与调度器同一条签到路径）。
-
-          import (
-          	"encoding/json"
-          	"flag"
-          	"fmt"
-          	"os"
-
-          	"trae2api/internal/auth"
-          	"trae2api/internal/pool"
-          	"trae2api/internal/upstream"
-          )
-
-          type result struct {
-          	UID       string `json:"uid"`
-          	Nickname  string `json:"nickname"`
-          	CheckedIn bool   `json:"checked_in"`
-          	Claimed   bool   `json:"claimed"`
-          	Credits   int64  `json:"credits"`
-          	Err       string `json:"err,omitempty"`
-          }
-
-          func main() {
-          	dir := flag.String("dir", "auths", "auths 目录")
-          	state := flag.String("state", "data/state.json", "pool 状态文件")
-          	flag.Parse()
-
-          	auths, err := auth.LoadDir(*dir)
-          	if err != nil {
-          		fmt.Fprintln(os.Stderr, "load auths:", err)
-          		os.Exit(1)
-          	}
-          	p := pool.New(*state)
-          	p.SyncToDir(auths)
-          	up := upstream.New()
-
-          	enc := json.NewEncoder(os.Stdout)
-          	total, ok := 0, 0
-          	for _, st := range p.List() {
-          		if st.Disabled {
-          			continue
-          		}
-          		a := p.AuthByUID(st.UID)
-          		if a == nil || a.RefreshTokenValue() == "" {
-          			continue
-          		}
-          		total++
-          		r := result{UID: st.UID, Nickname: a.Nickname}
-          		checkedIn, _, enable, err := up.CheckinStatus(a)
-          		if err != nil {
-          			r.Err = fmt.Sprintf("checkin status: %v", err)
-          		} else if !checkedIn && enable {
-          			if err := up.CheckinClaim(a); err != nil {
-          				r.Err = fmt.Sprintf("checkin claim: %v", err)
-          			} else {
-          				r.Claimed = true
-          			}
-          		} else {
-          			r.CheckedIn = checkedIn
-          		}
-          		remain, err := up.UserEntUsage(a)
-          		if err != nil {
-          			if r.Err == "" {
-          				r.Err = fmt.Sprintf("ent-usage: %v", err)
-          			}
-          		} else {
-          			r.Credits = remain
-          			p.ReenableIfCredits(st.UID, remain)
-          		}
-          		if r.Err == "" {
-          			ok++
-          		}
-          		_ = enc.Encode(r)
-          	}
-          	fmt.Fprintf(os.Stderr, "checkin done: %d/%d ok\n", ok, total)
-          }
-          EOF
+          echo "7. Bulk check-in all accounts (cooldown-aware)..."
+          # 签到/积分工具随 fork 维护（jarvanh/trae2api cmd/checkin、cmd/credit）。
+          # 冷却策略（工具内实现，状态落 Dropbox）：失败 30m 起步指数递增
+          # （30m→60m→120m 封顶），当日已签直接跳过 —— 避免上游 9074
+          # 「参与用户太多」限流下每 5 分钟空转重试。
           CHECKIN_JSONL=/tmp/trae2api-checkin.jsonl
           CHECKIN_ERR=/tmp/trae2api-checkin.err
           (cd "$TRAE_SRC" && go build -o /tmp/trae2api-checkin ./cmd/checkin) \
@@ -1634,9 +1552,11 @@ jobs:
             _msg=""
             if [ -s "$CHECKIN_JSONL" ]; then
               _total=$(wc -l < "$CHECKIN_JSONL" | tr -d ' ')
-              _ok=$(jq -s '[.[] | select((.err // "") == "")] | length' "$CHECKIN_JSONL")
+              _ok=$(jq -s '[.[] | select((.err // "") == "" and (.skipped // "") == "")] | length' "$CHECKIN_JSONL")
+              _skip=$(jq -s '[.[] | select((.skipped // "") != "")] | length' "$CHECKIN_JSONL")
+              _fail=$(jq -s '[.[] | select((.err // "") != "")] | length' "$CHECKIN_JSONL")
               tg_add_title _msg "🚀 trae2api"
-              tg_add_kv _msg "结论" "已就绪 · 签到成功 ${_ok}/${_total}"
+              tg_add_kv _msg "结论" "已就绪 · 已签 ${_ok} · 跳过 ${_skip} · 失败 ${_fail}（共 ${_total}）"
               tg_add_path _msg "接口" "http://127.0.0.1:7864/v1"
               tg_add_kv _msg "鉴权" "需 API Key（面板/CLI 共用）"
               tg_add_section _msg "💳 账号池 · ${_total}"
@@ -1651,10 +1571,13 @@ jobs:
                 _nick=$(jq -r '(.nickname // "-")' <<<"$_line" | escape_html)
                 _cr=$(jq -r '.credits' <<<"$_line")
                 _err=$(jq -r '(.err // "")' <<<"$_line")
+                _skipr=$(jq -r '(.skip_reason // "")' <<<"$_line")
                 if [ -n "$_err" ]; then
                   _st="⚠️ $(escape_html "$_err")"
                 elif [ "$(jq -r '.claimed' <<<"$_line")" = "true" ]; then
                   _st="签到 ✓ 本轮领取"
+                elif [ -n "$_skipr" ]; then
+                  _st=$(escape_html "$_skipr")
                 else
                   _st="今日已签"
                 fi
