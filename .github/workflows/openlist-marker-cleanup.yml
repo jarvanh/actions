@@ -1,0 +1,75 @@
+name: openlist-marker-cleanup
+
+# V1 改版（§15.4，2026-09-22 用户决策）: 旧格式 marker 条目一次性清理。
+# 与主轮互斥 —— 人工取消主轮后跑本 workflow；apply 完成再重新 dispatch openlist.yml。
+# 只动 onedrive:/logs/sync_state 记账文件，不碰媒体数据；apply 前先把原目录
+# 完整备份到 onedrive:/logs/sync_state_backup/legacy-cleanup-<UTC 时间戳>/（可回滚）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'dry-run=只统计留证；apply=备份原目录后清理写回'
+        required: true
+        default: dry-run
+        type: choice
+        options:
+          - dry-run
+          - apply
+
+concurrency: openlist-marker-cleanup
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: rclone-install
+        run: |
+          set -e
+          # 安装 rclone：GitHub Releases 直下 .deb，失败回退 rclone.org 安装脚本
+          bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" install
+
+      - name: rclone-config
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE }}
+        run: |
+          set -e
+          # 写配置 + 持久化：与 openlist.yml 同款装载
+          bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" config
+
+      - name: 下载 sync_state
+        run: |
+          set -e
+          mkdir -p /tmp/ss
+          rclone copy "${SYNC_STATE_DIR:-onedrive:/logs/sync_state}" /tmp/ss --files-only --retries 2
+          echo "下载 marker 文件数: $(find /tmp/ss -name '*.json' -not -path '*/_legacy_evidence/*' | wc -l | tr -d ' ')"
+        env:
+          SYNC_STATE_DIR: onedrive:/logs/sync_state
+
+      - name: 清理（mode=${{ inputs.mode }}）
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/scripts/openlist/cleanup_legacy_marker_entries.sh" \
+            "--${{ inputs.mode }}" /tmp/ss 2>&1 | tee cleanup_report.txt
+
+      - name: apply——备份原目录 + 写回清理结果
+        if: ${{ inputs.mode == 'apply' }}
+        run: |
+          set -e
+          TS=$(date -u +%Y%m%dT%H%M%SZ)
+          BK="onedrive:/logs/sync_state_backup/legacy-cleanup-$TS"
+          rclone copy "onedrive:/logs/sync_state" "$BK" --files-only --retries 2
+          BK_N=$(rclone lsf "$BK" --files-only --retries 1 2>/dev/null | wc -l | tr -d ' ')
+          echo "✅ 原 marker 已备份 → $BK（$BK_N 个文件）"
+          rclone copy /tmp/ss "${SYNC_STATE_DIR:-onedrive:/logs/sync_state}" --files-only --retries 2
+          echo "✅ 清理后 marker 已写回（备份路径已记入本行上方，可回滚）"
+        env:
+          SYNC_STATE_DIR: onedrive:/logs/sync_state
+
+      - name: 归档报告
+        if: always()
+        run: |
+          echo "========== 清理报告 =========="
+          cat cleanup_report.txt 2>/dev/null || echo "（无报告——前置步骤未完成）"
