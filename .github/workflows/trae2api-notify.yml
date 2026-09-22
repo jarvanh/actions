@@ -131,27 +131,16 @@ jobs:
                   _st="今日已签"
                 fi
                 _rows+="$(tree_conn "$_last")${_uid} · ${_nick} · ${_st} · 积分 ${_cr}"$'\n'
-              done < "$CHECKIN_JSONL"
-              tg_add_block _msg "${_rows%$'\n'}"
-              # ⏳ 积分过期提醒：未用完的包里最早过期的 3 个（跨账号）
-              PACKS_JSON=/tmp/trae2api-packs.json
-              if [ -s "$PACKS_JSON" ]; then
-                _exp=$(jq -r '[.[] | select(.remain > 0 and .expire_at > 0)] | sort_by(.expire_at) | .[:3][] | "\(.nickname) · 剩 \(.remain) 分 · \(.expire_fmt) 过期"' "$PACKS_JSON" 2>/dev/null || true)
-                if [ -n "$_exp" ]; then
-                  _n_exp=$(printf '%s\n' "$_exp" | grep -c . || true)
-                  tg_add_section _msg "⏳ 积分过期 · 最近 ${_n_exp}"
-                  _exp_rows=""
-                  _j=0
+                # 该账号未用完的包里最早过期的 3 个（子行）
+                _exp3=$(jq -r --arg uid "$_uid" '[.[] | select(.uid == $uid and .remain > 0 and .expire_at > 0)] | sort_by(.expire_at) | .[:3][] | "剩 \(.remain) 分 · \(.expire_fmt) 过期"' "$PACKS_JSON" 2>/dev/null || true)
+                if [ -n "$_exp3" ]; then
                   while IFS= read -r _eline; do
                     [ -z "$_eline" ] && continue
-                    _j=$((_j + 1))
-                    _elast=0
-                    [ "$_j" -eq "$_n_exp" ] && _elast=1
-                    _exp_rows+="$(tree_conn "$_elast")$(escape_html "$_eline")"$'\n'
-                  done <<< "$_exp"
-                  tg_add_block _msg "${_exp_rows%$'\n'}"
+                    _rows+="$(tree_sub "$_last")$(escape_html "$_eline")"$'\n'
+                  done <<< "$_exp3"
                 fi
-              fi
+              done < "$CHECKIN_JSONL"
+              tg_add_block _msg "${_rows%$'\n'}"
               tg_add_path _msg "数据目录" "$TRAE_DATA"
               tg_add_section _msg "🧾 签到原始输出"
               tg_add_pre _msg "$(tail -c 800 "$CHECKIN_ERR" 2>/dev/null || echo '（无 stderr 输出）')"
