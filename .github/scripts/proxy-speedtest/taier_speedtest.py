@@ -913,11 +913,15 @@ def _run():
         source_mapping = {}
 
     try:
-        _, alive_items = collect_provider_snapshot(source_mapping)
+        provider_snapshot, alive_items = collect_provider_snapshot(source_mapping)
     except Exception as e:
         log_progress('snapshot_failed', error=str(e))
         notify_failure(f'节点快照失败：{e}')
         return 1
+    # mihomo **实际加载**的节点数（provider 里的原始条目数）。展开要多久看的是这个数，
+    # 不是下面过滤后剩多少——按候选数算等待上限会严重低估（2026-09-23 实测：加载 20004、
+    # 过滤后 1539，按 1539 只给 152 秒，等不完）。
+    _loaded_total = sum(int(v.get('total') or 0) for v in (provider_snapshot or {}).values())
 
     # 优先级排序必须在 **max_nodes 截断之前**：否则截断先按 provider 原序砍掉了尾巴，
     # 命中优先级的节点可能根本不在「前 N 个」里，排序就白做了。
@@ -940,11 +944,12 @@ def _run():
     # 读 `/providers/proxies` 拿到的是**声明清单**，不等于节点已进 `/proxies/{name}`
     # 路由表；不等就探会在头几个节点上拿到本地 404（实测间隔仅 ~18.7 毫秒，根本不是
     # 3000ms 超时），进而误判为死、触发熔断。见 wait_provider_ready 的说明。
-    # 超时**不写死**：按节点数自动放大（见 `_provider_ready_timeout`）。写死 60 秒在 2123
-    # 个节点上等不完（实测 60 秒 / 138 次探测全 404），等不完 ⇒ 测活一开就熔断 ⇒
-    # 1498 个死节点全跑满 15.9 秒的测速窗口（≈6.6h，单这一项就吃掉整个预算）。
+    # 超时**不写死**、且按 **mihomo 实际加载量** 算（不是过滤后的候选数）：写死 60 秒在
+    # 2123 个节点上等不完（实测 60 秒 / 138 次探测全 404）；按候选数算同样不够——
+    # 2026-09-23 加载 20004、过滤后 1539，按 1539 只给 152 秒仍等不完（322 次全 404）。
+    # 等不完 ⇒ 测活一开就熔断 ⇒ 死节点全跑满 16.5 秒的测速窗口（本轮 1309 个 ≈ 6h）。
     _prov_ready, _prov_waited, _ = wait_provider_ready(
-        [i.get('name') for i in alive_items])
+        [i.get('name') for i in alive_items], total_loaded=_loaded_total)
 
     results = []
     bypass_hits = 0
@@ -962,6 +967,11 @@ def _run():
     # 「mihomo 不认识这个节点名」的连续计数：与 `_probe_dead_streak` 分开，
     # 因为二者语义完全不同——前者是 provider 加载状态，后者才是节点真的连不上。
     _unknown_streak = 0
+    # 「不认识节点名」时把节点放回队尾重排的**累计上限**：防止 provider 始终展不开时
+    # 无限重排（那样队列永远消费不完）。取「候选数 × 2」——给展开留两轮完整的机会；
+    # 到顶后退回旧行为（放行去测速，由测速那步自然失败），不再无休止重排。
+    _unknown_requeued = 0
+    _unknown_requeue_cap = max(1, len(alive_items)) * 2
     # 探测失败**待定**的节点：熔断时它们是「机制故障的受害者」，不是「节点死了」——
     # 必须撤销判死、放回测速队列，否则通知里会出现 N 条伪造的「测活未通过」。
     # 见 2026-09-16 run 35116972319：8 条 Resource not found 塞在 0.13 秒内，
@@ -1000,16 +1010,24 @@ def _run():
                     _unknown_streak += 1
                     log_progress('taier_node_probe_unknown', name=name, error=_perr,
                                  consecutive=_unknown_streak)
-                    if _unknown_streak >= _probe_guard_n:
-                        # 连着多个都「不认识」⇒ 就是 provider 还没展开完，关掉探测别白等
-                        _probe_enabled = False
-                        log_progress('taier_probe_disabled', consecutive_dead=_unknown_streak,
-                                     url=CONFIG['TAIER_ALIVE_PROBE_URL'],
-                                     revived=len(_probe_retry_queue),
-                                     reason='连续多个节点名 mihomo 均不认识（provider 未展开），停用测活')
-                        _revive_probe_failed(results, alive_items, _probe_retry_queue)
-                        _unknown_streak = 0
-                    # 不判死、不计入 _probe_dead、不进熔断的「节点死了」判据
+                    # ⚠️ 「连着多个都不认识」**不再关掉整个测活层**，而是把节点放回队尾
+                    # 重新排队。为什么必须改：mihomo 加载上万个节点时展开极慢，此刻「不认识」
+                    # 是**加载状态**而非节点属性；旧逻辑一熔断就永久关掉测活 ⇒ 上千个死节点
+                    # 再没人拦、全跑满 ~16 秒的测速窗口（2026-09-23 实测 1309 个 ≈ 6 小时，
+                    # 单这一项吃掉整个 5 小时预算）。改成重排队后，展开一旦完成，这些节点会
+                    # 被测活以 ~0.1 秒/个 拦下。
+                    #
+                    # 用「放回队尾」而不是原地重试：队列是逐个消费的，放回队尾等于让本轮
+                    # 其余节点先走，天然形成「等一会儿再试」，不需要额外的 sleep。
+                    # 上限 `_unknown_requeue_cap` 防止展开始终不完成时无限循环（到顶后
+                    # 才退回旧的「放行去测速」，由测速那一步自然失败——fail-open 同义）。
+                    if _unknown_requeued < _unknown_requeue_cap:
+                        _unknown_requeued += 1
+                        alive_items.append(item)
+                        continue
+                    # 到顶：确实展不开，退回旧行为（放行去测速），不判死、不计入判死判据
+                    log_progress('taier_probe_unknown_requeue_capped',
+                                 requeued=_unknown_requeued, cap=_unknown_requeue_cap)
                     continue
                 _unknown_streak = 0
                 _probe_dead_streak += 1
