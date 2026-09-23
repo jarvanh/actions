@@ -1416,7 +1416,7 @@ jobs:
           # 故按 fromLive 分成两组显示、各不丢数据：既全量，又一眼看出哪些客户端可见。
           # 注：fromLive 在上游语义是「是否来自实时接口」（models.go:85），
           # 本处仅用作展示分组依据，不用来过滤模型。
-          WB_RATES_CAT="$(mktemp)"; WB_RATES_FREE="$(mktemp)"
+          WB_RATES_CAT="$(mktemp)"; WB_RATES_MODELS="$(mktemp)"; WB_RATES_FREE="$(mktemp)"
           if [ -n "${WB_CACHE:-}" ] && [ -r "$WB_CACHE" ]; then
             # 5 列：站点 / 倍率 / 归一键 / 显示名 / fromLive(0=实时目录,1=缓存合并)
             jq -r '
@@ -1456,9 +1456,35 @@ jobs:
               | select($m != "")
               | "\($site)\tFREE\t\($m)"' "$WB_CACHE" 2>/dev/null >> "$WB_RATES_FREE" || true
           fi
+          # 第三路：status 顶层 models 数组 —— serve 汇总的「每模型 × 每站点」倍率表。
+          # 它覆盖目录里缺失/无倍率的条目，是国内站数据齐全的关键：
+          #   glm-5.3-flash 在 cn 目录里有但 multiplier=null（被上面 != null 过滤掉）
+          #     → 这里 cnMultiplier=0.06x 补上
+          #   hy4-preview-f 在 cn 目录里根本没有（0 次）
+          #     → 这里 cnFree=是 / cnMultiplier=0.00x 补上
+          # 来源即客户端/监视视图所用的同一张表，非我自造。
+          if [ -n "${WB_STATUS_JSON:-}" ] && [ -r "$WB_STATUS_JSON" ]; then
+            jq -r '
+              (.models // [])
+              | (if type == "array" then .[] else empty end)
+              | objects
+              | (.id | tostring | ascii_downcase | gsub("^[[:space:]]+|[[:space:]]+$"; "")) as $m
+              | select($m != "")
+              | [ { site: "cn",   raw: (.cnMultiplier // "-"),   free: (.cnFree // "-") },
+                  { site: "intl", raw: (.intlMultiplier // "-"), free: (.intlFree // "-") } ]
+              | .[]
+              | (.raw | tostring | gsub("[[:space:]]"; "") | gsub("[xX]$"; "")) as $rm
+              | if (.free | tostring) == "是" then
+                  "\(.site)\tFREE\t\($m)\t\($m)\t1"
+                elif ($rm | test("^[0-9]+([.][0-9]+)?$")) then
+                  "\(.site)\t\($rm)\t\($m)\t\($m)\t1"
+                else
+                  empty
+                end' "$WB_STATUS_JSON" 2>/dev/null > "$WB_RATES_MODELS" || true
+          fi
           # 合并去重：键=站点|模型（归一小写）；FREE 行优先于目录价行。
           # 输出 4 列：站点 / 分组序(0 实时,1 缓存) / 倍率(排序用) / 已渲染行
-          WB_RATES_TXT="$(cat "$WB_RATES_CAT" "$WB_RATES_FREE" 2>/dev/null \
+          WB_RATES_TXT="$(cat "$WB_RATES_CAT" "$WB_RATES_MODELS" "$WB_RATES_FREE" 2>/dev/null \
             | awk -F'\t' '
                 NF >= 3 {
                   k = $1 "|" $3
@@ -1485,7 +1511,7 @@ jobs:
                 if ($2 != g) { g=$2; printf "  %s\n", ($2=="0" ? "── 实时目录 ──" : "── 缓存合并 ──") }
                 printf "%s\n", $4
               }' 2>/dev/null || true)"
-          rm -f "$WB_RATES_CAT" "$WB_RATES_FREE"
+          rm -f "$WB_RATES_CAT" "$WB_RATES_MODELS" "$WB_RATES_FREE"
           # 计数只数模型行（分组标题行以 ── 开头，排除）
           WB_RATES_N="$(printf '%s\n' "${WB_RATES_TXT:-}" | grep -E '^  ' | grep -cv '──' || true)"
           WB_RATES_FREE_N="$(printf '%s\n' "${WB_RATES_TXT:-}" | grep -c '免费' || true)"
