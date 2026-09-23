@@ -1161,18 +1161,20 @@ def switch_proxy(name: str, settle_seconds: float):
     time.sleep(settle_seconds)
 
 def _provider_ready_timeout(loaded: int) -> float:
-    """按 **mihomo 实际加载的节点数** 算 provider 展开的等待上限（秒）：`60 + 0.3 × n`，封顶 900。
+    """按 **mihomo 实际加载的节点数** 算 provider 展开的等待上限（秒）：`60 + 0.3 × n`，封顶 300。
 
     ⚠️ 参数是**加载总量**，不是「过滤后要测的候选数」——展开耗时取决于 mihomo 装了多少，
     与调用方之后砍到多少无关。按候选数算会严重低估：2026-09-23 编排轮 mihomo 实际加载
     20004 个（`provider_snapshot_collected total`），而过滤后只剩 1539 个，按 1539 算只给
     152 秒 ⇒ 等不完 ⇒ 测活一开就熔断 ⇒ 1309 个死节点全跑满 16.5 秒的测速窗口。
 
-    系数怎么定的（用实测反推，不再拍脑袋）：见 taier 文档「provider 展开到底要多久」。
-    2 万个 ⇒ 606 秒；封顶 900 秒（15 分钟）避免极端池子吃掉整轮预算——到点仍按
-    `ready=False` 降级，不会把整轮打死。
+    ⚠️ 封顶 300 秒（2026-09-23 从 900 下调）：`provider_ready`（成功）事件在**所有**历史
+    轮次的日志里都**从未出现过**，`provider_ready_timeout` 却是每轮必有——包括给到 900 秒
+    的那轮（`waited=900.34 attempts=1810` 全 404）。这说明加时换不来「等到」，只换来了
+    「白烧预算」：15 分钟纯空转，而降级路径本身是安全的（taier 关掉测活全量放行、
+    gitee/cdn 只是少一道保险）。故封顶压到 5 分钟，把预算留给真正产生数据的测速。
     """
-    return min(60.0 + max(0, int(loaded)) * 0.3, 900.0)
+    return min(60.0 + max(0, int(loaded)) * 0.3, 300.0)
 
 
 def wait_provider_ready(names, timeout=None, total_loaded=None):
