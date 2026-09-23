@@ -984,13 +984,24 @@ jobs:
                 tg_append _msg $'\n'
               fi
               # 模型倍率段：数据源是上方生成的 WB_RATES_TXT（wb-models-cache.json 的
-              # catalogs，按站点分组、站点内倍率降序每模型一行）。取数失败/缓存缺失时为
-              # 空，整段跳过（与凭据段同口径），绝不编造倍率。
+              # catalogs，按站点分组、站点内倍率降序每模型一行、**全量不截断**）。
+              # 取数失败/缓存缺失时为空，整段跳过（与凭据段同口径），绝不编造倍率。
+              # 长度：send_tg 不分片，Telegram 单条上限 4096 B，而倍率全量实测 2200+ B，
+              # 与凭据/账号池叠加后可能超限（超限会 400 丢弃、只留 warning，整条通知静默丢失）。
+              # 故先按「主体 + 倍率段」试算：装得下就并入同一条（版式不变）；
+              # 装不下就把倍率段**单独发第二条**——宁可多一条，也不砍数据、也不丢整条。
+              WB_RATES_BLOCK=""
               if [ -n "${WB_RATES_TXT:-}" ]; then
-                tg_add_section _msg "📊 模型倍率 · ${WB_RATES_N:-0}"
-                tg_add_pre _msg "$WB_RATES_TXT"
-                # tg_add_pre 内部 <pre> 包裹 + 转义；段尾补空行对齐账号池段
-                tg_append _msg $'\n'
+                WB_RATES_BLOCK="$(tg_add_section WB_RATES_BLOCK "📊 模型倍率 · ${WB_RATES_N:-0}"; tg_add_pre WB_RATES_BLOCK "$WB_RATES_TXT"; printf '%s' "$WB_RATES_BLOCK")"
+                # 300 = 后续「数据目录」行 + 收尾区的保守预留；3900 留出转义增长余量
+                if [ "$((${#_msg} + ${#WB_RATES_BLOCK} + 300))" -lt 3900 ]; then
+                  tg_append _msg "$WB_RATES_BLOCK"
+                  WB_RATES_BLOCK=""
+                else
+                  # 装不下 → 不砍数据，改成带标题 + 收尾区的独立第二条
+                  WB_RATES_BLOCK=""
+                  WB_RATES_BLOCK="$(tg_add_title WB_RATES_BLOCK "📊 workbuddy-gateway 模型倍率 · ${WB_RATES_N:-0}"; tg_add_pre WB_RATES_BLOCK "$WB_RATES_TXT"; tg_add_footer WB_RATES_BLOCK; printf '%s' "$WB_RATES_BLOCK")"
+                fi
               fi
               tg_add_path _msg "数据目录" "$WB_DIR"
               if [ -n "$6" ]; then
@@ -999,6 +1010,13 @@ jobs:
               fi
               tg_add_footer _msg
               send_tg "$_msg" || echo "::warning::TG 通知发送失败（不影响任务）"
+              # 倍率段独立第二条（仅在主条装不下时非空）：数据全量保留，不与主条挤在
+              # 同一条里超限丢弃。它自带标题 + 收尾区，是可独立成篇的一条完整通知。
+              # 两条之间 sleep 1s：连续 sendMessage 撞 429 会让后一条直接丢失。
+              if [ -n "${WB_RATES_BLOCK:-}" ]; then
+                sleep 1
+                send_tg "$WB_RATES_BLOCK" || echo "::warning::模型倍率段独立通知发送失败（不影响任务）"
+              fi
             else
               echo "⚠️ Telegram secrets missing, skip workbuddy-gateway notification."
             fi
@@ -1400,23 +1418,15 @@ jobs:
           WB_RATES_N=0
           if [ -r "$WB_CACHE" ]; then
             WB_RATES_N="$(jq -r '[.catalogs // {} | to_entries[] | .value[]? | select((.multiplier // null) != null)] | length' "$WB_CACHE" 2>/dev/null || echo 0)"
-            # 每站点只渲染降序前 MAX 个：wb_notify 走**不分片**的 send_tg（Telegram 单条
-            # 上限 4096 B），全量 59 个实测已占 2202 B，模型继续增加会挤爆整条通知
-            # （send_tg 失败只 warning，通知会静默整个丢失）。截断时在该站点末尾
-            # 标注省略个数 —— 宁可少列几个，也不能让整条通知发不出去。
+            # 全量渲染、不截断：倍率是必要数据，砍掉等于没给。
+            # 长度风险改由 wb_notify 侧的「超限拆条」兜底（见函数内说明），
+            # 而不是在这里丢数据。
             WB_RATES_TXT="$(jq -r '(.catalogs // {}) | to_entries[] as $e | $e.value[]? | select((.multiplier // null) != null) | "\($e.key)\t\(.multiplier)\t\(.id)"' "$WB_CACHE" 2>/dev/null \
               | sort -t$'\t' -k1,1 -k2,2gr \
-              | awk -F'\t' -v MAX=20 '
-                  { k=$1
-                    if (k != cur) {
-                      if (cur != "" && n[cur] > MAX) printf "  … 其余 %d 个略\n", n[cur]-MAX
-                      cur=k; printf "%s\n", (k=="intl" ? "国际站" : "国内站")
-                    }
-                    n[k]++
-                    if (n[k] <= MAX) printf "  %-26s %6.2fx\n", $3, $2
-                  }
-                  END { if (cur != "" && n[cur] > MAX) printf "  … 其余 %d 个略\n", n[cur]-MAX }
-                ' 2>/dev/null || true)"
+              | awk -F'\t' 'BEGIN{s=""} {
+                  if ($1 != s) { s=$1; printf "%s\n", ($1=="intl" ? "国际站" : "国内站") }
+                  printf "  %-26s %6.2fx\n", $3, $2
+                }' 2>/dev/null || true)"
           fi
 
           # 接力轮次的判据：本文件由「Trigger next OpenClaw run」在上一轮收尾时以
