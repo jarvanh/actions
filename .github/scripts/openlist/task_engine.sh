@@ -376,6 +376,22 @@ sync_budget_stop() {
   [ $(( $(date +%s) + OPENLIST_SYNC_MIN_SLICE_SECONDS )) -ge "$OPENLIST_SYNC_DEADLINE_EPOCH" ]
 }
 
+# ===== 平台硬顶闸（2026-09-23 病灶 D）=====
+# 与 sync_budget_stop 的区别: 后者判"预算够不够再开一个新工作片"，拦的是**新开**；
+#   前者判"离 GitHub 硬杀线还剩多久"，拦的是**已经在跑的长循环内部**。
+# 为什么必须有第二层: 预算闸全部位于循环入口，一旦进入循环体，内部的
+#   rclone sync / 落盘轮询（6×30s）/ 逐条记账就在闸外无界 —— 实测两轮各溢出
+#   ~11min 撞 330min 硬顶（run 35717590337 / 35773926579，均 conclusion=failure）。
+# 语义: 距硬顶不足 <reserve> 秒就返回真（调用方应立即 break，剩余交下轮）。
+#   未注入硬顶锚点（调试/还原模式/单测）→ 永不触发，行为与改动前一致。
+# 用法: sync_hard_limit_stop [reserve_seconds]
+sync_hard_limit_stop() {
+  [ -n "${OPENLIST_STEP_HARD_LIMIT_EPOCH:-}" ] || return 1
+  local reserve="${1:-${OPENLIST_STEP_TAIL_RESERVE_SECONDS:-480}}"
+  [[ "$reserve" =~ ^[0-9]+$ ]] || reserve=480
+  [ $(( $(date +%s) + reserve )) -ge "$OPENLIST_STEP_HARD_LIMIT_EPOCH" ]
+}
+
 # ===== 修复管线的预算尾段（2026-09-15，C 判据专项）=====
 # 问题: 子目录循环的闸是"全局最小片 600s" —— 于是每轮都把预算一路吃到只剩 10 分钟，
 #   而**修复管线是在每个子目录的 sync 之后紧接着跑的** ⇒ 最后一个子目录的修复只剩几分钟，
