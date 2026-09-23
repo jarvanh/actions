@@ -983,6 +983,15 @@ jobs:
                 # 末条子行渲染，版式与规范示例（块与 kv 区之间空一行）不一致。
                 tg_append _msg $'\n'
               fi
+              # 模型倍率段：数据源是上方生成的 WB_RATES_TXT（wb-models-cache.json 的
+              # catalogs，按站点分组、站点内倍率降序每模型一行）。取数失败/缓存缺失时为
+              # 空，整段跳过（与凭据段同口径），绝不编造倍率。
+              if [ -n "${WB_RATES_TXT:-}" ]; then
+                tg_add_section _msg "📊 模型倍率 · ${WB_RATES_N:-0}"
+                tg_add_pre _msg "$WB_RATES_TXT"
+                # tg_add_pre 内部 <pre> 包裹 + 转义；段尾补空行对齐账号池段
+                tg_append _msg $'\n'
+              fi
               tg_add_path _msg "数据目录" "$WB_DIR"
               if [ -n "$6" ]; then
                 tg_add_section _msg "🧾 原始输出"
@@ -1381,6 +1390,33 @@ jobs:
             else
               echo "⚠️ 未找到 $WB_STATUS_JSON（账号池明细本轮留空）"
             fi
+          fi
+
+          # 模型倍率段数据源：serve 写出的 wb-models-cache.json（catalogs 按站点分组，
+          # 每项含 multiplier = 生效倍率，已含促销）。与 trae2api 的 /v1/models 单一列表
+          # 不同，workbuddy 是**站点级**（cn/intl），故按站点分组、各站点内倍率降序渲染。
+          # 取不到或为空时整段跳过（与凭据段同口径），绝不编造倍率。
+          WB_RATES_TXT=""
+          WB_RATES_N=0
+          if [ -r "$WB_CACHE" ]; then
+            WB_RATES_N="$(jq -r '[.catalogs // {} | to_entries[] | .value[]? | select((.multiplier // null) != null)] | length' "$WB_CACHE" 2>/dev/null || echo 0)"
+            # 每站点只渲染降序前 MAX 个：wb_notify 走**不分片**的 send_tg（Telegram 单条
+            # 上限 4096 B），全量 59 个实测已占 2202 B，模型继续增加会挤爆整条通知
+            # （send_tg 失败只 warning，通知会静默整个丢失）。截断时在该站点末尾
+            # 标注省略个数 —— 宁可少列几个，也不能让整条通知发不出去。
+            WB_RATES_TXT="$(jq -r '(.catalogs // {}) | to_entries[] as $e | $e.value[]? | select((.multiplier // null) != null) | "\($e.key)\t\(.multiplier)\t\(.id)"' "$WB_CACHE" 2>/dev/null \
+              | sort -t$'\t' -k1,1 -k2,2gr \
+              | awk -F'\t' -v MAX=20 '
+                  { k=$1
+                    if (k != cur) {
+                      if (cur != "" && n[cur] > MAX) printf "  … 其余 %d 个略\n", n[cur]-MAX
+                      cur=k; printf "%s\n", (k=="intl" ? "国际站" : "国内站")
+                    }
+                    n[k]++
+                    if (n[k] <= MAX) printf "  %-26s %6.2fx\n", $3, $2
+                  }
+                  END { if (cur != "" && n[cur] > MAX) printf "  … 其余 %d 个略\n", n[cur]-MAX }
+                ' 2>/dev/null || true)"
           fi
 
           # 接力轮次的判据：本文件由「Trigger next OpenClaw run」在上一轮收尾时以
