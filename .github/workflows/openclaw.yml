@@ -1550,7 +1550,7 @@ jobs:
                 tg_append _msg $'\n'
               fi
               # 模型倍率段：数据源是 7.5 生成的 RATES_TXT（/v1/models 的
-              # consumption_rate，倍率降序 3 个/行）；服务未就绪/取数失败时为空，
+              # consumption_rate，倍率降序、每模型一行）；服务未就绪/取数失败时为空，
               # 整段跳过（与凭据段同口径）。section 计数与「🔑 凭据 · N」同构。
               if [ -n "${RATES_TXT:-}" ]; then
                 tg_add_section _msg "📊 模型倍率 · ${RATES_N:-0}"
