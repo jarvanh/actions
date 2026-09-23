@@ -688,10 +688,6 @@ def main():
     check('nodes_include_filtered' in stages13,
           f'正常过滤记 nodes_include_filtered（实际 {stages13}）')
 
-    # 13f. 默认值：CONFIG 里必须是空串（定时轮 / 手动 dispatch 不过滤）
-    check(t.CONFIG['TAIER_INCLUDE_REGEX'] == '',
-          f"默认不过滤（实际 {t.CONFIG['TAIER_INCLUDE_REGEX']!r}）")
-
     # 13g. 接线次序：排序 → 过滤 → max_nodes 截断（截断必须按过滤后的池子算「前 N 个」）
     norm13 = _re.sub(r'\s+', '', _t_src)
     _pp13 = norm13.find("prioritize_nodes(alive_items")
@@ -701,6 +697,31 @@ def main():
           f'排序@{_pp13} < 过滤@{_ff13} < 截断@{_tr13}')
     check("os.environ.get('TAIER_INCLUDE_REGEX'" in norm13,
           'TAIER_INCLUDE_REGEX 可经 env 覆盖')
+
+    # 13f. 默认值：CONFIG 里必须是空串（定时轮 / 手动 dispatch 不过滤）
+    check(t.CONFIG['TAIER_INCLUDE_REGEX'] == '',
+          f"默认不过滤（实际 {t.CONFIG['TAIER_INCLUDE_REGEX']!r}）")
+
+    print('== 14. provider 展开等待按节点数放大（2026-09-22 失败节点吃满窗口的根因）==')
+    # 写死 60 秒在 2123 个节点上等不完 ⇒ 测活一开就熔断 ⇒ 1498 个死节点全跑满 15.9 秒
+    # 的测速窗口（≈6.6h，单这一项吃掉整个 5h 预算）。反证：把 timeout 写死回 60，14a 变红。
+
+    # 14a. 超时随节点数放大：大池子必须显著大于 60 秒，且封顶 600
+    f14 = g._provider_ready_timeout
+    check(f14(2123) > 60.0 * 2, f'2123 个节点 → {f14(2123):.0f} 秒（显著大于 60）')
+    check(f14(100) >= 60.0, f'小池子不低于基础 60 秒（实际 {f14(100):.0f}）')
+    check(f14(100000) == 600.0, f'封顶 600 秒（实际 {f14(100000):.0f}）')
+    check(f14(0) == 60.0, f'0 节点仍取基础值（实际 {f14(0):.0f}）')
+
+    # 14b. 三套调用点都**不再写死 60**（写死即漏修；用归一化源码匹配跨行调用）
+    for mod_name, mod in (('taier', t), ('gitee', g), ('cdn', d)):
+        src14 = _re.sub(r'\s+', '', pathlib.Path(mod.__file__).read_text(encoding='utf-8'))
+        check('timeout=60.0' not in src14,
+              f'{mod_name} 不得再写死 timeout=60.0')
+    # 14c. 默认参数必须是 None（= 自动），不能是某个写死的数字
+    import inspect as _ins
+    check(_ins.signature(g.wait_provider_ready).parameters['timeout'].default is None,
+          'wait_provider_ready 的 timeout 默认 None（按节点数自动）')
 
     print()
     if FAILURES:
