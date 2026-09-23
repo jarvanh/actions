@@ -104,6 +104,17 @@ rclone() {
 _PERSIST_LOG="/tmp/bulkfold_persist.txt"
 _persist_fix_entry_now() { echo "${5}" >> "$_PERSIST_LOG"; return 0; }
 
+# 批量版（2026-09-23 病灶 D）: 折叠记账改走它，本测试必须与单条版同样桩掉 ——
+#   否则它会调真实 `_marker_write`/`fix_blacklist_to_json`，在桩环境里不是
+#   "验证生产行为"，而是拿桩环境的缺口制造假红（CI 曾因此 EXIT=1）。
+#   只记条目数，与单条版同口径。
+_persist_fix_entries_batch() {
+  local entries_file="$5"
+  [ -s "$entries_file" ] || return 0
+  jq -r '.original' "$entries_file" 2>/dev/null >> "$_PERSIST_LOG" || true
+  return 0
+}
+
 _missing="/tmp/bulkfold_missing.txt"
 _fixlist="/tmp/bulkfold_fixlist.txt"
 reset_state() {

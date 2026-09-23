@@ -76,8 +76,16 @@ _persist_fix_entries_batch() {
 
   # 写法沿用 marker_add_fix_entry 的教训: 条目经 stdin 文档流喂 jq -s，不进 argv
   # （fixed_files 含内嵌 restore 脚本，--argjson 传参会 E2BIG 静默丢条目）。
+  # ⚠️ 黑名单是**顺带合并**，不是本函数的职责: 宿主未 source file_fix.sh 时
+  #   （单测只桩掉 _persist_fix_entry_now 就会出现这种环境）不能因此炸掉 ——
+  #   黑名单丢了下一轮会重试已证伪的方法，而 marker 主记录丢了是幽灵落盘，
+  #   后者代价大得多。故缺失即降级为空黑名单，不 return 1。
   local bl_json merged
-  bl_json=$(fix_blacklist_to_json)
+  if declare -F fix_blacklist_to_json >/dev/null 2>&1; then
+    bl_json=$(fix_blacklist_to_json 2>/dev/null || echo '{}')
+  else
+    bl_json='{}'
+  fi
   [ -n "$bl_json" ] || bl_json="{}"
   merged=$({ cat "$state_file"; echo; cat "$entries_file"; echo; printf '%s\n' "$bl_json"; } \
     | jq -sc '
