@@ -1259,6 +1259,39 @@ def _diag_probe_ready(candidates):
     log_progress('probe_ready_diag', proxies_top=len(keys), sample=sample,
                  candidates_checked=min(200, len(candidates)), candidates_hit=hit,
                  first_candidate=candidates[0] if candidates else '')
+    # ⚠️ 关键一问：provider 成员到底走哪个端点能探活？逐个试，把能通的记下来。
+    _diag_probe_endpoints(candidates, keys)
+
+
+def _diag_probe_endpoints(candidates, top_keys):
+    """试出 provider 成员**真正可用**的测活端点（诊断用，只读、失败静默）。
+
+    已确证（2026-09-24 诊断轮）：`/proxies` 顶层只有 8 个内置组（AUTO/COMPATIBLE/
+    DIRECT/GLOBAL/PASS…），两万多个 provider 成员**一个都没注册进去**。所以
+    `/proxies/{name}/delay` 必然 404 ⇒ 测活恒失效。正确端点应是 provider 作用域的
+    `/providers/proxies/{provider}/{name}/delay`。这里实测试出来，不靠猜。
+    """
+    if not candidates:
+        return
+    name = candidates[0]
+    qn = urllib.parse.quote(str(name), safe='')
+    tries = [
+        ('/proxies/' + qn + '/delay?url=http://www.gstatic.com/generate_204&timeout=3000'),
+        ('/providers/proxies/remote-1/' + qn + '/delay?url=http://www.gstatic.com/generate_204&timeout=3000'),
+        ('/providers/proxies/remote-1'),
+    ]
+    out = []
+    for path in tries:
+        try:
+            data = mihomo_api_get(path)
+            if isinstance(data, dict) and 'proxies' in data:
+                out.append(f'{path[:46]}... -> list({len(data.get("proxies") or [])})')
+            else:
+                out.append(f'{path[:46]}... -> {str(data)[:60]}')
+        except Exception as e:
+            out.append(f'{path[:46]}... -> ERR {str(e)[:50]}')
+    log_progress('probe_endpoint_diag', tries=out,
+                 note='哪个端点能探活即改用哪个')
 
 def git_direct_speedtest(env, gitee, test_file: pathlib.Path, push_timeout: int, clone_timeout: int, speedtest_mode: str, max_attempts: int = 5):
     """直连基线（本套的调用入口）。实现已抽到 `run_direct_baseline`，三套共用。
