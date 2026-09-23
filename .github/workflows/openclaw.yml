@@ -1838,14 +1838,15 @@ jobs:
                 | select(.id != "file_search_agent" and .id != "explore_sub_agent_v2"
                     and .id != "browser_use_subagent" and .id != "summary")] | length' /tmp/trae2api-models.json)"
             # 倍率升序（价格低的排上面）、等宽表格（模型左对齐 + 倍率两位小数右对齐），
-            # 通知里走 <pre> 渲染
+            # 通知里走 <pre> 渲染。版式与 workbuddy 段统一：
+            #   行首两空格缩进 + 模型 %-26s 左对齐 + 倍率 %6.2fx 右对齐
+            #   不列 model/rate 表头（workbuddy 以「国内站/国际站」分组，同样无表头）
             RATES_TXT="$(jq -r '.data[] | select((.consumption_rate // 0) > 0)
                 | select(.id != "file_search_agent" and .id != "explore_sub_agent_v2"
                     and .id != "browser_use_subagent" and .id != "summary")
                 | "\(.consumption_rate)\t\(.id)"' /tmp/trae2api-models.json \
                 | sort -k1,1 -n \
-              | awk -F'\t' 'BEGIN{printf "%-26s %5s\n", "model", "rate"}
-                {printf "%-26s %5.2fx\n", $2, $1}')"
+              | awk -F'\t' '{printf "  %-26s %6.2fx\n", $2, $1}')"
           fi
 
           echo "8. Telegram notification (workbuddy-format)..."
