@@ -960,7 +960,15 @@ def _run():
     # 测活的熔断：开头连续这么多个都没通过、且一个成功的都没有 ⇒ 更可能是**探测目标本身
     # 不可达**（控制面挂了 / URL 配错），而不是这些节点恰好都死了。继续判死会让整轮零产出。
     _probe_guard_n = 8
-    _probe_enabled = CONFIG['TAIER_ALIVE_PROBE']
+    # ⚠️ 展开等待**超时**（等满上限仍全 404）⇒ 节点名在 `/proxies` 里查不到，继续测活
+    # 只会让每个节点各吃一次 `Resource not found`（2026-09-23 实测 4743 次，纯空转）。
+    # 此处直接关掉测活、全量放行去测速——与熔断同一口径，但早得多、且不误伤判死判据。
+    # 注意只关「等不到」这一种；展开成功（`_prov_ready`）时测活照常开。
+    _probe_enabled = CONFIG['TAIER_ALIVE_PROBE'] and _prov_ready
+    if CONFIG['TAIER_ALIVE_PROBE'] and not _prov_ready:
+        log_progress('taier_probe_disabled', waited=round(_prov_waited, 3),
+                     total=len(alive_items),
+                     reason='provider 展开等待超时，节点名不可探，全量放行去测速')
     _probe_alive = 0
     _probe_dead = 0
     _probe_dead_streak = 0
@@ -1025,10 +1033,13 @@ def _run():
                         _unknown_requeued += 1
                         alive_items.append(item)
                         continue
-                    # 到顶：确实展不开，退回旧行为（放行去测速），不判死、不计入判死判据
+                    # 到顶：确实展不开。**必须放行去测速**（fail-open 同义），不判死、
+                    # 不计入判死判据。⚠️ 2026-09-23 教训：这里曾写成 `continue` 直接丢弃，
+                    # 于是 1581 个候选全部跳过测速 ⇒ `node_count=0` 整轮零产出。重排是
+                    # 「晚点再试」，试不出来就要按老办法照测，绝不能变成「不测」。
                     log_progress('taier_probe_unknown_requeue_capped',
                                  requeued=_unknown_requeued, cap=_unknown_requeue_cap)
-                    continue
+                    # 落到下面共用测速路径（此处**不得**跳过，否则节点被丢弃）
                 _unknown_streak = 0
                 _probe_dead_streak += 1
                 _probe_dead += 1
