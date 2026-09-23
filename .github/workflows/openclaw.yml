@@ -1692,7 +1692,7 @@ jobs:
               # 取数失败时为空，
               # 整段跳过（与凭据段同口径）。section 计数与「🔑 凭据 · N」同构。
               if [ -n "${RATES_TXT:-}" ]; then
-                tg_add_section _msg "📊 模型倍率 · ${RATES_N:-0}"
+                tg_add_section _msg "📊 模型倍率 · ${RATES_N:-0}（有倍率模型）"
                 tg_add_pre _msg "$RATES_TXT"
                 # tg_add_pre 内部 <pre> 包裹 + 转义；段尾补空行对齐账号池段
                 tg_append _msg $'\n'
@@ -1828,7 +1828,12 @@ jobs:
               -H "Authorization: Bearer ${_tw2a_key}" \
               "http://127.0.0.1:${TRAE_PORT}/v1/models" -o /tmp/trae2api-models.json 2>/dev/null \
               && jq -e '.data | length > 0' /tmp/trae2api-models.json >/dev/null 2>&1; then
-            # 过滤内部功能模型（subagent/summary 等），只留用户可用的对话模型
+            # 过滤内部功能模型（subagent/summary 等），只留用户可用的对话模型。
+            # 仅统计 consumption_rate > 0 的条目：上游 client.go:270 定义
+            # 「Rate 0 = 未知」，且 handler.go 只在 Rate > 0 时才输出该字段 ——
+            # 故 rate 缺失 ≠ 免费，不能渲染成「免费」或 0.00x（那是编造）。
+            # 未列出的还有 custom_model_* 占位（14）与内部功能模型（4）；
+            # 标题里的 N 是「有倍率模型数」，不是模型总数（避免误读）。
             RATES_N="$(jq -r '[.data[] | select((.consumption_rate // 0) > 0)
                 | select(.id != "file_search_agent" and .id != "explore_sub_agent_v2"
                     and .id != "browser_use_subagent" and .id != "summary")] | length' /tmp/trae2api-models.json)"
