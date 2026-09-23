@@ -1688,7 +1688,8 @@ jobs:
                 tg_append _msg $'\n'
               fi
               # 模型倍率段：数据源是 7.5 生成的 RATES_TXT（/v1/models 的
-              # consumption_rate，倍率降序、每模型一行）；服务未就绪/取数失败时为空，
+              # consumption_rate，倍率升序（价格低的排上面）、每模型一行）；服务未就绪/
+              # 取数失败时为空，
               # 整段跳过（与凭据段同口径）。section 计数与「🔑 凭据 · N」同构。
               if [ -n "${RATES_TXT:-}" ]; then
                 tg_add_section _msg "📊 模型倍率 · ${RATES_N:-0}"
@@ -1831,12 +1832,13 @@ jobs:
             RATES_N="$(jq -r '[.data[] | select((.consumption_rate // 0) > 0)
                 | select(.id != "file_search_agent" and .id != "explore_sub_agent_v2"
                     and .id != "browser_use_subagent" and .id != "summary")] | length' /tmp/trae2api-models.json)"
-            # 倍率降序、等宽表格（模型左对齐 + 倍率两位小数右对齐），通知里走 <pre> 渲染
+            # 倍率升序（价格低的排上面）、等宽表格（模型左对齐 + 倍率两位小数右对齐），
+            # 通知里走 <pre> 渲染
             RATES_TXT="$(jq -r '.data[] | select((.consumption_rate // 0) > 0)
                 | select(.id != "file_search_agent" and .id != "explore_sub_agent_v2"
                     and .id != "browser_use_subagent" and .id != "summary")
                 | "\(.consumption_rate)\t\(.id)"' /tmp/trae2api-models.json \
-                | sort -k1,1 -rn \
+                | sort -k1,1 -n \
               | awk -F'\t' 'BEGIN{printf "%-26s %5s\n", "model", "rate"}
                 {printf "%-26s %5.2fx\n", $2, $1}')"
           fi
