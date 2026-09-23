@@ -1177,7 +1177,7 @@ def _provider_ready_timeout(loaded: int) -> float:
     return min(60.0 + max(0, int(loaded)) * 0.3, 300.0)
 
 
-def wait_provider_ready(names, timeout=None, total_loaded=None):
+def wait_provider_ready(names, timeout=None, total_loaded=None, provider_names=None):
     """等 mihomo 把 provider 里的节点**真正注册进 `/proxies`**，返回 `(ready, waited, probed)`。
 
     **四套共用**（CDN / Gitee / taier 都调它；taier 另有自己的测活层，靠它开测前兜底）。
@@ -1217,7 +1217,7 @@ def wait_provider_ready(names, timeout=None, total_loaded=None):
     probes = candidates[:2] + candidates[-2:]
     # ⚠️ 诊断先行：历史轮次里 `provider_ready`（成功）**从未出现过**，全是 timeout。
     # 靠加时长已经排不掉，先把路由表实况打出来（1 次只读请求，失败静默）。
-    _diag_probe_ready(candidates)
+    _diag_probe_ready(candidates, provider_names)
     start = time.time()
     attempt = 0
     while time.time() - start < timeout:
@@ -1240,7 +1240,7 @@ def wait_provider_ready(names, timeout=None, total_loaded=None):
     return False, waited, ''
 
 
-def _diag_probe_ready(candidates):
+def _diag_probe_ready(candidates, provider_names=None):
     """超时时 dump mihomo 路由表实况（诊断用，只读、失败静默）。
 
     为什么需要它：`/providers/proxies` 返回两万多个节点，而 `/proxies/{name}`
@@ -1260,36 +1260,40 @@ def _diag_probe_ready(candidates):
                  candidates_checked=min(200, len(candidates)), candidates_hit=hit,
                  first_candidate=candidates[0] if candidates else '')
     # ⚠️ 关键一问：provider 成员到底走哪个端点能探活？逐个试，把能通的记下来。
-    _diag_probe_endpoints(candidates, keys)
+    _diag_probe_endpoints(candidates, provider_names)
 
 
-def _diag_probe_endpoints(candidates, top_keys):
+def _diag_probe_endpoints(candidates, provider_names=None):
     """试出 provider 成员**真正可用**的测活端点（诊断用，只读、失败静默）。
 
-    已确证（2026-09-24 诊断轮）：`/proxies` 顶层只有 8 个内置组（AUTO/COMPATIBLE/
-    DIRECT/GLOBAL/PASS…），两万多个 provider 成员**一个都没注册进去**。所以
-    `/proxies/{name}/delay` 必然 404 ⇒ 测活恒失效。正确端点应是 provider 作用域的
-    `/providers/proxies/{provider}/{name}/delay`。这里实测试出来，不靠猜。
+    已确证（2026-09-24 诊断轮，2 个节点与 2 万个节点结果一致）：`/proxies` 顶层只有
+    8 个内置组（AUTO/COMPATIBLE/DIRECT/GLOBAL/PASS…），provider 成员**一个都没注册进去**
+    ⇒ `/proxies/{name}/delay` 必然 404，测活恒失效。这排除了「加载慢」假说。
+    而 `/providers/proxies/{provider}` 能列出成员，所以测活应走 provider 作用域。
+    这里用**真实 provider 名**实测，不靠写死。
     """
     if not candidates:
         return
     name = candidates[0]
     qn = urllib.parse.quote(str(name), safe='')
-    tries = [
-        ('/proxies/' + qn + '/delay?url=http://www.gstatic.com/generate_204&timeout=3000'),
-        ('/providers/proxies/remote-1/' + qn + '/delay?url=http://www.gstatic.com/generate_204&timeout=3000'),
-        ('/providers/proxies/remote-1'),
-    ]
+    delay_q = '?url=http://www.gstatic.com/generate_204&timeout=3000'
+    tries = [('/proxies/' + qn + '/delay' + delay_q)]
+    for pname in (provider_names or ['remote-1'])[:3]:
+        qp = urllib.parse.quote(str(pname), safe='')
+        base = '/providers/proxies/' + qp
+        tries.append(base + '/' + qn + '/delay' + delay_q)
+        tries.append(base + '/healthcheck')
+    tries.append('/providers/proxies')
     out = []
     for path in tries:
         try:
             data = mihomo_api_get(path)
-            if isinstance(data, dict) and 'proxies' in data:
-                out.append(f'{path[:46]}... -> list({len(data.get("proxies") or [])})')
+            if isinstance(data, dict) and isinstance(data.get('proxies'), list):
+                out.append(f'{path[:44]}... -> list({len(data["proxies"])})')
             else:
-                out.append(f'{path[:46]}... -> {str(data)[:60]}')
+                out.append(f'{path[:44]}... -> {str(data)[:56]}')
         except Exception as e:
-            out.append(f'{path[:46]}... -> ERR {str(e)[:50]}')
+            out.append(f'{path[:44]}... -> ERR {str(e)[:48]}')
     log_progress('probe_endpoint_diag', tries=out,
                  note='哪个端点能探活即改用哪个')
 

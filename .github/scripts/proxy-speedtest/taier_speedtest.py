@@ -949,7 +949,8 @@ def _run():
     # 2026-09-23 加载 20004、过滤后 1539，按 1539 只给 152 秒仍等不完（322 次全 404）。
     # 等不完 ⇒ 测活一开就熔断 ⇒ 死节点全跑满 16.5 秒的测速窗口（本轮 1309 个 ≈ 6h）。
     _prov_ready, _prov_waited, _ = wait_provider_ready(
-        [i.get('name') for i in alive_items], total_loaded=_loaded_total)
+        [i.get('name') for i in alive_items], total_loaded=_loaded_total,
+        provider_names=list((provider_snapshot or {}).keys()))
 
     results = []
     bypass_hits = 0
