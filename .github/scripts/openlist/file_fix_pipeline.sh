@@ -526,8 +526,11 @@ _bulk_fold_record_landed() {
     echo "  ✅ 折叠落盘 · ${rel} (${fsize})" | tee -a "$LOG_FILENAME"
     echo "${mf}|${alt}|${method}|${restore}|${fsize}|${fbytes}|copyto_original|" >> "$fix_list"
     FIXED_THIS_RUN["$mf"]="$alt"
+    echo "$mf" >> "$folded_files"
     # md5 留空: 批量折叠不经本地副本，无法算内容指纹；marker 的 md5 是可选
     # 字段（还原时按 size_bytes 校验，缺 md5 只降级为大小校验）
+    # ⚠️ folded_files 的写入不能随 marker 写回一起挪走: 它是**本地**记账，
+    #   调用方靠它把已折叠条目从 missing_list 摘掉（否则下轮重复折叠）。
     jq -cn --arg o "$mf" --arg a "$alt" --arg m "$method" --arg rh "$restore" \
       --arg sh "$fsize" --argjson sb "${fbytes}" \
       '{original:$o, alternative:$a, method:$m, restore_hint:$rh, size_human:$sh,
