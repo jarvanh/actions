@@ -903,7 +903,9 @@ jobs:
               [ -n "$4" ] && tg_add_kv _msg "更新" "$4"
               if [ "${7:-0}" = "1" ]; then
                 tg_add_path _msg "接口" "http://127.0.0.1:${WB_PORT}/v1"
-                tg_add_kv _msg "鉴权" "需 API Key（与 glm-proxy 同值）"
+                # 明文 API Key（主人 23:33 要求）：本机网关访问口令，取值即启动 serve
+                # 时传入的 job 级 AI_GATEWAY_API_KEY，与客户端实际使用的一致
+                tg_add_kv _msg "鉴权" "API Key：${AI_GATEWAY_API_KEY:-未取到}"
               fi
               [ -n "$5" ] && tg_add_kv _msg "原因" "$5"
               if [ -n "${WB_CREDS:-}" ]; then
@@ -1631,7 +1633,10 @@ jobs:
               [ -n "$4" ] && tg_add_kv _msg "更新" "$4"
               if [ "${7:-0}" = "1" ]; then
                 tg_add_path _msg "接口" "http://127.0.0.1:${TRAE_PORT}/v1"
-                tg_add_kv _msg "鉴权" "需 API Key（面板/CLI 共用）"
+                # 明文 API Key（主人 23:33 要求，与 workbuddy 段同款展示）：
+                # 从 Dropbox 数据目录 .env 读取，即面板/CLI 实际使用的那把
+                local _trae_key="$(grep -m1 '^TW2A_API_KEY=' "${TRAE_DATA}/.env" 2>/dev/null | cut -d= -f2- || true)"
+                tg_add_kv _msg "鉴权" "API Key：${_trae_key:-未取到}"
               fi
               [ -n "$5" ] && tg_add_kv _msg "原因" "$5"
               if [ -n "${TRAE_CREDS:-}" ]; then
