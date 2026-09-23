@@ -1481,22 +1481,28 @@ jobs:
                   empty
                 end' "$WB_STATUS_JSON" 2>/dev/null > "$WB_RATES_MODELS" || true
           fi
-          # 合并去重：键=站点|模型（归一小写）；FREE 行优先于目录价/站点汇总价。
-          # 输出 3 列：站点 / 排序键（免费=0，沉底） / 已渲染行
+          # 合并去重：键=站点|模型（归一小写）。取值口径 = 取最小（FREE 视为 0.00）：
+          # 三路都可能给出同一键的倍率，谁更低以谁为准 —— 显示值即实际最低消耗。
+          # 倍率降到 0（含实测免费）一律渲染为「免费」。
+          # 输出 3 列：站点 / 排序键（0 沉底） / 已渲染行
           WB_RATES_TXT="$(cat "$WB_RATES_CAT" "$WB_RATES_MODELS" "$WB_RATES_FREE" 2>/dev/null \
             | awk -F'\t' '
                 NF >= 3 {
                   k = $1 "|" $3
-                  if ($2 == "FREE") { free[k] = 1; site[k] = $1; mname[k] = $3 }
-                  else if (!(k in mname)) {
-                    site[k] = $1; mname[k] = $3; disp[k] = ($4 != "" ? $4 : $3); mult[k] = $2
+                  # 取值口径（主人 08:45 定）：FREE 视为 0.00，与数值一起按「取最小」比较。
+                  # 理由：显示的就是实际最低消耗；促销/汇总表给出更低值时应以更低值为准，
+                  # 不再让先到（目录价）静默压掉后到的更低值。
+                  v = ($2 == "FREE" ? 0 : $2)
+                  if (!(k in mname) || v + 0 < best[k] + 0) {
+                    site[k] = $1; mname[k] = $3; disp[k] = ($4 != "" ? $4 : $3)
+                    best[k] = v + 0
                   }
                 }
                 END {
                   for (k in mname) {
                     d = (k in disp) ? disp[k] : mname[k]
-                    if (free[k]) printf "%s\t0\t  %-26s %6s\n", site[k], d, "免费"
-                    else if (mult[k] != "") printf "%s\t%s\t  %-26s %6.2fx\n", site[k], mult[k], d, mult[k]
+                    if (best[k] + 0 == 0) printf "%s\t0\t  %-26s %6s\n", site[k], d, "免费"
+                    else printf "%s\t%s\t  %-26s %6.2fx\n", site[k], best[k], d, best[k]
                   }
                 }' 2>/dev/null \
             | sort -t$'\t' -k1,1 -k2,2gr \
