@@ -1402,36 +1402,33 @@ jobs:
             fi
           fi
 
-          # 倍率段数据源（两路合并、实测优先）：不做任何模型名过滤，全部列出。
-          #   目录价：wb-models-cache.json 的 catalogs.<站点>[].multiplier（已含促销）
-          #   免费路：serve 运行时实测（modelStates.costClass==free，逐账号按站点归集）
-          #           + 探针（probes[site|model].verdict==free，站点级）
-          # 只看目录会漏免费模型（实测缺口）：hy4-preview-f 不在目录、hy3 目录无倍率、
-          # deepseek-v4.1-flash 目录标 0.03 但 intl 账号运行时实测免费 —— 实测优先于目录价。
+          # 倍率段数据源（三路合并、实测优先）：不做任何模型名过滤，全部列出。
+          #   目录价  ：wb-models-cache.json 的 catalogs.<站点>[].multiplier（已含促销）
+          #   站点汇总：status 顶层 models 数组的 cnMultiplier/intlMultiplier（每模型×每站点）
+          #   免费实测：运行时 modelStates.costClass==free（逐账号按站点归集）
+          #             + 探针 probes[site|model].verdict==free（站点级）
+          # 只看目录会漏模型（实测缺口）：glm-5.3-flash 在 cn 目录 multiplier=null、
+          # hy4-preview-f 在 cn 目录根本没有 —— 靠站点汇总表补齐；
+          # deepseek-v4.1-flash 目录标 0.03 但 intl 账号实测免费 —— 实测优先于目录价。
           #
-          # 分组标注（fromLive）：目录条目分两类 ——
-          #   实时目录（fromLive=true）：本轮官方实时接口返回，客户端可见的那些
-          #   缓存合并（无 fromLive）：serve 从历史缓存/npm 包合并进来的历史条目
-          # 主人比对客户端后确认模型数对不上，根源就是我们把「缓存合并」也列了。
-          # 故按 fromLive 分成两组显示、各不丢数据：既全量，又一眼看出哪些客户端可见。
-          # 注：fromLive 在上游语义是「是否来自实时接口」（models.go:85），
-          # 本处仅用作展示分组依据，不用来过滤模型。
+          # 不按 fromLive 分组（主人 08:06 要求取消）：所有模型混在一组、按倍率降序，
+          # 只保留站点分组（国内站 / 国际站）。fromLive 不再参与取数、排序与渲染。
           WB_RATES_CAT="$(mktemp)"; WB_RATES_MODELS="$(mktemp)"; WB_RATES_FREE="$(mktemp)"
           if [ -n "${WB_CACHE:-}" ] && [ -r "$WB_CACHE" ]; then
-            # 5 列：站点 / 倍率 / 归一键 / 显示名 / fromLive(0=实时目录,1=缓存合并)
+            # 4 列：站点 / 倍率 / 归一键 / 显示名
             jq -r '
               (.catalogs // {}) | to_entries[] as $e | $e.value[]?
               | select((.multiplier // null) != null)
               | ((.id // "") | ascii_downcase | gsub("^[[:space:]]+|[[:space:]]+$"; "")) as $_id
               | select($_id != "")
-              | "\($e.key)\t\(.multiplier)\t\($_id)\t\(.id // $_id)\t\(if .fromLive == true then "0" else "1" end)"' "$WB_CACHE" 2>/dev/null > "$WB_RATES_CAT" || true
+              | "\($e.key)\t\(.multiplier)\t\($_id)\t\(.id // $_id)"' "$WB_CACHE" 2>/dev/null > "$WB_RATES_CAT" || true
           fi
           if [ -n "${WB_STATUS_JSON:-}" ] && [ -r "$WB_STATUS_JSON" ]; then
             # 全字段防御：edition/modelStates/key 遇非字符串会报
             # explode input must be a string（实测复现）→ 整段静默丢失；
             # serve 每 3s 重写本文件，读到半截时结构异常 —— tostring + type 守卫
             # 对任何脏数据免疫；真读到坏文件时本轮免费路降级为空（下轮自然恢复）。
-            # 3 列：站点 / FREE / 模型（分组在合并时按目录 fromLive 归属，不在目录归缓存组）
+            # 3 列：站点 / FREE / 模型
             jq -r '
               (.accounts // [])
               | (if type == "array" then .[] else empty end) | objects
@@ -1447,6 +1444,7 @@ jobs:
               | "\($site)\tFREE\t\($m)"' "$WB_STATUS_JSON" 2>/dev/null >> "$WB_RATES_FREE" || true
           fi
           if [ -n "${WB_CACHE:-}" ] && [ -r "$WB_CACHE" ]; then
+            # 探针（站点级）：3 列
             jq -r '
               (.probes // {}) | to_entries[]
               | select(.value.verdict == "free")
@@ -1458,11 +1456,12 @@ jobs:
           fi
           # 第三路：status 顶层 models 数组 —— serve 汇总的「每模型 × 每站点」倍率表。
           # 它覆盖目录里缺失/无倍率的条目，是国内站数据齐全的关键：
-          #   glm-5.3-flash 在 cn 目录里有但 multiplier=null（被上面 != null 过滤掉）
+          #   glm-5.3-flash 在 cn 目录里有但 multiplier=null（被上面 != null 守卫过滤）
           #     → 这里 cnMultiplier=0.06x 补上
           #   hy4-preview-f 在 cn 目录里根本没有（0 次）
           #     → 这里 cnFree=是 / cnMultiplier=0.00x 补上
           # 来源即客户端/监视视图所用的同一张表，非我自造。
+          # 4 列：站点 / 倍率或FREE / 归一键 / 显示名（与目录价同构，便于合并）
           if [ -n "${WB_STATUS_JSON:-}" ] && [ -r "$WB_STATUS_JSON" ]; then
             jq -r '
               (.models // [])
@@ -1475,45 +1474,38 @@ jobs:
               | .[]
               | (.raw | tostring | gsub("[[:space:]]"; "") | gsub("[xX]$"; "")) as $rm
               | if (.free | tostring) == "是" then
-                  "\(.site)\tFREE\t\($m)\t\($m)\t1"
+                  "\(.site)\tFREE\t\($m)\t\($m)"
                 elif ($rm | test("^[0-9]+([.][0-9]+)?$")) then
-                  "\(.site)\t\($rm)\t\($m)\t\($m)\t1"
+                  "\(.site)\t\($rm)\t\($m)\t\($m)"
                 else
                   empty
                 end' "$WB_STATUS_JSON" 2>/dev/null > "$WB_RATES_MODELS" || true
           fi
-          # 合并去重：键=站点|模型（归一小写）；FREE 行优先于目录价行。
-          # 输出 4 列：站点 / 分组序(0 实时,1 缓存) / 倍率(排序用) / 已渲染行
+          # 合并去重：键=站点|模型（归一小写）；FREE 行优先于目录价/站点汇总价。
+          # 输出 3 列：站点 / 排序键（免费=0，沉底） / 已渲染行
           WB_RATES_TXT="$(cat "$WB_RATES_CAT" "$WB_RATES_MODELS" "$WB_RATES_FREE" 2>/dev/null \
             | awk -F'\t' '
                 NF >= 3 {
                   k = $1 "|" $3
-                  if ($2 == "FREE") {
-                    free[k] = 1; site[k] = $1; mname[k] = $3
-                    if (!(k in live)) live[k] = 1
-                  } else if (!(k in mname)) {
+                  if ($2 == "FREE") { free[k] = 1; site[k] = $1; mname[k] = $3 }
+                  else if (!(k in mname)) {
                     site[k] = $1; mname[k] = $3; disp[k] = ($4 != "" ? $4 : $3); mult[k] = $2
-                    live[k] = ($5 == "0" ? 0 : 1)
-                  } else if ($5 == "0") {
-                    live[k] = 0
                   }
                 }
                 END {
                   for (k in mname) {
                     d = (k in disp) ? disp[k] : mname[k]
-                    if (free[k]) printf "%s\t%d\t0\t  %-26s %6s\n", site[k], live[k], d, "免费"
-                    else if (mult[k] != "") printf "%s\t%d\t%s\t  %-26s %6.2fx\n", site[k], live[k], mult[k], d, mult[k]
+                    if (free[k]) printf "%s\t0\t  %-26s %6s\n", site[k], d, "免费"
+                    else if (mult[k] != "") printf "%s\t%s\t  %-26s %6.2fx\n", site[k], mult[k], d, mult[k]
                   }
                 }' 2>/dev/null \
-            | sort -t$'\t' -k1,1 -k2,2n -k3,3gr \
-            | awk -F'\t' 'BEGIN{s="";g=""} {
-                if ($1 != s) { s=$1; g=""; printf "%s\n", ($1=="intl" ? "国际站" : "国内站") }
-                if ($2 != g) { g=$2; printf "  %s\n", ($2=="0" ? "── 实时目录 ──" : "── 缓存合并 ──") }
-                printf "%s\n", $4
+            | sort -t$'\t' -k1,1 -k2,2gr \
+            | awk -F'\t' 'BEGIN{s=""} {
+                if ($1 != s) { s=$1; printf "%s\n", ($1=="intl" ? "国际站" : "国内站") }
+                printf "%s\n", $3
               }' 2>/dev/null || true)"
           rm -f "$WB_RATES_CAT" "$WB_RATES_MODELS" "$WB_RATES_FREE"
-          # 计数只数模型行（分组标题行以 ── 开头，排除）
-          WB_RATES_N="$(printf '%s\n' "${WB_RATES_TXT:-}" | grep -E '^  ' | grep -cv '──' || true)"
+          WB_RATES_N="$(printf '%s\n' "${WB_RATES_TXT:-}" | grep -cE '^  ' || true)"
           WB_RATES_FREE_N="$(printf '%s\n' "${WB_RATES_TXT:-}" | grep -c '免费' || true)"
           WB_RATES_FREE_TAG=""
           if [ "${WB_RATES_FREE_N:-0}" -gt 0 ]; then
