@@ -940,8 +940,11 @@ def _run():
     # 读 `/providers/proxies` 拿到的是**声明清单**，不等于节点已进 `/proxies/{name}`
     # 路由表；不等就探会在头几个节点上拿到本地 404（实测间隔仅 ~18.7 毫秒，根本不是
     # 3000ms 超时），进而误判为死、触发熔断。见 wait_provider_ready 的说明。
+    # 超时**不写死**：按节点数自动放大（见 `_provider_ready_timeout`）。写死 60 秒在 2123
+    # 个节点上等不完（实测 60 秒 / 138 次探测全 404），等不完 ⇒ 测活一开就熔断 ⇒
+    # 1498 个死节点全跑满 15.9 秒的测速窗口（≈6.6h，单这一项就吃掉整个预算）。
     _prov_ready, _prov_waited, _ = wait_provider_ready(
-        [i.get('name') for i in alive_items], timeout=60.0)
+        [i.get('name') for i in alive_items])
 
     results = []
     bypass_hits = 0

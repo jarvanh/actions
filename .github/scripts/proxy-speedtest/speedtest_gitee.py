@@ -1160,10 +1160,30 @@ def switch_proxy(name: str, settle_seconds: float):
     mihomo_api_put(f'/proxies/{urllib.parse.quote("AUTO", safe="")}', {'name': name})
     time.sleep(settle_seconds)
 
-def wait_provider_ready(names, timeout=60.0):
+def _provider_ready_timeout(count: int) -> float:
+    """按节点数算 provider 展开的等待上限（秒）：`基础 60 秒 + 每 1000 个节点 +60 秒`，封顶 600。
+
+    为什么必须按节点数放大：展开耗时随节点数增长，**写死 60 秒在大池子上必然等不完**。
+    实测 2026-09-22 编排轮：2123 个节点等满 60 秒（`attempts=138` 全 404）仍未展开。
+
+    系数怎么定的（宁可多等，也不再漏）：展开是「注册进路由表」的线性扫描，取
+    **60 秒 / 1000 个**这一档（2123 个 ⇒ 187 秒），比实测下界留出 3 倍余量；
+    封顶 600 秒（10 分钟）避免极端池子把整轮预算吃掉——到点仍按 `ready=False` 降级，
+    不会把整轮打死（各套的兜底见函数体末尾）。
+    """
+    return min(60.0 + max(0, int(count)) * 0.06, 600.0)
+
+
+def wait_provider_ready(names, timeout=None):
     """等 mihomo 把 provider 里的节点**真正注册进 `/proxies`**，返回 `(ready, waited, probed)`。
 
     **四套共用**（CDN / Gitee / taier 都调它；taier 另有自己的测活层，靠它开测前兜底）。
+
+    `timeout` 留空 = **按节点数自动放大**（见 `_provider_ready_timeout`）：展开耗时随节点数
+    增长，写死 60 秒在大池子上必然等不完——2026-09-22 编排轮 2123 个节点等满 60 秒
+    （`attempts=138` 全 404）仍未展开，taier 开测后头 8 个探测全 `Resource not found`
+    触发熔断关掉测活 ⇒ **1498 个死节点没被提前筛掉、全跑满 15.9 秒的测速超时**
+    （1498 × 15.9s ≈ 6.6h，单这一项就吃掉整个 5 小时预算）。
 
     为什么需要它：`wait_mihomo()` 只等 `/version`（控制器 HTTP 监听到来，毫秒级），
     **完全不保证 provider 已展开**。而 `/providers/proxies` 给出的是**声明清单**，
@@ -1185,6 +1205,8 @@ def wait_provider_ready(names, timeout=60.0):
     candidates = [str(n or '').strip() for n in (names or []) if str(n or '').strip()]
     if not candidates:
         return False, 0.0, ''
+    if timeout is None:
+        timeout = _provider_ready_timeout(len(candidates))
     # 取头尾各两个做哨兵：单取首个万一是脏名字（已在 provider 里但状态异常）会白等
     probes = candidates[:2] + candidates[-2:]
     start = time.time()
@@ -1740,7 +1762,8 @@ def main():
     # `/providers/proxies` 给的又是**声明清单**——不等就切，`switch_proxy` 对「组里
     # 还没注册的成员名」**不报错、静默保持原选择**，于是前几个节点测的是上一个节点的
     # 链路，结果静默失真（比报错更隐蔽）。见 wait_provider_ready 的说明。
-    wait_provider_ready([i.get('name') for i in alive_items], timeout=60.0)
+    # 超时不写死：按节点数自动放大（见 _provider_ready_timeout）。
+    wait_provider_ready([i.get('name') for i in alive_items])
     gitee = run_stage('Gitee 仓库准备', ensure_gitee_remote, env)
     log_progress('gitee_ready', owner=gitee['owner'], repo=gitee['repo'], remote_public=gitee['remote_public'])
     push_target_info = run_stage('Gitee 目标解析', resolve_push_target_info, gitee['remote_public'])
