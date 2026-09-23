@@ -1416,12 +1416,30 @@ jobs:
           # 取不到或为空时整段跳过（与凭据段同口径），绝不编造倍率。
           WB_RATES_TXT=""
           WB_RATES_N=0
+          # 内部/路由别名黑名单：这些 id 不是真实对话模型，而是请求路由别名
+          #   （auto/default 按语义映射到实际模型；fast/balanced/deep/primary 是档位别名；
+          #    hy3-x / hy4-preview-x 是内部通道；zz-probe-runner-only 是探针专用），
+          # 列倍率无意义，从倍率段剔除。黑名单集中此处，新增内部模型只改这一行。
+          # 免费名单不受影响：别名倍率均 > 0，免费判据（倍率==0）天然不会收录。
+          WB_RATES_INTERNAL="auto,default,default-model,fast-model,balanced-model,primary-model,deep-model,hy3-x,hy4-preview-x,zz-probe-runner-only"
           if [ -r "$WB_CACHE" ]; then
-            WB_RATES_N="$(jq -r '[.catalogs // {} | to_entries[] | .value[]? | select((.multiplier // null) != null)] | length' "$WB_CACHE" 2>/dev/null || echo 0)"
+            WB_RATES_N="$(jq -r --arg internal "$WB_RATES_INTERNAL" '
+              ($internal | split(",") | map(ascii_downcase)) as $internal
+              | [.catalogs // {} | to_entries[] | .value[]?
+                  | select((.multiplier // null) != null)
+                  | ((.id // "") | ascii_downcase | gsub("^[[:space:]]+|[[:space:]]+$"; "")) as $_id
+                  | select(($internal | index($_id)) == null)]
+                | length' "$WB_CACHE" 2>/dev/null || echo 0)"
             # 全量渲染、不截断：倍率是必要数据，砍掉等于没给。
             # 长度风险改由 wb_notify 侧的「超限拆条」兜底（见函数内说明），
             # 而不是在这里丢数据。
-            WB_RATES_TXT="$(jq -r '(.catalogs // {}) | to_entries[] as $e | $e.value[]? | select((.multiplier // null) != null) | "\($e.key)\t\(.multiplier)\t\(.id)"' "$WB_CACHE" 2>/dev/null \
+            WB_RATES_TXT="$(jq -r --arg internal "$WB_RATES_INTERNAL" '
+              ($internal | split(",") | map(ascii_downcase)) as $internal
+              | (.catalogs // {}) | to_entries[] as $e | $e.value[]?
+              | select((.multiplier // null) != null)
+              | ((.id // "") | ascii_downcase | gsub("^[[:space:]]+|[[:space:]]+$"; "")) as $_id
+              | select(($internal | index($_id)) == null)
+              | "\($e.key)\t\(.multiplier)\t\(.id)"' "$WB_CACHE" 2>/dev/null \
               | sort -t$'\t' -k1,1 -k2,2gr \
               | awk -F'\t' 'BEGIN{s=""} {
                   if ($1 != s) { s=$1; printf "%s\n", ($1=="intl" ? "国际站" : "国内站") }
