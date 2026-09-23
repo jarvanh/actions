@@ -994,7 +994,7 @@ jobs:
               # 一篇（带标题 + 收尾区）。既不砍数据，也不会因超限丢整条。
               WB_RATES_BLOCK=""
               if [ -n "${WB_RATES_TXT:-}" ]; then
-                WB_RATES_BLOCK="$(tg_add_title WB_RATES_BLOCK "📊 workbuddy-gateway 模型倍率 · ${WB_RATES_N:-0}${WB_RATES_FREE_TAG:-}"; tg_add_pre WB_RATES_BLOCK "$WB_RATES_TXT"; tg_add_footer WB_RATES_BLOCK; printf '%s' "$WB_RATES_BLOCK")"
+                WB_RATES_BLOCK="$(tg_add_title WB_RATES_BLOCK "📊 workbuddy-gateway 模型倍率 · 模型数量${WB_RATES_N:-0}${WB_RATES_FREE_TAG:-}"; tg_add_pre WB_RATES_BLOCK "$WB_RATES_TXT"; tg_add_footer WB_RATES_BLOCK; printf '%s' "$WB_RATES_BLOCK")"
               fi
               tg_add_path _msg "数据目录" "$WB_DIR"
               if [ -n "$6" ]; then
@@ -1692,7 +1692,7 @@ jobs:
               # 取数失败时为空，
               # 整段跳过（与凭据段同口径）。section 计数与「🔑 凭据 · N」同构。
               if [ -n "${RATES_TXT:-}" ]; then
-                tg_add_section _msg "📊 模型倍率 · ${RATES_N:-0}（有倍率模型）"
+                tg_add_section _msg "📊 模型倍率 · 模型数量${RATES_N:-0}"
                 tg_add_pre _msg "$RATES_TXT"
                 # tg_add_pre 内部 <pre> 包裹 + 转义；段尾补空行对齐账号池段
                 tg_append _msg $'\n'
@@ -1833,7 +1833,7 @@ jobs:
             # 「Rate 0 = 未知」，且 handler.go 只在 Rate > 0 时才输出该字段 ——
             # 故 rate 缺失 ≠ 免费，不能渲染成「免费」或 0.00x（那是编造）。
             # 未列出的还有 custom_model_* 占位（14）与内部功能模型（4）；
-            # 标题里的 N 是「有倍率模型数」，不是模型总数（避免误读）。
+            # 标题写成「模型数量N」，N 是有倍率模型数、不是模型总数（避免误读）。
             RATES_N="$(jq -r '[.data[] | select((.consumption_rate // 0) > 0)
                 | select(.id != "file_search_agent" and .id != "explore_sub_agent_v2"
                     and .id != "browser_use_subagent" and .id != "summary")] | length' /tmp/trae2api-models.json)"
