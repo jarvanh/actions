@@ -172,6 +172,15 @@ _run_registry_pairs_parallel() {
     if [ "$_pick" -ge 0 ] && sync_budget_stop; then
       echo "⏳ 时间预算将尽，不再分发新同步对（在途的等待完成）"
       SYNC_TIME_EXHAUSTED=1
+      # 硬顶闸（2026-09-23 病灶 D 第二轮）: 预算到点后本循环仍在**阻塞等**在途
+      #   同步对（_pairs_parallel_reap_one 是无限 sleep 2 轮询），而在途 worker
+      #   自己的子目录循环/修复管线还要跑几分钟 —— run 35810082306 就死在这段
+      #   等待里（07:49 打完"在途的等待完成" → 07:56 被 330min 硬杀，7min 空白）。
+      #   放弃等待不丢东西: 子目录 marker 已落盘、修复状态已增量持久化，下轮接力。
+      if [ "$_running" -gt 0 ] && sync_hard_limit_stop; then
+        echo "⏰ 距平台硬顶不足收尾预留，放弃等待在途同步对（子 marker/游标已持久化，下轮接力）"
+        break
+      fi
       if [ "$_running" -eq 0 ]; then break; fi
       _pairs_parallel_reap_one "$_pp_dir"; _running=$((_running - 1)); continue
     fi
