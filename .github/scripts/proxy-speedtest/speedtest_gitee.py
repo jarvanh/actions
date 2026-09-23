@@ -1277,25 +1277,45 @@ def _diag_probe_endpoints(candidates, provider_names=None):
     name = candidates[0]
     qn = urllib.parse.quote(str(name), safe='')
     delay_q = '?url=http://www.gstatic.com/generate_204&timeout=3000'
+    qn = urllib.parse.quote(str(name), safe='')
     tries = [('/proxies/' + qn + '/delay' + delay_q)]
     for pname in (provider_names or ['remote-1'])[:3]:
         qp = urllib.parse.quote(str(pname), safe='')
         base = '/providers/proxies/' + qp
         tries.append(base + '/' + qn + '/delay' + delay_q)
-        tries.append(base + '/healthcheck')
-    tries.append('/providers/proxies')
     out = []
     for path in tries:
         try:
             data = mihomo_api_get(path)
-            if isinstance(data, dict) and isinstance(data.get('proxies'), list):
-                out.append(f'{path[:44]}... -> list({len(data["proxies"])})')
-            else:
-                out.append(f'{path[:44]}... -> {str(data)[:56]}')
+            out.append(f'{path[:44]}... -> {str(data)[:56]}')
         except Exception as e:
             out.append(f'{path[:44]}... -> ERR {str(e)[:48]}')
     log_progress('probe_endpoint_diag', tries=out,
                  note='哪个端点能探活即改用哪个')
+    # ⚠️ 名字一致性：AUTO 组的成员名与快照名是否对得上（对不上就是 404 的根因）
+    _diag_name_match(candidates)
+
+
+def _diag_name_match(candidates):
+    """核对 AUTO 组成员名与快照名是否一致（诊断用，只读、失败静默）。
+
+    为什么需要：`/proxies/{name}` 与 `/proxies/{name}/delay` 都对 provider 成员 404，
+    但 `switch_proxy(AUTO, name)` 却能正常切节点测速。若 AUTO 组里的名字与快照名
+    **不完全相同**（mihomo 规范化 / 截断 / 去重改写），那 404 就只是名字没对上，
+    改对名字测活即可用。这里把两边摆在一起比对。
+    """
+    try:
+        data = mihomo_api_get('/proxies/AUTO')
+    except Exception as e:
+        log_progress('name_match_diag', error=f'GET /proxies/AUTO 失败: {e}')
+        return
+    all_names = [str(x or '') for x in (data.get('all') or [])]
+    sample = all_names[:3]
+    hit = sum(1 for n in candidates[:200] if n in all_names)
+    log_progress('name_match_diag', group_all=len(all_names),
+                 group_sample=sample,
+                 candidates_checked=min(200, len(candidates)), candidates_hit=hit,
+                 first_candidate=candidates[0] if candidates else '')
 
 def git_direct_speedtest(env, gitee, test_file: pathlib.Path, push_timeout: int, clone_timeout: int, speedtest_mode: str, max_attempts: int = 5):
     """直连基线（本套的调用入口）。实现已抽到 `run_direct_baseline`，三套共用。
