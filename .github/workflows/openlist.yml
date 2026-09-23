@@ -570,6 +570,15 @@ jobs:
             SYNC_BUDGET_MIN=320
           fi
           export OPENLIST_SYNC_BUDGET_SECONDS=$(( SYNC_BUDGET_MIN * 60 ))
+          # 平台硬顶锚点（2026-09-23 病灶 D）: 本 step 的 timeout-minutes=330 是
+          # GitHub 侧的硬杀线，被杀 = conclusion=failure + 在途持久化复核成果白丢。
+          # 脚本此前只知道"预算 deadline"，而预算闸只拦"新开工作"，已经进入的
+          # 循环（折叠内循环 / 假成功 leftover 清理）在闸外无界 —— 实测两轮各溢出
+          # ~11min 撞硬顶（run 35717590337 / 35773926579）。故把硬顶也下传，
+          # 脚本据此在闸外长循环里做"距硬顶不足预留就强制停"，把收尾时间抢回来。
+          # 留 8min 给收尾（持久化复核 + marker 打包 + 通知 + 接力）。
+          export OPENLIST_STEP_HARD_LIMIT_EPOCH=$(( $(date +%s) + 330 * 60 ))
+          export OPENLIST_STEP_TAIL_RESERVE_SECONDS="${OPENLIST_STEP_TAIL_RESERVE_SECONDS:-480}"
           # 缓存刷新等待秒数（默认 60；非正整数回落 60）
           case "${FS_REFRESH_SLEEP}" in
             ''|*[!0-9]*) FS_REFRESH_SLEEP=60 ;;

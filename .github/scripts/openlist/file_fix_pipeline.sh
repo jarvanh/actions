@@ -61,6 +61,97 @@ _persist_fix_entry_now() {
   fi
 }
 
+# 批量追加版（2026-09-23 病灶 D，折叠记账专用）: 多条条目一次合并、末尾只写回
+#   一次 marker。单条版每次 `_marker_write` 都是一次远端 onedrive 往返，单目录
+#   上千文件就是上千次往返 —— run 35773926579 死在折叠记账的逐条写回里。
+# 入参: <marker_path> <state_file> <source_path> <dest_path> <entries_ndjson_file>
+#   entries_ndjson 每行一个完整条目对象（含 restore 等字段）
+# 与单条版的差异（有意为之）: 中途被硬杀会丢本批的 marker 记录，但条目按 original
+#   幂等覆盖、文件已在目标端，下一轮按落盘清单重复记账即可，不会重复落盘。
+_persist_fix_entries_batch() {
+  local marker_path="$1" state_file="$2" source_path="$3" dest_path="$4"
+  local entries_file="$5"
+  [ -f "$state_file" ] || return 1
+  [ -s "$entries_file" ] || return 1
+
+  # 写法沿用 marker_add_fix_entry 的教训: 条目经 stdin 文档流喂 jq -s，不进 argv
+  # （fixed_files 含内嵌 restore 脚本，--argjson 传参会 E2BIG 静默丢条目）。
+  local bl_json merged
+  bl_json=$(fix_blacklist_to_json)
+  [ -n "$bl_json" ] || bl_json="{}"
+  merged=$({ cat "$state_file"; echo; cat "$entries_file"; echo; printf '%s\n' "$bl_json"; } \
+    | jq -sc '
+        . as $in
+        | ($in[-1]) as $bl
+        | ($in[1:-1] | map(select(type == "object" and has("original")))) as $add
+        | ($in[0]) as $m
+        | (($m.fixed_files // [])
+           | map(select(.original as $o | ($add | map(.original) | index($o)) | not))
+           + $add) as $nff
+        | $m + {fixed_files: $nff,
+                fixed_count: ($nff | length),
+                fixed_bytes: ([$nff[].size_bytes] | add // 0),
+                fix_blacklist: (($m.fix_blacklist // {}) * $bl)}
+      ' 2>/dev/null)
+  [ -n "$merged" ] || return 1
+
+  echo "$merged" > "$state_file"
+  local n
+  n=$(echo "$merged" | jq -r '.fixed_count' 2>/dev/null || echo '?')
+  if _marker_write "$merged" "$marker_path" >/dev/null 2>&1; then
+    echo "    ↳ 折叠条目已批量记账 $(grep -c . "$entries_file" 2>/dev/null || echo '?') 条 (marker 合计 ${n} 个)"
+  else
+    echo "    ↳ ⚠️ 批量记账写回 marker 失败（任务结束的统一保存会兜底）"
+  fi
+}
+
+# 批量版: 一次性移除多个 original，末尾只写回一次 marker。
+# 为什么要有它（2026-09-23 病灶 D）: 单条版每条都要 `_marker_write` 一次远端
+#   onedrive 往返（实测 2–4s/条）。预算到点后 leftover 清理段（:1303）会串行
+#   清掉 N 条假成功条目 —— run 35717590337 是 74 条 ⇒ 溢出 ~11min，正好吃光
+#   320min 预算与 330min 平台硬顶之间的 10min 缓冲，被平台超时硬杀（failure）。
+#   批量版把 N 次往返压成 1 次，该段耗时从"十分钟级"回到"秒级"。
+# 用法: _remove_fix_entries_batch <state_file> <marker_path> <orig>...
+# 输出: 末尾一条汇总（不再逐条打日志 —— 1 次写回打 N 条"已移除"是自相矛盾的噪声）
+# 返回: 0 = 已写回；1 = 无 state/无入参/合并失败
+_remove_fix_entries_batch() {
+  local state_file="$1" marker_path="$2"; shift 2
+  [ -f "$state_file" ] || return 1
+  [ "$#" -gt 0 ] || return 1
+
+  # 多 original 一次性喂给 jq：--args 后全当字符串收进 $ARGS.positional，
+  # 不碰 argv 单参数上限，长路径/中文名也不必经过 shell 引号拼装。
+  local merged
+  merged=$(jq -c '
+      . as $m
+      | $ARGS.positional as $os
+      | (($m.fixed_files // [])
+         | map(select(.original as $o | ($os | index($o)) | not))) as $nff
+      | $m + {fixed_files: $nff,
+              fixed_count: ($nff | length),
+              fixed_bytes: ([$nff[].size_bytes] | add // 0)}
+    ' --args "$@" < "$state_file" 2>/dev/null)
+  [ -n "$merged" ] || return 1
+
+  # 无任何条目被移除时不必写回: 空命中还要花一次远端往返没有收益，
+  # 且本段的存在意义就是"省掉无谓的远端往返"。
+  local before after
+  before=$(jq -r '.fixed_count // 0' "$state_file" 2>/dev/null || echo 0)
+  after=$(echo "$merged" | jq -r '.fixed_count // 0' 2>/dev/null || echo 0)
+  if [ "$before" = "$after" ]; then
+    echo "    ↳ 假成功条目批量移除: 无命中（$# 条均不在 marker 中），跳过写回"
+    return 0
+  fi
+
+  echo "$merged" > "$state_file"
+  if _marker_write "$merged" "$marker_path" >/dev/null 2>&1; then
+    # 只打一条汇总: 逐条打会掩盖"这是 1 次写回"的事实，日志噪声也无收益
+    echo "    ↳ 假成功条目已批量移除 $(( before - after )) 条 (marker 合计 ${after} 个)"
+  else
+    echo "    ↳ ⚠️ 批量移除条目写回 marker 失败（任务结束的统一保存会兜底）"
+  fi
+}
+
 # 从修复状态快照移除单个条目（按 original 精确匹配），并整体写回 marker
 # 用于假成功条目重试失败后清理 marker 里的幽灵 fixed_files 记录
 # 用法: _remove_fix_entry_from_state <state_file> <marker_path> <orig>
@@ -398,8 +489,16 @@ _bulk_fold_record_landed() {
   rm -f "$size_json"
 
   local ok_n=0 mf
+  local _fold_entries="/tmp/${task_name}_bulkfold_entries_${hash8}_$$.ndjson"
+  : > "$_fold_entries"
   while IFS= read -r mf; do
     [ -n "$mf" ] || continue
+    # 硬顶闸（2026-09-23 病灶 D）: 记账循环在预算闸之外，单目录上千条时逐条
+    #   跑完要十几分钟，run 35773926579 就是在这一段被硬杀。留足收尾时间。
+    if declare -F sync_hard_limit_stop >/dev/null 2>&1 && sync_hard_limit_stop; then
+      echo "  ⏰ 距平台硬顶不足收尾预留，停止记账（剩余文件交下轮重新折叠记账）" | tee -a "$LOG_FILENAME"
+      break
+    fi
     case "$mf" in "$dir_rel"/*) ;; *) continue ;; esac
     local rel="${mf#"$dir_rel"/}"
     case "$rel" in */*) continue ;; esac      # 子目录文件归它自己那组
@@ -419,14 +518,25 @@ _bulk_fold_record_landed() {
     echo "  ✅ 折叠落盘 · ${rel} (${fsize})" | tee -a "$LOG_FILENAME"
     echo "${mf}|${alt}|${method}|${restore}|${fsize}|${fbytes}|copyto_original|" >> "$fix_list"
     FIXED_THIS_RUN["$mf"]="$alt"
-    echo "$mf" >> "$folded_files"
     # md5 留空: 批量折叠不经本地副本，无法算内容指纹；marker 的 md5 是可选
     # 字段（还原时按 size_bytes 校验，缺 md5 只降级为大小校验）
-    _persist_fix_entry_now "$incr_marker_path" "$incr_state" "$source_path" "$dest_path" \
-      "$mf" "$alt" "$method" "$restore" "$fsize" "$fbytes" "copyto_original" "" 2>&1 \
-      | tee -a "$LOG_FILENAME" || true
+    jq -cn --arg o "$mf" --arg a "$alt" --arg m "$method" --arg rh "$restore" \
+      --arg sh "$fsize" --argjson sb "${fbytes}" \
+      '{original:$o, alternative:$a, method:$m, restore_hint:$rh, size_human:$sh,
+        size_bytes:$sb, method_id:"copyto_original"}' >> "$_fold_entries" 2>/dev/null || true
     ok_n=$((ok_n + 1))
   done < "$missing_list"
+  # marker 写回压到末尾一次: 单目录可达上千文件，逐条 `_persist_fix_entry_now`
+  #   就是上千次远端写回 —— 折叠循环后半程全在预算闸外，这段是「预算到点仍跑
+  #   十几分钟」的第二个溢出源（run 35773926579 死在此处，见 2026-09-23 病灶 D）。
+  # 批量写回的代价: 中途被硬杀会丢**本目录**已折叠条目的 marker 记录（文件已在
+  #   目标端）⇒ 下一轮重新折叠同一目录、按落盘清单重复记账；条目按 original
+  #   幂等覆盖，不会重复落盘，只多花一轮的记账时间。
+  if [ -s "$_fold_entries" ]; then
+    _persist_fix_entries_batch "$incr_marker_path" "$incr_state" "$source_path" "$dest_path" \
+      "$_fold_entries" 2>&1 | tee -a "$LOG_FILENAME" || true
+  fi
+  rm -f "$_fold_entries"
   _BULK_FOLD_OK_N=$ok_n
 }
 
@@ -592,6 +702,12 @@ _sync_bulk_hash_dir_fold() {
       [ "${landed_n:-0}" -gt 0 ] && [ "${_land_try}" -ge "$_land_tries" ] && break
       [ "$_land_try" -lt "$_land_tries" ] || break
       echo "  ↻ 折叠落盘校验不足（第 ${_land_try}/${_land_tries} 次，${landed_n:-0}/${cnt}），刷新服务端缓存后 ${_land_wait}s 重读" | tee -a "$LOG_FILENAME"
+      # 硬顶闸（2026-09-23 病灶 D）: 每轮等待前先看离平台硬杀线还剩多少 ——
+      #   6×30s 的等待叠加后续记账会把收尾时间挤没，宁可少等一轮交下轮复核。
+      if declare -F sync_hard_limit_stop >/dev/null 2>&1 && sync_hard_limit_stop; then
+        echo "  ⏰ 距平台硬顶不足收尾预留，停止等待落盘可见（该目录转延迟复核/下轮）" | tee -a "$LOG_FILENAME"
+        break
+      fi
       if declare -F _ol_refresh_path_cache >/dev/null 2>&1; then
         _ol_refresh_path_cache "$hash_dst" >/dev/null 2>&1 || true
       fi
@@ -1301,7 +1417,11 @@ _sync_persist_verify_and_retry() {
           done
 
           # 循环终止后仍待重试（轮数耗尽）→ 清理最后的假成功条目并转失败清单
-          local leftover_orig
+          # ⚠️ 写回必须批量（2026-09-23 病灶 D）: 本段在预算闸之外，逐条
+          #   `_remove_fix_entry_from_state` = 逐条远端写回（2–4s/条），74 条就
+          #   溢出 ~11min，把 320→330 的缓冲吃光被平台硬杀。故循环内只做本地
+          #   动作（fix_list/fail_list/事件/内存态），marker 合并留到末尾一次写回。
+          local leftover_orig _leftover_batch=()
           for leftover_orig in "${retry_pending[@]}"; do
             [ -z "$leftover_orig" ] && continue
             echo "  ⚠️ 轮数耗尽 → 失败清单 · $(_short_path "$leftover_orig")" | tee -a "$LOG_FILENAME"
@@ -1309,9 +1429,11 @@ _sync_persist_verify_and_retry() {
             echo "${leftover_orig}|未知|重试轮数耗尽仍未持久化（黑名单已记录，下一轮从剩余方法继续）" >> "$fail_list"
             _fix_event DEFERRED "$leftover_orig" "重试轮数耗尽"
             unset "FIXED_THIS_RUN[$leftover_orig]" 2>/dev/null || true
-            _remove_fix_entry_from_state "$incr_state" "$incr_marker_path" "$leftover_orig" 2>&1 | tee -a "$LOG_FILENAME" || true
+            _leftover_batch+=("$leftover_orig")
             retry_perm_fail=$((retry_perm_fail + 1))
           done
+          [ "${#_leftover_batch[@]}" -gt 0 ] && _remove_fix_entries_batch \
+            "$incr_state" "$incr_marker_path" "${_leftover_batch[@]}" 2>&1 | tee -a "$LOG_FILENAME" || true
 
           # 重试总结论
           if [ "$retry_perm_fail" -gt 0 ]; then
