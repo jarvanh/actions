@@ -1443,11 +1443,14 @@ jobs:
 
       # trae2api：TRAE SOLO 反代（OpenAI 兼容 API + Web 管理面板 /admin）。
       # 位置紧跟 workbuddy-gateway / glm-proxy：同为 AI 网关形态服务。
-      # 与 workbuddy 的差异：容器化运行（上游仅提供 go build / docker compose，
-      # 无 release 二进制），数据目录直接 bind mount Dropbox fuse 挂载点
+      # 部署方式：取 jarvanh/trae2api 的 Release 静态二进制直接构建镜像，
+      # 不再浅克隆源码、不在 runner 上跑 go build（省掉每轮 Go 编译开销）。
+      # Dockerfile 与签到/积分工具同样取自 fork 的 Release / raw，本机无需 Go 工具链。
+      # 镜像 tag 直接复用 Release 完整 tag（vYYYY.MM.DD-<短 commit>），
+      # 二进制 sha256 从 Release 的 SHA256SUMS 实时提取并强制校验，失败即中止。
+      # 数据目录直接 bind mount Dropbox fuse 挂载点
       # /dropbox/self-hosted/trae2api（实测可写；fuse 权限位恒 666，容器内
       # uid 10001 与 runner 均可读写，天然绕开 uid 对齐问题）。
-      # 源码每次浅克隆上游重建镜像（纯 Go 标准库，构建约 1 分钟）。
       # 隧道 trae2api（trae2api.derrick.eu.org → 127.0.0.1:7864）凭证随
       # /dropbox/self-hosted/.cloudflared 恢复，由 tunnels.conf 纳管。
       - name: Run trae2api container (TRAE SOLO reverse proxy)
@@ -1567,26 +1570,56 @@ jobs:
             fi
           }
 
-          echo "1. Cloning upstream source..."
-          rm -rf "$TRAE_SRC"
-          git clone --depth 1 https://github.com/jarvanh/trae2api.git "$TRAE_SRC" 2>&1 | tail -1
-          # 版本 = 本轮克隆的 commit 短 hash（容器由源码即时构建，无 release tag 可用）。
-          # 「更新」说明在成功路径（第 8 步）与 Dropbox 记录的上轮 hash 对比后判定。
-          TRAE_VER="$(git -C "$TRAE_SRC" rev-parse --short HEAD 2>/dev/null || true)"
+          echo "1. Resolving latest Release (jarvanh/trae2api)..."
+          # 部署取 fork 的 Release 静态二进制，不在 runner 上跑 go build。
+          # Release tag 形如 v2026.09.23-<短 commit>，镜像 tag 直接复用它（一一对应、
+          # 同日多构建不撞车）；「更新」说明在第 8 步与 Dropbox 记录的上轮 tag 对比后判定。
+          TRAE_REL="$(gh api repos/jarvanh/trae2api/releases/latest --jq '.tag_name' 2>/dev/null || true)"
+          if [ -z "$TRAE_REL" ]; then
+            echo "❌ 无法解析 jarvanh/trae2api 最新 Release" >&2
+            trae_notify "❌ trae2api 部署失败" "无法解析最新 Release" "" "" \
+              "gh api releases/latest 返回空（网络或仓库不可达）" "" 0
+            exit 1
+          fi
+          TRAE_VER="$TRAE_REL"
+          echo "   Release: $TRAE_REL"
+
+          # 二进制 sha256 从 Release 的 SHA256SUMS 实时提取，与版本强绑定；
+          # 取不到就拒绝构建（Dockerfile 内还有一道 sha256sum -c 兜底校验）。
+          TRAE_SHA256="$(curl -fsSL "https://github.com/jarvanh/trae2api/releases/download/${TRAE_REL}/SHA256SUMS" \
+            | awk '$2 == "./trae2api-linux-amd64" {print $1}')"
+          if [ -z "$TRAE_SHA256" ]; then
+            echo "❌ 未能提取 sha256，拒绝构建" >&2
+            trae_notify "❌ trae2api 部署失败" "SHA256SUMS 未取到校验值" "$TRAE_VER" "" \
+              "Release 资产缺失或下载失败" "" 0
+            exit 1
+          fi
+          echo "   sha256  : $TRAE_SHA256"
 
           echo "2. Bootstrap data files (idempotent, Dropbox 为准)..."
           if [ ! -f "$TRAE_DATA/.env" ]; then
             printf 'TW2A_API_KEY=%s\n' "$(openssl rand -hex 24)" > "$TRAE_DATA/.env"
           fi
           if [ ! -f "$TRAE_DATA/config.json" ]; then
-            cp "$TRAE_SRC/config.example.json" "$TRAE_DATA/config.json"
+            curl -fsSL "https://raw.githubusercontent.com/jarvanh/trae2api/${TRAE_REL}/config.example.json" \
+              -o "$TRAE_DATA/config.json"
           fi
 
-          echo "3. Use compose from repo (jarvanh/trae2api, mounts already fixed)..."
-          # 部署直接用仓库 clone 下来的 docker-compose.yml —— 挂载已在 jarvanh/trae2api
-          # eccfc2e 固化为 /dropbox/self-hosted/trae2api/... 绝对路径，不再由本 workflow
-          # 内联 heredoc 生成（此前两套 compose 并存，部署半途中断时会残留旧版）。
-          # 仅做防御校验：仓库 compose 若被回退成相对路径版，显式失败而不是让容器静默崩。
+          echo "3. Fetch Dockerfile + compose from fork Release..."
+          # 构建定义从 fork 对应 Release tag 的 raw 拉取（不再克隆源码、不再内联 heredoc）：
+          # fork 的 Dockerfile 是「alpine + 下载 Release 二进制 + sha256 校验」单阶段构建，
+          # compose 透传版本/Release/sha256 三个 build arg。本机无需源码、无需 Go 工具链。
+          rm -rf "$TRAE_SRC"
+          mkdir -p "$TRAE_SRC"
+          curl -fsSL "https://raw.githubusercontent.com/jarvanh/trae2api/${TRAE_REL}/Dockerfile" \
+            -o "$TRAE_SRC/Dockerfile"
+          curl -fsSL "https://raw.githubusercontent.com/jarvanh/trae2api/${TRAE_REL}/docker-compose.yml" \
+            -o "$TRAE_SRC/docker-compose.yml"
+
+          echo "3.5 防御校验：compose 必须固化 Dropbox 挂载..."
+          # 挂载在 jarvanh/trae2api eccfc2e 固化为 /dropbox/self-hosted/trae2api/... 绝对路径，
+          # 不再由本 workflow 内联生成（此前两套 compose 并存，部署半途中断时会残留旧版）。
+          # 取回来的 compose 若被回退成相对路径版，显式失败而不是让容器静默崩。
           if ! grep -q '/dropbox/self-hosted/trae2api' "$TRAE_SRC/docker-compose.yml"; then
             echo "::error::仓库 compose 未固化 Dropbox 挂载（可能被回退），拒绝部署" >&2
             exit 1
@@ -1595,6 +1628,10 @@ jobs:
           echo "4. Remove stale container & build & start..."
           # 幂等接管：清理同名旧容器（可能来自手工部署或旧 project），再由本 compose 接管
           docker rm -f trae2api >/dev/null 2>&1 || true
+          TRAE2API_IMAGE_VERSION="$TRAE_REL" \
+          TRAE2API_RELEASE_TAG="$TRAE_REL" \
+          TRAE2API_SHA256="$TRAE_SHA256" \
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
           docker compose --env-file "$TRAE_DATA/.env" \
             -f "$TRAE_SRC/docker-compose.yml" \
             --project-directory "$TRAE_SRC" up -d --build
@@ -1630,7 +1667,12 @@ jobs:
           # （30m→60m→120m 封顶），当日已签直接跳过 —— 避免上游 9074
           # 「参与用户太多」限流下每 5 分钟空转重试。
           # CHECKIN_JSONL / CHECKIN_ERR / PACKS_JSON 已在 step 顶部定义（trae_notify 数据源）。
-          (cd "$TRAE_SRC" && go build -o /tmp/trae2api-checkin ./cmd/checkin && go build -o /tmp/trae2api-credit ./cmd/credit) || true
+          # 工具二进制同样取自本轮 Release（fork 的 release.yml 一并构建），
+          # 不再 go build —— 本机无源码、也无需 Go 工具链。
+          curl -fsSL "https://github.com/jarvanh/trae2api/releases/download/${TRAE_REL}/trae2api-checkin-linux-amd64" \
+            -o /tmp/trae2api-checkin && chmod +x /tmp/trae2api-checkin
+          curl -fsSL "https://github.com/jarvanh/trae2api/releases/download/${TRAE_REL}/trae2api-credit-linux-amd64" \
+            -o /tmp/trae2api-credit && chmod +x /tmp/trae2api-credit
           /tmp/trae2api-checkin -dir "$TRAE_DATA/auths" -state "$TRAE_DATA/data/state.json" \
             > "$CHECKIN_JSONL" 2>"$CHECKIN_ERR" || true
           /tmp/trae2api-credit -dir "$TRAE_DATA/auths" -packs -json > "$PACKS_JSON" 2>/dev/null || true
