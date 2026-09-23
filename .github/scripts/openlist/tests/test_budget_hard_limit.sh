@@ -138,6 +138,29 @@ eval "$_fn3"
   sync_hard_limit_stop ) && _ok "T3e 非数字 reserve 回落 480（距硬顶 300s 触发）" \
                          || _fail "T3e 非数字 reserve 未回落 480"
 
+# T4: 硬顶时放弃等待在途同步对（病灶 D 第二轮，run 35810082306 死因）
+# 主循环在预算到点后仍会**阻塞** reap 在途 worker，必须能在硬顶临近时 break。
+# 这里不复刻整个 _run_registry_pairs_parallel（依赖面太大），只锁判据组合:
+#   「有在途(_running>0) 且 硬顶触发 → 必须停」，以及「有在途但硬顶未触发 → 继续等」。
+echo "── T4 在途等待遇硬顶必须放弃 ──"
+( export OPENLIST_STEP_HARD_LIMIT_EPOCH=$(( $(date +%s) + 60 ))
+  _running=1
+  if [ "$_running" -gt 0 ] && sync_hard_limit_stop; then exit 0; else exit 1; fi
+) && _ok "T4a 有在途 + 硬顶触发 → 放弃等待（break 分支可达）" \
+   || _fail "T4a 有在途 + 硬顶触发却未放弃等待（会重演 330min 硬杀）"
+
+( export OPENLIST_STEP_HARD_LIMIT_EPOCH=$(( $(date +%s) + 3600 ))
+  _running=1
+  if [ "$_running" -gt 0 ] && sync_hard_limit_stop; then exit 0; else exit 1; fi
+) && _fail "T4b 有在途但硬顶尚远 → 不应放弃（否则白丢在途成果）" \
+   || _ok "T4b 硬顶尚远时继续等待（不误伤正常收尾）"
+
+( export OPENLIST_STEP_HARD_LIMIT_EPOCH=$(( $(date +%s) + 60 ))
+  _running=0
+  if [ "$_running" -gt 0 ] && sync_hard_limit_stop; then exit 0; else exit 1; fi
+) && _fail "T4c 无在途不应走放弃分支（语义上是自然收工）" \
+   || _ok "T4c 无在途不走放弃分支"
+
 echo
 echo "=== 病灶 D 回归: PASS=${PASS} FAIL=${FAIL} ==="
 [ "$FAIL" -eq 0 ] || exit 1
