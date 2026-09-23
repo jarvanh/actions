@@ -1160,21 +1160,22 @@ def switch_proxy(name: str, settle_seconds: float):
     mihomo_api_put(f'/proxies/{urllib.parse.quote("AUTO", safe="")}', {'name': name})
     time.sleep(settle_seconds)
 
-def _provider_ready_timeout(count: int) -> float:
-    """按节点数算 provider 展开的等待上限（秒）：`基础 60 秒 + 每 1000 个节点 +60 秒`，封顶 600。
+def _provider_ready_timeout(loaded: int) -> float:
+    """按 **mihomo 实际加载的节点数** 算 provider 展开的等待上限（秒）：`60 + 0.3 × n`，封顶 900。
 
-    为什么必须按节点数放大：展开耗时随节点数增长，**写死 60 秒在大池子上必然等不完**。
-    实测 2026-09-22 编排轮：2123 个节点等满 60 秒（`attempts=138` 全 404）仍未展开。
+    ⚠️ 参数是**加载总量**，不是「过滤后要测的候选数」——展开耗时取决于 mihomo 装了多少，
+    与调用方之后砍到多少无关。按候选数算会严重低估：2026-09-23 编排轮 mihomo 实际加载
+    20004 个（`provider_snapshot_collected total`），而过滤后只剩 1539 个，按 1539 算只给
+    152 秒 ⇒ 等不完 ⇒ 测活一开就熔断 ⇒ 1309 个死节点全跑满 16.5 秒的测速窗口。
 
-    系数怎么定的（宁可多等，也不再漏）：展开是「注册进路由表」的线性扫描，取
-    **60 秒 / 1000 个**这一档（2123 个 ⇒ 187 秒），比实测下界留出 3 倍余量；
-    封顶 600 秒（10 分钟）避免极端池子把整轮预算吃掉——到点仍按 `ready=False` 降级，
-    不会把整轮打死（各套的兜底见函数体末尾）。
+    系数怎么定的（用实测反推，不再拍脑袋）：见 taier 文档「provider 展开到底要多久」。
+    2 万个 ⇒ 606 秒；封顶 900 秒（15 分钟）避免极端池子吃掉整轮预算——到点仍按
+    `ready=False` 降级，不会把整轮打死。
     """
-    return min(60.0 + max(0, int(count)) * 0.06, 600.0)
+    return min(60.0 + max(0, int(loaded)) * 0.3, 900.0)
 
 
-def wait_provider_ready(names, timeout=None):
+def wait_provider_ready(names, timeout=None, total_loaded=None):
     """等 mihomo 把 provider 里的节点**真正注册进 `/proxies`**，返回 `(ready, waited, probed)`。
 
     **四套共用**（CDN / Gitee / taier 都调它；taier 另有自己的测活层，靠它开测前兜底）。
@@ -1206,7 +1207,10 @@ def wait_provider_ready(names, timeout=None):
     if not candidates:
         return False, 0.0, ''
     if timeout is None:
-        timeout = _provider_ready_timeout(len(candidates))
+        # 展开耗时取决于 mihomo **实际加载了多少**（不是过滤后要测多少），调用方用
+        # `total_loaded` 把加载量传进来；没传时退化为候选数（小池子两者接近，不会误事）
+        timeout = _provider_ready_timeout(
+            total_loaded if total_loaded is not None else len(candidates))
     # 取头尾各两个做哨兵：单取首个万一是脏名字（已在 provider 里但状态异常）会白等
     probes = candidates[:2] + candidates[-2:]
     start = time.time()
@@ -1762,8 +1766,10 @@ def main():
     # `/providers/proxies` 给的又是**声明清单**——不等就切，`switch_proxy` 对「组里
     # 还没注册的成员名」**不报错、静默保持原选择**，于是前几个节点测的是上一个节点的
     # 链路，结果静默失真（比报错更隐蔽）。见 wait_provider_ready 的说明。
-    # 超时不写死：按节点数自动放大（见 _provider_ready_timeout）。
-    wait_provider_ready([i.get('name') for i in alive_items])
+    # 超时不写死、且按 mihomo **实际加载量** 算（见 _provider_ready_timeout）。
+    wait_provider_ready([i.get('name') for i in alive_items],
+                        total_loaded=sum(int(v.get('total') or 0)
+                                         for v in (provider_snapshot or {}).values()))
     gitee = run_stage('Gitee 仓库准备', ensure_gitee_remote, env)
     log_progress('gitee_ready', owner=gitee['owner'], repo=gitee['repo'], remote_public=gitee['remote_public'])
     push_target_info = run_stage('Gitee 目标解析', resolve_push_target_info, gitee['remote_public'])

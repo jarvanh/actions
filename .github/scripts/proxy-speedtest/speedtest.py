@@ -762,7 +762,7 @@ def main():
     # push 时触发 "expected str ... not list"。保持 CONFIG 字段类型稳定。
 
     try:
-        _, alive_items = collect_provider_snapshot(source_mapping)
+        provider_snapshot, alive_items = collect_provider_snapshot(source_mapping)
     except Exception as e:
         log_progress('snapshot_failed', error=str(e))
         write_termination(started_at, f'节点快照失败: {e}')
@@ -778,8 +778,10 @@ def main():
     # `/providers/proxies` 给的又是**声明清单**——不等就切，`switch_proxy` 对「组里
     # 还没注册的成员名」**不报错、静默保持原选择**，于是前几个节点测的是上一个节点的
     # 链路，结果静默失真（比报错更隐蔽）。见 speedtest_gitee.wait_provider_ready。
-    # 超时不写死：按节点数自动放大（见 speedtest_gitee._provider_ready_timeout）。
-    wait_provider_ready([i.get('name') for i in alive_items])
+    # 超时不写死、且按 mihomo **实际加载量** 算（见 speedtest_gitee._provider_ready_timeout）。
+    wait_provider_ready([i.get('name') for i in alive_items],
+                        total_loaded=sum(int(v.get('total') or 0)
+                                         for v in (provider_snapshot or {}).values()))
     results = []
 
     # 直连基线（家庭宽带对照）：只测代理节点带宽、不知道家庭宽带是多少，就看不出

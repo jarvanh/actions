@@ -25,6 +25,11 @@ taier 的测活、以及 **taier / gitee / cdn 三套**通知的降级渲染。
 - **include 过滤**（2026-09-22，编排轮池子上万远超预算）：最隐蔽的坏法是 **fail-open
   缺失**——非法正则抛异常、或「全过滤光」被当真返回空列表，编排轮会零节点、整轮白跑。
   另一处是**接线次序**：过滤必须在 max_nodes 截断之前，否则截断把已过滤节点算进配额。
+- **provider 展开等待**（2026-09-22 引入、2026-09-23 二次修正）：超时写死 60 秒 / 按
+  **候选数**放大，都会在大池子上等不完 ⇒ 测活开测就连吃「mihomo 不认识」⇒ 熔断关掉
+  整个测活层 ⇒ 上千个死节点跑满各自的测速窗口（单这一项吃掉整个 5h 预算）。
+  第 14 组钉住「按**实际加载量**放大 + 三套都传 `total_loaded`」，第 15 组钉住
+  「未知名**不再熔断**测活层，而是放回队尾重排」。
 
 跑法：`python .github/scripts/proxy-speedtest/tests/test_taier_runtime.py`
 退出码 0 = 全过。
@@ -702,15 +707,22 @@ def main():
     check(t.CONFIG['TAIER_INCLUDE_REGEX'] == '',
           f"默认不过滤（实际 {t.CONFIG['TAIER_INCLUDE_REGEX']!r}）")
 
-    print('== 14. provider 展开等待按节点数放大（2026-09-22 失败节点吃满窗口的根因）==')
-    # 写死 60 秒在 2123 个节点上等不完 ⇒ 测活一开就熔断 ⇒ 1498 个死节点全跑满 15.9 秒
-    # 的测速窗口（≈6.6h，单这一项吃掉整个 5h 预算）。反证：把 timeout 写死回 60，14a 变红。
+    print('== 14. provider 展开等待按「实际加载量」放大（2026-09-23 二次修正）==')
+    # 两轮失败的根因链：`wait_provider_ready` 超时不够 ⇒ 测活开测就连吃「mihomo 不认识」⇒
+    # 熔断关掉整个测活层 ⇒ 上千个死节点全跑满 ~16 秒的测速窗口（2026-09-23 实测 1309 个
+    # ≈ 6 小时，单这一项吃掉整个 5h 预算）。
+    #   第一版（f23e527）按**候选数**放大：加载 20004、过滤后 1539 ⇒ 只给 152 秒，仍等不完
+    #   （`attempts=322` 全 404）。第二版改按 **mihomo 实际加载量** 算——展开耗时取决于
+    #   mihomo 装了多少，与调用方之后砍到多少**无关**。
+    # 反证：把系数改回 0.06 或把封顶改回 600，14a/14b 变红；把 `total_loaded` 去掉，14c 变红。
 
-    # 14a. 超时随节点数放大：大池子必须显著大于 60 秒，且封顶 600
+    # 14a. 放大公式：`60 + 0.3 × 加载量`，封顶 900
     f14 = g._provider_ready_timeout
-    check(f14(2123) > 60.0 * 2, f'2123 个节点 → {f14(2123):.0f} 秒（显著大于 60）')
+    check(f14(2123) > 60.0 * 2, f'2123 个 → {f14(2123):.0f} 秒（显著大于 60）')
     check(f14(100) >= 60.0, f'小池子不低于基础 60 秒（实际 {f14(100):.0f}）')
-    check(f14(100000) == 600.0, f'封顶 600 秒（实际 {f14(100000):.0f}）')
+    check(f14(20000) > 600.0,
+          f'2 万加载量 > 600 秒（实际 {f14(20000):.0f}；按候选数只给 152 秒是上轮病灶）')
+    check(f14(100000) == 900.0, f'封顶 900 秒（实际 {f14(100000):.0f}）')
     check(f14(0) == 60.0, f'0 节点仍取基础值（实际 {f14(0):.0f}）')
 
     # 14b. 三套调用点都**不再写死 60**（写死即漏修；用归一化源码匹配跨行调用）
@@ -722,6 +734,53 @@ def main():
     import inspect as _ins
     check(_ins.signature(g.wait_provider_ready).parameters['timeout'].default is None,
           'wait_provider_ready 的 timeout 默认 None（按节点数自动）')
+
+    # 14d. ⚠️ 三套都必须把**加载量**传进来（不传就退化成候选数 = 上轮病灶）
+    #     反证：删掉任一处的 `total_loaded=`，对应这条变红。
+    for mod_name, mod in (('taier', t), ('gitee', g), ('cdn', d)):
+        src14d = _re.sub(r'\s+', '', pathlib.Path(mod.__file__).read_text(encoding='utf-8'))
+        check('total_loaded=' in src14d,
+              f'{mod_name} 必须传 total_loaded（按实际加载量算，而非过滤后的候选数）')
+
+    # 14e. 没传加载量时退化为候选数（老调用方不炸，只是精度差）
+    _orig_get14 = g.mihomo_api_get
+    try:
+        g.mihomo_api_get = lambda path: (_ for _ in ()).throw(_404())
+        _r14, _w14, _ = t.wait_provider_ready(['a'], timeout=0.1)
+        check(_r14 is False, 'timeout 显式给定时不走自动放大（调用方能压时间）')
+    finally:
+        g.mihomo_api_get = _orig_get14
+
+    print('== 15. 「mihomo 不认识节点名」不再熔断测活层，改为放回队尾重排（2026-09-23）==')
+    # 旧行为：连续 8 个 `Resource not found` ⇒ 永久关掉整个测活层。坏法是**把加载状态当
+    # 节点属性**——mihomo 加载上万个节点时展开极慢，此刻「不认识」是正常的中间态；一熔断
+    # 就再没人拦死节点，1309 个全跑满 16.5 秒 ≈ 6 小时。
+    # 新行为：把节点 append 回队尾（挪到本轮其余节点之后，天然形成「等会儿再试」），
+    # 累计上限 2N 防无限循环，到顶才退回旧的「放行去测速」。
+    # 反证：把 `alive_items.append(item)` 改回 `_probe_enabled = False`，15a/15b 变红。
+
+    # 15a. 源码级：未知名分支里**不再有**关掉测活层的语句，且存在放回队尾
+    _t15 = _re.sub(r'\s+', '', pathlib.Path(t.__file__).read_text(encoding='utf-8'))
+    _u15 = _t15.find('ifis_unknown_proxy_error(_perr):')
+    check(_u15 != -1, '未知名分支存在')
+    # 段界取到「下一条分支的连击清零」（`_unknown_streak=0`）为止——再往后就是**真连不上**
+    # 的熔断，那段必须保留（15c 验），框进来会把 15a 判成假红。
+    _e15 = _t15.find('_unknown_streak=0', _u15)
+    _seg15 = _t15[_u15:_e15] if _e15 != -1 else _t15[_u15:_u15 + 1200]
+    check('alive_items.append(item)' in _seg15,
+          '未知名 → 放回队尾（而不是关掉测活层）')
+    check('_probe_enabled=False' not in _seg15,
+          f'未知名分支不得再关掉测活层（_probe_enabled=False）')
+
+    # 15b. 有重排上限 + 到顶有日志（否则展不开时队列永远消费不完）
+    check('_unknown_requeue_cap' in _t15 and '_unknown_requeued' in _t15,
+          '重排有累计上限（防无限循环）')
+    check('taier_probe_unknown_requeue_capped' in _t15,
+          '到顶留痕（可核对是否真的展不开）')
+
+    # 15c. **真连不上**的熔断必须还在（只放开了「不认识」，没放开「节点真死」）
+    check('_probe_dead_streak>=_probe_guard_n' in _t15,
+          '真连不上的熔断判据仍在（不要因为改了未知名分支就整体失效）')
 
     print()
     if FAILURES:
