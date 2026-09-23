@@ -1215,6 +1215,9 @@ def wait_provider_ready(names, timeout=None, total_loaded=None):
             total_loaded if total_loaded is not None else len(candidates))
     # 取头尾各两个做哨兵：单取首个万一是脏名字（已在 provider 里但状态异常）会白等
     probes = candidates[:2] + candidates[-2:]
+    # ⚠️ 诊断先行：历史轮次里 `provider_ready`（成功）**从未出现过**，全是 timeout。
+    # 靠加时长已经排不掉，先把路由表实况打出来（1 次只读请求，失败静默）。
+    _diag_probe_ready(candidates)
     start = time.time()
     attempt = 0
     while time.time() - start < timeout:
@@ -1235,6 +1238,27 @@ def wait_provider_ready(names, timeout=None, total_loaded=None):
     log_progress('provider_ready_timeout', waited=round(waited, 3),
                  attempts=attempt, candidates=len(candidates))
     return False, waited, ''
+
+
+def _diag_probe_ready(candidates):
+    """超时时 dump mihomo 路由表实况（诊断用，只读、失败静默）。
+
+    为什么需要它：`/providers/proxies` 返回两万多个节点，而 `/proxies/{name}`
+    一个都查不到（等满 900 秒 / 1810 次探测全 404）。这不是「展开慢」，是**名字对不上**。
+    靠加时长永远查不出原因，必须把 `/proxies` 的键与候选名摆在一起比对。
+    """
+    try:
+        data = mihomo_api_get('/proxies')
+        keys = list((data or {}).get('proxies', {}).keys())
+    except Exception as e:
+        log_progress('probe_ready_diag', error=f'GET /proxies 失败: {e}')
+        return
+    sample = keys[:5]
+    # 候选名在 /proxies 里的命中情况：全 0 说明名字根本没进路由表
+    hit = sum(1 for n in candidates[:200] if n in keys)
+    log_progress('probe_ready_diag', proxies_top=len(keys), sample=sample,
+                 candidates_checked=min(200, len(candidates)), candidates_hit=hit,
+                 first_candidate=candidates[0] if candidates else '')
 
 def git_direct_speedtest(env, gitee, test_file: pathlib.Path, push_timeout: int, clone_timeout: int, speedtest_mode: str, max_attempts: int = 5):
     """直连基线（本套的调用入口）。实现已抽到 `run_direct_baseline`，三套共用。

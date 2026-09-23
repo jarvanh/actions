@@ -339,7 +339,8 @@ def main():
         ready, _waited, probed = t.wait_provider_ready(['n0', 'n1', 'n2', 'n3'], timeout=10)
         check(ready is True, '未就绪→就绪时返回 True')
         check(probed in ('n0', 'n1', 'n2', 'n3'), f'报出探测用的哨兵名（实际 {probed!r}）')
-        check([e[0] for e in ev9] == ['provider_ready'],
+        # 诊断事件 `probe_ready_diag` 允许出现在最前面（它只读、失败静默）
+        check([e[0] for e in ev9 if e[0] != 'probe_ready_diag'] == ['provider_ready'],
               f'记一条 provider_ready 便于观测（实际 {[e[0] for e in ev9]}）')
 
         # 9c. 超时：始终 404 ⇒ False，且不抛异常（调用方据此降级）
@@ -347,7 +348,7 @@ def main():
         ev9.clear()
         ready, _w, probed = t.wait_provider_ready(['a', 'b'], timeout=0.3)
         check(ready is False and probed == '', '始终未就绪 → False（不抛异常）')
-        check([e[0] for e in ev9] == ['provider_ready_timeout'],
+        check([e[0] for e in ev9 if e[0] != 'probe_ready_diag'] == ['provider_ready_timeout'],
               '超时要留痕，否则「等过但没等到」看不出来')
 
         # 9d. 空名单：不等待、不请求
