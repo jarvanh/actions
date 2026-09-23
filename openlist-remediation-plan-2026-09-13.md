@@ -365,6 +365,14 @@
      （60min 轮约 20%，320min 轮约 4%）⇒ **跑量用 320，验证用短轮**。
    - 两者都先 `gh run cancel <在跑轮>` 腾并发位，否则会 pending 到长轮结束。
 
+**⚠️ CI 既有红清单（2026-09-23 新增，判「是不是我的回归」先看这里）**：`tests.yml`
+  当前有 **3 套稳定 EXIT=1** —— `test_preview_diff.sh` / `test_progress_phase_layout.sh` /
+  `test_sync_notify_fail_list.sh`。成因是通知版式基线未同步: `597177c` 把树形前缀
+  包进了 `<code>`（`<code>  └─ </code>`），而这三个套件的断言仍按旧版式写
+  （期望 `  └─ <code>…</code>`）。**与 openlist 同步域改动无关**，修它要动
+  `docs/telegram-notify.md` 的版式基线（属另一域，别在 openlist 改动里顺手改）。
+  另: `test_bulk_hash_fold.sh` 在本机会红 4 项（无 docker/真 rclone），**CI 上 EXIT=0**。
+
 **红线**（§8，无例外）：run_mode 只允许「同步」与「调试 · 修复管线测试」；动通知必跑 `bash skills/telegram-notify-audit/scripts/render_preview.sh`；改完跑全套串行回归（数量会变，不写死；判据「除环境假红外全 `EXIT=0`」） + 全部日志 `grep "command not found"` 必须为空；push 前 `git fetch` 并更新本文档。
 
 **必须问用户的**（AI 权限外，见 §9）：**wopan176 的 OpenList 驱动登录令牌是否需要人工重抓**——2026-09-14 用户已答「账号状态正常」，但 8005 是 **OpenList 驱动层登录令牌**失效，与网盘账号是两回事（详见 §4 · F19 与 §9 第 1 项）。原 §9 的 F16 主副本选型**已取消**（用户要求后端一个都不削减），F15 `transfers` **已授权自行调整**。
@@ -4046,6 +4054,25 @@ mkdir 409(原目录 kate-bloom) → API 200 → 复核不存在（假成功，§
   - 收尾行为正常: 两轮均「本轮同步未完整收场（conclusion=failure），状态已持久化，
     下轮接力继续」，marker 打包备份成功 ⇒ 无数据丢失，只是**每轮白丢最后 ~11min 的
     持久化复核成果**。
+  - **✅ 修法已落地（2026-09-23，用户拍板「立即修两处」）**:
+    ① `file_fix_pipeline.sh` 新增 `_remove_fix_entries_batch` / `_persist_fix_entries_batch`:
+       leftover 清理与折叠记账都改「本地批量合并 + 末尾一次 marker 写回」（N 次
+       远端往返 → 1 次）；空命中直接跳过写回（省掉无谓往返）。
+    ② `task_engine.sh` 新增 `sync_hard_limit_stop`（硬顶闸，与 `sync_budget_stop`
+       分工: 后者拦"新开工作"，前者拦"已在跑的长循环内部"）；workflow 注入
+       `OPENLIST_STEP_HARD_LIMIT_EPOCH`（330min）+ `OPENLIST_STEP_TAIL_RESERVE_SECONDS`
+       （默认 480s）两个锚点；折叠记账循环与落盘轮询各接入一处 break。
+    ③ 新增回归 `tests/test_budget_hard_limit.sh`（13 断言: 写回次数归 1、条目
+       幂等覆盖、restore_hint 齐全、硬顶闸四种边界）；CI 38 套中
+       `test_budget_hard_limit.sh` 与 `test_bulk_hash_fold.sh` 均 EXIT=0。
+  - **踩坑（值得记）**: 把 marker 写回从逐条挪到批量时，**误把同一循环里的
+    `echo "$mf" >> "$folded_files"` 一起挪走了** —— 那是**本地**记账（调用方靠它
+    把已折叠条目从 missing_list 摘掉），与 marker 写回无关 ⇒ 折叠后条目不摘，
+    T13a/T14a 等"剩余 N 条"断言全红。教训: 改造"逐条→批量"时，先分清循环体里
+    哪些是**远端**动作（要合并）、哪些是**本地**动作（不能动）。
+    另: 批量函数调 `fix_blacklist_to_json` 在桩环境会 `command not found` ⇒
+    改为 `declare -F` 探测后降级空黑名单（黑名单丢了只是下轮重试已证伪方法，
+    marker 主记录丢了才是幽灵落盘，后者代价大得多）。
 
 ---
 
