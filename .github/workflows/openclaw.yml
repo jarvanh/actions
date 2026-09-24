@@ -1348,7 +1348,7 @@ jobs:
               # 都可能为空且相邻，一旦如此，后面的值会整体左移、把「模型冷却」当成模型名渲染
               # （已实测复现：输出「免费模型 1 · <code>2</code>」，2 是冷却数不是模型）。
               # 故**所有列一律不留空**：空值统一填哨兵「-」，渲染层再把哨兵还原成「跳过」。
-              WB_POOL="$(jq -r --argjson ready "${WB_FREE_READY:-0}" '
+              WB_POOL="$(TZ=Asia/Shanghai jq -r --argjson ready "${WB_FREE_READY:-0}" '
                 def fq: if . > -0.005 and . < 0.005 then "0"
                         else (. * 100 | round / 100 | tostring) end;
                 def state_cn:
@@ -1369,7 +1369,8 @@ jobs:
                 | .accounts[]
                 | (.path | split("/") | last) as $_fn
                 # 模型级冷却的「最早恢复」时刻：遍历 modelStates 取所有 cooldownUntil 的
-                # 最小值（= 至少有一个模型先可用）。换算成本地时区的 HH:MM。
+                # 最小值（= 至少有一个模型先可用）。换算成东八区 HH:MM（jq 前固定 TZ=Asia/Shanghai
+                # + strflocaltime；此前 strftime 恒按 UTC 渲染，通知时间比北京早 8 小时）。
                 # 冷却普遍是分钟级，跨天时只给 HH:MM 也够用，故不标日期（标了会把子行撑爆）。
                 | ( [ (.modelStates // {}) | to_entries[]
                       | .value.cooldownUntil // 0 | select(. > 0) ] | min ) as $_mc
@@ -1381,7 +1382,7 @@ jobs:
                     # 账号级冷却时刻：只在 state=cooldown 时展示。cooldownUntil 是
                     # omitempty，其他状态下即便残留也不展示 —— 免得与「可用」自相矛盾。
                     (if .state == "cooldown" and ((.cooldownUntil // 0) > 0)
-                       then ("冷却 " + (.cooldownUntil | strftime("%Y-%m-%d %H:%M")))
+                       then ("冷却 " + (.cooldownUntil | strflocaltime("%Y-%m-%d %H:%M")))
                      else "" end | or_dash),
                     (if .quotaKnown then ("额度剩 " + (.quotaRemaining | fq)
                        + (if .isPaidUser then " · 付费" else " · 免费" end))
@@ -1391,10 +1392,10 @@ jobs:
                     (if (.modelCooldowns // 0) > 0
                        then ("模型冷却 " + (.modelCooldowns | tostring)
                              + (if ($_mc // 0) > 0
-                                  then (" · 最早 " + ($_mc | strftime("%H:%M")) + " 恢复")
+                                  then (" · 最早 " + ($_mc | strflocaltime("%H:%M")) + " 恢复")
                                 else "" end))
                      else "" end | or_dash),
-                    (if (.tokenExpiresAt // 0) > 0 then ("过期 " + (.tokenExpiresAt | strftime("%Y-%m-%d %H:%M"))) else "" end | or_dash)
+                    (if (.tokenExpiresAt // 0) > 0 then ("过期 " + (.tokenExpiresAt | strflocaltime("%Y-%m-%d %H:%M"))) else "" end | or_dash)
                   ]
                 | @tsv
               ' --rawfile wbraw "$WB_FREEMAP" "$WB_STATUS_JSON" 2>/dev/null || true)"
