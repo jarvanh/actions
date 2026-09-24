@@ -19,7 +19,8 @@ jobs:
       # 本机两个自建 AI 网关（glm-proxy 8787 / workbuddy-gateway 8318）共用同一把访问 key，
       # 客户端只需记一个。定义在 job 级供两个 step 复用，避免两处各写一份而写歪。
       # 注：这是本机网关的访问口令，不是任何上游服务的凭据；两者都不对外暴露公网。
-      AI_GATEWAY_API_KEY: sk-lksdfhwkdsfhu783758sdjf
+      # 取值在仓库 Secrets（2026-09-24 轮换：旧明文已从仓库移除）
+      AI_GATEWAY_API_KEY: ${{ secrets.AI_GATEWAY_API_KEY }}
     steps:
       - name: Setup Node.js
         uses: actions/setup-node@v7
