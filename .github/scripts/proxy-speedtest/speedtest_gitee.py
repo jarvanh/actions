@@ -78,6 +78,10 @@ MIHOMO_CONFIG = HOME_RUNTIME / 'config.yaml'
 MIHOMO_LOG = HOME_RUNTIME / 'mihomo.log'
 MIHOMO_API = 'http://127.0.0.1:19090'
 MIHOMO_MIXED_PORT = 17892
+# 承载测速流量的 select 组名。**配置生成 / 切节点 / 探测 / 判就绪四处必须同一个**：
+# 分离散在各处写死 'AUTO'，改名时必然漏改一处——而漏改的表现是「静默测错对象」
+# （切的是 A 组、探的是 B 组），不是报错，极难发现。故收敛成常量。
+PROXY_GROUP_NAME = 'AUTO'
 MIHOMO_RELEASE_API = 'https://api.github.com/repos/MetaCubeX/mihomo/releases/latest'
 DEFAULT_HEALTHCHECK_URL = 'https://www.gstatic.com/generate_204'
 # 订阅拉取的重试参数。几 MB 的订阅体在 `gist.githubusercontent.com` 上会被中途掐断 TLS
@@ -731,6 +735,47 @@ def mihomo_api_put(path: str, payload: dict):
         raw = r.read().decode('utf-8', 'ignore')
     return raw
 
+def collect_group_delays(group, url, timeout_ms):
+    """一次请求拿**整组**的延迟表 `{节点名: 延迟ms}`，失败返回空表。
+
+    ⚠️ 为什么不能逐个探 `/proxies/{name}/delay`（2026-09-24 对照实验定案）：
+    同一个请求格式下 `/proxies/DIRECT/delay` 正常返回 `{'delay': 18}`（说明端点没写错），
+    而 provider 成员名**从未注册进 `/proxies`**——顶层只有 8 个内置组名
+    （AUTO/COMPATIBLE/DIRECT/GLOBAL/PASS…），两万节点池里候选命中数恒为 0。
+    所以 `/proxies/{name}/delay` 对 provider 成员**必然 404**，测活层从上线起
+    **一次都没真正生效过**（每轮 `probe_alive=0 probe_dead=0`），`wait_provider_ready`
+    等的是一件永远不会发生的事。
+
+    `/group/{group}/delay` 走**组**维度：mihomo 对组内成员并发测延迟、返回
+    `{名字: 延迟}` 映射，成员在不在 `/proxies` 里都无所谓。实测一次拿全组
+    （`{'DIRECT': 14, '🇯🇵 日本 KA-1A|…': 792, …}`），把 N 次往返压成 1 次。
+
+    ⚠️ 外层超时要给足：mihomo 是**并发**测全组，两万节点时单次请求可能跑几分钟；
+    按 `timeout_ms + 90` 余量算，夹在 [120, 900] 秒之间。短了会在 mihomo 给结论前断开。
+
+    失败一律返回空表（**fail-open**）：拿不到延迟表时调用方按「探测不可用」放行去测速，
+    绝不能反过来把节点判死——判反了整轮一个节点都不测，比在死节点上多花 25 秒糟得多。
+    """
+    path = ('/group/' + urllib.parse.quote(str(group), safe='')
+            + '/delay?url=' + urllib.parse.quote(str(url), safe='')
+            + '&timeout=' + str(max(1, int(timeout_ms))))
+    outer = min(900.0, max(120.0, int(timeout_ms) / 1000.0 + 90.0))
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(MIHOMO_API + path, timeout=outer) as r:
+            data = json.loads(r.read().decode('utf-8', 'ignore') or '{}')
+    except Exception as e:
+        log_progress('group_delay_failed', group=group, error=str(e)[:200])
+        return {}
+    out = {}
+    for key, val in (data or {}).items():
+        try:
+            out[str(key)] = int(val)
+        except (TypeError, ValueError):
+            continue
+    log_progress('group_delay_collected', group=group, entries=len(out))
+    return out
+
 def wait_mihomo(timeout=40):
     """等 mihomo 控制器就绪（`/version` 有响应）。
 
@@ -837,7 +882,7 @@ def build_mihomo_config(env):
         'secret': '',
         'proxy-groups': [
             {
-                'name': 'AUTO',
+                'name': PROXY_GROUP_NAME,
                 'type': 'select',
                 'use': use_names,
                 'proxies': ['DIRECT'],
@@ -1157,7 +1202,7 @@ def git_clone_testbranch(clone_dir: pathlib.Path, remote: str, env, timeout: int
     return elapsed, pulled
 
 def switch_proxy(name: str, settle_seconds: float):
-    mihomo_api_put(f'/proxies/{urllib.parse.quote("AUTO", safe="")}', {'name': name})
+    mihomo_api_put(f'/proxies/{urllib.parse.quote(PROXY_GROUP_NAME, safe="")}', {'name': name})
     time.sleep(settle_seconds)
 
 def _provider_ready_timeout(loaded: int) -> float:
@@ -1178,60 +1223,51 @@ def _provider_ready_timeout(loaded: int) -> float:
 
 
 def wait_provider_ready(names, timeout=None, total_loaded=None, provider_names=None):
-    """等 mihomo 把 provider 里的节点**真正注册进 `/proxies`**，返回 `(ready, waited, probed)`。
+    """等 mihomo 把 provider 里的节点**真正装进组**，返回 `(ready, waited, probed)`。
 
     **四套共用**（CDN / Gitee / taier 都调它；taier 另有自己的测活层，靠它开测前兜底）。
 
-    `timeout` 留空 = **按节点数自动放大**（见 `_provider_ready_timeout`）：展开耗时随节点数
-    增长，写死 60 秒在大池子上必然等不完——2026-09-22 编排轮 2123 个节点等满 60 秒
-    （`attempts=138` 全 404）仍未展开，taier 开测后头 8 个探测全 `Resource not found`
-    触发熔断关掉测活 ⇒ **1498 个死节点没被提前筛掉、全跑满 15.9 秒的测速超时**
-    （1498 × 15.9s ≈ 6.6h，单这一项就吃掉整个 5 小时预算）。
+    ⚠️ 2026-09-24 重写：判据从「探 `/proxies/{name}`」改为「探组的成员清单」。
+    旧判据等的是一件**永远不会发生**的事——`/proxies` 顶层恒为 8 个内置组名，
+    provider 成员从不注册进去（对照实验：同一请求格式下 `/proxies/DIRECT/delay`
+    正常返回 18ms，而成员名 100% 404；2 个与 2 万个节点两种池子结果一致）。
+    于是旧实现每轮必然 `provider_ready_timeout`（等满上限、上千次探测全 404），
+    白烧 5~15 分钟预算，还让 taier 据此关掉测活 ⇒ 上千死节点跑满测速窗口。
 
-    为什么需要它：`wait_mihomo()` 只等 `/version`（控制器 HTTP 监听到来，毫秒级），
-    **完全不保证 provider 已展开**。而 `/providers/proxies` 给出的是**声明清单**，
-    不等于节点已注册进 `/proxies/{name}` 路由表。不等就往下走，会撞上这个窗口：
+    新判据：读 `/proxies/{group}` 的 `all`，**成员出现在组里**才算装好。这与测速时
+    真正走的路径同源（`switch_proxy` 切的就是这个组）——**判据与被测对象必须同一条
+    路径**，否则「等到了」也不代表真的能测。
 
-    * taier 会立刻拿到本地 404（`Resource not found`）并把节点误判为死——实测 8 条失败
-      间隔恒为 ~18.7 毫秒（远小于 3000ms 探测超时 ⇒ 根本没去连节点），见 run 35116972319；
-    * CDN / Gitee 走 `switch_proxy` 切的是 `AUTO` 组，mihomo 对「组里还没注册的成员名」
-      不报错、**静默保持原选择**——于是它们不报错，但测的是**上一个**节点的链路，
-      结果静默失真（比 taier 报错更隐蔽）。
-
-    做法：拿候选节点名逐个探 `/proxies/{name}`，**第一个能查到**就认为 provider 已展开。
-    单点探测足够——展开是整体行为，不会只注册一部分；用哨兵比轮询几千个名字便宜得多。
-
-    返回的 `ready=False`（超时）**不抛异常**：调用方照常往下走，由各自的判据兜底
-    （taier 有 `is_unknown_proxy_error` fail-open；CDN / Gitee 没有探活层，
-    所以这里超时只是少了一道保险，不会把整轮打死）。
+    `timeout` 留空 = **按节点数自动放大**（见 `_provider_ready_timeout`）。
+    返回 `ready=False`（超时）**不抛异常**：调用方照常往下走，由各自判据兜底。
     """
     candidates = [str(n or '').strip() for n in (names or []) if str(n or '').strip()]
     if not candidates:
         return False, 0.0, ''
     if timeout is None:
-        # 展开耗时取决于 mihomo **实际加载了多少**（不是过滤后要测多少），调用方用
+        # 装填耗时取决于 mihomo **实际加载了多少**（不是过滤后要测多少），调用方用
         # `total_loaded` 把加载量传进来；没传时退化为候选数（小池子两者接近，不会误事）
         timeout = _provider_ready_timeout(
             total_loaded if total_loaded is not None else len(candidates))
     # 取头尾各两个做哨兵：单取首个万一是脏名字（已在 provider 里但状态异常）会白等
     probes = candidates[:2] + candidates[-2:]
-    # ⚠️ 诊断先行：历史轮次里 `provider_ready`（成功）**从未出现过**，全是 timeout。
-    # 靠加时长已经排不掉，先把路由表实况打出来（1 次只读请求，失败静默）。
-    _diag_probe_ready(candidates, provider_names)
     start = time.time()
     attempt = 0
     while time.time() - start < timeout:
         attempt += 1
+        try:
+            members = set(str(x or '') for x in (mihomo_api_get(
+                '/proxies/' + urllib.parse.quote(PROXY_GROUP_NAME, safe='')
+            ).get('all') or []))
+        except Exception:
+            # 读不到组（控制器抖动/组还没建）≠ 已就绪，同样不能据此判定装好
+            members = set()
         for name in probes:
-            try:
-                mihomo_api_get('/proxies/' + urllib.parse.quote(name, safe=''))
-            except Exception:
-                # 404 = 还没展开；其它异常（鉴权/5xx）同样不能据此判定「已就绪」
-                continue
-            ready = time.time() - start
-            log_progress('provider_ready', waited=round(ready, 3), attempts=attempt,
-                         probed=name, candidates=len(candidates))
-            return True, ready, name
+            if name in members:
+                ready = time.time() - start
+                log_progress('provider_ready', waited=round(ready, 3), attempts=attempt,
+                             probed=name, candidates=len(candidates))
+                return True, ready, name
         # 前几轮抢「其实马上就绪」（实测 16 秒量级），随后退到 0.5 秒避免空转
         time.sleep(0.05 if attempt <= 20 else 0.5)
     waited = time.time() - start
@@ -1239,95 +1275,6 @@ def wait_provider_ready(names, timeout=None, total_loaded=None, provider_names=N
                  attempts=attempt, candidates=len(candidates))
     return False, waited, ''
 
-
-def _diag_probe_ready(candidates, provider_names=None):
-    """超时时 dump mihomo 路由表实况（诊断用，只读、失败静默）。
-
-    为什么需要它：`/providers/proxies` 返回两万多个节点，而 `/proxies/{name}`
-    一个都查不到（等满 900 秒 / 1810 次探测全 404）。这不是「展开慢」，是**名字对不上**。
-    靠加时长永远查不出原因，必须把 `/proxies` 的键与候选名摆在一起比对。
-    """
-    try:
-        data = mihomo_api_get('/proxies')
-        keys = list((data or {}).get('proxies', {}).keys())
-    except Exception as e:
-        log_progress('probe_ready_diag', error=f'GET /proxies 失败: {e}')
-        return
-    sample = keys[:5]
-    # 候选名在 /proxies 里的命中情况：全 0 说明名字根本没进路由表
-    hit = sum(1 for n in candidates[:200] if n in keys)
-    log_progress('probe_ready_diag', proxies_top=len(keys), sample=sample,
-                 candidates_checked=min(200, len(candidates)), candidates_hit=hit,
-                 first_candidate=candidates[0] if candidates else '')
-    # ⚠️ 关键一问：provider 成员到底走哪个端点能探活？逐个试，把能通的记下来。
-    _diag_probe_endpoints(candidates, provider_names)
-
-
-def _diag_probe_endpoints(candidates, provider_names=None):
-    """试出 provider 成员**真正可用**的测活端点（诊断用，只读、失败静默）。
-
-    已确证（2026-09-24 诊断轮，2 与 2 万节点结果一致）：`/proxies` 顶层只有 8 个内置组
-    （AUTO/COMPATIBLE/DIRECT/GLOBAL/PASS…），provider 成员**一个都没注册进去**。
-    这排除了「加载慢」，但**没排除端点格式/端口写错**——两者表现都是 404。
-
-    ⚠️ 所以加**对照组** `DIRECT`：内置节点，必定在 `/proxies` 里。两组请求只差
-    「名字是不是 provider 成员」这一个变量：DIRECT 通 + 成员 404 才能定案「成员没注册」；
-    若 DIRECT 也 404，那是路径或端口写错，得先修那个再谈测活。
-    （2026-09-18 教训：对照档必须只差一个变量，否则已知现象会被伪装成新线索。）
-
-    同时试 mihomo 的**批量**端点 `/group/{组}/delay`：它对组内成员并发测延迟并返回
-    `{名字: 延迟}` map。若可用，测活就不必逐个请求，正好绕开「成员没注册」这个坑。
-    """
-    if not candidates:
-        return
-    name = candidates[0]
-    qn = urllib.parse.quote(str(name), safe='')
-    delay_q = '?url=http://www.gstatic.com/generate_204&timeout=3000'
-    tries = [
-        '/proxies/DIRECT/delay' + delay_q,       # 对照组：内置节点，必在 /proxies 里
-        '/proxies/' + qn + '/delay' + delay_q,   # 实验组：provider 成员
-        '/proxies/AUTO/delay' + delay_q,         # 组名走 /proxies
-        '/group/AUTO/delay' + delay_q,           # 组名走 /group（批量测活）
-    ]
-    for pname in (provider_names or ['remote-1'])[:1]:
-        tries.append('/providers/proxies/' + urllib.parse.quote(str(pname), safe='')
-                     + '/healthcheck')
-    out = []
-    for path in tries:
-        try:
-            data = mihomo_api_get(path)
-            out.append(path[:52] + ' -> ' + str(data)[:90])
-        except Exception as e:
-            # 区分「真的不存在（404）」与「端点存在但响应不是 JSON（如 204 空响应）」：
-            # healthcheck 属后者，那恰是「端点可用」的信号。
-            code = getattr(e, 'code', '')
-            out.append(path[:52] + (' -> HTTP ' + str(code) if code
-                                    else ' -> ERR ' + str(e)[:40]))
-    log_progress('probe_endpoint_diag', tries=out, note='哪个端点能探活即改用哪个')
-    # ⚠️ 名字一致性：AUTO 组的成员名与快照名是否对得上（对不上就是 404 的根因）
-    _diag_name_match(candidates)
-
-
-def _diag_name_match(candidates):
-    """核对 AUTO 组成员名与快照名是否一致（诊断用，只读、失败静默）。
-
-    为什么需要：`/proxies/{name}` 与 `/proxies/{name}/delay` 都对 provider 成员 404，
-    但 `switch_proxy(AUTO, name)` 却能正常切节点测速。若 AUTO 组里的名字与快照名
-    **不完全相同**（mihomo 规范化 / 截断 / 去重改写），那 404 就只是名字没对上，
-    改对名字测活即可用。这里把两边摆在一起比对。
-    """
-    try:
-        data = mihomo_api_get('/proxies/AUTO')
-    except Exception as e:
-        log_progress('name_match_diag', error=f'GET /proxies/AUTO 失败: {e}')
-        return
-    all_names = [str(x or '') for x in (data.get('all') or [])]
-    sample = all_names[:3]
-    hit = sum(1 for n in candidates[:200] if n in all_names)
-    log_progress('name_match_diag', group_all=len(all_names),
-                 group_sample=sample,
-                 candidates_checked=min(200, len(candidates)), candidates_hit=hit,
-                 first_candidate=candidates[0] if candidates else '')
 
 def git_direct_speedtest(env, gitee, test_file: pathlib.Path, push_timeout: int, clone_timeout: int, speedtest_mode: str, max_attempts: int = 5):
     """直连基线（本套的调用入口）。实现已抽到 `run_direct_baseline`，三套共用。
