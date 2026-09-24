@@ -1659,7 +1659,7 @@ jobs:
               # 前缀手拼 —— tree_lines 把每行都当兄弟条目，子行经它会渲染成 ├─/└─，
               # 与条目平级（规范 4.2 二层列表：子行与条目正文同列）。
               if [ -s "${CHECKIN_JSONL:-}" ]; then
-                local _total _rows _i _line _uid _nick _cr _err _skipr _st _exp3 _eline _last
+                local _total _rows _i _line _uid _nick _cr _err _skipr _skipped _st _exp3 _eline _last
                 _total="$(wc -l < "$CHECKIN_JSONL" | tr -d ' ')"
                 tg_add_section _msg "💳 账号池 · ${_total}"
                 _rows=""
@@ -1674,12 +1674,19 @@ jobs:
                   _cr=$(jq -r '.credits' <<<"$_line")
                   _err=$(jq -r '(.err // "")' <<<"$_line")
                   _skipr=$(jq -r '(.skip_reason // "")' <<<"$_line")
+                  _skipped=$(jq -r '(.skipped // "")' <<<"$_line")
                   if [ -n "$_err" ]; then
                     _st="⚠️ $_err"
                   elif [ "$(jq -r '.claimed' <<<"$_line")" = "true" ]; then
                     _st="签到 ✓ 本轮领取"
                   elif [ -n "$_skipr" ]; then
-                    _st="$_skipr"
+                    # already = 今天已签过；工具原文带「（跳过查询）」易误读为「跳过签到」，
+                    # 按主人 07:12 要求简化为「今日已签」（其余原因如冷却照常展示）
+                    if [ "$_skipped" = "already" ]; then
+                      _st="今日已签"
+                    else
+                      _st="$_skipr"
+                    fi
                   else
                     _st="今日已签"
                   fi
@@ -1843,21 +1850,28 @@ jobs:
             # 仅统计 consumption_rate > 0 的条目：上游 client.go:270 定义
             # 「Rate 0 = 未知」，且 handler.go 只在 Rate > 0 时才输出该字段 ——
             # 故 rate 缺失 ≠ 免费，不能渲染成「免费」或 0.00x（那是编造）。
-            # 未列出的还有 custom_model_* 占位（14）与内部功能模型（4）；
-            # 标题写成「模型数量N」，N 是有倍率模型数、不是模型总数（避免误读）。
-            RATES_N="$(jq -r '[.data[] | select((.consumption_rate // 0) > 0)
+            # 已排除 custom_model_* 占位（14）与内部功能模型（4）；
+            # 倍率未知的也列出并标「未知」（主人 07:12 定）。
+            # 标题「模型数量N」= 列出的模型数（有倍率 + 未知），不是接口返回总数。
+            RATES_N="$(jq -r '[.data[]
                 | select(.id != "file_search_agent" and .id != "explore_sub_agent_v2"
-                    and .id != "browser_use_subagent" and .id != "summary")] | length' /tmp/trae2api-models.json)"
+                    and .id != "browser_use_subagent" and .id != "summary")
+                | select((.id | startswith("custom_model")) | not)] | length' /tmp/trae2api-models.json)"
             # 倍率升序（价格低的排上面）、等宽表格（模型左对齐 + 倍率两位小数右对齐），
             # 通知里走 <pre> 渲染。版式与 workbuddy 段统一：
             #   行首两空格缩进 + 模型 %-26s 左对齐 + 倍率 %6.2fx 右对齐
             #   不列 model/rate 表头（workbuddy 以「国内站/国际站」分组，同样无表头）
-            RATES_TXT="$(jq -r '.data[] | select((.consumption_rate // 0) > 0)
+            # 倍率未知（rate 缺失/0）也列出，排在最末并标「未知」——不冒充免费或 0.00x。
+            # 排序键：有倍率用其值，未知用 9999 保证沉底。
+            RATES_TXT="$(jq -r '.data[]
                 | select(.id != "file_search_agent" and .id != "explore_sub_agent_v2"
                     and .id != "browser_use_subagent" and .id != "summary")
-                | "\(.consumption_rate)\t\(.id)"' /tmp/trae2api-models.json \
+                | select((.id | startswith("custom_model")) | not)
+                | if (.consumption_rate // 0) > 0
+                  then "\(.consumption_rate)\t\(.id)"
+                  else "9999\t\(.id)" end' /tmp/trae2api-models.json \
                 | sort -k1,1 -n \
-              | awk -F'\t' '{printf "  %-26s %6.2fx\n", $2, $1}')"
+              | awk -F'\t' '{if ($1 == "9999") printf "  %-26s %6s\n", $2, "未知"; else printf "  %-26s %6.2fx\n", $2, $1}')"
           fi
 
           echo "8. Telegram notification (workbuddy-format)..."
