@@ -72,12 +72,14 @@ from speedtest_gitee import (
     MIHOMO_LOG,
     build_mihomo_config,
     build_source_mapping,
+    collect_group_delays,
     collect_provider_snapshot,
     ensure_local_mihomo,
     switch_proxy,
     wait_mihomo,
-    # 开测前等 provider 展开（四套共用；见 speedtest_gitee.wait_provider_ready）
+    # 开测前等 provider 装填（四套共用；见 speedtest_gitee.wait_provider_ready）
     wait_provider_ready,
+    PROXY_GROUP_NAME,
 )
 
 # ---------------------------------------------------------------------------
@@ -162,21 +164,35 @@ CONFIG = {
 
 # `should_stop_for_budget` 由 speedtest_common 提供（四套测速共用一份判据），见文件头 import。
 
-def probe_node_alive(name, url, timeout_ms):
-    """经 mihomo 的 `GET /proxies/{name}/delay` 测活：连得通才去跑那 25 秒的测速。
+def probe_node_alive(name, url, timeout_ms, delay_table=None):
+    """经 mihomo 的延迟表判活：连得通才去跑那 25 秒的测速。
 
     返回 `(alive, delay_ms, error)`。
 
-    ⚠️ **只能对节点名探测，不能对组名探测。** mihomo 的 `/proxies/{name}/delay` 里
-    `name` 必须是**节点（proxy）**的名字——测速时真正承载流量的是 `AUTO` 这个 select 组，
-    当前指向谁由 `switch_proxy` 决定，但 `AUTO` 本身不是节点，对它探测只会拿到
-    `Resource not found`（2026-09-15 实测：编排轮 8/8 全失败即此形态）。测活必须用
-    `name`，与 `switch_proxy(name, ...)` 保持同一个标识。
+    `delay_table` 是**整组延迟表** `{节点名: 延迟ms}`（由 `collect_group_delays` 一次
+    请求拿到）。传了就查表（无网络往返），不传才退回逐个探测。
+
+    ⚠️ 2026-09-24 重写：原来是逐个请求 `GET /proxies/{name}/delay`，而**provider 成员
+    从未注册进 `/proxies`**——顶层恒为 8 个内置组名，成员名 100% 404（对照实验：
+    `/proxies/DIRECT/delay` 正常返回 18ms，成员名全 404）。于是测活层从上线起
+    **一次都没真正生效过**，每轮 `probe_alive=0 probe_dead=0`：既没拦下死节点，
+    还让整轮多跑很久。改为 `/group/{组}/delay` 批量预取后，查表是纯内存操作。
+
+    ⚠️ 查表命中的语义：mihomo 对**连不上**的节点在组测速结果里不给出延迟（不是给 0），
+    所以「表里没有这个名字」= 连不上 = 判死。这与旧路径的 `Resource not found`
+    （**名字不存在**，是加载状态）完全不同，别再拿旧判据套新路径。
 
     ⚠️ **只有 mihomo 明确判「连不上」才算死；探测机制本身出错一律 fail-open（按存活处理）。**
     为什么：探测挂了（mihomo API 抖动、URL 配错、本机超时）若被当成「节点死了」，整轮会
     **一个节点都不测**——那比在死节点上多花 25 秒糟得多。宁可多烧时间，也不能零产出。
     """
+    if delay_table is not None:
+        if not delay_table:
+            # 空表 = 探测本身没拿到结论（批量请求失败），不是节点死 ⇒ fail-open
+            return True, None, '探测不可用（按存活处理）：延迟表为空'
+        if name in delay_table:
+            return True, delay_table[name], ''
+        return False, None, '测活未通过：组测速无延迟值（连不上）'
     path = ('/proxies/' + urllib.parse.quote(str(name), safe='')
             + '/delay?url=' + urllib.parse.quote(str(url), safe='')
             + '&timeout=' + str(max(1, int(timeout_ms))))
@@ -949,8 +965,26 @@ def _run():
     # 2026-09-23 加载 20004、过滤后 1539，按 1539 只给 152 秒仍等不完（322 次全 404）。
     # 等不完 ⇒ 测活一开就熔断 ⇒ 死节点全跑满 16.5 秒的测速窗口（本轮 1309 个 ≈ 6h）。
     _prov_ready, _prov_waited, _ = wait_provider_ready(
-        [i.get('name') for i in alive_items], total_loaded=_loaded_total,
-        provider_names=list((provider_snapshot or {}).keys()))
+        [i.get('name') for i in alive_items], total_loaded=_loaded_total)
+
+    # ⚠️ 测活改为**开测前一次批量预取**整组延迟表（`/group/{组}/delay`），不再逐节点请求。
+    # 逐节点那条路（`GET /proxies/{name}/delay`）对 provider 成员**永远 404**（成员不注册
+    # 进 `/proxies`，2026-09-24 对照实验定案），测活层因此从未生效过。
+    # 批量预取把 N 次往返压成 1 次：mihomo 并发测全组、返回 `{名字: 延迟}`。
+    # 放在 `wait_provider_ready` 之后：组里得先有成员，才测得出东西。
+    _delay_table = {}
+    if CONFIG['TAIER_ALIVE_PROBE'] and _prov_ready and alive_items:
+        _delay_table = collect_group_delays(
+            PROXY_GROUP_NAME, CONFIG['TAIER_ALIVE_PROBE_URL'],
+            CONFIG['TAIER_ALIVE_PROBE_TIMEOUT_MS'])
+    # ⚠️ 探测层只在**真的拿到延迟表**时才算启用：拿空表说明探测机制本身没给出结论，
+    # 此时若照常判死会把整轮打成零产出（fail-open 是硬要求）。
+    # 注意这与「表里没有某节点」不同——后者是明确的判死结论。
+    _probe_enabled = CONFIG['TAIER_ALIVE_PROBE'] and bool(_delay_table)
+    if CONFIG['TAIER_ALIVE_PROBE'] and not _probe_enabled:
+        log_progress('taier_probe_disabled', waited=round(_prov_waited, 3),
+                     total=len(alive_items), prov_ready=_prov_ready,
+                     reason='未拿到组延迟表（等待超时或批量探测失败），全量放行去测速')
 
     results = []
     bypass_hits = 0
@@ -961,15 +995,6 @@ def _run():
     # 测活的熔断：开头连续这么多个都没通过、且一个成功的都没有 ⇒ 更可能是**探测目标本身
     # 不可达**（控制面挂了 / URL 配错），而不是这些节点恰好都死了。继续判死会让整轮零产出。
     _probe_guard_n = 8
-    # ⚠️ 展开等待**超时**（等满上限仍全 404）⇒ 节点名在 `/proxies` 里查不到，继续测活
-    # 只会让每个节点各吃一次 `Resource not found`（2026-09-23 实测 4743 次，纯空转）。
-    # 此处直接关掉测活、全量放行去测速——与熔断同一口径，但早得多、且不误伤判死判据。
-    # 注意只关「等不到」这一种；展开成功（`_prov_ready`）时测活照常开。
-    _probe_enabled = CONFIG['TAIER_ALIVE_PROBE'] and _prov_ready
-    if CONFIG['TAIER_ALIVE_PROBE'] and not _prov_ready:
-        log_progress('taier_probe_disabled', waited=round(_prov_waited, 3),
-                     total=len(alive_items),
-                     reason='provider 展开等待超时，节点名不可探，全量放行去测速')
     _probe_alive = 0
     _probe_dead = 0
     _probe_dead_streak = 0
@@ -1001,7 +1026,8 @@ def _run():
         # 判死全部节点（2026-09-15 实测）。切节点与探测必须同一个标识，见 probe_node_alive。
         if _probe_enabled:
             _alive, _delay, _perr = probe_node_alive(
-                name, CONFIG['TAIER_ALIVE_PROBE_URL'], CONFIG['TAIER_ALIVE_PROBE_TIMEOUT_MS'])
+                name, CONFIG['TAIER_ALIVE_PROBE_URL'],
+                CONFIG['TAIER_ALIVE_PROBE_TIMEOUT_MS'], delay_table=_delay_table)
             if _alive:
                 _probe_alive += 1
                 _probe_dead_streak = 0

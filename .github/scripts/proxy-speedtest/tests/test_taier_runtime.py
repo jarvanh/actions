@@ -134,6 +134,42 @@ def main():
         t.MIHOMO_API = _saved_api
         srv.shutdown()
 
+    # 2b. 批量延迟表测活（2026-09-24）：这是**唯一真正生效**的测活路径。
+    #     旧路径 `GET /proxies/{name}/delay` 对 provider 成员**永远 404**（成员从不注册
+    #     进 `/proxies`），所以测活层从上线起一次都没生效过。新路径 `/group/{组}/delay`
+    #     一次拿全组 `{名字: 延迟}`，查表是纯内存操作——这里钉住它的三种语义。
+    print('== 2b. 测活（批量延迟表）：查表命中 / 缺失 / 空表 fail-open ==')
+    _tbl = {'alive': 123, 'slow': 900}
+    okv, d, _e = t.probe_node_alive('alive', 'http://x', 3000, delay_table=_tbl)
+    check(okv is True and d == 123, f'表里命中 → 存活并带出延迟（实际 {okv}/{d}）')
+    okv, d, _e = t.probe_node_alive('slow', 'http://x', 3000, delay_table=_tbl)
+    check(okv is True and d == 900, f'延迟大也算活（判据是「连得上」，不是「快」）')
+    okv, _d, _e = t.probe_node_alive('dead', 'http://x', 3000, delay_table=_tbl)
+    # 表里没有 = mihomo 组测速没给出延迟 = 连不上 = 判死
+    check(okv is False, f'表里没有 → 判死（实际 {okv}）')
+    # ⚠️ 最关键：空表是**探测机制没给出结论**，不是节点死 ⇒ 必须 fail-open
+    okv, _d, err = t.probe_node_alive('whatever', 'http://x', 3000, delay_table={})
+    check(okv is True, f'空延迟表 → fail-open 判活（实际 {okv}）')
+    check('按存活处理' in err, f'空表 fail-open 要写清原因（实际 {err}）')
+
+    # 2c. 组名常量：配置生成 / 切节点 / 判就绪 / 批量探测必须同一个组名。
+    #     分散写死 'AUTO' 时漏改一处是「静默测错对象」，不报错、极难发现。
+    print('== 2c. 组名收敛为常量（防「切 A 组探 B 组」的静默错）==')
+    check(g.PROXY_GROUP_NAME == 'AUTO', f'组名常量为 AUTO（实际 {g.PROXY_GROUP_NAME!r}）')
+    _gsrc = pathlib.Path(g.__file__).read_text(encoding='utf-8')
+    check("'name': PROXY_GROUP_NAME" in _gsrc,
+          '配置生成用常量（不再写死 AUTO）')
+    check('urllib.parse.quote(PROXY_GROUP_NAME' in _gsrc,
+          '切节点与判就绪都用常量（不再写死 AUTO）')
+    _tsrc = pathlib.Path(t.__file__).read_text(encoding='utf-8')
+    check('PROXY_GROUP_NAME' in _tsrc, 'taier 批量探测用同一个常量')
+    check('collect_group_delays(' in _tsrc, 'taier 主流程调用了批量预取')
+    # 反证：不许再有人直接拼 `/proxies/{name}/delay` 做逐节点探测（那条路恒 404）。
+    # 逐字匹配会被换行/缩进坑到，按「压掉全部空白」后匹配（与 9g 同一手法）。
+    check("/proxies/'+urllib.parse.quote(str(name),safe='')+'/delay?url='"
+          not in re.sub(r'\s+', '', _tsrc),
+          'taier 不得再走逐个 /proxies/{name}/delay 探测（成员恒 404）')
+
     print('== 3. 通知：标题降级 + 正文补一行 ==')
 
     class Meta(dict):
@@ -318,10 +354,15 @@ def main():
         check(t.is_unknown_proxy_error(err) is exp,
               f'unknown 判据 {err!r} → {exp}（实际 {t.is_unknown_proxy_error(err)}）')
 
-    # 9b. 等就绪：前 2 次 404、第 3 次查到 ⇒ 就绪
+    # 9b. 等就绪：前 2 次组里还没成员、第 3 次成员出现 ⇒ 就绪
     #     实现已抽到共享层 speedtest_gitee（CDN / Gitee / taier 三套共用），
     #     函数体里的 `mihomo_api_get` 是在 **speedtest_gitee 命名空间**解析的，
     #     所以要打桩 `g.mihomo_api_get`（打 `t.` 那份不起作用）。
+    #
+    #     ⚠️ 2026-09-24 判据改写：旧判据是探 `/proxies/{name}`（成员 404 = 没展开），
+    #     而 provider 成员**从不注册进 `/proxies`**（对照实验：`/proxies/DIRECT/delay`
+    #     正常返回 18ms，成员名恒 404），旧判据等的是一件永远不会发生的事。
+    #     新判据读组的 `all` 清单——与测速真正走的路径同源。故 mock 返回 `{'all': [...]}`。
     _orig_get, _orig_sleep, _orig_log = g.mihomo_api_get, g.time.sleep, g.log_progress
     st = {'n': 0}
     ev9 = []
@@ -331,20 +372,20 @@ def main():
 
         def flaky_get(path):
             st['n'] += 1
+            # 前两次组里只有内置节点（provider 还没装填），第三次成员出现
             if st['n'] < 3:
-                raise _404()
-            return {'name': 'n0'}
+                return {'all': ['DIRECT']}
+            return {'all': ['DIRECT', 'n0', 'n1', 'n2', 'n3']}
 
         g.mihomo_api_get = flaky_get
         ready, _waited, probed = t.wait_provider_ready(['n0', 'n1', 'n2', 'n3'], timeout=10)
         check(ready is True, '未就绪→就绪时返回 True')
         check(probed in ('n0', 'n1', 'n2', 'n3'), f'报出探测用的哨兵名（实际 {probed!r}）')
-        # 诊断事件 `probe_ready_diag` 允许出现在最前面（它只读、失败静默）
-        check([e[0] for e in ev9 if e[0] != 'probe_ready_diag'] == ['provider_ready'],
+        check([e[0] for e in ev9] == ['provider_ready'],
               f'记一条 provider_ready 便于观测（实际 {[e[0] for e in ev9]}）')
 
-        # 9c. 超时：始终 404 ⇒ False，且不抛异常（调用方据此降级）
-        g.mihomo_api_get = lambda path: (_ for _ in ()).throw(_404())
+        # 9c. 超时：组里始终没有成员 ⇒ False，且不抛异常（调用方据此降级）
+        g.mihomo_api_get = lambda path: {'all': ['DIRECT']}
         ev9.clear()
         ready, _w, probed = t.wait_provider_ready(['a', 'b'], timeout=0.3)
         check(ready is False and probed == '', '始终未就绪 → False（不抛异常）')
