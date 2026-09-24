@@ -105,10 +105,12 @@ sep_len=$(printf '%s' "$TG_SEP" | wc -m | tr -d ' ')
 [ "$sep_len" -eq 18 ]; check "分隔线为 18 条（实测 ${sep_len}）" $?
 # 注意：写 ━━\{18\} 会被解析成「1 个字面 ━ + 后一个重复 18 次」= 19 条，必须只写一个
 printf '%s' "$msg" | grep -q '^━\{18\}$'; check "标题分隔线渲染正确" $?
-printf '%s' "$msg" | grep -q '^  ├─ <code>media/大文件A.mkv</code> · '; check "条目为 ├─ 树形且主体等宽" $?
+# 树形前缀断言必须写真源渲染的完整串（规范 4.2：前缀统一包等宽 <code>，2026-09-22 起）；
+# 别照规范样例区的裸前缀抽象写法抄——曾照抄导致整组假红
+printf '%s' "$msg" | grep -q '^<code>  ├─ </code><code>media/大文件A.mkv</code> · '; check "条目为 ├─ 树形且主体等宽" $?
 printf '%s' "$msg" | grep -q '&amp;amp;'; [ $? -ne 0 ]; check "无二次转义（&amp;amp;）" $?
 printf '%s' "$msg" | grep -q '&amp; &lt;剧集&gt;'; check "动态内容已转义一次" $?
-printf '%s' "$msg" | grep -q '└─ <code>media/被排除C.tmp</code>'; check "末条用 └─ 且无双 └─" $?
+printf '%s' "$msg" | grep -q '<code>  └─ </code><code>media/被排除C.tmp</code>'; check "末条用 └─ 且无双 └─" $?
 # 只校验链接部分：⏱ 时长依赖 GNU date 的 -d，macOS(BSD date) 下解析失败 → 时长按
 # 规范 · 收尾区降级链消失，属预期，不判 FAIL（Linux runner 上会正常显示「⏱ 已运行 X 」）
 printf '%s' "$msg" | grep -q '🔗 <a href=.*>运行日志</a>'; check "收尾区含运行日志链接" $?
@@ -117,7 +119,7 @@ case "$(printf '%s' "$msg")" in
   *) check "说明段前有且仅有一个空行" 1 ;;
 esac
 printf '%s' "$m2" | grep -q '<pre>2026/09/12 ERROR: Failed to copy &lt;a&gt; &amp;'; check "<pre> 内已转义" $?
-printf '%s' "$folded" | grep -q '└─ 还有 4 条…'; check "12 条折叠为 8 条 + 「还有 4 条…」" $?
+printf '%s' "$folded" | grep -q '<code>  └─ </code>还有 4 条…'; check "12 条折叠为 8 条 + 「还有 4 条…」" $?
 printf '%s' "$folded" | grep -c '└─' | grep -q '^1$'; check "折叠后只有一个 └─" $?
 
 # 宽度比对必须在「把多字节制表符折成 1 字节」之后用字节数比 —— 否则 │(3B) 与 ├─(6B)
@@ -130,9 +132,9 @@ _prefix_w() { { "$1" "$2"; } | _asciify | wc -c | tr -d ' '; }
 [ "$(_prefix_w tree_sub 1)" -eq "$(_prefix_w tree_conn 1)" ] \
   && check "子行前缀与条目前缀等宽（末条 5 字符）" 0 \
   || check "子行前缀与条目前缀等宽（末条 5 字符）" 1
-printf '%s' "$sub" | grep -q '^  │  排除 · 2'; check "非末条目子行前缀 = │ + 2 空格" $?
-printf '%s' "$sub" | grep -q '^     排除：<code>\*.tmp</code>'; check "末条目子行前缀 = 5 空格" $?
-printf '%s' "$sub" | grep -q '^  │    ├─ <code>notion/\*\*</code>'; check "子树缩进 = 子行前缀 + 2 空格" $?
+printf '%s' "$sub" | grep -q '^<code>  │  </code>排除 · 2'; check "非末条目子行前缀 = │ + 2 空格" $?
+printf '%s' "$sub" | grep -q '^<code>     </code>排除：<code>\*.tmp</code>'; check "末条目子行前缀 = 5 空格" $?
+printf '%s' "$sub" | grep -q '^<code>  │  </code><code>  ├─ </code><code>notion/\*\*</code>'; check "子树条目前缀 = 子行前缀 + 完整条目前缀" $?
 
 echo ""
 if [ "$FAIL" -eq 0 ]; then echo "全部校验通过"; else echo "存在 FAIL，逐条看上面"; fi
