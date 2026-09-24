@@ -1881,8 +1881,13 @@ jobs:
           _conclusion="已就绪 · 签到工具无输出（详见原始输出）"
           if [ -s "$CHECKIN_JSONL" ]; then
             _total=$(wc -l < "$CHECKIN_JSONL" | tr -d ' ')
-            _ok=$(jq -s '[.[] | select((.err // "") == "" and (.skipped // "") == "")] | length' "$CHECKIN_JSONL")
-            _skip=$(jq -s '[.[] | select((.skipped // "") != "")] | length' "$CHECKIN_JSONL")
+            # 分类口径与账号行对齐（实测 skipped 是枚举串而非布尔：
+            #   "already"=今天已签过、"cooldown"=冷却中本轮未签）。
+            # 已签 = claimed=true（本轮领取）或 skipped=already；跳过 = 其余 skipped 非空；
+            # 失败 = err 非空。原口径把 already 也算进「跳过」，导致结论「已签 0 · 跳过 4」
+            # 与账号行「今日已签（跳过查询）」直接矛盾。
+            _ok=$(jq -s '[.[] | select((.err // "") == "" and ((.claimed // false) == true or (.skipped // "") == "already"))] | length' "$CHECKIN_JSONL")
+            _skip=$(jq -s '[.[] | select((.err // "") == "" and (.claimed // false) != true and ((.skipped // "") != "" and (.skipped // "") != "already"))] | length' "$CHECKIN_JSONL")
             _fail=$(jq -s '[.[] | select((.err // "") != "")] | length' "$CHECKIN_JSONL")
             _conclusion="已就绪 · 已签 ${_ok} · 跳过 ${_skip} · 失败 ${_fail}（共 ${_total}）"
           else
