@@ -1143,6 +1143,15 @@ _try_fix_methods_round() {
   local round_file="${actual_dst_dir}/${file_name}"
 
   # 方法 1 copyto_original：直接 rclone copyto（当前目录 + 原文件名）
+  # 硬顶闸（2026-09-24 病灶 D 第四处）: 4 种方法是**顺序块**而非循环，而单个
+  #   方法对大文件可以吃掉几十分钟（4.5GiB 实测单方法 ~6min，外加 423 退避
+  #   300s）⇒ 只靠"取下一个文件前"那道预算闸（file_fix_pipeline.sh）根本拦不
+  #   住: 进入本函数后 deadline 早就过了。run 35946181786 即死于此 —— 预算
+  #   14:39 到点，却在单个文件的 4 方法轮转上耗到 15:44 被 330min 硬杀。
+  #   故每个方法**开始前**都查一次硬顶，到点即整轮放弃（剩余交下轮接力）。
+  if _fix_hard_limit_reached "方法1·原名直传"; then
+    return 1
+  fi
   if _fix_method_gate copyto_original; then
     local m1_status
     rclone copyto "$src_file" "$round_file" "${RCLONE_RETRY_FLAGS[@]}" --timeout "${OPENLIST_UPLOAD_TIMEOUT:-300}s" 2>&1 | \
@@ -1170,6 +1179,9 @@ _try_fix_methods_round() {
 
   # 方法 2 copyto_shorthash：短哈希文件名直传
   # <md5前8位>.<扩展名> — 密文名必然远低于 255 字节上限，对症"加密后文件名超长" 或敏感字符
+  if _fix_hard_limit_reached "方法2·短名直传"; then
+    return 1
+  fi
   if _fix_method_gate copyto_shorthash; then
     local sh_hash sh_name m2sh_dst m2sh_status
     sh_hash=$(printf '%s' "$failed_file_rel" | md5sum | cut -c1-8)
@@ -1204,6 +1216,11 @@ _try_fix_methods_round() {
   local SPLIT_LIMIT_BYTES="${OPENLIST_SPLIT_PART_BYTES:-1073741824}"
   local SPLIT_PART_HUMAN
   SPLIT_PART_HUMAN=$(format_bytes_iec "$SPLIT_LIMIT_BYTES")
+  # 方法 3/4 同样先过硬顶闸（同上注释）: 分卷是最慢的一条（zip 打包 + 逐卷上传），
+  #   大文件单方法实测 >20min，恰恰是最不能"已经开跑就停不下来"的那一档。
+  if _fix_hard_limit_reached "方法3/4·分卷"; then
+    return 1
+  fi
   _fix_method_gate zip_split_original "（粒度 ${SPLIT_PART_HUMAN}）" && { _try_fix_split_archive zip_split_original 0 && return 0; }
   _fix_method_gate zip_split_shorthash && { _try_fix_split_archive zip_split_shorthash 1 && return 0; }
 
