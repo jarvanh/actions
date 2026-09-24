@@ -218,7 +218,18 @@ _run_registry_pairs_parallel() {
       continue
     fi
     # 没有可分发的位置: 有在跑就等一个，否则收工
+    # 硬顶闸（2026-09-23 病灶 D 第三处漏网点）: 上方的预算耗尽分支要求
+    #   `_pick >= 0`，而"剩余候选的后端全被在途 worker 占着"时 `_pick == -1`
+    #   ⇒ 分支不成立，直接落到这里无界阻塞等 worker。run 35837806532 就死在这:
+    #   13:52:15 第 9/16 个完成后 `_pick` 变 -1（剩余 7 个的后端都被占用），
+    #   13:52:15「不再分发」后本行仍 sleep 2 轮询，直到 14:06 被 330min 硬杀。
+    #   放弃等待不丢东西: 子目录 marker 已落盘、修复状态已增量持久化，下轮接力。
     if [ "$_running" -gt 0 ]; then
+      if sync_hard_limit_stop; then
+        echo "⏰ 距平台硬顶不足收尾预留，放弃等待在途同步对（子 marker/游标已持久化，下轮接力）"
+        SYNC_TIME_EXHAUSTED=1
+        break
+      fi
       _pairs_parallel_reap_one "$_pp_dir"; _running=$((_running - 1)); continue
     fi
     break

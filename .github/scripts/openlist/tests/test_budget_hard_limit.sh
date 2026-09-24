@@ -161,6 +161,56 @@ echo "── T4 在途等待遇硬顶必须放弃 ──"
 ) && _fail "T4c 无在途不应走放弃分支（语义上是自然收工）" \
    || _ok "T4c 无在途不走放弃分支"
 
+# T5: 锁**实际代码路径**（2026-09-23 第三处漏网点，run 35837806532 死因）
+# T4 只验判据组合，不验代码里到不到得了那个分支 ⇒ T4 全绿而漏网点仍在:
+#   _run_registry_pairs_parallel 里"等待在途"有**两处** —
+#     ① 预算耗尽分支（要求 _pick >= 0）
+#     ② 无可分发位置的收尾分支（_pick == -1: 剩余候选的后端全被在途 worker 占着）
+#   run 35837806532 走的正是 ②，而修法只装在 ① ⇒ 死循环 sleep 2 到被硬杀。
+#   故这里直接对源码做静态断言: 两处等待分支外层都必须在调用 reap 前查硬顶闸。
+# 静态检查（而非跑函数）的理由: 复刻 _run_registry_pairs_parallel 需要
+# SYNC_TASK_REGISTRY/子进程/worker 脚本等一整套依赖，成本高且易与实现漂移；
+# 而"两处 reap 调用点前面都要有 sync_hard_limit_stop"是结构性事实，静态可判。
+echo "── T5 等待在途的两处分支都必须有硬顶闸 ──"
+_TE_SRC="$(dirname "${BASH_SOURCE[0]}")/../task_engine.sh"
+if [ ! -f "$_TE_SRC" ]; then
+  _fail "T5a 找不到 task_engine.sh（$_TE_SRC）"
+elif [ "$(grep -c '_pairs_parallel_reap_one "\$_pp_dir"' "$_TE_SRC")" -ne 3 ]; then
+  _fail "T5a reap 调用点数量变了（期望 3: 满载/预算耗尽/无可分发），需复核硬顶闸是否仍全覆盖"
+else
+  _ok "T5a reap 调用点共 3 处（满载 / 预算耗尽 / 无可分发）"
+fi
+
+# 逐处核对: 每个 reap 调用点**向前 12 行**内必须出现 sync_hard_limit_stop 或
+# 满载分支（满载分支靠预算闸在后续重入时收敛，本身就是有界等待）。
+if [ -f "$_TE_SRC" ]; then
+  _miss=""
+  while IFS=: read -r _ln _; do
+    _win=$(sed -n "$(( _ln > 12 ? _ln - 12 : 1 )),${_ln}p" "$_TE_SRC")
+    case "$_win" in
+      *sync_hard_limit_stop*) : ;;
+      *'$_running" -ge "$_par"'*) : ;;
+      *) _miss="$_miss $_ln" ;;
+    esac
+  done < <(grep -n '_pairs_parallel_reap_one "\$_pp_dir"' "$_TE_SRC")
+  if [ -n "$_miss" ]; then
+    _fail "T5b 这些 reap 调用点(${_miss} )前 12 行内既无硬顶闸也无满载保护 ⇒ 会无界阻塞"
+  else
+    _ok "T5b 全部 reap 调用点均由硬顶闸或满载保护覆盖"
+  fi
+fi
+
+# 反向断言: 无可分发分支（_pick == -1 时落到的那处）必须带 SYNC_TIME_EXHAUSTED 置位
+# —— 否则跳出后上层仍以为"预算未耗尽"，会继续开后续工作。
+if [ -f "$_TE_SRC" ]; then
+  _tail_block=$(awk '/# 没有可分发的位置/{f=1} f{print} f&&/^    break$/{exit}' "$_TE_SRC")
+  case "$_tail_block" in
+    *sync_hard_limit_stop*SYNC_TIME_EXHAUSTED=1*|*SYNC_TIME_EXHAUSTED=1*sync_hard_limit_stop*)
+      _ok "T5c 无可分发收尾分支: 硬顶放弃时同时置 SYNC_TIME_EXHAUSTED" ;;
+    *) _fail "T5c 无可分发收尾分支缺硬顶闸或未置 SYNC_TIME_EXHAUSTED" ;;
+  esac
+fi
+
 echo
 echo "=== 病灶 D 回归: PASS=${PASS} FAIL=${FAIL} ==="
 [ "$FAIL" -eq 0 ] || exit 1
