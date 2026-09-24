@@ -2360,9 +2360,23 @@ jobs:
           elif ! openclaw gateway install --force; then
             echo "⚠️ Initial gateway install failed; will attempt fallback reinstall."
             INITIAL_START_RESTART_OK=0
-          elif ! openclaw gateway restart; then
-            echo "⚠️ Initial gateway restart failed; will attempt fallback reinstall."
-            INITIAL_START_RESTART_OK=0
+          elif openclaw gateway restart; then
+            : # 重启成功，继续走健康检查
+          else
+            # restart 命令失败 ≠ 网关真的没起来。实测 2026-09-24：gateway install 刚由
+            # systemd 拉起新进程，旧进程仍持有 state-lifecycle 锁，restart 写不进
+            # "restart intent"（StateDatabaseCoordinatorContentionError / 慢 SQLite 锁等待），
+            # 报 GATEWAY_RESTART_PREPARATION_REFUSED 后直接判失败 → 走降级重装 →
+            # 旧版读不了已被 2026.9.6 升级过的 schema → 被迫清空 state，sessions 全丢。
+            # 属瞬时锁竞态，不是版本/配置问题。先按健康判定：install 已拉起的服务仍活着就直接放行。
+            echo "⚠️ Initial gateway restart command failed; checking whether the gateway is actually healthy before treating it as a failure. Details:"
+            echo "RESTART_REFUSED=1" >> "$RUN_OPENCLAW_META"
+            if wait_for_openclaw_health "initial_start_restart_refused_grace" 60 5; then
+              echo "✅ Gateway is healthy despite restart command error (transient state-lock contention); skipping fallback reinstall."
+            else
+              echo "⚠️ Initial gateway restart failed; will attempt fallback reinstall."
+              INITIAL_START_RESTART_OK=0
+            fi
           fi
 
           if [ "$INITIAL_START_RESTART_OK" = "1" ] && wait_for_openclaw_health "initial_start" 180 5; then
