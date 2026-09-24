@@ -110,6 +110,14 @@ _sync_retry_423() {
     local lock_retry_index
 
     for ((lock_retry_index = 1; lock_retry_index <= lock_retry_attempts; lock_retry_index++)); do
+      # 硬顶闸（2026-09-24 病灶 D 第四处）: 退避是 300s 的**纯等待**，而等待
+      #   之后还要再跑一整次 sync（可能又几十分钟）。距平台硬顶不足收尾预留时
+      #   这次退避必然把 step 拖过 330min 硬杀线 ⇒ 直接放弃整轮重试，剩余交
+      #   下轮接力（已落盘内容不丢，sync 是幂等的）。
+      if declare -F sync_hard_limit_stop >/dev/null 2>&1 && sync_hard_limit_stop; then
+        echo "⏰ 距平台硬顶不足收尾预留，放弃 423 退避重试（第 ${lock_retry_index}/${lock_retry_attempts} 次未执行，sync 幂等，下轮接力）" | tee -a "$LOG_FILENAME"
+        break
+      fi
       echo "检测到 OpenList 423 Locked，等待 ${lock_retry_sleep}s 后重试 ${lock_retry_index}/${lock_retry_attempts}。" | tee -a "$LOG_FILENAME"
       sleep "$lock_retry_sleep"
       SYNC_STATUS=0
@@ -140,6 +148,11 @@ _sync_retry_409() {
     local conflict_retry_index
 
     for ((conflict_retry_index = 1; conflict_retry_index <= conflict_retry_attempts; conflict_retry_index++)); do
+      # 硬顶闸（2026-09-24 病灶 D 第四处）: 与 423 退避同款（见该函数内注释）。
+      if declare -F sync_hard_limit_stop >/dev/null 2>&1 && sync_hard_limit_stop; then
+        echo "⏰ 距平台硬顶不足收尾预留，放弃 409 退避重试（第 ${conflict_retry_index}/${conflict_retry_attempts} 次未执行，sync 幂等，下轮接力）" | tee -a "$LOG_FILENAME"
+        break
+      fi
       echo "检测到 OpenList 409 Conflict/mkParentDir 失败，等待 ${conflict_retry_sleep}s 后重试 ${conflict_retry_index}/${conflict_retry_attempts}（目录已存在或并发争用，均可自愈）。" | tee -a "$LOG_FILENAME"
       sleep "$conflict_retry_sleep"
       SYNC_STATUS=0

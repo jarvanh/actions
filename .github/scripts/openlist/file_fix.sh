@@ -1135,6 +1135,30 @@ _fix_download_source() {
 #   修复流程当场中止（实测 2026-09-18: src_expect_bytes / file_md5 相继 unbound），
 #   `set +u` 下则退化成"拿空期望值去比尺寸"⇒ 落盘校验恒判失败 ⇒ 真修好的文件被误报失败。
 #   ⇒ 两条路径统一经 _fix_download_source 准备这些变量（见该函数）。
+# ===== 平台硬顶闸（2026-09-24 病灶 D 第四处）=====
+# 为什么需要: 修复管线原有的预算闸在 file_fix_pipeline.sh，只在"取下一个
+#   文件前"生效；一旦进入 try_fix_failed_file，单个文件内部的 4 方法轮转 +
+#   423/409 退避完全在闸外。而单个方法对大文件可达几十分钟（4.5GiB 实测
+#   ~6min，分卷 >20min，外加退避 300s）⇒ deadline 过了照样硬杀。
+#   run 35946181786 实证: 预算 14:39 到点，却在一个文件的方法轮转上耗到
+#   15:44 被 330min 硬杀（65min 全无产出）。
+# 与 sync_hard_limit_stop 的关系: 判据复用它（单一事实源），本函数只补
+#   "未加载时降级"与"统一日志文案"两件事 —— 与既有 `declare -F` 探测同款
+#   （file_fix_pipeline.sh 里对 sync_hard_limit_stop 的调用已是这个形态）:
+#   未注入硬顶锚点（调试/还原模式/单测）→ 永不触发，行为与改动前一致。
+# 用法: _fix_hard_limit_reached "<当前步骤名>"
+_fix_hard_limit_reached() {
+  if ! declare -F sync_hard_limit_stop >/dev/null 2>&1; then
+    return 1
+  fi
+  if sync_hard_limit_stop; then
+    log_fix "${fix_log:-/dev/stdout}" \
+      "  ⏰ 距平台硬顶不足收尾预留，跳过 ${1:-本步骤}（该文件交下轮接力，已修条目已持久化）"
+    return 0
+  fi
+  return 1
+}
+
 # 用法: _try_fix_methods_round
 #   返回 0=某方法成功（TRY_FIX_* 已由 _fix_succeed 就绪），1=本轮全败
 _try_fix_methods_round() {

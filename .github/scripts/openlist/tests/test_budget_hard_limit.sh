@@ -211,6 +211,70 @@ if [ -f "$_TE_SRC" ]; then
   esac
 fi
 
+# T6: 修复管线的**单次调用内部**也要有硬顶闸（2026-09-24 第四处，run 35946181786）
+# 与前几处的区别: 前三处是"循环体内部无闸"，这里是"单次调用内部无闸，而单次
+#   调用本身可达几十分钟"。4 种方法是**顺序块**，只有"取下一个文件前"那道闸，
+#   进入 _try_fix_methods_round 后 deadline 早就过了（该轮 65min 全无产出）。
+# 同样是**结构断言**（T5 教训: 判据型断言测不出路径可达性）。
+echo "── T6 修复管线方法轮转与退避都必须有硬顶闸 ──"
+_FF_SRC="$REPO_ROOT/.github/scripts/openlist/file_fix.sh"
+_SE_SRC="$REPO_ROOT/.github/scripts/openlist/sync_engine.sh"
+
+# T6a: 4 种方法（顺序块）每个入口前都得有闸。方法1/2 各一处，方法3/4 共用一处。
+# ⚠️ 必须只数**调用点**（`if _fix_hard_limit_reached "..."`），不能把函数定义体
+#   里的 `declare -F` 行算进来 —— 否则"闸只定义未接线"会被数成 2 处而漏判
+#   （反向验证时发现: 撤光 3 处调用后仍报 2 ⇒ 断言形同虚设）。
+if [ -f "$_FF_SRC" ]; then
+  _gates=$(grep -c '^  if _fix_hard_limit_reached "' "$_FF_SRC")
+  _gates="${_gates:-0}"
+  if [ "$_gates" -ge 3 ]; then
+    # 再验覆盖到的步骤名齐全（防止三处都装在同一方法上）
+    _names=$(grep -o '_fix_hard_limit_reached "[^"]*"' "$_FF_SRC" | sort -u | wc -l | tr -d ' ')
+    [ "$_names" -ge 3 ] && _ok "T6a 方法轮转处硬顶闸 ${_gates} 处，覆盖 ${_names} 个不同步骤" \
+                        || _fail "T6a 闸虽 ${_gates} 处但只覆盖 ${_names} 个步骤（疑似重复装在同一方法）"
+  else
+    _fail "T6a 方法轮转处硬顶闸调用仅 ${_gates} 处，至少需 3（方法1/方法2/方法3-4）"
+  fi
+else
+  _fail "T6a 找不到 file_fix.sh"
+fi
+
+# T6b: 闸不能只写调用——被调函数必须存在且有降级分支（未加载时不炸）
+if [ -f "$_FF_SRC" ]; then
+  _body="$(sed -n '/^_fix_hard_limit_reached() {/,/^}/p' "$_FF_SRC")"
+  case "$_body" in
+    *'declare -F sync_hard_limit_stop'*'sync_hard_limit_stop'*)
+      _ok "T6b _fix_hard_limit_reached 已定义且对未加载场景降级（declare -F 探测）" ;;
+    *) _fail "T6b _fix_hard_limit_reached 缺失或缺少 declare -F 降级 ⇒ 单测/还原模式会炸" ;;
+  esac
+fi
+
+# T6c: 423 / 409 退避的 sleep 之前必须有闸（方案 B 的另一半）
+# ⚠️ 反向验证时的教训: 初版用 grep -c 数 `sleep "$lock_retry_sleep"` 恒为 1，
+#   于是"闸被撤掉了"也照样报绿 —— **计数型断言测不出闸是否还在**。故这里改为:
+#   逐个 sleep 行取前 6 行窗口，窗口内必须出现 sync_hard_limit_stop，缺一个即红。
+if [ -f "$_SE_SRC" ]; then
+  _miss_sleep=""
+  _seen=0
+  while IFS=: read -r _ln _; do
+    _seen=$((_seen + 1))
+    _win=$(sed -n "$(( _ln > 6 ? _ln - 6 : 1 )),${_ln}p" "$_SE_SRC")
+    case "$_win" in
+      *sync_hard_limit_stop*) : ;;
+      *) _miss_sleep="$_miss_sleep $_ln" ;;
+    esac
+  done < <(grep -n 'sleep "\$lock_retry_sleep"\|sleep "\$conflict_retry_sleep"' "$_SE_SRC")
+  if [ "$_seen" -lt 2 ]; then
+    _fail "T6c 只找到 ${_seen} 处退避 sleep（期望 ≥2: 423 与 409），签名可能已改名"
+  elif [ -n "$_miss_sleep" ]; then
+    _fail "T6c 这些退避 sleep(${_miss_sleep} )前 6 行内无硬顶闸 ⇒ 300s 纯等待可拖过硬杀线"
+  else
+    _ok "T6c 全部 ${_seen} 处退避 sleep 前均有硬顶闸（423 + 409）"
+  fi
+else
+  _fail "T6c 找不到 sync_engine.sh"
+fi
+
 echo
 echo "=== 病灶 D 回归: PASS=${PASS} FAIL=${FAIL} ==="
 [ "$FAIL" -eq 0 ] || exit 1
