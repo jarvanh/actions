@@ -654,7 +654,7 @@ workbuddy-gateway**（第三个 AI 网关的对齐实现），差异只在数据
      ✅ 可用·免费：<code>glm-4.7-flash</code> · <code>glm-4-flash-250414</code>
      ❌ 余额不足/无资源包·付费：<code>glm-5.3-flash</code> · <code>glm-5.3</code>
 
-Anthropic 协议 /v1/messages → Anthropic 端点；OpenAI 协议 /v1/chat/completions → OpenAI 端点；不自动回退
+ANTHROPIC 协议 /v1/messages → OpenAI 端点（bridge：经协议翻译，ZCode 默认走这条）；OpenAI 协议 /v1/chat/completions → OpenAI 端点；不自动回退
 上游凭据来源：<code>zcode-credentials</code>
 代码目录：<code>/dropbox/self-hosted/glm-proxy</code>
 
@@ -689,12 +689,13 @@ Anthropic 协议 /v1/messages → Anthropic 端点；OpenAI 协议 /v1/chat/comp
   完整可用清单在上游端点分节里。
 - **鉴权固定写「需 API Key（与 workbuddy-gateway 同值）」**：`HOST=0.0.0.0` 且设了
   `AI_GATEWAY_API_KEY`，两个网关共用同一把。**不得回显 key 本身**。
-- **结尾那句路由说明反映真实映射**（`Anthropic 协议 /v1/messages → Anthropic 端点；OpenAI 协议 /v1/chat/completions → OpenAI 端点；不自动回退`）：
-  **讲什么协议就打哪条端点**。`/v1/messages` 默认原样直通 `api/anthropic`（Coding Plan 订阅），
-  `/v1/chat/completions` 打 `api/paas/v4`（按量余额）。`ANTHROPIC_MODE=bridge` 时才把
-  `/v1/messages` 翻译成 OpenAI 协议 —— 那是历史兼容开关，此时说明句会改说落到了 OpenAI 端点。
-  **不自动回退**：失败原样回传上游错误。这句话改过三次（「另一条仅作参考」→「自动回退」→ 现状），
-  **以服务端实际行为为准**，别照抄历史文案。
+- **结尾那句路由说明反映真实映射**（`ANTHROPIC 协议 /v1/messages → OpenAI 端点（bridge：经协议翻译，ZCode 默认走这条）…；不自动回退`）：
+  **bridge 为默认 —— 这是本服务存在的理由**:ZCode 的 Anthropic 协议写死,哪条端点有额度不由它决定;
+  Coding Plan 到期后只有把请求翻译成 OpenAI 协议打 paas/v4,ZCode 才能继续用付费模型
+  (实测 glm-4.7 在 paas/v4 是 200、在 api/anthropic 是 1309)。`ANTHROPIC_MODE=native` 才直通 api/anthropic。
+  **不自动回退**：失败原样回传上游错误。
+  **这句话改过四次**（「另一条仅作参考」→「自动回退」→「协议决定端点」→ 现状）——
+  改它之前先跑一遍 ZCode 的真实路径（/v1/messages + 付费模型），**以实测为准，别照抄历史文案**。
 - **失败态不给「接口 / 鉴权 / 模型」三行**：服务已不在，展示指向已停进程的地址会误导。
 - **日志尾部进「🧾 原始输出」的 `<pre>`**（尾部 15 行）：`<pre>` 只给原始输出，
   结构化数据（端点/模型/计费）一律走上面的树形条目 —— 把结构化数据塞进 `<pre>`
