@@ -906,8 +906,9 @@ jobs:
                 tg_add_path _msg "接口" "http://127.0.0.1:${WB_PORT}/v1"
                 # 明文 API Key（主人 23:33 要求）：本机网关访问口令，取值即启动 serve
                 # 时传入的 job 级 AI_GATEWAY_API_KEY，与客户端实际使用的一致
-                # 标签用「API Key」（主人 07:00 定）：值只放明文，避免「鉴权：API Key：」标签套娃
-                tg_add_kv _msg "API Key" "${AI_GATEWAY_API_KEY:-未取到}"
+                # 标签「API Key」+ tg_add_path：值按规范走 <code> 等宽，
+                # 客户端点一下即可整块复制（tg_add_kv 是纯文本，只能手选）
+                tg_add_path _msg "API Key" "${AI_GATEWAY_API_KEY:-未取到}"
               fi
               [ -n "$5" ] && tg_add_kv _msg "原因" "$5"
               if [ -n "${WB_CREDS:-}" ]; then
@@ -1639,8 +1640,9 @@ jobs:
                 # 明文 API Key（主人 23:33 要求，与 workbuddy 段同款展示）：
                 # 从 Dropbox 数据目录 .env 读取，即面板/CLI 实际使用的那把
                 local _trae_key="$(grep -m1 '^TW2A_API_KEY=' "${TRAE_DATA}/.env" 2>/dev/null | cut -d= -f2- || true)"
-                # 标签用「API Key」（主人 07:00 定）：值只放明文，避免「鉴权：API Key：」标签套娃
-                tg_add_kv _msg "API Key" "${_trae_key:-未取到}"
+                # 标签「API Key」+ tg_add_path：值按规范走 <code> 等宽，
+                # 客户端点一下即可整块复制（tg_add_kv 是纯文本，只能手选）
+                tg_add_path _msg "API Key" "${_trae_key:-未取到}"
               fi
               [ -n "$5" ] && tg_add_kv _msg "原因" "$5"
               if [ -n "${TRAE_CREDS:-}" ]; then
