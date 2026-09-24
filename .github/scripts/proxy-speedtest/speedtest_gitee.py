@@ -1266,32 +1266,44 @@ def _diag_probe_ready(candidates, provider_names=None):
 def _diag_probe_endpoints(candidates, provider_names=None):
     """试出 provider 成员**真正可用**的测活端点（诊断用，只读、失败静默）。
 
-    已确证（2026-09-24 诊断轮，2 个节点与 2 万个节点结果一致）：`/proxies` 顶层只有
-    8 个内置组（AUTO/COMPATIBLE/DIRECT/GLOBAL/PASS…），provider 成员**一个都没注册进去**
-    ⇒ `/proxies/{name}/delay` 必然 404，测活恒失效。这排除了「加载慢」假说。
-    而 `/providers/proxies/{provider}` 能列出成员，所以测活应走 provider 作用域。
-    这里用**真实 provider 名**实测，不靠写死。
+    已确证（2026-09-24 诊断轮，2 与 2 万节点结果一致）：`/proxies` 顶层只有 8 个内置组
+    （AUTO/COMPATIBLE/DIRECT/GLOBAL/PASS…），provider 成员**一个都没注册进去**。
+    这排除了「加载慢」，但**没排除端点格式/端口写错**——两者表现都是 404。
+
+    ⚠️ 所以加**对照组** `DIRECT`：内置节点，必定在 `/proxies` 里。两组请求只差
+    「名字是不是 provider 成员」这一个变量：DIRECT 通 + 成员 404 才能定案「成员没注册」；
+    若 DIRECT 也 404，那是路径或端口写错，得先修那个再谈测活。
+    （2026-09-18 教训：对照档必须只差一个变量，否则已知现象会被伪装成新线索。）
+
+    同时试 mihomo 的**批量**端点 `/group/{组}/delay`：它对组内成员并发测延迟并返回
+    `{名字: 延迟}` map。若可用，测活就不必逐个请求，正好绕开「成员没注册」这个坑。
     """
     if not candidates:
         return
     name = candidates[0]
     qn = urllib.parse.quote(str(name), safe='')
     delay_q = '?url=http://www.gstatic.com/generate_204&timeout=3000'
-    qn = urllib.parse.quote(str(name), safe='')
-    tries = [('/proxies/' + qn + '/delay' + delay_q)]
-    for pname in (provider_names or ['remote-1'])[:3]:
-        qp = urllib.parse.quote(str(pname), safe='')
-        base = '/providers/proxies/' + qp
-        tries.append(base + '/' + qn + '/delay' + delay_q)
+    tries = [
+        '/proxies/DIRECT/delay' + delay_q,       # 对照组：内置节点，必在 /proxies 里
+        '/proxies/' + qn + '/delay' + delay_q,   # 实验组：provider 成员
+        '/proxies/AUTO/delay' + delay_q,         # 组名走 /proxies
+        '/group/AUTO/delay' + delay_q,           # 组名走 /group（批量测活）
+    ]
+    for pname in (provider_names or ['remote-1'])[:1]:
+        tries.append('/providers/proxies/' + urllib.parse.quote(str(pname), safe='')
+                     + '/healthcheck')
     out = []
     for path in tries:
         try:
             data = mihomo_api_get(path)
-            out.append(f'{path[:44]}... -> {str(data)[:56]}')
+            out.append(path[:52] + ' -> ' + str(data)[:90])
         except Exception as e:
-            out.append(f'{path[:44]}... -> ERR {str(e)[:48]}')
-    log_progress('probe_endpoint_diag', tries=out,
-                 note='哪个端点能探活即改用哪个')
+            # 区分「真的不存在（404）」与「端点存在但响应不是 JSON（如 204 空响应）」：
+            # healthcheck 属后者，那恰是「端点可用」的信号。
+            code = getattr(e, 'code', '')
+            out.append(path[:52] + (' -> HTTP ' + str(code) if code
+                                    else ' -> ERR ' + str(e)[:40]))
+    log_progress('probe_endpoint_diag', tries=out, note='哪个端点能探活即改用哪个')
     # ⚠️ 名字一致性：AUTO 组的成员名与快照名是否对得上（对不上就是 404 的根因）
     _diag_name_match(candidates)
 
