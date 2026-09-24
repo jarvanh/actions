@@ -310,7 +310,7 @@ variables → Actions → Variables 可随时改，留空走默认）：
   [gistnodes 文档](proxy-speedtest-gistnodes.md#为什么发布前必须自己先测活)），这里再筛是重复劳动；
 - 真全死时也不会「零产出」，而是每个节点各自失败并如实记进结果与通知。
 
-⚠️ 副作用：坏节点会真的进循环、占掉一个测速窗口（gitee ≈ 数十秒、taier ≈ 15 秒，duration=5）。
+⚠️ 副作用：坏节点会真的进循环、占掉一个测速窗口（gitee ≈ 数十秒、taier ≈ 31 秒，duration=13）。
 这正是 taier 侧 `TAIER_ALIVE_PROBE`（默认开）存在的意义——开测前一次批量预取整组延迟表，
 拿到表就按 mihomo 的明确结论判死、拿不到表就整体关闭全量放行（fail-open）。
 若要限制总量用 `PROXY_SPEEDTEST_MAX_NODES`。

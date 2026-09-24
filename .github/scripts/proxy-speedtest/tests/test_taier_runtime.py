@@ -14,7 +14,7 @@ taier 的测活、以及 **taier / gitee / cdn 三套**通知的降级渲染。
   另外「非正数算不算不限」必须与 `speedtest_budget_deadline()` 同口径，否则同一份配置
   经 deadline 是「不限」、直接传进来却是「立即停」。
 - **测活**：最危险的是 **fail-open 写反**——把「探测机制挂了」当成「节点死了」，
-  整轮会一个节点都不测。那比在死节点上多花 25 秒糟得多，所以单独验。
+  整轮会一个节点都不测。那比在死节点上多花 31 秒糟得多，所以单独验。
   ⚠️ 2026-09-24 重写：判活路径从「逐个 `GET /proxies/{name}/delay`」换成「开测前一次
   `collect_group_delays` 拿整组延迟表 + 逐节点查表」。旧路径是**死代码**——provider
   成员从不注册进 `/proxies`（顶层恒为 8 个内置组名；对照实验：`/proxies/DIRECT/delay`
@@ -209,10 +209,10 @@ def main():
     # 提交到 Gist —— 那和撞硬取消没区别。
     check(budget < 21600, '预算 < job 默认上限 360 分钟')
     check(21600 - budget >= 3600, '预算与上限之间留够 ≥1 小时（前置准备 + 订阅导出/通知/Gist）')
-    # 测活**默认开启**（2026-09-15 改回）：目的就是「死节点别占掉 25 秒窗口」。
+    # 测活**默认开启**（2026-09-15 改回）：目的就是「死节点别占掉 31 秒窗口」。
     # run 34859505000 曾出现 27 个节点全部误杀（节点名在 mihomo 里对不上），
     # 但那条路径由熔断（连续 8 个未通过即关探测）与 fail-open 兜住，不值得为此默认牺牲收益。
-    check(t.CONFIG['TAIER_ALIVE_PROBE'] is True, '默认开启测活（省下死节点的 25 秒窗口）')
+    check(t.CONFIG['TAIER_ALIVE_PROBE'] is True, '默认开启测活（省下死节点的 31 秒窗口）')
     check('cnspeedtest' in t.CONFIG['TAIER_ALIVE_PROBE_URL'],
           f"默认探测目标对准泰尔控制面（实际 {t.CONFIG['TAIER_ALIVE_PROBE_URL']}）")
     # 显式关闭仍须生效（误杀现场要能一键退回纯测速）
@@ -607,62 +607,33 @@ def main():
     check("'download_seconds': round(download_s, 3)" in _g_src,
           'download_seconds 取的是纯传输耗时（同一个 download_s）')
 
-    print('== 12. 节点名优先级排序 + duration 默认 5（2026-09-17）==')
-    # 诉求：把 duration 从 10 降到 5（单节点 25s→15s），并让名字命中
-    # IPLC|IPEL|IEPL|专线|HK|Hong|港|TW|Taiwan|台|SG|新加坡 的节点优先测速。
-    # 反证：把 prioritize_nodes 换成普通 sorted()（不稳定）/退回只取命中集（会丢节点），
-    # 12b/12c 变红。
+    print('== 12. duration 默认 13 + 排序/截断功能已删（2026-09-24）==')
 
-    # 12a. duration 默认值：env 未设时必须是 5，且仍在 5-13 钳制区间内
+    # 12a. duration 默认值：env 未设时必须是 13，且仍在 5-13 钳制区间内。
+    #      2026-09-24 从 5 上调到 13（上游硬钳上限）：测活层已能真筛死节点，不再需要拿
+    #      duration 换节点覆盖数，把读数质量放回来（单节点 ≈31 秒）。
     _t_src = pathlib.Path(t.__file__).read_text(encoding='utf-8')
-    check("os.environ.get('TAIER_DURATION', '5')" in _t_src,
-          "duration 默认 5（env 未设时取 5）")
-    check(t.CONFIG['TAIER_DURATION'] == 5,
-          f"CONFIG 解析为 5（实际 {t.CONFIG['TAIER_DURATION']}）")
+    check("os.environ.get('TAIER_DURATION', '13')" in _t_src,
+          "duration 默认 13（env 未设时取 13）")
+    check(t.CONFIG['TAIER_DURATION'] == 13,
+          f"CONFIG 解析为 13（实际 {t.CONFIG['TAIER_DURATION']}）")
     # 钳制仍生效：上游二进制硬钳 5-13，越界值要被压回来（不能因为改了默认值就丢掉钳制）
     check(min(max(1, 5), 13) == 5 and min(max(99, 5), 13) == 13,
           'duration 钳制区间 5-13 仍生效')
 
-    # 12b. 命中者前置、未命中者不丢、且各自保持原相对顺序（稳定分区）
-    nodes = [
-        {'name': '日本 JP-01'}, {'name': 'IPLC-HK-01'}, {'name': '美国 US-02'},
-        {'name': 'IEPL-SG'}, {'name': '韩国 KR-03'}, {'name': '香港04'},
-    ]
-    ordered, hits = t.prioritize_nodes(nodes, t.CONFIG['TAIER_PRIORITY_REGEX'])
-    check(hits == 3, f'命中 3 个（实际 {hits}）')
-    check(len(ordered) == len(nodes),
-          f'不丢节点：总数不变（实际 {len(ordered)} vs {len(nodes)}）')
-    check([x['name'] for x in ordered[:3]] == ['IPLC-HK-01', 'IEPL-SG', '香港04'],
-          f'命中者按原序前置（实际 {[x["name"] for x in ordered[:3]]}）')
-    check([x['name'] for x in ordered[3:]] == ['日本 JP-01', '美国 US-02', '韩国 KR-03'],
-          f'未命中者按原序留在队尾（实际 {[x["name"] for x in ordered[3:]]}）')
-
-    # 12c. 大小写不敏感 + 中文关键词 + 专线
-    low = [{'name': 'hk-01'}, {'name': 'tw-02'}, {'name': 'iplc 专线'}, {'name': 'japan'}]
-    o2, h2 = t.prioritize_nodes(low, t.CONFIG['TAIER_PRIORITY_REGEX'])
-    check(h2 == 3, f'小写 hk/tw 与中文「专线」都命中（实际 {h2}）')
-    check(o2[-1]['name'] == 'japan', '未命中的 japan 落到队尾')
-
-    # 12d. 空输入 / 空正则 / 非法正则 → 原样返回、不抛（一个配置写错不该让整轮零产出）
-    same, h3 = t.prioritize_nodes(nodes, '')
-    check(same is nodes and h3 == 0, '空正则 → 原样返回、命中 0')
-    empty, h4 = t.prioritize_nodes([], 'HK')
-    check(empty == [] and h4 == 0, '空列表 → 返回空、命中 0')
-    import re as _re
-    bad_nodes = [{'name': 'HK-01'}, {'name': 'US-01'}]
-    bad_out, bad_hits = t.prioritize_nodes(bad_nodes, 'HK|(')  # 括号不闭合 ⇒ re.error
-    check(bad_out == bad_nodes and bad_hits == 0,
-          f'非法正则 → 原序返回、不抛（实际 {[x["name"] for x in bad_out]}）')
-
-    # 12e. 排序发生在 max_nodes 截断**之前**（否则命中者可能被截在门外，排序白做）
-    norm_t = _re.sub(r'\s+', '', _t_src)
-    check('prioritize_nodes(alive_items,CONFIG[\'TAIER_PRIORITY_REGEX\'])' in norm_t,
-          'alive_items 确实过了 prioritize_nodes')
-    _pi = norm_t.find("prioritize_nodes(alive_items")
-    _tr = norm_t.find("alive_items=alive_items[:max_nodes]")
-    check(_pi != -1 and _tr != -1 and _pi < _tr,
-          f'排序在 max_nodes 截断之前（prioritize@{_pi} < truncate@{_tr}）')
-    check('nodes_prioritized' in _t_src, '有 nodes_prioritized 日志（可核对命中数）')
+    # 12b. ⚠️ 优先级排序与 max_nodes 截断**不得回归**（2026-09-24 删除）：
+    #      prioritize 只排顺序、不减量，测活能真筛死节点后已无收益；max_nodes 是「按原序
+    #      砍尾巴」，会砍掉还没测过的节点、与「到点收摊」重复且更易误伤。
+    check(not hasattr(t, 'prioritize_nodes'),
+          'prioritize_nodes 已删除（只排序不减量，无收益）')
+    check('TAIER_PRIORITY_REGEX' not in _t_src and 'TAIER_MAX_NODES' not in _t_src,
+          'TAIER_PRIORITY_REGEX / TAIER_MAX_NODES 配置项已删除')
+    check('nodes_prioritized' not in _t_src,
+          'nodes_prioritized 日志不再存在')
+    # 池子裁剪只能由 include 过滤做，跑不完由预算到点收摊
+    _n12 = re.sub(r'\s+', '', _t_src)
+    check('filter_nodes_include(' in _n12 and 'should_stop_for_budget(' in _n12,
+          '池子交给 include 过滤、跑不完交给预算到点收摊')
 
     print('== 13. 节点名 include 过滤（2026-09-22，编排轮池子远超 5 小时预算）==')
     # 诉求：编排轮（gistnodes）交接 15793 个节点、预算只测完 1905 个——优先级排序只能决定
@@ -714,13 +685,18 @@ def main():
     check('nodes_include_filtered' in stages13,
           f'正常过滤记 nodes_include_filtered（实际 {stages13}）')
 
-    # 13g. 接线次序：排序 → 过滤 → max_nodes 截断（截断必须按过滤后的池子算「前 N 个」）
-    norm13 = _re.sub(r'\s+', '', _t_src)
-    _pp13 = norm13.find("prioritize_nodes(alive_items")
-    _ff13 = norm13.find("filter_nodes_include(alive_items")
-    _tr13 = norm13.find("alive_items=alive_items[:max_nodes]")
-    check(_pp13 != -1 and _ff13 != -1 and _tr13 != -1 and _pp13 < _ff13 < _tr13,
-          f'排序@{_pp13} < 过滤@{_ff13} < 截断@{_tr13}')
+    # 13g. ⚠️ 接线次序上的反回归（2026-09-24）：池子大小只能由 include 过滤决定，
+    #      排序与 max_nodes 截断已删——若有人在过滤之外再引入第二种裁剪/排序层，
+    #      「池子有多大」会由两个地方决定，编排轮的时长就又开始不可预测。
+    norm13 = re.sub(r'\s+', '', _t_src)
+    #      `max_nodes` 这个词只可能出现在说明「为什么删」的注释里，故只断言**代码形态**：
+    #      CONFIG 取值、切片截断、以及以它为名的日志字段——三者任一回来即为回归。
+    check('prioritize_nodes(' not in norm13,
+          '接线里不存在 prioritize_nodes 调用（只排序不减量，已删）')
+    check("CONFIG['TAIER_MAX_NODES']" not in norm13
+          and 'alive_items[:max_nodes]' not in norm13
+          and "'max_nodes':" not in norm13,
+          'max_nodes 截断只存在于注释（CONFIG 取值/切片/日志字段均已删）')
     check("os.environ.get('TAIER_INCLUDE_REGEX'" in norm13,
           'TAIER_INCLUDE_REGEX 可经 env 覆盖')
 
@@ -750,7 +726,7 @@ def main():
 
     # 14b. 三套调用点都**不再写死 60**（写死即漏修；用归一化源码匹配跨行调用）
     for mod_name, mod in (('taier', t), ('gitee', g), ('cdn', d)):
-        src14 = _re.sub(r'\s+', '', pathlib.Path(mod.__file__).read_text(encoding='utf-8'))
+        src14 = re.sub(r'\s+', '', pathlib.Path(mod.__file__).read_text(encoding='utf-8'))
         check('timeout=60.0' not in src14,
               f'{mod_name} 不得再写死 timeout=60.0')
     # 14c. 默认参数必须是 None（= 自动），不能是某个写死的数字
@@ -761,7 +737,7 @@ def main():
     # 14d. ⚠️ 三套都必须把**加载量**传进来（不传就退化成候选数 = 上轮病灶）
     #     反证：删掉任一处的 `total_loaded=`，对应这条变红。
     for mod_name, mod in (('taier', t), ('gitee', g), ('cdn', d)):
-        src14d = _re.sub(r'\s+', '', pathlib.Path(mod.__file__).read_text(encoding='utf-8'))
+        src14d = re.sub(r'\s+', '', pathlib.Path(mod.__file__).read_text(encoding='utf-8'))
         check('total_loaded=' in src14d,
               f'{mod_name} 必须传 total_loaded（按实际加载量算，而非过滤后的候选数）')
 
@@ -782,7 +758,7 @@ def main():
     # `/proxies/{name}`（恒 404，机制误伤与真死无法区分）」设计的兜底。新判据下只有
     # 「拿到表 / 没拿到表」两种世界，不需要中间态机器——它们若回来，会把「一堆死节点」
     # 误读成「机制坏了」⇒ 关掉测活 ⇒ 上千死节点各跑满一个测速窗口（≈6.6h）。
-    _t15 = _re.sub(r'\s+', '', pathlib.Path(t.__file__).read_text(encoding='utf-8'))
+    _t15 = re.sub(r'\s+', '', pathlib.Path(t.__file__).read_text(encoding='utf-8'))
     for _name in ('_probe_dead_streak', '_probe_guard_n', '_probe_retry_queue',
                   '_unknown_requeue_cap', '_unknown_requeued', '_unknown_streak',
                   '_revive_probe_failed', 'is_unknown_proxy_error'):

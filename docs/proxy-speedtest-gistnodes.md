@@ -465,10 +465,11 @@ caller 与 called 用同一个 group 值会互相影响：`cancel-in-progress: t
 
 编排轮把抓来的节点交给下游测速时，taier job 会经 `include_regex` 入参传一个**节点名过滤
 正则**（命中保留、未命中丢弃；下游 taier 引擎的 `TAIER_INCLUDE_REGEX`，见
-[taier 文档 · include 过滤](proxy-speedtest-taier.md#include-过滤真过滤2026-09-22)）。
-**为什么必须过滤**：排序（优先级正则）只能决定「先测谁」，决定不了「池子有多大」——
-2026-09-22 run 35684842162 实测交接 15793 个节点，5 小时预算（18000 秒）只测完 1905 个
-（单节点 ≈9.5 秒，全测完 ≈41 小时），轮轮撞预算到点收摊。
+[taier 文档 · include 过滤](proxy-speedtest-taier.md#include-过滤唯一决定池子有多大的一层2026-09-22)）。
+**为什么必须过滤**：这是**唯一**能把池子压小的一层——2026-09-22 run 35684842162 实测交接
+15793 个节点，5 小时预算（18000 秒）只测完 1905 个（单节点 ≈9.5 秒，全测完 ≈41 小时），
+轮轮撞预算到点收摊。（旧的优先级排序只排顺序、不减量，`max_nodes` 是按原序砍尾巴会误伤
+未测节点，两者已于 2026-09-24 一并删除。）
 
 ⚠️ **词表不是一劳永逸的：池子每轮都在变大。** 跨轮累积只增不减，实测两轮之间
 发布节点 16012 → 19369、累积文件 5.46MB → 6.57MB，同一个词表的 kept 从 1647 涨到 2123
@@ -496,16 +497,15 @@ fail-open（正则非法 / 过滤后为空 → 原样放行），词表写错不
 「不过滤全测」——所以改完看一眼 `nodes_include_filtered` 的 `kept` 是否仍在目标内。
 
 另一个收口方向（未采用，留作备选）：给编排轮的 `test_nodes` 设固定上限（如 1400）。
-因为过滤跑在截断**之前**（测试 13g 钉住次序），截掉的必然是已过滤队列的尾部，
-留下的全是命中优质词的——池子再涨也不用每轮重调词表。当时按「尽量保住地区覆盖」
-选了收紧词表；若后续池子涨到词表砍无可砍，就改用它兜底。
+（2026-09-24 起下游 taier 已不再接 `max_nodes` 入参——截断是「按原序砍尾巴」、会砍掉还没测过
+的节点，与「到点收摊」重复且更易误伤。若真要兜底，得在**本层**发布时就限量，而不是塞给下游。）
 
 **只对 taier 引擎生效**：gitee / cdn 未实现 include 过滤，`PROXY_SPEEDTEST_ENGINE` 切到
 它们时编排轮仍是不限量全测（它们的预算同为 18000 秒，照样到点收摊）。
 
-观测：下游日志 `nodes_prioritized`（排序命中数，不过滤的池子上打）→
-`nodes_include_filtered`（`before`/`kept`/`dropped`，过滤后池子）→
+观测：下游日志 `nodes_include_filtered`（`before`/`kept`/`dropped`，过滤后池子）→
 `nodes_collected`（最终进循环数）。
+（旧的 `nodes_prioritized` 已随 2026-09-24 删除的优先级排序一并消失，别再拿它当判据。）
 
 ## 环境变量
 
@@ -610,7 +610,7 @@ Sub-Store 产出与发布。为什么必须把这两者分开：job 超时是 Gi
 | 下游 `gist_raw_url_resolve_failed` 报 **404** | 多半是 **secret 里的 gist id 已失效**：Gist 被删/重建后 id 会变，而 secret 还指着旧的。判据是看 `fetch-nodes` 的 `gist_nodes_published` 有没有 `created: true`（本轮新建了）以及新 `gist_id`（实测 2026-09-16 run 35082354560：`created: true` + 新 id `09817e63…`，而 secret 里还是已 404 的 `fed0982f…`）。处置：把新 id 回填 secret `PROXY_SPEEDTEST_GISTNODES_GIST_ID`。⚠️ 这类故障以前会被**放大成看不懂的形态**——`Resolve source subscription` 步骤用 `$( )` 取 stdout，而解析失败时 `log_progress` 会往 stdout 写一行 JSON，于是 `$url` 拿到的是那行 JSON 而不是空串、判空失效，下一步报 `bootstrap_failed: unknown url type: {"kind"`。现已改为只认哨兵行（见 `GIST_RAW_URL_MARKER`），404 会老实地在 `Resolve source subscription` 处 `::error::` + exit 1 |
 | 订阅里节点数比发布时少 | 先看 `trial_load_done` 的 `removed`：那是**被摘掉的坏节点**（mihomo 装不上），不是丢了。被摘的名字在 `trial_load_removed_samples` / 摘要里。`trial_load_skipped` 则是排雷层自己故障、原样放行（不会少） |
 | 下游 `nodes_collected: 0` 但本层明明发布了上万个 | 先看下游日志的 `source_mapping_built entries`：**为 0 就是订阅根本没取到**，与本层的过滤/排雷无关。2026-09-16 run 35042828032 即此形态——本层 `gist_nodes_published nodes: 14124`、手工 curl 同一 URL `http=200` 且 14124 个节点，但 runner 取文途中被掐断 TLS（`subscription_fetch_skipped` / `SSL: UNEXPECTED_EOF_WHILE_READING`）。`fetch_text` 现已带指数退避重试，排障见 `docs/proxy-speedtest-gitee.md` 的同名行 |
-| 编排轮测速怎么还是测不完 / 想核对过滤有没有生效 | 下游 taier 日志按序看 `nodes_prioritized`（排序命中，不过滤的池子）→ `nodes_include_filtered`（`before`/`kept`/`dropped`，include 过滤只对 taier 引擎存在）→ `taier_budget_stop`（`tested`/`total`）。`include_regex_all_dropped_fallback` = 词表与当轮节点命名完全错位、已退化为不过滤全测（fail-open，不会零产出）；`include_regex_invalid` = 正则语法错。词表依据与调整方法见「编排轮 include 过滤词表」 |
+| 编排轮测速怎么还是测不完 / 想核对过滤有没有生效 | 下游 taier 日志按序看 `nodes_include_filtered`（`before`/`kept`/`dropped`，include 过滤只对 taier 引擎存在，**它是唯一决定池子大小的一层**）→ `taier_budget_stop`（`tested`/`total`）。`include_regex_all_dropped_fallback` = 词表与当轮节点命名完全错位、已退化为不过滤全测（fail-open，不会零产出）；`include_regex_invalid` = 正则语法错。⚠️ 2026-09-24 起 `nodes_prioritized`（优先级排序，只排顺序不减量）已随该功能删除，日志里不应再出现。词表依据与调整方法见「编排轮 include 过滤词表」 |
 | 试装把好节点也摘了 | 只可能是判据误判：看 `trial_load_skipped` 的 `skip_reason` 与 `first_error`。**provider 文件写在 home 外**会让 mihomo `level=fatal` 秒退、「装不上」被误读成节点非法——`_safe_home_dir` 专门兜这个，见到 `alive_filter_workdir_relocated` 说明它生效了 |
 | 容器起不来 | 该步骤会直接 `docker ps -a` / `docker port` / `docker logs` 打出来。镜像 `xream/sub-store:http-meta` 的默认布局是「后端 3000 / 前端 http-meta 3001」，我们只发布后端 3000、**不设** `SUB_STORE_BACKEND_API_PORT`/`_HOST`（设成 3001 会让后端去抢前端已占的端口，`EADDRINUSE` 起来就死）。该步骤另外**要设** `SUB_STORE_BODY_JSON_LIMIT=16mb` 与 `SUB_STORE_FRONTEND_BACKEND_PATH=/`，理由见下面两行 |
 | 步骤在 `docker run` 处 exit 125（**`connection reset by peer`** / `Unable to find image ... locally`） | **Docker Hub 侧的瞬时抖动，不是本仓库代码问题**——实测 2026-09-16 run 35046469047（schedule 轮）在 `auth.docker.io` 上被重置，而同一镜像在 33 分钟前的 run 35044338569 拉得好好的。该步骤现已**先 `docker pull` 再 `docker run`**（`docker run` 会把拉取与起容器合成一步、拉取失败即 125，连重试机会都没有），拉取带 4 次指数退避（5/10/20 秒），中间打 `::warning::`；**四次全失败才 `::error::` + exit 1**（Docker Hub 真挂了就该吵）。见到 warning 后成功属正常自愈，不用管 |
