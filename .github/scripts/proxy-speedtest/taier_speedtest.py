@@ -139,12 +139,14 @@ CONFIG = {
     # 泛泛的连通性；探测 URL 可覆盖。判死只认 mihomo 的明确结论，机制出错一律 fail-open
     # （见 probe_node_alive）。
     #
-    # ⚠️ **默认开启（2026-09-15 改回）**：曾因 run 34859505000 里 27 个节点**全部**探测失败
-    # （mihomo 的 `Resource not found`——不是「连不上」，而是探测请求里的节点名在 mihomo 里
-    # 找不到，多半是重名去重/改名）而临时默认关闭，避免误杀。既然要的是「死节点别占窗口」，
-    # 就该默认开：误杀风险由**熔断**（开头连续 8 个未通过且无一成功即关掉探测）与
-    # **fail-open**（机制出错按存活处理）双重兜住，代价可控——真要规避误杀可设
-    # `TAIER_ALIVE_PROBE=0` 显式关闭。
+    # ⚠️ **默认开启**：要的就是「死节点别占窗口」。误杀风险由 **fail-open** 兜住——
+    # 探测层只在**真的拿到延迟表**时才启用；拿不到表（等待未就绪 / 批量探测失败）
+    # 就整体关闭、全量放行去测速（`taier_probe_disabled`），绝不把「机制没给结论」
+    # 当成「节点死了」。拿到表时「表里没有该节点」才是 mihomo 的明确判死结论。
+    # 真要规避就设 `TAIER_ALIVE_PROBE=0` 显式关闭。
+    #
+    # 旧注释里的「熔断兜底」（开头连续 8 个未通过即关探测）已于 2026-09-24 随旧路径一并删除：
+    # 那是为「逐个探 `/proxies/{name}`（恒 404）」设计的，新判据下没有「机制中途坏掉」的状态。
     #
     # 这一层现在是**唯一的准入关口**：`collect_provider_snapshot` 已不再按 provider 的
     # `alive` 预筛（那条路在订阅大时会把节点收成 0 个，见其 docstring），收集来的节点
@@ -164,95 +166,28 @@ CONFIG = {
 
 # `should_stop_for_budget` 由 speedtest_common 提供（四套测速共用一份判据），见文件头 import。
 
-def probe_node_alive(name, url, timeout_ms, delay_table=None):
-    """经 mihomo 的延迟表判活：连得通才去跑那 25 秒的测速。
+def probe_node_alive(name, delay_table):
+    """经 mihomo 的**批量延迟表**判活：连得通才去跑那 25 秒的测速。
 
     返回 `(alive, delay_ms, error)`。
 
-    `delay_table` 是**整组延迟表** `{节点名: 延迟ms}`（由 `collect_group_delays` 一次
-    请求拿到）。传了就查表（无网络往返），不传才退回逐个探测。
+    ⚠️ 2026-09-24 重写（旧路径是死代码，已删除）：原来逐个请求
+    `GET /proxies/{name}/delay`，而**provider 成员从未注册进 `/proxies`**——顶层恒为
+    8 个内置组名，成员名 100% 404（对照实验：`/proxies/DIRECT/delay` 正常返回 18ms，
+    成员名全 404）。于是测活层从上线起**一次都没真正生效过**，每轮
+    `probe_alive=0 probe_dead=0`。现在由主流程开测前用 `collect_group_delays` 经
+    `/group/{组}/delay` 一次拿全组 `{名字: 延迟}`，这里查表是纯内存操作。
 
-    ⚠️ 2026-09-24 重写：原来是逐个请求 `GET /proxies/{name}/delay`，而**provider 成员
-    从未注册进 `/proxies`**——顶层恒为 8 个内置组名，成员名 100% 404（对照实验：
-    `/proxies/DIRECT/delay` 正常返回 18ms，成员名全 404）。于是测活层从上线起
-    **一次都没真正生效过**，每轮 `probe_alive=0 probe_dead=0`：既没拦下死节点，
-    还让整轮多跑很久。改为 `/group/{组}/delay` 批量预取后，查表是纯内存操作。
+    ⚠️ 查表语义：mihomo 对**连不上**的节点在组测速结果里**不给出延迟**（不是给 0），
+    所以「表里没有这个名字」= 连不上 = 判死。调用方保证只在**拿到非空表**时才进来
+    （空表 = 探测机制没给结论，fail-open 全量放行，在主流程处理）。
 
-    ⚠️ 查表命中的语义：mihomo 对**连不上**的节点在组测速结果里不给出延迟（不是给 0），
-    所以「表里没有这个名字」= 连不上 = 判死。这与旧路径的 `Resource not found`
-    （**名字不存在**，是加载状态）完全不同，别再拿旧判据套新路径。
-
-    ⚠️ **只有 mihomo 明确判「连不上」才算死；探测机制本身出错一律 fail-open（按存活处理）。**
-    为什么：探测挂了（mihomo API 抖动、URL 配错、本机超时）若被当成「节点死了」，整轮会
-    **一个节点都不测**——那比在死节点上多花 25 秒糟得多。宁可多烧时间，也不能零产出。
+    ⚠️ 判死的错误串**必须**带「测活未通过：」前缀：通知的 `❌ 失败` 会原样展示它，
+    读者要能一眼分清「测活阶段就死」与「测速阶段失败」。
     """
-    if delay_table is not None:
-        if not delay_table:
-            # 空表 = 探测本身没拿到结论（批量请求失败），不是节点死 ⇒ fail-open
-            return True, None, '探测不可用（按存活处理）：延迟表为空'
-        if name in delay_table:
-            return True, delay_table[name], ''
-        return False, None, '测活未通过：组测速无延迟值（连不上）'
-    path = ('/proxies/' + urllib.parse.quote(str(name), safe='')
-            + '/delay?url=' + urllib.parse.quote(str(url), safe='')
-            + '&timeout=' + str(max(1, int(timeout_ms))))
-    # ⚠️ 必须走**绕过代理**的 opener：mihomo API 是本机回环（127.0.0.1），而 `urlopen` 会
-    # 尊重环境里的 HTTP_PROXY —— 不少机器（含 macOS 开系统代理时）连 127.0.0.1 都被送进
-    # 代理，于是拿到的是代理的错误页。那会被下面的分支当成「mihomo 判死」，进而整轮
-    # 一个节点都不测。本机回环永远不该经代理。
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    try:
-        # 外层超时给「mihomo 自己的超时 + 余量」：短了会在 mihomo 给结论前就断开
-        with opener.open(MIHOMO_API + path,
-                         timeout=max(10.0, timeout_ms / 1000.0 + 10)) as r:
-            data = json.loads(r.read().decode('utf-8', 'ignore') or '{}')
-    except urllib.error.HTTPError as e:
-        # mihomo 对连不上的节点返回 4xx/5xx 并带 {"message": "..."}——这是它给出的**判死**结论
-        try:
-            raw = e.read().decode('utf-8', 'ignore')
-        except Exception:
-            raw = ''
-        try:
-            msg = (json.loads(raw) or {}).get('message') or raw
-        except Exception:
-            msg = raw
-        return False, None, (str(msg)[:200] or f'HTTP {e.code}')
-    except Exception as e:
-        # 探测机制不可用 → fail-open
-        return True, None, f'探测不可用（按存活处理）：{e}'
-    delay = data.get('delay')
-    if isinstance(delay, int) and delay > 0:
-        return True, delay, ''
-    return False, None, str(data.get('message') or '无延迟值（连不上）')[:200]
-
-
-def is_unknown_proxy_error(err):
-    """判断探测失败是不是「mihomo 不认识这个节点名」——与「节点真的连不上」区分开。
-
-    为什么必须分开（2026-09-16 run 35116972319，8 条 `Resource not found`）：
-    那 8 条**每两次间隔恒为 ~18.7 毫秒**（`.016`→`.035`→`.053`→…→`.147`）。真去连节点
-    不可能这么快——探测超时是 3000ms，而这是**本地 HTTP 的往返耗时**，说明 mihomo
-    **压根没发起连接**，只是在 `/proxies/{name}` 里找不到这个名字。
-
-    原因是 **provider 惰性展开**：`collect_provider_snapshot` 从 `/providers/proxies`
-    读到的是**声明清单**（8326 个名字），但那一刻这些节点**还没注册进 `/proxies/{name}`
-    路由表**。日志时序可证——读快照（`16:13:31.996`）后 **20 毫秒**就开始探测，
-    而第一个测速结果要到 `16:13:48.712`（16 秒后）才出现，那时 provider 早就绪了。
-
-    所以这类错误**不能当成「节点死了」**：它不是节点的属性，是 mihomo 的加载状态。
-
-    **判据只认「这个节点名不存在」的措辞，不要放宽成 `'not found'` 子串**：那样会把
-    `host not found` / `URL not found`（真·网络故障）一并吞成「机制故障 → fail-open」，
-    于是真连不上的节点被判成存活、还绕过熔断，噪声换成了漏判。mihomo 的实际文案是
-    `Resource not found`（`/proxies/{name}` 查不到），不同版本偶有 `no such proxy`。
-    """
-    text = str(err or '').strip().lower()
-    if not text:
-        return False
-    # 先挡掉真·网络故障：DNS 解析失败也含 "not found"，但它是节点问题、不是加载状态
-    if 'host not found' in text or 'name or service not known' in text:
-        return False
-    return 'resource not found' in text or 'no such proxy' in text
+    if name in delay_table:
+        return True, delay_table[name], ''
+    return False, None, '测活未通过：组测速无延迟值（连不上）'
 
 
 def prioritize_nodes(items: list, pattern: str):
@@ -310,27 +245,6 @@ def filter_nodes_include(items: list, pattern: str):
     log_progress('nodes_include_filtered', before=len(items), kept=len(kept),
                  dropped=dropped, pattern=pattern)
     return kept, dropped
-
-
-def _revive_probe_failed(results, alive_items, retry_queue):
-    """把「待定判死」的节点撤销判死、放回测速队列，并返回撤销的条数。
-
-    撤销是**原地**改 `results`（删除伪造的失败条目）与 `alive_items`（追加回队列）。
-    用可变对象传参，避免在循环里对局部名字做多重赋值。
-
-    为什么必须撤销：熔断判定「这是探测机制故障」之后，那些节点从未被真正探测过，
-    不该在通知里以「测活未通过」出现——读者会去排查一批其实正常的节点。
-    """
-    if not retry_queue:
-        return 0
-    names = {str(x.get('name') or '') for x in retry_queue}
-    results[:] = [r for r in results
-                  if not (r.get('probe_failed') and str(r.get('name') or '') in names)]
-    revived = [i for i in alive_items if str(i.get('name') or '') in names]
-    alive_items.extend(revived)
-    n = len(retry_queue)
-    retry_queue.clear()
-    return n
 
 
 MODE_LABELS = {'single': '只测单线程', 'multi': '只测多线程', 'both': '单线程 + 多线程对照'}
@@ -749,16 +663,11 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
         lines.append('')
 
     failed = [r for r in results if not r.get('ok')]
-    # 测活探测失败单独成节：它不是「节点失败」，而是「探测机制没跑通」。
-    # 混进 ❌ 失败清单会让读者以为这些节点是坏的（2026-09-16 run 35116972319 的
-    # 8 条 Resource not found 就是这么被误读的：实测它们根本没被真正探测过）。
-    probe_failed = [r for r in failed if r.get('probe_failed')]
-    failed = [r for r in failed if not r.get('probe_failed')]
-    if probe_failed:
-        lines.append(f'⚠️ 测活探测异常 · {len(probe_failed)}')
-        lines.append(f'<code>  └─ </code>探测接口本轮不可用（{tg_entry((probe_failed[0].get("error") or "").split("：")[-1][:60])}），'
-                     '这些节点未真正探测，不计入失败')
-        lines.append('')
+    # ⚠️ 2026-09-24 起**没有**「⚠️ 测活探测异常」分节：判活改为查整组延迟表后只有两种世界——
+    # 拿不到表 ⇒ 探测层整体关闭、不产生判死条目（机制没给结论就不能判死）；拿到了 ⇒
+    # 「表里没有」是 mihomo 的真判死结论，与测速失败同类，直接进下面的 `❌ 失败`。
+    # 旧分节记的是「探测机制没跑通」的误伤（逐个探 `/proxies/{name}` 恒 404 时每轮必现），
+    # 新判据下不复存在；若再出现该分节即为回退（规范 · 2.8 taier 专属分节）。
     if failed:
         lines.append(f'❌ 失败 · {len(failed)}')
         _failed_entries = []
@@ -798,7 +707,7 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
         # 206 个节点实测有速度、最高 245 Mbps，却报「达标不足 1 个」，读者只会去怀疑节点）。
         # 按真因分文案，并交代「测了多少 / 共多少」——否则预算内只测了 919/8326 会被
         # 读成「8326 个都不达标」。
-        _tested_n = len([r for r in results if not r.get('probe_failed')])
+        _tested_n = len(results)
         _scope = ''
         if aborted_due_to_runtime and collected_total > len(results):
             _scope = f'（预算内仅测完 {_tested_n}/{collected_total} 个）'
@@ -963,7 +872,7 @@ def _run():
     # 超时**不写死**、且按 **mihomo 实际加载量** 算（不是过滤后的候选数）：写死 60 秒在
     # 2123 个节点上等不完（实测 60 秒 / 138 次探测全 404）；按候选数算同样不够——
     # 2026-09-23 加载 20004、过滤后 1539，按 1539 只给 152 秒仍等不完（322 次全 404）。
-    # 等不完 ⇒ 测活一开就熔断 ⇒ 死节点全跑满 16.5 秒的测速窗口（本轮 1309 个 ≈ 6h）。
+    # 见 wait_provider_ready / _provider_ready_timeout 的说明。
     _prov_ready, _prov_waited, _ = wait_provider_ready(
         [i.get('name') for i in alive_items], total_loaded=_loaded_total)
 
@@ -992,25 +901,8 @@ def _run():
     # （退出码仍 0），拿已测节点照常出订阅（规范 · 2.7 测速三套）
     aborted_due_to_runtime = False
     runtime_abort_reason = ''
-    # 测活的熔断：开头连续这么多个都没通过、且一个成功的都没有 ⇒ 更可能是**探测目标本身
-    # 不可达**（控制面挂了 / URL 配错），而不是这些节点恰好都死了。继续判死会让整轮零产出。
-    _probe_guard_n = 8
     _probe_alive = 0
     _probe_dead = 0
-    _probe_dead_streak = 0
-    # 「mihomo 不认识这个节点名」的连续计数：与 `_probe_dead_streak` 分开，
-    # 因为二者语义完全不同——前者是 provider 加载状态，后者才是节点真的连不上。
-    _unknown_streak = 0
-    # 「不认识节点名」时把节点放回队尾重排的**累计上限**：防止 provider 始终展不开时
-    # 无限重排（那样队列永远消费不完）。取「候选数 × 2」——给展开留两轮完整的机会；
-    # 到顶后退回旧行为（放行去测速，由测速那步自然失败），不再无休止重排。
-    _unknown_requeued = 0
-    _unknown_requeue_cap = max(1, len(alive_items)) * 2
-    # 探测失败**待定**的节点：熔断时它们是「机制故障的受害者」，不是「节点死了」——
-    # 必须撤销判死、放回测速队列，否则通知里会出现 N 条伪造的「测活未通过」。
-    # 见 2026-09-16 run 35116972319：8 条 Resource not found 塞在 0.13 秒内，
-    # 是 mihomo 控制面调用失败，节点本身没被真正探测过。
-    _probe_retry_queue = []
     for item in alive_items:
         # 判据放在**开下一个节点之前**：单节点 ≈ 25 秒，所以超发最多一个节点
         if should_stop_for_budget(_budget_deadline):
@@ -1021,79 +913,29 @@ def _run():
                          budget_seconds=_budget_seconds)
             break
         name = str(item.get('name') or '')
-        # 先测活，再测速：死节点不再占用一整个测速窗口（≈25 秒/个）
-        # ⚠️ 探测用 `name`（节点名），不是 AUTO 组名——组名会让 mihomo 回 `Resource not found`，
-        # 判死全部节点（2026-09-15 实测）。切节点与探测必须同一个标识，见 probe_node_alive。
+        # 先测活，再测速：死节点不再占用一整个测速窗口（≈25 秒/个）。
+        # 查表是纯内存操作（~微秒级），与旧逐节点路径（每次一次 HTTP 往返）不是一个量级。
+        # 旧路径的熔断 / 未知名重排 / 撤销判死机器一并删除：那些是为「逐个探
+        # /proxies/{name}（恒 404，机制误伤与真死无法区分）」设计的；新判据拿到的
+        # 延迟表要么有（「表里没有」= mihomo 真判死），要么没有（探测层整体关闭、
+        # 全量放行）——不存在「中途发现机制坏了」的状态，无需中途熔断。
         if _probe_enabled:
-            _alive, _delay, _perr = probe_node_alive(
-                name, CONFIG['TAIER_ALIVE_PROBE_URL'],
-                CONFIG['TAIER_ALIVE_PROBE_TIMEOUT_MS'], delay_table=_delay_table)
+            _alive, _delay, _perr = probe_node_alive(name, _delay_table)
             if _alive:
                 _probe_alive += 1
-                _probe_dead_streak = 0
-                # 探测恢复正常 ⇒ 之前待定的节点是同一次机制故障的误伤，放回队列重测
-                if _probe_retry_queue:
-                    log_progress('taier_probe_retry_restored', count=len(_probe_retry_queue))
-                    alive_items = alive_items + _probe_retry_queue
-                    _probe_retry_queue = []
             else:
-                # ⚠️ 「mihomo 不认识这个节点名」≠「节点连不上」（见 is_unknown_proxy_error）：
-                # 前者是 provider 加载状态，拿它判死会污染熔断判据、并制造假失败条目。
-                # 这类直接**放行去测速**（fail-open 同义）：真连不上时测速那一步自然会失败，
-                # 代价只是一个 25 秒窗口，比误杀一批好节点划算得多。
-                if is_unknown_proxy_error(_perr):
-                    _unknown_streak += 1
-                    log_progress('taier_node_probe_unknown', name=name, error=_perr,
-                                 consecutive=_unknown_streak)
-                    # ⚠️ 「连着多个都不认识」**不再关掉整个测活层**，而是把节点放回队尾
-                    # 重新排队。为什么必须改：mihomo 加载上万个节点时展开极慢，此刻「不认识」
-                    # 是**加载状态**而非节点属性；旧逻辑一熔断就永久关掉测活 ⇒ 上千个死节点
-                    # 再没人拦、全跑满 ~16 秒的测速窗口（2026-09-23 实测 1309 个 ≈ 6 小时，
-                    # 单这一项吃掉整个 5 小时预算）。改成重排队后，展开一旦完成，这些节点会
-                    # 被测活以 ~0.1 秒/个 拦下。
-                    #
-                    # 用「放回队尾」而不是原地重试：队列是逐个消费的，放回队尾等于让本轮
-                    # 其余节点先走，天然形成「等一会儿再试」，不需要额外的 sleep。
-                    # 上限 `_unknown_requeue_cap` 防止展开始终不完成时无限循环（到顶后
-                    # 才退回旧的「放行去测速」，由测速那一步自然失败——fail-open 同义）。
-                    if _unknown_requeued < _unknown_requeue_cap:
-                        _unknown_requeued += 1
-                        alive_items.append(item)
-                        continue
-                    # 到顶：确实展不开。**必须放行去测速**（fail-open 同义），不判死、
-                    # 不计入判死判据。⚠️ 2026-09-23 教训：这里曾写成 `continue` 直接丢弃，
-                    # 于是 1581 个候选全部跳过测速 ⇒ `node_count=0` 整轮零产出。重排是
-                    # 「晚点再试」，试不出来就要按老办法照测，绝不能变成「不测」。
-                    log_progress('taier_probe_unknown_requeue_capped',
-                                 requeued=_unknown_requeued, cap=_unknown_requeue_cap)
-                    # 落到下面共用测速路径（此处**不得**跳过，否则节点被丢弃）
-                _unknown_streak = 0
-                _probe_dead_streak += 1
                 _probe_dead += 1
-                log_progress('taier_node_probe_failed', name=name, error=_perr,
-                             url=CONFIG['TAIER_ALIVE_PROBE_URL'])
-                if _probe_dead_streak >= _probe_guard_n and _probe_alive == 0:
-                    _probe_enabled = False
-                    log_progress('taier_probe_disabled', consecutive_dead=_probe_dead_streak,
-                                 url=CONFIG['TAIER_ALIVE_PROBE_URL'],
-                                 revived=len(_probe_retry_queue),
-                                 reason='开头连续多个均未通过且无一成功，怀疑探测目标不可达')
-                    _probe_dead -= _revive_probe_failed(results, alive_items, _probe_retry_queue)
-                    _probe_retry_queue = []
-                else:
-                    # 未熔断 ⇒ 真判死；但先挂进待定队列，熔断时可整体撤销
-                    _probe_retry_queue.append(item)
-                    results.append({
-                        'name': name,
-                        'type': item.get('type', ''),
-                        'source_entry': item.get('source_entry', {}) or {},
-                        'proxy_obj': item.get('proxy_obj', {}) or {},
-                        'mode': 'download',
-                        'ok': False,
-                        'probe_failed': True,
-                        'error': f'测活未通过：{_perr}',
-                    })
-                    continue
+                log_progress('taier_node_probe_failed', name=name, error=_perr)
+                results.append({
+                    'name': name,
+                    'type': item.get('type', ''),
+                    'source_entry': item.get('source_entry', {}) or {},
+                    'proxy_obj': item.get('proxy_obj', {}) or {},
+                    'mode': 'download',
+                    'ok': False,
+                    'error': _perr,
+                })
+                continue
         try:
             switch_proxy(name, CONFIG['TAIER_SWITCH_SETTLE'])
         except Exception as e:

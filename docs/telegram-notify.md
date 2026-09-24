@@ -762,18 +762,22 @@ Anthropic 协议 /v1/messages → Anthropic 端点；OpenAI 协议 /v1/chat/comp
 RESULT_JSON 的 `aborted_due_to_runtime` / `runtime_abort_reason`
 （`speedtest_gitee.py` 早已有这两个字段，`taier_speedtest.py` / `speedtest.py` 2026-09-14 起对齐）。
 
-**taier 的两个专属分节**（2026-09-17 补，均源自 run 35116972319 的误读）：
+**taier 的一个专属分节**（2026-09-17 补，源自 run 35116972319 的误读；2026-09-24 收紧为一条）：
 
-- **测活探测失败不混进 `❌ 失败`。** taier 有「测速前先测活」这一层（`probe_node_alive`），
-  它失败时是**探测机制没跑通**（mihomo 控制面返回 `Resource not found`，即
-  `/proxies/{name}` 里查不到名字），不是节点坏了。这类结果单独成节
-  `⚠️ 测活探测异常 · N`，并说明「这些节点未真正探测，不计入失败」；
-  `❌ 失败 · N` 只数真正的测速失败。混在一起会让读者去排查一批其实没问题的节点。
-  根因与两道防线（`wait_provider_ready` 等 provider 展开 + `is_unknown_proxy_error`
-  不判死）见 `docs/proxy-speedtest-taier.md`。注意这道防线是**三套共用**的
-  （gitee / cdn 也要等 provider 展开，只是它们不探活、坏法是静默测错节点而非报错），
-  所以 gitee / cdn 的日志里同样会出现 `provider_ready` / `provider_ready_timeout`——
-  **那是正常的等待记录，不是告警**。
+- **测活判死的节点进 `❌ 失败`，但「机制没跑通」不产生条目。** taier 有「测速前先测活」这一层
+  （`probe_node_alive`），判据是 mihomo 的**组测速延迟表**（开测前一次
+  `GET /group/{组}/delay` 拿 `{节点名: 延迟ms}`，逐节点只查表）。只有两种世界：
+  - **拿不到表** ⇒ 探测层整体关闭、全量放行去测速，**不产生任何判死条目**
+    （机制没给结论就不能判死）——这正是 2026-09-24 删掉 `⚠️ 测活探测异常 · N` 分节的原因：
+    该分节记的是「探测机制没跑通」的误伤，旧逐个探 `/proxies/{name}` 恒 404 时每轮必现；
+  - **拿到表** ⇒ 「表里没有该节点」是 mihomo 的**明确判死结论**（连不上的节点不给延迟，
+    不是给 0），计入 `❌ 失败`，错误串带「测活未通过：」前缀，
+    读者一眼能分清「测活阶段就死」与「测速阶段失败」。
+
+  ⚠️ **该分节若再出现即为回退**（实现与通知都不要再往回加）。根因与判据见
+  `docs/proxy-speedtest-taier.md`。注意 `provider_ready` / `provider_ready_timeout` 是
+  **三套共用**的等待记录（gitee / cdn 也调 `wait_provider_ready`，只是它们不探活、
+  坏法是静默测错节点而非报错），**那是正常的等待记录，不是告警**。
 - **`📦 订阅 · Gist` 的「未更新订阅」必须按真因分文案。** 三种情况形态完全不同：
   真·达标不足（节点慢）→ `达标不足 N 个 · 阈值 ≥X兆（按指标）· 未更新订阅`；
   有速度但缺可导出配置（实现层丢失 `proxy_obj`）→ `未更新订阅：本有节点测出速度，但缺少

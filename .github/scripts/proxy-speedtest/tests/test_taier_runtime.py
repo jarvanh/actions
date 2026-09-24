@@ -15,21 +15,25 @@ taier 的测活、以及 **taier / gitee / cdn 三套**通知的降级渲染。
   经 deadline 是「不限」、直接传进来却是「立即停」。
 - **测活**：最危险的是 **fail-open 写反**——把「探测机制挂了」当成「节点死了」，
   整轮会一个节点都不测。那比在死节点上多花 25 秒糟得多，所以单独验。
-  另有一类更隐蔽的：**mihomo 的 provider 是惰性展开的**——`/providers/proxies` 给的是
-  声明清单，节点尚未注册进 `/proxies/{name}` 时探测会拿到 `Resource not found`
-  （本地 404，实测间隔 ~18.7ms，远小于 3000ms 超时）。run 35116972319 里这被误判成
-  「前 8 个节点都死了」并触发熔断。第 9 组钉住两件事：开测前 `wait_provider_ready()`
-  等展开、以及 `is_unknown_proxy_error()` 把这类错误与「真连不上」分开（fail-open 放行）。
+  ⚠️ 2026-09-24 重写：判活路径从「逐个 `GET /proxies/{name}/delay`」换成「开测前一次
+  `collect_group_delays` 拿整组延迟表 + 逐节点查表」。旧路径是**死代码**——provider
+  成员从不注册进 `/proxies`（顶层恒为 8 个内置组名；对照实验：`/proxies/DIRECT/delay`
+  正常返回 18ms、成员名恒 404），所以测活层从上线起一次都没真正生效过。
+  新语义只有两种世界：拿不到表 ⇒ 探测层整体关闭、全量放行去测速（**不产生判死条目**）；
+  拿到了 ⇒ 「表里没有」是 mihomo 的真判死结论，计入 `❌ 失败`。
+  第 2/2b 组钉查表与批量预取，第 7 组钉通知口径，第 15 组钉旧机器（熔断 / 未知名重排 /
+  撤销判死）**不得回归**。
 - **通知降级**：`aborted_due_to_runtime` 传错、或标题降级写反，会让「到点收摊」看起来
   像一次正常完成，读者无从判断这轮到底测完了没有。三套的**行位置也必须一致**。
 - **include 过滤**（2026-09-22，编排轮池子上万远超预算）：最隐蔽的坏法是 **fail-open
   缺失**——非法正则抛异常、或「全过滤光」被当真返回空列表，编排轮会零节点、整轮白跑。
   另一处是**接线次序**：过滤必须在 max_nodes 截断之前，否则截断把已过滤节点算进配额。
-- **provider 展开等待**（2026-09-22 引入、2026-09-23 二次修正）：超时写死 60 秒 / 按
-  **候选数**放大，都会在大池子上等不完 ⇒ 测活开测就连吃「mihomo 不认识」⇒ 熔断关掉
-  整个测活层 ⇒ 上千个死节点跑满各自的测速窗口（单这一项吃掉整个 5h 预算）。
-  第 14 组钉住「按**实际加载量**放大 + 三套都传 `total_loaded`」，第 15 组钉住
-  「未知名**不再熔断**测活层，而是放回队尾重排」。
+- **provider 装填等待**（2026-09-22 引入、2026-09-23 放大修正、2026-09-24 改判据）：
+  超时写死 60 秒 / 按**候选数**放大，都会在大池子上等不完。**旧判据本身也是错的**——
+  探 `/proxies/{name}` 等的是一件永远不会发生的事（成员从不注册进 `/proxies`），
+  每轮必然超时（给到 900 秒仍是 `attempts=1810` 全 404）。现改读 `/proxies/{组}` 的
+  `all` 成员清单——与测速真正走的路径同源。第 14 组钉住「按**实际加载量**放大 +
+  三套都传 `total_loaded`」，第 9 组钉住新判据的就绪/超时/空名单三态。
 
 跑法：`python .github/scripts/proxy-speedtest/tests/test_taier_runtime.py`
 退出码 0 = 全过。
@@ -83,74 +87,68 @@ def main():
     check(t.should_stop_for_budget(c.speedtest_budget_deadline(0)) is False,
           '两端一致：0 预算经 deadline 后仍为「不限」')
 
-    print('== 2. 测活：先测活再测速（probe_node_alive）==')
+    print('== 2. 测活：查整组延迟表（probe_node_alive）==')
+    # ⚠️ 2026-09-24 重写：判活不再逐个请求 `/proxies/{name}/delay`（provider 成员从不
+    # 注册进 `/proxies`，恒 404 ⇒ 该路径从未生效过），改为开测前一次 `collect_group_delays`
+    # 拿整组 `{名字: 延迟}`、逐节点查表。所以这里验的是**查表语义**，不再起 HTTP 服务。
+    _tbl = {'alive': 123, 'slow': 99999}
 
-    class FakeMihomo(http.server.BaseHTTPRequestHandler):
-        """只实现 /proxies/{name}/delay，按节点名返回四种状态。"""
+    okv, d, err = t.probe_node_alive('alive', _tbl)
+    check(okv is True and d == 123 and err == '',
+          f'表里命中 → 存活并带出延迟（实际 {okv}/{d}/{err}）')
+
+    okv, d, err = t.probe_node_alive('slow', _tbl)
+    check(okv is True and d == 99999,
+          f'延迟大也算活（判据是「连得上」，不是「快」，实际 {okv}/{d}）')
+
+    okv, d, err = t.probe_node_alive('absent', _tbl)
+    check(okv is False and d is None, f'表里没有 → 判死（实际 {okv}/{d}）')
+    # 判死串必须带前缀：通知的 ❌ 失败会原样展示它，读者要能分清「测活阶段就死」
+    # 与「测速阶段失败」（规范 · 2.8 taier 专属分节）。
+    check(str(err).startswith('测活未通过：'),
+          f'判死错误串带「测活未通过：」前缀（实际 {err}）')
+
+    # 2b. 批量延迟表测活（2026-09-24）：这是**唯一真正生效**的测活路径。
+    #     旧路径 `GET /proxies/{name}/delay` 对 provider 成员**永远 404**（成员从不注册
+    #     进 `/proxies`），所以测活层从上线起一次都没生效过。新路径 `/group/{组}/delay`
+    #     一次拿全组 `{名字: 延迟}`，查表是纯内存操作——这里钉住它的三种语义。
+    # 2b. 批量预取本身（2026-09-24）：`collect_group_delays` 一次拿全组 `{名字: 延迟}`。
+    #     这是测活层唯一的取数入口——拿不到表 ⇒ 主流程关闭探测层（fail-open 放全量去测速），
+    #     所以**它自己必须 fail-open 返回空表**，绝不能抛异常把整轮打断。
+    print('== 2b. 批量预取 collect_group_delays：成功拿表 / 不可达返空表 ==')
+
+    class FakeGroup(http.server.BaseHTTPRequestHandler):
+        """只实现 /group/{组}/delay，其余一律 404。"""
 
         def log_message(self, *a):
             pass
 
         def do_GET(self):
-            code, body = 200, b'{}'
-            if '/proxies/alive/delay' in self.path:
-                body = b'{"delay": 123}'
-            elif '/proxies/dead/delay' in self.path:
-                code, body = 400, b'{"message": "get delay: dial tcp: i/o timeout"}'
-            elif '/proxies/nodelay/delay' in self.path:
-                body = b'{"message": "no delay"}'
+            if '/group/AUTO/delay' in self.path:
+                code, body = 200, b'{"DIRECT": 14, "n0": 792}'
             else:
-                code, body = 404, b'{"message": "not found"}'
+                code, body = 404, b'{}'
             self.send_response(code)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Content-Length', str(len(body)))
             self.end_headers()
             self.wfile.write(body)
 
-    srv = http.server.ThreadingHTTPServer(('127.0.0.1', 0), FakeMihomo)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    _saved_api = t.MIHOMO_API
-    t.MIHOMO_API = f'http://127.0.0.1:{srv.server_address[1]}'
+    srv2 = http.server.ThreadingHTTPServer(('127.0.0.1', 0), FakeGroup)
+    threading.Thread(target=srv2.serve_forever, daemon=True).start()
+    _saved_api2 = g.MIHOMO_API
+    g.MIHOMO_API = f'http://127.0.0.1:{srv2.server_address[1]}'
     try:
-        okv, d, err = t.probe_node_alive('alive', 'http://x', 3000)
-        check(okv is True and d == 123, f'有 delay → 存活（实际 {okv}/{d}/{err}）')
-        okv, _d, err = t.probe_node_alive('dead', 'http://x', 3000)
-        check(okv is False and 'timeout' in err, f'mihomo 判连不上 → 死（实际 {okv}/{err}）')
-        okv, _d, err = t.probe_node_alive('nodelay', 'http://x', 3000)
-        check(okv is False, f'200 但没有 delay → 死（实际 {okv}/{err}）')
-        # 组名（AUTO）不是节点：mihomo 回 404 `Resource not found`，会被当成「判死」。
-        # 2026-09-15 编排轮就是这么把 8/8 节点全跳过、整轮零产出的——探测必须传节点名。
-        okv, _d, err = t.probe_node_alive('AUTO', 'http://x', 3000)
-        check(okv is False and 'not found' in err.lower(),
-              f'对 AUTO 组名探测 → mihomo 回 not found（反证必须用节点名，实际 {okv}/{err}）')
-
-        # ⚠️ 最关键的一条：探测机制本身挂了必须**按存活处理**（fail-open）。
-        # 判反了会让整轮一个节点都不测——比在死节点上多花 25 秒糟得多。
-        t.MIHOMO_API = 'http://127.0.0.1:1'  # 没人监听
-        okv, _d, err = t.probe_node_alive('whatever', 'http://x', 3000)
-        check(okv is True, f'连不上 mihomo → fail-open 判活（实际 {okv}/{err}）')
-        check('按存活处理' in err, f'fail-open 要在原因里写清楚（实际 {err}）')
+        tbl2 = g.collect_group_delays('AUTO', 'http://x', 3000)
+        check(tbl2 == {'DIRECT': 14, 'n0': 792},
+              f'一次请求拿到整组延迟表（实际 {tbl2}）')
+        # 不可达 ⇒ 空表（fail-open），由主流程据此关闭探测层
+        g.MIHOMO_API = 'http://127.0.0.1:1'  # 没人监听
+        tbl3 = g.collect_group_delays('AUTO', 'http://x', 3000)
+        check(tbl3 == {}, f'拿不到表 → 空表 fail-open、不抛异常（实际 {tbl3}）')
     finally:
-        t.MIHOMO_API = _saved_api
-        srv.shutdown()
-
-    # 2b. 批量延迟表测活（2026-09-24）：这是**唯一真正生效**的测活路径。
-    #     旧路径 `GET /proxies/{name}/delay` 对 provider 成员**永远 404**（成员从不注册
-    #     进 `/proxies`），所以测活层从上线起一次都没生效过。新路径 `/group/{组}/delay`
-    #     一次拿全组 `{名字: 延迟}`，查表是纯内存操作——这里钉住它的三种语义。
-    print('== 2b. 测活（批量延迟表）：查表命中 / 缺失 / 空表 fail-open ==')
-    _tbl = {'alive': 123, 'slow': 900}
-    okv, d, _e = t.probe_node_alive('alive', 'http://x', 3000, delay_table=_tbl)
-    check(okv is True and d == 123, f'表里命中 → 存活并带出延迟（实际 {okv}/{d}）')
-    okv, d, _e = t.probe_node_alive('slow', 'http://x', 3000, delay_table=_tbl)
-    check(okv is True and d == 900, f'延迟大也算活（判据是「连得上」，不是「快」）')
-    okv, _d, _e = t.probe_node_alive('dead', 'http://x', 3000, delay_table=_tbl)
-    # 表里没有 = mihomo 组测速没给出延迟 = 连不上 = 判死
-    check(okv is False, f'表里没有 → 判死（实际 {okv}）')
-    # ⚠️ 最关键：空表是**探测机制没给出结论**，不是节点死 ⇒ 必须 fail-open
-    okv, _d, err = t.probe_node_alive('whatever', 'http://x', 3000, delay_table={})
-    check(okv is True, f'空延迟表 → fail-open 判活（实际 {okv}）')
-    check('按存活处理' in err, f'空表 fail-open 要写清原因（实际 {err}）')
+        g.MIHOMO_API = _saved_api2
+        srv2.shutdown()
 
     # 2c. 组名常量：配置生成 / 切节点 / 判就绪 / 批量探测必须同一个组名。
     #     分散写死 'AUTO' 时漏改一处是「静默测错对象」，不报错、极难发现。
@@ -283,28 +281,32 @@ def main():
           not any('<b>x</b>' in str(x) for x in c_esc),
           'cdn 中止原因经过 HTML 转义')
 
-    print('== 7. 测活探测失败不得混进「❌ 失败」（与节点故障区分）==')
-    # 2026-09-16 编排轮 35116972319：8 条 `Resource not found` 全挤在 0.13 秒内，
-    # 是 mihomo 控制面调用失败、节点根本没被真正探测过。旧实现把它们塞进 ❌ 失败清单，
-    # 读者只会以为 8 个节点是坏的。现在必须单独成节、且明确说「不计入失败」。
+    print('== 7. 测活判死计入「❌ 失败」，且不再有「⚠️ 测活探测异常」分节 ==')
+    # ⚠️ 2026-09-24 改：判活改为查整组延迟表后只有两种世界——
+    #   拿不到表 ⇒ 探测层整体关闭、不产生判死条目（机制没给结论就不能判死）；
+    #   拿到了 ⇒ 「表里没有」是 mihomo 的真判死结论，与测速失败同类，进 ❌ 失败。
+    # 旧分节记的是「探测机制没跑通」的误伤（逐个探 `/proxies/{name}` 恒 404 时每轮必现），
+    # 新判据下不复存在；若再出现即为回退（规范 · 2.8 taier 专属分节）。
     probe_dead = [{'ok': False, 'bypass': False, 'up': 0.0, 'down': 0.0, 'name': f'p{i}',
-                   'probe_failed': True, 'error': '测活未通过：Resource not found'}
+                   'error': '测活未通过：组测速无延迟值（连不上）'}
                   for i in range(8)]
     real_dead = [{'ok': False, 'bypass': False, 'up': 0.0, 'down': 0.0, 'name': f'd{i}',
                   'error': '连不上测速点 广东联通（延迟/上下行全空）'} for i in range(3)]
     mixed = render(probe_dead + real_dead)
     joined = '\n'.join(str(x) for x in mixed)
-    check('⚠️ 测活探测异常 · 8' in joined, f'探测失败单独成节（实际标题缺失）')
-    check('不计入失败' in joined, '明确交代「不计入失败」')
-    check('❌ 失败 · 3' in joined,
-          f'❌ 失败只数真正的失败（实际应为 3，即 {[x for x in mixed if "❌ 失败" in str(x)]}）')
-    check(not any('Resource not found' in str(x) and str(x).strip().startswith('├─')
-                  for x in mixed), '误报条目不再出现在树形清单里')
+    # 8 个测活判死 + 3 个测速失败 = 11，全部计入 ❌ 失败
+    check('❌ 失败 · 11' in joined,
+          f'测活判死与测速失败合并计数为 11（实际 {[x for x in mixed if "❌ 失败" in str(x)]}）')
+    check(not any('测活探测异常' in str(x) for x in mixed),
+          '不再有「⚠️ 测活探测异常」分节（该分节若出现即为回退）')
+    # 判死串带前缀，读者能分清「测活阶段就死」与「测速阶段失败」
+    check(any('测活未通过：' in str(x) for x in mixed),
+          '判死条目的原因带「测活未通过：」前缀')
 
-    # 负向对照：没有探测失败时，不得凭空出现该分节
+    # 负向对照：只有测速失败时也没有该分节
     only_real = render(real_dead)
     check(not any('测活探测异常' in str(x) for x in only_real),
-          '无探测失败 → 不出现该分节（负向对照）')
+          '无测活判死 → 同样不出现该分节（负向对照）')
 
     print('== 8. 「未更新订阅」按真因分文案（不把实现故障说成节点不达标）==')
     # 同样来自 run 35116972319：206 个节点实测有速度（最高 245 Mbps）却报「达标不足」。
@@ -337,23 +339,6 @@ def main():
     # 远小于 3000ms 的探测超时 ⇒ 是本地 HTTP 往返，mihomo 压根没连节点、只是
     # `/proxies/{name}` 里查不到名字。根因是读 `/providers/proxies`（声明清单）后
     # 仅 20ms 就开始探测，而节点尚未注册进路由表（16 秒后第一个测速结果才出现）。
-    import urllib.error
-
-    class _404(urllib.error.HTTPError):
-        def __init__(self):
-            super().__init__('u', 404, 'Not Found', {}, None)
-
-    # 9a. 判据：认「不认识这个名字」，不认「连不上」
-    #     `host not found` 是**真·网络故障**（DNS 解析失败），绝不能归进「机制故障」，
-    #     否则真连不上的节点会被 fail-open 判成存活、还绕过熔断（噪声换成漏判）。
-    for err, exp in [('Resource not found', True), ('no such proxy', True),
-                     ('timeout', False), ('connection refused', False),
-                     ('host not found', False),
-                     ('Name or service not known', False),
-                     ('无延迟值（连不上）', False), ('', False)]:
-        check(t.is_unknown_proxy_error(err) is exp,
-              f'unknown 判据 {err!r} → {exp}（实际 {t.is_unknown_proxy_error(err)}）')
-
     # 9b. 等就绪：前 2 次组里还没成员、第 3 次成员出现 ⇒ 就绪
     #     实现已抽到共享层 speedtest_gitee（CDN / Gitee / taier 三套共用），
     #     函数体里的 `mihomo_api_get` 是在 **speedtest_gitee 命名空间**解析的，
@@ -402,20 +387,14 @@ def main():
     finally:
         g.mihomo_api_get, g.time.sleep, g.log_progress = _orig_get, _orig_sleep, _orig_log
 
-    # 9e. 撤销判死：原地改 results / alive_items，返回条数
-    r9 = [{'name': 'p0', 'probe_failed': True, 'ok': False},
-          {'name': 'p1', 'probe_failed': True, 'ok': False},
-          {'name': 'real', 'ok': False}]
-    a9 = [{'name': 'p0'}, {'name': 'p1'}, {'name': 'other'}]
-    q9 = [{'name': 'p0'}, {'name': 'p1'}]
-    n9 = t._revive_probe_failed(r9, a9, q9)
-    check(n9 == 2, f'返回撤销条数（实际 {n9}）')
-    check([x['name'] for x in r9] == ['real'],
-          f'伪造的「测活未通过」条目被摘掉、真失败保留（实际 {[x["name"] for x in r9]}）')
-    check([x['name'] for x in a9] == ['p0', 'p1', 'other', 'p0', 'p1'],
-          f'撤销的节点回到测速队列（实际 {[x["name"] for x in a9]}）')
-    check(q9 == [], '队列清空（避免下一轮重复撤销）')
-    check(t._revive_probe_failed(r9, a9, []) == 0, '空队列 → 返回 0、不改动')
+    # 9e. 旧机器已删除，不得回归（2026-09-24）：`is_unknown_proxy_error` 区分「不认识名字」
+    #     与「真连不上」、`_revive_probe_failed` 撤销判死——它们都是为「逐个探
+    #     `/proxies/{name}`（恒 404，机制误伤与真死无法区分）」设计的兜底。新判据下
+    #     只有「拿到表 / 没拿到表」两种世界，不需要这些中间态机器。
+    check(not hasattr(t, 'is_unknown_proxy_error'),
+          'is_unknown_proxy_error 已删除（旧路径判据，不得回归）')
+    check(not hasattr(t, '_revive_probe_failed'),
+          '_revive_probe_failed 已删除（撤销判死机器，不得回归）')
 
     # 9f. 三套共用**同一份** wait_provider_ready（防某一套留了本地副本、修这边漏那边）
     #     判据用对象同一性（`is`），不是「都能调」——后者对副本也成立，抓不到漂移。
@@ -786,58 +765,43 @@ def main():
         check('total_loaded=' in src14d,
               f'{mod_name} 必须传 total_loaded（按实际加载量算，而非过滤后的候选数）')
 
-    # 14e. 没传加载量时退化为候选数（老调用方不炸，只是精度差）
+    # 14e. 组里始终没有成员 ⇒ 超时返回 False（不抛异常，调用方据此降级）
     _orig_get14 = g.mihomo_api_get
     try:
-        g.mihomo_api_get = lambda path: (_ for _ in ()).throw(_404())
+        g.mihomo_api_get = lambda path: {'all': ['a']}
+        check(t.wait_provider_ready(['a'], timeout=0.1)[0] is True,
+              '成员已在组里 → 立即就绪')
+        g.mihomo_api_get = lambda path: {'all': []}
         _r14, _w14, _ = t.wait_provider_ready(['a'], timeout=0.1)
-        check(_r14 is False, 'timeout 显式给定时不走自动放大（调用方能压时间）')
+        check(_r14 is False, '组里始终没有该成员 → 超时返回 False（不抛异常）')
     finally:
         g.mihomo_api_get = _orig_get14
 
-    print('== 15. 「mihomo 不认识节点名」不再熔断测活层，改为放回队尾重排（2026-09-23）==')
-    # 旧行为：连续 8 个 `Resource not found` ⇒ 永久关掉整个测活层。坏法是**把加载状态当
-    # 节点属性**——mihomo 加载上万个节点时展开极慢，此刻「不认识」是正常的中间态；一熔断
-    # 就再没人拦死节点，1309 个全跑满 16.5 秒 ≈ 6 小时。
-    # 新行为：把节点 append 回队尾（挪到本轮其余节点之后，天然形成「等会儿再试」），
-    # 累计上限 2N 防无限循环，到顶才退回旧的「放行去测速」。
-    # 反证：把 `alive_items.append(item)` 改回 `_probe_enabled = False`，15a/15b 变红。
-
-    # 15a. 源码级：未知名分支里**不再有**关掉测活层的语句，且存在放回队尾
+    print('== 15. 旧测活机器不得回归 + 拿不到表即启动 fail-open（2026-09-24）==')
+    # 旧机器（熔断 / 未知名重排 / 撤销判死 / 待定重试队列）全是为「逐个探
+    # `/proxies/{name}`（恒 404，机制误伤与真死无法区分）」设计的兜底。新判据下只有
+    # 「拿到表 / 没拿到表」两种世界，不需要中间态机器——它们若回来，会把「一堆死节点」
+    # 误读成「机制坏了」⇒ 关掉测活 ⇒ 上千死节点各跑满一个测速窗口（≈6.6h）。
     _t15 = _re.sub(r'\s+', '', pathlib.Path(t.__file__).read_text(encoding='utf-8'))
-    _u15 = _t15.find('ifis_unknown_proxy_error(_perr):')
-    check(_u15 != -1, '未知名分支存在')
-    # 段界取到「下一条分支的连击清零」（`_unknown_streak=0`）为止——再往后就是**真连不上**
-    # 的熔断，那段必须保留（15c 验），框进来会把 15a 判成假红。
-    _e15 = _t15.find('_unknown_streak=0', _u15)
-    _seg15 = _t15[_u15:_e15] if _e15 != -1 else _t15[_u15:_u15 + 1200]
-    check('alive_items.append(item)' in _seg15,
-          '未知名 → 放回队尾（而不是关掉测活层）')
-    check('_probe_enabled=False' not in _seg15,
-          f'未知名分支不得再关掉测活层（_probe_enabled=False）')
+    for _name in ('_probe_dead_streak', '_probe_guard_n', '_probe_retry_queue',
+                  '_unknown_requeue_cap', '_unknown_requeued', '_unknown_streak',
+                  '_revive_probe_failed', 'is_unknown_proxy_error'):
+        check(_name not in _t15, f'旧机器 {_name} 不得回归（新判据无中间态）')
+    # `probe_failed` 这个词本身不算回归——日志事件名 `taier_node_probe_failed` 是合法的；
+    # 回归指的是 results 条目再挂 `probe_failed` 标记走「待定→撤销」那一套。
+    check("'probe_failed':" not in _t15 and 'probe_failed=' not in _t15
+          and "r.get('probe_failed')" not in _t15,
+          'results 条目不得再挂 probe_failed 标记（待定→撤销机器已删）')
 
-    # 15b. 有重排上限 + 到顶有日志（否则展不开时队列永远消费不完）
-    check('_unknown_requeue_cap' in _t15 and '_unknown_requeued' in _t15,
-          '重排有累计上限（防无限循环）')
-    check('taier_probe_unknown_requeue_capped' in _t15,
-          '到顶留痕（可核对是否真的展不开）')
-
-    # 15d. ⚠️ **到顶后必须放行去测速，不得 continue 丢弃**（2026-09-23 零产出事故）
-    #     事故：重排配额烧完后写的是 `continue` ⇒ 1581 个候选全部跳过测速 ⇒
-    #     `taier_speedtest_done node_count=0`，整轮白跑。fail-open 的语义是「照测」，
-    #     不是「不测」。反证：把 `continue` 加回 `taier_probe_unknown_requeue_capped`
-    #     后面，这条变红。
-    # 判据用**区间计数**：从「到顶 log」到该分支收尾（`_unknown_streak=0`，即真判死分支
-    # 开始）之间**不得**再出现 continue。出现即说明到顶后又把节点丢了（零产出回归）。
-    _cap15 = _t15.find('taier_probe_unknown_requeue_capped')
-    check(_cap15 != -1, '到顶分支存在')
-    _end15 = _t15.find('_unknown_streak=0', _cap15)
-    check(_end15 != -1 and 'continue' not in _t15[_cap15:_end15],
-          '到顶后不得再 continue（否则节点被丢弃 ⇒ 零产出）')
-
-    # 15c. **真连不上**的熔断必须还在（只放开了「不认识」，没放开「节点真死」）
-    check('_probe_dead_streak>=_probe_guard_n' in _t15,
-          '真连不上的熔断判据仍在（不要因为改了未知名分支就整体失效）')
+    # 15a. ⚠️ 探测层只在**真的拿到延迟表**时才启用：拿空表 ⇒ 整体关闭、全量放行去测速。
+    #     这是 fail-open 的硬要求——拿不到结论却照常判死会把整轮打成零产出。
+    check('_probe_enabled=CONFIG[' in _t15 and 'bool(_delay_table)' in _t15,
+          '探测层启用判据 = 开关 且 拿到非空延迟表')
+    check('taier_probe_disabled' in _t15,
+          '探测层关闭要留痕（可核对是不是「机制没给结论」）')
+    # 15b. 判死条目直接进 results（带前缀错误串），不再有「待定 → 撤销」的中间态
+    check("'error':_perr" in _t15,
+          '判死条目直接落 results（不再挂待定队列等撤销）')
 
     print()
     if FAILURES:
