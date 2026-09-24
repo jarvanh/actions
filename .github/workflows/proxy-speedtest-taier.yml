@@ -55,13 +55,9 @@ on:
       duration:
         description: '每个方向测速秒数（上游二进制硬钳制 5-13，>13 会被压到 13）'
         required: false
-        default: '5'
-      max_nodes:
-        description: '最多测几个节点（0 = 不限）'
-        required: false
-        default: '0'
+        default: '13'
       alive_probe:
-        description: '测活开关（on = 默认，跳过连不上的节点省下 ≈15 秒窗口 / off = 关闭，直接测速）'
+        description: '测活开关（on = 默认，跳过连不上的节点省下 ≈31 秒窗口 / off = 关闭，直接测速）'
         required: false
         type: choice
         default: 'on'
@@ -118,10 +114,6 @@ on:
         description: '每个方向测速秒数'
         required: false
         type: string
-      max_nodes:
-        description: '最多测几个节点（0 = 不限）'
-        required: false
-        type: string
       alive_probe:
         description: '测活覆盖（on|off）；留空走默认值 on'
         required: false
@@ -161,10 +153,10 @@ jobs:
     runs-on: ubuntu-latest
     # **刻意不设 `timeout-minutes`**，与 gitee / cdn 两套一致（走 GitHub 的 job 默认 360 分钟）。
     # 原先写死 45 分钟，等于把「无界的串行测速」交给一个拍出来的天花板，必撞硬取消：
-    # 测速是逐节点串行的、每节点 ≈ `2 × duration + 5` = 15 秒（duration 默认 5，见
-    # taier_speedtest.py 里 `TAIER_DURATION` 的注释），**45 分钟只够约 180 个节点**；而
+    # 测速是逐节点串行的、每节点 ≈ `2 × duration + 5` = 31 秒（duration 默认 13，见
+    # taier_speedtest.py 里 `TAIER_DURATION` 的注释），**45 分钟只够约 87 个节点**；而
     # proxy-speedtest-gistnodes 一次会交接几千个（实测 2026-09-16 run 35116972319 交接
-    # 8326 个 ≈ 34.7 小时），于是整轮白烧。
+    # 8326 个 ≈ 71.7 小时），于是整轮白烧。
     # ⚠️ 不设 ≠ 没有上限，默认 360 分钟。**要让长轮真正跑完，靠的是脚本自己的墙钟预算
     # 到点收摊、拿已测节点出订阅，而不是靠抬天花板**（2026-09-14 已实现：
     # `TAIER_BUDGET_SECONDS`，默认 18000 秒 = 5 小时，比 360 分钟少 1 小时留给前置准备
@@ -248,19 +240,20 @@ jobs:
           # 测速参数（workflow_call 入参 > workflow_dispatch 入参 > 默认值；定时运行走默认值）
           TAIER_POINTS: ${{ inputs.points || github.event.inputs.points || '广东联通' }}
           TAIER_MODE: ${{ inputs.mode || github.event.inputs.mode || 'single' }}
-          TAIER_DURATION: ${{ inputs.duration || github.event.inputs.duration || '5' }}
-          TAIER_MAX_NODES: ${{ inputs.max_nodes || github.event.inputs.max_nodes || '0' }}
-          # 节点名优先级正则（不区分大小写）：命中者排到队首先测（**不丢弃**未命中者，
-          # 它们仍在队尾）。节点数远超 5 小时预算时，测速顺序决定了谁进订阅，
-          # 让专线/优质地区先测。留空或正则非法 → 原序、不报错。
-          TAIER_PRIORITY_REGEX: 'IPLC|IPEL|IEPL|专线|HK|Hong|港|TW|Taiwan|台|SG|新加坡'
+          # 默认 13（上游硬钳上限）：每方向采样 13 秒、单节点 ≈31 秒，读数最稳。
+          # 2026-09-24 从 5 上调——此前压到 5 是为了「同等预算多覆盖节点」，而真正的耗时
+          # 大头（死节点各吃一个测速窗口）已由测活层筛掉，不再需要拿 duration 换覆盖数。
+          TAIER_DURATION: ${{ inputs.duration || github.event.inputs.duration || '13' }}
+          # ⚠️ TAIER_MAX_NODES 与 TAIER_PRIORITY_REGEX 已于 2026-09-24 删除（脚本不再读）：
+          # max_nodes 是「按 provider 原序砍尾巴」，会砍掉还没测过的节点、与「到点收摊」
+          # 语义重复且更易误伤；priority 只排顺序、不减量，测活能真筛死节点后已无收益。
+          # 池子大小交给 TAIER_INCLUDE_REGEX，跑不完交给 TAIER_BUDGET_SECONDS 到点收摊。
           # include 过滤正则：workflow_call 入参透传（只有编排轮传，定时轮/手动 dispatch 为
           # 空 = 不过滤）。命中保留、未命中丢弃；正则非法或过滤后为空时脚本 fail-open 原样放行。
           TAIER_INCLUDE_REGEX: ${{ inputs.include_regex || '' }}
-          # 测活开关：默认**开**（跳过连不上泰尔控制面的死节点，省下每个 ≈15 秒的测速窗口）。
-          # 误杀风险由熔断（开头连续 8 个未通过且无一成功就关掉探测）与 fail-open（探测机制
-          # 出错按存活处理）兜住；run 34859505000 那次 27 个节点全 `Resource not found`
-          # （探测用的节点名在 mihomo 里对不上）属已知代价，真要规避就从 dispatch 选 `off`。
+          # 测活开关：默认**开**（跳过连不上泰尔控制面的死节点，省下每个测速窗口）。
+          # 判据是开测前一次批量拿整组延迟表：拿不到表 ⇒ 探测层整体关闭、全量放行；
+          # 拿到了 ⇒ 「表里没有」是真判死（2026-09-24 改，旧逐个探测路径恒 404）。
           # 不接仓库 Variables（排查现场的开关，不适合当成长期仓库配置）。
           TAIER_ALIVE_PROBE: ${{ (inputs.alive_probe || github.event.inputs.alive_probe) == 'off' && '0' || '1' }}
           # 墙钟预算（秒，0 = 不限）：到点不再开下一个节点，拿已测节点照常出订阅（退出码 0），

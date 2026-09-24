@@ -107,22 +107,15 @@ CONFIG = {
     # 单流体验；multi（下 8 + 上 4 连接）看节点带宽上限，both 两者对照
     'TAIER_MODE': (os.environ.get('TAIER_MODE', '') or 'single').strip(),
     # 上游二进制把 --duration 硬钳制在 5-13（main.go），>13 会被压到 13。
-    # 默认 5（2026-09-17 从 10 下调）：节点数远超 5 小时预算（8326 个 ÷ 19.6s ≈ 45 小时），
-    # 单节点成本 2×duration+5 里 duration 是最大且唯一可调的杠杆——10→5 把单节点从
-    # ≈25 秒压到 ≈15 秒，同等预算能覆盖的节点数从 ~900 提到 ~1500（约 +67%）。
-    # 代价是每方向采样窗口减半、读数更抖；配合下面的「优先测速」把窗口留给值得的节点。
-    'TAIER_DURATION': min(max(int(os.environ.get('TAIER_DURATION', '5') or 5), 5), 13),
-    # 0 = 不限（默认）；节点多时整体耗时 ≈ 节点数 × (2×duration + 5)s
-    'TAIER_MAX_NODES': int(os.environ.get('TAIER_MAX_NODES', '0') or 0),
-    # 节点名优先级正则（不区分大小写）：命中者**排到队首先测**，其余按原序追加。
-    # 为什么需要它：节点数远超预算时，测速顺序 = 谁进订阅名单的顺序，原序是 provider 的
-    # 声明序（与质量无关），等于把宝贵的测速窗口随机撒给几千个节点。专线/常见优质地区
-    # （IPLC/IEPL 专线、HK/TW/SG 低延迟区）命中率高得多，让它们先测，预算耗尽时至少
-    # 订阅里留下的是这些。**只排序、不丢弃**：未命中的节点仍在队尾照常参与（测得到就测）。
-    'TAIER_PRIORITY_REGEX': ((os.environ.get('TAIER_PRIORITY_REGEX', '') or '').strip()
-                             or 'IPLC|IPEL|IEPL|专线|HK|Hong|港|TW|Taiwan|台|SG|新加坡'),
-    # 节点名 include 正则（不区分大小写）：命中者**保留**、未命中者**丢弃**——与上面的
-    # 优先级正则（只排序、不丢弃）互补。为什么需要它：排序只能决定「先测谁」，决定不了
+    # 默认 13（2026-09-24 从 5 上调）：单节点成本 = 2×duration+5，duration 是最大且唯一
+    # 可调的杠杆。此前为了「同等预算多覆盖节点」一路压到 5（≈15 秒/节点），代价是每方向
+    # 采样窗口只有 5 秒、读数发抖；而真正的耗时大头是**死节点各吃一个测速窗口**——
+    # 2026-09-24 测活改批量延迟表后死节点被毫秒级筛掉（编排轮实测 199/200 判死），
+    # 不再需要靠压 duration 换节点覆盖，故把读数质量放回来：13 秒/方向，≈31 秒/节点。
+    # ⚠️ 代价是同等预算覆盖的节点数约为 duration=5 时的一半，靠 TAIER_BUDGET_SECONDS
+    # 到点收摊兜底，不会撞 job 硬取消。
+    'TAIER_DURATION': min(max(int(os.environ.get('TAIER_DURATION', '13') or 13), 5), 13),
+    # 节点名 include 正则（不区分大小写）：命中者**保留**、未命中者**丢弃**。
     # 「池子有多大」；编排轮（proxy-speedtest-gistnodes）交接的池子上万（2026-09-22 实测
     # 15793 个，5 小时预算只测完 1905 个），只有把池子压到预算内每轮才收得了摊。
     # 留空 = 不过滤（默认）：定时轮吃的是用户自己的机场订阅，不该被正则砍；只有编排轮
@@ -130,11 +123,11 @@ CONFIG = {
     'TAIER_INCLUDE_REGEX': (os.environ.get('TAIER_INCLUDE_REGEX', '') or '').strip(),
     # 墙钟预算（秒，0 = 不限）。**必须显著小于 job 的 timeout-minutes（默认 360 分钟）**，
     # 留出前置准备（mihomo 下载 / TUN）与收尾（通知 / Gist 上传）的余量：默认 5 小时。
-    # 为什么需要它：测速逐节点串行、每节点 ≈ 25 秒，而订阅里可能有几千个节点
+    # 为什么需要它：测速逐节点串行、每节点 ≈ 31 秒，而订阅里可能有几千个节点
     # （proxy-speedtest-gistnodes 2026-09-14 那轮交接 3284 个 ≈ 22.8 小时），
     # 撞 GitHub 的**硬取消**会把整轮工作全废；到点收摊则能拿已测节点出订阅。
     'TAIER_BUDGET_SECONDS': int(os.environ.get('TAIER_BUDGET_SECONDS', '18000') or 0),
-    # 测速前先测活：死节点别再烧掉一整个测速窗口（≈25 秒）。探测目标默认是**泰尔自己的
+    # 测速前先测活：死节点别再烧掉一整个测速窗口（≈31 秒）。探测目标默认是**泰尔自己的
     # 控制面**（`_TAIER_CTRL_SERVERS[0]`）——测的是「这个节点到底能不能跑泰尔」，而不是
     # 泛泛的连通性；探测 URL 可覆盖。判死只认 mihomo 的明确结论，机制出错一律 fail-open
     # （见 probe_node_alive）。
@@ -150,7 +143,7 @@ CONFIG = {
     #
     # 这一层现在是**唯一的准入关口**：`collect_provider_snapshot` 已不再按 provider 的
     # `alive` 预筛（那条路在订阅大时会把节点收成 0 个，见其 docstring），收集来的节点
-    # 全量进循环，由这里逐个判「值不值得烧 25 秒」。
+    # 全量进循环，由这里逐个判「值不值得烧 31 秒」。
     'TAIER_ALIVE_PROBE': (os.environ.get('TAIER_ALIVE_PROBE', '1').strip().lower()
                           not in ('0', 'false', 'no', 'off')),
     'TAIER_ALIVE_PROBE_URL': ((os.environ.get('TAIER_ALIVE_PROBE_URL', '') or '').strip()
@@ -167,7 +160,7 @@ CONFIG = {
 # `should_stop_for_budget` 由 speedtest_common 提供（四套测速共用一份判据），见文件头 import。
 
 def probe_node_alive(name, delay_table):
-    """经 mihomo 的**批量延迟表**判活：连得通才去跑那 25 秒的测速。
+    """经 mihomo 的**批量延迟表**判活：连得通才去跑那 31 秒的测速。
 
     返回 `(alive, delay_ms, error)`。
 
@@ -190,35 +183,11 @@ def probe_node_alive(name, delay_table):
     return False, None, '测活未通过：组测速无延迟值（连不上）'
 
 
-def prioritize_nodes(items: list, pattern: str):
-    """把节点名命中 `pattern` 的排到队首，其余保持原相对顺序。返回 `(排序后列表, 命中数)`。
-
-    **只重排、不丢弃**：未命中的节点仍在队尾，预算够就照测。这样「优先」是软保证——
-    命中节点先拿到测速窗口，但不会因为不命中就被排除出订阅候选。
-
-    **必须是稳定分区而不是排序**：命中集与未命中集内部都保持 provider 的原序，
-    否则同一份订阅每轮的测速顺序会漂移，历史对照数据就失去可比性。
-
-    `pattern` 非法（正则语法错）时**原样返回、不抛**——一个配置写错不该让整轮零产出，
-    与测活层的 fail-open 同一原则。
-    """
-    if not items or not pattern:
-        return items, 0
-    try:
-        rx = re.compile(pattern, re.IGNORECASE)
-    except re.error as e:
-        log_progress('priority_regex_invalid', pattern=pattern, error=str(e))
-        return items, 0
-    hit = [x for x in items if rx.search(str(x.get('name') or ''))]
-    miss = [x for x in items if not rx.search(str(x.get('name') or ''))]
-    return hit + miss, len(hit)
-
-
 def filter_nodes_include(items: list, pattern: str):
     """把节点名未命中 `pattern` 的**丢弃**，只留命中者。返回 `(保留列表, 丢弃数)`。
 
-    与 `prioritize_nodes`（只排序、不丢弃）互补：排序决定「先测谁」，过滤决定
-    「池子有多大」。编排轮节点数远超预算时，只有后者真正缩短运行时长。
+    这是**唯一**的池子裁剪层：决定「池子有多大」。编排轮节点数远超预算时，
+    只有它真正缩短运行时长（编排轮实测 22499 → 1695）。
 
     两条 fail-open（与测活层同一原则——过滤层故障不得造成零产出）：
 
@@ -227,8 +196,7 @@ def filter_nodes_include(items: list, pattern: str):
       全不剩更可能是**正则词表与当轮节点命名完全错位**，而不是「节点真的一万个都不要」；
       拿它当真会让整轮零节点，比不过滤糟得多。
 
-    命中判据与 prioritize 同款：`re.IGNORECASE` + 只看 `name`；保留集内保持原相对序
-    （调用方把它放在 prioritize 之后，命中者前置的顺序不会被破坏）。
+    命中判据：`re.IGNORECASE` + 只看 `name`；保留集内保持原相对序。
     """
     if not items or not pattern:
         return items, 0
@@ -811,7 +779,8 @@ def _run():
         'points': CONFIG['TAIER_POINTS'],
         'mode': CONFIG['TAIER_MODE'],
         'duration': CONFIG['TAIER_DURATION'],
-        'max_nodes': CONFIG['TAIER_MAX_NODES'],
+        # max_nodes / priority 两项已于 2026-09-24 随功能一并删除（见下方过滤处的说明），
+        # 这里不要补回来——补一个「已废弃但仍在打印」的字段比不打印更容易误导排查。
         'budget_seconds': _budget_seconds,
     })
     env = merged_env()
@@ -848,21 +817,15 @@ def _run():
     # 过滤后 1539，按 1539 只给 152 秒，等不完）。
     _loaded_total = sum(int(v.get('total') or 0) for v in (provider_snapshot or {}).values())
 
-    # 优先级排序必须在 **max_nodes 截断之前**：否则截断先按 provider 原序砍掉了尾巴，
-    # 命中优先级的节点可能根本不在「前 N 个」里，排序就白做了。
-    alive_items, priority_hits = prioritize_nodes(alive_items, CONFIG['TAIER_PRIORITY_REGEX'])
-    log_progress('nodes_prioritized', total=len(alive_items), hits=priority_hits,
-                 pattern=CONFIG['TAIER_PRIORITY_REGEX'])
-
-    # include 过滤同样必须在 max_nodes 截断之前：截断要按过滤后的最终池子算「前 N 个」，
-    # 先截会把已被过滤的节点算进配额。过滤保相对序，prioritize 的「命中者前置」不受影响。
+    # include 过滤：唯一决定「池子有多大」的一层（编排轮实测 22499 → 1695）。
+    # ⚠️ 优先级排序（prioritize_nodes）与 max_nodes 截断已于 2026-09-24 删除：
+    # 前者只排顺序、不减量，在测活已能真筛死节点后不再有收益；后者是「按原序砍尾巴」，
+    # 会砍掉还没测过的节点、与「到点收摊」语义重复且更容易误伤。池子大小交给 include，
+    # 跑不完交给 TAIER_BUDGET_SECONDS 到点收摊。
     if CONFIG['TAIER_INCLUDE_REGEX']:
         alive_items, _include_dropped = filter_nodes_include(
             alive_items, CONFIG['TAIER_INCLUDE_REGEX'])
 
-    max_nodes = CONFIG['TAIER_MAX_NODES']
-    if max_nodes and max_nodes > 0:
-        alive_items = alive_items[:max_nodes]
     log_progress('nodes_collected', count=len(alive_items))
 
     # ⚠️ 开测之前先等 provider 真正展开（治 `Resource not found` 误报的根因）。
@@ -904,7 +867,7 @@ def _run():
     _probe_alive = 0
     _probe_dead = 0
     for item in alive_items:
-        # 判据放在**开下一个节点之前**：单节点 ≈ 25 秒，所以超发最多一个节点
+        # 判据放在**开下一个节点之前**：单节点 ≈ 31 秒，所以超发最多一个节点
         if should_stop_for_budget(_budget_deadline):
             aborted_due_to_runtime = True
             runtime_abort_reason = (f'到点收摊：预算 {tg_format_elapsed(_budget_seconds)}，'
@@ -913,7 +876,7 @@ def _run():
                          budget_seconds=_budget_seconds)
             break
         name = str(item.get('name') or '')
-        # 先测活，再测速：死节点不再占用一整个测速窗口（≈25 秒/个）。
+        # 先测活，再测速：死节点不再占用一整个测速窗口（≈31 秒/个）。
         # 查表是纯内存操作（~微秒级），与旧逐节点路径（每次一次 HTTP 往返）不是一个量级。
         # 旧路径的熔断 / 未知名重排 / 撤销判死机器一并删除：那些是为「逐个探
         # /proxies/{name}（恒 404，机制误伤与真死无法区分）」设计的；新判据拿到的
