@@ -106,6 +106,18 @@ _pairs_parallel_reap_one() {
   local _pp_dir="$1" _tries=0 _idx _pid _f
   while :; do
     _tries=$((_tries + 1))
+    # 硬顶闸（2026-09-25 病灶 D 第五处）: 闸必须装在**轮询内部**，不能只装在
+    #   调用点前。调用点前的闸只能查到"进入等待的那一瞬间" —— run 35989879675
+    #   实证: 18:41:45 打完"不再分发新同步对"时距硬顶还有 14min（> reserve
+    #   480s），闸未触发 ⇒ 进入本函数的无限轮询后**再也回不到主循环**，闸永远
+    #   查不到第二次 ⇒ 18:56 被 330min 硬杀（14min 空白）。
+    #   （对照 run 35900336446 之所以 success，只是因为进入时恰好已到硬顶。）
+    #   故每轮 sleep 前都查一次: 到顶即放弃等待，返回 1 交调用方收摊。
+    #   不丢东西: 子目录 marker 已落盘、修复状态已增量持久化，下轮接力。
+    if declare -F sync_hard_limit_stop >/dev/null 2>&1 && sync_hard_limit_stop; then
+      echo "⏰ 距平台硬顶不足收尾预留，放弃等待在途同步对（子 marker/游标已持久化，下轮接力）"
+      return 1
+    fi
     for _idx in "${!_pp_pid[@]}"; do
       _pid=${_pp_pid[$_idx]:-}
       _f="$_pp_dir/$_idx.done"
@@ -167,7 +179,10 @@ _run_registry_pairs_parallel() {
       if [ -z "${_busy_be[$_be]:-}" ]; then _pick=$idx; _pick_be="$_be"; break; fi
     done
     if [ "$_pick" -ge 0 ] && [ "$_running" -ge "$_par" ]; then
-      _pairs_parallel_reap_one "$_pp_dir"; _running=$((_running - 1)); continue
+      # 满载等待: reap 返回 1 = 轮询内部撞上硬顶（见该函数注释）⇒ 立即收摊，
+      #   否则本循环会继续分发/等待，把 step 拖过 330min 硬杀线。
+      if ! _pairs_parallel_reap_one "$_pp_dir"; then SYNC_TIME_EXHAUSTED=1; break; fi
+      _running=$((_running - 1)); continue
     fi
     if [ "$_pick" -ge 0 ] && sync_budget_stop; then
       echo "⏳ 时间预算将尽，不再分发新同步对（在途的等待完成）"
@@ -182,7 +197,10 @@ _run_registry_pairs_parallel() {
         break
       fi
       if [ "$_running" -eq 0 ]; then break; fi
-      _pairs_parallel_reap_one "$_pp_dir"; _running=$((_running - 1)); continue
+      # 进入等待时若未到硬顶，reap 会在自己的轮询里持续复查硬顶并返回 1；
+      #   这里必须据此收摊（2026-09-25 第五处: 只靠进入前那一次判断是不够的）。
+      if ! _pairs_parallel_reap_one "$_pp_dir"; then SYNC_TIME_EXHAUSTED=1; break; fi
+      _running=$((_running - 1)); continue
     fi
     if [ "$_pick" -ge 0 ]; then
       # 分发
@@ -230,7 +248,10 @@ _run_registry_pairs_parallel() {
         SYNC_TIME_EXHAUSTED=1
         break
       fi
-      _pairs_parallel_reap_one "$_pp_dir"; _running=$((_running - 1)); continue
+      # 同样要靠 reap 的返回值收摊（同上，第五处）: 进入时未到硬顶不代表等待
+      #   全程都不会到顶。
+      if ! _pairs_parallel_reap_one "$_pp_dir"; then SYNC_TIME_EXHAUSTED=1; break; fi
+      _running=$((_running - 1)); continue
     fi
     break
   done

@@ -275,6 +275,40 @@ else
   _fail "T6c 找不到 sync_engine.sh"
 fi
 
+# T7: 阻塞等待函数**内部**必须自带硬顶复查（2026-09-25 第五处，run 35989879675）
+# 这是第四次同形态教训的固化: 闸装在**调用点前**只能判"进入等待的那一瞬间"。
+#   _pairs_parallel_reap_one 是 `while :; do ... sleep 2; done` 的无限轮询，
+#   一旦进入就回不到主循环 ⇒ 调用点前的闸永远只有第一次有效。
+#   实证对照: run 35900336446 进入时恰好已到硬顶 ⇒ 闸生效、success；
+#             run 35989879675 进入时距硬顶 14min ⇒ 进去后再没出来 ⇒ 硬杀。
+# 结构断言三件: ①轮询体内有闸 ②reap 返回 1 表示撞顶 ③三处调用点都用返回值收摊。
+echo "── T7 阻塞等待内部必须自带硬顶复查 ──"
+if [ -f "$_TE_SRC" ]; then
+  # T7a: 闸必须在 _pairs_parallel_reap_one 函数体内（而非只在调用方）
+  _reap_body="$(sed -n '/^_pairs_parallel_reap_one() {/,/^}/p' "$_TE_SRC")"
+  case "$_reap_body" in
+    *'while :; do'*sync_hard_limit_stop*'return 1'*)
+      _ok "T7a reap 轮询体内有硬顶复查且撞顶返回 1" ;;
+    *) _fail "T7a reap 轮询体内缺硬顶复查/未返回 1 ⇒ 进入后即无界（第五处死因）" ;;
+  esac
+
+  # T7b: 三处调用点必须**消费返回值**收摊（`if ! ...; then`），不能裸调用
+  _bare=""
+  while IFS=: read -r _ln _rest; do
+    case "$_rest" in
+      *'if ! _pairs_parallel_reap_one'*) : ;;
+      *) _bare="$_bare $_ln" ;;
+    esac
+  done < <(grep -n '_pairs_parallel_reap_one "\$_pp_dir"' "$_TE_SRC")
+  if [ -n "$_bare" ]; then
+    _fail "T7b 这些 reap 调用(${_bare} )未消费返回值 ⇒ 撞顶后仍不收摊"
+  else
+    _ok "T7b 全部 reap 调用均消费返回值并在撞顶时收摊"
+  fi
+else
+  _fail "T7 找不到 task_engine.sh"
+fi
+
 echo
 echo "=== 病灶 D 回归: PASS=${PASS} FAIL=${FAIL} ==="
 [ "$FAIL" -eq 0 ] || exit 1
