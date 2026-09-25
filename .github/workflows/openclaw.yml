@@ -2082,6 +2082,9 @@ jobs:
               if [ -n "$quota_json" ] && [ "$quota_json" != "{}" ]; then
                 local q
                 q="$(printf '%s' "$quota_json" | jq -r 'to_entries | map("\(.key) 剩 \(((.value.remaining / 100000) | floor) / 10)M / \(((.value.total / 100000) | floor) / 10)M") | join(" · ")' 2>/dev/null)"
+                local exp
+                exp="$(printf '%s' "$quota_json" | jq -r '[.[] | .expires_at // empty] | unique | map(todate | .[0:10]) | join(" · ")' 2>/dev/null)"
+                [ -n "$exp" ] && q="${q} · 有效期 ${exp}"
                 [ -n "$q" ] && sub="额度 $(escape_html "$q")"
               fi
               [ -n "$plan_name" ] && [ "$plan_name" != "-" ] && sub="${sub:+$sub · }套餐 $(escape_html "$plan_name")"
@@ -2232,6 +2235,7 @@ jobs:
               if [ -n "$Z2A_POOL_TEXT" ]; then
                 tg_add_section _m "$Z2A_POOL_TITLE"
                 tg_add_block _m "$Z2A_POOL_TEXT"
+                _m+=$'\n'
               fi
               tg_add_path _m "代码" "$Z2A_REPO"
               tg_add_footer _m
