@@ -2233,7 +2233,9 @@ jobs:
               fi
               tg_add_kv _m "结论" "$Z2A_REASON"
               tg_add_path _m "接口" "http://127.0.0.1:${Z2A_PORT}/v1"
-              tg_add_kv _m "鉴权" "需 API Key（与 workbuddy-gateway 同值）"
+              # 标签「API Key」+ tg_add_path：对齐 wb_notify 同款 —— 值走 <code> 等宽，
+              # 客户端点一下即可整块复制（tg_add_kv 是纯文本，只能手选）
+              tg_add_path _m "API Key" "${ZCODE_GATEWAY_KEY:-未取到}"
               [ -n "${Z2A_SELFTEST_MODEL:-}" ] && tg_add_path _m "模型" "$Z2A_SELFTEST_MODEL"
               if [ -n "$Z2A_POOL_TEXT" ]; then
                 tg_add_section _m "$Z2A_POOL_TITLE"
