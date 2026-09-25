@@ -2040,6 +2040,58 @@ jobs:
             fi
             return 1
           }
+          # 账号池采集：admin API 脱敏视图拼「💳 账号池」分节（对齐 wb_notify 的
+          # 账号池口径：条目行 = 名称 · 通道 · 状态；子行 = 额度/套餐 + 最近错误）。
+          # 只在服务已监听时可采；采集失败只影响通知信息量，不改变结论。
+          # 注意：子行换行用 $'\n' 单行拼接 —— YAML 块标量里裸换行续行会破坏缩进。
+          Z2A_POOL_TITLE=""
+          Z2A_POOL_TEXT=""
+          z2a_collect_pool() {
+            local ak json n=0 total=0
+            ak="$(grep -m1 '^ZCODE_ADMIN_KEY=' "$Z2A_RUN_DIR/.env" 2>/dev/null | cut -d= -f2-)"
+            [ -n "$ak" ] || return 0
+            json="$(curl -sS --max-time 10 -H "Authorization: Bearer ${ak}" \
+              "http://127.0.0.1:${Z2A_PORT}/admin/api/accounts" 2>/dev/null)" || return 0
+            printf '%s' "$json" | jq -e '.accounts' >/dev/null 2>&1 || return 0
+            total="$(printf '%s' "$json" | jq -r '.stats.total')"
+            Z2A_POOL_TITLE="$(printf '%s' "$json" | jq -r '"💳 账号池 · \(.stats.total)（active \(.stats.active)）"')"
+            local rows="" prefix subpre
+            while IFS=$'\t' read -r name prov mode st plan_name err quota_json; do
+              n=$((n + 1))
+              if [ "$n" -eq "$total" ]; then
+                prefix='<code>  └─ </code>'; subpre="$(tree_sub 1)"
+              else
+                prefix='<code>  ├─ </code>'; subpre="$(tree_sub 0)"
+              fi
+              local chan st_cn
+              case "$prov/$mode" in
+                zai/jwt)         chan="Plan 通道" ;;
+                bigmodel/apiKey) chan="Key 通道" ;;
+                *)               chan="$prov/$mode" ;;
+              esac
+              case "$st" in
+                active)    st_cn="正常" ;;
+                exhausted) st_cn="额度用完" ;;
+                cooling)   st_cn="冷却中" ;;
+                invalid)   st_cn="鉴权失效" ;;
+                disabled)  st_cn="已停用" ;;
+                *)         st_cn="$st" ;;
+              esac
+              local line="$prefix<code>$(escape_html "$name")</code> · $chan · $st_cn"
+              local sub=""
+              if [ -n "$quota_json" ] && [ "$quota_json" != "{}" ]; then
+                local q
+                q="$(printf '%s' "$quota_json" | jq -r 'to_entries | map("\(.key) 剩 \(((.value.remaining / 100000) | floor) / 10)M / \(((.value.total / 100000) | floor) / 10)M") | join(" · ")' 2>/dev/null)"
+                [ -n "$q" ] && sub="额度 $(escape_html "$q")"
+              fi
+              [ -n "$plan_name" ] && [ "$plan_name" != "-" ] && sub="${sub:+$sub · }套餐 $(escape_html "$plan_name")"
+              [ -n "$err" ] && [ "$err" != "-" ] && sub="${sub:+$sub · }最近错误 $(escape_html "$err")"
+              [ -n "$sub" ] && line="${line}"$'\n'"${subpre}${sub}"
+              rows+="$line"$'\n'
+            done < <(printf '%s' "$json" | jq -r '.accounts[] | [.name, .provider, .mode, .status, (.plan.name // "-"), (.last_error // "-"), (.quota // {} | tostring)] | @tsv')
+            Z2A_POOL_TEXT="$(printf '%s' "$rows" | sed '/^$/d')"
+          }
+
           z2a_ok_reason() {
             if [ "$Z2A_PLAN_BAD" = "1" ]; then
               echo "已就绪（Plan 通道降级）· glm-5.3-flash 自检 3 轮未过，bigmodel Key 通道可用（model=${Z2A_SELFTEST_MODEL:-未知}）"
@@ -2118,6 +2170,9 @@ jobs:
             fi
           fi
 
+          # 通知前采集账号池（服务已监听才有数据；失败不阻断，通知里少一节）
+          z2a_alive && z2a_collect_pool
+
           # 通知口径：与 workbuddy-gateway 一致，成功也推「已就绪」。
           # 接力轮每轮都会跑本步骤，为免逐轮刷屏，用本步骤自己的标记文件区分：
           # 文件在 → 上一轮已启动过 = 接力轮，不重复推「已就绪」。按未标记处理
@@ -2146,6 +2201,10 @@ jobs:
               tg_add_section _m "🧾 自检输出"
               tg_add_pre _m "$Z2A_SELFTEST_OUT"
             fi
+            if [ -n "$Z2A_POOL_TEXT" ]; then
+              tg_add_section _m "$Z2A_POOL_TITLE"
+              tg_add_block _m "$Z2A_POOL_TEXT"
+            fi
             if [ -n "$Z2A_TAIL" ]; then
               tg_add_section _m "🧾 服务日志尾部"
               tg_add_pre _m "$Z2A_TAIL"
@@ -2170,6 +2229,10 @@ jobs:
               tg_add_path _m "接口" "http://127.0.0.1:${Z2A_PORT}/v1"
               tg_add_kv _m "鉴权" "需 API Key（与 workbuddy-gateway 同值）"
               [ -n "${Z2A_SELFTEST_MODEL:-}" ] && tg_add_path _m "模型" "$Z2A_SELFTEST_MODEL"
+              if [ -n "$Z2A_POOL_TEXT" ]; then
+                tg_add_section _m "$Z2A_POOL_TITLE"
+                tg_add_block _m "$Z2A_POOL_TEXT"
+              fi
               tg_add_path _m "代码" "$Z2A_REPO"
               tg_add_footer _m
               send_tg "$_m" || echo "::warning::TG 通知发送失败（不影响任务）"
@@ -3656,6 +3719,22 @@ jobs:
             echo "⚠️ zcode2api 仍在监听 8319"
           else
             echo "✅ zcode2api 已停止"
+          fi
+
+          # 停止通知（口径对齐 workbuddy 的 3b 停止通知）：每轮收尾都发，
+          # 与下一轮的「已就绪」配对，肉眼可确认服务生命周期闭环。
+          if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+            _m=""
+            if [ "$Z2A_STILL_RUNNING" = "1" ]; then
+              tg_add_title _m "⚠️ zcode2api 已停止 · 进程残留"
+              tg_add_kv _m "结论" "强制结束后仍有进程残留"
+            else
+              tg_add_title _m "⛔ zcode2api 已停止"
+              tg_add_kv _m "结论" "服务已退出 · 数据目录保持原状"
+            fi
+            tg_add_path _m "端口" "8319"
+            tg_add_footer _m
+            send_tg "$_m" || true
           fi
 
           # 用法与版式同 send_telegram_alert（<对象> <结论> <原因> [原始输出]）；
