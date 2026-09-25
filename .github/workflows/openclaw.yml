@@ -1609,6 +1609,67 @@ jobs:
             WB_RATES_FREE_TAG="（含免费 ${WB_RATES_FREE_N}）"
           fi
 
+          # ---------- 每日签到采集（2026-09-26 补）----------
+          # 签到是 serve 内置后台协程 backgroundDailyCheckin 干的：**没有 CLI 子命令**
+          # （--help 里确实不列）、也**不写进 workbuddy-status.json**（实测该快照无签名字段，
+          # 账号键只有 path/edition/state/quota*/modelStates/freeModels/modelCooldowns 等）。
+          # 唯一可观测出口就是 serve.log 的 [Checkin] 行 —— 故只能从日志解析。
+          # 解析必须**对齐轮次**：只取最后一轮「开始每日签到，账号总数=N」之后的行，
+          # 否则会把历史上每一轮的账号都并进来、顺序与计数全乱（首版试跑即踩：
+          # 错把逐账号的「账号 X 开始每日签到」当轮次起点，结果只剩最后一个号）。
+          # 日志文案由上游 Go 源码固定，实测变体（2026-09-26 从二进制 + 日志双向核对）：
+          #   账号 %s 开始每日签到，站点=%s，接口=%s
+          #   账号 %s 每日签到成功
+          #   账号 %s 今天已经签到，本次按幂等成功处理
+          #   账号 %s 每日签到失败，HTTP=%d，原因=%v
+          #   本轮签到完成，总数=%d，成功=%d，今日已签=%d，失败=%d，跳过=%d
+          #   下一次定时签到时间=%s
+          # 失败原因里有中文与括号，且可能很长（撑爆条目行）—— 条目里只给「⚠️ 失败」定性，
+          # 完整原因可看下方「原始输出」段，不在此拼接。
+          # 三列 TSV：凭据文件名 \t 站点 \t 签到结果。列恒非空（结果缺省填「未取到结果」），
+          # 避免 read 的空白折叠导致列错位（与 WB_POOL 同一坑，见其注释）。
+          WB_CHECKIN=""
+          WB_CHECKIN_SUMMARY=""
+          WB_CHECKIN_NEXT=""
+          if [ -r "$WB_LOG" ]; then
+            # 下次签到时刻：serve 在**上一轮结束时**写入，时间上早于下一轮起点行，
+            # 故全局取最后一次，不能被轮次窗口切掉（首版试跑被切掉 → 取空）。
+            WB_CHECKIN_NEXT="$(grep -a "下一次定时签到时间=" "$WB_LOG" 2>/dev/null \
+              | tail -n 1 | sed 's/.*下一次定时签到时间=//' || true)"
+            _ck_start="$(grep -an "开始每日签到，账号总数=" "$WB_LOG" 2>/dev/null | tail -n 1 | cut -d: -f1 || true)"
+            if [ -n "$_ck_start" ]; then
+              WB_CHECKIN="$(tail -n +"$_ck_start" "$WB_LOG" 2>/dev/null \
+                | grep -a '\[Checkin\]' \
+                | awk '
+                  {
+                    line=$0
+                    if (line ~ /账号 .* 开始每日签到/) {
+                      f=line; sub(/.*\[Checkin\] 账号 /,"",f); sub(/ 开始每日签到.*/,"",f)
+                      s=line; sub(/.*站点=/,"",s); sub(/，接口=.*/,"",s)
+                      if (f != "" && !(f in seen)) { seen[f]=1; order[++n]=f; site[f]=s }
+                    } else if (line ~ / 每日签到成功/) {
+                      f=line; sub(/.*\[Checkin\] 账号 /,"",f); sub(/ 每日签到成功.*/,"",f)
+                      if (f!="") res[f]="签到 ✓"
+                    } else if (line ~ /今天已经签到/) {
+                      f=line; sub(/.*\[Checkin\] 账号 /,"",f); sub(/ 今天已经签到.*/,"",f)
+                      if (f!="") res[f]="今日已签"
+                    } else if (line ~ / 每日签到失败/) {
+                      f=line; sub(/.*\[Checkin\] 账号 /,"",f); sub(/ 每日签到失败.*/,"",f)
+                      if (f!="") res[f]="⚠️ 失败"
+                    }
+                  }
+                  END {
+                    for (i=1;i<=n;i++) {
+                      f=order[i]
+                      printf "%s\t%s\t%s\n", f, site[f], (res[f]=="" ? "未取到结果" : res[f])
+                    }
+                  }' 2>/dev/null || true)"
+              WB_CHECKIN_SUMMARY="$(tail -n +"$_ck_start" "$WB_LOG" 2>/dev/null \
+                | grep -a '本轮签到完成' | tail -n 1 \
+                | sed 's/.*\[Checkin\] //; s/^本轮签到完成，//' || true)"
+            fi
+          fi
+
           # 接力轮次的判据：本文件由「Trigger next OpenClaw run」在上一轮收尾时以
           # workflow_dispatch 接力启动（长跑保活标准形态），但接力轮同样会跑一遍本步骤，
           # 于是同一份 service 同一份账号池会**每个 run 各推一条**已就绪通知。
