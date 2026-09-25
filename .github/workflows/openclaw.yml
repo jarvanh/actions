@@ -1659,35 +1659,40 @@ jobs:
               # 账号池：与 wb_notify 同构的「条目 + 子行」形态。子行必须用 tree_sub
               # 前缀手拼 —— tree_lines 把每行都当兄弟条目，子行经它会渲染成 ├─/└─，
               # 与条目平级（规范 4.2 二层列表：子行与条目正文同列）。
+              # 错峰签到（主人 09-25 定）：checkin 先零请求落盘全部账号的排程行
+              # （skipped=scheduled/cooldown/already，带 planned_at），真实签到完成后
+              # 追加结果行 —— 同一 uid 会有两行，按 uid 取末行：有结果显示结果，
+              # 没轮到的显示「安排 HH:MM」；计数也按去重后的账号数。
               if [ -s "${CHECKIN_JSONL:-}" ]; then
-                local _total _rows _i _line _uid _nick _cr _err _skipr _skipped _st _exp3 _eline _last
-                _total="$(wc -l < "$CHECKIN_JSONL" | tr -d ' ')"
+                local _total _rows _i _line _uid _nick _cr _err _skipr _st _exp3 _eline _last _planned
+                # 按 uid 取末行（保持首次出现顺序）：JSONL 逐行 uid 序列去重拼接
+                _uids="$(jq -r '.uid' "$CHECKIN_JSONL" | awk '!seen[$0]++')"
+                _total="$(printf '%s\n' "$_uids" | grep -c . || true)"
                 tg_add_section _msg "💳 账号池 · ${_total}"
                 _rows=""
                 _i=0
-                while IFS= read -r _line; do
-                  [ -z "$_line" ] && continue
+                while IFS= read -r _uid; do
+                  [ -z "$_uid" ] && continue
                   _i=$((_i + 1))
                   _last=0
                   [ "$_i" -eq "$_total" ] && _last=1
-                  _uid=$(jq -r '.uid' <<<"$_line")
+                  _line="$(jq -c --arg uid "$_uid" 'select(.uid == $uid)' "$CHECKIN_JSONL" | tail -n 1)"
                   _nick=$(jq -r '(.nickname // "-")' <<<"$_line")
                   _cr=$(jq -r '.credits' <<<"$_line")
                   _err=$(jq -r '(.err // "")' <<<"$_line")
                   _skipr=$(jq -r '(.skip_reason // "")' <<<"$_line")
-                  _skipped=$(jq -r '(.skipped // "")' <<<"$_line")
+                  _planned=$(jq -r '(.planned_at // "")' <<<"$_line")
                   if [ -n "$_err" ]; then
                     _st="⚠️ $_err"
                   elif [ "$(jq -r '.claimed' <<<"$_line")" = "true" ]; then
                     _st="签到 ✓ 本轮领取"
+                  elif [ "$(jq -r '.checked_in' <<<"$_line")" = "true" ]; then
+                    _st="今日已签"
+                  elif [ -n "$_skipr" ] && [ -n "$_planned" ]; then
+                    # 排程/冷却中的账号：显示安排的签到时间（主人 09-25 定）
+                    _st="$_skipr · 安排 ${_planned}"
                   elif [ -n "$_skipr" ]; then
-                    # already = 今天已签过；工具原文带「（跳过查询）」易误读为「跳过签到」，
-                    # 按主人 07:12 要求简化为「今日已签」（其余原因如冷却照常展示）
-                    if [ "$_skipped" = "already" ]; then
-                      _st="今日已签"
-                    else
-                      _st="$_skipr"
-                    fi
+                    _st="$_skipr"
                   else
                     _st="今日已签"
                   fi
@@ -1932,16 +1937,13 @@ jobs:
           _title="🟢 trae2api 已就绪"
           _conclusion="已就绪 · 签到工具无输出（详见原始输出）"
           if [ -s "$CHECKIN_JSONL" ]; then
-            _total=$(wc -l < "$CHECKIN_JSONL" | tr -d ' ')
-            # 分类口径与账号行对齐（实测 skipped 是枚举串而非布尔：
-            #   "already"=今天已签过、"cooldown"=冷却中本轮未签）。
-            # 已签 = claimed=true（本轮领取）或 skipped=already；跳过 = 其余 skipped 非空；
-            # 失败 = err 非空。原口径把 already 也算进「跳过」，导致结论「已签 0 · 跳过 4」
-            # 与账号行「今日已签（跳过查询）」直接矛盾。
-            _ok=$(jq -s '[.[] | select((.err // "") == "" and ((.claimed // false) == true or (.skipped // "") == "already"))] | length' "$CHECKIN_JSONL")
-            _skip=$(jq -s '[.[] | select((.err // "") == "" and (.claimed // false) != true and ((.skipped // "") != "" and (.skipped // "") != "already"))] | length' "$CHECKIN_JSONL")
-            _fail=$(jq -s '[.[] | select((.err // "") != "")] | length' "$CHECKIN_JSONL")
-            _conclusion="已就绪 · 已签 ${_ok} · 跳过 ${_skip} · 失败 ${_fail}（共 ${_total}）"
+            # 两行制（排程行+结果行）：按 uid 取末行再分类，避免重复计数；
+            # 排程/冷却中的账号计入「待签」，结论里也能看到本轮还剩几个没轮到
+            _total=$(jq -sr 'group_by(.uid) | length' "$CHECKIN_JSONL")
+            _ok=$(jq -sr 'group_by(.uid) | map(last) | [.[] | select((.err // "") == "" and ((.claimed // false) == true or (.checked_in // false) == true or (.skipped // "") == "already"))] | length' "$CHECKIN_JSONL")
+            _wait=$(jq -sr 'group_by(.uid) | map(last) | [.[] | select((.err // "") == "" and (.claimed // false) != true and (.checked_in // false) != true and ((.skipped // "") == "scheduled" or (.skipped // "") == "cooldown"))] | length' "$CHECKIN_JSONL")
+            _fail=$(jq -sr 'group_by(.uid) | map(last) | [.[] | select((.err // "") != "")] | length' "$CHECKIN_JSONL")
+            _conclusion="已就绪 · 已签 ${_ok} · 待签 ${_wait} · 失败 ${_fail}（共 ${_total}）"
             # 错峰后台进行中 → 结论追加标记（剩余账号尚未落盘）
             _ckp="$(cat /tmp/trae2api-checkin.pid 2>/dev/null || true)"
             if [ -n "$_ckp" ] && kill -0 "$_ckp" 2>/dev/null; then
