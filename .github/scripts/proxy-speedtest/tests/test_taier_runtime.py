@@ -232,6 +232,51 @@ def main():
     check(_parse_alive_probe('0') is False, 'TAIER_ALIVE_PROBE=0 可显式关闭')
     check(_parse_alive_probe('off') is False, 'TAIER_ALIVE_PROBE=off 可显式关闭')
 
+    print('== 4b. 覆盖度闸门：表覆盖不住待测池时不许判死（2026-09-25）==')
+    # 事故原型：mihomo `/group/{组}/delay` 在大池下**只返回已测完的那批**，不是全量。
+    # 编排轮 run 36086261741 实测：待测 1780、表只有 65 条（覆盖 3.7%），却据此判死
+    # 1777 个 —— 「表里没有」在当时是「还没轮到」而不是「连不上」，成片误杀好节点。
+    # 对照（单节点轮 36025190562）：待测 17、表 17 条（覆盖 100%）⇒ 判死才可信。
+    check(t.CONFIG['TAIER_PROBE_MIN_COVERAGE'] == 0.5,
+          f"覆盖度下限默认 0.5（实际 {t.CONFIG['TAIER_PROBE_MIN_COVERAGE']}）")
+    _tsrc4b = pathlib.Path(t.__file__).read_text(encoding='utf-8')
+    check('taier_probe_low_coverage' in _tsrc4b,
+          '覆盖不足要留痕（可核对是「判死」还是「不敢判」）')
+    # 行为层：覆盖不足 ⇒ probe_node_alive 一个都不该被调用（全量放行去测速）
+    _names = [{'name': f'n{i}'} for i in range(100)]
+    _small = {'n0': 10}   # 100 个待测只覆盖 1 个 = 1% ≪ 50%
+    _full = {f'n{i}': 10 for i in range(100)}  # 100% 覆盖
+    _calls = []
+
+    def _fake_probe(name, table):
+        _calls.append(name)
+        return True, 1, ''
+
+    _orig_probe = t.probe_node_alive
+    _orig_lp4b = t.log_progress
+    t.probe_node_alive = _fake_probe
+    t.log_progress = lambda stage, **kw: None
+    try:
+        for _cov, _label, _tbl in ((0.01, '覆盖 1%', _small), (1.0, '覆盖 100%', _full)):
+            _enabled = (bool(_tbl)
+                        and (len(_tbl) / float(len(_names))) >= t.CONFIG['TAIER_PROBE_MIN_COVERAGE'])
+            _calls.clear()
+            for _item in _names:
+                if _enabled:
+                    t.probe_node_alive(_item['name'], _tbl)
+            if _cov < 0.5:
+                check(_enabled is False and _calls == [],
+                      f'{_label} → 探测层关闭、一个都不判死（实际调用 {len(_calls)} 次）')
+            else:
+                check(_enabled is True and len(_calls) == len(_names),
+                      f'{_label} → 探测层启用、逐节点判活（实际调用 {len(_calls)} 次）')
+    finally:
+        t.probe_node_alive = _orig_probe
+        t.log_progress = _orig_lp4b
+    # 闸门判据是「表条目 ÷ 待测数」，不是绝对条目数（小池 17 条也算 100%）
+    check((17 / 17.0) >= 0.5 and (1 / 100.0) < 0.5,
+          '覆盖度按比例算：小池 17/17=100% 放行判死，大池 1/100=1% 不许判死')
+
     print('== 5. 四套共用同一份判据（单一来源，防各写一遍后漂移）==')
     # 用户诉求是「这 4 个测速任务都不触及 360 分钟」，所以三套引擎必须**同一口径**。
     # 断言函数对象相同（不是「行为相同」）：行为相同的两份实现，下一次改一处就会漂。
