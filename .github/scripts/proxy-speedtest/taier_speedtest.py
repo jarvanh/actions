@@ -151,6 +151,13 @@ CONFIG = {
     'TAIER_ALIVE_PROBE_URL': ((os.environ.get('TAIER_ALIVE_PROBE_URL', '') or '').strip()
                               or _TAIER_CTRL_SERVERS[0]),
     'TAIER_ALIVE_PROBE_TIMEOUT_MS': int(os.environ.get('TAIER_ALIVE_PROBE_TIMEOUT_MS', '3000') or 3000),
+    # 组测速返回表的**覆盖度下限**（表条目 ÷ 待测节点数）：低于它就不许判死，退回
+    # fail-open 全量放行。为什么需要它（2026-09-25）：mihomo 的 `/group/{组}/delay`
+    # 在大池下**只返回已测完的那批**，不是全量——实测待测 1780 时表只有 65 条（覆盖
+    # 3.7%），此时「表里没有」是「还没轮到」而不是「连不上」，照判会成片误杀好节点。
+    # 小池（待测 17）表 17 条 = 覆盖 100%，判死才可信。取 0.5 是留够余量：覆盖过半时
+    # 「不在表里」已能大概率说明它真没测出延迟。
+    'TAIER_PROBE_MIN_COVERAGE': float(os.environ.get('TAIER_PROBE_MIN_COVERAGE', '0.5') or 0.5),
     'TAIER_TIMEOUT': int(os.environ.get('TAIER_TIMEOUT', '120') or 120),
     'TAIER_SWITCH_SETTLE': float(os.environ.get('TAIER_SWITCH_SETTLE_SECONDS', '1.5') or 1.5),
     # 每节点是否出结果图（上传图床）：默认关，避免 N 个节点刷 N 张图
@@ -920,11 +927,29 @@ def _run():
     _delay_table = {}
     if CONFIG['TAIER_ALIVE_PROBE'] and _prov_ready and alive_items:
         _delay_table = collect_group_delays_resilient(env, _loaded_total)
-    # ⚠️ 探测层只在**真的拿到延迟表**时才算启用：拿空表说明探测机制本身没给出结论，
-    # 此时若照常判死会把整轮打成零产出（fail-open 是硬要求）。
-    # 注意这与「表里没有某节点」不同——后者是明确的判死结论。
+    # ⚠️ 探测层只在**真的拿到延迟表、且表覆盖得住待测池**时才算启用——拿空表或表严重
+    # 偏小都说明探测机制没给出可信结论，此时照常判死会把整轮打成零产出（fail-open
+    # 是硬要求）。注意这与「表里没有某节点」不同——后者才是明确的判死结论。
+    #
+    # 覆盖度闸门（2026-09-25 加）：mihomo 的组测速在大池下**只返回已测完的那批**，
+    # 不是全量覆盖。三轮实测：
+    #   单节点轮（待测 17）    → 表 17 条，覆盖 100% ⇒ 判死 1 个，可信
+    #   编排轮（待测 200）     → 表 125 条，覆盖 62.5%
+    #   编排轮（待测 1780）    → 表 65 条，覆盖 3.7% ⇒ 判死 1777 个，**绝大多数是误杀**
+    # 3.7% 覆盖下「表里没有」根本不是「连不上」，而是「还没轮到」——照判就是把好节点
+    # 成片砍掉（那轮只因 3 个在表内就判其余全死）。故覆盖度不足时退回 fail-open：
+    # 宁可让死节点各吃一个测速窗口，也不能把活节点整片误杀。
     _probe_enabled = CONFIG['TAIER_ALIVE_PROBE'] and bool(_delay_table)
-    if CONFIG['TAIER_ALIVE_PROBE'] and not _probe_enabled:
+    _coverage = 0.0
+    if _probe_enabled and alive_items:
+        _coverage = len(_delay_table) / float(len(alive_items))
+        if _coverage < CONFIG['TAIER_PROBE_MIN_COVERAGE']:
+            _probe_enabled = False
+            log_progress('taier_probe_low_coverage', entries=len(_delay_table),
+                         total=len(alive_items), coverage=round(_coverage, 4),
+                         threshold=CONFIG['TAIER_PROBE_MIN_COVERAGE'],
+                         reason='组测速只返回已测完的那批，覆盖不足，判死不可信 → 全量放行')
+    if CONFIG['TAIER_ALIVE_PROBE'] and not _probe_enabled and not _coverage:
         log_progress('taier_probe_disabled', waited=round(_prov_waited, 3),
                      total=len(alive_items), prov_ready=_prov_ready,
                      reason='未拿到组延迟表（等待超时或批量探测失败），全量放行去测速')
