@@ -989,6 +989,40 @@ jobs:
                 # 末条子行渲染，版式与规范示例（块与 kv 区之间空一行）不一致。
                 tg_append _msg $'\n'
               fi
+              # 签到段（2026-09-26 补）：workbuddy-gateway 的每日签到是 serve 内置后台协程
+              # （backgroundDailyCheckin），**没有 CLI 子命令**（--help 里确实没列出），
+              # 也不写进 workbuddy-status.json —— 唯一可观测出口就是 serve.log 的 [Checkin] 行。
+              # 此前本通知完全没有这一段：主人看到的是「5 个账号全绿」的账号池，却无从知道
+              # 今天签到跑没跑、哪个号失败了。本段即补这个缺口。
+              # 数据源 WB_CHECKIN 是上一步解析好的 TSV：凭据文件名 \t 站点 \t 签到结果。
+              # 逐账号**一条目、无子行**：签到的信息量就是「哪个号 · 哪站 · 签了没」，
+              # 一行装得下；硬拆子行会把「账号 → 结果」拆成两行，扫读反而更累。
+              # 全量不折叠：账号量级只有个位数，读者要逐号核对，折叠等于把要看的藏起来。
+              if [ -n "${WB_CHECKIN:-}" ]; then
+                local _ckn _ckrows _cki _ckf _cks _ckr _cklast
+                _ckn="$(printf '%s\n' "$WB_CHECKIN" | grep -c . || true)"
+                tg_add_section _msg "🗓 每日签到 · ${_ckn}"
+                _ckrows=""
+                _cki=0
+                while IFS="$(printf '\t')" read -r _ckf _cks _ckr; do
+                  [ -z "$_ckf" ] && continue
+                  _cki=$((_cki + 1))
+                  if [ "$_cki" -eq "$_ckn" ]; then _cklast=1; else _cklast=0; fi
+                  _ckrows+="$(tree_conn "$_cklast")$(tg_entry "$_ckf" "$_cks" "$_ckr")"$'\n'
+                done <<< "$WB_CHECKIN"
+                tg_add_block _msg "${_ckrows%$'\n'}"
+                tg_append _msg $'\n'
+                # 汇总行（总数/成功/今日已签/失败/跳过）：**被跳过**的账号不会有「开始每日签到」
+                # 行、也就不会出现在上面的条目里 —— 只有这行能暴露「有号根本没轮到」，
+                # 光看逐账号条目会把「跳过」误读成「没问题」。
+                if [ -n "${WB_CHECKIN_SUMMARY:-}" ]; then
+                  tg_add_kv _msg "本轮汇总" "$WB_CHECKIN_SUMMARY"
+                fi
+                # 下次签到时刻：服务自己算的定时点（东八区，日志原文带 UTC+8 后缀）。
+                if [ -n "${WB_CHECKIN_NEXT:-}" ]; then
+                  tg_add_kv _msg "下次签到" "$WB_CHECKIN_NEXT"
+                fi
+              fi
               # 模型倍率段：数据源是上方生成的 WB_RATES_TXT（wb-models-cache.json 的
               # catalogs + 免费实测，按站点分组、站点内倍率升序（价格低者在上）每模型一行、
               # **全量不截断**）。
@@ -1107,6 +1141,51 @@ jobs:
           fi
 
           WB_VER="$(head -n 1 "$WB_VER_FILE" 2>/dev/null || true)"
+
+          # ---------- 1b. 启动前能力校验（2026-09-26 加） ----------
+          # 背景事故：config.json 提前写了 v6 routing 段，但 GitHub latest 停在 v1.13.2
+          # （不含 routing）。本步骤原本只看 .installed-version 字符串判定「已是最新版」，
+          # 于是下载旧版覆盖本地新版 → 旧版 DisallowUnknownFields 解析报
+          # json: unknown field "routing" → 退出码 1；Restart=always 让它崩溃循环 139 次，
+          # 每轮日志都只有那一句，看不出根因是「版本错配」。
+          # 根因在于**版本记录会骗人**：它可能被人工改错，也可能滞后于代码。
+          # 故判据不再取版本字符串，而是直接问二进制自己：
+          #   ① --version 自报版本（真实产物，不是记录）
+          #   ② 二进制内含 json:"routing" tag 即认支持路由（Go struct tag，编译期固化）
+          # config 要求的能力与二进制实际能力不符 → 明确报错并**拒绝启动**：
+          # 让它跑起来只会在 Restart=always 下静默崩溃循环，明确失败更好排障。
+          WB_BIN_VER=""
+          WB_CAP_OK=1
+          WB_CAP_MSG=""
+          if [ -x "$WB_BIN" ]; then
+            WB_BIN_VER="$("$WB_BIN" --version 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)"
+            if [ -n "$WB_BIN_VER" ]; then
+              echo "   preflight: 二进制自报版本=${WB_BIN_VER}（版本记录=${WB_VER:-无}）"
+              if [ -n "$WB_VER" ] && [ "$WB_BIN_VER" != "$WB_VER" ]; then
+                echo "⚠️ 版本记录与二进制自报不一致（记录 ${WB_VER} / 实际 ${WB_BIN_VER}），以二进制为准"
+                WB_CAP_MSG="版本记录 ${WB_VER} 与二进制自报 ${WB_BIN_VER} 不一致"
+              fi
+            fi
+            # 能力项：config.json 要求 routing，二进制必须具备（后续新能力照此加项）
+            if grep -aq '"routing"' "$WB_RUN_DIR/config.json" 2>/dev/null; then
+              if grep -aq 'json:"routing"' "$WB_BIN" 2>/dev/null; then
+                echo "✅ 能力校验通过：config 要求 routing，二进制支持"
+              else
+                WB_CAP_OK=0
+                WB_CAP_MSG="config.json 含 routing 段，但二进制 ${WB_BIN_VER:-未知版本} 不支持（缺 v6 路由）；多为代码已进 main 但未发版"
+                echo "❌ ${WB_CAP_MSG}"
+              fi
+            fi
+          else
+            WB_CAP_OK=0
+            WB_CAP_MSG="二进制不可执行：$WB_BIN"
+          fi
+          printf 'WB_BIN_VER=%s\n' "$WB_BIN_VER" >> "$WB_META"
+          if [ "$WB_CAP_OK" != "1" ]; then
+            WB_STATE="能力校验未通过"
+            WB_REASON="$WB_CAP_MSG"
+          fi
+
           echo "WB_STATE=${WB_STATE:-未知}" >> "$WB_META"
           echo "WB_VERSION=${WB_VER}" >> "$WB_META"
           printf 'WB_UPDATE=%s\n' "$WB_UPDATE" >> "$WB_META"
@@ -1131,7 +1210,13 @@ jobs:
           # 托管交给 gateways.sh（systemd --user + Restart=always）：窗口期内进程崩溃
           # 由 systemd 秒级拉起，不再依赖下一轮 run。ensure 语义 = 写单元 + 每轮重启，
           # 与本步骤原先的 pkill + nohup 等价；停止必须走 systemctl（见收尾 3b 注释）。
-          if ! ( cd "$WB_RUN_DIR" ); then
+          if [ "$WB_CAP_OK" != "1" ]; then
+            # 能力校验未通过 → **拒绝启动**，绝不交给 systemd。
+            # 理由：单元是 Restart=always，明知会崩还启动 = 340 分钟窗口期内崩溃循环，
+            # 每次只留一句 unknown field，日志被刷爆且根因被埋（本轮事故即此形态，
+            # 实测循环 139 次）。明确失败 + 通知里带人话原因，排障成本远低于崩溃循环。
+            echo "❌ 启动前能力校验未通过，已拒绝启动 serve：$WB_CAP_MSG" | tee "$WB_LOG"
+          elif ! ( cd "$WB_RUN_DIR" ); then
             echo "❌ 无法进入运行目录 $WB_RUN_DIR" >&2
             printf '%s\n' "cd $WB_RUN_DIR failed" > "$WB_LOG"
           else
