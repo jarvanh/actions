@@ -645,6 +645,12 @@ JWT / API Key 对齐进账号池；收尾归档 4c 再把运行目录的 .env + 
 接口：<code>http://127.0.0.1:8319/v1</code>
 鉴权：需 API Key（与 workbuddy-gateway 同值）
 模型：<code>glm-5.3-flash</code>
+
+💳 账号池 · 2（active 2）
+  ├─ <code>local-zcode-jwt</code> · Plan 通道 · 正常
+  │  额度 GLM-5.3-Flash 剩 199M / 300M · 套餐 ZCode Weekend Build
+  └─ <code>local-bigmodel-plan</code> · Key 通道 · 正常
+
 代码：<code>https://github.com/jarvanh/zcode2api.git</code>
 ```
 
@@ -663,6 +669,12 @@ JWT / API Key 对齐进账号池；收尾归档 4c 再把运行目录的 .env + 
   不能让「已就绪」掩盖通道缺失）。
 - **失败态不给「接口 / 鉴权 / 模型」三行**：服务已不在，展示指向已停进程的
   地址会误导。自检输出与服务日志尾部（各 15 行）进「🧾」分节的 `<pre>`。
+- **💳 账号池分节**（对齐 wb_notify 口径）：条目行 = `名称 · 通道 · 状态`，
+  子行 = 额度/套餐 + 最近错误。数据源是 admin API 脱敏视图（admin key 取自
+  数据快照里的 .env）；服务已监听才采集，失败只少一节不改结论。就绪与失败
+  通知都带（自检失败时账号状态正是最需要的诊断信息）。
+- **收尾 3c 停服后发 ⛔「已停止」通知**（对齐 workbuddy 的 3b）：与下一轮的
+  「已就绪」配对，肉眼可确认服务生命周期闭环；强制结束后仍有进程残留发 ⚠️。
 - **鉴权固定写「需 API Key（与 workbuddy-gateway 同值）」**：两个网关共用
   `AI_GATEWAY_API_KEY`。**不得回显 key 本身**。
 
