@@ -889,7 +889,8 @@ jobs:
           #   结论/更新/原因 → 人写的自然语言 → 裸文本 kv；版本/路径/端口 → 机器值 → <code>；
           #   原始输出 → <pre>，恒为正文最后一块（其后只跟收尾区）。空值整行跳过、空分节整段跳过。
           #   鉴权写实际形态：serve 以 -addr 0.0.0.0 监听（对 Tailscale/局域网开放），
-          #   故显式传 -api-key 做客户端 Bearer 校验，取值与 zcode2api 同为 AI_GATEWAY_API_KEY。
+          #   故显式传 -api-key 做客户端 Bearer 校验，取 AI_GATEWAY_API_KEY（workbuddy 专属，
+          #   与 zcode2api 的 ZCODE_GATEWAY_API_KEY 已分家，见 zcode2api 步骤 env 注释）。
           #   （此前注释写「仅回环监听，无需密钥」，与 -addr 0.0.0.0 的实际启动参数不符，已订正）
           #   绝不编造密钥值，也不在通知里回显 key 本身。凭据段只列 workbuddy*.json 的文件名，绝不回显内容（真实 Token）。
           #   账号池取自 workbuddy-status.json（键名由上游 Go 结构体固定，见采集处注释）；
@@ -1972,10 +1973,12 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          # 网关鉴权：与 workbuddy-gateway 同值（job 级 AI_GATEWAY_API_KEY）。
-          # 环境变量优先于 .env（python-dotenv 默认不覆盖已存在的环境变量），
-          # 无需改数据快照里的 .env 即与仓库 Secrets 对齐。
-          ZCODE_GATEWAY_KEY: ${{ secrets.AI_GATEWAY_API_KEY }}
+          # 网关鉴权：zcode2api 专属 secret（与 accounts.db meta 表 gateway_key 同值）。
+          # 勿改回 AI_GATEWAY_API_KEY——那是 workbuddy-gateway 的 key，两者已分家；
+          # DB meta 优先级高于 env，env 注错不影响服务，但自检会拿它报「API Key 无效」
+          # （2026-09-25 误报实录）。环境变量优先于 .env（python-dotenv 默认不覆盖
+          # 已存在的环境变量），无需改数据快照里的 .env 即与仓库 Secrets 对齐。
+          ZCODE_GATEWAY_KEY: ${{ secrets.ZCODE_GATEWAY_API_KEY }}
         run: |
           set -uo pipefail
           # 通知真源在 step 顶层 source 一次（勿挪进函数体，理由见 workbuddy 步骤同名注释 / 规范 4.4）
