@@ -398,6 +398,29 @@ _check_openlist_backend_connectivity() {
 # 用法: _backend_write_probe <dest_path> [log_file] → 0=可写, 1=该后端本轮不可用
 declare -A _BACKEND_WRITE_PROBE_CACHE=()
 
+# ===== 路径特异性坏目录记忆（2026-09-25 病灶 E）=====
+# 为什么需要: `_BACKEND_WRITE_PROBE_CACHE[$dest]=1`（下方"目标路径写不进但挂载根
+#   可写 ⇒ 按可写放行"）只解决了"别把健康后端误判成死"，但它把结论写成**可写**，
+#   于是后续所有通路（sync 重试 / 8005 retry / 子目录同步 / 修复管线）都认为这个
+#   目录能写 ⇒ **反复重入同一个已知写不进的目录**。
+#   实测 run 35989879675: 同一个目录（巨乳が成長し続ける女子生徒）在 25 分钟内被
+#   反复 sync，累计 **156 次 409 Conflict**，其中 90 次集中在同一目录 —— 该轮修复
+#   成功率因此只有 2.7%（成功 7 / 缺失 259）。
+# 语义（必须与熔断区分）: 这里是**路径级**记忆，不是后端级熔断 —— 后端仍然可用，
+#   只是这个具体路径本轮已知写不进，应交给"折叠/换目录"兜底，而不是反复直撞。
+# 用法: _path_unwritable_mark <dest> / _path_unwritable_hit <dest>
+declare -A _PATH_UNWRITABLE_ROUND=()
+_path_unwritable_mark() {
+  local dest="${1:-}"
+  [ -n "$dest" ] || return 0
+  _PATH_UNWRITABLE_ROUND["$dest"]=1
+}
+_path_unwritable_hit() {
+  local dest="${1:-}"
+  [ -n "$dest" ] || return 1
+  [ "${_PATH_UNWRITABLE_ROUND[$dest]:-0}" = "1" ]
+}
+
 # 清掉某目标路径的写探针结论，强制下一次 _backend_write_probe 真探（F22）。
 # 为什么需要（F4 的固有缺口）: 探针现状是「整轮只跑一次」，结论被缓存后整轮复用；
 #   但"探针 ✅ 与真实写入 405 并存"的长期悖论（diagnose 已定案）恰恰说明**探针的
@@ -502,6 +525,10 @@ _backend_write_probe() {
     if [ "$_root_rc" -eq 0 ]; then
       _BACKEND_WRITE_PROBE_CACHE["$dest"]=1
       echo "   ⚠️ 目标路径写不进但挂载根可写 ⇒ 判定为路径特异性（非后端故障），按可写放行（该目录交给折叠/换目录兜底）" | tee ${log_file:+-a "$log_file"}
+      # 病灶 E: 后端放行 ≠ 这个目录能写。这里额外记一笔**路径级**坏目录，
+      #   供下游通路（sync 重试 / 8005 retry / 修复管线）跳过重复直撞 —— 本轮
+      #   实测同一目录被反复 sync 出 156 次 409（见 _PATH_UNWRITABLE_ROUND 注释）。
+      _path_unwritable_mark "$dest"
       rm -f "$probe_local" 2>/dev/null || true
       return 0
     fi

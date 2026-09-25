@@ -73,6 +73,14 @@ _sync_retry_8005() {
       # 该助手定义在 openlist_driver.sh 里，改用函数会让那些测试报 command not found。
       # 键口径必须与助手一致（按同步对路径），改一处要同时核对另一处。
       unset "_BACKEND_WRITE_PROBE_CACHE[$dest_path]"
+      # 病灶 E（2026-09-25）: 探针结论是**后端级**的（挂载根可写 ⇒ 放行），但放行
+      #   不代表**这个路径**能写。若本轮已实测该路径写不进（路径特异性），再跑一次
+      #   整次重传必然重复撞 409 —— 实测同一目录 25 分钟内被反复 sync 出 156 次
+      #   409（其中 90 次集中同一目录）。这里直接跳过重传，交给折叠/换目录兜底。
+      if declare -F _path_unwritable_hit >/dev/null 2>&1 && _path_unwritable_hit "$dest_path"; then
+        echo "  ⏭ 本轮已实测该路径写不进（路径特异性），跳过整次重传（交折叠/换目录兜底，不再重复撞 409）" | tee -a "$LOG_FILENAME"
+        break
+      fi
       if ! _backend_write_probe "$dest_path" "$LOG_FILENAME"; then
         SYNC_BACKEND_DEAD=1
         # 写探针判死 = 强证据（真实 PUT + 刷新缓存复核），可跨轮持久化（F6）
@@ -118,6 +126,12 @@ _sync_retry_423() {
         echo "⏰ 距平台硬顶不足收尾预留，放弃 423 退避重试（第 ${lock_retry_index}/${lock_retry_attempts} 次未执行，sync 幂等，下轮接力）" | tee -a "$LOG_FILENAME"
         break
       fi
+      # 病灶 E（同 _sync_retry_8005 内注释）: 本轮已实测该路径写不进 ⇒ 重跑整次
+      #   sync 只会再撞一遍同样的 409/423，直接跳过交折叠/换目录兜底。
+      if declare -F _path_unwritable_hit >/dev/null 2>&1 && _path_unwritable_hit "$dest_path"; then
+        echo "⏭ 本轮已实测该路径写不进（路径特异性），跳过 423 重传（交折叠/换目录兜底）" | tee -a "$LOG_FILENAME"
+        break
+      fi
       echo "检测到 OpenList 423 Locked，等待 ${lock_retry_sleep}s 后重试 ${lock_retry_index}/${lock_retry_attempts}。" | tee -a "$LOG_FILENAME"
       sleep "$lock_retry_sleep"
       SYNC_STATUS=0
@@ -151,6 +165,12 @@ _sync_retry_409() {
       # 硬顶闸（2026-09-24 病灶 D 第四处）: 与 423 退避同款（见该函数内注释）。
       if declare -F sync_hard_limit_stop >/dev/null 2>&1 && sync_hard_limit_stop; then
         echo "⏰ 距平台硬顶不足收尾预留，放弃 409 退避重试（第 ${conflict_retry_index}/${conflict_retry_attempts} 次未执行，sync 幂等，下轮接力）" | tee -a "$LOG_FILENAME"
+        break
+      fi
+      # 病灶 E（同 _sync_retry_8005 内注释）: 409 正是"路径写不进"的直接症状，
+      #   本轮已实测过就别再撞一遍。
+      if declare -F _path_unwritable_hit >/dev/null 2>&1 && _path_unwritable_hit "$dest_path"; then
+        echo "⏭ 本轮已实测该路径写不进（路径特异性），跳过 409 重传（交折叠/换目录兜底）" | tee -a "$LOG_FILENAME"
         break
       fi
       echo "检测到 OpenList 409 Conflict/mkParentDir 失败，等待 ${conflict_retry_sleep}s 后重试 ${conflict_retry_index}/${conflict_retry_attempts}（目录已存在或并发争用，均可自愈）。" | tee -a "$LOG_FILENAME"
