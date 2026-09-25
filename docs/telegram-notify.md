@@ -633,7 +633,8 @@ workbuddy-gateway**（第三个 AI 网关的对齐实现），差异只在数据
 双协议），版式同源（2.5 节）。代码来自 jarvanh/zcode2api fork，.env 与账号池
 数据快照在 Dropbox `self-hosted/zcode2api-data.tar.gz`；凭据自动跟随
 （credential_sync.py）每轮把 `~/.zcode/v2/credentials.json` 解密出的最新
-JWT / API Key 对齐进账号池。
+JWT / API Key 对齐进账号池；收尾归档 4c 再把运行目录的 .env + data 回传快照，
+凭据闭环。仅本机结构性变更（增删账号、改 .env）才需手动重传覆盖。
 
 **示例：zcode2api 已就绪**（`openclaw.yml`）
 
