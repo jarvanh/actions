@@ -2071,8 +2071,9 @@ jobs:
                 Z2A_REASON="数据快照缺失或损坏：$Z2A_DATA_ARCHIVE（先在本机重新打包上传）"
               elif ! { python3 -m venv "$Z2A_RUN_DIR/.venv" \
                    && "$Z2A_RUN_DIR/.venv/bin/pip" install --quiet --disable-pip-version-check \
-                        -r "$Z2A_RUN_DIR/requirements.txt" 2>"$Z2A_RUN_DIR/logs/pip.log"; }; then
-                Z2A_REASON="依赖安装失败（见 logs/pip.log）"
+                        -r "$Z2A_RUN_DIR/requirements.txt" 2>"$Z2A_RUN_DIR/logs/pip.log" \
+                   && (cd "$Z2A_RUN_DIR/captcha_node" && npm ci --silent 2>"$Z2A_RUN_DIR/logs/npm.log"); }; then
+                Z2A_REASON="依赖安装失败（见 logs/pip.log / logs/npm.log）"
               else
                 echo "Starting zcode2api on ${Z2A_PORT}..."
                 (
@@ -2095,6 +2096,16 @@ jobs:
                     echo "✅ [zcode2api] credential sync 完成"
                   else
                     echo "⚠️ [zcode2api] credential sync 失败（沿用快照账号池凭据）"
+                  fi
+                  # 凭据自动跟随 cron：runner 重置会清掉手工 crontab，故每轮幂等重装。
+                  # run 间隔最长 ~5.75h，期间 zcode 客户端滚动刷新 credentials.json，
+                  # 账号池靠这条 cron 每 15 分钟跟上（脚本幂等，一致即 SKIP）。
+                  mkdir -p "$HOME/.openclaw/logs"
+                  CRON_LINE="*/15 * * * * flock -n /tmp/zcode2api-cred-sync.lock $Z2A_RUN_DIR/.venv/bin/python $Z2A_RUN_DIR/credential_sync.py >> $HOME/.openclaw/logs/zcode2api-cred-sync.log 2>&1"
+                  if { crontab -l 2>/dev/null | grep -vF 'zcode2api-cred-sync.lock'; echo "$CRON_LINE"; } | crontab -; then
+                    echo "✅ [zcode2api] credential sync cron 已就位"
+                  else
+                    echo "⚠️ [zcode2api] credential sync cron 安装失败（不影响本轮服务）"
                   fi
                   if z2a_selftest; then
                     Z2A_OK=1
