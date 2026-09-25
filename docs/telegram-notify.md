@@ -376,8 +376,8 @@ Telegram 收到，放弃重试只会让凭据彻底丢失。
 | ❌ workbuddy-gateway 启动失败 | `openclaw.yml` | serve 启动即退或超时未监听 8318 |
 | ❌ trae2api 启动失败 | `openclaw.yml` | 容器健康检查 120 秒未过（7864），原始输出给容器日志尾部 |
 | ⛔ / ⚠️ workbuddy-gateway 已停止 | `openclaw.yml` | 收尾停止本地代理网关（仍有进程残留时降级 ⚠️） |
-| 🟢 glm-proxy 已就绪 | `openclaw.yml` | 本地 GLM 反代（8787）启动自检后。字段口径见 2.6 节 |
-| ❌ glm-proxy 启动失败 | `openclaw.yml` | 启动脚本非 0，或自检候选模型全部无有效回答 |
+| 🟢 zcode2api 已就绪 | `openclaw.yml` | 本地 GLM 网关（8319）启动自检后。字段口径见 2.6 节 |
+| ❌ zcode2api 启动失败 | `openclaw.yml` | 部署/依赖失败，或自检两通道（Plan + bigmodel Key）均无有效回答 |
 | ⚠️ Emby 直链已回退 | `emby.yml` | 探活连续失败切直连 |
 
 **示例：归档告警**
@@ -594,7 +594,7 @@ workbuddy-gateway**（第三个 AI 网关的对齐实现），差异只在数据
   「🔑 凭据」列 `auths/` 下 trae-*.json 文件名（不回显内容，与 wb_notify 同口径）。
 - 「💳 账号池」来自批量签到输出：条目 `uid · 昵称 · 状态`，子行给未用完积分包里
   最早过期的 3 个（`剩 N 分 · 时刻 过期`）。
-- 「鉴权」写「需 API Key（面板/CLI 共用）」——key 不回显（与 glm-proxy 同口径）。
+- 「鉴权」写「需 API Key（面板/CLI 共用）」——key 不回显（与 zcode2api 同口径）。
 - 「🧾 原始输出」**非空才渲染**（同 wb_notify 的 $6 口径）：启动失败给容器日志尾部；
   签到分支给签到工具 stderr 尾部（均 1200 字节）。
 - 版式真源是 `openclaw.yml` trae2api 步骤内的 `trae_notify()` 函数（与 wb_notify
@@ -627,79 +627,41 @@ workbuddy-gateway**（第三个 AI 网关的对齐实现），差异只在数据
 - 归档步骤没产出明细（预检 `exit 1` / 运行被取消）时降级为 `⚠️ … 最终归档未完成`，
   这类失败在归档步骤内不产生任何通知，全靠这条兜底。
 
-### 2.6 glm-proxy（本地 GLM 反代，8787）
+### 2.6 zcode2api（本地 GLM 网关，8319）
 
-`glm-proxy` 是与 workbuddy-gateway 并列的第二个本地 AI 网关，版式同源（2.5 节）。
+`zcode2api` 是与 workbuddy-gateway 并列的本地 AI 网关（GLM，Anthropic + OpenAI
+双协议），版式同源（2.5 节）。代码来自 jarvanh/zcode2api fork，.env 与账号池
+数据快照在 Dropbox `self-hosted/zcode2api-data.tar.gz`；凭据自动跟随
+（credential_sync.py）每轮把 `~/.zcode/v2/credentials.json` 解密出的最新
+JWT / API Key 对齐进账号池。
 
-**示例：glm-proxy 已就绪**（`openclaw.yml`）
+**示例：zcode2api 已就绪**（`openclaw.yml`）
 
 ```
-🟢 glm-proxy 已就绪
+🟢 zcode2api 已就绪
 ━━━━━━━━━━━━━━━━━━
-结论：已就绪 · 自检消息已收到回答（model=glm-4.7）
-接口：<code>http://127.0.0.1:8787/v1</code>
+结论：已就绪 · 自检消息已收到回答（model=glm-5.3-flash）
+接口：<code>http://127.0.0.1:8319/v1</code>
 鉴权：需 API Key（与 workbuddy-gateway 同值）
-模型：<code>glm-4.7</code>
-
-🌐 上游端点 · 2
-  ├─ Anthropic 端点 · 可用 1/12
-  │  <code>https://open.bigmodel.cn/api/anthropic</code>
-  │  ✅ 可用·免费：<code>glm-4-flash-250414</code>
-  │  ❌ 余额不足/无资源包·付费：<code>glm-5.3-flash</code> · <code>glm-5.3</code>
-  │  ❌ 套餐已到期·付费：<code>glm-4.7</code> · <code>glm-4.5-air</code>
-
-  └─ OpenAI 端点 · 可用 5/12
-     <code>https://open.bigmodel.cn/api/paas/v4</code>
-     ✅ 可用·付费：<code>glm-4.7</code> · <code>glm-4.5-air</code>
-     ✅ 可用·免费：<code>glm-4.7-flash</code> · <code>glm-4-flash-250414</code>
-     ❌ 余额不足/无资源包·付费：<code>glm-5.3-flash</code> · <code>glm-5.3</code>
-
-ANTHROPIC 协议 /v1/messages → OpenAI 端点（bridge：经协议翻译，ZCode 默认走这条）；OpenAI 协议 /v1/chat/completions → OpenAI 端点；不自动回退
-上游凭据来源：<code>zcode-credentials</code>
-代码目录：<code>/dropbox/self-hosted/glm-proxy</code>
-
-⏱ 已运行 3 小时 44 分 · 🔗 运行日志
+模型：<code>glm-5.3-flash</code>
+代码：<code>https://github.com/jarvanh/zcode2api.git</code>
 ```
 
-**glm-proxy 通知的字段口径**（改这条通知时逐条对齐）：
+**zcode2api 通知的字段口径**（改这条通知时逐条对齐）：
 
-- **上游端点分节**（`🌐 上游端点 · N`，N = 端点数）由 `render-probe.py` 渲染，
-  数据来自 `probe.mjs`（真发请求探测两条端点 × 逐模型）。**这是唯一一处把上游
-  可用性搬进通知的地方**，因为"为什么不能用"无法从代理自身状态推出来。
-  - **端点是条目行、可用性档位是子行**（与账号池同形）：`<code>端点名</code> · 可用 N/M`，
-    子行给「图标 + 原因·计费档：模型清单」。子行前缀手拼 `│  `/空格，
-    **不能走 `tree_lines`**（它把每行都当兄弟条目，子行会被渲染成平级）。
-  - **计费档（付费/免费）必须逐行给出**：读者要一眼看出哪些模型免费、哪些消耗资源包。
-    这是"收费情况"的落点，不写等于没说。
-  - **模型名是机器值 → 逐个 `<code>`**；原因与计费档是自然语言 → 裸文本。
-  - **两条端点探同一份模型名单**：实测同一条端点会因模型而异（Anthropic 端点
-    `glm-4.7` 回 1309 套餐到期、`glm-5.3-flash` 回 1113 余额不足、免费模型 200），
-    只探一个模型会把多因误报成单因。
-  - 分节标题的计数由渲染脚本给出（第 1 行），正文在其余行 —— CI 侧只做
-    `head -n 1` / `tail -n +2` 拆分，不解析 JSON。
-  - **渲染脚本输出的 `<code>` 已转义**，CI 侧直接 `tg_add_block` 整段插入；
-    再套 `escape_html` 会二次转义成 `&amp;amp;`。
-- **结论**含自检实际用上的模型（`model=<名>`）——**不写死**。自检判据是
-  「上游端点能返回正确信息」：按 `DEFAULT_MODEL` → 探测可用清单 → 内置兜底逐个试，
-  任一模型答上来即通过。上游按模型分档供额（某代次欠费、另一代次仍有资源包）时，
-  网关整体仍可用，不该判失败。
-- **`DEFAULT_MODEL` 自身不可用**时结论里明说（`但默认模型 X 不可用`）：网关仍服务，
-  但不写 `model` 的客户端会全部 429 —— 不能让「已就绪」掩盖这个事实。
-- **「模型」行是机器值**（模型名）→ `<code>`。它报自检实际用上的那个模型，
-  完整可用清单在上游端点分节里。
-- **鉴权固定写「需 API Key（与 workbuddy-gateway 同值）」**：`HOST=0.0.0.0` 且设了
-  `AI_GATEWAY_API_KEY`，两个网关共用同一把。**不得回显 key 本身**。
-- **结尾那句路由说明反映真实映射**（`ANTHROPIC 协议 /v1/messages → OpenAI 端点（bridge：经协议翻译，ZCode 默认走这条）…；不自动回退`）：
-  **bridge 为默认 —— 这是本服务存在的理由**:ZCode 的 Anthropic 协议写死,哪条端点有额度不由它决定;
-  Coding Plan 到期后只有把请求翻译成 OpenAI 协议打 paas/v4,ZCode 才能继续用付费模型
-  (实测 glm-4.7 在 paas/v4 是 200、在 api/anthropic 是 1309)。`ANTHROPIC_MODE=native` 才直通 api/anthropic。
-  **不自动回退**：失败原样回传上游错误。
-  **这句话改过四次**（「另一条仅作参考」→「自动回退」→「协议决定端点」→ 现状）——
-  改它之前先跑一遍 ZCode 的真实路径（/v1/messages + 付费模型），**以实测为准，别照抄历史文案**。
-- **失败态不给「接口 / 鉴权 / 模型」三行**：服务已不在，展示指向已停进程的地址会误导。
-- **日志尾部进「🧾 原始输出」的 `<pre>`**（尾部 15 行）：`<pre>` 只给原始输出，
-  结构化数据（端点/模型/计费）一律走上面的树形条目 —— 把结构化数据塞进 `<pre>`
-  是这条通知最容易犯的版式错误（信息在，但读者扫不出来）。
+- **自检是真发消息**：判据「上游返回了助手内容块」（`content` 数组非空即过，
+  不限定 `text` 类型 —— GLM 是思考模型，`max_tokens` 给小了会只有 `thinking`
+  块，按 text 判会把健康网关误报成失败）。healthz/模型列表通不算数。
+- **Plan 通道降级如实报**：主探 `glm-5.3-flash`（Plan 通道，需无痕验证码，
+  求解偶发连败 → 仅验证码类错误重试 3 轮）；全败退探 `bigmodel/GLM-5.3`
+  （API Key 通道，免验证码）。退探能通 = 服务本体健康、仅 Plan 通道降级：
+  标题用 🟡、结论写明「Plan 通道降级」，**且降级轮不进接力静默**（每轮必报，
+  不能让「已就绪」掩盖通道缺失）。
+- **失败态不给「接口 / 鉴权 / 模型」三行**：服务已不在，展示指向已停进程的
+  地址会误导。自检输出与服务日志尾部（各 15 行）进「🧾」分节的 `<pre>`。
+- **鉴权固定写「需 API Key（与 workbuddy-gateway 同值）」**：两个网关共用
+  `AI_GATEWAY_API_KEY`。**不得回显 key 本身**。
+
 
 ### 2.7 Emby 服务
 

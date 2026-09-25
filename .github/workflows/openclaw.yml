@@ -16,7 +16,7 @@ jobs:
     env:
       TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
       TS_OAUTH_CLIENT_SECRET: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
-      # 本机两个自建 AI 网关（glm-proxy 8787 / workbuddy-gateway 8318）共用同一把访问 key，
+      # 本机两个自建 AI 网关（zcode2api 8319 / workbuddy-gateway 8318）共用同一把访问 key，
       # 客户端只需记一个。定义在 job 级供两个 step 复用，避免两处各写一份而写歪。
       # 注：这是本机网关的访问口令，不是任何上游服务的凭据；两者都不对外暴露公网。
       # 取值在仓库 Secrets（2026-09-24 轮换：旧明文已从仓库移除）
@@ -889,7 +889,7 @@ jobs:
           #   结论/更新/原因 → 人写的自然语言 → 裸文本 kv；版本/路径/端口 → 机器值 → <code>；
           #   原始输出 → <pre>，恒为正文最后一块（其后只跟收尾区）。空值整行跳过、空分节整段跳过。
           #   鉴权写实际形态：serve 以 -addr 0.0.0.0 监听（对 Tailscale/局域网开放），
-          #   故显式传 -api-key 做客户端 Bearer 校验，取值与 glm-proxy 同为 AI_GATEWAY_API_KEY。
+          #   故显式传 -api-key 做客户端 Bearer 校验，取值与 zcode2api 同为 AI_GATEWAY_API_KEY。
           #   （此前注释写「仅回环监听，无需密钥」，与 -addr 0.0.0.0 的实际启动参数不符，已订正）
           #   绝不编造密钥值，也不在通知里回显 key 本身。凭据段只列 workbuddy*.json 的文件名，绝不回显内容（真实 Token）。
           #   账号池取自 workbuddy-status.json（键名由上游 Go 结构体固定，见采集处注释）；
@@ -1586,7 +1586,7 @@ jobs:
           fi
 
       # trae2api：TRAE SOLO 反代（OpenAI 兼容 API + Web 管理面板 /admin）。
-      # 位置紧跟 workbuddy-gateway / glm-proxy：同为 AI 网关形态服务。
+      # 与 workbuddy-gateway / zcode2api 同为 AI 网关形态服务。
       # 部署方式：取 jarvanh/trae2api 的 Release 静态二进制直接构建镜像，
       # 不再浅克隆源码、不在 runner 上跑 go build（省掉每轮 Go 编译开销）。
       # Dockerfile 与签到/积分工具同样取自 fork 的 Release / raw，本机无需 Go 工具链。
@@ -1954,195 +1954,210 @@ jobs:
             "$TRAE_VER" "$TRAE_UPDATE" "" \
             "$(cat "$CHECKIN_ERR" 2>/dev/null || true)" 1
 
-      # glm-proxy：BigModel/GLM 本地反代（Anthropic ↔ OpenAI 协议转换）。
-      # 位置紧跟 workbuddy-gateway：两者同为「宿主进程 + 本地盘运行目录」形态，
-      # 且都要在 Notify Tailscale SSH entry 之前起来（该步骤会读 AI 网关状态）。
+      # zcode2api：GLM 反代网关（Anthropic + OpenAI 双协议，端口 8319）。
+      # 代码取 jarvanh/zcode2api fork（在 dengyie 上游之上补了 ZCODE_GATEWAY_KEY
+      # 环境变量生效与 credential_sync.py；本机 clone 为权威源，改动后 git push fork）。
+      # .env 与账号池（data/，SQLite WAL 不能跑在 rclone 挂载点上）是本机部署快照，
+      # 持久化在 Dropbox self-hosted/zcode2api-data.tar.gz，每轮还原到本地盘运行目录
+      # —— 与 workbuddy-gateway「运行目录落本地盘」同口径。
+      # 必须在 Notify Tailscale SSH entry 之前起来（该步骤会读 AI 网关状态）。
       # 收尾停止见 Stop OpenClaw and Final Archive 的 3c 步（在 workbuddy 的 3b 之后）。
-      - name: Run glm-proxy (GLM reverse proxy)
-        id: run_glm_proxy
+      - name: Run zcode2api (GLM gateway)
+        id: run_zcode2api
         continue-on-error: true
         env:
           # send_tg 发送闸 + 收尾区接线（缺任一则本步骤通知静默跳过）
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # 网关鉴权：与 workbuddy-gateway 同值（job 级 AI_GATEWAY_API_KEY）。
+          # 环境变量优先于 .env（python-dotenv 默认不覆盖已存在的环境变量），
+          # 无需改数据快照里的 .env 即与仓库 Secrets 对齐。
+          ZCODE_GATEWAY_KEY: ${{ secrets.AI_GATEWAY_API_KEY }}
         run: |
           set -uo pipefail
           # 通知真源在 step 顶层 source 一次（勿挪进函数体，理由见 workbuddy 步骤同名注释 / 规范 4.4）
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 
-          # 代码/脚本持久化在 Dropbox，运行目录落本地盘 —— 与 workbuddy-gateway 同口径：
-          #   1. rclone 挂载点无法执行文件（权限位由 --file-perms 合成，chmod +x 是空操作），
-          #      故必须用 bash 显式调用，直接 ./glm-proxy.sh 会报 bad interpreter。
-          #   2. 服务日志/pid 也写本地盘，避免 FUSE 挂载点上高频读写卡住。
-          GLM_DIR="/dropbox/self-hosted/glm-proxy"
-          GLM_RUN_DIR="/tmp/local_glm_proxy"
-          GLM_PORT="8787"
-          GLM_LOG="$GLM_RUN_DIR/logs/glm-proxy.log"
-          mkdir -p "$GLM_RUN_DIR/logs"
+          Z2A_REPO="https://github.com/jarvanh/zcode2api.git"
+          Z2A_DATA_ARCHIVE="dropbox:self-hosted/zcode2api-data.tar.gz"
+          Z2A_RUN_DIR="/tmp/local_zcode2api"
+          Z2A_PORT="8319"
+          Z2A_LOG="$Z2A_RUN_DIR/logs/zcode2api.log"
 
-          # 访问 key：与 workbuddy-gateway 同为 job 级 AI_GATEWAY_API_KEY，.env 里同名存放。
-          # 注意 glm-proxy.sh 会 source .env，而 .env 里的值会覆盖外部 export
-          # （脚本内 set -a 后 source），所以不能靠 export 纠偏，只能校验两份是否一致，
-          # 不一致就如实报出来（不静默用其中某一个）。
-          # server.mjs 对新名 AI_GATEWAY_API_KEY 与旧名 PROXY_API_KEY 都认，故两个都取来比对。
-          GLM_ENV_KEY="$(grep -m1 -E '^(AI_GATEWAY_API_KEY|PROXY_API_KEY)=' "$GLM_DIR/.env" 2>/dev/null | cut -d= -f2- || true)"
-          if [ -n "$GLM_ENV_KEY" ] && [ "$GLM_ENV_KEY" != "$AI_GATEWAY_API_KEY" ]; then
-            echo "⚠️ [glm-proxy] .env 里的访问 key 与 AI_GATEWAY_API_KEY 不一致，以 .env 为准"
-          fi
+          Z2A_OK=0
+          Z2A_REASON=""
+          Z2A_SELFTEST_MODEL=""
+          Z2A_SELFTEST_OUT=""
+          Z2A_PLAN_BAD=0
 
-          GLM_OK=0
-          GLM_REASON=""
-          GLM_SELFTEST_MODEL=""
-          GLM_DEFAULT_BAD=""
-          # 端到端自检：无论进程是新起的还是复用的残留实例，都要真发一条消息验证。
-          # 判据是「上游端点能返回正确信息」：脚本内部按候选名单逐个试，任一模型拿到
-          # 正文即通过 —— 不再绑死 GLM-5.3-Flash（该模型上游 429 时曾让健康的代理每轮
-          # 误报启动失败）。复用路径也必须过这道闸，否则残留实例能凭 healthz 直接
-          # 判成就绪，把「进程活着但上游不可用」报成绿（实测漏过）。
-          glm_run_selftest() {
-            GLM_SELFTEST_OUT="$(bash "$GLM_DIR/glm-proxy.sh" selftest 2>&1)"
-            GLM_SELFTEST_RC=$?
-            printf '%s\n' "$GLM_SELFTEST_OUT" | tail -n 10
-            if [ "$GLM_SELFTEST_RC" -ne 0 ]; then
-              return 1
-            fi
-            # 自检实际用的模型（脚本日志形如 "selftest OK (model=glm-4.7)"）——
-            # 通知里的「模型」行报真实值，不写死
-            GLM_SELFTEST_MODEL="$(printf '%s' "$GLM_SELFTEST_OUT" \
-              | sed -n 's/.*selftest OK (model=\([^)]*\)).*/\1/p' | tail -n 1)"
-            # DEFAULT_MODEL 自身不可用时脚本会打这行：网关仍可用，但"不写 model
-            # 的客户端"会全部 429。这条必须进通知，否则"已就绪"会掩盖该事实。
-            GLM_DEFAULT_BAD="$(printf '%s' "$GLM_SELFTEST_OUT" \
-              | sed -n 's/.*default_model_unusable=//p' | tail -n 1)"
-            return 0
+          # 端口存活判定：/v1 带鉴权，未带 key 会拿 401，不能 curl -f；
+          # 拿到任意 HTTP 码（非 000）即视为有进程在监听，链路可用性交给自检。
+          z2a_alive() {
+            local code
+            code="$(curl -s --max-time 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${Z2A_PORT}/v1/models" 2>/dev/null || true)"
+            [ -n "$code" ] && [ "$code" != "000" ]
           }
 
-          if curl -fsS --max-time 3 "http://127.0.0.1:${GLM_PORT}/healthz" >/dev/null 2>&1; then
-            # 端口已有实例在响应：多为上一轮残留进程，直接复用，不重复起。
-            # 但复用不等于可用 —— 仍要跑自检确认上游链路。
-            if glm_run_selftest; then
-              GLM_OK=1
-              if [ -n "$GLM_DEFAULT_BAD" ]; then
-                GLM_REASON="已就绪 · 复用 ${GLM_PORT} 上的实例（自检由 ${GLM_SELFTEST_MODEL} 通过；默认模型 ${GLM_DEFAULT_BAD} 不可用）"
-              else
-                GLM_REASON="已就绪 · 复用 ${GLM_PORT} 上的实例（自检 model=${GLM_SELFTEST_MODEL:-未知}）"
+          # 端到端自检：无论进程是新起的还是复用的残留实例，都要真发消息验证。
+          # 判据是「上游返回了助手内容块」——healthz/模型列表通不代表上游链路可用
+          # （旧反代实测漏过「进程活着但上游 429」）。注意 GLM 是思考模型，
+          # max_tokens 给小了会只产出 thinking 块，故判据不限定 text 类型。
+          # 主探 glm-5.3-flash（Plan 通道）：要过无痕验证码，求解偶发连败
+          # （实测多在第 2 次尝试成功），故验证码类错误重试 3 轮；
+          # 全败再退探 bigmodel/GLM-5.3（API Key 通道，免验证码）——能通说明服务
+          # 本体健康、仅 Plan 通道降级，通知里如实分开报（Z2A_PLAN_BAD）。
+          z2a_probe() {
+            curl -sS --max-time 120 -X POST "http://127.0.0.1:${Z2A_PORT}/v1/messages" \
+              -H "Authorization: Bearer ${ZCODE_GATEWAY_KEY}" \
+              -H 'content-type: application/json' \
+              -d "$1" 2>&1
+          }
+          z2a_body_ok() {
+            echo "$1" | jq -e '(.content // [] | length) > 0' >/dev/null 2>&1
+          }
+          z2a_selftest() {
+            Z2A_SELFTEST_OUT=""
+            Z2A_SELFTEST_MODEL=""
+            Z2A_PLAN_BAD=0
+            for _ in 1 2 3; do
+              Z2A_SELFTEST_OUT="$(z2a_probe '{"model":"glm-5.3-flash","max_tokens":16,"messages":[{"role":"user","content":"回复 ok 即可"}]}')"
+              if z2a_body_ok "$Z2A_SELFTEST_OUT"; then
+                Z2A_SELFTEST_MODEL="$(printf '%s' "$Z2A_SELFTEST_OUT" | jq -r '.model // "未知"' 2>/dev/null || true)"
+                return 0
               fi
-            else
-              GLM_REASON="复用 ${GLM_PORT} 上的实例，但自检未通过：候选模型全部无有效回答（原因见上游探测）"
+              # 只有验证码类错误值得重试（额控/鉴权重试也是同样结果）
+              echo "$Z2A_SELFTEST_OUT" | jq -e '.error.type == "captcha_error"' >/dev/null 2>&1 || break
+              sleep 5
+            done
+            Z2A_PLAN_BAD=1
+            Z2A_SELFTEST_OUT="$(z2a_probe '{"model":"bigmodel/GLM-5.3","max_tokens":16,"messages":[{"role":"user","content":"回复 ok 即可"}]}')"
+            if z2a_body_ok "$Z2A_SELFTEST_OUT"; then
+              Z2A_SELFTEST_MODEL="$(printf '%s' "$Z2A_SELFTEST_OUT" | jq -r '.model // "未知"' 2>/dev/null || true)"
+              return 0
             fi
-          elif [ ! -f "$GLM_DIR/glm-proxy.sh" ]; then
-            GLM_REASON="脚本缺失：$GLM_DIR/glm-proxy.sh"
-          elif [ ! -f "$GLM_DIR/server.mjs" ]; then
-            GLM_REASON="代码缺失：$GLM_DIR/server.mjs"
-          else
-            echo "Starting glm-proxy on ${GLM_PORT}..."
-            if bash "$GLM_DIR/glm-proxy.sh" start 2>&1 | tail -n 20; then
-              # 启动脚本已探过 healthz；这里再用真实消息做端到端闸门
-              if glm_run_selftest; then
-                GLM_OK=1
-                if [ -n "$GLM_DEFAULT_BAD" ]; then
-                  GLM_REASON="已就绪 · 自检由 ${GLM_SELFTEST_MODEL} 通过；但默认模型 ${GLM_DEFAULT_BAD} 不可用"
-                else
-                  GLM_REASON="已就绪 · 自检消息已收到回答（model=${GLM_SELFTEST_MODEL:-未知}）"
-                fi
-              else
-                GLM_REASON="自检未通过：候选模型全部无有效回答（原因见上游探测）"
-              fi
+            return 1
+          }
+          z2a_ok_reason() {
+            if [ "$Z2A_PLAN_BAD" = "1" ]; then
+              echo "已就绪（Plan 通道降级）· glm-5.3-flash 自检 3 轮未过，bigmodel Key 通道可用（model=${Z2A_SELFTEST_MODEL:-未知}）"
             else
-              GLM_REASON="启动脚本返回非 0（未在 30 秒内就绪）"
+              echo "已就绪 · 自检消息已收到回答（model=${Z2A_SELFTEST_MODEL:-未知}）"
+            fi
+          }
+
+          if z2a_alive; then
+            # 端口已有实例在响应：多为上一轮接力残留，直接复用，不重复起。
+            # 但复用不等于可用 —— 仍要跑自检确认上游链路。
+            if z2a_selftest; then
+              Z2A_OK=1
+              Z2A_REASON="已就绪 · 复用 ${Z2A_PORT} 上的实例（$(z2a_ok_reason)）"
+            else
+              Z2A_REASON="复用 ${Z2A_PORT} 上的实例，但自检未通过（输出见下方原始输出）"
+            fi
+          else
+            echo "Cloning zcode2api and restoring data snapshot..."
+            rm -rf "$Z2A_RUN_DIR"
+            # 先 clone（目标必须为空目录），logs 目录随后补建
+            if ! git clone --quiet --depth 1 "$Z2A_REPO" "$Z2A_RUN_DIR"; then
+              Z2A_REASON="代码克隆失败：$Z2A_REPO"
+            else
+              mkdir -p "$Z2A_RUN_DIR/logs"
+              if ! { rclone copyto "$Z2A_DATA_ARCHIVE" /tmp/zcode2api-data.tar.gz 2>/dev/null \
+                   && [ -s /tmp/zcode2api-data.tar.gz ] \
+                   && tar -xzf /tmp/zcode2api-data.tar.gz -C "$Z2A_RUN_DIR"; }; then
+                Z2A_REASON="数据快照缺失或损坏：$Z2A_DATA_ARCHIVE（先在本机重新打包上传）"
+              elif ! { python3 -m venv "$Z2A_RUN_DIR/.venv" \
+                   && "$Z2A_RUN_DIR/.venv/bin/pip" install --quiet --disable-pip-version-check \
+                        -r "$Z2A_RUN_DIR/requirements.txt" 2>"$Z2A_RUN_DIR/logs/pip.log"; }; then
+                Z2A_REASON="依赖安装失败（见 logs/pip.log）"
+              else
+                echo "Starting zcode2api on ${Z2A_PORT}..."
+                (
+                  cd "$Z2A_RUN_DIR"
+                  # setsid 脱离会话：step 结束后进程不被 shell 回收（与 workbuddy 同款手法）
+                  setsid nohup .venv/bin/python cli.py serve > "$Z2A_LOG" 2>&1 < /dev/null &
+                )
+                Z2A_UP=0
+                for _ in $(seq 1 60); do
+                  if z2a_alive; then Z2A_UP=1; break; fi
+                  sleep 1
+                done
+                if [ "$Z2A_UP" != "1" ]; then
+                  Z2A_REASON="服务未在 60 秒内监听 ${Z2A_PORT}（见日志尾部）"
+                else
+                  # 凭据自动跟随：credentials.json 每轮随 zcode.tar.gz 还原（比快照里的
+                  # 账号池新），解密出的 JWT / bigmodel API Key 对齐进账号池；
+                  # 脚本幂等（一致即 SKIP），失败不阻断，沿用快照凭据继续服务
+                  if (cd "$Z2A_RUN_DIR" && .venv/bin/python credential_sync.py >> "$Z2A_LOG" 2>&1); then
+                    echo "✅ [zcode2api] credential sync 完成"
+                  else
+                    echo "⚠️ [zcode2api] credential sync 失败（沿用快照账号池凭据）"
+                  fi
+                  if z2a_selftest; then
+                    Z2A_OK=1
+                    Z2A_REASON="$(z2a_ok_reason)"
+                  else
+                    Z2A_REASON="服务已监听但自检未通过（输出见下方原始输出）"
+                  fi
+                fi
+              fi
             fi
           fi
 
           # 通知口径：与 workbuddy-gateway 一致，成功也推「已就绪」。
           # 接力轮每轮都会跑本步骤，为免逐轮刷屏，用本步骤自己的标记文件区分：
-          # 文件在 → 上一轮已启动过 = 接力轮，不重复推「已就绪」（与 workbuddy 的
-          # WB_RUN_TAG_FILE 同款做法）。按标记失败处理（多发一条好过漏发）。
-          GLM_RUN_TAG_FILE="/tmp/glm-proxy-serve-run-tag"
-          GLM_RELAUNCH=0
-          GLM_PREV_TAG=""
-          if [ -s "$GLM_RUN_TAG_FILE" ]; then
-            GLM_RELAUNCH=1
-            GLM_PREV_TAG="$(head -n 1 "$GLM_RUN_TAG_FILE" 2>/dev/null || true)"
+          # 文件在 → 上一轮已启动过 = 接力轮，不重复推「已就绪」。按未标记处理
+          # （多发一条好过漏发）。Plan 降级不算接力静默条件：降级必须每轮报。
+          Z2A_RUN_TAG_FILE="/tmp/zcode2api-serve-run-tag"
+          Z2A_RELAUNCH=0
+          Z2A_PREV_TAG=""
+          if [ -s "$Z2A_RUN_TAG_FILE" ] && [ "$Z2A_PLAN_BAD" != "1" ]; then
+            Z2A_RELAUNCH=1
+            Z2A_PREV_TAG="$(head -n 1 "$Z2A_RUN_TAG_FILE" 2>/dev/null || true)"
           fi
 
-          # 上游探测：为通知提供「两条端点 / 逐模型 / 计费档」三档事实。
-          # 只在真要发通知时跑 —— 探测本身约 1~2 分钟（每条端点串行、逐模型真实请求），
-          # 接力轮静默时白跑不值当。探测失败只影响通知的信息量，不改变结论。
-          GLM_WILL_NOTIFY=0
-          if [ "$GLM_OK" != "1" ] || [ "$GLM_RELAUNCH" != "1" ]; then
-            GLM_WILL_NOTIFY=1
-          fi
-          GLM_PROBE_JSON="$GLM_RUN_DIR/upstream-probe.json"
-          GLM_PROBE_TITLE=""
-          GLM_PROBE_TEXT=""
-          if [ "$GLM_WILL_NOTIFY" = "1" ] && [ -f "$GLM_DIR/probe.mjs" ] && [ -f "$GLM_DIR/render-probe.py" ]; then
-            echo "Probing upstream endpoints (this takes a few minutes)..."
-            rm -f "$GLM_PROBE_JSON"
-            # 预算必须大于实测耗时，否则末尾模型被标成「未探测」，通知里就少一档
-            # （实测 24 个模型 × 逐条真发请求要 146~184s；曾把预算写成 150s，
-            #   每次运行都截断——2026-09-20 本机真跑暴露）。
-            # 300s 给足余量：探测有并发上限（2）且两条端点串行，正常不会到这个数。
-            # 外层 timeout 再兜一层（比内层预算多 120s），防解析/写盘卡死拖住步骤。
-            # 探测自身非 0 不当作步骤失败。
-            PROBE_DEADLINE_MS="${GLM_PROBE_DEADLINE_MS:-300000}" \
-              timeout 420 bash "$GLM_DIR/glm-proxy.sh" probe "$GLM_PROBE_JSON" 2>&1 | tail -n 5 || true
-            if [ -s "$GLM_PROBE_JSON" ]; then
-              # render-probe.py 输出两段：第 1 行 = 分节标题（含条目计数），其余 = 正文。
-              # 计数这类渲染细节由脚本决定，这里不再解析 JSON（与 wb_notify 的
-              # 「分节标题自带 · N」同口径，只是计数在渲染侧算）。
-              GLM_PROBE_ALL="$(python3 "$GLM_DIR/render-probe.py" "$GLM_PROBE_JSON" 2>/dev/null || true)"
-              GLM_PROBE_TITLE="$(printf '%s\n' "$GLM_PROBE_ALL" | head -n 1)"
-              GLM_PROBE_TEXT="$(printf '%s\n' "$GLM_PROBE_ALL" | tail -n +2)"
-              printf '%s\n' "$GLM_PROBE_ALL"
-            else
-              echo "⚠️ [glm-proxy] 未产出探测报告，通知里将省略上游端点一节"
-            fi
-          fi
-
-          if [ "$GLM_OK" != "1" ]; then
-            GLM_TAIL="$(tail -n 15 "$GLM_LOG" 2>/dev/null || true)"
-            # 日志尾部同时打到 stdout：<pre> 只进 Telegram，CI 日志里看不到
-            echo "--- glm-proxy.log tail ---"
-            printf '%s\n' "${GLM_TAIL:-<empty>}"
-            echo "--- end glm-proxy.log tail ---"
-            # 版式对齐 wb_notify 的失败态分支：结论/端口/原因 → 探测分节 → 原始输出 → 收尾。
-            # 失败时不给「接口 / 鉴权 / 模型」三行 —— 服务不在，展示指向已停进程的地址会误导。
+          if [ "$Z2A_OK" != "1" ]; then
+            Z2A_TAIL="$(tail -n 15 "$Z2A_LOG" 2>/dev/null || true)"
+            echo "--- zcode2api.log tail ---"
+            printf '%s\n' "${Z2A_TAIL:-<empty>}"
+            echo "--- end zcode2api.log tail ---"
             _m=""
-            tg_add_title _m "❌ glm-proxy 启动失败"
-            tg_add_kv _m "结论" "未就绪 · 退出码 1"
-            tg_add_path _m "端口" "$GLM_PORT"
-            tg_add_kv _m "原因" "$GLM_REASON"
-            tg_add_path _m "代码目录" "$GLM_DIR"
-            if [ -n "$GLM_PROBE_TEXT" ]; then
-              tg_add_section _m "$GLM_PROBE_TITLE"
-              tg_add_block _m "$GLM_PROBE_TEXT"
+            tg_add_title _m "❌ zcode2api 启动失败"
+            tg_add_kv _m "结论" "未就绪"
+            tg_add_path _m "端口" "$Z2A_PORT"
+            tg_add_kv _m "原因" "$Z2A_REASON"
+            tg_add_path _m "代码" "$Z2A_REPO"
+            tg_add_path _m "数据快照" "$Z2A_DATA_ARCHIVE"
+            if [ -n "$Z2A_SELFTEST_OUT" ]; then
+              tg_add_section _m "🧾 自检输出"
+              tg_add_pre _m "$Z2A_SELFTEST_OUT"
             fi
-            if [ -n "$GLM_TAIL" ]; then
-              tg_add_section _m "🧾 原始输出"
-              tg_add_pre _m "$GLM_TAIL"
+            if [ -n "$Z2A_TAIL" ]; then
+              tg_add_section _m "🧾 服务日志尾部"
+              tg_add_pre _m "$Z2A_TAIL"
             fi
             tg_add_footer _m
             send_tg "$_m" || echo "::warning::TG 通知发送失败（不影响任务）"
           else
-            echo "✅ [glm-proxy] ${GLM_PORT} 已就绪（${GLM_REASON}）"
-            printf '%s\n' "${GITHUB_RUN_ID:-manual}" > "$GLM_RUN_TAG_FILE"
-            if [ "$GLM_RELAUNCH" = "1" ]; then
-              echo "ℹ️ [glm-proxy] 接力轮（上一 run ${GLM_PREV_TAG} 已启动），跳过重复的就绪通知"
+            echo "✅ [zcode2api] ${Z2A_PORT} 已就绪（${Z2A_REASON}）"
+            printf '%s\n' "${GITHUB_RUN_ID:-manual}" > "$Z2A_RUN_TAG_FILE"
+            if [ "$Z2A_RELAUNCH" = "1" ]; then
+              echo "ℹ️ [zcode2api] 接力轮（上一 run ${Z2A_PREV_TAG} 已启动），跳过重复的就绪通知"
             else
-              # 版式对齐 wb_notify 的就绪态分支：结论 → 接口/鉴权/模型 → 探测分节 → 代码目录。
+              # 版式对齐 wb_notify 的就绪态分支：结论 → 接口/鉴权/模型 → 代码来源。
               # 「模型」是机器值（模型名），按规范 · 取值行口径走 <code>。
               _m=""
-              tg_add_title _m "🟢 glm-proxy 已就绪"
-              tg_add_kv _m "结论" "$GLM_REASON"
-              tg_add_path _m "接口" "http://127.0.0.1:${GLM_PORT}/v1"
-              tg_add_kv _m "鉴权" "需 API Key（与 workbuddy-gateway 同值）"
-              [ -n "${GLM_SELFTEST_MODEL:-}" ] && tg_add_path _m "模型" "$GLM_SELFTEST_MODEL"
-              if [ -n "$GLM_PROBE_TEXT" ]; then
-                tg_add_section _m "$GLM_PROBE_TITLE"
-                tg_add_block _m "$GLM_PROBE_TEXT"
+              if [ "$Z2A_PLAN_BAD" = "1" ]; then
+                tg_add_title _m "🟡 zcode2api 已就绪（Plan 通道降级）"
+              else
+                tg_add_title _m "🟢 zcode2api 已就绪"
               fi
-              tg_add_path _m "代码目录" "$GLM_DIR"
+              tg_add_kv _m "结论" "$Z2A_REASON"
+              tg_add_path _m "接口" "http://127.0.0.1:${Z2A_PORT}/v1"
+              tg_add_kv _m "鉴权" "需 API Key（与 workbuddy-gateway 同值）"
+              [ -n "${Z2A_SELFTEST_MODEL:-}" ] && tg_add_path _m "模型" "$Z2A_SELFTEST_MODEL"
+              tg_add_path _m "代码" "$Z2A_REPO"
               tg_add_footer _m
               send_tg "$_m" || echo "::warning::TG 通知发送失败（不影响任务）"
             fi
@@ -3611,27 +3626,22 @@ jobs:
             wb_stop_notify "⛔ workbuddy-gateway 已停止" "服务已退出 · 数据目录保持原状"
           fi
 
-          # 3c. glm-proxy：同为宿主进程（非容器），不会随 job 结束自动退出，
-          # 必须显式停，否则残留进程会一直持有 8787 并继续转发请求。
+          # 3c. zcode2api：同为宿主进程（非容器），不会随 job 结束自动退出，
+          # 必须显式停，否则残留进程会一直持有 8319 并继续转发请求。
           # 顺序在 workbuddy（3b）之后：两者互不依赖，但 3c 之后就是容器归档，
           # 宿主进程清理集中放在 3b/3c 两段便于对照。
-          echo "3c. Stopping glm-proxy..."
-          GLM_DIR="/dropbox/self-hosted/glm-proxy"
-          if [ -f "$GLM_DIR/glm-proxy.sh" ]; then
-            # 脚本自带优雅退出 + 20 秒后强杀 + pkill 兜底，这里不再重复实现
-            bash "$GLM_DIR/glm-proxy.sh" stop 2>&1 | tail -n 5 || \
-              echo "⚠️ glm-proxy 停止脚本返回非 0"
+          echo "3c. Stopping zcode2api..."
+          # 服务以 setsid 脱离会话，收殓只能按命令行特征：先 SIGTERM 优雅退出
+          # （uvicorn 收尾 in-flight 请求），2 秒后仍有残留再 SIGKILL。
+          pkill -f "local_zcode2api.*cli\.py serve" 2>/dev/null || true
+          sleep 2
+          pkill -9 -f "local_zcode2api.*cli\.py serve" 2>/dev/null || true
+          Z2A_STILL_RUNNING=0
+          if (exec 3<> /dev/tcp/127.0.0.1/8319) 2>/dev/null; then
+            Z2A_STILL_RUNNING=1
+            echo "⚠️ zcode2api 仍在监听 8319"
           else
-            echo "⚠️ 未找到 $GLM_DIR/glm-proxy.sh，按命令行兜底清理"
-          fi
-          # 兜底：按命令行匹配清残留（脚本未覆盖到的情形，如手动起的实例）
-          pkill -f "glm-proxy/server.mjs" 2>/dev/null || true
-          GLM_STILL_RUNNING=0
-          if curl -fsS --max-time 3 "http://127.0.0.1:8787/healthz" >/dev/null 2>&1; then
-            GLM_STILL_RUNNING=1
-            echo "⚠️ glm-proxy 仍在监听 8787"
-          else
-            echo "✅ glm-proxy 已停止"
+            echo "✅ zcode2api 已停止"
           fi
 
           # 用法与版式同 send_telegram_alert（<对象> <结论> <原因> [原始输出]）；
