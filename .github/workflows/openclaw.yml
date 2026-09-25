@@ -1959,7 +1959,9 @@ jobs:
       # 环境变量生效与 credential_sync.py；本机 clone 为权威源，改动后 git push fork）。
       # .env 与账号池（data/，SQLite WAL 不能跑在 rclone 挂载点上）是本机部署快照，
       # 持久化在 Dropbox self-hosted/zcode2api-data.tar.gz，每轮还原到本地盘运行目录
-      # —— 与 workbuddy-gateway「运行目录落本地盘」同口径。
+      # —— 与 workbuddy-gateway「运行目录落本地盘」同口径。收尾归档 4c 会把运行
+      # 目录的 .env + data 回传快照（凭据闭环）；仅本机结构性变更（增删账号、
+      # 改 .env）才需手动重传覆盖。
       # 必须在 Notify Tailscale SSH entry 之前起来（该步骤会读 AI 网关状态）。
       # 收尾停止见 Stop OpenClaw and Final Archive 的 3c 步（在 workbuddy 的 3b 之后）。
       - name: Run zcode2api (GLM gateway)
@@ -3287,6 +3289,7 @@ jobs:
               CliRelay|CliRelay.tar.gz)         echo "CliRelay" ;;
               CLIProxyAPI|CLIProxyAPI.tar.gz)   echo "CLIProxyAPI" ;;
               rsstt|rsstt.tar.gz)               echo "rss-to-telegram" ;;
+              zcode2api-data.tar.gz)            echo "zcode2api 数据" ;;
               *)                                echo "$1" ;;
             esac
           }
@@ -3655,6 +3658,7 @@ jobs:
               CliRelay|CliRelay.tar.gz)         echo "CliRelay" ;;
               CLIProxyAPI|CLIProxyAPI.tar.gz)   echo "CLIProxyAPI" ;;
               rsstt|rsstt.tar.gz)               echo "rss-to-telegram" ;;
+              zcode2api-data.tar.gz)            echo "zcode2api 数据" ;;
               *)                                echo "$1" ;;
             esac
           }
@@ -3824,6 +3828,41 @@ jobs:
           else
             echo "ℹ️ ~/.zcode/{cli,v2,server} 均不存在（本机从未部署 ZCode），跳过 ZCode 最终归档"
             record_archive_result "zcode.tar.gz" skip 0 "本机未部署 ZCode"
+          fi
+
+          echo "4c. Final archive of zcode2api data snapshot (.env + data/)..."
+          # 3c 已停服、SQLite 已静默，直接打包运行目录的 .env + data/（账号池
+          # accounts.db + device_mid）→ dropbox:self-hosted/zcode2api-data.tar.gz。
+          # 该快照下一轮被 Run zcode2api 还原，其 credential sync 又会把当轮
+          # credentials.json 的最新凭据对齐进库 —— 凭据就此闭环，无需本机续传。
+          # 仅结构在本机变了（增删账号、改 .env）才需要本机手动重传覆盖。
+          Z2A_RUN_DIR="/tmp/local_zcode2api"
+          if [ -f "$Z2A_RUN_DIR/.env" ] && [ -f "$Z2A_RUN_DIR/data/accounts.db" ]; then
+            TMP_Z2A_FINAL_TAR="/tmp/zcode2api-data-final.tar.gz"
+            rm -f "$TMP_Z2A_FINAL_TAR"
+            if z2a_final_output=$(tar -czf "$TMP_Z2A_FINAL_TAR" -C "$Z2A_RUN_DIR" .env data 2>&1) \
+              && [ -s "$TMP_Z2A_FINAL_TAR" ]; then
+              z2a_final_size=$(stat -c%s "$TMP_Z2A_FINAL_TAR" 2>/dev/null || echo 0)
+              z2a_final_upload_output=""
+              if z2a_final_upload_output=$(rclone copyto "$TMP_Z2A_FINAL_TAR" "dropbox:self-hosted/zcode2api-data.tar.gz" -v 2>&1); then
+                echo "final zcode2api-data archive/upload ok ($z2a_final_size bytes)"
+                record_archive_result "zcode2api-data.tar.gz" ok "$z2a_final_size"
+                rm -f "$TMP_Z2A_FINAL_TAR"
+              else
+                rc=$?
+                echo "⚠️ final zcode2api-data.tar.gz upload failed (rc=$rc): ${z2a_final_upload_output}"
+                record_archive_result "zcode2api-data.tar.gz" fail 0 "上传失败 · 退出码 $rc"
+                send_archive_alert "zcode2api-data.tar.gz" "上传失败 · 退出码 $rc" "rclone 上传失败" "${z2a_final_upload_output:-无输出}"
+              fi
+            else
+              rc=$?
+              echo "⚠️ final zcode2api-data.tar.gz archive failed (rc=$rc): ${z2a_final_output}"
+              record_archive_result "zcode2api-data.tar.gz" fail 0 "打包失败 · 退出码 $rc"
+              send_archive_alert "zcode2api-data.tar.gz" "归档失败 · 退出码 $rc" "打包失败" "${z2a_final_output:-无输出}"
+            fi
+          else
+            echo "ℹ️ $Z2A_RUN_DIR 缺 .env 或 data/accounts.db（本轮 zcode2api 未部署），跳过其数据归档"
+            record_archive_result "zcode2api-data.tar.gz" skip 0 "本轮未部署"
           fi
 
           MIN_SIZE=$((5 * 1024))
