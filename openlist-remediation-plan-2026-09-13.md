@@ -365,13 +365,20 @@
      （60min 轮约 20%，320min 轮约 4%）⇒ **跑量用 320，验证用短轮**。
    - 两者都先 `gh run cancel <在跑轮>` 腾并发位，否则会 pending 到长轮结束。
 
-**⚠️ CI 既有红清单（2026-09-23 新增，判「是不是我的回归」先看这里）**：`tests.yml`
-  当前有 **3 套稳定 EXIT=1** —— `test_preview_diff.sh` / `test_progress_phase_layout.sh` /
-  `test_sync_notify_fail_list.sh`。成因是通知版式基线未同步: `597177c` 把树形前缀
-  包进了 `<code>`（`<code>  └─ </code>`），而这三个套件的断言仍按旧版式写
-  （期望 `  └─ <code>…</code>`）。**与 openlist 同步域改动无关**，修它要动
-  `docs/telegram-notify.md` 的版式基线（属另一域，别在 openlist 改动里顺手改）。
-  另: `test_bulk_hash_fold.sh` 在本机会红 4 项（无 docker/真 rclone），**CI 上 EXIT=0**。
+**✅ 通知版式基线已同步（2026-09-25，用户选方案 A「改测试断言对齐新版式」）**：
+  原 3 套 EXIT=1 现已**全部转绿**（`test_preview_diff` 48/48 · `test_progress_phase_layout`
+  30/30 · `test_sync_notify_fail_list` 19/19），`render_preview.sh` 16 项校验全通过。
+  - ⚠️ **本节此前的归因是错的，已纠正**: 原写"成因是 `597177c` 把树形前缀包进
+    `<code>`" —— 实查 `597177c` 是 trae2api 部署改动（删内联 compose），**与通知
+    版式毫无关系**。真实情况: `tg_notify.sh` 的 `tree_conn`/`tree_sub` 规定前缀
+    **自带等宽 `<code>`**，理由写在文件头「版式规范」（比例字体下竖线才能严格
+    成列）；是**测试断言**与 `docs/telegram-notify.md` 示例没跟上这一版式。
+    ⇒ 教训: 挂账"某 commit 导致"前必须 `git show` 核实，否则会误导后续接手方。
+  - 修法: ① 三套测试的断言对齐新版式（前缀在 code 内，与主体分成两段）；
+    ② `sync_progress.sh` 标签块渲染此**前手写** `<code>└─ </code>`，与 `tree_conn`
+    漂移 ⇒ 统一改为走 `tree_conn`/`tree_sub`（**单一事实源**，不只改测试了事）；
+    ③ `docs/telegram-notify.md` 补版式基线说明（示例按纯文本示意，实际以
+    `tree_conn`/`tree_sub` 为准）。
 
 **红线**（§8，无例外）：run_mode 只允许「同步」与「调试 · 修复管线测试」；动通知必跑 `bash skills/telegram-notify-audit/scripts/render_preview.sh`；改完跑全套串行回归（数量会变，不写死；判据「除环境假红外全 `EXIT=0`」） + 全部日志 `grep "command not found"` 必须为空；push 前 `git fetch` 并更新本文档。
 
