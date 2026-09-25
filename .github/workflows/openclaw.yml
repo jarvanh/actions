@@ -1830,10 +1830,43 @@ jobs:
             -o /tmp/trae2api-checkin && chmod +x /tmp/trae2api-checkin
           curl -fsSL "https://github.com/jarvanh/trae2api/releases/download/${TRAE_REL}/trae2api-credit-linux-amd64" \
             -o /tmp/trae2api-credit && chmod +x /tmp/trae2api-credit
-          /tmp/trae2api-checkin -dir "$TRAE_DATA/auths" -state "$TRAE_DATA/data/state.json" \
-            > "$CHECKIN_JSONL" 2>"$CHECKIN_ERR" || true
+          # 启动式错峰签到（主人 09-25 定）：停用 cron 连打，每次 VM 启动只跑一轮。
+          #   - /tmp 标记随 VM 重启清空 → 天然「每次启动一次」
+          #   - 后台进程存活（pid 探活）→ 上一 run 拉起的错峰仍在 30-60 分钟账号间隔中，跳过
+          #   - 首个真实账号立即发起；already/cooldown 分支零请求秒回；
+          #     后续真实请求随机间隔 30-60 分钟（工具内 -stagger-min/-stagger-max）
+          #   - 不提供 -force：风控期禁止绕过冷却强打
+          CK_RUNNING=0
+          _ckp="$(cat /tmp/trae2api-checkin.pid 2>/dev/null || true)"
+          if [ -n "$_ckp" ] && kill -0 "$_ckp" 2>/dev/null; then
+            CK_RUNNING=1
+          fi
+          if [ "$CK_RUNNING" = 1 ]; then
+            echo "   后台错峰签到进行中（pid $_ckp），跳过重复拉起"
+          elif [ -f /tmp/trae2api-checkin.round ]; then
+            echo "   本次 VM 启动已完成一轮错峰签到（标记存在），跳过"
+          elif ! /tmp/trae2api-checkin -h 2>&1 | grep -q 'stagger-min'; then
+            echo "   ⚠️ 签到工具不支持错峰参数（Release 未更新），本轮跳过签到"
+          else
+            : > "$CHECKIN_JSONL"; : > "$CHECKIN_ERR"
+            nohup /tmp/trae2api-checkin -dir "$TRAE_DATA/auths" -state "$TRAE_DATA/data/state.json" \
+              -stagger-min 30 -stagger-max 60 \
+              > "$CHECKIN_JSONL" 2>>"$CHECKIN_ERR" &
+            echo $! > /tmp/trae2api-checkin.pid
+            touch /tmp/trae2api-checkin.round
+            echo "   已后台拉起错峰签到（pid $(cat /tmp/trae2api-checkin.pid)），真实请求随机间隔 30-60 分钟"
+          fi
+          # 等首批落盘：跳过类分支秒回；首个真实账号数秒～数十秒
+          for _i in 1 2 3 4 5 6 7 8 9; do
+            sleep 10
+            [ -s "$CHECKIN_JSONL" ] && break || true
+          done
           /tmp/trae2api-credit -dir "$TRAE_DATA/auths" -packs -json > "$PACKS_JSON" 2>/dev/null || true
           cat "$CHECKIN_JSONL" 2>/dev/null || true
+          _ckp="$(cat /tmp/trae2api-checkin.pid 2>/dev/null || true)"
+          if [ -n "$_ckp" ] && kill -0 "$_ckp" 2>/dev/null; then
+            echo "   （错峰签到后台进行中，剩余账号按 30-60 分钟间隔陆续落盘）"
+          fi
 
           echo "7.5 Fetch model consumption rates (from live /v1/models)..."
           # 数据源：本机 trae2api /v1/models 的 consumption_rate 字段（jarvanh/trae2api
@@ -1908,6 +1941,11 @@ jobs:
             _skip=$(jq -s '[.[] | select((.err // "") == "" and (.claimed // false) != true and ((.skipped // "") != "" and (.skipped // "") != "already"))] | length' "$CHECKIN_JSONL")
             _fail=$(jq -s '[.[] | select((.err // "") != "")] | length' "$CHECKIN_JSONL")
             _conclusion="已就绪 · 已签 ${_ok} · 跳过 ${_skip} · 失败 ${_fail}（共 ${_total}）"
+            # 错峰后台进行中 → 结论追加标记（剩余账号尚未落盘）
+            _ckp="$(cat /tmp/trae2api-checkin.pid 2>/dev/null || true)"
+            if [ -n "$_ckp" ] && kill -0 "$_ckp" 2>/dev/null; then
+              _conclusion="${_conclusion} · 错峰进行中"
+            fi
           else
             _title="⚠️ trae2api 已就绪 · 签到无输出"
           fi
