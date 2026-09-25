@@ -2083,7 +2083,10 @@ jobs:
                 local q
                 q="$(printf '%s' "$quota_json" | jq -r 'to_entries | map("\(.key) 剩 \(((.value.remaining / 100000) | floor) / 10)M / \(((.value.total / 100000) | floor) / 10)M") | join(" · ")' 2>/dev/null)"
                 local exp
-                exp="$(printf '%s' "$quota_json" | jq -r '[.[] | .expires_at // empty] | unique | map(todate | .[0:10]) | join(" · ")' 2>/dev/null)"
+                # 精确到时刻并强制北京时区（jq todate 是 GMT 且只取日期会丢时刻；
+                # strftime 两参数写法在本机 jq 会崩，故 bash 侧 date 换算）
+                exp="$(printf '%s' "$quota_json" | jq -r '[.[] | .expires_at // empty] | unique | .[]' 2>/dev/null \
+                  | while read -r ts; do TZ=Asia/Shanghai date -d @"$ts" '+%Y-%m-%d %H:%M'; done | paste -sd' · ' -)"
                 [ -n "$exp" ] && q="${q} · 有效期 ${exp}"
                 [ -n "$q" ] && sub="额度 $(escape_html "$q")"
               fi
