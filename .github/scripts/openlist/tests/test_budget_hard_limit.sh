@@ -258,7 +258,10 @@ if [ -f "$_SE_SRC" ]; then
   _seen=0
   while IFS=: read -r _ln _; do
     _seen=$((_seen + 1))
-    _win=$(sed -n "$(( _ln > 6 ? _ln - 6 : 1 )),${_ln}p" "$_SE_SRC")
+    # 窗口取 12 行（原 6 行）: 病灶 E 在闸与 sleep 之间插入了"路径不可写"分支，
+    #   把硬顶闸挤出了 6 行窗口 ⇒ 断言误报。窗口放宽到 12 行仍能抓住"闸被撤掉"
+    #   （撤掉后整个函数体内不再出现 sync_hard_limit_stop）。
+    _win=$(sed -n "$(( _ln > 12 ? _ln - 12 : 1 )),${_ln}p" "$_SE_SRC")
     case "$_win" in
       *sync_hard_limit_stop*) : ;;
       *) _miss_sleep="$_miss_sleep $_ln" ;;
