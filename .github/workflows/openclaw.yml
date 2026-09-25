@@ -1705,7 +1705,7 @@ jobs:
                       _rows+="$(tree_sub "$_last")$(escape_html "$_eline")"$'\n'
                     done <<< "$_exp3"
                   fi
-                done < "$CHECKIN_JSONL"
+                done <<< "$_uids"
                 tg_add_block _msg "${_rows%$'\n'}"
                 # 块尾补一个空行：tg_add_block 不补尾空行，下一个 kv（数据目录）会紧贴
                 # 末条子行渲染，版式与 wb_notify（块与 kv 区之间空一行）一致。
