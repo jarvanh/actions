@@ -515,6 +515,10 @@ _progress_render() {
           #   树连接符（否则与目标端行的 └─ 同级同形，层次混淆，2026-08-30 用户反馈），
           #   保留 ▸ 前导 + 等宽缩进;
           #   d≥1 挂在本层 🔄 活动行（已置尾）之下 —— 非末行 │ + 标签，末行 └─ + 标签
+          # ⚠️ 树形前缀必须走 tree_conn/tree_sub（tg_notify.sh 单一事实源），不能
+          #   手写 —— 2026-09-25 版式基线: 前缀自带等宽 <code>（比例字体下竖线
+          #   才能严格成列）。此前这里手写 `<code>└─ </code>`，与 tree_conn 形态
+          #   漂移，test_progress_phase_layout L3a/L4a 因此常红。
           local _lab_total=0 _lab_n=0
           [ -f "$_rf" ] && _lab_total=$(grep -c . "$_rf" || true)
           [ -f "$_rf" ] && while IFS= read -r _line; do
@@ -523,9 +527,9 @@ _progress_render() {
             if [ "$_d" -eq 0 ]; then
               msg+="<code>${_ind}▸ ${_line#▸ }</code>"$'\n'
             elif [ "$_lab_n" -eq "$_lab_total" ]; then
-              msg+="<code>${_ind}└─ ${_line#▸ }</code>"$'\n'
+              msg+="<code>${_ind}</code>$(tree_conn 1)${_line#▸ }"$'\n'
             else
-              msg+="<code>${_ind}│  ${_line#▸ }</code>"$'\n'
+              msg+="<code>${_ind}</code>$(tree_sub 0)${_line#▸ }"$'\n'
             fi
           done < "$_rf"
           # 统计行与后续块对齐标签文本列（+4 格），同样等宽渲染

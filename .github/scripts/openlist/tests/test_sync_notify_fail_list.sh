@@ -101,13 +101,15 @@ printf '%s' "$captured" | grep -q "mkdir" \
   && bad "1b 原始日志片段漏进通知" || ok "1b 原始日志片段不进通知"
 printf '%s' "$captured" | grep -q "目录可写性" \
   && bad "1c 内部诊断行漏进通知" || ok "1c 内部诊断行不进通知"
-printf '%s' "$captured" | grep -q "^  └─ <code>fSWP4H4.jpg</code> · 68.540 KiB · " \
+# ⚠️ 版式基线（2026-09-25 同步）: 树形前缀自带等宽 <code>（`<code>  └─ </code>`），
+#   与条目主体的 <code> 分成两段 —— 见 tg_notify.sh 文件头「版式规范」。
+printf '%s' "$captured" | grep -q "<code>  └─ </code><code>fSWP4H4.jpg</code> · 68.540 KiB · " \
   && ok "1d 条目行为树形 + 主体等宽 + 原因" || bad "1d: 条目行形态不符"
 printf '%s' "$captured" | grep -q "^❌ 无法同步文件 · 1$" \
   && ok "1e 分节带计数" || bad "1e: 分节计数缺失"
 # 子行删除后整条清单只剩 1 行条目（分节行之外不再有缩进行）
-n_lines=$(fail_block | grep -c '^  ' || true)
-[ "$n_lines" -eq 1 ] && ok "1f 清单只剩 1 行条目（无子行）" || bad "1f: 缩进行数=${n_lines}"
+n_lines=$(fail_block | grep -c '<code>  [├└]─ ' || true)
+[ "$n_lines" -eq 1 ] && ok "1f 清单只剩 1 行条目（无子行）" || bad "1f: 条目行数=${n_lines}"
 
 # ===== 2. 失败原因是人话（规范 · 说人话）=====
 ! printf '%s' "$captured" | grep -qE "熔断|探测|哈希|base64|短哈希" \
@@ -120,13 +122,13 @@ done > "$FAIL_LIST"
 call_notify
 printf '%s' "$captured" | grep -q "^❌ 无法同步文件 · 10$" \
   && ok "3a 分节计数取真实总数（10）" || bad "3a: 计数未取总数"
-printf '%s' "$captured" | grep -q "└─ 还有 2 条…" \
+printf '%s' "$captured" | grep -q "<code>  └─ </code>还有 2 条…" \
   && ok "3b 折叠行为「还有 2 条…」" || bad "3b: 无折叠行"
 c_last=$(fail_block | grep -c '└─' || true)
 [ "$c_last" -eq 1 ] && ok "3c 只有一个 └─（折叠行作末条）" || bad "3c: └─ 数量=${c_last}"
-c_entry=$(fail_block | grep -c '^  [├└]─ <code>' || true)
+c_entry=$(fail_block | grep -c '<code>  [├└]─ </code><code>' || true)
 [ "$c_entry" -eq 8 ] && ok "3d 展示 8 条条目（上限）" || bad "3d: 条目行数=${c_entry}"
-fail_block | tail -1 | grep -q '^  └─ 还有 2 条…$' \
+fail_block | tail -1 | grep -q '<code>  └─ </code>还有 2 条…$' \
   && ok "3e 折叠行是末条" || bad "3e: 末行=$(fail_block | tail -1)"
 
 # ===== 4. 参数表去掉 fix_log 后 shift 数正确（额外参数仍生效）=====

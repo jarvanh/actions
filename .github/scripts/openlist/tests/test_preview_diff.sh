@@ -243,22 +243,27 @@ add_preview_pair "onedrive:src9" "openlist:dst9b" --exclude '/notion/**' --exclu
 flush_task_preview >/dev/null
 [ "$(echo "$SEND_CAPTURE" | grep -c '排除 · 2')" = "2" ] \
   && ok "9a 两组头「排除 · 2」（每组一条）" || bad "9a: $SEND_CAPTURE"
-echo "$SEND_CAPTURE" | grep -q '│    ├─ <code>notion/\*\*</code>' \
-  && ok "9b 非末条目子树首条（│ + 4 空格 + ├─）" || bad "9b: $SEND_CAPTURE"
-echo "$SEND_CAPTURE" | grep -q '│    └─ <code>self-hosted_latest.tar.gz</code>' \
+# ⚠️ 版式基线（2026-09-25 同步）: 树形前缀自带等宽 <code>，前缀在 code **内**:
+#   tree_conn → `<code>  ├─ </code>` / `<code>  └─ </code>`
+#   tree_sub  → `<code>  │  </code>` / `<code>     </code>`
+#   理由见 tg_notify.sh 文件头「版式规范」: 比例字体正文区下竖线才能严格成列。
+echo "$SEND_CAPTURE" | grep -q '<code>  │  </code><code>  ├─ </code><code>notion/\*\*</code>' \
+  && ok "9b 非末条目子树首条（tree_sub │ 形态 + tree_conn ├─）" || bad "9b: $SEND_CAPTURE"
+echo "$SEND_CAPTURE" | grep -q '<code>  │  </code><code>  └─ </code><code>self-hosted_latest.tar.gz</code>' \
   && ok "9c 非末条目子树末条（模式内 └─）" || bad "9c: $SEND_CAPTURE"
-echo "$SEND_CAPTURE" | grep -q '^       ├─ <code>notion/\*\*</code>' \
-  && ok "9d 末条目子树（7 空格 + ├─）" || bad "9d: $SEND_CAPTURE"
+echo "$SEND_CAPTURE" | grep -q '<code>     </code><code>  ├─ </code><code>notion/\*\*</code>' \
+  && ok "9d 末条目子树（tree_sub 5 空格形态 + tree_conn ├─）" || bad "9d: $SEND_CAPTURE"
 echo "$SEND_CAPTURE" | grep -q '排除：<code>notion/\*\*、self-hosted_latest.tar.gz</code>' \
   && bad "9e 不应再有整串顿号连排形态" || ok "9e 无整串 <code> 连排"
 
 # 9f/9g: 子行前缀宽度锁定 —— tree_sub 必须与 tree_conn 等宽（5 字符），
-# 否则子行正文比条目正文右移一格，与规范 · 条目与树形的示例不对齐
-echo "$SEND_CAPTURE" | grep -q '^  │  排除 · 2' \
-  && ok "9f 非末条目子行前缀 = 2 空格 + │ + 2 空格（与 tree_conn 等宽）" \
+# 否则子行正文比条目正文右移一格，与规范 · 条目与树形的示例不对齐。
+# 前缀现已自带 <code>（见上方基线说明），故断言形态同步改为 code 包裹。
+echo "$SEND_CAPTURE" | grep -q '<code>  │  </code>排除 · 2' \
+  && ok "9f 非末条目子行前缀 = <code>  │  </code>（与 tree_conn 等宽 5 字符）" \
   || bad "9f: $SEND_CAPTURE"
-echo "$SEND_CAPTURE" | grep -q '^     排除 · 2' \
-  && ok "9g 末条目子行前缀 = 5 空格（与 tree_conn 等宽）" \
+echo "$SEND_CAPTURE" | grep -q '<code>     </code>排除 · 2' \
+  && ok "9g 末条目子行前缀 = <code>     </code>（5 空格，与 tree_conn 等宽）" \
   || bad "9g: $SEND_CAPTURE"
 
 echo "-----"
