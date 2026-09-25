@@ -34,6 +34,10 @@
     缺字段 / CIDR 非法 / 网络异常 → 一律回退内置快照且标 `fallback`、绝不冒泡；
     另验算子内嵌的是**传进来的**段表、不是偷偷读常量。
     主流程（1–5）里 `fetch_cf_cidrs` 被 stub 成回退表，保证自检离线且不随线上段表漂移。
+13. 控制字符清洗（24）：节点名里混进 C1 控制字符（`U+009F`，实测事故）时仍能解析成功并
+    发布干净 YAML；`\t` / `\n` / `\r` 必须保留（删了会破坏 YAML 结构）。反证：把
+    `strip_nonprintable` 的调用去掉，24b 立刻变红——这正是 2026-09-24 连续两轮
+    编排轮 exit 1 的原貌。
 
 **不覆盖健康检查过滤与试装排雷**：两者都要另起 mihomo（几十 MB 下载 + 每轮几十秒等待），
 本机跑只会一路超时。这里统一用 `GIST_NODES_ALIVE_FILTER=0` / `GIST_NODES_TRIAL_LOAD=0`
@@ -995,6 +999,36 @@ def main():
                   '算子内嵌的是传入的段表，不是内置常量')
         finally:
             gist_nodes.http_get = saved_get
+
+        print('== 24. 控制字符清洗：节点名带 C1 控制字符也能解析并发布干净 YAML ==')
+        # 事故原型（2026-09-24）：抓取来的节点名里混进 `U+009F`（C1 控制字符 APC），
+        # Sub-Store 不校验、原样写进产出 YAML；`yaml.safe_load` 按规范拒绝解析 ⇒
+        # 整轮 exit 1、下游三个测速 job 全 skipped，而那个脏节点还在累积文件里 ⇒ 轮轮红。
+        # 反证：把 main() 里 `strip_nonprintable` 那两行去掉，24b 立刻变红（实测 2 项）。
+
+        # 24a. 单元层：清洗掉 C1 与 NUL，但**保留** \t \n \r
+        dirty = 'a\x9fb\x00c\td\ne\rf'
+        clean, removed = gist_nodes.strip_nonprintable(dirty)
+        check(removed == 2, f'去掉 2 个控制字符（实际 {removed}）')
+        check(clean == 'abc\td\ne\rf', f'\\t \\n \\r 保留（实际 {clean!r}）')
+        check(gist_nodes.strip_nonprintable('') == ('', 0), '空串不炸、返回 0')
+        check(gist_nodes.strip_nonprintable('干净文本')[1] == 0, '干净文本不去任何字符')
+
+        # 24b. 链路层：假 Sub-Store 返回带脏字符的 YAML → 必须解析成功且发布的是干净 YAML
+        _orig_yaml = FakeSubStore.yaml_body
+        FakeSubStore.yaml_body = (
+            'proxies:\n- name: "\u009f\u009f脏名字"\n  type: vless\n'
+            '  server: 1.1.1.1\n  port: 443\n'
+            '- name: 正常\n  type: trojan\n  server: 2.2.2.2\n  port: 443\n')
+        try:
+            code24, uploaded24, _ = run_main(gist_nodes, tmpdir,
+                                             {'SUB_STORE_BACKEND_URL': base})
+            check(code24 == 0, f'带脏字符的产出不再整轮失败（实际退出码 {code24}）')
+            check('\u009f' not in uploaded24, '发布出去的 YAML 里不含控制字符')
+            check('正常' in uploaded24 and '脏名字' in uploaded24,
+                  '两个节点都保留（清洗只去字符、不丢节点）')
+        finally:
+            FakeSubStore.yaml_body = _orig_yaml
 
     finally:
         server.shutdown()

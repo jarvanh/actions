@@ -466,6 +466,29 @@ def ss_download(base, collection, target, timeout):
     return body
 
 
+def strip_nonprintable(text):
+    """去掉 YAML 规范不接受的控制字符，返回 `(清洗后文本, 被去掉的字符数)`。
+
+    为什么需要它（2026-09-24 修复）：抓取来的节点**名字**里会混进 C1 控制字符
+    （实测 `U+009F` APC），Sub-Store 不校验、原样写进产出 YAML，而 `yaml.safe_load`
+    按规范拒绝解析 —— `unacceptable character #x009f: special characters are not
+    allowed`。后果是**整轮 exit 1**：本脚本挂在「Sub-Store 产出的 YAML 解析失败」，
+    下游三个测速 job 全 `skipped`，而池子里那个脏节点还在累积文件里 ⇒ **轮轮红、
+    不会自愈**（实测连续两轮同一位置 8.09MB，run 36063768399 / 36064746041）。
+
+    为什么是「去掉」而不是「转义」：这些字符在节点名里没有语义（多半是上游生成订阅
+    时的编码事故），而留着它们 mihomo 也解析不了同一份 provider —— mihomo 对 provider
+    是**全有或全无**（见文件头），一个坏字符能废掉整份订阅。
+
+    保留 `\t` / `\n` / `\r`：它们是 YAML 的合法空白/换行，删了反而破坏结构。
+    """
+    if not text:
+        return text, 0
+    # U+0000-U+0008 / U+000B-U+000C / U+000E-U+001F / U+007F-U+009F（\t\n\r 已排除）
+    bad = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]')
+    return bad.sub('', text), len(bad.findall(text))
+
+
 # ---------------------------------------------------------------------------
 # Gist 搜索与取文
 # ---------------------------------------------------------------------------
@@ -1345,6 +1368,12 @@ def main():
 
     if 'proxies:' not in yaml_text:
         fail(f'Sub-Store 产出的不是 mihomo YAML，前 300 字：{yaml_text[:300]}')
+    # ⚠️ 必须在解析**之前**洗一次，而且洗的是后面要发布的那份文本（不是临时副本）：
+    # 脏字符来自抓取到的节点名，Sub-Store 不校验、照抄进产出；留着它 mihomo 也解析不了
+    # 同一份 provider（对 provider 是全有或全无）。详见 strip_nonprintable。
+    yaml_text, _stripped_n = strip_nonprintable(yaml_text)
+    if _stripped_n:
+        log_progress('gist_nodes_yaml_sanitized', removed=_stripped_n)
     try:
         proxies = (yaml.safe_load(yaml_text) or {}).get('proxies') or []
     except Exception as e:
