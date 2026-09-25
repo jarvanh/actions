@@ -162,6 +162,19 @@ def main():
     _tsrc = pathlib.Path(t.__file__).read_text(encoding='utf-8')
     check('PROXY_GROUP_NAME' in _tsrc, 'taier 批量探测用同一个常量')
     check('collect_group_delays(' in _tsrc, 'taier 主流程调用了批量预取')
+
+    # 2d. 组测速韧性包装（2026-09-25）：大池下组测速曾挤崩 mihomo（run 36080367499，
+    #     4.6s 连接被掐 → 1771 次 switch 全 refused → 整轮零数据）。包装必须：
+    #     a) 拿到表 → 原样返回（不引入额外请求）；
+    #     b) 空表 + mihomo 活着 → 返回空表（fail-open，不重启）；
+    #     c) 空表 + mihomo 死了 → 重启 + 等装填 + 重试一次。
+    #     反证：删掉包装里的 /version 分支，c) 变红——mihomo 死活不分、该重启不重启。
+    print('== 2d. 组测速韧性：mihomo 死了重启重试，活着 fail-open ==')
+    check('collect_group_delays_resilient' in _tsrc, '主流程走韧性包装')
+    check('mihomo_api_get(\'/version\')' in _tsrc.replace('"', "'"),
+          '失败后先探 /version 分辨死活（真超时≠进程死了）')
+    check('mihomo_restart_for_probe' in _tsrc and 'await_provider_loaded_after_restart' in _tsrc,
+          '死了先重启再重试（重启后要重新等 provider 装填，空表≠全员判死）')
     # 反证：不许再有人直接拼 `/proxies/{name}/delay` 做逐节点探测（那条路恒 404）。
     # 逐字匹配会被换行/缩进坑到，按「压掉全部空白」后匹配（与 9g 同一手法）。
     check("/proxies/'+urllib.parse.quote(str(name),safe='')+'/delay?url='"

@@ -28,6 +28,7 @@ Go 的 net.Dialer 又直接发系统调用（proxychains 这类 LD_PRELOAD 方�
 import html
 import json
 import os
+import pathlib
 import re
 import shutil
 import signal
@@ -75,6 +76,7 @@ from speedtest_gitee import (
     collect_group_delays,
     collect_provider_snapshot,
     ensure_local_mihomo,
+    mihomo_api_get,
     switch_proxy,
     wait_mihomo,
     # 开测前等 provider 装填（四套共用；见 speedtest_gitee.wait_provider_ready）
@@ -158,6 +160,74 @@ CONFIG = {
 }
 
 # `should_stop_for_budget` 由 speedtest_common 提供（四套测速共用一份判据），见文件头 import。
+
+
+def collect_group_delays_resilient(env, total_loaded):
+    """组测速韧性包装：失败先探 mihomo 存活，进程死了就重启再试一次。
+
+    为什么需要它（2026-09-25 编排轮 run 36080367499 实测）：provider 装载 2.35 万节点 +
+    TUN 的前提下，`/group/AUTO/delay` 一次并发测 1771 个成员，mihomo 在 **4.6 秒**就被
+    掐断（`Remote end closed connection without response`）——外层超时下限是 120 秒，
+    远没到 ⇒ 是 mihomo 侧断的；随后 1771 次 `switch_proxy` 全部 `Connection refused`
+    （每条 ~1.3ms，立即拒绝）⇒ **mihomo 进程在组测速期间崩了**（内存是头号嫌疑：
+    2.35 万 provider 全装载 + TUN + 上千并发探活握手）。fail-open 会放行，但放行后
+    面对的是一具尸体：整轮 1771 个 `switch_failed`、零数据、Gist 都不上传。
+
+    修法：组测速失败后立即探 `/version`——
+    - 活着（真超时/抖动）：记 `probe_alive`，按 fail-open 原样返回空表；
+    - 死了：记 `mihomo_restart_for_probe`，重启 mihomo + 重新装载 provider，
+      再试**一次**组测速。再失败就认命返回空表（fail-open 兜底，不再无限重试）。
+
+    重启的代价（provider 重新装载 + 二次组测速的几十秒）远小于「整轮零数据」，
+    且只在 mihomo 真死时才触发。
+    """
+    group = PROXY_GROUP_NAME
+    url = CONFIG['TAIER_ALIVE_PROBE_URL']
+    timeout_ms = CONFIG['TAIER_ALIVE_PROBE_TIMEOUT_MS']
+    table = collect_group_delays(group, url, timeout_ms)
+    if table:
+        return table
+    # 空表：先分清「mihomo 死了」还是「真超时/抖动」——处置完全不同
+    try:
+        mihomo_api_get('/version')
+        alive = True
+    except Exception as e:
+        log_progress('mihomo_healthcheck_after_group_delay_failed', alive=False, error=str(e)[:120])
+        alive = False
+    if alive:
+        return {}
+    log_progress('mihomo_restart_for_probe', total_loaded=total_loaded)
+    try:
+        start_mihomo_tun(env)
+    except Exception as e:
+        log_progress('mihomo_restart_failed', error=str(e)[:150])
+        return {}
+    # 重启后 provider 要**重新装载**进组（全新进程）：不等就发起组测速，组里没成员、
+    # 测了个寂寞，还会拿到一张空表误判成「全员判死」——与 wait_provider_ready 同一个坑。
+    _ready, _waited, _ = await_provider_loaded_after_restart(env, total_loaded)
+    if not _ready:
+        log_progress('mihomo_restart_provider_timeout', waited=round(_waited, 3))
+        return {}
+    return collect_group_delays(group, url, timeout_ms)
+
+
+def await_provider_loaded_after_restart(env, total_loaded):
+    """重启后按加载量等 provider 装填（哨兵名从 provider 文件现读，避免循环依赖）。"""
+    try:
+        cfg = yaml.safe_load(MIHOMO_CONFIG.read_text(encoding='utf-8')) or {}
+    except Exception:
+        return False, 0.0, ''
+    names = []
+    for pv in (cfg.get('proxy-providers') or {}).values():
+        try:
+            data = yaml.safe_load(pathlib.Path(pv['path']).read_text(encoding='utf-8')) or {}
+            names += [str(p.get('name') or '') for p in (data.get('proxies') or [])]
+        except Exception:
+            continue
+    # 只取头尾做哨兵（与 wait_provider_ready 的取法一致），两万个名字全传没必要
+    probes = names[:2] + names[-2:] if names else []
+    return wait_provider_ready(probes, total_loaded=total_loaded)
+
 
 def probe_node_alive(name, delay_table):
     """经 mihomo 的**批量延迟表**判活：连得通才去跑那 31 秒的测速。
@@ -844,11 +914,12 @@ def _run():
     # 进 `/proxies`，2026-09-24 对照实验定案），测活层因此从未生效过。
     # 批量预取把 N 次往返压成 1 次：mihomo 并发测全组、返回 `{名字: 延迟}`。
     # 放在 `wait_provider_ready` 之后：组里得先有成员，才测得出东西。
+    # ⚠️ 走韧性包装（collect_group_delays_resilient）：大池（装载 2.3 万+）下组测速
+    # 曾把 mihomo 进程挤崩（run 36080367499，4.6 秒连接被掐、随后 1771 次切换全
+    # refused）——失败时探 `/version` 分辨「真超时」与「进程死了」，死了重启再试一次。
     _delay_table = {}
     if CONFIG['TAIER_ALIVE_PROBE'] and _prov_ready and alive_items:
-        _delay_table = collect_group_delays(
-            PROXY_GROUP_NAME, CONFIG['TAIER_ALIVE_PROBE_URL'],
-            CONFIG['TAIER_ALIVE_PROBE_TIMEOUT_MS'])
+        _delay_table = collect_group_delays_resilient(env, _loaded_total)
     # ⚠️ 探测层只在**真的拿到延迟表**时才算启用：拿空表说明探测机制本身没给出结论，
     # 此时若照常判死会把整轮打成零产出（fail-open 是硬要求）。
     # 注意这与「表里没有某节点」不同——后者是明确的判死结论。
