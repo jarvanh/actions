@@ -1117,9 +1117,7 @@ jobs:
           # 用默认值必定撞端口，故这里显式传 -port 8318 覆盖。通知里的「接口」写实际绑定端口。
           WB_PORT="8318"
           WB_API="http://127.0.0.1:${WB_PORT}"
-          echo "2. Starting workbuddy-gateway serve on ${WB_PORT}..."
-          pkill -f "$WB_BIN serve" 2>/dev/null || true
-          sleep 1
+          echo "2. Starting workbuddy-gateway serve on ${WB_PORT} (systemd --user 托管)..."
           echo "   preflight: binary=$WB_BIN"
           ls -l "$WB_BIN" 2>&1 || true
           if [ ! -x "$WB_BIN" ]; then
@@ -1129,17 +1127,15 @@ jobs:
           # 凭据靠"自动发现当前目录下 workbuddy*.json"入池、状态与 logs/ 也都写同目录，
           # 这些高频小文件读写放本地盘才不会被 FUSE 卡住。数据已在第 0 步从 Dropbox 拉齐，
           # 收尾会回推（见 3b）。
+          # 托管交给 gateways.sh（systemd --user + Restart=always）：窗口期内进程崩溃
+          # 由 systemd 秒级拉起，不再依赖下一轮 run。ensure 语义 = 写单元 + 每轮重启，
+          # 与本步骤原先的 pkill + nohup 等价；停止必须走 systemctl（见收尾 3b 注释）。
           if ! ( cd "$WB_RUN_DIR" ); then
             echo "❌ 无法进入运行目录 $WB_RUN_DIR" >&2
             printf '%s\n' "cd $WB_RUN_DIR failed" > "$WB_LOG"
           else
-            (
-              cd "$WB_RUN_DIR" || exit 1
-              nohup "$WB_BIN" serve -addr 0.0.0.0 -port "$WB_PORT" \
-                -api-key "$AI_GATEWAY_API_KEY" \
-                > "$WB_LOG" 2>&1 &
-              echo $! > /tmp/workbuddy-serve.pid
-            )
+            mkdir -p "$WB_RUN_DIR/logs"
+            bash "$GITHUB_WORKSPACE/.github/scripts/gateways/gateways.sh" ensure workbuddy || true
           fi
 
           # 健康检查：GET /health 返回任意 HTTP 响应码即视为已监听。
@@ -1595,6 +1591,10 @@ jobs:
       # 数据目录直接 bind mount Dropbox fuse 挂载点
       # /dropbox/self-hosted/trae2api（实测可写；fuse 权限位恒 666，容器内
       # uid 10001 与 runner 均可读写，天然绕开 uid 对齐问题）。
+      # 容器不纳入 systemd --user（2026-09-25 定）：compose 的
+      # restart: unless-stopped 已覆盖崩溃自愈，dockerd 自身重启也会拉回容器，
+      # 再包一层 systemd 是重复托管；systemd --user 只管裸进程形态的
+      # workbuddy-gateway / zcode2api（见 gateways.sh）。
       # 隧道 trae2api（trae2api.derrick.eu.org → 127.0.0.1:7864）凭证随
       # /dropbox/self-hosted/.cloudflared 恢复，由 tunnels.conf 纳管。
       - name: Run trae2api container (TRAE SOLO reverse proxy)
@@ -2133,12 +2133,12 @@ jobs:
                    && (cd "$Z2A_RUN_DIR/captcha_node" && npm ci --silent 2>"$Z2A_RUN_DIR/logs/npm.log"); }; then
                 Z2A_REASON="依赖安装失败（见 logs/pip.log / logs/npm.log）"
               else
-                echo "Starting zcode2api on ${Z2A_PORT}..."
-                (
-                  cd "$Z2A_RUN_DIR"
-                  # setsid 脱离会话：step 结束后进程不被 shell 回收（与 workbuddy 同款手法）
-                  setsid nohup .venv/bin/python cli.py serve > "$Z2A_LOG" 2>&1 < /dev/null &
-                )
+                echo "Starting zcode2api on ${Z2A_PORT} (systemd --user 托管)..."
+                # 托管交给 gateways.sh（systemd --user + Restart=always）：窗口期内
+                # 进程崩溃由 systemd 秒级拉起，不再依赖下一轮 run。ZCODE_GATEWAY_KEY
+                # 由 step env 注入、单元 Environment 落盘（600），优先级高于 .env。
+                # 停止必须走 systemctl（见收尾 3c 注释），pkill 会被 Restart 抢回来。
+                bash "$GITHUB_WORKSPACE/.github/scripts/gateways/gateways.sh" ensure zcode2api || true
                 Z2A_UP=0
                 for _ in $(seq 1 60); do
                   if z2a_alive; then Z2A_UP=1; break; fi
@@ -3647,13 +3647,16 @@ jobs:
 
           # workbuddy-gateway 是宿主进程（非容器），必须显式停：它不会随 job 结束自动退出，
           # 留在后台会继续持凭据轮询上游。运行目录在本地盘，停止后需回推 Dropbox 才算落盘。
-          # 二进制路径须与启动步骤一致（本地盘 /tmp/local_workbuddy），否则 pkill -f 匹配不到。
+          # 服务已 systemd --user 化，必须走 systemctl stop —— pkill 会被单元的
+          # Restart=always 在 5 秒内拉回，「等待退出」循环会误判进程残留。
+          # pkill 兜底只针对过渡期残留的非托管实例（旧版 nohup 起的进程不在单元里）。
           echo "3b. Stopping workbuddy-gateway..."
           WB_DIR="/dropbox/self-hosted/workbuddy-gateway"
           WB_RUN_DIR="/tmp/local_workbuddy/data"
           WB_BIN="/tmp/local_workbuddy/workbuddy-gateway"
-          if [ -f /tmp/workbuddy-serve.pid ]; then
-            kill "$(cat /tmp/workbuddy-serve.pid)" 2>/dev/null || true
+          bash "$GITHUB_WORKSPACE/.github/scripts/gateways/gateways.sh" stop workbuddy || true
+          if systemctl --user is-failed --quiet workbuddy-gateway.service 2>/dev/null; then
+            systemctl --user reset-failed workbuddy-gateway.service 2>/dev/null || true
           fi
           pkill -f "$WB_BIN serve" 2>/dev/null || true
           # 给进程 30 秒优雅退出（写完状态快照），仍在则强杀
@@ -3717,8 +3720,13 @@ jobs:
           # 顺序在 workbuddy（3b）之后：两者互不依赖，但 3c 之后就是容器归档，
           # 宿主进程清理集中放在 3b/3c 两段便于对照。
           echo "3c. Stopping zcode2api..."
-          # 服务以 setsid 脱离会话，收殓只能按命令行特征：先 SIGTERM 优雅退出
-          # （uvicorn 收尾 in-flight 请求），2 秒后仍有残留再 SIGKILL。
+          # 服务已 systemd --user 化，必须走 systemctl stop（pkill 会被
+          # Restart=always 拉回，见 3b 注释）。pkill 兜底只针对过渡期残留的
+          # 非托管实例；先 SIGTERM 优雅退出（uvicorn 收尾 in-flight 请求）。
+          bash "$GITHUB_WORKSPACE/.github/scripts/gateways/gateways.sh" stop zcode2api || true
+          if systemctl --user is-failed --quiet zcode2api.service 2>/dev/null; then
+            systemctl --user reset-failed zcode2api.service 2>/dev/null || true
+          fi
           pkill -f "local_zcode2api.*cli\.py serve" 2>/dev/null || true
           sleep 2
           pkill -9 -f "local_zcode2api.*cli\.py serve" 2>/dev/null || true
