@@ -181,6 +181,20 @@ def main():
           not in re.sub(r'\s+', '', _tsrc),
           'taier 不得再走逐个 /proxies/{name}/delay 探测（成员恒 404）')
 
+    # 2e. ⚠️ 测速侧的 provider 健康检查必须**关掉**（2026-09-25 改）：
+    #     非惰性健康检查让 mihomo 装载 provider 时立刻对全部节点做一轮探测，编排轮
+    #     装载 2.4 万+ 时自己就把进程撑到极限，随后组测速再并发探一遍 ⇒ mihomo 崩
+    #     （连续三轮 `Remote end closed` + switch 全 refused，整轮零数据）。
+    #     而测速侧根本用不到这个结论（收集不按 alive 预筛、wait_provider_ready 读成员清单）。
+    #     反证：把 enable 改回 True 或加回 lazy:false，2e 立刻变红。
+    print('== 2e. 测速侧 provider 健康检查必须关（大池下会把 mihomo 撑崩）==')
+    _gsrc2e = pathlib.Path(g.__file__).read_text(encoding='utf-8')
+    _norm2e = re.sub(r'\s+', '', _gsrc2e)
+    check("'health-check':{'enable':False}" in _norm2e,
+          'build_mihomo_config 关闭健康检查（不再 enable=True + lazy:false）')
+    check("'lazy':False" not in _norm2e or _norm2e.count("'lazy':False") == 0,
+          '测速配置里不得再有 lazy:false（那是 alive_filter 的语义，别混进来）')
+
     print('== 3. 通知：标题降级 + 正文补一行 ==')
 
     class Meta(dict):

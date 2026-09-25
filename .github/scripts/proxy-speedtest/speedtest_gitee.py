@@ -842,7 +842,8 @@ def ensure_local_mihomo():
     return MIHOMO
 
 def build_mihomo_config(env):
-    health_url = env.get('PROXY_SPEEDTEST_HEALTHCHECK_URL', DEFAULT_HEALTHCHECK_URL).strip() or DEFAULT_HEALTHCHECK_URL
+    # 注：这里**不读** `PROXY_SPEEDTEST_HEALTHCHECK_URL`——provider 健康检查已关闭（见下），
+    # 需要它的是 alive_filter 那份配置（发布前筛活节点），与本处无关。
     provider_map = {}
     use_names = []
     provider_source_meta = {}
@@ -859,14 +860,17 @@ def build_mihomo_config(env):
         provider_map[name] = {
             'type': 'file',
             'path': str(local_path),
-            'health-check': {
-                'enable': True,
-                'url': health_url,
-                'interval': 86400,
-                'timeout': 5000,
-                'lazy': False,
-                'expected-status': 204,
-            },
+            # ⚠️ 健康检查**关掉**（2026-09-25 改，原为 enable=True + lazy:false）：
+            # 非惰性健康检查让 mihomo 在装载 provider 时**立刻**对全部节点做一轮探测，
+            # 编排轮装载 2.4 万+ 节点时它自己就把进程撑到极限——随后 `/group/{组}/delay`
+            # 再并发探一遍，mihomo 直接崩（连续三轮实测：4.6s / 重启后再崩，
+            # `Remote end closed` + 之后每次 switch 都 `Connection refused`）。
+            # 而测速侧**根本用不到**这个结论：收集不按 `alive` 预筛（见「为什么节点收集
+            # 不等健康检查」）、`wait_provider_ready` 读的是组成员清单。开着只是白烧
+            # 一轮 2.4 万次探测，还把组测速挤死。
+            # 需要健康检查语义的是 `alive_filter`（发布前筛活节点），它用自己的配置、
+            # 且显式要求 `lazy: false`——与本处互不影响。
+            'health-check': {'enable': False},
         }
         use_names.append(name)
     if not provider_map:
