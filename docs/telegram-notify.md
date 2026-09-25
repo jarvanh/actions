@@ -594,7 +594,8 @@ workbuddy-gateway**（第三个 AI 网关的对齐实现），差异只在数据
   「🔑 凭据」列 `auths/` 下 trae-*.json 文件名（不回显内容，与 wb_notify 同口径）。
 - 「💳 账号池」来自批量签到输出：条目 `uid · 昵称 · 状态`，子行给未用完积分包里
   最早过期的 3 个（`剩 N 分 · 时刻 过期`）。
-- 「鉴权」写「需 API Key（面板/CLI 共用）」——key 不回显（与 zcode2api 同口径）。
+- 「鉴权」写「需 API Key（面板/CLI 共用）」——key 不回显（注意：zcode2api
+  与 wb_notify 的「API Key」行是回显可复制的，trae2api 这条刻意不回显）。
 - 「🧾 原始输出」**非空才渲染**（同 wb_notify 的 $6 口径）：启动失败给容器日志尾部；
   签到分支给签到工具 stderr 尾部（均 1200 字节）。
 - 版式真源是 `openclaw.yml` trae2api 步骤内的 `trae_notify()` 函数（与 wb_notify
@@ -643,7 +644,7 @@ JWT / API Key 对齐进账号池；收尾归档 4c 再把运行目录的 .env + 
 ━━━━━━━━━━━━━━━━━━
 结论：已就绪 · 自检消息已收到回答（model=glm-5.3-flash）
 接口：<code>http://127.0.0.1:8319/v1</code>
-鉴权：需 API Key（与 workbuddy-gateway 同值）
+API Key：<code>sk-kj…（同 wb_notify，点选可复制）</code>
 模型：<code>glm-5.3-flash</code>
 
 💳 账号池 · 2（active 2）
@@ -677,8 +678,10 @@ JWT / API Key 对齐进账号池；收尾归档 4c 再把运行目录的 .env + 
   通知都带（自检失败时账号状态正是最需要的诊断信息）。
 - **收尾 3c 停服后发 ⛔「已停止」通知**（对齐 workbuddy 的 3b）：与下一轮的
   「已就绪」配对，肉眼可确认服务生命周期闭环；强制结束后仍有进程残留发 ⚠️。
-- **鉴权固定写「需 API Key（与 workbuddy-gateway 同值）」**：两个网关共用
-  `AI_GATEWAY_API_KEY`。**不得回显 key 本身**。
+- **「API Key」行同 wb_notify 口径**：标签 + `tg_add_path`，值走 `<code>`
+  等宽，客户端点一下整块复制（两个网关共用 `AI_GATEWAY_API_KEY`，
+  step env 注入的 ZCODE_GATEWAY_KEY 就是同一把）。**写「未取到」兜底**，
+  不编造密钥值。
 
 
 ### 2.7 Emby 服务
