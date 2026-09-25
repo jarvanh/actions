@@ -648,7 +648,7 @@ JWT / API Key 对齐进账号池；收尾归档 4c 再把运行目录的 .env + 
 
 💳 账号池 · 2（active 2）
   ├─ <code>local-zcode-jwt</code> · Plan 通道 · 正常
-  │  额度 GLM-5.3-Flash 剩 195M / 300M · 有效期 2026-09-28 · 套餐 ZCode Weekend Build
+  │  额度 GLM-5.3-Flash 剩 195M / 300M · 有效期 2026-09-28 09:00 · 套餐 ZCode Weekend Build
   └─ <code>local-bigmodel-plan</code> · Key 通道 · 正常
 
 代码：<code>https://github.com/jarvanh/zcode2api.git</code>
@@ -670,7 +670,7 @@ JWT / API Key 对齐进账号池；收尾归档 4c 再把运行目录的 .env + 
 - **失败态不给「接口 / 鉴权 / 模型」三行**：服务已不在，展示指向已停进程的
   地址会误导。自检输出与服务日志尾部（各 15 行）进「🧾」分节的 `<pre>`。
 - **💳 账号池分节**（对齐 wb_notify 口径）：条目行 = `名称 · 通道 · 状态`，
-  子行 = 额度/有效期/套餐 + 最近错误（有效期取 quota.expires_at）。分节块
+  子行 = 额度/有效期/套餐 + 最近错误（有效期取 quota.expires_at，精确到时刻、固定 TZ=Asia/Shanghai 显示，不随 runner 时区漂移）。分节块
   与后续 kv 行之间手动补一个空行（tg_add_block 之后接 tg_add_path 不自带分隔）。
   数据源是 admin API 脱敏视图（admin key 取自
   数据快照里的 .env）；服务已监听才采集，失败只少一节不改结论。就绪与失败
