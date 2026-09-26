@@ -2645,6 +2645,10 @@ jobs:
           GLM_REFRESH_TOKEN: ${{ secrets.GLM_REFRESH_TOKEN }}
           GLM2API_PORT: "8320"
           GLM2API_PATCH_DIR: ${{ github.workspace }}/.github/scripts/gateways/glm2api-patch
+          # 积分快照（跨轮累计「今日已消耗」）：单文件存 Dropbox。runner 本地盘
+          # 每轮重置，不落盘的话累计值每轮清零；走独立 rclone copyto 而不接
+          # 归档循环，避免改动既有打包逻辑。
+          GLM2API_QUOTA_ARCHIVE: dropbox:self-hosted/glm2api-quota-snapshot
         run: |
           set -uo pipefail
           # 通知真源在 step 顶层 source 一次（勿挪进函数体，理由见 workbuddy 步骤同名注释 / 规范 4.4）
@@ -2652,6 +2656,7 @@ jobs:
 
           DEPLOY="${GITHUB_WORKSPACE}/.github/scripts/gateways/glm2api_deploy.sh"
           GATEWAYS="${GITHUB_WORKSPACE}/.github/scripts/gateways/gateways.sh"
+          QUOTA="${GITHUB_WORKSPACE}/.github/scripts/gateways/glm2api_quota.sh"
           GL_OK=0
           GL_REASON=""
 
@@ -2694,6 +2699,35 @@ jobs:
             GL_REASON="运行目录准备失败（见日志尾部）"
           fi
 
+          # 积分采集（供「💳 积分」分节）：放在自检之后——上游结算有几秒延迟，
+          # 紧贴调用前后读会读到「没变」。采集失败只让通知少一节，不改变就绪结论。
+          GL_SCORE=""
+          GL_SCORE_RULE=""
+          GL_ROUND_DELTA=""
+          GL_DAY_TOTAL=""
+          if [ "$GL_OK" = "1" ]; then
+            # 先还原上一轮的快照（今日累计要跨轮累加）；缺失即首轮，delta 会自动按 0 起算
+            if command -v rclone >/dev/null 2>&1; then
+              rclone copyto "${GLM2API_QUOTA_ARCHIVE}" /tmp/local_glm2api/quota-snapshot 2>/dev/null \
+                || echo "::warning::[glm2api] 积分快照还原失败（按首轮处理）"
+            fi
+            if GLQ="$(bash "$QUOTA" fetch)"; then
+              GL_SCORE="$(printf '%s' "$GLQ" | cut -f1)"
+              GL_SCORE_RULE="$(printf '%s' "$GLQ" | cut -f2)"
+              if GLD="$(bash "$QUOTA" delta "$GL_SCORE")"; then
+                GL_ROUND_DELTA="$(printf '%s' "$GLD" | cut -f1)"
+                GL_DAY_TOTAL="$(printf '%s' "$GLD" | cut -f2)"
+                # 回推快照：让「今日已消耗」在下一轮继续累加
+                if command -v rclone >/dev/null 2>&1; then
+                  rclone copyto /tmp/local_glm2api/quota-snapshot "${GLM2API_QUOTA_ARCHIVE}" 2>/dev/null \
+                    || echo "::warning::[glm2api] 积分快照回推失败（下轮累计将从 0 起）"
+                fi
+              fi
+            else
+              echo "::warning::[glm2api] 积分采集失败，通知将省略积分分节"
+            fi
+          fi
+
           if [ "$GL_OK" != "1" ]; then
             _m=""
             tg_add_title _m "❌ glm2api 启动失败"
@@ -2710,7 +2744,22 @@ jobs:
             tg_add_kv _m "结论" "$GL_REASON"
             tg_add_path _m "接口" "http://127.0.0.1:${GLM2API_PORT}/v1"
             tg_add_path _m "模型" "glm-5.3 · glm-5.3-flash"
-            tg_add_kv _m "计费" "走清言账号积分（Flash 更省）"
+            tg_add_kv _m "计费" "默认通道不扣积分；-agent 后缀走 AgentMore 才扣"
+
+            # 💳 积分分节（版式对齐 zcode2api 的「💳 账号池」：条目行 = 主值 + 状态，
+            # 子行 = 明细）。只在采集成功时出现——接口失败时什么都不说，
+            # 不把「没取到」谎报成「余额 0」。
+            if [ -n "${GL_SCORE:-}" ]; then
+              tg_add_section _m "💳 积分 · 1"
+              # 单条目结构：条目行手拼 tree_conn、子行手拼 tree_sub。
+              # 不能用 tree_lines —— 它把每行都当兄弟条目，子行会被渲染成 ├─/└─
+              # 与条目平级（规范 · 二层列表要求子行与条目正文同列）。
+              _gl_rows=""
+              _gl_rows+="$(tree_conn 1)$(tg_entry "$(printf '%s' "$GL_SCORE")" "今日已消耗 $(printf '%s' "$GL_DAY_TOTAL")")"$'\n'
+              [ -n "${GL_ROUND_DELTA:-}" ] && _gl_rows+="$(tree_sub 1)$(escape_html "本轮消耗 ${GL_ROUND_DELTA}（自检产生）")"$'\n'
+              [ -n "${GL_SCORE_RULE:-}" ] && _gl_rows+="$(tree_sub 1)$(escape_html "${GL_SCORE_RULE}")"$'\n'
+              tg_add_block _m "${_gl_rows%$'\n'}"
+            fi
             tg_add_footer _m
             send_tg "$_m" || echo "::warning::TG 通知发送失败（不影响任务）"
           fi
