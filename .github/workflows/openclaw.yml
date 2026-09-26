@@ -994,21 +994,29 @@ jobs:
               # 也不写进 workbuddy-status.json —— 唯一可观测出口就是 serve.log 的 [Checkin] 行。
               # 此前本通知完全没有这一段：主人看到的是「5 个账号全绿」的账号池，却无从知道
               # 今天签到跑没跑、哪个号失败了。本段即补这个缺口。
-              # 数据源 WB_CHECKIN 是上一步解析好的 TSV：凭据文件名 \t 站点 \t 签到结果。
-              # 逐账号**一条目、无子行**：签到的信息量就是「哪个号 · 哪站 · 签了没」，
-              # 一行装得下；硬拆子行会把「账号 → 结果」拆成两行，扫读反而更累。
+              # 数据源 WB_CHECKIN 是上一步合并好的 TSV（5 列）：凭据文件名 \t 站点 \t
+              # 签到结果 \t 签到积分 \t 旅行奖励（后两列可为空，空则不展示）。
+              # 逐账号一条目：签到信息一行装得下；积分跟在结果后（本次/累计/连签），
+              # 旅行奖励有领取动作时独占一条子行（无领取不占行）。
               # 全量不折叠：账号量级只有个位数，读者要逐号核对，折叠等于把要看的藏起来。
               if [ -n "${WB_CHECKIN:-}" ]; then
-                local _ckn _ckrows _cki _ckf _cks _ckr _cklast
+                local _ckn _ckrows _cki _ckf _cks _ckr _cklast _ckcredit _cktravel _ckline
                 _ckn="$(printf '%s\n' "$WB_CHECKIN" | grep -c . || true)"
                 tg_add_section _msg "🗓 每日签到 · ${_ckn}"
                 _ckrows=""
                 _cki=0
-                while IFS="$(printf '\t')" read -r _ckf _cks _ckr; do
+                while IFS="$(printf '\t')" read -r _ckf _cks _ckr _ckcredit _cktravel; do
                   [ -z "$_ckf" ] && continue
                   _cki=$((_cki + 1))
                   if [ "$_cki" -eq "$_ckn" ]; then _cklast=1; else _cklast=0; fi
-                  _ckrows+="$(tree_conn "$_cklast")$(tg_entry "$_ckf" "$_cks" "$_ckr")"$'\n'
+                  _ckline="$(tg_entry "$_ckf" "$_cks" "$_ckr")"
+                  if [ -n "$_ckcredit" ]; then
+                    _ckline="${_ckline} · $(escape_html "$_ckcredit")"
+                  fi
+                  _ckrows+="$(tree_conn "$_cklast")${_ckline}"$'\n'
+                  if [ -n "$_cktravel" ]; then
+                    _ckrows+="$(tree_sub "$_cklast")$(escape_html "$_cktravel")"$'\n'
+                  fi
                 done <<< "$WB_CHECKIN"
                 tg_add_block _msg "${_ckrows%$'\n'}"
                 tg_append _msg $'\n'
@@ -1626,7 +1634,8 @@ jobs:
           #   下一次定时签到时间=%s
           # 失败原因里有中文与括号，且可能很长（撑爆条目行）—— 条目里只给「⚠️ 失败」定性，
           # 完整原因可看下方「原始输出」段，不在此拼接。
-          # 三列 TSV：凭据文件名 \t 站点 \t 签到结果。列恒非空（结果缺省填「未取到结果」），
+          # 此处先出 3 列 TSV：凭据文件名 \t 站点 \t 签到结果（下方与活动状态接口
+          # 合并成 5 列，加签到积分与旅行奖励）。列恒非空（结果缺省填「未取到结果」），
           # 避免 read 的空白折叠导致列错位（与 WB_POOL 同一坑，见其注释）。
           WB_CHECKIN=""
           WB_CHECKIN_SUMMARY=""
@@ -1667,6 +1676,162 @@ jobs:
               WB_CHECKIN_SUMMARY="$(tail -n +"$_ck_start" "$WB_LOG" 2>/dev/null \
                 | grep -a '本轮签到完成' | tail -n 1 \
                 | sed 's/.*\[Checkin\] //; s/^本轮签到完成，//' || true)"
+            fi
+          fi
+
+          # ---------- 签到积分采集（2026-09-26 补，主人要求通知里显示积分）----------
+          # 网关把签到接口的响应体整个丢掉（上游 checkinAccount 只接 status/err），
+          # 日志里只有「成功/已签」没有积分数值；「已签」幂等响应（code=10001）也不带积分。
+          # 积分真源是独立的活动状态接口（只读、幂等、无副作用，2026-09-26 全账号实测）：
+          #   POST {Origin}/v2/billing/meter/checkin-activity-status
+          #   data: active / today_checked_in / today_credit(本次) / total_credits(累计)
+          #         / streak_days(连签) / daily_credit(每日可得)
+          # 实测口径：国内站 active=true（Buddy 加油站，+100/天）；国际站 active=false
+          # （活动未开启）—— 而网关把 code=10001 一律按「今日已签」幂等成功处理，
+          # 国际站其实没签上（状态接口 today_checked_in=false 佐证）。故结果列以状态
+          # 接口为准修正；查询失败/无数据的账号保留网关日志结果，绝不编造积分。
+          WB_CKSTAT_OK=0
+          WB_CKSTAT_TOTAL=0
+          declare -A _CK_ACT _CK_CHK _CK_TODAY _CK_TOTAL _CK_STREAK _CK_DAILY _CK_TRAVEL
+          if [ "${WB_READY:-}" = "1" ] && [ -n "${WB_CREDS:-}" ]; then
+            WB_CKTMP="$(mktemp)"
+            while IFS= read -r _cf; do
+              if [ -z "$_cf" ]; then continue; fi
+              WB_CKSTAT_TOTAL=$((WB_CKSTAT_TOTAL + 1))
+              _fp="$WB_RUN_DIR/$_cf"
+              _tok=""
+              if [ -r "$_fp" ]; then
+                _tok="$(jq -r '.auth.accessToken // ""' "$_fp" 2>/dev/null || true)"
+              fi
+              if [ -z "$_tok" ]; then continue; fi
+              _uid="$(jq -r '.account.uid // ""' "$_fp" 2>/dev/null || true)"
+              _eid="$(jq -r '.account.enterpriseId // ""' "$_fp" 2>/dev/null || true)"
+              _dom="$(jq -r '.auth.domain // ""' "$_fp" 2>/dev/null || true)"
+              _ed="$(jq -r '.edition // "cn"' "$_fp" 2>/dev/null || true)"
+              case "$(printf '%s' "$_ed" | tr 'A-Z' 'a-z')" in
+                intl|international|global|workbuddy.ai) _base="https://www.workbuddy.ai" ;;
+                *) _base="https://www.codebuddy.cn" ;;
+              esac
+              _hdr=(--connect-timeout 5 --max-time 20 -X POST
+                -H "Authorization: Bearer ${_tok}"
+                -H 'X-Client-ID: codebuddy-cli'
+                -H 'X-Client-Version: 2.143.1'
+                -H 'X-Product: SaaS'
+                -H 'X-Client-Platform: web'
+                -H 'Content-Type: application/json' -d '{}')
+              if [ -n "$_uid" ]; then _hdr+=(-H "X-User-Id: ${_uid}"); fi
+              if [ -n "$_eid" ]; then _hdr+=(-H "X-Enterprise-Id: ${_eid}" -H "X-Tenant-Id: ${_eid}"); fi
+              if [ -n "$_dom" ]; then _hdr+=(-H "X-Domain: ${_dom}"); fi
+              if curl -o "$WB_CKTMP" "${_hdr[@]}" \
+                "${_base}/v2/billing/meter/checkin-activity-status" 2>/dev/null; then
+                _row="$(jq -r 'if .code == 0 and (.data | type == "object") then
+                    [ (.data.active // false), (.data.today_checked_in // false),
+                      (.data.today_credit // 0), (.data.total_credits // 0),
+                      (.data.streak_days // 0), (.data.daily_credit // 0) ]
+                    | map(tostring) | @tsv
+                  else empty end' "$WB_CKTMP" 2>/dev/null || true)"
+                if [ -n "$_row" ]; then
+                  IFS="$(printf '\t')" read -r _act _chk _tdy _tot _stk _dly <<< "$_row"
+                  if [ "$_act" = "true" ] || [ "$_act" = "false" ]; then
+                    WB_CKSTAT_OK=$((WB_CKSTAT_OK + 1))
+                    _CK_ACT["$_cf"]="$_act"
+                    _CK_CHK["$_cf"]="$_chk"
+                    _CK_TODAY["$_cf"]="$_tdy"
+                    _CK_TOTAL["$_cf"]="$_tot"
+                    _CK_STREAK["$_cf"]="$_stk"
+                    _CK_DAILY["$_cf"]="$_dly"
+                  fi
+                fi
+              fi
+            done <<< "$WB_CREDS"
+            rm -f "$WB_CKTMP"
+          fi
+
+          # Buddy 旅行奖励（仅国内站有旅行，领取成功才落一行 credit=）。
+          # 窗口 = 今天（东八区）全天日志，而不是最后一轮签到窗口：旅行奖励一天最多
+          # 领一次，常发生在更早的轮次（实测：启动轮 06:28 领取 credit=10.00，
+          # 09:00 定时轮只报「今日派遣已达上限」）—— 按轮次窗口会漏掉当天的实际领取。
+          # 日志时间戳已实测为东八区（09:00 定时轮落笔 09:00:00），与 TZ 过滤直接对齐。
+          if [ -r "$WB_LOG" ]; then
+            _today="$(TZ=Asia/Shanghai date +%Y/%m/%d)"
+            while IFS= read -r _tl; do
+              if [ -z "$_tl" ]; then continue; fi
+              case "$_tl" in
+                *"旅行奖励领取成功（credit="*)
+                  _tf="$(printf '%s' "$_tl" | sed 's/.*\[Travel\] 账号 //; s/ Buddy 已到达.*//' || true)"
+                  _tc="$(printf '%s' "$_tl" | sed 's/.*credit=//; s/）.*//' || true)"
+                  if [ -n "$_tf" ] && [ -n "$_tc" ]; then
+                    _CK_TRAVEL["$_tf"]="Buddy 旅行 +${_tc}"
+                  fi
+                  ;;
+              esac
+            done <<< "$(grep -a "^${_today} " "$WB_LOG" 2>/dev/null | grep -a '\[Travel\]' || true)"
+          fi
+
+          # 合并：状态接口修正结果列 + 拼积分/旅行列（3 列 → 5 列，渲染层只管展示）。
+          # 结果优先级：网关日志判「失败」时保留原样（HTTP/原因在原始输出里，更具体）；
+          # 其余以状态接口为准 —— active=false 修成「活动未开启」（网关把 code=10001
+          # 一律幂等成功，国际站活动没开也被记成「今日已签」，这里纠正）。
+          if [ -n "${WB_CHECKIN:-}" ]; then
+            WB_CHECKIN_MERGED=""
+            while IFS="$(printf '\t')" read -r _mf _ms _mr; do
+              if [ -z "$_mf" ]; then continue; fi
+              _mres="$_mr"
+              _mcred=""
+              if [ -n "${_CK_ACT[$_mf]:-}" ]; then
+                if printf '%s' "$_mr" | grep -q '失败'; then
+                  _mres="$_mr"
+                elif [ "${_CK_ACT[$_mf]}" = "false" ]; then
+                  _mres="活动未开启"
+                elif [ "${_CK_CHK[$_mf]}" = "true" ]; then
+                  case "$_mr" in *"签到 ✓"*) : ;; *) _mres="今日已签" ;; esac
+                  _mcred="本次 +${_CK_TODAY[$_mf]} · 累计 ${_CK_TOTAL[$_mf]} · 连签 ${_CK_STREAK[$_mf]} 天"
+                else
+                  _mres="未签"
+                  _mcred="可得 +${_CK_DAILY[$_mf]}"
+                fi
+              fi
+              _mtrav="${_CK_TRAVEL[$_mf]:-}"
+              WB_CHECKIN_MERGED+="${WB_CHECKIN_MERGED:+$'\n'}${_mf}"$'\t'"${_ms}"$'\t'"${_mres}"$'\t'"${_mcred}"$'\t'"${_mtrav}"
+            done <<< "$WB_CHECKIN"
+            WB_CHECKIN="$WB_CHECKIN_MERGED"
+
+            # 汇总：状态接口全覆盖时按展示行重算（与逐账号口径一致，含积分合计）；
+            # 有查询失败/无数据时退回网关日志口径的 WB_CHECKIN_SUMMARY，不硬凑。
+            if [ "$WB_CKSTAT_OK" -eq "$WB_CKSTAT_TOTAL" ] && [ "$WB_CKSTAT_TOTAL" -gt 0 ]; then
+              _n_signed=0
+              _n_closed=0
+              _n_open=0
+              _n_fail=0
+              _sum_today=0
+              while IFS="$(printf '\t')" read -r _sf _ss _sr _sc _st; do
+                if [ -z "$_sf" ]; then continue; fi
+                case "$_sr" in
+                  *"签到 ✓"*|*"今日已签"*) _n_signed=$((_n_signed + 1)) ;;
+                  *"活动未开启"*) _n_closed=$((_n_closed + 1)) ;;
+                  *"未签"*) _n_open=$((_n_open + 1)) ;;
+                  *"失败"*) _n_fail=$((_n_fail + 1)) ;;
+                esac
+              done <<< "$WB_CHECKIN"
+              for _kf in "${!_CK_ACT[@]}"; do
+                if [ "${_CK_ACT[$_kf]}" = "true" ] && [ "${_CK_CHK[$_kf]}" = "true" ]; then
+                  case "${_CK_TODAY[$_kf]}" in
+                    ''|*[!0-9]*) : ;;
+                    *) _sum_today=$((_sum_today + ${_CK_TODAY[$_kf]})) ;;
+                  esac
+                fi
+              done
+              _n_rows="$(printf '%s\n' "$WB_CHECKIN" | grep -c . || true)"
+              _n_creds="$(printf '%s\n' "$WB_CREDS" | grep -c . || true)"
+              _n_skip=$((_n_creds - _n_rows))
+              if [ "$_n_skip" -lt 0 ]; then _n_skip=0; fi
+              _cksum="已签 ${_n_signed}"
+              if [ "$_n_closed" -gt 0 ]; then _cksum="${_cksum} · 未开启 ${_n_closed}"; fi
+              if [ "$_n_open" -gt 0 ]; then _cksum="${_cksum} · 未签 ${_n_open}"; fi
+              if [ "$_n_fail" -gt 0 ]; then _cksum="${_cksum} · 失败 ${_n_fail}"; fi
+              if [ "$_n_skip" -gt 0 ]; then _cksum="${_cksum} · 跳过 ${_n_skip}"; fi
+              if [ "$_sum_today" -gt 0 ]; then _cksum="${_cksum} · 今日合计 +${_sum_today}"; fi
+              WB_CHECKIN_SUMMARY="$_cksum"
             fi
           fi
 
