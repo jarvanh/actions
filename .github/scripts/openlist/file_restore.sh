@@ -5,8 +5,11 @@
 #       （restore_task 指定任务名或 all）
 #
 # 还原策略按修复方式自动分类（方法编号对应 file_fix.sh 现行 4 种方法）:
-#   - 改名类（短哈希文件名、base64URL 编码目录变体、短哈希目录变体）: rclone moveto
-#     服务端移动回原路径（不经过本地，不重新上传）
+#   - 改名类（短哈希文件名、base64URL 编码目录变体、短哈希目录变体）: rclone copyto
+#     复制到原路径并**保留替代副本**（2026-09-26 用户拍板）
+#     ⚠️ 2026-09-26 变更: 原为 moveto（搬走即删副本）。副本消失的代价是这条记录
+#     再无法自证——短哈希不可逆，副本是唯一内容载体，且下次预演会把它判成
+#     「备份缺失」，把"已还原"伪装成"数据丢了"。改为 copyto 后代价只是多占空间。
 #     短哈希（目录与文件名都是 md5 前 8 位）是**不可逆**的: 单向 + 截断到 32bit，
 #     没有任何解码路径。原目录名/原文件名只能取 marker 的 original 字段——
 #     本文件全程按 alternative/original 完整路径移动，不解析目录名，故无需为它
@@ -16,10 +19,17 @@
 #     同理，marker 一旦丢失，短哈希目录里的文件就无法自愈回原路径。
 #   - 分卷 zip（方法3/4）: 下载全部 .zip.00N 分卷 → cat 合并 → 解压 →
 #       md5 与 marker 指纹核对（有记录则硬校验，不符拒上传）→
-#       上传到原路径 → 验证后删除替代文件
+#       上传到原路径 → 验证（**分卷同样保留**，2026-09-26 同 copyto 决策）
 #   - 原路径原名（alt == original，方法1）: 仅验证存在，跳过
 #
-# 每还原成功一个: 从 marker 的 fixed_files / fix_blacklist 移除该条目并即时写回，
+# 出账规则（2026-09-26 用户拍板「已还原/已失效的条目要自动清理」）:
+#   - 已还原成功 → 出账
+#   - 原路径已存在**且大小与 marker 记录一致** → 判定已还原，出账（不覆盖，见下）
+#   - 替代副本已不存在: **源端仍在** → 判定已失效，出账；**源端也不在** → 保留并告警
+#     （两端皆空是真风险，出账等于抹掉唯一线索）
+# ⚠️ 原路径已存在但大小不符 → SKIP，一个字节都不动: 覆盖可能毁掉用户已有内容或
+#    掩盖坏件，而短哈希不可逆 ⇒ 覆盖错的代价不可回滚。
+# 每出账一个即从 marker 的 fixed_files / fix_blacklist 移除并即时写回，
 # 中断后重跑不会重复处理。全部完成后发送 Telegram 汇总。
 #
 # 读取侧: 从 marker 载入的 alternative 一律先过 _norm_rel_path——存量条目可能带
@@ -102,6 +112,27 @@ _restore_build_payload() {
   echo "OK:$inner"
 }
 
+# 保留备份副本的还原（2026-09-26 用户拍板「还原的时候，目标端的备份副本应该保留」）
+# 用法: _restore_keep_copy <src_full> <dst_full>
+# 为什么不再 moveto: moveto 会把替代文件**搬走**，副本随之消失 —— 副本一消失，
+# 下次预演就把这条判成「备份缺失」，marker 条目也再无法自证（短哈希不可逆，
+# 副本是唯一内容载体）。改为 copyto 后副本保留，代价是目标端多占一份空间。
+# ⚠️ 必须用 copyto 而不是 copy（与 moveto 同源教训，见下方 _restore_one_entry）
+_restore_keep_copy() {
+  local src_full="$1" dst_full="$2"
+  local rflags=("${RCLONE_RETRY_FLAGS[@]}" --timeout 15m)
+  rclone copyto "$src_full" "$dst_full" "${rflags[@]}" >/dev/null 2>&1
+}
+
+# 取远端文件字节数（取不到返回空串 —— 空串显式区别于 0: 列表缓存延迟时 lsjson
+# 可能返回空，若按 0 处理会与"真空文件"混淆并误判同大小）
+# 用法: _dst_file_bytes <full_remote_path>
+_dst_file_bytes() {
+  local b
+  b=$(rclone lsjson "$1" 2>/dev/null | jq -r '.[0].Size // empty' 2>/dev/null)
+  case "$b" in ''|*[!0-9]*) echo "" ;; *) echo "$b" ;; esac
+}
+
 # 还原成功后清理目标端分卷（删除该前缀的全部卷）
 # 用法: _restore_cleanup_alternative <alt_base> <alt>
 _restore_cleanup_alternative() {
@@ -119,9 +150,12 @@ _restore_cleanup_alternative() {
 }
 
 # 还原单个条目（内部函数，输出一行状态: OK 或 FAIL: <原因>）
-# 用法: _restore_one_entry <dest_path> <orig> <alt> <method> <tmp_base> [md5]
+# 用法: _restore_one_entry <dest_path> <orig> <alt> <method> <tmp_base> [md5] [expect_bytes]
+#   expect_bytes: marker 记录的 size_bytes，用于「原路径已存在」分支的同大小判定；
+#                 不给或为空则该分支降级为"跳过并报需人工"（绝不覆盖）
+# 输出状态前缀: OK / SKIP / FAIL（调用方按 ${status%%:*} 判定）
 _restore_one_entry() {
-  local dest="$1" orig="$2" alt="$3" method="$4" tmp_base="$5" fmd5="${6:-}"
+  local dest="$1" orig="$2" alt="$3" method="$4" tmp_base="$5" fmd5="${6:-}" expect_bytes="${7:-}"
   local src_full="${dest}/${alt}"
   local dst_full="${dest}/${orig}"
   local rflags=("${RCLONE_RETRY_FLAGS[@]}" --timeout 15m)
@@ -141,24 +175,39 @@ _restore_one_entry() {
   kind=$(_restore_classify_kind "$method")
 
   if [ "$kind" = "move" ]; then
-    # 改名类: 服务端移动回原路径（目标端为 crypt，明文 md5 无从比对，
-    # 内容级校验只在分卷类的本地解压产物上做，此处以存在性为验收）
+    # ★ 原路径已存在分支（2026-09-26 用户拍板「同名且同大小 → 判定已还原，直接出账」）:
+    #   还原的目标路径本应"此前同步失败、因而一定不存在"，但实测有 62 份落点已放着
+    #   同名文件（成因多样: 后端拒写的是写入动作而非原位置无文件 / 历史同步遗留 /
+    #   上一轮已还原过）。**绝不能无条件覆盖** —— 若原路径是坏件或用户已有内容，
+    #   覆盖即不可逆损毁（短哈希不可逆，副本是唯一内容载体）。
+    #   故只在「同名 + 同大小」时判定"这份已经在位、无需搬运"，交给调用方出账；
+    #   大小取不到或不一致 ⇒ SKIP 并报需人工，一个字节都不动。
+    if _dst_file_exists "$dst_full"; then
+      local have_bytes
+      have_bytes=$(_dst_file_bytes "$dst_full")
+      if [ -n "$expect_bytes" ] && [ -n "$have_bytes" ] && [ "$have_bytes" = "$expect_bytes" ]; then
+        echo "OK: 原路径已存在且大小一致（判定已还原，未改动任何文件）"
+      else
+        echo "SKIP: 原路径已存在但大小不符或未记录大小（已有 ${have_bytes:-未知}B / 期望 ${expect_bytes:-未知}B）— 未覆盖，需人工确认"
+      fi
+      return 0
+    fi
+
+    # 改名类: 复制回原路径并**保留**替代文件（不再 moveto，见 _restore_keep_copy）
     #
-    # ⚠️ 必须用 moveto 而不是 move（2026-09-19 本地真 rclone 实测）:
-    #   `rclone move <src文件> <dst文件>` 的 dst 会被当成**目录**——目标文件不存在时
-    #   它会建出一个**以目标文件名命名的目录**再把文件放进去，即落点变成
+    # ⚠️ 必须用 copyto 而不是 move/copy（2026-09-19 本地真 rclone 实测）:
+    #   `rclone move|copy <src文件> <dst文件>` 的 dst 会被当成**目录**——目标文件不存在时
+    #   会建出一个**以目标文件名命名的目录**再把文件放进去，即落点变成
     #   `<原文件名>.mp4/<短哈希名>.mp4`，**不是**我们要的 `<原文件名>.mp4`。
-    #   还原的目标路径恰恰就是"此前同步失败、因而一定不存在"的原路径 ⇒ 稳定踩中
-    #   这条语义（实测 local 与 crypt 远端均如此）。moveto 才是"文件→文件"的改名。
     #   反例佐证: diag_409_semantics.sh 的改名复核用的就是 moveto。
-    if ! rclone moveto "$src_full" "$dst_full" "${rflags[@]}" >/dev/null 2>&1; then
-      echo "FAIL: rclone moveto 失败（替代文件可能已不存在）"
+    if ! _restore_keep_copy "$src_full" "$dst_full"; then
+      echo "FAIL: rclone copyto 失败（替代文件可能已不存在）"
       return 0
     fi
     if _dst_file_exists "$dst_full"; then
       echo "OK"
     else
-      echo "FAIL: move 返回成功但原路径未见文件（疑似假成功）"
+      echo "FAIL: copyto 返回成功但原路径未见文件（疑似假成功）"
     fi
     return 0
   fi
@@ -197,14 +246,16 @@ _restore_one_entry() {
 
   rclone copyto "$payload" "$dst_full" "${rflags[@]}" >/dev/null 2>&1 || { echo "FAIL: 上传还原文件失败"; rm -rf "$tmp"; return 0; }
 
-  # 原路径存在且大小与解压产物一致 → 才清理目标端替代文件
+  # 原路径存在且大小与解压产物一致 → 视为还原成功。
+  # ⚠️ 不再清理目标端分卷（2026-09-26 用户拍板保留备份副本）: 分卷是内容载体，
+  #   删了下次预演就判「备份缺失」，且短哈希不可逆 ⇒ 副本没了等于放弃自证能力。
+  #   代价是目标端多占空间，可后续按需手工清理。
   up_bytes=$(rclone size --json "$dst_full" "${rflags[@]}" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null)
   if ! _dst_file_exists "$dst_full"; then
     echo "FAIL: 上传返回成功但原路径未见文件（疑似假成功，替代文件已保留）"
   elif [ "$up_bytes" != "$payload_bytes" ]; then
     echo "FAIL: 上传后大小与解压产物不符 (产物 ${payload_bytes}B, 现值 ${up_bytes}B)，替代文件已保留"
   else
-    _restore_cleanup_alternative "$dest" "$alt"
     echo "OK"
   fi
   rm -rf "$tmp"
@@ -233,7 +284,9 @@ restore_fixed_files() {
 
   echo "=== 修复文件一键还原 (filter=${task_filter}) ==="
 
-  local markers m task marker_path json dest count
+  local markers m task marker_path json dest src count
+  local total_ok=0 total_fail=0 total_skip=0 total_stale=0 total_stale_risk=0
+  local ok_list="" fail_list="" skip_list="" stale_list="" stale_risk_list=""
   markers=$(rclone lsf "$SYNC_STATE_DIR" --files-only --retries 2 2>/dev/null | sort)
   if [ -z "$markers" ]; then
     echo "未找到任何 marker（${SYNC_STATE_DIR}）"
@@ -253,12 +306,15 @@ restore_fixed_files() {
     json=$(rclone cat "$marker_path" 2>/dev/null) || continue
     dest=$(echo "$json" | jq -r '.dest_path // empty' 2>/dev/null)
     [ -z "$dest" ] && continue
+    # 源端: 「已失效条目出账」的安全门（副本没了要确认源端还在才敢出账）。
+    # 取不到则 src 为空 ⇒ 该分支一律走"保留并告警"，宁可不出账也不丢线索。
+    src=$(echo "$json" | jq -r '.source_path // empty' 2>/dev/null)
     count=$(echo "$json" | jq -r '(.fixed_files // []) | length' 2>/dev/null || echo 0)
     [ "$count" -eq 0 ] && continue
 
     echo "--- marker: ${m} (dest=${dest}, 待还原 ${count} 条) ---"
 
-    while IFS=$'\t' read -r orig alt method fmd5; do
+    while IFS=$'\t' read -r orig alt method fmd5 size_bytes; do
       [ -z "$orig" ] && continue
       [ "$alt" = "null" ] || [ -z "$alt" ] && alt="$orig"
       # 存量 marker 可能带 `./` 污染段（读取侧归一化，见 _norm_rel_path）:
@@ -266,8 +322,31 @@ restore_fixed_files() {
       alt=$(_norm_rel_path "$alt")
 
       echo "还原中: ${orig} ← ${alt} [${method}]"
+
+      # ★ 已失效条目出账（2026-09-26 用户拍板「已还原/已失效的条目要自动清理」+
+      #   「源端在 → 才出账；源端不在 → 保留并告警」）:
+      #   替代副本已不存在 ⇒ 这条再也还原不了（短哈希不可逆，副本是唯一内容载体）。
+      #   但它留在 marker 里会让每次预演都报「备份缺失」，把历史残渣伪装成当前风险。
+      #   安全门 = 源端: 源端还在 ⇒ 数据没丢，只是目标端副本没了 → 出账；
+      #   源端也不在 ⇒ 这是**真风险**（两端都没了），保留条目并告警，绝不出账。
+      if [ "$alt" != "$orig" ] && ! _dst_file_exists "${dest}/${alt}"; then
+        local src_at="${src:-}"
+        if [ -n "$src_at" ] && _dst_file_exists "${src_at}/${orig}"; then
+          echo "  → 替代副本已不存在，源端仍在 ⇒ 判定已失效，出账"
+          json=$(echo "$json" | marker_remove_fix_entry "$orig" 1) || true
+          _marker_write "$json" "$marker_path" >/dev/null 2>&1 || true
+          total_stale=$((total_stale + 1))
+          tg_add_entry stale_list "$orig"
+        else
+          echo "  → 替代副本已不存在，且源端无此文件 ⇒ 保留条目并告警"
+          total_stale_risk=$((total_stale_risk + 1))
+          tg_add_entry stale_risk_list "$orig" "目标端副本与源端均不存在"
+        fi
+        continue
+      fi
+
       local status
-      status=$(_restore_one_entry "$dest" "$orig" "$alt" "$method" "$tmp_base" "$fmd5") || true
+      status=$(_restore_one_entry "$dest" "$orig" "$alt" "$method" "$tmp_base" "$fmd5" "$size_bytes") || true
       echo "  → ${status}"
 
       if [ "${status%%:*}" = "OK" ]; then
@@ -276,11 +355,15 @@ restore_fixed_files() {
         # 从 marker 移除该条目（fixed_files + fix_blacklist），即时写回
         json=$(echo "$json" | marker_remove_fix_entry "$orig" 1) || true
         _marker_write "$json" "$marker_path" >/dev/null 2>&1 || true
+      elif [ "${status%%:*}" = "SKIP" ]; then
+        # 原路径已存在但不敢覆盖 ⇒ 条目保留（下轮再判），单列计数不混进失败
+        total_skip=$((total_skip + 1))
+        tg_add_entry skip_list "$orig" "${status#SKIP: }"
       else
         total_fail=$((total_fail + 1))
         tg_add_entry fail_list "$orig" "${status#FAIL: }"
       fi
-    done < <(echo "$json" | jq -r '(.fixed_files // [])[] | [.original, .alternative, .method, (.md5 // "")] | @tsv' 2>/dev/null)
+    done < <(echo "$json" | jq -r '(.fixed_files // [])[] | [.original, .alternative, .method, (.md5 // ""), (.size_bytes // "")] | @tsv' 2>/dev/null)
   done
 
   rm -rf "$tmp_base"
@@ -288,21 +371,33 @@ restore_fixed_files() {
   # 汇总通知
   local msg=""
   tg_add_title msg "🔧 修复文件一键还原完成"
-  tg_add_kv msg "修复恢复" "${total_ok} 个"
+  tg_add_kv msg "已还原" "${total_ok} 个"
+  tg_add_kv msg "已失效出账" "${total_stale} 个"
+  tg_add_kv msg "跳过待确认" "${total_skip} 个"
   tg_add_kv msg "失败" "${total_fail} 个"
   if [ -n "$ok_list" ]; then
     tg_add_section msg "✅ 已还原 · ${total_ok}"
     tg_add_block msg "$(_fold_list "$ok_list" "$total_ok")"
-    tg_add_note msg "原路径原文件名"
+    tg_add_note msg "原路径原文件名；目标端备份副本已保留"
+  fi
+  if [ -n "$stale_risk_list" ]; then
+    tg_add_section msg "🚨 两端均无 · ${total_stale_risk}"
+    tg_add_block msg "$(_fold_list "$stale_risk_list" "$total_stale_risk")"
+    tg_add_note msg "目标端副本与源端都不存在，条目已保留未出账，需人工确认"
+  fi
+  if [ -n "$skip_list" ]; then
+    tg_add_section msg "⏸ 跳过待确认 · ${total_skip}"
+    tg_add_block msg "$(_fold_list "$skip_list" "$total_skip")"
+    tg_add_note msg "原路径已有同名文件但大小不符，未覆盖，条目保留"
   fi
   if [ -n "$fail_list" ]; then
     tg_add_section msg "❌ 失败清单 · ${total_fail}"
     tg_add_block msg "$(_fold_list "$fail_list" "$total_fail")"
   fi
-  tg_add_note msg "成功条目已从 marker 修复清单移除；失败条目保留，可重试。"
+  tg_add_note msg "已还原与已失效（源端仍在）条目已从 marker 修复清单移除；其余保留，可重试。"
   tg_add_footer msg
   send_telegram_message "$msg"
-  echo "=== 还原完成: OK=${total_ok} FAIL=${total_fail} ==="
+  echo "=== 还原完成: OK=${total_ok} 失效出账=${total_stale} SKIP=${total_skip} 两端均无=${total_stale_risk} FAIL=${total_fail} ==="
 }
 
 # rclone --exclude-from 行转义: 文件名里的 glob 字符（[ ] * ?）按字面匹配
