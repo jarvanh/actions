@@ -39,10 +39,19 @@
   - **⚠️ 还原的验收口径（2026-09-26 纠正）**: 同步/修复/marker 有**生产实证**；
     **"还原"只有只读预演（try run）实证，真写入从未在生产跑过**（三次 dispatch 的还原
     step 全 `skipped`；此前"77 条 moveto 命中"实为修复管线打印的**计划命令**，非执行）。
-    §17 已把该语义收口（保留备份副本 + 条目出账 + 判失效双判据）并做**本机真文件操作**验证，
-    生产真跑仍待用户决定时机。
-  - **CI `tests.yml` 41/41 FAIL=0**（run `36237951099` = `0562843`，新增 ledger 套件后 40→41；
-    本轮同时反证 `test_restore_real_local.sh` 本机 30/6 确属环境假红 —— runner 上 `EXIT=0`）；
+    §17 已把该语义收口（保留备份副本 + 条目出账 + 判失效双判据）并做**本机真文件操作**验证。
+    **真还原已装门禁（2026-09-26 用户拍板）**: 必须先跑 `openlist-restore-tryrun` 通过，
+    把 run id 填进 `verify_run_id` 才放行（校验 workflow 归属 + success + 24h 时效），
+    ⇒ "随手点一下真还原"这条路已堵死；生产真跑仍待用户决定时机（§17.6）。
+    **同步轮也在删副本（比 moveto 更狠，已修）**: `OPENLIST_CARRY_DELETE_ALIGNED` 默认
+    1→0；该删除 6h 自动跑一次，才是「备份缺失 98 条」主因（还原 moveto 从未执行过）。
+  - **CI `tests.yml` 42/42 FAIL=0**（run `36256426703` = `f9e7865`，本机与 CI 一致）:
+    41→42 是新增 `test_restore_keep_copy_local.sh`（本机真文件操作隔离测试）。
+    **该轮同时补上了本机跑不到的一层**: runner 上有真 rclone v1.75.1，
+    `test_restore_real_local.sh` 日志中「本机无 rclone 二进制」**0 次命中**（本机恒 SKIP）
+    ⇒ 真 rclone 还原落点/内容这次是真跑过的，不是跳过充数。
+    （更早: run `36237951099` = `0562843` 41/41，反证 `test_restore_real_local.sh`
+    本机 30/6 确属环境假红 —— root 绕过 `chmod 555`，runner 上 `EXIT=0`）；
     通知版式基线已对齐（§0 通知段，2026-09-25 方案 A）。
   - **§9 待决事项清零（2026-09-26）**: 用户已授权「有新修法待生产验证时可主动取消在跑轮」，
     自限两条边界（只为验修法才取消 / 取消后立即 dispatch 短轮）。
@@ -100,6 +109,7 @@
      还原的改名分支原用 `rclone move`，而 move 的 dst 被当目录 ⇒ 会建出
      `<原文件名>.mp4/<短哈希名>.mp4`。已全部改为 `rclone moveto`，并有
      `test_restore_real_local.sh`（真 rclone 实测，24 断言）锁住。
+     （**2026-09-26 再改为 `copyto` 以保留备份副本**，见 §17；此处保留 09-19 原叙述以存史。）
      **短哈希（目录名/文件名）能不能还原 → 能，但成立的唯一前提是 marker 的
      `original` 字段还在**（2026-09-19 实测 + 代码核对，见 §进度日志同日条目）：
      短哈希是 `md5(相对路径)` 前 8 位，**单向且截断 ⇒ 不存在反推路径**；
@@ -4381,6 +4391,19 @@ conclusion**，不要被日志文案误导。
 | **出账安全门: 源端在才出账** | 替代副本已不存在时: **源端仍在** ⇒ 判失效、出账；**源端也不在** ⇒ 保留 + 🚨 告警（两端皆空是真风险，出账等于抹掉唯一线索） |
 | **「62 份原路径已存在」** | 同名 **且同大小**（对 marker `size_bytes`）⇒ 判已还原、出账；大小不符或取不到 ⇒ ⏸ SKIP **绝不覆盖**（短哈希不可逆，覆盖错的代价不可回滚） |
 | **判失效必须双判据**（自加，出账不可逆的直接推论） | "副本不存在"= 列列举说不在 **且** 直读 `lsjson` stat 也取不到。只信列列举的话，一次列表假阴就会把"副本其实还在"的记录当失效删掉 —— 出账不可逆 + 短哈希不可逆 ⇒ 删了再无自证能力。同 §0「以列表为准的判据都要用直读交叉验证」 |
+| **同步轮也必须保留副本**（自查找出的第二处漏网，比 moveto 影响大） | 只改 `file_restore.sh` **不够**: 生产同步轮（6h 一次、自动跑）的「已对齐收尾」会对"原名已落位"条目 `rclone deletefile` 删替代形态，开关 `OPENLIST_CARRY_DELETE_ALIGNED` **默认 1（开）** ⇒ **副本每 6h 被删一轮**，而 marker 条目还在 ⇒ 这才是「备份缺失 98 条」的主因（还原 moveto 从未执行过，没机会删）。已翻转默认 `1→0`，并加断言 8j 锁**默认态** |
+| **真还原必须过门禁**（用户拍板） | `openlist.yml` 新增 `verify_run_id` 入参 + `🔒 门禁` step: ①必填 ②该 run 属于 `openlist-restore-tryrun` ③`conclusion=success` ④24h 内（可调 `vars.OPENLIST_RESTORE_VERIFY_MAX_AGE_HOURS`）。不满足即 fail + 打印复制即用的 tryrun 命令 |
+
+#### 门禁两处易漏（装上≠真的拦得住）
+
+1. **还原 step 的 `if` 只看 run_mode ⇒ 门禁失败后仍会继续跑还原**。step 没有 `needs`，
+   只能用 `steps.restore_gate.outcome != 'failure'` 表达依赖；而 gate 在非还原模式下是
+   skipped ⇒ 放行条件是「run_mode 匹配 **且** gate 不是 failure/cancelled」。
+2. **`gh api` 404 时错误 JSON 会进 stdout**，jq 仍能取到 `.path`（空）⇒ 只判 `info` 为空
+   漏得掉，必须额外排除 `Not Found` / `documentation_url`。
+
+本机四种输入实测: 空 → 拒 / 不存在的 id → 拒 / 非 tryrun（主轮 id 冒充）→ 拒 /
+合法 success（10h 前）→ 放行。
 
 ### 17.4 一个真 bug：`@tsv` + 空白 IFS 的空字段错位
 
@@ -4400,6 +4423,13 @@ conclusion**，不要被日志文案误导。
   看不到实际在盘上的副本，C11+C12 要求改走正常 copyto 还原）。
 - **反向验证**（逐条做过，撤修法必转红）: 退回 `moveto` ⇒ C1/C3 红；去掉同大小判定
   ⇒ C6 红；**去掉直读判据 ⇒ C11/C12 双红**（假阴被当失效，copyto 根本不发生）。
+- 新增 `test_restore_keep_copy_local.sh`（本机真文件操作隔离测试，**16/0**）:
+  本机无 rclone 二进制 ⇒ 自带 **rclone shim**（`copyto` 真 `cp`、`moveto` 真 `mv`），
+  在 mktemp 沙箱内**真搬文件、真读写 marker**，断言磁盘实际结果与文件内容。
+  护栏: ①shim 对沙箱外路径一律拒绝（**先 `realpath -m` 规范化再判前缀** —— 只做字符串
+  前缀匹配会被 `openlist:/../../../etc` 骗过）②造"源端"并全测后逐字节比对 md5 清单
+  ⇒ **源端零改动**（用户硬约束）。反向验证三项均**精准命中**: 退回 moveto ⇒ 只红 1c；
+  撤掉出账安全门 ⇒ 只红 5a/5b；大小不符也强判 OK ⇒ 只红 3a/3c。
 - 既有测试同步到新契约（**原锁旧语义，必须改**）:
   `test_restore_real_local.sh` 的 1c/2c/8f（原断言"替代文件已移走"→ 改为"副本仍在"）、
   `test_restore_tryrun.sh` 的 1e（`moveto` → `copyto`，预演命令必须与真实执行一致）。
@@ -4407,6 +4437,16 @@ conclusion**，不要被日志文案误导。
   `test_restore_real_local.sh` 本机 30/6 —— 6 红全在场景7（`chmod 555` 注入不可写目录
   被 **root 绕过**，落点没走短哈希兜底 ⇒ 8a 连锁）。**已由 CI 反证为环境假红**:
   run `36237951099`（`0562843`）该套件 `EXIT=0`，全套 41/41 FAIL=0。
+- **CI 复核 run `36256426703`（`f9e7865`）: 42/42 FAIL=0**，`command not found` 命中 0。
+  该轮补上本机跑不到的一层: runner 有真 rclone v1.75.1，
+  `test_restore_real_local.sh` 日志中「本机无 rclone 二进制」**0 次命中**（本机恒 SKIP）
+  ⇒ 真 rclone 的还原落点/内容是**真跑过**的，不是跳过充数。本机与 CI 结论一致。
+- `sync_marker.sh` 默认翻转后新增断言 **8j**（`test_marker_fixed.sh`）: 锁**默认态**不删副本。
+  ⚠️ 只测开关 `=0` 测不到默认值被改坏（显式给值时默认值不参与判断）；且不能用
+  `env -u X 函数` —— `env -u` 只作用于**子进程**，而这里是当前 shell 的**函数**，
+  断言会恒绿（假绿）⇒ 必须在子 shell 里 `unset` 后再调用，且 `DELFILE` 需 `export`
+  （mock 被子 shell 调用，未导出则记录落空路径、断言同样恒绿）。
+  反向验证: 默认改回 `1` ⇒ 8j 立刻红。
 
 ### 17.6 未做（边界）
 
@@ -4414,6 +4454,21 @@ conclusion**，不要被日志文案误导。
   「要么使用本机作为源端代替，进行测试还原，反正绝对不能动源端任务文件」。
   本次按后者做: 用**本机临时目录当真/假源端**跑真文件操作（§17.5），
   **未触碰任何生产源端**。生产真跑仍待用户决定时机。
+- **真还原现在的正确姿势**（门禁已装，§17.3）:
+
+  ```bash
+  gh workflow run openlist-restore-tryrun.yml -f task=<任务名>   # 先只读预演
+  gh run list --workflow=openlist-restore-tryrun.yml --limit 1 --json databaseId,conclusion
+  gh workflow run openlist.yml \
+    -f run_mode='⚠️ 还原 · 修复文件还原为原路径' \
+    -f restore_task=<任务名> -f verify_run_id=<上面那个 run id>
+  ```
+
+  没 `verify_run_id` 或它不合法 ⇒ 门禁 fail 并回打复制即用的 tryrun 命令，
+  还原 step 因 `steps.restore_gate.outcome` 依赖而不会执行。
+- **仍未验证**: 门禁本身只在**本机手工跑 gate 脚本**验过四种输入（空/不存在/
+  非 tryrun/合法 success），**没有在 GitHub 上真触发一次还原看它被拦**——
+  那需要一次真实的还原 dispatch（写操作），等用户决定时机再做。
 
 ---
 
