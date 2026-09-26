@@ -25,7 +25,11 @@
 # 依赖: utils.sh (format_bytes), telegram.sh (send_telegram_message)
 # 依赖: telegram/tg_notify.sh (escape_html, tree_* — 排版助手真源，L0 层 source)
 # 依赖环境变量: FORCE_SYNC — 为 "true" 时跳过所有标记检查
-#   OPENLIST_CARRY_DELETE_ALIGNED — 已对齐收尾删除开关（=0 只剔记录不删远端短名，默认开）
+#   OPENLIST_CARRY_DELETE_ALIGNED — 已对齐收尾删除开关（=0 只剔记录不删远端短名）
+#     ⚠️ **默认已由 1 改为 0**（2026-09-26，与「还原保留备份副本」同决策）:
+#       同步轮每 6h 自动跑一次，原名落位后删替代形态 ⇒ 副本每轮被删，marker 条目却
+#       还在 ⇒ 下次预演把这些判成「备份缺失」（实测 98 条），把"已还原"伪装成"数据丢了"。
+#       且短哈希不可逆，副本是唯一内容载体 ⇒ 删掉即放弃自证能力。保留的代价只是多占空间。
 
 # 标记存储目录
 SYNC_STATE_DIR="onedrive:/logs/sync_state"
@@ -150,7 +154,9 @@ _carry_forward_fixed() {
     #   ① size 一致（防半截原名冒充落位，丢掉唯一副本）② 非分卷/编码类
     #   （多卷与还原形态复杂，第一版放过）③ 开关未关。
     #   probe 是本循环刚取的新鲜值；删除失败仅警告，不影响剔除语义。
-    [ "${OPENLIST_CARRY_DELETE_ALIGNED:-1}" = "0" ] && continue
+    #   ⚠️ 2026-09-26 起默认**不删**（开关默认 0）: 详见文件头 OPENLIST_CARRY_DELETE_ALIGNED 说明。
+    #     该删除与「还原保留备份副本」直接冲突——同步轮 6h 一次，删得比还原还勤。
+    [ "${OPENLIST_CARRY_DELETE_ALIGNED:-0}" = "0" ] && continue
     [ -z "$alt" ] || [ "$alt" = "null" ] && continue
     case "$alt" in *.zip.[0-9][0-9][0-9]|*.7z.[0-9][0-9][0-9]|*.enc|*.enc.*|*.b64|*.b64.*) continue ;; esac
     local _alt_norm
