@@ -621,7 +621,46 @@ def build_source_mapping(env):
                          error=f'{type(e).__name__}: {e}')
             continue
 
-        added_raw = False
+        # ⚠️ **先解析 YAML、再扫链接**：两者写的是同一批映射（`exact_proxy` /
+        # `normalized_proxy` / `fingerprint`，且都是「已存在就不覆盖」），顺序决定谁赢。
+        # 必须让**真节点配置**赢——下面那轮链接扫描会把 YAML 里的节点名误当链接行取出
+        # 一个 frag 当键（实测有 `-01`、`002] 电报群：…` 这种碎片），若让它先占位，
+        # 真节点就会拿到一个还原不出配置的碎片条目。
+        #
+        # 同时，链接扫描与 YAML 解析**不是互斥**的两条路，别拿「扫到过链接」当「跳过 YAML」
+        # 的开关。旧写法是 `if added_raw: continue`，而 Clash YAML 的节点名里可能嵌着带
+        # `#片段` 的 URL——实测 2026-09-26 编排轮的源订阅（118055 行）里就有 3 行如此，
+        # 于是整份 YAML 一个都没解析：同一份正文 `yaml.safe_load` 能出 8470 个节点，实际却
+        # 只认到 6 条（`source_mapping_built entries: 6`），其余节点的 `source_entry` 全空
+        # ⇒ 导出时退回 mihomo 运行时对象（没有 server/port/凭据），客户端加载即报错。
+        # 判据改成「正文里到底有没有 proxies 列表」，与「像不像链接」彻底解耦。
+        if 'proxies:' in text:
+            try:
+                parsed_yaml = yaml.safe_load(text)
+            except Exception as e:
+                log_progress('subscription_yaml_parse_skipped', source_url=url, error=str(e))
+                parsed_yaml = None
+            proxies = []
+            if isinstance(parsed_yaml, dict):
+                proxies = parsed_yaml.get('proxies') or []
+            if isinstance(proxies, list):
+                for proxy in proxies:
+                    if not isinstance(proxy, dict):
+                        continue
+                    name = str(proxy.get('name') or '').strip()
+                    if not name:
+                        continue
+                    proxy_copy = deep_copy_json(proxy)
+                    entry = make_source_entry(url, name, share_link='', proxy=proxy_copy)
+                    if name not in exact_proxy_mapping:
+                        exact_proxy_mapping[name] = entry
+                    normalized = entry.get('normalized_name', '')
+                    if normalized and normalized not in normalized_proxy_mapping:
+                        normalized_proxy_mapping[normalized] = entry
+                    fingerprint = entry.get('fingerprint', '')
+                    if fingerprint and fingerprint not in fingerprint_mapping:
+                        fingerprint_mapping[fingerprint] = entry
+
         for raw in text.splitlines():
             line = raw.strip()
             if not line or '://' not in line or line.startswith('#'):
@@ -645,36 +684,6 @@ def build_source_mapping(env):
             fingerprint = entry.get('fingerprint', '')
             if fingerprint and fingerprint not in fingerprint_mapping:
                 fingerprint_mapping[fingerprint] = entry
-            added_raw = True
-
-        if added_raw:
-            continue
-
-        try:
-            parsed_yaml = yaml.safe_load(text)
-        except Exception as e:
-            log_progress('subscription_yaml_parse_skipped', source_url=url, error=str(e))
-            parsed_yaml = None
-        proxies = []
-        if isinstance(parsed_yaml, dict):
-            proxies = parsed_yaml.get('proxies') or []
-        if isinstance(proxies, list):
-            for proxy in proxies:
-                if not isinstance(proxy, dict):
-                    continue
-                name = str(proxy.get('name') or '').strip()
-                if not name:
-                    continue
-                proxy_copy = deep_copy_json(proxy)
-                entry = make_source_entry(url, name, share_link='', proxy=proxy_copy)
-                if name not in exact_proxy_mapping:
-                    exact_proxy_mapping[name] = entry
-                normalized = entry.get('normalized_name', '')
-                if normalized and normalized not in normalized_proxy_mapping:
-                    normalized_proxy_mapping[normalized] = entry
-                fingerprint = entry.get('fingerprint', '')
-                if fingerprint and fingerprint not in fingerprint_mapping:
-                    fingerprint_mapping[fingerprint] = entry
 
     exact_mapping.update(exact_raw_mapping)
     normalized_mapping.update(normalized_raw_mapping)

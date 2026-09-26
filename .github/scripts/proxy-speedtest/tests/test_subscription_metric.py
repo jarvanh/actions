@@ -12,12 +12,12 @@ run 34859505000 里 19 个测过的节点**下行全部达标**，订阅里却**
 默认 3）**且另一指标更多**时才改判另一指标。门槛单列、与 `min_nodes` 彻底脱钩
 （2026-09-17 从倍率制改回计数制并按此解耦）。
 
-第 7–9 组守**另一条更隐蔽的路**——「可导出配置」的取值来源。2026-09-16 的编排轮
+第 7–10 组守**另一条更隐蔽的路**——「可导出配置」的取值来源。2026-09-16 的编排轮
 `35116972319` 里 206 个节点实测有速度（最高上传 245 Mbps），订阅却判「达标不足 1 个」：
 `source_entry.proxy` 只在节点名匹配上订阅 source_mapping 时才有值，而编排轮的 8326 个
 节点由 gistnodes 经 provider 直接喂入、source_mapping 只有 4 条 ⇒ 配置全在 `proxy_obj`
 里却没人读。现在钉住：`source_entry.proxy` 优先、缺失回落 `proxy_obj`、**两者皆空仍须挡住**
-（回落不能变成「什么都算数」，否则会导出空壳节点）。
+（回落不能变成「什么都算数」：mihomo 运行时对象没有 `server`/`port`，不算可导出配置）。
 
 跑法：`python .github/scripts/proxy-speedtest/tests/test_subscription_metric.py`
 退出码 0 = 全过。
@@ -115,6 +115,8 @@ def main():
     # 编排轮形态：节点由 gistnodes 经 provider 直接喂进来，source_mapping 只有 4 条 ⇒
     # source_entry 匹配不上为空，配置全在 proxy_obj 里。旧实现只认 source_entry.proxy
     # ⇒ 206 个实测有速度的节点（最高 245 Mbps）全被判「无可用配置」⇒ 达标 0 ⇒ 不上传。
+    # ⚠️ 但兜底**不是「什么都能收」**——proxy_obj 有两种来路，只有真配置能导出，
+    # 见第 10 组与 speedtest_common.is_exportable_proxy。
     def orch_node(up_mbps, down_mbps, has_proxy_obj=True):
         return {'name': 'n', 'source_entry': {},
                 'proxy_obj': {'type': 'vless', 'server': 'x.com', 'port': 443}
@@ -151,6 +153,29 @@ def main():
           f'无配置的节点不计达标（实际 {C.count_qualified_nodes(empty, "upload", 10)}）')
     check(C.build_subscription_bundle(empty, pol)['text'] == '',
           '无配置 ⇒ 订阅文本为空，不上传空壳')
+
+    print('== 10. 兜底不许收「运行时对象」：没有 server/port 就不是配置 ==')
+    # 2026-09-26 编排轮事故：source_entry 匹配不上时，proxy_obj 回落到 mihomo
+    # `/providers/proxies` 的运行时对象（只有 name/type/udp/…），用它生成的订阅
+    # 客户端（Egern）加载直接报错，而日志一路正常。
+    runtime_only = {'name': 'shell', 'source_entry': {},
+                    'proxy_obj': {'name': 'shell', 'type': 'Vless', 'udp': True, 'uot': True,
+                                  'mptcp': False, 'smux': False, 'interface': '',
+                                  'routing-mark': 0, 'dialer-proxy': '', 'extra': {},
+                                  'provider-name': 'gist'},
+                    'upload_mibs': 50.0 / 8.388608, 'download_mibs': 50.0 / 8.388608}
+    check(C.node_proxy_config(runtime_only) == {}, '运行时对象不算可导出配置（返回空字典）')
+    check(C.is_exportable_proxy({'type': 'trojan', 'server': 'a.com', 'port': 443}),
+          'server + port 齐全 ⇒ 可导出')
+    check(not C.is_exportable_proxy({'type': 'trojan', 'server': 'a.com'}),
+          '只有 server、没有 port ⇒ 不可导出')
+    check(not C.is_exportable_proxy({'type': 'trojan', 'port': 443}),
+          '只有 port、没有 server ⇒ 不可导出')
+    check(not C.is_exportable_proxy({}), '空字典不可导出')
+    check(C.count_qualified_nodes([runtime_only], 'upload', 10) == 0,
+          f'空壳不计达标（实际 {C.count_qualified_nodes([runtime_only], "upload", 10)}）')
+    check(C.build_subscription_bundle([runtime_only], pol)['text'] == '',
+          '空壳不进订阅文本（宁可判「达标不足」，也不能发布装不上的订阅）')
 
     print()
     if FAILURES:
