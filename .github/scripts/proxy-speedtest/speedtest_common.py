@@ -305,24 +305,48 @@ def resolve_subscription_policy(env=None):
     }
 
 
+def is_exportable_proxy(proxy: dict) -> bool:
+    """这个字典够不够格写回订阅：必须有 `server` 与 `port`。
+
+    为什么单独一道闸：`proxy_obj` 有**两种来路**，一种能导出、一种不能——
+      * 能导出：`source_entry.proxy`（订阅原文里的 proxy 字典，字段齐全）；
+      * 不能导出：`collect_provider_snapshot` 从 mihomo `/providers/proxies` 读出的对象。
+        它**只有运行时字段**（name / type / udp / uot / mptcp / smux / interface /
+        routing-mark / dialer-proxy / extra / provider-name），**没有 server / port /
+        凭据**——那不是「节点配置」，是「运行状态」。
+
+    旧注释曾把这个回落当成「完整节点配置」（2026-09-17 的写法），于是这类空壳被当成
+    「有可用配置」写进订阅：2026-09-26 编排轮导出的 25 个节点全是这种壳，客户端
+    （Egern）加载直接报错，而日志一路显示正常。宁可判「无可用配置」并记日志，
+    也不能写出装不上的订阅。
+    """
+    if not proxy:
+        return False
+    return bool(str(proxy.get('server') or '').strip()) and bool(proxy.get('port'))
+
+
 def node_proxy_config(item: dict):
     """取节点的**可导出配置**：`source_entry.proxy` 优先，缺失时回落到 `proxy_obj`。
 
-    **为什么必须有回落**（2026-09-16 run 35116972319，编排轮 8326 个节点）：
-    `source_entry.proxy` 只在「节点名能匹配上订阅 source_mapping」时才有值。
-    编排轮里节点是 gistnodes 通过 provider 直接喂进来的（8326 个），而 source_mapping
-    只有 4 条 ⇒ 绝大多数节点 `source_entry` 为 `{}`。旧实现只认 `source_entry.proxy`，
-    于是 206 个**实测有速度**的节点（最高上传 245 Mbps）全被判「无可用配置」⇒
-    达标数 0 ⇒ 订阅被判「达标不足」不上传。整轮零产出，且日志零报错。
+    **为什么有回落这一层**（2026-09-16 run 35116972319）：`source_entry.proxy` 只在
+    「节点名能匹配上订阅 source_mapping」时才有值。旧实现只认它，于是 206 个**实测有速度**
+    的节点（最高上传 245 Mbps）全被判「无可用配置」⇒ 达标数 0 ⇒ 订阅被判「达标不足」
+    不上传，整轮零产出且日志零报错。所以要有回落，别把「这一条没匹配上」当成「没有配置」。
 
-    而 `proxy_obj` 是 `collect_provider_snapshot` 从 mihomo provider 直接读出的
-    **完整节点配置**（协议/地址/端口/密钥齐全），与 `source_entry.proxy` 语义等价
-    ——都是「能写回订阅的原始 proxy 字典」，所以回落不会引入脏数据。
+    ⚠️ 但回落**不等于什么都能收**：回落的来源是 mihomo provider 的运行时对象，它没有
+    `server`/`port`（见 `is_exportable_proxy`）。取到的必须是**真配置**才返回，否则返回
+    空字典让调用方按「无可用配置」处理——写出装不上的订阅比不写更糟。
+
+    ⚠️ 另注（2026-09-26）：编排轮 `source_mapping` 匹配不上的**根因**不是「订阅里没有这些
+    节点」，而是 `speedtest_gitee.build_source_mapping` 的 YAML 分支被一行看似链接的节点名
+    误跳过（详见该处注释）。现已修复，编排轮的 `source_mapping_built entries` 会从个位数
+    回到与订阅节点数同量级；这层回落退化为兜底。
     """
     source_proxy = (item.get('source_entry') or {}).get('proxy') or {}
     if source_proxy:
         return deep_copy_json(source_proxy)
-    return deep_copy_json(item.get('proxy_obj') or {})
+    fallback = deep_copy_json(item.get('proxy_obj') or {})
+    return fallback if is_exportable_proxy(fallback) else {}
 
 
 def count_qualified_nodes(results: list, metric: str, min_megabit):

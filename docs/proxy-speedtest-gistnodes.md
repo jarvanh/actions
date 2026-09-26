@@ -5,6 +5,9 @@
 > 自检：`.github/scripts/proxy-speedtest/tests/test_gist_nodes_substore.py`
 > 　　　`.github/scripts/proxy-speedtest/tests/test_alive_filter.py`（过滤层专测）
 > 　　　`.github/scripts/proxy-speedtest/tests/test_resolve_gist_raw_url.py`（源 raw URL 解析专测）
+> 　　　`.github/scripts/proxy-speedtest/tests/test_collect_provider_snapshot.py`（下游收集层专测）
+> 　　　`.github/scripts/proxy-speedtest/tests/test_source_mapping_branches.py`（source_mapping 分支专测）
+> 　　　`.github/scripts/proxy-speedtest/tests/test_subscription_metric.py`（达标判定与导出准入专测）
 
 ## 定位
 
@@ -192,6 +195,40 @@ ID`，单 provider 方案下**整层过滤归零**。切 200 一片后，实测�
 
 判据上只有「mihomo 给出明确死结论」才丢节点；**查不到结论的（重名、被改名、还没探完）
 一律保留**——过滤只该丢明确判死的，不该丢「说不清」的。
+
+## 为什么 source_mapping 会漏掉整份 YAML 订阅
+
+`source_mapping_built entries` 统计的是「下游从订阅正文里解析出多少条**可导出配置**」，
+**不是**「下游拿到几个节点」。它长期偏低（2026-09-15 的 `14`、2026-09-26 编排轮的 `6`），
+根因直到 2026-09-26 才定案：**不是规模、不是下载来不及，而是一行看似链接的节点名把整段
+YAML 解析跳过了。**
+
+`speedtest_gitee.build_source_mapping` 有两条互补的路：
+
+| 路 | 认什么 | 用途 |
+|---|---|---|
+| YAML 分支 | 正文里有 `proxies:` 时 `yaml.safe_load`，按 **proxy 的 `name`** 入表 | 订阅是 Clash YAML（本工作流产出的就是这种） |
+| 链接分支 | 逐行找含 `://` 且 `#片段` 非空的行，按 **frag** 入表 | 订阅是裸分享链接列表 |
+
+旧实现把两者当**互斥**：链接分支只要扫到过任意一行，就 `continue` 跳过 YAML 分支。而
+**Clash YAML 的节点名里可能嵌着带 `#片段` 的 URL**，实测 2026-09-26 那轮源订阅（118055 行、
+8470 个节点）里有 3 行如此——于是整份 YAML 一个都没解析，`entries` = 3 行 × 2 个映射 = **6**，
+8470 个节点里 8464 个拿不到 `source_entry`。
+
+**后果为什么很隐蔽**：导出层有 `proxy_obj` 兜底（见
+[gitee 文档 · 订阅导出策略](proxy-speedtest-gitee.md#订阅导出策略三套共用)），而那个兜底当时
+误把 mihomo `/providers/proxies` 的**运行时对象**当成完整配置 ⇒ 订阅照样生成、日志照样显示
+「✅ 已更新」，但写出去的是没有 `server`/`port` 的空壳，客户端（Egern）加载才报错。
+
+**修法与验证**（`tests/test_source_mapping_branches.py` 固化为断言）：
+
+- 判据从「有没有扫到链接」改成「正文里有没有 `proxies:`」，两条路不再互斥；
+- 顺序改成**先 YAML 后链接**：两路写同一批映射且「已存在不覆盖」，碎片键（实测有 `-01`、
+  `002] 电报群：…` 这种）不许挤掉真节点的配置；
+- 在**当轮真实源订阅**上实测：`entries` 6 → **8405**（8402 个键里 8399 个 `server`+`port`
+  齐全，剩下 3 个是碎片键、不与真节点重名），抽查失败订阅里的
+  `🇭🇰 香港(ClashNode)-2511` → `vless 154.218.15.250:2083`；
+- 解析 2.9MB 正文耗时约 7 秒，相对抓取/测速预算可忽略。
 
 ## 为什么还要试装（与「测活」是两件事）
 
@@ -648,6 +685,8 @@ python .github/scripts/proxy-speedtest/tests/test_gist_nodes_substore.py
 python .github/scripts/proxy-speedtest/tests/test_alive_filter.py
 python .github/scripts/proxy-speedtest/tests/test_resolve_gist_raw_url.py
 python .github/scripts/proxy-speedtest/tests/test_collect_provider_snapshot.py
+python .github/scripts/proxy-speedtest/tests/test_source_mapping_branches.py
+python .github/scripts/proxy-speedtest/tests/test_subscription_metric.py
 python .github/scripts/proxy-speedtest/tests/test_trial_load.py
 ```
 
@@ -691,6 +730,19 @@ token 空或全空白 / API 抛异常）都返回空串且**不抛异常**、空
 `alive` 状态原样带出且缺失时归一为 False（不谎报为活）、`AUTO`/`default` 组名不算节点、
 跨 provider 重名去重、`proxy_obj` 剔除 `alive`/`history` 这类运行时字段、空输入返回空、
 API 报错要抛异常（而不是「安静地收集到 0 个」）。
+
+**`test_source_mapping_branches.py`** 专测 `speedtest_gitee.build_source_mapping` 两条分支的取舍
+——它是「订阅导出成空壳、客户端报错」事故的根因所在
+（长度 118055 行的 YAML 源订阅里有 3 行节点名嵌着带 `#片段` 的 URL，旧实现据此跳过整段 YAML
+解析 ⇒ `entries` 只有 6）。覆盖：**YAML 里混进像链接的行仍必须解析出整份节点**、这些节点必须
+带 `server`/`port`（不是 mihomo 运行时对象那种空壳）、**纯链接列表仍走链接分支且还原得出配置**、
+**碎片键不许挤掉真节点**（YAML 必须先占位）、链接列表不含 `proxies:` 的对照。第 2 组还断言
+取文与解析都没走降级分支——第一版夹具 YAML 缩进写错时，正是被静音的
+`subscription_yaml_parse_skipped` 藏住的。
+
+**`test_subscription_metric.py`** 专测共享的达标判定与订阅导出策略：指标回退的两条判据、
+`min_nodes` 只管「传不传」、**可导出配置的取值与准入**（第 10 组：mihomo 运行时对象没有
+`server`/`port` ⇒ 不算可导出配置，空壳既不计达标也不进订阅文本）。
 
 **`test_trial_load.py`** 专测发布前的试装排雷层（2026-09-15 那份 13210 节点订阅在下游归零
 后加的）。它的坏法都很隐蔽，固化成 18 组断言：

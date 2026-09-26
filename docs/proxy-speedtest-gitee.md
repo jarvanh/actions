@@ -256,14 +256,27 @@ variables → Actions → Variables 可随时改，留空走默认）：
 实际采用的指标会写进日志（`subscription_policy` / `subscription_metric_fallback` /
 `subscription_metric_kept`）与 TG 通知文案。节点必须有**可导出配置**才计入达标——否则导不进
 订阅。取值顺序是 `source_entry.proxy` 优先、缺失时回落到 `proxy_obj`
-（`speedtest_common.node_proxy_config`）。
+（`speedtest_common.node_proxy_config`），且回落**只认真配置**：必须有 `server` 与 `port`
+（判据在 `speedtest_common.is_exportable_proxy`）。
 
 ⚠️ **回落这一层是 2026-09-17 补的，缺了它会整轮零产出。** `source_entry.proxy` 只在
-「节点名匹配上订阅 source_mapping」时才有值；编排轮（gistnodes 把节点经 provider 直接喂入）
-里 source_mapping 可能只有个位数条，而节点是几千个 ⇒ 绝大多数节点 `source_entry` 为空。
-实测 run 35116972319：8326 个节点里 206 个**测出了速度**（最高上传 245 Mbps），却因只认
-`source_entry.proxy` 全被判「无可用配置」⇒ 达标 0 ⇒ 订阅不上传。`proxy_obj` 是
-`collect_provider_snapshot` 从 mihomo provider 直接读出的完整节点配置，与前者语义等价。
+「节点名匹配上订阅 source_mapping」时才有值；只认它的旧实现实测踩过 run 35116972319：
+8326 个节点里 206 个**测出了速度**（最高上传 245 Mbps），却全被判「无可用配置」⇒ 达标 0
+⇒ 订阅不上传。
+
+⚠️ **但回落不等于「什么都能收」（2026-09-26 修正，此前写法有误）。** 2026-09-17 的注释把
+`proxy_obj` 说成「从 mihomo provider 读出的完整节点配置」，这不成立：`/providers/proxies`
+返回的是**运行时对象**，只有 `name` / `type` / `udp` / `uot` / `mptcp` / `smux` / `interface` /
+`routing-mark` / `dialer-proxy` / `extra` / `provider-name` 这些字段，**没有 `server` /
+`port` / 凭据**。于是 2026-09-26 编排轮导出的 25 个节点全是空壳，客户端（Egern）加载直接
+报错，而整轮日志一路正常、订阅照样显示「✅ 已更新」。现在 `is_exportable_proxy` 把空壳挡在
+门外：宁可判「无可用配置」并记 `subscription_yaml_source_missing`，也**不能发布装不上的订阅**。
+
+⚠️ **「匹配不上」的根因也已修**：`source_entry` 大片为空**不是**「订阅里没有这些节点」，
+而是 `speedtest_gitee.build_source_mapping` 的 YAML 分支被**一行看似链接的节点名**整段跳过
+（同一份源订阅实测只认到 6 条、修后 8405 条；详见该函数注释与
+[gistnodes 文档](proxy-speedtest-gistnodes.md#为什么-source_mapping-会漏掉整份-yaml-订阅)）。
+修好后这层回落退化为兜底。
 
 **TOP5 排序与判定指标一致**：三套的 TOP 榜都按实际采用的指标排序，通知标题标注
 `🏆 最快节点 · N · 按上传/按下载`，避免出现「按上传导出订阅、却按下行排 TOP」的自相矛盾。
@@ -398,7 +411,8 @@ mihomo 对「组里不存在的成员」改为报错，gitee / cdn 会立刻把�
 
 | 现象 | 原因 / 处置 |
 |---|---|
-| `nodes_collected: 0` 但 `source_mapping_built` 有值 | 见[为什么节点收集不等健康检查](#为什么节点收集不等健康检查)。`provider_snapshot_collected` 会给出 `total` / `alive` / `collected` 三个数，`collected == total` 即为正常（`alive` 为 0 只是还没探完） |
+| **订阅能生成、客户端（Egern 等）加载报错** | 2026-09-26 事故形态：写出去的是「空壳」——节点只有 `name`/`type`/`udp` 等运行时字段，没有 `server`/`port`。根因是 `source_entry` 大片为空（`source_mapping_built entries` 只有个位数，见[为什么 source_mapping 会漏掉整份 YAML 订阅](proxy-speedtest-gistnodes.md#为什么-source_mapping-会漏掉整份-yaml-订阅)），导出退回 mihomo `/providers/proxies` 的运行时对象。现已双重设防：源头修掉 YAML 分支误跳过，出口由 `is_exportable_proxy` 挡掉空壳（宁可判「无可用配置」并记 `subscription_yaml_source_missing`，也不发布装不上的订阅） |
+| `nodes_collected: 0` 但 `source_mapping_built` 有值 | 见[为什么节点收集不等健康检查](#为什么节点收集不等健康检查)。`provider_snapshot_collected` 会给出 `total` / `alive` / `collected` 三个数，`collected == total` 即为正常（`alive` 为 0 只是还没探完）。⚠️ `source_mapping_built entries` 是**可导出配置条数**、不是节点数，别拿两者互推 |
 | `nodes_collected: 0` 且 **`source_mapping_built entries: 0`** | 先找 `subscription_fetch_skipped` —— 那是**订阅根本没取到**（不是节点都判死了），`source_url` + `index` + `error` 三样齐；若 `error` 是 `SSL: UNEXPECTED_EOF_WHILE_READING` 一类，就是取文途中被掐断。几 MB 的订阅体（Gist raw）上这很常见，`fetch_text` 已带 4 次指数退避重试，中间会打 `subscription_fetch_retry`；**见到 retry 后成功属正常自愈**。重试全失败才 `skipped`，此时该 `exit`/产出的方向是「定位网络或订阅源」，不要去查解析与判据（判据没参与）。**这条以前是静默的**：一次抖动 = 整份订阅消失 = 零节点 + job 仍报成功 |
 | GitHub API 403/限流 | 匿名调用共享出口 IP 60 次/h；workflow 已带 `GITHUB_TOKEN`/`GH_TOKEN` 回退 |
 | Gitee 仓库体积超限 | `rebuild_gitee_repo` 自动重建私有仓库 `proxy-speedtest-temp` |

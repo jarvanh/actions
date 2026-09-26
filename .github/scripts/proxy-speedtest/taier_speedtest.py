@@ -52,6 +52,7 @@ from speedtest_common import (
     fetch_ip_network_info,
     log_progress,
     merged_env,
+    node_proxy_config,
     resolve_host_ipv4,
     resolve_subscription_policy,
     send_telegram,
@@ -758,8 +759,9 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
             _scope = f'（预算内仅测完 {_tested_n}/{collected_total} 个）'
         # 判据是「有没有可导出配置」，不是「有没有速度」：节点慢（0.5 兆）但有配置 ⇒
         # 那是真的达标不足；节点快（245 兆）却两者皆空 ⇒ 才是实现层丢配置。
-        _no_config = [r for r in results
-                      if not ((r.get('source_entry') or {}).get('proxy') or r.get('proxy_obj'))]
+        # 必须与导出层用**同一个判据**（node_proxy_config）：只有 server+port 齐全才算「有配置」，
+        # mihomo provider 的运行时对象不算（2026-09-26：那种空壳曾被当成有配置导出，客户端报错）。
+        _no_config = [r for r in results if not node_proxy_config(r)]
         _measured = [r for r in results
                      if (r.get('up') or 0) > 0 or (r.get('down') or 0) > 0]
         if qualified_count <= 0 and _measured and _no_config and len(_no_config) >= len(_measured):
@@ -1067,10 +1069,11 @@ def _run():
     gist_results = [{
         'name': r.get('name', ''),
         'source_entry': r.get('source_entry') or {},
-        # proxy_obj 必须带上：编排轮（gistnodes 交 8326 个节点）里 source_entry 匹配不上
-        # 订阅 source_mapping（只有 4 条），配置全在 proxy_obj 里。丢了它 ⇒ 有速度的节点
-        # 也被判「无可用配置」⇒ 达标 0 ⇒ 订阅不上传（2026-09-16 run 35116972319）。
-        # 见 speedtest_common.node_proxy_config 的说明。
+        # proxy_obj 也带上：它是兜底来源。⚠️ source_entry 匹配不上时，proxy_obj 往往是
+        # mihomo provider 的**运行时对象**（没有 server/port），导出层会按「无可用配置」挡掉
+        # ——那是对的，写出装不上的订阅更糟。匹配不上的根因（source_mapping 的 YAML 分支被
+        # 一行看似链接的节点名误跳过）已于 2026-09-26 修在 build_source_mapping，见
+        # speedtest_common.node_proxy_config 与 speedtest_gitee.build_source_mapping 的说明。
         'proxy_obj': r.get('proxy_obj') or {},
         'mode': 'download',
         'download_mibs': (r.get('down') or 0) / 8.388608,

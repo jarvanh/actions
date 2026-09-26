@@ -170,14 +170,18 @@ TUN 起来后 DNS 会被 mihomo 劫持，必须显式给可达的公共解析器
 注意 taier **上行常测不出**（CDN 类测速点拒绝上传包，引擎渲染 failed → 0），此时上行达标数
 远少于下行 ⇒ 自动落到下行判定，通知会显示实际采用的指标。
 
-⚠️ **编排轮（gistnodes 交接）必须靠 `proxy_obj` 回落才能导出订阅**（2026-09-17 修）。
-`source_entry.proxy` 只在节点名匹配上订阅 source_mapping 时才有值；编排轮的几千个节点由
-gistnodes 经 provider 直接喂入，source_mapping 只有个位数条 ⇒ 绝大多数节点 `source_entry`
-为空。实测 run 35116972319：8326 个节点里 206 个测出了速度（最高上传 245 Mbps），却因旧实现
-只认 `source_entry.proxy` 全被判「无可用配置」⇒ 达标 0 ⇒ **订阅不上传**。现在
-`gist_results` 会带上 `proxy_obj`（来自 `collect_provider_snapshot` 的完整节点配置），
-判定与导出都经 `speedtest_common.node_proxy_config` 取「`source_entry.proxy` 优先、
-缺失回落 `proxy_obj`」。细节见 [gitee 文档 · 订阅导出策略](proxy-speedtest-gitee.md#订阅导出策略三套共用)。
+⚠️ **匹配不上 source_mapping 时靠 `proxy_obj` 兜底**（2026-09-17 补）。`source_entry.proxy`
+只在节点名匹配上订阅 source_mapping 时才有值；只认它的旧实现实测踩过 run 35116972319：
+8326 个节点里 206 个测出了速度（最高上传 245 Mbps），却全被判「无可用配置」⇒ 达标 0
+⇒ **订阅不上传**。现在 `gist_results` 会带上 `proxy_obj`，判定与导出都经
+`speedtest_common.node_proxy_config` 取「`source_entry.proxy` 优先、缺失回落 `proxy_obj`」。
+
+⚠️ **但兜底只认「真配置」**（2026-09-26 修正）：`proxy_obj` 若是 mihomo `/providers/proxies`
+的**运行时对象**（没有 `server`/`port`/凭据），会被 `is_exportable_proxy` 挡掉——那是对的，
+写出装不上的订阅比不写更糟（当轮 25 个空壳客户端加载即报错）。同时，
+`source_entry` 大片为空的**根因**（`build_source_mapping` 的 YAML 分支被一行看似链接的节点名
+整段跳过）已修，这层回落退化为兜底。细节见
+[gitee 文档 · 订阅导出策略](proxy-speedtest-gitee.md#订阅导出策略三套共用)。
 
 **测活只有两种世界，没有中间态**（2026-09-24 重写）。判活走 mihomo 的**组测速**：开测前
 一次 `GET /group/{组}/delay` 拿整组 `{节点名: 延迟ms}`，逐节点只查这张表：
@@ -268,7 +272,8 @@ gitee 读快照 `23:32:05.426` → 首个 `node_start` `23:32:48.907`（43 秒�
 
 | 现象 | 原因 / 处置 |
 |---|---|
-| `nodes_collected: 0` 但 `source_mapping_built` 有值 | 2026-09-15 run 34969408908 的形态：收集层曾只收 provider 里 `alive` 为真的节点，而 `wait_mihomo` 不等健康检查出结论。现已改为全量收集，见 [gitee 文档 · 为什么节点收集不等健康检查](proxy-speedtest-gitee.md#为什么节点收集不等健康检查)；先看 `provider_snapshot_collected` 的 `total` / `collected` 是否相等 |
+| `nodes_collected: 0` 但 `source_mapping_built` 有值 | 2026-09-15 run 34969408908 的形态：收集层曾只收 provider 里 `alive` 为真的节点，而 `wait_mihomo` 不等健康检查出结论。现已改为全量收集，见 [gitee 文档 · 为什么节点收集不等健康检查](proxy-speedtest-gitee.md#为什么节点收集不等健康检查)；先看 `provider_snapshot_collected` 的 `total` / `collected` 是否相等。⚠️ `source_mapping_built entries` 是**可导出配置条数**、不是节点数 |
+| **订阅能生成、客户端（Egern 等）加载报错** | 2026-09-26 事故形态：写出去的是空壳（只有 `name`/`type`/`udp`，没有 `server`/`port`）。根因是 `source_mapping` 漏掉整份 YAML 订阅 ⇒ `source_entry` 为空 ⇒ 退回 mihomo 运行时对象，见 [gistnodes 文档](proxy-speedtest-gistnodes.md#为什么-source_mapping-会漏掉整份-yaml-订阅)；出口已由 `is_exportable_proxy` 设防 |
 | 通知出现 `⚠️ 疑似未走代理` | TUN 没起来或 `PROCESS-NAME` 规则未命中；查 `mihomo.log` 与 `/dev/net/tun`；结果不可信，整轮判失败 |
 | 节点全部「连不上测速点」 | 控制面 `*.cnspeedtest.cn` 经该节点不可达；换节点或检查 mihomo DNS 配置 |
 | **run 卡在 in_progress、取消也无效** | TUN 未撤（历史事故）：脚本退出前必须 `stop_mihomo_tun()`；workflow 里有 `always()` 兜底步骤 `pkill "mihomo -d"` |
