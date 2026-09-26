@@ -1123,6 +1123,9 @@ jobs:
               chmod 755 "$WB_TMP_BIN"
               if [ -s "$WB_TMP_BIN" ]; then
                 mv -f "$WB_TMP_BIN" "$WB_BIN"
+                # mv 保留源文件模式；上面的 chmod 755 只作用于 .new 临时文件。
+                # 这里对最终路径再补一次，防「临时文件权限被外部改回」等异常路径。
+                chmod +x "$WB_BIN" 2>/dev/null || true
                 if [ -n "$WB_REMOTE_VER" ]; then
                   printf '%s\n' "$WB_REMOTE_VER" > "$WB_VER_FILE"
                   if [ -n "$WB_LOCAL_VER" ]; then
@@ -1163,6 +1166,14 @@ jobs:
           echo "2. Starting workbuddy-gateway serve on ${WB_PORT} (systemd --user 托管)..."
           echo "   preflight: binary=$WB_BIN"
           ls -l "$WB_BIN" 2>&1 || true
+          # 权限位自愈（2026-09-26 事故加固）：二进制存在但丢了 +x 时，systemd 会以
+          # 203/EXEC 反复重启（当晚 23:05-23:15 崩溃循环 8 分钟，根因是手工 mv 了一个
+          # 0644 的临时产物进来）。下载分支的 chmod 管不到「非下载路径」写入的二进制，
+          # 故启动前统一补一次 +x：仅在「存在且不可执行」时动手，幂等、无副作用。
+          if [ -f "$WB_BIN" ] && [ ! -x "$WB_BIN" ]; then
+            chmod +x "$WB_BIN" 2>/dev/null || true
+            echo "🔧 二进制缺可执行位，已补回：$WB_BIN"
+          fi
           if [ ! -x "$WB_BIN" ]; then
             echo "❌ 二进制不可执行：$WB_BIN（下载失败或权限位丢失）"
           fi
