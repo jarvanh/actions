@@ -321,7 +321,12 @@ restore_fixed_files() {
       if [ "$alt" != "$orig" ] && ! _dst_file_exists "${dest}/${alt}" \
          && [ -z "$(_dst_file_bytes "${dest}/${alt}")" ]; then
         local src_at="${src:-}"
-        if [ -n "$src_at" ] && _dst_file_exists "${src_at}/${orig}"; then
+        # 源端判据同样**双判据**（2026-09-26 加固）: 源端"在不在"决定出账与否，
+        #   而出账不可逆 ⇒ 安全门不能只靠一次列列举。列列举假阴的后果是误判
+        #   "源端不在" ⇒ **保留条目**（保守方向，不丢数据），但会让本该出账的
+        #   历史残渣继续堆在 marker 里 ⇒ 用直读补一次，减少误保留。
+        if [ -n "$src_at" ] && { _dst_file_exists "${src_at}/${orig}" \
+             || [ -n "$(_dst_file_bytes "${src_at}/${orig}")" ]; }; then
           echo "  → 替代副本已不存在，源端仍在 ⇒ 判定已失效，出账"
           json=$(echo "$json" | marker_remove_fix_entry "$orig" 1) || true
           _marker_write "$json" "$marker_path" >/dev/null 2>&1 || true
