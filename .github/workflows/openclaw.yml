@@ -1149,6 +1149,51 @@ jobs:
           fi
 
           WB_VER="$(head -n 1 "$WB_VER_FILE" 2>/dev/null || true)"
+
+          # ---------- 1b. 启动前能力校验（2026-09-26 加） ----------
+          # 背景事故：config.json 提前写了 v6 routing 段，但 GitHub latest 停在 v1.13.2
+          # （不含 routing）。本步骤原本只看 .installed-version 字符串判定「已是最新版」，
+          # 于是下载旧版覆盖本地新版 → 旧版 DisallowUnknownFields 解析报
+          # json: unknown field "routing" → 退出码 1；Restart=always 让它崩溃循环 139 次，
+          # 每轮日志都只有那一句，看不出根因是「版本错配」。
+          # 根因在于**版本记录会骗人**：它可能被人工改错，也可能滞后于代码。
+          # 故判据不再取版本字符串，而是直接问二进制自己：
+          #   ① --version 自报版本（真实产物，不是记录）
+          #   ② 二进制内含 json:"routing" tag 即认支持路由（Go struct tag，编译期固化）
+          # config 要求的能力与二进制实际能力不符 → 明确报错并**拒绝启动**：
+          # 让它跑起来只会在 Restart=always 下静默崩溃循环，明确失败更好排障。
+          WB_BIN_VER=""
+          WB_CAP_OK=1
+          WB_CAP_MSG=""
+          if [ -x "$WB_BIN" ]; then
+            WB_BIN_VER="$("$WB_BIN" --version 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)"
+            if [ -n "$WB_BIN_VER" ]; then
+              echo "   preflight: 二进制自报版本=${WB_BIN_VER}（版本记录=${WB_VER:-无}）"
+              if [ -n "$WB_VER" ] && [ "$WB_BIN_VER" != "$WB_VER" ]; then
+                echo "⚠️ 版本记录与二进制自报不一致（记录 ${WB_VER} / 实际 ${WB_BIN_VER}），以二进制为准"
+                WB_CAP_MSG="版本记录 ${WB_VER} 与二进制自报 ${WB_BIN_VER} 不一致"
+              fi
+            fi
+            # 能力项：config.json 要求 routing，二进制必须具备（后续新能力照此加项）
+            if grep -aq '"routing"' "$WB_RUN_DIR/config.json" 2>/dev/null; then
+              if grep -aq 'json:"routing"' "$WB_BIN" 2>/dev/null; then
+                echo "✅ 能力校验通过：config 要求 routing，二进制支持"
+              else
+                WB_CAP_OK=0
+                WB_CAP_MSG="config.json 含 routing 段，但二进制 ${WB_BIN_VER:-未知版本} 不支持（缺 v6 路由）；多为代码已进 main 但未发版"
+                echo "❌ ${WB_CAP_MSG}"
+              fi
+            fi
+          else
+            WB_CAP_OK=0
+            WB_CAP_MSG="二进制不可执行：$WB_BIN"
+          fi
+          printf 'WB_BIN_VER=%s\n' "$WB_BIN_VER" >> "$WB_META"
+          if [ "$WB_CAP_OK" != "1" ]; then
+            WB_STATE="能力校验未通过"
+            WB_REASON="$WB_CAP_MSG"
+          fi
+
           echo "WB_STATE=${WB_STATE:-未知}" >> "$WB_META"
           echo "WB_VERSION=${WB_VER}" >> "$WB_META"
           printf 'WB_UPDATE=%s\n' "$WB_UPDATE" >> "$WB_META"
@@ -1173,7 +1218,13 @@ jobs:
           # 托管交给 gateways.sh（systemd --user + Restart=always）：窗口期内进程崩溃
           # 由 systemd 秒级拉起，不再依赖下一轮 run。ensure 语义 = 写单元 + 每轮重启，
           # 与本步骤原先的 pkill + nohup 等价；停止必须走 systemctl（见收尾 3b 注释）。
-          if ! ( cd "$WB_RUN_DIR" ); then
+          if [ "$WB_CAP_OK" != "1" ]; then
+            # 能力校验未通过 → **拒绝启动**，绝不交给 systemd。
+            # 理由：单元是 Restart=always，明知会崩还启动 = 340 分钟窗口期内崩溃循环，
+            # 每次只留一句 unknown field，日志被刷爆且根因被埋（本轮事故即此形态，
+            # 实测循环 139 次）。明确失败 + 通知里带人话原因，排障成本远低于崩溃循环。
+            echo "❌ 启动前能力校验未通过，已拒绝启动 serve：$WB_CAP_MSG" | tee "$WB_LOG"
+          elif ! ( cd "$WB_RUN_DIR" ); then
             echo "❌ 无法进入运行目录 $WB_RUN_DIR" >&2
             printf '%s\n' "cd $WB_RUN_DIR failed" > "$WB_LOG"
           else
