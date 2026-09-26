@@ -14,8 +14,10 @@
 #   Restart=always 把「崩溃→自愈」收敛到秒级；runner 的 user manager 常驻
 #   （openclaw-gateway.service 同款，Linger=yes）。
 #
+#   bash "$GITHUB_WORKSPACE/.github/scripts/gateways/gateways.sh" ensure <workbuddy|zcode2api|glm2api>
+#
 # 用法：
-#   gateways.sh ensure <workbuddy|zcode2api>  # 写单元(幂等)+reload+重启
+#   gateways.sh ensure <workbuddy|zcode2api|glm2api>  # 写单元(幂等)+reload+重启
 #   gateways.sh stop <name>                            # 收尾停止（等退出，不 pkill）
 #   gateways.sh status [name]                          # 状态总览
 #
@@ -115,7 +117,37 @@ StandardError=append:/tmp/local_zcode2api/logs/zcode2api.log
 WantedBy=default.target
 EOF
       ;;
-    *) die "未知网关: $name（可选 workbuddy | zcode2api）" ;;
+    glm2api)
+      # 凭据口径与其余两个网关相反：token 不进单元文件（避免同一份凭据落到
+      # 单元 + .env 两处，轮换时容易漏改一处），只写在运行目录 .env（600），
+      # 由服务自行读取。故这里只校验部署脚本是否已把 .env 写好。
+      [ -s /tmp/local_glm2api/.env ] || { rm -f "$tmp"; die "glm2api: 运行目录 .env 缺失或为空，请先跑 glm2api_deploy.sh prepare"; }
+      grep -q '^GLM_REFRESH_TOKEN=.' /tmp/local_glm2api/.env || { rm -f "$tmp"; die "glm2api: .env 内无 GLM_REFRESH_TOKEN，拒绝起游客态服务"; }
+      cat > "$tmp" <<EOF
+[Unit]
+Description=glm2api (ChatGLM 清言反代 -> OpenAI, ${GLM2API_PORT:-8320})
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=0
+
+[Service]
+Type=simple
+WorkingDirectory=/tmp/local_glm2api
+# 源码是 src/ 布局，经 PYTHONPATH 指过去，避免为启动做一次 pip install
+EnvironmentFile=/tmp/local_glm2api/env.sh
+# GLM_REFRESH_TOKEN 只存在于运行目录 .env（600），不进单元文件（理由见脚本注释）
+ExecStart=/tmp/local_glm2api/.venv/bin/python main.py
+Restart=always
+RestartSec=5
+StandardOutput=append:/tmp/local_glm2api/logs/glm2api.log
+StandardError=append:/tmp/local_glm2api/logs/glm2api.log
+
+[Install]
+WantedBy=default.target
+EOF
+      ;;
+    *) die "未知网关: $name（可选 workbuddy | zcode2api | glm2api）" ;;
   esac
   install -m 600 "$tmp" "$UNIT_DIR/$(unit_name "$name")"
   rm -f "$tmp"
@@ -123,7 +155,7 @@ EOF
 
 cmd_ensure() {
   local name="${1:-}"
-  [ -n "$name" ] || die "用法: $0 ensure <workbuddy|zcode2api>"
+  [ -n "$name" ] || die "用法: $0 ensure <workbuddy|zcode2api|glm2api>"
   local unit
   unit="$(unit_name "$name")"
 
@@ -149,7 +181,7 @@ cmd_ensure() {
 
 cmd_stop() {
   local name="${1:-}"
-  [ -n "$name" ] || die "用法: $0 stop <workbuddy|zcode2api>"
+  [ -n "$name" ] || die "用法: $0 stop <workbuddy|zcode2api|glm2api>"
   local unit
   unit="$(unit_name "$name")"
 
@@ -168,7 +200,7 @@ cmd_stop() {
 
 cmd_status() {
   local only="${1:-}"
-  local names="workbuddy zcode2api"
+  local names="workbuddy zcode2api glm2api"
   printf '%-12s %-24s %s\n' "网关" "状态" "单元"
   local n unit st
   for n in $names; do
