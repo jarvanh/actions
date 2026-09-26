@@ -38,6 +38,11 @@ class GLM2APIServer:
         self._server = ThreadingHTTPServer((config.host, config.port), handler_cls)
         self._server.daemon_threads = True
         self._server.allow_reuse_address = True
+        # socket listen backlog 默认只有 5：突发并发（如客户端一口气开 8 条流）时，
+        # 超出队列的连接会被内核直接 RST，客户端表现为 "Connection reset by peer"
+        # 且服务端无任何异常日志——实测 8 并发必掉 3 个。调大后突发连接进队列等待，
+        # 由 ThreadingHTTPServer 逐线程接管，不再被内核拒连。
+        self._server.request_queue_size = 128
 
     def serve_forever(self) -> None:
         self._server.serve_forever()
@@ -53,7 +58,11 @@ class GLM2APIServer:
 
         class RequestHandler(BaseHTTPRequestHandler):
             server_version = "glm2api/0.1.0"
-            protocol_version = "HTTP/1.1"
+            # 用 HTTP/1.0：本服务所有响应都带 Connection: close（不复用连接），
+            # 声明 1.1 会让客户端以为可以 keep-alive 复用，而服务端写完就关，
+            # 下一次复用即 RST —— 并发下表现为随机的 "Connection reset by peer"
+            # 且服务端日志干干净净（实测 8 并发掉 1~3 个）。1.0 与 close 语义一致。
+            protocol_version = "HTTP/1.0"
 
             def do_OPTIONS(self) -> None:
                 self.send_response(HTTPStatus.NO_CONTENT)

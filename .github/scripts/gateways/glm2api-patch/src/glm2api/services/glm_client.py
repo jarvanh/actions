@@ -370,20 +370,30 @@ class GLMWebClient:
             converted_messages[0]["content"] = refs + list(converted_messages[0]["content"]) # type: ignore
             debug_dump(self.logger, self.config.debug_dump_all, "附加上传引用后的 GLM messages", converted_messages)
 
+        # Agent 通道判定：模型名以 -agent 结尾 → 走 AgentMore 域的
+        # /agent-api/chat/stream，chat_mode=chat_agent。该通道**真实扣清言积分**
+        # （抓包实证：单次短消息扣 95 分），而默认的 /backend-api/assistant/stream
+        # 不扣分。判定放在模型名上，让「扣不扣积分」对调用方显式可见。
+        base_name = split_model_features(requested_model)[0]
+        is_agent = base_name.endswith(self.config.glm_agent_model_suffix)
+        agent_base = base_name[: -len(self.config.glm_agent_model_suffix)] if is_agent else base_name
+
         chat_mode = resolve_chat_mode(
             model=requested_model,
             reasoning_effort=openai_payload.get("reasoning_effort"),
             deep_research=openai_payload.get("deep_research"),
         )
+        if is_agent and chat_mode != "deep_research":
+            # AgentMore 抓包实证：agent 通道固定带 chat_mode=chat_agent + reasoning_effort=high
+            chat_mode = "chat_agent"
         is_networking = resolve_networking(
             model=requested_model,
             web_search=openai_payload.get("web_search"),
         )
         # 抓包确认（2026-09，mac 客户端 2.0.5）：上游用 meta_data.selected_model
         # 选择模型（glm-5.3 / glm-5.3-flash），缺省时默认应答 GLM-5.3-Flash。
-        selected_model = split_model_features(requested_model)[0]
-        if selected_model not in self.config.glm_selected_model_whitelist:
-            selected_model = None
+        # Agent 通道先把 -agent 后缀剥掉再传给上游（上游只认 glm-5.3 / glm-5.3-flash）。
+        selected_model = agent_base if agent_base in self.config.glm_selected_model_whitelist else None
 
         meta_data = {
             "channel": "",
@@ -395,10 +405,13 @@ class GLMWebClient:
             "is_test": False,
             "platform": self.config.glm_platform,
             "quote_log_id": "",
-            "cogview": {"rm_label_watermark": False},
+            # AgentMore 抓包值为 true；普通对话为 false。按通道区分，保持与真实客户端一致。
+            "cogview": {"rm_label_watermark": is_agent},
         }
         if chat_mode == "deep_thinking":
             meta_data["reasoning_effort"] = "max"
+        elif is_agent:
+            meta_data["reasoning_effort"] = "high"
         if selected_model:
             meta_data["selected_model"] = selected_model
 
@@ -416,9 +429,10 @@ class GLMWebClient:
         ).encode("utf-8")
 
         self.logger.info(
-            "转发请求 model=%s upstream=%s stream=%s",
+            "转发请求 model=%s upstream=%s channel=%s stream=%s",
             requested_model,
             upstream_model,
+            "agent(扣积分)" if is_agent else "chat(不扣积分)",
             openai_payload.get("stream"),
         )
         debug_dump(self.logger, self.config.debug_dump_all, "转发到 GLM 的 chat 原始请求体", request_body)
@@ -427,19 +441,25 @@ class GLMWebClient:
             for attempt in range(self.config.glm_busy_max_retries + 1):
                 try:
                     timestamp, nonce, sign = build_sign()
+                    headers = {
+                        **self.auth.get_browser_headers(),
+                        "Authorization": f"Bearer {access_token}",
+                        "X-Device-Id": uuid.uuid4().hex,
+                        "X-Nonce": nonce,
+                        "X-Request-Id": uuid.uuid4().hex,
+                        "X-Sign": sign,
+                        "X-Timestamp": timestamp,
+                    }
+                    if is_agent:
+                        # 跨域请求：Origin/Referer 必须是 agentmore 域，否则上游按
+                        # 跨站请求拒绝（与真实客户端一致）
+                        headers["Origin"] = self.config.glm_agent_base_url.replace("/chatglm", "")
+                        headers["Referer"] = headers["Origin"] + "/"
                     request = urllib.request.Request(
-                        self.config.chat_stream_url,
+                        self.config.agent_chat_stream_url if is_agent else self.config.chat_stream_url,
                         data=request_body,
                         method="POST",
-                        headers={
-                            **self.auth.get_browser_headers(),
-                            "Authorization": f"Bearer {access_token}",
-                            "X-Device-Id": uuid.uuid4().hex,
-                            "X-Nonce": nonce,
-                            "X-Request-Id": uuid.uuid4().hex,
-                            "X-Sign": sign,
-                            "X-Timestamp": timestamp,
-                        },
+                        headers=headers,
                     )
                     debug_dump(
                         self.logger,
