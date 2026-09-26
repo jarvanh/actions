@@ -86,6 +86,9 @@ LOG_LEVEL=INFO
 DEBUG_DUMP_ALL=false
 GLM_DELETE_CONVERSATION=true
 GLM_PLATFORM=mac
+# 并发槽位：上游实测 8 并发无压力（直连 8 路全部 ~2s 返回），
+# 默认 3 会让突发请求排队、队列超时后连接被重置。
+GLM_MAX_CONCURRENCY=${GLM2API_MAX_CONCURRENCY:-8}
 GLM_REFRESH_TOKEN=${GLM_REFRESH_TOKEN}
 EOF
   chmod 600 "$ENV_FILE" || true
@@ -110,9 +113,17 @@ cmd_status() {
 
 # 端到端自检：两个模型各发一条，判据是返回了助手内容。
 # 只验「有内容」不比对文本：模型回复内容不稳定，比对文本会 flaky。
+# 默认只自检不扣积分的 chat 通道（glm-5.3 / glm-5.3-flash）。
+# agent 通道（glm-5.3-flash-agent）会真实扣分，默认**不自检**，只有显式
+# GLM2API_SELFTEST_AGENT=1 才纳入 —— 每 5 分钟一轮的常驻服务不该默认烧分。
 cmd_selftest() {
-  local out model ok=0
-  for model in glm-5.3 glm-5.3-flash; do
+  local out model ok=0 total=0
+  local models="glm-5.3 glm-5.3-flash"
+  if [ "${GLM2API_SELFTEST_AGENT:-0}" = "1" ]; then
+    models="${models} glm-5.3-flash-agent"
+  fi
+  for model in $models; do
+    total=$((total + 1))
     out="$(curl -sS --max-time 120 -X POST "http://127.0.0.1:${PORT}/v1/chat/completions" \
       -H 'content-type: application/json' \
       -d "{\"model\":\"${model}\",\"max_tokens\":32,\"messages\":[{\"role\":\"user\",\"content\":\"回复 ok 即可\"}]}" 2>&1)"
@@ -123,7 +134,7 @@ cmd_selftest() {
       log "❌ ${model} 自检失败：$(printf '%s' "$out" | head -c 200)"
     fi
   done
-  [ "$ok" -eq 2 ] || return 1
+  [ "$ok" -eq "$total" ] || return 1
   return 0
 }
 

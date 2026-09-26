@@ -12,12 +12,19 @@ DEFAULT_ASSISTANT_ID = "65940acff94777010aa6b796"
 DEFAULT_IMAGE_ASSISTANT_ID = "65a232c082ff90a2ad2f15e2"
 DEFAULT_IMAGE_MODEL_NAME = "glm-image-1"
 DEFAULT_GLM_BASE_URL = "https://chatglm.cn/chatglm"
+# AgentMore（多 Agent 云端协作平台）独立域：走它的 agent 端点会真实扣清言积分。
+# 抓包实证：agentmore 的 /chatglm/agent-api/chat/stream 配 chat_mode=chat_agent
+# 单次短消息扣 95 分；而 chatglm.cn 的 /backend-api/assistant/stream（普通对话）
+# 连打 6 次扣 0。两者用同一套登录态（同一 refresh_token）。
+DEFAULT_AGENT_BASE_URL = "https://agentmore.chatglm.cn/chatglm"
 GUEST_REFRESH_TOKEN_MARKER = "__glm_guest__"
 DEFAULT_BLOCKED_TOOL_NAMES = ()
 BUILTIN_EXPOSED_MODELS = (
     "cogView-4-250304",
     "glm-5.3",
     "glm-5.3-flash",
+    "glm-5.3-agent",
+    "glm-5.3-flash-agent",
     "glm-5.2",
     "glm-5.1",
     "glm-5v-turbo",
@@ -48,6 +55,10 @@ BUILTIN_MODEL_ALIASES = {name: name for name in BUILTIN_EXPOSED_MODELS}
 # 网页/App 模型选择器当前只提供 GLM-5.3 与 GLM-Flash(=glm-5.3-flash) 两个值，
 # 其余模型名不携带该字段（走上游默认）。
 GLM_SELECTED_MODEL_SUPPORTED = frozenset({"glm-5.3", "glm-5.3-flash"})
+# 走 AgentMore agent 端点（扣积分）的模型名：glm-5.3-agent / glm-5.3-flash-agent。
+# 加 -agent 后缀而不是复用原名，是为了让「扣不扣积分」在模型名上显式可见，
+# 避免误用扣费通道。
+GLM_AGENT_MODEL_SUFFIX = "-agent"
 
 
 class ConfigError(ValueError):
@@ -145,6 +156,7 @@ class AppConfig:
     debug_dump_all: bool
     request_timeout: int
     glm_base_url: str
+    glm_agent_base_url: str
     glm_use_guest_refresh_token: bool
     glm_refresh_token: str
     glm_refresh_tokens: list[str]
@@ -153,6 +165,7 @@ class AppConfig:
     glm_image_model_name: str
     glm_user_agent: str
     glm_platform: str
+    glm_agent_model_suffix: str
     glm_selected_model_whitelist: frozenset[str]
     glm_delete_conversation: bool
     glm_max_concurrency: int
@@ -177,6 +190,10 @@ class AppConfig:
     @property
     def chat_stream_url(self) -> str:
         return f"{self.glm_base_url}/backend-api/assistant/stream"
+
+    @property
+    def agent_chat_stream_url(self) -> str:
+        return f"{self.glm_agent_base_url}/agent-api/chat/stream"
 
     @property
     def delete_conversation_url(self) -> str:
@@ -262,6 +279,7 @@ def load_config(env_file: str = ".env") -> AppConfig:
         debug_dump_all=debug_dump_all,
         request_timeout=parse_int(values.get("REQUEST_TIMEOUT_SECONDS"), 120),
         glm_base_url=values.get("GLM_BASE_URL", DEFAULT_GLM_BASE_URL).rstrip("/"),
+        glm_agent_base_url=values.get("GLM_AGENT_BASE_URL", DEFAULT_AGENT_BASE_URL).rstrip("/"),
         glm_use_guest_refresh_token=explicit_guest_mode,
         glm_refresh_token=single_refresh_token,
         glm_refresh_tokens=refresh_tokens,
@@ -276,6 +294,7 @@ def load_config(env_file: str = ".env") -> AppConfig:
             ),
         ).strip(),
         glm_platform=(values.get("GLM_PLATFORM", "mac").strip() or "mac"),
+        glm_agent_model_suffix=GLM_AGENT_MODEL_SUFFIX,
         glm_selected_model_whitelist=GLM_SELECTED_MODEL_SUPPORTED,
         glm_delete_conversation=parse_bool(values.get("GLM_DELETE_CONVERSATION"), True),
         glm_max_concurrency=glm_max_concurrency,
