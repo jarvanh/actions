@@ -2,9 +2,10 @@
 # ===== OpenList 同步工具 — 一键还原 try run（只读预演）=====
 #
 # 为什么要有它: 一键还原（file_restore.sh 的 restore_fixed_files）是**写操作** ——
-#   move 类会用 rclone moveto 在目标端把替代文件真的搬回原路径，分卷类会下载合卷
-#   解压再 copyto 回原路径并删除目标端分卷。真跑之前只能"读 marker 脑补"，
-#   脑补错了的代价是**目标端文件被搬到错位置**（且短哈希不可逆，搬错就再也回不去）。
+#   move 类会用 rclone copyto 把替代文件复制回原路径并**保留副本**，分卷类会下载合卷
+#   解压再 copyto 回原路径并保留分卷（2026-09-26 起一律保留备份副本）。真跑之前只能
+#   "读 marker 脑补"，脑补错了的代价是**目标端文件被搬到错位置**（且短哈希不可逆，
+#   搬错就再也回不去）。
 #   本模块按与生产**同源**的路径推导（dest_path + alternative/original + 同一个
 #   分类函数），把每一条会怎么走算出来并给出完整路径，**一个字节都不写**。
 #
@@ -35,7 +36,9 @@
 #   TRYRUN_SINCE=<UTC 时间下界，如 2026-09-19T11:03:00 或 2026-09-19>
 #       只预演**该时刻之后**产生的 marker。为什么需要**绝对**下界而不是只靠
 #       WITHIN_DAYS: 判定"新旧 marker 是否兼容"要看**语义变更提交**的那个时间点
-#       （最近一次改写 marker 语义的是 e90118e，2026-09-19T11:03:00Z，move→moveto），
+#       （最近一次改写 marker 语义的是 e90118e，2026-09-19T11:03:00Z，move→moveto；
+#        2026-09-26 起改 copyto **保留备份副本** —— 此后还原不再删副本，故
+#        「备份缺失」的后续增量会显著下降，跨该日的对比要把口径差算进去），
 #       而"最近 3 天"是相对天数，会把该时刻**之前**的旧语义 marker 一起放进来
 #       ⇒ 结论样本不纯。绝对下界才能切出"全都是新语义写的"这一批。
 #       与 WITHIN_DAYS 同时给时取**更严**（两个下界都满足才放行）。
@@ -333,9 +336,11 @@ _tryr_plan_one() {
     exec_path="${orig_full}"
     exec_cmd="（无需还原: 原路径原文件名，生产仅校验存在）"
   elif [ "$kind" = "move" ]; then
-    # 必须 moveto（dst 被 move 当目录 → 会建出以目标文件名命名的目录，见 file_restore.sh）
+    # 必须 copyto（dst 被 copy/move 当目录 → 会建出以目标文件名命名的目录）。
+    # ⚠️ 2026-09-26 起生产由 moveto 改为 copyto（**保留备份副本**，见 file_restore.sh）:
+    #   预演命令必须与真实执行一致，否则预演就是在撒谎（用户明确要求二者一致）。
     exec_path="${orig_full}"
-    exec_cmd="rclone moveto \"${backup}\" \"${orig_full}\""
+    exec_cmd="rclone copyto \"${backup}\" \"${orig_full}\"（保留备份副本）"
   else
     exec_path="${orig_full}"
     exec_cmd="下载分卷 ${dest}$(_tryr_split_glob "$alt") → cat 合并 → 7z x → rclone copyto <产物> \"${orig_full}\""
@@ -933,7 +938,9 @@ restore_try_run() {
       fi
     fi
     if [ "$TRYRUN_ORIG_RECHECK_TOTAL" -gt 0 ] && [ "$TRYRUN_ORIG_FLIPPED" -gt 0 ]; then
-      tg_add_kv msg "同名占用" "复查发现 ${TRYRUN_ORIG_FLIPPED} 份的目标位置已被同名文件占位，真跑恢复前需先处理"
+      # 2026-09-26 起: 真跑对"同名"不再一律报需处理 —— 同名**且同大小**的自动判已还原
+      # 并出账；只有大小不符才停下等人确认（不覆盖，见 file_restore.sh）。
+      tg_add_kv msg "同名占用" "复查发现 ${TRYRUN_ORIG_FLIPPED} 份的目标位置已被同名文件占位；真跑时同名同大小自动判已还原，大小不符才停下待确认"
     fi
     # ⚠️ 通知**只发摘要**，不列条目清单: 4684 条全塞进去会被切成 97 个分片，
     #   Telegram 限速下光发送就要 5 分钟，把整轮拖过 40 分钟 timeout 被取消

@@ -33,7 +33,7 @@
 # 中断后重跑不会重复处理。全部完成后发送 Telegram 汇总。
 #
 # 读取侧: 从 marker 载入的 alternative 一律先过 _norm_rel_path——存量条目可能带
-# `./` 污染段，不归一化则 moveto 源路径取不到、排除规则失配（替代形态漏排进
+# `./` 污染段，不归一化则 copyto 源路径取不到、排除规则失配（替代形态漏排进
 # 批量拷回污染源端），见 _norm_rel_path 头注释。
 #
 # 注意: 还原 = 把文件放回目标端原路径。若后端对该路径仍无法持久化（假成功），
@@ -133,23 +133,7 @@ _dst_file_bytes() {
   case "$b" in ''|*[!0-9]*) echo "" ;; *) echo "$b" ;; esac
 }
 
-# 还原成功后清理目标端分卷（删除该前缀的全部卷）
-# 用法: _restore_cleanup_alternative <alt_base> <alt>
-_restore_cleanup_alternative() {
-  local alt_base="$1" alt="$2"
-  local rflags=("${RCLONE_RETRY_FLAGS[@]}" --timeout 15m)
-  local alt_dir prefix parts_regex p
-  alt_dir="$(dirname "$alt")"
-  prefix="$(basename "$alt")"
-  prefix="${prefix%.*}"
-  parts_regex="^$(printf '%s' "$prefix" | sed 's/[.]/\\./g')\.[0-9]{3}$"
-  while IFS= read -r p; do
-    [ -z "$p" ] && continue
-    rclone deletefile "${alt_base}/${alt_dir}/${p}" "${rflags[@]}" >/dev/null 2>&1 || true
-  done < <(rclone lsf "${alt_base}/${alt_dir}" --files-only --retries 1 2>/dev/null | grep -E "$parts_regex")
-}
-
-# 还原单个条目（内部函数，输出一行状态: OK 或 FAIL: <原因>）
+# 还原单个条目（内部函数，输出一行状态: OK / SKIP / FAIL: <原因>）
 # 用法: _restore_one_entry <dest_path> <orig> <alt> <method> <tmp_base> [md5] [expect_bytes]
 #   expect_bytes: marker 记录的 size_bytes，用于「原路径已存在」分支的同大小判定；
 #                 不给或为空则该分支降级为"跳过并报需人工"（绝不覆盖）
@@ -293,9 +277,6 @@ restore_fixed_files() {
     return 0
   fi
 
-  local total_ok=0 total_fail=0
-  local ok_list="" fail_list=""
-
   for m in $markers; do
     [[ "$m" == *.json ]] || continue
     task="${m%%_*}"
@@ -314,11 +295,15 @@ restore_fixed_files() {
 
     echo "--- marker: ${m} (dest=${dest}, 待还原 ${count} 条) ---"
 
-    while IFS=$'\t' read -r orig alt method fmd5 size_bytes; do
+    # ⚠️ 分隔符必须用非空白 \x01 而不是 @tsv 的 TAB: IFS 含空白字符时，连续分隔符
+    #   会被合并、空字段被吞 —— marker 无 md5（常见）时第 4 位为空，会把 size_bytes
+    #   错位到 md5 位，导致"期望大小未知"而把「同名同大小」误判成 SKIP（假阴性）。
+    #   非空白分隔符不合并连续分隔符，空字段得以保留。
+    while IFS=$'\x01' read -r orig alt method fmd5 size_bytes; do
       [ -z "$orig" ] && continue
       [ "$alt" = "null" ] || [ -z "$alt" ] && alt="$orig"
       # 存量 marker 可能带 `./` 污染段（读取侧归一化，见 _norm_rel_path）:
-      #   moveto 源路径带污染段必取空
+      #   copyto 源路径带污染段必取空
       alt=$(_norm_rel_path "$alt")
 
       echo "还原中: ${orig} ← ${alt} [${method}]"
@@ -329,7 +314,12 @@ restore_fixed_files() {
       #   但它留在 marker 里会让每次预演都报「备份缺失」，把历史残渣伪装成当前风险。
       #   安全门 = 源端: 源端还在 ⇒ 数据没丢，只是目标端副本没了 → 出账；
       #   源端也不在 ⇒ 这是**真风险**（两端都没了），保留条目并告警，绝不出账。
-      if [ "$alt" != "$orig" ] && ! _dst_file_exists "${dest}/${alt}"; then
+      #   ⚠️ 判据必须**双判据**（§0 纪律: 凡以列列举为准的判据都要用直读交叉验证）:
+      #   列列举说不在 **且** 直读 stat 也取不到，才认"副本不存在"。若只信列列举，
+      #   一次列表假阴就会把"副本其实还在"的记录当失效删掉——出账不可逆，而短哈希
+      #   不可逆 ⇒ 删了这条就再没有任何东西能证明它该怎么还原。
+      if [ "$alt" != "$orig" ] && ! _dst_file_exists "${dest}/${alt}" \
+         && [ -z "$(_dst_file_bytes "${dest}/${alt}")" ]; then
         local src_at="${src:-}"
         if [ -n "$src_at" ] && _dst_file_exists "${src_at}/${orig}"; then
           echo "  → 替代副本已不存在，源端仍在 ⇒ 判定已失效，出账"
@@ -363,7 +353,7 @@ restore_fixed_files() {
         total_fail=$((total_fail + 1))
         tg_add_entry fail_list "$orig" "${status#FAIL: }"
       fi
-    done < <(echo "$json" | jq -r '(.fixed_files // [])[] | [.original, .alternative, .method, (.md5 // ""), (.size_bytes // "")] | @tsv' 2>/dev/null)
+    done < <(echo "$json" | jq -r '(.fixed_files // [])[] | [.original, .alternative, .method, (.md5 // ""), ((.size_bytes // "") | tostring)] | join("\u0001")' 2>/dev/null)
   done
 
   rm -rf "$tmp_base"
@@ -600,7 +590,7 @@ restore_source_from_target() {
       [ -z "$line_orig" ] && continue
       [ "$line_alt" = "null" ] || [ -z "$line_alt" ] && continue
       # 排除规则与逐条还原都用归一化后的路径: 带 `./` 段的规则匹配不上实际落点，
-      #   替代形态会漏排进批量拷贝污染源端；还原 moveto 同样会取空
+      #   替代形态会漏排进批量拷贝污染源端；还原 copyto 同样会取空
       line_alt=$(_norm_rel_path "$line_alt")
       [ "$line_alt" = "$line_orig" ] && continue
       if echo "$line_alt" | grep -qE '\.zip\.[0-9]{3}$'; then

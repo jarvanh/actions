@@ -1,7 +1,8 @@
 #!/bin/bash
 # 一键还原 try run（restore_tryrun.sh）—— 行为验证（mock rclone，不联网、不碰真远端）
 #
-# 为什么测这个: 一键还原是**写操作**（moveto 改目标端 / 分卷下载合卷后 copyto + 删分卷），
+# 为什么测这个: 一键还原是**写操作**（改名类 copyto 复制到原路径并保留副本 /
+#   分卷下载合卷后 copyto + 保留分卷，2026-09-26 起一律保留备份副本），
 #   try run 存在的唯一意义就是"真跑之前先看清会怎么走，且绝不写"。这两条**都不能靠自觉**:
 #     1. 三条路径推导错了 ⇒ 预演给出错误的落点，反而诱导一次错误真跑
 #     2. try run 里混进了写命令 ⇒ "预演"直接改了数据，比不预演更糟
@@ -160,9 +161,10 @@ grep -qF "openlist:wopan176Crypt/0/deadbeef/b.mp4" "$LOG" \
 # ② marker 记录的原文件 = dest/original
 grep -qF "openlist:wopan176Crypt/0/a/b.mp4" "$LOG" \
   && ok "1d ② 原文件 = <dest>/<original>" || bad "1d ② 原文件 = <dest>/<original>"
-# ③ 实际执行还原 = moveto 的 dst（必须是 moveto，不是 move —— move 会把 dst 当目录）
-grep -qE '将执行: rclone moveto "openlist:wopan176Crypt/0/deadbeef/b.mp4" "openlist:wopan176Crypt/0/a/b\.mp4"' "$LOG" \
-  && ok "1e ③ 实际执行 = moveto 到原路径（非 move）" || bad "1e ③ 实际执行 = moveto 到原路径"
+# ③ 实际执行还原 = copyto 到原路径（必须是 copyto，不是 copy/move —— 后者会把 dst
+#   当目录；2026-09-26 起由 moveto 改 copyto 以**保留备份副本**）
+grep -qE '将执行: rclone copyto "openlist:wopan176Crypt/0/deadbeef/b.mp4" "openlist:wopan176Crypt/0/a/b\.mp4"' "$LOG" \
+  && ok "1e ③ 实际执行 = copyto 到原路径（保留副本，非 copy/move）" || bad "1e ③ 实际执行 = copyto 到原路径"
 # ④ 源端原路径（灾难恢复口径）
 grep -qF "onedrive:0/a/b.mp4" "$LOG" \
   && ok "1f ④ 源端原路径 = <source_path>/<original>" || bad "1f ④ 源端原路径"
