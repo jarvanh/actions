@@ -347,16 +347,29 @@ workflow 的 `run_mode` 单选互斥：
 |---|---|
 | `同步` | 预览（可 `skip_preview` 跳过）→ 全量同步 |
 | `调试 · 修复管线测试` | 只跑指定任务的修复管线 |
-| `⚠️ 还原 · 修复文件还原为原路径` | `restore_fixed_files`（改名类走 `rclone moveto`：**必须**用 moveto，move 会把 dst 当目录、建出以目标文件名命名的目录） |
+| `⚠️ 还原 · 修复文件还原为原路径` | `restore_fixed_files`（改名类走 `rclone copyto`：**保留目标端备份副本**；必须用 copyto/moveto 而非 copy/move —— 后者的 dst 会被当目录、建出以目标文件名命名的目录）。**须先填 `verify_run_id`**（见下）|
 | `⚠️ 灾难恢复 · 目标端→源端` | `restore_source_from_target`（非破坏性） |
 | `⚠️ 灾难恢复 · 目标端→源端（删除源端多余文件）` | `rebuild_source_from_target`（**破坏性**） |
 
 带 ⚠️ 的三项会改写目标端或回传/删改源端，运行前核对 `restore_task` 任务名。
 
-### 一键还原 try run（只读预演）
+### 一键还原 try run（只读预演）+ 真还原门禁
 
 真跑「⚠️ 还原」之前先看一眼会怎么走，走 **`openlist-restore-tryrun.yml`**（独立 workflow，
-独立 concurrency，**一个字节都不写**）。全量核对（`check_exists=是`）实测约 40 分钟
+独立 concurrency，**一个字节都不写**）。
+
+> **门禁（2026-09-26 起）**: 生产「⚠️ 还原」模式强制要求先跑一次本预演并通过 ——
+> 填 `verify_run_id` = 那次 try run 的 run id。门禁校验 ①该 run 属于本 workflow
+> ②`conclusion=success` ③在 24h 内（可调 `vars.OPENLIST_RESTORE_VERIFY_MAX_AGE_HOURS`）。
+> 任一不满足 ⇒ step 失败并回打复制即用的预演命令，还原**不会**执行。
+>
+> ```bash
+> gh workflow run openlist-restore-tryrun.yml -f task=<任务名>
+> gh run list --workflow=openlist-restore-tryrun.yml --limit 1 --json databaseId,conclusion
+> # 取 id 填 verify_run_id 后再跑还原
+> ```
+
+全量核对（`check_exists=是`）实测约 40 分钟
 （4684 条 × 逐条真实远端列举 ≈ 0.48s/条），故 job 上限给到 300 分钟；`check_exists=否` 时
 不拉容器、纯 marker 推导，分钟级。逐条给出三条完整路径 + 一条交叉核对路径：
 
@@ -364,7 +377,7 @@ workflow 的 `run_mode` 单选互斥：
 |---|---|
 | ① 备份文件（目标端现存形态） | `<dest_path>/<alternative>` |
 | ② marker 记录的原文件 | `<dest_path>/<original>` |
-| ③ 实际执行还原的完整路径 | move 类 = `rclone moveto` 的 dst（= ②）；分卷类 = 本地合卷解压产物 `copyto` 的 dst（= ②）；`alt==orig` 记为 noop（只校验存在，不搬） |
+| ③ 实际执行还原的完整路径 | move 类 = `rclone copyto` 的 dst（= ②，**副本保留**）；分卷类 = 本地合卷解压产物 `copyto` 的 dst（= ②）；`alt==orig` 记为 noop（只校验存在，不搬） |
 | ④ 源端原路径（灾难恢复口径） | `<source_path>/<original>` |
 
 另核对「备份文件在不在 / 原路径是否已存在」。**两个"在不在"都各走两条判据**：列列举
@@ -400,7 +413,8 @@ workflow 的 `run_mode` 单选互斥：
 **绝对下界（入参 `since`）**：`YYYY-MM-DD` 或 `YYYY-MM-DDTHH:MM:SS`（UTC），只看该时刻
 **之后**产生的 marker。为什么 `within_days` 不够：判「新旧 marker 是否不兼容」要切出
 **全都是新语义写的**那一批，而语义变更是一个**时刻**（最近一次改写 marker 语义的是
-`e90118e` 2026-09-19T11:03:00Z，还原命令 `move`→`moveto`；更早 `137c005` 2026-09-16
+`e90118e` 2026-09-19T11:03:00Z，还原命令 `move`→`moveto`；**其后 2026-09-26 再改为 `copyto`
+（保留备份副本，`b164345`）**，故判"当前语义"的下界应取 2026-09-26 那次；更早 `137c005` 2026-09-16
 统一方法命名），相对天数会把该时刻**之前**的旧语义 marker 一起放进来 ⇒ 样本不纯、结论不可判。
 与 `within_days` 同时给时**取更严者**（两个下界都满足才放行）；解析不出格式 ⇒ 大声告警并
 **回落全量**（宁可多跑，也不假装筛过）。报告头与汇总行都会打印「绝对下界」与
