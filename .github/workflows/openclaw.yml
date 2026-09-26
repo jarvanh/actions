@@ -2413,10 +2413,24 @@ jobs:
           z2a_body_ok() {
             echo "$1" | jq -e '(.content // [] | length) > 0' >/dev/null 2>&1
           }
+          # 失败分诊：自检不通不等于服务没起来。上游额度耗尽时网关照样回 HTTP 200，
+          # 只是没有 content 块（实测 {"code":1005,"msg":"exceed quota limit"}），
+          # 与「进程没起来 / 端口没人听」是完全两种事，不该共用红色「启动失败」告警。
+          # 返回：quota=上游额度/余额类（服务本体健康）· channel=回退通道被关 ·
+          # captcha=验证码 · auth=鉴权 · unknown=其他（按真失败处理）
+          z2a_fail_class() {
+            printf '%s' "$1" | jq -e '.code == 1005 or ((.msg // "") | test("quota|余额|insufficient|1113"; "i"))' >/dev/null 2>&1 && { echo quota; return; }
+            printf '%s' "$1" | jq -e '.error.type == "channel_disabled"' >/dev/null 2>&1 && { echo channel; return; }
+            printf '%s' "$1" | jq -e '.error.type == "captcha_error"' >/dev/null 2>&1 && { echo captcha; return; }
+            printf '%s' "$1" | jq -e '.error.type | test("auth|invalid_request|unauthorized"; "i")' >/dev/null 2>&1 && { echo auth; return; }
+            echo unknown
+          }
           z2a_selftest() {
             Z2A_SELFTEST_OUT=""
             Z2A_SELFTEST_MODEL=""
             Z2A_PLAN_BAD=0
+            Z2A_FAIL_CLASS=""
+            Z2A_MAIN_CLASS=""
             for _ in 1 2 3; do
               Z2A_SELFTEST_OUT="$(z2a_probe '{"model":"glm-5.3-flash","max_tokens":16,"messages":[{"role":"user","content":"回复 ok 即可"}]}')"
               if z2a_body_ok "$Z2A_SELFTEST_OUT"; then
@@ -2427,11 +2441,22 @@ jobs:
               echo "$Z2A_SELFTEST_OUT" | jq -e '.error.type == "captcha_error"' >/dev/null 2>&1 || break
               sleep 5
             done
+            # 主通道失败原因先落袋：兜底探会覆盖 Z2A_SELFTEST_OUT，若只在最后
+            # 分诊，主通道的额度耗尽会被兜底的 channel_disabled 顶掉 —— 于是通知
+            # 让人去开回退通道，而该通道实测上游同样欠费（429 code 1113），白折腾。
+            Z2A_MAIN_CLASS="$(z2a_fail_class "$Z2A_SELFTEST_OUT")"
             Z2A_PLAN_BAD=1
             Z2A_SELFTEST_OUT="$(z2a_probe '{"model":"bigmodel/GLM-5.3","max_tokens":16,"messages":[{"role":"user","content":"回复 ok 即可"}]}')"
             if z2a_body_ok "$Z2A_SELFTEST_OUT"; then
               Z2A_SELFTEST_MODEL="$(printf '%s' "$Z2A_SELFTEST_OUT" | jq -r '.model // "未知"' 2>/dev/null || true)"
               return 0
+            fi
+            # 两条通道都没出内容：以主通道原因为准（它才是服务设计上该走的通道），
+            # 主通道归因不明时才退回兜底原因，供通知层区分「降级」与「真挂了」
+            if [ -n "$Z2A_MAIN_CLASS" ] && [ "$Z2A_MAIN_CLASS" != unknown ]; then
+              Z2A_FAIL_CLASS="$Z2A_MAIN_CLASS"
+            else
+              Z2A_FAIL_CLASS="$(z2a_fail_class "$Z2A_SELFTEST_OUT")"
             fi
             return 1
           }
@@ -2592,8 +2617,28 @@ jobs:
             printf '%s\n' "${Z2A_TAIL:-<empty>}"
             echo "--- end zcode2api.log tail ---"
             _m=""
-            tg_add_title _m "❌ zcode2api 启动失败"
-            tg_add_kv _m "结论" "未就绪"
+            # 失败分诊：服务已监听但自检不出内容时，先分清是「上游额度/通道问题」
+            # 还是「服务真没起来」。前者服务本体健康（/v1/models 带 key 回 200），
+            # 只是无额度可用 —— 用黄色「已就绪（额度耗尽）」，不用红色「启动失败」：
+            # 红色会让人去查进程/端口，实际该做的是等额度重置或换账号，方向完全不同。
+            case "$Z2A_FAIL_CLASS" in
+              quota)
+                tg_add_title _m "🟡 zcode2api 已就绪 · 全部通道额度耗尽"
+                tg_add_kv _m "结论" "服务正常，上游无可用额度（非启动故障）"
+                ;;
+              channel)
+                tg_add_title _m "🟡 zcode2api 已就绪 · 回退通道已关闭"
+                tg_add_kv _m "结论" "服务正常，bigmodel 回退通道被关（后台「设置」可开）"
+                ;;
+              auth)
+                tg_add_title _m "🟠 zcode2api 鉴权失败"
+                tg_add_kv _m "结论" "网关 Key / 上游鉴权不符，需人工介入"
+                ;;
+              *)
+                tg_add_title _m "❌ zcode2api 启动失败"
+                tg_add_kv _m "结论" "未就绪"
+                ;;
+            esac
             tg_add_path _m "端口" "$Z2A_PORT"
             tg_add_kv _m "原因" "$Z2A_REASON"
             tg_add_path _m "代码" "$Z2A_REPO"
