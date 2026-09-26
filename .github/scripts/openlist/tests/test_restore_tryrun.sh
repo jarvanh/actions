@@ -360,8 +360,10 @@ TRYRUN_SEND_TG=1 TRYRUN_WORK="$BIG" restore_try_run task0 > "$BIG/stdout.txt" 2>
 MSG_LEN=${#TG_CAPTURE}
 [ "$MSG_LEN" -lt 4000 ] && ok "10a 通知单条不分片（${MSG_LEN} 字符 < 4000）" \
   || bad "10a 通知单条不分片（${MSG_LEN} 字符 ≥ 4000 ⇒ 会分片拖垮整轮）"
-printf '%s' "$TG_CAPTURE" | grep -q "备份缺失" && ok "10b 摘要含备份缺失计数" || bad "10b 摘要含备份缺失计数"
-printf '%s' "$TG_CAPTURE" | grep -q "备份在" && ok "10c 摘要含备份在计数" || bad "10c 摘要含备份在计数"
+# 2026-09-26 通知说人话改版（规范 · 1.5）: 断言跟随新标签
+#   "备份在"→"备份完好"；"备份缺失"→"网盘上找不到备份副本"
+printf '%s' "$TG_CAPTURE" | grep -q "找不到备份副本" && ok "10b 摘要含缺失计数（人话标签）" || bad "10b 摘要含缺失计数（人话标签）"
+printf '%s' "$TG_CAPTURE" | grep -q "备份完好" && ok "10c 摘要含完好计数（人话标签）" || bad "10c 摘要含完好计数（人话标签）"
 printf '%s' "$TG_CAPTURE" | grep -q "运行日志" && ok "10d 收尾区完整" || bad "10d 收尾区完整"
 # 条目数只作为 kv 呈现，不得出现逐条树形清单
 ENTRY_LINES=$(printf '%s' "$TG_CAPTURE" | grep -cE '^├─|^└─' || true)

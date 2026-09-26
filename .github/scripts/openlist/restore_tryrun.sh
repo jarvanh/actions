@@ -890,57 +890,66 @@ restore_try_run() {
   _tryr_log "  ✅ 全程只读: 未写入/移动/删除任何源端与目标端数据"
 
   # ---- Telegram 汇总 ----
+  # 说人话原则（规范 · 1.5）: 这条通知的读者不是实现者 —— 读者做判断用的字段全部
+  #   用日常说法；实现层术语（move/noop/split 分类、marker、翻案、Q3、artifact）
+  #   留在运行日志与 tryrun.tsv。翻译的是词，不是口径：数字与条件分支原样保留。
   if [ "${TRYRUN_SEND_TG:-1}" = "1" ]; then
     local msg=""
-    tg_add_title msg "🧪 一键还原 try run（只读预演）"
-    tg_add_kv msg "模式" "只读预演 · 未修改任何数据"
-    tg_add_kv msg "任务过滤" "${task_filter}"
-    # 时间窗必须进通知: 不看它，"缺失 30"和"缺失 777"会被当成同一个问题的两种结论，
-    # 实际只是样本从 5194 缩到了最近 3 天
-    if [ "$cutoff" -gt 0 ]; then
-      # 生效下界要连时刻一起给: "最近 3 天"是相对的，看通知的人无法据此判断
-      # "这批是不是都在某次语义变更之后写的"，而这正是结论可不可比的关键（§15.2）
-      tg_add_kv msg "时间窗" "最近 ${within_days} 天 · 下界 $(printf '%(%Y-%m-%d %H:%M:%S)T' "$cutoff") UTC（跳过超窗 ${skipped_old} 个 marker）"
-      [ -n "$since_raw" ] && tg_add_kv msg "绝对下界" "${since_raw}"
+    tg_add_title msg "🧪 备份恢复演练完成（只读 · 未改动任何文件）"
+    if [ "$task_filter" = "all" ]; then
+      tg_add_kv msg "检查范围" "全部任务 · ${total} 份备份记录"
+    else
+      tg_add_kv msg "检查范围" "任务 ${task_filter} · ${total} 份备份记录"
     fi
-    [ "$ts_fallback" -eq 1 ] && tg_add_kv msg "时间窗" "❌ 未生效（取不到 ModTime）⇒ 回落全量"
-    tg_add_kv msg "预演条目" "${total} 个"
-    local kinds="" k
-    for k in $(printf '%s\n' "${!TRYRUN_KIND_COUNT[@]}" | sort); do
-      kinds+="${k} ${TRYRUN_KIND_COUNT[$k]} · "
-    done
-    [ -n "$kinds" ] && tg_add_kv msg "分类" "${kinds% · }"
-    tg_add_kv msg "备份缺失" "${TRYRUN_MISSING} 个"
-    [ "$TRYRUN_UNVERIFIED" -gt 0 ] && tg_add_kv msg "存在性未核对" "${TRYRUN_UNVERIFIED} 个"
+    # 时间窗决定样本大小，缺了它 "缺失 30" 和 "缺失 777" 会被当成同一个问题
+    if [ "$cutoff" -gt 0 ]; then
+      tg_add_kv msg "时间范围" "最近 ${within_days} 天（跳过超窗 ${skipped_old} 份）"
+      [ -n "$since_raw" ] && tg_add_kv msg "时间下界" "${since_raw}"
+    fi
+    [ "$ts_fallback" -eq 1 ] && tg_add_kv msg "时间范围" "❌ 未生效（取不到文件时间）⇒ 已回退为全部"
     if [ "${TRYRUN_CHECK_EXISTS:-1}" = "1" ] && [ "$total" -gt 0 ]; then
-      # 核对模式下这几个占比才是"真跑会发生什么"的摘要，比列文件名有用
-      tg_add_kv msg "备份在" "${TRYRUN_PRESENT} 个"
-      tg_add_kv msg "原路径已存在" "${TRYRUN_ORIG_EXISTS} 个"
+      # 核对模式下这三个数就是"真跑恢复会发生什么"的摘要，比列文件名有用
+      tg_add_kv msg "备份完好" "${TRYRUN_PRESENT} 份"
+      tg_add_kv msg "网盘上找不到备份副本" "${TRYRUN_MISSING} 份"
+      tg_add_kv msg "目标位置已有同名文件" "${TRYRUN_ORIG_EXISTS} 份"
+    else
+      tg_add_kv msg "网盘上找不到备份副本" "${TRYRUN_MISSING} 份"
+    fi
+    [ "$TRYRUN_UNVERIFIED" -gt 0 ] && tg_add_kv msg "未能核对" "${TRYRUN_UNVERIFIED} 份（目标端当时读不了）"
+    if [ "$TRYRUN_RECHECK_TOTAL" -gt 0 ]; then
+      # 复核给"缺失"这个数字背书: 更正多 ⇒ 目录清单不可信，缺失数是虚高
+      if [ "$TRYRUN_RECHECK_FLIPPED" -eq 0 ]; then
+        tg_add_kv msg "复核" "${TRYRUN_RECHECK_TOTAL} 份缺失已逐条复查，全部属实"
+      else
+        tg_add_kv msg "复核" "初次清点有误差，复查后更正 ${TRYRUN_RECHECK_FLIPPED} 份"
+      fi
+    fi
+    # 最关键的结论单独成行: 缺备份 ≠ 丢文件，这两件事读者最容易混
+    if [ "$TRYRUN_SRC_CHECKED" -gt 0 ]; then
+      if [ "$TRYRUN_SRC_MISSING" -eq 0 ]; then
+        tg_add_kv msg "原件核对" "✅ 缺备份的 ${TRYRUN_SRC_CHECKED} 份，源盘原件全部健在，没有丢失风险"
+      else
+        tg_add_kv msg "原件核对" "⚠️ ${TRYRUN_SRC_MISSING} 份连源盘原件也不在了（清单见运行日志）"
+      fi
+    fi
+    if [ "$TRYRUN_ORIG_RECHECK_TOTAL" -gt 0 ] && [ "$TRYRUN_ORIG_FLIPPED" -gt 0 ]; then
+      tg_add_kv msg "同名占用" "复查发现 ${TRYRUN_ORIG_FLIPPED} 份的目标位置已被同名文件占位，真跑恢复前需先处理"
     fi
     # ⚠️ 通知**只发摘要**，不列条目清单: 4684 条全塞进去会被切成 97 个分片，
     #   Telegram 限速下光发送就要 5 分钟，把整轮拖过 40 分钟 timeout 被取消
     #   （run 35478771033 实测: 预演本身跑完了，死在发通知上）。
-    #   三条完整路径属于"要看再取"的细节 → 交给 artifact（tryrun.tsv）+ run 日志。
-    #   条目数只作为一行 kv 呈现，不做树形清单。
-    if [ "$TRYRUN_RECHECK_TOTAL" -gt 0 ]; then
-      # 直读复核对"备份缺失"这个结论本身定性: 翻案多 ⇒ 列列举不可信，缺失数是虚高
-      tg_add_kv msg "直读复核" "${TRYRUN_RECHECK_TOTAL} 条中翻案 ${TRYRUN_RECHECK_FLIPPED} 条"
-    fi
-    [ "$TRYRUN_ORIG_RECHECK_TOTAL" -gt 0 ] && tg_add_kv msg "直读复核（原路径）" \
-      "${TRYRUN_ORIG_RECHECK_TOTAL} 条中翻案 ${TRYRUN_ORIG_FLIPPED} 条"
-    [ "$TRYRUN_SRC_CHECKED" -gt 0 ] && tg_add_kv msg "源端原路径（Q3）" \
-      "${TRYRUN_SRC_CHECKED} 条中源端不在 ${TRYRUN_SRC_MISSING} 条"
+    #   逐条明细属于"要看再取"的细节 → 交给附件（tryrun.tsv）+ run 日志。
     if [ "$TRYRUN_MISSING" -gt 0 ]; then
-      # 缺失清单同样限量（8 条）—— 它才是真跑会 FAIL 的部分，但 777 条全列依旧会爆
-      tg_add_section msg "⚠️ 备份缺失 · ${TRYRUN_MISSING}"
+      # 缺失清单同样限量（8 条）—— 它才是真跑会失败的部分，但 777 条全列依旧会爆
+      tg_add_section msg "⚠️ 网盘上找不到备份副本 · ${TRYRUN_MISSING}"
       tg_add_block msg "$(tree_fold "$TRYRUN_MISSING_LIST" 8)"
-      tg_add_note msg "目标端找不到替代文件，真跑会判 FAIL（条目保留在 marker，不会丢）"
+      tg_add_note msg "这批真跑恢复会失败（网盘上没有备份副本）；源盘原件都还在，备份记录也不会丢。"
     fi
-    tg_add_note msg "三条完整路径（① 备份 / ② marker 原文件 / ③ 实际落点）见 artifact tryrun.tsv 与 run 日志。"
+    tg_add_note msg "每份文件的详细去向清单见本次运行的附件（tryrun.tsv）与运行日志。"
     if [ "$TRYRUN_UNVERIFIED" -gt 0 ]; then
-      tg_add_note msg "存在性未核对 ${TRYRUN_UNVERIFIED} 条: 目标端不可读（多为容器未拉起），三条路径仍准确但'在不在'未验证"
+      tg_add_note msg "有 ${TRYRUN_UNVERIFIED} 份当时读不了目标端（多为容器未拉起）：去向清单仍准确，只是\"在不在\"没核对上"
     fi
-    tg_add_note msg "try run 全程只读（lsf/cat/size），源端与目标端均未改动。"
+    tg_add_note msg "本次演练全程只读（仅查看，不含移动/写入/删除），源盘与网盘均未改动。"
     tg_add_footer msg
     send_telegram_message "$msg"
   fi
