@@ -155,6 +155,9 @@ if _marker_write '{"a":1}' "onedrive:/x.json" >/dev/null 2>&1; then ok "7d 合�
 #     分卷·编码类放过 / 未对齐照旧继承 / size_bytes 缺失放过 / 开关可关。
 echo 0 > "$RCAT_N"; : > "$RCAP_FILE"
 DELFILE=$(mktemp); : > "$DELFILE"
+# mock rclone 是被**子进程/子 shell**调用的 ⇒ 必须 export，否则子 shell 里
+# DELFILE 为空、删除记录落到空路径，断言恒绿（假绿）
+export DELFILE
 rclone() {
   case "$1" in
     cat) cat "$MARKER_FILE" ;;
@@ -173,7 +176,10 @@ rclone() {
   esac
 }
 M8='{"fixed_files":[{"original":"sz123/a.flac","alternative":"sz123/sh1.flac","size_bytes":123},{"original":"sz456/b.flac","alternative":"sz123/sh2.flac","size_bytes":999},{"original":"sz123/c.zip","alternative":"sz123/sh3.zip.001","size_bytes":123},{"original":"sz123/d.enc","alternative":"sz123/sh4.enc","size_bytes":123},{"original":"sz123/e.flac","alternative":"./sz123/sh5.flac","size_bytes":123},{"original":"sz123/f.flac","alternative":"sz123/sh6.flac","size_bytes":0},{"original":"nomatch/g.flac","alternative":"nomatch/sh7.flac","size_bytes":1}]}'
-CARRY8=$(_carry_forward_fixed "openlist:dst" "$M8")
+# ⚠️ 2026-09-26 起默认**不删**（保留备份副本，与还原 copyto 同决策）⇒ 本组必须
+#   显式打开开关才测得到删除路径；否则测的是"默认保留"的存量行为，删不删都绿。
+#   另加 8i/8j: 默认（开关不动）下 deleted 必须为 0 —— 锁住"同步轮不再删副本"。
+CARRY8=$(OPENLIST_CARRY_DELETE_ALIGNED=1 _carry_forward_fixed "openlist:dst" "$M8")
 CAR8=$(echo "$CARRY8" | jq -c '.carried')
 [ "$(echo "$CARRY8" | jq -r '.deleted')" = "2" ] && ok "8a 已对齐且 size 一致 ⇒ 删除 2 个替代形态" || bad "8a: deleted=$(echo "$CARRY8" | jq -r '.deleted')"
 grep -qF "openlist:dst/sz123/sh1.flac" "$DELFILE" && ok "8b 短名 sh1 被删（精确 deletefile）" || bad "8b: $(cat "$DELFILE")"
@@ -186,6 +192,14 @@ grep -qF "sh6" "$DELFILE" && bad "8h size_bytes 缺失 ⇒ 不删" || ok "8h siz
 : > "$DELFILE"
 OPENLIST_CARRY_DELETE_ALIGNED=0 _carry_forward_fixed "openlist:dst" "$M8" >/dev/null
 [ ! -s "$DELFILE" ] && ok "8i 开关=0 ⇒ 收尾删除关闭（回退到只剔记录）" || bad "8i: $(cat "$DELFILE")"
+# 8j: **默认态**（不设该变量）必须也是不删 —— 锁住 2026-09-26 的默认翻转。
+#   只测开关=0 测不到默认值被改坏（开关显式给值时默认值根本不参与判断）。
+#   ⚠️ 不能用 `env -u X 函数`: env 只影响**子进程**，而 _carry_forward_fixed 是
+#   当前 shell 的**函数**，env -u 对它无效 ⇒ 断言恒绿（假绿）。必须在子 shell 里
+#   先 unset 再调用（子 shell 继承变量，unset 后才走默认分支）。
+: > "$DELFILE"
+( unset OPENLIST_CARRY_DELETE_ALIGNED; _carry_forward_fixed "openlist:dst" "$M8" >/dev/null )
+[ ! -s "$DELFILE" ] && ok "8j ★默认（未设开关）⇒ 不删备份副本（2026-09-26 默认翻转）" || bad "8j: 默认竟在删副本: $(cat "$DELFILE")"
 rm -f "$DELFILE"
 
 # ===== 场景 9: 病灶 C——游标拒写时仍持久化修复记录（2026-09-21，§14.21）=====

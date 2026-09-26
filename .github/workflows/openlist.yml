@@ -169,6 +169,11 @@ on:
         required: false
         type: string
         default: "all"
+      verify_run_id:
+        description: "⚠️ 还原模式专用（必填）: 先跑 openlist-restore-tryrun（只读预演）通过后，把那次的 run id 填在这里。门禁会校验它确实是 tryrun workflow 且 conclusion=success；填错/没填则还原直接拒绝执行。给 all 时预演也必须是 all，给具体任务时预演任务名须一致"
+        required: false
+        type: string
+        default: ""
   schedule:
     # 兜底触发（自续触发是主接力机制，见「自续触发」step）。
     # GitHub 对高频 cron 限流严重（实测 */5 曾 4.5h 零触发）。
@@ -435,14 +440,79 @@ jobs:
 
       # ===== 一键还原修复文件 =====
       # 把 marker fixed_files 中的替代文件还原为原路径原文件名:
-      #   改名类 → rclone moveto 服务端移动（**必须 moveto**: move 的 dst 被当目录，
-      #     会建出以目标文件名命名的目录 —— 见 file_restore.sh 内注释）；
-      #     压缩/分卷类 → 下载还原后回传原路径；
-      #     成功后清理目标端替代文件并从 marker 移除条目。
+      #   改名类 → rclone copyto 复制到原路径（**保留备份副本**，2026-09-26 起；
+      #     原 moveto 会搬走副本，见 file_restore.sh 内注释）；
+      #     压缩/分卷类 → 下载还原后回传原路径（分卷同样保留）；
+      #     成功后从 marker 移除条目（出账）。
       # 完成后发送 Telegram 汇总。restore_task 指定任务名（backup/task0-5，
       # 即 marker 文件名前缀）或 all。
-      - name: "⚠️ Restore: 一键还原修复文件"
+      #
+      # ── 门禁（2026-09-26 用户拍板「一定要先跑一次验证轮还原通过才能跑生产轮还原」）──
+      #   还原是**写操作 + 出账不可逆**（删 marker 条目，而短哈希不可逆 ⇒ 条目是
+      #   唯一映射）。没预演就真跑，等于拿唯一账本赌一次。故强制:
+      #   ① 必须填 verify_run_id（指向一次 openlist-restore-tryrun 运行）
+      #   ② 该 run 必须 conclusion=success
+      #   ③ 该 run 必须在时间窗内（默认 24h）—— 防拿很久以前的预演当放行条
+      #   ④ 时间窗/校验失败 ⇒ 整个 job 立刻失败，并打印复制即用的 tryrun 命令
+      - name: "🔒 门禁: 校验验证轮（try run）已通过"
+        id: restore_gate
         if: ${{ inputs.run_mode == '⚠️ 还原 · 修复文件还原为原路径' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERIFY_RUN_ID: ${{ inputs.verify_run_id }}
+          RESTORE_TASK: ${{ inputs.restore_task || 'all' }}
+          VERIFY_MAX_AGE_HOURS: ${{ vars.OPENLIST_RESTORE_VERIFY_MAX_AGE_HOURS || '24' }}
+        run: |
+          set -eu
+          echo "=== 还原门禁: 校验验证轮 ==="
+          if [ -z "${VERIFY_RUN_ID:-}" ]; then
+            echo "::error::还原被拒绝: 未填 verify_run_id（必须先跑一次只读预演并填它的 run id）"
+            echo ""
+            echo "复制即用（先跑预演）:"
+            echo "  gh workflow run openlist-restore-tryrun.yml -f task=${RESTORE_TASK}"
+            echo "  gh run list --workflow=openlist-restore-tryrun.yml --limit 1 --json databaseId,conclusion"
+            exit 1
+          fi
+          # 校验该 run 属于 tryrun workflow 且 success
+          info=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${VERIFY_RUN_ID}" \
+                   --jq '.status + "|" + (.conclusion // "") + "|" + (.created_at // "") + "|" + (.path // "")' 2>/dev/null || echo "")
+          # 404/权限不足时 gh api 会把错误 JSON 打到 stdout，jq 仍能取到 `.path`
+          # （空）⇒ 不能只判 info 为空，得再排除"看起来像报错"的返回
+          if [ -z "$info" ] || printf '%s' "$info" | grep -q 'Not Found\|message.*documentation_url'; then
+            echo "::error::还原被拒绝: run ${VERIFY_RUN_ID} 取不到（id 不存在或无权访问）"
+            exit 1
+          fi
+          # 变量名避开 status（zsh 里是只读变量；本 step 是 bash，但避免踩坑）
+          _v_status=$(echo "$info" | cut -d'|' -f1)
+          concl=$(echo "$info" | cut -d'|' -f2)
+          created=$(echo "$info" | cut -d'|' -f3)
+          wpath=$(echo "$info" | cut -d'|' -f4-)
+          echo "验证轮: id=${VERIFY_RUN_ID} status=${_v_status} conclusion=${concl} created=${created}"
+          case "$wpath" in
+            *openlist-restore-tryrun*) : ;;
+            *) echo "::error::还原被拒绝: run ${VERIFY_RUN_ID} 不是 openlist-restore-tryrun（实际: ${wpath}）"
+               exit 1 ;;
+          esac
+          if [ "$concl" != "success" ]; then
+            echo "::error::还原被拒绝: 验证轮结论为 '${concl:-未完成}'，必须是 success 才放行"
+            exit 1
+          fi
+          # 时效: 太旧的预演不能当放行条（marker 与远端都在变）
+          created_epoch=$(date -u -d "$created" +%s 2>/dev/null || echo 0)
+          now_epoch=$(date -u +%s)
+          age_h=$(( (now_epoch - created_epoch) / 3600 ))
+          echo "验证轮距今: ${age_h} 小时（上限 ${VERIFY_MAX_AGE_HOURS}）"
+          if [ "$age_h" -gt "${VERIFY_MAX_AGE_HOURS}" ]; then
+            echo "::error::还原被拒绝: 验证轮已过 ${age_h}h，超过 ${VERIFY_MAX_AGE_HOURS}h 上限，请重跑预演"
+            exit 1
+          fi
+          echo "✅ 门禁通过: 已有 ${age_h}h 内的成功验证轮，放行本次还原（task=${RESTORE_TASK}）"
+      - name: "⚠️ Restore: 一键还原修复文件"
+        # 门禁依赖: 上面那个 gate step 必须先 success 才轮到本步。
+        #   step 没有 needs，只能用 outcome 表达；而 gate 在非还原模式下是 skipped
+        #   ⇒ 放行条件必须是「run_mode 匹配 **且** gate 不是 failure/cancelled」。
+        #   少了这半句，gate 失败后 job 会继续往下跑还原（if 只看 run_mode）。
+        if: ${{ inputs.run_mode == '⚠️ 还原 · 修复文件还原为原路径' && steps.restore_gate.outcome != 'failure' && steps.restore_gate.outcome != 'cancelled' }}
         timeout-minutes: 240
         env:
           # 经 env 传参，不经 "${{ }} 直接内插 bash（string input 注入面，
