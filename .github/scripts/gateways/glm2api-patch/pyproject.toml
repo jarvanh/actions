@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "glm2api"
+version = "0.1.0"
+description = "将智谱清言 GLM Web 端接口转换为 OpenAI Chat Completions 兼容 API 的轻量代理。"
+readme = "README.md"
+# 原上游要求 >=3.14；实测代码（纯标准库）在 3.12 / 3.13 上同样可用，
+# 放宽以便在 GitHub ubuntu-latest runner 的默认 Python 上直接部署，无需额外装 3.14。
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+glm2api = "glm2api.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

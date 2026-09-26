@@ -2632,6 +2632,89 @@ jobs:
             fi
           fi
 
+      - name: Run glm2api (ChatGLM 清言反代)
+        id: run_glm2api
+        continue-on-error: true
+        env:
+          # send_tg 发送闸 + 收尾区接线（缺任一则本步骤通知静默跳过）
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # 凭据：清言账号的 chatglm_refresh_token。只从 Secrets 注入环境变量，
+          # 不落仓库、不回显；部署脚本写进运行目录 .env（600）供服务读取。
+          GLM_REFRESH_TOKEN: ${{ secrets.GLM_REFRESH_TOKEN }}
+          GLM2API_PORT: "8320"
+          GLM2API_PATCH_DIR: ${{ github.workspace }}/.github/scripts/gateways/glm2api-patch
+        run: |
+          set -uo pipefail
+          # 通知真源在 step 顶层 source 一次（勿挪进函数体，理由见 workbuddy 步骤同名注释 / 规范 4.4）
+          source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+
+          DEPLOY="${GITHUB_WORKSPACE}/.github/scripts/gateways/glm2api_deploy.sh"
+          GATEWAYS="${GITHUB_WORKSPACE}/.github/scripts/gateways/gateways.sh"
+          GL_OK=0
+          GL_REASON=""
+
+          # 凭据缺失直接跳过本步骤（不部署游客态服务）：游客模式拿不到账号积分，
+          # 且限流严重，起了也是假象。判空不判内容——内容有效性交给后面的自检。
+          if [ -z "${GLM_REFRESH_TOKEN:-}" ]; then
+            echo "::warning::[glm2api] 未配置 Secret GLM_REFRESH_TOKEN，跳过部署"
+            GL_REASON="未配置 Secret GLM_REFRESH_TOKEN"
+            _m=""
+            tg_add_title _m "⏭️ glm2api 已跳过"
+            tg_add_kv _m "结论" "未部署"
+            tg_add_kv _m "原因" "$GL_REASON"
+            tg_add_kv _m "如何配置" "仓库 Settings → Secrets → 新增 GLM_REFRESH_TOKEN（取法见脚本 login 指引）"
+            tg_add_footer _m
+            send_tg "$_m" || echo "::warning::TG 通知发送失败（不影响任务）"
+            exit 0
+          fi
+
+          # 1. 准备运行目录（拉代码 + venv + 写 .env）
+          if bash "$DEPLOY" prepare; then
+            # 2. 托管：systemd --user + Restart=always（窗口期崩溃秒级自愈，见 gateways.sh 文件头）
+            bash "$GATEWAYS" ensure glm2api || true
+            GL_UP=0
+            for _ in $(seq 1 60); do
+              if bash "$DEPLOY" status >/dev/null 2>&1; then GL_UP=1; break; fi
+              sleep 1
+            done
+            if [ "$GL_UP" != "1" ]; then
+              GL_REASON="服务未在 60 秒内监听 ${GLM2API_PORT}（见日志尾部）"
+            else
+              # 3. 端到端自检：两个模型各发一条，都返回助手内容才算就绪
+              if bash "$DEPLOY" selftest; then
+                GL_OK=1
+                GL_REASON="GLM-5.3 与 GLM-5.3-Flash 自检均通过"
+              else
+                GL_REASON="服务已监听但自检未通过（见日志尾部）"
+              fi
+            fi
+          else
+            GL_REASON="运行目录准备失败（见日志尾部）"
+          fi
+
+          if [ "$GL_OK" != "1" ]; then
+            _m=""
+            tg_add_title _m "❌ glm2api 启动失败"
+            tg_add_kv _m "结论" "未就绪"
+            tg_add_path _m "端口" "$GLM2API_PORT"
+            tg_add_kv _m "原因" "$GL_REASON"
+            tg_add_path _m "运行目录" "/tmp/local_glm2api"
+            tg_add_path _m "日志" "/tmp/local_glm2api/logs/glm2api.log"
+            tg_add_footer _m
+            send_tg "$_m" || echo "::warning::TG 通知发送失败（不影响任务）"
+          else
+            _m=""
+            tg_add_title _m "✅ glm2api 已就绪"
+            tg_add_kv _m "结论" "$GL_REASON"
+            tg_add_path _m "接口" "http://127.0.0.1:${GLM2API_PORT}/v1"
+            tg_add_path _m "模型" "glm-5.3 · glm-5.3-flash"
+            tg_add_kv _m "计费" "走清言账号积分（Flash 更省）"
+            tg_add_footer _m
+            send_tg "$_m" || echo "::warning::TG 通知发送失败（不影响任务）"
+          fi
+
       - name: Notify Tailscale SSH entry
         if: ${{ always() && steps.ts_ssh.outcome == 'success' }}
         continue-on-error: true
@@ -4134,6 +4217,37 @@ jobs:
               tg_add_kv _m "结论" "服务已退出 · 数据目录保持原状"
             fi
             tg_add_path _m "端口" "8319"
+            tg_add_footer _m
+            send_tg "$_m" || true
+          fi
+
+          # 3d. glm2api：同为宿主进程（非容器），随 job 结束不会自动退出，
+          # 必须显式停，否则残留进程会一直持有 8320 并继续消耗清言积分。
+          echo "3d. Stopping glm2api..."
+          bash "$GITHUB_WORKSPACE/.github/scripts/gateways/gateways.sh" stop glm2api || true
+          if systemctl --user is-failed --quiet glm2api.service 2>/dev/null; then
+            systemctl --user reset-failed glm2api.service 2>/dev/null || true
+          fi
+          pkill -f "local_glm2api.*main\.py" 2>/dev/null || true
+          sleep 2
+          pkill -9 -f "local_glm2api.*main\.py" 2>/dev/null || true
+          GL_STILL_RUNNING=0
+          if (exec 3<> /dev/tcp/127.0.0.1/8320) 2>/dev/null; then
+            GL_STILL_RUNNING=1
+            echo "⚠️ glm2api 仍在监听 8320"
+          else
+            echo "✅ glm2api 已停止"
+          fi
+          if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+            _m=""
+            if [ "$GL_STILL_RUNNING" = "1" ]; then
+              tg_add_title _m "⚠️ glm2api 已停止 · 进程残留"
+              tg_add_kv _m "结论" "强制结束后仍有进程残留"
+            else
+              tg_add_title _m "⛔ glm2api 已停止"
+              tg_add_kv _m "结论" "服务已退出 · 运行目录保持原状"
+            fi
+            tg_add_path _m "端口" "8320"
             tg_add_footer _m
             send_tg "$_m" || true
           fi
