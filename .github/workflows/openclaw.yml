@@ -1717,21 +1717,123 @@ jobs:
             done <<< "$(grep -a "^${_today} " "$WB_LOG" 2>/dev/null | grep -a '\[Travel\]' || true)"
           fi
 
+          # ---------- 国际站每日活跃触发（2026-09-26 改造，主人拍板）----------
+          # 国际站没有每日签到活动：积分按「每日活跃」发放 —— 当天至少一次对话
+          # 即视为活跃，次日凌晨到账（helper 实测延迟约 14h；本机 ja 号 Bonus Pack
+          # 入账与网关对话日对齐 1.5~9h，即网关流量已在替被命中账号「活跃」）。
+          # 但网关路由不保证每个国际号天天被命中 —— 这里逐号补一发最小活跃请求：
+          #   POST {intl}/v2/chat/completions · 流式 · system 消息必须在前
+          #     （否则 400 code=11128，照 autumnsentiment/workbuddy-helper 逆向结论）
+          #   · 免费模型 hy4-preview-f（快照 costClass=free；实测活跃前后余额分毫不差）
+          #   · max_tokens=64 + helper 默认活跃提示词（过短问候可能被判非有效会话）
+          #   · 客户端特征头照 helper 逆向：UA=WorkBuddy/5.5.2 … + X-IDE-* + X-Domain
+          # 幂等：HTTP 200 才落当日标记（东八区日期 × 凭据名，VM 存活期内生效）；
+          # 429 频率限制不落标记，由下一轮接力自然重试（实测 de/ha 限流 16:57 恢复）。
+          # 到账数额次日凌晨才由上游发放 —— 通知只标「活跃 ✓」，绝不预填数字。
+          WB_ACT_DIR="/tmp/workbuddy-active"
+          WB_ACT_TOTAL=0
+          WB_ACT_OK=0
+          declare -A _CK_ACTIVE
+          declare -A _CK_ACTWAIT
+          if [ "${WB_READY:-}" = "1" ] && [ -n "${WB_CREDS:-}" ]; then
+            mkdir -p "$WB_ACT_DIR"
+            _act_today="$(TZ=Asia/Shanghai date +%Y-%m-%d)"
+            while IFS= read -r _af; do
+              if [ -z "$_af" ]; then continue; fi
+              _aed="$(jq -r '.edition // "cn"' "$WB_RUN_DIR/$_af" 2>/dev/null || true)"
+              case "$(printf '%s' "$_aed" | tr 'A-Z' 'a-z')" in
+                intl|international|global|workbuddy.ai) : ;;
+                *) continue ;;
+              esac
+              WB_ACT_TOTAL=$((WB_ACT_TOTAL + 1))
+              _act_mk="$WB_ACT_DIR/${_act_today}__${_af}"
+              if [ -s "$_act_mk" ]; then
+                _CK_ACTIVE["$_af"]=1
+                WB_ACT_OK=$((WB_ACT_OK + 1))
+                continue
+              fi
+              # 限流 defer：上游 429 响应原文自带恢复时刻（「usage will reset at …」）。
+              # 接力轮约 5 分钟一轮，不 defer 会把「等恢复」变成几十次无用 429；
+              # defer 记「日期+时刻」（定宽字典序即时间序），到期自动失效、恢复正常重试。
+              _act_df="$WB_ACT_DIR/${_act_today}__defer__${_af}"
+              if [ -s "$_act_df" ]; then
+                _dreset="$(head -n 1 "$_act_df" 2>/dev/null || true)"
+                _nowdt="$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M')"
+                if [[ -n "$_dreset" && "$_nowdt" < "$_dreset" ]]; then
+                  _CK_ACTWAIT["$_af"]="限流 ${_dreset} 后自动重试"
+                  continue
+                fi
+                rm -f "$_act_df"
+              fi
+              _atok="$(jq -r '.auth.accessToken // ""' "$WB_RUN_DIR/$_af" 2>/dev/null || true)"
+              if [ -z "$_atok" ]; then continue; fi
+              _auid="$(jq -r '.account.uid // ""' "$WB_RUN_DIR/$_af" 2>/dev/null || true)"
+              _adom="$(jq -r '.auth.domain // ""' "$WB_RUN_DIR/$_af" 2>/dev/null || true)"
+              # 活跃载体模型：优先取快照里该号实测免费（costClass=free）的第一个 ——
+              # 免费名单上游随时可调，硬编码会在下架后静默失效；
+              # 快照缺失/无实测记录时退回 hy4-preview-f（2026-09-26 实测免费、活跃零消耗）。
+              _amodel="hy4-preview-f"
+              if [ -r "$WB_STATUS_JSON" ]; then
+                _am="$(jq -r --arg fn "$_af" '
+                  .accounts[]? | select((.path | split("/") | last) == $fn)
+                  | (.modelStates // {}) | to_entries[]
+                  | select(.value.costClass == "free") | .key' "$WB_STATUS_JSON" 2>/dev/null \
+                  | head -n 1 || true)"
+                if [ -n "$_am" ]; then _amodel="$_am"; fi
+              fi
+              _abody="$(jq -nc --arg m "$_amodel" '{model:$m,stream:true,max_tokens:64,
+                messages:[{role:"system",content:"You are a helpful assistant."},
+                          {role:"user",content:"你是谁，谁开发你的，现在是什么时间，什么天气"}]}')"
+              rm -f /tmp/_wb-act-resp
+              _ahdr=(-s --connect-timeout 5 --max-time 60 -X POST
+                -H "Authorization: Bearer ${_atok}"
+                -H 'User-Agent: WorkBuddy/5.5.2 WorkBuddy AI/5.5.2 CLI/2.137.1'
+                -H 'X-IDE-Type: WorkBuddy'
+                -H 'X-IDE-Name: WorkBuddy'
+                -H 'X-Product: SaaS'
+                -H 'Accept: text/event-stream'
+                -H 'Content-Type: application/json'
+                -H 'Origin: https://www.workbuddy.ai'
+                -H 'Referer: https://www.workbuddy.ai/')
+              if [ -n "$_auid" ]; then _ahdr+=(-H "X-User-Id: ${_auid}"); fi
+              if [ -n "$_adom" ]; then _ahdr+=(-H "X-Domain: ${_adom}"); fi
+              _acode="$(curl -o /tmp/_wb-act-resp -w '%{http_code}' "${_ahdr[@]}" \
+                -d "$_abody" \
+                "https://www.workbuddy.ai/v2/chat/completions" 2>/dev/null || true)"
+              if [ "$_acode" = "200" ] && grep -q "chat.completion" /tmp/_wb-act-resp 2>/dev/null; then
+                # 200 且响应确为对话流（首个 data chunk 带 chat.completion 字样）：
+                # 防「HTTP 200 但流内报错」的假阳性。此刻活跃已真实发生，落当日标记。
+                printf 'ok\n' > "$_act_mk"
+                _CK_ACTIVE["$_af"]=1
+                WB_ACT_OK=$((WB_ACT_OK + 1))
+              else
+                _areset="$(sed -nE 's/.*reset at ([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}):[0-9]{2}.*/\1/p' /tmp/_wb-act-resp 2>/dev/null | head -n 1 || true)"
+                if [ -n "$_areset" ]; then
+                  printf '%s\n' "$_areset" > "$_act_df"
+                  _CK_ACTWAIT["$_af"]="限流 ${_areset} 后自动重试"
+                else
+                  _CK_ACTWAIT["$_af"]="本轮失败 · 下一轮自动重试"
+                fi
+              fi
+            done <<< "$WB_CREDS"
+            rm -f /tmp/_wb-act-resp
+          fi
+
           # 合并：状态接口修正结果列 + 拼积分/旅行列（3 列 → 5 列，渲染层只管展示）。
-          # 结果优先级：网关日志判「失败」时保留原样（HTTP/原因在原始输出里，更具体）；
-          # 其余以状态接口为准 —— active=false 修成「活动未开启」（网关把 code=10001
-          # 一律幂等成功，国际站活动没开也被记成「今日已签」，这里纠正）。
+          # 口径优先级（2026-09-26 活跃改造后）：签到活动开启 → 积分口径最优先
+          # （活动一旦开启，签到积分比活跃触发值钱，活跃请求自动退居兜底）；
+          # 否则国际号走活跃口径（活跃 ✓ / 待重试）。网关日志判「失败」仅在活动
+          # 开启分支里让位展示 —— 国际站的「失败」本就是无意义活动上的网络噪声。
           if [ -n "${WB_CHECKIN:-}" ]; then
             WB_CHECKIN_MERGED=""
             while IFS="$(printf '\t')" read -r _mf _ms _mr; do
               if [ -z "$_mf" ]; then continue; fi
               _mres="$_mr"
               _mcred=""
-              if [ -n "${_CK_ACT[$_mf]:-}" ]; then
+              if [ "${_CK_ACT[$_mf]:-}" = "true" ]; then
+                # 签到活动开启（无论站点）：积分口径优先。
                 if printf '%s' "$_mr" | grep -q '失败'; then
                   _mres="$_mr"
-                elif [ "${_CK_ACT[$_mf]}" = "false" ]; then
-                  _mres="活动未开启"
                 elif [ "${_CK_CHK[$_mf]}" = "true" ]; then
                   case "$_mr" in *"签到 ✓"*) : ;; *) _mres="今日已签" ;; esac
                   _mcred="本次 +${_CK_TODAY[$_mf]} · 累计 ${_CK_TOTAL[$_mf]} · 连签 ${_CK_STREAK[$_mf]} 天"
@@ -1739,6 +1841,17 @@ jobs:
                   _mres="未签"
                   _mcred="可得 +${_CK_DAILY[$_mf]}"
                 fi
+              elif [ -n "${_CK_ACTIVE[$_mf]:-}" ]; then
+                # 国际站今日活跃已触发（本轮成功或当日标记已存在）：活跃口径。
+                _mres="活跃 ✓ 已触发"
+                _mcred="积分次日到账（当天是否 +30 以后端入账为准）"
+              elif [ -n "${_CK_ACTWAIT[$_mf]:-}" ]; then
+                # 活跃请求本轮被 429 限流/失败：如实展示，接力轮自动重试。
+                _mres="活跃待重试"
+                _mcred="${_CK_ACTWAIT[$_mf]}"
+              elif [ "${_CK_ACT[$_mf]:-}" = "false" ]; then
+                # 兜底：活跃轮询整体未跑到（理论上 intl 号都会被活跃覆盖）。
+                _mres="活动未开启"
               fi
               _mtrav="${_CK_TRAVEL[$_mf]:-}"
               WB_CHECKIN_MERGED+="${WB_CHECKIN_MERGED:+$'\n'}${_mf}"$'\t'"${_ms}"$'\t'"${_mres}"$'\t'"${_mcred}"$'\t'"${_mtrav}"
@@ -1749,6 +1862,8 @@ jobs:
             # 有查询失败/无数据时退回网关日志口径的 WB_CHECKIN_SUMMARY，不硬凑。
             if [ "$WB_CKSTAT_OK" -eq "$WB_CKSTAT_TOTAL" ] && [ "$WB_CKSTAT_TOTAL" -gt 0 ]; then
               _n_signed=0
+              _n_active=0
+              _n_retry=0
               _n_closed=0
               _n_open=0
               _n_fail=0
@@ -1757,6 +1872,8 @@ jobs:
                 if [ -z "$_sf" ]; then continue; fi
                 case "$_sr" in
                   *"签到 ✓"*|*"今日已签"*) _n_signed=$((_n_signed + 1)) ;;
+                  *"活跃 ✓"*) _n_active=$((_n_active + 1)) ;;
+                  *"活跃待重试"*) _n_retry=$((_n_retry + 1)) ;;
                   *"活动未开启"*) _n_closed=$((_n_closed + 1)) ;;
                   *"未签"*) _n_open=$((_n_open + 1)) ;;
                   *"失败"*) _n_fail=$((_n_fail + 1)) ;;
@@ -1775,6 +1892,8 @@ jobs:
               _n_skip=$((_n_creds - _n_rows))
               if [ "$_n_skip" -lt 0 ]; then _n_skip=0; fi
               _cksum="已签 ${_n_signed}"
+              if [ "$_n_active" -gt 0 ]; then _cksum="${_cksum} · 活跃 ${_n_active}"; fi
+              if [ "$_n_retry" -gt 0 ]; then _cksum="${_cksum} · 待重试 ${_n_retry}"; fi
               if [ "$_n_closed" -gt 0 ]; then _cksum="${_cksum} · 未开启 ${_n_closed}"; fi
               if [ "$_n_open" -gt 0 ]; then _cksum="${_cksum} · 未签 ${_n_open}"; fi
               if [ "$_n_fail" -gt 0 ]; then _cksum="${_cksum} · 失败 ${_n_fail}"; fi
