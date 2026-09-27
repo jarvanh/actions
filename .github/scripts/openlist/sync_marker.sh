@@ -150,7 +150,7 @@ _carry_forward_fixed() {
     #   ① size 一致（防半截原名冒充落位，丢掉唯一副本）② 非分卷/编码类
     #   （多卷与还原形态复杂，第一版放过）③ 开关未关。
     #   probe 是本循环刚取的新鲜值；删除失败仅警告，不影响剔除语义。
-    [ "${OPENLIST_CARRY_DELETE_ALIGNED:-1}" = "0" ] && continue
+    [ "${OPENLIST_CARRY_DELETE_ALIGNED:-0}" = "0" ] && continue
     [ -z "$alt" ] || [ "$alt" = "null" ] && continue
     case "$alt" in *.zip.[0-9][0-9][0-9]|*.7z.[0-9][0-9][0-9]|*.enc|*.enc.*|*.b64|*.b64.*) continue ;; esac
     local _alt_norm
