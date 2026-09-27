@@ -751,8 +751,13 @@ restore_try_run() {
   if [ "$cutoff" -gt 0 ]; then
     # 生效下界要**连时间点一起**写明: "最近 3 天"是相对的，读报告的人无法据此
     # 判断"这批是不是都在某次语义变更之后写的"，而这正是结论可不可比的关键（§15.2）
+    # ⚠️ 必须前缀 TZ=UTC（2026-09-27 修）: printf '%(...)T' 按**本地时区**渲染，
+    #   而这里标注的是 UTC —— 非 UTC 环境（如东八区）会差 8 小时，读报告的人
+    #   据此判断"这批 marker 是否在某次语义变更之后"就会判错（§15.2 的用途）。
+    #   筛选逻辑走 epoch 运算不受影响，只有这一行的显示错了。
+    #   CI runner 恰好 TZ=UTC ⇒ 该缺陷在 CI 上恒不暴露，只有非 UTC 环境才现形。
     _tryr_log "  ⏱️ 时间窗=最近 ${within_days} 天 · 绝对下界 ${since_raw:-（无）}" \
-              "（生效下界 $(printf '%(%Y-%m-%d %H:%M:%S)T' "$cutoff") UTC）: " \
+              "（生效下界 $(TZ=UTC printf '%(%Y-%m-%d %H:%M:%S)T' "$cutoff") UTC）: " \
               "扫描 marker ${scanned} 个 · 跳过超窗 ${skipped_old} 个 · 跳过无时间戳 ${skipped_nots} 个"
   fi
   if [ "$ts_fallback" -eq 1 ]; then
