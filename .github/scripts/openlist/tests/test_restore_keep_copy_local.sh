@@ -45,6 +45,8 @@ fi
 
 SANDBOX="$(mktemp -d /tmp/restore_keepcopy_XXXXXX)"
 trap 'rm -rf "$SANDBOX"' EXIT
+# 列列举假阴注入名单（空格分隔的基名）: 默认空 = 不注入
+LSF_OMIT=""
 
 # 沙箱布局: 远端前缀 → 本地目录（真文件系统）
 SRC_SIM="$SANDBOX/src_sim"     # 源端模拟（只读护栏对象）
@@ -86,7 +88,13 @@ rclone() {
       local p; p=$(_map_path "$2")
       _in_sandbox "$p" || return 1
       [ -d "$p" ] || return 1
-      (cd "$p" && find . -maxdepth 1 -type f -printf '%f\n' | sort)
+      # 假阴注入: LSF_OMIT 里的基名**故意不出现在列列举里**（模拟 OpenList 列表缓存
+      # 延迟 / 假阴）。直读（lsjson）不受它影响 ⇒ 用来验证"双判据真的在互补"。
+      (cd "$p" && find . -maxdepth 1 -type f -printf '%f\n' | sort \
+        | while IFS= read -r _n; do
+            case " $LSF_OMIT " in *" $_n "*) continue ;; esac
+            printf '%s\n' "$_n"
+          done)
       ;;
     lsjson)
       local p; p=$(_map_path "$2")
@@ -139,9 +147,11 @@ export -f rclone _map_path _in_sandbox 2>/dev/null || true
 export SANDBOX SRC_SIM DST_SIM
 
 # 源端 fixture 全部先造好（场景 1 用 video 原文件.mp4；场景 4 依赖"源端仍在"、
-# 场景 5 依赖"源端不在"）—— 基线必须取在它们之后，否则比对必然假红
+# 场景 5 依赖"源端不在"、场景 8 用 src_hidden_by_lsf.mp4）
+# —— 基线必须取在它们之后，否则场景 6 的 md5 比对必然假红
 printf 'SRC-1' > "$SRC_SIM/video 原文件.mp4"
 printf 'SRC-4' > "$SRC_SIM/gone_but_src.mp4"
+printf 'SRC-8' > "$SRC_SIM/src_hidden_by_lsf.mp4"
 SRC_BEFORE="$(cd "$SRC_SIM" && find . -type f -exec md5sum {} \; | sort)"
 
 # ────────────────────────────────────────────────────────────
@@ -222,6 +232,26 @@ after=$(jq -r '(.fixed_files // []) | length' "$STATE/task1_x.json" 2>/dev/null)
   && ok "5a ★两端皆无 ⇒ 条目保留未出账" || bad "5a 期望保留 1 条，实际 $after"
 grep -q "保留条目并告警" "$SANDBOX/out5.txt" \
   && ok "5b 两端皆无有告警日志" || bad "5b 缺少告警日志"
+
+# ────────────────────────────────────────────────────────────
+# 场景 8: 源端判据必须双判据（2026-09-26 加固的那一处）
+#   出账不可逆 ⇒ "源端在不在"不能只信一次列列举。本场景让列列举**看不到**
+#   源端文件（假阴），但直读 lsjson 看得到 ⇒ 正确行为是**仍然出账**。
+#   若退回单判据，这里会变成"保留并告警"（误保留，历史残渣继续堆）。
+# ────────────────────────────────────────────────────────────
+cat > "$STATE/task8_x.json" <<'JSON'
+{"dest_path":"openlist:","source_path":"onedrive:","fixed_files":[
+ {"original":"src_hidden_by_lsf.mp4","alternative":"nope/h8.mp4","method":"方法2·短名直传","size_bytes":5}
+],"fixed_count":1,"fixed_bytes":5}
+JSON
+LSF_OMIT="src_hidden_by_lsf.mp4" \
+  SYNC_STATE_DIR="$STATE" restore_fixed_files "task8" >"$SANDBOX/out8.txt" 2>&1
+after8=$(jq -r '(.fixed_files // []) | length' "$STATE/task8_x.json" 2>/dev/null)
+[ "$after8" = "0" ] \
+  && ok "8a ★源端列列举假阴时，直读补上 ⇒ 仍然出账" || bad "8a 期望出账 0 条，实际 $after8"
+grep -q "判定已失效，出账" "$SANDBOX/out8.txt" \
+  && ok "8b 走的是出账分支（非保留告警）" || bad "8b: $(grep -o '→ .*' "$SANDBOX/out8.txt" | head -2)"
+LSF_OMIT=""
 
 # ────────────────────────────────────────────────────────────
 # 场景 6: 源端只读护栏 —— 全程不得改动源端任何文件
