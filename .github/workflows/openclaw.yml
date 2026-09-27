@@ -2705,6 +2705,9 @@ jobs:
           GL_SCORE_RULE=""
           GL_ROUND_DELTA=""
           GL_DAY_TOTAL=""
+          GL_SOONEST=""
+          GL_SOONEST_AMT=""
+          GL_SOON_24H=""
           if [ "$GL_OK" = "1" ]; then
             # 先还原上一轮的快照（今日累计要跨轮累加）；缺失即首轮，delta 会自动按 0 起算
             if command -v rclone >/dev/null 2>&1; then
@@ -2714,6 +2717,9 @@ jobs:
             if GLQ="$(bash "$QUOTA" fetch)"; then
               GL_SCORE="$(printf '%s' "$GLQ" | cut -f1)"
               GL_SCORE_RULE="$(printf '%s' "$GLQ" | cut -f2)"
+              GL_SOONEST="$(printf '%s' "$GLQ" | cut -f3)"
+              GL_SOONEST_AMT="$(printf '%s' "$GLQ" | cut -f4)"
+              GL_SOON_24H="$(printf '%s' "$GLQ" | cut -f5)"
               if GLD="$(bash "$QUOTA" delta "$GL_SCORE")"; then
                 GL_ROUND_DELTA="$(printf '%s' "$GLD" | cut -f1)"
                 GL_DAY_TOTAL="$(printf '%s' "$GLD" | cut -f2)"
@@ -2757,6 +2763,15 @@ jobs:
               _gl_rows=""
               _gl_rows+="$(tree_conn 1)$(tg_entry "$(printf '%s' "$GL_SCORE")" "今日已消耗 $(printf '%s' "$GL_DAY_TOTAL")")"$'\n'
               [ -n "${GL_ROUND_DELTA:-}" ] && _gl_rows+="$(tree_sub 1)$(escape_html "本轮消耗 ${GL_ROUND_DELTA}（自检产生）")"$'\n'
+              # 到期：最近一批 + 24h 内将过期的总额。「-」表示没有带有效期的入账，
+              # 此时整行省略——不把「没取到」渲染成「00-00 到期」。
+              if [ -n "${GL_SOONEST:-}" ] && [ "$GL_SOONEST" != "-" ]; then
+                if [ -n "${GL_SOON_24H:-}" ] && [ "$GL_SOON_24H" != "0" ]; then
+                  _gl_rows+="$(tree_sub 1)$(escape_html "最近到期 ${GL_SOONEST}（该批 ${GL_SOONEST_AMT}）· 24h 内将过期 ${GL_SOON_24H}")"$'\n'
+                else
+                  _gl_rows+="$(tree_sub 1)$(escape_html "最近到期 ${GL_SOONEST}（该批 ${GL_SOONEST_AMT}）")"$'\n'
+                fi
+              fi
               [ -n "${GL_SCORE_RULE:-}" ] && _gl_rows+="$(tree_sub 1)$(escape_html "${GL_SCORE_RULE}")"$'\n'
               tg_add_block _m "${_gl_rows%$'\n'}"
             fi

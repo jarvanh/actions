@@ -15,7 +15,8 @@
 #   - 两个接口同名但差 100 倍（整数 vs 两位小数字符串），统一取 member-api 的整数。
 #
 # 用法：
-#   glm2api_quota.sh fetch            # 查当前余额，输出 TSV：余额<TAB>规则<TAB>会员状态
+#   glm2api_quota.sh fetch            # 查当前余额 + 最近到期，输出 TSV：
+#                                     #   余额<TAB>规则<TAB>最近到期时间<TAB>24h内将过期
 #   glm2api_quota.sh delta <当前余额>  # 与上次快照比，输出 TSV：本轮消耗<TAB>今日累计<TAB>今日日期
 set -u
 
@@ -37,7 +38,7 @@ cmd_fetch() {
   local out
   out="$(cd /tmp/local_glm2api 2>/dev/null && PYTHONPATH=/tmp/local_glm2api/src \
     /tmp/local_glm2api/.venv/bin/python - <<'PY' 2>/dev/null
-import json, logging, sys, urllib.request, urllib.error, uuid, os
+import json, logging, sys, urllib.request, urllib.error, uuid, os, time
 sys.path.insert(0, "/tmp/local_glm2api/src")
 logging.basicConfig(level=logging.CRITICAL)
 try:
@@ -56,7 +57,50 @@ try:
     url = "https://agentmore.chatglm.cn/chatglm/member-api/member/member_info"
     with urllib.request.urlopen(urllib.request.Request(url, headers=H), timeout=25) as r:
         d = json.loads(r.read().decode("utf-8", "ignore"))["result"]
-    print(json.dumps({"score": d.get("left_score"), "rule": d.get("score_rule", "")}))
+
+    # 过期时间只在积分流水里（余额接口没有）：翻到 has_more=false 才准。
+    # 实测两类有效期：登录赠送约 24h、任务奖励一年；消耗记录 expired_at=0 不计。
+    soonest = 0
+    soonest_amt = 0.0
+    soon_24h = 0.0
+    now = time.time()
+    for page in range(1, 11):
+        rec_url = ("https://chatglm.cn/chatglm/member-api/member/score_record"
+                   f"?page={page}&page_size=50")
+        try:
+            with urllib.request.urlopen(urllib.request.Request(rec_url, headers=H), timeout=25) as rr:
+                rd = json.loads(rr.read().decode("utf-8", "ignore"))["result"]
+        except Exception:
+            break
+        items = rd.get("list") or []
+        for it in items:
+            try:
+                amt = float(it.get("score") or 0)
+            except (TypeError, ValueError):
+                continue
+            exp = int(it.get("expired_at") or 0)
+            if amt <= 0 or exp <= 0:
+                continue
+            if exp > 1e10:
+                exp = exp // 1000
+            delta = exp - now
+            if delta <= 0:
+                continue
+            if delta <= 86400:
+                soon_24h += amt
+            if soonest == 0 or exp < soonest:
+                soonest = exp
+                soonest_amt = amt
+        if not rd.get("has_more") or not items:
+            break
+
+    print(json.dumps({
+        "score": d.get("left_score"),
+        "rule": d.get("score_rule", ""),
+        "soonest": soonest,
+        "soonest_amt": round(soonest_amt),
+        "soon_24h": round(soon_24h),
+    }))
 except Exception as e:
     print(json.dumps({"error": str(e)[:200]}))
 PY
@@ -64,12 +108,25 @@ PY
 
   score="$(printf '%s' "$out" | jq -r '.score // empty' 2>/dev/null || true)"
   rule="$(printf '%s' "$out" | jq -r '.rule // empty' 2>/dev/null || true)"
+  soonest="$(printf '%s' "$out" | jq -r '.soonest // 0' 2>/dev/null || true)"
+  soonest_amt="$(printf '%s' "$out" | jq -r '.soonest_amt // 0' 2>/dev/null || true)"
+  soon_24h="$(printf '%s' "$out" | jq -r '.soon_24h // 0' 2>/dev/null || true)"
+  # 最近到期时间：0 表示没有带有效期的入账。
+  # 时间格式化两个分支：ubuntu runner 有 GNU date -d；本机 macOS 只有
+  # date -r（秒级）。两者都试，都失败才退成 "-"。
+  if [ -n "$soonest" ] && [ "$soonest" -gt 0 ] 2>/dev/null; then
+    soonest_fmt="$(date -d "@${soonest}" '+%m-%d %H:%M' 2>/dev/null \
+                || date -r "${soonest}" '+%m-%d %H:%M' 2>/dev/null \
+                || echo "-")"
+  else
+    soonest_fmt="-"
+  fi
   if [ -z "$score" ]; then
     log "❌ 查积分失败：$(printf '%s' "$out" | head -c 150)"
     return 1
   fi
   # 会员状态：1 非会员 / 2 有效 / 3 已过期（App 壳 profile-service.js 口径）
-  printf '%s\t%s\n' "$score" "$rule"
+  printf '%s\t%s\t%s\t%s\t%s\n' "$score" "$rule" "$soonest_fmt" "$soonest_amt" "$soon_24h"
   return 0
 }
 
