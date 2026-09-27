@@ -2581,6 +2581,10 @@ jobs:
           # 凭据：清言账号的 chatglm_refresh_token。只从 Secrets 注入环境变量，
           # 不落仓库、不回显；部署脚本写进运行目录 .env（600）供服务读取。
           GLM_REFRESH_TOKEN: ${{ secrets.GLM_REFRESH_TOKEN }}
+          # 网关鉴权：本网关专属 key（不共用 AI_GATEWAY_API_KEY —— 每个反代各有
+          # 自己的 key，避免一把泄露波及全部）。监听已改 0.0.0.0，这是唯一的
+          # 安全边界；部署脚本写进 .env 的 SERVER_API_KEYS，缺值直接拒绝启动。
+          GLM2API_GATEWAY_KEY: ${{ secrets.GLM2API_GATEWAY_KEY }}
           GLM2API_PORT: "8320"
           GLM2API_PATCH_DIR: ${{ github.workspace }}/.github/scripts/gateways/glm2api-patch
           # 积分快照（跨轮累计「今日已消耗」）：单文件存 Dropbox。runner 本地盘
@@ -2687,6 +2691,10 @@ jobs:
             tg_add_title _m "✅ glm2api 已就绪"
             tg_add_kv _m "结论" "$GL_REASON"
             tg_add_path _m "接口" "http://127.0.0.1:${GLM2API_PORT}/v1"
+            # 标签「API Key」+ tg_add_path：对齐 zcode2api 就绪通知同款 —— 值走
+            # <code> 等宽，客户端点一下即可整块复制。监听已改 0.0.0.0，key 是唯一
+            # 安全边界，通知里给主人一份便于配置客户端（与 8319 的处理一致）。
+            tg_add_path _m "API Key" "${GLM2API_GATEWAY_KEY:-未取到}"
             tg_add_path _m "模型" "glm-5.3 · glm-5.3-flash"
             tg_add_kv _m "计费" "默认通道不扣积分；-agent 后缀走 AgentMore 才扣"
 
