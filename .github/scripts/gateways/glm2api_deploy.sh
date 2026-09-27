@@ -52,10 +52,15 @@ cmd_prepare() {
     if [ -n "$(ls -A "$RUN_DIR" 2>/dev/null)" ]; then
       log "⚠️ 运行目录非空且不是 git 仓库，清空后重新拉取"
       rm -rf "$RUN_DIR" || die "清空运行目录失败"
-      mkdir -p "$RUN_DIR" || die "无法创建运行目录 $RUN_DIR"
     fi
     git clone --depth 1 "$REPO" "$RUN_DIR" || die "拉取代码失败"
   fi
+
+  # 日志目录在 clone/清空之后必须重建：上面的 rm -rf 与 git clone 都会抹掉它，
+  # 而单元的 StandardOutput=append:<LOG> 在目录不存在时进程直接以
+  # status=209/STDOUT 退出（systemd 无法打开日志文件）→ 触发 Restart=always
+  # 崩溃循环。首轮部署必踩（实测 2026-09-27），故这里幂等补建。
+  mkdir -p "$LOG_DIR" || die "无法创建日志目录 $LOG_DIR"
 
   # 本地补丁：selected_model / platform=mac / deep_thinking。
   # 上游（XxxXTeam/glm2api）尚未合入这些改动，故每轮从本仓库的 patch 目录覆盖；
