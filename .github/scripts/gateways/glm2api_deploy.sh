@@ -34,6 +34,10 @@ die() { log "❌ $*"; exit 1; }
 # ── prepare：让运行目录达到「可被 systemd 拉起」的状态 ────────────────────────
 cmd_prepare() {
   [ -n "${GLM_REFRESH_TOKEN:-}" ] || die "未注入 GLM_REFRESH_TOKEN 环境变量（仓库 Secrets），拒绝部署游客态服务"
+  # 网关鉴权：本网关专属 key（与 8318/8319 各自独立的口径一致，不共用
+  # AI_GATEWAY_API_KEY）。监听已改 0.0.0.0，缺 key 等于把清言账号裸奔在
+  # 同机所有网卡上，不如显式失败（与 gateways.sh 的密钥缺失同口径）。
+  [ -n "${GLM2API_GATEWAY_KEY:-}" ] || die "未注入 GLM2API_GATEWAY_KEY 环境变量（仓库 Secrets），拒绝起无鉴权服务"
 
   mkdir -p "$RUN_DIR" "$LOG_DIR" || die "无法创建运行目录 $RUN_DIR"
 
@@ -85,12 +89,18 @@ cmd_prepare() {
   # 落在运行目录的 env.sh 供单元 EnvironmentFile 读取。
   umask 077
   cat > "$ENV_FILE" <<EOF
-HOST=127.0.0.1
+# 监听 0.0.0.0：与 8317/8318/8319 同口径（同机其它反代都对外网卡开放），
+# 便于容器/局域网客户端接入。安全边界由 SERVER_API_KEYS 承担，不再靠回环地址。
+HOST=0.0.0.0
 PORT=${PORT}
 LOG_LEVEL=INFO
 DEBUG_DUMP_ALL=false
 GLM_DELETE_CONVERSATION=true
 GLM_PLATFORM=mac
+# 鉴权：只校验 POST（/v1/chat/completions、/v1/responses、/v1/images），
+# /health 与 /v1/models 为公开路由，故存活探测不受影响（见 cmd_status）。
+# 支持 Bearer 与 x-api-key 两种头（server.py _authorize）。
+SERVER_API_KEYS=${GLM2API_GATEWAY_KEY}
 # 并发槽位：上游实测 8 并发无压力（直连 8 路全部 ~2s 返回），
 # 默认 3 会让突发请求排队、队列超时后连接被重置。
 GLM_MAX_CONCURRENCY=${GLM2API_MAX_CONCURRENCY:-8}
@@ -104,7 +114,8 @@ EOF
   log "✅ 运行目录就绪（$RUN_DIR，端口 $PORT）"
 }
 
-# 端口存活：/v1 未设 SERVER_API_KEYS 时无需鉴权，直接取 HTTP 码判断
+# 端口存活：/health 是公开路由（鉴权只作用于 POST：server.py 的 do_POST →
+# _authorize，GET 分支不走鉴权），故即便设了 SERVER_API_KEYS 也能免 key 探测。
 cmd_status() {
   local code
   code="$(curl -s --max-time 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${PORT}/health" 2>/dev/null || true)"
@@ -124,6 +135,11 @@ cmd_status() {
 cmd_selftest() {
   local out model ok=0 total=0
   local models="glm-5.3 glm-5.3-flash"
+  # 鉴权：POST 受 SERVER_API_KEYS 保护，自检也必须带 key —— 否则拿到 401 会被
+  # 误判成「服务没起来」（与 zcode2api 不能用 curl -f 判存活同款坑）。
+  # key 现取运行目录 .env（600），不进日志、不进通知。
+  local api_key=""
+  api_key="$(grep -m1 '^SERVER_API_KEYS=' "$ENV_FILE" 2>/dev/null | cut -d= -f2-)"
   if [ "${GLM2API_SELFTEST_AGENT:-0}" = "1" ]; then
     models="${models} glm-5.3-flash-agent"
   fi
@@ -131,6 +147,7 @@ cmd_selftest() {
     total=$((total + 1))
     out="$(curl -sS --max-time 120 -X POST "http://127.0.0.1:${PORT}/v1/chat/completions" \
       -H 'content-type: application/json' \
+      -H "Authorization: Bearer ${api_key}" \
       -d "{\"model\":\"${model}\",\"max_tokens\":32,\"messages\":[{\"role\":\"user\",\"content\":\"回复 ok 即可\"}]}" 2>&1)"
     if printf '%s' "$out" | jq -e '.choices[0].message.content | length > 0' >/dev/null 2>&1; then
       log "✅ ${model} 自检通过"
