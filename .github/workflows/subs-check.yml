@@ -94,6 +94,28 @@ jobs:
             echo "The tunnel '$TUNNEL_NAME' is running with connections: $CONNECTIONS. Stopping actions."
             exit 0 
           fi
+      # 顺序关键：必须先起容器，再起隧道。
+      # 原因（2026-09-27 修）：原先 cloudflared 步骤排在容器之前，tunnels.sh 做端口预检时
+      # 8199 还没监听，直接打印「跳过 subs-check：源站未监听」就退出，隧道永远起不来 ——
+      # 表现为访问 subs-check 域名一直 1033/530。现改为：容器后台启动 → 等端口就绪 → ensure。
+      - name: Run docker container
+        run: |
+          # -d 后台运行：前台阻塞会让后续隧道步骤永远不执行（旧版就是这样死的）
+          docker run -d --name subs-check -p 8199:8199 -v /dropbox/self-hosted/subs-check/config:/app/config -v /dropbox/self-hosted/subs-check/output:/app/output --restart always ghcr.io/beck-8/subs-check:latest
+      - name: Wait for port 8199
+        run: |
+          # 只判端口监听，不判 HTTP 内容：首轮检测未产出时 /all.yaml 可能还不存在，
+          # 用 curl 判活会误判失败；tunnels.sh 内部也是按端口预检，口径一致
+          for i in {1..60}; do
+            if ss -tln | awk '{print $4}' | grep -qE '[:.]8199$'; then
+              echo "源站 8199 已监听（第 ${i} 次探测）"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "源站 8199 在 120s 内未监听，打印容器日志后退出"
+          docker logs --tail 50 subs-check || true
+          exit 1
       - name: run cloudflared
         run: |
           cloudflared tunnel route dns subs-check subs-check.'${{ secrets.VD }}'.eu.org
@@ -102,7 +124,8 @@ jobs:
           else
             nohup cloudflared tunnel run --url http://127.0.0.1:8199 subs-check &
           fi
-      - name: Run docker container
+      # 隧道已收敛，容器在后台跑检测；这里休眠保活直到 run 时间上限，与 sub-store 一致
+      - name: sleep
         run: |
-          docker run --name subs-check -p 8199:8199 -v /dropbox/self-hosted/subs-check/config:/app/config -v /dropbox/self-hosted/subs-check/output:/app/output --restart always ghcr.io/beck-8/subs-check:latest
+          sleep 350m
 
