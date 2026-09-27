@@ -1,41 +1,13 @@
 # AGENTS.md
 
-GitHub Actions 工作流与脚本集合：OpenList 网盘同步、Emby 302 直链、代理测速三套、各类备份、Telegram 频道视频管线。功能清单与用法见 `README.md`。
-
-动手前先读完与本次改动相关的约定；细节一律看链接指向的真源，不在这里复制。
+动手前先读完与本次改动相关的约定；细节一律看链接指向的真源。
 
 ## 通用约定
 
 - **改完代码，同步更新注释与文档**：实现改了就更新文件头注释与相关 `docs/*.md`、`README.md`；改了通知版式要同步更新核对基线（`skills/telegram-notify-audit/references/audit-checklist.md`）——规范文档只写版式，不写「哪一轮核对过什么」。注释放「为什么这么写」，不复述代码。
 - 提交信息：`type(scope): 中文描述`，正文用 `- ` 列表说清「改了什么 + 为什么」。
-- **没有任何 workflow 监听 `push` / `pull_request`**，全是 `schedule` + `workflow_dispatch`：推送不会触发运行；判断某分支会不会产出通知，只看它是否支持 `workflow_dispatch`。
 - main 会被并行推送，push 前先 `git fetch` 确认落后数。
 - **长跑（保活型）workflow 的交接走共享接力脚本** `.github/scripts/lib/self_retrigger.sh`：判据（人工取消不接力 / 已有排队则跳过 / 开关关闭不接力）、cron 频率取舍（别用 `*/5`，会被限流）与接入配方见 `docs/self-retrigger.md`。周期性任务**不要**接（会把任务变常驻）。
-
-## 修复计划（已完结，归档）
-
-**当前没有进行中的长周期修复计划。** OpenList 网盘同步专项修复已完结（2026-09-27），
-蓝图移入 `docs/archive/`（见该目录 `README.md` 的用途说明与提炼结论）。
-仓库根**不再**有 `*-remediation-plan-*.md`，不要在那里找进度真源。
-
-需要查"为什么这么写 / 这个坑踩过没有"时，去 `docs/archive/openlist-remediation-plan-2026-09-13.md`
-按关键词搜；日常结论已提炼进 `README.md` 的 openlist 章节。
-
-以下三条是从那次修复里沉淀出的**常驻纪律**（不随计划完结而失效，改本仓库任何域都适用）：
-
-- **⚠️「已修复」必须附证据（2026-09-18 教训）**：凡声称"某修法已生效/已落地"，必须给出
-  **含该提交 sha 的生产轮号 + 命中计数**（`git merge-base --is-ancestor <sha> <run_sha>` 核对
-  + 在 `gh run view <id> --log` 里 grep 该分支的日志特征）。反例：`296a3c3` 合入近 6 小时、
-  被计划文档标为"最高优先级修法"，却**从未进过任何生产轮**（近 4 轮 sha 逐一核对均不含），
-  直到主动核对才发现 ⇒ 差点留下"已修复"的假象。
-- **⚠️ 判据的观测方式会与结论耦合错（2026-09-18 教训）**：OpenList 对**新建**目录/文件的
-  列表有缓存延迟（实测首次可见 ~10s）。用"列列举里有没有"判"在不在"，会把**成功判成失败**
-  —— 加等待也未必够（实测等 15s 仍不可见）；正解是**换成直读判据**（按全路径 `lsjson` stat），
-  一测即翻案。⇒ 凡"以列表为准"的判据，都要用一条独立的直读判据交叉验证。
-- **⚠️ 实验设计要数清变量（2026-09-18 教训）**：诊断探针里"对照档"与"其余档"必须**只差一个
-  变量**；否则会把**已知现象**伪装成**新线索**，催生一个根本不需要做的修法。
-  （反例：字符集阶梯的第 6 档用的是"真实失败名逐字复刻"，与其余 5 档同时差了字符集与具体串
-  两个变量 ⇒ 误判为"新维度"，复核后撤销。）
 
 ## Telegram 通知
 
@@ -45,7 +17,7 @@ GitHub Actions 工作流与脚本集合：OpenList 网盘同步、Emby 302 直�
 - 三套实现真源：bash `.github/scripts/telegram/tg_notify.sh`、pwsh `.github/scripts/telegram/tg_notify.ps1`、python `.github/scripts/proxy-speedtest/speedtest_common.py`。**新增或修改助手要三处同步**（大小/时长格式另有三处同义实现，规范 · 大小写法）。
 - 全库禁用 `<b>` / `<i>`；条目一律 `├─/└─` 树形；kv 一律全角冒号。
 
-## 可用 skill
+### 可用 skill
 
 放在仓库根 `skills/` 下，遵循 Agent Skills 开放标准，任何支持该标准的工具都能发现并使用：
 
@@ -56,22 +28,6 @@ GitHub Actions 工作流与脚本集合：OpenList 网盘同步、Emby 302 直�
 
 两者配套：先写后核。
 
-## 改完必验
+### 改完必验
 
-- 通知：`bash skills/telegram-notify-audit/scripts/render_preview.sh`（渲染预览 + 16 项自动校验）。
-- openlist 域：**测试在 CI 跑，不在本机跑**（2026-09-16 起，用户要求"避免消耗本机资源"）：
-  `gh workflow run tests.yml`（独立测试载体，见 `.github/workflows/tests.yml`；**目前只有 openlist 一个 job，
-  即该载体当前只服务 openlist 域**，proxy-speedtest 等域未接入、仍在各域本机自查），
-  跑完 `gh run list --workflow=tests.yml --limit 1 --json databaseId,status,conclusion` 看结论；
-  失败时 `gh run view <id> --log` 取失败套件的输出尾部。**CI 基线: 本域套件全绿** ——
-  本机那批非 0 全是环境假红（无 `date -d`、`wc` 前导空格、无 docker、沙箱拦子进程），
-  ubuntu runner 上都不存在。本机只做秒级静态检查（`bash -n` / YAML 解析）。
-- **修复能力验证**（"某个文件到底能不能修好"）：走 `gh workflow run openlist-fix-check.yml`
-  （独立 workflow，定点、分钟级、真值复核 + 逐文件 `VERDICT` 行），规程见
-  `docs/archive/openlist-remediation-plan-2026-09-13.md` §12.11；
-  后端诊断/吞吐测量走 `openlist-diag.yml`（**两者都必须与主轮错开**，同一网盘账号会互相干扰）。
-- openlist 域（历史本机口径，保留供追溯）：跑回归套件，本机达标线为「**除环境假红外全 `EXIT=0`**」；
-  环境假红固定 2 项（`marker_skip_guards`（无 `date -d`）、`truth`（需 docker）），另有 flaky 单独重跑即过
-  （`progress_no_orphans`（T5 时序）、`sync_trend_budget`（macOS `wc` 前导空格）、
-  `test_pair_parallel.sh`（`wc` 前导空白导致 `[: 0\n0: integer expression expected`，本机 11/11 全过）；
-  **套件运行期偶见沙箱拦子进程导致假红**，日志里会出现 `Brokered program policy check unavailable`，见到该标记即单独复跑复核——2026-09-14 `batch_consolidate` / `bulk_hash_fold` 即此形态，单跑分别 61/0、29/0），且 `command not found` 扫描必须为空（命令与 flake 名单见规范 · 回归套件）。
+- 通知：`bash skills/telegram-notify-audit/scripts/render_preview.sh`（渲染预览 + 自动校验）。
