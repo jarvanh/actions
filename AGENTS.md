@@ -67,7 +67,8 @@ GitHub Actions 工作流与脚本集合：OpenList 网盘同步、Emby 302 直�
   本机那批非 0 全是环境假红（无 `date -d`、`wc` 前导空格、无 docker、沙箱拦子进程），
   ubuntu runner 上都不存在。本机只做秒级静态检查（`bash -n` / YAML 解析）。
 - **修复能力验证**（"某个文件到底能不能修好"）：走 `gh workflow run openlist-fix-check.yml`
-  （独立 workflow，定点、分钟级、真值复核 + 逐文件 `VERDICT` 行），规程见计划文档 §12.11；
+  （独立 workflow，定点、分钟级、真值复核 + 逐文件 `VERDICT` 行），规程见
+  `docs/archive/openlist-remediation-plan-2026-09-13.md` §12.11；
   后端诊断/吞吐测量走 `openlist-diag.yml`（**两者都必须与主轮错开**，同一网盘账号会互相干扰）。
 - openlist 域（历史本机口径，保留供追溯）：跑回归套件，本机达标线为「**除环境假红外全 `EXIT=0`**」；
   环境假红固定 2 项（`marker_skip_guards`（无 `date -d`）、`truth`（需 docker）），另有 flaky 单独重跑即过
