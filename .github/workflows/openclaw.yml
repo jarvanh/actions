@@ -1123,6 +1123,9 @@ jobs:
               chmod 755 "$WB_TMP_BIN"
               if [ -s "$WB_TMP_BIN" ]; then
                 mv -f "$WB_TMP_BIN" "$WB_BIN"
+                # mv 保留源文件模式；上面的 chmod 755 只作用于 .new 临时文件。
+                # 这里对最终路径再补一次，防「临时文件权限被外部改回」等异常路径。
+                chmod +x "$WB_BIN" 2>/dev/null || true
                 if [ -n "$WB_REMOTE_VER" ]; then
                   printf '%s\n' "$WB_REMOTE_VER" > "$WB_VER_FILE"
                   if [ -n "$WB_LOCAL_VER" ]; then
@@ -1163,6 +1166,14 @@ jobs:
           echo "2. Starting workbuddy-gateway serve on ${WB_PORT} (systemd --user 托管)..."
           echo "   preflight: binary=$WB_BIN"
           ls -l "$WB_BIN" 2>&1 || true
+          # 权限位自愈（2026-09-26 事故加固）：二进制存在但丢了 +x 时，systemd 会以
+          # 203/EXEC 反复重启（当晚 23:05-23:15 崩溃循环 8 分钟，根因是手工 mv 了一个
+          # 0644 的临时产物进来）。下载分支的 chmod 管不到「非下载路径」写入的二进制，
+          # 故启动前统一补一次 +x：仅在「存在且不可执行」时动手，幂等、无副作用。
+          if [ -f "$WB_BIN" ] && [ ! -x "$WB_BIN" ]; then
+            chmod +x "$WB_BIN" 2>/dev/null || true
+            echo "🔧 二进制缺可执行位，已补回：$WB_BIN"
+          fi
           if [ ! -x "$WB_BIN" ]; then
             echo "❌ 二进制不可执行：$WB_BIN（下载失败或权限位丢失）"
           fi
@@ -1717,123 +1728,22 @@ jobs:
             done <<< "$(grep -a "^${_today} " "$WB_LOG" 2>/dev/null | grep -a '\[Travel\]' || true)"
           fi
 
-          # ---------- 国际站每日活跃触发（2026-09-26 改造，主人拍板）----------
-          # 国际站没有每日签到活动：积分按「每日活跃」发放 —— 当天至少一次对话
-          # 即视为活跃，次日凌晨到账（helper 实测延迟约 14h；本机 ja 号 Bonus Pack
-          # 入账与网关对话日对齐 1.5~9h，即网关流量已在替被命中账号「活跃」）。
-          # 但网关路由不保证每个国际号天天被命中 —— 这里逐号补一发最小活跃请求：
-          #   POST {intl}/v2/chat/completions · 流式 · system 消息必须在前
-          #     （否则 400 code=11128，照 autumnsentiment/workbuddy-helper 逆向结论）
-          #   · 免费模型 hy4-preview-f（快照 costClass=free；实测活跃前后余额分毫不差）
-          #   · max_tokens=64 + helper 默认活跃提示词（过短问候可能被判非有效会话）
-          #   · 客户端特征头照 helper 逆向：UA=WorkBuddy/5.5.2 … + X-IDE-* + X-Domain
-          # 幂等：HTTP 200 才落当日标记（东八区日期 × 凭据名，VM 存活期内生效）；
-          # 429 频率限制不落标记，由下一轮接力自然重试（实测 de/ha 限流 16:57 恢复）。
-          # 到账数额次日凌晨才由上游发放 —— 通知只标「活跃 ✓」，绝不预填数字。
-          WB_ACT_DIR="/tmp/workbuddy-active"
-          WB_ACT_TOTAL=0
-          WB_ACT_OK=0
-          declare -A _CK_ACTIVE
-          declare -A _CK_ACTWAIT
-          if [ "${WB_READY:-}" = "1" ] && [ -n "${WB_CREDS:-}" ]; then
-            mkdir -p "$WB_ACT_DIR"
-            _act_today="$(TZ=Asia/Shanghai date +%Y-%m-%d)"
-            while IFS= read -r _af; do
-              if [ -z "$_af" ]; then continue; fi
-              _aed="$(jq -r '.edition // "cn"' "$WB_RUN_DIR/$_af" 2>/dev/null || true)"
-              case "$(printf '%s' "$_aed" | tr 'A-Z' 'a-z')" in
-                intl|international|global|workbuddy.ai) : ;;
-                *) continue ;;
-              esac
-              WB_ACT_TOTAL=$((WB_ACT_TOTAL + 1))
-              _act_mk="$WB_ACT_DIR/${_act_today}__${_af}"
-              if [ -s "$_act_mk" ]; then
-                _CK_ACTIVE["$_af"]=1
-                WB_ACT_OK=$((WB_ACT_OK + 1))
-                continue
-              fi
-              # 限流 defer：上游 429 响应原文自带恢复时刻（「usage will reset at …」）。
-              # 接力轮约 5 分钟一轮，不 defer 会把「等恢复」变成几十次无用 429；
-              # defer 记「日期+时刻」（定宽字典序即时间序），到期自动失效、恢复正常重试。
-              _act_df="$WB_ACT_DIR/${_act_today}__defer__${_af}"
-              if [ -s "$_act_df" ]; then
-                _dreset="$(head -n 1 "$_act_df" 2>/dev/null || true)"
-                _nowdt="$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M')"
-                if [[ -n "$_dreset" && "$_nowdt" < "$_dreset" ]]; then
-                  _CK_ACTWAIT["$_af"]="限流 ${_dreset} 后自动重试"
-                  continue
-                fi
-                rm -f "$_act_df"
-              fi
-              _atok="$(jq -r '.auth.accessToken // ""' "$WB_RUN_DIR/$_af" 2>/dev/null || true)"
-              if [ -z "$_atok" ]; then continue; fi
-              _auid="$(jq -r '.account.uid // ""' "$WB_RUN_DIR/$_af" 2>/dev/null || true)"
-              _adom="$(jq -r '.auth.domain // ""' "$WB_RUN_DIR/$_af" 2>/dev/null || true)"
-              # 活跃载体模型：优先取快照里该号实测免费（costClass=free）的第一个 ——
-              # 免费名单上游随时可调，硬编码会在下架后静默失效；
-              # 快照缺失/无实测记录时退回 hy4-preview-f（2026-09-26 实测免费、活跃零消耗）。
-              _amodel="hy4-preview-f"
-              if [ -r "$WB_STATUS_JSON" ]; then
-                _am="$(jq -r --arg fn "$_af" '
-                  .accounts[]? | select((.path | split("/") | last) == $fn)
-                  | (.modelStates // {}) | to_entries[]
-                  | select(.value.costClass == "free") | .key' "$WB_STATUS_JSON" 2>/dev/null \
-                  | head -n 1 || true)"
-                if [ -n "$_am" ]; then _amodel="$_am"; fi
-              fi
-              _abody="$(jq -nc --arg m "$_amodel" '{model:$m,stream:true,max_tokens:64,
-                messages:[{role:"system",content:"You are a helpful assistant."},
-                          {role:"user",content:"你是谁，谁开发你的，现在是什么时间，什么天气"}]}')"
-              rm -f /tmp/_wb-act-resp
-              _ahdr=(-s --connect-timeout 5 --max-time 60 -X POST
-                -H "Authorization: Bearer ${_atok}"
-                -H 'User-Agent: WorkBuddy/5.5.2 WorkBuddy AI/5.5.2 CLI/2.137.1'
-                -H 'X-IDE-Type: WorkBuddy'
-                -H 'X-IDE-Name: WorkBuddy'
-                -H 'X-Product: SaaS'
-                -H 'Accept: text/event-stream'
-                -H 'Content-Type: application/json'
-                -H 'Origin: https://www.workbuddy.ai'
-                -H 'Referer: https://www.workbuddy.ai/')
-              if [ -n "$_auid" ]; then _ahdr+=(-H "X-User-Id: ${_auid}"); fi
-              if [ -n "$_adom" ]; then _ahdr+=(-H "X-Domain: ${_adom}"); fi
-              _acode="$(curl -o /tmp/_wb-act-resp -w '%{http_code}' "${_ahdr[@]}" \
-                -d "$_abody" \
-                "https://www.workbuddy.ai/v2/chat/completions" 2>/dev/null || true)"
-              if [ "$_acode" = "200" ] && grep -q "chat.completion" /tmp/_wb-act-resp 2>/dev/null; then
-                # 200 且响应确为对话流（首个 data chunk 带 chat.completion 字样）：
-                # 防「HTTP 200 但流内报错」的假阳性。此刻活跃已真实发生，落当日标记。
-                printf 'ok\n' > "$_act_mk"
-                _CK_ACTIVE["$_af"]=1
-                WB_ACT_OK=$((WB_ACT_OK + 1))
-              else
-                _areset="$(sed -nE 's/.*reset at ([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}):[0-9]{2}.*/\1/p' /tmp/_wb-act-resp 2>/dev/null | head -n 1 || true)"
-                if [ -n "$_areset" ]; then
-                  printf '%s\n' "$_areset" > "$_act_df"
-                  _CK_ACTWAIT["$_af"]="限流 ${_areset} 后自动重试"
-                else
-                  _CK_ACTWAIT["$_af"]="本轮失败 · 下一轮自动重试"
-                fi
-              fi
-            done <<< "$WB_CREDS"
-            rm -f /tmp/_wb-act-resp
-          fi
 
           # 合并：状态接口修正结果列 + 拼积分/旅行列（3 列 → 5 列，渲染层只管展示）。
-          # 口径优先级（2026-09-26 活跃改造后）：签到活动开启 → 积分口径最优先
-          # （活动一旦开启，签到积分比活跃触发值钱，活跃请求自动退居兜底）；
-          # 否则国际号走活跃口径（活跃 ✓ / 待重试）。网关日志判「失败」仅在活动
-          # 开启分支里让位展示 —— 国际站的「失败」本就是无意义活动上的网络噪声。
+          # 结果优先级：网关日志判「失败」时保留原样（HTTP/原因在原始输出里，更具体）；
+          # 其余以状态接口为准 —— active=false 修成「活动未开启」（网关把 code=10001
+          # 一律幂等成功，国际站活动没开也被记成「今日已签」，这里纠正）。
           if [ -n "${WB_CHECKIN:-}" ]; then
             WB_CHECKIN_MERGED=""
             while IFS="$(printf '\t')" read -r _mf _ms _mr; do
               if [ -z "$_mf" ]; then continue; fi
               _mres="$_mr"
               _mcred=""
-              if [ "${_CK_ACT[$_mf]:-}" = "true" ]; then
-                # 签到活动开启（无论站点）：积分口径优先。
+              if [ -n "${_CK_ACT[$_mf]:-}" ]; then
                 if printf '%s' "$_mr" | grep -q '失败'; then
                   _mres="$_mr"
+                elif [ "${_CK_ACT[$_mf]}" = "false" ]; then
+                  _mres="活动未开启"
                 elif [ "${_CK_CHK[$_mf]}" = "true" ]; then
                   case "$_mr" in *"签到 ✓"*) : ;; *) _mres="今日已签" ;; esac
                   _mcred="本次 +${_CK_TODAY[$_mf]} · 累计 ${_CK_TOTAL[$_mf]} · 连签 ${_CK_STREAK[$_mf]} 天"
@@ -1841,17 +1751,6 @@ jobs:
                   _mres="未签"
                   _mcred="可得 +${_CK_DAILY[$_mf]}"
                 fi
-              elif [ -n "${_CK_ACTIVE[$_mf]:-}" ]; then
-                # 国际站今日活跃已触发（本轮成功或当日标记已存在）：活跃口径。
-                _mres="活跃 ✓ 已触发"
-                _mcred="积分次日到账（当天是否 +30 以后端入账为准）"
-              elif [ -n "${_CK_ACTWAIT[$_mf]:-}" ]; then
-                # 活跃请求本轮被 429 限流/失败：如实展示，接力轮自动重试。
-                _mres="活跃待重试"
-                _mcred="${_CK_ACTWAIT[$_mf]}"
-              elif [ "${_CK_ACT[$_mf]:-}" = "false" ]; then
-                # 兜底：活跃轮询整体未跑到（理论上 intl 号都会被活跃覆盖）。
-                _mres="活动未开启"
               fi
               _mtrav="${_CK_TRAVEL[$_mf]:-}"
               WB_CHECKIN_MERGED+="${WB_CHECKIN_MERGED:+$'\n'}${_mf}"$'\t'"${_ms}"$'\t'"${_mres}"$'\t'"${_mcred}"$'\t'"${_mtrav}"
@@ -1862,8 +1761,6 @@ jobs:
             # 有查询失败/无数据时退回网关日志口径的 WB_CHECKIN_SUMMARY，不硬凑。
             if [ "$WB_CKSTAT_OK" -eq "$WB_CKSTAT_TOTAL" ] && [ "$WB_CKSTAT_TOTAL" -gt 0 ]; then
               _n_signed=0
-              _n_active=0
-              _n_retry=0
               _n_closed=0
               _n_open=0
               _n_fail=0
@@ -1872,8 +1769,6 @@ jobs:
                 if [ -z "$_sf" ]; then continue; fi
                 case "$_sr" in
                   *"签到 ✓"*|*"今日已签"*) _n_signed=$((_n_signed + 1)) ;;
-                  *"活跃 ✓"*) _n_active=$((_n_active + 1)) ;;
-                  *"活跃待重试"*) _n_retry=$((_n_retry + 1)) ;;
                   *"活动未开启"*) _n_closed=$((_n_closed + 1)) ;;
                   *"未签"*) _n_open=$((_n_open + 1)) ;;
                   *"失败"*) _n_fail=$((_n_fail + 1)) ;;
@@ -1892,8 +1787,6 @@ jobs:
               _n_skip=$((_n_creds - _n_rows))
               if [ "$_n_skip" -lt 0 ]; then _n_skip=0; fi
               _cksum="已签 ${_n_signed}"
-              if [ "$_n_active" -gt 0 ]; then _cksum="${_cksum} · 活跃 ${_n_active}"; fi
-              if [ "$_n_retry" -gt 0 ]; then _cksum="${_cksum} · 待重试 ${_n_retry}"; fi
               if [ "$_n_closed" -gt 0 ]; then _cksum="${_cksum} · 未开启 ${_n_closed}"; fi
               if [ "$_n_open" -gt 0 ]; then _cksum="${_cksum} · 未签 ${_n_open}"; fi
               if [ "$_n_fail" -gt 0 ]; then _cksum="${_cksum} · 失败 ${_n_fail}"; fi
@@ -2402,10 +2295,24 @@ jobs:
           z2a_body_ok() {
             echo "$1" | jq -e '(.content // [] | length) > 0' >/dev/null 2>&1
           }
+          # 失败分诊：自检不通不等于服务没起来。上游额度耗尽时网关照样回 HTTP 200，
+          # 只是没有 content 块（实测 {"code":1005,"msg":"exceed quota limit"}），
+          # 与「进程没起来 / 端口没人听」是完全两种事，不该共用红色「启动失败」告警。
+          # 返回：quota=上游额度/余额类（服务本体健康）· channel=回退通道被关 ·
+          # captcha=验证码 · auth=鉴权 · unknown=其他（按真失败处理）
+          z2a_fail_class() {
+            printf '%s' "$1" | jq -e '.code == 1005 or ((.msg // "") | test("quota|余额|insufficient|1113"; "i"))' >/dev/null 2>&1 && { echo quota; return; }
+            printf '%s' "$1" | jq -e '.error.type == "channel_disabled"' >/dev/null 2>&1 && { echo channel; return; }
+            printf '%s' "$1" | jq -e '.error.type == "captcha_error"' >/dev/null 2>&1 && { echo captcha; return; }
+            printf '%s' "$1" | jq -e '.error.type | test("auth|invalid_request|unauthorized"; "i")' >/dev/null 2>&1 && { echo auth; return; }
+            echo unknown
+          }
           z2a_selftest() {
             Z2A_SELFTEST_OUT=""
             Z2A_SELFTEST_MODEL=""
             Z2A_PLAN_BAD=0
+            Z2A_FAIL_CLASS=""
+            Z2A_MAIN_CLASS=""
             for _ in 1 2 3; do
               Z2A_SELFTEST_OUT="$(z2a_probe '{"model":"glm-5.3-flash","max_tokens":16,"messages":[{"role":"user","content":"回复 ok 即可"}]}')"
               if z2a_body_ok "$Z2A_SELFTEST_OUT"; then
@@ -2416,11 +2323,22 @@ jobs:
               echo "$Z2A_SELFTEST_OUT" | jq -e '.error.type == "captcha_error"' >/dev/null 2>&1 || break
               sleep 5
             done
+            # 主通道失败原因先落袋：兜底探会覆盖 Z2A_SELFTEST_OUT，若只在最后
+            # 分诊，主通道的额度耗尽会被兜底的 channel_disabled 顶掉 —— 于是通知
+            # 让人去开回退通道，而该通道实测上游同样欠费（429 code 1113），白折腾。
+            Z2A_MAIN_CLASS="$(z2a_fail_class "$Z2A_SELFTEST_OUT")"
             Z2A_PLAN_BAD=1
             Z2A_SELFTEST_OUT="$(z2a_probe '{"model":"bigmodel/GLM-5.3","max_tokens":16,"messages":[{"role":"user","content":"回复 ok 即可"}]}')"
             if z2a_body_ok "$Z2A_SELFTEST_OUT"; then
               Z2A_SELFTEST_MODEL="$(printf '%s' "$Z2A_SELFTEST_OUT" | jq -r '.model // "未知"' 2>/dev/null || true)"
               return 0
+            fi
+            # 两条通道都没出内容：以主通道原因为准（它才是服务设计上该走的通道），
+            # 主通道归因不明时才退回兜底原因，供通知层区分「降级」与「真挂了」
+            if [ -n "$Z2A_MAIN_CLASS" ] && [ "$Z2A_MAIN_CLASS" != unknown ]; then
+              Z2A_FAIL_CLASS="$Z2A_MAIN_CLASS"
+            else
+              Z2A_FAIL_CLASS="$(z2a_fail_class "$Z2A_SELFTEST_OUT")"
             fi
             return 1
           }
@@ -2581,8 +2499,28 @@ jobs:
             printf '%s\n' "${Z2A_TAIL:-<empty>}"
             echo "--- end zcode2api.log tail ---"
             _m=""
-            tg_add_title _m "❌ zcode2api 启动失败"
-            tg_add_kv _m "结论" "未就绪"
+            # 失败分诊：服务已监听但自检不出内容时，先分清是「上游额度/通道问题」
+            # 还是「服务真没起来」。前者服务本体健康（/v1/models 带 key 回 200），
+            # 只是无额度可用 —— 用黄色「已就绪（额度耗尽）」，不用红色「启动失败」：
+            # 红色会让人去查进程/端口，实际该做的是等额度重置或换账号，方向完全不同。
+            case "$Z2A_FAIL_CLASS" in
+              quota)
+                tg_add_title _m "🟡 zcode2api 已就绪 · 全部通道额度耗尽"
+                tg_add_kv _m "结论" "服务正常，上游无可用额度（非启动故障）"
+                ;;
+              channel)
+                tg_add_title _m "🟡 zcode2api 已就绪 · 回退通道已关闭"
+                tg_add_kv _m "结论" "服务正常，bigmodel 回退通道被关（后台「设置」可开）"
+                ;;
+              auth)
+                tg_add_title _m "🟠 zcode2api 鉴权失败"
+                tg_add_kv _m "结论" "网关 Key / 上游鉴权不符，需人工介入"
+                ;;
+              *)
+                tg_add_title _m "❌ zcode2api 启动失败"
+                tg_add_kv _m "结论" "未就绪"
+                ;;
+            esac
             tg_add_path _m "端口" "$Z2A_PORT"
             tg_add_kv _m "原因" "$Z2A_REASON"
             tg_add_path _m "代码" "$Z2A_REPO"
