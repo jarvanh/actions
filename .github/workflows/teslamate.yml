@@ -138,15 +138,6 @@ jobs:
             exit 31
           fi
 
-      - name: run cloudflared
-        run: |
-          cloudflared tunnel route dns t t.'${{ secrets.VD }}'.eu.org
-          if [ -f "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ]; then
-            bash "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ensure t || true
-          else
-            nohup cloudflared tunnel run --url http://127.0.0.1:5900 t &
-          fi
-            
       - name: Run teslamate container
         run: |
           # 关键修改：直接进入解压后的teslamate目录
@@ -159,6 +150,32 @@ jobs:
           
       - name: Verify docker container is running
         run: docker ps 
+      
+      # 顺序关键：必须先起容器，再起隧道（与 subs-check.yml 同款修复，2026-09-27）。
+      # 原顺序把 run cloudflared 排在 compose 之前，tunnels.sh 预检 5900 时 grafana 还没监听，
+      # 直接「跳过 t：源站未监听」且不重试 —— 隧道 t 长期零连接、域名报 1033。
+      - name: Wait for port 5900
+        run: |
+          # 5900 是 compose 里 grafana 的宿主映射端口，只有 up -d 之后才会监听
+          for i in {1..60}; do
+            if ss -tln | awk '{print $4}' | grep -qE '[:.]5900$'; then
+              echo "源站 5900(grafana) 已监听（第 ${i} 次探测）"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "源站 5900 在 120s 内未监听，打印 compose 状态后退出"
+          cd ./teslamate && docker compose -p teslamate ps || true
+          exit 1
+      
+      - name: run cloudflared
+        run: |
+          cloudflared tunnel route dns t t.'${{ secrets.VD }}'.eu.org
+          if [ -f "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ]; then
+            bash "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ensure t || true
+          else
+            nohup cloudflared tunnel run --url http://127.0.0.1:5900 t &
+          fi
       
       - name: Upgrade PostgreSQL with full state checks
         run: |
