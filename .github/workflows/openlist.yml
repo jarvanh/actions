@@ -440,10 +440,12 @@ jobs:
 
       # ===== 一键还原修复文件 =====
       # 把 marker fixed_files 中的替代文件还原为原路径原文件名:
-      #   改名类 → rclone moveto 服务端移动（**必须 moveto**: move 的 dst 被当目录，
-      #     会建出以目标文件名命名的目录 —— 见 file_restore.sh 内注释）；
-      #     压缩/分卷类 → 下载还原后回传原路径；
-      #     成功后清理目标端替代文件并从 marker 移除条目。
+      #   改名类 → rclone copyto 复制到原路径（**保留备份副本**，2026-09-26 起；
+      #     原 moveto 会搬走副本，副本是短哈希体系下唯一内容载体 —— 详见
+      #     file_restore.sh 内注释）；必须用 copyto/moveto 而非 copy/move，
+      #     后者 dst 会被当目录、建出以目标文件名命名的目录。
+      #     压缩/分卷类 → 下载还原后回传原路径（分卷同样**保留**，不删）；
+      #     成功后从 marker 移除条目（出账）。
       # 完成后发送 Telegram 汇总。restore_task 指定任务名（backup/task0-5，
       # 即 marker 文件名前缀）或 all。
       - name: "🔒 门禁: 校验验证轮（try run）已通过"
@@ -474,7 +476,18 @@ jobs:
             *) echo "::error::还原被拒绝: 不是 openlist-restore-tryrun"; exit 1 ;;
           esac
           [ "$concl" = "success" ] || { echo "::error::还原被拒绝: 结论 ${concl:-未完成}"; exit 1; }
+          # ⚠️ created 为空时 `date -u -d ""` 不报错、落到**当天零点** ⇒ age 偏小
+          #   ⇒ **放行**（fail-open）。gh api 恒返回 created_at，正常不可达；但门禁是
+          #   安全部件，空值必须走拒绝而不是放行 ⇒ 显式判空 + 判解析失败。
+          if [ -z "$created" ]; then
+            echo "::error::还原被拒绝: 验证轮取不到创建时间，无法判时效"
+            exit 1
+          fi
           created_epoch=$(date -u -d "$created" +%s 2>/dev/null || echo 0)
+          if [ "$created_epoch" -eq 0 ]; then
+            echo "::error::还原被拒绝: 验证轮创建时间无法解析: ${created}"
+            exit 1
+          fi
           age_h=$(( ( $(date -u +%s) - created_epoch ) / 3600 ))
           [ "$age_h" -gt "${VERIFY_MAX_AGE_HOURS}" ] && { echo "::error::还原被拒绝: 已过 ${age_h}h"; exit 1; }
           echo "✅ 门禁通过（${age_h}h 内的成功验证轮）"
