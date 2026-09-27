@@ -12,13 +12,17 @@ GitHub Actions 工作流与脚本集合：OpenList 网盘同步、Emby 302 直�
 - main 会被并行推送，push 前先 `git fetch` 确认落后数。
 - **长跑（保活型）workflow 的交接走共享接力脚本** `.github/scripts/lib/self_retrigger.sh`：判据（人工取消不接力 / 已有排队则跳过 / 开关关闭不接力）、cron 频率取舍（别用 `*/5`，会被限流）与接入配方见 `docs/self-retrigger.md`。周期性任务**不要**接（会把任务变常驻）。
 
-## 进行中的修复计划
+## 修复计划（已完结，归档）
 
-仓库根 `*-remediation-plan-*.md` 是长周期修复的执行蓝图，也是**唯一的跨会话进度真源**（复选框 + 进度日志；`.codebuddy/memory/` 是本机私有、不在 git 里，别的 AI 读不到）：
+**当前没有进行中的长周期修复计划。** OpenList 网盘同步专项修复已完结（2026-09-27），
+蓝图移入 `docs/archive/`（见该目录 `README.md` 的用途说明与提炼结论）。
+仓库根**不再**有 `*-remediation-plan-*.md`，不要在那里找进度真源。
 
-- `openlist-remediation-plan-2026-09-13.md` — **OpenList 网盘同步专项修复蓝图**（跨会话进度真源；
-  2026-09-22 曾整合两份域计划，同日 Emby 302 优化收官、成果并入 `docs/emby.md`）。
-  **接手先读它的 §0「AI 接手须知」**：当前阶段、开工四步、红线、必须问用户的事都在那里，§10 是可直接粘用的接手指令模板。续做时：先核对 run 的 `headSha` 是不是你要验证的那版代码（schedule 轮钉的是创建时刻的 main sha），收尾更新该文档的复选框与进度日志再 commit。
+需要查"为什么这么写 / 这个坑踩过没有"时，去 `docs/archive/openlist-remediation-plan-2026-09-13.md`
+按关键词搜；日常结论已提炼进 `README.md` 的 openlist 章节。
+
+以下三条是从那次修复里沉淀出的**常驻纪律**（不随计划完结而失效，改本仓库任何域都适用）：
+
 - **⚠️「已修复」必须附证据（2026-09-18 教训）**：凡声称"某修法已生效/已落地"，必须给出
   **含该提交 sha 的生产轮号 + 命中计数**（`git merge-base --is-ancestor <sha> <run_sha>` 核对
   + 在 `gh run view <id> --log` 里 grep 该分支的日志特征）。反例：`296a3c3` 合入近 6 小时、
