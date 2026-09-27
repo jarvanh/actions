@@ -17,6 +17,10 @@ CONF="$HERE/tunnels.conf"
 UNIT_DIR="/etc/systemd/system"
 LOG_DIR="${HOME}/.openclaw/logs"
 
+# 源站端口未监听时的最长等待秒数（0=不等待，保持旧的立即跳过行为）
+# 用于兜底「源站已启动但监听稍慢」的竞态，避免隧道被永久跳过
+CFTUN_PORT_WAIT="${CFTUN_PORT_WAIT:-60}"
+
 # 单实例锁，避免并发调用打架
 LOCK="/tmp/.cftun-$(id -u).lock"
 exec 9>"$LOCK" 2>/dev/null || true
@@ -68,10 +72,25 @@ ensure_one() {
   local name="$1" args="$2" port="$3"
   local unit="$(unit_name "$name")"
 
-  # 源站未就绪则跳过：避免隧道对着空端口狂重启刷日志
+  # 源站未就绪：先等待，不要立刻跳过。
+  # 背景（2026-09-27）：subs-check / teslamate 曾因 workflow 把 tunnels.sh ensure 排在
+  # 源站启动步骤**之前**，预检端口未监听就立刻跳过且**不重试** —— 隧道长期零连接，
+  # 域名一直报 Cloudflare 1033。等待能覆盖「源站已启动但监听稍慢」的竞态；
+  # 若真是顺序写反，等超时后仍会跳过，但日志会直接指向步骤顺序这个根因。
   if ! port_ready "$port"; then
-    log "跳过 $name：源站 127.0.0.1:$port 未监听"
-    return 0
+    local waited=0
+    log "等待源站 127.0.0.1:$port 监听（最多 ${CFTUN_PORT_WAIT}s）..."
+    while [ "$waited" -lt "$CFTUN_PORT_WAIT" ]; do
+      sleep 5
+      waited=$((waited + 5))
+      port_ready "$port" && break
+    done
+    if ! port_ready "$port"; then
+      log "❌ 跳过 $name：源站 127.0.0.1:$port 等待 ${CFTUN_PORT_WAIT}s 后仍未监听"
+      log "   排查方向：workflow 里 tunnels.sh ensure 是否排在源站启动步骤**之前**？"
+      return 0
+    fi
+    log "源站 127.0.0.1:$port 已监听（等待 ${waited}s）"
   fi
 
   write_unit "$name" "$args" "$port"
