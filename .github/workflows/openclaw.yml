@@ -4390,7 +4390,7 @@ jobs:
               openclaw_final_size=$(stat -c%s "$TMP_OPENCLAW_TAR" 2>/dev/null || echo 0)
               if [ "$HEALTHY_RUN" = "1" ]; then
                 record_archive_result "openclaw.tar.gz" ok "$openclaw_final_size" "覆盖主包"
-                echo "6. Versioned snapshot (every healthy run, keep 3)..."
+                echo "6. Versioned snapshot (every healthy run, keep 1)..."
                 SNAP_VERSION="$(grep '^RECORDED_SUCCESSFUL_OPENCLAW_VERSION=' /tmp/run-openclaw-meta.env | tail -n 1 | cut -d= -f2-)"
                 SNAP_NAME="openclaw-snapshot-$(date -u +%Y%m%d-%H%M)-v${SNAP_VERSION}.tar.gz"
                 if rclone copyto "$TMP_OPENCLAW_TAR" "dropbox:self-hosted/${SNAP_NAME}" -v 2>&1; then
@@ -4401,7 +4401,10 @@ jobs:
                 fi
                 # 保留清理**必须按前缀过滤**：本目录是 self-hosted/ 根，同层还有
                 # rsstt/zcode/CLIProxyAPI/CliRelay 等别人的归档，直接 lsf|tail 会误删。
-                rclone lsf dropbox:self-hosted/ --files-only 2>/dev/null | grep '^openclaw-snapshot-' | sort -r | tail -n +4 | while read -r OLD_SNAP; do
+                # 只保留最新 1 份：单份 4.2G，3 份 = 12.6G，占空间且回滚池用不上这么深
+                # （回滚是逐个验配置往前找，1 份已能覆盖「主包被坏状态覆盖」的兜底场景）。
+                # tail -n +2 = 排序后从第 2 份起全删（保留第 1 份 = 最新）。
+                rclone lsf dropbox:self-hosted/ --files-only 2>/dev/null | grep '^openclaw-snapshot-' | sort -r | tail -n +2 | while read -r OLD_SNAP; do
                   rclone deletefile "dropbox:self-hosted/${OLD_SNAP}" 2>/dev/null || true
                 done
               else
