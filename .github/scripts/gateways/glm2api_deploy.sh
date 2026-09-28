@@ -15,8 +15,20 @@
 #   未注入时脚本以非零退出并给出明确原因——没有该凭据服务只能跑游客模式，
 #   拿不到账号积分，不如显式失败（与 gateways.sh 的密钥缺失同口径）。
 #
+# 持久化口径（2026-09-28 改，对齐 workbuddy-gateway）：
+#   Dropbox 专属目录   $GLM2API_DATA_REMOTE（默认 dropbox:self-hosted/glm2api）
+#        ↔ 本地数据目录 $DATA_DIR（默认 /tmp/local_glm2api/data）
+#   起前 pull（拉）、停后 push（推），与 workbuddy 的 WB_DIR ↔ WB_RUN_DIR 同构。
+#   为什么只同步 data/ 而不是整个运行目录：运行目录是 git 仓库 + venv，
+#   整目录对拷会拿 Dropbox 上的旧代码覆盖当轮刚打的 patch，且 venv 的
+#   .venv/bin/python 是软链、放挂载点执行会因 rclone 合成权限(0644) 报
+#   Permission denied（workbuddy 二进制同理）。代码/venv/.env 每轮重建，
+#   只有服务产出的状态数据需要跨轮留存（当前就是积分快照 quota-snapshot）。
+#
 # 用法：
 #   glm2api_deploy.sh prepare   # 拉代码 + venv + 写 .env（幂等）
+#   glm2api_deploy.sh pull      # 从 Dropbox 拉回持久数据（起服务前）
+#   glm2api_deploy.sh push      # 回推持久数据 + 日志 + systemd 单元到 Dropbox（收尾）
 #   glm2api_deploy.sh selftest  # 端到端自检：glm-5.3 与 glm-5.3-flash 各发一条
 #   glm2api_deploy.sh status    # 端口存活 + 模型列表
 set -u
@@ -27,6 +39,13 @@ PORT="${GLM2API_PORT:-8320}"
 LOG_DIR="$RUN_DIR/logs"
 LOG="$LOG_DIR/glm2api.log"
 ENV_FILE="$RUN_DIR/.env"
+# 持久数据目录（本地侧）。运行期状态都落这里，随 pull/push 与 Dropbox 对齐。
+DATA_DIR="${GLM2API_DATA_DIR:-$RUN_DIR/data}"
+# Dropbox 侧远端（rclone remote 形式）。空=不同步（本地单轮跑）。
+DATA_REMOTE="${GLM2API_DATA_REMOTE:-}"
+# 迁移兜底：改造前的旧快照独立文件。新位置为空时从它取一次，取到即用。
+LEGACY_SNAP_REMOTE="${GLM2API_LEGACY_QUOTA_ARCHIVE:-dropbox:self-hosted/glm2api-quota-snapshot}"
+UNIT_SRC="${HOME}/.config/systemd/user/glm2api.service"
 
 log() { printf '[glm2api] %s\n' "$*"; }
 die() { log "❌ $*"; exit 1; }
@@ -65,6 +84,10 @@ cmd_prepare() {
   # status=209/STDOUT 退出（systemd 无法打开日志文件）→ 触发 Restart=always
   # 崩溃循环。首轮部署必踩（实测 2026-09-27），故这里幂等补建。
   mkdir -p "$LOG_DIR" || die "无法创建日志目录 $LOG_DIR"
+
+  # 持久数据目录：quota.sh 的快照就写这里（GLM2API_STATE_DIR 与本值同源，
+  # 见 workflow 的传参）。必须在 unit 启动前存在，否则快照写盘失败。
+  mkdir -p "$DATA_DIR" || die "无法创建数据目录 $DATA_DIR"
 
   # 本地补丁：selected_model / platform=mac / deep_thinking。
   # 上游（XxxXTeam/glm2api）尚未合入这些改动，故每轮从本仓库的 patch 目录覆盖；
@@ -112,6 +135,67 @@ EOF
   printf 'PYTHONPATH=%s/src\n' "$RUN_DIR" > "$RUN_DIR/env.sh"
   chmod 600 "$RUN_DIR/env.sh" || true
   log "✅ 运行目录就绪（$RUN_DIR，端口 $PORT）"
+}
+
+# ── pull：起服务前把 Dropbox 上的持久数据拉进本地 data/ ────────────────────
+# rclone copy 单向拉取、不删本地多余文件；远端为空是首轮正常情况，不判失败。
+cmd_pull() {
+  [ -n "$DATA_REMOTE" ] || { log "ℹ️ 未指定 GLM2API_DATA_REMOTE，跳过数据拉取"; return 0; }
+  command -v rclone >/dev/null 2>&1 || { log "⚠️ rclone 不可用，跳过数据拉取"; return 0; }
+  mkdir -p "$DATA_DIR" || return 1
+
+  log "拉取持久数据：$DATA_REMOTE → $DATA_DIR"
+  # 这里**不能**在失败时 return：远端目录尚未创建（首次改造轮次）时 rclone copy
+  # 会以「目录不存在」报错，若提前返回就会连下面的旧快照迁移一起跳过，
+  # 直接把「今日累计」清零。故只记警告，流程继续往下走。
+  rclone copy "$DATA_REMOTE" "$DATA_DIR" \
+    --exclude 'logs/**' --exclude 'systemd/**' --exclude '*.new' \
+    --retries 5 --low-level-retries 10 --timeout 1m --contimeout 15s 2>/dev/null \
+    || log "⚠️ 数据拉取失败/远端为空，按首轮空数据启动（今日累计将从 0 起算）"
+
+  # 迁移兜底：改造前快照是独立的 dropbox:self-hosted/glm2api-quota-snapshot。
+  # 新目录里还没有快照时取一次，避免改造当轮把「今日累计」清零。
+  if [ ! -s "$DATA_DIR/quota-snapshot" ] && [ -n "$LEGACY_SNAP_REMOTE" ]; then
+    if rclone copyto "$LEGACY_SNAP_REMOTE" "$DATA_DIR/quota-snapshot" \
+         --retries 3 --low-level-retries 5 --timeout 30s --contimeout 10s 2>/dev/null; then
+      log "✅ 已从旧位置迁移积分快照（$LEGACY_SNAP_REMOTE）"
+    else
+      log "ℹ️ 旧位置无积分快照，按首轮处理"
+    fi
+  fi
+  log "✅ 数据拉取完成"
+}
+
+# ── push：收尾把本地 data/ + 日志 + systemd 单元回推 Dropbox ──────────────
+# 只 copy 不 sync：远端的历史内容不该被本轮删掉（与 workbuddy 收尾同口径）。
+# 失败不阻断收尾通知——下一轮 pull 不到最多是累计从 0 起，不能因此卡住 job。
+cmd_push() {
+  [ -n "$DATA_REMOTE" ] || { log "ℹ️ 未指定 GLM2API_DATA_REMOTE，跳过数据回推"; return 0; }
+  command -v rclone >/dev/null 2>&1 || { log "⚠️ rclone 不可用，跳过数据回推"; return 0; }
+  [ -d "$DATA_DIR" ] || { log "ℹ️ 数据目录不存在，跳过回推"; return 0; }
+
+  log "回持久数据：$DATA_DIR → $DATA_REMOTE"
+  rclone copy "$DATA_DIR" "$DATA_REMOTE" \
+    --exclude '*.new' \
+    --retries 5 --low-level-retries 10 --timeout 1m --contimeout 15s 2>/dev/null \
+    || log "⚠️ 数据回推失败（下轮累计将从 0 起）"
+
+  # 日志：服务日志在 RUN_DIR/logs（单元 StandardOutput 指这儿），不在 data/ 下，
+  # 单独带一份上去便于事后回看。体积很小（纯 INFO 行），全量 copy 无压力。
+  if [ -d "$LOG_DIR" ]; then
+    rclone copy "$LOG_DIR" "$DATA_REMOTE/logs" \
+      --retries 3 --low-level-retries 5 --timeout 1m --contimeout 15s 2>/dev/null \
+      || log "⚠️ 日志回推失败（不影响数据）"
+  fi
+
+  # systemd 单元真源：~/.config 不在持久化白名单，runner 重置会丢。
+  # 存一份到 Dropbox，重置后可按此恢复（与 workbuddy-gateway/systemd/ 同口径）。
+  if [ -s "$UNIT_SRC" ]; then
+    rclone copyto "$UNIT_SRC" "$DATA_REMOTE/systemd/glm2api.service" \
+      --retries 3 --low-level-retries 5 --timeout 30s --contimeout 10s 2>/dev/null \
+      || log "⚠️ 单元回推失败（不影响数据）"
+  fi
+  log "✅ 数据回推完成"
 }
 
 # 端口存活：/health 是公开路由（鉴权只作用于 POST：server.py 的 do_POST →
@@ -162,7 +246,9 @@ cmd_selftest() {
 
 case "${1:-}" in
   prepare)  cmd_prepare ;;
+  pull)     cmd_pull ;;
+  push)     cmd_push ;;
   status)   cmd_status ;;
   selftest) cmd_selftest ;;
-  *) echo "用法: $0 {prepare|status|selftest}"; exit 1 ;;
+  *) echo "用法: $0 {prepare|pull|push|status|selftest}"; exit 1 ;;
 esac
