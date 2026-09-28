@@ -2587,10 +2587,15 @@ jobs:
           GLM2API_GATEWAY_KEY: ${{ secrets.GLM2API_GATEWAY_KEY }}
           GLM2API_PORT: "8320"
           GLM2API_PATCH_DIR: ${{ github.workspace }}/.github/scripts/gateways/glm2api-patch
-          # 积分快照（跨轮累计「今日已消耗」）：单文件存 Dropbox。runner 本地盘
-          # 每轮重置，不落盘的话累计值每轮清零；走独立 rclone copyto 而不接
-          # 归档循环，避免改动既有打包逻辑。
-          GLM2API_QUOTA_ARCHIVE: dropbox:self-hosted/glm2api-quota-snapshot
+          # 持久化（2026-09-28 改，对齐 workbuddy-gateway）：
+          #   Dropbox 专属目录 ↔ 本地数据目录，起前 pull / 停后 push。
+          #   DATA_DIR 同时是积分快照的落点（GLM2API_STATE_DIR 指向它），
+          #   runner 本地盘每轮重置，不落 Dropbox 的话「今日累计」每轮清零。
+          GLM2API_DATA_REMOTE: dropbox:self-hosted/glm2api
+          GLM2API_DATA_DIR: /tmp/local_glm2api/data
+          GLM2API_STATE_DIR: /tmp/local_glm2api/data
+          # 迁移兜底：改造前快照是独立单文件，新目录为空时从中取一次（取到即停）。
+          GLM2API_LEGACY_QUOTA_ARCHIVE: dropbox:self-hosted/glm2api-quota-snapshot
         run: |
           set -uo pipefail
           # 通知真源在 step 顶层 source 一次（勿挪进函数体，理由见 workbuddy 步骤同名注释 / 规范 4.4）
@@ -2616,6 +2621,11 @@ jobs:
             send_tg "$_m" || echo "::warning::TG 通知发送失败（不影响任务）"
             exit 0
           fi
+
+          # 0. 先把 Dropbox 上的持久数据拉回本地（积分快照等）。
+          #    必须在 prepare 之前：prepare 只保证目录存在，不负责跨轮状态。
+          #    拉失败不阻断——按首轮空数据启动，只是「今日累计」从 0 起算。
+          bash "$DEPLOY" pull || echo "::warning::[glm2api] 持久数据拉取失败，按首轮处理"
 
           # 1. 准备运行目录（拉代码 + venv + 写 .env）
           if bash "$DEPLOY" prepare; then
@@ -2651,11 +2661,8 @@ jobs:
           GL_SOONEST_AMT=""
           GL_SOON_24H=""
           if [ "$GL_OK" = "1" ]; then
-            # 先还原上一轮的快照（今日累计要跨轮累加）；缺失即首轮，delta 会自动按 0 起算
-            if command -v rclone >/dev/null 2>&1; then
-              rclone copyto "${GLM2API_QUOTA_ARCHIVE}" /tmp/local_glm2api/quota-snapshot 2>/dev/null \
-                || echo "::warning::[glm2api] 积分快照还原失败（按首轮处理）"
-            fi
+            # 快照已在步骤 0 由 `deploy pull` 还原到 GLM2API_STATE_DIR；
+            # 缺失即首轮，delta 会自动按 0 起算，无需在此再拉一次。
             if GLQ="$(bash "$QUOTA" fetch)"; then
               GL_SCORE="$(printf '%s' "$GLQ" | cut -f1)"
               GL_SCORE_RULE="$(printf '%s' "$GLQ" | cut -f2)"
@@ -2665,11 +2672,10 @@ jobs:
               if GLD="$(bash "$QUOTA" delta "$GL_SCORE")"; then
                 GL_ROUND_DELTA="$(printf '%s' "$GLD" | cut -f1)"
                 GL_DAY_TOTAL="$(printf '%s' "$GLD" | cut -f2)"
-                # 回推快照：让「今日已消耗」在下一轮继续累加
-                if command -v rclone >/dev/null 2>&1; then
-                  rclone copyto /tmp/local_glm2api/quota-snapshot "${GLM2API_QUOTA_ARCHIVE}" 2>/dev/null \
-                    || echo "::warning::[glm2api] 积分快照回推失败（下轮累计将从 0 起）"
-                fi
+                # 快照落盘后立刻回推 Dropbox：本轮窗口约 5.75h，中途 runner 被
+                # 回收也能保住已累计的消耗（收尾还有一次 push 兜底）。
+                bash "$DEPLOY" push 2>/dev/null \
+                  || echo "::warning::[glm2api] 持久数据回推失败（下轮累计将从 0 起）"
               fi
             else
               echo "::warning::[glm2api] 积分采集失败，通知将省略积分分节"
@@ -4241,6 +4247,13 @@ jobs:
           pkill -f "local_glm2api.*main\.py" 2>/dev/null || true
           sleep 2
           pkill -9 -f "local_glm2api.*main\.py" 2>/dev/null || true
+
+          # 进程已停 → 回推持久数据到 Dropbox（对齐 workbuddy 收尾的 3b-1）。
+          # 只 copy 不 sync：远端历史内容不该被本轮删掉。失败不阻塞收尾通知。
+          echo "3d-1. Syncing glm2api data back to Dropbox..."
+          bash "$GITHUB_WORKSPACE/.github/scripts/gateways/glm2api_deploy.sh" push 2>/dev/null || \
+            echo "⚠️ glm2api 数据回推失败（今日累计可能落后一轮）"
+
           GL_STILL_RUNNING=0
           if (exec 3<> /dev/tcp/127.0.0.1/8320) 2>/dev/null; then
             GL_STILL_RUNNING=1
