@@ -2075,12 +2075,21 @@ sync_by_file_batches() {
   PROGRESS_STATS=""
   PROGRESS_PHASE_INFO="▸ 📦 文件批次拆分 · depth=${SYNC_AUTO_SPLIT_DEPTH:-0} · 正在列出文件"
   progress_update "正在列出文件..."
-  # 注意：GitHub Actions 默认 set -e -o pipefail，rclone lsjson 失败时管道会非零退出，
-  # 此处只需文件列表（失败时 total_files=0 触发下方 lsf 备选），用 || true 避免 step 直接退出。
+  # 注意：GitHub Actions 默认 set -e -o pipefail，rclone 列举失败时管道会非零退出，
+  # 此处只需文件列表（失败时 total_files=0 触发下方 lsf 备选），不能让 step 直接退出。
   # 记录 rclone 自身退出码: 供下方区分"源端为空"与"两次列举全失败"（防静默漏同步）。
+  # ⚠️ 不能写 `rclone ... | jq ... || true` 后取 PIPESTATUS（2026-09-28 审查实锤）:
+  #   rclone 失败且输出错误文本时 jq 跟着失败 → || true 执行 → PIPESTATUS 被
+  #   重置为 true 自身（恒 0）⇒ rclone 退出码丢失 ⇒ 下方"两次列举全失败"护栏
+  #   被静默吞掉。改用"先落原始输出再过滤"两段式，rc 用 `|| _rc=$?` 直接捕获
+  #   （&& || 链中的命令不触发 set -e）。
+  # ⚠️ 原 `2>&1` 一并移除: 它把 rclone 的错误/警告文本混进 jq 的 stdin，正是
+  #  诱发 jq 流式解析失败丢弃合法输出的病灶；stderr 不重定向即自然流向 job
+  #   日志，错误原因仍可见。
   local _lsjson_rc=0 _lsf_rc=0
-  rclone lsjson --recursive --files-only --no-modtime --no-mimetype "$source_path" 2>&1 | jq -c '.[]' > "$file_list_file" 2>/dev/null || true
-  _lsjson_rc=${PIPESTATUS[0]}
+  local _lsjson_raw="${batch_dir}/lsjson.raw"
+  rclone lsjson --recursive --files-only --no-modtime --no-mimetype "$source_path" > "$_lsjson_raw" || _lsjson_rc=$?
+  jq -c '.[]' < "$_lsjson_raw" > "$file_list_file" 2>/dev/null || true
 
   local total_files
   total_files=$(wc -l < "$file_list_file" | tr -d ' ')
@@ -2091,15 +2100,17 @@ sync_by_file_batches() {
   if [ "$total_files" -eq 0 ]; then
     echo "⚠️ 无文件列出，尝试 rclone lsf 备选方案..."
     # 备选：用 rclone lsf -l 获取文件列表和大小
-    rclone lsf -l --files-only --recursive "$source_path" 2>&1 | \
-      awk '{
+    # 同 lsjson 的两段式 + 去掉 2>&1（stderr 的错误文本原先会混进 awk 被转成
+    # 垃圾 JSON 行；现在自然流向 job 日志，且 rc 捕获不再依赖 PIPESTATUS）
+    local _lsf_raw="${batch_dir}/lsf.raw"
+    rclone lsf -l --files-only --recursive "$source_path" > "$_lsf_raw" || _lsf_rc=$?
+    awk '{
         size=$1
         name=""
         # 文件名是第5个字段之后的所有内容（文件名可能含空格）
         for(i=5;i<=NF;i++) name = (i==5 ? $i : name " " $i)
         if (name != "") printf "{\"size\":%s,\"path\":\"%s\"}\n", size, name
-      }' > "$file_list_file" 2>/dev/null || true
-    _lsf_rc=${PIPESTATUS[0]}
+      }' < "$_lsf_raw" > "$file_list_file" 2>/dev/null || true
     total_files=$(wc -l < "$file_list_file" | tr -d ' ')
     echo "备选方案文件数: ${total_files}"
   fi
