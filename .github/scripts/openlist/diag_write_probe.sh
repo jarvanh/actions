@@ -53,13 +53,10 @@ WP_BYTES="${DIAG_WP_BYTES:-1048576}"
 
 mkdir -p "$(dirname "$REPORT")" /tmp/ol_diag
 : > "$REPORT"
+# say/sec/http_code_of/is_409/is_mkparentdir/_mk 收敛在 diag_common.sh（2026-09-29 结构优化）
+source "$(dirname "${BASH_SOURCE[0]}")/diag_common.sh"
 
-say() { printf '%s\n' "$*" | tee -a "$REPORT"; }
-sec() { say ""; say "──────── $* ────────"; }
 
-http_code_of() { grep -oE '(4[0-9]{2}|5[0-9]{2}) [A-Za-z]' <<<"$1" | tail -1 | cut -d' ' -f1; }
-is_409() { grep -Eqi 'Conflict:[[:space:]]*409|409[[:space:]]+Conflict' <<<"$1"; }
-is_mkparentdir() { grep -Eqi 'mkParentDir' <<<"$1"; }
 _short_ol() { local p="$1"; if [ "${#p}" -gt 60 ]; then printf '%s…%s' "${p:0:30}" "${p: -26}"; else printf '%s' "$p"; fi; }
 
 say "目录可写性判据验证（探针写失败 == 目录不可写 吗）"

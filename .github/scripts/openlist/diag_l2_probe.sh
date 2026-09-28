@@ -59,12 +59,10 @@ BYTES="${DIAG_L2_BYTES:-65536}"
 
 mkdir -p "$(dirname "$REPORT")" /tmp/ol_diag
 : > "$REPORT"
+# say/sec/http_code_of/is_409/is_mkparentdir/_mk 收敛在 diag_common.sh（2026-09-29 结构优化）
+source "$(dirname "${BASH_SOURCE[0]}")/diag_common.sh"
 
-say() { printf '%s\n' "$*" | tee -a "$REPORT"; }
-sec() { say ""; say "──────── $* ────────"; }
 
-http_code_of() { grep -oE '(4[0-9]{2}|5[0-9]{2}) [A-Za-z]' <<<"$1" | tail -1 | cut -d' ' -f1; }
-is_409() { grep -Eqi 'Conflict:[[:space:]]*409|409[[:space:]]+Conflict' <<<"$1"; }
 _short_ol() { local p="$1"; if [ "${#p}" -gt 64 ]; then printf '%s…%s' "${p:0:30}" "${p: -30}"; else printf '%s' "$p"; fi; }
 
 say "L2 级「mkdir 假成功」普遍性实验"
@@ -77,22 +75,6 @@ say "开始时间: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 TS=$(date +%s)
 L1_ABS="$TARGET/$L1_REL"
 
-# 统一探测: mkdir → lsd 复核，输出三元组
-# 用法: _mk <远端目录> <标签>
-#   全局: _K_RC / _K_409 / _K_EXISTS
-_mk() {
-  local dir="$1" label="$2"
-  local _out _rc _409 _http
-  _out=$(rclone mkdir "$dir" --timeout "$MKDIR_TIMEOUT" 2>&1); _rc=$?
-  _409=0; is_409 "$_out" && _409=1
-  _http=$(http_code_of "$_out")
-  local _exists=0
-  rclone lsd "$dir" --retries 1 --timeout "$PROBE_TIMEOUT" >/dev/null 2>&1 && _exists=1
-  say "   ${label}: mkdir rc=${_rc} · http=${_http:-无} · 409特征=${_409} · **lsd 存在=${_exists}**"
-  [ "$_rc" -ne 0 ] && say "$_out" | tail -2 | sed 's/^/        ▸ /' | tee -a "$REPORT"
-  _K_RC="$_rc"; _K_409="$_409"; _K_EXISTS="$_exists"
-  [ "$_exists" -eq 1 ] && return 0 || return 1
-}
 
 # ── 前置: L1 必须存在（否则整组结论弱） ──────────────────────
 sec "P0 · 前置检查（L1 是否存在）"

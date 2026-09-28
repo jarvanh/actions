@@ -76,30 +76,12 @@ E4_WAIT="${DIAG_ESC_E4_WAIT:-15}"
 
 mkdir -p "$(dirname "$REPORT")" /tmp/ol_diag
 : > "$REPORT"
+# say/sec/http_code_of/is_409/is_mkparentdir/_mk 收敛在 diag_common.sh（2026-09-29 结构优化）
+source "$(dirname "${BASH_SOURCE[0]}")/diag_common.sh"
 
-say() { printf '%s\n' "$*" | tee -a "$REPORT"; }
-sec() { say ""; say "──────── $* ────────"; }
 
-http_code_of() { grep -oE '(4[0-9]{2}|5[0-9]{2}) [A-Za-z]' <<<"$1" | tail -1 | cut -d' ' -f1; }
-is_409() { grep -Eqi 'Conflict:[[:space:]]*409|409[[:space:]]+Conflict' <<<"$1"; }
 _short_ol() { local p="$1"; if [ "${#p}" -gt 64 ]; then printf '%s…%s' "${p:0:30}" "${p: -30}"; else printf '%s' "$p"; fi; }
 
-# 统一探测: mkdir → lsd 复核，输出三元组（与 diag_l2_probe.sh 同口径，便于对照）
-# 用法: _mk <远端目录> <标签>
-#   全局: _K_RC / _K_409 / _K_EXISTS
-_mk() {
-  local dir="$1" label="$2"
-  local _out _rc _409 _http
-  _out=$(rclone mkdir "$dir" --timeout "$MKDIR_TIMEOUT" 2>&1); _rc=$?
-  _409=0; is_409 "$_out" && _409=1
-  _http=$(http_code_of "$_out")
-  local _exists=0
-  rclone lsd "$dir" --retries 1 --timeout "$PROBE_TIMEOUT" >/dev/null 2>&1 && _exists=1
-  say "   ${label}: mkdir rc=${_rc} · http=${_http:-无} · 409特征=${_409} · **lsd 存在=${_exists}**"
-  [ "$_rc" -ne 0 ] && say "$_out" | tail -2 | sed 's/^/        ▸ /' | tee -a "$REPORT"
-  _K_RC="$_rc"; _K_409="$_409"; _K_EXISTS="$_exists"
-  [ "$_exists" -eq 1 ] && return 0 || return 1
-}
 
 say "「兜底目录跳出故障子树」可行性验证"
 say "挂载根:        $TARGET"
@@ -266,6 +248,9 @@ else
     say "⚠️ 写入失败（rc=${_rc}）⇒ 该层不可作为兜底落点"
   fi
   rm -f "$E3_SRC" 2>/dev/null || true
+  # ⚠️ E4 会复用 _rc 变量（moveto），此处必须把 E3 的 copyto rc 先存走——
+  #   否则尾部汇总行「E3 跳出层写文件」会显示 E4 的 rc（2026-09-29 审查修正）
+  E3_RC="${_rc:-NA}"
 fi
 
 # ── E4 · 还原路径可行性 ─────────────────────────────────────
@@ -364,7 +349,7 @@ for (( i=0; i<=UP_MAX; i++ )); do
 done
 say "E2 不跳出可写:     ${E2_IN_OK}"
 say "E2 跳出可写:       ${E2_OUT_OK}（复用 E1 结果）"
-say "E3 跳出层写文件:   ${_rc:-?}（详见报告正文）"
+say "E3 跳出层写文件:   ${E3_RC:-?}（详见报告正文）"
 say "结束时间: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 say "报告文件: $REPORT"
 exit 0

@@ -50,10 +50,9 @@ UP_TIMEOUT="${DIAG_REJECT_TIMEOUT:-1200s}"
 
 mkdir -p "$(dirname "$REPORT")" /tmp/ol_diag
 : > "$REPORT"
+# say/sec/http_code_of/is_409/is_mkparentdir/_mk 收敛在 diag_common.sh（2026-09-29 结构优化）
+source "$(dirname "${BASH_SOURCE[0]}")/diag_common.sh"
 
-say() { printf '%s\n' "$*" | tee -a "$REPORT"; }
-sec() { say ""; say "──────── $* ────────"; }
-http_code_of() { grep -oE '(4[0-9]{2}|5[0-9]{2}) [A-Za-z]' <<<"$1" | tail -1 | cut -d' ' -f1; }
 
 say "拒收归因专项诊断（V3 §12.13.4 的定向跟进）"
 say "目标父目录: $TARGET"

@@ -32,12 +32,11 @@ mkdir -p "$(dirname "$REPORT")" /tmp/ol_diag
 : > "$REPORT"
 
 # 同时写 stdout（进 run 日志）与报告文件（进 artifact）
-say() { printf '%s\n' "$*" | tee -a "$REPORT"; }
-sec() { say ""; say "──────── $* ────────"; }
+# say/sec/http_code_of 收敛在 diag_common.sh（2026-09-29 结构优化，原为本地逐字重复）
+source "$(dirname "${BASH_SOURCE[0]}")/diag_common.sh"
 # 从 rclone 输出里摘出 HTTP 码（405/401/423/500…）
 # 不用 \b: BSD grep -E 不支持词边界，会静默零匹配（与本机已知的 \S 同类坑）。
 # 改要求「码 + 空格 + 字母」——这同时避开了进度行的 "450.089 MiB"（后随 '.'）。
-http_code_of() { grep -oE '(4[0-9]{2}|5[0-9]{2}) [A-Za-z]' <<<"$1" | tail -1 | cut -d' ' -f1; }
 # grep -c 在零命中时会打印 0 且 exit 1；不接 || echo 会拿到 "0\n0"
 count_of() { local n; n=$(grep -cE "$1" "$2" 2>/dev/null); printf '%s' "${n:-0}"; }
 
