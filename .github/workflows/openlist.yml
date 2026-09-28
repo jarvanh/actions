@@ -9,7 +9,7 @@ on:
       # 取代旧的 3 个 boolean（fix_test_mode / restore_fixed / restore_to_source），
       # 从 UI 上杜绝多开关误组合; ⚠️ 开头的项为还原类危险操作，排在末尾
       run_mode:
-        description: "▶️ 运行模式（单选互斥）。⚠️ 标记的三项为危险操作: 会改写目标端或回传/删改源端，运行前请核对下方 restore_task 任务名"
+        description: "▶️ 运行模式（单选互斥）。⚠️ 标记的三项为危险操作: 会改写目标端或回传/删改源端，运行前请先跑 openlist-restore-tryrun 预演、核对下方 restore_task 任务名，并把预演 run id 填入 verify_run_id（三种还原/恢复模式均强制门禁）"
         required: true
         type: choice
         default: "同步"
@@ -170,7 +170,7 @@ on:
         type: string
         default: "all"
       verify_run_id:
-        description: "⚠️ 还原模式专用（必填）: 先跑 openlist-restore-tryrun（只读预演）通过后，把那次的 run id 填在这里。门禁校验它确实是 tryrun workflow 且 conclusion=success；填错/没填则还原拒绝执行"
+        description: "⚠️ 三种还原/恢复模式共用（必填）: 先跑 openlist-restore-tryrun（只读预演）通过后，把那次的 run id 填在这里。门禁校验它确实是 tryrun workflow 且 conclusion=success；填错/没填则还原/恢复拒绝执行。预演的 ①②③ 备份/原文件/实际落点核对还原模式，④ 源端原路径核对两种灾难恢复"
         required: false
         type: string
         default: ""
@@ -450,7 +450,13 @@ jobs:
       # 即 marker 文件名前缀）或 all。
       - name: "🔒 门禁: 校验验证轮（try run）已通过"
         id: restore_gate
-        if: ${{ inputs.run_mode == '⚠️ 还原 · 修复文件还原为原路径' }}
+        # 2026-09-28 起覆盖全部三种还原/恢复模式（此前只挂在一键还原上，
+        # 危险度更高的两种灾难恢复反而裸奔——其中 rebuild 变体会删源端文件，
+        # 保护强度倒挂）。tryrun 预演的 ④ 源端原路径核对正是灾难恢复的落点口径。
+        if: >-
+          ${{ inputs.run_mode == '⚠️ 还原 · 修复文件还原为原路径' ||
+          inputs.run_mode == '⚠️ 灾难恢复 · 目标端→源端' ||
+          inputs.run_mode == '⚠️ 灾难恢复 · 目标端→源端（删除源端多余文件）' }}
         env:
           GH_TOKEN: ${{ github.token }}
           VERIFY_RUN_ID: ${{ inputs.verify_run_id }}
@@ -459,23 +465,23 @@ jobs:
         run: |
           set -eu
           if [ -z "${VERIFY_RUN_ID:-}" ]; then
-            echo "::error::还原被拒绝: 未填 verify_run_id"
+            echo "::error::还原/恢复被拒绝: 未填 verify_run_id"
             echo "  gh workflow run openlist-restore-tryrun.yml -f task=${RESTORE_TASK}"
             exit 1
           fi
           info=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${VERIFY_RUN_ID}" \
                    --jq '.status + "|" + (.conclusion // "") + "|" + (.created_at // "") + "|" + (.path // "")' 2>/dev/null || echo "")
           if [ -z "$info" ] || printf '%s' "$info" | grep -q 'Not Found\|message.*documentation_url'; then
-            echo "::error::还原被拒绝: run ${VERIFY_RUN_ID} 取不到"; exit 1
+            echo "::error::还原/恢复被拒绝: run ${VERIFY_RUN_ID} 取不到"; exit 1
           fi
           concl=$(echo "$info" | cut -d'|' -f2)
           created=$(echo "$info" | cut -d'|' -f3)
           wpath=$(echo "$info" | cut -d'|' -f4-)
           case "$wpath" in
             *openlist-restore-tryrun*) : ;;
-            *) echo "::error::还原被拒绝: 不是 openlist-restore-tryrun"; exit 1 ;;
+            *) echo "::error::还原/恢复被拒绝: 不是 openlist-restore-tryrun"; exit 1 ;;
           esac
-          [ "$concl" = "success" ] || { echo "::error::还原被拒绝: 结论 ${concl:-未完成}"; exit 1; }
+          [ "$concl" = "success" ] || { echo "::error::还原/恢复被拒绝: 结论 ${concl:-未完成}"; exit 1; }
           # ⚠️ created 为空时 `date -u -d ""` 不报错、落到**当天零点** ⇒ age 偏小
           #   ⇒ **放行**（fail-open）。gh api 恒返回 created_at，正常不可达；但门禁是
           #   安全部件，空值必须走拒绝而不是放行 ⇒ 显式判空 + 判解析失败。
@@ -514,7 +520,7 @@ jobs:
       # 需外置的 marker 备份才能映射修复条目 —— 收尾每轮打包到
       # dropbox:self-hosted/openlist/sync_state_backup/，见 §13）。
       - name: "⚠️ Restore: 灾难恢复 目标端→源端"
-        if: ${{ inputs.run_mode == '⚠️ 灾难恢复 · 目标端→源端' }}
+        if: ${{ inputs.run_mode == '⚠️ 灾难恢复 · 目标端→源端' && steps.restore_gate.outcome != 'failure' && steps.restore_gate.outcome != 'cancelled' }}
         timeout-minutes: 240
         env:
           RESTORE_TASK: ${{ inputs.restore_task || 'all' }}
@@ -529,7 +535,7 @@ jobs:
       # 替代形态与修复条目原路径均排除出 sync（防密文名拷回/防误删待还原路径），
       # 由逐条还原负责回填并按 marker md5 校验。目标端全程只读，可重复执行。
       - name: "⚠️ Restore: 镜像灾难恢复 目标端→源端（删除源端多余文件）"
-        if: ${{ inputs.run_mode == '⚠️ 灾难恢复 · 目标端→源端（删除源端多余文件）' }}
+        if: ${{ inputs.run_mode == '⚠️ 灾难恢复 · 目标端→源端（删除源端多余文件）' && steps.restore_gate.outcome != 'failure' && steps.restore_gate.outcome != 'cancelled' }}
         timeout-minutes: 240
         env:
           RESTORE_TASK: ${{ inputs.restore_task || 'all' }}
