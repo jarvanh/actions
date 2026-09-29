@@ -841,6 +841,9 @@ jobs:
           # 2026-09-05 审计发现 watchdog/启动通知因只注入 TG_* 而静默丢失，故双名并注
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          # 告警档凭据（tier=alert 时发往告警 bot；未配置自动回落主 bot）
+          TELEGRAM_BOT_TOKEN_ALERT: ${{ secrets.TELEGRAM_BOT_TOKEN_ALERT }}
+          TELEGRAM_CHAT_ID_ALERT: ${{ secrets.TELEGRAM_CHAT_ID_ALERT }}
           EMBY_API_KEY: ${{ secrets.EMBY_API_TOKEN }}
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -1053,7 +1056,7 @@ jobs:
               tg_add_kv WD_MSG "动作" "已自动切到中转模式（视频经服务器转发）"
               tg_add_footer WD_MSG
               # 不再吞 stderr：发送失败原因（429 重试耗尽 / 400 解析失败）必须可见（规范 · 发送层）
-              send_tg "$WD_MSG" || true
+              send_tg "$WD_MSG" alert || true
               exit 0
             fi
           done

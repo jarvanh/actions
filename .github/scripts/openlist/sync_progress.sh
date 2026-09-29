@@ -428,18 +428,23 @@ _progress_render() {
   local msg=""
   local title
   local subtitle=""
+  local final_note=""
   if [ "$finalized" -eq 1 ]; then
-    # 收尾标题只有 4 种终态，按严重度从高到低判定:
-    #   1 ⛔ 中断          — 仍有 pending/running（撞 job 上限被取消、step 提前
-    #     失败），或一个任务都没注册。它必须排在 failed 之前: 中断时伴生的失败
-    #     只是"没跑完"的副产物，"13 待处理 + 1 失败"被报成"同步完成（有失败）"
-    #     会让人误以为整轮跑完了。
-    #   2 ⚠️ 有文件无法同步 — 全部任务都跑完，但个别文件连修复管线也没搞定
+    # 收尾标题共 5 种终态，按严重度从高到低判定:
+    #   1 ⛔ 中断          — 一个任务都没注册（注册前就被取消/失败），引擎压根
+    #     没启动，属真异常。
+    #   2 ⏸️ 收摊          — 仍有 pending/running：时间预算优雅到站或撞 6h job
+    #     上限，剩余任务下轮经 marker + self_retrigger 自动接力，属预期内收摊
+    #     而非事故（2026-09-28 语义修正：旧版与「未注册」共用 ⛔ 同步中断，预算
+    #     到站的正常收摊被误报成事故）。它必须排在 failed 之前: 收摊时伴生的
+    #     失败只是"没跑完"的副产物，"13 待处理 + 1 失败"被报成"同步完成（有
+    #     失败）"会让人误以为整轮跑完了。
+    #   3 ⚠️ 有文件无法同步 — 全部任务都跑完，但个别文件连修复管线也没搞定
     #     （已记入 marker 修复清单/黑名单，下轮继续）。修复成功的同时仍有
     #     顽固失败时，失败优先。
-    #   3 ✅ 带修复的完成  — 全部跑完、无遗留失败，但部分文件是经替代方式
+    #   4 ✅ 带修复的完成  — 全部跑完、无遗留失败，但部分文件是经替代方式
     #     （改名/短哈希/分卷）落盘的，提醒可还原。
-    #   4 ✅ 完全完成
+    #   5 ✅ 完全完成
     local fixed_total
     fixed_total=$(_progress_get_fixed_files)
     # 标题只留 emoji+短语，计数细节下沉 "状态" kv 行（telegram.sh 规范:
@@ -449,9 +454,10 @@ _progress_render() {
       title="⛔ 同步中断"
       subtitle="未注册任何任务"
     elif [ $((pending + running)) -gt 0 ]; then
-      title="⛔ 同步中断"
+      title="⏸️ 同步轮次收摊"
       subtitle="待处理 ${pending} · 进行中未执行完 ${running}"
       [ "$failed" -gt 0 ] && subtitle+=" · 失败 ${failed}"
+      final_note="时间预算到站，剩余任务下轮自动接力"
     elif [ "$failed" -gt 0 ]; then
       title="⚠️ 同步完成"
       subtitle="${failed} 个任务有文件无法同步"
@@ -470,6 +476,8 @@ _progress_render() {
   [ -n "$subtitle" ] && tg_add_kv msg "状态" "$subtitle"
   # 计数行字段图标同样裸置（规范 · 取值行口径：emoji 一律不套标签，无例外）
   tg_append msg "📊 总 ${total} · 待处理 ${pending} · 进行中 ${running} · 完成 ${completed} · 跳过 ${skipped} · 失败 ${failed}"$'\n'
+  # 收摊说明紧跟计数行：第一眼就知道「预期内、不用动手」（规范 · 说明段：段前空行）
+  [ -n "$final_note" ] && tg_add_note msg "$final_note"
 
   # 进行中任务块: 任务条目（分组渲染）+ 多层级阶段行/统计信息/细粒度状态
   #   各拆分深度槽位逐层下沉合并：深度 0 的块挂在任务条目下，
@@ -479,7 +487,7 @@ _progress_render() {
   # 阶段/统计不展示（progress_finalize 已清空各槽位，属过期信息）
   if [ "$running" -gt 0 ]; then
     local _running_title="📍 进行中 · ${running}"
-    # 规范：状态 emoji 统一表无 ⏸️（finalize 后仍在跑 = 🔄）
+    # 规范：分节 emoji 用 🔄（finalize 后仍在跑 = 🔄；⏸️ 专用于收摊终态标题，分节不用）
     [ "$finalized" -eq 1 ] && _running_title="🔄 进行中 · ${running}"
     tg_add_section msg "$_running_title"
     tg_add_block msg "$(_progress_render_task_list "$running_lines")"

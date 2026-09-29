@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# 收尾进度通知标题四态回归测试（run 撞 6h job 上限实录: 16 任务 / 13 待处理
+# 收尾进度通知标题五态回归测试（run 撞 6h job 上限实录: 16 任务 / 13 待处理
 #   / 1 进行中 / 1 完成 / 1 失败，标题却是"⚠️ 同步完成（有失败）"）
 # 背景: 旧判定的 failed>0 分支排在 pending/running 之前，中断与"跑完但有
 #   顽固失败"共用同一个 ⚠️ 标题，被中断的一轮看着像正常收尾。
-# 契约（终态四态: 中断 / 有文件无法同步 / 带修复完成 / 完全完成，按严重度从高到低
+# 契约（终态五态: 中断 / 收摊 / 有文件无法同步 / 带修复完成 / 完全完成，按严重度从高到低
 #   互斥判定；标题只留 emoji+短语，计数细节一律
 #   下沉第二行 "状态：" kv 行、" · " 分隔）:
-#   T1 有 pending/running（含失败） -> ⛔ 同步中断 + 状态行（待处理/进行中未执行完/失败）
-#   T2 有 pending/running 但无失败  -> ⛔ 同步中断 + 状态行（不带失败数）
+#   T1 有 pending/running（含失败） -> ⏸️ 同步轮次收摊 + 状态行（待处理/进行中未执行完/失败）+ 接力说明段
+#   T2 有 pending/running 但无失败  -> ⏸️ 同步轮次收摊 + 状态行（不带失败数）+ 接力说明段
 #   T3 一个任务都没注册             -> ⛔ 同步中断 + 状态行（未注册任何任务）
 #   T4 全部跑完、无失败、无修复     -> ✅ 同步全部完成（无状态行）
 #   T5 全部跑完、无失败、有修复     -> ✅ 同步全部完成 + 状态行（N 个文件经修复同步）
@@ -80,8 +80,8 @@ while [ "$local_i" -lt 13 ]; do
   local_i=$((local_i + 1))
   add_task "p${local_i}" "onedrive:$((local_i % 6)) → wopan175/$((local_i % 6))" pending
 done
-chk "T1 中断（含失败数）优先于失败态" "$(title_of)" \
-  "$(expect_title '⛔ 同步中断')"
+chk "T1 收摊（含失败数）优先于失败态" "$(title_of)" \
+  "$(expect_title '⏸️ 同步轮次收摊')"
 chk "T1 中断计数下沉状态行" "$(subtitle_of)" \
   "$(expect_status '待处理 13 · 进行中未执行完 1 · 失败 1')"
 
@@ -90,8 +90,9 @@ reset_case
 add_task t_done "onedrive:backup → aliyundriveCrypt/backup" completed
 add_task t_run "onedrive:0 → wopan176Crypt/0" running
 add_task t_pend "onedrive:1 → wopan175/1" pending
-chk "T2 中断无失败时不带失败数" "$(subtitle_of)" \
+chk "T2 收摊无失败时不带失败数" "$(subtitle_of)" \
   "$(expect_status '待处理 1 · 进行中未执行完 1')"
+chk "T2 收摊带接力说明段" "$(_progress_render | grep -c '时间预算到站，剩余任务下轮自动接力')" "1"
 
 # ---------- T3: 未注册任何任务 ----------
 reset_case

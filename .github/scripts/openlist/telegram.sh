@@ -41,14 +41,15 @@
 send_telegram_message() {
   local message="$1"
   local parse_mode="${2:-HTML}"
+  local tier="${3:-}"
   [ -z "$message" ] && return 0
   # 不再吞掉 stderr：发送层已把失败原因（429 重试耗尽 / 400 解析失败 / 其它 API 错误）
   # 写到 stderr，>/dev/null 会让「通知静默消失」无法定位（规范 · 发送层）
   if [ "${#message}" -gt 4000 ]; then
-    send_tg_chunked "$message" || true
+    send_tg_chunked "$message" "$tier" || true
     return 0
   fi
-  send_tg "$message" || true
+  send_tg "$message" "$tier" || true
 }
 
 # 发送 Telegram 消息并返回 message_id

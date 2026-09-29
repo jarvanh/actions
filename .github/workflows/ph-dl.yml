@@ -209,7 +209,7 @@ jobs:
           rm -f "$YT_DLP_ARCHIVE"
 
           # 损坏文件通知（process_ph_download.sh 验证失败并丢弃的文件；统一 HTML 版式）
-          # NEW_CORRUPT = 本轮新增的损坏数，收尾标题的降级依据；
+          # NEW_CORRUPT = 本轮新增的损坏数（收尾标题恒 ✅，不再参与降级判定）；
           # 与库存里的累计损坏数（CORRUPT_VIDEOS）是两回事，别混用
           NEW_CORRUPT=0
           if [ -f "$DOWNLOAD_TMP/corrupted.txt" ]; then
@@ -217,8 +217,11 @@ jobs:
             CORRUPTED_COUNT=$(grep -c . "$DOWNLOAD_TMP/corrupted.txt" || true)
             CORRUPTED_LIST=$(cat "$DOWNLOAD_TMP/corrupted.txt")
             msg=""
-            tg_add_title msg "🗑️ ph-dl 下载阶段损坏视频"
-            tg_add_kv msg "损坏数量" "${CORRUPTED_COUNT} 个"
+            # 损坏是「只能接受」的终态而非事故（2026-09-28 语义修正）：标题带数量，
+            # 处置写进 kv——文件已删除并重置下载记录（archive 移除 ID），下轮自动
+            # 重下；源端文件本身损坏则每轮重复，无法修复
+            tg_add_title msg "🗑️ ph-dl 新增损坏视频 · ${CORRUPTED_COUNT}"
+            tg_add_kv msg "处置" "已删除并重置下载记录，下轮自动重下；源端持续损坏则每轮重复，无法修复"
             tg_add_section msg "📋 文件列表 · ${CORRUPTED_COUNT}"
             # tree_code_fold: 逐行转义 + 超 8 条折叠（裸文件名未转义会触发 400 整条退化）
             tg_add_block msg "$(tree_code_fold "$CORRUPTED_LIST")"
@@ -271,18 +274,13 @@ jobs:
 
           # 统一 HTML 版式 + 统一收尾区（散装消息合并为一条，明细树形列出）
           msg=""
-          # 状态图标随结论降级（规范 · 状态图标）：本轮有文件损坏被丢弃才 ⚠️。
-          # 不能拿库存里的累计损坏数判定——历史遗留的损坏每轮都在，本轮空转
-          #（0 下载）也会被标黄，读者分不清「这轮出事」还是「旧账没清」，
-          # 而且本轮真有损坏时上面已单独发过 🗑️ 通知，再标一次等于重复报警
+          # 收尾恒 ✅（2026-09-28 语义修正）：损坏丢弃是「只能接受」的终态——
+          # 明细已有 🗑️ 单独通知 + 下方「本次损坏丢弃」kv，同步本身没有出问题，
+          # 不再降级 ⚠️。库存累计损坏数仍只作 kv，不参与任何判定
           # 标题写「同步」而不是「下载」：本 workflow 是「拉收藏夹增量 → 去重 →
           # 转码上传频道」，写「下载」会让人以为只下不传，也解释不了下面那几行
           # 库存/已上传统计
-          if [ "${NEW_CORRUPT:-0}" -gt 0 ]; then
-            tg_add_title msg "⚠️ ph 收藏夹同步完成"
-          else
-            tg_add_title msg "✅ ph 收藏夹同步完成"
-          fi
+          tg_add_title msg "✅ ph 收藏夹同步完成"
           tg_add_kv msg "收藏夹" "${PH_FAV_TOTAL:-未知} 个视频"
           tg_add_kv msg "视频文件" "${TOTAL_VIDEOS} 条"
           tg_add_kv msg "库存状态" "已上传 ${UPLOADED_VIDEOS} · 待上传 ${PENDING_VIDEOS}"

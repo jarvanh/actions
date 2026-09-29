@@ -21,6 +21,9 @@ jobs:
       # 注：这是本机网关的访问口令，不是任何上游服务的凭据；两者都不对外暴露公网。
       # 取值在仓库 Secrets（2026-09-24 轮换：旧明文已从仓库移除）
       AI_GATEWAY_API_KEY: ${{ secrets.AI_GATEWAY_API_KEY }}
+      # 告警档凭据（tier=alert 时发往告警 bot；未配置自动回落主 bot）
+      TELEGRAM_BOT_TOKEN_ALERT: ${{ secrets.TELEGRAM_BOT_TOKEN_ALERT }}
+      TELEGRAM_CHAT_ID_ALERT: ${{ secrets.TELEGRAM_CHAT_ID_ALERT }}
     steps:
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -2538,7 +2541,7 @@ jobs:
               tg_add_pre _m "$Z2A_TAIL"
             fi
             tg_add_footer _m
-            send_tg "$_m" || echo "::warning::TG 通知发送失败（不影响任务）"
+            send_tg "$_m" alert || echo "::warning::TG 通知发送失败（不影响任务）"
           else
             echo "✅ [zcode2api] ${Z2A_PORT} 已就绪（${Z2A_REASON}）"
             printf '%s\n' "${GITHUB_RUN_ID:-manual}" > "$Z2A_RUN_TAG_FILE"
@@ -2691,7 +2694,7 @@ jobs:
             tg_add_path _m "运行目录" "/tmp/local_glm2api"
             tg_add_path _m "日志" "/tmp/local_glm2api/logs/glm2api.log"
             tg_add_footer _m
-            send_tg "$_m" || echo "::warning::TG 通知发送失败（不影响任务）"
+            send_tg "$_m" alert || echo "::warning::TG 通知发送失败（不影响任务）"
           else
             _m=""
             tg_add_title _m "✅ glm2api 已就绪"
@@ -3325,7 +3328,7 @@ jobs:
             tg_add_footer msg
             # 统一走发送层：429 按 retry_after 重试已内置，HTML 解析失败直接报错。
             # 用 chunked 版：日志经转义后可能膨胀到单条上限，分片比整条被拒好
-            send_tg_chunked "$msg" || true
+            send_tg_chunked "$msg" alert || true
           else
             echo "⚠️ Telegram alert skipped: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is empty"
           fi
@@ -3885,7 +3888,7 @@ jobs:
               tg_add_footer full_msg
               # 走发送层而非 curl 直发：429 重试已内建，HTML 解析失败直接报错（规范 · 发送层），
               # 429 限流按 retry_after 等待重试，disable_web_page_preview 内置
-              send_tg "$full_msg" || true
+              send_tg "$full_msg" alert || true
             fi
           }
 
@@ -4081,7 +4084,7 @@ jobs:
               tg_add_note msg "请及时保存状态或完成当前操作。"
               tg_add_footer msg
               # 统一走发送层（退化/429 重试内置）
-              send_tg "$msg" || true
+              send_tg "$msg" alert || true
             else
               echo "⚠️ Telegram secrets missing, skip final archive warning."
             fi
@@ -4311,7 +4314,7 @@ jobs:
                 tg_add_pre full_msg "$(printf '%s' "$detail" | tail -c 1200)"
               fi
               tg_add_footer full_msg
-              send_tg "$full_msg" || true
+              send_tg "$full_msg" alert || true
             fi
           }
 
@@ -4686,7 +4689,7 @@ jobs:
             tg_add_kv msg "结论" "$_verdict"
             tg_add_note msg "本轮没有产出归档明细，云端归档保持上一轮状态。"
             tg_add_footer msg
-            send_tg "$msg" || echo "::warning::TG 通知发送失败（不影响任务）"
+            send_tg "$msg" alert || echo "::warning::TG 通知发送失败（不影响任务）"
             exit 0
           fi
 
