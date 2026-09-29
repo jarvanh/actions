@@ -2242,6 +2242,32 @@ jobs:
       # 改 .env）才需手动重传覆盖。
       # 必须在 Notify Tailscale SSH entry 之前起来（该步骤会读 AI 网关状态）。
       # 收尾停止见 Stop OpenClaw and Final Archive 的 3c 步（在 workbuddy 的 3b 之后）。
+      # quota-board：三网关额度聚合看板（TG 置顶消息原地编辑 + Mini App HTTP :8321）。
+      # 代码/unit 真源在 /dropbox/self-hosted/quota-board/（随 Dropbox 每轮恢复）；
+      # 这里只做幂等 install+restart。隧道 qb（qb.derrick.eu.org → 127.0.0.1:8321）
+      # 凭证随 /dropbox/self-hosted/.cloudflared 恢复，由 tunnels.conf 纳管。
+      # QUOTA_BOARD_TOKEN 持久化在 ~/.openclaw/.env（随 openclaw.tar.gz 归档每轮恢复），
+      # unit 的 EnvironmentFile 指向该文件，本 step 只负责拉起服务。
+      - name: Run quota-board (TG 额度看板 + Mini App)
+        run: |
+          set -euo pipefail
+          QB_DIR=/dropbox/self-hosted/quota-board
+          [ -f "$QB_DIR/quota-board.service" ] || { echo "quota-board unit 缺失，跳过"; exit 0; }
+          mkdir -p ~/.config/systemd/user
+          cp "$QB_DIR/quota-board.service" ~/.config/systemd/user/
+          systemctl --user daemon-reload || true
+          systemctl --user enable quota-board >/dev/null 2>&1 || true
+          systemctl --user restart quota-board
+          sleep 3
+          systemctl --user is-active quota-board || true
+          # 隧道纳入统一管理器（幂等）
+          if [ -f "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ]; then
+            bash "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ensure qb || true
+          else
+            nohup cloudflared tunnel run --url http://127.0.0.1:8321 qb \
+              > ~/.openclaw/logs/cloudflared_qb.log 2>&1 &
+          fi
+
       - name: Run zcode2api (GLM gateway)
         id: run_zcode2api
         continue-on-error: true
