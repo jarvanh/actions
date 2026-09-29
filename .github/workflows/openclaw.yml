@@ -2285,9 +2285,10 @@ jobs:
           # 判据是「上游返回了助手内容块」——healthz/模型列表通不代表上游链路可用
           # （旧反代实测漏过「进程活着但上游 429」）。注意 GLM 是思考模型，
           # max_tokens 给小了会只产出 thinking 块，故判据不限定 text 类型。
-          # 主探 glm-5.3-flash（Plan 通道）：要过无痕验证码，求解偶发连败
-          # （实测多在第 2 次尝试成功），故验证码类错误重试 3 轮；
-          # 全败再退探 bigmodel/GLM-5.3（API Key 通道，免验证码）——能通说明服务
+          # 主探 glm-5.3-flash（Plan 通道）：要过无痕验证码。2026-09-29 起
+          # 求解器已切 bun + vendored 上游 captcha-happy（实测 6/6 成功），
+          # 连败已罕见，验证码类错误重试 3 轮仅作兜底；全败再退探
+          # bigmodel/GLM-5.3（API Key 通道，免验证码）——能通说明服务
           # 本体健康、仅 Plan 通道降级，通知里如实分开报（Z2A_PLAN_BAD）。
           z2a_probe() {
             curl -sS --max-time 120 -X POST "http://127.0.0.1:${Z2A_PORT}/v1/messages" \
@@ -2422,6 +2423,19 @@ jobs:
             fi
           else
             echo "Cloning zcode2api and restoring data snapshot..."
+            # Bun 运行时：验证码求解主路径 = bun + vendored 上游 captcha-happy
+            # （fork 641c193 起）。缺 bun 时 settings.py 自动回退旧 node solver.js，
+            # 该移植版在上游轮换 pe 版本后失速率 >70%（表现为连环 500「多次重试
+            # 无结果」），故此处 best-effort 补装；安装失败不阻断本轮（有回退路
+            # 径），但自检大概率 Plan 降级。runner 重置会清 ~/.bun，每轮幂等检查。
+            if [ ! -x "$HOME/.bun/bin/bun" ]; then
+              echo "Installing Bun for zcode2api captcha solver..."
+              if curl -fsSL https://bun.sh/install | bash; then
+                echo "✅ [zcode2api] Bun 已安装（$HOME/.bun/bin/bun）"
+              else
+                echo "⚠️ [zcode2api] Bun 安装失败（回退 node solver.js，验证码可能连环 500）"
+              fi
+            fi
             rm -rf "$Z2A_RUN_DIR"
             # 先 clone（目标必须为空目录），logs 目录随后补建
             if ! git clone --quiet --depth 1 "$Z2A_REPO" "$Z2A_RUN_DIR"; then
