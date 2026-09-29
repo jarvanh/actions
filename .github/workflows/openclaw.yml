@@ -21,7 +21,7 @@ jobs:
       # 注：这是本机网关的访问口令，不是任何上游服务的凭据；两者都不对外暴露公网。
       # 取值在仓库 Secrets（2026-09-24 轮换：旧明文已从仓库移除）
       AI_GATEWAY_API_KEY: ${{ secrets.AI_GATEWAY_API_KEY }}
-      # 告警档凭据（tier=alert 时发往告警 bot；未配置自动回落主 bot）
+      # 告警档凭据（tier=alert 直达告警 bot @SaberFuckBot，无回落）
       TELEGRAM_BOT_TOKEN_ALERT: ${{ secrets.TELEGRAM_BOT_TOKEN_ALERT }}
       TELEGRAM_CHAT_ID_ALERT: ${{ secrets.TELEGRAM_CHAT_ID_ALERT }}
     steps:

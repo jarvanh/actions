@@ -15,8 +15,8 @@
 # 环境变量: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 #   （历史名 TG_BOT_TOKEN / TG_CHAT_ID 自动兼容——见下方别名回退）
 # 档位路由（2026-09-28 通知分级）: send_tg <text> [tier] / send_tg_chunked <text> [tier]
-#   tier=alert 且 TELEGRAM_BOT_TOKEN_ALERT + TELEGRAM_CHAT_ID_ALERT 均非空 → 发往告警 bot；
-#   否则一律回落主 bot——未配置 secrets 只降级不丢消息。调用点显式传档位，不按标题匹配。
+#   tier=alert → 发往告警 bot（@SaberFuckBot，secrets 已固定配置，无回落）；
+#   凭据缺失时发送失败并在日志留痕。调用点显式传档位，不按标题匹配。
 #   例外: openlist 进度面板直连 API（删旧发新依赖同 bot）固定主 bot，不参与路由。
 # 收尾接线（可选，缺席时 tg_add_footer 优雅降级）:
 #   TG_RUN_URL        运行日志链接（workflow 注入 https://github.com/<repo>/actions/runs/<id>）
@@ -344,14 +344,14 @@ tg_add_pre() {
 # 单次发送尝试（429 自动重试；其余失败直接返回非 0 并输出错误信息）
 # 退出码: 0 成功 / 2 HTML 解析失败（can't parse entities）/ 1 其他失败
 # ===== 档位路由 =====
-# tier 为空 = 日常（主 bot）；tier=alert 且告警凭据齐全 = 告警 bot；其余一律主 bot。
+# tier 为空 = 日常（主 bot）；tier=alert = 告警 bot（@SaberFuckBot，无回落，凭据缺失即失败留痕）。
 # 解析结果写入 _TG_TOKEN/_TG_CHAT，仅 _tg_send_once 消费；面板/sendDocument 等直连
 # API 的路径不读它们（固定主 bot）。
 tg_route() {
   local tier="${1:-}"
   _TG_TOKEN="${TELEGRAM_BOT_TOKEN}"
   _TG_CHAT="${TELEGRAM_CHAT_ID}"
-  if [ "$tier" = "alert" ] && [ -n "${TELEGRAM_BOT_TOKEN_ALERT:-}" ] && [ -n "${TELEGRAM_CHAT_ID_ALERT:-}" ]; then
+  if [ "$tier" = "alert" ]; then
     _TG_TOKEN="${TELEGRAM_BOT_TOKEN_ALERT}"
     _TG_CHAT="${TELEGRAM_CHAT_ID_ALERT}"
   fi
@@ -399,7 +399,7 @@ _tg_send_once() {
 }
 
 # 单条发送（HTML parse_mode；429 自动重试，其余失败直接返回非 0 并在 stderr 输出错误）
-# tier 可选: alert=告警 bot（未配置自动回落主 bot），缺省=主 bot
+# tier 可选: alert=告警 bot（@SaberFuckBot，无回落），缺省=主 bot
 send_tg() {
   local text="$1" tier="${2:-}"
   [ -z "$text" ] && return 0

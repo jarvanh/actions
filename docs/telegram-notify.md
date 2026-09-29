@@ -1437,7 +1437,8 @@ python 侧拿不到 bash 函数，仍有两处同义实现（`add_uploaded_video
   真源本身不校验。
 - **告警档（2026-09-28）**：`send_tg "$msg" alert` / `send_tg_chunked "$msg" alert` /
   `send_telegram_message "$msg" HTML alert` 的 step 还需注入 `TELEGRAM_BOT_TOKEN_ALERT` /
-  `TELEGRAM_CHAT_ID_ALERT`；告警 bot 未配置时发送层自动回落主 bot，不会丢消息。
+  `TELEGRAM_CHAT_ID_ALERT`；告警 bot 已固定配置为 @SaberFuckBot，`alert` 档直达、
+  不回退主 bot——凭据缺失时发送失败并在日志留痕。
   档位由调用点显式声明，发送层不按标题匹配。
 - bash 真源兼容历史变量名 `TG_BOT_TOKEN` / `TG_CHAT_ID`；**pwsh 侧没有这层回退**，
   必须注入 `TELEGRAM_*`。
@@ -1493,8 +1494,8 @@ bash 里内嵌的 python 段（`python3 - <<'PY'`）无法 import 共享层，�
 - **已引入发送层的通知点不得 curl 直发**。唯一例外是需要 message_id 的进度面板原地
   维护（4.6 节）。
 - **档位路由（2026-09-28）**：`send_tg` / `send_tg_chunked` 收可选 `tier`（pwsh
-  `Send-TgMessage <text> [tier]`）；`alert` 档在 `*_ALERT` 凭据齐全时发往告警 bot，
-  否则回落主 bot。进度面板直连 API 固定主 bot，不参与路由。
+  `Send-TgMessage <text> [tier]`）；`alert` 档固定发往告警 bot（@SaberFuckBot，
+  secrets 已配置，无回落）。进度面板直连 API 固定主 bot，不参与路由。
 - 媒体上传（`sendDocument` / `sendVideo`）不走 sendMessage 发送层（固有例外），但
   caption **必须**转义、429 重试与发送层同口径（最多 5 次）。
 
