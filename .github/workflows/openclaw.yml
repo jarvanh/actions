@@ -303,6 +303,13 @@ jobs:
           } > "$HOME/ts.env"
           echo "SSH 入口: ssh runner@${TS_HOST}（RustDesk 直连: ${TS_FQDN}:21118）"
 
+          # 后台管理面板走 ts.net 域名：tailscale serve 反代到本地 8319（AI 网关）。
+          # tailscaled 以 --state=mem: 运行（runner 临时态设计），签不了 HTTPS 证书
+          # （no TailscaleVarRoot），故用 HTTP:80 —— 流量仍在 WireGuard 隧道内，
+          # 安全性与直连 IP:8319 明文等同。serve 配置随内存态逐轮清零，此处幂等重建。
+          sudo tailscale serve --bg --http=80 http://127.0.0.1:8319
+          echo "后台管理: http://${TS_FQDN}/admin/login（monitoring: /admin/monitoring）"
+
       - name: Tailscale secrets missing
         if: ${{ always() && env.TS_OAUTH_CLIENT_ID == '' && env.TS_OAUTH_CLIENT_SECRET == '' }}
         run: echo "⚠️ 未配置 TS_OAUTH_CLIENT_ID / TS_OAUTH_CLIENT_SECRET，跳过 Tailscale SSH 调试入口"
