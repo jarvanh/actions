@@ -614,19 +614,27 @@ _progress_render() {
 _progress_refresh() {
   local msg
   msg=$(_progress_render)
-  local new_id
-  # flock 串行化「读 id → 删旧 → 发新 → 写回」临界区: 主线程与 rt 线程并发刷新
+  # flock 串行化「读 id → 删旧 → 发新 → 记账 → 写回」**全**临界区: 并发刷新
   # 时禁止交错 —— 双方读到同一旧 id、各发一条时，先发的那条 id 被覆盖而失去
-  # 追踪，成为孤儿「同步进度」消息。子 shell 退出自动释放锁；锁文件打开或
-  # flock 本身失败不阻断主流程（ubuntu runner 必有 flock，此处仅防御）。
-  new_id=$(
+  # 追踪，成为孤儿「同步进度」消息。
+  # ⚠️ 写回必须在锁内（2026-09-29 审查修正）: 原实现在锁外还有一次写回
+  #   （与 _tg_ensure_bottom_message 锁内写回重复），它是**过期值覆盖**窗口
+  #   —— 本进程的锁内写回之后，另一进程可能已刷新并写回更新的 id，本进程
+  #   锁外的过期写回会把 tracked 拉回旧值；后续刷新读到旧 id → 删已删的、
+  #   中间某条消息从此无人删除 ⇒ 孤儿。测试环境（fake curl 毫秒级）全部
+  #   刷新在首个过期写回落地前完成，窗口躲开 ⇒ T4 难以复现；生产环境锁内
+  #   是真实 Telegram 往返（秒级），窗口必然打开。修复后写回仅存锁内一处。
+  # 子 shell 退出自动释放锁；锁文件打开或 flock 本身失败不阻断主流程
+  # （ubuntu runner 必有 flock，此处仅防御）。
+  (
     exec 9>>"$PROGRESS_LOCK_FILE" 2>/dev/null || true
     flock 9 2>/dev/null || true
-    _tg_ensure_bottom_message "$msg"
+    local new_id
+    new_id=$(_tg_ensure_bottom_message "$msg")
+    # Telegram 失败（new_id 空）时返回 1 会沿 progress_update/progress_task_begin
+    # 等裸调用链在 set -e 下终止整个 step —— 通知失败不传播
+    [ -n "$new_id" ] && echo "$new_id" > "$PROGRESS_MSG_ID_FILE"
   )
-  # Telegram 失败（new_id 空）时返回 1 会沿 progress_update/progress_task_begin 等
-  # 裸调用链在 set -e 下终止整个 step —— 通知失败不传播
-  [ -n "$new_id" ] && echo "$new_id" > "$PROGRESS_MSG_ID_FILE"
   return 0
 }
 
