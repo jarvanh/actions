@@ -1167,6 +1167,70 @@ jobs:
           printf 'WB_UPDATE=%s\n' "$WB_UPDATE" >> "$WB_META"
           printf 'WB_REASON=%s\n' "$WB_REASON" >> "$WB_META"
 
+          # ---------- 1b. 回推 Dropbox + 裁剪旧版本（2026-09-29 事故加固） ----------
+          # 升级流程唯一正确的顺序：
+          #   ① 发版：push v* tag → workbuddy-gateway 的 release.yml 自动构建并发布正式产物；
+          #   ② 本步骤从 GitHub Releases 拉「正式产物」上线（绝不本地编译直上，本机曾因此
+          #      出现 v1.14.11 这种官方没有的非正式版本号，后续无法追溯）；
+          #   ③ 立即回推 Dropbox 并裁剪旧版本 —— 本段做的事。
+          #
+          # 为什么必须回推：setup-env.sh 的 ensure_workbuddy_gateway() 自愈源是 Dropbox 的
+          # -current。此前本步骤只把二进制写进本地盘 /tmp/local_workbuddy，从不回推，于是
+          # 「runner 重启」= 回退到上一个被写回 Dropbox 的旧版本。2026-09-29 18:25 重启即
+          # 回退到 v1.14.10（运行中的进程因持有旧 inode 未断流才没暴露）。
+          # 铁律：拉到新版本后必须立刻回推 -current，否则下次重启就是回退。
+          echo "1b. Persisting binary to Dropbox and pruning old versions..."
+          WB_REMOTE="dropbox:self-hosted/workbuddy-gateway"
+          if [ -x "$WB_BIN" ] && [ -s "$WB_BIN" ]; then
+            WB_BIN_SIZE="$(stat -c %s "$WB_BIN" 2>/dev/null || true)"
+            # 1) 回推主入口与 -current（自愈源，最关键的一份）
+            for _dst in workbuddy-gateway workbuddy-gateway-current; do
+              if rclone copyto "$WB_BIN" "$WB_REMOTE/$_dst" \
+                --retries 5 --low-level-retries 10 --timeout 1m --contimeout 15s 2>/dev/null; then
+                echo "   pushed: $_dst (${WB_BIN_SIZE} bytes)"
+              else
+                echo "⚠️ workbuddy 二进制回推失败：$_dst（下轮重启可能回退到旧版）"
+              fi
+            done
+            # 2) 版本化副本：可回滚的历史产物
+            if [ -n "${WB_VER:-}" ]; then
+              rclone copyto "$WB_BIN" "$WB_REMOTE/workbuddy-gateway-${WB_VER#v}" \
+                --retries 5 --low-level-retries 10 --timeout 1m --contimeout 15s 2>/dev/null \
+                && echo "   pushed: workbuddy-gateway-${WB_VER#v}" || true
+            fi
+            # 3) .installed-version 以远端为准再写一次：下载分支写的是挂载点文件，
+            #    这里保证远端副本与本地一致（自愈靠它判断是否需要更新）
+            if [ -n "${WB_VER:-}" ]; then
+              printf '%s\n' "$WB_VER" | rclone rcat "$WB_REMOTE/.installed-version" 2>/dev/null || true
+            fi
+            # 4) 裁剪旧版本副本：按版本号排序只留最近 2 份。
+            #    安全闸：现行版本（-current 与 -<当前版本>）按名字跳过，绝不删。
+            #    ⚠️ Dropbox 远端不支持 md5/sha256 哈希比对（hash unsupported），故按名字保护。
+            WB_KEEP_N="2"
+            _old_copies="$(rclone lsf "$WB_REMOTE" --files-only 2>/dev/null \
+              | grep -E '^workbuddy-gateway-[0-9]+\.[0-9]+\.[0-9]+$' || true)"
+            _old_total="$(printf '%s\n' "$_old_copies" | grep -c . || true)"
+            if [ "${_old_total:-0}" -gt "$WB_KEEP_N" ]; then
+              printf '%s\n' "$_old_copies" | sort -V | head -n -"$WB_KEEP_N" | while read -r _f; do
+                [ -z "$_f" ] && continue
+                # 现行版本的版本化副本不删（可能就是刚推上去的那份）
+                if [ -n "${WB_VER:-}" ] && [ "$_f" = "workbuddy-gateway-${WB_VER#v}" ]; then
+                  echo "   keep(current version): $_f"
+                  continue
+                fi
+                if rclone deletefile "$WB_REMOTE/$_f" 2>/dev/null; then
+                  echo "   pruned: $_f"
+                else
+                  echo "   ⚠️ prune failed: $_f"
+                fi
+              done
+            else
+              echo "   版本化副本 ${_old_total:-0} 份（≤${WB_KEEP_N}），无需裁剪"
+            fi
+          else
+            echo "⚠️ 本地二进制不可用，跳过 Dropbox 回推与裁剪"
+          fi
+
           # ---------- 2. 启动 serve ----------
           # 注意：workbuddy-gateway 上游 -port 默认值是 8317，但 8317 已被本文件上一步起的
           # CliRelay/CLIProxyAPI 占用（OpenClaw 主 AI 网关）。两者并列跑在同一 runner 上，
