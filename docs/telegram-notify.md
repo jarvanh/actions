@@ -1425,7 +1425,7 @@ python 侧拿不到 bash 函数，仍有两处同义实现（`add_uploaded_video
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          # 告警档通知（send_tg "$msg" alert）的 step 才需要注入以下两行：
+          # 重要档通知（send_tg "$msg" alert = 告警 + 信息）的 step 才需要注入以下两行：
           TELEGRAM_BOT_TOKEN_ALERT: ${{ secrets.TELEGRAM_BOT_TOKEN_ALERT }}
           TELEGRAM_CHAT_ID_ALERT: ${{ secrets.TELEGRAM_CHAT_ID_ALERT }}
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -1435,11 +1435,14 @@ python 侧拿不到 bash 函数，仍有两处同义实现（`add_uploaded_video
   上下文、恒为空串），助手侧走 `/proc/1` 兜底。
 - 凭据校验在**调用方**，且放在引入真源**之前**：`if [ -z "$TELEGRAM_BOT_TOKEN" ] …exit 0`。
   真源本身不校验。
-- **告警档（2026-09-28）**：`send_tg "$msg" alert` / `send_tg_chunked "$msg" alert` /
+- **重要档（2026-09-29 两档分类）**：`send_tg "$msg" alert` / `send_tg_chunked "$msg" alert` /
   `send_telegram_message "$msg" HTML alert` 的 step 还需注入 `TELEGRAM_BOT_TOKEN_ALERT` /
-  `TELEGRAM_CHAT_ID_ALERT`；告警 bot 已固定配置为 @SaberFuckBot，`alert` 档直达、
+  `TELEGRAM_CHAT_ID_ALERT`；重要档 bot 已固定配置为 @SaberFuckBot，`alert` 档直达、
   不回退主 bot——凭据缺失时发送失败并在日志留痕。
   档位由调用点显式声明，发送层不按标题匹配。
+  **重要档 = 告警 + 信息**：告警（备份失败/归档告警/网关启动失败/源端异常/灾难恢复/
+  Pixiv cookie 失效/`⛔ 同步中断·未注册任何任务`）＋ 信息（入口/凭据/模型倍率/服务启停/
+  各网关已就绪）。其余（结果 + 流水）为**普通档**，不传 tier，走 @FuckSaberBot。
 - bash 真源兼容历史变量名 `TG_BOT_TOKEN` / `TG_CHAT_ID`；**pwsh 侧没有这层回退**，
   必须注入 `TELEGRAM_*`。
 - python 侧凭据从传入的 `env` 读，但 `TG_RUN_URL` 只读
@@ -1493,9 +1496,11 @@ bash 里内嵌的 python 段（`python3 - <<'PY'`）无法 import 共享层，�
   字典（失败带 `reason`），调用方**必须**把原因记进日志。
 - **已引入发送层的通知点不得 curl 直发**。唯一例外是需要 message_id 的进度面板原地
   维护（4.6 节）。
-- **档位路由（2026-09-28）**：`send_tg` / `send_tg_chunked` 收可选 `tier`（pwsh
-  `Send-TgMessage <text> [tier]`）；`alert` 档固定发往告警 bot（@SaberFuckBot，
-  secrets 已配置，无回落）。进度面板直连 API 固定主 bot，不参与路由。
+- **档位路由（2026-09-29 两档）**：`send_tg` / `send_tg_chunked` 收可选 `tier`（pwsh
+  `Send-TgMessage <text> [tier]`）。只有两档：
+  - `alert` = **重要通知**（告警 + 信息）→ @SaberFuckBot（secrets 已配置，无回落）；
+  - 不传 tier = **普通通知**（结果 + 流水）→ @FuckSaberBot（主 bot）。
+  进度面板直连 API 固定主 bot，不参与路由。
 - 媒体上传（`sendDocument` / `sendVideo`）不走 sendMessage 发送层（固有例外），但
   caption **必须**转义、429 重试与发送层同口径（最多 5 次）。
 

@@ -138,6 +138,9 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # 重要档凭据（Windows runner 入口通知 tier=alert 直达 @SaberFuckBot，无回落）
+          TELEGRAM_BOT_TOKEN_ALERT: ${{ secrets.TELEGRAM_BOT_TOKEN_ALERT }}
+          TELEGRAM_CHAT_ID_ALERT: ${{ secrets.TELEGRAM_CHAT_ID_ALERT }}
           # 与 Enable SSH 步骤同一取值，密码明文只出现在 Telegram 通知里（不打印到 Actions 日志）
           RUNNER_PASSWORD: ${{ secrets.RUNNER_PASSWORD }}
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -190,7 +193,7 @@ jobs:
           $msg += "`n`nℹ️ $notes"
           $footer = Get-TgFooter
           if ($footer) { $msg += "`n`n$footer" }
-          Send-TgMessage $msg
+          Send-TgMessage $msg "alert"
           echo "已推送入口通知: ssh $Env:TS_USER@$Env:TS_HOST"
 
       - name: Keep alive

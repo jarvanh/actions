@@ -375,6 +375,9 @@ jobs:
             # （429 按 retry_after 等待重试；HTML 解析失败不重发、直接报错——与全库同一套语义）。
             export TELEGRAM_BOT_TOKEN="${{ secrets.TELEGRAM_BOT_TOKEN }}"
             export TELEGRAM_CHAT_ID="${{ secrets.TG_CHAT_ID }}"
+            # 重要档凭据（OpenList 凭据通知 tier=alert 直达 @SaberFuckBot，无回落）
+            export TELEGRAM_BOT_TOKEN_ALERT="${{ secrets.TELEGRAM_BOT_TOKEN_ALERT }}"
+            export TELEGRAM_CHAT_ID_ALERT="${{ secrets.TELEGRAM_CHAT_ID_ALERT }}"
             source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
             if [ -s /tmp/openlist-pw-note ]; then
               PW_KIND=$(cut -d: -f1 /tmp/openlist-pw-note)
@@ -399,7 +402,7 @@ jobs:
               # TG_RUN_URL 由本 step env 注入；时长走 /proc/1 兜底（平台无运行起始时间上下文，
               # 本 step 靠 job 头部，误差秒级）。两者皆无时整行自动跳过。
               tg_add_footer PW_MSG
-              send_tg "$PW_MSG" \
+              send_tg "$PW_MSG" alert \
                 && echo "已通过 TG 私信发送 OpenList 凭据（不落公开日志）" \
                 || echo "::warning::OpenList 凭据 TG 通知发送失败（不影响链路）"
               shred -u /tmp/openlist-pw-note 2>/dev/null || rm -f /tmp/openlist-pw-note
@@ -988,7 +991,7 @@ jobs:
           tg_add_note START_MSG "网盘快捷方式 = 网盘里指向别处文件的 .url 文件；本服务会自动跟随它换成可直接播放的链接"
           tg_add_footer START_MSG
           echo "TG(启动): 已构建统一版式消息"
-          send_tg "$START_MSG" || true
+          send_tg "$START_MSG" alert || true
 
           if [ "$MODE" = "302" ]; then
             nohup cloudflared tunnel run --url http://127.0.0.1:8095 e > /opt/logs/cloudflared.log 2>&1 &
@@ -2777,6 +2780,9 @@ jobs:
           # 发送走 send_tg（429 按 retry_after 重试 + HTML 解析失败直接报错不重发 + 预览禁用），需注入标准名
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          # 重要档凭据（Emby 停止通知 tier=alert 直达 @SaberFuckBot，无回落）
+          TELEGRAM_BOT_TOKEN_ALERT: ${{ secrets.TELEGRAM_BOT_TOKEN_ALERT }}
+          TELEGRAM_CHAT_ID_ALERT: ${{ secrets.TELEGRAM_CHAT_ID_ALERT }}
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           source "$EMBY302_DIR/lib.sh"
@@ -2863,7 +2869,7 @@ jobs:
           echo "TG(收尾): 已构建统一版式消息"
           # 走发送层而非 curl 直发：429 重试已内建，HTML 解析失败直接报错（规范 · 发送层），
           # 429 限流自动等待重试，disable_web_page_preview 内置
-          send_tg "$msg" || echo "::warning::收尾 TG 通知发送失败"
+          send_tg "$msg" alert || echo "::warning::收尾 TG 通知发送失败"
 
       # ===== 自续触发（流式接力）=====
       # 一轮结束立刻 dispatch 下一轮，中间不留空档；cron 只做链条断裂时的兜底。

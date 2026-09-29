@@ -1060,13 +1060,13 @@ jobs:
                 tg_add_pre _msg "$(printf '%s' "$6" | tail -c 1200)"
               fi
               tg_add_footer _msg
-              send_tg "$_msg" || echo "::warning::TG 通知发送失败（不影响任务）"
+              send_tg "$_msg" alert || echo "::warning::TG 通知发送失败（不影响任务）"
               # 倍率段独立第二条（常驻：只要取到倍率就发）：数据全量保留，不与主条挤在
               # 同一条里超限丢弃。它自带标题 + 收尾区，是可独立成篇的一条完整通知。
               # 两条之间 sleep 1s：连续 sendMessage 撞 429 会让后一条直接丢失。
               if [ -n "${WB_RATES_BLOCK:-}" ]; then
                 sleep 1
-                send_tg "$WB_RATES_BLOCK" || echo "::warning::模型倍率段独立通知发送失败（不影响任务）"
+                send_tg "$WB_RATES_BLOCK" alert || echo "::warning::模型倍率段独立通知发送失败（不影响任务）"
               fi
             else
               echo "⚠️ Telegram secrets missing, skip workbuddy-gateway notification."
@@ -2009,7 +2009,7 @@ jobs:
                 tg_add_pre _msg "$(printf '%s' "$6" | tail -c 1200)"
               fi
               tg_add_footer _msg
-              send_tg "$_msg" || echo "::warning::TG 通知发送失败（不影响任务）"
+              send_tg "$_msg" alert || echo "::warning::TG 通知发送失败（不影响任务）"
             else
               echo "⚠️ Telegram secrets missing, skip trae2api notification."
             fi
@@ -2616,7 +2616,7 @@ jobs:
               fi
               tg_add_path _m "代码" "$Z2A_REPO"
               tg_add_footer _m
-              send_tg "$_m" || echo "::warning::TG 通知发送失败（不影响任务）"
+              send_tg "$_m" alert || echo "::warning::TG 通知发送失败（不影响任务）"
             fi
           fi
 
@@ -2778,7 +2778,7 @@ jobs:
               tg_add_block _m "${_gl_rows%$'\n'}"
             fi
             tg_add_footer _m
-            send_tg "$_m" || echo "::warning::TG 通知发送失败（不影响任务）"
+            send_tg "$_m" alert || echo "::warning::TG 通知发送失败（不影响任务）"
           fi
 
       - name: Notify Tailscale SSH entry
@@ -2864,7 +2864,7 @@ jobs:
           tg_add_footer msg
           # 走发送层而非 curl 直发：429 重试已内建，HTML 解析失败直接报错（规范 · 发送层），
           # 429 限流按 retry_after 等待重试，disable_web_page_preview 内置
-          send_tg "$msg" || true
+          send_tg "$msg" alert || true
           echo "已推送 SSH 入口通知: ssh runner@${TS_HOST}（AI 网关: ${AI_BACKEND}）"
 
       - name: Run OpenClaw
@@ -4237,7 +4237,7 @@ jobs:
               [ -n "${WB_VER:-}" ] && tg_add_path _msg "版本" "$WB_VER"
               tg_add_path _msg "数据目录" "$WB_DIR"
               tg_add_footer _msg
-              send_tg "$_msg" || echo "::warning::TG 通知发送失败（不影响任务）"
+              send_tg "$_msg" alert || echo "::warning::TG 通知发送失败（不影响任务）"
             else
               echo "⚠️ Telegram secrets missing, skip workbuddy-gateway stop notification."
             fi
@@ -4284,7 +4284,7 @@ jobs:
             fi
             tg_add_path _m "端口" "8319"
             tg_add_footer _m
-            send_tg "$_m" || true
+            send_tg "$_m" alert || true
           fi
 
           # 3d. glm2api：同为宿主进程（非容器），随 job 结束不会自动退出，
@@ -4322,7 +4322,7 @@ jobs:
             fi
             tg_add_path _m "端口" "8320"
             tg_add_footer _m
-            send_tg "$_m" || true
+            send_tg "$_m" alert || true
           fi
 
           # 用法与版式同 send_telegram_alert（<对象> <结论> <原因> [原始输出]）；
