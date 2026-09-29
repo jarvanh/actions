@@ -112,6 +112,9 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # 告警档凭据（tier=alert 时发往告警 bot；未配置自动回落主 bot）
+          TELEGRAM_BOT_TOKEN_ALERT: ${{ secrets.TELEGRAM_BOT_TOKEN_ALERT }}
+          TELEGRAM_CHAT_ID_ALERT: ${{ secrets.TELEGRAM_CHAT_ID_ALERT }}
           STATUS: ${{ job.status }}
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -127,7 +130,7 @@ jobs:
             tg_add_title msg "⛔ 任务已中断"
             tg_add_note msg "任务被取消，数据未受影响；如需继续请重新运行。"
             tg_add_footer msg
-            send_tg "$msg" || echo "::warning::TG 通知发送失败（不影响任务结果）"
+            send_tg "$msg" alert || echo "::warning::TG 通知发送失败（不影响任务结果）"
             exit 0
           fi
           if [ "$STATUS" == "success" ]; then
@@ -135,6 +138,7 @@ jobs:
             FILE_SIZE_BYTES="${SELF_HOSTED_ARCHIVE_BYTES:-0}"
             FILE_SIZE_HUMAN=$(numfmt --to=iec-i --suffix=B "$FILE_SIZE_BYTES" 2>/dev/null || echo "${FILE_SIZE_BYTES}B")
             if [ "$FILE_SIZE_BYTES" -le 0 ]; then
+              _tier="alert"   # ⚠️ 状态异常 = 需人工检查日志
               tg_add_title msg "⚠️ Self-Hosted 数据备份状态异常"
               tg_add_kv msg "日期" "$(date +'%Y-%m-%d')"
               tg_add_path msg "文件" "$ARCHIVE_NAME"
@@ -148,8 +152,9 @@ jobs:
               tg_add_note msg "已覆盖旧包"
             fi
           else
+            _tier="alert"     # ❌ 备份失败 = 告警档
             tg_add_title msg "❌ Self-Hosted 数据备份失败"
             tg_add_note msg "请前往 GitHub Actions 检查日志详情。"
           fi
           tg_add_footer msg
-          send_tg "$msg" || echo "::warning::TG 通知发送失败（不影响任务结果）"
+          send_tg "$msg" "${_tier:-}" || echo "::warning::TG 通知发送失败（不影响任务结果）"

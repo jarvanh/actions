@@ -647,7 +647,7 @@ restore_source_from_target() {
   fi
   tg_add_note msg "目标端未做任何删改，可重复执行补齐失败条目。"
   tg_add_footer msg
-  send_telegram_message "$msg"
+  send_telegram_message "$msg" HTML alert
   echo "=== 恢复完成: bulk=${total_bulk} ok=${total_ok} skip=${total_skip} fail=${total_fail} ==="
 }
 
@@ -764,6 +764,6 @@ rebuild_source_from_target() {
   fi
   tg_add_note msg "源端已按目标端镜像；目标端全程只读，失败条目可直接重跑补齐。"
   tg_add_footer msg
-  send_telegram_message "$msg"
+  send_telegram_message "$msg" HTML alert
   echo "=== 镜像恢复完成: ok=${total_ok} skip=${total_skip} fail=${total_fail} ==="
 }

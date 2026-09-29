@@ -63,11 +63,18 @@ function Get-TgFooter {
 }
 
 # 单条发送（HTML parse_mode；429 按 Retry-After 重试最多 5 次；其余失败 throw 并带响应体）
-function Send-TgMessage([string]$text) {
-  $body = @{ chat_id = $Env:TELEGRAM_CHAT_ID; text = $text; disable_web_page_preview = 'true'; parse_mode = 'HTML' }
+function Send-TgMessage([string]$text, [string]$tier) {
+  # 档位路由（与 bash 发送层同语义）: alert 且告警凭据齐全 → 告警 bot，否则回落主 bot
+  $token = $Env:TELEGRAM_BOT_TOKEN
+  $chat = $Env:TELEGRAM_CHAT_ID
+  if ($tier -eq 'alert' -and $Env:TELEGRAM_BOT_TOKEN_ALERT -and $Env:TELEGRAM_CHAT_ID_ALERT) {
+    $token = $Env:TELEGRAM_BOT_TOKEN_ALERT
+    $chat = $Env:TELEGRAM_CHAT_ID_ALERT
+  }
+  $body = @{ chat_id = $chat; text = $text; disable_web_page_preview = 'true'; parse_mode = 'HTML' }
   for ($attempt = 1; $attempt -le 5; $attempt++) {
     try {
-      Invoke-RestMethod -Uri "https://api.telegram.org/bot$Env:TELEGRAM_BOT_TOKEN/sendMessage" `
+      Invoke-RestMethod -Uri "https://api.telegram.org/bot$token/sendMessage" `
         -Method Post -Body $body | Out-Null
       return
     } catch {

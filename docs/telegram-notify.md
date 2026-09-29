@@ -101,7 +101,7 @@ HTML 变复杂。
 | 通知 | 在哪 | 何时发 |
 |---|---|---|
 | 📋 任务预览 · 任务名 | `task_preview.sh` | 预览阶段，每个任务一条 |
-| 🔄 同步进度 / ⛔ 同步中断 / ⚠️ 同步完成 / ✅ 同步全部完成 | `sync_progress.sh` | 进度面板原地刷新 + 三种终态 |
+| 🔄 同步进度 / ⏸️ 同步轮次收摊 / ⛔ 同步中断 / ⚠️ 同步完成 / ✅ 同步全部完成 | `sync_progress.sh` | 进度面板原地刷新 + 五种终态（收摊=预算到站下轮接力；中断=未注册任何任务） |
 | ✅ 同步完成 / ⚠️ 部分文件同步失败 / ⚠️ 部分文件已通过其他方式同步 / ⚠️ 同步失败 | `sync_notify.sh` | 同步结束，按结果分四态 |
 | 📁 任务名 · 错误日志 | `sync_notify.sh` | 同步失败后随 `sendDocument` 附上的日志文件 |
 | ⏭️ 同步任务跳过 | `sync_marker.sh` | 落在跳过窗口内 |
@@ -306,9 +306,9 @@ HTML 变复杂。
 |---|---|---|
 | ✅ …备份成功 / ⚠️ …状态异常 / ❌ …备份失败 / ⛔ 任务已中断 | `github_backup_all.yml`、`self-hosted_backup.yml` | 备份结束，`if: always()` 四态 |
 | ☁️ / ⛔ / ❌ iCloud 照片下载 | `icloud-photos-downloader.yml` | 独立 `if: always()` step，按 `job.status` 三态 |
-| ✅ / ⚠️ / ❌ PixivUtil2 任务完成 · 失败 | `pixivutil2.yml` | 按任务状态三态 |
-| 🗑️ ph-dl 下载阶段损坏视频 | `ph-dl.yml` | 下载完整性检查发现损坏 |
-| ✅ / ⚠️ ph 收藏夹同步完成 | `ph-dl.yml` | 收尾（**本轮**有损坏丢弃才降级 ⚠️；库存累计损坏数只作 kv，不参与判定） |
+| ✅/⚠️ PixivUtil2 完成 · 未完成 / ❌ cookie 已失效 · 未运行 | `pixivutil2.yml` | 按退出码分态：1/45=收藏 404/已删除（无法处理，⚠️）；未知错误 ⚠️（run 仍红）；cookie 失效与启动前中断 ❌（可动手） |
+| 🗑️ ph-dl 新增损坏视频 · N | `ph-dl.yml` | 新下载文件完整性检查失败：已删除并重置下载记录，下轮自动重下；源端持续损坏则每轮重复，无法修复 |
+| ✅ ph 收藏夹同步完成 | `ph-dl.yml` | 收尾恒 ✅——损坏丢弃属「只能接受」终态（明细走 🗑️ 单独通知与 kv，不再降级 ⚠️；库存累计数只作 kv） |
 
 **示例：备份成功**
 
@@ -1249,10 +1249,11 @@ fi
 
 ### 4.6 进度面板（原地刷新）
 
-- 标题：刷新态 `🔄 同步进度`；终态按**严重度从高到低**判定——`⛔ 同步中断`（还有
-  待处理/进行中，或一个任务都没注册）> `⚠️ 同步完成`（有失败）> `✅ 同步全部完成`
-  （无失败，若有文件经修复落盘则在副标题说明）。
-  中断必须排在失败之前：中断时伴生的失败只是「没跑完」的副产物，报成「同步完成（有
+- 标题：刷新态 `🔄 同步进度`；终态按**严重度从高到低**判定——`⛔ 同步中断`（一个
+  任务都没注册，注册前就被取消/失败）> `⏸️ 同步轮次收摊`（还有待处理/进行中：时间
+  预算到站或撞 6h job 上限，剩余任务下轮自动接力，属预期内收摊而非事故）> `⚠️ 同步
+  完成`（有失败）> `✅ 同步全部完成`（无失败，若有文件经修复落盘则在副标题说明）。
+  收摊必须排在失败之前：收摊时伴生的失败只是「没跑完」的副产物，报成「同步完成（有
   失败）」会让人误以为整轮跑完了。
 - 五组任务列表（进行中 / 待处理 / 已完成 / 已跳过 / 失败）**全量展示不折叠**——面板
   要一眼看全，折叠掉就等于把「哪些任务没跑完」藏起来。
@@ -1262,10 +1263,12 @@ fi
 - 时长只从收尾区出。
 
 ```
-⛔ 同步中断
+⏸️ 同步轮次收摊
 ━━━━━━━━━━━━━━━━━━
 状态：待处理 4 · 进行中未执行完 2 · 失败 1
 📊 总 12 · 待处理 4 · 进行中 2 · 完成 5 · 跳过 0 · 失败 1
+
+时间预算到站，剩余任务下轮自动接力
 
 🔄 进行中 · 2
   ├─ <code>onedrive:media/电影</code> · 3.1 GiB / 12 文件
@@ -1371,7 +1374,8 @@ python 侧拿不到 bash 函数，仍有两处同义实现（`add_uploaded_video
 ### 5.5 状态图标语义
 
 `✅` 成功 · `⚠️` 部分失败/警告 · `❌` 失败 · `⏭️` 跳过 · `🔄` 进行中 ·
-`⏳` 待处理 · `⛔` 中断 · `🚨` 危险警告 · `🆘` 灾难恢复 · `📍` 进度面板当前阶段
+`⏳` 待处理 · `⛔` 中断（注册前即死）· `⏸️` 轮次收摊（预算到站，预期内）·
+`🚨` 危险警告 · `🆘` 灾难恢复 · `📍` 进度面板当前阶段
 
 建议图标与结论一致，不要自造 `⭐` / `🥇` 之类前缀。同一条通知里避免两个相同 emoji
 承担不同角色（如两个 `📍`）。
@@ -1421,6 +1425,9 @@ python 侧拿不到 bash 函数，仍有两处同义实现（`add_uploaded_video
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # 告警档通知（send_tg "$msg" alert）的 step 才需要注入以下两行：
+          TELEGRAM_BOT_TOKEN_ALERT: ${{ secrets.TELEGRAM_BOT_TOKEN_ALERT }}
+          TELEGRAM_CHAT_ID_ALERT: ${{ secrets.TELEGRAM_CHAT_ID_ALERT }}
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
 ```
 
@@ -1428,6 +1435,10 @@ python 侧拿不到 bash 函数，仍有两处同义实现（`add_uploaded_video
   上下文、恒为空串），助手侧走 `/proc/1` 兜底。
 - 凭据校验在**调用方**，且放在引入真源**之前**：`if [ -z "$TELEGRAM_BOT_TOKEN" ] …exit 0`。
   真源本身不校验。
+- **告警档（2026-09-28）**：`send_tg "$msg" alert` / `send_tg_chunked "$msg" alert` /
+  `send_telegram_message "$msg" HTML alert` 的 step 还需注入 `TELEGRAM_BOT_TOKEN_ALERT` /
+  `TELEGRAM_CHAT_ID_ALERT`；告警 bot 未配置时发送层自动回落主 bot，不会丢消息。
+  档位由调用点显式声明，发送层不按标题匹配。
 - bash 真源兼容历史变量名 `TG_BOT_TOKEN` / `TG_CHAT_ID`；**pwsh 侧没有这层回退**，
   必须注入 `TELEGRAM_*`。
 - python 侧凭据从传入的 `env` 读，但 `TG_RUN_URL` 只读
@@ -1481,6 +1492,9 @@ bash 里内嵌的 python 段（`python3 - <<'PY'`）无法 import 共享层，�
   字典（失败带 `reason`），调用方**必须**把原因记进日志。
 - **已引入发送层的通知点不得 curl 直发**。唯一例外是需要 message_id 的进度面板原地
   维护（4.6 节）。
+- **档位路由（2026-09-28）**：`send_tg` / `send_tg_chunked` 收可选 `tier`（pwsh
+  `Send-TgMessage <text> [tier]`）；`alert` 档在 `*_ALERT` 凭据齐全时发往告警 bot，
+  否则回落主 bot。进度面板直连 API 固定主 bot，不参与路由。
 - 媒体上传（`sendDocument` / `sendVideo`）不走 sendMessage 发送层（固有例外），但
   caption **必须**转义、429 重试与发送层同口径（最多 5 次）。
 

@@ -1025,7 +1025,7 @@ send_sync_warning() {
 如确认无误，请手动触发 force_sync=true"
   tg_add_footer msg
 
-  send_telegram_message "$msg"
+  send_telegram_message "$msg" HTML alert
 }
 
 # 发送"近期已成功同步，本次跳过"的通知
