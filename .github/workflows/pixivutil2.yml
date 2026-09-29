@@ -155,7 +155,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          # 告警档凭据（tier=alert 时发往告警 bot；未配置自动回落主 bot）
+          # 告警档凭据（tier=alert 直达告警 bot @SaberFuckBot，无回落）
           TELEGRAM_BOT_TOKEN_ALERT: ${{ secrets.TELEGRAM_BOT_TOKEN_ALERT }}
           TELEGRAM_CHAT_ID_ALERT: ${{ secrets.TELEGRAM_CHAT_ID_ALERT }}
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -205,7 +205,7 @@ jobs:
           [ -n "$PU_NOTE" ] && tg_add_note msg "$PU_NOTE"
           tg_add_footer msg
           # 通知发送失败不额外把任务判失败，避免"任务没事、只是 TG 抖动"却变红
-          # 通知发送走档位路由（cookie 失效/未运行 → 告警 bot，未配置则回落主 bot）
+          # 通知发送走档位路由（cookie 失效/未运行 → 告警 bot @SaberFuckBot，直达无回落）
           send_tg "$msg" "${PU_TIER:-}" || echo "⚠️ Telegram 通知发送失败，详见步骤日志"
 
           # 让任务变红的口径：cookie 失效（failure）/ 未知错误（unknown）/

@@ -64,10 +64,10 @@ function Get-TgFooter {
 
 # 单条发送（HTML parse_mode；429 按 Retry-After 重试最多 5 次；其余失败 throw 并带响应体）
 function Send-TgMessage([string]$text, [string]$tier) {
-  # 档位路由（与 bash 发送层同语义）: alert 且告警凭据齐全 → 告警 bot，否则回落主 bot
+  # 档位路由（与 bash 发送层同语义）: alert → 告警 bot（@SaberFuckBot，无回落）
   $token = $Env:TELEGRAM_BOT_TOKEN
   $chat = $Env:TELEGRAM_CHAT_ID
-  if ($tier -eq 'alert' -and $Env:TELEGRAM_BOT_TOKEN_ALERT -and $Env:TELEGRAM_CHAT_ID_ALERT) {
+  if ($tier -eq 'alert') {
     $token = $Env:TELEGRAM_BOT_TOKEN_ALERT
     $chat = $Env:TELEGRAM_CHAT_ID_ALERT
   }

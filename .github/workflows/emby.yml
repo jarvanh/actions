@@ -841,7 +841,7 @@ jobs:
           # 2026-09-05 审计发现 watchdog/启动通知因只注入 TG_* 而静默丢失，故双名并注
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          # 告警档凭据（tier=alert 时发往告警 bot；未配置自动回落主 bot）
+          # 告警档凭据（tier=alert 直达告警 bot @SaberFuckBot，无回落）
           TELEGRAM_BOT_TOKEN_ALERT: ${{ secrets.TELEGRAM_BOT_TOKEN_ALERT }}
           TELEGRAM_CHAT_ID_ALERT: ${{ secrets.TELEGRAM_CHAT_ID_ALERT }}
           EMBY_API_KEY: ${{ secrets.EMBY_API_TOKEN }}

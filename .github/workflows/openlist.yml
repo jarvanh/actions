@@ -196,7 +196,7 @@ jobs:
       FORCE_SYNC: ${{ inputs.force_sync || 'false' }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      # 告警档凭据（tier=alert 时发往告警 bot；未配置自动回落主 bot）
+      # 告警档凭据（tier=alert 直达告警 bot @SaberFuckBot，无回落）
       TELEGRAM_BOT_TOKEN_ALERT: ${{ secrets.TELEGRAM_BOT_TOKEN_ALERT }}
       TELEGRAM_CHAT_ID_ALERT: ${{ secrets.TELEGRAM_CHAT_ID_ALERT }}
       # 统一收尾区（tg_add_footer）: 运行日志链接 + 已运行时长（时长走开机时刻兜底）
