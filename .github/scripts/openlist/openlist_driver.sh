@@ -610,7 +610,7 @@ _refresh_openlist_cache() {
     -d "{\"path\":\"$ol_path\",\"recursive\":true}" \
     >/dev/null 2>&1 || true
 
-  # 等待缓存刷新完成（默认 60s，确保递归刷新大目录完成）
+  # 等待缓存刷新完成（默认 40s，确保递归刷新大目录完成；由 60 调低的依据见下）
   # ✅ 可配: OPENLIST_FS_REFRESH_SLEEP（2026-09-15 加）。
   # 为什么值得关注: 静态间隔分析显示一轮被调 ~14 次 ⇒ 60s × 14 = **14min**，
   # 占 72min 短轮的 **19%**（长轮里也有 7%）。这个 sleep 是在赌"递归刷新在 N 秒内
@@ -751,7 +751,7 @@ _restart_openlist_for_truth_impl() {
     echo "  ⚠️ 重启后 HTTP 60s 内未就绪" | tee -a "$log_file"
     return 1
   }
-  echo "  等待驱动重新初始化（自适应轮询，上限 60s）..." | tee -a "$log_file"
+  echo "  等待驱动重新初始化（盲等 60s，见 _wait_driver_ready 注释）..." | tee -a "$log_file"
   _wait_driver_ready "$ol_path" "$log_file"
   if [ -n "$ol_path" ]; then
     local t
@@ -857,7 +857,7 @@ _openlist_truth_check() {
 }
 # 重启 OpenList 容器并等待驱动就绪 + 刷新路径缓存（持久化验证/假成功重试共用）
 # 用法: _sync_restart_for_verify <log_file> <ol_path 以 / 开头>
-# 返回: 0=重启且 HTTP 就绪, 1=HTTP 60s 内未就绪
+# 返回: 0=重启成功（HTTP 就绪 + 驱动盲等完成 + 路径缓存已刷新）, 1=HTTP 60s 内未就绪
 _sync_restart_for_verify() {
   local log_file="$1" ol_path="$2"
   sudo docker restart openlist >/dev/null 2>&1 || true
@@ -870,7 +870,7 @@ _sync_restart_for_verify() {
     sleep 2
   done
   curl -sf http://127.0.0.1:5244/ping >/dev/null 2>&1 || return 1
-  echo "  等待驱动重新初始化（自适应轮询，上限 60s）..." | tee -a "$log_file"
+  echo "  等待驱动重新初始化（盲等 60s，见 _wait_driver_ready 注释）..." | tee -a "$log_file"
   _wait_driver_ready "$ol_path" "$log_file"
   local t
   t=$(_get_openlist_token)

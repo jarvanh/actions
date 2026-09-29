@@ -3,6 +3,10 @@
 # 在 workflow 中通过 source 加载所有函数:
 #   source "$GITHUB_WORKSPACE/.github/scripts/openlist/load_all.sh"
 #
+# 全库注释中的「§N.N」引用一律指归档计划文档
+#   docs/archive/openlist-remediation-plan-2026-09-13.md 的章节编号（实验依据
+#   与决策记录的溯源），例如 §12.14.3 = 该文档 12.14.3 节。
+#
 # 命名约定: <领域>_<职责>.sh
 #   rclone_*    — rclone 适配层（参数、查询）
 #   openlist_*  — OpenList 适配层（管理面 API、驱动与健康）
@@ -30,7 +34,7 @@ unset _OPENLIST_TG_LIB
 
 # --- L1 基础层（无内部依赖）---
 source "$_OPENLIST_SCRIPT_DIR/rclone_flags.sh"  # rclone 参数单点定义（RCLONE_*_FLAGS）
-source "$_OPENLIST_SCRIPT_DIR/utils.sh"         # 通用工具（log_fix, format_bytes 等）
+source "$_OPENLIST_SCRIPT_DIR/utils.sh"         # 通用工具（日志判定、路径归一化、字节格式化）
 source "$_OPENLIST_SCRIPT_DIR/telegram.sh"      # Telegram 消息发送/编辑/删除
 
 # --- L2 外部服务适配 ---

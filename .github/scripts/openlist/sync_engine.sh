@@ -274,9 +274,11 @@ sync_with_logging() {
     ) &
     local heartbeat_pid=$!
 
-    # OpenList 目标端（特别是 wopan176 crypt 后端）上传速度慢且不支持高并发
-    # 上传保持串行（transfers=1，给后端足够时间持久化每个文件，避免 "object not found"）；
-    # 检查阶段只读列表，可提高并发大幅缩短 diff/比对耗时（上传仍逐个进行）
+    # OpenList 目标端（特别是 wopan176 crypt 后端）上传速度慢，高并发易触发
+    # 423 锁与假成功。transfers 默认 6（2026-09-15 由 1 提升: 隔离吞吐阶梯
+    # 实测拐点在 12 流，6 × subdir_parallel=2 ≈ 12；重试已抬到 retries=3/
+    # low-level=5 消化新目录并发 mkdir 的 423，见 rclone_flags.sh 头注释）；
+    # 检查阶段只读列表，可提高并发大幅缩短 diff/比对耗时（上传并发低于检查）
     # 同时增加超时时间（单个文件可能耗时 1-2 分钟）
     local openlist_guard_flags=()
     if [[ "$dest_path" == openlist:* ]]; then

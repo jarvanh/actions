@@ -619,8 +619,9 @@ run_all_tasks() {
   fi
 
   # 并行同步对分支（OPENLIST_PAIR_PARALLEL>=2 且正式执行）:
-  # 按后端分组调度，跨后端并行、同后端串行 —— 依据是"后端有总量带宽上限"
-  # 的诊断结论（见 _run_registry_pairs_parallel 头注释）。预览/仅注册 pass
+  # 按后端分组调度，跨后端并行、同后端串行 —— 依据是"后端挂载额度相互
+  # 独立"的隔离复测结论（同后端并行会互抢同一条额度，故禁止；详见
+  # _run_registry_pairs_parallel 头注释）。预览/仅注册 pass
   # 不并行（只读、顺序无关紧要，且要复用串行路径的注册渲染）。
   if [ "$real_pass" -eq 1 ] && [ "${OPENLIST_PAIR_PARALLEL:-2}" -ge 2 ]; then
     _run_registry_pairs_parallel
@@ -1673,7 +1674,9 @@ sync_task() {
 # 不产生 Copied/Failed 日志，自然不会进重试清单（避免每批对排除项无谓重扫）。
 # 依赖调用方（sync_by_file_batches）作用域（bash 动态作用域）:
 #   source_path / dest_path / task_name / batch_dir / extra_args
-# 用法: _batch_consolidate <batch_idx> <batch_log>（恒返回 0，异常仅告警）
+# 用法: _batch_consolidate <batch_idx> <batch_log> [batch_rc]（恒返回 0，异常仅告警）
+#   batch_rc — 本批 copy 的退出码（可选）: 124 = 被预算硬上限 timeout 掉，
+#   此时"未落盘"是截断所致，不当"后端拒收"证据（见下方 _judge_dead）
 # 开关: OPENLIST_BATCH_CONSOLIDATE=0 关闭（调试用）
 _batch_consolidate() {
   local batch_idx="$1"
