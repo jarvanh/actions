@@ -310,6 +310,13 @@ jobs:
           sudo tailscale serve --bg --http=80 http://127.0.0.1:8319
           echo "后台管理: http://${TS_FQDN}/admin/login（monitoring: /admin/monitoring）"
 
+          # trae2api 控制台同走 ts.net：独立端口 8080 反代到容器管理口 18080。
+          # 与 zcode（80→8319）分开端口，避免两个后台抢同一路径。
+          # 公网隧道 trae2api.derrick.eu.org 已于 2026-09-29 撤销（主人要求不再公网暴露），
+          # serve 同样随内存态逐轮清零，故一并在此幂等重建。
+          sudo tailscale serve --bg --http=8080 http://127.0.0.1:18080
+          echo "trae2api 控制台: http://${TS_FQDN}:8080/admin"
+
       - name: Tailscale secrets missing
         if: ${{ always() && env.TS_OAUTH_CLIENT_ID == '' && env.TS_OAUTH_CLIENT_SECRET == '' }}
         run: echo "⚠️ 未配置 TS_OAUTH_CLIENT_ID / TS_OAUTH_CLIENT_SECRET，跳过 Tailscale SSH 调试入口"
@@ -1888,7 +1895,7 @@ jobs:
       # restart: unless-stopped 已覆盖崩溃自愈，dockerd 自身重启也会拉回容器，
       # 再包一层 systemd 是重复托管；systemd --user 只管裸进程形态的
       # workbuddy-gateway / zcode2api（见 gateways.sh）。
-      # 隧道 trae2api（trae2api.derrick.eu.org → 127.0.0.1:7864）凭证随
+      # 隧道 trae2api（原 trae2api.derrick.eu.org → 127.0.0.1:7864）已于 2026-09-29 撤销：
       # /dropbox/self-hosted/.cloudflared 恢复，由 tunnels.conf 纳管。
       - name: Run trae2api container (TRAE SOLO reverse proxy)
         env:
@@ -2114,7 +2121,9 @@ jobs:
           fi
 
           echo "6. Converge tunnel..."
-          bash "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ensure trae2api || true
+          # 公网隧道已撤（2026-09-29 主人要求）：trae2api 管理后台改走 Tailscale
+          # ts.net 内网，不再暴露公网。tunnels.conf 里 trae2api 一行已删除，
+          # ensure 对清单外名字是静默空操作；这里保留注释说明，避免后人误加回公网。
 
           echo "7. Bulk check-in all accounts (cooldown-aware)..."
           # 签到/积分工具随 fork 维护（jarvanh/trae2api cmd/checkin、cmd/credit）。
