@@ -111,7 +111,8 @@ _progress_batch_history_render() {
 
 # ===== 批次传输实时刷新线程（分钟级进度）=====
 # 背景: 批次内 rclone copy 阻塞主线程数分钟～数十分钟，期间无 progress_update
-# 调用，进度消息冻结在批次开始时刻。本线程按固定间隔（默认 60s）tail 批次
+# 调用，进度消息冻结在批次开始时刻。本线程按固定间隔（默认 20s，
+# PROGRESS_RT_INTERVAL 可调）tail 批次
 # 日志，提取 rclone --progress 的 Transferred 行，刷新为“传输中”实时状态。
 # 生命周期: _start_batch_progress_thread 在每批 copy 前启动；
 #           _stop_batch_progress_thread 在 copy 后（含失败/中止路径）停止。

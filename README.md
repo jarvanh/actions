@@ -61,35 +61,49 @@ proxy-speedtest/            测速结果数据
 
 全部为 bash 函数库，由 `load_all.sh` 统一加载；不含可执行入口，入口是 workflow 的 `run_mode`。
 
+> 注：脚本注释中的「§N.N」引用一律指归档计划文档
+> `docs/archive/openlist-remediation-plan-2026-09-13.md` 的章节编号
+> （实验依据与决策记录的溯源）。
+
 ---
 
 ## 模块划分
 
-文件名采用 `<领域>_<职责>.sh`，按域聚集：
+文件名采用 `<领域>_<职责>.sh`，按域聚集（**诊断/运维族不进 `load_all.sh` 加载链**，由对应 workflow 独立调用）：
 
-| 域 | 文件 | 行数 | 职责 |
-|---|---|---:|---|
-| **rclone** | `rclone_flags.sh` | 53 | rclone 参数单点定义（`RCLONE_*_FLAGS`） |
-| | `rclone_query.sh` | 99 | 查询与过滤解析（`size --json`、`check`、exclude 提取） |
-| **openlist** | `openlist_api.sh` | 106 | 管理面登录换 token、服务就绪等待 |
-| | `openlist_driver.sh` | 841 | 驱动刷新、健康预检、缓存刷新、truth-check |
-| | `diag_backend.sh` | 724 | **诊断专用**（不进 `load_all.sh` 加载链）：四组写探针 + 容器日志原始 `rsp_code` dump，由 `openlist-diag.yml` 调用 |
-| **sync** | `sync_engine.sh` | 392 | 核心同步引擎（编排 + 423/8005 重试） |
-| | `sync_marker.sh` | 1058 | 同步标记持久化（跳过、黑名单、修复清单）+ 修复记录生命周期（carry-forward 继承、已对齐收尾清理、父级守卫提取、**游标拒写分支立即持久化修复记录**——防「fold 后拒写丢记录 → 产物被删 → 重 fold」循环）+ **marker 打包外置备份**（`backup_sync_state_to_dropbox`） |
-| | `sync_notify.sh` | 341 | 同步结果通知构建（统一 Telegram HTML 排版） |
-| | `sync_trend.sh` | 242 | 跨 run 传输趋势（P0 可见化：剩余未传/净传速率/预计清零，收尾发「📈 同步趋势」通知） |
-| | `sync_progress.sh` | 820 | 全局进度通知系统（含收尾四态标题、多层级阶段区） |
-| **file** | `file_split.sh` | 689 | 大文件分割（ffmpeg 关键帧 / 7z 分卷） |
-| | `file_fix.sh` | 1705 | 单文件修复的 4 种方法 + 目录可写性三态预检 + 短哈希目录兜底 + 写入侧根层路径断根（防 `./` 污染进 marker） |
-| | `file_fix_pipeline.sh` | 1395 | 修复管线编排（方法轮换 + 增量持久化 + 最终 sync 的 filter 保护构建：marker ∪ 本轮累计 ∪ 父级守卫） |
-| | `file_restore.sh` | 655 | 修复文件还原（目标端 → 原路径 / 源端） |
-| | `restore_tryrun.sh` | 859 | 一键还原 **try run**（只读预演：三条完整路径推导 + 只读白名单护栏 + 时间窗 `within_days` / 绝对下界 `since` + 读取侧路径归一化（`./` 污染金丝雀）+ 双直读复核 + 缺失目录结构探针 + 源端原路径核对与阳性对照 + **marker 原文探针**（dump 归属/时间/源端直读，查"这条记录由谁、何时写下"）；`restore_try_run`） |
-| | `reset_markers.sh` | 120 | marker **归档 + 清空**（一次性运维：先打包归档到 dropbox、归档失败拒绝清空、两道读取判据、默认 dry-run 需 `--commit`；`reset_markers` 入参） |
-| **task** | `task_preview.sh` | 526 | 任务预览（大小估算、跳过预判、未传量估算） |
-| | `task_engine.sh` | 2284 | 任务注册表与编排（分批、轮转、阶段行生产 + 子任务分发前注入父级守卫，防「父级已修被子目录 sync 删」） |
-| **基础** | `utils.sh` | 152 | 通用工具（格式化、日志判定、`_norm_rel_path` 读取侧路径归一化（`./` 污染兜底）；转义/树形渲染已收敛到 `telegram/tg_notify.sh`） |
-| | `telegram.sh` | 132 | Telegram 进度面板（`send_telegram_message` + 原地编辑；排版/发送 source 真源） |
-| | `load_all.sh` | 61 | 统一加载入口（L0 通知真源 → L6 分层） |
+| 域 | 文件 | 职责 |
+|---|---|---|
+| **rclone** | `rclone_flags.sh` | rclone 参数单点定义（`RCLONE_*_FLAGS`） |
+| | `rclone_query.sh` | 查询与过滤解析（`size --json`、`check`、exclude 提取） |
+| **openlist** | `openlist_api.sh` | 管理面登录换 token、服务就绪等待 |
+| | `openlist_driver.sh` | 驱动刷新、健康预检、缓存刷新、truth-check |
+| **sync** | `sync_engine.sh` | 核心同步引擎（编排 + 423/8005 重试） |
+| | `sync_marker.sh` | 同步标记持久化（跳过、黑名单、修复清单）+ 修复记录生命周期（carry-forward 继承、已对齐收尾清理、父级守卫提取、**游标拒写分支立即持久化修复记录**——防「fold 后拒写丢记录 → 产物被删 → 重 fold」循环）+ **marker 打包外置备份**（`backup_sync_state_to_dropbox`） |
+| | `sync_notify.sh` | 同步结果通知构建（统一 Telegram HTML 排版） |
+| | `sync_trend.sh` | 跨 run 传输趋势（P0 可见化：剩余未传/净传速率/预计清零，收尾发「📈 同步趋势」通知） |
+| | `sync_progress.sh` | 全局进度通知系统（含收尾四态标题、多层级阶段区） |
+| **file** | `file_split.sh` | 大文件分割（ffmpeg 关键帧 / 7z 分卷） |
+| | `file_fix.sh` | 单文件修复的 4 种方法 + 目录可写性三态预检 + 短哈希目录兜底 + 写入侧根层路径断根（防 `./` 污染进 marker） |
+| | `file_fix_pipeline.sh` | 修复管线编排（方法轮换 + 增量持久化 + 最终 sync 的 filter 保护构建：marker ∪ 本轮累计 ∪ 父级守卫） |
+| | `file_restore.sh` | 修复文件还原（目标端 → 原路径 / 源端） |
+| | `restore_tryrun.sh` | 一键还原 **try run**（只读预演：三条完整路径推导 + 只读白名单护栏 + 时间窗 `within_days` / 绝对下界 `since` + 读取侧路径归一化（`./` 污染金丝雀）+ 双直读复核 + 缺失目录结构探针 + 源端原路径核对与阳性对照 + **marker 原文探针**（dump 归属/时间/源端直读，查"这条记录由谁、何时写下"）；`restore_try_run`） |
+| | `reset_markers.sh` | marker **归档 + 清空**（一次性运维：先打包归档到 dropbox、归档失败拒绝清空、两道读取判据、默认 dry-run 需 `--commit`；`reset_markers` 入参） |
+| **task** | `task_preview.sh` | 任务预览（大小估算、跳过预判、未传量估算） |
+| | `task_engine.sh` | 任务注册表与编排（分批、轮转、阶段行生产 + 子任务分发前注入父级守卫，防「父级已修被子目录 sync 删」） |
+| **基础** | `utils.sh` | 通用工具（格式化、日志判定、`_norm_rel_path` 读取侧路径归一化（`./` 污染兜底）；转义/树形渲染已收敛到 `telegram/tg_notify.sh`） |
+| | `telegram.sh` | Telegram 进度面板（`send_telegram_message` + 原地编辑；排版/发送 source 真源） |
+| | `load_all.sh` | 统一加载入口（L0 通知真源 → L6 分层；注释含 §N.N 引用指引） |
+| **诊断**（`openlist-diag.yml` 调用） | `diag_common.sh` | 诊断族公共函数（`say/sec/http_code_of/is_409/_mk`） |
+| | `diag_backend.sh` | 后端可写性总诊断：多组写探针（挂载根/任务子路径/并发/大文件阶梯）+ 容器日志原始 `rsp_code` dump |
+| | `diag_write_probe.sh` | 目录可写性判据验证（探针写失败 == 不可写？→ 隐式 mkParentDir 假设的证实/证伪） |
+| | `diag_dirname_probe.sh` | 目录名/路径变量分离（名字 vs 父层路径 vs 后端残留） |
+| | `diag_l2_probe.sh` | L2「mkdir 假成功」普遍性实验（通用缺陷还是个例） |
+| | `diag_depth_probe.sh` | 层级/深度 vs 健康窗口同构分离（同深度同形状对照） |
+| | `diag_escape_probe.sh` | 兜底目录跳出故障子树可行性（上跳可写层 + 归位路径） |
+| | `diag_409_semantics.sh` | 409 语义验证（幂等 vs 真故障）+ 短名改回原名是否蒸发 |
+| | `diag_reject.sh` | 拒收归因（按内容 vs 按文件名/状态；三组对照 + 重启取真值） |
+| **运维**（独立 workflow 调用） | `fix_check.sh` | 修复能力定点验证（对指定文件跑生产同款修复管线，逐文件判 fixed/fake_success/failed；`openlist-fix-check.yml`） |
+| | `cleanup_legacy_marker_entries.sh` | 旧格式 marker 条目一次性清理（dry-run 默认，`--apply` 生效；`openlist-marker-cleanup.yml`） |
 
 辅助程序：`get_storage_addition.py`（从 db 读存储配置）、
 `scan_fix_signatures.py`（marker 丢失时反推修复条目）、`restore_info.jq`（还原方式分类）。
