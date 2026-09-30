@@ -1,62 +1,101 @@
 #!/usr/bin/env bash
-# glm2api 积分采集（供 Telegram 通知的「💳 积分」分节消费）
+# qingyan-proxy 积分采集（供 Telegram 通知的「💳 积分」分节消费）
 #
-# 位置：.github/scripts/gateways/glm2api_quota.sh（随仓库 checkout 分发）
-# 调用：openclaw.yml 的 glm2api 步骤（采集）与收尾步骤（落盘）
+# 位置：.github/scripts/gateways/qingyan_quota.sh（随仓库 checkout 分发）
+# 调用：openclaw.yml 的 qingyan-proxy 步骤（采集）与收尾步骤（落盘）
 #
 # 为什么单独成脚本：通知里要显示「余额 + 本轮消耗 + 今日累计消耗」，后者必须跨
 # workflow 轮次累计（每轮 ~5.75h，runner 本地盘不保）。采集逻辑与通知版式解耦，
-# 状态落在 STATE_DIR（由 workflow 指向可归档目录），随既有归档流程回推 Dropbox。
+# 状态落在 STATE_DIR（由 workflow 指向数据目录），随 deploy push 回推 Dropbox。
 #
-# 为什么用 left_score 而不是别的字段（2026-09-27 实测）：
+# 为什么鉴权走 proxy.py 而不是手拼请求头：签名头（X-Sign/X-Timestamp/X-Nonce）
+# 的算法与刷新轮换逻辑都在服务同款 proxy.py 里（qingyan_deploy 拉下来的运行
+# 目录），直接 import 复用，永不与主服务漂移；401 时走同一套轮换式 refresh，
+# 新票写回状态文件，服务进程靠 mtime 缓存失效自动跟上。
+#
+# 为什么 member_info 用 agentmore 域 + mac/2.0.5 平台头（glm2api 时代实测，2026-09-27）：
 #   - member_info 的 left_score 是真实扣费计数：agent 通道单次短消息扣 94~95 分，
 #     chat 通道连打 6 次扣 0；
 #   - 结算有几秒延迟（同轮内立刻读可能读到不变），故采集点放在自检之后；
 #   - 两个接口同名但差 100 倍（整数 vs 两位小数字符串），统一取 member-api 的整数。
+#   这组平台头是 member-api 的实测可用组合，与主服务 chat 域的 pc/1.7.x 口径不同，
+#   照抄实测值不赌。
 #
 # 用法：
-#   glm2api_quota.sh fetch            # 查当前余额 + 最近到期，输出 TSV：
+#   qingyan_quota.sh fetch            # 查当前余额 + 最近到期，输出 TSV：
 #                                     #   余额<TAB>规则<TAB>最近到期时间<TAB>24h内将过期
-#   glm2api_quota.sh delta <当前余额>  # 与上次快照比，输出 TSV：本轮消耗<TAB>今日累计<TAB>今日日期
+#   qingyan_quota.sh delta <当前余额>  # 与上次快照比，输出 TSV：本轮消耗<TAB>今日累计<TAB>今日日期
 set -u
 
-STATE_DIR="${GLM2API_STATE_DIR:-/tmp/local_glm2api}"
+STATE_DIR="${QINGYAN_STATE_DIR:-/tmp/local_qingyan/data}"
 SNAP="$STATE_DIR/quota-snapshot"
+ENV_FILE="${QINGYAN_ENV_FILE:-/tmp/local_qingyan/env.sh}"
+RUN_DIR="${QINGYAN_RUN_DIR:-/tmp/local_qingyan}"
 
-log() { printf '[glm2api-quota] %s\n' "$*"; }
+log() { printf '[qingyan-quota] %s\n' "$*"; }
 
-# 取当前积分余额。走 agentmore 域（与 chat 域同登录态，实测都返回同一份 member 数据）。
-# 失败时输出空串 + 非 0 退出，由调用方决定降级（通知里少一节，不阻断服务）。
+# 取当前积分余额。失败时输出空串 + 非 0 退出，由调用方决定降级
+# （通知里少一节，不阻断服务）。
 cmd_fetch() {
-  local token code body score rule status
-  token="${GLM_REFRESH_TOKEN:-}"
-  [ -n "$token" ] || { log "❌ 未注入 GLM_REFRESH_TOKEN，无法查积分"; return 1; }
+  [ -s "$RUN_DIR/proxy.py" ] || { log "❌ 运行目录缺 proxy.py，无法采集积分"; return 1; }
+  # proxy.py 按环境变量定位凭证状态文件（文件模式），先 source env.sh（600）
+  # 把 QINGYAN_CRED_FILE / QINGYAN_REFRESH_TOKEN 等灌进来
+  set -a
+  # shellcheck disable=SC1090
+  . "$ENV_FILE" 2>/dev/null || { log "❌ 无法读取 $ENV_FILE"; return 1; }
+  set +a
 
-  # 用 refresh_token 换 access_token，再查 member_info。
-  # 走 python 而不是 curl 手拼：签名头（X-Sign/X-Timestamp/X-Nonce）由项目
-  # 鉴权模块生成，避免与服务端实现漂移（本地已验证该路径可用）。
   local out
-  out="$(cd /tmp/local_glm2api 2>/dev/null && PYTHONPATH=/tmp/local_glm2api/src \
-    /tmp/local_glm2api/.venv/bin/python - <<'PY' 2>/dev/null
-import json, logging, sys, urllib.request, urllib.error, uuid, os, time
-sys.path.insert(0, "/tmp/local_glm2api/src")
-logging.basicConfig(level=logging.CRITICAL)
+  out="$(/usr/bin/python3 - <<'PY' 2>/dev/null
+import json, sys, time, urllib.request, urllib.error, uuid
+sys.path.insert(0, "/tmp/local_qingyan")
+import proxy
+
+MEMBER_URL = "https://agentmore.chatglm.cn/chatglm/member-api/member/member_info"
+REC_URL = "https://chatglm.cn/chatglm/member-api/member/score_record"
+
+
+def _headers(token):
+    # agentmore 域实测组合：mac / 2.0.5 / 随机 32 位 hex 设备号（见文件头注释）
+    H = proxy.base_headers(f"Bearer {token}")
+    H["X-Device-Id"] = uuid.uuid4().hex
+    H["X-App-Platform"] = "mac"
+    H["X-App-Version"] = "2.0.5"
+    H["Origin"] = "https://agentmore.chatglm.cn"
+    H["Referer"] = "https://agentmore.chatglm.cn/"
+    return H
+
+
+def _member(token):
+    with urllib.request.urlopen(
+            urllib.request.Request(MEMBER_URL, headers=_headers(token)), timeout=25) as r:
+        return json.loads(r.read().decode("utf-8", "ignore"))["result"]
+
+
 try:
-    from glm2api.config import load_config
-    from glm2api.services.glm_auth import GLMAccessTokenManager, build_sign
-    cfg = load_config("/tmp/local_glm2api/.env")
-    auth = GLMAccessTokenManager(config=cfg, logger=logging.getLogger("q"))
-    access = auth.get_access_token_for_account(0)
-    ts, nonce, sign = build_sign()
-    H = {**auth.get_browser_headers(), "Authorization": f"Bearer {access}",
-         "Accept": "application/json", "X-Device-Id": uuid.uuid4().hex,
-         "X-App-Platform": "mac", "X-App-Version": "2.0.5",
-         "X-Nonce": nonce, "X-Sign": sign, "X-Timestamp": ts,
-         "Origin": "https://agentmore.chatglm.cn",
-         "Referer": "https://agentmore.chatglm.cn/"}
-    url = "https://agentmore.chatglm.cn/chatglm/member-api/member/member_info"
-    with urllib.request.urlopen(urllib.request.Request(url, headers=H), timeout=25) as r:
-        d = json.loads(r.read().decode("utf-8", "ignore"))["result"]
+    d = None
+    H = None
+    access = (proxy.read_credentials() or {}).get("token") or ""
+    if access:
+        try:
+            H = _headers(access)
+            with urllib.request.urlopen(
+                    urllib.request.Request(MEMBER_URL, headers=H), timeout=25) as r:
+                d = json.loads(r.read().decode("utf-8", "ignore"))["result"]
+        except urllib.error.HTTPError as e:
+            if e.code != 401:
+                raise
+            d = None
+    if d is None:
+        # 无 access token（首轮只有种子）或已 401：轮换新票后重试。
+        # proxy.refresh_access_token 会把新票写回状态文件（轮换式，旧票作废）。
+        new_access = proxy.refresh_access_token(proxy.read_credentials(force=True))
+        if not new_access:
+            raise RuntimeError("refresh token 不可用，拿不到 access token")
+        H = _headers(new_access)
+        with urllib.request.urlopen(
+                urllib.request.Request(MEMBER_URL, headers=H), timeout=25) as r:
+            d = json.loads(r.read().decode("utf-8", "ignore"))["result"]
 
     # 过期时间只在积分流水里（余额接口没有）：翻到 has_more=false 才准。
     # 实测两类有效期：登录赠送约 24h、任务奖励一年；消耗记录 expired_at=0 不计。
@@ -65,10 +104,9 @@ try:
     soon_24h = 0.0
     now = time.time()
     for page in range(1, 11):
-        rec_url = ("https://chatglm.cn/chatglm/member-api/member/score_record"
-                   f"?page={page}&page_size=50")
+        rec = f"{REC_URL}?page={page}&page_size=50"
         try:
-            with urllib.request.urlopen(urllib.request.Request(rec_url, headers=H), timeout=25) as rr:
+            with urllib.request.urlopen(urllib.request.Request(rec, headers=H), timeout=25) as rr:
                 rd = json.loads(rr.read().decode("utf-8", "ignore"))["result"]
         except Exception:
             break
@@ -125,7 +163,6 @@ PY
     log "❌ 查积分失败：$(printf '%s' "$out" | head -c 150)"
     return 1
   fi
-  # 会员状态：1 非会员 / 2 有效 / 3 已过期（App 壳 profile-service.js 口径）
   printf '%s\t%s\t%s\t%s\t%s\n' "$score" "$rule" "$soonest_fmt" "$soonest_amt" "$soon_24h"
   return 0
 }
