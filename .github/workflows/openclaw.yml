@@ -2595,9 +2595,13 @@ jobs:
             # 只是无额度可用 —— 用黄色「已就绪（额度耗尽）」，不用红色「启动失败」：
             # 红色会让人去查进程/端口，实际该做的是等额度重置或换账号，方向完全不同。
             case "$Z2A_FAIL_CLASS" in
-              quota)
+              # unavailable = 网关 503 no_available_account / 请求级死线：账号池全冷却
+              # 或额度耗尽，服务本体在监听且能回 /v1/models —— 与 quota 同为黄色降级，
+              # 不能掉进红色「启动失败」（2026-09-30 误报实例：额度耗尽报成了启动失败）
+              quota|unavailable)
                 tg_add_title _m "🟡 zcode2api 已就绪 · 全部通道额度耗尽"
-                tg_add_kv _m "结论" "服务正常，上游无可用额度（非启动故障）"
+                tg_add_kv _m "结论" "服务正常，上游无可用额度/账号池冷却中（非启动故障）"
+                tg_add_kv _m "说明" "冷却到期自动回轮询，无需人工介入；额度周期刷新后自动恢复"
                 ;;
               channel)
                 tg_add_title _m "🟡 zcode2api 已就绪 · 回退通道已关闭"
