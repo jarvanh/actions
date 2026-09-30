@@ -286,14 +286,42 @@ jobs:
           # 回读实际注册的 DNS 名。--hostname 的重命名有传播延迟，若 set 后立刻读取
           # 可能拿到机器原始主机名（如 github-runnervmgx7h7），导致 ts.env 里的 SSH/
           # RustDesk 直连地址每轮漂移。这里轮询等待名字收敛为 openclaw。
+          # tailnet 后缀（形如 xxxx.ts.net）动态取，避免硬编码到别的 tailnet 时写歪。
+          TS_SUFFIX="$(tailscale status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')"
+          TS_SUFFIX="${TS_SUFFIX#*.}"
           TS_FQDN=""
           for i in $(seq 1 15); do
             TS_FQDN="$(tailscale status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')"
             case "$TS_FQDN" in
-              openclaw.*) break ;;
+              "openclaw.${TS_SUFFIX}") break ;;
             esac
             sleep 2
           done
+
+          # 固定主机名 openclaw（2026-09-30 补）：撞名时控制面会**静默拒绝**并退化成
+          # openclaw-1/-2…，根因是上一轮同名 ephemeral 节点残留在 tailnet——离线也照样占名。
+          # 直连 set 对这种情况无效（prefs 里 Hostname 已写对，但 DNS 名仍是 openclaw-1）。
+          # 兜底：先改到一个临时名把 openclaw 让出来，再改回去 —— 实测可强制收回名字。
+          if [ "${TS_FQDN:-}" != "openclaw.${TS_SUFFIX}" ]; then
+            echo "⚠️ 主机名被占（当前 ${TS_FQDN:-未知}），走临时名中转回收 openclaw"
+            sudo tailscale set --hostname="openclaw-tmp-$$" 2>&1 || true
+            for i in $(seq 1 10); do
+              _TMP_FQDN="$(tailscale status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')"
+              case "$_TMP_FQDN" in
+                "openclaw-tmp-$$.${TS_SUFFIX}") break ;;
+              esac
+              sleep 3
+            done
+            sudo tailscale set --ssh --hostname=openclaw --advertise-exit-node 2>&1 || true
+            TS_FQDN=""
+            for i in $(seq 1 12); do
+              TS_FQDN="$(tailscale status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')"
+              case "$TS_FQDN" in
+                "openclaw.${TS_SUFFIX}") break ;;
+              esac
+              sleep 5
+            done
+          fi
           TS_FQDN="${TS_FQDN:-$(tailscale status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')}"
           TS_HOST="$(printf '%s' "$TS_FQDN" | cut -d. -f1)"
           {
