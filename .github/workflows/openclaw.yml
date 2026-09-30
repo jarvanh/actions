@@ -2461,11 +2461,23 @@ jobs:
           # 账号池口径：条目行 = 名称 · 通道 · 状态；子行 = 额度/套餐 + 最近错误）。
           # 只在服务已监听时可采；采集失败只影响通知信息量，不改变结论。
           # 注意：子行换行用 $'\n' 单行拼接 —— YAML 块标量里裸换行续行会破坏缩进。
+          # 后台密码真值在 accounts.db 的 meta.admin_key：.env 的 ZCODE_ADMIN_KEY
+          # 只在首次初始化时播种一次（store.py 是 INSERT OR IGNORE），后台「设置」页
+          # 改过密码后 db 永久优先、.env 变成历史残留 —— 拿 .env 的值调 admin API
+          # 会 401，账号池分节静默消失（2026-09-30 实测）。故优先读 db，读不到才回退 .env。
+          z2a_admin_key() {
+            local k=""
+            if [ -f "$Z2A_RUN_DIR/data/accounts.db" ]; then
+              k="$(Z2A_DB="$Z2A_RUN_DIR/data/accounts.db" python3 -c 'import os,sqlite3;db=sqlite3.connect("file:"+os.environ["Z2A_DB"]+"?mode=ro",uri=True,timeout=5);r=db.execute("select value from meta where key=?",("admin_key",)).fetchone();print(r[0] if r and r[0] else "")' 2>/dev/null || true)"
+            fi
+            [ -n "$k" ] || k="$(grep -m1 '^ZCODE_ADMIN_KEY=' "$Z2A_RUN_DIR/.env" 2>/dev/null | cut -d= -f2-)"
+            printf '%s' "$k"
+          }
           Z2A_POOL_TITLE=""
           Z2A_POOL_TEXT=""
           z2a_collect_pool() {
             local ak json n=0 total=0
-            ak="$(grep -m1 '^ZCODE_ADMIN_KEY=' "$Z2A_RUN_DIR/.env" 2>/dev/null | cut -d= -f2-)"
+            ak="$(z2a_admin_key)"
             [ -n "$ak" ] || return 0
             json="$(curl -sS --max-time 10 -H "Authorization: Bearer ${ak}" \
               "http://127.0.0.1:${Z2A_PORT}/admin/api/accounts" 2>/dev/null)" || return 0
