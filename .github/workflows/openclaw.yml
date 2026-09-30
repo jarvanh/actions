@@ -2010,6 +2010,41 @@ jobs:
                 # 末条子行渲染，版式与 wb_notify（块与 kv 区之间空一行）一致。
                 tg_append _msg $'\n'
               fi
+              # 签到健康段（主人 09-30 定：原先独立的「签到简报」并入已就绪通知，
+              # 不再单独发一条）。只列**需要关注**的账号（连败>0 / 换代过 / 仍在退避），
+              # 全健康时整段跳过 —— 健康是常态，异常才值得占版面，否则每轮重复渲染
+              # 四行「连败 0」纯属噪音。
+              # 数据源：checkin-state.json（连败/上次成功）+ state.json（自愈换代/退避）。
+              # 换代 gen>0 是 9074 自愈动过手的证据（不是故障），故单列且不加 ⚠️。
+              local _ck_state _st_state _hrows _hu _hfc _hlcd _hgen _hrc _hnick _hinfo
+              _ck_state="${TRAE_DATA}/data/checkin-state.json"
+              _st_state="${TRAE_DATA}/data/state.json"
+              _hrows=""
+              _hn=0
+              if [ -s "$_ck_state" ]; then
+                while IFS= read -r _hu; do
+                  [ -z "$_hu" ] && continue
+                  _hfc=$(jq -r --arg u "$_hu" '.[$u].fail_count // 0' "$_ck_state" 2>/dev/null || echo 0)
+                  _hlcd=$(jq -r --arg u "$_hu" '.[$u].last_claim_date // "-"' "$_ck_state" 2>/dev/null || echo "-")
+                  _hgen=$(jq -r --arg u "$_hu" '.accounts[$u].checkin_device_gen // 0' "$_st_state" 2>/dev/null || echo 0)
+                  _hrc=$(jq -r --arg u "$_hu" '.accounts[$u].checkin_retry_count // 0' "$_st_state" 2>/dev/null || echo 0)
+                  # 全健康 → 跳过（不占版面）
+                  [ "${_hfc:-0}" -gt 0 ] || [ "${_hgen:-0}" -gt 0 ] || [ "${_hrc:-0}" -gt 0 ] || continue
+                  _hnick=$(jq -r --arg uid "$_hu" '[.[] | select(.uid == $uid) | .nickname] | last // ""' "${CHECKIN_JSONL:-/dev/null}" 2>/dev/null || true)
+                  [ -n "$_hnick" ] || _hnick="$_hu"
+                  _hinfo="上次成功 ${_hlcd}"
+                  [ "${_hfc:-0}" -gt 0 ] && _hinfo="${_hinfo} · ⚠️ 连败 ${_hfc}"
+                  [ "${_hgen:-0}" -gt 0 ] && _hinfo="${_hinfo} · 自愈换代 gen ${_hgen}"
+                  [ "${_hrc:-0}" -gt 0 ] && _hinfo="${_hinfo} · 退避 ${_hrc}"
+                  tg_add_entry _hrows "${_hnick} · ${_hinfo}"
+                  _hn=$((_hn + 1))
+                done <<< "$(jq -r 'keys[]' "$_ck_state" 2>/dev/null)"
+              fi
+              if [ "$_hn" -gt 0 ]; then
+                tg_add_section _msg "🩺 签到健康 · ${_hn}"
+                tg_add_block _msg "$(tree_lines "${_hrows%$'\n'}")"
+                tg_append _msg $'\n'
+              fi
               # 模型倍率段：数据源是 7.5 生成的 RATES_TXT（/v1/models 的
               # consumption_rate，倍率升序（价格低的排上面）、每模型一行）；服务未就绪/
               # 取数失败时为空，
