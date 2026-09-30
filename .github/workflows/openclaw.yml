@@ -2355,11 +2355,14 @@ jobs:
           # 只是没有 content 块（实测 {"code":1005,"msg":"exceed quota limit"}），
           # 与「进程没起来 / 端口没人听」是完全两种事，不该共用红色「启动失败」告警。
           # 返回：quota=上游额度/余额类（服务本体健康）· channel=回退通道被关 ·
-          # captcha=验证码 · auth=鉴权 · unknown=其他（按真失败处理）
+          # captcha=验证码 · auth=鉴权 ·
+          #       unavailable=网关 503/请求级死线（账号池全冷却/耗尽，服务本体健康）·
+          #       unknown=其他（按真失败处理）
           z2a_fail_class() {
             printf '%s' "$1" | jq -e '.code == 1005 or ((.msg // "") | test("quota|余额|insufficient|1113"; "i"))' >/dev/null 2>&1 && { echo quota; return; }
             printf '%s' "$1" | jq -e '.error.type == "channel_disabled"' >/dev/null 2>&1 && { echo channel; return; }
             printf '%s' "$1" | jq -e '.error.type == "captcha_error"' >/dev/null 2>&1 && { echo captcha; return; }
+            printf '%s' "$1" | jq -e '.error.type == "no_available_account"' >/dev/null 2>&1 && { echo unavailable; return; }
             printf '%s' "$1" | jq -e '.error.type | test("auth|invalid_request|unauthorized"; "i")' >/dev/null 2>&1 && { echo auth; return; }
             echo unknown
           }
@@ -2383,7 +2386,26 @@ jobs:
             # 分诊，主通道的额度耗尽会被兜底的 channel_disabled 顶掉 —— 于是通知
             # 让人去开回退通道，而该通道实测上游同样欠费（429 code 1113），白折腾。
             Z2A_MAIN_CLASS="$(z2a_fail_class "$Z2A_SELFTEST_OUT")"
+            # 请求级死线形态：主通道被 429 梯拖满 600s，curl 拿不到任何字节
+            # （自检输出恰为 "curl: (28) Operation timed out ..."，非 JSON）。
+            # 这不是服务挂了，是账号池在冷却期。
+            if [ "$Z2A_MAIN_CLASS" = "unknown" ] && \
+               printf '%s' "$Z2A_SELFTEST_OUT" | grep -q 'curl: (28)'; then
+              Z2A_MAIN_CLASS="unavailable"
+            fi
+            # 兜底探 bigmodel/GLM-5.3（Key 通道，免验证码）。该通道是**独立**的
+            # bigmodel 账号池：Plan 池耗尽/冷却时它仍可能出内容，故「主通道 503/超时
+            # + 兜底通」应报「Plan 通道降级」，不该报启动失败。
+            # 但主通道已确认是额度/无可用账号时不必再等：兜底探在 Key 池同样 429 时
+            # 会被 curl 拖满 120s（零输出），直接判「服务正常 · 无可用额度」更快更准。
             Z2A_PLAN_BAD=1
+            case "$Z2A_MAIN_CLASS" in
+              quota|unavailable)
+                Z2A_SELFTEST_OUT=""
+                Z2A_FAIL_CLASS="$Z2A_MAIN_CLASS"
+                return 1
+                ;;
+            esac
             Z2A_SELFTEST_OUT="$(z2a_probe '{"model":"bigmodel/GLM-5.3","max_tokens":16,"messages":[{"role":"user","content":"回复 ok 即可"}]}')"
             if z2a_body_ok "$Z2A_SELFTEST_OUT"; then
               Z2A_SELFTEST_MODEL="$(printf '%s' "$Z2A_SELFTEST_OUT" | jq -r '.model // "未知"' 2>/dev/null || true)"
