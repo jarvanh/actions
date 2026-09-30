@@ -971,6 +971,8 @@ send_sync_warning() {
   local diff_bytes=$((marker_bytes - MARKER_CURRENT_BYTES))
   local diff_count=$((marker_count - MARKER_CURRENT_COUNT))
   local pct=0
+  # 下方两个列表分节（缺失/新增目录）共用的条目流缓冲
+  local _dirs_html=""
   if [ "$marker_bytes" -gt 0 ]; then
     pct=$((diff_bytes * 100 / marker_bytes))
   fi

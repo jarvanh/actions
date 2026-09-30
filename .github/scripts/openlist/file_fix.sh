@@ -1332,7 +1332,7 @@ _fix_switch_to_hash_dir() {
     return 1
   fi
   local hash_dst_dir="${dest_path}/${HASH_DIR_REL}"
-  local hash_ol_dir="/${ol_dst_base}/${HASH_DIR_REL}"
+  local hash_ol_dir="/${ol_dst_base:+${ol_dst_base}/}${HASH_DIR_REL}"
   if [ "$file_dir_rel" = "." ] || [ -z "$file_dir_rel" ]; then
     log_fix "$fix_log" "🔀 目录级兜底: 目标端根目录折叠为短哈希目录 ${HASH_DIR_REL}（根目录无目录名可折，改为在根下新建）"
   else
@@ -1502,7 +1502,9 @@ try_fix_failed_file() {
   local dir_ok=0
   local used_base64_dir=0
   local actual_dst_dir="$dst_dir"
-  local actual_ol_dir="/${ol_dst_base}/${file_dir_rel}"
+  # ol 内部路径: base/相对层都空时退化为 "/"，不带多余斜杠（API 虽容忍
+  # 尾斜杠/双斜杠，但保持干净口径可避免日志对照时的困惑）
+  local actual_ol_dir="/${ol_dst_base}${file_dir_rel:+/${file_dir_rel}}"
 
   # 尝试 rclone mkdir
   log_fix "$fix_log" "📁 确保目标目录存在: $(_short_path "$dst_dir")"
@@ -1588,7 +1590,7 @@ try_fix_failed_file() {
       fi
 
       actual_dst_dir="${dest_path}/${new_file_dir_rel}"
-      actual_ol_dir="/${ol_dst_base}/${new_file_dir_rel}"
+      actual_ol_dir="/${ol_dst_base:+${ol_dst_base}/}${new_file_dir_rel}"
 
       log_fix "$fix_log" "原始目录: $file_dir_rel"
       log_fix "$fix_log" "base64URL 编码目录: $new_file_dir_rel"

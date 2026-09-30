@@ -2231,12 +2231,9 @@ sync_by_file_batches() {
       local batch_guard_flags=()
       local batch_timeout="5m"
       if [[ "$dest_path" == openlist:* ]]; then
-        local _ol_transfers
-        if [[ "$dest_path" == openlist:* ]]; then
-          _ol_transfers="${OPENLIST_TRANSFERS:-6}"
-        else
-          _ol_transfers="${RCLONE_TRANSFERS:-6}"
-        fi
+        # 仅 openlist:* 目标限制并发；非 openlist 目标（当前无）走外层 else 的
+        # batch_timeout=5m + 不加 guard flags
+        local _ol_transfers="${OPENLIST_TRANSFERS:-6}"
         batch_guard_flags=("--transfers" "$_ol_transfers" "--checkers" "${OPENLIST_CHECKERS:-8}")
         batch_timeout="30m"
         # 打印实际生效值: 旧版这里硬编码 transfers=1，而实际读的是无人设置的
