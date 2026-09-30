@@ -331,21 +331,21 @@ jobs:
           } > "$HOME/ts.env"
           echo "SSH 入口: ssh runner@${TS_HOST}（RustDesk 直连: ${TS_FQDN}:21118）"
 
-          # 后台管理面板走 ts.net 域名：tailscale serve 反代到本地 8319（AI 网关）。
+          # 两个后台按端口隔离（2026-09-30 改）：trae2api 走 8080、zcode-hub 走 8081，
+          # 各自独占根路径 /admin，不必再靠 --set-path 子路径区分（此前两者抢 /admin
+          # 只能挤在同一端口的不同前缀上）。
           # tailscaled 以 --state=mem: 运行（runner 临时态设计），签不了 HTTPS 证书
-          # （no TailscaleVarRoot），故用 HTTP:80 —— 流量仍在 WireGuard 隧道内，
-          # 安全性与直连 IP:8319 明文等同。serve 配置随内存态逐轮清零，此处幂等重建。
-          sudo tailscale serve --bg --http=80 http://127.0.0.1:8319
-          echo "后台管理: http://${TS_FQDN}/admin/login（monitoring: /admin/monitoring）"
+          # （no TailscaleVarRoot），故用 HTTP —— 流量仍在 WireGuard 隧道内，
+          # 安全性与直连后端端口明文等同。serve 配置随内存态逐轮清零，此处幂等重建。
+          sudo tailscale serve --bg --http=8080 http://127.0.0.1:18080
+          echo "trae2api 控制台: http://${TS_FQDN}:8080/admin"
 
-          # trae2api 控制台同走 ts.net 80 端口，挂子路径 /trae → 容器管理口 18080。
-          # 2026-09-30 起与 zcode 统一到同一端口（此前 8080 独立端口是为绕开
-          # 两后台抢根路径 /admin；现前端已支持挂载前缀自适应，见 trae2api commit a75ec3e）。
-          # tailscale serve --set-path 转发时剥掉前缀（后端收到的仍是 /admin/...），
-          # 故后端路由零改动。公网隧道 trae2api.derrick.eu.org 已于 2026-09-29 撤销
-          # （主人要求不再公网暴露）。serve 随内存态逐轮清零，此处幂等重建。
-          sudo tailscale serve --bg --http=80 --set-path=/trae http://127.0.0.1:18080
-          echo "trae2api 控制台: http://${TS_FQDN}/trae/admin"
+          sudo tailscale serve --bg --http=8081 http://127.0.0.1:8319
+          echo "zcode-hub 后台: http://${TS_FQDN}:8081/admin/accounts（API 网关: /v1）"
+          # 注：trae2api 的前端前缀自适应（commit a75ec3e）保留、不做 revert —— 挂根路径时
+          # 其 BASE 推导为空串、行为完全不变（向后兼容），实测 :8080/admin/api/models 200。
+          # revert 需重出 Release + 重建镜像 + 重启容器，收益为零。端口隔离后前缀能力闲置。
+          # 公网隧道 trae2api.derrick.eu.org 已于 2026-09-29 撤销（主人要求不再公网暴露）。
 
       - name: Tailscale secrets missing
         if: ${{ always() && env.TS_OAUTH_CLIENT_ID == '' && env.TS_OAUTH_CLIENT_SECRET == '' }}
