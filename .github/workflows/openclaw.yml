@@ -331,21 +331,20 @@ jobs:
           } > "$HOME/ts.env"
           echo "SSH 入口: ssh runner@${TS_HOST}（RustDesk 直连: ${TS_FQDN}:21118）"
 
-          # 后台管理面板走 ts.net 域名：tailscale serve 反代到本地 8319（AI 网关）。
+          # 两个后台各占一个端口、各占根路径 /admin：trae2api 8080、zcode-hub 8081。
+          # 分开端口是因为两者前端都用绝对路径 /admin，同端口会打架。
           # tailscaled 以 --state=mem: 运行（runner 临时态设计），签不了 HTTPS 证书
-          # （no TailscaleVarRoot），故用 HTTP:80 —— 流量仍在 WireGuard 隧道内，
-          # 安全性与直连 IP:8319 明文等同。serve 配置随内存态逐轮清零，此处幂等重建。
-          sudo tailscale serve --bg --http=80 http://127.0.0.1:8319
-          echo "后台管理: http://${TS_FQDN}/admin/login（monitoring: /admin/monitoring）"
+          # （no TailscaleVarRoot），故用 HTTP —— 流量仍在 WireGuard 隧道内，
+          # 安全性与直连后端端口明文等同。serve 配置随内存态逐轮清零，此处幂等重建。
+          sudo tailscale serve --bg --http=8081 http://127.0.0.1:8319
+          echo "zcode-hub 后台: http://${TS_FQDN}:8081/admin/accounts（API 网关: /v1）"
 
-          # trae2api 控制台走独立端口 8080 → 容器管理口 18080。
-          # 与 zcode 分开端口是因为两者都要占根路径 /admin，同端口会打架。
-          # 2026-09-30 曾尝试用子路径 /trae 合并到 80 端口（依赖 trae2api commit
-          # a75ec3e 的前端前缀自适应），后已整体回退：a75ec3e 被 revert（镜像
-          # v2026.09.30-46abeff），恢复为端口隔离方案。
-          # 公网隧道 trae2api.derrick.eu.org 已于 2026-09-29 撤销（主人要求不再公网暴露）。
           sudo tailscale serve --bg --http=8080 http://127.0.0.1:18080
           echo "trae2api 控制台: http://${TS_FQDN}:8080/admin"
+          # 2026-09-30 曾尝试把 trae 挂到 80 端口的 /trae 子路径（依赖 trae2api commit
+          # a75ec3e 的前端前缀自适应），后已整体回退：a75ec3e 被 revert（镜像
+          # v2026.09.30-46abeff），zcode 也从 80 挪到 8081，与 trae 端口相邻。
+          # 公网隧道 trae2api.derrick.eu.org 已于 2026-09-29 撤销（主人要求不再公网暴露）。
 
       - name: Tailscale secrets missing
         if: ${{ always() && env.TS_OAUTH_CLIENT_ID == '' && env.TS_OAUTH_CLIENT_SECRET == '' }}
