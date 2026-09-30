@@ -601,7 +601,7 @@ restore_try_run() {
   #   时间点筛了，实际是全量（§0 判据静默失败 ⇒ 错误结论）。
   #   （解析失败会在此处告警并回落；具体格式见文件头 TRYRUN_SINCE 说明）
   if [ -n "$since_raw" ]; then
-    local sd="${since_raw%%T*}"; st="${since_raw#*T}"
+    local sd="${since_raw%%T*}" st="${since_raw#*T}"
     [ "$st" = "$since_raw" ] && st="00:00:00"
     st="${st%%.*}"; st="${st%%+*}"; st="${st%Z}"
     if [[ "$sd" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] \

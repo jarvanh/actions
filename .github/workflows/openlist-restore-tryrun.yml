@@ -48,7 +48,7 @@ on:
         type: string
         default: "0"
       since:
-        description: "绝对时间下界（UTC，YYYY-MM-DD 或 YYYY-MM-DDTHH:MM:SS；留空 = 不限）。只看该时刻之后产生的 marker —— 判新旧 marker 是否不兼容必须用这个: 最近一次改写 marker 语义的是 e90118e 2026-09-19T11:03:00Z（move 改 moveto），之前的 marker 其还原脚本是错的 move。与 within_days 同时给时取更严者"
+        description: "绝对时间下界（UTC，YYYY-MM-DD 或 YYYY-MM-DDTHH:MM:SS；留空 = 不限）。只看该时刻之后产生的 marker —— 判新旧 marker 是否不兼容必须用这个: 最近一次改写 marker 语义的是 e90118e 2026-09-19T11:03:00Z（move 改 moveto），之前的 marker 其还原脚本是错的 move。2026-09-26 起还原改 copyto 保留副本，仅搬运方式变化，marker 字段语义不变，不影响该分界。与 within_days 同时给时取更严者"
         required: false
         type: string
         default: ""
