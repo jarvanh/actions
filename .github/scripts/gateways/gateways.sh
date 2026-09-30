@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 宿主进程形态 AI 网关的 systemd --user 管理器（workbuddy-gateway / zcode2api）
+# 宿主进程形态 AI 网关的 systemd --user 管理器（workbuddy-gateway / zcode2api / qingyan）
 #
 # 位置：.github/scripts/gateways/gateways.sh（随仓库 checkout 分发）
 # 调用：openclaw.yml 的两个网关启动步骤（ensure）与收尾停止步骤（stop）
@@ -14,10 +14,10 @@
 #   Restart=always 把「崩溃→自愈」收敛到秒级；runner 的 user manager 常驻
 #   （openclaw-gateway.service 同款，Linger=yes）。
 #
-#   bash "$GITHUB_WORKSPACE/.github/scripts/gateways/gateways.sh" ensure <workbuddy|zcode2api|glm2api>
+#   bash "$GITHUB_WORKSPACE/.github/scripts/gateways/gateways.sh" ensure <workbuddy|zcode2api|qingyan>
 #
 # 用法：
-#   gateways.sh ensure <workbuddy|zcode2api|glm2api>  # 写单元(幂等)+reload+重启
+#   gateways.sh ensure <workbuddy|zcode2api|qingyan>  # 写单元(幂等)+reload+重启
 #   gateways.sh stop <name>                            # 收尾停止（等退出，不 pkill）
 #   gateways.sh status [name]                          # 状态总览
 #
@@ -32,6 +32,11 @@
 # 前置条件（由各启动步骤负责，本脚本不做）：
 #   workbuddy  /tmp/local_workbuddy/{workbuddy-gateway,data/}（含 logs/ 目录）
 #   zcode2api  /tmp/local_zcode2api/{.venv,cli.py,.env,logs/}
+#   qingyan    /tmp/local_qingyan/{proxy.py,env.sh,logs/}（单文件零依赖，无需 venv）
+#
+# 为什么 qingyan 取代了 glm2api（2026-09-30）：qingyan-proxy 是自研单文件反代，
+# 已在本机端到端验证，glm2api 退役；部署脚本同步换成 qingyan_deploy.sh，
+# 本脚本的单元模板也一并换掉，否则单元指向已删除的 main.py 会直接启动失败。
 set -u
 
 UNIT_DIR="${HOME}/.config/systemd/user"
@@ -117,15 +122,19 @@ StandardError=append:/tmp/local_zcode2api/logs/zcode2api.log
 WantedBy=default.target
 EOF
       ;;
-    glm2api)
-      # 凭据口径与其余两个网关相反：token 不进单元文件（避免同一份凭据落到
-      # 单元 + .env 两处，轮换时容易漏改一处），只写在运行目录 .env（600），
-      # 由服务自行读取。故这里只校验部署脚本是否已把 .env 写好。
-      [ -s /tmp/local_glm2api/.env ] || { rm -f "$tmp"; die "glm2api: 运行目录 .env 缺失或为空，请先跑 glm2api_deploy.sh prepare"; }
-      grep -q '^GLM_REFRESH_TOKEN=.' /tmp/local_glm2api/.env || { rm -f "$tmp"; die "glm2api: .env 内无 GLM_REFRESH_TOKEN，拒绝起游客态服务"; }
+    qingyan)
+      # 凭据只落在运行目录 env.sh（600），不进单元文件——同一份 refresh token
+      # 落到两处会在上游轮换式刷新时漏改一处。这里只校验部署脚本是否已写好。
+      [ -s /tmp/local_qingyan/env.sh ] || { rm -f "$tmp"; die "qingyan: 运行目录 env.sh 缺失或为空，请先跑 qingyan_deploy.sh prepare"; }
+      grep -q '^QINGYAN_REFRESH_TOKEN=.' /tmp/local_qingyan/env.sh || { rm -f "$tmp"; die "qingyan: env.sh 内无 QINGYAN_REFRESH_TOKEN，拒绝起无凭据服务"; }
+      [ -s /tmp/local_qingyan/proxy.py ] || { rm -f "$tmp"; die "qingyan: 运行目录缺 proxy.py"; }
+      # 日志目录必须存在：StandardOutput=append:<LOG> 在目录不存在时进程直接以
+      # status=209/STDOUT 退出 → Restart=always 崩溃循环（glm2api 时代实测踩过）。
+      # 部署脚本已建，这里幂等补一道。
+      mkdir -p /tmp/local_qingyan/logs || true
       cat > "$tmp" <<EOF
 [Unit]
-Description=glm2api (ChatGLM 清言反代 -> OpenAI, ${GLM2API_PORT:-8320})
+Description=qingyan-proxy (清言 chatglm.cn 反代 -> OpenAI, ${QINGYAN_PORT:-8320})
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=300
@@ -133,21 +142,20 @@ StartLimitBurst=0
 
 [Service]
 Type=simple
-WorkingDirectory=/tmp/local_glm2api
-# 源码是 src/ 布局，经 PYTHONPATH 指过去，避免为启动做一次 pip install
-EnvironmentFile=/tmp/local_glm2api/env.sh
-# GLM_REFRESH_TOKEN 只存在于运行目录 .env（600），不进单元文件（理由见脚本注释）
-ExecStart=/tmp/local_glm2api/.venv/bin/python main.py
+WorkingDirectory=/tmp/local_qingyan
+EnvironmentFile=/tmp/local_qingyan/env.sh
+# 单文件零依赖（纯标准库），系统 python3 直接跑，无需 venv
+ExecStart=/usr/bin/python3 proxy.py
 Restart=always
 RestartSec=5
-StandardOutput=append:/tmp/local_glm2api/logs/glm2api.log
-StandardError=append:/tmp/local_glm2api/logs/glm2api.log
+StandardOutput=append:/tmp/local_qingyan/logs/qingyan.log
+StandardError=append:/tmp/local_qingyan/logs/qingyan.log
 
 [Install]
 WantedBy=default.target
 EOF
       ;;
-    *) die "未知网关: $name（可选 workbuddy | zcode2api | glm2api）" ;;
+    *) die "未知网关: $name（可选 workbuddy | zcode2api | qingyan）" ;;
   esac
   install -m 600 "$tmp" "$UNIT_DIR/$(unit_name "$name")"
   rm -f "$tmp"
@@ -155,7 +163,7 @@ EOF
 
 cmd_ensure() {
   local name="${1:-}"
-  [ -n "$name" ] || die "用法: $0 ensure <workbuddy|zcode2api|glm2api>"
+  [ -n "$name" ] || die "用法: $0 ensure <workbuddy|zcode2api|qingyan>"
   local unit
   unit="$(unit_name "$name")"
 
@@ -181,7 +189,7 @@ cmd_ensure() {
 
 cmd_stop() {
   local name="${1:-}"
-  [ -n "$name" ] || die "用法: $0 stop <workbuddy|zcode2api|glm2api>"
+  [ -n "$name" ] || die "用法: $0 stop <workbuddy|zcode2api|qingyan>"
   local unit
   unit="$(unit_name "$name")"
 
@@ -200,7 +208,7 @@ cmd_stop() {
 
 cmd_status() {
   local only="${1:-}"
-  local names="workbuddy zcode2api glm2api"
+  local names="workbuddy zcode2api qingyan"
   printf '%-12s %-24s %s\n' "网关" "状态" "单元"
   local n unit st
   for n in $names; do

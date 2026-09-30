@@ -2509,12 +2509,25 @@ jobs:
             json="$(curl -sS --max-time 10 -H "Authorization: Bearer ${ak}" \
               "http://127.0.0.1:${Z2A_PORT}/admin/api/accounts" 2>/dev/null)" || return 0
             printf '%s' "$json" | jq -e '.accounts' >/dev/null 2>&1 || return 0
-            total="$(printf '%s' "$json" | jq -r '.stats.total')"
-            Z2A_POOL_TITLE="$(printf '%s' "$json" | jq -r '"💳 账号池 · \(.stats.total)（active \(.stats.active)）"')"
+            # 无额度账号不展示（主人 2026-09-30 要求）。判据与 quota-board 的
+            # zc_apikeys 一致：**quota 为空即无额度可展示**，不按 mode 硬编码隐藏 ——
+            # Key 通道（bigmodel/apiKey）设计上不打 billing 全家桶，quota 恒空，
+            # 将来上游若给它补了额度会自动出现，不用回来改代码。
+            local pool_rows shown_total shown_active hidden_total
+            pool_rows="$(printf '%s' "$json" | jq -r '.accounts[] | select((.quota // {} | length) > 0) | [.name, .provider, .mode, .status, (.plan.name // "-"), (.last_error // "-"), (.quota // {} | tostring)] | @tsv' 2>/dev/null || true)"
+            shown_total="$(printf '%s' "$pool_rows" | grep -c . || true)"
+            shown_active="$(printf '%s' "$pool_rows" | awk -F'\t' '$4=="active"' | grep -c . || true)"
+            hidden_total="$(printf '%s' "$json" | jq -r '[.accounts[] | select((.quota // {} | length) == 0)] | length' 2>/dev/null || true)"
+            # 标题计数用**已展示**的条目，避免「账号池 10」却只列 1 条的口径打架；
+            # 被略去的条数单独标出，主人仍知道池子里还有多少无额度账号。
+            Z2A_POOL_TITLE="💳 账号池 · ${shown_total}（active ${shown_active}）"
+            if [ "${hidden_total:-0}" -gt 0 ] 2>/dev/null; then
+              Z2A_POOL_TITLE="${Z2A_POOL_TITLE} · 略 ${hidden_total} 无额度"
+            fi
             local rows="" prefix subpre
             while IFS=$'\t' read -r name prov mode st plan_name err quota_json; do
               n=$((n + 1))
-              if [ "$n" -eq "$total" ]; then
+              if [ "$n" -eq "${shown_total}" ]; then
                 prefix='<code>  └─ </code>'; subpre="$(tree_sub 1)"
               else
                 prefix='<code>  ├─ </code>'; subpre="$(tree_sub 0)"
@@ -2550,7 +2563,7 @@ jobs:
               [ -n "$err" ] && [ "$err" != "-" ] && sub="${sub:+$sub · }最近错误 $(escape_html "$err")"
               [ -n "$sub" ] && line="${line}"$'\n'"${subpre}${sub}"
               rows+="$line"$'\n'
-            done < <(printf '%s' "$json" | jq -r '.accounts[] | [.name, .provider, .mode, .status, (.plan.name // "-"), (.last_error // "-"), (.quota // {} | tostring)] | @tsv')
+            done < <(printf '%s\n' "$pool_rows")
             Z2A_POOL_TEXT="$(printf '%s' "$rows" | sed '/^$/d')"
           }
 
@@ -2741,8 +2754,8 @@ jobs:
             fi
           fi
 
-      - name: Run glm2api (ChatGLM 清言反代)
-        id: run_glm2api
+      - name: Run qingyan-proxy (ChatGLM 清言反代)
+        id: run_qingyan
         continue-on-error: true
         env:
           # send_tg 发送闸 + 收尾区接线（缺任一则本步骤通知静默跳过）
@@ -2750,41 +2763,44 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
           # 凭据：清言账号的 chatglm_refresh_token。只从 Secrets 注入环境变量，
-          # 不落仓库、不回显；部署脚本写进运行目录 .env（600）供服务读取。
-          GLM_REFRESH_TOKEN: ${{ secrets.GLM_REFRESH_TOKEN }}
+          # 不落仓库、不回显；部署脚本写进运行目录 env.sh（600）供服务读取。
+          # 上游 refresh 是轮换式（旧票立即作废），本值只作首轮种子，之后以
+          # 数据目录里轮换出的新票为准 —— 故 data/ 必须随 Dropbox 跨轮持久化。
+          QINGYAN_REFRESH_TOKEN: ${{ secrets.GLM_REFRESH_TOKEN }}
           # 网关鉴权：本网关专属 key（不共用 AI_GATEWAY_API_KEY —— 每个反代各有
           # 自己的 key，避免一把泄露波及全部）。监听已改 0.0.0.0，这是唯一的
-          # 安全边界；部署脚本写进 .env 的 SERVER_API_KEYS，缺值直接拒绝启动。
-          GLM2API_GATEWAY_KEY: ${{ secrets.GLM2API_GATEWAY_KEY }}
-          GLM2API_PORT: "8320"
-          GLM2API_PATCH_DIR: ${{ github.workspace }}/.github/scripts/gateways/glm2api-patch
-          # 持久化（2026-09-28 改，对齐 workbuddy-gateway）：
-          #   Dropbox 专属目录 ↔ 本地数据目录，起前 pull / 停后 push。
-          #   DATA_DIR 同时是积分快照的落点（GLM2API_STATE_DIR 指向它），
-          #   runner 本地盘每轮重置，不落 Dropbox 的话「今日累计」每轮清零。
-          GLM2API_DATA_REMOTE: dropbox:self-hosted/glm2api
-          GLM2API_DATA_DIR: /tmp/local_glm2api/data
-          GLM2API_STATE_DIR: /tmp/local_glm2api/data
-          # 迁移兜底：改造前快照是独立单文件，新目录为空时从中取一次（取到即停）。
-          GLM2API_LEGACY_QUOTA_ARCHIVE: dropbox:self-hosted/glm2api-quota-snapshot
+          # 安全边界；部署脚本写进 env.sh 的 PROXY_API_KEY，缺值直接拒绝启动。
+          QINGYAN_GATEWAY_KEY: ${{ secrets.GLM2API_GATEWAY_KEY }}
+          QINGYAN_PORT: "8320"
+          # 代码源（Dropbox 侧）：项目在本机 ~/AI/qingyan-proxy（非 git 仓库），
+          # 经 rclone 存到该远端，每轮 pull 保证跑在最新版上。
+          QINGYAN_APP_REMOTE: dropbox:self-hosted/qingyan-proxy/app
+          # 持久化（对齐 workbuddy-gateway）：Dropbox 专属目录 ↔ 本地数据目录，
+          # 起前 pull / 停后 push。DATA_DIR 同时是积分快照落点（STATE_DIR 指向它），
+          # runner 本地盘每轮重置，不落 Dropbox 的话「今日累计」每轮清零。
+          QINGYAN_DATA_REMOTE: dropbox:self-hosted/qingyan-proxy/data
+          QINGYAN_DATA_DIR: /tmp/local_qingyan/data
+          QINGYAN_STATE_DIR: /tmp/local_qingyan/data
+          QINGYAN_RUN_DIR: /tmp/local_qingyan
+          QINGYAN_ENV_FILE: /tmp/local_qingyan/env.sh
         run: |
           set -uo pipefail
           # 通知真源在 step 顶层 source 一次（勿挪进函数体，理由见 workbuddy 步骤同名注释 / 规范 4.4）
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 
-          DEPLOY="${GITHUB_WORKSPACE}/.github/scripts/gateways/glm2api_deploy.sh"
+          DEPLOY="${GITHUB_WORKSPACE}/.github/scripts/gateways/qingyan_deploy.sh"
           GATEWAYS="${GITHUB_WORKSPACE}/.github/scripts/gateways/gateways.sh"
-          QUOTA="${GITHUB_WORKSPACE}/.github/scripts/gateways/glm2api_quota.sh"
+          QUOTA="${GITHUB_WORKSPACE}/.github/scripts/gateways/qingyan_quota.sh"
           GL_OK=0
           GL_REASON=""
 
-          # 凭据缺失直接跳过本步骤（不部署游客态服务）：游客模式拿不到账号积分，
+          # 凭据缺失直接跳过本步骤（不部署无凭据服务）：拿不到账号积分，
           # 且限流严重，起了也是假象。判空不判内容——内容有效性交给后面的自检。
-          if [ -z "${GLM_REFRESH_TOKEN:-}" ]; then
-            echo "::warning::[glm2api] 未配置 Secret GLM_REFRESH_TOKEN，跳过部署"
+          if [ -z "${QINGYAN_REFRESH_TOKEN:-}" ]; then
+            echo "::warning::[qingyan] 未配置 Secret GLM_REFRESH_TOKEN，跳过部署"
             GL_REASON="未配置 Secret GLM_REFRESH_TOKEN"
             _m=""
-            tg_add_title _m "⏭️ glm2api 已跳过"
+            tg_add_title _m "⏭️ qingyan-proxy 已跳过"
             tg_add_kv _m "结论" "未部署"
             tg_add_kv _m "原因" "$GL_REASON"
             tg_add_kv _m "如何配置" "仓库 Settings → Secrets → 新增 GLM_REFRESH_TOKEN（取法见脚本 login 指引）"
@@ -2796,19 +2812,19 @@ jobs:
           # 0. 先把 Dropbox 上的持久数据拉回本地（积分快照等）。
           #    必须在 prepare 之前：prepare 只保证目录存在，不负责跨轮状态。
           #    拉失败不阻断——按首轮空数据启动，只是「今日累计」从 0 起算。
-          bash "$DEPLOY" pull || echo "::warning::[glm2api] 持久数据拉取失败，按首轮处理"
+          bash "$DEPLOY" pull || echo "::warning::[qingyan] 持久数据拉取失败，按首轮处理"
 
-          # 1. 准备运行目录（拉代码 + venv + 写 .env）
+          # 1. 准备运行目录（从 Dropbox 拉代码 + 写 env.sh）
           if bash "$DEPLOY" prepare; then
             # 2. 托管：systemd --user + Restart=always（窗口期崩溃秒级自愈，见 gateways.sh 文件头）
-            bash "$GATEWAYS" ensure glm2api || true
+            bash "$GATEWAYS" ensure qingyan || true
             GL_UP=0
             for _ in $(seq 1 60); do
               if bash "$DEPLOY" status >/dev/null 2>&1; then GL_UP=1; break; fi
               sleep 1
             done
             if [ "$GL_UP" != "1" ]; then
-              GL_REASON="服务未在 60 秒内监听 ${GLM2API_PORT}（见日志尾部）"
+              GL_REASON="服务未在 60 秒内监听 ${QINGYAN_PORT}（见日志尾部）"
             else
               # 3. 端到端自检：两个模型各发一条，都返回助手内容才算就绪
               if bash "$DEPLOY" selftest; then
@@ -2832,7 +2848,7 @@ jobs:
           GL_SOONEST_AMT=""
           GL_SOON_24H=""
           if [ "$GL_OK" = "1" ]; then
-            # 快照已在步骤 0 由 `deploy pull` 还原到 GLM2API_STATE_DIR；
+            # 快照已在步骤 0 由 `deploy pull` 还原到 QINGYAN_STATE_DIR；
             # 缺失即首轮，delta 会自动按 0 起算，无需在此再拉一次。
             if GLQ="$(bash "$QUOTA" fetch)"; then
               GL_SCORE="$(printf '%s' "$GLQ" | cut -f1)"
@@ -2846,32 +2862,32 @@ jobs:
                 # 快照落盘后立刻回推 Dropbox：本轮窗口约 5.75h，中途 runner 被
                 # 回收也能保住已累计的消耗（收尾还有一次 push 兜底）。
                 bash "$DEPLOY" push 2>/dev/null \
-                  || echo "::warning::[glm2api] 持久数据回推失败（下轮累计将从 0 起）"
+                  || echo "::warning::[qingyan] 持久数据回推失败（下轮累计将从 0 起）"
               fi
             else
-              echo "::warning::[glm2api] 积分采集失败，通知将省略积分分节"
+              echo "::warning::[qingyan] 积分采集失败，通知将省略积分分节"
             fi
           fi
 
           if [ "$GL_OK" != "1" ]; then
             _m=""
-            tg_add_title _m "❌ glm2api 启动失败"
+            tg_add_title _m "❌ qingyan-proxy 启动失败"
             tg_add_kv _m "结论" "未就绪"
-            tg_add_path _m "端口" "$GLM2API_PORT"
+            tg_add_path _m "端口" "$QINGYAN_PORT"
             tg_add_kv _m "原因" "$GL_REASON"
-            tg_add_path _m "运行目录" "/tmp/local_glm2api"
-            tg_add_path _m "日志" "/tmp/local_glm2api/logs/glm2api.log"
+            tg_add_path _m "运行目录" "/tmp/local_qingyan"
+            tg_add_path _m "日志" "/tmp/local_qingyan/logs/qingyan.log"
             tg_add_footer _m
             send_tg "$_m" alert || echo "::warning::TG 通知发送失败（不影响任务）"
           else
             _m=""
-            tg_add_title _m "✅ glm2api 已就绪"
+            tg_add_title _m "✅ qingyan-proxy 已就绪"
             tg_add_kv _m "结论" "$GL_REASON"
-            tg_add_path _m "接口" "http://127.0.0.1:${GLM2API_PORT}/v1"
+            tg_add_path _m "接口" "http://127.0.0.1:${QINGYAN_PORT}/v1"
             # 标签「API Key」+ tg_add_path：对齐 zcode2api 就绪通知同款 —— 值走
             # <code> 等宽，客户端点一下即可整块复制。监听已改 0.0.0.0，key 是唯一
             # 安全边界，通知里给主人一份便于配置客户端（与 8319 的处理一致）。
-            tg_add_path _m "API Key" "${GLM2API_GATEWAY_KEY:-未取到}"
+            tg_add_path _m "API Key" "${QINGYAN_GATEWAY_KEY:-未取到}"
             tg_add_path _m "模型" "glm-5.3 · glm-5.3-flash"
             tg_add_kv _m "计费" "默认通道不扣积分；-agent 后缀走 AgentMore 才扣"
 
@@ -4461,37 +4477,37 @@ jobs:
             send_tg "$_m" alert || true
           fi
 
-          # 3d. glm2api：同为宿主进程（非容器），随 job 结束不会自动退出，
+          # 3d. qingyan-proxy：同为宿主进程（非容器），随 job 结束不会自动退出，
           # 必须显式停，否则残留进程会一直持有 8320 并继续消耗清言积分。
-          echo "3d. Stopping glm2api..."
-          bash "$GITHUB_WORKSPACE/.github/scripts/gateways/gateways.sh" stop glm2api || true
-          if systemctl --user is-failed --quiet glm2api.service 2>/dev/null; then
-            systemctl --user reset-failed glm2api.service 2>/dev/null || true
+          echo "3d. Stopping qingyan-proxy..."
+          bash "$GITHUB_WORKSPACE/.github/scripts/gateways/gateways.sh" stop qingyan || true
+          if systemctl --user is-failed --quiet qingyan.service 2>/dev/null; then
+            systemctl --user reset-failed qingyan.service 2>/dev/null || true
           fi
-          pkill -f "local_glm2api.*main\.py" 2>/dev/null || true
+          pkill -f "local_qingyan.*proxy\.py" 2>/dev/null || true
           sleep 2
-          pkill -9 -f "local_glm2api.*main\.py" 2>/dev/null || true
+          pkill -9 -f "local_qingyan.*proxy\.py" 2>/dev/null || true
 
           # 进程已停 → 回推持久数据到 Dropbox（对齐 workbuddy 收尾的 3b-1）。
           # 只 copy 不 sync：远端历史内容不该被本轮删掉。失败不阻塞收尾通知。
-          echo "3d-1. Syncing glm2api data back to Dropbox..."
-          bash "$GITHUB_WORKSPACE/.github/scripts/gateways/glm2api_deploy.sh" push 2>/dev/null || \
-            echo "⚠️ glm2api 数据回推失败（今日累计可能落后一轮）"
+          echo "3d-1. Syncing qingyan-proxy data back to Dropbox..."
+          bash "$GITHUB_WORKSPACE/.github/scripts/gateways/qingyan_deploy.sh" push 2>/dev/null || \
+            echo "⚠️ qingyan-proxy 数据回推失败（今日累计可能落后一轮）"
 
           GL_STILL_RUNNING=0
           if (exec 3<> /dev/tcp/127.0.0.1/8320) 2>/dev/null; then
             GL_STILL_RUNNING=1
-            echo "⚠️ glm2api 仍在监听 8320"
+            echo "⚠️ qingyan-proxy 仍在监听 8320"
           else
-            echo "✅ glm2api 已停止"
+            echo "✅ qingyan-proxy 已停止"
           fi
           if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
             _m=""
             if [ "$GL_STILL_RUNNING" = "1" ]; then
-              tg_add_title _m "⚠️ glm2api 已停止 · 进程残留"
+              tg_add_title _m "⚠️ qingyan-proxy 已停止 · 进程残留"
               tg_add_kv _m "结论" "强制结束后仍有进程残留"
             else
-              tg_add_title _m "⛔ glm2api 已停止"
+              tg_add_title _m "⛔ qingyan-proxy 已停止"
               tg_add_kv _m "结论" "服务已退出 · 运行目录保持原状"
             fi
             tg_add_path _m "端口" "8320"
