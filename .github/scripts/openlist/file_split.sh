@@ -679,11 +679,11 @@ split_on_sync_failure() {
   case "$switch_value" in
     true|TRUE|1|yes|YES|on|ON) ;;
     *)
-      echo "大文件切割开关关闭 (split_on_sync_failure=false)，跳过切割处理: task=${task_name} source=${source_path}（仅开关状态通知，不代表同步失败）"
+      echo "大文件切割开关关闭 (OPENLIST_SPLIT_ON_SYNC_FAILURE=false)，跳过切割处理: task=${task_name} source=${source_path}（仅开关状态通知，不代表同步失败）"
       return 0
       ;;
   esac
 
-  echo "大文件切割开关已开启 (split_on_sync_failure=true)，开始检查超阈值大文件: task=${task_name} source=${source_path}"
+  echo "大文件切割开关已开启 (OPENLIST_SPLIT_ON_SYNC_FAILURE=true)，开始检查超阈值大文件: task=${task_name} source=${source_path}"
   preprocess_large_files "$source_path" "$task_name"
 }
