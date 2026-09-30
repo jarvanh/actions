@@ -310,12 +310,14 @@ jobs:
           sudo tailscale serve --bg --http=80 http://127.0.0.1:8319
           echo "后台管理: http://${TS_FQDN}/admin/login（monitoring: /admin/monitoring）"
 
-          # trae2api 控制台同走 ts.net：独立端口 8080 反代到容器管理口 18080。
-          # 与 zcode（80→8319）分开端口，避免两个后台抢同一路径。
-          # 公网隧道 trae2api.derrick.eu.org 已于 2026-09-29 撤销（主人要求不再公网暴露），
-          # serve 同样随内存态逐轮清零，故一并在此幂等重建。
-          sudo tailscale serve --bg --http=8080 http://127.0.0.1:18080
-          echo "trae2api 控制台: http://${TS_FQDN}:8080/admin"
+          # trae2api 控制台同走 ts.net 80 端口，挂子路径 /trae → 容器管理口 18080。
+          # 2026-09-30 起与 zcode 统一到同一端口（此前 8080 独立端口是为绕开
+          # 两后台抢根路径 /admin；现前端已支持挂载前缀自适应，见 trae2api commit a75ec3e）。
+          # tailscale serve --set-path 转发时剥掉前缀（后端收到的仍是 /admin/...），
+          # 故后端路由零改动。公网隧道 trae2api.derrick.eu.org 已于 2026-09-29 撤销
+          # （主人要求不再公网暴露）。serve 随内存态逐轮清零，此处幂等重建。
+          sudo tailscale serve --bg --http=80 --set-path=/trae http://127.0.0.1:18080
+          echo "trae2api 控制台: http://${TS_FQDN}/trae/admin"
 
       - name: Tailscale secrets missing
         if: ${{ always() && env.TS_OAUTH_CLIENT_ID == '' && env.TS_OAUTH_CLIENT_SECRET == '' }}
