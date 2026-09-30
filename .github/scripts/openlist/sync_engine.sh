@@ -37,8 +37,6 @@ init_sync_state() {
   progress_init
 }
 
-
-
 # ===== 8005 登录失败重试 =====
 # wopan176 后端写操作可能返回 8005（OpenList 包装为 HTTP 405 返回给 rclone）
 # 需要检查 OpenList 容器日志中的真实 8005 错误，刷新 token 并重试
@@ -144,7 +142,6 @@ _sync_retry_423() {
   fi
 }
 
-
 # ===== HTTP 409 Conflict 重试（2026-09-17 加，与 423 同款）=====
 # 为什么需要: run 35186977864 单轮 2062 次 409 Conflict / 1088 次 mkParentDir failed，
 #   整轮零落盘。409 有两个来源: ① 目录已存在（MKCOL 语义，本该幂等成功）
@@ -185,7 +182,6 @@ _sync_retry_409() {
   fi
 }
 
-
 # ===== object not found 错误解析（源文件不存在）=====
 # 依赖调用方作用域: LAST_ATTEMPT_LOG / fail_list / LOG_FILENAME / task_name / HAS_OBJECT_NOT_FOUND
 _sync_parse_object_not_found() {
@@ -204,8 +200,6 @@ _sync_parse_object_not_found() {
     )
   fi
 }
-
-
 
 # 带探测、重试和详细日志的同步函数
 # 用法: sync_with_logging <source_path> <dest_path> <task_name> [rclone_extra_args...]

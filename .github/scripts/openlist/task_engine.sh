@@ -26,10 +26,10 @@ readonly DEFAULT_SPLIT_THRESHOLD_BYTES="${SYNC_SPLIT_THRESHOLD_BYTES:-5000000000
 # 格式: "id|源端|目标端|任务名|附加参数"
 #   id:       调试模式（run_task_by_id）的选择器，无需单独调试的任务填 "-"
 #   附加参数: --auto-split / --1d-skip / --exclude 等，原样透传给 sync_task
-# 所有任务统一 sync_task（rclone sync，删除目标端多余文件）:
-#   - --delete-before 等由 RCLONE_SYNC_TASK_FLAGS 自动追加
+# 所有任务统一 sync_task（rclone sync 编排；删除语义已整体移除，目标端只增不减）:
+#   - RCLONE_SYNC_TASK_FLAGS 现为空数组，不再追加任何 --delete-*（见 rclone_flags.sh）
 #   - 已修复文件（original/alternative）由 sync_engine.sh 的 filter-from 排除，
-#     排除 = 不传输 + 不删除，sync 模式下不会被误删
+#     排除 = 不传输 + 不删除，不会被当"多余文件"清掉
 SYNC_TASK_REGISTRY=(
   "backup-aliyundrive|onedrive:backup|openlist:aliyundriveCrypt/backup|backup|--auto-split --1d-skip --exclude /notion/** --exclude notion/** --exclude /self-hosted_latest.tar.gz --exclude self-hosted_latest.tar.gz --exclude /github_repos_latest.tar.gz --exclude github_repos_latest.tar.gz"
   "backup|onedrive:backup|openlist:wopan176Crypt/backup|backup|--auto-split --1d-skip"
@@ -1550,12 +1550,12 @@ _sync_task_impl() {
   [ "${SYNC_FAILED_BATCH:-0}" = "1" ] && SYNC_FAILED=1
 }
 
-# sync_task: rclone sync 模式（删除目标端多余文件）
+# sync_task: rclone sync 编排（删除语义已整体移除，目标端只增不减——依据见 rclone_flags.sh）
 # 可选参数:
-#   --auto-split   开启 50GB 子目录自动拆分
+#   --auto-split   开启子目录自动拆分（阈值 SYNC_SPLIT_THRESHOLD_BYTES，workflow 设 20GB）
 #   --1d-skip      开启 1 天跳过（--2d-skip / --3d-skip 可自定义天数）
 #   其余参数（如 --exclude）原样传给 rclone
-# sync_task 特有参数（--delete-before 等）由 RCLONE_SYNC_TASK_FLAGS 自动追加
+# sync_task 特有参数（现为空数组）由 RCLONE_SYNC_TASK_FLAGS 自动展开
 sync_task() {
   local source_path="$1"
   local dest_path="$2"

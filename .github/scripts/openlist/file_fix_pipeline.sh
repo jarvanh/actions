@@ -316,7 +316,6 @@ _rebuild_raw_baseline() {
   return 1
 }
 
-
 # 转义 rclone filter 中的 glob 特殊字符 [ ] * ? { } → 字符类形式
 # 用法: _escape_filter_glob <glob_pattern>
 _escape_filter_glob() { printf '%s' "$1" | sed -e 's/[][*?{}]/[&]/g'; }
@@ -462,7 +461,6 @@ _bulk_fold_ensure_dir() {
   return 1
 }
 
-
 # 折叠落盘记账（正常路径与延迟复核共用；依赖调用方作用域）
 #   作用域依赖: dir_rel / hash8 / hash_dst / source_path / dest_path / task_name /
 #               missing_list / fix_list / folded_files / incr_marker_path /
@@ -521,7 +519,7 @@ _bulk_fold_record_landed() {
     # method 文本含"短哈希目录 <hash>" → restore_info.jq 判为 hash_dir 类型
     local alt="${hash8}/${rel}"
     local method="rclone copyto（短哈希目录 ${hash8} + 原文件名）"
-    local restore="rclone moveto '${dest_path}/${alt}' '${dest_path}/${mf}'"
+    local restore="rclone copyto '${dest_path}/${alt}' '${dest_path}/${mf}'  # 保留备份副本"
 
     echo "  ✅ 折叠落盘 · ${rel} (${fsize})" | tee -a "$LOG_FILENAME"
     echo "${mf}|${alt}|${method}|${restore}|${fsize}|${fbytes}|copyto_original|" >> "$fix_list"

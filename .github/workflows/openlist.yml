@@ -7,7 +7,7 @@ on:
     inputs:
       # ===== 运行模式（单选下拉，互斥）=====
       # 取代旧的 3 个 boolean（fix_test_mode / restore_fixed / restore_to_source），
-      # 从 UI 上杜绝多开关误组合; ⚠️ 开头的项为还原类危险操作，排在末尾
+      # 从 UI 上杜绝多开关误组合; 带 ⚠️ 前缀的三项为还原类危险操作，排在选项末尾
       run_mode:
         description: "▶️ 运行模式（单选互斥）。⚠️ 标记的三项为危险操作: 会改写目标端或回传/删改源端，运行前请先跑 openlist-restore-tryrun 预演、核对下方 restore_task 任务名，并把预演 run id 填入 verify_run_id（三种还原/恢复模式均强制门禁）"
         required: true
