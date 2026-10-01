@@ -16,6 +16,11 @@ jobs:
     env:
       TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
       TS_OAUTH_CLIENT_SECRET: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
+      # Tailscale API access token（tskey-api-*）：具备 devices 读写权限，用于
+      # 「僵尸清退」删除上一轮残留的 openclaw* 节点，从根上消掉主机名退化。
+      # 与上面那对 OAuth client 凭据不是一类东西：tskey-client-* 天生只有
+      # auth_keys scope，永远列不了/删不了设备（2026-10-01 实测 404）。
+      TS_API_KEY: ${{ secrets.TS_API_KEY }}
       # 本机两个自建 AI 网关（zcode2api 8319 / workbuddy-gateway 8318）共用同一把访问 key，
       # 客户端只需记一个。定义在 job 级供两个 step 复用，避免两处各写一份而写歪。
       # 注：这是本机网关的访问口令，不是任何上游服务的凭据；两者都不对外暴露公网。
@@ -255,10 +260,11 @@ jobs:
 
       - name: Clean stale Tailscale nodes (openclaw* 僵尸清退)
         id: ts_clean
-        if: ${{ always() && env.TS_OAUTH_CLIENT_ID != '' && env.TS_OAUTH_CLIENT_SECRET != '' }}
+        if: ${{ always() && (env.TS_API_KEY != '' || (env.TS_OAUTH_CLIENT_ID != '' && env.TS_OAUTH_CLIENT_SECRET != '')) }}
         env:
           TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           TS_OAUTH_CLIENT_SECRET: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
+          TS_API_KEY: ${{ secrets.TS_API_KEY }}
         run: |
           set -euo pipefail
           # 上一轮被 360m 硬上限强杀时，tailscale/github-action 的 post-logout 不跑，
@@ -266,30 +272,46 @@ jobs:
           # 清理有几十分钟级延迟，singleton 立即接力的下一轮仍会撞名 —— 新轮
           # 会被控制面静默退化成 openclaw-1/-2…（2026-09-30 实锤，KeyExpiry=null）。
           # 本步骤先于 Setup Tailscale 执行：此刻 tailnet 里的 openclaw* 一律是历史
-          # 残留（含 openclaw-N / openclaw-tmp-*），用 OAuth 换 API token 逐个删除。
-          # OAuth client 缺 devices 写权限时删除会 403 —— 降级为告警不阻塞，需到
-          # Tailscale admin 给该 client 补 devices 写 scope（或改配 TS_API_KEY）。
-          echo "1. OAuth client credentials -> API access token..."
-          _tok="$(curl -fsS --max-time 20 https://api.tailscale.com/api/v2/oauth/token \
-            --data-urlencode "client_id=${TS_OAUTH_CLIENT_ID}" \
-            --data-urlencode "client_secret=${TS_OAUTH_CLIENT_SECRET}" \
-            --data-urlencode "grant_type=client_credentials" 2>/dev/null \
-            | jq -r '.access_token // empty' 2>/dev/null || true)"
-          if [ -z "${_tok}" ]; then
-            echo "⚠️ 未能取得 Tailscale API token，跳过僵尸清退（本轮可能仍退化 openclaw-1）"
-            exit 0
+          # 残留（含 openclaw-N / openclaw-tmp-*），逐个删除，从根上消掉退化。
+          #
+          # ⚠️ 关键坑（2026-10-01 实测）：Tailscale API **不用 Bearer**！
+          #    此前一律用 -H "Authorization: Bearer ..." 打，无论 tskey-client-*
+          #    还是 tskey-api-* 都返回 401/404，被误判成「scope 不足」，守护因此
+          #    空转了很久（连代码注释都跟着写错了结论）。正确用法是 Basic auth：
+          #      curl -u "${KEY}:" https://api.tailscale.com/api/v2/...
+          #    （key 作用户名、密码留空）
+          # 凭据优先级：
+          #   ① TS_API_KEY（tskey-api-*）—— API access token，具 devices 读写权限；
+          #   ② 无则回退 OAuth client（tskey-client-*）—— 仅兼容保留，实测无 devices 权限。
+          _auth=()
+          if [ -n "${TS_API_KEY:-}" ]; then
+            echo "1. 使用 TS_API_KEY（API access token · Basic auth）..."
+            _auth=(-u "${TS_API_KEY}:")
+          else
+            echo "1. OAuth client -> token（scope 仅 auth_keys，预计列设备失败）..."
+            _tok="$(curl -fsS --max-time 20 https://api.tailscale.com/api/v2/oauth/token \
+              --data-urlencode "client_id=${TS_OAUTH_CLIENT_ID}" \
+              --data-urlencode "client_secret=${TS_OAUTH_CLIENT_SECRET}" \
+              --data-urlencode "grant_type=client_credentials" 2>/dev/null \
+              | jq -r '.access_token // empty' 2>/dev/null || true)"
+            if [ -z "${_tok}" ]; then
+              echo "⚠️ 未能取得 Tailscale API token，跳过僵尸清退（本轮可能仍退化 openclaw-1）"
+              exit 0
+            fi
+            _auth=(-H "Authorization: Bearer ${_tok}")
           fi
           echo "2. 拉取 tailnet 设备列表..."
-          # 列表接口需要 devices 读 scope；本仓库 OAuth client 实测 scope 仅 auth_keys
-          # （token 响应 scope=auth_keys，devices 接口 404）。scope 不足时降级退出：
-          # 正常收尾轮（post logout）能即时注销 ephemeral 节点，不再依赖本步骤；
-          # 仅被强杀轮可能短暂占名，靠控制面延迟清理自愈。
           _dev_code="$(curl -s -o /tmp/ts-devices.json -w '%{http_code}' --max-time 20 \
-            -H "Authorization: Bearer ${_tok}" \
+            "${_auth[@]}" \
             https://api.tailscale.com/api/v2/tailnet/-/devices 2>/dev/null || true)"
           if [ "${_dev_code}" != "200" ]; then
-            echo "⚠️ 设备列表获取失败 (HTTP ${_dev_code})：OAuth client 缺 devices scope，僵尸清退未生效"
-            echo "   补法：Tailscale admin → Settings → OAuth clients → 该 client 勾选 devices 读写 scope（或改配 TS_API_KEY）"
+            echo "⚠️ 设备列表获取失败 (HTTP ${_dev_code})：僵尸清退未生效"
+            if [ -z "${TS_API_KEY:-}" ]; then
+              echo "   根因：tskey-client-* 只有 auth_keys scope，天生无 devices 权限"
+              echo "   补法：Tailscale admin → Settings → Keys → 生成 tskey-api-* 存为 TS_API_KEY"
+            else
+              echo "   TS_API_KEY 已配置但仍失败：多为认证方式非 Basic（-u \"KEY:\"），或 key 已撤销/过期"
+            fi
             rm -f /tmp/ts-devices.json
             exit 0
           fi
@@ -308,14 +330,13 @@ jobs:
           echo "3. 发现 $(printf '%s' "${_stale}" | grep -c .) 个残留节点，逐个删除..."
           for _id in ${_stale}; do
             _code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 -X DELETE \
-              -H "Authorization: Bearer ${_tok}" \
+              "${_auth[@]}" \
               "https://api.tailscale.com/api/v2/device/${_id}" 2>/dev/null || true)"
             case "${_code}" in
               200|204) echo "✅ 已删除残留节点 ${_id} (HTTP ${_code})" ;;
-              *) echo "⚠️ 删除 ${_id} 失败 (HTTP ${_code})：多为 OAuth client 缺 devices 写权限，请在 Tailscale admin 给该 client 补 scope" ;;
+              *) echo "⚠️ 删除 ${_id} 失败 (HTTP ${_code})：凭据无 devices 写权限或该节点不可管理" ;;
             esac
           done
-
       - name: Setup Tailscale (SSH 调试入口)
         id: ts
         if: ${{ always() && env.TS_OAUTH_CLIENT_ID != '' && env.TS_OAUTH_CLIENT_SECRET != '' }}
