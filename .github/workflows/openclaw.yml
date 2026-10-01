@@ -319,9 +319,20 @@ jobs:
           rm -f /tmp/ts-devices.json
           # 注册前运行：openclaw* 一律视为残留。按 hostname/name 双字段匹配，
           # 覆盖 openclaw / openclaw-1 / openclaw-tmp-* 全家族。
+          #
+          # ⚠️ 只删「断连」节点，绝不碰活着的（2026-10-01 实测加固）：
+          #    权限打通前本步骤因删不动而“安全”；一旦能删，无差别 test("openclaw")
+          #    会命中**当前仍在跑的那一轮自己** —— job 重试/手动重触发时开场就把
+          #    自己的 SSH 入口删掉（自杀）。故必须加 connectedToControl == false。
+          #    判据说明：设备列表**没有 online 字段**（别用 .online // false ——
+          #    jq 的 // 对字段缺失同样取右值，会静默把活节点判成离线，已踩）；
+          #    真实在线判据是 connectedToControl。实测真僵尸该值为 false，
+          #    在跑的节点为 true。
+          # 活着的同名节点交给 Enable Tailscale SSH 的临时名中转去回收，不在这里硬删。
           _stale="$(printf '%s' "${_dev}" | jq -r '
             (.devices // [])[]?
             | select(((.hostname // "") + " " + (.name // "")) | test("openclaw"))
+            | select(.connectedToControl == false)
             | .id' 2>/dev/null || true)"
           if [ -z "${_stale}" ]; then
             echo "✅ 无 openclaw* 残留节点，跳过删除"
