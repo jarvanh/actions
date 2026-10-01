@@ -4501,9 +4501,15 @@ jobs:
           echo "1. Stopping OpenClaw gateway..."
           openclaw gateway stop || echo "OpenClaw already stopped or command failed."
           # 优化（2026-10-01）：原为无条件 sleep 1m（纯等待 60s）。改为轮询网关
-          # 进程真退出即继续，通常数秒完成；超时 60s 兜底，语义与原来等价。
+          # 真退出即继续，通常数秒完成；超时 60s 兜底，语义与原来等价。
+          # ⚠️ 判定必须用 systemctl（2026-10-01 二修）：首版写的是
+          #   pgrep -f "openclaw-gateway"，但 "openclaw-gateway" 只是 **unit 名**，
+          #   **不在进程 cmdline 里**（真实 cmdline 为 `node ... dist/index.js
+          #   gateway --port 18789`）。该 pgrep 恒不匹配 → 循环第 1 次就 break、
+          #   等 0s，等于把等待直接删掉，保护形同虚设；反之若将来有进程 cmdline
+          #   含该串，又会反常地等满 60s。改用 unit 的 active 状态才是真判定。
           for _i in $(seq 1 60); do
-            if ! pgrep -f "openclaw-gateway" >/dev/null 2>&1; then
+            if [ "$(systemctl --user is-active openclaw-gateway.service 2>/dev/null || echo inactive)" != "active" ]; then
               echo "✅ OpenClaw gateway 已退出（等待 $((_i - 1))s）"
               break
             fi
@@ -4814,6 +4820,10 @@ jobs:
                 # 兜底：服务端复制失败时回退本机上传，绝不丢快照。
                 if rclone copyto "dropbox:self-hosted/openclaw.tar.gz" "dropbox:self-hosted/${SNAP_NAME}" -v 2>&1; then
                   echo "✅ Versioned snapshot created via server-side copy: dropbox:self-hosted/${SNAP_NAME}"
+                  # 快照名必须两个分支都写：Notify 步骤靠 [ -s "$SNAPSHOT_FILE" ] 决定
+                  # 通知里是否带「快照」行。首版只在回退分支写，走服务端复制成功时
+                  # 该行静默消失（2026-10-01 发现并修复）。
+                  printf '%s\n' "$SNAP_NAME" > "$FINAL_ARCHIVE_SNAPSHOT"
                 elif rclone copyto "$TMP_OPENCLAW_TAR" "dropbox:self-hosted/${SNAP_NAME}" -v 2>&1; then
                   echo "⚠️ Versioned snapshot via server-side copy failed, fell back to local upload: dropbox:self-hosted/${SNAP_NAME}"
                   printf '%s\n' "$SNAP_NAME" > "$FINAL_ARCHIVE_SNAPSHOT"
