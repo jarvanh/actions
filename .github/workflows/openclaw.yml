@@ -34,6 +34,9 @@ jobs:
       - name: rclone-install
         run: |
           set -e
+          # 记录 job 近似起点：Keep alive 的动态死线以它为基准（Set up job/Node/checkout
+          # 与本步间隔仅数秒，误差可忽略；2026-10-01 动态保活改造）
+          date +%s > /tmp/job-start-epoch 2>/dev/null || true
           # 安装 rclone：GitHub Releases 直下 .deb，失败回退 rclone.org 安装脚本
           bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" install
       - name: rclone-config
@@ -249,6 +252,69 @@ jobs:
           find "$HOME/.openclaw/workspace/skills-data/proactivity" -type d -exec chmod 700 {} + 2>/dev/null || true
           find "$HOME/.openclaw/workspace/skills-data/proactivity" -type f -exec chmod 600 {} + 2>/dev/null || true
           ls -ld "$HOME/proactivity" "$HOME/.openclaw/workspace/skills-data/proactivity"
+
+      - name: Clean stale Tailscale nodes (openclaw* 僵尸清退)
+        id: ts_clean
+        if: ${{ always() && env.TS_OAUTH_CLIENT_ID != '' && env.TS_OAUTH_CLIENT_SECRET != '' }}
+        env:
+          TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          TS_OAUTH_CLIENT_SECRET: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          # 上一轮被 360m 硬上限强杀时，tailscale/github-action 的 post-logout 不跑，
+          # 节点虽为 ephemeral（action 注册即带 ephemeral=true，源码实测），但控制面
+          # 清理有几十分钟级延迟，singleton 立即接力的下一轮仍会撞名 —— 新轮
+          # 会被控制面静默退化成 openclaw-1/-2…（2026-09-30 实锤，KeyExpiry=null）。
+          # 本步骤先于 Setup Tailscale 执行：此刻 tailnet 里的 openclaw* 一律是历史
+          # 残留（含 openclaw-N / openclaw-tmp-*），用 OAuth 换 API token 逐个删除。
+          # OAuth client 缺 devices 写权限时删除会 403 —— 降级为告警不阻塞，需到
+          # Tailscale admin 给该 client 补 devices 写 scope（或改配 TS_API_KEY）。
+          echo "1. OAuth client credentials -> API access token..."
+          _tok="$(curl -fsS --max-time 20 https://api.tailscale.com/api/v2/oauth/token \
+            --data-urlencode "client_id=${TS_OAUTH_CLIENT_ID}" \
+            --data-urlencode "client_secret=${TS_OAUTH_CLIENT_SECRET}" \
+            --data-urlencode "grant_type=client_credentials" 2>/dev/null \
+            | jq -r '.access_token // empty' 2>/dev/null || true)"
+          if [ -z "${_tok}" ]; then
+            echo "⚠️ 未能取得 Tailscale API token，跳过僵尸清退（本轮可能仍退化 openclaw-1）"
+            exit 0
+          fi
+          echo "2. 拉取 tailnet 设备列表..."
+          # 列表接口需要 devices 读 scope；本仓库 OAuth client 实测 scope 仅 auth_keys
+          # （token 响应 scope=auth_keys，devices 接口 404）。scope 不足时降级退出：
+          # 正常收尾轮（post logout）能即时注销 ephemeral 节点，不再依赖本步骤；
+          # 仅被强杀轮可能短暂占名，靠控制面延迟清理自愈。
+          _dev_code="$(curl -s -o /tmp/ts-devices.json -w '%{http_code}' --max-time 20 \
+            -H "Authorization: Bearer ${_tok}" \
+            https://api.tailscale.com/api/v2/tailnet/-/devices 2>/dev/null || true)"
+          if [ "${_dev_code}" != "200" ]; then
+            echo "⚠️ 设备列表获取失败 (HTTP ${_dev_code})：OAuth client 缺 devices scope，僵尸清退未生效"
+            echo "   补法：Tailscale admin → Settings → OAuth clients → 该 client 勾选 devices 读写 scope（或改配 TS_API_KEY）"
+            rm -f /tmp/ts-devices.json
+            exit 0
+          fi
+          _dev="$(cat /tmp/ts-devices.json)"
+          rm -f /tmp/ts-devices.json
+          # 注册前运行：openclaw* 一律视为残留。按 hostname/name 双字段匹配，
+          # 覆盖 openclaw / openclaw-1 / openclaw-tmp-* 全家族。
+          _stale="$(printf '%s' "${_dev}" | jq -r '
+            (.devices // [])[]?
+            | select(((.hostname // "") + " " + (.name // "")) | test("openclaw"))
+            | .id' 2>/dev/null || true)"
+          if [ -z "${_stale}" ]; then
+            echo "✅ 无 openclaw* 残留节点，跳过删除"
+            exit 0
+          fi
+          echo "3. 发现 $(printf '%s' "${_stale}" | grep -c .) 个残留节点，逐个删除..."
+          for _id in ${_stale}; do
+            _code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 -X DELETE \
+              -H "Authorization: Bearer ${_tok}" \
+              "https://api.tailscale.com/api/v2/device/${_id}" 2>/dev/null || true)"
+            case "${_code}" in
+              200|204) echo "✅ 已删除残留节点 ${_id} (HTTP ${_code})" ;;
+              *) echo "⚠️ 删除 ${_id} 失败 (HTTP ${_code})：多为 OAuth client 缺 devices 写权限，请在 Tailscale admin 给该 client 补 scope" ;;
+            esac
+          done
 
       - name: Setup Tailscale (SSH 调试入口)
         id: ts
@@ -4290,12 +4356,34 @@ jobs:
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          KEEPALIVE_MINUTES=340
+          # —— 动态保活（2026-10-01）：按 job 截止时刻算睡眠，不再写死 340 分钟 ——
+          # 账目：GitHub 单 job 硬上限 360m；准备相 8-14m + 写死 340m + 最终归档
+          # 11-15m = 359-369m，准备相稍长就被平台强杀（conclusion=cancelled）：
+          # 最终归档被砍、「Trigger next」不跑、tailscale post-logout 不跑 → 僵尸占名。
+          # 现改为死线 = 360 - 归档预算 20 - 安全余量 8 = 332 分钟（job 起点起算），
+          # 已耗多少睡多少；job 起点由 rclone-install 步骤写 /tmp/job-start-epoch。
+          HARD_LIMIT_MINUTES=360
+          FINAL_ARCHIVE_BUDGET_MINUTES=20
+          SAFETY_MARGIN_MINUTES=8
+          DEADLINE_MINUTES=$((HARD_LIMIT_MINUTES - FINAL_ARCHIVE_BUDGET_MINUTES - SAFETY_MARGIN_MINUTES))
+          # tr -dc '0-9'：文件存在但为空/含杂字符时兜底为 0，避免算术表达式炸掉步骤
+          JOB_START_EPOCH="$(cat /tmp/job-start-epoch 2>/dev/null | tr -dc '0-9' || true)"
+          [ -n "${JOB_START_EPOCH}" ] || JOB_START_EPOCH=0
+          NOW_EPOCH="$(date +%s)"
+          if [ "${JOB_START_EPOCH}" -le 0 ]; then
+            # 时间戳缺失（理论兜底）：按已耗 32 分钟计，睡到死线，宁可少保活不越线
+            JOB_START_EPOCH=$((NOW_EPOCH - 32*60))
+          fi
+          ELAPSED_SECONDS=$((NOW_EPOCH - JOB_START_EPOCH))
+          SLEEP_SECONDS=$((DEADLINE_MINUTES*60 - ELAPSED_SECONDS))
+          if [ "${SLEEP_SECONDS}" -lt 60 ]; then SLEEP_SECONDS=60; fi
+          echo "Keep alive: job 已运行 $((ELAPSED_SECONDS/60))m$((ELAPSED_SECONDS%60))s，睡 $((SLEEP_SECONDS/60))m$((SLEEP_SECONDS%60))s 后进入最终归档（死线=job 起 ${DEADLINE_MINUTES}m）"
           FINAL_ARCHIVE_WARNING_BEFORE_MINUTES=15
-          WARNING_DELAY_MINUTES=$((KEEPALIVE_MINUTES - FINAL_ARCHIVE_WARNING_BEFORE_MINUTES))
+          WARNING_DELAY_SECONDS=$((SLEEP_SECONDS - FINAL_ARCHIVE_WARNING_BEFORE_MINUTES*60))
+          if [ "${WARNING_DELAY_SECONDS}" -lt 0 ]; then WARNING_DELAY_SECONDS=0; fi
 
           send_final_archive_warning() {
-            sleep "${WARNING_DELAY_MINUTES}m"
+            sleep "${WARNING_DELAY_SECONDS}"
             if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
               # 统一 HTML 版式 + 统一收尾区
               source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
@@ -4318,10 +4406,13 @@ jobs:
           send_final_archive_warning &
           echo $! > /tmp/openclaw-final-archive-warning.pid
 
-          sleep "${KEEPALIVE_MINUTES}m"
+          sleep "${SLEEP_SECONDS}"
 
       - name: Stop OpenClaw and Final Archive
         id: final_archive
+        # 兜底超时：动态死线 332m + 本步 24m + 通知/接力 ~2m = 358m < 360m 硬上限，
+        # 卡死时走本超时干净失败（post 步骤仍会跑），而不是被平台 6h 强杀
+        timeout-minutes: 24
         env:
           # send_archive_alert 同上：未注入时约 15 处最终归档告警静默不发
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
