@@ -324,6 +324,13 @@ jobs:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
           tags: tag:ci
+          # 注册时就固定主机名（action v4 原生 hostname 入参，实测 306e68a 的
+          # action.yml 有该 input）：此前是「先按 runner 名注册、再 set --hostname
+          # 改名」，两步之间存在竞态 —— 注册瞬间若 tailnet 里还有上一轮的
+          # openclaw 残留，控制面当场就分配 openclaw-1，事后 set 改不回来
+          # （prefs 里 Hostname 写对了，DNS 名仍是 openclaw-1，2026-10-01 实锤）。
+          # 注册即声明能消掉这个窗口，是防退化的第一优先手段。
+          hostname: openclaw
 
       - name: Enable Tailscale SSH
         id: ts_ssh
@@ -396,6 +403,33 @@ jobs:
             printf 'TS_IP=%s\n' "$(tailscale ip -4)"
           } > "$HOME/ts.env"
           echo "SSH 入口: ssh runner@${TS_HOST}（RustDesk 直连: ${TS_FQDN}:21118）"
+
+          # ---------- 主机名回收守护（2026-10-01 补）----------
+          # 为什么必须有守护：上面所有回收动作都只在本步骤**这一刻**试一次，而残留的
+          # 上一轮 ephemeral 节点要几十分钟后才被控制面清掉 —— 名字是在本步骤结束后
+          # 才空出来的，那时已经没有任何东西再去收回，于是这一整轮都顶着 openclaw-1。
+          # 2026-10-01 实锤：ts.env 写着 TS_HOST=openclaw-1，而控制面 prefs 里
+          # Hostname 其实是对的 openclaw（= 名被别人占着，不是我们设错）。
+          # 且「Clean stale」步骤删不动（本仓库 OAuth client 只有 auth_keys scope，
+          # devices 列表接口 404，整段降级跳过）—— 删不掉就只能等，等就必须有人重试。
+          # 故起一个脱离本步骤进程树的守护，在整个 job 生命周期内周期重试回收：
+          #   名字一旦变回 openclaw → 重写 ts.env，RustDesk/通知/serve 地址随之自愈。
+          # setsid + nohup 脱离进程树；job 结束随 runner 一起消失，无需收尾清理。
+          mkdir -p "$HOME/.openclaw/logs"
+          if [ "${TS_FQDN:-}" != "openclaw.${TS_SUFFIX}" ]; then
+            echo "🔁 当前名为 ${TS_FQDN}，启动后台回收守护（每 120s 重试收回 openclaw）"
+            # 守护脚本本体独立成文件（.github/scripts/tailscale/ts-reclaim-hostname.sh）：
+            # 内联 heredoc 里的行不带 YAML 块缩进，会打断 run 的缩进层级（实测 YAML 解析报
+            # "could not find expected ':'"）——脚本独立出去，workflow 里只剩一行调用。
+            setsid nohup bash "${GITHUB_WORKSPACE}/.github/scripts/tailscale/ts-reclaim-hostname.sh" \
+              "${TS_SUFFIX}" "${GITHUB_RUN_ID:-0}" \
+              >> "$HOME/.openclaw/logs/ts-reclaim.log" 2>&1 < /dev/null &
+            disown 2>/dev/null || true
+            sleep 1
+            echo "✅ 回收守护已启动（日志: ~/.openclaw/logs/ts-reclaim.log）"
+          else
+            echo "✅ 主机名已为 openclaw，无需回收守护"
+          fi
 
           # 两个后台各占一个端口、各占根路径 /admin：trae2api 8080、zcode-hub 8081。
           # 分开端口是因为两者前端都用绝对路径 /admin，同端口会打架。
