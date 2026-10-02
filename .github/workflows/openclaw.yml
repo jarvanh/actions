@@ -3331,8 +3331,22 @@ jobs:
           fi
 
           if [ "$CONFIG_VALID_FOR_CURRENT" = "1" ] && [ "$DOCTOR_RAN" != "1" ]; then
-            echo "🛠️ Running preflight 'openclaw doctor --fix' before gateway restart..."
-            openclaw doctor --fix || echo "DOCTOR_EXIT=$? (non-fatal, continuing)"
+            # 优化（2026-10-02）：config 已校验通过时，preflight doctor 只在 OpenClaw
+            # **版本变化**时才跑。实测该步固定耗时 79s，而配置合法时 doctor 并无
+            # 修复动作（日志仅 warnings + registry 刷新 + agent-db 完整性检查）。
+            # 版本未变 ⇒ 跳过（省 79s）；版本一变 ⇒ 照跑，保住升级时的自愈。
+            # 状态文件放在 ~/.openclaw 内：它随主包归档/恢复，上轮记录得以延续。
+            # 版本解析失败时（CURRENT_OPENCLAW_SEMVER 为空）一律照跑 —— 保守。
+            DOCTOR_STATE_FILE="$HOME/.openclaw/openclaw-doctor-last-version"
+            LAST_DOCTOR_VERSION="$(head -n 1 "$DOCTOR_STATE_FILE" 2>/dev/null || true)"
+            if [ -n "$CURRENT_OPENCLAW_SEMVER" ] && [ "$LAST_DOCTOR_VERSION" = "$CURRENT_OPENCLAW_SEMVER" ]; then
+              echo "⏭️ Skipping preflight doctor: config valid & version unchanged (${CURRENT_OPENCLAW_SEMVER})"
+            else
+              echo "🛠️ Running preflight 'openclaw doctor --fix' before gateway restart... (${LAST_DOCTOR_VERSION:-none} → ${CURRENT_OPENCLAW_SEMVER})"
+              openclaw doctor --fix || echo "DOCTOR_EXIT=$? (non-fatal, continuing)"
+              mkdir -p "$HOME/.openclaw"
+              printf '%s\n' "$CURRENT_OPENCLAW_SEMVER" > "$DOCTOR_STATE_FILE"
+            fi
           fi
           PREFLIGHT_END_TS=$(date +%s)
           echo "PREFLIGHT_DOCTOR_DURATION_SEC=$((PREFLIGHT_END_TS - PREFLIGHT_BEGIN_TS))" >> "$RUN_OPENCLAW_META"
