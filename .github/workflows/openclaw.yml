@@ -4383,7 +4383,9 @@ jobs:
           # hostedtoolcache 里 —— 找不到它时 create-openclaw-archive.sh 的 config validate
           # 一直被静默跳过（日志 openclaw_archive_config_check_skipped），「坏配置不进包」
           # 的防线形同虚设。启动循环前把 openclaw 所在 bin 前置进 PATH，随 nohup 一并继承。
-          for _nd in /opt/hostedtoolcache/node/*/bin; do
+          # 实测布局是 node/<版本>/x64/bin 两层目录（node/*/bin 从未匹配上，此前的
+          # 「修复」只在 job step 里靠继承 PATH 碰巧生效）；两种 glob 都试，防布局变动。
+          for _nd in /opt/hostedtoolcache/node/*/*/bin /opt/hostedtoolcache/node/*/bin; do
             if [ -x "$_nd/openclaw" ]; then
               PATH="$_nd:$PATH"
               export PATH
