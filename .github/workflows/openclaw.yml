@@ -29,6 +29,17 @@ jobs:
       # 告警档凭据（tier=alert 直达告警 bot @SaberFuckBot，无回落）
       TELEGRAM_BOT_TOKEN_ALERT: ${{ secrets.TELEGRAM_BOT_TOKEN_ALERT }}
       TELEGRAM_CHAT_ID_ALERT: ${{ secrets.TELEGRAM_CHAT_ID_ALERT }}
+      # GitHub CLI 鉴权（2026-10-02 事故修复）：缺了它，任何 step 的 shell 里跑
+      # `gh api` 都会直接报「To use GitHub CLI in a GitHub Actions workflow, set
+      # the GH_TOKEN environment variable」—— 与仓库公开/私有无关、与网络抖动无关。
+      # 事故链：trae2api step 未设 GH_TOKEN → gh api 取 Release 恒失败 → 判空
+      # exit 1 → 无 continue-on-error → 后续 quota-board/zcode2api/qingyan/
+      # Run OpenClaw 被整条级联跳过（run 36963030965 实测）。
+      # 更隐蔽的是：下面「Prepare runtime env」里那段「从 GH_TOKEN 持久化 gh auth
+      # 到本地 hosts.yml」的逻辑读的也是 ${GH_TOKEN:-} —— 它在 job 级拿不到值时，
+      # 持久化从未生效过，等于后续所有 shell 里的 gh 都是裸奔状态。
+      # 故在 job 级统一注入，一次覆盖全部 step（含上面那段持久化逻辑）。
+      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -152,6 +163,54 @@ jobs:
             fi
             echo "openclaw.tar.gz 大小: ${archive_kb}KB"
             require_free_kb /tmp $((archive_kb * 3 + 1024 * 1024)) "openclaw extract preflight"
+            # 2026-10-02 二次事故：云端主包被 98KB 空壳包覆盖后仍被恢复上岗 —— 恢复侧原
+            # 只验 gzip 完整性（98KB 空壳照样通过），而 preflight doctor 会现造一份合法
+            # 配置骗过归档侧 config validate，健康门全绿后空壳照样打上行。恢复是最后防线：
+            # 真实主包 GB 级，50MB 绝对下限留约两个数量级余量，且 openclaw.json 必须真实
+            # 在包内。任一不满足 → 先走 Dropbox revision 回退捞最近的好包，全部不可用才
+            # exit 1（任务失败→通知）。宁可失败，不要空壳。
+            OPENCLAW_TARBALL_MIN_KB=$((50 * 1024))
+            listing_has_config() {
+              (
+                set +o pipefail
+                if command -v pigz >/dev/null 2>&1; then pigz -dc "$1" 2>/dev/null; else gunzip -c "$1" 2>/dev/null; fi | tar -tf - 2>/dev/null | grep -q '^\.openclaw/openclaw\.json$'
+              )
+            }
+            tarball_usable=0
+            if [ "$archive_kb" -ge "$OPENCLAW_TARBALL_MIN_KB" ] && listing_has_config "$TMP_OPENCLAW_TAR"; then
+              tarball_usable=1
+            else
+              echo "⚠️ 云端主包异常（size=${archive_kb}KB，要求 ≥${OPENCLAW_TARBALL_MIN_KB}KB 且含 openclaw.json），尝试 revision 回退..."
+              DBX_TOKEN=$(rclone config show dropbox 2>/dev/null | sed -n 's/^token = .*"access_token":"\([^"]*\)".*/\1/p' | tail -1)
+              if [ -n "$DBX_TOKEN" ]; then
+                mapfile -t GOOD_REVS < <(curl -s --max-time 60 -X POST https://api.dropboxapi.com/2/files/list_revisions \
+                  -H "Authorization: Bearer $DBX_TOKEN" -H "Content-Type: application/json" \
+                  -d '{"path":"/self-hosted/openclaw.tar.gz","mode":"path","limit":10}' \
+                  | python3 -c "import json,sys; d=json.load(sys.stdin); [print(r['rev']) for r in d.get('entries',[]) if r.get('size',0) >= ${OPENCLAW_TARBALL_MIN_KB} * 1024]" 2>/dev/null \
+                  | head -3)
+                for _rev in "${GOOD_REVS[@]:-}"; do
+                  [ -z "$_rev" ] && continue
+                  echo "⬇️ 下载历史 revision $_rev ..."
+                  if curl -s --max-time 1800 -X POST https://content.dropboxapi.com/2/files/download \
+                     -H "Authorization: Bearer $DBX_TOKEN" \
+                     -H "{\"path\":\"/self-hosted/openclaw.tar.gz\",\"rev\":\"$_rev\"}" \
+                     -o "$TMP_OPENCLAW_TAR" && [ -s "$TMP_OPENCLAW_TAR" ] \
+                     && listing_has_config "$TMP_OPENCLAW_TAR"; then
+                    archive_kb=$(du -sk "$TMP_OPENCLAW_TAR" | awk '{print $1}')
+                    require_free_kb /tmp $((archive_kb * 3 + 1024 * 1024)) "openclaw revision extract preflight"
+                    tarball_usable=1
+                    echo "✅ revision $_rev 可用（${archive_kb}KB）"
+                    break
+                  fi
+                done
+              else
+                echo "⚠️ 未能从 rclone 配置取到 Dropbox token，跳过 revision 回退"
+              fi
+            fi
+            if [ "$tarball_usable" -ne 1 ]; then
+              echo "❌ 云端主包与全部候选 revision 均不可用：拒绝用空壳状态上岗" >&2
+              exit 1
+            fi
             # 优化（2026-10-02）：恢复侧 gzip 单线程 → pigz 并行。实测 305MB 样本
             # 解压 5.44s → 3.29s（1.65 倍，注意比压缩侧的 2.65 倍低：gzip 流解压
             # 可并行度不如压缩）。产物仍是标准 gzip 流，与 tar -xzf 完全兼容。
@@ -205,11 +264,13 @@ jobs:
           du -sh ~/.openclaw 2>/dev/null || true
           stat -c '%s bytes  %n' ~/.openclaw/openclaw.json 2>/dev/null || echo "⚠️ openclaw.json 不存在"
           ls -l ~/.openclaw/state 2>/dev/null || echo "⚠️ state/ 不存在"
-          # 2026-10-02 硬后置校验：恢复完成后 openclaw.json 必须在盘上。缺了就大声标记 ——
-          # 后续 Run OpenClaw 会被自身启动失败路径接住并发通知，周期/终归档也会因 rc=4
-          # 拒绝把空壳打上行、主包不会被覆盖；这里显式留一句，CI 日志一眼看到「恢复就没成」。
+          # 2026-10-02 硬后置校验：恢复完成后 openclaw.json 必须在盘上。原设计只「大声
+          # 标记」、指望 Run OpenClaw 启动失败路径兜底 —— 实测不成立：preflight doctor
+          # 会现造一份合法配置让网关健康上岗（当轮 98KB 空壳即此形态），随后空壳照样
+          # 被打上行。改为直接 exit 1 硬失败，触发任务失败通知；带病上岗比失败一轮代价大。
           if [ ! -s "$HOME/.openclaw/openclaw.json" ]; then
-            echo "❌ 恢复完成后 openclaw.json 仍缺失：本轮状态不全，属不健康运行"
+            echo "❌ 恢复完成后 openclaw.json 仍缺失：本轮状态不全，拒绝继续" >&2
+            exit 1
           fi
 
           # ZCode 数据恢复：~/.zcode 下的个人数据在 runner 重置后会丢，从 Dropbox 主包还原。
@@ -3774,7 +3835,10 @@ jobs:
             exit 2
           fi
 
-          MIN_SIZE=$((5 * 1024))
+          # 2026-10-02 二次事故：5KB 下限形同虚设（98KB 空壳轻松过线并覆盖云端主包）。
+          # 真实主包 GB 级；50MB 绝对下限不与历史包比较（2026-09-12 的教训：比较式
+          # 体积门会被主动瘦身永久卡死），只拦「数量级不对」的包。
+          MIN_SIZE=$((50 * 1024 * 1024))
           SRC_DIR="/home/runner/.openclaw"
           STAGE_DIR=""
           KEEP_DIR=""
@@ -3890,8 +3954,11 @@ jobs:
           # 瘦身（排除缓存/调试转储）、日志轮转永久改变，拿上一次归档当基准会把
           # 正常瘦身判成状态丢失，且主包就此冻结、每轮重复告警（2026-09-12）。
           # 退出码 4 = 状态不全，调用方按归档失败处理，不覆盖云端。
+          # 2026-10-02：.env 加入关键文件 —— 凭据全在里面（GH/Gemini/通道 token 等），
+          # 缺 .env 是「doctor 现造空壳」的标志性特征：合法但全空，config validate 照样
+          # 通过。缺失即 exit 4，主包不覆盖。
           missing=""
-          for f in openclaw.json; do
+          for f in openclaw.json .env; do
             if [ ! -s "$STAGE_DIR/.openclaw/$f" ]; then
               missing="$missing $f"
             fi
