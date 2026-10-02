@@ -3711,13 +3711,30 @@ jobs:
           MIN_SIZE=$((5 * 1024))
           SRC_DIR="/home/runner/.openclaw"
           STAGE_DIR=""
+          KEEP_DIR=""
 
           cleanup() {
             if [ -n "${STAGE_DIR:-}" ] && [ -d "$STAGE_DIR" ]; then
               rm -rf "$STAGE_DIR"
             fi
+            if [ -n "${KEEP_DIR:-}" ] && [ -d "$KEEP_DIR" ]; then
+              rm -rf "$KEEP_DIR"
+            fi
           }
           trap cleanup EXIT
+
+          # 关键文件必须是「可解析的完整 JSON」：0 字节（截断写入途中）与半截
+          # 写入（写了一半被扫到）都要判否，只有 -s 是不够的。jq 不可用则回退
+          # python3，都没有才退化成只看非空（最弱判据，但优于不判）。
+          json_ok() {
+            if command -v jq >/dev/null 2>&1; then
+              jq empty "$1" >/dev/null 2>&1
+            elif command -v python3 >/dev/null 2>&1; then
+              python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$1" >/dev/null 2>&1
+            else
+              [ -s "$1" ]
+            fi
+          }
 
           rm -f "$OUTPUT_TAR"
 
@@ -3728,6 +3745,36 @@ jobs:
 
           STAGE_DIR=$(mktemp -d /tmp/openclaw-archive-stage.XXXXXX)
           mkdir -p "$STAGE_DIR/.openclaw"
+
+          # ── 关键文件隔离快照（2026-10-02 事故修复）──────────────────────
+          # 根因：openclaw.json 被网关持续重写（mtime 每轮都变），而 rsync 扫完
+          # 6.5G 要数分钟。若 rsync 恰好在网关「截断写入 / 原子替换」那一瞬扫到
+          # 该文件，staging 里就是缺失或 0 字节 —— 完整性校验判 missing →
+          # 退出码 4 → 主包冻结、每 20 分钟重复告警（run 36963030965 即此形态）。
+          # 原逻辑容忍 rsync rc=24（file has vanished），恰恰放过了这种情形：
+          # 文件没「消失」，是被重写了，rc 仍是 0。
+          # 对策：rsync 前先把关键文件拷到隔离位，校验为完整 JSON 才收，重试
+          # 直到拿到好副本；rsync 后再用该副本兜底回填，让瞬时竞态自愈，
+          # 而不是整轮判失败、冻结主包。
+          CRITICAL_FILES="openclaw.json"
+          KEEP_DIR="$(mktemp -d /tmp/openclaw-archive-keep.XXXXXX)"
+          keep_ok=1
+          for f in $CRITICAL_FILES; do
+            got=0
+            for attempt in 1 2 3 4 5; do
+              if cp "$SRC_DIR/$f" "$KEEP_DIR/$f" 2>/dev/null && json_ok "$KEEP_DIR/$f"; then
+                got=1
+                break
+              fi
+              sleep 1
+            done
+            if [ "$got" -ne 1 ]; then
+              # 连抓 5 次都拿不到完整副本 = 源本身有问题，不是竞态。
+              # 不回填，交给下方完整性校验按真实故障处理（退出码 4）。
+              echo "openclaw_critical_snapshot_failed file=$f (源不可用，非竞态)" >&2
+              keep_ok=0
+            fi
+          done
 
           # Copy a stable snapshot first. rsync may return 24 when live files vanish
           # during copy; that is expected for active OpenClaw session/lock files, so
@@ -3758,6 +3805,18 @@ jobs:
 
           if [ "$rsync_rc" -eq 24 ]; then
             echo "openclaw_snapshot_partial_live_changes"
+          fi
+
+          # 竞态兜底回填：rsync 期间关键文件若被网关重写而扫成缺失 / 0 字节 /
+          # 半截写入，用 rsync 前抓到的稳定副本补齐。副本本身不可用时
+          #（keep_ok=0）不回填 —— 那是源真坏了，必须让校验拦下。
+          if [ "$keep_ok" -eq 1 ]; then
+            for f in $CRITICAL_FILES; do
+              if ! json_ok "$STAGE_DIR/.openclaw/$f"; then
+                cp "$KEEP_DIR/$f" "$STAGE_DIR/.openclaw/$f"
+                echo "openclaw_archive_race_repaired file=$f (rsync 竞态，已用稳定副本回填)" >&2
+              fi
+            done
           fi
 
           # 完整性校验：关键文件必须存在且非空 —— 这才是「状态全不全」的判据。
