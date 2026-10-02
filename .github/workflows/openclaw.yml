@@ -2635,6 +2635,9 @@ jobs:
 
       - name: Run zcode2api (GLM gateway)
         id: run_zcode2api
+        # 2026-10-02：trae2api 步骤硬失败时本步骤被默认语义级联跳过（continue-on-error
+        # 只影响自身失败标记，不改变「前置失败则跳过」），与 Run OpenClaw 同款修复。
+        if: ${{ !cancelled() }}
         continue-on-error: true
         env:
           # send_tg 发送闸 + 收尾区接线（缺任一则本步骤通知静默跳过）
