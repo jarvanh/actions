@@ -2275,11 +2275,33 @@ jobs:
           # 部署取 fork 的 Release 静态二进制，不在 runner 上跑 go build。
           # Release tag 形如 v2026.09.23-<短 commit>，镜像 tag 直接复用它（一一对应、
           # 同日多构建不撞车）；「更新」说明在第 8 步与 Dropbox 记录的上轮 tag 对比后判定。
-          TRAE_REL="$(gh api repos/jarvanh/trae2api/releases/latest --jq '.tag_name' 2>/dev/null || true)"
+          # 重试（2026-10-02 事故修复）：单次 gh api 瞬时返回空就 exit 1 → 服务
+          # 停摆一整轮（run 36963030965 实测：step 2 秒即失败，非网络超时；
+          # 之后无容器/无镜像/端口未监听，停摆约 5 小时才被发现）。
+          # 瞬时抖动不该等价于一整轮不可用，故重试 3 次、间隔 5 秒，
+          # 全失败才判定真故障。stderr 保留用于排查，不再静默吞掉。
+          TRAE_REL=""
+          TRAE_REL_ERR=""
+          for _try in 1 2 3; do
+            # ⚠️ 不能写 VAR="$(cmd)"：set -euo pipefail 下命令替换失败会直接终止脚本，
+            # 重试循环形同虚设。必须让失败落在 &&/|| 列表里被吃掉，再回读文件取结果。
+            gh api repos/jarvanh/trae2api/releases/latest --jq '.tag_name' \
+              >/tmp/trae-rel.out 2>/tmp/trae-rel.err && _gh_rc=0 || _gh_rc=$?
+            TRAE_REL="$(cat /tmp/trae-rel.out 2>/dev/null || true)"
+            TRAE_REL_ERR="$(cat /tmp/trae-rel.err 2>/dev/null || true)"
+            [ "$_gh_rc" -ne 0 ] && [ -z "$TRAE_REL_ERR" ] && TRAE_REL_ERR="gh api exit=$_gh_rc"
+            if [ -n "$TRAE_REL" ]; then
+              [ "$_try" -gt 1 ] && echo "   （第 ${_try} 次尝试成功）"
+              break
+            fi
+            echo "   ⚠️ 第 ${_try}/3 次解析 Release 失败，5 秒后重试" >&2
+            [ "$_try" -lt 3 ] && sleep 5
+          done
+          rm -f /tmp/trae-rel.out /tmp/trae-rel.err
           if [ -z "$TRAE_REL" ]; then
-            echo "❌ 无法解析 jarvanh/trae2api 最新 Release" >&2
+            echo "❌ 无法解析 jarvanh/trae2api 最新 Release（已重试 3 次）" >&2
             trae_notify "❌ trae2api 部署失败" "无法解析最新 Release" "" "" \
-              "gh api releases/latest 返回空（网络或仓库不可达）" "" 0
+              "gh api releases/latest 连续 3 次返回空（网络抖动或仓库不可达）" "${TRAE_REL_ERR}" 0
             exit 1
           fi
           TRAE_VER="$TRAE_REL"
@@ -2287,12 +2309,29 @@ jobs:
 
           # 二进制 sha256 从 Release 的 SHA256SUMS 实时提取，与版本强绑定；
           # 取不到就拒绝构建（Dockerfile 内还有一道 sha256sum -c 兜底校验）。
-          TRAE_SHA256="$(curl -fsSL "https://github.com/jarvanh/trae2api/releases/download/${TRAE_REL}/SHA256SUMS" \
-            | awk '$2 == "./trae2api-linux-amd64" {print $1}')"
+          # 同上：SHA256SUMS 是同一轮网络请求的下游，抖动会连带失败，
+          # 同样重试 3 次；全失败才拒绝构建（安全底线不动：取不到仍不构建）。
+          TRAE_SHA256=""
+          TRAE_SHA_ERR=""
+          for _try in 1 2 3; do
+            # 同上：curl 失败不能直接进命令替换赋值，否则 set -e 当场终止。
+            curl -fsSL "https://github.com/jarvanh/trae2api/releases/download/${TRAE_REL}/SHA256SUMS" \
+              >/tmp/trae-sums.out 2>/tmp/trae-sums.err && _curl_rc=0 || _curl_rc=$?
+            TRAE_SHA256="$(awk '$2 == "./trae2api-linux-amd64" {print $1}' /tmp/trae-sums.out 2>/dev/null || true)"
+            TRAE_SHA_ERR="$(cat /tmp/trae-sums.err 2>/dev/null || true)"
+            [ "$_curl_rc" -ne 0 ] && [ -z "$TRAE_SHA_ERR" ] && TRAE_SHA_ERR="curl exit=$_curl_rc"
+            if [ -n "$TRAE_SHA256" ]; then
+              [ "$_try" -gt 1 ] && echo "   （第 ${_try} 次尝试成功）"
+              break
+            fi
+            echo "   ⚠️ 第 ${_try}/3 次获取 SHA256SUMS 失败，5 秒后重试" >&2
+            [ "$_try" -lt 3 ] && sleep 5
+          done
+          rm -f /tmp/trae-sums.out /tmp/trae-sums.err
           if [ -z "$TRAE_SHA256" ]; then
-            echo "❌ 未能提取 sha256，拒绝构建" >&2
+            echo "❌ 未能提取 sha256，拒绝构建（已重试 3 次）" >&2
             trae_notify "❌ trae2api 部署失败" "SHA256SUMS 未取到校验值" "$TRAE_VER" "" \
-              "Release 资产缺失或下载失败" "" 0
+              "Release 资产缺失或连续 3 次下载失败" "${TRAE_SHA_ERR}" 0
             exit 1
           fi
           echo "   sha256  : $TRAE_SHA256"
