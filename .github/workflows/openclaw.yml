@@ -217,7 +217,10 @@ jobs:
             # pipefail 必须开：否则 tar 失败会被 pigz 的成功码掩盖。
             ARCHIVE_OK=0
             if command -v pigz >/dev/null 2>&1; then
-              ( set -o pipefail; pigz -dc "$TMP_OPENCLAW_TAR" | tar -tzf - >/dev/null 2>&1 ) && ARCHIVE_OK=1
+              # 流已被 pigz -dc 解压成明文 tar，tar 这层只能用 -tf；-tzf 会对明文
+              # 再解压一次，恒报 "not in gzip format"（2026-10-02 事故：无论云端
+              # 包多健康，完整性校验恒失败 → 恢复永远跳过 → 空壳上岗）。
+              ( set -o pipefail; pigz -dc "$TMP_OPENCLAW_TAR" | tar -tf - >/dev/null 2>&1 ) && ARCHIVE_OK=1
             else
               tar -tzf "$TMP_OPENCLAW_TAR" >/dev/null 2>&1 && ARCHIVE_OK=1
             fi
