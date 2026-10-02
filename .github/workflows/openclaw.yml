@@ -128,7 +128,21 @@ jobs:
           mkdir -p "$RESTORE_DIR"
 
           echo "📦 Restoring ~/.openclaw: prefer archive, fallback to raw directory sync..."
-          if rclone ls dropbox:self-hosted/openclaw.tar.gz > /dev/null 2>&1; then
+          # 2026-10-02 加固：rclone 对 Dropbox 的瞬时失败（token 刷新/限流/挂载抖动）曾把
+          # 「探测失败」误判成「无归档」→ 落入 else 从**空的**原始目录兜底（openclaw/ 目录
+          # 早已清空，兜底恒为 no-op）→ ~/.openclaw 空壳静默上岗：网关起不来、归档循环
+          # 连续 12 轮 rc=4 告警（2026-10-02 04:09-08:16）。探测重试 3 次再定性，
+          # 瞬态不至于丢掉整份主包恢复。
+          ARCHIVE_PRESENT=0
+          for _probe in 1 2 3; do
+            if rclone ls dropbox:self-hosted/openclaw.tar.gz > /dev/null 2>&1; then
+              ARCHIVE_PRESENT=1
+              break
+            fi
+            echo "⚠️ rclone ls 探测归档失败（第 ${_probe}/3 次），15s 后重试..."
+            sleep 15
+          done
+          if [ "$ARCHIVE_PRESENT" = "1" ]; then
             echo "📦 Found openclaw.tar.gz! Downloading and extracting..."
             rclone copyto dropbox:self-hosted/openclaw.tar.gz "$TMP_OPENCLAW_TAR"
             archive_kb=$(du -sk "$TMP_OPENCLAW_TAR" | awk '{print $1}')
@@ -191,6 +205,12 @@ jobs:
           du -sh ~/.openclaw 2>/dev/null || true
           stat -c '%s bytes  %n' ~/.openclaw/openclaw.json 2>/dev/null || echo "⚠️ openclaw.json 不存在"
           ls -l ~/.openclaw/state 2>/dev/null || echo "⚠️ state/ 不存在"
+          # 2026-10-02 硬后置校验：恢复完成后 openclaw.json 必须在盘上。缺了就大声标记 ——
+          # 后续 Run OpenClaw 会被自身启动失败路径接住并发通知，周期/终归档也会因 rc=4
+          # 拒绝把空壳打上行、主包不会被覆盖；这里显式留一句，CI 日志一眼看到「恢复就没成」。
+          if [ ! -s "$HOME/.openclaw/openclaw.json" ]; then
+            echo "❌ 恢复完成后 openclaw.json 仍缺失：本轮状态不全，属不健康运行"
+          fi
 
           # ZCode 数据恢复：~/.zcode 下的个人数据在 runner 重置后会丢，从 Dropbox 主包还原。
           # v2/tasks-index.sqlite 是侧栏会话列表（标题/置顶/归档/未读/删除），不是可再生索引 ——
@@ -3161,6 +3181,13 @@ jobs:
 
       - name: Run OpenClaw
         id: run_openclaw
+        # 2026-10-02 事故根因：任一前置服务步骤（quota-board/trae/zcode2api…）硬失败时，
+        # 本步骤被静默跳过 —— meta 不写、网关不起、快照回滚不跑，且 outcome=skipped 连
+        # 「Notify OpenClaw startup failure」（只认 failure）都不触发，OpenClaw 整条链
+        # 无声消失。本步骤的自愈机制（fallback 重装、快照回滚、失败通知）本就为「自己
+        # 失败」设计，理应在任何前置失败后仍获得执行机会；cancelled 除外 —— 主动取消
+        # 时不该再拉起网关。
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
 
@@ -4246,6 +4273,18 @@ jobs:
           #!/usr/bin/env bash
           set -euo pipefail
 
+          # 2026-10-02：loop 由 nohup 起在极简 PATH 下，而 openclaw 装在 setup-node 的
+          # hostedtoolcache 里 —— 找不到它时 create-openclaw-archive.sh 的 config validate
+          # 一直被静默跳过（日志 openclaw_archive_config_check_skipped），「坏配置不进包」
+          # 的防线形同虚设。启动循环前把 openclaw 所在 bin 前置进 PATH，随 nohup 一并继承。
+          for _nd in /opt/hostedtoolcache/node/*/bin; do
+            if [ -x "$_nd/openclaw" ]; then
+              PATH="$_nd:$PATH"
+              export PATH
+              break
+            fi
+          done
+
           TMP_OPENCLAW_TAR="/tmp/openclaw.tar.gz"
           TMP_CLIPROXYAPI_TAR="/tmp/CLIProxyAPI.tar.gz"
           TMP_CLIRELAY_TAR="/tmp/CliRelay.tar.gz"
@@ -4317,7 +4356,10 @@ jobs:
           trap 'rm -f "$PID_FILE"' EXIT
 
           ARCHIVE_DEST="dropbox:self-hosted/openclaw.tar.gz"
-          if [ -f /tmp/run-openclaw-meta.env ] && ! grep -q '^RECORDED_SUCCESSFUL_OPENCLAW_VERSION=' /tmp/run-openclaw-meta.env; then
+          # 2026-10-02 加固：meta 文件**不存在**（启动链没跑到 Run OpenClaw 就断了）同样是
+          # 不健康 —— 原判据只认「文件存在但缺版本行」，启动链整体被跳过时这里会放行，
+          # 把故障状态照样指向主包（当轮靠 rc=4 完整性校验兜住，属运气不是设计）。
+          if ! grep -q '^RECORDED_SUCCESSFUL_OPENCLAW_VERSION=' /tmp/run-openclaw-meta.env 2>/dev/null; then
             ARCHIVE_DEST="dropbox:self-hosted/openclaw-failed-$(date -u +%Y%m%d-%H%M).tar.gz"
             echo "openclaw-failed-$(date -u +%Y%m%d-%H%M).tar.gz" > /tmp/failed-archive-name
             echo "ℹ️ Unhealthy run detected: background archive targets $ARCHIVE_DEST (main package keeps the last healthy state)."
@@ -4325,12 +4367,17 @@ jobs:
 
           while true; do
             openclaw_archive_output=""
-            if openclaw_archive_output=$(flock -E 200 -n "$LOCK_FILE" bash /tmp/create-openclaw-archive.sh "$TMP_OPENCLAW_TAR" 2>&1); then
+            # 2026-10-02：归档全程套 timeout —— 循环曾在一个悬挂的归档/上传迭代里卡死
+            # 8 小时（无 timeout 的 rclone/网络调用），期间不归档、不告警、整条归档链静音。
+            # timeout 杀掉后 flock 随之释放、rc=124 走失败分支照常告警，循环得以自愈。
+            if openclaw_archive_output=$(flock -E 200 -n "$LOCK_FILE" timeout 40m bash /tmp/create-openclaw-archive.sh "$TMP_OPENCLAW_TAR" 2>&1); then
               echo "[$(date '+%F %T')] openclaw archive ok, uploading... ${openclaw_archive_output}"
               new_size=$(stat -c%s "$TMP_OPENCLAW_TAR" 2>/dev/null || echo 0)
               remote_size=0
               if [ "$ARCHIVE_DEST" = "dropbox:self-hosted/openclaw.tar.gz" ]; then
-                remote_size=$(rclone ls "$ARCHIVE_DEST" 2>/dev/null | awk '{s+=$1} END {print s+0}')
+                # rclone 失败须兜住：loop 带 set -euo pipefail，裸 rclone 在管道里非零会
+                # 无声杀死整个循环（nohup 后台无任何告警）。
+                remote_size=$({ timeout 5m rclone ls "$ARCHIVE_DEST" 2>/dev/null || true; } | awk '{s+=$1} END {print s+0}')
               fi
               # 体积骤降只记录、不拦截：完整性由归档脚本的关键文件校验把关（见
               # create-openclaw-archive.sh）。原先拿云端现有包当基准判「缩水」，会被
@@ -4340,7 +4387,7 @@ jobs:
                 echo "[$(date '+%F %T')] ℹ️ 体积较云端下降超 40%（new=${new_size}B remote=${remote_size}B），已通过完整性校验，正常覆盖"
               fi
               openclaw_upload_output=""
-              if openclaw_upload_output=$(rclone copyto "$TMP_OPENCLAW_TAR" "$ARCHIVE_DEST" 2>&1); then
+              if openclaw_upload_output=$(timeout 30m rclone copyto "$TMP_OPENCLAW_TAR" "$ARCHIVE_DEST" 2>&1); then
                 echo "[$(date '+%F %T')] openclaw upload ok"
                 rm -f "$TMP_OPENCLAW_TAR"
               else
@@ -4382,10 +4429,10 @@ jobs:
             fi
 
             ai_archive_output=""
-            if ai_archive_output=$(flock -E 200 -n "$LOCK_FILE" bash "$AI_ARCHIVE_SCRIPT" "$AI_ARCHIVE_TAR" 2>&1); then
+            if ai_archive_output=$(flock -E 200 -n "$LOCK_FILE" timeout 40m bash "$AI_ARCHIVE_SCRIPT" "$AI_ARCHIVE_TAR" 2>&1); then
               echo "[$(date '+%F %T')] ${AI_LABEL} archive ok, uploading... ${ai_archive_output}"
               ai_upload_output=""
-              if ai_upload_output=$(rclone copyto "$AI_ARCHIVE_TAR" "$AI_ARCHIVE_DEST" 2>&1); then
+              if ai_upload_output=$(timeout 30m rclone copyto "$AI_ARCHIVE_TAR" "$AI_ARCHIVE_DEST" 2>&1); then
                 echo "[$(date '+%F %T')] ${AI_LABEL} upload ok"
                 if [ "$AI_SUDO_RM" = "yes" ]; then sudo rm -f "$AI_ARCHIVE_TAR"; else rm -f "$AI_ARCHIVE_TAR"; fi
               else
@@ -4409,10 +4456,11 @@ jobs:
             # ZCode 个人数据归档：~/.zcode 的 cli/ + v2/ → dropbox:self-hosted/zcode.tar.gz（带完整性校验）
             if [ -d "$HOME/.zcode/cli" ] || [ -d "$HOME/.zcode/v2" ] || [ -d "$HOME/.zcode/server" ]; then
               zcode_archive_output=""
-              if zcode_archive_output=$(flock -E 200 -n "$LOCK_FILE" bash /tmp/create-zcode-archive.sh "$TMP_ZCODE_TAR" 2>&1); then
+              if zcode_archive_output=$(flock -E 200 -n "$LOCK_FILE" timeout 40m bash /tmp/create-zcode-archive.sh "$TMP_ZCODE_TAR" 2>&1); then
                 echo "[$(date '+%F %T')] zcode archive ok, uploading... ${zcode_archive_output}"
                 zcode_new_size=$(stat -c%s "$TMP_ZCODE_TAR" 2>/dev/null || echo 0)
-                zcode_remote_size=$(rclone ls "dropbox:self-hosted/zcode.tar.gz" 2>/dev/null | awk '{s+=$1} END {print s+0}')
+                # rclone 失败兜底口径同 openclaw 主包：防 pipefail 无声杀循环
+                zcode_remote_size=$({ timeout 5m rclone ls "dropbox:self-hosted/zcode.tar.gz" 2>/dev/null || true; } | awk '{s+=$1} END {print s+0}')
                 # 体积骤降只记录、不拦截（口径同 openclaw 主包）：完整性由
                 # create-zcode-archive.sh 的 db.sqlite 校验把关。原先的缩水保护
                 # 在排除 model-io 调试转储后把正常瘦身判成状态丢失，主包冻结。
@@ -4420,7 +4468,7 @@ jobs:
                   echo "[$(date '+%F %T')] ℹ️ zcode 体积较云端下降超 40%（new=${zcode_new_size}B remote=${zcode_remote_size}B），已通过完整性校验，正常覆盖"
                 fi
                 zcode_upload_output=""
-                if zcode_upload_output=$(rclone copyto "$TMP_ZCODE_TAR" "dropbox:self-hosted/zcode.tar.gz" 2>&1); then
+                if zcode_upload_output=$(timeout 30m rclone copyto "$TMP_ZCODE_TAR" "dropbox:self-hosted/zcode.tar.gz" 2>&1); then
                   echo "[$(date '+%F %T')] zcode upload ok"
                   rm -f "$TMP_ZCODE_TAR"
                 else
