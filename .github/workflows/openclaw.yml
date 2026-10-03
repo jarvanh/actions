@@ -3505,7 +3505,10 @@ jobs:
             # 属瞬时锁竞态，不是版本/配置问题。先按健康判定：install 已拉起的服务仍活着就直接放行。
             echo "⚠️ Initial gateway restart command failed; checking whether the gateway is actually healthy before treating it as a failure. Details:"
             echo "RESTART_REFUSED=1" >> "$RUN_OPENCLAW_META"
-            if wait_for_openclaw_health "initial_start_restart_refused_grace" 60 5; then
+            # 2026-10-03 事故：新版本首启要对全部 agent 库逐个跑完整性门，冷启动
+            # 可超 60s；60s 宽限把「正在健康化」误判为失败，杀死首启后触发整条
+            # 降级链（降级又读不了已迁移的 state → 崩溃循环）。放宽到 180s。
+            if wait_for_openclaw_health "initial_start_restart_refused_grace" 180 5; then
               echo "✅ Gateway is healthy despite restart command error (transient state-lock contention); skipping fallback reinstall."
             else
               echo "⚠️ Initial gateway restart failed; will attempt fallback reinstall."
@@ -3564,6 +3567,10 @@ jobs:
 
               echo "Restarting OpenClaw after fallback reinstall..."
               FALLBACK_RESTART_OK=1
+              # 2026-10-03 事故：降级后的启动崩溃循环会烧光 systemd StartLimitBurst
+              # （10 次/300s），此后 restart 恒报 "Start request repeated too quickly"，
+              # 自愈还没开始就被熔断锁死。restart 前先清 failed 计数。
+              systemctl --user reset-failed openclaw-gateway.service 2>/dev/null || true
               if ! openclaw gateway install --force; then
                 echo "⚠️ Fallback gateway install failed."
                 FALLBACK_RESTART_OK=0
@@ -3639,6 +3646,10 @@ jobs:
                   echo "🛑 Stopping gateway (cancels the systemd auto-restart loop)..."
                   systemctl --user stop openclaw-gateway.service 2>/dev/null || true
                   openclaw gateway stop 2>/dev/null || true
+                  # failed 计数跨 stop 存续：不清掉，下方 install 的 restart 会被
+                  # "Start request repeated too quickly" 拒绝（2026-10-03 事故，
+                  # 快照回滚尚未来得及验证就被熔断判死）。
+                  systemctl --user reset-failed openclaw-gateway.service 2>/dev/null || true
                   sleep 3
                   BAK_TS="$(date +%Y%m%d-%H%M%S)"
                   mv "$HOME/.openclaw" "$HOME/.openclaw.broken-bak-$BAK_TS"
