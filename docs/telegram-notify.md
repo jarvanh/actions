@@ -1435,14 +1435,20 @@ python 侧拿不到 bash 函数，仍有两处同义实现（`add_uploaded_video
   上下文、恒为空串），助手侧走 `/proc/1` 兜底。
 - 凭据校验在**调用方**，且放在引入真源**之前**：`if [ -z "$TELEGRAM_BOT_TOKEN" ] …exit 0`。
   真源本身不校验。
-- **重要档（2026-09-29 两档分类）**：`send_tg "$msg" alert` / `send_tg_chunked "$msg" alert` /
-  `send_telegram_message "$msg" HTML alert` 的 step 还需注入 `TELEGRAM_BOT_TOKEN_ALERT` /
-  `TELEGRAM_CHAT_ID_ALERT`；重要档 bot 已固定配置为 @SaberFuckBot，`alert` 档直达、
-  不回退主 bot——凭据缺失时发送失败并在日志留痕。
+- **重要档（2026-09-29 两档分类，2026-10-03 复核坐实）**：`send_tg "$msg" alert` /
+  `send_tg_chunked "$msg" alert` / `send_telegram_message "$msg" HTML alert` 的 step 还需
+  注入 `TELEGRAM_BOT_TOKEN_ALERT` / `TELEGRAM_CHAT_ID_ALERT`；重要档 bot 已固定配置为
+  @SaberFuckBot（显示名「重要通知」），`alert` 档直达、不回退主 bot——凭据缺失时发送失败
+  并在日志留痕。
   档位由调用点显式声明，发送层不按标题匹配。
   **重要档 = 告警 + 信息**：告警（备份失败/归档告警/网关启动失败/源端异常/灾难恢复/
   Pixiv cookie 失效/`⛔ 同步中断·未注册任何任务`）＋ 信息（入口/凭据/模型倍率/服务启停/
-  各网关已就绪）。其余（结果 + 流水）为**普通档**，不传 tier，走 @FuckSaberBot。
+  各网关已就绪）。其余（结果 + 流水）为**普通档**，不传 tier，走 @FuckSaberBot
+  （显示名「一般通知」）。
+- **全库 bot 分工（2026-10-03 终版定案）**：见 7.1 节。要点是**一般通知一律
+  @FuckSaberBot、重要通知一律 @SaberFuckBot**，本机与仓库同 bot、不各设一套；
+  且**系统内部消息（exec completion relay、心跳残留、卡死会话恢复）不属于任何一档**，
+  由本机 @ass_openclaw_bot 隔离承接，不进本仓库的业务通知通道。
 - bash 真源兼容历史变量名 `TG_BOT_TOKEN` / `TG_CHAT_ID`；**pwsh 侧没有这层回退**，
   必须注入 `TELEGRAM_*`。
 - python 侧凭据从传入的 `env` 读，但 `TG_RUN_URL` 只读
@@ -1496,11 +1502,58 @@ bash 里内嵌的 python 段（`python3 - <<'PY'`）无法 import 共享层，�
   字典（失败带 `reason`），调用方**必须**把原因记进日志。
 - **已引入发送层的通知点不得 curl 直发**。唯一例外是需要 message_id 的进度面板原地
   维护（4.6 节）。
-- **档位路由（2026-09-29 两档）**：`send_tg` / `send_tg_chunked` 收可选 `tier`（pwsh
-  `Send-TgMessage <text> [tier]`）。只有两档：
+- **档位路由（2026-09-29 两档，2026-10-03 复核坐实）**：`send_tg` / `send_tg_chunked` 收
+  可选 `tier`（pwsh `Send-TgMessage <text> [tier]`）。只有两档：
   - `alert` = **重要通知**（告警 + 信息）→ @SaberFuckBot（secrets 已配置，无回落）；
-  - 不传 tier = **普通通知**（结果 + 流水）→ @FuckSaberBot（主 bot）。
+  - 不传 tier = **普通通知**（结果 + 流水）→ @FuckSaberBot。
   进度面板直连 API 固定主 bot，不参与路由。
+
+### 7.1 全库 bot 分工（2026-10-03 终版定案）
+
+> 本节是**唯一口径**。改任何通知路由前先对照这里，避免把业务通知与内部消息混用。
+
+| bot | 职责 | 本机 | 仓库 |
+| --- | --- | --- | --- |
+| @openclaw_sb_bot | 主对话（与人对话，不发通知） | ✓ | — |
+| @FuckSaberBot | **一般通知**（业务） | ✓ | ✓ |
+| @SaberFuckBot | **重要通知** | ✓ | ✓ |
+| @sbsb / @sbsbsb / @sbsbsbsb / @sbsbsbsbsb | agent 各自对话窗口 | ✓ | — |
+| @ass_openclaw_bot | **内部消息隔离带**（relay / 后台完成 / 串号排查） | ✓ | — |
+
+**两档 × 两侧，共 4 格，只用 2 个通知 bot**：
+
+| | 本机 | 仓库 |
+| --- | --- | --- |
+| **一般通知** | @FuckSaberBot | @FuckSaberBot |
+| **重要通知** | @SaberFuckBot | @SaberFuckBot |
+
+**判定口径**
+
+| 档位 | 承载内容 | 判定 |
+| --- | --- | --- |
+| 一般 | 业务类：`send_tg` 不传 tier（备份结果、同步状态、测速结果等） | 默认路径 |
+| 重要 | runner 重启、setup-env 报告、测速告警、`tier=alert` 告警档 | 显式传 `alert` |
+
+> **内部消息不属于上面任何一档。** exec completion relay、心跳残留、卡死会话恢复等
+> 系统内部消息由本机 @ass_openclaw_bot 隔离承接，**不进本仓库的业务通知通道**。
+> 判据：业务一般通知是「人该看到的业务结果」，内部消息是「没人主动问的系统流水」，
+> 两者不能共用一个 bot。
+
+**实测坐实（2026-10-03，靠 Telegram 转发消息头，非推断）**
+
+| 格 | 证据 |
+| --- | --- |
+| 一般通知·仓库 | 3 条 `一般通知 (@FuckSaberBot)`：备份成功 / 同步跳过 / 泰尔测速 |
+| 重要通知·仓库 | `重要通知 (@SaberFuckBot)`：OpenClaw Runner 已就绪 |
+| 一般通知·本机 | 网关日志 `[default] starting provider` + msg_id 号段 |
+| 重要通知·本机 | 本机裸变量 `TELEGRAM_BOT_TOKEN` getMe 实测（@SaberFuckBot） |
+
+> ⚠️ **判据（易踩）**：GitHub Secrets 只写不可读，本机 `.env` 的值 ≠ 仓库 secrets 的值。
+> 判断「仓库接的是哪个 bot」**只能靠消息头**（转发任意一条通知即可看到发送 bot 的
+> 显示名 + username），拿本机 token 去推断仓库必错。
+>
+> ⚠️ **不要**把本机裸变量 `TELEGRAM_BOT_TOKEN` 改值——它是本机重要通知（runner 重启、
+> setup-env 报告、测速告警）的出口，改了会直接切断重要告警通道。
 - 媒体上传（`sendDocument` / `sendVideo`）不走 sendMessage 发送层（固有例外），但
   caption **必须**转义、429 重试与发送层同口径（最多 5 次）。
 
