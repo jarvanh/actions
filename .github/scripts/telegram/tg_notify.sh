@@ -14,10 +14,13 @@
 #   它与本文件是单向依赖: tg-channel/ 只 source 本文件，本文件不反向引用。
 # 环境变量: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 #   （历史名 TG_BOT_TOKEN / TG_CHAT_ID 自动兼容——见下方别名回退）
-# 档位路由（2026-09-28 通知分级）: send_tg <text> [tier] / send_tg_chunked <text> [tier]
-#   tier=alert → 发往告警 bot（@SaberFuckBot，secrets 已固定配置，无回落）；
+# 档位路由（2026-09-28 分级 / 2026-10-03 全库 bot 分工终版）:
+#   send_tg <text> [tier] / send_tg_chunked <text> [tier]
+#   tier=alert  → 重要通知 → @SaberFuckBot（secrets 已固定配置，无回落）
+#   不传 tier   → 一般通知 → @FuckSaberBot（仓库 secrets.TELEGRAM_BOT_TOKEN）
 #   凭据缺失时发送失败并在日志留痕。调用点显式传档位，不按标题匹配。
 #   例外: openlist 进度面板直连 API（删旧发新依赖同 bot）固定主 bot，不参与路由。
+#   完整分工见 docs/telegram-notify.md 7.1 节（含本机 @ass_openclaw_bot 内部消息隔离带）。
 # 收尾接线（可选，缺席时 tg_add_footer 优雅降级）:
 #   TG_RUN_URL        运行日志链接（workflow 注入 https://github.com/<repo>/actions/runs/<id>）
 #   TG_RUN_STARTED_AT  历史注入名，平台无 github.run_started_at 上下文、注入恒为空；
@@ -344,7 +347,7 @@ tg_add_pre() {
 # 单次发送尝试（429 自动重试；其余失败直接返回非 0 并输出错误信息）
 # 退出码: 0 成功 / 2 HTML 解析失败（can't parse entities）/ 1 其他失败
 # ===== 档位路由 =====
-# tier 为空 = 日常（主 bot）；tier=alert = 告警 bot（@SaberFuckBot，无回落，凭据缺失即失败留痕）。
+# tier 为空 = 一般通知（@FuckSaberBot）；tier=alert = 重要通知（@SaberFuckBot，无回落，凭据缺失即失败留痕）。
 # 解析结果写入 _TG_TOKEN/_TG_CHAT，仅 _tg_send_once 消费；面板/sendDocument 等直连
 # API 的路径不读它们（固定主 bot）。
 tg_route() {
@@ -399,7 +402,7 @@ _tg_send_once() {
 }
 
 # 单条发送（HTML parse_mode；429 自动重试，其余失败直接返回非 0 并在 stderr 输出错误）
-# tier 可选: alert=告警 bot（@SaberFuckBot，无回落），缺省=主 bot
+# tier 可选: alert=重要通知（@SaberFuckBot，无回落），缺省=一般通知（@FuckSaberBot）
 send_tg() {
   local text="$1" tier="${2:-}"
   [ -z "$text" ] && return 0
