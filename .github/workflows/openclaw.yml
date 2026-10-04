@@ -2631,21 +2631,30 @@ jobs:
       # 必须在 Notify Tailscale SSH entry 之前起来（该步骤会读 AI 网关状态）。
       # 收尾停止见 Stop OpenClaw and Final Archive 的 3c 步（在 workbuddy 的 3b 之后）。
       # quota-board：三网关额度聚合看板（TG 置顶消息原地编辑 + Mini App HTTP :8321）。
-      # 代码/unit 真源在 /dropbox/self-hosted/quota-board/（随 Dropbox 每轮恢复）；
-      # 这里只做幂等 install+restart。隧道 qb（qb.derrick.eu.org → 127.0.0.1:8321）
+      # unit 真源已统一进 gateways.sh（2026-10-04，与四个网关同口径）：
+      # 原先这里从 Dropbox 静态副本 cp unit，与 write_unit 双轨并存、改配置易漏改。
+      # 现由 ensure 生成并每轮重启一次；/dropbox 下那份副本已无权威性（不再读取）。
+      # 看板本体 board.py 仍在 /dropbox/self-hosted/quota-board/（持久化目录，非 unit）。
+      # 隧道 qb（qb.derrick.eu.org → 127.0.0.1:8321）
       # 凭证随 /dropbox/self-hosted/.cloudflared 恢复，由 tunnels.conf 纳管。
       # QUOTA_BOARD_TOKEN 持久化在 ~/.openclaw/.env（随 openclaw.tar.gz 归档每轮恢复），
       # unit 的 EnvironmentFile 指向该文件，本 step 只负责拉起服务。
       - name: Run quota-board (TG 额度看板 + Mini App)
         run: |
           set -euo pipefail
-          QB_DIR=/dropbox/self-hosted/quota-board
-          [ -f "$QB_DIR/quota-board.service" ] || { echo "quota-board unit 缺失，跳过"; exit 0; }
-          mkdir -p ~/.config/systemd/user
-          cp "$QB_DIR/quota-board.service" ~/.config/systemd/user/
-          systemctl --user daemon-reload || true
-          systemctl --user enable quota-board >/dev/null 2>&1 || true
-          systemctl --user restart quota-board
+          if [ -f "$GITHUB_WORKSPACE/.github/scripts/gateways/gateways.sh" ]; then
+            bash "$GITHUB_WORKSPACE/.github/scripts/gateways/gateways.sh" ensure quota-board || true
+          else
+            # 兜底：gateways.sh 缺失（仓库未 checkout）时退回旧路径，避免看板静默不起
+            echo "⚠️ gateways.sh 缺失，退回 Dropbox 副本安装 unit"
+            QB_DIR=/dropbox/self-hosted/quota-board
+            [ -f "$QB_DIR/quota-board.service" ] || { echo "quota-board unit 缺失，跳过"; exit 0; }
+            mkdir -p ~/.config/systemd/user
+            cp "$QB_DIR/quota-board.service" ~/.config/systemd/user/
+            systemctl --user daemon-reload || true
+            systemctl --user enable quota-board >/dev/null 2>&1 || true
+            systemctl --user restart quota-board
+          fi
           sleep 3
           systemctl --user is-active quota-board || true
           # 隧道纳入统一管理器（幂等）
