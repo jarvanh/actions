@@ -1197,16 +1197,10 @@ jobs:
                 tg_add_path _msg "API Key" "${AI_GATEWAY_API_KEY:-未取到}"
               fi
               [ -n "$5" ] && tg_add_kv _msg "原因" "$5"
-              if [ -n "${WB_CREDS:-}" ]; then
-                local _n_creds _ent
-                _n_creds="$(printf '%s\n' "$WB_CREDS" | grep -c . || true)"
-                tg_add_section _msg "🔑 凭据 · ${_n_creds}"
-                _ent=""
-                while IFS= read -r _c; do
-                  [ -n "$_c" ] && tg_add_entry _ent "$_c"
-                done <<< "$WB_CREDS"
-                tg_add_block _msg "$(tree_lines "${_ent%$'\n'}")"
-              fi
+              # 凭据段（🔑 凭据 · N）已按主人要求移除（2026-10-05）：凭据文件名去掉
+              # 前后缀后与下方账号池条目名逐字相同，同一份名单渲染两遍纯占版面。
+              # ⚠️ WB_CREDS 变量本身**保留** —— 上方签到汇总仍用它算「跳过」数
+              # （_n_creds - _n_rows），删掉会让跳过数恒为 0。
               # 账号池：逐账号「一条目 + 多子行」。数据源是函数外的 WB_POOL —— 采集处
               # （启动步骤）已用 jq 解析 workbuddy-status.json 成 9 列 TSV：
               #     名录可信标记 \t 凭据文件名 \t 站点 \t 状态 \t 账号冷却 \t 额度 \t 免费模型名 \t 模型冷却 \t Token 过期
@@ -2238,16 +2232,8 @@ jobs:
                 tg_add_path _msg "API Key" "${_trae_key:-未取到}"
               fi
               [ -n "$5" ] && tg_add_kv _msg "原因" "$5"
-              if [ -n "${TRAE_CREDS:-}" ]; then
-                local _n_creds _ent _c
-                _n_creds="$(printf '%s\n' "$TRAE_CREDS" | grep -c . || true)"
-                tg_add_section _msg "🔑 凭据 · ${_n_creds}"
-                _ent=""
-                while IFS= read -r _c; do
-                  [ -n "$_c" ] && tg_add_entry _ent "$_c"
-                done <<< "$TRAE_CREDS"
-                tg_add_block _msg "$(tree_lines "${_ent%$'\n'}")"
-              fi
+              # 凭据段（🔑 凭据 · N）已按主人要求移除（2026-10-05），与 wb_notify 同口径。
+              # TRAE_CREDS 变量保留（采集处仍在产出，供将来其它用途），仅不再渲染。
               # 账号池：与 wb_notify 同构的「条目 + 子行」形态。子行必须用 tree_sub
               # 前缀手拼 —— tree_lines 把每行都当兄弟条目，子行经它会渲染成 ├─/└─，
               # 与条目平级（规范 4.2 二层列表：子行与条目正文同列）。
