@@ -22,7 +22,7 @@
 #   · 默认**重置历史失败记忆**（测"能力上限"，不是"生产实际会走的那条路"）
 #   · **先验后写**: 只给真值复核通过的条目写 marker（生产是"先写后删"）
 #
-# 安全边界: 只做 copyto / move 到正确路径，**绝不删除**任何文件；不装 cloudflared、
+# 安全边界: 只做 copyto 到正确路径（修复产物），**绝不删除**任何文件；不装 cloudflared、
 #   不碰隧道、不回传 DB（与 openlist-diag.yml 同口径）。
 #   容器名固定 openlist: 真值复核用的 `_sync_restart_for_verify` 硬编码该名字。
 #

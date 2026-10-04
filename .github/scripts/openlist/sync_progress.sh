@@ -7,7 +7,6 @@
 #   PROGRESS_MSG_ID_FILE     — 当前进度消息的 message_id
 #   PROGRESS_TASKS_FILE      — 任务队列（TSV: task_id, display_name, status, detail, size_hint）
 #   PROGRESS_CURRENT_FILE    — 当前正在执行的任务 ID
-#   PROGRESS_START_FILE      — 进度开始时间戳
 #   PROGRESS_ROWS_FILE.N     — 拆分深度 N 的阶段行（原始行，连接符由渲染器加）
 #   PROGRESS_STATS_FILE.N    — 拆分深度 N 的统计信息（HTML 片段）
 #   PROGRESS_NOTE_FILE.N     — 拆分深度 N 的细粒度状态（深层 detail，见下）
@@ -50,7 +49,6 @@
 PROGRESS_MSG_ID_FILE="/tmp/progress_msg_id.txt"
 PROGRESS_TASKS_FILE="/tmp/progress_tasks.tsv"
 PROGRESS_CURRENT_FILE="/tmp/progress_current.txt"
-PROGRESS_START_FILE="/tmp/progress_start.txt"
 # 阶段树/统计按拆分深度分槽存储（auto-split 递归可达 10 层，留余量取 16）
 PROGRESS_MAX_DEPTH=16
 _progress_slot_rows() { printf '/tmp/progress_rows.%d' "$1"; }
@@ -253,15 +251,6 @@ _progress_set_task_status() {
     fi
   done < "$PROGRESS_TASKS_FILE"
   mv "$tmp" "$PROGRESS_TASKS_FILE"
-}
-
-# 加载进度开始时间（无则返回当前时间）
-_progress_get_start_time() {
-  if [ -f "$PROGRESS_START_FILE" ]; then
-    cat "$PROGRESS_START_FILE" 2>/dev/null
-  else
-    date +%s
-  fi
 }
 
 # 获取当前正在执行的任务 ID
@@ -661,7 +650,6 @@ progress_init() {
   rm -f "$PROGRESS_FINALIZED_FILE" 2>/dev/null || true
   : > "$PROGRESS_SENT_IDS_LOG" 2>/dev/null || true
   rm -f "$PROGRESS_RT_STOP_FILE" "$PROGRESS_RT_EXIT_FILE" 2>/dev/null || true
-  date +%s > "$PROGRESS_START_FILE"
 
   # 不在此处发送消息: 此刻任务队列为空，只会发出 "总任务：0 | 已用：0s" 的
   # 空占位消息；若运行在任务注册前被取消（concurrency 抢占/早期失败），
