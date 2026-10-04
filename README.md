@@ -197,7 +197,7 @@ workflow 会把 `*.sh` `*.py` `*.jq` 拷到 `/tmp` 再 `source /tmp/load_all.sh`
 | | 维度 | 阈值 | 位置 |
 |---|---|---|---|
 | **文件级分割** | 把单个大文件切成多段 | 4GB（`LARGE_FILE_THRESHOLD_BYTES`） | `file_split.sh` |
-| **任务级分批** | 按一级子目录把同步任务拆成子任务递归 | 50GB（`SYNC_SPLIT_THRESHOLD_BYTES`） | `task_engine.sh` 的 `--auto-split` |
+| **任务级分批** | 按一级子目录把同步任务拆成子任务递归 | 20GB（workflow 设 `SYNC_SPLIT_THRESHOLD_BYTES`，脚本兜底 50GB） | `task_engine.sh` 的 `--auto-split` |
 
 `SYNC_SPLIT_*` 是历史命名且属**用户可配环境变量**，为避免既有配置静默失效，未改名；
 两者关系在 `file_split.sh` 与 `task_engine.sh` 头部有交叉标注。
@@ -362,7 +362,7 @@ workflow 的 `run_mode` 单选互斥：
 |---|---|
 | `同步` | 预览（可 `skip_preview` 跳过）→ 全量同步 |
 | `调试 · 修复管线测试` | 只跑指定任务的修复管线 |
-| `⚠️ 还原 · 修复文件还原为原路径` | `restore_fixed_files`（改名类走 `rclone moveto`：**必须**用 moveto，move 会把 dst 当目录、建出以目标文件名命名的目录） |
+| `⚠️ 还原 · 修复文件还原为原路径` | `restore_fixed_files`（改名类走 `rclone copyto` 复制回原路径并**保留备份副本**——2026-09-26 起弃用 moveto，副本是短哈希体系下唯一内容载体；也不能用 copy/move：它们会把 dst 当目录、建出以目标文件名命名的目录） |
 | `⚠️ 灾难恢复 · 目标端→源端` | `restore_source_from_target`（非破坏性） |
 | `⚠️ 灾难恢复 · 目标端→源端（删除源端多余文件）` | `rebuild_source_from_target`（**破坏性**） |
 
@@ -379,7 +379,7 @@ workflow 的 `run_mode` 单选互斥：
 |---|---|
 | ① 备份文件（目标端现存形态） | `<dest_path>/<alternative>` |
 | ② marker 记录的原文件 | `<dest_path>/<original>` |
-| ③ 实际执行还原的完整路径 | move 类 = `rclone moveto` 的 dst（= ②）；分卷类 = 本地合卷解压产物 `copyto` 的 dst（= ②）；`alt==orig` 记为 noop（只校验存在，不搬） |
+| ③ 实际执行还原的完整路径 | 改名类 = `rclone copyto` 的 dst（= ②，复制回原路径并保留备份副本）；分卷类 = 本地合卷解压产物 `copyto` 的 dst（= ②，分卷同样保留）；`alt==orig` 记为 noop（只校验存在，不搬） |
 | ④ 源端原路径（灾难恢复口径） | `<source_path>/<original>` |
 
 另核对「备份文件在不在 / 原路径是否已存在」。**两个"在不在"都各走两条判据**：列列举

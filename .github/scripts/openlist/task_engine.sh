@@ -2,7 +2,7 @@
 # ===== OpenList 同步工具 — 任务编排函数 =====
 # 提供 sync_task 用户接口函数，
 # 支持:
-#   --auto-split  — 源端 > 50GB 时按一级子目录自动分批（阈值 SYNC_SPLIT_THRESHOLD_BYTES 可调）
+#   --auto-split  — 源端超过拆分阈值时按一级子目录自动分批（阈值 SYNC_SPLIT_THRESHOLD_BYTES 可调，workflow 现设 20GB）
 #                   注: 这是"任务级分批"，与 file_split.sh 的"文件级分割"（把单个
 #                   大文件切成多段）无关，两者维度不同（任务 vs 文件）。
 #                   SYNC_SPLIT_* 系历史命名，因属用户可配环境变量故保留不改。
@@ -1075,7 +1075,7 @@ _sync_subdirs_parallel_run() {
   return 0
 }
 
-# 自动拆分同步实现：源端 > 50GB 时按一级子目录拆分，最后再完整同步一次
+# 自动拆分同步实现：源端超过拆分阈值（SYNC_SPLIT_THRESHOLD_BYTES）时按一级子目录拆分，最后再完整同步一次
 # 用法: _sync_task_impl <source_path> <dest_path> <task_name> [rclone_extra_args...]
 _sync_task_impl() {
   local source_path="$1"
@@ -1183,7 +1183,7 @@ _sync_task_impl() {
     return "$_rc"
   fi
 
-  # 超过 50GB，需要拆分
+  # 超过拆分阈值，需要拆分
   if [ "$current_depth" -ge "$max_depth" ]; then
     echo "已达最大拆分深度 ${max_depth}，按文件批次拆分 (depth=${current_depth}, size=$(format_bytes_iec "$source_size_bytes"))"
     progress_update "文件批次拆分 · 已达最大深度 ${current_depth}"
@@ -1649,7 +1649,7 @@ sync_task() {
 #       巩固链路从未运行 —— PUT 假成功文件（OpenList 缓存里有、后端没有，
 #       容器重启即消失）每轮重传，预览差值纹丝不动（task0 wopan176Crypt
 #       长期 +225GiB 的根因）。
-# 本函数把巩固单元从"整个任务"缩小到"单个批次"（~50GB）:
+# 本函数把巩固单元从"整个任务"缩小到"单个批次"（单批 ≤ 拆分阈值）:
 #   1. 本批触碰过文件（Copied 声称成功 或 Failed to copy 直接失败——含全批
 #      405: 只看 Copied 会让 405 批次跳过巩固，复核/重试/修复/熔断全饿死，
 #      2026-08-31 用户反馈实录）→ 重启 OpenList 容器，清缓存取后端真值列表
@@ -2025,7 +2025,7 @@ _render_batch_stats_line() {
 }
 
 # 按文件批次拆分同步（用于无子目录的大文件夹）
-# 按 ~50GB 拆分为多个批次，每批用 rclone copy --files-from 同步
+# 按拆分阈值（SYNC_SPLIT_THRESHOLD_BYTES）拆分为多个批次，每批用 rclone copy --files-from 同步
 # 用法: sync_by_file_batches <source_path> <dest_path> <task_name> [rclone_extra_args...]
 sync_by_file_batches() {
   # 本层文件批次路径是否失败（独立标志，见函数尾注释: 不能只写 SYNC_FAILED，
@@ -2138,7 +2138,7 @@ sync_by_file_batches() {
     return 0
   fi
 
-  # 按大小拆分为 ~50GB 的批次
+  # 按大小拆分为不超过拆分阈值的批次
   local batch_num=0
   local batch_size=0
   local batch_file="${batch_dir}/batch_${batch_num}.txt"
@@ -2253,7 +2253,7 @@ sync_by_file_batches() {
           echo "♻️ 批次 $((i+1)): 写探针结论已过期，清缓存后重探（间隔 ${OPENLIST_WRITE_REPROBE_INTERVAL:-1800}s）"
         fi
         # 批次级三层预检熔断: sync_with_logging 的入口预检覆盖不到本循环内
-        # 的 rclone copy --files-from，登录失效后端会把第一个大批次（≤50GB）
+        # 的 rclone copy --files-from，登录失效后端会把第一个大批次（≤ 拆分阈值）
         # 全额烧完才由 _batch_consolidate 行为启发式止损。此处与
         # run_rclone_sync_once 的二次预检同构（刷新驱动 → 两层强校验 → 起
         # 保鲜线程），把拦截前移到每个批次传输之前；含 Crypt 底层派生存储校验
