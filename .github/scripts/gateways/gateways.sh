@@ -60,8 +60,13 @@ unit_name() {
   esac
 }
 
-# systemd --user 单元模板。两份各自内联（与服务耦合的路径/参数差异大，
+# systemd --user 单元模板。三份各自内联（与服务耦合的路径/参数差异大，
 # 抽通用模板反而难读）；写盘走 mktemp + install -m 600，避免 umask 意外放权。
+#
+# 本文件是这三个网关单元的**唯一真源**：每轮 ensure 无条件覆盖写盘，
+# 因此任何手改 ~/.config/systemd/user/*.service 的行为都会被下一轮冲掉，
+# 同理 Dropbox / 运行目录下的静态副本均无权威性（2026-10-04 统一清理）。
+# 要改单元内容，改这里的 heredoc 并 push，不要改现役文件。
 write_unit() {
   local name="$1"
   local unit
@@ -89,6 +94,9 @@ Environment=AI_GATEWAY_API_KEY=${AI_GATEWAY_API_KEY}
 ExecStart=/tmp/local_workbuddy/workbuddy-gateway serve -addr 0.0.0.0 -port 8318 -api-key \${AI_GATEWAY_API_KEY}
 Restart=always
 RestartSec=5
+# 停止超时：默认 90s 不够长连接/子进程排空，会被 systemd 升级 SIGKILL
+# （zcode2api 2026-10-03 实证 stop-sigterm timeout）。三网关统一放宽。
+TimeoutStopSec=180
 StandardOutput=append:/tmp/local_workbuddy/data/logs/serve.log
 StandardError=append:/tmp/local_workbuddy/data/logs/serve.log
 
@@ -115,6 +123,9 @@ Environment=ZCODE_GATEWAY_KEY=${ZCODE_GATEWAY_KEY}
 ExecStart=/tmp/local_zcode2api/.venv/bin/python cli.py serve
 Restart=always
 RestartSec=5
+# 停止超时：captcha 真浏览器子进程 + SSE 长连接排空需要时间，默认 90s
+# 会被 SIGKILL（2026-10-03 重启实证），放宽到 180s 后退出干净。
+TimeoutStopSec=180
 StandardOutput=append:/tmp/local_zcode2api/logs/zcode2api.log
 StandardError=append:/tmp/local_zcode2api/logs/zcode2api.log
 
@@ -148,6 +159,8 @@ EnvironmentFile=/tmp/local_qingyan/env.sh
 ExecStart=/usr/bin/python3 proxy.py
 Restart=always
 RestartSec=5
+# 停止超时：同上，默认 90s 不够排空，统一放宽到 180s。
+TimeoutStopSec=180
 StandardOutput=append:/tmp/local_qingyan/logs/qingyan.log
 StandardError=append:/tmp/local_qingyan/logs/qingyan.log
 
