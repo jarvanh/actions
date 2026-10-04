@@ -60,10 +60,10 @@ unit_name() {
   esac
 }
 
-# systemd --user 单元模板。三份各自内联（与服务耦合的路径/参数差异大，
+# systemd --user 单元模板。四份各自内联（与服务耦合的路径/参数差异大，
 # 抽通用模板反而难读）；写盘走 mktemp + install -m 600，避免 umask 意外放权。
 #
-# 本文件是这三个网关单元的**唯一真源**：每轮 ensure 无条件覆盖写盘，
+# 本文件是这些单元的**唯一真源**：每轮 ensure 无条件覆盖写盘，
 # 因此任何手改 ~/.config/systemd/user/*.service 的行为都会被下一轮冲掉，
 # 同理 Dropbox / 运行目录下的静态副本均无权威性（2026-10-04 统一清理）。
 # 要改单元内容，改这里的 heredoc 并 push，不要改现役文件。
@@ -168,7 +168,33 @@ StandardError=append:/tmp/local_qingyan/logs/qingyan.log
 WantedBy=default.target
 EOF
       ;;
-    *) die "未知网关: $name（可选 workbuddy | zcode2api | qingyan）" ;;
+    workbuddy-cred-sync)
+      # 同步循环依赖 openclaw.yml 生成的 /tmp/workbuddy-cred-sync.sh（rclone 把
+      # Dropbox 凭据拉到运行目录）。脚本缺失时起单元只会空转崩溃循环。
+      [ -s /tmp/workbuddy-cred-sync.sh ] || { rm -f "$tmp"; die "workbuddy-cred-sync: /tmp/workbuddy-cred-sync.sh 缺失"; }
+      cat > "$tmp" <<EOF
+[Unit]
+Description=workbuddy credential sync (Dropbox -> /tmp/local_workbuddy/data, 300s)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=0
+
+[Service]
+Type=simple
+ExecStart=/tmp/workbuddy-cred-sync.sh 300
+Restart=always
+RestartSec=10
+# 停止超时：循环可能正持有 flock / rclone 传输，默认 90s 不够，统一放宽。
+TimeoutStopSec=180
+StandardOutput=append:/tmp/local_workbuddy/data/logs/cred-sync.log
+StandardError=append:/tmp/local_workbuddy/data/logs/cred-sync.log
+
+[Install]
+WantedBy=default.target
+EOF
+      ;;
+    *) die "未知网关: $name（可选 workbuddy | zcode2api | qingyan | workbuddy-cred-sync）" ;;
   esac
   install -m 600 "$tmp" "$UNIT_DIR/$(unit_name "$name")"
   rm -f "$tmp"
@@ -176,7 +202,7 @@ EOF
 
 cmd_ensure() {
   local name="${1:-}"
-  [ -n "$name" ] || die "用法: $0 ensure <workbuddy|zcode2api|qingyan>"
+  [ -n "$name" ] || die "用法: $0 ensure <workbuddy|zcode2api|qingyan|workbuddy-cred-sync>"
   local unit
   unit="$(unit_name "$name")"
 
@@ -202,7 +228,7 @@ cmd_ensure() {
 
 cmd_stop() {
   local name="${1:-}"
-  [ -n "$name" ] || die "用法: $0 stop <workbuddy|zcode2api|qingyan>"
+  [ -n "$name" ] || die "用法: $0 stop <workbuddy|zcode2api|qingyan|workbuddy-cred-sync>"
   local unit
   unit="$(unit_name "$name")"
 
@@ -221,8 +247,8 @@ cmd_stop() {
 
 cmd_status() {
   local only="${1:-}"
-  local names="workbuddy zcode2api qingyan"
-  printf '%-12s %-24s %s\n' "网关" "状态" "单元"
+  local names="workbuddy zcode2api qingyan workbuddy-cred-sync"
+  printf '%-20s %-34s %s\n' "单元" "状态" "服务"
   local n unit st
   for n in $names; do
     [ -n "$only" ] && [ "$n" != "$only" ] && continue
@@ -230,7 +256,7 @@ cmd_status() {
     if systemctl --user is-active --quiet "$unit" 2>/dev/null; then st="✅ 运行"
     elif systemctl --user is-enabled --quiet "$unit" 2>/dev/null; then st="⛔ 已停止"
     else st="— 未安装"; fi
-    printf '%-12s %-24s %s\n' "$n" "$st" "$unit"
+    printf '%-20s %-34s %s\n' "$n" "$st" "$unit"
   done
 }
 
