@@ -2579,6 +2579,9 @@ jobs:
           # 的「已启动 · 无可用账号」调用点），服务本身仍就绪 → 接口行照常展示（第 7 参 1）。
           _title="🟢 trae2api 已就绪"
           _conclusion="已就绪 · 签到工具无输出（详见原始输出）"
+          # 必须先初始化：本 step 顶部是 set -euo pipefail（带 -u），而下面的 else 分支
+          # 不赋值 _raw_out，trae_notify 第 6 参展开它会 unbound variable 直接退出整 step。
+          _raw_out=""
           if [ -s "$CHECKIN_JSONL" ]; then
             # 两行制（排程行+结果行）：按 uid 取末行再分类，避免重复计数；
             # 排程/冷却中的账号计入「待签」，结论里也能看到本轮还剩几个没轮到
@@ -2599,14 +2602,15 @@ jobs:
             if [ -n "$_ckp" ] && kill -0 "$_ckp" 2>/dev/null; then
               _conclusion="${_conclusion} · 错峰进行中"
             fi
-            # 原始输出：全 skipped 轮次（四号均已签、本轮没发真实领取请求）时
-            # checkin 的 stderr 尾行是「checkin done: 0/4 ok」——与结论「已签 4」
-            # 正面冲突，读者会以为签到全挂了。0/N 里的 0 是「本轮真实领取次数」，
-            # 不是失败数（已签账号幂等跳过，不计入分子）。
-            # 口径：无失败时把这句改写成人话；有失败则原样保留（失败细节必须可见）。
+            # 原始输出：全签轮次的 stderr 尾行是「checkin done: 0/N ok」，分子 0 是
+            # 「本轮真实领取次数」（已签账号幂等跳过不计入），不是失败数 —— 与结论的
+            # 「已签 N」正面冲突，读者会以为签到全挂了。
+            # 处理：无失败时滤掉该行。结论行已写明已签数，这是重复信息，没必要换句
+            # 术语再解释一遍；滤完为空则「原始输出」整段跳过（规范 · 空清单整段跳过）。
+            # 有失败时原样保留 —— 失败细节必须可见，不能被这层过滤盖掉。
             _raw_out="$(cat "$CHECKIN_ERR" 2>/dev/null || true)"
-            if [ "${_fail:-0}" -eq 0 ] && printf '%s' "$_raw_out" | grep -qE 'checkin done:[[:space:]]*0/'; then
-              _raw_out="本轮 0 次真实领取（${_ok} 号均已签，幂等跳过）\n$(printf '%s' "$_raw_out" | grep -vE 'checkin done:[[:space:]]*0/')"
+            if [ "${_fail:-0}" -eq 0 ]; then
+              _raw_out="$(printf '%s' "$_raw_out" | grep -vE 'checkin done:[[:space:]]*0/' || true)"
             fi
           else
             _title="⚠️ trae2api 已就绪 · 签到无输出"
