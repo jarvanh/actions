@@ -38,6 +38,9 @@ set -u
 
 RUN_DIR="/tmp/local_qingyan"
 PORT="${QINGYAN_PORT:-8320}"
+# 长输出超时（秒）。⚠️ proxy.py 的两步式写入要跑两轮完整长生成，
+# 默认 300s 第二轮必撞 deadline（实测 900 也不够），1800 才稳。
+UPSTREAM_TIMEOUT="${QINGYAN_UPSTREAM_TIMEOUT:-1800}"
 LOG_DIR="$RUN_DIR/logs"
 LOG="$LOG_DIR/qingyan.log"
 ENV_FILE="$RUN_DIR/env.sh"
@@ -89,6 +92,8 @@ cmd_prepare() {
 PROXY_HOST=0.0.0.0
 PROXY_PORT=${PORT}
 PROXY_API_KEY=${QINGYAN_GATEWAY_KEY}
+# 长输出超时：两步式写入需两轮长生成，默认 300 必撞 deadline，实测 1800 才稳
+QINGYAN_UPSTREAM_TIMEOUT=${UPSTREAM_TIMEOUT}
 # 凭证状态文件：轮换式 refresh 的新票写回这里，随 data/ 与 Dropbox 对齐
 QINGYAN_CRED_FILE=${CRED_FILE}
 # 首轮种子：仅当状态文件里还没有 refresh token 时生效一次（上游轮换式刷新，
