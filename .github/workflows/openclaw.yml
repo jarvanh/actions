@@ -1476,7 +1476,7 @@ jobs:
           # 凭据靠"自动发现当前目录下 workbuddy*.json"入池、状态与 logs/ 也都写同目录，
           # 这些高频小文件读写放本地盘才不会被 FUSE 卡住。数据已在第 0 步从 Dropbox 拉齐，
           # 收尾会回推（见 3b）。
-          # 托管交给 gateways.sh（systemd --user + Restart=always）：窗口期内进程崩溃
+          # 托管交给 services.sh（systemd --user + Restart=always）：窗口期内进程崩溃
           # 由 systemd 秒级拉起，不再依赖下一轮 run。ensure 语义 = 写单元 + 每轮重启，
           # 与本步骤原先的 pkill + nohup 等价；停止必须走 systemctl（见收尾 3b 注释）。
           if ! ( cd "$WB_RUN_DIR" ); then
@@ -1484,7 +1484,7 @@ jobs:
             printf '%s\n' "cd $WB_RUN_DIR failed" > "$WB_LOG"
           else
             mkdir -p "$WB_RUN_DIR/logs"
-            bash "$GITHUB_WORKSPACE/.github/scripts/gateways/gateways.sh" ensure workbuddy || true
+            bash "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" ensure workbuddy || true
           fi
 
           # 健康检查：GET /health 返回任意 HTTP 响应码即视为已监听。
@@ -2162,7 +2162,7 @@ jobs:
       # 容器不纳入 systemd --user（2026-09-25 定）：compose 的
       # restart: unless-stopped 已覆盖崩溃自愈，dockerd 自身重启也会拉回容器，
       # 再包一层 systemd 是重复托管；systemd --user 只管裸进程形态的
-      # workbuddy-gateway / zcode2api（见 gateways.sh）。
+      # workbuddy-gateway / zcode2api（见 services.sh）。
       # 隧道 trae2api（原 trae2api.derrick.eu.org → 127.0.0.1:7864）已于 2026-09-29 撤销：
       # /dropbox/self-hosted/.cloudflared 恢复，由 tunnels.conf 纳管。
       - name: Run trae2api container (TRAE SOLO reverse proxy)
@@ -2631,7 +2631,7 @@ jobs:
       # 必须在 Notify Tailscale SSH entry 之前起来（该步骤会读 AI 网关状态）。
       # 收尾停止见 Stop OpenClaw and Final Archive 的 3c 步（在 workbuddy 的 3b 之后）。
       # quota-board：三网关额度聚合看板（TG 置顶消息原地编辑 + Mini App HTTP :8321）。
-      # unit 真源已统一进 gateways.sh（2026-10-04，与四个网关同口径）：
+      # unit 真源已统一进 services.sh（2026-10-04，与四个网关同口径）：
       # 原先这里从 Dropbox 静态副本 cp unit，与 write_unit 双轨并存、改配置易漏改。
       # 现由 ensure 生成并每轮重启一次；/dropbox 下那份副本已无权威性（不再读取）。
       # 看板本体 board.py 仍在 /dropbox/self-hosted/quota-board/（持久化目录，非 unit）。
@@ -2642,11 +2642,11 @@ jobs:
       - name: Run quota-board (TG 额度看板 + Mini App)
         run: |
           set -euo pipefail
-          if [ -f "$GITHUB_WORKSPACE/.github/scripts/gateways/gateways.sh" ]; then
-            bash "$GITHUB_WORKSPACE/.github/scripts/gateways/gateways.sh" ensure quota-board || true
+          if [ -f "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" ]; then
+            bash "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" ensure quota-board || true
           else
-            # 兜底：gateways.sh 缺失（仓库未 checkout）时退回旧路径，避免看板静默不起
-            echo "⚠️ gateways.sh 缺失，退回 Dropbox 副本安装 unit"
+            # 兜底：services.sh 缺失（仓库未 checkout）时退回旧路径，避免看板静默不起
+            echo "⚠️ services.sh 缺失，退回 Dropbox 副本安装 unit"
             QB_DIR=/dropbox/self-hosted/quota-board
             [ -f "$QB_DIR/quota-board.service" ] || { echo "quota-board unit 缺失，跳过"; exit 0; }
             mkdir -p ~/.config/systemd/user
@@ -2926,11 +2926,11 @@ jobs:
                 Z2A_REASON="依赖安装失败（见 logs/pip.log / logs/npm.log）"
               else
                 echo "Starting zcode2api on ${Z2A_PORT} (systemd --user 托管)..."
-                # 托管交给 gateways.sh（systemd --user + Restart=always）：窗口期内
+                # 托管交给 services.sh（systemd --user + Restart=always）：窗口期内
                 # 进程崩溃由 systemd 秒级拉起，不再依赖下一轮 run。ZCODE_GATEWAY_KEY
                 # 由 step env 注入、单元 Environment 落盘（600），优先级高于 .env。
                 # 停止必须走 systemctl（见收尾 3c 注释），pkill 会被 Restart 抢回来。
-                bash "$GITHUB_WORKSPACE/.github/scripts/gateways/gateways.sh" ensure zcode2api || true
+                bash "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" ensure zcode2api || true
                 Z2A_UP=0
                 for _ in $(seq 1 60); do
                   if z2a_alive; then Z2A_UP=1; break; fi
@@ -3098,9 +3098,9 @@ jobs:
           # 通知真源在 step 顶层 source 一次（勿挪进函数体，理由见 workbuddy 步骤同名注释 / 规范 4.4）
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 
-          DEPLOY="${GITHUB_WORKSPACE}/.github/scripts/gateways/qingyan_deploy.sh"
-          GATEWAYS="${GITHUB_WORKSPACE}/.github/scripts/gateways/gateways.sh"
-          QUOTA="${GITHUB_WORKSPACE}/.github/scripts/gateways/qingyan_quota.sh"
+          DEPLOY="${GITHUB_WORKSPACE}/.github/scripts/services/qingyan_deploy.sh"
+          SERVICES="${GITHUB_WORKSPACE}/.github/scripts/services/services.sh"
+          QUOTA="${GITHUB_WORKSPACE}/.github/scripts/services/qingyan_quota.sh"
           GL_OK=0
           GL_REASON=""
 
@@ -3126,8 +3126,8 @@ jobs:
 
           # 1. 准备运行目录（从 Dropbox 拉代码 + 写 env.sh）
           if bash "$DEPLOY" prepare; then
-            # 2. 托管：systemd --user + Restart=always（窗口期崩溃秒级自愈，见 gateways.sh 文件头）
-            bash "$GATEWAYS" ensure qingyan || true
+            # 2. 托管：systemd --user + Restart=always（窗口期崩溃秒级自愈，见 services.sh 文件头）
+            bash "$SERVICES" ensure qingyan || true
             GL_UP=0
             for _ in $(seq 1 60); do
               if bash "$DEPLOY" status >/dev/null 2>&1; then GL_UP=1; break; fi
@@ -4660,10 +4660,10 @@ jobs:
           #      连坐杀掉，runner 重置后也无人拉起；systemd 自带 Restart=always 自愈。
           #   2) 收尾停止必须用 systemctl stop —— unit 是 Restart=always，pkill 会被
           #      systemd 在 RestartSec=10 秒后抢回来，表现为「停了又活」。
-          # 2026-10-04 unit 真源统一进 gateways.sh：原先这里用 printf 内联写单元，
+          # 2026-10-04 unit 真源统一进 services.sh：原先这里用 printf 内联写单元，
           #   与另外三个网关的 write_unit 双轨并存，改配置极易漏改一处。现与它们
           #   同口径，由 ensure 生成（含 TimeoutStopSec=180）并每轮重启一次。
-          bash "$GITHUB_WORKSPACE/.github/scripts/gateways/gateways.sh" ensure workbuddy-cred-sync || true
+          bash "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" ensure workbuddy-cred-sync || true
 
           # 立即同步执行一次并打印结果：后台循环的 stdout 只进 /tmp/workbuddy-cred-sync.log，
           # 不进 step 日志，而该 log 又只存在于 runner 上 —— 收尾打印只覆盖"跑满一整轮"的场景，
@@ -4793,8 +4793,8 @@ jobs:
           #    pkill 会被 systemd 在 RestartSec=10 秒后抢回来（「停了又活」），
           #    必须走 systemctl stop。旧 pid 文件方式同步退役。
           rm -f /tmp/workbuddy-cred-sync.pid 2>/dev/null || true
-          # 与启动侧同口径：走 gateways.sh stop（unit 真源统一，2026-10-04）
-          bash "$GITHUB_WORKSPACE/.github/scripts/gateways/gateways.sh" stop workbuddy-cred-sync 2>/dev/null \
+          # 与启动侧同口径：走 services.sh stop（unit 真源统一，2026-10-04）
+          bash "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" stop workbuddy-cred-sync 2>/dev/null \
             && echo "workbuddy: cred-sync stopped" \
             || echo "⚠️ workbuddy: cred-sync 停止失败（可能未运行）"
           # 兜底：清理历史遗留、非 systemd 托管的 nohup 实例（ppid=1 的孤儿）。
@@ -4818,7 +4818,7 @@ jobs:
           WB_DIR="/dropbox/self-hosted/workbuddy-gateway"
           WB_RUN_DIR="/tmp/local_workbuddy/data"
           WB_BIN="/tmp/local_workbuddy/workbuddy-gateway"
-          bash "$GITHUB_WORKSPACE/.github/scripts/gateways/gateways.sh" stop workbuddy || true
+          bash "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" stop workbuddy || true
           if systemctl --user is-failed --quiet workbuddy-gateway.service 2>/dev/null; then
             systemctl --user reset-failed workbuddy-gateway.service 2>/dev/null || true
           fi
@@ -4892,7 +4892,7 @@ jobs:
           # 服务已 systemd --user 化，必须走 systemctl stop（pkill 会被
           # Restart=always 拉回，见 3b 注释）。pkill 兜底只针对过渡期残留的
           # 非托管实例；先 SIGTERM 优雅退出（uvicorn 收尾 in-flight 请求）。
-          bash "$GITHUB_WORKSPACE/.github/scripts/gateways/gateways.sh" stop zcode2api || true
+          bash "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" stop zcode2api || true
           if systemctl --user is-failed --quiet zcode2api.service 2>/dev/null; then
             systemctl --user reset-failed zcode2api.service 2>/dev/null || true
           fi
@@ -4926,7 +4926,7 @@ jobs:
           # 3d. qingyan-proxy：同为宿主进程（非容器），随 job 结束不会自动退出，
           # 必须显式停，否则残留进程会一直持有 8320 并继续消耗清言积分。
           echo "3d. Stopping qingyan-proxy..."
-          bash "$GITHUB_WORKSPACE/.github/scripts/gateways/gateways.sh" stop qingyan || true
+          bash "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" stop qingyan || true
           if systemctl --user is-failed --quiet qingyan.service 2>/dev/null; then
             systemctl --user reset-failed qingyan.service 2>/dev/null || true
           fi
@@ -4937,7 +4937,7 @@ jobs:
           # 进程已停 → 回推持久数据到 Dropbox（对齐 workbuddy 收尾的 3b-1）。
           # 只 copy 不 sync：远端历史内容不该被本轮删掉。失败不阻塞收尾通知。
           echo "3d-1. Syncing qingyan-proxy data back to Dropbox..."
-          bash "$GITHUB_WORKSPACE/.github/scripts/gateways/qingyan_deploy.sh" push 2>/dev/null || \
+          bash "$GITHUB_WORKSPACE/.github/scripts/services/qingyan_deploy.sh" push 2>/dev/null || \
             echo "⚠️ qingyan-proxy 数据回推失败（今日累计可能落后一轮）"
 
           GL_STILL_RUNNING=0

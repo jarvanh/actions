@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # qingyan-proxy 部署脚本（清言 chatglm.cn 反代 → OpenAI 兼容 API，端口 8320）
 #
-# 位置：.github/scripts/gateways/qingyan_deploy.sh（随仓库 checkout 分发）
-# 调用：openclaw.yml 的 "Run qingyan-proxy" 步骤；托管由 gateways.sh 负责
+# 位置：.github/scripts/services/qingyan_deploy.sh（随仓库 checkout 分发）
+# 调用：openclaw.yml 的 "Run qingyan-proxy" 步骤；托管由 services.sh 负责
 #
 # 为什么替换 glm2api（2026-09-30）：qingyan-proxy 是自研单文件零依赖反代
 # （函数调用桥 + 两步式写入协议 + 推理档位），已在本机 ZCode/TraeWork/openclaw
@@ -62,7 +62,7 @@ cmd_prepare() {
   [ -n "${QINGYAN_REFRESH_TOKEN:-}" ] || die "未注入 QINGYAN_REFRESH_TOKEN 环境变量（仓库 Secret GLM_REFRESH_TOKEN），拒绝部署无凭据服务"
   # 网关鉴权：本网关专属 key（与 8318/8319/旧 8320 各自独立的口径一致，不共用
   # AI_GATEWAY_API_KEY）。监听 0.0.0.0，缺 key 等于把清言账号裸奔在同机所有
-  # 网卡上，不如显式失败（与 gateways.sh 的密钥缺失同口径）。
+  # 网卡上，不如显式失败（与 services.sh 的密钥缺失同口径）。
   [ -n "${QINGYAN_GATEWAY_KEY:-}" ] || die "未注入 QINGYAN_GATEWAY_KEY 环境变量（仓库 Secret GLM2API_GATEWAY_KEY），拒绝起无鉴权服务"
 
   mkdir -p "$RUN_DIR" "$LOG_DIR" "$DATA_DIR" || die "无法创建运行目录 $RUN_DIR"
