@@ -2586,11 +2586,27 @@ jobs:
             _ok=$(jq -sr 'group_by(.uid) | map(last) | [.[] | select((.err // "") == "" and ((.claimed // false) == true or (.checked_in // false) == true or (.skipped // "") == "already"))] | length' "$CHECKIN_JSONL")
             _wait=$(jq -sr 'group_by(.uid) | map(last) | [.[] | select((.err // "") == "" and (.claimed // false) != true and (.checked_in // false) != true and ((.skipped // "") == "scheduled" or (.skipped // "") == "cooldown"))] | length' "$CHECKIN_JSONL")
             _fail=$(jq -sr 'group_by(.uid) | map(last) | [.[] | select((.err // "") != "")] | length' "$CHECKIN_JSONL")
-            _conclusion="已就绪 · 已签 ${_ok} · 待签 ${_wait} · 失败 ${_fail}（共 ${_total}）"
+            # 计数只列非零项（telegram-notify 规范 2.5 / 5.4）：
+            # 「待签 0 · 失败 0」这类零计数与 🟢 已就绪的标题自相矛盾，且把常态噪音
+            # 顶到结论行最显眼的位置。共 N 是分母、始终保留（读者需要知道池子多大）。
+            _parts="已就绪"
+            [ "${_ok:-0}" -gt 0 ] && _parts="${_parts} · 已签 ${_ok}"
+            [ "${_wait:-0}" -gt 0 ] && _parts="${_parts} · 待签 ${_wait}"
+            [ "${_fail:-0}" -gt 0 ] && _parts="${_parts} · 失败 ${_fail}"
+            _conclusion="${_parts}（共 ${_total}）"
             # 错峰后台进行中 → 结论追加标记（剩余账号尚未落盘）
             _ckp="$(cat /tmp/trae2api-checkin.pid 2>/dev/null || true)"
             if [ -n "$_ckp" ] && kill -0 "$_ckp" 2>/dev/null; then
               _conclusion="${_conclusion} · 错峰进行中"
+            fi
+            # 原始输出：全 skipped 轮次（四号均已签、本轮没发真实领取请求）时
+            # checkin 的 stderr 尾行是「checkin done: 0/4 ok」——与结论「已签 4」
+            # 正面冲突，读者会以为签到全挂了。0/N 里的 0 是「本轮真实领取次数」，
+            # 不是失败数（已签账号幂等跳过，不计入分子）。
+            # 口径：无失败时把这句改写成人话；有失败则原样保留（失败细节必须可见）。
+            _raw_out="$(cat "$CHECKIN_ERR" 2>/dev/null || true)"
+            if [ "${_fail:-0}" -eq 0 ] && printf '%s' "$_raw_out" | grep -qE 'checkin done:[[:space:]]*0/'; then
+              _raw_out="本轮 0 次真实领取（${_ok} 号均已签，幂等跳过）\n$(printf '%s' "$_raw_out" | grep -vE 'checkin done:[[:space:]]*0/')"
             fi
           else
             _title="⚠️ trae2api 已就绪 · 签到无输出"
@@ -2598,7 +2614,7 @@ jobs:
           trae_notify "$_title" \
             "$_conclusion" \
             "$TRAE_VER" "$TRAE_UPDATE" "" \
-            "$(cat "$CHECKIN_ERR" 2>/dev/null || true)" 1
+            "${_raw_out}" 1
 
       # zcode2api：GLM 反代网关（Anthropic + OpenAI 双协议，端口 8319）。
       # 代码取 jarvanh/zcode2api fork（在 dengyie 上游之上补了 ZCODE_GATEWAY_KEY
