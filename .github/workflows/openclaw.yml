@@ -1903,7 +1903,19 @@ jobs:
             # 故全局取最后一次，不能被轮次窗口切掉（首版试跑被切掉 → 取空）。
             WB_CHECKIN_NEXT="$(grep -a "下一次定时签到时间=" "$WB_LOG" 2>/dev/null \
               | tail -n 1 | sed 's/.*下一次定时签到时间=//' || true)"
-            _ck_start="$(grep -an "开始每日签到，账号总数=" "$WB_LOG" 2>/dev/null | tail -n 1 | cut -d: -f1 || true)"
+            # 轮次锚点（2026-10-05 修）：取**最近一轮已有完成行的轮次**的起点行，
+            # 而不是无脑取最后一个起点行。原因：通知段在签到协程进行中也会被触发，
+            # 进行中的轮次大量账号还没写完成行 —— 首版只认最后起点行时，进行中轮次
+            # 被当成完整结果：完成行没写的账号全落「未取到结果」/缺行，再被汇总层
+            # 反推成「跳过 N」（实测：镜像轮恰逢 22:50 签到轮进行中，国际站 5 个号
+            # 被截成 2 行：已签 1 + 未开启 1 + 跳过 4）。取最近**已完成**轮 = 永远
+            # 展示完整一轮；进行中的轮次等它写完完成行后自然接管。
+            _ck_start="$(grep -an "开始每日签到，账号总数=\|本轮签到完成" "$WB_LOG" 2>/dev/null \
+              | awk -F: '
+                  /本轮签到完成/ { if (laststart != "") done_start = laststart; next }
+                  { laststart = $1 }
+                  END { if (done_start != "") print done_start; else if (laststart != "") print laststart }' \
+              || true)"
             if [ -n "$_ck_start" ]; then
               WB_CHECKIN="$(tail -n +"$_ck_start" "$WB_LOG" 2>/dev/null \
                 | grep -a '\[Checkin\]' \
@@ -2050,6 +2062,13 @@ jobs:
               if [ -n "${_CK_ACT[$_mf]:-}" ]; then
                 if printf '%s' "$_mr" | grep -q '失败'; then
                   _mres="$_mr"
+                elif [ "$_mr" = "未取到结果" ]; then
+                  # 采集层没拿到结果（结果列缺省值）：说明采集中断/缺行，不是「没签到」。
+                  # 不能被下面 active=false 分支降级成「活动未开启」—— 那是把
+                  # 「我们不知道」伪装成确定结论，且积分列全 0（实测 2026-10-05：
+                  # workbuddy-18 被降级后还带出了「可得 +0」假积分）。
+                  # 保留缺省原样如实展示（下轮日志写全自然恢复），汇总层只计「未采集」。
+                  _mres="$_mr"
                 elif printf '%s' "$_mr" | grep -q '活跃 ✓'; then
                   # 国际站（2026-10-04 补）：ACP 会话跑完即签到成功。积分活动 active=false
                   # 只表示「这个站没有积分可领」，**不代表签到没做** —— 不能被下面的
@@ -2077,6 +2096,7 @@ jobs:
               _n_closed=0
               _n_open=0
               _n_fail=0
+              _n_unk=0
               _sum_today=0
               while IFS="$(printf '\t')" read -r _sf _ss _sr _sc _st; do
                 if [ -z "$_sf" ]; then continue; fi
@@ -2086,6 +2106,7 @@ jobs:
                   *"活动未开启"*) _n_closed=$((_n_closed + 1)) ;;
                   *"未签"*) _n_open=$((_n_open + 1)) ;;
                   *"失败"*) _n_fail=$((_n_fail + 1)) ;;
+                  *"未取到结果"*) _n_unk=$((_n_unk + 1)) ;;
                 esac
               done <<< "$WB_CHECKIN"
               for _kf in "${!_CK_ACT[@]}"; do
@@ -2104,6 +2125,7 @@ jobs:
               if [ "$_n_closed" -gt 0 ]; then _cksum="${_cksum} · 未开启 ${_n_closed}"; fi
               if [ "$_n_open" -gt 0 ]; then _cksum="${_cksum} · 未签 ${_n_open}"; fi
               if [ "$_n_fail" -gt 0 ]; then _cksum="${_cksum} · 失败 ${_n_fail}"; fi
+              if [ "$_n_unk" -gt 0 ]; then _cksum="${_cksum} · 未采集 ${_n_unk}"; fi
               if [ "$_n_skip" -gt 0 ]; then _cksum="${_cksum} · 跳过 ${_n_skip}"; fi
               if [ "$_sum_today" -gt 0 ]; then _cksum="${_cksum} · 今日合计 +${_sum_today}"; fi
               WB_CHECKIN_SUMMARY="$_cksum"
