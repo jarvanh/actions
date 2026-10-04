@@ -2295,6 +2295,9 @@ jobs:
               # 四行「连败 0」纯属噪音。
               # 数据源：checkin-state.json（连败/上次成功）+ state.json（自愈换代/退避）。
               # 换代 gen>0 是 9074 自愈动过手的证据（不是故障），故单列且不加 ⚠️。
+              # 2026-10-04 主人：裸写「自愈换代 gen 1」外人读不懂 → 条目改白话
+              # 「曾触发风控·已自动换代恢复（历史标记）」，标题改「N 个账号有备注」
+              # （N 是账号数不是失败数，此前被误读为「1 个失败」）。
               local _ck_state _st_state _hrows _hu _hfc _hlcd _hgen _hrc _hnick _hinfo
               _ck_state="${TRAE_DATA}/data/checkin-state.json"
               _st_state="${TRAE_DATA}/data/state.json"
@@ -2312,15 +2315,15 @@ jobs:
                   _hnick=$(jq -r --arg uid "$_hu" '[.[] | select(.uid == $uid) | .nickname] | last // ""' "${CHECKIN_JSONL:-/dev/null}" 2>/dev/null || true)
                   [ -n "$_hnick" ] || _hnick="$_hu"
                   _hinfo="上次成功 ${_hlcd}"
-                  [ "${_hfc:-0}" -gt 0 ] && _hinfo="${_hinfo} · ⚠️ 连败 ${_hfc}"
-                  [ "${_hgen:-0}" -gt 0 ] && _hinfo="${_hinfo} · 自愈换代 gen ${_hgen}"
-                  [ "${_hrc:-0}" -gt 0 ] && _hinfo="${_hinfo} · 退避 ${_hrc}"
+                  [ "${_hfc:-0}" -gt 0 ] && _hinfo="${_hinfo} · ⚠️ 连续失败 ${_hfc} 次"
+                  [ "${_hgen:-0}" -gt 0 ] && _hinfo="${_hinfo} · 曾触发风控·已自动换代恢复（历史标记）"
+                  [ "${_hrc:-0}" -gt 0 ] && _hinfo="${_hinfo} · ⏳ 退避重试中（已退 ${_hrc} 次）"
                   tg_add_entry _hrows "${_hnick} · ${_hinfo}"
                   _hn=$((_hn + 1))
                 done <<< "$(jq -r 'keys[]' "$_ck_state" 2>/dev/null)"
               fi
               if [ "$_hn" -gt 0 ]; then
-                tg_add_section _msg "🩺 签到健康 · ${_hn}"
+                tg_add_section _msg "🩺 签到健康 · ${_hn} 个账号有备注"
                 tg_add_block _msg "$(tree_lines "${_hrows%$'\n'}")"
                 tg_append _msg $'\n'
               fi
