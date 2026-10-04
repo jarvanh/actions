@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# 宿主进程形态 AI 网关的 systemd --user 管理器（workbuddy-gateway / zcode2api / qingyan）
+# 宿主进程形态 AI 网关与看板服务的 systemd --user 管理器
+# （workbuddy-gateway / zcode2api / qingyan / workbuddy-cred-sync / quota-board）
 #
 # 位置：.github/scripts/gateways/gateways.sh（随仓库 checkout 分发）
 # 调用：openclaw.yml 的两个网关启动步骤（ensure）与收尾停止步骤（stop）
@@ -14,10 +15,10 @@
 #   Restart=always 把「崩溃→自愈」收敛到秒级；runner 的 user manager 常驻
 #   （openclaw-gateway.service 同款，Linger=yes）。
 #
-#   bash "$GITHUB_WORKSPACE/.github/scripts/gateways/gateways.sh" ensure <workbuddy|zcode2api|qingyan>
+#   bash "$GITHUB_WORKSPACE/.github/scripts/gateways/gateways.sh" ensure <workbuddy|zcode2api|qingyan|quota-board>
 #
 # 用法：
-#   gateways.sh ensure <workbuddy|zcode2api|qingyan>  # 写单元(幂等)+reload+重启
+#   gateways.sh ensure <workbuddy|zcode2api|qingyan|quota-board>  # 写单元(幂等)+reload+重启
 #   gateways.sh stop <name>                            # 收尾停止（等退出，不 pkill）
 #   gateways.sh status [name]                          # 状态总览
 #
@@ -33,6 +34,8 @@
 #   workbuddy  /tmp/local_workbuddy/{workbuddy-gateway,data/}（含 logs/ 目录）
 #   zcode2api  /tmp/local_zcode2api/{.venv,cli.py,.env,logs/}
 #   qingyan    /tmp/local_qingyan/{proxy.py,env.sh,logs/}（单文件零依赖，无需 venv）
+#   quota-board /dropbox/self-hosted/quota-board/board.py + ~/.openclaw/.env
+#              （看板本体与凭据都在持久化目录，运行目录无需准备）
 #
 # 为什么 qingyan 取代了 glm2api（2026-09-30）：qingyan-proxy 是自研单文件反代，
 # 已在本机端到端验证，glm2api 退役；部署脚本同步换成 qingyan_deploy.sh，
@@ -60,7 +63,7 @@ unit_name() {
   esac
 }
 
-# systemd --user 单元模板。四份各自内联（与服务耦合的路径/参数差异大，
+# systemd --user 单元模板。五份各自内联（与服务耦合的路径/参数差异大，
 # 抽通用模板反而难读）；写盘走 mktemp + install -m 600，避免 umask 意外放权。
 #
 # 本文件是这些单元的**唯一真源**：每轮 ensure 无条件覆盖写盘，
@@ -194,7 +197,39 @@ StandardError=append:/tmp/local_workbuddy/data/logs/cred-sync.log
 WantedBy=default.target
 EOF
       ;;
-    *) die "未知网关: $name（可选 workbuddy | zcode2api | qingyan | workbuddy-cred-sync）" ;;
+    quota-board)
+      # 看板不是网关，但同为宿主常驻进程，同样需要 Restart=always 自愈。
+      # 与四个网关的差异：本体（board.py）和凭据都在持久化目录
+      # （/dropbox/self-hosted/quota-board/ + ~/.openclaw/.env），
+      # 运行目录无需准备，只需校验两份持久化文件在位。
+      # 注意：fuse 挂载上脚本不可直接执行（bad interpreter），故用解释器显式调用。
+      [ -s /dropbox/self-hosted/quota-board/board.py ] || { rm -f "$tmp"; die "quota-board: board.py 缺失"; }
+      [ -s "${HOME}/.openclaw/.env" ] || { rm -f "$tmp"; die "quota-board: ~/.openclaw/.env 缺失（TG token / TRAE2API_KEY 依赖）"; }
+      cat > "$tmp" <<EOF
+[Unit]
+Description=quota-board (workbuddy/trae/zcode 额度聚合 + TG 看板, 8321)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=0
+
+[Service]
+Type=simple
+# 复用全局敏感变量：TELEGRAM_BOT_TOKEN_*、TELEGRAM_CHAT_ID、TRAE2API_KEY
+EnvironmentFile=%h/.openclaw/.env
+ExecStart=/usr/bin/python3 /dropbox/self-hosted/quota-board/board.py
+Restart=always
+RestartSec=5
+# 停止超时：看板每轮采集含 HTTP 请求与 sqlite 只读查询，统一放宽（同三网关）
+TimeoutStopSec=180
+StandardOutput=append:/dropbox/self-hosted/quota-board/board.log
+StandardError=append:/dropbox/self-hosted/quota-board/board.log
+
+[Install]
+WantedBy=default.target
+EOF
+      ;;
+    *) die "未知服务: $name（可选 workbuddy | zcode2api | qingyan | workbuddy-cred-sync | quota-board）" ;;
   esac
   install -m 600 "$tmp" "$UNIT_DIR/$(unit_name "$name")"
   rm -f "$tmp"
@@ -202,7 +237,7 @@ EOF
 
 cmd_ensure() {
   local name="${1:-}"
-  [ -n "$name" ] || die "用法: $0 ensure <workbuddy|zcode2api|qingyan|workbuddy-cred-sync>"
+  [ -n "$name" ] || die "用法: $0 ensure <workbuddy|zcode2api|qingyan|workbuddy-cred-sync|quota-board>"
   local unit
   unit="$(unit_name "$name")"
 
@@ -228,7 +263,7 @@ cmd_ensure() {
 
 cmd_stop() {
   local name="${1:-}"
-  [ -n "$name" ] || die "用法: $0 stop <workbuddy|zcode2api|qingyan|workbuddy-cred-sync>"
+  [ -n "$name" ] || die "用法: $0 stop <workbuddy|zcode2api|qingyan|workbuddy-cred-sync|quota-board>"
   local unit
   unit="$(unit_name "$name")"
 
@@ -247,7 +282,7 @@ cmd_stop() {
 
 cmd_status() {
   local only="${1:-}"
-  local names="workbuddy zcode2api qingyan workbuddy-cred-sync"
+  local names="workbuddy zcode2api qingyan workbuddy-cred-sync quota-board"
   printf '%-20s %-34s %s\n' "单元" "状态" "服务"
   local n unit st
   for n in $names; do
