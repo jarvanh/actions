@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # qingyan-proxy 积分采集（供 Telegram 通知的「💳 积分」分节消费）
 #
-# 位置：.github/scripts/gateways/qingyan_quota.sh（随仓库 checkout 分发）
+# 位置：.github/scripts/services/qingyan_quota.sh（随仓库 checkout 分发）
 # 调用：openclaw.yml 的 qingyan-proxy 步骤（采集）与收尾步骤（落盘）
 #
 # 为什么单独成脚本：通知里要显示「余额 + 本轮消耗 + 今日累计消耗」，后者必须跨

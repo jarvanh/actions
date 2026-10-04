@@ -2,7 +2,7 @@
 # 宿主进程形态 AI 网关与看板服务的 systemd --user 管理器
 # （workbuddy-gateway / zcode2api / qingyan / workbuddy-cred-sync / quota-board）
 #
-# 位置：.github/scripts/gateways/gateways.sh（随仓库 checkout 分发）
+# 位置：.github/scripts/services/services.sh（随仓库 checkout 分发）
 # 调用：openclaw.yml 的两个网关启动步骤（ensure）与收尾停止步骤（stop）
 #
 # 为什么不含 trae2api：它是 docker 容器，compose 的 restart: unless-stopped
@@ -15,12 +15,12 @@
 #   Restart=always 把「崩溃→自愈」收敛到秒级；runner 的 user manager 常驻
 #   （openclaw-gateway.service 同款，Linger=yes）。
 #
-#   bash "$GITHUB_WORKSPACE/.github/scripts/gateways/gateways.sh" ensure <workbuddy|zcode2api|qingyan|quota-board>
+#   bash "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" ensure <workbuddy|zcode2api|qingyan|quota-board>
 #
 # 用法：
-#   gateways.sh ensure <workbuddy|zcode2api|qingyan|quota-board>  # 写单元(幂等)+reload+重启
-#   gateways.sh stop <name>                            # 收尾停止（等退出，不 pkill）
-#   gateways.sh status [name]                          # 状态总览
+#   services.sh ensure <workbuddy|zcode2api|qingyan|quota-board>  # 写单元(幂等)+reload+重启
+#   services.sh stop <name>                            # 收尾停止（等退出，不 pkill）
+#   services.sh status [name]                          # 状态总览
 #
 # ensure 语义是「每轮重启一次」而不是「已运行则跳过」：与原 nohup 方案每轮
 # pkill + 重启完全一致，重启点就是每轮 run 的起点。窗口期内的崩溃自愈由
@@ -46,13 +46,13 @@ UNIT_DIR="${HOME}/.config/systemd/user"
 LOG_DIR="${HOME}/.openclaw/logs"
 
 # 单实例锁，避免并发调用打架（与 tunnels.sh 同款）
-LOCK="/tmp/.gateways-$(id -u).lock"
+LOCK="/tmp/.services-$(id -u).lock"
 exec 9>"$LOCK" 2>/dev/null || true
-flock -n 9 2>/dev/null || { echo "[gateways] 另一个实例正在运行，跳过"; exit 0; }
+flock -n 9 2>/dev/null || { echo "[services] 另一个实例正在运行，跳过"; exit 0; }
 
 mkdir -p "$UNIT_DIR" "$LOG_DIR" 2>/dev/null || true
 
-log() { printf '[gateways] %s\n' "$*"; }
+log() { printf '[services] %s\n' "$*"; }
 die() { log "❌ $*"; exit 1; }
 
 # 单元名与服务名解耦：workbuddy 用完整语义的单元名，避免歧义
