@@ -4629,45 +4629,12 @@ jobs:
           # 2026-09-29 改 systemd --user 托管单入口（原为 nohup 起 + 写 pid 文件）：
           #   1) 本机约定「长驻服务一律 systemd 托管」：nohup 起的进程会被 exec 会话清理
           #      连坐杀掉，runner 重置后也无人拉起；systemd 自带 Restart=always 自愈。
-          #   2) ~/.config/systemd/user 不在持久化白名单，重置即丢，故 unit 每轮重写
-          #      （与 gateways.sh 的 write_unit 同口径，写盘走 install -m 600）。
-          #   3) 收尾停止必须用 systemctl stop —— unit 是 Restart=always，pkill 会被
+          #   2) 收尾停止必须用 systemctl stop —— unit 是 Restart=always，pkill 会被
           #      systemd 在 RestartSec=10 秒后抢回来，表现为「停了又活」。
-          #   4) unit 内容与 setup-env 历史版本一致（cmp 相同即跳过重写），因此不会
-          #      对已在跑的实例造成无谓重启。
-          WB_SYNC_UNIT="$HOME/.config/systemd/user/workbuddy-cred-sync.service"
-          # printf 逐行写而非 heredoc：YAML run 块有固定缩进，heredoc 会把缩进带进 unit
-          printf '%s\n' \
-            '[Unit]' \
-            'Description=workbuddy credential sync (Dropbox -> /tmp/local_workbuddy/data, 300s)' \
-            'After=network-online.target' \
-            'Wants=network-online.target' \
-            'StartLimitIntervalSec=300' \
-            'StartLimitBurst=0' \
-            '' \
-            '[Service]' \
-            'Type=simple' \
-            'ExecStart=/tmp/workbuddy-cred-sync.sh 300' \
-            'Restart=always' \
-            'RestartSec=10' \
-            'StandardOutput=append:/tmp/local_workbuddy/data/logs/cred-sync.log' \
-            'StandardError=append:/tmp/local_workbuddy/data/logs/cred-sync.log' \
-            '' \
-            '[Install]' \
-            'WantedBy=default.target' \
-            > /tmp/.wb-cred-sync.unit.$$ 2>/dev/null || true
-          if [ -s /tmp/.wb-cred-sync.unit.$$ ]; then
-            if ! cmp -s /tmp/.wb-cred-sync.unit.$$ "$WB_SYNC_UNIT" 2>/dev/null; then
-              install -m 600 /tmp/.wb-cred-sync.unit.$$ "$WB_SYNC_UNIT" 2>/dev/null \
-                && echo "workbuddy: cred-sync unit written" \
-                || echo "⚠️ workbuddy: cred-sync unit 写入失败"
-            fi
-          fi
-          rm -f /tmp/.wb-cred-sync.unit.$$ 2>/dev/null || true
-          systemctl --user daemon-reload 2>/dev/null || true
-          systemctl --user enable --now workbuddy-cred-sync.service 2>/dev/null \
-            && echo "workbuddy: cred-sync enabled via systemd" \
-            || echo "⚠️ workbuddy: cred-sync systemd 启用失败（凭据可能不同步）"
+          # 2026-10-04 unit 真源统一进 gateways.sh：原先这里用 printf 内联写单元，
+          #   与另外三个网关的 write_unit 双轨并存，改配置极易漏改一处。现与它们
+          #   同口径，由 ensure 生成（含 TimeoutStopSec=180）并每轮重启一次。
+          bash "$GITHUB_WORKSPACE/.github/scripts/gateways/gateways.sh" ensure workbuddy-cred-sync || true
 
           # 立即同步执行一次并打印结果：后台循环的 stdout 只进 /tmp/workbuddy-cred-sync.log，
           # 不进 step 日志，而该 log 又只存在于 runner 上 —— 收尾打印只覆盖"跑满一整轮"的场景，
@@ -4797,7 +4764,8 @@ jobs:
           #    pkill 会被 systemd 在 RestartSec=10 秒后抢回来（「停了又活」），
           #    必须走 systemctl stop。旧 pid 文件方式同步退役。
           rm -f /tmp/workbuddy-cred-sync.pid 2>/dev/null || true
-          systemctl --user stop workbuddy-cred-sync.service 2>/dev/null \
+          # 与启动侧同口径：走 gateways.sh stop（unit 真源统一，2026-10-04）
+          bash "$GITHUB_WORKSPACE/.github/scripts/gateways/gateways.sh" stop workbuddy-cred-sync 2>/dev/null \
             && echo "workbuddy: cred-sync stopped" \
             || echo "⚠️ workbuddy: cred-sync 停止失败（可能未运行）"
           # 兜底：清理历史遗留、非 systemd 托管的 nohup 实例（ppid=1 的孤儿）。
