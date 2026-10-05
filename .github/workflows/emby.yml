@@ -249,6 +249,8 @@ jobs:
           # 收尾区接线（规范 · 收尾区）：本 step 有 OpenList 凭据通知，需要运行日志链接
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          # 真源只在 step 顶层 source 一次（规范 4.4）——此前在 main() 函数体内 source
+          source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
           main() {
             sudo mkdir -p /opt/openlist
             sudo chown -R runner:runner /opt/openlist /opt/logs
@@ -378,7 +380,6 @@ jobs:
             # 重要档凭据（OpenList 凭据通知 tier=alert 直达 @SaberFuckBot，无回落）
             export TELEGRAM_BOT_TOKEN_ALERT="${{ secrets.TELEGRAM_BOT_TOKEN_ALERT }}"
             export TELEGRAM_CHAT_ID_ALERT="${{ secrets.TELEGRAM_CHAT_ID_ALERT }}"
-            source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
             if [ -s /tmp/openlist-pw-note ]; then
               PW_KIND=$(cut -d: -f1 /tmp/openlist-pw-note)
               PW_VAL=$(cut -d: -f2- /tmp/openlist-pw-note)
