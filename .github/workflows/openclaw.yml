@@ -83,18 +83,28 @@ jobs:
           #   --poll-interval 0  run 期间远端目录不会自己变，关轮询省 API 配额
           #   --buffer-size 16M  原 100M：每个打开的文件常驻一份，小文件场景用不到
           #   删除 --vfs-read-chunk-size-limit 10G：会让单个 Range 请求一路翻倍到 10GB
-          nohup rclone mount dropbox: /dropbox \
-            --config /home/runner/.config/rclone/rclone.conf \
-            --cache-dir /mnt/vfs/dropbox \
-            --allow-other --umask 000 --no-gzip-encoding \
-            --attr-timeout 1m \
-            --dir-cache-time 72h --poll-interval 0 \
-            --vfs-cache-mode full \
-            --vfs-cache-max-size 2G --vfs-cache-max-age 1h \
-            --vfs-cache-min-free-space 2G \
-            --vfs-cache-poll-interval 30s \
-            --buffer-size 16M \
-            --log-file /opt/logs/rclone-dropbox.log --log-level INFO &
+          # 长驻服务一律 systemd 托管（2026-10-05 主人拍板）：
+          #   挂载进程崩溃或被 signal sweep 后由 Restart=always 秒级自愈，
+          #   不再只能等下一轮 run（可达数小时）。管理器缺失时退回原 nohup。
+          #   注意：ensure 检测到已有裸跑实例会**跳过**（不打断本轮挂载），
+          #   单元在新 VM 上自动接管；回退分支因此仍必须保留。
+          if [ -f "$GITHUB_WORKSPACE/.github/scripts/daemons/daemons.sh" ]; then
+            bash "$GITHUB_WORKSPACE/.github/scripts/daemons/daemons.sh" ensure rclone-dropbox || true
+          fi
+          if ! mount | grep -q " on /dropbox "; then
+            nohup rclone mount dropbox: /dropbox \
+              --config /home/runner/.config/rclone/rclone.conf \
+              --cache-dir /mnt/vfs/dropbox \
+              --allow-other --umask 000 --no-gzip-encoding \
+              --attr-timeout 1m \
+              --dir-cache-time 72h --poll-interval 0 \
+              --vfs-cache-mode full \
+              --vfs-cache-max-size 2G --vfs-cache-max-age 1h \
+              --vfs-cache-min-free-space 2G \
+              --vfs-cache-poll-interval 30s \
+              --buffer-size 16M \
+              --log-file /opt/logs/rclone-dropbox.log --log-level INFO &
+          fi
 
           echo "Waiting for mount..."
           for i in {1..30}; do
@@ -455,6 +465,31 @@ jobs:
               *) echo "⚠️ 删除 ${_id} 失败 (HTTP ${_code})：凭据无 devices 写权限或该节点不可管理" ;;
             esac
           done
+      - name: Tailscale daemon 纳管 (systemd)
+        # 长驻服务一律 systemd 托管（2026-10-05 主人拍板）。必须在
+        # tailscale/github-action **之前**执行，原因见下方接管原理。
+        run: |
+          set -uo pipefail
+          if [ -f "$GITHUB_WORKSPACE/.github/scripts/daemons/daemons.sh" ]; then
+            bash "$GITHUB_WORKSPACE/.github/scripts/daemons/daemons.sh" ensure tailscaled || true
+          else
+            echo "⚠️ daemons.sh 缺失，沿用 action 自带的 --state=mem: 裸跑"
+          fi
+          # 接管原理（2026-10-05 实测）：
+          #   action 内部无条件 spawn `sudo -E tailscaled --state=mem:`。若本单元
+          #   已占据 TUN，action 那个实例会因 "TUN device tailscale0 is busy" 立即
+          #   退出；但 action 随后 waitForDaemonReady() 轮询的是**默认 socket**
+          #   （即本单元），拿到响应即判定就绪，接着 connectToTailscale 的
+          #   `tailscale up` 同样打在本单元上 —— 于是登录态落到托管的 daemon。
+          #   第二个实例的退出码被 action 忽略（detached + unref），不会 fail 步骤。
+          #
+          # 为什么必须 --statedir 而非 --state=mem:（实测踩坑）
+          #   mem: 把登录态只放内存，进程一死认证即丢，Restart=always 拉起来的
+          #   只是个 Logged out 空壳 —— 托管形同虚设。statedir 落盘后崩溃重启
+          #   自动恢复登录，自愈才是真的自愈。
+          #
+          # 过渡期：若本机已有 action 起的 mem: 裸跑实例，ensure 会检测并跳过
+          #   （不抢占 TUN、不打断当前 SSH），单元在新 VM 上自动接管。
       - name: Setup Tailscale (SSH 调试入口)
         id: ts
         if: ${{ always() && env.TS_OAUTH_CLIENT_ID != '' && env.TS_OAUTH_CLIENT_SECRET != '' }}
@@ -463,6 +498,9 @@ jobs:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
           tags: tag:ci
+          # 与 systemd 单元用同一 statedir：即便本轮是 action 的实例抢到了 TUN，
+          # 登录态也落盘，下一轮单元接管时无需重新认证。
+          statedir: /var/lib/tailscale
           # 注册时就固定主机名（action v4 原生 hostname 入参，实测 306e68a 的
           # action.yml 有该 input）：此前是「先按 runner 名注册、再 set --hostname
           # 改名」，两步之间存在竞态 —— 注册瞬间若 tailnet 里还有上一轮的
@@ -4696,8 +4734,18 @@ jobs:
           done
           EOF
           chmod +x /tmp/openclaw-archive-loop.sh
-          nohup bash /tmp/openclaw-archive-loop.sh > /tmp/openclaw-archive-loop.log 2>&1 &
-          echo $! > /tmp/openclaw-archive-loop.launcher.pid
+          # 长驻服务一律 systemd 托管（2026-10-05 主人拍板）：归档循环崩溃后由
+          # Restart=always 自愈，不再只能等下一轮 run。管理器缺失时退回原 nohup。
+          # ⚠️ 这里必须用 ensure 而不是 restart：若已有裸跑实例，systemd 再起一个
+          #    会造成**双份归档**同时上传同一 tar.gz（flock 抢锁、云端反复覆盖）。
+          #    ensure 检测到裸跑就跳过，新 VM 上则由单元接管。
+          if [ -f "$GITHUB_WORKSPACE/.github/scripts/daemons/daemons.sh" ]; then
+            bash "$GITHUB_WORKSPACE/.github/scripts/daemons/daemons.sh" ensure archive-loop || true
+          fi
+          if ! pgrep -f "openclaw-archive-loop.sh" >/dev/null 2>&1; then
+            nohup bash /tmp/openclaw-archive-loop.sh > /tmp/openclaw-archive-loop.log 2>&1 &
+            echo $! > /tmp/openclaw-archive-loop.launcher.pid
+          fi
 
           # 凭据同步循环（每 5 分钟）：让运行期在 Dropbox 新增/删除/替换的 workbuddy*.json
           # 在几分钟内反映到 serve（它每 5 秒扫 cwd 热加载），而不是等下一轮。
