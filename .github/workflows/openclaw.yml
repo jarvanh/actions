@@ -1159,7 +1159,7 @@ jobs:
           WB_RELEASE_BASE="https://github.com/jarvanh/workbuddy-gateway/releases/latest/download"
           WB_VER_FILE="$WB_DIR/.installed-version"
           WB_META="/tmp/run-workbuddy-meta.env"
-          WB_LOG="$WB_RUN_DIR/logs/serve.log"
+          WB_LOG="$WB_DIR/logs/serve.log"
           : > "$WB_META"
 
           # workbuddy 通知的版式真源（docs/telegram-notify.md 2.5 workbuddy 段）。
@@ -2738,7 +2738,7 @@ jobs:
           Z2A_DATA_ARCHIVE="dropbox:self-hosted/zcode2api-data.tar.gz"
           Z2A_RUN_DIR="/tmp/local_zcode2api"
           Z2A_PORT="8319"
-          Z2A_LOG="$Z2A_RUN_DIR/logs/zcode2api.log"
+          Z2A_LOG="/dropbox/self-hosted/zcode2api/logs/zcode2api.log"
 
           Z2A_OK=0
           Z2A_REASON=""
@@ -3233,7 +3233,7 @@ jobs:
             tg_add_path _m "端口" "$QINGYAN_PORT"
             tg_add_kv _m "原因" "$GL_REASON"
             tg_add_path _m "运行目录" "/tmp/local_qingyan"
-            tg_add_path _m "日志" "/tmp/local_qingyan/logs/qingyan.log"
+            tg_add_path _m "日志" "/dropbox/self-hosted/qingyan-proxy/logs/qingyan.log"
             tg_add_footer _m
             send_tg "$_m" alert || echo "::warning::TG 通知发送失败（不影响任务）"
           else
@@ -4900,7 +4900,7 @@ jobs:
           # 2026-09-29：cred-sync 改 systemd 托管后，日志由 unit 的 StandardOutput 写入
           # data/logs/cred-sync.log（与 setup-env 历史口径一致，且能随 3b-1 回推 Dropbox）。
           # 旧路径 /tmp/workbuddy-cred-sync.log 仅作兼容兜底。
-          tail -n 10 /tmp/local_workbuddy/data/logs/cred-sync.log 2>/dev/null \
+          tail -n 10 /dropbox/self-hosted/workbuddy-gateway/logs/cred-sync.log 2>/dev/null \
             || tail -n 10 /tmp/workbuddy-cred-sync.log 2>/dev/null \
             || echo "<no cred sync log>"
           echo "--- end workbuddy-cred-sync.log tail ---"
