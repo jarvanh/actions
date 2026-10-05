@@ -77,11 +77,11 @@ die() { log "❌ $*"; exit 1; }
 #   - serve.log 等 append 型单文件：append: 模式 systemd 不轮转，
 #     /etc/logrotate.d/ 也没有任何规则命中 Dropbox 这些路径。
 # 故在此按天删除 + 按体积原地截断，随每轮 ensure 顺带跑，无需新增定时器。
-#   LOG_KEEP_DAYS  按天文件的保留天数（默认 7，与网关 config.json 同口径）
-#   LOG_MAX_MB     单个 append 型日志的体积上限（默认 20MB），超出保留尾部一半
+#   LOG_KEEP_DAYS  按天文件的保留天数（默认 90，主人 2026-10-05 定）
+#   LOG_MAX_MB     单个 append 型日志的体积上限（默认 100MB，主人 2026-10-05 定），超出保留尾部一半
 #   LOG_PRUNE_DRY_RUN=1  只预览不执行
-LOG_KEEP_DAYS="${LOG_KEEP_DAYS:-7}"
-LOG_MAX_MB="${LOG_MAX_MB:-20}"
+LOG_KEEP_DAYS="${LOG_KEEP_DAYS:-90}"
+LOG_MAX_MB="${LOG_MAX_MB:-100}"
 
 prune_logs() {
   local dir f size max_bytes keep rel
