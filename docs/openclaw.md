@@ -230,11 +230,11 @@ tar -xzf /tmp/restore.tar.gz -C /tmp/restore .openclaw/openclaw.json
 | `⚠️ 最终归档告警 · <对象>` | 最终归档失败 | 同上；标题以「最终归档」区分阶段 |
 | `✅ / ⚠️ / ❌ OpenClaw 最终归档结果` | 最终归档之后（`Notify OpenClaw final archive result`） | 结果计数（成功 / 失败 / 跳过）+ 合计大小 + 快照名 + 📦 归档明细（每个包一行：结论 + 大小 + 去向）；未产出明细时降级为「⚠️ 最终归档未完成」 |
 | `⚠️ OpenClaw 即将进入最终归档` | keepalive 第 325 分钟 | 约 15 分钟后执行 `Stop OpenClaw and Final Archive` |
-| `🟢 workbuddy-gateway 已就绪` | **首轮**启动步骤自检通过且账号池非空（接力轮不重复推，见下） | 账号池结论、版本、更新说明、接口地址、鉴权说明、🔑 凭据文件名、💳 逐账号（站点 / 状态 / 冷却时刻 · 额度 · 免费模型具体名称 · 模型冷却 N · 最早恢复 · Token 过期）、数据目录 |
+| `🟢 workbuddy-gateway 已就绪` | **首轮**启动步骤自检通过且账号池非空（接力轮不重复推，见下） | 账号池结论、版本、更新说明、接口地址、API Key（等宽回显）、🗓 每日签到 · N、💳 逐账号（站点 / 状态 / 冷却时刻 · 额度 · 免费模型具体名称 · 模型冷却 N · 最早恢复 · Token 过期）、数据目录 |
 | `⚠️ workbuddy-gateway 已启动 · 无可用账号` | 服务已监听但账号池为空 | 提示需人工扫码登录（`login` 无法在 workflow 内完成） |
 | `❌ workbuddy-gateway 启动失败` | 进程启动即退，或 120 秒内未监听 8318 | 失败原因 + 🧾 原始输出（日志尾部 1200 字节） |
 | `⛔ / ⚠️ workbuddy-gateway 已停止` | 收尾停止段落执行后 | 版本与数据目录；仍有进程残留时降级 ⚠️ |
-| `🟢 trae2api 已就绪` | 容器健康检查通过、批量签到完成后 | 签到结论（已签 / 跳过 / 失败 / 共 N）、接口地址、鉴权说明、💳 逐账号（uid / 昵称 / 签到状态，子行为最早过期的 3 个积分包）、数据目录；签到 stderr 非空时附 🧾 原始输出 |
+| `🟢 trae2api 已就绪` | 容器健康检查通过、批量签到完成后 | 签到结论（已就绪 · 已签 / 待签 / 失败 / 共 N）、接口地址、API Key（等宽回显）、🩺 签到健康、📊 模型倍率、💳 逐账号（uid / 昵称 / 签到状态，子行为最早过期的 3 个积分包）、数据目录；签到 stderr 非空时附 🧾 原始输出 |
 | `⚠️ trae2api 已就绪 · 签到工具执行失败` | 服务就绪但签到输出为空（工具失败或无账号） | 结论 + 接口 / 鉴权 / 数据目录 + 🧾 原始输出（签到 stderr 尾部） |
 | `❌ trae2api 启动失败` | 容器 120 秒内健康检查未过 7864 | 结论（HTTP 码）+ 数据目录 + 🧾 原始输出（容器日志尾部 1200 字节，同时打到步骤日志） |
 
@@ -247,11 +247,13 @@ tar -xzf /tmp/restore.tar.gz -C /tmp/restore .openclaw/openclaw.json
 > 「接口」写 `http://127.0.0.1:8318/v1`。**注意区分两个「默认」**：workbuddy-gateway
 > 上游 `-port` 默认值是 **8317**，与 CliRelay/CLIProxyAPI（OpenClaw 主网关）撞车，
 > 故本步骤启动时显式传 `-port 8318` 覆盖 —— 通知里的端口是**实际绑定端口**，
-> 不是上游默认值。「鉴权」恒写
-> **仅回环监听，无需密钥** —— 启动命令不传 `-api-key` 且只绑 `127.0.0.1`，网关不做鉴权；
-> 上游该参数默认空、本仓库也从未设置，**不得编造密钥值**。
-> 「🔑 凭据」只列 `workbuddy*.json` 的**文件名**（真实 Access/Refresh Token 绝不上通知），
-> 且排除 serve 自己写的状态快照 `workbuddy-status.json`。
+> 不是上游默认值。「鉴权」写实际形态：serve 以 `-addr 0.0.0.0` 监听（对 Tailscale/
+> 局域网开放），启动显式传 `-api-key` 做客户端 Bearer 校验（取 job 级
+> `AI_GATEWAY_API_KEY`），通知以「API Key」一行等宽回显、写「未取到」兜底
+> （2026-10-05 订正——旧文「仅回环监听，无需密钥」与实际启动参数不符）。
+> 「🔑 凭据」分节已移除（2026-10-05，与账号池条目名重复）；`workbuddy*.json` 的
+> **内容**（真实 Access/Refresh Token）仍然绝不上通知，
+> serve 自己写的状态快照 `workbuddy-status.json` 不算凭据。
 > 「💳 账号池」的额度/状态/冷却取自 serve 写出的 `workbuddy-status.json`（**jq 解析**），
 > **免费模型名单另走上游「模型目录」接口**（不读快照的 `modelStates`，理由见下）。
 > 快照键名由上游 Go 结构体 `accountSnapshot` / `statusSnapshot` 的 json tag 固定
