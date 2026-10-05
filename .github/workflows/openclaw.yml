@@ -1324,6 +1324,12 @@ jobs:
                 WB_RATES_BLOCK="$(tg_add_title WB_RATES_BLOCK "📊 workbuddy-gateway 模型倍率 · 模型数量${WB_RATES_N:-0}${WB_RATES_FREE_TAG:-}"; tg_add_pre WB_RATES_BLOCK "$WB_RATES_TXT"; tg_add_footer WB_RATES_BLOCK; printf '%s' "$WB_RATES_BLOCK")"
               fi
               tg_add_path _msg "数据目录" "$WB_DIR"
+              # 用量 + 流水（看板独有，2026-10-05 补进通知）：只渲染本网关自己，
+              # 避免 wb 通知里出现 zcode 数据（语义串台）。调 board.py 的 CLI 子命令 ——
+              # 与看板**共用同一份渲染代码与本地实时 usage**，不另写一套、不走 Dropbox 旧副本
+              # （那版仅收尾回推，实测落后 4 小时丢 93% 行）。文件缺失时 CLI 输出空串，静默跳过。
+              _wb_ul_block="$(python3 /dropbox/self-hosted/quota-board/board.py usage-ledger workbuddy 12 2>/dev/null || true)"
+              [ -n "$_wb_ul_block" ] && tg_append _msg "$_wb_ul_block"
               if [ -n "$6" ]; then
                 tg_add_section _msg "🧾 原始输出"
                 tg_add_pre _msg "$(printf '%s' "$6" | tail -c 1200)"
