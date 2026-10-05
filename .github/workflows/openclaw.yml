@@ -3146,6 +3146,10 @@ jobs:
                 _m+=$'\n'
               fi
               tg_add_path _m "代码" "$Z2A_REPO"
+              # 用量 + 流水（看板独有，2026-10-05 补进 zcode 通知，与 wb/trae 同口径）：
+              # 只渲染 zcode 自己的，调 board.py CLI 与看板共用渲染代码与数据源。
+              _z2a_ul_block="$(python3 /dropbox/self-hosted/quota-board/board.py usage-ledger zcode 12 2>/dev/null || true)"
+              [ -n "$_z2a_ul_block" ] && tg_append _msg "$_z2a_ul_block"
               tg_add_footer _m
               send_tg "$_m" alert || echo "::warning::TG 通知发送失败（不影响任务）"
             fi
