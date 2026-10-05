@@ -66,6 +66,58 @@ exec 9>"$LOCK" 2>/dev/null || true
 flock -n 9 2>/dev/null || { echo "[services] 另一个实例正在运行，跳过"; exit 0; }
 
 mkdir -p "$UNIT_DIR" "$LOG_DIR" 2>/dev/null || true
+SYSTEM_UNIT_DIR="/etc/systemd/system"
+
+# ── systemd 级别分流（2026-10-05 主人拍板 C 方案）───────────────────────────
+# 本脚本同时管理 --user 级与 system 级单元。为什么要混两级：
+#   归属按**服务性质**定（服务 vs 隧道），不按 systemd 级别定 —— 级别只是实现
+#   细节。tailscaled 必须 system 级（TUN 设备 /dev/net/tun 是 root:root，
+#   --user 单元起不来），但它显然不是"隧道"，不该塞进 tunnels.sh。
+#   于是 services.sh 自己按级别分流，对外仍是"所有服务一个入口"。
+svc_level() {
+  case "$1" in
+    tailscaled) echo system ;;
+    *)          echo user ;;
+  esac
+}
+
+# 单元目录按级别取
+svc_unit_dir() {
+  case "$(svc_level "$1")" in
+    system) echo "$SYSTEM_UNIT_DIR" ;;
+    user)   echo "$UNIT_DIR" ;;
+  esac
+}
+
+# systemctl 包装：按级别决定加不加 sudo / --user
+svc() {
+  local name="$1"; shift
+  local unit; unit="$(unit_name "$name")"
+  case "$(svc_level "$name")" in
+    system) sudo systemctl "$@" "$unit" ;;
+    user)   systemctl --user "$@" "$unit" ;;
+  esac
+}
+
+# 名称白名单：校验必须在**当前 shell** 做（放进 $(...) 时 die 只退子 shell）
+valid_name() {
+  case "$1" in
+    workbuddy|zcode2api|qingyan|workbuddy-cred-sync|quota-board|rclone-dropbox|archive-loop|tailscaled) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# 裸跑实例检测：单元尚未接管，但同功能进程已在跑（历史 nohup / action spawn 的）。
+# 这些服务 ensure 时**不能无条件重启** —— 见 cmd_ensure 里的说明。
+has_bare_instance() {
+  case "$1" in
+    rclone-dropbox) mount 2>/dev/null | grep -q " on /dropbox " ;;
+    archive-loop)   pgrep -f "openclaw-archive-loop.sh" >/dev/null 2>&1 ;;
+    tailscaled)     pgrep -x tailscaled >/dev/null 2>&1 &&
+                      ! sudo systemctl is-active --quiet tailscaled.service 2>/dev/null ;;
+    *) return 1 ;;
+  esac
+}
 
 log() { printf '[services] %s\n' "$*"; }
 die() { log "❌ $*"; exit 1; }
@@ -307,19 +359,124 @@ StandardError=append:/dropbox/self-hosted/quota-board/board.log
 WantedBy=default.target
 EOF
       ;;
-    *) die "未知服务: $name（可选 workbuddy | zcode2api | qingyan | workbuddy-cred-sync | quota-board）" ;;
+    rclone-dropbox)
+      cat > "$tmp" <<EOF
+[Unit]
+Description=rclone mount dropbox: -> /dropbox
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=0
+
+[Service]
+Type=simple
+# 参数画像："配置 / Docker 数据卷"——小文件随机读写，不需要大块顺序预读。
+#   --cache-dir        默认 ~/.cache/rclone 会落进根分区（≈14GB），必须指向 /mnt
+#   --attr-timeout 1m  原 10m：容器内文件频繁增删改，属性缓存 10 分钟有陈旧风险
+#   --poll-interval 0  run 期间远端目录不会自己变，关轮询省 API 配额
+#   --buffer-size 16M  原 100M：每个打开的文件常驻一份，小文件场景用不到
+# 以 runner 身份挂载（不用 sudo）：root 挂载会在 token 刷新时把 rclone.conf
+# 回写成 root 属主 600，之后归档循环读它就 permission denied。
+ExecStart=/usr/bin/rclone mount dropbox: /dropbox \\
+  --config %h/.config/rclone/rclone.conf \\
+  --cache-dir /mnt/vfs/dropbox \\
+  --allow-other --umask 000 --no-gzip-encoding \\
+  --attr-timeout 1m \\
+  --dir-cache-time 72h --poll-interval 0 \\
+  --vfs-cache-mode full \\
+  --vfs-cache-max-size 2G --vfs-cache-max-age 1h \\
+  --vfs-cache-min-free-space 2G \\
+  --vfs-cache-poll-interval 30s \\
+  --buffer-size 16M \\
+  --log-file /opt/logs/rclone-dropbox.log --log-level INFO
+Restart=always
+RestartSec=10
+# -uz：先 lazy unmount 再强制，避免 "device is busy" 把停止卡成 SIGKILL
+ExecStop=/usr/bin/fusermount3 -uz /dropbox
+TimeoutStopSec=60
+StandardOutput=append:${LOG_DIR}/rclone-dropbox.log
+StandardError=append:${LOG_DIR}/rclone-dropbox.log
+
+[Install]
+WantedBy=default.target
+EOF
+      ;;
+    archive-loop)
+      cat > "$tmp" <<EOF
+[Unit]
+Description=OpenClaw periodic archive loop (Dropbox 归档循环)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=0
+
+[Service]
+Type=simple
+# 脚本由 openclaw.yml 每轮用 heredoc 现场生成到 /tmp；不存在则安静跳过，
+# 不要进入"启动即失败"的崩溃循环（与 tunnels.sh 的端口预检同口径）。
+ConditionPathExists=/tmp/openclaw-archive-loop.sh
+ExecStart=/bin/bash /tmp/openclaw-archive-loop.sh
+Restart=always
+RestartSec=30
+# 一轮归档最长 40m（脚本内 timeout），留足排空时间
+TimeoutStopSec=180
+StandardOutput=append:${LOG_DIR}/openclaw-archive-loop.log
+StandardError=append:${LOG_DIR}/openclaw-archive-loop.log
+
+[Install]
+WantedBy=default.target
+EOF
+      ;;
+    tailscaled)
+      # systemd 级（root）：TUN 设备 /dev/net/tun 属 root，--user 单元起不来。
+      # ⚠️ 关键坑（2026-10-05 实测）：原写法 `tailscaled --state=mem:` 把登录态
+      #    只放内存 —— 进程一死认证即丢，Restart=always 拉起来的只是个
+      #    Logged out 空壳，托管形同虚设。改用 --statedir 落盘后崩溃重启
+      #    自动恢复登录，自愈才是真的自愈。
+      #    /var/lib/tailscale 需预先存在，否则 tailscaled 直接退出。
+      cat > "$tmp" <<EOF
+[Unit]
+Description=Tailscale daemon (systemd 托管, 持久 state)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=0
+
+[Service]
+Type=simple
+ExecStartPre=/bin/mkdir -p /run/tailscale /var/lib/tailscale
+# 与 tailscale/github-action 的 statedir 入参同路径，共享同一份登录态
+ExecStart=/usr/local/bin/tailscaled --statedir=/var/lib/tailscale --socket=/run/tailscale/tailscaled.sock
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+      ;;
+    *) die "未知服务: $name（可选 workbuddy | zcode2api | qingyan | workbuddy-cred-sync | quota-board | rclone-dropbox | archive-loop | tailscaled）" ;;
   esac
-  install -m 600 "$tmp" "$UNIT_DIR/$(unit_name "$name")"
+  # 写盘按级别分流：system 级落到 /etc/systemd/system（需 sudo，权限 644）
+  case "$(svc_level "$name")" in
+    system)
+      sudo install -m 644 "$tmp" "$(svc_unit_dir "$name")/$(unit_name "$name")" 2>/dev/null \
+        || { rm -f "$tmp"; die "$name: system 级单元写盘失败（sudo 不可用？）"; }
+      ;;
+    user)
+      install -m 600 "$tmp" "$(svc_unit_dir "$name")/$(unit_name "$name")"
+      ;;
+  esac
   rm -f "$tmp"
 }
 
 cmd_ensure() {
   local name="${1:-}"
-  [ -n "$name" ] || die "用法: $0 ensure <workbuddy|zcode2api|qingyan|workbuddy-cred-sync|quota-board>"
+  [ -n "$name" ] || die "用法: $0 ensure <workbuddy|zcode2api|qingyan|workbuddy-cred-sync|quota-board|rclone-dropbox|archive-loop|tailscaled>"
+  valid_name "$name" || die "未知服务: $name"
   local unit
   unit="$(unit_name "$name")"
 
-  # 日志保留：ensure 会对 5 个服务各调一次，用当日戳去重，每轮 run 只跑一次
+  # 日志保留：ensure 会对各服务各调一次，用当日戳去重，每轮 run 只跑一次
   _prune_stamp="/tmp/.services-prune-$(date +%F)"
   if [ ! -f "$_prune_stamp" ]; then
     prune_logs
@@ -327,62 +484,81 @@ cmd_ensure() {
   fi
 
   write_unit "$name"
-  systemctl --user daemon-reload
+  case "$(svc_level "$name")" in
+    system) sudo systemctl daemon-reload 2>/dev/null ;;
+    user)   systemctl --user daemon-reload ;;
+  esac
 
-  # 幂等 enable：runner user manager 常驻（Linger=yes），enable 让单元在
-  # user manager 意外重启后也能被拉回
-  systemctl --user enable "$unit" >/dev/null 2>&1
+  # 幂等 enable：user manager 常驻（Linger=yes），system 级随 multi-user.target
+  svc "$name" enable >/dev/null 2>&1
+
+  # ⚠️ 裸跑实例优先（2026-10-05 加）：单元尚未接管、但同功能进程已在跑时，
+  #    **不重启** —— 过渡期单元与旧裸跑实例并存，无条件 restart 会造成：
+  #      rclone   挂载点抖动，所有读写 /dropbox 的进程遭殃
+  #      archive  双份归档同时传同一 tar.gz（flock 抢锁、云端反复覆盖）
+  #    只安装单元并提示：每轮 run 都是新 VM，下一轮单元自然接管。
+  if has_bare_instance "$name"; then
+    log "⚠️ $name 检测到裸跑实例（非 systemd 托管），本轮不打断"
+    log "   单元已安装就绪，新 VM / 服务重启后自动接管"
+    return 0
+  fi
 
   # 每轮重启一次（语义对齐原 nohup 方案的 pkill + 重启；理由见文件头）
   log "重启 $unit（每轮 run 起点，确保跑在最新二进制/依赖上）"
-  systemctl --user restart "$unit"
+  svc "$name" restart
   sleep 3
 
-  if systemctl --user is-active --quiet "$unit" 2>/dev/null; then
+  if svc "$name" is-active --quiet; then
     log "✅ $name 运行中 ($unit)"
   else
-    log "❌ $name 启动失败，查看: journalctl --user -u $unit"
+    case "$(svc_level "$name")" in
+      system) log "❌ $name 启动失败，查看: sudo journalctl -u $unit" ;;
+      user)   log "❌ $name 启动失败，查看: journalctl --user -u $unit" ;;
+    esac
     return 1
   fi
 }
 
 cmd_stop() {
   local name="${1:-}"
-  [ -n "$name" ] || die "用法: $0 stop <workbuddy|zcode2api|qingyan|workbuddy-cred-sync|quota-board>"
+  [ -n "$name" ] || die "用法: $0 stop <workbuddy|zcode2api|qingyan|workbuddy-cred-sync|quota-board|rclone-dropbox|archive-loop|tailscaled>"
+  valid_name "$name" || die "未知服务: $name"
   local unit
   unit="$(unit_name "$name")"
 
   # 必须走 systemd stop 而不是 pkill：Restart=always 会把 pkill 杀掉的进程
   # 在 5 秒内拉回来，「等待退出」循环会误判进程残留（收尾步骤语义见 openclaw.yml）
-  systemctl --user stop "$unit" 2>/dev/null || true
+  svc "$name" stop || true
   for _ in $(seq 1 30); do
-    systemctl --user is-active --quiet "$unit" 2>/dev/null || { log "✅ $name 已停止"; return 0; }
+    svc "$name" is-active --quiet || { log "✅ $name 已停止"; return 0; }
     sleep 1
   done
   log "⚠️ $name 未在 30 秒内退出，强制结束"
-  systemctl --user kill --signal=SIGKILL "$unit" 2>/dev/null || true
-  systemctl --user stop "$unit" 2>/dev/null || true
+  svc "$name" kill --signal=SIGKILL || true
+  svc "$name" stop || true
   return 0
 }
 
 cmd_status() {
   local only="${1:-}"
-  local names="workbuddy zcode2api qingyan workbuddy-cred-sync quota-board"
-  printf '%-20s %-34s %s\n' "单元" "状态" "服务"
-  local n unit st
+  local names="workbuddy zcode2api qingyan workbuddy-cred-sync quota-board rclone-dropbox archive-loop tailscaled"
+  printf '%-20s %-10s %-34s %s\n' "服务" "级别" "状态" "单元"
+  local n unit st lvl
   for n in $names; do
     [ -n "$only" ] && [ "$n" != "$only" ] && continue
     unit="$(unit_name "$n")"
-    if systemctl --user is-active --quiet "$unit" 2>/dev/null; then st="✅ 运行"
-    elif systemctl --user is-enabled --quiet "$unit" 2>/dev/null; then st="⛔ 已停止"
+    lvl="$(svc_level "$n")"
+    if svc "$n" is-active --quiet; then st="✅ 运行"
+    elif svc "$n" is-enabled --quiet; then st="⛔ 已停止"
     else st="— 未安装"; fi
-    printf '%-20s %-34s %s\n' "$n" "$st" "$unit"
+    printf '%-20s %-10s %-34s %s\n' "$n" "$lvl" "$st" "$unit"
   done
 }
 
 case "${1:-}" in
   ensure) cmd_ensure "${2:-}" ;;
   stop)   cmd_stop "${2:-}" ;;
+  restart) cmd_ensure "${2:-}" ;;
   status) cmd_status "${2:-}" ;;
   *) echo "用法: $0 {ensure|stop|status} [name]"; exit 1 ;;
 esac
