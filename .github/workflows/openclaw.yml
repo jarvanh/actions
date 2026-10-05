@@ -1392,7 +1392,7 @@ jobs:
           # rclone copy 单向拉取、不删本地多余文件，缺失也不报错 —— 首轮目录为空是正常情况。
           echo "0. Syncing workbuddy data from Dropbox to local run dir..."
           rclone copy "dropbox:self-hosted/workbuddy-gateway" "$WB_RUN_DIR" \
-            --exclude 'logs/**' --exclude '*.new' \
+            --exclude 'logs/**' --exclude '*.new' --exclude 'workbuddy-gateway-*' \
             --retries 5 --low-level-retries 10 --timeout 1m --contimeout 15s 2>/dev/null || \
             echo "⚠️ workbuddy 数据拉取失败/为空，按空账号池启动（凭据可由 serve 启动后热加载）"
           ls -la "$WB_RUN_DIR" 2>/dev/null | head -20 || true
@@ -4938,7 +4938,12 @@ jobs:
           # 只 copy 不 sync：远端的历史日志不该被本轮删掉。失败不阻塞收尾通知。
           # 周期回推循环（每 5 分钟）此时已被 kill，这里做的是最终兜底 + 让 logs/ 也落盘。
           echo "3b-1. Syncing workbuddy data back to Dropbox..."
+          # 排除版本化二进制：运行目录里每个历史版本都留下 workbuddy-gateway-<ver>
+          # （含 -current / -darwin-arm64），回推时无 exclude 会整批推上 Dropbox，
+          # 实测堆积 17 个共 155MB。二进制由本步骤每轮从 GitHub Releases 重拉，
+          # 不需要持久化；只回推凭据/状态/用量等真数据。
           rclone copy "$WB_RUN_DIR" "dropbox:self-hosted/workbuddy-gateway" \
+            --exclude 'workbuddy-gateway-*' \
             --retries 5 --low-level-retries 10 --timeout 1m --contimeout 15s 2>/dev/null || \
             echo "⚠️ workbuddy 数据回推失败（状态快照可能落后一轮）"
           WB_VER="$(head -n 1 "$WB_DIR/.installed-version" 2>/dev/null || true)"
