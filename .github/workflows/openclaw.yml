@@ -2366,6 +2366,11 @@ jobs:
                 tg_append _msg $'\n'
               fi
               tg_add_path _msg "数据目录" "$TRAE_DATA"
+              # 用量 + 流水（与 wb_notify 同口径，2026-10-05 补）：只渲染 trae 自己的，
+              # 调 board.py CLI 与看板共用渲染代码与数据源。trae 当日无 usage 文件时
+              # CLI 输出空串，静默跳过（不留空行）。
+              _trae_ul_block="$(python3 /dropbox/self-hosted/quota-board/board.py usage-ledger trae 12 2>/dev/null || true)"
+              [ -n "$_trae_ul_block" ] && tg_append _msg "$_trae_ul_block"
               if [ -n "$6" ]; then
                 tg_add_section _msg "🧾 原始输出"
                 tg_add_pre _msg "$(printf '%s' "$6" | tail -c 1200)"
