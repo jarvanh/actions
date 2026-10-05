@@ -45,6 +45,21 @@ set -u
 UNIT_DIR="${HOME}/.config/systemd/user"
 LOG_DIR="${HOME}/.openclaw/logs"
 
+# 服务日志统一落盘目录（2026-10-05 主人拍板：不要双目录，全部网关统一存 Dropbox）。
+# 此前日志分散在 /tmp 各运行目录（/tmp/local_workbuddy/data/logs、/tmp/local_zcode2api/logs、
+# /tmp/local_qingyan/logs），runner 重置即丢 —— 冷却与「无可用账号」等事件轨迹随之蒸发，
+# quota-board 的告警解析读不到就静默失效（实测 hy4-preview-f 06:52 冷却、07:19 无可用账号
+# 全程零通知）。统一到 Dropbox 后事件可跨轮次追溯，告警不再漏报。
+# 挂载点上写日志已长期实证可行：网关自己的 gateway-*.log 与看板 board.log 都在
+# Dropbox 上高频写入且正常（注意 openclaw.yml 里「工作目录不能放挂载点」指的是
+# cwd 高频读写状态文件，与 StandardOutput 追加写日志不是一回事）。
+LOG_ROOT="/dropbox/self-hosted"
+
+# 日志目录必须存在：StandardOutput=append:<LOG> 在目录不存在时进程直接以
+# status=209/STDOUT 退出 → Restart=always 崩溃循环（glm2api 时代实测踩过）。
+# 日志改落 Dropbox 后目录未必预建，统一由此幂等补一道。
+ensure_log_dir() { mkdir -p "$(dirname "$1")" 2>/dev/null || true; }
+
 # 单实例锁，避免并发调用打架（与 tunnels.sh 同款）
 LOCK="/tmp/.services-$(id -u).lock"
 exec 9>"$LOCK" 2>/dev/null || true
@@ -82,6 +97,7 @@ write_unit() {
       # 缺密钥直接拒绝生成：网关缺 -api-key 会静默不校验，客户端不带 Bearer
       # 也能过，等于裸奔，不如显式失败暴露问题（与启动步骤的密钥注入同口径）
       [ -n "${AI_GATEWAY_API_KEY:-}" ] || { rm -f "$tmp"; die "workbuddy: AI_GATEWAY_API_KEY 未注入，拒绝生成无鉴权单元"; }
+      ensure_log_dir "$LOG_ROOT/workbuddy-gateway/logs/serve.log"
       cat > "$tmp" <<EOF
 [Unit]
 Description=workbuddy-gateway (CodeBuddy/Hunyuan -> OpenAI, 8318)
@@ -100,8 +116,8 @@ RestartSec=5
 # 停止超时：默认 90s 不够长连接/子进程排空，会被 systemd 升级 SIGKILL
 # （zcode2api 2026-10-03 实证 stop-sigterm timeout）。三网关统一放宽。
 TimeoutStopSec=180
-StandardOutput=append:/tmp/local_workbuddy/data/logs/serve.log
-StandardError=append:/tmp/local_workbuddy/data/logs/serve.log
+StandardOutput=append:$LOG_ROOT/workbuddy-gateway/logs/serve.log
+StandardError=append:$LOG_ROOT/workbuddy-gateway/logs/serve.log
 
 [Install]
 WantedBy=default.target
@@ -109,6 +125,7 @@ EOF
       ;;
     zcode2api)
       [ -n "${ZCODE_GATEWAY_KEY:-}" ] || { rm -f "$tmp"; die "zcode2api: ZCODE_GATEWAY_KEY 未注入，拒绝生成无鉴权单元"; }
+      ensure_log_dir "$LOG_ROOT/zcode2api/logs/zcode2api.log"
       cat > "$tmp" <<EOF
 [Unit]
 Description=zcode2api (GLM Anthropic+OpenAI gateway, 8319)
@@ -129,8 +146,8 @@ RestartSec=5
 # 停止超时：captcha 真浏览器子进程 + SSE 长连接排空需要时间，默认 90s
 # 会被 SIGKILL（2026-10-03 重启实证），放宽到 180s 后退出干净。
 TimeoutStopSec=180
-StandardOutput=append:/tmp/local_zcode2api/logs/zcode2api.log
-StandardError=append:/tmp/local_zcode2api/logs/zcode2api.log
+StandardOutput=append:$LOG_ROOT/zcode2api/logs/zcode2api.log
+StandardError=append:$LOG_ROOT/zcode2api/logs/zcode2api.log
 
 [Install]
 WantedBy=default.target
@@ -145,7 +162,7 @@ EOF
       # 日志目录必须存在：StandardOutput=append:<LOG> 在目录不存在时进程直接以
       # status=209/STDOUT 退出 → Restart=always 崩溃循环（glm2api 时代实测踩过）。
       # 部署脚本已建，这里幂等补一道。
-      mkdir -p /tmp/local_qingyan/logs || true
+      ensure_log_dir "$LOG_ROOT/qingyan-proxy/logs/qingyan.log"
       cat > "$tmp" <<EOF
 [Unit]
 Description=qingyan-proxy (清言 chatglm.cn 反代 -> OpenAI, ${QINGYAN_PORT:-8320})
@@ -164,8 +181,8 @@ Restart=always
 RestartSec=5
 # 停止超时：同上，默认 90s 不够排空，统一放宽到 180s。
 TimeoutStopSec=180
-StandardOutput=append:/tmp/local_qingyan/logs/qingyan.log
-StandardError=append:/tmp/local_qingyan/logs/qingyan.log
+StandardOutput=append:$LOG_ROOT/qingyan-proxy/logs/qingyan.log
+StandardError=append:$LOG_ROOT/qingyan-proxy/logs/qingyan.log
 
 [Install]
 WantedBy=default.target
@@ -175,6 +192,7 @@ EOF
       # 同步循环依赖 openclaw.yml 生成的 /tmp/workbuddy-cred-sync.sh（rclone 把
       # Dropbox 凭据拉到运行目录）。脚本缺失时起单元只会空转崩溃循环。
       [ -s /tmp/workbuddy-cred-sync.sh ] || { rm -f "$tmp"; die "workbuddy-cred-sync: /tmp/workbuddy-cred-sync.sh 缺失"; }
+      ensure_log_dir "$LOG_ROOT/workbuddy-gateway/logs/cred-sync.log"
       cat > "$tmp" <<EOF
 [Unit]
 Description=workbuddy credential sync (Dropbox -> /tmp/local_workbuddy/data, 300s)
@@ -190,8 +208,8 @@ Restart=always
 RestartSec=10
 # 停止超时：循环可能正持有 flock / rclone 传输，默认 90s 不够，统一放宽。
 TimeoutStopSec=180
-StandardOutput=append:/tmp/local_workbuddy/data/logs/cred-sync.log
-StandardError=append:/tmp/local_workbuddy/data/logs/cred-sync.log
+StandardOutput=append:$LOG_ROOT/workbuddy-gateway/logs/cred-sync.log
+StandardError=append:$LOG_ROOT/workbuddy-gateway/logs/cred-sync.log
 
 [Install]
 WantedBy=default.target
