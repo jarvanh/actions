@@ -11,10 +11,10 @@
 | 2 | 平铺条目 | `•` | 零使用，仅注释提及 |
 | 3 | 半角冒号 kv | `[一-龥]:[^/:= ]` | 仅非通知代码（echo/grep 表达式） |
 | 4 | 紧凑时长 / 高精度浮点 / ISO 直出 | `[0-9]+h ?[0-9]+m\|[0-9]\.[0-9]{4,} 秒\|[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}` | 仅注释、测试夹具、非通知数据 |
-| 5 | curl 直发 | `curl .*(sendMessage\|/bot)` | 6 处 = 3 类：发送层自身（`tg_notify.sh:322/328`）、进度面板 message_id 与 deleteMessage（`openlist/telegram.sh:64/70/102`）、`sendDocument`（`sync_notify.sh:357`） |
+| 5 | curl 直发 | `curl .*(sendMessage\|/bot)` | 6 处 = 3 类：发送层自身（`tg_notify.sh:370/376`）、进度面板 message_id 与 deleteMessage（`openlist/telegram.sh:65/71/103`）、`sendDocument`（`sync_notify.sh:308`）——行号会漂，腐化时以 grep 重数为准 |
 | 6 | 分隔线 | `TG_SEP *=\|━━━` | 四套同值 18 条（bash 真源 / ps1 `0x2501*18` / python `'━'*18` / sync_to_tg 内嵌） |
 | 7 | 收尾区覆盖 | 分别统计 `tg_add_title` 与 `tg_add_footer\|Get-TgFooter\|tg_footer_line` 的**按文件**计数 | 计数不等时逐个查是否「分支汇聚」或「注释」造成；每处标题分支都必须能走到 footer |
-| 8 | 运行日志接线 | `TG_RUN_URL` 按文件列出 | 14 个 workflow，与「有通知集合」完全重合 |
+| 8 | 运行日志接线 | `TG_RUN_URL` 按文件列出 | 15 个 workflow（2026-10-05 起，含 `openlist-restore-tryrun.yml`），与「有通知集合」完全重合 |
 | 9 | 树形/折叠调用点 | `tree_lines\|tree_fold\|tree_code_fold` | 逐个确认折叠口径（见第 3 节） |
 | 10 | 分节计数 | `tg_add_section +[a-z_]+ +"[^"]*"` | 后跟列表的带 ` · N`；后跟 `<pre>` 或 kv 行的可不带 |
 | 11 | 速查表行号 | 按 `skills/telegram-notify-send/references/api-reference.md` 三列逐个 `grep -nE '^函数名\(\)'` 对真源 | 与表内数字一致（bash 列曾在 `TG_SEP`→`tg_add_title` 之间整体漂 14 行） |
@@ -47,7 +47,7 @@
 | 进度面板四组任务列表（待处理/已完成/已跳过/失败 + 进行中）不折叠 | 结构性清单：折掉后半段等于把「哪些任务没跑完」藏起来（`sync_progress.sh:476-478` 注释即此意） |
 | `task_preview` 同步对、`task_engine` 子目录/批次统计不折叠 | 结构性清单，同 规范 · 折叠规则判据 |
 | `sync_to_tg.sh` 失败清单走 `tree_fold` | 流水类，与同通知「已上传」同口径 |
-| `📍 测速点网络` 分节不带 ` · N` | taier/gitee 恒单目标，共享层有 count_hint 逻辑 |
+| `📍 测速点网络` 分节带 ` · N` | 2026-09-12 起恒带计数（规范 · 分节：后跟条目列表必须带），taier/gitee 单目标即 ` · 1`——共享层 `count_hint` 无条件拼（`speedtest_common.py` build_target_network_section） |
 | taier 通知**没有**「⚠️ 测活探测异常」分节（2026-09-24 起） | 旧分节记「探测机制没跑通」的误伤（逐个探 `/proxies/{name}` 恒 404）；改批量延迟表判活后只有两种世界：拿不到表 ⇒ 探测层整体关闭、不产生判死条目；拿到了 ⇒ 「表里没有」是真判死、计入 `❌ 失败`。若再出现该分节即为回退（规范 · 2.8 测速三套） |
 | taier 的「未更新订阅」有两条不同文案 | 真·达标不足 / 有速度但缺可导出配置（实现层丢 `proxy_obj`）是两回事，文案必须分开（规范 · 2.7 taier 专属分节） |
 | 后跟 `<pre>` 或 kv 行的分节不带计数 | 规范 · 分节允许 |
@@ -56,13 +56,13 @@
 | openclaw「最终归档结果」的 `📦 归档明细` 只调 `tree_lines`、不折叠 | 固定几项的结构性清单（最多 5 个归档对象），折掉任一项都会让读者误判归档是否完整；条目由 `tg_add_entry` 构建（已含 `<code>`），本就该走 `tree_lines`/`tree_fold` 而非 `tree_code_fold` |
 | 媒体 caption 无标题/分隔线/收尾区 | 规范 · 收尾区固有例外，但必须转义 + 显式 parse_mode |
 | 测速节点指标串里的 `35ms` | 指标字段（与 `↑`/`↓` 并排），非独立时长表述，不走「毫秒」层 |
-| emby「取直链」的 `（缓存命中）` / `（冷解析）` | 与既有 `（预估值）`「（走挂载）」同为**冒号前**、紧跟被测量对象的括号说明（不是行尾后缀），说明本次取链是否真花了那段时间；对象已有括号时并入同一括号、以 ` · ` 分隔。属自然语言裸文本，不套 `<code>`；判据见 规范 · 起播等待（`docs/telegram-notify.md` 2.6 节示例下方注） |
+| emby「取直链」的 `（缓存命中）` / `（冷解析）` | 与既有 `（预估值）`「（走挂载）」同为**冒号前**、紧跟被测量对象的括号说明（不是行尾后缀），说明本次取链是否真花了那段时间；对象已有括号时并入同一括号、以 ` · ` 分隔。属自然语言裸文本，不套 `<code>`；判据见 规范 · 起播等待（`docs/telegram-notify.md` 2.7 节示例下方注；引用规范写主题名不写章节号，此处括注仅便于初次定位） |
 | 标题数与 footer 数不等 | 多为分支汇聚（如 `github_backup_all.yml` 4:2）或注释造成的计数差 |
 | openclaw 的 `wb_notify` / `wb_stop_notify` 两处各存一份版式 | `Run workbuddy-gateway` 与 `Stop OpenClaw and Final Archive` 是两个 step、shell 不共享，函数无法跨 step 复用；**改版式必须两处一起改**，这是最容易「改一处漏一处」的地方（规范 2.5 / `openclaw.yml` 两处函数头注释） |
 | `wb_notify` 账号池的子行不是 `tree_lines` 渲染的 | 子行必须用 `tree_sub` 前缀**手拼**：`tree_lines` 把每行当兄弟条目，子行经它会渲染成 `├─/└─` 与条目平级（规范 4.2 二层列表）。条目行用 `tree_conn`，子行紧接其后用 `tree_sub`，末条索引两处一致 |
 | 收尾停止通知只有结论行、没有账号池 | 收尾 step 里没有 `WB_CREDS` / `WB_POOL`（启动 step 的局部变量），且网关已停——列账号池会让人以为服务还在跑。**不是漏字段** |
 | `tg_append _msg $'\n'` 出现在账号池块之后 | 块尾补空行：`tg_add_block` 不补尾空行，否则下一个 kv（数据目录）会紧贴末条子行，与规范示例的「块与 kv 区之间空一行」不一致 |
-| trae2api 通知（`openclaw.yml` / `trae2api-notify.yml` 两份内联副本）无「版本 / 更新 / 凭据」行、「🧾 原始输出」非空才渲染 | 与 workbuddy 版式同源但数据来源不同：上游无 release（源码浅克隆重建镜像），无可列的凭据文件清单；「原始输出」照 wb_notify 的 $6 口径非空才渲染，启动失败给容器日志尾部、签到分支给签到工具 stderr 尾部（1200 字节）。`trae2api-notify.yml` 不起服务，标题写「签到完成」不写「已就绪」 |
+| trae2api 通知（`openclaw.yml` 单份内联；按需签到 workflow `trae2api-notify.yml` 已于 2026-09-22 移除）无「凭据」分节（2026-10-05 随 wb_notify 一并移除）、「🧾 原始输出」非空才渲染 | 与 workbuddy 版式同源但数据来源不同：版本写 Release tag（2026-10-05 起取 fork Release 静态二进制部署）；「原始输出」照 wb_notify 的 $6 口径非空才渲染，部署失败给脚本 stderr、启动失败给容器日志尾部、签到分支给签到工具 stderr 尾部（1200 字节） |
 | workbuddy 账号池用 `jq` 解析 `workbuddy-status.json` | **不是**「解析未文档化文件」：键名由上游 Go 结构体 `accountSnapshot` 的 json tag 固定，比 `status` 子命令的对齐文本表格可靠（后者字段名后跟多个空格、`过期时间` 独立成行，解析脆且易漏）。规范 2.5 节有字段表 |
 | `quotaKnown` 为 false 时显示「额度未获取」而不是 0 | 快照里 `quotaRemaining` 此时是无意义的 0（还没查到），显示 0 会与「付费耗尽」混淆。照上游 `monitor` 显示 `-` 的同一判断 |
 | workbuddy 通知里的 `exp` / `awk` 解析残留 | 已全面改用 jq；若再看到 awk 解析 `status` 文本输出即为回退。**另：awk 里 `exp` 是内置函数（指数），不能当变量名**（历史踩坑） |
@@ -81,6 +81,34 @@
 |---|---|---|---|
 | 12 | **函数体内 `source` 真源** | `source .*tg_notify\.sh`，人工判断是否落在 `name() { … }` 之间 | 只允许在 step 顶层 / heredoc 脚本顶层。函数体在子 shell 里跑时，函数内 `source` 不影响父 shell 函数表，会把调用点对 `send_tg` 的本地覆写还原掉，`local` 也失效（规范 4.4） |
 | 13 | 接力轮重复通知 | 长跑 workflow 里按「服务已就绪」判据发通知的调用点 | 用 `/tmp` 标记文件区分首轮/接力轮，接力轮只记日志；否则每个接力 run 重复推同一条（规范 4.4） |
+
+## 3.2 2026-10-05 第六轮核对结论（全库四域）
+
+- **方法**：四域并行通读（openlist / workflows 内联 / tg-channel / 测速+pwsh）→ 逐条
+  回代码复核 → render_preview 16 项全绿 → 修复后回归。本轮共确认 39 条不一致并已全部
+  处理（文档侧改 规范+本文件，实现侧 8 处见下）。
+- **硬约束全绿**：TG_RUN_URL 15 个 workflow 全覆盖且无 `TG_RUN_STARTED_AT` 残留注入；
+  alert 档调用点凭据注入齐全；`<b>/<i>/•` 零使用；curl 直发 6 处 = 3 类合规例外。
+- **实现侧已修**：
+  - `openclaw.yml` send_telegram_alert / send_final_archive_warning 的真源 source
+    提到 step 顶层（后者以 `&` 后台执行，原写法正中规范 4.4 子 shell 陷阱）；
+  - 备份两 workflow 通知大小 numfmt → 真源 `format_bytes`（打包段 numfmt 只进日志，保留）；
+  - `emby.yml` 删自造 `fmt_size`（5.5 GB），规格行走 `format_bytes`；
+  - trae 签到健康条目 `tg_add_entry` → `tg_add_entry_text`（主体是自然语言）；
+  - `sync_progress.sh` 两处整行 `<code>` 包 tree_lines 输出 → 缩进段与树行**并列**
+    两个 `<code>`（嵌套同名标签会 HTML 400 面板丢失）；L2b/L7d-3 断言同步改并列形态；
+  - `file_split.sh` 三处通知点 `format_bytes_iec` → `format_bytes`（iec 只留给
+    log_fix 日志行）；安全检查摘要 `bytes` 统一「字节」；
+  - `add_uploaded_video.py` 台账 human_size 对齐 IEC（只进台账不进通知）。
+- **规范侧已修**：workbuddy「鉴权→API Key」「凭据分节移除」、trae2api 四条口径、
+  最终归档/归档告警标题、task_engine 触发点、「四态→四类分支五种标题」、2.1/2.2/2.7
+  示例补组与 IEC 化、2.5 补每日签到渲染形态与模型倍率独立通知、2.6 补 🟡/🟠 中间态
+  与 qingyan-proxy 行、5.2 python 侧如实描述、6.2 档位清单移除「⛔ 同步中断」
+  （面板恒主 bot 不参与路由）、TSV 列号 6/7 → 7/8。
+- **仍合规、无需再查**（下轮可直接跳过）：openlist 域树形/折叠调用点分工、
+  `sync_to_tg.sh` 失败清单 tree_fold、五组任务列表不折叠、`task_preview` 结构性
+  清单、三套测速「到点收摊」位置与文案、taier 无「测活探测异常」分节、
+  caption 三行形态与转义。
 
 ## 4. 回归基线（改动触及 openlist 域时必跑）
 
