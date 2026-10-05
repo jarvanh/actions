@@ -70,6 +70,66 @@ mkdir -p "$UNIT_DIR" "$LOG_DIR" 2>/dev/null || true
 log() { printf '[services] %s\n' "$*"; }
 die() { log "❌ $*"; exit 1; }
 
+# ───────────────────────── 日志保留（自动清理） ─────────────────────────
+# 背景（2026-10-05）：日志统一落 Dropbox 后只增不减 ——
+#   - gateway-*.log 按天切分，但网关 config.json 的 keepDays: 7 **实测未生效**
+#     （目录下躺着 19 个、最早 09-17 已存 18 天，日志里也搜不到任何清理动作）；
+#   - serve.log 等 append 型单文件：append: 模式 systemd 不轮转，
+#     /etc/logrotate.d/ 也没有任何规则命中 Dropbox 这些路径。
+# 故在此按天删除 + 按体积原地截断，随每轮 ensure 顺带跑，无需新增定时器。
+#   LOG_KEEP_DAYS  按天文件的保留天数（默认 7，与网关 config.json 同口径）
+#   LOG_MAX_MB     单个 append 型日志的体积上限（默认 20MB），超出保留尾部一半
+#   LOG_PRUNE_DRY_RUN=1  只预览不执行
+LOG_KEEP_DAYS="${LOG_KEEP_DAYS:-7}"
+LOG_MAX_MB="${LOG_MAX_MB:-20}"
+
+prune_logs() {
+  local dir f size max_bytes keep rel
+  max_bytes=$(( LOG_MAX_MB * 1024 * 1024 ))
+  # 服务日志目录（board.log 直接在服务根目录，不在 logs/ 下）
+  for dir in \
+    "$LOG_ROOT/workbuddy-gateway/logs" \
+    "$LOG_ROOT/zcode2api/logs" \
+    "$LOG_ROOT/qingyan-proxy/logs" \
+    "$LOG_ROOT/quota-board"
+  do
+    [ -d "$dir" ] || continue
+    # ① 按天文件：gateway-YYYY-MM-DD.log 超期删除（mtime 早于保留窗口）
+    for f in "$dir"/gateway-*.log; do
+      [ -f "$f" ] || continue
+      [ -n "$(find "$f" -type f -mtime +"$LOG_KEEP_DAYS" -print -quit 2>/dev/null)" ] || continue
+      rel="${f#$LOG_ROOT/}"
+      if [ -n "${LOG_PRUNE_DRY_RUN:-}" ]; then
+        log "[dry-run] 将删除超期日志: $rel"
+        continue
+      fi
+      rm -f "$f" && log "🗑 超期日志已删: $rel（>${LOG_KEEP_DAYS} 天）"
+    done
+    # ② append 型单文件：超体积原地截断
+    for f in "$dir"/*.log; do
+      [ -f "$f" ] || continue
+      size=$(stat -c %s "$f" 2>/dev/null || echo 0)
+      [ "$size" -gt "$max_bytes" ] || continue
+      keep=$(( max_bytes / 2 ))
+      rel="${f#$LOG_ROOT/}"
+      if [ -n "${LOG_PRUNE_DRY_RUN:-}" ]; then
+        log "[dry-run] 将截断超限日志: $rel（$(( size / 1048576 ))MB → 留尾部 $(( keep / 1048576 ))MB）"
+        continue
+      fi
+      # ⚠️ 必须原地重写（cat > 同一路径）：mv 换 inode 会让 systemd 持有的 fd
+      #    继续写到已脱离目录的旧 inode，新日志全部不可见 —— 日志"看似停更"。
+      if tail -c "$keep" "$f" > "$f.prune.tmp" 2>/dev/null && \
+         cat "$f.prune.tmp" > "$f" 2>/dev/null; then
+        rm -f "$f.prune.tmp"
+        log "✂️ 超限日志已截断: $rel（$(( size / 1048576 ))MB → 留尾部 $(( keep / 1048576 ))MB）"
+      else
+        rm -f "$f.prune.tmp"
+        log "⚠️ 日志截断失败（已跳过）: $rel"
+      fi
+    done
+  done
+}
+
 # 单元名与服务名解耦：workbuddy 用完整语义的单元名，避免歧义
 unit_name() {
   case "$1" in
@@ -258,6 +318,13 @@ cmd_ensure() {
   [ -n "$name" ] || die "用法: $0 ensure <workbuddy|zcode2api|qingyan|workbuddy-cred-sync|quota-board>"
   local unit
   unit="$(unit_name "$name")"
+
+  # 日志保留：ensure 会对 5 个服务各调一次，用当日戳去重，每轮 run 只跑一次
+  _prune_stamp="/tmp/.services-prune-$(date +%F)"
+  if [ ! -f "$_prune_stamp" ]; then
+    prune_logs
+    : > "$_prune_stamp"
+  fi
 
   write_unit "$name"
   systemctl --user daemon-reload
