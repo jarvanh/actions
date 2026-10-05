@@ -228,14 +228,14 @@ tar -xzf /tmp/restore.tar.gz -C /tmp/restore .openclaw/openclaw.json
 | `🚨 OpenClaw 自愈失败` | `Run OpenClaw` 步骤失败 | 步骤、Run ID、失败阶段（中文）、当前版本、Fallback + 来源、成功版本记录、三段耗时、SSH 调试入口、🧾 关键日志（`<pre>` 等宽块，最多 2800 字节） |
 | `⚠️ 归档告警 · <对象>` | 20 分钟归档循环失败 | 问题（上传失败 / 归档失败 / 目录缺失 / 状态不全）+ 对象名 + Run ID |
 | `⚠️ 最终归档告警 · <对象>` | 最终归档失败 | 同上；标题以「最终归档」区分阶段 |
-| `✅ / ⚠️ / ❌ OpenClaw 最终归档结果` | 最终归档之后（`Notify OpenClaw final archive result`） | 结果计数（成功 / 失败 / 跳过）+ 合计大小 + 快照名 + 📦 归档明细（每个包一行：结论 + 大小 + 去向）；未产出明细时降级为「⚠️ 最终归档未完成」 |
+| `✅ OpenClaw 最终归档完成` / `⚠️ … 完成 · 部分失败` / `⚠️ … 未完成` | 最终归档之后（`Notify OpenClaw final archive result`） | 结果计数（成功 / 失败 / 跳过）+ 合计大小 + 快照名 + 📦 归档明细（每个包一行：结论 + 大小 + 去向）；归档步骤没产出明细（预检失败/运行被取消）时发「⚠️ 最终归档未完成」兜底 |
 | `⚠️ OpenClaw 即将进入最终归档` | keepalive 第 325 分钟 | 约 15 分钟后执行 `Stop OpenClaw and Final Archive` |
 | `🟢 workbuddy-gateway 已就绪` | **首轮**启动步骤自检通过且账号池非空（接力轮不重复推，见下） | 账号池结论、版本、更新说明、接口地址、API Key（等宽回显）、🗓 每日签到 · N、💳 逐账号（站点 / 状态 / 冷却时刻 · 额度 · 免费模型具体名称 · 模型冷却 N · 最早恢复 · Token 过期）、数据目录 |
 | `⚠️ workbuddy-gateway 已启动 · 无可用账号` | 服务已监听但账号池为空 | 提示需人工扫码登录（`login` 无法在 workflow 内完成） |
 | `❌ workbuddy-gateway 启动失败` | 进程启动即退，或 120 秒内未监听 8318 | 失败原因 + 🧾 原始输出（日志尾部 1200 字节） |
 | `⛔ / ⚠️ workbuddy-gateway 已停止` | 收尾停止段落执行后 | 版本与数据目录；仍有进程残留时降级 ⚠️ |
 | `🟢 trae2api 已就绪` | 容器健康检查通过、批量签到完成后 | 签到结论（已就绪 · 已签 / 待签 / 失败 / 共 N）、接口地址、API Key（等宽回显）、🩺 签到健康、📊 模型倍率、💳 逐账号（uid / 昵称 / 签到状态，子行为最早过期的 3 个积分包）、数据目录；签到 stderr 非空时附 🧾 原始输出 |
-| `⚠️ trae2api 已就绪 · 签到工具执行失败` | 服务就绪但签到输出为空（工具失败或无账号） | 结论 + 接口 / 鉴权 / 数据目录 + 🧾 原始输出（签到 stderr 尾部） |
+| `⚠️ trae2api 已就绪 · 签到无输出` | 服务就绪但签到输出为空（工具失败或无账号） | 结论 + 接口 / API Key / 数据目录 + 🧾 原始输出（签到 stderr 尾部） |
 | `❌ trae2api 启动失败` | 容器 120 秒内健康检查未过 7864 | 结论（HTTP 码）+ 数据目录 + 🧾 原始输出（容器日志尾部 1200 字节，同时打到步骤日志） |
 
 > workbuddy 的就绪通知**只在首轮发**。本 workflow 由收尾步骤 `gh workflow run` 接力启动，
@@ -272,9 +272,10 @@ tar -xzf /tmp/restore.tar.gz -C /tmp/restore .openclaw/openclaw.json
 > 字段口径、目录接口与免费判据逐条见 [`telegram-notify.md`](telegram-notify.md) 2.5 节。
 
 > trae2api 三条通知与 workbuddy-gateway **版式同源**（同为 AI 网关形态），差异只在数据
-> 来源：版本写 commit 短 hash（上游无 release），账号池来自批量签到输出；「原始输出」
-> 非空才渲染。版式真源是 trae2api 步骤内的 `trae_notify()` 函数，独立按需签到 workflow
-> `trae2api-notify.yml` 已移除（2026-09-22）。
+> 来源：版本写 **Release tag**（2026-10-05 起取 fork 的 Release 静态二进制部署，不再
+> 浅克隆源码构建），账号池来自批量签到输出；「原始输出」非空才渲染。版式真源是
+> trae2api 步骤内的 `trae_notify()` 函数，独立按需签到 workflow `trae2api-notify.yml`
+> 已移除（2026-09-22）。
 > 字段口径见 [`telegram-notify.md`](telegram-notify.md) 2.5 节末。
 
 > `<对象>` 为归档短名：`OpenClaw 主包` / `ZCode` / `CliRelay` / `CLIProxyAPI` /
