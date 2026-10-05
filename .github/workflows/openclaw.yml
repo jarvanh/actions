@@ -4543,6 +4543,11 @@ jobs:
           cleanup_archive_outputs
           PID_FILE="/tmp/openclaw-archive.pid"
 
+          # 真源只在 step 顶层 source 一次（规范 4.4）：本 step 的归档循环会 fork
+          # 子进程调用 send_telegram_alert，函数体内再 source 不会改父 shell 的
+          # 函数表，调用点若对 send_tg 做本地覆写会被静默还原成真发。
+          source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+
           # 用法: send_telegram_alert <对象> <结论> <原因> [原始输出]
           # 版式（docs/telegram-notify.md 2.3 / 4.3 / 规范 · 多行块）：对象是机器返回的包名 → <code>；
           # 结论与原因是人写的自然语言 → 裸文本 kv；rclone/tar 的原始输出 → <pre>。
@@ -4566,8 +4571,8 @@ jobs:
             if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
               local run_id="${GITHUB_RUN_ID:-manual}"
               # 统一 HTML 版式 + 统一收尾区（tg_add_* 内置转义，值原样传入即可；
-              # 二次 escape_html 会把 & 变成 &amp;amp; 字面量直出）
-              source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+              # 二次 escape_html 会把 & 变成 &amp;amp; 字面量直出）。真源已在 step
+              # 顶层 source（规范 4.4），函数体只用助手、不再重复 source。
               local full_msg=""
               tg_add_title full_msg "⚠️ 归档告警 · $(obj_label "$obj")"
               tg_add_path full_msg "对象" "$obj"
@@ -4817,11 +4822,15 @@ jobs:
           WARNING_DELAY_SECONDS=$((SLEEP_SECONDS - FINAL_ARCHIVE_WARNING_BEFORE_MINUTES*60))
           if [ "${WARNING_DELAY_SECONDS}" -lt 0 ]; then WARNING_DELAY_SECONDS=0; fi
 
+          # 真源只在 step 顶层 source 一次（规范 4.4）：本函数会以 `&` 后台执行，
+          # 函数体内再 source 只改子 shell 的函数表——调用点若对 send_tg 做本地
+          # 覆写会被静默还原成真发，且子 shell 里看不出任何异常。
+          source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+
           send_final_archive_warning() {
             sleep "${WARNING_DELAY_SECONDS}"
             if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
-              # 统一 HTML 版式 + 统一收尾区
-              source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+              # 统一 HTML 版式 + 统一收尾区（真源已在 step 顶层 source，规范 4.4）
               msg=""
               tg_add_title msg "⚠️ OpenClaw 即将进入最终归档"
               # 值只写时长，"后执行"由标签「预计」表达（值不重复标签语义）
