@@ -26,7 +26,9 @@ send_video_split_notification() {
   local validation_summary="${6:-}"
 
   local file_size_human
-  file_size_human=$(format_bytes_iec "$file_size")
+  # 通知走真源 format_bytes（"1.071 GiB"，规范 5.2）；format_bytes_iec（"1.0GiB"）
+  # 只保留给 log_fix 日志行 —— 两种口径各有用途，通知里不得出现日志口径
+  file_size_human=$(format_bytes "$file_size")
 
   local message=""
   if [ "$result" = "success" ]; then
@@ -92,7 +94,8 @@ send_binary_split_notification() {
   local result="$4"
   local log_file="$5"
   local file_size_human
-  file_size_human=$(format_bytes_iec "$file_size")
+  # 通知走真源 format_bytes（同上，规范 5.2）
+  file_size_human=$(format_bytes "$file_size")
   local message=""
   if [ "$result" = "success" ]; then
     tg_add_title message "✅ 7z 分卷成功"
@@ -252,7 +255,7 @@ split_large_video() {
       "1. 获取/估算视频时长：${check_duration}" \
       "2. ffmpeg 成功退出：${check_ffmpeg}" \
       "3. 至少生成 1 个分片：${check_parts_generated}" \
-      "4. 每个分片 ≤ ${max_part_size} bytes：${check_parts_size}" \
+      "4. 每个分片 ≤ ${max_part_size} 字节：${check_parts_size}" \
       "5. 所有分片上传成功：${check_upload}" \
       "6. 满足以上条件后删除原始文件：${check_delete}"
   }
@@ -620,7 +623,7 @@ preprocess_large_files() {
       # 英文 kind 不直出通知（规范 · 失败与异常）: media/binary 映射中文标签
       local _kind_label="二进制"
       [ "$split_kind" = "media" ] && _kind_label="媒体"
-      tg_add_entry processed_files "${remote_source}:${full_path}" "$(format_bytes_iec "$file_size") · ${_kind_label}"
+      tg_add_entry processed_files "${remote_source}:${full_path}" "$(format_bytes "$file_size") · ${_kind_label}"
       tg_add_entry deleted_files "${remote_source}:${full_path}"
       echo "$(date +%Y-%m-%d_%H:%M:%S) - ${remote_source}:${full_path} - OpenList 前置分割成功(${split_kind})，已删除原始大文件" >> "$PROCESSED_FILES_LOG"
     else

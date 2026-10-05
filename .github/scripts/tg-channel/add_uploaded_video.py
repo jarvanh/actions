@@ -85,13 +85,17 @@ def local_file_to_iso(filepath: str, attr: str = "mtime") -> str:
 
 
 def human_size(num_bytes: int) -> str:
-    """将字节数格式化为易读字符串：B / KB / MB / GB / TB（1024 进制，保留 2 位小数）。"""
+    """将字节数格式化为易读字符串（1024 进制 + IEC 单位，与全库 "1.150 GiB" 同口径）。
+
+    本值写进 uploaded_videos.json 台账与日志、不直接进通知（规范 5.2），但台账
+    会被人翻阅，口径与通知一致免得两套数字对不上。
+    """
     size = float(num_bytes)
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if size < 1024 or unit == "TB":
-            return f"{size:.2f}{unit}"
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if size < 1024 or unit == "TiB":
+            return f"{int(size)} {unit}" if unit == "B" else f"{size:.3f} {unit}"
         size /= 1024
-    return f"{size:.2f}TB"
+    return f"{size:.3f} TiB"
 
 
 def main():

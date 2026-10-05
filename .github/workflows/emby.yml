@@ -1276,12 +1276,9 @@ jobs:
               *) [ -n "$1" ] && printf '%s' "$1";;
             esac
           }
-          fmt_size() { # $1=字节 → 1.7 GB / 240 MB
-            local b=${1:-0}
-            case "$b" in ''|*[!0-9]*) return 0;; esac
-            [ "$b" -le 0 ] && return 0
-            awk -v b="$b" 'BEGIN{ gb=b/1073741824; if (gb>=1) printf "%.1f GB", gb; else printf "%.0f MB", b/1048576 }'
-          }
+          # 体积格式化直接用真源 format_bytes（"5.500 GiB"，规范 5.2：bash 侧只有
+          # 一份实现，source 了真源的通知点不再自造）——此前本文件的 fmt_size 输出
+          # "5.5 GB"（一位小数、SI 单位），已删
           join_parts() { local out= p; for p in "$@"; do [ -n "$p" ] && out="${out:+${out} · }${p}"; done; printf '%s' "$out"; }
 
           # ge2o 访问日志的耗时列单位随量级变化：152.244µs / 90.359458ms / 1.4s。
@@ -1424,7 +1421,7 @@ jobs:
               "$(fmt_dur "$mins")" \
               "$(fmt_res "$hgt")" \
               "$(escape_html "$codec")" \
-              "$(fmt_size "$size_b")")
+              "$( [ "${size_b:-0}" -gt 0 ] 2>/dev/null && format_bytes "$size_b" )")
 
             # 第 3 行：链路。302 时把直链剩余有效期说清楚——链接不是永久的
             # emoji 不套标签，剩余有效期是元数据 → · （规范 · 取值行口径、条目与树形）

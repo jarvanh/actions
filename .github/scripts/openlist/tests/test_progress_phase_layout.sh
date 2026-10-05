@@ -97,10 +97,11 @@ progress_update "$BATCH_DETAIL" >/dev/null
 # ---------- L2: 树型块 —— 统计行（表头）在前，树行缩进 2 格 ----------
 chk "L2a 统计行缩进 5 格、位于树行之前" \
   "$(line_of '子目录：')" "<code>     ${TASK_SUBDIR_STATS}</code>"
-# ⚠️ 版式基线（2026-09-25 同步）: 树形前缀自带等宽 <code>（tree_conn/tree_sub），
-#   前缀与条目主体分属两个 code 段 —— 理由见 tg_notify.sh 文件头「版式规范」。
+# ⚠️ 版式基线（2026-10-05 同步）: 缩进段与树行是两个**并列** <code>（树行自带
+#   <code> 前缀段，整行再包一层会嵌套同名标签，HTML 解析失败 = 面板静默丢失）。
+#   前缀与条目主体仍各自等宽、竖线成列 —— 理由见 tg_notify.sh 文件头「版式规范」。
 chk "L2b 首个树行缩进 7 格（统计行 +2）并带 ├─ 连接符" \
-  "$(line_of 'archive')" "<code>       <code>  ├─ </code>⏭️ archive · $(format_bytes 500400000)</code>"
+  "$(line_of 'archive')" "<code>       </code><code>  ├─ </code>⏭️ archive · $(format_bytes 500400000)"
 
 # ---------- L3: 标签型块 —— 标签在前、与统计行同列、无连接符 ----------
 # 批次块在深度 1，表头缩进 = 5*1+5 = 10 格（L4 断言它正对本层树行文本列）
@@ -184,8 +185,8 @@ rm -f "$PROGRESS_LAST_UPDATE_FILE"
 progress_transfer_tick "传输中: 2.469 GiB / 4.976 GiB" "" >/dev/null
 chk "L7d-2 历史非空时 note 前缀不变（注记不占树节点）" \
   "$(line_of '传输中')" "<code>         · 传输中: 2.469 GiB / 4.976 GiB</code>"
-chk "L7d-3 批次历史在 note 之后渲染（缩进在 code 内，渲染器既有行为）" \
-  "$(line_of '#47')" "<code>         <code>  └─ </code>❌#47 ✅00 🔧00 ❗22 ⏭️00 ♻️00 ⏱00:58 ⬆️4.72G</code>"
+chk "L7d-3 批次历史在 note 之后渲染（缩进段与树行并列 code，不嵌套）" \
+  "$(line_of '#47')" "<code>         </code><code>  └─ </code>❌#47 ✅00 🔧00 ❗22 ⏭️00 ♻️00 ⏱00:58 ⬆️4.72G"
 
 # 线程实体行为: note 直写 + stats 无 ⏱ + 停止清理
 printf 'Transferred: 2.469 GiB / 4.976 GiB, ETA 3m\n' > "$WORK_DIR/batch_l7.log"

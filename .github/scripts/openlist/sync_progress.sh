@@ -546,7 +546,9 @@ _progress_render() {
             msg+="<code>${_ind_sub}· $(escape_html "$(cat "$_nf")")</code>"$'\n'
           fi
           if [ -n "$_bh" ]; then
-            msg+="$(tree_lines "$_bh" | sed 's/^  //' | sed "s/^/${_ind_sub}/" | sed 's/^\(.*\)$/<code>\1<\/code>/')"$'\n'
+            # 缩进段与树行并列输出（不整行包裹）：tree_lines 行首已是 <code> 前缀段，
+            # 整行再包一层会嵌套同名标签（HTML 400 = 面板静默丢失，规范 7 章）
+            msg+="$(tree_lines "$_bh" | sed 's/^  //' | sed "s/^/<code>${_ind_sub}<\/code>/")"$'\n'
           fi
         else
           [ -f "$_sf" ] && msg+="<code>${_ind}$(escape_html "$(cat "$_sf")")</code>"$'\n'
@@ -554,9 +556,12 @@ _progress_render() {
           # tree_lines 每行自带 2 空格树干前缀（tree_conn），剥掉后
           # 由本层缩进统一控制，保证树与统计行同列对齐
           _tree="$(tree_lines "$_raw" | sed 's/^  //')"
+          # 缩进拼在行首、树行原样跟随：tree_lines 的行首已是 <code> 前缀段，
+          # 整行再包一层 <code> 会嵌套同名标签（HTML 解析失败 = 面板静默丢失，
+          # 规范 7 章不重发）；两个 <code> 并列在同一等宽列，竖线照样成列。
           while IFS= read -r _line; do
             [ -z "$_line" ] && continue
-            msg+="<code>${_ind_rows}${_line}</code>"$'\n'
+            msg+="<code>${_ind_rows}</code>${_line}"$'\n'
           done <<< "$_tree"
         fi
         # 细粒度状态（深层 detail）挂在最末；标签型块时对齐末条标签文本列（+4 格），等宽渲染

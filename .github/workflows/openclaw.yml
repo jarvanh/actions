@@ -2384,7 +2384,9 @@ jobs:
                   [ "${_hfc:-0}" -gt 0 ] && _hinfo="${_hinfo} · ⚠️ 连续失败 ${_hfc} 次"
                   [ "${_hgen:-0}" -gt 0 ] && _hinfo="${_hinfo} · 签到设备换代 +1"
                   [ "${_hrc:-0}" -gt 0 ] && _hinfo="${_hinfo} · ⏳ 退避重试中（已退 ${_hrc} 次）"
-                  tg_add_entry _hrows "${_hnick} · ${_hinfo}"
+                  # 主体是「昵称 · 健康备注」= 自然语言（规范 · 取值行口径），走
+                  # tg_add_entry_text 裸文本；tg_add_entry 会把整串当机器值套 <code>
+                  tg_add_entry_text _hrows "${_hnick} · ${_hinfo}"
                   _hn=$((_hn + 1))
                 done <<< "$(jq -r 'keys[]' "$_ck_state" 2>/dev/null)"
               fi
