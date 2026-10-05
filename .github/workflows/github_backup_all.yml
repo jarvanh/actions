@@ -134,7 +134,10 @@ jobs:
           if [ "$STATUS" == "success" ]; then
             ARCHIVE_NAME="${GITHUB_REPOS_ARCHIVE_NAME:-github_repos_latest.tar.gz}"
             FILE_SIZE_BYTES="${GITHUB_REPOS_ARCHIVE_BYTES:-0}"
-            FILE_SIZE_HUMAN=$(numfmt --to=iec-i --suffix=B "$FILE_SIZE_BYTES" 2>/dev/null || echo "${FILE_SIZE_BYTES}B")
+            # 大小走真源 format_bytes（规范 5.2：bash 侧只有一份实现，source 了
+            # 真源的通知点直接用它）——numfmt --to=iec-i 输出 "3.4GiB"（无空格、
+            # 非三位小数），与全库 "3.400 GiB" 形态漂移
+            FILE_SIZE_HUMAN=$(format_bytes "$FILE_SIZE_BYTES")
             if [ "$FILE_SIZE_BYTES" -le 0 ]; then
               _tier="alert"   # ⚠️ 状态异常 = 需人工检查日志
               tg_add_title msg "⚠️ GitHub 全仓库备份状态异常"
