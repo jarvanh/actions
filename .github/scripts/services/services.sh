@@ -344,7 +344,12 @@ StartLimitIntervalSec=300
 StartLimitBurst=0
 
 [Service]
-Type=simple
+# Type=notify + WatchdogSec：防「进程活着但不干活」的假死（2026-10-05）。
+# 主循环用 except Exception 吞异常、永不退出，这类故障 Restart=always 看不见；
+# board.py 每完整跑完一轮发一次 WATCHDOG=1，卡在 cycle() 内就喂不上狗，
+# 超时后由 systemd 重启。POLL_SECS=60，180s 留足三轮余量（避免采集中小抖动误杀）。
+Type=notify
+WatchdogSec=180
 # 复用全局敏感变量：TELEGRAM_BOT_TOKEN_*、TELEGRAM_CHAT_ID、TRAE2API_KEY
 EnvironmentFile=%h/.openclaw/.env
 ExecStart=/usr/bin/python3 /dropbox/self-hosted/quota-board/board.py
