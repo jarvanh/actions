@@ -88,8 +88,8 @@ jobs:
           #   不再只能等下一轮 run（可达数小时）。管理器缺失时退回原 nohup。
           #   注意：ensure 检测到已有裸跑实例会**跳过**（不打断本轮挂载），
           #   单元在新 VM 上自动接管；回退分支因此仍必须保留。
-          if [ -f "$GITHUB_WORKSPACE/.github/scripts/daemons/daemons.sh" ]; then
-            bash "$GITHUB_WORKSPACE/.github/scripts/daemons/daemons.sh" ensure rclone-dropbox || true
+          if [ -f "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" ]; then
+            bash "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" ensure rclone-dropbox || true
           fi
           if ! mount | grep -q " on /dropbox "; then
             nohup rclone mount dropbox: /dropbox \
@@ -470,10 +470,10 @@ jobs:
         # tailscale/github-action **之前**执行，原因见下方接管原理。
         run: |
           set -uo pipefail
-          if [ -f "$GITHUB_WORKSPACE/.github/scripts/daemons/daemons.sh" ]; then
-            bash "$GITHUB_WORKSPACE/.github/scripts/daemons/daemons.sh" ensure tailscaled || true
+          if [ -f "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" ]; then
+            bash "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" ensure tailscaled || true
           else
-            echo "⚠️ daemons.sh 缺失，沿用 action 自带的 --state=mem: 裸跑"
+            echo "⚠️ services.sh 缺失，沿用 action 自带的 --state=mem: 裸跑"
           fi
           # 接管原理（2026-10-05 实测）：
           #   action 内部无条件 spawn `sudo -E tailscaled --state=mem:`。若本单元
@@ -4739,8 +4739,8 @@ jobs:
           # ⚠️ 这里必须用 ensure 而不是 restart：若已有裸跑实例，systemd 再起一个
           #    会造成**双份归档**同时上传同一 tar.gz（flock 抢锁、云端反复覆盖）。
           #    ensure 检测到裸跑就跳过，新 VM 上则由单元接管。
-          if [ -f "$GITHUB_WORKSPACE/.github/scripts/daemons/daemons.sh" ]; then
-            bash "$GITHUB_WORKSPACE/.github/scripts/daemons/daemons.sh" ensure archive-loop || true
+          if [ -f "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" ]; then
+            bash "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" ensure archive-loop || true
           fi
           if ! pgrep -f "openclaw-archive-loop.sh" >/dev/null 2>&1; then
             nohup bash /tmp/openclaw-archive-loop.sh > /tmp/openclaw-archive-loop.log 2>&1 &
