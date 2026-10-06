@@ -4561,9 +4561,14 @@ jobs:
           # staging 目录全部抹掉 —— 健康实例刚打好的包被直接删除，rclone 随即报
           # "no such file or directory"；而 copyto 已先删远端目标，云端包跟着消失。
           # 归档循环崩溃 121 次、zcode.tar.gz 云端一度查不到，根因都在这层互相抹除。
-          SELF_PID=$$
-          if other_pid=$(pgrep -f "openclaw-archive-loop.sh" 2>/dev/null | grep -v "^${SELF_PID}$" | head -n 1) && [ -n "$other_pid" ]; then
-            echo "[$(date '+%F %T')] ⏭️ another archive loop already running (pid=$other_pid), exit without cleanup"
+          # 用 flock 而不是 pgrep -f：pgrep 按命令行全文匹配，会把**排查命令自身**
+          #（如 `pgrep -af "openclaw-archive-loop.sh"`）也算成另一个实例，
+          # 结果两个实例互相否决、谁都不干活（2026-10-06 实测踩到）。
+          # flock 只看锁文件持有者，与命令行文本无关，且退出即自动释放。
+          LOOP_LOCK="/tmp/openclaw-archive-loop.instance.lock"
+          exec 9>"$LOOP_LOCK"
+          if ! flock -n 9; then
+            echo "[$(date '+%F %T')] ⏭️ another archive loop already running (lock=$LOOP_LOCK), exit without cleanup"
             exit 0
           fi
 
