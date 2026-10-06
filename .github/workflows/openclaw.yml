@@ -4976,6 +4976,23 @@ jobs:
           if [ -f /tmp/openclaw-archive.pid ]; then
             kill "$(cat /tmp/openclaw-archive.pid)" 2>/dev/null || true
           fi
+          # 2026-10-06 rc=23 根治：归档循环已由 systemd 托管（archive-loop.service，
+          # Restart=always / RestartSec=30）。上面只 kill pid 的话，30s 后会被原样拉回，
+          # 新实例启动即执行 cleanup_archive_outputs，rm -rf /tmp/openclaw-archive-stage.*
+          # 恰好抹掉最终归档正在写入的 staging 目录 → rsync 全量 mkdir ENOENT → rc=23
+          # （run 37396503543 即此形态：staging 43tN0K 06:33:29 建立、06:33:50 全量报错）。
+          # 必须走 systemctl stop 并等 unit 退出 —— 与下方 cred-sync 的教训同一模式。
+          if systemctl --user is-active --quiet archive-loop.service 2>/dev/null; then
+            systemctl --user stop archive-loop.service 2>/dev/null || true
+          fi
+          for _i in $(seq 1 30); do
+            if [ "$(systemctl --user is-active archive-loop.service 2>/dev/null || echo inactive)" != "active" ]; then
+              break
+            fi
+            sleep 1
+          done
+          # 兜底：nohup 历史实例（无 unit 托管）或 stop 失败的残留进程，统一补杀
+          pkill -f "bash /tmp/openclaw-archive-loop.sh" 2>/dev/null || true
           # 凭据同步循环：先停它再停 serve，避免它在本轮收尾期间又拉进新凭据
           # ⚠️ 2026-09-29：cred-sync 已改 systemd 托管，unit 是 Restart=always，
           #    pkill 会被 systemd 在 RestartSec=10 秒后抢回来（「停了又活」），
@@ -5231,7 +5248,11 @@ jobs:
           echo "OpenClaw 待归档目录大小: ${openclaw_src_kb}KB"
           require_free_kb /tmp $((openclaw_src_kb + 1024 * 1024)) "final openclaw archive preflight"
           openclaw_final_output=""
-          if openclaw_final_output=$(bash /tmp/create-openclaw-archive.sh "$TMP_OPENCLAW_TAR" 2>&1); then
+          # 2026-10-06：与周期归档循环共用同一把 /tmp/openclaw-archive.lock 互斥。
+          # 此前是裸调用、不受锁保护，若循环实例因故仍存活（如 stop 失败），
+          # 两路 rsync 会并发扫同一源目录、staging 互相干扰。等锁最多 600s，
+          # 仍拿不到则以 rc=200 走失败分支照常告警且不覆盖云端主包（保守优于脏写）。
+          if openclaw_final_output=$(flock -w 600 -E 200 /tmp/openclaw-archive.lock timeout 40m bash /tmp/create-openclaw-archive.sh "$TMP_OPENCLAW_TAR" 2>&1); then
             openclaw_final_upload_output=""
             echo "5. Resolving archive destination (healthy → main package; unhealthy → openclaw-failed-* isolate)..."
             ARCHIVE_DEST="dropbox:self-hosted/openclaw.tar.gz"
