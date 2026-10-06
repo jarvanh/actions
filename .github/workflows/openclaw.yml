@@ -5061,8 +5061,13 @@ jobs:
           # （含 -current / -darwin-arm64），回推时无 exclude 会整批推上 Dropbox，
           # 实测堆积 17 个共 155MB。二进制由本步骤每轮从 GitHub Releases 重拉，
           # 不需要持久化；只回推凭据/状态/用量等真数据。
+          # ⚠️ 2026-10-06：workbuddy 的 WorkingDirectory 已改为 Dropbox（数据直写），
+          # 故本回推**不再是主路径**，只作兜底（例如 cwd 曾被回退到 /tmp 的旧轮次）。
+          # 必须加 --ignore-existing：否则 /tmp 里可能残留比 Dropbox 更旧的副本
+          # （rclone copy 默认按大小/时间覆盖），会把直写的新数据倒退回旧版本。
+          # 只补远端没有的文件，绝不覆盖已存在的。
           rclone copy "$WB_RUN_DIR" "dropbox:self-hosted/workbuddy-gateway" \
-            --exclude 'workbuddy-gateway-*' \
+            --exclude 'workbuddy-gateway-*' --ignore-existing \
             --retries 5 --low-level-retries 10 --timeout 1m --contimeout 15s 2>/dev/null || \
             echo "⚠️ workbuddy 数据回推失败（状态快照可能落后一轮）"
           WB_VER="$(head -n 1 "$WB_DIR/.installed-version" 2>/dev/null || true)"

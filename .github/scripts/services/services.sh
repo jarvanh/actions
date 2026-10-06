@@ -220,7 +220,15 @@ StartLimitBurst=0
 
 [Service]
 Type=simple
-WorkingDirectory=/tmp/local_workbuddy/data
+# 工作目录直接指向 Dropbox（2026-10-06 定）：让凭据/config/usage 等数据
+# **直写**持久化目录，不再依赖「停后回推」（此前 Dropbox 副本实测滞后 4 小时，
+# runner 崩溃会丢整轮用量流水）。
+# 可行性实测：cwd 在 FUSE 上的 atomic write（tmp+rename）连续 20/20 成功；
+# 20 次 rename FUSE 213ms vs 本地 41ms（约 5 倍，单次约 10ms）。按 status.json
+# 每 3 秒一次算，全天 28800 次、多耗约 4 分钟且分散，对网关无感。
+# ⚠️ 二进制仍必须在本地盘：挂载点合成权限无 x 位，执行报 Permission denied。
+# ⚠️ 凭据落挂载点会变成 666（全局可写）—— 主人已知并接受（2026-10-06）。
+WorkingDirectory=/dropbox/self-hosted/workbuddy-gateway
 Environment=AI_GATEWAY_API_KEY=${AI_GATEWAY_API_KEY}
 ExecStart=/tmp/local_workbuddy/workbuddy-gateway serve -addr 0.0.0.0 -port 8318 -api-key \${AI_GATEWAY_API_KEY}
 Restart=always
