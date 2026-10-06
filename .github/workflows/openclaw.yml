@@ -4569,51 +4569,9 @@ jobs:
           EOF
           chmod +x /tmp/create-clirelay-archive.sh
 
-          # workbuddy 凭据同步：serve 只把「启动时那份快照」读进内存，且只扫描 cwd ——
-          # 运行期在 Dropbox 上新增/替换 workbuddy*.json，serve 看不到，最快也要等下一轮
-          # （≈5.7 小时）。这里每 INTERVAL_SECONDS 秒把 Dropbox 上的凭据同步进运行目录，
-          # serve 每 5 秒扫描 cwd 热加载，于是「你上传凭据」到「凭据生效」缩短到几分钟。
-          # 用 sync 让 Dropbox 成为凭据唯一真源：你在那边删掉的凭据这里同步移除（账号退出池）。
-          #
-          # 用 --filter 而非 --include + --exclude：rclone 明确警告混用 include/exclude 结果
-          # 不可预期，--filter 按序求值才是确定的。规则从上到下首个命中即定：
-          #   1) - workbuddy-status.json  排除 serve 自建的状态快照。
-          #      必须显式排除 —— 'workbuddy*.json' 这个 glob 会把它一起匹配进来，
-          #      而它是 serve 运行期高频重写的文件，sync --delete 会在每轮把它删掉。
-          #   2) + workbuddy*.json        凭据（唯一进入同步的文件）
-          #   3) - **                     其余一律排除（二进制、模型缓存、logs/ 等）
-          # 源目录不存在（首轮）→ 静默跳过；rclone 失败只记日志，不打断循环、也不发通知。
-          cat > /tmp/workbuddy-cred-sync.sh <<'EOF'
-          #!/usr/bin/env bash
-          set -uo pipefail
-
-          SRC="dropbox:self-hosted/workbuddy-gateway"
-          DEST="/tmp/local_workbuddy/data"
-          LOCK_FILE="/tmp/workbuddy-cred-sync.lock"
-          INTERVAL_SECONDS="${1:-300}"
-
-          while true; do
-            if [ -d "$DEST" ]; then
-              if flock -E 200 -n "$LOCK_FILE" \
-                rclone sync "$SRC" "$DEST" \
-                  --filter '- workbuddy-status.json' \
-                  --filter '+ workbuddy*.json' \
-                  --filter '- **' \
-                  --retries 3 --low-level-retries 5 --timeout 1m --contimeout 15s 2>/dev/null; then
-                echo "[$(date '+%F %T')] workbuddy credentials synced from Dropbox"
-              else
-                rc=$?
-                if [ "$rc" -eq 200 ]; then
-                  echo "[$(date '+%F %T')] ⏭️ previous credential sync still running, skip this round"
-                else
-                  echo "[$(date '+%F %T')] ⚠️ workbuddy credential sync failed (rc=$rc)"
-                fi
-              fi
-            fi
-            sleep "$INTERVAL_SECONDS"
-          done
-          EOF
-          chmod +x /tmp/workbuddy-cred-sync.sh
+          # workbuddy-cred-sync 已于 2026-10-06 停用移除，不再生成该同步脚本。
+          # （原逻辑：每 300s 把 Dropbox 凭据 sync 进 /tmp 运行目录；现 workbuddy 的
+          #   WorkingDirectory 已直指 Dropbox，凭据由网关自己直写，该同步彻底空转。）
 
           cat > /tmp/openclaw-archive-loop.sh <<'EOF'
           #!/usr/bin/env bash
@@ -4906,29 +4864,12 @@ jobs:
           # 2026-10-04 unit 真源统一进 services.sh：原先这里用 printf 内联写单元，
           #   与另外三个网关的 write_unit 双轨并存，改配置极易漏改一处。现与它们
           #   同口径，由 ensure 生成（含 TimeoutStopSec=180）并每轮重启一次。
-          bash "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" ensure workbuddy-cred-sync || true
-
-          # 立即同步执行一次并打印结果：后台循环的 stdout 只进 /tmp/workbuddy-cred-sync.log，
-          # 不进 step 日志，而该 log 又只存在于 runner 上 —— 收尾打印只覆盖"跑满一整轮"的场景，
-          # 被取消的轮次收尾步骤会被跳过，那就完全看不到证据。这里同步跑一次，
-          # 让「凭据同步是否真的工作」在 step 日志里永远有据可查。
-          echo "--- initial workbuddy credential sync probe ---"
-          # 不能写成 `if rclone ... | tail`：那测的是 tail 的退出码，rclone 失败也会报 ✅。
-          # 先落变量再判 rc，保留 tail 的截断展示。
-          probe_out=""
-          probe_rc=0
-          probe_out="$(rclone sync "dropbox:self-hosted/workbuddy-gateway" /tmp/local_workbuddy/data \
-            --filter '- workbuddy-status.json' \
-            --filter '+ workbuddy*.json' \
-            --filter '- **' -v 2>&1)" || probe_rc=$?
-          printf '%s\n' "$probe_out" | tail -n 15
-          if [ "$probe_rc" -eq 0 ]; then
-            echo "✅ probe ok"
-          else
-            echo "⚠️ probe failed (rc=$probe_rc)（不阻塞；后台循环会继续重试）"
-          fi
-          echo "--- credentials now in run dir ---"
-          ls -la /tmp/local_workbuddy/data/workbuddy*.json 2>/dev/null || echo "<none>"
+          # workbuddy-cred-sync 已于 2026-10-06 停用：
+          # workbuddy 的 WorkingDirectory 已改为 Dropbox（数据直写），不再读 /tmp；
+          # 该同步（Dropbox → /tmp/local_workbuddy/data）彻底空转 —— 实测两侧凭据
+          # md5 一致，且无任何进程持有 /tmp 下 workbuddy 文件。
+          # services.sh 已移除该 unit 分支，故此处不再 ensure，也不再跑 sync probe。
+          echo "workbuddy-cred-sync: 已停用（2026-10-06），跳过"
 
       - name: Keep alive
         id: keepalive
@@ -5039,14 +4980,8 @@ jobs:
           # ⚠️ 2026-09-29：cred-sync 已改 systemd 托管，unit 是 Restart=always，
           #    pkill 会被 systemd 在 RestartSec=10 秒后抢回来（「停了又活」），
           #    必须走 systemctl stop。旧 pid 文件方式同步退役。
-          rm -f /tmp/workbuddy-cred-sync.pid 2>/dev/null || true
-          # 与启动侧同口径：走 services.sh stop（unit 真源统一，2026-10-04）
-          bash "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" stop workbuddy-cred-sync 2>/dev/null \
-            && echo "workbuddy: cred-sync stopped" \
-            || echo "⚠️ workbuddy: cred-sync 停止失败（可能未运行）"
-          # 兜底：清理历史遗留、非 systemd 托管的 nohup 实例（ppid=1 的孤儿）。
-          # 必须在 systemctl stop 之后执行 —— unit 是 Restart=always，先 pkill 会被
-          # systemd 在 RestartSec=10 秒后抢回来，表现为「停了又活」。
+          # workbuddy-cred-sync 已于 2026-10-06 停用，unit 已从 services.sh 移除，无需 stop。
+          # 仅清理可能残留的历史进程（无害兜底）。
           pkill -f "workbuddy-cred-sync.sh" 2>/dev/null || true
 
           echo "3. Stopping service containers before final archive..."
@@ -5104,16 +5039,7 @@ jobs:
             --retries 5 --low-level-retries 10 --timeout 1m --contimeout 15s 2>/dev/null || \
             echo "⚠️ workbuddy 数据回推失败（状态快照可能落后一轮）"
           WB_VER="$(head -n 1 "$WB_DIR/.installed-version" 2>/dev/null || true)"
-          # 把凭据同步循环的日志尾部打出来：它跑在后台，日志只在 runner 上，
-          # 不打印就无从确认「每 5 分钟同步凭据」是否真的在发生（本轮次次成功/跳过/失败）。
-          echo "--- workbuddy-cred-sync.log tail ---"
-          # 2026-09-29：cred-sync 改 systemd 托管后，日志由 unit 的 StandardOutput 写入
-          # data/logs/cred-sync.log（与 setup-env 历史口径一致，且能随 3b-1 回推 Dropbox）。
-          # 旧路径 /tmp/workbuddy-cred-sync.log 仅作兼容兜底。
-          tail -n 10 /dropbox/self-hosted/workbuddy-gateway/logs/cred-sync.log 2>/dev/null \
-            || tail -n 10 /tmp/workbuddy-cred-sync.log 2>/dev/null \
-            || echo "<no cred sync log>"
-          echo "--- end workbuddy-cred-sync.log tail ---"
+          # workbuddy-cred-sync 已于 2026-10-06 停用，无循环日志可读。
           # 顺带核对凭据是否已进运行目录（运行期新上传的凭据应出现在这里）
           ls -la "$WB_RUN_DIR"/workbuddy*.json 2>/dev/null | head -10 || true
 

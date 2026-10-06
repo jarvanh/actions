@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 宿主进程形态 AI 网关与看板服务的 systemd --user 管理器
-# （workbuddy-gateway / zcode2api / qingyan / workbuddy-cred-sync / quota-board）
+# （workbuddy-gateway / zcode2api / qingyan / quota-board）
+# 注：workbuddy-cred-sync 已于 2026-10-06 停用移除，见 write_unit 内同名注释。
 #
 # 位置：.github/scripts/services/services.sh（随仓库 checkout 分发）
 # 调用：openclaw.yml 的两个网关启动步骤（ensure）与收尾停止步骤（stop）
@@ -102,7 +103,7 @@ svc() {
 # 名称白名单：校验必须在**当前 shell** 做（放进 $(...) 时 die 只退子 shell）
 valid_name() {
   case "$1" in
-    workbuddy|zcode2api|qingyan|workbuddy-cred-sync|quota-board|rclone-dropbox|archive-loop|tailscaled) return 0 ;;
+    workbuddy|zcode2api|qingyan|quota-board|rclone-dropbox|archive-loop|tailscaled) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -308,33 +309,10 @@ StandardError=append:$LOG_ROOT/qingyan-proxy/logs/qingyan.log
 WantedBy=default.target
 EOF
       ;;
-    workbuddy-cred-sync)
-      # 同步循环依赖 openclaw.yml 生成的 /tmp/workbuddy-cred-sync.sh（rclone 把
-      # Dropbox 凭据拉到运行目录）。脚本缺失时起单元只会空转崩溃循环。
-      [ -s /tmp/workbuddy-cred-sync.sh ] || { rm -f "$tmp"; die "workbuddy-cred-sync: /tmp/workbuddy-cred-sync.sh 缺失"; }
-      ensure_log_dir "$LOG_ROOT/workbuddy-gateway/logs/cred-sync.log"
-      cat > "$tmp" <<EOF
-[Unit]
-Description=workbuddy credential sync (Dropbox -> /tmp/local_workbuddy/data, 300s)
-After=network-online.target
-Wants=network-online.target
-StartLimitIntervalSec=300
-StartLimitBurst=0
-
-[Service]
-Type=simple
-ExecStart=/tmp/workbuddy-cred-sync.sh 300
-Restart=always
-RestartSec=10
-# 停止超时：循环可能正持有 flock / rclone 传输，默认 90s 不够，统一放宽。
-TimeoutStopSec=180
-StandardOutput=append:$LOG_ROOT/workbuddy-gateway/logs/cred-sync.log
-StandardError=append:$LOG_ROOT/workbuddy-gateway/logs/cred-sync.log
-
-[Install]
-WantedBy=default.target
-EOF
-      ;;
+    # workbuddy-cred-sync 已于 2026-10-06 停用并移除：
+    # 它原本做「Dropbox → /tmp/local_workbuddy/data」单向同步凭据，但 workbuddy 的
+    # WorkingDirectory 已改为 Dropbox（数据直写），不再读 /tmp —— 该同步彻底空转。
+    # 实测凭据两侧 md5 一致，确认为无效同步。保留此处注释以防将来误加回。
     quota-board)
       # 看板不是网关，但同为宿主常驻进程，同样需要 Restart=always 自愈。
       # 与四个网关的差异：本体（board.py）和凭据都在持久化目录
@@ -467,7 +445,7 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
       ;;
-    *) die "未知服务: $name（可选 workbuddy | zcode2api | qingyan | workbuddy-cred-sync | quota-board | rclone-dropbox | archive-loop | tailscaled）" ;;
+    *) die "未知服务: $name（可选 workbuddy | zcode2api | qingyan | quota-board | rclone-dropbox | archive-loop | tailscaled）" ;;
   esac
   # 写盘按级别分流：system 级落到 /etc/systemd/system（需 sudo，权限 644）
   case "$(svc_level "$name")" in
@@ -484,7 +462,7 @@ EOF
 
 cmd_ensure() {
   local name="${1:-}"
-  [ -n "$name" ] || die "用法: $0 ensure <workbuddy|zcode2api|qingyan|workbuddy-cred-sync|quota-board|rclone-dropbox|archive-loop|tailscaled>"
+  [ -n "$name" ] || die "用法: $0 ensure <workbuddy|zcode2api|qingyan|quota-board|rclone-dropbox|archive-loop|tailscaled>"
   valid_name "$name" || die "未知服务: $name"
   local unit
   unit="$(unit_name "$name")"
@@ -534,7 +512,7 @@ cmd_ensure() {
 
 cmd_stop() {
   local name="${1:-}"
-  [ -n "$name" ] || die "用法: $0 stop <workbuddy|zcode2api|qingyan|workbuddy-cred-sync|quota-board|rclone-dropbox|archive-loop|tailscaled>"
+  [ -n "$name" ] || die "用法: $0 stop <workbuddy|zcode2api|qingyan|quota-board|rclone-dropbox|archive-loop|tailscaled>"
   valid_name "$name" || die "未知服务: $name"
   local unit
   unit="$(unit_name "$name")"
@@ -554,7 +532,7 @@ cmd_stop() {
 
 cmd_status() {
   local only="${1:-}"
-  local names="workbuddy zcode2api qingyan workbuddy-cred-sync quota-board rclone-dropbox archive-loop tailscaled"
+  local names="workbuddy zcode2api qingyan quota-board rclone-dropbox archive-loop tailscaled"
   printf '%-20s %-10s %-34s %s\n' "服务" "级别" "状态" "单元"
   local n unit st lvl
   for n in $names; do
