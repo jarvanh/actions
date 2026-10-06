@@ -4555,6 +4555,18 @@ jobs:
             fi
           done
 
+          # 2026-10-06：单实例守卫 —— 必须放在 cleanup_archive_outputs **之前**。
+          # systemd 单元（enabled 后随 user session 自启）与 nohup 拉起的实例会并存，
+          # 重复实例一启动就执行 cleanup_archive_outputs，把 /tmp/*.tar.gz 与
+          # staging 目录全部抹掉 —— 健康实例刚打好的包被直接删除，rclone 随即报
+          # "no such file or directory"；而 copyto 已先删远端目标，云端包跟着消失。
+          # 归档循环崩溃 121 次、zcode.tar.gz 云端一度查不到，根因都在这层互相抹除。
+          SELF_PID=$$
+          if other_pid=$(pgrep -f "openclaw-archive-loop.sh" 2>/dev/null | grep -v "^${SELF_PID}$" | head -n 1) && [ -n "$other_pid" ]; then
+            echo "[$(date '+%F %T')] ⏭️ another archive loop already running (pid=$other_pid), exit without cleanup"
+            exit 0
+          fi
+
           TMP_OPENCLAW_TAR="/tmp/openclaw.tar.gz"
           TMP_CLIPROXYAPI_TAR="/tmp/CLIProxyAPI.tar.gz"
           TMP_CLIRELAY_TAR="/tmp/CliRelay.tar.gz"
@@ -4577,7 +4589,24 @@ jobs:
           # 真源只在 step 顶层 source 一次（规范 4.4）：本 step 的归档循环会 fork
           # 子进程调用 send_telegram_alert，函数体内再 source 不会改父 shell 的
           # 函数表，调用点若对 send_tg 做本地覆写会被静默还原成真发。
-          source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+          # 2026-10-06：systemd 单元不继承 GitHub Actions 的环境，GITHUB_WORKSPACE
+          # 为空 → set -u 下 source 直接报错退出 → Restart=always 变崩溃循环
+          #（实测 NRestarts=121，每 30s 一轮，每轮还顺手 cleanup 一次）。
+          # 真源仓库检出路径固定，缺失时回落到该路径；文件不存在则只降级告警能力，
+          # 绝不能因此让整个归档循环退出。
+          WS_DIR="${GITHUB_WORKSPACE:-/home/runner/work/actions/actions}"
+          if [ -f "$WS_DIR/.github/scripts/telegram/tg_notify.sh" ]; then
+            source "$WS_DIR/.github/scripts/telegram/tg_notify.sh"
+          else
+            echo "[$(date '+%F %T')] ⚠️ tg_notify.sh not found at $WS_DIR; alerts degraded to log-only"
+            send_tg() { echo "[send_tg degraded] $1" >&2; return 0; }
+            tg_add_title() { :; }
+            tg_add_path() { :; }
+            tg_add_kv() { :; }
+            tg_add_section() { :; }
+            tg_add_pre() { :; }
+            tg_add_footer() { :; }
+          fi
 
           # 用法: send_telegram_alert <对象> <结论> <原因> [原始输出]
           # 版式（docs/telegram-notify.md 2.3 / 4.3 / 规范 · 多行块）：对象是机器返回的包名 → <code>；
