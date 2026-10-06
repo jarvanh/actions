@@ -5223,6 +5223,37 @@ jobs:
             printf '%s\t%s\t%s\t%s\n' "$1" "$2" "${3:-0}" "${4:-}" >> "$FINAL_ARCHIVE_RESULTS" 2>/dev/null \
               || echo "⚠️ 归档结果记录失败（不影响归档）: $1 $2" >&2
           }
+          # ── 通用：最终归档的「体积校验 → 上传 → 记结果 → 告警 → 清理」 ──
+          # 2026-10-06 第三层归档统一：原先 zcode / zcode2api-data / CliRelay /
+          # CLIProxyAPI / rsstt 各自写一遍这段，仅对象名与路径不同，行为完全一致。
+          # 各家**打包**方式仍保留差异（脚本 vs 裸 tar、sudo vs 普通、flock 与否），
+          # 只统一打包之后的收尾，避免误改打包语义。
+          # 用法: upload_final_archive <对象名> <本地包路径> <远端目标> [最小字节]
+          upload_final_archive() {
+            local obj="$1" tar_path="$2" remote="$3" min_size="${4:-0}"
+            local size out="" rc=0
+            size=$(stat -c%s "$tar_path" 2>/dev/null || echo 0)
+            if [ "${size:-0}" -lt "${min_size:-0}" ]; then
+              echo "⚠️ ${obj} 压缩包小于最小阈值，放弃覆盖云端数据: size=${size} min=${min_size}"
+              record_archive_result "$obj" fail 0 "压缩包小于最小阈值"
+              send_archive_alert "$obj" "归档失败" "压缩包小于最小阈值 · 放弃覆盖云端数据" "size=$size min=$min_size output=$tar_path"
+              return 1
+            fi
+            if out=$(rclone copyto "$tar_path" "$remote" -v 2>&1); then
+              echo "final ${obj} archive/upload ok (${size} bytes)"
+              record_archive_result "$obj" ok "$size"
+              # 包可能由 root 产出（rsstt / CLIProxyAPI 用 sudo tar），普通 rm 会失败
+              rm -f "$tar_path" 2>/dev/null || sudo rm -f "$tar_path" 2>/dev/null || true
+              return 0
+            else
+              rc=$?
+              echo "⚠️ final ${obj} upload failed (rc=$rc): ${out}"
+              record_archive_result "$obj" fail 0 "上传失败 · 退出码 $rc"
+              send_archive_alert "$obj" "上传失败 · 退出码 $rc" "rclone 上传失败" "${out:-无输出}"
+              return 1
+            fi
+          }
+
           # 快照名单独记（它是主包的副本，混进明细会与主包重复计数）
           FINAL_ARCHIVE_SNAPSHOT="/tmp/openclaw-final-snapshot-name"
           rm -f "$FINAL_ARCHIVE_SNAPSHOT"
@@ -5369,17 +5400,7 @@ jobs:
               if [ "$zcode_final_remote_size" -gt 0 ] && [ "$zcode_final_new_size" -lt "$((zcode_final_remote_size * 60 / 100))" ]; then
                 echo "ℹ️ zcode 体积较云端下降超 40%（new=${zcode_final_new_size}B remote=${zcode_final_remote_size}B），已通过完整性校验，正常覆盖"
               fi
-              zcode_final_upload_output=""
-              if zcode_final_upload_output=$(rclone copyto "$TMP_ZCODE_FINAL_TAR" "dropbox:self-hosted/zcode.tar.gz" -v 2>&1); then
-                echo "final zcode archive/upload ok: ${zcode_final_output}"
-                record_archive_result "zcode.tar.gz" ok "$zcode_final_new_size"
-                rm -f "$TMP_ZCODE_FINAL_TAR"
-              else
-                rc=$?
-                echo "⚠️ final zcode.tar.gz upload failed (rc=$rc): ${zcode_final_upload_output}"
-                record_archive_result "zcode.tar.gz" fail 0 "上传失败 · 退出码 $rc"
-                send_archive_alert "zcode.tar.gz" "上传失败 · 退出码 $rc" "rclone 上传失败" "${zcode_final_upload_output:-无输出}"
-              fi
+              upload_final_archive "zcode.tar.gz" "$TMP_ZCODE_FINAL_TAR" "dropbox:self-hosted/zcode.tar.gz"
             else
               rc=$?
               echo "⚠️ final zcode.tar.gz archive failed (rc=$rc): ${zcode_final_output}"
@@ -5404,17 +5425,7 @@ jobs:
             if z2a_final_output=$(tar -czf "$TMP_Z2A_FINAL_TAR" -C "$Z2A_RUN_DIR" .env data 2>&1) \
               && [ -s "$TMP_Z2A_FINAL_TAR" ]; then
               z2a_final_size=$(stat -c%s "$TMP_Z2A_FINAL_TAR" 2>/dev/null || echo 0)
-              z2a_final_upload_output=""
-              if z2a_final_upload_output=$(rclone copyto "$TMP_Z2A_FINAL_TAR" "dropbox:self-hosted/zcode2api-data.tar.gz" -v 2>&1); then
-                echo "final zcode2api-data archive/upload ok ($z2a_final_size bytes)"
-                record_archive_result "zcode2api-data.tar.gz" ok "$z2a_final_size"
-                rm -f "$TMP_Z2A_FINAL_TAR"
-              else
-                rc=$?
-                echo "⚠️ final zcode2api-data.tar.gz upload failed (rc=$rc): ${z2a_final_upload_output}"
-                record_archive_result "zcode2api-data.tar.gz" fail 0 "上传失败 · 退出码 $rc"
-                send_archive_alert "zcode2api-data.tar.gz" "上传失败 · 退出码 $rc" "rclone 上传失败" "${z2a_final_upload_output:-无输出}"
-              fi
+              upload_final_archive "zcode2api-data.tar.gz" "$TMP_Z2A_FINAL_TAR" "dropbox:self-hosted/zcode2api-data.tar.gz"
             else
               rc=$?
               echo "⚠️ final zcode2api-data.tar.gz archive failed (rc=$rc): ${z2a_final_output}"
@@ -5446,23 +5457,7 @@ jobs:
               CLIRELAY_FINAL_TAR="/tmp/CliRelay-final.tar.gz"
               if clirelay_final_output=$(flock -w 600 -E 200 /tmp/openclaw-archive.lock timeout 40m bash /tmp/create-clirelay-archive.sh "$CLIRELAY_FINAL_TAR" 2>&1); then
                 actual_size=$(stat -c%s "$CLIRELAY_FINAL_TAR" 2>/dev/null || echo 0)
-                if [ "$actual_size" -ge "$MIN_SIZE" ]; then
-                  clirelay_final_upload_output=""
-                  if clirelay_final_upload_output=$(rclone copyto "$CLIRELAY_FINAL_TAR" dropbox:self-hosted/CliRelay.tar.gz -v 2>&1); then
-                    echo "final CliRelay archive/upload ok: ${clirelay_final_output}"
-                    record_archive_result "CliRelay.tar.gz" ok "$actual_size"
-                    rm -f "$CLIRELAY_FINAL_TAR"
-                  else
-                    rc=$?
-                    echo "⚠️ final CliRelay.tar.gz upload failed (rc=$rc): ${clirelay_final_upload_output}"
-                    record_archive_result "CliRelay.tar.gz" fail 0 "上传失败 · 退出码 $rc"
-                    send_archive_alert "CliRelay.tar.gz" "上传失败 · 退出码 $rc" "rclone 上传失败" "${clirelay_final_upload_output:-无输出}"
-                  fi
-                else
-                  echo "⚠️ CliRelay 压缩包小于 5KB，放弃覆盖云端数据: size=${actual_size}"
-                  record_archive_result "CliRelay.tar.gz" fail 0 "压缩包小于最小阈值"
-                  send_archive_alert "CliRelay.tar.gz" "归档失败" "压缩包小于最小阈值 · 放弃覆盖云端数据" "size=$actual_size min=$MIN_SIZE output=$CLIRELAY_FINAL_TAR"
-                fi
+                upload_final_archive "CliRelay.tar.gz" "$CLIRELAY_FINAL_TAR" "dropbox:self-hosted/CliRelay.tar.gz" "$MIN_SIZE"
               else
                 rc=$?
                 echo "⚠️ final CliRelay.tar.gz archive failed (rc=$rc): ${clirelay_final_output}"
@@ -5492,23 +5487,7 @@ jobs:
             CLIPROXYAPI_FINAL_TAR="/tmp/CLIProxyAPI-final.tar.gz"
             if cliproxyapi_final_output=$(flock -w 600 -E 200 /tmp/openclaw-archive.lock timeout 40m bash /tmp/create-cliproxyapi-archive.sh "$CLIPROXYAPI_FINAL_TAR" 2>&1); then
               actual_size=$(stat -c%s "$CLIPROXYAPI_FINAL_TAR" 2>/dev/null || echo 0)
-              if [ "$actual_size" -ge "$MIN_SIZE" ]; then
-                cliproxyapi_final_upload_output=""
-                if cliproxyapi_final_upload_output=$(rclone copyto "$CLIPROXYAPI_FINAL_TAR" dropbox:self-hosted/CLIProxyAPI.tar.gz -v 2>&1); then
-                  echo "final CLIProxyAPI archive/upload ok: ${cliproxyapi_final_output}"
-                  record_archive_result "CLIProxyAPI.tar.gz" ok "$actual_size"
-                  sudo rm -f "$CLIPROXYAPI_FINAL_TAR"
-                else
-                  rc=$?
-                  echo "⚠️ final CLIProxyAPI.tar.gz upload failed (rc=$rc): ${cliproxyapi_final_upload_output}"
-                  record_archive_result "CLIProxyAPI.tar.gz" fail 0 "上传失败 · 退出码 $rc"
-                  send_archive_alert "CLIProxyAPI.tar.gz" "上传失败 · 退出码 $rc" "rclone 上传失败" "${cliproxyapi_final_upload_output:-无输出}"
-                fi
-              else
-                echo "⚠️ CLIProxyAPI 压缩包小于 10KB，放弃覆盖云端数据: size=${actual_size} min=${MIN_SIZE}"
-                record_archive_result "CLIProxyAPI.tar.gz" fail 0 "压缩包小于最小阈值"
-                send_archive_alert "CLIProxyAPI.tar.gz" "归档失败" "压缩包小于最小阈值 · 放弃覆盖云端数据" "size=$actual_size min=$MIN_SIZE output=$CLIPROXYAPI_FINAL_TAR"
-              fi
+              upload_final_archive "CLIProxyAPI.tar.gz" "$CLIPROXYAPI_FINAL_TAR" "dropbox:self-hosted/CLIProxyAPI.tar.gz" "$MIN_SIZE"
             else
               rc=$?
               echo "⚠️ final CLIProxyAPI.tar.gz archive failed (rc=$rc): ${cliproxyapi_final_output}"
@@ -5548,23 +5527,7 @@ jobs:
               if rsstt_validate_output=$(sudo tar -tzf /tmp/rsstt.tar.gz 2>&1); then
                 actual_size=$(stat -c%s /tmp/rsstt.tar.gz 2>/dev/null || echo 0)
                 echo "rsstt archive size: ${actual_size} bytes"
-                if [ "$actual_size" -ge "$MIN_SIZE" ]; then
-                  rsstt_upload_output=""
-                  if rsstt_upload_output=$(rclone copyto /tmp/rsstt.tar.gz dropbox:self-hosted/rsstt.tar.gz -v 2>&1); then
-                    echo "final rsstt archive/upload ok"
-                    record_archive_result "rsstt.tar.gz" ok "$actual_size"
-                    sudo rm -f /tmp/rsstt.tar.gz
-                  else
-                    rc=$?
-                    echo "⚠️ final rsstt.tar.gz upload failed (rc=$rc): ${rsstt_upload_output}"
-                    record_archive_result "rsstt.tar.gz" fail 0 "上传失败 · 退出码 $rc"
-                    send_archive_alert "rsstt.tar.gz" "上传失败 · 退出码 $rc" "rclone 上传失败" "${rsstt_upload_output:-无输出}"
-                  fi
-                else
-                  echo "⚠️ rsstt 压缩包小于 10KB，放弃覆盖云端数据: size=${actual_size} min=${MIN_SIZE}"
-                  record_archive_result "rsstt.tar.gz" fail 0 "压缩包小于最小阈值"
-                  send_archive_alert "rsstt.tar.gz" "归档失败" "压缩包小于最小阈值 · 放弃覆盖云端数据" "size=$actual_size min=$MIN_SIZE output=/tmp/rsstt.tar.gz"
-                fi
+                upload_final_archive "rsstt.tar.gz" "/tmp/rsstt.tar.gz" "dropbox:self-hosted/rsstt.tar.gz" "$MIN_SIZE"
               else
                 rc=$?
                 echo "⚠️ final rsstt.tar.gz validation failed (rc=$rc): ${rsstt_validate_output}"
