@@ -104,55 +104,24 @@ EOF
 # ── pull：起服务前把 Dropbox 上的持久数据拉进本地 data/ ────────────────────
 # rclone copy 单向拉取、不删本地多余文件；远端为空是首轮正常情况，不判失败。
 cmd_pull() {
-  [ -n "$DATA_REMOTE" ] || { log "ℹ️ 未指定 QINGYAN_DATA_REMOTE，跳过数据拉取"; return 0; }
-  command -v rclone >/dev/null 2>&1 || { log "⚠️ rclone 不可用，跳过数据拉取"; return 0; }
-  mkdir -p "$DATA_DIR" || return 1
-
-  log "拉取持久数据：$DATA_REMOTE → $DATA_DIR"
-  # 失败不 return：远端目录尚未创建（首轮）时 rclone copy 会报「目录不存在」，
-  # 若提前返回会连下面的旧快照迁移一起跳过。故只记警告，流程继续。
-  rclone copy "$DATA_REMOTE" "$DATA_DIR" \
-    --retries 5 --low-level-retries 10 --timeout 1m --contimeout 15s 2>/dev/null \
-    || log "⚠️ 数据拉取失败/远端为空，按首轮空数据启动"
-
-  # 迁移兜底：glm2api 的积分快照在其数据目录下，替换后第一次拉取时搬过来，
-  # 避免替换当轮把「今日累计」清零。
-  if [ ! -s "$DATA_DIR/quota-snapshot" ] && [ -n "$LEGACY_SNAP_REMOTE" ]; then
-    if rclone copyto "$LEGACY_SNAP_REMOTE/quota-snapshot" "$DATA_DIR/quota-snapshot" \
-         --retries 3 --low-level-retries 5 --timeout 30s --contimeout 10s 2>/dev/null; then
-      log "✅ 已从 glm2api 数据目录迁移积分快照（$LEGACY_SNAP_REMOTE）"
-    else
-      log "ℹ️ glm2api 数据目录无积分快照，按首轮处理"
-    fi
-  fi
-  log "✅ 数据拉取完成"
+  # 2026-10-06 已移除：qingyan 全面跑在 Dropbox 上（代码/数据/凭据/日志），
+  # DATA_DIR 与 DATA_REMOTE 指向同一目录，原逻辑是「自己同步自己」的 no-op；
+  # 日志也已由 unit 的 StandardOutput 直写 Dropbox，不再从 /tmp 回推。
+  log "ℹ️ 数据拉取已移除（qingyan 直写 Dropbox），跳过"
+  return 0
 }
 
 # ── push：收尾把本地 data/ + 日志回推 Dropbox ──────────────────────────────
 # 只 copy 不 sync：远端的历史内容不该被本轮删掉（与 glm2api/workbuddy 收尾同口径）。
 # 失败不阻断收尾通知——下一轮 pull 不到最多是凭证退回种子/累计从 0 起。
 cmd_push() {
-  [ -n "$DATA_REMOTE" ] || { log "ℹ️ 未指定 QINGYAN_DATA_REMOTE，跳过数据回推"; return 0; }
-  command -v rclone >/dev/null 2>&1 || { log "⚠️ rclone 不可用，跳过数据回推"; return 0; }
-  [ -d "$DATA_DIR" ] || { log "ℹ️ 数据目录不存在，跳过回推"; return 0; }
-
-  log "回持久数据：$DATA_DIR → $DATA_REMOTE"
-  rclone copy "$DATA_DIR" "$DATA_REMOTE" \
-    --exclude '*.tmp' \
-    --retries 5 --low-level-retries 10 --timeout 1m --contimeout 15s 2>/dev/null \
-    || log "⚠️ 数据回推失败（下轮凭证退回种子/累计从 0 起）"
-
-  # 日志单独带一份上去便于事后回看（纯 INFO 行，体积小）。
-  if [ -d "$LOG_DIR" ]; then
-    rclone copy "$LOG_DIR" "$DATA_REMOTE/logs" \
-      --retries 3 --low-level-retries 5 --timeout 1m --contimeout 15s 2>/dev/null \
-      || log "⚠️ 日志回推失败（不影响数据）"
-  fi
-  log "✅ 数据回推完成"
+  # 2026-10-06 已移除：qingyan 全面跑在 Dropbox 上（代码/数据/凭据/日志），
+  # DATA_DIR 与 DATA_REMOTE 指向同一目录，原逻辑是「自己同步自己」的 no-op；
+  # 日志也已由 unit 的 StandardOutput 直写 Dropbox，不再从 /tmp 回推。
+  log "ℹ️ 数据回推已移除（qingyan 直写 Dropbox），跳过"
+  return 0
 }
 
-# 端口存活：/healthz 在设置了 PROXY_API_KEY 时同样要求鉴权（proxy.py 的 GET
-# 一律先 _authed），故探测必须带 key；key 现取 env.sh（600），不进日志。
 cmd_status() {
   local key code
   key="$(grep -m1 '^PROXY_API_KEY=' "$ENV_FILE" 2>/dev/null | cut -d= -f2-)"
