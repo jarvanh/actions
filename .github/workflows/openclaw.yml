@@ -2097,6 +2097,25 @@ jobs:
           # 结果优先级：网关日志判「失败」时保留原样（HTTP/原因在原始输出里，更具体）；
           # 其余以状态接口为准 —— active=false 修成「活动未开启」（网关把 code=10001
           # 一律幂等成功，国际站活动没开也被记成「今日已签」，这里纠正）。
+          # ---------- 国际站「每日活跃」奖励（2026-10-06 补）----------
+          # 国际站没有签到活动，活跃奖励的**真值只在 quota-board 的账本里**：
+          # 每笔 `wb|<账号>` 的正向 delta，按金额众数还原每日额度（实测 30.0/天，
+          # 10-01~10-06 每天一笔）。签到活动状态接口对国际站恒 active=false，
+          # 查不到这笔钱 —— 首版据此把国际站写成「活动未开启 · 无积分」，与账本里
+          # 实打实的 +30/天 直接矛盾。
+          # 故调 board.py 的 CLI 复用**同一份**聚合代码，不在 shell 里另写一套
+          # （两边各写一套必然对不齐，与 usage-ledger 走同一条路）。
+          declare -A _CK_ADAILY _CK_ATOTAL _CK_ADAYS _CK_ATODAY
+          if [ "${WB_READY:-}" = "1" ]; then
+            while IFS="$(printf '\t')" read -r _af _adaily _adays _atotal _atoday; do
+              [ -z "$_af" ] && continue
+              _CK_ADAILY["$_af"]="$_adaily"
+              _CK_ATOTAL["$_af"]="$_atotal"
+              _CK_ADAYS["$_af"]="$_adays"
+              _CK_ATODAY["$_af"]="$_atoday"
+            done <<< "$(python3 /dropbox/self-hosted/quota-board/board.py active-credits 2>/dev/null || true)"
+          fi
+
           if [ -n "${WB_CHECKIN:-}" ]; then
             WB_CHECKIN_MERGED=""
             while IFS="$(printf '\t')" read -r _mf _ms _mr; do
@@ -2119,6 +2138,14 @@ jobs:
                   # 分支降级成「活动未开启」（首版会显示成活动未开启，观感像没签到）。
                   # 2026-10-06 改名：原文案「活跃 ✓」脱离上下文看不出是签到，改「今日活跃 ✓」。
                   _mres="$_mr"
+                  # 活跃奖励：真值在账本（见上方采集段）。只有**今日确实到账**
+                  # 才写「本次 +N」，否则只给累计 —— 避免把历史额度当成今天领的。
+                  _ak="$(printf '%s' "$_mf" | sed 's/^workbuddy-//; s/\.json$//')"
+                  if [ "${_CK_ATODAY[$_ak]:-}" = "1" ]; then
+                    _mcred="本次 +${_CK_ADAILY[$_ak]} · 累计 ${_CK_ATOTAL[$_ak]} · 活跃 ${_CK_ADAYS[$_ak]} 天"
+                  elif [ -n "${_CK_ATOTAL[$_ak]:-}" ]; then
+                    _mcred="累计 ${_CK_ATOTAL[$_ak]} · 活跃 ${_CK_ADAYS[$_ak]} 天"
+                  fi
                 elif [ "${_CK_ACT[$_mf]}" = "false" ]; then
                   _mres="活动未开启"
                 elif [ "${_CK_CHK[$_mf]}" = "true" ]; then
@@ -2154,6 +2181,16 @@ jobs:
                   *"未取到结果"*) _n_unk=$((_n_unk + 1)) ;;
                 esac
               done <<< "$WB_CHECKIN"
+              # 国际站活跃奖励（账本口径）：与国内站签到积分同等计入今日合计。
+              # 只加「今日确实到账」的号，且只认整数，避免小数把 $(( )) 打挂。
+              for _kf in "${!_CK_ATODAY[@]}"; do
+                if [ "${_CK_ATODAY[$_kf]}" = "1" ]; then
+                  case "${_CK_ADAILY[$_kf]}" in
+                    ''|*[!0-9]*) : ;;
+                    *) _sum_today=$((_sum_today + ${_CK_ADAILY[$_kf]})) ;;
+                  esac
+                fi
+              done
               for _kf in "${!_CK_ACT[@]}"; do
                 if [ "${_CK_ACT[$_kf]}" = "true" ] && [ "${_CK_CHK[$_kf]}" = "true" ]; then
                   case "${_CK_TODAY[$_kf]}" in
