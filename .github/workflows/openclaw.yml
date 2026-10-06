@@ -5219,7 +5219,11 @@ jobs:
 
           echo "4. Performing final archive to Dropbox..."
           cleanup_archive_outputs() {
-            rm -f /tmp/openclaw-final.tar.gz /tmp/rsstt.tar.gz /tmp/CliRelay.tar.gz /tmp/zcode-final.tar.gz 2>/dev/null || true
+            rm -f /tmp/openclaw-final.tar.gz /tmp/rsstt.tar.gz /tmp/zcode-final.tar.gz 2>/dev/null || true
+            # -final 后缀产物（2026-10-06）：与周期归档同名解耦后，清理也要跟着改名
+            rm -f /tmp/CliRelay-final.tar.gz /tmp/CLIProxyAPI-final.tar.gz 2>/dev/null || true
+            # 周期归档的同名产物仍照常清理（它可能残留自被 systemd 拉回的循环实例）
+            rm -f /tmp/CliRelay.tar.gz 2>/dev/null || true
             sudo rm -f /tmp/CLIProxyAPI.tar.gz 2>/dev/null || true
             rm -rf /tmp/openclaw-archive-stage.* 2>/dev/null || true
             sudo rm -rf /tmp/cliproxyapi-archive-stage.* 2>/dev/null || true
@@ -5332,7 +5336,7 @@ jobs:
           echo "4b. Final archive of ZCode personal data (~/.zcode cli/ + v2/)..."
           if [ -d "$HOME/.zcode/cli" ] || [ -d "$HOME/.zcode/v2" ] || [ -d "$HOME/.zcode/server" ]; then
             TMP_ZCODE_FINAL_TAR="/tmp/zcode-final.tar.gz"
-            if zcode_final_output=$(bash /tmp/create-zcode-archive.sh "$TMP_ZCODE_FINAL_TAR" 2>&1); then
+            if zcode_final_output=$(flock -w 600 -E 200 /tmp/openclaw-archive.lock timeout 40m bash /tmp/create-zcode-archive.sh "$TMP_ZCODE_FINAL_TAR" 2>&1); then
               zcode_final_new_size=$(stat -c%s "$TMP_ZCODE_FINAL_TAR" 2>/dev/null || echo 0)
               zcode_final_remote_size=$(rclone ls "dropbox:self-hosted/zcode.tar.gz" 2>/dev/null | awk '{s+=$1} END {print s+0}')
               # 体积骤降只记录、不拦截（口径同周期归档）：完整性由 create-zcode-archive.sh
@@ -5411,14 +5415,18 @@ jobs:
             # CliRelay 主用：pg_dump（postgres 仍在运行）→ 打包上传 CliRelay.tar.gz → compose down
             if [ -f /tmp/local_CliRelay/docker-compose.yml ]; then
               clirelay_final_output=""
-              if clirelay_final_output=$(bash /tmp/create-clirelay-archive.sh /tmp/CliRelay.tar.gz 2>&1); then
-                actual_size=$(stat -c%s /tmp/CliRelay.tar.gz)
+              # 2026-10-06：产物改用 -final 后缀，与周期归档的 /tmp/CliRelay.tar.gz 解耦 ——
+              # 循环实例（含 systemd 拉回的那些）cleanup 会 rm -f 同名产物，会删掉
+              # final 正要上传的包。同时加 flock 与周期归档互斥（同一把锁）。
+              CLIRELAY_FINAL_TAR="/tmp/CliRelay-final.tar.gz"
+              if clirelay_final_output=$(flock -w 600 -E 200 /tmp/openclaw-archive.lock timeout 40m bash /tmp/create-clirelay-archive.sh "$CLIRELAY_FINAL_TAR" 2>&1); then
+                actual_size=$(stat -c%s "$CLIRELAY_FINAL_TAR" 2>/dev/null || echo 0)
                 if [ "$actual_size" -ge "$MIN_SIZE" ]; then
                   clirelay_final_upload_output=""
-                  if clirelay_final_upload_output=$(rclone copyto /tmp/CliRelay.tar.gz dropbox:self-hosted/CliRelay.tar.gz -v 2>&1); then
+                  if clirelay_final_upload_output=$(rclone copyto "$CLIRELAY_FINAL_TAR" dropbox:self-hosted/CliRelay.tar.gz -v 2>&1); then
                     echo "final CliRelay archive/upload ok: ${clirelay_final_output}"
                     record_archive_result "CliRelay.tar.gz" ok "$actual_size"
-                    rm -f /tmp/CliRelay.tar.gz
+                    rm -f "$CLIRELAY_FINAL_TAR"
                   else
                     rc=$?
                     echo "⚠️ final CliRelay.tar.gz upload failed (rc=$rc): ${clirelay_final_upload_output}"
@@ -5428,7 +5436,7 @@ jobs:
                 else
                   echo "⚠️ CliRelay 压缩包小于 5KB，放弃覆盖云端数据: size=${actual_size}"
                   record_archive_result "CliRelay.tar.gz" fail 0 "压缩包小于最小阈值"
-                  send_archive_alert "CliRelay.tar.gz" "归档失败" "压缩包小于最小阈值 · 放弃覆盖云端数据" "size=$actual_size min=$MIN_SIZE output=/tmp/CliRelay.tar.gz"
+                  send_archive_alert "CliRelay.tar.gz" "归档失败" "压缩包小于最小阈值 · 放弃覆盖云端数据" "size=$actual_size min=$MIN_SIZE output=$CLIRELAY_FINAL_TAR"
                 fi
               else
                 rc=$?
@@ -5455,14 +5463,16 @@ jobs:
             echo "CLIProxyAPI 待归档目录大小: ${cliproxyapi_src_kb}KB"
             require_free_kb /tmp $((cliproxyapi_src_kb + 512 * 1024)) "final CLIProxyAPI archive preflight"
             cliproxyapi_final_output=""
-            if cliproxyapi_final_output=$(bash /tmp/create-cliproxyapi-archive.sh /tmp/CLIProxyAPI.tar.gz 2>&1); then
-              actual_size=$(stat -c%s /tmp/CLIProxyAPI.tar.gz 2>/dev/null || echo 0)
+            # 同上（2026-10-06）：产物改 -final 后缀与周期归档解耦，并加 flock 互斥。
+            CLIPROXYAPI_FINAL_TAR="/tmp/CLIProxyAPI-final.tar.gz"
+            if cliproxyapi_final_output=$(flock -w 600 -E 200 /tmp/openclaw-archive.lock timeout 40m bash /tmp/create-cliproxyapi-archive.sh "$CLIPROXYAPI_FINAL_TAR" 2>&1); then
+              actual_size=$(stat -c%s "$CLIPROXYAPI_FINAL_TAR" 2>/dev/null || echo 0)
               if [ "$actual_size" -ge "$MIN_SIZE" ]; then
                 cliproxyapi_final_upload_output=""
-                if cliproxyapi_final_upload_output=$(rclone copyto /tmp/CLIProxyAPI.tar.gz dropbox:self-hosted/CLIProxyAPI.tar.gz -v 2>&1); then
+                if cliproxyapi_final_upload_output=$(rclone copyto "$CLIPROXYAPI_FINAL_TAR" dropbox:self-hosted/CLIProxyAPI.tar.gz -v 2>&1); then
                   echo "final CLIProxyAPI archive/upload ok: ${cliproxyapi_final_output}"
                   record_archive_result "CLIProxyAPI.tar.gz" ok "$actual_size"
-                  sudo rm -f /tmp/CLIProxyAPI.tar.gz
+                  sudo rm -f "$CLIPROXYAPI_FINAL_TAR"
                 else
                   rc=$?
                   echo "⚠️ final CLIProxyAPI.tar.gz upload failed (rc=$rc): ${cliproxyapi_final_upload_output}"
@@ -5472,7 +5482,7 @@ jobs:
               else
                 echo "⚠️ CLIProxyAPI 压缩包小于 10KB，放弃覆盖云端数据: size=${actual_size} min=${MIN_SIZE}"
                 record_archive_result "CLIProxyAPI.tar.gz" fail 0 "压缩包小于最小阈值"
-                send_archive_alert "CLIProxyAPI.tar.gz" "归档失败" "压缩包小于最小阈值 · 放弃覆盖云端数据" "size=$actual_size min=$MIN_SIZE output=/tmp/CLIProxyAPI.tar.gz"
+                send_archive_alert "CLIProxyAPI.tar.gz" "归档失败" "压缩包小于最小阈值 · 放弃覆盖云端数据" "size=$actual_size min=$MIN_SIZE output=$CLIPROXYAPI_FINAL_TAR"
               fi
             else
               rc=$?
