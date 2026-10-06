@@ -3259,8 +3259,8 @@ jobs:
           # 起前 pull / 停后 push。DATA_DIR 同时是积分快照落点（STATE_DIR 指向它），
           # runner 本地盘每轮重置，不落 Dropbox 的话「今日累计」每轮清零。
           QINGYAN_DATA_REMOTE: dropbox:self-hosted/qingyan-proxy/data
-          QINGYAN_DATA_DIR: /tmp/local_qingyan/data
-          QINGYAN_STATE_DIR: /tmp/local_qingyan/data
+          QINGYAN_DATA_DIR: /dropbox/self-hosted/qingyan-proxy/data
+          QINGYAN_STATE_DIR: /dropbox/self-hosted/qingyan-proxy/data
           QINGYAN_RUN_DIR: /tmp/local_qingyan
           QINGYAN_ENV_FILE: /tmp/local_qingyan/env.sh
         run: |
