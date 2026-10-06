@@ -1269,7 +1269,9 @@ jobs:
                   # （`set -uo pipefail` 不会关掉 -e），A && B 里 A 为假时整条返回 1，
                   # 循环体末条命令返回 1 会直接终止整个 step —— 只要有任何一列是哨兵「-」
                   # 就会 exit 1。改成 if 语句：无论分支走哪边，返回值恒为 0。
-                  for _x in _acdl _quota _fm _cdl _tok; do
+                  # ⚠️ _state 也必须在列：active 已映射为空串（常态不显示「· 可用」），
+                  # 采集处的 or_dash 会把空串补成哨兵「-」，不还原就渲染成「· -」。
+                  for _x in _state _acdl _quota _fm _cdl _tok; do
                     if [ "${!_x}" = "-" ]; then printf -v "$_x" '%s' ""; fi
                   done
                   _i=$((_i + 1))
@@ -1740,8 +1742,11 @@ jobs:
               WB_POOL="$(TZ=Asia/Shanghai jq -r --argjson ready "${WB_FREE_READY:-0}" '
                 def fq: if . > -0.005 and . < 0.005 then "0"
                         else (. * 100 | round / 100 | tostring) end;
+                # 账号状态中文化：active 是**常态**，映射成空串（渲染层不显示）——
+                # 主人 2026-10-06 要求去掉条目行的「· 可用」（6 个号每个都挂一遍纯占版面，
+                # 且与看板 board.py 同口径：只露异常）。冷却/付费耗尽/已过期/失效仍要露出。
                 def state_cn:
-                  if   . == "active"         then "可用"
+                  if   . == "active"         then ""
                   elif . == "cooldown"       then "冷却"
                   elif . == "paid_exhausted" then "付费耗尽"
                   elif . == "expired"        then "已过期"
@@ -1761,8 +1766,16 @@ jobs:
                 # 最小值（= 至少有一个模型先可用）。换算成东八区 HH:MM（jq 前固定 TZ=Asia/Shanghai
                 # + strflocaltime；此前 strftime 恒按 UTC 渲染，通知时间比北京早 8 小时）。
                 # 冷却普遍是分钟级，跨天时只给 HH:MM 也够用，故不标日期（标了会把子行撑爆）。
+                # 正在冷却的**具体模型名**（主人 2026-10-06 要求：别只报数量）：
+                # 从 modelStates 的 key 取，只保留 cooldownUntil > now 的（已过期的冷却不算，
+                # 否则会写出一条早已恢复的冷却，与「可用」自相矛盾）。
                 | ( [ (.modelStates // {}) | to_entries[]
-                      | .value.cooldownUntil // 0 | select(. > 0) ] | min ) as $_mc
+                      | select((.value | type) == "object")
+                      | select((.value.cooldownUntil // 0) > now) ] ) as $_cdmpairs
+                | ( [ $_cdmpairs[] | .key ] | sort ) as $_cdms
+                # 最早恢复时刻：只从**仍在冷却**的条目里取最小值（此前取所有 >0 的，
+                # 含已过期项 → 会渲染出过去的恢复时刻）。
+                | ( [ $_cdmpairs[] | .value.cooldownUntil ] | min ) as $_mc
                 | [
                     ($ready | tostring),
                     ($_fn | or_dash),
@@ -1773,13 +1786,14 @@ jobs:
                     (if .state == "cooldown" and ((.cooldownUntil // 0) > 0)
                        then ("冷却 " + (.cooldownUntil | strflocaltime("%Y-%m-%d %H:%M")))
                      else "" end | or_dash),
-                    (if .quotaKnown then ("额度剩 " + (.quotaRemaining | fq)
-                       + (if .isPaidUser then " · 付费" else " · 免费" end))
+                    # 额度行只留额度（主人 2026-10-06 要求去掉「· 免费/付费」后缀：
+                    # 该属性由下方「免费模型 N · 模型名」子行表达，两处重复纯占版面）
+                    (if .quotaKnown then ("额度剩 " + (.quotaRemaining | fq))
                      else "额度未获取" end),
                     ($free[$_fn] // "" | or_dash),
-                    # 模型冷却：数量 + 最早恢复时刻（两者同时有才写后半段，缺一不写半截）
-                    (if (.modelCooldowns // 0) > 0
-                       then ("模型冷却 " + (.modelCooldowns | tostring)
+                    # 模型冷却：**具体模型名** + 最早恢复时刻（缺一不写半截）
+                    (if ($_cdms | length) > 0
+                       then ("模型冷却 " + ($_cdms | join(" · "))
                              + (if ($_mc // 0) > 0
                                   then (" · 最早 " + ($_mc | strflocaltime("%H:%M")) + " 恢复")
                                 else "" end))

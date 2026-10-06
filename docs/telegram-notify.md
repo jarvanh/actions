@@ -479,13 +479,13 @@ Run ID：<code>12345678</code>
 API Key：<code>sk-…（点选可复制）</code>
 
 💳 账号池 · 3
-  ├─ <code>workbuddy.json</code> · 国内站 · 可用
-  │  额度剩 59.64 · 免费 · 过期 2026-09-21 08:32
+  ├─ <code>workbuddy.json</code> · 国内站
+  │  额度剩 59.64 · 过期 2026-09-21 08:32
   │  免费模型 2 · <code>deepseek-v4.1-flash</code> · <code>hy3</code>
   ├─ <code>workbuddy-cn2.json</code> · 国内站 · 冷却
-  │  冷却 2026-09-18 00:12 · 额度剩 12.30 · 免费 · 过期 2026-09-21 08:32
+  │  冷却 2026-09-18 00:12 · 额度剩 12.30 · 过期 2026-09-21 08:32
   └─ <code>workbuddy-intl.json</code> · 国际站 · 付费耗尽
-     额度剩 0 · 免费 · 过期 2027-06-07 04:32 · 模型冷却 2 · 最早 00:47 恢复
+     额度剩 0 · 过期 2027-06-07 04:32 · 模型冷却 hy4-preview-f · 最早 00:47 恢复
      免费模型 1 · <code>glm-5.2</code>
 
 数据目录：<code>/dropbox/self-hosted/workbuddy-gateway</code>
