@@ -2387,8 +2387,13 @@ jobs:
                   else
                     _st="今日已签"
                   fi
-                  _rows+="$(tree_conn "$_last")$(tg_entry "$_uid" "$_nick" "$_st" "积分 ${_cr}")"$'\n'
-                  # 子行：该账号未用完的包里最早过期的前 3 个（逐包一行）
+                  # 条目行只留「uid · 昵称」，签到状态与积分下移成子行
+                  # （主人 2026-10-06 要求：少用 · 分割、多换行）。此前四段全挤在
+                  # 条目行，读起来是一坨；与看板 trae 段同版式（board.py 该段
+                  # 注释里的样板即「今日已签 · 积分 3517」独占一行）。
+                  _rows+="$(tree_conn "$_last")$(tg_entry "$_uid" "$_nick")"$'\n'
+                  _rows+="$(tree_sub "$_last")$(escape_html "${_st} · 积分 ${_cr}")"$'\n'
+                  # 子行：该账号未用完的包里最早过期的前 3 个（逐包一行，完整时间戳）
                   _exp3=$(jq -r --arg uid "$_uid" '[.[] | select(.uid == $uid and .remain > 0 and .expire_at > 0)] | sort_by(.expire_at) | .[:3][] | "剩 \(.remain) 分 · \(.expire_fmt) 过期"' "${PACKS_JSON:-}" 2>/dev/null || true)
                   if [ -n "$_exp3" ]; then
                     while IFS= read -r _eline; do
