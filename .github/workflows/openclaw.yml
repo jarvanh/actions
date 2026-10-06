@@ -4580,6 +4580,237 @@ jobs:
           EOF
           chmod +x /tmp/create-clirelay-archive.sh
 
+          cat > /tmp/create-rsstt-archive.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          # rss-to-telegram 数据归档（2026-10-06 新增）：
+          # 该包原先**只在 job 收尾打一次**（Final Archive 步骤）。if: ${{ always() }}
+          # 只兜得住 failure —— 碰上 cancel / 360m 平台强杀 / runner 回收，那一步
+          # 根本没机会跑（run 37439913203 cancelled 即此形态）。实测云端 rsstt.tar.gz
+          # 曾落后本地 8.5 小时，回滚会丢订阅列表与推送游标。
+          # 纳入 20 分钟周期循环后，最坏回滚窗口从「一轮 job ≈6h」压到 20 分钟。
+          #
+          # ⚠️ 权限：源目录 /tmp/local_rsstt 由容器内 uid 1001 写入（实测 db.sqlite3
+          # 与 bot.session 属主 1001:1001）。runner 当前可读，但容器重启后可能重建为
+          # 私有位，故全程 sudo 读写 —— 与 Final Archive 段的口径一致。产物统一
+          # chmod 644，否则 runner 身份的 rclone 读不到 root 产出的包。
+
+          OUTPUT_TAR="${1:-}"
+          if [ -z "$OUTPUT_TAR" ]; then
+          echo "Usage: $0 /path/to/output.tar.gz" >&2
+          exit 2
+          fi
+
+          MIN_SIZE=$((5 * 1024))
+          SRC_ROOT="/tmp/local_rsstt"
+          STAGE_DIR=""
+
+          cleanup() {
+          if [ -n "${STAGE_DIR:-}" ] && [ -d "$STAGE_DIR" ]; then
+          sudo rm -rf "$STAGE_DIR"
+          fi
+          }
+          trap cleanup EXIT
+
+          sudo rm -f "$OUTPUT_TAR"
+
+          # 目录不存在 = 容器启动步骤被跳过/失败 → 退出码 3，调用方跳过本轮，
+          # 不用空包覆盖云端（2026-10-06 Final Archive 段已有的保护，这里同样要）
+          if [ ! -d "$SRC_ROOT" ]; then
+          echo "rsstt_dir_missing"
+          exit 3
+          fi
+
+          # 只剩占位 .keep = 本轮容器没起来，打包上传只会把云端好包换成空包
+          data_files=$(sudo find "$SRC_ROOT" -type f ! -name '.keep' 2>/dev/null | wc -l)
+          if [ "$((data_files + 0))" -lt 1 ]; then
+          echo "rsstt_no_data_files"
+          exit 3
+          fi
+
+          # mktemp 默认 700，runner 后续要 stat / tar -tzf 读包，放开读位
+          STAGE_DIR=$(sudo mktemp -d /tmp/rsstt-archive-stage.XXXXXX)
+          sudo chmod 755 "$STAGE_DIR"
+
+          set +e
+          sudo rsync -a --delete "$SRC_ROOT/" "$STAGE_DIR/"
+          rsync_rc=$?
+          set -e
+          # rc=24：源文件在遍历期间消失（容器正在写），属预期，仍校验最终包
+          if [ "$rsync_rc" -ne 0 ] && [ "$rsync_rc" -ne 24 ]; then
+          echo "rsstt_snapshot_failed rc=$rsync_rc" >&2
+          exit 1
+          fi
+          sudo chmod -R a+rX "$STAGE_DIR" 2>/dev/null || true
+
+          # SQLite 一致性快照：容器内活跃 SQLite 处于 WAL 模式，数据可能还躺在 -wal
+          # 里，主文件单独拿出来是半截状态（2026-10-06 实测：db.sqlite3 主库停在
+          # 14:33 的 172032B，而 bot.session 一路写到 23:12 —— 差异就是 WAL 未归并）。
+          # .backup 从**活库**导出自包含单文件（比 staging 的 rsync 逐文件拷贝更一致，
+          # 后者可能跨越写入时刻），再丢掉 -wal/-shm，还原侧拿到即完整。
+          # sqlite3 不可用时保留 rsync 副本（三文件同在本身也是可用快照）。
+          if command -v sqlite3 >/dev/null 2>&1; then
+          while IFS= read -r live_db; do
+          [ -n "$live_db" ] || continue
+          rel="${live_db#"$SRC_ROOT"/}"
+          staged="$STAGE_DIR/$rel"
+          [ -f "$staged" ] || continue
+          if sudo sqlite3 "$live_db" ".backup '$staged.tmp'" 2>/dev/null && [ -s "$staged.tmp" ]; then
+          sudo mv -f "$staged.tmp" "$staged"
+          sudo rm -f "$staged-wal" "$staged-shm" 2>/dev/null || true
+          echo "sqlite_snapshot ok $rel"
+          else
+          sudo rm -f "$staged.tmp" 2>/dev/null || true
+          echo "sqlite_snapshot_fallback $rel (kept rsync copy)"
+          fi
+          done < <(sudo find "$SRC_ROOT" -name '*.sqlite3' -type f 2>/dev/null)
+          else
+          echo "sqlite_snapshot_skipped (sqlite3 not found; using rsync copies)"
+          fi
+
+          # 完整性判据（取代体积基准）：两项都是「没有就说明状态不全」——
+          #   config/bot.session  Bot 登录态（SQLite），丢了要重新登录
+          #   config/db.sqlite3   订阅列表 + 推送游标，丢了订阅还原并重复推送
+          missing=""
+          for f in config/bot.session config/db.sqlite3; do
+          if [ ! -s "$STAGE_DIR/$f" ]; then
+          missing="$missing $f"
+          fi
+          done
+          if [ -n "$missing" ]; then
+          echo "rsstt_archive_incomplete missing=$missing" >&2
+          exit 4
+          fi
+
+          sudo tar -C "$STAGE_DIR" -czf "$OUTPUT_TAR" .
+          sudo chmod 644 "$OUTPUT_TAR" 2>/dev/null || true
+
+          actual_size=$(stat -c%s "$OUTPUT_TAR" 2>/dev/null || echo 0)
+          if [ ! -s "$OUTPUT_TAR" ]; then
+          echo "rsstt_archive_empty output=$OUTPUT_TAR"
+          exit 1
+          elif [ "$actual_size" -lt "$MIN_SIZE" ]; then
+          echo "rsstt_archive_too_small size=${actual_size} min=${MIN_SIZE} output=$OUTPUT_TAR"
+          exit 1
+          elif ! tar -tzf "$OUTPUT_TAR" >/dev/null 2>&1; then
+          echo "rsstt_archive_tar_validation_failed output=$OUTPUT_TAR"
+          exit 1
+          else
+          echo "archive_ready size=${actual_size} output=$OUTPUT_TAR"
+          fi
+          EOF
+          chmod +x /tmp/create-rsstt-archive.sh
+
+          cat > /tmp/create-zcode2api-data-archive.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          # zcode2api 数据快照归档（2026-10-06 新增）：与 rsstt 同一类问题 ——
+          # 原先只在 Final Archive 打一次，cancel / 强杀即整轮跳过。实测云端
+          # zcode2api-data.tar.gz 落后本地约 5 小时：accounts.db 的 md5 已与本地
+          # 分叉，本地新增的 captchalog-2026-10-06.jsonl（96KB）云端包里根本没有。
+          # 纳入 20 分钟周期循环后，回滚窗口从 ≈6h 压到 20 分钟。
+          #
+          # 只收 .env + data/ 两项目，其余一概不管：
+          #   代码   ← GitHub 仓库 jarvanh/zcode2api，每轮 clone
+          #   logs/  ← 直写 Dropbox（/dropbox/self-hosted/zcode2api/logs），不落 /tmp
+          #   凭据   ← cred-sync cron 每 10 分钟从 Dropbox 对齐进库
+          # 三者各有真源，重复入包只会让包变大、回滚面变宽。
+          #
+          # 本目录由 runner 自己跑 systemd 服务写入，无需 sudo（与 rsstt 那边的
+          # uid 1001 容器场景不同），故走普通 cp/rsync + 普通 tar。
+
+          OUTPUT_TAR="${1:-}"
+          if [ -z "$OUTPUT_TAR" ]; then
+          echo "Usage: $0 /path/to/output.tar.gz" >&2
+          exit 2
+          fi
+
+          MIN_SIZE=$((5 * 1024))
+          SRC_ROOT="/tmp/local_zcode2api"
+          STAGE_DIR=""
+
+          cleanup() {
+          if [ -n "${STAGE_DIR:-}" ] && [ -d "$STAGE_DIR" ]; then
+          rm -rf "$STAGE_DIR"
+          fi
+          }
+          trap cleanup EXIT
+
+          rm -f "$OUTPUT_TAR"
+
+          if [ ! -f "$SRC_ROOT/.env" ] && [ ! -d "$SRC_ROOT/data" ]; then
+          echo "zcode2api_dir_missing"
+          exit 3
+          fi
+
+          STAGE_DIR=$(mktemp -d /tmp/zcode2api-data-archive-stage.XXXXXX)
+          mkdir -p "$STAGE_DIR/data"
+
+          if [ -f "$SRC_ROOT/.env" ]; then
+          cp -a "$SRC_ROOT/.env" "$STAGE_DIR/.env"
+          fi
+
+          if [ -d "$SRC_ROOT/data" ]; then
+          set +e
+          rsync -a --delete "$SRC_ROOT/data/" "$STAGE_DIR/data/"
+          rsync_rc=$?
+          set -e
+          # rc=23/24：服务（8319）正在写 usage-*.jsonl / reqlog-*.jsonl，
+          # 部分文件在遍历期间变动或权限受限，属预期，仍校验最终包。
+          # 其余非零才是真失败 —— 与 set -e 下同口径的 zcode 归档保持一致。
+          if [ "$rsync_rc" -ne 0 ] && [ "$rsync_rc" -ne 23 ] && [ "$rsync_rc" -ne 24 ]; then
+          echo "zcode2api_snapshot_failed rc=$rsync_rc" >&2
+          exit 1
+          fi
+          fi
+
+          # SQLite 一致性快照：accounts.db 是账号池，服务在跑处于 WAL（同目录常驻
+          # -wal / -shm）。直接搬主文件会漏掉尚未 checkpoint 的账号增删改与额度变化。
+          # .backup 从活库导出自包含单文件，再丢掉 -wal/-shm。
+          if command -v sqlite3 >/dev/null 2>&1 && [ -f "$SRC_ROOT/data/accounts.db" ]; then
+          if sqlite3 "$SRC_ROOT/data/accounts.db" ".backup '$STAGE_DIR/data/accounts.db.tmp'" 2>/dev/null \
+          && [ -s "$STAGE_DIR/data/accounts.db.tmp" ]; then
+          mv -f "$STAGE_DIR/data/accounts.db.tmp" "$STAGE_DIR/data/accounts.db"
+          rm -f "$STAGE_DIR/data/accounts.db-wal" "$STAGE_DIR/data/accounts.db-shm" 2>/dev/null || true
+          echo "sqlite_snapshot ok data/accounts.db"
+          else
+          rm -f "$STAGE_DIR/data/accounts.db.tmp" 2>/dev/null || true
+          echo "sqlite_snapshot_fallback data/accounts.db (kept rsync copy)"
+          fi
+          fi
+
+          # 完整性判据：.env 是运行配置（端口/网关 key/日志路径），
+          # accounts.db 是账号池本体；缺任一项即以 4 中止，不覆盖云端好包
+          missing=""
+          [ -s "$STAGE_DIR/.env" ] || missing="$missing .env"
+          [ -s "$STAGE_DIR/data/accounts.db" ] || missing="$missing data/accounts.db"
+          if [ -n "$missing" ]; then
+          echo "zcode2api_archive_incomplete missing=$missing" >&2
+          exit 4
+          fi
+
+          # 包内布局与 Final Archive 段完全一致（解包即得 .env + data/），
+          # 两侧互相 restores 无差异
+          tar -C "$STAGE_DIR" -czf "$OUTPUT_TAR" .env data
+
+          actual_size=$(stat -c%s "$OUTPUT_TAR" 2>/dev/null || echo 0)
+          if [ ! -s "$OUTPUT_TAR" ]; then
+          echo "zcode2api_archive_empty output=$OUTPUT_TAR"
+          exit 1
+          elif [ "$actual_size" -lt "$MIN_SIZE" ]; then
+          echo "zcode2api_archive_too_small size=${actual_size} min=${MIN_SIZE} output=$OUTPUT_TAR"
+          exit 1
+          elif ! tar -tzf "$OUTPUT_TAR" >/dev/null 2>&1; then
+          echo "zcode2api_archive_tar_validation_failed output=$OUTPUT_TAR"
+          exit 1
+          else
+          echo "archive_ready size=${actual_size} output=$OUTPUT_TAR"
+          fi
+          EOF
+          chmod +x /tmp/create-zcode2api-data-archive.sh
+
           # workbuddy-cred-sync 已于 2026-10-06 停用移除，不再生成该同步脚本。
           # （原逻辑：每 300s 把 Dropbox 凭据 sync 进 /tmp 运行目录；现 workbuddy 的
           #   WorkingDirectory 已直指 Dropbox，凭据由网关自己直写，该同步彻底空转。）
@@ -4623,6 +4854,12 @@ jobs:
           TMP_CLIPROXYAPI_TAR="/tmp/CLIProxyAPI.tar.gz"
           TMP_CLIRELAY_TAR="/tmp/CliRelay.tar.gz"
           TMP_ZCODE_TAR="/tmp/zcode.tar.gz"
+          # 2026-10-06 新增：rsstt / zcode2api-data 原先只在 job 收尾打一次，
+          # cancel 或 360m 强杀时那一步没机会跑，实测云端落后本地 5-8.5 小时。
+          # 纳入本 20 分钟周期循环后，回滚窗口从「一轮 job ≈6h」压到 20 分钟。
+          # 产物用 -periodic 后缀，与 Final Archive 的同名包区分，互不覆盖。
+          TMP_RSSTT_TAR="/tmp/rsstt-periodic.tar.gz"
+          TMP_Z2A_DATA_TAR="/tmp/zcode2api-data-periodic.tar.gz"
           LOCK_FILE="/tmp/openclaw-archive.lock"
 
           cleanup_archive_outputs() {
@@ -4634,6 +4871,10 @@ jobs:
             sudo rm -rf /tmp/cliproxyapi-archive-stage.* 2>/dev/null || true
             rm -rf /tmp/clirelay-archive-stage.* 2>/dev/null || true
             rm -rf /tmp/zcode-archive-stage.* 2>/dev/null || true
+            sudo rm -f "$TMP_RSSTT_TAR" 2>/dev/null || true
+            rm -f "$TMP_Z2A_DATA_TAR" 2>/dev/null || true
+            sudo rm -rf /tmp/rsstt-archive-stage.* 2>/dev/null || true
+            rm -rf /tmp/zcode2api-data-archive-stage.* 2>/dev/null || true
           }
           cleanup_archive_outputs
           PID_FILE="/tmp/openclaw-archive.pid"
@@ -4846,6 +5087,63 @@ jobs:
             else
               echo "[$(date '+%F %T')] ℹ️ ~/.zcode/{cli,v2,server} 均不存在，跳过 zcode 归档"
             fi
+
+          # ===== rss-to-telegram 数据归档（2026-10-06 新增）=====
+          # 原先只在 job 收尾打一次，cancel / 360m 强杀时那一步没机会跑 ——
+          # 实测云端 rsstt.tar.gz 曾落后本地 8.5 小时（回滚丢订阅列表与推送游标）。
+          # 纳入周期循环后，回滚窗口从「一轮 job ≈6h」压到 20 分钟。
+          rsstt_archive_output=""
+          if rsstt_archive_output=$(flock -E 200 -n "$LOCK_FILE" timeout 20m bash /tmp/create-rsstt-archive.sh "$TMP_RSSTT_TAR" 2>&1); then
+            echo "[$(date '+%F %T')] rsstt archive ok, uploading... ${rsstt_archive_output}"
+            rsstt_upload_output=""
+            if rsstt_upload_output=$(timeout 20m rclone copyto "$TMP_RSSTT_TAR" "dropbox:self-hosted/rsstt.tar.gz" 2>&1); then
+              echo "[$(date '+%F %T')] rsstt upload ok"
+              sudo rm -f "$TMP_RSSTT_TAR"
+            else
+              rc=$?
+              echo "[$(date '+%F %T')] ⚠️ rsstt.tar.gz upload failed (rc=$rc): ${rsstt_upload_output}"
+              send_telegram_alert "rsstt.tar.gz" "上传失败 · 退出码 $rc" "rclone 上传失败" "${rsstt_upload_output:-无输出}"
+            fi
+          else
+            rc=$?
+            if [ "$rc" -eq 200 ]; then
+              echo "[$(date '+%F %T')] ⏭️ previous archive still running, skip rsstt archive"
+            elif [ "$rc" -eq 3 ]; then
+              # 目录不存在或只剩占位 .keep（容器没起来）：不打空包覆盖云端好包
+              echo "[$(date '+%F %T')] ⏭️ rsstt data dir missing or empty, skip (rc=3)"
+            else
+              echo "[$(date '+%F %T')] ⚠️ rsstt.tar.gz archive failed in periodic archive (rc=$rc): ${rsstt_archive_output}"
+              send_telegram_alert "rsstt.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${rsstt_archive_output:-归档脚本无输出}"
+            fi
+          fi
+
+          # ===== zcode2api 数据快照归档（2026-10-06 新增）=====
+          # 同上：原先单点收尾，实测云端落后本地约 5 小时（accounts.db md5 已分叉，
+          # 本地 captchalog 当天日志云端包里没有）。承载账号池、用量与请求流水。
+          z2a_archive_output=""
+          if z2a_archive_output=$(flock -E 200 -n "$LOCK_FILE" timeout 20m bash /tmp/create-zcode2api-data-archive.sh "$TMP_Z2A_DATA_TAR" 2>&1); then
+            echo "[$(date '+%F %T')] zcode2api-data archive ok, uploading... ${z2a_archive_output}"
+            z2a_upload_output=""
+            if z2a_upload_output=$(timeout 20m rclone copyto "$TMP_Z2A_DATA_TAR" "dropbox:self-hosted/zcode2api-data.tar.gz" 2>&1); then
+              echo "[$(date '+%F %T')] zcode2api-data upload ok"
+              rm -f "$TMP_Z2A_DATA_TAR"
+            else
+              rc=$?
+              echo "[$(date '+%F %T')] ⚠️ zcode2api-data.tar.gz upload failed (rc=$rc): ${z2a_upload_output}"
+              send_telegram_alert "zcode2api-data.tar.gz" "上传失败 · 退出码 $rc" "rclone 上传失败" "${z2a_upload_output:-无输出}"
+            fi
+          else
+            rc=$?
+            if [ "$rc" -eq 200 ]; then
+              echo "[$(date '+%F %T')] ⏭️ previous archive still running, skip zcode2api-data archive"
+            elif [ "$rc" -eq 3 ]; then
+              # 本轮 zcode2api 未部署（无 .env 也无 data/），跳过
+              echo "[$(date '+%F %T')] ⏭️ zcode2api run dir missing, skip (rc=3)"
+            else
+              echo "[$(date '+%F %T')] ⚠️ zcode2api-data.tar.gz archive failed in periodic archive (rc=$rc): ${z2a_archive_output}"
+              send_telegram_alert "zcode2api-data.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${z2a_archive_output:-归档脚本无输出}"
+            fi
+          fi
 
             sleep 1200
           done
