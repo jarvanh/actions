@@ -34,6 +34,24 @@ RUN_DIR="${QINGYAN_RUN_DIR:-/tmp/local_qingyan}"
 
 log() { printf '[qingyan-quota] %s\n' "$*"; }
 
+# 整数口径（member-api，真值两位小数 ×100）→ 真值积分。
+#
+# ⚠️ 背景（2026-10-06 实测）：member-api 的 left_score 与积分流水 score_record
+# 的 score **同名但差 100 倍**（前者整数、后者两位小数）。此前统一取 member-api
+# 的整数值却**没在展示前还原**，于是通知里「今日已消耗 167342」—— 而流水里
+# 今日实际消耗是 1673.42，整整放大 100 倍。旁证：规则写「免费用户登录赠送
+# 200 积分/天」，按未还原值算余额 729544 够领 3647 天，还原成 7295.44 才约
+# 36 天量，后者才合理。
+# 旧快照无小数点 → 判为旧整数口径，÷100 迁移；已有小数点的按真值原样返回。
+_qy_to_real() {
+  local v="${1:-}"
+  [ -z "$v" ] && { printf '0'; return 0; }
+  case "$v" in
+    *.*) printf '%s' "$v" ;;
+    *) awk -v x="$v" 'BEGIN{printf "%.2f", x/100}' ;;
+  esac
+}
+
 # 取当前积分余额。失败时输出空串 + 非 0 退出，由调用方决定降级
 # （通知里少一节，不阻断服务）。
 cmd_fetch() {
@@ -145,6 +163,10 @@ PY
 )" || true
 
   score="$(printf '%s' "$out" | jq -r '.score // empty' 2>/dev/null || true)"
+  # 还原成真值积分（见 _qy_to_real 注释：member-api 是整数口径 ×100）。
+  # 在此统一转换，下游（通知展示 / 快照累计）全部按真值走，避免各消费方
+  # 各自记得除以 100 —— 漏一处就重现「今日已消耗 167342」。
+  [ -n "$score" ] && score="$(_qy_to_real "$score")"
   rule="$(printf '%s' "$out" | jq -r '.rule // empty' 2>/dev/null || true)"
   soonest="$(printf '%s' "$out" | jq -r '.soonest // 0' 2>/dev/null || true)"
   soonest_amt="$(printf '%s' "$out" | jq -r '.soonest_amt // 0' 2>/dev/null || true)"
@@ -177,17 +199,20 @@ cmd_delta() {
   today="$(date +%F)"
   prev_score="$(grep -m1 '^score=' "$SNAP" 2>/dev/null | cut -d= -f2- || true)"
   prev_date="$(grep -m1 '^date=' "$SNAP" 2>/dev/null | cut -d= -f2- || true)"
+  # 旧快照迁移：历史文件存的是整数口径，统一还原成真值再参与计算，
+  # 否则本轮会把已有累计再放大 100 倍。
+  prev_score="$(_qy_to_real "$prev_score")"
 
-  if [ -z "$prev_score" ]; then
-    round_delta=0; day_total=0
+  if [ -z "$prev_score" ] || [ "$prev_score" = "0" ] || [ "$prev_score" = "0.00" ]; then
+    round_delta="0"; day_total="0"
   else
-    # 余额下降 = 消耗；余额上升（每日登录赠送）不计为负消耗，按 0 处理
-    round_delta=$((prev_score - cur))
-    [ "$round_delta" -lt 0 ] && round_delta=0
+    # 余额下降 = 消耗；余额上升（每日登录赠送）不计为负消耗，按 0 处理。
+    # 真值带两位小数，故用 awk 浮点，不能用 $(( ))（bash 整数运算会报错）。
+    round_delta="$(awk -v a="$prev_score" -v b="$cur" 'BEGIN{d=a-b; if (d<0) d=0; printf "%.2f", d}')"
     if [ "$prev_date" = "$today" ]; then
-      day_total=$round_delta
+      day_total="$round_delta"
     else
-      day_total=0   # 跨日：本轮即今日首笔
+      day_total="0"   # 跨日：本轮即今日首笔
     fi
   fi
 
@@ -195,9 +220,10 @@ cmd_delta() {
   local prev_day_total=0
   if [ "$prev_date" = "$today" ]; then
     prev_day_total="$(grep -m1 '^day_total=' "$SNAP" 2>/dev/null | cut -d= -f2- || true)"
-    [ -z "$prev_day_total" ] && prev_day_total=0
+    prev_day_total="$(_qy_to_real "$prev_day_total")"
+    [ -z "$prev_day_total" ] && prev_day_total="0"
   fi
-  day_total=$((prev_day_total + round_delta))
+  day_total="$(awk -v a="$prev_day_total" -v b="$round_delta" 'BEGIN{printf "%.2f", a+b}')"
 
   umask 077
   {
