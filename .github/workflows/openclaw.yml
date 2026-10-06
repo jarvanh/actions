@@ -1976,10 +1976,10 @@ jobs:
                       if (f != "" && !(f in seen)) { seen[f]=1; order[++n]=f; site[f]="国际站" }
                     } else if (line ~ / 国际站每日活跃完成/) {
                       f=line; sub(/.*\[Checkin\] 账号 /,"",f); sub(/ 国际站每日活跃完成.*/,"",f)
-                      if (f!="") res[f]="活跃 ✓"
+                      if (f!="") res[f]="今日活跃 ✓"
                     } else if (line ~ / 国际站每日活跃失败/) {
                       f=line; sub(/.*\[Checkin\] 账号 /,"",f); sub(/ 国际站每日活跃失败.*/,"",f)
-                      if (f!="") res[f]="⚠️ 失败"
+                      if (f!="") res[f]="⚠️ 活跃失败"
                     } else if (line ~ / 每日签到成功/) {
                       f=line; sub(/.*\[Checkin\] 账号 /,"",f); sub(/ 每日签到成功.*/,"",f)
                       if (f!="") res[f]="签到 ✓"
@@ -2113,10 +2113,11 @@ jobs:
                   # workbuddy-18 被降级后还带出了「可得 +0」假积分）。
                   # 保留缺省原样如实展示（下轮日志写全自然恢复），汇总层只计「未采集」。
                   _mres="$_mr"
-                elif printf '%s' "$_mr" | grep -q '活跃 ✓'; then
+                elif printf '%s' "$_mr" | grep -q '今日活跃 ✓'; then
                   # 国际站（2026-10-04 补）：ACP 会话跑完即签到成功。积分活动 active=false
                   # 只表示「这个站没有积分可领」，**不代表签到没做** —— 不能被下面的
                   # 分支降级成「活动未开启」（首版会显示成活动未开启，观感像没签到）。
+                  # 2026-10-06 改名：原文案「活跃 ✓」脱离上下文看不出是签到，改「今日活跃 ✓」。
                   _mres="$_mr"
                 elif [ "${_CK_ACT[$_mf]}" = "false" ]; then
                   _mres="活动未开启"
@@ -2145,8 +2146,8 @@ jobs:
               while IFS="$(printf '\t')" read -r _sf _ss _sr _sc _st; do
                 if [ -z "$_sf" ]; then continue; fi
                 case "$_sr" in
-                  # 「活跃 ✓」= 国际站 ACP 会话成功（2026-10-04 补），与国内站签到同等计入已签
-                  *"签到 ✓"*|*"今日已签"*|*"活跃 ✓"*) _n_signed=$((_n_signed + 1)) ;;
+                  # 「今日活跃 ✓」= 国际站 ACP 会话成功（2026-10-04 补），与国内站签到同等计入已签
+                  *"签到 ✓"*|*"今日已签"*|*"今日活跃 ✓"*) _n_signed=$((_n_signed + 1)) ;;
                   *"活动未开启"*) _n_closed=$((_n_closed + 1)) ;;
                   *"未签"*) _n_open=$((_n_open + 1)) ;;
                   *"失败"*) _n_fail=$((_n_fail + 1)) ;;
