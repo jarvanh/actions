@@ -30,8 +30,6 @@
 #
 # 用法：
 #   qingyan_deploy.sh prepare   # 从 Dropbox 拉代码 + 写 env.sh（幂等）
-#   qingyan_deploy.sh pull      # 从 Dropbox 拉回持久数据（起服务前）
-#   qingyan_deploy.sh push      # 回推持久数据 + 日志到 Dropbox（收尾）
 #   qingyan_deploy.sh selftest  # 端到端自检：glm-5.3 与 glm-5.3-flash 各发一条
 #   qingyan_deploy.sh status    # 端口存活（/healthz 需带 key）
 set -u
@@ -55,9 +53,7 @@ APP_REMOTE="${QINGYAN_APP_REMOTE:-}"
 # 持久数据目录（本地侧）：凭证状态文件 + 积分快照。
 DATA_DIR="${QINGYAN_DATA_DIR:-$RUN_DIR/data}"
 # Dropbox 侧数据远端。空=不同步（本地单轮跑）。
-DATA_REMOTE="${QINGYAN_DATA_REMOTE:-}"
 # 迁移兜底：glm2api 时代的积分快照在其数据目录下。新位置为空时取一次，取到即用。
-LEGACY_SNAP_REMOTE="${QINGYAN_LEGACY_SNAP_REMOTE:-dropbox:self-hosted/glm2api}"
 CRED_FILE="$DATA_DIR/qingyan-credentials.json"
 
 log() { printf '[qingyan] %s\n' "$*"; }
@@ -101,27 +97,6 @@ EOF
   log "✅ 运行目录就绪（$RUN_DIR，端口 $PORT）"
 }
 
-# ── pull：起服务前把 Dropbox 上的持久数据拉进本地 data/ ────────────────────
-# rclone copy 单向拉取、不删本地多余文件；远端为空是首轮正常情况，不判失败。
-cmd_pull() {
-  # 2026-10-06 已移除：qingyan 全面跑在 Dropbox 上（代码/数据/凭据/日志），
-  # DATA_DIR 与 DATA_REMOTE 指向同一目录，原逻辑是「自己同步自己」的 no-op；
-  # 日志也已由 unit 的 StandardOutput 直写 Dropbox，不再从 /tmp 回推。
-  log "ℹ️ 数据拉取已移除（qingyan 直写 Dropbox），跳过"
-  return 0
-}
-
-# ── push：收尾把本地 data/ + 日志回推 Dropbox ──────────────────────────────
-# 只 copy 不 sync：远端的历史内容不该被本轮删掉（与 glm2api/workbuddy 收尾同口径）。
-# 失败不阻断收尾通知——下一轮 pull 不到最多是凭证退回种子/累计从 0 起。
-cmd_push() {
-  # 2026-10-06 已移除：qingyan 全面跑在 Dropbox 上（代码/数据/凭据/日志），
-  # DATA_DIR 与 DATA_REMOTE 指向同一目录，原逻辑是「自己同步自己」的 no-op；
-  # 日志也已由 unit 的 StandardOutput 直写 Dropbox，不再从 /tmp 回推。
-  log "ℹ️ 数据回推已移除（qingyan 直写 Dropbox），跳过"
-  return 0
-}
-
 cmd_status() {
   local key code
   key="$(grep -m1 '^PROXY_API_KEY=' "$ENV_FILE" 2>/dev/null | cut -d= -f2-)"
@@ -163,9 +138,7 @@ cmd_selftest() {
 
 case "${1:-}" in
   prepare)  cmd_prepare ;;
-  pull)     cmd_pull ;;
-  push)     cmd_push ;;
   status)   cmd_status ;;
   selftest) cmd_selftest ;;
-  *) echo "用法: $0 {prepare|pull|push|status|selftest}"; exit 1 ;;
+  *) echo "用法: $0 {prepare|status|selftest}"; exit 1 ;;
 esac
