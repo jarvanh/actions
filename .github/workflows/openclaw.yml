@@ -4003,6 +4003,26 @@ jobs:
             fi
           }
 
+          # 2026-10-06：.env 是 KEY=VALUE 纯文本，不是 JSON，套 json_ok 会恒判否
+          # （正是此前 .env 进不了隔离快照名单的原因之一）。判据取「非空 +
+          # 至少一行合法 KEY=」：只判 -s 会把写了一半的文件当好副本收下、回填后
+          # 完整性校验照样过 —— 所以补进名单时必须先把判据做对。
+          env_ok() {
+            [ -s "$1" ] || return 1
+            grep -q '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' "$1" 2>/dev/null
+          }
+
+          # 按文件类型分派完好性判据：JSON 必须可解析，.env 走文本判据，其余退回非空。
+          file_ok() {
+            local path="$1" base
+            base="${path##*/}"
+            case "$base" in
+              *.json)     json_ok "$path" ;;
+              .env|*.env) env_ok "$path" ;;
+              *)          [ -s "$path" ] ;;
+            esac
+          }
+
           rm -f "$OUTPUT_TAR"
 
           if [ ! -d "$SRC_DIR" ]; then
@@ -4023,13 +4043,17 @@ jobs:
           # 对策：rsync 前先把关键文件拷到隔离位，校验为完整 JSON 才收，重试
           # 直到拿到好副本；rsync 后再用该副本兜底回填，让瞬时竞态自愈，
           # 而不是整轮判失败、冻结主包。
-          CRITICAL_FILES="openclaw.json"
+          # 2026-10-06：.env 补进隔离快照名单 —— 此前只有 openclaw.json 享受「抓副本
+          # → 校验 → 回填」的自愈待遇，.env 全靠 rsync 那一趟扫到；6.9G 的 rsync 一旦
+          # 漏扫，就直接落到 exit 4（run 37396503543 即此形态：日志第一行还在回填
+          # openclaw.json，第二行已经报 missing= .env）。补进名单后漏扫也能用副本补齐。
+          CRITICAL_FILES="openclaw.json .env"
           KEEP_DIR="$(mktemp -d /tmp/openclaw-archive-keep.XXXXXX)"
           keep_ok=1
           for f in $CRITICAL_FILES; do
             got=0
             for attempt in 1 2 3 4 5; do
-              if cp "$SRC_DIR/$f" "$KEEP_DIR/$f" 2>/dev/null && json_ok "$KEEP_DIR/$f"; then
+              if cp "$SRC_DIR/$f" "$KEEP_DIR/$f" 2>/dev/null && file_ok "$KEEP_DIR/$f"; then
                 got=1
                 break
               fi
@@ -4079,7 +4103,7 @@ jobs:
           #（keep_ok=0）不回填 —— 那是源真坏了，必须让校验拦下。
           if [ "$keep_ok" -eq 1 ]; then
             for f in $CRITICAL_FILES; do
-              if ! json_ok "$STAGE_DIR/.openclaw/$f"; then
+              if ! file_ok "$STAGE_DIR/.openclaw/$f"; then
                 cp "$KEEP_DIR/$f" "$STAGE_DIR/.openclaw/$f"
                 echo "openclaw_archive_race_repaired file=$f (rsync 竞态，已用稳定副本回填)" >&2
               fi
