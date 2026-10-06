@@ -36,6 +36,9 @@
 #   qingyan_deploy.sh status    # 端口存活（/healthz 需带 key）
 set -u
 
+# 2026-10-06 起 qingyan 全面跑在 Dropbox 上（代码/数据/凭据/日志），
+# 不再往 /tmp/local_qingyan 拉运行副本。APP_DIR 是代码真源（unit 直跑这里）。
+APP_DIR="/dropbox/self-hosted/qingyan-proxy/app"
 RUN_DIR="/tmp/local_qingyan"
 PORT="${QINGYAN_PORT:-8320}"
 # 长输出超时（秒）。⚠️ proxy.py 的两步式写入要跑两轮完整长生成，
@@ -43,7 +46,10 @@ PORT="${QINGYAN_PORT:-8320}"
 UPSTREAM_TIMEOUT="${QINGYAN_UPSTREAM_TIMEOUT:-1800}"
 LOG_DIR="$RUN_DIR/logs"
 LOG="$LOG_DIR/qingyan.log"
-ENV_FILE="$RUN_DIR/env.sh"
+# 凭据也落 Dropbox（主人 2026-10-06 决定）：unit 的 EnvironmentFile 读这里。
+# ⚠️ 挂载点权限恒 666（chmod 600 是空操作），env.sh 内含 refresh token 明文，
+#    对同机所有用户可读可写 —— 已知并接受的风险。
+ENV_FILE="/dropbox/self-hosted/qingyan-proxy/env.sh"
 # 代码源（Dropbox 侧，rclone remote 形式）。空=不拉取（目录里已有代码才能跑）。
 APP_REMOTE="${QINGYAN_APP_REMOTE:-}"
 # 持久数据目录（本地侧）：凭证状态文件 + 积分快照。
@@ -65,22 +71,12 @@ cmd_prepare() {
   # 网卡上，不如显式失败（与 services.sh 的密钥缺失同口径）。
   [ -n "${QINGYAN_GATEWAY_KEY:-}" ] || die "未注入 QINGYAN_GATEWAY_KEY 环境变量（仓库 Secret GLM2API_GATEWAY_KEY），拒绝起无鉴权服务"
 
-  mkdir -p "$RUN_DIR" "$LOG_DIR" "$DATA_DIR" || die "无法创建运行目录 $RUN_DIR"
+  mkdir -p "$RUN_DIR" "$DATA_DIR" || die "无法创建数据目录 $DATA_DIR"
 
-  # 代码：单文件项目，从 Dropbox 拉取（幂等 copy，每轮都拉保证跑在最新版上）。
-  # 拉不到且本地已有 proxy.py 时沿用旧副本（Dropbox 抖动不阻断部署）。
-  if [ -n "$APP_REMOTE" ]; then
-    if rclone copy "$APP_REMOTE" "$RUN_DIR" \
-         --exclude '.DS_Store' --exclude 'logs/**' --exclude 'data/**' \
-         --retries 5 --low-level-retries 10 --timeout 1m --contimeout 15s 2>/dev/null; then
-      log "已从 Dropbox 拉取代码：$APP_REMOTE"
-    elif [ -s "$RUN_DIR/proxy.py" ]; then
-      log "⚠️ 代码拉取失败，沿用运行目录现有副本"
-    else
-      die "从 Dropbox 拉取代码失败且无本地副本：$APP_REMOTE"
-    fi
-  fi
-  [ -s "$RUN_DIR/proxy.py" ] || die "运行目录缺 proxy.py（未指定 QINGYAN_APP_REMOTE 且本地无代码）"
+  # 代码（2026-10-06 起）：真源就是 Dropbox 的 app 目录，unit 用绝对路径直跑它，
+  # 不再往 /tmp/local_qingyan 拉运行副本 —— 拉了也没人用，且 /tmp 被清理时会
+  # 误判「运行目录缺 proxy.py」而 die。这里只校验真源在位。
+  [ -s "$APP_DIR/proxy.py" ] || die "Dropbox app 目录缺 proxy.py：$APP_DIR（APP_REMOTE=$APP_REMOTE）"
 
   # env.sh：凭据 + 服务参数，systemd 单元 EnvironmentFile 读取。600 落盘。
   # proxy.py 纯读环境变量，一份 env.sh 全覆盖（glm2api 时代的 .env/env.sh 双文件
