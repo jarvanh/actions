@@ -1392,16 +1392,13 @@ jobs:
             fi
           }
 
-          mkdir -p "$WB_DIR" "$WB_DIR/logs" "$WB_RUN_DIR/logs" "$WB_BIN_DIR"
+          mkdir -p "$WB_DIR" "$WB_DIR/logs" "$WB_BIN_DIR"
 
-          # 把 Dropbox 上的持久数据拉进本地运行目录（凭据、状态快照；logs 不拉，用本轮新写的）。
-          # rclone copy 单向拉取、不删本地多余文件，缺失也不报错 —— 首轮目录为空是正常情况。
-          echo "0. Syncing workbuddy data from Dropbox to local run dir..."
-          rclone copy "dropbox:self-hosted/workbuddy-gateway" "$WB_RUN_DIR" \
-            --exclude 'logs/**' --exclude '*.new' --exclude 'workbuddy-gateway-*' \
-            --retries 5 --low-level-retries 10 --timeout 1m --contimeout 15s 2>/dev/null || \
-            echo "⚠️ workbuddy 数据拉取失败/为空，按空账号池启动（凭据可由 serve 启动后热加载）"
-          ls -la "$WB_RUN_DIR" 2>/dev/null | head -20 || true
+          # 拉取已移除（2026-10-06）：workbuddy 的 WorkingDirectory 已直指 Dropbox
+          # （/dropbox/self-hosted/workbuddy-gateway），凭据/config/usage/status 全部由网关
+          # 自己直写，不再需要把数据搬进 /tmp/local_workbuddy/data 这个无人读取的运行目录。
+          # 原逻辑每轮在此白跑一次 rclone copy。
+          echo "0. workbuddy 数据直写 Dropbox（cwd=$WB_DIR），无需拉取"
 
           # ---------- 1. 检查更新：比对 GitHub Releases 的 latest 版本号与本地记录 ----------
           # 查版本失败按"保持现状"处理，不因查版本失败而少启一个服务。
@@ -5148,11 +5145,10 @@ jobs:
           sleep 2
           pkill -9 -f "local_qingyan.*proxy\.py" 2>/dev/null || true
 
-          # 进程已停 → 回推持久数据到 Dropbox（对齐 workbuddy 收尾的 3b-1）。
-          # 只 copy 不 sync：远端历史内容不该被本轮删掉。失败不阻塞收尾通知。
-          echo "3d-1. Syncing qingyan-proxy data back to Dropbox..."
-          bash "$GITHUB_WORKSPACE/.github/scripts/services/qingyan_deploy.sh" push 2>/dev/null || \
-            echo "⚠️ qingyan-proxy 数据回推失败（今日累计可能落后一轮）"
+          # 3d-1 回推已移除（2026-10-06）：qingyan 全面直写 Dropbox（代码/数据/凭据/日志），
+          # 原本的「停进程 → 回推 data 到 Dropbox」已无意义（DATA_DIR 与 DATA_REMOTE
+          # 指向同一目录，是「自己同步自己」的 no-op），故不再调用 deploy.sh push。
+          echo "3d-1. qingyan 数据直写 Dropbox，无需回推"
 
           GL_STILL_RUNNING=0
           if (exec 3<> /dev/tcp/127.0.0.1/8320) 2>/dev/null; then
