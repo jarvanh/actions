@@ -1224,6 +1224,11 @@ jobs:
               local _msg=""
               tg_add_title _msg "$1"
               tg_add_kv _msg "结论" "$2"
+              # 数据目录（机器值 → <code>）移到头部（主人 2026-10-06 要求）：
+              # 它是「这条通知说的是哪台机/哪份数据」的定位信息，与 版本/接口/API Key
+              # 同类；压在正文末尾时夹在「用量/流水」与「原始输出」之间，既不像结论
+              # 也不像明细，读者要找它得翻到底。
+              tg_add_path _msg "数据目录" "$WB_DIR"
               [ -n "$3" ] && tg_add_path _msg "版本" "$3"
               [ -n "$4" ] && tg_add_kv _msg "更新" "$4"
               if [ "${7:-0}" = "1" ]; then
@@ -1361,7 +1366,6 @@ jobs:
               if [ -n "${WB_RATES_TXT:-}" ]; then
                 WB_RATES_BLOCK="$(tg_add_title WB_RATES_BLOCK "📊 workbuddy-gateway 模型倍率 · 模型数量${WB_RATES_N:-0}${WB_RATES_FREE_TAG:-}"; tg_add_pre WB_RATES_BLOCK "$WB_RATES_TXT"; tg_add_footer WB_RATES_BLOCK; printf '%s' "$WB_RATES_BLOCK")"
               fi
-              tg_add_path _msg "数据目录" "$WB_DIR"
               # 用量 + 流水（看板独有，2026-10-05 补进通知）：只渲染本网关自己，
               # 避免 wb 通知里出现 zcode 数据（语义串台）。调 board.py 的 CLI 子命令 ——
               # 与看板**共用同一份渲染代码与本地实时 usage**，不另写一套、不走 Dropbox 旧副本
@@ -2324,6 +2328,11 @@ jobs:
               local _msg=""
               tg_add_title _msg "$1"
               tg_add_kv _msg "结论" "$2"
+              # 数据目录（机器值 → <code>）移到头部，与 wb_notify 同口径
+              # （主人 2026-10-06 要求）：它是「这条通知说的是哪份数据」的定位信息，
+              # 与 版本/接口/API Key 同类；压在正文末尾夹在用量段与原始输出之间，
+              # 既不像结论也不像明细，读者要找它得翻到底。
+              tg_add_path _msg "数据目录" "$TRAE_DATA"
               [ -n "$3" ] && tg_add_path _msg "版本" "$3"
               [ -n "$4" ] && tg_add_kv _msg "更新" "$4"
               if [ "${7:-0}" = "1" ]; then
@@ -2443,7 +2452,6 @@ jobs:
                 # tg_add_pre 内部 <pre> 包裹 + 转义；段尾补空行对齐账号池段
                 tg_append _msg $'\n'
               fi
-              tg_add_path _msg "数据目录" "$TRAE_DATA"
               # 用量 + 流水（与 wb_notify 同口径，2026-10-05 补）：只渲染 trae 自己的，
               # 调 board.py CLI 与看板共用渲染代码与数据源。trae 当日无 usage 文件时
               # CLI 输出空串，静默跳过（不留空行）。
