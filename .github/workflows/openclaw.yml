@@ -5241,10 +5241,25 @@ jobs:
             fi
             echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
           }
+          # 目录体积预估（KB）。第二参数传 sudo 则以 root 统计。
+          # ⚠️ 2026-10-06 修：du 遇到不可读条目会往 stderr 报 "cannot access" 并以非 0
+          #   退出；在 `set -euo pipefail` 下 pipefail 会把该非 0 透出，赋值语句失败
+          #   即触发 set -e，整个最终归档步骤当场 exit 1（实测：backups/ 下一个
+          #   600 权限的畸形路径就让本轮归档全部中止，云端主包停在上一轮）。
+          #   体积只是容量预检，个别条目读不到不该掀桌：只记录 stderr，取到数字就继续。
+          du_sk() {
+            local target="$1" prefix="${2:-}" out=""
+            out=$(${prefix} du -sk "$target" 2>/tmp/du-sk.err) || true
+            if [ -s /tmp/du-sk.err ]; then
+              echo "⚠️ du_sk: ${target} 部分条目不可读（已忽略，仅影响容量预估）：$(head -3 /tmp/du-sk.err | tr '\n' ' ')" >&2
+              : > /tmp/du-sk.err
+            fi
+            awk 'NF{print $1; exit}' <<<"${out}"
+          }
           cleanup_archive_outputs
           TMP_OPENCLAW_TAR="/tmp/openclaw-final.tar.gz"
 
-          openclaw_src_kb=$(du -sk "$HOME/.openclaw" | awk '{print $1}')
+          openclaw_src_kb=$(du_sk "$HOME/.openclaw")
           if [ -z "${openclaw_src_kb:-}" ] || [ "$openclaw_src_kb" -le 0 ]; then
             echo "❌ final openclaw archive preflight: unable to calculate source size" >&2
             exit 1
@@ -5455,7 +5470,7 @@ jobs:
             echo "5a. Archiving CLIProxyAPI persistent data (fallback backend, with clirelay auths)..."
             echo "=== local CLIProxyAPI tree before archive ==="
             find /tmp/local_CLIPProxyAPI -maxdepth 4 | sort || true
-            cliproxyapi_src_kb=$(sudo du -sk /tmp/local_CLIPProxyAPI | awk '{print $1}')
+            cliproxyapi_src_kb=$(du_sk /tmp/local_CLIPProxyAPI sudo)
             if [ -z "${cliproxyapi_src_kb:-}" ] || [ "$cliproxyapi_src_kb" -le 0 ]; then
               echo "❌ final CLIProxyAPI archive preflight: unable to calculate source size" >&2
               exit 1
@@ -5500,7 +5515,7 @@ jobs:
           if [ -d /tmp/local_rsstt ]; then
             echo "=== local rss-to-telegram tree before archive ==="
             find /tmp/local_rsstt -maxdepth 4 | sort || true
-            rsstt_src_kb=$(sudo du -sk /tmp/local_rsstt | awk '{print $1}')
+            rsstt_src_kb=$(du_sk /tmp/local_rsstt sudo)
             if [ -z "${rsstt_src_kb:-}" ] || [ "$rsstt_src_kb" -le 0 ]; then
               echo "❌ final rsstt archive preflight: unable to calculate source size" >&2
               exit 1
