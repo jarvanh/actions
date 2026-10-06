@@ -3023,9 +3023,33 @@ jobs:
             fi
           }
 
+          # 自检前先强制刷新一次额度 —— 修「有额度却报额度耗尽」的误报
+          # （2026-10-06 实测：启动通知报 4 个账号全「额度用完」，实际刷新后
+          # 4 个全部 active、合计剩 2.76 亿 token）。
+          # 成因是时序竞争：服务重启后账号状态从 accounts.db 恢复，带着上次
+          # 运行留下的 EXHAUSTED；后台 monitor 的额度刷新还没跑完，自检探针就
+          # 打进来拿 503，通知便据此判「全部通道额度耗尽」。服务没病，是健康
+          # 检查抢跑。故先刷一次让状态追上真实额度，再自检 —— 刷新后仍 503
+          # 才是真的无额度，此时报警才准。
+          # 失败不阻断：刷新只用于纠正状态，刷不动时自检结果本身仍然可信。
+          # （端点只跳过 cooling / 非 Plan 通道账号，EXHAUSTED 会被刷到，
+          #  quota.py 的「额度恢复 → 重新激活」逻辑会把有余量的账号救回 active）
+          z2a_refresh_quota() {
+            local ak
+            ak="$(z2a_admin_key)"
+            [ -n "$ak" ] || return 0
+            curl -sS --max-time 180 -X POST \
+              "http://127.0.0.1:${Z2A_PORT}/admin/api/accounts/refresh" \
+              -H "Authorization: Bearer ${ak}" \
+              -H 'content-type: application/json' \
+              -d '{"all":true}' >/dev/null 2>&1 || true
+          }
+
           if z2a_alive; then
             # 端口已有实例在响应：多为上一轮接力残留，直接复用，不重复起。
             # 但复用不等于可用 —— 仍要跑自检确认上游链路。
+            # 复用实例同理先刷额度：残留实例可能已跑很久，状态未必跟上。
+            z2a_refresh_quota
             if z2a_selftest; then
               Z2A_OK=1
               Z2A_REASON="已就绪 · 复用 ${Z2A_PORT} 上的实例（$(z2a_ok_reason)）"
@@ -3095,6 +3119,10 @@ jobs:
                   else
                     echo "⚠️ [zcode2api] credential sync cron 安装失败（不影响本轮服务）"
                   fi
+                  # 新起实例：自检前先刷额度，避免账号从 accounts.db 带着上轮的
+                  # EXHAUSTED 恢复、后台刷新尚未跑完就被自检判「额度耗尽」
+                  # （2026-10-06 误报实例，详见 z2a_refresh_quota 处注释）
+                  z2a_refresh_quota
                   if z2a_selftest; then
                     Z2A_OK=1
                     Z2A_REASON="$(z2a_ok_reason)"
