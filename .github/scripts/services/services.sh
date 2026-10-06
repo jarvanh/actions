@@ -275,14 +275,19 @@ WantedBy=default.target
 EOF
       ;;
     qingyan)
-      # 凭据只落在运行目录 env.sh（600），不进单元文件——同一份 refresh token
-      # 落到两处会在上游轮换式刷新时漏改一处。这里只校验部署脚本是否已写好。
-      [ -s /tmp/local_qingyan/env.sh ] || { rm -f "$tmp"; die "qingyan: 运行目录 env.sh 缺失或为空，请先跑 qingyan_deploy.sh prepare"; }
-      grep -q '^QINGYAN_REFRESH_TOKEN=.' /tmp/local_qingyan/env.sh || { rm -f "$tmp"; die "qingyan: env.sh 内无 QINGYAN_REFRESH_TOKEN，拒绝起无凭据服务"; }
-      [ -s /tmp/local_qingyan/proxy.py ] || { rm -f "$tmp"; die "qingyan: 运行目录缺 proxy.py"; }
-      # 日志目录必须存在：StandardOutput=append:<LOG> 在目录不存在时进程直接以
-      # status=209/STDOUT 退出 → Restart=always 崩溃循环（glm2api 时代实测踩过）。
-      # 部署脚本已建，这里幂等补一道。
+      # 2026-10-06 起 qingyan 全面跑在 Dropbox 上（代码 / 数据 / 凭据 / 日志），
+      # 不再往 /tmp/local_qingyan 拉副本：
+      #   - 代码：纯标准库单文件，系统 python3 用绝对路径直跑挂载点上的 proxy.py
+      #     （Python 只需读权限，不像二进制需要 x 位 —— 已实测可执行）
+      #   - 数据：QINGYAN_DATA_DIR / CRED_FILE 已指向 Dropbox（workflow ac769de）
+      #   - 凭据：env.sh 也放 Dropbox（主人 2026-10-06 决定）
+      # ⚠️ 安全代价（实测）：挂载点合成权限恒为 666，chmod 600 是空操作 ——
+      #    env.sh 内含 PROXY_API_KEY 与 QINGYAN_REFRESH_TOKEN 明文，
+      #    落挂载点后对同机所有用户**可读且可写**（可被篡改/删除）。
+      #    此为已知并接受的风险；若将来收紧，把 env.sh 改回 /tmp 即可。
+      [ -s /dropbox/self-hosted/qingyan-proxy/env.sh ] || { rm -f "$tmp"; die "qingyan: Dropbox env.sh 缺失或为空，请先跑 qingyan_deploy.sh prepare"; }
+      grep -q '^QINGYAN_REFRESH_TOKEN=.' /dropbox/self-hosted/qingyan-proxy/env.sh || { rm -f "$tmp"; die "qingyan: env.sh 内无 QINGYAN_REFRESH_TOKEN，拒绝起无凭据服务"; }
+      [ -s /dropbox/self-hosted/qingyan-proxy/app/proxy.py ] || { rm -f "$tmp"; die "qingyan: Dropbox app 目录缺 proxy.py"; }
       ensure_log_dir "$LOG_ROOT/qingyan-proxy/logs/qingyan.log"
       cat > "$tmp" <<EOF
 [Unit]
@@ -294,10 +299,11 @@ StartLimitBurst=0
 
 [Service]
 Type=simple
-WorkingDirectory=/tmp/local_qingyan
-EnvironmentFile=/tmp/local_qingyan/env.sh
-# 单文件零依赖（纯标准库），系统 python3 直接跑，无需 venv
-ExecStart=/usr/bin/python3 proxy.py
+WorkingDirectory=/dropbox/self-hosted/qingyan-proxy/app
+EnvironmentFile=/dropbox/self-hosted/qingyan-proxy/env.sh
+# 单文件零依赖（纯标准库），系统 python3 直接跑，无需 venv；
+# 用绝对路径直指挂载点上的代码，不再往 /tmp 拉副本
+ExecStart=/usr/bin/python3 /dropbox/self-hosted/qingyan-proxy/app/proxy.py
 Restart=always
 RestartSec=5
 # 停止超时：同上，默认 90s 不够排空，统一放宽到 180s。
