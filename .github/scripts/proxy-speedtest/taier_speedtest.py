@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""订阅节点三网测速（引擎 MiaM1ku/taierspeedtest，链路 mihomo TUN 透明代理）。
+"""订阅节点三网测速（引擎 jarvanh/taierspeedtest v1.0.4-jh.1+，链路 mihomo 标准反压代理）。
 
 与 speedtest.py 同属「订阅节点测速」域：复用 speedtest_common.py 共享层（订阅导出策略 /
 通知排版 / 测速点归属查询 / Telegram 发送 / Gist 上传）与 speedtest_gitee.py 的 mihomo 内核 /
@@ -7,15 +7,11 @@
 协议还原自 com.cnspeedtest.globalspeed），拿到的是「订阅节点 → 国内电信/联通/移动
 测速点」的延迟与单/多线程上下行带宽。
 
-为什么必须开 TUN：taierspeedtest 是原生 TCP/ICMP 客户端，既没有 --proxy 参数，
-Go 的 net.Dialer 又直接发系统调用（proxychains 这类 LD_PRELOAD 方案对它无效），
-只能靠 mihomo TUN 把该进程的流量透明接入代理节点。为不误伤 runner 自身网络：
-
-    rules: ['PROCESS-NAME,taierspeedtest,AUTO', 'MATCH,DIRECT']
-
-即只有测速进程走代理、其余流量（含 GitHub runner 自己的心跳/日志）直连；再用
-「测速看到的出口 IP == runner 直连出口 IP」校验规则是否真的生效——规则失灵或 TUN
-起不来时会静默直连、整轮结果失真，这个校验必须存在（bypass 命中即判失败）。
+链路（2026-10-07 弃 TUN 定案）：引擎数据面已全走 http.Client（v1.0.4-jh.1），
+经 mihomo mixed-port 的标准反压代理接入节点 —— TAIER_SOCKS5 隧道 + HTTP(S)_PROXY。
+不再需要 TUN/auto-route/CAP_NET_ADMIN（旧 TUN 的 gvisor 贪婪收包+本地回 ACK 是
+上行读数虚高 756 倍的放大器本体，实测 4.6Gbps 假读数来源）。bypass 校验保留：
+引擎测得的出口 IP 若等于 runner 直连出口，说明代理没生效，判失败。
 
 设计原则（与 speedtest.py 一致）：
   - 共享能力一律 import 复用：纯共享层来自 speedtest_common，mihomo/订阅源来自
@@ -23,7 +19,7 @@ Go 的 net.Dialer 又直接发系统调用（proxychains 这类 LD_PRELOAD 方�
   - 节点串行测试（共享同一 mihomo 内核，切换后 settle）
   - 参数全部经环境变量控制
   - 兜底对齐 gitee：SIGTERM/SIGINT → ⛔ 通知；未捕获异常/阶段失败 → ❌ 通知
-    （所有失败路径均先撤 TUN 再发——notify_failure 内部先调幂等的 stop_mihomo_tun）
+    （mihomo 收尾仍调幂等的 stop_mihomo_tun，防止内核残留占端口）
 """
 import html
 import json
@@ -72,6 +68,7 @@ from speedtest_gitee import (
     MIHOMO_API,
     MIHOMO_CONFIG,
     MIHOMO_LOG,
+    MIHOMO_MIXED_PORT,
     build_mihomo_config,
     build_source_mapping,
     collect_group_delays,
@@ -161,6 +158,20 @@ CONFIG = {
     'TAIER_PROBE_MIN_COVERAGE': float(os.environ.get('TAIER_PROBE_MIN_COVERAGE', '0.5') or 0.5),
     'TAIER_TIMEOUT': int(os.environ.get('TAIER_TIMEOUT', '120') or 120),
     'TAIER_SWITCH_SETTLE': float(os.environ.get('TAIER_SWITCH_SETTLE_SECONDS', '1.5') or 1.5),
+    # 逃生门：TAIER_USE_TUN=1 回退旧行为（TUN+进程分流）。默认关闭。
+    'TAIER_USE_TUN': (os.environ.get('TAIER_USE_TUN', '').strip().lower()
+                      in ('1', 'true', 'yes', 'on')),
+    # ── 弃 TUN · 代理链路（2026-10-07 定案）──
+    # 背景：mihomo TUN 的 gvisor 用户态栈贪婪收包并本地回 ACK，客户端 Write() 几乎
+    # 不阻塞，盲写计数实测虚高 756 倍（↓4618兆 假读数来源）。改为标准反压代理后
+    # （mihomo mixed-port，转不动就不读），写多快取决于真实出口速率，实测 0.8x。
+    # 引擎侧改造见 jarvanh/taierspeedtest v1.0.4-jh.1（数据面全走 http.Client）。
+    # 数据面 SOCKS5 隧道（mihomo mixed-port 同端口兼容；engine 优先于 HTTP_PROXY）。
+    # 留空 = 引擎回落 HTTP_PROXY；两者都空 = 直连（旧行为，仅排查用）。
+    'TAIER_SOCKS5': (os.environ.get('TAIER_SOCKS5', '') or '').strip(),
+    # 上行真实长度（字节）：900MB 谎言经代理会被服务端 RST（curl 真实 1MB→200 实证）。
+    # 引擎按此长度**循环上传**直到窗口结束，服务端逐个 200 确认。建议 1~4MB。
+    'TAIER_UPLOAD_LEN': int(os.environ.get('TAIER_UPLOAD_LEN', '1048576') or 0),
     # 每节点是否出结果图（上传图床）：默认关，避免 N 个节点刷 N 张图
     'TAIER_IMAGE': (os.environ.get('TAIER_IMAGE', '0').strip().lower() in ('1', 'true', 'yes', 'on')),
     # 默认不测 IPv6：TUN 下客户端会误判 v6 可用而把单节点耗时翻倍，且多数节点无 v6
@@ -313,13 +324,33 @@ def _github_json(url: str):
 
 
 def ensure_local_taier():
-    """下载 taierspeedtest 最新 Release 二进制（固定文件名，供 PROCESS-NAME 规则匹配）。"""
-    if TAIER.exists() and os.access(TAIER, os.X_OK):
-        return TAIER
+    """下载 taierspeedtest 最新 Release 二进制（固定文件名）。
+
+    缓存判据 = meta 文件记录的 `repo|tag` 与 TAIER_REPO 的 latest 一致。
+    为什么必须做：HOME_RUNTIME 里的旧缓存可能是 MiaM1ku 原版引擎（无代理支持），
+    TAIER_REPO 切到 fork 后若直接复用缓存，会静默跑旧引擎、读数照旧虚高——
+    这比下载失败隐蔽得多，必须有版本对账。
+    """
     arch = 'arm64' if os.uname().machine in ('aarch64', 'arm64') else 'amd64'
     asset = f'taierspeedtest-linux-{arch}'
-    data = _github_json(TAIER_RELEASE_API)
-    VERSION['taier'] = str(data.get('tag_name') or '')
+    meta_path = HOME_RUNTIME / 'taierspeedtest.meta'
+    try:
+        data = _github_json(TAIER_RELEASE_API)
+    except Exception as e:
+        # API 失败且缓存确实属于本 repo 时降级复用（比整轮失败好）
+        if TAIER.exists() and os.access(TAIER, os.X_OK) and meta_path.exists():
+            have = meta_path.read_text(encoding='utf-8').strip()
+            if have.startswith(TAIER_REPO + '|'):
+                log_progress('taier_cache_fallback', reason=str(e)[:120],
+                             cached=have.split('|', 1)[1])
+                return TAIER
+        raise
+    tag = str(data.get('tag_name') or '')
+    want = f'{TAIER_REPO}|{tag}'
+    have = meta_path.read_text(encoding='utf-8').strip() if meta_path.exists() else ''
+    if TAIER.exists() and os.access(TAIER, os.X_OK) and have == want:
+        VERSION['taier'] = tag
+        return TAIER
     url = ''
     for a in data.get('assets') or []:
         if a.get('name') == asset:
@@ -329,7 +360,9 @@ def ensure_local_taier():
     with urllib.request.urlopen(url, timeout=180) as r, TAIER.open('wb') as f:
         shutil.copyfileobj(r, f)
     os.chmod(TAIER, 0o755)
-    log_progress('taier_downloaded', tag=VERSION['taier'], asset=asset, path=str(TAIER))
+    meta_path.write_text(want, encoding='utf-8')
+    VERSION['taier'] = tag
+    log_progress('taier_downloaded', tag=tag, asset=asset, path=str(TAIER))
     return TAIER
 
 
@@ -365,44 +398,57 @@ def _kill_stale_mihomo():
                            capture_output=True, timeout=10)
 
 
-def build_tun_config(env):
-    """在 speedtest_gitee 的原配置上开 TUN + 进程级分流（不改动原函数）。
+def build_proxy_config(env):
+    """生成 mihomo 配置。默认**不开 TUN**（标准反压代理，2026-10-07 定案）；
+    TAIER_USE_TUN=1 可逃生回 TUN 模式（gvisor 贪婪收包是读数虚高的放大器本体）。
 
-    只改 4 处：
-      mode: rule        → global 模式会忽略 rules，必须切回 rule
-      tun.enable/auto-route/auto-detect-interface → 透明接管（需 CAP_NET_ADMIN）
-      PROCESS-NAME 规则 → 仅测速进程走 AUTO（即当前节点）
-      MATCH,DIRECT      → 其余流量直连，避免把 runner 自身流量也拖进节点
+    代理模式（默认）：mixed-port 已由 build_mihomo_config 提供（HTTP+SOCKS5 同端口），
+    引擎经 TAIER_SOCKS5/HTTP_PROXY 走 AUTO 组 —— 无需 CAP_NET_ADMIN、不劫持整机路由。
+    规则用 MATCH,AUTO（现有默认）：绕过 TUN 后"只有测速进程走节点"由环境变量隔离达成，
+    不再依赖 PROCESS-NAME。
     """
     cfg, raw_proxy_map = build_mihomo_config(env)
-    cfg['mode'] = 'rule'
-    cfg['tun'] = {
-        'enable': True,
-        'stack': 'mixed',
-        'auto-route': True,
-        'auto-detect-interface': True,
-    }
-    # TUN 起来后 DNS 会被 mihomo 劫持：默认递归解析器（国内 DNS）在 Azure runner 上
-    # 经常不通，会让 runner 自己（日志/状态回传）与测速客户端一起解析失败。
-    # 显式指定可达的公共递归解析器 + respect-rules=false（DNS 不走规则，直接解析）。
-    cfg['dns'] = {
-        'enable': True,
-        'respect-rules': False,
-        'nameserver': ['1.1.1.1', '8.8.8.8'],
-    }
-    cfg['rules'] = [f'PROCESS-NAME,{TAIER.name},AUTO', 'MATCH,DIRECT']
+    if os.environ.get('TAIER_USE_TUN', '').strip().lower() in ('1', 'true', 'yes', 'on'):
+        # 逃生门：旧行为（TUN + 进程级分流）。仅排障用，默认关闭。
+        cfg['mode'] = 'rule'
+        cfg['tun'] = {
+            'enable': True,
+            'stack': 'mixed',
+            'auto-route': True,
+            'auto-detect-interface': True,
+        }
+        cfg['dns'] = {
+            'enable': True,
+            'respect-rules': False,
+            'nameserver': ['1.1.1.1', '8.8.8.8'],
+        }
+        cfg['rules'] = [f'PROCESS-NAME,{TAIER.name},AUTO', 'MATCH,DIRECT']
+        log_progress('mihomo_tun_config_built', mode=cfg['mode'], rules=cfg['rules'])
+    else:
+        # build_mihomo_config 默认就是 rule + MATCH,AUTO + mixed-port，无需改动；
+        # 显式断言防止上游改默认值后静默漂移。
+        if cfg.get('mode') != 'rule' or 'MATCH,AUTO' not in (cfg.get('rules') or []):
+            cfg['mode'] = 'rule'
+            cfg['rules'] = ['MATCH,AUTO']
+        log_progress('mihomo_proxy_config_built', mode=cfg['mode'],
+                     mixed_port=MIHOMO_MIXED_PORT, tun=False)
     MIHOMO_CONFIG.write_text(yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False),
                              encoding='utf-8')
-    log_progress('mihomo_tun_config_built', mode=cfg['mode'], rules=cfg['rules'])
     return raw_proxy_map
 
 
 def start_mihomo_tun(env):
+    """启动 mihomo（函数名保留以兼容既有调用点/通知文案，默认已是纯代理模式）。
+
+    弃 TUN（2026-10-07 定案）：不开 tun/auto-route，无需 CAP_NET_ADMIN（不再 sudo），
+    不劫持整机路由 —— 节点切换经 mixed-port + AUTO 组完成，引擎经环境变量走代理。
+    TAIER_USE_TUN=1 可逃生回 TUN（build_proxy_config 内处理）。
+    """
     ensure_local_mihomo()
-    raw_proxy_map = build_tun_config(env)
+    raw_proxy_map = build_proxy_config(env)
     _kill_stale_mihomo()
     time.sleep(1)
-    cmd = _sudo_prefix() + [str(MIHOMO), '-d', str(HOME_RUNTIME), '-f', str(MIHOMO_CONFIG)]
+    cmd = [str(MIHOMO), '-d', str(HOME_RUNTIME), '-f', str(MIHOMO_CONFIG)]
     with MIHOMO_LOG.open('a', encoding='utf-8') as lf:
         subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT, start_new_session=True)
     info = wait_mihomo(timeout=40)
@@ -450,9 +496,24 @@ def run_taier(points: str, mode: str, duration: int, timeout: int, with_image: b
         cmd.append('--no-image')
     if CONFIG['TAIER_NO_IPV6']:
         cmd.append('--no-ipv6')
+    # 弃 TUN（2026-10-07）：引擎经环境变量走 mihomo mixed-port 的标准反压代理。
+    # 引擎优先级：TAIER_SOCKS5（数据面隧道）> HTTP_PROXY/HTTPS_PROXY（数据面+控制面）。
+    # ⚠️ HTTPS_PROXY 必须设：控制面是 https，只设 HTTP_PROXY 时控制面会静默直连，
+    #    fetchClient 拿到的是 runner 直连 IP → 按错误归属选测速服务器（实测踩过）。
+    env = os.environ.copy()
+    proxy = f'http://127.0.0.1:{MIHOMO_MIXED_PORT}'
+    if not CONFIG['TAIER_USE_TUN']:
+        env['HTTP_PROXY'] = proxy
+        env['HTTPS_PROXY'] = proxy
+        if CONFIG['TAIER_SOCKS5']:
+            env['TAIER_SOCKS5'] = CONFIG['TAIER_SOCKS5']
+        else:
+            env['TAIER_SOCKS5'] = f'127.0.0.1:{MIHOMO_MIXED_PORT}'
+        if CONFIG['TAIER_UPLOAD_LEN'] > 0:
+            env['TAIER_UPLOAD_LEN'] = str(CONFIG['TAIER_UPLOAD_LEN'])
     try:
         p = subprocess.run(cmd, text=True, capture_output=True, timeout=timeout,
-                           stdin=subprocess.DEVNULL)
+                           stdin=subprocess.DEVNULL, env=env)
         return p.returncode, p.stdout or '', p.stderr or ''
     except subprocess.TimeoutExpired:
         return 124, '', f'timeout after {timeout}s'
