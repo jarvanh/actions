@@ -4862,18 +4862,35 @@ jobs:
           LOCK_FILE="/tmp/openclaw-archive.lock"
 
           cleanup_archive_outputs() {
+            # 产物文件（非 staging 目录）照常清理
             rm -f "$TMP_OPENCLAW_TAR" 2>/dev/null || true
             sudo rm -f "$TMP_CLIPROXYAPI_TAR" 2>/dev/null || true
             rm -f "$TMP_CLIRELAY_TAR" 2>/dev/null || true
             rm -f "$TMP_ZCODE_TAR" 2>/dev/null || true
-            rm -rf /tmp/openclaw-archive-stage.* 2>/dev/null || true
-            sudo rm -rf /tmp/cliproxyapi-archive-stage.* 2>/dev/null || true
-            rm -rf /tmp/clirelay-archive-stage.* 2>/dev/null || true
-            rm -rf /tmp/zcode-archive-stage.* 2>/dev/null || true
             sudo rm -f "$TMP_RSSTT_TAR" 2>/dev/null || true
             rm -f "$TMP_Z2A_DATA_TAR" 2>/dev/null || true
-            sudo rm -rf /tmp/rsstt-archive-stage.* 2>/dev/null || true
-            rm -rf /tmp/zcode2api-data-archive-stage.* 2>/dev/null || true
+            # ── 2026-10-07 rc=23 根治：staging 目录绝不能在别人持锁写入时被抹 ──
+            # 形态（run 37577681547）：最终归档持 /tmp/openclaw-archive.lock 跑 rsync
+            # 期间，被 systemd(Restart=always) 拉回的循环新实例执行本函数，通配
+            # rm -rf 把 staging 整棵抹掉 → rsync **目标侧** mkstemp / recv_generator:
+            # mkdir 全量 ENOENT（917 条）→ rc=23 → 主包不覆盖、每轮重复告警。
+            # 判据：报错全部落在目标侧（源侧无长路径、无悬空链接、读取正常），
+            # 即「父目录被抹」而非「源文件消失」—— 后者才是 rc=24 的语义。
+            # 对策：清理 staging 前先**非阻塞**抢同一把归档锁；抢不到说明有人正在
+            # 写，跳过清理（残留目录由持有方自己的 trap cleanup 回收，不会泄漏）。
+            if (
+              flock -n 9 || exit 1
+              rm -rf /tmp/openclaw-archive-stage.* 2>/dev/null || true
+              sudo rm -rf /tmp/cliproxyapi-archive-stage.* 2>/dev/null || true
+              rm -rf /tmp/clirelay-archive-stage.* 2>/dev/null || true
+              rm -rf /tmp/zcode-archive-stage.* 2>/dev/null || true
+              sudo rm -rf /tmp/rsstt-archive-stage.* 2>/dev/null || true
+              rm -rf /tmp/zcode2api-data-archive-stage.* 2>/dev/null || true
+            ) 9>>/tmp/openclaw-archive.lock 2>/dev/null; then
+              :
+            else
+              echo "⚠️ 归档锁被持有（有打包正在写入），跳过 staging 清理以免抹掉在写的目录" >&2
+            fi
           }
           cleanup_archive_outputs
           PID_FILE="/tmp/openclaw-archive.pid"
@@ -5560,10 +5577,20 @@ jobs:
             # 周期归档的同名产物仍照常清理（它可能残留自被 systemd 拉回的循环实例）
             rm -f /tmp/CliRelay.tar.gz 2>/dev/null || true
             sudo rm -f /tmp/CLIProxyAPI.tar.gz 2>/dev/null || true
-            rm -rf /tmp/openclaw-archive-stage.* 2>/dev/null || true
-            sudo rm -rf /tmp/cliproxyapi-archive-stage.* 2>/dev/null || true
-            rm -rf /tmp/clirelay-archive-stage.* 2>/dev/null || true
-            rm -rf /tmp/zcode-archive-stage.* 2>/dev/null || true
+            # ── 2026-10-07 rc=23 根治：同上，staging 清理必须先抢到归档锁 ──
+            # 本 step 自己在下方才 flock 持锁，此处若裸删通配 stage，会抹掉仍在
+            # 写入的目录（循环实例 / 上一轮残留）。抢不到锁即跳过，由持有方回收。
+            if (
+              flock -n 9 || exit 1
+              rm -rf /tmp/openclaw-archive-stage.* 2>/dev/null || true
+              sudo rm -rf /tmp/cliproxyapi-archive-stage.* 2>/dev/null || true
+              rm -rf /tmp/clirelay-archive-stage.* 2>/dev/null || true
+              rm -rf /tmp/zcode-archive-stage.* 2>/dev/null || true
+            ) 9>>/tmp/openclaw-archive.lock 2>/dev/null; then
+              :
+            else
+              echo "⚠️ 归档锁被持有（有打包正在写入），跳过 staging 清理以免抹掉在写的目录" >&2
+            fi
           }
           free_kb() { df -Pk "${1:-/tmp}" | awk 'NR==2 {print $4}'; }
           require_free_kb() {
