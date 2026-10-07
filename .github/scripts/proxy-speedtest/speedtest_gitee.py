@@ -1149,11 +1149,55 @@ def git_prepare_work_repo(repo_dir: pathlib.Path, remote: str, env, branch_name:
         if code != 0:
             raise RuntimeError((err or out or 'git config failed')[-400:])
 
+UPLOAD_NONCE_BYTES = 16
+
+
+def _inject_upload_nonce(path: pathlib.Path):
+    """把随机 nonce 覆写到文件头部 —— 让**每次** push 的 blob 内容都不同。
+
+    ⚠️ 2026-10-07 引入，修「↑ 上传值系统性虚高」的假象。
+
+    病因：测速文件由 `ensure_test_file` 每轮 VM 只 urandom 生成一次并按大小缓存
+    （`HOME_RUNTIME/gitee_speed_{size}mb.bin`，大小没变就不重新生成）⇒ 一轮里
+    全部节点（实测 118 个）push 的是**同一份内容**。而 git 是内容寻址的：首节点
+    把 10MiB blob 传上去之后，后续节点 push 时服务端已有该对象 ⇒ 只传几百字节的
+    commit 对象。于是「10MiB ÷ push 耗时」里的耗时，只剩 TLS 握手 + 认证 + 协商的
+    固定开销（实测 1.6~3.6 秒，与节点延迟强相关、与带宽无关）⇒ 38 个节点的 ↑ 值
+    全挤在 2.77~6.08 MiB/s，完全失去分辨力。
+
+    铁证（直连 clone 远端 master 查历史）：最近 8 个 commit 只有 **2 个不同的 tree
+    哈希**（5 连发共享一棵树、3 连发共享另一棵）—— 正是「一轮内所有 push 同树」的
+    直接证据。
+
+    修法：copy 到**工作区副本**后再用随机字节覆写文件头部。
+      * 只改副本，`file_path` 指向的缓存文件不被污染（仍可跨节点复用，不重复
+        urandom 10MiB 的开销）；
+      * 大小不变（仅覆写前 16 字节）⇒ 字节数换算不受影响；
+      * blob 哈希必变 ⇒ git 无法去重 ⇒ 每次 push 都真传 10MiB。
+
+    一处修改覆盖全部调用方：`upload_speedtest` 是 CDN / Gitee 单节点 / 直连基线三处
+    的共享实现，最终都走到本文件的 `git_force_push_testfile`。
+    """
+    try:
+        with open(path, 'r+b') as f:
+            f.write(os.urandom(UPLOAD_NONCE_BYTES))
+            f.flush()
+            os.fsync(f.fileno())
+    except Exception as e:
+        # 注入失败必须**硬失败**：静默跳过会让这一轮退回成假象数据，且与「真传」
+        # 的数据混在同一份结果里无从分辨 —— 宁可报错，也不产假数。
+        raise RuntimeError(f'upload nonce inject failed: {e}')
+
+
 def git_force_push_testfile(repo_dir: pathlib.Path, remote: str, env, file_path: pathlib.Path, commit_message: str, push_timeout: int, branch_name: str, target_filename: str, gitee: dict | None = None):
     """Push 测速文件；若 gitee 传入且 push 因 size exceeds limit 失败，自动重建仓库并重试一次。"""
     def _do_push():
         git_prepare_work_repo(repo_dir, remote, env, branch_name)
         shutil.copy2(file_path, repo_dir / target_filename)
+        # ⚠️ 2026-10-07：注入 nonce 强制本次 push 真传全量内容（否则同轮内所有
+        # 节点共享同一 blob，git 去重后只传几百字节 ⇒ ↑ 值沦为握手开销的假象）。
+        # 详见 `_inject_upload_nonce` 的说明。
+        _inject_upload_nonce(repo_dir / target_filename)
         code, out, err = run(['git', 'add', target_filename], cwd=repo_dir, env=env, timeout=60)
         if code != 0:
             raise RuntimeError((err or out or 'git add failed')[-400:])
