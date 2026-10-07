@@ -1147,8 +1147,9 @@ send_sync_warning() {
   local _task_key
   _task_key=$(_sync_task_key "$task_name" "$dest_path")
   tg_add_note msg "⏭️ 已跳过此同步，继续执行其他任务
-⏳ 如已配置审批通道，主对话会收到 ✅/❌ 按钮，点 ✅ 即只放行本任务
-如确认无误也可手动触发（任务键 ${_task_key}）:"
+⏳ 审批请求已推送: 主对话将收到 ✅/❌ 按钮，点 ✅ 即只放行本任务"
+  tg_add_section msg "🛠️ 手动触发 · 单任务"
+  tg_add_pre msg "gh workflow run openlist.yml -f run_mode=同步 -f force_sync_task=${_task_key}"
   tg_add_footer msg
 
   send_telegram_message "$msg" HTML alert
