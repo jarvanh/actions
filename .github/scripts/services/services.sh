@@ -240,7 +240,9 @@ Type=simple
 # ⚠️ 凭据落挂载点会变成 666（全局可写）—— 主人已知并接受（2026-10-06）。
 WorkingDirectory=/dropbox/self-hosted/workbuddy-gateway
 # 鉴权在 config.json 的 gateway 段（apiKeyEnabled + apiKey），不在启动参数里。
-ExecStart=/tmp/local_workbuddy/workbuddy-gateway serve -addr 0.0.0.0 -port 8318
+# -webui：启用只读网页管理台，监听 gateway.webPort（默认 8316），与模型 API
+#   端口分离；管理台用独立的 gateway.adminKey 鉴权，不接受模型 API Key。
+ExecStart=/tmp/local_workbuddy/workbuddy-gateway serve -addr 0.0.0.0 -port 8318 -webui
 Restart=always
 RestartSec=5
 # 停止超时：默认 90s 不够长连接/子进程排空，会被 systemd 升级 SIGKILL
