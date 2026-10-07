@@ -1035,7 +1035,10 @@ jobs:
               MAP_WARNED=1
               echo "$(date '+%F %T') 映射探针不可用（MEDIA_DIR 为空）——本轮只探 ge2o 存活，映射断裂不会被发现"
             fi
-            if curl -fsS -m 5 http://127.0.0.1:8095/emby/System/Info/Public >/dev/null 2>&1 \
+            # 先单独探 ge2o 存活（原 && 链短路导致失败行分不清是哪一环挂了）
+            GE2O_OK=0
+            curl -fsS -m 5 http://127.0.0.1:8095/emby/System/Info/Public >/dev/null 2>&1 && GE2O_OK=1
+            if [ "$GE2O_OK" = "1" ] \
                && [ -n "$TOK" ] \
                && [ "$MAP_OK" = "1" ] \
                && curl -s -m 5 -X POST ${LINK_HOST}/api/fs/list \
@@ -1045,7 +1048,11 @@ jobs:
               FAIL=0
             else
               FAIL=$((FAIL+1))
-              echo "$(date '+%F %T') 302 health fail #$FAIL map_ok=$MAP_OK"
+              # 失败现场快照：ge2o 存活 + odlink graph.err 累计值（区分限流/断链/服务挂）
+              WD_STATS=$(curl -s -m 5 http://127.0.0.1:5245/stats 2>/dev/null || true)
+              WD_GERR=$(printf '%s' "$WD_STATS" | jq -r '.graph.err // "?"' 2>/dev/null || echo "?")
+              [ -n "$WD_GERR" ] || WD_GERR="?"
+              echo "$(date '+%F %T') 302 health fail #$FAIL map_ok=$MAP_OK ge2o_ok=$GE2O_OK graph_err=$WD_GERR"
             fi
             if [ "$FAIL" -ge 3 ]; then
               echo "302 unhealthy -> switching to direct"
@@ -2581,6 +2588,8 @@ jobs:
           tail -n 30 /opt/logs/incbackup.log 2>/dev/null || echo "(无 incbackup.log)"
           echo "--- odwarm.log（直链预热: 目录回填 + 详情页预取, tail 30）---"
           tail -n 30 /opt/logs/odwarm.log 2>/dev/null || echo "(无 odwarm.log)"
+          echo "--- watchdog.log（302 健康失败行, 末 10；取证 run 37434959958 时整段缺失）---"
+          grep -a "302 health fail" /opt/logs/watchdog.log 2>/dev/null | tail -n 10 || true
           echo "--- odlink /stats（缓存命中情况）---"
           curl -s -m 5 http://127.0.0.1:5245/stats 2>/dev/null | jq -c . 2>/dev/null || echo "(odlink 未就绪)"
           echo "--- seek.log（拖动取链统计）---"
