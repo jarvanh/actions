@@ -1305,14 +1305,9 @@ jobs:
             awk -v x="$v" -v d="$u" 'BEGIN {printf "%.3f", x / d}'
           }
 
-          # 耗时显示：≥1 秒用秒（两位小数），不足 1 秒用整数毫秒。
-          # 实测 Emby 读文件头只要 20~30ms、命中缓存的取直链也是几十毫秒，
-          # 一律按秒保留小数会显示成"0.00 秒"——既看不出快慢，也让人怀疑没测到。
-          fmt_ms() { # $1=秒（小数或空）→ "27 毫秒" / "1.40 秒"；空或非法返回空
-            local v=$1
-            case "$v" in ''|*[!0-9.]*) printf ''; return 0;; esac
-            awk -v x="$v" 'BEGIN { if (x < 1) printf "%d 毫秒", x * 1000 + 0.5; else printf "%.2f 秒", x }'
-          }
+          # 耗时显示走真源 tg_format_ms（规范 · 时长 第 3/4 层）：≥1 秒两位小数秒、
+          # 不足 1 秒整数毫秒——实测读文件头只要 20~30ms，按秒两位小数会显示成
+          # "0.00 秒"。真源唯一实现，此处不再内联副本。
 
           # 取直链的冷/热标注（规范 · 起播等待）：优先用 odlink 的真实缓存命中标记
           # （/opt/odlink-last.json 的 cached，60 秒内才算本次播放的），拿不到就按耗时
@@ -1480,14 +1475,14 @@ jobs:
             if [ -n "${TUNNEL_TTFB:-}" ]; then
               wt="你 → Cloudflare"
               [ -n "${TUNNEL_EDGE:-}" ] && wt="${wt} $(edge_cn "${TUNNEL_EDGE}")"
-              waitline="${waitline}${wt} → Emby（预估值）：$(fmt_ms "${TUNNEL_TTFB}")"$'\n'
+              waitline="${waitline}${wt} → Emby（预估值）：$(tg_format_ms "${TUNNEL_TTFB}")"$'\n'
             fi
-            [ -n "$prep" ] && waitline="${waitline}Emby → OneDrive 读文件头（走挂载）：$(fmt_ms "$prep")"$'\n'
-            [ -n "$dur" ]  && waitline="${waitline}Emby → OneDrive 取直链$(link_tag "$dur")：$(fmt_ms "$dur")"$'\n'
+            [ -n "$prep" ] && waitline="${waitline}Emby → OneDrive 读文件头（走挂载）：$(tg_format_ms "$prep")"$'\n'
+            [ -n "$dur" ]  && waitline="${waitline}Emby → OneDrive 取直链$(link_tag "$dur")：$(tg_format_ms "$dur")"$'\n'
             [ -n "${LINK_TTFB:-}" ] && \
-              waitline="${waitline}你 → OneDrive 拉首字节（预估值）：$(fmt_ms "${LINK_TTFB}")"$'\n'
-            [ -n "$sub" ]  && waitline="${waitline}Emby → OneDrive 抽字幕：$(fmt_ms "$sub")"$'\n'
-            [ -n "$seek" ] && waitline="${waitline}拖动进度条（Emby → OneDrive 重取直链$(link_tag "$seek" i)）：$(fmt_ms "$seek")"$'\n'
+              waitline="${waitline}你 → OneDrive 拉首字节（预估值）：$(tg_format_ms "${LINK_TTFB}")"$'\n'
+            [ -n "$sub" ]  && waitline="${waitline}Emby → OneDrive 抽字幕：$(tg_format_ms "$sub")"$'\n'
+            [ -n "$seek" ] && waitline="${waitline}拖动进度条（Emby → OneDrive 重取直链$(link_tag "$seek" i)）：$(tg_format_ms "$seek")"$'\n'
             if [ -n "$waitline" ]; then
               # 同一棵树同时落日志：它此前只进 TG 私信，事后完全无法复核"上次起播为什么慢"。
               # 内容只有"谁在等什么 + 耗时"，无片名/路径/URL，进公开日志安全。
@@ -1591,7 +1586,7 @@ jobs:
               # 访问日志里还有"耗时"与"客户端 IP"两列（起播慢 / 谁在播的定位依据），一并带进通知：
               #   [ge2o:v2.8.2] <时间> | 206 | 4.16s | 198.51.100.23 | 8095 <路由> | GET /emby/videos/...
               DUR_RAW=$(printf '%s\n' "$line" | grep -aoE '\| [0-9.]+(µs|ms|s) \|' | head -1 | tr -d '| ')
-              # 先归一化成秒（单位会变 µs/ms/s），显示格式交给 notify 里的 fmt_ms 按量级选
+              # 先归一化成秒（单位会变 µs/ms/s），显示格式交给 notify 里的 tg_format_ms 按量级选
               DUR_RAW=$(to_sec "$DUR_RAW")
               CIP=$(printf '%s\n' "$line" | grep -oE '\| [0-9]{1,3}(\.[0-9]{1,3}){3} \|' | head -1 | tr -d '| ')
               # Emby 准备耗时：本次播放前、同一 IP 最近一次 PlaybackInfo 的耗时。

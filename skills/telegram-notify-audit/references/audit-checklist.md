@@ -11,7 +11,7 @@
 | 2 | 平铺条目 | `•` | 零使用，仅注释提及 |
 | 3 | 半角冒号 kv | `[一-龥]:[^/:= ]` | 仅非通知代码（echo/grep 表达式） |
 | 4 | 紧凑时长 / 高精度浮点 / ISO 直出 | `[0-9]+h ?[0-9]+m\|[0-9]\.[0-9]{4,} 秒\|[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}` | 仅注释、测试夹具、非通知数据 |
-| 5 | curl 直发 | `curl .*(sendMessage\|/bot)` | 6 处 = 3 类：发送层自身（`tg_notify.sh:370/376`）、进度面板 message_id 与 deleteMessage（`openlist/telegram.sh:65/71/103`）、`sendDocument`（`sync_notify.sh:308`）——行号会漂，腐化时以 grep 重数为准 |
+| 5 | curl 直发 | `curl .*(sendMessage\|/bot)` | 6 处 = 3 类：发送层自身（`tg_notify.sh` `send_tg` 内两处）、进度面板 message_id 与 deleteMessage（`openlist/telegram.sh`）、`sendDocument`（`sync_notify.sh`）——不给行号（会漂），腐化时以 grep 重数为准 |
 | 6 | 分隔线 | `TG_SEP *=\|━━━` | 四套同值 18 条（bash 真源 / ps1 `0x2501*18` / python `'━'*18` / sync_to_tg 内嵌） |
 | 7 | 收尾区覆盖 | 分别统计 `tg_add_title` 与 `tg_add_footer\|Get-TgFooter\|tg_footer_line` 的**按文件**计数 | 计数不等时逐个查是否「分支汇聚」或「注释」造成；每处标题分支都必须能走到 footer |
 | 8 | 运行日志接线 | `TG_RUN_URL` 按文件列出 | 15 个 workflow（2026-10-05 起，含 `openlist-restore-tryrun.yml`），与「有通知集合」完全重合 |
@@ -44,7 +44,7 @@
 
 | 写法 | 为什么合规 |
 |---|---|
-| 进度面板四组任务列表（待处理/已完成/已跳过/失败 + 进行中）不折叠 | 结构性清单：折掉后半段等于把「哪些任务没跑完」藏起来（`sync_progress.sh:476-478` 注释即此意） |
+| 进度面板四组任务列表（待处理/已完成/已跳过/失败 + 进行中）不折叠 | 结构性清单：折掉后半段等于把「哪些任务没跑完」藏起来（`sync_progress.sh` 终态判定段 `_progress_render_task_list` 一带注释即此意） |
 | `task_preview` 同步对、`task_engine` 子目录/批次统计不折叠 | 结构性清单，同 规范 · 折叠规则判据 |
 | `sync_to_tg.sh` 失败清单走 `tree_fold` | 流水类，与同通知「已上传」同口径 |
 | `📍 测速点网络` 分节带 ` · N` | 2026-09-12 起恒带计数（规范 · 分节：后跟条目列表必须带），taier/gitee 单目标即 ` · 1`——共享层 `count_hint` 无条件拼（`speedtest_common.py` build_target_network_section） |
