@@ -27,9 +27,13 @@
 # pkill + 重启完全一致，重启点就是每轮 run 的起点。窗口期内的崩溃自愈由
 # systemd 的 Restart=always 负责，不经过本脚本。
 #
-# 单元里内嵌的密钥（AI_GATEWAY_API_KEY / ZCODE_GATEWAY_KEY）本来就在进程
-# cmdline 和环境里可见（同机只有 runner 一个真实用户），单元文件按 600 落盘，
-# 没有扩大暴露面；通知/日志里依然绝不回显（docs/telegram-notify.md 口径不变）。
+# 单元里内嵌的密钥本来就在进程 cmdline 和环境里可见（同机只有 runner 一个真实用户），
+# 单元文件按 600 落盘，没有扩大暴露面；通知/日志里依然绝不回显
+# （docs/telegram-notify.md 口径不变）。
+#
+# 注：workbuddy 的 AI_GATEWAY_API_KEY 已于 2026-10-07 随 v1.23.0 下线 ——
+# 鉴权迁移到 config.json 的 gateway 段（见 write_unit 内 workbuddy 注释），
+# 单元不再持有该环境变量。zcode2api 的 ZCODE_GATEWAY_KEY 仍是 flag 鉴权，保持不变。
 #
 # 前置条件（由各启动步骤负责，本脚本不做）：
 #   workbuddy  /tmp/local_workbuddy/{workbuddy-gateway,data/}（含 logs/ 目录）
@@ -207,9 +211,14 @@ write_unit() {
   umask 077
   case "$name" in
     workbuddy)
-      # 缺密钥直接拒绝生成：网关缺 -api-key 会静默不校验，客户端不带 Bearer
-      # 也能过，等于裸奔，不如显式失败暴露问题（与启动步骤的密钥注入同口径）
-      [ -n "${AI_GATEWAY_API_KEY:-}" ] || { rm -f "$tmp"; die "workbuddy: AI_GATEWAY_API_KEY 未注入，拒绝生成无鉴权单元"; }
+      # 缺密钥直接拒绝生成：v1.23.0 起鉴权生效处是 config.json 的 gateway.apiKey，
+      # -api-key flag 已降级为兼容占位并随之移除。这里直接校验真正生效的那份配置，
+      # 避免「环境变量在、config.json 没写」导致网关静默不校验、等于裸奔。
+      python3 -c "import json,sys
+d=json.load(open('$LOG_ROOT/workbuddy-gateway/config.json'))
+g=d.get('gateway',{})
+sys.exit(0 if g.get('apiKeyEnabled') and g.get('apiKey') else 1)" \
+        || { rm -f "$tmp"; die "workbuddy: config.json 未配置 gateway.apiKey（鉴权生效处），拒绝生成无鉴权单元"; }
       ensure_log_dir "$LOG_ROOT/workbuddy-gateway/logs/serve.log"
       cat > "$tmp" <<EOF
 [Unit]
@@ -230,8 +239,8 @@ Type=simple
 # ⚠️ 二进制仍必须在本地盘：挂载点合成权限无 x 位，执行报 Permission denied。
 # ⚠️ 凭据落挂载点会变成 666（全局可写）—— 主人已知并接受（2026-10-06）。
 WorkingDirectory=/dropbox/self-hosted/workbuddy-gateway
-Environment=AI_GATEWAY_API_KEY=${AI_GATEWAY_API_KEY}
-ExecStart=/tmp/local_workbuddy/workbuddy-gateway serve -addr 0.0.0.0 -port 8318 -api-key \${AI_GATEWAY_API_KEY}
+# 鉴权在 config.json 的 gateway 段（apiKeyEnabled + apiKey），不在启动参数里。
+ExecStart=/tmp/local_workbuddy/workbuddy-gateway serve -addr 0.0.0.0 -port 8318
 Restart=always
 RestartSec=5
 # 停止超时：默认 90s 不够长连接/子进程排空，会被 systemd 升级 SIGKILL
