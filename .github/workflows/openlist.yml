@@ -222,6 +222,8 @@ jobs:
       # 未配置时 sync_marker.sh 内 _push_force_sync_approval 静默跳过（fail-open）。
       OPENCLAW_HOOK_URL: ${{ secrets.OPENCLAW_HOOK_URL }}
       OPENCLAW_HOOK_TOKEN: ${{ secrets.OPENCLAW_HOOK_TOKEN }}
+      # 审批卡片发往的对话（复用告警 chat，同一主人的私聊，不在仓库明文落 id）
+      OPENCLAW_HOOK_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
       # ===== 集中阈值定义（避免魔数散落各处）=====
       # 字节大小阈值

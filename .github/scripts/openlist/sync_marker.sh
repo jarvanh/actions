@@ -1019,8 +1019,9 @@ _push_force_sync_approval() {
   local task_key="$1" task_name="$2" source_path="$3" dest_path="$4"
   local diff_bytes="$5" marker_bytes="$6"
   local hook_url="${OPENCLAW_HOOK_URL:-}" hook_token="${OPENCLAW_HOOK_TOKEN:-}"
-  if [ -z "$hook_url" ] || [ -z "$hook_token" ]; then
-    echo "⚠️ 未配置 OPENCLAW_HOOK_URL/TOKEN，跳过审批推送（告警已照常发出）" >&2
+  local approval_to="${OPENCLAW_HOOK_CHAT_ID:-}"
+  if [ -z "$hook_url" ] || [ -z "$hook_token" ] || [ -z "$approval_to" ]; then
+    echo "⚠️ 未配置 OPENCLAW_HOOK_URL/TOKEN/CHAT_ID，跳过审批推送（告警已照常发出）" >&2
     return 0
   fi
 
@@ -1036,17 +1037,24 @@ _push_force_sync_approval() {
 
 请在 Telegram 主对话向主人发一条带两个按钮的审批消息（✅ 强制同步该任务 / ❌ 忽略），
 不要长篇解释，把上面几项用简短 kv 列出即可。
-点 ✅ 时执行：gh workflow run openlist.yml -R jarvanh/actions -f run_mode=同步 -f force_sync_task=${task_key}
-并把返回的 run 链接/ id 回报给主人；点 ❌ 时回复「已忽略」即可。
+按钮用 message 工具（action=send, channel=telegram, target=${approval_to}）发送，
+presentation blocks 按钮固定为:
+  ✅ 强制同步该任务 → callback value: olsync:approve:${task_key}
+  ❌ 忽略           → callback value: olsync:ignore:${task_key}
+卡片发出后本轮直接结束，不要再补发任何文字。
+后续主人点 ✅ 的回调（callback_data: olsync:approve:...）会回到主会话，
+由主会话 agent 执行 gh workflow run openlist.yml -R jarvanh/actions \
+  -f run_mode=同步 -f force_sync_task=${task_key} 并回报 run 链接。
 EOF
 )
 
   local payload resp
   payload=$(jq -nc \
     --arg msg "$prompt" \
-    --arg chat "${OPENCLAW_HOOK_CHAT_ID:-83279194}" \
-    '{message: $msg, agentId: "main", channel: "telegram", to: $chat,
-      accountId: "openclaw_sb_bot", name: ("sync-approval-" + (now|floor|tostring))}' 2>/dev/null) || {
+    --arg chat "$approval_to" \
+    '{message: $msg, agentId: "main", deliver: false,
+      channel: "telegram", to: $chat, accountId: "openclaw_sb_bot",
+      name: ("sync-approval-" + (now|floor|tostring))}' 2>/dev/null) || {
     echo "⚠️ 审批载荷构造失败，跳过推送" >&2
     return 0
   }
