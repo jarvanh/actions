@@ -25,6 +25,18 @@ on:
         required: false
         type: boolean
         default: false
+      force_sync_task:
+        # 单任务粒度强制同步（2026-10-07 加）。force_sync=true 是**全量**开关，
+        # 会放行本轮全部同步对；源端缩小告警往往只涉及其中一个对，为它放行
+        # 全部会白跑其余十几对（每对都要走 marker 检查 + rclone size 列举）。
+        # 这里填告警消息里的「任务键」，格式 <task_name>_<目标端首段>，例:
+        #   task0_wopan176Crypt / backup_aliyundriveCrypt / task5_wopan175
+        # 可逗号分隔填多个。留空 = 不按任务强制（等同于不开启）。
+        # 与 force_sync=true 同时给时以 force_sync=true（全量）为准。
+        description: "同步/调试模式: 单任务强制同步（填任务键，如 task0_wopan176Crypt；逗号分隔可多个。仅放行点名的同步对，粒度细于 force_sync 全量）"
+        required: false
+        type: string
+        default: ""
       split_on_sync_failure:
         description: "同步模式: 失败后切割超阈值大文件（默认关闭; 关闭时日志的『跳过切割』提示仅为开关状态通知，不代表同步失败）"
         required: false
@@ -194,6 +206,8 @@ jobs:
     env:
       OPENLIST_SPLIT_ON_SYNC_FAILURE: ${{ inputs.split_on_sync_failure || 'false' }}
       FORCE_SYNC: ${{ inputs.force_sync || 'false' }}
+      # 单任务粒度强制同步（任务键，逗号分隔；留空=不按任务强制）
+      FORCE_SYNC_TASK: ${{ inputs.force_sync_task || '' }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       # 告警档凭据（tier=alert 直达告警 bot @SaberFuckBot，无回落）
@@ -201,6 +215,13 @@ jobs:
       TELEGRAM_CHAT_ID_ALERT: ${{ secrets.TELEGRAM_CHAT_ID_ALERT }}
       # 统一收尾区（tg_add_footer）: 运行日志链接 + 已运行时长（时长走开机时刻兜底）
       TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      # ===== 源端缩小告警 → Telegram 单任务审批通道 =====
+      # 告警本身照旧直连 @SaberFuckBot（留痕不变）；这里额外把审批请求推给
+      # OpenClaw 网关，由网关在主对话发 ✅/❌ 按钮（告警 bot 不在网关里，
+      # 按钮回调没人接，故必须走网关这一跳）。
+      # 未配置时 sync_marker.sh 内 _push_force_sync_approval 静默跳过（fail-open）。
+      OPENCLAW_HOOK_URL: ${{ secrets.OPENCLAW_HOOK_URL }}
+      OPENCLAW_HOOK_TOKEN: ${{ secrets.OPENCLAW_HOOK_TOKEN }}
 
       # ===== 集中阈值定义（避免魔数散落各处）=====
       # 字节大小阈值

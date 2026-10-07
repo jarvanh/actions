@@ -24,13 +24,55 @@
 #
 # 依赖: utils.sh (format_bytes), telegram.sh (send_telegram_message)
 # 依赖: telegram/tg_notify.sh (escape_html, tree_* — 排版助手真源，L0 层 source)
-# 依赖环境变量: FORCE_SYNC — 为 "true" 时跳过所有标记检查
+# 依赖环境变量:
+#   FORCE_SYNC      — 为 "true" 时跳过所有标记检查（全量）
+#   FORCE_SYNC_TASK — 任务级强制同步键（逗号分隔，仅点名的任务跳过标记检查）
 #   OPENLIST_CARRY_DELETE_ALIGNED — 已对齐收尾删除开关（=0 只剔记录不删远端短名，默认开）
 
 # 标记存储目录
 SYNC_STATE_DIR="onedrive:/logs/sync_state"
 # 默认跳过时间窗口（24 小时，可被 SYNC_SKIP_SECONDS 覆盖）
 SYNC_SKIP_SECONDS=$((24 * 60 * 60))
+
+# ===== 任务级强制同步（FORCE_SYNC_TASK）=====
+# 背景: FORCE_SYNC=true 是**全量**开关，没有单任务粒度。源端缩小告警往往只涉及
+#   一个同步对，为它放行全部任务会白白重跑其余十几对（每对都要走 marker 检查 +
+#   size 列举，代价可观）。故引入任务级匹配。
+# 匹配键为什么不用 marker 的 md5: get_marker_path 的短哈希不可逆，既没法在告警
+#   消息里给人看、也没法由人工/网关回传。改用 task_name + 目标端首段，
+#   SYNC_TASK_REGISTRY 内唯一:
+#     task0 + openlist:wopan176Crypt/0 → task0_wopan176Crypt
+#     task0 + openlist:wopan175/0      → task0_wopan175
+#     backup + openlist:aliyundriveCrypt/backup → backup_aliyundriveCrypt
+# ⚠️ 与 task_engine.sh 的 _derive_task_id 同算法（那边用于进度跟踪槽位）。
+#    两份实现是分层所致（本文件 L3、task_engine L6，反向依赖不可用），
+#    改算法时必须两处同改，否则审批放行会匹配不到任务。
+# 用法: _sync_task_key <task_name> <dest_path>
+_sync_task_key() {
+  local task_name="$1" dest_path="$2"
+  local dest_clean="${dest_path#*:}"
+  local first_component="${dest_clean%%/*}"
+  [ -z "$first_component" ] && first_component="$dest_clean"
+  [ -z "$first_component" ] && first_component="dest"
+  echo "${task_name}_${first_component}"
+}
+
+# 本任务是否被点名强制同步（FORCE_SYNC_TASK，逗号分隔可点名多个）
+# 用法: _force_sync_matches <task_name> <dest_path>
+# 返回: 0 = 放行（全量强制 或 本任务被点名）; 1 = 不强制
+_force_sync_matches() {
+  [ "${FORCE_SYNC:-}" = "true" ] && return 0
+  [ -z "${FORCE_SYNC_TASK:-}" ] && return 1
+  local key want
+  key=$(_sync_task_key "$1" "$2")
+  [ -z "$key" ] && return 1
+  # 逗号/空格均视为分隔符，避免手动触发时手滑写成空格分隔
+  local IFS=', '
+  for want in ${FORCE_SYNC_TASK}; do
+    [ "$want" = "$key" ] && return 0
+  done
+  return 1
+}
 
 # 生成标记文件路径（每个 task+dest 组合唯一）
 # 用法: get_marker_path <task_name> <dest_path>
@@ -764,7 +806,8 @@ check_marker_skip_window() {
   local task_name="$1"
   local dest_path="$2"
   local skip_secs="${3:-${SYNC_SKIP_SECONDS:-86400}}"
-  [ "${FORCE_SYNC:-}" = "true" ] && return 1
+  # 全量强制 或 本任务被点名（FORCE_SYNC_TASK）→ 视为未命中窗口，不跳过
+  _force_sync_matches "$task_name" "$dest_path" && return 1
   [[ "$skip_secs" =~ ^[0-9]+$ ]] || skip_secs="${SYNC_SKIP_SECONDS:-86400}"
   [ "$skip_secs" -le 0 ] && return 1
 
@@ -819,8 +862,12 @@ check_sync_marker() {
   MARKER_FIXED_FILES="[]"
 
   # 强制同步跳过所有检查
-  if [ "$FORCE_SYNC" = "true" ]; then
-    echo "强制同步模式，跳过标记检查"
+  if _force_sync_matches "$task_name" "$dest_path"; then
+    if [ "${FORCE_SYNC:-}" = "true" ]; then
+      echo "强制同步模式（全量），跳过标记检查: $(_sync_task_key "$task_name" "$dest_path")"
+    else
+      echo "任务级强制同步（FORCE_SYNC_TASK 命中），跳过标记检查: $(_sync_task_key "$task_name" "$dest_path")"
+    fi
     return 0
   fi
 
@@ -955,6 +1002,68 @@ _top_dirs_to_lines() {
   fi
 }
 
+# ===== 源端缩小告警 → Telegram 单任务审批 =====
+# 为什么需要"双发": 告警消息是 runner 内 curl 直连 Bot API 发出的（@SaberFuckBot），
+#   而 Telegram 的 inline button 回调只投给**发消息的那个 bot**。告警 bot 不在
+#   OpenClaw 网关里、runner job 结束即消失（无常驻 HTTP 端点）⇒ 按钮点了没人接。
+#   故原告警照发（留痕不变），同时把审批请求推给 OpenClaw 网关，由网关在主对话
+#   发带 ✅/❌ 按钮的消息；主人点 ✅ → 回调回网关 → agent 触发
+#   `gh workflow run ... -f force_sync_task=<任务键>`。
+# 依赖环境变量（workflow secrets 注入；缺任一即静默跳过，绝不阻断告警本身）:
+#   OPENCLAW_HOOK_URL   — 网关 hook 端点，如 https://oc.derrick.eu.org/hooks/agent
+#   OPENCLAW_HOOK_TOKEN — 与 openclaw.json 的 hooks.token 一致
+# 失败语义: fail-open。审批是"加急通道"，不是告警的必要条件 —— 推送失败只写
+#   stderr 供日志排查，不影响同步跳过决策，也不改变已发出的告警。
+# 用法: _push_force_sync_approval <task_key> <task_name> <source> <dest> <diff_bytes> <marker_bytes>
+_push_force_sync_approval() {
+  local task_key="$1" task_name="$2" source_path="$3" dest_path="$4"
+  local diff_bytes="$5" marker_bytes="$6"
+  local hook_url="${OPENCLAW_HOOK_URL:-}" hook_token="${OPENCLAW_HOOK_TOKEN:-}"
+  if [ -z "$hook_url" ] || [ -z "$hook_token" ]; then
+    echo "⚠️ 未配置 OPENCLAW_HOOK_URL/TOKEN，跳过审批推送（告警已照常发出）" >&2
+    return 0
+  fi
+
+  local prompt
+  prompt=$(cat <<EOF
+【同步审批请求 · 源端大小异常减小】
+任务键: ${task_key}
+任务: ${task_name}
+源端: ${source_path}
+目标: ${dest_path}
+减少: $(format_bytes "$diff_bytes")（原 $(format_bytes "$marker_bytes")）
+已按保护策略跳过本任务同步，等待确认。
+
+请在 Telegram 主对话向主人发一条带两个按钮的审批消息（✅ 强制同步该任务 / ❌ 忽略），
+不要长篇解释，把上面几项用简短 kv 列出即可。
+点 ✅ 时执行：gh workflow run openlist.yml -R jarvanh/actions -f run_mode=同步 -f force_sync_task=${task_key}
+并把返回的 run 链接/ id 回报给主人；点 ❌ 时回复「已忽略」即可。
+EOF
+)
+
+  local payload resp
+  payload=$(jq -nc \
+    --arg msg "$prompt" \
+    --arg chat "${OPENCLAW_HOOK_CHAT_ID:-83279194}" \
+    '{message: $msg, agentId: "main", channel: "telegram", to: $chat,
+      accountId: "openclaw_sb_bot", name: ("sync-approval-" + (now|floor|tostring))}' 2>/dev/null) || {
+    echo "⚠️ 审批载荷构造失败，跳过推送" >&2
+    return 0
+  }
+
+  # 短超时: 审批推送不该拖住同步流程（最长 15s）
+  resp=$(curl -s -m 15 -X POST "$hook_url" \
+    -H "Authorization: Bearer ${hook_token}" \
+    -H 'Content-Type: application/json' \
+    -d "$payload" 2>/dev/null) || true
+  if printf '%s' "$resp" | grep -q '"ok":true'; then
+    echo "✅ 审批请求已推送到网关（${task_key}）"
+  else
+    echo "⚠️ 审批推送失败（告警已照常发出）: $(printf '%s' "$resp" | head -c 200)" >&2
+  fi
+  return 0
+}
+
 # 发送源端大小减小的警告通知（同时跳过本次同步）
 # 依赖全局变量: MARKER_JSON, MARKER_CURRENT_BYTES, MARKER_CURRENT_COUNT, MARKER_CURRENT_DIRS
 # 用法: send_sync_warning <task_name> <source_path> <dest_path>
@@ -986,7 +1095,10 @@ send_sync_warning() {
 
   local msg=""
   tg_add_title msg "🚨 源端大小异常减小"
+  # 任务键（== FORCE_SYNC_TASK 的匹配键）必须出现在告警里: 审批单任务强制同步
+  # 时要照抄这个值，缺了就只能退回 force_sync=true 全量放行
   tg_add_kv msg "任务" "$task_name"
+  tg_add_kv msg "任务键" "$(_sync_task_key "$task_name" "$dest_path")"
   tg_add_path msg "源端" "$source_path"
   tg_add_path msg "目标" "$dest_path"
   tg_add_section msg "📊 大小对比"
@@ -1023,11 +1135,19 @@ send_sync_warning() {
   # 收尾区: 状态 + 备注（裸文本说明段），footer 自带空行。
   # 注意: tg_add_note 对整段做 escape_html，段内不能携带 HTML 标签——
   # emoji 只能随段裸置（转义边界决定的既定形态，勿套任何标签）
+  # 审批键从"全量 force_sync"换成任务键: 单任务精准放行，不再牵连其余同步对
+  local _task_key
+  _task_key=$(_sync_task_key "$task_name" "$dest_path")
   tg_add_note msg "⏭️ 已跳过此同步，继续执行其他任务
-如确认无误，请手动触发 force_sync=true"
+⏳ 如已配置审批通道，主对话会收到 ✅/❌ 按钮，点 ✅ 即只放行本任务
+如确认无误也可手动触发（任务键 ${_task_key}）:"
   tg_add_footer msg
 
   send_telegram_message "$msg" HTML alert
+
+  # 推送审批请求到网关（fail-open: 失败只记日志，不影响上面已发出的告警）
+  _push_force_sync_approval "$_task_key" "$task_name" "$source_path" "$dest_path" \
+    "$diff_bytes" "$marker_bytes"
 }
 
 # 发送"近期已成功同步，本次跳过"的通知
