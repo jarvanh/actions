@@ -319,8 +319,9 @@ def tail_file(path: str, n: int = 15) -> str:
 
 
 def human_size(num):
-    """1024 进制、GiB/MiB/KiB/B，与 openlist format_bytes（及本域 dedupe_*.sh 的
-    human_bytes）同口径：整体统一优先于个性（规范 · 入口与凭据）。
+    """1024 进制、GiB/MiB/KiB/B，与真源 format_bytes 同口径：整体统一优先于个性
+    （规范 · 入口与凭据）。openlist 域经 load_all.sh 注入 format_bytes；本域
+    dedupe_*.sh 直接调用同一真源——python 内嵌段拿不到 bash 函数，保留同义实现。
 
     此前是 du -h 风格（1G / 512M），与全库「1.200 GiB」形态不一致。
     """

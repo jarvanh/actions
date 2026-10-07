@@ -1,35 +1,41 @@
 # 通知构件速查
 
-真源行号取自 2026-09-12 的版本，**改真源时同步更新本表**。bash 列漂过一次（`tg_notify.sh` 在 `TG_SEP` 与 `tg_add_title` 之间插过代码，其后整列偏 14 行，已修正）——核对方式：`grep -nE '^函数名\(\)' 真源`。
+本表**不给行号**——行号会随实现漂移（此前记过一版 2026-09-12 的行号，一个月内 bash 列
+整体漂了 +8~+34 行、python 列漂了 +116 行，全部腐化）。函数名是稳定锚点，定位用：
+
+```bash
+grep -nE '^(函数名)\(\)|^def 函数名|^function 函数名|\$?TG_SEP *=' 真源文件
+```
 
 ## 1. 三套实现对照
 
 | 用途 | bash `tg_notify.sh` | pwsh `tg_notify.ps1` | python `speedtest_common.py` |
 |---|---|---|---|
-| 转义 | `escape_html` (L54) | `Esc-Html` (L17) | `html.escape` |
-| 分隔线 18 条 | `TG_SEP` (L63) | `$TG_SEP` (L15) | `TG_SEP` (L560) |
-| 标题 | `tg_add_title` (L86) | 手拼 | 手拼 |
-| kv（裸文本值） | `tg_add_kv` (L92) | 手拼 | 手拼 |
-| kv（机器值 `<code>`） | `tg_add_path` (L97) | 手拼 | 手拼 |
-| 分节 | `tg_add_section` (L108) | 手拼 | 手拼 |
-| 说明段 | `tg_add_note` (L119) | 手拼 | 手拼 |
-| 多行块（原样） | `tg_add_block` (L129) | — | — |
-| 多行块（`<pre>`） | `tg_add_pre` (L325) | — | `tg_pre_block` (L658) |
-| 收尾区 | `tg_add_footer` (L147) | `Get-TgFooter` (L39) | `tg_footer_line` (L663) |
-| 条目（单行，无尾换行） | `tg_entry` (L265) | — | `tg_entry` (L617) |
-| 条目（累积，含尾换行） | `tg_add_entry` (L283) | — | 自己 join |
-| 条目（文字主体） | `tg_entry_text` (L274) / `tg_add_entry_text` (L288) | — | `tg_entry(..., code=False)` |
-| 条目（双机器值 `→`） | `tg_entry_pair` (L309) / `tg_add_entry_pair` (L313) | — | `tg_entry_pair` (L642) |
-| 条目（双机器值 `·`） | `tg_entry_codes` (L311) / `tg_add_entry_codes` (L318) | — | `tg_entry_codes` (L650) |
-| 树形前缀 | `tree_conn` (L194) / `tree_sub` (L201) | 手写 `  ├─ ` `  └─ ` | 手写 |
-| 多行 → 树形 | `tree_lines` (L207) | — | — |
-| 折叠（裸文本） | `tree_code_fold` (L225) | — | — |
-| 折叠（已构建条目流） | `tree_fold` (L249) | — | — |
-| 时长格式化 | `tg_add_footer` 内置 | `Format-TgDuration` (L23) | `tg_format_elapsed` (L599) |
-| 发送 | `send_tg` (L373) / `send_tg_chunked` (L380) | `Send-TgMessage` (L61) | `send_telegram` (L507) / `send_telegram_chunked` (L565) |
-| 原样追加（**不转义**） | `tg_append` (L80) | — | — |
+| 转义 | `escape_html` | `Esc-Html` | `html.escape` |
+| 分隔线 18 条 | `TG_SEP` | `$TG_SEP` | `TG_SEP` |
+| 标题 | `tg_add_title` | 手拼 | 手拼 |
+| kv（裸文本值） | `tg_add_kv` | 手拼 | 手拼 |
+| kv（机器值 `<code>`） | `tg_add_path` | 手拼 | 手拼 |
+| 分节 | `tg_add_section` | 手拼 | 手拼 |
+| 说明段 | `tg_add_note` | 手拼 | 手拼 |
+| 多行块（原样） | `tg_add_block` | — | — |
+| 多行块（`<pre>`） | `tg_add_pre` | — | `tg_pre_block` |
+| 收尾区 | `tg_add_footer` | `Get-TgFooter` | `tg_footer_line` |
+| 条目（单行，无尾换行） | `tg_entry` | — | `tg_entry` |
+| 条目（累积，含尾换行） | `tg_add_entry` | — | 自己 join |
+| 条目（文字主体） | `tg_entry_text` / `tg_add_entry_text` | — | `tg_entry(..., code=False)` |
+| 条目（双机器值 `→`） | `tg_entry_pair` / `tg_add_entry_pair` | — | `tg_entry_pair` |
+| 条目（双机器值 `·`） | `tg_entry_codes` / `tg_add_entry_codes` | — | `tg_entry_codes` |
+| 树形前缀 | `tree_conn` / `tree_sub` | 手写 `  ├─ ` `  └─ ` | 手写 |
+| 多行 → 树形 | `tree_lines` | — | — |
+| 折叠（裸文本） | `tree_code_fold` | — | — |
+| 折叠（已构建条目流） | `tree_fold` | — | — |
+| 时长格式化（收尾三段式） | `tg_add_footer` 内置 | `Format-TgDuration` | `tg_format_elapsed` |
+| 耗时（正文单条，毫秒/秒双档） | `tg_format_ms` | —（无消费场景） | —（延迟走指标串例外） |
+| 发送 | `send_tg` / `send_tg_chunked` | `Send-TgMessage` | `send_telegram` / `send_telegram_chunked` |
+| 原样追加（**不转义**） | `tg_append` | — | — |
 
-pwsh 侧**只有 5 个成员**（`$TG_SEP` / `Esc-Html` / `Format-TgDuration` / `Get-TgFooter` / `Send-TgMessage`），没有第六个。全库 dot-source 它的只有 `rdp.yml:86` 与 `tailscale-windows.yml:119`。
+pwsh 侧**只有 5 个成员**（`$TG_SEP` / `Esc-Html` / `Format-TgDuration` / `Get-TgFooter` / `Send-TgMessage`），没有第六个。全库 dot-source 它的只有 `rdp.yml` 与 `tailscale-windows.yml`。
 
 ## 2. bash 函数签名（易记错的部分）
 
@@ -40,6 +46,7 @@ tg_add_path    <变量名> <标签> <值>          # 值转义 + <code>
 tg_add_footer  <变量名> ["标签" "URL"]...    # 附加链接对
 tg_entry       <主体> [元数据...]            # 单行，无尾换行
 tg_add_entry   <变量名> <主体> [元数据...]    # 2 必填 + 变长元数据，追加一整行
+tg_format_ms   <秒>                          # "27 毫秒" / "1.40 秒"；空或非法返回空
 tree_fold      <多行条目流> [上限=8]          # 只截断
 tree_code_fold <多行裸文本> [上限=8]          # 转义 + <code> + 截断
 ```
@@ -115,6 +122,9 @@ for t in test_*.sh; do bash "$t" </dev/null > "/tmp/x_${t%.sh}.log" 2>&1; echo "
 grep "command not found" /tmp/x_*.log   # 必须为空
 ```
 
-判定基线：**17 个 EXIT=0** + 两个已知环境失败：`test_truth`（依赖 docker）、`test_marker_skip_guards` 1b（macOS BSD `date` 无 `-d`）。全量约 10 分钟，后台跑。
+判定基线：**除环境假红外全部 `EXIT=0`**（套件数会变，别记数字；具体名单以
+`skills/telegram-notify-audit/references/audit-checklist.md` 为准）。已知环境假红固定为：
+`test_truth`（依赖 docker）、`test_marker_skip_guards` 1b（macOS BSD `date` 无 `-d`）。
+全量约 10 分钟，后台跑。
 
 已知 flake（负载高时）：`test_progress_no_orphans`（时序断言）、`test_get_openlist_token_login`（sandbox IPC 超时）。**单独复跑确认再下结论，别急着改代码。**

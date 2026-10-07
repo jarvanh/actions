@@ -777,9 +777,10 @@ API Key：<code>sk-kj…（同 wb_notify，点选可复制）</code>
 - **收尾 3c 停服后发 ⛔「已停止」通知**（对齐 workbuddy 的 3b）：与下一轮的
   「已就绪」配对，肉眼可确认服务生命周期闭环；强制结束后仍有进程残留发 ⚠️。
 - **「API Key」行同 wb_notify 口径**：标签 + `tg_add_path`，值走 `<code>`
-  等宽，客户端点一下整块复制（两个网关共用 `AI_GATEWAY_API_KEY`，
-  step env 注入的 ZCODE_GATEWAY_KEY 就是同一把）。**写「未取到」兜底**，
-  不编造密钥值。
+  等宽，客户端点一下整块复制（网关 key 2026-10-05 起各自分家：workbuddy 用
+  `AI_GATEWAY_API_KEY`，本网关用**独立 secret** `ZCODE_GATEWAY_API_KEY`
+  注入为 `ZCODE_GATEWAY_KEY`——勿改回共用，qingyan 同理用 `GLM2API_GATEWAY_KEY`）。
+  **写「未取到」兜底**，不编造密钥值。
 
 
 ### 2.7 Emby 服务
@@ -1396,7 +1397,10 @@ run 已结束，以上任务本轮未执行完
 | 4 | `X 毫秒`（整数） | < 1 秒 | `27 毫秒`、`340 毫秒` |
 | 5 | `⏱mm:ss`（定宽补零） | 进度面板批次行 | `⏱01:15` |
 
-- 第 1–4 层由三套真源的收尾区实现与各处耗时复用，三者逐字一致；
+- 第 1–3 层由三套真源的收尾区实现，三者逐字一致；第 3/4 层的**正文单条耗时**
+  （毫秒/秒双档，`27 毫秒` / `1.40 秒`）由 bash 真源 `tg_format_ms` 提供——
+  emby 起播等待、openclaw 自愈告警的耗时 kv 都走它（2026-10-07 起收敛进真源，
+  不再 workflow 内联各写一份）；python/pwsh 侧暂无消费场景、未实现；
 - 第 3 层的两位小数是**固定精度**（整数秒写作 `12.00 秒`）：精度一致才好纵向比较；
 - 第 4 层是子秒专用形态——不足 1 秒若硬走第 3 层会退化成 `0.00 秒`，所以单列一层；
 - 第 5 层是**面板列字段**（为了计数列竖向对齐），与第 1–4 层不是一套体系；
@@ -1544,6 +1548,7 @@ python 侧格式化统一走共享层 `speedtest_common.py`。
 | 说明段 | `tg_add_note` | 手拼 | 手拼 |
 | 树形 / 折叠 | `tree_conn` `tree_sub` `tree_lines` `tree_code_fold`（裸文本）/ `tree_fold`（已构建条目流）；前缀自带等宽 `<code>` | 手拼（前缀同样包 `<code>`） | 手拼（同左） |
 | 大小格式化 | `format_bytes` | 手算 | 手算（python 侧同义实现） |
+| 耗时（正文单条，毫秒/秒双档） | `tg_format_ms` | —（无消费场景） | —（节点延迟走指标串例外，5.1 节） |
 | 转义 | `escape_html` | `Esc-Html` | `html.escape` |
 | 收尾 | `tg_add_footer` | `Get-TgFooter` | `tg_footer_line` / `tg_format_elapsed` |
 | 发送 | `send_tg` / `send_tg_chunked` | `Send-TgMessage` | `send_telegram` / `send_telegram_chunked` |
