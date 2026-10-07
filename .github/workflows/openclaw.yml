@@ -1189,9 +1189,9 @@ jobs:
           #   2. 工作目录也不能直接用挂载点：serve 会在 cwd 下高频读写 logs/ 与 workbuddy-status.json，
           #      在 --vfs-cache-mode full 的 FUSE 挂载点上会卡住/被 runner 清理，表现为
           #      「进程已退出且 serve.log 为空」。
-          # 所以：WB_RUN_DIR（本地盘）跑服务，起前 rclone 拉数据、停后回推 Dropbox。
+          # 2026-10-07 起无 WB_RUN_DIR：数据（凭据/config/usage/status/logs）直写 WB_DIR（Dropbox），
+          # 二进制在本地盘；原「起前拉数据、停后回推」机制已随数据直写迁移退役。
           WB_DIR="/dropbox/self-hosted/workbuddy-gateway"
-          WB_RUN_DIR="/tmp/local_workbuddy/data"
           WB_BIN_DIR="/tmp/local_workbuddy"
           WB_BIN="$WB_BIN_DIR/workbuddy-gateway"
           WB_RELEASE_BASE="https://github.com/jarvanh/workbuddy-gateway/releases/latest/download"
@@ -1513,20 +1513,16 @@ jobs:
           if [ ! -x "$WB_BIN" ]; then
             echo "❌ 二进制不可执行：$WB_BIN（下载失败或权限位丢失）"
           fi
-          # serve 的工作目录是本地运行目录（WB_RUN_DIR），不是 Dropbox 挂载点：
-          # 凭据靠"自动发现当前目录下 workbuddy*.json"入池、状态与 logs/ 也都写同目录，
-          # 这些高频小文件读写放本地盘才不会被 FUSE 卡住。数据已在第 0 步从 Dropbox 拉齐，
-          # 收尾会回推（见 3b）。
+          # serve 的工作目录是 Dropbox（WB_DIR，2026-10-06 起数据直写：凭据/状态/缓存/logs 都落这里），
+          # 二进制在本地盘 WB_BIN_DIR；unit 真源 services.sh（WorkingDirectory=WB_DIR）。
           # 托管交给 services.sh（systemd --user + Restart=always）：窗口期内进程崩溃
           # 由 systemd 秒级拉起，不再依赖下一轮 run。ensure 语义 = 写单元 + 每轮重启，
           # 与本步骤原先的 pkill + nohup 等价；停止必须走 systemctl（见收尾 3b 注释）。
-          if ! ( cd "$WB_RUN_DIR" ); then
-            echo "❌ 无法进入运行目录 $WB_RUN_DIR" >&2
-            printf '%s\n' "cd $WB_RUN_DIR failed" > "$WB_LOG"
-          else
-            mkdir -p "$WB_RUN_DIR/logs"
-            bash "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" ensure workbuddy || true
-          fi
+          # ⚠️ 2026-10-07 事故修复：此处曾残留旧门闸 cd "$WB_RUN_DIR"（/tmp/local_workbuddy/data）。
+          #    数据直写迁移（2026-10-06）后该目录不再创建，runner 重启清空 /tmp 后 cd 必败 →
+          #    ensure 被跳过 → systemd 单元缺失、服务起不来（告警「无法进入运行目录」）。
+          #    ensure 无前置条件，直接执行。
+          bash "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" ensure workbuddy || true
 
           # 健康检查：GET /health 返回任意 HTTP 响应码即视为已监听。
           # 就绪后再校验进程是否还在：进程若已崩，端口可能短暂由 TIME_WAIT/旧进程占用，
@@ -1560,7 +1556,7 @@ jobs:
 
           # 凭据清单：只取文件名（真实 token 绝不回显）。serve 自动发现 cwd 下
           # workbuddy*.json 组池，这份清单就是它实际加载的凭据集合。
-          WB_CREDS="$(cd "$WB_RUN_DIR" 2>/dev/null && ls -1 workbuddy*.json 2>/dev/null \
+          WB_CREDS="$(cd "$WB_DIR" 2>/dev/null && ls -1 workbuddy*.json 2>/dev/null \
             | grep -v '^workbuddy-status\.json$' || true)"
 
           # 逐账号明细走 serve 写出的状态快照 workbuddy-status.json（JSON，jq 直接取）。
@@ -1574,7 +1570,7 @@ jobs:
           #   state: active|cooldown|paid_exhausted|expired|disabled → 可用/冷却/付费耗尽/已过期/失效
           #   quotaKnown 为 false 时额度三项无意义（monitor 显示 "-"），此处显示「未获取」
           #   quotaRemaining 按上游 formatQuota（两位小数、去尾零）
-          WB_STATUS_JSON="$WB_RUN_DIR/workbuddy-status.json"
+          WB_STATUS_JSON="$WB_DIR/workbuddy-status.json"
 
           # 免费模型名单：三路并集（见下方 siteKnownFree 说明），目录接口只是其中一路。
           # 目录接口：GET {Base}/v2/enterprises/personal/models
@@ -1606,7 +1602,7 @@ jobs:
             while IFS= read -r _cf; do
               [ -z "$_cf" ] && continue
               WB_FREE_TOTAL_ACC=$((WB_FREE_TOTAL_ACC + 1))
-              _fp="$WB_RUN_DIR/$_cf"
+              _fp="$WB_DIR/$_cf"
               [ -r "$_fp" ] || continue
               _tok="$(jq -r '.auth.accessToken // ""' "$_fp" 2>/dev/null || true)"
               [ -z "$_tok" ] && continue
@@ -1687,7 +1683,7 @@ jobs:
             #      站点级，需按账号 edition 展开到该站点的每个账号（上游 siteKnownFree 正是按站点判）。
             # 为什么必须补：目录接口只返回**当前在售**的模型，实测免费但已下架/未在列的模型
             # （deepseek-v4.1-flash）在目录里根本取不到，只走 ③ 就会漏报（本轮实测少报一半）。
-            WB_CACHE="$WB_RUN_DIR/wb-models-cache.json"
+            WB_CACHE="$WB_DIR/wb-models-cache.json"
             # 缓存缺失时 jq --slurpfile 会报错（且引用未定义的 $cache 会直接编译失败），
             # 故缺失就用一个临时空对象顶上：只走 ②（modelStates 在快照里，仍覆盖实测免费），
             # 探针那一路自然为空，而不是整段不产出。
@@ -2037,7 +2033,7 @@ jobs:
             while IFS= read -r _cf; do
               if [ -z "$_cf" ]; then continue; fi
               WB_CKSTAT_TOTAL=$((WB_CKSTAT_TOTAL + 1))
-              _fp="$WB_RUN_DIR/$_cf"
+              _fp="$WB_DIR/$_cf"
               _tok=""
               if [ -r "$_fp" ]; then
                 _tok="$(jq -r '.auth.accessToken // ""' "$_fp" 2>/dev/null || true)"
@@ -5327,7 +5323,6 @@ jobs:
           # pkill 兜底只针对过渡期残留的非托管实例（旧版 nohup 起的进程不在单元里）。
           echo "3b. Stopping workbuddy-gateway..."
           WB_DIR="/dropbox/self-hosted/workbuddy-gateway"
-          WB_RUN_DIR="/tmp/local_workbuddy/data"
           WB_BIN="/tmp/local_workbuddy/workbuddy-gateway"
           bash "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" stop workbuddy || true
           if systemctl --user is-failed --quiet workbuddy-gateway.service 2>/dev/null; then
@@ -5363,14 +5358,12 @@ jobs:
           # 必须加 --ignore-existing：否则 /tmp 里可能残留比 Dropbox 更旧的副本
           # （rclone copy 默认按大小/时间覆盖），会把直写的新数据倒退回旧版本。
           # 只补远端没有的文件，绝不覆盖已存在的。
-          rclone copy "$WB_RUN_DIR" "dropbox:self-hosted/workbuddy-gateway" \
-            --exclude 'workbuddy-gateway-*' --ignore-existing \
-            --retries 5 --low-level-retries 10 --timeout 1m --contimeout 15s 2>/dev/null || \
-            echo "⚠️ workbuddy 数据回推失败（状态快照可能落后一轮）"
+          # 兜底回推已退役（2026-10-07）：WorkingDirectory 直指 Dropbox 后数据全程直写，无需回推
+          echo "ℹ️ workbuddy 数据直写 Dropbox，跳过兜底回推"
           WB_VER="$(head -n 1 "$WB_DIR/.installed-version" 2>/dev/null || true)"
           # workbuddy-cred-sync 已于 2026-10-06 停用，无循环日志可读。
           # 顺带核对凭据是否已进运行目录（运行期新上传的凭据应出现在这里）
-          ls -la "$WB_RUN_DIR"/workbuddy*.json 2>/dev/null | head -10 || true
+          ls -la "$WB_DIR"/workbuddy*.json 2>/dev/null | head -10 || true
 
           wb_stop_notify() {
             # 收尾停止通知。版式与运行步骤里的 wb_notify 同源（docs/telegram-notify.md
