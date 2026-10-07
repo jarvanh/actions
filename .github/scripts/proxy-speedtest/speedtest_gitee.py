@@ -1178,37 +1178,46 @@ def git_force_push_testfile(repo_dir: pathlib.Path, remote: str, env, file_path:
 def git_clone_testbranch(clone_dir: pathlib.Path, remote: str, env, timeout: int, branch_name: str, target_filename: str):
     """经代理拉回测速分支上的文件，返回 `(纯传输秒数, 文件路径)`。
 
-    **计时只包住文件内容的传输**（2026-09-17 改）。原实现 `t0 = time.time()` 包住整条
-    `git clone`，量出来的是「仓库元数据协商 + 内容传输 + 本地 checkout」的墙钟时间；
-    10MiB 文件在高速节点上，元数据/checkout 的固定开销能占掉相当比例 ⇒ 算出的 MiB/s
-    被系统性低估，四套之间的「下载速度」也就不可比（上行侧只包住 `git push` 一条命令，
-    口径本来就不对称）。
+    ⚠️ 2026-10-07 修正：计时段从 `git checkout` 挪回 `git clone`，并去掉 `--filter=blob:none`。
 
-    现在是两段，只量第二段：
-      1. 索引/元数据 clone：`--filter=blob:none` 只取提交与树，不取任何文件内容；
-      2. 取文件内容：`git checkout` 把 blob 落到工作区，**这一段才是下载耗时**。
+    旧实现的致命前提错误：它假设 Gitee 私有仓库支持 partial clone（`--filter=blob:none`），
+    于是设计成「clone 只取元数据 → checkout 才拉内容 → 只计 checkout」。实测（10-07）坐实
+    **Gitee 私有仓库根本不认这个 filter** —— clone 阶段 10MiB 内容已全量落地（size-pack
+    10.01 MiB、缺失 blob 0），checkout 退化成「把本地 .git 里现成的 blob 解包到工作区」，
+    纯磁盘操作仅 13~56ms ⇒ 10MiB / 0.056s ≈ 178 MiB/s ≈ **1417 兆**。
 
-    `--filter=blob:none` 需要远端支持 partial clone（Gitee 支持）；不支持时 git 会告警并
-    退回全量下载，此时第 2 段几乎是空操作，退化成接近旧口径，因此不额外加兜底分支
-    ——多一条分支就多一种「看起来成功但口径不同」的路径。
+    后果不是「偏大」，是**恒定的假象**：所有节点、连直连基线都测出同一个 178 MiB/s
+    （实测直连基线 download_mibs=178.82、download_seconds=0.056），与代理质量完全无关，
+    ↓列彻底失去分辨力，订阅排序也因此被污染。
+
+    修法（已实测验证）：
+      1. 去掉 `--filter=blob:none` —— 对 Gitee 私有仓库无效，留着只会让人误以为生效；
+      2. clone 加 `--no-checkout` —— 让 clone 段**只**做网络传输、不碰本地解包。
+         实测：pack 仍 10.00 MiB（内容到位）而工作区 0 文件（未解包）；
+      3. **计时包住 clone** —— 这才是真正的网络传输段。实测直连 14.44s ⇒ 0.69 MiB/s ≈ 5 兆，
+         与同文件走 API contents 端点独立测得的 0.64 MiB/s 吻合（交叉验证通过）；
+      4. checkout 保留但**不计时**，仅用于把文件落到工作区，供调用方取真实字节数。
+
+    已知口径残留：clone 段仍含「仓库元数据协商」（depth=1 单分支，树很小，占比可忽略），
+    与上行侧「只包住 git push 一条命令」不完全对称 —— 这是 Gitee 私有仓库不支持
+    partial clone 的必然代价，无法在本测法内进一步剥离。
     """
     shutil.rmtree(clone_dir, ignore_errors=True)
+    # 计时只包住 clone：--no-checkout 保证这一段是纯网络传输，不含本地解包
+    t0 = time.time()
     code, out, err = run(
         ['git', 'clone', '--depth', '1', '--single-branch', '--branch', branch_name,
-         '--filter=blob:none', remote, str(clone_dir)],
+         '--no-checkout', remote, str(clone_dir)],
         env=env, timeout=timeout,
     )
+    elapsed = time.time() - t0
     if code != 0:
         raise RuntimeError((err or out or 'git clone failed')[-500:])
-    # 只量「把文件内容拉下来」这一件事：checkout 触发 blob 获取并写入工作区。
-    t0 = time.time()
+    # 只把文件落到工作区（读本地 .git，非网络操作），不计入耗时
     code, out, err = run(
         ['git', 'checkout', '--force', 'HEAD', '--', target_filename],
         cwd=clone_dir, env=env, timeout=timeout,
     )
-    # 非 0 不直接抛：blob:none 下这次 checkout 才去取内容，超时/失败都要看文件到底有没有落地，
-    # 落地了就当这一次测到（计耗时），没落地才报错——避免把「内容已到、命令却非 0」判成下载失败。
-    elapsed = time.time() - t0
     pulled = clone_dir / target_filename
     if not pulled.exists():
         raise RuntimeError((err or out or 'git checkout failed')[-500:])

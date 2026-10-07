@@ -601,15 +601,21 @@ def main():
     check('via_proxy=via_proxy' in pathlib.Path(d.__file__).read_text(encoding='utf-8'),
           'cdn 把开关接到了调用的 via_proxy 参数上')
 
-    print('== 11. 下载计时只包住文件内容传输（纯传输时间）==')
-    # 诉求（2026-09-17）：原实现 t0=time.time() 包住整条 git clone，量到的是
-    # 「仓库元数据协商 + 内容传输 + 本地 checkout」的墙钟时间 ⇒ 高速节点上固定开销占比大，
-    # MiB/s 被系统性低估，且与只包住 git push 的上行侧口径不对称。
-    # 现在两段：--filter=blob:none 的 metadata clone（不计时）+ checkout 取内容（计时）。
-    # 反证：把 t0 挪回 clone 之前，11c 会把 metadata clone 的 5s 也算进去而变红。
+    print('== 11. 下载计时只包住网络传输段（clone），不含本地解包（checkout）==')
+    # ⚠️ 2026-10-07 前提反转：旧实现假设 Gitee 私有仓库支持 partial clone
+    # （--filter=blob:none ⇒ clone 只取元数据、checkout 才拉内容），于是只计 checkout。
+    # 实测坐实 Gitee 私有仓库**不认这个 filter**：内容在 clone 段已全量落地
+    # （size-pack 10.01 MiB、缺失 blob 0），checkout 退化成纯本地解包（13~56ms）
+    # ⇒ 所有节点乃至直连基线都测出同一个 ≈178 MiB/s（1417 兆）的常数假象。
+    #
+    # 新实现：去掉 filter、clone 加 --no-checkout（只做网络传输、不碰工作区）、
+    # **计时包住 clone**；checkout 保留，但只负责把文件落到工作区供取真实字节数。
+    # 反证：把 t0 挪回 checkout（旧行为），11c 会只计到 2s 而变红。
     _g_src = pathlib.Path(g.__file__).read_text(encoding='utf-8')
-    check('--filter=blob:none' in _g_src,
-          'clone 用 blob:none 只取元数据（不把内容传输混进元数据阶段）')
+    check('--no-checkout' in _g_src,
+          'clone 加 --no-checkout（网络传输段不掺本地解包开销）')
+    # 注意：不按「源文件里不出现 --filter=blob:none」来判 —— 新注释里为了说明
+    # 为什么移除它，必然会提到这个词。真正的判据在下面 11d：实际 clone 命令不带该 flag。
 
     # 打在真正的进程边界（subprocess.run）上，而不是 g.run：这样实现里的
     # shutil.rmtree / 文件落地都不受影响，命令序列也能按「clone → checkout」精确推进。
@@ -621,13 +627,13 @@ def main():
     def _fake_subprocess_run(cmd, **kw):
         cmd_seq.append(list(cmd))
         if cmd[:2] == ['git', 'clone']:
-            # metadata clone 阶段：伪造耗时 5s，并只造一个**空壳**仓库目录
+            # 网络传输阶段（**计时对象**）：伪造耗时 5s，并只造一个**空壳**仓库目录
             monkey[0] += 5.0
             clone_dir = pathlib.Path(cmd[-1])
             clone_dir.mkdir(parents=True, exist_ok=True)
             return _sp.CompletedProcess(cmd, 0, '', '')
         if cmd[:2] == ['git', 'checkout']:
-            # 内容传输阶段：伪造耗时 2s，再把文件真的写到工作区
+            # 本地解包阶段（**不**计时）：伪造耗时 2s，再把文件真的写到工作区
             monkey[0] += 2.0
             (pathlib.Path(kw['cwd']) / cmd[-1]).write_bytes(b'x' * 10)
             return _sp.CompletedProcess(cmd, 0, '', '')
@@ -646,16 +652,18 @@ def main():
         _sp.run = _sp_run
         g.time.time = _orig_time
 
-    # 11c. 只有 checkout 那一段（2s）被计时，metadata clone 的 5s 必须被排除
-    check(abs(elapsed - 2.0) < 1e-6,
-          f'只用 checkout 段计时，不含 metadata clone（实际 {elapsed}s，期望 2.0）')
+    # 11c. 只有 clone（网络传输）那一段 5s 被计时；checkout 的 2s 本地解包必须被排除
+    check(abs(elapsed - 5.0) < 1e-6,
+          f'只计 clone 网络传输段，不含 checkout 本地解包（实际 {elapsed}s，期望 5.0）')
     # 11d. 两段命令都在，且各自只跑一次
     clones = [c for c in cmd_seq if c[:2] == ['git', 'clone']]
     checkouts = [c for c in cmd_seq if c[:2] == ['git', 'checkout']]
     check(len(clones) == 1, f'clone 只调一次（实际 {len(clones)}）')
     check(len(checkouts) == 1, f'checkout 只调一次（实际 {len(checkouts)}）')
-    check(clones and '--filter=blob:none' in clones[0],
-          'clone 命令确实带 blob:none 过滤')
+    check(clones and '--no-checkout' in clones[0],
+          'clone 命令带 --no-checkout（计时段内不做本地解包）')
+    check(clones and '--filter=blob:none' not in clones[0],
+          'clone 命令不带 blob:none（Gitee 私有仓库不认，留着是假前提）')
     check(checkouts and 'speed.bin' in checkouts[0],
           'checkout 只取测速文件（不整树 checkout，否则又会掺入别的开销）')
 

@@ -22,15 +22,16 @@
 
 容易被误读的三点写在最前：**① 只有 taier 与 gistnodes 真探活**（CDN/Gitee 的「活」是测量
 成功的副产品）；**② taier 的「兆」与另外三套的 MiB/s 不是同一把尺子**（见下方换算）；
-**③ 上行与下行都只计「数据在链路上跑」的那一段**（CDN 的 curl Range、Gitee 的 git blob
-传输；仓库元数据协商、checkout、commit 等固定开销一律排除，见下方「下载计时」）。
+**③ 上行与下行都只计「数据在链路上跑」的那一段**（CDN 的 curl Range、Gitee 的
+`--no-checkout` clone；元数据协商等固定开销无法剥离但占比可忽略，本地 checkout 解包、
+commit 等一律排除，见下方「下载计时」）。
 
 | 项 | CDN | Gitee | taier | gistnodes |
 |---|---|---|---|---|
 | **探活** | ❌ 无（`ok = 延迟成功 or 下载成功`） | ❌ 无（push 成功即活） | ✅ 开测前一次 `GET /group/{组}/delay` 拿整组延迟表，逐节点查表 | ✅ 非惰性健康检查 + 轮询等结论 |
 | **延迟** | `latency_probe`：baidu+taobao，各 4 次，8s，**HTTP 首字节** | 同实现，目标只有 `gitee.com` | 引擎对运营商服务器打**原生 TCP** | — |
 | **上传** | git push→Gitee，**可切直连** | git push→Gitee，**可切直连** | 引擎发流（single/multi） | — |
-| **下载** | curl 单连接 Range 10MiB，多镜像取最优 | `blob:none` clone + checkout 取文件，**只计传输** | 同一次引擎调用的「↓」列 | — |
+| **下载** | curl 单连接 Range 10MiB，多镜像取最优 | `--no-checkout` clone，**只计整段网络传输**（不含本地 checkout 解包） | 同一次引擎调用的「↓」列 | — |
 | **单位** | MiB/s | MiB/s | 原始 Mbps | — |
 
 ⚠️ **taier 的单位陷阱**：引擎输出 Mbps，导出时 ÷8.388608 转 MiB/s、展示时 ×8 转回「兆」，
@@ -64,8 +65,8 @@
 5. 逐节点：切换 AUTO → 经代理 HTTP 计时测 gitee.com 延迟（`latency_probe`，采样
    `PROXY_SPEEDTEST_LATENCY_SAMPLES` × 超时 `PROXY_SPEEDTEST_LATENCY_TIMEOUT`）
    → 经代理 `git push`（单流 HTTPS，超时 `PROXY_SPEEDTEST_PUSH_TIMEOUT`）按推送耗时
-   换算上行 → `git clone` + `checkout` 取文件（超时 `PROXY_SPEEDTEST_CLONE_TIMEOUT`）
-   换算下行（只计 blob 传输，见[下载计时](#下载计时只计-blob-传输2026-09-17)）；
+   换算上行 → `git clone --no-checkout`（超时 `PROXY_SPEEDTEST_CLONE_TIMEOUT`）整段计时
+   换算下行（checkout 只负责把文件落到工作区，不计时，见[下载计时](#下载计时只计-clone-网络传输2026-10-07-修正)）；
 6. 汇总 → 按**订阅导出策略**判定达标节点（见[订阅导出策略](#订阅导出策略三套共用)）导出到专属 Gist
    （`update_gist`，只上传不回拉；2026-09-10 已移除原先「第二个 mihomo 实例（19690/19691）
    回拉 Gist raw + 抽样验证」的步骤，见[运维与排查](#运维与排查)）；
@@ -110,33 +111,38 @@
 ⚠️ **默认保持「经代理」**：历史通知里的「上传」都指节点上行，改默认会让新旧数据不可比。
 要测家庭宽带，显式设 `PROXY_SPEEDTEST_UPLOAD_VIA_PROXY=0`。
 
-## 下载计时：只计 blob 传输（2026-09-17）
+## 下载计时：只计 clone 网络传输（2026-10-07 修正）
 
-**原口径**：`t0 = time.time()` 包住整条 `git clone --depth 1 --single-branch`，量到的是
-「远端仓库元数据协商 + 文件内容传输 + 本地 checkout」的总墙钟时间。10MiB 文件在高速节点上，
-元数据/checkout 的固定开销能占掉相当比例 ⇒ 算出的 MiB/s 被**系统性低估**；且上行侧只包住
-`git push` 一条命令，两侧口径本就不对称。
+**历次口径**：
 
-**现口径**：拆成两段，只量第二段：
+- **v1（~09-16）**：`t0 = time.time()` 包住整条 `git clone`，量到「元数据协商 + 内容传输 +
+  本地 checkout」的总墙钟时间，高速节点上固定开销占比大 ⇒ 系统性低估。
+- **v2（09-17）**：假设 Gitee 支持 partial clone，拆两段只计 checkout 取内容那段。
+  **前提是错的**：实测（10-07）坐实 Gitee 私有仓库**不认 `--filter=blob:none`**——
+  clone 阶段 10MiB 内容已全量落地（size-pack 10.01 MiB、缺失 blob 0），checkout 退化成
+  「把本地 .git 里现成的 blob 解包到工作区」的纯磁盘操作（13~56ms）⇒ 10MiB / 0.056s ≈
+  178 MiB/s ≈ **1417 兆**。所有节点、连直连基线都测出同一个常数假象，↓列彻底失去分辨力。
+- **v3（现口径，10-07）**：
 
 | 段 | 命令 | 是否计时 |
 |---|---|---|
-| ① 元数据 clone | `git clone --depth 1 --single-branch --branch <b> --filter=blob:none <remote>` | ❌ 不计 |
-| ② 内容传输 | `git checkout --force HEAD -- <file>`（触发 blob 获取并写入工作区） | ✅ **计** |
+| ① 网络传输 | `git clone --depth 1 --single-branch --branch <b> --no-checkout <remote>` | ✅ **计** |
+| ② 本地落地 | `git checkout --force HEAD -- <file>`（读本地 .git 写工作区） | ❌ 不计 |
 
-`--filter=blob:none` 是 partial clone：只取提交与树、不取任何文件内容，因此第 ① 段几乎不含
-数据流量；第 ② 段的 `checkout` 才真正把 10MiB blob 拉下来——**这一段才是「下载」**。
-测试第 11 组用「clone 阶段伪造 5s、checkout 阶段伪造 2s」的伪造时钟钉住：返回的
-`download_seconds` 必须是 2s 而不是 7s；把 `t0` 挪回 clone 之前会立刻变红。
+  - 去掉 `--filter=blob:none`（对 Gitee 私有仓库无效，留着只会让人误以为生效）；
+  - clone 加 `--no-checkout`：实测 pack 仍 10.00 MiB（内容到位）而工作区 0 文件（未解包），
+    保证计时段是**纯网络传输**、不掺本地解包开销；
+  - 计时包住整条 clone。实测直连 14.44s ⇒ 0.69 MiB/s ≈ 5 兆，与同文件走 API contents
+    端点独立测得的 0.64 MiB/s 吻合（交叉验证通过）。
 
-两点约定：
+**已知口径残留**：clone 段仍含仓库元数据协商（depth=1 单分支，树很小，占比可忽略），与
+上行侧「只包住 git push」不完全对称——这是 Gitee 私有仓库不支持 partial clone 的必然代价。
 
-- **checkout 非 0 不直接抛**：`blob:none` 下这次 checkout 才去取内容，超时/失败都要看文件
-  到底有没有落地——落地了就当这次测到（计耗时），没落地才 `RuntimeError`。避免把
-  「内容已到、命令却非 0」误判成下载失败。
-- **不做「远端不支持 partial clone」的兜底分支**：Gitee 支持；万一不支持，git 会告警并退回
-  全量下载，此时第 ② 段几乎是空操作、退化成接近旧口径。多一条兜底就多一种「看起来成功但
-  口径不同」的路径，宁可让它自然退化。
+**配套调整**：`PROXY_SPEEDTEST_CLONE_TIMEOUT` 从 30 上调到 90——计时段从 56ms 的本地
+解包变成真实网络传输（直连实测 14.4s），沿用 30 秒会把「慢但可用」的节点误判为失败。
+
+测试第 11 组改用「clone 阶段伪造 5s、checkout 阶段伪造 2s」的伪造时钟钉住：返回的
+`download_seconds` 必须是 5s 而不是 2s；把 `t0` 挪回 checkout（v2 行为）会立刻变红。
 
 `download_seconds`（RESULT_JSON / `direct_baseline_finished` 日志）**整个替换**为这个纯传输
 耗时，不并存两个口径——并存迟早有人拿错那个字段。
@@ -192,7 +198,7 @@
 |---|---|---|
 | `PROXY_SPEEDTEST_MODE` | both | both = 上行+下行+延迟三项；push-only = 只测上行 |
 | `PROXY_SPEEDTEST_SIZE_MIB` | 10 | 测速文件大小 |
-| `PROXY_SPEEDTEST_PUSH_TIMEOUT` / `CLONE_TIMEOUT` | 30 / 30 | 单次 push / clone 超时 |
+| `PROXY_SPEEDTEST_PUSH_TIMEOUT` / `CLONE_TIMEOUT` | 30 / 90 | 单次 push / clone 超时（下载超时 2026-10-07 上调，计时段已是真实网络传输） |
 | `PROXY_SPEEDTEST_LATENCY_SAMPLES` / `_TIMEOUT` | 4 / 8 | gitee.com 延迟采样次数 / 单次超时 |
 | `PROXY_SPEEDTEST_UPLOAD_VIA_PROXY` | 1 | 上行经代理（`0` = 直连 Gitee 测家庭宽带）。与 cdn 同名同默认 |
 | `PROXY_SPEEDTEST_DIRECT_BASELINE_TIMEOUT` / `_MAX_ATTEMPTS` | 60 / 5 | 直连基线 |
