@@ -8,13 +8,11 @@ name: proxy-speedtest-taier
 # 只是测速引擎换成泰尔测速：它给的是三网测速点口径的延迟/带宽，而 proxy-speedtest
 # 给的是延迟 + 镜像站下载 + Gitee 上行的综合口径。
 #
-# 链路说明：taierspeedtest 是原生 TCP/ICMP 客户端，没有 --proxy 参数，且 Go 的
-# net.Dialer 直接发系统调用（proxychains 之类 LD_PRELOAD 方案无效），所以走
-# mihomo TUN 透明接管该进程流量：
-#   rules: [PROCESS-NAME,taierspeedtest,AUTO, MATCH,DIRECT]
-# 即只有测速进程走节点、其余流量（含 runner 心跳/日志）直连；再用「测速出口 IP
-# 是否等于 runner 直连出口 IP」校验规则真的生效（TUN 起不来会静默直连、结果失真）。
-# 开 TUN 需要 CAP_NET_ADMIN，脚本会在非 root 时自动加 sudo。
+# 链路说明（2026-10-07 弃 TUN 定案）：引擎 v1.0.4-jh.1 数据面已全走 http.Client，
+# 经 mihomo mixed-port 的标准反压代理接入节点（TAIER_SOCKS5 隧道 + HTTP(S)_PROXY）。
+# 旧 TUN 方案的 gvisor 用户态栈贪婪收包并本地回 ACK，客户端 Write() 几乎不阻塞，
+# 盲写计数实测虚高 756 倍（↓4618兆 假读数来源）—— 已废除，不再需要 CAP_NET_ADMIN/sudo。
+# bypass 校验保留：测速出口 IP 若等于 runner 直连出口 = 代理未生效，判失败。
 on:
   schedule:
     # 每天 4 次、间隔 4 小时：UTC 23:00, 03:00, 07:00, 11:00（北京 07:00, 11:00, 15:00, 19:00）。
@@ -261,7 +259,16 @@ jobs:
           # 默认 18000 秒 = 5 小时，比硬上限少 1 小时留给前置准备与收尾。**与 job 的
           # timeout-minutes 成对，改一个要回看另一个。**
           TAIER_BUDGET_SECONDS: '18000'
-          # 订阅导出策略（四套共用，脚本默认值；各脚本消费）：阈值（兆，默认 10）、
+          # ── 弃 TUN · 代理链路（2026-10-07 定案）──
+          # 背景：mihomo TUN 的 gvisor 用户态栈贪婪收包并本地回 ACK，客户端 Write()
+          # 几乎不阻塞，盲写计数实测虚高 756 倍（↓4618兆 假读数来源）。引擎 v1.0.4-jh.1
+          # 数据面全走 http.Client，经 mixed-port 标准反压代理后读数回落真实值（实测 0.8x）。
+          # 引擎二进制改从 jarvanh/taierspeedtest 拉（脚本 TAIER_REPO 开关，现有逻辑）。
+          TAIER_REPO: 'jarvanh/taierspeedtest'
+          # 数据面 SOCKS5 隧道：留空则脚本回落 127.0.0.1:17892（mixed-port）
+          TAIER_SOCKS5: '127.0.0.1:17892'
+          # 上行真实长度（字节）：900MB 谎言经代理被服务端 RST；1MB 实测 200 三连
+          TAIER_UPLOAD_LEN: '1048576'          # 订阅导出策略（四套共用，脚本默认值；各脚本消费）：阈值（兆，默认 10）、
           # 判定指标 upload|download（默认 upload 按上行判定；主指标达标数 < 回退门槛
           # 且另一指标更多时改用另一指标。taier 上传常测不出（CDN 拒绝上传包），通常会落到下行）、
           # 最少节点数（默认 1，不足则不上传）、回退门槛（默认 3，与最少节点数是两回事）。
@@ -291,7 +298,7 @@ jobs:
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: python .github/scripts/proxy-speedtest/taier_speedtest.py
 
-      # 兜底收尾：mihomo TUN 的 auto-route 会接管整机出向路由，内核不撤掉的话
+      # 兜底收尾：mihomo 内核残留会占住 17892 端口、下一轮起不来
       # runner 无法把日志/状态回传 GitHub（表现为所有 step 已完成但 run 卡在
       # in_progress、连取消都执行不了）。脚本正常路径会自己关，这里防异常/超时。
       - name: Cleanup mihomo TUN

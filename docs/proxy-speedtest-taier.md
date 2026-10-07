@@ -27,9 +27,9 @@
 [gitee 文档 · 为什么节点收集不等健康检查](proxy-speedtest-gitee.md#为什么节点收集不等健康检查)）：
 
 1. 下载 `MiaM1ku/taierspeedtest` 最新 Release 二进制（固定文件名 `~/proxy-speedtest/taierspeedtest`，供进程规则匹配）；
-2. mihomo 以 **TUN 模式**启动：`tun.enable + auto-route` 接管整机出向，规则
-   `['PROCESS-NAME,taierspeedtest,AUTO', 'MATCH,DIRECT']`——**只有测速进程走当前节点**，
-   runner 自己的心跳/日志直连；经 API 切换 AUTO 组到该节点；
+2. mihomo 以**标准反压代理**启动（2026-10-07 弃 TUN 定案）：mixed-port（HTTP+SOCKS5
+   同端口）+ 规则 `['MATCH,AUTO']`；引擎 v1.0.4-jh.1 数据面全走 http.Client，经
+   `TAIER_SOCKS5` 隧道 + `HTTP(S)_PROXY` 走 AUTO 组；经 API 切换 AUTO 组到该节点；
 3. 运行 taierspeedtest（协议还原自 `com.cnspeedtest.globalspeed`：控制面取出口 IP/定位 →
    按测速点匹配运营商服务器 → 原生 TCP 上下行）；
 4. 解析 stdout：出口 IP/位置、延迟、上下行；与 runner 直连出口 IP 比对（**bypass 校验**）；
@@ -105,16 +105,19 @@ if CONFIG['TAIER_INCLUDE_REGEX']:
 [gistnodes 文档 · 编排轮 include 过滤词表](proxy-speedtest-gistnodes.md#编排轮-include-过滤词表2026-09-22)。
 
 
-## 为什么必须 mihomo TUN
+## 为什么弃用 mihomo TUN（2026-10-07 定案）
 
-taierspeedtest 是原生 TCP/ICMP 客户端：没有 `--proxy` 参数；Go 的 `net.Dialer` 直接发
-系统调用，**proxychains 这类 LD_PRELOAD 方案对 Go 静态二进制无效**。只有 TUN 能把该
-进程流量透明接入节点。开 TUN 需要 `CAP_NET_ADMIN`，非 root 时脚本自动 `sudo -n` 启动
-mihomo（kill 陈旧进程同理）。
+旧链路确实因「原生 TCP 客户端无 --proxy 参数」而选了 TUN，但实测证明 TUN 的 gvisor
+用户态栈会**贪婪收包并本地回 ACK**——客户端 `Write()` 几乎不阻塞，盲写计数虚高
+**756 倍**（↓4618兆 假读数来源，ampdemo 实测 written=11180 vs truth=14.78 Mbps）。
+引擎 v1.0.4-jh.1 数据面全改 http.Client 后，走 mihomo mixed-port 的**标准反压代理**
+（转不动就不读、TCP 窗口关闭、反压直接传导回客户端），读数回落真实值（实测 0.8x）。
+不再需要 `CAP_NET_ADMIN`/`sudo`/auto-route，runner 自身流量零波及。
 
-TUN 起来后 DNS 会被 mihomo 劫持，必须显式给可达的公共解析器
-（`dns.nameserver: [1.1.1.1, 8.8.8.8]` + `respect-rules: false`）——默认国内递归 DNS
-在 Azure runner 上不通，会导致被代理程序秒失败。
+`TAIER_USE_TUN=1` 保留逃生门（旧 TUN+进程分流行为），仅排障用。
+
+引擎缓存对账：`taierspeedtest.meta` 记录 `repo|tag`，与 `TAIER_REPO` 的 latest 不一致
+自动重下（防旧缓存静默跑旧引擎）。
 
 ## bypass 校验（必须有）
 
