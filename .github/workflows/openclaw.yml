@@ -4585,7 +4585,7 @@ jobs:
           set -euo pipefail
 
           # rss-to-telegram 数据归档（2026-10-06 新增）：
-          # 该包原先**只在 job 收尾打一次**（Final Archive 步骤）。if: ${{ always() }}
+          # 该包原先**只在 job 收尾打一次**（Final Archive 步骤，if: always()）。
           # 只兜得住 failure —— 碰上 cancel / 360m 平台强杀 / runner 回收，那一步
           # 根本没机会跑（run 37439913203 cancelled 即此形态）。实测云端 rsstt.tar.gz
           # 曾落后本地 8.5 小时，回滚会丢订阅列表与推送游标。
