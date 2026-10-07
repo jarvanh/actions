@@ -1018,6 +1018,10 @@ _top_dirs_to_lines() {
 _push_force_sync_approval() {
   local task_key="$1" task_name="$2" source_path="$3" dest_path="$4"
   local diff_bytes="$5" marker_bytes="$6"
+  # 第 7/8 参: 检测时点的当前源端大小/文件数（check_sync_marker 留下的全局值，
+  # 过滤口径与 marker 一致）。接受基线时直接用这组数 —— 回调侧不能现测:
+  # 现测拿不到任务的 --exclude 过滤规则，口径与 marker 对不上。
+  local current_bytes="${7:-0}" current_count="${8:-0}"
   local hook_url="${OPENCLAW_HOOK_URL:-}" hook_token="${OPENCLAW_HOOK_TOKEN:-}"
   local approval_to="${OPENCLAW_HOOK_CHAT_ID:-}"
   if [ -z "$hook_url" ] || [ -z "$hook_token" ] || [ -z "$approval_to" ]; then
@@ -1025,7 +1029,8 @@ _push_force_sync_approval() {
     return 0
   fi
 
-  local prompt
+  local marker_stem prompt
+  marker_stem=$(basename "$(get_marker_path "$task_name" "$dest_path")" .json)
   prompt=$(cat <<EOF
 【同步审批请求 · 源端大小异常减小】
 任务键: ${task_key}
@@ -1033,18 +1038,28 @@ _push_force_sync_approval() {
 源端: ${source_path}
 目标: ${dest_path}
 减少: $(format_bytes "$diff_bytes")（原 $(format_bytes "$marker_bytes")）
+现在约: $(format_bytes "$current_bytes") · ${current_count} 文件
+marker: ${marker_stem}.json
 已按保护策略跳过本任务同步，等待确认。
 
-请在 Telegram 主对话向主人发一条带两个按钮的审批消息（✅ 强制同步该任务 / ❌ 忽略），
+请在 Telegram 主对话向主人发一条带三个按钮的审批卡，
 不要长篇解释，把上面几项用简短 kv 列出即可。
 按钮用 message 工具（action=send, channel=telegram, target=${approval_to}）发送，
 presentation blocks 按钮固定为:
-  ✅ 强制同步该任务 → callback value: olsync:approve:${task_key}
-  ❌ 忽略           → callback value: olsync:ignore:${task_key}
+  🛡️ 接受新大小（首选）→ callback value: olsync:accept:${marker_stem}:${current_bytes}:${current_count}
+     动作: 源端是故意删的，无需同步。执行
+       bash ~/.openclaw/workspace/tools/ol-sync-approve.sh accept ${marker_stem} ${current_bytes} ${current_count} --commit
+     工具先归档原 marker 再动手（有修复记录只改基线，无记录才删 marker），
+     秒级完成、不开新 run。把工具输出摘要回报给主人。
+  ✅ 强制同步该任务（备选）→ callback value: olsync:approve:${task_key}
+     动作: 要立刻把目标端补齐到新状态。执行
+       gh workflow run openlist.yml -R jarvanh/actions -f run_mode=同步 -f force_sync_task=${task_key}
+     并把 run 链接回报给主人（concurrency 单例，会排队等在跑轮结束）。
+  ❌ 忽略 → callback value: olsync:ignore:${task_key}
+     动作: 回复「已忽略，本轮不同步」。
 卡片发出后本轮直接结束，不要再补发任何文字。
-后续主人点 ✅ 的回调（callback_data: olsync:approve:...）会回到主会话，
-由主会话 agent 执行 gh workflow run openlist.yml -R jarvanh/actions \
-  -f run_mode=同步 -f force_sync_task=${task_key} 并回报 run 链接。
+后续回调（callback_data: olsync:accept / approve / ignore:...）会回到主会话，
+由主会话 agent 按上述动作执行；任务键与 marker 名都在卡片里。
 EOF
 )
 
@@ -1147,7 +1162,8 @@ send_sync_warning() {
   local _task_key
   _task_key=$(_sync_task_key "$task_name" "$dest_path")
   tg_add_note msg "⏭️ 已跳过此同步，继续执行其他任务
-⏳ 审批请求已推送: 主对话将收到 ✅/❌ 按钮，点 ✅ 即只放行本任务"
+⏳ 审批请求已推送: 主对话将收到三按钮审批卡
+🛡️ 接受新大小（首选，秒级）· ✅ 强制同步（开新 run）· ❌ 忽略"
   tg_add_section msg "🛠️ 手动触发 · 单任务"
   tg_add_pre msg "gh workflow run openlist.yml -f run_mode=同步 -f force_sync_task=${_task_key}"
   tg_add_footer msg
@@ -1155,8 +1171,11 @@ send_sync_warning() {
   send_telegram_message "$msg" HTML alert
 
   # 推送审批请求到网关（fail-open: 失败只记日志，不影响上面已发出的告警）
+  # 末两参 = 检测时点的当前大小/文件数（check_sync_marker 的过滤口径全局值），
+  # 「接受新大小」直接采用，回调侧不现测（现测拿不到任务 --exclude 过滤规则）
+  # :-0 兜底: 个别测试直接调本函数而不走 check_sync_marker，set -u 下不能炸
   _push_force_sync_approval "$_task_key" "$task_name" "$source_path" "$dest_path" \
-    "$diff_bytes" "$marker_bytes"
+    "$diff_bytes" "$marker_bytes" "${MARKER_CURRENT_BYTES:-0}" "${MARKER_CURRENT_COUNT:-0}"
 }
 
 # 发送"近期已成功同步，本次跳过"的通知
