@@ -2791,6 +2791,9 @@ jobs:
       - name: Run quota-board (TG 额度看板 + Mini App)
         run: |
           set -euo pipefail
+          # psutil：看板「🖥 系统」段的数据源（2026-10-07 合并系统看板进主看板）。
+          # --user 安装落在 ~，runner 重置即丢，故每轮幂等补装（已装则秒过）。
+          python3 -c "import psutil" 2>/dev/null || pip3 install --user --quiet psutil || true
           if [ -f "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" ]; then
             bash "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" ensure quota-board || true
           else
