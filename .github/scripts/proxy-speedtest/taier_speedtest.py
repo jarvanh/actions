@@ -158,6 +158,12 @@ CONFIG = {
     'TAIER_PROBE_MIN_COVERAGE': float(os.environ.get('TAIER_PROBE_MIN_COVERAGE', '0.5') or 0.5),
     'TAIER_TIMEOUT': int(os.environ.get('TAIER_TIMEOUT', '120') or 120),
     'TAIER_SWITCH_SETTLE': float(os.environ.get('TAIER_SWITCH_SETTLE_SECONDS', '1.5') or 1.5),
+    # 节点间隔（秒，0 = 不间隔）：降低对单一测速服务器的请求密度。
+    # 背景（2026-10-07 实测）：服务端对下载端点 File(1G).dl 有累计限频 ——
+    # 同一节点不同时刻结果不同（复现时 shopify 从 0 变 102Mbps），且序列越往后
+    # 403 越多（前18/中16/后11 递减）。摊薄单位时间请求数是唯一可调节手段，
+    # 代价是单轮覆盖节点数下降（≈31 秒/节点 + 间隔）。
+    'TAIER_NODE_INTERVAL': float(os.environ.get('TAIER_NODE_INTERVAL_SECONDS', '0') or 0),
     # 逃生门：TAIER_USE_TUN=1 回退旧行为（TUN+进程分流）。默认关闭。
     'TAIER_USE_TUN': (os.environ.get('TAIER_USE_TUN', '').strip().lower()
                       in ('1', 'true', 'yes', 'on')),
@@ -1035,6 +1041,9 @@ def _run():
                          budget_seconds=_budget_seconds)
             break
         name = str(item.get('name') or '')
+        # 节点间隔：摊薄对测速服务器的请求密度（压降 403），首个节点不等待。
+        if CONFIG['TAIER_NODE_INTERVAL'] > 0 and results:
+            time.sleep(CONFIG['TAIER_NODE_INTERVAL'])
         # 先测活，再测速：死节点不再占用一整个测速窗口（≈31 秒/个）。
         # 查表是纯内存操作（~微秒级），与旧逐节点路径（每次一次 HTTP 往返）不是一个量级。
         # 旧路径的熔断 / 未知名重排 / 撤销判死机器一并删除：那些是为「逐个探
