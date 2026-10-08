@@ -448,6 +448,18 @@ save_sync_marker() {
   source_bytes=$(_size_json_field "$size_json" bytes)
   source_count=$(_size_json_field "$size_json" count)
 
+  # 分层基线（meta/payload）: 供下轮缩小检测做归因。取不到就写 null，
+  #   下轮读到 null 走"不可归因"保守分支（与旧 marker 同处理），不影响正确性。
+  local _cb source_meta_bytes source_payload_bytes
+  _cb=$(_rclone_class_bytes_json "$source_path" "${FILTER_ARGS[@]}")
+  if [ -n "$_cb" ]; then
+    source_meta_bytes=$(_size_json_field "$_cb" meta)
+    source_payload_bytes=$(_size_json_field "$_cb" payload)
+  else
+    source_meta_bytes="null"
+    source_payload_bytes="null"
+  fi
+
   # 双重保险：校验目标端真实文件数
   # 即使 _send_sync_result_notification 已做了同步后缓存刷新 + is_partial_success 检测，
   # 这里再校验一次，防止 SYNC_FAILED=0 但 dest_count 仍小于 source_count 的情况
@@ -637,13 +649,17 @@ save_sync_marker() {
     --arg dest_path "$dest_path" \
     --argjson source_bytes "$source_bytes" \
     --argjson source_count "$source_count" \
+    --argjson source_meta_bytes "$source_meta_bytes" \
+    --argjson source_payload_bytes "$source_payload_bytes" \
     --argjson top_dirs "$top_dirs_json" \
     --argjson fixed_count "$fixed_count" \
     --argjson fixed_bytes "$fixed_bytes" \
     --argjson stats_filtered true \
     '. as [$fixed_files, $fix_blacklist]
     | {last_success: $last_success, source_path: $source_path, dest_path: $dest_path,
-       source_bytes: $source_bytes, source_count: $source_count, top_dirs: $top_dirs,
+       source_bytes: $source_bytes, source_count: $source_count,
+       source_meta_bytes: $source_meta_bytes, source_payload_bytes: $source_payload_bytes,
+       top_dirs: $top_dirs,
        fixed_files: $fixed_files, fixed_count: $fixed_count, fixed_bytes: $fixed_bytes,
        fix_blacklist: $fix_blacklist, stats_filtered: $stats_filtered}')
 
@@ -842,6 +858,62 @@ check_marker_skip_window() {
 #   MARKER_FIXED_COUNT   — 已修复文件数（以非原名存在于目标端）
 #   MARKER_FIXED_BYTES   — 已修复文件总字节数
 #   MARKER_FIXED_FILES   — 已修复文件列表 JSON
+# ===== 源端缩小归因: 减少量落在哪一类文件上 =====
+# 分层口径见 rclone_query.sh 的 SYNC_SHRINK_META_EXTS:
+#   meta 类（nfo/xml/字幕等纯文本）减少 → 刮削器重写所致，判定为正常变动
+#   payload 类（mkv/mp4/图片/压缩包等二进制）减少 → 疑似被删或损坏
+# 不可归因时一律保守返回 payload（宁可误报，不可漏报）:
+#   ① 旧 marker 缺分层基线（source_meta_bytes / source_payload_bytes 为 null）
+#   ② 本轮分层列举失败（网盘限流 / 驱动抖动）
+#   ③ 字段非数字（marker 被外部写坏）
+# 上限 SYNC_SHRINK_META_MAX_BYTES（默认 16 MiB）: 即便减少量全在 meta 类，
+#   超过该值也不再当作"正常重写"（可能是元数据被成批清空），转告警。
+# 输出: "meta" | "payload"
+# 用法: _shrink_classify <marker_json> <source_path> [filter_args...]
+_shrink_classify() {
+  local marker_json="$1" source_path="$2"
+  shift 2
+
+  local base_meta base_payload
+  base_meta=$(echo "$marker_json" | jq -r '.source_meta_bytes // empty' 2>/dev/null)
+  base_payload=$(echo "$marker_json" | jq -r '.source_payload_bytes // empty' 2>/dev/null)
+  if ! [[ "$base_meta" =~ ^[0-9]+$ ]] || ! [[ "$base_payload" =~ ^[0-9]+$ ]]; then
+    echo "payload"
+    return 0
+  fi
+
+  local cur_json cur_meta cur_payload
+  cur_json=$(_rclone_class_bytes_json "$source_path" "$@")
+  if [ -z "$cur_json" ]; then
+    echo "payload"
+    return 0
+  fi
+  cur_meta=$(_size_json_field "$cur_json" meta)
+  cur_payload=$(_size_json_field "$cur_json" payload)
+  if ! [[ "$cur_meta" =~ ^[0-9]+$ ]] || ! [[ "$cur_payload" =~ ^[0-9]+$ ]]; then
+    echo "payload"
+    return 0
+  fi
+
+  # payload 只要有减少就告警（正片类零容差——3 B 落在 mkv 上是损坏，不是重写）
+  local payload_drop=$((base_payload - cur_payload))
+  if [ "$payload_drop" -gt 0 ]; then
+    echo "payload"
+    return 0
+  fi
+
+  # 减少量全在 meta 类: 仍设上限，超上限视为异常（元数据被成批清空）
+  local meta_drop=$((base_meta - cur_meta))
+  local cap="${SYNC_SHRINK_META_MAX_BYTES:-16777216}"
+  [[ "$cap" =~ ^[0-9]+$ ]] || cap=16777216
+  if [ "$meta_drop" -gt "$cap" ]; then
+    echo "payload"
+    return 0
+  fi
+
+  echo "meta"
+}
+
 # 用法: check_sync_marker <source_path> <dest_path> <task_name> [rclone_extra_args...]
 check_sync_marker() {
   local source_path="$1"
@@ -948,9 +1020,26 @@ check_sync_marker() {
     if [ "$stats_filtered" != "true" ]; then
       echo "旧 marker 为未过滤统计口径（无 stats_filtered），跳过源端缩小检测，本轮成功后将按新口径重写"
     else
-      echo "⚠️ 源端大小减小: $(format_bytes "$marker_bytes") → $(format_bytes "$MARKER_CURRENT_BYTES")"
-      MARKER_ACTION="warning"
-      return 0
+      # ===== 分层归因: 减少量落在哪类文件上，决定告警还是放行 =====
+      # 总量口径分不清「元数据重写」与「正片损坏」—— 两者都是"变小"。
+      #   meta 类（nfo/xml/字幕等纯文本）: 刮削器重写会让字节数上下抖动几 B~几 KB，
+      #     属正常变动 ⇒ 放行同步（同步成功后 marker 自然刷新基线，无需人工审批）
+      #   payload 类（mkv/mp4/图片/压缩包等二进制）: 缩小意味文件被删或损坏 ⇒ 告警
+      # 不可归因（缺分层基线 或 本轮分层列举失败）⇒ 保守按 payload 处理（宁可误报）
+      local _action
+      _action=$(_shrink_classify "$marker_json" "$source_path" "${FILTER_ARGS[@]}")
+      case "$_action" in
+        meta)
+          echo "ℹ️ 源端减小 $(format_bytes "$((marker_bytes - MARKER_CURRENT_BYTES))")，全部来自元数据类文件（nfo/字幕等），判定为刮削重写，放行同步"
+          MARKER_ACTION="proceed"
+          return 0
+          ;;
+        *)
+          echo "⚠️ 源端大小减小: $(format_bytes "$marker_bytes") → $(format_bytes "$MARKER_CURRENT_BYTES")"
+          MARKER_ACTION="warning"
+          return 0
+          ;;
+      esac
     fi
   fi
 
