@@ -1029,8 +1029,20 @@ _push_force_sync_approval() {
     return 0
   fi
 
-  local marker_stem prompt
+  local marker_stem marker_hash8 prompt
   marker_stem=$(basename "$(get_marker_path "$task_name" "$dest_path")" .json)
+  # ⚠️ 回调只带 8 位哈希，不带完整 stem（2026-10-08 实测教训）:
+  #   Telegram callback_data 硬上限 64 **字节**。中文任务名按 UTF-8 计 3 字节/字，
+  #   完整 "olsync:accept:<中文stem>:<bytes>:<count>" 达 76 字节 ⇒ Telegram 拒收，
+  #   网关降级成纯文本，三个按钮全变不可点文字（droppedControls=3,
+  #   callback_data_too_long）。marker 文件名形如 <task_name>_<8位md5>.json，
+  #   8 位段全局唯一 ⇒ 只传它，由网关插件/执行器反查完整 stem 与 task_key。
+  #   改此处必须同步: extensions/olsync-approve/index.js + tools/ol-sync-approve.sh
+  marker_hash8="${marker_stem##*_}"
+  [[ "$marker_hash8" =~ ^[0-9a-f]{8}$ ]] || {
+    echo "⚠️ marker stem 尾部非 8 位哈希($marker_hash8)，跳过审批推送（告警已照常发出）" >&2
+    return 0
+  }
   prompt=$(cat <<EOF
 【同步审批请求 · 源端大小异常减小】
 任务键: ${task_key}
@@ -1046,16 +1058,16 @@ marker: ${marker_stem}.json
 不要长篇解释，把上面几项用简短 kv 列出即可。
 按钮用 message 工具（action=send, channel=telegram, target=${approval_to}）发送，
 presentation blocks 按钮固定为:
-  🛡️ 接受新大小（首选）→ callback value: olsync:accept:${marker_stem}:${current_bytes}:${current_count}
+  🛡️ 接受新大小（首选）→ callback value: olsync:accept:${marker_hash8}:${current_bytes}:${current_count}
      动作: 源端是故意删的，无需同步。执行
-       bash ~/.openclaw/workspace/tools/ol-sync-approve.sh accept ${marker_stem} ${current_bytes} ${current_count} --commit
+       bash ~/.openclaw/workspace/tools/ol-sync-approve.sh accept ${marker_hash8} ${current_bytes} ${current_count} --commit
      工具先归档原 marker 再动手（有修复记录只改基线，无记录才删 marker），
      秒级完成、不开新 run。把工具输出摘要回报给主人。
-  ✅ 强制同步该任务（备选）→ callback value: olsync:approve:${task_key}
+  ✅ 强制同步该任务（备选）→ callback value: olsync:approve:${marker_hash8}
      动作: 要立刻把目标端补齐到新状态。执行
        gh workflow run openlist.yml -R jarvanh/actions -f run_mode=同步 -f force_sync_task=${task_key}
      并把 run 链接回报给主人（concurrency 单例，会排队等在跑轮结束）。
-  ❌ 忽略 → callback value: olsync:ignore:${task_key}
+  ❌ 忽略 → callback value: olsync:ignore:${marker_hash8}
      动作: 回复「已忽略，本轮不同步」。
 卡片发出后本轮直接结束，不要再补发任何文字。
 后续回调（callback_data: olsync:accept / approve / ignore:...）会回到主会话，
