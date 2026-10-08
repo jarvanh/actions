@@ -242,6 +242,11 @@ WorkingDirectory=/dropbox/self-hosted/workbuddy-gateway
 # 鉴权在 config.json 的 gateway 段（apiKeyEnabled + apiKey），不在启动参数里。
 # -webui：启用只读网页管理台，监听 gateway.webPort（默认 8316），与模型 API
 #   端口分离；管理台用独立的 gateway.adminKey 鉴权，不接受模型 API Key。
+# notify 出口：config.json 的 notify.botTokenEnv=TELEGRAM_BOT_TOKEN、
+#   chatIdEnv=TELEGRAM_CHAT_ID，从 .env 读入。2026-10-08 补：此前 unit 缺
+#   EnvironmentFile，serve 进程拿不到变量，网关内置 Telegram 通知静默失败
+#   （serve.log 连刷「telegram 配置不完整」），warmup 结果通知同样依赖此出口。
+EnvironmentFile=%h/.openclaw/.env
 ExecStart=/tmp/local_workbuddy/workbuddy-gateway serve -addr 0.0.0.0 -port 8318 -webui
 Restart=always
 RestartSec=5
