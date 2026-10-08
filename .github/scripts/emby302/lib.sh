@@ -127,3 +127,69 @@ link_host() {
 link_token() {
   cat /tmp/link-token 2>/dev/null || echo ""
 }
+
+# ---------- apt / 包安装超时保护 ----------
+# 背景（2026-10-07，run 37640174494）：rclone-run 里的裸 `sudo apt-get update`
+# 因 azure.archive.ubuntu.com 镜像不可达而挂住 6 小时，直到 job 6h 硬上限被 cancel，
+# 后续 cloudflared / OpenList / odlink / Emby / ge2o / 预热 / 备份 全部 skipped，
+# 整轮服务零产出。
+# ⚠️ 铁律：任何 apt 调用必须带超时，且失败不得吃掉整轮预算。
+#    一个挂住的镜像源足以让 5 小时的保留时长归零。
+APT_TIMEOUT="${APT_TIMEOUT:-300}"
+
+apt_update() { # 超时/失败均返回非 0，由调用方决定是否致命
+  local rc=0
+  timeout "$APT_TIMEOUT" sudo apt-get update || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "⚠️ apt-get update 超时或失败（rc=${rc}，上限 ${APT_TIMEOUT}s）——继续，不阻断本轮" >&2
+    return 1
+  fi
+}
+
+# $1=命令名 $2=deb 包名（缺省同 $1）
+# 已存在就跳过 apt（常态：runner 镜像自带）；真正缺包才走 apt，且全程带超时。
+ensure_apt_pkg() {
+  local cmd="$1" pkg="${2:-$1}" rc=0
+  if command -v "$cmd" >/dev/null 2>&1; then
+    echo "✅ ${pkg} 已就绪（$(command -v "$cmd")），跳过 apt"
+    return 0
+  fi
+  echo "📦 ${pkg} 未安装，apt 安装中（上限 ${APT_TIMEOUT}s）..."
+  apt_update || true
+  timeout "$APT_TIMEOUT" sudo apt-get install -y "$pkg" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "⚠️ ${pkg} 安装失败/超时（rc=${rc}）" >&2
+    return 1
+  fi
+  command -v "$cmd" >/dev/null 2>&1
+}
+
+# fuse3 探测：/dev/fuse 设备节点 + mount helper，两者缺一 rclone mount 都起不来。
+# ⚠️ 坑：mount.fuse3 落在 /sbin 与 /usr/sbin，而 GitHub runner 的 PATH 不含这两处，
+#      `command -v mount.fuse3` 恒失败 → 会误判成"没装"而反复走 apt。
+#      必须按绝对路径逐个探，不能只靠 command -v。
+have_fuse3() {
+  [ -c /dev/fuse ] || return 1
+  local h
+  for h in /sbin/mount.fuse3 /usr/sbin/mount.fuse3 /bin/mount.fuse3 /usr/bin/mount.fuse3; do
+    [ -x "$h" ] && return 0
+  done
+  return 1
+}
+
+# fuse3 是 rclone mount 的硬依赖，装不上必须让 step 失败（fail fast），
+# 而不是带着残缺环境往下跑——否则后面挂载失败时的报错更难定位。
+ensure_fuse3() {
+  if have_fuse3; then
+    echo "✅ fuse3 已就绪（/dev/fuse + mount helper 存在），跳过 apt"
+    return 0
+  fi
+  echo "📦 fuse3 缺失，apt 安装中（上限 ${APT_TIMEOUT}s）..."
+  apt_update || true
+  timeout "$APT_TIMEOUT" sudo apt-get install -y fuse3 || {
+    echo "❌ fuse3 安装失败：rclone mount 无法进行" >&2
+    return 1
+  }
+  have_fuse3 || { echo "❌ fuse3 装完仍不可用" >&2; return 1; }
+  echo "✅ fuse3 安装完成"
+}
