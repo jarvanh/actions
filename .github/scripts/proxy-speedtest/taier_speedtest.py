@@ -1135,6 +1135,15 @@ def _run():
             err_tail = (err or '').strip().splitlines()[-3:]
             if err_tail:
                 print('stderr: ' + ' | '.join(err_tail))
+            # 诊断补充（2026-10-08）：引擎上行失败原因写在 [debug-ul] 里，
+            # 但它在 stderr 中段，会被上面「只取末 3 行」截掉 —— 上行全 0 时
+            # 日志里只剩 [probe] 行，看不出 do 失败的真实原因（RST/超时/状态码）。
+            # 这里单独捞 debug 行（限量 + 已脱敏），只增日志，不改测速逻辑。
+            if row['up'] <= 0:
+                dbg = [l for l in (err or '').splitlines()
+                       if '[debug-ul]' in l][:6]
+                if dbg:
+                    print('debug-ul: ' + ' | '.join(dbg))
 
     # 先关 TUN 再发通知：通知走的是 runner 自身网络，必须在路由恢复之后
     stop_mihomo_tun()
