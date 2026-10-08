@@ -5261,6 +5261,44 @@ jobs:
 
           sleep "${SLEEP_SECONDS}"
 
+      - name: Notify AI gateway usage report
+        # 归档前发一份五网关用量汇总。插在 Keep alive 之后、最终归档之前：
+        # 此时所有网关仍在运行（归档步骤里才开始逐个 stop），读到的是最新用量；
+        # 放进归档步骤内部则会读到服务已停、数据不再更新的旧值。
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          # 刻意不用 set -e：本报告是附加信息，任何一处失败都不该影响最终归档。
+          # 凭据缺失时静默跳过（与全库其他通知同口径）。
+          if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
+            echo "⚠️ Telegram secrets missing, skip AI gateway usage report."
+            exit 0
+          fi
+          source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+
+          BOARD="/dropbox/self-hosted/quota-board/board.py"
+          if [ ! -s "$BOARD" ]; then
+            echo "⚠️ quota-board 缺失，跳过用量报告"
+            exit 0
+          fi
+
+          # 渲染走 board.py CLI：与看板共用同一份采集与版式代码，
+          # 不在 workflow 里另写一套（避免两边口径漂移）。
+          REPORT="$(timeout 90 python3 "$BOARD" usage-report 2>/dev/null || true)"
+          if [ -z "$REPORT" ]; then
+            echo "⚠️ 用量报告渲染为空，跳过发送"
+            exit 0
+          fi
+
+          # 收尾区由 tg_notify.sh 统一追加（运行日志链接只有 workflow 侧知道）
+          tg_add_footer REPORT
+          send_tg "$REPORT" || echo "::warning::AI 网关用量报告发送失败（不影响任务）"
+
       - name: Stop OpenClaw and Final Archive
         id: final_archive
         # 兜底超时：动态死线 332m + 本步 24m + 通知/接力 ~2m = 358m < 360m 硬上限，
