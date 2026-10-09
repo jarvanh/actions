@@ -427,7 +427,7 @@ runner 以 `tailscale set --ssh --hostname=openclaw --advertise-exit-node` 广�
 | 路径 | 内容 |
 |---|---|
 | `/tmp/local_workbuddy/workbuddy-gateway` | 二进制（**本地盘**，每轮按 GitHub Releases 的 `latest` 按需下载） |
-| `/tmp/local_workbuddy/data/` | **本轮运行目录**（`serve` 的 cwd），起前从 Dropbox 拉、停后回推 |
+| `/dropbox/self-hosted/workbuddy-gateway/` | **运行目录**（`serve` 的 cwd）。2026-10-06 起**数据直写 Dropbox**，不再有 `/tmp/local_workbuddy/data/` 运行副本（该目录已废弃、每轮不再创建） |
 | `/dropbox/self-hosted/workbuddy-gateway/workbuddy*.json` | 凭据文件（**需人工 `login` 扫码生成**，见下）——Dropbox 侧为唯一真源，**运行期每 5 分钟同步进运行目录（带删除）** |
 | `/dropbox/self-hosted/workbuddy-gateway/.installed-version` | 已安装版本号（用于比对是否需要更新） |
 | `/dropbox/self-hosted/workbuddy-gateway/workbuddy-status.json` | 账号池状态快照（serve 写进运行目录，停止时回推） |
@@ -537,11 +537,13 @@ serve 根本看不到，最快也要等下一轮（≈5.7 小时）。为此在�
   `Checks: N/N` 即纳入同步的凭据数，`✅ probe ok` 表示连上 Dropbox 且成功。
 - **收尾会打印循环日志尾部**（`--- workbuddy-cred-sync.log tail ---`）与运行目录下的
   `workbuddy*.json` 清单，用来确认这段时间里同步是否真的在发生。
+  （⚠️ `workbuddy-cred-sync` 已于 2026-10-06 停用移除，凭据不再需要双向同步 ——
+   见 `services.sh` 同款注释；此处仅作历史背景保留。）
 
 ### 排障入口
 
-- 本轮实时日志：`/tmp/local_workbuddy/data/logs/serve.log`（停止后回推到 Dropbox 同路径）。
-- 账号池状态：运行目录下 `workbuddy-status.json`，或 `workbuddy-gateway monitor` 前台刷新。
+- 本轮实时日志：`/dropbox/self-hosted/workbuddy-gateway/logs/serve.log`（unit 的 `StandardOutput` 直写挂账点，不再回推）。
+- 账号池状态：`/dropbox/self-hosted/workbuddy-gateway/workbuddy-status.json`，或 `workbuddy-gateway monitor` 前台刷新。
   想看某账号某个模型到底免费还是收费：直接 `curl` 上游模型目录接口
   （`GET {Base}/v2/enterprises/personal/models`，带凭据文件里的 `accessToken`），
   看该模型的 `credits` 与 `modelPromotions` —— 口径与通知里的免费名单一致，且不耗额度。
