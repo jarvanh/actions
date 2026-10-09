@@ -103,9 +103,11 @@ _TAIER_CTRL_SERVERS = [
 CONFIG = {
     # 测速点：单个点即可（每点 = 一次完整上下行），多点会成倍拉长单节点耗时
     'TAIER_POINTS': (os.environ.get('TAIER_POINTS', '') or '广东联通').strip(),
-    # 默认 single = 单连接：与 proxy-speedtest 系列的单流口径可比，也更贴近日常
-    # 单流体验；multi（下 8 + 上 4 连接）看节点带宽上限，both 两者对照
-    'TAIER_MODE': (os.environ.get('TAIER_MODE', '') or 'single').strip(),
+    # 默认 multi（下 8 + 上 4 连接）：2026-10-10 实测定案，泰尔服务端对**单条上传
+    # 连接**限速 ~1MiB/s（67.11Mbps 档），single 口径快节点全被钳（10/16 扎堆
+    # 67.11）；multi 4 连接天花板 268.44Mbps，实测 13/23 节点读数=真实上行。
+    # single/both 仍可经 workflow input / 环境变量显式选择。
+    'TAIER_MODE': (os.environ.get('TAIER_MODE', '') or 'multi').strip(),
     # 上游二进制把 --duration 硬钳制在 5-13（main.go），>13 会被压到 13。
     # 默认 13（2026-09-24 从 5 上调）：单节点成本 = 2×duration+5，duration 是最大且唯一
     # 可调的杠杆。此前为了「同等预算多覆盖节点」一路压到 5（≈15 秒/节点），代价是每方向
