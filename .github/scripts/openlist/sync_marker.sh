@@ -1151,10 +1151,16 @@ marker: ${marker_stem}.json
 presentation blocks 按钮只有这两种（主人的定案口径：源端异常减小只有两种处理方式），
      不要增减按钮、不要改写文案:
   ✅ 强制同步 · 源端→目标端 → callback value: olsync:approve:${marker_hash8}
-     语义: 现在就把源端同步到目标端（源端新增的补齐；同步只补不删，目标端多余的文件会保留）。
+     语义: 让**下一轮**把源端同步到目标端（源端新增的补齐；同步只补不删，
+     目标端多余的文件会保留）。
+     ⚠️ 不要 dispatch workflow: openlist.yml 是 concurrency 单例且无
+     cancel-in-progress，新 run 只能排在在跑轮后面（实测排队 3h27m）。
+     改为清空 marker 的 last_success ⇒ 下轮 check_sync_marker 直接放行，
+     零排队；且保留 fixed_files/fix_blacklist（修复文件还原的唯一索引，
+     删 marker 会把它们一起丢掉）。
      动作: 执行
-       gh workflow run openlist.yml -R jarvanh/actions -f run_mode=同步 -f force_sync_task=${task_key}
-     并把 run 链接回报给主人（concurrency 单例，会排队等在跑轮结束）。
+       bash ~/.openclaw/workspace/tools/ol-sync-approve.sh force ${marker_hash8} --commit
+     工具先归档原 marker 再动手，秒级完成、不开新 run。把工具输出摘要回报给主人。
   🛡️ 忽略减小 · 接受大小差异 → callback value: olsync:accept:${marker_hash8}:${current_bytes}:${current_count}
      语义: 承认源端现在更小是正常状态，接受两端的大小差异 ⇒ 不传数据，
      只把 marker 基线对齐到新大小，下一轮同步自动恢复正常。
@@ -1381,9 +1387,9 @@ send_sync_warning() {
   _task_key=$(_sync_task_key "$task_name" "$dest_path")
   tg_add_note msg "⏭️ 已跳过此同步，继续执行其他任务
 ⏳ 审批请求已推送: 主对话将收到两按钮审批卡
-✅ 强制同步·源端→目标端（开新 run）· 🛡️ 忽略减小·接受大小差异（只改基线）"
-  tg_add_note msg "两种处理方式: 「强制同步」= 现在就把源端补到目标端（排队等在跑轮结束后开始）；
-「忽略减小」= 接受两端大小差异，不传数据，只把基线对齐到新大小，下轮同步自动恢复正常"
+✅ 强制同步·源端→目标端（下轮执行）· 🛡️ 忽略减小·接受大小差异（只改基线）"
+  tg_add_note msg "两种处理方式: 「强制同步」= 让下一轮把源端同步到目标端（不开新 run、不排队）；
+「忽略减小」= 接受两端大小差异，不传数据，只把基线对齐到新大小"
   tg_add_section msg "🛠️ 手动触发 · 单任务"
   tg_add_pre msg "gh workflow run openlist.yml -f run_mode=同步 -f force_sync_task=${_task_key}"
   tg_add_footer msg
