@@ -1141,7 +1141,7 @@ def _run():
             # 这里单独捞 debug 行（限量 + 已脱敏），只增日志，不改测速逻辑。
             if row['up'] <= 0:
                 dbg = [l for l in (err or '').splitlines()
-                       if '[debug-ul]' in l][:6]
+                       if '[debug-ul' in l][:8]  # 含 [debug-ul-attr]（失败归因探针 v1.0.4-jh.7）
                 if dbg:
                     print('debug-ul: ' + ' | '.join(dbg))
 
