@@ -1147,13 +1147,17 @@ marker: ${marker_stem}.json
 不要长篇解释，把上面几项用简短 kv 列出即可。
 按钮用 message 工具（action=send, channel=telegram, target=${approval_to}）发送，
 presentation blocks 按钮固定为:
-  🛡️ 接受新大小（首选）→ callback value: olsync:accept:${marker_hash8}:${current_bytes}:${current_count}
-     动作: 源端是故意删的，无需同步。执行
+  🛡️ 是我删的 · 只改记录（首选）→ callback value: olsync:accept:${marker_hash8}:${current_bytes}:${current_count}
+     ⚠️ 按钮文案必须一字不差用上面这段，不要改写/简化。
+     语义: 源端变小是主人故意删的 ⇒ 只把 marker 基线对齐到新大小，
+     **不动任何文件、不传数据、不开 run**，下一轮同步自动恢复正常。
+     动作: 执行
        bash ~/.openclaw/workspace/tools/ol-sync-approve.sh accept ${marker_hash8} ${current_bytes} ${current_count} --commit
      工具先归档原 marker 再动手（有修复记录只改基线，无记录才删 marker），
      秒级完成、不开新 run。把工具输出摘要回报给主人。
-  ✅ 强制同步该任务（备选）→ callback value: olsync:approve:${marker_hash8}
-     动作: 要立刻把目标端补齐到新状态。执行
+  ✅ 立刻同步这个任务（备选）→ callback value: olsync:approve:${marker_hash8}
+     语义: 要现在就把源端补到目标端（会开新 run、排队等在跑轮结束）。
+     动作: 执行
        gh workflow run openlist.yml -R jarvanh/actions -f run_mode=同步 -f force_sync_task=${task_key}
      并把 run 链接回报给主人（concurrency 单例，会排队等在跑轮结束）。
   ❌ 忽略 → callback value: olsync:ignore:${marker_hash8}
@@ -1264,7 +1268,9 @@ send_sync_warning() {
   _task_key=$(_sync_task_key "$task_name" "$dest_path")
   tg_add_note msg "⏭️ 已跳过此同步，继续执行其他任务
 ⏳ 审批请求已推送: 主对话将收到三按钮审批卡
-🛡️ 接受新大小（首选，秒级）· ✅ 强制同步（开新 run）· ❌ 忽略"
+🛡️ 是我删的·只改记录（首选，秒级）· ✅ 立刻同步（开新 run）· ❌ 忽略"
+  tg_add_note msg "「只改记录」= 仅把同步基线对齐到新大小，不动任何文件、不传数据、不开 run；
+下一轮同步自动恢复正常，源端新增的文件照常补到目标端"
   tg_add_section msg "🛠️ 手动触发 · 单任务"
   tg_add_pre msg "gh workflow run openlist.yml -f run_mode=同步 -f force_sync_task=${_task_key}"
   tg_add_footer msg
