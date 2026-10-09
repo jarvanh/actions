@@ -1148,19 +1148,22 @@ marker: ${marker_stem}.json
 请在 Telegram 主对话向主人发一条带两个按钮的审批卡，
 不要长篇解释，把上面几项用简短 kv 列出即可。
 按钮用 message 工具（action=send, channel=telegram, target=${approval_to}）发送，
-presentation blocks 按钮固定为:
-  🛡️ 是我删的 · 只改记录（首选）→ callback value: olsync:accept:${marker_hash8}:${current_bytes}:${current_count}
-     ⚠️ 按钮文案必须一字不差用上面这段，不要改写/简化。
-     语义: 源端变小是主人故意删的 ⇒ 只把 marker 基线对齐到新大小，
-     **不动任何文件、不传数据、不开 run**，下一轮同步自动恢复正常。
+presentation blocks 按钮只有这两种（主人的定案口径：源端异常减小只有两种处理方式），
+     不要增减按钮、不要改写文案:
+  ✅ 强制同步 · 源端→目标端 → callback value: olsync:approve:${marker_hash8}
+     语义: 现在就把源端同步到目标端（源端新增的补齐；同步只补不删，目标端多余的文件会保留）。
+     动作: 执行
+       gh workflow run openlist.yml -R jarvanh/actions -f run_mode=同步 -f force_sync_task=${task_key}
+     并把 run 链接回报给主人（concurrency 单例，会排队等在跑轮结束）。
+  🛡️ 忽略减小 · 接受大小差异 → callback value: olsync:accept:${marker_hash8}:${current_bytes}:${current_count}
+     语义: 承认源端现在更小是正常状态，接受两端的大小差异 ⇒ 不传数据，
+     只把 marker 基线对齐到新大小，下一轮同步自动恢复正常。
      动作: 执行
        bash ~/.openclaw/workspace/tools/ol-sync-approve.sh accept ${marker_hash8} ${current_bytes} ${current_count} --commit
      工具先归档原 marker 再动手（有修复记录只改基线，无记录才删 marker），
-     秒级完成、不开新 run。把工具输出摘要回报给主人。
-  ❌ 忽略 → callback value: olsync:ignore:${marker_hash8}
-     动作: 回复「已忽略，本轮不同步」。
+     秒级完成、不开 run。把工具输出摘要回报给主人。
 卡片发出后本轮直接结束，不要再补发任何文字。
-后续回调（callback_data: olsync:accept / ignore:...）会回到主会话，
+后续回调（callback_data: olsync:approve / accept:...）会回到主会话，
 由主会话 agent 按上述动作执行；任务键与 marker 名都在卡片里。
 EOF
 )
@@ -1378,12 +1381,9 @@ send_sync_warning() {
   _task_key=$(_sync_task_key "$task_name" "$dest_path")
   tg_add_note msg "⏭️ 已跳过此同步，继续执行其他任务
 ⏳ 审批请求已推送: 主对话将收到两按钮审批卡
-🛡️ 是我删的·只改记录（首选，秒级）· ❌ 忽略"
-  tg_add_note msg "不再提供「强制同步」按钮: 同步只补不删，源端删掉的文件同步补不回来，
-而源端新增的文件下一轮本就会自动补上；开新 run 还要排队等在跑轮结束，通常没必要。
-确有需要时用下方 gh 命令手动触发"
-  tg_add_note msg "「只改记录」= 仅把同步基线对齐到新大小，不动任何文件、不传数据、不开 run；
-下一轮同步自动恢复正常，源端新增的文件照常补到目标端"
+✅ 强制同步·源端→目标端（开新 run）· 🛡️ 忽略减小·接受大小差异（只改基线）"
+  tg_add_note msg "两种处理方式: 「强制同步」= 现在就把源端补到目标端（排队等在跑轮结束后开始）；
+「忽略减小」= 接受两端大小差异，不传数据，只把基线对齐到新大小，下轮同步自动恢复正常"
   tg_add_section msg "🛠️ 手动触发 · 单任务"
   tg_add_pre msg "gh workflow run openlist.yml -f run_mode=同步 -f force_sync_task=${_task_key}"
   tg_add_footer msg
