@@ -666,6 +666,8 @@ save_sync_marker() {
   # 上传标记到 OneDrive
   rclone mkdir "$SYNC_STATE_DIR" >/dev/null 2>&1 || true
   _marker_write "$marker_json" "$marker_path" 2>/dev/null
+  # 源端清单快照（供下轮缩小告警回答「少了什么」；内部全失败即静默，不影响同步）
+  save_source_listing_snapshot "$(basename "$marker_path" .json)" "$source_path" "${FILTER_ARGS[@]}"
   local summary=""
   local new_count fb_count
   new_count=$(echo "$new_fixed_json" | jq 'length' 2>/dev/null || echo 0)
@@ -1143,7 +1145,7 @@ _push_force_sync_approval() {
 marker: ${marker_stem}.json
 已按保护策略跳过本任务同步，等待确认。
 
-请在 Telegram 主对话向主人发一条带三个按钮的审批卡，
+请在 Telegram 主对话向主人发一条带两个按钮的审批卡，
 不要长篇解释，把上面几项用简短 kv 列出即可。
 按钮用 message 工具（action=send, channel=telegram, target=${approval_to}）发送，
 presentation blocks 按钮固定为:
@@ -1155,15 +1157,10 @@ presentation blocks 按钮固定为:
        bash ~/.openclaw/workspace/tools/ol-sync-approve.sh accept ${marker_hash8} ${current_bytes} ${current_count} --commit
      工具先归档原 marker 再动手（有修复记录只改基线，无记录才删 marker），
      秒级完成、不开新 run。把工具输出摘要回报给主人。
-  ✅ 立刻同步这个任务（备选）→ callback value: olsync:approve:${marker_hash8}
-     语义: 要现在就把源端补到目标端（会开新 run、排队等在跑轮结束）。
-     动作: 执行
-       gh workflow run openlist.yml -R jarvanh/actions -f run_mode=同步 -f force_sync_task=${task_key}
-     并把 run 链接回报给主人（concurrency 单例，会排队等在跑轮结束）。
   ❌ 忽略 → callback value: olsync:ignore:${marker_hash8}
      动作: 回复「已忽略，本轮不同步」。
 卡片发出后本轮直接结束，不要再补发任何文字。
-后续回调（callback_data: olsync:accept / approve / ignore:...）会回到主会话，
+后续回调（callback_data: olsync:accept / ignore:...）会回到主会话，
 由主会话 agent 按上述动作执行；任务键与 marker 名都在卡片里。
 EOF
 )
@@ -1194,6 +1191,95 @@ EOF
 
 # 发送源端大小减小的警告通知（同时跳过本次同步）
 # 依赖全局变量: MARKER_JSON, MARKER_CURRENT_BYTES, MARKER_CURRENT_COUNT, MARKER_CURRENT_DIRS
+# ===== 源端清单快照（回答「少了什么」，2026-10-09）=====
+# 背景: marker 只存汇总数字（source_bytes/count/top_dirs[12]），不存文件清单
+#   ⇒ 缩小告警只能说「少了 3.2 GB」，说不出少了哪些文件，主人无法判断是不是真丢了。
+#   快照补齐这个基线。实测源端递归列举 2775 文件约 85s，只在写 marker 时做一次。
+# 设计铁律: 快照是**增强信息**，任一环节失败一律静默放弃（缺了只是告警没明细，
+#   绝不能拖累同步主流程）。单独存 <stem>.listing.json.gz，不塞进 marker ——
+#   marker 已 78 KB，2775 条清单会让它膨胀数倍，拖慢每次 marker 读写。
+# 用法: _listing_snapshot_path <stem>
+_listing_snapshot_path() {
+  echo "${SYNC_STATE_DIR}/${1}.listing.json.gz"
+}
+
+# 用法: save_source_listing_snapshot <stem> <source_path> [filter_args...]
+# 过滤口径必须与 save_sync_marker 一致，否则排除项会被误判成「被删」
+save_source_listing_snapshot() {
+  local stem="$1" source_path="$2"
+  shift 2
+  local snap tmp
+  snap=$(_listing_snapshot_path "$stem")
+  tmp=$(mktemp /tmp/ol_listing_XXXXXX) || return 0
+  if ! rclone lsjson "$source_path" --recursive --files-only --no-mimetype --no-modtime "$@" \
+        >"${tmp}.json" 2>/dev/null; then
+    rm -f "$tmp" "${tmp}.json" 2>/dev/null; return 0
+  fi
+  if ! jq -r '.[] | [.Path, (.Size // 0)] | @tsv' "${tmp}.json" >"$tmp" 2>/dev/null || [ ! -s "$tmp" ]; then
+    rm -f "$tmp" "${tmp}.json" 2>/dev/null; return 0
+  fi
+  gzip -c "$tmp" >"${tmp}.gz" 2>/dev/null
+  rclone copyto "${tmp}.gz" "$snap" >/dev/null 2>&1 || true
+  rm -f "$tmp" "${tmp}.json" "${tmp}.gz" 2>/dev/null
+  return 0
+}
+
+# 用法: _shrink_missing_report <stem> <source_path> <dest_path> [filter_args...]
+# 输出: 每行 "<大小可读>\t<路径>\t<safe|lost|unknown>"（按大小降序，取前 SYNC_SHRINK_TOPN 条）
+#   safe    = 目标端仍有副本 ⇒ 源端删了但没丢数据
+#   lost    = 两端皆无 ⇒ 真丢了，需人工确认
+#   unknown = 目标端列举失败，无法判定
+_shrink_missing_report() {
+  local stem="$1" source_path="$2" dest_path="$3"
+  shift 3
+  local -a fa=()
+  # ⚠️ 不能写 ${#FILTER_ARGS[@]:-0} —— 数组长度不支持 :- 默认值，是非法语法
+  #  （bad substitution，实测三种情况全炸：未设置 / 空数组 / 有值）。
+  #  本文件全程 set -u，FILTER_ARGS 由 _extract_filter_args 赋值，但直接调
+  #  本函数（如测试）时它可能未定义 ⇒ 必须先判断变量是否存在。
+  if [ "$#" -gt 0 ]; then
+    fa=("$@")
+  elif [ "${FILTER_ARGS+set}" = set ] && [ "${#FILTER_ARGS[@]}" -gt 0 ]; then
+    fa=("${FILTER_ARGS[@]}")
+  fi
+  local snap old cur
+  snap=$(_listing_snapshot_path "$stem")
+  old=$(rclone cat "$snap" 2>/dev/null | gunzip 2>/dev/null)
+  [ -z "$old" ] && return 0
+  local tmpc
+  tmpc=$(mktemp /tmp/ol_cur_XXXXXX) || return 0
+  if ! rclone lsjson "$source_path" --recursive --files-only --no-mimetype --no-modtime "${fa[@]}" \
+        >"${tmpc}.json" 2>/dev/null; then
+    rm -f "$tmpc" "${tmpc}.json" 2>/dev/null; return 0
+  fi
+  cur=$(jq -r '.[] | [.Path, (.Size // 0)] | @tsv' "${tmpc}.json" 2>/dev/null)
+  rm -f "$tmpc" "${tmpc}.json" 2>/dev/null
+  [ -z "$cur" ] && return 0
+
+  # 目标端清单（判定「备份还在吗」）；失败则状态记 unknown，不阻断
+  local destraw=""
+  destraw=$(rclone lsjson "$dest_path" --recursive --files-only --no-mimetype --no-modtime 2>/dev/null \
+            | jq -r '.[] | .Path' 2>/dev/null)
+
+  # diff: 快照里有、当前没有 ⇒ 被删（按大小降序）
+  local missing
+  missing=$(awk -F'\t' 'NR==FNR{c[$1]=1;next} !($1 in c){print $0}' \
+            <(printf '%s\n' "$cur") <(printf '%s\n' "$old") | sort -t$'\t' -k2,2nr)
+  [ -z "$missing" ] && return 0
+
+  local n=0 path size st
+  while IFS=$'\t' read -r path size; do
+    [ -z "$path" ] && continue
+    n=$((n + 1))
+    [ "$n" -gt "${SYNC_SHRINK_TOPN:-8}" ] && break
+    st="unknown"
+    if [ -n "$destraw" ]; then
+      if printf '%s\n' "$destraw" | grep -qxF "$path"; then st="safe"; else st="lost"; fi
+    fi
+    printf '%s\t%s\t%s\n' "$(format_bytes "$size")" "$path" "$st"
+  done <<< "$missing"
+}
+
 # 用法: send_sync_warning <task_name> <source_path> <dest_path>
 send_sync_warning() {
   local task_name="$1"
@@ -1260,6 +1346,30 @@ send_sync_warning() {
     tg_append msg "$(tree_fold "${_dirs_html%$'\n'}")"$'\n'
   fi
 
+  # 🔍 少了什么: 有清单快照时直接列出被删文件 + 备份是否还在（2026-10-09）
+  # 放在告警正文而非做成按钮 —— 按钮回调落本机，而本机连不上目标端 openlist:，
+  #   判定不了「备份还在吗」；检测发生在 workflow 内，两端可达，才是算 diff 的位置。
+  local _mstem _mrep
+  _mstem=$(basename "$(get_marker_path "$task_name" "$dest_path")" .json)
+  _mrep=$(_shrink_missing_report "$_mstem" "$source_path" "$dest_path")
+  if [ -n "$_mrep" ]; then
+    tg_add_section msg "🔍 少了什么 · 按大小前 $(printf '%s' "$_mrep" | grep -c .)"
+    local _mh=""
+    while IFS=$'\t' read -r _sz _p _st; do
+      [ -z "$_p" ] && continue
+      case "$_st" in
+        safe) _mk="✅ 备份还在" ;;
+        lost) _mk="🚨 备份也没有" ;;
+        *) _mk="❓ 未知" ;;
+      esac
+      tg_add_entry _mh "${_sz} · ${_p} → ${_mk}"
+    done <<< "$_mrep"
+    tg_append msg "$(tree_fold "${_mh%$'\n'}")"$'\n'
+    tg_add_note msg "✅ 备份还在 = 目标端仍有副本，只是源端删了，没丢数据；🚨 备份也没有 = 两端皆无，需人工确认"
+  else
+    tg_add_note msg "🔍 尚无文件清单快照，无法列出具体少了哪些文件（下轮同步成功后自动生成）"
+  fi
+
   # 收尾区: 状态 + 备注（裸文本说明段），footer 自带空行。
   # 注意: tg_add_note 对整段做 escape_html，段内不能携带 HTML 标签——
   # emoji 只能随段裸置（转义边界决定的既定形态，勿套任何标签）
@@ -1267,8 +1377,11 @@ send_sync_warning() {
   local _task_key
   _task_key=$(_sync_task_key "$task_name" "$dest_path")
   tg_add_note msg "⏭️ 已跳过此同步，继续执行其他任务
-⏳ 审批请求已推送: 主对话将收到三按钮审批卡
-🛡️ 是我删的·只改记录（首选，秒级）· ✅ 立刻同步（开新 run）· ❌ 忽略"
+⏳ 审批请求已推送: 主对话将收到两按钮审批卡
+🛡️ 是我删的·只改记录（首选，秒级）· ❌ 忽略"
+  tg_add_note msg "不再提供「强制同步」按钮: 同步只补不删，源端删掉的文件同步补不回来，
+而源端新增的文件下一轮本就会自动补上；开新 run 还要排队等在跑轮结束，通常没必要。
+确有需要时用下方 gh 命令手动触发"
   tg_add_note msg "「只改记录」= 仅把同步基线对齐到新大小，不动任何文件、不传数据、不开 run；
 下一轮同步自动恢复正常，源端新增的文件照常补到目标端"
   tg_add_section msg "🛠️ 手动触发 · 单任务"
