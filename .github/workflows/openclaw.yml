@@ -3352,7 +3352,10 @@ jobs:
               GL_SOONEST="$(printf '%s' "$GLQ" | cut -f3)"
               GL_SOONEST_AMT="$(printf '%s' "$GLQ" | cut -f4)"
               GL_SOON_24H="$(printf '%s' "$GLQ" | cut -f5)"
-              if GLD="$(bash "$QUOTA" delta "$GL_SCORE")"; then
+              # 第 2/3 参（2026-10-09 加）：把 fetch 拿到的「最近到期 / 24h 将过期」
+              # 一并交给 delta 落进快照 —— 此前快照只存 date/score/day_total，
+              # quota-board 想显示「即将过期」根本没有数据源。
+              if GLD="$(bash "$QUOTA" delta "$GL_SCORE" "$GL_SOONEST" "$GL_SOON_24H")"; then
                 GL_ROUND_DELTA="$(printf '%s' "$GLD" | cut -f1)"
                 GL_DAY_TOTAL="$(printf '%s' "$GLD" | cut -f2)"
                 # 快照落盘后立刻回推 Dropbox：本轮窗口约 5.75h，中途 runner 被

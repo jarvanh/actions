@@ -24,7 +24,10 @@
 # 用法：
 #   qingyan_quota.sh fetch            # 查当前余额 + 最近到期，输出 TSV：
 #                                     #   余额<TAB>规则<TAB>最近到期时间<TAB>24h内将过期
-#   qingyan_quota.sh delta <当前余额>  # 与上次快照比，输出 TSV：本轮消耗<TAB>今日累计<TAB>今日日期
+#   qingyan_quota.sh delta <当前余额> [最近到期] [24h将过期]
+#                                     # 与上次快照比，输出 TSV：本轮消耗<TAB>今日累计<TAB>今日日期
+#                                     # 后两参可选（2026-10-09 加）：把 fetch 拿到的到期信息
+#                                     # 一并落进快照，供 quota-board 读「总积分 / 即将过期」
 set -u
 
 STATE_DIR="${QINGYAN_STATE_DIR:-/tmp/local_qingyan/data}"
@@ -192,7 +195,9 @@ PY
 # 与上次快照比较，算本轮消耗与今日累计；跨日自动清零。
 cmd_delta() {
   local cur="${1:-}"
-  [ -n "$cur" ] || { log "用法: $0 delta <当前余额>"; return 1; }
+  local soonest_in="${2:-}"
+  local soon_24h_in="${3:-}"
+  [ -n "$cur" ] || { log "用法: $0 delta <当前余额> [最近到期] [24h将过期]"; return 1; }
   mkdir -p "$STATE_DIR" 2>/dev/null || true
 
   local today prev_score prev_date round_delta day_total
@@ -225,11 +230,22 @@ cmd_delta() {
   fi
   day_total="$(awk -v a="$prev_day_total" -v b="$round_delta" 'BEGIN{printf "%.2f", a+b}')"
 
+  # 到期信息落盘（2026-10-09 加）：快照此前只落 date/score/day_total，
+  # 到期时间压根没存 —— quota-board 就算想显示「即将过期」也没有数据源。
+  # 取本次 fetch 的新值；未传则沿用快照旧值，避免单轮漏传就把已有信息清空。
+  local prev_soonest prev_soon_24h
+  prev_soonest="$(grep -m1 '^soonest=' "$SNAP" 2>/dev/null | cut -d= -f2- || true)"
+  prev_soon_24h="$(grep -m1 '^soon_24h=' "$SNAP" 2>/dev/null | cut -d= -f2- || true)"
+  [ -n "$soonest_in" ] && prev_soonest="$soonest_in"
+  [ -n "$soon_24h_in" ] && prev_soon_24h="$soon_24h_in"
+
   umask 077
   {
     printf 'date=%s\n' "$today"
     printf 'score=%s\n' "$cur"
     printf 'day_total=%s\n' "$day_total"
+    printf 'soonest=%s\n' "${prev_soonest:--}"
+    printf 'soon_24h=%s\n' "${prev_soon_24h:-0}"
   } > "$SNAP" 2>/dev/null || true
 
   printf '%s\t%s\t%s\n' "$round_delta" "$day_total" "$today"
