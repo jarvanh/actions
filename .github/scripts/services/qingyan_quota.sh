@@ -254,6 +254,6 @@ cmd_delta() {
 
 case "${1:-}" in
   fetch) cmd_fetch ;;
-  delta) cmd_delta "${2:-}" ;;
-  *) echo "用法: $0 {fetch|delta <当前余额>}"; exit 1 ;;
+  delta) cmd_delta "${2:-}" "${3:-}" "${4:-}" ;;
+  *) echo "用法: $0 {fetch|delta <当前余额> [最近到期] [24h将过期]}"; exit 1 ;;
 esac
