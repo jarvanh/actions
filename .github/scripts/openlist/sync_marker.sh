@@ -1136,7 +1136,6 @@ _push_force_sync_approval() {
   }
   prompt=$(cat <<EOF
 【同步审批请求 · 源端大小异常减小】
-任务键: ${task_key}
 任务: ${task_name}
 源端: ${source_path}
 目标: ${dest_path}
@@ -1145,8 +1144,15 @@ _push_force_sync_approval() {
 marker: ${marker_stem}.json
 已按保护策略跳过本任务同步，等待确认。
 
-请在 Telegram 主对话向主人发一条带两个按钮的审批卡，
-不要长篇解释，把上面几项用简短 kv 列出即可。
+请在 Telegram 主对话向主人发一条带两个按钮的审批卡。
+
+【卡片正文只写下面这几项，简短 kv，不要长篇解释】
+  任务、源端、目标、上次记录、当前大小、减少、文件减少（非 0 时）
+⚠️ 严禁把下面【内部指令】区的内容写进卡片正文 —— 那是给你执行用的，
+   不是给人看的（marker 名、marker 哈希、任务键、修复索引、排队时长、
+   脚本路径、fixed_files/fix_blacklist 这类实现细节一律不上卡片）。
+
+【内部指令】（不显示在卡片上）
 按钮用 message 工具（action=send, channel=telegram, target=${approval_to}）发送，
 presentation blocks 按钮只有这两种（主人的定案口径：源端异常减小只有两种处理方式），
      不要增减按钮、不要改写文案:
@@ -1170,7 +1176,9 @@ presentation blocks 按钮只有这两种（主人的定案口径：源端异常
      秒级完成、不开 run。把工具输出摘要回报给主人。
 卡片发出后本轮直接结束，不要再补发任何文字。
 后续回调（callback_data: olsync:approve / accept:...）会回到主会话，
-由主会话 agent 按上述动作执行；任务键与 marker 名都在卡片里。
+由主会话 agent 按上述动作执行。
+注意: 任务键与 marker 名**无需**出现在卡片上 —— approve 走执行器的 force
+子命令只认 8 位哈希，任务键仅在人工手动 dispatch 时才需要（见 🛠️ 段）。
 EOF
 )
 
@@ -1318,10 +1326,11 @@ send_sync_warning() {
 
   local msg=""
   tg_add_title msg "🚨 源端大小异常减小"
-  # 任务键（== FORCE_SYNC_TASK 的匹配键）必须出现在告警里: 审批单任务强制同步
-  # 时要照抄这个值，缺了就只能退回 force_sync=true 全量放行
+  # ⚠️ 2026-10-09 移除正文的「任务键」kv:
+  #   它 == FORCE_SYNC_TASK 的匹配键，只服务于「审批时照抄它去 dispatch」，
+  #   而 approve 已改走 ol-sync-approve.sh force（只传 8 位哈希），用不到任务键。
+  #   留着就是把内部匹配键当正文噪音；手动触发仍需它，故保留在下方 🛠️ 段。
   tg_add_kv msg "任务" "$task_name"
-  tg_add_kv msg "任务键" "$(_sync_task_key "$task_name" "$dest_path")"
   tg_add_path msg "源端" "$source_path"
   tg_add_path msg "目标" "$dest_path"
   tg_add_section msg "📊 大小对比"
@@ -1386,10 +1395,9 @@ send_sync_warning() {
   local _task_key
   _task_key=$(_sync_task_key "$task_name" "$dest_path")
   tg_add_note msg "⏭️ 已跳过此同步，继续执行其他任务
-⏳ 审批请求已推送: 主对话将收到两按钮审批卡
-✅ 强制同步·源端→目标端（下轮执行）· 🛡️ 忽略减小·接受大小差异（只改基线）"
-  tg_add_note msg "两种处理方式: 「强制同步」= 让下一轮把源端同步到目标端（不开新 run、不排队）；
-「忽略减小」= 接受两端大小差异，不传数据，只把基线对齐到新大小"
+⏳ 审批卡已推送（见主对话）
+✅ 强制同步·源端→目标端 → 下轮把源端补到目标端，基线不动
+🛡️ 忽略减小·接受大小差异 → 不传数据，只把基线对齐到新大小"
   tg_add_section msg "🛠️ 手动触发 · 单任务"
   tg_add_pre msg "gh workflow run openlist.yml -f run_mode=同步 -f force_sync_task=${_task_key}"
   tg_add_footer msg
