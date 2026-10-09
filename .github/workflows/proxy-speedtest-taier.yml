@@ -42,10 +42,10 @@ on:
           - '四川电信'
           - '湖北电信'
       mode:
-        description: '测速模式：single = 单连接（与 proxy-speedtest 系列口径可比、贴近日常单流体验）；multi = 下8+上4 连接叠加看带宽上限；both = 两者对照（耗时翻倍）'
+        description: '测速模式：multi = 下8+上4 连接（默认；泰尔服务端对单上传连接限速 ~1MiB/s=67.11Mbps，4 连接天花板 268.44Mbps 才测得到真实上行）；single = 单连接（被 67.11 钳制，仅慢节点真实）；both = 两者对照（耗时翻倍）'
         required: false
         type: choice
-        default: 'single'
+        default: 'multi'
         options:
           - 'single'
           - 'multi'
@@ -237,7 +237,7 @@ jobs:
         env:
           # 测速参数（workflow_call 入参 > workflow_dispatch 入参 > 默认值；定时运行走默认值）
           TAIER_POINTS: ${{ inputs.points || github.event.inputs.points || '广东联通' }}
-          TAIER_MODE: ${{ inputs.mode || github.event.inputs.mode || 'single' }}
+          TAIER_MODE: ${{ inputs.mode || github.event.inputs.mode || 'multi' }}
           # 默认 13（上游硬钳上限）：每方向采样 13 秒、单节点 ≈31 秒，读数最稳。
           # 2026-09-24 从 5 上调——此前压到 5 是为了「同等预算多覆盖节点」，而真正的耗时
           # 大头（死节点各吃一个测速窗口）已由测活层筛掉，不再需要拿 duration 换覆盖数。
