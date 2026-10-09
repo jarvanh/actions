@@ -38,7 +38,8 @@
 # 前置条件（由各启动步骤负责，本脚本不做）：
 #   workbuddy  /tmp/local_workbuddy/{workbuddy-gateway,data/}（含 logs/ 目录）
 #   zcode2api  /tmp/local_zcode2api/{.venv,cli.py,.env,logs/}
-#   qingyan    /tmp/local_qingyan/{proxy.py,env.sh,logs/}（单文件零依赖，无需 venv）
+#   qingyan    /dropbox/self-hosted/qingyan-proxy/{app/,data/,env.sh,logs/}
+#              （2026-10-06 起全面直跑 Dropbox 真源，不再有 /tmp 运行副本）
 #   quota-board /dropbox/self-hosted/quota-board/board.py + ~/.openclaw/.env
 #              （看板本体与凭据都在持久化目录，运行目录无需准备）
 #
@@ -52,7 +53,7 @@ LOG_DIR="${HOME}/.openclaw/logs"
 
 # 服务日志统一落盘目录（2026-10-05 主人拍板：不要双目录，全部网关统一存 Dropbox）。
 # 此前日志分散在 /tmp 各运行目录（/tmp/local_workbuddy/data/logs、/tmp/local_zcode2api/logs、
-# /tmp/local_qingyan/logs），runner 重置即丢 —— 冷却与「无可用账号」等事件轨迹随之蒸发，
+# 以及 qingyan 的旧运行目录），runner 重置即丢 —— 冷却与「无可用账号」等事件轨迹随之蒸发，
 # quota-board 的告警解析读不到就静默失效（实测 hy4-preview-f 06:52 冷却、07:19 无可用账号
 # 全程零通知）。统一到 Dropbox 后事件可跨轮次追溯，告警不再漏报。
 # 挂载点上写日志已长期实证可行：网关自己的 gateway-*.log 与看板 board.log 都在
@@ -292,7 +293,7 @@ EOF
       ;;
     qingyan)
       # 2026-10-06 起 qingyan 全面跑在 Dropbox 上（代码 / 数据 / 凭据 / 日志），
-      # 不再往 /tmp/local_qingyan 拉副本：
+      # 不再有 /tmp 运行副本：
       #   - 代码：纯标准库单文件，系统 python3 用绝对路径直跑挂载点上的 proxy.py
       #     （Python 只需读权限，不像二进制需要 x 位 —— 已实测可执行）
       #   - 数据：QINGYAN_DATA_DIR / CRED_FILE 已指向 Dropbox（workflow ac769de）

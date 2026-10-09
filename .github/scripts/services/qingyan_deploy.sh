@@ -35,15 +35,13 @@
 set -u
 
 # 2026-10-06 起 qingyan 全面跑在 Dropbox 上（代码/数据/凭据/日志），
-# 不再往 /tmp/local_qingyan 拉运行副本。APP_DIR 是代码真源（unit 直跑这里）。
+# **不存在 /tmp 运行副本**；APP_DIR 是代码真源（unit 用绝对路径直跑这里）。
 APP_DIR="/dropbox/self-hosted/qingyan-proxy/app"
-RUN_DIR="/tmp/local_qingyan"
+DATA_ROOT="/dropbox/self-hosted/qingyan-proxy"
 PORT="${QINGYAN_PORT:-8320}"
 # 长输出超时（秒）。⚠️ proxy.py 的两步式写入要跑两轮完整长生成，
 # 默认 300s 第二轮必撞 deadline（实测 900 也不够），1800 才稳。
 UPSTREAM_TIMEOUT="${QINGYAN_UPSTREAM_TIMEOUT:-1800}"
-LOG_DIR="$RUN_DIR/logs"
-LOG="$LOG_DIR/qingyan.log"
 # 凭据也落 Dropbox（主人 2026-10-06 决定）：unit 的 EnvironmentFile 读这里。
 # ⚠️ 挂载点权限恒 666（chmod 600 是空操作），env.sh 内含 refresh token 明文，
 #    对同机所有用户可读可写 —— 已知并接受的风险。
@@ -51,7 +49,7 @@ ENV_FILE="/dropbox/self-hosted/qingyan-proxy/env.sh"
 # 代码源（Dropbox 侧，rclone remote 形式）。空=不拉取（目录里已有代码才能跑）。
 APP_REMOTE="${QINGYAN_APP_REMOTE:-}"
 # 持久数据目录（本地侧）：凭证状态文件 + 积分快照。
-DATA_DIR="${QINGYAN_DATA_DIR:-$RUN_DIR/data}"
+DATA_DIR="${QINGYAN_DATA_DIR:-$DATA_ROOT/data}"
 # Dropbox 侧数据远端。空=不同步（本地单轮跑）。
 # 迁移兜底：glm2api 时代的积分快照在其数据目录下。新位置为空时取一次，取到即用。
 CRED_FILE="$DATA_DIR/qingyan-credentials.json"
@@ -67,11 +65,10 @@ cmd_prepare() {
   # 网卡上，不如显式失败（与 services.sh 的密钥缺失同口径）。
   [ -n "${QINGYAN_GATEWAY_KEY:-}" ] || die "未注入 QINGYAN_GATEWAY_KEY 环境变量（仓库 Secret GLM2API_GATEWAY_KEY），拒绝起无鉴权服务"
 
-  mkdir -p "$RUN_DIR" "$DATA_DIR" || die "无法创建数据目录 $DATA_DIR"
+  mkdir -p "$DATA_DIR" || die "无法创建数据目录 $DATA_DIR"
 
-  # 代码（2026-10-06 起）：真源就是 Dropbox 的 app 目录，unit 用绝对路径直跑它，
-  # 不再往 /tmp/local_qingyan 拉运行副本 —— 拉了也没人用，且 /tmp 被清理时会
-  # 误判「运行目录缺 proxy.py」而 die。这里只校验真源在位。
+  # 代码：真源就是 Dropbox 的 app 目录，unit 用绝对路径直跑它。
+  # 这里只校验真源在位（历史上曾校验 /tmp 运行副本，该副本早已不存在）。
   [ -s "$APP_DIR/proxy.py" ] || die "Dropbox app 目录缺 proxy.py：$APP_DIR（APP_REMOTE=$APP_REMOTE）"
 
   # env.sh：凭据 + 服务参数，systemd 单元 EnvironmentFile 读取。600 落盘。
@@ -94,7 +91,7 @@ QINGYAN_REFRESH_TOKEN=${QINGYAN_REFRESH_TOKEN}
 QINGYAN_DELETE_CONVERSATIONS=1
 EOF
   chmod 600 "$ENV_FILE" || true
-  log "✅ 运行目录就绪（$RUN_DIR，端口 $PORT）"
+  log "✅ 运行目录就绪（$APP_DIR，端口 $PORT）"
 }
 
 cmd_status() {
