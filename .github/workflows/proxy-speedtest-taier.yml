@@ -51,13 +51,14 @@ on:
           - 'multi'
           - 'both'
       up_threads:
-        description: '多线程上传连接数（机场对单连接限 8MiB/s=67.11Mbps 档：4→268.44 天花板、8→536.9；并发限次由多会话+错峰缓解）'
+        description: '多线程上传连接数（机场对单连接限 8MiB/s=67.11Mbps 档：4→268.44 天花板、8→536.9、16→1073.7；并发限次由多会话+错峰缓解）'
         required: false
         type: choice
         default: '4'
         options:
           - '4'
           - '8'
+          - '16'
       duration:
         description: '每个方向测速秒数（上游二进制硬钳制 5-13，>13 会被压到 13）'
         required: false
