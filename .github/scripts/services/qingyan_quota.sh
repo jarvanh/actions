@@ -30,16 +30,14 @@
 #                                     # 一并落进快照，供 quota-board 读「总积分 / 即将过期」
 set -u
 
-STATE_DIR="${QINGYAN_STATE_DIR:-/tmp/local_qingyan/data}"
+# 2026-10-06 起 qingyan 全面跑在 Dropbox 上（代码/数据/凭据/日志），**不存在
+# /tmp 运行副本**。三个默认值一律指向 Dropbox 真源，不再回退到 /tmp。
+DATA_ROOT="/dropbox/self-hosted/qingyan-proxy"
+STATE_DIR="${QINGYAN_STATE_DIR:-$DATA_ROOT/data}"
 SNAP="$STATE_DIR/quota-snapshot"
-ENV_FILE="${QINGYAN_ENV_FILE:-/tmp/local_qingyan/env.sh}"
-RUN_DIR="${QINGYAN_RUN_DIR:-/tmp/local_qingyan}"
-# ⚠️ 2026-10-09 修正：代码真源早在 2026-10-06 就迁到 Dropbox 的 app 目录
-# （qingyan_deploy.sh cmd_prepare 明确「不再往 /tmp/local_qingyan 拉运行副本，
-#  拉了也没人用」），但本脚本仍拿 RUN_DIR 找 proxy.py —— 该文件永远不存在，
-# 于是 cmd_fetch 每轮必失败（表现为通知里「💳 积分」分节长期缺失）。
-# 积分采集只需 import proxy 复用其签名/刷新逻辑，故直接指向 Dropbox 真源。
-APP_DIR="${QINGYAN_APP_DIR:-/dropbox/self-hosted/qingyan-proxy/app}"
+ENV_FILE="${QINGYAN_ENV_FILE:-$DATA_ROOT/env.sh}"
+# 积分采集只需 import proxy 复用其签名/刷新逻辑，故指向 Dropbox 代码真源
+APP_DIR="${QINGYAN_APP_DIR:-$DATA_ROOT/app}"
 
 log() { printf '[qingyan-quota] %s\n' "$*"; }
 
@@ -64,7 +62,7 @@ _qy_to_real() {
 # 取当前积分余额。失败时输出空串 + 非 0 退出，由调用方决定降级
 # （通知里少一节，不阻断服务）。
 cmd_fetch() {
-  # 真源在 Dropbox app 目录（见文件头 APP_DIR 注释），不再找 /tmp 运行副本
+  # 代码真源在 Dropbox app 目录（见文件头 APP_DIR 注释）
   [ -s "$APP_DIR/proxy.py" ] || { log "❌ Dropbox app 目录缺 proxy.py：$APP_DIR"; return 1; }
   # 传给下面的 python（heredoc 是 <<'PY' 不展开 shell 变量，改由环境传递）
   export QINGYAN_APP_DIR="$APP_DIR"
@@ -78,9 +76,8 @@ cmd_fetch() {
   local out
   out="$(/usr/bin/python3 - <<'PY' 2>/dev/null
 import json, os, sys, time, urllib.request, urllib.error, uuid
-# 代码真源在 Dropbox app 目录（由 shell 经 QINGYAN_APP_DIR 传入）；
-# 兜底保留旧 /tmp 路径仅为兼容，实际已无人往那里放代码。
-sys.path.insert(0, os.environ.get("QINGYAN_APP_DIR") or "/tmp/local_qingyan")
+# 代码真源在 Dropbox app 目录（由 shell 经 QINGYAN_APP_DIR 传入）
+sys.path.insert(0, os.environ.get("QINGYAN_APP_DIR") or "/dropbox/self-hosted/qingyan-proxy/app")
 import proxy
 
 MEMBER_URL = "https://agentmore.chatglm.cn/chatglm/member-api/member/member_info"

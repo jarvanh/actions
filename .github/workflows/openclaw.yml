@@ -3277,8 +3277,9 @@ jobs:
           QINGYAN_DATA_REMOTE: dropbox:self-hosted/qingyan-proxy/data
           QINGYAN_DATA_DIR: /dropbox/self-hosted/qingyan-proxy/data
           QINGYAN_STATE_DIR: /dropbox/self-hosted/qingyan-proxy/data
-          QINGYAN_RUN_DIR: /tmp/local_qingyan
           QINGYAN_ENV_FILE: /dropbox/self-hosted/qingyan-proxy/env.sh
+          # 注：不再有 QINGYAN_RUN_DIR —— 2026-10-06 起 qingyan 全面直跑
+          # Dropbox 真源（代码/数据/凭据/日志），不存在 /tmp 运行副本。
         run: |
           set -uo pipefail
           # 通知真源在 step 顶层 source 一次（勿挪进函数体，理由见 workbuddy 步骤同名注释 / 规范 4.4）
@@ -3374,7 +3375,7 @@ jobs:
             tg_add_kv _m "结论" "未就绪"
             tg_add_path _m "端口" "$QINGYAN_PORT"
             tg_add_kv _m "原因" "$GL_REASON"
-            tg_add_path _m "运行目录" "/tmp/local_qingyan"
+            tg_add_path _m "运行目录" "/dropbox/self-hosted/qingyan-proxy/app"
             tg_add_path _m "日志" "/dropbox/self-hosted/qingyan-proxy/logs/qingyan.log"
             tg_add_footer _m
             send_tg "$_m" alert || echo "::warning::TG 通知发送失败（不影响任务）"
@@ -5493,9 +5494,9 @@ jobs:
           if systemctl --user is-failed --quiet qingyan.service 2>/dev/null; then
             systemctl --user reset-failed qingyan.service 2>/dev/null || true
           fi
-          pkill -f "local_qingyan.*proxy\.py" 2>/dev/null || true
-          sleep 2
-          pkill -9 -f "local_qingyan.*proxy\.py" 2>/dev/null || true
+          # 注：此处原有按旧运行目录匹配进程的 pkill，进程实际跑在 Dropbox 路径
+          # （/usr/bin/python3 /dropbox/.../app/proxy.py），该匹配已永远命中不了，
+          # 作为死代码删除；停服由上面的 services.sh stop 覆盖。
 
           # 3d-1 回推已移除（2026-10-06）：qingyan 全面直写 Dropbox（代码/数据/凭据/日志），
           # 原本的「停进程 → 回推 data 到 Dropbox」已无意义（DATA_DIR 与 DATA_REMOTE
