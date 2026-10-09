@@ -995,11 +995,8 @@ check_sync_marker() {
 
   # 检查源端大小是否减小（可能数据丢失）
   # 源端统计与 save_sync_marker 保持相同的过滤口径（应用 --exclude/--include）
-  local marker_bytes marker_count
+  local marker_bytes
   marker_bytes=$(echo "$marker_json" | jq -r '.source_bytes // 0')
-  # 文件数基线: 微抖动闸门要拿它判「文件有没有真少」（少文件=真删，不适用抖动放行）
-  marker_count=$(echo "$marker_json" | jq -r '.source_count // 0')
-  [[ "$marker_count" =~ ^[0-9]+$ ]] || marker_count=0
 
   _extract_filter_args "${extra_args[@]}"
   local current_size_json
@@ -1025,32 +1022,6 @@ check_sync_marker() {
     if [ "$stats_filtered" != "true" ]; then
       echo "旧 marker 为未过滤统计口径（无 stats_filtered），跳过源端缩小检测，本轮成功后将按新口径重写"
     else
-      # ===== 微抖动闸门: 先按「少了多少」筛噪音，再谈归因（2026-10-09）=====
-      # 背景（实测新金瓶梅4）: 网盘文件被重写/回填会让字节数抖 2 B，而 payload 类
-      #   零容差 ⇒ 2 B 也走完整告警、要人工审批；warning 又会跳过同步 ⇒ marker 基线
-      #   永不刷新 ⇒ 下轮同样 2 B 再告警。实测该任务 last_success 卡在 10-05 不动，
-      #   正是这个死循环。闸门放行后同步成功，基线自然刷新，循环自解。
-      # 判据（两个条件是「且」，缺一不可）:
-      #   ① 绝对量 < SYNC_SHRINK_MIN_BYTES（默认 1 MiB）
-      #   ② 相对量 < SYNC_SHRINK_MIN_PCT_BP（默认 1 bp = 0.01%）
-      #   ① 让大库容忍 MiB 级抖动；② 让小库（<1 MiB）不被 ① 的绝对值放水 ——
-      #      100 KB 的库删掉 50 KB 是 5000 bp，远超 1 bp，照样告警。
-      # 前置条件: 文件数**没有减少**。少文件 = 真删，哪怕只少 1 B 也不能当抖动放行。
-      local _dust=$((marker_bytes - MARKER_CURRENT_BYTES))
-      if [ "$MARKER_CURRENT_COUNT" -ge "$marker_count" ]; then
-        local _min_abs="${SYNC_SHRINK_MIN_BYTES:-1048576}"
-        local _min_bp="${SYNC_SHRINK_MIN_PCT_BP:-1}"
-        [[ "$_min_abs" =~ ^[0-9]+$ ]] || _min_abs=1048576
-        [[ "$_min_bp" =~ ^[0-9]+$ ]] || _min_bp=1
-        local _pct_bp=0
-        [ "$marker_bytes" -gt 0 ] && _pct_bp=$((_dust * 10000 / marker_bytes))
-        if [ "$_dust" -lt "$_min_abs" ] && [ "$_pct_bp" -lt "$_min_bp" ]; then
-          echo "ℹ️ 源端减小 $(format_bytes "$_dust")（< $(format_bytes "$_min_abs") 且 < ${_min_bp}bp，文件数未减），判定为微抖动，放行同步并刷新基线"
-          MARKER_ACTION="proceed"
-          return 0
-        fi
-      fi
-
       # ===== 分层归因: 减少量落在哪类文件上，决定告警还是放行 =====
       # 总量口径分不清「元数据重写」与「正片损坏」—— 两者都是"变小"。
       #   meta 类（nfo/xml/字幕等纯文本）: 刮削器重写会让字节数上下抖动几 B~几 KB，
@@ -1271,11 +1242,10 @@ save_source_listing_snapshot() {
 }
 
 # 用法: _shrink_missing_report <stem> <source_path> <dest_path> [filter_args...]
-# 输出: 每行 "<大小可读>\t<路径>\t<safe|lost|unknown|changed>"（取前 SYNC_SHRINK_TOPN 条）
+# 输出: 每行 "<大小可读>\t<路径>\t<safe|lost|unknown>"（按大小降序，取前 SYNC_SHRINK_TOPN 条）
 #   safe    = 目标端仍有副本 ⇒ 源端删了但没丢数据
 #   lost    = 两端皆无 ⇒ 真丢了，需人工确认
 #   unknown = 目标端列举失败，无法判定
-#   changed = 文件还在、字节数变了（大小可读列带 − / + 号表示缩小/变大）
 _shrink_missing_report() {
   local stem="$1" source_path="$2" dest_path="$3"
   shift 3
@@ -1308,20 +1278,13 @@ _shrink_missing_report() {
   destraw=$(rclone lsjson "$dest_path" --recursive --files-only --no-mimetype --no-modtime 2>/dev/null \
             | jq -r '.[] | .Path' 2>/dev/null)
 
-  # ===== diff 两路（2026-10-09 新增 changed 路）=====
-  # 只比路径（missing 路）回答不了「2 B 少在哪」—— 文件被改写时 path 依然命中，
-  #   missing 为空 ⇒ 告警只能报总数、列不出任何文件（实测新金瓶梅4: 减 2 B、
-  #   6 个文件一个没少）。故补 changed 路: 同路径、Size 不同。
-  #   added 路不列 —— 同步是"补"的方向，新增不构成丢失风险。
-  local missing changed
+  # diff: 快照里有、当前没有 ⇒ 被删（按大小降序）
+  local missing
   missing=$(awk -F'\t' 'NR==FNR{c[$1]=1;next} !($1 in c){print $0}' \
             <(printf '%s\n' "$cur") <(printf '%s\n' "$old") | sort -t$'\t' -k2,2nr)
-  # changed: 输出 "|<Δ>|\t<Δ>\t<路径>"，按 |Δ| 降序（Δ<0 = 缩小）
-  changed=$(awk -F'\t' 'NR==FNR{s[$1]=$2;next} ($1 in s) && s[$1]!=$2 {d=$2-s[$1]; a=d; if(a<0)a=-d; printf "%d\t%d\t%s\n", a, d, $1}' \
-            <(printf '%s\n' "$old") <(printf '%s\n' "$cur") | sort -t$'\t' -k1,1nr)
+  [ -z "$missing" ] && return 0
 
-  local n=0 path size st abs delta
-  # 1) 被删: 快照里有、当前没有
+  local n=0 path size st
   while IFS=$'\t' read -r path size; do
     [ -z "$path" ] && continue
     n=$((n + 1))
@@ -1332,17 +1295,6 @@ _shrink_missing_report() {
     fi
     printf '%s\t%s\t%s\n' "$(format_bytes "$size")" "$path" "$st"
   done <<< "$missing"
-
-  # 2) 字节变化: 同路径、大小不同（覆盖「文件还在、字节变了」这类纯抖动）
-  while IFS=$'\t' read -r abs delta path; do
-    [ -z "$path" ] && continue
-    [ "$n" -ge "${SYNC_SHRINK_TOPN:-8}" ] && break
-    n=$((n + 1))
-    st="changed"
-    local _sg=""
-    [ "$delta" -lt 0 ] && _sg="−"
-    printf '%s\t%s\t%s\n' "${_sg}$(format_bytes "$abs")" "$path" "$st"
-  done <<< "$changed"
 }
 
 # 用法: send_sync_warning <task_name> <source_path> <dest_path>
@@ -1426,7 +1378,6 @@ send_sync_warning() {
       case "$_st" in
         safe) _mk="✅ 备份还在" ;;
         lost) _mk="🚨 备份也没有" ;;
-        changed) _mk="↕ 文件还在、字节数变了" ;;
         *) _mk="❓ 未知" ;;
       esac
       tg_add_entry _mh "${_sz} · ${_p} → ${_mk}"
@@ -1434,11 +1385,7 @@ send_sync_warning() {
     tg_append msg "$(tree_fold "${_mh%$'\n'}")"$'\n'
     tg_add_note msg "✅ 备份还在 = 目标端仍有副本，只是源端删了，没丢数据；🚨 备份也没有 = 两端皆无，需人工确认"
   else
-    if rclone lsf "$(_listing_snapshot_path "$_mstem")" >/dev/null 2>&1; then
-      tg_add_note msg "🔍 已比对文件清单快照：无文件被删、也无字节变化（减少量落在快照未覆盖的层面，如目录项或过滤排除项）"
-    else
-      tg_add_note msg "🔍 尚无文件清单快照，无法列出具体少了哪些文件（下轮同步成功后自动生成）"
-    fi
+    tg_add_note msg "🔍 尚无文件清单快照，无法列出具体少了哪些文件（下轮同步成功后自动生成）"
   fi
 
   # 收尾区: 状态 + 备注（裸文本说明段），footer 自带空行。
