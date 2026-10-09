@@ -1,0 +1,57 @@
+name: audit-taier-upload-rst
+
+# 临时诊断工作流（audit 分支专用）：定位「泰尔测速点对上传 POST 秒断 RST」的根因。
+# S1 = runner 直连（Azure 境外 IP，不经任何代理）
+# S2 = runner 经本地 mihomo MATCH,DIRECT（同构软件栈，出口仍是 runner IP）
+# 判读：
+#   S1 RST              -> 测速点按 IP 地域拒上传（境外 IP 风控）实锤
+#   S1 成功 && S2 成功   -> 服务器与 mihomo 均无辜，RST 来自机场节点（节点掐大上传）实锤
+#   S1 成功 && S2 RST   -> 意外情况（mihomo 链路形态问题），需再议
+# 用后即弃：诊断完成删除本分支。
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Prepare engine, mihomo, verify egress
+        run: |
+          set -e
+          cd /tmp
+          curl -sL --retry 3 -o taier https://github.com/jarvanh/taierspeedtest/releases/download/v1.0.4-jh.6/taierspeedtest-linux-amd64
+          echo "040b914540cc339c94f6f6eac267b9f6cea812a9b76d22eaa058cf929388de7a  taier" | sha256sum -c -
+          chmod +x taier
+          curl -sL --retry 3 -o mihomo.gz https://github.com/MetaCubeX/mihomo/releases/download/v1.19.32/mihomo-linux-amd64-v1.19.32.gz
+          gunzip -f mihomo.gz && chmod +x mihomo
+          printf 'mixed-port: 17893\nmode: rule\nlog-level: info\nrules:\n  - MATCH,DIRECT\n' > mh.yaml
+          mkdir -p mhd
+          nohup ./mihomo -d /tmp/mhd -f mh.yaml > mihomo.log 2>&1 &
+          sleep 4
+          DIRECT_IP=$(curl -s --max-time 10 https://api.ipify.org || true)
+          VIA_IP=$(curl -s --max-time 10 -x socks5h://127.0.0.1:17893 https://api.ipify.org || true)
+          echo "direct egress : $DIRECT_IP"
+          echo "via mihomo    : $VIA_IP"
+          [ -n "$DIRECT_IP" ] && [ "$DIRECT_IP" = "$VIA_IP" ] || echo "WARN: egress mismatch"
+
+      - name: S1 - runner DIRECT (no proxy at all)
+        run: |
+          cd /tmp
+          timeout 100 ./taier --points 广东联通 --mode single --duration 13 --no-image --no-ipv6 </dev/null > s1.out 2> s1.err || true
+          echo "===== S1 stdout ====="
+          cat s1.out
+          echo "===== S1 stderr ====="
+          cat s1.err
+          sleep 20
+
+      - name: S2 - via mihomo MATCH,DIRECT (egress unchanged)
+        run: |
+          cd /tmp
+          TAIER_SOCKS5=127.0.0.1:17893 HTTP_PROXY=http://127.0.0.1:17893 HTTPS_PROXY=http://127.0.0.1:17893 \
+            timeout 100 ./taier --points 广东联通 --mode single --duration 13 --no-image --no-ipv6 </dev/null > s2.out 2> s2.err || true
+          echo "===== S2 stdout ====="
+          cat s2.out
+          echo "===== S2 stderr ====="
+          cat s2.err
