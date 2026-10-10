@@ -51,10 +51,10 @@ on:
           - 'multi'
           - 'both'
       up_threads:
-        description: '多线程上传连接数（机场对单连接限 8MiB/s=67.11Mbps 档：4→268.44 天花板、8→536.9、16→1073.7；并发限次由多会话+错峰缓解）'
+        description: '多线程上传连接数（机场对单连接限 8MiB/s=67.11Mbps 配额档，多会话叠加：实测 up 峰值 4→268 / 8→706 / 16→1785 Mbps，up>0 率 8 连接最优 96%；schedule 默认 8，16 作人工峰值测量档）'
         required: false
         type: choice
-        default: '4'
+        default: '8'
         options:
           - '4'
           - '8'
@@ -247,7 +247,7 @@ jobs:
           # 测速参数（workflow_call 入参 > workflow_dispatch 入参 > 默认值；定时运行走默认值）
           TAIER_POINTS: ${{ inputs.points || github.event.inputs.points || '广东联通' }}
           TAIER_MODE: ${{ inputs.mode || github.event.inputs.mode || 'multi' }}
-          TAIER_UP_THREADS: ${{ inputs.up_threads || '4' }}
+          TAIER_UP_THREADS: ${{ inputs.up_threads || '8' }}
           # 默认 13（上游硬钳上限）：每方向采样 13 秒、单节点 ≈31 秒，读数最稳。
           # 2026-09-24 从 5 上调——此前压到 5 是为了「同等预算多覆盖节点」，而真正的耗时
           # 大头（死节点各吃一个测速窗口）已由测活层筛掉，不再需要拿 duration 换覆盖数。
