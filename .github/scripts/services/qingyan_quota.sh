@@ -130,7 +130,7 @@ try:
     # 实测两类有效期：登录赠送约 24h、任务奖励一年；消耗记录 expired_at=0 不计。
     soonest = 0
     soonest_amt = 0.0
-    soon_24h = 0.0
+    soon_expire = 0.0
     now = time.time()
     for page in range(1, 11):
         rec = f"{REC_URL}?page={page}&page_size=50"
@@ -153,8 +153,8 @@ try:
             delta = exp - now
             if delta <= 0:
                 continue
-            if delta <= 86400:
-                soon_24h += amt
+            if delta <= 604800:   # 7 天（主人 2026-10-10 定：与看板 EXPIRE_SOON_SECS 同口径）
+                soon_expire += amt
             if soonest == 0 or exp < soonest:
                 soonest = exp
                 soonest_amt = amt
@@ -166,7 +166,7 @@ try:
         "rule": d.get("score_rule", ""),
         "soonest": soonest,
         "soonest_amt": round(soonest_amt),
-        "soon_24h": round(soon_24h),
+        "soon_expire": round(soon_expire),
     }))
 except Exception as e:
     print(json.dumps({"error": str(e)[:200]}))
@@ -181,7 +181,7 @@ PY
   rule="$(printf '%s' "$out" | jq -r '.rule // empty' 2>/dev/null || true)"
   soonest="$(printf '%s' "$out" | jq -r '.soonest // 0' 2>/dev/null || true)"
   soonest_amt="$(printf '%s' "$out" | jq -r '.soonest_amt // 0' 2>/dev/null || true)"
-  soon_24h="$(printf '%s' "$out" | jq -r '.soon_24h // 0' 2>/dev/null || true)"
+  soon_expire="$(printf '%s' "$out" | jq -r '.soon_expire // 0' 2>/dev/null || true)"
   # 最近到期时间：0 表示没有带有效期的入账。
   # 时间格式化两个分支：ubuntu runner 有 GNU date -d；本机 macOS 只有
   # date -r（秒级）。两者都试，都失败才退成 "-"。
@@ -196,7 +196,7 @@ PY
     log "❌ 查积分失败：$(printf '%s' "$out" | head -c 150)"
     return 1
   fi
-  printf '%s\t%s\t%s\t%s\t%s\n' "$score" "$rule" "$soonest_fmt" "$soonest_amt" "$soon_24h"
+  printf '%s\t%s\t%s\t%s\t%s\n' "$score" "$rule" "$soonest_fmt" "$soonest_amt" "$soon_expire"
   return 0
 }
 
@@ -204,7 +204,7 @@ PY
 cmd_delta() {
   local cur="${1:-}"
   local soonest_in="${2:-}"
-  local soon_24h_in="${3:-}"
+  local soon_expire_in="${3:-}"
   [ -n "$cur" ] || { log "用法: $0 delta <当前余额> [最近到期] [24h将过期]"; return 1; }
   mkdir -p "$STATE_DIR" 2>/dev/null || true
 
@@ -241,11 +241,11 @@ cmd_delta() {
   # 到期信息落盘（2026-10-09 加）：快照此前只落 date/score/day_total，
   # 到期时间压根没存 —— quota-board 就算想显示「即将过期」也没有数据源。
   # 取本次 fetch 的新值；未传则沿用快照旧值，避免单轮漏传就把已有信息清空。
-  local prev_soonest prev_soon_24h
+  local prev_soonest prev_soon_expire
   prev_soonest="$(grep -m1 '^soonest=' "$SNAP" 2>/dev/null | cut -d= -f2- || true)"
-  prev_soon_24h="$(grep -m1 '^soon_24h=' "$SNAP" 2>/dev/null | cut -d= -f2- || true)"
+  prev_soon_expire="$(grep -m1 '^soon_expire=' "$SNAP" 2>/dev/null | cut -d= -f2- || true)"
   [ -n "$soonest_in" ] && prev_soonest="$soonest_in"
-  [ -n "$soon_24h_in" ] && prev_soon_24h="$soon_24h_in"
+  [ -n "$soon_expire_in" ] && prev_soon_expire="$soon_expire_in"
 
   umask 077
   {
@@ -253,7 +253,7 @@ cmd_delta() {
     printf 'score=%s\n' "$cur"
     printf 'day_total=%s\n' "$day_total"
     printf 'soonest=%s\n' "${prev_soonest:--}"
-    printf 'soon_24h=%s\n' "${prev_soon_24h:-0}"
+    printf 'soon_expire=%s\n' "${prev_soon_expire:-0}"
   } > "$SNAP" 2>/dev/null || true
 
   printf '%s\t%s\t%s\n' "$round_delta" "$day_total" "$today"

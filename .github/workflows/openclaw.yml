@@ -3343,7 +3343,7 @@ jobs:
           GL_DAY_TOTAL=""
           GL_SOONEST=""
           GL_SOONEST_AMT=""
-          GL_SOON_24H=""
+          GL_SOON_EXPIRE=""
           if [ "$GL_OK" = "1" ]; then
             # 快照已在步骤 0 由 `deploy pull` 还原到 QINGYAN_STATE_DIR；
             # 缺失即首轮，delta 会自动按 0 起算，无需在此再拉一次。
@@ -3352,11 +3352,11 @@ jobs:
               GL_SCORE_RULE="$(printf '%s' "$GLQ" | cut -f2)"
               GL_SOONEST="$(printf '%s' "$GLQ" | cut -f3)"
               GL_SOONEST_AMT="$(printf '%s' "$GLQ" | cut -f4)"
-              GL_SOON_24H="$(printf '%s' "$GLQ" | cut -f5)"
+              GL_SOON_EXPIRE="$(printf '%s' "$GLQ" | cut -f5)"
               # 第 2/3 参（2026-10-09 加）：把 fetch 拿到的「最近到期 / 24h 将过期」
               # 一并交给 delta 落进快照 —— 此前快照只存 date/score/day_total，
               # quota-board 想显示「即将过期」根本没有数据源。
-              if GLD="$(bash "$QUOTA" delta "$GL_SCORE" "$GL_SOONEST" "$GL_SOON_24H")"; then
+              if GLD="$(bash "$QUOTA" delta "$GL_SCORE" "$GL_SOONEST" "$GL_SOON_EXPIRE")"; then
                 GL_ROUND_DELTA="$(printf '%s' "$GLD" | cut -f1)"
                 GL_DAY_TOTAL="$(printf '%s' "$GLD" | cut -f2)"
                 # 快照落盘后立刻回推 Dropbox：本轮窗口约 5.75h，中途 runner 被
@@ -3402,11 +3402,11 @@ jobs:
               _gl_rows=""
               _gl_rows+="$(tree_conn 1)$(tg_entry "$(printf '%s' "$GL_SCORE")" "今日已消耗 $(printf '%s' "$GL_DAY_TOTAL")")"$'\n'
               [ -n "${GL_ROUND_DELTA:-}" ] && _gl_rows+="$(tree_sub 1)$(escape_html "本轮消耗 ${GL_ROUND_DELTA}（自检产生）")"$'\n'
-              # 到期：最近一批 + 24h 内将过期的总额。「-」表示没有带有效期的入账，
+              # 到期：最近一批 + 7 天内将过期的总额。「-」表示没有带有效期的入账，
               # 此时整行省略——不把「没取到」渲染成「00-00 到期」。
               if [ -n "${GL_SOONEST:-}" ] && [ "$GL_SOONEST" != "-" ]; then
-                if [ -n "${GL_SOON_24H:-}" ] && [ "$GL_SOON_24H" != "0" ]; then
-                  _gl_rows+="$(tree_sub 1)$(escape_html "最近到期 ${GL_SOONEST}（该批 ${GL_SOONEST_AMT}）· 24h 内将过期 ${GL_SOON_24H}")"$'\n'
+                if [ -n "${GL_SOON_EXPIRE:-}" ] && [ "$GL_SOON_EXPIRE" != "0" ]; then
+                  _gl_rows+="$(tree_sub 1)$(escape_html "最近到期 ${GL_SOONEST}（该批 ${GL_SOONEST_AMT}）· 7 天内将过期 ${GL_SOON_EXPIRE}")"$'\n'
                 else
                   _gl_rows+="$(tree_sub 1)$(escape_html "最近到期 ${GL_SOONEST}（该批 ${GL_SOONEST_AMT}）")"$'\n'
                 fi
