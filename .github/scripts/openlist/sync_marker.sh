@@ -1025,19 +1025,33 @@ check_sync_marker() {
     if [ "$stats_filtered" != "true" ]; then
       echo "旧 marker 为未过滤统计口径（无 stats_filtered），跳过源端缩小检测，本轮成功后将按新口径重写"
     else
-      # ===== 微抖动闸门: 先按「少了多少」筛噪音，再谈归因（2026-10-09）=====
-      # 背景（实测新金瓶梅4）: 网盘文件被重写/回填会让字节数抖 2 B，而 payload 类
-      #   零容差 ⇒ 2 B 也走完整告警、要人工审批；warning 又会跳过同步 ⇒ marker 基线
-      #   永不刷新 ⇒ 下轮同样 2 B 再告警。实测该任务 last_success 卡在 10-05 不动，
-      #   正是这个死循环。闸门放行后同步成功，基线自然刷新，循环自解。
-      # 判据（两个条件是「且」，缺一不可）:
-      #   ① 绝对量 < SYNC_SHRINK_MIN_BYTES（默认 1 MiB）
-      #   ② 相对量 < SYNC_SHRINK_MIN_PCT_BP（默认 1 bp = 0.01%）
-      #   ① 让大库容忍 MiB 级抖动；② 让小库（<1 MiB）不被 ① 的绝对值放水 ——
-      #      100 KB 的库删掉 50 KB 是 5000 bp，远超 1 bp，照样告警。
-      # 前置条件: 文件数**没有减少**。少文件 = 真删，哪怕只少 1 B 也不能当抖动放行。
+      # ===== 口径迁移闸门: 仅对「分层基线缺失」的旧 marker 放行一次（2026-10-10）=====
+      # 背景: 分层归因(source_meta_bytes/source_payload_bytes)由 ebfcc41(10-08) 引入,
+      #   更早写入的 marker 天然缺这两个字段 ⇒ _shrink_classify 走"不可归因"保守分支
+      #   判 payload ⇒ 告警 ⇒ 跳过同步 ⇒ 基线永不重写 ⇒ 下轮同样告警(死循环)。
+      #   实测新金瓶梅5(22ef011d)/新金瓶梅4(debf0f65) 的 last_success 卡在 10-05 不动。
+      #
+      # ⚠️ 为什么限定在「基线缺失」而不按量级一刀切(2026-10-10 主人纠正):
+      #   按量级放行对所有文件一视同仁 —— 正片 mkv 减 2 B 也会被放行, 而那正是
+      #   本告警要拦的损坏信号。放行必须绑到**文件类型**, 量级只能作为
+      #   "完全没有类型信息时"的兜底。基线缺失 = 恰好没有任何类型信息可用。
+      #
+      # 为什么基线缺失时可以放行: 同步管线不放任何 --delete-*(rclone_flags.sh
+      #   有事故记录), 是"只补不删" ⇒ 放行同步不会造成目标端数据丢失;
+      #   代价仅是这一轮没提醒。放行后同步成功 ⇒ marker 按新口径重写 ⇒
+      #   死循环自解, 之后每轮都能按文件类型准确归因。
+      #   与既有 stats_filtered != true 的旧 marker 同处理(口径迁移一律放行一次)。
+      #
+      # 保守兜底(防止基线缺失时大额减少被静默放行): 仍要求两个条件同时成立
+      #   ① 文件数未减少 —— 少文件 = 真删, 不适用迁移放行
+      #   ② 绝对量 < SYNC_SHRINK_MIN_BYTES(默认 1 MiB) 且 相对量 < 1bp
+      #   两者缺一不可; 超过任一阈值 ⇒ 落到下面的分层归因, 该告警照告警。
+      local _bm _bp _bm_missing=0
+      _bm=$(echo "$marker_json" | jq -r '.source_meta_bytes // empty' 2>/dev/null)
+      _bp=$(echo "$marker_json" | jq -r '.source_payload_bytes // empty' 2>/dev/null)
+      if ! [[ "$_bm" =~ ^[0-9]+$ ]] || ! [[ "$_bp" =~ ^[0-9]+$ ]]; then _bm_missing=1; fi
       local _dust=$((marker_bytes - MARKER_CURRENT_BYTES))
-      if [ "$MARKER_CURRENT_COUNT" -ge "$marker_count" ]; then
+      if [ "$_bm_missing" -eq 1 ] && [ "$MARKER_CURRENT_COUNT" -ge "$marker_count" ]; then
         local _min_abs="${SYNC_SHRINK_MIN_BYTES:-1048576}"
         local _min_bp="${SYNC_SHRINK_MIN_PCT_BP:-1}"
         [[ "$_min_abs" =~ ^[0-9]+$ ]] || _min_abs=1048576
@@ -1045,7 +1059,7 @@ check_sync_marker() {
         local _pct_bp=0
         [ "$marker_bytes" -gt 0 ] && _pct_bp=$((_dust * 10000 / marker_bytes))
         if [ "$_dust" -lt "$_min_abs" ] && [ "$_pct_bp" -lt "$_min_bp" ]; then
-          echo "ℹ️ 源端减小 $(format_bytes "$_dust")（< $(format_bytes "$_min_abs") 且 < ${_min_bp}bp，文件数未减），判定为微抖动，放行同步并刷新基线"
+          echo "ℹ️ 源端减小 $(format_bytes "$_dust")（< $(format_bytes "$_min_abs") 且 < ${_min_bp}bp，文件数未减），分层基线缺失=口径未迁移，文件数未减且减少量微小），放行同步并按新口径重写基线"
           MARKER_ACTION="proceed"
           return 0
         fi
