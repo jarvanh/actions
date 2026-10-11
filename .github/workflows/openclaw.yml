@@ -173,7 +173,6 @@ jobs:
           tg_add_kv _m "影响" "所有归档/回推都将失败（path/insufficient_space），本轮提前结束"
           tg_add_section _m "🧹 清理建议"
           _qrows=""
-          _qrows+="$(tree_conn 0)删 <code>openclaw-failed-*</code> 隔离包（超 2 个自动清，可手动删）"$'\n'
           _qrows+="$(tree_sub 1)检查其他大文件或升级套餐"
           tg_add_block _m "$_qrows"
           tg_add_footer _m
@@ -5521,18 +5520,23 @@ jobs:
           # 2026-10-02 加固：meta 文件**不存在**（启动链没跑到 Run OpenClaw 就断了）同样是
           # 不健康 —— 原判据只认「文件存在但缺版本行」，启动链整体被跳过时这里会放行，
           # 把故障状态照样指向主包（当轮靠 rc=4 完整性校验兜住，属运气不是设计）。
+          # 2026-10-11 失败现场包退役（主人拍板，省配额）：不健康运行**不归档不上传**，
+          # 主包保持最后健康状态；故障状态只留在本地 ~/.openclaw（job 结束即回收）。
+          UNHEALTHY_RUN=0
           if ! grep -q '^RECORDED_SUCCESSFUL_OPENCLAW_VERSION=' /tmp/run-openclaw-meta.env 2>/dev/null; then
-            ARCHIVE_DEST="dropbox:self-hosted/openclaw-failed-$(date -u +%Y%m%d-%H%M).tar.gz"
-            echo "openclaw-failed-$(date -u +%Y%m%d-%H%M).tar.gz" > /tmp/failed-archive-name
-            echo "ℹ️ Unhealthy run detected: background archive targets $ARCHIVE_DEST (main package keeps the last healthy state)."
+            UNHEALTHY_RUN=1
+            echo "ℹ️ Unhealthy run detected: background archive SKIPS the openclaw package (main package keeps the last healthy state)."
           fi
 
           while true; do
-            openclaw_archive_output=""
+            # 2026-10-11 失败现场包退役：不健康运行直接跳过 openclaw 包的归档/上传
+            # （本轮状态本来就坏，没有保存价值；其余 rsstt/网关等数据包照常归档）。
+            if [ "$UNHEALTHY_RUN" = "1" ]; then
+              echo "[$(date '+%F %T')] ⏭️ unhealthy run, skip openclaw package archive (main package keeps last healthy state)"
             # 2026-10-02：归档全程套 timeout —— 循环曾在一个悬挂的归档/上传迭代里卡死
             # 8 小时（无 timeout 的 rclone/网络调用），期间不归档、不告警、整条归档链静音。
             # timeout 杀掉后 flock 随之释放、rc=124 走失败分支照常告警，循环得以自愈。
-            if openclaw_archive_output=$(flock -E 200 -n "$LOCK_FILE" timeout 40m bash /tmp/create-openclaw-archive.sh "$TMP_OPENCLAW_TAR" 2>&1); then
+            elif openclaw_archive_output=$(flock -E 200 -n "$LOCK_FILE" timeout 40m bash /tmp/create-openclaw-archive.sh "$TMP_OPENCLAW_TAR" 2>&1); then
               echo "[$(date '+%F %T')] openclaw archive ok, uploading... ${openclaw_archive_output}"
               new_size=$(stat -c%s "$TMP_OPENCLAW_TAR" 2>/dev/null || echo 0)
               remote_size=0
@@ -6234,15 +6238,15 @@ jobs:
           # 仍拿不到则以 rc=200 走失败分支照常告警且不覆盖云端主包（保守优于脏写）。
           if openclaw_final_output=$(flock -w 600 -E 200 /tmp/openclaw-archive.lock timeout 40m bash /tmp/create-openclaw-archive.sh "$TMP_OPENCLAW_TAR" 2>&1); then
             openclaw_final_upload_output=""
-            echo "5. Resolving archive destination (healthy → main package; unhealthy → openclaw-failed-* isolate)..."
+            echo "5. Resolving archive destination (healthy → main package; unhealthy → skip)..."
             ARCHIVE_DEST="dropbox:self-hosted/openclaw.tar.gz"
             HEALTHY_RUN=0
             if [ -f /tmp/run-openclaw-meta.env ] && grep -q '^RECORDED_SUCCESSFUL_OPENCLAW_VERSION=' /tmp/run-openclaw-meta.env; then
               HEALTHY_RUN=1
             else
-              FAILED_NAME="$(cat /tmp/failed-archive-name 2>/dev/null || echo "openclaw-failed-$(date -u +%Y%m%d-%H%M).tar.gz")"
-              ARCHIVE_DEST="dropbox:self-hosted/${FAILED_NAME}"
-              echo "ℹ️ Unhealthy run: main package will NOT be overwritten; failed state goes to $ARCHIVE_DEST"
+              # 2026-10-11 失败现场包退役（主人拍板，省配额）：不健康运行**不上传**，
+              # 主包保持最后健康状态；本地故障状态随 runner 回收，失败通知已含诊断。
+              echo "ℹ️ Unhealthy run: main package will NOT be overwritten; failed state NOT uploaded."
             fi
             # 体积骤降只记录、不拦截（口径同周期归档）：完整性已由归档脚本的关键文件
             # 校验把关，这里不再拿云端现有包当基准 —— 那会被主动瘦身永久卡死（新包
@@ -6254,21 +6258,17 @@ jobs:
                 echo "ℹ️ 体积较云端下降超 40%（new=${final_new_size}B remote=${final_remote_size}B），已通过完整性校验，正常覆盖"
               fi
             fi
-            if openclaw_final_upload_output=$(rclone copyto "$TMP_OPENCLAW_TAR" "$ARCHIVE_DEST" -v 2>&1); then
+            if [ "$HEALTHY_RUN" != "1" ]; then
+              # 失败现场包退役：不健康运行不上传，临时包就地销毁
+              echo "⏭️ unhealthy run, skip openclaw package upload (main package keeps last healthy state)"
+              rm -f "$TMP_OPENCLAW_TAR"
+            elif openclaw_final_upload_output=$(rclone copyto "$TMP_OPENCLAW_TAR" "$ARCHIVE_DEST" -v 2>&1); then
               echo "final openclaw archive/upload ok → $ARCHIVE_DEST: ${openclaw_final_output}"
               # 大小必须在 rm 之前取——成功上传后临时包即被删除，事后测不到
               openclaw_final_size=$(stat -c%s "$TMP_OPENCLAW_TAR" 2>/dev/null || echo 0)
-              if [ "$HEALTHY_RUN" = "1" ]; then
-                record_archive_result "openclaw.tar.gz" ok "$openclaw_final_size" "覆盖主包"
-                # 2026-10-11 移除版本化快照（主人拍板）：它是主包的服务端副本，
-                # 主包坏它也坏，兜底价值≈0，还常驻一份 4.2GB 云端空间。
-              else
-                record_archive_result "openclaw.tar.gz" ok "$openclaw_final_size" "写入失败现场 · 主包未覆盖"
-                rclone lsf dropbox:self-hosted/ --files-only 2>/dev/null | grep '^openclaw-failed-' | sort -r | tail -n +3 | while read -r OLD_FAILED; do
-                  rclone deletefile "dropbox:self-hosted/${OLD_FAILED}" 2>/dev/null || true
-                done
-                echo "ℹ️ Failed-run archive kept (2 max, openclaw-failed-*); main package untouched."
-              fi
+              record_archive_result "openclaw.tar.gz" ok "$openclaw_final_size" "覆盖主包"
+              # 2026-10-11 移除版本化快照（主人拍板）：它是主包的服务端副本，
+              # 主包坏它也坏，兜底价值≈0，还常驻一份 4.2GB 云端空间。
               rm -f "$TMP_OPENCLAW_TAR"
             else
               rc=$?
