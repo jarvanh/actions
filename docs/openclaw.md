@@ -62,7 +62,7 @@
         │
         ▼
 健康检查（180s）
-  ├─ 成功 → 记录 known-good → 覆盖主包 → 写版本化快照（机制③）
+  ├─ 成功 → 记录 known-good → 覆盖主包
   │
   └─ 失败 → 机制④ 回退 known-good 版本
               │
@@ -73,9 +73,7 @@
               │              └─ 仍失败 → 状态库移位（干净启动面）
               │                         → doctor --fix → 网关重启 → 健康检查
               │
-              └─ 健康检查仍失败 → 机制⑤ 快照成对回滚
-                    ├─ 成功 → 记录 known-good，恢复正常运行
-                    └─ 失败 → 通知 + 失败现场隔离 + 触发下一轮
+              └─ 健康检查仍失败 → 通知 + 失败现场隔离 + 触发下一轮
 ```
 
 ## 三、五层机制
@@ -89,8 +87,8 @@
 - 两次 validate 的错误详情均写入步骤日志与失败通知。
 - 启动动作固定为 `openclaw gateway install --force` + `openclaw gateway restart`，任一失败即本阶段失败。
 - 阶段标记 `FAIL_STAGE` 依次写入 `/tmp/run-openclaw-meta.env`：
-  `preflight_doctor` → `config_validate` → `initial_start` → `fallback_reinstall` → `snapshot_restore`，
-  失败通知里映射为中文：预检修复 / 配置校验 / 首次启动 / 回退重装 / 快照回滚。
+  `preflight_doctor` → `config_validate` → `initial_start` → `fallback_reinstall`，
+  失败通知里映射为中文：预检修复 / 配置校验 / 首次启动 / 回退重装。
 
 ### 机制②：修复动作显式化
 
@@ -108,26 +106,23 @@
 随后 `dump_openclaw_diagnostics` 打印 systemd status、journal（近 10 分钟）与
 `/tmp/openclaw/openclaw-*.log` 最新两个文件的尾部 80 行。
 
-### 机制③：存储三区（主包 / 失败隔离 / 快照池）
+### 机制③：存储两区（主包 / 失败隔离）
 
-三区**全部平铺在 `self-hosted/` 根目录、靠文件名前缀区分**，与同层的
+两区**全部平铺在 `self-hosted/` 根目录、靠文件名前缀区分**，与同层的
 `rsstt.tar.gz` / `zcode.tar.gz` / `CLIProxyAPI.tar.gz` / `CliRelay.tar.gz` 风格一致 ——
-不再用 `snapshots/` / `failed/` 这类无前缀子目录（看不出归属，且清理时容易误伤他物）。
+不再用 `failed/` 这类无前缀子目录（看不出归属，且清理时容易误伤他物）。
 
 | 路径（Dropbox `self-hosted/` 下） | 内容 | 写入者 | 保留 |
 |---|---|---|---|
 | `openclaw.tar.gz` | 主状态包，**永远是最后一次健康状态** | 仅健康运行 | 永久覆盖更新 |
 | `openclaw-failed-<UTC时间>.tar.gz` | 失败运行现场 | 仅失败运行 | 最新 2 份 |
-| `openclaw-snapshot-<UTC日期-时分>-v<版本>.tar.gz` | 版本化健康快照 | 仅健康运行 | 最新 1 份 |
 
-- 快照文件名内嵌版本号（`v<版本>` = 实际通过健康检查的二进制），可按版本检索。
-- 失败运行不覆盖主包、不进快照池；归档循环（每 20 分钟）与最终归档写入同一份 failed 文件
+- 版本化快照已于 2026-10-11 移除（主人拍板）：它是主包的服务端副本，主包坏它也坏，
+  兜底价值≈0，还常驻一份 4.2GB 云端空间。
+- 失败运行不覆盖主包；归档循环（每 20 分钟）与最终归档写入同一份 failed 文件
   （循环把名字写进 `/tmp/failed-archive-name`，最终归档复用它，避免同一轮产生两份）。
-- **保留清理必须按前缀过滤后再排序删除**：这三区与 rsstt/zcode 等归档同处根目录，
-  直接 `lsf | tail -n +4` 会把别人的包删掉。快照按 `openclaw-snapshot-` 前缀取，
-  失败包按 `openclaw-failed-` 前缀取，各留 3 / 2 份。
-  > 旧实现（子目录时期）的清理没加前缀过滤，列快照的另一处却加了 —— 两处口径不一致。
-  > 当时目录里只有 openclaw 的东西所以没暴露，扁平化后必须补上，否则会误删同层归档。
+- **保留清理必须按前缀过滤后再排序删除**：这两区与 rsstt/zcode 等归档同处根目录，
+  直接 `lsf | tail` 会把别人的包删掉。失败包按 `openclaw-failed-` 前缀取，留 2 份。
 - 除这三区外，最终归档还上传 `dropbox:self-hosted/rsstt.tar.gz`（rss-to-telegram 数据）
   与 AI 网关归档（见第六节）。
 - rsstt 归档带空数据保护：数据目录内只有占位 `.keep`（本轮容器没起来）时不打包、不上传，
@@ -164,7 +159,7 @@
   `ℹ️ 体积较云端下降超 40%`，照常覆盖。保留「包为什么变小了」的可追溯性，
   但不再拿它当拦截判据。
 - **归档结果汇总**：各归档分支边归档边把结果（对象 / 结论 / 字节 / 备注）写进
-  `/tmp/openclaw-final-archive-results.tsv`，快照名另写一个文件；最终归档结束后由
+  `/tmp/openclaw-final-archive-results.tsv`；最终归档结束后由
   独立步骤 `Notify OpenClaw final archive result` 渲染成一条通知。之所以不在归档步骤
   内直接发：该步骤多处 `exit 1`（预检失败 / 磁盘不足），写在末尾的通知会随之被跳过。
   临时包成功上传后即被删除，所以大小只能当场记、不能事后反推。
@@ -180,12 +175,8 @@
 - validate 失败：先 `doctor --fix` 修复并复检；**仍失败** → 将 `~/.openclaw/state/openclaw.sqlite*`（含 -wal/-shm）整体移位为 `*.state-bak-<时间戳>`，让回退版本以全新状态库启动，再运行一次 doctor 完成初始化。
 - 移位只发生在确认必要时；被移位的库是新版格式数据，升级回新版后改回原名可找回旧会话。
 
-### 机制⑤：快照成对回滚
-
-- **触发**：回退版本重启后仍未通过健康检查——二进制回退已不足，按"状态 + 版本成对"恢复。
-- **选快照**：优先取池内**回退目标版本**的最新快照（文件名 `-v<版本>` 精确匹配）；不存在则**采纳池内最新快照**——从文件名解析版本并安装对应二进制（快照池只收健康对，比可能过期的 known-good 文件更可信）。
-- **动作**：停止网关（取消 systemd 自动重启循环）→ 当前状态整体移位为 `~/.openclaw.broken-bak-<时间戳>` → 解包快照至 `~/.openclaw` → 修复权限 → 网关重启 → 健康检查 → 记录 known-good。
-- **失败路径**：快照池为空、下载失败、解包失败（自动还原现场）、回滚后仍不健康——均转入通知 + 失败现场隔离 + 触发下一轮；`~/.openclaw.broken-bak-*` 永远保留供人工分析。
+> **机制⑤（快照成对回滚）已于 2026-10-11 移除**（主人拍板）：快照是主包的服务端副本，
+> 主包坏它也坏，兜底价值≈0。回退重装失败即通知人工介入，现场保留分析。
 
 ## 四、标准操作流程
 
@@ -193,7 +184,7 @@
 
 1. 新版本发布后，下一轮运行自动安装。
 2. 预检门先验证：配置兼容 → 直接以新版运行；不兼容 → doctor 试修 → 仍不行则自动回退 known-good 版本，通知中含两次 validate 详情。
-3. 稳定运行在新版本后，known-good 与快照池自动随之更新。
+3. 稳定运行在新版本后，known-good 自动随之更新。
 
 ### 手动回退到指定版本
 
@@ -203,22 +194,6 @@ npm i -g openclaw@<目标版本>
 mv ~/.openclaw/state/openclaw.sqlite{,.state-bak-$(date +%s)}   # 含 -wal/-shm
 openclaw gateway restart
 ```
-
-### 从快照恢复（手动）
-
-```bash
-# 1. 列出快照（按前缀过滤，同层还有 rsstt/zcode 等别的归档）
-rclone lsf dropbox:self-hosted/ --files-only | grep '^openclaw-snapshot-'
-
-# 2a. 整包回滚：覆盖主包，下一轮运行自动恢复
-rclone copyto "dropbox:self-hosted/<快照名>.tar.gz" dropbox:self-hosted/openclaw.tar.gz
-
-# 2b. 只取单个文件
-rclone copyto "dropbox:self-hosted/<快照名>.tar.gz" /tmp/restore.tar.gz
-tar -xzf /tmp/restore.tar.gz -C /tmp/restore .openclaw/openclaw.json
-```
-
-> 快照名中的 `v<版本>` 是写下该状态的 OpenClaw 版本；整包回滚后如当前安装版本更新且拒绝该配置，预检门会自动导向回退，不会硬启动。
 
 ### 通知清单
 
@@ -298,8 +273,8 @@ emoji 标题 + ━━━ 分隔线 + 键值/分节区 + 统一收尾行 `⏱ 已
 
 | 场景 | 行为 |
 |---|---|
-| 配置被外部改成新旧版本都不认 | 快照池非空时由机制⑤成对恢复；池为空（首次部署窗口）需人工修复配置 |
-| 快照池本身不可用（Dropbox 异常） | 依赖 Dropbox 自身版本历史，工作流无法自愈 |
+| 配置被外部改成新旧版本都不认 | doctor --fix 尝试修复；失败则回退重装，仍失败需人工修复配置 |
+| 云端主包本身损坏（Dropbox 异常写入） | 依赖 Dropbox 自身版本历史（revision），工作流无法自愈 |
 | 需要语义决策的迁移（agent roster 归属等） | doctor 与恢复机制拒绝代做决定，需人工显式声明 |
 | 降级/状态库移位 | 会话索引丢失（工作区与配置不受影响）；`*.state-bak-*` / `*.broken-bak-*` 保留可恢复 |
 | Dropbox 挂载失败 | 本轮以首次启动形态运行，不恢复历史状态 |

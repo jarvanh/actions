@@ -173,7 +173,6 @@ jobs:
           tg_add_kv _m "影响" "所有归档/回推都将失败（path/insufficient_space），本轮提前结束"
           tg_add_section _m "🧹 清理建议"
           _qrows=""
-          _qrows+="$(tree_conn 0)删旧 <code>openclaw-snapshot-*</code>（只保最新 1 份）"$'\n'
           _qrows+="$(tree_conn 0)删 <code>openclaw-failed-*</code> 隔离包（超 2 个自动清，可手动删）"$'\n'
           _qrows+="$(tree_sub 1)检查其他大文件或升级套餐"
           tg_add_block _m "$_qrows"
@@ -4039,9 +4038,9 @@ jobs:
       - name: Run OpenClaw
         id: run_openclaw
         # 2026-10-02 事故根因：任一前置服务步骤（quota-board/trae/zcode2api…）硬失败时，
-        # 本步骤被静默跳过 —— meta 不写、网关不起、快照回滚不跑，且 outcome=skipped 连
+        # 本步骤被静默跳过 —— meta 不写、网关不起，且 outcome=skipped 连
         # 「Notify OpenClaw startup failure」（只认 failure）都不触发，OpenClaw 整条链
-        # 无声消失。本步骤的自愈机制（fallback 重装、快照回滚、失败通知）本就为「自己
+        # 无声消失。本步骤的自愈机制（fallback 重装、失败通知）本就为「自己
         # 失败」设计，理应在任何前置失败后仍获得执行机会；cancelled 除外 —— 主动取消
         # 时不该再拉起网关。
         if: ${{ !cancelled() }}
@@ -4340,105 +4339,13 @@ jobs:
                 echo "FALLBACK_REINSTALL_DURATION_SEC=$((FALLBACK_REINSTALL_END_TS - FALLBACK_REINSTALL_BEGIN_TS))" >> "$RUN_OPENCLAW_META"
                 dump_openclaw_diagnostics
 
-                echo "FAIL_STAGE=snapshot_restore" >> "$RUN_OPENCLAW_META"
-                echo "🔁 Fallback reinstall did not become healthy. Trying automatic snapshot rollback (state + version pair from the healthy snapshot pool)..."
-                # 候选：版本匹配的优先，其余依次；一律新→旧。
-                # 关键：**逐个校验包内配置**，通过才采用。快照池的「健康」是产出时贴的标签，
-                # 而健康检查只看进程、不看磁盘配置 —— 配置被改坏后热重载会拒绝它并继续用内存
-                # 里的旧配置服务，/health 照常 200，坏配置就这样顶着「健康」标签进了池。
-                # 只取最新一份必然把同一故障原样恢复（2026-09-18 事故：回滚"成功"却原地失败），
-                # 故必须逐个验、跳过坏的、往前找更旧的。
-                SNAP_POOL_ALL="$(rclone lsf dropbox:self-hosted/ --files-only 2>/dev/null | grep "^openclaw-snapshot-.*-v" | sort -r || true)"
-                SNAP_MATCHED="$(printf '%s\n' "$SNAP_POOL_ALL" | grep -- "-v${TARGET_VERSION}.tar.gz" || true)"
-                SNAP_OTHERS="$(printf '%s\n' "$SNAP_POOL_ALL" | grep -v -- "-v${TARGET_VERSION}.tar.gz" || true)"
-                SNAP_CANDIDATES="$(printf '%s\n%s\n' "$SNAP_MATCHED" "$SNAP_OTHERS")"
-                SNAPSHOT_TGZ=""
-                SNAP_CHECK_DIR="$(mktemp -d /tmp/snapshot-check.XXXXXX)"
-                while IFS= read -r _cand; do
-                  [ -z "$_cand" ] && continue
-                  echo "🔎 Checking snapshot candidate: $_cand"
-                  if ! rclone copyto "dropbox:self-hosted/${_cand}" /tmp/snapshot-restore.tar.gz -v 2>&1 | tail -n 1; then
-                    echo "⚠️ Download failed; skipping: $_cand"
-                    continue
-                  fi
-                  rm -rf "$SNAP_CHECK_DIR/.openclaw"
-                  if ! tar -xzf /tmp/snapshot-restore.tar.gz -C "$SNAP_CHECK_DIR" .openclaw/openclaw.json 2>/dev/null; then
-                    echo "⚠️ Cannot extract openclaw.json; skipping: $_cand"
-                    continue
-                  fi
-                  if OPENCLAW_CONFIG_PATH="$SNAP_CHECK_DIR/.openclaw/openclaw.json" openclaw config validate >/dev/null 2>&1; then
-                    SNAPSHOT_TGZ="$_cand"
-                    echo "✅ Snapshot config is valid; selected: $_cand"
-                    break
-                  fi
-                  echo "⚠️ Snapshot carries an invalid config (restoring it would reproduce the failure); skipping: $_cand"
-                done <<< "$SNAP_CANDIDATES"
-                if [ -n "$SNAPSHOT_TGZ" ]; then
-                  # 版本成对：采用快照自带版本。放在**选定之后**——为坏快照白装一次版本毫无意义。
-                  ADOPTED_VERSION="$(printf '%s\n' "$SNAPSHOT_TGZ" | sed -n 's/.*-v\([0-9]\{4\}\.[0-9]*\.[0-9]*\)\.tar\.gz/\1/p')"
-                  if [ -n "$ADOPTED_VERSION" ] && [ "$ADOPTED_VERSION" != "$TARGET_VERSION" ]; then
-                    echo "🔄 Adopting snapshot version $ADOPTED_VERSION: installing openclaw@$ADOPTED_VERSION before restore..."
-                    npm i -g "openclaw@$ADOPTED_VERSION"
-                    fix_openclaw_permissions
-                    TARGET_VERSION="$ADOPTED_VERSION"
-                    echo "SNAPSHOT_ADOPTED_VERSION=$ADOPTED_VERSION" >> "$RUN_OPENCLAW_META"
-                  fi
-                  # 换版本后 schema 可能不同：用**装好的**二进制再验一次，避免采用版本之后才失败
-                  if ! OPENCLAW_CONFIG_PATH="$SNAP_CHECK_DIR/.openclaw/openclaw.json" openclaw config validate >/dev/null 2>&1; then
-                    echo "❌ Selected snapshot's config is invalid under openclaw@$TARGET_VERSION; aborting snapshot rollback."
-                    SNAPSHOT_TGZ=""
-                  fi
-                fi
-                rm -rf "$SNAP_CHECK_DIR"
-                if [ -z "$SNAPSHOT_TGZ" ]; then
-                  echo "ℹ️ Snapshot rollback unavailable (pool empty / unusable / every candidate carries an invalid config)."
-                else
-                  # 选中的快照已在候选校验时下到 /tmp/snapshot-restore.tar.gz，不再重复下载
-                  echo "🛑 Stopping gateway (cancels the systemd auto-restart loop)..."
-                  systemctl --user stop openclaw-gateway.service 2>/dev/null || true
-                  openclaw gateway stop 2>/dev/null || true
-                  # failed 计数跨 stop 存续：不清掉，下方 install 的 restart 会被
-                  # "Start request repeated too quickly" 拒绝（2026-10-03 事故，
-                  # 快照回滚尚未来得及验证就被熔断判死）。
-                  systemctl --user reset-failed openclaw-gateway.service 2>/dev/null || true
-                  sleep 3
-                  BAK_TS="$(date +%Y%m%d-%H%M%S)"
-                  mv "$HOME/.openclaw" "$HOME/.openclaw.broken-bak-$BAK_TS"
-                  if tar -xzf /tmp/snapshot-restore.tar.gz -C "$HOME" && [ -s "$HOME/.openclaw/openclaw.json" ]; then
-                    echo "✅ State restored from snapshot (broken state kept at ~/.openclaw.broken-bak-$BAK_TS)."
-                    fix_openclaw_permissions
-                    if openclaw gateway install --force && openclaw gateway restart && wait_for_openclaw_health "snapshot_restore" 180 5; then
-                      record_successful_openclaw_version "$TARGET_VERSION"
-                      echo "✅ OpenClaw is healthy after automatic snapshot rollback!"
-                      # 回滚成功 ⇒ 本步整体成功。置标志跳过块尾的失败判定：此前没有这一步，
-                      # 回滚明明救回来了也照样落到 fail_startup 被判 exit 1（既有缺陷）。
-                      SNAPSHOT_ROLLBACK_OK=1
-                    else
-                      dump_openclaw_diagnostics
-                      err="快照回滚（状态+版本成对恢复）后仍无法启动；损坏状态保留于 ~/.openclaw.broken-bak-$BAK_TS"
-                      fail_startup "$err"
-                    fi
-                  else
-                    echo "❌ Snapshot extraction failed; restoring the previous state and giving up."
-                    rm -rf "$HOME/.openclaw"
-                    mv "$HOME/.openclaw.broken-bak-$BAK_TS" "$HOME/.openclaw"
-                    err="快照解包失败，已还原现场"
-                    fail_startup "$err"
-                  fi
-                fi
-                # 走到这里有两种情况，必须分开说，别把「没回滚」谎报成「回滚了还失败」：
-                #   池空/候选全坏 → 回滚根本没发生；
-                #   其余（选中并恢复后健康检查仍不过）→ 回滚确实做了但没救回来。
-                # 回滚成功时 SNAPSHOT_ROLLBACK_OK=1，此处整段跳过（本步已成功）。
-                if [ "${SNAPSHOT_ROLLBACK_OK:-0}" = "1" ]; then
-                  :
-                elif [ -z "$SNAPSHOT_TGZ" ]; then
-                  err="回退到最近记录版本后，OpenClaw 依然无法启动；且快照池无可用的健康快照（池空或候选配置均无效），快照回滚未执行"
-                  fail_startup "$err"
-                else
-                  err="回退到最近记录版本后，OpenClaw 依然无法启动（健康检查失败）"
-                  fail_startup "$err"
-                fi
+                # 2026-10-11 移除版本化快照回滚（主人拍板）：快照是主包的服务端副本，
+                # 主包坏它也坏，兜底价值≈0，却长期占用一份 4.2GB 云端空间。自愈链
+                # 收敛为：doctor --fix → 回退重装（已记录的兼容版本）。走到这里说明
+                # 两条都失败了，直接判死走失败通知（人工介入，现场保留）。
+                echo "FAIL_STAGE=fallback_reinstall" >> "$RUN_OPENCLAW_META"
+                err="回退到最近记录版本（${TARGET_VERSION:-未知}）重装后，OpenClaw 依然无法启动（健康检查失败）"
+                fail_startup "$err"
               fi
           fi
 
@@ -4532,7 +4439,6 @@ jobs:
                 config_validate) fail_stage_label="配置校验";;
                 initial_start) fail_stage_label="首次启动";;
                 fallback_reinstall) fail_stage_label="回退重装";;
-                snapshot_restore) fail_stage_label="快照回滚";;
                 *) fail_stage_label="$fail_stage";;
               esac
             fi
@@ -4759,10 +4665,10 @@ jobs:
           # 配置可用性校验：包内 openclaw.json 必须是**当前版本能接受**的配置。
           # 为什么必须卡在这里：网关的「健康」只反映**运行中的进程**，不反映**磁盘上的配置**。
           # 配置被改坏后热重载会拒绝它、继续用内存里的旧配置服务，/health 照常 200，
-          # 于是本脚本会把磁盘上那份坏配置打进包、顶着「健康」标签进主包与快照池；
-          # 下轮启动读到的就是坏配置，回滚又把同一份坏配置恢复一遍 —— 故障自我复现。
-          # （2026-09-18 事故即此形态：heartbeat 写了无效键 enabled，回滚"成功"却原地失败。）
-          # 退出码 5 = 配置不可用，调用方按归档失败处理：不覆盖云端、不入快照池。
+          # 于是本脚本会把磁盘上那份坏配置打进包、顶着「健康」标签覆盖云端主包；
+          # 下轮启动读到的就是坏配置，同一故障自我复现。
+          # （2026-09-18 事故即此形态：heartbeat 写了无效键 enabled。）
+          # 退出码 5 = 配置不可用，调用方按归档失败处理：不覆盖云端。
           if command -v openclaw >/dev/null 2>&1; then
             if ! OPENCLAW_CONFIG_PATH="$STAGE_DIR/.openclaw/openclaw.json" openclaw config validate >/dev/null 2>&1; then
               echo "openclaw_archive_config_invalid path=openclaw.json" >&2
@@ -6260,10 +6166,6 @@ jobs:
             fi
           }
 
-          # 快照名单独记（它是主包的副本，混进明细会与主包重复计数）
-          FINAL_ARCHIVE_SNAPSHOT="/tmp/openclaw-final-snapshot-name"
-          rm -f "$FINAL_ARCHIVE_SNAPSHOT"
-
           echo "4. Performing final archive to Dropbox..."
           cleanup_archive_outputs() {
             rm -f /tmp/openclaw-final.tar.gz /tmp/rsstt.tar.gz /tmp/zcode-final.tar.gz 2>/dev/null || true
@@ -6358,34 +6260,8 @@ jobs:
               openclaw_final_size=$(stat -c%s "$TMP_OPENCLAW_TAR" 2>/dev/null || echo 0)
               if [ "$HEALTHY_RUN" = "1" ]; then
                 record_archive_result "openclaw.tar.gz" ok "$openclaw_final_size" "覆盖主包"
-                echo "6. Versioned snapshot (every healthy run, keep 1)..."
-                SNAP_VERSION="$(grep '^RECORDED_SUCCESSFUL_OPENCLAW_VERSION=' /tmp/run-openclaw-meta.env | tail -n 1 | cut -d= -f2-)"
-                SNAP_NAME="openclaw-snapshot-$(date -u +%Y%m%d-%H%M)-v${SNAP_VERSION}.tar.gz"
-                # 优化（2026-10-01）：原为把同一份 4.5GB 包**再传一遍**（本机上行
-                # 走两次，实测约 3 分钟纯浪费）。改云端→云端服务端复制：主包刚上传
-                # 完，云端已有完全相同的一份，Dropbox 内部拷贝不经本机带宽。
-                # 实测 169MB 服务端复制 3.8s；快照功能与保留策略完全不变。
-                # 兜底：服务端复制失败时回退本机上传，绝不丢快照。
-                if rclone copyto "dropbox:self-hosted/openclaw.tar.gz" "dropbox:self-hosted/${SNAP_NAME}" -v 2>&1; then
-                  echo "✅ Versioned snapshot created via server-side copy: dropbox:self-hosted/${SNAP_NAME}"
-                  # 快照名必须两个分支都写：Notify 步骤靠 [ -s "$SNAPSHOT_FILE" ] 决定
-                  # 通知里是否带「快照」行。首版只在回退分支写，走服务端复制成功时
-                  # 该行静默消失（2026-10-01 发现并修复）。
-                  printf '%s\n' "$SNAP_NAME" > "$FINAL_ARCHIVE_SNAPSHOT"
-                elif rclone copyto "$TMP_OPENCLAW_TAR" "dropbox:self-hosted/${SNAP_NAME}" -v 2>&1; then
-                  echo "⚠️ Versioned snapshot via server-side copy failed, fell back to local upload: dropbox:self-hosted/${SNAP_NAME}"
-                  printf '%s\n' "$SNAP_NAME" > "$FINAL_ARCHIVE_SNAPSHOT"
-                else
-                  echo "⚠️ Versioned snapshot upload failed (non-fatal)."
-                fi
-                # 保留清理**必须按前缀过滤**：本目录是 self-hosted/ 根，同层还有
-                # rsstt/zcode/CLIProxyAPI/CliRelay 等别人的归档，直接 lsf|tail 会误删。
-                # 只保留最新 1 份：单份 4.2G，3 份 = 12.6G，占空间且回滚池用不上这么深
-                # （回滚是逐个验配置往前找，1 份已能覆盖「主包被坏状态覆盖」的兜底场景）。
-                # tail -n +2 = 排序后从第 2 份起全删（保留第 1 份 = 最新）。
-                rclone lsf dropbox:self-hosted/ --files-only 2>/dev/null | grep '^openclaw-snapshot-' | sort -r | tail -n +2 | while read -r OLD_SNAP; do
-                  rclone deletefile "dropbox:self-hosted/${OLD_SNAP}" 2>/dev/null || true
-                done
+                # 2026-10-11 移除版本化快照（主人拍板）：它是主包的服务端副本，
+                # 主包坏它也坏，兜底价值≈0，还常驻一份 4.2GB 云端空间。
               else
                 record_archive_result "openclaw.tar.gz" ok "$openclaw_final_size" "写入失败现场 · 主包未覆盖"
                 rclone lsf dropbox:self-hosted/ --files-only 2>/dev/null | grep '^openclaw-failed-' | sort -r | tail -n +3 | while read -r OLD_FAILED; do
@@ -6601,7 +6477,6 @@ jobs:
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 
           RESULTS_FILE="/tmp/openclaw-final-archive-results.tsv"
-          SNAPSHOT_FILE="/tmp/openclaw-final-snapshot-name"
 
           msg=""
           # 归档步骤在记录任何结果前就结束了（预检 exit 1 / 运行被取消）：降级为「未完成」
@@ -6664,10 +6539,6 @@ jobs:
           tg_add_kv msg "结果" "$result_parts"
           if [ "$ok_n" -gt 0 ]; then
             tg_add_kv msg "大小" "合计 $(format_bytes "$total_bytes")"
-          fi
-          # 快照是主包的副本，单列一行、不并入明细与合计（否则与主包重复计数）
-          if [ -s "$SNAPSHOT_FILE" ]; then
-            tg_add_path msg "快照" "$(cat "$SNAPSHOT_FILE")"
           fi
 
           tg_add_section msg "📦 归档明细 · $((ok_n + fail_n + skip_n))"
