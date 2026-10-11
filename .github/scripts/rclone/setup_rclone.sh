@@ -129,6 +129,25 @@ check_conf() {
   return 0
 }
 
+# 瞬时故障防线：check_conf 单发直判容易被毫秒级抖动打死（实测 run 38174654301：
+# 前一秒 Dropbox 恢复版校验通过网络列举成功，100ms 后最终校验 listremotes 读空），
+# 故加 3 次指数退避重试（3s/6s，最坏 +9s），就地自愈、省掉整轮接力。
+check_conf_retry() {
+  local delay=3 i
+  for i in 1 2 3; do
+    if check_conf; then
+      [ "$i" -gt 1 ] && echo "check_conf 第 ${i} 次尝试通过"
+      return 0
+    fi
+    if [ "$i" -lt 3 ]; then
+      echo "::warning::check_conf 第 ${i}/3 次失败，${delay}s 后重试"
+      sleep "$delay"
+      delay=$((delay * 2))
+    fi
+  done
+  return 1
+}
+
 write_secret_conf() {
   local content="$1"
   if [ -z "$content" ]; then
@@ -205,7 +224,7 @@ do_config() {
       cp "$CONF" "$persisted.fallback"
       mv "$persisted" "$CONF"
       chmod 600 "$CONF"
-      if check_conf; then
+      if check_conf_retry; then
         echo "已从 $PERSIST_REMOTE 恢复 rclone.conf（校验通过）"
         mask_conf
       else
@@ -222,8 +241,13 @@ do_config() {
   fi
 
   # 4. 最终有效性检查：conf 无效则本轮必然失败，尽早报错
-  if ! check_conf; then
+  # （重试由 check_conf_retry 兜底；仍失败则是真问题，比如 secret 本身损坏）
+  if ! check_conf_retry; then
     echo "::error::rclone.conf 有效性检查失败（remote 不可用）"
+    # 失败原因落盘：同 job 的收尾通知 step（if: always()）读取后拼进 TG 消息，
+    # 省得主人去翻日志。文件约定：/tmp/wf-fail-reason（一行文本）。
+    # 其他 workflow 不读此文件，写入无副作用（脚本为 23 个 workflow 共用）
+    printf 'rclone.conf 有效性检查失败（remote 不可用，已重试 3 次）\n' > /tmp/wf-fail-reason 2>/dev/null || true
     # 排查信息：conf 实际路径 + rclone 原始报错（stderr 平时被 check_conf 吞掉）
     # remote 列表本身不含凭据，conf 内的敏感值已在前面 ::add-mask::，可安全输出
     echo "rclone 实际使用的 conf: $(rclone config file 2>&1 | tail -n 1)"
