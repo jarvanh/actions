@@ -496,6 +496,31 @@ def latency_probe(targets, proxy_env, samples=4, timeout=8.0):
 
 
 # ---------------------------------------------------------------------------
+# 直连出口 IP（bypass 校验基础，三套共用）
+# ---------------------------------------------------------------------------
+def direct_egress_ip(timeout=8):
+    """runner 直连出口 IP：用于校验「测速流量真的进了代理节点」。
+
+    原实现挂在 taier_speedtest（2026-10-11 上抽到共享层）：cdn/gitee 两套此前没有
+    bypass 校验，测速流量是否真走了节点完全靠 switch_proxy 正确性保证、无仪器自证。
+    多源降级（ipify → ifconfig.me → myip.ipip.net），全部失败返回 ''（调用方据此
+    跳过校验，不阻塞测速）。
+    """
+    for url in ('https://api.ipify.org', 'https://ifconfig.me/ip', 'https://myip.ipip.net'):
+        try:
+            # 显式直连（禁环境代理）：这里要的就是 runner 自身出口
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=timeout) as r:
+                text = r.read().decode('utf-8', 'ignore')
+            m = re.search(r'(?:\d{1,3}\.){3}\d{1,3}', text)
+            if m:
+                return m.group(0)
+        except Exception:
+            continue
+    return ''
+
+
+# ---------------------------------------------------------------------------
 # 测速点 IP 归属查询与「📍 测速点网络」统一分节
 # ---------------------------------------------------------------------------
 def resolve_host_ipv4(target, timeout=5):

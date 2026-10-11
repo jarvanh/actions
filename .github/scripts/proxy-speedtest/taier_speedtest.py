@@ -56,6 +56,7 @@ from speedtest_common import (
     # 到点收摊判据由共享层提供（四套测速同一份实现，避免各写一遍后漂移）
     should_stop_for_budget,
     speedtest_budget_deadline,
+    direct_egress_ip,
     tg_entry, tg_entry_codes,
     tg_footer_line,
     tg_format_elapsed,
@@ -492,19 +493,8 @@ def stop_mihomo_tun():
     log_progress('mihomo_tun_stopped')
 
 
-def direct_egress_ip():
-    """runner 直连出口 IP：用于校验「测速流量真的进了代理节点」。"""
-    for url in ('https://api.ipify.org', 'https://ifconfig.me/ip', 'https://myip.ipip.net'):
-        try:
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=8) as r:
-                text = r.read().decode('utf-8', 'ignore')
-            m = re.search(r'(?:\d{1,3}\.){3}\d{1,3}', text)
-            if m:
-                return m.group(0)
-        except Exception:
-            continue
-    return ''
+# direct_egress_ip 已上抽到 speedtest_common（2026-10-11）：cdn/gitee 接入 bypass 校验
+# 时需要同一份实现，避免三套各写一遍后漂移。本文件经 import 使用，行为不变。
 
 
 # ---------------------------------------------------------------------------

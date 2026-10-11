@@ -48,6 +48,7 @@ from speedtest_common import (
     build_node_metric_prefix,
     build_subscription_bundle,
     build_target_network_section,
+    direct_egress_ip,
     fetch_ip_network_info,
     latency_probe,
     log_progress,
@@ -390,7 +391,32 @@ def gitee_push_speedtest(env, size_mib, push_timeout, branch, via_proxy=True):
 # ----------------------------------------------------------------------------
 # 单节点测试编排
 # ----------------------------------------------------------------------------
-def speedtest_single_node(item, proxy_env, cfg, download_urls):
+def proxied_egress_ip(proxy_env, timeout=8):
+    """经 mihomo mixed-port 查当前节点的出口 IP（bypass 校验用，2026-10-11 新增）。
+
+    与 direct_egress_ip（共享层）同源不同路：这里必须显式走代理 Handler，
+    拿到的是「测速流量实际出口」；两值相同 = 节点切换没生效 / 流量没进节点。
+    失败返回 ''（调用方跳过该节点校验，不判死）。
+    """
+    proxy = proxy_env.get('HTTP_PROXY') or proxy_env.get('HTTPS_PROXY')
+    if not proxy:
+        return ''
+    handlers = [urllib.request.ProxyHandler({'http': proxy, 'https': proxy})]
+    opener = urllib.request.build_opener(*handlers)
+    for url in ('https://api.ipify.org', 'https://ifconfig.me/ip'):
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with opener.open(req, timeout=timeout) as r:
+                text = r.read().decode('utf-8', 'ignore')
+            m = re.search(r'(?:\d{1,3}\.){3}\d{1,3}', text)
+            if m:
+                return m.group(0)
+        except Exception:
+            continue
+    return ''
+
+
+def speedtest_single_node(item, proxy_env, cfg, download_urls, direct_ip=''):
     name = item.get('name', '')
     log_progress('node_test_start', name=name, type=item.get('type', ''))
     result = {
@@ -412,9 +438,19 @@ def speedtest_single_node(item, proxy_env, cfg, download_urls):
     else:
         result['upload'] = {'ok': False, 'mibps': None, 'error': 'disabled'}
     result['ok'] = bool(result['latency']['ok'] or result['download']['ok'])
+    # bypass 校验（2026-10-11 对齐 taier）：经代理查当前节点出口 IP，与 runner 直连
+    # 出口相同 = 流量没进节点（切换未生效/节点是透明直连），该节点结果不可信判失败。
+    # 查询失败（direct_ip 为空或代理探测失败）→ 跳过校验不判死（fail-open，与 taier 一致）。
+    result['exit_ip'] = proxied_egress_ip(proxy_env)
+    result['bypass'] = bool(direct_ip and result['exit_ip'] and result['exit_ip'] == direct_ip)
+    if result['bypass']:
+        result['ok'] = False
+        result['bypass_reason'] = f"出口 IP 与 runner 直连出口相同（{direct_ip}），测速流量未进节点"
+        log_progress('node_bypass_detected', name=name, exit_ip=direct_ip)
     # 注：upload 字段一并输出，便于从日志直接排查上行测速结果（无需解析最终报告）
     log_progress('node_test_done', name=name, latency_ms=result['latency'].get('median_ms'),
-                 download_mibps=result['download'].get('mibps'), upload_mibps=result['upload'].get('mibps'))
+                 download_mibps=result['download'].get('mibps'), upload_mibps=result['upload'].get('mibps'),
+                 bypass=result['bypass'])
     return result
 
 
@@ -745,6 +781,11 @@ def main():
 
     proxy_env = build_proxy_env(env)
 
+    # bypass 校验基线（2026-10-11 对齐 taier）：runner 直连出口 IP。
+    # 拿不到（网络抖动/三源全失败）→ 跳过全部节点的 bypass 校验（fail-open），照常测速。
+    direct_ip = direct_egress_ip()
+    log_progress('direct_egress_resolved', ip=direct_ip)
+
     # 构建订阅源映射：抓取 PROXY_SPEEDTEST_SUBSCRIPTION_URLS 指向的订阅，解析出每个节点的
     # 原始配置（share_link / proxy YAML），供后续导出 gist 订阅使用。无订阅源时跳过（gist
     # 上传会产出空订阅，仍安全返回）。
@@ -857,7 +898,8 @@ def main():
                             'upload': {'ok': False, 'error': 'disabled'},
                             'source_entry': {}, 'mode': 'download'})
             continue
-        node_result = speedtest_single_node(item, proxy_env, CONFIG, download_urls)
+        node_result = speedtest_single_node(item, proxy_env, CONFIG, download_urls,
+                                            direct_ip=direct_ip)
         # 挂载该节点的原始订阅配置，供后续导出 gist 订阅；mode 决定 gist 排序度量
         # （开启上行测速时用 upload_mibs，否则用 download_mibs）。
         node_result['source_entry'] = item.get('source_entry', {}) or {}
@@ -891,6 +933,9 @@ def main():
         'results': results,
         # 直连基线：供通知展示「家庭宽带 vs 节点」对照（拿不到时 ok=False，不带数字）
         'direct_baseline': direct_baseline,
+        # bypass 校验（与 taier 同口径）：命中数与直连出口，供通知展示「疑似未走代理」
+        'direct_egress_ip': direct_ip,
+        'bypass_hits': sum(1 for r in results if r.get('bypass')),
         # 到点收摊判据（供下游/事后分析区分「测完」与「没测完但不算失败」）
         'aborted_due_to_runtime': aborted_due_to_runtime,
         'runtime_abort_reason': runtime_abort_reason,
@@ -966,7 +1011,8 @@ def main():
         tg_res = send_telegram_chunked(env, '\n'.join(build_telegram_lines(
             results, meta=meta, gist_res=gist_res, bundle=bundle,
             aborted_due_to_runtime=aborted_due_to_runtime,
-            runtime_abort_reason=runtime_abort_reason)))
+            runtime_abort_reason=runtime_abort_reason,
+            direct_ip=direct_ip, bypass_hits=summary.get('bypass_hits', 0))))
         # 发送层不写 stderr（python 侧靠返回值），失败原因必须回传日志，否则
         # 400 解析失败/限流会表现为「通知静默消失」（规范 · 发送层）
         log_progress('telegram_send_finished', sent=bool(tg_res.get('sent')),
@@ -990,7 +1036,8 @@ def _result_metric_item(r):
 
 
 def build_telegram_lines(results, *, meta, gist_res, bundle=None,
-                         aborted_due_to_runtime=False, runtime_abort_reason=''):
+                         aborted_due_to_runtime=False, runtime_abort_reason='',
+                         direct_ip='', bypass_hits=0):
     """生成人性化 Telegram 通知（统一 HTML 版式，对齐全库通知模板）：
     emoji 标题 + ━━━ 分隔线 + 键值概览（数值裸文本）+ 树形 TOP5（节点 <code>）+
     订阅状态 + 统一收尾区（⏱ 已运行 · 🔗 运行日志，读 TG_RUN_URL 环境变量）。"""
@@ -1030,6 +1077,9 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None,
     # ⚠️ 同 taier：注释与 f-string 都在，赋值行漏了 ⇒ 标题渲染即 NameError、通知静默发不出。
     # 判据与注释、规范（规范 · 3.x CDN 测速：0 可用节点降级 ⚠️）一致。
     _title_emoji = '⚠️' if (not ok_results or aborted_due_to_runtime) else '✅'
+    # 全部可用节点都命中 bypass ⇒ 结果不可信，标题同样降 ⚠️（与 taier 规范一致）
+    if ok_results and bypass_hits >= len(ok_results):
+        _title_emoji = '⚠️'
     _label = (merged_env().get('PROXY_SPEEDTEST_LABEL') or '').strip()
     _title_prefix = f'{_label} · ' if _label else ''
     lines = [
@@ -1069,6 +1119,14 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None,
         lines.append('')
     else:
         lines.append('⚠️ 没有节点测速成功')
+        lines.append('')
+
+    # bypass 校验命中分节（与 taier 同款）：有可用节点但全部命中 bypass 时降 ⚠️ 的逻辑
+    # 放在标题 emoji 处；这里负责正文交代「多少个节点疑似未走代理」
+    if bypass_hits:
+        lines.append('⚠️ 疑似未走代理')
+        lines.append(f"<code>  └─ </code>{bypass_hits} 个节点的出口 IP 与 runner 直连出口"
+                     f"（{tg_entry(direct_ip)}）相同，节点切换可能未生效，结果不可信")
         lines.append('')
 
     # 失败节点明细（与 taier 对齐：原因可见，便于区分拒测/超时/鉴权失败）
