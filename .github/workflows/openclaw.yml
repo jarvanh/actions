@@ -3250,7 +3250,8 @@ jobs:
           # 票仓与代码真源（Dropbox）
           AUTOCLAW_SNAPSHOT_REMOTE: dropbox:self-hosted/autoclaw-proxy/auth-snapshot.json
           AUTOCLAW_APP_REMOTE: dropbox:self-hosted/autoclaw-proxy/app
-          AUTOCLAW_PORT: "8321"
+          # 2026-10-11：8321 归 quota-board（qb 隧道源站），autoclaw 反代挪 8322
+          AUTOCLAW_PORT: "8322"
         run: |
           set -uo pipefail
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
@@ -3294,7 +3295,17 @@ jobs:
                 || echo "::warning::[autoclaw] 快照回推失败（票仍是可复用长票时无害；一旦上游轮换即丢票，需重新 bootstrap）"
 
               # 2. 起反代（凭据不足时 proxy 自身也会报 401，交给自检分诊）
-              PROXY_HOST=127.0.0.1 PROXY_PORT="$AUTOCLAW_PORT" \
+              # 2026-10-11 两处修正：
+              #   a) PROXY_HOST 改 0.0.0.0 —— OmniRoute 容器经 host.docker.internal
+              #      回连本机反代（autoclaw 渠道已入网关），绑 127.0.0.1 不可达；
+              #      有 PROXY_API_KEY 时不带 key 的业务请求仍被 401 挡住。
+              #   b) 起前确保 ~/.openclaw-autoclaw/openclaw.json 存在 —— proxy 从
+              #      该文件热读模型表，缺了会「模型: 未发现」空跑（app 目录里带
+              #      了一份 zai 四模型的现成配置，首次拷入，已存在则不动）。
+              mkdir -p "$HOME/.openclaw-autoclaw"
+              [ -f "$HOME/.openclaw-autoclaw/openclaw.json" ] \
+                || cp "$RUN_DIR/openclaw.json" "$HOME/.openclaw-autoclaw/openclaw.json"
+              PROXY_HOST=0.0.0.0 PROXY_PORT="$AUTOCLAW_PORT" \
               PROXY_API_KEY="${AUTOCLAW_GATEWAY_KEY:-}" \
               PROXY_ACCOUNTS_FILE="$RUN_DIR/accounts.json" \
                 nohup python3 "$RUN_DIR/proxy.py" > "$RUN_DIR/proxy.log" 2>&1 &
