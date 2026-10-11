@@ -3675,7 +3675,8 @@ jobs:
             tg_add_footer _m
             send_tg "$_m" alert || echo "::warning::TG 通知发送失败（不影响任务）"
           else
-            tg_add_title _m "✅ autoclaw-proxy 已就绪"
+            # 2026-10-11 标题对齐全库网关就绪约定：🟢（对齐 workbuddy/zcode2api/trae/Runner，见 docs/telegram-notify.md）；原 ✅ 是照抄 qingyan 骨架带进来的游离用法
+            tg_add_title _m "🟢 autoclaw-proxy 已就绪"
             tg_add_kv _m "结论" "$AC_REASON"
             tg_add_path _m "接口" "http://127.0.0.1:${AUTOCLAW_PORT}/v1"
             tg_add_path _m "API Key" "${AUTOCLAW_GATEWAY_KEY:-未取到}"
@@ -3827,7 +3828,8 @@ jobs:
             send_tg "$_m" alert || echo "::warning::TG 通知发送失败（不影响任务）"
           else
             _m=""
-            tg_add_title _m "✅ qingyan-proxy 已就绪"
+            # 2026-10-11 标题对齐全库网关就绪约定：🟢（对齐 workbuddy/zcode2api/trae/Runner，见 docs/telegram-notify.md）
+            tg_add_title _m "🟢 qingyan-proxy 已就绪"
             tg_add_kv _m "结论" "$GL_REASON"
             tg_add_path _m "接口" "http://127.0.0.1:${QINGYAN_PORT}/v1"
             # 标签「API Key」+ tg_add_path：对齐 zcode2api 就绪通知同款 —— 值走
