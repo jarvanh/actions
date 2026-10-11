@@ -3596,6 +3596,20 @@ jobs:
               rclone copyto "$RUN_DIR/snapshot.json" "$AUTOCLAW_SNAPSHOT_REMOTE" \
                 || echo "::warning::[autoclaw] 快照回推失败（票仍是可复用长票时无害；一旦上游轮换即丢票，需重新 bootstrap）"
 
+              # 1.5 每日签到（daily_signin，+200 积分/账号/天；2026-10-11 新增）：
+              #     复用 refresh 出的热票打 task 网关；幂等三重保障——本地状态当日
+              #     跳过、上游 already_completed 不重复加分、-f 只在状态丢失时兜底。
+              #     签到失败不影响反代启动（结果只进通知）。
+              AC_CHECKIN=""
+              # 脚本在 stdout 末尾打 "--- summary ---" 单行摘要（多账号明细同行），
+              # awk 取分隔行之后的内容作为通知摘要；签到 rc=1（有账号失败）不阻断反代。
+              CHECKIN_OUT="$(python3 "$RUN_DIR/autoclaw_auth.py" checkin \
+                   --snapshot "$RUN_DIR/snapshot.json" \
+                   --accounts-out "$RUN_DIR/accounts.json" \
+                   --results-out "$RUN_DIR/checkin-results.json" 2>&1 || true)"
+              AC_CHECKIN="$(printf '%s\n' "$CHECKIN_OUT" | awk 'f{print} /^--- summary ---$/{f=1}' | tail -n 1)"
+              echo "签到: ${AC_CHECKIN:-（无摘要输出）}"
+
               # 2. 起反代（凭据不足时 proxy 自身也会报 401，交给自检分诊）
               # 2026-10-11 两处修正：
               #   a) 绑定地址：设了 PROXY_API_KEY（secret AUTOCLAW_GATEWAY_KEY）才绑
@@ -3667,6 +3681,11 @@ jobs:
               _ac_rows="$(tree_conn 1)$(tg_entry "账号数 ${AC_ACCOUNTS}" "负载均衡 · 401/406 冷却回退 · 快过期积分优先")"$'\n'
               [ -n "${AC_SCORE:-}" ] && _ac_rows+="$(tree_sub 1)$(escape_html "$AC_SCORE")"$'\n'
               tg_add_block _m "${_ac_rows%$'\n'}"
+            fi
+            # 每日签到结果（独立分节；含 +积分 明细）
+            if [ -n "${AC_CHECKIN:-}" ]; then
+              tg_add_section _m "📅 每日签到 · 1"
+              tg_add_block _m "$(tree_lines "结果：<code>$(escape_html "$AC_CHECKIN")</code>")"
             fi
             tg_add_footer _m
             send_tg "$_m" alert || echo "::warning::TG 通知发送失败（不影响任务）"
