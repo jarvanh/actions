@@ -3250,6 +3250,147 @@ jobs:
             fi
           fi
 
+      - name: Run autoclaw-proxy (AutoClaw 积分反代 · 多账号池)
+        id: run_autoclaw
+        # 2026-10-11 新增。qingyan-proxy 同款骨架：Dropbox 快照做票仓真源 → 无头刷新
+        # → 起反代 → 端到端自检 → tailscale serve → TG 通知。与 qingyan 一样
+        # continue-on-error + if:!cancelled()（避开前置失败级联跳过，见 Run OpenClaw 注释）。
+        #
+        # 凭据模型（与 qingyan 的轮换票同构）：
+        #   - 账号票（access JWT 24h + refresh JWT 29d 可复用）由本机
+        #     ~/AI/autoclaw-proxy/autoclaw_auth.py bootstrap 生成，快照存
+        #     dropbox:self-hosted/autoclaw-proxy/auth-snapshot.json
+        #   - runner 每轮 pull 快照 → refresh（剩余>6h 自动跳过）→ 新票**回推 Dropbox**
+        #     （refresh token 未轮换时可复用，推送幂等；一旦上游开始轮换，推送就是
+        #     持久化动作，漏推即丢票）—— 多实例并跑时以「最后写者胜」为准，openclaw
+        #     singleton 并发组已保证同轮不重叠
+        #   - 无快照 = 无凭据 → 本步骤跳过并告警（不起假服务）
+        #
+        # 契约要点（2026-10-11 实测定位的 406 闸门，全部已在 proxy.py 内对齐）：
+        #   body 只发 max_completion_tokens(满额 307200)+store:false+reasoning_effort:high，
+        #   max_tokens 字段出现即 406；system 必须精确等于官方 banner。
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # 网关鉴权：autoclaw-proxy 专属 key（与 qingyan 同规：每反代独立 key，
+          # 不共用 AI_GATEWAY_API_KEY；监听 127.0.0.1 + tailscale serve，key 为第二道边界）
+          AUTOCLAW_GATEWAY_KEY: ${{ secrets.AUTOCLAW_GATEWAY_KEY }}
+          # 票仓与代码真源（Dropbox）
+          AUTOCLAW_SNAPSHOT_REMOTE: dropbox:self-hosted/autoclaw-proxy/auth-snapshot.json
+          AUTOCLAW_APP_REMOTE: dropbox:self-hosted/autoclaw-proxy/app
+          AUTOCLAW_PORT: "8321"
+        run: |
+          set -uo pipefail
+          source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+
+          RUN_DIR="/tmp/local_autoclaw-proxy"
+          AC_OK=0
+          AC_REASON=""
+          AC_ACCOUNTS=""
+          AC_MODEL=""
+          AC_SCORE=""
+
+          # 0. 拉代码 + 票仓快照（快照缺失 = 未导入凭据，直接跳过）
+          mkdir -p "$RUN_DIR"
+          if ! rclone copy "$AUTOCLAW_APP_REMOTE" "$RUN_DIR" 2>/dev/null || [ ! -f "$RUN_DIR/proxy.py" ]; then
+            echo "::warning::[autoclaw] 代码拉取失败（$AUTOCLAW_APP_REMOTE）"
+            AC_REASON="代码拉取失败"
+          elif ! rclone copyto "$AUTOCLAW_SNAPSHOT_REMOTE" "$RUN_DIR/snapshot.json" 2>/dev/null || [ ! -s "$RUN_DIR/snapshot.json" ]; then
+            echo "::warning::[autoclaw] 无凭据快照（先在本机跑 autoclaw_auth.py bootstrap）"
+            AC_REASON="未配置凭据快照"
+          else
+            SNAP_ACCOUNTS="$(python3 -c "import json;print(len(json.load(open('$RUN_DIR/snapshot.json')).get('accounts',[])))" 2>/dev/null || echo 0)"
+            if [ "${SNAP_ACCOUNTS:-0}" -eq 0 ]; then
+              echo "::warning::[autoclaw] 快照为空（0 账号）"
+              AC_REASON="快照无账号"
+            else
+              echo "快照账号数: $SNAP_ACCOUNTS"
+
+              # 1. 无头刷新：剩余>6h 自动跳过；失败再 -f 强刷一次（406/网络抖动兜底）
+              #    新票回写 snapshot 后立即回推 Dropbox（票持久化，见上方凭据模型）
+              if python3 "$RUN_DIR/autoclaw_auth.py" refresh \
+                   --snapshot "$RUN_DIR/snapshot.json" \
+                   --accounts-out "$RUN_DIR/accounts.json"; then
+                echo "refresh: 直刷通过"
+              else
+                echo "refresh: 直刷失败，尝试 -f 强刷"
+                python3 "$RUN_DIR/autoclaw_auth.py" refresh -f \
+                  --snapshot "$RUN_DIR/snapshot.json" \
+                  --accounts-out "$RUN_DIR/accounts.json" || true
+              fi
+              rclone copyto "$RUN_DIR/snapshot.json" "$AUTOCLAW_SNAPSHOT_REMOTE" \
+                || echo "::warning::[autoclaw] 快照回推失败（票仍是可复用长票时无害；一旦上游轮换即丢票，需重新 bootstrap）"
+
+              # 2. 起反代（凭据不足时 proxy 自身也会报 401，交给自检分诊）
+              PROXY_HOST=127.0.0.1 PROXY_PORT="$AUTOCLAW_PORT" \
+              PROXY_API_KEY="${AUTOCLAW_GATEWAY_KEY:-}" \
+              PROXY_ACCOUNTS_FILE="$RUN_DIR/accounts.json" \
+                nohup python3 "$RUN_DIR/proxy.py" > "$RUN_DIR/proxy.log" 2>&1 &
+              for _ in $(seq 1 15); do
+                code="$(curl -s --max-time 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${AUTOCLAW_PORT}/v1/models" 2>/dev/null || true)"
+                [ -n "$code" ] && [ "$code" != "000" ] && break
+                sleep 2
+              done
+
+              # 3. 端到端自检：真发消息（healthz 通≠上游通，zcode2api 同款原则）。
+              #    失败分诊：quota=上游限流（服务本体健康）· auth=票无效 · unavailable=其他
+              AC_PROBE="$(curl -sS --max-time 120 -X POST "http://127.0.0.1:${AUTOCLAW_PORT}/v1/chat/completions" \
+                -H "Authorization: Bearer ${AUTOCLAW_GATEWAY_KEY}" \
+                -H 'content-type: application/json' \
+                -d '{"model":"zai_glm-5.3-flash","messages":[{"role":"user","content":"只回复两个字：正常"}],"max_tokens":256}' 2>&1 || true)"
+              if printf '%s' "$AC_PROBE" | jq -e '(.choices // [] | length) > 0' >/dev/null 2>&1; then
+                AC_OK=1
+                AC_REASON="端到端自检通过"
+                AC_MODEL="zai_auto · zai_glm-5.3-flash · zaicoding_glm-5.3"
+                AC_ACCOUNTS="$(curl -s --max-time 5 "http://127.0.0.1:${AUTOCLAW_PORT}/healthz" 2>/dev/null | jq -r '.accounts.count // "?"' 2>/dev/null || echo '?')"
+                AC_SCORE="$(curl -s --max-time 5 "http://127.0.0.1:${AUTOCLAW_PORT}/healthz" 2>/dev/null \
+                  | jq -r '.wallet | select(.available) | "总余额 \(.total_balance) · 即将到期 \(.expiring.points // 0)"' 2>/dev/null || true)"
+              elif printf '%s' "$AC_PROBE" | grep -qE '401|authentication'; then
+                AC_REASON="自检失败：账号凭据无效（401）—— 票已过期且 refresh 失败，需本机重新 bootstrap"
+              elif printf '%s' "$AC_PROBE" | grep -qE '406|upstream_throttled|繁忙'; then
+                AC_REASON="自检失败：上游限流/限载（406/503）—— 服务本体健康，下轮重试"
+              else
+                AC_REASON="自检失败：$(printf '%s' "$AC_PROBE" | head -c 120)"
+              fi
+            fi
+          fi
+
+          # 4. tailscale serve（复用「HTTP 明文 + WireGuard 隧道」既有口径；serve 态
+          #    随内存 state 逐轮清零，幂等重建）
+          if [ "$AC_OK" = "1" ] && [ -n "${TS_FQDN:-}" ]; then
+            sudo tailscale serve --bg --http=8321 "http://127.0.0.1:${AUTOCLAW_PORT}" 2>/dev/null \
+              && echo "autoclaw 反代: http://${TS_FQDN}:8321/v1"
+          fi
+
+          # 5. TG 通知（版式对齐 qingyan/zcode2api：失败走 alert 档）
+          _m=""
+          if [ "$AC_OK" != "1" ]; then
+            tg_add_title _m "❌ autoclaw-proxy 启动失败"
+            tg_add_kv _m "结论" "未就绪"
+            tg_add_kv _m "原因" "$AC_REASON"
+            tg_add_kv _m "处理" "本机跑 python3 ~/AI/autoclaw-proxy/autoclaw_auth.py bootstrap（桌面端加 --inspect=9229）"
+            tg_add_footer _m
+            send_tg "$_m" alert || echo "::warning::TG 通知发送失败（不影响任务）"
+          else
+            tg_add_title _m "✅ autoclaw-proxy 已就绪"
+            tg_add_kv _m "结论" "$AC_REASON"
+            tg_add_path _m "接口" "http://127.0.0.1:${AUTOCLAW_PORT}/v1"
+            tg_add_path _m "API Key" "${AUTOCLAW_GATEWAY_KEY:-未取到}"
+            tg_add_kv _m "模型" "$AC_MODEL"
+            if [ -n "$AC_ACCOUNTS" ] && [ "$AC_ACCOUNTS" != "?" ]; then
+              tg_add_section _m "💳 账号池 · 1"
+              _ac_rows="$(tree_conn 1)$(tg_entry "账号数 ${AC_ACCOUNTS}" "负载均衡 · 401/406 冷却回退 · 快过期积分优先")"$'\n'
+              [ -n "${AC_SCORE:-}" ] && _ac_rows+="$(tree_sub 1)$(escape_html "$AC_SCORE")"$'\n'
+              tg_add_block _m "${_ac_rows%$'\n'}"
+            fi
+            tg_add_footer _m
+            send_tg "$_m" alert || echo "::warning::TG 通知发送失败（不影响任务）"
+          fi
+          exit 0
+
       - name: Run qingyan-proxy (ChatGLM 清言反代)
         id: run_qingyan
         continue-on-error: true
