@@ -12,6 +12,12 @@
 #      否则每轮取消都会被当成人工取消、链永久断掉；此时放行派发（fail-open）。
 #   ③ 队列里已有 queued/waiting/pending 的运行：说明下一轮已经排上了（cron 兜底留下的
 #      pending，或上一次派发），再派一轮就是叠罗汉
+#   ④ 连续失败熔断（SR_CB_THRESHOLD，默认 3，2026-10-11 增补）：本轮失败且此前已有
+#      (阈值-1) 轮连续 failure 时停止接力并发 tier=alert 告警——失败接力没有上限会退化
+#      成 2 分钟一轮的失败工厂（vaultwarden db.sqlite3 丢失当日实测：全程无人知晓）。
+#      成功一轮即自动清零；熔断期间链路由每小时 cron 兜底，根因修完后下一轮自然恢复。
+#      计数 API 失败一律放行（fail-open，与②③同一取向：保活优先，宁可多派一轮）；
+#      SR_CB_THRESHOLD=0 可关闭。
 #
 # ⚠️ 判据 ③ 是这套设计能成立的关键：保活型 workflow 的 cron 会在队列里留下 pending，
 #   上一轮结束的瞬间它就接管——零空档其实来自这里；接力只在队列**空出来**时（cron 被
@@ -31,9 +37,26 @@
 #   SR_INPUTS      透传给下一轮的输入，形如 "run_minutes=8&mode=302"
 #   SR_LABEL       日志里的名字（默认取 workflow 文件名去掉 .yml）
 #   SR_LIMIT       查排队时取多少条（默认 30）
+#   SR_CB_THRESHOLD 连续失败熔断阈值（默认 3；0=关闭），见判据④
 #
 # 返回码：0 = 已派发或按判据跳过（都属正常）；1 = 派发失败（调用方通常 `|| true`，
 #         失败时由 cron 兜底，不必让整轮失败）
+
+# 熔断告警（tier=alert）：停止接力若无人知晓，服务就静默躺平到 cron 兜底（最长 1h）。
+# 独立成函数便于测试桩替换；tg_notify.sh 缺失/凭据缺失时留痕跳过，不影响接力判定。
+self_retrigger_breaker_alert() {
+  local label="$1" streak="$2" threshold="$3"
+  local notify="${BASH_SOURCE[0]%/*}/../telegram/tg_notify.sh"
+  [ -f "$notify" ] || { echo "（tg_notify.sh 缺失，熔断告警未发送）"; return 0; }
+  source "$notify" 2>/dev/null || return 0
+  local msg=""
+  tg_add_title msg "🧯 保活接力已熔断"
+  tg_add_kv msg "任务" "${label}"
+  tg_add_kv msg "现象" "连续 ${streak} 轮 failure（阈值 ${threshold}），停止自动接力"
+  tg_add_note msg "链路由 cron 兜底；根因修复后手动 dispatch 即恢复"
+  tg_add_footer msg
+  send_tg "$msg" alert || true
+}
 
 self_retrigger() {
   local wf="${1:-}"
@@ -42,12 +65,14 @@ self_retrigger() {
   local enabled="${SR_ENABLED:-true}"
   local cancel_min="${SR_CANCEL_MIN:-21000}"
   local on_failure="${SR_ON_FAILURE:-1}"
+  local cb_threshold="${SR_CB_THRESHOLD:-3}"
   local label="${SR_LABEL:-${wf%.yml}}"
   local limit="${SR_LIMIT:-30}"
   local elapsed="${SR_ELAPSED:-}" pending="" reason="" kv=""
   local -a args=()
 
   [ -n "$wf" ] || { echo "self_retrigger: 未指定 workflow 文件名，跳过"; return 0; }
+  case "$cb_threshold" in ''|*[!0-9]*) cb_threshold=3;; esac
   if [ "$enabled" != "true" ]; then
     echo "⏭️ 未接力（${label}）：开关关闭"
     return 0
@@ -87,6 +112,26 @@ self_retrigger() {
       --jq '[.[] | select(.status == "queued" or .status == "waiting" or .status == "pending")] | length' 2>/dev/null || echo 0)
     case "$pending" in ''|*[!0-9]*) pending=0;; esac
     [ "$pending" -eq 0 ] || reason="队列里已有 ${pending} 个排队运行"
+  fi
+
+  # 判据④：连续失败熔断。只在"本轮失败且前面没有其他跳过原因"时才多打一次 API；
+  # 成功路径零开销。从最近已完成轮次往回数连续 failure（遇非 failure 即停，本轮的
+  # 失败由 status 计入），够阈值就停止接力并发 tier=alert。gh 计数失败 → streak=1
+  # → 不达阈值放行（fail-open）。
+  if [ -z "$reason" ] && [ "$status" = "failure" ]; then
+    local streak=1 prev c
+    prev=$(gh run list -R "$repo" --workflow="$wf" --limit "$((cb_threshold + 30))" \
+      --json conclusion,status \
+      --jq '[.[] | select(.status == "completed") | .conclusion] | .[]' 2>/dev/null || true)
+    while IFS= read -r c; do
+      [ -n "$c" ] || continue
+      [ "$c" = "failure" ] || break
+      streak=$((streak + 1))
+    done <<< "$prev"
+    if [ "$cb_threshold" -gt 0 ] && [ "$streak" -ge "$cb_threshold" ]; then
+      reason="连续失败熔断：最近 ${streak} 轮全部 failure（阈值 ${cb_threshold}）"
+      self_retrigger_breaker_alert "$label" "$streak" "$cb_threshold"
+    fi
   fi
 
   if [ -n "$reason" ]; then

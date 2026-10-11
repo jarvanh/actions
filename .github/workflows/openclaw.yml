@@ -907,6 +907,13 @@ jobs:
           fi
 
       - name: Run AI API gateway (OmniRoute)
+        env:
+          # 归档存在但恢复失败→bootstrap 空库时发 tier=alert 告警（P0 加固 2026-10-11）
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          TELEGRAM_BOT_TOKEN_ALERT: ${{ secrets.TELEGRAM_BOT_TOKEN_ALERT }}
+          TELEGRAM_CHAT_ID_ALERT: ${{ secrets.TELEGRAM_CHAT_ID_ALERT }}
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
 
@@ -929,6 +936,10 @@ jobs:
           OMNIROUTE_ARCHIVE="dropbox:self-hosted/OmniRoute.tar.gz"
           OMNIROUTE_IMAGE="diegosouzapw/omniroute:3.8.51"
           OMNIROUTE_VOLUME="omniroute_omniroute-data"
+          # 恢复路径观测标记：ARCHIVE_PRESENT=探测通过；ARCHIVE_SEEN=确认云端归档存在
+          # （bootstrap 告警判据——归档存在却没恢复成 = 数据事故，见 restore 失败分支）
+          OMNIROUTE_ARCHIVE_PRESENT=0
+          OMNIROUTE_ARCHIVE_SEEN=0
 
           cleanup_archive_workdir() {
             rm -f /tmp/OmniRoute.tar.gz 2>/dev/null || true
@@ -970,10 +981,23 @@ jobs:
             fi
             cleanup_archive_workdir
             require_free_kb /tmp $((2 * 1024 * 1024)) "OmniRoute restore preflight"
-            if ! rclone ls "$OMNIROUTE_ARCHIVE" > /dev/null 2>&1; then
+            # 探测重试 3 次再定性（与 ~/.openclaw 恢复 2026-10-02 加固同口径）：
+            # rclone 瞬时失败被误判成"无归档"会静默 bootstrap 空库——比"恢复失败"更
+            # 危险，它连 ARCHIVE_SEEN 标记都立不起来，告警都不会响。
+            OMNIROUTE_ARCHIVE_PRESENT=0
+            for _probe in 1 2 3; do
+              if rclone ls "$OMNIROUTE_ARCHIVE" > /dev/null 2>&1; then
+                OMNIROUTE_ARCHIVE_PRESENT=1
+                break
+              fi
+              echo "⚠️ rclone ls 探测归档失败（第 ${_probe}/3 次），15s 后重试..."
+              sleep 15
+            done
+            if [ "$OMNIROUTE_ARCHIVE_PRESENT" != "1" ]; then
               echo "ℹ️ 未找到 OmniRoute 归档，走全新 bootstrap"
               return 1
             fi
+            OMNIROUTE_ARCHIVE_SEEN=1
             echo "📦 Found OmniRoute.tar.gz! Downloading and validating..."
             if ! rclone copyto "$OMNIROUTE_ARCHIVE" "$OMNIROUTE_TAR"; then
               echo "⚠️ OmniRoute.tar.gz 下载失败，走全新 bootstrap"
@@ -1112,6 +1136,20 @@ jobs:
           # 数据准备失败不终止（bootstrap 全新部署兜底，与旧 CliRelay 同口径）
           if ! restore_omniroute_data; then
             bootstrap_omniroute
+            # P0 加固（2026-10-11）：归档明明存在却没恢复成 = 数据事故信号，必须炸响。
+            # 当天事故即此形态：cleanup 误删解包目录 → 恒报"缺少 docker-compose.yml/.env"
+            # → 静默 bootstrap 空库上岗，全靠归档脚本 1MB 体积门才没让空库覆盖云端好包。
+            if [ "$OMNIROUTE_ARCHIVE_SEEN" = "1" ]; then
+              if source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh" 2>/dev/null; then
+                msg=""
+                tg_add_title msg "🚨 OmniRoute 归档恢复失败 · 空库兜底"
+                tg_add_kv msg "现象" "Dropbox 归档存在，但本轮恢复未走通，已 bootstrap 空库"
+                tg_add_kv msg "影响" "无渠道/无入站 key，客户端 401；1MB 体积门将拦住空库回传"
+                tg_add_note msg "根因看本轮日志 OmniRoute 步骤 Found OmniRoute.tar.gz 之后的段"
+                tg_add_footer msg
+                send_tg "$msg" alert || true
+              fi
+            fi
           fi
 
           if start_omniroute && wait_api_ready "omniroute" 150; then

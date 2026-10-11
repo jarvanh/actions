@@ -103,6 +103,13 @@ jobs:
       # bitwarden-data/ 下找不到 db.sqlite3 说明远端数据异常：直接报错终止——宁可不开
       # 服务，也绝不启动空库（老账号全部失效），更不会在后续步骤回传空数据覆盖远端。
       - name: Restore bitwarden data from Dropbox
+        env:
+          # 数据异常告警（tier=alert 直达告警 bot，P0 加固 2026-10-11）
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          TELEGRAM_BOT_TOKEN_ALERT: ${{ secrets.TELEGRAM_BOT_TOKEN_ALERT }}
+          TELEGRAM_CHAT_ID_ALERT: ${{ secrets.TELEGRAM_CHAT_ID_ALERT }}
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
           VW_DIR=/dropbox/self-hosted/bitwarden
@@ -111,6 +118,17 @@ jobs:
           rclone copy "dropbox:self-hosted/bitwarden" "$VW_DIR" -P --retries 5 --retries-sleep 10s --low-level-retries 20
           if [ ! -s "$VW_DIR/bitwarden-data/db.sqlite3" ]; then
             echo "::error::远端 dropbox:self-hosted/bitwarden/bitwarden-data 未找到 db.sqlite3，数据拉取异常，终止运行（不启动空库、不回传）"
+            # P0 加固（2026-10-11 事故）：这类终止以前只有日志没人看，接力每 2 分钟
+            # 空转一轮直到人工撞见——数据异常必须炸响。告警失败不改变终止语义。
+            if source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh" 2>/dev/null; then
+              msg=""
+              tg_add_title msg "🚨 vaultwarden 数据恢复失败"
+              tg_add_kv msg "现象" "dropbox:self-hosted/bitwarden/bitwarden-data 缺 db.sqlite3"
+              tg_add_kv msg "处置" "本轮终止：不启动空库、不回传（防覆盖远端）"
+              tg_add_note msg "OneDrive backup/bitwarden_latest.tar.gz 可作恢复素材；修复远端后手动 dispatch"
+              tg_add_footer msg
+              send_tg "$msg" alert || true
+            fi
             exit 1
           fi
           touch /tmp/VW_DATA_PULLED
@@ -176,14 +194,20 @@ jobs:
           echo "已上传 onedrive:backup/bitwarden_latest.tar.gz"
       # ===== 自续触发（下轮接力）=====
       # 放在最后一步：数据已回传完才派下一轮，避免下一轮开机时读到半份数据。
-      # 三条判据（人工取消不接力 / 已有排队则跳过 / 开关关闭不接力）与统一日志
-      # 都在 .github/scripts/lib/self_retrigger.sh 里，emby 同源。
+      # 四条判据（人工取消不接力 / 已有排队则跳过 / 开关关闭不接力 / 连续失败熔断）
+      # 与统一日志都在 .github/scripts/lib/self_retrigger.sh 里，emby 同源。
       - name: 自续触发（下轮接力）
         if: ${{ always() }}
         env:
           GH_TOKEN: ${{ github.token }}
           SR_STATUS: ${{ job.status }}
           SR_ENABLED: ${{ github.event.inputs.self_retrigger || 'true' }}
+          # 熔断告警接线（tier=alert）；凭据缺失时发送层留痕跳过，不影响接力判定
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          TELEGRAM_BOT_TOKEN_ALERT: ${{ secrets.TELEGRAM_BOT_TOKEN_ALERT }}
+          TELEGRAM_CHAT_ID_ALERT: ${{ secrets.TELEGRAM_CHAT_ID_ALERT }}
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           source "$GITHUB_WORKSPACE/.github/scripts/lib/self_retrigger.sh"
           self_retrigger p.yml || true
