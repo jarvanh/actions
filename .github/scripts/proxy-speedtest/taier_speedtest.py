@@ -103,12 +103,17 @@ _TAIER_CTRL_SERVERS = [
 CONFIG = {
     # 测速点：单个点即可（每点 = 一次完整上下行），多点会成倍拉长单节点耗时
     'TAIER_POINTS': (os.environ.get('TAIER_POINTS', '') or '广东联通').strip(),
-    # 默认 multi（下 8 + 上 4 连接）：2026-10-10 三档实测定案——机场链路对**单条
-    # 上传连接**有 ~8MiB/s（=67.11Mbps）配额档（多会话下按会话叠加档位），single
-    # 口径快节点全被钳；multi 聚合才测得到真实上行（实测 up 峰值：4 连接 268、
-    # 8 连接 706、16 连接 1785 Mbps，up>0 率 8 连接最优 96%）。工作流 up_threads
-    # 可选 4/8/16（schedule 建议 4/8，16 作人工峰值测量档）。single/both 可显式选。
-    'TAIER_MODE': (os.environ.get('TAIER_MODE', '') or 'multi').strip(),
+    # 默认 single（单连接）：2026-10-11 定案——单流读数贴近真实体验（本机直连同一
+    # 广州联通测速点实测：single 117~156Mbps vs multi×8 聚合 887~1143Mbps，聚合值
+    # 是「满血突发」口径，single 才是「用起来」的口径）。multi/both 可显式选。
+    # ⚠️ 代价：单条**上传**连接会被机场 ~8MiB/s（=67.11Mbps）配额档钳制（多会话
+    # 按会话叠加），single 口径快节点的上传读数被钳在 ≈67Mbps——这是配额不是测量
+    # 错误；下载方向无此问题。要测真实上行选 multi（实测 up 峰值 4 连接 268、
+    # 8 连接 706、16 连接 1785 Mbps，up>0 率 8 连接最优 96%）。
+    # 订阅判定联动：单测上行普遍 ≤67Mbps 时「≥10兆」仍大多达标；判定指标默认
+    # upload、达标不足时自动回退 download（PROXY_SPEEDTEST_METRIC_FALLBACK_MIN_NODES），
+    # 链路不受影响。
+    'TAIER_MODE': (os.environ.get('TAIER_MODE', '') or 'single').strip(),
     # 上游二进制把 --duration 硬钳制在 5-13（main.go），>13 会被压到 13。
     # 默认 13（2026-09-24 从 5 上调）：单节点成本 = 2×duration+5，duration 是最大且唯一
     # 可调的杠杆。此前为了「同等预算多覆盖节点」一路压到 5（≈15 秒/节点），代价是每方向
