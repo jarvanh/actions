@@ -998,9 +998,11 @@ jobs:
             rm -rf /tmp/omniroute-restore
             mkdir -p /tmp/omniroute-restore
             tar -xzf "$OMNIROUTE_TAR" -C /tmp/omniroute-restore
-            cleanup_archive_workdir
+            # cleanup_archive_workdir 会 rm -rf /tmp/omniroute-restore，
+            # 必须等数据卷恢复消费完 data.tar.gz 之后才能调用，不能放在检查前
             if [ ! -f /tmp/omniroute-restore/docker-compose.yml ] || [ ! -f /tmp/omniroute-restore/.env ]; then
               echo "⚠️ OmniRoute.tar.gz 缺少 docker-compose.yml/.env，走全新 bootstrap"
+              cleanup_archive_workdir
               return 1
             fi
             mkdir -p "$OMNIROUTE_DIR"
@@ -1026,6 +1028,7 @@ jobs:
             fi
             echo "=== restored OmniRoute tree ==="
             find "$OMNIROUTE_DIR" -maxdepth 2 | sort || true
+            cleanup_archive_workdir
             return 0
           }
 
