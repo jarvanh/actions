@@ -376,6 +376,9 @@ HTML 变复杂。
 |---|---|---|
 | 🟢 OpenClaw Runner 已就绪 | `openclaw.yml` | Tailscale SSH 就绪，推 SSH / RustDesk / 出口网络 / 出口节点 / AI 网关 |
 | 🟢 workbuddy-gateway 已就绪 / ⚠️ 已启动 · 无可用账号 | `openclaw.yml` | 本地代理网关启动自检后（账号池为空时降级 ⚠️——「已启动」刻意区分服务起来了与账号可用）。字段口径见 2.5 节 |
+| 🟢 zcode2api 已就绪（🟡 降级态见 2.6 节） | `openclaw.yml` | 本地 GLM 网关（8319）启动自检后 |
+| 🟢 qingyan-proxy 已就绪 | `openclaw.yml` | 清言反代（8320）端到端自检后（2026-10-11 从 ✅ 对齐为 🟢） |
+| 🟢 autoclaw-proxy 已就绪 | `openclaw.yml` | AutoClaw 积分反代（8322）端到端自检后（2026-10-11 从 ✅ 对齐为 🟢） |
 | 🟢 / ⚠️ trae2api 已就绪 | `openclaw.yml` | TRAE SOLO 反代（7864）健康检查通过、批量签到后（签到工具失败降级 ⚠️）。版式同 workbuddy-gateway，差异见 2.5 节末 |
 | 🟢 Windows runner 已就绪 | `tailscale-windows.yml` | 同上（Windows，pwsh 手拼） |
 | 🖥️ Windows RDP 已就绪 | `rdp.yml` | 隧道地址拿到后推 RDP 凭据（pwsh 手拼） |
@@ -426,7 +429,8 @@ Telegram 收到，放弃重试只会让凭据彻底丢失。
 | ⛔ / ⚠️ workbuddy-gateway 已停止 | `openclaw.yml` | 收尾停止本地代理网关（仍有进程残留时降级 ⚠️） |
 | 🟢 zcode2api 已就绪（🟡/🟠 中间态见下） | `openclaw.yml` | 本地 GLM 网关（8319）启动自检后。字段口径见 2.6 节 |
 | ❌ zcode2api 启动失败 | `openclaw.yml` | 部署/依赖失败，或自检两通道（Plan + bigmodel Key）均无有效回答 |
-| ⏭️ / ❌ / ✅ qingyan-proxy 已跳过 · 启动失败 · 已就绪 | `openclaw.yml` | 本地 GLM 反代（8320）：条件不满足跳过 / 60 秒未监听失败 / 就绪（带 `💳 积分` 分节与「API Key」行，alert 档） |
+| ⏭️ / ❌ / 🟢 qingyan-proxy 已跳过 · 启动失败 · 已就绪 | `openclaw.yml` | 本地 GLM 反代（8320）：条件不满足跳过 / 60 秒未监听失败 / 就绪（带 `💳 积分` 分节与「API Key」行，alert 档；2026-10-11 就绪态从 ✅ 对齐为 🟢） |
+| ❌ / 🟢 autoclaw-proxy 启动失败 · 已就绪 | `openclaw.yml` | AutoClaw 积分反代（8322）：凭据缺失跳过不起假服务 / 自检失败分诊 / 就绪（带账号池与每日签到分节，alert 档；2026-10-11 就绪态从 ✅ 对齐为 🟢） |
 | ⛔ / ⚠️ zcode2api、qingyan-proxy 已停止 | `openclaw.yml` | 收尾停服（对齐 workbuddy 的 3b/3c；有进程残留降级 ⚠️） |
 | ⚠️ Emby 直链已回退 | `emby.yml` | 探活连续失败切直连 |
 
