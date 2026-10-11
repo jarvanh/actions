@@ -72,6 +72,7 @@ from speedtest_gitee import (
     TEST_FILE_NAME,
     build_proxy_env,
     build_source_mapping,
+    check_mihomo_runtime,
     collect_provider_snapshot,
     ensure_gitee_remote,
     ensure_mihomo_running,
@@ -94,25 +95,31 @@ DEFAULT_LATENCY_TARGETS = [
     'https://www.taobao.com',
 ]
 # 方案 A：不写死带版本号的具体 ISO（容易随镜像清理而失效），改为：
-#  1) 默认从下列「滚动 ISO 索引目录」自动发现当前存在的 *-latest-*.iso 软链；
+#  1) 默认从下列「滚动 ISO 索引目录」自动发现当前存在的 *-latest-*/版本目录内 ISO；
 #  2) 仅当用户显式设置 PROXY_SPEEDTEST_DOWNLOAD_URLS 时才使用指定 URL（向后兼容）。
-# 这些目录长期稳定，内部 ISO 版本会轮换，但 *-latest-* 软链始终指向最新可用文件，
-# 脚本每次运行自动取该软链，彻底规避版本号失效问题。
+# ⚠️ 2026-10-11 清理：CentOS Stream 8/9 已 EOL，各国内镜像站（TUNA/USTC/阿里/华为/BFSU）
+# 的 centos-stream isos 目录实测全部 404（曾导致自动发现只剩腾讯云一个源）。换成
+# ubuntu-releases 24.04（163/清华双源实测 206 精确 10MiB Range，版本号随 24.04 LTS
+# 点版本滚动，目录长期存在）。
 DEFAULT_DOWNLOAD_CATALOGS = [
+    'https://mirrors.163.com/ubuntu-releases/24.04/',
+    'https://mirrors.tuna.tsinghua.edu.cn/ubuntu-releases/24.04/',
     'https://mirrors.cloud.tencent.com/centos/8-stream/isos/x86_64/',
-    'https://mirrors.cloud.tencent.com/centos/9-stream/isos/x86_64/',
-    'https://mirrors.tuna.tsinghua.edu.cn/centos/8-stream/isos/x86_64/',
 ]
-# 兜底写死 URL（仅在自动发现全部失败时使用），同样选用滚动 latest 软链。
+# 兜底写死 URL（仅在自动发现全部失败时使用）：腾讯云 Stream-8 latest 软链实测仍在
+# （206 精确 10MiB）；ubuntu 用 24.04 当前点版本，若失效由上面的 catalog 发现兜住。
 DEFAULT_DOWNLOAD_URLS = [
     'https://mirrors.cloud.tencent.com/centos/8-stream/isos/x86_64/CentOS-Stream-8-x86_64-latest-boot.iso',
-    'https://mirrors.cloud.tencent.com/centos/9-stream/isos/x86_64/CentOS-Stream-9-x86_64-latest-boot.iso',
+    'https://mirrors.163.com/ubuntu-releases/24.04/ubuntu-24.04.4-live-server-amd64.iso',
 ]
 # 国内厂商 CDN 固定软件测速点：npmmirror（淘宝 npm 镜像）不提供 latest 软链，但可通过
 # registry 的 dist-tags 实时拿到最新版本号，拼出「最新版」固定直链（几乎不删旧版本，长期可用）。
 # 这样既不写死版本号、又保证是软件最新版，作为镜像站 ISO 之外的日常软件下载带宽代表。
 NPMMIRROR_LATEST_API = 'https://registry.npmmirror.com/node'
-NPMMIRROR_NODE_ZIP_TPL = 'https://registry.npmmirror.com/-/binary/node/{version}/node-{version}-win-x64.zip'
+# ⚠️ 路径必须带 v 前缀（v26.11.1/node-v26.11.1-…）：npmmirror 的 binary 索引按
+# <version> 原样建目录，而 dist-tags.latest 给的是无 v 的裸版本号——2026-10-11 实测
+# 裸版本号路径 404、v 前缀路径 302→cdn 206（曾因此连续 404，该测速点静默失效）。
+NPMMIRROR_NODE_ZIP_TPL = 'https://registry.npmmirror.com/-/binary/node/v{version}/node-v{version}-win-x64.zip'
 DEFAULT_GITEE_BRANCH = 'master'
 
 CONFIG = {
@@ -271,6 +278,11 @@ def download_speedtest(urls, proxy_env, timeout=30.0, size_hint_mib=10, max_dura
     对每个测速 URL 优先用 HTTP Range 单次精确拉取 size_hint_mib 字节（避免重复连接
     开销、速度读数更准）；若目标不支持 Range（返回整文件），则按实际下载字节与耗时
     换算速度。若指定 max_duration>0 则限制单节点总时长（多个 URL 串行取最优）。
+
+    ⚠️ curl 必须带 `-L`（2026-10-11 修）：npmmirror 的 node zip 直链返回 302 →
+    cdn.npmmirror.com，不带 -L 时 size_download=90（就是 302 响应体本身），
+    「10MiB ÷ 4s」换算出一个 0.00002 MiB/s 的假值——因取多 URL 最优它永远落选，
+    该测速点自上线起从未真正生效。实测带 -L 后 206、size 精确等于请求量。
     """
     proxy = f'http://127.0.0.1:{MIHOMO_MIXED_PORT}'
     target_bytes = int(size_hint_mib * 1024 * 1024)
@@ -286,7 +298,7 @@ def download_speedtest(urls, proxy_env, timeout=30.0, size_hint_mib=10, max_dura
             break
         range_arg = f'0-{target_bytes - 1}'
         cmd = [
-            'curl', '-sS', '-x', proxy, '-o', '/dev/null',
+            'curl', '-sSL', '-x', proxy, '-o', '/dev/null',
             '-w', '%{time_total},%{size_download}',
             '--connect-timeout', '10',
             '--max-time', str(min(remaining, timeout)),
@@ -820,6 +832,19 @@ def main():
                                     f'已测 {len(results)}/{len(alive_items)} 个节点')
             log_progress('speedtest_budget_stop', index=index, total=len(alive_items),
                          tested=len(results), budget_seconds=budget_seconds)
+            break
+        # ⚠️ mihomo 运行中健康检查（2026-10-11 补，对齐 gitee 同名机制）：mihomo 中途
+        # 挂掉后，mixed-port 连接全部被拒，后续每个节点会各烧一遍「延迟×4 全超时 +
+        # 下载全失败」的最长失败窗口（单节点 ≈1 分钟），整轮变成纯烧预算的失败流水；
+        # 且此时 curl 报错是「connection refused」——与其他下载失败（镜像 404、Range
+        # 不支持）混在一起，事后无法区分「节点都不行」与「测量仪挂了」。检测到即
+        # 中止本轮（到点收摊语义，退出码仍 0，拿已测节点照常出订阅/通知）。
+        runtime_status = check_mihomo_runtime()
+        if not runtime_status['ok']:
+            aborted_due_to_runtime = True
+            runtime_abort_reason = runtime_status['error']
+            log_progress('runtime_abort', index=index, total=len(alive_items),
+                         reason=runtime_abort_reason)
             break
         name = item.get('name', '')
         try:
