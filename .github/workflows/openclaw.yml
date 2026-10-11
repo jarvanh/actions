@@ -1108,6 +1108,217 @@ jobs:
             echo "✅ OmniRoute 部署目录就绪: $OMNIROUTE_DIR（bootstrap 空库，无渠道/无入站 key）"
           }
 
+          # ===== 回退后端（2026-10-11 恢复自动降级）：CliRelay 全栈 + CLIProxyAPI 单容器 =====
+          # 从 dcf418e 迁移提交的父版本移植，改动仅两点：
+          #   ① 端口统一：官方 compose "8317:8317" → 降级路径 docker run 侧 -p 20128:8317
+          #     （容器内仍 8317，凭据/配置零改动）；健康检查探测 20128。
+          #   ② 函数化保持旧语义：归档恢复优先，无效则 bootstrap。
+          CLIRELAY_DIR=/tmp/local_CliRelay
+          CLIRELAY_TAR=/tmp/CliRelay.tar.gz
+          CLIRELAY_ARCHIVE="dropbox:self-hosted/CliRelay.tar.gz"
+          COMPOSE="docker compose -p clirelay -f $CLIRELAY_DIR/docker-compose.yml --project-directory $CLIRELAY_DIR"
+
+          # CliRelay/CLIProxyAPI 服务 8317（容器内），宿主侧统一映射 20128：
+          # 健康检查与 OmniRoute 同一探测点，降级后客户端/隧道零改动
+          wait_clirelay_ready() {
+            local label="$1"
+            local tries="${2:-120}"
+            local code
+            for i in $(seq 1 "$tries"); do
+              code=$(curl -s --connect-timeout 2 -o /dev/null -w "%{http_code}" http://127.0.0.1:20128/ || true)
+              if [ -n "$code" ] && [ "$code" -ge 100 ] && [ "$code" -lt 600 ]; then
+                echo "✅ [$label] 20128 已就绪 (HTTP ${code})"
+                return 0
+              fi
+              echo "⏳ [$label] 等待中... ${i}/${tries}"
+              sleep 2
+            done
+            return 1
+          }
+
+          # ---------- CLIProxyAPI 数据恢复（旧逻辑原样移植，幂等；回退与 bootstrap 共用） ----------
+          restore_cliproxyapi_data() {
+            if [ -f /tmp/local_CLIPProxyAPI/config.yaml ]; then
+              echo "ℹ️ CLIProxyAPI 数据目录已就绪，跳过恢复"
+              return 0
+            fi
+            echo "Configuring local CLIProxyAPI directory with persistent data..."
+            cleanup_archive_workdir
+            require_free_kb /tmp $((2 * 1024 * 1024)) "CLIProxyAPI restore preflight"
+            rm -rf /tmp/local_CLIPProxyAPI
+            mkdir -p /tmp/local_CLIPProxyAPI
+            if rclone ls dropbox:self-hosted/CLIProxyAPI.tar.gz > /dev/null 2>&1; then
+              echo "📦 Found CLIProxyAPI.tar.gz! Downloading and extracting..."
+              rclone copyto dropbox:self-hosted/CLIProxyAPI.tar.gz /tmp/CLIProxyAPI.tar.gz
+              archive_kb=$(du -sk /tmp/CLIProxyAPI.tar.gz | awk '{print $1}')
+              if [ -z "${archive_kb:-}" ] || [ "$archive_kb" -le 0 ]; then
+                echo "❌ CLIProxyAPI extract preflight: unable to calculate archive size" >&2
+                exit 1
+              fi
+              echo "CLIProxyAPI.tar.gz 大小: ${archive_kb}KB"
+              require_free_kb /tmp $((archive_kb * 3 + 512 * 1024)) "CLIProxyAPI extract preflight"
+              local min_size=$((5 * 1024))
+              local actual_size
+              actual_size=$(stat -c%s /tmp/CLIProxyAPI.tar.gz 2>/dev/null || echo 0)
+              if [ "$actual_size" -ge "$min_size" ] && tar -tzf /tmp/CLIProxyAPI.tar.gz >/dev/null 2>&1; then
+                tar -xzf /tmp/CLIProxyAPI.tar.gz -C /tmp/local_CLIPProxyAPI
+              else
+                echo "⚠️ CLIProxyAPI.tar.gz validation failed, skipping archive restore."
+              fi
+              cleanup_archive_workdir
+            else
+              echo "⚠️ No CLIProxyAPI archive found. Falling back to sync from raw directory..."
+              rclone copy dropbox:self-hosted/CLIProxyAPI /tmp/local_CLIPProxyAPI \
+                --retries 10 \
+                --low-level-retries 20 \
+                --timeout 1m \
+                --contimeout 15s \
+                -P || true
+            fi
+            mkdir -p /tmp/local_CLIPProxyAPI/auth-dir /tmp/local_CLIPProxyAPI/logs
+            touch /tmp/local_CLIPProxyAPI/config.yaml
+            touch /tmp/local_CLIPProxyAPI/stats.json
+            echo "=== restored CLIProxyAPI tree ==="
+            find /tmp/local_CLIPProxyAPI -maxdepth 3 | sort || true
+          }
+
+          # ---------- CLIProxyAPI 数据 → CliRelay 部署目录（bootstrap 迁移，旧逻辑原样移植） ----------
+          bootstrap_clirelay_from_cliproxyapi() {
+            echo "🔄 Bootstrapping CliRelay deployment from CLIProxyAPI data..."
+            rm -rf "$CLIRELAY_DIR"
+            mkdir -p "$CLIRELAY_DIR"/auths "$CLIRELAY_DIR"/sql "$CLIRELAY_DIR"/postgres-data "$CLIRELAY_DIR"/redis-data "$CLIRELAY_DIR"/logs "$CLIRELAY_DIR"/data
+            if [ -f /tmp/local_CLIPProxyAPI/config.yaml ]; then
+              cp -a /tmp/local_CLIPProxyAPI/config.yaml "$CLIRELAY_DIR/config.yaml"
+            else
+              touch "$CLIRELAY_DIR/config.yaml"
+            fi
+            if [ -d /tmp/local_CLIPProxyAPI/auth-dir ]; then
+              cp -a /tmp/local_CLIPProxyAPI/auth-dir/. "$CLIRELAY_DIR/auths/" 2>/dev/null || true
+            fi
+            find "$CLIRELAY_DIR/auths" -name '._*' -delete 2>/dev/null || true
+            curl -fsSL --retry 3 https://raw.githubusercontent.com/kittors/CliRelay/main/docker-compose.yml \
+              -o "$CLIRELAY_DIR/docker-compose.yml" || { echo "❌ 无法下载 CliRelay docker-compose.yml"; return 1; }
+            local pgpass
+            pgpass=$(openssl rand -hex 16)
+            {
+              printf 'CLIRELAY_PROJECT_DIR=%s\n' "$CLIRELAY_DIR"
+              printf 'AUTH_PATH=/root/.cli-proxy-api\n'
+              printf 'CLIRELAY_POSTGRES_DB=clirelay\n'
+              printf 'CLIRELAY_POSTGRES_USER=clirelay\n'
+              printf 'CLIRELAY_POSTGRES_PASSWORD=%s\n' "$pgpass"
+            } > "$CLIRELAY_DIR/.env"
+            chmod 600 "$CLIRELAY_DIR/.env"
+            echo "✅ CliRelay 部署目录就绪: $CLIRELAY_DIR"
+          }
+
+          # ---------- CliRelay 数据恢复：Dropbox 归档优先，无效则 bootstrap 迁移（旧逻辑原样移植） ----------
+          restore_clirelay_data() {
+            rm -rf "$CLIRELAY_DIR"
+            local restored=0
+            if rclone ls "$CLIRELAY_ARCHIVE" > /dev/null 2>&1; then
+              echo "📦 Found CliRelay.tar.gz! Downloading and validating..."
+              require_free_kb /tmp $((2 * 1024 * 1024)) "clirelay restore preflight"
+              if rclone copyto "$CLIRELAY_ARCHIVE" "$CLIRELAY_TAR"; then
+                if [ -s "$CLIRELAY_TAR" ] && tar -tzf "$CLIRELAY_TAR" >/dev/null 2>&1; then
+                  rm -rf /tmp/clirelay-restore
+                  mkdir -p /tmp/clirelay-restore
+                  tar -xzf "$CLIRELAY_TAR" -C /tmp/clirelay-restore
+                  if [ -f /tmp/clirelay-restore/docker-compose.yml ] && [ -f /tmp/clirelay-restore/.env ]; then
+                    mkdir -p "$CLIRELAY_DIR"
+                    cp -a /tmp/clirelay-restore/. "$CLIRELAY_DIR/"
+                    mkdir -p "$CLIRELAY_DIR"/auths "$CLIRELAY_DIR"/sql "$CLIRELAY_DIR"/postgres-data "$CLIRELAY_DIR"/redis-data "$CLIRELAY_DIR"/logs "$CLIRELAY_DIR"/data
+                    echo "✅ Restored CliRelay deployment from archive"
+                    restored=1
+                  else
+                    echo "⚠️ CliRelay.tar.gz 缺少 docker-compose.yml/.env，转 bootstrap 迁移。"
+                  fi
+                else
+                  echo "⚠️ CliRelay.tar.gz validation failed, 转 bootstrap 迁移。"
+                fi
+              else
+                echo "⚠️ CliRelay.tar.gz 下载失败，转 bootstrap 迁移。"
+              fi
+            else
+              echo "ℹ️ 未找到 CliRelay 归档，从 CLIProxyAPI 数据 bootstrap 迁移。"
+            fi
+            cleanup_archive_workdir
+            if [ "$restored" != 1 ]; then
+              restore_cliproxyapi_data
+              bootstrap_clirelay_from_cliproxyapi
+            fi
+          }
+
+          # ---------- CliRelay 全栈启动：postgres 先行 → SQL 导入 → 全栈 up（旧逻辑移植 + 统一端口） ----------
+          start_clirelay() {
+            echo "🚀 Starting CliRelay compose stack..."
+            docker rm -f cli-proxy-api clirelay 2>/dev/null || true
+            # CliRelay 路径若残留上一轮 socat/端口桥接，先拆
+            sudo pkill -f 'socat.*TCP-LISTEN:20128' 2>/dev/null || true
+            $COMPOSE down --remove-orphans 2>/dev/null || true
+            # 统一端口 override：官方 compose 绑 8317:8317（0.0.0.0），覆盖为宿主
+            # 127.0.0.1:20128 → 容器 8317。与 OmniRoute 同宿主端口，降级后客户端/隧道零改动；
+            # override 独立成文件不碰云端归档恢复来的 compose 原件。
+            printf '%s\n' \
+              'services:' \
+              '  cli-proxy-api:' \
+              '    ports: !override' \
+              '      - "127.0.0.1:20128:8317"' \
+              '      - "127.0.0.1:8085:8085"' \
+              '      - "127.0.0.1:1455:1455"' \
+              '      - "127.0.0.1:54545:54545"' \
+              '      - "127.0.0.1:51121:51121"' \
+              '      - "127.0.0.1:11451:11451"' \
+              > "$CLIRELAY_DIR/docker-compose.port-override.yml"
+            $COMPOSE -f "$CLIRELAY_DIR/docker-compose.yml" -f "$CLIRELAY_DIR/docker-compose.port-override.yml" up -d postgres || return 1
+            local pg_ok=0
+            for i in $(seq 1 30); do
+              if $COMPOSE exec -T postgres sh -c '. /clirelay-deploy/.env; pg_isready -U "$CLIRELAY_POSTGRES_USER" -d "$CLIRELAY_POSTGRES_DB"' >/dev/null 2>&1; then
+                pg_ok=1
+                break
+              fi
+              sleep 2
+            done
+            if [ "$pg_ok" != 1 ]; then
+              echo "❌ CliRelay postgres 未在预期时间内就绪"
+              return 1
+            fi
+            # 恢复脚本：先导 SQL 再起全栈（PG 数据卷不入归档，每轮均为全新库，直接导入无冲突）
+            shopt -s nullglob
+            local sql_files=( "$CLIRELAY_DIR"/sql/*.sql )
+            shopt -u nullglob
+            if [ "${#sql_files[@]}" -gt 0 ]; then
+              local latest_sql
+              latest_sql=$(ls -1t "${sql_files[@]}" | head -n 1)
+              echo "📥 Importing PostgreSQL snapshot: $latest_sql"
+              $COMPOSE exec -T postgres sh -c '. /clirelay-deploy/.env; exec psql -U "$CLIRELAY_POSTGRES_USER" -d "$CLIRELAY_POSTGRES_DB" -v ON_ERROR_STOP=1' < "$latest_sql" || return 1
+              echo "✅ PostgreSQL 数据导入完成"
+            fi
+            $COMPOSE -f "$CLIRELAY_DIR/docker-compose.yml" -f "$CLIRELAY_DIR/docker-compose.port-override.yml" up -d || return 1
+          }
+
+          # ---------- CLIProxyAPI 单容器启动（回退后端；端口改绑 20128→容器 8317） ----------
+          start_cliproxyapi() {
+            echo "🚀 Starting CLIProxyAPI container (fallback backend)..."
+            docker rm -f cliproxyapi cli-proxy-api clirelay 2>/dev/null || true
+            # CliRelay 路径残留的 socat 会抢 20128，先拆
+            sudo pkill -f 'socat.*TCP-LISTEN:20128' 2>/dev/null || true
+            mkdir -p /tmp/local_CLIPProxyAPI/auth-dir /tmp/local_CLIPProxyAPI/logs
+            touch /tmp/local_CLIPProxyAPI/config.yaml
+            touch /tmp/local_CLIPProxyAPI/stats.json
+            # ① 容器原生即 8317，宿主侧直接绑 20128（与 OmniRoute 同端口，客户端/隧道零改动）
+            # ② 官方 compose 的 clirelay-init 会写 config，这里数据是归档/旧目录恢复的，直接挂
+            docker run -d \
+              --name cliproxyapi \
+              --restart unless-stopped \
+              -p 127.0.0.1:20128:8317 \
+              -e TZ=Asia/Shanghai \
+              -v /tmp/local_CLIPProxyAPI/config.yaml:/CLIProxyAPI/config.yaml \
+              -v /tmp/local_CLIPProxyAPI/auth-dir:/root/.cli-proxy-api \
+              -v /tmp/local_CLIPProxyAPI/logs:/CLIProxyAPI/logs \
+              -v /tmp/local_CLIPProxyAPI/stats.json:/CLIProxyAPI/stats.json \
+              eceasy/cli-proxy-api:latest || return 1
+          }
+
           # ---------- 启动：恢复路径走 compose（卷已由 compose 声明复用），bootstrap 路径走 docker run ----------
           start_omniroute() {
             echo "🚀 Starting OmniRoute container..."
@@ -1152,16 +1363,66 @@ jobs:
             fi
           fi
 
+          # ---------- 主流程：三后端降级链 OmniRoute → CliRelay → CLIProxyAPI（2026-10-11 恢复自动降级） ----------
+          # 统一端口方案：三个后端全部服务在宿主机 127.0.0.1:20128 —— OpenClaw 客户端
+          # （openclaw.json，随主包归档持久化）硬编码指向 127.0.0.1:20128/v1，ai-api 隧道
+          # 也是固定地址模式指向 20128（tunnels.conf），因此降级不换端口、不改客户端、
+          # 不重建隧道。CliRelay/CLIProxyAPI 官方 compose/容器原生端口 8317，降级路径用
+          # docker run 侧端口映射改绑 20128，容器内仍是 8317，凭据/配置零改动。
+          # 降级链：主用 OmniRoute 起不来 → 回退 CliRelay 全栈（数据随 CliRelay.tar.gz 恢复）
+          # → CliRelay 也起不来 → 回退 CLIProxyAPI 单容器（数据随 CLIProxyAPI.tar.gz 恢复）。
+          # 每次降级记录 FALLBACK_REASON 写入 BACKEND_STATE，通知步骤自动向 Telegram 报告。
+          ACTIVE_BACKEND=""
+          FALLBACK_REASON=""
+
           if start_omniroute && wait_api_ready "omniroute" 150; then
             ACTIVE_BACKEND=omniroute
             docker ps -a
             echo "✅ 当前生效 AI 网关: OmniRoute"
           else
-            echo "❌ OmniRoute 未在预期时间内就绪"
+            if [ -z "${FALLBACK_REASON:-}" ]; then
+              FALLBACK_REASON="OmniRoute 未能在预期时间内就绪 · compose 启动或 20128 健康检查失败"
+            fi
+            echo "⚠️ $FALLBACK_REASON，打印日志并回退 CliRelay..."
+            echo "--- omniroute logs (tail 100) ---"
             docker logs omniroute --tail 100 || true
-            exit 1
+            docker rm -f omniroute 2>/dev/null || true
+
+            restore_clirelay_data || {
+              [ -z "${FALLBACK_REASON:-}" ] && FALLBACK_REASON="CliRelay 数据准备失败 · 归档缺失/校验失败或 bootstrap 迁移失败"
+              echo "⚠️ CliRelay 数据准备失败，跳过 CliRelay 直接回退 CLIProxyAPI"
+            }
+
+            if [ -z "${ACTIVE_BACKEND:-}" ] && [ -f "$CLIRELAY_DIR/docker-compose.yml" ] \
+              && start_clirelay && wait_clirelay_ready "clirelay" 120; then
+              ACTIVE_BACKEND=clirelay
+              docker ps -a
+              echo "✅ 已回退，当前生效 AI 网关: CliRelay（全栈，20128 统一端口）"
+            else
+              [ -z "${ACTIVE_BACKEND:-}" ] && [ -z "${FALLBACK_REASON:-}" ] && \
+                FALLBACK_REASON="CliRelay 未能在预期时间内就绪 · compose 启动或 20128 健康检查失败"
+              echo "⚠️ CliRelay 也未就绪，打印日志并回退 CLIProxyAPI..."
+              echo "--- clirelay compose logs (tail 80) ---"
+              $COMPOSE logs --tail 80 2>/dev/null || true
+              $COMPOSE down -v --remove-orphans 2>/dev/null || true
+              docker rm -f cli-proxy-api clirelay 2>/dev/null || true
+
+              restore_cliproxyapi_data
+              if start_cliproxyapi && wait_clirelay_ready "cliproxyapi" 120; then
+                ACTIVE_BACKEND=cliproxyapi
+                docker ps -a
+                echo "✅ 已回退，当前生效 AI 网关: CLIProxyAPI（单容器，20128 统一端口）"
+              else
+                echo "❌ 三个后端全部未就绪（omniroute/clirelay/cliproxyapi）"
+                docker logs cliproxyapi --tail 100 2>/dev/null || true
+                exit 1
+              fi
+            fi
           fi
-          printf 'ACTIVE_BACKEND=%s\n' "$ACTIVE_BACKEND" > "$BACKEND_STATE"
+          {
+            printf 'ACTIVE_BACKEND=%s\n' "$ACTIVE_BACKEND"
+            if [ -n "${FALLBACK_REASON:-}" ]; then printf 'FALLBACK_REASON=%s\n' "$FALLBACK_REASON"; fi
+          } > "$BACKEND_STATE"
 
           # Hand off to the systemd unit (Restart=always) instead of a bare
           # nohup, so the tunnel survives signal sweeps and restarts itself.
@@ -3651,7 +3912,13 @@ jobs:
           # 「状态」是自然语言结论 → 说明段，留在取值行里会变成 code/裸交错（规范 · 取值行口径）
           tg_add_note msg "状态：已广播 · 可作为出口节点"
 
-          if [ "$AI_BACKEND" = "omniroute" ]; then _ai_backend="OmniRoute"; _ai_state="主用"; else _ai_backend="OmniRoute"; _ai_state="状态未知"; fi
+          # 三后端显示映射（2026-10-11 恢复自动降级）：主用 omniroute，降级链 clirelay/cliproxyapi
+          case "$AI_BACKEND" in
+            omniroute)   _ai_backend="OmniRoute";    _ai_state="主用" ;;
+            clirelay)    _ai_backend="CliRelay";     _ai_state="⚠️ 已降级 · 回退后端" ;;
+            cliproxyapi) _ai_backend="CLIProxyAPI";  _ai_state="⚠️ 已降级 · 末级回退" ;;
+            *)           _ai_backend="$AI_BACKEND";  _ai_state="状态未知" ;;
+          esac
           # 后端**标识**是机器值 → <code>；「主用」是自然语言结论 → 裸文本。
           # 此前二者拼成一个串整段套 <code>，等于让自然语言冒充机器值（规范 · 取值行口径）
           tg_add_section msg "🤖 AI 网关 · 1"
@@ -4667,6 +4934,184 @@ jobs:
           EOF
           chmod +x /tmp/create-omniroute-archive.sh
 
+          # ===== 回退后端归档脚本（2026-10-11 恢复自动降级，从 dcf418e 父版本移植） =====
+          # 只在对应后端实际生效时被周期/Final 归档调用（见归档循环三选一），保持
+          # 「生效后端的数据才进对应归档」的旧口径，防止降级态把 OmniRoute 空库刷进好包。
+          cat > /tmp/create-cliproxyapi-archive.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          OUTPUT_TAR="${1:-}"
+          if [ -z "$OUTPUT_TAR" ]; then
+            echo "Usage: $0 /path/to/output.tar.gz" >&2
+            exit 2
+          fi
+
+          MIN_SIZE=$((5 * 1024))
+          SRC_DIR="/tmp/local_CLIPProxyAPI"
+          STAGE_DIR=""
+
+          cleanup() {
+            if [ -n "${STAGE_DIR:-}" ] && [ -d "$STAGE_DIR" ]; then
+              sudo rm -rf "$STAGE_DIR"
+            fi
+          }
+          trap cleanup EXIT
+
+          sudo rm -f "$OUTPUT_TAR"
+
+          if [ ! -d "$SRC_DIR" ]; then
+            echo "cliproxyapi_dir_missing"
+            exit 3
+          fi
+
+          STAGE_DIR=$(mktemp -d /tmp/cliproxyapi-archive-stage.XXXXXX)
+          sudo mkdir -p "$STAGE_DIR"
+
+          # Copy a stable snapshot first. Exclude volatile request logs/caches; persist
+          # config, auth, and stats.
+          sudo rsync -a --delete \
+            --exclude 'logs/**' \
+            --exclude 'cache/**' \
+            --exclude 'tmp/**' \
+            --exclude 'temp/**' \
+            --exclude '*.lock' \
+            --exclude '*.pid' \
+            --exclude '*.jsonl.lock' \
+            "$SRC_DIR"/ "$STAGE_DIR"/
+
+          # 回退态 token 双保险：把 CliRelay 的 auths 一并打进包（恢复侧忽略未知目录，向后兼容）
+          if [ -d /tmp/local_CliRelay/auths ]; then
+            sudo mkdir -p "$STAGE_DIR/clirelay-auths"
+            sudo cp -a /tmp/local_CliRelay/auths/. "$STAGE_DIR/clirelay-auths/" 2>/dev/null || true
+            sudo find "$STAGE_DIR/clirelay-auths" -name '._*' -delete 2>/dev/null || true
+          fi
+
+          sudo tar -C "$STAGE_DIR" -czf "$OUTPUT_TAR" .
+          # 压缩包是 root 产出、随后由 runner 身份的 rclone 上传，显式放开读权限，不依赖 umask
+          sudo chmod 644 "$OUTPUT_TAR"
+
+          actual_size=$(stat -c%s "$OUTPUT_TAR" 2>/dev/null || echo 0)
+          if [ ! -s "$OUTPUT_TAR" ]; then
+            echo "cliproxyapi_archive_empty output=$OUTPUT_TAR"
+            exit 1
+          elif [ "$actual_size" -lt "$MIN_SIZE" ]; then
+            echo "cliproxyapi_archive_too_small size=${actual_size} min=${MIN_SIZE} output=$OUTPUT_TAR"
+            exit 1
+          elif ! sudo tar -tzf "$OUTPUT_TAR" >/dev/null 2>&1; then
+            echo "cliproxyapi_archive_tar_validation_failed output=$OUTPUT_TAR"
+            exit 1
+          else
+            echo "archive_ready size=${actual_size} output=$OUTPUT_TAR"
+          fi
+          EOF
+          chmod +x /tmp/create-cliproxyapi-archive.sh
+
+          cat > /tmp/create-clirelay-archive.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          OUTPUT_TAR="${1:-}"
+          if [ -z "$OUTPUT_TAR" ]; then
+            echo "Usage: $0 /path/to/output.tar.gz" >&2
+            exit 2
+          fi
+
+          MIN_SIZE=$((5 * 1024))
+          SRC_DIR="/tmp/local_CliRelay"
+          COMPOSE="docker compose -p clirelay -f $SRC_DIR/docker-compose.yml --project-directory $SRC_DIR"
+          STAGE_DIR=""
+          SQL_TMP=""
+
+          cleanup() {
+            if [ -n "${STAGE_DIR:-}" ] && [ -d "$STAGE_DIR" ]; then
+              rm -rf "$STAGE_DIR"
+            fi
+            if [ -n "${SQL_TMP:-}" ]; then
+              rm -f "$SQL_TMP"
+            fi
+          }
+          trap cleanup EXIT
+
+          rm -f "$OUTPUT_TAR"
+
+          if [ ! -f "$SRC_DIR/docker-compose.yml" ] || [ ! -f "$SRC_DIR/.env" ]; then
+            echo "clirelay_dir_missing"
+            exit 3
+          fi
+
+          STAGE_DIR=$(mktemp -d /tmp/clirelay-archive-stage.XXXXXX)
+
+          # 1. pg_dump 刷新 SQL（postgres 数据卷不入包，恢复时 psql 导入；容器仍在运行时执行）
+          #
+          # 必须先落临时文件、成功后再 mv 覆盖 —— 直接重定向到 clirelay-latest.sql 的话，
+          # shell 在 pg_dump 启动前就已把旧 SQL 截断；pg_dump 中途失败时磁盘上剩下的是
+          # 半截 dump，而旧的那份好 SQL 已经被毁。半截 dump 照样能过体积校验并上传，
+          # 下轮 psql -v ON_ERROR_STOP=1 导入失败 → start_clirelay 返回 1 → 回退
+          # CLIProxyAPI → 回退后 postgres 不启动，归档又切去 CLIProxyAPI 脚本，
+          # CliRelay.tar.gz 从此不再刷新，永久锁死在回退态。
+          . "$SRC_DIR/.env"
+          mkdir -p "$SRC_DIR/sql"
+          # 临时文件放 SRC_DIR 根而非 sql/：sql/ 整个目录会被打进包，失败残留的半截
+          # dump 混进去就污染了归档（trap 只在脚本退出时清，而 tar 在那之前执行）
+          SQL_TARGET="$SRC_DIR/sql/clirelay-latest.sql"
+          SQL_TMP="$(mktemp "$SRC_DIR/.clirelay-pgdump.XXXXXX")"
+          if $COMPOSE exec -T postgres sh -c '. /clirelay-deploy/.env; exec pg_dump -U "$CLIRELAY_POSTGRES_USER" -d "$CLIRELAY_POSTGRES_DB" --no-owner' > "$SQL_TMP" 2>/tmp/clirelay-pgdump.err; then
+            pg_size=$(stat -c%s "$SQL_TMP" 2>/dev/null || echo 0)
+            if [ "$pg_size" -lt 200 ]; then
+              # 空库/异常小的 dump 同样不覆盖：宁可沿用上一轮的好 SQL，也不要用可疑输出
+              # 换掉它（旧实现在这里也照样覆盖了）
+              echo "⚠️ pg_dump 输出过小（${pg_size} bytes），可能为空库或异常输出，保留旧 SQL"
+            else
+              mv -f "$SQL_TMP" "$SQL_TARGET"
+              SQL_TMP=""
+              echo "pg_dump ok size=${pg_size}"
+            fi
+          else
+            echo "⚠️ pg_dump 失败（非致命，保留旧 SQL 继续）: $(tail -n 3 /tmp/clirelay-pgdump.err 2>/dev/null || true)"
+          fi
+          rm -f /tmp/clirelay-pgdump.err
+          # 磁盘上无 SQL 可打（首轮 bootstrap 且本轮 dump 未成功）→ 明确记一句，
+          # 否则归档只有「打包了什么」没有「缺了什么」，排障时看不出数据库是空的
+          if [ ! -s "$SQL_TARGET" ]; then
+            echo "⚠️ 归档内不含可用 SQL 快照（sql/clirelay-latest.sql 缺失或为空）"
+          fi
+
+          # 2. 打包：auths + config.yaml + .env + compose 文件 + sql/（跳过 postgres-data/redis-data/logs/data 原始目录）
+          mkdir -p "$STAGE_DIR"
+          cp -a "$SRC_DIR/config.yaml" "$SRC_DIR/.env" "$SRC_DIR/docker-compose.yml" "$STAGE_DIR/"
+          mkdir -p "$STAGE_DIR/auths" "$STAGE_DIR/sql"
+          cp -a "$SRC_DIR/auths/." "$STAGE_DIR/auths/" 2>/dev/null || true
+          find "$STAGE_DIR/auths" -name '._*' -delete 2>/dev/null || true
+          cp -a "$SRC_DIR/sql/." "$STAGE_DIR/sql/" 2>/dev/null || true
+
+          tar -C "$STAGE_DIR" -czf "$OUTPUT_TAR" .
+          chmod 644 "$OUTPUT_TAR" 2>/dev/null || true
+
+          # 把归档内容打进日志：CliRelay 的统计/用量数据在 sql/*.sql 里而不像 CLIProxyAPI
+          # 那样有个 stats.json，光看目录结构看不出统计到底在不在包里（2026-09-19 为此
+          # 专门查过一轮）。有清单后这类问题直接读日志即可，不必再靠包体积反推。
+          # sql/ 可能有多份（保留旧 SQL 策略下不会，但手动放过就会），逐份列大小。
+          echo "📦 CliRelay 归档内容:"
+          tar -tzvf "$OUTPUT_TAR" 2>/dev/null | awk '{printf "  %s  %s\n", $3, $6}' | \
+            grep -v '^ *0  \./sql/$' | head -n 40 || true
+
+          actual_size=$(stat -c%s "$OUTPUT_TAR" 2>/dev/null || echo 0)
+          if [ ! -s "$OUTPUT_TAR" ]; then
+            echo "clirelay_archive_empty output=$OUTPUT_TAR"
+            exit 1
+          elif [ "$actual_size" -lt "$MIN_SIZE" ]; then
+            echo "clirelay_archive_too_small size=${actual_size} min=${MIN_SIZE} output=$OUTPUT_TAR"
+            exit 1
+          elif ! tar -tzf "$OUTPUT_TAR" >/dev/null 2>&1; then
+            echo "clirelay_archive_tar_validation_failed output=$OUTPUT_TAR"
+            exit 1
+          else
+            echo "archive_ready size=${actual_size} output=$OUTPUT_TAR"
+          fi
+          EOF
+          chmod +x /tmp/create-clirelay-archive.sh
+
           cat > /tmp/create-rsstt-archive.sh <<'EOF'
           #!/usr/bin/env bash
           set -euo pipefail
@@ -4939,6 +5384,9 @@ jobs:
 
           TMP_OPENCLAW_TAR="/tmp/openclaw.tar.gz"
           TMP_OMNIROUTE_TAR="/tmp/OmniRoute.tar.gz"
+          # 2026-10-11 恢复自动降级：回退后端归档恢复刷新（生效后端的数据才进对应包）
+          TMP_CLIRELAY_TAR="/tmp/CliRelay.tar.gz"
+          TMP_CLIPROXYAPI_TAR="/tmp/CLIProxyAPI.tar.gz"
           TMP_ZCODE_TAR="/tmp/zcode.tar.gz"
           # 2026-10-06 新增：rsstt / zcode2api-data 原先只在 job 收尾打一次，
           # cancel 或 360m 强杀时那一步没机会跑，实测云端落后本地 5-8.5 小时。
@@ -4952,6 +5400,8 @@ jobs:
             # 产物文件（非 staging 目录）照常清理
             rm -f "$TMP_OPENCLAW_TAR" 2>/dev/null || true
             rm -f "$TMP_OMNIROUTE_TAR" 2>/dev/null || true
+            rm -f "$TMP_CLIRELAY_TAR" 2>/dev/null || true
+            sudo rm -f "$TMP_CLIPROXYAPI_TAR" 2>/dev/null || true
             rm -f "$TMP_ZCODE_TAR" 2>/dev/null || true
             sudo rm -f "$TMP_RSSTT_TAR" 2>/dev/null || true
             rm -f "$TMP_Z2A_DATA_TAR" 2>/dev/null || true
@@ -4968,6 +5418,8 @@ jobs:
               flock -n 9 || exit 1
               rm -rf /tmp/openclaw-archive-stage.* 2>/dev/null || true
               rm -rf /tmp/omniroute-archive-stage.* 2>/dev/null || true
+              rm -rf /tmp/clirelay-archive-stage.* 2>/dev/null || true
+              sudo rm -rf /tmp/cliproxyapi-archive-stage.* 2>/dev/null || true
               rm -rf /tmp/zcode-archive-stage.* 2>/dev/null || true
               sudo rm -rf /tmp/rsstt-archive-stage.* 2>/dev/null || true
               rm -rf /tmp/zcode2api-data-archive-stage.* 2>/dev/null || true
@@ -5104,13 +5556,39 @@ jobs:
               fi
             fi
 
-            # AI 网关归档：OmniRoute（2026-10-11 迁移后单后端）—— 部署目录（compose + .env）
-            # + 数据卷快照（storage.sqlite 渠道/入站 key + server.env 加密根钥）一起打包
-            AI_ARCHIVE_TAR="$TMP_OMNIROUTE_TAR"
-            AI_ARCHIVE_DEST="dropbox:self-hosted/OmniRoute.tar.gz"
-            AI_ARCHIVE_SCRIPT="/tmp/create-omniroute-archive.sh"
-            AI_LABEL="OmniRoute"
-            AI_SUDO_RM="no"
+            # AI 网关归档三选一（2026-10-11 恢复自动降级）：按当前生效后端选择归档脚本
+            # omni→OmniRoute.tar.gz；clirelay→CliRelay.tar.gz；cliproxyapi→CLIProxyAPI.tar.gz
+            # 只刷生效后端的包：降级态下 OmniRoute 卷可能是空库，绝不能盖掉云端好包；
+            # 主用态下回退后端没有活数据，刷了也是把陈旧状态当新鲜的上传。
+            ACTIVE_BACKEND="omniroute"
+            if [ -f /tmp/active-ai-backend.env ]; then
+              ACTIVE_BACKEND=$(grep '^ACTIVE_BACKEND=' /tmp/active-ai-backend.env | tail -n 1 | cut -d= -f2- || true)
+            fi
+            ACTIVE_BACKEND="${ACTIVE_BACKEND:-omniroute}"
+
+            case "$ACTIVE_BACKEND" in
+              clirelay)
+                AI_ARCHIVE_TAR="$TMP_CLIRELAY_TAR"
+                AI_ARCHIVE_DEST="dropbox:self-hosted/CliRelay.tar.gz"
+                AI_ARCHIVE_SCRIPT="/tmp/create-clirelay-archive.sh"
+                AI_LABEL="CliRelay"
+                AI_SUDO_RM="no"
+                ;;
+              cliproxyapi)
+                AI_ARCHIVE_TAR="$TMP_CLIPROXYAPI_TAR"
+                AI_ARCHIVE_DEST="dropbox:self-hosted/CLIProxyAPI.tar.gz"
+                AI_ARCHIVE_SCRIPT="/tmp/create-cliproxyapi-archive.sh"
+                AI_LABEL="CLIProxyAPI"
+                AI_SUDO_RM="yes"
+                ;;
+              *)
+                AI_ARCHIVE_TAR="$TMP_OMNIROUTE_TAR"
+                AI_ARCHIVE_DEST="dropbox:self-hosted/OmniRoute.tar.gz"
+                AI_ARCHIVE_SCRIPT="/tmp/create-omniroute-archive.sh"
+                AI_LABEL="OmniRoute"
+                AI_SUDO_RM="no"
+                ;;
+            esac
 
             ai_archive_output=""
             if ai_archive_output=$(flock -E 200 -n "$LOCK_FILE" timeout 40m bash "$AI_ARCHIVE_SCRIPT" "$AI_ARCHIVE_TAR" 2>&1); then
@@ -5680,9 +6158,11 @@ jobs:
           cleanup_archive_outputs() {
             rm -f /tmp/openclaw-final.tar.gz /tmp/rsstt.tar.gz /tmp/zcode-final.tar.gz 2>/dev/null || true
             # -final 后缀产物（2026-10-06）：与周期归档同名解耦后，清理也要跟着改名
-            rm -f /tmp/OmniRoute-final.tar.gz 2>/dev/null || true
+            rm -f /tmp/OmniRoute-final.tar.gz /tmp/CliRelay-final.tar.gz 2>/dev/null || true
+            sudo rm -f /tmp/CLIProxyAPI-final.tar.gz 2>/dev/null || true
             # 周期归档的同名产物仍照常清理（它可能残留自被 systemd 拉回的循环实例）
-            rm -f /tmp/OmniRoute.tar.gz 2>/dev/null || true
+            rm -f /tmp/OmniRoute.tar.gz /tmp/CliRelay.tar.gz 2>/dev/null || true
+            sudo rm -f /tmp/CLIProxyAPI.tar.gz 2>/dev/null || true
             # ── 2026-10-07 rc=23 根治：同上，staging 清理必须先抢到归档锁 ──
             # 本 step 自己在下方才 flock 持锁，此处若裸删通配 stage，会抹掉仍在
             # 写入的目录（循环实例 / 上一轮残留）。抢不到锁即跳过，由持有方回收。
@@ -5690,6 +6170,8 @@ jobs:
               flock -n 9 || exit 1
               rm -rf /tmp/openclaw-archive-stage.* 2>/dev/null || true
               rm -rf /tmp/omniroute-archive-stage.* 2>/dev/null || true
+              rm -rf /tmp/clirelay-archive-stage.* 2>/dev/null || true
+              sudo rm -rf /tmp/cliproxyapi-archive-stage.* 2>/dev/null || true
               rm -rf /tmp/zcode-archive-stage.* 2>/dev/null || true
             ) 9>>/tmp/openclaw-archive.lock 2>/dev/null; then
               :
@@ -5865,32 +6347,77 @@ jobs:
 
           MIN_SIZE=$((5 * 1024))
 
-          echo "5. Archiving AI gateway persistent data (OmniRoute)..."
-          # 2026-10-11 网关迁移：CliRelay/CLIProxyAPI → OmniRoute（单后端，双轨归档退役）。
-          # 归档对象 = /home/runner/omniroute（compose + .env 密钥）+ omniroute 数据卷
-          # （storage.sqlite：全部渠道/入站 key/combo；server.env：STORAGE_ENCRYPTION_KEY，
-          #  与 storage.sqlite 必须同代否则存量 key 解不开 —— 二者同一份归档，天然同代）。
-          # 旧链路归档的处置：CliRelay.tar.gz 由生产侧归档循环在备用容器存活期间继续
-          # 刷新（备用网关口径），CLIProxyAPI.tar.gz 为历史快照不再刷新 —— 本 workflow
-          # 均不再消费，仅作手动回滚素材。
-          if [ -f /home/runner/omniroute/docker-compose.yml ]; then
-            omniroute_final_output=""
-            # 产物改 -final 后缀与周期归档解耦（2026-10-06 口径沿用），flock 与周期归档互斥（同一把锁）
-            OMNIROUTE_FINAL_TAR="/tmp/OmniRoute-final.tar.gz"
-            if omniroute_final_output=$(flock -w 600 -E 200 /tmp/openclaw-archive.lock timeout 40m bash /tmp/create-omniroute-archive.sh "$OMNIROUTE_FINAL_TAR" 2>&1); then
-              actual_size=$(stat -c%s "$OMNIROUTE_FINAL_TAR" 2>/dev/null || echo 0)
-              upload_final_archive "OmniRoute.tar.gz" "$OMNIROUTE_FINAL_TAR" "dropbox:self-hosted/OmniRoute.tar.gz" "$MIN_SIZE"
-            else
-              rc=$?
-              echo "⚠️ final OmniRoute.tar.gz archive failed (rc=$rc): ${omniroute_final_output}"
-              record_archive_result "OmniRoute.tar.gz" fail 0 "归档失败 · 退出码 $rc"
-              send_archive_alert "OmniRoute.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${omniroute_final_output:-归档脚本无输出}"
-            fi
-          else
-            echo "⚠️ /home/runner/omniroute 不存在，跳过 OmniRoute 归档"
-            record_archive_result "OmniRoute.tar.gz" fail 0 "部署目录未初始化"
-            send_archive_alert "OmniRoute.tar.gz" "归档失败 · 退出码 3" "OmniRoute 本地部署目录未初始化 · /home/runner/omniroute 不存在 · 通常表示 OmniRoute 启动步骤被跳过或失败" "omniroute_dir_missing"
+          echo "5. Archiving AI gateway persistent data (backend-aware)..."
+          # 2026-10-11 恢复自动降级：Final 归档按当前生效后端三选一（口径同周期归档）
+          # omni→OmniRoute.tar.gz（部署目录 + 数据卷快照，storage.sqlite 与 server.env
+          # 同代天然保证）；clirelay→CliRelay.tar.gz（auths + config + pg_dump SQL）；
+          # cliproxyapi→CLIProxyAPI.tar.gz（config + auth + stats，附 clirelay-auths）。
+          # 只刷生效后端的包：降级态下 OmniRoute 卷可能是空库，绝不能盖掉云端好包。
+          ACTIVE_BACKEND="omniroute"
+          if [ -f /tmp/active-ai-backend.env ]; then
+            ACTIVE_BACKEND=$(grep '^ACTIVE_BACKEND=' /tmp/active-ai-backend.env | tail -n 1 | cut -d= -f2- || true)
           fi
+          ACTIVE_BACKEND="${ACTIVE_BACKEND:-omniroute}"
+
+          case "$ACTIVE_BACKEND" in
+            clirelay)
+              echo "生效后端: CliRelay → Final 归档 CliRelay.tar.gz"
+              if [ -f "$CLIRELAY_DIR/docker-compose.yml" ] || [ -f /tmp/local_CliRelay/docker-compose.yml ]; then
+                CLIRELAY_FINAL_TAR="/tmp/CliRelay-final.tar.gz"
+                if clirelay_final_output=$(flock -w 600 -E 200 /tmp/openclaw-archive.lock timeout 40m bash /tmp/create-clirelay-archive.sh "$CLIRELAY_FINAL_TAR" 2>&1); then
+                  actual_size=$(stat -c%s "$CLIRELAY_FINAL_TAR" 2>/dev/null || echo 0)
+                  upload_final_archive "CliRelay.tar.gz" "$CLIRELAY_FINAL_TAR" "dropbox:self-hosted/CliRelay.tar.gz" "$MIN_SIZE"
+                else
+                  rc=$?
+                  echo "⚠️ final CliRelay.tar.gz archive failed (rc=$rc): ${clirelay_final_output}"
+                  record_archive_result "CliRelay.tar.gz" fail 0 "归档失败 · 退出码 $rc"
+                  send_archive_alert "CliRelay.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${clirelay_final_output:-归档脚本无输出}"
+                fi
+              else
+                echo "⚠️ /tmp/local_CliRelay 不存在，跳过 CliRelay 归档"
+                record_archive_result "CliRelay.tar.gz" fail 0 "部署目录未初始化"
+                send_archive_alert "CliRelay.tar.gz" "归档失败 · 退出码 3" "CliRelay 本地部署目录未初始化 · 通常表示回退路径未执行" "clirelay_dir_missing"
+              fi
+              ;;
+            cliproxyapi)
+              echo "生效后端: CLIProxyAPI → Final 归档 CLIProxyAPI.tar.gz"
+              if [ -d /tmp/local_CLIPProxyAPI ]; then
+                CLIPROXYAPI_FINAL_TAR="/tmp/CLIProxyAPI-final.tar.gz"
+                if cliproxyapi_final_output=$(flock -w 600 -E 200 /tmp/openclaw-archive.lock timeout 40m bash /tmp/create-cliproxyapi-archive.sh "$CLIPROXYAPI_FINAL_TAR" 2>&1); then
+                  actual_size=$(stat -c%s "$CLIPROXYAPI_FINAL_TAR" 2>/dev/null || echo 0)
+                  upload_final_archive "CLIProxyAPI.tar.gz" "$CLIPROXYAPI_FINAL_TAR" "dropbox:self-hosted/CLIProxyAPI.tar.gz" "$MIN_SIZE"
+                else
+                  rc=$?
+                  echo "⚠️ final CLIProxyAPI.tar.gz archive failed (rc=$rc): ${cliproxyapi_final_output}"
+                  record_archive_result "CLIProxyAPI.tar.gz" fail 0 "归档失败 · 退出码 $rc"
+                  send_archive_alert "CLIProxyAPI.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${cliproxyapi_final_output:-归档脚本无输出}"
+                fi
+              else
+                echo "⚠️ /tmp/local_CLIPProxyAPI 不存在，跳过 CLIProxyAPI 归档"
+                record_archive_result "CLIProxyAPI.tar.gz" fail 0 "数据目录未初始化"
+                send_archive_alert "CLIProxyAPI.tar.gz" "归档失败 · 退出码 3" "CLIProxyAPI 本地数据目录未初始化 · 通常表示回退路径未执行" "cliproxyapi_dir_missing"
+              fi
+              ;;
+            *)
+              echo "生效后端: OmniRoute → Final 归档 OmniRoute.tar.gz"
+              if [ -f /home/runner/omniroute/docker-compose.yml ]; then
+                OMNIROUTE_FINAL_TAR="/tmp/OmniRoute-final.tar.gz"
+                if omniroute_final_output=$(flock -w 600 -E 200 /tmp/openclaw-archive.lock timeout 40m bash /tmp/create-omniroute-archive.sh "$OMNIROUTE_FINAL_TAR" 2>&1); then
+                  actual_size=$(stat -c%s "$OMNIROUTE_FINAL_TAR" 2>/dev/null || echo 0)
+                  upload_final_archive "OmniRoute.tar.gz" "$OMNIROUTE_FINAL_TAR" "dropbox:self-hosted/OmniRoute.tar.gz" "$MIN_SIZE"
+                else
+                  rc=$?
+                  echo "⚠️ final OmniRoute.tar.gz archive failed (rc=$rc): ${omniroute_final_output}"
+                  record_archive_result "OmniRoute.tar.gz" fail 0 "归档失败 · 退出码 $rc"
+                  send_archive_alert "OmniRoute.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${omniroute_final_output:-归档脚本无输出}"
+                fi
+              else
+                echo "⚠️ /home/runner/omniroute 不存在，跳过 OmniRoute 归档"
+                record_archive_result "OmniRoute.tar.gz" fail 0 "部署目录未初始化"
+                send_archive_alert "OmniRoute.tar.gz" "归档失败 · 退出码 3" "OmniRoute 本地部署目录未初始化 · /home/runner/omniroute 不存在 · 通常表示 OmniRoute 启动步骤被跳过或失败" "omniroute_dir_missing"
+              fi
+              ;;
+          esac
 
           echo "6. Archiving rss-to-telegram data..."
           if [ -d /tmp/local_rsstt ]; then
