@@ -4617,11 +4617,22 @@ jobs:
           fi
 
           # 2. 数据卷快照：helper 容器（root）打包整个 /app/data
-          docker run --rm --user root -v "$VOLUME:/data:ro" -v "$STAGE_DIR:/stage" \
-            "$IMAGE" tar czf /stage/data.tar.gz -C /data . 2>/dev/null || {
-            echo "omniroute_volume_snapshot_failed volume=$VOLUME"
+          #    2026-10-11 加固：镜像偶发启动慢导致单次失败（实测约 1/4 概率），重试 3 次幂等
+          snap_ok=0
+          for attempt in 1 2 3; do
+            if docker run --rm --user root -v "$VOLUME:/data:ro" -v "$STAGE_DIR:/stage" \
+              "$IMAGE" tar czf /stage/data.tar.gz -C /data . 2>/dev/null; then
+              snap_ok=1
+              break
+            fi
+            echo "⚠️ volume snapshot attempt ${attempt}/3 failed, retrying..."
+            sleep 5
+            rm -f "$STAGE_DIR/data.tar.gz" 2>/dev/null || true
+          done
+          if [ "$snap_ok" != 1 ]; then
+            echo "omniroute_volume_snapshot_failed volume=$VOLUME after 3 attempts"
             exit 4
-          }
+          fi
           data_size=$(stat -c%s "$STAGE_DIR/data.tar.gz" 2>/dev/null || echo 0)
           if [ "$data_size" -lt "$MIN_SIZE" ]; then
             echo "omniroute_data_snapshot_too_small size=${data_size} min=${MIN_SIZE}"
