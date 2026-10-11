@@ -406,6 +406,24 @@ def main():
     check('预算内仅测完 10/8326' in l3, f'到点收摊时交代「测了多少/共多少」（实际 {l3}）')
     check('未达' not in l3 or '达标不足' in l3, '中止范围是补充说明，不改变原结论')
 
+    print('== 8b. TOP 条目口径 = 引擎原始 Mbps（speedtest.net 同单位，无 4.6% 往返损失）==')
+    # 2026-10-11：通知 TOP5 曾把引擎值 ÷8.388608 变 MiB/s 再 ×8 显示成「兆」，
+    # 591.86Mbps 显示成 564兆（十进制/二进制单位往返损失 4.6%），与 speedtest.net
+    # 客户端读数对不上。改喂原始 Mbps（÷8 进共享层、×8 取整出），数值须与引擎一致。
+    # 例：591.86 → ÷8 → ×8 取整 = 592（旧口径 591.86/8.388608*8 = 564）。
+    top_node = [{'ok': True, 'bypass': False, 'up': 591.86, 'down': 1301.87, 'rtt': '350ms',
+                 'name': 'n1', 'source_entry': cfg, 'proxy_obj': {}}]
+    top_lines = [str(x) for x in t.build_telegram_lines(
+        top_node, meta, '1.2.3.4', 0, None, {}, {},
+        collected_total=1)]
+    _top_entry = next(x for x in top_lines if '592' in x and '1242' not in x)
+    check('↑592兆' in _top_entry, f'上传 591.86Mbps 须显示 ↑592兆（实际 {_top_entry}）')
+    check('↓1302兆' in _top_entry, f'下载 1301.87Mbps 须显示 ↓1302兆（实际 {_top_entry}）')
+    check('564' not in _top_entry and '1241' not in _top_entry,
+          f'旧 ÷8.388608 口径的 564/1241 不得再出现（实际 {_top_entry}）')
+    check('speedtest' in next(x for x in top_lines if '最快节点' in x),
+          '图例须标注「兆=Mbps，同 speedtest 口径」让读者知道单位可直接对比')
+
     print('== 9. provider 惰性展开：等就绪 + 404 不判死（方案 C，run 35116972319 根因）==')
     # 事故取证：那 8 条 `Resource not found` 每两次间隔恒为 ~18.7ms（`.016`→`.147`），
     # 远小于 3000ms 的探测超时 ⇒ 是本地 HTTP 往返，mihomo 压根没连节点、只是

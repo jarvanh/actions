@@ -754,20 +754,24 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
     lines.extend(taier_target_network_lines(meta['points'], direct_ip))
     lines.append('')
     if top:
-        # 四套统一：TOP 条目复用共享的 build_node_metric_prefix（↑上传 · ↓下载 · 延迟ms，
-        # 单位「兆」），不再手拼 Mbps —— 此前只有 taier 一处两种单位/分隔符（规范 · 入口与凭据 统一优先于个性）。
-        # 引擎原始值 Mbps → 共享层单位 MiB/s（÷8.388608），与订阅导出口径一致
+        # TOP 条目仍复用共享的 build_node_metric_prefix 渲染（树形/省略/延迟语义不重写），
+        # 但**喂进原始 Mbps**（×8 折算 MiB/s）而非引擎值 ÷8.388608 —— 口径对齐 speedtest.net：
+        # 引擎 calcMbps 是十进制 Mbps（与 speedtest.net 同单位），共享层「兆」= mibs×8 取整，
+        # 走 ÷8.388608→×8 往返会把 591.86Mbps 显示成 564兆（4.6% 缩水）；×8 后 591.86→592，
+        # 通知数值与 speedtest.net 客户端读数同口径可直接对比（2026-10-11 用户口径要求）。
+        # ⚠️ 仅通知侧如此；Gist 订阅导出（下方 gist_results）仍按 MiB/s 口径，
+        # 客户端「兆」显示 = MiB/s×8.388608 反推 Mbps，链路自洽。
         _top_mode = 'push-only' if bundle.get('metric', 'upload') == 'upload' else 'download'
         has_up = any((r.get('up') or 0) > 0 for r in top)
-        legend = '↑上传 · ↓下载 · 延迟ms' if has_up else '↓下载 · 延迟ms'
+        legend = '↑上传 · ↓下载 · 延迟ms（兆=Mbps，同 speedtest 口径）' if has_up else '↓下载 · 延迟ms（兆=Mbps）'
         # 标题点出排序依据（= 订阅判定指标），避免读者按 ↓ 数值读不出顺序
         sort_hint = f' · 按{esc(metric_label)}' if metric_label else ''
         lines.append(f'🏆 最快节点 · {len(top)}{sort_hint} · {legend}')
         for idx, r in enumerate(top, 1):
             connector = '└─' if idx == len(top) else '├─'
             prefix = build_node_metric_prefix({
-                'upload_mibs': (r.get('up') or 0) / 8.388608,
-                'download_mibs': (r.get('down') or 0) / 8.388608,
+                'upload_mibs': (r.get('up') or 0) / 8,
+                'download_mibs': (r.get('down') or 0) / 8,
                 'latency_ms': _rtt_to_ms(r.get('rtt')),
             }, _top_mode, order='up_first')
             # 条目行统一走共享的 tg_entry（主体 + 元数据，转义与分隔符一致）
