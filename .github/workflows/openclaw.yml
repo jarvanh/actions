@@ -115,6 +115,72 @@ jobs:
             sleep 2
           done
 
+      # 2026-10-11 事故根治：本轮（run 38118437892）收尾时 zcode-final.tar.gz 上传
+      # 三连败于 path/insufficient_space（Dropbox 配额到顶），step 是 set -e 直接炸出
+      # exit 1，且后续 4c/5/rsstt 归档整段被级联跳过。改在起跑最前面预检：配额不足
+      # 就发 alert 档 TG 告警并中止本轮（exit 1），不空转 6 小时后死在收尾。
+      #   - 判据是 rclone about 的 free 原始字节数，阈值经 JOB_QUOTA_MIN_FREE_KB
+      #     环境变量可调（默认 1GiB，收尾要上传的增量约为 GB 级）。
+      #   - rclone about / 解析失败只告警放行（fail-open）：预检工具故障不该把整轮
+      #     服务全停掉；真配额满了收尾侧的上传失败告警仍在。
+      #   - 失败（配额不足）时后续 always() 步骤（Keep alive / Final Archive /
+      #     Trigger next 等）按 steps.dropbox_preflight.conclusion 闸门跳过：
+      #     Keep alive 对空环境白睡 5.5h、Final Archive 对空环境发连环告警都无意义。
+      #     Tailscale 的 post 步骤由 action 自己跑，注销入口不受影响。
+      - name: Dropbox quota preflight
+        id: dropbox_preflight
+        env:
+          # 告警凭据走 alert 档（@SaberFuckBot）；缺了则发送留痕但不阻断流程
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_BOT_TOKEN_ALERT: ${{ secrets.TELEGRAM_BOT_TOKEN_ALERT }}
+          TELEGRAM_CHAT_ID_ALERT: ${{ secrets.TELEGRAM_CHAT_ID_ALERT }}
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+          # 阈值默认 1GiB：收尾要上传的归档增量约 GB 级，低于它本轮必在收尾炸
+          MIN_FREE_KB="${JOB_QUOTA_MIN_FREE_KB:-$((1 * 1024 * 1024))}"
+          # --json 拿原始字节数（人类可读输出的 KiB/MiB 单位换算不可靠），jq 失败
+          # 则回退 python3，都没有就放行（fail-open，见步骤头注释）
+          ABOUT_JSON=$(rclone about dropbox: --json 2>&1) || ABOUT_RC=1
+          if [ "${ABOUT_RC:-0}" != "0" ]; then
+            echo "::warning::[dropbox-quota] rclone about 失败，放行本轮：${ABOUT_JSON}"
+            exit 0
+          fi
+          PARSE_FAIL=0
+          FREE_BYTES=$(printf '%s' "$ABOUT_JSON" | jq -r '.free // empty' 2>/dev/null) || PARSE_FAIL=1
+          if [ "$PARSE_FAIL" != "0" ] || [ -z "${FREE_BYTES:-}" ]; then
+            # 回退解析 free/total 分行输出：合一行会让空 free 被 awk 误取 total 的值
+            if ABOUT_JSON=$(printf '%s' "$ABOUT_JSON" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("free","")); print(d.get("total",""))' 2>/dev/null); then
+              FREE_BYTES=$(printf '%s' "$ABOUT_JSON" | sed -n '1p')
+            fi
+          fi
+          case "${FREE_BYTES:-}" in ''|*[!0-9]*)
+            echo "::warning::[dropbox-quota] rclone about 无可解析的 free 字段，放行本轮"
+            exit 0
+          esac
+          FREE_KB=$((FREE_BYTES / 1024))
+          if [ "${FREE_KB}" -ge "$MIN_FREE_KB" ]; then
+            echo "✅ Dropbox 剩余配额充足：$(format_bytes "$FREE_BYTES")（阈值 $(format_bytes "$((MIN_FREE_KB * 1024))")）"
+            exit 0
+          fi
+
+          # 配额不足：alert 档告警后失败退出（后续步骤按闸门跳过，不再空转）
+          _m=""
+          tg_add_title _m "🚫 Dropbox 配额不足，本轮已中止"
+          tg_add_kv _m "结论" "剩余 $(escape_html "$(format_bytes "$FREE_BYTES")")，低于阈值 $(escape_html "$(format_bytes "$((MIN_FREE_KB * 1024))")")"
+          tg_add_kv _m "影响" "所有归档/回推都将失败（path/insufficient_space），本轮提前结束"
+          tg_add_section _m "🧹 清理建议"
+          _qrows=""
+          _qrows+="$(tree_conn 0)删旧 <code>openclaw-snapshot-*</code>（只保最新 1 份）"$'\n'
+          _qrows+="$(tree_conn 0)删 <code>openclaw-failed-*</code> 隔离包（超 2 个自动清，可手动删）"$'\n'
+          _qrows+="$(tree_sub 1)检查其他大文件或升级套餐"
+          tg_add_block _m "$_qrows"
+          tg_add_footer _m
+          send_tg "$_m" alert || echo "::warning::[dropbox-quota] TG 告警发送失败"
+          exit 1
+
       - name: Install OpenClaw
         run: |
           echo "Installing OpenClaw base..."
@@ -3728,12 +3794,10 @@ jobs:
           QINGYAN_GATEWAY_KEY: ${{ secrets.GLM2API_GATEWAY_KEY }}
           QINGYAN_PORT: "8320"
           # 代码源（Dropbox 侧）：项目在本机 ~/AI/qingyan-proxy（非 git 仓库），
-          # 经 rclone 存到该远端，每轮 pull 保证跑在最新版上。
+          # 经 rclone 存到该远端，每轮 prepare 校验真源在位。
           QINGYAN_APP_REMOTE: dropbox:self-hosted/qingyan-proxy/app
-          # 持久化（对齐 workbuddy-gateway）：Dropbox 专属目录 ↔ 本地数据目录，
-          # 起前 pull / 停后 push。DATA_DIR 同时是积分快照落点（STATE_DIR 指向它），
-          # runner 本地盘每轮重置，不落 Dropbox 的话「今日累计」每轮清零。
-          QINGYAN_DATA_REMOTE: dropbox:self-hosted/qingyan-proxy/data
+          # 持久化（2026-10-06 起）：qingyan 全面直写 Dropbox（代码/数据/凭据/日志），
+          # DATA_DIR 同时是积分快照落点（STATE_DIR 指向它），不再有 pull/push 往返。
           QINGYAN_DATA_DIR: /dropbox/self-hosted/qingyan-proxy/data
           QINGYAN_STATE_DIR: /dropbox/self-hosted/qingyan-proxy/data
           QINGYAN_ENV_FILE: /dropbox/self-hosted/qingyan-proxy/env.sh
@@ -3765,12 +3829,7 @@ jobs:
             exit 0
           fi
 
-          # 0. 先把 Dropbox 上的持久数据拉回本地（积分快照等）。
-          #    必须在 prepare 之前：prepare 只保证目录存在，不负责跨轮状态。
-          #    拉失败不阻断——按首轮空数据启动，只是「今日累计」从 0 起算。
-          bash "$DEPLOY" pull || echo "::warning::[qingyan] 持久数据拉取失败，按首轮处理"
-
-          # 1. 准备运行目录（从 Dropbox 拉代码 + 写 env.sh）
+          # 1. 准备运行目录（校验 Dropbox 真源在位 + 写 env.sh）
           if bash "$DEPLOY" prepare; then
             # 2. 托管：systemd --user + Restart=always（窗口期崩溃秒级自愈，见 services.sh 文件头）
             bash "$SERVICES" ensure qingyan || true
@@ -3804,8 +3863,8 @@ jobs:
           GL_SOONEST_AMT=""
           GL_SOON_EXPIRE=""
           if [ "$GL_OK" = "1" ]; then
-            # 快照已在步骤 0 由 `deploy pull` 还原到 QINGYAN_STATE_DIR；
-            # 缺失即首轮，delta 会自动按 0 起算，无需在此再拉一次。
+            # 快照由 QUOTA delta 直接写进 QINGYAN_STATE_DIR（= Dropbox 数据目录，
+            # 直写真源）。缺失即首轮，delta 会自动按 0 起算。
             if GLQ="$(bash "$QUOTA" fetch)"; then
               GL_SCORE="$(printf '%s' "$GLQ" | cut -f1)"
               GL_SCORE_RULE="$(printf '%s' "$GLQ" | cut -f2)"
@@ -3815,13 +3874,10 @@ jobs:
               # 第 2/3 参（2026-10-09 加）：把 fetch 拿到的「最近到期 / 24h 将过期」
               # 一并交给 delta 落进快照 —— 此前快照只存 date/score/day_total，
               # quota-board 想显示「即将过期」根本没有数据源。
+              # 快照直写 QINGYAN_STATE_DIR（Dropbox 真源），无需回推。
               if GLD="$(bash "$QUOTA" delta "$GL_SCORE" "$GL_SOONEST" "$GL_SOON_EXPIRE")"; then
                 GL_ROUND_DELTA="$(printf '%s' "$GLD" | cut -f1)"
                 GL_DAY_TOTAL="$(printf '%s' "$GLD" | cut -f2)"
-                # 快照落盘后立刻回推 Dropbox：本轮窗口约 5.75h，中途 runner 被
-                # 回收也能保住已累计的消耗（收尾还有一次 push 兜底）。
-                bash "$DEPLOY" push 2>/dev/null \
-                  || echo "::warning::[qingyan] 持久数据回推失败（下轮累计将从 0 起）"
               fi
             else
               echo "::warning::[qingyan] 积分采集失败，通知将省略积分分节"
@@ -4528,7 +4584,9 @@ jobs:
           # 收尾区接线（规范 · 收尾区）：只需注入 TG_RUN_URL，缺了收尾区就没有日志入口；
           # 时长由 tg_add_footer 内的 runner 开机时刻兜底
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        if: ${{ always() }}
+        # 预检失败（Dropbox 配额不足）时不启动归档循环：对满额远端每 20 分钟
+        # 打一轮失败告警纯属噪音，等空间腾出后的下一轮再正常托管。
+        if: ${{ always() && steps.dropbox_preflight.conclusion != 'failure' }}
         run: |
           echo "Starting background archive tasks: archive ~/.openclaw every 20 minutes; OmniRoute data is archived periodically and at final shutdown..."
           cat > /tmp/create-openclaw-archive.sh <<'EOF'
@@ -5796,7 +5854,7 @@ jobs:
 
       - name: Keep alive
         id: keepalive
-        if: ${{ always() }}
+        if: ${{ always() && steps.dropbox_preflight.conclusion != 'failure' }}
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -5863,7 +5921,8 @@ jobs:
         # 归档前发一份五网关用量汇总。插在 Keep alive 之后、最终归档之前：
         # 此时所有网关仍在运行（归档步骤里才开始逐个 stop），读到的是最新用量；
         # 放进归档步骤内部则会读到服务已停、数据不再更新的旧值。
-        if: ${{ !cancelled() }}
+        # 预检失败（Dropbox 配额不足）时网关从未部署，无用量可报。
+        if: ${{ !cancelled() && steps.dropbox_preflight.conclusion != 'failure' }}
         continue-on-error: true
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -5907,7 +5966,9 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        if: ${{ always() }}
+        # 预检失败（Dropbox 配额不足）时本轮没部署任何服务，归档会对着空环境
+        # 发连环失败告警 —— 跳过，等空间腾出后的下一轮正常收尾。
+        if: ${{ always() && steps.dropbox_preflight.conclusion != 'failure' }}
         run: |
           set -euo pipefail
           # 通知真源在 step 顶层 source 一次（勿挪进下面的函数体，理由见启动步骤同名注释 / 规范 4.4）
@@ -6519,7 +6580,10 @@ jobs:
       # （预检失败 / 磁盘不足），写在步骤末尾的通知会随之被跳过；always() + 结果文件
       # 让「没产出明细」也能有交代（那类失败在归档步骤内不产生任何通知）。
       - name: Notify OpenClaw final archive result
-        if: ${{ always() }}
+        # 预检失败时归档步骤被闸门跳过（skipped），归档结果通知无意义。
+        # 注意用 conclusion == 'failure' 只闸预检失败：skipped 本身是
+        # 「结果文件为空」通知的正常输入之一，不能把整步跳掉。
+        if: ${{ always() && steps.dropbox_preflight.conclusion != 'failure' }}
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
