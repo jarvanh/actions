@@ -56,7 +56,7 @@ import yaml
 from speedtest_common import (
     DEFAULT_MIN_MEGABIT, DEFAULT_MIN_NODES, DEFAULT_SPEED_METRIC, HOME_RUNTIME, METRIC_LABELS, PROVIDERS_DIR, SOURCE_SNAPSHOT_DIR,
     _redact_value, _scrub_cred_urls, build_node_metric_prefix, build_subscription_bundle,
-    build_target_network_section, deep_copy_json, fetch_ip_network_info,
+    build_target_network_section, deep_copy_json, direct_egress_ip, fetch_ip_network_info,
     get_item_megabits, latency_probe, log_progress, merged_env,
     resolve_host_ipv4, resolve_subscription_policy,
     send_telegram, send_telegram_chunked, tg_entry, tg_entry_codes, tg_footer_line,
@@ -1466,7 +1466,33 @@ def run_direct_baseline(env, gitee, test_file, push_timeout, clone_timeout,
     joined = ' | '.join(f'第{i}次: {e}' for i, e in enumerate(attempt_errors, 1))
     raise RuntimeError(f'本机直连基线测速连续 {max_attempts} 次失败: {joined[-1500:]}')
 
-def speedtest_single_item(env, gitee, item: dict, test_file: pathlib.Path, push_timeout: int, clone_timeout: int, switch_settle_seconds: float, speedtest_mode: str, via_proxy: bool = True):
+def _proxied_egress_ip(proxy_env, timeout=8):
+    """经 mihomo mixed-port 查当前节点的出口 IP（bypass 校验用，2026-10-11 新增）。
+
+    与 direct_egress_ip（共享层）同源不同路：这里显式走代理 Handler，拿到的是
+    「测速流量实际出口」；两值相同 = 节点切换没生效/流量没进节点。失败返回 ''。
+    与 cdn 的 proxied_egress_ip 同一份逻辑——单份实现两处 import 不划算（gitee 是
+    cdn 的上游模块，反向 import 破坏分层），故各留一份小函数，判定口径一致。
+    """
+    proxy = proxy_env.get('HTTP_PROXY') or proxy_env.get('HTTPS_PROXY')
+    if not proxy:
+        return ''
+    handlers = [urllib.request.ProxyHandler({'http': proxy, 'https': proxy})]
+    opener = urllib.request.build_opener(*handlers)
+    for url in ('https://api.ipify.org', 'https://ifconfig.me/ip'):
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with opener.open(req, timeout=timeout) as r:
+                text = r.read().decode('utf-8', 'ignore')
+            m = re.search(r'(?:\d{1,3}\.){3}\d{1,3}', text)
+            if m:
+                return m.group(0)
+        except Exception:
+            continue
+    return ''
+
+
+def speedtest_single_item(env, gitee, item: dict, test_file: pathlib.Path, push_timeout: int, clone_timeout: int, switch_settle_seconds: float, speedtest_mode: str, via_proxy: bool = True, direct_ip: str = ''):
     name = item['name']
     local_env = build_proxy_env(env)
     branch_name = TEST_BRANCH
@@ -1485,6 +1511,24 @@ def speedtest_single_item(env, gitee, item: dict, test_file: pathlib.Path, push_
 
     repo_dir = HOME_RUNTIME / f'upload-{sanitize_name(name)}'
     clone_dir = HOME_RUNTIME / f'download-{sanitize_name(name)}'
+    # bypass 校验（2026-10-11 对齐 taier）：经代理查当前节点出口 IP，与 runner 直连
+    # 出口相同 = 流量没进节点（切换未生效/节点透明直连），push/clone 结果不可信。
+    # 查询失败 → 跳过校验不判死（fail-open）。放在 push 之前：省下坏节点 30~90s 窗口。
+    exit_ip = _proxied_egress_ip(local_env)
+    bypass = bool(direct_ip and exit_ip and exit_ip == direct_ip)
+    if bypass:
+        log_progress('node_bypass_detected', name=name, exit_ip=direct_ip)
+        # 返回带 bypass 标记的失败结果（不是抛异常）：走正常 node_done 落账，
+        # 通知层按 bypass_hits 汇总展示；不触发「重建仓库」那套错误恢复。
+        return {
+            'name': name,
+            'provider': item['provider'],
+            'type': item.get('type'),
+            'ok': False,
+            'bypass': True,
+            'exit_ip': direct_ip,
+            'error': f'疑似未走代理：出口 IP 与 runner 直连出口相同（{direct_ip}），测速流量未进节点',
+        }
     # 上行经共享实现（与 CDN 同一份）；`via_proxy=False` 时测的是家庭宽带直连上行
     upload_s, total = upload_speedtest(
         env=env, gitee=gitee, test_file=test_file, push_timeout=push_timeout,
@@ -1498,6 +1542,8 @@ def speedtest_single_item(env, gitee, item: dict, test_file: pathlib.Path, push_
         'share_link_match': item.get('share_link_match', ''),
         'proxy_obj': deep_copy_json(item.get('proxy_obj') or {}),
         'ok': True,
+        'bypass': False,
+        'exit_ip': exit_ip,
         'branch_name': branch_name,
         'target_filename': target_filename,
         'mode': speedtest_mode,
@@ -1667,7 +1713,7 @@ def build_run_summary(*, started_at, ended_at, elapsed_seconds, duration_text, a
         'gist': {'ok': False, 'reason': 'not-run-yet'},
     }
 
-def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_count, ok_results, speed_results, speedtest_mode, aborted_due_to_runtime, runtime_abort_reason, ok_results_by_download, metric_label=''):
+def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_count, ok_results, speed_results, speedtest_mode, aborted_due_to_runtime, runtime_abort_reason, ok_results_by_download, metric_label='', direct_ip='', bypass_hits=0):
     """生成人性化 Telegram 通知，版式对齐 speedtest.build_telegram_lines。
 
     2026-09-08 起 TOP 节点条目与四套统一为三项指标（↑上传 · ↓下载 · 延迟ms，
@@ -1691,6 +1737,9 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
     # 标题状态随结论降级（规范 · 状态图标语义）：0 节点测速成功 / 本轮中止 → ⚠️，
     # 不再恒 ✅（此前「✅ 完成」下面写着「⚠️ 没有节点测速成功」，自相矛盾）
     _title_emoji = '⚠️' if (aborted_due_to_runtime or not ok_results_by_download) else '✅'
+    # 全部可用节点都命中 bypass ⇒ 结果不可信，标题同样降 ⚠️（与 taier/CDN 规范一致）
+    if ok_results and bypass_hits >= len(ok_results):
+        _title_emoji = '⚠️'
     # 来源标签（PROXY_SPEEDTEST_LABEL）：编排层 proxy-speedtest-gistnodes 调用时传
     # 「gist 节点」，标题变成「gist 节点 · Gitee 测速完成」。同一套测速会被定时轮和 gist
     # 抓取轮分别触发，标题不区分的话读者分不清通知来自哪一轮（规范 · 3.1）。
@@ -1706,6 +1755,11 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
         # 同一条信息落在不同位置会让读者以为自己看漏了）。放在测速点区块之前，
         # 是因为它修饰的正是上面那行「共 N 个 · 可用 M 个」的读数。
         *([f'⚠️ 本轮已中止：{esc(runtime_abort_reason)}'] if aborted_due_to_runtime else []),
+        # bypass 校验命中分节（与 taier/CDN 同款）：出口 IP == runner 直连出口
+        # = 流量没进节点，结果不可信，必须让读者一眼看到
+        *([f'⚠️ 疑似未走代理'] if bypass_hits else []),
+        *([f'<code>  └─ </code>{bypass_hits} 个节点的出口 IP 与 runner 直连出口'
+           f'（{tg_entry(direct_ip)}）相同，节点切换可能未生效，结果不可信'] if bypass_hits else []),
         '',
     ]
     # 测速点（Gitee push 目标）的网络归属：域名解析 IP 后查 ISP/ASN/位置
@@ -1914,6 +1968,10 @@ def main():
         alive_items = alive_items[:max_nodes]
 
     log_progress('speedtest_plan_ready', speedtest_mode=speedtest_mode, size_mib=size_mib, push_timeout=push_timeout, clone_timeout=clone_timeout, direct_baseline_timeout=direct_baseline_timeout, direct_baseline_max_attempts=direct_baseline_max_attempts, total_nodes=len(alive_items), budget_seconds=budget_seconds)
+    # bypass 校验基线（2026-10-11 对齐 taier/CDN）：runner 直连出口 IP。
+    # 拿不到（三源全失败）→ 跳过全部节点的 bypass 校验（fail-open），照常测速。
+    direct_ip = direct_egress_ip()
+    log_progress('direct_egress_resolved', ip=direct_ip)
     test_file = run_stage('测速文件准备', ensure_test_file, size_mib)
     log_progress('test_file_ready', path=str(test_file), size_mib=size_mib)
     direct_baseline = None
@@ -1983,6 +2041,7 @@ def main():
                 switch_settle_seconds=switch_settle_seconds,
                 speedtest_mode=speedtest_mode,
                 via_proxy=upload_via_proxy,
+                direct_ip=direct_ip,
             ), index, item)
         except Exception as e:
             err_text = str(e)
@@ -2007,6 +2066,7 @@ def main():
                         switch_settle_seconds=switch_settle_seconds,
                         speedtest_mode=speedtest_mode,
                         via_proxy=upload_via_proxy,
+                        direct_ip=direct_ip,
                     ), index, item)
                 except Exception as e2:
                     err_text = f'{err_text} | rebuild retry: {str(e2)[:300]}'
@@ -2104,6 +2164,8 @@ def main():
         runtime_abort_reason=runtime_abort_reason,
         ok_results_by_download=ok_results_by_download,
         metric_label=bundle['metric_label'],
+        direct_ip=direct_ip,
+        bypass_hits=sum(1 for r in speed_results if r.get('bypass')),
     )
     run_stage('Gist 更新/通知', finalize_gist_and_notify, env, summary, summary_lines, subscription_text, bundle)
 
