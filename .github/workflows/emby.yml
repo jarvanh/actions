@@ -2789,6 +2789,8 @@ jobs:
           TELEGRAM_BOT_TOKEN_ALERT: ${{ secrets.TELEGRAM_BOT_TOKEN_ALERT }}
           TELEGRAM_CHAT_ID_ALERT: ${{ secrets.TELEGRAM_CHAT_ID_ALERT }}
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # 失败位置采集：Jobs API 查本轮失败 step（仅 failure/cancelled 时用到）
+          GH_TOKEN: ${{ github.token }}
         run: |
           source "$EMBY302_DIR/lib.sh"
           STATUS="${{ job.status }}"
@@ -2858,9 +2860,29 @@ jobs:
             cancelled) STATUS_CN="中断";;
             *) STATUS_CN="$STATUS";;
           esac
+          # 失败位置/原因采集（2026-10-11）：收尾通知此前不带失败细节，主人只能点日志链接自翻。
+          # 位置 = Jobs API 里 conclusion=failure 的 step 名；原因 = 关键脚本主动落盘的
+          # /tmp/wf-fail-reason（如 setup_rclone.sh 有效性检查失败时写入，一行文本）。
+          # ⚠️ 本 step 在 bash -e 下跑：每条管道都自带 || true，防静默 exit（同上文 WW_N 教训）
+          FAIL_LOC=""
+          FAIL_REASON=""
+          if [ "$STATUS" != "success" ]; then
+            FAIL_LOC=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs" \
+              --jq '.jobs[] | .steps[]? | select(.conclusion=="failure") | .name' 2>/dev/null \
+              | head -3 | paste -sd '、' - || true)
+            # 兜底：step 级没采到（如 job 整体挂）就报 job 名
+            if [ -z "$FAIL_LOC" ]; then
+              FAIL_LOC=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs" \
+                --jq '.jobs[] | select(.conclusion=="failure") | .name' 2>/dev/null \
+                | head -3 | paste -sd '、' - || true)
+            fi
+            FAIL_REASON=$(cat /tmp/wf-fail-reason 2>/dev/null || true)
+          fi
           msg=""
           tg_add_title msg "${STATUS_EMOJI} Emby 服务停止"
           tg_add_kv msg "状态" "${STATUS_CN}"
+          if [ -n "$FAIL_LOC" ]; then tg_add_kv msg "失败位置" "$FAIL_LOC"; fi
+          if [ -n "$FAIL_REASON" ]; then tg_add_kv msg "失败原因" "$FAIL_REASON"; fi
           tg_add_kv msg "模式" "${MODE_DESC}"
           tg_add_kv msg "本轮直链" "$OD_SUMMARY"
           tg_add_kv msg "海报预热" "$WW_SUMMARY"
