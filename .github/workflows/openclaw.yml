@@ -4886,18 +4886,20 @@ jobs:
           # 2. 数据卷快照：helper 容器（root）打包整个 /app/data
           #    2026-10-11 加固：镜像偶发启动慢导致单次失败（实测约 1/4 概率），重试 3 次幂等
           snap_ok=0
-          for attempt in 1 2 3; do
+          for attempt in 1 2 3 4; do
             if docker run --rm --user root -v "$VOLUME:/data:ro" -v "$STAGE_DIR:/stage" \
-              "$IMAGE" tar czf /stage/data.tar.gz -C /data . 2>/dev/null; then
+              "$IMAGE" tar czf /stage/data.tar.gz -C /data . 2>/tmp/omniroute-snap.err; [ $? -le 1 ]; then
               snap_ok=1
               break
             fi
-            echo "⚠️ volume snapshot attempt ${attempt}/3 failed, retrying..."
-            sleep 5
+            echo "⚠️ volume snapshot attempt ${attempt}/4 failed: $(tail -c 160 /tmp/omniroute-snap.err 2>/dev/null)"
+            # 指数退避 20/40/60s：失败多发生在 openclaw 8GB 主包上传窗口（IO/内存争抢），短间隔会连撞
+            sleep $((attempt * 20))
             rm -f "$STAGE_DIR/data.tar.gz" 2>/dev/null || true
           done
+          rm -f /tmp/omniroute-snap.err
           if [ "$snap_ok" != 1 ]; then
-            echo "omniroute_volume_snapshot_failed volume=$VOLUME after 3 attempts"
+            echo "omniroute_volume_snapshot_failed volume=$VOLUME after 4 attempts"
             exit 4
           fi
           data_size=$(stat -c%s "$STAGE_DIR/data.tar.gz" 2>/dev/null || echo 0)
