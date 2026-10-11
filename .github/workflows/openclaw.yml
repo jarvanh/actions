@@ -241,8 +241,9 @@ jobs:
             # 只验 gzip 完整性（98KB 空壳照样通过），而 preflight doctor 会现造一份合法
             # 配置骗过归档侧 config validate，健康门全绿后空壳照样打上行。恢复是最后防线：
             # 真实主包 GB 级，50MB 绝对下限留约两个数量级余量，且 openclaw.json 必须真实
-            # 在包内。任一不满足 → 先走 Dropbox revision 回退捞最近的好包，全部不可用才
-            # exit 1（任务失败→通知）。宁可失败，不要空壳。
+            # 在包内。结构判据之外 2026-10-11 加配置预检（config_precheck_ok，见下）：
+            # 任一不满足 → 走 Dropbox revision 回退（候选上限 100）逐个验到能过为止，
+            # 全部不可用才 exit 1（任务失败→通知）。宁可失败，不要空壳/坏配置上岗。
             OPENCLAW_TARBALL_MIN_KB=$((50 * 1024))
             listing_has_config() {
               (
@@ -250,39 +251,80 @@ jobs:
                 if command -v pigz >/dev/null 2>&1; then pigz -dc "$1" 2>/dev/null; else gunzip -c "$1" 2>/dev/null; fi | tar -tf - 2>/dev/null | grep -q '^\.openclaw/openclaw\.json$'
               )
             }
+            # 2026-10-11 恢复侧配置预检（结构判据之外的语义判据）：把包内 openclaw.json
+            # 抽出来用**已安装的** openclaw 二进制 validate。此前云端主包可能顶着
+            # 「结构完好」（≥50MB 且含 openclaw.json）的状态被恢复上岗，网关却因配置
+            # 语义坏起不来，且每轮恢复同一份坏主包、无自动出口 —— 归档侧 config
+            # validate 门（退出码 5 不覆盖云端）只挡得住「归档时配置已坏」，挡不住
+            # 「归档时健康、运行中写坏」的形态（2026-09-18 事故）。配置判据加进
+            # tarball_usable 后，revision 回退的触发条件从「结构坏」扩到「结构或配置坏」，
+            # 逐个历史版本验到第一个能过的为止 —— 主包真源兜底闭环。
+            # 二进制不可得（openclaw 未装上/安装失败）时跳过配置判据、只按结构放行：
+            # 没有校验器比有结构校验强，拦死恢复反而让下一轮连结构兜底都没了。
+            tar_extract_config() {
+              (
+                set +o pipefail
+                if command -v pigz >/dev/null 2>&1; then pigz -dc "$1" 2>/dev/null; else gunzip -c "$1" 2>/dev/null; fi | tar -xf - -C "$2" .openclaw/openclaw.json 2>/dev/null
+              )
+            }
+            config_precheck_ok() {
+              # 用法: config_precheck_ok <tar.gz 路径> <工作目录（抽包落点）>
+              local tar="$1" workdir="$2"
+              command -v openclaw >/dev/null 2>&1 || { echo "SKIP (openclaw not on PATH)"; return 0; }
+              rm -rf "$workdir/.openclaw"
+              tar_extract_config "$tar" "$workdir" || { echo "FAIL (extract)"; return 1; }
+              if [ ! -s "$workdir/.openclaw/openclaw.json" ]; then
+                echo "FAIL (config missing)"; return 1
+              fi
+              if OPENCLAW_CONFIG_PATH="$workdir/.openclaw/openclaw.json" openclaw config validate >/dev/null 2>&1; then
+                echo "PASS"; return 0
+              fi
+              echo "FAIL (config invalid)"; return 1
+            }
+            CONFIG_CHECK_DIR="$(mktemp -d /tmp/openclaw-config-check.XXXXXX)"
             tarball_usable=0
-            if [ "$archive_kb" -ge "$OPENCLAW_TARBALL_MIN_KB" ] && listing_has_config "$TMP_OPENCLAW_TAR"; then
+            _verdict="$(config_precheck_ok "$TMP_OPENCLAW_TAR" "$CONFIG_CHECK_DIR")"
+            if [ "$archive_kb" -ge "$OPENCLAW_TARBALL_MIN_KB" ] && listing_has_config "$TMP_OPENCLAW_TAR" && [[ "$_verdict" == PASS* ]]; then
               tarball_usable=1
+              echo "✅ 云端主包结构+配置预检通过（$_verdict）"
             else
-              echo "⚠️ 云端主包异常（size=${archive_kb}KB，要求 ≥${OPENCLAW_TARBALL_MIN_KB}KB 且含 openclaw.json），尝试 revision 回退..."
+              echo "⚠️ 云端主包异常（size=${archive_kb}KB 要求 ≥${OPENCLAW_TARBALL_MIN_KB}KB / 含 openclaw.json / 配置预检=$_verdict），尝试 revision 回退..."
               DBX_TOKEN=$(rclone config show dropbox 2>/dev/null | sed -n 's/^token = .*"access_token":"\([^"]*\)".*/\1/p' | tail -1)
               if [ -n "$DBX_TOKEN" ]; then
+                # limit=100（Dropbox API 上限即 100）：历史版本要多捞些，逐个验到能过为止
                 mapfile -t GOOD_REVS < <(curl -s --max-time 60 -X POST https://api.dropboxapi.com/2/files/list_revisions \
                   -H "Authorization: Bearer $DBX_TOKEN" -H "Content-Type: application/json" \
-                  -d '{"path":"/self-hosted/openclaw.tar.gz","mode":"path","limit":10}' \
-                  | python3 -c "import json,sys; d=json.load(sys.stdin); [print(r['rev']) for r in d.get('entries',[]) if r.get('size',0) >= ${OPENCLAW_TARBALL_MIN_KB} * 1024]" 2>/dev/null \
-                  | head -3)
+                  -d '{"path":"/self-hosted/openclaw.tar.gz","mode":"path","limit":100}' \
+                  | python3 -c "import json,sys; d=json.load(sys.stdin); [print(r['rev']) for r in d.get('entries',[]) if r.get('size',0) >= ${OPENCLAW_TARBALL_MIN_KB} * 1024]" 2>/dev/null)
+                echo "revision 候选（结构达标）: ${#GOOD_REVS[@]} 个"
+                _rev_n=0
                 for _rev in "${GOOD_REVS[@]:-}"; do
                   [ -z "$_rev" ] && continue
-                  echo "⬇️ 下载历史 revision $_rev ..."
+                  _rev_n=$((_rev_n + 1))
+                  echo "⬇️ 下载历史 revision $_rev（候选 $_rev_n/${#GOOD_REVS[@]}）..."
                   if curl -s --max-time 1800 -X POST https://content.dropboxapi.com/2/files/download \
                      -H "Authorization: Bearer $DBX_TOKEN" \
                      -H "{\"path\":\"/self-hosted/openclaw.tar.gz\",\"rev\":\"$_rev\"}" \
                      -o "$TMP_OPENCLAW_TAR" && [ -s "$TMP_OPENCLAW_TAR" ] \
                      && listing_has_config "$TMP_OPENCLAW_TAR"; then
                     archive_kb=$(du -sk "$TMP_OPENCLAW_TAR" | awk '{print $1}')
-                    require_free_kb /tmp $((archive_kb * 3 + 1024 * 1024)) "openclaw revision extract preflight"
-                    tarball_usable=1
-                    echo "✅ revision $_rev 可用（${archive_kb}KB）"
-                    break
+                    _verdict="$(config_precheck_ok "$TMP_OPENCLAW_TAR" "$CONFIG_CHECK_DIR")"
+                    if [[ "$_verdict" == PASS* ]]; then
+                      require_free_kb /tmp $((archive_kb * 3 + 1024 * 1024)) "openclaw revision extract preflight"
+                      tarball_usable=1
+                      echo "✅ revision $_rev 可用（${archive_kb}KB，$_verdict）"
+                      break
+                    fi
+                    echo "⚠️ revision $_rev 结构可用但配置预检失败（$_verdict），继续往前找"
                   fi
                 done
               else
                 echo "⚠️ 未能从 rclone 配置取到 Dropbox token，跳过 revision 回退"
               fi
             fi
+            rm -rf "$CONFIG_CHECK_DIR"
             if [ "$tarball_usable" -ne 1 ]; then
-              echo "❌ 云端主包与全部候选 revision 均不可用：拒绝用空壳状态上岗" >&2
+              echo "❌ 云端主包与全部候选 revision 均不可用（结构/配置预检未通过）：拒绝用坏状态上岗" >&2
               exit 1
             fi
             # 优化（2026-10-02）：恢复侧 gzip 单线程 → pigz 并行。实测 305MB 样本
