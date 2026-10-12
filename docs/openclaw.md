@@ -346,6 +346,28 @@ pooled dispatcher ... host.docker.internal:8318` ×11，而 autoclaw 自身 3~4s
 > "succeeded 之后多久又 OPEN"，若中间没有目标 provider 的请求，就是被牵连不是本体坏；
 > ③ 直接从容器内 `node -e fetch(...)` 复现上游真实延迟，拿数据再调参，别默认值改默认值。
 
+### 与 CliRelay 阈值的对齐（2026-10-12 复核）
+
+CliRelay（回退后端）的口径是「**慢就等，绝不判死**」——`main-api-read-timeout-seconds: 1800`
+（30 分钟）、**没有 provider 熔断器**（失败即透出）、流式 keep-alive 15s、首字节前可重试 1 次
+（`streaming.bootstrap-retries: 1`）。
+
+OmniRoute 有熔断器（CliRelay 没有），所以对齐策略 = **总超时口径对齐 + 熔断阈值放到足够宽
+（别把慢判成坏）+ 缺失项补齐**：
+
+| 项 | CliRelay | OmniRoute 现值 | 对齐 |
+|---|---|---|---|
+| 总读取/请求超时 | 1800s（read timeout） | `REQUEST_TIMEOUT_MS=1800000` + `FETCH_TIMEOUT_MS`/`STREAM_IDLE_TIMEOUT_MS` 同为 1800s | ✅ |
+| 等响应头 | 同上（同 read） | `OMNIROUTE_DIRECT_HEADERS_TIMEOUT_MS=150s` | ✅（覆盖实测 85s） |
+| SSE readiness | 同上 | 150s / 自适应 420s | ✅ |
+| 流式静默 | keep-alive 15s 主动续命 | `STREAM_IDLE_TIMEOUT_MS=1800s` | ✅（被动等待，够宽） |
+| 首字节前重试 | `bootstrap-retries: 1` | 无对应 | ⚠️ 见下 |
+| provider 熔断 | 无 | 阈值 30 / 60，冷却 3min | 有意放宽（非对齐） |
+
+「首字节前重试」OmniRoute 无直接对应项，其等价位是 `OMNIROUTE_DIRECT_RESPONSE_RETRY_TIMEOUT_MS`
+（600000，已显式声明）+ 熔断半开试探；不做强行对齐——CliRelay 没有熔断，给了重试也不会
+把 provider 打进冷却，语义不同。
+
 **三处必须同源**（少一处就会在特定路径上退回默认值、故障复发）：
 1. 生产 compose `/home/runner/omniroute/docker-compose.yml`（`environment:` 块）；
 2. workflow 的 compose heredoc（`restore_omniroute_data` 恢复路径）；
