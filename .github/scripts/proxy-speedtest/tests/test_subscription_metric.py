@@ -36,9 +36,13 @@ def check(cond, label):
         FAILURES.append(label)
 
 
-def node(up_mbps, down_mbps, with_proxy=True):
-    """按 taier 的单位换算构造一条结果：Mbps / 8.388608 = MiB/s（与 taier_speedtest 一致）。"""
-    return {'name': 'n', 'source_entry': {'proxy': {'type': 'vless'}} if with_proxy else {},
+def node(up_mbps, down_mbps, with_proxy=True, ok=True):
+    """按 taier 的单位换算构造一条结果：Mbps / 8.388608 = MiB/s（与 taier_speedtest 一致）。
+
+    ok=True 是默认：达标判定（2026-10-12 起）要求 ok=True，构造的这些是成功节点。
+    """
+    return {'name': 'n', 'ok': ok,
+            'source_entry': {'proxy': {'type': 'vless'}} if with_proxy else {},
             'upload_mibs': up_mbps / 8.388608, 'download_mibs': down_mbps / 8.388608}
 
 
@@ -117,8 +121,10 @@ def main():
     # ⇒ 206 个实测有速度的节点（最高 245 Mbps）全被判「无可用配置」⇒ 达标 0 ⇒ 不上传。
     # ⚠️ 但兜底**不是「什么都能收」**——proxy_obj 有两种来路，只有真配置能导出，
     # 见第 10 组与 speedtest_common.is_exportable_proxy。
-    def orch_node(up_mbps, down_mbps, has_proxy_obj=True):
-        return {'name': 'n', 'source_entry': {},
+    def orch_node(up_mbps, down_mbps, has_proxy_obj=True, ok=True):
+        # ok=True：编排轮这批是**实测有速度**的正常节点（2026-10-12 补 ok 字段——
+        # 达标判定要求 ok=True，失败/bypass 节点不得进订阅）
+        return {'name': 'n', 'source_entry': {}, 'ok': ok,
                 'proxy_obj': {'type': 'vless', 'server': 'x.com', 'port': 443}
                 if has_proxy_obj else {},
                 'upload_mibs': up_mbps / 8.388608, 'download_mibs': down_mbps / 8.388608}
@@ -132,11 +138,30 @@ def main():
     check(b7['text'].count('name:') == 206,
           f'导出的 YAML 含 206 个节点（实际 {b7["text"].count("name:")}）')
 
+    print('== 7b. 失败节点（bypass 未走代理/超时/切换失败）不得进订阅（2026-10-12 修）==')
+    # 实例：CDN 轮 28 个节点全部 bypass（出口 == runner 直连出口）判定失败，速度字段
+    # 与原始配置都还在 ⇒ 旧口径把它们当「达标」导出，订阅段写「✅ 达标 24 个」而
+    # 通知标题是「⚠️ 没有节点测速成功」，自相矛盾且订阅内容全是不可信节点。
+    failed = [orch_node(100.0, 100.0, ok=False) for _ in range(28)]
+    ok_nodes = [orch_node(100.0, 100.0, ok=True) for _ in range(3)]
+    mixed = failed + ok_nodes
+    check(C.count_qualified_nodes(mixed, 'upload', 10) == 3,
+          f'失败节点不计入达标：28 失败 + 3 成功 ⇒ 3（实际 {C.count_qualified_nodes(mixed, "upload", 10)}）')
+    b7b = C.build_subscription_bundle(mixed, pol)
+    check(b7b['qualified'] == 3,
+          f'bundle 达标数 = 3（实际 {b7b["qualified"]}）')
+    check(b7b['text'].count('name:') == 3,
+          f'导出 YAML 只含 3 个成功节点（实际 {b7b["text"].count("name:")}）')
+    # 全失败一轮：达标 0 ⇒ min_nodes=1 不足 ⇒ 不上传订阅（text 为空）
+    b7c = C.build_subscription_bundle(failed, pol)
+    check(b7c['qualified'] == 0 and not b7c['text'].strip(),
+          f'全失败一轮不产出订阅（实际 qualified={b7c["qualified"]}, text空={not b7c["text"].strip()}）')
+
     print('== 8. source_entry.proxy 优先于 proxy_obj（前者是更权威的来源）==')
     both = {'name': 'n',
             'source_entry': {'proxy': {'type': 'trojan', 'server': 'from-entry.com', 'port': 443}},
             'proxy_obj': {'type': 'vless', 'server': 'from-obj.com', 'port': 80},
-            'upload_mibs': 20.0 / 8.388608, 'download_mibs': 20.0 / 8.388608}
+            'ok': True, 'upload_mibs': 20.0 / 8.388608, 'download_mibs': 20.0 / 8.388608}
     picked = C.node_proxy_config(both)
     check(picked.get('server') == 'from-entry.com',
           f'source_entry 存在时用它（实际 {picked.get("server")}）')
@@ -163,7 +188,7 @@ def main():
                                   'mptcp': False, 'smux': False, 'interface': '',
                                   'routing-mark': 0, 'dialer-proxy': '', 'extra': {},
                                   'provider-name': 'gist'},
-                    'upload_mibs': 50.0 / 8.388608, 'download_mibs': 50.0 / 8.388608}
+                    'ok': True, 'upload_mibs': 50.0 / 8.388608, 'download_mibs': 50.0 / 8.388608}
     check(C.node_proxy_config(runtime_only) == {}, '运行时对象不算可导出配置（返回空字典）')
     check(C.is_exportable_proxy({'type': 'trojan', 'server': 'a.com', 'port': 443}),
           'server + port 齐全 ⇒ 可导出')
