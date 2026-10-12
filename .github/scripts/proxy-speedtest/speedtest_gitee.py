@@ -1153,6 +1153,17 @@ def git_prepare_work_repo(repo_dir: pathlib.Path, remote: str, env, branch_name:
     config_steps = [
         ['git', 'config', 'user.name', 'Javis'],
         ['git', 'config', 'user.email', 'javis@bot.ai'],
+        # ⚠️ http.postBuffer（2026-10-12 修）：经代理（高延迟/会重协商的链路）做
+        # HTTP push 时，git 需要重发请求体；默认缓冲不足即报
+        # 「unable to rewind rpc post data - try increasing http.postBuffer」
+        # + 「RPC failed; curl 65 GnuTLS recv error」。修复根因（mode global→rule）
+        # 让流量真的进节点后，这条才从隐藏状态暴露：验证轮 35 个失败里 31 个是它。
+        # 100MB 覆盖 10~64MiB 测速文件的重发需求（git 默认 1MB，远不够）。
+        ['git', 'config', 'http.postBuffer', '104857600'],
+        # 同族兜底：低带宽链路（代理节点回连 Gitee 常在 1Mbps 以下）上 git 的
+        # 默认 1 分钟 speed 保护会误杀正常传输（表现为 early EOF / RPC failed）
+        ['git', 'config', 'http.lowSpeedLimit', '0'],
+        ['git', 'config', 'http.lowSpeedTime', '999999'],
     ]
     for cmd in config_steps:
         code, out, err = run(cmd, cwd=repo_dir, env=env, timeout=60)
