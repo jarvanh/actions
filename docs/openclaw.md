@@ -315,10 +315,20 @@ runner-autoclaw 承接 40 万 token 级上下文，实测 96 万字符请求 **6
 日志里的反证很直接：`08:33:21 succeeded (26042ms)` 之后 **2 秒**断路器又 OPEN——单次是成功的，
 触发的是 provider 级累积计数，不是单次超时。
 
+**二次调参（同日 11:04，第一轮没治好）**：第一轮只调了 SSE readiness，漏了**更前置的
+direct response-start 闸**（`OMNIROUTE_DIRECT_HEADERS_TIMEOUT_MS`，默认 30s）——它发生在
+等响应头阶段，比任何 SSE 判据都早。日志坐证：`Direct response-start timeout (30000ms) on
+pooled dispatcher ... host.docker.internal:8318` ×11，而 autoclaw 自身 3~4s 就 200
+（11:04:15 succeeded → 11:04:41 被拒，中间没有任何 autoclaw 请求）——**熔断是沿 combo
+从 workbuddy(8318) 传染过来的**，8318 的长上下文实测 24~85s 才出响应头。
+→ 补两个：`OMNIROUTE_DIRECT_HEADERS_TIMEOUT_MS` 30s→**150s**、
+`OMNIROUTE_DIRECT_RESPONSE_RETRY_TIMEOUT_MS` 10min→**600000**（不变，显式声明）。
+
 **调参**（数值全部按实测延迟量级给，不拍脑袋；与早年 CliRelay 时代同口径——那次也是放宽）：
 
 | 变量 | 默认 | 改为 | 理由 |
 |---|---|---|---|
+| `OMNIROUTE_DIRECT_HEADERS_TIMEOUT_MS` | 30s | **150s** | 等响应头比 SSE 更前置；实测 85s |
 | `STREAM_READINESS_TIMEOUT_MS` | 80s | **150s** | 覆盖 61s 实测 + 排队抖动 |
 | `STREAM_READINESS_MAX_TIMEOUT_MS` | 180s | **420s** | 大/重请求自适应上限 |
 | `OMNIROUTE_AGENT_GOAL_READINESS_MAX_TIMEOUT_MS` | 600s | **900s** | `/goal` agent 长跑 |
@@ -330,6 +340,11 @@ runner-autoclaw 承接 40 万 token 级上下文，实测 96 万字符请求 **6
 | `OMNIROUTE_PROVIDER_BREAKER_API_KEY_DEGRADATION_THRESHOLD` | 7 | **20** | 降级门槛 |
 | `OMNIROUTE_PROVIDER_BREAKER_API_KEY_COOLDOWN_MS` | 600s | **180s** | 真故障时也较快恢复 |
 | `OMNIROUTE_PROVIDER_BREAKER_API_KEY_MAX_BACKOFF_MULTIPLIER` | 4 | **2** | 退避倍率 |
+
+> **排查方法论**（下次再遇到先做这三步）：① 看熔断前 30s 有没有**别的** provider 超时
+> （`DIRECT_HEADERS` / `ProxyFetch` 字样）——combo 型会话会跨 provider 传染；② 对比
+> "succeeded 之后多久又 OPEN"，若中间没有目标 provider 的请求，就是被牵连不是本体坏；
+> ③ 直接从容器内 `node -e fetch(...)` 复现上游真实延迟，拿数据再调参，别默认值改默认值。
 
 **三处必须同源**（少一处就会在特定路径上退回默认值、故障复发）：
 1. 生产 compose `/home/runner/omniroute/docker-compose.yml`（`environment:` 块）；
