@@ -303,6 +303,47 @@ emoji 标题 + ━━━ 分隔线 + 键值/分节区 + 统一收尾行 `⏱ 已
 `cliproxyapi`）：**pinned 模式只跑指定后端，失败即失败、不降级**，便于定点验证单个后端；
 `auto`（默认 / 定时触发）走完整降级链。
 
+### 长上下文阈值调参（2026-10-12）
+
+**现象**：OmniRoute 侧刷屏 `[503] runner-autoclaw/zai_glm-5.3-flash: provider — Provider
+openai-compatible-chat-conn:99d395d6 circuit breaker is open (HTTP 503) (reset after 7s/11s)`。
+
+**根因**：不是 autoclaw-proxy 挂了（短请求全 200、上游流式正常），而是「**慢被读成坏**」——
+runner-autoclaw 承接 40 万 token 级上下文，实测 96 万字符请求 **61s**、常规长请求 **25~27s**
+（proxy 日志 + 亲手压测两组数据）；而 OmniRoute 默认首事件 readiness 80s、provider 级失败计数
+**DEGRADED=7 / OPEN=15**。几次慢请求 + 几次客户端 abort 就够把整条 provider 打进冷却。
+日志里的反证很直接：`08:33:21 succeeded (26042ms)` 之后 **2 秒**断路器又 OPEN——单次是成功的，
+触发的是 provider 级累积计数，不是单次超时。
+
+**调参**（数值全部按实测延迟量级给，不拍脑袋；与早年 CliRelay 时代同口径——那次也是放宽）：
+
+| 变量 | 默认 | 改为 | 理由 |
+|---|---|---|---|
+| `STREAM_READINESS_TIMEOUT_MS` | 80s | **150s** | 覆盖 61s 实测 + 排队抖动 |
+| `STREAM_READINESS_MAX_TIMEOUT_MS` | 180s | **420s** | 大/重请求自适应上限 |
+| `OMNIROUTE_AGENT_GOAL_READINESS_MAX_TIMEOUT_MS` | 600s | **900s** | `/goal` agent 长跑 |
+| `FETCH_TIMEOUT_MS` | 600s | **900s** | 上游总超时（长上下文+换号重试） |
+| `STREAM_IDLE_TIMEOUT_MS` | 600s | **900s** | 流式静默上限 |
+| `OMNIROUTE_CIRCUIT_BREAKER_API_KEY_THRESHOLD` | 12 | **30** | 连续失败阈值 |
+| `OMNIROUTE_CIRCUIT_BREAKER_API_KEY_RESET_MS` | 30s | **60s** | 半开试探要跑完长请求 |
+| `OMNIROUTE_PROVIDER_BREAKER_API_KEY_FAILURE_THRESHOLD` | 15 | **60** | 30min 窗口内失败才冷却 provider |
+| `OMNIROUTE_PROVIDER_BREAKER_API_KEY_DEGRADATION_THRESHOLD` | 7 | **20** | 降级门槛 |
+| `OMNIROUTE_PROVIDER_BREAKER_API_KEY_COOLDOWN_MS` | 600s | **180s** | 真故障时也较快恢复 |
+| `OMNIROUTE_PROVIDER_BREAKER_API_KEY_MAX_BACKOFF_MULTIPLIER` | 4 | **2** | 退避倍率 |
+
+**三处必须同源**（少一处就会在特定路径上退回默认值、故障复发）：
+1. 生产 compose `/home/runner/omniroute/docker-compose.yml`（`environment:` 块）；
+2. workflow 的 compose heredoc（`restore_omniroute_data` 恢复路径）；
+3. workflow 的 `bootstrap_omniroute()` 的 `docker run` 分支（归档缺失冷启动路径）。
+
+> ⚠️ 2026-10-12 补记：改动只落在 (1)(2) 时，(3) 还是默认阈值——归档一失效就退回旧行为。
+> 本轮已补齐。**验证口径**：DR 恢复后 `docker exec omniroute env | grep STREAM_READINESS`
+> 应看到 `150000`，bootstrap 路径同理。
+
+**归档同步**：`create-omniroute-archive.sh` 从 `/home/runner/omniroute` 直接取 compose，
+所以重打归档即带新阈值；归档校验要看**包内** compose 参数条数（11 条），只看上传成功不算数。
+
+
 ### 启动链路
 
 ```
