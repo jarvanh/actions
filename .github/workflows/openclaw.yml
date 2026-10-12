@@ -1220,6 +1220,9 @@ jobs:
                 STREAM_READINESS_TIMEOUT_MS: "150000"
                 STREAM_READINESS_MAX_TIMEOUT_MS: "420000"
                 OMNIROUTE_AGENT_GOAL_READINESS_MAX_TIMEOUT_MS: "900000"
+                # 流式总寿命：镜像默认 1260000（21min）短于 CliRelay 1800s，长任务会在
+                # 第 21 分钟被砍 → 显式设 1800s 对齐（0=禁用，这里不用）。
+                STREAM_ACTIVE_TIMEOUT_MS: "1800000"
                 FETCH_TIMEOUT_MS: "1800000"
                 STREAM_IDLE_TIMEOUT_MS: "1800000"
                 # API-key provider 熔断（autoclaw / zcode2api 均属此类）
@@ -1497,6 +1500,7 @@ jobs:
                 -e STREAM_READINESS_TIMEOUT_MS=150000 \
                 -e STREAM_READINESS_MAX_TIMEOUT_MS=420000 \
                 -e OMNIROUTE_AGENT_GOAL_READINESS_MAX_TIMEOUT_MS=900000 \
+                -e STREAM_ACTIVE_TIMEOUT_MS=1800000 \
                 -e FETCH_TIMEOUT_MS=1800000 \
                 -e STREAM_IDLE_TIMEOUT_MS=1800000 \
                 -e OMNIROUTE_CIRCUIT_BREAKER_API_KEY_THRESHOLD=30 \
