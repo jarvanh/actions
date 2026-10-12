@@ -1198,6 +1198,10 @@ jobs:
                 OMNIROUTE_MEMORY_MB: "4096"
                 BASE_URL: http://omniroute:20128
                 AUTH_COOKIE_SECURE: "false"
+                # 上下文窗口自动校正（auto:discovery）周期：24h 扫描上游同步缓存，
+                # 上游 /v1/models 报窗口（context_length 等字段）→ 自动写 auto override；
+                # model_context_overrides 里的 manual 行永不覆盖（跳过）。设 0 可关闭。
+                CONTEXT_WINDOW_RECONCILE_INTERVAL: "86400"
               extra_hosts:
                 - "host.docker.internal:host-gateway"
               volumes:
