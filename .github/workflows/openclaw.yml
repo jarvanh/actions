@@ -1208,6 +1208,12 @@ jobs:
                 # 失败计数（DEGRADED=7 / OPEN=15）会把「慢」判成「坏」，OmniRoute
                 # 侧刷屏 "[503] circuit breaker is open (reset after 7s/11s)"。
                 # 数值全部按实测延迟量级给，不拍脑袋。
+                # ---- 慢透传容差（2026-10-12 二次调，见 docs/openclaw.md）----
+                # direct response-start 的 30s 闸比 SSE readiness 更前置：workbuddy
+                # (8318) 长上下文实测 24~85s 才出响应头，11 次 30s 超时靠重试救回，
+                # 却全计入 provider 失败计数并沿 combo 传染 autoclaw 熔断。
+                OMNIROUTE_DIRECT_HEADERS_TIMEOUT_MS: "150000"
+                OMNIROUTE_DIRECT_RESPONSE_RETRY_TIMEOUT_MS: "600000"
                 STREAM_READINESS_TIMEOUT_MS: "150000"
                 STREAM_READINESS_MAX_TIMEOUT_MS: "420000"
                 OMNIROUTE_AGENT_GOAL_READINESS_MAX_TIMEOUT_MS: "900000"
@@ -1482,6 +1488,8 @@ jobs:
                 -e OMNIROUTE_MEMORY_MB=4096 \
                 -e BASE_URL=http://omniroute:20128 \
                 -e AUTH_COOKIE_SECURE=false \
+                -e OMNIROUTE_DIRECT_HEADERS_TIMEOUT_MS=150000 \
+                -e OMNIROUTE_DIRECT_RESPONSE_RETRY_TIMEOUT_MS=600000 \
                 -e STREAM_READINESS_TIMEOUT_MS=150000 \
                 -e STREAM_READINESS_MAX_TIMEOUT_MS=420000 \
                 -e OMNIROUTE_AGENT_GOAL_READINESS_MAX_TIMEOUT_MS=900000 \
