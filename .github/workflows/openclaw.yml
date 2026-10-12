@@ -4,6 +4,18 @@ on:
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
+    # 手动运行时可指定本次使用的 AI 网关后端（默认 auto = 自动降级链）。
+    # pinned 模式不降级：指定后端起不来直接失败，便于定点验证单个后端。
+    inputs:
+      ai_backend:
+        description: "AI 网关后端"
+        type: choice
+        default: auto
+        options:
+          - auto
+          - omniroute
+          - clirelay
+          - cliproxyapi
 
 permissions:
   contents: read
@@ -1012,8 +1024,10 @@ jobs:
             echo "❌ TELEGRAM_BOT_TOKEN_RSS_SB_BOT 未配置，跳过 rss-to-telegram 启动；本轮无 rsstt 数据，最终归档会跳过上传"
           fi
 
-      - name: Run AI API gateway (OmniRoute)
+      - name: "Run AI API gateway (backend: ${{ inputs.ai_backend }})"
         env:
+          # 手动运行时可指定本次使用的网关后端（auto = 自动降级链）；定时触发为 auto
+          AI_BACKEND_INPUT: ${{ inputs.ai_backend || 'auto' }}
           # 归档存在但恢复失败→bootstrap 空库时发 tier=alert 告警（P0 加固 2026-10-11）
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
@@ -1031,7 +1045,7 @@ jobs:
           # CLIProxyAPI.tar.gz 为历史快照不再刷新 —— DR workflow 均不再消费，仅作手动回滚素材。
           # 本机渠道上游（workbuddy 8318 / zcode2api 8319 / qingyan 8320 / trae 7864）
           # 由 extra_hosts host.docker.internal:host-gateway 回连。
-          echo "Configuring AI API gateway: OmniRoute (docker compose, port 20128)..."
+          echo "Configuring AI API gateway: requested backend = ${AI_BACKEND_INPUT:-auto} (port 20128)..."
           mkdir -p /home/runner/omniroute ~/.openclaw/logs
 
           BACKEND_STATE=/tmp/active-ai-backend.env
@@ -1480,8 +1494,43 @@ jobs:
           # 每次降级记录 FALLBACK_REASON 写入 BACKEND_STATE，通知步骤自动向 Telegram 报告。
           ACTIVE_BACKEND=""
           FALLBACK_REASON=""
+          # pinned 模式：手动运行时显式指定后端 → 只跑它，失败即失败（不降级），
+          # 便于定点验证单个后端；auto（默认/定时触发）走完整降级链
+          PINNED_BACKEND="${AI_BACKEND_INPUT:-auto}"
 
-          if start_omniroute && wait_api_ready "omniroute" 150; then
+          if [ "$PINNED_BACKEND" = "omniroute" ]; then
+            if start_omniroute && wait_api_ready "omniroute" 150; then
+              ACTIVE_BACKEND=omniroute
+              docker ps -a
+              echo "✅ 当前生效 AI 网关: OmniRoute（pinned）"
+            else
+              echo "❌ OmniRoute（pinned）未就绪 —— pinned 模式不降级，直接失败"
+              docker logs omniroute --tail 100 || true
+              exit 1
+            fi
+          elif [ "$PINNED_BACKEND" = "clirelay" ]; then
+            restore_clirelay_data || true
+            if start_clirelay && wait_clirelay_ready "clirelay" 120; then
+              ACTIVE_BACKEND=clirelay
+              docker ps -a
+              echo "✅ 当前生效 AI 网关: CliRelay（pinned）"
+            else
+              echo "❌ CliRelay（pinned）未就绪 —— pinned 模式不降级，直接失败"
+              $COMPOSE logs --tail 80 2>/dev/null || true
+              exit 1
+            fi
+          elif [ "$PINNED_BACKEND" = "cliproxyapi" ]; then
+            restore_cliproxyapi_data
+            if start_cliproxyapi && wait_clirelay_ready "cliproxyapi" 120; then
+              ACTIVE_BACKEND=cliproxyapi
+              docker ps -a
+              echo "✅ 当前生效 AI 网关: CLIProxyAPI（pinned）"
+            else
+              echo "❌ CLIProxyAPI（pinned）未就绪 —— pinned 模式不降级，直接失败"
+              docker logs cliproxyapi --tail 100 || true
+              exit 1
+            fi
+          elif start_omniroute && wait_api_ready "omniroute" 150; then
             ACTIVE_BACKEND=omniroute
             docker ps -a
             echo "✅ 当前生效 AI 网关: OmniRoute"
