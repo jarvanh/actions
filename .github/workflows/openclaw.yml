@@ -5954,11 +5954,27 @@ jobs:
 
           # 渲染走 board.py CLI：与看板共用同一份采集与版式代码，
           # 不在 workflow 里另写一套（避免两边口径漂移）。
-          REPORT="$(timeout 90 python3 "$BOARD" usage-report 2>/dev/null || true)"
-          if [ -z "$REPORT" ]; then
-            echo "⚠️ 用量报告渲染为空，跳过发送"
+          # ⚠️ 2026-10-12 修：此前是 `2>/dev/null || true`，把 CLI 崩溃整个吞掉 ——
+          #   实测 board.py usage-report 抛 NameError（render_usage_report 体内
+          #   引用裸名 data，CLI 形态无上层作用域必崩），紧接着的 `-z "$REPORT"`
+          #   判空走「渲染为空跳过发送」，既不报错也不告警，报告从未发出。
+          #   改为：stderr 单独捕获，失败时退出码 + stderr 尾部都留痕
+          #   （::warning:: 进 GH 注解），下次再炸立刻可见。
+          _rp_err="$(mktemp)"
+          REPORT="$(timeout 90 python3 "$BOARD" usage-report 2>"$_rp_err")"
+          _rp_rc=$?
+          if [ "$_rp_rc" -ne 0 ]; then
+            echo "::warning::AI 网关用量报告渲染失败（不影响任务）: exit=${_rp_rc} stderr=$(tail -c 300 "$_rp_err" | tr '\n' ' ')"
+            rm -f "$_rp_err"
             exit 0
           fi
+          # 渲染成功但产出为空也留痕（可能是真的无数据，也可能是空输出 bug）
+          if [ -z "$REPORT" ]; then
+            echo "::warning::AI 网关用量报告渲染为空（退出码 0 但无输出），跳过发送"
+            rm -f "$_rp_err"
+            exit 0
+          fi
+          rm -f "$_rp_err"
 
           # 收尾区由 tg_notify.sh 统一追加（运行日志链接只有 workflow 侧知道）
           tg_add_footer REPORT
