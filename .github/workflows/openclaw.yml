@@ -3664,6 +3664,9 @@ jobs:
           # 票仓与代码真源（Dropbox）
           AUTOCLAW_SNAPSHOT_REMOTE: dropbox:self-hosted/autoclaw-proxy/auth-snapshot.json
           AUTOCLAW_APP_REMOTE: dropbox:self-hosted/autoclaw-proxy/app
+          # 累计用量统计（唯一不可再生的运行数据，2026-10-12 主人拍板入 Dropbox）：
+          # 启动时拉回续计，job 收尾回推；/tmp 清理不再丢
+          AUTOCLAW_STATS_REMOTE: dropbox:self-hosted/autoclaw-proxy/lifetime_stats.json
           # 2026-10-11：8321 归 quota-board（qb 隧道源站），autoclaw 反代挪 8322
           AUTOCLAW_PORT: "8322"
         run: |
@@ -3686,6 +3689,10 @@ jobs:
             echo "::warning::[autoclaw] 无凭据快照（先在本机跑 autoclaw_auth.py bootstrap）"
             AC_REASON="未配置凭据快照"
           else
+            # 累计统计拉回续计：Dropbox 有则覆盖本地（/tmp 重建后为空），无则从零起计
+            rclone copyto "$AUTOCLAW_STATS_REMOTE" "$RUN_DIR/lifetime_stats.json" 2>/dev/null \
+              && echo "lifetime_stats: 已从 Dropbox 拉回续计" \
+              || echo "lifetime_stats: 无云端存档，从零起计"
             SNAP_ACCOUNTS="$(python3 -c "import json;print(len(json.load(open('$RUN_DIR/snapshot.json')).get('accounts',[])))" 2>/dev/null || echo 0)"
             if [ "${SNAP_ACCOUNTS:-0}" -eq 0 ]; then
               echo "::warning::[autoclaw] 快照为空（0 账号）"
@@ -6052,6 +6059,33 @@ jobs:
             wb_stop_notify "⚠️ workbuddy-gateway 已停止 · 进程残留" "强制结束后仍有进程残留"
           else
             wb_stop_notify "⛔ workbuddy-gateway 已停止" "服务已退出 · 数据目录保持原状"
+          fi
+
+          # 3b-1. autoclaw-proxy：宿主进程（nohup），收尾回推累计统计后停止。
+          # lifetime_stats.json 是唯一不可再生的运行数据（累计用量统计），2026-10-12
+          # 主人拍板入 Dropbox：启动时拉回续计，此处回推最终值。回推在停进程**之前**
+          # 执行 —— proxy 运行中该文件会被周期改写，停止前的最后一次读取即终值，
+          # 停后再读反而可能与退出写竞态。
+          echo "3b-1. Pushing autoclaw-proxy lifetime stats & stopping..."
+          if [ -f /tmp/local_autoclaw-proxy/lifetime_stats.json ]; then
+            if rclone copyto /tmp/local_autoclaw-proxy/lifetime_stats.json "$AUTOCLAW_STATS_REMOTE" 2>/dev/null; then
+              echo "✅ autoclaw lifetime_stats 回推 Dropbox 完成"
+            else
+              echo "::warning::[autoclaw] lifetime_stats 回推失败（下轮启动会以本地残留续计，VM 销毁才丢）"
+            fi
+          fi
+          AC_PROXY_PID="$(pgrep -f "python3 /tmp/local_autoclaw-proxy/proxy.py" | head -n 1 || true)"
+          if [ -n "$AC_PROXY_PID" ]; then
+            kill "$AC_PROXY_PID" 2>/dev/null || true
+            for _ in $(seq 1 10); do
+              pgrep -f "python3 /tmp/local_autoclaw-proxy/proxy.py" >/dev/null 2>&1 || break
+              sleep 1
+            done
+            pgrep -f "python3 /tmp/local_autoclaw-proxy/proxy.py" >/dev/null 2>&1 \
+              && kill -9 "$(pgrep -f "python3 /tmp/local_autoclaw-proxy/proxy.py" | head -n 1)" 2>/dev/null || true
+            echo "✅ autoclaw-proxy 已停止"
+          else
+            echo "ℹ️ autoclaw-proxy 未在运行（本轮未启动或已退出），跳过"
           fi
 
           # 3c. zcode2api：同为宿主进程（非容器），不会随 job 结束自动退出，
