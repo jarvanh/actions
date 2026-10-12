@@ -3848,6 +3848,40 @@ jobs:
               AC_CHECKIN="$(printf '%s\n' "$CHECKIN_OUT" | awk 'f{print} /^--- summary ---$/{f=1}' | tail -n 1)"
               echo "签到: ${AC_CHECKIN:-（无摘要输出）}"
 
+              # 1.6 积分收割（claim 全家桶：签到+灵感中心+新人任务+活动奖励；2026-10-12 新增）：
+              #     签到之外的可领积分（灵感中心每日 200 为主）也要自动收干净。
+              #     调度收敛到每日两个窗口：CST 9 点后首轮 + 21 点后首轮 —— 同时覆盖
+              #     「UTC 零点重置（=08:00 CST）」与「CN 零点重置」两种上游口径。
+              #     GitHub cron 常迟到/偶发跳轮，所以按「小时开窗 + 标记去重」而非
+              #     精确分钟匹配；标记文件在 STATE_DIR（/tmp 之外），跨轮持久，
+              #     VM 销毁后自动重新开窗。窗口内脚本硬崩（无 summary 行）不落标记，
+              #     下轮自动重试；claim 幂等（上游 already/560118 不重复加分）。
+              AC_CLAIM=""
+              AC_CLAIM_TODAY="$(TZ=Asia/Shanghai date +%F)"
+              AC_CLAIM_HOUR="$(TZ=Asia/Shanghai date +%H)"
+              AC_CLAIM_MARK="$HOME/.config/autoclaw-auth/claim-marker.json"
+              if [ "$AC_CLAIM_HOUR" -ge 9 ] 2>/dev/null || [ "$AC_CLAIM_HOUR" -le 3 ] 2>/dev/null; then
+                AC_CLAIM_SLOT="am"
+              fi
+              if [ "$AC_CLAIM_HOUR" -ge 21 ] 2>/dev/null; then
+                AC_CLAIM_SLOT="pm"
+              fi
+              if [ -n "${AC_CLAIM_SLOT:-}" ]; then
+                # 单行 python -c（run: | 块内多行内嵌会破坏 YAML 块标量缩进）
+                AC_CLAIM_DONE="$(python3 -c "import json,os;print(json.load(open('$AC_CLAIM_MARK')).get('$AC_CLAIM_SLOT','') if os.path.exists('$AC_CLAIM_MARK') else '')" 2>/dev/null)"
+                if [ "$AC_CLAIM_DONE" != "$AC_CLAIM_TODAY" ]; then
+                  CLAIM_OUT="$(python3 "$RUN_DIR/app/autoclaw_auth.py" claim \
+                       --snapshot "$RUN_DIR/snapshot.json" 2>&1 || true)"
+                  AC_CLAIM="$(printf '%s\n' "$CLAIM_OUT" | awk 'f{print} /^--- summary ---$/{f=1}' | tail -n 1)"
+                  if [ -n "$AC_CLAIM" ]; then
+                    python3 -c "import json,os,time;os.makedirs(os.path.dirname('$AC_CLAIM_MARK'),exist_ok=True);m=(json.load(open('$AC_CLAIM_MARK')) if os.path.exists('$AC_CLAIM_MARK') else {});m['$AC_CLAIM_SLOT']='$AC_CLAIM_TODAY';m['updated_at']=int(time.time());json.dump(m,open('$AC_CLAIM_MARK','w'))"
+                  else
+                    AC_CLAIM="已到收割窗口但未取到摘要（脚本报错？详见本轮 action 日志）"
+                  fi
+                  echo "claim: $AC_CLAIM"
+                fi
+              fi
+
               # 2. 托管起反代（2026-10-12 起 systemd --user，取代原 nohup 裸跑）
               #    旧方案：nohup 起的进程 PPID=1，~/.config/systemd/user 下无单元，
               #    本机重启/被收编即断连且无自愈（窗口期崩溃要等下一轮 run）。
@@ -3967,6 +4001,12 @@ jobs:
               # 摘要恒为空 → 整段静默消失，看通知的人无从判断是「没跑」还是「跑了没输出」。
               tg_add_section _m "📅 每日签到 · 1"
               tg_add_block _m "$(tree_lines "结果：<code>未取到签到摘要（本轮未执行或脚本报错）</code>")"
+            fi
+            # 积分收割（claim 全家桶）：只在收割窗口轮展示（每日两轮，见 1.6 注释）；
+            # 非窗口轮不渲染此节，避免每 5 分钟通知重复「全部已领」的噪音。
+            if [ -n "${AC_CLAIM:-}" ]; then
+              tg_add_section _m "🌾 积分收割 · 1"
+              tg_add_block _m "$(tree_lines "结果：<code>$(escape_html "$AC_CLAIM")</code>")"
             fi
             # 用量 + 流水（信息层面对齐 wb/zcode 通知，主人 2026-10-11 要求）：
             # 调 board.py CLI 与看板共用渲染代码；autoclaw 走 lifetime 累计特例，
