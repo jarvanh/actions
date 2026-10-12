@@ -1212,13 +1212,16 @@ jobs:
                 # direct response-start 的 30s 闸比 SSE readiness 更前置：workbuddy
                 # (8318) 长上下文实测 24~85s 才出响应头，11 次 30s 超时靠重试救回，
                 # 却全计入 provider 失败计数并沿 combo 传染 autoclaw 熔断。
+                # 总口径对齐 CliRelay main-api-read-timeout-seconds=1800
+                # 与官方推荐 "Long-running code generation: REQUEST_TIMEOUT_MS=900000"
+                REQUEST_TIMEOUT_MS: "1800000"
                 OMNIROUTE_DIRECT_HEADERS_TIMEOUT_MS: "150000"
                 OMNIROUTE_DIRECT_RESPONSE_RETRY_TIMEOUT_MS: "600000"
                 STREAM_READINESS_TIMEOUT_MS: "150000"
                 STREAM_READINESS_MAX_TIMEOUT_MS: "420000"
                 OMNIROUTE_AGENT_GOAL_READINESS_MAX_TIMEOUT_MS: "900000"
-                FETCH_TIMEOUT_MS: "900000"
-                STREAM_IDLE_TIMEOUT_MS: "900000"
+                FETCH_TIMEOUT_MS: "1800000"
+                STREAM_IDLE_TIMEOUT_MS: "1800000"
                 # API-key provider 熔断（autoclaw / zcode2api 均属此类）
                 OMNIROUTE_CIRCUIT_BREAKER_API_KEY_THRESHOLD: "30"
                 OMNIROUTE_CIRCUIT_BREAKER_API_KEY_RESET_MS: "60000"
@@ -1488,13 +1491,14 @@ jobs:
                 -e OMNIROUTE_MEMORY_MB=4096 \
                 -e BASE_URL=http://omniroute:20128 \
                 -e AUTH_COOKIE_SECURE=false \
+                -e REQUEST_TIMEOUT_MS=1800000 \
                 -e OMNIROUTE_DIRECT_HEADERS_TIMEOUT_MS=150000 \
                 -e OMNIROUTE_DIRECT_RESPONSE_RETRY_TIMEOUT_MS=600000 \
                 -e STREAM_READINESS_TIMEOUT_MS=150000 \
                 -e STREAM_READINESS_MAX_TIMEOUT_MS=420000 \
                 -e OMNIROUTE_AGENT_GOAL_READINESS_MAX_TIMEOUT_MS=900000 \
-                -e FETCH_TIMEOUT_MS=900000 \
-                -e STREAM_IDLE_TIMEOUT_MS=900000 \
+                -e FETCH_TIMEOUT_MS=1800000 \
+                -e STREAM_IDLE_TIMEOUT_MS=1800000 \
                 -e OMNIROUTE_CIRCUIT_BREAKER_API_KEY_THRESHOLD=30 \
                 -e OMNIROUTE_CIRCUIT_BREAKER_API_KEY_RESET_MS=60000 \
                 -e OMNIROUTE_PROVIDER_BREAKER_API_KEY_FAILURE_THRESHOLD=60 \
