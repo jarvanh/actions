@@ -357,12 +357,18 @@ OmniRoute 有熔断器（CliRelay 没有），所以对齐策略 = **总超时�
 
 | 项 | CliRelay | OmniRoute 现值 | 对齐 |
 |---|---|---|---|
-| 总读取/请求超时 | 1800s（read timeout） | `REQUEST_TIMEOUT_MS=1800000` + `FETCH_TIMEOUT_MS`/`STREAM_IDLE_TIMEOUT_MS` 同为 1800s | ✅ |
-| 等响应头 | 同上（同 read） | `OMNIROUTE_DIRECT_HEADERS_TIMEOUT_MS=150s` | ✅（覆盖实测 85s） |
-| SSE readiness | 同上 | 150s / 自适应 420s | ✅ |
-| 流式静默 | keep-alive 15s 主动续命 | `STREAM_IDLE_TIMEOUT_MS=1800s` | ✅（被动等待，够宽） |
-| 首字节前重试 | `bootstrap-retries: 1` | 无对应 | ⚠️ 见下 |
-| provider 熔断 | 无 | 阈值 30 / 60，冷却 3min | 有意放宽（非对齐） |
+| 总读取/请求超时 | `main-api-read-timeout-seconds: 1800` | `REQUEST_TIMEOUT_MS` / `FETCH_TIMEOUT_MS` / `STREAM_IDLE_TIMEOUT_MS` / `STREAM_ACTIVE_TIMEOUT_MS` **四者均 1800s** | ✅ |
+| 等响应头 | 同 read（1800） | `OMNIROUTE_DIRECT_HEADERS_TIMEOUT_MS=150s` | ✅（覆盖实测 85s） |
+| SSE readiness | 同 read（1800） | 150s / 自适应 420s | ✅（覆盖实测 61s、85s） |
+| 流式静默 | keep-alive 15s 主动续命 | `STREAM_IDLE_TIMEOUT_MS=1800s` | ✅ 已对齐（被动等待，够宽） |
+| 流式总寿命 | 同 read（1800） | `STREAM_ACTIVE_TIMEOUT_MS=1800s` | ✅（原默认 1260000=21min，短 9min 会砍长任务 → 已补） |
+| 首字节前重试 | `bootstrap-retries: 1` | 等价位 `OMNIROUTE_DIRECT_RESPONSE_RETRY_TIMEOUT_MS=600000` | ✅ 语义一致（30s 响应头超时→换新 socket 重试），无需额外开关 |
+| provider 熔断 | **无此概念** | 阈值 30 / 60，冷却 3min | **有意放宽而非取消**（见下） |
+
+> `STREAM_ACTIVE_TIMEOUT_MS` 是最后一处缺口：镜像默认 1260000（21min）比 CliRelay 的 1800s
+> 短 9 分钟，长任务跑到第 21 分钟会被砍断。已显式设 1800s。
+> 熔断**不取消**：CliRelay 没有熔断器所以无所谓；OmniRoute 有，若也去掉，"真死的 provider"
+> 会让每个请求挂满 30 分钟。策略是阈值宽到慢请求打不到，同时保留对真故障的响应。
 
 「首字节前重试」OmniRoute 无直接对应项，其等价位是 `OMNIROUTE_DIRECT_RESPONSE_RETRY_TIMEOUT_MS`
 （600000，已显式声明）+ 熔断半开试探；不做强行对齐——CliRelay 没有熔断，给了重试也不会
