@@ -26,7 +26,7 @@
 | Prepare runtime env | 生成 `~/runtime-env.sh` 并设为 `BASH_ENV`：加载 `~/.openclaw/.env`、继承 runner add_path、本地化 gh/git 认证 | — |
 | Install / Run Cloudflared Tunnel | 命名隧道 `oc`（`ai-api` 在网关步骤起） | `oc.<VD>.eu.org`→18789 |
 | Run rss-to-telegram container | `rongronggg9/rss-to-telegram:latest`，启动门禁 = 独立 bot secret `TELEGRAM_BOT_TOKEN_RSS_SB_BOT`（未配置则跳过启动，本轮不产生数据、最终归档也跳过上传） | 数据 `/tmp/local_rsstt`（config + data） |
-| Run AI API gateway | CliRelay 全栈优先 / CLIProxyAPI 回退 | 8317 → 隧道 `ai-api` |
+| Run AI API gateway | OmniRoute 单后端（回退链：CliRelay → CLIProxyAPI） | 20128 → 隧道 `ai-api` |
 | Run workbuddy-gateway | 先查 GitHub Releases 决定是否更新二进制，再 `serve`（见第八节） | 8318（仅本机） |
 | Run OpenClaw | 自愈主流程（本文第三、四章） | 18789 |
 | Start background archive loop | 每 20 分钟归档 `~/.openclaw` + AI 网关数据（`flock` 防重入） | Dropbox |
@@ -220,7 +220,7 @@ openclaw gateway restart
 > 判定规则与写法见 [`telegram-notify.md`](telegram-notify.md) 4.4 节。
 
 > 「接口」写 `http://127.0.0.1:8318/v1`。**注意区分两个「默认」**：workbuddy-gateway
-> 上游 `-port` 默认值是 **8317**，与 CliRelay/CLIProxyAPI（OpenClaw 主网关）撞车，
+> 上游 `-port` 默认值是 **8317**，与 OpenClaw 主 AI 网关（OmniRoute `:20128`，旧 CliRelay/CLIProxyAPI 曾占 8317）撞车，
 > 故本步骤启动时显式传 `-port 8318` 覆盖 —— 通知里的端口是**实际绑定端口**，
 > 不是上游默认值。「鉴权」写实际形态：serve 以 `-addr 0.0.0.0` 监听（对 Tailscale/
 > 局域网开放），启动显式传 `-api-key` 做客户端 Bearer 校验（取 job 级
@@ -253,7 +253,7 @@ openclaw gateway restart
 > 已移除（2026-09-22）。
 > 字段口径见 [`telegram-notify.md`](telegram-notify.md) 2.5 节末。
 
-> `<对象>` 为归档短名：`OpenClaw 主包` / `ZCode` / `CliRelay` / `CLIProxyAPI` /
+> `<对象>` 为归档短名：`OpenClaw 主包` / `ZCode` / `OmniRoute` / `rsstt` /
 > `rss-to-telegram`。此前五类归档共用「OpenClaw 归档告警」一个标题，无法从标题
 > 判断是哪个包出问题（看到标题会以为是主包，实际可能是 ZCode）。
 
@@ -279,48 +279,75 @@ emoji 标题 + ━━━ 分隔线 + 键值/分节区 + 统一收尾行 `⏱ 已
 | 降级/状态库移位 | 会话索引丢失（工作区与配置不受影响）；`*.state-bak-*` / `*.broken-bak-*` 保留可恢复 |
 | Dropbox 挂载失败 | 本轮以首次启动形态运行，不恢复历史状态 |
 
-## 六、AI API 网关：CliRelay 全栈优先 + CLIProxyAPI 回退
+## 六、AI API 网关：OmniRoute 单后端 + 两级回退
 
-> 对应步骤：「Run AI API gateway (CliRelay first, fallback CLIProxyAPI)」。
+> 对应步骤：「Run AI API gateway (backend: ${{ inputs.ai_backend }})」。
+> 2026-10-11 迁移：CliRelay（compose 全栈）/ CLIProxyAPI（单容器回退）→ **OmniRoute 单后端**，
+> 旧两后端降级为「自动回退链的第 2/3 级」，只在 OmniRoute 起不来时才上岗。
 
-### 双后端策略
+### 三后端降级链
 
-| 后端 | 形态 | 端口 | 数据目录 | 归档 |
+| 后端 | 形态 | 宿主端口 | 数据目录 / 卷 | 归档 |
 |---|---|---|---|---|
-| **CliRelay（主用）** | docker compose 全栈（项目名 `clirelay`）：`cli-proxy-api` 主容器 + postgres + redis + init + updater；compose 文件来自归档，bootstrap 时从上游 raw 下载（`kittors/CliRelay/main/docker-compose.yml`，镜像 `ghcr.io/kittors/clirelay:latest`） | 8317 | `/tmp/local_CliRelay`（auths + config.yaml + .env + compose + sql/） | `dropbox:self-hosted/CliRelay.tar.gz` |
-| **CLIProxyAPI（回退）** | 单容器 `eceasy/cli-proxy-api:latest` | 8317 | `/tmp/local_CLIPProxyAPI`（config.yaml + auth-dir + stats.json） | `dropbox:self-hosted/CLIProxyAPI.tar.gz`（附带 clirelay auths 双保险） |
+| **OmniRoute（主用）** | 单容器 `diegosouzapw/omniroute:3.8.51`，compose 部署（容器名 `omniroute`）；`extra_hosts: host.docker.internal:host-gateway` 回连本机上游（workbuddy 8318 / zcode2api 8319 / qingyan 8320 / trae 7864） | 20128 | 部署目录 `/home/runner/omniroute`（compose + `.env`）+ 命名卷 `omniroute_omniroute-data`（`/app/data`：`storage.sqlite` 渠道/入站 key/combo + `server.env` 加密根钥） | `dropbox:self-hosted/OmniRoute.tar.gz` |
+| **CliRelay（回退 1）** | docker compose 全栈（项目名 `clirelay`）：`cli-proxy-api` 主容器 + postgres + redis + init + updater；compose 文件来自归档，bootstrap 时从上游 raw 下载（`kittors/CliRelay/main/docker-compose.yml`，镜像 `ghcr.io/kittors/clirelay:latest`） | 20128（容器内 8317） | `/tmp/local_CliRelay`（auths + config.yaml + .env + compose + sql/） | `dropbox:self-hosted/CliRelay.tar.gz` |
+| **CLIProxyAPI（回退 2）** | 单容器 `eceasy/cli-proxy-api:latest` | 20128（容器内 8317） | `/tmp/local_CLIPProxyAPI`（config.yaml + auth-dir + stats.json） | `dropbox:self-hosted/CLIProxyAPI.tar.gz`（附带 clirelay auths 双保险） |
 
-两后端共用 8317 端口 → cloudflared `ai-api` 命名隧道（→ 127.0.0.1:8317）无需按后端切换。
+**三后端共用宿主 `127.0.0.1:20128`** —— OpenClaw 客户端（`openclaw.json`，随主包归档
+持久化）硬编码指向 `127.0.0.1:20128/v1`，`ai-api` 隧道也是固定地址模式指向 20128
+（`tunnels.conf`），因此**降级不换端口、不改客户端、不重建隧道**。CliRelay/CLIProxyAPI
+官方容器原生端口 8317，回退路径用 `docker run` 侧 `-p 127.0.0.1:20128:8317` 改绑，
+容器内仍是 8317，凭据/配置零改动。
+
+`workflow_dispatch` 可用 `ai_backend` 手动指定（`auto` / `omniroute` / `clirelay` /
+`cliproxyapi`）：**pinned 模式只跑指定后端，失败即失败、不降级**，便于定点验证单个后端；
+`auto`（默认 / 定时触发）走完整降级链。
 
 ### 启动链路
 
 ```
-恢复 CliRelay.tar.gz（缺失/无效 → 从 CLIProxyAPI 数据 bootstrap 迁移）
-    → compose up postgres → pg_isready（30×2s）→ psql 导入最新 sql/*.sql（ON_ERROR_STOP=1）
-    → compose up 全栈 → 8317 健康检查（120×2s，判据为任意 HTTP 响应码）
-        ├─ 就绪 → ACTIVE_BACKEND=clirelay
-        └─ 失败 → compose logs + down -v → 记录 FALLBACK_REASON
-                   → 恢复/复用 /tmp/local_CLIPProxyAPI → docker run cliproxyapi
-                   → 8317 健康检查（120×2s）
-                       ├─ 就绪 → ACTIVE_BACKEND=cliproxyapi
-                       └─ 失败 → docker logs + exit 1（进入失败通知链路）
+restore_omniroute_data()   ← Dropbox OmniRoute.tar.gz（缺失/无效 → bootstrap 空库 + alert 告警）
+    → start_omniroute()    ← compose up（有 compose）或 docker run（纯 bootstrap）
+    → /healthz 健康检查（150×2s，判据为任意 HTTP 响应码）
+        ├─ 就绪 → ACTIVE_BACKEND=omniroute
+        └─ 失败 → docker logs → docker rm -f omniroute → 记录 FALLBACK_REASON
+                   → restore_clirelay_data → start_clirelay → 健康检查（120×2s）
+                       ├─ 就绪 → ACTIVE_BACKEND=clirelay
+                       └─ 失败 → compose logs + down -v → restore_cliproxyapi_data
+                                 → start_cliproxyapi → 健康检查（120×2s）
+                                       ├─ 就绪 → ACTIVE_BACKEND=cliproxyapi
+                                       └─ 失败 → docker logs + exit 1（进入失败通知链路）
 ```
 
 - 当前生效后端与回退原因写入 `/tmp/active-ai-backend.env`，供归档循环分支与启动通知读取。
-- CliRelay 数据准备失败（归档缺失/校验失败/bootstrap 失败）不会终止步骤，直接走回退路径。
-- 就绪后重启 `ai-api` 命名隧道：`cloudflared tunnel run --protocol http2 --url http://127.0.0.1:8317 ai-api`。
-- 收尾时先 `docker stop clirelay cli-proxy-api cliproxyapi`（compose 主容器名是 `cli-proxy-api`），
-  postgres 保留到最终 pg_dump 完成后才 `compose down`。
+- 数据准备失败不终止步骤（bootstrap 全新部署兜底，与旧 CliRelay 同口径）。
+- 就绪后起 `ai-api` 命名隧道：`tunnels.sh ensure ai-api`（systemd 托管，固定地址模式
+  → `127.0.0.1:20128`）；脚本缺失时回落 `nohup cloudflared tunnel run --url http://127.0.0.1:20128 ai-api`。
+- ⚠️ **P0 加固（2026-10-11）**：归档明明存在却没恢复成 = 数据事故信号，必须炸响 ——
+  `OMNIROUTE_ARCHIVE_SEEN=1` 且恢复失败即 `send_tg "$msg" alert`。当天事故正是此形态：
+  cleanup 误删解包目录 → 恒报「缺少 docker-compose.yml/.env」→ 静默 bootstrap 空库上岗，
+  全靠归档脚本 1MB 体积门才没让空库覆盖云端好包。
 
-### 归档双轨
+### 归档（按生效后端三选一）
 
-- **主用（clirelay）**：`create-clirelay-archive.sh` —— postgres 运行中 `pg_dump` 刷新
-  `sql/clirelay-latest.sql` → tar 打包 `auths/ + config.yaml + .env + docker-compose.yml + sql/`
-  （**跳过 postgres-data/ redis-data 原始目录**：Redis 可重建，PG 走 SQL 导入恢复）→ `CliRelay.tar.gz`。
-  - **统计/用量数据没有 `stats.json` 那样的独立文件，全在 `sql/*.sql` 里**（CliRelay 的运行时主库是
-    PostgreSQL，请求日志由 `request-log-storage` 落库）。因此「统计到底在不在包里」不能靠目录结构判断，
-    脚本会把归档内容清单（含每份文件大小）打进日志，直接读日志即可。
-  - **pg_dump 必须先落临时文件、成功后再 `mv` 覆盖**，且输出过小（<200B）时同样不覆盖。
+「生效后端的数据才进对应归档」—— 防止降级态把 OmniRoute 空库刷进好包。
+20 分钟后台归档循环与最终归档（Stop OpenClaw and Final Archive）均按 `ACTIVE_BACKEND` 分支。
+
+- **OmniRoute（`/tmp/create-omniroute-archive.sh`）**：
+  1. **SQLite 在线一致性快照**：容器在跑时 `docker exec omniroute node -e` 调 better-sqlite3
+     `.backup()` 产出 `storage-backup.sqlite`，落在同一数据卷内（失败非致命，活库三件套兜底）。
+     > 容器内**没有 sqlite3 CLI**，只有 better-sqlite3（node 模块）—— 看板读用量也是这条路径。
+  2. **数据卷快照**：helper 容器（root）`tar czf /stage/data.tar.gz -C /data .` 整卷打包
+     `/app/data`。镜像偶发启动慢导致单次失败（实测约 1/4 概率），**重试 4 次、指数退避
+     20/40/60s** —— 失败多发生在 openclaw 8GB 主包上传窗口（IO/内存争抢），短间隔会连撞。
+  3. 打进包：`docker-compose.yml` + `.env`（`chmod 600`）+ `data.tar.gz`；产物 `chmod 644`
+     让 runner 身份的 rclone 读得到。
+  4. 体积门 `MIN_SIZE=1MB`：空包 / 过小 / `tar -tzf` 失败一律 exit 非 0，**不覆盖云端好包**。
+- **回退态（clirelay / cliproxyapi）**：沿用 `create-clirelay-archive.sh` /
+  `create-cliproxyapi-archive.sh`（2026-10-11 从 `dcf418e` 父版本原样移植，逻辑不变）。
+  - CliRelay 的统计/用量数据**没有独立文件，全在 `sql/*.sql` 里**（运行时主库是 PostgreSQL），
+    故脚本会把归档内容清单（含每份文件大小）打进日志，判断「统计在不在包里」直接读日志。
+  - pg_dump **必须先落临时文件、成功后再 `mv` 覆盖**，且输出过小（<200B）时同样不覆盖。
     > 旧实现直接重定向到 `clirelay-latest.sql`：shell 在 pg_dump 启动前就已截断旧 SQL，
     > 中途失败时磁盘上剩半截 dump、旧的好 SQL 已毁，日志却说「保留旧 SQL 继续」。
     > 半截 dump 仍能过体积校验并上传 → 下轮 `psql -v ON_ERROR_STOP=1` 导入失败 →
@@ -328,39 +355,41 @@ emoji 标题 + ━━━ 分隔线 + 键值/分节区 + 统一收尾行 `⏱ 已
     > CLIProxyAPI 脚本，**`CliRelay.tar.gz` 从此不再刷新，永久锁死在回退态**。一次瞬时
     > dump 失败即可触发（2026-09-19 修复）。
   - 临时 dump 文件放在部署目录根（不在 `sql/` 内）：`sql/` 整个目录会被打进包，
-    失败残留混进去就污染了归档（`trap` 只在脚本退出时清，而 `tar` 在那之前执行）。
-- **回退态（cliproxyapi）**：现有 `create-cliproxyapi-archive.sh` 逻辑不变，
-  额外把 `/tmp/local_CliRelay/auths` 打进包内 `clirelay-auths/`（token 双保险，恢复侧忽略未知目录）。
-- 20 分钟后台归档循环与最终归档（Stop OpenClaw and Final Archive）均按 `ACTIVE_BACKEND` 分支；
-  最终归档顺序：pg_dump（postgres 尚在运行）→ 打包上传 → `compose down`。
+    失败残留混进去就污染了归档。
 
 ### 恢复链路（下轮 run）
 
-`CliRelay.tar.gz` 存在且含 `docker-compose.yml`/`.env` → 解压 → `compose up postgres`
-→ `psql -v ON_ERROR_STOP=1 < sql/*.sql` → `compose up` 全栈。PG 数据卷不入包，每轮均为全新库，导入无冲突。
+`OmniRoute.tar.gz` 存在且含 `docker-compose.yml`/`.env` → 解压到 `/home/runner/omniroute`
+→ 卷内 `data.tar.gz` 由 helper 容器解包进 `omniroute_omniroute-data`
+→ **`storage-backup.sqlite` 优先 `mv` 成 `storage.sqlite`**（活库文件可能撕裂，只作兜底），
+并删掉 `-wal`/`-shm` → `compose up -d`。归档探测失败会重试 3 次再定性，防止 rclone 瞬时
+失败被误判成「无归档」而静默 bootstrap 空库（比恢复失败更危险 —— 连告警都立不起来）。
 
-### 凭据体系（两套并存，勿混淆）
+> `server.env`（`STORAGE_ENCRYPTION_KEY`）与 `storage.sqlite` **必须同代**，否则存量 key
+> 解不开 —— 二者出自同一份归档，天然同代。
+
+### 凭据体系（OmniRoute）
 
 | 凭据 | 来源 | 作用域 |
 |---|---|---|
-| **面板登录**（`/manage/login`） | 用户名 `admin`，密码 = 部署 `.env` 的 `CLIRELAY_ADMIN_PASSWORD`（未预设时由 `clirelay-init` 首启自动生成并回写 `.env`，随归档持久化） | CliRelay 面板（独立账号体系，存 postgres，支持租户/角色/权限） |
-| **管理 API**（`/v0/management`，Bearer） | `config.yaml` 的 `remote-management.secret-key`（明文写入后启动时自动哈希） | 管理 API；与 `~/.openclaw/.env` 的 `MANAGEMENT_KEY` 保持一致 |
+| **面板登录 / admin API** | 部署目录 `.env` 的 `INITIAL_PASSWORD`（bootstrap 时 `openssl rand -base64 18` 生成，文件 `chmod 600`；**改密后 `INITIAL_PASSWORD` 仍有效**） | 打容器 IP 的 `/api/auth/login`；排障改渠道 `isActive` 走 `PATCH /api/providers/{connectionId}` |
+| **JWT / API Key 签名** | `.env` 的 `JWT_SECRET` / `API_KEY_SECRET`（bootstrap 随机生成） | 会话与入站 key 签名，随归档持久化 |
 
-- 两套密码已统一为同一值；`CLIRELAY_ADMIN_PASSWORD` 若要预设必须满足复杂度规则
-  （≥12 字符 + 大小写 + 非字母数字），不合规会被 `clirelay-init` 替换。
-- Dropbox 的 `CLIProxyAPI.tar.gz` 内 config.yaml 的 secret-key 也保持同步，
-  保证回退恢复后的管理 API 密钥不回退到旧值。
-- 统计/用量/审计数据存 postgres（本地 `data/` SQLite 为空），随 pg_dump 进入归档，不丢失
-  —— 前提是 dump 成功，失败/异常小时会保留上一轮的 SQL（见上「归档双轨」）。
+- ⚠️ `PUT /api/provider-nodes/{id}` 会**静默丢弃** connections 数组（改连接状态无效），
+  改 `isActive` 必须用 `PATCH /api/providers/{connectionId}`。
+- ⚠️ 回退到 CliRelay / CLIProxyAPI 时是**另一套凭据**（面板 `CLIRELAY_ADMIN_PASSWORD`
+  + 管理 API `config.yaml` 的 `remote-management.secret-key`，二者已统一为同一值）。
+  降级态极少出现，需要时按旧口径处理：面板密码须满足复杂度规则（≥12 字符 + 大小写 +
+  非字母数字），不合规会被 `clirelay-init` 替换；Dropbox 的 `CLIProxyAPI.tar.gz` 内
+  config.yaml 的 secret-key 与之保持同步，保证回退后管理 API 密钥不回到旧值。
 
-### clirelay-updater 版本提示（已知现象）
+### clirelay-updater 版本提示（仅回退态会遇到）
 
 - updater 跟踪 **main 分支最新 commit**（`CLIRELAY_UPDATE_CHANNEL=main`），而
   `ghcr.io/kittors/clirelay:latest` 镜像由上游 CI 构建——纯文档类 commit 可能跳过镜像构建，
   导致镜像落后于 main HEAD，**刚部署也可能提示「可用新版本 main-xxxxxx」**，属正常现象。
 - updater 挂载 docker.sock（更新时主容器会短暂重启）；无状态文件（`.clirelay-updater-status.json`）
   表示尚未执行过更新。若不需要自动更新，可从 compose 移除 `clirelay-updater` 服务后重新归档。
-
 ## 七、远程访问入口（Tailscale）
 
 Runner 每轮通过 Tailscale 加入 tailnet（ephemeral，`--hostname=openclaw` 固定 MagicDNS 名）：
@@ -397,7 +426,7 @@ runner 以 `tailscale set --ssh --hostname=openclaw --advertise-exit-node` 广�
 
 ### 数据落点
 
-**运行整体落本地盘，Dropbox 只做持久化存放**（与 OpenClaw / CliRelay 同口径）：
+**运行整体落本地盘，Dropbox 只做持久化存放**（与 OpenClaw / OmniRoute 同口径）：
 
 | 路径 | 内容 |
 |---|---|
@@ -449,7 +478,7 @@ runner 以 `tailscale set --ssh --hostname=openclaw --advertise-exit-node` 广�
   > 也不读快照 `modelStates` —— 它只在模型被真实请求过时才有键，默认 `unknown`，
   > 光读快照拿不到名字。
 
-- **端口 8318**：8317 已被 CliRelay / CLIProxyAPI 占用（OpenClaw 主 AI 网关），
+- **端口 8318**：20128 是 OpenClaw 主 AI 网关（OmniRoute）的宿主端口，
   二者并列互不干扰；本步骤**不**为本服务起 cloudflared 隧道，仅本机可达。
 - **执行与工作目录都在本地盘**：`serve` 的**工作目录**必须是数据目录 —— 它靠
   「读取当前目录下所有 `workbuddy*.json`」组建账号池，状态文件与 `logs/` 也写在同目录。
@@ -533,5 +562,5 @@ serve 根本看不到，最快也要等下一轮（≈5.7 小时）。为此在�
   （`ls -l /tmp/local_workbuddy/workbuddy-gateway`），挂载点上永远执行不了。
 - 日志为空且进程秒退时，先确认 `cd` 的是本地运行目录而非 `/dropbox/...`。
 
-> 说明：OpenClaw 主网关（CliRelay `:8317` → cloudflared `ai-api` 隧道）见第六节；
+> 说明：OpenClaw 主网关（OmniRoute `:20128` → cloudflared `ai-api` 隧道）见第六节；
 > 本节服务是**并列的第二网关**，对外入口与归档一律互不涉及。
