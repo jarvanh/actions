@@ -501,8 +501,8 @@ API Key：<code>sk-…（点选可复制）</code>
 
 - **结论**取自 serve 日志的`账号池`行（`有效 N, 失效 M`），**接口**是 `http://127.0.0.1:<端口>/v1`，
   端口取启动时的 `WB_PORT`。**注意别把「上游默认」和「本仓库实际绑定」混为一谈**：
-  workbuddy-gateway 自己的 `-port` 默认值是 **8317**，但 8317 被 CliRelay/CLIProxyAPI
-  占用（OpenClaw 主 AI 网关），本仓库启动时显式传 `-port 8318` 覆盖掉。
+  workbuddy-gateway 自己的 `-port` 默认值是 **8317**，但 OpenClaw 主 AI 网关走 **20128**
+  （OmniRoute；旧 CliRelay/CLIProxyAPI 曾占 8317），本仓库启动时显式传 `-port 8318` 覆盖掉。
   通知里写的必须是**实际绑定端口**（当前 `8318`），不是上游默认值。
 - **鉴权写实际形态：「API Key」一行等宽回显**：serve 以 `-addr 0.0.0.0` 监听
   （对 Tailscale/局域网开放），故启动显式传 `-api-key` 做客户端 Bearer 校验
@@ -710,9 +710,9 @@ workbuddy-gateway**（第三个 AI 网关的对齐实现），差异只在数据
 📦 归档明细 · 5
   ├─ <code>openclaw.tar.gz</code> · ✅ 28.000 MiB · 覆盖主包
   ├─ <code>zcode.tar.gz</code> · ✅ 12.000 MiB
-  ├─ <code>CliRelay.tar.gz</code> · ✅ 1.100 GiB
+  ├─ <code>OmniRoute.tar.gz</code> · ✅ 1.100 GiB
   ├─ <code>rsstt.tar.gz</code> · ✅ 12.000 MiB
-  └─ <code>CLIProxyAPI.tar.gz</code> · ⏭️ 跳过 · 本轮未生效（回退后端未启用）
+  └─ <code>CliRelay.tar.gz</code> · ⏭️ 跳过 · 本轮未生效（回退后端未启用）
 
 ⏱ 已运行 5 小时 46 分 · 🔗 运行日志
 ```
