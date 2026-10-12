@@ -3777,7 +3777,6 @@ jobs:
               # awk 取分隔行之后的内容作为通知摘要；签到 rc=1（有账号失败）不阻断反代。
               CHECKIN_OUT="$(python3 "$RUN_DIR/autoclaw_auth.py" checkin \
                    --snapshot "$RUN_DIR/snapshot.json" \
-                   --accounts-out "$RUN_DIR/accounts.json" \
                    --results-out "$RUN_DIR/checkin-results.json" 2>&1 || true)"
               AC_CHECKIN="$(printf '%s\n' "$CHECKIN_OUT" | awk 'f{print} /^--- summary ---$/{f=1}' | tail -n 1)"
               echo "签到: ${AC_CHECKIN:-（无摘要输出）}"
@@ -3813,9 +3812,30 @@ jobs:
                 AC_OK=1
                 AC_REASON="端到端自检通过"
                 AC_MODEL="zai_auto · zai_glm-5.3-flash · zaicoding_glm-5.3"
-                AC_ACCOUNTS="$(curl -s --max-time 5 "http://127.0.0.1:${AUTOCLAW_PORT}/healthz" 2>/dev/null | jq -r '.accounts.count // "?"' 2>/dev/null || echo '?')"
-                AC_SCORE="$(curl -s --max-time 5 "http://127.0.0.1:${AUTOCLAW_PORT}/healthz" 2>/dev/null \
-                  | jq -r '.wallet | select(.available) | "总余额 \(.total_balance) · 即将到期 \(.expiring.points // 0)"' 2>/dev/null || true)"
+                # ⚠️ 2026-10-12 修正：积分/钱包字段**只在 /v1/health**，/healthz 的
+                # 响应体顶层根本没有 wallet/subscription 键（实测对比两端口字段：
+                # healthz=[ok,uptime,upstream,token,models,...]，v1/health=[...,wallet,
+                # subscription,...]）。此前这里打 /healthz 取 .wallet，jq 恒落空 →
+                # AC_SCORE 永远为空 → 通知的账号池子行没有积分包信息（主人反馈）。
+                AC_HEALTH="$(curl -s --max-time 5 -H "Authorization: Bearer ${AUTOCLAW_GATEWAY_KEY}" \
+                  "http://127.0.0.1:${AUTOCLAW_PORT}/v1/health" 2>/dev/null || true)"
+                AC_ACCOUNTS="$(printf '%s' "$AC_HEALTH" | jq -r '.accounts.count // "?"' 2>/dev/null || echo '?')"
+                # 积分包：总余额 + 即将到期（有账号级明细时一并带上，与 qingyan 的
+                # 「💳 积分」同口径：真有才显示，取不到就整段省略不谎报 0）。
+                AC_SCORE="$(printf '%s' "$AC_HEALTH" | jq -r '.wallet | select(.available) \
+                  | "总余额 \(.total_balance) · 即将到期 \(.expiring.points // 0)"' 2>/dev/null || true)"
+                # 钱包取不到时**必须留痕**（主人 2026-10-12 反馈「没有积分包过期时间」）：
+                # 可用性判定落在 .wallet.available，上游返回 410000「用户未登录」时
+                # 该值为 false —— 此时若不展示原因，通知里这一行就是凭空消失，
+                # 读者无法区分「没配这个字段」和「上游没给数据」。
+                if [ -z "${AC_SCORE:-}" ]; then
+                  AC_SCORE="$(printf '%s' "$AC_HEALTH" | jq -r '.wallet | select(.available == false) \
+                    | "积分包未取到 · \(.error // "原因未知")"' 2>/dev/null || true)"
+                fi
+                # 票有效期：credential.expired 为 true 时不显示剩余秒数（负值无意义）
+                AC_TOKEN_EXP="$(printf '%s' "$AC_HEALTH" | jq -r '.credential \
+                  | select(.present) | if .expired then "票已过期" \
+                    else "票有效 · 剩余 \((.expires_in_seconds // 0) / 3600 | floor) 小时" end' 2>/dev/null || true)"
               elif printf '%s' "$AC_PROBE" | grep -qE '401|authentication'; then
                 AC_REASON="自检失败：账号凭据无效（401）—— 票已过期且 refresh 失败，需本机重新 bootstrap"
               elif printf '%s' "$AC_PROBE" | grep -qE '406|upstream_throttled|繁忙'; then
@@ -3857,13 +3877,21 @@ jobs:
             if [ -n "$AC_ACCOUNTS" ] && [ "$AC_ACCOUNTS" != "?" ]; then
               tg_add_section _m "💳 账号池 · 1"
               _ac_rows="$(tree_conn 1)$(tg_entry "账号数 ${AC_ACCOUNTS}" "负载均衡 · 401/406 冷却回退 · 快过期积分优先")"$'\n'
+              # 积分包信息（主人 2026-10-12 要求：对齐 workbuddy 的「积分有效期」口径）
               [ -n "${AC_SCORE:-}" ] && _ac_rows+="$(tree_sub 1)$(escape_html "$AC_SCORE")"$'\n'
+              [ -n "${AC_TOKEN_EXP:-}" ] && _ac_rows+="$(tree_sub 1)$(escape_html "$AC_TOKEN_EXP")"$'\n'
               tg_add_block _m "${_ac_rows%$'\n'}"
             fi
             # 每日签到结果（独立分节；含 +积分 明细）
             if [ -n "${AC_CHECKIN:-}" ]; then
               tg_add_section _m "📅 每日签到 · 1"
               tg_add_block _m "$(tree_lines "结果：<code>$(escape_html "$AC_CHECKIN")</code>")"
+            else
+              # 签到段缺席必须留痕（主人 2026-10-12 反馈「没有签到信息」）：
+              # 此前 checkin 因传入不支持的 --accounts-out 参数直接 argparse exit 2，
+              # 摘要恒为空 → 整段静默消失，看通知的人无从判断是「没跑」还是「跑了没输出」。
+              tg_add_section _m "📅 每日签到 · 1"
+              tg_add_block _m "$(tree_lines "结果：<code>未取到签到摘要（本轮未执行或脚本报错）</code>")"
             fi
             # 用量 + 流水（信息层面对齐 wb/zcode 通知，主人 2026-10-11 要求）：
             # 调 board.py CLI 与看板共用渲染代码；autoclaw 走 lifetime 累计特例，
