@@ -3766,13 +3766,20 @@ jobs:
 
               # 1. 无头刷新：剩余>6h 自动跳过；失败再 -f 强刷一次（406/网络抖动兜底）
               #    新票回写 snapshot 后立即回推 Dropbox（票持久化，见上方凭据模型）
-              if python3 "$RUN_DIR/app/autoclaw_auth.py" refresh \
+              #
+              #    ⚠️ AUTOCLAW_AUTH_EMIT_REFRESH=1（2026-10-12）：同时产出
+              #    accounts.json.refresh（0600，含 refresh_token/device_id），
+              #    这是 proxy 内 M3「现刷新票」的唯一原料。缺它时 M3 恒空转——
+              #    一旦上游启用 access token「铸造时间」分钟级校验（switch 在
+              #    2.0.2 网关实测过），静态票会 401 且**没有第二个号可换**时
+              #    整个池子全 401（今天 07:02–07:53 就是这么熔断的）。
+              if AUTOCLAW_AUTH_EMIT_REFRESH=1 python3 "$RUN_DIR/app/autoclaw_auth.py" refresh \
                    --snapshot "$RUN_DIR/snapshot.json" \
                    --accounts-out "$RUN_DIR/accounts.json"; then
                 echo "refresh: 直刷通过"
               else
                 echo "refresh: 直刷失败，尝试 -f 强刷"
-                python3 "$RUN_DIR/app/autoclaw_auth.py" refresh -f \
+                AUTOCLAW_AUTH_EMIT_REFRESH=1 python3 "$RUN_DIR/app/autoclaw_auth.py" refresh -f \
                   --snapshot "$RUN_DIR/snapshot.json" \
                   --accounts-out "$RUN_DIR/accounts.json" || true
               fi
