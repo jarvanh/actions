@@ -884,12 +884,20 @@ def build_mihomo_config(env):
         use_names.append(name)
     if not provider_map:
         raise RuntimeError('no valid providers built from PROXY_SPEEDTEST_SUB_URLS')
+    # ⚠️ mode 必须 rule（2026-10-12 实锤修复，曾是 'global'）：global 模式下
+    # mixed-port 流量一律走 GLOBAL 组，而 GLOBAL 组成员只有 DIRECT/REJECT/内置组——
+    # switch_proxy 切的是 AUTO 组，**对 global 模式的流量完全不生效**，出口恒为
+    # runner 直连。后果：gitee 轮 28/28 节点 git push 全部 timed out（直连 Gitee 被墙
+    # 路由 1300~2500ms 假延迟）、cdn 轮同病；bypass 校验上线首日 28/28 全中实锤。
+    # 本机对照实验：global 模式切 AUTO 出口不变；rule+MATCH,AUTO 下切 AUTO 出口
+    # 即变（直连→节点→直连三段验证）。taier 一直是 rule（build_proxy_config 有
+    # 防漂移断言），gitee/cdn 此处同构对齐。
     cfg = {
         'port': 17890,
         'socks-port': 17891,
         'mixed-port': MIHOMO_MIXED_PORT,
         'allow-lan': False,
-        'mode': 'global',
+        'mode': 'rule',
         'log-level': env.get('PROXY_SPEEDTEST_MIHOMO_LOG_LEVEL', 'info'),
         'external-controller': '127.0.0.1:19090',
         'secret': '',
@@ -902,6 +910,8 @@ def build_mihomo_config(env):
             }
         ],
         'proxy-providers': provider_map,
+        # 规则与 mode 成对：MATCH,AUTO 让全部流量（含 mixed-port 的 git/curl）进 AUTO
+        # 组，switch_proxy 的节点切换才作用于实际流量路径。
         'rules': ['MATCH,AUTO'],
     }
     MIHOMO_CONFIG.write_text(yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False), encoding='utf-8')
