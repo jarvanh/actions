@@ -350,11 +350,19 @@ def node_proxy_config(item: dict):
 
 
 def count_qualified_nodes(results: list, metric: str, min_megabit):
-    """按指定指标统计达标节点数（须同时有可导出配置，否则导不进订阅）。"""
+    """按指定指标统计达标节点数（须同时有可导出配置，否则导不进订阅）。
+
+    ⚠️ 必须同时过滤 `ok=False`（2026-10-12 修）：此前只看「速度达标 + 有可导出
+    配置」，而失败节点（切换失败/超时/bypass 未走代理）同样带着速度字段与原始
+    配置——于是「可用 0 个」的一轮仍导出 24 个达标节点，产出一份全部未走代理、
+    结果不可信的订阅（CDN 轮实例：0 可用 / 24 达标）。判定与通知口径因此自相
+    矛盾（标题 ⚠️ 无可用节点，订阅段却写「✅ 已更新，达标 24 个」）。
+    """
     mode = METRIC_MODES.get(metric, METRIC_MODES[DEFAULT_SPEED_METRIC])
     return sum(
         1 for item in results
-        if get_item_megabits(item, mode) >= int(min_megabit)
+        if item.get('ok', False)
+        and get_item_megabits(item, mode) >= int(min_megabit)
         and node_proxy_config(item)
     )
 
@@ -422,6 +430,10 @@ def build_subscription_bundle(results: list, policy: dict):
 def build_mihomo_yaml_text(results: list, speedtest_mode: str, min_megabit: int = DEFAULT_MIN_MEGABIT):
     proxies = []
     for item in results:
+        # ⚠️ 与 count_qualified_nodes 同口径：失败节点（含 bypass 未走代理）不带进
+        # 订阅，否则「可用 0 个」的一轮仍会导出 N 个「达标」节点（2026-10-12 修）。
+        if not item.get('ok', False):
+            continue
         if get_item_megabits(item, speedtest_mode) < int(min_megabit):
             continue
         source_entry = item.get('source_entry') or {}
