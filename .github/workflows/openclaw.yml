@@ -1469,6 +1469,10 @@ jobs:
             if [ -f "$OMNIROUTE_DIR/docker-compose.yml" ]; then
               docker compose -p omniroute -f "$OMNIROUTE_DIR/docker-compose.yml" --project-directory "$OMNIROUTE_DIR" up -d || return 1
             else
+              # bootstrap 路径同样要带长上下文阈值 —— 与下方 compose heredoc
+              # （restore 路径）保持同值，否则归档缺失的冷启动会被默认
+              # readiness 80s + provider 失败计数 7/15 又快快打成熔断。
+              # 阈值依据见 compose heredoc 处的注释块（2026-10-12 实测调参）。
               docker run -d \
                 --name omniroute \
                 --restart unless-stopped \
@@ -1478,6 +1482,17 @@ jobs:
                 -e OMNIROUTE_MEMORY_MB=4096 \
                 -e BASE_URL=http://omniroute:20128 \
                 -e AUTH_COOKIE_SECURE=false \
+                -e STREAM_READINESS_TIMEOUT_MS=150000 \
+                -e STREAM_READINESS_MAX_TIMEOUT_MS=420000 \
+                -e OMNIROUTE_AGENT_GOAL_READINESS_MAX_TIMEOUT_MS=900000 \
+                -e FETCH_TIMEOUT_MS=900000 \
+                -e STREAM_IDLE_TIMEOUT_MS=900000 \
+                -e OMNIROUTE_CIRCUIT_BREAKER_API_KEY_THRESHOLD=30 \
+                -e OMNIROUTE_CIRCUIT_BREAKER_API_KEY_RESET_MS=60000 \
+                -e OMNIROUTE_PROVIDER_BREAKER_API_KEY_FAILURE_THRESHOLD=60 \
+                -e OMNIROUTE_PROVIDER_BREAKER_API_KEY_DEGRADATION_THRESHOLD=20 \
+                -e OMNIROUTE_PROVIDER_BREAKER_API_KEY_COOLDOWN_MS=180000 \
+                -e OMNIROUTE_PROVIDER_BREAKER_API_KEY_MAX_BACKOFF_MULTIPLIER=2 \
                 --add-host host.docker.internal:host-gateway \
                 -v "$OMNIROUTE_VOLUME:/app/data" \
                 --env-file "$OMNIROUTE_DIR/.env" \
