@@ -3692,9 +3692,16 @@ jobs:
         # → 起反代 → 端到端自检 → tailscale serve → TG 通知。与 qingyan 一样
         # continue-on-error + if:!cancelled()（避开前置失败级联跳过，见 Run OpenClaw 注释）。
         #
+        # 来源模型（2026-10-12 起，主人拍板「代码走 GitHub、Dropbox 只存数据」）：
+        #   - 代码真源 = github.com/jarvanh/autoclaw-proxy（私有仓库，M1–M6 整合版），
+        #     git clone --depth 1 拉取（zcode2api 同款先例；runner 已 gh auth setup-git，
+        #     私有仓可克隆，token 不落 remote）
+        #   - Dropbox 只保留**数据**：auth-snapshot.json（票仓真源）+
+        #     lifetime_stats.json（累计用量，唯一不可再生数据）。app/ 目录已下线。
+        #
         # 凭据模型（与 qingyan 的轮换票同构）：
         #   - 账号票（access JWT 24h + refresh JWT 29d 可复用）由本机
-        #     ~/AI/autoclaw-proxy/autoclaw_auth.py bootstrap 生成，快照存
+        #     autoclaw_auth.py bootstrap 生成，快照存
         #     dropbox:self-hosted/autoclaw-proxy/auth-snapshot.json
         #   - runner 每轮 pull 快照 → refresh（剩余>6h 自动跳过）→ 新票**回推 Dropbox**
         #     （refresh token 未轮换时可复用，推送幂等；一旦上游开始轮换，推送就是
@@ -3702,9 +3709,10 @@ jobs:
         #     singleton 并发组已保证同轮不重叠
         #   - 无快照 = 无凭据 → 本步骤跳过并告警（不起假服务）
         #
-        # 契约要点（2026-10-11 实测定位的 406 闸门，全部已在 proxy.py 内对齐）：
+        # 契约要点（2026-10-11 实测定位的 406 闸门，全部已在 proxy.py 内对齐；
+        # 2026-10-12 起 2.x 契约由 PROXY_CONTRACT=2x 开关提供，默认 1x 不变）：
         #   body 只发 max_completion_tokens(满额 307200)+store:false+reasoning_effort:high，
-        #   max_tokens 字段出现即 406；system 必须精确等于官方 banner。
+        #   max_tokens 字段出现即 406；system 必须精确等于官方 banner（1x）/ persona（2x）。
         if: ${{ !cancelled() }}
         continue-on-error: true
         env:
@@ -3714,9 +3722,10 @@ jobs:
           # 网关鉴权：autoclaw-proxy 专属 key（与 qingyan 同规：每反代独立 key，
           # 不共用 AI_GATEWAY_API_KEY；监听 127.0.0.1 + tailscale serve，key 为第二道边界）
           AUTOCLAW_GATEWAY_KEY: ${{ secrets.AUTOCLAW_GATEWAY_KEY }}
-          # 票仓与代码真源（Dropbox）
+          # 代码真源（GitHub，私有仓库；zcode2api 同款 clone 先例）
+          AUTOCLAW_REPO: https://github.com/jarvanh/autoclaw-proxy.git
+          # 票仓与累计统计（Dropbox，只存数据不存代码）
           AUTOCLAW_SNAPSHOT_REMOTE: dropbox:self-hosted/autoclaw-proxy/auth-snapshot.json
-          AUTOCLAW_APP_REMOTE: dropbox:self-hosted/autoclaw-proxy/app
           # 累计用量统计（唯一不可再生的运行数据，2026-10-12 主人拍板入 Dropbox）：
           # 启动时拉回续计，job 收尾回推；/tmp 清理不再丢
           AUTOCLAW_STATS_REMOTE: dropbox:self-hosted/autoclaw-proxy/lifetime_stats.json
@@ -3733,17 +3742,19 @@ jobs:
           AC_MODEL=""
           AC_SCORE=""
 
-          # 0. 拉代码 + 票仓快照（快照缺失 = 未导入凭据，直接跳过）
-          mkdir -p "$RUN_DIR"
-          if ! rclone copy "$AUTOCLAW_APP_REMOTE" "$RUN_DIR" 2>/dev/null || [ ! -f "$RUN_DIR/proxy.py" ]; then
-            echo "::warning::[autoclaw] 代码拉取失败（$AUTOCLAW_APP_REMOTE）"
-            AC_REASON="代码拉取失败"
+          # 0. 拉代码（GitHub，clone 到干净目录）+ 票仓快照（快照缺失 = 未导入凭据，直接跳过）
+          rm -rf "$RUN_DIR"
+          if ! git clone --quiet --depth 1 "$AUTOCLAW_REPO" "$RUN_DIR" || [ ! -f "$RUN_DIR/app/proxy.py" ]; then
+            echo "::warning::[autoclaw] 代码克隆失败（$AUTOCLAW_REPO）"
+            AC_REASON="代码克隆失败"
           elif ! rclone copyto "$AUTOCLAW_SNAPSHOT_REMOTE" "$RUN_DIR/snapshot.json" 2>/dev/null || [ ! -s "$RUN_DIR/snapshot.json" ]; then
             echo "::warning::[autoclaw] 无凭据快照（先在本机跑 autoclaw_auth.py bootstrap）"
             AC_REASON="未配置凭据快照"
           else
+            AC_COMMIT="$(git -C "$RUN_DIR" rev-parse --short HEAD)"
+            echo "代码: $AUTOCLAW_REPO @ $AC_COMMIT"
             # 累计统计拉回续计：Dropbox 有则覆盖本地（/tmp 重建后为空），无则从零起计
-            rclone copyto "$AUTOCLAW_STATS_REMOTE" "$RUN_DIR/lifetime_stats.json" 2>/dev/null \
+            rclone copyto "$AUTOCLAW_STATS_REMOTE" "$RUN_DIR/app/lifetime_stats.json" 2>/dev/null \
               && echo "lifetime_stats: 已从 Dropbox 拉回续计" \
               || echo "lifetime_stats: 无云端存档，从零起计"
             SNAP_ACCOUNTS="$(python3 -c "import json;print(len(json.load(open('$RUN_DIR/snapshot.json')).get('accounts',[])))" 2>/dev/null || echo 0)"
@@ -3755,13 +3766,13 @@ jobs:
 
               # 1. 无头刷新：剩余>6h 自动跳过；失败再 -f 强刷一次（406/网络抖动兜底）
               #    新票回写 snapshot 后立即回推 Dropbox（票持久化，见上方凭据模型）
-              if python3 "$RUN_DIR/autoclaw_auth.py" refresh \
+              if python3 "$RUN_DIR/app/autoclaw_auth.py" refresh \
                    --snapshot "$RUN_DIR/snapshot.json" \
                    --accounts-out "$RUN_DIR/accounts.json"; then
                 echo "refresh: 直刷通过"
               else
                 echo "refresh: 直刷失败，尝试 -f 强刷"
-                python3 "$RUN_DIR/autoclaw_auth.py" refresh -f \
+                python3 "$RUN_DIR/app/autoclaw_auth.py" refresh -f \
                   --snapshot "$RUN_DIR/snapshot.json" \
                   --accounts-out "$RUN_DIR/accounts.json" || true
               fi
@@ -3775,7 +3786,7 @@ jobs:
               AC_CHECKIN=""
               # 脚本在 stdout 末尾打 "--- summary ---" 单行摘要（多账号明细同行），
               # awk 取分隔行之后的内容作为通知摘要；签到 rc=1（有账号失败）不阻断反代。
-              CHECKIN_OUT="$(python3 "$RUN_DIR/autoclaw_auth.py" checkin \
+              CHECKIN_OUT="$(python3 "$RUN_DIR/app/autoclaw_auth.py" checkin \
                    --snapshot "$RUN_DIR/snapshot.json" \
                    --results-out "$RUN_DIR/checkin-results.json" 2>&1 || true)"
               AC_CHECKIN="$(printf '%s\n' "$CHECKIN_OUT" | awk 'f{print} /^--- summary ---$/{f=1}' | tail -n 1)"
@@ -3789,13 +3800,13 @@ jobs:
               #      fail-closed，避免公网 VM 上裸奔。业务端点始终有 key 401 保护。
               mkdir -p "$HOME/.openclaw-autoclaw"
               [ -f "$HOME/.openclaw-autoclaw/openclaw.json" ] \
-                || cp "$RUN_DIR/openclaw.json" "$HOME/.openclaw-autoclaw/openclaw.json"
+                || cp "$RUN_DIR/app/openclaw.json" "$HOME/.openclaw-autoclaw/openclaw.json"
               AC_BIND_HOST="127.0.0.1"
               [ -n "${AUTOCLAW_GATEWAY_KEY:-}" ] && AC_BIND_HOST="0.0.0.0"
               PROXY_HOST="$AC_BIND_HOST" PROXY_PORT="$AUTOCLAW_PORT" \
               PROXY_API_KEY="${AUTOCLAW_GATEWAY_KEY:-}" \
               PROXY_ACCOUNTS_FILE="$RUN_DIR/accounts.json" \
-                nohup python3 "$RUN_DIR/proxy.py" > "$RUN_DIR/proxy.log" 2>&1 &
+                nohup python3 "$RUN_DIR/app/proxy.py" > "$RUN_DIR/proxy.log" 2>&1 &
               for _ in $(seq 1 15); do
                 code="$(curl -s --max-time 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${AUTOCLAW_PORT}/v1/models" 2>/dev/null || true)"
                 [ -n "$code" ] && [ "$code" != "000" ] && break
@@ -3859,7 +3870,7 @@ jobs:
             tg_add_title _m "❌ autoclaw-proxy 启动失败"
             tg_add_kv _m "结论" "未就绪"
             tg_add_kv _m "原因" "$AC_REASON"
-            tg_add_kv _m "处理" "本机跑 python3 ~/AI/autoclaw-proxy/autoclaw_auth.py bootstrap（桌面端加 --inspect=9229）"
+            tg_add_kv _m "处理" "本机 clone jarvanh/autoclaw-proxy 后跑 python3 app/autoclaw_auth.py bootstrap（桌面端加 --inspect=9229）"
             tg_add_footer _m
             send_tg "$_m" alert || echo "::warning::TG 通知发送失败（不影响任务）"
           else
@@ -3871,9 +3882,9 @@ jobs:
             tg_add_kv _m "模型" "$AC_MODEL"
             # 信息层面对齐 wb_notify（主人 2026-10-11 要求）：数据目录 + 代码来源。
             # 数据目录是「这条通知说的是哪台机/哪份数据」的定位信息（主人 10-06 定的
-            # 头部定位口径）；代码真源在 Dropbox（autoclaw 同款凭据模型）。
+            # 头部定位口径）；代码真源已迁 GitHub（2026-10-12，Dropbox 只存数据）。
             tg_add_path _m "数据目录" "/tmp/local_autoclaw-proxy"
-            tg_add_path _m "代码" "dropbox:self-hosted/autoclaw-proxy/app"
+            tg_add_path _m "代码" "$AUTOCLAW_REPO @ $AC_COMMIT"
             if [ -n "$AC_ACCOUNTS" ] && [ "$AC_ACCOUNTS" != "?" ]; then
               tg_add_section _m "💳 账号池 · 1"
               _ac_rows="$(tree_conn 1)$(tg_entry "账号数 ${AC_ACCOUNTS}" "负载均衡 · 401/406 冷却回退 · 快过期积分优先")"$'\n'
@@ -6164,22 +6175,22 @@ jobs:
           # 执行 —— proxy 运行中该文件会被周期改写，停止前的最后一次读取即终值，
           # 停后再读反而可能与退出写竞态。
           echo "3b-1. Pushing autoclaw-proxy lifetime stats & stopping..."
-          if [ -f /tmp/local_autoclaw-proxy/lifetime_stats.json ]; then
-            if rclone copyto /tmp/local_autoclaw-proxy/lifetime_stats.json "$AUTOCLAW_STATS_REMOTE" 2>/dev/null; then
+          if [ -f /tmp/local_autoclaw-proxy/app/lifetime_stats.json ]; then
+            if rclone copyto /tmp/local_autoclaw-proxy/app/lifetime_stats.json "$AUTOCLAW_STATS_REMOTE" 2>/dev/null; then
               echo "✅ autoclaw lifetime_stats 回推 Dropbox 完成"
             else
               echo "::warning::[autoclaw] lifetime_stats 回推失败（下轮启动会以本地残留续计，VM 销毁才丢）"
             fi
           fi
-          AC_PROXY_PID="$(pgrep -f "python3 /tmp/local_autoclaw-proxy/proxy.py" | head -n 1 || true)"
+          AC_PROXY_PID="$(pgrep -f "python3 /tmp/local_autoclaw-proxy/app/proxy.py" | head -n 1 || true)"
           if [ -n "$AC_PROXY_PID" ]; then
             kill "$AC_PROXY_PID" 2>/dev/null || true
             for _ in $(seq 1 10); do
-              pgrep -f "python3 /tmp/local_autoclaw-proxy/proxy.py" >/dev/null 2>&1 || break
+              pgrep -f "python3 /tmp/local_autoclaw-proxy/app/proxy.py" >/dev/null 2>&1 || break
               sleep 1
             done
-            pgrep -f "python3 /tmp/local_autoclaw-proxy/proxy.py" >/dev/null 2>&1 \
-              && kill -9 "$(pgrep -f "python3 /tmp/local_autoclaw-proxy/proxy.py" | head -n 1)" 2>/dev/null || true
+            pgrep -f "python3 /tmp/local_autoclaw-proxy/app/proxy.py" >/dev/null 2>&1 \
+              && kill -9 "$(pgrep -f "python3 /tmp/local_autoclaw-proxy/app/proxy.py" | head -n 1)" 2>/dev/null || true
             echo "✅ autoclaw-proxy 已停止"
           else
             echo "ℹ️ autoclaw-proxy 未在运行（本轮未启动或已退出），跳过"
