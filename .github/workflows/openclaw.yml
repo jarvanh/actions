@@ -3848,22 +3848,30 @@ jobs:
               AC_CHECKIN="$(printf '%s\n' "$CHECKIN_OUT" | awk 'f{print} /^--- summary ---$/{f=1}' | tail -n 1)"
               echo "签到: ${AC_CHECKIN:-（无摘要输出）}"
 
-              # 2. 起反代（凭据不足时 proxy 自身也会报 401，交给自检分诊）
-              # 2026-10-11 两处修正：
-              #   a) 绑定地址：设了 PROXY_API_KEY（secret AUTOCLAW_GATEWAY_KEY）才绑
-              #      0.0.0.0 —— OmniRoute 容器经 host.docker.internal 回连本机反代
-              #      （autoclaw 渠道已入网关），绑回环不可达；无 key 则回退 127.0.0.1
-              #      fail-closed，避免公网 VM 上裸奔。业务端点始终有 key 401 保护。
+              # 2. 托管起反代（2026-10-12 起 systemd --user，取代原 nohup 裸跑）
+              #    旧方案：nohup 起的进程 PPID=1，~/.config/systemd/user 下无单元，
+              #    本机重启/被收编即断连且无自愈（窗口期崩溃要等下一轮 run）。
+              #    新方案与其他四网关同口径：services.sh ensure → 写单元(幂等)+restart，
+              #    Restart=always 把崩溃自愈收敛到秒级。
+              #
+              #    与 qingyan 的差异：autoclaw 代码在 /tmp（每轮 clone 自 GitHub，真源不在
+              #    本机），故 write_unit 用 AUTOCLAW_RUN_DIR 定位，且每轮 ensure 的 restart
+              #    语义与原 nohup 的「每轮 pkill + 重启」完全一致。
+              #
+              #    绑定地址/鉴权 fail-closed 已移入单元：无 AUTOCLAW_GATEWAY_KEY 时
+              #    write_unit 直接拒绝生成单元（比原来的「运行期降级回环」更严，不起假服务）。
               mkdir -p "$HOME/.openclaw-autoclaw"
               [ -f "$HOME/.openclaw-autoclaw/openclaw.json" ] \
                 || cp "$RUN_DIR/app/openclaw.json" "$HOME/.openclaw-autoclaw/openclaw.json"
-              AC_BIND_HOST="127.0.0.1"
-              [ -n "${AUTOCLAW_GATEWAY_KEY:-}" ] && AC_BIND_HOST="0.0.0.0"
-              PROXY_HOST="$AC_BIND_HOST" PROXY_PORT="$AUTOCLAW_PORT" \
-              PROXY_API_KEY="${AUTOCLAW_GATEWAY_KEY:-}" \
-              PROXY_ACCOUNTS_FILE="$RUN_DIR/accounts.json" \
-                nohup python3 "$RUN_DIR/app/proxy.py" > "$RUN_DIR/proxy.log" 2>&1 &
-              for _ in $(seq 1 15); do
+              AC_SERVICES="${GITHUB_WORKSPACE}/.github/scripts/services/services.sh"
+              if [ -f "$AC_SERVICES" ]; then
+                AUTOCLAW_RUN_DIR="$RUN_DIR" bash "$AC_SERVICES" ensure autoclaw || \
+                  echo "::warning::[autoclaw] systemd 托管失败（见 services 日志），自检将判定未就绪"
+              else
+                echo "::error::[autoclaw] services.sh 缺失，无法托管"
+              fi
+              # 就绪等待：systemd active ≠ 端口已监听（绑定失败会 active 后秒退），故仍以端口为准。
+              for _ in $(seq 1 30); do
                 code="$(curl -s --max-time 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${AUTOCLAW_PORT}/v1/models" 2>/dev/null || true)"
                 [ -n "$code" ] && [ "$code" != "000" ] && break
                 sleep 2
@@ -6089,6 +6097,12 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # autoclaw 累计用量回推目标（2026-10-12 补）：本 step 是 set -euo pipefail，
+          # 而 3b-1 的 rclone copyto 引用了 $AUTOCLAW_STATS_REMOTE —— 此前该变量**只在
+          # run_autoclaw step 的 env 里定义**，本 step 取不到 → unbound variable 直接崩，
+          # 3b-1 之后的 zcode2api/qingyan 停服与 Final Archive 全部不执行。
+          # 与 run_autoclaw 的值保持一致（改需两处同改）。
+          AUTOCLAW_STATS_REMOTE: dropbox:self-hosted/autoclaw-proxy/lifetime_stats.json
         # 预检失败（Dropbox 配额不足）时本轮没部署任何服务，归档会对着空环境
         # 发连环失败告警 —— 跳过，等空间腾出后的下一轮正常收尾。
         if: ${{ always() && steps.dropbox_preflight.conclusion != 'failure' }}
@@ -6225,11 +6239,12 @@ jobs:
             wb_stop_notify "⛔ workbuddy-gateway 已停止" "服务已退出 · 数据目录保持原状"
           fi
 
-          # 3b-1. autoclaw-proxy：宿主进程（nohup），收尾回推累计统计后停止。
-          # lifetime_stats.json 是唯一不可再生的运行数据（累计用量统计），2026-10-12
-          # 主人拍板入 Dropbox：启动时拉回续计，此处回推最终值。回推在停进程**之前**
-          # 执行 —— proxy 运行中该文件会被周期改写，停止前的最后一次读取即终值，
-          # 停后再读反而可能与退出写竞态。
+          # 3b-1. autoclaw-proxy：宿主进程（2026-10-12 起 systemd --user 托管，
+          #     原 nohup 裸跑已废 —— pkill 会被 Restart=always 拉回，必须走 systemctl）。
+          #     lifetime_stats.json 是唯一不可再生的运行数据（累计用量统计），2026-10-12
+          #     主人拍板入 Dropbox：启动时拉回续计，此处回推最终值。回推在停进程**之前**
+          #     执行 —— proxy 运行中该文件会被周期改写，停止前的最后一次读取即终值，
+          #     停后再读反而可能与退出写竞态。
           echo "3b-1. Pushing autoclaw-proxy lifetime stats & stopping..."
           if [ -f /tmp/local_autoclaw-proxy/app/lifetime_stats.json ]; then
             if rclone copyto /tmp/local_autoclaw-proxy/app/lifetime_stats.json "$AUTOCLAW_STATS_REMOTE" 2>/dev/null; then
@@ -6238,18 +6253,18 @@ jobs:
               echo "::warning::[autoclaw] lifetime_stats 回推失败（下轮启动会以本地残留续计，VM 销毁才丢）"
             fi
           fi
-          AC_PROXY_PID="$(pgrep -f "python3 /tmp/local_autoclaw-proxy/app/proxy.py" | head -n 1 || true)"
-          if [ -n "$AC_PROXY_PID" ]; then
-            kill "$AC_PROXY_PID" 2>/dev/null || true
-            for _ in $(seq 1 10); do
-              pgrep -f "python3 /tmp/local_autoclaw-proxy/app/proxy.py" >/dev/null 2>&1 || break
-              sleep 1
-            done
-            pgrep -f "python3 /tmp/local_autoclaw-proxy/app/proxy.py" >/dev/null 2>&1 \
-              && kill -9 "$(pgrep -f "python3 /tmp/local_autoclaw-proxy/app/proxy.py" | head -n 1)" 2>/dev/null || true
-            echo "✅ autoclaw-proxy 已停止"
+          # 停止必须走 services.sh stop（systemctl stop，非 pkill）：Restart=always 会把
+          # pkill 杀掉的进程 5 秒内拉回来，「等待退出」循环误判进程残留（zcode2api 同款教训）。
+          bash "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" stop autoclaw || true
+          if systemctl --user is-failed --quiet autoclaw.service 2>/dev/null; then
+            systemctl --user reset-failed autoclaw.service 2>/dev/null || true
+          fi
+          AC_STILL_RUNNING=0
+          if (exec 3<> /dev/tcp/127.0.0.1/8322) 2>/dev/null; then
+            AC_STILL_RUNNING=1
+            echo "⚠️ autoclaw-proxy 仍在监听 8322"
           else
-            echo "ℹ️ autoclaw-proxy 未在运行（本轮未启动或已退出），跳过"
+            echo "✅ autoclaw-proxy 已停止"
           fi
 
           # 3c. zcode2api：同为宿主进程（非容器），不会随 job 结束自动退出，
