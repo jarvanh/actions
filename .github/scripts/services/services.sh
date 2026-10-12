@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 宿主进程形态 AI 网关与看板服务的 systemd --user 管理器
-# （workbuddy-gateway / zcode2api / qingyan / quota-board）
+# （workbuddy-gateway / zcode2api / qingyan / quota-board / autoclaw-proxy）
 # 注：workbuddy-cred-sync 已于 2026-10-06 停用移除，见 write_unit 内同名注释。
 #
 # 位置：.github/scripts/services/services.sh（随仓库 checkout 分发）
@@ -16,10 +16,10 @@
 #   Restart=always 把「崩溃→自愈」收敛到秒级；runner 的 user manager 常驻
 #   （openclaw-gateway.service 同款，Linger=yes）。
 #
-#   bash "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" ensure <workbuddy|zcode2api|qingyan|quota-board>
+#   bash "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" ensure <workbuddy|zcode2api|qingyan|quota-board|autoclaw>
 #
 # 用法：
-#   services.sh ensure <workbuddy|zcode2api|qingyan|quota-board>  # 写单元(幂等)+reload+重启
+#   services.sh ensure <workbuddy|zcode2api|qingyan|quota-board|autoclaw>  # 写单元(幂等)+reload+重启
 #   services.sh stop <name>                            # 收尾停止（等退出，不 pkill）
 #   services.sh status [name]                          # 状态总览
 #
@@ -42,6 +42,8 @@
 #              （2026-10-06 起全面直跑 Dropbox 真源，不再有 /tmp 运行副本）
 #   quota-board /dropbox/self-hosted/quota-board/board.py + ~/.openclaw/.env
 #              （看板本体与凭据都在持久化目录，运行目录无需准备）
+#   autoclaw   /tmp/local_autoclaw-proxy/{app/proxy.py,accounts.json}
+#              （代码每轮由 workflow clone 自 GitHub，真源不在 Dropbox）
 #
 # 为什么 qingyan 取代了 glm2api（2026-09-30）：qingyan-proxy 是自研单文件反代，
 # 已在本机端到端验证，glm2api 退役；部署脚本同步换成 qingyan_deploy.sh，
@@ -108,7 +110,7 @@ svc() {
 # 名称白名单：校验必须在**当前 shell** 做（放进 $(...) 时 die 只退子 shell）
 valid_name() {
   case "$1" in
-    workbuddy|zcode2api|qingyan|quota-board|rclone-dropbox|archive-loop|tailscaled) return 0 ;;
+    workbuddy|zcode2api|qingyan|quota-board|autoclaw|rclone-dropbox|archive-loop|tailscaled) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -149,7 +151,8 @@ prune_logs() {
     "$LOG_ROOT/workbuddy-gateway/logs" \
     "$LOG_ROOT/zcode2api/logs" \
     "$LOG_ROOT/qingyan-proxy/logs" \
-    "$LOG_ROOT/quota-board"
+    "$LOG_ROOT/quota-board" \
+    "$LOG_ROOT/autoclaw-proxy/logs"
   do
     [ -d "$dir" ] || continue
     # ① 按天文件：gateway-YYYY-MM-DD.log 超期删除（mtime 早于保留窗口）
@@ -336,6 +339,53 @@ EOF
     # 它原本做「Dropbox → /tmp/local_workbuddy/data」单向同步凭据，但 workbuddy 的
     # WorkingDirectory 已改为 Dropbox（数据直写），不再读 /tmp —— 该同步彻底空转。
     # 实测凭据两侧 md5 一致，确认为无效同步。保留此处注释以防将来误加回。
+    #
+    # autoclaw 于 2026-10-12 接入托管（此前 workflow nohup 裸跑，PPID=1、
+    # ~/.config/systemd/user 下无单元，本机重启即断连且无人自愈）。
+    # 代码真源在 GitHub（jarvanh/autoclaw-proxy），workflow 每轮 clone 到
+    # /tmp/local_autoclaw-proxy 并刷完票才 ensure —— 故不能像 qingyan 那样
+    # 指向持久化路径，而是校验 workflow 已铺好的运行产物（fail-closed）。
+    autoclaw)
+      local ac_run_dir="${AUTOCLAW_RUN_DIR:-/tmp/local_autoclaw-proxy}"
+      [ -s "$ac_run_dir/app/proxy.py" ] || { rm -f "$tmp"; die "autoclaw: $ac_run_dir/app/proxy.py 缺失（workflow 需先 clone 代码）"; }
+      [ -s "$ac_run_dir/accounts.json" ] || { rm -f "$tmp"; die "autoclaw: $ac_run_dir/accounts.json 缺失或为空（无凭据，拒绝起无凭据服务）"; }
+      [ -n "${AUTOCLAW_GATEWAY_KEY:-}" ] || { rm -f "$tmp"; die "autoclaw: AUTOCLAW_GATEWAY_KEY 未注入，拒绝生成无鉴权单元"; }
+      ensure_log_dir "$LOG_ROOT/autoclaw-proxy/logs/proxy.log"
+      cat > "$tmp" <<EOF
+[Unit]
+Description=autoclaw-proxy (AutoClaw 积分反代 -> OpenAI, ${AUTOCLAW_PORT:-8322})
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=0
+
+[Service]
+Type=simple
+# WorkingDirectory 指到运行目录：proxy.py 用 __file__ 定位同目录的
+# pool_state.json 与 lifetime_stats.json，cwd 错位会写到别处去。
+# ⚠️ 代码在 /tmp：workflow 每轮 rm -rf + git clone 重新铺，真源不在本机；
+#    这是与 qingyan（Dropbox 真源）的本质差异，别照抄它的路径。
+WorkingDirectory=$ac_run_dir
+# 绑 0.0.0.0：OmniRoute 容器经 host.docker.internal 回连本机反代
+# （autoclaw 渠道已入网关），绑回环不可达。无 key 时上面已先 die，
+# 不会留下裸奔实例；业务端点始终有 PROXY_API_KEY 401 保护。
+Environment=PROXY_HOST=0.0.0.0
+Environment=PROXY_PORT=${AUTOCLAW_PORT:-8322}
+Environment=PROXY_API_KEY=${AUTOCLAW_GATEWAY_KEY}
+Environment=PROXY_ACCOUNTS_FILE=$ac_run_dir/accounts.json
+# 纯标准库单文件（urllib + http.server），系统 python3 直跑，无需 venv。
+ExecStart=/usr/bin/python3 $ac_run_dir/app/proxy.py
+Restart=always
+RestartSec=5
+# 停止超时：SSE 长连接 + 上游请求排空，统一放宽到 180s（同三网关）。
+TimeoutStopSec=180
+StandardOutput=append:$LOG_ROOT/autoclaw-proxy/logs/proxy.log
+StandardError=append:$LOG_ROOT/autoclaw-proxy/logs/proxy.log
+
+[Install]
+WantedBy=default.target
+EOF
+      ;;
     quota-board)
       # 看板不是网关，但同为宿主常驻进程，同样需要 Restart=always 自愈。
       # 与四个网关的差异：本体（board.py）和凭据都在持久化目录
@@ -485,7 +535,7 @@ EOF
 
 cmd_ensure() {
   local name="${1:-}"
-  [ -n "$name" ] || die "用法: $0 ensure <workbuddy|zcode2api|qingyan|quota-board|rclone-dropbox|archive-loop|tailscaled>"
+  [ -n "$name" ] || die "用法: $0 ensure <workbuddy|zcode2api|qingyan|quota-board|autoclaw|rclone-dropbox|archive-loop|tailscaled>"
   valid_name "$name" || die "未知服务: $name"
   local unit
   unit="$(unit_name "$name")"
@@ -535,7 +585,7 @@ cmd_ensure() {
 
 cmd_stop() {
   local name="${1:-}"
-  [ -n "$name" ] || die "用法: $0 stop <workbuddy|zcode2api|qingyan|quota-board|rclone-dropbox|archive-loop|tailscaled>"
+  [ -n "$name" ] || die "用法: $0 stop <workbuddy|zcode2api|qingyan|quota-board|autoclaw|rclone-dropbox|archive-loop|tailscaled>"
   valid_name "$name" || die "未知服务: $name"
   local unit
   unit="$(unit_name "$name")"
@@ -555,7 +605,7 @@ cmd_stop() {
 
 cmd_status() {
   local only="${1:-}"
-  local names="workbuddy zcode2api qingyan quota-board rclone-dropbox archive-loop tailscaled"
+  local names="workbuddy zcode2api qingyan quota-board autoclaw rclone-dropbox archive-loop tailscaled"
   printf '%-20s %-10s %-34s %s\n' "服务" "级别" "状态" "单元"
   local n unit st lvl
   for n in $names; do
