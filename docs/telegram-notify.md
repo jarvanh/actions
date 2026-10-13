@@ -106,6 +106,7 @@ HTML 变复杂。
 | 📁 任务名 · 错误日志 | `sync_notify.sh` | 同步失败后随 `sendDocument` 附上的日志文件 |
 | ⏭️ 同步任务跳过 | `sync_marker.sh` | 落在跳过窗口内 |
 | 🚨 源端大小异常减小 | `sync_marker.sh` | 源端比上次记录缩水超阈值 |
+| 🚨 存储账号失效 · N | `openlist_storage_check.sh` | 容器就绪后、同步开跑前巡检 `storage/list`：有存储驱动 Init 失败（登录态到期）即告警，含受影响同步对 |
 | 🔧 修复文件一键还原完成 | `file_restore.sh` | 还原 marker 修复条目到原路径 |
 | 🆘 灾难恢复完成 / 🆘 镜像灾难恢复完成 | `file_restore.sh` | 目标端回填源端（镜像变体会删源端多余文件） |
 | 📈 同步趋势 | `sync_trend.sh` | 一轮结束，输出净传速率与 ETA |
@@ -198,6 +199,40 @@ HTML 变复杂。
 
 ⏱ 已运行 3 分钟 · 🔗 运行日志
 ```
+
+**示例：存储账号失效**（alert 档；openlist 侧第一条「事前」告警，不是同步跑
+挂之后才说）
+
+```
+🚨 存储账号失效 · 2
+━━━━━━━━━━━━━━━━━━
+结论：2 个存储的登录态已失效（共 6 个），涉及它们的同步对会被跳过
+首次发现：2026-10-13 07:55 UTC
+
+🧾 失效存储 · 2
+  ├─ <code>/baidupan</code> · BaiduPan
+  └─ <code>/aliyundrive</code> · AliyundriveOpen
+
+⏭️ 会被跳过的同步对 · 2
+  ├─ <code>task1</code> · <code>openlist:baidupanCrypt/1</code>
+  └─ <code>task2</code> · <code>openlist:aliyundriveCrypt/2</code>
+
+这些存储的登录态到期后无法自动续期，需要在 OpenList 管理后台重新填写账号；重登成功后同步会自动恢复，不需要改动本仓库的任何配置。
+
+🧾 原始错误
+<pre>/baidupan (BaiduPan): rsp_code:8005 login failed
+/aliyundrive (AliyundriveOpen): [115] refresh token expired</pre>
+
+⏱ 已运行 4 分钟 · 🔗 运行日志
+```
+
+> 判据只认 OpenList 自己持久化的驱动健康度：`x_storages.status != work`
+> （上游 `internal/op/storage.go`：驱动 Init 失败即 `SetStatus(err.Error())` 写库）。
+> 触发时机是**容器就绪后、同步开跑前**，所以读者在 PCR 一轮跑完之前就知道
+> 哪些账号要重登。带 6h 冷却 + 「历史账里没有的新失效挂载」绕过冷却必发
+> （读者不能等 6h 才发现新坏了一个）；`first_seen` 跨轮保持，所以续报有
+> 「已持续 3 小时」；恢复后条目自动销账。记账落 `storage_alert.json`
+> （与 `backend_dead.json` 同目录，随收尾镜像 + 外置打包备份）。
 
 **示例：进度面板（骨架）**（刷新态分节用 📍；收摊终态里改用 🔄，⏸️ 专用于标题）
 

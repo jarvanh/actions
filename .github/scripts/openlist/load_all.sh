@@ -40,6 +40,7 @@ source "$_OPENLIST_SCRIPT_DIR/telegram.sh"      # Telegram 消息发送/编辑/�
 # --- L2 外部服务适配 ---
 source "$_OPENLIST_SCRIPT_DIR/rclone_query.sh"  # rclone 查询与过滤解析（size/check/exclude）[utils]
 source "$_OPENLIST_SCRIPT_DIR/openlist_api.sh"  # OpenList 服务访问（管理面登录、就绪等待）
+source "$_OPENLIST_SCRIPT_DIR/openlist_storage_check.sh"  # 存储账号失效巡检与告警（storage/list 全量真值 + 冷却记账）[openlist_api, telegram]
 
 # --- L3 领域能力 ---
 source "$_OPENLIST_SCRIPT_DIR/file_fix.sh"      # 单文件修复 4 种方法实现（try_fix_failed_file）
