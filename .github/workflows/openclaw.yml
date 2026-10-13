@@ -4047,14 +4047,13 @@ jobs:
             # 2026-10-11 标题对齐全库网关就绪约定：🟢（对齐 workbuddy/zcode2api/trae/Runner，见 docs/telegram-notify.md）；原 ✅ 是照抄 qingyan 骨架带进来的游离用法
             tg_add_title _m "🟢 autoclaw-proxy 已就绪"
             tg_add_kv _m "结论" "$AC_REASON"
+            tg_add_path _m "数据目录" "/tmp/local_autoclaw-proxy"
+            tg_add_path _m "代码" "$AUTOCLAW_REPO @ $AC_COMMIT"
             tg_add_path _m "接口" "http://127.0.0.1:${AUTOCLAW_PORT}/v1"
             tg_add_path _m "API Key" "${AUTOCLAW_GATEWAY_KEY:-未取到}"
-            tg_add_kv _m "模型" "$AC_MODEL"
             # 信息层面对齐 wb_notify（主人 2026-10-11 要求）：数据目录 + 代码来源。
             # 数据目录是「这条通知说的是哪台机/哪份数据」的定位信息（主人 10-06 定的
             # 头部定位口径）；代码真源已迁 GitHub（2026-10-12，Dropbox 只存数据）。
-            tg_add_path _m "数据目录" "/tmp/local_autoclaw-proxy"
-            tg_add_path _m "代码" "$AUTOCLAW_REPO @ $AC_COMMIT"
             if [ -n "$AC_ACCOUNTS" ] && [ "$AC_ACCOUNTS" != "?" ]; then
               tg_add_section _m "💳 账号池 · 1"
               _ac_rows="$(tree_conn 1)$(tg_entry "账号数 ${AC_ACCOUNTS}" "负载均衡 · 401/406 冷却回退 · 快过期积分优先")"$'\n'
@@ -4214,6 +4213,9 @@ jobs:
             # 2026-10-11 标题对齐全库网关就绪约定：🟢（对齐 workbuddy/zcode2api/trae/Runner，见 docs/telegram-notify.md）
             tg_add_title _m "🟢 qingyan-proxy 已就绪"
             tg_add_kv _m "结论" "$GL_REASON"
+            tg_add_path _m "运行目录" "/dropbox/self-hosted/qingyan-proxy/app"
+            tg_add_path _m "日志" "/dropbox/self-hosted/qingyan-proxy/logs/qingyan.log"
+            tg_add_path _m "代码" "dropbox:self-hosted/qingyan-proxy/app"
             tg_add_path _m "接口" "http://127.0.0.1:${QINGYAN_PORT}/v1"
             # 标签「API Key」+ tg_add_path：对齐 zcode2api 就绪通知同款 —— 值走
             # <code> 等宽，客户端点一下即可整块复制。监听已改 0.0.0.0，key 是唯一
@@ -4223,9 +4225,6 @@ jobs:
             tg_add_kv _m "计费" "默认通道不扣积分；-agent 后缀走 AgentMore 才扣"
             # 信息层面对齐 wb_notify（主人 2026-10-11 要求）：运行目录 + 日志 + 代码来源。
             # 与下方失败分支同口径；代码真源在 Dropbox（qingyan_deploy.sh 每轮 pull）。
-            tg_add_path _m "运行目录" "/dropbox/self-hosted/qingyan-proxy/app"
-            tg_add_path _m "日志" "/dropbox/self-hosted/qingyan-proxy/logs/qingyan.log"
-            tg_add_path _m "代码" "dropbox:self-hosted/qingyan-proxy/app"
 
             # 💳 积分分节（版式对齐 zcode2api 的「💳 账号池」：条目行 = 主值 + 状态，
             # 子行 = 明细）。只在采集成功时出现——接口失败时什么都不说，
