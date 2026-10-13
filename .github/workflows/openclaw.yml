@@ -6497,9 +6497,13 @@ jobs:
             avail=$(free_kb "$path")
             if [ "${avail:-0}" -lt "$min_kb" ]; then
               echo "❌ ${label}: insufficient free space at ${path}. available=${avail}KB required=${min_kb}KB" >&2
-              exit 1
+              # 2026-10-13 禁 exit（主人「一个打包出错不应该影响之后的打包」）：
+              # 这里是容量预检，写 return 1 由调用方判定是否中止本归档项，
+              # 不再用 exit 掀掉整个 set -e shell。
+              return 1
             fi
             echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
+            return 0
           }
           # 目录体积预估（KB）。第二参数传 sudo 则以 root 统计。
           # ⚠️ 2026-10-06 修：du 遇到不可读条目会往 stderr 报 "cannot access" 并以非 0
@@ -6507,6 +6511,8 @@ jobs:
           #   即触发 set -e，整个最终归档步骤当场 exit 1（实测：backups/ 下一个
           #   600 权限的畸形路径就让本轮归档全部中止，云端主包停在上一轮）。
           #   体积只是容量预检，个别条目读不到不该掀桌：只记录 stderr，取到数字就继续。
+          #   注：本函数仍可能因 set -u / set -o pipefail 透出非 0，调用点一律加 '|| true'
+          #   兜底（2026-10-13 故障隔离改造，见主包/rsstt 两处调用点）。
           du_sk() {
             local target="$1" prefix="${2:-}" out=""
             out=$(${prefix} du -sk "$target" 2>/tmp/du-sk.err) || true
@@ -6519,13 +6525,26 @@ jobs:
           cleanup_archive_outputs
           TMP_OPENCLAW_TAR="/tmp/openclaw-final.tar.gz"
 
-          openclaw_src_kb=$(du_sk "$HOME/.openclaw")
+          # 2026-10-13 故障隔离（主人「一个打包出错不应该影响之后的打包」）：
+          # 预检失败只放弃 **openclaw 主包这一项** —— 记结果 + 告警 + 跳过打包主体，
+          # 不再用 exit 1 掀掉整个归档 step（否则后面 zcode / zcode2api-data /
+          # AI gateway / rsstt 全部陪葬，而这次事故正是被 autoclaw 回推一个
+          # 非关键操作连带 disintegrate 的）。
+          openclaw_src_kb=$(du_sk "$HOME/.openclaw" || true)
+          MAINPKG_SKIP=""
           if [ -z "${openclaw_src_kb:-}" ] || [ "$openclaw_src_kb" -le 0 ]; then
             echo "❌ final openclaw archive preflight: unable to calculate source size" >&2
-            exit 1
+            MAINPKG_SKIP="源目录体积计算失败"
+          elif ! require_free_kb /tmp $((openclaw_src_kb + 1024 * 1024)) "final openclaw archive preflight"; then
+            MAINPKG_SKIP="/tmp 可用空间不足"
+          else
+            echo "OpenClaw 待归档目录大小: ${openclaw_src_kb}KB"
           fi
-          echo "OpenClaw 待归档目录大小: ${openclaw_src_kb}KB"
-          require_free_kb /tmp $((openclaw_src_kb + 1024 * 1024)) "final openclaw archive preflight"
+          if [ -n "$MAINPKG_SKIP" ]; then
+            # 预检不过 = 本项失败，但归档 step 继续
+            record_archive_result "openclaw.tar.gz" fail 0 "$MAINPKG_SKIP"
+            send_archive_alert "openclaw.tar.gz" "归档失败" "$MAINPKG_SKIP · 放弃本轮主包归档" "预检未通过，云端主包保持上一轮状态；其余归档项继续执行"
+          else
           openclaw_final_output=""
           # 2026-10-06：与周期归档循环共用同一把 /tmp/openclaw-archive.lock 互斥。
           # 此前是裸调用、不受锁保护，若循环实例因故仍存活（如 stop 失败），
@@ -6548,7 +6567,7 @@ jobs:
             # 永远小于瘦身前的旧包，主包冻结、每轮重复告警，2026-09-12）。
             if [ "$HEALTHY_RUN" = "1" ]; then
               final_new_size=$(stat -c%s "$TMP_OPENCLAW_TAR" 2>/dev/null || echo 0)
-              final_remote_size=$(rclone ls "$ARCHIVE_DEST" 2>/dev/null | awk '{s+=$1} END {print s+0}')
+              final_remote_size=$(rclone ls "$ARCHIVE_DEST" 2>/dev/null | awk '{s+=$1} END {print s+0}' || true)
               if [ "$final_remote_size" -gt 0 ] && [ "$final_new_size" -lt "$((final_remote_size * 60 / 100))" ]; then
                 echo "ℹ️ 体积较云端下降超 40%（new=${final_new_size}B remote=${final_remote_size}B），已通过完整性校验，正常覆盖"
               fi
@@ -6577,19 +6596,22 @@ jobs:
             record_archive_result "openclaw.tar.gz" fail 0 "归档失败 · 退出码 $rc"
             send_archive_alert "openclaw.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${openclaw_final_output:-归档脚本无输出}"
           fi
+          fi
 
           echo "4b. Final archive of ZCode personal data (~/.zcode cli/ + v2/)..."
           if [ -d "$HOME/.zcode/cli" ] || [ -d "$HOME/.zcode/v2" ] || [ -d "$HOME/.zcode/server" ]; then
             TMP_ZCODE_FINAL_TAR="/tmp/zcode-final.tar.gz"
             if zcode_final_output=$(flock -w 600 -E 200 /tmp/openclaw-archive.lock timeout 40m bash /tmp/create-zcode-archive.sh "$TMP_ZCODE_FINAL_TAR" 2>&1); then
               zcode_final_new_size=$(stat -c%s "$TMP_ZCODE_FINAL_TAR" 2>/dev/null || echo 0)
-              zcode_final_remote_size=$(rclone ls "dropbox:self-hosted/zcode.tar.gz" 2>/dev/null | awk '{s+=$1} END {print s+0}')
+              zcode_final_remote_size=$(rclone ls "dropbox:self-hosted/zcode.tar.gz" 2>/dev/null | awk '{s+=$1} END {print s+0}' || true)
               # 体积骤降只记录、不拦截（口径同周期归档）：完整性由 create-zcode-archive.sh
               # 的 db.sqlite 校验把关，不再拿云端现有包当基准。
               if [ "$zcode_final_remote_size" -gt 0 ] && [ "$zcode_final_new_size" -lt "$((zcode_final_remote_size * 60 / 100))" ]; then
                 echo "ℹ️ zcode 体积较云端下降超 40%（new=${zcode_final_new_size}B remote=${zcode_final_remote_size}B），已通过完整性校验，正常覆盖"
               fi
-              upload_final_archive "zcode.tar.gz" "$TMP_ZCODE_FINAL_TAR" "dropbox:self-hosted/zcode.tar.gz"
+              # 上传失败已在本函数内 record + alert 并 return 1；此处 || true 防止
+              # 单包失败被 set -e 放大成整步 exit（2026-10-13 故障隔离）
+              upload_final_archive "zcode.tar.gz" "$TMP_ZCODE_FINAL_TAR" "dropbox:self-hosted/zcode.tar.gz" || true
             else
               rc=$?
               echo "⚠️ final zcode.tar.gz archive failed (rc=$rc): ${zcode_final_output}"
@@ -6614,7 +6636,9 @@ jobs:
             if z2a_final_output=$(tar -czf "$TMP_Z2A_FINAL_TAR" -C "$Z2A_RUN_DIR" .env data 2>&1) \
               && [ -s "$TMP_Z2A_FINAL_TAR" ]; then
               z2a_final_size=$(stat -c%s "$TMP_Z2A_FINAL_TAR" 2>/dev/null || echo 0)
-              upload_final_archive "zcode2api-data.tar.gz" "$TMP_Z2A_FINAL_TAR" "dropbox:self-hosted/zcode2api-data.tar.gz"
+              # 上传失败已在本函数内 record + alert 并 return 1；此处 || true 防止
+              # 单包失败被 set -e 放大成整步 exit（2026-10-13 故障隔离）
+              upload_final_archive "zcode2api-data.tar.gz" "$TMP_Z2A_FINAL_TAR" "dropbox:self-hosted/zcode2api-data.tar.gz" || true
             else
               rc=$?
               echo "⚠️ final zcode2api-data.tar.gz archive failed (rc=$rc): ${z2a_final_output}"
@@ -6643,11 +6667,12 @@ jobs:
           case "$ACTIVE_BACKEND" in
             clirelay)
               echo "生效后端: CliRelay → Final 归档 CliRelay.tar.gz"
-              if [ -f "$CLIRELAY_DIR/docker-compose.yml" ] || [ -f /tmp/local_CliRelay/docker-compose.yml ]; then
+              if [ -f "${CLIRELAY_DIR:-/tmp/local_CliRelay}/docker-compose.yml" ] || [ -f /tmp/local_CliRelay/docker-compose.yml ]; then
                 CLIRELAY_FINAL_TAR="/tmp/CliRelay-final.tar.gz"
                 if clirelay_final_output=$(flock -w 600 -E 200 /tmp/openclaw-archive.lock timeout 40m bash /tmp/create-clirelay-archive.sh "$CLIRELAY_FINAL_TAR" 2>&1); then
                   actual_size=$(stat -c%s "$CLIRELAY_FINAL_TAR" 2>/dev/null || echo 0)
-                  upload_final_archive "CliRelay.tar.gz" "$CLIRELAY_FINAL_TAR" "dropbox:self-hosted/CliRelay.tar.gz" "$MIN_SIZE"
+                  # 上传失败已在本函数内 record + alert 并 return 1；|| true 防 set -e 放大
+                  upload_final_archive "CliRelay.tar.gz" "$CLIRELAY_FINAL_TAR" "dropbox:self-hosted/CliRelay.tar.gz" "$MIN_SIZE" || true
                 else
                   rc=$?
                   echo "⚠️ final CliRelay.tar.gz archive failed (rc=$rc): ${clirelay_final_output}"
@@ -6666,7 +6691,8 @@ jobs:
                 CLIPROXYAPI_FINAL_TAR="/tmp/CLIProxyAPI-final.tar.gz"
                 if cliproxyapi_final_output=$(flock -w 600 -E 200 /tmp/openclaw-archive.lock timeout 40m bash /tmp/create-cliproxyapi-archive.sh "$CLIPROXYAPI_FINAL_TAR" 2>&1); then
                   actual_size=$(stat -c%s "$CLIPROXYAPI_FINAL_TAR" 2>/dev/null || echo 0)
-                  upload_final_archive "CLIProxyAPI.tar.gz" "$CLIPROXYAPI_FINAL_TAR" "dropbox:self-hosted/CLIProxyAPI.tar.gz" "$MIN_SIZE"
+                  # 上传失败已在本函数内 record + alert 并 return 1；|| true 防 set -e 放大
+                  upload_final_archive "CLIProxyAPI.tar.gz" "$CLIPROXYAPI_FINAL_TAR" "dropbox:self-hosted/CLIProxyAPI.tar.gz" "$MIN_SIZE" || true
                 else
                   rc=$?
                   echo "⚠️ final CLIProxyAPI.tar.gz archive failed (rc=$rc): ${cliproxyapi_final_output}"
@@ -6685,7 +6711,8 @@ jobs:
                 OMNIROUTE_FINAL_TAR="/tmp/OmniRoute-final.tar.gz"
                 if omniroute_final_output=$(flock -w 600 -E 200 /tmp/openclaw-archive.lock timeout 40m bash /tmp/create-omniroute-archive.sh "$OMNIROUTE_FINAL_TAR" 2>&1); then
                   actual_size=$(stat -c%s "$OMNIROUTE_FINAL_TAR" 2>/dev/null || echo 0)
-                  upload_final_archive "OmniRoute.tar.gz" "$OMNIROUTE_FINAL_TAR" "dropbox:self-hosted/OmniRoute.tar.gz" "$MIN_SIZE"
+                  # 上传失败已在本函数内 record + alert 并 return 1；|| true 防 set -e 放大
+                  upload_final_archive "OmniRoute.tar.gz" "$OMNIROUTE_FINAL_TAR" "dropbox:self-hosted/OmniRoute.tar.gz" "$MIN_SIZE" || true
                 else
                   rc=$?
                   echo "⚠️ final OmniRoute.tar.gz archive failed (rc=$rc): ${omniroute_final_output}"
@@ -6704,18 +6731,26 @@ jobs:
           if [ -d /tmp/local_rsstt ]; then
             echo "=== local rss-to-telegram tree before archive ==="
             find /tmp/local_rsstt -maxdepth 4 | sort || true
-            rsstt_src_kb=$(du_sk /tmp/local_rsstt sudo)
+            # 2026-10-13 故障隔离（同主包口径）：rsstt 预检失败只放弃本项，不掀桌
+            rsstt_src_kb=$(du_sk /tmp/local_rsstt sudo || true)
+            RSSTT_SKIP=0
             if [ -z "${rsstt_src_kb:-}" ] || [ "$rsstt_src_kb" -le 0 ]; then
               echo "❌ final rsstt archive preflight: unable to calculate source size" >&2
-              exit 1
+              RSSTT_SKIP=1
+            elif ! require_free_kb /tmp $((rsstt_src_kb + 512 * 1024)) "final rsstt archive preflight"; then
+              RSSTT_SKIP=1
+            else
+              echo "rsstt 待归档目录大小: ${rsstt_src_kb}KB"
             fi
-            echo "rsstt 待归档目录大小: ${rsstt_src_kb}KB"
-            require_free_kb /tmp $((rsstt_src_kb + 512 * 1024)) "final rsstt archive preflight"
+            if [ "$RSSTT_SKIP" = "1" ]; then
+              record_archive_result "rsstt.tar.gz" fail 0 "预检未通过（体积计算或 /tmp 空间）"
+              send_archive_alert "rsstt.tar.gz" "归档失败" "预检未通过 · 放弃本轮 rsstt 归档" "云端 rsstt.tar.gz 保持上一轮状态；其余归档项已执行"
+            else
             sudo rm -f /tmp/rsstt.tar.gz
             rsstt_tar_output=""
             # 目录里只剩占位 .keep = 本轮容器没起来（凭据缺失/启动失败）：
             # 此时打包上传只会用空包覆盖云端 rsstt.tar.gz，直接跳过并说明原因
-            rsstt_data_files=$(sudo find /tmp/local_rsstt -type f ! -name '.keep' 2>/dev/null | wc -l)
+            rsstt_data_files=$(sudo find /tmp/local_rsstt -type f ! -name '.keep' 2>/dev/null | wc -l || true)
             if [ "$((rsstt_data_files + 0))" -lt 1 ]; then
               echo "⚠️ rss-to-telegram 本轮没有产生数据文件，跳过归档，云端 rsstt.tar.gz 保持原状"
               record_archive_result "rsstt.tar.gz" skip 0 "本轮未产生数据"
@@ -6727,7 +6762,8 @@ jobs:
               if rsstt_validate_output=$(sudo tar -tzf /tmp/rsstt.tar.gz 2>&1); then
                 actual_size=$(stat -c%s /tmp/rsstt.tar.gz 2>/dev/null || echo 0)
                 echo "rsstt archive size: ${actual_size} bytes"
-                upload_final_archive "rsstt.tar.gz" "/tmp/rsstt.tar.gz" "dropbox:self-hosted/rsstt.tar.gz" "$MIN_SIZE"
+                # 上传失败已在本函数内 record + alert 并 return 1；|| true 防 set -e 放大
+                upload_final_archive "rsstt.tar.gz" "/tmp/rsstt.tar.gz" "dropbox:self-hosted/rsstt.tar.gz" "$MIN_SIZE" || true
               else
                 rc=$?
                 echo "⚠️ final rsstt.tar.gz validation failed (rc=$rc): ${rsstt_validate_output}"
@@ -6740,6 +6776,7 @@ jobs:
               record_archive_result "rsstt.tar.gz" fail 0 "归档失败 · 退出码 $rc"
               send_archive_alert "rsstt.tar.gz" "归档失败 · 退出码 $rc" "tar 创建失败" "${rsstt_tar_output:-无输出}"
             fi
+          fi
           else
             echo "⚠️ /tmp/local_rsstt 不存在，跳过 rss-to-telegram 归档"
             record_archive_result "rsstt.tar.gz" fail 0 "数据目录未初始化"
