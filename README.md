@@ -76,6 +76,7 @@ proxy-speedtest/            测速结果数据
 | **rclone** | `rclone_flags.sh` | rclone 参数单点定义（`RCLONE_*_FLAGS`） |
 | | `rclone_query.sh` | 查询与过滤解析（`size --json`、`check`、exclude 提取） |
 | **openlist** | `openlist_api.sh` | 管理面登录换 token、服务就绪等待 |
+| | `openlist_storage_check.sh` | 存储账号失效巡检与 Telegram 告警（`storage/list` 全量真值 + 冷却/首次发现记账 `storage_alert.json` + Crypt 派生影响面；`check_openlist_storage_health`） |
 | | `openlist_driver.sh` | 驱动刷新、健康预检、缓存刷新、truth-check |
 | **sync** | `sync_engine.sh` | 核心同步引擎（编排 + 423/8005 重试） |
 | | `sync_marker.sh` | 同步标记持久化（跳过、黑名单、修复清单）+ 修复记录生命周期（carry-forward 继承、已对齐收尾清理、父级守卫提取、**游标拒写分支立即持久化修复记录**——防「fold 后拒写丢记录 → 产物被删 → 重 fold」循环）+ **marker 打包外置备份**（`backup_sync_state_to_dropbox`） |

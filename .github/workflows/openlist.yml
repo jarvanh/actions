@@ -389,6 +389,24 @@ jobs:
             exit 1
           fi
 
+      # ===== 存储账号失效巡检 → Telegram 告警 =====
+      # 为什么必须放这里（容器就绪之后、任何同步对开跑之前）:
+      #   网盘登录态失效历来只在**同步进行中**才暴露（_pre_webdav_health_check /
+      #   _openlist_api_health_check / 容器日志 8005），三类判据都只让单个同步对
+      #   跳过、不发通知，读者拿不到一份"现在到底哪些存储坏了"的完整清单。
+      #   OpenList 把驱动 Init 的失败原因持久化进 x_storages.status
+      #   （internal/op/storage.go: Init 失败 → SetStatus(err.Error()) 并写库），
+      #   因此开跑前读一次 /api/admin/storage/list 就是全量真值。
+      # 判据与告警实现见 openlist_storage_check.sh；带冷却与首次发现记账
+      #   （storage_alert.json 落在 SYNC_STATE_DIR，随收尾镜像 + 外置打包备份），
+      #   否则每小时 cron + 自续接力会把同一个失效账号刷成一整页。
+      # 本条 step 自身恒不失败（fire-and-forget），不阻断同步。
+      - name: 存储账号失效巡检（Telegram 告警）
+        run: |
+          source "$GITHUB_WORKSPACE/.github/scripts/openlist/load_all.sh"
+          # 恒不失败: 告警是附加能力，不能因为它让整轮同步 exit 1
+          check_openlist_storage_health || true
+
       - name: 安装 cloudflared 并载入隧道凭据
         run: |
           sudo mkdir -p ~/.cloudflared
