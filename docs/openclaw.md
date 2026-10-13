@@ -329,8 +329,8 @@ pooled dispatcher ... host.docker.internal:8318` ×11，而 autoclaw 自身 3~4s
 | 变量 | 默认 | 改为 | 理由 |
 |---|---|---|---|
 | `OMNIROUTE_DIRECT_HEADERS_TIMEOUT_MS` | 30s | **150s** | 等响应头比 SSE 更前置；实测 85s |
-| `STREAM_READINESS_TIMEOUT_MS` | 80s | **150s** | 覆盖 61s 实测 + 排队抖动 |
-| `STREAM_READINESS_MAX_TIMEOUT_MS` | 180s | **420s** | 大/重请求自适应上限 |
+| `STREAM_READINESS_TIMEOUT_MS` | 80s | **600s** | step-5-preview 深度思考首字 p90 虽仅 21s，但实测 max 207s、同体量有 111s 成功先例；150s 会误杀长尾慢请求 |
+| `STREAM_READINESS_MAX_TIMEOUT_MS` | 180s | **900s** | 大/重请求自适应上限，与 AGENT_GOAL 900s 对齐 |
 | `OMNIROUTE_AGENT_GOAL_READINESS_MAX_TIMEOUT_MS` | 600s | **900s** | `/goal` agent 长跑 |
 | `FETCH_TIMEOUT_MS` | 600s | **900s** | 上游总超时（长上下文+换号重试） |
 | `STREAM_IDLE_TIMEOUT_MS` | 600s | **900s** | 流式静默上限 |
