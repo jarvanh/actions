@@ -3960,6 +3960,13 @@ jobs:
           if [ "$AC_OK" = "1" ] && [ -n "${TS_FQDN:-}" ]; then
             sudo tailscale serve --bg --http=8321 "http://127.0.0.1:${AUTOCLAW_PORT}" 2>/dev/null \
               && echo "autoclaw 反代: http://${TS_FQDN}:8321/v1"
+            # 内置状态面板（/dashboard | / | /ui 均同一页）：2026-10-13 补。
+            # 端口 8083 —— 延续后台端口段（trae 8080 / zcode 8081 / wb 8082），
+            # 看板 admin_entries 第 4 项指的就是这个地址，两者必须一致。
+            # 该面板免鉴权（实测无 key 即 200），收敛靠 tailscale 内网；
+            # 主人 2026-10-13 明确「不要密码」，故不加 key 参数。
+            sudo tailscale serve --bg --http=8083 "http://127.0.0.1:${AUTOCLAW_PORT}" 2>/dev/null \
+              && echo "autoclaw 控制台: http://${TS_FQDN}:8083/"
           fi
 
           # 5. TG 通知（版式对齐 qingyan/zcode2api：失败走 alert 档）
