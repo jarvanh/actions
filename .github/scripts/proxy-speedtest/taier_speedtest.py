@@ -539,6 +539,36 @@ def _rtt_to_ms(rtt):
     return float(m.group(1)) if m else 0
 
 
+def to_gist_result_row(r):
+    """把一条测速结果投影成订阅判定层（speedtest_common）要的形状。
+
+    ⚠️ ok 必须显式投影（2026-10-18 修）：10-12 起共享层 `count_qualified_nodes`
+    要求 `ok=True` 才计入达标（8ada680，修「可用 0 个却导出 24 个达标节点」），
+    而本函数原先**不带**该字段 ⇒ 每个节点都按 `item.get('ok', False)` 读出
+    False ⇒ 整轮「测出了速度却 qualified=0、订阅不上传」且**不报错**。
+    实例 run 39109181078（2026-10-18）：23 个节点里 8 个上行达标（最高
+    134.22 Mbps）、10+ 个下行达标，日志却 `subscription_policy qualified=0`
+    / `gist_skipped`。taier 轮自 10-12 03:39 起每 4 小时一轮全部白跑，
+    至 10-18 已六天。
+    speedtest.py 投影同病同修；回归钉在 tests/test_projection_ok_field.py。
+    """
+    return {
+        'name': r.get('name', ''),
+        'source_entry': r.get('source_entry') or {},
+        # proxy_obj 也带上：它是兜底来源。⚠️ source_entry 匹配不上时，proxy_obj 往往是
+        # mihomo provider 的**运行时对象**（没有 server/port），导出层会按「无可用配置」挡掉
+        # ——那是对的，写出装不上的订阅更糟。匹配不上的根因（source_mapping 的 YAML 分支被
+        # 一行看似链接的节点名误跳过）已于 2026-09-26 修在 build_source_mapping，见
+        # speedtest_common.node_proxy_config 与 speedtest_gitee.build_source_mapping 的说明。
+        'proxy_obj': r.get('proxy_obj') or {},
+        'mode': 'download',
+        'download_mibs': (r.get('down') or 0) / 8.388608,
+        'upload_mibs': (r.get('up') or 0) / 8.388608,
+        'latency_ms': _rtt_to_ms(r.get('rtt')),
+        'ok': bool(r.get('ok')),
+    }
+
+
 def parse_taier_output(text: str):
     """解析 stdout → 出口 IP/位置、首行结果（延迟/上行/下行）、原始表格。
 
@@ -1153,20 +1183,9 @@ def _run():
     # 默认按上行判定；上行达标数 < 回退门槛（默认 3）且下行更多时自动改用下行。
     gist_res = None
     gist_error = ''
-    gist_results = [{
-        'name': r.get('name', ''),
-        'source_entry': r.get('source_entry') or {},
-        # proxy_obj 也带上：它是兜底来源。⚠️ source_entry 匹配不上时，proxy_obj 往往是
-        # mihomo provider 的**运行时对象**（没有 server/port），导出层会按「无可用配置」挡掉
-        # ——那是对的，写出装不上的订阅更糟。匹配不上的根因（source_mapping 的 YAML 分支被
-        # 一行看似链接的节点名误跳过）已于 2026-09-26 修在 build_source_mapping，见
-        # speedtest_common.node_proxy_config 与 speedtest_gitee.build_source_mapping 的说明。
-        'proxy_obj': r.get('proxy_obj') or {},
-        'mode': 'download',
-        'download_mibs': (r.get('down') or 0) / 8.388608,
-        'upload_mibs': (r.get('up') or 0) / 8.388608,
-        'latency_ms': _rtt_to_ms(r.get('rtt')),
-    } for r in results]
+    # 投影走模块级 to_gist_result_row（回归测试直接钉这条线上路径）：旧的内联
+    # 写法漏投影 ok 字段，线上白跑六天且不报错，见该函数 docstring。
+    gist_results = [to_gist_result_row(r) for r in results]
     bundle = build_subscription_bundle(gist_results, resolve_subscription_policy(env))
     log_progress('subscription_policy', metric=bundle['metric'], qualified=bundle['qualified'],
                  min_megabit=bundle['min_megabit'], min_nodes=bundle['min_nodes'],

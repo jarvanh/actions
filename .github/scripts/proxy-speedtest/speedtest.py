@@ -958,19 +958,9 @@ def main():
     gist_res = None
     bundle = None
     try:
-        gist_results = []
-        for r in results:
-            dl = (r.get('download') or {}).get('mibps')
-            ul = (r.get('upload') or {}).get('mibps')
-            lat = (r.get('latency') or {}).get('median_ms')
-            gist_results.append({
-                'name': r.get('name', ''),
-                'source_entry': r.get('source_entry') or {},
-                'mode': r.get('mode', 'download'),
-                'download_mibs': dl if isinstance(dl, (int, float)) else 0,
-                'upload_mibs': ul if isinstance(ul, (int, float)) else 0,
-                'latency_ms': lat if isinstance(lat, (int, float)) else 0,
-            })
+        # 投影走模块级 to_gist_result_row（回归测试直接钉这条线上路径）：旧的内联
+        # 写法漏投影 ok 字段，线上白跑六天且不报错，见该函数 docstring。
+        gist_results = [to_gist_result_row(r) for r in results]
         # 达标策略（阈值 / 判定指标 / 最少节点数）与四套共用，见 resolve_subscription_policy：
         # 默认按上行判定；上行达标数 < 回退门槛（默认 3）且下行更多时自动改用下行。
         bundle = build_subscription_bundle(gist_results, resolve_subscription_policy(env))
@@ -1032,6 +1022,31 @@ def _result_metric_item(r):
         'upload_mibs': (r.get('upload') or {}).get('mibps'),
         'download_mibs': (r.get('download') or {}).get('mibps'),
         'latency_ms': (r.get('latency') or {}).get('median_ms'),
+    }
+
+
+def to_gist_result_row(r):
+    """把一条测速结果投影成订阅判定层（speedtest_common）要的形状。
+
+    ⚠️ ok 必须显式投影（2026-10-18 修）：10-12 起共享层 `count_qualified_nodes`
+    要求 `ok=True` 才计入达标（8ada680，修「可用 0 个却导出 24 个达标节点」），
+    而原内联投影**不带**该字段 ⇒ 每个节点都按 `item.get('ok', False)` 读出
+    False ⇒ 整轮「测出了速度却 qualified=0、订阅不上传」且**不报错**。
+    实例见 taier_speedtest.to_gist_result_row 的 docstring（run 39109181078：
+    8 个上行达标却 qualified=0，10-12~10-18 六天白跑）。本套（镜像站口径）同病同修。
+    回归钉在 tests/test_projection_ok_field.py。
+    """
+    dl = (r.get('download') or {}).get('mibps')
+    ul = (r.get('upload') or {}).get('mibps')
+    lat = (r.get('latency') or {}).get('median_ms')
+    return {
+        'name': r.get('name', ''),
+        'source_entry': r.get('source_entry') or {},
+        'mode': r.get('mode', 'download'),
+        'download_mibs': dl if isinstance(dl, (int, float)) else 0,
+        'upload_mibs': ul if isinstance(ul, (int, float)) else 0,
+        'latency_ms': lat if isinstance(lat, (int, float)) else 0,
+        'ok': bool(r.get('ok')),
     }
 
 
