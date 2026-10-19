@@ -747,6 +747,15 @@ jobs:
           # 面板密码独立于 API Key（PBKDF2 落盘 settings.json），仅 tailnet 内可访问。
           sudo tailscale serve --bg --http=8084 http://127.0.0.1:8790
           echo "qoder2api 看板: http://${TS_FQDN}:8084/（API 网关: /v1）"
+          # OmniRoute AI API 无端口 HTTPS 入口：20128 → 443。
+          # 公网 ai-api.derrick.eu.org 走 Cloudflare，有 100s 硬超时；tailnet 内这条
+          # 前面没有 Cloudflare，慢请求（step-5-preview 深度思考实测单请求 18~330s）
+          # 走这里不撞墙。证书由 tailscale 自动签发、客户端免 -k（实测 TLS 校验通过）。
+          # ⚠️ 若节点名变更导致证书签发失败，不能让整步挂掉，故加兜底 echo。
+          # 网关 Control UI 另走 8085（网关自身无 /v1 路由，443 不能指 18789）。
+          sudo tailscale serve --bg --https=443 http://127.0.0.1:20128 2>/dev/null \
+            || echo "⚠️ 443 HTTPS serve 失败（多为证书签发/节点名问题），HTTP 端口 serve 不受影响"
+          echo "OmniRoute AI API: https://${TS_FQDN}/v1（API Key: CLIPROXYAPI_API_KEY）"
           # 2026-09-30 曾尝试把 trae 挂到 80 端口的 /trae 子路径（依赖 trae2api commit
           # a75ec3e 的前端前缀自适应），后已整体回退：a75ec3e 被 revert（镜像
           # v2026.09.30-46abeff），zcode 也从 80 挪到 8081，与 trae 端口相邻。
