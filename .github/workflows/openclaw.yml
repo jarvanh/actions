@@ -279,6 +279,12 @@ jobs:
                 if command -v pigz >/dev/null 2>&1; then pigz -dc "$1" 2>/dev/null; else gunzip -c "$1" 2>/dev/null; fi | tar -xf - -C "$2" .openclaw/openclaw.json 2>/dev/null
               )
             }
+            tar_extract_env() {
+              (
+                set +o pipefail
+                if command -v pigz >/dev/null 2>&1; then pigz -dc "$1" 2>/dev/null; else gunzip -c "$1" 2>/dev/null; fi | tar -xf - -C "$2" .openclaw/.env 2>/dev/null
+              )
+            }
             config_precheck_ok() {
               # 用法: config_precheck_ok <tar.gz 路径> <工作目录（抽包落点）>
               local tar="$1" workdir="$2"
@@ -288,17 +294,41 @@ jobs:
               if [ ! -s "$workdir/.openclaw/openclaw.json" ]; then
                 echo "FAIL (config missing)"; return 1
               fi
-              if OPENCLAW_CONFIG_PATH="$workdir/.openclaw/openclaw.json" openclaw config validate >/dev/null 2>&1; then
-                echo "PASS"; return 0
+              if ! OPENCLAW_CONFIG_PATH="$workdir/.openclaw/openclaw.json" openclaw config validate >/dev/null 2>&1; then
+                echo "FAIL (config invalid)"; return 1
               fi
-              echo "FAIL (config invalid)"; return 1
+              # 2026-10-19 事故（run 39229141269）：config validate 不校验 SecretRef 可解析性，
+              # 「新增 telegram 账号但 env 变量没进 secrets allowlist」的配置照样 validate
+              # PASS，网关却在 secrets 激活阶段恒崩（required secrets are unavailable）→
+              # 自愈链（doctor / 回退同版本重装）对该故障无出口，反复恢复同一份坏主包死循环。
+              # 补 secrets audit 门：unresolved>0 即判不合格 → 走 revision 回退，
+              # 直到找到「能真正启动」的历史版本为止。
+              # 必须把包内 .env 一并抽出：audit 从 $OPENCLAW_STATE_DIR/.env 取值，
+              # 缺了会把全部 env 引用误判成 unresolved（实测 17 个），错杀健康历史包。
+              # 老 revision 没有 .env 也不会错杀：老式明文配置不依赖 env 引用，
+              # audit 仍给 unresolved=0。audit 自身崩溃（exit 1 等）按不合格处理 ——
+              # 宁可回退，不可放行必坏包。
+              tar_extract_env "$tar" "$workdir" || true
+              local audit_out audit_rc unresolved_n
+              if audit_out="$(OPENCLAW_STATE_DIR="$workdir/.openclaw" OPENCLAW_CONFIG_PATH="$workdir/.openclaw/openclaw.json" timeout 120 openclaw secrets audit 2>&1)"; then
+                echo "PASS"
+                return 0
+              fi
+              audit_rc=$?
+              unresolved_n="$(printf '%s' "$audit_out" | grep -oE 'unresolved=[0-9]+' | head -n 1 | cut -d= -f2 || true)"
+              if [ -n "${unresolved_n:-}" ] && [ "${unresolved_n}" -gt 0 ]; then
+                echo "FAIL (secrets unresolved=${unresolved_n})"
+                return 1
+              fi
+              echo "FAIL (secrets audit rc=${audit_rc})"
+              return 1
             }
             CONFIG_CHECK_DIR="$(mktemp -d /tmp/openclaw-config-check.XXXXXX)"
             tarball_usable=0
             _verdict="$(config_precheck_ok "$TMP_OPENCLAW_TAR" "$CONFIG_CHECK_DIR")"
             if [ "$archive_kb" -ge "$OPENCLAW_TARBALL_MIN_KB" ] && listing_has_config "$TMP_OPENCLAW_TAR" && [[ "$_verdict" == PASS* ]]; then
               tarball_usable=1
-              echo "✅ 云端主包结构+配置预检通过（$_verdict）"
+              echo "✅ 云端主包结构+配置+secrets 预检通过（$_verdict）"
             else
               echo "⚠️ 云端主包异常（size=${archive_kb}KB 要求 ≥${OPENCLAW_TARBALL_MIN_KB}KB / 含 openclaw.json / 配置预检=$_verdict），尝试 revision 回退..."
               DBX_TOKEN=$(rclone config show dropbox 2>/dev/null | sed -n 's/^token = .*"access_token":"\([^"]*\)".*/\1/p' | tail -1)
