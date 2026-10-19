@@ -3290,7 +3290,9 @@ jobs:
       # 部署方式：官方预构建 GHCR 多架构镜像（ghcr.io/shuishuipingan/qoder2api-hub），
       # 与 trae2api 同为容器形态（restart: unless-stopped 覆盖崩溃自愈，不纳入 systemd --user，
       # Stop 段也不显式停——容器随 VM 生命周期存续，下一轮 docker rm -f 幂等接管）。
-      # 端口 8790（上游默认，仅绑 127.0.0.1）；看板走 Tailscale serve 8084（见 Tailscale 段）。
+      # 端口 8790（上游默认，绑 0.0.0.0 —— OmniRoute 经 host.docker.internal:8790
+      # 以 runner-qoder 节点接入本网关，127.0.0.1 绑定对 docker 网桥不可达；
+      # 与 trae2api 18080 同款形态）；看板走 Tailscale serve 8084（见 Tailscale 段）。
       # 数据直写 Dropbox fuse：/dropbox/self-hosted/qoder2api/{accounts,usage}——
       # 账号池/用量/调度状态全是 JSON/JSONL（无 SQLite），fuse 挂载点无锁兼容问题，
       # 无需本地盘中转；持久化白名单内（A 类），周期归档/收尾归档均无需登记（对齐 trae2api）。
@@ -3392,7 +3394,7 @@ jobs:
           docker rm -f qoder2api >/dev/null 2>&1 || true
           if ! docker run -d --name qoder2api \
             --restart unless-stopped \
-            -p 127.0.0.1:${QODER_PORT}:8790 \
+            -p ${QODER_PORT}:8790 \
             -e HOST=0.0.0.0 -e PORT=8790 -e TZ=Asia/Shanghai \
             -v "$QODER_DATA/accounts:/app/accounts" \
             -v "$QODER_DATA/usage:/app/usage" \
