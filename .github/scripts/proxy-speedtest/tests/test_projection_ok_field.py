@@ -43,6 +43,10 @@ def main():
     import speedtest as S
 
     pol = C.resolve_subscription_policy({})
+    # 显式 min_nodes=1 的策略：下面几组验的是「投影有没有漏 ok」这条回归线，与「最少传几个」
+    # 无关（新默认 10 的守卫由 test_subscription_metric.py 钉）。不足 10 个成功节点的一轮，
+    # 用默认 pol 时 text 为空是正确行为，不该让这组断言来验证。
+    pol_min1 = dict(pol, min_nodes=1)
     proxy = {'type': 'ss', 'server': 'hk.example.com', 'port': 443}
 
     # ── 1. 字段存在性：投影结果必须带 'ok'（坏的写法连键都没有，看不出异常）──
@@ -79,8 +83,13 @@ def main():
     bundle = C.build_subscription_bundle(taier_rows, pol)
     check(bundle['qualified'] == 8,
           f'taier：8 个上行达标节点全部计入（实际 {bundle["qualified"]}）')
-    check(bool((bundle['text'] or '').strip()),
-          'taier：订阅文本非空（不会再有 qualified=0/gist_skipped）')
+    check(bundle['min_nodes'] == 10,
+          f'taier：默认最少节点数 10（实际 {bundle["min_nodes"]}）')
+    check(not (bundle['text'] or '').strip(),
+          'taier：默认阈值下 8 < 10 ⇒ 不更新订阅（2026-10-19 新守卫生效）')
+    bundle_p1 = C.build_subscription_bundle(taier_rows, pol_min1)
+    check(bool((bundle_p1['text'] or '').strip()),
+          'taier：min_nodes=1 时订阅文本非空（不会再有 qualified=0/gist_skipped）')
 
     ss_rows = [S.to_gist_result_row({
         'name': f'MI-{i:02d}', 'ok': True, 'mode': 'push-only',
@@ -92,7 +101,10 @@ def main():
     bundle2 = C.build_subscription_bundle(ss_rows, pol)
     check(bundle2['qualified'] == 3,
           f'speedtest：3 个上行达标节点全部计入（实际 {bundle2["qualified"]}）')
-    check(bool((bundle2['text'] or '').strip()), 'speedtest：订阅文本非空')
+    check(bundle2['text'].count('name:') == 0,
+          'speedtest：默认阈值下 3 < 10 ⇒ 不导出（新守卫）')
+    bundle2_p1 = C.build_subscription_bundle(ss_rows, pol_min1)
+    check(bool((bundle2_p1['text'] or '').strip()), 'speedtest：订阅文本非空')
 
     # ── 3. 反向：失败/default 节点仍必须被挡住（ok=False 不得进订阅）──
     print('== 3. 反向：失败节点不得进订阅（10-12 修的口径不能被投影环节绕开）==')
@@ -124,8 +136,11 @@ def main():
     })]
     b4 = C.build_subscription_bundle(mixed, pol)
     check(b4['qualified'] == 1, f'混合轮达标 1 个（实际 {b4["qualified"]}）')
-    check(b4['text'].count('name:') == 1,
-          f'导出 YAML 只含 1 个成功节点（实际 {b4["text"].count("name:")}）')
+    check(b4['text'].count('name:') == 0,
+          f'默认阈值下 1 < 10 ⇒ 不导出（实际 {b4["text"].count("name:")}）')
+    b4_p1 = C.build_subscription_bundle(mixed, pol_min1)
+    check(b4_p1['text'].count('name:') == 1,
+          f'min_nodes=1 时导出 YAML 只含 1 个成功节点（实际 {b4_p1["text"].count("name:")}）')
 
     # ── 5. 病根钉死：漏 ok 字段的投影必须让判定归零（证明这道闸真的有效）──
     print('== 5. 病根回归：漏 ok 的旧写法会让判定归零 ==')

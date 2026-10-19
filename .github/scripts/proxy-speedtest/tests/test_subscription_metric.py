@@ -60,6 +60,9 @@ def main():
     check(pol['metric'] == 'upload', '默认判定指标是 upload')
     check(pol['metric_fallback_min_nodes'] == 3,
           f"默认回退门槛 3（实际 {pol['metric_fallback_min_nodes']}）")
+    check(pol['min_nodes'] == 10,
+          f'默认最少节点数 10（实际 {pol["min_nodes"]}；2026-10-19 主人定：'
+          '源枯竭时 qualified=1 也照旧上传，订阅里只剩一个节点不如不更新）')
 
     m, q, fb = C.resolve_subscription_metric(results, pol)
     check(m == 'download', f'上行只有 1 个达标（< 3）⇒ 回退到 download（实际 {m}）')
@@ -143,15 +146,22 @@ def main():
     # 与原始配置都还在 ⇒ 旧口径把它们当「达标」导出，订阅段写「✅ 达标 24 个」而
     # 通知标题是「⚠️ 没有节点测速成功」，自相矛盾且订阅内容全是不可信节点。
     failed = [orch_node(100.0, 100.0, ok=False) for _ in range(28)]
-    ok_nodes = [orch_node(100.0, 100.0, ok=True) for _ in range(3)]
+    ok_nodes = [orch_node(100.0, 100.0, ok=True) for _ in range(10)]
     mixed = failed + ok_nodes
-    check(C.count_qualified_nodes(mixed, 'upload', 10) == 3,
-          f'失败节点不计入达标：28 失败 + 3 成功 ⇒ 3（实际 {C.count_qualified_nodes(mixed, "upload", 10)}）')
+    check(C.count_qualified_nodes(mixed, 'upload', 10) == 10,
+          f'失败节点不计入达标：28 失败 + 10 成功 ⇒ 10（实际 {C.count_qualified_nodes(mixed, "upload", 10)}）')
     b7b = C.build_subscription_bundle(mixed, pol)
-    check(b7b['qualified'] == 3,
-          f'bundle 达标数 = 3（实际 {b7b["qualified"]}）')
-    check(b7b['text'].count('name:') == 3,
-          f'导出 YAML 只含 3 个成功节点（实际 {b7b["text"].count("name:")}）')
+    check(b7b['qualified'] == 10,
+          f'bundle 达标数 = 10（实际 {b7b["qualified"]}）')
+    check(b7b['text'].count('name:') == 10,
+          f'导出 YAML 只含 10 个成功节点，28 个失败的一个都不进（实际 {b7b["text"].count("name:")}）')
+    # 达标 10 = 默认最少节点数 ⇒ 刚好够上传；少一个（9 个）就按新口径不更新订阅
+    #   （2026-10-19 主人定：源枯竭时 qualified=1 也照旧上传，订阅里只剩一个
+    #    节点不如不更新——保留上一份多节点订阅更可用）
+    short = failed + ok_nodes[:9]
+    b7s = C.build_subscription_bundle(short, pol)
+    check(b7s['qualified'] == 9 and not b7s['text'].strip(),
+          f'达标 9 < 最少节点数 10 ⇒ 不上传订阅（实际 qualified={b7s["qualified"]}, text空={not b7s["text"].strip()}）')
     # 全失败一轮：达标 0 ⇒ min_nodes=1 不足 ⇒ 不上传订阅（text 为空）
     b7c = C.build_subscription_bundle(failed, pol)
     check(b7c['qualified'] == 0 and not b7c['text'].strip(),

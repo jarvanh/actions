@@ -155,13 +155,16 @@ def log_progress(stage: str, **kwargs):
 DEFAULT_MIN_MEGABIT = 10
 # 订阅导出策略默认值（全部可经 env / 仓库 Variables 覆盖，见 resolve_subscription_policy）：
 #   阈值（兆） / 判定指标（upload|download） / 上传订阅的最少节点数
-DEFAULT_MIN_NODES = 1
+# ⚠️ 最少节点数默认 10（2026-10-19 主人定）：源枯竭时曾出现 qualified=1 也照旧上传
+#   订阅，订阅里孤零零一个节点不如不更新——保留上一份多节点订阅更可用。
+DEFAULT_MIN_NODES = 10
 DEFAULT_SPEED_METRIC = 'upload'
 # 判定指标回退的门槛（达标数）：**主指标达标数 < 该值**才改判另一指标。
 # 为什么是独立配置而不是复用 min_nodes（2026-09-17 改回并解耦）：
-#   min_nodes 语义是「不足则不上传订阅」，默认 1。拿它当回退门槛 ⇒ 只要主指标有 1 个达标
-#   就永不回退，正好退回 run 34859505000 的事故（19 个节点下行全达标、上行只 1 个，
-#   却因 1 >= 1 不回退 ⇒ 订阅里只剩 1 个节点）。两个语义必须分开。
+#   min_nodes 语义是「不足则不上传订阅」，默认 10（源枯竭时 1 个节点不如不传，见上）。
+#   拿它当回退门槛 ⇒ 只要主指标有 1 个达标就永不回退，正好退回 run 34859505000 的事故
+#   （19 个节点下行全达标、上行只 1 个，却因 1 >= 1 不回退 ⇒ 订阅里只剩 1 个节点）。
+#   两个语义必须分开：回退门槛单列，不受 min_nodes 提高影响。
 #   默认 3 是「主指标只剩零星几个时才算不可信」：既能触发回退，又不至于有 1 个就换。
 DEFAULT_METRIC_FALLBACK_MIN_NODES = 3
 # 判定指标 → build_mihomo_yaml_text 的 speedtest_mode（push-only = 按上行判定）
@@ -284,7 +287,9 @@ def resolve_subscription_policy(env=None):
 
       PROXY_SPEEDTEST_MIN_MEGABIT   达标阈值（兆），默认 10
       PROXY_SPEEDTEST_SPEED_METRIC  判定指标：upload（默认，按上行）/ download（按下行）
-      PROXY_SPEEDTEST_MIN_NODES     上传订阅的最少节点数，默认 1
+      PROXY_SPEEDTEST_MIN_NODES     上传订阅的最少节点数，默认 10（2026-10-19 主人定：
+                                    源枯竭时 qualified=1 也照旧上传，订阅里只剩一个节点
+                                    不如不更新）
       PROXY_SPEEDTEST_METRIC_FALLBACK_MIN_NODES
                                     判定指标回退的达标数门槛，默认 3：**主指标达标数 < 该值**
                                     且另一指标达标数更多时，改判另一指标
@@ -378,7 +383,8 @@ def resolve_subscription_metric(results: list, policy: dict):
       2. `secondary > primary`（另一指标确实更多，避免「换了反而更少」）
 
     ⚠️ **门槛不能复用 `min_nodes`**（2026-09-14 事故 + 2026-09-17 解耦为独立配置）。
-    `min_nodes` 的语义是「不足则不上传订阅」、默认 1；一旦拿它当回退门槛，就会变成
+    `min_nodes` 的语义是「不足则不上传订阅」、默认 10（源枯竭时 1 个节点不如不传）；
+    一旦拿它当回退门槛，就会变成
     「主指标有 1 个达标就永不回退」——实测 run 34859505000：19 个节点里上行只有 1 个测得出
     （公开节点上行被限），下行 19 个全部达标，却因 `1 >= 1` 不回退 ⇒ **订阅里只剩 1 个节点**。
     所以回退门槛单列 `PROXY_SPEEDTEST_METRIC_FALLBACK_MIN_NODES`（默认 3），
