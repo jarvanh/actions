@@ -1044,7 +1044,7 @@ jobs:
           AI_BACKEND_INPUT: ${{ inputs.ai_backend || 'auto' }}
           # 归档存在但恢复失败→bootstrap 空库时发 tier=alert 告警（P0 加固 2026-10-11）
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TELEGRAM_BOT_TOKEN_ALERT: ${{ secrets.TELEGRAM_BOT_TOKEN_ALERT }}
           TELEGRAM_CHAT_ID_ALERT: ${{ secrets.TELEGRAM_CHAT_ID_ALERT }}
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -6498,6 +6498,24 @@ jobs:
             echo "✅ autoclaw-proxy 已停止"
           fi
 
+          # 停服通知（口径对齐 zcode2api/qingyan/workbuddy 的 3b/3c/3d）：
+          # 每轮收尾都发，与下一轮的「已就绪」配对，肉眼可确认服务生命周期闭环。
+          # 2026-10-19 补 —— 此前四个本地网关里只有 autoclaw 只 echo 不发通知，
+          # 服务被停这件事在主对话里无人知晓（仅剩启动步骤的失败告警可见）。
+          if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+            _m=""
+            if [ "$AC_STILL_RUNNING" = "1" ]; then
+              tg_add_title _m "⚠️ autoclaw-proxy 已停止 · 进程残留"
+              tg_add_kv _m "结论" "强制结束后仍有进程残留"
+            else
+              tg_add_title _m "⛔ autoclaw-proxy 已停止"
+              tg_add_kv _m "结论" "服务已退出 · 数据目录保持原状"
+            fi
+            tg_add_path _m "端口" "8322"
+            tg_add_footer _m
+            send_tg "$_m" alert || true
+          fi
+
           # 3c. zcode2api：同为宿主进程（非容器），不会随 job 结束自动退出，
           # 必须显式停，否则残留进程会一直持有 8319 并继续转发请求。
           # 顺序在 workbuddy（3b）之后：两者互不依赖，但 3c 之后就是容器归档，
@@ -7067,7 +7085,14 @@ jobs:
           tg_add_section msg "📦 归档明细 · $((ok_n + fail_n + skip_n))"
           tg_add_block msg "$(tree_lines "$entries")"
           tg_add_footer msg
-          send_tg "$msg" || echo "::warning::TG 通知发送失败（不影响任务）"
+          # 全败走 alert 档：同轮内每个对象都另有 send_archive_alert（alert 档）单发，
+          # 这条汇总量级最大、最能说明「本轮归档整体失败」，降级成普通档会让读者
+          # 在一般通知流里漏掉它（2026-10-19 对齐 send_archive_alert 的档位口径）。
+          if [ "$fail_n" -gt 0 ] && [ "$ok_n" -eq 0 ]; then
+            send_tg "$msg" alert || echo "::warning::TG 通知发送失败（不影响任务）"
+          else
+            send_tg "$msg" || echo "::warning::TG 通知发送失败（不影响任务）"
+          fi
 
       - name: Trigger next OpenClaw run
         if: ${{ always() && steps.keepalive.conclusion == 'success' }}

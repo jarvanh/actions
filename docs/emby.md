@@ -84,7 +84,7 @@ cron 退回 6 小时一档只做兜底。三道护栏：
 | `EMBY_API_TOKEN` | Emby API 密钥 | 用于探活、片名反查、海报预热、优雅停机、播放监听 |
 | `EMBY_USER` | 期望存在的 Emby 用户名 | 校验"这份数据是我们的备份"与预热定位用户。**仓库公开，用户名不写死在代码里**；走 secret 还自带日志打码 |
 | `TELEGRAM_BOT_TOKEN` | TG 机器人 | 所有通知 |
-| `TG_CHAT_ID` | TG 会话 ID | 通知目标（私密 chat） |
+| `TELEGRAM_CHAT_ID` | TG 会话 ID | 通知目标（私密 chat） |
 | `VD` | 域名前缀 | OpenList 维护入口 `oe.<VD>.eu.org` |
 | `GITHUB_TOKEN` | 内置 | 调 GitHub API 取最新 release，避免 runner 共享出口 IP 的匿名配额耗尽 |
 
