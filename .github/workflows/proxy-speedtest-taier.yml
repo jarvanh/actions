@@ -327,10 +327,12 @@ jobs:
           # 订阅导出策略（四套共用，脚本默认值；各脚本消费）：阈值（兆，默认 10）、
           # 判定指标 upload|download（默认 upload 按上行判定；主指标达标数 < 回退门槛
           # 且另一指标更多时改用另一指标。上传端点偶发 403/断流读数为 0 时自动落到下行）、
-          # 最少节点数（默认 1，不足则不上传）、回退门槛（默认 3，与最少节点数是两回事）。
+          # 最少节点数（默认 10，不足则不上传）、回退门槛（默认 3，与最少节点数是两回事）。
+          # ⚠️ 10 是主人 2026-10-19 定的口径：源枯竭时曾出现 qualified=1 也照旧上传订阅，
+          # 订阅里孤零零一个节点不如不更新（保留上一份多节点订阅更可用）。
           PROXY_SPEEDTEST_MIN_MEGABIT: '10'
           PROXY_SPEEDTEST_SPEED_METRIC: 'upload'
-          PROXY_SPEEDTEST_MIN_NODES: '1'
+          PROXY_SPEEDTEST_MIN_NODES: '10'
           PROXY_SPEEDTEST_METRIC_FALLBACK_MIN_NODES: '3'
           # GitHub API 匿名调用在共享出口 IP 上 60 次/h 限流时的认证回退
           GH_TOKEN: ${{ secrets.PAT }}
