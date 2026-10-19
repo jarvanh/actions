@@ -777,6 +777,26 @@ jobs:
           # 面板密码独立于 API Key（PBKDF2 落盘 settings.json），仅 tailnet 内可访问。
           sudo tailscale serve --bg --http=8084 http://127.0.0.1:8790
           echo "qoder2api 看板: http://${TS_FQDN}:8084/（API 网关: /v1）"
+          # 2026-10-19 主人要求「其他控制台怎么不使用 https」：6 个后台统一补 HTTPS 入口。
+          # tailscaled 虽以 --state=mem: 运行，实测**仍能签发证书**（8443-8448 全通，
+          # TLS 校验无需 -k）—— 上面「签不了 HTTPS 证书」的判断只对无端口 443 成立
+          # 的历史场景，勿再据此断言带端口 https 不可用。映射与看板 admin_entries 一致：
+          #   8443→8316(wb) 8444→18080(trae) 8445→8319(zcode)
+          #   8446→8322(autoclaw) 8447→8790(qoder) 8448→20128(omniroute)
+          # 证书签发失败不能拖垮整步，统一加兜底 echo（与 443 同款处理）。
+          sudo tailscale serve --bg --https=8443 http://127.0.0.1:8316 2>/dev/null \
+            || echo "⚠️ 8443 HTTPS serve 失败，HTTP 8082 仍可用"
+          sudo tailscale serve --bg --https=8444 http://127.0.0.1:18080 2>/dev/null \
+            || echo "⚠️ 8444 HTTPS serve 失败，HTTP 8080 仍可用"
+          sudo tailscale serve --bg --https=8445 http://127.0.0.1:8319 2>/dev/null \
+            || echo "⚠️ 8445 HTTPS serve 失败，HTTP 8081 仍可用"
+          sudo tailscale serve --bg --https=8446 http://127.0.0.1:8322 2>/dev/null \
+            || echo "⚠️ 8446 HTTPS serve 失败，HTTP 8083 仍可用"
+          sudo tailscale serve --bg --https=8447 http://127.0.0.1:8790 2>/dev/null \
+            || echo "⚠️ 8447 HTTPS serve 失败，HTTP 8084 仍可用"
+          sudo tailscale serve --bg --https=8448 http://127.0.0.1:20128 2>/dev/null \
+            || echo "⚠️ 8448 HTTPS serve 失败，OmniRoute 控制台将无入口"
+          echo "HTTPS 控制台: wb=8443 trae=8444 zcode=8445 autoclaw=8446 qoder=8447 omniroute=8448"
           # OmniRoute AI API 无端口 HTTPS 入口：20128 → 443。
           # 公网 ai-api.derrick.eu.org 走 Cloudflare，有 100s 硬超时；tailnet 内这条
           # 前面没有 Cloudflare，慢请求（step-5-preview 深度思考实测单请求 18~330s）
@@ -4181,7 +4201,12 @@ jobs:
 
           # 4. tailscale serve（复用「HTTP 明文 + WireGuard 隧道」既有口径；serve 态
           #    随内存 state 逐轮清零，幂等重建）
-          if [ "$AC_OK" = "1" ] && [ -n "${TS_FQDN:-}" ]; then
+          # ⚠️ 2026-10-19 修死链：面板路由原来整段挂在 $AC_OK 上，而 AC_OK 是
+          # **端到端自检**结论 —— 上游限流/限载（406/503）会让自检失败，但服务本身
+          # 健康、端口在听。此时 8083 不建，看板 admin_entries 第 4 项就成了死链
+          # （实测 HTTP 000，主人 2026-10-19 反馈）。故面板与 API 入口拆开：
+          # 面板/API serve 只看**端口是否在听**，与自检结论解耦。
+          if [ -n "${TS_FQDN:-}" ] && curl -s --max-time 3 -o /dev/null "http://127.0.0.1:${AUTOCLAW_PORT}/v1/models" 2>/dev/null; then
             sudo tailscale serve --bg --http=8321 "http://127.0.0.1:${AUTOCLAW_PORT}" 2>/dev/null \
               && echo "autoclaw 反代: http://${TS_FQDN}:8321/v1"
             # 内置状态面板（/dashboard | / | /ui 均同一页）：2026-10-13 补。
@@ -4191,6 +4216,10 @@ jobs:
             # 主人 2026-10-13 明确「不要密码」，故不加 key 参数。
             sudo tailscale serve --bg --http=8083 "http://127.0.0.1:${AUTOCLAW_PORT}" 2>/dev/null \
               && echo "autoclaw 控制台: http://${TS_FQDN}:8083/"
+          elif [ -z "${TS_FQDN:-}" ]; then
+            echo "⚠️ autoclaw serve 跳过：TS_FQDN 为空"
+          else
+            echo "⚠️ autoclaw 端口 ${AUTOCLAW_PORT} 未监听，跳过 serve（面板将不可达）"
           fi
 
           # 5. TG 通知（版式对齐 qingyan/zcode2api：失败走 alert 档）
