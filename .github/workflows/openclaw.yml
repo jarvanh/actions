@@ -742,6 +742,11 @@ jobs:
           # （config.json gateway.adminKey），仅 tailnet 内可访问，不做公网暴露。
           sudo tailscale serve --bg --http=8082 http://127.0.0.1:8316
           echo "workbuddy 控制台: http://${TS_FQDN}:8082/ui/"
+          # qoder2api-hub 看板（root 路径直出，无 /admin 前缀）：8790 → 8084。
+          # 延续后台端口段（trae 8080 / zcode-hub 8081 / wb 8082 / autoclaw 8083）。
+          # 面板密码独立于 API Key（PBKDF2 落盘 settings.json），仅 tailnet 内可访问。
+          sudo tailscale serve --bg --http=8084 http://127.0.0.1:8790
+          echo "qoder2api 看板: http://${TS_FQDN}:8084/（API 网关: /v1）"
           # 2026-09-30 曾尝试把 trae 挂到 80 端口的 /trae 子路径（依赖 trae2api commit
           # a75ec3e 的前端前缀自适应），后已整体回退：a75ec3e 被 revert（镜像
           # v2026.09.30-46abeff），zcode 也从 80 挪到 8081，与 trae 端口相邻。
@@ -3270,6 +3275,176 @@ jobs:
       # 凭证随 /dropbox/self-hosted/.cloudflared 恢复，由 tunnels.conf 纳管。
       # QUOTA_BOARD_TOKEN 持久化在 ~/.openclaw/.env（随 openclaw.tar.gz 归档每轮恢复），
       # unit 的 EnvironmentFile 指向该文件，本 step 只负责拉起服务。
+      # qoder2api-hub：Qoder（阿里）双区反代网关（国际 qoder.com / 国内 qoder.com.cn），
+      # OpenAI 兼容 API + Responses API + Web 看板，与 workbuddy-gateway / zcode2api /
+      # trae2api 同为 AI 网关形态服务（2026-10-19 主人要求接入）。
+      # 部署方式：官方预构建 GHCR 多架构镜像（ghcr.io/shuishuipingan/qoder2api-hub），
+      # 与 trae2api 同为容器形态（restart: unless-stopped 覆盖崩溃自愈，不纳入 systemd --user，
+      # Stop 段也不显式停——容器随 VM 生命周期存续，下一轮 docker rm -f 幂等接管）。
+      # 端口 8790（上游默认，仅绑 127.0.0.1）；看板走 Tailscale serve 8084（见 Tailscale 段）。
+      # 数据直写 Dropbox fuse：/dropbox/self-hosted/qoder2api/{accounts,usage}——
+      # 账号池/用量/调度状态全是 JSON/JSONL（无 SQLite），fuse 挂载点无锁兼容问题，
+      # 无需本地盘中转；持久化白名单内（A 类），周期归档/收尾归档均无需登记（对齐 trae2api）。
+      # 凭据引导（幂等，仅 settings.json 缺失时）：launcher API Key（qd- 前缀）与看板
+      # 面板密码随机生成，PBKDF2-SHA256 摘要预写 settings.json（与 qoder_settings.py
+      # _digest 逐字段对齐：salt 16B hex + 120000 轮），首启即免默认面板密码 admin 裸奔。
+      # ⚠️ 运行时绝不传 --panel-password：该参数每次启动都会重置密码（set_panel_password
+      # 无条件覆盖），会把预写凭据冲掉。容器 CMD 用镜像默认（--lan：强制鉴权 + 0.0.0.0）。
+      # 版本标记用浮动 tag 1.5 + 镜像 digest（1.5 恒指最新 1.5.x，2026-10-19 实测 digest
+      # 与 1.5.2 一致；digest 入账 .installed-version，浮动 tag 下仍可识别真实更新）。
+      # continue-on-error：新网关故障不得级联跳过后续 quota-board / zcode2api / Run OpenClaw
+      # （对齐 autoclaw/qingyan 的保护口径；可见性由 step 内 TG 告警保证）。
+      - name: Run qoder2api-hub container (Qoder 双区 OpenAI 兼容网关)
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # 通知真源在 step 顶层 source 一次（对齐 trae2api 段注释）
+          source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+          # TS_FQDN 由 Tailscale 步骤写入 ts.env，step 间不共享 env，需显式加载
+          # （对齐 autoclaw 段写法）；缺失时看板入口两行整体跳过，不影响网关本身。
+          [ -f "$HOME/ts.env" ] && . "$HOME/ts.env" || true
+
+          QODER_DATA=/dropbox/self-hosted/qoder2api
+          QODER_PORT="8790"
+          QODER_IMAGE="ghcr.io/shuishuipingan/qoder2api-hub:1.5"
+          QODER_TAG="1.5"
+
+          # 通知版式对齐 trae_notify / wb_notify：标题 + 结论/版本/更新/接口/鉴权 +
+          # 数据目录 + 原始输出。用法: qoder_notify <标题> <结论> <版本> <更新> <原因> <原始输出> <就绪态>
+          # 第 7 参 = 服务就绪态，取 "1" 才补「接口 / 看板 / API Key」三行（失败时服务
+          # 已不在，展示指向已停进程的地址会误导读者，与 wb_notify 同口径）。
+          qoder_notify() {
+            if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+              local _msg=""
+              tg_add_title _msg "$1"
+              tg_add_kv _msg "结论" "$2"
+              tg_add_path _msg "数据目录" "$QODER_DATA"
+              [ -n "$3" ] && tg_add_path _msg "版本" "$3"
+              [ -n "$4" ] && tg_add_kv _msg "更新" "$4"
+              if [ "${7:-0}" = "1" ]; then
+                tg_add_path _msg "接口" "http://127.0.0.1:${QODER_PORT}/v1"
+                # 看板入口 + 面板密码（tailscale serve 8084）：ts.env 由 Tailscale 步骤
+                # 在本 step 之前写出；缺失时两行整体跳过（tg_add_path 不留空行）。
+                if [ -n "${TS_FQDN:-}" ]; then
+                  tg_add_path _msg "看板" "http://${TS_FQDN}:8084/"
+                  local _qp="$(cat "$QODER_DATA/.panel-password" 2>/dev/null || true)"
+                  tg_add_path _msg "看板密码" "${_qp:-未取到}"
+                fi
+                # 明文 API Key（对齐 wb/trae 展示口径）
+                tg_add_path _msg "API Key" "$(read_qoder_key | grep . || echo 未取到)"
+              fi
+              [ -n "$5" ] && tg_add_kv _msg "原因" "$5"
+              if [ -n "$6" ]; then
+                tg_add_pre _msg "$(printf '%s' "$6" | tail -c 1200)"
+              fi
+              tg_add_footer _msg
+              send_tg "$_msg" alert || echo "::warning::TG 通知发送失败（不影响任务）"
+            else
+              echo "⚠️ Telegram secrets missing, skip qoder2api notification."
+            fi
+          }
+
+          # 明文 API Key 读取 helper（面板管理 Key 优先、回落 launcher Key —— 与
+          # 网关侧 api_key_override 取值顺序一致）；多调用点共用，避免两处写歪。
+          read_qoder_key() {
+            python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print(d.get("api_key") if d.get("api_key_set") else d.get("launcher_key",""))' "$QODER_DATA/accounts/settings.json" 2>/dev/null || true
+          }
+
+          echo "1. Bootstrap credentials (idempotent, Dropbox 为准)..."
+          mkdir -p "$QODER_DATA/accounts" "$QODER_DATA/usage"
+          if [ ! -s "$QODER_DATA/accounts/settings.json" ]; then
+            # 首启凭据：launcher Key（qd- 前缀，同上游 ensure_launcher_key 形态）+
+            # 面板密码随机生成；PBKDF2 摘要预写 settings.json（120000 轮与上游一致）。
+            # 单行 python3 -c：YAML 块标量内多行 heredoc 体必须顶格才合法，会破坏
+            # 块缩进（omniroute 的 heredoc+sed 先例是给数据文件用的）；凭据生成逻辑
+            # 短小，一行写完最稳，且与 qoder_settings.py _digest 逐字段对齐。
+            QODER_KEY="qd-$(openssl rand -hex 24)"
+            QODER_PANEL_PW="$(openssl rand -base64 18)"
+            python3 -c 'import json,sys,secrets,hashlib,pathlib; p,k,w=sys.argv[1],sys.argv[2],sys.argv[3]; s=secrets.token_hex(16); d=hashlib.pbkdf2_hmac("sha256",w.encode(),bytes.fromhex(s),120000).hex(); pathlib.Path(p).write_text(json.dumps({"launcher_key":k,"panel_password_salt":s,"panel_password_rounds":120000,"panel_password_hash":d,"panel_password_default":False},indent=2),encoding="utf-8")' \
+              "$QODER_DATA/accounts/settings.json" "$QODER_KEY" "$QODER_PANEL_PW"
+            # 面板密码明文单独落一份（fuse 权限位恒 666，边界在 Dropbox 账号侧；
+            # 仅首次生成时写，便于从数据目录找回；看板内改密后此文件即过期）
+            printf '%s\n' "$QODER_PANEL_PW" > "$QODER_DATA/.panel-password"
+            echo "   凭据已生成（launcher Key qd-… + 面板密码 → .panel-password）"
+          fi
+
+          echo "2. Pull image & start container..."
+          # 拉取失败不硬退：沿用本地旧镜像先保住服务可用性（digest 仍如实入账；
+          # inspect 也兜 || true —— set -e 下命令替换失败会直接终止整 step）
+          docker pull -q "$QODER_IMAGE" || echo "⚠️ 镜像拉取失败，沿用本地镜像"
+          QODER_IMG_DIGEST="$(docker image inspect --format '{{index .RepoDigests 0}}' "$QODER_IMAGE" 2>/dev/null | awk -F'@' '{print substr($2,1,19)}' || true)"
+          QODER_VERSION="${QODER_TAG} @ ${QODER_IMG_DIGEST:-digest未知}"
+          # 幂等接管：清掉同名旧容器（可能来自上一轮或手工部署），再由本轮接管。
+          # 启动失败必须出声（continue-on-error 会吞掉非零退出，TG 是唯一可见通道）。
+          docker rm -f qoder2api >/dev/null 2>&1 || true
+          if ! docker run -d --name qoder2api \
+            --restart unless-stopped \
+            -p 127.0.0.1:${QODER_PORT}:8790 \
+            -e HOST=0.0.0.0 -e PORT=8790 -e TZ=Asia/Shanghai \
+            -v "$QODER_DATA/accounts:/app/accounts" \
+            -v "$QODER_DATA/usage:/app/usage" \
+            "$QODER_IMAGE"; then
+            qoder_notify "❌ qoder2api-hub 启动失败" "docker run 失败" \
+              "$QODER_VERSION" "" "镜像缺失或端口/挂载冲突（详见运行日志）" \
+              "$(docker logs --tail 40 qoder2api 2>&1 || true)" 0
+            exit 1
+          fi
+
+          echo "3. Health check..."
+          _code=""
+          for i in $(seq 1 60); do
+            _code=$(curl -s --connect-timeout 2 -o /dev/null -w "%{http_code}" "http://127.0.0.1:${QODER_PORT}/ping" || true)
+            if [ "$_code" = "200" ]; then
+              echo "✅ [qoder2api] ${QODER_PORT} 已就绪 (HTTP 200)"
+              break
+            fi
+            echo "⏳ [qoder2api] 等待中... ${i}/60"
+            sleep 2
+          done
+          if [ "${_code:-}" != "200" ]; then
+            echo "❌ qoder2api 未在 120 秒内就绪" >&2
+            qoder_notify "❌ qoder2api-hub 启动失败" \
+              "未就绪 · 120 秒健康检查超时" \
+              "$QODER_VERSION" "" "镜像拉取或启动失败（详见运行日志）" \
+              "$(docker logs --tail 60 qoder2api 2>&1 || true)" 0
+            exit 1
+          fi
+
+          echo "4. Auth self-check..."
+          _qk="$(read_qoder_key)"
+          _mk="$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${_qk}" "http://127.0.0.1:${QODER_PORT}/v1/models" || true)"
+          _mn="$(curl -s -H "Authorization: Bearer ${_qk}" "http://127.0.0.1:${QODER_PORT}/v1/models" 2>/dev/null | jq -r '(.data | length) // 0' 2>/dev/null || echo 0)"
+          echo "   /v1/models 带鉴权: HTTP ${_mk} · 官方模型 ${_mn} 个（双区动态清单）"
+
+          echo "5. Account pool snapshot..."
+          # 账号池即 accounts/ 下除 settings.json / active_realm.json 外的 *.json
+          # （与网关 AccountPool.load() 的过滤口径一致）
+          _accs="$(find "$QODER_DATA/accounts" -maxdepth 1 -name '*.json' ! -name 'settings.json' ! -name 'active_realm.json' 2>/dev/null | wc -l | tr -d ' ')"
+
+          echo "6. Version ledger & notification..."
+          # 更新判定用镜像 digest（浮动 tag 1.5 下 tag 恒定，digest 才是真实版本指纹）。
+          # 记录写在健康通过之后 —— 未就绪的轮次不落账，下轮仍报「更新」（对齐 trae2api）。
+          QODER_VER_FILE="$QODER_DATA/.installed-version"
+          QODER_LOCAL_VER="$(head -n 1 "$QODER_VER_FILE" 2>/dev/null || true)"
+          if [ -n "$QODER_LOCAL_VER" ] && [ "$QODER_LOCAL_VER" = "$QODER_IMG_DIGEST" ]; then
+            QODER_UPDATE="已在 ${QODER_VERSION} · 镜像层缓存复用"
+          elif [ -n "$QODER_LOCAL_VER" ]; then
+            QODER_UPDATE="从 ${QODER_LOCAL_VER} 更新到 ${QODER_IMG_DIGEST}"
+          else
+            QODER_UPDATE="首次部署 ${QODER_VERSION}"
+          fi
+          printf '%s\n' "$QODER_IMG_DIGEST" > "$QODER_VER_FILE"
+
+          _title="🟢 qoder2api-hub 已就绪"
+          _conclusion="已就绪 · 官方模型 ${_mn} 个"
+          [ "${_accs:-0}" -gt 0 ] && _conclusion="${_conclusion} · 账号 ${_accs}（看板 OAuth 可添加）"
+          [ "${_accs:-0}" -eq 0 ] && _conclusion="${_conclusion} · 账号池空（看板「+ 添加账号 (OAuth)」入池）"
+          qoder_notify "$_title" "$_conclusion" "$QODER_VERSION" "$QODER_UPDATE" "" "" 1
+
       - name: Run quota-board (TG 额度看板 + Mini App)
         run: |
           set -euo pipefail
