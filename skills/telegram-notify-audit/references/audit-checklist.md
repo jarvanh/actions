@@ -110,6 +110,38 @@
   清单、三套测速「到点收摊」位置与文案、taier 无「测活探测异常」分节、
   caption 三行形态与转义。
 
+## 3.3 2026-10-19 第七轮核对结论（通知文档 vs 实现，全库标题字面量穷举）
+
+方法：以 `docs/telegram-notify.md` 为基准，抽取全库所有 `tg_add_title` /
+`Send-TgMessage` / python f-string / `wb_notify`·`trae_notify` 调用点标题 +
+逐文件核 31 个 workflow 与 `.github/scripts/` 五域，共确认 **16 处不一致**，
+分三类全部处理（文档侧 11 条、实现侧 5 条）。
+
+- **A 类 · 文档写错（引用了不存在的东西）**——5 条
+  - `speedtest_common.should_stop_for_budget` → 实为 `speedtest_common.py`；
+  - 「`check_mihomo_runtime` 仅 gitee 有」→ cdn 也在用（taier 才没有）；
+  - 「`tg_notify.sh` 头部写着 source 幂等可重复」→ 头部无此句，4.4 节论据改写为
+    「bash 允许同名函数重复定义」；
+  - `❌ 处理上传失败` → 实际 `❌ 处理/上传失败`；
+  - 「python 侧格式化统一走共享层」→ 共享层无此函数，实为 `sync_to_tg.sh` 内嵌
+    `human_size`（6.3 表格原写「python 手算」与 5.2 自相矛盾，一并改）。
+- **B 类 · 实现有、文档没收**——6 条，补登记：`❌ OpenClaw 最终归档失败`（三态，
+  原只记 ✅/⚠️）、`🚨 OmniRoute 归档恢复失败 · 空库兜底`（P0 事故通道）、
+  `🚨 vaultwarden 数据恢复失败`（`p.yml` 整条链路未收录）、
+  `🚫 Dropbox 配额不足，本轮已中止`、`🧯 保活接力已熔断`、`❌ trae2api 部署失败`。
+- **C 类 · 口径分歧**——5 条：zcode2api 就绪态在 2.4/2.5 重复登记（收敛为
+  2.5 只记 🟡/🟠 中间态 + 指向 2.4）；`openlist-diag`/`openlist-fix-check` 注入
+  凭据但一次不发（2.10 记死配置）；autoclaw 缺停服通知（实现补齐，四网关闭环）；
+  `🚫`/`🧯` 不进 5.5 图标表（补）；`❌ OpenClaw 最终归档失败` 走普通档而同轮
+  `send_archive_alert` 是 alert 档（实现改为全败 alert）。
+- **secrets 命名统一**：8 处 `secrets.TG_CHAT_ID` → `secrets.TELEGRAM_CHAT_ID`
+  （`openclaw.yml` 1 + `p.yml` 2 + `emby.yml` 5），`docs/emby.md` secrets 表同步。
+  ⚠️ **环境变量键名 `TG_CHAT_ID` 保留不动**（`emby.yml:1077/1673` 把它透传给
+  `/opt/watchdog.sh`，那是 bash 真源 `TG_*` 别名回退的契约，与 secret 名是两件事）。
+- **下轮可直接跳过**：39 个脚本文件/14 个 workflow 存在性（全部核对过，无一缺失）；
+  openlist 域 2.1 表各通知落点；`TG_RUN_URL` 全库注入面（12 个发通知的
+  workflow 全覆盖，无 `TG_RUN_STARTED_AT` 残留）；`render_preview.sh` 16 项全绿。
+
 ## 4. 回归基线（改动触及 openlist 域时必跑）
 
 ```bash

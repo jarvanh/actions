@@ -298,7 +298,7 @@ HTML 变复杂。
 | 通知 | 在哪 | 何时发 |
 |---|---|---|
 | 📺 / ⚠️ / ❌ 同步汇总 | `sync_to_tg.sh` | 一轮频道同步结束（全失败 ❌ / 部分失败 ⚠️ / 否则 📺） |
-| ❌ 获取远端文件列表失败 / ❌ 下载失败 / ⏭️ 损坏视频已标记跳过 / ❌ 处理上传失败 | `sync_to_tg.sh` | 单文件级失败即时通知 |
+| ❌ 获取远端文件列表失败 / ❌ 下载失败 / ⏭️ 损坏视频已标记跳过 / ❌ 处理/上传失败 | `sync_to_tg.sh` | 单文件级失败即时通知 |
 | 🔍 重复视频检测与去重（按 ID / 按哈希） | `dedupe_ph_videos.sh`、`dedupe_videos_by_hash.sh` | 发现重复组 |
 | 🧹 清理 yt-dlp 残留文件 | `cleanup_ytdlp_residual.sh` | 清理 `-Frag` / `.ytdl` / `.m3u8` |
 | 🧹 频道清理完成 | `reset_tg_channel.sh` | 清空频道并删 uploaded/failed 记录 |
@@ -457,16 +457,21 @@ Telegram 收到，放弃重试只会让凭据彻底丢失。
 |---|---|---|
 | 🚨 OpenClaw 自愈失败 | `openclaw.yml` | 主步骤失败，推失败阶段 / 版本 / 关键日志 |
 | ⚠️ 归档告警 · 对象 / ⚠️ 最终归档告警 · 对象 | `openclaw.yml` | 周期/最终归档失败（rclone/tar；标题带对象——五个归档包曾共用一个标题，看不出是哪个包出问题） |
-| ✅ / ⚠️ OpenClaw 最终归档完成 | `openclaw.yml` | 最终归档收尾，按对象汇总结果（有失败降级 ⚠️「完成 · 部分失败」；归档步骤没产出明细时发 ⚠️「最终归档未完成」兜底） |
+| ✅ / ⚠️ / ❌ OpenClaw 最终归档完成 · 部分失败 · 失败 | `openclaw.yml` | 最终归档收尾，按对象汇总结果（全败 ❌「OpenClaw 最终归档失败」；有失败降级 ⚠️「完成 · 部分失败」；归档步骤没产出明细时发 ⚠️「最终归档未完成」兜底）。**档位**：全败的 ❌ 走 `alert` 档（与同轮 `send_archive_alert` 对齐），✅/⚠️ 走普通档 |
+| 🚨 OmniRoute 归档恢复失败 · 空库兜底 | `openclaw.yml` | Dropbox 归档存在但本轮恢复未走通、已 bootstrap 空库（P0 数据事故信号，`alert` 档） |
+| 🚨 vaultwarden 数据恢复失败 | `p.yml` | Dropbox 备份缺 `db.sqlite3`：本轮终止、不启动空库、不回传（防空库覆盖远端好数据，`alert` 档）。`p.yml` 是 vaultwarden 容器工作流，与 OpenClaw 主链路共用同一套通知层 |
+| 🚫 Dropbox 配额不足，本轮已中止 | `openclaw.yml` | 归档前置预检：剩余空间低于阈值即中止本轮，不空转刷失败告警（`alert` 档） |
 | ⚠️ OpenClaw 即将进入最终归档 | `openclaw.yml` | keepalive 剩余约 15 分钟时预警 |
 | ❌ workbuddy-gateway 启动失败 | `openclaw.yml` | serve 启动即退或超时未监听 8318 |
-| ❌ trae2api 启动失败 | `openclaw.yml` | 容器健康检查 120 秒未过（7864），原始输出给容器日志尾部 |
+| ❌ trae2api 启动失败 / ❌ trae2api 部署失败 | `openclaw.yml` | 容器健康检查 120 秒未过（7864）发启动失败、原始输出给容器日志尾部；Release tag 解析失败或 SHA256SUMS 缺失发部署失败（二进制与版本强绑定，两者都属「必须动手」类） |
 | ⛔ / ⚠️ workbuddy-gateway 已停止 | `openclaw.yml` | 收尾停止本地代理网关（仍有进程残留时降级 ⚠️） |
-| 🟢 zcode2api 已就绪（🟡/🟠 中间态见下） | `openclaw.yml` | 本地 GLM 网关（8319）启动自检后。字段口径见 2.6 节 |
 | ❌ zcode2api 启动失败 | `openclaw.yml` | 部署/依赖失败，或自检两通道（Plan + bigmodel Key）均无有效回答 |
 | ⏭️ / ❌ / 🟢 qingyan-proxy 已跳过 · 启动失败 · 已就绪 | `openclaw.yml` | 本地 GLM 反代（8320）：条件不满足跳过 / 60 秒未监听失败 / 就绪（带 `💳 积分` 分节与「API Key」行，alert 档；2026-10-11 就绪态从 ✅ 对齐为 🟢） |
 | ❌ / 🟢 autoclaw-proxy 启动失败 · 已就绪 | `openclaw.yml` | AutoClaw 积分反代（8322）：凭据缺失跳过不起假服务 / 自检失败分诊 / 就绪（带账号池与每日签到分节，alert 档；2026-10-11 就绪态从 ✅ 对齐为 🟢） |
 | ⛔ / ⚠️ zcode2api、qingyan-proxy 已停止 | `openclaw.yml` | 收尾停服（对齐 workbuddy 的 3b/3c；有进程残留降级 ⚠️） |
+| ⛔ / ⚠️ autoclaw-proxy 已停止 | `openclaw.yml` | 收尾停服（与 zcode2api/qingyan 同范式；有进程残留降级 ⚠️） |
+| 🧯 保活接力已熔断 | `lib/self_retrigger.sh` | 连续 N 轮 failure 达阈值后停止自动接力（不告警则服务静默躺平到 cron 兜底，`alert` 档） |
+| 🟡 / 🟠 zcode2api 已就绪降级态 · 鉴权失败 | `openclaw.yml` | 自检失败先分类再选标题，完整口径见 2.6 节：额度耗尽 / 账号池全冷却 / 回退通道关闭 / Plan 通道降级 → 🟡（服务在，等即可，**且不进接力静默、每轮必报**）；网关 Key 或上游鉴权不符 → 🟠（需人工介入）。✅/🟢 就绪态本身见 2.4 节，不在本表重复登记 |
 | ⚠️ Emby 直链已回退 | `emby.yml` | 探活连续失败切直连 |
 
 **示例：归档告警**
@@ -877,9 +882,9 @@ API Key：<code>sk-kj…（同 wb_notify，点选可复制）</code>
 三套位置不同会让读者以为自己看漏了（gitee 原先放在测速点区块**之后**，已挪齐）。
 
 **「到点收摊」与「运行中中止」都走这条降级**。前者是脚本自己的墙钟预算到点
-（三套共用 `speedtest_common.should_stop_for_budget`，默认 5 小时；gitee/cdn 的 env 是
+（三套共用 `speedtest_common.py` 的 `should_stop_for_budget`，默认 5 小时；gitee/cdn 的 env 是
 `PROXY_SPEEDTEST_BUDGET_SECONDS`，taier 是 `TAIER_BUDGET_SECONDS`），后者是内核/端口挂了
-（`check_mihomo_runtime` 失败，仅 gitee 有）。**两者都不是失败，退出码仍为 0**，拿已测节点
+（`check_mihomo_runtime` 失败，仅 gitee 与 cdn 有，taier 没有）。**两者都不是失败，退出码仍为 0**，拿已测节点
 照常出订阅——理由同「到点收摊 ≠ 失败」：撞 GitHub 的硬取消会让整轮工作全废。判定字段是
 RESULT_JSON 的 `aborted_due_to_runtime` / `runtime_abort_reason`
 （`speedtest_gitee.py` 早已有这两个字段，`taier_speedtest.py` / `speedtest.py` 2026-09-14 起对齐）。
@@ -965,6 +970,13 @@ parse_mode**，否则文件名里的 `& < >` 会 400、markdown 语法字符会�
 
 `subs-check.yml` 等一批 workflow 当前不发通知。要补的话，照 2.3 节备份类的形态即可
 （标题 + 关键 kv + 收尾区），并把 `TG_RUN_*` 接上（3.9 节）。
+
+⚠️ **已知死配置**：`openlist-diag.yml` 与 `openlist-fix-check.yml` 在 job 级注入
+`TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`，但两个 workflow 及其调用的
+`diag_*.sh` / `fix_check.sh` **一次都没有发送**（既不 `source` 通知层构建消息，也不
+调 `send_tg`）——注入的凭据是纯摆设。2026-10-19 核对时确认，暂无发送需求，故
+**保留注入不做改动**（删掉会让将来想接通知的人找不到接在哪），但记录在此：
+这两份凭据不产生任何通知，别把它们算进「哪些 workflow 在发通知」的清单。
 
 ---
 
@@ -1299,8 +1311,9 @@ send_tg "$msg" || echo "::warning::TG 通知发送失败（不影响任务）"
 
 ### 4.4 通知函数的正确接法（子 shell 陷阱与接力轮去重）
 
-**真源只在顶层 source 一次。** `tg_notify.sh` 的头部写着「source 幂等、可重复」，
-这只保证**不会重复定义出错**，不代表在函数体内 source 等价。函数体往往在**子 shell**
+**真源只在顶层 source 一次。** 真源的函数定义**重复执行不会报错**（bash 允许
+同名函数重复定义、后定义覆盖前定义），但这只保证「不会 source 崩掉」，
+**不代表在函数体内 source 等价**。函数体往往在**子 shell**
 里执行——`m=$(fn)`、`fn | …`、`fn &` 都会 fork：
 
 - 子 shell 内 `source` 只改子 shell 的函数表，**父 shell 里调用点做的覆写不会被还原**
@@ -1462,7 +1475,9 @@ python 侧拿不到 bash 函数，另有一处**同口径**实现（`sync_to_tg.
 `human_size`，1024 进制 + IEC + 三位小数，与 `format_bytes` 对齐）——改口径时它要
 跟着改。`add_uploaded_video.py` 也有一份 `human_size`，但只写 uploaded_videos.json
 台账与日志、不进通知（2026-10-05 起同为 IEC 口径）。pwsh / python 无 numfmt，
-python 侧格式化统一走共享层 `speedtest_common.py`。
+python 脚本侧大小格式化**没有**收敛进共享层 `speedtest_common.py`，仍由
+`sync_to_tg.sh` 内嵌 `human_size`（唯一的 python 侧口径来源）；bash 侧只用
+`format_bytes`。这两处是**唯一需要同步的地方**——改口径必须同时改它们。
 
 ### 5.3 日期与相对时间
 
@@ -1490,6 +1505,8 @@ python 侧格式化统一走共享层 `speedtest_common.py`。
 `✅` 成功 · `⚠️` 部分失败/警告 · `❌` 失败 · `⏭️` 跳过 · `🔄` 进行中 ·
 `⏳` 待处理 · `⛔` 中断（注册前即死）· `⏸️` 轮次收摊（预算到站，预期内）·
 `🚨` 危险警告 · `🆘` 灾难恢复 · `📍` 进度面板当前阶段 ·
+`🚫` 本轮中止（Dropbox 配额预检不通过，预期内收尾而非故障）·
+`🧯` 自动接力熔断（保活链路停摆，需手动 dispatch 恢复）·
 `🟡` 降级但服务在（通道缺失/额度耗尽——等即可，不用动手）·
 `🟠` 需人工介入（zcode2api 鉴权失败；介于警告与失败之间）
 
@@ -1586,7 +1603,7 @@ python 侧格式化统一走共享层 `speedtest_common.py`。
 | 多行块 | `tg_add_pre` | — | `tg_pre_block(text)` |
 | 说明段 | `tg_add_note` | 手拼 | 手拼 |
 | 树形 / 折叠 | `tree_conn` `tree_sub` `tree_lines` `tree_code_fold`（裸文本）/ `tree_fold`（已构建条目流）；前缀自带等宽 `<code>` | 手拼（前缀同样包 `<code>`） | 手拼（同左） |
-| 大小格式化 | `format_bytes` | 手算 | 手算（python 侧同义实现） |
+| 大小格式化 | `format_bytes` | 手算 | py 侧无共享函数：走 `sync_to_tg.sh` 内嵌 `human_size`（与 `format_bytes` 同口径） |
 | 耗时（正文单条，毫秒/秒双档） | `tg_format_ms` | —（无消费场景） | —（节点延迟走指标串例外，5.1 节） |
 | 转义 | `escape_html` | `Esc-Html` | `html.escape` |
 | 收尾 | `tg_add_footer` | `Get-TgFooter` | `tg_footer_line` / `tg_format_elapsed` |
