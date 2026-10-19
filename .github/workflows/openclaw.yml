@@ -3541,6 +3541,15 @@ jobs:
             nohup cloudflared tunnel run --url http://127.0.0.1:8321 qb \
               > ~/.openclaw/logs/cloudflared_qb.log 2>&1 &
           fi
+          # Mini App 入口（TG 菜单按钮 web_app）—— 2026-10-19 迁到 @openclaw_sb_bot。
+          # 按钮本体在 Telegram 服务端，不在任何本地持久化载体里（实测 2026-10-09
+          # 丢过一次、靠人工重设），故每轮幂等重建：目标 bot 挂 web_app + 旧 bot
+          # @sbsbsbsbsb_openclaw_bot 清成 commands，避免留下双入口。
+          if [ -f "$HOME/.openclaw/workspace/scripts/ensure-miniapp-menu.sh" ]; then
+            bash "$HOME/.openclaw/workspace/scripts/ensure-miniapp-menu.sh" || true
+          else
+            echo "⚠️ ensure-miniapp-menu.sh 缺失，跳过 Mini App 入口重建"
+          fi
 
       - name: Run zcode2api (GLM gateway)
         id: run_zcode2api
