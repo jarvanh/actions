@@ -127,10 +127,12 @@ check_once() {
   n="$(count_nodes "$cur")"
 
   if [ "$n" -ge "$FLOOR" ]; then
-    # 达标：把当前内容落成快照，供下一轮不合格时兜底
-    if cp -f "$cur" "$GOOD" 2>/dev/null; then
+    # 达标：把当前内容落成快照，供下一轮不合格时兜底。
+    # 先写临时文件再 mv：本目录在 rclone/fuse 上，直写可能让另一台 runner 读到半个快照。
+    if cp -f "$cur" "$GOOD.tmp" 2>/dev/null && mv -f "$GOOD.tmp" "$GOOD" 2>/dev/null; then
       : # 常态静默
     else
+      rm -f "$GOOD.tmp" 2>/dev/null || true
       say "写 last-good 快照失败（$GOOD），不影响订阅"
     fi
     rm -f "$cur"; return 0
@@ -145,7 +147,7 @@ check_once() {
   local gn
   gn="$(count_nodes "$GOOD")"
   if [ "$gn" -lt "$FLOOR" ]; then
-    say "last-good 也只有 $gn 个节点，同样不达标，放弃回滚"
+    say "last-good 也只有 $gn 个节点（或文件不可解析），同样不达标，放弃回滚"
     rm -f "$cur"; return 0
   fi
   if ! snapshot_age_ok; then
