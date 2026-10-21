@@ -124,24 +124,6 @@ jobs:
           else
             nohup cloudflared tunnel run --url http://127.0.0.1:8199 subs-check &
           fi
-      # Gist 节点数下限闸门（2026-10-21 新增）
-      # 背景：subs-check 原生没有「至少 N 个节点才上传」的开关 —— success-limit 是上限、
-      # success-rate 只打日志、0 节点才跳过保存，1~9 个照样推 Gist。容器里也没法拦：
-      # alpine 镜像删掉了 node、没有 curl，callback-script 又是在 SaveConfig 之后才跑。
-      # 所以在这里挂一个常驻外部闸门：每 5 分钟读一次 Gist，节点数 < GIST_MIN_NODES 就把
-      # last-good 快照 PATCH 回去（等价「不合格不上线」）。状态放 Dropbox，跨 run 持久。
-      - name: Gist 节点数下限闸门
-        env:
-          GIST_MIN_NODES: "10"
-          # 探测间隔：每次只一个 gist GET（鉴权限流 5000/h，60s 一次占 1%，无压力）。
-          # 取 60s 是为了把「不合格结果已上线、尚未被回滚」的暴露窗口压到 1 分钟内。
-          GIST_GUARD_INTERVAL: "60"
-        run: |
-          nohup bash "$GITHUB_WORKSPACE/.github/scripts/subs-check/gist-floor-guard.sh" loop \
-            > /opt/logs/gist-floor-guard.log 2>&1 &
-          sleep 3
-          echo "闸门已启动（下限 ${GIST_MIN_NODES} 节点），日志：/opt/logs/gist-floor-guard.log"
-          head -5 /opt/logs/gist-floor-guard.log 2>/dev/null || true
       # 隧道已收敛，容器在后台跑检测；这里休眠保活直到 run 时间上限，与 sub-store 一致
       - name: sleep
         run: |
