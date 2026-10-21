@@ -133,6 +133,9 @@ jobs:
       - name: Gist 节点数下限闸门
         env:
           GIST_MIN_NODES: "10"
+          # 探测间隔：每次只一个 gist GET（鉴权限流 5000/h，60s 一次占 1%，无压力）。
+          # 取 60s 是为了把「不合格结果已上线、尚未被回滚」的暴露窗口压到 1 分钟内。
+          GIST_GUARD_INTERVAL: "60"
         run: |
           nohup bash "$GITHUB_WORKSPACE/.github/scripts/subs-check/gist-floor-guard.sh" loop \
             > /opt/logs/gist-floor-guard.log 2>&1 &
