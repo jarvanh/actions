@@ -113,7 +113,7 @@ jobs:
           # 与 workflow 内各步骤的固定 tag 对齐；漏改只丢增益（消费方自己仍会拉）。
           for img in rongronggg9/rss-to-telegram:latest \
                      diegosouzapw/omniroute:3.8.51 \
-                     ghcr.io/shuishuipingan/qoder2api-hub:1.5; do
+                     ghcr.io/shuishuipingan/qoder2api-hub:1.6; do
             docker image pull "$img" >"$P/pull-$(printf '%s' "$img" | tr '/:.' '___').log" 2>&1
           done
           PF_EOF
@@ -3458,8 +3458,8 @@ jobs:
 
           QODER_DATA=/dropbox/self-hosted/qoder2api
           QODER_PORT="8790"
-          QODER_IMAGE="ghcr.io/shuishuipingan/qoder2api-hub:1.5"
-          QODER_TAG="1.5"
+          QODER_IMAGE="ghcr.io/shuishuipingan/qoder2api-hub:1.6"
+          QODER_TAG="1.6"
 
           # 通知版式对齐 trae_notify / wb_notify：标题 + 结论/版本/更新/接口/鉴权 +
           # 数据目录 + 原始输出。用法: qoder_notify <标题> <结论> <版本> <更新> <原因> <原始输出> <就绪态>
@@ -3575,7 +3575,7 @@ jobs:
           _accs="$(find "$QODER_DATA/accounts" -maxdepth 1 -name '*.json' ! -name 'settings.json' ! -name 'active_realm.json' 2>/dev/null | wc -l | tr -d ' ')"
 
           echo "6. Version ledger & notification..."
-          # 更新判定用镜像 digest（浮动 tag 1.5 下 tag 恒定，digest 才是真实版本指纹）。
+          # 更新判定用镜像 digest（浮动 tag 1.6 下 tag 恒定，digest 才是真实版本指纹）。
           # 记录写在健康通过之后 —— 未就绪的轮次不落账，下轮仍报「更新」（对齐 trae2api）。
           QODER_VER_FILE="$QODER_DATA/.installed-version"
           QODER_LOCAL_VER="$(head -n 1 "$QODER_VER_FILE" 2>/dev/null || true)"
