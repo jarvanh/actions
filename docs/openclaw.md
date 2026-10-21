@@ -19,8 +19,9 @@
 |---|---|---|
 | Setup Node.js（`current`）+ checkout | 运行时基础 | — |
 | rclone-install / rclone-config | 挂载 Dropbox 的前提 | — |
+| Prefetch cold artifacts（后台并行） | 把与本轮状态无关的大块下载丢到后台：主包 `openclaw.tar.gz`（9.3GB / 实测 54s）+ 三个固定 tag 的网关镜像（omniroute 35.7s、rss-to-telegram ~20s、qoder2api-hub），与挂载 / Tailscale / 装 OpenClaw / 解包重叠。产物先写 `.part` 再 mv、`rc` 文件最后落，消费方读不到半截；**纯增益**，预取失败或没跑完，消费方按原路自己下载 | `/tmp/openclaw-prefetch/` |
 | Mount Dropbox | `rclone mount dropbox: /dropbox`（**runner 身份挂载**：root 挂载会在 token 刷新时把 conf 改成 root:600，导致后续上传 EACCES）；VFS 上限 2G、`--attr-timeout 1m`、`--poll-interval 0` | `/dropbox`，日志 `/opt/logs/rclone-dropbox.log` |
-| Install OpenClaw | `install.sh --no-onboard` → 恢复 `~/.openclaw` → `npm i -g @google/gemini-cli clawhub` | `~/.openclaw` |
+| Install OpenClaw | `install.sh --no-onboard` → 恢复 `~/.openclaw`（等 prefetch 收尾 → **单趟**解包 + 盘上判据）→ `npm i -g @google/gemini-cli clawhub` | `~/.openclaw` |
 | Restore skill symlink for proactivity | proactivity 真实状态落 `~/.openclaw/workspace/skills-data/proactivity`，`~/proactivity` 只是兼容软链 | — |
 | Setup / Enable Tailscale | ephemeral 节点、固定主机名 `openclaw`、开启 SSH 与 Exit Node | `ssh runner@openclaw` |
 | Prepare runtime env | 生成 `~/runtime-env.sh` 并设为 `BASH_ENV`：加载 `~/.openclaw/.env`、继承 runner add_path、本地化 gh/git 认证 | — |
@@ -116,6 +117,20 @@
 |---|---|---|---|
 | `openclaw.tar.gz` | 主状态包，**永远是最后一次健康状态** | 仅健康运行 | 永久覆盖更新 |
 
+- **打包前必须真的把网关停下来**（2026-10-21 修复）：`openclaw gateway stop` 在非交互
+  shell 下会**拒绝执行**（提示 “…or re-run with --force…”），而收尾步骤原先写的是
+  `openclaw gateway stop || echo "already stopped or command failed."` —— 失败被 `||` 吃成
+  静默，这条停止命令**从来没有生效过**：60s 轮询只是干等满 60 秒（run 39515245551 实证
+  05:00:44 拒绝 → 05:01:45 才走下一步），最终归档全程对着仍在写盘的 `~/.openclaw` 打包。
+  现在用 `timeout 60 openclaw gateway stop --force`（`--force` 正是 CLI 给非交互 shell 的
+  显式确认），把等待结果落成 `GW_DOWN` 断言：60s 内没退 → `systemctl --user stop --no-block`
+  再等 120s → 仍在则 `systemctl --user kill -s KILL` 等 10s → 全链失败打 `::warning::`，
+  让「对着活树打包」变成可见事件而不是静默常态。
+  > 升级必须走 systemctl 而不是 pkill：单元是 `Restart=always` / `RestartSec=5`，直接杀进程
+  > 会被拉回来；显式 stop 作业内的结束不算崩溃，不触发重启。`TimeoutStopSec=330`，所以
+  > 同步 `systemctl stop` 会把下线时长交给最坏情况 —— 用 `--no-block` + 自带轮询封顶。
+  > 停止与否**不影响上传门**：`HEALTHY_RUN` 读的是 `/tmp/run-openclaw-meta.env` 里启动时
+  > 记录的 `RECORDED_SUCCESSFUL_OPENCLAW_VERSION=` 标记，不是实时健康探针。
 - 版本化快照与失败现场包（`openclaw-failed-*`）均已于 2026-10-11 移除（主人拍板，省配额）：
   前者是主包的服务端副本（主包坏它也坏），后者保存的是**坏状态**，两者兜底价值都很有限，
   却各自常驻一份 4.2GB+ 云端空间。
@@ -274,7 +289,7 @@ emoji 标题 + ━━━ 分隔线 + 键值/分节区 + 统一收尾行 `⏱ 已
 | 场景 | 行为 |
 |---|---|
 | 配置被外部改成新旧版本都不认 | doctor --fix 尝试修复；失败则回退重装，仍失败需人工修复配置 |
-| 云端主包结构/配置坏（空壳、截断、配置语义坏） | 恢复侧预检（体积/包内 openclaw.json/config validate）不过即自动 revision 回退：逐个历史版本（上限 100）验到第一个能过的为止；全部不可用才失败通知人工 |
+| 云端主包结构/配置坏（空壳、截断、配置语义坏、secrets 解析不了） | 恢复侧判据（体积 ≥50MB / 解包后盘上有 `openclaw.json` / `config validate` 通过 / `secrets audit` unresolved=0）任一不过即自动 revision 回退：逐个历史版本（上限 100）验到第一个能过的为止；全部不可用才失败通知人工。四道判据在**同一趟解包**后读盘上文件（2026-10-21 去重：旧实现同一个包解三趟，白烧 ~180s CPU+IO） |
 | 需要语义决策的迁移（agent roster 归属等） | doctor 与恢复机制拒绝代做决定，需人工显式声明 |
 | 降级/状态库移位 | 会话索引丢失（工作区与配置不受影响）；`*.state-bak-*` / `*.broken-bak-*` 保留可恢复 |
 | Dropbox 挂载失败 | 本轮以首次启动形态运行，不恢复历史状态 |

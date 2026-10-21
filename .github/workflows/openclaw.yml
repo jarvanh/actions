@@ -74,6 +74,70 @@ jobs:
           set -e
           # 写配置 + 持久化：secret 起步 → 掩码 → Dropbox 恢复优先 → 有效性检查 → 同步回 Dropbox
           bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" config
+      - name: Prefetch cold artifacts (后台并行)
+        # 把「与本轮状态无关」的大块下载从串行关键路径上摘出去。实测一轮冷启动里
+        # 主包下载 54s、omniroute 镜像 35.7s、rss 镜像 ~20s 都排在各自消费步骤里干
+        # 等（run 39515245551 逐行核对日志），本步把它们丢到后台，与 mount/tailscale/
+        # 装 openclaw/解包重叠。
+        # 纯增益，不参与正确性：消费方原有的同步下载与 `docker run` 拉取路径一行未动，
+        # 预取没跑完/跑失败就按原路走；产物先写 .part 再 mv，消费方不会看到半截文件。
+        run: |
+          # 关掉 errexit：GH 默认 shell 是 bash -e，本步骤任何一次探测失败（rclone 限流、
+          # 磁盘不足）都不该把整轮打死 —— 预取的语义是「成了是赚，砸了照原路走」。
+          set +e
+          set -uo pipefail
+          P=/tmp/openclaw-prefetch
+          rm -rf "$P"; mkdir -p "$P"
+
+          cat > "$P/pull-openclaw-tar.sh" <<'PF_EOF'
+          #!/usr/bin/env bash
+          # 主包 prefetch：产物落在 prefetch 目录，由恢复步骤等完再 mv 走（同一 fs，rename 免费）。
+          # rc 文件最后写 —— 它出现即代表 .tar.gz 已就位，轮询方不会读到半截。
+          set +e
+          P="$1"
+          rclone copyto dropbox:self-hosted/openclaw.tar.gz "$P/openclaw.tar.gz.part"
+          rc=$?
+          if [ "$rc" -eq 0 ] && [ -s "$P/openclaw.tar.gz.part" ]; then
+            mv "$P/openclaw.tar.gz.part" "$P/openclaw.tar.gz"
+          else
+            rm -f "$P/openclaw.tar.gz.part"
+            [ "$rc" -eq 0 ] && rc=1
+          fi
+          echo "$rc" > "$P/openclaw-tar.rc"
+          PF_EOF
+          cat > "$P/pull-images.sh" <<'PF_EOF'
+          #!/usr/bin/env bash
+          set +e
+          # $1 = prefetch 目录（父 shell 的变量不会自动进子 shell，必须显式传）
+          P="$1"
+          # 与 workflow 内各步骤的固定 tag 对齐；漏改只丢增益（消费方自己仍会拉）。
+          for img in rongronggg9/rss-to-telegram:latest \
+                     diegosouzapw/omniroute:3.8.51 \
+                     ghcr.io/shuishuipingan/qoder2api-hub:1.5; do
+            docker image pull "$img" >"$P/pull-$(printf '%s' "$img" | tr '/:.' '___').log" 2>&1
+          done
+          PF_EOF
+          chmod +x "$P/pull-openclaw-tar.sh" "$P/pull-images.sh"
+
+          nohup bash "$P/pull-images.sh" "$P" >"$P/pull-images.out" 2>&1 &
+          echo "🚀 已后台拉起网关镜像预取（pid $!）"
+
+          tar_bytes="$(rclone size --json dropbox:self-hosted/openclaw.tar.gz 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null)" || tar_bytes=0
+          case "${tar_bytes:-0}" in ''|*[!0-9]*) tar_bytes=0 ;; esac
+          if [ "$tar_bytes" -eq 0 ]; then
+            echo "ℹ️ 未取得主包远端体积，跳过预取（恢复步骤按原路同步下载）"
+          else
+            # 预取不能反过来把恢复侧挤爆：留 2 倍包体积 + 1GB（与恢复侧 require_free_kb 同口径）
+            avail_kb="$(df -Pk /tmp | awk 'NR==2 {print $4}')"
+            need_kb="$(( tar_bytes / 1024 * 2 + 1024 * 1024 ))"
+            if [ "${avail_kb:-0}" -lt "$need_kb" ]; then
+              echo "ℹ️ /tmp 空间不足以预取主包（available=${avail_kb}KB required=${need_kb}KB），跳过"
+            else
+              nohup bash "$P/pull-openclaw-tar.sh" "$P" >"$P/openclaw-tar.out" 2>&1 &
+              echo $! > "$P/openclaw-tar.pid"
+              echo "🚀 已后台预取主包 openclaw.tar.gz（${tar_bytes}B，pid $(cat "$P/openclaw-tar.pid")）"
+            fi
+          fi
       - name: Mount Dropbox
         run: |
           sudo apt-get update
@@ -241,76 +305,96 @@ jobs:
           done
           if [ "$ARCHIVE_PRESENT" = "1" ]; then
             echo "📦 Found openclaw.tar.gz! Downloading and extracting..."
-            rclone copyto dropbox:self-hosted/openclaw.tar.gz "$TMP_OPENCLAW_TAR"
-            archive_kb=$(du -sk "$TMP_OPENCLAW_TAR" | awk '{print $1}')
-            if [ -z "${archive_kb:-}" ] || [ "$archive_kb" -le 0 ]; then
-              echo "❌ openclaw extract preflight: unable to calculate archive size" >&2
-              exit 1
+            # 主包下载已在 Prefetch cold artifacts 步骤里于后台起跑（实测 9.3GB / 54s
+            # 是纯串行等待）。这里只等它收尾：轮询 rc 文件（prefetch 进程先没了就立刻收，
+            # 不空等），命中则 mv 进恢复路径 —— 同一文件系统，mv 是 rename 不是拷贝。
+            # 未命中/失败一律回落原有同步下载，判据与语义不变。
+            PREFETCH_DIR="/tmp/openclaw-prefetch"
+            if [ -f "$PREFETCH_DIR/openclaw-tar.pid" ]; then
+              _pf_waited=0
+              while [ ! -f "$PREFETCH_DIR/openclaw-tar.rc" ] && [ "$_pf_waited" -lt 900 ]; do
+                _pf_pid="$(cat "$PREFETCH_DIR/openclaw-tar.pid" 2>/dev/null | tr -dc '0-9')"
+                [ -n "$_pf_pid" ] || break
+                kill -0 "$_pf_pid" 2>/dev/null || break
+                sleep 2
+                _pf_waited=$((_pf_waited + 2))
+              done
+              _pf_rc="$(cat "$PREFETCH_DIR/openclaw-tar.rc" 2>/dev/null || echo none)"
+              if [ "$_pf_rc" = "0" ] && [ -s "$PREFETCH_DIR/openclaw.tar.gz" ]; then
+                mv "$PREFETCH_DIR/openclaw.tar.gz" "$TMP_OPENCLAW_TAR"
+                rm -f "$PREFETCH_DIR/openclaw.tar.gz.part" "$PREFETCH_DIR/openclaw-tar.rc" "$PREFETCH_DIR/openclaw-tar.pid" 2>/dev/null || true
+                echo "✅ 主包 prefetch 命中（等待 ${_pf_waited}s）"
+              else
+                # 回落同步下载前必须清掉 prefetch 的 .part：后台进程被杀时不会自己删，
+                # 残留的 9GB 会把 /tmp 挤到解包预检（kb*3+1GB）硬失败 —— 白丢一整轮。
+                echo "⚠️ 主包 prefetch 未命中（rc=${_pf_rc}），回落同步下载"
+                rm -f "$PREFETCH_DIR/openclaw.tar.gz.part" 2>/dev/null || true
+                rclone copyto dropbox:self-hosted/openclaw.tar.gz "$TMP_OPENCLAW_TAR"
+              fi
+            else
+              rm -f "$PREFETCH_DIR/openclaw.tar.gz.part" 2>/dev/null || true
+              rclone copyto dropbox:self-hosted/openclaw.tar.gz "$TMP_OPENCLAW_TAR"
             fi
-            echo "openclaw.tar.gz 大小: ${archive_kb}KB"
-            require_free_kb /tmp $((archive_kb * 3 + 1024 * 1024)) "openclaw extract preflight"
             # 2026-10-02 二次事故：云端主包被 98KB 空壳包覆盖后仍被恢复上岗 —— 恢复侧原
             # 只验 gzip 完整性（98KB 空壳照样通过），而 preflight doctor 会现造一份合法
             # 配置骗过归档侧 config validate，健康门全绿后空壳照样打上行。恢复是最后防线：
             # 真实主包 GB 级，50MB 绝对下限留约两个数量级余量，且 openclaw.json 必须真实
-            # 在包内。结构判据之外 2026-10-11 加配置预检（config_precheck_ok，见下）：
-            # 任一不满足 → 走 Dropbox revision 回退（候选上限 100）逐个验到能过为止，
-            # 全部不可用才 exit 1（任务失败→通知）。宁可失败，不要空壳/坏配置上岗。
+            # 在包内。结构判据之外 2026-10-11 加配置预检：任一不满足 → 走 Dropbox revision
+            # 回退（候选上限 100）逐个验到能过为止，全部不可用才 exit 1（任务失败→通知）。
+            # 宁可失败，不要空壳/坏配置上岗。
+            #
+            # 2026-10-21 改成单趟：上面四道判据一条没减，但读的是**解包之后的盘上文件**。
+            # 旧实现对同一个包解了三趟全量流 —— listing_has_config 的 tar -tf、ARCHIVE_OK
+            # 的 tar -tf、最终 tar -xf，实测白烧 ~180s CPU+IO。第二趟想换来的「gzip 流
+            # 完整、tar 结构没坏」这个信息，一趟带写入的解压本来就用非零退出码给出了。
+            # 顺带修掉一处哑门：旧流程在 if 之外做 `_verdict="$(config_precheck_ok ...)"`
+            # 赋值，本步骤跑在 bash -e 下，配置判据一旦 FAIL 就直接把整步打死，
+            # revision 回退分支根本走不到 —— 预检越严，回退越是死代码。
             OPENCLAW_TARBALL_MIN_KB=$((50 * 1024))
-            listing_has_config() {
-              (
-                set +o pipefail
-                if command -v pigz >/dev/null 2>&1; then pigz -dc "$1" 2>/dev/null; else gunzip -c "$1" 2>/dev/null; fi | tar -tf - 2>/dev/null | grep -q '^\.openclaw/openclaw\.json$'
-              )
+            extract_openclaw_archive() {
+              # 用法: extract_openclaw_archive <tar.gz 路径> <落点目录>
+              # pigz 并行解压（2026-10-02 实测 305MB 样本 5.44s → 3.29s；产物是标准
+              # gzip 流，与 tar -xzf 完全兼容）。pipefail 必须开：否则 tar 的失败会被
+              # pigz 的成功码掩盖。
+              local tar="$1" dest="$2"
+              rm -rf "$dest"
+              mkdir -p "$dest"
+              if command -v pigz >/dev/null 2>&1; then
+                ( set -o pipefail; pigz -dc "$tar" | tar -xf - -C "$dest" )
+              else
+                tar -xzf "$tar" -C "$dest"
+              fi
             }
-            # 2026-10-11 恢复侧配置预检（结构判据之外的语义判据）：把包内 openclaw.json
-            # 抽出来用**已安装的** openclaw 二进制 validate。此前云端主包可能顶着
-            # 「结构完好」（≥50MB 且含 openclaw.json）的状态被恢复上岗，网关却因配置
-            # 语义坏起不来，且每轮恢复同一份坏主包、无自动出口 —— 归档侧 config
-            # validate 门（退出码 5 不覆盖云端）只挡得住「归档时配置已坏」，挡不住
-            # 「归档时健康、运行中写坏」的形态（2026-09-18 事故）。配置判据加进
-            # tarball_usable 后，revision 回退的触发条件从「结构坏」扩到「结构或配置坏」，
-            # 逐个历史版本验到第一个能过的为止 —— 主包真源兜底闭环。
-            # 二进制不可得（openclaw 未装上/安装失败）时跳过配置判据、只按结构放行：
-            # 没有校验器比有结构校验强，拦死恢复反而让下一轮连结构兜底都没了。
-            tar_extract_config() {
-              (
-                set +o pipefail
-                if command -v pigz >/dev/null 2>&1; then pigz -dc "$1" 2>/dev/null; else gunzip -c "$1" 2>/dev/null; fi | tar -xf - -C "$2" .openclaw/openclaw.json 2>/dev/null
-              )
-            }
-            tar_extract_env() {
-              (
-                set +o pipefail
-                if command -v pigz >/dev/null 2>&1; then pigz -dc "$1" 2>/dev/null; else gunzip -c "$1" 2>/dev/null; fi | tar -xf - -C "$2" .openclaw/.env 2>/dev/null
-              )
-            }
-            config_precheck_ok() {
-              # 用法: config_precheck_ok <tar.gz 路径> <工作目录（抽包落点）>
-              local tar="$1" workdir="$2"
+            validate_openclaw_tree() {
+              # 用法: validate_openclaw_tree <解包落点>，stdout 给 PASS/SKIP/FAIL 结论
+              # 三道判据由宽到严：结构（openclaw.json 真在包里）→ 配置语义 → secrets 可解析性。
+              # 配置判据（2026-10-11）：主包可能顶着「结构完好」被恢复上岗，网关却因配置
+              # 语义坏起不来，且每轮恢复同一份坏主包、无自动出口 —— 归档侧 config validate
+              # 门（退出码 5 不覆盖云端）只挡得住「归档时配置已坏」，挡不住「归档时健康、
+              # 运行中写坏」的形态（2026-09-18 事故）。
+              # 二进制不可得（openclaw 未装上/安装失败）时跳过语义判据、只按结构放行：
+              # 没有校验器比有结构校验强，拦死恢复反而让下一轮连结构兜底都没了。
+              # secrets 判据（2026-10-19 事故 run 39229141269）：config validate 不校验
+              # SecretRef 可解析性，「新增 telegram 账号但 env 变量没进 secrets allowlist」
+              # 的配置照样 validate PASS，网关却在 secrets 激活阶段恒崩（required secrets
+              # are unavailable）→ 自愈链（doctor / 回退同版本重装）对该故障无出口，反复
+              # 恢复同一份坏主包死循环。unresolved>0 即判不合格，回退到「能真正启动」的
+              # 历史版本为止。audit 从 $OPENCLAW_STATE_DIR/.env 取值 —— 单趟解包后 .env
+              # 已在盘上（老 revision 包内没有 .env 也不会错杀：老式明文配置不依赖 env
+              # 引用，audit 仍给 unresolved=0）。audit 自身崩溃按不合格处理 —— 宁可回退，
+              # 不可放行必坏包。
+              local root="$1"
+              if [ ! -s "$root/.openclaw/openclaw.json" ]; then
+                echo "FAIL (openclaw.json missing)"
+                return 1
+              fi
               command -v openclaw >/dev/null 2>&1 || { echo "SKIP (openclaw not on PATH)"; return 0; }
-              rm -rf "$workdir/.openclaw"
-              tar_extract_config "$tar" "$workdir" || { echo "FAIL (extract)"; return 1; }
-              if [ ! -s "$workdir/.openclaw/openclaw.json" ]; then
-                echo "FAIL (config missing)"; return 1
+              if ! OPENCLAW_CONFIG_PATH="$root/.openclaw/openclaw.json" openclaw config validate >/dev/null 2>&1; then
+                echo "FAIL (config invalid)"
+                return 1
               fi
-              if ! OPENCLAW_CONFIG_PATH="$workdir/.openclaw/openclaw.json" openclaw config validate >/dev/null 2>&1; then
-                echo "FAIL (config invalid)"; return 1
-              fi
-              # 2026-10-19 事故（run 39229141269）：config validate 不校验 SecretRef 可解析性，
-              # 「新增 telegram 账号但 env 变量没进 secrets allowlist」的配置照样 validate
-              # PASS，网关却在 secrets 激活阶段恒崩（required secrets are unavailable）→
-              # 自愈链（doctor / 回退同版本重装）对该故障无出口，反复恢复同一份坏主包死循环。
-              # 补 secrets audit 门：unresolved>0 即判不合格 → 走 revision 回退，
-              # 直到找到「能真正启动」的历史版本为止。
-              # 必须把包内 .env 一并抽出：audit 从 $OPENCLAW_STATE_DIR/.env 取值，
-              # 缺了会把全部 env 引用误判成 unresolved（实测 17 个），错杀健康历史包。
-              # 老 revision 没有 .env 也不会错杀：老式明文配置不依赖 env 引用，
-              # audit 仍给 unresolved=0。audit 自身崩溃（exit 1 等）按不合格处理 ——
-              # 宁可回退，不可放行必坏包。
-              tar_extract_env "$tar" "$workdir" || true
               local audit_out audit_rc unresolved_n
-              if audit_out="$(OPENCLAW_STATE_DIR="$workdir/.openclaw" OPENCLAW_CONFIG_PATH="$workdir/.openclaw/openclaw.json" timeout 120 openclaw secrets audit 2>&1)"; then
+              if audit_out="$(OPENCLAW_STATE_DIR="$root/.openclaw" OPENCLAW_CONFIG_PATH="$root/.openclaw/openclaw.json" timeout 120 openclaw secrets audit 2>&1)"; then
                 echo "PASS"
                 return 0
               fi
@@ -323,14 +407,41 @@ jobs:
               echo "FAIL (secrets audit rc=${audit_rc})"
               return 1
             }
-            CONFIG_CHECK_DIR="$(mktemp -d /tmp/openclaw-config-check.XXXXXX)"
+            try_openclaw_candidate() {
+              # 用法: try_openclaw_candidate <tar.gz 路径> <对象名>
+              # 通过 = 体积达标 + 能完整解开 + 盘上判据全过，解好的树留在 $RESTORE_DIR 等就位；
+              # 任一不过 = 清掉 $RESTORE_DIR，绝不让下一个候选对着上一次的半成品判。
+              local tar="$1" label="$2" kb
+              kb="$(du -sk "$tar" 2>/dev/null | awk '{print $1}')"
+              if [ -z "${kb:-}" ] || [ "$kb" -le 0 ]; then
+                echo "⚠️ ${label}: 无法取得包体积，按不可用处理"
+                return 1
+              fi
+              echo "${label} 大小: ${kb}KB"
+              if [ "$kb" -lt "$OPENCLAW_TARBALL_MIN_KB" ]; then
+                echo "⚠️ ${label} 体积不足（${kb}KB < ${OPENCLAW_TARBALL_MIN_KB}KB），按空壳处理"
+                return 1
+              fi
+              require_free_kb /tmp $((kb * 3 + 1024 * 1024)) "${label} extract preflight"
+              if ! extract_openclaw_archive "$tar" "$RESTORE_DIR"; then
+                echo "⚠️ ${label} 解包失败（gzip 流不完整或 tar 结构坏）"
+                rm -rf "$RESTORE_DIR"
+                return 1
+              fi
+              OPENCLAW_RESTORE_VERDICT="$(validate_openclaw_tree "$RESTORE_DIR" || true)"
+              if [[ "$OPENCLAW_RESTORE_VERDICT" == FAIL* ]]; then
+                echo "⚠️ ${label} 判据未通过（${OPENCLAW_RESTORE_VERDICT}），不采用"
+                rm -rf "$RESTORE_DIR"
+                return 1
+              fi
+              echo "✅ ${label} 结构+配置+secrets 判据通过（${OPENCLAW_RESTORE_VERDICT}）"
+              return 0
+            }
             tarball_usable=0
-            _verdict="$(config_precheck_ok "$TMP_OPENCLAW_TAR" "$CONFIG_CHECK_DIR")"
-            if [ "$archive_kb" -ge "$OPENCLAW_TARBALL_MIN_KB" ] && listing_has_config "$TMP_OPENCLAW_TAR" && [[ "$_verdict" == PASS* ]]; then
+            if try_openclaw_candidate "$TMP_OPENCLAW_TAR" "云端主包"; then
               tarball_usable=1
-              echo "✅ 云端主包结构+配置+secrets 预检通过（$_verdict）"
             else
-              echo "⚠️ 云端主包异常（size=${archive_kb}KB 要求 ≥${OPENCLAW_TARBALL_MIN_KB}KB / 含 openclaw.json / 配置预检=$_verdict），尝试 revision 回退..."
+              echo "⚠️ 云端主包不可用，尝试 revision 回退..."
               DBX_TOKEN=$(rclone config show dropbox 2>/dev/null | sed -n 's/^token = .*"access_token":"\([^"]*\)".*/\1/p' | tail -1)
               if [ -n "$DBX_TOKEN" ]; then
                 # limit=100（Dropbox API 上限即 100）：历史版本要多捞些，逐个验到能过为止
@@ -338,7 +449,7 @@ jobs:
                   -H "Authorization: Bearer $DBX_TOKEN" -H "Content-Type: application/json" \
                   -d '{"path":"/self-hosted/openclaw.tar.gz","mode":"path","limit":100}' \
                   | python3 -c "import json,sys; d=json.load(sys.stdin); [print(r['rev']) for r in d.get('entries',[]) if r.get('size',0) >= ${OPENCLAW_TARBALL_MIN_KB} * 1024]" 2>/dev/null)
-                echo "revision 候选（结构达标）: ${#GOOD_REVS[@]} 个"
+                echo "revision 候选（体积达标）: ${#GOOD_REVS[@]} 个"
                 _rev_n=0
                 for _rev in "${GOOD_REVS[@]:-}"; do
                   [ -z "$_rev" ] && continue
@@ -347,65 +458,35 @@ jobs:
                   if curl -s --max-time 1800 -X POST https://content.dropboxapi.com/2/files/download \
                      -H "Authorization: Bearer $DBX_TOKEN" \
                      -H "{\"path\":\"/self-hosted/openclaw.tar.gz\",\"rev\":\"$_rev\"}" \
-                     -o "$TMP_OPENCLAW_TAR" && [ -s "$TMP_OPENCLAW_TAR" ] \
-                     && listing_has_config "$TMP_OPENCLAW_TAR"; then
-                    archive_kb=$(du -sk "$TMP_OPENCLAW_TAR" | awk '{print $1}')
-                    _verdict="$(config_precheck_ok "$TMP_OPENCLAW_TAR" "$CONFIG_CHECK_DIR")"
-                    if [[ "$_verdict" == PASS* ]]; then
-                      require_free_kb /tmp $((archive_kb * 3 + 1024 * 1024)) "openclaw revision extract preflight"
-                      tarball_usable=1
-                      echo "✅ revision $_rev 可用（${archive_kb}KB，$_verdict）"
-                      break
-                    fi
-                    echo "⚠️ revision $_rev 结构可用但配置预检失败（$_verdict），继续往前找"
+                     -o "$TMP_OPENCLAW_TAR" \
+                     && try_openclaw_candidate "$TMP_OPENCLAW_TAR" "revision $_rev"; then
+                    tarball_usable=1
+                    break
                   fi
                 done
               else
                 echo "⚠️ 未能从 rclone 配置取到 Dropbox token，跳过 revision 回退"
               fi
             fi
-            rm -rf "$CONFIG_CHECK_DIR"
             if [ "$tarball_usable" -ne 1 ]; then
-              echo "❌ 云端主包与全部候选 revision 均不可用（结构/配置预检未通过）：拒绝用坏状态上岗" >&2
+              echo "❌ 云端主包与全部候选 revision 均不可用（体积/解包/配置/secrets 判据未通过）：拒绝用坏状态上岗" >&2
               exit 1
             fi
-            # 优化（2026-10-02）：恢复侧 gzip 单线程 → pigz 并行。实测 305MB 样本
-            # 解压 5.44s → 3.29s（1.65 倍，注意比压缩侧的 2.65 倍低：gzip 流解压
-            # 可并行度不如压缩）。产物仍是标准 gzip 流，与 tar -xzf 完全兼容。
-            # pipefail 必须开：否则 tar 失败会被 pigz 的成功码掩盖。
-            ARCHIVE_OK=0
-            if command -v pigz >/dev/null 2>&1; then
-              # 流已被 pigz -dc 解压成明文 tar，tar 这层只能用 -tf；-tzf 会对明文
-              # 再解压一次，恒报 "not in gzip format"（2026-10-02 事故：无论云端
-              # 包多健康，完整性校验恒失败 → 恢复永远跳过 → 空壳上岗）。
-              ( set -o pipefail; pigz -dc "$TMP_OPENCLAW_TAR" | tar -tf - >/dev/null 2>&1 ) && ARCHIVE_OK=1
-            else
-              tar -tzf "$TMP_OPENCLAW_TAR" >/dev/null 2>&1 && ARCHIVE_OK=1
-            fi
-            if [ "$ARCHIVE_OK" = "1" ]; then
-              if command -v pigz >/dev/null 2>&1; then
-                ( set -o pipefail; pigz -dc "$TMP_OPENCLAW_TAR" | tar -xf - -C "$RESTORE_DIR" )
+            # 判据已在盘上过，剩下的唯一动作是就位：清空 ~/.openclaw 后把通过校验的树搬过去。
+            # cp -a → mv（2026-10-02）：/tmp 与 $HOME 实测同一文件系统（设备号相同），跨目录
+            # mv 是 rename 而非拷贝 —— 6.39GiB 实测 cp -a 37.3s → mv 0.002s，语义等价（同样
+            # 先清空再放入新内容）。回退：若将来换机导致跨设备 mv 失败，重建目录并退回 cp -a。
+            if [ -d "$RESTORE_DIR/.openclaw" ]; then
+              find ~/.openclaw -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+              if rmdir "$HOME/.openclaw" 2>/dev/null && mv "$RESTORE_DIR/.openclaw" "$HOME/.openclaw" 2>/dev/null; then
+                :
               else
-                tar -xzf "$TMP_OPENCLAW_TAR" -C "$RESTORE_DIR"
+                mkdir -p "$HOME/.openclaw"
+                cp -a "$RESTORE_DIR/.openclaw/." "$HOME/.openclaw/"
               fi
-              if [ -d "$RESTORE_DIR/.openclaw" ]; then
-                find ~/.openclaw -mindepth 1 -maxdepth 1 -exec rm -rf {} +
-                # 优化（2026-10-02）：cp -a → mv。/tmp 与 $HOME 实测同一文件系统
-                # （设备号相同），跨目录 mv 是 rename 而非拷贝：6.39GiB 实测
-                # cp -a 37.3s → mv 0.002s。语义等价（同样先清空再放入新内容）。
-                # 回退：若将来换机导致跨设备 mv 失败，重建目录并退回 cp -a。
-                if rmdir "$HOME/.openclaw" 2>/dev/null && mv "$RESTORE_DIR/.openclaw" "$HOME/.openclaw" 2>/dev/null; then
-                  :
-                else
-                  mkdir -p "$HOME/.openclaw"
-                  cp -a "$RESTORE_DIR/.openclaw/." "$HOME/.openclaw/"
-                fi
-                echo "✅ Restored ~/.openclaw from archive"
-              else
-                echo "⚠️ Archive does not contain .openclaw root, skipping archive restore."
-              fi
+              echo "✅ Restored ~/.openclaw from archive"
             else
-              echo "⚠️ openclaw.tar.gz validation failed, skipping archive restore."
+              echo "⚠️ Archive does not contain .openclaw root, skipping archive restore."
             fi
             cleanup_archive_workdir
           else
@@ -6419,7 +6500,21 @@ jobs:
           # 通知真源在 step 顶层 source 一次（勿挪进下面的函数体，理由见启动步骤同名注释 / 规范 4.4）
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
           echo "1. Stopping OpenClaw gateway..."
-          openclaw gateway stop || echo "OpenClaw already stopped or command failed."
+          # 2026-10-21 修复（run 39515245551 日志实证）：`openclaw gateway stop` 在非交互
+          # shell 下**拒绝执行**——05:00:44 打出 "…or re-run with --force if you really mean
+          # it."，紧接着 `|| echo "already stopped or command failed"` 把这条失败吃成静默，
+          # 于是这条停止命令从来没生效过：60s 轮询干等到 05:01:45（整 60s 白花），最终归档
+          # 全程对着**仍在写盘的 ~/.openclaw** 打包（state sqlite 连 -wal 都是活体快照）。
+          # --force 就是给这种场景的显式确认（`stop --help`: "Allow stop from a non-interactive
+          # shell"），语义正确；timeout 60 防 CLI 自身卡死；本步骤是 set -e，用 if 包裹，
+          # 停止失败只降级告警、不打断收尾（还有 6 个归档要做）。
+          GW_STOP_LOG=/tmp/openclaw-gateway-stop.log
+          if timeout 60 openclaw gateway stop --force >"$GW_STOP_LOG" 2>&1; then
+            echo "openclaw gateway stop --force 已执行"
+          else
+            echo "⚠️ openclaw gateway stop --force 失败（rc=$?），日志尾部："
+            tail -n 20 "$GW_STOP_LOG" 2>/dev/null || true
+          fi
           # 优化（2026-10-01）：原为无条件 sleep 1m（纯等待 60s）。改为轮询网关
           # 真退出即继续，通常数秒完成；超时 60s 兜底，语义与原来等价。
           # ⚠️ 判定必须用 systemctl（2026-10-01 二修）：首版写的是
@@ -6428,13 +6523,52 @@ jobs:
           #   gateway --port 18789`）。该 pgrep 恒不匹配 → 循环第 1 次就 break、
           #   等 0s，等于把等待直接删掉，保护形同虚设；反之若将来有进程 cmdline
           #   含该串，又会反常地等满 60s。改用 unit 的 active 状态才是真判定。
+          # 2026-10-21 补升级链：旧写法无论等没等到都往下走，"已退出"根本没被断言过
+          # （实测恒假 —— 因为 stop 从没执行）。现在把结果落成 GW_DOWN，等不到就升级，
+          # 全链失败则在日志里留 ::warning::，让「对着活树打包」这件事可见。
+          GW_DOWN=0
+          gw_is_active() {
+            [ "$(systemctl --user is-active openclaw-gateway.service 2>/dev/null || echo inactive)" = "active" ]
+          }
           for _i in $(seq 1 60); do
-            if [ "$(systemctl --user is-active openclaw-gateway.service 2>/dev/null || echo inactive)" != "active" ]; then
+            if ! gw_is_active; then
               echo "✅ OpenClaw gateway 已退出（等待 $((_i - 1))s）"
+              GW_DOWN=1
               break
             fi
             sleep 1
           done
+          # 升级走 systemd 自己的 stop 作业：单元 Restart=always，直接 kill 进程会在
+          # RestartSec=5 后被拉回来；显式 stop 作业内的一律不重启（restart 只看崩溃）。
+          # --no-block + 自带轮询：单元 TimeoutStopSec=330，同步等等于把下线时长交给
+          # 最坏情况，这里只给它 120s（优雅停机的大头在前几十秒）。
+          if [ "$GW_DOWN" != "1" ]; then
+            echo "⚠️ 60s 内 unit 仍 active，改用 systemctl --user stop 兜底..."
+            systemctl --user stop --no-block openclaw-gateway.service 2>/dev/null || true
+            for _i in $(seq 1 120); do
+              if ! gw_is_active; then
+                echo "✅ OpenClaw gateway 已退出（systemctl stop 再等 ${_i}s）"
+                GW_DOWN=1
+                break
+              fi
+              sleep 1
+            done
+          fi
+          if [ "$GW_DOWN" != "1" ]; then
+            echo "⚠️ systemctl stop 作业 120s 未完成，发送 SIGKILL"
+            systemctl --user kill -s KILL openclaw-gateway.service 2>/dev/null || true
+            for _i in $(seq 1 10); do
+              if ! gw_is_active; then
+                GW_DOWN=1
+                break
+              fi
+              sleep 1
+            done
+          fi
+          if [ "$GW_DOWN" != "1" ]; then
+            echo "::warning::OpenClaw gateway 未能停止（unit 仍 active），本轮最终归档是在网关写盘状态下打的包"
+            echo "⚠️ 网关未能停止，最终归档将对着活动状态打包"
+          fi
 
           echo "2. Killing background archive process..."
           if [ -f /tmp/openclaw-archive-loop.launcher.pid ]; then
