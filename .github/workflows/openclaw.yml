@@ -5193,6 +5193,33 @@ jobs:
             fi
           done
 
+          # 派生副本 7 天自动清理（2026-10-21）：状态库迁移与 doctor 会在原地留下同名
+          # *.bak（单个 agent 库 0.5–0.8GB），skills 又往 backups/ 堆时间戳快照 —— 这两类
+          # 都会被打进主包、下一轮原样还原回来，只增不减（实测 4.69GB + 1.55GB，约占包体
+          # 四成，且每轮 doctor 还在往上加）。剪在打包之前，云端主包才会跟着一起瘦下来。
+          # 判龄只认 mtime 不认名字：backups/ 下命名格式不止一种（YYYYMMDD-HHMM、
+          # YYYYMMDD-HHMM-tag、YYMM-DDHHMM），解析名字必漏。
+          # 清理失败不拦归档：剪不动大不了本轮还是大包，正事是打包本身。
+          PRUNE_DAYS="${OPENCLAW_PRUNE_DAYS:-7}"
+          prune_victims="/tmp/openclaw-prune-victims.$$"
+          {
+            find "$SRC_DIR/backups" -mindepth 1 -maxdepth 1 -mtime +"$PRUNE_DAYS" -print0 2>/dev/null
+            find "$SRC_DIR" -name '*.bak' -type f -mtime +"$PRUNE_DAYS" -print0 2>/dev/null
+          } > "$prune_victims" || true
+          prune_bytes=0
+          prune_count=0
+          while IFS= read -r -d '' victim; do
+            [ -e "$victim" ] || continue
+            vsz=$(du -sb "$victim" 2>/dev/null | awk '{print $1+0}')
+            rm -rf -- "$victim" 2>/dev/null || continue
+            prune_bytes=$(( prune_bytes + ${vsz:-0} ))
+            prune_count=$(( prune_count + 1 ))
+          done < "$prune_victims"
+          rm -f "$prune_victims"
+          if [ "$prune_count" -gt 0 ]; then
+            echo "openclaw_pruned_derived_copies count=$prune_count bytes=$prune_bytes days=$PRUNE_DAYS"
+          fi
+
           # Copy a stable snapshot first. rsync may return 24 when live files vanish
           # during copy; that is expected for active OpenClaw session/lock files, so
           # accept 24 and still validate the final tarball.

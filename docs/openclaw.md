@@ -142,6 +142,14 @@
   与 AI 网关归档（见第六节）。
 - rsstt 归档带空数据保护：数据目录内只有占位 `.keep`（本轮容器没起来）时不打包、不上传，
   只发一条「归档跳过」告警——空包上传会用几百字节的 tar 覆盖掉云端正常归档。
+- **派生副本 7 天自动清理（2026-10-21）**：归档脚本在 rsync 暂存**之前**剪两类只增不减的
+  派生物 —— `backups/` 下的顶层时间戳条目、以及全树 `*.bak`（状态库迁移与 doctor 留下的
+  同名副本，单个 agent 库 0.5–0.8GB）。判龄只认 `mtime +7`，不解析目录名：`backups/` 下
+  命名格式不止一种（`YYYYMMDD-HHMM` / `YYYYMMDD-HHMM-tag` / `YYMM-DDHHMM`），按名字剪必漏。
+  剪在打包之前才有意义：这两类原先会被打进主包、下一轮原样还原回来，等于自我放大
+  （实测 4.69GB + 1.55GB，约占包体四成，且每跑一次 doctor 再加 ~130MB）。
+  清理是增益、不拦归档：计数与字节只在真剪到东西时打一行 `openclaw_pruned_derived_copies`。
+  天数可用 `OPENCLAW_PRUNE_DAYS` 覆盖，默认 7。
 - **完整性校验（取代缩水保护）**：打包前校验关键文件必须存在且非空 —— 主包是
   `.openclaw/openclaw.json`，zcode 是 `.zcode/cli/db/db.sqlite`（会话正文）、
   `.zcode/v2/tasks-index.sqlite`（侧栏列表）与 `.zcode/server/zcode-server.cjs`（服务端 bundle）。
