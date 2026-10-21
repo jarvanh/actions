@@ -3626,10 +3626,15 @@ jobs:
           # 按钮本体在 Telegram 服务端，不在任何本地持久化载体里（实测 2026-10-09
           # 丢过一次、靠人工重设），故每轮幂等重建：目标 bot 挂 web_app + 旧 bot
           # @sbsbsbsbsb_openclaw_bot 清成 commands，避免留下双入口。
-          if [ -f "$HOME/.openclaw/workspace/scripts/ensure-miniapp-menu.sh" ]; then
+          # ⚠️ 2026-10-22 修复：脚本本体此前从未入库（commit 1e30239 只有这 9 行调用，
+          # workspace 副本丢失后安全网空转 3 天）。真源改为本仓库 .github/scripts/telegram/，
+          # 与 tg_notify.sh 同级；workspace 路径仅作过渡期兜底。
+          if [ -f "$GITHUB_WORKSPACE/.github/scripts/telegram/ensure-miniapp-menu.sh" ]; then
+            bash "$GITHUB_WORKSPACE/.github/scripts/telegram/ensure-miniapp-menu.sh" || true
+          elif [ -f "$HOME/.openclaw/workspace/scripts/ensure-miniapp-menu.sh" ]; then
             bash "$HOME/.openclaw/workspace/scripts/ensure-miniapp-menu.sh" || true
           else
-            echo "⚠️ ensure-miniapp-menu.sh 缺失，跳过 Mini App 入口重建"
+            echo "⚠️ ensure-miniapp-menu.sh 缺失（仓库与 workspace 均无），跳过 Mini App 入口重建"
           fi
 
       - name: Run zcode2api (GLM gateway)
