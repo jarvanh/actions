@@ -1169,9 +1169,17 @@ def _run():
             # 但它在 stderr 中段，会被上面「只取末 3 行」截掉 —— 上行全 0 时
             # 日志里只剩 [probe] 行，看不出 do 失败的真实原因（RST/超时/状态码）。
             # 这里单独捞 debug 行（限量 + 已脱敏），只增日志，不改测速逻辑。
+            #
+            # 上传诚实度台账（2026-10-19）：[debug-ul-ack] sent/confirmed/clawed/ratio
+            # 是「上传读数是否全由服务端确认支撑」的审计凭证，**无条件**落日志 ——
+            # 此前它被上面「末 3 行」截掉、又不满足 up<=0 的捞取条件，导致正常运行时
+            # 确认率 ratio 完全不可见、诚实度无法审计。每个上行出值的节点都记一行。
+            ack = [l for l in (err or '').splitlines() if '[debug-ul-ack]' in l]
+            if ack:
+                print('debug-ul-ack: ' + ' | '.join(ack[:2]))
             if row['up'] <= 0:
                 dbg = [l for l in (err or '').splitlines()
-                       if '[debug-ul' in l][:8]  # 含 [debug-ul-attr]（失败归因探针 v1.0.4-jh.7）
+                       if '[debug-ul' in l and '[debug-ul-ack]' not in l][:8]  # 含 [debug-ul-attr]
                 if dbg:
                     print('debug-ul: ' + ' | '.join(dbg))
 
