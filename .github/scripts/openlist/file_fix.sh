@@ -57,7 +57,7 @@ _get_storage_addition_from_db() {
   local db_src="/opt/openlist-data/data.db"
   [ -f "$db_src" ] || db_src="/dropbox/self-hosted/openlist/data/data.db"
   [ -f "$db_src" ] || { echo "db 文件不存在: /opt/openlist-data/data.db 与 /dropbox/.../data.db 均缺失" >&2; return 1; }
-  local db_local="/tmp/ol_data_$$.db"
+  local db_local="/tmp/ol_data_${BASHPID:-$$}.db"
   cp "$db_src" "$db_local" || return 1
   cp "${db_src}-wal" "${db_local}-wal" 2>/dev/null || true
   cp "${db_src}-shm" "${db_local}-shm" 2>/dev/null || true
@@ -96,7 +96,7 @@ _crypt_diag() {
 _get_crypt_config() {
   local mount="$1"
   local ol_token="" resp="" addition="" why=""
-  local db_err="/tmp/ol_db_err_$$.log"
+  local db_err="/tmp/ol_db_err_${BASHPID:-$$}.log"
 
   # admin API 优先; token 不可用 / curl 失败不能直接判死——
   # data.db 兜底不依赖 token，必须继续尝试（run 31931752797 实测:
@@ -925,7 +925,7 @@ _fix_probe_dir_writable() {
   fi
 
   local probe_name probe_local probe_dst
-  probe_name="olprobe_$(printf '%s' "${dir_remote}$$" | md5sum | cut -c1-8).txt"
+  probe_name="olprobe_$(printf '%s' "${dir_remote}${BASHPID:-$$}" | md5sum | cut -c1-8).txt"
   probe_local="${temp_dir}/${probe_name}"
   probe_dst="${dir_remote}/${probe_name}"
   printf '%s' "openlist dir probe" > "$probe_local" 2>/dev/null || true
@@ -1495,7 +1495,7 @@ try_fix_failed_file() {
 
   # 临时目录: 目录可写性探测（探针）必须先于下载完成，故在此创建
   # （顺序很重要——目录若不可写，整文件下载连同 4 种方法全是白跑）
-  local temp_dir="temp_fix_$(date +%s)_$$"
+  local temp_dir="temp_fix_$(date +%s)_${BASHPID:-$$}"
   mkdir -p "$temp_dir"
 
   # ===== Step 1: 创建/确认目标目录 =====

@@ -607,9 +607,13 @@ grep -qF "绝对下界 2026-09-19T11:03:00" "$OUT12/tryrun.log" \
 # 生效下界必须落成 UTC 时间点: 否则读者无法判断这批是否都在语义变更之后
 grep -qF "生效下界 2026-09-19 11:03:00 UTC" "$OUT12/tryrun.log" \
   && ok "15e 报告写明生效下界时刻" || bad "15e 报告应写明生效下界时刻（UTC）"
-# 与 WITHIN_DAYS 同时给时取**更严**者: 最近 30 天（松）+ 下界 09-19（严）⇒ 仍只留 after
+# 与 WITHIN_DAYS 同时给时取**更严**者: 窗口（松）+ 下界 09-19（严）⇒ 仍只留 after。
+# 窗口取 3650 天而非 30: 本场景 marker 时间戳是写死的历史时刻（09-10/09-18/09-19），
+# 相对天数窗口随日历推进会把样本滤光 —— 30 天窗在 2026-10-19 之后必假红
+# （2026-10-21 实证 15f 红: 期望 1 条实际 0 条）。3650 天保证窗口恒"松"，
+# 断言语义（双下界取严者）不变。
 OUT13="$WORK/out13"; mkdir -p "$OUT13"
-TRYRUN_WITHIN_DAYS=30 TRYRUN_SINCE="2026-09-19T11:03:00" TRYRUN_SEND_TG=0 TRYRUN_WORK="$OUT13" \
+TRYRUN_WITHIN_DAYS=3650 TRYRUN_SINCE="2026-09-19T11:03:00" TRYRUN_SEND_TG=0 TRYRUN_WORK="$OUT13" \
   restore_try_run task9 > "$OUT13/stdout.txt" 2>&1
 N_BOTH=$(awk -F'\t' 'NF' "$OUT13/tryrun.tsv" | wc -l | tr -d ' ')
 [ "$N_BOTH" = "1" ] && ok "15f 双下界取更严者（${N_BOTH} 条）" \
