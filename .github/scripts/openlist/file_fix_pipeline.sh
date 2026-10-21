@@ -313,6 +313,19 @@ _rebuild_raw_baseline() {
   fi
   _RAW_VERIFY_BUDGET=0
   echo "⚠️ raw 计数持续为 0（容器重启后列表未就绪），本轮禁用落盘即时校验（信任 rc，重启复核兜底）——避免把真实落盘误判为假成功" | tee -a "$log_file"
+  # 防御降级不许静默（2026-10-21 加）: 这是「假成功防护网失效」的窗口期，
+  # 只留在日志里等于要等事故后翻 5 万行才发现。run 内只发一次（多任务/多批次
+  # 都可能触发，无冷却会刷屏），标记文件随 /tmp 生命周期 = 每轮重置。
+  if [ ! -f /tmp/.ol_raw_verify_disabled_alerted ]; then
+    : > /tmp/.ol_raw_verify_disabled_alerted
+    local _m=""
+    tg_add_title _m "⚠️ 落盘即时校验已降级"
+    tg_add_kv _m "现象" "raw 计数持续为 0（容器重启后列表未就绪）"
+    tg_add_kv _m "处置" "本轮禁用落盘即时校验，改信任 rclone 退出码 + 重启复核兜底"
+    tg_add_kv _m "风险" "此窗口内的假成功只能靠事后 truth-check 暴露"
+    tg_add_note _m "详见本 run 日志「raw 计数持续为 0」"
+    send_telegram_message "$_m" "" "alert" || true
+  fi
   return 1
 }
 
@@ -356,8 +369,67 @@ _fix_event_fail() {
   local _f="$1" _msg="${2:-}"
   _fix_event FAIL "$_f" "$_msg"
   case "$_msg" in
-    *所有修复方法均失败*) _fix_event EXHAUSTED "$_f" "方法耗尽" ;;
+    *所有修复方法均失败*)
+      _fix_event EXHAUSTED "$_f" "方法耗尽"
+      _exhausted_ledger_add "$_f" "${task_name:-}"
+      ;;
   esac
+}
+
+# ===== 永久失败台账（EXHAUSTED ledger，2026-10-21 加）=====
+# 问题: 方法耗尽的文件留痕只活在当轮日志尾部（/tmp/ol_fix_events.log），跨轮无痕；
+#   且下轮「♻ 全方法拉黑重置」会把它重新拉回逐方法慢路径白烧时间（每个文件
+#   4 种方法 × 原目录/兜底目录，还带 300s 下载）。
+# 方案: EXHAUSTED 当场记入 ${SYNC_STATE_DIR}/exhausted_ledger.json（随收尾
+#   镜像 + 打包备份链路一起保全，见 backup_sync_state_to_dropbox）；修复循环
+#   按 TTL 跳过台账内文件。
+# TTL（OPENLIST_EXHAUSTED_TTL_DAYS，默认 7 天）到期自动重试——"永久失败"可能
+#   是暂态（后端修复/配额恢复）；force_sync=true / 修复管线测试模式无视台账。
+_exhausted_ledger_add() {
+  local _f="$1" _task="${2:-}" _now _entry _merged _path
+  [ -n "$_f" ] || return 0
+  # 默认值兜底: 单测只 source 本文件时 sync_marker.sh 的顶层定义不在
+  # （set -u 下未绑定变量直接炸，2026-10-21 回归实证）
+  _path="${SYNC_STATE_DIR:-onedrive:/logs/sync_state}/exhausted_ledger.json"
+  _now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  _entry=$(jq -cn --arg f "$_f" --arg t "$_task" --arg ts "$_now" \
+    '{($f): {task:$t, ts:$ts, reason:"方法耗尽"}}' 2>/dev/null) || return 0
+  # 读-改-写: 旧台账 ∪ 本条（同 key 以新条目覆盖）；读失败按空台账起步
+  _merged=$( { rclone cat "$_path" 2>/dev/null; printf '%s\n' "$_entry"; } \
+    | jq -s 'add // {}' 2>/dev/null) || return 0
+  [ -n "$_merged" ] || return 0
+  # 台账是辅助能力，写失败绝不阻断修复管线（与 _rotation_save 同策略）
+  _marker_write "$_merged" "$_path" >/dev/null 2>&1 || true
+}
+
+# 从缺失清单剔除「台账 TTL 内」的永久失败文件（调用方作用域: LOG_FILENAME 可选）
+# 用法: _exhausted_ledger_prune <missing_list>
+_exhausted_ledger_prune() {
+  local _ml="$1"
+  [ -s "$_ml" ] || return 0
+  # 调试模式要验证修复效果、force_sync 是显式强制 —— 都照常重试
+  [ "${OPENLIST_FIX_TEST_MODE:-0}" = "1" ] && return 0
+  [ "${FORCE_SYNC:-false}" = "true" ] && return 0
+  local _ttl_days="${OPENLIST_EXHAUSTED_TTL_DAYS:-7}" _cutoff _active _tmp _before _after
+  [[ "$_ttl_days" =~ ^[0-9]+$ ]] || _ttl_days=7
+  _cutoff=$(( $(date -u +%s) - _ttl_days * 86400 ))
+  _active=$(rclone cat "${SYNC_STATE_DIR:-onedrive:/logs/sync_state}/exhausted_ledger.json" 2>/dev/null \
+    | jq -r --argjson c "$_cutoff" \
+      'to_entries[] | select(((.value.ts // "") | fromdateiso8601? // 0) > $c) | .key' 2>/dev/null) || true
+  [ -n "$_active" ] || return 0
+  _tmp="${_ml}.exh"
+  printf '%s\n' "$_active" | sort -u > "${_ml}.exh_keys"
+  if grep -vxF -f "${_ml}.exh_keys" "$_ml" > "$_tmp" 2>/dev/null; then
+    _before=$(wc -l < "$_ml" | tr -d ' '); _after=$(wc -l < "$_tmp" | tr -d ' ')
+    if [ "$_before" != "$_after" ]; then
+      echo "⏭ 永久失败台账跳过 $((_before - _after)) 个方法耗尽文件（TTL ${_ttl_days} 天内已确认修不好；force_sync 可强制重试）" \
+        | tee -a "${LOG_FILENAME:-/dev/null}"
+      mv "$_tmp" "$_ml"
+    else
+      rm -f "$_tmp"
+    fi
+  fi
+  rm -f "${_ml}.exh_keys"
 }
 
 # 构建 sync 的 filter-from 排除清单（排除 = 不传输 + 不删除，防修复产物被 sync
@@ -371,7 +443,7 @@ _fix_event_fail() {
 _sync_fixed_files_exclusion() {
   if [[ "$dest_path" == openlist:* ]]; then
     _load_marker_fixed_files "$source_path" "$dest_path" "$task_name"
-    local fixed_exclude_file="/tmp/${task_name}_fixed_exclude_$$.txt"
+    local fixed_exclude_file="/tmp/${task_name}_fixed_exclude_${BASHPID:-$$}.txt"
     : > "$fixed_exclude_file"
     local _fx_orig _fx_alt _fx_method
     while IFS=$'\t' read -r _fx_orig _fx_alt _fx_method; do
@@ -481,7 +553,7 @@ _bulk_fold_record_landed() {
   done < "$_land_file"
 
   # 源端尺寸一次取回（逐文件 rclone size 会退化成 N 次往返，正是要避免的）
-  local size_json="/tmp/${task_name}_bulkfold_size_${hash8}_$$.json"
+  local size_json="/tmp/${task_name}_bulkfold_size_${hash8}_${BASHPID:-$$}.json"
   rclone lsjson "${source_path}/${dir_rel}" --files-only --no-mimetype --no-modtime \
     --retries 1 --timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900s}" > "$size_json" 2>/dev/null \
     || echo '[]' > "$size_json"
@@ -495,7 +567,7 @@ _bulk_fold_record_landed() {
   rm -f "$size_json"
 
   local ok_n=0 mf
-  local _fold_entries="/tmp/${task_name}_bulkfold_entries_${hash8}_$$.ndjson"
+  local _fold_entries="/tmp/${task_name}_bulkfold_entries_${hash8}_${BASHPID:-$$}.ndjson"
   : > "$_fold_entries"
   while IFS= read -r mf; do
     [ -n "$mf" ] || continue
@@ -601,7 +673,7 @@ _sync_bulk_hash_dir_fold() {
 
   # 目录分组: dirname → 该目录直属缺失文件数，按文件数降序（先啃最划算的）
   # 只取直属文件（子目录的文件归它自己那组，分组与 sync 的目录级粒度一致）
-  local dir_counts="/tmp/${task_name}_bulkfold_dirs_$$.txt"
+  local dir_counts="/tmp/${task_name}_bulkfold_dirs_${BASHPID:-$$}.txt"
   awk '{
     n = split($0, p, "/")
     if (n <= 1) next
@@ -612,13 +684,13 @@ _sync_bulk_hash_dir_fold() {
   [ -s "$dir_counts" ] || { rm -f "$dir_counts"; return 0; }
 
   # _fix_probe_dir_writable 依赖调用方作用域的探针目录与日志文件
-  local temp_dir="temp_bulkfold_$$"
+  local temp_dir="temp_bulkfold_${BASHPID:-$$}"
   mkdir -p "$temp_dir" 2>/dev/null || true
 
-  local folded_files="/tmp/${task_name}_bulkfold_done_$$.txt"
+  local folded_files="/tmp/${task_name}_bulkfold_done_${BASHPID:-$$}.txt"
   : > "$folded_files"
   # 折叠时列表读空的目录（dir_rel / hash8 / hash_dst / 期望条数），供末尾延迟复核
-  local pending_fold="/tmp/${task_name}_bulkfold_pending_$$.txt"
+  local pending_fold="/tmp/${task_name}_bulkfold_pending_${BASHPID:-$$}.txt"
   : > "$pending_fold"
   local dirs_done=0
 
@@ -674,7 +746,7 @@ _sync_bulk_hash_dir_fold() {
       continue
     fi
 
-    local fold_log="/tmp/${task_name}_bulkfold_${hash8}_$$.log"
+    local fold_log="/tmp/${task_name}_bulkfold_${hash8}_${BASHPID:-$$}.log"
     # --max-depth 1 不能省: 递归会把子目录也搬进短哈希目录（hash/sub/003.jpg），
     # 但记账只认本目录的直属文件 —— 那些子目录文件会变成"落了盘却没 marker 记录"
     # 的幽灵条目，还原时无从映射。子目录由它自己那一组负责折叠（文件数不达标
@@ -690,7 +762,7 @@ _sync_bulk_hash_dir_fold() {
 
     # 落盘校验以目标端实际列出的文件为准，不认 rclone 退出码:
     # 假成功是这套体系的头号敌人（sync 报成功但后端没落盘实测多次）
-    local landed="/tmp/${task_name}_bulkfold_land_${hash8}_$$.txt"
+    local landed="/tmp/${task_name}_bulkfold_land_${hash8}_${BASHPID:-$$}.txt"
     # 但**读的时机要给足**: 实测该后端写入后的「列表可见性延迟」远超 60s ——
     #   run 34826097133 报"批量折叠零落盘（rc=0）"的 5b32587f，11 小时后 diag
     #   读到 18 个文件；且新探针显示「重启前列表数 0、重启后 60s 内仍 0」。
@@ -770,7 +842,7 @@ _sync_bulk_hash_dir_fold() {
     echo "🔁 折叠落盘延迟复核: $(wc -l < "$pending_fold" | tr -d ' ') 个目录（折叠时列表读空）" | tee -a "$LOG_FILENAME"
     while IFS=$'\t' read -r p_dir p_hash p_dst p_cnt; do
       [ -n "${p_dir:-}" ] || continue
-      local p_list="/tmp/${task_name}_reverify_${p_hash}_$$.txt"
+      local p_list="/tmp/${task_name}_reverify_${p_hash}_${BASHPID:-$$}.txt"
       rclone lsf "$p_dst" --files-only --retries 1 \
         --timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900s}" > "$p_list" 2>/dev/null || : > "$p_list"
       # 按**非空行**计数: 空白输出（只有换行）不能算"已可见"，否则会把空列表
@@ -830,7 +902,7 @@ _sync_fix_missing_files() {
     #      源文件不存在，由后面专门章节记录，这里排除）
     #   2) 源端 vs 目标端 lsf 递归 diff 出的缺失文件（假成功文件没有 ERROR
     #      日志、退出码为 0，只能靠 diff 发现）
-    local missing_list="/tmp/${task_name}_missing_$$.txt"
+    local missing_list="/tmp/${task_name}_missing_${BASHPID:-$$}.txt"
     if [ -n "${SYNC_FIX_MISSING_OVERRIDE:-}" ]; then
       missing_list="$SYNC_FIX_MISSING_OVERRIDE"
       if ! [ -s "$missing_list" ]; then
@@ -847,8 +919,8 @@ _sync_fix_missing_files() {
       # 只传纯 filter 参数，避免把 --delete-before/--no-traverse 等 sync/copy
       # 特有参数传给 lsf）
       _extract_filter_args "${extra_args[@]}"
-      local src_ls="/tmp/${task_name}_src_ls_$$.txt"
-      local dst_ls="/tmp/${task_name}_dst_ls_$$.txt"
+      local src_ls="/tmp/${task_name}_src_ls_${BASHPID:-$$}.txt"
+      local dst_ls="/tmp/${task_name}_dst_ls_${BASHPID:-$$}.txt"
       local src_ls_ok=0 dst_ls_ok=0
       timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900s}" rclone lsf "$source_path" -R --files-only "${FILTER_ARGS[@]}" > "$src_ls" 2>/dev/null && src_ls_ok=1 || true
       # 目标端清单复用: 调用方（如批次巩固 _batch_consolidate）刚做过 lsf 的
@@ -873,6 +945,10 @@ _sync_fix_missing_files() {
       [ "$dst_ls" = "${SYNC_FIX_LIST_CACHE:-}" ] || rm -f "$dst_ls"
       sort -u "$missing_list" -o "$missing_list"
     fi
+
+    # 永久失败台账过滤: 方法耗尽且仍在 TTL 内的文件不再进修复慢路径（见
+    # _exhausted_ledger_prune；须在统计/折叠/截断之前，让它省下的是真时间）
+    _exhausted_ledger_prune "$missing_list"
 
     # 本轮缺失总量累计（供收尾统计: 没有它就无法判断"修复成功率"，
     # run #12616 报 success 而实际 0 成功/394 失败，全靠事后翻日志才发现）
@@ -915,7 +991,7 @@ _sync_fix_missing_files() {
         done < <(echo "$MARKER_FIX_BLACKLIST" | jq -r 'to_entries[] | [.key, .value] | @tsv' 2>/dev/null)
       fi
       if [ "${MARKER_FIXED_COUNT:-0}" -gt 0 ] && [ "$MARKER_FIXED_FILES" != "[]" ]; then
-        local keep_list="/tmp/${task_name}_missing_keep_$$.txt"
+        local keep_list="/tmp/${task_name}_missing_keep_${BASHPID:-$$}.txt"
         : > "$keep_list"
         while IFS= read -r mf; do
           [ -z "$mf" ] && continue
@@ -1013,7 +1089,7 @@ _sync_fix_missing_files() {
       # （中断时已完成的修复不丢失；沿用上轮修复的条目本就来自 marker，无需重写）
       local incr_marker_path incr_state incr_base
       incr_marker_path=$(get_marker_path "$task_name" "$dest_path")
-      incr_state="/tmp/${task_name}_fixstate_$$.json"
+      incr_state="/tmp/${task_name}_fixstate_${BASHPID:-$$}.json"
       incr_base=$(rclone cat "$incr_marker_path" 2>/dev/null) || true
       if ! echo "$incr_base" | jq -e 'type == "object"' >/dev/null 2>&1; then
         incr_base=$(jq -cn --arg sp "$source_path" --arg dp "$dest_path" '{source_path:$sp, dest_path:$dp}')
@@ -1247,7 +1323,7 @@ _sync_persist_verify_and_retry() {
     _log_section "$LOG_FILENAME" "${task_name} 修复持久化验证（重启容器复核）"
 
     # 1. 先过滤出"修复成功且路径仍在该 dest_path 下"的条目，保存待验证清单
-    local PERSIST_VERIFY_LIST="/tmp/${task_name}_persist_verify_$$.txt"
+    local PERSIST_VERIFY_LIST="/tmp/${task_name}_persist_verify_${BASHPID:-$$}.txt"
     : > "$PERSIST_VERIFY_LIST"
     while IFS='|' read -r f_orig f_alt f_method f_restore f_size f_bytes f_mid; do
       [ -z "$f_alt" ] && continue
@@ -1269,7 +1345,7 @@ _sync_persist_verify_and_retry() {
       fi
 
       # 3. 保存重启前的大小快照（用于对比）
-      local PERSIST_BEFORE="/tmp/${task_name}_persist_before_$$.txt"
+      local PERSIST_BEFORE="/tmp/${task_name}_persist_before_${BASHPID:-$$}.txt"
       : > "$PERSIST_BEFORE"
       while IFS='|' read -r alt_path bytes orig_path f_method f_mid; do
         [ -z "$alt_path" ] && continue
@@ -1325,7 +1401,7 @@ _sync_persist_verify_and_retry() {
           # 重试状态快照: 从当前 marker 重建（成功条目按 original 覆盖假成功条目）
           local incr_marker_path incr_state incr_base
           incr_marker_path=$(get_marker_path "$task_name" "$dest_path")
-          incr_state="/tmp/${task_name}_fixstate_retry_$$.json"
+          incr_state="/tmp/${task_name}_fixstate_retry_${BASHPID:-$$}.json"
           incr_base=$(rclone cat "$incr_marker_path" 2>/dev/null) || true
           if ! echo "$incr_base" | jq -e 'type == "object"' >/dev/null 2>&1; then
             incr_base=$(jq -cn --arg sp "$source_path" --arg dp "$dest_path" '{source_path:$sp, dest_path:$dp}')
@@ -1361,7 +1437,7 @@ _sync_persist_verify_and_retry() {
               _rebuild_raw_baseline "$LOG_FILENAME" || true
             fi
 
-            local round_list="/tmp/${task_name}_persist_retry_r${retry_round}_$$.txt"
+            local round_list="/tmp/${task_name}_persist_retry_r${retry_round}_${BASHPID:-$$}.txt"
             : > "$round_list"
             local retry_orig retry_fixed=0
             for retry_orig in "${retry_pending[@]}"; do

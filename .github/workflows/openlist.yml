@@ -16,6 +16,7 @@ on:
         options:
           - "同步"
           - "调试 · 修复管线测试"
+          - "🔧 修复优先 · 全量积压清理（跳过传输）"
           - "⚠️ 还原 · 修复文件还原为原路径"
           - "⚠️ 灾难恢复 · 目标端→源端"
           - "⚠️ 灾难恢复 · 目标端→源端（删除源端多余文件）"
@@ -190,11 +191,15 @@ on:
   schedule:
     # 兜底触发（自续触发是主接力机制，见「自续触发」step）。
     # GitHub 对高频 cron 限流严重（实测 */5 曾 4.5h 零触发）。
-    # 频率取 1h 而非 30min: 单轮 job 上限 6h + concurrency 单例，30min 一次会在
-    # 一个 job 周期内堆出 ~12 个 waiting run（run 34685067684 实测排队 3h27m 才
-    # 启动），既让「已有排队/等待中的运行」护栏长期命中、自续触发几乎永不生效，
-    # 也让 run 列表塞满空转的过时排队。1h 折中: 堆 6 个，兜底延迟 ≤1h。
-    - cron: "0 * * * *"
+    # 频率 1h → 3h（2026-10-21 改）: concurrency 单例的真实语义是「组内恒最多
+    #   1 running + 1 pending，新 run 进组即顶掉旧 pending」——1h 一班等于每小时
+    #   把上一个 pending 顶掉一次，run 列表塞满**零产出的 cancelled 空壳**
+    #   （10-18~10-19 的 6 轮里 2 轮如此: 各挂着 2h52m、steps=0、日志 zip 为空，
+    #   死因都是被下一班 cron 顶掉）。而 pending 只要存在就必然接棒（跑完即上），
+    #   高频 cron 对接续零贡献，只是制造空壳。
+    #   3h 折中: 兜底延迟 ≤3h（自续触发断链时的最坏空窗），空壳 run 减少 2/3。
+    #   接力链条正常时轮与轮之间仍然无缝（dispatch 的 run 顶掉/接替 pending）。
+    - cron: "0 */3 * * *"
   watch:
     types: started
 
@@ -624,6 +629,50 @@ jobs:
           run_task_by_id "$FIX_TEST_TASK"
           echo "=== 修复管线测试完成 (SYNC_FAILED=${SYNC_FAILED}) ==="
 
+      # ===== 修复优先: 全量积压清理（跳过传输，专攻缺失修复）=====
+      # 立项依据（2026-10-19 两轮生产日志实证）: 正常轮预算被 initial sync 吃掉，
+      #   修复管线排在最后 —— task1 一个任务积压 18121 个缺失，修复只轮到 24min
+      #   （上限 400 实际只跑 30 个），折叠还因临时目录互踩零落盘 3 个目录。
+      #   按正常轮的修复吞吐，积压永远清不完（长尾不收敛）。
+      # 机制: 复用修复管线测试的"跳过实际传输"路径（OPENLIST_FIX_TEST_MODE:
+      #   跳过 rclone sync 传输 → lsf diff 出缺失 → 目录折叠 + 逐文件修复 →
+      #   持久化复核），区别是跑**全量任务清单**（run_all_tasks）而非单任务，
+      #   且修复上限放开到入参 fix_test_max（默认 400/任务）。
+      # 用法: 不搬运新量、只清积压，与正常轮互补。建议积压期每天跑一轮
+      #   （预算 300min 跑满）；1d-skip 仍生效，已成功同步的任务会跳过，
+      #   要连它们一起修就勾 force_sync（注意: force_sync 会无视永久失败台账）。
+      - name: "🔧 修复优先: 全量积压清理（跳过传输）"
+        if: ${{ inputs.run_mode == '🔧 修复优先 · 全量积压清理（跳过传输）' }}
+        timeout-minutes: 330
+        env:
+          # 经 env 传参（string/number input 不内插 bash）
+          FIX_PRIORITY_MAX: ${{ inputs.fix_test_max || 400 }}
+        run: |
+          source /tmp/load_all.sh
+          echo "等待 OpenList 就绪..."
+          wait_openlist_ready || true
+          init_sync_state
+          # 跳过 initial sync 实际传输（只做 diff → 折叠 → 修复 → 持久化复核）
+          export OPENLIST_FIX_TEST_MODE=1
+          export OPENLIST_MISSING_FIX_MAX="${FIX_PRIORITY_MAX}"
+          # 预算锚点与正式同步同款（超时优雅收摊 + 平台硬顶闸），上限 320min
+          export OPENLIST_SYNC_BUDGET_SECONDS=$(( 320 * 60 ))
+          export OPENLIST_SYNC_DEADLINE_EPOCH=$(( $(date +%s) + OPENLIST_SYNC_BUDGET_SECONDS ))
+          export OPENLIST_STEP_HARD_LIMIT_EPOCH=$(( $(date +%s) + 330 * 60 ))
+          export OPENLIST_STEP_TAIL_RESERVE_SECONDS="${OPENLIST_STEP_TAIL_RESERVE_SECONDS:-480}"
+          echo "=== 修复优先: 全量积压清理（单任务修复上限 ${OPENLIST_MISSING_FIX_MAX}）==="
+          run_all_tasks
+          echo "=== 修复优先轮修复成效: $(cat /tmp/ol_round_stats.env 2>/dev/null || echo '无统计数据') ==="
+          # 收尾持久化（公共收尾 step 只挂同步模式，修复记录须自行镜像+打包）
+          echo "镜像 sync_state → dropbox..."
+          rclone sync onedrive:/logs/sync_state dropbox:sync_state_mirror --create-empty-src-dirs 2>&1 | tail -2 || true
+          if backup_sync_state_to_dropbox; then
+            echo "marker 打包备份成功"
+          else
+            echo "⚠️ marker 打包备份未成功（不阻断收尾，持续失败需人工介入）"
+          fi
+          echo "=== 修复优先轮完成 (SYNC_FAILED=${SYNC_FAILED:-0}) ==="
+
       - name: 初始化同步状态
         if: ${{ inputs.run_mode == '' || inputs.run_mode == '同步' }}
         run: |
@@ -962,11 +1011,15 @@ jobs:
             exit 0
           fi
 
-          # 护栏3: 已有排队/等待中的运行则不重复触发（cron 仍会创建排队）
+          # 护栏3: 已有排队/等待中的运行则不重复触发（cron 仍会创建排队）。
+          # 语义辨析（2026-10-21）: 这不是 bug —— concurrency 单例组内恒最多
+          # 1 running + 1 pending，pending 存在 = 跑完必然无缝接棒，此时再 dispatch
+          # 只是顶掉那个 pending（无增益）。接力真正的价值是 cron 失灵时补位，
+          # 那时没有 pending，本护栏自然放行。
           PENDING=$(gh run list -R "$REPO" --workflow=openlist.yml --limit 30 --json status \
             | jq '[.[] | select(.status == "queued" or .status == "waiting" or .status == "pending")] | length')
           if [ "${PENDING:-0}" -gt 0 ]; then
-            echo "已有 ${PENDING} 个排队/等待中的运行，跳过接力"
+            echo "已有 ${PENDING} 个排队/等待中的运行（concurrency 组内 pending 必然接棒），跳过接力"
             exit 0
           fi
 

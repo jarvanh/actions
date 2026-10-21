@@ -103,9 +103,23 @@ OPENLIST_PAIR_PARALLEL="${OPENLIST_PAIR_PARALLEL:-2}"   # 1=串行；>=2=按后�
 _pairs_parallel_reap_one() {
   # 依赖调用方（_run_registry_pairs_parallel）作用域:
   #   _pp_dir / _pp_pid[idx] / _pp_be[idx] / _pp_dst[idx] / _busy_be / _done_n / _failed_n
-  local _pp_dir="$1" _tries=0 _idx _pid _f
+  local _pp_dir="$1" _tries=0 _idx _pid _f _beat_ts=0 _beat_now _beat_left
   while :; do
     _tries=$((_tries + 1))
+    # 心跳（2026-10-21 加）: 并行等待期日志可静默几十分钟（大文件传输 / 423 重试
+    #   的 300s 睡眠），run 被取消时"最后停在哪一步"无从归因（2 轮 2h52m 被取消
+    #   的 run 连日志都没有）。每 10 分钟打一行现状，归因靠它。
+    _beat_now=$(date +%s)
+    if [ $(( _beat_now - _beat_ts )) -ge 600 ]; then
+      _beat_ts=$_beat_now
+      local _beat_live=0 _beat_k
+      for _beat_k in "${!_pp_pid[@]}"; do
+        [ -n "${_pp_pid[$_beat_k]:-}" ] && _beat_live=$((_beat_live + 1))
+      done
+      _beat_left="未知"
+      [ -n "${OPENLIST_SYNC_DEADLINE_EPOCH:-}" ] && _beat_left="$(( (OPENLIST_SYNC_DEADLINE_EPOCH - _beat_now) / 60 ))min"
+      echo "⏱ [心跳] 并行同步对等待中: 在跑 ${_beat_live} 个 · 已完成 ${_done_n}/${_pp_n} · 累计传输 $(format_bytes "${total_transferred:-0}") · 预算剩 ${_beat_left}"
+    fi
     # 硬顶闸（2026-09-25 病灶 D 第五处）: 闸必须装在**轮询内部**，不能只装在
     #   调用点前。调用点前的闸只能查到"进入等待的那一瞬间" —— run 35989879675
     #   实证: 18:41:45 打完"不再分发新同步对"时距硬顶还有 14min（> reserve
@@ -159,7 +173,7 @@ _run_registry_pairs_parallel() {
   # 写: total_transferred / SYNC_TIME_EXHAUSTED
   local _par="$OPENLIST_PAIR_PARALLEL"
   [ "$_par" -lt 2 ] && _par=2
-  local _pp_dir="/tmp/ol_pairs_$(date +%s)_$$"
+  local _pp_dir="/tmp/ol_pairs_$(date +%s)_${BASHPID:-$$}"
   mkdir -p "$_pp_dir"
   declare -A _pp_pid=() _pp_be=() _pp_dst=() _busy_be=() _started=()
   # 这几个是"调用方局部": _pairs_parallel_reap_one 靠 bash 动态作用域改它们，
@@ -998,7 +1012,7 @@ _sync_subdirs_parallel_run() {
   #   GLOBAL_FIX_BLACKLIST_JSON
   local _par="${OPENLIST_SUBDIR_PARALLEL:-2}"
   [ "$_par" -lt 2 ] && _par=2
-  local _par_dir="/tmp/ol_par_$(date +%s)_$$"
+  local _par_dir="/tmp/ol_par_$(date +%s)_${BASHPID:-$$}"
   mkdir -p "$_par_dir"
   # 父 marker 原文只 cat 一次，循环内按 subdir 本地筛选（防「父修子删」B 路径修法）
   local _PAR_GUARD_RAW
@@ -1264,7 +1278,7 @@ _sync_task_impl() {
   # 并行统计子目录大小（纯只读列举，无状态冲突；_rclone_size_json 单次
   # 1-3s，串行在 150+ 子目录的任务上要耗 5 分钟以上，8 路并行 <1 分钟）。
   # 结果按索引写临时文件回收，保持与串行完全一致的排序口径与日志输出
-  local _sz_dir="/tmp/ol_sz_$(date +%s)_$$"
+  local _sz_dir="/tmp/ol_sz_$(date +%s)_${BASHPID:-$$}"
   mkdir -p "$_sz_dir"
   local -a _sz_names=()
   while IFS= read -r subdir; do

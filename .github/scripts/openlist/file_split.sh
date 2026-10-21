@@ -337,7 +337,7 @@ split_large_video() {
     fi
 
     rm -rf "$split_dir" 2>/dev/null || true
-    split_dir="split_${safe_base_name}_$(date +%s)_$$_${attempt}"
+    split_dir="split_${safe_base_name}_$(date +%s)_${BASHPID:-$$}_${attempt}"
     mkdir -p "$split_dir"
     log_fix "$video_split_log" "尝试分割: attempt=$attempt segment_count=$segment_count target_part_size=${target_part_size} max_part_size=${max_part_size} segment_time=${segment_time}s"
 
@@ -456,7 +456,7 @@ split_large_binary_file() {
   file_size=$(stat -c%s "$local_file_path" 2>/dev/null || echo 0)
   local max_part_size="${OPENLIST_MAX_PART_SIZE:-4000000000}"
   local volume_size="${OPENLIST_7Z_VOLUME_SIZE:-3810m}"
-  local split_dir="binary_split_$(printf '%s' "$file_name" | tr '/\\' '__')_$(date +%s)_$$"
+  local split_dir="binary_split_$(printf '%s' "$file_name" | tr '/\\' '__')_$(date +%s)_${BASHPID:-$$}"
   mkdir -p "$split_dir"
 
   log_fix "$video_split_log" "开始非视频 7z 分卷: $file_name"

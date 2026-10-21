@@ -127,7 +127,7 @@ _start_batch_progress_thread() {
     # Transferred 行）会让整条管道非零，_xfer 赋值失败直接杀死子壳 —— 实时刷新
     # 永久失效（首次运行实测）。全程显式容错: 管道尾部 || true，循环体自身永不非零。
     # 排查痕迹: 每次唤醒/刷新写 stderr 日志（job log 可见，仅当 GitHub 显示）
-    echo "[rt-thread] started interval=${PROGRESS_RT_INTERVAL}s log=$log_file pid=$$" >&2
+    echo "[rt-thread] started interval=${PROGRESS_RT_INTERVAL}s log=$log_file pid=${BASHPID:-$$}" >&2
     # 优雅停止协议: 裸 sleep $INTERVAL 换成 1s 粒度轮询停止标志；收到停止后在刷新
     # 间隙退出并写退出标记，主线程据此确认线程已死 —— 绝不在 Telegram 发送中途
     # 打断线程（消息已发出但 id 未写回 = 孤儿「同步进度」消息）
@@ -149,7 +149,7 @@ _start_batch_progress_thread() {
       progress_transfer_tick "传输中: ${_xfer#传输中: }" "▸ 📊 批次：${batch_idx:-?}/${total_batches:-?} | ✅${synced_batches:-0} ❌${failed_batches:-0} · 📄 ${batch_total_files:-?}/${total_files:-?} 文件" || true
     done
     # 退出标记（仅 presence 语义）: _stop_batch_progress_thread 轮询它确认线程已死
-    echo "$$" > "$PROGRESS_RT_EXIT_FILE" 2>/dev/null || true
+    echo "${BASHPID:-$$}" > "$PROGRESS_RT_EXIT_FILE" 2>/dev/null || true
   ) &
   echo $! > "$PROGRESS_RT_PID_FILE"
 }

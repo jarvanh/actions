@@ -121,9 +121,15 @@ trend_record_and_notify() {
     : > "$_local"
   fi
 
-  printf '{"ts":"%s","run_id":"%s","trigger":"%s","duration_s":%d,"transferred_bytes":%d,"remaining_bytes":%s}\n' \
+  # 文件口径的"剩余"（2026-10-21 加）: skip_preview 轮 remaining_bytes 恒 null，
+  # 趋势里只剩"传了多少"看不到"还差多少"。修复管线的 ROUND_MISSING / ROUND_FIXED_OK
+  # （/tmp/ol_round_stats.env，收尾 step 已加载）给出文件数口径。非法值归零。
+  local _miss_files="${ROUND_MISSING:-0}" _fix_files="${ROUND_FIXED_OK:-0}"
+  [[ "$_miss_files" =~ ^[0-9]+$ ]] || _miss_files=0
+  [[ "$_fix_files" =~ ^[0-9]+$ ]] || _fix_files=0
+  printf '{"ts":"%s","run_id":"%s","trigger":"%s","duration_s":%d,"transferred_bytes":%d,"remaining_bytes":%s,"missing_files":%d,"fixed_files":%d}\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$run_id" "$trigger" "$_duration" "$_transferred" \
-    "${_remaining:-null}" >> "$_local"
+    "${_remaining:-null}" "$_miss_files" "$_fix_files" >> "$_local"
 
   # 回传保护: 远端存在但读取彻底失败 → 宁可丢弃本次样本，也不让 copyto
   # 用本地残缺内容覆盖远端全部历史（情形 c）
@@ -197,10 +203,13 @@ print("rate_per_hour=%.1f" % rate)
 print("remaining=%s" % (rem if rem is not None else ""))
 print("eta_minutes=%s" % (eta_minutes if eta_minutes is not None else ""))
 print("history=%d" % len(entries))
+print("miss_files=%d" % (cur.get("missing_files") or 0))
+print("fix_files=%d" % (cur.get("fixed_files") or 0))
 PYEOF
 ) || _py_out=""
 
   local _rounds=0 _this_tr=0 _this_du=0 _rate=0 _rem="" _eta="" _hist=0 _k _v
+  local _miss_files=0 _fix_files=0
   while IFS='=' read -r _k _v; do
     case "$_k" in
       rounds)           _rounds=$_v ;;
@@ -210,15 +219,21 @@ PYEOF
       remaining)        _rem=$_v ;;
       eta_minutes)      _eta=$_v ;;
       history)          _hist=$_v ;;
+      miss_files)       _miss_files=$_v ;;
+      fix_files)        _fix_files=$_v ;;
     esac
   done <<< "$_py_out"
   [[ "$_rounds" =~ ^[0-9]+$ ]] || _rounds=0
   [[ "$_rate" =~ ^[0-9.]+$ ]] || _rate=0
+  [[ "$_miss_files" =~ ^[0-9]+$ ]] || _miss_files=0
+  [[ "$_fix_files" =~ ^[0-9]+$ ]] || _fix_files=0
 
   local msg=""
   tg_add_title msg "📈 同步趋势"
   tg_add_section msg "本轮"
   tg_add_kv msg "净传 / 历时" "$(format_bytes "$_this_tr") / $(_trend_fmt_duration "$_this_du")"
+  # 文件口径（字节口径不可得时唯一的"还差多少"线索）
+  tg_add_kv msg "缺失 / 修复成功（文件）" "${_miss_files} / ${_fix_files}"
   if [ "$_rounds" -gt 1 ]; then
     tg_add_section msg "近 ${_rounds} 轮"
     tg_add_kv msg "平均净传速率" "$(format_bytes "${_rate%.*}")/h"
@@ -234,7 +249,7 @@ PYEOF
       fi
     else
       # 说明/备注走 tg_add_note（规范 · 说明段）：tg_add_block 只接已含标签的片段
-      tg_add_note msg "剩余未传未知（近期 run 未启用预览，无法估算清零时间）"
+      tg_add_note msg "剩余未传未知（近期 run 未启用预览，无法估算清零时间）；文件口径见上方「缺失 / 修复成功」"
     fi
   fi
   tg_add_footer msg
