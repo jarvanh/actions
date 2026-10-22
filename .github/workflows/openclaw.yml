@@ -472,26 +472,6 @@ jobs:
               echo "❌ 云端主包与全部候选 revision 均不可用（体积/解包/配置/secrets 判据未通过）：拒绝用坏状态上岗" >&2
               exit 1
             fi
-            # 2026-10-22 hot/cold：hot 包（收尾时点的 config/state/agents 会话库）覆盖在全量包上，
-            # 让「最近 ≤20 分钟的会话与状态」不因全量包滞后而丢失。
-            # hot 包缺失/损坏只降级不阻塞 —— 全量包本身就是可用状态。
-            HOT_TAR="/tmp/openclaw-hot-restore.tar.gz"
-            if rclone ls dropbox:self-hosted/openclaw-hot.tar.gz >/dev/null 2>&1; then
-              echo "📦 Found openclaw-hot.tar.gz! Applying hot overlay..."
-              if rclone copyto dropbox:self-hosted/openclaw-hot.tar.gz "$HOT_TAR" 2>/dev/null \
-                 && [ -s "$HOT_TAR" ] && tar -tzf "$HOT_TAR" >/dev/null 2>&1; then
-                if tar -xzf "$HOT_TAR" -C "$RESTORE_DIR" 2>/dev/null; then
-                  echo "✅ hot overlay applied"
-                else
-                  echo "⚠️ hot overlay 解包失败（忽略，继续用全量包）"
-                fi
-              else
-                echo "⚠️ hot 包不可用（下载/校验失败），忽略"
-              fi
-              rm -f "$HOT_TAR" 2>/dev/null || true
-            else
-              echo "ℹ️ 云端无 openclaw-hot.tar.gz，按全量包恢复"
-            fi
             # 判据已在盘上过，剩下的唯一动作是就位：清空 ~/.openclaw 后把通过校验的树搬过去。
             # cp -a → mv（2026-10-02）：/tmp 与 $HOME 实测同一文件系统（设备号相同），跨目录
             # mv 是 rename 而非拷贝 —— 6.39GiB 实测 cp -a 37.3s → mv 0.002s，语义等价（同样
@@ -5259,17 +5239,6 @@ jobs:
           # during copy; that is expected for active OpenClaw session/lock files, so
           # accept 24 and still validate the final tarball.
           set +e
-          # 2026-10-22 hot/cold 分包：hot 档排除冷数据（workspace/tools/browser/npm/skills），
-          # 冷数据由 20 分钟周期循环的全量包覆盖；恢复 = 全量包打底 + hot 包覆盖。
-          PROFILE="${OPENCLAW_ARCHIVE_PROFILE:-full}"
-          COLD_EXCLUDES=()
-          if [ "$PROFILE" = "hot" ]; then
-            # 先 include 再 exclude（rsync 首个命中生效）：memory 日记与 workspace 根目录的
-            # MEMORY/USER/AGENTS/SOUL 必须留在热包（它们是最频繁写、最不能丢的），
-            # 其余 workspace 大件（skills-data/tmp/wbg-src）才归冷包。
-            COLD_EXCLUDES+=(--include 'workspace/memory/***' --include 'workspace/*.md')
-            COLD_EXCLUDES+=(--exclude 'workspace/**' --exclude 'tools/**' --exclude 'browser/**' --exclude 'npm/**' --exclude 'skills/**')
-          fi
           rsync -a --delete \
             --exclude 'logs/**' \
             --exclude 'cache/**' \
@@ -5284,9 +5253,6 @@ jobs:
             --exclude '*.lock' \
             --exclude '*.pid' \
             --exclude '*.jsonl.lock' \
-            --exclude 'backups/**' \
-            --exclude 'archive/**' \
-            "${COLD_EXCLUDES[@]}" \
             "$SRC_DIR"/ "$STAGE_DIR/.openclaw"/
           rsync_rc=$?
           set -e
@@ -7056,11 +7022,8 @@ jobs:
             send_archive_alert "openclaw.tar.gz" "归档失败" "$MAINPKG_SKIP · 放弃本轮主包归档" "预检未通过，云端主包保持上一轮状态；其余归档项继续执行"
           else
           openclaw_final_output=""
-          # 2026-10-22 hot/cold：收尾只产 hot 包（config/state/agents 会话库），
-          # 冷数据（workspace/tools/browser/npm/skills）由 20 分钟周期循环的全量包覆盖。
-          # 恢复 = openclaw.tar.gz 打底 + openclaw-hot.tar.gz 覆盖（见 Install OpenClaw）。
-          ARCHIVE_DEST="dropbox:self-hosted/openclaw-hot.tar.gz"
-          STREAM_DEST="dropbox:self-hosted/.openclaw-hot-streaming.tar.gz"
+          ARCHIVE_DEST="dropbox:self-hosted/openclaw.tar.gz"
+          STREAM_DEST="dropbox:self-hosted/.openclaw-streaming.tar.gz"
           HEALTHY_RUN=0
           if [ -f /tmp/run-openclaw-meta.env ] && grep -q '^RECORDED_SUCCESSFUL_OPENCLAW_VERSION=' /tmp/run-openclaw-meta.env; then
             HEALTHY_RUN=1
@@ -7079,13 +7042,13 @@ jobs:
             echo "4a. Streaming main package (tar|pigz → rclone rcat)..."
             rclone deletefile "$STREAM_DEST" >/dev/null 2>&1 || true
             STREAM_BEGIN_TS=$(date +%s)
-            if flock -w 600 -E 200 /tmp/openclaw-archive.lock timeout 40m env OPENCLAW_ARCHIVE_PROFILE=hot bash /tmp/create-openclaw-archive.sh - 2>/tmp/openclaw-stream.err | rclone rcat "$STREAM_DEST" 2>/tmp/openclaw-stream-upload.err; then
+            if flock -w 600 -E 200 /tmp/openclaw-archive.lock timeout 40m bash /tmp/create-openclaw-archive.sh - 2>/tmp/openclaw-stream.err | rclone rcat "$STREAM_DEST" 2>/tmp/openclaw-stream-upload.err; then
               stream_bytes=$(rclone size --json "$STREAM_DEST" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null || echo 0)
               case "${stream_bytes:-0}" in ''|*[!0-9]*) stream_bytes=0 ;; esac
               if [ "$stream_bytes" -ge $(( openclaw_src_kb * 1024 * 30 / 100 )) ]; then
                 if rclone moveto "$STREAM_DEST" "$ARCHIVE_DEST" >/tmp/openclaw-stream-move.log 2>&1; then
                   echo "final openclaw archive/upload ok (streamed ${stream_bytes}B in $(( $(date +%s) - STREAM_BEGIN_TS ))s) → $ARCHIVE_DEST"
-                  record_archive_result "openclaw.tar.gz" ok "$stream_bytes" "流式 hot 包"
+                  record_archive_result "openclaw.tar.gz" ok "$stream_bytes" "流式覆盖主包"
                   STREAM_OK=1
                 else
                   echo "⚠️ 流式上传完成但原子改名失败：$(tail -n 3 /tmp/openclaw-stream-move.log 2>/dev/null)"
@@ -7106,10 +7069,10 @@ jobs:
           # 此前是裸调用、不受锁保护，若循环实例因故仍存活（如 stop 失败），
           # 两路 rsync 会并发扫同一源目录、staging 互相干扰。等锁最多 600s，
           # 仍拿不到则以 rc=200 走失败分支照常告警且不覆盖云端主包（保守优于脏写）。
-          if openclaw_final_output=$(flock -w 600 -E 200 /tmp/openclaw-archive.lock timeout 40m env OPENCLAW_ARCHIVE_PROFILE=hot bash /tmp/create-openclaw-archive.sh "$TMP_OPENCLAW_TAR" 2>&1); then
+          if openclaw_final_output=$(flock -w 600 -E 200 /tmp/openclaw-archive.lock timeout 40m bash /tmp/create-openclaw-archive.sh "$TMP_OPENCLAW_TAR" 2>&1); then
             openclaw_final_upload_output=""
             echo "5. Resolving archive destination (healthy → main package; unhealthy → skip)..."
-            ARCHIVE_DEST="dropbox:self-hosted/openclaw-hot.tar.gz"
+            ARCHIVE_DEST="dropbox:self-hosted/openclaw.tar.gz"
             HEALTHY_RUN=0
             if [ -f /tmp/run-openclaw-meta.env ] && grep -q '^RECORDED_SUCCESSFUL_OPENCLAW_VERSION=' /tmp/run-openclaw-meta.env; then
               HEALTHY_RUN=1
@@ -7155,11 +7118,6 @@ jobs:
           fi
           # end: STREAM_OK 回退分支（流式成功时不重走本地打包上传）
           fi
-
-          # 2026-10-22 收尾只归档主包（主人定案）：zcode / zcode2api-data / AI gateway /
-          # rsstt 四项已全部纳入 20 分钟周期循环（sleep 1200），收尾再传一遍只是把
-          # 下线窗口拉长 ~190s。保留开关 FINAL_ARCHIVE_MAIN_ONLY=0 可临时恢复旧行为。
-          if [ "${FINAL_ARCHIVE_MAIN_ONLY:-1}" != "1" ]; then
 
           echo "4b. Final archive of ZCode personal data (~/.zcode cli/ + v2/)..."
           if [ -d "$HOME/.zcode/cli" ] || [ -d "$HOME/.zcode/v2" ] || [ -d "$HOME/.zcode/server" ]; then
@@ -7344,9 +7302,6 @@ jobs:
             echo "⚠️ /tmp/local_rsstt 不存在，跳过 rss-to-telegram 归档"
             record_archive_result "rsstt.tar.gz" fail 0 "数据目录未初始化"
             send_archive_alert "rsstt.tar.gz" "归档失败 · 退出码 3" "rss-to-telegram 本地数据目录未初始化 · /tmp/local_rsstt 不存在 · 通常表示 rss-to-telegram 容器启动步骤被跳过或失败" "rsstt_dir_missing"
-          fi
-          else
-            echo "ℹ️ 收尾只归档主包（FINAL_ARCHIVE_MAIN_ONLY=1）：zcode / zcode2api-data / AI gateway / rsstt 已交由 20 分钟周期循环，不再重复打包上传"
           fi
 
       # 最终归档结果汇总（规范 · 结果通知）：归档步骤边归档边把结果写进 /tmp 的结果文件，
