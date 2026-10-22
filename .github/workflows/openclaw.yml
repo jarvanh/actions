@@ -5264,6 +5264,10 @@ jobs:
           PROFILE="${OPENCLAW_ARCHIVE_PROFILE:-full}"
           COLD_EXCLUDES=()
           if [ "$PROFILE" = "hot" ]; then
+            # 先 include 再 exclude（rsync 首个命中生效）：memory 日记与 workspace 根目录的
+            # MEMORY/USER/AGENTS/SOUL 必须留在热包（它们是最频繁写、最不能丢的），
+            # 其余 workspace 大件（skills-data/tmp/wbg-src）才归冷包。
+            COLD_EXCLUDES+=(--include 'workspace/memory/***' --include 'workspace/*.md')
             COLD_EXCLUDES+=(--exclude 'workspace/**' --exclude 'tools/**' --exclude 'browser/**' --exclude 'npm/**' --exclude 'skills/**')
           fi
           rsync -a --delete \
