@@ -2009,12 +2009,33 @@ jobs:
           # ② 冷启动不再调 CLI restart：install 已拉起就直接等健康，unit 未激活才显式 start。
           GW_UNIT="openclaw-gateway.service"
           GW_DROPIN_DIR="$HOME/.config/systemd/user/${GW_UNIT}.d"
-          mkdir -p "$GW_DROPIN_DIR"
-          cat > "$GW_DROPIN_DIR/10-stop-timeout.conf" <<'EOF_STOP'
+          # 2026-10-22 修复（run 5507 日志+本机复现实证）：drop-in 必须在 install
+          # **之后**落盘。install 的发布事务会快照受管工件（unit/generated/service.d
+          # 系目录）并在发布间隙做严格指纹比对（systemd-definition-mutation:248），
+          # 事务开始前已存在的 drop-in 目录会被判「工件被外部改动」→ 中止 + 回滚
+          # 删 unit，该机后续 install 全部连带失败。EE6A3D5 起的正确顺序是 install
+          # 成功后再补 drop-in（TimeoutStopSec 对下一次 stop 依然生效，无损失）。
+          # 防御：若上一轮残留了 drop-in（如 10-22 上半夜的失败轮），先摘除再装，
+          # 装完按 GW_DROPIN_PENDING 回放。
+          GW_DROPIN_PENDING=0
+          if [ -d "$GW_DROPIN_DIR" ]; then
+            mv "$GW_DROPIN_DIR" "${GW_DROPIN_DIR}.pre-install.$$" 2>/dev/null || true
+            GW_DROPIN_PENDING=1
+            systemctl --user daemon-reload 2>/dev/null || true
+          fi
+
+          # install 成功后回放 drop-in：目录 755 / 文件 644（install 的安全门会拒绝
+          # group/world-writable 的定义文件 —— run 5507 当晚本机复现的第二道坎）。
+          apply_gw_dropin() {
+            mkdir -p "$GW_DROPIN_DIR"
+            chmod 755 "$GW_DROPIN_DIR"
+            cat > "$GW_DROPIN_DIR/10-stop-timeout.conf" <<'EOF_STOP'
           [Service]
           TimeoutStopSec=90
           EOF_STOP
-          systemctl --user daemon-reload 2>/dev/null || true
+            chmod 644 "$GW_DROPIN_DIR/10-stop-timeout.conf"
+            systemctl --user daemon-reload 2>/dev/null || true
+          }
 
           INITIAL_START_RESTART_OK=1
           if [ "$CONFIG_VALID_FOR_CURRENT" != "1" ]; then
@@ -2031,6 +2052,9 @@ jobs:
               systemctl --user reset-failed "$GW_UNIT" 2>/dev/null || true
               systemctl --user start "$GW_UNIT" 2>/dev/null || echo "⚠️ systemctl start 返回非零，交给健康检查判定"
             fi
+            # drop-in 在 install 之后落盘（原因见上）：此刻 unit 已在盘上、服务已拉起，
+            # 等健康前补齐 TimeoutStopSec=90（对下一次 stop 生效）
+            apply_gw_dropin
             echo "COLD_START_SKIP_RESTART=1" >> "$RUN_OPENCLAW_META"
           fi
 
@@ -2089,6 +2113,10 @@ jobs:
               # （10 次/300s），此后 restart 恒报 "Start request repeated too quickly"，
               # 自愈还没开始就被熔断锁死。restart 前先清 failed 计数。
               systemctl --user reset-failed openclaw-gateway.service 2>/dev/null || true
+              if [ -d "$GW_DROPIN_DIR" ]; then
+                mv "$GW_DROPIN_DIR" "${GW_DROPIN_DIR}.pre-install.$$" 2>/dev/null || true
+                GW_DROPIN_PENDING=1
+              fi
               if ! openclaw gateway install --force; then
                 echo "⚠️ Fallback gateway install failed."
                 FALLBACK_RESTART_OK=0
@@ -2097,6 +2125,10 @@ jobs:
                 FALLBACK_RESTART_OK=0
               fi
 
+              if [ "$FALLBACK_RESTART_OK" = "1" ]; then
+                # 回退重装的 install 同样要求无 drop-in 现场；成功后先回放再等健康
+                apply_gw_dropin
+              fi
               if [ "$FALLBACK_RESTART_OK" = "1" ] && wait_for_openclaw_health "fallback_reinstall" 180 5; then
                 FALLBACK_REINSTALL_END_TS=$(date +%s)
                 echo "FALLBACK_REINSTALL_DURATION_SEC=$((FALLBACK_REINSTALL_END_TS - FALLBACK_REINSTALL_BEGIN_TS))" >> "$RUN_OPENCLAW_META"
