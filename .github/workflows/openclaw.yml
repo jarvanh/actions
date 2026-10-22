@@ -2015,17 +2015,16 @@ jobs:
           # 事务开始前已存在的 drop-in 目录会被判「工件被外部改动」→ 中止 + 回滚
           # 删 unit，该机后续 install 全部连带失败。EE6A3D5 起的正确顺序是 install
           # 成功后再补 drop-in（TimeoutStopSec 对下一次 stop 依然生效，无损失）。
-          # 防御：若上一轮残留了 drop-in（如 10-22 上半夜的失败轮），先摘除再装，
-          # 装完按 GW_DROPIN_PENDING 回放。
-          GW_DROPIN_PENDING=0
+          # 防御：若上一轮残留了 drop-in（如 10-22 失败轮），先摘除再装；
+          # 装完后由 apply_gw_dropin 统一重写（不依赖旧目录）。
           if [ -d "$GW_DROPIN_DIR" ]; then
             mv "$GW_DROPIN_DIR" "${GW_DROPIN_DIR}.pre-install.$$" 2>/dev/null || true
-            GW_DROPIN_PENDING=1
             systemctl --user daemon-reload 2>/dev/null || true
           fi
 
-          # install 成功后回放 drop-in：目录 755 / 文件 644（install 的安全门会拒绝
+          # install 成功后落盘 drop-in：目录 755 / 文件 644（install 的安全门会拒绝
           # group/world-writable 的定义文件 —— run 5507 当晚本机复现的第二道坎）。
+          # 顺带清掉上方摘除时侧移的旧目录。
           apply_gw_dropin() {
             mkdir -p "$GW_DROPIN_DIR"
             chmod 755 "$GW_DROPIN_DIR"
@@ -2034,6 +2033,7 @@ jobs:
           TimeoutStopSec=90
           EOF_STOP
             chmod 644 "$GW_DROPIN_DIR/10-stop-timeout.conf"
+            rm -rf "${GW_DROPIN_DIR}".pre-install.* 2>/dev/null || true
             systemctl --user daemon-reload 2>/dev/null || true
           }
 
@@ -2115,7 +2115,6 @@ jobs:
               systemctl --user reset-failed openclaw-gateway.service 2>/dev/null || true
               if [ -d "$GW_DROPIN_DIR" ]; then
                 mv "$GW_DROPIN_DIR" "${GW_DROPIN_DIR}.pre-install.$$" 2>/dev/null || true
-                GW_DROPIN_PENDING=1
               fi
               if ! openclaw gateway install --force; then
                 echo "⚠️ Fallback gateway install failed."
