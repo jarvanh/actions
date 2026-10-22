@@ -258,7 +258,9 @@ jobs:
       - name: Install OpenClaw
         run: |
           echo "Installing OpenClaw base..."
+          INST_T0=$(date +%s)
           curl -fsSL https://openclaw.ai/install.sh | bash -s -- --no-onboard
+          echo "⏱️ install timing: cli_install_sec=$(( $(date +%s) - INST_T0 ))"
 
           echo "Configuring local ~/.openclaw with Dropbox-linked config..."
           mkdir -p /dropbox/self-hosted/openclaw
@@ -305,6 +307,7 @@ jobs:
           done
           if [ "$ARCHIVE_PRESENT" = "1" ]; then
             echo "📦 Found openclaw.tar.gz! Downloading and extracting..."
+            INST_T1=$(date +%s)
             # 主包下载已在 Prefetch cold artifacts 步骤里于后台起跑（实测 9.3GB / 54s
             # 是纯串行等待）。这里只等它收尾：轮询 rc 文件（prefetch 进程先没了就立刻收，
             # 不空等），命中则 mv 进恢复路径 —— 同一文件系统，mv 是 rename 不是拷贝。
@@ -485,6 +488,7 @@ jobs:
                 cp -a "$RESTORE_DIR/.openclaw/." "$HOME/.openclaw/"
               fi
               echo "✅ Restored ~/.openclaw from archive"
+              echo "⏱️ install timing: wait_prefetch_and_extract_sec=$(( $(date +%s) - INST_T1 ))"
             else
               echo "⚠️ Archive does not contain .openclaw root, skipping archive restore."
             fi
@@ -503,6 +507,7 @@ jobs:
           # 恢复后诊断：主包里到底恢复了什么（判断是否缺关键文件/状态库）
           echo "=== restored ~/.openclaw ==="
           ls -A ~/.openclaw | sort || true
+          echo "⏱️ install timing total_sec=$(( $(date +%s) - INST_T0 ))"
           du -sh ~/.openclaw 2>/dev/null || true
           stat -c '%s bytes  %n' ~/.openclaw/openclaw.json 2>/dev/null || echo "⚠️ openclaw.json 不存在"
           ls -l ~/.openclaw/state 2>/dev/null || echo "⚠️ state/ 不存在"
@@ -1791,8 +1796,464 @@ jobs:
 
           echo "ai-api 命名隧道已启动（systemd 托管，固定地址模式），当前后端: ${ACTIVE_BACKEND}"
 
+      - name: Run OpenClaw
+        id: run_openclaw
+        # 2026-10-02 事故根因：任一前置服务步骤（quota-board/trae/zcode2api…）硬失败时，
+        # 本步骤被静默跳过 —— meta 不写、网关不起，且 outcome=skipped 连
+        # 「Notify OpenClaw startup failure」（只认 failure）都不触发，OpenClaw 整条链
+        # 无声消失。本步骤的自愈机制（fallback 重装、失败通知）本就为「自己
+        # 失败」设计，理应在任何前置失败后仍获得执行机会；cancelled 除外 —— 主动取消
+        # 时不该再拉起网关。
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+
+          RUN_OPENCLAW_STEP_LOG="/tmp/run-openclaw-step.log"
+          RUN_OPENCLAW_META="/tmp/run-openclaw-meta.env"
+          : > "$RUN_OPENCLAW_STEP_LOG"
+          : > "$RUN_OPENCLAW_META"
+          exec > >(tee -a "$RUN_OPENCLAW_STEP_LOG") 2>&1
+
+          CURRENT_OPENCLAW_VERSION="$(openclaw --version 2>/dev/null | head -n 1 || true)"
+          CURRENT_OPENCLAW_SEMVER="$(printf '%s\n' "$CURRENT_OPENCLAW_VERSION" | grep -oE '[0-9]{4}\.[0-9]+\.[0-9]+' | head -n 1 || true)"
+          KNOWN_GOOD_VERSION_FILE="$HOME/.openclaw/openclaw-known-good-version"
+          echo "CURRENT_OPENCLAW_VERSION=$CURRENT_OPENCLAW_VERSION" >> "$RUN_OPENCLAW_META"
+          echo "CURRENT_OPENCLAW_SEMVER=$CURRENT_OPENCLAW_SEMVER" >> "$RUN_OPENCLAW_META"
+          echo "FAIL_STAGE=preflight_doctor" >> "$RUN_OPENCLAW_META"
+          PREFLIGHT_BEGIN_TS=$(date +%s)
+
+          fail_startup() {
+            local msg="$1"
+            echo "❌ $msg"
+            exit 1
+          }
+
+          normalize_openclaw_version() {
+            printf '%s\n' "${1:-}" | tr -d '[:space:]' | grep -oE '^[0-9]{4}\.[0-9]+\.[0-9]+$' || true
+          }
+
+          read_openclaw_version_file() {
+            local file="$1"
+            if [ -s "$file" ]; then
+              normalize_openclaw_version "$(head -n 1 "$file" 2>/dev/null || true)"
+            fi
+          }
+
+          record_successful_openclaw_version() {
+            local version="$1"
+            version="$(normalize_openclaw_version "$version")"
+            if [ -z "$version" ]; then
+              echo "⚠️ Cannot record successful OpenClaw version: current version is empty or invalid."
+              return 0
+            fi
+            mkdir -p "$HOME/.openclaw"
+            printf '%s\n' "$version" > "$KNOWN_GOOD_VERSION_FILE"
+            echo "RECORDED_SUCCESSFUL_OPENCLAW_VERSION=$version" >> "$RUN_OPENCLAW_META"
+            echo "✅ Recorded successful OpenClaw version: $version"
+          }
+
+          resolve_fallback_openclaw_version() {
+            local version=""
+
+            version="$(read_openclaw_version_file "$KNOWN_GOOD_VERSION_FILE")"
+            if [ -n "$version" ]; then
+              echo "FALLBACK_VERSION_SOURCE=known_good_file" >> "$RUN_OPENCLAW_META"
+              echo "$version"
+              return 0
+            fi
+
+            if [ -s "$HOME/.openclaw/openclaw.json" ]; then
+              version="$(jq -r '.meta.lastTouchedVersion // empty' "$HOME/.openclaw/openclaw.json" 2>/dev/null | head -n 1 || true)"
+              version="$(normalize_openclaw_version "$version")"
+              if [ -n "$version" ]; then
+                echo "FALLBACK_VERSION_SOURCE=meta_lastTouchedVersion" >> "$RUN_OPENCLAW_META"
+                echo "$version"
+                return 0
+              fi
+            fi
+
+            echo ""
+            return 1
+          }
+
+          fix_openclaw_permissions() {
+            echo "🔧 Fixing file permissions to pass security checks..."
+            sudo chmod -R o-w "$(npm root -g)"
+            chmod 700 ~/.openclaw
+            if [ -f ~/.openclaw/openclaw.json ]; then
+              chmod 600 ~/.openclaw/openclaw.json
+            fi
+          }
+
+          openclaw_port_listening() {
+            sudo lsof -Pi :18789 -sTCP:LISTEN -t >/dev/null
+          }
+
+          openclaw_log_ready() {
+            journalctl --user -u openclaw-gateway.service --since "5 minutes ago" --no-pager 2>/dev/null \
+              | grep -q "\[gateway\] ready"
+          }
+
+          openclaw_health_http_ok() {
+            [ "$(curl -fsS -o /dev/null -w "%{http_code}" --connect-timeout 3 --max-time 15 http://127.0.0.1:18789/health || true)" = "200" ]
+          }
+
+          wait_for_openclaw_health() {
+            local label="$1"
+            local timeout_sec="${2:-180}"
+            local interval_sec="${3:-5}"
+            local start_ts now_ts elapsed
+            start_ts=$(date +%s)
+
+            echo "Waiting for OpenClaw health (${label}, timeout=${timeout_sec}s)..."
+            while true; do
+              now_ts=$(date +%s)
+              elapsed=$((now_ts - start_ts))
+
+              if openclaw_port_listening; then
+                if openclaw_health_http_ok; then
+                  echo "✅ OpenClaw Gateway health is OK after ${elapsed}s (${label})."
+                  return 0
+                fi
+
+                if openclaw_log_ready; then
+                  echo "⏳ Gateway is listening and logged ready, but /health is still slow after ${elapsed}s (${label}); continuing grace wait."
+                else
+                  echo "⏳ Gateway port is listening, waiting for ready/health... ${elapsed}/${timeout_sec}s (${label})"
+                fi
+              else
+                echo "⏳ Gateway port is not listening yet... ${elapsed}/${timeout_sec}s (${label})"
+              fi
+
+              if [ "$elapsed" -ge "$timeout_sec" ]; then
+                echo "❌ OpenClaw Gateway health did not become OK within ${timeout_sec}s (${label})."
+                return 1
+              fi
+              sleep "$interval_sec"
+            done
+          }
+
+          dump_openclaw_diagnostics() {
+            echo "⚠️ Gateway not healthy yet. Diagnostics:"
+            echo "--- systemd status ---"
+            systemctl --user --no-pager --full status openclaw-gateway.service || true
+            echo "--- recent journal ---"
+            journalctl --user -u openclaw-gateway.service --since "10 minutes ago" --no-pager | tail -n 120 || true
+            echo "--- /tmp/openclaw logs ---"
+            find /tmp/openclaw -maxdepth 1 -type f -name 'openclaw-*.log' -printf '%T@ %p\n' 2>/dev/null \
+              | sort -nr \
+              | head -2 \
+              | cut -d' ' -f2- \
+              | while IFS= read -r log_file; do
+                  echo "--- tail $log_file ---"
+                  tail -n 80 "$log_file" || true
+                done
+          }
+
+          fix_openclaw_permissions
+
+          echo "FAIL_STAGE=config_validate" >> "$RUN_OPENCLAW_META"
+          echo "🧪 Preflight config validation for $CURRENT_OPENCLAW_VERSION ..."
+          CONFIG_VALID_FOR_CURRENT=0
+          DOCTOR_RAN=0
+          if openclaw config validate >/tmp/config-validate.log 2>&1; then
+            CONFIG_VALID_FOR_CURRENT=1
+            echo "✅ Config valid for current version."
+          else
+            echo "⚠️ Config invalid for current version. Trying 'openclaw doctor --fix' to repair, then re-validating. Details:"
+            tail -n 15 /tmp/config-validate.log 2>/dev/null || true
+            echo "🛠️ Running 'openclaw doctor --fix' to repair the config..."
+            DOCTOR_RAN=1
+            openclaw doctor --fix || echo "DOCTOR_EXIT=$? (non-fatal, continuing)"
+            if openclaw config validate >/tmp/config-validate-2.log 2>&1; then
+              CONFIG_VALID_FOR_CURRENT=1
+              echo "✅ Config repaired by doctor; now valid for current version."
+            else
+              echo "❌ Config still invalid after doctor. Gateway start will be skipped; fallback reinstall, downgrade guard and snapshot rollback handle recovery. Details:"
+              tail -n 10 /tmp/config-validate-2.log 2>/dev/null || true
+            fi
+          fi
+
+          if [ "$CONFIG_VALID_FOR_CURRENT" = "1" ] && [ "$DOCTOR_RAN" != "1" ]; then
+            # 优化（2026-10-02）：config 已校验通过时，preflight doctor 只在 OpenClaw
+            # **版本变化**时才跑。实测该步固定耗时 79s，而配置合法时 doctor 并无
+            # 修复动作（日志仅 warnings + registry 刷新 + agent-db 完整性检查）。
+            # 版本未变 ⇒ 跳过（省 79s）；版本一变 ⇒ 照跑，保住升级时的自愈。
+            # 状态文件放在 ~/.openclaw 内：它随主包归档/恢复，上轮记录得以延续。
+            # 版本解析失败时（CURRENT_OPENCLAW_SEMVER 为空）一律照跑 —— 保守。
+            DOCTOR_STATE_FILE="$HOME/.openclaw/openclaw-doctor-last-version"
+            LAST_DOCTOR_VERSION="$(head -n 1 "$DOCTOR_STATE_FILE" 2>/dev/null || true)"
+            if [ -n "$CURRENT_OPENCLAW_SEMVER" ] && [ "$LAST_DOCTOR_VERSION" = "$CURRENT_OPENCLAW_SEMVER" ]; then
+              echo "⏭️ Skipping preflight doctor: config valid & version unchanged (${CURRENT_OPENCLAW_SEMVER})"
+            else
+              echo "🛠️ Running preflight 'openclaw doctor --fix' before gateway restart... (${LAST_DOCTOR_VERSION:-none} → ${CURRENT_OPENCLAW_SEMVER})"
+              openclaw doctor --fix || echo "DOCTOR_EXIT=$? (non-fatal, continuing)"
+              mkdir -p "$HOME/.openclaw"
+              printf '%s\n' "$CURRENT_OPENCLAW_SEMVER" > "$DOCTOR_STATE_FILE"
+            fi
+          fi
+          PREFLIGHT_END_TS=$(date +%s)
+          echo "PREFLIGHT_DOCTOR_DURATION_SEC=$((PREFLIGHT_END_TS - PREFLIGHT_BEGIN_TS))" >> "$RUN_OPENCLAW_META"
+
+          echo "FAIL_STAGE=initial_start" >> "$RUN_OPENCLAW_META"
+          INITIAL_START_BEGIN_TS=$(date +%s)
+          echo "Restarting OpenClaw gateway..."
+
+          # 2026-10-22 冷启动优化（run 39637798065 日志实证）：unit 由 CLI 生成时带
+          # TimeoutStopSec=330，而 `gateway install --force` 已经把服务拉起来了；
+          # 紧接着再 `gateway restart` 会走一遍完整 stop→start —— 首启进程还在 boot、
+          # 不响应 SIGTERM，systemd 就陪它等到 330s 才 SIGKILL。日志里
+          # 16:59:47 "Gateway service installed" → 17:05:23 "Restarted systemd service"
+          # 的 336s 静默正是它（冷启动根本没有「旧进程」要停）。
+          # 对策两层：① drop-in 把停机上限压到 90s（install 重写主 unit 不影响 .d 覆盖）；
+          # ② 冷启动不再调 CLI restart：install 已拉起就直接等健康，unit 未激活才显式 start。
+          GW_UNIT="openclaw-gateway.service"
+          GW_DROPIN_DIR="$HOME/.config/systemd/user/${GW_UNIT}.d"
+          mkdir -p "$GW_DROPIN_DIR"
+          cat > "$GW_DROPIN_DIR/10-stop-timeout.conf" <<'EOF_STOP'
+          [Service]
+          TimeoutStopSec=90
+          EOF_STOP
+          systemctl --user daemon-reload 2>/dev/null || true
+
+          INITIAL_START_RESTART_OK=1
+          if [ "$CONFIG_VALID_FOR_CURRENT" != "1" ]; then
+            echo "⚠️ Skipping gateway start: config still invalid after doctor. Going straight to fallback reinstall with the recorded compatible version."
+            INITIAL_START_RESTART_OK=0
+          elif ! openclaw gateway install --force; then
+            echo "⚠️ Initial gateway install failed; will attempt fallback reinstall."
+            INITIAL_START_RESTART_OK=0
+          else
+            if [ "$(systemctl --user is-active "$GW_UNIT" 2>/dev/null || echo inactive)" = "active" ]; then
+              echo "⏭️ unit 已由 install --force 拉起，跳过 gateway restart，直接等健康（冷启动快路径）"
+            else
+              echo "ℹ️ unit 未激活，systemctl --user start 拉起（不走 CLI restart）"
+              systemctl --user reset-failed "$GW_UNIT" 2>/dev/null || true
+              systemctl --user start "$GW_UNIT" 2>/dev/null || echo "⚠️ systemctl start 返回非零，交给健康检查判定"
+            fi
+            echo "COLD_START_SKIP_RESTART=1" >> "$RUN_OPENCLAW_META"
+          fi
+
+          if [ "$INITIAL_START_RESTART_OK" = "1" ] && wait_for_openclaw_health "initial_start" 180 5; then
+              INITIAL_START_END_TS=$(date +%s)
+              echo "INITIAL_START_DURATION_SEC=$((INITIAL_START_END_TS - INITIAL_START_BEGIN_TS))" >> "$RUN_OPENCLAW_META"
+              record_successful_openclaw_version "$CURRENT_OPENCLAW_SEMVER"
+              echo "✅ OpenClaw Gateway is healthy!"
+          else
+              INITIAL_START_END_TS=$(date +%s)
+              echo "INITIAL_START_DURATION_SEC=$((INITIAL_START_END_TS - INITIAL_START_BEGIN_TS))" >> "$RUN_OPENCLAW_META"
+              dump_openclaw_diagnostics
+
+              echo "FAIL_STAGE=fallback_reinstall" >> "$RUN_OPENCLAW_META"
+              echo "🔄 Initial start failed after preflight doctor. Attempting to fallback and reinstall recorded OpenClaw version..."
+
+              TARGET_VERSION="$(resolve_fallback_openclaw_version || true)"
+              if [ -z "$TARGET_VERSION" ]; then
+                fail_startup "No fallback OpenClaw version found. Checked $KNOWN_GOOD_VERSION_FILE and .meta.lastTouchedVersion."
+              fi
+              echo "✅ Selected fallback OpenClaw version: $TARGET_VERSION"
+
+              echo "Installing openclaw@$TARGET_VERSION ..."
+              echo "FALLBACK_TARGET_VERSION=$TARGET_VERSION" >> "$RUN_OPENCLAW_META"
+              FALLBACK_REINSTALL_BEGIN_TS=$(date +%s)
+              npm i -g "openclaw@$TARGET_VERSION"
+
+              fix_openclaw_permissions
+
+              echo "🧪 Validating config against fallback openclaw@$TARGET_VERSION ..."
+              if openclaw config validate >/tmp/config-validate-fallback.log 2>&1; then
+                echo "✅ Config valid for fallback version."
+              else
+                echo "⚠️ Config invalid for fallback version. Trying 'openclaw doctor --fix' first. Details:"
+                tail -n 10 /tmp/config-validate-fallback.log 2>/dev/null || true
+                openclaw doctor --fix || echo "DOCTOR_EXIT=$? (non-fatal, continuing)"
+                if openclaw config validate >/tmp/config-validate-fallback-2.log 2>&1; then
+                  echo "✅ Config repaired by doctor for fallback version."
+                else
+                  DOWNGRADE_TS="$(date +%Y%m%d-%H%M%S)"
+                  echo "❌ Config still invalid for fallback version after doctor. Moving the current state aside so the fallback version starts clean (kept as *.state-bak-$DOWNGRADE_TS; sessions will be lost, upgrade back to recover). Details:"
+                  tail -n 10 /tmp/config-validate-fallback-2.log 2>/dev/null || true
+                  for STATE_DB in "$HOME/.openclaw/state/openclaw.sqlite" "$HOME/.openclaw/state/openclaw.sqlite-wal" "$HOME/.openclaw/state/openclaw.sqlite-shm"; do
+                    if [ -f "$STATE_DB" ]; then
+                      mv "$STATE_DB" "$STATE_DB.state-bak-$DOWNGRADE_TS" && echo "➡️ Moved aside: $STATE_DB"
+                    fi
+                  done
+                  echo "🛠️ Running 'openclaw doctor --fix' on the clean state..."
+                  openclaw doctor --fix || echo "DOCTOR_EXIT=$? (non-fatal, continuing)"
+                fi
+              fi
+
+              echo "Restarting OpenClaw after fallback reinstall..."
+              FALLBACK_RESTART_OK=1
+              # 2026-10-03 事故：降级后的启动崩溃循环会烧光 systemd StartLimitBurst
+              # （10 次/300s），此后 restart 恒报 "Start request repeated too quickly"，
+              # 自愈还没开始就被熔断锁死。restart 前先清 failed 计数。
+              systemctl --user reset-failed openclaw-gateway.service 2>/dev/null || true
+              if ! openclaw gateway install --force; then
+                echo "⚠️ Fallback gateway install failed."
+                FALLBACK_RESTART_OK=0
+              elif ! openclaw gateway restart; then
+                echo "⚠️ Fallback gateway restart failed."
+                FALLBACK_RESTART_OK=0
+              fi
+
+              if [ "$FALLBACK_RESTART_OK" = "1" ] && wait_for_openclaw_health "fallback_reinstall" 180 5; then
+                FALLBACK_REINSTALL_END_TS=$(date +%s)
+                echo "FALLBACK_REINSTALL_DURATION_SEC=$((FALLBACK_REINSTALL_END_TS - FALLBACK_REINSTALL_BEGIN_TS))" >> "$RUN_OPENCLAW_META"
+                record_successful_openclaw_version "$TARGET_VERSION"
+                echo "✅ OpenClaw Gateway is healthy after fallback reinstall!"
+              else
+                FALLBACK_REINSTALL_END_TS=$(date +%s)
+                echo "FALLBACK_REINSTALL_DURATION_SEC=$((FALLBACK_REINSTALL_END_TS - FALLBACK_REINSTALL_BEGIN_TS))" >> "$RUN_OPENCLAW_META"
+                dump_openclaw_diagnostics
+
+                # 2026-10-11 移除版本化快照回滚（主人拍板）：快照是主包的服务端副本，
+                # 主包坏它也坏，兜底价值≈0，却长期占用一份 4.2GB 云端空间。自愈链
+                # 收敛为：doctor --fix → 回退重装（已记录的兼容版本）。走到这里说明
+                # 两条都失败了，直接判死走失败通知（人工介入，现场保留）。
+                echo "FAIL_STAGE=fallback_reinstall" >> "$RUN_OPENCLAW_META"
+                err="回退到最近记录版本（${TARGET_VERSION:-未知}）重装后，OpenClaw 依然无法启动（健康检查失败）"
+                fail_startup "$err"
+              fi
+          fi
+
+      - name: Notify OpenClaw startup failure
+        if: ${{ always() && steps.run_openclaw.outcome == 'failure' }}
+        env:
+          # send_tg 发送闸 + 收尾区接线（时长走 tg_add_footer 内的 runner 开机时刻兜底，
+          # 无需注入起始时间——平台无 github.run_started_at 上下文）
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] && [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ]; then
+            step_log="/tmp/run-openclaw-step.log"
+            meta_file="/tmp/run-openclaw-meta.env"
+
+            sanitize_log() {
+              perl -pe 's/\x1b\[[0-9;]*[A-Za-z]//g; s/\r//g'
+            }
+
+            error_summary=""
+            if [ -f openclaw.log ]; then
+              error_summary=$(sanitize_log < openclaw.log | grep -Ei 'error|fail|exception|unhealthy|timed out|cannot|denied|missing|invalid' | tail -n 20 || true)
+              if [ -z "$error_summary" ]; then
+                error_summary=$(sanitize_log < openclaw.log | tail -n 40 || true)
+              fi
+            fi
+            if [ -z "$error_summary" ] && [ -f "$step_log" ]; then
+              error_summary=$(sanitize_log < "$step_log" | grep -Ei 'error|fail|exception|unhealthy|timed out|cannot|denied|missing|invalid|doctor|fallback|restart' | tail -n 30 || true)
+              if [ -z "$error_summary" ]; then
+                error_summary=$(sanitize_log < "$step_log" | tail -n 60 || true)
+              fi
+            fi
+            if [ -z "$error_summary" ]; then
+              error_summary="openclaw.log 与步骤日志均未找到可用摘要"
+            fi
+            # 与同文件 send_telegram_alert / send_archive_alert 同口径（尾部 1200 字节）：
+            # 超长输出会让 <pre> 跨 4000 字符分片、标签断开即破版（规范 · 分节）
+            error_summary=$(printf '%s' "$error_summary" | tail -c 1200)
+
+            ts_host=""
+            ts_ip=""
+            if [ -f "$HOME/ts.env" ]; then
+              ts_host=$(grep '^TS_HOST=' "$HOME/ts.env" | tail -n 1 | cut -d= -f2- || true)
+              ts_ip=$(grep '^TS_IP=' "$HOME/ts.env" | tail -n 1 | cut -d= -f2- || true)
+            fi
+            ssh_entry="Tailscale SSH 暂不可用 · 稍后查看 Actions 日志"
+            if [ -n "$ts_host" ] && [ -n "$ts_ip" ]; then
+              ssh_entry="tailscale ssh runner@${ts_host} · 或 ssh runner@${ts_ip}"
+            elif [ -n "$ts_host" ]; then
+              ssh_entry="tailscale ssh runner@${ts_host}"
+            fi
+
+            current_version=""
+            fallback_version=""
+            fallback_version_source=""
+            recorded_successful_version=""
+            fail_stage=""
+            initial_start_duration_sec=""
+            preflight_doctor_duration_sec=""
+            fallback_reinstall_duration_sec=""
+            if [ -f "$meta_file" ]; then
+              current_version=$(grep '^CURRENT_OPENCLAW_VERSION=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
+              fallback_version=$(grep '^FALLBACK_TARGET_VERSION=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
+              fallback_version_source=$(grep '^FALLBACK_VERSION_SOURCE=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
+              recorded_successful_version=$(grep '^RECORDED_SUCCESSFUL_OPENCLAW_VERSION=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
+              fail_stage=$(grep '^FAIL_STAGE=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
+              initial_start_duration_sec=$(grep '^INITIAL_START_DURATION_SEC=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
+              preflight_doctor_duration_sec=$(grep '^PREFLIGHT_DOCTOR_DURATION_SEC=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
+              fallback_reinstall_duration_sec=$(grep '^FALLBACK_REINSTALL_DURATION_SEC=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
+            fi
+
+            export RUN_URL="${TG_RUN_URL}"
+            export SSH_ENTRY="$ssh_entry"
+            export ERROR_SUMMARY="$error_summary"
+            export CURRENT_VERSION="$current_version"
+            export FALLBACK_VERSION="$fallback_version"
+            export FALLBACK_VERSION_SOURCE="$fallback_version_source"
+            export RECORDED_SUCCESSFUL_VERSION="$recorded_successful_version"
+            export FAIL_STAGE="$fail_stage"
+            export INITIAL_START_DURATION_SEC="$initial_start_duration_sec"
+            export PREFLIGHT_DOCTOR_DURATION_SEC="$preflight_doctor_duration_sec"
+            export FALLBACK_REINSTALL_DURATION_SEC="$fallback_reinstall_duration_sec"
+            # 统一 HTML 版式 + 统一收尾区（动态值一律转义；日志收敛 <pre> 等宽块；
+            # HTML 解析失败直接报错不重发——修复"声明 parse_mode=HTML 但未转义"的隐患）
+            # 失败阶段英文 token → 中文标签（规范 · 失败与异常：英文原因 token 不得直出通知）
+            fail_stage_label=""
+            if [ -n "$fail_stage" ]; then
+              case "$fail_stage" in
+                preflight_doctor) fail_stage_label="预检修复";;
+                config_validate) fail_stage_label="配置校验";;
+                initial_start) fail_stage_label="首次启动";;
+                fallback_reinstall) fail_stage_label="回退重装";;
+                *) fail_stage_label="$fail_stage";;
+              esac
+            fi
+            source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+            # 耗时显示走真源 tg_format_ms（规范 · 时长 第 3/4 层）：≥1 秒两位小数秒、
+            # 不足 1 秒整数毫秒 —— 上游写入的是整数秒，恒按 %.2f 输出时 0 会显示成
+            # "0.00 秒"：看不出快慢，也让人怀疑没测到。真源唯一实现，不再内联副本。
+            msg=""
+            tg_add_title msg "🚨 OpenClaw 自愈失败"
+            # 英文步骤名不直出通知（规范 · 失败与异常）
+            tg_add_kv msg "步骤" "运行 OpenClaw"
+            tg_add_path msg "Run ID" "${{ github.run_id }}"
+            [ -n "$fail_stage_label" ] && tg_add_kv msg "失败阶段" "$fail_stage_label"
+            [ -n "$current_version" ] && tg_add_path msg "当前版本" "$current_version"
+            [ -n "$fallback_version" ] && tg_add_path msg "回退版本" "$fallback_version"
+            # 英文 token 不直出通知（规范 · 失败与异常）：known_good_file / meta_lastTouchedVersion → 中文
+            if [ -n "$fallback_version_source" ]; then
+              case "$fallback_version_source" in
+                known_good_file) _fvs="known-good 版本文件" ;;
+                meta_lastTouchedVersion) _fvs="meta 里的 lastTouchedVersion" ;;
+                *) _fvs="$fallback_version_source" ;;
+              esac
+              tg_add_kv msg "回退来源" "$_fvs"
+            fi
+            [ -n "$recorded_successful_version" ] && tg_add_path msg "成功版本记录" "$recorded_successful_version"
+            # 耗时走 tg_format_ms（规范 · 时长写法第 3/4 层），不再一律按秒两位小数
+            [ -n "$initial_start_duration_sec" ] && tg_add_kv msg "首次启动耗时" "$(tg_format_ms "$initial_start_duration_sec")"
+            [ -n "$preflight_doctor_duration_sec" ] && tg_add_kv msg "预检修复耗时" "$(tg_format_ms "$preflight_doctor_duration_sec")"
+            [ -n "$fallback_reinstall_duration_sec" ] && tg_add_kv msg "回退重装耗时" "$(tg_format_ms "$fallback_reinstall_duration_sec")"
+            [ -n "$ssh_entry" ] && tg_add_path msg "SSH 调试" "$ssh_entry"
+            tg_add_section msg "🧾 关键日志"
+            # 走真源 tg_add_pre（转义 + <pre> 包裹），与同文件归档告警同款；
+            # 此前本处手拼 <pre>，是 tg_add_pre 的重复实现
+            tg_add_pre msg "$error_summary"
+            tg_add_footer msg
+            # 统一走发送层：429 按 retry_after 重试已内置，HTML 解析失败直接报错。
+            # 用 chunked 版：日志经转义后可能膨胀到单条上限，分片比整条被拒好
+            send_tg_chunked "$msg" alert || true
+          else
+            echo "⚠️ Telegram alert skipped: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is empty"
+          fi
+
       - name: Run workbuddy-gateway (check update first, then serve)
         id: run_workbuddy
+        # 2026-10-22 步骤重排后位于 Run OpenClaw 之后：本步失败不得级联跳过
+        # （此前排在前面自然免疫，2026-10-02 事故注释同款语义）
+        if: ${{ !cancelled() }}
         env:
           # send_tg 发送闸 + 收尾区接线（缺任一则本步骤通知静默跳过）
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -2931,6 +3392,8 @@ jobs:
       # 隧道 trae2api（原 trae2api.derrick.eu.org → 127.0.0.1:7864）已于 2026-09-29 撤销：
       # /dropbox/self-hosted/.cloudflared 恢复，由 tunnels.conf 纳管。
       - name: Run trae2api container (TRAE SOLO reverse proxy)
+        # 2026-10-22 步骤重排后位于 Run OpenClaw 之后：本步失败不得级联跳过
+        if: ${{ !cancelled() }}
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -3443,6 +3906,8 @@ jobs:
       # continue-on-error：新网关故障不得级联跳过后续 quota-board / zcode2api / Run OpenClaw
       # （对齐 autoclaw/qingyan 的保护口径；可见性由 step 内 TG 告警保证）。
       - name: Run qoder2api-hub container (Qoder 双区 OpenAI 兼容网关)
+        # 2026-10-22 步骤重排后位于 Run OpenClaw 之后：本步失败不得级联跳过
+        if: ${{ !cancelled() }}
         continue-on-error: true
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -3595,6 +4060,8 @@ jobs:
           qoder_notify "$_title" "$_conclusion" "$QODER_VERSION" "$QODER_UPDATE" "" "" 1
 
       - name: Run quota-board (TG 额度看板 + Mini App)
+        # 2026-10-22 步骤重排后位于 Run OpenClaw 之后：本步失败不得级联跳过
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           # psutil：看板「🖥 系统」段的数据源（2026-10-07 合并系统看板进主看板）。
@@ -4374,6 +4841,8 @@ jobs:
 
       - name: Run qingyan-proxy (ChatGLM 清言反代)
         id: run_qingyan
+        # 2026-10-22 步骤重排后位于 Run OpenClaw 之后：本步失败不得级联跳过
+        if: ${{ !cancelled() }}
         continue-on-error: true
         env:
           # send_tg 发送闸 + 收尾区接线（缺任一则本步骤通知静默跳过）
@@ -4636,458 +5105,6 @@ jobs:
           send_tg "$msg" alert || true
           echo "已推送 SSH 入口通知: ssh runner@${TS_HOST}（AI 网关: ${AI_BACKEND}）"
 
-      - name: Run OpenClaw
-        id: run_openclaw
-        # 2026-10-02 事故根因：任一前置服务步骤（quota-board/trae/zcode2api…）硬失败时，
-        # 本步骤被静默跳过 —— meta 不写、网关不起，且 outcome=skipped 连
-        # 「Notify OpenClaw startup failure」（只认 failure）都不触发，OpenClaw 整条链
-        # 无声消失。本步骤的自愈机制（fallback 重装、失败通知）本就为「自己
-        # 失败」设计，理应在任何前置失败后仍获得执行机会；cancelled 除外 —— 主动取消
-        # 时不该再拉起网关。
-        if: ${{ !cancelled() }}
-        run: |
-          set -euo pipefail
-
-          RUN_OPENCLAW_STEP_LOG="/tmp/run-openclaw-step.log"
-          RUN_OPENCLAW_META="/tmp/run-openclaw-meta.env"
-          : > "$RUN_OPENCLAW_STEP_LOG"
-          : > "$RUN_OPENCLAW_META"
-          exec > >(tee -a "$RUN_OPENCLAW_STEP_LOG") 2>&1
-
-          CURRENT_OPENCLAW_VERSION="$(openclaw --version 2>/dev/null | head -n 1 || true)"
-          CURRENT_OPENCLAW_SEMVER="$(printf '%s\n' "$CURRENT_OPENCLAW_VERSION" | grep -oE '[0-9]{4}\.[0-9]+\.[0-9]+' | head -n 1 || true)"
-          KNOWN_GOOD_VERSION_FILE="$HOME/.openclaw/openclaw-known-good-version"
-          echo "CURRENT_OPENCLAW_VERSION=$CURRENT_OPENCLAW_VERSION" >> "$RUN_OPENCLAW_META"
-          echo "CURRENT_OPENCLAW_SEMVER=$CURRENT_OPENCLAW_SEMVER" >> "$RUN_OPENCLAW_META"
-          echo "FAIL_STAGE=preflight_doctor" >> "$RUN_OPENCLAW_META"
-          PREFLIGHT_BEGIN_TS=$(date +%s)
-
-          fail_startup() {
-            local msg="$1"
-            echo "❌ $msg"
-            exit 1
-          }
-
-          normalize_openclaw_version() {
-            printf '%s\n' "${1:-}" | tr -d '[:space:]' | grep -oE '^[0-9]{4}\.[0-9]+\.[0-9]+$' || true
-          }
-
-          read_openclaw_version_file() {
-            local file="$1"
-            if [ -s "$file" ]; then
-              normalize_openclaw_version "$(head -n 1 "$file" 2>/dev/null || true)"
-            fi
-          }
-
-          record_successful_openclaw_version() {
-            local version="$1"
-            version="$(normalize_openclaw_version "$version")"
-            if [ -z "$version" ]; then
-              echo "⚠️ Cannot record successful OpenClaw version: current version is empty or invalid."
-              return 0
-            fi
-            mkdir -p "$HOME/.openclaw"
-            printf '%s\n' "$version" > "$KNOWN_GOOD_VERSION_FILE"
-            echo "RECORDED_SUCCESSFUL_OPENCLAW_VERSION=$version" >> "$RUN_OPENCLAW_META"
-            echo "✅ Recorded successful OpenClaw version: $version"
-          }
-
-          resolve_fallback_openclaw_version() {
-            local version=""
-
-            version="$(read_openclaw_version_file "$KNOWN_GOOD_VERSION_FILE")"
-            if [ -n "$version" ]; then
-              echo "FALLBACK_VERSION_SOURCE=known_good_file" >> "$RUN_OPENCLAW_META"
-              echo "$version"
-              return 0
-            fi
-
-            if [ -s "$HOME/.openclaw/openclaw.json" ]; then
-              version="$(jq -r '.meta.lastTouchedVersion // empty' "$HOME/.openclaw/openclaw.json" 2>/dev/null | head -n 1 || true)"
-              version="$(normalize_openclaw_version "$version")"
-              if [ -n "$version" ]; then
-                echo "FALLBACK_VERSION_SOURCE=meta_lastTouchedVersion" >> "$RUN_OPENCLAW_META"
-                echo "$version"
-                return 0
-              fi
-            fi
-
-            echo ""
-            return 1
-          }
-
-          fix_openclaw_permissions() {
-            echo "🔧 Fixing file permissions to pass security checks..."
-            sudo chmod -R o-w "$(npm root -g)"
-            chmod 700 ~/.openclaw
-            if [ -f ~/.openclaw/openclaw.json ]; then
-              chmod 600 ~/.openclaw/openclaw.json
-            fi
-          }
-
-          openclaw_port_listening() {
-            sudo lsof -Pi :18789 -sTCP:LISTEN -t >/dev/null
-          }
-
-          openclaw_log_ready() {
-            journalctl --user -u openclaw-gateway.service --since "5 minutes ago" --no-pager 2>/dev/null \
-              | grep -q "\[gateway\] ready"
-          }
-
-          openclaw_health_http_ok() {
-            [ "$(curl -fsS -o /dev/null -w "%{http_code}" --connect-timeout 3 --max-time 15 http://127.0.0.1:18789/health || true)" = "200" ]
-          }
-
-          wait_for_openclaw_health() {
-            local label="$1"
-            local timeout_sec="${2:-180}"
-            local interval_sec="${3:-5}"
-            local start_ts now_ts elapsed
-            start_ts=$(date +%s)
-
-            echo "Waiting for OpenClaw health (${label}, timeout=${timeout_sec}s)..."
-            while true; do
-              now_ts=$(date +%s)
-              elapsed=$((now_ts - start_ts))
-
-              if openclaw_port_listening; then
-                if openclaw_health_http_ok; then
-                  echo "✅ OpenClaw Gateway health is OK after ${elapsed}s (${label})."
-                  return 0
-                fi
-
-                if openclaw_log_ready; then
-                  echo "⏳ Gateway is listening and logged ready, but /health is still slow after ${elapsed}s (${label}); continuing grace wait."
-                else
-                  echo "⏳ Gateway port is listening, waiting for ready/health... ${elapsed}/${timeout_sec}s (${label})"
-                fi
-              else
-                echo "⏳ Gateway port is not listening yet... ${elapsed}/${timeout_sec}s (${label})"
-              fi
-
-              if [ "$elapsed" -ge "$timeout_sec" ]; then
-                echo "❌ OpenClaw Gateway health did not become OK within ${timeout_sec}s (${label})."
-                return 1
-              fi
-              sleep "$interval_sec"
-            done
-          }
-
-          dump_openclaw_diagnostics() {
-            echo "⚠️ Gateway not healthy yet. Diagnostics:"
-            echo "--- systemd status ---"
-            systemctl --user --no-pager --full status openclaw-gateway.service || true
-            echo "--- recent journal ---"
-            journalctl --user -u openclaw-gateway.service --since "10 minutes ago" --no-pager | tail -n 120 || true
-            echo "--- /tmp/openclaw logs ---"
-            find /tmp/openclaw -maxdepth 1 -type f -name 'openclaw-*.log' -printf '%T@ %p\n' 2>/dev/null \
-              | sort -nr \
-              | head -2 \
-              | cut -d' ' -f2- \
-              | while IFS= read -r log_file; do
-                  echo "--- tail $log_file ---"
-                  tail -n 80 "$log_file" || true
-                done
-          }
-
-          fix_openclaw_permissions
-
-          echo "FAIL_STAGE=config_validate" >> "$RUN_OPENCLAW_META"
-          echo "🧪 Preflight config validation for $CURRENT_OPENCLAW_VERSION ..."
-          CONFIG_VALID_FOR_CURRENT=0
-          DOCTOR_RAN=0
-          if openclaw config validate >/tmp/config-validate.log 2>&1; then
-            CONFIG_VALID_FOR_CURRENT=1
-            echo "✅ Config valid for current version."
-          else
-            echo "⚠️ Config invalid for current version. Trying 'openclaw doctor --fix' to repair, then re-validating. Details:"
-            tail -n 15 /tmp/config-validate.log 2>/dev/null || true
-            echo "🛠️ Running 'openclaw doctor --fix' to repair the config..."
-            DOCTOR_RAN=1
-            openclaw doctor --fix || echo "DOCTOR_EXIT=$? (non-fatal, continuing)"
-            if openclaw config validate >/tmp/config-validate-2.log 2>&1; then
-              CONFIG_VALID_FOR_CURRENT=1
-              echo "✅ Config repaired by doctor; now valid for current version."
-            else
-              echo "❌ Config still invalid after doctor. Gateway start will be skipped; fallback reinstall, downgrade guard and snapshot rollback handle recovery. Details:"
-              tail -n 10 /tmp/config-validate-2.log 2>/dev/null || true
-            fi
-          fi
-
-          if [ "$CONFIG_VALID_FOR_CURRENT" = "1" ] && [ "$DOCTOR_RAN" != "1" ]; then
-            # 优化（2026-10-02）：config 已校验通过时，preflight doctor 只在 OpenClaw
-            # **版本变化**时才跑。实测该步固定耗时 79s，而配置合法时 doctor 并无
-            # 修复动作（日志仅 warnings + registry 刷新 + agent-db 完整性检查）。
-            # 版本未变 ⇒ 跳过（省 79s）；版本一变 ⇒ 照跑，保住升级时的自愈。
-            # 状态文件放在 ~/.openclaw 内：它随主包归档/恢复，上轮记录得以延续。
-            # 版本解析失败时（CURRENT_OPENCLAW_SEMVER 为空）一律照跑 —— 保守。
-            DOCTOR_STATE_FILE="$HOME/.openclaw/openclaw-doctor-last-version"
-            LAST_DOCTOR_VERSION="$(head -n 1 "$DOCTOR_STATE_FILE" 2>/dev/null || true)"
-            if [ -n "$CURRENT_OPENCLAW_SEMVER" ] && [ "$LAST_DOCTOR_VERSION" = "$CURRENT_OPENCLAW_SEMVER" ]; then
-              echo "⏭️ Skipping preflight doctor: config valid & version unchanged (${CURRENT_OPENCLAW_SEMVER})"
-            else
-              echo "🛠️ Running preflight 'openclaw doctor --fix' before gateway restart... (${LAST_DOCTOR_VERSION:-none} → ${CURRENT_OPENCLAW_SEMVER})"
-              openclaw doctor --fix || echo "DOCTOR_EXIT=$? (non-fatal, continuing)"
-              mkdir -p "$HOME/.openclaw"
-              printf '%s\n' "$CURRENT_OPENCLAW_SEMVER" > "$DOCTOR_STATE_FILE"
-            fi
-          fi
-          PREFLIGHT_END_TS=$(date +%s)
-          echo "PREFLIGHT_DOCTOR_DURATION_SEC=$((PREFLIGHT_END_TS - PREFLIGHT_BEGIN_TS))" >> "$RUN_OPENCLAW_META"
-
-          echo "FAIL_STAGE=initial_start" >> "$RUN_OPENCLAW_META"
-          INITIAL_START_BEGIN_TS=$(date +%s)
-          echo "Restarting OpenClaw gateway..."
-
-          # 2026-10-22 冷启动优化（run 39637798065 日志实证）：unit 由 CLI 生成时带
-          # TimeoutStopSec=330，而 `gateway install --force` 已经把服务拉起来了；
-          # 紧接着再 `gateway restart` 会走一遍完整 stop→start —— 首启进程还在 boot、
-          # 不响应 SIGTERM，systemd 就陪它等到 330s 才 SIGKILL。日志里
-          # 16:59:47 "Gateway service installed" → 17:05:23 "Restarted systemd service"
-          # 的 336s 静默正是它（冷启动根本没有「旧进程」要停）。
-          # 对策两层：① drop-in 把停机上限压到 90s（install 重写主 unit 不影响 .d 覆盖）；
-          # ② 冷启动不再调 CLI restart：install 已拉起就直接等健康，unit 未激活才显式 start。
-          GW_UNIT="openclaw-gateway.service"
-          GW_DROPIN_DIR="$HOME/.config/systemd/user/${GW_UNIT}.d"
-          mkdir -p "$GW_DROPIN_DIR"
-          cat > "$GW_DROPIN_DIR/10-stop-timeout.conf" <<'EOF_STOP'
-          [Service]
-          TimeoutStopSec=90
-          EOF_STOP
-          systemctl --user daemon-reload 2>/dev/null || true
-
-          INITIAL_START_RESTART_OK=1
-          if [ "$CONFIG_VALID_FOR_CURRENT" != "1" ]; then
-            echo "⚠️ Skipping gateway start: config still invalid after doctor. Going straight to fallback reinstall with the recorded compatible version."
-            INITIAL_START_RESTART_OK=0
-          elif ! openclaw gateway install --force; then
-            echo "⚠️ Initial gateway install failed; will attempt fallback reinstall."
-            INITIAL_START_RESTART_OK=0
-          else
-            if [ "$(systemctl --user is-active "$GW_UNIT" 2>/dev/null || echo inactive)" = "active" ]; then
-              echo "⏭️ unit 已由 install --force 拉起，跳过 gateway restart，直接等健康（冷启动快路径）"
-            else
-              echo "ℹ️ unit 未激活，systemctl --user start 拉起（不走 CLI restart）"
-              systemctl --user reset-failed "$GW_UNIT" 2>/dev/null || true
-              systemctl --user start "$GW_UNIT" 2>/dev/null || echo "⚠️ systemctl start 返回非零，交给健康检查判定"
-            fi
-            echo "COLD_START_SKIP_RESTART=1" >> "$RUN_OPENCLAW_META"
-          fi
-
-          if [ "$INITIAL_START_RESTART_OK" = "1" ] && wait_for_openclaw_health "initial_start" 180 5; then
-              INITIAL_START_END_TS=$(date +%s)
-              echo "INITIAL_START_DURATION_SEC=$((INITIAL_START_END_TS - INITIAL_START_BEGIN_TS))" >> "$RUN_OPENCLAW_META"
-              record_successful_openclaw_version "$CURRENT_OPENCLAW_SEMVER"
-              echo "✅ OpenClaw Gateway is healthy!"
-          else
-              INITIAL_START_END_TS=$(date +%s)
-              echo "INITIAL_START_DURATION_SEC=$((INITIAL_START_END_TS - INITIAL_START_BEGIN_TS))" >> "$RUN_OPENCLAW_META"
-              dump_openclaw_diagnostics
-
-              echo "FAIL_STAGE=fallback_reinstall" >> "$RUN_OPENCLAW_META"
-              echo "🔄 Initial start failed after preflight doctor. Attempting to fallback and reinstall recorded OpenClaw version..."
-
-              TARGET_VERSION="$(resolve_fallback_openclaw_version || true)"
-              if [ -z "$TARGET_VERSION" ]; then
-                fail_startup "No fallback OpenClaw version found. Checked $KNOWN_GOOD_VERSION_FILE and .meta.lastTouchedVersion."
-              fi
-              echo "✅ Selected fallback OpenClaw version: $TARGET_VERSION"
-
-              echo "Installing openclaw@$TARGET_VERSION ..."
-              echo "FALLBACK_TARGET_VERSION=$TARGET_VERSION" >> "$RUN_OPENCLAW_META"
-              FALLBACK_REINSTALL_BEGIN_TS=$(date +%s)
-              npm i -g "openclaw@$TARGET_VERSION"
-
-              fix_openclaw_permissions
-
-              echo "🧪 Validating config against fallback openclaw@$TARGET_VERSION ..."
-              if openclaw config validate >/tmp/config-validate-fallback.log 2>&1; then
-                echo "✅ Config valid for fallback version."
-              else
-                echo "⚠️ Config invalid for fallback version. Trying 'openclaw doctor --fix' first. Details:"
-                tail -n 10 /tmp/config-validate-fallback.log 2>/dev/null || true
-                openclaw doctor --fix || echo "DOCTOR_EXIT=$? (non-fatal, continuing)"
-                if openclaw config validate >/tmp/config-validate-fallback-2.log 2>&1; then
-                  echo "✅ Config repaired by doctor for fallback version."
-                else
-                  DOWNGRADE_TS="$(date +%Y%m%d-%H%M%S)"
-                  echo "❌ Config still invalid for fallback version after doctor. Moving the current state aside so the fallback version starts clean (kept as *.state-bak-$DOWNGRADE_TS; sessions will be lost, upgrade back to recover). Details:"
-                  tail -n 10 /tmp/config-validate-fallback-2.log 2>/dev/null || true
-                  for STATE_DB in "$HOME/.openclaw/state/openclaw.sqlite" "$HOME/.openclaw/state/openclaw.sqlite-wal" "$HOME/.openclaw/state/openclaw.sqlite-shm"; do
-                    if [ -f "$STATE_DB" ]; then
-                      mv "$STATE_DB" "$STATE_DB.state-bak-$DOWNGRADE_TS" && echo "➡️ Moved aside: $STATE_DB"
-                    fi
-                  done
-                  echo "🛠️ Running 'openclaw doctor --fix' on the clean state..."
-                  openclaw doctor --fix || echo "DOCTOR_EXIT=$? (non-fatal, continuing)"
-                fi
-              fi
-
-              echo "Restarting OpenClaw after fallback reinstall..."
-              FALLBACK_RESTART_OK=1
-              # 2026-10-03 事故：降级后的启动崩溃循环会烧光 systemd StartLimitBurst
-              # （10 次/300s），此后 restart 恒报 "Start request repeated too quickly"，
-              # 自愈还没开始就被熔断锁死。restart 前先清 failed 计数。
-              systemctl --user reset-failed openclaw-gateway.service 2>/dev/null || true
-              if ! openclaw gateway install --force; then
-                echo "⚠️ Fallback gateway install failed."
-                FALLBACK_RESTART_OK=0
-              elif ! openclaw gateway restart; then
-                echo "⚠️ Fallback gateway restart failed."
-                FALLBACK_RESTART_OK=0
-              fi
-
-              if [ "$FALLBACK_RESTART_OK" = "1" ] && wait_for_openclaw_health "fallback_reinstall" 180 5; then
-                FALLBACK_REINSTALL_END_TS=$(date +%s)
-                echo "FALLBACK_REINSTALL_DURATION_SEC=$((FALLBACK_REINSTALL_END_TS - FALLBACK_REINSTALL_BEGIN_TS))" >> "$RUN_OPENCLAW_META"
-                record_successful_openclaw_version "$TARGET_VERSION"
-                echo "✅ OpenClaw Gateway is healthy after fallback reinstall!"
-              else
-                FALLBACK_REINSTALL_END_TS=$(date +%s)
-                echo "FALLBACK_REINSTALL_DURATION_SEC=$((FALLBACK_REINSTALL_END_TS - FALLBACK_REINSTALL_BEGIN_TS))" >> "$RUN_OPENCLAW_META"
-                dump_openclaw_diagnostics
-
-                # 2026-10-11 移除版本化快照回滚（主人拍板）：快照是主包的服务端副本，
-                # 主包坏它也坏，兜底价值≈0，却长期占用一份 4.2GB 云端空间。自愈链
-                # 收敛为：doctor --fix → 回退重装（已记录的兼容版本）。走到这里说明
-                # 两条都失败了，直接判死走失败通知（人工介入，现场保留）。
-                echo "FAIL_STAGE=fallback_reinstall" >> "$RUN_OPENCLAW_META"
-                err="回退到最近记录版本（${TARGET_VERSION:-未知}）重装后，OpenClaw 依然无法启动（健康检查失败）"
-                fail_startup "$err"
-              fi
-          fi
-
-      - name: Notify OpenClaw startup failure
-        if: ${{ always() && steps.run_openclaw.outcome == 'failure' }}
-        env:
-          # send_tg 发送闸 + 收尾区接线（时长走 tg_add_footer 内的 runner 开机时刻兜底，
-          # 无需注入起始时间——平台无 github.run_started_at 上下文）
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          if [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] && [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ]; then
-            step_log="/tmp/run-openclaw-step.log"
-            meta_file="/tmp/run-openclaw-meta.env"
-
-            sanitize_log() {
-              perl -pe 's/\x1b\[[0-9;]*[A-Za-z]//g; s/\r//g'
-            }
-
-            error_summary=""
-            if [ -f openclaw.log ]; then
-              error_summary=$(sanitize_log < openclaw.log | grep -Ei 'error|fail|exception|unhealthy|timed out|cannot|denied|missing|invalid' | tail -n 20 || true)
-              if [ -z "$error_summary" ]; then
-                error_summary=$(sanitize_log < openclaw.log | tail -n 40 || true)
-              fi
-            fi
-            if [ -z "$error_summary" ] && [ -f "$step_log" ]; then
-              error_summary=$(sanitize_log < "$step_log" | grep -Ei 'error|fail|exception|unhealthy|timed out|cannot|denied|missing|invalid|doctor|fallback|restart' | tail -n 30 || true)
-              if [ -z "$error_summary" ]; then
-                error_summary=$(sanitize_log < "$step_log" | tail -n 60 || true)
-              fi
-            fi
-            if [ -z "$error_summary" ]; then
-              error_summary="openclaw.log 与步骤日志均未找到可用摘要"
-            fi
-            # 与同文件 send_telegram_alert / send_archive_alert 同口径（尾部 1200 字节）：
-            # 超长输出会让 <pre> 跨 4000 字符分片、标签断开即破版（规范 · 分节）
-            error_summary=$(printf '%s' "$error_summary" | tail -c 1200)
-
-            ts_host=""
-            ts_ip=""
-            if [ -f "$HOME/ts.env" ]; then
-              ts_host=$(grep '^TS_HOST=' "$HOME/ts.env" | tail -n 1 | cut -d= -f2- || true)
-              ts_ip=$(grep '^TS_IP=' "$HOME/ts.env" | tail -n 1 | cut -d= -f2- || true)
-            fi
-            ssh_entry="Tailscale SSH 暂不可用 · 稍后查看 Actions 日志"
-            if [ -n "$ts_host" ] && [ -n "$ts_ip" ]; then
-              ssh_entry="tailscale ssh runner@${ts_host} · 或 ssh runner@${ts_ip}"
-            elif [ -n "$ts_host" ]; then
-              ssh_entry="tailscale ssh runner@${ts_host}"
-            fi
-
-            current_version=""
-            fallback_version=""
-            fallback_version_source=""
-            recorded_successful_version=""
-            fail_stage=""
-            initial_start_duration_sec=""
-            preflight_doctor_duration_sec=""
-            fallback_reinstall_duration_sec=""
-            if [ -f "$meta_file" ]; then
-              current_version=$(grep '^CURRENT_OPENCLAW_VERSION=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
-              fallback_version=$(grep '^FALLBACK_TARGET_VERSION=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
-              fallback_version_source=$(grep '^FALLBACK_VERSION_SOURCE=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
-              recorded_successful_version=$(grep '^RECORDED_SUCCESSFUL_OPENCLAW_VERSION=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
-              fail_stage=$(grep '^FAIL_STAGE=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
-              initial_start_duration_sec=$(grep '^INITIAL_START_DURATION_SEC=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
-              preflight_doctor_duration_sec=$(grep '^PREFLIGHT_DOCTOR_DURATION_SEC=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
-              fallback_reinstall_duration_sec=$(grep '^FALLBACK_REINSTALL_DURATION_SEC=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
-            fi
-
-            export RUN_URL="${TG_RUN_URL}"
-            export SSH_ENTRY="$ssh_entry"
-            export ERROR_SUMMARY="$error_summary"
-            export CURRENT_VERSION="$current_version"
-            export FALLBACK_VERSION="$fallback_version"
-            export FALLBACK_VERSION_SOURCE="$fallback_version_source"
-            export RECORDED_SUCCESSFUL_VERSION="$recorded_successful_version"
-            export FAIL_STAGE="$fail_stage"
-            export INITIAL_START_DURATION_SEC="$initial_start_duration_sec"
-            export PREFLIGHT_DOCTOR_DURATION_SEC="$preflight_doctor_duration_sec"
-            export FALLBACK_REINSTALL_DURATION_SEC="$fallback_reinstall_duration_sec"
-            # 统一 HTML 版式 + 统一收尾区（动态值一律转义；日志收敛 <pre> 等宽块；
-            # HTML 解析失败直接报错不重发——修复"声明 parse_mode=HTML 但未转义"的隐患）
-            # 失败阶段英文 token → 中文标签（规范 · 失败与异常：英文原因 token 不得直出通知）
-            fail_stage_label=""
-            if [ -n "$fail_stage" ]; then
-              case "$fail_stage" in
-                preflight_doctor) fail_stage_label="预检修复";;
-                config_validate) fail_stage_label="配置校验";;
-                initial_start) fail_stage_label="首次启动";;
-                fallback_reinstall) fail_stage_label="回退重装";;
-                *) fail_stage_label="$fail_stage";;
-              esac
-            fi
-            source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
-            # 耗时显示走真源 tg_format_ms（规范 · 时长 第 3/4 层）：≥1 秒两位小数秒、
-            # 不足 1 秒整数毫秒 —— 上游写入的是整数秒，恒按 %.2f 输出时 0 会显示成
-            # "0.00 秒"：看不出快慢，也让人怀疑没测到。真源唯一实现，不再内联副本。
-            msg=""
-            tg_add_title msg "🚨 OpenClaw 自愈失败"
-            # 英文步骤名不直出通知（规范 · 失败与异常）
-            tg_add_kv msg "步骤" "运行 OpenClaw"
-            tg_add_path msg "Run ID" "${{ github.run_id }}"
-            [ -n "$fail_stage_label" ] && tg_add_kv msg "失败阶段" "$fail_stage_label"
-            [ -n "$current_version" ] && tg_add_path msg "当前版本" "$current_version"
-            [ -n "$fallback_version" ] && tg_add_path msg "回退版本" "$fallback_version"
-            # 英文 token 不直出通知（规范 · 失败与异常）：known_good_file / meta_lastTouchedVersion → 中文
-            if [ -n "$fallback_version_source" ]; then
-              case "$fallback_version_source" in
-                known_good_file) _fvs="known-good 版本文件" ;;
-                meta_lastTouchedVersion) _fvs="meta 里的 lastTouchedVersion" ;;
-                *) _fvs="$fallback_version_source" ;;
-              esac
-              tg_add_kv msg "回退来源" "$_fvs"
-            fi
-            [ -n "$recorded_successful_version" ] && tg_add_path msg "成功版本记录" "$recorded_successful_version"
-            # 耗时走 tg_format_ms（规范 · 时长写法第 3/4 层），不再一律按秒两位小数
-            [ -n "$initial_start_duration_sec" ] && tg_add_kv msg "首次启动耗时" "$(tg_format_ms "$initial_start_duration_sec")"
-            [ -n "$preflight_doctor_duration_sec" ] && tg_add_kv msg "预检修复耗时" "$(tg_format_ms "$preflight_doctor_duration_sec")"
-            [ -n "$fallback_reinstall_duration_sec" ] && tg_add_kv msg "回退重装耗时" "$(tg_format_ms "$fallback_reinstall_duration_sec")"
-            [ -n "$ssh_entry" ] && tg_add_path msg "SSH 调试" "$ssh_entry"
-            tg_add_section msg "🧾 关键日志"
-            # 走真源 tg_add_pre（转义 + <pre> 包裹），与同文件归档告警同款；
-            # 此前本处手拼 <pre>，是 tg_add_pre 的重复实现
-            tg_add_pre msg "$error_summary"
-            tg_add_footer msg
-            # 统一走发送层：429 按 retry_after 重试已内置，HTML 解析失败直接报错。
-            # 用 chunked 版：日志经转义后可能膨胀到单条上限，分片比整条被拒好
-            send_tg_chunked "$msg" alert || true
-          else
-            echo "⚠️ Telegram alert skipped: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is empty"
-          fi
 
       - name: Start background archive loop
         env:
@@ -5171,6 +5188,9 @@ jobs:
             exit 1
           fi
 
+          # 2026-10-22 分段计时（测量埋点）：rsync 与 pigz 压缩占了脚本耗时大头，
+          # 各段秒数打进行内日志，供逐轮归档日志直接对比（下线窗口优化用）。
+          ARCH_T0=$(date +%s)
           STAGE_DIR=$(mktemp -d /tmp/openclaw-archive-stage.XXXXXX)
           mkdir -p "$STAGE_DIR/.openclaw"
 
@@ -5256,6 +5276,7 @@ jobs:
             "$SRC_DIR"/ "$STAGE_DIR/.openclaw"/
           rsync_rc=$?
           set -e
+          echo "openclaw_archive_timing rsync_sec=$(( $(date +%s) - ARCH_T0 )) rc=${rsync_rc}"
 
           if [ "$rsync_rc" -ne 0 ] && [ "$rsync_rc" -ne 24 ]; then
             echo "openclaw_snapshot_failed rc=$rsync_rc" >&2
@@ -5332,12 +5353,14 @@ jobs:
           # 300MB 样本 6.33s → 2.57s，快 2.5 倍）。产物仍是标准 gzip 流，
           # 已实测可用现有 `tar -xzf` 正常解开，恢复侧无需任何改动。
           # pigz 不可用时自动回退 gzip，保证归档不中断。
+          ARCH_T1=$(date +%s)
           if command -v pigz >/dev/null 2>&1; then
             tar -C "$STAGE_DIR" -cf - .openclaw | pigz -p "$(nproc)" -6 > "$OUTPUT_TAR"
           else
             echo "pigz unavailable, fallback to gzip" >&2
             tar -C "$STAGE_DIR" -czf "$OUTPUT_TAR" .openclaw
           fi
+          echo "openclaw_archive_timing compress_sec=$(( $(date +%s) - ARCH_T1 )) total_sec=$(( $(date +%s) - ARCH_T0 ))"
 
           actual_size=$(stat -c%s "$OUTPUT_TAR" 2>/dev/null || echo 0)
           if [ ! -s "$OUTPUT_TAR" ]; then
@@ -6056,7 +6079,14 @@ jobs:
           # 产物用 -periodic 后缀，与 Final Archive 的同名包区分，互不覆盖。
           TMP_RSSTT_TAR="/tmp/rsstt-periodic.tar.gz"
           TMP_Z2A_DATA_TAR="/tmp/zcode2api-data-periodic.tar.gz"
-          LOCK_FILE="/tmp/openclaw-archive.lock"
+          # 2026-10-22 对象级锁改造（与 Final Archive 同口径）：互斥粒度从一把大锁
+          # 改为按对象分锁 —— 循环内各项本就串行执行，分锁只为与收尾的并行旁路
+          # 归档精确互斥（收尾在归档主包时，小项不必等主包的锁，反之亦然）。
+          LOCK_OPENCLAW="/tmp/openclaw-archive.lock.openclaw"
+          LOCK_AIGW="/tmp/openclaw-archive.lock.aigateway"
+          LOCK_ZCODE="/tmp/openclaw-archive.lock.zcode"
+          LOCK_RSSTT="/tmp/openclaw-archive.lock.rsstt"
+          LOCK_Z2A="/tmp/openclaw-archive.lock.zcode2api"
 
           cleanup_archive_outputs() {
             # 产物文件（非 staging 目录）照常清理
@@ -6076,20 +6106,30 @@ jobs:
             # 即「父目录被抹」而非「源文件消失」—— 后者才是 rc=24 的语义。
             # 对策：清理 staging 前先**非阻塞**抢同一把归档锁；抢不到说明有人正在
             # 写，跳过清理（残留目录由持有方自己的 trap cleanup 回收，不会泄漏）。
-            if (
+            # ── 2026-10-07 rc=23 根治 + 2026-10-22 对象级锁改造 ──
+            # staging 清理按对象分锁：锁被持有 = 该对象正在打包，只跳过该对象的
+            # staging（残留由持有方自己的 trap cleanup 回收）；其余对象照常清理。
+            (
               flock -n 9 || exit 1
               rm -rf /tmp/openclaw-archive-stage.* 2>/dev/null || true
-              rm -rf /tmp/omniroute-archive-stage.* 2>/dev/null || true
-              rm -rf /tmp/clirelay-archive-stage.* 2>/dev/null || true
+            ) 9>>"$LOCK_OPENCLAW" 2>/dev/null || echo "⚠️ 主包归档锁被持有，跳过其 staging 清理" >&2
+            (
+              flock -n 9 || exit 1
+              rm -rf /tmp/omniroute-archive-stage.* /tmp/clirelay-archive-stage.* 2>/dev/null || true
               sudo rm -rf /tmp/cliproxyapi-archive-stage.* 2>/dev/null || true
+            ) 9>>"$LOCK_AIGW" 2>/dev/null || echo "⚠️ AI 网关归档锁被持有，跳过其 staging 清理" >&2
+            (
+              flock -n 9 || exit 1
               rm -rf /tmp/zcode-archive-stage.* 2>/dev/null || true
+            ) 9>>"$LOCK_ZCODE" 2>/dev/null || echo "⚠️ zcode 归档锁被持有，跳过其 staging 清理" >&2
+            (
+              flock -n 9 || exit 1
               sudo rm -rf /tmp/rsstt-archive-stage.* 2>/dev/null || true
+            ) 9>>"$LOCK_RSSTT" 2>/dev/null || echo "⚠️ rsstt 归档锁被持有，跳过其 staging 清理" >&2
+            (
+              flock -n 9 || exit 1
               rm -rf /tmp/zcode2api-data-archive-stage.* 2>/dev/null || true
-            ) 9>>/tmp/openclaw-archive.lock 2>/dev/null; then
-              :
-            else
-              echo "⚠️ 归档锁被持有（有打包正在写入），跳过 staging 清理以免抹掉在写的目录" >&2
-            fi
+            ) 9>>"$LOCK_Z2A" 2>/dev/null || echo "⚠️ zcode2api 归档锁被持有，跳过其 staging 清理" >&2
           }
           cleanup_archive_outputs
           PID_FILE="/tmp/openclaw-archive.pid"
@@ -6186,22 +6226,12 @@ jobs:
             # 2026-10-02：归档全程套 timeout —— 循环曾在一个悬挂的归档/上传迭代里卡死
             # 8 小时（无 timeout 的 rclone/网络调用），期间不归档、不告警、整条归档链静音。
             # timeout 杀掉后 flock 随之释放、rc=124 走失败分支照常告警，循环得以自愈。
-            elif openclaw_archive_output=$(flock -E 200 -n "$LOCK_FILE" timeout 40m bash /tmp/create-openclaw-archive.sh "$TMP_OPENCLAW_TAR" 2>&1); then
+            elif openclaw_archive_output=$(flock -E 200 -n "$LOCK_OPENCLAW" timeout 40m bash /tmp/create-openclaw-archive.sh "$TMP_OPENCLAW_TAR" 2>&1); then
               echo "[$(date '+%F %T')] openclaw archive ok, uploading... ${openclaw_archive_output}"
-              new_size=$(stat -c%s "$TMP_OPENCLAW_TAR" 2>/dev/null || echo 0)
-              remote_size=0
-              if [ "$ARCHIVE_DEST" = "dropbox:self-hosted/openclaw.tar.gz" ]; then
-                # rclone 失败须兜住：loop 带 set -euo pipefail，裸 rclone 在管道里非零会
-                # 无声杀死整个循环（nohup 后台无任何告警）。
-                remote_size=$({ timeout 5m rclone ls "$ARCHIVE_DEST" 2>/dev/null || true; } | awk '{s+=$1} END {print s+0}')
-              fi
-              # 体积骤降只记录、不拦截：完整性由归档脚本的关键文件校验把关（见
-              # create-openclaw-archive.sh）。原先拿云端现有包当基准判「缩水」，会被
-              # 主动瘦身（排除缓存/调试转储）永久卡死 —— 新包永远小于旧包，主包就此
-              # 冻结且每轮重复告警；体积本也不是「状态全不全」的判据（2026-09-12）。
-              if [ "$remote_size" -gt 0 ] && [ "$new_size" -lt "$((remote_size * 60 / 100))" ]; then
-                echo "[$(date '+%F %T')] ℹ️ 体积较云端下降超 40%（new=${new_size}B remote=${remote_size}B），已通过完整性校验，正常覆盖"
-              fi
+              # 2026-10-22：为「体积骤降只记录不拦截」而做的 rclone ls 已移除 ——
+              # 该信息不参与任何判定，却给每轮循环加一次最长 5m 的远端往返；
+              # 完整性由归档脚本的关键文件校验把关（体积本就不是「状态全不全」
+              # 的判据，2026-09-12 起「缩水」即不再拦截）。
               openclaw_upload_output=""
               if openclaw_upload_output=$(timeout 30m rclone copyto "$TMP_OPENCLAW_TAR" "$ARCHIVE_DEST" 2>&1); then
                 echo "[$(date '+%F %T')] openclaw upload ok"
@@ -6258,7 +6288,7 @@ jobs:
             esac
 
             ai_archive_output=""
-            if ai_archive_output=$(flock -E 200 -n "$LOCK_FILE" timeout 40m bash "$AI_ARCHIVE_SCRIPT" "$AI_ARCHIVE_TAR" 2>&1); then
+            if ai_archive_output=$(flock -E 200 -n "$LOCK_AIGW" timeout 40m bash "$AI_ARCHIVE_SCRIPT" "$AI_ARCHIVE_TAR" 2>&1); then
               echo "[$(date '+%F %T')] ${AI_LABEL} archive ok, uploading... ${ai_archive_output}"
               ai_upload_output=""
               if ai_upload_output=$(timeout 30m rclone copyto "$AI_ARCHIVE_TAR" "$AI_ARCHIVE_DEST" 2>&1); then
@@ -6285,17 +6315,9 @@ jobs:
             # ZCode 个人数据归档：~/.zcode 的 cli/ + v2/ → dropbox:self-hosted/zcode.tar.gz（带完整性校验）
             if [ -d "$HOME/.zcode/cli" ] || [ -d "$HOME/.zcode/v2" ] || [ -d "$HOME/.zcode/server" ]; then
               zcode_archive_output=""
-              if zcode_archive_output=$(flock -E 200 -n "$LOCK_FILE" timeout 40m bash /tmp/create-zcode-archive.sh "$TMP_ZCODE_TAR" 2>&1); then
+              if zcode_archive_output=$(flock -E 200 -n "$LOCK_ZCODE" timeout 40m bash /tmp/create-zcode-archive.sh "$TMP_ZCODE_TAR" 2>&1); then
                 echo "[$(date '+%F %T')] zcode archive ok, uploading... ${zcode_archive_output}"
-                zcode_new_size=$(stat -c%s "$TMP_ZCODE_TAR" 2>/dev/null || echo 0)
-                # rclone 失败兜底口径同 openclaw 主包：防 pipefail 无声杀循环
-                zcode_remote_size=$({ timeout 5m rclone ls "dropbox:self-hosted/zcode.tar.gz" 2>/dev/null || true; } | awk '{s+=$1} END {print s+0}')
-                # 体积骤降只记录、不拦截（口径同 openclaw 主包）：完整性由
-                # create-zcode-archive.sh 的 db.sqlite 校验把关。原先的缩水保护
-                # 在排除 model-io 调试转储后把正常瘦身判成状态丢失，主包冻结。
-                if [ "$zcode_remote_size" -gt 0 ] && [ "$zcode_new_size" -lt "$((zcode_remote_size * 60 / 100))" ]; then
-                  echo "[$(date '+%F %T')] ℹ️ zcode 体积较云端下降超 40%（new=${zcode_new_size}B remote=${zcode_remote_size}B），已通过完整性校验，正常覆盖"
-                fi
+                # 2026-10-22：rclone ls 体积对照已移除（口径同主包，不参与判定纯成本）
                 zcode_upload_output=""
                 if zcode_upload_output=$(timeout 30m rclone copyto "$TMP_ZCODE_TAR" "dropbox:self-hosted/zcode.tar.gz" 2>&1); then
                   echo "[$(date '+%F %T')] zcode upload ok"
@@ -6325,7 +6347,7 @@ jobs:
           # 实测云端 rsstt.tar.gz 曾落后本地 8.5 小时（回滚丢订阅列表与推送游标）。
           # 纳入周期循环后，回滚窗口从「一轮 job ≈6h」压到 20 分钟。
           rsstt_archive_output=""
-          if rsstt_archive_output=$(flock -E 200 -n "$LOCK_FILE" timeout 20m bash /tmp/create-rsstt-archive.sh "$TMP_RSSTT_TAR" 2>&1); then
+          if rsstt_archive_output=$(flock -E 200 -n "$LOCK_RSSTT" timeout 20m bash /tmp/create-rsstt-archive.sh "$TMP_RSSTT_TAR" 2>&1); then
             echo "[$(date '+%F %T')] rsstt archive ok, uploading... ${rsstt_archive_output}"
             rsstt_upload_output=""
             if rsstt_upload_output=$(timeout 20m rclone copyto "$TMP_RSSTT_TAR" "dropbox:self-hosted/rsstt.tar.gz" 2>&1); then
@@ -6353,7 +6375,7 @@ jobs:
           # 同上：原先单点收尾，实测云端落后本地约 5 小时（accounts.db md5 已分叉，
           # 本地 captchalog 当天日志云端包里没有）。承载账号池、用量与请求流水。
           z2a_archive_output=""
-          if z2a_archive_output=$(flock -E 200 -n "$LOCK_FILE" timeout 20m bash /tmp/create-zcode2api-data-archive.sh "$TMP_Z2A_DATA_TAR" 2>&1); then
+          if z2a_archive_output=$(flock -E 200 -n "$LOCK_Z2A" timeout 20m bash /tmp/create-zcode2api-data-archive.sh "$TMP_Z2A_DATA_TAR" 2>&1); then
             echo "[$(date '+%F %T')] zcode2api-data archive ok, uploading... ${z2a_archive_output}"
             z2a_upload_output=""
             if z2a_upload_output=$(timeout 20m rclone copyto "$TMP_Z2A_DATA_TAR" "dropbox:self-hosted/zcode2api-data.tar.gz" 2>&1); then
@@ -6555,6 +6577,14 @@ jobs:
           set -euo pipefail
           # 通知真源在 step 顶层 source 一次（勿挪进下面的函数体，理由见启动步骤同名注释 / 规范 4.4）
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+          # 2026-10-22 对象级锁（值须与 Start background archive loop 侧保持一致，
+          # 改需两处同改）：互斥粒度按对象分 —— 主包流式归档与四个小对象归档
+          # 并行执行，各自只锁自己的对象，循环侧同理。
+          LOCK_OPENCLAW="/tmp/openclaw-archive.lock.openclaw"
+          LOCK_AIGW="/tmp/openclaw-archive.lock.aigateway"
+          LOCK_ZCODE="/tmp/openclaw-archive.lock.zcode"
+          LOCK_RSSTT="/tmp/openclaw-archive.lock.rsstt"
+          LOCK_Z2A="/tmp/openclaw-archive.lock.zcode2api"
           echo "1. Stopping OpenClaw gateway..."
           # 2026-10-21 修复（run 39515245551 日志实证）：`openclaw gateway stop` 在非交互
           # shell 下**拒绝执行**——05:00:44 打出 "…or re-run with --force if you really mean
@@ -6731,11 +6761,16 @@ jobs:
               echo "⚠️ Telegram secrets missing, skip workbuddy-gateway stop notification."
             fi
           }
-          if [ "$WB_STILL_RUNNING" = "1" ]; then
-            wb_stop_notify "⚠️ workbuddy-gateway 已停止 · 进程残留" "强制结束后仍有进程残留"
-          else
-            wb_stop_notify "⛔ workbuddy-gateway 已停止" "服务已退出 · 数据目录保持原状"
-          fi
+          # 2026-10-22 下线提速：停止通知后台发送（send_tg 内置 429 重试，慢发
+          # 不该占收尾关键路径）；子 shell 内解除 set -e，失败只留日志不掀桌
+          (
+            set +e
+            if [ "$WB_STILL_RUNNING" = "1" ]; then
+              wb_stop_notify "⚠️ workbuddy-gateway 已停止 · 进程残留" "强制结束后仍有进程残留"
+            else
+              wb_stop_notify "⛔ workbuddy-gateway 已停止" "服务已退出 · 数据目录保持原状"
+            fi
+          ) &
 
           # 3b-1. autoclaw-proxy：宿主进程（2026-10-12 起 systemd --user 托管，
           #     原 nohup 裸跑已废 —— pkill 会被 Restart=always 拉回，必须走 systemctl）。
@@ -6769,19 +6804,24 @@ jobs:
           # 每轮收尾都发，与下一轮的「已就绪」配对，肉眼可确认服务生命周期闭环。
           # 2026-10-19 补 —— 此前四个本地网关里只有 autoclaw 只 echo 不发通知，
           # 服务被停这件事在主对话里无人知晓（仅剩启动步骤的失败告警可见）。
-          if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
-            _m=""
-            if [ "$AC_STILL_RUNNING" = "1" ]; then
-              tg_add_title _m "⚠️ autoclaw-proxy 已停止 · 进程残留"
-              tg_add_kv _m "结论" "强制结束后仍有进程残留"
-            else
-              tg_add_title _m "⛔ autoclaw-proxy 已停止"
-              tg_add_kv _m "结论" "服务已退出 · 数据目录保持原状"
+          # 2026-10-22 下线提速：停止通知后台发送（send_tg 内置 429 重试）；
+          # 子 shell 内解除 set -e，失败只留日志
+          (
+            set +e
+            if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+              _m=""
+              if [ "$AC_STILL_RUNNING" = "1" ]; then
+                tg_add_title _m "⚠️ autoclaw-proxy 已停止 · 进程残留"
+                tg_add_kv _m "结论" "强制结束后仍有进程残留"
+              else
+                tg_add_title _m "⛔ autoclaw-proxy 已停止"
+                tg_add_kv _m "结论" "服务已退出 · 数据目录保持原状"
+              fi
+              tg_add_path _m "端口" "8322"
+              tg_add_footer _m
+              send_tg "$_m" alert || true
             fi
-            tg_add_path _m "端口" "8322"
-            tg_add_footer _m
-            send_tg "$_m" alert || true
-          fi
+          ) &
 
           # 3c. zcode2api：同为宿主进程（非容器），不会随 job 结束自动退出，
           # 必须显式停，否则残留进程会一直持有 8319 并继续转发请求。
@@ -6808,19 +6848,24 @@ jobs:
 
           # 停止通知（口径对齐 workbuddy 的 3b 停止通知）：每轮收尾都发，
           # 与下一轮的「已就绪」配对，肉眼可确认服务生命周期闭环。
-          if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
-            _m=""
-            if [ "$Z2A_STILL_RUNNING" = "1" ]; then
-              tg_add_title _m "⚠️ zcode2api 已停止 · 进程残留"
-              tg_add_kv _m "结论" "强制结束后仍有进程残留"
-            else
-              tg_add_title _m "⛔ zcode2api 已停止"
-              tg_add_kv _m "结论" "服务已退出 · 数据目录保持原状"
+          # 2026-10-22 下线提速：停止通知后台发送（send_tg 内置 429 重试）；
+          # 子 shell 内解除 set -e，失败只留日志
+          (
+            set +e
+            if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+              _m=""
+              if [ "$Z2A_STILL_RUNNING" = "1" ]; then
+                tg_add_title _m "⚠️ zcode2api 已停止 · 进程残留"
+                tg_add_kv _m "结论" "强制结束后仍有进程残留"
+              else
+                tg_add_title _m "⛔ zcode2api 已停止"
+                tg_add_kv _m "结论" "服务已退出 · 数据目录保持原状"
+              fi
+              tg_add_path _m "端口" "8319"
+              tg_add_footer _m
+              send_tg "$_m" alert || true
             fi
-            tg_add_path _m "端口" "8319"
-            tg_add_footer _m
-            send_tg "$_m" alert || true
-          fi
+          ) &
 
           # 3d. qingyan-proxy：同为宿主进程（非容器），随 job 结束不会自动退出，
           # 必须显式停，否则残留进程会一直持有 8320 并继续消耗清言积分。
@@ -6845,19 +6890,24 @@ jobs:
           else
             echo "✅ qingyan-proxy 已停止"
           fi
-          if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
-            _m=""
-            if [ "$GL_STILL_RUNNING" = "1" ]; then
-              tg_add_title _m "⚠️ qingyan-proxy 已停止 · 进程残留"
-              tg_add_kv _m "结论" "强制结束后仍有进程残留"
-            else
-              tg_add_title _m "⛔ qingyan-proxy 已停止"
-              tg_add_kv _m "结论" "服务已退出 · 运行目录保持原状"
+          # 2026-10-22 下线提速：停止通知后台发送（send_tg 内置 429 重试）；
+          # 子 shell 内解除 set -e，失败只留日志
+          (
+            set +e
+            if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+              _m=""
+              if [ "$GL_STILL_RUNNING" = "1" ]; then
+                tg_add_title _m "⚠️ qingyan-proxy 已停止 · 进程残留"
+                tg_add_kv _m "结论" "强制结束后仍有进程残留"
+              else
+                tg_add_title _m "⛔ qingyan-proxy 已停止"
+                tg_add_kv _m "结论" "服务已退出 · 运行目录保持原状"
+              fi
+              tg_add_path _m "端口" "8320"
+              tg_add_footer _m
+              send_tg "$_m" alert || true
             fi
-            tg_add_path _m "端口" "8320"
-            tg_add_footer _m
-            send_tg "$_m" alert || true
-          fi
+          ) &
 
           # 用法与版式同 send_telegram_alert（<对象> <结论> <原因> [原始输出]）；
           # 两个函数分处不同 step、无法共享定义，改版式时两处要一起改
@@ -6953,18 +7003,30 @@ jobs:
             # ── 2026-10-07 rc=23 根治：同上，staging 清理必须先抢到归档锁 ──
             # 本 step 自己在下方才 flock 持锁，此处若裸删通配 stage，会抹掉仍在
             # 写入的目录（循环实例 / 上一轮残留）。抢不到锁即跳过，由持有方回收。
-            if (
+            # 2026-10-22 对象级锁改造（与周期归档循环同口径）：staging 清理按对象
+            # 分锁，锁被持有 = 该对象正在打包（收尾自己的并行分支或循环残留实例），
+            # 只跳过该对象的 staging；其余对象照常清理。
+            (
               flock -n 9 || exit 1
               rm -rf /tmp/openclaw-archive-stage.* 2>/dev/null || true
-              rm -rf /tmp/omniroute-archive-stage.* 2>/dev/null || true
-              rm -rf /tmp/clirelay-archive-stage.* 2>/dev/null || true
+            ) 9>>"$LOCK_OPENCLAW" 2>/dev/null || echo "⚠️ 主包归档锁被持有，跳过其 staging 清理" >&2
+            (
+              flock -n 9 || exit 1
+              rm -rf /tmp/omniroute-archive-stage.* /tmp/clirelay-archive-stage.* 2>/dev/null || true
               sudo rm -rf /tmp/cliproxyapi-archive-stage.* 2>/dev/null || true
+            ) 9>>"$LOCK_AIGW" 2>/dev/null || echo "⚠️ AI 网关归档锁被持有，跳过其 staging 清理" >&2
+            (
+              flock -n 9 || exit 1
               rm -rf /tmp/zcode-archive-stage.* 2>/dev/null || true
-            ) 9>>/tmp/openclaw-archive.lock 2>/dev/null; then
-              :
-            else
-              echo "⚠️ 归档锁被持有（有打包正在写入），跳过 staging 清理以免抹掉在写的目录" >&2
-            fi
+            ) 9>>"$LOCK_ZCODE" 2>/dev/null || echo "⚠️ zcode 归档锁被持有，跳过其 staging 清理" >&2
+            (
+              flock -n 9 || exit 1
+              sudo rm -rf /tmp/rsstt-archive-stage.* 2>/dev/null || true
+            ) 9>>"$LOCK_RSSTT" 2>/dev/null || echo "⚠️ rsstt 归档锁被持有，跳过其 staging 清理" >&2
+            (
+              flock -n 9 || exit 1
+              rm -rf /tmp/zcode2api-data-archive-stage.* 2>/dev/null || true
+            ) 9>>"$LOCK_Z2A" 2>/dev/null || echo "⚠️ zcode2api 归档锁被持有，跳过其 staging 清理" >&2
           }
           free_kb() { df -Pk "${1:-/tmp}" | awk 'NR==2 {print $4}'; }
           require_free_kb() {
@@ -7007,6 +7069,15 @@ jobs:
           # AI gateway / rsstt 全部陪葬，而这次事故正是被 autoclaw 回推一个
           # 非关键操作连带 disintegrate 的）。
           openclaw_src_kb=$(du_sk "$HOME/.openclaw" || true)
+          # 2026-10-22 主包成分测量（瘦身决策用）：一级子目录体积 Top10 打进归档日志，
+          # 纯观测，不影响任何分支。du -k 不可读条目照例忽略（同 du_sk 口径）。
+          echo "=== openclaw main package composition (top-level, KB) ==="
+          du -sk "$HOME/.openclaw"/* 2>/dev/null | sort -nr | head -10 || true
+          # HEALTHY_RUN / PKG_BG_PID 必须先于 MAINPKG 分支定义：主包预检失败时
+          # 下方 else 分支不执行、两个变量都不赋值，而汇合处（回退判定 + wait）
+          # 都会读它们 —— set -u 下未定义变量会掀掉整个收尾 step。
+          HEALTHY_RUN=0
+          PKG_BG_PID=""
           MAINPKG_SKIP=""
           if [ -z "${openclaw_src_kb:-}" ] || [ "$openclaw_src_kb" -le 0 ]; then
             echo "❌ final openclaw archive preflight: unable to calculate source size" >&2
@@ -7035,274 +7106,243 @@ jobs:
           # 旧路径 = 打包 318s → 上传 380s（串行 698s，占收尾 77%）；
           # 新路径 = tar|pigz 直接管道给 `rclone rcat`，耗时压到 max(打包, 上传)。
           # 安全口径：先写临时对象，只有「流成功 + 远端体积 ≥ 源 30% + 本轮健康」
-          # 才原子改名覆盖主包；任一环不满足都删临时对象并回退旧路径，
+          # 才原子改名覆盖主包；任一环不满足都删临时对象并放弃覆盖（兜底 = 周期
+          # 归档循环，≤20 分钟前刚上传过周期包；各失败分支均记结果 + 告警），
           # 云端主包在任何情况下都不会被半截包覆盖。
-          STREAM_OK=0
+          # 2026-10-22 并行化（下线优化）：主包流式归档后台执行，四个小对象归档
+          # 与它同时开跑 —— 收尾墙钟从「主包 + 小项之和」变成 ≈ max(主包, 小项)。
+          PKG_BG_PID=""
           if [ "$HEALTHY_RUN" = "1" ]; then
-            echo "4a. Streaming main package (tar|pigz → rclone rcat)..."
-            rclone deletefile "$STREAM_DEST" >/dev/null 2>&1 || true
-            STREAM_BEGIN_TS=$(date +%s)
-            if flock -w 600 -E 200 /tmp/openclaw-archive.lock timeout 40m bash /tmp/create-openclaw-archive.sh - 2>/tmp/openclaw-stream.err | rclone rcat "$STREAM_DEST" 2>/tmp/openclaw-stream-upload.err; then
-              stream_bytes=$(rclone size --json "$STREAM_DEST" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null || echo 0)
-              case "${stream_bytes:-0}" in ''|*[!0-9]*) stream_bytes=0 ;; esac
-              if [ "$stream_bytes" -ge $(( openclaw_src_kb * 1024 * 30 / 100 )) ]; then
-                if rclone moveto "$STREAM_DEST" "$ARCHIVE_DEST" >/tmp/openclaw-stream-move.log 2>&1; then
-                  echo "final openclaw archive/upload ok (streamed ${stream_bytes}B in $(( $(date +%s) - STREAM_BEGIN_TS ))s) → $ARCHIVE_DEST"
-                  record_archive_result "openclaw.tar.gz" ok "$stream_bytes" "流式覆盖主包"
-                  STREAM_OK=1
+            (
+              # rc 文件最后定稿（0 仅在 moveto 成功后写）：汇合处的回退判定读它，
+              # 先写 1 占位防读到空/陈旧值
+              echo 1 > /tmp/openclaw-stream.rc
+              echo "4a. Streaming main package (tar|pigz → rclone rcat)..."
+              rclone deletefile "$STREAM_DEST" >/dev/null 2>&1 || true
+              STREAM_BEGIN_TS=$(date +%s)
+              if flock -w 600 -E 200 "$LOCK_OPENCLAW" timeout 40m bash /tmp/create-openclaw-archive.sh - 2>/tmp/openclaw-stream.err | rclone rcat "$STREAM_DEST" 2>/tmp/openclaw-stream-upload.err; then
+                stream_bytes=$(rclone size --json "$STREAM_DEST" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null || echo 0)
+                case "${stream_bytes:-0}" in ''|*[!0-9]*) stream_bytes=0 ;; esac
+                if [ "$stream_bytes" -ge $(( openclaw_src_kb * 1024 * 30 / 100 )) ]; then
+                  if rclone moveto "$STREAM_DEST" "$ARCHIVE_DEST" >/tmp/openclaw-stream-move.log 2>&1; then
+                    echo "final openclaw archive/upload ok (streamed ${stream_bytes}B in $(( $(date +%s) - STREAM_BEGIN_TS ))s) → $ARCHIVE_DEST"
+                    record_archive_result "openclaw.tar.gz" ok "$stream_bytes" "流式覆盖主包"
+                    echo 0 > /tmp/openclaw-stream.rc
+                  else
+                    echo "⚠️ 流式上传完成但原子改名失败：$(tail -n 3 /tmp/openclaw-stream-move.log 2>/dev/null)"
+                  fi
                 else
-                  echo "⚠️ 流式上传完成但原子改名失败：$(tail -n 3 /tmp/openclaw-stream-move.log 2>/dev/null)"
+                  echo "⚠️ 流式包体积异常（${stream_bytes}B < 源 30%），放弃覆盖云端主包"
                 fi
               else
-                echo "⚠️ 流式包体积异常（${stream_bytes}B < 源 30%），放弃覆盖，回退旧路径"
+                echo "⚠️ 流式打包/上传失败。stderr 尾部："
+                tail -n 5 /tmp/openclaw-stream.err /tmp/openclaw-stream-upload.err 2>/dev/null || true
               fi
-            else
-              echo "⚠️ 流式打包/上传失败，回退旧路径。stderr 尾部："
-              tail -n 5 /tmp/openclaw-stream.err /tmp/openclaw-stream-upload.err 2>/dev/null || true
-            fi
-            rclone deletefile "$STREAM_DEST" >/dev/null 2>&1 || true
-          fi
-
-          if [ "$STREAM_OK" != "1" ]; then
-          # ── 旧路径（回退）：本地打包 → 校验 → 上传 ──
-          # 2026-10-06：与周期归档循环共用同一把 /tmp/openclaw-archive.lock 互斥。
-          # 此前是裸调用、不受锁保护，若循环实例因故仍存活（如 stop 失败），
-          # 两路 rsync 会并发扫同一源目录、staging 互相干扰。等锁最多 600s，
-          # 仍拿不到则以 rc=200 走失败分支照常告警且不覆盖云端主包（保守优于脏写）。
-          if openclaw_final_output=$(flock -w 600 -E 200 /tmp/openclaw-archive.lock timeout 40m bash /tmp/create-openclaw-archive.sh "$TMP_OPENCLAW_TAR" 2>&1); then
-            openclaw_final_upload_output=""
-            echo "5. Resolving archive destination (healthy → main package; unhealthy → skip)..."
-            ARCHIVE_DEST="dropbox:self-hosted/openclaw.tar.gz"
-            HEALTHY_RUN=0
-            if [ -f /tmp/run-openclaw-meta.env ] && grep -q '^RECORDED_SUCCESSFUL_OPENCLAW_VERSION=' /tmp/run-openclaw-meta.env; then
-              HEALTHY_RUN=1
-            else
-              # 2026-10-11 失败现场包退役（主人拍板，省配额）：不健康运行**不上传**，
-              # 主包保持最后健康状态；本地故障状态随 runner 回收，失败通知已含诊断。
-              echo "ℹ️ Unhealthy run: main package will NOT be overwritten; failed state NOT uploaded."
-            fi
-            # 体积骤降只记录、不拦截（口径同周期归档）：完整性已由归档脚本的关键文件
-            # 校验把关，这里不再拿云端现有包当基准 —— 那会被主动瘦身永久卡死（新包
-            # 永远小于瘦身前的旧包，主包冻结、每轮重复告警，2026-09-12）。
-            if [ "$HEALTHY_RUN" = "1" ]; then
-              final_new_size=$(stat -c%s "$TMP_OPENCLAW_TAR" 2>/dev/null || echo 0)
-              final_remote_size=$(rclone ls "$ARCHIVE_DEST" 2>/dev/null | awk '{s+=$1} END {print s+0}' || true)
-              if [ "$final_remote_size" -gt 0 ] && [ "$final_new_size" -lt "$((final_remote_size * 60 / 100))" ]; then
-                echo "ℹ️ 体积较云端下降超 40%（new=${final_new_size}B remote=${final_remote_size}B），已通过完整性校验，正常覆盖"
-              fi
-            fi
-            if [ "$HEALTHY_RUN" != "1" ]; then
-              # 失败现场包退役：不健康运行不上传，临时包就地销毁
-              echo "⏭️ unhealthy run, skip openclaw package upload (main package keeps last healthy state)"
-              rm -f "$TMP_OPENCLAW_TAR"
-            elif openclaw_final_upload_output=$(rclone copyto "$TMP_OPENCLAW_TAR" "$ARCHIVE_DEST" -v 2>&1); then
-              echo "final openclaw archive/upload ok → $ARCHIVE_DEST: ${openclaw_final_output}"
-              # 大小必须在 rm 之前取——成功上传后临时包即被删除，事后测不到
-              openclaw_final_size=$(stat -c%s "$TMP_OPENCLAW_TAR" 2>/dev/null || echo 0)
-              record_archive_result "openclaw.tar.gz" ok "$openclaw_final_size" "覆盖主包"
-              # 2026-10-11 移除版本化快照（主人拍板）：它是主包的服务端副本，
-              # 主包坏它也坏，兜底价值≈0，还常驻一份 4.2GB 云端空间。
-              rm -f "$TMP_OPENCLAW_TAR"
-            else
-              rc=$?
-              echo "⚠️ final openclaw.tar.gz upload failed (rc=$rc): ${openclaw_final_upload_output}"
-              record_archive_result "openclaw.tar.gz" fail 0 "上传失败 · 退出码 $rc"
-              send_archive_alert "openclaw.tar.gz" "上传失败 · 退出码 $rc" "rclone 上传失败" "${openclaw_final_upload_output:-无输出}"
-            fi
+              rclone deletefile "$STREAM_DEST" >/dev/null 2>&1 || true
+            ) &
+            PKG_BG_PID=$!
+            echo "🚀 主包流式归档已后台开跑（pid ${PKG_BG_PID}）"
           else
-            rc=$?
-            echo "⚠️ final openclaw.tar.gz archive failed (rc=$rc): ${openclaw_final_output}"
-            record_archive_result "openclaw.tar.gz" fail 0 "归档失败 · 退出码 $rc"
-            send_archive_alert "openclaw.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${openclaw_final_output:-归档脚本无输出}"
+            # 2026-10-11 失败现场包退役（主人拍板，省配额）：不健康运行不上传，
+            # 主包保持最后健康状态；本地故障状态随 runner 回收，失败通知已含诊断。
+            echo "⏭️ unhealthy run, skip openclaw package upload (main package keeps last healthy state)"
           fi
-          fi
-          # end: STREAM_OK 回退分支（流式成功时不重走本地打包上传）
-          fi
-
-          echo "4b. Final archive of ZCode personal data (~/.zcode cli/ + v2/)..."
-          if [ -d "$HOME/.zcode/cli" ] || [ -d "$HOME/.zcode/v2" ] || [ -d "$HOME/.zcode/server" ]; then
-            TMP_ZCODE_FINAL_TAR="/tmp/zcode-final.tar.gz"
-            if zcode_final_output=$(flock -w 600 -E 200 /tmp/openclaw-archive.lock timeout 40m bash /tmp/create-zcode-archive.sh "$TMP_ZCODE_FINAL_TAR" 2>&1); then
-              zcode_final_new_size=$(stat -c%s "$TMP_ZCODE_FINAL_TAR" 2>/dev/null || echo 0)
-              zcode_final_remote_size=$(rclone ls "dropbox:self-hosted/zcode.tar.gz" 2>/dev/null | awk '{s+=$1} END {print s+0}' || true)
-              # 体积骤降只记录、不拦截（口径同周期归档）：完整性由 create-zcode-archive.sh
-              # 的 db.sqlite 校验把关，不再拿云端现有包当基准。
-              if [ "$zcode_final_remote_size" -gt 0 ] && [ "$zcode_final_new_size" -lt "$((zcode_final_remote_size * 60 / 100))" ]; then
-                echo "ℹ️ zcode 体积较云端下降超 40%（new=${zcode_final_new_size}B remote=${zcode_final_remote_size}B），已通过完整性校验，正常覆盖"
-              fi
-              # 上传失败已在本函数内 record + alert 并 return 1；此处 || true 防止
-              # 单包失败被 set -e 放大成整步 exit（2026-10-13 故障隔离）
-              upload_final_archive "zcode.tar.gz" "$TMP_ZCODE_FINAL_TAR" "dropbox:self-hosted/zcode.tar.gz" || true
-            else
-              rc=$?
-              echo "⚠️ final zcode.tar.gz archive failed (rc=$rc): ${zcode_final_output}"
-              record_archive_result "zcode.tar.gz" fail 0 "归档失败 · 退出码 $rc"
-              send_archive_alert "zcode.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${zcode_final_output:-归档脚本无输出}"
-            fi
-          else
-            echo "ℹ️ ~/.zcode/{cli,v2,server} 均不存在（本机从未部署 ZCode），跳过 ZCode 最终归档"
-            record_archive_result "zcode.tar.gz" skip 0 "本机未部署 ZCode"
-          fi
-
-          echo "4c. Final archive of zcode2api data snapshot (.env + data/)..."
-          # 3c 已停服、SQLite 已静默，直接打包运行目录的 .env + data/（账号池
-          # accounts.db + device_mid）→ dropbox:self-hosted/zcode2api-data.tar.gz。
-          # 该快照下一轮被 Run zcode2api 还原，其 credential sync 又会把当轮
-          # credentials.json 的最新凭据对齐进库 —— 凭据就此闭环，无需本机续传。
-          # 仅结构在本机变了（增删账号、改 .env）才需要本机手动重传覆盖。
-          Z2A_RUN_DIR="/tmp/local_zcode2api"
-          if [ -f "$Z2A_RUN_DIR/.env" ] && [ -f "$Z2A_RUN_DIR/data/accounts.db" ]; then
-            TMP_Z2A_FINAL_TAR="/tmp/zcode2api-data-final.tar.gz"
-            rm -f "$TMP_Z2A_FINAL_TAR"
-            if z2a_final_output=$(tar -czf "$TMP_Z2A_FINAL_TAR" -C "$Z2A_RUN_DIR" .env data 2>&1) \
-              && [ -s "$TMP_Z2A_FINAL_TAR" ]; then
-              z2a_final_size=$(stat -c%s "$TMP_Z2A_FINAL_TAR" 2>/dev/null || echo 0)
-              # 上传失败已在本函数内 record + alert 并 return 1；此处 || true 防止
-              # 单包失败被 set -e 放大成整步 exit（2026-10-13 故障隔离）
-              upload_final_archive "zcode2api-data.tar.gz" "$TMP_Z2A_FINAL_TAR" "dropbox:self-hosted/zcode2api-data.tar.gz" || true
-            else
-              rc=$?
-              echo "⚠️ final zcode2api-data.tar.gz archive failed (rc=$rc): ${z2a_final_output}"
-              record_archive_result "zcode2api-data.tar.gz" fail 0 "打包失败 · 退出码 $rc"
-              send_archive_alert "zcode2api-data.tar.gz" "归档失败 · 退出码 $rc" "打包失败" "${z2a_final_output:-无输出}"
-            fi
-          else
-            echo "ℹ️ $Z2A_RUN_DIR 缺 .env 或 data/accounts.db（本轮 zcode2api 未部署），跳过其数据归档"
-            record_archive_result "zcode2api-data.tar.gz" skip 0 "本轮未部署"
           fi
 
           MIN_SIZE=$((5 * 1024))
 
-          echo "5. Archiving AI gateway persistent data (backend-aware)..."
-          # 2026-10-11 恢复自动降级：Final 归档按当前生效后端三选一（口径同周期归档）
-          # omni→OmniRoute.tar.gz（部署目录 + 数据卷快照，storage.sqlite 与 server.env
-          # 同代天然保证）；clirelay→CliRelay.tar.gz（auths + config + pg_dump SQL）；
-          # cliproxyapi→CLIProxyAPI.tar.gz（config + auth + stats，附 clirelay-auths）。
-          # 只刷生效后端的包：降级态下 OmniRoute 卷可能是空库，绝不能盖掉云端好包。
-          ACTIVE_BACKEND="omniroute"
-          if [ -f /tmp/active-ai-backend.env ]; then
-            ACTIVE_BACKEND=$(grep '^ACTIVE_BACKEND=' /tmp/active-ai-backend.env | tail -n 1 | cut -d= -f2- || true)
-          fi
-          ACTIVE_BACKEND="${ACTIVE_BACKEND:-omniroute}"
-
-          case "$ACTIVE_BACKEND" in
-            clirelay)
-              echo "生效后端: CliRelay → Final 归档 CliRelay.tar.gz"
-              if [ -f "${CLIRELAY_DIR:-/tmp/local_CliRelay}/docker-compose.yml" ] || [ -f /tmp/local_CliRelay/docker-compose.yml ]; then
-                CLIRELAY_FINAL_TAR="/tmp/CliRelay-final.tar.gz"
-                if clirelay_final_output=$(flock -w 600 -E 200 /tmp/openclaw-archive.lock timeout 40m bash /tmp/create-clirelay-archive.sh "$CLIRELAY_FINAL_TAR" 2>&1); then
-                  actual_size=$(stat -c%s "$CLIRELAY_FINAL_TAR" 2>/dev/null || echo 0)
-                  # 上传失败已在本函数内 record + alert 并 return 1；|| true 防 set -e 放大
-                  upload_final_archive "CliRelay.tar.gz" "$CLIRELAY_FINAL_TAR" "dropbox:self-hosted/CliRelay.tar.gz" "$MIN_SIZE" || true
-                else
-                  rc=$?
-                  echo "⚠️ final CliRelay.tar.gz archive failed (rc=$rc): ${clirelay_final_output}"
-                  record_archive_result "CliRelay.tar.gz" fail 0 "归档失败 · 退出码 $rc"
-                  send_archive_alert "CliRelay.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${clirelay_final_output:-归档脚本无输出}"
-                fi
-              else
-                echo "⚠️ /tmp/local_CliRelay 不存在，跳过 CliRelay 归档"
-                record_archive_result "CliRelay.tar.gz" fail 0 "部署目录未初始化"
-                send_archive_alert "CliRelay.tar.gz" "归档失败 · 退出码 3" "CliRelay 本地部署目录未初始化 · 通常表示回退路径未执行" "clirelay_dir_missing"
-              fi
-              ;;
-            cliproxyapi)
-              echo "生效后端: CLIProxyAPI → Final 归档 CLIProxyAPI.tar.gz"
-              if [ -d /tmp/local_CLIPProxyAPI ]; then
-                CLIPROXYAPI_FINAL_TAR="/tmp/CLIProxyAPI-final.tar.gz"
-                if cliproxyapi_final_output=$(flock -w 600 -E 200 /tmp/openclaw-archive.lock timeout 40m bash /tmp/create-cliproxyapi-archive.sh "$CLIPROXYAPI_FINAL_TAR" 2>&1); then
-                  actual_size=$(stat -c%s "$CLIPROXYAPI_FINAL_TAR" 2>/dev/null || echo 0)
-                  # 上传失败已在本函数内 record + alert 并 return 1；|| true 防 set -e 放大
-                  upload_final_archive "CLIProxyAPI.tar.gz" "$CLIPROXYAPI_FINAL_TAR" "dropbox:self-hosted/CLIProxyAPI.tar.gz" "$MIN_SIZE" || true
-                else
-                  rc=$?
-                  echo "⚠️ final CLIProxyAPI.tar.gz archive failed (rc=$rc): ${cliproxyapi_final_output}"
-                  record_archive_result "CLIProxyAPI.tar.gz" fail 0 "归档失败 · 退出码 $rc"
-                  send_archive_alert "CLIProxyAPI.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${cliproxyapi_final_output:-归档脚本无输出}"
-                fi
-              else
-                echo "⚠️ /tmp/local_CLIPProxyAPI 不存在，跳过 CLIProxyAPI 归档"
-                record_archive_result "CLIProxyAPI.tar.gz" fail 0 "数据目录未初始化"
-                send_archive_alert "CLIProxyAPI.tar.gz" "归档失败 · 退出码 3" "CLIProxyAPI 本地数据目录未初始化 · 通常表示回退路径未执行" "cliproxyapi_dir_missing"
-              fi
-              ;;
-            *)
-              echo "生效后端: OmniRoute → Final 归档 OmniRoute.tar.gz"
-              if [ -f /home/runner/omniroute/docker-compose.yml ]; then
-                OMNIROUTE_FINAL_TAR="/tmp/OmniRoute-final.tar.gz"
-                if omniroute_final_output=$(flock -w 600 -E 200 /tmp/openclaw-archive.lock timeout 40m bash /tmp/create-omniroute-archive.sh "$OMNIROUTE_FINAL_TAR" 2>&1); then
-                  actual_size=$(stat -c%s "$OMNIROUTE_FINAL_TAR" 2>/dev/null || echo 0)
-                  # 上传失败已在本函数内 record + alert 并 return 1；|| true 防 set -e 放大
-                  upload_final_archive "OmniRoute.tar.gz" "$OMNIROUTE_FINAL_TAR" "dropbox:self-hosted/OmniRoute.tar.gz" "$MIN_SIZE" || true
-                else
-                  rc=$?
-                  echo "⚠️ final OmniRoute.tar.gz archive failed (rc=$rc): ${omniroute_final_output}"
-                  record_archive_result "OmniRoute.tar.gz" fail 0 "归档失败 · 退出码 $rc"
-                  send_archive_alert "OmniRoute.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${omniroute_final_output:-归档脚本无输出}"
-                fi
-              else
-                echo "⚠️ /home/runner/omniroute 不存在，跳过 OmniRoute 归档"
-                record_archive_result "OmniRoute.tar.gz" fail 0 "部署目录未初始化"
-                send_archive_alert "OmniRoute.tar.gz" "归档失败 · 退出码 3" "OmniRoute 本地部署目录未初始化 · /home/runner/omniroute 不存在 · 通常表示 OmniRoute 启动步骤被跳过或失败" "omniroute_dir_missing"
-              fi
-              ;;
-          esac
-
-          echo "6. Archiving rss-to-telegram data..."
-          if [ -d /tmp/local_rsstt ]; then
-            echo "=== local rss-to-telegram tree before archive ==="
-            find /tmp/local_rsstt -maxdepth 4 | sort || true
-            # 2026-10-13 故障隔离（同主包口径）：rsstt 预检失败只放弃本项，不掀桌
-            rsstt_src_kb=$(du_sk /tmp/local_rsstt sudo || true)
-            RSSTT_SKIP=0
-            if [ -z "${rsstt_src_kb:-}" ] || [ "$rsstt_src_kb" -le 0 ]; then
-              echo "❌ final rsstt archive preflight: unable to calculate source size" >&2
-              RSSTT_SKIP=1
-            elif ! require_free_kb /tmp $((rsstt_src_kb + 512 * 1024)) "final rsstt archive preflight"; then
-              RSSTT_SKIP=1
-            else
-              echo "rsstt 待归档目录大小: ${rsstt_src_kb}KB"
-            fi
-            if [ "$RSSTT_SKIP" = "1" ]; then
-              record_archive_result "rsstt.tar.gz" fail 0 "预检未通过（体积计算或 /tmp 空间）"
-              send_archive_alert "rsstt.tar.gz" "归档失败" "预检未通过 · 放弃本轮 rsstt 归档" "云端 rsstt.tar.gz 保持上一轮状态；其余归档项已执行"
-            else
-            sudo rm -f /tmp/rsstt.tar.gz
-            rsstt_tar_output=""
-            # 目录里只剩占位 .keep = 本轮容器没起来（凭据缺失/启动失败）：
-            # 此时打包上传只会用空包覆盖云端 rsstt.tar.gz，直接跳过并说明原因
-            rsstt_data_files=$(sudo find /tmp/local_rsstt -type f ! -name '.keep' 2>/dev/null | wc -l || true)
-            if [ "$((rsstt_data_files + 0))" -lt 1 ]; then
-              echo "⚠️ rss-to-telegram 本轮没有产生数据文件，跳过归档，云端 rsstt.tar.gz 保持原状"
-              record_archive_result "rsstt.tar.gz" skip 0 "本轮未产生数据"
-              send_archive_alert "rsstt.tar.gz" "归档跳过" "本轮 rss-to-telegram 未产生数据 · 云端归档保持原状未覆盖" "data_files=0 dir=/tmp/local_rsstt"
-            elif rsstt_tar_output=$(sudo tar -czf /tmp/rsstt.tar.gz -C /tmp/local_rsstt . 2>&1); then
-              # 同上：root 产出的包由 runner 身份的 rclone 上传，显式放开读权限
-              sudo chmod 644 /tmp/rsstt.tar.gz 2>/dev/null || true
-              rsstt_validate_output=""
-              if rsstt_validate_output=$(sudo tar -tzf /tmp/rsstt.tar.gz 2>&1); then
-                actual_size=$(stat -c%s /tmp/rsstt.tar.gz 2>/dev/null || echo 0)
-                echo "rsstt archive size: ${actual_size} bytes"
-                # 上传失败已在本函数内 record + alert 并 return 1；|| true 防 set -e 放大
-                upload_final_archive "rsstt.tar.gz" "/tmp/rsstt.tar.gz" "dropbox:self-hosted/rsstt.tar.gz" "$MIN_SIZE" || true
+          # ── 2026-10-22 并行化：四个小对象最终归档（原 4b/4c/5/6 串行段整体迁入
+          # 本函数后台执行）。互斥口径与周期循环对齐（对象级锁，定义见循环侧）；
+          # 失败由各分支当场 record + 告警，汇合处只等齐不打断（沿用 2026-10-13
+          # 故障隔离口径：一个归档出错不影响其他归档与收尾通知）。
+          run_small_archives() {
+            # 4b. ZCode 个人数据（~/.zcode cli/ + v2/）
+            if [ -d "$HOME/.zcode/cli" ] || [ -d "$HOME/.zcode/v2" ] || [ -d "$HOME/.zcode/server" ]; then
+              TMP_ZCODE_FINAL_TAR="/tmp/zcode-final.tar.gz"
+              if zcode_final_output=$(flock -w 600 -E 200 "$LOCK_ZCODE" timeout 40m bash /tmp/create-zcode-archive.sh "$TMP_ZCODE_FINAL_TAR" 2>&1); then
+                # 体积骤降「只记录不拦截」且为做记录而跑的 rclone ls 已随并行化移除：
+                # 它不参与任何判定，却给小对象归档串行加一次远端往返。
+                upload_final_archive "zcode.tar.gz" "$TMP_ZCODE_FINAL_TAR" "dropbox:self-hosted/zcode.tar.gz" || true
               else
                 rc=$?
-                echo "⚠️ final rsstt.tar.gz validation failed (rc=$rc): ${rsstt_validate_output}"
-                record_archive_result "rsstt.tar.gz" fail 0 "归档校验失败 · 退出码 $rc"
-                send_archive_alert "rsstt.tar.gz" "归档校验失败 · 退出码 $rc" "tar 列表校验失败" "${rsstt_validate_output:-无输出}"
+                echo "⚠️ final zcode.tar.gz archive failed (rc=$rc): ${zcode_final_output}"
+                record_archive_result "zcode.tar.gz" fail 0 "归档失败 · 退出码 $rc"
+                send_archive_alert "zcode.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${zcode_final_output:-归档脚本无输出}"
+              fi
+            else
+              echo "ℹ️ ~/.zcode/{cli,v2,server} 均不存在（本机从未部署 ZCode），跳过 ZCode 最终归档"
+              record_archive_result "zcode.tar.gz" skip 0 "本机未部署 ZCode"
+            fi
+
+            # 4c. zcode2api 数据快照（.env + data/）
+            Z2A_RUN_DIR="/tmp/local_zcode2api"
+            if [ -f "$Z2A_RUN_DIR/.env" ] && [ -f "$Z2A_RUN_DIR/data/accounts.db" ]; then
+              TMP_Z2A_FINAL_TAR="/tmp/zcode2api-data-final.tar.gz"
+              rm -f "$TMP_Z2A_FINAL_TAR"
+              if z2a_final_output=$(tar -czf "$TMP_Z2A_FINAL_TAR" -C "$Z2A_RUN_DIR" .env data 2>&1) \
+                && [ -s "$TMP_Z2A_FINAL_TAR" ]; then
+                upload_final_archive "zcode2api-data.tar.gz" "$TMP_Z2A_FINAL_TAR" "dropbox:self-hosted/zcode2api-data.tar.gz" || true
+              else
+                rc=$?
+                echo "⚠️ final zcode2api-data.tar.gz archive failed (rc=$rc): ${z2a_final_output}"
+                record_archive_result "zcode2api-data.tar.gz" fail 0 "打包失败 · 退出码 $rc"
+                send_archive_alert "zcode2api-data.tar.gz" "归档失败 · 退出码 $rc" "打包失败" "${z2a_final_output:-无输出}"
+              fi
+            else
+              echo "ℹ️ $Z2A_RUN_DIR 缺 .env 或 data/accounts.db（本轮 zcode2api 未部署），跳过其数据归档"
+              record_archive_result "zcode2api-data.tar.gz" skip 0 "本轮未部署"
+            fi
+
+            # 5. AI 网关持久数据（backend-aware，三选一，口径同周期归档）
+            ACTIVE_BACKEND="omniroute"
+            if [ -f /tmp/active-ai-backend.env ]; then
+              ACTIVE_BACKEND=$(grep '^ACTIVE_BACKEND=' /tmp/active-ai-backend.env | tail -n 1 | cut -d= -f2- || true)
+            fi
+            ACTIVE_BACKEND="${ACTIVE_BACKEND:-omniroute}"
+            case "$ACTIVE_BACKEND" in
+              clirelay)
+                echo "生效后端: CliRelay → Final 归档 CliRelay.tar.gz"
+                if [ -f "${CLIRELAY_DIR:-/tmp/local_CliRelay}/docker-compose.yml" ] || [ -f /tmp/local_CliRelay/docker-compose.yml ]; then
+                  CLIRELAY_FINAL_TAR="/tmp/CliRelay-final.tar.gz"
+                  if clirelay_final_output=$(flock -w 600 -E 200 "$LOCK_AIGW" timeout 40m bash /tmp/create-clirelay-archive.sh "$CLIRELAY_FINAL_TAR" 2>&1); then
+                    upload_final_archive "CliRelay.tar.gz" "$CLIRELAY_FINAL_TAR" "dropbox:self-hosted/CliRelay.tar.gz" "$MIN_SIZE" || true
+                  else
+                    rc=$?
+                    echo "⚠️ final CliRelay.tar.gz archive failed (rc=$rc): ${clirelay_final_output}"
+                    record_archive_result "CliRelay.tar.gz" fail 0 "归档失败 · 退出码 $rc"
+                    send_archive_alert "CliRelay.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${clirelay_final_output:-归档脚本无输出}"
+                  fi
+                else
+                  echo "⚠️ /tmp/local_CliRelay 不存在，跳过 CliRelay 归档"
+                  record_archive_result "CliRelay.tar.gz" fail 0 "部署目录未初始化"
+                  send_archive_alert "CliRelay.tar.gz" "归档失败 · 退出码 3" "CliRelay 本地部署目录未初始化 · 通常表示回退路径未执行" "clirelay_dir_missing"
+                fi
+                ;;
+              cliproxyapi)
+                echo "生效后端: CLIProxyAPI → Final 归档 CLIProxyAPI.tar.gz"
+                if [ -d /tmp/local_CLIPProxyAPI ]; then
+                  CLIPROXYAPI_FINAL_TAR="/tmp/CLIProxyAPI-final.tar.gz"
+                  if cliproxyapi_final_output=$(flock -w 600 -E 200 "$LOCK_AIGW" timeout 40m bash /tmp/create-cliproxyapi-archive.sh "$CLIPROXYAPI_FINAL_TAR" 2>&1); then
+                    upload_final_archive "CLIProxyAPI.tar.gz" "$CLIPROXYAPI_FINAL_TAR" "dropbox:self-hosted/CLIProxyAPI.tar.gz" "$MIN_SIZE" || true
+                  else
+                    rc=$?
+                    echo "⚠️ final CLIProxyAPI.tar.gz archive failed (rc=$rc): ${cliproxyapi_final_output}"
+                    record_archive_result "CLIProxyAPI.tar.gz" fail 0 "归档失败 · 退出码 $rc"
+                    send_archive_alert "CLIProxyAPI.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${cliproxyapi_final_output:-归档脚本无输出}"
+                  fi
+                else
+                  echo "⚠️ /tmp/local_CLIPProxyAPI 不存在，跳过 CLIProxyAPI 归档"
+                  record_archive_result "CLIProxyAPI.tar.gz" fail 0 "数据目录未初始化"
+                  send_archive_alert "CLIProxyAPI.tar.gz" "归档失败 · 退出码 3" "CLIProxyAPI 本地数据目录未初始化 · 通常表示回退路径未执行" "cliproxyapi_dir_missing"
+                fi
+                ;;
+              *)
+                echo "生效后端: OmniRoute → Final 归档 OmniRoute.tar.gz"
+                if [ -f /home/runner/omniroute/docker-compose.yml ]; then
+                  OMNIROUTE_FINAL_TAR="/tmp/OmniRoute-final.tar.gz"
+                  if omniroute_final_output=$(flock -w 600 -E 200 "$LOCK_AIGW" timeout 40m bash /tmp/create-omniroute-archive.sh "$OMNIROUTE_FINAL_TAR" 2>&1); then
+                    upload_final_archive "OmniRoute.tar.gz" "$OMNIROUTE_FINAL_TAR" "dropbox:self-hosted/OmniRoute.tar.gz" "$MIN_SIZE" || true
+                  else
+                    rc=$?
+                    echo "⚠️ final OmniRoute.tar.gz archive failed (rc=$rc): ${omniroute_final_output}"
+                    record_archive_result "OmniRoute.tar.gz" fail 0 "归档失败 · 退出码 $rc"
+                    send_archive_alert "OmniRoute.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${omniroute_final_output:-归档脚本无输出}"
+                  fi
+                else
+                  echo "⚠️ /home/runner/omniroute 不存在，跳过 OmniRoute 归档"
+                  record_archive_result "OmniRoute.tar.gz" fail 0 "部署目录未初始化"
+                  send_archive_alert "OmniRoute.tar.gz" "归档失败 · 退出码 3" "OmniRoute 本地部署目录未初始化 · /home/runner/omniroute 不存在 · 通常表示 OmniRoute 启动步骤被跳过或失败" "omniroute_dir_missing"
+                fi
+                ;;
+            esac
+
+            # 6. rss-to-telegram 数据
+            if [ -d /tmp/local_rsstt ]; then
+              rsstt_src_kb=$(du_sk /tmp/local_rsstt sudo || true)
+              RSSTT_SKIP=0
+              if [ -z "${rsstt_src_kb:-}" ] || [ "$rsstt_src_kb" -le 0 ]; then
+                echo "❌ final rsstt archive preflight: unable to calculate source size" >&2
+                RSSTT_SKIP=1
+              elif ! require_free_kb /tmp $((rsstt_src_kb + 512 * 1024)) "final rsstt archive preflight"; then
+                RSSTT_SKIP=1
+              else
+                echo "rsstt 待归档目录大小: ${rsstt_src_kb}KB"
+              fi
+              if [ "$RSSTT_SKIP" = "1" ]; then
+                record_archive_result "rsstt.tar.gz" fail 0 "预检未通过（体积计算或 /tmp 空间）"
+                send_archive_alert "rsstt.tar.gz" "归档失败" "预检未通过 · 放弃本轮 rsstt 归档" "云端 rsstt.tar.gz 保持上一轮状态；其余归档项已执行"
+              else
+                sudo rm -f /tmp/rsstt.tar.gz
+                # 目录里只剩占位 .keep = 本轮容器没起来（凭据缺失/启动失败）：
+                # 此时打包上传只会用空包覆盖云端 rsstt.tar.gz，直接跳过并说明原因
+                rsstt_data_files=$(sudo find /tmp/local_rsstt -type f ! -name '.keep' 2>/dev/null | wc -l || true)
+                if [ "$((rsstt_data_files + 0))" -lt 1 ]; then
+                  echo "⚠️ rss-to-telegram 本轮没有产生数据文件，跳过归档，云端 rsstt.tar.gz 保持原状"
+                  record_archive_result "rsstt.tar.gz" skip 0 "本轮未产生数据"
+                  send_archive_alert "rsstt.tar.gz" "归档跳过" "本轮 rss-to-telegram 未产生数据 · 云端归档保持原状未覆盖" "data_files=0 dir=/tmp/local_rsstt"
+                elif rsstt_tar_output=$(sudo tar -czf /tmp/rsstt.tar.gz -C /tmp/local_rsstt . 2>&1); then
+                  # root 产出的包由 runner 身份的 rclone 上传，显式放开读权限
+                  sudo chmod 644 /tmp/rsstt.tar.gz 2>/dev/null || true
+                  if rsstt_validate_output=$(sudo tar -tzf /tmp/rsstt.tar.gz 2>&1); then
+                    upload_final_archive "rsstt.tar.gz" "/tmp/rsstt.tar.gz" "dropbox:self-hosted/rsstt.tar.gz" "$MIN_SIZE" || true
+                  else
+                    rc=$?
+                    echo "⚠️ final rsstt.tar.gz validation failed (rc=$rc): ${rsstt_validate_output}"
+                    record_archive_result "rsstt.tar.gz" fail 0 "归档校验失败 · 退出码 $rc"
+                    send_archive_alert "rsstt.tar.gz" "归档校验失败 · 退出码 $rc" "tar 列表校验失败" "${rsstt_validate_output:-无输出}"
+                  fi
+                else
+                  rc=$?
+                  echo "⚠️ final rsstt.tar.gz archive failed (rc=$rc): ${rsstt_tar_output}"
+                  record_archive_result "rsstt.tar.gz" fail 0 "归档失败 · 退出码 $rc"
+                  send_archive_alert "rsstt.tar.gz" "归档失败 · 退出码 $rc" "tar 创建失败" "${rsstt_tar_output:-无输出}"
+                fi
+              fi
+            else
+              echo "⚠️ /tmp/local_rsstt 不存在，跳过 rss-to-telegram 归档"
+              record_archive_result "rsstt.tar.gz" fail 0 "数据目录未初始化"
+              send_archive_alert "rsstt.tar.gz" "归档失败 · 退出码 3" "rss-to-telegram 本地数据目录未初始化 · /tmp/local_rsstt 不存在 · 通常表示 rss-to-telegram 容器启动步骤被跳过或失败" "rsstt_dir_missing"
+            fi
+          }
+          run_small_archives &
+          SMALL_ARCHIVES_PID=$!
+          echo "🚀 小对象归档（zcode / zcode2api / AI 网关 / rsstt）已后台并行开跑（pid ${SMALL_ARCHIVES_PID}）"
+
+          # 汇合两路后台归档（子 shell 内失败已各自记结果 + 告警，这里只等齐）。
+          # wait 的非零退出在 set -e 下以 || 兜住：单路失败不影响本 step 继续收尾。
+          if [ -n "$PKG_BG_PID" ]; then
+            wait "$PKG_BG_PID" || echo "⚠️ 主包归档后台任务退出码非零（明细见上方分支日志）"
+          fi
+
+          # ── 主包回退旧路径（ee6a3d5 保留的兜底，并行化后语义不变）：仅当本轮
+          # 健康且流式未成功（打包/上传失败、体积门不过、改名失败）时执行。
+          # 此时小对象归档仍在后台跑，互斥由对象级锁保证；回退期间不再阻塞它们。
+          if [ "$HEALTHY_RUN" = "1" ] && [ "$(cat /tmp/openclaw-stream.rc 2>/dev/null || echo 1)" != "0" ]; then
+            echo "4a-fallback. 流式未成功，回退旧路径（本地打包 → 校验 → 上传）..."
+            if openclaw_final_output=$(flock -w 600 -E 200 "$LOCK_OPENCLAW" timeout 40m bash /tmp/create-openclaw-archive.sh "$TMP_OPENCLAW_TAR" 2>&1); then
+              if openclaw_final_upload_output=$(rclone copyto "$TMP_OPENCLAW_TAR" "$ARCHIVE_DEST" -v 2>&1); then
+                # 大小必须在 rm 之前取——成功上传后临时包即被删除，事后测不到
+                openclaw_final_size=$(stat -c%s "$TMP_OPENCLAW_TAR" 2>/dev/null || echo 0)
+                echo "final openclaw archive/upload ok (fallback) → $ARCHIVE_DEST: ${openclaw_final_output}"
+                record_archive_result "openclaw.tar.gz" ok "$openclaw_final_size" "回退路径覆盖主包"
+                rm -f "$TMP_OPENCLAW_TAR"
+              else
+                rc=$?
+                echo "⚠️ final openclaw.tar.gz upload failed (rc=$rc): ${openclaw_final_upload_output}"
+                record_archive_result "openclaw.tar.gz" fail 0 "上传失败 · 退出码 $rc"
+                send_archive_alert "openclaw.tar.gz" "上传失败 · 退出码 $rc" "rclone 上传失败" "${openclaw_final_upload_output:-无输出}"
               fi
             else
               rc=$?
-              echo "⚠️ final rsstt.tar.gz archive failed (rc=$rc): ${rsstt_tar_output}"
-              record_archive_result "rsstt.tar.gz" fail 0 "归档失败 · 退出码 $rc"
-              send_archive_alert "rsstt.tar.gz" "归档失败 · 退出码 $rc" "tar 创建失败" "${rsstt_tar_output:-无输出}"
+              echo "⚠️ final openclaw.tar.gz archive failed (rc=$rc): ${openclaw_final_output}"
+              record_archive_result "openclaw.tar.gz" fail 0 "归档失败 · 退出码 $rc"
+              send_archive_alert "openclaw.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${openclaw_final_output:-归档脚本无输出}"
             fi
           fi
-          else
-            echo "⚠️ /tmp/local_rsstt 不存在，跳过 rss-to-telegram 归档"
-            record_archive_result "rsstt.tar.gz" fail 0 "数据目录未初始化"
-            send_archive_alert "rsstt.tar.gz" "归档失败 · 退出码 3" "rss-to-telegram 本地数据目录未初始化 · /tmp/local_rsstt 不存在 · 通常表示 rss-to-telegram 容器启动步骤被跳过或失败" "rsstt_dir_missing"
-          fi
+
+          wait "$SMALL_ARCHIVES_PID" || echo "⚠️ 小对象归档后台任务退出码非零（明细见上方分支日志）"
+          echo "✅ 并行最终归档全部汇合完成"
+
 
       # 最终归档结果汇总（规范 · 结果通知）：归档步骤边归档边把结果写进 /tmp 的结果文件，
       # 这里统一渲染成一条通知。单独成 step 而不是并进归档步骤——归档步骤多处 exit 1
