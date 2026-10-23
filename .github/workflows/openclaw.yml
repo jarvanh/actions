@@ -736,6 +736,11 @@ jobs:
             esac
           done
       - name: Tailscale daemon 纳管 (systemd)
+        id: ts_daemon
+        # 2026-10-23：本步骤与 OpenClaw 无关，不能因前置 Install OpenClaw 失败而被
+        # 默认 success() 跳过 —— run 39858698391 就是这样：Install 失败 → 本步 skipped
+        # → 下一步 Setup Tailscale 仍用 always() 跑，却没有托管 daemon，直接失败。
+        if: ${{ always() }}
         # 长驻服务一律 systemd 托管（2026-10-05 主人拍板）。必须在
         # tailscale/github-action **之前**执行，原因见下方接管原理。
         run: |
@@ -762,7 +767,9 @@ jobs:
           #   （不抢占 TUN、不打断当前 SSH），单元在新 VM 上自动接管。
       - name: Setup Tailscale (SSH 调试入口)
         id: ts
-        if: ${{ always() && env.TS_OAUTH_CLIENT_ID != '' && env.TS_OAUTH_CLIENT_SECRET != '' }}
+        # daemon 纳管没成功就不要硬跑 action：否则失败会看起来像 Tailscale 本身坏了，
+        # 实际是前置步骤被跳过（run 39858698391 的级联失败）。
+        if: ${{ always() && steps.ts_daemon.outcome == 'success' && env.TS_OAUTH_CLIENT_ID != '' && env.TS_OAUTH_CLIENT_SECRET != '' }}
         uses: tailscale/github-action@306e68a486fd2350f2bfc3b19fcd143891a4a2d8 # v4
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
