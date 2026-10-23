@@ -76,7 +76,7 @@ jobs:
             --exclude "data.db-wal" --exclude "data.db-shm" --exclude "data.db-journal"
           OPENLIST_DB_MD5_PULL=$(md5sum /opt/openlist-data/data.db 2>/dev/null | awk '{print $1}' || echo "none")
           echo "OPENLIST_DB_MD5_PULL=$OPENLIST_DB_MD5_PULL" >> "$GITHUB_ENV"
-          docker run -d --restart=unless-stopped -v /opt/openlist-data:/opt/openlist/data -p 5244:5244 -e PUID=0 -e PGID=0 -e UMASK=022 --name="openlist" openlistteam/openlist:latest
+          docker run -d --restart=unless-stopped -v /opt/openlist-data:/opt/openlist/data -p 5244:5244 -e PUID=0 -e PGID=0 -e UMASK=022 --name="openlist" openlistteam/openlist:beta
           sleep 1m
           docker ps
           sudo mkdir -p /openlist /mnt/vfs/openlist /opt/logs

@@ -379,7 +379,7 @@ jobs:
           OPENLIST_DB_MD5_PULL="${OPENLIST_DB_MD5_PULL:-none}"
           echo "OPENLIST_DB_MD5_PULL=$OPENLIST_DB_MD5_PULL" >> "$GITHUB_ENV"
           echo "db 拉取指纹: $OPENLIST_DB_MD5_PULL"
-          docker run -d --restart=unless-stopped -v /opt/openlist-data:/opt/openlist/data -p 5244:5244 -e PUID=0 -e PGID=0 -e UMASK=022 --name="openlist" openlistteam/openlist:latest
+          docker run -d --restart=unless-stopped -v /opt/openlist-data:/opt/openlist/data -p 5244:5244 -e PUID=0 -e PGID=0 -e UMASK=022 --name="openlist" openlistteam/openlist:beta
 
       - name: 校验 OpenList 容器运行状态
         run: |

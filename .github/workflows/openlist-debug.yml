@@ -72,7 +72,7 @@ jobs:
             --exclude "data.db-wal" --exclude "data.db-shm" --exclude "data.db-journal" \
             --exclude "log/**" --exclude "temp/**"
           echo "拉取完成: $(ls -la /opt/openlist-data/ | tail -n +2 | wc -l) 个条目"
-          docker run -d --restart=unless-stopped -v /opt/openlist-data:/opt/openlist/data -p 5244:5244 -e PUID=0 -e PGID=0 -e UMASK=022 --name="openlist" openlistteam/openlist:latest
+          docker run -d --restart=unless-stopped -v /opt/openlist-data:/opt/openlist/data -p 5244:5244 -e PUID=0 -e PGID=0 -e UMASK=022 --name="openlist" openlistteam/openlist:beta
 
       - name: 校验容器运行状态
         run: |

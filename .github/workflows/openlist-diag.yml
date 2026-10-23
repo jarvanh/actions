@@ -198,7 +198,7 @@ jobs:
           echo "拉取完成: $(ls -la /opt/openlist-data/ | tail -n +2 | wc -l) 个条目"
           docker run -d --restart=no -v /opt/openlist-data:/opt/openlist/data \
             -p 5244:5244 -e PUID=0 -e PGID=0 -e UMASK=022 \
-            --name="$OL_CONTAINER" openlistteam/openlist:latest
+            --name="$OL_CONTAINER" openlistteam/openlist:beta
 
       - name: 校验 OpenList 容器运行状态
         run: |
