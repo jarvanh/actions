@@ -1845,9 +1845,12 @@ jobs:
         # 本步骤被静默跳过 —— meta 不写、网关不起，且 outcome=skipped 连
         # 「Notify OpenClaw startup failure」（只认 failure）都不触发，OpenClaw 整条链
         # 无声消失。本步骤的自愈机制（fallback 重装、失败通知）本就为「自己
-        # 失败」设计，理应在任何前置失败后仍获得执行机会；cancelled 除外 —— 主动取消
+        # 失败」设计，理应在任何前置服务失败后仍获得执行机会；cancelled 除外 —— 主动取消
         # 时不该再拉起网关。
-        if: ${{ !cancelled() }}
+        # 2026-10-23 补充：Install OpenClaw 是硬前置，它失败/跳过时不再 Run ——
+        # 否则 preflight doctor 会现造空壳配置把网关拉起并判成功，掩盖恢复失败
+        # （run 39858698391 / 39888680026 / 39886777685 即此形态）。
+        if: ${{ !cancelled() && steps.install_openclaw.outcome == 'success' }}
         run: |
           set -euo pipefail
 
@@ -2192,7 +2195,7 @@ jobs:
           fi
 
       - name: Notify OpenClaw startup failure
-        if: ${{ always() && (steps.install_openclaw.outcome == 'failure' || steps.run_openclaw.outcome == 'failure') }}
+        if: ${{ always() && !cancelled() && (steps.install_openclaw.outcome != 'success' || steps.run_openclaw.outcome == 'failure') }}
         env:
           # send_tg 发送闸 + 收尾区接线（时长走 tg_add_footer 内的 runner 开机时刻兜底，
           # 无需注入起始时间——平台无 github.run_started_at 上下文）
@@ -2315,8 +2318,8 @@ jobs:
               esac
             fi
             # Install/恢复失败且 Run OpenClaw 没给出更具体阶段时，明确标成「安装/恢复」，
-            # 不再让通知看起来像一次普通的启动失败。
-            if [ "$install_outcome" = "failure" ] && [ -z "$fail_stage_label" ]; then
+            # 不再让通知看起来像一次普通的启动失败。Install 被前置失败跳过也算。
+            if [ "$install_outcome" != "success" ] && [ -z "$fail_stage_label" ]; then
               fail_stage_label="安装/恢复"
             fi
             source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
@@ -5271,6 +5274,10 @@ jobs:
 
 
       - name: Start background archive loop
+        # 2026-10-23：只有 Install 与 Run 都成功才启动归档循环。Install 失败时
+        # ~/.openclaw 不可用，循环会每 20 分钟报一次归档失败（噪音）；Run 失败时
+        # 状态未验证，也不应让周期包覆盖云端主包。
+        if: ${{ always() && steps.dropbox_preflight.conclusion != 'failure' && steps.install_openclaw.outcome == 'success' && steps.run_openclaw.outcome == 'success' }}
         env:
           # send_telegram_alert 以这两个变量为发送闸，缺任一即静默跳过
           # （2026-09-05 复审发现：此前本 step 未注入，约 5 处归档告警从未发出）
@@ -6610,7 +6617,9 @@ jobs:
 
       - name: Keep alive
         id: keepalive
-        if: ${{ always() && steps.dropbox_preflight.conclusion != 'failure' }}
+        # 2026-10-23：Run OpenClaw 没成功就不要保活 —— 否则 Install 失败后本步
+        # 仍会睡满 6 小时，占着 runner 且不触发下一轮，故障被拖成半天空窗。
+        if: ${{ always() && steps.dropbox_preflight.conclusion != 'failure' && steps.run_openclaw.outcome == 'success' }}
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
