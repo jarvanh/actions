@@ -256,7 +256,13 @@ jobs:
           exit 1
 
       - name: Install OpenClaw
+        id: install_openclaw
         run: |
+          # 2026-10-23：本步骤失败也要能触发失败通知。此前通知只认
+          # run_openclaw.outcome == 'failure'，而 run 39888680026 / 39886777685
+          # 都是 Install 失败、Run OpenClaw 却成功（doctor 现造配置），通知被静默跳过。
+          # 把本步输出落一份到 /tmp，供失败通知取错误摘要。
+          exec > >(tee -a /tmp/install-openclaw-step.log) 2>&1
           echo "Installing OpenClaw base..."
           INST_T0=$(date +%s)
           curl -fsSL https://openclaw.ai/install.sh | bash -s -- --no-onboard
@@ -2179,7 +2185,7 @@ jobs:
           fi
 
       - name: Notify OpenClaw startup failure
-        if: ${{ always() && steps.run_openclaw.outcome == 'failure' }}
+        if: ${{ always() && (steps.install_openclaw.outcome == 'failure' || steps.run_openclaw.outcome == 'failure') }}
         env:
           # send_tg 发送闸 + 收尾区接线（时长走 tg_add_footer 内的 runner 开机时刻兜底，
           # 无需注入起始时间——平台无 github.run_started_at 上下文）
@@ -2190,13 +2196,23 @@ jobs:
           if [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] && [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ]; then
             step_log="/tmp/run-openclaw-step.log"
             meta_file="/tmp/run-openclaw-meta.env"
+            install_outcome="${{ steps.install_openclaw.outcome }}"
+            run_outcome="${{ steps.run_openclaw.outcome }}"
 
             sanitize_log() {
               perl -pe 's/\x1b\[[0-9;]*[A-Za-z]//g; s/\r//g'
             }
 
             error_summary=""
-            if [ -f openclaw.log ]; then
+            # Install/恢复失败优先取它自己的日志：此时 Run OpenClaw 可能已经
+            # 被 doctor 用空壳配置拉起并“成功”，openclaw.log 里看不到恢复失败的真因。
+            if [ "$install_outcome" = "failure" ] && [ -f /tmp/install-openclaw-step.log ]; then
+              error_summary=$(sanitize_log < /tmp/install-openclaw-step.log | grep -Ei 'error|fail|exception|unhealthy|timed out|cannot|denied|missing|invalid|解包失败|不可用|revision|拒绝' | tail -n 30 || true)
+              if [ -z "$error_summary" ]; then
+                error_summary=$(sanitize_log < /tmp/install-openclaw-step.log | tail -n 60 || true)
+              fi
+            fi
+            if [ -z "$error_summary" ] && [ -f openclaw.log ]; then
               error_summary=$(sanitize_log < openclaw.log | grep -Ei 'error|fail|exception|unhealthy|timed out|cannot|denied|missing|invalid' | tail -n 20 || true)
               if [ -z "$error_summary" ]; then
                 error_summary=$(sanitize_log < openclaw.log | tail -n 40 || true)
@@ -2290,6 +2306,11 @@ jobs:
                 fallback_reinstall) fail_stage_label="回退重装";;
                 *) fail_stage_label="$fail_stage";;
               esac
+            fi
+            # Install/恢复失败且 Run OpenClaw 没给出更具体阶段时，明确标成「安装/恢复」，
+            # 不再让通知看起来像一次普通的启动失败。
+            if [ "$install_outcome" = "failure" ] && [ -z "$fail_stage_label" ]; then
+              fail_stage_label="安装/恢复"
             fi
             source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
             # 耗时显示走真源 tg_format_ms（规范 · 时长 第 3/4 层）：≥1 秒两位小数秒、
