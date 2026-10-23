@@ -458,13 +458,21 @@ jobs:
                   [ -z "$_rev" ] && continue
                   _rev_n=$((_rev_n + 1))
                   echo "⬇️ 下载历史 revision $_rev（候选 $_rev_n/${#GOOD_REVS[@]}）..."
-                  if curl -s --max-time 1800 -X POST https://content.dropboxapi.com/2/files/download \
+                  # 2026-10-23 修复：files/download 的参数必须放 Dropbox-API-Arg 头，
+                  # 此前是裸 JSON 头 → Dropbox 直接 400 拒掉，95 个候选全在 1s 内
+                  # 全灭且无任何判据输出，回退名存实亡。-f 让 4xx 显式失败，
+                  # 失败时打印 rc 与响应前几行，不再盲试。
+                  if curl -fsS --max-time 1800 -X POST https://content.dropboxapi.com/2/files/download \
                      -H "Authorization: Bearer $DBX_TOKEN" \
-                     -H "{\"path\":\"/self-hosted/openclaw.tar.gz\",\"rev\":\"$_rev\"}" \
+                     -H "Dropbox-API-Arg: {\"path\":\"/self-hosted/openclaw.tar.gz\",\"rev\":\"$_rev\"}" \
                      -o "$TMP_OPENCLAW_TAR" \
                      && try_openclaw_candidate "$TMP_OPENCLAW_TAR" "revision $_rev"; then
                     tarball_usable=1
                     break
+                  else
+                    _rev_rc=$?
+                    echo "⚠️ revision $_rev 不可用（rc=${_rev_rc}）: $(head -c 120 "$TMP_OPENCLAW_TAR" 2>/dev/null)"
+                    rm -f "$TMP_OPENCLAW_TAR"
                   fi
                 done
               else
