@@ -2110,6 +2110,10 @@ jobs:
             systemctl --user daemon-reload 2>/dev/null || true
           }
 
+          # 2026-10-24: install 生成 unit 时按目录是否存在决定是否收录 ~/.bun/bin
+          # （version-manager 黑名单不含 bun）。先建目录，让首启进程的 PATH 就包含 bun；
+          # bun 本体由后续 zcode2api 步骤装进同一目录，PATH 在 spawn 时查找。
+          mkdir -p "$HOME/.bun/bin"
           INITIAL_START_RESTART_OK=1
           if [ "$CONFIG_VALID_FOR_CURRENT" != "1" ]; then
             echo "⚠️ Skipping gateway start: config still invalid after doctor. Going straight to fallback reinstall with the recorded compatible version."
@@ -2190,6 +2194,7 @@ jobs:
                 GW_DROPIN_BACKUP="${GW_DROPIN_DIR}.pre-install.$$.$(date +%s%N)"
                 mv "$GW_DROPIN_DIR" "$GW_DROPIN_BACKUP" 2>/dev/null || true
               fi
+              mkdir -p "$HOME/.bun/bin"
               if ! openclaw gateway install --force; then
                 echo "⚠️ Fallback gateway install failed."
                 FALLBACK_RESTART_OK=0
