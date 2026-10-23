@@ -5248,6 +5248,28 @@ jobs:
           echo "已推送 SSH 入口通知: ssh runner@${TS_HOST}（AI 网关: ${AI_BACKEND}）"
 
 
+      - name: Notify Tailscale entry failure
+        # 2026-10-23：Tailscale 链任一环节失败都要出声。此前只有成功通知，
+        # run 39858698391 的 Setup Tailscale 失败后完全静默。
+        if: ${{ always() && (steps.ts_daemon.outcome == 'failure' || steps.ts.outcome == 'failure' || steps.ts_ssh.outcome == 'failure') }}
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] && [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ]; then
+            source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+            msg=""
+            tg_add_title msg "⚠️ Tailscale SSH 入口设置失败"
+            tg_add_path msg "Run ID" "${{ github.run_id }}"
+            tg_add_kv msg "影响" "本轮无 SSH 调试入口；OpenClaw 主流程不受影响"
+            tg_add_note msg "排查：查看 Actions 日志中「Tailscale daemon 纳管」与「Setup Tailscale」两步。"
+            tg_add_footer msg
+            send_tg "$msg" alert || true
+          fi
+
+
       - name: Start background archive loop
         env:
           # send_telegram_alert 以这两个变量为发送闸，缺任一即静默跳过
