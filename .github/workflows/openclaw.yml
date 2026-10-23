@@ -6617,10 +6617,12 @@ jobs:
 
       - name: Keep alive
         id: keepalive
-        # 2026-10-23：Run OpenClaw 没成功就不要保活 —— 否则 Install 失败后本步
-        # 仍会睡满 6 小时，占着 runner 且不触发下一轮，故障被拖成半天空窗。
-        if: ${{ always() && steps.dropbox_preflight.conclusion != 'failure' && steps.run_openclaw.outcome == 'success' }}
+        # 2026-10-23：失败轮也要保活一段调试窗口（Tailscale SSH 可用），
+        # 但只留 60 分钟，不睡满 6 小时；成功轮按原死线。
+        if: ${{ !cancelled() && steps.dropbox_preflight.conclusion != 'failure' }}
         env:
+          RUN_OUTCOME: ${{ steps.run_openclaw.outcome }}
+          INSTALL_OUTCOME: ${{ steps.install_openclaw.outcome }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -6647,6 +6649,16 @@ jobs:
           ELAPSED_SECONDS=$((NOW_EPOCH - JOB_START_EPOCH))
           SLEEP_SECONDS=$((DEADLINE_MINUTES*60 - ELAPSED_SECONDS))
           if [ "${SLEEP_SECONDS}" -lt 60 ]; then SLEEP_SECONDS=60; fi
+          # 失败轮（Install/Run 未成功）只保活 60 分钟：给 Tailscale SSH 留调试窗口，
+          # 又不把故障轮拖成 6 小时僵尸。成功轮不受影响。
+          if [ "${INSTALL_OUTCOME:-}" != "success" ] || [ "${RUN_OUTCOME:-}" != "success" ]; then
+            DEBUG_KEEPALIVE_MINUTES=60
+            DEBUG_SLEEP_SECONDS=$((DEBUG_KEEPALIVE_MINUTES*60))
+            if [ "${DEBUG_SLEEP_SECONDS}" -lt "${SLEEP_SECONDS}" ]; then
+              SLEEP_SECONDS="${DEBUG_SLEEP_SECONDS}"
+            fi
+            echo "Keep alive: 失败轮，仅保活 ${DEBUG_KEEPALIVE_MINUTES}m 供调试（实际睡 $((SLEEP_SECONDS/60))m$((SLEEP_SECONDS%60))s）"
+          fi
           echo "Keep alive: job 已运行 $((ELAPSED_SECONDS/60))m$((ELAPSED_SECONDS%60))s，睡 $((SLEEP_SECONDS/60))m$((SLEEP_SECONDS%60))s 后进入最终归档（死线=job 起 ${DEADLINE_MINUTES}m）"
           FINAL_ARCHIVE_WARNING_BEFORE_MINUTES=15
           WARNING_DELAY_SECONDS=$((SLEEP_SECONDS - FINAL_ARCHIVE_WARNING_BEFORE_MINUTES*60))
@@ -7636,7 +7648,7 @@ jobs:
           fi
 
       - name: Trigger next OpenClaw run
-        if: ${{ always() && steps.keepalive.conclusion == 'success' }}
+        if: ${{ always() && steps.keepalive.conclusion == 'success' && steps.install_openclaw.outcome == 'success' && steps.run_openclaw.outcome == 'success' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
