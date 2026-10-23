@@ -2051,8 +2051,9 @@ jobs:
           # 不响应 SIGTERM，systemd 就陪它等到 330s 才 SIGKILL。日志里
           # 16:59:47 "Gateway service installed" → 17:05:23 "Restarted systemd service"
           # 的 336s 静默正是它（冷启动根本没有「旧进程」要停）。
-          # 对策两层：① drop-in 把停机上限压到 90s（install 重写主 unit 不影响 .d 覆盖）；
-          # ② 冷启动不再调 CLI restart：install 已拉起就直接等健康，unit 未激活才显式 start。
+          # 对策两层：① drop-in 保持 openclaw 要求的 TimeoutStopSec=330（install 重写主
+          #    unit 不影响 .d 覆盖）；② 冷启动不再调 CLI restart：install 已拉起就直接等
+          #    健康，unit 未激活才显式 start。② 生效后冷启动不会再出现 330s 的 stop 等待。
           GW_UNIT="openclaw-gateway.service"
           GW_DROPIN_DIR="$HOME/.config/systemd/user/${GW_UNIT}.d"
           # 2026-10-22 修复（run 5507 日志+本机复现实证）：drop-in 必须在 install
@@ -2063,20 +2064,46 @@ jobs:
           # 成功后再补 drop-in（TimeoutStopSec 对下一次 stop 依然生效，无损失）。
           # 防御：若上一轮残留了 drop-in（如 10-22 失败轮），先摘除再装；
           # 装完后由 apply_gw_dropin 统一重写（不依赖旧目录）。
+          GW_DROPIN_BACKUP=""
           if [ -d "$GW_DROPIN_DIR" ]; then
-            mv "$GW_DROPIN_DIR" "${GW_DROPIN_DIR}.pre-install.$$" 2>/dev/null || true
+            GW_DROPIN_BACKUP="${GW_DROPIN_DIR}.pre-install.$$.$(date +%s%N)"
+            mv "$GW_DROPIN_DIR" "$GW_DROPIN_BACKUP" 2>/dev/null || true
             systemctl --user daemon-reload 2>/dev/null || true
           fi
 
           # install 成功后落盘 drop-in：目录 755 / 文件 644（install 的安全门会拒绝
           # group/world-writable 的定义文件 —— run 5507 当晚本机复现的第二道坎）。
-          # 顺带清掉上方摘除时侧移的旧目录。
+          # 先回放上方摘除时侧移的运营者 drop-in（memory.conf / 20-*.conf 等），再写
+          # 托管项，避免每轮供应把运营者覆盖清空。
           apply_gw_dropin() {
             mkdir -p "$GW_DROPIN_DIR"
             chmod 755 "$GW_DROPIN_DIR"
-            cat > "$GW_DROPIN_DIR/10-stop-timeout.conf" <<'EOF_STOP'
+            if [ -n "${GW_DROPIN_BACKUP:-}" ] && [ -d "$GW_DROPIN_BACKUP" ]; then
+              for _f in "$GW_DROPIN_BACKUP"/*.conf; do
+                [ -e "$_f" ] || continue
+                if [ "$(basename "$_f")" = "10-stop-timeout.conf" ]; then
+                  continue
+                fi
+                cp -p "$_f" "$GW_DROPIN_DIR/" 2>/dev/null || true
+              done
+              rm -rf "$GW_DROPIN_BACKUP"
+            fi
+            # L4 内存护栏（2026-10-21 16:50 事故 10G peak）：仅在缺失时创建，
+            # 已存在的运营者配置由上方回放保留，不覆盖。
+            if [ ! -f "$GW_DROPIN_DIR/memory.conf" ]; then
+              cat > "$GW_DROPIN_DIR/memory.conf" <<'EOF_MEM'
           [Service]
-          TimeoutStopSec=90
+          MemoryHigh=9G
+          MemoryMax=11G
+          EOF_MEM
+              chmod 644 "$GW_DROPIN_DIR/memory.conf"
+            fi
+            GW_NODE_BIN_DIR="$(dirname "$(command -v node 2>/dev/null || echo /usr/bin/node)")"
+            GW_SERVICE_PATH="$HOME/.bun/bin:$GW_NODE_BIN_DIR:/usr/local/bin:/usr/bin:/bin:$HOME/.nvm/current/bin:$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/bin:$HOME/.nix-profile/bin"
+            cat > "$GW_DROPIN_DIR/10-stop-timeout.conf" <<EOF_STOP
+          [Service]
+          Environment=PATH=$GW_SERVICE_PATH
+          TimeoutStopSec=330
           EOF_STOP
             chmod 644 "$GW_DROPIN_DIR/10-stop-timeout.conf"
             rm -rf "${GW_DROPIN_DIR}".pre-install.* 2>/dev/null || true
@@ -2099,7 +2126,7 @@ jobs:
               systemctl --user start "$GW_UNIT" 2>/dev/null || echo "⚠️ systemctl start 返回非零，交给健康检查判定"
             fi
             # drop-in 在 install 之后落盘（原因见上）：此刻 unit 已在盘上、服务已拉起，
-            # 等健康前补齐 TimeoutStopSec=90（对下一次 stop 生效）
+            # 等健康前补齐 PATH 与 TimeoutStopSec=330（对下一次 stop 生效）
             apply_gw_dropin
             echo "COLD_START_SKIP_RESTART=1" >> "$RUN_OPENCLAW_META"
           fi
@@ -2160,7 +2187,8 @@ jobs:
               # 自愈还没开始就被熔断锁死。restart 前先清 failed 计数。
               systemctl --user reset-failed openclaw-gateway.service 2>/dev/null || true
               if [ -d "$GW_DROPIN_DIR" ]; then
-                mv "$GW_DROPIN_DIR" "${GW_DROPIN_DIR}.pre-install.$$" 2>/dev/null || true
+                GW_DROPIN_BACKUP="${GW_DROPIN_DIR}.pre-install.$$.$(date +%s%N)"
+                mv "$GW_DROPIN_DIR" "$GW_DROPIN_BACKUP" 2>/dev/null || true
               fi
               if ! openclaw gateway install --force; then
                 echo "⚠️ Fallback gateway install failed."
