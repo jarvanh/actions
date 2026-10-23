@@ -6411,7 +6411,7 @@ jobs:
               # 完整性由归档脚本的关键文件校验把关（体积本就不是「状态全不全」
               # 的判据，2026-09-12 起「缩水」即不再拦截）。
               openclaw_upload_output=""
-              if openclaw_upload_output=$(timeout 30m rclone copyto "$TMP_OPENCLAW_TAR" "$ARCHIVE_DEST" --dropbox-chunk-size 128M --buffer-size 64M 2>&1); then
+              if openclaw_upload_output=$(timeout 30m rclone copyto "$TMP_OPENCLAW_TAR" "$ARCHIVE_DEST" --dropbox-chunk-size 128M 2>&1); then
                 echo "[$(date '+%F %T')] openclaw upload ok"
                 rm -f "$TMP_OPENCLAW_TAR"
               else
@@ -7156,7 +7156,7 @@ jobs:
               send_archive_alert "$obj" "归档失败" "压缩包小于最小阈值 · 放弃覆盖云端数据" "size=$size min=$min_size output=$tar_path"
               return 1
             fi
-            if out=$(rclone copyto "$tar_path" "$remote" -v --dropbox-chunk-size 128M --buffer-size 64M 2>&1); then
+            if out=$(rclone copyto "$tar_path" "$remote" -v --dropbox-chunk-size 128M 2>&1); then
               echo "final ${obj} archive/upload ok (${size} bytes)"
               record_archive_result "$obj" ok "$size"
               # 包可能由 root 产出（rsstt / CLIProxyAPI 用 sudo tar），普通 rm 会失败
@@ -7300,10 +7300,10 @@ jobs:
               echo "4a. Streaming main package (tar|pigz → rclone rcat)..."
               rclone deletefile "$STREAM_DEST" >/dev/null 2>&1 || true
               STREAM_BEGIN_TS=$(date +%s)
-              # 2026-10-24 上传调优：dropbox 分片 48M→128M（减少上传会话往返），
-              # 读缓冲 16M→64M（流式管道更少停顿）。实测 7-12GB 主包上传 10-19MB/s，
-              # 分片/缓冲是客户端侧唯一可控项；效果看归档日志 "streamed XB in Ys"。
-              if flock -w 600 -E 200 "$LOCK_OPENCLAW" timeout 40m bash /tmp/create-openclaw-archive.sh - 2>/tmp/openclaw-stream.err | rclone rcat --dropbox-chunk-size 128M --buffer-size 64M "$STREAM_DEST" 2>/tmp/openclaw-stream-upload.err; then
+              # 2026-10-24 上传调优（本机 512MB A/B 实测）：dropbox 分片 48M→128M
+              # 把上传从 21-26MB/s 提到 31-34MB/s（+30~40%）；--buffer-size 64M 对
+              # rcat 无影响（单变量对照），故不保留。效果看归档日志 "streamed XB in Ys"。
+              if flock -w 600 -E 200 "$LOCK_OPENCLAW" timeout 40m bash /tmp/create-openclaw-archive.sh - 2>/tmp/openclaw-stream.err | rclone rcat --dropbox-chunk-size 128M "$STREAM_DEST" 2>/tmp/openclaw-stream-upload.err; then
                 stream_bytes=$(rclone size --json "$STREAM_DEST" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null || echo 0)
                 case "${stream_bytes:-0}" in ''|*[!0-9]*) stream_bytes=0 ;; esac
                 if [ "$stream_bytes" -ge $(( openclaw_src_kb * 1024 * 30 / 100 )) ]; then
@@ -7509,7 +7509,7 @@ jobs:
           if [ "$HEALTHY_RUN" = "1" ] && [ "$(cat /tmp/openclaw-stream.rc 2>/dev/null || echo 1)" != "0" ]; then
             echo "4a-fallback. 流式未成功，回退旧路径（本地打包 → 校验 → 上传）..."
             if openclaw_final_output=$(flock -w 600 -E 200 "$LOCK_OPENCLAW" timeout 40m bash /tmp/create-openclaw-archive.sh "$TMP_OPENCLAW_TAR" 2>&1); then
-              if openclaw_final_upload_output=$(rclone copyto "$TMP_OPENCLAW_TAR" "$ARCHIVE_DEST" -v --dropbox-chunk-size 128M --buffer-size 64M 2>&1); then
+              if openclaw_final_upload_output=$(rclone copyto "$TMP_OPENCLAW_TAR" "$ARCHIVE_DEST" -v --dropbox-chunk-size 128M 2>&1); then
                 # 大小必须在 rm 之前取——成功上传后临时包即被删除，事后测不到
                 openclaw_final_size=$(stat -c%s "$TMP_OPENCLAW_TAR" 2>/dev/null || echo 0)
                 echo "final openclaw archive/upload ok (fallback) → $ARCHIVE_DEST: ${openclaw_final_output}"
