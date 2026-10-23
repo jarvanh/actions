@@ -270,6 +270,12 @@ jobs:
           TMP_OPENCLAW_TAR="/tmp/openclaw.tar.gz"
           RESTORE_DIR="/tmp/openclaw-restore"
 
+          # 2026-10-23 恢复来源追踪：通知里要能说清本轮用的是云端主包，
+          # 还是历史 revision、以及该 revision 的创建时间。空值 = 未知。
+          OPENCLAW_RESTORE_SOURCE=""
+          OPENCLAW_RESTORE_REV=""
+          OPENCLAW_RESTORE_REV_TIME=""
+
           cleanup_archive_workdir() {
             rm -f "$TMP_OPENCLAW_TAR" 2>/dev/null || true
             rm -rf "$RESTORE_DIR" 2>/dev/null || true
@@ -443,6 +449,7 @@ jobs:
             tarball_usable=0
             if try_openclaw_candidate "$TMP_OPENCLAW_TAR" "云端主包"; then
               tarball_usable=1
+              OPENCLAW_RESTORE_SOURCE="cloud-main"
             else
               echo "⚠️ 云端主包不可用，尝试 revision 回退..."
               DBX_TOKEN=$(rclone config show dropbox 2>/dev/null | sed -n 's/^token = .*"access_token":"\([^"]*\)".*/\1/p' | tail -1)
@@ -451,13 +458,16 @@ jobs:
                 mapfile -t GOOD_REVS < <(curl -s --max-time 60 -X POST https://api.dropboxapi.com/2/files/list_revisions \
                   -H "Authorization: Bearer $DBX_TOKEN" -H "Content-Type: application/json" \
                   -d '{"path":"/self-hosted/openclaw.tar.gz","mode":"path","limit":100}' \
-                  | python3 -c "import json,sys; d=json.load(sys.stdin); [print(r['rev']) for r in d.get('entries',[]) if r.get('size',0) >= ${OPENCLAW_TARBALL_MIN_KB} * 1024]" 2>/dev/null)
+                  | python3 -c "import json,sys; d=json.load(sys.stdin); [print(r['rev'] + '|' + r.get('server_modified','')) for r in d.get('entries',[]) if r.get('size',0) >= ${OPENCLAW_TARBALL_MIN_KB} * 1024]" 2>/dev/null)
                 echo "revision 候选（体积达标）: ${#GOOD_REVS[@]} 个"
                 _rev_n=0
-                for _rev in "${GOOD_REVS[@]:-}"; do
-                  [ -z "$_rev" ] && continue
+                for _entry in "${GOOD_REVS[@]:-}"; do
+                  [ -z "$_entry" ] && continue
+                  _rev="${_entry%%|*}"
+                  _rev_time="${_entry#*|}"
+                  [ "$_rev_time" = "$_entry" ] && _rev_time=""
                   _rev_n=$((_rev_n + 1))
-                  echo "⬇️ 下载历史 revision $_rev（候选 $_rev_n/${#GOOD_REVS[@]}）..."
+                  echo "⬇️ 下载历史 revision $_rev（创建于 ${_rev_time:-未知}，候选 $_rev_n/${#GOOD_REVS[@]}）..."
                   # 2026-10-23 修复：files/download 的参数必须放 Dropbox-API-Arg 头，
                   # 此前是裸 JSON 头 → Dropbox 直接 400 拒掉，95 个候选全在 1s 内
                   # 全灭且无任何判据输出，回退名存实亡。-f 让 4xx 显式失败，
@@ -468,6 +478,10 @@ jobs:
                      -o "$TMP_OPENCLAW_TAR" \
                      && try_openclaw_candidate "$TMP_OPENCLAW_TAR" "revision $_rev"; then
                     tarball_usable=1
+                    OPENCLAW_RESTORE_SOURCE="revision"
+                    OPENCLAW_RESTORE_REV="$_rev"
+                    OPENCLAW_RESTORE_REV_TIME="$_rev_time"
+                    echo "✅ 已采用历史 revision $_rev（创建于 ${_rev_time:-未知}）"
                     break
                   else
                     _rev_rc=$?
@@ -503,6 +517,7 @@ jobs:
             cleanup_archive_workdir
           else
             echo "⚠️ No openclaw archive found. Falling back to sync from raw directory..."
+            OPENCLAW_RESTORE_SOURCE="raw-dir"
             rclone copy dropbox:self-hosted/openclaw ~/.openclaw \
               --retries 10 \
               --low-level-retries 20 \
@@ -511,6 +526,13 @@ jobs:
               --exclude "logs/**" \
               -P || true
           fi
+
+          # 恢复来源落盘：跨 step 只能走文件（🟢 就绪通知 / 🚨 自愈失败通知都会读）。
+          {
+            printf 'OPENCLAW_RESTORE_SOURCE=%s\n' "${OPENCLAW_RESTORE_SOURCE:-unknown}"
+            printf 'OPENCLAW_RESTORE_REV=%s\n' "${OPENCLAW_RESTORE_REV:-}"
+            printf 'OPENCLAW_RESTORE_REV_TIME=%s\n' "${OPENCLAW_RESTORE_REV_TIME:-}"
+          } > /tmp/openclaw-restore-meta.env
 
           # 恢复后诊断：主包里到底恢复了什么（判断是否缺关键文件/状态库）
           echo "=== restored ~/.openclaw ==="
@@ -2225,6 +2247,26 @@ jobs:
               fallback_reinstall_duration_sec=$(grep '^FALLBACK_REINSTALL_DURATION_SEC=' "$meta_file" | tail -n 1 | cut -d= -f2- || true)
             fi
 
+            # 恢复来源（2026-10-23）：自愈失败时也要能看出是不是靠历史 revision 起的。
+            restore_source=""
+            restore_rev=""
+            restore_rev_time=""
+            restore_time_display=""
+            if [ -f /tmp/openclaw-restore-meta.env ]; then
+              restore_source=$(grep '^OPENCLAW_RESTORE_SOURCE=' /tmp/openclaw-restore-meta.env | tail -n 1 | cut -d= -f2- || true)
+              restore_rev=$(grep '^OPENCLAW_RESTORE_REV=' /tmp/openclaw-restore-meta.env | tail -n 1 | cut -d= -f2- || true)
+              restore_rev_time=$(grep '^OPENCLAW_RESTORE_REV_TIME=' /tmp/openclaw-restore-meta.env | tail -n 1 | cut -d= -f2- || true)
+            fi
+            if [ -n "$restore_rev_time" ]; then
+              _restore_local=$(TZ=Asia/Shanghai date -d "$restore_rev_time" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || true)
+              _restore_utc=$(TZ=UTC date -d "$restore_rev_time" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || true)
+              if [ -n "$_restore_local" ] && [ -n "$_restore_utc" ]; then
+                restore_time_display="${_restore_local}（UTC+8） · ${_restore_utc} UTC"
+              else
+                restore_time_display="$restore_rev_time"
+              fi
+            fi
+
             export RUN_URL="${TG_RUN_URL}"
             export SSH_ENTRY="$ssh_entry"
             export ERROR_SUMMARY="$error_summary"
@@ -2258,6 +2300,9 @@ jobs:
             # 英文步骤名不直出通知（规范 · 失败与异常）
             tg_add_kv msg "步骤" "运行 OpenClaw"
             tg_add_path msg "Run ID" "${{ github.run_id }}"
+            if [ "$restore_source" = "revision" ]; then
+              tg_add_kv msg "恢复来源" "历史 revision ${restore_rev:-未知} · 创建于 ${restore_time_display:-未知}"
+            fi
             [ -n "$fail_stage_label" ] && tg_add_kv msg "失败阶段" "$fail_stage_label"
             [ -n "$current_version" ] && tg_add_path msg "当前版本" "$current_version"
             [ -n "$fallback_version" ] && tg_add_path msg "回退版本" "$fallback_version"
@@ -5085,6 +5130,23 @@ jobs:
           fi
           AI_BACKEND="${AI_BACKEND:-omniroute}"
 
+          # 恢复来源（2026-10-23）：主包正常时不必提示；用了历史 revision 必须
+          # 告知是哪个版本、创建于何时 —— 否则「悄悄回退」看起来像正常启动。
+          RESTORE_SOURCE=""
+          RESTORE_REV=""
+          RESTORE_REV_TIME=""
+          RESTORE_REV_TIME_LOCAL=""
+          RESTORE_REV_TIME_UTC=""
+          if [ -f /tmp/openclaw-restore-meta.env ]; then
+            RESTORE_SOURCE=$(grep '^OPENCLAW_RESTORE_SOURCE=' /tmp/openclaw-restore-meta.env | tail -n 1 | cut -d= -f2- || true)
+            RESTORE_REV=$(grep '^OPENCLAW_RESTORE_REV=' /tmp/openclaw-restore-meta.env | tail -n 1 | cut -d= -f2- || true)
+            RESTORE_REV_TIME=$(grep '^OPENCLAW_RESTORE_REV_TIME=' /tmp/openclaw-restore-meta.env | tail -n 1 | cut -d= -f2- || true)
+          fi
+          if [ -n "$RESTORE_REV_TIME" ]; then
+            RESTORE_REV_TIME_LOCAL=$(TZ=Asia/Shanghai date -d "$RESTORE_REV_TIME" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || true)
+            RESTORE_REV_TIME_UTC=$(TZ=UTC date -d "$RESTORE_REV_TIME" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || true)
+          fi
+
           # 统一 HTML 通知 + 统一收尾区（tg_notify.sh，checkout 后可用）。
           # TG_RUN_URL 由本 step 的 env 注入，tg_add_footer 直接读取；时长走开机时刻兜底。
           # 版式与 tailscale-windows.yml "🟢 Windows runner 已就绪" 同款：
@@ -5136,6 +5198,19 @@ jobs:
           tg_add_block msg "$(tree_lines "后端：<code>$(escape_html "${_ai_backend}")</code> · $(escape_html "${_ai_state}")")"
           if [ -n "$AI_FALLBACK_REASON" ]; then
             tg_add_note msg "回退原因：${AI_FALLBACK_REASON}"
+          fi
+          # 用了历史 revision 才提示（主包正常时不制造噪音）；同时给出 UTC+8 与 UTC，
+          # 方便对照 run 时间与 Dropbox 版本时间。
+          if [ "$RESTORE_SOURCE" = "revision" ]; then
+            _rev_time_display="${RESTORE_REV_TIME:-未知}"
+            if [ -n "$RESTORE_REV_TIME_LOCAL" ] && [ -n "$RESTORE_REV_TIME_UTC" ]; then
+              _rev_time_display="${RESTORE_REV_TIME_LOCAL}（UTC+8） · ${RESTORE_REV_TIME_UTC} UTC"
+            fi
+            _entries="来源：<code>历史 revision $(escape_html "${RESTORE_REV:-未知}")</code>"
+            _entries+=$'\n'"创建时间：<code>$(escape_html "${_rev_time_display}")</code>"
+            tg_add_section msg "📦 状态恢复 · 2"
+            tg_add_block msg "$(tree_lines "$_entries")"
+            tg_add_note msg "说明：云端主包本轮不可用，已回退到历史版本。"
           fi
           # footer 读 TG_RUN_URL（由本 step 的 env 注入），时长走开机时刻兜底
           tg_add_footer msg
