@@ -5276,7 +5276,7 @@ jobs:
       - name: Start background archive loop
         # 2026-10-23：只有 Install 与 Run 都成功才启动归档循环。Install 失败时
         # ~/.openclaw 不可用，循环会每 20 分钟报一次归档失败（噪音）；Run 失败时
-        # 状态未验证，也不应让周期包覆盖云端主包。
+        # 状态未验证，也不应让周期包覆盖云端主包。Dropbox 预检失败同样不启动。
         if: ${{ always() && steps.dropbox_preflight.conclusion != 'failure' && steps.install_openclaw.outcome == 'success' && steps.run_openclaw.outcome == 'success' }}
         env:
           # send_telegram_alert 以这两个变量为发送闸，缺任一即静默跳过
@@ -5286,9 +5286,6 @@ jobs:
           # 收尾区接线（规范 · 收尾区）：只需注入 TG_RUN_URL，缺了收尾区就没有日志入口；
           # 时长由 tg_add_footer 内的 runner 开机时刻兜底
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        # 预检失败（Dropbox 配额不足）时不启动归档循环：对满额远端每 20 分钟
-        # 打一轮失败告警纯属噪音，等空间腾出后的下一轮再正常托管。
-        if: ${{ always() && steps.dropbox_preflight.conclusion != 'failure' }}
         run: |
           echo "Starting background archive tasks: archive ~/.openclaw every 20 minutes; OmniRoute data is archived periodically and at final shutdown..."
           cat > /tmp/create-openclaw-archive.sh <<'EOF'
