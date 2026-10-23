@@ -5169,6 +5169,15 @@ jobs:
             exit 2
           fi
 
+          # 2026-10-23 流式污染修复：OUTPUT_TAR="-" 时 stdout 是**数据通道**，
+          # 任何日志行混进去都会让云端包变成「明文头 + gzip 流」的坏包 ——
+          # run 39894704352 的 revision 65e74a9 首行正是 openclaw_archive_timing…，
+          # 恢复侧解包必失败。把原始 stdout 挪到 fd 3，其余输出统一走 stderr，
+          # tar 流只写 fd 3（见下方流式分支）。
+          if [ "$OUTPUT_TAR" = "-" ]; then
+            exec 3>&1 1>&2
+          fi
+
           # 2026-10-02 二次事故：5KB 下限形同虚设（98KB 空壳轻松过线并覆盖云端主包）。
           # 真实主包 GB 级；50MB 绝对下限不与历史包比较（2026-09-12 的教训：比较式
           # 体积门会被主动瘦身永久卡死），只拦「数量级不对」的包。
@@ -5377,12 +5386,13 @@ jobs:
           # 2026-10-22 流式模式（下线优化）：OUTPUT_TAR="-" 时把 gzip 流直接写 stdout，
           # 供调用方 `rclone rcat` 边压边传 —— 把「打包 318s → 上传 380s」的串行改成
           # max(打包, 上传)。元信息走 stderr，不污染数据流；完整性由调用方按
-          # 「流退出码 + 远端体积 ≥ 源 50%」两道门把关（失败不覆盖云端）。
+          # 「流退出码 + 远端体积 ≥ 源 30% + gzip 魔数」三道门把关（失败不覆盖云端）。
           if [ "$OUTPUT_TAR" = "-" ]; then
+            # 只把 gzip 流写到 fd 3（原始 stdout），日志走 stderr。
             if command -v pigz >/dev/null 2>&1; then
-              tar -C "$STAGE_DIR" -cf - .openclaw | pigz -p "$(nproc)" -6
+              tar -C "$STAGE_DIR" -cf - .openclaw | pigz -p "$(nproc)" -6 >&3
             else
-              tar -C "$STAGE_DIR" -cf - .openclaw | gzip -6
+              tar -C "$STAGE_DIR" -cf - .openclaw | gzip -6 >&3
             fi
             echo "archive_stream_ready" >&2
             exit 0
@@ -7163,7 +7173,13 @@ jobs:
                 stream_bytes=$(rclone size --json "$STREAM_DEST" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null || echo 0)
                 case "${stream_bytes:-0}" in ''|*[!0-9]*) stream_bytes=0 ;; esac
                 if [ "$stream_bytes" -ge $(( openclaw_src_kb * 1024 * 30 / 100 )) ]; then
-                  if rclone moveto "$STREAM_DEST" "$ARCHIVE_DEST" >/tmp/openclaw-stream-move.log 2>&1; then
+                  # 2026-10-23 新增：体积门挡不住「明文日志头 + gzip 流」的坏包
+                  # （run 39894704352 即此形态，恢复侧解包失败）。改名覆盖主包前
+                  # 花 2 字节确认 gzip 魔数，坏流绝不落到 openclaw.tar.gz。
+                  stream_magic=$(rclone cat --head 2 "$STREAM_DEST" 2>/dev/null | od -An -tx1 | tr -d ' \n')
+                  if [ "$stream_magic" != "1f8b" ]; then
+                    echo "⚠️ 流式包头部不是 gzip 魔数（${stream_magic:-empty}），放弃覆盖云端主包"
+                  elif rclone moveto "$STREAM_DEST" "$ARCHIVE_DEST" >/tmp/openclaw-stream-move.log 2>&1; then
                     echo "final openclaw archive/upload ok (streamed ${stream_bytes}B in $(( $(date +%s) - STREAM_BEGIN_TS ))s) → $ARCHIVE_DEST"
                     record_archive_result "openclaw.tar.gz" ok "$stream_bytes" "流式覆盖主包"
                     echo 0 > /tmp/openclaw-stream.rc
