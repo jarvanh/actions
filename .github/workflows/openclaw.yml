@@ -2240,6 +2240,8 @@ jobs:
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           if [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] && [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ]; then
+            # 发送层要在下面的日志截断之前就可用（tg_tail_safe 在此文件定义）。
+            source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
             step_log="/tmp/run-openclaw-step.log"
             meta_file="/tmp/run-openclaw-meta.env"
             install_outcome="${{ steps.install_openclaw.outcome }}"
@@ -2275,7 +2277,7 @@ jobs:
             fi
             # 与同文件 send_telegram_alert / send_archive_alert 同口径（尾部 1200 字节）：
             # 超长输出会让 <pre> 跨 4000 字符分片、标签断开即破版（规范 · 分节）
-            error_summary=$(printf '%s' "$error_summary" | tail -c 1200)
+            error_summary=$(tg_tail_safe "$error_summary" 1200)
 
             ts_host=""
             ts_ip=""
@@ -2358,7 +2360,6 @@ jobs:
             if [ "$install_outcome" != "success" ] && [ -z "$fail_stage_label" ]; then
               fail_stage_label="安装/恢复"
             fi
-            source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
             # 耗时显示走真源 tg_format_ms（规范 · 时长 第 3/4 层）：≥1 秒两位小数秒、
             # 不足 1 秒整数毫秒 —— 上游写入的是整数秒，恒按 %.2f 输出时 0 会显示成
             # "0.00 秒"：看不出快慢，也让人怀疑没测到。真源唯一实现，不再内联副本。
@@ -2604,11 +2605,10 @@ jobs:
               # catalogs + 免费实测，按站点分组、站点内倍率升序（价格低者在上）每模型一行、
               # **全量不截断**）。
               # 取数失败/缓存缺失时为空，整段跳过（与凭据段同口径），绝不编造倍率。
-              # 长度：send_tg 不分片，Telegram 单条上限 4096 B；倍率全量实测 2200+ B，
-              # 与凭据 + 账号池（三行明细）叠加后实测 3912 B，余量仅 184 B —— 模型继续
-              # 增长必然超限（超限会 400 丢弃、只留 warning，整条通知静默丢失）。
-              # 故倍率段**常驻独立第二条**：主消息保持完整版式且远低于上限，倍率段自成
-              # 一篇（带标题 + 收尾区）。既不砍数据，也不会因超限丢整条。
+              # 长度：send_tg 现在会自动分片（超过 3900 UTF-16 码元走 send_tg_chunked）；
+              # 倍率全量实测 2200+ B，与凭据 + 账号池（三行明细）叠加后实测 3912 B。
+              # 仍保留独立第二条：主消息保持完整版式，倍率段自成一篇（标题 + 收尾区），
+              # 既不砍数据，也避免主消息在客户端被折叠得太长。
               WB_RATES_BLOCK=""
               if [ -n "${WB_RATES_TXT:-}" ]; then
                 WB_RATES_BLOCK="$(tg_add_title WB_RATES_BLOCK "📊 workbuddy-gateway 模型倍率 · 模型数量${WB_RATES_N:-0}${WB_RATES_FREE_TAG:-}"; tg_add_pre WB_RATES_BLOCK "$WB_RATES_TXT"; tg_add_footer WB_RATES_BLOCK; printf '%s' "$WB_RATES_BLOCK")"
@@ -2621,7 +2621,7 @@ jobs:
               [ -n "$_wb_ul_block" ] && tg_append _msg "$_wb_ul_block"
               if [ -n "$6" ]; then
                 tg_add_section _msg "🧾 原始输出"
-                tg_add_pre _msg "$(printf '%s' "$6" | tail -c 1200)"
+                tg_add_pre _msg "$(tg_tail_safe "$6" 1200)"
               fi
               tg_add_footer _msg
               if send_tg "$_msg" alert; then
@@ -3502,7 +3502,7 @@ jobs:
               [ "$WB_NOTIFY_OK" = "1" ] && printf '%s\n' "${GITHUB_RUN_ID:-manual}" > "$WB_RUN_TAG_FILE"
             fi
           else
-            WB_TAIL="$(tail -c 1200 "$WB_LOG" 2>/dev/null || true)"
+            WB_TAIL="$(tg_tail_file_safe "$WB_LOG" 1200)"
             # 把日志尾部同时打到 stdout：<pre> 只进 Telegram，CI 日志里看不到，
             # 排查时不得不再跑一轮才能拿到真实报错。
             echo "--- serve.log tail (1200B) ---"
@@ -3615,7 +3615,7 @@ jobs:
               if [ -s "${CHECKIN_JSONL:-}" ]; then
                 local _total _rows _i _line _uid _nick _cr _err _skipr _st _exp3 _eline _last _planned
                 # 按 uid 取末行（保持首次出现顺序）：JSONL 逐行 uid 序列去重拼接
-                _uids="$(jq -r '.uid' "$CHECKIN_JSONL" | awk '!seen[$0]++')"
+                _uids="$(jq -r '.uid' "$CHECKIN_JSONL" 2>/dev/null | awk '!seen[$0]++' || true)"
                 _total="$(printf '%s\n' "$_uids" | grep -c . || true)"
                 tg_add_section _msg "💳 账号池 · ${_total}"
                 _rows=""
@@ -3625,7 +3625,7 @@ jobs:
                   _i=$((_i + 1))
                   _last=0
                   [ "$_i" -eq "$_total" ] && _last=1
-                  _line="$(jq -c --arg uid "$_uid" 'select(.uid == $uid)' "$CHECKIN_JSONL" | tail -n 1)"
+                  _line="$(jq -c --arg uid "$_uid" 'select(.uid == $uid)' "$CHECKIN_JSONL" 2>/dev/null | tail -n 1 || true)"
                   _nick=$(jq -r '(.nickname // "-")' <<<"$_line")
                   _cr=$(jq -r '.credits' <<<"$_line")
                   _err=$(jq -r '(.err // "")' <<<"$_line")
@@ -3722,7 +3722,7 @@ jobs:
               [ -n "$_trae_ul_block" ] && tg_append _msg "$_trae_ul_block"
               if [ -n "$6" ]; then
                 tg_add_section _msg "🧾 原始输出"
-                tg_add_pre _msg "$(printf '%s' "$6" | tail -c 1200)"
+                tg_add_pre _msg "$(tg_tail_safe "$6" 1200)"
               fi
               tg_add_footer _msg
               if send_tg "$_msg" alert; then
@@ -3981,10 +3981,10 @@ jobs:
           if [ -s "$CHECKIN_JSONL" ]; then
             # 两行制（排程行+结果行）：按 uid 取末行再分类，避免重复计数；
             # 排程/冷却中的账号计入「待签」，结论里也能看到本轮还剩几个没轮到
-            _total=$(jq -sr 'group_by(.uid) | length' "$CHECKIN_JSONL")
-            _ok=$(jq -sr 'group_by(.uid) | map(last) | [.[] | select((.err // "") == "" and ((.claimed // false) == true or (.checked_in // false) == true or (.skipped // "") == "already"))] | length' "$CHECKIN_JSONL")
-            _wait=$(jq -sr 'group_by(.uid) | map(last) | [.[] | select((.err // "") == "" and (.claimed // false) != true and (.checked_in // false) != true and ((.skipped // "") == "scheduled" or (.skipped // "") == "cooldown"))] | length' "$CHECKIN_JSONL")
-            _fail=$(jq -sr 'group_by(.uid) | map(last) | [.[] | select((.err // "") != "")] | length' "$CHECKIN_JSONL")
+            _total=$(jq -sr 'group_by(.uid) | length' "$CHECKIN_JSONL" 2>/dev/null || echo 0)
+            _ok=$(jq -sr 'group_by(.uid) | map(last) | [.[] | select((.err // "") == "" and ((.claimed // false) == true or (.checked_in // false) == true or (.skipped // "") == "already"))] | length' "$CHECKIN_JSONL" 2>/dev/null || echo 0)
+            _wait=$(jq -sr 'group_by(.uid) | map(last) | [.[] | select((.err // "") == "" and (.claimed // false) != true and (.checked_in // false) != true and ((.skipped // "") == "scheduled" or (.skipped // "") == "cooldown"))] | length' "$CHECKIN_JSONL" 2>/dev/null || echo 0)
+            _fail=$(jq -sr 'group_by(.uid) | map(last) | [.[] | select((.err // "") != "")] | length' "$CHECKIN_JSONL" 2>/dev/null || echo 0)
             # 计数只列非零项（telegram-notify 规范 2.5 / 5.4）：
             # 「待签 0 · 失败 0」这类零计数与 🟢 已就绪的标题自相矛盾，且把常态噪音
             # 顶到结论行最显眼的位置。共 N 是分母、始终保留（读者需要知道池子多大）。
@@ -4115,7 +4115,7 @@ jobs:
               fi
               [ -n "$5" ] && tg_add_kv _msg "原因" "$5"
               if [ -n "$6" ]; then
-                tg_add_pre _msg "$(printf '%s' "$6" | tail -c 1200)"
+                tg_add_pre _msg "$(tg_tail_safe "$6" 1200)"
               fi
               tg_add_footer _msg
               if send_tg "$_msg" alert; then
@@ -4131,7 +4131,7 @@ jobs:
           # 明文 API Key 读取 helper（面板管理 Key 优先、回落 launcher Key —— 与
           # 网关侧 api_key_override 取值顺序一致）；多调用点共用，避免两处写歪。
           read_qoder_key() {
-            python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print(d.get("api_key") if d.get("api_key_set") else d.get("launcher_key",""))' "$QODER_DATA/accounts/settings.json" 2>/dev/null || true
+            python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print((d.get("api_key") or d.get("launcher_key") or "") if d.get("api_key_set") else (d.get("launcher_key") or ""))' "$QODER_DATA/accounts/settings.json" 2>/dev/null || true
           }
 
           echo "1. Bootstrap credentials (idempotent, Dropbox 为准)..."
@@ -6509,7 +6509,7 @@ jobs:
                 # 多行原始输出 → <pre>（规范 · 多行块）；取尾部 1200 字节（与 file_split.sh
                 # 日志摘要同口径）：超长输出会让 <pre> 跨 4000 字符分片，标签断开即破版
                 tg_add_section full_msg "🧾 原始输出"
-                tg_add_pre full_msg "$(printf '%s' "$detail" | tail -c 1200)"
+                tg_add_pre full_msg "$(tg_tail_safe "$detail" 1200)"
               fi
               tg_add_footer full_msg
               # 走发送层而非 curl 直发：429 重试已内建，HTML 解析失败直接报错（规范 · 发送层），
@@ -7258,7 +7258,7 @@ jobs:
               tg_add_path full_msg "Run ID" "$run_id"
               if [ -n "$detail" ]; then
                 tg_add_section full_msg "🧾 原始输出"
-                tg_add_pre full_msg "$(printf '%s' "$detail" | tail -c 1200)"
+                tg_add_pre full_msg "$(tg_tail_safe "$detail" 1200)"
               fi
               tg_add_footer full_msg
               send_tg "$full_msg" alert || true

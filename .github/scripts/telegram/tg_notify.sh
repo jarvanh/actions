@@ -99,6 +99,40 @@ tg_format_ms() {
   awk -v x="$1" 'BEGIN { if (x < 1) printf "%d 毫秒", x * 1000 + 0.5; else printf "%.2f 秒", x }'
 }
 
+# 按字符安全截断尾部：`tail -c N` 会切在多字节 UTF-8 中间，导致
+# Telegram 400 / 长度计算 UnicodeDecodeError。n 是最大字节数，
+# 返回合法 UTF-8（丢掉被切断的首个残字节）。
+tg_tail_safe() {
+  local text="$1" n="${2:-1200}"
+  printf '%s' "$text" | python3 -c '
+import sys
+b = sys.stdin.buffer.read()
+n = int(sys.argv[1])
+if n > 0:
+    b = b[-n:]
+while b and (b[0] & 0xC0) == 0x80:
+    b = b[1:]
+sys.stdout.write(b.decode("utf-8", "ignore"))
+' "$n"
+}
+
+tg_tail_file_safe() {
+  local f="$1" n="${2:-1200}"
+  [ -r "$f" ] || return 0
+  python3 -c '
+import sys
+with open(sys.argv[1], "rb") as f:
+    f.seek(0, 2)
+    size = f.tell()
+    n = int(sys.argv[2])
+    f.seek(max(0, size - n) if n > 0 else 0)
+    b = f.read()
+while b and (b[0] & 0xC0) == 0x80:
+    b = b[1:]
+sys.stdout.write(b.decode("utf-8", "ignore"))
+' "$f" "$n"
+}
+
 # 标题块: "标题\n分隔线\n"（2026-09-10 终版：全库无 <b>/<i>，一切信息文字裸文本，
 # 层级由分隔线/空行/emoji/等宽 <code> 承担）
 tg_add_title() {
@@ -386,21 +420,28 @@ _tg_send_once() {
     token="${_TG_TOKEN:-$TELEGRAM_BOT_TOKEN}"
     chat="${_TG_CHAT:-$TELEGRAM_CHAT_ID}"
   fi
-  local resp retry_after attempt max_attempts=5
+  local resp retry_after attempt max_attempts=5 http_code wait
   for attempt in $(seq 1 "$max_attempts"); do
     if [ -n "$parse_mode" ]; then
-      resp=$(curl -s -m 15 -X POST "https://api.telegram.org/bot${token}/sendMessage" \
+      resp=$(curl -s -m 15 -w '\n%{http_code}' -X POST "https://api.telegram.org/bot${token}/sendMessage" \
         --data-urlencode "chat_id=${chat}" \
         --data-urlencode "text=${text}" \
         --data-urlencode "disable_web_page_preview=true" \
         -d "parse_mode=${parse_mode}" 2>&1)
     else
-      resp=$(curl -s -m 15 -X POST "https://api.telegram.org/bot${token}/sendMessage" \
+      resp=$(curl -s -m 15 -w '\n%{http_code}' -X POST "https://api.telegram.org/bot${token}/sendMessage" \
         --data-urlencode "chat_id=${chat}" \
         --data-urlencode "text=${text}" \
         --data-urlencode "disable_web_page_preview=true" 2>&1)
     fi
-    if echo "$resp" | grep -q '"ok":true'; then
+    # curl -w 追加的最后一行是 HTTP 状态码；正文里可能本来就有换行，
+    # 所以从最后一个换行处拆，不能简单按行取。
+    http_code="${resp##*$'\n'}"
+    resp="${resp%$'\n'*}"
+    if [ "$http_code" = "200" ] && {
+      echo "$resp" | jq -e '.ok == true' >/dev/null 2>&1 ||
+      echo "$resp" | grep -q '"ok":true';
+    }; then
       return 0
     fi
     # 429 限流: 按 retry_after 等待后重试
@@ -416,6 +457,17 @@ _tg_send_once() {
       echo "❌ Telegram HTML 解析失败（400 can't parse entities），消息未发送: $(echo "$resp" | head -c 200)" >&2
       return 2
     fi
+    # 5xx / 网络错误（HTTP 000）是瞬时故障：退避重试，避免就绪通知直接丢失。
+    case "$http_code" in
+      5*|000|"")
+        if [ "$attempt" -lt "$max_attempts" ]; then
+          wait=$((attempt * 2))
+          echo "⚠️ Telegram 5xx/网络错误 (HTTP ${http_code:-?})，${wait}s 后重试 (尝试 $attempt/$max_attempts)..." >&2
+          sleep "$wait"
+          continue
+        fi
+        ;;
+    esac
     echo "⚠️ Telegram 通知发送失败: $(echo "$resp" | head -c 200)" >&2
     return 1
   done
@@ -431,7 +483,7 @@ send_tg() {
   tg_route "$tier"
   # Telegram 单条上限 4096 UTF-16 码元；超过就自动分片，绝不整条丢。
   local _len
-  _len=$(printf '%s' "$text" | python3 -c 'import sys; print(len(sys.stdin.read().encode("utf-16-le"))//2)' 2>/dev/null || echo 0)
+  _len=$(printf '%s' "$text" | python3 -c 'import sys; print(len(sys.stdin.buffer.read().decode("utf-8","replace").encode("utf-16-le"))//2)' 2>/dev/null || echo 0)
   if [ "${_len:-0}" -le 3900 ]; then
     _tg_send_once "$text" "HTML"
   else
@@ -451,7 +503,7 @@ send_tg_chunked() {
     sleep "$delay"
   done < <(printf '%s' "$text" | python3 -c '
 import sys, re
-data = sys.stdin.read()
+data = sys.stdin.buffer.read().decode("utf-8", "replace")
 LIMIT = 3800
 TAG = re.compile(r"<(/?)([A-Za-z][A-Za-z0-9]*)([^>]*)>")
 
