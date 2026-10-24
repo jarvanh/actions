@@ -3490,14 +3490,11 @@ jobs:
           fi
           if [ "$WB_READY" = "1" ]; then
             if [ -n "$WB_ACCOUNTS" ]; then
-              if [ "$WB_RELAUNCH" = "1" ]; then
-                # 接力轮安静续跑：不重复推版式完全相同的「已就绪」，让唯一那条待在本轮顶部。
-                echo "ℹ️ [workbuddy-gateway] 接力轮（上一 run ${WB_PREV_TAG} 已启动），跳过重复的就绪通知"
-              else
-                wb_notify "🟢 workbuddy-gateway 已就绪" "$WB_ACCOUNTS" "$WB_VER" "$WB_UPDATE" "$WB_REASON" "" 1
-                [ "$WB_NOTIFY_OK" = "1" ] && printf '%s\n' "${GITHUB_RUN_ID:-manual}" > "$WB_RUN_TAG_FILE"
-              fi
-            elif [ "$WB_RELAUNCH" != "1" ]; then
+              # 2026-10-24 主人定：就绪通知每次启动都发。services.sh ensure
+              # 每轮 restart 一次，故这里不再按「接力轮」静默。
+              wb_notify "🟢 workbuddy-gateway 已就绪" "$WB_ACCOUNTS" "$WB_VER" "$WB_UPDATE" "$WB_REASON" "" 1
+              [ "$WB_NOTIFY_OK" = "1" ] && printf '%s\n' "${GITHUB_RUN_ID:-manual}" > "$WB_RUN_TAG_FILE"
+            else
               # 网关自己起来了、但账号池为空：多半是数据目录里还没有 workbuddy*.json
               # （二维码登录只能人工做），如实标注为可用性问题，不假装就绪。
               wb_notify "⚠️ workbuddy-gateway 已启动 · 无可用账号" \
@@ -3584,6 +3581,7 @@ jobs:
           # 账号池逐账号「一条目 + 多子行」：数据源是函数外的 CHECKIN_JSONL / PACKS_JSON
           # （uid/昵称/状态/积分进条目行，该账号最早过期的前 3 个包各占一个子行）。
           trae_notify() {
+            TRAE_NOTIFY_OK=0
             if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
               local _msg=""
               tg_add_title _msg "$1"
@@ -3727,7 +3725,11 @@ jobs:
                 tg_add_pre _msg "$(printf '%s' "$6" | tail -c 1200)"
               fi
               tg_add_footer _msg
-              send_tg "$_msg" alert || echo "::warning::TG 通知发送失败（不影响任务）"
+              if send_tg "$_msg" alert; then
+                TRAE_NOTIFY_OK=1
+              else
+                echo "::warning::TG 通知发送失败（不影响任务）"
+              fi
             else
               echo "⚠️ Telegram secrets missing, skip trae2api notification."
             fi
@@ -3969,10 +3971,6 @@ jobs:
           else
             TRAE_UPDATE="首次构建 ${TRAE_VER}"
           fi
-          if [ -n "$TRAE_VER" ]; then
-            printf '%s\n' "$TRAE_VER" > "$TRAE_VER_FILE"
-          fi
-
           # 标题/结论随签到结果走：无输出 = 签到工具自身异常（⚠️ 中间态，对齐 workbuddy
           # 的「已启动 · 无可用账号」调用点），服务本身仍就绪 → 接口行照常展示（第 7 参 1）。
           _title="🟢 trae2api 已就绪"
@@ -4017,6 +4015,11 @@ jobs:
             "$_conclusion" \
             "$TRAE_VER" "$TRAE_UPDATE" "" \
             "${_raw_out}" 1
+          # 只有通知真正发出才落版本标记：发送失败时下轮仍会报「从 X 更新到 Y」，
+          # 不会把更新说明永久吞掉（与 workbuddy/zcode 同口径）。
+          if [ "${TRAE_NOTIFY_OK:-0}" = "1" ] && [ -n "$TRAE_VER" ]; then
+            printf '%s\n' "$TRAE_VER" > "$TRAE_VER_FILE"
+          fi
 
       # zcode2api：GLM 反代网关（Anthropic + OpenAI 双协议，端口 8319）。
       # 代码取 jarvanh/zcode2api fork（在 dengyie 上游之上补了 ZCODE_GATEWAY_KEY
@@ -4090,6 +4093,7 @@ jobs:
           # 第 7 参 = 服务就绪态，取 "1" 才补「接口 / 看板 / API Key」三行（失败时服务
           # 已不在，展示指向已停进程的地址会误导读者，与 wb_notify 同口径）。
           qoder_notify() {
+            QODER_NOTIFY_OK=0
             if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
               local _msg=""
               tg_add_title _msg "$1"
@@ -4114,7 +4118,11 @@ jobs:
                 tg_add_pre _msg "$(printf '%s' "$6" | tail -c 1200)"
               fi
               tg_add_footer _msg
-              send_tg "$_msg" alert || echo "::warning::TG 通知发送失败（不影响任务）"
+              if send_tg "$_msg" alert; then
+                QODER_NOTIFY_OK=1
+              else
+                echo "::warning::TG 通知发送失败（不影响任务）"
+              fi
             else
               echo "⚠️ Telegram secrets missing, skip qoder2api notification."
             fi
@@ -4210,13 +4218,15 @@ jobs:
           else
             QODER_UPDATE="首次部署 ${QODER_VERSION}"
           fi
-          printf '%s\n' "$QODER_IMG_DIGEST" > "$QODER_VER_FILE"
-
           _title="🟢 qoder2api-hub 已就绪"
           _conclusion="已就绪 · 官方模型 ${_mn} 个"
           [ "${_accs:-0}" -gt 0 ] && _conclusion="${_conclusion} · 账号 ${_accs}（看板 OAuth 可添加）"
           [ "${_accs:-0}" -eq 0 ] && _conclusion="${_conclusion} · 账号池空（看板「+ 添加账号 (OAuth)」入池）"
           qoder_notify "$_title" "$_conclusion" "$QODER_VERSION" "$QODER_UPDATE" "" "" 1
+          # 发送成功才落版本标记：失败时下轮仍报更新，不丢「从 X 更新到 Y」。
+          if [ "${QODER_NOTIFY_OK:-0}" = "1" ] && [ -n "$QODER_IMG_DIGEST" ]; then
+            printf '%s\n' "$QODER_IMG_DIGEST" > "$QODER_VER_FILE"
+          fi
 
       - name: Run quota-board (TG 额度看板 + Mini App)
         # 2026-10-22 步骤重排后位于 Run OpenClaw 之后：本步失败不得级联跳过
@@ -4293,6 +4303,7 @@ jobs:
 
           Z2A_OK=0
           Z2A_REASON=""
+          Z2A_STARTED=0
           Z2A_SELFTEST_MODEL=""
           Z2A_SELFTEST_OUT=""
           Z2A_PLAN_BAD=0
@@ -4561,6 +4572,9 @@ jobs:
                 if [ "$Z2A_UP" != "1" ]; then
                   Z2A_REASON="服务未在 60 秒内监听 ${Z2A_PORT}（见日志尾部）"
                 else
+                  # 本轮确实执行了 ensure/start（不是复用旧实例）→ 属于「启动」，
+                  # 就绪通知必须发，即使上一轮留下过 tag 文件。
+                  Z2A_STARTED=1
                   # 凭据自动跟随：credentials.json 每轮随 zcode.tar.gz 还原（比快照里的
                   # 账号池新），解密出的 JWT / bigmodel API Key 对齐进账号池；
                   # 脚本幂等（一致即 SKIP），失败不阻断，沿用快照凭据继续服务
@@ -4661,7 +4675,7 @@ jobs:
             send_tg "$_m" alert || echo "::warning::TG 通知发送失败（不影响任务）"
           else
             echo "✅ [zcode2api] ${Z2A_PORT} 已就绪（${Z2A_REASON}）"
-            if [ "$Z2A_RELAUNCH" = "1" ]; then
+            if [ "$Z2A_RELAUNCH" = "1" ] && [ "$Z2A_STARTED" != "1" ]; then
               echo "ℹ️ [zcode2api] 接力轮（上一 run ${Z2A_PREV_TAG} 已启动），跳过重复的就绪通知"
             else
               # 版式对齐 wb_notify 的就绪态分支：结论 → 接口/鉴权/模型 → 代码来源。
