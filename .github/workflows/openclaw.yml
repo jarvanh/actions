@@ -3626,16 +3626,16 @@ jobs:
                   _last=0
                   [ "$_i" -eq "$_total" ] && _last=1
                   _line="$(jq -c --arg uid "$_uid" 'select(.uid == $uid)' "$CHECKIN_JSONL" 2>/dev/null | tail -n 1 || true)"
-                  _nick=$(jq -r '(.nickname // "-")' <<<"$_line")
-                  _cr=$(jq -r '.credits' <<<"$_line")
-                  _err=$(jq -r '(.err // "")' <<<"$_line")
-                  _skipr=$(jq -r '(.skip_reason // "")' <<<"$_line")
-                  _planned=$(jq -r '(.planned_at // "")' <<<"$_line")
+                  _nick=$(jq -r '(.nickname // "-")' <<<"$_line" 2>/dev/null || echo "-")
+                  _cr=$(jq -r '.credits' <<<"$_line" 2>/dev/null || echo "-")
+                  _err=$(jq -r '(.err // "")' <<<"$_line" 2>/dev/null || true)
+                  _skipr=$(jq -r '(.skip_reason // "")' <<<"$_line" 2>/dev/null || true)
+                  _planned=$(jq -r '(.planned_at // "")' <<<"$_line" 2>/dev/null || true)
                   if [ -n "$_err" ]; then
                     _st="⚠️ $_err"
-                  elif [ "$(jq -r '.claimed' <<<"$_line")" = "true" ]; then
+                  elif [ "$(jq -r '.claimed' <<<"$_line" 2>/dev/null || true)" = "true" ]; then
                     _st="签到 ✓ 本轮领取"
-                  elif [ "$(jq -r '.checked_in' <<<"$_line")" = "true" ]; then
+                  elif [ "$(jq -r '.checked_in' <<<"$_line" 2>/dev/null || true)" = "true" ]; then
                     _st="今日已签"
                   elif [ -n "$_skipr" ] && [ -n "$_planned" ]; then
                     # 排程/冷却中的账号：显示安排的签到时间（主人 09-25 定）
