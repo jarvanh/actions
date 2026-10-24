@@ -4486,6 +4486,30 @@ jobs:
             Z2A_POOL_TEXT="$(printf '%s' "$rows" | sed '/^$/d')"
           }
 
+          # 风控停用检测（2026-10-24 主人要求：账号风控要像模型冷却一样主动通知）：
+          # 上游 503「无可用账号」文案把三种原因混在一句话里，其中「风控封禁停用」
+          # （disabled + last_error 命中风控特征 3012/unusual activity）额度满格、
+          # 不会自动恢复、必须人工到 z.ai 后台解封 —— 不能再套「额度耗尽 · 无需
+          # 人工介入」的口径。只认 status=disabled 且 last_error 命中风控特征的账号。
+          # 状态留痕落 /dropbox（跨 runner 重置存活）：报过风控 → 写入；后续任一轮
+          # admin API 可达、无风控停用账号且自检通过 → 补发「风控解除」并清痕。
+          Z2A_RISK_STATE_FILE="/dropbox/self-hosted/zcode2api/state/risk-ban.state"
+          Z2A_RISK_BAN_COUNT=0
+          Z2A_RISK_BAN_LIST=""
+          Z2A_RISK_SEEN_OK=0
+          z2a_detect_risk_ban() {
+            local ak json names
+            ak="$(z2a_admin_key)"
+            [ -n "$ak" ] || return 0
+            json="$(curl -sS --max-time 10 -H "Authorization: Bearer ${ak}" \
+              "http://127.0.0.1:${Z2A_PORT}/admin/api/accounts" 2>/dev/null)" || return 0
+            printf '%s' "$json" | jq -e '.accounts' >/dev/null 2>&1 || return 0
+            Z2A_RISK_SEEN_OK=1
+            names="$(printf '%s' "$json" | jq -r '[.accounts[] | select(.status == "disabled") | select((.last_error // "") | test("风控|3012|unusual activity")) | .name] | .[]' 2>/dev/null || true)"
+            Z2A_RISK_BAN_COUNT="$(printf '%s' "$names" | grep -c . || true)"
+            Z2A_RISK_BAN_LIST="$(printf '%s' "$names" | paste -sd'、' -)"
+          }
+
           z2a_ok_reason() {
             if [ "$Z2A_PLAN_BAD" = "1" ]; then
               echo "已就绪（Plan 通道降级）· glm-5.3-flash 自检 3 轮未过，bigmodel Key 通道可用（model=${Z2A_SELFTEST_MODEL:-未知}）"
@@ -4610,6 +4634,14 @@ jobs:
 
           # 通知前采集账号池（服务已监听才有数据；失败不阻断，通知里少一节）
           z2a_alive && z2a_collect_pool
+          z2a_detect_risk_ban
+          # 503 no_available_account + 池内存在风控停用账号 → 真实原因是风控封禁，
+          # 重新分诊为 risk_ban（区别于真额度耗尽：后者才适用「无需人工介入」）
+          if [ "$Z2A_OK" != "1" ] && [ "$Z2A_RISK_BAN_COUNT" -gt 0 ]; then
+            case "$Z2A_FAIL_CLASS" in
+              quota|unavailable) Z2A_FAIL_CLASS="risk_ban" ;;
+            esac
+          fi
 
           # 通知口径：与 workbuddy-gateway 一致，成功也推「已就绪」。
           # 接力轮每轮都会跑本步骤，为免逐轮刷屏，用本步骤自己的标记文件区分：
@@ -4634,6 +4666,14 @@ jobs:
             # 只是无额度可用 —— 用黄色「已就绪（额度耗尽）」，不用红色「启动失败」：
             # 红色会让人去查进程/端口，实际该做的是等额度重置或换账号，方向完全不同。
             case "$Z2A_FAIL_CLASS" in
+              # risk_ban = 账号被 z.ai 风控封禁自动停用（3012/unusual activity）：
+              # 额度满格、不自动恢复、必须人工解封后启用 —— 红色点名 + 持续每轮
+              # 上报直至解除（2026-10-24 主人要求：风控要像模型冷却一样通知）
+              risk_ban)
+                tg_add_title _m "🔴 zcode2api 账号池风控停用 · 需人工解封"
+                tg_add_kv _m "结论" "z.ai 风控封禁（3012/unusual activity）已停用 ${Z2A_RISK_BAN_COUNT} 个账号：${Z2A_RISK_BAN_LIST}；账号额度满格，并非额度耗尽"
+                tg_add_kv _m "说明" "不会自动恢复：需到 z.ai 后台确认解封后启用（解封后可让我调 admin API 启用并实测）；解除前 GLM-5.3 持续 503"
+                ;;
               # unavailable = 网关 503 no_available_account / 请求级死线：账号池全冷却
               # 或额度耗尽，服务本体在监听且能回 /v1/models —— 与 quota 同为黄色降级，
               # 不能掉进红色「启动失败」（2026-09-30 误报实例：额度耗尽报成了启动失败）
@@ -4672,9 +4712,36 @@ jobs:
               tg_add_pre _m "$Z2A_TAIL"
             fi
             tg_add_footer _m
-            send_tg "$_m" alert || echo "::warning::TG 通知发送失败（不影响任务）"
+            if send_tg "$_m" alert; then
+              # 风控停用留痕：发送成功才写（失败下轮重试，对齐就绪标记口径）
+              if [ "$Z2A_FAIL_CLASS" = "risk_ban" ]; then
+                mkdir -p "$(dirname "$Z2A_RISK_STATE_FILE")" 2>/dev/null || true
+                printf 'banned: %s\n' "${Z2A_RISK_BAN_LIST}" > "$Z2A_RISK_STATE_FILE" 2>/dev/null || true
+              fi
+            else
+              echo "::warning::TG 通知发送失败（不影响任务）"
+            fi
           else
             echo "✅ [zcode2api] ${Z2A_PORT} 已就绪（${Z2A_REASON}）"
+            # 风控解除补报：上一轮报过风控停用（留痕在）且本轮 admin API 可达、
+            # 无风控停用账号、自检通过 → 补发恢复通知并清痕。独立于接力静默：
+            # 恢复是状态翻转事件，必须每轮都有机会补报。
+            if [ -s "$Z2A_RISK_STATE_FILE" ] && [ "$Z2A_RISK_SEEN_OK" = "1" ] && [ "$Z2A_RISK_BAN_COUNT" -eq 0 ]; then
+              _r=""
+              tg_add_title _r "🟢 zcode2api 风控解除 · 账号池恢复"
+              tg_add_kv _r "结论" "此前风控停用的账号已恢复可用，自检通过（model=${Z2A_SELFTEST_MODEL:-未知}）"
+              tg_add_path _r "端口" "$Z2A_PORT"
+              if [ -n "$Z2A_POOL_TEXT" ]; then
+                tg_add_section _r "$Z2A_POOL_TITLE"
+                tg_add_block _r "$Z2A_POOL_TEXT"
+              fi
+              tg_add_footer _r
+              if send_tg "$_r" alert; then
+                rm -f "$Z2A_RISK_STATE_FILE" 2>/dev/null || true
+              else
+                echo "::warning::TG 通知发送失败（不影响任务）"
+              fi
+            fi
             if [ "$Z2A_RELAUNCH" = "1" ] && [ "$Z2A_STARTED" != "1" ]; then
               echo "ℹ️ [zcode2api] 接力轮（上一 run ${Z2A_PREV_TAG} 已启动），跳过重复的就绪通知"
             else
@@ -4699,6 +4766,10 @@ jobs:
                 tg_add_block _m "$Z2A_POOL_TEXT"
                 _m+=$'\n'
               fi
+              # 池内仍有风控停用账号时，就绪卡也必须点名（不能只靠账号池明细一行小字）
+              if [ "$Z2A_RISK_BAN_COUNT" -gt 0 ]; then
+                tg_add_kv _m "⚠️ 风控停用" "${Z2A_RISK_BAN_COUNT} 个：${Z2A_RISK_BAN_LIST} · 需 z.ai 后台解封后启用"
+              fi
               tg_add_path _m "代码" "$Z2A_REPO"
               # 用量 + 流水（看板独有，2026-10-05 补进 zcode 通知，与 wb/trae 同口径）：
               # 只渲染 zcode 自己的，调 board.py CLI 与看板共用渲染代码与数据源。
@@ -4711,6 +4782,11 @@ jobs:
               tg_add_footer _m
               if send_tg "$_m" alert; then
                 printf '%s\n' "${GITHUB_RUN_ID:-manual}" > "$Z2A_RUN_TAG_FILE"
+                if [ "$Z2A_RISK_BAN_COUNT" -gt 0 ]; then
+                  # 就绪卡已点名风控停用 → 同样留痕，供后续轮次补报解除
+                  mkdir -p "$(dirname "$Z2A_RISK_STATE_FILE")" 2>/dev/null || true
+                  printf 'banned: %s\n' "${Z2A_RISK_BAN_LIST}" > "$Z2A_RISK_STATE_FILE" 2>/dev/null || true
+                fi
               else
                 echo "::warning::TG 通知发送失败（不影响任务）"
               fi
