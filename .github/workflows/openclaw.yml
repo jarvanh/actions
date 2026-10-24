@@ -2462,6 +2462,9 @@ jobs:
           #   免费模型列**具体模型名**（取自上游模型目录接口，见采集处注释），
           #   全量展示不折叠 —— 只给「免费模型 N」读者不知道是哪个，等于没说。
           wb_notify() {
+            # 发送成功才置 1；调用方据此决定是否写「本轮已启动」标记，
+            # 避免发送失败后下一轮被标记挡住、通知永久丢失。
+            WB_NOTIFY_OK=0
             if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
               local _msg=""
               tg_add_title _msg "$1"
@@ -2621,7 +2624,11 @@ jobs:
                 tg_add_pre _msg "$(printf '%s' "$6" | tail -c 1200)"
               fi
               tg_add_footer _msg
-              send_tg "$_msg" alert || echo "::warning::TG 通知发送失败（不影响任务）"
+              if send_tg "$_msg" alert; then
+                WB_NOTIFY_OK=1
+              else
+                echo "::warning::TG 通知发送失败（不影响任务）"
+              fi
               # 倍率段独立第二条（常驻：只要取到倍率就发）：数据全量保留，不与主条挤在
               # 同一条里超限丢弃。它自带标题 + 收尾区，是可独立成篇的一条完整通知。
               # 两条之间 sleep 1s：连续 sendMessage 撞 429 会让后一条直接丢失。
@@ -3482,19 +3489,20 @@ jobs:
             WB_PREV_TAG="$(head -n 1 "$WB_RUN_TAG_FILE" 2>/dev/null || true)"
           fi
           if [ "$WB_READY" = "1" ]; then
-            printf '%s\n' "${GITHUB_RUN_ID:-manual}" > "$WB_RUN_TAG_FILE"
             if [ -n "$WB_ACCOUNTS" ]; then
               if [ "$WB_RELAUNCH" = "1" ]; then
                 # 接力轮安静续跑：不重复推版式完全相同的「已就绪」，让唯一那条待在本轮顶部。
                 echo "ℹ️ [workbuddy-gateway] 接力轮（上一 run ${WB_PREV_TAG} 已启动），跳过重复的就绪通知"
               else
                 wb_notify "🟢 workbuddy-gateway 已就绪" "$WB_ACCOUNTS" "$WB_VER" "$WB_UPDATE" "$WB_REASON" "" 1
+                [ "$WB_NOTIFY_OK" = "1" ] && printf '%s\n' "${GITHUB_RUN_ID:-manual}" > "$WB_RUN_TAG_FILE"
               fi
             elif [ "$WB_RELAUNCH" != "1" ]; then
               # 网关自己起来了、但账号池为空：多半是数据目录里还没有 workbuddy*.json
               # （二维码登录只能人工做），如实标注为可用性问题，不假装就绪。
               wb_notify "⚠️ workbuddy-gateway 已启动 · 无可用账号" \
                 "账号池为空 · 需人工扫码登录" "$WB_VER" "$WB_UPDATE" "$WB_REASON" "" 1
+              [ "$WB_NOTIFY_OK" = "1" ] && printf '%s\n' "${GITHUB_RUN_ID:-manual}" > "$WB_RUN_TAG_FILE"
             fi
           else
             WB_TAIL="$(tail -c 1200 "$WB_LOG" 2>/dev/null || true)"
@@ -4091,10 +4099,10 @@ jobs:
               [ -n "$4" ] && tg_add_kv _msg "更新" "$4"
               if [ "${7:-0}" = "1" ]; then
                 tg_add_path _msg "接口" "http://127.0.0.1:${QODER_PORT}/v1"
-                # 看板入口 + 面板密码（tailscale serve 8084）：ts.env 由 Tailscale 步骤
-                # 在本 step 之前写出；缺失时两行整体跳过（tg_add_path 不留空行）。
+                # 看板入口 + 面板密码（与看板 admin_entries 统一走 https 8447）：
+                # ts.env 由 Tailscale 步骤在本 step 之前写出；缺失时两行整体跳过。
                 if [ -n "${TS_FQDN:-}" ]; then
-                  tg_add_path _msg "看板" "http://${TS_FQDN}:8084/"
+                  tg_add_path _msg "看板" "https://${TS_FQDN}:8447/"
                   local _qp="$(cat "$QODER_DATA/.panel-password" 2>/dev/null || true)"
                   tg_add_path _msg "看板密码" "${_qp:-未取到}"
                 fi
@@ -4653,7 +4661,6 @@ jobs:
             send_tg "$_m" alert || echo "::warning::TG 通知发送失败（不影响任务）"
           else
             echo "✅ [zcode2api] ${Z2A_PORT} 已就绪（${Z2A_REASON}）"
-            printf '%s\n' "${GITHUB_RUN_ID:-manual}" > "$Z2A_RUN_TAG_FILE"
             if [ "$Z2A_RELAUNCH" = "1" ]; then
               echo "ℹ️ [zcode2api] 接力轮（上一 run ${Z2A_PREV_TAG} 已启动），跳过重复的就绪通知"
             else
@@ -4688,7 +4695,11 @@ jobs:
               # zcode2api 的「已就绪」通知自 2026-10-06 (a873e07) 起从未发出过。
               [ -n "$_z2a_ul_block" ] && tg_append _m "$_z2a_ul_block"
               tg_add_footer _m
-              send_tg "$_m" alert || echo "::warning::TG 通知发送失败（不影响任务）"
+              if send_tg "$_m" alert; then
+                printf '%s\n' "${GITHUB_RUN_ID:-manual}" > "$Z2A_RUN_TAG_FILE"
+              else
+                echo "::warning::TG 通知发送失败（不影响任务）"
+              fi
             fi
           fi
 
@@ -4956,7 +4967,7 @@ jobs:
             # 数据目录是「这条通知说的是哪台机/哪份数据」的定位信息（主人 10-06 定的
             # 头部定位口径）；代码真源已迁 GitHub（2026-10-12，Dropbox 只存数据）。
             if [ -n "$AC_ACCOUNTS" ] && [ "$AC_ACCOUNTS" != "?" ]; then
-              tg_add_section _m "💳 账号池 · 1"
+              tg_add_section _m "💳 账号池 · ${AC_ACCOUNTS}"
               _ac_rows="$(tree_conn 1)$(tg_entry "账号数 ${AC_ACCOUNTS}" "负载均衡 · 401/406 冷却回退 · 快过期积分优先")"$'\n'
               # 积分包信息（主人 2026-10-12 要求：对齐 workbuddy 的「积分有效期」口径）
               [ -n "${AC_SCORE:-}" ] && _ac_rows+="$(tree_sub 1)$(escape_html "$AC_SCORE")"$'\n'
