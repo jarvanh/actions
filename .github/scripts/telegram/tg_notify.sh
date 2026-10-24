@@ -362,6 +362,7 @@ tg_add_pre() {
 # API 的路径不读它们（固定主 bot）。
 tg_route() {
   local tier="${1:-}"
+  _TG_TIER="$tier"
   _TG_TOKEN="${TELEGRAM_BOT_TOKEN}"
   _TG_CHAT="${TELEGRAM_CHAT_ID}"
   if [ "$tier" = "alert" ]; then
@@ -372,8 +373,19 @@ tg_route() {
 
 _tg_send_once() {
   local text="$1" parse_mode="$2"
-  local token="${_TG_TOKEN:-$TELEGRAM_BOT_TOKEN}"
-  local chat="${_TG_CHAT:-$TELEGRAM_CHAT_ID}"
+  local token chat
+  if [ "${_TG_TIER:-}" = "alert" ]; then
+    # alert 档明确不回落主 bot：凭据缺失就失败留痕，避免告警静默发到错误会话。
+    token="$_TG_TOKEN"
+    chat="$_TG_CHAT"
+    if [ -z "$token" ] || [ -z "$chat" ]; then
+      echo "❌ alert 档凭据缺失（TELEGRAM_BOT_TOKEN_ALERT / TELEGRAM_CHAT_ID_ALERT），不回落主 bot" >&2
+      return 1
+    fi
+  else
+    token="${_TG_TOKEN:-$TELEGRAM_BOT_TOKEN}"
+    chat="${_TG_CHAT:-$TELEGRAM_CHAT_ID}"
+  fi
   local resp retry_after attempt max_attempts=5
   for attempt in $(seq 1 "$max_attempts"); do
     if [ -n "$parse_mode" ]; then
@@ -417,40 +429,81 @@ send_tg() {
   local text="$1" tier="${2:-}"
   [ -z "$text" ] && return 0
   tg_route "$tier"
-  _tg_send_once "$text" "HTML"
+  # Telegram 单条上限 4096 UTF-16 码元；超过就自动分片，绝不整条丢。
+  local _len
+  _len=$(printf '%s' "$text" | python3 -c 'import sys; print(len(sys.stdin.read().encode("utf-16-le"))//2)' 2>/dev/null || echo 0)
+  if [ "${_len:-0}" -le 3900 ]; then
+    _tg_send_once "$text" "HTML"
+  else
+    send_tg_chunked "$text" "$tier"
+  fi
 }
 
-# 按 4000 字符分片，尽量在换行处断开，避免切断 UTF-8 多字节字符
+# 按 3800 UTF-16 码元分片，断在换行处，并在分片边界闭合/重开 HTML 标签。
+# 旧实现按 4000 Python 字符切，既可能超 UTF-16 上限，也可能把 <pre>/<code> 拆断。
 send_tg_chunked() {
   local text="$1" tier="${2:-}"
   [ -z "$text" ] && return 0
-  local delay="${TG_CHUNK_DELAY:-2}"
-  printf '%s' "$text" | python3 -c '
-import sys
-data = sys.stdin.read()
-chunk_size = 4000
-chunks = []
-i = 0
-n = len(data)
-while i < n:
-    end = min(i + chunk_size, n)
-    if end < n:
-        last_nl = data.rfind("\n", i, end)
-        if last_nl > i + chunk_size // 2:
-            end = last_nl + 1
-    chunks.append(data[i:end])
-    i = end
-try:
-    for idx, c in enumerate(chunks, 1):
-        sys.stderr.write(f"--- 发送分片 {idx}/{len(chunks)} ({len(c)} 字符) ---\n")
-        sys.stdout.write(c + "\x00")
-        sys.stdout.flush()
-except BrokenPipeError:
-    pass
-' | while IFS= read -r -d "" chunk; do
-    send_tg "$chunk" "$tier" || true
+  tg_route "$tier"
+  local delay="${TG_CHUNK_DELAY:-2}" rc=0
+  while IFS= read -r -d "" chunk; do
+    _tg_send_once "$chunk" "HTML" || rc=1
     sleep "$delay"
-  done
+  done < <(printf '%s' "$text" | python3 -c '
+import sys, re
+data = sys.stdin.read()
+LIMIT = 3800
+TAG = re.compile(r"<(/?)([A-Za-z][A-Za-z0-9]*)([^>]*)>")
+
+def u16(s):
+    return len(s.encode("utf-16-le")) // 2
+
+def tname(tag):
+    m = TAG.match(tag)
+    return m.group(2).lower() if m else ""
+
+def split_html(data):
+    out = []
+    pos = 0
+    stack = []
+    n = len(data)
+    while pos < n:
+        prefix = "".join(stack)
+        budget = max(200, LIMIT - u16(prefix) - 200)
+        end = min(n, pos + budget)
+        nl = data.rfind("\n", pos, end)
+        if nl > pos + 50:
+            end = nl + 1
+        chunk = data[pos:end]
+        lt, gt = chunk.rfind("<"), chunk.rfind(">")
+        if lt > gt:
+            end = pos + lt
+            if end <= pos:
+                end = min(n, pos + 1)
+            chunk = data[pos:end]
+        stack2 = list(stack)
+        for m in TAG.finditer(chunk):
+            closing, name, _ = m.group(1), m.group(2).lower(), m.group(3)
+            full = m.group(0)
+            if closing:
+                for j in range(len(stack2) - 1, -1, -1):
+                    if tname(stack2[j]) == name:
+                        del stack2[j:]
+                        break
+            elif name not in ("br", "img", "hr", "meta", "input"):
+                stack2.append(full)
+        closing = "".join("</%s>" % tname(t) for t in reversed(stack2))
+        piece = prefix + chunk + closing
+        if piece.strip():
+            out.append(piece)
+        stack = stack2
+        pos = end
+    return out
+
+for c in split_html(data):
+    sys.stdout.write(c + "\0")
+')
+  return "$rc"
 }
 
 # 凭据/密码类消息（如 OpenList 改密回执）不需要单独的发送函数：
