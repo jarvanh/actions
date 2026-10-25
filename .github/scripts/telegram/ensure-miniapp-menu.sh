@@ -36,7 +36,7 @@ if [ -z "$SB_TOKEN" ] || [ -z "$QB_TOKEN" ]; then
 fi
 
 API="https://api.telegram.org/bot"
-QB_URL="${QB_URL_BASE}/p/${QB_TOKEN}"
+QB_URL="${QB_URL_BASE}/p/${QB_TOKEN}/"
 
 # ⚠️ setChatMenuButton 不得传 "chat_id": null（实测 400 invalid chat_id）；
 # 不传 chat_id 才是「默认全局菜单」语义（实测 ok:true）。
