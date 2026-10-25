@@ -433,6 +433,24 @@ def build_subscription_bundle(results: list, policy: dict):
 # ---------------------------------------------------------------------------
 # 达标订阅 YAML 构建
 # ---------------------------------------------------------------------------
+def normalize_proxy_scalars(proxy: dict) -> dict:
+    """把「必须是数字」的字段统一成 int（port / alterId）。
+
+    背景（2026-10-25）：上游订阅常把端口写成带引号的字符串（`port: '443'`），
+    原样透传会让严格类型的客户端（Egern 要求 port 为 integer）整条节点 decode 失败，
+    而报错位置会回退到该节点第一个键（表现为「位于第 2 行第 3 列」这类假 YAML 报错）。
+    导出前统一转 int，解析失败一律保持原值不抛异常。
+    """
+    out = dict(proxy)
+    for key in ('port', 'alterId'):
+        value = out.get(key)
+        if isinstance(value, str):
+            text = value.strip()
+            if text.isdigit():
+                out[key] = int(text)
+    return out
+
+
 def build_mihomo_yaml_text(results: list, speedtest_mode: str, min_megabit: int = DEFAULT_MIN_MEGABIT):
     proxies = []
     for item in results:
@@ -453,7 +471,7 @@ def build_mihomo_yaml_text(results: list, speedtest_mode: str, min_megabit: int 
         if prefix:
             name = f"{prefix} | {name}"
         proxy['name'] = name
-        proxies.append(proxy)
+        proxies.append(normalize_proxy_scalars(proxy))
     if not proxies:
         return ''
     return yaml.safe_dump({'proxies': proxies}, allow_unicode=True, sort_keys=False)
