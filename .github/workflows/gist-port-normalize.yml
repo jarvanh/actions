@@ -1,0 +1,27 @@
+name: gist-port-normalize
+
+# 为什么需要它（2026-10-25）：subs-check 容器把 all.yaml 的端口序列化成 `port: "443"`，
+# Egern 要求 port 为 integer，整条节点 decode 失败（报「位于第 2 行第 7 列」）。
+# 容器自己的上传改不了，就在它上传之后做一次定点修正：只把带引号的数字端口改成整数，
+# 没有可改内容就不写 Gist（幂等，不制造无意义提交）。
+
+on:
+  schedule:
+    - cron: "7,37 * * * *"
+  workflow_dispatch:
+
+concurrency: gist-port-normalize
+
+jobs:
+  normalize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: 修正 Gist 中的字符串端口
+        env:
+          GH_TOKEN: ${{ secrets.PAT }}
+          GIST_ID: ${{ vars.SUBS_CHECK_GIST_ID }}
+          FILENAME: all.yaml
+        run: |
+          python3 -m pip install --quiet pyyaml
+          python3 .github/scripts/gist/normalize_ports.py
