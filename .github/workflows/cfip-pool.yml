@@ -38,9 +38,6 @@ jobs:
         continue-on-error: true
         run: |
           set -e
-          awk -F: '{print $1}' out/cfip-all.txt | sort -u | head -200 > candidates.txt
-          wc -l candidates.txt
-          scp -o BatchMode=yes -o StrictHostKeyChecking=no -q candidates.txt root@100.90.2.41:/tmp/candidates.txt
           ssh -o BatchMode=yes -o StrictHostKeyChecking=no root@100.90.2.41 '
             set -e
             cd /tmp
@@ -49,13 +46,16 @@ jobs:
               curl -sSL --max-time 180 -o cfst.tar.gz \
                 https://ghfast.top/https://github.com/XIU2/CloudflareSpeedTest/releases/latest/download/cfst_linux_amd64.tar.gz
               tar -xzf cfst.tar.gz
-              cp cfst_linux_amd64/cfst ./cfst
-              chmod +x cfst
             fi
-            ./cfst -f candidates.txt -o out.csv -p 443 -t 20 -n 20 \
+            cd /tmp/cfst_linux_amd64
+            chmod +x cfst
+            # 不给 -f：用 CFST 自带的 ip.txt（Cloudflare 网段）自己生成并测速，
+            # 这样拿到的才是「自扫 IP + 真实速度」，与 881288 的 VPS IP 区分开
+            ./cfst -o /tmp/out.csv -p 443 -t 20 -n 20 \
               -url "https://speed.cloudflare.com/__down?bytes=10000000" || true
           '
           scp -o BatchMode=yes -o StrictHostKeyChecking=no -q root@100.90.2.41:/tmp/out.csv cfst.csv
+          echo "CFST_LABEL=cfst-aliyun" >> "$GITHUB_ENV"
           head -3 cfst.csv
 
       - name: 本机自扫（autoclaw 不可用时的兜底）
@@ -67,9 +67,10 @@ jobs:
           tar -xzf cfst.tar.gz
           BIN=$(find . -maxdepth 2 -type f -name cfst | head -1)
           chmod +x "$BIN"
-          awk -F: '{print $1}' out/cfip-all.txt | sort -u | head -200 > candidates.txt
-          "$BIN" -f candidates.txt -o cfst.csv -p 443 -t 20 -n 20 \
-            -url 'https://speed.cloudflare.com/__down?bytes=10000000' || true
+          # 同样用 CFST 自带的 ip.txt（CF 网段）自扫，得到的是真实 CF IP + 速度
+          (cd "$(dirname "$BIN")" && ./cfst -o "$OLDPWD/cfst.csv" -p 443 -t 20 -n 20 \
+            -url 'https://speed.cloudflare.com/__down?bytes=10000000') || true
+          echo "CFST_LABEL=cfst-azure" >> "$GITHUB_ENV"
           if [ -f cfst.csv ]; then head -3 cfst.csv; else echo "cfst 未产出结果，跳过自扫合并"; fi
 
       - name: 合并并上传 Gist
@@ -78,7 +79,7 @@ jobs:
           GIST_ID: ${{ vars.CFIP_GIST_ID }}
         run: |
           set -e
-          python3 .github/scripts/cfip/build_pool.py --out out --cfst cfst.csv
+          python3 .github/scripts/cfip/build_pool.py --out out --cfst cfst.csv --cfst-label "${CFST_LABEL:-cfst-local}"
           test "$(wc -l < out/cfip-all.txt)" -ge 20 || { echo "::error::池子条目过少"; exit 1; }
           for f in out/cfip-*.txt; do
             name=$(basename "$f")

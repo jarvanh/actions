@@ -87,6 +87,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--out', default='out')
     ap.add_argument('--cfst', default='')
+    ap.add_argument('--cfst-label', default='cfst')
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
 
@@ -132,8 +133,10 @@ def main():
             f.write('\n'.join(lines[:MAX_PER_FILE]) + '\n')
 
     # 自扫文件
+    label = (args.cfst_label or 'cfst').strip() or 'cfst'
     with open(os.path.join(args.out, 'cfip-cfst.txt'), 'w', encoding='utf-8') as f:
-        lines = [f'{ip}:{DEFAULT_PORT}#cfst {speed:.2f}MB/s' if speed > 0 else f'{ip}:{DEFAULT_PORT}#cfst {latency:.0f}ms'
+        # 有速度的排前面（按速度降序），没速度的按延迟升序；标签标明在哪台机器测的
+        lines = [f'{ip}:{DEFAULT_PORT}#{label} {speed:.2f}MB/s' if speed > 0 else f'{ip}:{DEFAULT_PORT}#{label} {latency:.0f}ms'
                  for ip, speed, latency in cfst[:MAX_PER_FILE]]
         f.write('\n'.join(lines) + ('\n' if lines else ''))
 
