@@ -21,6 +21,26 @@ jobs:
       - name: 抓取并校验 IP 源
         run: python3 .github/scripts/cfip/build_pool.py --out out
 
+      # 为什么走 exit node（2026-10-26）：Azure runner 在弗吉尼亚，测出来的「速度」只代表
+      # 机房到 CF 的回源速度，跟实际使用地（国内）无关。autoclaw 是 tailnet 里已批准
+      # 的 exit node（tag:ci，AllowedIPs 含 0.0.0.0/0），把自扫流量从它出去更接近真实链路。
+      # 失败不影响主流程：拿不到 exit node 就退回本机直连自扫。
+      - name: 加入 Tailscale（可选，exit node = autoclaw）
+        id: ts
+        continue-on-error: true
+        uses: tailscale/github-action@306e68a486fd2350f2bfc3b19fcd143891a4a2d8 # v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
+          tags: tag:ci
+          args: --exit-node=100.90.2.41 --exit-node-allow-lan-access
+
+      - name: 确认出口 IP
+        if: ${{ steps.ts.outcome == 'success' }}
+        run: |
+          tailscale status | head -3 || true
+          echo "出口 IP: $(curl -sS -m 10 https://ipinfo.io/ip || echo 获取失败)"
+
       - name: 自扫（CloudflareSpeedTest）
         run: |
           set -e
@@ -38,6 +58,10 @@ jobs:
           "$BIN" -f candidates.txt -o cfst.csv -p 443 -t 20 -n 20 \
             -url 'https://speed.cloudflare.com/__down?bytes=10000000' || true
           if [ -f cfst.csv ]; then head -3 cfst.csv; else echo "cfst 未产出结果，跳过自扫合并"; fi
+
+      - name: 恢复直连（清 exit node）
+        if: always()
+        run: sudo tailscale set --exit-node= 2>/dev/null || true
 
       - name: 合并并上传 Gist
         env:
