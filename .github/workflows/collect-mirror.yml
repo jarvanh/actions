@@ -1,0 +1,43 @@
+name: collect-mirror
+
+# 为什么要有它（2026-10-26）：collect 的 clash.yaml 是完整配置 + flow 风格节点，
+# Egern 报「位于第 8 行第 6 列」但文件本身合法（libyaml 系解析器全部通过、端口已整数）。
+# 这里把它转成「只有 proxies、块状 YAML、端口整数」的镜像，供 Egern 直接引用；
+# 每 30 分钟跟随上游刷新一次，内容无变化不写 Gist。
+
+on:
+  schedule:
+    - cron: "11,41 * * * *"
+  workflow_dispatch:
+
+concurrency: collect-mirror
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 生成镜像
+        run: |
+          python3 .github/scripts/collect/mirror.py --out out
+          python3 .github/scripts/collect/all_mirror.py --out out
+
+      - name: 上传 Gist
+        env:
+          GH_TOKEN: ${{ secrets.PAT }}
+          GIST_ID: ${{ vars.COLLECT_GIST_ID }}
+        run: |
+          set -e
+          for f in out/collect.yaml out/all.yaml; do
+            name=$(basename "$f")
+            [ -s "$f" ] || { echo "::error::$name 为空"; exit 1; }
+            cur=$(gh api "gists/$GIST_ID" --jq ".files[\"$name\"].content" 2>/dev/null || true)
+            if [ "$cur" = "$(cat "$f")" ]; then
+              echo "未变化 $name"
+              continue
+            fi
+            jq -n --arg n "$name" --arg c "$(cat "$f")" '{files:{($n):{content:$c}}}' > payload.json
+            gh api -X PATCH "gists/$GIST_ID" --input payload.json >/dev/null
+            echo "已更新 $name"
+          done
