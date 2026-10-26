@@ -4,16 +4,14 @@ name: cfip-pool
 # 混进列表，订阅侧拿到非 IP 行就整段解析失败（10-21 因此被禁用，可用节点随之变少）。
 # 这里每 6 小时重建一次优选 IP 池：镜像 881288 六地区 + 公共源 + 自扫（CloudflareSpeedTest），
 # 逐行校验后发布到 secret gist，供订阅侧直接引用。
+#
+# 自扫跑在哪（2026-10-26）：优先 SSH 到 tailnet 里的 autoclaw（阿里云北京），测出来是
+# 国内真实链路；SSH 不可用时退回 runner 本机直连（弗吉尼亚机房，只代表回源速度）。
 
 on:
   schedule:
     - cron: "23 */6 * * *"
   workflow_dispatch:
-    inputs:
-      use_exit_node:
-        description: '经 autoclaw exit node 自扫（DERP 中继下速度为 0，仅在直连可用时勾选）'
-        type: boolean
-        default: false
 
 concurrency: cfip-pool
 
@@ -26,48 +24,53 @@ jobs:
       - name: 抓取并校验 IP 源
         run: python3 .github/scripts/cfip/build_pool.py --out out
 
-      # 为什么走 exit node（2026-10-26）：Azure runner 在弗吉尼亚，测出来的「速度」只代表
-      # 机房到 CF 的回源速度，跟实际使用地（国内）无关。autoclaw 是 tailnet 里已批准
-      # 的 exit node（tag:ci，AllowedIPs 含 0.0.0.0/0），把自扫流量从它出去更接近真实链路。
-      # 失败不影响主流程：拿不到 exit node 就退回本机直连自扫。
-      - name: 加入 Tailscale（可选，exit node = autoclaw）
+      - name: 加入 Tailscale（用于 SSH 到 autoclaw）
         id: ts
-        if: ${{ inputs.use_exit_node }}
         continue-on-error: true
         uses: tailscale/github-action@306e68a486fd2350f2bfc3b19fcd143891a4a2d8 # v4
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
           tags: tag:ci
-          args: --exit-node=100.90.2.41 --exit-node-allow-lan-access
 
-      - name: 确认出口 IP
-        if: ${{ inputs.use_exit_node && steps.ts.outcome == 'success' }}
+      - name: 在 autoclaw 上自扫（国内真实链路）
+        if: ${{ steps.ts.outcome == 'success' }}
+        continue-on-error: true
         run: |
-          tailscale status | head -3 || true
-          echo "出口 IP: $(curl -sS -m 10 https://ipinfo.io/ip || echo 获取失败)"
+          set -e
+          awk -F: '{print $1}' out/cfip-all.txt | sort -u | head -200 > candidates.txt
+          wc -l candidates.txt
+          scp -o BatchMode=yes -o StrictHostKeyChecking=no -q candidates.txt root@100.90.2.41:/tmp/candidates.txt
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=no root@100.90.2.41 '
+            set -e
+            cd /tmp
+            if [ ! -x cfst ]; then
+              # autoclaw 在国内，GitHub 直连慢，走镜像；只用一次，后续复用
+              curl -sSL --max-time 180 -o cfst.tar.gz \
+                https://ghfast.top/https://github.com/XIU2/CloudflareSpeedTest/releases/latest/download/cfst_linux_amd64.tar.gz
+              tar -xzf cfst.tar.gz
+              cp cfst_linux_amd64/cfst ./cfst
+              chmod +x cfst
+            fi
+            ./cfst -f candidates.txt -o out.csv -p 443 -t 20 -n 20 \
+              -url "https://speed.cloudflare.com/__down?bytes=10000000" || true
+          '
+          scp -o BatchMode=yes -o StrictHostKeyChecking=no -q root@100.90.2.41:/tmp/out.csv cfst.csv
+          head -3 cfst.csv
 
-      - name: 自扫（CloudflareSpeedTest）
+      - name: 本机自扫（autoclaw 不可用时的兜底）
+        if: ${{ !hashFiles('cfst.csv') }}
         run: |
           set -e
           curl -sSL --retry 3 -o cfst.tar.gz \
             https://github.com/XIU2/CloudflareSpeedTest/releases/latest/download/cfst_linux_amd64.tar.gz
           tar -xzf cfst.tar.gz
-          # 压缩包里是 cfst_linux_amd64/cfst，不能直接 ./cfst
           BIN=$(find . -maxdepth 2 -type f -name cfst | head -1)
           chmod +x "$BIN"
-          # 自扫只用 IP（端口固定 443），限 200 个，控制运行时长
           awk -F: '{print $1}' out/cfip-all.txt | sort -u | head -200 > candidates.txt
-          wc -l candidates.txt
-          # 必须显式指定测速地址：CFST 默认值 https://cf.xiu2.xyz/url 在 Azure runner 上不可用，
-          # 不传的话下载测速会全部归零（2026-10-26 实测）；单次 10MB 足够且不会被 CF 拒。
           "$BIN" -f candidates.txt -o cfst.csv -p 443 -t 20 -n 20 \
             -url 'https://speed.cloudflare.com/__down?bytes=10000000' || true
           if [ -f cfst.csv ]; then head -3 cfst.csv; else echo "cfst 未产出结果，跳过自扫合并"; fi
-
-      - name: 恢复直连（清 exit node）
-        if: ${{ always() && inputs.use_exit_node }}
-        run: sudo tailscale set --exit-node= 2>/dev/null || true
 
       - name: 合并并上传 Gist
         env:
