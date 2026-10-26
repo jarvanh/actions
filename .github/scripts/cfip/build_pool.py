@@ -124,8 +124,12 @@ def main():
                 continue
             seen.add(ip)
             lines.append(f'{ip}:{port}#{note}' if note else f'{ip}:{port}')
+        if not lines:
+            # 源站临时失败时**不写空文件**，避免把 gist 里上一轮的好内容覆盖掉
+            print(f'{region}: 本轮无有效行，保留上一轮内容', file=sys.stderr)
+            continue
         with open(os.path.join(args.out, f'cfip-{region}.txt'), 'w', encoding='utf-8') as f:
-            f.write('\n'.join(lines[:MAX_PER_FILE]) + ('\n' if lines else ''))
+            f.write('\n'.join(lines[:MAX_PER_FILE]) + '\n')
 
     # 自扫文件
     with open(os.path.join(args.out, 'cfip-cfst.txt'), 'w', encoding='utf-8') as f:
