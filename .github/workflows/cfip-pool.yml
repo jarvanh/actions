@@ -51,7 +51,10 @@ jobs:
             chmod +x cfst
             # 不给 -f：用 CFST 自带的 ip.txt（Cloudflare 网段）自己生成并测速，
             # 这样拿到的才是「自扫 IP + 真实速度」，与 881288 的 VPS IP 区分开
-            ./cfst -o /tmp/out.csv -p 443 -t 20 -n 20 \
+            # -tl 500：延迟超过 500ms 的直接不测下载（随机 CF IP 大多不可用，
+            # 不设上限会每条卡满 10s 超时，一轮跑十几分钟）；
+            # -n 10：只对前 10 个测下载，够用且快。
+            ./cfst -o /tmp/out.csv -p 443 -t 20 -n 10 -tl 500 \
               -url "https://speed.cloudflare.com/__down?bytes=10000000" || true
           '
           scp -o BatchMode=yes -o StrictHostKeyChecking=no -q root@100.90.2.41:/tmp/out.csv cfst.csv
@@ -68,7 +71,7 @@ jobs:
           BIN=$(find . -maxdepth 2 -type f -name cfst | head -1)
           chmod +x "$BIN"
           # 同样用 CFST 自带的 ip.txt（CF 网段）自扫，得到的是真实 CF IP + 速度
-          (cd "$(dirname "$BIN")" && ./cfst -o "$OLDPWD/cfst.csv" -p 443 -t 20 -n 20 \
+          (cd "$(dirname "$BIN")" && ./cfst -o "$OLDPWD/cfst.csv" -p 443 -t 20 -n 10 -tl 500 \
             -url 'https://speed.cloudflare.com/__down?bytes=10000000') || true
           echo "CFST_LABEL=cfst-azure" >> "$GITHUB_ENV"
           if [ -f cfst.csv ]; then head -3 cfst.csv; else echo "cfst 未产出结果，跳过自扫合并"; fi
