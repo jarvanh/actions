@@ -33,7 +33,10 @@ jobs:
           # 自扫只用 IP（端口固定 443），限 200 个，控制运行时长
           awk -F: '{print $1}' out/cfip-all.txt | sort -u | head -200 > candidates.txt
           wc -l candidates.txt
-          "$BIN" -f candidates.txt -o cfst.csv -p 443 -t 20 -n 20 || true
+          # 必须显式指定测速地址：CFST 默认值 https://cf.xiu2.xyz/url 在 Azure runner 上不可用，
+          # 不传的话下载测速会全部归零（2026-10-26 实测）；单次 10MB 足够且不会被 CF 拒。
+          "$BIN" -f candidates.txt -o cfst.csv -p 443 -t 20 -n 20 \
+            -url 'https://speed.cloudflare.com/__down?bytes=10000000' || true
           if [ -f cfst.csv ]; then head -3 cfst.csv; else echo "cfst 未产出结果，跳过自扫合并"; fi
 
       - name: 合并并上传 Gist
