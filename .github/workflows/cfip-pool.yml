@@ -46,6 +46,7 @@ jobs:
           test "$(wc -l < out/cfip-all.txt)" -ge 20 || { echo "::error::池子条目过少"; exit 1; }
           for f in out/cfip-*.txt; do
             name=$(basename "$f")
+            if [ ! -s "$f" ]; then echo "空文件跳过 $name"; continue; fi
             cur=$(gh api "gists/$GIST_ID" --jq ".files[\"$name\"].content" 2>/dev/null || true)
             if [ "$cur" = "$(cat "$f")" ]; then
               echo "未变化 $name"
