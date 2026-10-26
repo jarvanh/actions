@@ -1,0 +1,43 @@
+name: cfip-pool
+
+# 为什么要有它（2026-10-26）：proxyip.881288.xyz 的 D1 免费额度超限时会把错误文本
+# 混进列表，订阅侧拿到非 IP 行就整段解析失败（10-21 因此被禁用，可用节点随之变少）。
+# 这里每 6 小时重建一次优选 IP 池：镜像 881288 六地区 + 公共源 + 自扫（CloudflareSpeedTest），
+# 逐行校验后发布到 secret gist，供订阅侧直接引用。
+
+on:
+  schedule:
+    - cron: "23 */6 * * *"
+  workflow_dispatch:
+
+concurrency: cfip-pool
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 抓取并校验 IP 源
+        run: python3 .github/scripts/cfip/build_pool.py --out out
+
+      - name: 自扫（CloudflareSpeedTest）
+        run: |
+          set -e
+          curl -sSL --retry 3 -o cfst.tar.gz \
+            https://github.com/XIU2/CloudflareSpeedTest/releases/latest/download/cfst_linux_amd64.tar.gz
+          tar -xzf cfst.tar.gz
+          # 自扫只用 IP（端口固定 443），限 200 个，控制运行时长
+          awk -F: '{print $1}' out/cfip-all.txt | sort -u | head -200 > candidates.txt
+          wc -l candidates.txt
+          ./cfst -f candidates.txt -o cfst.csv -p 443 -t 20 -n 20 || true
+          [ -f cfst.csv ] && head -3 cfst.csv || echo "cfst 未产出结果，跳过自扫合并"
+
+      - name: 合并并上传 Gist
+        env:
+          GH_TOKEN: *** secrets.PAT }}
+          GIST_ID: ${{ vars.CFIP_GIST_ID }}
+        run: |
+          python3 .github/scripts/cfip/build_pool.py --out out --cfst cfst.csv
+          test "$(wc -l < out/cfip-all.txt)" -ge 20 || { echo "::error::池子条目过少"; exit 1; }
+          python3 .github/scripts/cfip/upload_gist.py
