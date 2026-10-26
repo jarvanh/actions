@@ -3003,7 +3003,21 @@ jobs:
                   | group_by(.key)
                   | map({ key: .[0].key, value: (map(.value) | join(" · ")) })
                   | from_entries ) as $free
-                | .accounts[]
+                | .accounts
+                | to_entries
+                | sort_by([
+                    # 账号池排序（2026-10-26 主人定，与看板小程序 sortAccounts 同规则）：
+                    # 站点（国内站在前）→ D 账号 → 数字账号升序 → 其他保持原序。
+                    # 文件名形如 workbuddy-131.json / workbuddy-D.json。
+                    (if .value.edition == "intl" then 1 else 0 end),
+                    ( (.value.path | split("/") | last
+                       | ltrimstr("workbuddy-") | rtrimstr(".json")) as $n
+                      | if ($n | test("^[Dd]($|[^A-Za-z])")) then [0, 0]
+                        elif ($n | test("[0-9]{3,}")) then [1, (($n | capture("(?<x>[0-9]{3,})").x) | tonumber)]
+                        else [2, 0] end ),
+                    .key
+                  ])
+                | .[].value
                 | (.path | split("/") | last) as $_fn
                 # 模型级冷却的「最早恢复」时刻：遍历 modelStates 取所有 cooldownUntil 的
                 # 最小值（= 至少有一个模型先可用）。换算成东八区 HH:MM（jq 前固定 TZ=Asia/Shanghai
