@@ -113,10 +113,10 @@ jobs:
           set +e
           # $1 = prefetch 目录（父 shell 的变量不会自动进子 shell，必须显式传）
           P="$1"
-          # 与 workflow 内各步骤的固定 tag 对齐；漏改只丢增益（消费方自己仍会拉）。
+          # qoder 用浮动 latest（实际部署步骤会按最新 release tag 再拉一次）；其余固定 tag 与步骤对齐。
           for img in rongronggg9/rss-to-telegram:latest \
                      diegosouzapw/omniroute:3.8.51 \
-                     ghcr.io/shuishuipingan/qoder2api-hub:1.7.7; do
+                     ghcr.io/shuishuipingan/qoder2api-hub:latest; do
             docker image pull "$img" >"$P/pull-$(printf '%s' "$img" | tr '/:.' '___').log" 2>&1
           done
           PF_EOF
@@ -4077,8 +4077,8 @@ jobs:
       # _digest 逐字段对齐：salt 16B hex + 120000 轮），首启即免默认面板密码 admin 裸奔。
       # ⚠️ 运行时绝不传 --panel-password：该参数每次启动都会重置密码（set_panel_password
       # 无条件覆盖），会把预写凭据冲掉。容器 CMD 用镜像默认（--lan：强制鉴权 + 0.0.0.0）。
-      # 版本标记用浮动 tag 1.5 + 镜像 digest（1.5 恒指最新 1.5.x，2026-10-19 实测 digest
-      # 与 1.5.2 一致；digest 入账 .installed-version，浮动 tag 下仍可识别真实更新）。
+      # 版本标记：每轮动态解析上游最新 release tag（不用固定 pin），镜像 digest 入账
+      # .installed-version；tag 变化或 digest 变化都能识别真实更新。
       # continue-on-error：新网关故障不得级联跳过后续 quota-board / zcode2api / Run OpenClaw
       # （对齐 autoclaw/qingyan 的保护口径；可见性由 step 内 TG 告警保证）。
       - name: Run qoder2api-hub container (Qoder 双区 OpenAI 兼容网关)
@@ -4099,8 +4099,17 @@ jobs:
 
           QODER_DATA=/dropbox/self-hosted/qoder2api
           QODER_PORT="8790"
-          QODER_IMAGE="ghcr.io/shuishuipingan/qoder2api-hub:1.7.7"
-          QODER_TAG="1.7.7"
+          # 动态解析上游最新 release tag：禁止固定 pin，否则每 5 分钟 workflow
+          # 会把已部署的新版本重建回旧版（2026-10-26 实测 1.7.6 被 1.7.3 覆盖）。
+          QODER_TAG="$(gh api repos/shuishuipingan/qoder2api-hub/releases/latest --jq '.tag_name' 2>/dev/null | sed 's/^v//')"
+          if [ -z "$QODER_TAG" ]; then
+            QODER_TAG="$(git ls-remote --tags --refs https://github.com/shuishuipingan/qoder2api-hub.git 2>/dev/null | awk -F/ '{print $3}' | sed 's/^v//' | grep -E '^[0-9]+(\.[0-9]+)+$' | sort -V | tail -1)"
+          fi
+          if [ -z "$QODER_TAG" ]; then
+            echo "::error::无法解析 qoder2api-hub 最新 release tag"
+            exit 1
+          fi
+          QODER_IMAGE="ghcr.io/shuishuipingan/qoder2api-hub:${QODER_TAG}"
 
           # 通知版式对齐 trae_notify / wb_notify：标题 + 结论/版本/更新/接口/鉴权 +
           # 数据目录 + 原始输出。用法: qoder_notify <标题> <结论> <版本> <更新> <原因> <原始输出> <就绪态>
