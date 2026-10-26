@@ -55,7 +55,12 @@ def parse_lines(text, default_port=DEFAULT_PORT):
 
 
 def read_cfst(path):
-    """读 CloudflareSpeedTest 的 result.csv，按下载速度降序返回 [(ip, speed)]。"""
+    """读 CloudflareSpeedTest 的 result.csv，返回 [(ip, speed, latency)]。
+
+    排序：有下载速度的按速度降序在前，没速度的按延迟升序在后。
+    为什么允许 speed=0：GitHub runner 在 Azure，CF 的下载测速端点经常限速/不可达，
+    这一列会全是 0.00；此时仍可用延迟筛出「能连通」的 IP，不要让整份自扫结果作废。
+    """
     if not path or not os.path.exists(path):
         return []
     rows = []
@@ -68,12 +73,13 @@ def read_cfst(path):
             ip = row[0].strip()
             try:
                 loss = float(row[3])
+                latency = float(row[4])
                 speed = float(row[5])
             except ValueError:
                 continue
-            if loss < 1.0 and speed > 0:
-                rows.append((ip, speed))
-    rows.sort(key=lambda x: x[1], reverse=True)
+            if loss < 1.0 and latency > 0:
+                rows.append((ip, speed, latency))
+    rows.sort(key=lambda r: (r[1] > 0, r[1] if r[1] > 0 else -r[2]), reverse=True)
     return rows
 
 
@@ -123,7 +129,9 @@ def main():
 
     # 自扫文件
     with open(os.path.join(args.out, 'cfip-cfst.txt'), 'w', encoding='utf-8') as f:
-        f.write('\n'.join(f'{ip}:{DEFAULT_PORT}#cfst {speed:.2f}MB/s' for ip, speed in cfst[:MAX_PER_FILE]) + ('\n' if cfst else ''))
+        lines = [f'{ip}:{DEFAULT_PORT}#cfst {speed:.2f}MB/s' if speed > 0 else f'{ip}:{DEFAULT_PORT}#cfst {latency:.0f}ms'
+                 for ip, speed, latency in cfst[:MAX_PER_FILE]]
+        f.write('\n'.join(lines) + ('\n' if lines else ''))
 
     # 合并文件：地区优先，其次公共源，最后自扫
     merged, seen = [], set()
@@ -137,7 +145,7 @@ def main():
             if ip not in seen:
                 seen.add(ip)
                 merged.append(f'{ip}:{port}')
-    for ip, _ in cfst:
+    for ip, _speed, _lat in cfst:
         if ip not in seen:
             seen.add(ip)
             merged.append(f'{ip}:{DEFAULT_PORT}')
