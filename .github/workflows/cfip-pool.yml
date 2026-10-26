@@ -27,17 +27,31 @@ jobs:
           curl -sSL --retry 3 -o cfst.tar.gz \
             https://github.com/XIU2/CloudflareSpeedTest/releases/latest/download/cfst_linux_amd64.tar.gz
           tar -xzf cfst.tar.gz
+          # 压缩包里是 cfst_linux_amd64/cfst，不能直接 ./cfst
+          BIN=$(find . -maxdepth 2 -type f -name cfst | head -1)
+          chmod +x "$BIN"
           # 自扫只用 IP（端口固定 443），限 200 个，控制运行时长
           awk -F: '{print $1}' out/cfip-all.txt | sort -u | head -200 > candidates.txt
           wc -l candidates.txt
-          ./cfst -f candidates.txt -o cfst.csv -p 443 -t 20 -n 20 || true
-          [ -f cfst.csv ] && head -3 cfst.csv || echo "cfst 未产出结果，跳过自扫合并"
+          "$BIN" -f candidates.txt -o cfst.csv -p 443 -t 20 -n 20 || true
+          if [ -f cfst.csv ]; then head -3 cfst.csv; else echo "cfst 未产出结果，跳过自扫合并"; fi
 
       - name: 合并并上传 Gist
         env:
           GH_TOKEN: ${{ secrets.PAT }}
           GIST_ID: ${{ vars.CFIP_GIST_ID }}
         run: |
+          set -e
           python3 .github/scripts/cfip/build_pool.py --out out --cfst cfst.csv
           test "$(wc -l < out/cfip-all.txt)" -ge 20 || { echo "::error::池子条目过少"; exit 1; }
-          python3 .github/scripts/cfip/upload_gist.py
+          for f in out/cfip-*.txt; do
+            name=$(basename "$f")
+            cur=$(gh api "gists/$GIST_ID" --jq ".files[\"$name\"].content" 2>/dev/null || true)
+            if [ "$cur" = "$(cat "$f")" ]; then
+              echo "未变化 $name"
+              continue
+            fi
+            jq -n --arg n "$name" --arg c "$(cat "$f")" '{files:{($n):{content:$c}}}' > payload.json
+            gh api -X PATCH "gists/$GIST_ID" --input payload.json >/dev/null
+            echo "已更新 $name"
+          done
