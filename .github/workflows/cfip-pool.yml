@@ -35,7 +35,7 @@ jobs:
 
       - name: 合并并上传 Gist
         env:
-          GH_TOKEN: *** secrets.PAT }}
+          GH_TOKEN: ${{ secrets.PAT }}
           GIST_ID: ${{ vars.CFIP_GIST_ID }}
         run: |
           python3 .github/scripts/cfip/build_pool.py --out out --cfst cfst.csv
