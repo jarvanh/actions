@@ -9,6 +9,11 @@ on:
   schedule:
     - cron: "23 */6 * * *"
   workflow_dispatch:
+    inputs:
+      use_exit_node:
+        description: '经 autoclaw exit node 自扫（DERP 中继下速度为 0，仅在直连可用时勾选）'
+        type: boolean
+        default: false
 
 concurrency: cfip-pool
 
@@ -27,6 +32,7 @@ jobs:
       # 失败不影响主流程：拿不到 exit node 就退回本机直连自扫。
       - name: 加入 Tailscale（可选，exit node = autoclaw）
         id: ts
+        if: ${{ inputs.use_exit_node }}
         continue-on-error: true
         uses: tailscale/github-action@306e68a486fd2350f2bfc3b19fcd143891a4a2d8 # v4
         with:
@@ -36,7 +42,7 @@ jobs:
           args: --exit-node=100.90.2.41 --exit-node-allow-lan-access
 
       - name: 确认出口 IP
-        if: ${{ steps.ts.outcome == 'success' }}
+        if: ${{ inputs.use_exit_node && steps.ts.outcome == 'success' }}
         run: |
           tailscale status | head -3 || true
           echo "出口 IP: $(curl -sS -m 10 https://ipinfo.io/ip || echo 获取失败)"
@@ -60,7 +66,7 @@ jobs:
           if [ -f cfst.csv ]; then head -3 cfst.csv; else echo "cfst 未产出结果，跳过自扫合并"; fi
 
       - name: 恢复直连（清 exit node）
-        if: always()
+        if: ${{ always() && inputs.use_exit_node }}
         run: sudo tailscale set --exit-node= 2>/dev/null || true
 
       - name: 合并并上传 Gist
