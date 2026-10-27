@@ -4245,6 +4245,21 @@ jobs:
           _conclusion="已就绪 · 官方模型 ${_mn} 个"
           [ "${_accs:-0}" -gt 0 ] && _conclusion="${_conclusion} · 账号 ${_accs}（看板 OAuth 可添加）"
           [ "${_accs:-0}" -eq 0 ] && _conclusion="${_conclusion} · 账号池空（看板「+ 添加账号 (OAuth)」入池）"
+          # 账号池签到状态（2026-10-27 主人要求「都加上」）：读账号文件 lastCheckin
+          # （容器 TZ=Asia/Shanghai 墙钟串）比对北京日界，今日增量取 lastCreditsDelta
+          # 合计。jq 解析失败或无账号池时整段省略，不编 0。
+          if [ "${_accs:-0}" -gt 0 ]; then
+            _qd_ck="$(jq -rs --arg d "$(TZ=Asia/Shanghai date +%F)" '
+              [ .[] | select(.uid != null and .enabled != null) ] as $a
+              | [ $a[] | select(((.lastCheckin // "")[0:10]) == $d) ] as $s
+              | if ($a | length) == 0 then ""
+                else ("\($s | length)/\($a | length)") +
+                     (if ([ $s[] | (.lastCreditsDelta // 0) ] | add // 0) > 0
+                      then " · 今日 +\([ $s[] | (.lastCreditsDelta // 0) ] | add)"
+                      else "" end) end
+            ' "$QODER_DATA"/accounts/*.json 2>/dev/null || true)"
+            [ -n "$_qd_ck" ] && _conclusion="${_conclusion} · 签到 ${_qd_ck}"
+          fi
           qoder_notify "$_title" "$_conclusion" "$QODER_VERSION" "$QODER_UPDATE" "" "" 1
           # 发送成功才落版本标记：失败时下轮仍报更新，不丢「从 X 更新到 Y」。
           if [ "${QODER_NOTIFY_OK:-0}" = "1" ] && [ -n "$QODER_IMG_DIGEST" ]; then
