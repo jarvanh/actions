@@ -116,7 +116,7 @@ jobs:
           # qoder 用浮动 latest（实际部署步骤会按最新 release tag 再拉一次）；其余固定 tag 与步骤对齐。
           for img in rongronggg9/rss-to-telegram:latest \
                      diegosouzapw/omniroute:3.8.51 \
-                     ghcr.io/shuishuipingan/qoder2api-hub:latest; do
+                     ghcr.io/jarvanh/qoder2api-hub:latest; do
             docker image pull "$img" >"$P/pull-$(printf '%s' "$img" | tr '/:.' '___').log" 2>&1
           done
           PF_EOF
@@ -4057,7 +4057,9 @@ jobs:
       # qoder2api-hub：Qoder（阿里）双区反代网关（国际 qoder.com / 国内 qoder.com.cn），
       # OpenAI 兼容 API + Responses API + Web 看板，与 workbuddy-gateway / zcode2api /
       # trae2api 同为 AI 网关形态服务（2026-10-19 主人要求接入）。
-      # 部署方式：官方预构建 GHCR 多架构镜像（ghcr.io/shuishuipingan/qoder2api-hub），
+      # 部署方式：预构建 GHCR 多架构镜像（ghcr.io/jarvanh/qoder2api-hub，fork 自
+      # shuishuipingan/qoder2api-hub；每日同步轮把上游改动合进 fork 后发版，110 停放
+      # + 流式真实状态码两处根治见 fork v1.7.8），
       # 与 trae2api 同为容器形态（restart: unless-stopped 覆盖崩溃自愈，不纳入 systemd --user，
       # Stop 段也不显式停——容器随 VM 生命周期存续，下一轮 docker rm -f 幂等接管）。
       # 端口 8790（上游默认，绑 0.0.0.0 —— OmniRoute 经 host.docker.internal:8790
@@ -4099,17 +4101,20 @@ jobs:
 
           QODER_DATA=/dropbox/self-hosted/qoder2api
           QODER_PORT="8790"
-          # 动态解析上游最新 release tag：禁止固定 pin，否则每 5 分钟 workflow
+          # 动态解析**本仓库（fork）**最新 release tag：禁止固定 pin，否则每 5 分钟 workflow
           # 会把已部署的新版本重建回旧版（2026-10-26 实测 1.7.6 被 1.7.3 覆盖）。
-          QODER_TAG="$(gh api repos/shuishuipingan/qoder2api-hub/releases/latest --jq '.tag_name' 2>/dev/null | sed 's/^v//')"
+          # 2026-10-28 改指 jarvanh fork：上游无 push 权限，110 停放 + 流式真实状态码
+          # 两处根治只在 fork 里；每日 09:00 同步自动化会把上游新提交合进 fork 再发版，
+          # 所以「fork 最新 release」仍等于「上游最新 + 本地根治」，不违背不 pin 的约束。
+          QODER_TAG="$(gh api repos/jarvanh/qoder2api-hub/releases/latest --jq '.tag_name' 2>/dev/null | sed 's/^v//')"
           if [ -z "$QODER_TAG" ]; then
-            QODER_TAG="$(git ls-remote --tags --refs https://github.com/shuishuipingan/qoder2api-hub.git 2>/dev/null | awk -F/ '{print $3}' | sed 's/^v//' | grep -E '^[0-9]+(\.[0-9]+)+$' | sort -V | tail -1)"
+            QODER_TAG="$(git ls-remote --tags --refs https://github.com/jarvanh/qoder2api-hub.git 2>/dev/null | awk -F/ '{print $3}' | sed 's/^v//' | grep -E '^[0-9]+(\.[0-9]+)+$' | sort -V | tail -1)"
           fi
           if [ -z "$QODER_TAG" ]; then
             echo "::error::无法解析 qoder2api-hub 最新 release tag"
             exit 1
           fi
-          QODER_IMAGE="ghcr.io/shuishuipingan/qoder2api-hub:${QODER_TAG}"
+          QODER_IMAGE="ghcr.io/jarvanh/qoder2api-hub:${QODER_TAG}"
 
           # 通知版式对齐 trae_notify / wb_notify：标题 + 结论/版本/更新/接口/鉴权 +
           # 数据目录 + 原始输出。用法: qoder_notify <标题> <结论> <版本> <更新> <原因> <原始输出> <就绪态>
