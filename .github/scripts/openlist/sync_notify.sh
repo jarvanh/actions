@@ -152,7 +152,7 @@ _send_sync_result_notification() {
   if [ -s "$fix_list" ]; then
     fix_total=$(grep -c . "$fix_list" 2>/dev/null || true)
     local _fix_entries=""
-    while IFS='|' read -r f_original f_alternative f_method f_restore f_size f_bytes f_mid; do
+    while IFS="$OL_FIELD_SEP" read -r f_original f_alternative f_method f_restore f_size f_bytes f_mid; do
       [ -z "$f_original" ] && continue
       local f_method_tag _entry
       f_method_tag=$(_fix_method_short "$f_mid")
@@ -189,7 +189,7 @@ _send_sync_result_notification() {
   if [ -s "$fail_list" ]; then
     fail_total=$(grep -c . "$fail_list" 2>/dev/null || true)
     local _fail_entries=""
-    while IFS='|' read -r fpath fsize fmsg; do
+    while IFS="$OL_FIELD_SEP" read -r fpath fsize fmsg; do
       [ -z "$fpath" ] && continue
       _fail_entries+="$(tg_entry "$fpath" "$fsize" "$fmsg")"$'\n'
     done < "$fail_list"

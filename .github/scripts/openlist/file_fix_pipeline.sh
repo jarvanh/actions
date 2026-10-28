@@ -1447,7 +1447,8 @@ _sync_persist_verify_and_retry() {
               echo "↻ 重试（换方法）· $(_short_path "$retry_orig")" | tee -a "$LOG_FILENAME"
 
               # 先从 fix_list 移除旧假成功条目（无论重试成败都不保留）
-              RO="$retry_orig" awk 'BEGIN{FS="|"} $1 != ENVIRON["RO"]' "$fix_list" > "${fix_list}.tmp" && mv "${fix_list}.tmp" "$fix_list"
+              # FS 用 0x1F（OL_FIELD_SEP 真源）；awk -v 传控制字符经转义层易碎，直接写 \x1f
+              RO="$retry_orig" awk 'BEGIN{FS="\x1f"} $1 != ENVIRON["RO"]' "$fix_list" > "${fix_list}.tmp" && mv "${fix_list}.tmp" "$fix_list"
 
               _fix_event ATTEMPT "$retry_orig"
               try_fix_failed_file "$source_path" "$dest_path" "$task_name" "$retry_orig" "$fix_log" || true
@@ -1461,16 +1462,16 @@ _sync_persist_verify_and_retry() {
                 retry_size_bytes=$(echo "$retry_size_json" | jq -r '.bytes // 0' 2>/dev/null || echo 0)
                 [[ "$retry_size_bytes" =~ ^[0-9]+$ ]] || retry_size_bytes=0
                 retry_size_human=$(format_bytes "$retry_size_bytes")
-                echo "${TRY_FIX_ORIGINAL}|${TRY_FIX_ALTERNATIVE}|${TRY_FIX_METHOD}|${TRY_FIX_RESTORE}|${retry_size_human}|${retry_size_bytes}|${TRY_FIX_METHOD_ID}|${TRY_FIX_MD5:-}" >> "$fix_list"
+                echo "${TRY_FIX_ORIGINAL}${OL_FIELD_SEP}${TRY_FIX_ALTERNATIVE}${OL_FIELD_SEP}${TRY_FIX_METHOD}${OL_FIELD_SEP}${TRY_FIX_RESTORE}${OL_FIELD_SEP}${retry_size_human}${OL_FIELD_SEP}${retry_size_bytes}${OL_FIELD_SEP}${TRY_FIX_METHOD_ID}${OL_FIELD_SEP}${TRY_FIX_MD5:-}" >> "$fix_list"
                 FIXED_THIS_RUN["$TRY_FIX_ORIGINAL"]="$TRY_FIX_ALTERNATIVE"
                 # 覆盖 marker 里的假成功条目（同 original 新条目替换旧条目）
                 _persist_fix_entry_now "$incr_marker_path" "$incr_state" "$source_path" "$dest_path" \
                   "$TRY_FIX_ORIGINAL" "$TRY_FIX_ALTERNATIVE" "$TRY_FIX_METHOD" "$TRY_FIX_RESTORE" \
                   "$retry_size_human" "$retry_size_bytes" "${TRY_FIX_METHOD_ID:-}" "${TRY_FIX_MD5:-}" 2>&1 | tee -a "$LOG_FILENAME" || true
-                echo "${TRY_FIX_ALTERNATIVE}|${retry_size_bytes}|${TRY_FIX_ORIGINAL}|${TRY_FIX_METHOD}|${TRY_FIX_METHOD_ID}" >> "$round_list"
+                echo "${TRY_FIX_ALTERNATIVE}${OL_FIELD_SEP}${retry_size_bytes}${OL_FIELD_SEP}${TRY_FIX_ORIGINAL}${OL_FIELD_SEP}${TRY_FIX_METHOD}${OL_FIELD_SEP}${TRY_FIX_METHOD_ID}" >> "$round_list"
               else
                 echo "❌ 重试失败（方法耗尽）· $(_short_path "$retry_orig") · ${TRY_FIX_MESSAGE}" | tee -a "$LOG_FILENAME"
-                echo "${retry_orig}|未知|重试修复失败: ${TRY_FIX_MESSAGE:-所有修复方法均失败}" >> "$fail_list"
+                echo "${retry_orig}${OL_FIELD_SEP}未知${OL_FIELD_SEP}重试修复失败: ${TRY_FIX_MESSAGE:-所有修复方法均失败}" >> "$fail_list"
                 _fix_event_fail "$retry_orig" "${TRY_FIX_MESSAGE:-所有修复方法均失败}"
                 unset "FIXED_THIS_RUN[$retry_orig]" 2>/dev/null || true
                 # 从 marker 移除假成功条目，避免下一轮作为"沿用上轮修复"空转
@@ -1512,8 +1513,8 @@ _sync_persist_verify_and_retry() {
           for leftover_orig in "${retry_pending[@]}"; do
             [ -z "$leftover_orig" ] && continue
             echo "  ⚠️ 轮数耗尽 → 失败清单 · $(_short_path "$leftover_orig")" | tee -a "$LOG_FILENAME"
-            RO="$leftover_orig" awk 'BEGIN{FS="|"} $1 != ENVIRON["RO"]' "$fix_list" > "${fix_list}.tmp" && mv "${fix_list}.tmp" "$fix_list"
-            echo "${leftover_orig}|未知|重试轮数耗尽仍未持久化（黑名单已记录，下一轮从剩余方法继续）" >> "$fail_list"
+            RO="$leftover_orig" awk 'BEGIN{FS="\x1f"} $1 != ENVIRON["RO"]' "$fix_list" > "${fix_list}.tmp" && mv "${fix_list}.tmp" "$fix_list"
+            echo "${leftover_orig}${OL_FIELD_SEP}未知${OL_FIELD_SEP}重试轮数耗尽仍未持久化（黑名单已记录，下一轮从剩余方法继续）" >> "$fail_list"
             _fix_event DEFERRED "$leftover_orig" "重试轮数耗尽"
             unset "FIXED_THIS_RUN[$leftover_orig]" 2>/dev/null || true
             _leftover_batch+=("$leftover_orig")
