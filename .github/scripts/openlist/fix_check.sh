@@ -386,7 +386,8 @@ _fc_try_file() {  # <rel 相对任务根>
 
   if [ "$TRY_FIX_STATUS" = "success" ]; then
     # 先入待复核清单（**先验后写**，与生产的"先写后删"不同，见头部说明）
-    printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+    # \037 = OL_FIELD_SEP（0x1F）写进格式串: 文件名可合法含 `|`，不能用作分隔符
+    printf '%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\n' \
       "$FC_LEAF_DST" "$TRY_FIX_ORIGINAL" "$TRY_FIX_ALTERNATIVE" "$TRY_FIX_METHOD" "$TRY_FIX_RESTORE" \
       "$(format_bytes "$src_bytes")" "$src_bytes" "${TRY_FIX_METHOD_ID:-}" "${TRY_FIX_MD5:-}" >> "$FC_FIXLIST"
     _fc_log "  ✅ 修复成功（待真值复核）· $(_fix_method_short "${TRY_FIX_METHOD_ID:-}") · ${TRY_FIX_ALTERNATIVE}"
@@ -443,10 +444,10 @@ if [ -s "$FC_FIXLIST" ]; then
   declare -A FC_GROUP_LIST=()
   declare -A FC_LEAF_MARKER_OF=()
   declare -A FC_LEAF_SRC_OF=()
-  while IFS='|' read -r _ld _o _a _m _r _sh _sb _mid _md5 || [ -n "$_ld" ]; do
+  while IFS="$OL_FIELD_SEP" read -r _ld _o _a _m _r _sh _sb _mid _md5 || [ -n "$_ld" ]; do
     [ -n "$_a" ] || continue
     [ -n "${FC_GROUP_LIST[$_ld]:-}" ] || FC_GROUP_LIST[$_ld]="$FC_WORK/verify_$(printf '%s' "$_ld" | md5sum | cut -c1-8).txt"
-    printf '%s|%s|%s|%s|%s\n' "$_a" "${_sb:-0}" "$_o" "$_m" "$_mid" >> "${FC_GROUP_LIST[$_ld]}"
+    printf '%s\037%s\037%s\037%s\037%s\n' "$_a" "${_sb:-0}" "$_o" "$_m" "$_mid" >> "${FC_GROUP_LIST[$_ld]}"
     # 叶子 marker 由 (叶子 task_name, 叶子 dest) 决定；叶子 task_name 按生产规则
     # `${task}_${subdir//\//_}` 逐层拼（task_engine.sh:885/1208），叶子源路径同理由 dest 反推
     if [ -z "${FC_LEAF_MARKER_OF[$_ld]:-}" ]; then
@@ -481,12 +482,12 @@ if [ -s "$FC_FIXLIST" ]; then
         _persist_verify_entries "$_ld" "${FC_GROUP_LIST[$_ld]}" 0 "$FC_LOG"
         _fc_log "  叶子 ${_ld}: 复核 ${PERSIST_IDX} · 通过 ${PERSIST_OK} · 失败 ${PERSIST_FAIL}"
         for _bad in ${PERSIST_FAILED_ORIGS[@]+"${PERSIST_FAILED_ORIGS[@]}"}; do
-          [ -n "$_bad" ] && FC_FAILED_SET["${_ld}|${_bad}"]=1
+          [ -n "$_bad" ] && FC_FAILED_SET["${_ld}${OL_FIELD_SEP}${_bad}"]=1
         done
       done
-      while IFS='|' read -r _ld _o _a _m _r _sh _sb _mid _md5 || [ -n "$_ld" ]; do
+      while IFS="$OL_FIELD_SEP" read -r _ld _o _a _m _r _sh _sb _mid _md5 || [ -n "$_ld" ]; do
         [ -n "$_a" ] || continue
-        if [ -n "${FC_FAILED_SET["${_ld}|${_o}"]:-}" ]; then
+        if [ -n "${FC_FAILED_SET["${_ld}${OL_FIELD_SEP}${_o}"]:-}" ]; then
           _fc_verdict fake_success "$_mid" "$(_fc_full_rel "$_ld" "$_o")" "$_a" "重启容器后替代路径不可见（PUT 假成功，未落盘）"
         else
           _fc_write_marker "$_ld" "$_o" "$_a" "$_m" "$_r" "$_sh" "$_sb" "$_mid" "$_md5"
@@ -495,7 +496,7 @@ if [ -s "$FC_FIXLIST" ]; then
       done < "$FC_FIXLIST"
     else
       _fc_log "  ⚠️ 容器重启复核不可用 ⇒ 以下条目**未经真值复核**（仅缓存口径，结论可能偏乐观）"
-      while IFS='|' read -r _ld _o _a _m _r _sh _sb _mid _md5 || [ -n "$_ld" ]; do
+      while IFS="$OL_FIELD_SEP" read -r _ld _o _a _m _r _sh _sb _mid _md5 || [ -n "$_ld" ]; do
         [ -n "$_a" ] || continue
         _fc_write_marker "$_ld" "$_o" "$_a" "$_m" "$_r" "$_sh" "$_sb" "$_mid" "$_md5"
         _fc_verdict fixed "$_mid" "$(_fc_full_rel "$_ld" "$_o")" "$_a" "⚠️ 未经真值复核（容器重启不可用，仅缓存口径）"
