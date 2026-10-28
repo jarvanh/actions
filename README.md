@@ -43,6 +43,7 @@ proxy-speedtest/            测速结果数据
 | `jellyfin.yml` | 媒体服务器运维 |
 | `HomeAssistant.yml` / `rdp.yml` / `openclaw.yml` | 自托管服务 |
 | `ql.yml` / `sub-store.yml` / `subs-check.yml` | 签到与订阅管理 |
+| `socks-exit-pool.yml` | 免费源 SOCKS5 → edgetunnel path 级出口节点池（YouTube 定区），产物写独立 Gist 文件 —— 详见 [`docs/socks-exit-pool.md`](docs/socks-exit-pool.md) |
 | `icloud-photos-downloader.yml` / `ph-dl.yml` / `pixivutil2.yml` | 媒体抓取下载 |
 | `proxy-speedtest-gitee.yml` / `proxy-speedtest-cdn.yml` / `proxy-speedtest-taier.yml` | 代理测速三套（按测速点命名）：Gitee 上行/下行/延迟 / 国内 CDN 延迟+下载 / 泰尔三网 |
 | `proxy-speedtest-gistnodes.yml` | 抓 gist 公开节点 → Sub-Store 去重 → 交给上面三套之一测速（选哪套由 Variable `PROXY_SPEEDTEST_ENGINE` 决定）—— 详见 [`docs/proxy-speedtest-gistnodes.md`](docs/proxy-speedtest-gistnodes.md) |
