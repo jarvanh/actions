@@ -180,7 +180,9 @@ _remove_fix_entry_from_state() {
 # 持久化验证单轮复核（在 OpenList 容器重启、缓存刷新之后调用）
 # 逐条检查修复条目是否被后端真正持久化；失败条目当场加入方法黑名单，
 # 供本轮"立即换方法重试"直接跳过失效方法（不再等下一轮）
-# 输入清单格式: <alt_path>|<bytes>|<orig_path>|<method>|<method_id> 每行一条
+# 输入清单格式: <alt_path>␟<bytes>␟<orig_path>␟<method>␟<method_id> 每行一条
+#   分隔符是真源 utils.sh 的 OL_FIELD_SEP（0x1F），不用 `|` —— 文件名可合法
+#   含 `|`，会让字段整体右移（见 utils.sh 该常量注释的 run 40623856341 实证）
 # max_sample: 0 = 复核全部条目（默认语义，修复条目本来就有限，
 #             OPENLIST_MISSING_FIX_MAX 封顶）；>0 = 仅复核前 N 条（限流逃生阀）
 # 结果写入全局: PERSIST_OK / PERSIST_FAIL / PERSIST_IDX /
@@ -193,7 +195,7 @@ _persist_verify_entries() {
   PERSIST_IDX=0
   PERSIST_FAILED_ORIGS=()
   local alt_path bytes orig_path f_method f_mid
-  while IFS='|' read -r alt_path bytes orig_path f_method f_mid; do
+  while IFS="$OL_FIELD_SEP" read -r alt_path bytes orig_path f_method f_mid; do
     [ -z "$alt_path" ] && continue
     # 存量条目的路径可能带 `./` 段（读取侧归一化，见 _norm_rel_path）: 不纠正会让
     #   刚修好的文件被判"未持久化"而重修
@@ -594,7 +596,7 @@ _bulk_fold_record_landed() {
     local restore="rclone copyto '${dest_path}/${alt}' '${dest_path}/${mf}'  # 保留备份副本"
 
     echo "  ✅ 折叠落盘 · ${rel} (${fsize})" | tee -a "$LOG_FILENAME"
-    echo "${mf}|${alt}|${method}|${restore}|${fsize}|${fbytes}|copyto_original|" >> "$fix_list"
+    echo "${mf}${OL_FIELD_SEP}${alt}${OL_FIELD_SEP}${method}${OL_FIELD_SEP}${restore}${OL_FIELD_SEP}${fsize}${OL_FIELD_SEP}${fbytes}${OL_FIELD_SEP}copyto_original${OL_FIELD_SEP}" >> "$fix_list"
     FIXED_THIS_RUN["$mf"]="$alt"
     echo "$mf" >> "$folded_files"
     # md5 留空: 批量折叠不经本地副本，无法算内容指纹；marker 的 md5 是可选
@@ -1019,7 +1021,7 @@ _sync_fix_missing_files() {
               echo "♻ 沿用上轮修复 · $(_fix_method_short "$prev_mid") · $(_short_path "$mf")" | tee -a "$LOG_FILENAME"
               # 沿用 = 上轮成果，不是本轮产出；单列计数，供收尾区分"新落盘"与"沿用"
               ROUND_REUSED_TOTAL=$((ROUND_REUSED_TOTAL + 1))
-              echo "${mf}|${prev_alt}|${prev_method}|${prev_restore}|${prev_shuman}|${prev_sbytes}|${prev_mid}" >> "$fix_list"
+              echo "${mf}${OL_FIELD_SEP}${prev_alt}${OL_FIELD_SEP}${prev_method}${OL_FIELD_SEP}${prev_restore}${OL_FIELD_SEP}${prev_shuman}${OL_FIELD_SEP}${prev_sbytes}${OL_FIELD_SEP}${prev_mid}" >> "$fix_list"
               FIXED_THIS_RUN["$mf"]="$prev_alt"
               continue
             fi
@@ -1245,7 +1247,7 @@ _sync_fix_missing_files() {
         if [ "$TRY_FIX_STATUS" = "success" ]; then
           echo "✅ 修复成功 · $(_fix_method_short "${TRY_FIX_METHOD_ID:-}") · $(_short_path "$failed_line")" | tee -a "$LOG_FILENAME"
           echo "  ↳ 还原: ${TRY_FIX_RESTORE}" | tee -a "$LOG_FILENAME"
-          echo "${TRY_FIX_ORIGINAL}|${TRY_FIX_ALTERNATIVE}|${TRY_FIX_METHOD}|${TRY_FIX_RESTORE}|${file_size}|${file_size_bytes}|${TRY_FIX_METHOD_ID}|${TRY_FIX_MD5:-}" >> "$fix_list"
+          echo "${TRY_FIX_ORIGINAL}${OL_FIELD_SEP}${TRY_FIX_ALTERNATIVE}${OL_FIELD_SEP}${TRY_FIX_METHOD}${OL_FIELD_SEP}${TRY_FIX_RESTORE}${OL_FIELD_SEP}${file_size}${OL_FIELD_SEP}${file_size_bytes}${OL_FIELD_SEP}${TRY_FIX_METHOD_ID}${OL_FIELD_SEP}${TRY_FIX_MD5:-}" >> "$fix_list"
           FIXED_THIS_RUN["$TRY_FIX_ORIGINAL"]="$TRY_FIX_ALTERNATIVE"
           # 立即记录到修复文件清单（增量持久化，防中断丢失）
           _persist_fix_entry_now "$incr_marker_path" "$incr_state" "$source_path" "$dest_path" \
