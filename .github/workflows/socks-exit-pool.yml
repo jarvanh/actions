@@ -38,24 +38,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PAT }}
           GIST_ID: ${{ secrets.SOCKS_EXIT_GIST_ID }}
-        run: |
-          set -e
-          f=out/socks-exit.yaml
-          # 脚本在「无可用节点」时故意不产出文件：此时保留上一版，避免客户端订阅清零
-          if [ ! -s "$f" ]; then
-            echo "::warning::本轮未产出节点，保留上一版 Gist"
-            exit 0
-          fi
-          n=$(python3 -c "import yaml;print(len(yaml.safe_load(open('$f'))['proxies']))")
-          if [ "$n" -lt 1 ]; then
-            echo "::warning::本轮 0 个可用节点，保留上一版 Gist"
-            exit 0
-          fi
-          cur=$(gh api "gists/$GIST_ID" --jq '.files["socks-exit.yaml"].content' 2>/dev/null || true)
-          if [ "$cur" = "$(cat "$f")" ]; then
-            echo "内容未变化，跳过写入"
-            exit 0
-          fi
-          jq -n --arg c "$(cat "$f")" '{files:{"socks-exit.yaml":{content:$c}}}' > payload.json
-          gh api -X PATCH "gists/$GIST_ID" --input payload.json >/dev/null
-          echo "已更新 socks-exit.yaml（$n 个节点）"
+        # 发布经 gist_publish.py：v3 产物 675KB，jq --arg 传参会撞 ARG_MAX
+        # （run 40636213832 实证），改走文件/内存流
+        run: python3 .github/scripts/socks-exit/gist_publish.py out/socks-exit.yaml
