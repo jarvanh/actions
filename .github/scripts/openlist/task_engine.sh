@@ -22,6 +22,9 @@
 # 常量定义
 readonly DEFAULT_SPLIT_THRESHOLD_BYTES="${SYNC_SPLIT_THRESHOLD_BYTES:-50000000000}" # 兜底 50GB；workflow 已设 20GB（拆分/批次统一阈值）
 
+# 清单分隔符兜底（真源 utils.sh）: 单测可能只 source 本文件，set -u 下未绑定会中止
+: "${OL_FIELD_SEP=$'\037'}"
+
 # ===== 同步任务清单（单点定义，增减任务只需在此添加/删除一行）=====
 # 格式: "id|源端|目标端|任务名|附加参数"
 #   id:       调试模式（run_task_by_id）的选择器，无需单独调试的任务填 "-"

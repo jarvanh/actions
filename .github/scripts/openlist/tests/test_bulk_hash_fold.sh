@@ -154,7 +154,7 @@ _sync_bulk_hash_dir_fold
 [ "$(lines "$_missing")" = "1" ] && ok "T1a 折叠后缺失清单只剩 1 条" || bad "T1a 剩余 $(lines "$_missing") 条: $(cat "$_missing")"
 grep -qxF "e/003.jpg" "$_missing" && ok "T1b 未达标目录(e/ 仅1个文件)留在清单里" || bad "T1b e/003.jpg 不见了"
 [ "$(lines "$_fixlist")" = "2" ] && ok "T1c 2 个文件记入 fix_list" || bad "T1c fix_list $(lines "$_fixlist") 条"
-_first_alt=$(head -1 "$_fixlist" 2>/dev/null | cut -d'|' -f2)
+_first_alt=$(head -1 "$_fixlist" 2>/dev/null | cut -d$'\037' -f2)
 if [[ "$_first_alt" =~ ^[0-9a-f]{8}/001\.jpg$ ]]; then ok "T1d alternative 为 <8位短哈希>/原文件名 ($_first_alt)"; else bad "T1d alternative 格式不对: $_first_alt"; fi
 grep -q '短哈希目录' "$_fixlist" 2>/dev/null && ok "T1e method 文本含『短哈希目录』(restore_info.jq 据此判 hash_dir)" || bad "T1e method 文本不含短哈希目录"
 [ -n "$SYNC_CALLS" ] && ok "T1f 走的是批量 rclone sync" || bad "T1f 没有触发 sync"

@@ -15,6 +15,9 @@
 #       telegram.sh (send_telegram_message), file_fix.sh (_fix_method_short),
 #       openlist_driver.sh (_refresh_openlist_cache)
 # 被依赖: sync_engine.sh (sync_with_logging)
+
+# 清单分隔符兜底（真源 utils.sh）: 单测可能只 source 本文件，set -u 下未绑定会中止
+: "${OL_FIELD_SEP=$'\037'}"
 # ===== 通知消息公共段落构建 =====
 # 4 个通知分支共享的头部/任务信息/排除规则段落。
 # 统一走 telegram/tg_notify.sh 的 tg_* 排版助手（HTML）；

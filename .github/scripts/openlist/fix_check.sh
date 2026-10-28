@@ -440,7 +440,7 @@ _fc_write_marker() {  # <leaf_dest> <orig> <alt> <method> <restore> <size_human>
 }
 
 if [ -s "$FC_FIXLIST" ]; then
-  # 叶子 dest → 该组的复核清单（alt|bytes|orig|method|mid）
+  # 叶子 dest → 该组的复核清单（alt␟bytes␟orig␟method␟mid，分隔符见 utils.sh OL_FIELD_SEP）
   declare -A FC_GROUP_LIST=()
   declare -A FC_LEAF_MARKER_OF=()
   declare -A FC_LEAF_SRC_OF=()
@@ -504,7 +504,7 @@ if [ -s "$FC_FIXLIST" ]; then
     fi
   else
     _fc_log "⚠️ 跳过真值复核（FIXCHECK_TRUTH_RESTART=${FIXCHECK_TRUTH_RESTART} 或 docker 不可用）⇒ 结论仅缓存口径"
-    while IFS='|' read -r _ld _o _a _m _r _sh _sb _mid _md5 || [ -n "$_ld" ]; do
+    while IFS="$OL_FIELD_SEP" read -r _ld _o _a _m _r _sh _sb _mid _md5 || [ -n "$_ld" ]; do
       [ -n "$_a" ] || continue
       _fc_write_marker "$_ld" "$_o" "$_a" "$_m" "$_r" "$_sh" "$_sb" "$_mid" "$_md5"
       _fc_verdict fixed "$_mid" "$(_fc_full_rel "$_ld" "$_o")" "$_a" "⚠️ 未经真值复核（已按要求跳过）"
