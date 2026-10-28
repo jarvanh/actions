@@ -394,7 +394,7 @@ grep -q "沿用本轮结论" "$FIX_LOG" && ok "10b 日志记录沿用结论" || 
 # mock 的 jq 不够用，这里需要真 jq 跑分类程序；环境无 jq 则跳过
 if [ -n "$(type -P jq 2>/dev/null)" ]; then
   unset -f jq
-  printf '%s\n' "${REL}|${HASH}/options.xml|rclone copyto（短哈希目录 ${HASH} + 原文件名）|rclone move x y|2.796 KiB|2863|copyto_original|0123456789abcdef0123456789abcdef" > "$WORK/fix_list.txt"
+  printf '%s\n' "${REL}$(printf '\037')${HASH}/options.xml$(printf '\037')rclone copyto（短哈希目录 ${HASH} + 原文件名）$(printf '\037')rclone move x y$(printf '\037')2.796 KiB$(printf '\037')2863$(printf '\037')copyto_original$(printf '\037')0123456789abcdef0123456789abcdef" > "$WORK/fix_list.txt"
   KIND=$(jq -R -s --arg sp "onedrive:backup" --arg dp "$DEST" -f \
     "$_REPO_ROOT/.github/scripts/openlist/restore_info.jq" "$WORK/fix_list.txt" 2>/dev/null \
     | jq -r '.[0].restore.kind' 2>/dev/null)

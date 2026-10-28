@@ -84,7 +84,7 @@ call_notify() {
 }
 
 # ===== 1. 不挂"修复过程"子行（fix_log 里存在片段也不进通知）=====
-printf '%s\n' 'fSWP4H4.jpg|68.540 KiB|目标目录不可写（存储端本轮整体故障，未试写；无目录可换）' > "$FAIL_LIST"
+printf '%s\n' "fSWP4H4.jpg$(printf '\037')68.540 KiB$(printf '\037')目标目录不可写（存储端本轮整体故障，未试写；无目录可换）" > "$FAIL_LIST"
 cat > "$FIX_LOG" <<'EOF'
 [2026/09/12 05:16:54] === 尝试修复失败文件: fSWP4H4.jpg ===
 [2026/09/12 05:16:54] ── 修复 fSWP4H4.jpg

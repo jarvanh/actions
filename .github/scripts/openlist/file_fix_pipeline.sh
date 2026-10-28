@@ -25,6 +25,10 @@
 #       rclone_query.sh (_extract_filter_args)
 # 被依赖: sync_engine.sh (sync_with_logging)
 
+# 清单分隔符兜底: 真源定义在 utils.sh（L1）。单测可能只 source 本文件而不经
+# load_all.sh，set -u 下未绑定会让整条清单读取链路当场中止（不是"少读几条"）。
+: "${OL_FIELD_SEP=$'\037'}"
+
 # 增量持久化单个修复条目到 marker（修复循环内每成功一个立即调用）
 # 目的: step 超时/手动取消/runner 回收等中断发生时，已完成的修复不丢失，
 #       下一轮"沿用上轮修复"检查可直接复用，避免重复下载/打包/上传
@@ -355,6 +359,9 @@ _escape_filter_glob() { printf '%s' "$1" | sed -e 's/[][*?{}]/[&]/g'; }
 # 今天就有这个缺陷）。append 到 /tmp 文件则父子进程都可见，与 trend_record_transferred
 # 同一思路。
 # 格式: <事件>|<文件>|<原因>，事件取值:
+#   ⚠️ 本日志只按行首事件名做前缀计数/展示（见 workflow 的 `grep -c '^ATTEMPT|'`），
+#   不做字段解析，故仍用 `|`：文件名含 `|` 不影响计数口径（与 fix_list 那类
+#   需要逐字段读取的清单不同，后者必须用 OL_FIELD_SEP）
 #   ATTEMPT   本次尝试修复一个文件（逐文件路径 + 假成功重试路径）
 #   FAIL      该次尝试失败（原因见第三列）
 #   EXHAUSTED 失败且原因为"所有修复方法均失败" ⇒ **永久性失败**，这才是"文件修不好、
