@@ -1,6 +1,7 @@
 # 修复方式 → 还原元数据（kind/summary/steps/script）分类程序
 # 由 file_fix_pipeline.sh _sync_serialize_fixed_files 以 jq -R -s --arg sp <src> --arg dp <dst> -f 调用
-# 输入: fix_list 原始文本（| 分隔，每行 original|alternative|method|restore_hint|size_human|size_bytes|method_id[|md5]）
+# 输入: fix_list 原始文本（\u001f 即 0x1F 分隔，每行 original␟alternative␟method␟restore_hint␟size_human␟size_bytes␟method_id[\u001fmd5]）
+#   ⚠️ 不用 `|` 分字段: 文件名可合法含 `|`（真源 utils.sh OL_FIELD_SEP 注释）
 # 输出: fixed_files JSON 数组
 def restore_info($orig; $alt; $method; $src; $dst):
   # 现行 4 种修复方式精确识别（文案来源: file_fix.sh _succeed 各调用点）
@@ -50,7 +51,7 @@ def restore_info($orig; $alt; $method; $src; $dst):
       script:  ("# 路径未变化，无需还原\nSRC=\"" + $src + "\"\nDST=\"" + $dst + "\"\nORIG=\"" + $orig + "\"\nALT=\"" + $alt + "\"\n# 如需取回: rclone copyto \"${DST}/${ALT}\" ./local_copy")}
     end;
 split("\n") | map(select(length > 0)) | map(
-  split("|") as $f
+  split("\u001f") as $f
   | {
       original:    $f[0],
       alternative: $f[1],

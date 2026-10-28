@@ -191,9 +191,9 @@ _sync_parse_object_not_found() {
     while IFS= read -r failed_line; do
       [ -z "$failed_line" ] && continue
       # 跳过已在缺失文件修复中处理的文件
-      grep -qF "${failed_line}|" "$fail_list" 2>/dev/null && continue
+      grep -qF "${failed_line}${OL_FIELD_SEP}" "$fail_list" 2>/dev/null && continue
       echo "源文件不存在: ${failed_line}" | tee -a "$LOG_FILENAME"
-      echo "${failed_line}|未知|源文件不存在 (object not found)" >> "$fail_list"
+      echo "${failed_line}${OL_FIELD_SEP}未知${OL_FIELD_SEP}源文件不存在 (object not found)" >> "$fail_list"
     done < <(
       grep -E 'ERROR : .+: Failed to copy.*object not found' "$LAST_ATTEMPT_LOG" 2>/dev/null | \
         sed -E 's/^.*ERROR : //; s/: Failed to copy.*$//' | sort -u

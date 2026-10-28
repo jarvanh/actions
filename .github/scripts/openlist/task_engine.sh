@@ -1993,16 +1993,16 @@ _consolidate_verify_fixed() {
   local kept="${batch_dir}/fix_kept_${batch_idx}.txt"
   : > "$kept"
   local f_orig f_alt f_method f_restore f_size f_bytes f_mid
-  while IFS='|' read -r f_orig f_alt f_method f_restore f_size f_bytes f_mid; do
+  while IFS="$OL_FIELD_SEP" read -r f_orig f_alt f_method f_restore f_size f_bytes f_mid; do
     [ -z "$f_alt" ] && continue
     if grep -qxF "$f_alt" "$truth3"; then
-      echo "${f_orig}|${f_alt}|${f_method}|${f_restore}|${f_size}|${f_bytes}|${f_mid}" >> "$kept"
+      echo "${f_orig}${OL_FIELD_SEP}${f_alt}${OL_FIELD_SEP}${f_method}${OL_FIELD_SEP}${f_restore}${OL_FIELD_SEP}${f_size}${OL_FIELD_SEP}${f_bytes}${OL_FIELD_SEP}${f_mid}" >> "$kept"
       kept_n=$((kept_n + 1))
     else
       # 假成功: 拉黑本条所用方法，下一轮直接从剩余方法继续
       [ -n "$f_mid" ] && _blacklist_add "$f_orig" "$f_mid"
       echo "🔴 ${label} 巩固: 修复假成功（重启后消失）· $(_fix_method_short "$f_mid") · $(_short_path "$f_orig")"
-      echo "${f_orig}|${f_size}|修复后重启复核未落盘（$(_fix_method_short "$f_mid")，已拉黑）" >> "$fail_list"
+      echo "${f_orig}${OL_FIELD_SEP}${f_size}${OL_FIELD_SEP}修复后重启复核未落盘（$(_fix_method_short "$f_mid")，已拉黑）" >> "$fail_list"
       ghost_n=$((ghost_n + 1))
     fi
   done < "$fix_list"
