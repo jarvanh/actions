@@ -1259,7 +1259,7 @@ _sync_fix_missing_files() {
           _FIX_MKDIR_FAIL_STREAK=0
         else
           echo "❌ 修复失败 · $(_short_path "$failed_line") · ${TRY_FIX_MESSAGE}" | tee -a "$LOG_FILENAME"
-          echo "${failed_line}|${file_size}|${TRY_FIX_MESSAGE}" >> "$fail_list"
+          echo "${failed_line}${OL_FIELD_SEP}${file_size}${OL_FIELD_SEP}${TRY_FIX_MESSAGE}" >> "$fail_list"
           _fix_event_fail "$failed_line" "${TRY_FIX_MESSAGE:-}"
 
           # 目录创建层连续失败计数（见循环开头 _FIX_MKDIR_FAIL_STREAK 的收手判据）。
@@ -1327,10 +1327,10 @@ _sync_persist_verify_and_retry() {
     # 1. 先过滤出"修复成功且路径仍在该 dest_path 下"的条目，保存待验证清单
     local PERSIST_VERIFY_LIST="/tmp/${task_name}_persist_verify_${BASHPID:-$$}.txt"
     : > "$PERSIST_VERIFY_LIST"
-    while IFS='|' read -r f_orig f_alt f_method f_restore f_size f_bytes f_mid; do
+    while IFS="$OL_FIELD_SEP" read -r f_orig f_alt f_method f_restore f_size f_bytes f_mid; do
       [ -z "$f_alt" ] && continue
       # ALT 路径相对于 dest_path 已经记录在 fix_list，直接用
-      echo "${f_alt}|${f_bytes}|${f_orig}|${f_method}|${f_mid}" >> "$PERSIST_VERIFY_LIST"
+      echo "${f_alt}${OL_FIELD_SEP}${f_bytes}${OL_FIELD_SEP}${f_orig}${OL_FIELD_SEP}${f_method}${OL_FIELD_SEP}${f_mid}" >> "$PERSIST_VERIFY_LIST"
     done < "$fix_list"
     local verify_total=$(wc -l < "$PERSIST_VERIFY_LIST" | tr -d ' ' || echo 0)
     echo "  待验证修复条目: ${verify_total} 个" | tee -a "$LOG_FILENAME"
@@ -1349,12 +1349,12 @@ _sync_persist_verify_and_retry() {
       # 3. 保存重启前的大小快照（用于对比）
       local PERSIST_BEFORE="/tmp/${task_name}_persist_before_${BASHPID:-$$}.txt"
       : > "$PERSIST_BEFORE"
-      while IFS='|' read -r alt_path bytes orig_path f_method f_mid; do
+      while IFS="$OL_FIELD_SEP" read -r alt_path bytes orig_path f_method f_mid; do
         [ -z "$alt_path" ] && continue
         local full_alt="${dest_path}/${alt_path}"
         local sz
         sz=$(rclone size --json "$full_alt" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null || echo 0)
-        echo "${alt_path}|${bytes}|${sz}" >> "$PERSIST_BEFORE"
+        echo "${alt_path}${OL_FIELD_SEP}${bytes}${OL_FIELD_SEP}${sz}" >> "$PERSIST_BEFORE"
         echo "  重启前大小检查: $alt_path (expected=$bytes, actual=$sz)" | tee -a "$LOG_FILENAME"
       done < "$PERSIST_VERIFY_LIST"
 
