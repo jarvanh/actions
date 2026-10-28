@@ -17,7 +17,19 @@
 # 旧 bash/zsh 无此选项，shopt 报错被吞，不影响加载。
 shopt -u patsub_replacement 2>/dev/null || true
 
-# ===== 排版助手来自通知真源 =====
+# ===== 单行清单的分隔符（唯一真源）=====
+# 为什么不是 `|`: 源端文件名可以合法含 `|`（OneDrive 允许，pixiv 图集的
+#   「作品名 | Aki Adagaki.png」即此形态）。fix_list 这类清单以 `|` 分字段时，
+#   含 `|` 的 original 会把后续字段整体右移 —— run 40623856341 实证: bytes 位
+#   落到 "1.234 MiB" 这类人类可读串上，`rclone size` 取回 0，**已成功落盘的修复
+#   文件被误判假成功** → 拉黑方法 → 重传 → 从 marker 删真条目 → 下轮重修，
+#   跨轮死循环（该轮 7 个文件，是 7 次复核里唯一失败的一组）。
+# 0x1F（US, ASCII 单元分隔符）不可能出现在合法文件名里（OneDrive / 主流网盘
+#   均禁用 C0 控制字符），jq 输出为 \u001f、awk 可用 FS="\x1f"、bash 的
+#   `IFS=$'\037'` 与 grep 前缀匹配均正常工作。
+OL_FIELD_SEP=$'\037'
+
+# 排版助手来自通知真源
 # escape_html / tree_conn / tree_sub / tree_lines / tree_code_fold 已收敛到
 # scripts/telegram/tg_notify.sh（全库唯一真源），由 load_all.sh 在 L0 层最先 source。
 # 本文件不再自带副本——两份实现迟早漂移（2026-09-06 收敛）。
