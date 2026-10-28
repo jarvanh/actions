@@ -22,6 +22,9 @@
 #   TELEGRAM_BOT_TOKEN   — 用于发送日志文件
 #   TELEGRAM_CHAT_ID     — 用于发送日志文件
 
+# 清单分隔符兜底（真源 utils.sh）: 单测可能只 source 本文件，set -u 下未绑定会中止
+: "${OL_FIELD_SEP=$'\037'}"
+
 # 初始化同步会话状态（计数器/日志名/进度系统）
 # 变量不加 local，故意写入调用方 shell（各 step source 后直接调用）
 # 由 workflow 在每个同步 step 开头调用；依赖 sync_progress.sh 的 progress_init

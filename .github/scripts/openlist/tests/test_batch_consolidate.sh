@@ -362,9 +362,9 @@ echo "$OUT" | grep -q "修复复核 1 个真实落盘 / 1 个假成功已剔除"
 
 [ "$(wc -l < "$BC_DIR/consolidate_fix_0.txt" | tr -d ' ')" = "1" ] \
   && ok "11b fix_list 只留真成果（假成功已剔除，不进 marker）" || bad "11b: $(cat "$BC_DIR/consolidate_fix_0.txt")"
-cut -d'|' -f1 "$BC_DIR/consolidate_fix_0.txt" | grep -qxF "bad/file3.mp4" \
+cut -d$'\037' -f1 "$BC_DIR/consolidate_fix_0.txt" | grep -qxF "bad/file3.mp4" \
   && ok "11c 保留的是重启后仍在的条目" || bad "11c: $(cat "$BC_DIR/consolidate_fix_0.txt")"
-cut -d'|' -f1 "$BC_DIR/consolidate_fix_0.txt" | grep -qxF "ghost/file2.mp4" \
+cut -d$'\037' -f1 "$BC_DIR/consolidate_fix_0.txt" | grep -qxF "ghost/file2.mp4" \
   && bad "11c2 假成功不应留在 fix_list" || ok "11c2 假成功已移出 fix_list"
 grep -q "ghost/file2.mp4" "$BC_DIR/consolidate_fail_0.txt" \
   && ok "11d 假成功转记失败清单（下轮继续修）" || bad "11d: $(cat "$BC_DIR/consolidate_fail_0.txt" 2>/dev/null)"

@@ -63,6 +63,10 @@
 #   FIXCHECK_RESET_BLACKLIST=1|0   FIXCHECK_TRUTH_RESTART=1|0
 set -uo pipefail
 
+# 清单分隔符兜底（真源 utils.sh）: 单测 stub 掉 load_all.sh 时 utils 不在场，
+# set -u 下未绑定会让整个驱动当场中止（不是"少读几条"）
+: "${OL_FIELD_SEP=$'\037'}"
+
 FIXCHECK_MODE="${FIXCHECK_MODE:-list}"
 FIXCHECK_TASK="${FIXCHECK_TASK:-task5}"
 FIXCHECK_MAX="${FIXCHECK_MAX:-10}"
