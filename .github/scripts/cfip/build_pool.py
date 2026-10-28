@@ -26,6 +26,11 @@ EXTRA_SOURCES = {
     # cf-speed-dns（CloudflareSpeedTest 每 5 分钟推送优选）：整行逗号分隔，parse_lines 已兼容
     'cf-speed-dns': 'https://ip.164746.xyz/ipTop.html',
 }
+
+# 反代IP不是优选入口：实测 8.222.219.140/47.57.245.232 TLS 握手失败，8.218.70.238 返回的是
+# 无关站点证书（merchant.dfcaifu.top）。当优选IP会直接产出死节点，故不进 cfip-extra.txt，
+# 只保留在 cfip-all.txt（可用作 PROXYIP 候选池）。
+NOT_ENTRY_SOURCES = {'ipdb-bestproxy'}
 IP_PORT = re.compile(r'^(\d{1,3}(?:\.\d{1,3}){3}):(\d{1,5})(?:#(.*))?$')
 IP_ONLY = re.compile(r'^(\d{1,3}(?:\.\d{1,3}){3})$')
 DEFAULT_PORT = '443'
@@ -145,7 +150,8 @@ def main():
     for name, url in EXTRA_SOURCES.items():
         try:
             extras[name] = parse_lines(fetch(url))
-            extra_tagged.extend((ip, port, note or name) for ip, port, note in extras[name])
+            if name not in NOT_ENTRY_SOURCES:
+                extra_tagged.extend((ip, port, note or name) for ip, port, note in extras[name])
             print(f'{name}: {len(extras[name])} 条')
         except Exception as exc:
             extras[name] = []
