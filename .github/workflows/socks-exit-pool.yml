@@ -30,8 +30,8 @@ jobs:
 
       - name: 抓源测活并生成节点
         env:
-          EDGETUNNEL_HOST: ${{ secrets.EDGETUNNEL_HOST }}
-          EDGETUNNEL_UUID: ${{ secrets.EDGETUNNEL_UUID }}
+          # 基座 = subs-check 的 all.yaml（节点名带测速/IP风险/解锁标签）；出口固定取 qzz 源 socks5
+          SUBS_CHECK_GIST_ID: ${{ secrets.SUBS_CHECK_GIST_ID }}
         run: python3 .github/scripts/socks-exit/build_socks_exit.py --out out
 
       - name: 更新 Gist
