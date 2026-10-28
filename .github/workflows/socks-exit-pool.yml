@@ -1,0 +1,61 @@
+name: socks-exit-pool
+
+# 为什么要有它（2026-10-28）：
+#   主人要把免费订阅（234.qzz.io）的 SOCKS5 当 edgetunnel 出口用，让 YouTube 稳定判区。
+#   实测结论定了设计：这批节点 1 小时换血 93%，手钉进 KV 必死；而 edgetunnel 支持
+#   path 级出口（/socks5://host:port 全局形），所以改成「定时测活 → 重新生成节点」，
+#   客户端每次拉订阅拿到的都是当下能用的。产物写独立私有 Gist 文件 socks-exit.yaml，
+#   与 subs-check 每 5 分钟同步的 all.yaml 分开，避免两边互相覆盖。
+#
+# 为什么是 10 分钟：源节点按小时漂，10 分钟足够跟上；再密没有收益，且 Actions 定时本身有延迟。
+
+on:
+  schedule:
+    # 源节点按小时漂移，15 分钟足够跟上；仓库约定不用 */5（会被限流，见 docs/self-retrigger.md）
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+concurrency: socks-exit-pool
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 安装依赖
+        run: |
+          # ubuntu-24.04 镜像自带 PyYAML；缺失时才装（PEP 668 需 --break-system-packages）
+          python3 -c "import yaml" 2>/dev/null || python3 -m pip install --quiet --break-system-packages pyyaml
+
+      - name: 抓源测活并生成节点
+        env:
+          EDGETUNNEL_HOST: ${{ secrets.EDGETUNNEL_HOST }}
+          EDGETUNNEL_UUID: ${{ secrets.EDGETUNNEL_UUID }}
+        run: python3 .github/scripts/socks-exit/build_socks_exit.py --out out
+
+      - name: 更新 Gist
+        env:
+          GH_TOKEN: ${{ secrets.PAT }}
+          GIST_ID: ${{ secrets.SOCKS_EXIT_GIST_ID }}
+        run: |
+          set -e
+          f=out/socks-exit.yaml
+          # 脚本在「无可用节点」时故意不产出文件：此时保留上一版，避免客户端订阅清零
+          if [ ! -s "$f" ]; then
+            echo "::warning::本轮未产出节点，保留上一版 Gist"
+            exit 0
+          fi
+          n=$(python3 -c "import yaml;print(len(yaml.safe_load(open('$f'))['proxies']))")
+          if [ "$n" -lt 1 ]; then
+            echo "::warning::本轮 0 个可用节点，保留上一版 Gist"
+            exit 0
+          fi
+          cur=$(gh api "gists/$GIST_ID" --jq '.files["socks-exit.yaml"].content' 2>/dev/null || true)
+          if [ "$cur" = "$(cat "$f")" ]; then
+            echo "内容未变化，跳过写入"
+            exit 0
+          fi
+          jq -n --arg c "$(cat "$f")" '{files:{"socks-exit.yaml":{content:$c}}}' > payload.json
+          gh api -X PATCH "gists/$GIST_ID" --input payload.json >/dev/null
+          echo "已更新 socks-exit.yaml（$n 个节点）"
