@@ -141,10 +141,51 @@ jobs:
               echo "🚀 已后台预取主包 openclaw.tar.gz（${tar_bytes}B，pid $(cat "$P/openclaw-tar.pid")）"
             fi
           fi
+
+          # 2026-10-29 下线优化（B2）：zcode/OmniRoute 主档同样预取（消费方各自等收口，
+          # 未命中照原路同步下载；zcode 消费方 = 后置的 ZCode 恢复步骤，OmniRoute 消费方
+          # = AI 网关步骤）。单档体积门 2×+512MB，与主包同口径防挤爆；rc 文件最后写。
+          cat > "$P/pull-one-tar.sh" <<'PF_EOF'
+          #!/usr/bin/env bash
+          # 用法: pull-one-tar.sh <Name> <prefetch_dir>；产物 .part → mv，rc 文件最后写
+          #（rc 出现即代表包就位或终态失败，轮询方不会读到半截）。
+          set +e
+          NAME="$1"; P="$2"
+          KEY="$(printf '%s' "$NAME" | tr 'A-Z' 'a-z')"
+          rclone copyto "dropbox:self-hosted/${NAME}.tar.gz" "$P/${NAME}.tar.gz.part" --multi-thread-streams 16
+          rc=$?
+          if [ "$rc" -eq 0 ] && [ -s "$P/${NAME}.tar.gz.part" ]; then
+            mv "$P/${NAME}.tar.gz.part" "$P/${NAME}.tar.gz"
+          else
+            rm -f "$P/${NAME}.tar.gz.part"
+            [ "$rc" -eq 0 ] && rc=1
+          fi
+          echo "$rc" > "$P/${KEY}-tar.rc"
+          PF_EOF
+          chmod +x "$P/pull-one-tar.sh"
+          for _pf_name in zcode OmniRoute; do
+            _pf_key="$(printf '%s' "$_pf_name" | tr 'A-Z' 'a-z')"
+            _pf_bytes="$(rclone size --json "dropbox:self-hosted/${_pf_name}.tar.gz" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null)" || _pf_bytes=0
+            case "${_pf_bytes:-0}" in ''|*[!0-9]*) _pf_bytes=0 ;; esac
+            if [ "$_pf_bytes" -eq 0 ]; then
+              echo "ℹ️ 未取得 ${_pf_name}.tar.gz 远端体积，跳过预取（消费方按原路同步下载）"
+              continue
+            fi
+            _pf_avail_kb="$(df -Pk /tmp | awk 'NR==2 {print $4}')"
+            _pf_need_kb="$(( _pf_bytes / 1024 * 2 + 512 * 1024 ))"
+            if [ "${_pf_avail_kb:-0}" -lt "$_pf_need_kb" ]; then
+              echo "ℹ️ /tmp 空间不足以预取 ${_pf_name}.tar.gz（available=${_pf_avail_kb}KB required=${_pf_need_kb}KB），跳过"
+              continue
+            fi
+            nohup bash "$P/pull-one-tar.sh" "$_pf_name" "$P" >"$P/${_pf_key}-tar.out" 2>&1 &
+            echo $! > "$P/${_pf_key}-tar.pid"
+            echo "🚀 已后台预取 ${_pf_name}.tar.gz（${_pf_bytes}B，pid $(cat "$P/${_pf_key}-tar.pid")）"
+          done
       - name: Mount Dropbox
         run: |
-          sudo apt-get update
-          sudo apt-get install -y fuse3
+          # 2026-10-29 下线优化（B3）：hosted runner 镜像自带 apt 索引，直接安装；
+          # 索引过期导致失败时再补 update 重装（实测 apt-get update 占本步骤大半耗时）。
+          sudo apt-get install -y fuse3 || { sudo apt-get update && sudo apt-get install -y fuse3; }
           sudo mkdir -p /dropbox /mnt/vfs/dropbox /opt/logs
           sudo chown runner:runner /dropbox /mnt/vfs/dropbox /opt/logs
 
@@ -268,8 +309,23 @@ jobs:
           exec > >(tee -a /tmp/install-openclaw-step.log) 2>&1
           echo "Installing OpenClaw base..."
           INST_T0=$(date +%s)
-          curl -fsSL https://openclaw.ai/install.sh | bash -s -- --no-onboard
-          echo "⏱️ install timing: cli_install_sec=$(( $(date +%s) - INST_T0 ))"
+          # 2026-10-29 下线优化（B2）：CLI 安装与主包下载/解包互相独立 —— installer 后台
+          # 起跑，与 Prefetch 的主包下载/解包重叠（实测两者各占约 1 分钟）。收口点在
+          # 恢复侧判据之前：config validate / secrets audit 需要 openclaw 在 PATH，
+          # 判据强度不因并行化衰减。失败语义不变：wait 非零 → 本步骤 exit 1 →
+          # Run OpenClaw 不执行 → 既有失败通知照发。
+          ( curl -fsSL https://openclaw.ai/install.sh | bash -s -- --no-onboard ) > /tmp/openclaw-cli-install.log 2>&1 &
+          OC_CLI_INSTALL_PID=$!
+          wait_cli_install() {
+            if wait "$OC_CLI_INSTALL_PID"; then
+              echo "✅ OpenClaw CLI 安装完成"
+            else
+              echo "❌ OpenClaw CLI 安装失败（/tmp/openclaw-cli-install.log 尾部：）"
+              tail -n 20 /tmp/openclaw-cli-install.log 2>/dev/null || true
+              exit 1
+            fi
+            echo "⏱️ install timing: cli_install_sec=$(( $(date +%s) - INST_T0 ))"
+          }
 
           echo "Configuring local ~/.openclaw with Dropbox-linked config..."
           mkdir -p /dropbox/self-hosted/openclaw
@@ -455,6 +511,9 @@ jobs:
               echo "✅ ${label} 结构+配置+secrets 判据通过（${OPENCLAW_RESTORE_VERDICT}）"
               return 0
             }
+            # B2 收口：try_openclaw_candidate 内的 config validate / secrets audit
+            # 需要 openclaw CLI —— installer 必须在此前完成，判据强度不衰减。
+            wait_cli_install
             tarball_usable=0
             if try_openclaw_candidate "$TMP_OPENCLAW_TAR" "云端主包"; then
               tarball_usable=1
@@ -527,6 +586,9 @@ jobs:
           else
             echo "⚠️ No openclaw archive found. Falling back to sync from raw directory..."
             OPENCLAW_RESTORE_SOURCE="raw-dir"
+            # B2 收口：installer 后台并行，与 raw 目录同步重叠；步骤结束前必须 wait，
+            # 否则 GH 在 step 结束时回收子进程会打断半截安装。
+            wait_cli_install
             rclone copy dropbox:self-hosted/openclaw ~/.openclaw \
               --retries 10 \
               --low-level-retries 20 \
@@ -559,76 +621,6 @@ jobs:
             exit 1
           fi
 
-          # ZCode 数据恢复：~/.zcode 下的个人数据在 runner 重置后会丢，从 Dropbox 主包还原。
-          # v2/tasks-index.sqlite 是侧栏会话列表（标题/置顶/归档/未读/删除），不是可再生索引 ——
-          # 它只由在线 sessions-index 订阅播种，本地 db 重建不出来，丢了侧栏就是空的。
-          # server/ 也入包：它是桌面客户端连接时下载铺开的运行时（约 326MB，含 116MB node），
-          # 有包在手就能省掉每轮重新下载。但只在本地**不存在**时铺开 —— 本地已有说明客户端
-          # 已部署好（比包内新），覆盖只会把新版本降级成旧版本。
-          TMP_ZCODE_TAR="/tmp/zcode-restore.tar.gz"
-          ZCODE_RESTORE_DIR="/tmp/zcode-restore"
-          rm -rf "$ZCODE_RESTORE_DIR" 2>/dev/null || true
-          if rclone ls dropbox:self-hosted/zcode.tar.gz > /dev/null 2>&1; then
-            echo "📦 Found zcode.tar.gz! Downloading and extracting..."
-            rclone copyto dropbox:self-hosted/zcode.tar.gz "$TMP_ZCODE_TAR" --multi-thread-streams 16
-            if [ -s "$TMP_ZCODE_TAR" ] && tar -tzf "$TMP_ZCODE_TAR" >/dev/null 2>&1; then
-              mkdir -p "$ZCODE_RESTORE_DIR"
-              tar -xzf "$TMP_ZCODE_TAR" -C "$ZCODE_RESTORE_DIR"
-              restored_any=0
-              for rel in cli v2; do
-                if [ -d "$ZCODE_RESTORE_DIR/.zcode/$rel" ]; then
-                  mkdir -p ~/.zcode
-                  rm -rf ~/.zcode/$rel
-                  cp -a "$ZCODE_RESTORE_DIR/.zcode/$rel" ~/.zcode/$rel
-                  echo "✅ Restored ~/.zcode/$rel from archive"
-                  restored_any=1
-                fi
-              done
-              if [ "$restored_any" -eq 0 ]; then
-                echo "⚠️ Archive contains neither .zcode/cli nor .zcode/v2, skipping ZCode restore."
-              fi
-              # server 设备身份（v2/certs CA + telemetry-state.json 的 deviceMid）随 v2/ 一起还原。
-              # 每次重新部署 server 都会重新生成身份，客户端把归档等本地 UI 状态 keyed 到该身份上；
-              # 身份一变，客户端里已归档会话全部复活（2026-09-12 排查结论：归档动作在 runner 侧零落盘）。
-              # 复用身份后客户端跨重置认得同一个 server。
-              if [ -d "$ZCODE_RESTORE_DIR/.zcode/v2/certs" ]; then
-                echo "✅ Restored ~/.zcode/v2 server identity (certs + deviceMid)"
-              else
-                echo "ℹ️ Archive has no .zcode/v2 identity (old package), server will generate a fresh one."
-              fi
-              # server/：仅当本地没有时铺开（省一次完整下载）。本地已有则保留 —— 那是客户端
-              # 本轮刚部署的版本，可能比包内新，覆盖等于降级。
-              if [ -d "$ZCODE_RESTORE_DIR/.zcode/server" ]; then
-                if [ -d ~/.zcode/server ]; then
-                  echo "ℹ️ ~/.zcode/server 已存在（客户端已部署），保留本地版本、不用包内副本覆盖"
-                else
-                  mkdir -p ~/.zcode
-                  cp -a "$ZCODE_RESTORE_DIR/.zcode/server" ~/.zcode/server
-                  echo "✅ Restored ~/.zcode/server from archive (skips this run's re-download)"
-                fi
-              else
-                echo "ℹ️ Archive has no .zcode/server (old package), client will deploy it fresh."
-              fi
-            else
-              echo "⚠️ zcode.tar.gz validation failed, skipping ZCode restore."
-            fi
-            rm -f "$TMP_ZCODE_TAR" 2>/dev/null || true
-            rm -rf "$ZCODE_RESTORE_DIR" 2>/dev/null || true
-            echo "=== restored ~/.zcode ==="
-            du -sh ~/.zcode/cli ~/.zcode/v2 ~/.zcode/server 2>/dev/null || true
-            ls ~/.zcode/cli/db/db.sqlite ~/.zcode/v2/tasks-index.sqlite 2>/dev/null \
-              || echo "⚠️ 还原后未见 db.sqlite/tasks-index.sqlite"
-            if command -v sqlite3 >/dev/null 2>&1; then
-              # 侧栏条数是「还原是否真的成功」最直接的证据：只报文件存在，无法区分空库与有库
-              echo "tasks-index rows: $(sqlite3 ~/.zcode/v2/tasks-index.sqlite 'select count(*) from tasks' 2>/dev/null || echo '?')"
-              echo "db.sqlite sessions: $(sqlite3 ~/.zcode/cli/db/db.sqlite 'select count(*) from session' 2>/dev/null || echo '?')"
-            fi
-          else
-            echo "ℹ️ No zcode.tar.gz found on Dropbox (first run), skipping ZCode restore."
-          fi
-
-          npm i -g @google/gemini-cli
-          npm i -g clawhub
 
 
       - name: Restore skill symlink for proactivity
@@ -647,305 +639,6 @@ jobs:
           find "$HOME/.openclaw/workspace/skills-data/proactivity" -type d -exec chmod 700 {} + 2>/dev/null || true
           find "$HOME/.openclaw/workspace/skills-data/proactivity" -type f -exec chmod 600 {} + 2>/dev/null || true
           ls -ld "$HOME/proactivity" "$HOME/.openclaw/workspace/skills-data/proactivity"
-
-      - name: Clean stale Tailscale nodes (openclaw* 僵尸清退)
-        id: ts_clean
-        if: ${{ always() && (env.TS_API_KEY != '' || (env.TS_OAUTH_CLIENT_ID != '' && env.TS_OAUTH_CLIENT_SECRET != '')) }}
-        env:
-          TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          TS_OAUTH_CLIENT_SECRET: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
-          TS_API_KEY: ${{ secrets.TS_API_KEY }}
-        run: |
-          set -euo pipefail
-          # 上一轮被 360m 硬上限强杀时，tailscale/github-action 的 post-logout 不跑，
-          # 节点虽为 ephemeral（action 注册即带 ephemeral=true，源码实测），但控制面
-          # 清理有几十分钟级延迟，singleton 立即接力的下一轮仍会撞名 —— 新轮
-          # 会被控制面静默退化成 openclaw-1/-2…（2026-09-30 实锤，KeyExpiry=null）。
-          # 本步骤先于 Setup Tailscale 执行：此刻 tailnet 里的 openclaw* 一律是历史
-          # 残留（含 openclaw-N / openclaw-tmp-*），逐个删除，从根上消掉退化。
-          #
-          # ⚠️ 关键坑（2026-10-01 实测）：Tailscale API **不用 Bearer**！
-          #    此前一律用 -H "Authorization: Bearer ..." 打，无论 tskey-client-*
-          #    还是 tskey-api-* 都返回 401/404，被误判成「scope 不足」，守护因此
-          #    空转了很久（连代码注释都跟着写错了结论）。正确用法是 Basic auth：
-          #      curl -u "${KEY}:" https://api.tailscale.com/api/v2/...
-          #    （key 作用户名、密码留空）
-          # 凭据优先级：
-          #   ① TS_API_KEY（tskey-api-*）—— API access token，具 devices 读写权限；
-          #   ② 无则回退 OAuth client（tskey-client-*）—— 仅兼容保留，实测无 devices 权限。
-          _auth=()
-          if [ -n "${TS_API_KEY:-}" ]; then
-            echo "1. 使用 TS_API_KEY（API access token · Basic auth）..."
-            _auth=(-u "${TS_API_KEY}:")
-          else
-            echo "1. OAuth client -> token（scope 仅 auth_keys，预计列设备失败）..."
-            _tok="$(curl -fsS --max-time 20 https://api.tailscale.com/api/v2/oauth/token \
-              --data-urlencode "client_id=${TS_OAUTH_CLIENT_ID}" \
-              --data-urlencode "client_secret=${TS_OAUTH_CLIENT_SECRET}" \
-              --data-urlencode "grant_type=client_credentials" 2>/dev/null \
-              | jq -r '.access_token // empty' 2>/dev/null || true)"
-            if [ -z "${_tok}" ]; then
-              echo "⚠️ 未能取得 Tailscale API token，跳过僵尸清退（本轮可能仍退化 openclaw-1）"
-              exit 0
-            fi
-            _auth=(-H "Authorization: Bearer ${_tok}")
-          fi
-          echo "2. 拉取 tailnet 设备列表..."
-          _dev_code="$(curl -s -o /tmp/ts-devices.json -w '%{http_code}' --max-time 20 \
-            "${_auth[@]}" \
-            https://api.tailscale.com/api/v2/tailnet/-/devices 2>/dev/null || true)"
-          if [ "${_dev_code}" != "200" ]; then
-            echo "⚠️ 设备列表获取失败 (HTTP ${_dev_code})：僵尸清退未生效"
-            if [ -z "${TS_API_KEY:-}" ]; then
-              echo "   根因：tskey-client-* 只有 auth_keys scope，天生无 devices 权限"
-              echo "   补法：Tailscale admin → Settings → Keys → 生成 tskey-api-* 存为 TS_API_KEY"
-            else
-              echo "   TS_API_KEY 已配置但仍失败：多为认证方式非 Basic（-u \"KEY:\"），或 key 已撤销/过期"
-            fi
-            rm -f /tmp/ts-devices.json
-            exit 0
-          fi
-          _dev="$(cat /tmp/ts-devices.json)"
-          rm -f /tmp/ts-devices.json
-          # 注册前运行：openclaw* 一律视为残留。按 hostname/name 双字段匹配，
-          # 覆盖 openclaw / openclaw-1 / openclaw-tmp-* 全家族。
-          #
-          # ⚠️ 只删「断连」节点，绝不碰活着的（2026-10-01 实测加固）：
-          #    权限打通前本步骤因删不动而“安全”；一旦能删，无差别 test("openclaw")
-          #    会命中**当前仍在跑的那一轮自己** —— job 重试/手动重触发时开场就把
-          #    自己的 SSH 入口删掉（自杀）。故必须加 connectedToControl == false。
-          #    判据说明：设备列表**没有 online 字段**（别用 .online // false ——
-          #    jq 的 // 对字段缺失同样取右值，会静默把活节点判成离线，已踩）；
-          #    真实在线判据是 connectedToControl。实测真僵尸该值为 false，
-          #    在跑的节点为 true。
-          # 活着的同名节点交给 Enable Tailscale SSH 的临时名中转去回收，不在这里硬删。
-          _stale="$(printf '%s' "${_dev}" | jq -r '
-            (.devices // [])[]?
-            | select(((.hostname // "") + " " + (.name // "")) | test("openclaw"))
-            | select(.connectedToControl == false)
-            | .id' 2>/dev/null || true)"
-          if [ -z "${_stale}" ]; then
-            echo "✅ 无 openclaw* 残留节点，跳过删除"
-            exit 0
-          fi
-          echo "3. 发现 $(printf '%s' "${_stale}" | grep -c .) 个残留节点，逐个删除..."
-          for _id in ${_stale}; do
-            _code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 -X DELETE \
-              "${_auth[@]}" \
-              "https://api.tailscale.com/api/v2/device/${_id}" 2>/dev/null || true)"
-            case "${_code}" in
-              200|204) echo "✅ 已删除残留节点 ${_id} (HTTP ${_code})" ;;
-              *) echo "⚠️ 删除 ${_id} 失败 (HTTP ${_code})：凭据无 devices 写权限或该节点不可管理" ;;
-            esac
-          done
-      - name: Tailscale daemon 纳管 (systemd)
-        id: ts_daemon
-        # 2026-10-23：本步骤与 OpenClaw 无关，不能因前置 Install OpenClaw 失败而被
-        # 默认 success() 跳过 —— run 39858698391 就是这样：Install 失败 → 本步 skipped
-        # → 下一步 Setup Tailscale 仍用 always() 跑，却没有托管 daemon，直接失败。
-        if: ${{ always() }}
-        # 长驻服务一律 systemd 托管（2026-10-05 主人拍板）。必须在
-        # tailscale/github-action **之前**执行，原因见下方接管原理。
-        run: |
-          set -uo pipefail
-          if [ -f "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" ]; then
-            bash "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" ensure tailscaled || true
-          else
-            echo "⚠️ services.sh 缺失，沿用 action 自带的 --state=mem: 裸跑"
-          fi
-          # 接管原理（2026-10-05 实测）：
-          #   action 内部无条件 spawn `sudo -E tailscaled --state=mem:`。若本单元
-          #   已占据 TUN，action 那个实例会因 "TUN device tailscale0 is busy" 立即
-          #   退出；但 action 随后 waitForDaemonReady() 轮询的是**默认 socket**
-          #   （即本单元），拿到响应即判定就绪，接着 connectToTailscale 的
-          #   `tailscale up` 同样打在本单元上 —— 于是登录态落到托管的 daemon。
-          #   第二个实例的退出码被 action 忽略（detached + unref），不会 fail 步骤。
-          #
-          # 为什么必须 --statedir 而非 --state=mem:（实测踩坑）
-          #   mem: 把登录态只放内存，进程一死认证即丢，Restart=always 拉起来的
-          #   只是个 Logged out 空壳 —— 托管形同虚设。statedir 落盘后崩溃重启
-          #   自动恢复登录，自愈才是真的自愈。
-          #
-          # 过渡期：若本机已有 action 起的 mem: 裸跑实例，ensure 会检测并跳过
-          #   （不抢占 TUN、不打断当前 SSH），单元在新 VM 上自动接管。
-      - name: Setup Tailscale (SSH 调试入口)
-        id: ts
-        # daemon 纳管没成功就不要硬跑 action：否则失败会看起来像 Tailscale 本身坏了，
-        # 实际是前置步骤被跳过（run 39858698391 的级联失败）。
-        if: ${{ always() && steps.ts_daemon.outcome == 'success' && env.TS_OAUTH_CLIENT_ID != '' && env.TS_OAUTH_CLIENT_SECRET != '' }}
-        uses: tailscale/github-action@306e68a486fd2350f2bfc3b19fcd143891a4a2d8 # v4
-        with:
-          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
-          tags: tag:ci
-          # 与 systemd 单元用同一 statedir：即便本轮是 action 的实例抢到了 TUN，
-          # 登录态也落盘，下一轮单元接管时无需重新认证。
-          statedir: /var/lib/tailscale
-          # 注册时就固定主机名（action v4 原生 hostname 入参，实测 306e68a 的
-          # action.yml 有该 input）：此前是「先按 runner 名注册、再 set --hostname
-          # 改名」，两步之间存在竞态 —— 注册瞬间若 tailnet 里还有上一轮的
-          # openclaw 残留，控制面当场就分配 openclaw-1，事后 set 改不回来
-          # （prefs 里 Hostname 写对了，DNS 名仍是 openclaw-1，2026-10-01 实锤）。
-          # 注册即声明能消掉这个窗口，是防退化的第一优先手段。
-          hostname: openclaw
-
-      - name: Enable Tailscale SSH
-        id: ts_ssh
-        if: ${{ always() && steps.ts.outcome == 'success' }}
-        run: |
-          set -euo pipefail
-          # 开启 Exit Node 前置条件：启用内核转发
-          echo 'net.ipv4.ip_forward = 1' | sudo tee /etc/sysctl.d/99-tailscale-forward.conf
-          echo 'net.ipv6.conf.all.forwarding = 1' | sudo tee -a /etc/sysctl.d/99-tailscale-forward.conf
-          sudo sysctl -p /etc/sysctl.d/99-tailscale-forward.conf
-
-          # 固定主机名 openclaw（singleton 并发下不会撞名）；节点为 ephemeral，job 结束自动移除
-          # 开启 Exit Node：tailnet 内设备可将本 runner 设为出口节点
-          # 批准方式（任选其一）：
-          #   ① 管理页手动批准: https://login.tailscale.com/admin/machines → 找到 openclaw 节点
-          #      → Edit route settings → 勾选 0.0.0.0/0, ::/0（ephemeral 节点每次运行都需重新批准）
-          #   ② ACL autoApprovers（推荐，免每次批准）: 在 Tailscale ACL rules 前加：
-          #        "autoApprovers": {
-          #          "routes": { "0.0.0.0/0": ["tag:ci"], "::/0": ["tag:ci"] }
-          #        },
-          #   ③ Tailscale API 程序化批准:
-          #      GET  https://api.tailscale.com/api/v2/tailnet/{tailnet}/devices  查到节点 id
-          #      POST https://api.tailscale.com/api/v2/device/{device_id}/routes  body: {"routes": ["0.0.0.0/0", "::/0"]}
-          #      （需 TS_API_KEY，ephemeral 节点 id 每次变化，需按主机名动态查询）
-          sudo tailscale set --ssh --hostname=openclaw --advertise-exit-node
-          # 回读实际注册的 DNS 名。--hostname 的重命名有传播延迟，若 set 后立刻读取
-          # 可能拿到机器原始主机名（如 github-runnervmgx7h7），导致 ts.env 里的 SSH/
-          # RustDesk 直连地址每轮漂移。这里轮询等待名字收敛为 openclaw。
-          # tailnet 后缀（形如 xxxx.ts.net）动态取，避免硬编码到别的 tailnet 时写歪。
-          TS_SUFFIX="$(tailscale status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')"
-          TS_SUFFIX="${TS_SUFFIX#*.}"
-          TS_FQDN=""
-          for i in $(seq 1 15); do
-            TS_FQDN="$(tailscale status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')"
-            case "$TS_FQDN" in
-              "openclaw.${TS_SUFFIX}") break ;;
-            esac
-            sleep 2
-          done
-
-          # 固定主机名 openclaw（2026-09-30 补）：撞名时控制面会**静默拒绝**并退化成
-          # openclaw-1/-2…，根因是上一轮同名 ephemeral 节点残留在 tailnet——离线也照样占名。
-          # 直连 set 对这种情况无效（prefs 里 Hostname 已写对，但 DNS 名仍是 openclaw-1）。
-          # 兜底：先改到一个临时名把 openclaw 让出来，再改回去 —— 实测可强制收回名字。
-          if [ "${TS_FQDN:-}" != "openclaw.${TS_SUFFIX}" ]; then
-            echo "⚠️ 主机名被占（当前 ${TS_FQDN:-未知}），走临时名中转回收 openclaw"
-            sudo tailscale set --hostname="openclaw-tmp-$$" 2>&1 || true
-            for i in $(seq 1 10); do
-              _TMP_FQDN="$(tailscale status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')"
-              case "$_TMP_FQDN" in
-                "openclaw-tmp-$$.${TS_SUFFIX}") break ;;
-              esac
-              sleep 3
-            done
-            sudo tailscale set --ssh --hostname=openclaw --advertise-exit-node 2>&1 || true
-            TS_FQDN=""
-            for i in $(seq 1 12); do
-              TS_FQDN="$(tailscale status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')"
-              case "$TS_FQDN" in
-                "openclaw.${TS_SUFFIX}") break ;;
-              esac
-              sleep 5
-            done
-          fi
-          TS_FQDN="${TS_FQDN:-$(tailscale status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')}"
-          TS_HOST="$(printf '%s' "$TS_FQDN" | cut -d. -f1)"
-          {
-            printf 'TS_HOST=%s\n' "$TS_HOST"
-            printf 'TS_FQDN=%s\n' "$TS_FQDN"
-            printf 'TS_IP=%s\n' "$(tailscale ip -4)"
-          } > "$HOME/ts.env"
-          echo "SSH 入口: ssh runner@${TS_HOST}（RustDesk 直连: ${TS_FQDN}:21118）"
-
-          # ---------- 主机名回收守护（2026-10-01 补）----------
-          # 为什么必须有守护：上面所有回收动作都只在本步骤**这一刻**试一次，而残留的
-          # 上一轮 ephemeral 节点要几十分钟后才被控制面清掉 —— 名字是在本步骤结束后
-          # 才空出来的，那时已经没有任何东西再去收回，于是这一整轮都顶着 openclaw-1。
-          # 2026-10-01 实锤：ts.env 写着 TS_HOST=openclaw-1，而控制面 prefs 里
-          # Hostname 其实是对的 openclaw（= 名被别人占着，不是我们设错）。
-          # 且「Clean stale」步骤删不动（本仓库 OAuth client 只有 auth_keys scope，
-          # devices 列表接口 404，整段降级跳过）—— 删不掉就只能等，等就必须有人重试。
-          # 故起一个脱离本步骤进程树的守护，在整个 job 生命周期内周期重试回收：
-          #   名字一旦变回 openclaw → 重写 ts.env，RustDesk/通知/serve 地址随之自愈。
-          # setsid + nohup 脱离进程树；job 结束随 runner 一起消失，无需收尾清理。
-          mkdir -p "$HOME/.openclaw/logs"
-          if [ "${TS_FQDN:-}" != "openclaw.${TS_SUFFIX}" ]; then
-            echo "🔁 当前名为 ${TS_FQDN}，启动后台回收守护（每 120s 重试收回 openclaw）"
-            # 守护脚本本体独立成文件（.github/scripts/tailscale/ts-reclaim-hostname.sh）：
-            # 内联 heredoc 里的行不带 YAML 块缩进，会打断 run 的缩进层级（实测 YAML 解析报
-            # "could not find expected ':'"）——脚本独立出去，workflow 里只剩一行调用。
-            setsid nohup bash "${GITHUB_WORKSPACE}/.github/scripts/tailscale/ts-reclaim-hostname.sh" \
-              "${TS_SUFFIX}" "${GITHUB_RUN_ID:-0}" \
-              >> "$HOME/.openclaw/logs/ts-reclaim.log" 2>&1 < /dev/null &
-            disown 2>/dev/null || true
-            sleep 1
-            echo "✅ 回收守护已启动（日志: ~/.openclaw/logs/ts-reclaim.log）"
-          else
-            echo "✅ 主机名已为 openclaw，无需回收守护"
-          fi
-
-          # 两个后台各占一个端口、各占根路径 /admin：trae2api 8080、zcode-hub 8081。
-          # 分开端口是因为两者前端都用绝对路径 /admin，同端口会打架。
-          # tailscaled 以 --state=mem: 运行（runner 临时态设计），签不了 HTTPS 证书
-          # （no TailscaleVarRoot），故用 HTTP —— 流量仍在 WireGuard 隧道内，
-          # 安全性与直连后端端口明文等同。serve 配置随内存态逐轮清零，此处幂等重建。
-          sudo tailscale serve --bg --http=8081 http://127.0.0.1:8319
-          echo "zcode-hub 后台: http://${TS_FQDN}:8081/admin/accounts（API 网关: /v1）"
-
-          sudo tailscale serve --bg --http=8080 http://127.0.0.1:18080
-          echo "trae2api 控制台: http://${TS_FQDN}:8080/admin"
-
-          # workbuddy 只读管理台（v1.23.0 -webui，真源 services.sh）：8316 → 8082。
-          # 前端资源用相对路径，挂在 /ui/ 子路径即可；管理 Key 独立于模型 API Key
-          # （config.json gateway.adminKey），仅 tailnet 内可访问，不做公网暴露。
-          sudo tailscale serve --bg --http=8082 http://127.0.0.1:8316
-          echo "workbuddy 控制台: http://${TS_FQDN}:8082/ui/"
-          # qoder2api-hub 看板（root 路径直出，无 /admin 前缀）：8790 → 8084。
-          # 延续后台端口段（trae 8080 / zcode-hub 8081 / wb 8082 / autoclaw 8083）。
-          # 面板密码独立于 API Key（PBKDF2 落盘 settings.json），仅 tailnet 内可访问。
-          sudo tailscale serve --bg --http=8084 http://127.0.0.1:8790
-          echo "qoder2api 看板: http://${TS_FQDN}:8084/（API 网关: /v1）"
-          # 2026-10-19 主人要求「其他控制台怎么不使用 https」：6 个后台统一补 HTTPS 入口。
-          # tailscaled 虽以 --state=mem: 运行，实测**仍能签发证书**（8443-8448 全通，
-          # TLS 校验无需 -k）—— 上面「签不了 HTTPS 证书」的判断只对无端口 443 成立
-          # 的历史场景，勿再据此断言带端口 https 不可用。映射与看板 admin_entries 一致：
-          #   8443→8316(wb) 8444→18080(trae) 8445→8319(zcode)
-          #   8446→8322(autoclaw) 8447→8790(qoder) 8448→20128(omniroute)
-          # 证书签发失败不能拖垮整步，统一加兜底 echo（与 443 同款处理）。
-          sudo tailscale serve --bg --https=8443 http://127.0.0.1:8316 2>/dev/null \
-            || echo "⚠️ 8443 HTTPS serve 失败，HTTP 8082 仍可用"
-          sudo tailscale serve --bg --https=8444 http://127.0.0.1:18080 2>/dev/null \
-            || echo "⚠️ 8444 HTTPS serve 失败，HTTP 8080 仍可用"
-          sudo tailscale serve --bg --https=8445 http://127.0.0.1:8319 2>/dev/null \
-            || echo "⚠️ 8445 HTTPS serve 失败，HTTP 8081 仍可用"
-          sudo tailscale serve --bg --https=8446 http://127.0.0.1:8322 2>/dev/null \
-            || echo "⚠️ 8446 HTTPS serve 失败，HTTP 8083 仍可用"
-          sudo tailscale serve --bg --https=8447 http://127.0.0.1:8790 2>/dev/null \
-            || echo "⚠️ 8447 HTTPS serve 失败，HTTP 8084 仍可用"
-          sudo tailscale serve --bg --https=8448 http://127.0.0.1:20128 2>/dev/null \
-            || echo "⚠️ 8448 HTTPS serve 失败，OmniRoute 控制台将无入口"
-          echo "HTTPS 控制台: wb=8443 trae=8444 zcode=8445 autoclaw=8446 qoder=8447 omniroute=8448"
-          # OmniRoute AI API 无端口 HTTPS 入口：20128 → 443。
-          # 公网 ai-api.derrick.eu.org 走 Cloudflare，有 100s 硬超时；tailnet 内这条
-          # 前面没有 Cloudflare，慢请求（step-5-preview 深度思考实测单请求 18~330s）
-          # 走这里不撞墙。证书由 tailscale 自动签发、客户端免 -k（实测 TLS 校验通过）。
-          # ⚠️ 若节点名变更导致证书签发失败，不能让整步挂掉，故加兜底 echo。
-          # 网关 Control UI 另走 8085（网关自身无 /v1 路由，443 不能指 18789）。
-          sudo tailscale serve --bg --https=443 http://127.0.0.1:20128 2>/dev/null \
-            || echo "⚠️ 443 HTTPS serve 失败（多为证书签发/节点名问题），HTTP 端口 serve 不受影响"
-          echo "OmniRoute AI API: https://${TS_FQDN}/v1（API Key: CLIPROXYAPI_API_KEY）"
-          # 2026-09-30 曾尝试把 trae 挂到 80 端口的 /trae 子路径（依赖 trae2api commit
-          # a75ec3e 的前端前缀自适应），后已整体回退：a75ec3e 被 revert（镜像
-          # v2026.09.30-46abeff），zcode 也从 80 挪到 8081，与 trae 端口相邻。
-          # 公网隧道 trae2api.derrick.eu.org 已于 2026-09-29 撤销（主人要求不再公网暴露）。
-
-      - name: Tailscale secrets missing
-        if: ${{ always() && env.TS_OAUTH_CLIENT_ID == '' && env.TS_OAUTH_CLIENT_SECRET == '' }}
-        run: echo "⚠️ 未配置 TS_OAUTH_CLIENT_ID / TS_OAUTH_CLIENT_SECRET，跳过 Tailscale SSH 调试入口"
 
       - name: Prepare runtime env for later steps
         run: |
@@ -1040,808 +733,6 @@ jobs:
           chmod +x "$HOME/runtime-env.sh"
           echo "BASH_ENV=$HOME/runtime-env.sh" >> "$GITHUB_ENV"
           
-      - name: Install Cloudflared
-        run: |
-          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-          sudo dpkg -i cloudflared-linux-amd64.deb
-          sudo mkdir -p ~/.cloudflared/
-          sudo cp -r /dropbox/self-hosted/.cloudflared/* ~/.cloudflared/ 2>/dev/null || true
-          # 家目录里的状态必须是 runner 属主：sudo 复制会让凭据变成 root 属主，
-          # 而 cloudflared 是 runner 身份启动的（读 ~/.cloudflared 会 EACCES）
-          sudo chown -R runner:runner ~/.cloudflared
-
-      - name: Run Cloudflared Tunnel
-        run: |
-          mkdir -p ~/.openclaw/logs
-
-          cloudflared tunnel route dns oc oc.'${{ secrets.VD }}'.eu.org || true
-          # Managed by the unified systemd tunnel manager: tunnels get
-          # Restart=always, so a killed connector comes back on its own.
-          # Falls back to nohup only if the manager is unavailable.
-          if [ -f "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ]; then
-            bash "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ensure oc || true
-          else
-            nohup cloudflared tunnel run --url http://127.0.0.1:18789 oc \
-              > ~/.openclaw/logs/cloudflared_oc.log 2>&1 &
-            echo $! > ~/.openclaw/logs/cloudflared_oc.pid
-          fi
-
-          sleep 10
-          echo "OpenClaw tunnel started (systemd-managed)."
-
-      - name: Run rss-to-telegram container
-        env:
-          # rsstt 服务使用独立 bot，token 经同名 secret 注入（此前未接线导致容器 TOKEN 恒空）
-          TELEGRAM_BOT_TOKEN_RSS_SB_BOT: ${{ secrets.TELEGRAM_BOT_TOKEN_RSS_SB_BOT }}
-        run: |
-          set -euo pipefail
-          echo "Starting rss-to-telegram before OmniRoute..."
-          mkdir -p /dropbox/self-hosted/rsstt
-          cleanup_archive_workdir() {
-            rm -f /tmp/rsstt.tar.gz 2>/dev/null || true
-            rm -rf /tmp/rsstt-restore 2>/dev/null || true
-          }
-          free_kb() { df -Pk "${1:-/tmp}" | awk 'NR==2 {print $4}'; }
-          require_free_kb() {
-            local path="$1" min_kb="$2" label="$3"
-            local avail
-            avail=$(free_kb "$path")
-            if [ "${avail:-0}" -lt "$min_kb" ]; then
-              echo "❌ ${label}: insufficient free space at ${path}. available=${avail}KB required=${min_kb}KB" >&2
-              exit 1
-            fi
-            echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
-          }
-          require_free_kb /tmp $((1024 * 1024)) "rsstt restore preflight"
-          rm -rf /tmp/local_rsstt
-          cleanup_archive_workdir
-          mkdir -p /tmp/local_rsstt /tmp/rsstt-restore
-
-          # 门禁只看 rsstt 真正依赖的凭据（同名 secret 注入）：
-          # ~/.openclaw/.env 由 OpenClaw 自身维护、与 rsstt 无关，不能作为启动条件
-          if [ -n "${TELEGRAM_BOT_TOKEN_RSS_SB_BOT:-}" ]; then
-            if rclone ls dropbox:self-hosted/rsstt.tar.gz > /dev/null 2>&1; then
-              echo "📦 Found rsstt.tar.gz! Downloading and extracting..."
-              rclone copyto dropbox:self-hosted/rsstt.tar.gz /tmp/rsstt.tar.gz
-              archive_kb=$(du -sk /tmp/rsstt.tar.gz | awk '{print $1}')
-              if [ -z "${archive_kb:-}" ] || [ "$archive_kb" -le 0 ]; then
-                echo "❌ rsstt extract preflight: unable to calculate archive size" >&2
-                exit 1
-              fi
-              echo "rsstt.tar.gz 大小: ${archive_kb}KB"
-              require_free_kb /tmp $((archive_kb * 3 + 512 * 1024)) "rsstt extract preflight"
-              if [ -s /tmp/rsstt.tar.gz ] && tar -tzf /tmp/rsstt.tar.gz >/dev/null 2>&1; then
-                tar -xzf /tmp/rsstt.tar.gz -C /tmp/rsstt-restore
-                cp -a /tmp/rsstt-restore/. /tmp/local_rsstt/ || true
-              else
-                echo "⚠️ rsstt.tar.gz validation failed, skipping archive restore."
-              fi
-              cleanup_archive_workdir
-            else
-              echo "⚠️ No rsstt archive found. Falling back to sync from raw directory..."
-              rclone copy dropbox:self-hosted/rsstt /tmp/local_rsstt \
-                --retries 10 \
-                --low-level-retries 20 \
-                --timeout 1m \
-                --contimeout 15s \
-                --exclude "docker-compose.yml" \
-                -P || true
-            fi
-
-            mkdir -p /tmp/local_rsstt/config /tmp/local_rsstt/data
-            touch /tmp/local_rsstt/config/.keep /tmp/local_rsstt/data/.keep
-
-            echo "=== restored rss-to-telegram tree ==="
-            find /tmp/local_rsstt -maxdepth 3 | sort || true
-
-            start_rsstt_container() {
-              docker rm -f rss-to-telegram 2>/dev/null || true
-              docker run -d \
-                --name rss-to-telegram \
-                --restart unless-stopped \
-                -v /tmp/local_rsstt/config:/app/config \
-                -v /tmp/local_rsstt/data:/app/data \
-                -e TOKEN="$TELEGRAM_BOT_TOKEN_RSS_SB_BOT" \
-                -e MANAGER="83279194" \
-                -e MULTIUSER="0" \
-                rongronggg9/rss-to-telegram:latest
-            }
-
-            print_rsstt_status() {
-              echo "=== rss-to-telegram status ==="
-              docker ps -a --filter name=rss-to-telegram
-              container_status="$(docker inspect --format '{{.State.Status}}' rss-to-telegram)"
-              health_status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' rss-to-telegram)"
-              restart_count="$(docker inspect --format '{{.RestartCount}}' rss-to-telegram)"
-              echo "rss-to-telegram status=${container_status} health=${health_status} restarts=${restart_count}"
-            }
-
-            validate_rsstt_container() {
-              print_rsstt_status
-
-              if [ "$container_status" != "running" ] || [ "$health_status" = "unhealthy" ]; then
-                echo "❌ rss-to-telegram failed to become healthy"
-                docker logs --tail 200 rss-to-telegram || true
-                return 1
-              fi
-
-              if docker logs --tail 200 rss-to-telegram 2>&1 | grep -Eqi 'LOGIN FAILED|Unknown error occurred during login'; then
-                echo "❌ rss-to-telegram encountered a Telegram login failure"
-                docker logs --tail 200 rss-to-telegram || true
-                return 1
-              fi
-            }
-
-            archive_rsstt_state() {
-              local min_size=$((5 * 1024))
-              local actual_size
-
-              echo "📦 Archiving repaired rss-to-telegram state immediately..."
-              rm -f /tmp/rsstt.tar.gz
-              tar -czf /tmp/rsstt.tar.gz -C /tmp/local_rsstt .
-              tar -tzf /tmp/rsstt.tar.gz >/dev/null
-              actual_size="$(stat -c%s /tmp/rsstt.tar.gz 2>/dev/null || echo 0)"
-              if [ "$actual_size" -lt "$min_size" ]; then
-                echo "❌ repaired rsstt archive is too small: size=${actual_size} min=${min_size}"
-                exit 1
-              fi
-              rclone copyto /tmp/rsstt.tar.gz dropbox:self-hosted/rsstt.tar.gz -v
-              rm -f /tmp/rsstt.tar.gz
-              echo "✅ Repaired rss-to-telegram state uploaded"
-            }
-
-            echo "Waiting for rss-to-telegram container to stabilize..."
-            start_rsstt_container
-            sleep 12
-
-            if ! validate_rsstt_container; then
-              if docker logs --tail 200 rss-to-telegram 2>&1 | grep -qi 'AuthKeyDuplicatedError'; then
-                echo "⚠️ rss-to-telegram session was invalidated by AuthKeyDuplicatedError; deleting session and retrying once."
-                docker rm -f rss-to-telegram 2>/dev/null || true
-                rm -f \
-                  /tmp/local_rsstt/config/bot.session \
-                  /tmp/local_rsstt/config/bot.session-journal \
-                  /tmp/local_rsstt/config/bot.session-shm \
-                  /tmp/local_rsstt/config/bot.session-wal
-                start_rsstt_container
-                sleep 12
-                validate_rsstt_container
-                archive_rsstt_state
-              else
-                exit 1
-              fi
-            fi
-
-            echo "=== rss-to-telegram /app tree (for persistence verification) ==="
-            docker exec rss-to-telegram sh -lc 'find /app -maxdepth 3 \( -type f -o -type d \) | sort | sed -n "1,200p"'
-            echo "=== rss-to-telegram local bind tree after startup ==="
-            find /tmp/local_rsstt -maxdepth 3 | sort || true
-          else
-            echo "❌ TELEGRAM_BOT_TOKEN_RSS_SB_BOT 未配置，跳过 rss-to-telegram 启动；本轮无 rsstt 数据，最终归档会跳过上传"
-          fi
-
-      - name: "Run AI API gateway (backend: ${{ inputs.ai_backend }})"
-        env:
-          # 手动运行时可指定本次使用的网关后端（auto = 自动降级链）；定时触发为 auto
-          AI_BACKEND_INPUT: ${{ inputs.ai_backend || 'auto' }}
-          # 归档存在但恢复失败→bootstrap 空库时发 tier=alert 告警（P0 加固 2026-10-11）
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          TELEGRAM_BOT_TOKEN_ALERT: ${{ secrets.TELEGRAM_BOT_TOKEN_ALERT }}
-          TELEGRAM_CHAT_ID_ALERT: ${{ secrets.TELEGRAM_CHAT_ID_ALERT }}
-          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          set -euo pipefail
-
-          # 2026-10-11 网关迁移：CliRelay（compose 全栈）/ CLIProxyAPI（回退）→ OmniRoute 单后端。
-          # 部署形态：/home/runner/omniroute（compose + .env 密钥）+ 命名卷 omniroute_omniroute-data
-          # （storage.sqlite：全部渠道/入站 key/combo；server.env：STORAGE_ENCRYPTION_KEY）。
-          # 灾备 = Dropbox OmniRoute.tar.gz 一起恢复这两样。旧链路归档的处置：
-          # CliRelay.tar.gz 由生产侧归档循环在备用容器存活期间继续刷新（备用网关口径），
-          # CLIProxyAPI.tar.gz 为历史快照不再刷新 —— DR workflow 均不再消费，仅作手动回滚素材。
-          # 本机渠道上游（workbuddy 8318 / zcode2api 8319 / qingyan 8320 / trae 7864）
-          # 由 extra_hosts host.docker.internal:host-gateway 回连。
-          echo "Configuring AI API gateway: requested backend = ${AI_BACKEND_INPUT:-auto} (port 20128)..."
-          mkdir -p /home/runner/omniroute ~/.openclaw/logs
-
-          BACKEND_STATE=/tmp/active-ai-backend.env
-          : > "$BACKEND_STATE"
-
-          OMNIROUTE_DIR=/home/runner/omniroute
-          OMNIROUTE_TAR=/tmp/OmniRoute.tar.gz
-          OMNIROUTE_ARCHIVE="dropbox:self-hosted/OmniRoute.tar.gz"
-          OMNIROUTE_IMAGE="diegosouzapw/omniroute:3.8.51"
-          OMNIROUTE_VOLUME="omniroute_omniroute-data"
-          # 恢复路径观测标记：ARCHIVE_PRESENT=探测通过；ARCHIVE_SEEN=确认云端归档存在
-          # （bootstrap 告警判据——归档存在却没恢复成 = 数据事故，见 restore 失败分支）
-          OMNIROUTE_ARCHIVE_PRESENT=0
-          OMNIROUTE_ARCHIVE_SEEN=0
-
-          cleanup_archive_workdir() {
-            rm -f /tmp/OmniRoute.tar.gz 2>/dev/null || true
-            rm -rf /tmp/omniroute-restore 2>/dev/null || true
-          }
-          free_kb() { df -Pk "${1:-/tmp}" | awk 'NR==2 {print $4}'; }
-          require_free_kb() {
-            local path="$1" min_kb="$2" label="$3"
-            local avail
-            avail=$(free_kb "$path")
-            if [ "${avail:-0}" -lt "$min_kb" ]; then
-              echo "❌ ${label}: insufficient free space at ${path}. available=${avail}KB required=${min_kb}KB" >&2
-              exit 1
-            fi
-            echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
-          }
-
-          wait_api_ready() {
-            local label="$1"
-            local tries="${2:-120}"
-            local code
-            for i in $(seq 1 "$tries"); do
-              code=$(curl -s --connect-timeout 2 -o /dev/null -w "%{http_code}" http://127.0.0.1:20128/healthz || true)
-              if [ -n "$code" ] && [ "$code" -ge 100 ] && [ "$code" -lt 600 ]; then
-                echo "✅ [$label] OmniRoute 已就绪 (HTTP ${code})"
-                return 0
-              fi
-              echo "⏳ [$label] 等待中... ${i}/${tries}"
-              sleep 2
-            done
-            return 1
-          }
-
-          # ---------- OmniRoute 部署目录 + 数据卷恢复（Dropbox 归档优先，缺失则 bootstrap） ----------
-          restore_omniroute_data() {
-            if [ -f "$OMNIROUTE_DIR/docker-compose.yml" ] && [ -f "$OMNIROUTE_DIR/.env" ]; then
-              echo "ℹ️ OmniRoute 部署目录已就绪，跳过恢复"
-              return 0
-            fi
-            cleanup_archive_workdir
-            require_free_kb /tmp $((2 * 1024 * 1024)) "OmniRoute restore preflight"
-            # 探测重试 3 次再定性（与 ~/.openclaw 恢复 2026-10-02 加固同口径）：
-            # rclone 瞬时失败被误判成"无归档"会静默 bootstrap 空库——比"恢复失败"更
-            # 危险，它连 ARCHIVE_SEEN 标记都立不起来，告警都不会响。
-            OMNIROUTE_ARCHIVE_PRESENT=0
-            for _probe in 1 2 3; do
-              if rclone ls "$OMNIROUTE_ARCHIVE" > /dev/null 2>&1; then
-                OMNIROUTE_ARCHIVE_PRESENT=1
-                break
-              fi
-              echo "⚠️ rclone ls 探测归档失败（第 ${_probe}/3 次），15s 后重试..."
-              sleep 15
-            done
-            if [ "$OMNIROUTE_ARCHIVE_PRESENT" != "1" ]; then
-              echo "ℹ️ 未找到 OmniRoute 归档，走全新 bootstrap"
-              return 1
-            fi
-            OMNIROUTE_ARCHIVE_SEEN=1
-            echo "📦 Found OmniRoute.tar.gz! Downloading and validating..."
-            if ! rclone copyto "$OMNIROUTE_ARCHIVE" "$OMNIROUTE_TAR"; then
-              echo "⚠️ OmniRoute.tar.gz 下载失败，走全新 bootstrap"
-              cleanup_archive_workdir
-              return 1
-            fi
-            local archive_kb actual_size
-            archive_kb=$(du -sk "$OMNIROUTE_TAR" | awk '{print $1}')
-            if [ -z "${archive_kb:-}" ] || [ "$archive_kb" -le 0 ]; then
-              echo "❌ OmniRoute extract preflight: unable to calculate archive size" >&2
-              exit 1
-            fi
-            echo "OmniRoute.tar.gz 大小: ${archive_kb}KB"
-            require_free_kb /tmp $((archive_kb * 3 + 512 * 1024)) "OmniRoute extract preflight"
-            local min_size=$((1024 * 1024))
-            actual_size=$(stat -c%s "$OMNIROUTE_TAR" 2>/dev/null || echo 0)
-            if [ "$actual_size" -lt "$min_size" ] || ! tar -tzf "$OMNIROUTE_TAR" >/dev/null 2>&1; then
-              echo "⚠️ OmniRoute.tar.gz validation failed，走全新 bootstrap"
-              cleanup_archive_workdir
-              return 1
-            fi
-            rm -rf /tmp/omniroute-restore
-            mkdir -p /tmp/omniroute-restore
-            tar -xzf "$OMNIROUTE_TAR" -C /tmp/omniroute-restore
-            # cleanup_archive_workdir 会 rm -rf /tmp/omniroute-restore，
-            # 必须等数据卷恢复消费完 data.tar.gz 之后才能调用，不能放在检查前
-            if [ ! -f /tmp/omniroute-restore/docker-compose.yml ] || [ ! -f /tmp/omniroute-restore/.env ]; then
-              echo "⚠️ OmniRoute.tar.gz 缺少 docker-compose.yml/.env，走全新 bootstrap"
-              cleanup_archive_workdir
-              return 1
-            fi
-            mkdir -p "$OMNIROUTE_DIR"
-            cp -a /tmp/omniroute-restore/docker-compose.yml /tmp/omniroute-restore/.env "$OMNIROUTE_DIR/"
-            chmod 600 "$OMNIROUTE_DIR/.env"
-            # 数据卷恢复：归档内 data.tar.gz → docker 卷。server.env（STORAGE_ENCRYPTION_KEY）
-            # 与 storage.sqlite 必须同代，否则存量 key 解不开 —— 二者同一份归档，天然同代。
-            # storage-backup.sqlite（归档侧 sqlite 在线一致性备份）优先于活库三件套。
-            if [ -f /tmp/omniroute-restore/data.tar.gz ]; then
-              docker volume create "$OMNIROUTE_VOLUME" >/dev/null
-              docker run --rm --user root -v "$OMNIROUTE_VOLUME:/target" -v /tmp/omniroute-restore:/src:ro \
-                "$OMNIROUTE_IMAGE" sh -c '
-                  tar xzf /src/data.tar.gz -C /target
-                  if [ -f /target/storage-backup.sqlite ]; then
-                    mv -f /target/storage-backup.sqlite /target/storage.sqlite
-                    rm -f /target/storage.sqlite-wal /target/storage.sqlite-shm
-                  fi
-                  find /target -name "._*" -delete 2>/dev/null || true
-                  chown -R 1000:1000 /target'
-              echo "✅ OmniRoute 数据卷已恢复"
-            else
-              echo "⚠️ 归档内无 data.tar.gz（纯部署目录），数据卷留空"
-            fi
-            echo "=== restored OmniRoute tree ==="
-            find "$OMNIROUTE_DIR" -maxdepth 2 | sort || true
-            cleanup_archive_workdir
-            return 0
-          }
-
-          # ---------- 全新 bootstrap（无归档时）：生成 compose + 随机密钥，空库起服 ----------
-          # 空库 = 无渠道无入站 key，客户端会 401 —— 仅用于首次冷启动兜底；首轮 Final
-          # Archive 会把这份空库打包上传，之后每次重建都走归档恢复路径。
-          # compose 内容经 sed 剥掉 run-block 的 10 空格缩进后再落盘（heredoc 无法用 <<- 剥空格）。
-          bootstrap_omniroute() {
-            echo "🔄 Bootstrapping fresh OmniRoute deployment..."
-            mkdir -p "$OMNIROUTE_DIR"
-            cat <<'OMNIROUTE_COMPOSE_EOF' | sed 's/^          //' > "$OMNIROUTE_DIR/docker-compose.yml"
-          services:
-            omniroute:
-              image: diegosouzapw/omniroute:3.8.51
-              container_name: omniroute
-              restart: unless-stopped
-              stop_grace_period: 40s
-              ports:
-                - "127.0.0.1:20128:20128"
-              env_file: .env
-              environment:
-                PORT: 20128
-                OMNIROUTE_MEMORY_MB: "4096"
-                BASE_URL: http://omniroute:20128
-                AUTH_COOKIE_SECURE: "false"
-                # 上下文窗口自动校正（auto:discovery）周期：24h 扫描上游同步缓存，
-                # 上游 /v1/models 报窗口（context_length 等字段）→ 自动写 auto override；
-                # model_context_overrides 里的 manual 行永不覆盖（跳过）。设 0 可关闭。
-                CONTEXT_WINDOW_RECONCILE_INTERVAL: "86400"
-                # ---- 长上下文容忍度（2026-10-12，按实测调；与 CliRelay 时代同口径）----
-                # runner-autoclaw 承接 40 万 token 级上下文：上游实测 96 万字符
-                # 请求 61s、常规长请求 25~27s。默认首事件 readiness 80s + provider
-                # 失败计数（DEGRADED=7 / OPEN=15）会把「慢」判成「坏」，OmniRoute
-                # 侧刷屏 "[503] circuit breaker is open (reset after 7s/11s)"。
-                # 数值全部按实测延迟量级给，不拍脑袋。
-                # ---- 慢透传容差（2026-10-12 二次调，见 docs/openclaw.md）----
-                # direct response-start 的 30s 闸比 SSE readiness 更前置：workbuddy
-                # (8318) 长上下文实测 24~85s 才出响应头，11 次 30s 超时靠重试救回，
-                # 却全计入 provider 失败计数并沿 combo 传染 autoclaw 熔断。
-                # 总口径对齐 CliRelay main-api-read-timeout-seconds=1800
-                # 与官方推荐 "Long-running code generation: REQUEST_TIMEOUT_MS=900000"
-                REQUEST_TIMEOUT_MS: "1800000"
-                OMNIROUTE_DIRECT_HEADERS_TIMEOUT_MS: "150000"
-                OMNIROUTE_DIRECT_RESPONSE_RETRY_TIMEOUT_MS: "600000"
-                STREAM_READINESS_TIMEOUT_MS: "600000"
-                STREAM_READINESS_MAX_TIMEOUT_MS: "900000"
-                OMNIROUTE_AGENT_GOAL_READINESS_MAX_TIMEOUT_MS: "900000"
-                # 流式总寿命：镜像默认 1260000（21min）短于 CliRelay 1800s，长任务会在
-                # 第 21 分钟被砍 → 显式设 1800s 对齐（0=禁用，这里不用）。
-                STREAM_ACTIVE_TIMEOUT_MS: "1800000"
-                FETCH_TIMEOUT_MS: "1800000"
-                STREAM_IDLE_TIMEOUT_MS: "1800000"
-                # API-key provider 熔断（autoclaw / zcode2api 均属此类）
-                OMNIROUTE_CIRCUIT_BREAKER_API_KEY_THRESHOLD: "30"
-                OMNIROUTE_CIRCUIT_BREAKER_API_KEY_RESET_MS: "60000"
-                OMNIROUTE_PROVIDER_BREAKER_API_KEY_FAILURE_THRESHOLD: "60"
-                OMNIROUTE_PROVIDER_BREAKER_API_KEY_DEGRADATION_THRESHOLD: "20"
-                OMNIROUTE_PROVIDER_BREAKER_API_KEY_COOLDOWN_MS: "180000"
-                OMNIROUTE_PROVIDER_BREAKER_API_KEY_MAX_BACKOFF_MULTIPLIER: "2"
-              extra_hosts:
-                - "host.docker.internal:host-gateway"
-              volumes:
-                - omniroute-data:/app/data
-              healthcheck:
-                test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:20128/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
-                interval: 60s
-                timeout: 15s
-                start_period: 120s
-                retries: 5
-              logging:
-                driver: json-file
-                options:
-                  max-size: "50m"
-                  max-file: "5"
-
-          volumes:
-            omniroute-data:
-          OMNIROUTE_COMPOSE_EOF
-            if [ ! -f "$OMNIROUTE_DIR/.env" ]; then
-              {
-                printf 'JWT_SECRET=%s\n' "$(openssl rand -hex 32)"
-                printf 'API_KEY_SECRET=%s\n' "$(openssl rand -hex 32)"
-                printf 'INITIAL_PASSWORD=%s\n' "$(openssl rand -base64 18 | tr '+/' '-_' | tr -d '=')"
-              } > "$OMNIROUTE_DIR/.env"
-            fi
-            chmod 600 "$OMNIROUTE_DIR/.env"
-            echo "✅ OmniRoute 部署目录就绪: $OMNIROUTE_DIR（bootstrap 空库，无渠道/无入站 key）"
-          }
-
-          # ===== 回退后端（2026-10-11 恢复自动降级）：CliRelay 全栈 + CLIProxyAPI 单容器 =====
-          # 从 dcf418e 迁移提交的父版本移植，改动仅两点：
-          #   ① 端口统一：官方 compose "8317:8317" → 降级路径 docker run 侧 -p 20128:8317
-          #     （容器内仍 8317，凭据/配置零改动）；健康检查探测 20128。
-          #   ② 函数化保持旧语义：归档恢复优先，无效则 bootstrap。
-          CLIRELAY_DIR=/tmp/local_CliRelay
-          CLIRELAY_TAR=/tmp/CliRelay.tar.gz
-          CLIRELAY_ARCHIVE="dropbox:self-hosted/CliRelay.tar.gz"
-          COMPOSE="docker compose -p clirelay -f $CLIRELAY_DIR/docker-compose.yml --project-directory $CLIRELAY_DIR"
-
-          # CliRelay/CLIProxyAPI 服务 8317（容器内），宿主侧统一映射 20128：
-          # 健康检查与 OmniRoute 同一探测点，降级后客户端/隧道零改动
-          wait_clirelay_ready() {
-            local label="$1"
-            local tries="${2:-120}"
-            local code
-            for i in $(seq 1 "$tries"); do
-              code=$(curl -s --connect-timeout 2 -o /dev/null -w "%{http_code}" http://127.0.0.1:20128/ || true)
-              if [ -n "$code" ] && [ "$code" -ge 100 ] && [ "$code" -lt 600 ]; then
-                echo "✅ [$label] 20128 已就绪 (HTTP ${code})"
-                return 0
-              fi
-              echo "⏳ [$label] 等待中... ${i}/${tries}"
-              sleep 2
-            done
-            return 1
-          }
-
-          # ---------- CLIProxyAPI 数据恢复（旧逻辑原样移植，幂等；回退与 bootstrap 共用） ----------
-          restore_cliproxyapi_data() {
-            if [ -f /tmp/local_CLIPProxyAPI/config.yaml ]; then
-              echo "ℹ️ CLIProxyAPI 数据目录已就绪，跳过恢复"
-              return 0
-            fi
-            echo "Configuring local CLIProxyAPI directory with persistent data..."
-            cleanup_archive_workdir
-            require_free_kb /tmp $((2 * 1024 * 1024)) "CLIProxyAPI restore preflight"
-            rm -rf /tmp/local_CLIPProxyAPI
-            mkdir -p /tmp/local_CLIPProxyAPI
-            if rclone ls dropbox:self-hosted/CLIProxyAPI.tar.gz > /dev/null 2>&1; then
-              echo "📦 Found CLIProxyAPI.tar.gz! Downloading and extracting..."
-              rclone copyto dropbox:self-hosted/CLIProxyAPI.tar.gz /tmp/CLIProxyAPI.tar.gz
-              archive_kb=$(du -sk /tmp/CLIProxyAPI.tar.gz | awk '{print $1}')
-              if [ -z "${archive_kb:-}" ] || [ "$archive_kb" -le 0 ]; then
-                echo "❌ CLIProxyAPI extract preflight: unable to calculate archive size" >&2
-                exit 1
-              fi
-              echo "CLIProxyAPI.tar.gz 大小: ${archive_kb}KB"
-              require_free_kb /tmp $((archive_kb * 3 + 512 * 1024)) "CLIProxyAPI extract preflight"
-              local min_size=$((5 * 1024))
-              local actual_size
-              actual_size=$(stat -c%s /tmp/CLIProxyAPI.tar.gz 2>/dev/null || echo 0)
-              if [ "$actual_size" -ge "$min_size" ] && tar -tzf /tmp/CLIProxyAPI.tar.gz >/dev/null 2>&1; then
-                tar -xzf /tmp/CLIProxyAPI.tar.gz -C /tmp/local_CLIPProxyAPI
-              else
-                echo "⚠️ CLIProxyAPI.tar.gz validation failed, skipping archive restore."
-              fi
-              cleanup_archive_workdir
-            else
-              echo "⚠️ No CLIProxyAPI archive found. Falling back to sync from raw directory..."
-              rclone copy dropbox:self-hosted/CLIProxyAPI /tmp/local_CLIPProxyAPI \
-                --retries 10 \
-                --low-level-retries 20 \
-                --timeout 1m \
-                --contimeout 15s \
-                -P || true
-            fi
-            mkdir -p /tmp/local_CLIPProxyAPI/auth-dir /tmp/local_CLIPProxyAPI/logs
-            touch /tmp/local_CLIPProxyAPI/config.yaml
-            touch /tmp/local_CLIPProxyAPI/stats.json
-            echo "=== restored CLIProxyAPI tree ==="
-            find /tmp/local_CLIPProxyAPI -maxdepth 3 | sort || true
-          }
-
-          # ---------- CLIProxyAPI 数据 → CliRelay 部署目录（bootstrap 迁移，旧逻辑原样移植） ----------
-          bootstrap_clirelay_from_cliproxyapi() {
-            echo "🔄 Bootstrapping CliRelay deployment from CLIProxyAPI data..."
-            rm -rf "$CLIRELAY_DIR"
-            mkdir -p "$CLIRELAY_DIR"/auths "$CLIRELAY_DIR"/sql "$CLIRELAY_DIR"/postgres-data "$CLIRELAY_DIR"/redis-data "$CLIRELAY_DIR"/logs "$CLIRELAY_DIR"/data
-            if [ -f /tmp/local_CLIPProxyAPI/config.yaml ]; then
-              cp -a /tmp/local_CLIPProxyAPI/config.yaml "$CLIRELAY_DIR/config.yaml"
-            else
-              touch "$CLIRELAY_DIR/config.yaml"
-            fi
-            if [ -d /tmp/local_CLIPProxyAPI/auth-dir ]; then
-              cp -a /tmp/local_CLIPProxyAPI/auth-dir/. "$CLIRELAY_DIR/auths/" 2>/dev/null || true
-            fi
-            find "$CLIRELAY_DIR/auths" -name '._*' -delete 2>/dev/null || true
-            curl -fsSL --retry 3 https://raw.githubusercontent.com/kittors/CliRelay/main/docker-compose.yml \
-              -o "$CLIRELAY_DIR/docker-compose.yml" || { echo "❌ 无法下载 CliRelay docker-compose.yml"; return 1; }
-            local pgpass
-            pgpass=$(openssl rand -hex 16)
-            {
-              printf 'CLIRELAY_PROJECT_DIR=%s\n' "$CLIRELAY_DIR"
-              printf 'AUTH_PATH=/root/.cli-proxy-api\n'
-              printf 'CLIRELAY_POSTGRES_DB=clirelay\n'
-              printf 'CLIRELAY_POSTGRES_USER=clirelay\n'
-              printf 'CLIRELAY_POSTGRES_PASSWORD=%s\n' "$pgpass"
-            } > "$CLIRELAY_DIR/.env"
-            chmod 600 "$CLIRELAY_DIR/.env"
-            echo "✅ CliRelay 部署目录就绪: $CLIRELAY_DIR"
-          }
-
-          # ---------- CliRelay 数据恢复：Dropbox 归档优先，无效则 bootstrap 迁移（旧逻辑原样移植） ----------
-          restore_clirelay_data() {
-            rm -rf "$CLIRELAY_DIR"
-            local restored=0
-            if rclone ls "$CLIRELAY_ARCHIVE" > /dev/null 2>&1; then
-              echo "📦 Found CliRelay.tar.gz! Downloading and validating..."
-              require_free_kb /tmp $((2 * 1024 * 1024)) "clirelay restore preflight"
-              if rclone copyto "$CLIRELAY_ARCHIVE" "$CLIRELAY_TAR"; then
-                if [ -s "$CLIRELAY_TAR" ] && tar -tzf "$CLIRELAY_TAR" >/dev/null 2>&1; then
-                  rm -rf /tmp/clirelay-restore
-                  mkdir -p /tmp/clirelay-restore
-                  tar -xzf "$CLIRELAY_TAR" -C /tmp/clirelay-restore
-                  if [ -f /tmp/clirelay-restore/docker-compose.yml ] && [ -f /tmp/clirelay-restore/.env ]; then
-                    mkdir -p "$CLIRELAY_DIR"
-                    cp -a /tmp/clirelay-restore/. "$CLIRELAY_DIR/"
-                    mkdir -p "$CLIRELAY_DIR"/auths "$CLIRELAY_DIR"/sql "$CLIRELAY_DIR"/postgres-data "$CLIRELAY_DIR"/redis-data "$CLIRELAY_DIR"/logs "$CLIRELAY_DIR"/data
-                    echo "✅ Restored CliRelay deployment from archive"
-                    restored=1
-                  else
-                    echo "⚠️ CliRelay.tar.gz 缺少 docker-compose.yml/.env，转 bootstrap 迁移。"
-                  fi
-                else
-                  echo "⚠️ CliRelay.tar.gz validation failed, 转 bootstrap 迁移。"
-                fi
-              else
-                echo "⚠️ CliRelay.tar.gz 下载失败，转 bootstrap 迁移。"
-              fi
-            else
-              echo "ℹ️ 未找到 CliRelay 归档，从 CLIProxyAPI 数据 bootstrap 迁移。"
-            fi
-            cleanup_archive_workdir
-            if [ "$restored" != 1 ]; then
-              restore_cliproxyapi_data
-              bootstrap_clirelay_from_cliproxyapi
-            fi
-          }
-
-          # ---------- CliRelay 全栈启动：postgres 先行 → SQL 导入 → 全栈 up（旧逻辑移植 + 统一端口） ----------
-          start_clirelay() {
-            echo "🚀 Starting CliRelay compose stack..."
-            docker rm -f cli-proxy-api clirelay 2>/dev/null || true
-            # CliRelay 路径若残留上一轮 socat/端口桥接，先拆
-            sudo pkill -f 'socat.*TCP-LISTEN:20128' 2>/dev/null || true
-            $COMPOSE down --remove-orphans 2>/dev/null || true
-            # 统一端口 override：官方 compose 绑 8317:8317（0.0.0.0），覆盖为宿主
-            # 127.0.0.1:20128 → 容器 8317。与 OmniRoute 同宿主端口，降级后客户端/隧道零改动；
-            # override 独立成文件不碰云端归档恢复来的 compose 原件。
-            printf '%s\n' \
-              'services:' \
-              '  cli-proxy-api:' \
-              '    ports: !override' \
-              '      - "127.0.0.1:20128:8317"' \
-              '      - "127.0.0.1:8085:8085"' \
-              '      - "127.0.0.1:1455:1455"' \
-              '      - "127.0.0.1:54545:54545"' \
-              '      - "127.0.0.1:51121:51121"' \
-              '      - "127.0.0.1:11451:11451"' \
-              > "$CLIRELAY_DIR/docker-compose.port-override.yml"
-            $COMPOSE -f "$CLIRELAY_DIR/docker-compose.yml" -f "$CLIRELAY_DIR/docker-compose.port-override.yml" up -d postgres || return 1
-            local pg_ok=0
-            for i in $(seq 1 30); do
-              if $COMPOSE exec -T postgres sh -c '. /clirelay-deploy/.env; pg_isready -U "$CLIRELAY_POSTGRES_USER" -d "$CLIRELAY_POSTGRES_DB"' >/dev/null 2>&1; then
-                pg_ok=1
-                break
-              fi
-              sleep 2
-            done
-            if [ "$pg_ok" != 1 ]; then
-              echo "❌ CliRelay postgres 未在预期时间内就绪"
-              return 1
-            fi
-            # 恢复脚本：先导 SQL 再起全栈（PG 数据卷不入归档，每轮均为全新库，直接导入无冲突）
-            shopt -s nullglob
-            local sql_files=( "$CLIRELAY_DIR"/sql/*.sql )
-            shopt -u nullglob
-            if [ "${#sql_files[@]}" -gt 0 ]; then
-              local latest_sql
-              latest_sql=$(ls -1t "${sql_files[@]}" | head -n 1)
-              echo "📥 Importing PostgreSQL snapshot: $latest_sql"
-              $COMPOSE exec -T postgres sh -c '. /clirelay-deploy/.env; exec psql -U "$CLIRELAY_POSTGRES_USER" -d "$CLIRELAY_POSTGRES_DB" -v ON_ERROR_STOP=1' < "$latest_sql" || return 1
-              echo "✅ PostgreSQL 数据导入完成"
-            fi
-            $COMPOSE -f "$CLIRELAY_DIR/docker-compose.yml" -f "$CLIRELAY_DIR/docker-compose.port-override.yml" up -d || return 1
-          }
-
-          # ---------- CLIProxyAPI 单容器启动（回退后端；端口改绑 20128→容器 8317） ----------
-          start_cliproxyapi() {
-            echo "🚀 Starting CLIProxyAPI container (fallback backend)..."
-            docker rm -f cliproxyapi cli-proxy-api clirelay 2>/dev/null || true
-            # CliRelay 路径残留的 socat 会抢 20128，先拆
-            sudo pkill -f 'socat.*TCP-LISTEN:20128' 2>/dev/null || true
-            mkdir -p /tmp/local_CLIPProxyAPI/auth-dir /tmp/local_CLIPProxyAPI/logs
-            touch /tmp/local_CLIPProxyAPI/config.yaml
-            touch /tmp/local_CLIPProxyAPI/stats.json
-            # ① 容器原生即 8317，宿主侧直接绑 20128（与 OmniRoute 同端口，客户端/隧道零改动）
-            # ② 官方 compose 的 clirelay-init 会写 config，这里数据是归档/旧目录恢复的，直接挂
-            docker run -d \
-              --name cliproxyapi \
-              --restart unless-stopped \
-              -p 127.0.0.1:20128:8317 \
-              -e TZ=Asia/Shanghai \
-              -v /tmp/local_CLIPProxyAPI/config.yaml:/CLIProxyAPI/config.yaml \
-              -v /tmp/local_CLIPProxyAPI/auth-dir:/root/.cli-proxy-api \
-              -v /tmp/local_CLIPProxyAPI/logs:/CLIProxyAPI/logs \
-              -v /tmp/local_CLIPProxyAPI/stats.json:/CLIProxyAPI/stats.json \
-              eceasy/cli-proxy-api:latest || return 1
-          }
-
-          # ---------- 启动：恢复路径走 compose（卷已由 compose 声明复用），bootstrap 路径走 docker run ----------
-
-          start_omniroute() {
-            echo "🚀 Starting OmniRoute container..."
-            docker rm -f omniroute 2>/dev/null || true
-            docker volume create "$OMNIROUTE_VOLUME" >/dev/null
-            if [ -f "$OMNIROUTE_DIR/docker-compose.yml" ]; then
-              docker compose -p omniroute -f "$OMNIROUTE_DIR/docker-compose.yml" --project-directory "$OMNIROUTE_DIR" up -d || return 1
-            else
-              # bootstrap 路径同样要带长上下文阈值 —— 与下方 compose heredoc
-              # （restore 路径）保持同值，否则归档缺失的冷启动会被默认
-              # readiness 80s + provider 失败计数 7/15 又快快打成熔断。
-              # 阈值依据见 compose heredoc 处的注释块（2026-10-12 实测调参）。
-              docker run -d \
-                --name omniroute \
-                --restart unless-stopped \
-                --stop-timeout 40 \
-                -p 127.0.0.1:20128:20128 \
-                -e PORT=20128 \
-                -e OMNIROUTE_MEMORY_MB=4096 \
-                -e BASE_URL=http://omniroute:20128 \
-                -e AUTH_COOKIE_SECURE=false \
-                -e REQUEST_TIMEOUT_MS=1800000 \
-                -e OMNIROUTE_DIRECT_HEADERS_TIMEOUT_MS=150000 \
-                -e OMNIROUTE_DIRECT_RESPONSE_RETRY_TIMEOUT_MS=600000 \
-                -e STREAM_READINESS_TIMEOUT_MS=600000 \
-                -e STREAM_READINESS_MAX_TIMEOUT_MS=900000 \
-                -e OMNIROUTE_AGENT_GOAL_READINESS_MAX_TIMEOUT_MS=900000 \
-                -e STREAM_ACTIVE_TIMEOUT_MS=1800000 \
-                -e FETCH_TIMEOUT_MS=1800000 \
-                -e STREAM_IDLE_TIMEOUT_MS=1800000 \
-                -e OMNIROUTE_CIRCUIT_BREAKER_API_KEY_THRESHOLD=30 \
-                -e OMNIROUTE_CIRCUIT_BREAKER_API_KEY_RESET_MS=60000 \
-                -e OMNIROUTE_PROVIDER_BREAKER_API_KEY_FAILURE_THRESHOLD=60 \
-                -e OMNIROUTE_PROVIDER_BREAKER_API_KEY_DEGRADATION_THRESHOLD=20 \
-                -e OMNIROUTE_PROVIDER_BREAKER_API_KEY_COOLDOWN_MS=180000 \
-                -e OMNIROUTE_PROVIDER_BREAKER_API_KEY_MAX_BACKOFF_MULTIPLIER=2 \
-                --add-host host.docker.internal:host-gateway \
-                -v "$OMNIROUTE_VOLUME:/app/data" \
-                --env-file "$OMNIROUTE_DIR/.env" \
-                "$OMNIROUTE_IMAGE" || return 1
-            fi
-          }
-
-          cleanup_archive_workdir
-          # 数据准备失败不终止（bootstrap 全新部署兜底，与旧 CliRelay 同口径）
-          if ! restore_omniroute_data; then
-            bootstrap_omniroute
-            # P0 加固（2026-10-11）：归档明明存在却没恢复成 = 数据事故信号，必须炸响。
-            # 当天事故即此形态：cleanup 误删解包目录 → 恒报"缺少 docker-compose.yml/.env"
-            # → 静默 bootstrap 空库上岗，全靠归档脚本 1MB 体积门才没让空库覆盖云端好包。
-            if [ "$OMNIROUTE_ARCHIVE_SEEN" = "1" ]; then
-              if source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh" 2>/dev/null; then
-                msg=""
-                tg_add_title msg "🚨 OmniRoute 归档恢复失败 · 空库兜底"
-                tg_add_kv msg "现象" "Dropbox 归档存在，但本轮恢复未走通，已 bootstrap 空库"
-                tg_add_kv msg "影响" "无渠道/无入站 key，客户端 401；1MB 体积门将拦住空库回传"
-                tg_add_note msg "根因看本轮日志 OmniRoute 步骤 Found OmniRoute.tar.gz 之后的段"
-                tg_add_footer msg
-                send_tg "$msg" alert || true
-              fi
-            fi
-          fi
-
-          # ---------- 主流程：三后端降级链 OmniRoute → CliRelay → CLIProxyAPI（2026-10-11 恢复自动降级） ----------
-          # 统一端口方案：三个后端全部服务在宿主机 127.0.0.1:20128 —— OpenClaw 客户端
-          # （openclaw.json，随主包归档持久化）硬编码指向 127.0.0.1:20128/v1，ai-api 隧道
-          # 也是固定地址模式指向 20128（tunnels.conf），因此降级不换端口、不改客户端、
-          # 不重建隧道。CliRelay/CLIProxyAPI 官方 compose/容器原生端口 8317，降级路径用
-          # docker run 侧端口映射改绑 20128，容器内仍是 8317，凭据/配置零改动。
-          # 降级链：主用 OmniRoute 起不来 → 回退 CliRelay 全栈（数据随 CliRelay.tar.gz 恢复）
-          # → CliRelay 也起不来 → 回退 CLIProxyAPI 单容器（数据随 CLIProxyAPI.tar.gz 恢复）。
-          # 每次降级记录 FALLBACK_REASON 写入 BACKEND_STATE，通知步骤自动向 Telegram 报告。
-          ACTIVE_BACKEND=""
-          FALLBACK_REASON=""
-          # pinned 模式：手动运行时显式指定后端 → 只跑它，失败即失败（不降级），
-          # 便于定点验证单个后端；auto（默认/定时触发）走完整降级链
-          PINNED_BACKEND="${AI_BACKEND_INPUT:-auto}"
-
-          if [ "$PINNED_BACKEND" = "omniroute" ]; then
-            if start_omniroute && wait_api_ready "omniroute" 150; then
-              ACTIVE_BACKEND=omniroute
-              docker ps -a
-              echo "✅ 当前生效 AI 网关: OmniRoute（pinned）"
-            else
-              echo "❌ OmniRoute（pinned）未就绪 —— pinned 模式不降级，直接失败"
-              docker logs omniroute --tail 100 || true
-              exit 1
-            fi
-          elif [ "$PINNED_BACKEND" = "clirelay" ]; then
-            restore_clirelay_data || true
-            if start_clirelay && wait_clirelay_ready "clirelay" 120; then
-              ACTIVE_BACKEND=clirelay
-              docker ps -a
-              echo "✅ 当前生效 AI 网关: CliRelay（pinned）"
-            else
-              echo "❌ CliRelay（pinned）未就绪 —— pinned 模式不降级，直接失败"
-              $COMPOSE logs --tail 80 2>/dev/null || true
-              exit 1
-            fi
-          elif [ "$PINNED_BACKEND" = "cliproxyapi" ]; then
-            restore_cliproxyapi_data
-            if start_cliproxyapi && wait_clirelay_ready "cliproxyapi" 120; then
-              ACTIVE_BACKEND=cliproxyapi
-              docker ps -a
-              echo "✅ 当前生效 AI 网关: CLIProxyAPI（pinned）"
-            else
-              echo "❌ CLIProxyAPI（pinned）未就绪 —— pinned 模式不降级，直接失败"
-              docker logs cliproxyapi --tail 100 || true
-              exit 1
-            fi
-          elif start_omniroute && wait_api_ready "omniroute" 150; then
-            ACTIVE_BACKEND=omniroute
-            docker ps -a
-            echo "✅ 当前生效 AI 网关: OmniRoute"
-          else
-            if [ -z "${FALLBACK_REASON:-}" ]; then
-              FALLBACK_REASON="OmniRoute 未能在预期时间内就绪 · compose 启动或 20128 健康检查失败"
-            fi
-            echo "⚠️ $FALLBACK_REASON，打印日志并回退 CliRelay..."
-            echo "--- omniroute logs (tail 100) ---"
-            docker logs omniroute --tail 100 || true
-            docker rm -f omniroute 2>/dev/null || true
-
-            restore_clirelay_data || {
-              [ -z "${FALLBACK_REASON:-}" ] && FALLBACK_REASON="CliRelay 数据准备失败 · 归档缺失/校验失败或 bootstrap 迁移失败"
-              echo "⚠️ CliRelay 数据准备失败，跳过 CliRelay 直接回退 CLIProxyAPI"
-            }
-
-            if [ -z "${ACTIVE_BACKEND:-}" ] && [ -f "$CLIRELAY_DIR/docker-compose.yml" ] \
-              && start_clirelay && wait_clirelay_ready "clirelay" 120; then
-              ACTIVE_BACKEND=clirelay
-              docker ps -a
-              echo "✅ 已回退，当前生效 AI 网关: CliRelay（全栈，20128 统一端口）"
-            else
-              [ -z "${ACTIVE_BACKEND:-}" ] && [ -z "${FALLBACK_REASON:-}" ] && \
-                FALLBACK_REASON="CliRelay 未能在预期时间内就绪 · compose 启动或 20128 健康检查失败"
-              echo "⚠️ CliRelay 也未就绪，打印日志并回退 CLIProxyAPI..."
-              echo "--- clirelay compose logs (tail 80) ---"
-              $COMPOSE logs --tail 80 2>/dev/null || true
-              $COMPOSE down -v --remove-orphans 2>/dev/null || true
-              docker rm -f cli-proxy-api clirelay 2>/dev/null || true
-
-              restore_cliproxyapi_data
-              if start_cliproxyapi && wait_clirelay_ready "cliproxyapi" 120; then
-                ACTIVE_BACKEND=cliproxyapi
-                docker ps -a
-                echo "✅ 已回退，当前生效 AI 网关: CLIProxyAPI（单容器，20128 统一端口）"
-              else
-                echo "❌ 三个后端全部未就绪（omniroute/clirelay/cliproxyapi）"
-                docker logs cliproxyapi --tail 100 2>/dev/null || true
-                exit 1
-              fi
-            fi
-          fi
-          {
-            printf 'ACTIVE_BACKEND=%s\n' "$ACTIVE_BACKEND"
-            if [ -n "${FALLBACK_REASON:-}" ]; then printf 'FALLBACK_REASON=%s\n' "$FALLBACK_REASON"; fi
-          } > "$BACKEND_STATE"
-
-          # Hand off to the systemd unit (Restart=always) instead of a bare
-          # nohup, so the tunnel survives signal sweeps and restarts itself.
-          if [ -f "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ]; then
-            bash "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ensure ai-api || true
-          else
-            nohup cloudflared tunnel run --protocol http2 --url http://127.0.0.1:20128 ai-api \
-              > ~/.openclaw/logs/cloudflared_omniroute.log 2>&1 &
-            sleep 5
-            echo $! > ~/.openclaw/logs/cloudflared_omniroute.pid
-          fi
-
-          echo "ai-api 命名隧道已启动（systemd 托管，固定地址模式），当前后端: ${ACTIVE_BACKEND}"
-
       - name: Run OpenClaw
         id: run_openclaw
         # 2026-10-02 事故根因：任一前置服务步骤（quota-board/trae/zcode2api…）硬失败时，
@@ -2401,6 +1292,1307 @@ jobs:
             echo "⚠️ Telegram alert skipped: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is empty"
           fi
 
+      - name: Install Cloudflared
+        # 2026-10-29 下线优化（B1）：本步骤后置到 Run OpenClaw 之后（网关健康不依赖它），
+        # 处于失败级联区 —— 按 qoder/zcode2api/autoclaw 同款护栏处理：
+        # continue-on-error + if:!cancelled()，本步故障不级联跳过 oc 隧道与后续服务步骤。
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
+          sudo mkdir -p ~/.cloudflared/
+          sudo cp -r /dropbox/self-hosted/.cloudflared/* ~/.cloudflared/ 2>/dev/null || true
+          # 家目录里的状态必须是 runner 属主：sudo 复制会让凭据变成 root 属主，
+          # 而 cloudflared 是 runner 身份启动的（读 ~/.cloudflared 会 EACCES）
+          sudo chown -R runner:runner ~/.cloudflared
+
+      - name: Run Cloudflared Tunnel
+        # 2026-10-29 下线优化（B1）：同 Install Cloudflared 护栏口径；隧道此刻才启动，
+        # 网关（18789）已先就绪 —— 公网可达性恢复略晚于网关健康，换取下线关键路径缩短。
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          mkdir -p ~/.openclaw/logs
+
+          cloudflared tunnel route dns oc oc.'${{ secrets.VD }}'.eu.org || true
+          # Managed by the unified systemd tunnel manager: tunnels get
+          # Restart=always, so a killed connector comes back on its own.
+          # Falls back to nohup only if the manager is unavailable.
+          if [ -f "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ]; then
+            bash "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ensure oc || true
+          else
+            nohup cloudflared tunnel run --url http://127.0.0.1:18789 oc \
+              > ~/.openclaw/logs/cloudflared_oc.log 2>&1 &
+            echo $! > ~/.openclaw/logs/cloudflared_oc.pid
+          fi
+
+          sleep 10
+          echo "OpenClaw tunnel started (systemd-managed)."
+
+      - name: Run rss-to-telegram container
+        # 2026-10-29 下线优化（B1）：后置护栏，口径同 Install Cloudflared ——
+        # rsstt 故障不得级联跳过 AI 网关 / 隧道 / 后续服务。
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        env:
+          # rsstt 服务使用独立 bot，token 经同名 secret 注入（此前未接线导致容器 TOKEN 恒空）
+          TELEGRAM_BOT_TOKEN_RSS_SB_BOT: ${{ secrets.TELEGRAM_BOT_TOKEN_RSS_SB_BOT }}
+        run: |
+          set -euo pipefail
+          echo "Starting rss-to-telegram before OmniRoute..."
+          mkdir -p /dropbox/self-hosted/rsstt
+          cleanup_archive_workdir() {
+            rm -f /tmp/rsstt.tar.gz 2>/dev/null || true
+            rm -rf /tmp/rsstt-restore 2>/dev/null || true
+          }
+          free_kb() { df -Pk "${1:-/tmp}" | awk 'NR==2 {print $4}'; }
+          require_free_kb() {
+            local path="$1" min_kb="$2" label="$3"
+            local avail
+            avail=$(free_kb "$path")
+            if [ "${avail:-0}" -lt "$min_kb" ]; then
+              echo "❌ ${label}: insufficient free space at ${path}. available=${avail}KB required=${min_kb}KB" >&2
+              exit 1
+            fi
+            echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
+          }
+          require_free_kb /tmp $((1024 * 1024)) "rsstt restore preflight"
+          rm -rf /tmp/local_rsstt
+          cleanup_archive_workdir
+          mkdir -p /tmp/local_rsstt /tmp/rsstt-restore
+
+          # 门禁只看 rsstt 真正依赖的凭据（同名 secret 注入）：
+          # ~/.openclaw/.env 由 OpenClaw 自身维护、与 rsstt 无关，不能作为启动条件
+          if [ -n "${TELEGRAM_BOT_TOKEN_RSS_SB_BOT:-}" ]; then
+            if rclone ls dropbox:self-hosted/rsstt.tar.gz > /dev/null 2>&1; then
+              echo "📦 Found rsstt.tar.gz! Downloading and extracting..."
+              rclone copyto dropbox:self-hosted/rsstt.tar.gz /tmp/rsstt.tar.gz
+              archive_kb=$(du -sk /tmp/rsstt.tar.gz | awk '{print $1}')
+              if [ -z "${archive_kb:-}" ] || [ "$archive_kb" -le 0 ]; then
+                echo "❌ rsstt extract preflight: unable to calculate archive size" >&2
+                exit 1
+              fi
+              echo "rsstt.tar.gz 大小: ${archive_kb}KB"
+              require_free_kb /tmp $((archive_kb * 3 + 512 * 1024)) "rsstt extract preflight"
+              if [ -s /tmp/rsstt.tar.gz ] && tar -tzf /tmp/rsstt.tar.gz >/dev/null 2>&1; then
+                tar -xzf /tmp/rsstt.tar.gz -C /tmp/rsstt-restore
+                cp -a /tmp/rsstt-restore/. /tmp/local_rsstt/ || true
+              else
+                echo "⚠️ rsstt.tar.gz validation failed, skipping archive restore."
+              fi
+              cleanup_archive_workdir
+            else
+              echo "⚠️ No rsstt archive found. Falling back to sync from raw directory..."
+              rclone copy dropbox:self-hosted/rsstt /tmp/local_rsstt \
+                --retries 10 \
+                --low-level-retries 20 \
+                --timeout 1m \
+                --contimeout 15s \
+                --exclude "docker-compose.yml" \
+                -P || true
+            fi
+
+            mkdir -p /tmp/local_rsstt/config /tmp/local_rsstt/data
+            touch /tmp/local_rsstt/config/.keep /tmp/local_rsstt/data/.keep
+
+            echo "=== restored rss-to-telegram tree ==="
+            find /tmp/local_rsstt -maxdepth 3 | sort || true
+
+            start_rsstt_container() {
+              docker rm -f rss-to-telegram 2>/dev/null || true
+              docker run -d \
+                --name rss-to-telegram \
+                --restart unless-stopped \
+                -v /tmp/local_rsstt/config:/app/config \
+                -v /tmp/local_rsstt/data:/app/data \
+                -e TOKEN="$TELEGRAM_BOT_TOKEN_RSS_SB_BOT" \
+                -e MANAGER="83279194" \
+                -e MULTIUSER="0" \
+                rongronggg9/rss-to-telegram:latest
+            }
+
+            print_rsstt_status() {
+              echo "=== rss-to-telegram status ==="
+              docker ps -a --filter name=rss-to-telegram
+              container_status="$(docker inspect --format '{{.State.Status}}' rss-to-telegram)"
+              health_status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' rss-to-telegram)"
+              restart_count="$(docker inspect --format '{{.RestartCount}}' rss-to-telegram)"
+              echo "rss-to-telegram status=${container_status} health=${health_status} restarts=${restart_count}"
+            }
+
+            validate_rsstt_container() {
+              print_rsstt_status
+
+              if [ "$container_status" != "running" ] || [ "$health_status" = "unhealthy" ]; then
+                echo "❌ rss-to-telegram failed to become healthy"
+                docker logs --tail 200 rss-to-telegram || true
+                return 1
+              fi
+
+              if docker logs --tail 200 rss-to-telegram 2>&1 | grep -Eqi 'LOGIN FAILED|Unknown error occurred during login'; then
+                echo "❌ rss-to-telegram encountered a Telegram login failure"
+                docker logs --tail 200 rss-to-telegram || true
+                return 1
+              fi
+            }
+
+            archive_rsstt_state() {
+              local min_size=$((5 * 1024))
+              local actual_size
+
+              echo "📦 Archiving repaired rss-to-telegram state immediately..."
+              rm -f /tmp/rsstt.tar.gz
+              tar -czf /tmp/rsstt.tar.gz -C /tmp/local_rsstt .
+              tar -tzf /tmp/rsstt.tar.gz >/dev/null
+              actual_size="$(stat -c%s /tmp/rsstt.tar.gz 2>/dev/null || echo 0)"
+              if [ "$actual_size" -lt "$min_size" ]; then
+                echo "❌ repaired rsstt archive is too small: size=${actual_size} min=${min_size}"
+                exit 1
+              fi
+              rclone copyto /tmp/rsstt.tar.gz dropbox:self-hosted/rsstt.tar.gz -v
+              rm -f /tmp/rsstt.tar.gz
+              echo "✅ Repaired rss-to-telegram state uploaded"
+            }
+
+            echo "Waiting for rss-to-telegram container to stabilize..."
+            start_rsstt_container
+            sleep 12
+
+            if ! validate_rsstt_container; then
+              if docker logs --tail 200 rss-to-telegram 2>&1 | grep -qi 'AuthKeyDuplicatedError'; then
+                echo "⚠️ rss-to-telegram session was invalidated by AuthKeyDuplicatedError; deleting session and retrying once."
+                docker rm -f rss-to-telegram 2>/dev/null || true
+                rm -f \
+                  /tmp/local_rsstt/config/bot.session \
+                  /tmp/local_rsstt/config/bot.session-journal \
+                  /tmp/local_rsstt/config/bot.session-shm \
+                  /tmp/local_rsstt/config/bot.session-wal
+                start_rsstt_container
+                sleep 12
+                validate_rsstt_container
+                archive_rsstt_state
+              else
+                exit 1
+              fi
+            fi
+
+            echo "=== rss-to-telegram /app tree (for persistence verification) ==="
+            docker exec rss-to-telegram sh -lc 'find /app -maxdepth 3 \( -type f -o -type d \) | sort | sed -n "1,200p"'
+            echo "=== rss-to-telegram local bind tree after startup ==="
+            find /tmp/local_rsstt -maxdepth 3 | sort || true
+          else
+            echo "❌ TELEGRAM_BOT_TOKEN_RSS_SB_BOT 未配置，跳过 rss-to-telegram 启动；本轮无 rsstt 数据，最终归档会跳过上传"
+          fi
+
+      - name: "Run AI API gateway (backend: ${{ inputs.ai_backend }})"
+        # 2026-10-29 下线优化（B1）：后置护栏，口径同 Install Cloudflared —— 网关进程
+        # 健康不依赖 20128（config validate / secrets audit 为 schema+secrets 判据，
+        # health 探活走 18789 本地），模型端点晚几秒就绪只影响最早的消息请求。
+        # 若后续观测到 doctor/config validate 探测 20128，把本步骤挪回 Run OpenClaw 之前即可。
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        env:
+          # 手动运行时可指定本次使用的网关后端（auto = 自动降级链）；定时触发为 auto
+          AI_BACKEND_INPUT: ${{ inputs.ai_backend || 'auto' }}
+          # 归档存在但恢复失败→bootstrap 空库时发 tier=alert 告警（P0 加固 2026-10-11）
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_BOT_TOKEN_ALERT: ${{ secrets.TELEGRAM_BOT_TOKEN_ALERT }}
+          TELEGRAM_CHAT_ID_ALERT: ${{ secrets.TELEGRAM_CHAT_ID_ALERT }}
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          # 2026-10-11 网关迁移：CliRelay（compose 全栈）/ CLIProxyAPI（回退）→ OmniRoute 单后端。
+          # 部署形态：/home/runner/omniroute（compose + .env 密钥）+ 命名卷 omniroute_omniroute-data
+          # （storage.sqlite：全部渠道/入站 key/combo；server.env：STORAGE_ENCRYPTION_KEY）。
+          # 灾备 = Dropbox OmniRoute.tar.gz 一起恢复这两样。旧链路归档的处置：
+          # CliRelay.tar.gz 由生产侧归档循环在备用容器存活期间继续刷新（备用网关口径），
+          # CLIProxyAPI.tar.gz 为历史快照不再刷新 —— DR workflow 均不再消费，仅作手动回滚素材。
+          # 本机渠道上游（workbuddy 8318 / zcode2api 8319 / qingyan 8320 / trae 7864）
+          # 由 extra_hosts host.docker.internal:host-gateway 回连。
+          echo "Configuring AI API gateway: requested backend = ${AI_BACKEND_INPUT:-auto} (port 20128)..."
+          mkdir -p /home/runner/omniroute ~/.openclaw/logs
+
+          BACKEND_STATE=/tmp/active-ai-backend.env
+          : > "$BACKEND_STATE"
+
+          OMNIROUTE_DIR=/home/runner/omniroute
+          OMNIROUTE_TAR=/tmp/OmniRoute.tar.gz
+          OMNIROUTE_ARCHIVE="dropbox:self-hosted/OmniRoute.tar.gz"
+          OMNIROUTE_IMAGE="diegosouzapw/omniroute:3.8.51"
+          OMNIROUTE_VOLUME="omniroute_omniroute-data"
+          # 恢复路径观测标记：ARCHIVE_PRESENT=探测通过；ARCHIVE_SEEN=确认云端归档存在
+          # （bootstrap 告警判据——归档存在却没恢复成 = 数据事故，见 restore 失败分支）
+          OMNIROUTE_ARCHIVE_PRESENT=0
+          OMNIROUTE_ARCHIVE_SEEN=0
+
+          cleanup_archive_workdir() {
+            rm -f /tmp/OmniRoute.tar.gz 2>/dev/null || true
+            rm -rf /tmp/omniroute-restore 2>/dev/null || true
+          }
+          free_kb() { df -Pk "${1:-/tmp}" | awk 'NR==2 {print $4}'; }
+          require_free_kb() {
+            local path="$1" min_kb="$2" label="$3"
+            local avail
+            avail=$(free_kb "$path")
+            if [ "${avail:-0}" -lt "$min_kb" ]; then
+              echo "❌ ${label}: insufficient free space at ${path}. available=${avail}KB required=${min_kb}KB" >&2
+              exit 1
+            fi
+            echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
+          }
+
+          wait_api_ready() {
+            local label="$1"
+            local tries="${2:-120}"
+            local code
+            for i in $(seq 1 "$tries"); do
+              code=$(curl -s --connect-timeout 2 -o /dev/null -w "%{http_code}" http://127.0.0.1:20128/healthz || true)
+              if [ -n "$code" ] && [ "$code" -ge 100 ] && [ "$code" -lt 600 ]; then
+                echo "✅ [$label] OmniRoute 已就绪 (HTTP ${code})"
+                return 0
+              fi
+              echo "⏳ [$label] 等待中... ${i}/${tries}"
+              sleep 2
+            done
+            return 1
+          }
+
+          fetch_via_prefetch() {
+            # 2026-10-29（B2）：Prefetch 步骤 .part→mv→rc 协议的收货函数。
+            # 用法: fetch_via_prefetch <Name> <dest>；命中 = 返回 0 且产物已 mv 到 dest。
+            # 与后置 ZCode 恢复步骤的同名函数互为副本（分处不同 step 无法共享定义，
+            # 改一处必须两处同改 —— 同 wb_stop_notify 的双份实现口径）。
+            local name="$1" dest="$2" key pf_dir rc pid waited
+            key="$(printf '%s' "$name" | tr 'A-Z' 'a-z')"
+            pf_dir="/tmp/openclaw-prefetch"
+            [ -f "$pf_dir/${key}-tar.pid" ] || return 1
+            waited=0
+            while [ ! -f "$pf_dir/${key}-tar.rc" ] && [ "$waited" -lt 600 ]; do
+              pid="$(cat "$pf_dir/${key}-tar.pid" 2>/dev/null | tr -dc '0-9')"
+              [ -n "$pid" ] || break
+              kill -0 "$pid" 2>/dev/null || break
+              sleep 2
+              waited=$((waited + 2))
+            done
+            rc="$(cat "$pf_dir/${key}-tar.rc" 2>/dev/null || echo none)"
+            if [ "$rc" = "0" ] && [ -s "$pf_dir/${name}.tar.gz" ]; then
+              mv "$pf_dir/${name}.tar.gz" "$dest"
+              rm -f "$pf_dir/${name}.tar.gz.part" "$pf_dir/${key}-tar.rc" "$pf_dir/${key}-tar.pid" 2>/dev/null || true
+              echo "✅ ${name}.tar.gz prefetch 命中（等待 ${waited}s）"
+              return 0
+            fi
+            rm -f "$pf_dir/${name}.tar.gz.part" 2>/dev/null || true
+            echo "⚠️ ${name}.tar.gz prefetch 未命中（rc=${rc}），回落同步下载"
+            return 1
+          }
+
+          # ---------- OmniRoute 部署目录 + 数据卷恢复（Dropbox 归档优先，缺失则 bootstrap） ----------
+          restore_omniroute_data() {
+            if [ -f "$OMNIROUTE_DIR/docker-compose.yml" ] && [ -f "$OMNIROUTE_DIR/.env" ]; then
+              echo "ℹ️ OmniRoute 部署目录已就绪，跳过恢复"
+              return 0
+            fi
+            cleanup_archive_workdir
+            require_free_kb /tmp $((2 * 1024 * 1024)) "OmniRoute restore preflight"
+            # 探测重试 3 次再定性（与 ~/.openclaw 恢复 2026-10-02 加固同口径）：
+            # rclone 瞬时失败被误判成"无归档"会静默 bootstrap 空库——比"恢复失败"更
+            # 危险，它连 ARCHIVE_SEEN 标记都立不起来，告警都不会响。
+            OMNIROUTE_ARCHIVE_PRESENT=0
+            for _probe in 1 2 3; do
+              if rclone ls "$OMNIROUTE_ARCHIVE" > /dev/null 2>&1; then
+                OMNIROUTE_ARCHIVE_PRESENT=1
+                break
+              fi
+              echo "⚠️ rclone ls 探测归档失败（第 ${_probe}/3 次），15s 后重试..."
+              sleep 15
+            done
+            if [ "$OMNIROUTE_ARCHIVE_PRESENT" != "1" ]; then
+              echo "ℹ️ 未找到 OmniRoute 归档，走全新 bootstrap"
+              return 1
+            fi
+            OMNIROUTE_ARCHIVE_SEEN=1
+            echo "📦 Found OmniRoute.tar.gz! Downloading and validating..."
+            # 2026-10-29（B2）：OmniRoute.tar.gz 已在 Prefetch 后台预取，命中则 mv 收货；
+            # 未命中/失败回落原同步下载，判据与语义不变。
+            if ! fetch_via_prefetch OmniRoute "$OMNIROUTE_TAR"; then
+              if ! rclone copyto "$OMNIROUTE_ARCHIVE" "$OMNIROUTE_TAR"; then
+                echo "⚠️ OmniRoute.tar.gz 下载失败，走全新 bootstrap"
+                cleanup_archive_workdir
+                return 1
+              fi
+            fi
+            local archive_kb actual_size
+            archive_kb=$(du -sk "$OMNIROUTE_TAR" | awk '{print $1}')
+            if [ -z "${archive_kb:-}" ] || [ "$archive_kb" -le 0 ]; then
+              echo "❌ OmniRoute extract preflight: unable to calculate archive size" >&2
+              exit 1
+            fi
+            echo "OmniRoute.tar.gz 大小: ${archive_kb}KB"
+            require_free_kb /tmp $((archive_kb * 3 + 512 * 1024)) "OmniRoute extract preflight"
+            local min_size=$((1024 * 1024))
+            actual_size=$(stat -c%s "$OMNIROUTE_TAR" 2>/dev/null || echo 0)
+            if [ "$actual_size" -lt "$min_size" ] || ! tar -tzf "$OMNIROUTE_TAR" >/dev/null 2>&1; then
+              echo "⚠️ OmniRoute.tar.gz validation failed，走全新 bootstrap"
+              cleanup_archive_workdir
+              return 1
+            fi
+            rm -rf /tmp/omniroute-restore
+            mkdir -p /tmp/omniroute-restore
+            tar -xzf "$OMNIROUTE_TAR" -C /tmp/omniroute-restore
+            # cleanup_archive_workdir 会 rm -rf /tmp/omniroute-restore，
+            # 必须等数据卷恢复消费完 data.tar.gz 之后才能调用，不能放在检查前
+            if [ ! -f /tmp/omniroute-restore/docker-compose.yml ] || [ ! -f /tmp/omniroute-restore/.env ]; then
+              echo "⚠️ OmniRoute.tar.gz 缺少 docker-compose.yml/.env，走全新 bootstrap"
+              cleanup_archive_workdir
+              return 1
+            fi
+            mkdir -p "$OMNIROUTE_DIR"
+            cp -a /tmp/omniroute-restore/docker-compose.yml /tmp/omniroute-restore/.env "$OMNIROUTE_DIR/"
+            chmod 600 "$OMNIROUTE_DIR/.env"
+            # 数据卷恢复：归档内 data.tar.gz → docker 卷。server.env（STORAGE_ENCRYPTION_KEY）
+            # 与 storage.sqlite 必须同代，否则存量 key 解不开 —— 二者同一份归档，天然同代。
+            # storage-backup.sqlite（归档侧 sqlite 在线一致性备份）优先于活库三件套。
+            if [ -f /tmp/omniroute-restore/data.tar.gz ]; then
+              docker volume create "$OMNIROUTE_VOLUME" >/dev/null
+              docker run --rm --user root -v "$OMNIROUTE_VOLUME:/target" -v /tmp/omniroute-restore:/src:ro \
+                "$OMNIROUTE_IMAGE" sh -c '
+                  tar xzf /src/data.tar.gz -C /target
+                  if [ -f /target/storage-backup.sqlite ]; then
+                    mv -f /target/storage-backup.sqlite /target/storage.sqlite
+                    rm -f /target/storage.sqlite-wal /target/storage.sqlite-shm
+                  fi
+                  find /target -name "._*" -delete 2>/dev/null || true
+                  chown -R 1000:1000 /target'
+              echo "✅ OmniRoute 数据卷已恢复"
+            else
+              echo "⚠️ 归档内无 data.tar.gz（纯部署目录），数据卷留空"
+            fi
+            echo "=== restored OmniRoute tree ==="
+            find "$OMNIROUTE_DIR" -maxdepth 2 | sort || true
+            cleanup_archive_workdir
+            return 0
+          }
+
+          # ---------- 全新 bootstrap（无归档时）：生成 compose + 随机密钥，空库起服 ----------
+          # 空库 = 无渠道无入站 key，客户端会 401 —— 仅用于首次冷启动兜底；首轮 Final
+          # Archive 会把这份空库打包上传，之后每次重建都走归档恢复路径。
+          # compose 内容经 sed 剥掉 run-block 的 10 空格缩进后再落盘（heredoc 无法用 <<- 剥空格）。
+          bootstrap_omniroute() {
+            echo "🔄 Bootstrapping fresh OmniRoute deployment..."
+            mkdir -p "$OMNIROUTE_DIR"
+            cat <<'OMNIROUTE_COMPOSE_EOF' | sed 's/^          //' > "$OMNIROUTE_DIR/docker-compose.yml"
+          services:
+            omniroute:
+              image: diegosouzapw/omniroute:3.8.51
+              container_name: omniroute
+              restart: unless-stopped
+              stop_grace_period: 40s
+              ports:
+                - "127.0.0.1:20128:20128"
+              env_file: .env
+              environment:
+                PORT: 20128
+                OMNIROUTE_MEMORY_MB: "4096"
+                BASE_URL: http://omniroute:20128
+                AUTH_COOKIE_SECURE: "false"
+                # 上下文窗口自动校正（auto:discovery）周期：24h 扫描上游同步缓存，
+                # 上游 /v1/models 报窗口（context_length 等字段）→ 自动写 auto override；
+                # model_context_overrides 里的 manual 行永不覆盖（跳过）。设 0 可关闭。
+                CONTEXT_WINDOW_RECONCILE_INTERVAL: "86400"
+                # ---- 长上下文容忍度（2026-10-12，按实测调；与 CliRelay 时代同口径）----
+                # runner-autoclaw 承接 40 万 token 级上下文：上游实测 96 万字符
+                # 请求 61s、常规长请求 25~27s。默认首事件 readiness 80s + provider
+                # 失败计数（DEGRADED=7 / OPEN=15）会把「慢」判成「坏」，OmniRoute
+                # 侧刷屏 "[503] circuit breaker is open (reset after 7s/11s)"。
+                # 数值全部按实测延迟量级给，不拍脑袋。
+                # ---- 慢透传容差（2026-10-12 二次调，见 docs/openclaw.md）----
+                # direct response-start 的 30s 闸比 SSE readiness 更前置：workbuddy
+                # (8318) 长上下文实测 24~85s 才出响应头，11 次 30s 超时靠重试救回，
+                # 却全计入 provider 失败计数并沿 combo 传染 autoclaw 熔断。
+                # 总口径对齐 CliRelay main-api-read-timeout-seconds=1800
+                # 与官方推荐 "Long-running code generation: REQUEST_TIMEOUT_MS=900000"
+                REQUEST_TIMEOUT_MS: "1800000"
+                OMNIROUTE_DIRECT_HEADERS_TIMEOUT_MS: "150000"
+                OMNIROUTE_DIRECT_RESPONSE_RETRY_TIMEOUT_MS: "600000"
+                STREAM_READINESS_TIMEOUT_MS: "600000"
+                STREAM_READINESS_MAX_TIMEOUT_MS: "900000"
+                OMNIROUTE_AGENT_GOAL_READINESS_MAX_TIMEOUT_MS: "900000"
+                # 流式总寿命：镜像默认 1260000（21min）短于 CliRelay 1800s，长任务会在
+                # 第 21 分钟被砍 → 显式设 1800s 对齐（0=禁用，这里不用）。
+                STREAM_ACTIVE_TIMEOUT_MS: "1800000"
+                FETCH_TIMEOUT_MS: "1800000"
+                STREAM_IDLE_TIMEOUT_MS: "1800000"
+                # API-key provider 熔断（autoclaw / zcode2api 均属此类）
+                OMNIROUTE_CIRCUIT_BREAKER_API_KEY_THRESHOLD: "30"
+                OMNIROUTE_CIRCUIT_BREAKER_API_KEY_RESET_MS: "60000"
+                OMNIROUTE_PROVIDER_BREAKER_API_KEY_FAILURE_THRESHOLD: "60"
+                OMNIROUTE_PROVIDER_BREAKER_API_KEY_DEGRADATION_THRESHOLD: "20"
+                OMNIROUTE_PROVIDER_BREAKER_API_KEY_COOLDOWN_MS: "180000"
+                OMNIROUTE_PROVIDER_BREAKER_API_KEY_MAX_BACKOFF_MULTIPLIER: "2"
+              extra_hosts:
+                - "host.docker.internal:host-gateway"
+              volumes:
+                - omniroute-data:/app/data
+              healthcheck:
+                test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:20128/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+                interval: 60s
+                timeout: 15s
+                start_period: 120s
+                retries: 5
+              logging:
+                driver: json-file
+                options:
+                  max-size: "50m"
+                  max-file: "5"
+
+          volumes:
+            omniroute-data:
+          OMNIROUTE_COMPOSE_EOF
+            if [ ! -f "$OMNIROUTE_DIR/.env" ]; then
+              {
+                printf 'JWT_SECRET=%s\n' "$(openssl rand -hex 32)"
+                printf 'API_KEY_SECRET=%s\n' "$(openssl rand -hex 32)"
+                printf 'INITIAL_PASSWORD=%s\n' "$(openssl rand -base64 18 | tr '+/' '-_' | tr -d '=')"
+              } > "$OMNIROUTE_DIR/.env"
+            fi
+            chmod 600 "$OMNIROUTE_DIR/.env"
+            echo "✅ OmniRoute 部署目录就绪: $OMNIROUTE_DIR（bootstrap 空库，无渠道/无入站 key）"
+          }
+
+          # ===== 回退后端（2026-10-11 恢复自动降级）：CliRelay 全栈 + CLIProxyAPI 单容器 =====
+          # 从 dcf418e 迁移提交的父版本移植，改动仅两点：
+          #   ① 端口统一：官方 compose "8317:8317" → 降级路径 docker run 侧 -p 20128:8317
+          #     （容器内仍 8317，凭据/配置零改动）；健康检查探测 20128。
+          #   ② 函数化保持旧语义：归档恢复优先，无效则 bootstrap。
+          CLIRELAY_DIR=/tmp/local_CliRelay
+          CLIRELAY_TAR=/tmp/CliRelay.tar.gz
+          CLIRELAY_ARCHIVE="dropbox:self-hosted/CliRelay.tar.gz"
+          COMPOSE="docker compose -p clirelay -f $CLIRELAY_DIR/docker-compose.yml --project-directory $CLIRELAY_DIR"
+
+          # CliRelay/CLIProxyAPI 服务 8317（容器内），宿主侧统一映射 20128：
+          # 健康检查与 OmniRoute 同一探测点，降级后客户端/隧道零改动
+          wait_clirelay_ready() {
+            local label="$1"
+            local tries="${2:-120}"
+            local code
+            for i in $(seq 1 "$tries"); do
+              code=$(curl -s --connect-timeout 2 -o /dev/null -w "%{http_code}" http://127.0.0.1:20128/ || true)
+              if [ -n "$code" ] && [ "$code" -ge 100 ] && [ "$code" -lt 600 ]; then
+                echo "✅ [$label] 20128 已就绪 (HTTP ${code})"
+                return 0
+              fi
+              echo "⏳ [$label] 等待中... ${i}/${tries}"
+              sleep 2
+            done
+            return 1
+          }
+
+          # ---------- CLIProxyAPI 数据恢复（旧逻辑原样移植，幂等；回退与 bootstrap 共用） ----------
+          restore_cliproxyapi_data() {
+            if [ -f /tmp/local_CLIPProxyAPI/config.yaml ]; then
+              echo "ℹ️ CLIProxyAPI 数据目录已就绪，跳过恢复"
+              return 0
+            fi
+            echo "Configuring local CLIProxyAPI directory with persistent data..."
+            cleanup_archive_workdir
+            require_free_kb /tmp $((2 * 1024 * 1024)) "CLIProxyAPI restore preflight"
+            rm -rf /tmp/local_CLIPProxyAPI
+            mkdir -p /tmp/local_CLIPProxyAPI
+            if rclone ls dropbox:self-hosted/CLIProxyAPI.tar.gz > /dev/null 2>&1; then
+              echo "📦 Found CLIProxyAPI.tar.gz! Downloading and extracting..."
+              rclone copyto dropbox:self-hosted/CLIProxyAPI.tar.gz /tmp/CLIProxyAPI.tar.gz
+              archive_kb=$(du -sk /tmp/CLIProxyAPI.tar.gz | awk '{print $1}')
+              if [ -z "${archive_kb:-}" ] || [ "$archive_kb" -le 0 ]; then
+                echo "❌ CLIProxyAPI extract preflight: unable to calculate archive size" >&2
+                exit 1
+              fi
+              echo "CLIProxyAPI.tar.gz 大小: ${archive_kb}KB"
+              require_free_kb /tmp $((archive_kb * 3 + 512 * 1024)) "CLIProxyAPI extract preflight"
+              local min_size=$((5 * 1024))
+              local actual_size
+              actual_size=$(stat -c%s /tmp/CLIProxyAPI.tar.gz 2>/dev/null || echo 0)
+              if [ "$actual_size" -ge "$min_size" ] && tar -tzf /tmp/CLIProxyAPI.tar.gz >/dev/null 2>&1; then
+                tar -xzf /tmp/CLIProxyAPI.tar.gz -C /tmp/local_CLIPProxyAPI
+              else
+                echo "⚠️ CLIProxyAPI.tar.gz validation failed, skipping archive restore."
+              fi
+              cleanup_archive_workdir
+            else
+              echo "⚠️ No CLIProxyAPI archive found. Falling back to sync from raw directory..."
+              rclone copy dropbox:self-hosted/CLIProxyAPI /tmp/local_CLIPProxyAPI \
+                --retries 10 \
+                --low-level-retries 20 \
+                --timeout 1m \
+                --contimeout 15s \
+                -P || true
+            fi
+            mkdir -p /tmp/local_CLIPProxyAPI/auth-dir /tmp/local_CLIPProxyAPI/logs
+            touch /tmp/local_CLIPProxyAPI/config.yaml
+            touch /tmp/local_CLIPProxyAPI/stats.json
+            echo "=== restored CLIProxyAPI tree ==="
+            find /tmp/local_CLIPProxyAPI -maxdepth 3 | sort || true
+          }
+
+          # ---------- CLIProxyAPI 数据 → CliRelay 部署目录（bootstrap 迁移，旧逻辑原样移植） ----------
+          bootstrap_clirelay_from_cliproxyapi() {
+            echo "🔄 Bootstrapping CliRelay deployment from CLIProxyAPI data..."
+            rm -rf "$CLIRELAY_DIR"
+            mkdir -p "$CLIRELAY_DIR"/auths "$CLIRELAY_DIR"/sql "$CLIRELAY_DIR"/postgres-data "$CLIRELAY_DIR"/redis-data "$CLIRELAY_DIR"/logs "$CLIRELAY_DIR"/data
+            if [ -f /tmp/local_CLIPProxyAPI/config.yaml ]; then
+              cp -a /tmp/local_CLIPProxyAPI/config.yaml "$CLIRELAY_DIR/config.yaml"
+            else
+              touch "$CLIRELAY_DIR/config.yaml"
+            fi
+            if [ -d /tmp/local_CLIPProxyAPI/auth-dir ]; then
+              cp -a /tmp/local_CLIPProxyAPI/auth-dir/. "$CLIRELAY_DIR/auths/" 2>/dev/null || true
+            fi
+            find "$CLIRELAY_DIR/auths" -name '._*' -delete 2>/dev/null || true
+            curl -fsSL --retry 3 https://raw.githubusercontent.com/kittors/CliRelay/main/docker-compose.yml \
+              -o "$CLIRELAY_DIR/docker-compose.yml" || { echo "❌ 无法下载 CliRelay docker-compose.yml"; return 1; }
+            local pgpass
+            pgpass=$(openssl rand -hex 16)
+            {
+              printf 'CLIRELAY_PROJECT_DIR=%s\n' "$CLIRELAY_DIR"
+              printf 'AUTH_PATH=/root/.cli-proxy-api\n'
+              printf 'CLIRELAY_POSTGRES_DB=clirelay\n'
+              printf 'CLIRELAY_POSTGRES_USER=clirelay\n'
+              printf 'CLIRELAY_POSTGRES_PASSWORD=%s\n' "$pgpass"
+            } > "$CLIRELAY_DIR/.env"
+            chmod 600 "$CLIRELAY_DIR/.env"
+            echo "✅ CliRelay 部署目录就绪: $CLIRELAY_DIR"
+          }
+
+          # ---------- CliRelay 数据恢复：Dropbox 归档优先，无效则 bootstrap 迁移（旧逻辑原样移植） ----------
+          restore_clirelay_data() {
+            rm -rf "$CLIRELAY_DIR"
+            local restored=0
+            if rclone ls "$CLIRELAY_ARCHIVE" > /dev/null 2>&1; then
+              echo "📦 Found CliRelay.tar.gz! Downloading and validating..."
+              require_free_kb /tmp $((2 * 1024 * 1024)) "clirelay restore preflight"
+              if rclone copyto "$CLIRELAY_ARCHIVE" "$CLIRELAY_TAR"; then
+                if [ -s "$CLIRELAY_TAR" ] && tar -tzf "$CLIRELAY_TAR" >/dev/null 2>&1; then
+                  rm -rf /tmp/clirelay-restore
+                  mkdir -p /tmp/clirelay-restore
+                  tar -xzf "$CLIRELAY_TAR" -C /tmp/clirelay-restore
+                  if [ -f /tmp/clirelay-restore/docker-compose.yml ] && [ -f /tmp/clirelay-restore/.env ]; then
+                    mkdir -p "$CLIRELAY_DIR"
+                    cp -a /tmp/clirelay-restore/. "$CLIRELAY_DIR/"
+                    mkdir -p "$CLIRELAY_DIR"/auths "$CLIRELAY_DIR"/sql "$CLIRELAY_DIR"/postgres-data "$CLIRELAY_DIR"/redis-data "$CLIRELAY_DIR"/logs "$CLIRELAY_DIR"/data
+                    echo "✅ Restored CliRelay deployment from archive"
+                    restored=1
+                  else
+                    echo "⚠️ CliRelay.tar.gz 缺少 docker-compose.yml/.env，转 bootstrap 迁移。"
+                  fi
+                else
+                  echo "⚠️ CliRelay.tar.gz validation failed, 转 bootstrap 迁移。"
+                fi
+              else
+                echo "⚠️ CliRelay.tar.gz 下载失败，转 bootstrap 迁移。"
+              fi
+            else
+              echo "ℹ️ 未找到 CliRelay 归档，从 CLIProxyAPI 数据 bootstrap 迁移。"
+            fi
+            cleanup_archive_workdir
+            if [ "$restored" != 1 ]; then
+              restore_cliproxyapi_data
+              bootstrap_clirelay_from_cliproxyapi
+            fi
+          }
+
+          # ---------- CliRelay 全栈启动：postgres 先行 → SQL 导入 → 全栈 up（旧逻辑移植 + 统一端口） ----------
+          start_clirelay() {
+            echo "🚀 Starting CliRelay compose stack..."
+            docker rm -f cli-proxy-api clirelay 2>/dev/null || true
+            # CliRelay 路径若残留上一轮 socat/端口桥接，先拆
+            sudo pkill -f 'socat.*TCP-LISTEN:20128' 2>/dev/null || true
+            $COMPOSE down --remove-orphans 2>/dev/null || true
+            # 统一端口 override：官方 compose 绑 8317:8317（0.0.0.0），覆盖为宿主
+            # 127.0.0.1:20128 → 容器 8317。与 OmniRoute 同宿主端口，降级后客户端/隧道零改动；
+            # override 独立成文件不碰云端归档恢复来的 compose 原件。
+            printf '%s\n' \
+              'services:' \
+              '  cli-proxy-api:' \
+              '    ports: !override' \
+              '      - "127.0.0.1:20128:8317"' \
+              '      - "127.0.0.1:8085:8085"' \
+              '      - "127.0.0.1:1455:1455"' \
+              '      - "127.0.0.1:54545:54545"' \
+              '      - "127.0.0.1:51121:51121"' \
+              '      - "127.0.0.1:11451:11451"' \
+              > "$CLIRELAY_DIR/docker-compose.port-override.yml"
+            $COMPOSE -f "$CLIRELAY_DIR/docker-compose.yml" -f "$CLIRELAY_DIR/docker-compose.port-override.yml" up -d postgres || return 1
+            local pg_ok=0
+            for i in $(seq 1 30); do
+              if $COMPOSE exec -T postgres sh -c '. /clirelay-deploy/.env; pg_isready -U "$CLIRELAY_POSTGRES_USER" -d "$CLIRELAY_POSTGRES_DB"' >/dev/null 2>&1; then
+                pg_ok=1
+                break
+              fi
+              sleep 2
+            done
+            if [ "$pg_ok" != 1 ]; then
+              echo "❌ CliRelay postgres 未在预期时间内就绪"
+              return 1
+            fi
+            # 恢复脚本：先导 SQL 再起全栈（PG 数据卷不入归档，每轮均为全新库，直接导入无冲突）
+            shopt -s nullglob
+            local sql_files=( "$CLIRELAY_DIR"/sql/*.sql )
+            shopt -u nullglob
+            if [ "${#sql_files[@]}" -gt 0 ]; then
+              local latest_sql
+              latest_sql=$(ls -1t "${sql_files[@]}" | head -n 1)
+              echo "📥 Importing PostgreSQL snapshot: $latest_sql"
+              $COMPOSE exec -T postgres sh -c '. /clirelay-deploy/.env; exec psql -U "$CLIRELAY_POSTGRES_USER" -d "$CLIRELAY_POSTGRES_DB" -v ON_ERROR_STOP=1' < "$latest_sql" || return 1
+              echo "✅ PostgreSQL 数据导入完成"
+            fi
+            $COMPOSE -f "$CLIRELAY_DIR/docker-compose.yml" -f "$CLIRELAY_DIR/docker-compose.port-override.yml" up -d || return 1
+          }
+
+          # ---------- CLIProxyAPI 单容器启动（回退后端；端口改绑 20128→容器 8317） ----------
+          start_cliproxyapi() {
+            echo "🚀 Starting CLIProxyAPI container (fallback backend)..."
+            docker rm -f cliproxyapi cli-proxy-api clirelay 2>/dev/null || true
+            # CliRelay 路径残留的 socat 会抢 20128，先拆
+            sudo pkill -f 'socat.*TCP-LISTEN:20128' 2>/dev/null || true
+            mkdir -p /tmp/local_CLIPProxyAPI/auth-dir /tmp/local_CLIPProxyAPI/logs
+            touch /tmp/local_CLIPProxyAPI/config.yaml
+            touch /tmp/local_CLIPProxyAPI/stats.json
+            # ① 容器原生即 8317，宿主侧直接绑 20128（与 OmniRoute 同端口，客户端/隧道零改动）
+            # ② 官方 compose 的 clirelay-init 会写 config，这里数据是归档/旧目录恢复的，直接挂
+            docker run -d \
+              --name cliproxyapi \
+              --restart unless-stopped \
+              -p 127.0.0.1:20128:8317 \
+              -e TZ=Asia/Shanghai \
+              -v /tmp/local_CLIPProxyAPI/config.yaml:/CLIProxyAPI/config.yaml \
+              -v /tmp/local_CLIPProxyAPI/auth-dir:/root/.cli-proxy-api \
+              -v /tmp/local_CLIPProxyAPI/logs:/CLIProxyAPI/logs \
+              -v /tmp/local_CLIPProxyAPI/stats.json:/CLIProxyAPI/stats.json \
+              eceasy/cli-proxy-api:latest || return 1
+          }
+
+          # ---------- 启动：恢复路径走 compose（卷已由 compose 声明复用），bootstrap 路径走 docker run ----------
+
+          start_omniroute() {
+            echo "🚀 Starting OmniRoute container..."
+            docker rm -f omniroute 2>/dev/null || true
+            docker volume create "$OMNIROUTE_VOLUME" >/dev/null
+            if [ -f "$OMNIROUTE_DIR/docker-compose.yml" ]; then
+              docker compose -p omniroute -f "$OMNIROUTE_DIR/docker-compose.yml" --project-directory "$OMNIROUTE_DIR" up -d || return 1
+            else
+              # bootstrap 路径同样要带长上下文阈值 —— 与下方 compose heredoc
+              # （restore 路径）保持同值，否则归档缺失的冷启动会被默认
+              # readiness 80s + provider 失败计数 7/15 又快快打成熔断。
+              # 阈值依据见 compose heredoc 处的注释块（2026-10-12 实测调参）。
+              docker run -d \
+                --name omniroute \
+                --restart unless-stopped \
+                --stop-timeout 40 \
+                -p 127.0.0.1:20128:20128 \
+                -e PORT=20128 \
+                -e OMNIROUTE_MEMORY_MB=4096 \
+                -e BASE_URL=http://omniroute:20128 \
+                -e AUTH_COOKIE_SECURE=false \
+                -e REQUEST_TIMEOUT_MS=1800000 \
+                -e OMNIROUTE_DIRECT_HEADERS_TIMEOUT_MS=150000 \
+                -e OMNIROUTE_DIRECT_RESPONSE_RETRY_TIMEOUT_MS=600000 \
+                -e STREAM_READINESS_TIMEOUT_MS=600000 \
+                -e STREAM_READINESS_MAX_TIMEOUT_MS=900000 \
+                -e OMNIROUTE_AGENT_GOAL_READINESS_MAX_TIMEOUT_MS=900000 \
+                -e STREAM_ACTIVE_TIMEOUT_MS=1800000 \
+                -e FETCH_TIMEOUT_MS=1800000 \
+                -e STREAM_IDLE_TIMEOUT_MS=1800000 \
+                -e OMNIROUTE_CIRCUIT_BREAKER_API_KEY_THRESHOLD=30 \
+                -e OMNIROUTE_CIRCUIT_BREAKER_API_KEY_RESET_MS=60000 \
+                -e OMNIROUTE_PROVIDER_BREAKER_API_KEY_FAILURE_THRESHOLD=60 \
+                -e OMNIROUTE_PROVIDER_BREAKER_API_KEY_DEGRADATION_THRESHOLD=20 \
+                -e OMNIROUTE_PROVIDER_BREAKER_API_KEY_COOLDOWN_MS=180000 \
+                -e OMNIROUTE_PROVIDER_BREAKER_API_KEY_MAX_BACKOFF_MULTIPLIER=2 \
+                --add-host host.docker.internal:host-gateway \
+                -v "$OMNIROUTE_VOLUME:/app/data" \
+                --env-file "$OMNIROUTE_DIR/.env" \
+                "$OMNIROUTE_IMAGE" || return 1
+            fi
+          }
+
+          cleanup_archive_workdir
+          # 数据准备失败不终止（bootstrap 全新部署兜底，与旧 CliRelay 同口径）
+          if ! restore_omniroute_data; then
+            bootstrap_omniroute
+            # P0 加固（2026-10-11）：归档明明存在却没恢复成 = 数据事故信号，必须炸响。
+            # 当天事故即此形态：cleanup 误删解包目录 → 恒报"缺少 docker-compose.yml/.env"
+            # → 静默 bootstrap 空库上岗，全靠归档脚本 1MB 体积门才没让空库覆盖云端好包。
+            if [ "$OMNIROUTE_ARCHIVE_SEEN" = "1" ]; then
+              if source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh" 2>/dev/null; then
+                msg=""
+                tg_add_title msg "🚨 OmniRoute 归档恢复失败 · 空库兜底"
+                tg_add_kv msg "现象" "Dropbox 归档存在，但本轮恢复未走通，已 bootstrap 空库"
+                tg_add_kv msg "影响" "无渠道/无入站 key，客户端 401；1MB 体积门将拦住空库回传"
+                tg_add_note msg "根因看本轮日志 OmniRoute 步骤 Found OmniRoute.tar.gz 之后的段"
+                tg_add_footer msg
+                send_tg "$msg" alert || true
+              fi
+            fi
+          fi
+
+          # ---------- 主流程：三后端降级链 OmniRoute → CliRelay → CLIProxyAPI（2026-10-11 恢复自动降级） ----------
+          # 统一端口方案：三个后端全部服务在宿主机 127.0.0.1:20128 —— OpenClaw 客户端
+          # （openclaw.json，随主包归档持久化）硬编码指向 127.0.0.1:20128/v1，ai-api 隧道
+          # 也是固定地址模式指向 20128（tunnels.conf），因此降级不换端口、不改客户端、
+          # 不重建隧道。CliRelay/CLIProxyAPI 官方 compose/容器原生端口 8317，降级路径用
+          # docker run 侧端口映射改绑 20128，容器内仍是 8317，凭据/配置零改动。
+          # 降级链：主用 OmniRoute 起不来 → 回退 CliRelay 全栈（数据随 CliRelay.tar.gz 恢复）
+          # → CliRelay 也起不来 → 回退 CLIProxyAPI 单容器（数据随 CLIProxyAPI.tar.gz 恢复）。
+          # 每次降级记录 FALLBACK_REASON 写入 BACKEND_STATE，通知步骤自动向 Telegram 报告。
+          ACTIVE_BACKEND=""
+          FALLBACK_REASON=""
+          # pinned 模式：手动运行时显式指定后端 → 只跑它，失败即失败（不降级），
+          # 便于定点验证单个后端；auto（默认/定时触发）走完整降级链
+          PINNED_BACKEND="${AI_BACKEND_INPUT:-auto}"
+
+          if [ "$PINNED_BACKEND" = "omniroute" ]; then
+            if start_omniroute && wait_api_ready "omniroute" 150; then
+              ACTIVE_BACKEND=omniroute
+              docker ps -a
+              echo "✅ 当前生效 AI 网关: OmniRoute（pinned）"
+            else
+              echo "❌ OmniRoute（pinned）未就绪 —— pinned 模式不降级，直接失败"
+              docker logs omniroute --tail 100 || true
+              exit 1
+            fi
+          elif [ "$PINNED_BACKEND" = "clirelay" ]; then
+            restore_clirelay_data || true
+            if start_clirelay && wait_clirelay_ready "clirelay" 120; then
+              ACTIVE_BACKEND=clirelay
+              docker ps -a
+              echo "✅ 当前生效 AI 网关: CliRelay（pinned）"
+            else
+              echo "❌ CliRelay（pinned）未就绪 —— pinned 模式不降级，直接失败"
+              $COMPOSE logs --tail 80 2>/dev/null || true
+              exit 1
+            fi
+          elif [ "$PINNED_BACKEND" = "cliproxyapi" ]; then
+            restore_cliproxyapi_data
+            if start_cliproxyapi && wait_clirelay_ready "cliproxyapi" 120; then
+              ACTIVE_BACKEND=cliproxyapi
+              docker ps -a
+              echo "✅ 当前生效 AI 网关: CLIProxyAPI（pinned）"
+            else
+              echo "❌ CLIProxyAPI（pinned）未就绪 —— pinned 模式不降级，直接失败"
+              docker logs cliproxyapi --tail 100 || true
+              exit 1
+            fi
+          elif start_omniroute && wait_api_ready "omniroute" 150; then
+            ACTIVE_BACKEND=omniroute
+            docker ps -a
+            echo "✅ 当前生效 AI 网关: OmniRoute"
+          else
+            if [ -z "${FALLBACK_REASON:-}" ]; then
+              FALLBACK_REASON="OmniRoute 未能在预期时间内就绪 · compose 启动或 20128 健康检查失败"
+            fi
+            echo "⚠️ $FALLBACK_REASON，打印日志并回退 CliRelay..."
+            echo "--- omniroute logs (tail 100) ---"
+            docker logs omniroute --tail 100 || true
+            docker rm -f omniroute 2>/dev/null || true
+
+            restore_clirelay_data || {
+              [ -z "${FALLBACK_REASON:-}" ] && FALLBACK_REASON="CliRelay 数据准备失败 · 归档缺失/校验失败或 bootstrap 迁移失败"
+              echo "⚠️ CliRelay 数据准备失败，跳过 CliRelay 直接回退 CLIProxyAPI"
+            }
+
+            if [ -z "${ACTIVE_BACKEND:-}" ] && [ -f "$CLIRELAY_DIR/docker-compose.yml" ] \
+              && start_clirelay && wait_clirelay_ready "clirelay" 120; then
+              ACTIVE_BACKEND=clirelay
+              docker ps -a
+              echo "✅ 已回退，当前生效 AI 网关: CliRelay（全栈，20128 统一端口）"
+            else
+              [ -z "${ACTIVE_BACKEND:-}" ] && [ -z "${FALLBACK_REASON:-}" ] && \
+                FALLBACK_REASON="CliRelay 未能在预期时间内就绪 · compose 启动或 20128 健康检查失败"
+              echo "⚠️ CliRelay 也未就绪，打印日志并回退 CLIProxyAPI..."
+              echo "--- clirelay compose logs (tail 80) ---"
+              $COMPOSE logs --tail 80 2>/dev/null || true
+              $COMPOSE down -v --remove-orphans 2>/dev/null || true
+              docker rm -f cli-proxy-api clirelay 2>/dev/null || true
+
+              restore_cliproxyapi_data
+              if start_cliproxyapi && wait_clirelay_ready "cliproxyapi" 120; then
+                ACTIVE_BACKEND=cliproxyapi
+                docker ps -a
+                echo "✅ 已回退，当前生效 AI 网关: CLIProxyAPI（单容器，20128 统一端口）"
+              else
+                echo "❌ 三个后端全部未就绪（omniroute/clirelay/cliproxyapi）"
+                docker logs cliproxyapi --tail 100 2>/dev/null || true
+                exit 1
+              fi
+            fi
+          fi
+          {
+            printf 'ACTIVE_BACKEND=%s\n' "$ACTIVE_BACKEND"
+            if [ -n "${FALLBACK_REASON:-}" ]; then printf 'FALLBACK_REASON=%s\n' "$FALLBACK_REASON"; fi
+          } > "$BACKEND_STATE"
+
+          # Hand off to the systemd unit (Restart=always) instead of a bare
+          # nohup, so the tunnel survives signal sweeps and restarts itself.
+          if [ -f "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ]; then
+            bash "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ensure ai-api || true
+          else
+            nohup cloudflared tunnel run --protocol http2 --url http://127.0.0.1:20128 ai-api \
+              > ~/.openclaw/logs/cloudflared_omniroute.log 2>&1 &
+            sleep 5
+            echo $! > ~/.openclaw/logs/cloudflared_omniroute.pid
+          fi
+
+          echo "ai-api 命名隧道已启动（systemd 托管，固定地址模式），当前后端: ${ACTIVE_BACKEND}"
+
+      - name: Clean stale Tailscale nodes (openclaw* 僵尸清退)
+        id: ts_clean
+        if: ${{ always() && (env.TS_API_KEY != '' || (env.TS_OAUTH_CLIENT_ID != '' && env.TS_OAUTH_CLIENT_SECRET != '')) }}
+        env:
+          TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          TS_OAUTH_CLIENT_SECRET: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
+          TS_API_KEY: ${{ secrets.TS_API_KEY }}
+        run: |
+          set -euo pipefail
+          # 上一轮被 360m 硬上限强杀时，tailscale/github-action 的 post-logout 不跑，
+          # 节点虽为 ephemeral（action 注册即带 ephemeral=true，源码实测），但控制面
+          # 清理有几十分钟级延迟，singleton 立即接力的下一轮仍会撞名 —— 新轮
+          # 会被控制面静默退化成 openclaw-1/-2…（2026-09-30 实锤，KeyExpiry=null）。
+          # 本步骤先于 Setup Tailscale 执行：此刻 tailnet 里的 openclaw* 一律是历史
+          # 残留（含 openclaw-N / openclaw-tmp-*），逐个删除，从根上消掉退化。
+          #
+          # ⚠️ 关键坑（2026-10-01 实测）：Tailscale API **不用 Bearer**！
+          #    此前一律用 -H "Authorization: Bearer ..." 打，无论 tskey-client-*
+          #    还是 tskey-api-* 都返回 401/404，被误判成「scope 不足」，守护因此
+          #    空转了很久（连代码注释都跟着写错了结论）。正确用法是 Basic auth：
+          #      curl -u "${KEY}:" https://api.tailscale.com/api/v2/...
+          #    （key 作用户名、密码留空）
+          # 凭据优先级：
+          #   ① TS_API_KEY（tskey-api-*）—— API access token，具 devices 读写权限；
+          #   ② 无则回退 OAuth client（tskey-client-*）—— 仅兼容保留，实测无 devices 权限。
+          _auth=()
+          if [ -n "${TS_API_KEY:-}" ]; then
+            echo "1. 使用 TS_API_KEY（API access token · Basic auth）..."
+            _auth=(-u "${TS_API_KEY}:")
+          else
+            echo "1. OAuth client -> token（scope 仅 auth_keys，预计列设备失败）..."
+            _tok="$(curl -fsS --max-time 20 https://api.tailscale.com/api/v2/oauth/token \
+              --data-urlencode "client_id=${TS_OAUTH_CLIENT_ID}" \
+              --data-urlencode "client_secret=${TS_OAUTH_CLIENT_SECRET}" \
+              --data-urlencode "grant_type=client_credentials" 2>/dev/null \
+              | jq -r '.access_token // empty' 2>/dev/null || true)"
+            if [ -z "${_tok}" ]; then
+              echo "⚠️ 未能取得 Tailscale API token，跳过僵尸清退（本轮可能仍退化 openclaw-1）"
+              exit 0
+            fi
+            _auth=(-H "Authorization: Bearer ${_tok}")
+          fi
+          echo "2. 拉取 tailnet 设备列表..."
+          _dev_code="$(curl -s -o /tmp/ts-devices.json -w '%{http_code}' --max-time 20 \
+            "${_auth[@]}" \
+            https://api.tailscale.com/api/v2/tailnet/-/devices 2>/dev/null || true)"
+          if [ "${_dev_code}" != "200" ]; then
+            echo "⚠️ 设备列表获取失败 (HTTP ${_dev_code})：僵尸清退未生效"
+            if [ -z "${TS_API_KEY:-}" ]; then
+              echo "   根因：tskey-client-* 只有 auth_keys scope，天生无 devices 权限"
+              echo "   补法：Tailscale admin → Settings → Keys → 生成 tskey-api-* 存为 TS_API_KEY"
+            else
+              echo "   TS_API_KEY 已配置但仍失败：多为认证方式非 Basic（-u \"KEY:\"），或 key 已撤销/过期"
+            fi
+            rm -f /tmp/ts-devices.json
+            exit 0
+          fi
+          _dev="$(cat /tmp/ts-devices.json)"
+          rm -f /tmp/ts-devices.json
+          # 注册前运行：openclaw* 一律视为残留。按 hostname/name 双字段匹配，
+          # 覆盖 openclaw / openclaw-1 / openclaw-tmp-* 全家族。
+          #
+          # ⚠️ 只删「断连」节点，绝不碰活着的（2026-10-01 实测加固）：
+          #    权限打通前本步骤因删不动而“安全”；一旦能删，无差别 test("openclaw")
+          #    会命中**当前仍在跑的那一轮自己** —— job 重试/手动重触发时开场就把
+          #    自己的 SSH 入口删掉（自杀）。故必须加 connectedToControl == false。
+          #    判据说明：设备列表**没有 online 字段**（别用 .online // false ——
+          #    jq 的 // 对字段缺失同样取右值，会静默把活节点判成离线，已踩）；
+          #    真实在线判据是 connectedToControl。实测真僵尸该值为 false，
+          #    在跑的节点为 true。
+          # 活着的同名节点交给 Enable Tailscale SSH 的临时名中转去回收，不在这里硬删。
+          _stale="$(printf '%s' "${_dev}" | jq -r '
+            (.devices // [])[]?
+            | select(((.hostname // "") + " " + (.name // "")) | test("openclaw"))
+            | select(.connectedToControl == false)
+            | .id' 2>/dev/null || true)"
+          if [ -z "${_stale}" ]; then
+            echo "✅ 无 openclaw* 残留节点，跳过删除"
+            exit 0
+          fi
+          echo "3. 发现 $(printf '%s' "${_stale}" | grep -c .) 个残留节点，逐个删除..."
+          for _id in ${_stale}; do
+            _code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 -X DELETE \
+              "${_auth[@]}" \
+              "https://api.tailscale.com/api/v2/device/${_id}" 2>/dev/null || true)"
+            case "${_code}" in
+              200|204) echo "✅ 已删除残留节点 ${_id} (HTTP ${_code})" ;;
+              *) echo "⚠️ 删除 ${_id} 失败 (HTTP ${_code})：凭据无 devices 写权限或该节点不可管理" ;;
+            esac
+          done
+      - name: Tailscale daemon 纳管 (systemd)
+        id: ts_daemon
+        # 2026-10-23：本步骤与 OpenClaw 无关，不能因前置 Install OpenClaw 失败而被
+        # 默认 success() 跳过 —— run 39858698391 就是这样：Install 失败 → 本步 skipped
+        # → 下一步 Setup Tailscale 仍用 always() 跑，却没有托管 daemon，直接失败。
+        if: ${{ always() }}
+        # 长驻服务一律 systemd 托管（2026-10-05 主人拍板）。必须在
+        # tailscale/github-action **之前**执行，原因见下方接管原理。
+        run: |
+          set -uo pipefail
+          if [ -f "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" ]; then
+            bash "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" ensure tailscaled || true
+          else
+            echo "⚠️ services.sh 缺失，沿用 action 自带的 --state=mem: 裸跑"
+          fi
+          # 接管原理（2026-10-05 实测）：
+          #   action 内部无条件 spawn `sudo -E tailscaled --state=mem:`。若本单元
+          #   已占据 TUN，action 那个实例会因 "TUN device tailscale0 is busy" 立即
+          #   退出；但 action 随后 waitForDaemonReady() 轮询的是**默认 socket**
+          #   （即本单元），拿到响应即判定就绪，接着 connectToTailscale 的
+          #   `tailscale up` 同样打在本单元上 —— 于是登录态落到托管的 daemon。
+          #   第二个实例的退出码被 action 忽略（detached + unref），不会 fail 步骤。
+          #
+          # 为什么必须 --statedir 而非 --state=mem:（实测踩坑）
+          #   mem: 把登录态只放内存，进程一死认证即丢，Restart=always 拉起来的
+          #   只是个 Logged out 空壳 —— 托管形同虚设。statedir 落盘后崩溃重启
+          #   自动恢复登录，自愈才是真的自愈。
+          #
+          # 过渡期：若本机已有 action 起的 mem: 裸跑实例，ensure 会检测并跳过
+          #   （不抢占 TUN、不打断当前 SSH），单元在新 VM 上自动接管。
+      - name: Setup Tailscale (SSH 调试入口)
+        id: ts
+        # daemon 纳管没成功就不要硬跑 action：否则失败会看起来像 Tailscale 本身坏了，
+        # 实际是前置步骤被跳过（run 39858698391 的级联失败）。
+        if: ${{ always() && steps.ts_daemon.outcome == 'success' && env.TS_OAUTH_CLIENT_ID != '' && env.TS_OAUTH_CLIENT_SECRET != '' }}
+        uses: tailscale/github-action@306e68a486fd2350f2bfc3b19fcd143891a4a2d8 # v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
+          tags: tag:ci
+          # 与 systemd 单元用同一 statedir：即便本轮是 action 的实例抢到了 TUN，
+          # 登录态也落盘，下一轮单元接管时无需重新认证。
+          statedir: /var/lib/tailscale
+          # 注册时就固定主机名（action v4 原生 hostname 入参，实测 306e68a 的
+          # action.yml 有该 input）：此前是「先按 runner 名注册、再 set --hostname
+          # 改名」，两步之间存在竞态 —— 注册瞬间若 tailnet 里还有上一轮的
+          # openclaw 残留，控制面当场就分配 openclaw-1，事后 set 改不回来
+          # （prefs 里 Hostname 写对了，DNS 名仍是 openclaw-1，2026-10-01 实锤）。
+          # 注册即声明能消掉这个窗口，是防退化的第一优先手段。
+          hostname: openclaw
+
+      - name: Enable Tailscale SSH
+        id: ts_ssh
+        if: ${{ always() && steps.ts.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          # 开启 Exit Node 前置条件：启用内核转发
+          echo 'net.ipv4.ip_forward = 1' | sudo tee /etc/sysctl.d/99-tailscale-forward.conf
+          echo 'net.ipv6.conf.all.forwarding = 1' | sudo tee -a /etc/sysctl.d/99-tailscale-forward.conf
+          sudo sysctl -p /etc/sysctl.d/99-tailscale-forward.conf
+
+          # 固定主机名 openclaw（singleton 并发下不会撞名）；节点为 ephemeral，job 结束自动移除
+          # 开启 Exit Node：tailnet 内设备可将本 runner 设为出口节点
+          # 批准方式（任选其一）：
+          #   ① 管理页手动批准: https://login.tailscale.com/admin/machines → 找到 openclaw 节点
+          #      → Edit route settings → 勾选 0.0.0.0/0, ::/0（ephemeral 节点每次运行都需重新批准）
+          #   ② ACL autoApprovers（推荐，免每次批准）: 在 Tailscale ACL rules 前加：
+          #        "autoApprovers": {
+          #          "routes": { "0.0.0.0/0": ["tag:ci"], "::/0": ["tag:ci"] }
+          #        },
+          #   ③ Tailscale API 程序化批准:
+          #      GET  https://api.tailscale.com/api/v2/tailnet/{tailnet}/devices  查到节点 id
+          #      POST https://api.tailscale.com/api/v2/device/{device_id}/routes  body: {"routes": ["0.0.0.0/0", "::/0"]}
+          #      （需 TS_API_KEY，ephemeral 节点 id 每次变化，需按主机名动态查询）
+          sudo tailscale set --ssh --hostname=openclaw --advertise-exit-node
+          # 回读实际注册的 DNS 名。--hostname 的重命名有传播延迟，若 set 后立刻读取
+          # 可能拿到机器原始主机名（如 github-runnervmgx7h7），导致 ts.env 里的 SSH/
+          # RustDesk 直连地址每轮漂移。这里轮询等待名字收敛为 openclaw。
+          # tailnet 后缀（形如 xxxx.ts.net）动态取，避免硬编码到别的 tailnet 时写歪。
+          TS_SUFFIX="$(tailscale status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')"
+          TS_SUFFIX="${TS_SUFFIX#*.}"
+          TS_FQDN=""
+          for i in $(seq 1 15); do
+            TS_FQDN="$(tailscale status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')"
+            case "$TS_FQDN" in
+              "openclaw.${TS_SUFFIX}") break ;;
+            esac
+            sleep 2
+          done
+
+          # 固定主机名 openclaw（2026-09-30 补）：撞名时控制面会**静默拒绝**并退化成
+          # openclaw-1/-2…，根因是上一轮同名 ephemeral 节点残留在 tailnet——离线也照样占名。
+          # 直连 set 对这种情况无效（prefs 里 Hostname 已写对，但 DNS 名仍是 openclaw-1）。
+          # 兜底：先改到一个临时名把 openclaw 让出来，再改回去 —— 实测可强制收回名字。
+          if [ "${TS_FQDN:-}" != "openclaw.${TS_SUFFIX}" ]; then
+            echo "⚠️ 主机名被占（当前 ${TS_FQDN:-未知}），走临时名中转回收 openclaw"
+            sudo tailscale set --hostname="openclaw-tmp-$$" 2>&1 || true
+            for i in $(seq 1 10); do
+              _TMP_FQDN="$(tailscale status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')"
+              case "$_TMP_FQDN" in
+                "openclaw-tmp-$$.${TS_SUFFIX}") break ;;
+              esac
+              sleep 3
+            done
+            sudo tailscale set --ssh --hostname=openclaw --advertise-exit-node 2>&1 || true
+            TS_FQDN=""
+            for i in $(seq 1 12); do
+              TS_FQDN="$(tailscale status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')"
+              case "$TS_FQDN" in
+                "openclaw.${TS_SUFFIX}") break ;;
+              esac
+              sleep 5
+            done
+          fi
+          TS_FQDN="${TS_FQDN:-$(tailscale status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')}"
+          TS_HOST="$(printf '%s' "$TS_FQDN" | cut -d. -f1)"
+          {
+            printf 'TS_HOST=%s\n' "$TS_HOST"
+            printf 'TS_FQDN=%s\n' "$TS_FQDN"
+            printf 'TS_IP=%s\n' "$(tailscale ip -4)"
+          } > "$HOME/ts.env"
+          echo "SSH 入口: ssh runner@${TS_HOST}（RustDesk 直连: ${TS_FQDN}:21118）"
+
+          # ---------- 主机名回收守护（2026-10-01 补）----------
+          # 为什么必须有守护：上面所有回收动作都只在本步骤**这一刻**试一次，而残留的
+          # 上一轮 ephemeral 节点要几十分钟后才被控制面清掉 —— 名字是在本步骤结束后
+          # 才空出来的，那时已经没有任何东西再去收回，于是这一整轮都顶着 openclaw-1。
+          # 2026-10-01 实锤：ts.env 写着 TS_HOST=openclaw-1，而控制面 prefs 里
+          # Hostname 其实是对的 openclaw（= 名被别人占着，不是我们设错）。
+          # 且「Clean stale」步骤删不动（本仓库 OAuth client 只有 auth_keys scope，
+          # devices 列表接口 404，整段降级跳过）—— 删不掉就只能等，等就必须有人重试。
+          # 故起一个脱离本步骤进程树的守护，在整个 job 生命周期内周期重试回收：
+          #   名字一旦变回 openclaw → 重写 ts.env，RustDesk/通知/serve 地址随之自愈。
+          # setsid + nohup 脱离进程树；job 结束随 runner 一起消失，无需收尾清理。
+          mkdir -p "$HOME/.openclaw/logs"
+          if [ "${TS_FQDN:-}" != "openclaw.${TS_SUFFIX}" ]; then
+            echo "🔁 当前名为 ${TS_FQDN}，启动后台回收守护（每 120s 重试收回 openclaw）"
+            # 守护脚本本体独立成文件（.github/scripts/tailscale/ts-reclaim-hostname.sh）：
+            # 内联 heredoc 里的行不带 YAML 块缩进，会打断 run 的缩进层级（实测 YAML 解析报
+            # "could not find expected ':'"）——脚本独立出去，workflow 里只剩一行调用。
+            setsid nohup bash "${GITHUB_WORKSPACE}/.github/scripts/tailscale/ts-reclaim-hostname.sh" \
+              "${TS_SUFFIX}" "${GITHUB_RUN_ID:-0}" \
+              >> "$HOME/.openclaw/logs/ts-reclaim.log" 2>&1 < /dev/null &
+            disown 2>/dev/null || true
+            sleep 1
+            echo "✅ 回收守护已启动（日志: ~/.openclaw/logs/ts-reclaim.log）"
+          else
+            echo "✅ 主机名已为 openclaw，无需回收守护"
+          fi
+
+          # 两个后台各占一个端口、各占根路径 /admin：trae2api 8080、zcode-hub 8081。
+          # 分开端口是因为两者前端都用绝对路径 /admin，同端口会打架。
+          # tailscaled 以 --state=mem: 运行（runner 临时态设计），签不了 HTTPS 证书
+          # （no TailscaleVarRoot），故用 HTTP —— 流量仍在 WireGuard 隧道内，
+          # 安全性与直连后端端口明文等同。serve 配置随内存态逐轮清零，此处幂等重建。
+          sudo tailscale serve --bg --http=8081 http://127.0.0.1:8319
+          echo "zcode-hub 后台: http://${TS_FQDN}:8081/admin/accounts（API 网关: /v1）"
+
+          sudo tailscale serve --bg --http=8080 http://127.0.0.1:18080
+          echo "trae2api 控制台: http://${TS_FQDN}:8080/admin"
+
+          # workbuddy 只读管理台（v1.23.0 -webui，真源 services.sh）：8316 → 8082。
+          # 前端资源用相对路径，挂在 /ui/ 子路径即可；管理 Key 独立于模型 API Key
+          # （config.json gateway.adminKey），仅 tailnet 内可访问，不做公网暴露。
+          sudo tailscale serve --bg --http=8082 http://127.0.0.1:8316
+          echo "workbuddy 控制台: http://${TS_FQDN}:8082/ui/"
+          # qoder2api-hub 看板（root 路径直出，无 /admin 前缀）：8790 → 8084。
+          # 延续后台端口段（trae 8080 / zcode-hub 8081 / wb 8082 / autoclaw 8083）。
+          # 面板密码独立于 API Key（PBKDF2 落盘 settings.json），仅 tailnet 内可访问。
+          sudo tailscale serve --bg --http=8084 http://127.0.0.1:8790
+          echo "qoder2api 看板: http://${TS_FQDN}:8084/（API 网关: /v1）"
+          # 2026-10-19 主人要求「其他控制台怎么不使用 https」：6 个后台统一补 HTTPS 入口。
+          # tailscaled 虽以 --state=mem: 运行，实测**仍能签发证书**（8443-8448 全通，
+          # TLS 校验无需 -k）—— 上面「签不了 HTTPS 证书」的判断只对无端口 443 成立
+          # 的历史场景，勿再据此断言带端口 https 不可用。映射与看板 admin_entries 一致：
+          #   8443→8316(wb) 8444→18080(trae) 8445→8319(zcode)
+          #   8446→8322(autoclaw) 8447→8790(qoder) 8448→20128(omniroute)
+          # 证书签发失败不能拖垮整步，统一加兜底 echo（与 443 同款处理）。
+          sudo tailscale serve --bg --https=8443 http://127.0.0.1:8316 2>/dev/null \
+            || echo "⚠️ 8443 HTTPS serve 失败，HTTP 8082 仍可用"
+          sudo tailscale serve --bg --https=8444 http://127.0.0.1:18080 2>/dev/null \
+            || echo "⚠️ 8444 HTTPS serve 失败，HTTP 8080 仍可用"
+          sudo tailscale serve --bg --https=8445 http://127.0.0.1:8319 2>/dev/null \
+            || echo "⚠️ 8445 HTTPS serve 失败，HTTP 8081 仍可用"
+          sudo tailscale serve --bg --https=8446 http://127.0.0.1:8322 2>/dev/null \
+            || echo "⚠️ 8446 HTTPS serve 失败，HTTP 8083 仍可用"
+          sudo tailscale serve --bg --https=8447 http://127.0.0.1:8790 2>/dev/null \
+            || echo "⚠️ 8447 HTTPS serve 失败，HTTP 8084 仍可用"
+          sudo tailscale serve --bg --https=8448 http://127.0.0.1:20128 2>/dev/null \
+            || echo "⚠️ 8448 HTTPS serve 失败，OmniRoute 控制台将无入口"
+          echo "HTTPS 控制台: wb=8443 trae=8444 zcode=8445 autoclaw=8446 qoder=8447 omniroute=8448"
+          # OmniRoute AI API 无端口 HTTPS 入口：20128 → 443。
+          # 公网 ai-api.derrick.eu.org 走 Cloudflare，有 100s 硬超时；tailnet 内这条
+          # 前面没有 Cloudflare，慢请求（step-5-preview 深度思考实测单请求 18~330s）
+          # 走这里不撞墙。证书由 tailscale 自动签发、客户端免 -k（实测 TLS 校验通过）。
+          # ⚠️ 若节点名变更导致证书签发失败，不能让整步挂掉，故加兜底 echo。
+          # 网关 Control UI 另走 8085（网关自身无 /v1 路由，443 不能指 18789）。
+          sudo tailscale serve --bg --https=443 http://127.0.0.1:20128 2>/dev/null \
+            || echo "⚠️ 443 HTTPS serve 失败（多为证书签发/节点名问题），HTTP 端口 serve 不受影响"
+          echo "OmniRoute AI API: https://${TS_FQDN}/v1（API Key: CLIPROXYAPI_API_KEY）"
+          # 2026-09-30 曾尝试把 trae 挂到 80 端口的 /trae 子路径（依赖 trae2api commit
+          # a75ec3e 的前端前缀自适应），后已整体回退：a75ec3e 被 revert（镜像
+          # v2026.09.30-46abeff），zcode 也从 80 挪到 8081，与 trae 端口相邻。
+          # 公网隧道 trae2api.derrick.eu.org 已于 2026-09-29 撤销（主人要求不再公网暴露）。
+
+      - name: Tailscale secrets missing
+        if: ${{ always() && env.TS_OAUTH_CLIENT_ID == '' && env.TS_OAUTH_CLIENT_SECRET == '' }}
+        run: echo "⚠️ 未配置 TS_OAUTH_CLIENT_ID / TS_OAUTH_CLIENT_SECRET，跳过 Tailscale SSH 调试入口"
+
+      - name: Restore ZCode data & install auxiliary CLIs
+        # 2026-10-29 下线优化（B2）：原为 Install OpenClaw 尾部段，与网关启动无关却占着
+        # 「恢复 → Run OpenClaw」的下线关键路径，后置到网关健康之后执行；zcode.tar.gz
+        # 已在 Prefetch 步骤后台预取，此处等收口即可。护栏与 qoder/zcode2api/autoclaw
+        # 同款（continue-on-error + if:!cancelled）：本步故障不得级联跳过后续服务；
+        # 但 ~/.zcode 丢了侧栏就是空的、CLIs 缺了技能降级 —— 失败必须出声（TG alert）。
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # 真源在 step 顶层 source 一次（规范 4.4）
+          source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+          # gemini-cli / clawhub 与 zcode 恢复互相独立：后台起跑，恢复完 wait 收口
+          (
+            npm i -g @google/gemini-cli
+            npm i -g clawhub
+          ) > /tmp/aux-cli-install.log 2>&1 &
+          AUX_NPM_PID=$!
+
+          fetch_via_prefetch() {
+            # 用法: fetch_via_prefetch <Name> <dest>。Prefetch 步骤 .part→mv→rc 协议：
+            # 命中 = 返回 0 且产物已 mv 到 dest；未命中/未预取 = 非 0（消费方回落同步下载）。
+            # 与主包恢复侧的等收口循环同款（kill -0 探活，进程没了立刻收，不空等）。
+            local name="$1" dest="$2" key pf_dir rc pid waited
+            key="$(printf '%s' "$name" | tr 'A-Z' 'a-z')"
+            pf_dir="/tmp/openclaw-prefetch"
+            [ -f "$pf_dir/${key}-tar.pid" ] || return 1
+            waited=0
+            while [ ! -f "$pf_dir/${key}-tar.rc" ] && [ "$waited" -lt 600 ]; do
+              pid="$(cat "$pf_dir/${key}-tar.pid" 2>/dev/null | tr -dc '0-9')"
+              [ -n "$pid" ] || break
+              kill -0 "$pid" 2>/dev/null || break
+              sleep 2
+              waited=$((waited + 2))
+            done
+            rc="$(cat "$pf_dir/${key}-tar.rc" 2>/dev/null || echo none)"
+            if [ "$rc" = "0" ] && [ -s "$pf_dir/${name}.tar.gz" ]; then
+              mv "$pf_dir/${name}.tar.gz" "$dest"
+              rm -f "$pf_dir/${name}.tar.gz.part" "$pf_dir/${key}-tar.rc" "$pf_dir/${key}-tar.pid" 2>/dev/null || true
+              echo "✅ ${name}.tar.gz prefetch 命中（等待 ${waited}s）"
+              return 0
+            fi
+            rm -f "$pf_dir/${name}.tar.gz.part" 2>/dev/null || true
+            echo "⚠️ ${name}.tar.gz prefetch 未命中（rc=${rc}），回落同步下载"
+            return 1
+          }
+
+          aux_fail_notify() {
+            # 失败告警。版式同 send_archive_alert 口径（<pre> 尾部 1200 字节规范在此不涉及）
+            local msg="" reason="${1:-恢复/安装失败}"
+            tg_add_title msg "⚠️ ZCode 数据/辅助 CLI 后置恢复失败"
+            tg_add_kv msg "原因" "$reason"
+            tg_add_kv msg "影响" "客户端 ZCode 数据目录可能缺失（侧栏空）或 gemini-cli/clawhub 未装；网关不受影响"
+            tg_add_path msg "Run" "$TG_RUN_URL"
+            tg_add_footer msg
+            send_tg "$msg" alert || true
+          }
+
+          # ZCode 数据恢复：~/.zcode 下的个人数据在 runner 重置后会丢，从 Dropbox 主包还原。
+          # v2/tasks-index.sqlite 是侧栏会话列表（标题/置顶/归档/未读/删除），不是可再生索引 ——
+          # 它只由在线 sessions-index 订阅播种，本地 db 重建不出来，丢了侧栏就是空的。
+          # server/ 也入包：它是桌面客户端连接时下载铺开的运行时（约 326MB，含 116MB node），
+          # 有包在手就能省掉每轮重新下载。但只在本地**不存在**时铺开 —— 本地已有说明客户端
+          # 已部署好（比包内新），覆盖只会把新版本降级成旧版本。
+          TMP_ZCODE_TAR="/tmp/zcode-restore.tar.gz"
+          ZCODE_RESTORE_DIR="/tmp/zcode-restore"
+          rm -rf "$ZCODE_RESTORE_DIR" 2>/dev/null || true
+          if rclone ls dropbox:self-hosted/zcode.tar.gz > /dev/null 2>&1; then
+            echo "📦 Found zcode.tar.gz! Downloading and extracting..."
+            # 2026-10-29（B2）：zcode.tar.gz 已在 Prefetch 后台预取，命中则 mv 收货；
+            # 未命中/失败回落原同步下载。下载失败不再掀步骤（后置步骤语义：
+            # 网关已在岗，数据缺失降级 + 告警，不级联），由下游 -s/tar 判据兜底跳过。
+            if ! fetch_via_prefetch zcode "$TMP_ZCODE_TAR"; then
+              if ! rclone copyto dropbox:self-hosted/zcode.tar.gz "$TMP_ZCODE_TAR" --multi-thread-streams 16; then
+                echo "⚠️ zcode.tar.gz 下载失败，跳过 ZCode 恢复（发告警）"
+                aux_fail_notify "zcode.tar.gz 下载失败"
+                rm -f "$TMP_ZCODE_TAR" 2>/dev/null || true
+              fi
+            fi
+            if [ -s "$TMP_ZCODE_TAR" ] && tar -tzf "$TMP_ZCODE_TAR" >/dev/null 2>&1; then
+              mkdir -p "$ZCODE_RESTORE_DIR"
+              tar -xzf "$TMP_ZCODE_TAR" -C "$ZCODE_RESTORE_DIR"
+              restored_any=0
+              for rel in cli v2; do
+                if [ -d "$ZCODE_RESTORE_DIR/.zcode/$rel" ]; then
+                  mkdir -p ~/.zcode
+                  rm -rf ~/.zcode/$rel
+                  cp -a "$ZCODE_RESTORE_DIR/.zcode/$rel" ~/.zcode/$rel
+                  echo "✅ Restored ~/.zcode/$rel from archive"
+                  restored_any=1
+                fi
+              done
+              if [ "$restored_any" -eq 0 ]; then
+                echo "⚠️ Archive contains neither .zcode/cli nor .zcode/v2, skipping ZCode restore."
+              fi
+              # server 设备身份（v2/certs CA + telemetry-state.json 的 deviceMid）随 v2/ 一起还原。
+              # 每次重新部署 server 都会重新生成身份，客户端把归档等本地 UI 状态 keyed 到该身份上；
+              # 身份一变，客户端里已归档会话全部复活（2026-09-12 排查结论：归档动作在 runner 侧零落盘）。
+              # 复用身份后客户端跨重置认得同一个 server。
+              if [ -d "$ZCODE_RESTORE_DIR/.zcode/v2/certs" ]; then
+                echo "✅ Restored ~/.zcode/v2 server identity (certs + deviceMid)"
+              else
+                echo "ℹ️ Archive has no .zcode/v2 identity (old package), server will generate a fresh one."
+              fi
+              # server/：仅当本地没有时铺开（省一次完整下载）。本地已有则保留 —— 那是客户端
+              # 本轮刚部署的版本，可能比包内新，覆盖等于降级。
+              if [ -d "$ZCODE_RESTORE_DIR/.zcode/server" ]; then
+                if [ -d ~/.zcode/server ]; then
+                  echo "ℹ️ ~/.zcode/server 已存在（客户端已部署），保留本地版本、不用包内副本覆盖"
+                else
+                  mkdir -p ~/.zcode
+                  cp -a "$ZCODE_RESTORE_DIR/.zcode/server" ~/.zcode/server
+                  echo "✅ Restored ~/.zcode/server from archive (skips this run's re-download)"
+                fi
+              else
+                echo "ℹ️ Archive has no .zcode/server (old package), client will deploy it fresh."
+              fi
+            else
+              echo "⚠️ zcode.tar.gz validation failed, skipping ZCode restore."
+            fi
+            rm -f "$TMP_ZCODE_TAR" 2>/dev/null || true
+            rm -rf "$ZCODE_RESTORE_DIR" 2>/dev/null || true
+            echo "=== restored ~/.zcode ==="
+            du -sh ~/.zcode/cli ~/.zcode/v2 ~/.zcode/server 2>/dev/null || true
+            ls ~/.zcode/cli/db/db.sqlite ~/.zcode/v2/tasks-index.sqlite 2>/dev/null \
+              || echo "⚠️ 还原后未见 db.sqlite/tasks-index.sqlite"
+            if command -v sqlite3 >/dev/null 2>&1; then
+              # 侧栏条数是「还原是否真的成功」最直接的证据：只报文件存在，无法区分空库与有库
+              echo "tasks-index rows: $(sqlite3 ~/.zcode/v2/tasks-index.sqlite 'select count(*) from tasks' 2>/dev/null || echo '?')"
+              echo "db.sqlite sessions: $(sqlite3 ~/.zcode/cli/db/db.sqlite 'select count(*) from session' 2>/dev/null || echo '?')"
+            fi
+          else
+            echo "ℹ️ No zcode.tar.gz found on Dropbox (first run), skipping ZCode restore."
+          fi
+
+          # B2 收口：npm 后台任务必须在本步骤结束前 wait（GH 会回收 step 的子进程）
+          if wait "$AUX_NPM_PID"; then
+            echo "✅ 辅助 CLI 安装完成（gemini-cli / clawhub）"
+          else
+            echo "::warning::辅助 CLI 安装失败（gemini-cli / clawhub），日志尾部："
+            tail -n 20 /tmp/aux-cli-install.log 2>/dev/null || true
+            aux_fail_notify "gemini-cli/clawhub npm 安装失败"
+            exit 1
+          fi
       - name: Run workbuddy-gateway (check update first, then serve)
         id: run_workbuddy
         # 2026-10-22 步骤重排后位于 Run OpenClaw 之后：本步失败不得级联跳过
@@ -6843,7 +7035,8 @@ jobs:
               # 值只写时长，"后执行"由标签「预计」表达（值不重复标签语义）
               tg_add_kv msg "预计" "约 ${FINAL_ARCHIVE_WARNING_BEFORE_MINUTES} 分钟"
               # kv 区集中连排；英文 token 不直出通知（规范 · 失败与异常）：步骤名写中文
-              tg_add_kv msg "随后执行" "停止 OpenClaw 并执行最终归档"
+              # 2026-10-29（A1）：归档期间网关仍在线，真正停机在归档汇合之后
+              tg_add_kv msg "随后执行" "执行最终归档（网关仍在线）→ 停止 OpenClaw"
               # 说明段只装说明，且作末段（规范 · 说明段）：此前它插在两个 kv 之间
               tg_add_note msg "请及时保存状态或完成当前操作。"
               tg_add_footer msg
@@ -6916,6 +7109,10 @@ jobs:
 
       - name: Stop OpenClaw and Final Archive
         id: final_archive
+        # 2026-10-29 下线提速（A1/A2）：阶段顺序改为「停归档循环 → 并行停服（A2）→
+        # 主包活树流式归档 + 小对象归档并行 → 最后停网关（A1，段尾「7.」）」。
+        # 网关下线窗口从整个收尾（实测 647s）压缩到汇合后的真正停机段。
+        # 阶段标签沿用历史编号（原 1=停网关 已后置为 7，1 空缺），避免跨轮日志 grep 断裂。
         # 兜底超时：动态死线 332m + 本步 24m + 通知/接力 ~2m = 358m < 360m 硬上限，
         # 卡死时走本超时干净失败（post 步骤仍会跑），而不是被平台 6h 强杀
         timeout-minutes: 24
@@ -6945,77 +7142,6 @@ jobs:
           LOCK_ZCODE="/tmp/openclaw-archive.lock.zcode"
           LOCK_RSSTT="/tmp/openclaw-archive.lock.rsstt"
           LOCK_Z2A="/tmp/openclaw-archive.lock.zcode2api"
-          echo "1. Stopping OpenClaw gateway..."
-          # 2026-10-21 修复（run 39515245551 日志实证）：`openclaw gateway stop` 在非交互
-          # shell 下**拒绝执行**——05:00:44 打出 "…or re-run with --force if you really mean
-          # it."，紧接着 `|| echo "already stopped or command failed"` 把这条失败吃成静默，
-          # 于是这条停止命令从来没生效过：60s 轮询干等到 05:01:45（整 60s 白花），最终归档
-          # 全程对着**仍在写盘的 ~/.openclaw** 打包（state sqlite 连 -wal 都是活体快照）。
-          # --force 就是给这种场景的显式确认（`stop --help`: "Allow stop from a non-interactive
-          # shell"），语义正确；timeout 60 防 CLI 自身卡死；本步骤是 set -e，用 if 包裹，
-          # 停止失败只降级告警、不打断收尾（还有 6 个归档要做）。
-          GW_STOP_LOG=/tmp/openclaw-gateway-stop.log
-          if timeout 60 openclaw gateway stop --force >"$GW_STOP_LOG" 2>&1; then
-            echo "openclaw gateway stop --force 已执行"
-          else
-            echo "⚠️ openclaw gateway stop --force 失败（rc=$?），日志尾部："
-            tail -n 20 "$GW_STOP_LOG" 2>/dev/null || true
-          fi
-          # 优化（2026-10-01）：原为无条件 sleep 1m（纯等待 60s）。改为轮询网关
-          # 真退出即继续，通常数秒完成；超时 60s 兜底，语义与原来等价。
-          # ⚠️ 判定必须用 systemctl（2026-10-01 二修）：首版写的是
-          #   pgrep -f "openclaw-gateway"，但 "openclaw-gateway" 只是 **unit 名**，
-          #   **不在进程 cmdline 里**（真实 cmdline 为 `node ... dist/index.js
-          #   gateway --port 18789`）。该 pgrep 恒不匹配 → 循环第 1 次就 break、
-          #   等 0s，等于把等待直接删掉，保护形同虚设；反之若将来有进程 cmdline
-          #   含该串，又会反常地等满 60s。改用 unit 的 active 状态才是真判定。
-          # 2026-10-21 补升级链：旧写法无论等没等到都往下走，"已退出"根本没被断言过
-          # （实测恒假 —— 因为 stop 从没执行）。现在把结果落成 GW_DOWN，等不到就升级，
-          # 全链失败则在日志里留 ::warning::，让「对着活树打包」这件事可见。
-          GW_DOWN=0
-          gw_is_active() {
-            [ "$(systemctl --user is-active openclaw-gateway.service 2>/dev/null || echo inactive)" = "active" ]
-          }
-          for _i in $(seq 1 60); do
-            if ! gw_is_active; then
-              echo "✅ OpenClaw gateway 已退出（等待 $((_i - 1))s）"
-              GW_DOWN=1
-              break
-            fi
-            sleep 1
-          done
-          # 升级走 systemd 自己的 stop 作业：单元 Restart=always，直接 kill 进程会在
-          # RestartSec=5 后被拉回来；显式 stop 作业内的一律不重启（restart 只看崩溃）。
-          # --no-block + 自带轮询：单元 TimeoutStopSec=330，同步等等于把下线时长交给
-          # 最坏情况，这里只给它 120s（优雅停机的大头在前几十秒）。
-          if [ "$GW_DOWN" != "1" ]; then
-            echo "⚠️ 60s 内 unit 仍 active，改用 systemctl --user stop 兜底..."
-            systemctl --user stop --no-block openclaw-gateway.service 2>/dev/null || true
-            for _i in $(seq 1 120); do
-              if ! gw_is_active; then
-                echo "✅ OpenClaw gateway 已退出（systemctl stop 再等 ${_i}s）"
-                GW_DOWN=1
-                break
-              fi
-              sleep 1
-            done
-          fi
-          if [ "$GW_DOWN" != "1" ]; then
-            echo "⚠️ systemctl stop 作业 120s 未完成，发送 SIGKILL"
-            systemctl --user kill -s KILL openclaw-gateway.service 2>/dev/null || true
-            for _i in $(seq 1 10); do
-              if ! gw_is_active; then
-                GW_DOWN=1
-                break
-              fi
-              sleep 1
-            done
-          fi
-          if [ "$GW_DOWN" != "1" ]; then
-            echo "::warning::OpenClaw gateway 未能停止（unit 仍 active），本轮最终归档是在网关写盘状态下打的包"
-            echo "⚠️ 网关未能停止，最终归档将对着活动状态打包"
-          fi
-
           echo "2. Killing background archive process..."
           if [ -f /tmp/openclaw-archive-loop.launcher.pid ]; then
             kill "$(cat /tmp/openclaw-archive-loop.launcher.pid)" 2>/dev/null || true
@@ -7048,12 +7174,28 @@ jobs:
           # 仅清理可能残留的历史进程（无害兜底）。
           pkill -f "workbuddy-cred-sync.sh" 2>/dev/null || true
 
-          echo "3. Stopping service containers before final archive..."
+          # ── 2026-10-29 下线提速（A2）：五个停服分支互相独立，改并行子壳等齐 ──
+          # 原串行约 40s（workbuddy 优雅等待最长 30s），并行后 ≈ max(各分支) ≈ 10-15s。
+          # A1 重排后本段执行时 OpenClaw 网关仍在运行（真正停机收口到段尾「7.」）；
+          # 分支正文与串行版逐行一致（systemd stop / pkill 兜底 / 优雅等待 / 端口复测 /
+          # TG 通知语义不变），仅从主 shell 串行改为子壳并行；分支内 set +e，
+          # 单个停服失败只留日志不掀收尾（与 2026-10-13 故障隔离口径一致）。
+          _stop_pids=""
+
+          # ── A2 并行分支：3. rss-to-telegram 容器 ──
+          (
+            set +e
+          echo "3. Stopping service containers & host gateways (A2: 并行等齐；网关仍在运行 — A1)..."
           docker stop rss-to-telegram 2>/dev/null || echo "rss-to-telegram already stopped or missing."
           # OmniRoute 保持运行（2026-10-11 迁移）：最终归档的 sqlite 在线一致性备份需要
           # 容器在跑（docker exec），数据卷快照走 helper 容器与主容器无关；job 结束后
           # VM 回收，容器随之消亡，无需显式 stop。旧 CliRelay/CLIProxyAPI 容器已随迁移退役。
 
+          ) & _stop_pids="$_stop_pids $!"
+
+          # ── A2 并行分支：3b. workbuddy-gateway ──
+          (
+            set +e
           # workbuddy-gateway 是宿主进程（非容器），必须显式停：它不会随 job 结束自动退出，
           # 留在后台会继续持凭据轮询上游。运行目录在本地盘，停止后需回推 Dropbox 才算落盘。
           # 服务已 systemd --user 化，必须走 systemctl stop —— pkill 会被单元的
@@ -7132,6 +7274,11 @@ jobs:
             fi
           ) &
 
+          ) & _stop_pids="$_stop_pids $!"
+
+          # ── A2 并行分支：3b-1. autoclaw-proxy ──
+          (
+            set +e
           # 3b-1. autoclaw-proxy：宿主进程（2026-10-12 起 systemd --user 托管，
           #     原 nohup 裸跑已废 —— pkill 会被 Restart=always 拉回，必须走 systemctl）。
           #     lifetime_stats.json 是唯一不可再生的运行数据（累计用量统计），2026-10-12
@@ -7183,6 +7330,11 @@ jobs:
             fi
           ) &
 
+          ) & _stop_pids="$_stop_pids $!"
+
+          # ── A2 并行分支：3c. zcode2api ──
+          (
+            set +e
           # 3c. zcode2api：同为宿主进程（非容器），不会随 job 结束自动退出，
           # 必须显式停，否则残留进程会一直持有 8319 并继续转发请求。
           # 顺序在 workbuddy（3b）之后：两者互不依赖，但 3c 之后就是容器归档，
@@ -7227,6 +7379,11 @@ jobs:
             fi
           ) &
 
+          ) & _stop_pids="$_stop_pids $!"
+
+          # ── A2 并行分支：3d. qingyan-proxy ──
+          (
+            set +e
           # 3d. qingyan-proxy：同为宿主进程（非容器），随 job 结束不会自动退出，
           # 必须显式停，否则残留进程会一直持有 8320 并继续消耗清言积分。
           echo "3d. Stopping qingyan-proxy..."
@@ -7268,6 +7425,13 @@ jobs:
               send_tg "$_m" alert || true
             fi
           ) &
+
+          ) & _stop_pids="$_stop_pids $!"
+
+          # A2 汇合：等齐全部停服分支（分支失败只告警，不阻断后续归档/停机）
+          for _sp in $_stop_pids; do
+            wait "$_sp" || echo "⚠️ 停服并行分支 $_sp 非零退出（明细见上方分支日志）"
+          done
 
           # 用法与版式同 send_telegram_alert（<对象> <结论> <原因> [原始输出]）；
           # 两个函数分处不同 step、无法共享定义，改版式时两处要一起改
@@ -7711,6 +7875,83 @@ jobs:
 
           wait "$SMALL_ARCHIVES_PID" || echo "⚠️ 小对象归档后台任务退出码非零（明细见上方分支日志）"
           echo "✅ 并行最终归档全部汇合完成"
+          # ── 2026-10-29 下线提速（A1）：网关停止从收尾第一步后置到最后一步 ──
+          # 原顺序 = 停网关 → 停服/归档，网关下线窗口 = 整个收尾（实测 647s）。
+          # 主包归档脚本（create-openclaw-archive.sh）本就是周期归档循环每 20 分钟对
+          # 活树执行的那份（关键文件隔离快照/keep-dir 回填/体积门等防线同源），最终
+          # 归档复用同口径在网关运行中打包。一致性口径：与周期归档一致（本就接受
+          # ≤20 分钟回滚窗口），最终包内容 = 归档启动时刻的快照，距实际停机差归档耗时。
+          echo "7. Stopping OpenClaw gateway (A1: 最后停机 — 归档全部汇合后再停)..."
+          # 2026-10-21 修复（run 39515245551 日志实证）：`openclaw gateway stop` 在非交互
+          # shell 下**拒绝执行**——05:00:44 打出 "…or re-run with --force if you really mean
+          # it."，紧接着 `|| echo "already stopped or command failed"` 把这条失败吃成静默，
+          # 于是这条停止命令从来没生效过：60s 轮询干等到 05:01:45（整 60s 白花），最终归档
+          # 全程对着**仍在写盘的 ~/.openclaw** 打包（state sqlite 连 -wal 都是活体快照）。
+          # --force 就是给这种场景的显式确认（`stop --help`: "Allow stop from a non-interactive
+          # shell"），语义正确；timeout 60 防 CLI 自身卡死；本步骤是 set -e，用 if 包裹，
+          # 停止失败只降级告警、不打断收尾（还有 6 个归档要做）。
+          GW_STOP_LOG=/tmp/openclaw-gateway-stop.log
+          if timeout 60 openclaw gateway stop --force >"$GW_STOP_LOG" 2>&1; then
+            echo "openclaw gateway stop --force 已执行"
+          else
+            echo "⚠️ openclaw gateway stop --force 失败（rc=$?），日志尾部："
+            tail -n 20 "$GW_STOP_LOG" 2>/dev/null || true
+          fi
+          # 优化（2026-10-01）：原为无条件 sleep 1m（纯等待 60s）。改为轮询网关
+          # 真退出即继续，通常数秒完成；超时 60s 兜底，语义与原来等价。
+          # ⚠️ 判定必须用 systemctl（2026-10-01 二修）：首版写的是
+          #   pgrep -f "openclaw-gateway"，但 "openclaw-gateway" 只是 **unit 名**，
+          #   **不在进程 cmdline 里**（真实 cmdline 为 `node ... dist/index.js
+          #   gateway --port 18789`）。该 pgrep 恒不匹配 → 循环第 1 次就 break、
+          #   等 0s，等于把等待直接删掉，保护形同虚设；反之若将来有进程 cmdline
+          #   含该串，又会反常地等满 60s。改用 unit 的 active 状态才是真判定。
+          # 2026-10-21 补升级链：旧写法无论等没等到都往下走，"已退出"根本没被断言过
+          # （实测恒假 —— 因为 stop 从没执行）。现在把结果落成 GW_DOWN，等不到就升级，
+          # 全链失败则在日志里留 ::warning::，让「对着活树打包」这件事可见。
+          GW_DOWN=0
+          gw_is_active() {
+            [ "$(systemctl --user is-active openclaw-gateway.service 2>/dev/null || echo inactive)" = "active" ]
+          }
+          for _i in $(seq 1 60); do
+            if ! gw_is_active; then
+              echo "✅ OpenClaw gateway 已退出（等待 $((_i - 1))s）"
+              GW_DOWN=1
+              break
+            fi
+            sleep 1
+          done
+          # 升级走 systemd 自己的 stop 作业：单元 Restart=always，直接 kill 进程会在
+          # RestartSec=5 后被拉回来；显式 stop 作业内的一律不重启（restart 只看崩溃）。
+          # --no-block + 自带轮询：单元 TimeoutStopSec=330，同步等等于把下线时长交给
+          # 最坏情况，这里只给它 120s（优雅停机的大头在前几十秒）。
+          if [ "$GW_DOWN" != "1" ]; then
+            echo "⚠️ 60s 内 unit 仍 active，改用 systemctl --user stop 兜底..."
+            systemctl --user stop --no-block openclaw-gateway.service 2>/dev/null || true
+            for _i in $(seq 1 120); do
+              if ! gw_is_active; then
+                echo "✅ OpenClaw gateway 已退出（systemctl stop 再等 ${_i}s）"
+                GW_DOWN=1
+                break
+              fi
+              sleep 1
+            done
+          fi
+          if [ "$GW_DOWN" != "1" ]; then
+            echo "⚠️ systemctl stop 作业 120s 未完成，发送 SIGKILL"
+            systemctl --user kill -s KILL openclaw-gateway.service 2>/dev/null || true
+            for _i in $(seq 1 10); do
+              if ! gw_is_active; then
+                GW_DOWN=1
+                break
+              fi
+              sleep 1
+            done
+          fi
+          if [ "$GW_DOWN" != "1" ]; then
+            echo "::warning::OpenClaw gateway 未能停止（unit 仍 active），本轮最终归档是在网关写盘状态下打的包"
+            echo "⚠️ 网关未能停止，最终归档将对着活动状态打包"
+          fi
+
 
 
       # 最终归档结果汇总（规范 · 结果通知）：归档步骤边归档边把结果写进 /tmp 的结果文件，
