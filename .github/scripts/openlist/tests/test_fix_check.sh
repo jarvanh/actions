@@ -75,7 +75,7 @@ _persist_verify_entries() {
   PERSIST_OK=0; PERSIST_FAIL=0; PERSIST_FAILED_ORIGS=()
   if [ "\${FC_MOCK_VERIFY_FAIL_ALL:-0}" = "1" ]; then
     PERSIST_FAIL="\$PERSIST_IDX"
-    while IFS='|' read -r _a _b _o _m _mid; do
+    while IFS=$'\\037' read -r _a _b _o _m _mid; do
       [ -n "\$_a" ] && PERSIST_FAILED_ORIGS+=("\$_o")
     done < "\$2"
   else
