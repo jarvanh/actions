@@ -250,7 +250,10 @@ WorkingDirectory=/dropbox/self-hosted/workbuddy-gateway
 #   chatIdEnv=TELEGRAM_CHAT_ID，从 .env 读入。2026-10-08 补：此前 unit 缺
 #   EnvironmentFile，serve 进程拿不到变量，网关内置 Telegram 通知静默失败
 #   （serve.log 连刷「telegram 配置不完整」），warmup 结果通知同样依赖此出口。
-EnvironmentFile=%h/.openclaw/.env
+#   2026-10-30 R4 去耦：`-` 前缀容忍缺失 —— Install OpenClaw 失败/被闸门跳过的
+#   轮次里 ~/.openclaw/.env 不存在，此前 systemd 直接拒启单元（wb「立即退出」的
+#   根因）；现在 serve 照常服务，仅内置 TG 通知降级。
+EnvironmentFile=-%h/.openclaw/.env
 ExecStart=/tmp/local_workbuddy/workbuddy-gateway serve -addr 0.0.0.0 -port 8318 -webui
 Restart=always
 RestartSec=5
@@ -393,7 +396,11 @@ EOF
       # 运行目录无需准备，只需校验两份持久化文件在位。
       # 注意：fuse 挂载上脚本不可直接执行（bad interpreter），故用解释器显式调用。
       [ -s /dropbox/self-hosted/quota-board/board.py ] || { rm -f "$tmp"; die "quota-board: board.py 缺失"; }
-      [ -s "${HOME}/.openclaw/.env" ] || { rm -f "$tmp"; die "quota-board: ~/.openclaw/.env 缺失（TG token / TRAE2API_KEY 依赖）"; }
+      # 2026-10-30 R4 去耦：~/.openclaw/.env 缺失不再阻断看板（board.py 无头降级 +
+      # unit EnvironmentFile `-` 前缀），仅 TRAE2API_KEY/TG 推送降级。
+      if [ ! -s "${HOME}/.openclaw/.env" ]; then
+        echo "⚠️ quota-board: ~/.openclaw/.env 缺失（TG token / TRAE2API_KEY 降级），看板照常启动"
+      fi
       cat > "$tmp" <<EOF
 [Unit]
 Description=quota-board (workbuddy/trae/zcode 额度聚合 + TG 看板, 8321)
@@ -410,7 +417,8 @@ StartLimitBurst=0
 Type=notify
 WatchdogSec=180
 # 复用全局敏感变量：TELEGRAM_BOT_TOKEN_*、TELEGRAM_CHAT_ID、TRAE2API_KEY
-EnvironmentFile=%h/.openclaw/.env
+# 2026-10-30 R4 去耦：`-` 前缀容忍缺失（配合 board.py 无头降级，见其 main()）
+EnvironmentFile=-%h/.openclaw/.env
 ExecStart=/usr/bin/python3 /dropbox/self-hosted/quota-board/board.py
 Restart=always
 RestartSec=5

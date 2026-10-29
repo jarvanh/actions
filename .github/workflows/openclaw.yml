@@ -80,6 +80,360 @@ jobs:
           node-version: ${{ env.NODE_STABLE || '26' }}
           
       - uses: actions/checkout@v7
+      - name: Clean stale Tailscale nodes (openclaw* 僵尸清退)
+        id: ts_clean
+        if: ${{ always() && (env.TS_API_KEY != '' || (env.TS_OAUTH_CLIENT_ID != '' && env.TS_OAUTH_CLIENT_SECRET != '')) }}
+        env:
+          TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          TS_OAUTH_CLIENT_SECRET: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
+          TS_API_KEY: ${{ secrets.TS_API_KEY }}
+        run: |
+          set -euo pipefail
+          # 上一轮被 360m 硬上限强杀时，tailscale/github-action 的 post-logout 不跑，
+          # 节点虽为 ephemeral（action 注册即带 ephemeral=true，源码实测），但控制面
+          # 清理有几十分钟级延迟，singleton 立即接力的下一轮仍会撞名 —— 新轮
+          # 会被控制面静默退化成 openclaw-1/-2…（2026-09-30 实锤，KeyExpiry=null）。
+          # 本步骤先于 Setup Tailscale 执行：此刻 tailnet 里的 openclaw* 一律是历史
+          # 残留（含 openclaw-N / openclaw-tmp-*），逐个删除，从根上消掉退化。
+          #
+          # ⚠️ 关键坑（2026-10-01 实测）：Tailscale API **不用 Bearer**！
+          #    此前一律用 -H "Authorization: Bearer ..." 打，无论 tskey-client-*
+          #    还是 tskey-api-* 都返回 401/404，被误判成「scope 不足」，守护因此
+          #    空转了很久（连代码注释都跟着写错了结论）。正确用法是 Basic auth：
+          #      curl -u "${KEY}:" https://api.tailscale.com/api/v2/...
+          #    （key 作用户名、密码留空）
+          # 凭据优先级：
+          #   ① TS_API_KEY（tskey-api-*）—— API access token，具 devices 读写权限；
+          #   ② 无则回退 OAuth client（tskey-client-*）—— 仅兼容保留，实测无 devices 权限。
+          _auth=()
+          if [ -n "${TS_API_KEY:-}" ]; then
+            echo "1. 使用 TS_API_KEY（API access token · Basic auth）..."
+            _auth=(-u "${TS_API_KEY}:")
+          else
+            echo "1. OAuth client -> token（scope 仅 auth_keys，预计列设备失败）..."
+            _tok="$(curl -fsS --max-time 20 https://api.tailscale.com/api/v2/oauth/token \
+              --data-urlencode "client_id=${TS_OAUTH_CLIENT_ID}" \
+              --data-urlencode "client_secret=${TS_OAUTH_CLIENT_SECRET}" \
+              --data-urlencode "grant_type=client_credentials" 2>/dev/null \
+              | jq -r '.access_token // empty' 2>/dev/null || true)"
+            if [ -z "${_tok}" ]; then
+              echo "⚠️ 未能取得 Tailscale API token，跳过僵尸清退（本轮可能仍退化 openclaw-1）"
+              exit 0
+            fi
+            _auth=(-H "Authorization: Bearer ${_tok}")
+          fi
+          echo "2. 拉取 tailnet 设备列表..."
+          _dev_code="$(curl -s -o /tmp/ts-devices.json -w '%{http_code}' --max-time 20 \
+            "${_auth[@]}" \
+            https://api.tailscale.com/api/v2/tailnet/-/devices 2>/dev/null || true)"
+          if [ "${_dev_code}" != "200" ]; then
+            echo "⚠️ 设备列表获取失败 (HTTP ${_dev_code})：僵尸清退未生效"
+            if [ -z "${TS_API_KEY:-}" ]; then
+              echo "   根因：tskey-client-* 只有 auth_keys scope，天生无 devices 权限"
+              echo "   补法：Tailscale admin → Settings → Keys → 生成 tskey-api-* 存为 TS_API_KEY"
+            else
+              echo "   TS_API_KEY 已配置但仍失败：多为认证方式非 Basic（-u \"KEY:\"），或 key 已撤销/过期"
+            fi
+            rm -f /tmp/ts-devices.json
+            exit 0
+          fi
+          _dev="$(cat /tmp/ts-devices.json)"
+          rm -f /tmp/ts-devices.json
+          # 注册前运行：openclaw* 一律视为残留。按 hostname/name 双字段匹配，
+          # 覆盖 openclaw / openclaw-1 / openclaw-tmp-* 全家族。
+          #
+          # ⚠️ 只删「断连」节点，绝不碰活着的（2026-10-01 实测加固）：
+          #    权限打通前本步骤因删不动而“安全”；一旦能删，无差别 test("openclaw")
+          #    会命中**当前仍在跑的那一轮自己** —— job 重试/手动重触发时开场就把
+          #    自己的 SSH 入口删掉（自杀）。故必须加 connectedToControl == false。
+          #    判据说明：设备列表**没有 online 字段**（别用 .online // false ——
+          #    jq 的 // 对字段缺失同样取右值，会静默把活节点判成离线，已踩）；
+          #    真实在线判据是 connectedToControl。实测真僵尸该值为 false，
+          #    在跑的节点为 true。
+          # 活着的同名节点交给 Enable Tailscale SSH 的临时名中转去回收，不在这里硬删。
+          _stale="$(printf '%s' "${_dev}" | jq -r '
+            (.devices // [])[]?
+            | select(((.hostname // "") + " " + (.name // "")) | test("openclaw"))
+            | select(.connectedToControl == false)
+            | .id' 2>/dev/null || true)"
+          if [ -z "${_stale}" ]; then
+            echo "✅ 无 openclaw* 残留节点，跳过删除"
+            exit 0
+          fi
+          echo "3. 发现 $(printf '%s' "${_stale}" | grep -c .) 个残留节点，逐个删除..."
+          for _id in ${_stale}; do
+            _code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 -X DELETE \
+              "${_auth[@]}" \
+              "https://api.tailscale.com/api/v2/device/${_id}" 2>/dev/null || true)"
+            case "${_code}" in
+              200|204) echo "✅ 已删除残留节点 ${_id} (HTTP ${_code})" ;;
+              *) echo "⚠️ 删除 ${_id} 失败 (HTTP ${_code})：凭据无 devices 写权限或该节点不可管理" ;;
+            esac
+          done
+      - name: Restore Tailscale certs (gpg 解密 ← actions/cache)
+        # 2026-10-29 LE 429 实锤：临时 runner 每 5 分钟一轮，每轮都为同一个
+        # openclaw.taild54677.ts.net 重新签证书，撞满 Let's Encrypt「同一组
+        # 标识符 168h 内最多 5 张」后，8443-8448/443 全部在 TLS 握手挂起
+        # （retry-after 长达一天，服务端硬限制，机器上无法绕过）。
+        # 解法：把 statedir/certs 跨轮缓存 —— tailscaled 的证书库本来就是
+        # 「先查文件、有效即用、不碰 ACME」，恢复出有效证书后整轮零签发。
+        # 本仓库是公开的，actions/cache 同仓库任意 run 可读，缓存前必须
+        # gpg 对称加密（passphrase 在 Secrets.TS_CERT_GPG_KEY，fork PR 与
+        # 缓存本身都拿不到明文私钥）。无 secret/无缓存时优雅降级为本轮现签。
+        if: ${{ always() }}
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/ts-cert-cache
+          # 精确 key 永不命中（证书到期日只有签发后才知道），靠 restore-keys
+          # 前缀取最近创建的一条 —— 恰好是最新一张证书；到期换新后新 key
+          # 入库，前缀自动翻新到新版。
+          key: openclaw-certs-exp-bootstrap-${{ github.run_id }}
+          restore-keys: |
+            openclaw-certs-exp-
+
+      - name: Install cached Tailscale certs into statedir
+        # 必须先于「Tailscale daemon 纳管」执行：让 systemd 单元（或 action
+        # spawn 抢到 TUN 的实例）启动时证书已就位，首个 HTTPS 握手直接命中。
+        # 证书不足 24h 有效期则只保留 ACME 账号密钥、丢弃 crt/key 现签。
+        # 2026-10-30 外置：脚本 ts-cert-cache.sh install（yml 500KB 减重，见上）。
+        if: ${{ always() }}
+        env:
+          TS_CERT_GPG_KEY: ${{ secrets.TS_CERT_GPG_KEY }}
+        run: bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/ts-cert-cache.sh" install
+
+      - name: Tailscale daemon 纳管 (systemd)
+        id: ts_daemon
+        # 2026-10-23：本步骤与 OpenClaw 无关，不能因前置 Install OpenClaw 失败而被
+        # 默认 success() 跳过 —— run 39858698391 就是这样：Install 失败 → 本步 skipped
+        # → 下一步 Setup Tailscale 仍用 always() 跑，却没有托管 daemon，直接失败。
+        if: ${{ always() }}
+        # 长驻服务一律 systemd 托管（2026-10-05 主人拍板）。必须在
+        # tailscale/github-action **之前**执行，原因见下方接管原理。
+        run: |
+          set -uo pipefail
+          if [ -f "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" ]; then
+            bash "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" ensure tailscaled || true
+          else
+            echo "⚠️ services.sh 缺失，沿用 action 自带的 --state=mem: 裸跑"
+          fi
+          # 接管原理（2026-10-05 实测）：
+          #   action 内部无条件 spawn `sudo -E tailscaled --state=mem:`。若本单元
+          #   已占据 TUN，action 那个实例会因 "TUN device tailscale0 is busy" 立即
+          #   退出；但 action 随后 waitForDaemonReady() 轮询的是**默认 socket**
+          #   （即本单元），拿到响应即判定就绪，接着 connectToTailscale 的
+          #   `tailscale up` 同样打在本单元上 —— 于是登录态落到托管的 daemon。
+          #   第二个实例的退出码被 action 忽略（detached + unref），不会 fail 步骤。
+          #
+          # 为什么必须 --statedir 而非 --state=mem:（实测踩坑）
+          #   mem: 把登录态只放内存，进程一死认证即丢，Restart=always 拉起来的
+          #   只是个 Logged out 空壳 —— 托管形同虚设。statedir 落盘后崩溃重启
+          #   自动恢复登录，自愈才是真的自愈。
+          #
+          # 过渡期：若本机已有 action 起的 mem: 裸跑实例，ensure 会检测并跳过
+          #   （不抢占 TUN、不打断当前 SSH），单元在新 VM 上自动接管。
+      - name: Setup Tailscale (SSH 调试入口)
+        id: ts
+        # daemon 纳管没成功就不要硬跑 action：否则失败会看起来像 Tailscale 本身坏了，
+        # 实际是前置步骤被跳过（run 39858698391 的级联失败）。
+        if: ${{ always() && steps.ts_daemon.outcome == 'success' && env.TS_OAUTH_CLIENT_ID != '' && env.TS_OAUTH_CLIENT_SECRET != '' }}
+        uses: tailscale/github-action@306e68a486fd2350f2bfc3b19fcd143891a4a2d8 # v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
+          tags: tag:ci
+          # 与 systemd 单元用同一 statedir：即便本轮是 action 的实例抢到了 TUN，
+          # 登录态也落盘，下一轮单元接管时无需重新认证。
+          statedir: /var/lib/tailscale
+          # 注册时就固定主机名（action v4 原生 hostname 入参，实测 306e68a 的
+          # action.yml 有该 input）：此前是「先按 runner 名注册、再 set --hostname
+          # 改名」，两步之间存在竞态 —— 注册瞬间若 tailnet 里还有上一轮的
+          # openclaw 残留，控制面当场就分配 openclaw-1，事后 set 改不回来
+          # （prefs 里 Hostname 写对了，DNS 名仍是 openclaw-1，2026-10-01 实锤）。
+          # 注册即声明能消掉这个窗口，是防退化的第一优先手段。
+          hostname: openclaw
+
+      - name: Enable Tailscale SSH
+        id: ts_ssh
+        if: ${{ always() && steps.ts.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          # 开启 Exit Node 前置条件：启用内核转发
+          echo 'net.ipv4.ip_forward = 1' | sudo tee /etc/sysctl.d/99-tailscale-forward.conf
+          echo 'net.ipv6.conf.all.forwarding = 1' | sudo tee -a /etc/sysctl.d/99-tailscale-forward.conf
+          sudo sysctl -p /etc/sysctl.d/99-tailscale-forward.conf
+
+          # 固定主机名 openclaw（singleton 并发下不会撞名）；节点为 ephemeral，job 结束自动移除
+          # 开启 Exit Node：tailnet 内设备可将本 runner 设为出口节点
+          # 批准方式（任选其一）：
+          #   ① 管理页手动批准: https://login.tailscale.com/admin/machines → 找到 openclaw 节点
+          #      → Edit route settings → 勾选 0.0.0.0/0, ::/0（ephemeral 节点每次运行都需重新批准）
+          #   ② ACL autoApprovers（推荐，免每次批准）: 在 Tailscale ACL rules 前加：
+          #        "autoApprovers": {
+          #          "routes": { "0.0.0.0/0": ["tag:ci"], "::/0": ["tag:ci"] }
+          #        },
+          #   ③ Tailscale API 程序化批准:
+          #      GET  https://api.tailscale.com/api/v2/tailnet/{tailnet}/devices  查到节点 id
+          #      POST https://api.tailscale.com/api/v2/device/{device_id}/routes  body: {"routes": ["0.0.0.0/0", "::/0"]}
+          #      （需 TS_API_KEY，ephemeral 节点 id 每次变化，需按主机名动态查询）
+          sudo tailscale set --ssh --hostname=openclaw --advertise-exit-node
+          # 回读实际注册的 DNS 名。--hostname 的重命名有传播延迟，若 set 后立刻读取
+          # 可能拿到机器原始主机名（如 github-runnervmgx7h7），导致 ts.env 里的 SSH/
+          # RustDesk 直连地址每轮漂移。这里轮询等待名字收敛为 openclaw。
+          # tailnet 后缀（形如 xxxx.ts.net）动态取，避免硬编码到别的 tailnet 时写歪。
+          TS_SUFFIX="$(tailscale status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')"
+          TS_SUFFIX="${TS_SUFFIX#*.}"
+          TS_FQDN=""
+          for i in $(seq 1 15); do
+            TS_FQDN="$(tailscale status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')"
+            case "$TS_FQDN" in
+              "openclaw.${TS_SUFFIX}") break ;;
+            esac
+            sleep 2
+          done
+
+          # 固定主机名 openclaw（2026-09-30 补）：撞名时控制面会**静默拒绝**并退化成
+          # openclaw-1/-2…，根因是上一轮同名 ephemeral 节点残留在 tailnet——离线也照样占名。
+          # 直连 set 对这种情况无效（prefs 里 Hostname 已写对，但 DNS 名仍是 openclaw-1）。
+          # 兜底：先改到一个临时名把 openclaw 让出来，再改回去 —— 实测可强制收回名字。
+          if [ "${TS_FQDN:-}" != "openclaw.${TS_SUFFIX}" ]; then
+            echo "⚠️ 主机名被占（当前 ${TS_FQDN:-未知}），走临时名中转回收 openclaw"
+            sudo tailscale set --hostname="openclaw-tmp-$$" 2>&1 || true
+            for i in $(seq 1 10); do
+              _TMP_FQDN="$(tailscale status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')"
+              case "$_TMP_FQDN" in
+                "openclaw-tmp-$$.${TS_SUFFIX}") break ;;
+              esac
+              sleep 3
+            done
+            sudo tailscale set --ssh --hostname=openclaw --advertise-exit-node 2>&1 || true
+            TS_FQDN=""
+            for i in $(seq 1 12); do
+              TS_FQDN="$(tailscale status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')"
+              case "$TS_FQDN" in
+                "openclaw.${TS_SUFFIX}") break ;;
+              esac
+              sleep 5
+            done
+          fi
+          TS_FQDN="${TS_FQDN:-$(tailscale status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')}"
+          TS_HOST="$(printf '%s' "$TS_FQDN" | cut -d. -f1)"
+          {
+            printf 'TS_HOST=%s\n' "$TS_HOST"
+            printf 'TS_FQDN=%s\n' "$TS_FQDN"
+            printf 'TS_IP=%s\n' "$(tailscale ip -4)"
+          } > "$HOME/ts.env"
+          echo "SSH 入口: ssh runner@${TS_HOST}（RustDesk 直连: ${TS_FQDN}:21118）"
+
+          # ---------- 主机名回收守护（2026-10-01 补）----------
+          # 为什么必须有守护：上面所有回收动作都只在本步骤**这一刻**试一次，而残留的
+          # 上一轮 ephemeral 节点要几十分钟后才被控制面清掉 —— 名字是在本步骤结束后
+          # 才空出来的，那时已经没有任何东西再去收回，于是这一整轮都顶着 openclaw-1。
+          # 2026-10-01 实锤：ts.env 写着 TS_HOST=openclaw-1，而控制面 prefs 里
+          # Hostname 其实是对的 openclaw（= 名被别人占着，不是我们设错）。
+          # 且「Clean stale」步骤删不动（本仓库 OAuth client 只有 auth_keys scope，
+          # devices 列表接口 404，整段降级跳过）—— 删不掉就只能等，等就必须有人重试。
+          # 故起一个脱离本步骤进程树的守护，在整个 job 生命周期内周期重试回收：
+          #   名字一旦变回 openclaw → 重写 ts.env，RustDesk/通知/serve 地址随之自愈。
+          # setsid + nohup 脱离进程树；job 结束随 runner 一起消失，无需收尾清理。
+          mkdir -p "$HOME/.openclaw/logs"
+          if [ "${TS_FQDN:-}" != "openclaw.${TS_SUFFIX}" ]; then
+            echo "🔁 当前名为 ${TS_FQDN}，启动后台回收守护（每 120s 重试收回 openclaw）"
+            # 守护脚本本体独立成文件（.github/scripts/tailscale/ts-reclaim-hostname.sh）：
+            # 内联 heredoc 里的行不带 YAML 块缩进，会打断 run 的缩进层级（实测 YAML 解析报
+            # "could not find expected ':'"）——脚本独立出去，workflow 里只剩一行调用。
+            setsid nohup bash "${GITHUB_WORKSPACE}/.github/scripts/tailscale/ts-reclaim-hostname.sh" \
+              "${TS_SUFFIX}" "${GITHUB_RUN_ID:-0}" \
+              >> "$HOME/.openclaw/logs/ts-reclaim.log" 2>&1 < /dev/null &
+            disown 2>/dev/null || true
+            sleep 1
+            echo "✅ 回收守护已启动（日志: ~/.openclaw/logs/ts-reclaim.log）"
+          else
+            echo "✅ 主机名已为 openclaw，无需回收守护"
+          fi
+
+          # 两个后台各占一个端口、各占根路径 /admin：trae2api 8080、zcode-hub 8081。
+          # 分开端口是因为两者前端都用绝对路径 /admin，同端口会打架。
+          # tailscaled 以 --state=mem: 运行（runner 临时态设计），签不了 HTTPS 证书
+          # （no TailscaleVarRoot），故用 HTTP —— 流量仍在 WireGuard 隧道内，
+          # 安全性与直连后端端口明文等同。serve 配置随内存态逐轮清零，此处幂等重建。
+          sudo tailscale serve --bg --http=8081 http://127.0.0.1:8319
+          echo "zcode-hub 后台: http://${TS_FQDN}:8081/admin/accounts（API 网关: /v1）"
+
+          sudo tailscale serve --bg --http=8080 http://127.0.0.1:18080
+          echo "trae2api 控制台: http://${TS_FQDN}:8080/admin"
+
+          # workbuddy 只读管理台（v1.23.0 -webui，真源 services.sh）：8316 → 8082。
+          # 前端资源用相对路径，挂在 /ui/ 子路径即可；管理 Key 独立于模型 API Key
+          # （config.json gateway.adminKey），仅 tailnet 内可访问，不做公网暴露。
+          sudo tailscale serve --bg --http=8082 http://127.0.0.1:8316
+          echo "workbuddy 控制台: http://${TS_FQDN}:8082/ui/"
+          # qoder2api-hub 看板（root 路径直出，无 /admin 前缀）：8790 → 8084。
+          # 延续后台端口段（trae 8080 / zcode-hub 8081 / wb 8082 / autoclaw 8083）。
+          # 面板密码独立于 API Key（PBKDF2 落盘 settings.json），仅 tailnet 内可访问。
+          sudo tailscale serve --bg --http=8084 http://127.0.0.1:8790
+          echo "qoder2api 看板: http://${TS_FQDN}:8084/（API 网关: /v1）"
+          # 2026-10-19 主人要求「其他控制台怎么不使用 https」：6 个后台统一补 HTTPS 入口。
+          # tailscaled 虽以 --state=mem: 运行，实测**仍能签发证书**（8443-8448 全通，
+          # TLS 校验无需 -k）—— 上面「签不了 HTTPS 证书」的判断只对无端口 443 成立
+          # 的历史场景，勿再据此断言带端口 https 不可用。映射与看板 admin_entries 一致：
+          #   8443→8316(wb) 8444→18080(trae) 8445→8319(zcode)
+          #   8446→8322(autoclaw) 8447→8790(qoder) 8448→20128(omniroute)
+          # 证书签发失败不能拖垮整步，统一加兜底 echo（与 443 同款处理）。
+          # 2026-10-29 起证书来自跨轮缓存（上游 Restore/Install 步骤已把有效证书
+          # 铺进 statedir/certs，tailscaled 有效即用、零签发）；本块兜底 echo 只在
+          # 缓存缺席且撞上 LE 429 限频（每周 5 张上限）时才会走到。
+          sudo tailscale serve --bg --https=8443 http://127.0.0.1:8316 2>/dev/null \
+            || echo "⚠️ 8443 HTTPS serve 失败，HTTP 8082 仍可用"
+          sudo tailscale serve --bg --https=8444 http://127.0.0.1:18080 2>/dev/null \
+            || echo "⚠️ 8444 HTTPS serve 失败，HTTP 8080 仍可用"
+          sudo tailscale serve --bg --https=8445 http://127.0.0.1:8319 2>/dev/null \
+            || echo "⚠️ 8445 HTTPS serve 失败，HTTP 8081 仍可用"
+          sudo tailscale serve --bg --https=8446 http://127.0.0.1:8322 2>/dev/null \
+            || echo "⚠️ 8446 HTTPS serve 失败，HTTP 8083 仍可用"
+          sudo tailscale serve --bg --https=8447 http://127.0.0.1:8790 2>/dev/null \
+            || echo "⚠️ 8447 HTTPS serve 失败，HTTP 8084 仍可用"
+          sudo tailscale serve --bg --https=8448 http://127.0.0.1:20128 2>/dev/null \
+            || echo "⚠️ 8448 HTTPS serve 失败，OmniRoute 控制台将无入口"
+          echo "HTTPS 控制台: wb=8443 trae=8444 zcode=8445 autoclaw=8446 qoder=8447 omniroute=8448"
+          # OmniRoute AI API 无端口 HTTPS 入口：20128 → 443。
+          # 公网 ai-api.derrick.eu.org 走 Cloudflare，有 100s 硬超时；tailnet 内这条
+          # 前面没有 Cloudflare，慢请求（step-5-preview 深度思考实测单请求 18~330s）
+          # 走这里不撞墙。证书由 tailscale 自动签发、客户端免 -k（实测 TLS 校验通过）。
+          # ⚠️ 若节点名变更导致证书签发失败，不能让整步挂掉，故加兜底 echo。
+          # 网关 Control UI 另走 8085（网关自身无 /v1 路由，443 不能指 18789）。
+          sudo tailscale serve --bg --https=443 http://127.0.0.1:20128 2>/dev/null \
+            || echo "⚠️ 443 HTTPS serve 失败（多为证书签发/节点名问题），HTTP 端口 serve 不受影响"
+          echo "OmniRoute AI API: https://${TS_FQDN}/v1（API Key: CLIPROXYAPI_API_KEY）"
+          # 2026-09-30 曾尝试把 trae 挂到 80 端口的 /trae 子路径（依赖 trae2api commit
+          # a75ec3e 的前端前缀自适应），后已整体回退：a75ec3e 被 revert（镜像
+          # v2026.09.30-46abeff），zcode 也从 80 挪到 8081，与 trae 端口相邻。
+          # 公网隧道 trae2api.derrick.eu.org 已于 2026-09-29 撤销（主人要求不再公网暴露）。
+
+      - name: Trigger cert issue & stash Tailscale certs (gpg 加密暂存)
+        id: ts_certs_stash
+        # 证书是惰性签发的（首个 TLS 握手才触发 ACME），这里主动打一发 8444 握手：
+        #   缓存命中 → 握手秒回，全程零签发；
+        #   无缓存/限频已解禁 → 当场签发落盘，紧随其后回存缓存；
+        #   仍在 LE 429 限频期 → ~60s 后握手报错，吞掉不拖垮 job（HTTP 端口不受影响）。
+        # key 用证书到期日：到期换新后 key 随之翻新，上游 restore-keys 前缀
+        # 永远命中最新一张。同 key 重复 save 时 actions/cache 只告警不报错。
+        # 2026-10-30 外置：脚本 ts-cert-cache.sh stash（yml 500KB 减重）。
+        if: ${{ always() && steps.ts_ssh.outcome == 'success' }}
+        env:
+          TS_CERT_GPG_KEY: ${{ secrets.TS_CERT_GPG_KEY }}
+        run: bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/ts-cert-cache.sh" stash
+
+      - name: Save Tailscale certs cache
+        if: ${{ always() && steps.ts_certs_stash.outputs.saved == 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ~/ts-cert-cache
+          key: ${{ steps.ts_certs_stash.outputs.key }}
+
+      - name: Tailscale secrets missing
+        if: ${{ always() && env.TS_OAUTH_CLIENT_ID == '' && env.TS_OAUTH_CLIENT_SECRET == '' }}
+        run: echo "⚠️ 未配置 TS_OAUTH_CLIENT_ID / TS_OAUTH_CLIENT_SECRET，跳过 Tailscale SSH 调试入口"
+
       - name: rclone-install
         run: |
           set -e
@@ -486,6 +840,352 @@ jobs:
           chmod +x "$HOME/runtime-env.sh"
           echo "BASH_ENV=$HOME/runtime-env.sh" >> "$GITHUB_ENV"
           
+      - name: Install Cloudflared
+        # 2026-10-29 下线优化（B1）：本步骤后置到 Run OpenClaw 之后（网关健康不依赖它），
+        # 处于失败级联区 —— 按 qoder/zcode2api/autoclaw 同款护栏处理：
+        # continue-on-error + if:!cancelled()，本步故障不级联跳过 oc 隧道与后续服务步骤。
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
+          sudo mkdir -p ~/.cloudflared/
+          sudo cp -r /dropbox/self-hosted/.cloudflared/* ~/.cloudflared/ 2>/dev/null || true
+          # 家目录里的状态必须是 runner 属主：sudo 复制会让凭据变成 root 属主，
+          # 而 cloudflared 是 runner 身份启动的（读 ~/.cloudflared 会 EACCES）
+          sudo chown -R runner:runner ~/.cloudflared
+
+      - name: Run workbuddy-gateway (check update first, then serve)
+        id: run_workbuddy
+        # 2026-10-22 步骤重排后位于 Run OpenClaw 之后：本步失败不得级联跳过
+        # （此前排在前面自然免疫，2026-10-02 事故注释同款语义）
+        if: ${{ !cancelled() }}
+        env:
+          # send_tg 发送闸 + 收尾区接线（缺任一则本步骤通知静默跳过）
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # GitHub API 认证（配额 5000/h，而非匿名 60/h/出口 IP）。runner 出口 IP 是共享的，
+          # 匿名配额会被同 IP 的其他 job 吃光 —— 本步骤查 release 版本即因此偶发失败。
+          # 与 emby.yml / proxy-speedtest-gitee.yml 同口径。缺失时退回匿名 + 重定向兜底。
+          WB_GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # 2026-10-30 减重外置：脚本本体在 .github/scripts/openclaw/run-workbuddy.sh
+        #（原样搬移，零逻辑改动），P5b 双层子壳与 rc 标记契约原样保留 —— 等齐门
+        #（AI 网关步骤轮询 /tmp/upstream-rc-workbuddy，上限 480s）不受影响；上游
+        # 失败走脚本内既有 TG 告警，不阻断 AI 网关（continue-on-error 口径）。
+        # 背景同 Install OpenClaw 的 500KB 注。
+        run: bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/run-workbuddy.sh"
+
+      # trae2api：TRAE SOLO 反代（OpenAI 兼容 API + Web 管理面板 /admin）。
+      # 与 workbuddy-gateway / zcode2api 同为 AI 网关形态服务。
+      # 部署方式：取 jarvanh/trae2api 的 Release 静态二进制直接构建镜像，
+      # 不再浅克隆源码、不在 runner 上跑 go build（省掉每轮 Go 编译开销）。
+      # Dockerfile 与签到/积分工具同样取自 fork 的 Release / raw，本机无需 Go 工具链。
+      # 镜像 tag 直接复用 Release 完整 tag（vYYYY.MM.DD-<短 commit>），
+      # 二进制 sha256 从 Release 的 SHA256SUMS 实时提取并强制校验，失败即中止。
+      # 数据目录直接 bind mount Dropbox fuse 挂载点
+      # /dropbox/self-hosted/trae2api（实测可写；fuse 权限位恒 666，容器内
+      # uid 10001 与 runner 均可读写，天然绕开 uid 对齐问题）。
+      # 容器不纳入 systemd --user（2026-09-25 定）：compose 的
+      # restart: unless-stopped 已覆盖崩溃自愈，dockerd 自身重启也会拉回容器，
+      # 再包一层 systemd 是重复托管；systemd --user 只管裸进程形态的
+      # workbuddy-gateway / zcode2api（见 services.sh）。
+      # 隧道 trae2api（原 trae2api.derrick.eu.org → 127.0.0.1:7864）已于 2026-09-29 撤销：
+      # /dropbox/self-hosted/.cloudflared 恢复，由 tunnels.conf 纳管。
+      - name: Run trae2api container (TRAE SOLO reverse proxy)
+        # 2026-10-22 步骤重排后位于 Run OpenClaw 之后：本步失败不得级联跳过
+        if: ${{ !cancelled() }}
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        # 2026-10-30 减重外置：脚本本体在 .github/scripts/openclaw/run-trae2api.sh
+        #（原样搬移，零逻辑改动），P5b 双层子壳与 rc 标记契约原样保留。
+        # 背景同 Install OpenClaw 的 500KB 注。
+        run: bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/run-trae2api.sh"
+
+      # zcode2api：GLM 反代网关（Anthropic + OpenAI 双协议，端口 8319）。
+      # 代码取 jarvanh/zcode2api fork（在 dengyie 上游之上补了 ZCODE_GATEWAY_KEY
+      # 环境变量生效与 credential_sync.py；本机 clone 为权威源，改动后 git push fork）。
+      # .env 与账号池（data/，SQLite WAL 不能跑在 rclone 挂载点上）是本机部署快照，
+      # 持久化在 Dropbox self-hosted/zcode2api-data.tar.gz，每轮还原到本地盘运行目录
+      # —— 与 workbuddy-gateway「运行目录落本地盘」同口径。收尾归档 4c 会把运行
+      # 目录的 .env + data 回传快照（凭据闭环）；仅本机结构性变更（增删账号、
+      # 改 .env）才需手动重传覆盖。
+      # 必须在 Notify Tailscale SSH entry 之前起来（该步骤会读 AI 网关状态）。
+      # 收尾停止见 Stop OpenClaw and Final Archive 的 3c 步（在 workbuddy 的 3b 之后）。
+      # quota-board：三网关额度聚合看板（TG 置顶消息原地编辑 + Mini App HTTP :8321）。
+      # unit 真源已统一进 services.sh（2026-10-04，与四个网关同口径）：
+      # 原先这里从 Dropbox 静态副本 cp unit，与 write_unit 双轨并存、改配置易漏改。
+      # 现由 ensure 生成并每轮重启一次；/dropbox 下那份副本已无权威性（不再读取）。
+      # 看板本体 board.py 仍在 /dropbox/self-hosted/quota-board/（持久化目录，非 unit）。
+      # 隧道 qb（qb.derrick.eu.org → 127.0.0.1:8321）
+      # 凭证随 /dropbox/self-hosted/.cloudflared 恢复，由 tunnels.conf 纳管。
+      # QUOTA_BOARD_TOKEN 持久化在 ~/.openclaw/.env（随 openclaw.tar.gz 归档每轮恢复），
+      # unit 的 EnvironmentFile 指向该文件，本 step 只负责拉起服务。
+      # qoder2api-hub：Qoder（阿里）双区反代网关（国际 qoder.com / 国内 qoder.com.cn），
+      # OpenAI 兼容 API + Responses API + Web 看板，与 workbuddy-gateway / zcode2api /
+      # trae2api 同为 AI 网关形态服务（2026-10-19 主人要求接入）。
+      # 部署方式：预构建 GHCR 多架构镜像（ghcr.io/jarvanh/qoder2api-hub，fork 自
+      # shuishuipingan/qoder2api-hub；每日同步轮把上游改动合进 fork 后发版，110 停放
+      # + 流式真实状态码两处根治见 fork v1.7.8），
+      # 与 trae2api 同为容器形态（restart: unless-stopped 覆盖崩溃自愈，不纳入 systemd --user，
+      # Stop 段也不显式停——容器随 VM 生命周期存续，下一轮 docker rm -f 幂等接管）。
+      # 端口 8790（上游默认，绑 0.0.0.0 —— OmniRoute 经 host.docker.internal:8790
+      # 以 runner-qoder 节点接入本网关，127.0.0.1 绑定对 docker 网桥不可达；
+      # ⚠️ 必须挂 --network omniroute_default：该 provider_node 的 base_url 是
+      #    http://qoder2api:8790/v1（容器名 DNS 解析），而 qoder2api 出厂只在 bridge。
+      #    2026-10-19 实测裸名 qwen3.8-flash 报 502 ENOTFOUND qoder2api ——
+      #    combo（free）与模型本身都没问题，纯粹是跨网络不可达。挂上后即可用
+      #    qwen3.8-flash 直连，runner-qoder/Qwen3.8-Flash 前缀名也一起通。
+      # 仍保留 -p 端口映射，宿主机 curl / 看板访问不受影响。
+      # 与 trae2api 18080 同款形态）；看板走 Tailscale serve 8084（见 Tailscale 段）。
+      # 数据直写 Dropbox fuse：/dropbox/self-hosted/qoder2api/{accounts,usage}——
+      # 账号池/用量/调度状态全是 JSON/JSONL（无 SQLite），fuse 挂载点无锁兼容问题，
+      # 无需本地盘中转；持久化白名单内（A 类），周期归档/收尾归档均无需登记（对齐 trae2api）。
+      # 凭据引导（幂等，仅 settings.json 缺失时）：launcher API Key（qd- 前缀）与看板
+      # 面板密码随机生成，PBKDF2-SHA256 摘要预写 settings.json（与 qoder_settings.py
+      # _digest 逐字段对齐：salt 16B hex + 120000 轮），首启即免默认面板密码 admin 裸奔。
+      # ⚠️ 运行时绝不传 --panel-password：该参数每次启动都会重置密码（set_panel_password
+      # 无条件覆盖），会把预写凭据冲掉。容器 CMD 用镜像默认（--lan：强制鉴权 + 0.0.0.0）。
+      # 版本标记：每轮动态解析上游最新 release tag（不用固定 pin），镜像 digest 入账
+      # .installed-version；tag 变化或 digest 变化都能识别真实更新。
+      # continue-on-error：新网关故障不得级联跳过后续 quota-board / zcode2api / Run OpenClaw
+      # （对齐 autoclaw/qingyan 的保护口径；可见性由 step 内 TG 告警保证）。
+      - name: Run zcode2api (GLM gateway)
+        id: run_zcode2api
+        # 2026-10-02：trae2api 步骤硬失败时本步骤被默认语义级联跳过（continue-on-error
+        # 只影响自身失败标记，不改变「前置失败则跳过」），与 Run OpenClaw 同款修复。
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        env:
+          # send_tg 发送闸 + 收尾区接线（缺任一则本步骤通知静默跳过）
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # 网关鉴权：zcode2api 专属 secret（与 accounts.db meta 表 gateway_key 同值）。
+          # 勿改回 AI_GATEWAY_API_KEY——那是 workbuddy-gateway 的 key，两者已分家；
+          # DB meta 优先级高于 env，env 注错不影响服务，但自检会拿它报「API Key 无效」
+          # （2026-09-25 误报实录）。环境变量优先于 .env（python-dotenv 默认不覆盖
+          # 已存在的环境变量），无需改数据快照里的 .env 即与仓库 Secrets 对齐。
+          ZCODE_GATEWAY_KEY: ${{ secrets.ZCODE_GATEWAY_API_KEY }}
+        # 2026-10-30 减重外置：脚本本体在 .github/scripts/openclaw/run-zcode2api.sh
+        #（原样搬移，唯 Bun 安装器由 curl|bash 改两步式——下载落盘再执行，安全扫描
+        # 高危整改，语义等价）。P5b 契约与背景同 workbuddy 注。
+        run: bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/run-zcode2api.sh"
+
+      - name: Run qingyan-proxy (ChatGLM 清言反代)
+        id: run_qingyan
+        # 2026-10-22 步骤重排后位于 Run OpenClaw 之后：本步失败不得级联跳过
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        env:
+          # send_tg 发送闸 + 收尾区接线（缺任一则本步骤通知静默跳过）
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # 凭据：清言账号的 chatglm_refresh_token。只从 Secrets 注入环境变量，
+          # 不落仓库、不回显；部署脚本写进运行目录 env.sh（600）供服务读取。
+          # 上游 refresh 是轮换式（旧票立即作废），本值只作首轮种子，之后以
+          # 数据目录里轮换出的新票为准 —— 故 data/ 必须随 Dropbox 跨轮持久化。
+          QINGYAN_REFRESH_TOKEN: ${{ secrets.GLM_REFRESH_TOKEN }}
+          # 网关鉴权：本网关专属 key（不共用 AI_GATEWAY_API_KEY —— 每个反代各有
+          # 自己的 key，避免一把泄露波及全部）。监听已改 0.0.0.0，这是唯一的
+          # 安全边界；部署脚本写进 env.sh 的 PROXY_API_KEY，缺值直接拒绝启动。
+          QINGYAN_GATEWAY_KEY: ${{ secrets.GLM2API_GATEWAY_KEY }}
+          QINGYAN_PORT: "8320"
+          # 代码源（Dropbox 侧）：项目在本机 ~/AI/qingyan-proxy（非 git 仓库），
+          # 经 rclone 存到该远端，每轮 prepare 校验真源在位。
+          QINGYAN_APP_REMOTE: dropbox:self-hosted/qingyan-proxy/app
+          # 持久化（2026-10-06 起）：qingyan 全面直写 Dropbox（代码/数据/凭据/日志），
+          # DATA_DIR 同时是积分快照落点（STATE_DIR 指向它），不再有 pull/push 往返。
+          QINGYAN_DATA_DIR: /dropbox/self-hosted/qingyan-proxy/data
+          QINGYAN_STATE_DIR: /dropbox/self-hosted/qingyan-proxy/data
+          QINGYAN_ENV_FILE: /dropbox/self-hosted/qingyan-proxy/env.sh
+          # 注：不再有 QINGYAN_RUN_DIR —— 2026-10-06 起 qingyan 全面直跑
+          # Dropbox 真源（代码/数据/凭据/日志），不存在 /tmp 运行副本。
+        # 2026-10-30 减重外置：脚本本体在 .github/scripts/openclaw/run-qingyan.sh
+        #（原样搬移，零逻辑改动），P5b 契约与背景同 workbuddy 注。
+        run: bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/run-qingyan.sh"
+
+      - name: Run Cloudflared Tunnel
+        # 2026-10-29 下线优化（B1）：同 Install Cloudflared 护栏口径；隧道此刻才启动，
+        # 网关（18789）已先就绪 —— 公网可达性恢复略晚于网关健康，换取下线关键路径缩短。
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          mkdir -p ~/.openclaw/logs
+
+          cloudflared tunnel route dns oc oc.'${{ secrets.VD }}'.eu.org || true
+          # Managed by the unified systemd tunnel manager: tunnels get
+          # Restart=always, so a killed connector comes back on its own.
+          # Falls back to nohup only if the manager is unavailable.
+          if [ -f "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ]; then
+            bash "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ensure oc || true
+          else
+            nohup cloudflared tunnel run --url http://127.0.0.1:18789 oc \
+              > ~/.openclaw/logs/cloudflared_oc.log 2>&1 &
+            echo $! > ~/.openclaw/logs/cloudflared_oc.pid
+          fi
+
+          sleep 10
+          echo "OpenClaw tunnel started (systemd-managed)."
+
+      - name: Run rss-to-telegram container
+        # 2026-10-29 下线优化（B1）：后置护栏，口径同 Install Cloudflared ——
+        # rsstt 故障不得级联跳过 AI 网关 / 隧道 / 后续服务。
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        env:
+          # rsstt 服务使用独立 bot，token 经同名 secret 注入（此前未接线导致容器 TOKEN 恒空）
+          TELEGRAM_BOT_TOKEN_RSS_SB_BOT: ${{ secrets.TELEGRAM_BOT_TOKEN_RSS_SB_BOT }}
+        run: |
+          set -euo pipefail
+          echo "Starting rss-to-telegram before OmniRoute..."
+          mkdir -p /dropbox/self-hosted/rsstt
+          cleanup_archive_workdir() {
+            rm -f /tmp/rsstt.tar.gz 2>/dev/null || true
+            rm -rf /tmp/rsstt-restore 2>/dev/null || true
+          }
+          free_kb() { df -Pk "${1:-/tmp}" | awk 'NR==2 {print $4}'; }
+          require_free_kb() {
+            local path="$1" min_kb="$2" label="$3"
+            local avail
+            avail=$(free_kb "$path")
+            if [ "${avail:-0}" -lt "$min_kb" ]; then
+              echo "❌ ${label}: insufficient free space at ${path}. available=${avail}KB required=${min_kb}KB" >&2
+              exit 1
+            fi
+            echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
+          }
+          require_free_kb /tmp $((1024 * 1024)) "rsstt restore preflight"
+          rm -rf /tmp/local_rsstt
+          cleanup_archive_workdir
+          mkdir -p /tmp/local_rsstt /tmp/rsstt-restore
+
+          # 门禁只看 rsstt 真正依赖的凭据（同名 secret 注入）：
+          # ~/.openclaw/.env 由 OpenClaw 自身维护、与 rsstt 无关，不能作为启动条件
+          if [ -n "${TELEGRAM_BOT_TOKEN_RSS_SB_BOT:-}" ]; then
+            if rclone ls dropbox:self-hosted/rsstt.tar.gz > /dev/null 2>&1; then
+              echo "📦 Found rsstt.tar.gz! Downloading and extracting..."
+              rclone copyto dropbox:self-hosted/rsstt.tar.gz /tmp/rsstt.tar.gz
+              archive_kb=$(du -sk /tmp/rsstt.tar.gz | awk '{print $1}')
+              if [ -z "${archive_kb:-}" ] || [ "$archive_kb" -le 0 ]; then
+                echo "❌ rsstt extract preflight: unable to calculate archive size" >&2
+                exit 1
+              fi
+              echo "rsstt.tar.gz 大小: ${archive_kb}KB"
+              require_free_kb /tmp $((archive_kb * 3 + 512 * 1024)) "rsstt extract preflight"
+              if [ -s /tmp/rsstt.tar.gz ] && tar -tzf /tmp/rsstt.tar.gz >/dev/null 2>&1; then
+                tar -xzf /tmp/rsstt.tar.gz -C /tmp/rsstt-restore
+                cp -a /tmp/rsstt-restore/. /tmp/local_rsstt/ || true
+              else
+                echo "⚠️ rsstt.tar.gz validation failed, skipping archive restore."
+              fi
+              cleanup_archive_workdir
+            else
+              echo "⚠️ No rsstt archive found. Falling back to sync from raw directory..."
+              rclone copy dropbox:self-hosted/rsstt /tmp/local_rsstt \
+                --retries 10 \
+                --low-level-retries 20 \
+                --timeout 1m \
+                --contimeout 15s \
+                --exclude "docker-compose.yml" \
+                -P || true
+            fi
+
+            mkdir -p /tmp/local_rsstt/config /tmp/local_rsstt/data
+            touch /tmp/local_rsstt/config/.keep /tmp/local_rsstt/data/.keep
+
+            echo "=== restored rss-to-telegram tree ==="
+            find /tmp/local_rsstt -maxdepth 3 | sort || true
+
+            start_rsstt_container() {
+              docker rm -f rss-to-telegram 2>/dev/null || true
+              docker run -d \
+                --name rss-to-telegram \
+                --restart unless-stopped \
+                -v /tmp/local_rsstt/config:/app/config \
+                -v /tmp/local_rsstt/data:/app/data \
+                -e TOKEN="$TELEGRAM_BOT_TOKEN_RSS_SB_BOT" \
+                -e MANAGER="83279194" \
+                -e MULTIUSER="0" \
+                rongronggg9/rss-to-telegram:latest
+            }
+
+            print_rsstt_status() {
+              echo "=== rss-to-telegram status ==="
+              docker ps -a --filter name=rss-to-telegram
+              container_status="$(docker inspect --format '{{.State.Status}}' rss-to-telegram)"
+              health_status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' rss-to-telegram)"
+              restart_count="$(docker inspect --format '{{.RestartCount}}' rss-to-telegram)"
+              echo "rss-to-telegram status=${container_status} health=${health_status} restarts=${restart_count}"
+            }
+
+            validate_rsstt_container() {
+              print_rsstt_status
+
+              if [ "$container_status" != "running" ] || [ "$health_status" = "unhealthy" ]; then
+                echo "❌ rss-to-telegram failed to become healthy"
+                docker logs --tail 200 rss-to-telegram || true
+                return 1
+              fi
+
+              if docker logs --tail 200 rss-to-telegram 2>&1 | grep -Eqi 'LOGIN FAILED|Unknown error occurred during login'; then
+                echo "❌ rss-to-telegram encountered a Telegram login failure"
+                docker logs --tail 200 rss-to-telegram || true
+                return 1
+              fi
+            }
+
+            archive_rsstt_state() {
+              local min_size=$((5 * 1024))
+              local actual_size
+
+              echo "📦 Archiving repaired rss-to-telegram state immediately..."
+              rm -f /tmp/rsstt.tar.gz
+              tar -czf /tmp/rsstt.tar.gz -C /tmp/local_rsstt .
+              tar -tzf /tmp/rsstt.tar.gz >/dev/null
+              actual_size="$(stat -c%s /tmp/rsstt.tar.gz 2>/dev/null || echo 0)"
+              if [ "$actual_size" -lt "$min_size" ]; then
+                echo "❌ repaired rsstt archive is too small: size=${actual_size} min=${min_size}"
+                exit 1
+              fi
+              rclone copyto /tmp/rsstt.tar.gz dropbox:self-hosted/rsstt.tar.gz -v
+              rm -f /tmp/rsstt.tar.gz
+              echo "✅ Repaired rss-to-telegram state uploaded"
+            }
+
+            echo "Waiting for rss-to-telegram container to stabilize..."
+            start_rsstt_container
+            sleep 12
+
+            if ! validate_rsstt_container; then
+              if docker logs --tail 200 rss-to-telegram 2>&1 | grep -qi 'AuthKeyDuplicatedError'; then
+                echo "⚠️ rss-to-telegram session was invalidated by AuthKeyDuplicatedError; deleting session and retrying once."
+                docker rm -f rss-to-telegram 2>/dev/null || true
+                rm -f \
+                  /tmp/local_rsstt/config/bot.session \
+                  /tmp/local_rsstt/config/bot.session-journal \
+                  /tmp/local_rsstt/config/bot.session-shm \
+                  /tmp/local_rsstt/config/bot.session-wal
+                start_rsstt_container
+                sleep 12
+                validate_rsstt_container
+                archive_rsstt_state
+              else
+                exit 1
+              fi
+            fi
+
+            echo "=== rss-to-telegram /app tree (for persistence verification) ==="
+            docker exec rss-to-telegram sh -lc 'find /app -maxdepth 3 \( -type f -o -type d \) | sort | sed -n "1,200p"'
+            echo "=== rss-to-telegram local bind tree after startup ==="
+            find /tmp/local_rsstt -maxdepth 3 | sort || true
+          else
+            echo "❌ TELEGRAM_BOT_TOKEN_RSS_SB_BOT 未配置，跳过 rss-to-telegram 启动；本轮无 rsstt 数据，最终归档会跳过上传"
+          fi
+
       - name: Run OpenClaw
         id: run_openclaw
         # 2026-10-02 事故根因：任一前置服务步骤（quota-board/trae/zcode2api…）硬失败时，
@@ -675,174 +1375,6 @@ jobs:
             echo "⚠️ Telegram alert skipped: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is empty"
           fi
 
-      - name: Install Cloudflared
-        # 2026-10-29 下线优化（B1）：本步骤后置到 Run OpenClaw 之后（网关健康不依赖它），
-        # 处于失败级联区 —— 按 qoder/zcode2api/autoclaw 同款护栏处理：
-        # continue-on-error + if:!cancelled()，本步故障不级联跳过 oc 隧道与后续服务步骤。
-        if: ${{ !cancelled() }}
-        continue-on-error: true
-        run: |
-          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-          sudo dpkg -i cloudflared-linux-amd64.deb
-          sudo mkdir -p ~/.cloudflared/
-          sudo cp -r /dropbox/self-hosted/.cloudflared/* ~/.cloudflared/ 2>/dev/null || true
-          # 家目录里的状态必须是 runner 属主：sudo 复制会让凭据变成 root 属主，
-          # 而 cloudflared 是 runner 身份启动的（读 ~/.cloudflared 会 EACCES）
-          sudo chown -R runner:runner ~/.cloudflared
-
-      - name: Run workbuddy-gateway (check update first, then serve)
-        id: run_workbuddy
-        # 2026-10-22 步骤重排后位于 Run OpenClaw 之后：本步失败不得级联跳过
-        # （此前排在前面自然免疫，2026-10-02 事故注释同款语义）
-        if: ${{ !cancelled() }}
-        env:
-          # send_tg 发送闸 + 收尾区接线（缺任一则本步骤通知静默跳过）
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          # GitHub API 认证（配额 5000/h，而非匿名 60/h/出口 IP）。runner 出口 IP 是共享的，
-          # 匿名配额会被同 IP 的其他 job 吃光 —— 本步骤查 release 版本即因此偶发失败。
-          # 与 emby.yml / proxy-speedtest-gitee.yml 同口径。缺失时退回匿名 + 重定向兜底。
-          WB_GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        # 2026-10-30 减重外置：脚本本体在 .github/scripts/openclaw/run-workbuddy.sh
-        #（原样搬移，零逻辑改动），P5b 双层子壳与 rc 标记契约原样保留 —— 等齐门
-        #（AI 网关步骤轮询 /tmp/upstream-rc-workbuddy，上限 480s）不受影响；上游
-        # 失败走脚本内既有 TG 告警，不阻断 AI 网关（continue-on-error 口径）。
-        # 背景同 Install OpenClaw 的 500KB 注。
-        run: bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/run-workbuddy.sh"
-
-      # trae2api：TRAE SOLO 反代（OpenAI 兼容 API + Web 管理面板 /admin）。
-      # 与 workbuddy-gateway / zcode2api 同为 AI 网关形态服务。
-      # 部署方式：取 jarvanh/trae2api 的 Release 静态二进制直接构建镜像，
-      # 不再浅克隆源码、不在 runner 上跑 go build（省掉每轮 Go 编译开销）。
-      # Dockerfile 与签到/积分工具同样取自 fork 的 Release / raw，本机无需 Go 工具链。
-      # 镜像 tag 直接复用 Release 完整 tag（vYYYY.MM.DD-<短 commit>），
-      # 二进制 sha256 从 Release 的 SHA256SUMS 实时提取并强制校验，失败即中止。
-      # 数据目录直接 bind mount Dropbox fuse 挂载点
-      # /dropbox/self-hosted/trae2api（实测可写；fuse 权限位恒 666，容器内
-      # uid 10001 与 runner 均可读写，天然绕开 uid 对齐问题）。
-      # 容器不纳入 systemd --user（2026-09-25 定）：compose 的
-      # restart: unless-stopped 已覆盖崩溃自愈，dockerd 自身重启也会拉回容器，
-      # 再包一层 systemd 是重复托管；systemd --user 只管裸进程形态的
-      # workbuddy-gateway / zcode2api（见 services.sh）。
-      # 隧道 trae2api（原 trae2api.derrick.eu.org → 127.0.0.1:7864）已于 2026-09-29 撤销：
-      # /dropbox/self-hosted/.cloudflared 恢复，由 tunnels.conf 纳管。
-      - name: Run trae2api container (TRAE SOLO reverse proxy)
-        # 2026-10-22 步骤重排后位于 Run OpenClaw 之后：本步失败不得级联跳过
-        if: ${{ !cancelled() }}
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        # 2026-10-30 减重外置：脚本本体在 .github/scripts/openclaw/run-trae2api.sh
-        #（原样搬移，零逻辑改动），P5b 双层子壳与 rc 标记契约原样保留。
-        # 背景同 Install OpenClaw 的 500KB 注。
-        run: bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/run-trae2api.sh"
-
-      # zcode2api：GLM 反代网关（Anthropic + OpenAI 双协议，端口 8319）。
-      # 代码取 jarvanh/zcode2api fork（在 dengyie 上游之上补了 ZCODE_GATEWAY_KEY
-      # 环境变量生效与 credential_sync.py；本机 clone 为权威源，改动后 git push fork）。
-      # .env 与账号池（data/，SQLite WAL 不能跑在 rclone 挂载点上）是本机部署快照，
-      # 持久化在 Dropbox self-hosted/zcode2api-data.tar.gz，每轮还原到本地盘运行目录
-      # —— 与 workbuddy-gateway「运行目录落本地盘」同口径。收尾归档 4c 会把运行
-      # 目录的 .env + data 回传快照（凭据闭环）；仅本机结构性变更（增删账号、
-      # 改 .env）才需手动重传覆盖。
-      # 必须在 Notify Tailscale SSH entry 之前起来（该步骤会读 AI 网关状态）。
-      # 收尾停止见 Stop OpenClaw and Final Archive 的 3c 步（在 workbuddy 的 3b 之后）。
-      # quota-board：三网关额度聚合看板（TG 置顶消息原地编辑 + Mini App HTTP :8321）。
-      # unit 真源已统一进 services.sh（2026-10-04，与四个网关同口径）：
-      # 原先这里从 Dropbox 静态副本 cp unit，与 write_unit 双轨并存、改配置易漏改。
-      # 现由 ensure 生成并每轮重启一次；/dropbox 下那份副本已无权威性（不再读取）。
-      # 看板本体 board.py 仍在 /dropbox/self-hosted/quota-board/（持久化目录，非 unit）。
-      # 隧道 qb（qb.derrick.eu.org → 127.0.0.1:8321）
-      # 凭证随 /dropbox/self-hosted/.cloudflared 恢复，由 tunnels.conf 纳管。
-      # QUOTA_BOARD_TOKEN 持久化在 ~/.openclaw/.env（随 openclaw.tar.gz 归档每轮恢复），
-      # unit 的 EnvironmentFile 指向该文件，本 step 只负责拉起服务。
-      # qoder2api-hub：Qoder（阿里）双区反代网关（国际 qoder.com / 国内 qoder.com.cn），
-      # OpenAI 兼容 API + Responses API + Web 看板，与 workbuddy-gateway / zcode2api /
-      # trae2api 同为 AI 网关形态服务（2026-10-19 主人要求接入）。
-      # 部署方式：预构建 GHCR 多架构镜像（ghcr.io/jarvanh/qoder2api-hub，fork 自
-      # shuishuipingan/qoder2api-hub；每日同步轮把上游改动合进 fork 后发版，110 停放
-      # + 流式真实状态码两处根治见 fork v1.7.8），
-      # 与 trae2api 同为容器形态（restart: unless-stopped 覆盖崩溃自愈，不纳入 systemd --user，
-      # Stop 段也不显式停——容器随 VM 生命周期存续，下一轮 docker rm -f 幂等接管）。
-      # 端口 8790（上游默认，绑 0.0.0.0 —— OmniRoute 经 host.docker.internal:8790
-      # 以 runner-qoder 节点接入本网关，127.0.0.1 绑定对 docker 网桥不可达；
-      # ⚠️ 必须挂 --network omniroute_default：该 provider_node 的 base_url 是
-      #    http://qoder2api:8790/v1（容器名 DNS 解析），而 qoder2api 出厂只在 bridge。
-      #    2026-10-19 实测裸名 qwen3.8-flash 报 502 ENOTFOUND qoder2api ——
-      #    combo（free）与模型本身都没问题，纯粹是跨网络不可达。挂上后即可用
-      #    qwen3.8-flash 直连，runner-qoder/Qwen3.8-Flash 前缀名也一起通。
-      # 仍保留 -p 端口映射，宿主机 curl / 看板访问不受影响。
-      # 与 trae2api 18080 同款形态）；看板走 Tailscale serve 8084（见 Tailscale 段）。
-      # 数据直写 Dropbox fuse：/dropbox/self-hosted/qoder2api/{accounts,usage}——
-      # 账号池/用量/调度状态全是 JSON/JSONL（无 SQLite），fuse 挂载点无锁兼容问题，
-      # 无需本地盘中转；持久化白名单内（A 类），周期归档/收尾归档均无需登记（对齐 trae2api）。
-      # 凭据引导（幂等，仅 settings.json 缺失时）：launcher API Key（qd- 前缀）与看板
-      # 面板密码随机生成，PBKDF2-SHA256 摘要预写 settings.json（与 qoder_settings.py
-      # _digest 逐字段对齐：salt 16B hex + 120000 轮），首启即免默认面板密码 admin 裸奔。
-      # ⚠️ 运行时绝不传 --panel-password：该参数每次启动都会重置密码（set_panel_password
-      # 无条件覆盖），会把预写凭据冲掉。容器 CMD 用镜像默认（--lan：强制鉴权 + 0.0.0.0）。
-      # 版本标记：每轮动态解析上游最新 release tag（不用固定 pin），镜像 digest 入账
-      # .installed-version；tag 变化或 digest 变化都能识别真实更新。
-      # continue-on-error：新网关故障不得级联跳过后续 quota-board / zcode2api / Run OpenClaw
-      # （对齐 autoclaw/qingyan 的保护口径；可见性由 step 内 TG 告警保证）。
-      - name: Run zcode2api (GLM gateway)
-        id: run_zcode2api
-        # 2026-10-02：trae2api 步骤硬失败时本步骤被默认语义级联跳过（continue-on-error
-        # 只影响自身失败标记，不改变「前置失败则跳过」），与 Run OpenClaw 同款修复。
-        if: ${{ !cancelled() }}
-        continue-on-error: true
-        env:
-          # send_tg 发送闸 + 收尾区接线（缺任一则本步骤通知静默跳过）
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          # 网关鉴权：zcode2api 专属 secret（与 accounts.db meta 表 gateway_key 同值）。
-          # 勿改回 AI_GATEWAY_API_KEY——那是 workbuddy-gateway 的 key，两者已分家；
-          # DB meta 优先级高于 env，env 注错不影响服务，但自检会拿它报「API Key 无效」
-          # （2026-09-25 误报实录）。环境变量优先于 .env（python-dotenv 默认不覆盖
-          # 已存在的环境变量），无需改数据快照里的 .env 即与仓库 Secrets 对齐。
-          ZCODE_GATEWAY_KEY: ${{ secrets.ZCODE_GATEWAY_API_KEY }}
-        # 2026-10-30 减重外置：脚本本体在 .github/scripts/openclaw/run-zcode2api.sh
-        #（原样搬移，唯 Bun 安装器由 curl|bash 改两步式——下载落盘再执行，安全扫描
-        # 高危整改，语义等价）。P5b 契约与背景同 workbuddy 注。
-        run: bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/run-zcode2api.sh"
-
-      - name: Run qingyan-proxy (ChatGLM 清言反代)
-        id: run_qingyan
-        # 2026-10-22 步骤重排后位于 Run OpenClaw 之后：本步失败不得级联跳过
-        if: ${{ !cancelled() }}
-        continue-on-error: true
-        env:
-          # send_tg 发送闸 + 收尾区接线（缺任一则本步骤通知静默跳过）
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          # 凭据：清言账号的 chatglm_refresh_token。只从 Secrets 注入环境变量，
-          # 不落仓库、不回显；部署脚本写进运行目录 env.sh（600）供服务读取。
-          # 上游 refresh 是轮换式（旧票立即作废），本值只作首轮种子，之后以
-          # 数据目录里轮换出的新票为准 —— 故 data/ 必须随 Dropbox 跨轮持久化。
-          QINGYAN_REFRESH_TOKEN: ${{ secrets.GLM_REFRESH_TOKEN }}
-          # 网关鉴权：本网关专属 key（不共用 AI_GATEWAY_API_KEY —— 每个反代各有
-          # 自己的 key，避免一把泄露波及全部）。监听已改 0.0.0.0，这是唯一的
-          # 安全边界；部署脚本写进 env.sh 的 PROXY_API_KEY，缺值直接拒绝启动。
-          QINGYAN_GATEWAY_KEY: ${{ secrets.GLM2API_GATEWAY_KEY }}
-          QINGYAN_PORT: "8320"
-          # 代码源（Dropbox 侧）：项目在本机 ~/AI/qingyan-proxy（非 git 仓库），
-          # 经 rclone 存到该远端，每轮 prepare 校验真源在位。
-          QINGYAN_APP_REMOTE: dropbox:self-hosted/qingyan-proxy/app
-          # 持久化（2026-10-06 起）：qingyan 全面直写 Dropbox（代码/数据/凭据/日志），
-          # DATA_DIR 同时是积分快照落点（STATE_DIR 指向它），不再有 pull/push 往返。
-          QINGYAN_DATA_DIR: /dropbox/self-hosted/qingyan-proxy/data
-          QINGYAN_STATE_DIR: /dropbox/self-hosted/qingyan-proxy/data
-          QINGYAN_ENV_FILE: /dropbox/self-hosted/qingyan-proxy/env.sh
-          # 注：不再有 QINGYAN_RUN_DIR —— 2026-10-06 起 qingyan 全面直跑
-          # Dropbox 真源（代码/数据/凭据/日志），不存在 /tmp 运行副本。
-        # 2026-10-30 减重外置：脚本本体在 .github/scripts/openclaw/run-qingyan.sh
-        #（原样搬移，零逻辑改动），P5b 契约与背景同 workbuddy 注。
-        run: bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/run-qingyan.sh"
-
       - name: "Run AI API gateway (backend: ${{ inputs.ai_backend }})"
         # 2026-10-29 下线优化（B1+B1c）：后置护栏，口径同 Install Cloudflared —— 网关进程
         # 健康不依赖 20128（config validate / secrets audit 为 schema+secrets 判据，
@@ -864,538 +1396,6 @@ jobs:
         #（原样搬移，零逻辑改动），P5b 等齐门消费 /tmp/upstream-rc-*（上游四脚本的
         # 标记，契约不变）。背景同 Install OpenClaw 的 500KB 注。
         run: bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/run-ai-gateway.sh"
-
-      - name: Run Cloudflared Tunnel
-        # 2026-10-29 下线优化（B1）：同 Install Cloudflared 护栏口径；隧道此刻才启动，
-        # 网关（18789）已先就绪 —— 公网可达性恢复略晚于网关健康，换取下线关键路径缩短。
-        if: ${{ !cancelled() }}
-        continue-on-error: true
-        run: |
-          mkdir -p ~/.openclaw/logs
-
-          cloudflared tunnel route dns oc oc.'${{ secrets.VD }}'.eu.org || true
-          # Managed by the unified systemd tunnel manager: tunnels get
-          # Restart=always, so a killed connector comes back on its own.
-          # Falls back to nohup only if the manager is unavailable.
-          if [ -f "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ]; then
-            bash "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ensure oc || true
-          else
-            nohup cloudflared tunnel run --url http://127.0.0.1:18789 oc \
-              > ~/.openclaw/logs/cloudflared_oc.log 2>&1 &
-            echo $! > ~/.openclaw/logs/cloudflared_oc.pid
-          fi
-
-          sleep 10
-          echo "OpenClaw tunnel started (systemd-managed)."
-
-      - name: Run rss-to-telegram container
-        # 2026-10-29 下线优化（B1）：后置护栏，口径同 Install Cloudflared ——
-        # rsstt 故障不得级联跳过 AI 网关 / 隧道 / 后续服务。
-        if: ${{ !cancelled() }}
-        continue-on-error: true
-        env:
-          # rsstt 服务使用独立 bot，token 经同名 secret 注入（此前未接线导致容器 TOKEN 恒空）
-          TELEGRAM_BOT_TOKEN_RSS_SB_BOT: ${{ secrets.TELEGRAM_BOT_TOKEN_RSS_SB_BOT }}
-        run: |
-          set -euo pipefail
-          echo "Starting rss-to-telegram before OmniRoute..."
-          mkdir -p /dropbox/self-hosted/rsstt
-          cleanup_archive_workdir() {
-            rm -f /tmp/rsstt.tar.gz 2>/dev/null || true
-            rm -rf /tmp/rsstt-restore 2>/dev/null || true
-          }
-          free_kb() { df -Pk "${1:-/tmp}" | awk 'NR==2 {print $4}'; }
-          require_free_kb() {
-            local path="$1" min_kb="$2" label="$3"
-            local avail
-            avail=$(free_kb "$path")
-            if [ "${avail:-0}" -lt "$min_kb" ]; then
-              echo "❌ ${label}: insufficient free space at ${path}. available=${avail}KB required=${min_kb}KB" >&2
-              exit 1
-            fi
-            echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
-          }
-          require_free_kb /tmp $((1024 * 1024)) "rsstt restore preflight"
-          rm -rf /tmp/local_rsstt
-          cleanup_archive_workdir
-          mkdir -p /tmp/local_rsstt /tmp/rsstt-restore
-
-          # 门禁只看 rsstt 真正依赖的凭据（同名 secret 注入）：
-          # ~/.openclaw/.env 由 OpenClaw 自身维护、与 rsstt 无关，不能作为启动条件
-          if [ -n "${TELEGRAM_BOT_TOKEN_RSS_SB_BOT:-}" ]; then
-            if rclone ls dropbox:self-hosted/rsstt.tar.gz > /dev/null 2>&1; then
-              echo "📦 Found rsstt.tar.gz! Downloading and extracting..."
-              rclone copyto dropbox:self-hosted/rsstt.tar.gz /tmp/rsstt.tar.gz
-              archive_kb=$(du -sk /tmp/rsstt.tar.gz | awk '{print $1}')
-              if [ -z "${archive_kb:-}" ] || [ "$archive_kb" -le 0 ]; then
-                echo "❌ rsstt extract preflight: unable to calculate archive size" >&2
-                exit 1
-              fi
-              echo "rsstt.tar.gz 大小: ${archive_kb}KB"
-              require_free_kb /tmp $((archive_kb * 3 + 512 * 1024)) "rsstt extract preflight"
-              if [ -s /tmp/rsstt.tar.gz ] && tar -tzf /tmp/rsstt.tar.gz >/dev/null 2>&1; then
-                tar -xzf /tmp/rsstt.tar.gz -C /tmp/rsstt-restore
-                cp -a /tmp/rsstt-restore/. /tmp/local_rsstt/ || true
-              else
-                echo "⚠️ rsstt.tar.gz validation failed, skipping archive restore."
-              fi
-              cleanup_archive_workdir
-            else
-              echo "⚠️ No rsstt archive found. Falling back to sync from raw directory..."
-              rclone copy dropbox:self-hosted/rsstt /tmp/local_rsstt \
-                --retries 10 \
-                --low-level-retries 20 \
-                --timeout 1m \
-                --contimeout 15s \
-                --exclude "docker-compose.yml" \
-                -P || true
-            fi
-
-            mkdir -p /tmp/local_rsstt/config /tmp/local_rsstt/data
-            touch /tmp/local_rsstt/config/.keep /tmp/local_rsstt/data/.keep
-
-            echo "=== restored rss-to-telegram tree ==="
-            find /tmp/local_rsstt -maxdepth 3 | sort || true
-
-            start_rsstt_container() {
-              docker rm -f rss-to-telegram 2>/dev/null || true
-              docker run -d \
-                --name rss-to-telegram \
-                --restart unless-stopped \
-                -v /tmp/local_rsstt/config:/app/config \
-                -v /tmp/local_rsstt/data:/app/data \
-                -e TOKEN="$TELEGRAM_BOT_TOKEN_RSS_SB_BOT" \
-                -e MANAGER="83279194" \
-                -e MULTIUSER="0" \
-                rongronggg9/rss-to-telegram:latest
-            }
-
-            print_rsstt_status() {
-              echo "=== rss-to-telegram status ==="
-              docker ps -a --filter name=rss-to-telegram
-              container_status="$(docker inspect --format '{{.State.Status}}' rss-to-telegram)"
-              health_status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' rss-to-telegram)"
-              restart_count="$(docker inspect --format '{{.RestartCount}}' rss-to-telegram)"
-              echo "rss-to-telegram status=${container_status} health=${health_status} restarts=${restart_count}"
-            }
-
-            validate_rsstt_container() {
-              print_rsstt_status
-
-              if [ "$container_status" != "running" ] || [ "$health_status" = "unhealthy" ]; then
-                echo "❌ rss-to-telegram failed to become healthy"
-                docker logs --tail 200 rss-to-telegram || true
-                return 1
-              fi
-
-              if docker logs --tail 200 rss-to-telegram 2>&1 | grep -Eqi 'LOGIN FAILED|Unknown error occurred during login'; then
-                echo "❌ rss-to-telegram encountered a Telegram login failure"
-                docker logs --tail 200 rss-to-telegram || true
-                return 1
-              fi
-            }
-
-            archive_rsstt_state() {
-              local min_size=$((5 * 1024))
-              local actual_size
-
-              echo "📦 Archiving repaired rss-to-telegram state immediately..."
-              rm -f /tmp/rsstt.tar.gz
-              tar -czf /tmp/rsstt.tar.gz -C /tmp/local_rsstt .
-              tar -tzf /tmp/rsstt.tar.gz >/dev/null
-              actual_size="$(stat -c%s /tmp/rsstt.tar.gz 2>/dev/null || echo 0)"
-              if [ "$actual_size" -lt "$min_size" ]; then
-                echo "❌ repaired rsstt archive is too small: size=${actual_size} min=${min_size}"
-                exit 1
-              fi
-              rclone copyto /tmp/rsstt.tar.gz dropbox:self-hosted/rsstt.tar.gz -v
-              rm -f /tmp/rsstt.tar.gz
-              echo "✅ Repaired rss-to-telegram state uploaded"
-            }
-
-            echo "Waiting for rss-to-telegram container to stabilize..."
-            start_rsstt_container
-            sleep 12
-
-            if ! validate_rsstt_container; then
-              if docker logs --tail 200 rss-to-telegram 2>&1 | grep -qi 'AuthKeyDuplicatedError'; then
-                echo "⚠️ rss-to-telegram session was invalidated by AuthKeyDuplicatedError; deleting session and retrying once."
-                docker rm -f rss-to-telegram 2>/dev/null || true
-                rm -f \
-                  /tmp/local_rsstt/config/bot.session \
-                  /tmp/local_rsstt/config/bot.session-journal \
-                  /tmp/local_rsstt/config/bot.session-shm \
-                  /tmp/local_rsstt/config/bot.session-wal
-                start_rsstt_container
-                sleep 12
-                validate_rsstt_container
-                archive_rsstt_state
-              else
-                exit 1
-              fi
-            fi
-
-            echo "=== rss-to-telegram /app tree (for persistence verification) ==="
-            docker exec rss-to-telegram sh -lc 'find /app -maxdepth 3 \( -type f -o -type d \) | sort | sed -n "1,200p"'
-            echo "=== rss-to-telegram local bind tree after startup ==="
-            find /tmp/local_rsstt -maxdepth 3 | sort || true
-          else
-            echo "❌ TELEGRAM_BOT_TOKEN_RSS_SB_BOT 未配置，跳过 rss-to-telegram 启动；本轮无 rsstt 数据，最终归档会跳过上传"
-          fi
-
-      - name: Clean stale Tailscale nodes (openclaw* 僵尸清退)
-        id: ts_clean
-        if: ${{ always() && (env.TS_API_KEY != '' || (env.TS_OAUTH_CLIENT_ID != '' && env.TS_OAUTH_CLIENT_SECRET != '')) }}
-        env:
-          TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          TS_OAUTH_CLIENT_SECRET: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
-          TS_API_KEY: ${{ secrets.TS_API_KEY }}
-        run: |
-          set -euo pipefail
-          # 上一轮被 360m 硬上限强杀时，tailscale/github-action 的 post-logout 不跑，
-          # 节点虽为 ephemeral（action 注册即带 ephemeral=true，源码实测），但控制面
-          # 清理有几十分钟级延迟，singleton 立即接力的下一轮仍会撞名 —— 新轮
-          # 会被控制面静默退化成 openclaw-1/-2…（2026-09-30 实锤，KeyExpiry=null）。
-          # 本步骤先于 Setup Tailscale 执行：此刻 tailnet 里的 openclaw* 一律是历史
-          # 残留（含 openclaw-N / openclaw-tmp-*），逐个删除，从根上消掉退化。
-          #
-          # ⚠️ 关键坑（2026-10-01 实测）：Tailscale API **不用 Bearer**！
-          #    此前一律用 -H "Authorization: Bearer ..." 打，无论 tskey-client-*
-          #    还是 tskey-api-* 都返回 401/404，被误判成「scope 不足」，守护因此
-          #    空转了很久（连代码注释都跟着写错了结论）。正确用法是 Basic auth：
-          #      curl -u "${KEY}:" https://api.tailscale.com/api/v2/...
-          #    （key 作用户名、密码留空）
-          # 凭据优先级：
-          #   ① TS_API_KEY（tskey-api-*）—— API access token，具 devices 读写权限；
-          #   ② 无则回退 OAuth client（tskey-client-*）—— 仅兼容保留，实测无 devices 权限。
-          _auth=()
-          if [ -n "${TS_API_KEY:-}" ]; then
-            echo "1. 使用 TS_API_KEY（API access token · Basic auth）..."
-            _auth=(-u "${TS_API_KEY}:")
-          else
-            echo "1. OAuth client -> token（scope 仅 auth_keys，预计列设备失败）..."
-            _tok="$(curl -fsS --max-time 20 https://api.tailscale.com/api/v2/oauth/token \
-              --data-urlencode "client_id=${TS_OAUTH_CLIENT_ID}" \
-              --data-urlencode "client_secret=${TS_OAUTH_CLIENT_SECRET}" \
-              --data-urlencode "grant_type=client_credentials" 2>/dev/null \
-              | jq -r '.access_token // empty' 2>/dev/null || true)"
-            if [ -z "${_tok}" ]; then
-              echo "⚠️ 未能取得 Tailscale API token，跳过僵尸清退（本轮可能仍退化 openclaw-1）"
-              exit 0
-            fi
-            _auth=(-H "Authorization: Bearer ${_tok}")
-          fi
-          echo "2. 拉取 tailnet 设备列表..."
-          _dev_code="$(curl -s -o /tmp/ts-devices.json -w '%{http_code}' --max-time 20 \
-            "${_auth[@]}" \
-            https://api.tailscale.com/api/v2/tailnet/-/devices 2>/dev/null || true)"
-          if [ "${_dev_code}" != "200" ]; then
-            echo "⚠️ 设备列表获取失败 (HTTP ${_dev_code})：僵尸清退未生效"
-            if [ -z "${TS_API_KEY:-}" ]; then
-              echo "   根因：tskey-client-* 只有 auth_keys scope，天生无 devices 权限"
-              echo "   补法：Tailscale admin → Settings → Keys → 生成 tskey-api-* 存为 TS_API_KEY"
-            else
-              echo "   TS_API_KEY 已配置但仍失败：多为认证方式非 Basic（-u \"KEY:\"），或 key 已撤销/过期"
-            fi
-            rm -f /tmp/ts-devices.json
-            exit 0
-          fi
-          _dev="$(cat /tmp/ts-devices.json)"
-          rm -f /tmp/ts-devices.json
-          # 注册前运行：openclaw* 一律视为残留。按 hostname/name 双字段匹配，
-          # 覆盖 openclaw / openclaw-1 / openclaw-tmp-* 全家族。
-          #
-          # ⚠️ 只删「断连」节点，绝不碰活着的（2026-10-01 实测加固）：
-          #    权限打通前本步骤因删不动而“安全”；一旦能删，无差别 test("openclaw")
-          #    会命中**当前仍在跑的那一轮自己** —— job 重试/手动重触发时开场就把
-          #    自己的 SSH 入口删掉（自杀）。故必须加 connectedToControl == false。
-          #    判据说明：设备列表**没有 online 字段**（别用 .online // false ——
-          #    jq 的 // 对字段缺失同样取右值，会静默把活节点判成离线，已踩）；
-          #    真实在线判据是 connectedToControl。实测真僵尸该值为 false，
-          #    在跑的节点为 true。
-          # 活着的同名节点交给 Enable Tailscale SSH 的临时名中转去回收，不在这里硬删。
-          _stale="$(printf '%s' "${_dev}" | jq -r '
-            (.devices // [])[]?
-            | select(((.hostname // "") + " " + (.name // "")) | test("openclaw"))
-            | select(.connectedToControl == false)
-            | .id' 2>/dev/null || true)"
-          if [ -z "${_stale}" ]; then
-            echo "✅ 无 openclaw* 残留节点，跳过删除"
-            exit 0
-          fi
-          echo "3. 发现 $(printf '%s' "${_stale}" | grep -c .) 个残留节点，逐个删除..."
-          for _id in ${_stale}; do
-            _code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 -X DELETE \
-              "${_auth[@]}" \
-              "https://api.tailscale.com/api/v2/device/${_id}" 2>/dev/null || true)"
-            case "${_code}" in
-              200|204) echo "✅ 已删除残留节点 ${_id} (HTTP ${_code})" ;;
-              *) echo "⚠️ 删除 ${_id} 失败 (HTTP ${_code})：凭据无 devices 写权限或该节点不可管理" ;;
-            esac
-          done
-      - name: Restore Tailscale certs (gpg 解密 ← actions/cache)
-        # 2026-10-29 LE 429 实锤：临时 runner 每 5 分钟一轮，每轮都为同一个
-        # openclaw.taild54677.ts.net 重新签证书，撞满 Let's Encrypt「同一组
-        # 标识符 168h 内最多 5 张」后，8443-8448/443 全部在 TLS 握手挂起
-        # （retry-after 长达一天，服务端硬限制，机器上无法绕过）。
-        # 解法：把 statedir/certs 跨轮缓存 —— tailscaled 的证书库本来就是
-        # 「先查文件、有效即用、不碰 ACME」，恢复出有效证书后整轮零签发。
-        # 本仓库是公开的，actions/cache 同仓库任意 run 可读，缓存前必须
-        # gpg 对称加密（passphrase 在 Secrets.TS_CERT_GPG_KEY，fork PR 与
-        # 缓存本身都拿不到明文私钥）。无 secret/无缓存时优雅降级为本轮现签。
-        if: ${{ always() }}
-        uses: actions/cache/restore@v4
-        with:
-          path: ~/ts-cert-cache
-          # 精确 key 永不命中（证书到期日只有签发后才知道），靠 restore-keys
-          # 前缀取最近创建的一条 —— 恰好是最新一张证书；到期换新后新 key
-          # 入库，前缀自动翻新到新版。
-          key: openclaw-certs-exp-bootstrap-${{ github.run_id }}
-          restore-keys: |
-            openclaw-certs-exp-
-
-      - name: Install cached Tailscale certs into statedir
-        # 必须先于「Tailscale daemon 纳管」执行：让 systemd 单元（或 action
-        # spawn 抢到 TUN 的实例）启动时证书已就位，首个 HTTPS 握手直接命中。
-        # 证书不足 24h 有效期则只保留 ACME 账号密钥、丢弃 crt/key 现签。
-        # 2026-10-30 外置：脚本 ts-cert-cache.sh install（yml 500KB 减重，见上）。
-        if: ${{ always() }}
-        env:
-          TS_CERT_GPG_KEY: ${{ secrets.TS_CERT_GPG_KEY }}
-        run: bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/ts-cert-cache.sh" install
-
-      - name: Tailscale daemon 纳管 (systemd)
-        id: ts_daemon
-        # 2026-10-23：本步骤与 OpenClaw 无关，不能因前置 Install OpenClaw 失败而被
-        # 默认 success() 跳过 —— run 39858698391 就是这样：Install 失败 → 本步 skipped
-        # → 下一步 Setup Tailscale 仍用 always() 跑，却没有托管 daemon，直接失败。
-        if: ${{ always() }}
-        # 长驻服务一律 systemd 托管（2026-10-05 主人拍板）。必须在
-        # tailscale/github-action **之前**执行，原因见下方接管原理。
-        run: |
-          set -uo pipefail
-          if [ -f "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" ]; then
-            bash "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" ensure tailscaled || true
-          else
-            echo "⚠️ services.sh 缺失，沿用 action 自带的 --state=mem: 裸跑"
-          fi
-          # 接管原理（2026-10-05 实测）：
-          #   action 内部无条件 spawn `sudo -E tailscaled --state=mem:`。若本单元
-          #   已占据 TUN，action 那个实例会因 "TUN device tailscale0 is busy" 立即
-          #   退出；但 action 随后 waitForDaemonReady() 轮询的是**默认 socket**
-          #   （即本单元），拿到响应即判定就绪，接着 connectToTailscale 的
-          #   `tailscale up` 同样打在本单元上 —— 于是登录态落到托管的 daemon。
-          #   第二个实例的退出码被 action 忽略（detached + unref），不会 fail 步骤。
-          #
-          # 为什么必须 --statedir 而非 --state=mem:（实测踩坑）
-          #   mem: 把登录态只放内存，进程一死认证即丢，Restart=always 拉起来的
-          #   只是个 Logged out 空壳 —— 托管形同虚设。statedir 落盘后崩溃重启
-          #   自动恢复登录，自愈才是真的自愈。
-          #
-          # 过渡期：若本机已有 action 起的 mem: 裸跑实例，ensure 会检测并跳过
-          #   （不抢占 TUN、不打断当前 SSH），单元在新 VM 上自动接管。
-      - name: Setup Tailscale (SSH 调试入口)
-        id: ts
-        # daemon 纳管没成功就不要硬跑 action：否则失败会看起来像 Tailscale 本身坏了，
-        # 实际是前置步骤被跳过（run 39858698391 的级联失败）。
-        if: ${{ always() && steps.ts_daemon.outcome == 'success' && env.TS_OAUTH_CLIENT_ID != '' && env.TS_OAUTH_CLIENT_SECRET != '' }}
-        uses: tailscale/github-action@306e68a486fd2350f2bfc3b19fcd143891a4a2d8 # v4
-        with:
-          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
-          tags: tag:ci
-          # 与 systemd 单元用同一 statedir：即便本轮是 action 的实例抢到了 TUN，
-          # 登录态也落盘，下一轮单元接管时无需重新认证。
-          statedir: /var/lib/tailscale
-          # 注册时就固定主机名（action v4 原生 hostname 入参，实测 306e68a 的
-          # action.yml 有该 input）：此前是「先按 runner 名注册、再 set --hostname
-          # 改名」，两步之间存在竞态 —— 注册瞬间若 tailnet 里还有上一轮的
-          # openclaw 残留，控制面当场就分配 openclaw-1，事后 set 改不回来
-          # （prefs 里 Hostname 写对了，DNS 名仍是 openclaw-1，2026-10-01 实锤）。
-          # 注册即声明能消掉这个窗口，是防退化的第一优先手段。
-          hostname: openclaw
-
-      - name: Enable Tailscale SSH
-        id: ts_ssh
-        if: ${{ always() && steps.ts.outcome == 'success' }}
-        run: |
-          set -euo pipefail
-          # 开启 Exit Node 前置条件：启用内核转发
-          echo 'net.ipv4.ip_forward = 1' | sudo tee /etc/sysctl.d/99-tailscale-forward.conf
-          echo 'net.ipv6.conf.all.forwarding = 1' | sudo tee -a /etc/sysctl.d/99-tailscale-forward.conf
-          sudo sysctl -p /etc/sysctl.d/99-tailscale-forward.conf
-
-          # 固定主机名 openclaw（singleton 并发下不会撞名）；节点为 ephemeral，job 结束自动移除
-          # 开启 Exit Node：tailnet 内设备可将本 runner 设为出口节点
-          # 批准方式（任选其一）：
-          #   ① 管理页手动批准: https://login.tailscale.com/admin/machines → 找到 openclaw 节点
-          #      → Edit route settings → 勾选 0.0.0.0/0, ::/0（ephemeral 节点每次运行都需重新批准）
-          #   ② ACL autoApprovers（推荐，免每次批准）: 在 Tailscale ACL rules 前加：
-          #        "autoApprovers": {
-          #          "routes": { "0.0.0.0/0": ["tag:ci"], "::/0": ["tag:ci"] }
-          #        },
-          #   ③ Tailscale API 程序化批准:
-          #      GET  https://api.tailscale.com/api/v2/tailnet/{tailnet}/devices  查到节点 id
-          #      POST https://api.tailscale.com/api/v2/device/{device_id}/routes  body: {"routes": ["0.0.0.0/0", "::/0"]}
-          #      （需 TS_API_KEY，ephemeral 节点 id 每次变化，需按主机名动态查询）
-          sudo tailscale set --ssh --hostname=openclaw --advertise-exit-node
-          # 回读实际注册的 DNS 名。--hostname 的重命名有传播延迟，若 set 后立刻读取
-          # 可能拿到机器原始主机名（如 github-runnervmgx7h7），导致 ts.env 里的 SSH/
-          # RustDesk 直连地址每轮漂移。这里轮询等待名字收敛为 openclaw。
-          # tailnet 后缀（形如 xxxx.ts.net）动态取，避免硬编码到别的 tailnet 时写歪。
-          TS_SUFFIX="$(tailscale status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')"
-          TS_SUFFIX="${TS_SUFFIX#*.}"
-          TS_FQDN=""
-          for i in $(seq 1 15); do
-            TS_FQDN="$(tailscale status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')"
-            case "$TS_FQDN" in
-              "openclaw.${TS_SUFFIX}") break ;;
-            esac
-            sleep 2
-          done
-
-          # 固定主机名 openclaw（2026-09-30 补）：撞名时控制面会**静默拒绝**并退化成
-          # openclaw-1/-2…，根因是上一轮同名 ephemeral 节点残留在 tailnet——离线也照样占名。
-          # 直连 set 对这种情况无效（prefs 里 Hostname 已写对，但 DNS 名仍是 openclaw-1）。
-          # 兜底：先改到一个临时名把 openclaw 让出来，再改回去 —— 实测可强制收回名字。
-          if [ "${TS_FQDN:-}" != "openclaw.${TS_SUFFIX}" ]; then
-            echo "⚠️ 主机名被占（当前 ${TS_FQDN:-未知}），走临时名中转回收 openclaw"
-            sudo tailscale set --hostname="openclaw-tmp-$$" 2>&1 || true
-            for i in $(seq 1 10); do
-              _TMP_FQDN="$(tailscale status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')"
-              case "$_TMP_FQDN" in
-                "openclaw-tmp-$$.${TS_SUFFIX}") break ;;
-              esac
-              sleep 3
-            done
-            sudo tailscale set --ssh --hostname=openclaw --advertise-exit-node 2>&1 || true
-            TS_FQDN=""
-            for i in $(seq 1 12); do
-              TS_FQDN="$(tailscale status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')"
-              case "$TS_FQDN" in
-                "openclaw.${TS_SUFFIX}") break ;;
-              esac
-              sleep 5
-            done
-          fi
-          TS_FQDN="${TS_FQDN:-$(tailscale status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')}"
-          TS_HOST="$(printf '%s' "$TS_FQDN" | cut -d. -f1)"
-          {
-            printf 'TS_HOST=%s\n' "$TS_HOST"
-            printf 'TS_FQDN=%s\n' "$TS_FQDN"
-            printf 'TS_IP=%s\n' "$(tailscale ip -4)"
-          } > "$HOME/ts.env"
-          echo "SSH 入口: ssh runner@${TS_HOST}（RustDesk 直连: ${TS_FQDN}:21118）"
-
-          # ---------- 主机名回收守护（2026-10-01 补）----------
-          # 为什么必须有守护：上面所有回收动作都只在本步骤**这一刻**试一次，而残留的
-          # 上一轮 ephemeral 节点要几十分钟后才被控制面清掉 —— 名字是在本步骤结束后
-          # 才空出来的，那时已经没有任何东西再去收回，于是这一整轮都顶着 openclaw-1。
-          # 2026-10-01 实锤：ts.env 写着 TS_HOST=openclaw-1，而控制面 prefs 里
-          # Hostname 其实是对的 openclaw（= 名被别人占着，不是我们设错）。
-          # 且「Clean stale」步骤删不动（本仓库 OAuth client 只有 auth_keys scope，
-          # devices 列表接口 404，整段降级跳过）—— 删不掉就只能等，等就必须有人重试。
-          # 故起一个脱离本步骤进程树的守护，在整个 job 生命周期内周期重试回收：
-          #   名字一旦变回 openclaw → 重写 ts.env，RustDesk/通知/serve 地址随之自愈。
-          # setsid + nohup 脱离进程树；job 结束随 runner 一起消失，无需收尾清理。
-          mkdir -p "$HOME/.openclaw/logs"
-          if [ "${TS_FQDN:-}" != "openclaw.${TS_SUFFIX}" ]; then
-            echo "🔁 当前名为 ${TS_FQDN}，启动后台回收守护（每 120s 重试收回 openclaw）"
-            # 守护脚本本体独立成文件（.github/scripts/tailscale/ts-reclaim-hostname.sh）：
-            # 内联 heredoc 里的行不带 YAML 块缩进，会打断 run 的缩进层级（实测 YAML 解析报
-            # "could not find expected ':'"）——脚本独立出去，workflow 里只剩一行调用。
-            setsid nohup bash "${GITHUB_WORKSPACE}/.github/scripts/tailscale/ts-reclaim-hostname.sh" \
-              "${TS_SUFFIX}" "${GITHUB_RUN_ID:-0}" \
-              >> "$HOME/.openclaw/logs/ts-reclaim.log" 2>&1 < /dev/null &
-            disown 2>/dev/null || true
-            sleep 1
-            echo "✅ 回收守护已启动（日志: ~/.openclaw/logs/ts-reclaim.log）"
-          else
-            echo "✅ 主机名已为 openclaw，无需回收守护"
-          fi
-
-          # 两个后台各占一个端口、各占根路径 /admin：trae2api 8080、zcode-hub 8081。
-          # 分开端口是因为两者前端都用绝对路径 /admin，同端口会打架。
-          # tailscaled 以 --state=mem: 运行（runner 临时态设计），签不了 HTTPS 证书
-          # （no TailscaleVarRoot），故用 HTTP —— 流量仍在 WireGuard 隧道内，
-          # 安全性与直连后端端口明文等同。serve 配置随内存态逐轮清零，此处幂等重建。
-          sudo tailscale serve --bg --http=8081 http://127.0.0.1:8319
-          echo "zcode-hub 后台: http://${TS_FQDN}:8081/admin/accounts（API 网关: /v1）"
-
-          sudo tailscale serve --bg --http=8080 http://127.0.0.1:18080
-          echo "trae2api 控制台: http://${TS_FQDN}:8080/admin"
-
-          # workbuddy 只读管理台（v1.23.0 -webui，真源 services.sh）：8316 → 8082。
-          # 前端资源用相对路径，挂在 /ui/ 子路径即可；管理 Key 独立于模型 API Key
-          # （config.json gateway.adminKey），仅 tailnet 内可访问，不做公网暴露。
-          sudo tailscale serve --bg --http=8082 http://127.0.0.1:8316
-          echo "workbuddy 控制台: http://${TS_FQDN}:8082/ui/"
-          # qoder2api-hub 看板（root 路径直出，无 /admin 前缀）：8790 → 8084。
-          # 延续后台端口段（trae 8080 / zcode-hub 8081 / wb 8082 / autoclaw 8083）。
-          # 面板密码独立于 API Key（PBKDF2 落盘 settings.json），仅 tailnet 内可访问。
-          sudo tailscale serve --bg --http=8084 http://127.0.0.1:8790
-          echo "qoder2api 看板: http://${TS_FQDN}:8084/（API 网关: /v1）"
-          # 2026-10-19 主人要求「其他控制台怎么不使用 https」：6 个后台统一补 HTTPS 入口。
-          # tailscaled 虽以 --state=mem: 运行，实测**仍能签发证书**（8443-8448 全通，
-          # TLS 校验无需 -k）—— 上面「签不了 HTTPS 证书」的判断只对无端口 443 成立
-          # 的历史场景，勿再据此断言带端口 https 不可用。映射与看板 admin_entries 一致：
-          #   8443→8316(wb) 8444→18080(trae) 8445→8319(zcode)
-          #   8446→8322(autoclaw) 8447→8790(qoder) 8448→20128(omniroute)
-          # 证书签发失败不能拖垮整步，统一加兜底 echo（与 443 同款处理）。
-          # 2026-10-29 起证书来自跨轮缓存（上游 Restore/Install 步骤已把有效证书
-          # 铺进 statedir/certs，tailscaled 有效即用、零签发）；本块兜底 echo 只在
-          # 缓存缺席且撞上 LE 429 限频（每周 5 张上限）时才会走到。
-          sudo tailscale serve --bg --https=8443 http://127.0.0.1:8316 2>/dev/null \
-            || echo "⚠️ 8443 HTTPS serve 失败，HTTP 8082 仍可用"
-          sudo tailscale serve --bg --https=8444 http://127.0.0.1:18080 2>/dev/null \
-            || echo "⚠️ 8444 HTTPS serve 失败，HTTP 8080 仍可用"
-          sudo tailscale serve --bg --https=8445 http://127.0.0.1:8319 2>/dev/null \
-            || echo "⚠️ 8445 HTTPS serve 失败，HTTP 8081 仍可用"
-          sudo tailscale serve --bg --https=8446 http://127.0.0.1:8322 2>/dev/null \
-            || echo "⚠️ 8446 HTTPS serve 失败，HTTP 8083 仍可用"
-          sudo tailscale serve --bg --https=8447 http://127.0.0.1:8790 2>/dev/null \
-            || echo "⚠️ 8447 HTTPS serve 失败，HTTP 8084 仍可用"
-          sudo tailscale serve --bg --https=8448 http://127.0.0.1:20128 2>/dev/null \
-            || echo "⚠️ 8448 HTTPS serve 失败，OmniRoute 控制台将无入口"
-          echo "HTTPS 控制台: wb=8443 trae=8444 zcode=8445 autoclaw=8446 qoder=8447 omniroute=8448"
-          # OmniRoute AI API 无端口 HTTPS 入口：20128 → 443。
-          # 公网 ai-api.derrick.eu.org 走 Cloudflare，有 100s 硬超时；tailnet 内这条
-          # 前面没有 Cloudflare，慢请求（step-5-preview 深度思考实测单请求 18~330s）
-          # 走这里不撞墙。证书由 tailscale 自动签发、客户端免 -k（实测 TLS 校验通过）。
-          # ⚠️ 若节点名变更导致证书签发失败，不能让整步挂掉，故加兜底 echo。
-          # 网关 Control UI 另走 8085（网关自身无 /v1 路由，443 不能指 18789）。
-          sudo tailscale serve --bg --https=443 http://127.0.0.1:20128 2>/dev/null \
-            || echo "⚠️ 443 HTTPS serve 失败（多为证书签发/节点名问题），HTTP 端口 serve 不受影响"
-          echo "OmniRoute AI API: https://${TS_FQDN}/v1（API Key: CLIPROXYAPI_API_KEY）"
-          # 2026-09-30 曾尝试把 trae 挂到 80 端口的 /trae 子路径（依赖 trae2api commit
-          # a75ec3e 的前端前缀自适应），后已整体回退：a75ec3e 被 revert（镜像
-          # v2026.09.30-46abeff），zcode 也从 80 挪到 8081，与 trae 端口相邻。
-          # 公网隧道 trae2api.derrick.eu.org 已于 2026-09-29 撤销（主人要求不再公网暴露）。
-
-      - name: Trigger cert issue & stash Tailscale certs (gpg 加密暂存)
-        id: ts_certs_stash
-        # 证书是惰性签发的（首个 TLS 握手才触发 ACME），这里主动打一发 8444 握手：
-        #   缓存命中 → 握手秒回，全程零签发；
-        #   无缓存/限频已解禁 → 当场签发落盘，紧随其后回存缓存；
-        #   仍在 LE 429 限频期 → ~60s 后握手报错，吞掉不拖垮 job（HTTP 端口不受影响）。
-        # key 用证书到期日：到期换新后 key 随之翻新，上游 restore-keys 前缀
-        # 永远命中最新一张。同 key 重复 save 时 actions/cache 只告警不报错。
-        # 2026-10-30 外置：脚本 ts-cert-cache.sh stash（yml 500KB 减重）。
-        if: ${{ always() && steps.ts_ssh.outcome == 'success' }}
-        env:
-          TS_CERT_GPG_KEY: ${{ secrets.TS_CERT_GPG_KEY }}
-        run: bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/ts-cert-cache.sh" stash
-
-      - name: Save Tailscale certs cache
-        if: ${{ always() && steps.ts_certs_stash.outputs.saved == 'true' }}
-        uses: actions/cache/save@v4
-        with:
-          path: ~/ts-cert-cache
-          key: ${{ steps.ts_certs_stash.outputs.key }}
-
-      - name: Tailscale secrets missing
-        if: ${{ always() && env.TS_OAUTH_CLIENT_ID == '' && env.TS_OAUTH_CLIENT_SECRET == '' }}
-        run: echo "⚠️ 未配置 TS_OAUTH_CLIENT_ID / TS_OAUTH_CLIENT_SECRET，跳过 Tailscale SSH 调试入口"
 
       - name: Restore ZCode data & install auxiliary CLIs
         # 2026-10-29 下线优化（B2）：原为 Install OpenClaw 尾部段，与网关启动无关却占着
@@ -1557,51 +1557,6 @@ jobs:
         #（原样搬移，零逻辑改动；本步无 P5b 后台结构，行内执行）。背景同 Install
         # OpenClaw 的 500KB 注。
         run: bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/run-qoder2api.sh"
-
-      - name: Run quota-board (TG 额度看板 + Mini App)
-        # 2026-10-22 步骤重排后位于 Run OpenClaw 之后：本步失败不得级联跳过
-        if: ${{ !cancelled() }}
-        run: |
-          set -euo pipefail
-          # psutil：看板「🖥 系统」段的数据源（2026-10-07 合并系统看板进主看板）。
-          # --user 安装落在 ~，runner 重置即丢，故每轮幂等补装（已装则秒过）。
-          python3 -c "import psutil" 2>/dev/null || pip3 install --user --quiet psutil || true
-          if [ -f "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" ]; then
-            bash "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" ensure quota-board || true
-          else
-            # 兜底：services.sh 缺失（仓库未 checkout）时退回旧路径，避免看板静默不起
-            echo "⚠️ services.sh 缺失，退回 Dropbox 副本安装 unit"
-            QB_DIR=/dropbox/self-hosted/quota-board
-            [ -f "$QB_DIR/quota-board.service" ] || { echo "quota-board unit 缺失，跳过"; exit 0; }
-            mkdir -p ~/.config/systemd/user
-            cp "$QB_DIR/quota-board.service" ~/.config/systemd/user/
-            systemctl --user daemon-reload || true
-            systemctl --user enable quota-board >/dev/null 2>&1 || true
-            systemctl --user restart quota-board
-          fi
-          sleep 3
-          systemctl --user is-active quota-board || true
-          # 隧道纳入统一管理器（幂等）
-          if [ -f "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ]; then
-            bash "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ensure qb || true
-          else
-            nohup cloudflared tunnel run --url http://127.0.0.1:8321 qb \
-              > ~/.openclaw/logs/cloudflared_qb.log 2>&1 &
-          fi
-          # Mini App 入口（TG 菜单按钮 web_app）—— 2026-10-19 迁到 @openclaw_sb_bot。
-          # 按钮本体在 Telegram 服务端，不在任何本地持久化载体里（实测 2026-10-09
-          # 丢过一次、靠人工重设），故每轮幂等重建：目标 bot 挂 web_app + 旧 bot
-          # @sbsbsbsbsb_openclaw_bot 清成 commands，避免留下双入口。
-          # ⚠️ 2026-10-22 修复：脚本本体此前从未入库（commit 1e30239 只有这 9 行调用，
-          # workspace 副本丢失后安全网空转 3 天）。真源改为本仓库 .github/scripts/telegram/，
-          # 与 tg_notify.sh 同级；workspace 路径仅作过渡期兜底。
-          if [ -f "$GITHUB_WORKSPACE/.github/scripts/telegram/ensure-miniapp-menu.sh" ]; then
-            bash "$GITHUB_WORKSPACE/.github/scripts/telegram/ensure-miniapp-menu.sh" || true
-          elif [ -f "$HOME/.openclaw/workspace/scripts/ensure-miniapp-menu.sh" ]; then
-            bash "$HOME/.openclaw/workspace/scripts/ensure-miniapp-menu.sh" || true
-          else
-            echo "⚠️ ensure-miniapp-menu.sh 缺失（仓库与 workspace 均无），跳过 Mini App 入口重建"
-          fi
 
       - name: Run autoclaw-proxy (AutoClaw 积分反代 · 多账号池)
         id: run_autoclaw
@@ -1900,6 +1855,51 @@ jobs:
             send_tg "$_m" alert || echo "::warning::TG 通知发送失败（不影响任务）"
           fi
           exit 0
+
+      - name: Run quota-board (TG 额度看板 + Mini App)
+        # 2026-10-22 步骤重排后位于 Run OpenClaw 之后：本步失败不得级联跳过
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          # psutil：看板「🖥 系统」段的数据源（2026-10-07 合并系统看板进主看板）。
+          # --user 安装落在 ~，runner 重置即丢，故每轮幂等补装（已装则秒过）。
+          python3 -c "import psutil" 2>/dev/null || pip3 install --user --quiet psutil || true
+          if [ -f "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" ]; then
+            bash "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" ensure quota-board || true
+          else
+            # 兜底：services.sh 缺失（仓库未 checkout）时退回旧路径，避免看板静默不起
+            echo "⚠️ services.sh 缺失，退回 Dropbox 副本安装 unit"
+            QB_DIR=/dropbox/self-hosted/quota-board
+            [ -f "$QB_DIR/quota-board.service" ] || { echo "quota-board unit 缺失，跳过"; exit 0; }
+            mkdir -p ~/.config/systemd/user
+            cp "$QB_DIR/quota-board.service" ~/.config/systemd/user/
+            systemctl --user daemon-reload || true
+            systemctl --user enable quota-board >/dev/null 2>&1 || true
+            systemctl --user restart quota-board
+          fi
+          sleep 3
+          systemctl --user is-active quota-board || true
+          # 隧道纳入统一管理器（幂等）
+          if [ -f "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ]; then
+            bash "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ensure qb || true
+          else
+            nohup cloudflared tunnel run --url http://127.0.0.1:8321 qb \
+              > ~/.openclaw/logs/cloudflared_qb.log 2>&1 &
+          fi
+          # Mini App 入口（TG 菜单按钮 web_app）—— 2026-10-19 迁到 @openclaw_sb_bot。
+          # 按钮本体在 Telegram 服务端，不在任何本地持久化载体里（实测 2026-10-09
+          # 丢过一次、靠人工重设），故每轮幂等重建：目标 bot 挂 web_app + 旧 bot
+          # @sbsbsbsbsb_openclaw_bot 清成 commands，避免留下双入口。
+          # ⚠️ 2026-10-22 修复：脚本本体此前从未入库（commit 1e30239 只有这 9 行调用，
+          # workspace 副本丢失后安全网空转 3 天）。真源改为本仓库 .github/scripts/telegram/，
+          # 与 tg_notify.sh 同级；workspace 路径仅作过渡期兜底。
+          if [ -f "$GITHUB_WORKSPACE/.github/scripts/telegram/ensure-miniapp-menu.sh" ]; then
+            bash "$GITHUB_WORKSPACE/.github/scripts/telegram/ensure-miniapp-menu.sh" || true
+          elif [ -f "$HOME/.openclaw/workspace/scripts/ensure-miniapp-menu.sh" ]; then
+            bash "$HOME/.openclaw/workspace/scripts/ensure-miniapp-menu.sh" || true
+          else
+            echo "⚠️ ensure-miniapp-menu.sh 缺失（仓库与 workspace 均无），跳过 Mini App 入口重建"
+          fi
 
       - name: Notify Tailscale SSH entry
         if: ${{ always() && steps.ts_ssh.outcome == 'success' }}
@@ -2991,10 +2991,6 @@ jobs:
           EOF
           chmod +x /tmp/create-zcode2api-data-archive.sh
 
-          # workbuddy-cred-sync 已于 2026-10-06 停用移除，不再生成该同步脚本。
-          # （原逻辑：每 300s 把 Dropbox 凭据 sync 进 /tmp 运行目录；现 workbuddy 的
-          #   WorkingDirectory 已直指 Dropbox，凭据由网关自己直写，该同步彻底空转。）
-
           cat > /tmp/openclaw-archive-loop.sh <<'EOF'
           #!/usr/bin/env bash
           set -euo pipefail
@@ -3390,12 +3386,6 @@ jobs:
           # 2026-10-04 unit 真源统一进 services.sh：原先这里用 printf 内联写单元，
           #   与另外三个网关的 write_unit 双轨并存，改配置极易漏改一处。现与它们
           #   同口径，由 ensure 生成（含 TimeoutStopSec=180）并每轮重启一次。
-          # workbuddy-cred-sync 已于 2026-10-06 停用：
-          # workbuddy 的 WorkingDirectory 已改为 Dropbox（数据直写），不再读 /tmp；
-          # 该同步（Dropbox → /tmp/local_workbuddy/data）彻底空转 —— 实测两侧凭据
-          # md5 一致，且无任何进程持有 /tmp 下 workbuddy 文件。
-          # services.sh 已移除该 unit 分支，故此处不再 ensure，也不再跑 sync probe。
-          echo "workbuddy-cred-sync: 已停用（2026-10-06），跳过"
 
       - name: Keep alive
         id: keepalive
@@ -3585,9 +3575,6 @@ jobs:
           # ⚠️ 2026-09-29：cred-sync 已改 systemd 托管，unit 是 Restart=always，
           #    pkill 会被 systemd 在 RestartSec=10 秒后抢回来（「停了又活」），
           #    必须走 systemctl stop。旧 pid 文件方式同步退役。
-          # workbuddy-cred-sync 已于 2026-10-06 停用，unit 已从 services.sh 移除，无需 stop。
-          # 仅清理可能残留的历史进程（无害兜底）。
-          pkill -f "workbuddy-cred-sync.sh" 2>/dev/null || true
 
           # ── 2026-10-29 下线提速（A2/A1b）：停服分两批 ──
           # 批 1（此处）：仅 rss-to-telegram（非聊天路径），其数据归档在阶段A随行；
@@ -4091,7 +4078,6 @@ jobs:
           # 兜底回推已退役（2026-10-07）：WorkingDirectory 直指 Dropbox 后数据全程直写，无需回推
           echo "ℹ️ workbuddy 数据直写 Dropbox，跳过兜底回推"
           WB_VER="$(head -n 1 "$WB_DIR/.installed-version" 2>/dev/null || true)"
-          # workbuddy-cred-sync 已于 2026-10-06 停用，无循环日志可读。
           # 顺带核对凭据是否已进运行目录（运行期新上传的凭据应出现在这里）
           ls -la "$WB_DIR"/workbuddy*.json 2>/dev/null | head -10 || true
 
