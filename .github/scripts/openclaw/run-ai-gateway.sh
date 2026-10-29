@@ -6,7 +6,7 @@
 #   入口 env（步骤 env 注入）：AI_BACKEND_INPUT / TELEGRAM_BOT_TOKEN(_ALERT) /
 #     TELEGRAM_CHAT_ID(_ALERT) / TG_RUN_URL / GITHUB_WORKSPACE
 #   落盘契约：/tmp/active-ai-backend.env（BACKEND_STATE，下游通知读取）、
-#     /tmp/upstream-rc-*（P5b 等齐门，上游四脚本的标记）
+#     /tmp/upstream-rc-*（P5b 等齐门，上游六脚本的标记）
 # 调用方用 `bash -eo pipefail`（= GitHub run: 默认语义）；体内Barrier 段自带
 # set +e（等齐轮询）与 set -euo pipefail（部署段），失败语义与原 run 块一致。
 # 注：compose heredoc 原本靠 `sed 's/^          //'` 剥 run-block 缩进，
@@ -17,14 +17,14 @@
 # 此处等齐（上限 480s）才开始部署 OmniRoute —— 守住「上游先于代理」的启动
 # 顺序（主人原则）。全健康 → 正常；有失败/超时 → 渠道降级照常部署（与原
 # 串行语义一致：上游失败不阻断 AI 网关，失败详情由各步骤 TG 告警与下方日志承担）。
-_up_names="workbuddy trae2api zcode2api qingyan"
+_up_names="workbuddy trae2api zcode2api qingyan autoclaw qoder2api"
 _up_deadline=$(( $(date +%s) + 480 ))
 while [ "$(date +%s)" -lt "$_up_deadline" ]; do
   _up_done=0
   for _u in $_up_names; do
     if [ -f "/tmp/upstream-rc-$_u" ]; then _up_done=$((_up_done+1)); fi
   done
-  if [ "$_up_done" -eq 4 ]; then break; fi
+  if [ "$_up_done" -eq 6 ]; then break; fi
   sleep 2
 done
 for _u in $_up_names; do
