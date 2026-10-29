@@ -181,6 +181,31 @@ jobs:
             echo $! > "$P/${_pf_key}-tar.pid"
             echo "🚀 已后台预取 ${_pf_name}.tar.gz（${_pf_bytes}B，pid $(cat "$P/${_pf_key}-tar.pid")）"
           done
+
+          # 2026-10-30 P5a：zcode2api 代码+依赖预准备（后台）。命令序列与消费步骤的
+          # fresh 路径逐条一致（同 $Z2A_REPO HEAD clone → 同 requirements venv/pip →
+          # captcha_node npm ci）；消费方检测到就绪产物即跳过现场安装，数据快照
+          # （.env + data/）仍由消费方从 Dropbox 恢复。rc 文件仅观测（消费方以产物
+          # 就绪性为准：requirements + .venv/bin/python + node_modules + git 树）。
+          cat > "$P/pull-z2a-deps.sh" <<'PF_EOF'
+          #!/usr/bin/env bash
+          set +e
+          Z2A_REPO="https://github.com/jarvanh/zcode2api.git"
+          Z2A_RUN_DIR="/tmp/local_zcode2api"
+          rm -rf "$Z2A_RUN_DIR"
+          if ! git clone --quiet --depth 1 "$Z2A_REPO" "$Z2A_RUN_DIR"; then
+            echo 1 > "$P/z2a-deps.rc"; exit 1
+          fi
+          mkdir -p "$Z2A_RUN_DIR/logs"
+          python3 -m venv "$Z2A_RUN_DIR/.venv" \
+            && "$Z2A_RUN_DIR/.venv/bin/pip" install --quiet --disable-pip-version-check \
+                 -r "$Z2A_RUN_DIR/requirements.txt" 2>"$Z2A_RUN_DIR/logs/pip.log" \
+            && (cd "$Z2A_RUN_DIR/captcha_node" && npm ci --silent 2>"$Z2A_RUN_DIR/logs/npm.log")
+          echo "$?" > "$P/z2a-deps.rc"
+          PF_EOF
+          chmod +x "$P/pull-z2a-deps.sh"
+          nohup bash "$P/pull-z2a-deps.sh" >"$P/z2a-deps.out" 2>&1 &
+          echo "🚀 已后台预准备 zcode2api 代码+依赖（pid $!）"
       - name: Mount Dropbox
         run: |
           # 2026-10-29 下线优化（B3）：hosted runner 镜像自带 apt 索引，直接安装；
@@ -1307,184 +1332,6 @@ jobs:
           # 而 cloudflared 是 runner 身份启动的（读 ~/.cloudflared 会 EACCES）
           sudo chown -R runner:runner ~/.cloudflared
 
-      - name: Run Cloudflared Tunnel
-        # 2026-10-29 下线优化（B1）：同 Install Cloudflared 护栏口径；隧道此刻才启动，
-        # 网关（18789）已先就绪 —— 公网可达性恢复略晚于网关健康，换取下线关键路径缩短。
-        if: ${{ !cancelled() }}
-        continue-on-error: true
-        run: |
-          mkdir -p ~/.openclaw/logs
-
-          cloudflared tunnel route dns oc oc.'${{ secrets.VD }}'.eu.org || true
-          # Managed by the unified systemd tunnel manager: tunnels get
-          # Restart=always, so a killed connector comes back on its own.
-          # Falls back to nohup only if the manager is unavailable.
-          if [ -f "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ]; then
-            bash "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ensure oc || true
-          else
-            nohup cloudflared tunnel run --url http://127.0.0.1:18789 oc \
-              > ~/.openclaw/logs/cloudflared_oc.log 2>&1 &
-            echo $! > ~/.openclaw/logs/cloudflared_oc.pid
-          fi
-
-          sleep 10
-          echo "OpenClaw tunnel started (systemd-managed)."
-
-      - name: Run rss-to-telegram container
-        # 2026-10-29 下线优化（B1）：后置护栏，口径同 Install Cloudflared ——
-        # rsstt 故障不得级联跳过 AI 网关 / 隧道 / 后续服务。
-        if: ${{ !cancelled() }}
-        continue-on-error: true
-        env:
-          # rsstt 服务使用独立 bot，token 经同名 secret 注入（此前未接线导致容器 TOKEN 恒空）
-          TELEGRAM_BOT_TOKEN_RSS_SB_BOT: ${{ secrets.TELEGRAM_BOT_TOKEN_RSS_SB_BOT }}
-        run: |
-          set -euo pipefail
-          echo "Starting rss-to-telegram before OmniRoute..."
-          mkdir -p /dropbox/self-hosted/rsstt
-          cleanup_archive_workdir() {
-            rm -f /tmp/rsstt.tar.gz 2>/dev/null || true
-            rm -rf /tmp/rsstt-restore 2>/dev/null || true
-          }
-          free_kb() { df -Pk "${1:-/tmp}" | awk 'NR==2 {print $4}'; }
-          require_free_kb() {
-            local path="$1" min_kb="$2" label="$3"
-            local avail
-            avail=$(free_kb "$path")
-            if [ "${avail:-0}" -lt "$min_kb" ]; then
-              echo "❌ ${label}: insufficient free space at ${path}. available=${avail}KB required=${min_kb}KB" >&2
-              exit 1
-            fi
-            echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
-          }
-          require_free_kb /tmp $((1024 * 1024)) "rsstt restore preflight"
-          rm -rf /tmp/local_rsstt
-          cleanup_archive_workdir
-          mkdir -p /tmp/local_rsstt /tmp/rsstt-restore
-
-          # 门禁只看 rsstt 真正依赖的凭据（同名 secret 注入）：
-          # ~/.openclaw/.env 由 OpenClaw 自身维护、与 rsstt 无关，不能作为启动条件
-          if [ -n "${TELEGRAM_BOT_TOKEN_RSS_SB_BOT:-}" ]; then
-            if rclone ls dropbox:self-hosted/rsstt.tar.gz > /dev/null 2>&1; then
-              echo "📦 Found rsstt.tar.gz! Downloading and extracting..."
-              rclone copyto dropbox:self-hosted/rsstt.tar.gz /tmp/rsstt.tar.gz
-              archive_kb=$(du -sk /tmp/rsstt.tar.gz | awk '{print $1}')
-              if [ -z "${archive_kb:-}" ] || [ "$archive_kb" -le 0 ]; then
-                echo "❌ rsstt extract preflight: unable to calculate archive size" >&2
-                exit 1
-              fi
-              echo "rsstt.tar.gz 大小: ${archive_kb}KB"
-              require_free_kb /tmp $((archive_kb * 3 + 512 * 1024)) "rsstt extract preflight"
-              if [ -s /tmp/rsstt.tar.gz ] && tar -tzf /tmp/rsstt.tar.gz >/dev/null 2>&1; then
-                tar -xzf /tmp/rsstt.tar.gz -C /tmp/rsstt-restore
-                cp -a /tmp/rsstt-restore/. /tmp/local_rsstt/ || true
-              else
-                echo "⚠️ rsstt.tar.gz validation failed, skipping archive restore."
-              fi
-              cleanup_archive_workdir
-            else
-              echo "⚠️ No rsstt archive found. Falling back to sync from raw directory..."
-              rclone copy dropbox:self-hosted/rsstt /tmp/local_rsstt \
-                --retries 10 \
-                --low-level-retries 20 \
-                --timeout 1m \
-                --contimeout 15s \
-                --exclude "docker-compose.yml" \
-                -P || true
-            fi
-
-            mkdir -p /tmp/local_rsstt/config /tmp/local_rsstt/data
-            touch /tmp/local_rsstt/config/.keep /tmp/local_rsstt/data/.keep
-
-            echo "=== restored rss-to-telegram tree ==="
-            find /tmp/local_rsstt -maxdepth 3 | sort || true
-
-            start_rsstt_container() {
-              docker rm -f rss-to-telegram 2>/dev/null || true
-              docker run -d \
-                --name rss-to-telegram \
-                --restart unless-stopped \
-                -v /tmp/local_rsstt/config:/app/config \
-                -v /tmp/local_rsstt/data:/app/data \
-                -e TOKEN="$TELEGRAM_BOT_TOKEN_RSS_SB_BOT" \
-                -e MANAGER="83279194" \
-                -e MULTIUSER="0" \
-                rongronggg9/rss-to-telegram:latest
-            }
-
-            print_rsstt_status() {
-              echo "=== rss-to-telegram status ==="
-              docker ps -a --filter name=rss-to-telegram
-              container_status="$(docker inspect --format '{{.State.Status}}' rss-to-telegram)"
-              health_status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' rss-to-telegram)"
-              restart_count="$(docker inspect --format '{{.RestartCount}}' rss-to-telegram)"
-              echo "rss-to-telegram status=${container_status} health=${health_status} restarts=${restart_count}"
-            }
-
-            validate_rsstt_container() {
-              print_rsstt_status
-
-              if [ "$container_status" != "running" ] || [ "$health_status" = "unhealthy" ]; then
-                echo "❌ rss-to-telegram failed to become healthy"
-                docker logs --tail 200 rss-to-telegram || true
-                return 1
-              fi
-
-              if docker logs --tail 200 rss-to-telegram 2>&1 | grep -Eqi 'LOGIN FAILED|Unknown error occurred during login'; then
-                echo "❌ rss-to-telegram encountered a Telegram login failure"
-                docker logs --tail 200 rss-to-telegram || true
-                return 1
-              fi
-            }
-
-            archive_rsstt_state() {
-              local min_size=$((5 * 1024))
-              local actual_size
-
-              echo "📦 Archiving repaired rss-to-telegram state immediately..."
-              rm -f /tmp/rsstt.tar.gz
-              tar -czf /tmp/rsstt.tar.gz -C /tmp/local_rsstt .
-              tar -tzf /tmp/rsstt.tar.gz >/dev/null
-              actual_size="$(stat -c%s /tmp/rsstt.tar.gz 2>/dev/null || echo 0)"
-              if [ "$actual_size" -lt "$min_size" ]; then
-                echo "❌ repaired rsstt archive is too small: size=${actual_size} min=${min_size}"
-                exit 1
-              fi
-              rclone copyto /tmp/rsstt.tar.gz dropbox:self-hosted/rsstt.tar.gz -v
-              rm -f /tmp/rsstt.tar.gz
-              echo "✅ Repaired rss-to-telegram state uploaded"
-            }
-
-            echo "Waiting for rss-to-telegram container to stabilize..."
-            start_rsstt_container
-            sleep 12
-
-            if ! validate_rsstt_container; then
-              if docker logs --tail 200 rss-to-telegram 2>&1 | grep -qi 'AuthKeyDuplicatedError'; then
-                echo "⚠️ rss-to-telegram session was invalidated by AuthKeyDuplicatedError; deleting session and retrying once."
-                docker rm -f rss-to-telegram 2>/dev/null || true
-                rm -f \
-                  /tmp/local_rsstt/config/bot.session \
-                  /tmp/local_rsstt/config/bot.session-journal \
-                  /tmp/local_rsstt/config/bot.session-shm \
-                  /tmp/local_rsstt/config/bot.session-wal
-                start_rsstt_container
-                sleep 12
-                validate_rsstt_container
-                archive_rsstt_state
-              else
-                exit 1
-              fi
-            fi
-
-            echo "=== rss-to-telegram /app tree (for persistence verification) ==="
-            docker exec rss-to-telegram sh -lc 'find /app -maxdepth 3 \( -type f -o -type d \) | sort | sed -n "1,200p"'
-            echo "=== rss-to-telegram local bind tree after startup ==="
-            find /tmp/local_rsstt -maxdepth 3 | sort || true
-          else
-            echo "❌ TELEGRAM_BOT_TOKEN_RSS_SB_BOT 未配置，跳过 rss-to-telegram 启动；本轮无 rsstt 数据，最终归档会跳过上传"
-          fi
-
       - name: Run workbuddy-gateway (check update first, then serve)
         id: run_workbuddy
         # 2026-10-22 步骤重排后位于 Run OpenClaw 之后：本步失败不得级联跳过
@@ -1500,6 +1347,12 @@ jobs:
           # 与 emby.yml / proxy-speedtest-gitee.yml 同口径。缺失时退回匿名 + 重定向兜底。
           WB_GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # 2026-10-30 P5b：后台部署 —— rc → /tmp/upstream-rc-workbuddy，日志 → /opt/logs/upstream-workbuddy.log。
+          # AI 网关步骤等齐四个标记后才部署 OmniRoute（上游先于代理，主人原则）；
+          # 内部失败走本步骤既有 TG 告警，不阻断 AI 网关（与 continue-on-error 口径一致）。
+          (
+            set +e
+            (
           set -uo pipefail
 
           # 通知真源在 step 顶层 source 一次。**不要挪进 wb_notify 函数体**：
@@ -2628,6 +2481,11 @@ jobs:
             wb_notify "❌ workbuddy-gateway 启动失败" "未监听 ${WB_PORT} · 退出码 1" "$WB_VER" \
               "$WB_UPDATE" "$_wb_fail_reason" "$WB_TAIL" 0
           fi
+            )
+            _up_rc=$?
+            printf '%s' "$_up_rc" > /tmp/upstream-rc-workbuddy
+          ) > /opt/logs/upstream-workbuddy.log 2>&1 &
+          echo "🚀 [P5b] workbuddy-gateway 已转后台部署（等齐门在 AI 网关步骤）"
 
       # trae2api：TRAE SOLO 反代（OpenAI 兼容 API + Web 管理面板 /admin）。
       # 与 workbuddy-gateway / zcode2api 同为 AI 网关形态服务。
@@ -2653,6 +2511,12 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          # 2026-10-30 P5b：后台部署 —— rc → /tmp/upstream-rc-trae2api，日志 → /opt/logs/upstream-trae2api.log。
+          # AI 网关步骤等齐四个标记后才部署 OmniRoute（上游先于代理，主人原则）；
+          # 内部失败走本步骤既有 TG 告警，不阻断 AI 网关（与 continue-on-error 口径一致）。
+          (
+            set +e
+            (
           set -euo pipefail
           # 通知真源在 step 顶层 source 一次（勿挪进函数体，理由见 workbuddy 步骤同名注释 / 规范 4.4）
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
@@ -3118,6 +2982,11 @@ jobs:
           if [ "${TRAE_NOTIFY_OK:-0}" = "1" ] && [ -n "$TRAE_VER" ]; then
             printf '%s\n' "$TRAE_VER" > "$TRAE_VER_FILE"
           fi
+            )
+            _up_rc=$?
+            printf '%s' "$_up_rc" > /tmp/upstream-rc-trae2api
+          ) > /opt/logs/upstream-trae2api.log 2>&1 &
+          echo "🚀 [P5b] trae2api 已转后台部署（等齐门在 AI 网关步骤）"
 
       # zcode2api：GLM 反代网关（Anthropic + OpenAI 双协议，端口 8319）。
       # 代码取 jarvanh/zcode2api fork（在 dengyie 上游之上补了 ZCODE_GATEWAY_KEY
@@ -3185,6 +3054,12 @@ jobs:
           # 已存在的环境变量），无需改数据快照里的 .env 即与仓库 Secrets 对齐。
           ZCODE_GATEWAY_KEY: ${{ secrets.ZCODE_GATEWAY_API_KEY }}
         run: |
+          # 2026-10-30 P5b：后台部署 —— rc → /tmp/upstream-rc-zcode2api，日志 → /opt/logs/upstream-zcode2api.log。
+          # AI 网关步骤等齐四个标记后才部署 OmniRoute（上游先于代理，主人原则）；
+          # 内部失败走本步骤既有 TG 告警，不阻断 AI 网关（与 continue-on-error 口径一致）。
+          (
+            set +e
+            (
           set -uo pipefail
           # 通知真源在 step 顶层 source 一次（勿挪进函数体，理由见 workbuddy 步骤同名注释 / 规范 4.4）
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
@@ -3460,9 +3335,20 @@ jobs:
                 echo "⚠️ [zcode2api] Bun 安装失败（回退 node solver.js，验证码可能连环 500）"
               fi
             fi
-            rm -rf "$Z2A_RUN_DIR"
+            # 2026-10-30 P5a：代码+依赖已由 Prefetch 后台就绪时直接复用（同 $Z2A_REPO
+            # HEAD、同 requirements 自装，结果与本步骤现场安装等价）；数据快照仍由
+            # 本步骤从 Dropbox 照常恢复。检测判据 = clone 树 + venv + node_modules 齐备；
+            # 任一不齐（Prefetch 失败/半途）则按原路径现场重装，语义与此前完全一致。
+            Z2A_PREPPED=0
+            if [ -f "$Z2A_RUN_DIR/requirements.txt" ] && [ -x "$Z2A_RUN_DIR/.venv/bin/python" ] \
+               && [ -d "$Z2A_RUN_DIR/captcha_node/node_modules" ] \
+               && git -C "$Z2A_RUN_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+              echo "ℹ️ [zcode2api] 代码与依赖已由 Prefetch 就绪，跳过 clone 与依赖安装"
+              Z2A_PREPPED=1
+            fi
+            if [ "$Z2A_PREPPED" != "1" ]; then rm -rf "$Z2A_RUN_DIR"; fi
             # 先 clone（目标必须为空目录），logs 目录随后补建
-            if ! git clone --quiet --depth 1 "$Z2A_REPO" "$Z2A_RUN_DIR"; then
+            if ! { [ "$Z2A_PREPPED" = "1" ] || git clone --quiet --depth 1 "$Z2A_REPO" "$Z2A_RUN_DIR"; }; then
               Z2A_REASON="代码克隆失败：$Z2A_REPO"
             else
               mkdir -p "$Z2A_RUN_DIR/logs"
@@ -3470,10 +3356,10 @@ jobs:
                    && [ -s /tmp/zcode2api-data.tar.gz ] \
                    && tar -xzf /tmp/zcode2api-data.tar.gz -C "$Z2A_RUN_DIR"; }; then
                 Z2A_REASON="数据快照缺失或损坏：$Z2A_DATA_ARCHIVE（先在本机重新打包上传）"
-              elif ! { python3 -m venv "$Z2A_RUN_DIR/.venv" \
+              elif ! { [ "$Z2A_PREPPED" = "1" ] || { python3 -m venv "$Z2A_RUN_DIR/.venv" \
                    && "$Z2A_RUN_DIR/.venv/bin/pip" install --quiet --disable-pip-version-check \
                         -r "$Z2A_RUN_DIR/requirements.txt" 2>"$Z2A_RUN_DIR/logs/pip.log" \
-                   && (cd "$Z2A_RUN_DIR/captcha_node" && npm ci --silent 2>"$Z2A_RUN_DIR/logs/npm.log"); }; then
+                   && (cd "$Z2A_RUN_DIR/captcha_node" && npm ci --silent 2>"$Z2A_RUN_DIR/logs/npm.log"); }; }; then
                 Z2A_REASON="依赖安装失败（见 logs/pip.log / logs/npm.log）"
               else
                 echo "Starting zcode2api on ${Z2A_PORT} (systemd --user 托管)..."
@@ -3686,6 +3572,11 @@ jobs:
               fi
             fi
           fi
+            )
+            _up_rc=$?
+            printf '%s' "$_up_rc" > /tmp/upstream-rc-zcode2api
+          ) > /opt/logs/upstream-zcode2api.log 2>&1 &
+          echo "🚀 [P5b] zcode2api 已转后台部署（等齐门在 AI 网关步骤）"
 
       - name: Run qingyan-proxy (ChatGLM 清言反代)
         id: run_qingyan
@@ -3718,6 +3609,12 @@ jobs:
           # 注：不再有 QINGYAN_RUN_DIR —— 2026-10-06 起 qingyan 全面直跑
           # Dropbox 真源（代码/数据/凭据/日志），不存在 /tmp 运行副本。
         run: |
+          # 2026-10-30 P5b：后台部署 —— rc → /tmp/upstream-rc-qingyan，日志 → /opt/logs/upstream-qingyan.log。
+          # AI 网关步骤等齐四个标记后才部署 OmniRoute（上游先于代理，主人原则）；
+          # 内部失败走本步骤既有 TG 告警，不阻断 AI 网关（与 continue-on-error 口径一致）。
+          (
+            set +e
+            (
           set -uo pipefail
           # 通知真源在 step 顶层 source 一次（勿挪进函数体，理由见 workbuddy 步骤同名注释 / 规范 4.4）
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
@@ -3860,6 +3757,11 @@ jobs:
             tg_add_footer _m
             send_tg "$_m" alert || echo "::warning::TG 通知发送失败（不影响任务）"
           fi
+            )
+            _up_rc=$?
+            printf '%s' "$_up_rc" > /tmp/upstream-rc-qingyan
+          ) > /opt/logs/upstream-qingyan.log 2>&1 &
+          echo "🚀 [P5b] qingyan-proxy 已转后台部署（等齐门在 AI 网关步骤）"
 
       - name: "Run AI API gateway (backend: ${{ inputs.ai_backend }})"
         # 2026-10-29 下线优化（B1+B1c）：后置护栏，口径同 Install Cloudflared —— 网关进程
@@ -3879,6 +3781,35 @@ jobs:
           TELEGRAM_CHAT_ID_ALERT: ${{ secrets.TELEGRAM_CHAT_ID_ALERT }}
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          # ── 2026-10-30 P5b：上游并行拉起汇合门（屏障）──
+          # workbuddy/trae2api/zcode2api/qingyan 已改后台部署（rc → /tmp/upstream-rc-*）。
+          # 此处等齐（上限 480s）才开始部署 OmniRoute —— 守住「上游先于代理」的启动
+          # 顺序（主人原则）。全健康 → 正常；有失败/超时 → 渠道降级照常部署（与原
+          # 串行语义一致：上游失败不阻断 AI 网关，失败详情由各步骤 TG 告警与下方日志承担）。
+          _up_names="workbuddy trae2api zcode2api qingyan"
+          _up_deadline=$(( $(date +%s) + 480 ))
+          while [ "$(date +%s)" -lt "$_up_deadline" ]; do
+            _up_done=0
+            for _u in $_up_names; do
+              if [ -f "/tmp/upstream-rc-$_u" ]; then _up_done=$((_up_done+1)); fi
+            done
+            if [ "$_up_done" -eq 4 ]; then break; fi
+            sleep 2
+          done
+          for _u in $_up_names; do
+            if [ -f "/tmp/upstream-rc-$_u" ]; then
+              _up_rc="$(cat "/tmp/upstream-rc-$_u")"
+              if [ "$_up_rc" = "0" ]; then
+                echo "✅ [P5b] 上游 $_u 就绪"
+              else
+                echo "⚠️ [P5b] 上游 $_u 退出码 $_up_rc（渠道降级，OmniRoute 照常部署）"
+              fi
+              tail -n 8 "/opt/logs/upstream-$_u.log" 2>/dev/null | sed 's/^/    │ /' || true
+            else
+              echo "⚠️ [P5b] 上游 $_u 未在 480s 内完成（照常部署，渠道可能降级）"
+            fi
+          done
+
           set -euo pipefail
 
           # 2026-10-11 网关迁移：CliRelay（compose 全栈）/ CLIProxyAPI（回退）→ OmniRoute 单后端。
@@ -4522,6 +4453,184 @@ jobs:
           fi
 
           echo "ai-api 命名隧道已启动（systemd 托管，固定地址模式），当前后端: ${ACTIVE_BACKEND}"
+
+      - name: Run Cloudflared Tunnel
+        # 2026-10-29 下线优化（B1）：同 Install Cloudflared 护栏口径；隧道此刻才启动，
+        # 网关（18789）已先就绪 —— 公网可达性恢复略晚于网关健康，换取下线关键路径缩短。
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          mkdir -p ~/.openclaw/logs
+
+          cloudflared tunnel route dns oc oc.'${{ secrets.VD }}'.eu.org || true
+          # Managed by the unified systemd tunnel manager: tunnels get
+          # Restart=always, so a killed connector comes back on its own.
+          # Falls back to nohup only if the manager is unavailable.
+          if [ -f "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ]; then
+            bash "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ensure oc || true
+          else
+            nohup cloudflared tunnel run --url http://127.0.0.1:18789 oc \
+              > ~/.openclaw/logs/cloudflared_oc.log 2>&1 &
+            echo $! > ~/.openclaw/logs/cloudflared_oc.pid
+          fi
+
+          sleep 10
+          echo "OpenClaw tunnel started (systemd-managed)."
+
+      - name: Run rss-to-telegram container
+        # 2026-10-29 下线优化（B1）：后置护栏，口径同 Install Cloudflared ——
+        # rsstt 故障不得级联跳过 AI 网关 / 隧道 / 后续服务。
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        env:
+          # rsstt 服务使用独立 bot，token 经同名 secret 注入（此前未接线导致容器 TOKEN 恒空）
+          TELEGRAM_BOT_TOKEN_RSS_SB_BOT: ${{ secrets.TELEGRAM_BOT_TOKEN_RSS_SB_BOT }}
+        run: |
+          set -euo pipefail
+          echo "Starting rss-to-telegram before OmniRoute..."
+          mkdir -p /dropbox/self-hosted/rsstt
+          cleanup_archive_workdir() {
+            rm -f /tmp/rsstt.tar.gz 2>/dev/null || true
+            rm -rf /tmp/rsstt-restore 2>/dev/null || true
+          }
+          free_kb() { df -Pk "${1:-/tmp}" | awk 'NR==2 {print $4}'; }
+          require_free_kb() {
+            local path="$1" min_kb="$2" label="$3"
+            local avail
+            avail=$(free_kb "$path")
+            if [ "${avail:-0}" -lt "$min_kb" ]; then
+              echo "❌ ${label}: insufficient free space at ${path}. available=${avail}KB required=${min_kb}KB" >&2
+              exit 1
+            fi
+            echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
+          }
+          require_free_kb /tmp $((1024 * 1024)) "rsstt restore preflight"
+          rm -rf /tmp/local_rsstt
+          cleanup_archive_workdir
+          mkdir -p /tmp/local_rsstt /tmp/rsstt-restore
+
+          # 门禁只看 rsstt 真正依赖的凭据（同名 secret 注入）：
+          # ~/.openclaw/.env 由 OpenClaw 自身维护、与 rsstt 无关，不能作为启动条件
+          if [ -n "${TELEGRAM_BOT_TOKEN_RSS_SB_BOT:-}" ]; then
+            if rclone ls dropbox:self-hosted/rsstt.tar.gz > /dev/null 2>&1; then
+              echo "📦 Found rsstt.tar.gz! Downloading and extracting..."
+              rclone copyto dropbox:self-hosted/rsstt.tar.gz /tmp/rsstt.tar.gz
+              archive_kb=$(du -sk /tmp/rsstt.tar.gz | awk '{print $1}')
+              if [ -z "${archive_kb:-}" ] || [ "$archive_kb" -le 0 ]; then
+                echo "❌ rsstt extract preflight: unable to calculate archive size" >&2
+                exit 1
+              fi
+              echo "rsstt.tar.gz 大小: ${archive_kb}KB"
+              require_free_kb /tmp $((archive_kb * 3 + 512 * 1024)) "rsstt extract preflight"
+              if [ -s /tmp/rsstt.tar.gz ] && tar -tzf /tmp/rsstt.tar.gz >/dev/null 2>&1; then
+                tar -xzf /tmp/rsstt.tar.gz -C /tmp/rsstt-restore
+                cp -a /tmp/rsstt-restore/. /tmp/local_rsstt/ || true
+              else
+                echo "⚠️ rsstt.tar.gz validation failed, skipping archive restore."
+              fi
+              cleanup_archive_workdir
+            else
+              echo "⚠️ No rsstt archive found. Falling back to sync from raw directory..."
+              rclone copy dropbox:self-hosted/rsstt /tmp/local_rsstt \
+                --retries 10 \
+                --low-level-retries 20 \
+                --timeout 1m \
+                --contimeout 15s \
+                --exclude "docker-compose.yml" \
+                -P || true
+            fi
+
+            mkdir -p /tmp/local_rsstt/config /tmp/local_rsstt/data
+            touch /tmp/local_rsstt/config/.keep /tmp/local_rsstt/data/.keep
+
+            echo "=== restored rss-to-telegram tree ==="
+            find /tmp/local_rsstt -maxdepth 3 | sort || true
+
+            start_rsstt_container() {
+              docker rm -f rss-to-telegram 2>/dev/null || true
+              docker run -d \
+                --name rss-to-telegram \
+                --restart unless-stopped \
+                -v /tmp/local_rsstt/config:/app/config \
+                -v /tmp/local_rsstt/data:/app/data \
+                -e TOKEN="$TELEGRAM_BOT_TOKEN_RSS_SB_BOT" \
+                -e MANAGER="83279194" \
+                -e MULTIUSER="0" \
+                rongronggg9/rss-to-telegram:latest
+            }
+
+            print_rsstt_status() {
+              echo "=== rss-to-telegram status ==="
+              docker ps -a --filter name=rss-to-telegram
+              container_status="$(docker inspect --format '{{.State.Status}}' rss-to-telegram)"
+              health_status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' rss-to-telegram)"
+              restart_count="$(docker inspect --format '{{.RestartCount}}' rss-to-telegram)"
+              echo "rss-to-telegram status=${container_status} health=${health_status} restarts=${restart_count}"
+            }
+
+            validate_rsstt_container() {
+              print_rsstt_status
+
+              if [ "$container_status" != "running" ] || [ "$health_status" = "unhealthy" ]; then
+                echo "❌ rss-to-telegram failed to become healthy"
+                docker logs --tail 200 rss-to-telegram || true
+                return 1
+              fi
+
+              if docker logs --tail 200 rss-to-telegram 2>&1 | grep -Eqi 'LOGIN FAILED|Unknown error occurred during login'; then
+                echo "❌ rss-to-telegram encountered a Telegram login failure"
+                docker logs --tail 200 rss-to-telegram || true
+                return 1
+              fi
+            }
+
+            archive_rsstt_state() {
+              local min_size=$((5 * 1024))
+              local actual_size
+
+              echo "📦 Archiving repaired rss-to-telegram state immediately..."
+              rm -f /tmp/rsstt.tar.gz
+              tar -czf /tmp/rsstt.tar.gz -C /tmp/local_rsstt .
+              tar -tzf /tmp/rsstt.tar.gz >/dev/null
+              actual_size="$(stat -c%s /tmp/rsstt.tar.gz 2>/dev/null || echo 0)"
+              if [ "$actual_size" -lt "$min_size" ]; then
+                echo "❌ repaired rsstt archive is too small: size=${actual_size} min=${min_size}"
+                exit 1
+              fi
+              rclone copyto /tmp/rsstt.tar.gz dropbox:self-hosted/rsstt.tar.gz -v
+              rm -f /tmp/rsstt.tar.gz
+              echo "✅ Repaired rss-to-telegram state uploaded"
+            }
+
+            echo "Waiting for rss-to-telegram container to stabilize..."
+            start_rsstt_container
+            sleep 12
+
+            if ! validate_rsstt_container; then
+              if docker logs --tail 200 rss-to-telegram 2>&1 | grep -qi 'AuthKeyDuplicatedError'; then
+                echo "⚠️ rss-to-telegram session was invalidated by AuthKeyDuplicatedError; deleting session and retrying once."
+                docker rm -f rss-to-telegram 2>/dev/null || true
+                rm -f \
+                  /tmp/local_rsstt/config/bot.session \
+                  /tmp/local_rsstt/config/bot.session-journal \
+                  /tmp/local_rsstt/config/bot.session-shm \
+                  /tmp/local_rsstt/config/bot.session-wal
+                start_rsstt_container
+                sleep 12
+                validate_rsstt_container
+                archive_rsstt_state
+              else
+                exit 1
+              fi
+            fi
+
+            echo "=== rss-to-telegram /app tree (for persistence verification) ==="
+            docker exec rss-to-telegram sh -lc 'find /app -maxdepth 3 \( -type f -o -type d \) | sort | sed -n "1,200p"'
+            echo "=== rss-to-telegram local bind tree after startup ==="
+            find /tmp/local_rsstt -maxdepth 3 | sort || true
+          else
+            echo "❌ TELEGRAM_BOT_TOKEN_RSS_SB_BOT 未配置，跳过 rss-to-telegram 启动；本轮无 rsstt 数据，最终归档会跳过上传"
+          fi
 
       - name: Clean stale Tailscale nodes (openclaw* 僵尸清退)
         id: ts_clean
