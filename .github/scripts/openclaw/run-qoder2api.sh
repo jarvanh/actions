@@ -6,10 +6,14 @@
 #   入口 env（步骤 env 注入）：TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID / TG_RUN_URL
 #   文件依赖：$HOME/ts.env（Tailscale 步骤落盘，看板入口两行用）
 #   消费方：/dropbox/self-hosted/qoder2api/（数据直写 Dropbox）
-# 本步骤无 P5b 后台结构（行内执行）；体内自带 set -euo pipefail。
-# 调用方用 `bash -eo pipefail`（= GitHub run: 默认语义）。
+# 2026-10-30 P5b 化（主人拍板：qoder2api 也是上游，须先于 OmniRoute 启动）：
+# 双层子壳 + rc 标记（/tmp/upstream-rc-qoder2api）+ 后台日志，与四上游同契约。
+# 调用方用 `bash -eo pipefail`（= GitHub run: 默认语义）；体内自带 set -euo pipefail。
 
-set -euo pipefail
+(
+  set +e
+  (
+    set -euo pipefail
 # 通知真源在 step 顶层 source 一次（对齐 trae2api 段注释）
 source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 # TS_FQDN 由 Tailscale 步骤写入 ts.env，step 间不共享 env，需显式加载
@@ -187,3 +191,9 @@ qoder_notify "$_title" "$_conclusion" "$QODER_VERSION" "$QODER_UPDATE" "" "" 1
 if [ "${QODER_NOTIFY_OK:-0}" = "1" ] && [ -n "$QODER_IMG_DIGEST" ]; then
   printf '%s\n' "$QODER_IMG_DIGEST" > "$QODER_VER_FILE"
 fi
+
+  )
+  _up_rc=$?
+  printf '%s' "$_up_rc" > /tmp/upstream-rc-qoder2api
+) > /opt/logs/upstream-qoder2api.log 2>&1 &
+echo "🚀 [P5b] qoder2api 已转后台部署（等齐门在 AI 网关步骤）"
