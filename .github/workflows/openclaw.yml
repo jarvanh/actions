@@ -56,7 +56,11 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 'current' # 始终使用官方发布的最新版
+          # 2026-10-30 由 'current' 收敛为 pin 26：openclaw 安装器硬性要求
+          # Node >=24.22.1 <25 || >=26.12.1，而 'current' 当日解析到 27.0.0-alpha
+          # （runner 镜像更新连带），prerelease 按语义化版本规则不满足任何
+          # 普通范围 → npm install 全灭（run 40919524093 实锤）。27 转正后可回。
+          node-version: '26'
           
       - uses: actions/checkout@v7
       - name: rclone-install
