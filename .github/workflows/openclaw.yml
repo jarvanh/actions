@@ -53,14 +53,31 @@ jobs:
       # 故在 job 级统一注入，一次覆盖全部 step（含上面那段持久化逻辑）。
       GH_TOKEN: ${{ github.token }}
     steps:
+      - name: Resolve latest stable Node
+        # 2026-10-30：为 Setup Node 提供版本号。演进史：'current' 当日解析到
+        # 27.0.0-alpha（runner 镜像连带），prerelease 按语义化版本规则不满足
+        # openclaw 安装器的任何普通范围（>=24.22.1 <25 || >=26.12.1）→ npm install
+        # 全灭（run 40919524093 实锤）；硬 pin 26 又会在 openclaw 未来抬高下限的
+        # 当天静默过期。故每轮从 nodejs.org dist index（按新到旧排序）取**首个
+        # 无 prerelease 后缀的稳定版**——openclaw 范围上端开放，27 转正当日自动
+        # 跟上，且永不踩 prerelease 坑；查询失败回退 26（≥当前下限 26.12.1）。
+        run: |
+          set -euo pipefail
+          V="$(curl -fsSL --max-time 20 https://nodejs.org/dist/index.json \
+            | jq -r '[.[] | select(.version | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))][0].version' \
+            | tr -d 'v')"
+          if [ -z "$V" ]; then
+            echo "⚠️ 无法解析最新稳定版 Node（查询失败），回退 26"
+            V=26
+          fi
+          echo "NODE_STABLE=$V" >> "$GITHUB_ENV"
+          echo "✅ 最新稳定版 Node: $V"
+
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          # 2026-10-30 由 'current' 收敛为 pin 26：openclaw 安装器硬性要求
-          # Node >=24.22.1 <25 || >=26.12.1，而 'current' 当日解析到 27.0.0-alpha
-          # （runner 镜像更新连带），prerelease 按语义化版本规则不满足任何
-          # 普通范围 → npm install 全灭（run 40919524093 实锤）。27 转正后可回。
-          node-version: '26'
+          # 上一步骤解析的最新稳定版；'26' 仅为表达式空值兜底
+          node-version: ${{ env.NODE_STABLE || '26' }}
           
       - uses: actions/checkout@v7
       - name: rclone-install
