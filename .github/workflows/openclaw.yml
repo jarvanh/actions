@@ -5891,8 +5891,11 @@ jobs:
           # 「流退出码 + 远端体积 ≥ 源 30% + gzip 魔数」三道门把关（失败不覆盖云端）。
           if [ "$OUTPUT_TAR" = "-" ]; then
             # 只把 gzip 流写到 fd 3（原始 stdout），日志走 stderr。
+            # 2026-10-30 P4a：-6 → -1。上传 31-34MB/s（2026-10-24 调优值）才是真杆，
+            # 压得更快只能小幅前移上传窗口；包体 +15~25% 换压缩 ~2×，每 20min 周期
+            # 归档同样受益。效果看埋点 rsync_sec / compress_sec 对比。
             if command -v pigz >/dev/null 2>&1; then
-              tar -C "$STAGE_DIR" -cf - .openclaw | pigz -p "$(nproc)" -6 >&3
+              tar -C "$STAGE_DIR" -cf - .openclaw | pigz -p "$(nproc)" -1 >&3
             else
               tar -C "$STAGE_DIR" -cf - .openclaw | gzip -6 >&3
             fi
@@ -5906,7 +5909,7 @@ jobs:
           # pigz 不可用时自动回退 gzip，保证归档不中断。
           ARCH_T1=$(date +%s)
           if command -v pigz >/dev/null 2>&1; then
-            tar -C "$STAGE_DIR" -cf - .openclaw | pigz -p "$(nproc)" -6 > "$OUTPUT_TAR"
+            tar -C "$STAGE_DIR" -cf - .openclaw | pigz -p "$(nproc)" -1 > "$OUTPUT_TAR"
           else
             echo "pigz unavailable, fallback to gzip" >&2
             tar -C "$STAGE_DIR" -czf "$OUTPUT_TAR" .openclaw
@@ -6082,7 +6085,7 @@ jobs:
           fi
 
           # OmniRoute 网关归档（2026-10-11 迁移）：部署目录（compose + .env 密钥）
-          # + 数据卷快照（storage.sqlite 渠道/入站 key/combo + server.env 加密根钥）。
+          # + 数据卷快照（2026-10-30 P3 瘦身为 storage-backup.sqlite + server.env 最小集）。
           # 卷快照走 helper 容器（主容器没起也能打）；sqlite 先做在线一致性备份，
           # 恢复侧优先用 storage-backup.sqlite（活库文件可能撕裂，只作兜底）。
           MIN_SIZE=$((1024 * 1024))
@@ -6117,12 +6120,21 @@ jobs:
             rm -f /tmp/omniroute-backup.err
           fi
 
-          # 2. 数据卷快照：helper 容器（root）打包整个 /app/data
-          #    2026-10-11 加固：镜像偶发启动慢导致单次失败（实测约 1/4 概率），重试 3 次幂等
+          # 2. 数据卷快照（2026-10-30 P3 重构）：只打包「真源 + 同代根钥」，不再全卷 tar。
+          #    恢复侧优先消费 storage-backup.sqlite（在线一致性备份）；server.env 是
+          #    STORAGE_ENCRYPTION_KEY，必须与 backup 同代 —— 卷内仅这两个是必需项。
+          #    排除（卷内实测死重）：db_backups/ 975MB 预迁移快照、call_logs/ 670MB 请求
+          #    日志、logs/ 116MB、storage.sqlite.broken-* 坏库残骸、cache/、omniroute.db
+          #    0B 占位 —— 源从 ~3.7GB 降到 ~977MB；活库三件套不再兜底入包（撕裂风险，
+          #    恢复侧本就不优先消费；backup 缺失时 tar 直接失败 → 走既有 exit 4 告警链）。
+          #    容器内只做 tar 不压缩（旧路径容器内单线程 gzip 全卷 ~4-6min 是 ~12min 的
+          #    主因之一），压缩挪到宿主 pigz -1 管道；产物仍是标准 gzip 流，恢复侧零改动。
+          #    2026-10-11 加固保留：镜像偶发启动慢导致单次失败（实测约 1/4 概率），重试幂等
           snap_ok=0
           for attempt in 1 2 3 4; do
-            if docker run --rm --user root -v "$VOLUME:/data:ro" -v "$STAGE_DIR:/stage" \
-              "$IMAGE" tar czf /stage/data.tar.gz -C /data . 2>/tmp/omniroute-snap.err; [ $? -le 1 ]; then
+            if docker run --rm --user root -v "$VOLUME:/data:ro" \
+              "$IMAGE" sh -c 'tar cf - -C /data storage-backup.sqlite server.env' 2>/tmp/omniroute-snap.err \
+              | pigz -p "$(nproc)" -1 > "$STAGE_DIR/data.tar.gz"; [ $? -le 1 ] && [ -s "$STAGE_DIR/data.tar.gz" ]; then
               snap_ok=1
               break
             fi
