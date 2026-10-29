@@ -9,9 +9,9 @@
 #     /opt/logs/upstream-zcode2api.log、$Z2A_LOG（Dropbox 服务日志）
 # P5b 双层子壳结构是刻意设计，勿动结构。
 # 调用方用 `bash -eo pipefail`（= GitHub run: 默认语义）；体内自带 set -uo pipefail。
-# 唯一逻辑适配：Bun 安装由 `curl | bash` 改为「下载落盘 → bash 执行」——
-# 管道直执行被安全扫描判高危；两步式语义等价（同一脚本、同一 bash、同 env），
-# 且落盘后可留档核对，是 curl|bash 的标准安全改写。
+# 唯一逻辑适配：Bun 安装由「下载安装脚本直接执行」改为「取 oven-sh 官方 Release
+# 的预编译 zip 解包」——远端脚本执行被安全扫描判高危；预编译产物解包与安装器
+# 内部动作等价（下载 → 解压到 ~/.bun），且全程零远端代码执行、可校验来源。
 
 (
   set +e
@@ -285,14 +285,23 @@
       # 径），但自检大概率 Plan 降级。runner 重置会清 ~/.bun，每轮幂等检查。
       if [ ! -x "$HOME/.bun/bin/bun" ]; then
         echo "Installing Bun for zcode2api captcha solver..."
-        # 2026-10-30 外置适配：原 `curl | bash` 被安全扫描判高危，改两步式
-        #（下载落盘 → bash 执行），语义等价且可留档核对。
-        if curl -fsSL https://bun.sh/install -o /tmp/bun-install.sh \
-           && bash /tmp/bun-install.sh; then
+        # 2026-10-30 外置适配：原安装器（下载脚本直接执行）被安全扫描判高危。
+        # 改为直接取 oven-sh 官方 Release 的预编译 zip 解包到 ~/.bun/bin —— 与
+        # 安装器内部动作等价（下载 → 解压），全程不执行任何远端脚本；失败仍
+        # 不阻断本轮（settings.py 回退 node solver.js）。
+        _bun_zip=/tmp/bun-linux-x64.zip
+        _bun_unpack=/tmp/bun-unpack
+        if curl -fsSL --max-time 120 -o "$_bun_zip" \
+             https://github.com/oven-sh/bun/releases/latest/download/bun-linux-x64.zip \
+           && unzip -oq "$_bun_zip" -d "$_bun_unpack" \
+           && mkdir -p "$HOME/.bun/bin" \
+           && mv "$_bun_unpack/bun-linux-x64/bun" "$HOME/.bun/bin/bun" \
+           && chmod +x "$HOME/.bun/bin/bun"; then
           echo "✅ [zcode2api] Bun 已安装（$HOME/.bun/bin/bun）"
         else
           echo "⚠️ [zcode2api] Bun 安装失败（回退 node solver.js，验证码可能连环 500）"
         fi
+        rm -rf "$_bun_zip" "$_bun_unpack" 2>/dev/null || true
       fi
       # 2026-10-30 P5a：代码+依赖已由 Prefetch 后台就绪时直接复用（同 $Z2A_REPO
       # HEAD、同 requirements 自装，结果与本步骤现场安装等价）；数据快照仍由
