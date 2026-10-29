@@ -498,6 +498,13 @@ EOF
       #    Logged out 空壳，托管形同虚设。改用 --statedir 落盘后崩溃重启
       #    自动恢复登录，自愈才是真的自愈。
       #    /var/lib/tailscale 需预先存在，否则 tailscaled 直接退出。
+      # ⚠️ 让位守卫（2026-10-29 实测）：action spawn 的实例抢先占住 TUN/socket
+      #    时，本单元 ExecStart 撞 `safesocket.Listen: address already in use`
+      #    退 1，配 Restart=always + StartLimitBurst=0 变成每 5s 无限崩溃循环
+      #    （journal 刷屏、干扰诊断）。故 ExecStartPre 先探测控制面 socket：
+      #    有健康实例应答就等它退出再接管（5s 一探，timeout 6h，超时退 124
+      #    会让 systemd 重启单元继续等）。保留「裸跑实例暴毙后单元接管」的
+      #    自愈语义；自家实例崩溃重启时 socket 无应答，探测立即放行。
       cat > "$tmp" <<EOF
 [Unit]
 Description=Tailscale daemon (systemd 托管, 持久 state)
@@ -508,8 +515,11 @@ StartLimitBurst=0
 
 [Service]
 Type=simple
+# 让位等待最长 6h，默认 90s 的 TimeoutStartSec 会把等待判成启动失败
+TimeoutStartSec=0
 ExecStartPre=/bin/mkdir -p /run/tailscale /var/lib/tailscale
 # 与 tailscale/github-action 的 statedir 入参同路径，共享同一份登录态
+ExecStartPre=/bin/sh -c 'if /usr/local/bin/tailscale --socket=/run/tailscale/tailscaled.sock status >/dev/null 2>&1; then echo "[services] tailscaled: 已有健康实例，让位等待其退出（5s 一探，最多 6h）"; timeout 21600 sh -c "until ! /usr/local/bin/tailscale --socket=/run/tailscale/tailscaled.sock status >/dev/null 2>&1; do sleep 5; done"; fi'
 ExecStart=/usr/local/bin/tailscaled --statedir=/var/lib/tailscale --socket=/run/tailscale/tailscaled.sock
 Restart=always
 RestartSec=5
