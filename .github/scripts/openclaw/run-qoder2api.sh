@@ -124,15 +124,15 @@ if ! docker network inspect omniroute_default >/dev/null 2>&1; then
     --label com.docker.compose.network=default >/dev/null \
     || docker network inspect omniroute_default >/dev/null
 fi
-# 2026-10-30 补齐 fork v1.7.11/v1.7.13 特性 env：QD_QUEUE_FAST_MODELS 按模型排队
-# 快速拒绝（赠品腿 dfmodel/deepseek-flash 10605 排队秒拒，付费模型照等不进名单）。
-# 此前 workflow 重建容器会丢该 env，导致 fork 特性在自动部署后静默失效。
+# QD_QUEUE_FAST_MODELS 不设（2026-10-30 23:26 主人决定）：优先用免费腿——
+# dfmodel/deepseek-flash 排队时走默认 visible 流内等待（预算 QD_QUEUE_WAIT_BUDGET_SECS=600s），
+# 排到就继续用免费模型，不再秒拒切付费下一腿。要恢复秒拒把下行加回：
+#   -e QD_QUEUE_FAST_MODELS=dfmodel,deepseek-flash \
 if ! docker run -d --name qoder2api \
   --restart unless-stopped \
   --network omniroute_default \
   -p ${QODER_PORT}:8790 \
   -e HOST=0.0.0.0 -e PORT=8790 -e TZ=Asia/Shanghai \
-  -e QD_QUEUE_FAST_MODELS=dfmodel,deepseek-flash \
   -v "$QODER_DATA/accounts:/app/accounts" \
   -v "$QODER_DATA/usage:/app/usage" \
   "$QODER_IMAGE"; then
