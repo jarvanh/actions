@@ -4,7 +4,9 @@
 #   - 基座节点 = subs-check 的 all.yaml（原样保留：名字含测速/IP风险/流媒体解锁标签，入口为 edgetunnel 优选IP）
 #   - 组合节点 = 每个基座节点 × 每个验证通过的 SOCKS5 出口：
 #       入口沿用该基座节点（优选IP/端口/TLS/Host 头全部不动），仅 ws path 换成 /socks5://<出口>
-#       名字 = 基座名 + |YT-<实测判区>|<延迟>s（与 subs-check 自身 YT- 标签同语义：经此节点 YouTube 判到的地区）
+#       名字 = 基座名 + |SX-YT-<实测判区>|<延迟>s（SX-YT = 经该 SOCKS5 出口的 YouTube 实测判区。
+#             不沿用 subs-check 的 YT- 前缀：那是基座默认出口（ProxyIP 池）的判区标签，同名会让
+#             客户端按关键字筛 YouTube 节点时把两类出口混在一起）
 #   - 出口只收 socks5（http/https 实测存活 1/7 且判区不可控，主人明确剔除）
 #   - 全失败（无可用出口）时不产出文件 → workflow 保留上一版 Gist，避免客户端订阅清零
 #
@@ -92,6 +94,17 @@ def probe(node):
         'loc': kv.get('loc', ''),
         'latency': latency,
     }
+
+
+def exit_node_name(base_name, gl, latency, n=1):
+    """组合节点名：`基座名|SX-YT-<判区>|<延迟>s`（重名时追加 `#n`）。
+
+    SX-YT 前缀（socks-exit 的 YouTube 判区）刻意不用 subs-check 的 `YT-`：基座名里
+    已带 subs-check 对默认出口（ProxyIP 池）的 `YT-xx` 标签，同名会让客户端按
+    关键字筛 YouTube 定区节点时把两类出口混在一起。
+    """
+    name = f"{base_name}|SX-YT-{gl}|{latency:.2f}s"
+    return name if n <= 1 else f"{name}#{n}"
 
 
 def build_exit_node(base, live):
@@ -182,11 +195,11 @@ def main():
             continue                                # 非 ws 形态承载不了 path 出口
         for live_item in picked:
             node = build_exit_node(base, live_item)
-            name = f"{base['name']}|YT-{live_item['gl']}|{live_item['latency']:.2f}s"
+            name = exit_node_name(base['name'], live_item['gl'], live_item['latency'])
             n = 1
             while name in used:
                 n += 1
-                name = f"{base['name']}|YT-{live_item['gl']}|{live_item['latency']:.2f}s#{n}"
+                name = exit_node_name(base['name'], live_item['gl'], live_item['latency'], n)
             used.add(name)
             node['name'] = name
             out_nodes.append(node)
