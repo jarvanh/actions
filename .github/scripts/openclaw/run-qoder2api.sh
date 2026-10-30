@@ -110,11 +110,29 @@ QODER_VERSION="${QODER_TAG} @ ${QODER_IMG_DIGEST:-digest未知}"
 # 幂等接管：清掉同名旧容器（可能来自上一轮或手工部署），再由本轮接管。
 # 启动失败必须出声（continue-on-error 会吞掉非零退出，TG 是唯一可见通道）。
 docker rm -f qoder2api >/dev/null 2>&1 || true
+# 网络护栏（2026-10-30 04:14 事故固化）：P5b 化后本步骤先于 OmniRoute 启动，而
+# omniroute_default 由 OmniRoute compose 首次 up 才创建 —— 全新 VM 上此刻尚不存在，
+# docker run 卡死 Created（error=failed to set up container networking: network
+# omniroute_default not found；--restart 救不了从未启动过的容器），监控侧即
+# 「qoder 数据源失联」告警。缺网时幂等预创建带 compose 收编标签的同名网络
+#（compose 2.38.2 沙盒实测：project/network 两标签齐即原样收编，不重建不改名），
+# OmniRoute 随后 up -d 直接复用同一网络，容器名 DNS（http://qoder2api:8790/v1）不变。
+if ! docker network inspect omniroute_default >/dev/null 2>&1; then
+  echo "   预创建 omniroute_default（OmniRoute 未启动场景护栏，compose 将收编）"
+  docker network create omniroute_default \
+    --label com.docker.compose.project=omniroute \
+    --label com.docker.compose.network=default >/dev/null \
+    || docker network inspect omniroute_default >/dev/null
+fi
+# 2026-10-30 补齐 fork v1.7.11/v1.7.13 特性 env：QD_QUEUE_FAST_MODELS 按模型排队
+# 快速拒绝（赠品腿 dfmodel/deepseek-flash 10605 排队秒拒，付费模型照等不进名单）。
+# 此前 workflow 重建容器会丢该 env，导致 fork 特性在自动部署后静默失效。
 if ! docker run -d --name qoder2api \
   --restart unless-stopped \
   --network omniroute_default \
   -p ${QODER_PORT}:8790 \
   -e HOST=0.0.0.0 -e PORT=8790 -e TZ=Asia/Shanghai \
+  -e QD_QUEUE_FAST_MODELS=dfmodel,deepseek-flash \
   -v "$QODER_DATA/accounts:/app/accounts" \
   -v "$QODER_DATA/usage:/app/usage" \
   "$QODER_IMAGE"; then
