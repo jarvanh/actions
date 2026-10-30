@@ -103,6 +103,27 @@ jobs:
             echo "✅ /etc/hosts 已补 127.0.1.1 openclaw"
           fi
           hostname
+      - name: Seed ZCode server identity (先于客户端接入固定 installationId)
+        # 2026-10-30（同一事故的第二层）：hostname 只决定客户端里显示的**设备名**，
+        # 客户端「认设备」用的是 server 上报的 serverId —— 即
+        # ~/.zcode/server/install.json 的 installationId（server-core:
+        # `serverId = resolveCoreServerId() ?? hostname()`），侧栏任务全部挂在
+        # host_id = remote:server:<installationId> 上。
+        #
+        # 事故链：临时 runner 每轮重建 → 客户端一连上就部署一份新 server（本轮 17:57），
+        # install.json 由 ensureServerInstallOwnership() 随机生成 → 客户端当场记下这个
+        # 随机 id；而「还原 ZCode 数据」步骤远在网关健康之后（本轮 18:09）才按
+        # tasks-index 回钉历史 id → 同一轮内身份「先新后旧」，客户端必然弹
+        # 「连接目标的身份已变化，请确认是否作为新设备使用」。
+        #
+        # 根治：把主身份（历史 id，tasks-index 里 125 条任务的 host_id）随仓库带上，
+        # job 最前面、Tailscale 尚未接入（SSH 入口还不存在）时就铺好 install.json。
+        # 客户端随后部署时走 ensureServerInstallOwnership 的 EEXIST → validate 分支，
+        # 直接沿用这个 id，不再生成随机 id，也就没有「变化」可言。
+        # 注：installationId 是公开 UUID，不是凭据；installedAt 只需满足 schema，固定值。
+        # 脚本本体在 .github/scripts/openclaw/zcode-server-identity.sh（yml 减重惯例）。
+        if: ${{ always() }}
+        run: bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/zcode-server-identity.sh" install
       - name: Clean stale Tailscale nodes (openclaw* 僵尸清退)
         id: ts_clean
         if: ${{ always() && (env.TS_API_KEY != '' || (env.TS_OAUTH_CLIENT_ID != '' && env.TS_OAUTH_CLIENT_SECRET != '')) }}
@@ -1839,44 +1860,55 @@ jobs:
               else
                 echo "ℹ️ Archive has no .zcode/v2 identity (old package), server will generate a fresh one."
               fi
-              # server/：仅当本地没有时铺开（省一次完整下载）。本地已有则保留 —— 那是客户端
-              # 本轮刚部署的版本，可能比包内新，覆盖等于降级。
+              # server/：仅当本地没有「真实部署」时才从包内铺开（省一次完整下载）。本地
+              # 已有客户端部署则保留 —— 客户端本轮部署的版本可能比包内新，覆盖等于降级。
+              # 2026-10-30：判据不能再只看目录是否存在 —— job 开头的「Seed ZCode server
+              # identity」已经建了 ~/.zcode/server 并写 install.json，只看目录会永远命中
+              # 「已存在」，把包内约 326MB 运行时白白丢掉、逼客户端重新下载。
+              # 故判据改为「除 install.json / run/ 之外还有内容（releases、current.json…）」。
               if [ -d "$ZCODE_RESTORE_DIR/.zcode/server" ]; then
-                if [ -d ~/.zcode/server ]; then
-                  echo "ℹ️ ~/.zcode/server 已存在（客户端已部署），保留本地版本、不用包内副本覆盖"
+                _deployed="$(find ~/.zcode/server -mindepth 1 -maxdepth 1 \
+                  ! -name install.json ! -name run -print -quit 2>/dev/null || true)"
+                if [ -n "$_deployed" ]; then
+                  echo "ℹ️ ~/.zcode/server 已有客户端部署（$(basename "$_deployed")），保留本地版本"
                 else
-                  mkdir -p ~/.zcode
-                  cp -a "$ZCODE_RESTORE_DIR/.zcode/server" ~/.zcode/server
+                  mkdir -p ~/.zcode/server
+                  cp -a "$ZCODE_RESTORE_DIR/.zcode/server/." ~/.zcode/server/
                   echo "✅ Restored ~/.zcode/server from archive (skips this run's re-download)"
+                  # 包内 install.json 的 installedAt 会随上一轮浮动，合并后立刻按仓库主身份复核
+                  bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/zcode-server-identity.sh" install || true
                 fi
               else
                 echo "ℹ️ Archive has no .zcode/server (old package), client will deploy it fresh."
               fi
-              # installationId 回钉（2026-10-30 事故）：客户端认设备用的是 server 的
-              # installationId（host_id = remote:server:<installationId>，见 server-core
-              # 的 readOwnership），侧栏任务全部 keyed 到它。本轮客户端中途重部署 server
-              # 生了新 id（5ead5e6a… 顶掉旧 68197550…），旧设备下 125 条任务在新设备里
-              # 整片消失。这里在还原完 tasks-index 后，把「任务最多的 host_id」当作权威
-              # 身份回写 install.json —— 身份文件每次请求现读，无需重启 server。
-              if [ -d ~/.zcode/server ] && command -v sqlite3 >/dev/null 2>&1 \
-                 && [ -s ~/.zcode/v2/tasks-index.sqlite ]; then
-                _dom_id="$(sqlite3 ~/.zcode/v2/tasks-index.sqlite \
-                  "select replace(host_id,'remote:server:','') from tasks \
-                   where host_id like 'remote:server:%' group by host_id \
-                   order by count(*) desc limit 1;" 2>/dev/null || true)"
-                _inst="$HOME/.zcode/server/install.json"
-                if [ -n "$_dom_id" ]; then
-                  if [ -f "$_inst" ]; then
-                    jq --arg id "$_dom_id" '.installationId = $id' "$_inst" > "$_inst.tmp" \
-                      && mv "$_inst.tmp" "$_inst"
+              # 身份复核（幂等）：仓库内身份文件是唯一权威，正常情况下这里什么都不改。
+              # 只有它缺失/损坏（seed 未生效）时，才回落到「tasks-index 里任务最多的
+              # host_id」—— 这条兜底路径会把客户端已看到的随机 id 换掉，代价是客户端弹
+              # 一次「确认是否作为新设备」。
+              if [ -f "$GITHUB_WORKSPACE/.github/scripts/openclaw/zcode-server-identity.json" ]; then
+                bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/zcode-server-identity.sh" install || true
+              else
+                echo "::warning::仓库主身份文件缺失，回落 tasks-index 兜底"
+                if [ -d ~/.zcode/server ] && command -v sqlite3 >/dev/null 2>&1 \
+                   && [ -s ~/.zcode/v2/tasks-index.sqlite ]; then
+                  _dom_id="$(sqlite3 ~/.zcode/v2/tasks-index.sqlite \
+                    "select replace(host_id,'remote:server:','') from tasks \
+                     where host_id like 'remote:server:%' group by host_id \
+                     order by count(*) desc limit 1;" 2>/dev/null || true)"
+                  _inst="$HOME/.zcode/server/install.json"
+                  if [ -n "$_dom_id" ]; then
+                    if [ -f "$_inst" ]; then
+                      jq --arg id "$_dom_id" '.installationId = $id' "$_inst" > "$_inst.tmp" \
+                        && mv "$_inst.tmp" "$_inst"
+                    else
+                      jq -n --arg id "$_dom_id" --arg root "$HOME/.zcode/server" \
+                        '{product:"zcode-server",schemaVersion:1,canonicalServerRoot:$root,installationId:$id,installedAt:(now*1000|floor)}' \
+                        > "$_inst"
+                    fi
+                    echo "✅ installationId 已固定为历史主身份: ${_dom_id}"
                   else
-                    jq -n --arg id "$_dom_id" --arg root "$HOME/.zcode/server" \
-                      '{product:"zcode-server",schemaVersion:1,canonicalServerRoot:$root,installationId:$id,installedAt:(now*1000|floor)}' \
-                      > "$_inst"
+                    echo "ℹ️ tasks-index 无 remote:server host_id，installationId 保持现状"
                   fi
-                  echo "✅ installationId 已固定为历史主身份: ${_dom_id}"
-                else
-                  echo "ℹ️ tasks-index 无 remote:server host_id，installationId 保持现状"
                 fi
               fi
             else

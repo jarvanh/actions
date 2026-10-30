@@ -172,6 +172,18 @@
   本地已有说明桌面客户端本轮已部署（且可能比包内新），覆盖等于把新版本降级成旧版本。
   时间线上 `server/` 由客户端在连接时部署（实测 07:22），晚于还原步骤（06:13），
   所以正常情况下还原时它不存在、铺开是纯增益。
+- **设备身份 `installationId` 先于客户端接入固定（2026-10-30）**：客户端「认设备」用的是
+  server 上报的 `serverId`，真源是 `~/.zcode/server/install.json` 的 `installationId`
+  （`host_id = remote:server:<installationId>`，侧栏任务全部 keyed 到它），hostname 只影响
+  显示名。临时 runner 每轮重建时，`server/` 由客户端连接时部署并随机生成 `install.json`；
+  而「Restore ZCode data」步骤已后置到网关健康之后（晚于客户端接入），在那里回钉历史 id
+  会造成同一轮内身份「先新后旧」→ 客户端弹「连接目标的身份已变化，是否作为新设备」。
+  根治做法：历史 id 随仓库保存（`.github/scripts/openclaw/zcode-server-identity.json`），
+  job 最前面、Tailscale 起来之前就铺好 `install.json`；客户端部署走
+  `ensureServerInstallOwnership()` 的 `EEXIST → validate` 分支沿用该 id。
+  还原步骤里的回钉降级为兜底（仅 seed 失效时才真正改盘）。
+  > 客户端此前若已按别的身份确认过「作为新设备」，修复后首次连接可能仍需确认一次；
+  > 此后 id 恒定，不再复发。
 - **SQLite 取一致性快照**：`db.sqlite` 与 `tasks-index.sqlite` 用 `sqlite3 .backup` 从活库
   导出自包含单文件，随后丢掉 `-wal`/`-shm`。WAL 模式下数据可能全在 `-wal` 里 ——
   实测 `tasks-index.sqlite` 主文件仅 4KB、连 `tasks` 表都没有，3 行数据全在 716KB 的 `-wal` 中，
