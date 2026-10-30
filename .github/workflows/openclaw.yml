@@ -80,6 +80,29 @@ jobs:
           node-version: ${{ env.NODE_STABLE || '26' }}
           
       - uses: actions/checkout@v7
+      - name: Lock hostname to openclaw
+        # 2026-10-30：临时 runner 每次重建，OS hostname 都是云镜像默认名（本轮实测
+        # runnervm48cm3），而 Tailscale 的 --hostname=openclaw 只改 DNS 名、不改本机
+        # hostname。ZCode 客户端连上来后把 server 的 hostname 当设备名显示，于是每轮
+        # 都像「换了台新设备」—— 同一台机器在客户端出现 runnervmXXXX 卡片，侧栏
+        # 历史整片消失（旧设备 125 条任务实测）。
+        # 在 job 最前面锁死本机 hostname，整轮（含 ZCode server / 客户端连接）看到的
+        # 都是同一台 openclaw；/etc/hosts 同步补映射，避免 sudo 等工具报
+        # "unable to resolve host"。
+        run: |
+          set -euo pipefail
+          current="$(hostname)"
+          if [ "$current" = "openclaw" ]; then
+            echo "✅ hostname 已是 openclaw，无需修改"
+          else
+            sudo hostnamectl set-hostname openclaw
+            echo "✅ hostname: ${current} → openclaw"
+          fi
+          if ! grep -qE '^127\.0\.1\.1[[:space:]]+openclaw([[:space:]]|$)' /etc/hosts; then
+            echo '127.0.1.1 openclaw' | sudo tee -a /etc/hosts >/dev/null
+            echo "✅ /etc/hosts 已补 127.0.1.1 openclaw"
+          fi
+          hostname
       - name: Clean stale Tailscale nodes (openclaw* 僵尸清退)
         id: ts_clean
         if: ${{ always() && (env.TS_API_KEY != '' || (env.TS_OAUTH_CLIENT_ID != '' && env.TS_OAUTH_CLIENT_SECRET != '')) }}
@@ -1828,6 +1851,33 @@ jobs:
                 fi
               else
                 echo "ℹ️ Archive has no .zcode/server (old package), client will deploy it fresh."
+              fi
+              # installationId 回钉（2026-10-30 事故）：客户端认设备用的是 server 的
+              # installationId（host_id = remote:server:<installationId>，见 server-core
+              # 的 readOwnership），侧栏任务全部 keyed 到它。本轮客户端中途重部署 server
+              # 生了新 id（5ead5e6a… 顶掉旧 68197550…），旧设备下 125 条任务在新设备里
+              # 整片消失。这里在还原完 tasks-index 后，把「任务最多的 host_id」当作权威
+              # 身份回写 install.json —— 身份文件每次请求现读，无需重启 server。
+              if [ -d ~/.zcode/server ] && command -v sqlite3 >/dev/null 2>&1 \
+                 && [ -s ~/.zcode/v2/tasks-index.sqlite ]; then
+                _dom_id="$(sqlite3 ~/.zcode/v2/tasks-index.sqlite \
+                  "select replace(host_id,'remote:server:','') from tasks \
+                   where host_id like 'remote:server:%' group by host_id \
+                   order by count(*) desc limit 1;" 2>/dev/null || true)"
+                _inst="$HOME/.zcode/server/install.json"
+                if [ -n "$_dom_id" ]; then
+                  if [ -f "$_inst" ]; then
+                    jq --arg id "$_dom_id" '.installationId = $id' "$_inst" > "$_inst.tmp" \
+                      && mv "$_inst.tmp" "$_inst"
+                  else
+                    jq -n --arg id "$_dom_id" --arg root "$HOME/.zcode/server" \
+                      '{product:"zcode-server",schemaVersion:1,canonicalServerRoot:$root,installationId:$id,installedAt:(now*1000|floor)}' \
+                      > "$_inst"
+                  fi
+                  echo "✅ installationId 已固定为历史主身份: ${_dom_id}"
+                else
+                  echo "ℹ️ tasks-index 无 remote:server host_id，installationId 保持现状"
+                fi
               fi
             else
               echo "⚠️ zcode.tar.gz validation failed, skipping ZCode restore."
