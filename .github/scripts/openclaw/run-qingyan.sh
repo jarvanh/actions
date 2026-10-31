@@ -23,6 +23,7 @@
     QUOTA="${GITHUB_WORKSPACE}/.github/scripts/services/qingyan_quota.sh"
     GL_OK=0
     GL_REASON=""
+    GL_ENSURE_FAILED=0
 
     # 凭据缺失直接跳过本步骤（不部署无凭据服务）：拿不到账号积分，
     # 且限流严重，起了也是假象。判空不判内容——内容有效性交给后面的自检。
@@ -42,14 +43,25 @@
     # 1. 准备运行目录（校验 Dropbox 真源在位 + 写 env.sh）
     if bash "$DEPLOY" prepare; then
       # 2. 托管：systemd --user + Restart=always（窗口期崩溃秒级自愈，见 services.sh 文件头）
-      bash "$SERVICES" ensure qingyan || true
+      # 2026-10-31 修复：ensure 失败不再静默（旧 `|| true` 掩盖过「单元根本
+      # 没写盘」的假就绪，见当日两轮「60 秒内未监听 8320」告警）。输出原样
+      # 落运行日志，失败打 warning 并标记，让下方 60s 探测给出准确原因。
+      if ! _ens_out="$(bash "$SERVICES" ensure qingyan 2>&1)"; then
+        printf '%s\n' "$_ens_out"
+        echo "::warning::[qingyan] systemd 托管失败（ensure 退出码非零，见上方输出）"
+        GL_ENSURE_FAILED=1
+      fi
       GL_UP=0
       for _ in $(seq 1 60); do
         if bash "$DEPLOY" status >/dev/null 2>&1; then GL_UP=1; break; fi
         sleep 1
       done
       if [ "$GL_UP" != "1" ]; then
-        GL_REASON="服务未在 60 秒内监听 ${QINGYAN_PORT}（见日志尾部）"
+        if [ "$GL_ENSURE_FAILED" = "1" ]; then
+          GL_REASON="systemd 托管失败（ensure 退出码非零，见运行日志）"
+        else
+          GL_REASON="服务未在 60 秒内监听 ${QINGYAN_PORT}（见日志尾部）"
+        fi
       else
         # 3. 端到端自检：两个模型各发一条，都返回助手内容才算就绪
         # 2026-10-22 限时（下线优化）：实测该自检曾在 glm-5.3 通过后静默 203s
