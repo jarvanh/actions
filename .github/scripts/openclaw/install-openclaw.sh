@@ -218,14 +218,36 @@ if [ "$ARCHIVE_PRESENT" = "1" ]; then
     echo "✅ ${label} 结构+配置+secrets 判据通过（${OPENCLAW_RESTORE_VERDICT}）"
     return 0
   }
-  # B2 收口：try_openclaw_candidate 内的 config validate / secrets audit
-  # 需要 openclaw CLI —— installer 必须在此前完成，判据强度不衰减。
-  wait_cli_install
+  # B2 收口（判据强度不衰减）：config validate / secrets audit 需要 openclaw CLI，
+  # 校验必须在 CLI 就绪后执行。2026-10-31 启动提速：**解压不需要 CLI** —— 主包
+  # 解压改为与 CLI 安装并行（实测 CLI 33s + 解压 66s 串行 = 99s，并行后 =
+  # max(33, 66) ≈ 66s）。判据顺序与强度原样保留：体积门 → 解包 →
+  # 结构/配置/secrets，全部收口后才放行；云端主包不可用仍走 revision 回退。
   tarball_usable=0
-  if try_openclaw_candidate "$TMP_OPENCLAW_TAR" "云端主包"; then
-    tarball_usable=1
-    OPENCLAW_RESTORE_SOURCE="cloud-main"
+  _cand_kb="$(du -sk "$TMP_OPENCLAW_TAR" 2>/dev/null | awk '{print $1}')"
+  if [ -n "${_cand_kb:-}" ] && [ "${_cand_kb:-0}" -gt 0 ] && [ "${_cand_kb:-0}" -ge "$OPENCLAW_TARBALL_MIN_KB" ] \
+     && require_free_kb /tmp $((_cand_kb * 3 + 1024 * 1024)) "云端主包 extract preflight"; then
+    echo "云端主包 大小: ${_cand_kb}KB"
+    extract_openclaw_archive "$TMP_OPENCLAW_TAR" "$RESTORE_DIR" &
+    _extract_pid=$!
+    wait_cli_install
+    OPENCLAW_RESTORE_VERDICT=""
+    if wait "$_extract_pid" \
+       && OPENCLAW_RESTORE_VERDICT="$(validate_openclaw_tree "$RESTORE_DIR" || true)" \
+       && [[ "$OPENCLAW_RESTORE_VERDICT" != FAIL* ]]; then
+      echo "✅ 云端主包 结构+配置+secrets 判据通过（${OPENCLAW_RESTORE_VERDICT}）"
+      tarball_usable=1
+      OPENCLAW_RESTORE_SOURCE="cloud-main"
+    else
+      echo "⚠️ 云端主包 不可用（解包失败或判据未通过：${OPENCLAW_RESTORE_VERDICT:-解包失败}），不采用"
+      rm -rf "$RESTORE_DIR"
+    fi
   else
+    echo "⚠️ 云端主包 体积门未过（${_cand_kb:-未知}KB < ${OPENCLAW_TARBALL_MIN_KB}KB），按空壳处理"
+    rm -rf "$RESTORE_DIR"
+    wait_cli_install
+  fi
+  if [ "$tarball_usable" -ne 1 ]; then
     echo "⚠️ 云端主包不可用，尝试 revision 回退..."
     DBX_TOKEN=$(rclone config show dropbox 2>/dev/null | sed -n 's/^token = .*"access_token":"\([^"]*\)".*/\1/p' | tail -1)
     if [ -n "$DBX_TOKEN" ]; then

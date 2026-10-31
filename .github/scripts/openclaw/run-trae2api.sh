@@ -5,7 +5,9 @@
 # 与 yml 薄包装的接口：
 #   入口 env（步骤 env 注入）：TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID / TG_RUN_URL /
 #     GITHUB_WORKSPACE
-#   落盘契约：/tmp/upstream-rc-trae2api（P5b 等齐门标记）、/opt/logs/upstream-trae2api.log
+#   落盘契约：/tmp/upstream-rc-trae2api（P5b 等齐门标记；2026-10-31 契约拆分：语义 =
+#     「服务已监听」，流程内就绪判定点直写，签到/通知后置）、/tmp/upstream-final-rc-trae2api
+#     （子壳进程最终 rc，仅留痕）、/opt/logs/upstream-trae2api.log
 # P5b 双层子壳结构是刻意设计（孤儿化孙进程存活到网关步骤等齐），勿动结构。
 # 调用方用 `bash -eo pipefail`（= GitHub run: 默认语义）；体内自带 set -euo pipefail。
 
@@ -310,6 +312,8 @@
     done
     if [ "${_code:-}" != "200" ]; then
       echo "❌ trae2api 未在 120 秒内就绪" >&2
+      # 2026-10-31 P5b 契约拆分：失败也要先写等齐门 rc（通知在后面，别让网关干等）
+      printf '%s' 1 > /tmp/upstream-rc-trae2api
       # 失败也通知（对齐 workbuddy：成功/失败都有声）。接口行不展示（第 7 参 0）：
       # 服务已不在，展示一个指向已停进程的地址会误导读者（wb_notify 同口径）。
       trae_notify "❌ trae2api 启动失败" \
@@ -318,6 +322,10 @@
         "$(docker logs --tail 60 trae2api 2>&1 || true)" 0
       exit 1
     fi
+
+    # 2026-10-31 P5b 契约拆分：服务已监听即写等齐门 rc —— 下面的批量签到/
+    # 通知等收尾段全部后置，不再占住启动关键路径。
+    printf '%s' 0 > /tmp/upstream-rc-trae2api
 
     echo "6. Converge tunnel..."
     # 公网隧道已撤（2026-09-29 主人要求）：trae2api 管理后台改走 Tailscale
@@ -479,6 +487,9 @@
     fi
   )
   _up_rc=$?
-  printf '%s' "$_up_rc" > /tmp/upstream-rc-trae2api
+  # 2026-10-31 P5b 契约拆分：等齐门消费的是就绪判定点写的「服务已监听」rc；
+  # 这里只把子壳进程最终 rc 另存留痕。若流程早退（就绪点未到达），兜底写 1。
+  printf '%s' "$_up_rc" > /tmp/upstream-final-rc-trae2api
+  [ -f /tmp/upstream-rc-trae2api ] || printf '%s' 1 > /tmp/upstream-rc-trae2api
 ) > /opt/logs/upstream-trae2api.log 2>&1 &
 echo "🚀 [P5b] trae2api 已转后台部署（等齐门在 AI 网关步骤）"

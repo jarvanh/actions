@@ -5,7 +5,9 @@
 # 与 yml 薄包装的接口：
 #   入口 env（步骤 env 注入）：TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID / TG_RUN_URL /
 #     ZCODE_GATEWAY_KEY / GITHUB_WORKSPACE / GITHUB_RUN_ID
-#   落盘契约：/tmp/upstream-rc-zcode2api（P5b 等齐门标记）、
+#   落盘契约：/tmp/upstream-rc-zcode2api（P5b 等齐门标记；2026-10-31 契约拆分：语义 =
+#     「服务已监听」，流程内就绪判定点直写，credential sync/自检/通知后置）、
+#     /tmp/upstream-final-rc-zcode2api（子壳进程最终 rc，仅留痕）、
 #     /opt/logs/upstream-zcode2api.log、$Z2A_LOG（Dropbox 服务日志）
 # P5b 双层子壳结构是刻意设计，勿动结构。
 # 调用方用 `bash -eo pipefail`（= GitHub run: 默认语义）；体内自带 set -uo pipefail。
@@ -268,6 +270,9 @@
     if z2a_alive; then
       # 端口已有实例在响应：多为上一轮接力残留，直接复用，不重复起。
       # 但复用不等于可用 —— 仍要跑自检确认上游链路。
+      # 2026-10-31 P5b 契约拆分：复用即「服务已监听」，先写等齐门 rc
+      # （额度刷新 max-time 180s + 自检都在 rc 之后，不占启动关键路径）。
+      printf '%s' 0 > /tmp/upstream-rc-zcode2api
       # 复用实例同理先刷额度：残留实例可能已跑很久，状态未必跟上。
       z2a_refresh_quota
       if z2a_selftest; then
@@ -343,7 +348,12 @@
           done
           if [ "$Z2A_UP" != "1" ]; then
             Z2A_REASON="服务未在 60 秒内监听 ${Z2A_PORT}（见日志尾部）"
+            # 2026-10-31 P5b 契约拆分：失败也先写等齐门 rc（通知在后面）
+            printf '%s' 1 > /tmp/upstream-rc-zcode2api
           else
+            # 2026-10-31 P5b 契约拆分：服务已监听即写等齐门 rc —— credential sync /
+            # 额度刷新（max-time 180s）/自检/通知全部后置，不再占住启动关键路径。
+            printf '%s' 0 > /tmp/upstream-rc-zcode2api
             # 本轮确实执行了 ensure/start（不是复用旧实例）→ 属于「启动」，
             # 就绪通知必须发，即使上一轮留下过 tag 文件。
             Z2A_STARTED=1
@@ -542,6 +552,9 @@
     fi
   )
   _up_rc=$?
-  printf '%s' "$_up_rc" > /tmp/upstream-rc-zcode2api
+  # 2026-10-31 P5b 契约拆分：等齐门消费的是就绪判定点写的「服务已监听」rc；
+  # 这里只把子壳进程最终 rc 另存留痕。若流程早退（就绪点未到达），兜底写 1。
+  printf '%s' "$_up_rc" > /tmp/upstream-final-rc-zcode2api
+  [ -f /tmp/upstream-rc-zcode2api ] || printf '%s' 1 > /tmp/upstream-rc-zcode2api
 ) > /opt/logs/upstream-zcode2api.log 2>&1 &
 echo "🚀 [P5b] zcode2api 已转后台部署（等齐门在 AI 网关步骤）"

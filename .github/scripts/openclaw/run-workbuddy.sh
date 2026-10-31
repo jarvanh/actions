@@ -5,8 +5,10 @@
 # 与 yml 薄包装的接口：
 #   入口 env（步骤 env 注入）：TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID / TG_RUN_URL /
 #     WB_GH_TOKEN / AI_GATEWAY_API_KEY（job 级）/ GITHUB_WORKSPACE / GITHUB_RUN_ID
-#   落盘契约：/tmp/upstream-rc-workbuddy（P5b 等齐门标记，AI 网关步骤轮询上限 480s）、
-#     /opt/logs/upstream-workbuddy.log、/tmp/run-workbuddy-meta.env
+#   落盘契约：/tmp/upstream-rc-workbuddy（P5b 等齐门标记，AI 网关步骤轮询上限 480s；
+#     2026-10-31 契约拆分：语义 = 「服务已监听」，由流程内就绪判定点直接写 —— 签到汇总/
+#     通知等收尾段不再占住等齐门）、/tmp/upstream-final-rc-workbuddy（子壳进程最终 rc，
+#     仅留痕）、/opt/logs/upstream-workbuddy.log、/tmp/run-workbuddy-meta.env
 # P5b 双层子壳结构是刻意设计（外层子壳收 rc，内层子壳跑本体）：步骤 shell 退出后
 # 孤儿化的孙进程才能活到网关步骤等齐，动结构前先读 7ccd896 的 P5b 说明。
 # 调用方用 `bash -eo pipefail`（= GitHub run: 默认语义）。
@@ -393,6 +395,11 @@
       echo "⏳ [workbuddy-gateway] 等待中... ${i}/60"
       sleep 2
     done
+
+    # 2026-10-31 P5b 契约拆分：服务已监听（或确认起不来）即写等齐门 rc ——
+    # 下面的账号池快照/免费模型名录/签到汇总/TG 通知全部后置，不再占住启动关键路径
+    #（2026-10-30 run 41129523878 实测：等齐门被整段收尾流程拖满 480s 上限）。
+    if [ "$WB_READY" = "1" ]; then printf '%s' 0; else printf '%s' 1; fi > /tmp/upstream-rc-workbuddy
 
     WB_ACCOUNTS=""
     WB_STATUS_RAW="$(grep -a '账号池' "$WB_LOG" 2>/dev/null | tail -n 1 || true)"
@@ -1144,6 +1151,10 @@
     fi
   )
   _up_rc=$?
-  printf '%s' "$_up_rc" > /tmp/upstream-rc-workbuddy
+  # 2026-10-31 P5b 契约拆分：等齐门消费的是上面就绪判定点写的「服务已监听」rc；
+  # 这里只把子壳进程最终 rc 另存留痕。若流程早退（就绪点未到达），兜底写 1，
+  # 让等齐门按「渠道降级」立即放行，而不是空等 480s。
+  printf '%s' "$_up_rc" > /tmp/upstream-final-rc-workbuddy
+  [ -f /tmp/upstream-rc-workbuddy ] || printf '%s' 1 > /tmp/upstream-rc-workbuddy
 ) > /opt/logs/upstream-workbuddy.log 2>&1 &
 echo "🚀 [P5b] workbuddy-gateway 已转后台部署（等齐门在 AI 网关步骤）"
