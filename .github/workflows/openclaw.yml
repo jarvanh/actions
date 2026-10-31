@@ -2525,14 +2525,22 @@ jobs:
 
           # 完整性校验（取代体积基准）：三项都是「没有就说明状态不全」的判据 ——
           # db.sqlite 是会话正文与消息树，tasks-index.sqlite 是侧栏列表，
-          # server/zcode-server.cjs 是服务端 bundle（缺它就得整包重下）。
+          # server/current.json 及其所指 release 的 runtime/server-core.js 是服务端部署。
+          # （2026-10-31 更新：客户端 3.17.1 起单文件 server/zcode-server.cjs 拆为
+          #  组件化布局，旧判据恒缺失 → 归档持续退出码 4；改为「部署指针 + 核心 bundle」。）
           # 缺任一项即以退出码 4 中止、不覆盖云端。
           missing=""
-          for f in cli/db/db.sqlite v2/tasks-index.sqlite server/zcode-server.cjs; do
+          for f in cli/db/db.sqlite v2/tasks-index.sqlite server/current.json; do
             if [ ! -s "$STAGE_DIR/.zcode/$f" ]; then
               missing="$missing $f"
             fi
           done
+          # 核心 bundle 按 current.json 所指 release 校验：指针与内容必须同时在场
+          _rel_name="$(jq -r '.releaseDir // empty' "$STAGE_DIR/.zcode/server/current.json" 2>/dev/null || true)"
+          _rel_name="${_rel_name##*/}"
+          if [ -n "$_rel_name" ] && [ ! -s "$STAGE_DIR/.zcode/server/releases/$_rel_name/runtime/server-core.js" ]; then
+            missing="$missing server/releases/$_rel_name/runtime/server-core.js"
+          fi
           if [ -n "$missing" ]; then
             echo "zcode_archive_incomplete missing=$missing" >&2
             exit 4
