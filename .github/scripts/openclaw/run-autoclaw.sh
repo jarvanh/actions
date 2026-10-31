@@ -7,7 +7,9 @@
 #   落盘契约：/tmp/upstream-rc-autoclaw（P5b 等齐门标记，2026-10-30 起 autoclaw
 #     计入上游 —— 主人拍板：autoclaw 也是模型渠道，须先于 OmniRoute 启动；
 #     2026-10-31 契约拆分：语义 =「服务已监听」，端口等待点直写 —— 签到/收割/
-#     自检/通知后置，不再把等齐门拖到 480s 上限）、
+#     自检/通知后置，不再把等齐门拖到 480s 上限；2026-11-01 换序：ensure+rc
+#     写点提前到签到/收割之前（此前签到+收割 >8min 仍挡在 rc 前面，等齐门
+#     连续三轮烧满上限，见 run 41129523878/41184962753/41209067864）、
 #     /tmp/upstream-final-rc-autoclaw（子壳进程最终 rc，仅留痕）、
 #     /opt/logs/upstream-autoclaw.log
 # P5b 双层子壳结构是刻意设计，勿动结构。
@@ -70,7 +72,46 @@
               rclone copyto "$RUN_DIR/snapshot.json" "$AUTOCLAW_SNAPSHOT_REMOTE" \
                 || echo "::warning::[autoclaw] 快照回推失败（票仍是可复用长票时无害；一旦上游轮换即丢票，需重新 bootstrap）"
 
-              # 1.5 每日签到（daily_signin，+200 积分/账号/天；2026-10-11 新增）：
+              # 1.5 托管起反代（2026-10-12 起 systemd --user，取代原 nohup 裸跑）
+              #    2026-11-01 换序（下线提速收尾）：本段从 1.6/1.7 之后提到最前 ——
+              #    实测签到+收割 >8 分钟（两轮新流程 run 41184962753/41209067864 的
+              #    等齐门均被 autoclaw 拖满 480s 上限），而签到用 autoclaw_auth.py
+              #    直连上游账号 API、与反代进程零依赖（原注释亦明言「签到失败不
+              #    影响反代启动」）→ 先起服务、写等齐门 rc，再签到/收割。
+              #    旧方案：nohup 起的进程 PPID=1，~/.config/systemd/user 下无单元，
+              #    本机重启/被收编即断连且无自愈（窗口期崩溃要等下一轮 run）。
+              #    新方案与其他四网关同口径：services.sh ensure → 写单元(幂等)+restart，
+              #    Restart=always 把崩溃自愈收敛到秒级。
+              #
+              #    与 qingyan 的差异：autoclaw 代码在 /tmp（每轮 clone 自 GitHub，真源不在
+              #    本机），故 write_unit 用 AUTOCLAW_RUN_DIR 定位，且每轮 ensure 的 restart
+              #    语义与原 nohup 的「每轮 pkill + 重启」完全一致。
+              #
+              #    绑定地址/鉴权 fail-closed 已移入单元：无 AUTOCLAW_GATEWAY_KEY 时
+              #    write_unit 直接拒绝生成单元（比原来的「运行期降级回环」更严，不起假服务）。
+              mkdir -p "$HOME/.openclaw-autoclaw"
+              [ -f "$HOME/.openclaw-autoclaw/openclaw.json" ] \
+                || cp "$RUN_DIR/app/openclaw.json" "$HOME/.openclaw-autoclaw/openclaw.json"
+              AC_SERVICES="${GITHUB_WORKSPACE}/.github/scripts/services/services.sh"
+              if [ -f "$AC_SERVICES" ]; then
+                AUTOCLAW_RUN_DIR="$RUN_DIR" bash "$AC_SERVICES" ensure autoclaw || \
+                  echo "::warning::[autoclaw] systemd 托管失败（见 services 日志），自检将判定未就绪"
+              else
+                echo "::error::[autoclaw] services.sh 缺失，无法托管"
+              fi
+              # 就绪等待：systemd active ≠ 端口已监听（绑定失败会 active 后秒退），故仍以端口为准。
+              AC_PORT_OK=0
+              for _ in $(seq 1 30); do
+                code="$(curl -s --max-time 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${AUTOCLAW_PORT}/v1/models" 2>/dev/null || true)"
+                if [ -n "$code" ] && [ "$code" != "000" ]; then AC_PORT_OK=1; break; fi
+                sleep 2
+              done
+              # 2026-10-31 P5b 契约拆分：服务已监听（或确认起不来）即写等齐门 rc ——
+              # 签到/收割/自检/通知后置。2026-11-01 换序后本写点已在签到/收割之前，
+              # 等齐门不再被其拖满 480s 上限（run 41129523878 实锤的 8 分钟白等）。
+              if [ "$AC_PORT_OK" = "1" ]; then printf '%s' 0; else printf '%s' 1; fi > /tmp/upstream-rc-autoclaw
+
+              # 1.6 每日签到（daily_signin，+200 积分/账号/天；2026-10-11 新增）：
               #     复用 refresh 出的热票打 task 网关；幂等三重保障——本地状态当日
               #     跳过、上游 already_completed 不重复加分、-f 只在状态丢失时兜底。
               #     签到失败不影响反代启动（结果只进通知）。
@@ -83,7 +124,7 @@
               AC_CHECKIN="$(printf '%s\n' "$CHECKIN_OUT" | awk 'f{print} /^--- summary ---$/{f=1}' | tail -n 1)"
               echo "签到: ${AC_CHECKIN:-（无摘要输出）}"
 
-              # 1.6 积分收割（claim 全家桶：签到+灵感中心+新人任务+活动奖励；2026-10-12 新增）：
+              # 1.7 积分收割（claim 全家桶：签到+灵感中心+新人任务+活动奖励；2026-10-12 新增）：
               #     签到之外的可领积分（灵感中心每日 200 为主）也要自动收干净。
               #     调度收敛到每日两个窗口：CST 9 点后首轮 + 21 点后首轮 —— 同时覆盖
               #     「UTC 零点重置（=08:00 CST）」与「CN 零点重置」两种上游口径。
@@ -117,42 +158,7 @@
                 fi
               fi
 
-              # 2. 托管起反代（2026-10-12 起 systemd --user，取代原 nohup 裸跑）
-              #    旧方案：nohup 起的进程 PPID=1，~/.config/systemd/user 下无单元，
-              #    本机重启/被收编即断连且无自愈（窗口期崩溃要等下一轮 run）。
-              #    新方案与其他四网关同口径：services.sh ensure → 写单元(幂等)+restart，
-              #    Restart=always 把崩溃自愈收敛到秒级。
-              #
-              #    与 qingyan 的差异：autoclaw 代码在 /tmp（每轮 clone 自 GitHub，真源不在
-              #    本机），故 write_unit 用 AUTOCLAW_RUN_DIR 定位，且每轮 ensure 的 restart
-              #    语义与原 nohup 的「每轮 pkill + 重启」完全一致。
-              #
-              #    绑定地址/鉴权 fail-closed 已移入单元：无 AUTOCLAW_GATEWAY_KEY 时
-              #    write_unit 直接拒绝生成单元（比原来的「运行期降级回环」更严，不起假服务）。
-              mkdir -p "$HOME/.openclaw-autoclaw"
-              [ -f "$HOME/.openclaw-autoclaw/openclaw.json" ] \
-                || cp "$RUN_DIR/app/openclaw.json" "$HOME/.openclaw-autoclaw/openclaw.json"
-              AC_SERVICES="${GITHUB_WORKSPACE}/.github/scripts/services/services.sh"
-              if [ -f "$AC_SERVICES" ]; then
-                AUTOCLAW_RUN_DIR="$RUN_DIR" bash "$AC_SERVICES" ensure autoclaw || \
-                  echo "::warning::[autoclaw] systemd 托管失败（见 services 日志），自检将判定未就绪"
-              else
-                echo "::error::[autoclaw] services.sh 缺失，无法托管"
-              fi
-              # 就绪等待：systemd active ≠ 端口已监听（绑定失败会 active 后秒退），故仍以端口为准。
-              AC_PORT_OK=0
-              for _ in $(seq 1 30); do
-                code="$(curl -s --max-time 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${AUTOCLAW_PORT}/v1/models" 2>/dev/null || true)"
-                if [ -n "$code" ] && [ "$code" != "000" ]; then AC_PORT_OK=1; break; fi
-                sleep 2
-              done
-              # 2026-10-31 P5b 契约拆分：服务已监听（或确认起不来）即写等齐门 rc ——
-              # 每日签到/积分收割/120s 端到端自检/TG 通知全部后置。旧契约把 rc 压到
-              # 整段流程末尾，实测签到+收割慢的轮次 rc 超 480s 不落地，等齐门被拖满
-              # 上限、OmniRoute 白等 8 分钟（run 41129523878 实锤）。
-              if [ "$AC_PORT_OK" = "1" ]; then printf '%s' 0; else printf '%s' 1; fi > /tmp/upstream-rc-autoclaw
-
-              # 3. 端到端自检：真发消息（healthz 通≠上游通，zcode2api 同款原则）。
+              # 2. 端到端自检：真发消息（healthz 通≠上游通，zcode2api 同款原则）。
               #    失败分诊：quota=上游限流（服务本体健康）· auth=票无效 · unavailable=其他
               AC_PROBE="$(curl -sS --max-time 120 -X POST "http://127.0.0.1:${AUTOCLAW_PORT}/v1/chat/completions" \
                 -H "Authorization: Bearer ${AUTOCLAW_GATEWAY_KEY}" \
@@ -258,7 +264,7 @@
               tg_add_section _m "📅 每日签到 · 1"
               tg_add_block _m "$(tree_lines "结果：<code>未取到签到摘要（本轮未执行或脚本报错）</code>")"
             fi
-            # 积分收割（claim 全家桶）：只在收割窗口轮展示（每日两轮，见 1.6 注释）；
+            # 积分收割（claim 全家桶）：只在收割窗口轮展示（每日两轮，见 1.7 注释）；
             # 非窗口轮不渲染此节，避免每 5 分钟通知重复「全部已领」的噪音。
             if [ -n "${AC_CLAIM:-}" ]; then
               tg_add_section _m "🌾 积分收割 · 1"
