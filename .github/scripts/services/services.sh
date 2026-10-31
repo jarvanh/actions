@@ -68,10 +68,17 @@ LOG_ROOT="/dropbox/self-hosted"
 # 日志改落 Dropbox 后目录未必预建，统一由此幂等补一道。
 ensure_log_dir() { mkdir -p "$(dirname "$1")" 2>/dev/null || true; }
 
-# 单实例锁，避免并发调用打架（与 tunnels.sh 同款）
+# 单实例锁，避免并发调用打架。2026-10-31 由 flock -n「抢不到即跳过(exit 0)」
+# 改为阻塞等待：P5b 六个上游部署并行起跑，ensure 常态并发，-n 会把撞锁方的
+# ensure 整个跳过且 exit 0 —— 单元根本没写盘，部署方还以为成功（当日 qingyan
+# 两轮「60 秒内未监听 8320」告警的根因）。各调用持锁仅数秒，180s 等待上限
+# 足够；超时按失败退出，由调用方告警，不再假跳过。
 LOCK="/tmp/.services-$(id -u).lock"
 exec 9>"$LOCK" 2>/dev/null || true
-flock -n 9 2>/dev/null || { echo "[services] 另一个实例正在运行，跳过"; exit 0; }
+if ! flock -w 180 9 2>/dev/null; then
+  echo "[services] 等待单实例锁超时（180s），本次操作未执行" >&2
+  exit 1
+fi
 
 mkdir -p "$UNIT_DIR" "$LOG_DIR" 2>/dev/null || true
 SYSTEM_UNIT_DIR="/etc/systemd/system"
