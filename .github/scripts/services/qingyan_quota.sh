@@ -185,9 +185,13 @@ PY
   # 最近到期时间：0 表示没有带有效期的入账。
   # 时间格式化两个分支：ubuntu runner 有 GNU date -d；本机 macOS 只有
   # date -r（秒级）。两者都试，都失败才退成 "-"。
+  # ⚠️ 必须显式 TZ=Asia/Shanghai（2026-11-01 修，主人报「剩 363 天」追出来的
+  # 同源缺陷）：runner 默认 UTC，落盘的 MM-DD HH:MM 曾是 UTC 时钟，而
+  # quota-board 的 _parse_soon_at 按北京时间解析 → 倒计时整体短 8h。
+  # 两端口径在此对齐：快照一律落北京钟面时刻。
   if [ -n "$soonest" ] && [ "$soonest" -gt 0 ] 2>/dev/null; then
-    soonest_fmt="$(date -d "@${soonest}" '+%m-%d %H:%M' 2>/dev/null \
-                || date -r "${soonest}" '+%m-%d %H:%M' 2>/dev/null \
+    soonest_fmt="$(TZ=Asia/Shanghai date -d "@${soonest}" '+%m-%d %H:%M' 2>/dev/null \
+                || TZ=Asia/Shanghai date -r "${soonest}" '+%m-%d %H:%M' 2>/dev/null \
                 || echo "-")"
   else
     soonest_fmt="-"
@@ -209,7 +213,10 @@ cmd_delta() {
   mkdir -p "$STATE_DIR" 2>/dev/null || true
 
   local today prev_score prev_date round_delta day_total
-  today="$(date +%F)"
+  # 跨日判定按北京日历（2026-11-01 修）：runner 默认 UTC，16:00-24:00 UTC 的
+  # 轮次会把 date 写成北京的「昨天」，quota-board 误报「快照停留在 x」并把
+  # 今日消耗清零。快照 date 字段口径 = 北京日。
+  today="$(TZ=Asia/Shanghai date +%F)"
   prev_score="$(grep -m1 '^score=' "$SNAP" 2>/dev/null | cut -d= -f2- || true)"
   prev_date="$(grep -m1 '^date=' "$SNAP" 2>/dev/null | cut -d= -f2- || true)"
   # 旧快照迁移：历史文件存的是整数口径，统一还原成真值再参与计算，
