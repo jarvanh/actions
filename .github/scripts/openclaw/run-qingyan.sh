@@ -7,7 +7,10 @@
 #     QINGYAN_REFRESH_TOKEN / QINGYAN_GATEWAY_KEY / QINGYAN_PORT /
 #     QINGYAN_APP_REMOTE / QINGYAN_DATA_DIR / QINGYAN_STATE_DIR / QINGYAN_ENV_FILE /
 #     GITHUB_WORKSPACE
-#   落盘契约：/tmp/upstream-rc-qingyan（P5b 等齐门标记）、/opt/logs/upstream-qingyan.log
+#   落盘契约：/tmp/upstream-rc-qingyan（P5b 等齐门标记；2026-10-31 契约拆分：语义 =
+#     「服务已监听」，流程内就绪判定点直写，自检/积分采集/通知后置）、
+#     /tmp/upstream-final-rc-qingyan（子壳进程最终 rc，仅留痕）、
+#     /opt/logs/upstream-qingyan.log
 # P5b 双层子壳结构是刻意设计，勿动结构。
 # 调用方用 `bash -eo pipefail`（= GitHub run: 默认语义）；体内自带 set -uo pipefail。
 
@@ -30,6 +33,9 @@
     if [ -z "${QINGYAN_REFRESH_TOKEN:-}" ]; then
       echo "::warning::[qingyan] 未配置 Secret GLM_REFRESH_TOKEN，跳过部署"
       GL_REASON="未配置 Secret GLM_REFRESH_TOKEN"
+      # 2026-10-31 P5b 契约拆分：未部署 = 渠道降级，显式写 1（旧契约 exit 0 会让
+      # 等齐门把「没部署」误读成「已就绪」）
+      printf '%s' 1 > /tmp/upstream-rc-qingyan
       _m=""
       tg_add_title _m "⏭️ qingyan-proxy 已跳过"
       tg_add_kv _m "结论" "未部署"
@@ -56,6 +62,9 @@
         if bash "$DEPLOY" status >/dev/null 2>&1; then GL_UP=1; break; fi
         sleep 1
       done
+      # 2026-10-31 P5b 契约拆分：服务已监听（或确认起不来）即写等齐门 rc ——
+      # 下面的 90s 自检/积分采集/TG 通知全部后置，不再占住启动关键路径。
+      if [ "${GL_UP:-0}" = "1" ]; then printf '%s' 0; else printf '%s' 1; fi > /tmp/upstream-rc-qingyan
       if [ "$GL_UP" != "1" ]; then
         if [ "$GL_ENSURE_FAILED" = "1" ]; then
           GL_REASON="systemd 托管失败（ensure 退出码非零，见运行日志）"
@@ -170,6 +179,9 @@
     fi
   )
   _up_rc=$?
-  printf '%s' "$_up_rc" > /tmp/upstream-rc-qingyan
+  # 2026-10-31 P5b 契约拆分：等齐门消费的是就绪判定点写的「服务已监听」rc；
+  # 这里只把子壳进程最终 rc 另存留痕。若流程早退（就绪点未到达），兜底写 1。
+  printf '%s' "$_up_rc" > /tmp/upstream-final-rc-qingyan
+  [ -f /tmp/upstream-rc-qingyan ] || printf '%s' 1 > /tmp/upstream-rc-qingyan
 ) > /opt/logs/upstream-qingyan.log 2>&1 &
 echo "🚀 [P5b] qingyan-proxy 已转后台部署（等齐门在 AI 网关步骤）"

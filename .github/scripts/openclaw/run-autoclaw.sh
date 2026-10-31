@@ -5,7 +5,10 @@
 #   入口 env（步骤 env 注入）：TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID / TG_RUN_URL / AUTOCLAW_GATEWAY_KEY / AUTOCLAW_REPO / AUTOCLAW_SNAPSHOT_REMOTE / AUTOCLAW_STATS_REMOTE / AUTOCLAW_PORT
 #   文件依赖：$HOME/ts.env（Tailscale 步骤落盘；serve/tailscale 入口用）
 #   落盘契约：/tmp/upstream-rc-autoclaw（P5b 等齐门标记，2026-10-30 起 autoclaw
-#     计入上游 —— 主人拍板：autoclaw 也是模型渠道，须先于 OmniRoute 启动）、
+#     计入上游 —— 主人拍板：autoclaw 也是模型渠道，须先于 OmniRoute 启动；
+#     2026-10-31 契约拆分：语义 =「服务已监听」，端口等待点直写 —— 签到/收割/
+#     自检/通知后置，不再把等齐门拖到 480s 上限）、
+#     /tmp/upstream-final-rc-autoclaw（子壳进程最终 rc，仅留痕）、
 #     /opt/logs/upstream-autoclaw.log
 # P5b 双层子壳结构是刻意设计，勿动结构。
 # 调用方用 `bash -eo pipefail`（= GitHub run: 默认语义）；体内自带 set -uo pipefail。
@@ -137,11 +140,17 @@
                 echo "::error::[autoclaw] services.sh 缺失，无法托管"
               fi
               # 就绪等待：systemd active ≠ 端口已监听（绑定失败会 active 后秒退），故仍以端口为准。
+              AC_PORT_OK=0
               for _ in $(seq 1 30); do
                 code="$(curl -s --max-time 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${AUTOCLAW_PORT}/v1/models" 2>/dev/null || true)"
-                [ -n "$code" ] && [ "$code" != "000" ] && break
+                if [ -n "$code" ] && [ "$code" != "000" ]; then AC_PORT_OK=1; break; fi
                 sleep 2
               done
+              # 2026-10-31 P5b 契约拆分：服务已监听（或确认起不来）即写等齐门 rc ——
+              # 每日签到/积分收割/120s 端到端自检/TG 通知全部后置。旧契约把 rc 压到
+              # 整段流程末尾，实测签到+收割慢的轮次 rc 超 480s 不落地，等齐门被拖满
+              # 上限、OmniRoute 白等 8 分钟（run 41129523878 实锤）。
+              if [ "$AC_PORT_OK" = "1" ]; then printf '%s' 0; else printf '%s' 1; fi > /tmp/upstream-rc-autoclaw
 
               # 3. 端到端自检：真发消息（healthz 通≠上游通，zcode2api 同款原则）。
               #    失败分诊：quota=上游限流（服务本体健康）· auth=票无效 · unavailable=其他
@@ -266,6 +275,9 @@
           exit 0
   )
   _up_rc=$?
-  printf '%s' "$_up_rc" > /tmp/upstream-rc-autoclaw
+  # 2026-10-31 P5b 契约拆分：等齐门消费的是上面就绪判定点写的「服务已监听」rc；
+  # 这里只把子壳进程最终 rc 另存留痕。若流程早退（就绪点未到达），兜底写 1。
+  printf '%s' "$_up_rc" > /tmp/upstream-final-rc-autoclaw
+  [ -f /tmp/upstream-rc-autoclaw ] || printf '%s' 1 > /tmp/upstream-rc-autoclaw
 ) > /opt/logs/upstream-autoclaw.log 2>&1 &
 echo "🚀 [P5b] autoclaw-proxy 已转后台部署（等齐门在 AI 网关步骤）"

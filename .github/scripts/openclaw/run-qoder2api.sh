@@ -8,6 +8,8 @@
 #   消费方：/dropbox/self-hosted/qoder2api/（数据直写 Dropbox）
 # 2026-10-30 P5b 化（主人拍板：qoder2api 也是上游，须先于 OmniRoute 启动）：
 # 双层子壳 + rc 标记（/tmp/upstream-rc-qoder2api）+ 后台日志，与四上游同契约。
+# 2026-10-31 P5b 契约拆分：rc 语义 =「服务已监听」（健康检查 200 即写）；子壳最终 rc
+# 另存 /tmp/upstream-final-rc-qoder2api 仅作留痕，早退未写时兜底写 1。
 # 调用方用 `bash -eo pipefail`（= GitHub run: 默认语义）；体内自带 set -euo pipefail。
 
 (
@@ -155,12 +157,18 @@ for i in $(seq 1 60); do
 done
 if [ "${_code:-}" != "200" ]; then
   echo "❌ qoder2api 未在 120 秒内就绪" >&2
+  # 2026-10-31 P5b 契约拆分：失败也要先写等齐门 rc（通知在后面，别让网关干等）
+  printf '%s' 1 > /tmp/upstream-rc-qoder2api
   qoder_notify "❌ qoder2api-hub 启动失败" \
     "未就绪 · 120 秒健康检查超时" \
     "$QODER_VERSION" "" "镜像拉取或启动失败（详见运行日志）" \
     "$(docker logs --tail 60 qoder2api 2>&1 || true)" 0
   exit 1
 fi
+
+# 2026-10-31 P5b 契约拆分：服务已监听即写等齐门 rc —— 鉴权自检/账号池快照/
+# 版本台账/TG 通知全部后置，不再占住启动关键路径。
+printf '%s' 0 > /tmp/upstream-rc-qoder2api
 
 echo "4. Auth self-check..."
 _qk="$(read_qoder_key)"
@@ -212,6 +220,9 @@ fi
 
   )
   _up_rc=$?
-  printf '%s' "$_up_rc" > /tmp/upstream-rc-qoder2api
+  # 2026-10-31 P5b 契约拆分：等齐门消费的是就绪判定点写的「服务已监听」rc；
+  # 这里只把子壳进程最终 rc 另存留痕。若流程早退（就绪点未到达），兜底写 1。
+  printf '%s' "$_up_rc" > /tmp/upstream-final-rc-qoder2api
+  [ -f /tmp/upstream-rc-qoder2api ] || printf '%s' 1 > /tmp/upstream-rc-qoder2api
 ) > /opt/logs/upstream-qoder2api.log 2>&1 &
 echo "🚀 [P5b] qoder2api 已转后台部署（等齐门在 AI 网关步骤）"
