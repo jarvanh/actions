@@ -96,6 +96,7 @@
     GL_SOONEST=""
     GL_SOONEST_AMT=""
     GL_SOON_EXPIRE=""
+    GL_BATCHES=""
     if [ "$GL_OK" = "1" ]; then
       # 快照由 QUOTA delta 直接写进 QINGYAN_STATE_DIR（= Dropbox 数据目录，
       # 直写真源）。缺失即首轮，delta 会自动按 0 起算。
@@ -105,13 +106,16 @@
         GL_SOONEST="$(printf '%s' "$GLQ" | cut -f3)"
         GL_SOONEST_AMT="$(printf '%s' "$GLQ" | cut -f4)"
         GL_SOON_EXPIRE="$(printf '%s' "$GLQ" | cut -f5)"
+        GL_BATCHES="$(printf '%s' "$GLQ" | cut -f6)"
         # 第 2/3 参（2026-10-09 加）：把 fetch 拿到的「最近到期 / 24h 将过期」
         # 一并交给 delta 落进快照 —— 此前快照只存 date/score/day_total，
         # quota-board 想显示「即将过期」根本没有数据源。
         # 快照直写 QINGYAN_STATE_DIR（Dropbox 真源），无需回推。
         # 第 4 参（2026-11-01）：最早批金额一并落快照 —— 旧快照只有合计 + 最早批
         # 时刻，看板把合计挂在最早批倒计时下，读起来像全部 11 小时后作废。
-        if GLD="$(bash "$QUOTA" delta "$GL_SCORE" "$GL_SOONEST" "$GL_SOON_EXPIRE" "$GL_SOONEST_AMT")"; then
+        # 第 5 参（2026-11-01）：逐批明细 JSON 一并落快照 —— 每批都带真实时刻，
+        # 看板逐批倒计时（「其余批次·时刻未给」是此前展示层偷懒，上游数据本来就有）。
+        if GLD="$(bash "$QUOTA" delta "$GL_SCORE" "$GL_SOONEST" "$GL_SOON_EXPIRE" "$GL_SOONEST_AMT" "$GL_BATCHES")"; then
           GL_ROUND_DELTA="$(printf '%s' "$GLD" | cut -f1)"
           GL_DAY_TOTAL="$(printf '%s' "$GLD" | cut -f2)"
         fi
