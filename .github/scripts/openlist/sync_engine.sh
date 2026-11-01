@@ -330,11 +330,30 @@ sync_with_logging() {
       _st_to="timeout ${_st_tmo}"
       echo "本次 sync 硬上限 ${_st_tmo}s（预算剩余 − 尾部预留；超出由 timeout 收掉后走优雅收摊）" | tee -a "$LOG_FILENAME"
     fi
-    ${_st_to} rclone sync "$source_path" "$dest_path" \
-      "${RCLONE_DEFAULT_FLAGS[@]}" \
-      "${openlist_guard_flags[@]}" \
-      "${extra_args[@]}" \
-      2>&1 | tee "$LAST_ATTEMPT_LOG"
+    # openlist: 目标端用 copy 而非 sync（2026-11-01，run 41196672258/41219905962 实证）:
+    #   sync 的清理阶段在 OpenList 上不可信，会删两类不该删的文件 ——
+    #   ① 修复产物: 排除清单三来源（marker ∪ 本轮 ∪ 父级守卫）有结构性缺口
+    #     （任务拆分/重命名后旧 marker 记录孤儿化，如 f27becd6 短哈希目录被
+    #      整目录 Deleted + Removing directory），删了下轮重折叠，跨轮净进度为零；
+    #   ② 源端真实文件: WebDAV+crypt 超长文件名场景下列举出现幻影条目，
+    #     同一条 rclone 命令先 Copied (new) 后 Deleted 同一路径（aHR0cDov…jpg，
+    #     84 分钟内 copy→删→copy 拉锯 3 轮）。
+    #   备份语义本就"只增不减"（见 rclone_flags.sh 头注释），sync 的删除从未是需求；
+    #   改 copy 同时省去传前的目标端全量列举（万级文件目录省数分钟）。
+    #   非openlist 目标（无 guard flags 的远端）维持 sync 行为不变。
+    if [ "${#openlist_guard_flags[@]}" -gt 0 ]; then
+      ${_st_to} rclone copy "$source_path" "$dest_path" \
+        "${RCLONE_DEFAULT_FLAGS[@]}" \
+        "${openlist_guard_flags[@]}" \
+        "${extra_args[@]}" \
+        2>&1 | tee "$LAST_ATTEMPT_LOG"
+    else
+      ${_st_to} rclone sync "$source_path" "$dest_path" \
+        "${RCLONE_DEFAULT_FLAGS[@]}" \
+        "${openlist_guard_flags[@]}" \
+        "${extra_args[@]}" \
+        2>&1 | tee "$LAST_ATTEMPT_LOG"
+    fi
     local attempt_status=${PIPESTATUS[0]}
 
     _stop_token_refresher
