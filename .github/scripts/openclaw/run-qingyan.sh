@@ -109,7 +109,9 @@
         # 一并交给 delta 落进快照 —— 此前快照只存 date/score/day_total，
         # quota-board 想显示「即将过期」根本没有数据源。
         # 快照直写 QINGYAN_STATE_DIR（Dropbox 真源），无需回推。
-        if GLD="$(bash "$QUOTA" delta "$GL_SCORE" "$GL_SOONEST" "$GL_SOON_EXPIRE")"; then
+        # 第 4 参（2026-11-01）：最早批金额一并落快照 —— 旧快照只有合计 + 最早批
+        # 时刻，看板把合计挂在最早批倒计时下，读起来像全部 11 小时后作废。
+        if GLD="$(bash "$QUOTA" delta "$GL_SCORE" "$GL_SOONEST" "$GL_SOON_EXPIRE" "$GL_SOONEST_AMT")"; then
           GL_ROUND_DELTA="$(printf '%s' "$GLD" | cut -f1)"
           GL_DAY_TOTAL="$(printf '%s' "$GLD" | cut -f2)"
         fi

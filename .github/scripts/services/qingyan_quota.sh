@@ -209,7 +209,8 @@ cmd_delta() {
   local cur="${1:-}"
   local soonest_in="${2:-}"
   local soon_expire_in="${3:-}"
-  [ -n "$cur" ] || { log "用法: $0 delta <当前余额> [最近到期] [24h将过期]"; return 1; }
+  local soonest_amt_in="${4:-}"   # 2026-11-01：最早批金额（拆行展示数据源）
+  [ -n "$cur" ] || { log "用法: $0 delta <当前余额> [最近到期] [24h将过期] [最早批金额]"; return 1; }
   mkdir -p "$STATE_DIR" 2>/dev/null || true
 
   local today prev_score prev_date round_delta day_total
@@ -248,11 +249,13 @@ cmd_delta() {
   # 到期信息落盘（2026-10-09 加）：快照此前只落 date/score/day_total，
   # 到期时间压根没存 —— quota-board 就算想显示「即将过期」也没有数据源。
   # 取本次 fetch 的新值；未传则沿用快照旧值，避免单轮漏传就把已有信息清空。
-  local prev_soonest prev_soon_expire
+  local prev_soonest prev_soon_expire prev_soonest_amt
   prev_soonest="$(grep -m1 '^soonest=' "$SNAP" 2>/dev/null | cut -d= -f2- || true)"
   prev_soon_expire="$(grep -m1 '^soon_expire=' "$SNAP" 2>/dev/null | cut -d= -f2- || true)"
+  prev_soonest_amt="$(grep -m1 '^soonest_amt=' "$SNAP" 2>/dev/null | cut -d= -f2- || true)"
   [ -n "$soonest_in" ] && prev_soonest="$soonest_in"
   [ -n "$soon_expire_in" ] && prev_soon_expire="$soon_expire_in"
+  [ -n "$soonest_amt_in" ] && prev_soonest_amt="$soonest_amt_in"
 
   umask 077
   {
@@ -260,6 +263,7 @@ cmd_delta() {
     printf 'score=%s\n' "$cur"
     printf 'day_total=%s\n' "$day_total"
     printf 'soonest=%s\n' "${prev_soonest:--}"
+    printf 'soonest_amt=%s\n' "${prev_soonest_amt:-0}"
     printf 'soon_expire=%s\n' "${prev_soon_expire:-0}"
   } > "$SNAP" 2>/dev/null || true
 
@@ -269,6 +273,6 @@ cmd_delta() {
 
 case "${1:-}" in
   fetch) cmd_fetch ;;
-  delta) cmd_delta "${2:-}" "${3:-}" "${4:-}" ;;
-  *) echo "用法: $0 {fetch|delta <当前余额> [最近到期] [24h将过期]}"; exit 1 ;;
+  delta) cmd_delta "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
+  *) echo "用法: $0 {fetch|delta <当前余额> [最近到期] [24h将过期] [最早批金额]}"; exit 1 ;;
 esac
