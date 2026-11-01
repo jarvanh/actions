@@ -124,6 +124,152 @@ jobs:
         # 脚本本体在 .github/scripts/openclaw/zcode-server-identity.sh（yml 减重惯例）。
         if: ${{ always() }}
         run: bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/zcode-server-identity.sh" install
+
+      - name: rclone-install
+        run: |
+          set -e
+          # 记录 job 近似起点：Keep alive 的动态死线以它为基准（Set up job/Node/checkout
+          # 与本步间隔仅数秒，误差可忽略；2026-10-01 动态保活改造）
+          date +%s > /tmp/job-start-epoch 2>/dev/null || true
+          # 安装 rclone：GitHub Releases 直下 .deb，失败回退 rclone.org 安装脚本
+          bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" install
+      - name: rclone-config
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE }}
+        run: |
+          set -e
+          # 写配置 + 持久化：secret 起步 → 掩码 → Dropbox 恢复优先 → 有效性检查 → 同步回 Dropbox
+          bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" config
+      - name: Restore ZCode data (先于 Tailscale 接入)
+        # 2026-11-01 事故根治（主人拍板）：zcode.tar.gz 数据还原必须先于 Tailscale SSH 接入。
+        # 事故链：B2（2026-10-29）把还原后置到网关健康之后 → 客户端经 Tailscale 先连上、
+        # 部署 server 并打开 tasks-index.sqlite，还原步骤随后 rm -rf + cp -a 把运行中服务
+        # 脚下的库整个换掉，3.17.1 迁移时序被搅乱、projects 注册表清空 → 客户端全量
+        # project.not-found。还原前移到「任何客户端都可能接入」之前：server 首次打开的
+        # 就是最终数据，不存在脚下换库。
+        # 时序依赖：rclone-install/config 已前移到本步之前；本步在 Prefetch 之前执行，
+        # zcode.tar.gz 直接同步下载（3GB ≈ 30-60s），不再进 Prefetch。护栏同款：
+        # continue-on-error 不级联（此刻网关尚未启动，无服务可伤），失败必须出声（TG alert）。
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+          zcode_fail_notify() {
+            local msg="" reason="${1:-恢复失败}"
+            tg_add_title msg "⚠️ ZCode 数据提前恢复失败"
+            tg_add_kv msg "原因" "$reason"
+            tg_add_kv msg "影响" "客户端侧栏可能为空；网关与 OpenClaw 不受影响"
+            tg_add_path msg "Run" "$TG_RUN_URL"
+            tg_add_footer msg
+            send_tg "$msg" alert || true
+          }
+          if ! command -v rclone >/dev/null 2>&1; then
+            echo "⚠️ rclone 不可用（前置步骤被跳过？），跳过 ZCode 提前恢复"
+            zcode_fail_notify "rclone 不可用"
+            exit 0
+          fi
+          TMP_ZCODE_TAR="/tmp/zcode-restore.tar.gz"
+          ZCODE_RESTORE_DIR="/tmp/zcode-restore"
+          rm -rf "$ZCODE_RESTORE_DIR" 2>/dev/null || true
+          if rclone ls dropbox:self-hosted/zcode.tar.gz > /dev/null 2>&1; then
+            echo "📦 Found zcode.tar.gz! Downloading and extracting..."
+            if ! rclone copyto dropbox:self-hosted/zcode.tar.gz "$TMP_ZCODE_TAR" --multi-thread-streams 16; then
+              echo "⚠️ zcode.tar.gz 下载失败，跳过 ZCode 提前恢复（发告警）"
+              zcode_fail_notify "zcode.tar.gz 下载失败"
+              rm -f "$TMP_ZCODE_TAR" 2>/dev/null || true
+            fi
+            if [ -s "$TMP_ZCODE_TAR" ] && tar -tzf "$TMP_ZCODE_TAR" >/dev/null 2>&1; then
+              mkdir -p "$ZCODE_RESTORE_DIR"
+              tar -xzf "$TMP_ZCODE_TAR" -C "$ZCODE_RESTORE_DIR"
+              restored_any=0
+              for rel in cli v2; do
+                if [ -d "$ZCODE_RESTORE_DIR/.zcode/$rel" ]; then
+                  mkdir -p ~/.zcode
+                  rm -rf ~/.zcode/$rel
+                  cp -a "$ZCODE_RESTORE_DIR/.zcode/$rel" ~/.zcode/$rel
+                  echo "✅ Restored ~/.zcode/$rel from archive"
+                  restored_any=1
+                fi
+              done
+              if [ "$restored_any" -eq 0 ]; then
+                echo "⚠️ Archive contains neither .zcode/cli nor .zcode/v2, skipping ZCode restore."
+              fi
+              # server 设备身份（v2/certs CA + telemetry-state.json 的 deviceMid）随 v2/ 一起还原，
+              # 客户端跨重置认得同一个 server；server/ 运行时无本地部署时一并铺开（省一次下载）。
+              if [ -d "$ZCODE_RESTORE_DIR/.zcode/v2/certs" ]; then
+                echo "✅ Restored ~/.zcode/v2 server identity (certs + deviceMid)"
+              else
+                echo "ℹ️ Archive has no .zcode/v2 identity (old package), server will generate a fresh one."
+              fi
+              # server/：仅当本地没有「真实部署」时才从包内铺开（Seed identity 只建了
+              # install.json，此刻必然为空 → 从包内恢复 326MB 运行时，客户端接入零等待）。
+              if [ -d "$ZCODE_RESTORE_DIR/.zcode/server" ]; then
+                _deployed="$(find ~/.zcode/server -mindepth 1 -maxdepth 1 \
+                  ! -name install.json ! -name run -print -quit 2>/dev/null || true)"
+                if [ -n "$_deployed" ]; then
+                  echo "ℹ️ ~/.zcode/server 已有客户端部署（$(basename "$_deployed")），保留本地版本"
+                else
+                  mkdir -p ~/.zcode/server
+                  cp -a "$ZCODE_RESTORE_DIR/.zcode/server/." ~/.zcode/server/
+                  echo "✅ Restored ~/.zcode/server from archive (skips this run's re-download)"
+                  bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/zcode-server-identity.sh" install || true
+                fi
+              else
+                echo "ℹ️ Archive has no .zcode/server (old package), client will deploy it fresh."
+              fi
+              # 身份复核（幂等）：仓库内身份文件是唯一权威，正常情况下这里什么都不改。
+              if [ -f "$GITHUB_WORKSPACE/.github/scripts/openclaw/zcode-server-identity.json" ]; then
+                bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/zcode-server-identity.sh" install || true
+              else
+                echo "::warning::仓库主身份文件缺失，回落 tasks-index 兜底"
+                if [ -d ~/.zcode/server ] && command -v sqlite3 >/dev/null 2>&1 \
+                   && [ -s ~/.zcode/v2/tasks-index.sqlite ]; then
+                  _dom_id="$(sqlite3 ~/.zcode/v2/tasks-index.sqlite \
+                    "select replace(host_id,'remote:server:','') from tasks \
+                     where host_id like 'remote:server:%' group by host_id \
+                     order by count(*) desc limit 1;" 2>/dev/null || true)"
+                  _inst="$HOME/.zcode/server/install.json"
+                  if [ -n "$_dom_id" ]; then
+                    if [ -f "$_inst" ]; then
+                      jq --arg id "$_dom_id" '.installationId = $id' "$_inst" > "$_inst.tmp" \
+                        && mv "$_inst.tmp" "$_inst"
+                    else
+                      jq -n --arg id "$_dom_id" --arg root "$HOME/.zcode/server" \
+                        '{product:"zcode-server",schemaVersion:1,canonicalServerRoot:$root,installationId:$id,installedAt:(now*1000|floor)}' \
+                        > "$_inst"
+                    fi
+                    echo "✅ installationId 已固定为历史主身份: ${_dom_id}"
+                  else
+                    echo "ℹ️ tasks-index 无 remote:server host_id，installationId 保持现状"
+                  fi
+                fi
+              fi
+            else
+              echo "⚠️ zcode.tar.gz validation failed, skipping ZCode restore."
+              if [ -f "$TMP_ZCODE_TAR" ]; then
+                zcode_fail_notify "归档校验失败（空/损坏）"
+              fi
+            fi
+            rm -f "$TMP_ZCODE_TAR" 2>/dev/null || true
+            rm -rf "$ZCODE_RESTORE_DIR" 2>/dev/null || true
+            echo "=== restored ~/.zcode (early, before Tailscale) ==="
+            du -sh ~/.zcode/cli ~/.zcode/v2 ~/.zcode/server 2>/dev/null || true
+            ls ~/.zcode/cli/db/db.sqlite ~/.zcode/v2/tasks-index.sqlite 2>/dev/null \
+              || echo "⚠️ 还原后未见 db.sqlite/tasks-index.sqlite"
+            if command -v sqlite3 >/dev/null 2>&1; then
+              # 侧栏条数是「还原是否真的成功」最直接的证据：只报文件存在，无法区分空库与有库
+              echo "tasks-index rows: $(sqlite3 ~/.zcode/v2/tasks-index.sqlite 'select count(*) from tasks' 2>/dev/null || echo '?')"
+              echo "db.sqlite sessions: $(sqlite3 ~/.zcode/cli/db/db.sqlite 'select count(*) from session' 2>/dev/null || echo '?')"
+            fi
+          else
+            echo "ℹ️ No zcode.tar.gz found on Dropbox (first run), skipping ZCode restore."
+          fi
+
       - name: Clean stale Tailscale nodes (openclaw* 僵尸清退)
         id: ts_clean
         if: ${{ always() && (env.TS_API_KEY != '' || (env.TS_OAUTH_CLIENT_ID != '' && env.TS_OAUTH_CLIENT_SECRET != '')) }}
@@ -478,21 +624,6 @@ jobs:
         if: ${{ always() && env.TS_OAUTH_CLIENT_ID == '' && env.TS_OAUTH_CLIENT_SECRET == '' }}
         run: echo "⚠️ 未配置 TS_OAUTH_CLIENT_ID / TS_OAUTH_CLIENT_SECRET，跳过 Tailscale SSH 调试入口"
 
-      - name: rclone-install
-        run: |
-          set -e
-          # 记录 job 近似起点：Keep alive 的动态死线以它为基准（Set up job/Node/checkout
-          # 与本步间隔仅数秒，误差可忽略；2026-10-01 动态保活改造）
-          date +%s > /tmp/job-start-epoch 2>/dev/null || true
-          # 安装 rclone：GitHub Releases 直下 .deb，失败回退 rclone.org 安装脚本
-          bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" install
-      - name: rclone-config
-        env:
-          RCLONE_CONFIG: ${{ secrets.RCLONE }}
-        run: |
-          set -e
-          # 写配置 + 持久化：secret 起步 → 掩码 → Dropbox 恢复优先 → 有效性检查 → 同步回 Dropbox
-          bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" config
       - name: Prefetch cold artifacts (后台并行)
         # 把「与本轮状态无关」的大块下载从串行关键路径上摘出去。实测一轮冷启动里
         # 主包下载 54s、omniroute 镜像 35.7s、rss 镜像 ~20s 都排在各自消费步骤里干
@@ -561,9 +692,10 @@ jobs:
             fi
           fi
 
-          # 2026-10-29 下线优化（B2）：zcode/OmniRoute 主档同样预取（消费方各自等收口，
-          # 未命中照原路同步下载；zcode 消费方 = 后置的 ZCode 恢复步骤，OmniRoute 消费方
-          # = AI 网关步骤）。单档体积门 2×+512MB，与主包同口径防挤爆；rc 文件最后写。
+          # 2026-10-29 下线优化（B2）：OmniRoute 主档同样预取（消费方 = AI 网关步骤，
+          # 未命中照原路同步下载）。zcode.tar.gz 原也在此预取、由后置 ZCode 恢复消费；
+          # 2026-11-01 该恢复前移到 rclone-config 之后（先于 Tailscale 接入），改为直接
+          # 同步下载，不再进预取。单档体积门 2×+512MB，与主包同口径防挤爆；rc 文件最后写。
           cat > "$P/pull-one-tar.sh" <<'PF_EOF'
           #!/usr/bin/env bash
           # 用法: pull-one-tar.sh <Name> <prefetch_dir>；产物 .part → mv，rc 文件最后写
@@ -582,7 +714,7 @@ jobs:
           echo "$rc" > "$P/${KEY}-tar.rc"
           PF_EOF
           chmod +x "$P/pull-one-tar.sh"
-          for _pf_name in zcode OmniRoute; do
+          for _pf_name in OmniRoute; do
             _pf_key="$(printf '%s' "$_pf_name" | tr 'A-Z' 'a-z')"
             _pf_bytes="$(rclone size --json "dropbox:self-hosted/${_pf_name}.tar.gz" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null)" || _pf_bytes=0
             case "${_pf_bytes:-0}" in ''|*[!0-9]*) _pf_bytes=0 ;; esac
@@ -1580,12 +1712,11 @@ jobs:
             echo "⚠️ Telegram alert skipped: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is empty"
           fi
 
-      - name: Restore ZCode data & install auxiliary CLIs
-        # 2026-10-29 下线优化（B2）：原为 Install OpenClaw 尾部段，与网关启动无关却占着
-        # 「恢复 → Run OpenClaw」的下线关键路径，后置到网关健康之后执行；zcode.tar.gz
-        # 已在 Prefetch 步骤后台预取，此处等收口即可。护栏与 qoder/zcode2api/autoclaw
-        # 同款（continue-on-error + if:!cancelled）：本步故障不得级联跳过后续服务；
-        # 但 ~/.zcode 丢了侧栏就是空的、CLIs 缺了技能降级 —— 失败必须出声（TG alert）。
+      - name: Install auxiliary CLIs (gemini-cli/clawhub)
+        # 2026-11-01：ZCode 数据还原已前移为「Restore ZCode data (先于 Tailscale 接入)」
+        # （事故：后置还原会在运行中的 server 脚下换库，主人拍板还原先于 Tailscale）。
+        # 本步只剩与 ZCode 数据无关的辅助 CLI 安装，原位置与护栏不变：
+        # continue-on-error 不级联；CLIs 缺了技能降级 —— 失败必须出声（TG alert）。
         if: ${{ !cancelled() }}
         continue-on-error: true
         env:
@@ -1596,168 +1727,21 @@ jobs:
           set -euo pipefail
           # 真源在 step 顶层 source 一次（规范 4.4）
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
-          # gemini-cli / clawhub 与 zcode 恢复互相独立：后台起跑，恢复完 wait 收口
+          aux_fail_notify() {
+            local msg="" reason="${1:-安装失败}"
+            tg_add_title msg "⚠️ 辅助 CLI 安装失败"
+            tg_add_kv msg "原因" "$reason"
+            tg_add_kv msg "影响" "gemini-cli/clawhub 未装，相关技能降级；网关与 ZCode 数据不受影响"
+            tg_add_path msg "Run" "$TG_RUN_URL"
+            tg_add_footer msg
+            send_tg "$msg" alert || true
+          }
           (
             npm i -g @google/gemini-cli
             npm i -g clawhub
           ) > /tmp/aux-cli-install.log 2>&1 &
           AUX_NPM_PID=$!
-
-          fetch_via_prefetch() {
-            # 用法: fetch_via_prefetch <Name> <dest>。Prefetch 步骤 .part→mv→rc 协议：
-            # 命中 = 返回 0 且产物已 mv 到 dest；未命中/未预取 = 非 0（消费方回落同步下载）。
-            # 与主包恢复侧的等收口循环同款（kill -0 探活，进程没了立刻收，不空等）。
-            local name="$1" dest="$2" key pf_dir rc pid waited
-            key="$(printf '%s' "$name" | tr 'A-Z' 'a-z')"
-            pf_dir="/tmp/openclaw-prefetch"
-            [ -f "$pf_dir/${key}-tar.pid" ] || return 1
-            waited=0
-            while [ ! -f "$pf_dir/${key}-tar.rc" ] && [ "$waited" -lt 600 ]; do
-              pid="$(cat "$pf_dir/${key}-tar.pid" 2>/dev/null | tr -dc '0-9')"
-              [ -n "$pid" ] || break
-              kill -0 "$pid" 2>/dev/null || break
-              sleep 2
-              waited=$((waited + 2))
-            done
-            rc="$(cat "$pf_dir/${key}-tar.rc" 2>/dev/null || echo none)"
-            if [ "$rc" = "0" ] && [ -s "$pf_dir/${name}.tar.gz" ]; then
-              mv "$pf_dir/${name}.tar.gz" "$dest"
-              rm -f "$pf_dir/${name}.tar.gz.part" "$pf_dir/${key}-tar.rc" "$pf_dir/${key}-tar.pid" 2>/dev/null || true
-              echo "✅ ${name}.tar.gz prefetch 命中（等待 ${waited}s）"
-              return 0
-            fi
-            rm -f "$pf_dir/${name}.tar.gz.part" 2>/dev/null || true
-            echo "⚠️ ${name}.tar.gz prefetch 未命中（rc=${rc}），回落同步下载"
-            return 1
-          }
-
-          aux_fail_notify() {
-            # 失败告警。版式同 send_archive_alert 口径（<pre> 尾部 1200 字节规范在此不涉及）
-            local msg="" reason="${1:-恢复/安装失败}"
-            tg_add_title msg "⚠️ ZCode 数据/辅助 CLI 后置恢复失败"
-            tg_add_kv msg "原因" "$reason"
-            tg_add_kv msg "影响" "客户端 ZCode 数据目录可能缺失（侧栏空）或 gemini-cli/clawhub 未装；网关不受影响"
-            tg_add_path msg "Run" "$TG_RUN_URL"
-            tg_add_footer msg
-            send_tg "$msg" alert || true
-          }
-
-          # ZCode 数据恢复：~/.zcode 下的个人数据在 runner 重置后会丢，从 Dropbox 主包还原。
-          # v2/tasks-index.sqlite 是侧栏会话列表（标题/置顶/归档/未读/删除），不是可再生索引 ——
-          # 它只由在线 sessions-index 订阅播种，本地 db 重建不出来，丢了侧栏就是空的。
-          # server/ 也入包：它是桌面客户端连接时下载铺开的运行时（约 326MB，含 116MB node），
-          # 有包在手就能省掉每轮重新下载。但只在本地**不存在**时铺开 —— 本地已有说明客户端
-          # 已部署好（比包内新），覆盖只会把新版本降级成旧版本。
-          TMP_ZCODE_TAR="/tmp/zcode-restore.tar.gz"
-          ZCODE_RESTORE_DIR="/tmp/zcode-restore"
-          rm -rf "$ZCODE_RESTORE_DIR" 2>/dev/null || true
-          if rclone ls dropbox:self-hosted/zcode.tar.gz > /dev/null 2>&1; then
-            echo "📦 Found zcode.tar.gz! Downloading and extracting..."
-            # 2026-10-29（B2）：zcode.tar.gz 已在 Prefetch 后台预取，命中则 mv 收货；
-            # 未命中/失败回落原同步下载。下载失败不再掀步骤（后置步骤语义：
-            # 网关已在岗，数据缺失降级 + 告警，不级联），由下游 -s/tar 判据兜底跳过。
-            if ! fetch_via_prefetch zcode "$TMP_ZCODE_TAR"; then
-              if ! rclone copyto dropbox:self-hosted/zcode.tar.gz "$TMP_ZCODE_TAR" --multi-thread-streams 16; then
-                echo "⚠️ zcode.tar.gz 下载失败，跳过 ZCode 恢复（发告警）"
-                aux_fail_notify "zcode.tar.gz 下载失败"
-                rm -f "$TMP_ZCODE_TAR" 2>/dev/null || true
-              fi
-            fi
-            if [ -s "$TMP_ZCODE_TAR" ] && tar -tzf "$TMP_ZCODE_TAR" >/dev/null 2>&1; then
-              mkdir -p "$ZCODE_RESTORE_DIR"
-              tar -xzf "$TMP_ZCODE_TAR" -C "$ZCODE_RESTORE_DIR"
-              restored_any=0
-              for rel in cli v2; do
-                if [ -d "$ZCODE_RESTORE_DIR/.zcode/$rel" ]; then
-                  mkdir -p ~/.zcode
-                  rm -rf ~/.zcode/$rel
-                  cp -a "$ZCODE_RESTORE_DIR/.zcode/$rel" ~/.zcode/$rel
-                  echo "✅ Restored ~/.zcode/$rel from archive"
-                  restored_any=1
-                fi
-              done
-              if [ "$restored_any" -eq 0 ]; then
-                echo "⚠️ Archive contains neither .zcode/cli nor .zcode/v2, skipping ZCode restore."
-              fi
-              # server 设备身份（v2/certs CA + telemetry-state.json 的 deviceMid）随 v2/ 一起还原。
-              # 每次重新部署 server 都会重新生成身份，客户端把归档等本地 UI 状态 keyed 到该身份上；
-              # 身份一变，客户端里已归档会话全部复活（2026-09-12 排查结论：归档动作在 runner 侧零落盘）。
-              # 复用身份后客户端跨重置认得同一个 server。
-              if [ -d "$ZCODE_RESTORE_DIR/.zcode/v2/certs" ]; then
-                echo "✅ Restored ~/.zcode/v2 server identity (certs + deviceMid)"
-              else
-                echo "ℹ️ Archive has no .zcode/v2 identity (old package), server will generate a fresh one."
-              fi
-              # server/：仅当本地没有「真实部署」时才从包内铺开（省一次完整下载）。本地
-              # 已有客户端部署则保留 —— 客户端本轮部署的版本可能比包内新，覆盖等于降级。
-              # 2026-10-30：判据不能再只看目录是否存在 —— job 开头的「Seed ZCode server
-              # identity」已经建了 ~/.zcode/server 并写 install.json，只看目录会永远命中
-              # 「已存在」，把包内约 326MB 运行时白白丢掉、逼客户端重新下载。
-              # 故判据改为「除 install.json / run/ 之外还有内容（releases、current.json…）」。
-              if [ -d "$ZCODE_RESTORE_DIR/.zcode/server" ]; then
-                _deployed="$(find ~/.zcode/server -mindepth 1 -maxdepth 1 \
-                  ! -name install.json ! -name run -print -quit 2>/dev/null || true)"
-                if [ -n "$_deployed" ]; then
-                  echo "ℹ️ ~/.zcode/server 已有客户端部署（$(basename "$_deployed")），保留本地版本"
-                else
-                  mkdir -p ~/.zcode/server
-                  cp -a "$ZCODE_RESTORE_DIR/.zcode/server/." ~/.zcode/server/
-                  echo "✅ Restored ~/.zcode/server from archive (skips this run's re-download)"
-                  # 包内 install.json 的 installedAt 会随上一轮浮动，合并后立刻按仓库主身份复核
-                  bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/zcode-server-identity.sh" install || true
-                fi
-              else
-                echo "ℹ️ Archive has no .zcode/server (old package), client will deploy it fresh."
-              fi
-              # 身份复核（幂等）：仓库内身份文件是唯一权威，正常情况下这里什么都不改。
-              # 只有它缺失/损坏（seed 未生效）时，才回落到「tasks-index 里任务最多的
-              # host_id」—— 这条兜底路径会把客户端已看到的随机 id 换掉，代价是客户端弹
-              # 一次「确认是否作为新设备」。
-              if [ -f "$GITHUB_WORKSPACE/.github/scripts/openclaw/zcode-server-identity.json" ]; then
-                bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/zcode-server-identity.sh" install || true
-              else
-                echo "::warning::仓库主身份文件缺失，回落 tasks-index 兜底"
-                if [ -d ~/.zcode/server ] && command -v sqlite3 >/dev/null 2>&1 \
-                   && [ -s ~/.zcode/v2/tasks-index.sqlite ]; then
-                  _dom_id="$(sqlite3 ~/.zcode/v2/tasks-index.sqlite \
-                    "select replace(host_id,'remote:server:','') from tasks \
-                     where host_id like 'remote:server:%' group by host_id \
-                     order by count(*) desc limit 1;" 2>/dev/null || true)"
-                  _inst="$HOME/.zcode/server/install.json"
-                  if [ -n "$_dom_id" ]; then
-                    if [ -f "$_inst" ]; then
-                      jq --arg id "$_dom_id" '.installationId = $id' "$_inst" > "$_inst.tmp" \
-                        && mv "$_inst.tmp" "$_inst"
-                    else
-                      jq -n --arg id "$_dom_id" --arg root "$HOME/.zcode/server" \
-                        '{product:"zcode-server",schemaVersion:1,canonicalServerRoot:$root,installationId:$id,installedAt:(now*1000|floor)}' \
-                        > "$_inst"
-                    fi
-                    echo "✅ installationId 已固定为历史主身份: ${_dom_id}"
-                  else
-                    echo "ℹ️ tasks-index 无 remote:server host_id，installationId 保持现状"
-                  fi
-                fi
-              fi
-            else
-              echo "⚠️ zcode.tar.gz validation failed, skipping ZCode restore."
-            fi
-            rm -f "$TMP_ZCODE_TAR" 2>/dev/null || true
-            rm -rf "$ZCODE_RESTORE_DIR" 2>/dev/null || true
-            echo "=== restored ~/.zcode ==="
-            du -sh ~/.zcode/cli ~/.zcode/v2 ~/.zcode/server 2>/dev/null || true
-            ls ~/.zcode/cli/db/db.sqlite ~/.zcode/v2/tasks-index.sqlite 2>/dev/null \
-              || echo "⚠️ 还原后未见 db.sqlite/tasks-index.sqlite"
-            if command -v sqlite3 >/dev/null 2>&1; then
-              # 侧栏条数是「还原是否真的成功」最直接的证据：只报文件存在，无法区分空库与有库
-              echo "tasks-index rows: $(sqlite3 ~/.zcode/v2/tasks-index.sqlite 'select count(*) from tasks' 2>/dev/null || echo '?')"
-              echo "db.sqlite sessions: $(sqlite3 ~/.zcode/cli/db/db.sqlite 'select count(*) from session' 2>/dev/null || echo '?')"
-            fi
-          else
-            echo "ℹ️ No zcode.tar.gz found on Dropbox (first run), skipping ZCode restore."
-          fi
-
-          # B2 收口：npm 后台任务必须在本步骤结束前 wait（GH 会回收 step 的子进程）
+          # 收口：GH 会回收 step 的子进程，npm 后台任务必须在本步骤结束前 wait
           if wait "$AUX_NPM_PID"; then
             echo "✅ 辅助 CLI 安装完成（gemini-cli / clawhub）"
           else

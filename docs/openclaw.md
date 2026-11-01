@@ -168,20 +168,30 @@
   > 删掉会触发重新下载 —— 与省下载的目的相反，故一并保留。
   > 早先的版本把 `cli/rollout`、`cli/exec` 当「调试转储」排除，等于切掉会话内容；同时漏掉
   > 整个 `v2/`（侧栏列表）与 `server/`。这是 2026-09-18「备份不齐全、会话仍丢」的根因。
-- **`server/` 还原是条件性的**：仅当本地 `~/.zcode/server` **不存在**时才从包内铺开。
-  本地已有说明桌面客户端本轮已部署（且可能比包内新），覆盖等于把新版本降级成旧版本。
-  时间线上 `server/` 由客户端在连接时部署（实测 07:22），晚于还原步骤（06:13），
-  所以正常情况下还原时它不存在、铺开是纯增益。
+- **`server/` 还原是条件性的**：仅当本地 `~/.zcode/server` **除 install.json/run 外无部署**时才从包内铺开。
+  本地已有说明本轮已部署（且可能比包内新），覆盖等于把新版本降级成旧版本。
+  2026-11-01 起还原前移到 Tailscale 接入之前（见下条），正常轮次还原时本地必然只有
+  Seed identity 写的 install.json → 包内 `server/` 直接铺开，客户端接入零等待；
+  「本地已有部署则保留」的判据仅在本步被重跑/手动触发时生效。
 - **设备身份 `installationId` 先于客户端接入固定（2026-10-30）**：客户端「认设备」用的是
   server 上报的 `serverId`，真源是 `~/.zcode/server/install.json` 的 `installationId`
   （`host_id = remote:server:<installationId>`，侧栏任务全部 keyed 到它），hostname 只影响
   显示名。临时 runner 每轮重建时，`server/` 由客户端连接时部署并随机生成 `install.json`；
-  而「Restore ZCode data」步骤已后置到网关健康之后（晚于客户端接入），在那里回钉历史 id
-  会造成同一轮内身份「先新后旧」→ 客户端弹「连接目标的身份已变化，是否作为新设备」。
+  若数据还原晚于客户端接入，在那里回钉历史 id 会造成同一轮内身份「先新后旧」→
+  客户端弹「连接目标的身份已变化，是否作为新设备」。
   根治做法：历史 id 随仓库保存（`.github/scripts/openclaw/zcode-server-identity.json`），
   job 最前面、Tailscale 起来之前就铺好 `install.json`；客户端部署走
   `ensureServerInstallOwnership()` 的 `EEXIST → validate` 分支沿用该 id。
   还原步骤里的回钉降级为兜底（仅 seed 失效时才真正改盘）。
+- **ZCode 数据还原先于 Tailscale 接入（2026-11-01，主人拍板）**：B2（2026-10-29）曾把还原
+  后置到网关健康之后，实测两种事故形态：① 客户端经 Tailscale 先连上空数据 server、
+  还原步骤随后 `rm -rf + cp -a` 把运行中服务脚下的库整个换掉，3.17.1 迁移时序被搅乱、
+  projects 注册表清空 → 全量 `project.not-found`；② 有毒库（projects 空表）被归档循环
+  传上云后，下一轮冷启动还原毒库复发同错。根治：`Restore ZCode data (先于 Tailscale 接入)`
+  步骤移到 Seed identity 之后、所有 Tailscale 步骤之前，rclone-install/config 一并前移；
+  还原后 server 首次打开的就是最终数据，不存在脚下换库。zcode.tar.gz 因此退出 Prefetch
+  （消费方已前移，Prefetch 收口等待反而拉长接入前延迟），改同步下载。原位置只剩
+  `Install auxiliary CLIs`（gemini-cli/clawhub），护栏不变。
   > 客户端此前若已按别的身份确认过「作为新设备」，修复后首次连接可能仍需确认一次；
   > 此后 id 恒定，不再复发。
 - **SQLite 取一致性快照**：`db.sqlite` 与 `tasks-index.sqlite` 用 `sqlite3 .backup` 从活库
