@@ -17,6 +17,12 @@
 # 补三路通知（alert 档、title+footer，与 run-workbuddy.sh 等六脚本同口径）：
 #   🟢 就绪 / ⚠️ 降级（附回退原因）/ ❌ 全败或 pinned 失败。版式真源：docs/telegram-notify.md。
 _ai_tg_avail() { [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; }
+# tg_add_title/tg_add_kv 在下方各通知点由**父 shell**直接调用，必须顶层 source 一次；
+# 只在 _ai_notify 的子 shell 里 source 对父 shell 函数表不可见 —— 503b30b 首次部署即
+# 因此在就绪通知点 exit 127（bash -e），把 ensure ai-api 一起打死（2026-11-01
+# ai-api 530/1033 事故根因，被步骤级 continue-on-error 掩盖成 success）。
+# shellcheck disable=SC1091
+source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh" 2>/dev/null || true
 _ai_notify() {
   _ai_tg_avail || return 0
   if [ -f "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh" ]; then
