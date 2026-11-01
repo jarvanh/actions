@@ -469,6 +469,9 @@
         tg_add_section _m "🧾 服务日志尾部"
         tg_add_pre _m "$Z2A_TAIL"
       fi
+      # 资产段（套餐到期 + 今日消耗）：路线 B —— 口径真源在看板（2026-11-01）。
+      _z2a_assets="$(python3 /dropbox/self-hosted/quota-board/board.py assets zcode 2>/dev/null || true)"
+      [ -n "$_z2a_assets" ] && tg_append _m "$_z2a_assets"
       tg_add_footer _m
       if send_tg "$_m" alert; then
         # 风控停用留痕：发送成功才写（失败下轮重试，对齐就绪标记口径）

@@ -459,6 +459,7 @@ Telegram 收到，放弃重试只会让凭据彻底丢失。
 | ⚠️ 归档告警 · 对象 / ⚠️ 最终归档告警 · 对象 | `openclaw.yml` | 周期/最终归档失败（rclone/tar；标题带对象——五个归档包曾共用一个标题，看不出是哪个包出问题） |
 | ✅ / ⚠️ / ❌ OpenClaw 最终归档完成 · 部分失败 · 失败 | `openclaw.yml` | 最终归档收尾，按对象汇总结果（全败 ❌「OpenClaw 最终归档失败」；有失败降级 ⚠️「完成 · 部分失败」；归档步骤没产出明细时发 ⚠️「最终归档未完成」兜底）。**档位**：全败的 ❌ 走 `alert` 档（与同轮 `send_archive_alert` 对齐），✅/⚠️ 走普通档 |
 | 🟢 / ⚠️ / ❌ AI 网关就绪 · 后端 / 已降级 · 后端 / 全部未就绪 | `openclaw.yml` | AI 网关（OmniRoute→CliRelay→CLIProxyAPI 降级链）部署收口：主用就绪 🟢、自动降级 ⚠️（附回退原因）、pinned 失败或三后端全败 ❌；alert 档。2026-11-01 补齐——此前 OmniRoute 是唯一不发就绪/失败通知的网关 |
+| 📅 资产 · 签到与有效期（段） | `run-{workbuddy,trae2api,zcode2api,qoder2api,autoclaw}.sh` | 就绪通知内嵌段：签到汇总（已签 N/M · 签到 +N 积分，当日口径）+ 时间维度（wb 额度刷新 / zcode 套餐到期 / trae 即将过期 / autoclaw 今日领取）。数据源 = `board.py assets <src>` CLI（路线 B，2026-11-01 主人拍板：口径真源在看板，通知只引用，零漂移） |
 | 🚨 OmniRoute 归档恢复失败 · 空库兜底 | `openclaw.yml` | Dropbox 归档存在但本轮恢复未走通、已 bootstrap 空库（P0 数据事故信号，`alert` 档） |
 | ⚠️ ZCode 数据提前恢复失败 / ⚠️ 辅助 CLI 安装失败 | `openclaw.yml` | zcode.tar.gz 下载/校验失败或 rclone 不可用（提前恢复步，先于 Tailscale 接入）；gemini-cli/clawhub npm 安装失败；均 alert 档。2026-11-01 由「ZCode 数据/辅助 CLI 后置恢复失败」拆分更名（还原前移） |
 | 🚨 vaultwarden 数据恢复失败 | `p.yml` | Dropbox 备份缺 `db.sqlite3`：本轮终止、不启动空库、不回传（防空库覆盖远端好数据，`alert` 档）。`p.yml` 是 vaultwarden 容器工作流，与 OpenClaw 主链路共用同一套通知层 |

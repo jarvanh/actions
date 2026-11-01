@@ -63,6 +63,9 @@ qoder_notify() {
       fi
       # 明文 API Key（对齐 wb/trae 展示口径）
       tg_add_path _msg "API Key" "$(read_qoder_key | grep . || echo 未取到)"
+      # 资产段（签到汇总）：路线 B —— 口径真源在看板（2026-11-01）。
+      _qd_assets="$(python3 /dropbox/self-hosted/quota-board/board.py assets qoder 2>/dev/null || true)"
+      [ -n "$_qd_assets" ] && tg_append _msg "$_qd_assets"
     fi
     [ -n "$5" ] && tg_add_kv _msg "原因" "$5"
     if [ -n "$6" ]; then

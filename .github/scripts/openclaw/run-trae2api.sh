@@ -177,6 +177,9 @@
         # 用量 + 流水（与 wb_notify 同口径，2026-10-05 补）：只渲染 trae 自己的，
         # 调 board.py CLI 与看板共用渲染代码与数据源。trae 当日无 usage 文件时
         # CLI 输出空串，静默跳过（不留空行）。
+        # 资产段（签到汇总 + 即将过期）：路线 B —— 口径真源在看板（2026-11-01）。
+        _trae_assets="$(python3 /dropbox/self-hosted/quota-board/board.py assets trae 2>/dev/null || true)"
+        [ -n "$_trae_assets" ] && tg_append _msg "$_trae_assets"
         _trae_ul_block="$(python3 /dropbox/self-hosted/quota-board/board.py usage-ledger trae 12 2>/dev/null || true)"
         [ -n "$_trae_ul_block" ] && tg_append _msg "$_trae_ul_block"
         if [ -n "$6" ]; then

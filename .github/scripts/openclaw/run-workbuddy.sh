@@ -84,6 +84,16 @@
           # 标签「API Key」+ tg_add_path：值按规范走 <code> 等宽，
           # 客户端点一下即可整块复制（tg_add_kv 是纯文本，只能手选）
           tg_add_path _msg "API Key" "${AI_GATEWAY_API_KEY:-未取到}"
+          # 健康自检（2026-11-01 主人要求）：配置 JSON 可解析 / 凭据数 / 端口
+          # 监听 —— 11-01 wb 崩溃循环（config unknown field）若有这行，通知
+          # 当场暴露根因，不用等看板标陈旧才发现。
+          _hc_cfg="✗"; _hc_cred="—"; _hc_port="✗"
+          if python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$WB_DIR/config.json" 2>/dev/null; then _hc_cfg="✓"; fi
+          _hc_n="$(find "$WB_DIR" -maxdepth 1 -name 'workbuddy-*.json' 2>/dev/null | grep -c . || true)"
+          if [ "${_hc_n:-0}" -gt 0 ]; then _hc_cred="✓ ${_hc_n} 个"; fi
+          _hc_code="$(curl -s --connect-timeout 2 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${WB_PORT}/health" 2>/dev/null || true)"
+          if [ -n "$_hc_code" ] && [ "$_hc_code" != "000" ]; then _hc_port="✓"; fi
+          tg_add_kv _msg "自检" "配置 $_hc_cfg · 凭据 $_hc_cred · 端口 $_hc_port"
         fi
         [ -n "$5" ] && tg_add_kv _msg "原因" "$5"
         # 凭据段（🔑 凭据 · N）已按主人要求移除（2026-10-05）：凭据文件名去掉
@@ -217,6 +227,10 @@
         # 避免 wb 通知里出现 zcode 数据（语义串台）。调 board.py 的 CLI 子命令 ——
         # 与看板**共用同一份渲染代码与本地实时 usage**，不另写一套、不走 Dropbox 旧副本
         # （那版仅收尾回推，实测落后 4 小时丢 93% 行）。文件缺失时 CLI 输出空串，静默跳过。
+        # 资产段（签到汇总 + 额度刷新）：路线 B（2026-11-01 主人拍板）——口径
+        # 真源在看板，通知只引用 assets CLI 输出，看板改措辞自动跟上。
+        _wb_assets="$(python3 /dropbox/self-hosted/quota-board/board.py assets workbuddy 2>/dev/null || true)"
+        [ -n "$_wb_assets" ] && tg_append _msg "$_wb_assets"
         _wb_ul_block="$(python3 /dropbox/self-hosted/quota-board/board.py usage-ledger workbuddy 12 2>/dev/null || true)"
         [ -n "$_wb_ul_block" ] && tg_append _msg "$_wb_ul_block"
         if [ -n "$6" ]; then
@@ -1089,7 +1103,9 @@
         if [ "$_n_fail" -gt 0 ]; then _cksum="${_cksum} · 失败 ${_n_fail}"; fi
         if [ "$_n_unk" -gt 0 ]; then _cksum="${_cksum} · 未采集 ${_n_unk}"; fi
         if [ "$_n_skip" -gt 0 ]; then _cksum="${_cksum} · 跳过 ${_n_skip}"; fi
-        if [ "$_sum_today" -gt 0 ]; then _cksum="${_cksum} · 今日合计 +${_sum_today}"; fi
+        # 今日合计改由「资产段」承载（路线 B，2026-11-01 主人拍板 b）：当日
+        # 口径与小程序完全同源（board.py assets CLI，含国际站账本），本轮汇总
+        # 不再混当日累计 —— 两处数字打架就是这么来的。
         WB_CHECKIN_SUMMARY="$_cksum"
       fi
     fi
