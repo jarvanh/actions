@@ -170,7 +170,7 @@ workflow 会把 `*.sh` `*.py` `*.jq` 拷到 `/tmp` 再 `source /tmp/load_all.sh`
 
 第二遍（真正同步）
   run_all_tasks → sync_task → _sync_task_impl → sync_with_logging
-      健康预检 → rclone sync → 重试(423/8005) → truth-check 取后端真值
+      健康预检 → rclone copy（openlist: 目标端，2026-11-01 起）→ 重试(423/8005) → truth-check 取后端真值
       → diff 出缺失文件 → 修复管线 → 结果通知
 ```
 
@@ -551,13 +551,14 @@ API list），读得通但写不进的后端会被整轮放行——run #12616 �
 死后端重试多少次都一样。收尾 step 打印 `本轮修复成效: 成功 X · 缺失 Y · 未修复 Z`，
 `Y>0 且 X=0` 时额外输出 🚨 零成功告警 —— `conclusion=success` 不等于有数据落盘。
 
-**删除语义（2026-09-12 改）**：`RCLONE_SYNC_TASK_FLAGS` 已移除 `--delete-before`，
-`rclone sync` 退化为只增不减的 copy 语义。原因：上一轮以替代形态修复成功的文件，会被
-下一轮的 initial sync 当成「源端没有的多余文件」删除（run #12616：50 个 `Deleted` +
-短哈希目录 `f21d720a` 被整个 `Removing directory`），随后 truth-check 又把同一批文件判为
-缺失重新修复——修一轮、删一轮，跨轮净进度为零。排除清单是文件级的，目录里混有未记录
-文件就会被逐个删空、目录随之消失，保护形同虚设。备份语义下目标端是灾备副本，误删代价
-远大于残留。
+**删除语义（2026-11-01 终版修复）**：`RCLONE_SYNC_TASK_FLAGS` 移除 `--delete-before`（2026-09-12）**没有**
+达成只增不减——`rclone sync` 自带的清理阶段仍在删文件。run 41196672258 / 41219905962 两轮日志实锤
+两类误删：① 修复产物短哈希目录 `f27becd6` 被 `Deleted` + `Removing directory`（旧任务名下的 marker
+记录孤儿化后 filter 为空），同轮又重新折叠 97 文件，跨轮净进度为零；② WebDAV+crypt 超长文件名场景
+同一条命令先 `Copied (new)` 后 `Deleted` 同一路径（幻影列举条目），84 分钟内 copy→删→copy 拉锯 3 轮。
+2026-11-01 起 openlist: 目标端的 initial sync 直接改用 **`rclone copy`**（非 openlist 目标维持 sync）：
+目标端不再删除任何文件，marker/修复/还原链路不受影响；批次 copy、目录折叠、dropbox 镜像、灾难恢复
+rebuild 的既有语义不变。备份语义下目标端是灾备副本，误删代价远大于残留。
 
 **吞吐调优（P1）**：`transfers`（**默认 6**）、`subdir_parallel`（**默认 2**）、
 `pair_parallel`（**默认 2**）三者相乘即"单后端并发 PUT 数"（6×2=12，正好落在实测拐点；
