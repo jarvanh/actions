@@ -121,7 +121,15 @@ _pairs_parallel_reap_one() {
       done
       _beat_left="未知"
       [ -n "${OPENLIST_SYNC_DEADLINE_EPOCH:-}" ] && _beat_left="$(( (OPENLIST_SYNC_DEADLINE_EPOCH - _beat_now) / 60 ))min"
-      echo "⏱ [心跳] 并行同步对等待中: 在跑 ${_beat_live} 个 · 已完成 ${_done_n}/${_pp_n} · 累计传输 $(format_bytes "${total_transferred:-0}") · 预算剩 ${_beat_left}"
+      # 已完成对的字节只在 reap 时结算；传输中的对要走实时记账文件求和
+      # （trend_record_transferred 由各任务收尾追加），否则大文件一传几小时、
+      # 心跳的"累计传输"纹丝不动（run 41196672258: 3h 停在 345.154 KiB，
+      # 同期 rclone 实际在传 GiB 级）
+      local _beat_live_bytes=0 _beat_line
+      while IFS= read -r _beat_line; do
+        [[ "$_beat_line" =~ ^[0-9]+$ ]] && _beat_live_bytes=$((_beat_live_bytes + _beat_line))
+      done < "${TREND_TRANSFERRED_LOG:-/tmp/ol_trend_transferred.log}" 2>/dev/null || true
+      echo "⏱ [心跳] 并行同步对等待中: 在跑 ${_beat_live} 个 · 已完成 ${_done_n}/${_pp_n} · 累计传输 $(format_bytes "${total_transferred:-0}") + 在途 $(format_bytes "$_beat_live_bytes") · 预算剩 ${_beat_left}"
     fi
     # 硬顶闸（2026-09-25 病灶 D 第五处）: 闸必须装在**轮询内部**，不能只装在
     #   调用点前。调用点前的闸只能查到"进入等待的那一瞬间" —— run 35989879675
