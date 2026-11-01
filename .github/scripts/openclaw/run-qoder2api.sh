@@ -130,11 +130,16 @@ fi
 # dfmodel/deepseek-flash 排队时走默认 visible 流内等待（预算 QD_QUEUE_WAIT_BUDGET_SECS=600s），
 # 排到就继续用免费模型，不再秒拒切付费下一腿。要恢复秒拒把下行加回：
 #   -e QD_QUEUE_FAST_MODELS=dfmodel,deepseek-flash \
+# QD_ERROR_COOLDOWN_WAIT_MAX=30（fork v1.7.20）：短频控自吞预算从默认 10s 调大，
+# ≤30s 的上游短频控窗服务端 sleep 等过后正常服务，客户端不再看到瞬态 429
+#（2026-11-01 Kimi 21s 实锤：10s 预算接不住 + 客户端不认 Retry-After 直接抛错）。
+# 远小于排队既有 600s 等待预算，无占坑风险。
 if ! docker run -d --name qoder2api \
   --restart unless-stopped \
   --network omniroute_default \
   -p ${QODER_PORT}:8790 \
   -e HOST=0.0.0.0 -e PORT=8790 -e TZ=Asia/Shanghai \
+  -e QD_ERROR_COOLDOWN_WAIT_MAX=30 \
   -v "$QODER_DATA/accounts:/app/accounts" \
   -v "$QODER_DATA/usage:/app/usage" \
   "$QODER_IMAGE"; then
