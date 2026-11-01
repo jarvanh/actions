@@ -741,6 +741,23 @@ if [ "${OMNIROUTE_NOTIFY:-1}" != "0" ]; then
   else
     tg_add_title _ai_m "🟢 AI 网关已就绪 · ${ACTIVE_BACKEND}"
   fi
+  # 2026-11-01 首弹实拍（run 41351683271，主人转发反馈）：原版只有标题+footer，
+  # 比五网关就绪通知薄 —— 补齐 接口/镜像（omniroute）/自检 三件。统一端口方案：
+  # 三后端全部服务在 127.0.0.1:20128（降级不换端口），接口行恒同。OmniRoute 是
+  # token 口径无签到，无资产段（assets CLI 无此源）。
+  tg_add_path _ai_m "接口" "http://127.0.0.1:20128/v1"
+  if [ "$ACTIVE_BACKEND" = "omniroute" ]; then
+    tg_add_kv _ai_m "镜像" "${OMNIROUTE_IMAGE:-未知}"
+  fi
+  _ai_hc="$(curl -s --connect-timeout 2 -o /dev/null -w '%{http_code}' http://127.0.0.1:20128/healthz 2>/dev/null || true)"
+  _ai_hc_txt="20128 HTTP ${_ai_hc:-000}"
+  case "$ACTIVE_BACKEND" in
+    omniroute)   _ai_ct="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' omniroute 2>/dev/null || true)" ;;
+    clirelay)    _ai_ct="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' clirelay 2>/dev/null || true)" ;;
+    cliproxyapi) _ai_ct="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' cli-proxy-api 2>/dev/null || true)" ;;
+  esac
+  [ -n "$_ai_ct" ] && _ai_hc_txt="${_ai_hc_txt} · 容器 ${_ai_ct}"
+  tg_add_kv _ai_m "自检" "$_ai_hc_txt"
   _ai_notify
 fi
 
