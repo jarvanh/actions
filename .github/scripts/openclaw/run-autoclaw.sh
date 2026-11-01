@@ -270,6 +270,9 @@
               tg_add_section _m "🌾 积分收割 · 1"
               tg_add_block _m "$(tree_lines "结果：<code>$(escape_html "$AC_CLAIM")</code>")"
             fi
+            # 资产段（签到汇总 + 今日领取）：路线 B —— 口径真源在看板（2026-11-01）。
+            _ac_assets="$(python3 /dropbox/self-hosted/quota-board/board.py assets autoclaw 2>/dev/null || true)"
+            [ -n "$_ac_assets" ] && tg_append _m "$_ac_assets"
             # 用量 + 流水（信息层面对齐 wb/zcode 通知，主人 2026-10-11 要求）：
             # 调 board.py CLI 与看板共用渲染代码；autoclaw 走 lifetime 累计特例，
             # 无数据时输出空串静默跳过（与 wb/zcode 同口径）。
