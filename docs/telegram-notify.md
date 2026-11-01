@@ -458,6 +458,7 @@ Telegram 收到，放弃重试只会让凭据彻底丢失。
 | 🚨 OpenClaw 自愈失败 | `openclaw.yml` | 主步骤失败，推失败阶段 / 版本 / 关键日志 |
 | ⚠️ 归档告警 · 对象 / ⚠️ 最终归档告警 · 对象 | `openclaw.yml` | 周期/最终归档失败（rclone/tar；标题带对象——五个归档包曾共用一个标题，看不出是哪个包出问题） |
 | ✅ / ⚠️ / ❌ OpenClaw 最终归档完成 · 部分失败 · 失败 | `openclaw.yml` | 最终归档收尾，按对象汇总结果（全败 ❌「OpenClaw 最终归档失败」；有失败降级 ⚠️「完成 · 部分失败」；归档步骤没产出明细时发 ⚠️「最终归档未完成」兜底）。**档位**：全败的 ❌ 走 `alert` 档（与同轮 `send_archive_alert` 对齐），✅/⚠️ 走普通档 |
+| 🟢 / ⚠️ / ❌ AI 网关就绪 · 后端 / 已降级 · 后端 / 全部未就绪 | `openclaw.yml` | AI 网关（OmniRoute→CliRelay→CLIProxyAPI 降级链）部署收口：主用就绪 🟢、自动降级 ⚠️（附回退原因）、pinned 失败或三后端全败 ❌；alert 档。2026-11-01 补齐——此前 OmniRoute 是唯一不发就绪/失败通知的网关 |
 | 🚨 OmniRoute 归档恢复失败 · 空库兜底 | `openclaw.yml` | Dropbox 归档存在但本轮恢复未走通、已 bootstrap 空库（P0 数据事故信号，`alert` 档） |
 | 🚨 vaultwarden 数据恢复失败 | `p.yml` | Dropbox 备份缺 `db.sqlite3`：本轮终止、不启动空库、不回传（防空库覆盖远端好数据，`alert` 档）。`p.yml` 是 vaultwarden 容器工作流，与 OpenClaw 主链路共用同一套通知层 |
 | 🚫 Dropbox 配额不足，本轮已中止 | `openclaw.yml` | 归档前置预检：剩余空间低于阈值即中止本轮，不空转刷失败告警（`alert` 档） |
