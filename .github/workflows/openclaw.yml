@@ -150,6 +150,7 @@ jobs:
         # 时序依赖：rclone-install/config 已前移到本步之前；本步在 Prefetch 之前执行，
         # zcode.tar.gz 直接同步下载（3GB ≈ 30-60s），不再进 Prefetch。护栏同款：
         # continue-on-error 不级联（此刻网关尚未启动，无服务可伤），失败必须出声（TG alert）。
+        # ⚠️ 本步位置 = 时序红线：必须先于所有 Tailscale 步骤（红线说明见 Clean stale 节点上方注释）。
         if: ${{ !cancelled() }}
         continue-on-error: true
         env:
@@ -270,6 +271,11 @@ jobs:
             echo "ℹ️ No zcode.tar.gz found on Dropbox (first run), skipping ZCode restore."
           fi
 
+      # ⚠️ 时序红线（2026-11-01 project.not-found 事故）：从本行往下，Tailscale/SSH 入口随时可用，
+      # 客户端可接入并部署/打开 ZCode server。上方的「Restore ZCode data (先于 Tailscale 接入)」
+      # 必须保持在所有 Tailscale 步骤之前，禁止后移 —— B2 曾把还原后置到网关健康之后，客户端
+      # 接入后还原步骤 rm -rf 换库，3.17.1 迁移时序被搅乱、projects 注册表清空全量 not-found。
+      # 任何「还原/迁移类」新步骤都不得排到本行之后；细节见 docs/openclaw.md「还原时序」。
       - name: Clean stale Tailscale nodes (openclaw* 僵尸清退)
         id: ts_clean
         if: ${{ always() && (env.TS_API_KEY != '' || (env.TS_OAUTH_CLIENT_ID != '' && env.TS_OAUTH_CLIENT_SECRET != '')) }}
