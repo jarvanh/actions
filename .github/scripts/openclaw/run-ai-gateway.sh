@@ -12,6 +12,23 @@
 # 注：compose heredoc 原本靠 `sed 's/^          //'` 剥 run-block 缩进，
 # 外置后内容天然顶格，该 sed 成为无害 no-op，保留以防口径漂移。
 
+# ── 2026-11-01 OmniRoute 通知补齐（主人：就绪/失败通知要全部网关都有）──
+# 此前本脚本的「已就绪」全是 job 日志 echo，不发 TG —— 七网关里唯一漏网。
+# 补三路通知（alert 档、title+footer，与 run-workbuddy.sh 等六脚本同口径）：
+#   🟢 就绪 / ⚠️ 降级（附回退原因）/ ❌ 全败或 pinned 失败。版式真源：docs/telegram-notify.md。
+_ai_tg_avail() { [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; }
+_ai_notify() {
+  _ai_tg_avail || return 0
+  if [ -f "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh" ]; then
+    ( source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh" 2>/dev/null \
+      && tg_add_footer _ai_m \
+      && send_tg "$_ai_m" alert ) \
+      || echo "::warning::OmniRoute TG 通知发送失败（不影响任务）"
+  else
+    echo "::warning::tg_notify.sh 不存在，OmniRoute TG 通知跳过"
+  fi
+}
+
 # ── 2026-10-30 P5b：上游并行拉起汇合门（屏障）──
 # workbuddy/trae2api/zcode2api/qingyan 已改后台部署（rc → /tmp/upstream-rc-*）。
 # 此处等齐（上限 480s）才开始部署 OmniRoute —— 守住「上游先于代理」的启动
@@ -608,6 +625,8 @@ if [ "$PINNED_BACKEND" = "omniroute" ]; then
     echo "✅ 当前生效 AI 网关: OmniRoute（pinned）"
   else
     echo "❌ OmniRoute（pinned）未就绪 —— pinned 模式不降级，直接失败"
+    _ai_m=""; tg_add_title _ai_m "❌ OmniRoute（pinned）未就绪"
+    _ai_notify
     docker logs omniroute --tail 100 || true
     exit 1
   fi
@@ -619,6 +638,8 @@ elif [ "$PINNED_BACKEND" = "clirelay" ]; then
     echo "✅ 当前生效 AI 网关: CliRelay（pinned）"
   else
     echo "❌ CliRelay（pinned）未就绪 —— pinned 模式不降级，直接失败"
+    _ai_m=""; tg_add_title _ai_m "❌ CliRelay（pinned）未就绪"
+    _ai_notify
     $COMPOSE logs --tail 80 2>/dev/null || true
     exit 1
   fi
@@ -630,6 +651,8 @@ elif [ "$PINNED_BACKEND" = "cliproxyapi" ]; then
     echo "✅ 当前生效 AI 网关: CLIProxyAPI（pinned）"
   else
     echo "❌ CLIProxyAPI（pinned）未就绪 —— pinned 模式不降级，直接失败"
+    _ai_m=""; tg_add_title _ai_m "❌ CLIProxyAPI（pinned）未就绪"
+    _ai_notify
     docker logs cliproxyapi --tail 100 || true
     exit 1
   fi
@@ -672,6 +695,12 @@ else
       echo "✅ 已回退，当前生效 AI 网关: CLIProxyAPI（单容器，20128 统一端口）"
     else
       echo "❌ 三个后端全部未就绪（omniroute/clirelay/cliproxyapi）"
+      # 2026-11-01：失败态也写 BACKEND_STATE —— 此前 exit 1 在写文件之前发生，
+      # 下游 Runner 就绪通知读不到、默认显示 omniroute（假信息）。
+      printf 'ACTIVE_BACKEND=none\n' > "$BACKEND_STATE"
+      [ -n "${FALLBACK_REASON:-}" ] && printf 'FALLBACK_REASON=%s\n' "$FALLBACK_REASON" >> "$BACKEND_STATE"
+      _ai_m=""; tg_add_title _ai_m "❌ AI 网关全部未就绪"
+      _ai_notify
       docker logs cliproxyapi --tail 100 2>/dev/null || true
       exit 1
     fi
@@ -681,6 +710,19 @@ fi
   printf 'ACTIVE_BACKEND=%s\n' "$ACTIVE_BACKEND"
   if [ -n "${FALLBACK_REASON:-}" ]; then printf 'FALLBACK_REASON=%s\n' "$FALLBACK_REASON"; fi
 } > "$BACKEND_STATE"
+
+# ── 就绪/降级 TG 通知（2026-11-01 补齐）：OMNIROUTE_NOTIFY=0 可关（pinned
+# 定点验证时免打扰）；降级带回退原因。版式与六网关脚本同款（title+footer）。
+if [ "${OMNIROUTE_NOTIFY:-1}" != "0" ]; then
+  _ai_m=""
+  if [ -n "${FALLBACK_REASON:-}" ]; then
+    tg_add_title _ai_m "⚠️ AI 网关已降级 · ${ACTIVE_BACKEND}"
+    tg_add_kv _ai_m "回退原因" "${FALLBACK_REASON}"
+  else
+    tg_add_title _ai_m "🟢 AI 网关已就绪 · ${ACTIVE_BACKEND}"
+  fi
+  _ai_notify
+fi
 
 # Hand off to the systemd unit (Restart=always) instead of a bare
 # nohup, so the tunnel survives signal sweeps and restarts itself.
