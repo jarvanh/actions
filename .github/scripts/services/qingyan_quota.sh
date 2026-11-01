@@ -131,6 +131,7 @@ try:
     soonest = 0
     soonest_amt = 0.0
     soon_expire = 0.0
+    _batches = []   # 2026-11-01：7 天窗内逐批明细 [{at,amt,ty}]（已过期剔除）
     now = time.time()
     for page in range(1, 11):
         rec = f"{REC_URL}?page={page}&page_size=50"
@@ -155,6 +156,14 @@ try:
                 continue
             if delta <= 604800:   # 7 天（主人 2026-10-10 定：与看板 EXPIRE_SOON_SECS 同口径）
                 soon_expire += amt
+                # 逐批明细（2026-11-01 主人指出时刻上游本来就有）：每批带
+                # 时刻+金额+来源，看板逐批渲染真实倒计时。
+                _batches.append({
+                    "at": time.strftime("%m-%d %H:%M", time.localtime(exp)),
+                    "amt": round(amt),
+                    "ty": str(it.get("type") or it.get("title")
+                              or it.get("remark") or "").strip()[:20],
+                })
             if soonest == 0 or exp < soonest:
                 soonest = exp
                 soonest_amt = amt
@@ -167,6 +176,7 @@ try:
         "soonest": soonest,
         "soonest_amt": round(soonest_amt),
         "soon_expire": round(soon_expire),
+        "batches": _batches,
     }))
 except Exception as e:
     print(json.dumps({"error": str(e)[:200]}))
@@ -182,6 +192,8 @@ PY
   soonest="$(printf '%s' "$out" | jq -r '.soonest // 0' 2>/dev/null || true)"
   soonest_amt="$(printf '%s' "$out" | jq -r '.soonest_amt // 0' 2>/dev/null || true)"
   soon_expire="$(printf '%s' "$out" | jq -r '.soon_expire // 0' 2>/dev/null || true)"
+  # 逐批明细原样透传（2026-11-01）；jq -c 紧凑单行（无 tab，不破坏 TSV 列）
+  qy_batches="$(printf '%s' "$out" | jq -c '.batches // []' 2>/dev/null || true)"
   # 最近到期时间：0 表示没有带有效期的入账。
   # 时间格式化两个分支：ubuntu runner 有 GNU date -d；本机 macOS 只有
   # date -r（秒级）。两者都试，都失败才退成 "-"。
@@ -200,7 +212,7 @@ PY
     log "❌ 查积分失败：$(printf '%s' "$out" | head -c 150)"
     return 1
   fi
-  printf '%s\t%s\t%s\t%s\t%s\n' "$score" "$rule" "$soonest_fmt" "$soonest_amt" "$soon_expire"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$score" "$rule" "$soonest_fmt" "$soonest_amt" "$soon_expire" "$qy_batches"
   return 0
 }
 
@@ -210,6 +222,7 @@ cmd_delta() {
   local soonest_in="${2:-}"
   local soon_expire_in="${3:-}"
   local soonest_amt_in="${4:-}"   # 2026-11-01：最早批金额（拆行展示数据源）
+  local batches_in="${5:-}"       # 2026-11-01：7 天窗内逐批明细 JSON
   [ -n "$cur" ] || { log "用法: $0 delta <当前余额> [最近到期] [24h将过期] [最早批金额]"; return 1; }
   mkdir -p "$STATE_DIR" 2>/dev/null || true
 
@@ -253,9 +266,11 @@ cmd_delta() {
   prev_soonest="$(grep -m1 '^soonest=' "$SNAP" 2>/dev/null | cut -d= -f2- || true)"
   prev_soon_expire="$(grep -m1 '^soon_expire=' "$SNAP" 2>/dev/null | cut -d= -f2- || true)"
   prev_soonest_amt="$(grep -m1 '^soonest_amt=' "$SNAP" 2>/dev/null | cut -d= -f2- || true)"
+  prev_batches="$(grep -m1 '^batches=' "$SNAP" 2>/dev/null | cut -d= -f2- || true)"
   [ -n "$soonest_in" ] && prev_soonest="$soonest_in"
   [ -n "$soon_expire_in" ] && prev_soon_expire="$soon_expire_in"
   [ -n "$soonest_amt_in" ] && prev_soonest_amt="$soonest_amt_in"
+  [ -n "$batches_in" ] && prev_batches="$batches_in"
 
   umask 077
   {
@@ -264,6 +279,7 @@ cmd_delta() {
     printf 'day_total=%s\n' "$day_total"
     printf 'soonest=%s\n' "${prev_soonest:--}"
     printf 'soonest_amt=%s\n' "${prev_soonest_amt:-0}"
+    printf 'batches=%s\n' "${prev_batches:-[]}"
     printf 'soon_expire=%s\n' "${prev_soon_expire:-0}"
   } > "$SNAP" 2>/dev/null || true
 
@@ -273,6 +289,6 @@ cmd_delta() {
 
 case "${1:-}" in
   fetch) cmd_fetch ;;
-  delta) cmd_delta "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
+  delta) cmd_delta "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}" ;;
   *) echo "用法: $0 {fetch|delta <当前余额> [最近到期] [24h将过期] [最早批金额]}"; exit 1 ;;
 esac
