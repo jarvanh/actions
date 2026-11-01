@@ -50,13 +50,27 @@ _ai_notify() {
 # 撞上未预热/自检失败的上游 —— 由 OmniRoute 自身 circuit breaker 兜底，
 # 与「自检失败也照常部署」的旧降级路径同性质，只是时间点提前。
 _up_names="workbuddy trae2api zcode2api qingyan autoclaw qoder2api"
+# 2026-11-02 屏障加固：主等待 = 全齐或 480s 上限不变；新增「5/6 就绪 + 60s 宽限」
+# 提前放行 —— 单个上游 rc 缺席（脚本 bug / 早退未写兜底 rc，run 41294902778 即
+# autoclaw 内联版从未写 rc）不再把其余五个全拖满 480s。宽限后仍缺席的按缺席口径
+# 降级放行（渠道可能降级，照常部署），语义与超时路径一致。
 _up_deadline=$(( $(date +%s) + 480 ))
+_up_grace_deadline=""
 while [ "$(date +%s)" -lt "$_up_deadline" ]; do
   _up_done=0
   for _u in $_up_names; do
     if [ -f "/tmp/upstream-rc-$_u" ]; then _up_done=$((_up_done+1)); fi
   done
   if [ "$_up_done" -eq 6 ]; then break; fi
+  # 5/6 到齐且宽限死线未定 → 设定宽限死线（60s 后放行）
+  if [ "$_up_done" -eq 5 ] && [ -z "$_up_grace_deadline" ]; then
+    _up_grace_deadline=$(( $(date +%s) + 60 ))
+    echo "⏳ [P5b] 5/6 上游就绪，余下 1 个宽限 60s（到点按缺席降级放行）"
+  fi
+  if [ -n "$_up_grace_deadline" ] && [ "$(date +%s)" -ge "$_up_grace_deadline" ]; then
+    echo "⚠️ [P5b] 宽限 60s 内最后 1 个上游仍未出 rc，提前放行"
+    break
+  fi
   sleep 2
 done
 for _u in $_up_names; do

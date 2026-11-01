@@ -19,6 +19,10 @@
   set +e
   (
           set -uo pipefail
+          # TS_FQDN 由 Tailscale 步骤写入 ts.env，step 间不共享 env，需显式加载
+          # （对齐 run-qoder2api.sh；内联版靠 BASH_ENV 全局注入，外置化后必须自带 ——
+          # 缺了它 serve 段恒走「TS_FQDN 为空」分支，面板/反代入口不建）
+          [ -f "$HOME/ts.env" ] && . "$HOME/ts.env" || true
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 
           RUN_DIR="/tmp/local_autoclaw-proxy"
