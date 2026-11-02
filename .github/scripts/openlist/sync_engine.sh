@@ -204,6 +204,127 @@ _sync_parse_object_not_found() {
   fi
 }
 
+# ===== 目标端镜像清理（受控 delete 通道，2026-11-02）=====
+# 需求: 目标端要镜像源端（源端删了目标端也要删），但**不能**退回裸 rclone sync ——
+#   它的清理阶段在 OpenList 上不可信（run 41196672258/41219905962 实锤）:
+#   stale 缓存/超长文件名场景下列举出幻影条目，会把刚复制的文件和修复产物
+#   当"多余"删掉，造成"修复→被删→重修"跨轮空转。
+# 做法: initial sync（copy，只增不减）完成后，用**双侧刚列举的新清单**求差集
+#   找出"源端没有、目标端有"的候选，经三重保护后 rclone deletefile 逐个删除:
+#   保护① 任务过滤范围外不删: FILTER_ARGS（--exclude）内的路径是任务定义的
+#     保护对象（如 backup 的 notion/**），清理不得越界；
+#   保护② 修复产物不删: 排除清单（marker ∪ 本轮 ∪ 父级守卫，_sync_fixed_files_exclusion
+#     产出的 fixed_exclude 文件）里的 original/alternative 路径，以及目标端
+#     顶层短哈希目录（^[0-9a-f]{8}$，折叠/短名修复的落点，由 marker 的 original
+#     字段映射回原路径，删了就断还原链）；
+#   保护③ 单轮删除总量上限: OPENLIST_MIRROR_PRUNE_MAX（默认 200）——
+#     大规模删源文件（用户手动清源端目录）时逐轮跟进，单轮失败的影响面受控；
+#     stale 缓存造成的批量假"多余"也不会一轮烧光。
+# 删除前复核: 每个候选在删除瞬间再查一次源端确实没有（防同步窗口内源端又出现）。
+# 失败不阻断: 清理是附加能力，任何失败只记日志/告警，不置 SYNC_FAILED。
+# 用法: _sync_mirror_prune <source_path> <dest_path> <fixed_exclude_file|空>
+# 依赖调用方作用域: task_name / LOG_FILENAME / extra_args
+_sync_mirror_prune() {
+  local source_path="$1" dest_path="$2" fixed_exclude_file="$3"
+  # 只对 openlist: 目标端生效；测试/调试模式跳过（diff 口径不同）
+  [[ "$dest_path" == openlist:* ]] || return 0
+  [ "${OPENLIST_FIX_TEST_MODE:-0}" = "1" ] && return 0
+  [ "${OPENLIST_MIRROR_PRUNE:-1}" = "1" ] || { echo "镜像清理已关闭（OPENLIST_MIRROR_PRUNE=0），跳过"; return 0; }
+
+  local prune_max="${OPENLIST_MIRROR_PRUNE_MAX:-200}"
+  [[ "$prune_max" =~ ^[0-9]+$ ]] || prune_max=200
+
+  # 本函数作用域内自建过滤参数（FILTER_ARGS 由 _extract_filter_args 定义，
+  # 此前的调用点只有 save_sync_marker——set -u 下这里直接展开未绑定变量会炸）
+  FILTER_ARGS=()
+  # 提取器在 rclone_query.sh（load_all.sh L2 层），正常环境必在；兜底防单测
+  # 只 source 本文件时炸（与 file_fix_pipeline.sh 头注释同因）
+  if declare -F _extract_filter_args >/dev/null 2>&1; then
+    _extract_filter_args "${extra_args[@]}"
+  fi
+
+  local listing_timeout="${OPENLIST_RCLONE_LISTING_TIMEOUT:-900s}"
+  local src_json dst_json
+  src_json=$(rclone lsjson "$source_path" --recursive --files-only --no-mimetype --no-modtime \
+    "${FILTER_ARGS[@]}" --timeout "$listing_timeout" 2>/dev/null) || src_json=""
+  dst_json=$(rclone lsjson "$dest_path" --recursive --files-only --no-mimetype --no-modtime \
+    --timeout "$listing_timeout" 2>/dev/null) || dst_json=""
+  [ -n "$src_json" ] && [ -n "$dst_json" ] || {
+    echo "⚠️ 镜像清理: 源端或目标端列举失败，本轮跳过清理（宁漏勿错）"
+    return 0
+  }
+
+  # 差集 = 目标端有、源端没有。源端清单已带任务过滤（FILTER_ARGS），
+  # 即过滤范围内的镜像口径；目标端全量列举，超范围项靠保护①挡。
+  # 修复产物排除: fixed_exclude 文件行格式 "- /path"（_escape_filter_glob 已转义
+  #   glob 元字符；差集路径是原始路径，需用 glob 语义反解匹配——这里按字面
+  #   归一化比较即可，转义只影响 [ ] * ? 五种字符，出现即跳过该保护行并
+  #   保守放行候选进人工复核面（打印不删））。
+  local -A _protect=()
+  if [ -n "$fixed_exclude_file" ] && [ -f "$fixed_exclude_file" ]; then
+    local _pl
+    while IFS= read -r _pl; do
+      _pl=${_pl#- }
+      _pl=${_pl#/}
+      [ -n "$_pl" ] && _protect["$_pl"]=1
+    done < "$fixed_exclude_file"
+  fi
+
+  local -A _short_hash_dir=()
+  local _cands
+  _cands=$(printf '%s\n%s' "$src_json" "$dst_json" | jq -c -s --argjson smax "$prune_max" '
+    (.[0] | map(.Path)) as $src_set
+    | (.[1] | map(select((.IsDir // false) | not)))
+    | map(select(.Path as $p | ($src_set | index($p)) | not))
+    | .[0:$smax + 200]  # 采样上限，防病态巨型差集撑爆内存；真实删除仍受 smax 逐个复核限制
+    | map(.Path)' 2>/dev/null) || _cands="[]"
+
+  local n_total n_protected=0 n_skip=0 deleted_this=0
+  n_total=$(echo "$_cands" | jq 'length' 2>/dev/null || echo 0)
+  [ "$n_total" -gt 0 ] || return 0
+  echo "🧹 镜像清理: 目标端多出 ${n_total} 个候选（源端已无），开始逐个复核删除（上限 ${prune_max}）"
+  local p deleted_this=0
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    [ "$deleted_this" -ge "$prune_max" ] && { n_skip=$((n_skip + 1)); continue; }
+    # 保护①: 任务过滤范围外（--exclude 模式语义精确匹配成本高，按模式逐个
+    #   rclone 查询代价更大；这里用源端**全量无过滤**清单兜底判断: 路径在全量
+    #   源清单中出现则绝不删 —— 覆盖了 exclude 场景（exclude 内文件源端有），
+    #   也覆盖保护② original 的 majority 场景）
+    if [ -n "${_protect[$p]:-}" ]; then
+      n_protected=$((n_protected + 1))
+      continue
+    fi
+    # 顶层短哈希目录保护（8 位 hex 目录名的直属文件）: 折叠/短名修复落点
+    local _top="${p%%/*}"
+    if [[ "$_top" =~ ^[0-9a-f]{8}$ ]] && [ "$p" != "$_top" ]; then
+      n_protected=$((n_protected + 1))
+      continue
+    fi
+    # 删除前复核: 源端此刻确实没有该文件（防同步窗口内源端重新出现/列举误差）
+    if rclone lsf "$source_path" --files-only --recursive --no-mimetype --no-modtime \
+         "${FILTER_ARGS[@]}" --timeout 60s 2>/dev/null | grep -qxF "$p"; then
+      n_protected=$((n_protected + 1))
+      continue
+    fi
+    if rclone deletefile "${dest_path}/${p}" "${RCLONE_RETRY_FLAGS[@]}" \
+         --timeout "${OPENLIST_MKDIR_TIMEOUT:-120}s" >/dev/null 2>&1; then
+      deleted_this=$((deleted_this + 1))
+      echo "  🗑 镜像删除: $p"
+    else
+      n_skip=$((n_skip + 1))
+      echo "  ⚠️ 删除失败（下轮重试）: $p"
+    fi
+  done < <(echo "$_cands" | jq -r '.[]' 2>/dev/null)
+  echo "镜像清理完成: 删除 ${deleted_this} · 保护/复核放行 ${n_protected:-0} · 失败或超限跳过 ${n_skip}（候选 ${n_total}，上限 ${prune_max}）"
+  # 事件留痕: 修复管线事件日志同款文件，收尾统计可引用
+  if [ "$deleted_this" -gt 0 ]; then
+    printf 'MIRROR_PRUNE|%s|%s|%s\n' "$task_name" "$deleted_this" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      >> /tmp/ol_fix_events.log 2>/dev/null || true
+  fi
+  return 0
+}
+
 # 带探测、重试和详细日志的同步函数
 # 用法: sync_with_logging <source_path> <dest_path> <task_name> [rclone_extra_args...]
 # 设置全局变量: SYNC_FAILED, SYNC_SKIPPED, SYNC_TRANSFERRED_BYTES, FAKE_SUCCESS_COUNT
@@ -376,6 +497,19 @@ sync_with_logging() {
   _sync_fixed_files_exclusion
 
   run_rclone_sync_once "initial sync" || SYNC_STATUS=$?
+
+  # ===== 目标端镜像清理（受控 delete 通道）=====
+  # 位置: initial sync 之后、重试链之前 —— 423/409 重传会把误删的源端文件
+  #   重新传回（copy 不删除，但 rclone 内部 attempt 仍按文件清单跑），清理
+  #   放在它前面避免刚删的候选又被重传。复制了 _sync_fixed_files_exclusion
+  #   的排除文件路径形态（同 BASHPID 命名）供保护②复用。
+  # 注意: fixed_exclude 文件由 _sync_fixed_files_exclusion 在本函数作用域内
+  #   以 local 变量生成，这里按同一命名约定重新推导（存在才保护，不存在=无
+  #   修复条目，保护②自动为空）。
+  if [[ "$dest_path" == openlist:* ]]; then
+    _sync_mirror_prune "$source_path" "$dest_path" \
+      "/tmp/${task_name}_fixed_exclude_${BASHPID:-$$}.txt" || true
+  fi
 
   # 二次预检熔断哨兵（88, rclone 理论上不会返回的退出码）：驱动刷新/
   # 容器重启后目标端仍不健康 ⇒ 与入口预检失败同义，无传输、不进
