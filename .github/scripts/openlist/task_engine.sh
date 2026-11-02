@@ -589,6 +589,41 @@ _batch_405_flood() {
   [ "$n" -ge "$min" ]
 }
 
+# 409 死目录闸（2026-11-02 加，run 41364959191 数据驱动）
+# 为什么需要: 该轮 409 Conflict 达 13217 次，其中 `[魔人]euphoria` 一个目录
+#   5657 次重试、**零成功**；这类目录名（超长日文 + 特殊字符）在 wopan175 上
+#   确定性建不出来，rclone 的 --retries 3 × --low-level-retries 5 全打在同一
+#   个 MKCOL 上，白烧整轮预算，最后仍要靠折叠到短哈希目录才落地。
+# 与 405 闸的区别（为什么不能直接数 409）: 见 _batch_405_flood 头注释 ——
+#   409 有大量**可自愈**形态（并发 mkdir 竞争、目录已存在），单独按计数判死
+#   会误杀正常批次。故本闸要求**两个条件同时成立**:
+#     ① 409 计数 ≥ 阈值（默认 20，同 405 闸的噪声余量口径）
+#     ② 本批**传输字节为 0**（一个字节都没写进去）
+#   ② 是决定性判据: 真死目录必然零产出；而竞争冲突形态下同批总会有文件成功。
+# 用法: _batch_409_deadlock <batch_log> → 0=判定为 409 死目录
+_batch_409_deadlock() {
+  local batch_log="$1"
+  [ -f "$batch_log" ] || return 1
+  local min="${OPENLIST_409_FAST_FAIL_MIN:-20}"
+  [[ "$min" =~ ^[0-9]+$ ]] || min=20
+  [ "$min" -le 0 ] && return 1
+  local n=0
+  n=$(grep -acE 'Conflict:[[:space:]]*409|409[[:space:]]+Conflict' "$batch_log" 2>/dev/null || true)
+  [[ "$n" =~ ^[0-9]+$ ]] || n=0
+  [ "$n" -ge "$min" ] || return 1
+  # 条件②: 本批零字节传输。get_transferred_bytes_from_log 解析 rclone 的
+  #   "Transferred:" 汇总行；解析不到（空/非数字）按 0 处理，但此时至少要
+  #   确认日志里没有成功的 "Copied" 行，避免把"解析失败"误判成"零产出"。
+  local bytes=0
+  bytes=$(get_transferred_bytes_from_log "$batch_log" 2>/dev/null || echo 0)
+  [[ "$bytes" =~ ^[0-9]+$ ]] || bytes=0
+  if [ "$bytes" -gt 0 ]; then
+    return 1
+  fi
+  grep -qE 'INFO  : .*: Copied' "$batch_log" 2>/dev/null && return 1
+  return 0
+}
+
 # 顺序执行清单中的全部任务（支持同步对轮转，防饿死，见上方说明）
 run_all_tasks() {
   local n=${#SYNC_TASK_REGISTRY[@]}
@@ -2391,6 +2426,16 @@ sync_by_file_batches() {
         tg_add_entry_text failed_batch_list "批次 $((i+1))/${total_batches}" \
           "405 拒写 ${_n405} 次" "目录本轮写不进，快速失败"
         echo "🛑 批次 $((i+1)): 检测到 ${_n405} 次 405 Method Not Allowed（阈值 ${OPENLIST_405_FAST_FAIL_MIN:-20}）→ 该目录本轮确定性拒写，中止剩余批次（下轮经折叠/换目录兜底）"
+      elif [ "$rc" -ne 124 ] && _batch_409_deadlock "$batch_log"; then
+        # 409 死目录（判据见 _batch_409_deadlock 头注释: 计数达阈值 **且**
+        # 本批零字节零 Copied）。与 405 闸同一个中止出口，语义一致。
+        BATCH_BACKEND_DEAD=1
+        BATCH_ABORT_REASON="409 死目录"
+        _n409=$(grep -acE 'Conflict:[[:space:]]*409|409[[:space:]]+Conflict' "$batch_log" 2>/dev/null || true)
+        [[ "$_n409" =~ ^[0-9]+$ ]] || _n409=0
+        tg_add_entry_text failed_batch_list "批次 $((i+1))/${total_batches}" \
+          "409 冲突 ${_n409} 次且零传输" "目录名确定性建不出来，快速失败"
+        echo "🛑 批次 $((i+1)): 检测到 ${_n409} 次 409 Conflict 且本批零字节落盘（阈值 ${OPENLIST_409_FAST_FAIL_MIN:-20}）→ 该目录确定性建不出来，中止剩余批次（下轮经折叠/换目录兜底）"
       else
         BATCH_BACKEND_DEAD=0
         BATCH_ABORT_REASON=""
