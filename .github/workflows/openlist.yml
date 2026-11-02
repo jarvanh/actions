@@ -263,6 +263,14 @@ jobs:
       # "该目录本轮写不进"，先于巩固中止剩余批次（历史一个坏目录逐文件烧 115min）。
       # 20 留足噪声余量（坏目录实测累积上千条，个别长名文件只有几条）。
       OPENLIST_405_FAST_FAIL_MIN: "20"
+      # F10b 409 死目录闸（2026-11-02 加）: 409 Conflict 计数达此值 **且** 本批
+      # 零字节落盘（无 Transferred、无 Copied）即判"目录名确定性建不出来"，
+      # 与 405 闸同一中止出口。为什么需要: run 41364959191 单目录
+      # `[魔人]euphoria` 5657 次 409、零成功，rclone 的 retries 全打在同一次
+      # MKCOL 上白烧预算，最后仍靠折叠短哈希目录落地。为什么必须带"零落盘"
+      # 条件: 409 有大量可自愈形态（并发 mkdir 竞争/目录已存在），只数计数
+      # 会误杀正常批次（见 _batch_405_flood 头注释同一考量）。
+      OPENLIST_409_FAST_FAIL_MIN: "20"
       OPENLIST_MKDIR_TIMEOUT: "120"
       OPENLIST_DOWNLOAD_TIMEOUT: "300"
       OPENLIST_UPLOAD_TIMEOUT: "300"
