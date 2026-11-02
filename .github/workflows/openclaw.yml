@@ -4493,8 +4493,8 @@ jobs:
           #     执行 —— proxy 运行中该文件会被周期改写，停止前的最后一次读取即终值，
           #     停后再读反而可能与退出写竞态。
           echo "3b-1. Pushing autoclaw-proxy lifetime stats & stopping..."
-          if [ -f /tmp/local_autoclaw-proxy/app/lifetime_stats.json ]; then
-            if rclone copyto /tmp/local_autoclaw-proxy/app/lifetime_stats.json "$AUTOCLAW_STATS_REMOTE" 2>/dev/null; then
+          if [ -f /dropbox/self-hosted/autoclaw-proxy/app/lifetime_stats.json ]; then
+            if rclone copyto /dropbox/self-hosted/autoclaw-proxy/app/lifetime_stats.json "$AUTOCLAW_STATS_REMOTE" 2>/dev/null; then
               echo "✅ autoclaw lifetime_stats 回推 Dropbox 完成"
             else
               echo "::warning::[autoclaw] lifetime_stats 回推失败（下轮启动会以本地残留续计，VM 销毁才丢）"

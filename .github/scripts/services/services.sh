@@ -352,11 +352,11 @@ EOF
     #
     # autoclaw 于 2026-10-12 接入托管（此前 workflow nohup 裸跑，PPID=1、
     # ~/.config/systemd/user 下无单元，本机重启即断连且无人自愈）。
-    # 代码真源在 GitHub（jarvanh/autoclaw-proxy），workflow 每轮 clone 到
-    # /tmp/local_autoclaw-proxy 并刷完票才 ensure —— 故不能像 qingyan 那样
-    # 指向持久化路径，而是校验 workflow 已铺好的运行产物（fail-closed）。
+    # 代码真源在 GitHub（jarvanh/autoclaw-proxy）。2026-11-02 起代码+数据常驻
+    # Dropbox 持久目录（workflow 每轮 clone 到 /tmp 后仅同步 app/ 进来），
+    # 与 qingyan 同款；机器重启不再裸奔到下一轮。仍校验运行产物（fail-closed）。
     autoclaw)
-      local ac_run_dir="${AUTOCLAW_RUN_DIR:-/tmp/local_autoclaw-proxy}"
+      local ac_run_dir="${AUTOCLAW_RUN_DIR:-/dropbox/self-hosted/autoclaw-proxy}"
       [ -s "$ac_run_dir/app/proxy.py" ] || { rm -f "$tmp"; die "autoclaw: $ac_run_dir/app/proxy.py 缺失（workflow 需先 clone 代码）"; }
       [ -s "$ac_run_dir/accounts.json" ] || { rm -f "$tmp"; die "autoclaw: $ac_run_dir/accounts.json 缺失或为空（无凭据，拒绝起无凭据服务）"; }
       [ -n "${AUTOCLAW_GATEWAY_KEY:-}" ] || { rm -f "$tmp"; die "autoclaw: AUTOCLAW_GATEWAY_KEY 未注入，拒绝生成无鉴权单元"; }
