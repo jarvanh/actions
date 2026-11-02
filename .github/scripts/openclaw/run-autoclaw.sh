@@ -37,8 +37,18 @@
           # 0. 拉代码（GitHub，clone 到 /tmp 临时目录，同步 app/ 进 Dropbox
           #    持久目录；数据文件原地保留，绝不 rm -rf 运行目录）+ 票仓快照
           SRC_DIR="/tmp/local_autoclaw-proxy-src"
-          # 2026-11-02 实测：开机后首轮 clone 偶发失败（17:03 一次，重跑即好），
-          # 单次失败会让服务整轮缺席。三次重试 + 打印 git stderr 便于定位。
+          # 2026-11-02 22:52 二次实锤（/tmp/autoclaw-clone.err = "Repository not
+          # found"）：job 级 GH_TOKEN=*** 前缀) 注入后，
+          # gh auth setup-git 把 ghs_ 票排在 credential helper 首位；且
+          # Prepare-runtime 段的 hosts.yml PAT 修复被 `if ! gh auth status`
+          # 守卫短路（GITHUB_TOKEN 环境存在时恒假）→ 失效票整轮留在首位，
+          # 私有仓 clone 全部 404（workbuddy/zcode 是公开仓，从不暴露此问题）。
+          # 修复：剥掉全部 token 环境变量，git 走 credential helper 里的
+          # hosts.yml ghp_ PAT（本机已实测剥掉 ghs_ 后克隆成功）。
+          unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN
+          export GIT_TERMINAL_PROMPT=0
+          # 2026-11-02 首轮实测：偶发失败仍存在，三次重试兜网络抖动，
+          # 失败时打印 git stderr 便于定位。
           _clone_ok=0
           for _try in 1 2 3; do
             rm -rf "$SRC_DIR"
