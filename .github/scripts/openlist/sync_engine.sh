@@ -210,20 +210,29 @@ _sync_parse_object_not_found() {
 #   stale 缓存/超长文件名场景下列举出幻影条目，会把刚复制的文件和修复产物
 #   当"多余"删掉，造成"修复→被删→重修"跨轮空转。
 # 做法: initial sync（copy，只增不减）完成后，用**双侧刚列举的新清单**求差集
-#   找出"源端没有、目标端有"的候选，经三重保护后 rclone deletefile 逐个删除:
-#   保护① 任务过滤范围外不删: FILTER_ARGS（--exclude）内的路径是任务定义的
-#     保护对象（如 backup 的 notion/**），清理不得越界；
-#   保护② 修复产物不删: 排除清单（marker ∪ 本轮 ∪ 父级守卫，_sync_fixed_files_exclusion
-#     产出的 fixed_exclude 文件）里的 original/alternative 路径，以及目标端
-#     顶层短哈希目录（^[0-9a-f]{8}$，折叠/短名修复的落点，由 marker 的 original
-#     字段映射回原路径，删了就断还原链）；
-#   保护③ 单轮删除总量上限: OPENLIST_MIRROR_PRUNE_MAX（默认 200）——
-#     大规模删源文件（用户手动清源端目录）时逐轮跟进，单轮失败的影响面受控；
-#     stale 缓存造成的批量假"多余"也不会一轮烧光。
-# 删除前复核: 每个候选在删除瞬间再查一次源端确实没有（防同步窗口内源端又出现）。
+#   找出"源端没有、目标端有"的候选，经保护后 rclone deletefile 逐个删除。
+# 差集口径（关键，2026-11-02 修）: 源端清单**不带任务过滤**（不传 FILTER_ARGS）。
+#   镜像语义是「目标端 == 源端」，不是「目标端 == 源端 ∩ 本任务过滤」——
+#   用过滤口径会把 --exclude 范围内的目标端文件（如 backup 的 notion/**）
+#   误判成"源端没有"而越界删除。改全量口径后，exclude 内文件因源端确实有
+#   而天然不进候选，无需再做模式匹配（也省掉一遍列举）。
+# 保护:
+#   ① 修复产物不删: 排除清单（marker ∪ 本轮 ∪ 父级守卫，_sync_fixed_files_exclusion
+#     产出的 fixed_exclude 文件）里的 original/alternative 路径。全量口径下
+#     original 通常已在源端清单里，但 alternative（短哈希/base64/压缩形态）以及
+#     marker 记录孤儿化（任务改名）的场景仍需这层按路径精确挡；
+#   ② 顶层短哈希目录（^[0-9a-f]{8}$）不删: 折叠/短名修复落点恒为
+#     dest_path/<hash8>（见 file_fix.sh _hash_dir_rel_for），是还原链路唯一
+#     映射载体，marker 记录丢失时这是最后一道硬保护；
+#   ③ 单轮删除总量上限: OPENLIST_MIRROR_PRUNE_MAX（默认 200）——
+#     大规模删源端（用户手动清目录）时分轮跟进，stale 缓存造成的批量
+#     假"多余"也不会一轮烧光；OPENLIST_MIRROR_PRUNE=0 整体关闭。
+# 删除前复核: 候选非空时**再列一次**源端（只在真要删时才付这份成本），凡在
+#   该快照里出现的候选一律不删（防同步窗口内源端又出现/列举误差）。
+#   ⚠️ 绝不对每个候选各列一次 —— 200 个候选 = 200 次全量列举，比传输还慢。
 # 失败不阻断: 清理是附加能力，任何失败只记日志/告警，不置 SYNC_FAILED。
 # 用法: _sync_mirror_prune <source_path> <dest_path> <fixed_exclude_file|空>
-# 依赖调用方作用域: task_name / LOG_FILENAME / extra_args
+# 依赖调用方作用域: task_name / LOG_FILENAME
 _sync_mirror_prune() {
   local source_path="$1" dest_path="$2" fixed_exclude_file="$3"
   # 只对 openlist: 目标端生效；测试/调试模式跳过（diff 口径不同）
@@ -234,76 +243,84 @@ _sync_mirror_prune() {
   local prune_max="${OPENLIST_MIRROR_PRUNE_MAX:-200}"
   [[ "$prune_max" =~ ^[0-9]+$ ]] || prune_max=200
 
-  # 本函数作用域内自建过滤参数（FILTER_ARGS 由 _extract_filter_args 定义，
-  # 此前的调用点只有 save_sync_marker——set -u 下这里直接展开未绑定变量会炸）
-  FILTER_ARGS=()
-  # 提取器在 rclone_query.sh（load_all.sh L2 层），正常环境必在；兜底防单测
-  # 只 source 本文件时炸（与 file_fix_pipeline.sh 头注释同因）
-  if declare -F _extract_filter_args >/dev/null 2>&1; then
-    _extract_filter_args "${extra_args[@]}"
-  fi
-
   local listing_timeout="${OPENLIST_RCLONE_LISTING_TIMEOUT:-900s}"
   local src_json dst_json
+  # 源端: 全量（刻意不加 FILTER_ARGS，见函数头"差集口径"）
   src_json=$(rclone lsjson "$source_path" --recursive --files-only --no-mimetype --no-modtime \
-    "${FILTER_ARGS[@]}" --timeout "$listing_timeout" 2>/dev/null) || src_json=""
+    --timeout "$listing_timeout" 2>/dev/null) || src_json=""
   dst_json=$(rclone lsjson "$dest_path" --recursive --files-only --no-mimetype --no-modtime \
     --timeout "$listing_timeout" 2>/dev/null) || dst_json=""
   [ -n "$src_json" ] && [ -n "$dst_json" ] || {
     echo "⚠️ 镜像清理: 源端或目标端列举失败，本轮跳过清理（宁漏勿错）"
     return 0
   }
+  # 空/非法 JSON 可能是"真没有"也可能是列举静默失败（超时/驱动异常返回空）。
+  # 源端清单失效 = 会把目标端删光（高危方向），必须区分并拒删。
+  printf '%s' "$src_json" | jq -e 'type == "array"' >/dev/null 2>&1 || {
+    echo "⚠️ 镜像清理: 源端清单不是合法 JSON 数组，本轮跳过清理（防误删）"
+    return 0
+  }
 
-  # 差集 = 目标端有、源端没有。源端清单已带任务过滤（FILTER_ARGS），
-  # 即过滤范围内的镜像口径；目标端全量列举，超范围项靠保护①挡。
-  # 修复产物排除: fixed_exclude 文件行格式 "- /path"（_escape_filter_glob 已转义
-  #   glob 元字符；差集路径是原始路径，需用 glob 语义反解匹配——这里按字面
-  #   归一化比较即可，转义只影响 [ ] * ? 五种字符，出现即跳过该保护行并
-  #   保守放行候选进人工复核面（打印不删））。
+  # 保护①: 排除清单 → 关联数组。行格式 "- /path"（_escape_filter_glob 转过
+  #   glob 元字符）；按字面比较，转义导致的失配方向是"少保护"，故对含元字符
+  #   的行额外按去转义后的原文再存一份
   local -A _protect=()
   if [ -n "$fixed_exclude_file" ] && [ -f "$fixed_exclude_file" ]; then
-    local _pl
+    local _pl _pl_raw
     while IFS= read -r _pl; do
       _pl=${_pl#- }
       _pl=${_pl#/}
       [ -n "$_pl" ] && _protect["$_pl"]=1
+      _pl_raw=$(printf '%s' "$_pl" | sed -e 's/\[\([][*?{}]\)\]/\1/g')
+      [ -n "$_pl_raw" ] && [ "$_pl_raw" != "$_pl" ] && _protect["$_pl_raw"]=1
     done < "$fixed_exclude_file"
   fi
 
-  local -A _short_hash_dir=()
   local _cands
   _cands=$(printf '%s\n%s' "$src_json" "$dst_json" | jq -c -s --argjson smax "$prune_max" '
     (.[0] | map(.Path)) as $src_set
     | (.[1] | map(select((.IsDir // false) | not)))
     | map(select(.Path as $p | ($src_set | index($p)) | not))
-    | .[0:$smax + 200]  # 采样上限，防病态巨型差集撑爆内存；真实删除仍受 smax 逐个复核限制
+    | .[0:($smax + 200)]  # 采样上限: 防病态巨型差集撑爆内存（真实删除另有 smax 闸）
     | map(.Path)' 2>/dev/null) || _cands="[]"
 
   local n_total n_protected=0 n_skip=0 deleted_this=0
   n_total=$(echo "$_cands" | jq 'length' 2>/dev/null || echo 0)
+  [[ "$n_total" =~ ^[0-9]+$ ]] || n_total=0
   [ "$n_total" -gt 0 ] || return 0
+
+  # 删除前复核快照（见函数头）: 只在有候选时列举这一次
+  local -A _recheck_set=()
+  local _rc_json
+  _rc_json=$(rclone lsjson "$source_path" --recursive --files-only --no-mimetype --no-modtime \
+    --timeout "$listing_timeout" 2>/dev/null) || _rc_json=""
+  printf '%s' "$_rc_json" | jq -e 'type == "array"' >/dev/null 2>&1 || {
+    echo "⚠️ 镜像清理: 删除前源端复核列举失败，本轮不删任何文件（宁漏勿错，下轮重试）"
+    return 0
+  }
+  local _rp
+  while IFS= read -r _rp; do
+    [ -n "$_rp" ] && _recheck_set["$_rp"]=1
+  done < <(printf '%s' "$_rc_json" | jq -r '.[] | select((.IsDir // false)|not) | .Path' 2>/dev/null)
+
   echo "🧹 镜像清理: 目标端多出 ${n_total} 个候选（源端已无），开始逐个复核删除（上限 ${prune_max}）"
-  local p deleted_this=0
+  local p
   while IFS= read -r p; do
     [ -n "$p" ] || continue
     [ "$deleted_this" -ge "$prune_max" ] && { n_skip=$((n_skip + 1)); continue; }
-    # 保护①: 任务过滤范围外（--exclude 模式语义精确匹配成本高，按模式逐个
-    #   rclone 查询代价更大；这里用源端**全量无过滤**清单兜底判断: 路径在全量
-    #   源清单中出现则绝不删 —— 覆盖了 exclude 场景（exclude 内文件源端有），
-    #   也覆盖保护② original 的 majority 场景）
+    # 保护①: 修复产物路径（排除清单）
     if [ -n "${_protect[$p]:-}" ]; then
       n_protected=$((n_protected + 1))
       continue
     fi
-    # 顶层短哈希目录保护（8 位 hex 目录名的直属文件）: 折叠/短名修复落点
+    # 保护②: 顶层短哈希目录（折叠/短名修复落点，还原链路唯一载体）
     local _top="${p%%/*}"
     if [[ "$_top" =~ ^[0-9a-f]{8}$ ]] && [ "$p" != "$_top" ]; then
       n_protected=$((n_protected + 1))
       continue
     fi
-    # 删除前复核: 源端此刻确实没有该文件（防同步窗口内源端重新出现/列举误差）
-    if rclone lsf "$source_path" --files-only --recursive --no-mimetype --no-modtime \
-         "${FILTER_ARGS[@]}" --timeout 60s 2>/dev/null | grep -qxF "$p"; then
+    # 删除前复核: 该快照里仍有 → 不删（源端又出现/列举误差）
+    if [ -n "${_recheck_set[$p]:-}" ]; then
       n_protected=$((n_protected + 1))
       continue
     fi
@@ -317,7 +334,7 @@ _sync_mirror_prune() {
     fi
   done < <(echo "$_cands" | jq -r '.[]' 2>/dev/null)
   echo "镜像清理完成: 删除 ${deleted_this} · 保护/复核放行 ${n_protected:-0} · 失败或超限跳过 ${n_skip}（候选 ${n_total}，上限 ${prune_max}）"
-  # 事件留痕: 修复管线事件日志同款文件，收尾统计可引用
+  # 事件留痕: 与修复管线事件日志同文件，收尾统计可引用
   if [ "$deleted_this" -gt 0 ]; then
     printf 'MIRROR_PRUNE|%s|%s|%s\n' "$task_name" "$deleted_this" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
       >> /tmp/ol_fix_events.log 2>/dev/null || true
