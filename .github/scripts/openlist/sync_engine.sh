@@ -289,6 +289,19 @@ _sync_mirror_prune() {
   [[ "$n_total" =~ ^[0-9]+$ ]] || n_total=0
   [ "$n_total" -gt 0 ] || return 0
 
+  # 空源端拒删（高危方向最后一道闸）:
+  #   源端清单为空数组而目标端有文件 ⇒ 差集 = 目标端全部 ⇒ 会把整个目标端删光。
+  #   真实场景里"用户把 10TB 源端清空"远比"驱动异常返回空清单 / 源端路径配错 /
+  #   临时不可读"罕见，二者在当前信息下不可区分 ⇒ 一律拒删并要求显式放行
+  #   （OPENLIST_MIRROR_PRUNE_ALLOW_EMPTY_SOURCE=1）。宁可不镜像，不能误清备份。
+  local _src_n
+  _src_n=$(printf '%s' "$src_json" | jq 'length' 2>/dev/null || echo 0)
+  [[ "$_src_n" =~ ^[0-9]+$ ]] || _src_n=0
+  if [ "$_src_n" -eq 0 ] && [ "${OPENLIST_MIRROR_PRUNE_ALLOW_EMPTY_SOURCE:-0}" != "1" ]; then
+    echo "⛔ 镜像清理拒绝执行: 源端清单为空但目标端有 ${n_total} 个文件 —— 更可能是驱动异常/路径配错而非真清空，本轮不删（确需清空请设 OPENLIST_MIRROR_PRUNE_ALLOW_EMPTY_SOURCE=1）"
+    return 0
+  fi
+
   # 删除前复核快照（见函数头）: 只在有候选时列举这一次
   local -A _recheck_set=()
   local _rc_json
@@ -524,8 +537,14 @@ sync_with_logging() {
   #   以 local 变量生成，这里按同一命名约定重新推导（存在才保护，不存在=无
   #   修复条目，保护②自动为空）。
   if [[ "$dest_path" == openlist:* ]]; then
-    _sync_mirror_prune "$source_path" "$dest_path" \
-      "/tmp/${task_name}_fixed_exclude_${BASHPID:-$$}.txt" || true
+    # 二次预检熔断（88）时目标端已判不健康，清理只会逐个 delete 全失败白烧
+    # 时间 ⇒ 跳过（不删 = 安全方向，下轮再说）
+    if [ "$SYNC_STATUS" -eq "${OPENLIST_POSTCHECK_SKIP_RC:-88}" ]; then
+      echo "⏭ 镜像清理跳过: 本次 initial sync 触发二次预检熔断（后端不健康）"
+    else
+      _sync_mirror_prune "$source_path" "$dest_path" \
+        "/tmp/${task_name}_fixed_exclude_${BASHPID:-$$}.txt" || true
+    fi
   fi
 
   # 二次预检熔断哨兵（88, rclone 理论上不会返回的退出码）：驱动刷新/
