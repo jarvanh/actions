@@ -25,24 +25,31 @@
           [ -f "$HOME/ts.env" ] && . "$HOME/ts.env" || true
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 
-          RUN_DIR="/tmp/local_autoclaw-proxy"
+          # 2026-11-02 主人拍板：代码+数据常驻 Dropbox（照 qingyan 范式），
+          # /tmp 只做临时克隆。机器重启不再丢 accounts.json/代码。
+          RUN_DIR="/dropbox/self-hosted/autoclaw-proxy"
           AC_OK=0
           AC_REASON=""
           AC_ACCOUNTS=""
           AC_MODEL=""
           AC_SCORE=""
 
-          # 0. 拉代码（GitHub，clone 到干净目录）+ 票仓快照（快照缺失 = 未导入凭据，直接跳过）
-          rm -rf "$RUN_DIR"
-          if ! git clone --quiet --depth 1 "$AUTOCLAW_REPO" "$RUN_DIR" || [ ! -f "$RUN_DIR/app/proxy.py" ]; then
+          # 0. 拉代码（GitHub，clone 到 /tmp 临时目录，同步 app/ 进 Dropbox
+          #    持久目录；数据文件原地保留，绝不 rm -rf 运行目录）+ 票仓快照
+          SRC_DIR="/tmp/local_autoclaw-proxy-src"
+          rm -rf "$SRC_DIR"
+          if ! git clone --quiet --depth 1 "$AUTOCLAW_REPO" "$SRC_DIR" || [ ! -f "$SRC_DIR/app/proxy.py" ]; then
             echo "::warning::[autoclaw] 代码克隆失败（$AUTOCLAW_REPO）"
             AC_REASON="代码克隆失败"
-          elif ! rclone copyto "$AUTOCLAW_SNAPSHOT_REMOTE" "$RUN_DIR/snapshot.json" 2>/dev/null || [ ! -s "$RUN_DIR/snapshot.json" ]; then
+          elif ! rclone copyto "$AUTOCLAW_SNAPSHOT_REMOTE" "$RUN_DIR/snapshot.json" 2>/dev/null && [ ! -s "$RUN_DIR/snapshot.json" ]; then
             echo "::warning::[autoclaw] 无凭据快照（先在本机跑 autoclaw_auth.py bootstrap）"
             AC_REASON="未配置凭据快照"
           else
-            AC_COMMIT="$(git -C "$RUN_DIR" rev-parse --short HEAD)"
-            echo "代码: $AUTOCLAW_REPO @ $AC_COMMIT"
+            AC_COMMIT="$(git -C "$SRC_DIR" rev-parse --short HEAD)"
+            mkdir -p "$RUN_DIR/app"
+            cp -a "$SRC_DIR/app/." "$RUN_DIR/app/"
+            printf '%s\n' "$AC_COMMIT" > "$RUN_DIR/COMMIT"
+            echo "代码: $AUTOCLAW_REPO @ $AC_COMMIT（已同步 $RUN_DIR/app）"
             # 累计统计拉回续计：Dropbox 有则覆盖本地（/tmp 重建后为空），无则从零起计
             rclone copyto "$AUTOCLAW_STATS_REMOTE" "$RUN_DIR/app/lifetime_stats.json" 2>/dev/null \
               && echo "lifetime_stats: 已从 Dropbox 拉回续计" \
@@ -242,7 +249,7 @@
             # 2026-10-11 标题对齐全库网关就绪约定：🟢（对齐 workbuddy/zcode2api/trae/Runner，见 docs/telegram-notify.md）；原 ✅ 是照抄 qingyan 骨架带进来的游离用法
             tg_add_title _m "🟢 autoclaw-proxy 已就绪"
             tg_add_kv _m "结论" "$AC_REASON"
-            tg_add_path _m "数据目录" "/tmp/local_autoclaw-proxy"
+            tg_add_path _m "数据目录" "$RUN_DIR"
             tg_add_path _m "代码" "$AUTOCLAW_REPO @ $AC_COMMIT"
             tg_add_path _m "接口" "http://127.0.0.1:${AUTOCLAW_PORT}/v1"
             tg_add_path _m "API Key" "${AUTOCLAW_GATEWAY_KEY:-未取到}"
