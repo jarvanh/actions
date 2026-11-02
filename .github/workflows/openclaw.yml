@@ -3247,6 +3247,7 @@ jobs:
             tg_add_footer() { :; }
           fi
 
+
           # 用法: send_telegram_alert <对象> <结论> <原因> [原始输出]
           # 版式（docs/telegram-notify.md 2.3 / 4.3 / 规范 · 多行块）：对象是机器返回的包名 → <code>；
           # 结论与原因是人写的自然语言 → 裸文本 kv；rclone/tar 的原始输出 → <pre>。
@@ -3555,6 +3556,12 @@ jobs:
           FINAL_ARCHIVE_WARNING_BEFORE_MINUTES=15
           WARNING_DELAY_SECONDS=$((SLEEP_SECONDS - FINAL_ARCHIVE_WARNING_BEFORE_MINUTES*60))
           if [ "${WARNING_DELAY_SECONDS}" -lt 0 ]; then WARNING_DELAY_SECONDS=0; fi
+          # ── 2026-11-02（C，两段式告警）：T-15 预告 + T-2 真停机倒计时 ──
+          # 旧单段告警让人从 T-15 就不敢用（白等 13 分钟）。A1 反转后数据安全边界 =
+          # 2.5 停网关瞬间（归档启动后 ~2min 内发生），真正该停手的是 T-2。
+          SHUTDOWN_WARNING_BEFORE_MINUTES=2
+          SHUTDOWN_DELAY_SECONDS=$((SLEEP_SECONDS - SHUTDOWN_WARNING_BEFORE_MINUTES*60))
+          if [ "${SHUTDOWN_DELAY_SECONDS}" -lt 0 ]; then SHUTDOWN_DELAY_SECONDS=0; fi
 
           # 真源只在 step 顶层 source 一次（规范 4.4）：本函数会以 `&` 后台执行，
           # 函数体内再 source 只改子 shell 的函数表——调用点若对 send_tg 做本地
@@ -3566,24 +3573,38 @@ jobs:
             if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
               # 统一 HTML 版式 + 统一收尾区（真源已在 step 顶层 source，规范 4.4）
               msg=""
-              tg_add_title msg "⚠️ OpenClaw 即将进入最终归档"
-              # 值只写时长，"后执行"由标签「预计」表达（值不重复标签语义）
-              tg_add_kv msg "预计" "约 ${FINAL_ARCHIVE_WARNING_BEFORE_MINUTES} 分钟"
-              # kv 区集中连排；英文 token 不直出通知（规范 · 失败与异常）：步骤名写中文
-              # 2026-10-29（A1/A1b）：归档期间网关与渠道均在线；渠道随批2先关，网关最后停
-              tg_add_kv msg "随后执行" "最终归档（渠道在线）→ 停 AI 网关与上游 → 停 OpenClaw"
-              # 说明段只装说明，且作末段（规范 · 说明段）：此前它插在两个 kv 之间
-              tg_add_note msg "请及时保存状态或完成当前操作。"
+              tg_add_title msg "ℹ️ OpenClaw 约 ${FINAL_ARCHIVE_WARNING_BEFORE_MINUTES} 分钟后进入收尾"
+              # A1 反转：真正停手点是 T-2 停机倒计时，本条只是预告——收尾前仍可正常使用
+              tg_add_kv msg "随后执行" "收尾流程启动（服务仍在线）"
+              tg_add_kv msg "停机倒计时" "约 $((FINAL_ARCHIVE_WARNING_BEFORE_MINUTES - SHUTDOWN_WARNING_BEFORE_MINUTES)) 分钟后另发，届时请停手"
+              tg_add_note msg "本次为预告；可继续正常使用，停机前另有倒计时通知。"
               tg_add_footer msg
               # 统一走发送层（退化/429 重试内置）
-              send_tg "$msg" alert || true
+              send_tg "$msg" || true
             else
               echo "⚠️ Telegram secrets missing, skip final archive warning."
             fi
           }
 
+          send_shutdown_warning() {
+            sleep "${SHUTDOWN_DELAY_SECONDS}"
+            if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+              msg=""
+              tg_add_title msg "⛔ OpenClaw 约 ${SHUTDOWN_WARNING_BEFORE_MINUTES} 分钟后停机"
+              # A1 反转后的真停机口径：停机瞬间 = 数据安全边界，停机前写入都安全
+              tg_add_kv msg "随后执行" "停 OpenClaw（落定数据）→ 归档 → 停 AI 栈"
+              tg_add_note msg "请在此 ${SHUTDOWN_WARNING_BEFORE_MINUTES} 分钟内保存状态或完成当前操作；停机后写入不再入档。"
+              tg_add_footer msg
+              send_tg "$msg" alert || true
+            else
+              echo "⚠️ Telegram secrets missing, skip shutdown warning."
+            fi
+          }
+
           send_final_archive_warning &
           echo $! > /tmp/openclaw-final-archive-warning.pid
+          send_shutdown_warning &
+          echo $! > /tmp/openclaw-shutdown-warning.pid
 
           sleep "${SLEEP_SECONDS}"
 
@@ -3644,12 +3665,15 @@ jobs:
 
       - name: Stop OpenClaw and Final Archive
         id: final_archive
-        # 2026-10-29 下线提速（A1/A2/A1b）：阶段顺序为「停归档循环 → 批1停服（仅 rsstt，
-        # 非聊天路径）→ 阶段A归档（主包流式 ∥ zcode ∥ OmniRoute ∥ rsstt；渠道上游全在线）
-        # → 批2：停 OmniRoute → 并行停上游网关 → z2a-data 归档 → 最后停网关（A1，段尾「7.」）」。
-        # 网关硬下线压到 ~9s + 汇合后停机段；渠道不可用窗口从归档期全停的 ~12min 压到批2 的 ~30s。
-        # OmniRoute 在上游之后启动、之前停止（主人拍板），避免「代理在线、渠道已死」的半开状态。
-        # 阶段标签沿用历史编号（1 空缺，停网关为 7），避免跨轮日志 grep 断裂。
+        # 2026-10-29 下线提速（A2/A1b）+ 2026-11-02 A1 反转（主人拍板）：阶段顺序为
+        # 「停归档循环 → 批1停服（仅 rsstt）→ 2.5 停 OpenClaw 网关（数据安全边界，快照语义
+        # 见 2.5 段注）→ 阶段A归档（主包流式 ∥ zcode ∥ OmniRoute ∥ rsstt，对静树打包）
+        # → 批2：停 OmniRoute → 并行停上游网关 → z2a-data 归档」。
+        # 旧 A1（网关最后停）保住归档期「在线」，但主包是 T0 快照，归档期新写数据照样丢
+        # —— 在线是有损假象，故反转：先停机落定、后归档，有效丢失窗口 ~10-12min → ~0。
+        # 批2 保留（OmniRoute 先停、上游并行停）：归档期上游仍在跑（只是聊天网关已关），
+        # 避免上游空转；渠道不可用窗口从归档期全停的 ~12min 收敛为 2.5 停机瞬间。
+        # 阶段标签沿用历史编号（1 空缺，停网关现为 2.5，原「7.」已删除），保跨轮 grep 习惯。
         # 兜底超时：动态死线 332m + 本步 24m + 通知/接力 ~2m = 358m < 360m 硬上限，
         # 卡死时走本超时干净失败（post 步骤仍会跑），而不是被平台 6h 强杀
         timeout-minutes: 24
@@ -3731,6 +3755,84 @@ jobs:
             wait "$_sp" || echo "⚠️ 停服并行分支 $_sp 非零退出（明细见上方分支日志）"
           done
 
+          echo "2.5. Stopping OpenClaw gateway (2026-11-02 A1 反转，主人拍板：先停机 → 后归档)..."
+          # ── A1 反转的理由（快照语义）：主包归档是 tar 快照，只含归档启动时刻的
+          # ~/.openclaw —— 归档期间网关继续在线写盘的新会话**不在包里**，VM 销毁即丢。
+          # 旧 A1（归档期在线，网关最后停）保住的只是「在线」假象，T0 后继续聊 = 白聊；
+          # 真正的数据安全边界 = 停机瞬间。反转后：停机 → 落定 → 对静树打包（比活树
+          # 一致性更好，state sqlite/-wal 不再是活体快照）→ 归档期聊天中断（反正不用）。
+          # 有效数据丢失窗口从 ~10-12min 压到 ~0；「不敢用」窗口由两段式告警管理
+          # （T-15 预告 + T-2 真停机倒计时，见 Keep alive 步骤）。
+          # 2026-10-21 修复（run 39515245551 日志实证）：`openclaw gateway stop` 在非交互
+          # shell 下**拒绝执行**——05:00:44 打出 "…or re-run with --force if you really mean
+          # it."，紧接着 `|| echo "already stopped or command failed"` 把这条失败吃成静默，
+          # 于是这条停止命令从来没生效过：60s 轮询干等到 05:01:45（整 60s 白花），最终归档
+          # 全程对着**仍在写盘的 ~/.openclaw** 打包（state sqlite 连 -wal 都是活体快照）。
+          # --force 就是给这种场景的显式确认（`stop --help`: "Allow stop from a non-interactive
+          # shell"），语义正确；timeout 60 防 CLI 自身卡死；本步骤是 set -e，用 if 包裹，
+          # 停止失败只降级告警、不打断收尾（还有 6 个归档要做）。
+          GW_STOP_LOG=/tmp/openclaw-gateway-stop.log
+          if timeout 60 openclaw gateway stop --force >"$GW_STOP_LOG" 2>&1; then
+            echo "openclaw gateway stop --force 已执行"
+          else
+            echo "⚠️ openclaw gateway stop --force 失败（rc=$?），日志尾部："
+            tail -n 20 "$GW_STOP_LOG" 2>/dev/null || true
+          fi
+          # 优化（2026-10-01）：原为无条件 sleep 1m（纯等待 60s）。改为轮询网关
+          # 真退出即继续，通常数秒完成；超时 60s 兜底，语义与原来等价。
+          # ⚠️ 判定必须用 systemctl（2026-10-01 二修）：首版写的是
+          #   pgrep -f "openclaw-gateway"，但 "openclaw-gateway" 只是 **unit 名**，
+          #   **不在进程 cmdline 里**（真实 cmdline 为 `node ... dist/index.js
+          #   gateway --port 18789`）。该 pgrep 恒不匹配 → 循环第 1 次就 break、
+          #   等 0s，等于把等待直接删掉，保护形同虚设；反之若将来有进程 cmdline
+          #   含该串，又会反常地等满 60s。改用 unit 的 active 状态才是真判定。
+          # 2026-10-21 补升级链：旧写法无论等没等到都往下走，"已退出"根本没被断言过
+          # （实测恒假 —— 因为 stop 从没执行）。现在把结果落成 GW_DOWN，等不到就升级，
+          # 全链失败则在日志里留 ::warning:: —— A1 反转后此处失败意味着「归档对着
+          # 仍在写盘的树打包」，可见性比旧序更重要。
+          GW_DOWN=0
+          gw_is_active() {
+            [ "$(systemctl --user is-active openclaw-gateway.service 2>/dev/null || echo inactive)" = "active" ]
+          }
+          for _i in $(seq 1 60); do
+            if ! gw_is_active; then
+              echo "✅ OpenClaw gateway 已退出（等待 $((_i - 1))s）"
+              GW_DOWN=1
+              break
+            fi
+            sleep 1
+          done
+          # 升级走 systemd 自己的 stop 作业：单元 Restart=always，直接 kill 进程会在
+          # RestartSec=5 后被拉回来；显式 stop 作业内的一律不重启（restart 只看崩溃）。
+          # --no-block + 自带轮询：单元 TimeoutStopSec=330，同步等等于把下线时长交给
+          # 最坏情况，这里只给它 120s（优雅停机的大头在前几十秒）。
+          if [ "$GW_DOWN" != "1" ]; then
+            echo "⚠️ 60s 内 unit 仍 active，改用 systemctl --user stop 兜底..."
+            systemctl --user stop --no-block openclaw-gateway.service 2>/dev/null || true
+            for _i in $(seq 1 120); do
+              if ! gw_is_active; then
+                echo "✅ OpenClaw gateway 已退出（systemctl stop 再等 ${_i}s）"
+                GW_DOWN=1
+                break
+              fi
+              sleep 1
+            done
+          fi
+          if [ "$GW_DOWN" != "1" ]; then
+            echo "⚠️ systemctl stop 作业 120s 未完成，发送 SIGKILL"
+            systemctl --user kill -s KILL openclaw-gateway.service 2>/dev/null || true
+            for _i in $(seq 1 10); do
+              if ! gw_is_active; then
+                GW_DOWN=1
+                break
+              fi
+              sleep 1
+            done
+          fi
+          if [ "$GW_DOWN" != "1" ]; then
+            echo "::warning::OpenClaw gateway 未能停止（unit 仍 active），本轮最终归档是在网关写盘状态下打的包"
+            echo "⚠️ 网关未能停止，最终归档将对着活动状态打包"
+          fi
           # 用法与版式同 send_telegram_alert（<对象> <结论> <原因> [原始输出]）；
           # 两个函数分处不同 step、无法共享定义，改版式时两处要一起改
           # （此前一个用 <i> 说明段、一个用 <b> kv，同一标题两种形态）
@@ -3813,7 +3915,7 @@ jobs:
             fi
           }
 
-          echo "4. Performing final archive to Dropbox (阶段A：主包∥zcode∥OmniRoute∥rsstt；渠道上游全在线)..."
+          echo "4. Performing final archive to Dropbox (阶段A：主包∥zcode∥OmniRoute∥rsstt；网关已停，上游仍在跑)..."
           cleanup_archive_outputs() {
             rm -f /tmp/openclaw-final.tar.gz /tmp/rsstt.tar.gz /tmp/zcode-final.tar.gz 2>/dev/null || true
             # -final 后缀产物（2026-10-06）：与周期归档同名解耦后，清理也要跟着改名
@@ -4167,11 +4269,11 @@ jobs:
           wait "$_arc_pid_zcode" || echo "⚠️ zcode 归档后台任务退出码非零（明细见上方分支日志）"
           wait "$_arc_pid_aigw"  || echo "⚠️ AI 网关归档后台任务退出码非零（明细见上方分支日志）"
           wait "$_arc_pid_rsstt" || echo "⚠️ rsstt 归档后台任务退出码非零（明细见上方分支日志）"
-          echo "✅ 阶段A归档汇合完成（主包+zcode+OmniRoute+rsstt；渠道上游仍在线）"
+          echo "✅ 阶段A归档汇合完成（主包+zcode+OmniRoute+rsstt；网关已于 2.5 停止）"
           # ── 2026-10-29 A1b（主人拍板）：渠道停止收口 —— OmniRoute 先停，上游网关随后 ──
-          # 阶段A期间渠道上游全在线，聊天不中断；此处 OmniRoute 一停聊天路径立刻干净
-          # 关闭，上游并行排空、不再接收「代理在线、渠道已死」的失败流量（避免 circuit
-          # breaker 污染），全部停妥后才进入「7.」停网关。
+          # 2026-11-02 A1 反转后口径：聊天网关已在 2.5 停止，阶段A期间在线的只剩上游
+          # 渠道（对归档无影响）。此处 OmniRoute 先停 → 上游并行停，收干净渠道后结束
+          # 收尾（原「7. 停网关」段已随反转前移为 2.5）。
           echo "6. Stopping AI stack (A1b: OmniRoute 先停 → 上游网关并行停)..."
           docker stop omniroute 2>/dev/null || echo "omniroute already stopped or missing."
           _stop_pids=""
@@ -4438,81 +4540,9 @@ jobs:
           # ── 2026-10-29 下线提速（A1）：网关停止从收尾第一步后置到最后一步 ──
           # 原顺序 = 停网关 → 停服/归档，网关下线窗口 = 整个收尾（实测 647s）。
           # 主包归档脚本（create-openclaw-archive.sh）本就是周期归档循环每 20 分钟对
-          # 活树执行的那份（关键文件隔离快照/keep-dir 回填/体积门等防线同源），最终
-          # 归档复用同口径在网关运行中打包。一致性口径：与周期归档一致（本就接受
-          # ≤20 分钟回滚窗口），最终包内容 = 归档启动时刻的快照，距实际停机差归档耗时。
-          echo "7. Stopping OpenClaw gateway (A1: 最后停机 — 归档全部汇合后再停)..."
-          # 2026-10-21 修复（run 39515245551 日志实证）：`openclaw gateway stop` 在非交互
-          # shell 下**拒绝执行**——05:00:44 打出 "…or re-run with --force if you really mean
-          # it."，紧接着 `|| echo "already stopped or command failed"` 把这条失败吃成静默，
-          # 于是这条停止命令从来没生效过：60s 轮询干等到 05:01:45（整 60s 白花），最终归档
-          # 全程对着**仍在写盘的 ~/.openclaw** 打包（state sqlite 连 -wal 都是活体快照）。
-          # --force 就是给这种场景的显式确认（`stop --help`: "Allow stop from a non-interactive
-          # shell"），语义正确；timeout 60 防 CLI 自身卡死；本步骤是 set -e，用 if 包裹，
-          # 停止失败只降级告警、不打断收尾（还有 6 个归档要做）。
-          GW_STOP_LOG=/tmp/openclaw-gateway-stop.log
-          if timeout 60 openclaw gateway stop --force >"$GW_STOP_LOG" 2>&1; then
-            echo "openclaw gateway stop --force 已执行"
-          else
-            echo "⚠️ openclaw gateway stop --force 失败（rc=$?），日志尾部："
-            tail -n 20 "$GW_STOP_LOG" 2>/dev/null || true
-          fi
-          # 优化（2026-10-01）：原为无条件 sleep 1m（纯等待 60s）。改为轮询网关
-          # 真退出即继续，通常数秒完成；超时 60s 兜底，语义与原来等价。
-          # ⚠️ 判定必须用 systemctl（2026-10-01 二修）：首版写的是
-          #   pgrep -f "openclaw-gateway"，但 "openclaw-gateway" 只是 **unit 名**，
-          #   **不在进程 cmdline 里**（真实 cmdline 为 `node ... dist/index.js
-          #   gateway --port 18789`）。该 pgrep 恒不匹配 → 循环第 1 次就 break、
-          #   等 0s，等于把等待直接删掉，保护形同虚设；反之若将来有进程 cmdline
-          #   含该串，又会反常地等满 60s。改用 unit 的 active 状态才是真判定。
-          # 2026-10-21 补升级链：旧写法无论等没等到都往下走，"已退出"根本没被断言过
-          # （实测恒假 —— 因为 stop 从没执行）。现在把结果落成 GW_DOWN，等不到就升级，
-          # 全链失败则在日志里留 ::warning::，让「对着活树打包」这件事可见。
-          GW_DOWN=0
-          gw_is_active() {
-            [ "$(systemctl --user is-active openclaw-gateway.service 2>/dev/null || echo inactive)" = "active" ]
-          }
-          for _i in $(seq 1 60); do
-            if ! gw_is_active; then
-              echo "✅ OpenClaw gateway 已退出（等待 $((_i - 1))s）"
-              GW_DOWN=1
-              break
-            fi
-            sleep 1
-          done
-          # 升级走 systemd 自己的 stop 作业：单元 Restart=always，直接 kill 进程会在
-          # RestartSec=5 后被拉回来；显式 stop 作业内的一律不重启（restart 只看崩溃）。
-          # --no-block + 自带轮询：单元 TimeoutStopSec=330，同步等等于把下线时长交给
-          # 最坏情况，这里只给它 120s（优雅停机的大头在前几十秒）。
-          if [ "$GW_DOWN" != "1" ]; then
-            echo "⚠️ 60s 内 unit 仍 active，改用 systemctl --user stop 兜底..."
-            systemctl --user stop --no-block openclaw-gateway.service 2>/dev/null || true
-            for _i in $(seq 1 120); do
-              if ! gw_is_active; then
-                echo "✅ OpenClaw gateway 已退出（systemctl stop 再等 ${_i}s）"
-                GW_DOWN=1
-                break
-              fi
-              sleep 1
-            done
-          fi
-          if [ "$GW_DOWN" != "1" ]; then
-            echo "⚠️ systemctl stop 作业 120s 未完成，发送 SIGKILL"
-            systemctl --user kill -s KILL openclaw-gateway.service 2>/dev/null || true
-            for _i in $(seq 1 10); do
-              if ! gw_is_active; then
-                GW_DOWN=1
-                break
-              fi
-              sleep 1
-            done
-          fi
-          if [ "$GW_DOWN" != "1" ]; then
-            echo "::warning::OpenClaw gateway 未能停止（unit 仍 active），本轮最终归档是在网关写盘状态下打的包"
-            echo "⚠️ 网关未能停止，最终归档将对着活动状态打包"
-          fi
-
-
+          # 活树执行的那份（关键文件隔离快照/keep-dir 回填/体积门等防线同源）。2026-11-02
+          # A1 反转后最终归档在网关已停的静树上执行 —— 比「网关运行中打包」一致性更好
+          # （state sqlite/-wal 不再是活体快照），脚本本身零改动。
 
       # 最终归档结果汇总（规范 · 结果通知）：归档步骤边归档边把结果写进 /tmp 的结果文件，
       # 这里统一渲染成一条通知。单独成 step 而不是并进归档步骤——归档步骤多处 exit 1
