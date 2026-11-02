@@ -2445,9 +2445,16 @@ jobs:
 
           OUTPUT_TAR="${1:-}"
           if [ -z "$OUTPUT_TAR" ]; then
-            echo "Usage: $0 /path/to/output.tar.gz" >&2
+            echo "Usage: $0 /path/to/output.tar.gz | -" >&2
+            echo "  -  流式模式：tar|pigz 写 stdout（最终归档用，打包与上传流水线化）" >&2
             exit 2
           fi
+          # STREAM_MODE（2026-11-02 下线提速）："-" = 流式输出，最终归档专用（与主包
+          # tar|pigz→rclone rcat 同款）；周期归档循环仍走文件模式（要落盘做 tar -tzf 校验）。
+          # 流式模式下 tar/pigz 退出码经 pipefail 透出，调用方以「流成功 + 远端体积门 +
+          # gzip 魔数」三重判定后才原子改名覆盖 —— 校验强度与文件模式等价。
+          STREAM_MODE=0
+          [ "$OUTPUT_TAR" = "-" ] && STREAM_MODE=1
 
           MIN_SIZE=$((5 * 1024))
           SRC_ROOT="/home/runner/.zcode"
@@ -2460,10 +2467,10 @@ jobs:
           }
           trap cleanup EXIT
 
-          rm -f "$OUTPUT_TAR"
+          [ "$STREAM_MODE" = "1" ] || rm -f "$OUTPUT_TAR"
 
           if [ ! -d "$SRC_ROOT/cli" ] && [ ! -d "$SRC_ROOT/v2" ] && [ ! -d "$SRC_ROOT/server" ]; then
-            echo "zcode_dir_missing"
+            echo "zcode_dir_missing" >&2
             exit 3
           fi
 
@@ -2482,7 +2489,7 @@ jobs:
             find "$SRC_ROOT/cli/rollout" -type f -mtime +14 -delete 2>/dev/null || true
             find "$SRC_ROOT/cli/rollout" -type d -empty -delete 2>/dev/null || true
             _ro_after=$(du -sk "$SRC_ROOT/cli/rollout" 2>/dev/null | awk '{print $1}')
-            echo "rollout 14d cleanup: ${_ro_before:-?}KB → ${_ro_after:-?}KB"
+            echo "rollout 14d cleanup: ${_ro_before:-?}KB → ${_ro_after:-?}KB" >&2
           fi
 
           # 快照 cli/ + v2/ + server/ 三棵子树，只排除真正的垃圾：
@@ -2504,7 +2511,7 @@ jobs:
             local rc=0
             rsync -a --delete "$@" "$src/" "$dst/" || rc=$?
             if [ "$rc" -eq 24 ]; then
-              echo "zcode_snapshot_partial_live_changes src=$src"
+              echo "zcode_snapshot_partial_live_changes src=$src" >&2
               return 0
             fi
             return "$rc"
@@ -2555,14 +2562,14 @@ jobs:
               if sqlite3 "$live_db" ".backup '$staged.tmp'" 2>/dev/null && [ -s "$staged.tmp" ]; then
                 mv -f "$staged.tmp" "$staged"
                 rm -f "$staged-wal" "$staged-shm" 2>/dev/null || true
-                echo "sqlite_snapshot ok $rel"
+                echo "sqlite_snapshot ok $rel" >&2
               else
                 rm -f "$staged.tmp" 2>/dev/null || true
-                echo "sqlite_snapshot_fallback $rel (kept rsync copy)"
+                echo "sqlite_snapshot_fallback $rel (kept rsync copy)" >&2
               fi
             done < <(find "$SRC_ROOT/cli" "$SRC_ROOT/v2" "$SRC_ROOT/server" -name '*.sqlite' -type f 2>/dev/null)
           else
-            echo "sqlite_snapshot_skipped (sqlite3 not found; using rsync copies)"
+            echo "sqlite_snapshot_skipped (sqlite3 not found; using rsync copies)" >&2
           fi
 
           # 完整性校验（取代体积基准）：三项都是「没有就说明状态不全」的判据 ——
@@ -2588,20 +2595,36 @@ jobs:
             exit 4
           fi
 
+          if [ "$STREAM_MODE" = "1" ]; then
+            # ⚠️ stdout 专用：本脚本内**所有**日志 echo 均已显式 >&2（2026-11-02 沙箱
+            # 实测抓到：sqlite_snapshot ok 打进 stdout，流首两字节成了 "sq"，远端包报废）。
+            # 新增 echo 一律加 >&2，否则会污染 gzip 流。
+            # pigz 多核并行压缩（实测 2-3x 单线程 gzip），与下游 rclone rcat 流水线并行：
+            # 旧文件模式 = gzip ~330s + 上传 ~130s 串行（zcode 归档实测 612s，比主包多 5min，
+            # 是收尾尾巴的长杆）；新流式 ≈ max(压缩, 上传)。staging 已落定（sqlite .backup
+            # 完成），此处只读；tar 的 stderr 走 stderr，不污染 stdout 的 gzip 流。
+            if command -v pigz >/dev/null 2>&1; then
+              ( set -o pipefail; tar -C "$STAGE_DIR" -cf - .zcode | pigz -p "$(nproc)" -1 )
+            else
+              tar -C "$STAGE_DIR" -czf -
+            fi
+            exit $?
+          fi
+
           tar -C "$STAGE_DIR" -czf "$OUTPUT_TAR" .zcode
 
           actual_size=$(stat -c%s "$OUTPUT_TAR" 2>/dev/null || echo 0)
           if [ ! -s "$OUTPUT_TAR" ]; then
-            echo "zcode_archive_empty output=$OUTPUT_TAR"
+            echo "zcode_archive_empty output=$OUTPUT_TAR" >&2
             exit 1
           elif [ "$actual_size" -lt "$MIN_SIZE" ]; then
-            echo "zcode_archive_too_small size=${actual_size} min=${MIN_SIZE} output=$OUTPUT_TAR"
+            echo "zcode_archive_too_small size=${actual_size} min=${MIN_SIZE} output=$OUTPUT_TAR" >&2
             exit 1
           elif ! tar -tzf "$OUTPUT_TAR" >/dev/null 2>&1; then
-            echo "zcode_archive_tar_validation_failed output=$OUTPUT_TAR"
+            echo "zcode_archive_tar_validation_failed output=$OUTPUT_TAR" >&2
             exit 1
           else
-            echo "archive_ready size=${actual_size} output=$OUTPUT_TAR"
+            echo "archive_ready size=${actual_size} output=$OUTPUT_TAR" >&2
           fi
           EOF
           chmod +x /tmp/create-zcode-archive.sh
@@ -4096,16 +4119,57 @@ jobs:
           # 失败口径不变：各分支当场 record + 告警，汇合处只等齐不打断（2026-10-13 口径）。
           run_zcode_archive() {
             if [ -d "$HOME/.zcode/cli" ] || [ -d "$HOME/.zcode/v2" ] || [ -d "$HOME/.zcode/server" ]; then
-              TMP_ZCODE_FINAL_TAR="/tmp/zcode-final.tar.gz"
-              if zcode_final_output=$(flock -w 600 -E 200 "$LOCK_ZCODE" timeout 40m bash /tmp/create-zcode-archive.sh "$TMP_ZCODE_FINAL_TAR" 2>&1); then
-                # 体积骤降「只记录不拦截」且为做记录而跑的 rclone ls 已随并行化移除：
-                # 它不参与任何判定，却给小对象归档串行加一次远端往返。
-                upload_final_archive "zcode.tar.gz" "$TMP_ZCODE_FINAL_TAR" "dropbox:self-hosted/zcode.tar.gz" || true
+              # ── 2026-11-02 流式化（下线提速）：zcode 归档实测 612s，是收尾尾巴的长杆
+              # （比主包 315s 多 ~5min），直接决定「旧 job 何时结束 → 新 run 何时能拿
+              # runner」（concurrency 单例：旧 job 不结束，新 run 的 provision 不开始）。
+              # 旧路径 = 单线程 gzip 落盘 4GB（~330s）→ rclone copyto 上传（~130s），串行；
+              # 新路径 = tar|pigz 管道直给 rclone rcat，压缩与上传流水线化 ≈ max(两者)。
+              # 安全链与主包同款三步：体积门（≥源 10%；压缩比随内容浮动，只挡明显截断）
+              # → gzip 魔数 1f8b（挡「明文头 + 坏流」，run 39894704352 形态）→ moveto
+              # 原子覆盖。任一步不过即保留云端旧包（周期循环 ≤20min 内刚写过）。
+              # 兜底：流式失败回落原文件模式，新路径出问题也不丢归档。
+              ZCODE_STREAM_DEST="dropbox:self-hosted/.zcode-streaming.tar.gz"
+              ZCODE_ARCHIVE_DEST="dropbox:self-hosted/zcode.tar.gz"
+              _zcode_src_kb=$(du_sk "$HOME/.zcode" || true)
+              case "${_zcode_src_kb:-}" in ''|*[!0-9]*) _zcode_src_kb=0 ;; esac
+              echo "4b. Streaming zcode package (tar|pigz → rclone rcat)..."
+              rclone deletefile "$ZCODE_STREAM_DEST" >/dev/null 2>&1 || true
+              _zc_begin=$(date +%s)
+              _zc_ok=0
+              if flock -w 600 -E 200 "$LOCK_ZCODE" timeout 40m bash /tmp/create-zcode-archive.sh - 2>/tmp/zcode-stream.err | rclone rcat --dropbox-chunk-size 128M "$ZCODE_STREAM_DEST" 2>/tmp/zcode-stream-upload.err; then
+                _zc_bytes=$(rclone size --json "$ZCODE_STREAM_DEST" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null || echo 0)
+                case "${_zc_bytes:-0}" in ''|*[!0-9]*) _zc_bytes=0 ;; esac
+                if [ "$_zc_bytes" -le 0 ] || { [ "$_zcode_src_kb" -gt 0 ] && [ "$_zc_bytes" -lt $(( _zcode_src_kb * 1024 * 10 / 100 )) ]; }; then
+                  echo "⚠️ 流式 zcode 包体积异常（${_zc_bytes}B，源 ${_zcode_src_kb}KB），放弃覆盖云端"
+                else
+                  _zc_magic=$(rclone cat --head 2 "$ZCODE_STREAM_DEST" 2>/dev/null | od -An -tx1 | tr -d ' \n')
+                  if [ "$_zc_magic" != "1f8b" ]; then
+                    echo "⚠️ 流式 zcode 包头部不是 gzip 魔数（${_zc_magic:-empty}），放弃覆盖云端"
+                  elif rclone moveto "$ZCODE_STREAM_DEST" "$ZCODE_ARCHIVE_DEST" >/tmp/zcode-stream-move.log 2>&1; then
+                    echo "final zcode.tar.gz archive/upload ok (streamed ${_zc_bytes}B in $(( $(date +%s) - _zc_begin ))s)"
+                    record_archive_result "zcode.tar.gz" ok "$_zc_bytes" "流式覆盖"
+                    _zc_ok=1
+                  else
+                    echo "⚠️ 流式 zcode 上传完成但原子改名失败：$(tail -n 3 /tmp/zcode-stream-move.log 2>/dev/null)"
+                  fi
+                fi
               else
-                rc=$?
-                echo "⚠️ final zcode.tar.gz archive failed (rc=$rc): ${zcode_final_output}"
-                record_archive_result "zcode.tar.gz" fail 0 "归档失败 · 退出码 $rc"
-                send_archive_alert "zcode.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${zcode_final_output:-归档脚本无输出}"
+                echo "⚠️ 流式 zcode 打包/上传失败。stderr 尾部："
+                tail -n 5 /tmp/zcode-stream.err /tmp/zcode-stream-upload.err 2>/dev/null || true
+              fi
+              rclone deletefile "$ZCODE_STREAM_DEST" >/dev/null 2>&1 || true
+
+              if [ "$_zc_ok" != "1" ]; then
+                echo "4b-fallback. 流式未成功，回退文件模式（打包 → 校验 → 上传）..."
+                TMP_ZCODE_FINAL_TAR="/tmp/zcode-final.tar.gz"
+                if zcode_final_output=$(flock -w 600 -E 200 "$LOCK_ZCODE" timeout 40m bash /tmp/create-zcode-archive.sh "$TMP_ZCODE_FINAL_TAR" 2>&1); then
+                  upload_final_archive "zcode.tar.gz" "$TMP_ZCODE_FINAL_TAR" "dropbox:self-hosted/zcode.tar.gz" || true
+                else
+                  rc=$?
+                  echo "⚠️ final zcode.tar.gz archive failed (rc=$rc): ${zcode_final_output}"
+                  record_archive_result "zcode.tar.gz" fail 0 "归档失败 · 退出码 $rc"
+                  send_archive_alert "zcode.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${zcode_final_output:-归档脚本无输出}"
+                fi
               fi
             else
               echo "ℹ️ ~/.zcode/{cli,v2,server} 均不存在（本机从未部署 ZCode），跳过 ZCode 最终归档"
