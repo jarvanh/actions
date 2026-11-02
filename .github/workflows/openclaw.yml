@@ -2536,19 +2536,32 @@ jobs:
           STAGE_DIR=$(mktemp -d /tmp/zcode-archive-stage.XXXXXX)
           mkdir -p "$STAGE_DIR/.zcode"
 
-          # rollout/ 14 天保留窗（2026-11-02，主人拍板）：rollout 里全是 model-io-*
-          # 模型请求/响应观测转储（会话正文在 cli/db/db.sqlite，21201 条 message 实证），
-          # 跨轮持续 append 导致单文件可达 2GB、目录实测 12GB —— 曾把 zcode.tar.gz
-          # 撑到 ~4GB，恢复步骤占启动关键路径 191s、最终归档 ~10min（小对象链拖后者）。
-          # 归档前直接清本地源目录：一轮生效、轮轮保持，打包/上传/恢复全链受益。
-          # 14 天窗由主人定（对齐 qingyan 快照 7 天窗的同类决策）；mtime 是最后写入
-          # 时间，长会话只要近期活跃就不会被误清。删失败不阻断归档（find 自身幂等）。
+          # rollout/ 本地体积上限 20GB（2026-11-03，主人拍板：归档剔除 rollout，
+          # 见下方 snapshot 排除项注释）。旧「mtime+14 天保留窗」实证失效：
+          # rollout 文件被活跃会话持续 append、隔几天唤醒即刷 mtime，实测 171 个
+          # 文件全部落在 14 天内、一个都清不掉，目录涨到 14.6GB。
+          # 改按目录总体积控制：超 20GB 才从最老的文件开始删（mtime 升序），
+          # 本地磁盘有界且近期观测转储尽量多留。删失败不阻断归档。
           if [ -d "$SRC_ROOT/cli/rollout" ]; then
             _ro_before=$(du -sk "$SRC_ROOT/cli/rollout" 2>/dev/null | awk '{print $1}')
-            find "$SRC_ROOT/cli/rollout" -type f -mtime +14 -delete 2>/dev/null || true
-            find "$SRC_ROOT/cli/rollout" -type d -empty -delete 2>/dev/null || true
-            _ro_after=$(du -sk "$SRC_ROOT/cli/rollout" 2>/dev/null | awk '{print $1}')
-            echo "rollout 14d cleanup: ${_ro_before:-?}KB → ${_ro_after:-?}KB" >&2
+            case "${_ro_before:-0}" in ''|*[!0-9]*) _ro_before=0 ;; esac
+            if [ "$_ro_before" -gt $((20 * 1024 * 1024)) ]; then
+              _ro_excess_kb=$((_ro_before - 20 * 1024 * 1024))
+              # 先删超过上限的最老文件；文件按 mtime 升序累加，删够 excess 即停
+              # 单文件就超上限的边角：若用「删后累计 ≤ excess*1.2」判定，
+              # 最老文件自己超限时一个都不删、目录永不收缩。改为「删除前累计」
+              # 判定并保底删掉最老的一个，保证任何分布下目录都单调收缩。
+              find "$SRC_ROOT/cli/rollout" -type f -printf '%T@ %s %p\n' 2>/dev/null | sort -n | \
+                awk -v excess_kb="$_ro_excess_kb" '
+                  NR == 1 { print $3 }
+                  { prev = cum; cum += $2/1024; if (NR > 1 && prev <= excess_kb * 1.2) print $3 }' | \
+                xargs -r -d '\n' rm -f 2>/dev/null || true
+              find "$SRC_ROOT/cli/rollout" -mindepth 1 -type d -empty -delete 2>/dev/null || true
+              _ro_after=$(du -sk "$SRC_ROOT/cli/rollout" 2>/dev/null | awk '{print $1}')
+              echo "rollout 20GB cap cleanup: ${_ro_before}KB → ${_ro_after:-?}KB" >&2
+            else
+              echo "rollout 20GB cap: ${_ro_before}KB ≤ cap, no cleanup" >&2
+            fi
           fi
 
           # 快照 cli/ + v2/ + server/ 三棵子树，只排除真正的垃圾：
@@ -2576,8 +2589,17 @@ jobs:
             return "$rc"
           }
 
+          # 2026-11-03（主人拍板）：归档剔除 cli/rollout —— 实测其 14.6GB 原始
+          # / gzip 后 ~4.4GB 占 zcode.tar.gz 的 90%，而它是模型请求/响应的观测转储
+          # （发往模型的 HTTP 报文镜像），会话正文真身在 cli/db/db.sqlite：
+          # message 表 249 会话 23826 条全覆盖 rollout 的 174 文件，part 表存正文
+          # 分片（随机抽 5 会话交叉验证 5/5 齐全；从 db 直接读出本对话首条消息原文
+          # 实证）。恢复侧（cli/v2/server 三子树各自 mv，缺失即跳过）对 rollout 零依赖。
+          # 剔除后包 ~4.8GB → ~0.4GB，zcode 归档 15.8min → ~1-2min，整轮下线→上线
+          # 25min → ~10min。本地源目录照常保留（只影响云端备份内容），上限清理见上方。
           set +e
           snapshot_tree "$SRC_ROOT/cli" "$STAGE_DIR/.zcode/cli/" \
+            --exclude 'rollout' \
             --exclude 'log/**' \
             --exclude '*.lock' \
             --exclude '*.pid'
@@ -4189,17 +4211,23 @@ jobs:
               # 兜底：流式失败回落原文件模式，新路径出问题也不丢归档。
               ZCODE_STREAM_DEST="dropbox:self-hosted/.zcode-streaming.tar.gz"
               ZCODE_ARCHIVE_DEST="dropbox:self-hosted/zcode.tar.gz"
+              # 体积门基准 = 源减 rollout（2026-11-03 归档已剔除 rollout，见归档脚本注释；
+              # 门若仍用全源，rollout 14.6GB 会把下限抬到 1.7GB > 瘦身后包 ~0.4GB，
+              # 每轮都被误判「体积异常」而永不覆盖云端）。
               _zcode_src_kb=$(du_sk "$HOME/.zcode" || true)
               case "${_zcode_src_kb:-}" in ''|*[!0-9]*) _zcode_src_kb=0 ;; esac
-              echo "4b. Streaming zcode package (tar|pigz → rclone rcat)..."
+              _rollout_kb=$(du_sk "$HOME/.zcode/cli/rollout" || true)
+              case "${_rollout_kb:-}" in ''|*[!0-9]*) _rollout_kb=0 ;; esac
+              _zcode_archived_kb=$((_zcode_src_kb > _rollout_kb ? _zcode_src_kb - _rollout_kb : _zcode_src_kb))
+              echo "4b. Streaming zcode package (tar|pigz → rclone rcat, 门基准=源 ${_zcode_src_kb}KB - rollout ${_rollout_kb}KB = ${_zcode_archived_kb}KB)..."
               rclone deletefile "$ZCODE_STREAM_DEST" >/dev/null 2>&1 || true
               _zc_begin=$(date +%s)
               _zc_ok=0
               if flock -w 600 -E 200 "$LOCK_ZCODE" timeout 40m bash /tmp/create-zcode-archive.sh - 2>/tmp/zcode-stream.err | rclone rcat --dropbox-chunk-size 128M "$ZCODE_STREAM_DEST" 2>/tmp/zcode-stream-upload.err; then
                 _zc_bytes=$(rclone size --json "$ZCODE_STREAM_DEST" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null || echo 0)
                 case "${_zc_bytes:-0}" in ''|*[!0-9]*) _zc_bytes=0 ;; esac
-                if [ "$_zc_bytes" -le 0 ] || { [ "$_zcode_src_kb" -gt 0 ] && [ "$_zc_bytes" -lt $(( _zcode_src_kb * 1024 * 10 / 100 )) ]; }; then
-                  echo "⚠️ 流式 zcode 包体积异常（${_zc_bytes}B，源 ${_zcode_src_kb}KB），放弃覆盖云端"
+                if [ "$_zc_bytes" -le 0 ] || { [ "$_zcode_archived_kb" -gt 0 ] && [ "$_zc_bytes" -lt $(( _zcode_archived_kb * 1024 * 10 / 100 )) ]; }; then
+                  echo "⚠️ 流式 zcode 包体积异常（${_zc_bytes}B，门基准 ${_zcode_archived_kb}KB），放弃覆盖云端"
                 else
                   _zc_magic=$(rclone cat --head 2 "$ZCODE_STREAM_DEST" 2>/dev/null | od -An -tx1 | tr -d ' \n')
                   if [ "$_zc_magic" != "1f8b" ]; then
