@@ -140,6 +140,174 @@ jobs:
           set -e
           # 写配置 + 持久化：secret 起步 → 掩码 → Dropbox 恢复优先 → 有效性检查 → 同步回 Dropbox
           bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" config
+
+          # ── 2026-11-02 启动提速（C2，P1）：zcode.tar.gz 后台预取 ──
+          # 4GB 下载 ~25s（16 流实测 174-190MB/s），此前整段压在 Restore 步骤的
+          # 同步路径上（run 41294902778 实测 restore 191s，其中下载占大头）。
+          # 本步末尾 nohup 后台拉起，与后续 Restore 前的全部步骤重叠；消费方
+          # （Restore ZCode data）按 prefetch 体系的 .part→mv→rc 协议收货，
+          # 未命中/失败照原路同步下载（纯增益，不参与正确性）。
+          # 协议与 Prefetch cold artifacts 同款（rc 文件最后写）。
+          PF="/tmp/openclaw-prefetch"
+          mkdir -p "$PF"
+          ZPF="$PF/zcode-prefetch.sh"
+          cat > "$ZPF" <<'ZPF_EOF'
+          #!/usr/bin/env bash
+          set +e
+          P="$1"
+          rclone copyto dropbox:self-hosted/zcode.tar.gz "$P/zcode.tar.gz.part" --multi-thread-streams 16
+          rc=$?
+          if [ "$rc" -eq 0 ] && [ -s "$P/zcode.tar.gz.part" ]; then
+            mv "$P/zcode.tar.gz.part" "$P/zcode.tar.gz"
+          else
+            rm -f "$P/zcode.tar.gz.part"
+            [ "$rc" -eq 0 ] && rc=1
+          fi
+          echo "$rc" > "$P/zcode-tar.rc"
+          ZPF_EOF
+          chmod +x "$ZPF"
+          nohup bash "$ZPF" "$PF" >"$PF/zcode-tar.out" 2>&1 &
+          echo $! > "$PF/zcode-tar.pid"
+          echo "🚀 已后台预取 zcode.tar.gz（pid $(cat "$PF/zcode-tar.pid")）"
+
+
+      - name: Prefetch cold artifacts (后台并行)
+        # 把「与本轮状态无关」的大块下载从串行关键路径上摘出去。实测一轮冷启动里
+        # 主包下载 54s、omniroute 镜像 35.7s、rss 镜像 ~20s 都排在各自消费步骤里干
+        # 等（run 39515245551 逐行核对日志），本步把它们丢到后台，与 mount/tailscale/
+        # 装 openclaw/解包重叠。
+        # 2026-11-02 启动提速（C2，P4）位置前移：原排在 Tailscale 段之后，预取与
+        # Restore ZCode（时序红线，必须先行）完全串行 —— 现挪到 rclone-config 之后、
+        # Restore 之前（本步只依赖 rclone + docker，不碰 ~/.zcode、不暴露任何入口，
+        # 红线无碍），预取与 Restore 的 12GB 解压全程重叠；Install OpenClaw 到达时
+        # 主包/镜像多已就位。
+        # 纯增益，不参与正确性：消费方原有的同步下载与 `docker run` 拉取路径一行未动，
+        # 预取没跑完/跑失败就按原路走；产物先写 .part 再 mv，消费方不会看到半截文件。
+        run: |
+          # 关掉 errexit：GH 默认 shell 是 bash -e，本步骤任何一次探测失败（rclone 限流、
+          # 磁盘不足）都不该把整轮打死 —— 预取的语义是「成了是赚，砸了照原路走」。
+          set +e
+          set -uo pipefail
+          P=/tmp/openclaw-prefetch
+          rm -rf "$P"; mkdir -p "$P"
+
+          cat > "$P/pull-openclaw-tar.sh" <<'PF_EOF'
+          #!/usr/bin/env bash
+          # 主包 prefetch：产物落在 prefetch 目录，由恢复步骤等完再 mv 走（同一 fs，rename 免费）。
+          # rc 文件最后写 —— 它出现即代表 .tar.gz 已就位，轮询方不会读到半截。
+          set +e
+          P="$1"
+          # 2026-10-24 下载调优（本机 2GB A/B 实测）：--multi-thread-streams 16
+          # 把下载从 70-82MB/s（默认 4 流）提到 174-190MB/s（16/24/32 流为同一
+          # 平台区，取最低值）；主包 9-12GB，Install 步骤直接受益。
+          rclone copyto dropbox:self-hosted/openclaw.tar.gz "$P/openclaw.tar.gz.part" --multi-thread-streams 16
+          rc=$?
+          if [ "$rc" -eq 0 ] && [ -s "$P/openclaw.tar.gz.part" ]; then
+            mv "$P/openclaw.tar.gz.part" "$P/openclaw.tar.gz"
+          else
+            rm -f "$P/openclaw.tar.gz.part"
+            [ "$rc" -eq 0 ] && rc=1
+          fi
+          echo "$rc" > "$P/openclaw-tar.rc"
+          PF_EOF
+          cat > "$P/pull-images.sh" <<'PF_EOF'
+          #!/usr/bin/env bash
+          set +e
+          # $1 = prefetch 目录（父 shell 的变量不会自动进子 shell，必须显式传）
+          P="$1"
+          # qoder 用浮动 latest（实际部署步骤会按最新 release tag 再拉一次）；其余固定 tag 与步骤对齐。
+          for img in rongronggg9/rss-to-telegram:latest \
+                     diegosouzapw/omniroute:3.8.51 \
+                     ghcr.io/jarvanh/qoder2api-hub:latest; do
+            docker image pull "$img" >"$P/pull-$(printf '%s' "$img" | tr '/:.' '___').log" 2>&1
+          done
+          PF_EOF
+          chmod +x "$P/pull-openclaw-tar.sh" "$P/pull-images.sh"
+
+          nohup bash "$P/pull-images.sh" "$P" >"$P/pull-images.out" 2>&1 &
+          echo "🚀 已后台拉起网关镜像预取（pid $!）"
+
+          tar_bytes="$(rclone size --json dropbox:self-hosted/openclaw.tar.gz 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null)" || tar_bytes=0
+          case "${tar_bytes:-0}" in ''|*[!0-9]*) tar_bytes=0 ;; esac
+          if [ "$tar_bytes" -eq 0 ]; then
+            echo "ℹ️ 未取得主包远端体积，跳过预取（恢复步骤按原路同步下载）"
+          else
+            # 预取不能反过来把恢复侧挤爆：留 2 倍包体积 + 1GB（与恢复侧 require_free_kb 同口径）
+            avail_kb="$(df -Pk /tmp | awk 'NR==2 {print $4}')"
+            need_kb="$(( tar_bytes / 1024 * 2 + 1024 * 1024 ))"
+            if [ "${avail_kb:-0}" -lt "$need_kb" ]; then
+              echo "ℹ️ /tmp 空间不足以预取主包（available=${avail_kb}KB required=${need_kb}KB），跳过"
+            else
+              nohup bash "$P/pull-openclaw-tar.sh" "$P" >"$P/openclaw-tar.out" 2>&1 &
+              echo $! > "$P/openclaw-tar.pid"
+              echo "🚀 已后台预取主包 openclaw.tar.gz（${tar_bytes}B，pid $(cat "$P/openclaw-tar.pid")）"
+            fi
+          fi
+
+          # 2026-10-29 下线优化（B2）：OmniRoute 主档同样预取（消费方 = AI 网关步骤，
+          # 未命中照原路同步下载）。zcode.tar.gz 原也在此预取、由后置 ZCode 恢复消费；
+          # 2026-11-01 该恢复前移到 rclone-config 之后（先于 Tailscale 接入），改为直接
+          # 同步下载，不再进预取。单档体积门 2×+512MB，与主包同口径防挤爆；rc 文件最后写。
+          cat > "$P/pull-one-tar.sh" <<'PF_EOF'
+          #!/usr/bin/env bash
+          # 用法: pull-one-tar.sh <Name> <prefetch_dir>；产物 .part → mv，rc 文件最后写
+          #（rc 出现即代表包就位或终态失败，轮询方不会读到半截）。
+          set +e
+          NAME="$1"; P="$2"
+          KEY="$(printf '%s' "$NAME" | tr 'A-Z' 'a-z')"
+          rclone copyto "dropbox:self-hosted/${NAME}.tar.gz" "$P/${NAME}.tar.gz.part" --multi-thread-streams 16
+          rc=$?
+          if [ "$rc" -eq 0 ] && [ -s "$P/${NAME}.tar.gz.part" ]; then
+            mv "$P/${NAME}.tar.gz.part" "$P/${NAME}.tar.gz"
+          else
+            rm -f "$P/${NAME}.tar.gz.part"
+            [ "$rc" -eq 0 ] && rc=1
+          fi
+          echo "$rc" > "$P/${KEY}-tar.rc"
+          PF_EOF
+          chmod +x "$P/pull-one-tar.sh"
+          for _pf_name in OmniRoute; do
+            _pf_key="$(printf '%s' "$_pf_name" | tr 'A-Z' 'a-z')"
+            _pf_bytes="$(rclone size --json "dropbox:self-hosted/${_pf_name}.tar.gz" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null)" || _pf_bytes=0
+            case "${_pf_bytes:-0}" in ''|*[!0-9]*) _pf_bytes=0 ;; esac
+            if [ "$_pf_bytes" -eq 0 ]; then
+              echo "ℹ️ 未取得 ${_pf_name}.tar.gz 远端体积，跳过预取（消费方按原路同步下载）"
+              continue
+            fi
+            _pf_avail_kb="$(df -Pk /tmp | awk 'NR==2 {print $4}')"
+            _pf_need_kb="$(( _pf_bytes / 1024 * 2 + 512 * 1024 ))"
+            if [ "${_pf_avail_kb:-0}" -lt "$_pf_need_kb" ]; then
+              echo "ℹ️ /tmp 空间不足以预取 ${_pf_name}.tar.gz（available=${_pf_avail_kb}KB required=${_pf_need_kb}KB），跳过"
+              continue
+            fi
+            nohup bash "$P/pull-one-tar.sh" "$_pf_name" "$P" >"$P/${_pf_key}-tar.out" 2>&1 &
+            echo $! > "$P/${_pf_key}-tar.pid"
+            echo "🚀 已后台预取 ${_pf_name}.tar.gz（${_pf_bytes}B，pid $(cat "$P/${_pf_key}-tar.pid")）"
+          done
+
+          # 2026-10-30 P5a：zcode2api 代码+依赖预准备（后台）。命令序列与消费步骤的
+          # fresh 路径逐条一致（同 $Z2A_REPO HEAD clone → 同 requirements venv/pip →
+          # captcha_node npm ci）；消费方检测到就绪产物即跳过现场安装，数据快照
+          # （.env + data/）仍由消费方从 Dropbox 恢复。rc 文件仅观测（消费方以产物
+          # 就绪性为准：requirements + .venv/bin/python + node_modules + git 树）。
+          cat > "$P/pull-z2a-deps.sh" <<'PF_EOF'
+          #!/usr/bin/env bash
+          set +e
+          Z2A_REPO="https://github.com/jarvanh/zcode2api.git"
+          Z2A_RUN_DIR="/tmp/local_zcode2api"
+          rm -rf "$Z2A_RUN_DIR"
+          if ! git clone --quiet --depth 1 "$Z2A_REPO" "$Z2A_RUN_DIR"; then
+            echo 1 > "$P/z2a-deps.rc"; exit 1
+          fi
+          mkdir -p "$Z2A_RUN_DIR/logs"
+          python3 -m venv "$Z2A_RUN_DIR/.venv" \
+            && "$Z2A_RUN_DIR/.venv/bin/pip" install --quiet --disable-pip-version-check \
+                 -r "$Z2A_RUN_DIR/requirements.txt" 2>"$Z2A_RUN_DIR/logs/pip.log" \
+            && (cd "$Z2A_RUN_DIR/captcha_node" && npm ci --silent 2>"$Z2A_RUN_DIR/logs/npm.log")
+          echo "$?" > "$P/z2a-deps.rc"
+          PF_EOF
+          chmod +x "$P/pull-z2a-deps.sh"
+          nohup bash "$P/pull-z2a-deps.sh" >"$P/z2a-deps.out" 2>&1 &
       - name: Restore ZCode data (先于 Tailscale 接入)
         # 2026-11-01 事故根治（主人拍板）：zcode.tar.gz 数据还原必须先于 Tailscale SSH 接入。
         # 事故链：B2（2026-10-29）把还原后置到网关健康之后 → 客户端经 Tailscale 先连上、
@@ -147,9 +315,10 @@ jobs:
         # 脚下的库整个换掉，3.17.1 迁移时序被搅乱、projects 注册表清空 → 客户端全量
         # project.not-found。还原前移到「任何客户端都可能接入」之前：server 首次打开的
         # 就是最终数据，不存在脚下换库。
-        # 时序依赖：rclone-install/config 已前移到本步之前；本步在 Prefetch 之前执行，
-        # zcode.tar.gz 直接同步下载（3GB ≈ 30-60s），不再进 Prefetch。护栏同款：
-        # continue-on-error 不级联（此刻网关尚未启动，无服务可伤），失败必须出声（TG alert）。
+        # 时序依赖：rclone-install/config 已前移到本步之前；2026-11-02（P1）起
+        # zcode.tar.gz 由 rclone-config 步末尾后台预取，本步按 .part→mv→rc 协议收货，
+        # 未命中回落同步下载。护栏同款：continue-on-error 不级联（此刻网关尚未启动，
+        # 无服务可伤），失败必须出声（TG alert）。
         # ⚠️ 本步位置 = 时序红线：必须先于所有 Tailscale 步骤（红线说明见 Clean stale 节点上方注释）。
         if: ${{ !cancelled() }}
         continue-on-error: true
@@ -179,20 +348,61 @@ jobs:
           rm -rf "$ZCODE_RESTORE_DIR" 2>/dev/null || true
           if rclone ls dropbox:self-hosted/zcode.tar.gz > /dev/null 2>&1; then
             echo "📦 Found zcode.tar.gz! Downloading and extracting..."
-            if ! rclone copyto dropbox:self-hosted/zcode.tar.gz "$TMP_ZCODE_TAR" --multi-thread-streams 16; then
-              echo "⚠️ zcode.tar.gz 下载失败，跳过 ZCode 提前恢复（发告警）"
-              zcode_fail_notify "zcode.tar.gz 下载失败"
-              rm -f "$TMP_ZCODE_TAR" 2>/dev/null || true
+            # ── 2026-11-02 启动提速（C2，P1 收货）：rclone-config 步末尾已后台预取本包，
+            # 此处按 prefetch 体系 .part→mv→rc 协议收货；未命中/失败回落原同步下载
+            # （协议与 Prefetch cold artifacts / run-ai-gateway.sh 的 fetch_via_prefetch 同款）。
+            PF="/tmp/openclaw-prefetch"
+            _zpf_hit=0
+            if [ -f "$PF/zcode-tar.pid" ]; then
+              _zpf_waited=0
+              while [ ! -f "$PF/zcode-tar.rc" ] && [ "$_zpf_waited" -lt 600 ]; do
+                _zpf_pid="$(cat "$PF/zcode-tar.pid" 2>/dev/null | tr -dc '0-9')"
+                [ -n "$_zpf_pid" ] || break
+                kill -0 "$_zpf_pid" 2>/dev/null || break
+                sleep 2
+                _zpf_waited=$((_zpf_waited + 2))
+              done
+              _zpf_rc="$(cat "$PF/zcode-tar.rc" 2>/dev/null || echo none)"
+              if [ "$_zpf_rc" = "0" ] && [ -s "$PF/zcode.tar.gz" ]; then
+                mv "$PF/zcode.tar.gz" "$TMP_ZCODE_TAR"
+                rm -f "$PF/zcode.tar.gz.part" "$PF/zcode-tar.rc" "$PF/zcode-tar.pid" 2>/dev/null || true
+                echo "✅ zcode.tar.gz prefetch 命中（等待 ${_zpf_waited}s）"
+                _zpf_hit=1
+              else
+                echo "⚠️ zcode.tar.gz prefetch 未命中（rc=${_zpf_rc}），回落同步下载"
+                rm -f "$PF/zcode.tar.gz.part" "$PF/zcode-tar.rc" "$PF/zcode-tar.pid" 2>/dev/null || true
+              fi
+            fi
+            if [ "$_zpf_hit" != "1" ]; then
+              if ! rclone copyto dropbox:self-hosted/zcode.tar.gz "$TMP_ZCODE_TAR" --multi-thread-streams 16; then
+                echo "⚠️ zcode.tar.gz 下载失败，跳过 ZCode 提前恢复（发告警）"
+                zcode_fail_notify "zcode.tar.gz 下载失败"
+                rm -f "$TMP_ZCODE_TAR" 2>/dev/null || true
+              fi
             fi
             if [ -s "$TMP_ZCODE_TAR" ] && tar -tzf "$TMP_ZCODE_TAR" >/dev/null 2>&1; then
+              # ── 2026-11-02 启动提速（C2，P2）：解压与落位改单趟 ──
+              # 旧路径 = tar 解到 /tmp 暂存 → 逐子树 cp -a 到 ~/.zcode（12GB 双趟 I/O，
+              # 实测 restore 191s）。新路径 = pigz 并行解压（同 FS staging，标准 gzip 流
+              # 兼容；解压即校验，非零退出码即失败）→ 同设备 rename 原子落位（0 开销，
+              # 同 install-openclaw.sh 的 cp -a → mv 改造，实测 37.3s → 0.002s）。
+              # cli/server/v2 三子树整体 staging 后逐个原子换入；validation 判据不变。
               mkdir -p "$ZCODE_RESTORE_DIR"
-              tar -xzf "$TMP_ZCODE_TAR" -C "$ZCODE_RESTORE_DIR"
+              if command -v pigz >/dev/null 2>&1; then
+                ( set -o pipefail; pigz -dc "$TMP_ZCODE_TAR" | tar -xf - -C "$ZCODE_RESTORE_DIR" )
+              else
+                tar -xzf "$TMP_ZCODE_TAR" -C "$ZCODE_RESTORE_DIR"
+              fi
               restored_any=0
               for rel in cli v2; do
                 if [ -d "$ZCODE_RESTORE_DIR/.zcode/$rel" ]; then
                   mkdir -p ~/.zcode
                   rm -rf ~/.zcode/$rel
-                  cp -a "$ZCODE_RESTORE_DIR/.zcode/$rel" ~/.zcode/$rel
+                  if mv "$ZCODE_RESTORE_DIR/.zcode/$rel" ~/.zcode/$rel 2>/dev/null; then
+                    :
+                  else
+                    cp -a "$ZCODE_RESTORE_DIR/.zcode/$rel" ~/.zcode/$rel
+                  fi
                   echo "✅ Restored ~/.zcode/$rel from archive"
                   restored_any=1
                 fi
@@ -216,7 +426,11 @@ jobs:
                   echo "ℹ️ ~/.zcode/server 已有客户端部署（$(basename "$_deployed")），保留本地版本"
                 else
                   mkdir -p ~/.zcode/server
-                  cp -a "$ZCODE_RESTORE_DIR/.zcode/server/." ~/.zcode/server/
+                  if mv "$ZCODE_RESTORE_DIR/.zcode/server" "$HOME/.zcode/server" 2>/dev/null; then
+                    :
+                  else
+                    cp -a "$ZCODE_RESTORE_DIR/.zcode/server/." ~/.zcode/server/
+                  fi
                   echo "✅ Restored ~/.zcode/server from archive (skips this run's re-download)"
                   bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/zcode-server-identity.sh" install || true
                 fi
@@ -629,139 +843,6 @@ jobs:
       - name: Tailscale secrets missing
         if: ${{ always() && env.TS_OAUTH_CLIENT_ID == '' && env.TS_OAUTH_CLIENT_SECRET == '' }}
         run: echo "⚠️ 未配置 TS_OAUTH_CLIENT_ID / TS_OAUTH_CLIENT_SECRET，跳过 Tailscale SSH 调试入口"
-
-      - name: Prefetch cold artifacts (后台并行)
-        # 把「与本轮状态无关」的大块下载从串行关键路径上摘出去。实测一轮冷启动里
-        # 主包下载 54s、omniroute 镜像 35.7s、rss 镜像 ~20s 都排在各自消费步骤里干
-        # 等（run 39515245551 逐行核对日志），本步把它们丢到后台，与 mount/tailscale/
-        # 装 openclaw/解包重叠。
-        # 纯增益，不参与正确性：消费方原有的同步下载与 `docker run` 拉取路径一行未动，
-        # 预取没跑完/跑失败就按原路走；产物先写 .part 再 mv，消费方不会看到半截文件。
-        run: |
-          # 关掉 errexit：GH 默认 shell 是 bash -e，本步骤任何一次探测失败（rclone 限流、
-          # 磁盘不足）都不该把整轮打死 —— 预取的语义是「成了是赚，砸了照原路走」。
-          set +e
-          set -uo pipefail
-          P=/tmp/openclaw-prefetch
-          rm -rf "$P"; mkdir -p "$P"
-
-          cat > "$P/pull-openclaw-tar.sh" <<'PF_EOF'
-          #!/usr/bin/env bash
-          # 主包 prefetch：产物落在 prefetch 目录，由恢复步骤等完再 mv 走（同一 fs，rename 免费）。
-          # rc 文件最后写 —— 它出现即代表 .tar.gz 已就位，轮询方不会读到半截。
-          set +e
-          P="$1"
-          # 2026-10-24 下载调优（本机 2GB A/B 实测）：--multi-thread-streams 16
-          # 把下载从 70-82MB/s（默认 4 流）提到 174-190MB/s（16/24/32 流为同一
-          # 平台区，取最低值）；主包 9-12GB，Install 步骤直接受益。
-          rclone copyto dropbox:self-hosted/openclaw.tar.gz "$P/openclaw.tar.gz.part" --multi-thread-streams 16
-          rc=$?
-          if [ "$rc" -eq 0 ] && [ -s "$P/openclaw.tar.gz.part" ]; then
-            mv "$P/openclaw.tar.gz.part" "$P/openclaw.tar.gz"
-          else
-            rm -f "$P/openclaw.tar.gz.part"
-            [ "$rc" -eq 0 ] && rc=1
-          fi
-          echo "$rc" > "$P/openclaw-tar.rc"
-          PF_EOF
-          cat > "$P/pull-images.sh" <<'PF_EOF'
-          #!/usr/bin/env bash
-          set +e
-          # $1 = prefetch 目录（父 shell 的变量不会自动进子 shell，必须显式传）
-          P="$1"
-          # qoder 用浮动 latest（实际部署步骤会按最新 release tag 再拉一次）；其余固定 tag 与步骤对齐。
-          for img in rongronggg9/rss-to-telegram:latest \
-                     diegosouzapw/omniroute:3.8.51 \
-                     ghcr.io/jarvanh/qoder2api-hub:latest; do
-            docker image pull "$img" >"$P/pull-$(printf '%s' "$img" | tr '/:.' '___').log" 2>&1
-          done
-          PF_EOF
-          chmod +x "$P/pull-openclaw-tar.sh" "$P/pull-images.sh"
-
-          nohup bash "$P/pull-images.sh" "$P" >"$P/pull-images.out" 2>&1 &
-          echo "🚀 已后台拉起网关镜像预取（pid $!）"
-
-          tar_bytes="$(rclone size --json dropbox:self-hosted/openclaw.tar.gz 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null)" || tar_bytes=0
-          case "${tar_bytes:-0}" in ''|*[!0-9]*) tar_bytes=0 ;; esac
-          if [ "$tar_bytes" -eq 0 ]; then
-            echo "ℹ️ 未取得主包远端体积，跳过预取（恢复步骤按原路同步下载）"
-          else
-            # 预取不能反过来把恢复侧挤爆：留 2 倍包体积 + 1GB（与恢复侧 require_free_kb 同口径）
-            avail_kb="$(df -Pk /tmp | awk 'NR==2 {print $4}')"
-            need_kb="$(( tar_bytes / 1024 * 2 + 1024 * 1024 ))"
-            if [ "${avail_kb:-0}" -lt "$need_kb" ]; then
-              echo "ℹ️ /tmp 空间不足以预取主包（available=${avail_kb}KB required=${need_kb}KB），跳过"
-            else
-              nohup bash "$P/pull-openclaw-tar.sh" "$P" >"$P/openclaw-tar.out" 2>&1 &
-              echo $! > "$P/openclaw-tar.pid"
-              echo "🚀 已后台预取主包 openclaw.tar.gz（${tar_bytes}B，pid $(cat "$P/openclaw-tar.pid")）"
-            fi
-          fi
-
-          # 2026-10-29 下线优化（B2）：OmniRoute 主档同样预取（消费方 = AI 网关步骤，
-          # 未命中照原路同步下载）。zcode.tar.gz 原也在此预取、由后置 ZCode 恢复消费；
-          # 2026-11-01 该恢复前移到 rclone-config 之后（先于 Tailscale 接入），改为直接
-          # 同步下载，不再进预取。单档体积门 2×+512MB，与主包同口径防挤爆；rc 文件最后写。
-          cat > "$P/pull-one-tar.sh" <<'PF_EOF'
-          #!/usr/bin/env bash
-          # 用法: pull-one-tar.sh <Name> <prefetch_dir>；产物 .part → mv，rc 文件最后写
-          #（rc 出现即代表包就位或终态失败，轮询方不会读到半截）。
-          set +e
-          NAME="$1"; P="$2"
-          KEY="$(printf '%s' "$NAME" | tr 'A-Z' 'a-z')"
-          rclone copyto "dropbox:self-hosted/${NAME}.tar.gz" "$P/${NAME}.tar.gz.part" --multi-thread-streams 16
-          rc=$?
-          if [ "$rc" -eq 0 ] && [ -s "$P/${NAME}.tar.gz.part" ]; then
-            mv "$P/${NAME}.tar.gz.part" "$P/${NAME}.tar.gz"
-          else
-            rm -f "$P/${NAME}.tar.gz.part"
-            [ "$rc" -eq 0 ] && rc=1
-          fi
-          echo "$rc" > "$P/${KEY}-tar.rc"
-          PF_EOF
-          chmod +x "$P/pull-one-tar.sh"
-          for _pf_name in OmniRoute; do
-            _pf_key="$(printf '%s' "$_pf_name" | tr 'A-Z' 'a-z')"
-            _pf_bytes="$(rclone size --json "dropbox:self-hosted/${_pf_name}.tar.gz" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null)" || _pf_bytes=0
-            case "${_pf_bytes:-0}" in ''|*[!0-9]*) _pf_bytes=0 ;; esac
-            if [ "$_pf_bytes" -eq 0 ]; then
-              echo "ℹ️ 未取得 ${_pf_name}.tar.gz 远端体积，跳过预取（消费方按原路同步下载）"
-              continue
-            fi
-            _pf_avail_kb="$(df -Pk /tmp | awk 'NR==2 {print $4}')"
-            _pf_need_kb="$(( _pf_bytes / 1024 * 2 + 512 * 1024 ))"
-            if [ "${_pf_avail_kb:-0}" -lt "$_pf_need_kb" ]; then
-              echo "ℹ️ /tmp 空间不足以预取 ${_pf_name}.tar.gz（available=${_pf_avail_kb}KB required=${_pf_need_kb}KB），跳过"
-              continue
-            fi
-            nohup bash "$P/pull-one-tar.sh" "$_pf_name" "$P" >"$P/${_pf_key}-tar.out" 2>&1 &
-            echo $! > "$P/${_pf_key}-tar.pid"
-            echo "🚀 已后台预取 ${_pf_name}.tar.gz（${_pf_bytes}B，pid $(cat "$P/${_pf_key}-tar.pid")）"
-          done
-
-          # 2026-10-30 P5a：zcode2api 代码+依赖预准备（后台）。命令序列与消费步骤的
-          # fresh 路径逐条一致（同 $Z2A_REPO HEAD clone → 同 requirements venv/pip →
-          # captcha_node npm ci）；消费方检测到就绪产物即跳过现场安装，数据快照
-          # （.env + data/）仍由消费方从 Dropbox 恢复。rc 文件仅观测（消费方以产物
-          # 就绪性为准：requirements + .venv/bin/python + node_modules + git 树）。
-          cat > "$P/pull-z2a-deps.sh" <<'PF_EOF'
-          #!/usr/bin/env bash
-          set +e
-          Z2A_REPO="https://github.com/jarvanh/zcode2api.git"
-          Z2A_RUN_DIR="/tmp/local_zcode2api"
-          rm -rf "$Z2A_RUN_DIR"
-          if ! git clone --quiet --depth 1 "$Z2A_REPO" "$Z2A_RUN_DIR"; then
-            echo 1 > "$P/z2a-deps.rc"; exit 1
-          fi
-          mkdir -p "$Z2A_RUN_DIR/logs"
-          python3 -m venv "$Z2A_RUN_DIR/.venv" \
-            && "$Z2A_RUN_DIR/.venv/bin/pip" install --quiet --disable-pip-version-check \
-                 -r "$Z2A_RUN_DIR/requirements.txt" 2>"$Z2A_RUN_DIR/logs/pip.log" \
-            && (cd "$Z2A_RUN_DIR/captcha_node" && npm ci --silent 2>"$Z2A_RUN_DIR/logs/npm.log")
-          echo "$?" > "$P/z2a-deps.rc"
-          PF_EOF
-          chmod +x "$P/pull-z2a-deps.sh"
-          nohup bash "$P/pull-z2a-deps.sh" >"$P/z2a-deps.out" 2>&1 &
           echo "🚀 已后台预准备 zcode2api 代码+依赖（pid $!）"
       - name: Mount Dropbox
         run: |
@@ -880,6 +961,59 @@ jobs:
           tg_add_footer _m
           send_tg "$_m" alert || echo "::warning::[dropbox-quota] TG 告警发送失败"
           exit 1
+
+      # ── 2026-11-02 启动提速（C2，P3）：六上游提前派发 ──
+      # 六个 run-*.sh 脚本调用即返回（真实部署在脚本内 nohup 后台子壳），且只依赖
+      # rclone + ts.env + checkout —— 三者在 Tailscale 段结束时全部就绪。此前 dispatch
+      # 排在 Install/runtime-env/Cloudflared 之后，上游与这 ~100s 完全串行；现在提前
+      # 发射，与 Prefetch/Mount/preflight/Install/skill/runtime-env/Cloudflared 重叠，
+      # AI 网关 step 的等齐门到达时上游早已全绿（实测上游 wall ≈ 45s）。
+      # 位置（2026-11-02 二调）：初版插在 Tailscale 段后，但 qingyan 的 prepare 校验
+# /dropbox 真源（qingyan_deploy.sh cmd_prepare:72），早于 Mount Dropbox 必失败；
+# 挪到 preflight 之后、Install OpenClaw 之前，依赖齐备且重叠收益基本不减。
+# 原六个 Run step 改为收口等待：rc 已在 → 只读结果打日志；rc 缺席 → 前台补跑
+      # 脚本（幂等保底，覆盖 early dispatch 被跳过/失败的形态）。
+      # env 注入：六个脚本的全部 secrets/常量在此集中注入（与原 step env 块逐一对应，
+      # 改任一处需同步另一处 —— 两处都引用同名 secrets，不会取到错值）。
+      - name: Dispatch upstream services (early, 与 install 段重叠)
+        id: dispatch_upstream_early
+        # 2026-10-22 口径：本步失败不得级联跳过后续（收口 step 会兜底）
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # workbuddy
+          WB_GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # zcode2api
+          ZCODE_GATEWAY_KEY: ${{ secrets.ZCODE_GATEWAY_API_KEY }}
+          # qingyan
+          QINGYAN_REFRESH_TOKEN: ${{ secrets.GLM_REFRESH_TOKEN }}
+          QINGYAN_GATEWAY_KEY: ${{ secrets.GLM2API_GATEWAY_KEY }}
+          QINGYAN_PORT: "8320"
+          QINGYAN_APP_REMOTE: dropbox:self-hosted/qingyan-proxy/app
+          QINGYAN_DATA_DIR: /dropbox/self-hosted/qingyan-proxy/data
+          QINGYAN_STATE_DIR: /dropbox/self-hosted/qingyan-proxy/data
+          QINGYAN_ENV_FILE: /dropbox/self-hosted/qingyan-proxy/env.sh
+          # qoder2api：无 secrets（QODER_KEY 脚本内自生成、面板密码 PBKDF2 预写）
+          # autoclaw
+          AUTOCLAW_GATEWAY_KEY: ${{ secrets.AUTOCLAW_GATEWAY_KEY }}
+          AUTOCLAW_REPO: https://github.com/jarvanh/autoclaw-proxy.git
+          AUTOCLAW_SNAPSHOT_REMOTE: dropbox:self-hosted/autoclaw-proxy/auth-snapshot.json
+          AUTOCLAW_STATS_REMOTE: dropbox:self-hosted/autoclaw-proxy/lifetime_stats.json
+          AUTOCLAW_PORT: "8322"
+        run: |
+          set -uo pipefail
+          OC_DIR="${GITHUB_WORKSPACE}/.github/scripts/openclaw"
+          # 幂等：rc 已在（理论不可能，防御补跑轮）则不重复派发
+          _dispatched=0
+          for _u in workbuddy trae2api zcode2api qingyan qoder2api autoclaw; do
+            [ -f "/tmp/upstream-rc-$_u" ] && continue
+            bash -eo pipefail "$OC_DIR/run-$( [ "$_u" = qingyan ] && echo qingyan || echo "$_u" ).sh"               || echo "::warning::[early-dispatch] $_u 脚本返回非零（部署后台进行中或失败，收口 step 兜底）"
+            _dispatched=$((_dispatched + 1))
+          done
+          echo "🚀 [early-dispatch] 已派发 ${_dispatched}/6 上游（真实部署后台进行，收口 step 等待 rc）"
 
       - name: Install OpenClaw
         id: install_openclaw
@@ -1056,7 +1190,32 @@ jobs:
         #（AI 网关步骤轮询 /tmp/upstream-rc-workbuddy，上限 480s）不受影响；上游
         # 失败走脚本内既有 TG 告警，不阻断 AI 网关（continue-on-error 口径）。
         # 背景同 Install OpenClaw 的 500KB 注。
-        run: bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/run-workbuddy.sh"
+        # 2026-11-02 启动提速（C2，P3）：真实部署已在「Dispatch upstream services
+        # (early)」步后台起跑，本 step 只收口 —— 等 /tmp/upstream-rc-workbuddy 出现
+        #（上限 600s，与等齐门同级），出现后按 rc 值复述结论；rc 迟迟不出
+        #（early dispatch 被跳过/脚本未起）→ 前台补跑脚本兜底（幂等：脚本自身
+        # 会跳过已完成段）。outcome 语义与原「同步执行脚本」一致：补跑失败
+        #（continue-on-error）不级联，仅告警。
+        run: |
+          set -uo pipefail
+          _rc="/tmp/upstream-rc-workbuddy"
+          _waited=0
+          while [ ! -f "$_rc" ] && [ "$_waited" -lt 600 ]; do
+            sleep 2
+            _waited=$((_waited + 2))
+          done
+          if [ -f "$_rc" ]; then
+            _v="$(cat "$_rc")"
+            if [ "$_v" = "0" ]; then
+              echo "✅ [收口] 上游 workbuddy 已就绪（early dispatch，等待 ${_waited}s）"
+            else
+              echo "⚠️ [收口] 上游 workbuddy 部署退出码 $_v（渠道降级，明细见 /opt/logs/upstream-workbuddy.log）"
+            fi
+            tail -n 8 "/opt/logs/upstream-workbuddy.log" 2>/dev/null | sed 's/^/    │ /' || true
+          else
+            echo "⚠️ [收口] early dispatch 未产出 rc，前台补跑 run-workbuddy.sh ..."
+            bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/run-workbuddy.sh"
+          fi
 
       # trae2api：TRAE SOLO 反代（OpenAI 兼容 API + Web 管理面板 /admin）。
       # 与 workbuddy-gateway / zcode2api 同为 AI 网关形态服务。
@@ -1084,7 +1243,32 @@ jobs:
         # 2026-10-30 减重外置：脚本本体在 .github/scripts/openclaw/run-trae2api.sh
         #（原样搬移，零逻辑改动），P5b 双层子壳与 rc 标记契约原样保留。
         # 背景同 Install OpenClaw 的 500KB 注。
-        run: bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/run-trae2api.sh"
+        # 2026-11-02 启动提速（C2，P3）：真实部署已在「Dispatch upstream services
+        # (early)」步后台起跑，本 step 只收口 —— 等 /tmp/upstream-rc-trae2api 出现
+        #（上限 600s，与等齐门同级），出现后按 rc 值复述结论；rc 迟迟不出
+        #（early dispatch 被跳过/脚本未起）→ 前台补跑脚本兜底（幂等：脚本自身
+        # 会跳过已完成段）。outcome 语义与原「同步执行脚本」一致：补跑失败
+        #（continue-on-error）不级联，仅告警。
+        run: |
+          set -uo pipefail
+          _rc="/tmp/upstream-rc-trae2api"
+          _waited=0
+          while [ ! -f "$_rc" ] && [ "$_waited" -lt 600 ]; do
+            sleep 2
+            _waited=$((_waited + 2))
+          done
+          if [ -f "$_rc" ]; then
+            _v="$(cat "$_rc")"
+            if [ "$_v" = "0" ]; then
+              echo "✅ [收口] 上游 trae2api 已就绪（early dispatch，等待 ${_waited}s）"
+            else
+              echo "⚠️ [收口] 上游 trae2api 部署退出码 $_v（渠道降级，明细见 /opt/logs/upstream-trae2api.log）"
+            fi
+            tail -n 8 "/opt/logs/upstream-trae2api.log" 2>/dev/null | sed 's/^/    │ /' || true
+          else
+            echo "⚠️ [收口] early dispatch 未产出 rc，前台补跑 run-trae2api.sh ..."
+            bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/run-trae2api.sh"
+          fi
 
       # zcode2api：GLM 反代网关（Anthropic + OpenAI 双协议，端口 8319）。
       # 代码取 jarvanh/zcode2api fork（在 dengyie 上游之上补了 ZCODE_GATEWAY_KEY
@@ -1154,7 +1338,32 @@ jobs:
         # 2026-10-30 减重外置：脚本本体在 .github/scripts/openclaw/run-zcode2api.sh
         #（原样搬移，唯 Bun 安装器由 curl|bash 改两步式——下载落盘再执行，安全扫描
         # 高危整改，语义等价）。P5b 契约与背景同 workbuddy 注。
-        run: bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/run-zcode2api.sh"
+        # 2026-11-02 启动提速（C2，P3）：真实部署已在「Dispatch upstream services
+        # (early)」步后台起跑，本 step 只收口 —— 等 /tmp/upstream-rc-zcode2api 出现
+        #（上限 600s，与等齐门同级），出现后按 rc 值复述结论；rc 迟迟不出
+        #（early dispatch 被跳过/脚本未起）→ 前台补跑脚本兜底（幂等：脚本自身
+        # 会跳过已完成段）。outcome 语义与原「同步执行脚本」一致：补跑失败
+        #（continue-on-error）不级联，仅告警。
+        run: |
+          set -uo pipefail
+          _rc="/tmp/upstream-rc-zcode2api"
+          _waited=0
+          while [ ! -f "$_rc" ] && [ "$_waited" -lt 600 ]; do
+            sleep 2
+            _waited=$((_waited + 2))
+          done
+          if [ -f "$_rc" ]; then
+            _v="$(cat "$_rc")"
+            if [ "$_v" = "0" ]; then
+              echo "✅ [收口] 上游 zcode2api 已就绪（early dispatch，等待 ${_waited}s）"
+            else
+              echo "⚠️ [收口] 上游 zcode2api 部署退出码 $_v（渠道降级，明细见 /opt/logs/upstream-zcode2api.log）"
+            fi
+            tail -n 8 "/opt/logs/upstream-zcode2api.log" 2>/dev/null | sed 's/^/    │ /' || true
+          else
+            echo "⚠️ [收口] early dispatch 未产出 rc，前台补跑 run-zcode2api.sh ..."
+            bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/run-zcode2api.sh"
+          fi
 
       - name: Run qingyan-proxy (ChatGLM 清言反代)
         id: run_qingyan
@@ -1188,7 +1397,32 @@ jobs:
           # Dropbox 真源（代码/数据/凭据/日志），不存在 /tmp 运行副本。
         # 2026-10-30 减重外置：脚本本体在 .github/scripts/openclaw/run-qingyan.sh
         #（原样搬移，零逻辑改动），P5b 契约与背景同 workbuddy 注。
-        run: bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/run-qingyan.sh"
+        # 2026-11-02 启动提速（C2，P3）：真实部署已在「Dispatch upstream services
+        # (early)」步后台起跑，本 step 只收口 —— 等 /tmp/upstream-rc-qingyan 出现
+        #（上限 600s，与等齐门同级），出现后按 rc 值复述结论；rc 迟迟不出
+        #（early dispatch 被跳过/脚本未起）→ 前台补跑脚本兜底（幂等：脚本自身
+        # 会跳过已完成段）。outcome 语义与原「同步执行脚本」一致：补跑失败
+        #（continue-on-error）不级联，仅告警。
+        run: |
+          set -uo pipefail
+          _rc="/tmp/upstream-rc-qingyan"
+          _waited=0
+          while [ ! -f "$_rc" ] && [ "$_waited" -lt 600 ]; do
+            sleep 2
+            _waited=$((_waited + 2))
+          done
+          if [ -f "$_rc" ]; then
+            _v="$(cat "$_rc")"
+            if [ "$_v" = "0" ]; then
+              echo "✅ [收口] 上游 qingyan 已就绪（early dispatch，等待 ${_waited}s）"
+            else
+              echo "⚠️ [收口] 上游 qingyan 部署退出码 $_v（渠道降级，明细见 /opt/logs/upstream-qingyan.log）"
+            fi
+            tail -n 8 "/opt/logs/upstream-qingyan.log" 2>/dev/null | sed 's/^/    │ /' || true
+          else
+            echo "⚠️ [收口] early dispatch 未产出 rc，前台补跑 run-qingyan.sh ..."
+            bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/run-qingyan.sh"
+          fi
 
       - name: Run qoder2api-hub container (Qoder 双区 OpenAI 兼容网关)
         # 2026-10-22 步骤重排后位于 Run OpenClaw 之后：本步失败不得级联跳过
@@ -1201,7 +1435,32 @@ jobs:
         # 2026-10-30 减重外置：脚本本体在 .github/scripts/openclaw/run-qoder2api.sh
         #（原样搬移，零逻辑改动；本步无 P5b 后台结构，行内执行）。背景同 Install
         # OpenClaw 的 500KB 注。
-        run: bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/run-qoder2api.sh"
+        # 2026-11-02 启动提速（C2，P3）：真实部署已在「Dispatch upstream services
+        # (early)」步后台起跑，本 step 只收口 —— 等 /tmp/upstream-rc-qoder2api 出现
+        #（上限 600s，与等齐门同级），出现后按 rc 值复述结论；rc 迟迟不出
+        #（early dispatch 被跳过/脚本未起）→ 前台补跑脚本兜底（幂等：脚本自身
+        # 会跳过已完成段）。outcome 语义与原「同步执行脚本」一致：补跑失败
+        #（continue-on-error）不级联，仅告警。
+        run: |
+          set -uo pipefail
+          _rc="/tmp/upstream-rc-qoder2api"
+          _waited=0
+          while [ ! -f "$_rc" ] && [ "$_waited" -lt 600 ]; do
+            sleep 2
+            _waited=$((_waited + 2))
+          done
+          if [ -f "$_rc" ]; then
+            _v="$(cat "$_rc")"
+            if [ "$_v" = "0" ]; then
+              echo "✅ [收口] 上游 qoder2api 已就绪（early dispatch，等待 ${_waited}s）"
+            else
+              echo "⚠️ [收口] 上游 qoder2api 部署退出码 $_v（渠道降级，明细见 /opt/logs/upstream-qoder2api.log）"
+            fi
+            tail -n 8 "/opt/logs/upstream-qoder2api.log" 2>/dev/null | sed 's/^/    │ /' || true
+          else
+            echo "⚠️ [收口] early dispatch 未产出 rc，前台补跑 run-qoder2api.sh ..."
+            bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/run-qoder2api.sh"
+          fi
 
       - name: Run autoclaw-proxy (AutoClaw 积分反代 · 多账号池)
         id: run_autoclaw
@@ -1244,7 +1503,32 @@ jobs:
           AUTOCLAW_PORT: "8322"
         # 2026-11-02 减重外置：脚本本体在 .github/scripts/openclaw/run-autoclaw.sh
         #（双层子壳后台化 + P5b rc 契约，与其他五上游同构）。背景同 Install OpenClaw 注。
-        run: bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/run-autoclaw.sh"
+        # 2026-11-02 启动提速（C2，P3）：真实部署已在「Dispatch upstream services
+        # (early)」步后台起跑，本 step 只收口 —— 等 /tmp/upstream-rc-autoclaw 出现
+        #（上限 600s，与等齐门同级），出现后按 rc 值复述结论；rc 迟迟不出
+        #（early dispatch 被跳过/脚本未起）→ 前台补跑脚本兜底（幂等：脚本自身
+        # 会跳过已完成段）。outcome 语义与原「同步执行脚本」一致：补跑失败
+        #（continue-on-error）不级联，仅告警。
+        run: |
+          set -uo pipefail
+          _rc="/tmp/upstream-rc-autoclaw"
+          _waited=0
+          while [ ! -f "$_rc" ] && [ "$_waited" -lt 600 ]; do
+            sleep 2
+            _waited=$((_waited + 2))
+          done
+          if [ -f "$_rc" ]; then
+            _v="$(cat "$_rc")"
+            if [ "$_v" = "0" ]; then
+              echo "✅ [收口] 上游 autoclaw 已就绪（early dispatch，等待 ${_waited}s）"
+            else
+              echo "⚠️ [收口] 上游 autoclaw 部署退出码 $_v（渠道降级，明细见 /opt/logs/upstream-autoclaw.log）"
+            fi
+            tail -n 8 "/opt/logs/upstream-autoclaw.log" 2>/dev/null | sed 's/^/    │ /' || true
+          else
+            echo "⚠️ [收口] early dispatch 未产出 rc，前台补跑 run-autoclaw.sh ..."
+            bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/run-autoclaw.sh"
+          fi
 
       - name: "Run AI API gateway (backend: ${{ inputs.ai_backend }})"
         # 2026-10-31 重排（C1，主人拍板）：本步骤前移到 Run OpenClaw 之前 ——
