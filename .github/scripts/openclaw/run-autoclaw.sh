@@ -60,18 +60,26 @@
             echo "::warning::[autoclaw] clone 第 ${_try}/3 次失败：$(tail -c 300 /tmp/autoclaw-clone.err | tr '\n' ' ')"
             sleep $(( _try * 5 ))
           done
-          if [ "$_clone_ok" != "1" ]; then
-            echo "::warning::[autoclaw] 代码克隆失败（$AUTOCLAW_REPO）"
+          # 2026-11-02 兜底：代码+数据已常驻 Dropbox，clone 再挂也用上次同步的
+          # 代码照常起服务（只损失新鲜度，不损失可用性）。
+          if [ "$_clone_ok" != "1" ] && [ ! -s "$RUN_DIR/app/proxy.py" ]; then
+            echo "::warning::[autoclaw] 代码克隆失败（$AUTOCLAW_REPO）且 Dropbox 无常驻代码"
             AC_REASON="代码克隆失败"
           elif ! rclone copyto "$AUTOCLAW_SNAPSHOT_REMOTE" "$RUN_DIR/snapshot.json" 2>/dev/null && [ ! -s "$RUN_DIR/snapshot.json" ]; then
             echo "::warning::[autoclaw] 无凭据快照（先在本机跑 autoclaw_auth.py bootstrap）"
             AC_REASON="未配置凭据快照"
           else
-            AC_COMMIT="$(git -C "$SRC_DIR" rev-parse --short HEAD)"
-            mkdir -p "$RUN_DIR/app"
-            cp -a "$SRC_DIR/app/." "$RUN_DIR/app/"
-            printf '%s\n' "$AC_COMMIT" > "$RUN_DIR/COMMIT"
-            echo "代码: $AUTOCLAW_REPO @ $AC_COMMIT（已同步 $RUN_DIR/app）"
+            if [ "$_clone_ok" = "1" ]; then
+              AC_COMMIT="$(git -C "$SRC_DIR" rev-parse --short HEAD)"
+              mkdir -p "$RUN_DIR/app"
+              cp -a "$SRC_DIR/app/." "$RUN_DIR/app/"
+              printf '%s\n' "$AC_COMMIT" > "$RUN_DIR/COMMIT"
+              echo "代码: $AUTOCLAW_REPO @ $AC_COMMIT（已同步 $RUN_DIR/app）"
+            else
+              AC_COMMIT="$(head -c 16 "$RUN_DIR/COMMIT" 2>/dev/null || true)"
+              [ -n "$AC_COMMIT" ] || AC_COMMIT="dropbox-resident"
+              echo "::warning::[autoclaw] clone 失败，回退 Dropbox 常驻代码 @ $AC_COMMIT"
+            fi
             # 累计统计拉回续计：Dropbox 有则覆盖本地（/tmp 重建后为空），无则从零起计
             rclone copyto "$AUTOCLAW_STATS_REMOTE" "$RUN_DIR/app/lifetime_stats.json" 2>/dev/null \
               && echo "lifetime_stats: 已从 Dropbox 拉回续计" \
