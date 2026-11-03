@@ -2352,10 +2352,18 @@ jobs:
           # YYYYMMDD-HHMM-tag、YYMM-DDHHMM），解析名字必漏。
           # 清理失败不拦归档：剪不动大不了本轮还是大包，正事是打包本身。
           PRUNE_DAYS="${OPENCLAW_PRUNE_DAYS:-7}"
+          # 迁移备份豁免（2026-11-04）：doctor/升级迁移的 *.pre-startup-migration-*.bak
+          # 是框架给 12 个库（agents ~3.7GB + state 108MB）留的完整副本，一次性事件
+          # （2026.10.9→.10 升级，run 41599325596 实测主包 4.56GB→7.59GB、归档 402s→810s）。
+          # 走普通 7 天窗会让每轮收尾白背 3GB 长达一周；24h 就剪（回滚靠重新触发迁移，
+          # 且 bak 会随主包还原、mtime 跨轮连续，24h 后必被剪掉）。
+          PRUNE_MIGRATION_BAK_DAYS="${OPENCLAW_PRUNE_MIGRATION_BAK_DAYS:-1}"
           prune_victims="/tmp/openclaw-prune-victims.$$"
           {
             find "$SRC_DIR/backups" -mindepth 1 -maxdepth 1 -mtime +"$PRUNE_DAYS" -print0 2>/dev/null
-            find "$SRC_DIR" -name '*.bak' -type f -mtime +"$PRUNE_DAYS" -print0 2>/dev/null
+            find "$SRC_DIR" -name '*.bak' -type f -mtime +"$PRUNE_DAYS" \
+              ! -name '*.pre-startup-migration-*.bak' -print0 2>/dev/null
+            find "$SRC_DIR" -name '*.pre-startup-migration-*.bak' -type f -mtime +"$PRUNE_MIGRATION_BAK_DAYS" -print0 2>/dev/null
           } > "$prune_victims" || true
           prune_bytes=0
           prune_count=0
