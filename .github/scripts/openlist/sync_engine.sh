@@ -326,7 +326,19 @@ _sync_mirror_prune() {
       n_protected=$((n_protected + 1))
       continue
     fi
-    # 保护②: 顶层短哈希目录（折叠/短名修复落点，还原链路唯一载体）
+    # 保护②: 短哈希形态保护（折叠/短名修复落点，还原链路唯一载体）。
+    #   两种形态，run 41516270971 实测后扩展:
+    #   a) 任意层级的 **8位hex 文件名**（方法2·短名直传落点 <hash8>.<ext>）——
+    #     跨任务/子任务视角下 marker 记录不可见（记录在修复时任务名的 marker
+    #     里，sync 的是另一个同步对），排除清单护不到 ⇒ 按文件名形态硬保护。
+    #     误保护代价 = 该文件留在目标端不镜像（安全方向）；真实源端文件恰好
+    #     8位hex 命名的概率极低，且即使有也只是"少删"不是"错删"。
+    #   b) 8位hex **目录**下的文件（目录级批量折叠落点 dest/<hash8>/<file>）。
+    local _base="${p##*/}"
+    if [[ "$_base" =~ ^[0-9a-f]{8}\.[A-Za-z0-9]{1,8}$ ]]; then
+      n_protected=$((n_protected + 1))
+      continue
+    fi
     local _top="${p%%/*}"
     if [[ "$_top" =~ ^[0-9a-f]{8}$ ]] && [ "$p" != "$_top" ]; then
       n_protected=$((n_protected + 1))
