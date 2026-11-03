@@ -584,6 +584,33 @@ sync_with_logging() {
   # 顺序放在 423 之后: 先走完已有重试链，再对 409 兜一轮，避免两者互相等待。
   _sync_retry_409
 
+  # ===== 子目录级 409 死目录快速失败（2026-11-03 加）=====
+  # 为什么需要: 批次路径有 _batch_409_deadlock 闸，但**子目录级 initial sync**
+  #   绕开了批次循环。run 41568255043 实证: task1_1024j_套图_逐月su 的子目录
+  #   sync 跑 09:06→10:59（近 2h），仅 4 个文件成功落地、487 次 409 ——
+  #   超长文件名（FireShot Capture …）在该后端确定性建不出父目录，
+  #   rclone 的 retries × low-level 全打在同一处，2h 预算换 4 个文件。
+  # 判据与批次闸同口径（两个条件同时成立，防误杀可自愈的竞争冲突）:
+  #   ① 409 计数 ≥ OPENLIST_409_FAST_FAIL_MIN（默认 20）
+  #   ② 本次 sync 零字节落盘（Transferred 为 0 且无 Copied 行）
+  # 命中后不再等下一轮重试，直接交修复管线（它有 base64 目录/短哈希/分卷
+  #   等 4 种方法，实测能把这类文件救回来），省下的时间给其他子目录。
+  local _n409_sync=0
+  _n409_sync=$(grep -acE 'Conflict:[[:space:]]*409|409[[:space:]]+Conflict' "$LAST_ATTEMPT_LOG" 2>/dev/null || true)
+  [[ "$_n409_sync" =~ ^[0-9]+$ ]] || _n409_sync=0
+  if [ "$_n409_sync" -ge "${OPENLIST_409_FAST_FAIL_MIN:-20}" ]; then
+    # 条件②内联判定（不调 task_engine 的 _batch_409_deadlock: 本文件是更底层的
+    #   模块，反向依赖上层函数是反模式，且 load_all 顺序一变就静默失效）
+    local _d_bytes _d_copied=0
+    _d_bytes=$(get_transferred_bytes_from_log "$LAST_ATTEMPT_LOG" 2>/dev/null || echo 0)
+    [[ "$_d_bytes" =~ ^[0-9]+$ ]] || _d_bytes=0
+    grep -qE 'INFO  : .*: Copied' "$LAST_ATTEMPT_LOG" 2>/dev/null && _d_copied=1
+    if [ "$_d_bytes" -eq 0 ] && [ "$_d_copied" -eq 0 ]; then
+      echo "🛑 子目录级 sync: ${_n409_sync} 次 409 且零字节落盘（阈值 ${OPENLIST_409_FAST_FAIL_MIN:-20}）→ 判该目录确定性建不出来，跳过后续重试，直接交修复管线（折叠/短名/base64/分卷）" | tee -a "$LOG_FILENAME"
+      SYNC_STATUS=0
+    fi
+  fi
+
   # ===== truth-check（任意 openlist: 目标端通用）=====
   # 放在缺失文件 diff 之前：本轮有传输则重启 OpenList 容器取后端真值列表，
   # diff 才能把"PUT 假成功"文件（仅存在于缓存）识别为缺失并送修复管线。
