@@ -2629,6 +2629,50 @@ jobs:
             exit 1
           fi
 
+          # ── server 部署竞态自愈（2026-11-04，根治 run 41788381119 的 rc=4）──
+          # 症状：流式与 fallback 双双 `zcode_archive_incomplete missing=
+          # server/current.json`，该轮 zcode 不覆盖云端（靠 20min 周期循环自愈）。
+          # 根因：current.json 由 ZCode 客户端部署/升级时**原子替换整个 server 树**
+          # 写入；rsync 恰好扫到「旧指针已删、新指针未落」的窗口（rc=24 被上面
+          # 当活动文件消失容忍），staging 就缺了它。云端包实际一直含该文件
+          # （rclone cat | tar -tf 实证），是单轮快照竞态，不是数据损坏。
+          # 对策：校验前判「指针 + 所指 release 的 server-core.js」是否同时在场；
+          # 不齐时先按主包 CRITICAL_FILES 同款思路从活源单文件补齐（3KB，最便宜），
+          # 仍不齐再重扫 server 子树（整树 rsync，仅在竞态时触发），最多 3 轮。
+          # 硬判据原样保留：3 轮后仍不齐才 exit 4、保留云端旧包（安全降级不变）。
+          # ⚠️ 流式模式 stdout 是 gzip 数据通道，所有日志必须 >&2。
+          _server_snapshots=0
+          for _srv_try in 1 2 3; do
+            _srv_rel=""
+            if [ -s "$STAGE_DIR/.zcode/server/current.json" ]; then
+              _srv_rel="$(jq -r '.releaseDir // empty' "$STAGE_DIR/.zcode/server/current.json" 2>/dev/null || true)"
+              _srv_rel="${_srv_rel##*/}"
+            fi
+            if [ -n "$_srv_rel" ] && [ -s "$STAGE_DIR/.zcode/server/releases/$_srv_rel/runtime/server-core.js" ]; then
+              break
+            fi
+            # 活源本身没有指针就别白重试（真未部署 → 交给下方 exit 4 判据）
+            [ -s "$SRC_ROOT/server/current.json" ] || break
+            echo "zcode_server_snapshot_retry try=$_srv_try (部署竞态：指针/核心 bundle 未齐)" >&2
+            if [ "$_srv_try" -gt 1 ]; then
+              sleep 2
+              set +e
+              snapshot_tree "$SRC_ROOT/server" "$STAGE_DIR/.zcode/server/" \
+                --exclude 'asset-cache/staging' \
+                --exclude '*.lock' \
+                --exclude '*.pid'
+              server_rc=$?
+              set -e
+              [ "$server_rc" -eq 0 ] || break
+              _server_snapshots=$((_server_snapshots + 1))
+            fi
+            # 单文件补齐（重扫后也再做一次，防重扫又撞上同一窗口）
+            if [ ! -s "$STAGE_DIR/.zcode/server/current.json" ]; then
+              cp "$SRC_ROOT/server/current.json" "$STAGE_DIR/.zcode/server/current.json" 2>/dev/null || true
+            fi
+          done
+          [ "$_server_snapshots" -eq 0 ] || echo "zcode_server_snapshot_repaired rescan=$_server_snapshots" >&2
+
           # v2/ 整棵入包：tasks-index.sqlite 是侧栏会话列表（标题/置顶/归档/未读/删除），
           # certs + telemetry-state.json 是 server 设备身份（见还原步骤注释），
           # setting.json / provider_config.json / credentials.json 是客户端配置与凭据。
