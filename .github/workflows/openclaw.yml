@@ -513,10 +513,18 @@ jobs:
                 if [ -n "$_deployed" ]; then
                   echo "ℹ️ ~/.zcode/server 已有客户端部署（$(basename "$_deployed")），保留本地版本"
                 else
-                  mkdir -p ~/.zcode/server
+                  # ⚠️ 2026-11-05 根治 mv 嵌套：此前先 mkdir -p 再 mv，目标是已存在
+                  # 的目录 → mv 把包内 server 移成 ~/.zcode/server/server（而不是
+                  # 覆盖），顶层因此缺 current.json → 归档判据 exit 4、zcode 备份
+                  # 停摆数小时（run 41885045791 实测 02:29–06:41 每 20min 全失败，
+                  # 云端包停在 02:05）；历史包还把嵌套一层层带下去（本机已 5 层、
+                  # 4.31GB 里几乎全是重复 releases）。改为先移除空壳（seed 只建了
+                  # install.json，identity 随后会重建）再 mv，落点即顶层。
+                  rm -rf ~/.zcode/server
                   if mv "$ZCODE_RESTORE_DIR/.zcode/server" "$HOME/.zcode/server" 2>/dev/null; then
                     :
                   else
+                    mkdir -p ~/.zcode/server
                     cp -a "$ZCODE_RESTORE_DIR/.zcode/server/." ~/.zcode/server/
                   fi
                   echo "✅ Restored ~/.zcode/server from archive (skips this run's re-download)"
@@ -2610,6 +2618,41 @@ jobs:
           # 实证）。恢复侧（cli/v2/server 三子树各自 mv，缺失即跳过）对 rollout 零依赖。
           # 剔除后包 ~4.8GB → ~0.4GB，zcode 归档 15.8min → ~1-2min，整轮下线→上线
           # 25min → ~10min。本地源目录照常保留（只影响云端备份内容），上限清理见上方。
+          # ── 历史 mv 嵌套：先提升、再清理（2026-11-05）──
+          # 旧还原逻辑把包内 server 移成 ~/.zcode/server/server，且该结构留在包里
+          # 每轮再嵌套一层（本机实测 5 层、server 目录 4.31GB 里几乎全是重复
+          # releases，每层 331MB）。两种情形分开处理：
+          #   (a) 顶层有完整有效部署 → 嵌套子树是纯冗余副本，删掉（包体积回落）；
+          #   (b) 顶层无效但 server/server 里有有效部署 → 说明这是旧逻辑的产物，
+          #       把嵌套那层提上来再删余下嵌套（不丢数据，否则归档会因缺顶层指针
+          #       持续 exit 4 —— 正是本次事故形态）。
+          # 判据共用「current.json 指针 + 所指 release 的 server-core.js」。剪不动
+          # 不拦归档，与 rollout 清理同款。
+          _srv_valid() {
+            local root="$1" rel
+            [ -s "$root/current.json" ] || return 1
+            rel="$(jq -r '.releaseDir // empty' "$root/current.json" 2>/dev/null || true)"
+            rel="${rel##*/}"
+            [ -n "$rel" ] && [ -s "$root/releases/$rel/runtime/server-core.js" ]
+          }
+          if [ -d "$SRC_ROOT/server/server" ]; then
+            if _srv_valid "$SRC_ROOT/server"; then
+              _nested_kb=$(du -sk "$SRC_ROOT/server/server" 2>/dev/null | awk '{print $1}')
+              rm -rf "$SRC_ROOT/server/server" 2>/dev/null || true
+              echo "zcode_server_nested_prune removed_kb=${_nested_kb:-0}" >&2
+            elif _srv_valid "$SRC_ROOT/server/server"; then
+              # 嵌套层整体上移一级：先把顶层残留挪开再搬，避免又一次嵌套
+              _promote_tmp="$SRC_ROOT/server.promote.$$"
+              if mv "$SRC_ROOT/server/server" "$_promote_tmp" 2>/dev/null; then
+                rm -rf "$SRC_ROOT/server" 2>/dev/null || true
+                mv "$_promote_tmp" "$SRC_ROOT/server" 2>/dev/null || true
+                echo "zcode_server_nested_promoted (顶层无效，嵌套部署已提升一级)" >&2
+              else
+                echo "⚠️ zcode_server_nested_promote_failed (保留原状)" >&2
+              fi
+            fi
+          fi
+
           set +e
           snapshot_tree "$SRC_ROOT/cli" "$STAGE_DIR/.zcode/cli/" \
             --exclude 'rollout' \
