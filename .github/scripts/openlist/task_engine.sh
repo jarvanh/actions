@@ -290,6 +290,17 @@ _run_registry_pairs_parallel() {
   [ "$_resume" -lt 0 ] && _resume=$start
   if [ "$rotation_enabled" -eq 1 ] && [ "$real_pass" -eq 1 ]; then
     _rotation_save "$_resume" 0
+    # 硬顶放弃时还有 _pp_pid 里的在途 worker 没交回结果文件。此前只报
+    # 「本轮 0 个（失败 0）· 传输 0 B」，把「整轮零产出」写成了无事发生
+    # （run 41750655316 实证: 2 个 worker 跑 5h20m 被截断，收尾 0/0 却 success）。
+    # 明确报出在途数，让日志与「交下轮接力」的实际状态一致。
+    local _pp_abandoned=0 _pp_k
+    for _pp_k in "${!_pp_pid[@]}"; do
+      [ -n "${_pp_pid[$_pp_k]:-}" ] && _pp_abandoned=$((_pp_abandoned + 1))
+    done
+    if [ "$_pp_abandoned" -gt 0 ]; then
+      echo "⚠️ 硬顶放弃在途同步对 ${_pp_abandoned} 个（未完成，留待下个循环重试；本轮传输量/修复统计可能偏低）"
+    fi
     echo "并行同步对完成: 本轮 ${_done_n} 个（失败 ${_failed_n}）· 传输 $(format_bytes "$total_transferred") · 下轮游标 → 第 $((_resume + 1))/${n} 个"
   fi
   return 0
@@ -2348,9 +2359,18 @@ sync_by_file_batches() {
       # （rc=124 走失败分支 → 巩固 → 循环闸优雅收摊），不再拖到 330min 整轮被杀
       local _b_tmo="" _b_to=""
       _b_tmo=$(_budget_slice_seconds)
+      # 批次 copy 的单片上限对齐 _batch_slice_effective（默认预算下 7200s）。
+      # 只看「剩余预算 − 尾部预留」会在轮初给出 ~16166s（run 41750655316
+      # 实测 05:14 开出 4.5h 的批次 1）: 一个慢批次独占整轮，两个并行 worker
+      # 直到 10:30 硬顶都没交回完成统计，父级收尾显示 0 个 / 0 B。
+      # 到点由 timeout 收掉后走巩固/修复/优雅收摊，剩余批次交下轮，不影响正确性。
       if [ -n "$_b_tmo" ]; then
+        local _b_cap
+        _b_cap=$(_batch_slice_effective)
+        [[ "$_b_cap" =~ ^[0-9]+$ ]] && [ "$_b_cap" -gt 0 ] \
+          && [ "$_b_tmo" -gt "$_b_cap" ] && _b_tmo="$_b_cap"
         _b_to="timeout ${_b_tmo}"
-        echo "批次 $((i+1)): 本轮剩余预算内最多传输 ${_b_tmo}s（超出由 timeout 收掉后走优雅收摊）"
+        echo "批次 $((i+1)): 本轮剩余预算内最多传输 ${_b_tmo}s（单片上限 ${_b_cap:-无}；超出由 timeout 收掉后走优雅收摊）"
       fi
       set +e
       ${_b_to} rclone copy "$source_path" "$dest_path" \

@@ -80,6 +80,8 @@ tg_add_entry_text() {
 # 批次循环预算闸: 真身在 task_engine.sh 顶层（sed 单函数抽取不含它）。
 # 默认返回 1（不闸，保持既有场景行为），G6 用 BATCH_BUDGET_STOP_RC=0 置"预算将尽"
 _batch_budget_stop() { return "${BATCH_BUDGET_STOP_RC:-1}"; }
+# 单片上限对齐生产运行期派生值；默认给个极大值，保证 G7 的 120s 不被截
+_batch_slice_effective() { echo "${BATCH_SLICE_OVERRIDE:-999999}"; }
 # 在途传输硬上限: 默认空串 = 不套 timeout 包装（与未设预算锚点的生产行为一致），
 # G7 用 BUDGET_SLICE_OVERRIDE 给出秒数，验证包装确实生效
 _budget_slice_seconds() { echo "${BUDGET_SLICE_OVERRIDE:-}"; }

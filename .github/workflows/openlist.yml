@@ -839,9 +839,16 @@ jobs:
           [[ "$FIX_EXHAUSTED" =~ ^[0-9]+$ ]] || FIX_EXHAUSTED=0
           [[ "$FIX_DEFERRED" =~ ^[0-9]+$ ]] || FIX_DEFERRED=0
           FIX_DENOM=$(( ROUND_FIXED_NEW + ROUND_FAILED ))
-          FIX_RATE=100
-          if [ "$FIX_DENOM" -gt 0 ]; then FIX_RATE=$(( ROUND_FIXED_NEW * 100 / FIX_DENOM )); fi
-          echo "修复管线: 尝试 ${FIX_ATTEMPT} · 失败 ${FIX_FAIL}（其中方法耗尽 ${FIX_EXHAUSTED} · 顺延下轮 ${FIX_DEFERRED}） · 成功率 ${FIX_RATE}%（新落盘 ${ROUND_FIXED_NEW}/${FIX_DENOM}）"
+          FIX_RATE=0
+          # 分母为 0 时没有可评估的修复成效，不能默认报 100%（run 41750655316
+          # 实证: 在途 worker 被硬顶截断、修复统计没回传，收尾却打印
+          # 「成功率 100%（新落盘 0/0）」，把零产出轮伪装成全绿）。
+          if [ "$FIX_DENOM" -eq 0 ]; then
+            echo "修复管线: 尝试 ${FIX_ATTEMPT} · 失败 ${FIX_FAIL}（其中方法耗尽 ${FIX_EXHAUSTED} · 顺延下轮 ${FIX_DEFERRED}） · 无可评估成效（新落盘 0/0；本轮未产生修复统计，见上方同步对截断告警）"
+          else
+            FIX_RATE=$(( ROUND_FIXED_NEW * 100 / FIX_DENOM ))
+            echo "修复管线: 尝试 ${FIX_ATTEMPT} · 失败 ${FIX_FAIL}（其中方法耗尽 ${FIX_EXHAUSTED} · 顺延下轮 ${FIX_DEFERRED}） · 成功率 ${FIX_RATE}%（新落盘 ${ROUND_FIXED_NEW}/${FIX_DENOM}）"
+          fi
           if [ "${FIX_EXHAUSTED:-0}" -gt 0 ]; then
             echo "🚨 ${FIX_EXHAUSTED} 个文件用尽全部修复方法仍未落盘（永久性失败）—— 这类文件不会被后续轮次自动修好，需人工看 fail_list 的原因（文件路径见 /tmp/ol_fix_events.log 的 EXHAUSTED 行）"
             grep '^EXHAUSTED|' /tmp/ol_fix_events.log 2>/dev/null | head -5 | cut -c1-200 || true
