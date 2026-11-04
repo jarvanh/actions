@@ -351,6 +351,8 @@ workflow 会把 `*.sh` `*.py` `*.jq` 拷到 `/tmp` 再 `source /tmp/load_all.sh`
 `OPENLIST_DIR_PROBE_TIMEOUT`（预检探针超时，默认 120s）·
 `OPENLIST_WRITE_REPROBE_INTERVAL`（F22 写探针周期性重探间隔，默认 1800s；≤0 关闭）·
 `OPENLIST_405_FAST_FAIL_MIN`（F10 单批 405 计数阈值，默认 20；=0 关闭）·
+`OPENLIST_409_FAST_FAIL_MIN`（409 死目录判据阈值，默认 20；=0 关闭。批内与子目录级 sync 两处
+同款: 409 计数达阈值 **且** 零字节零 Copied ⇒ 确定性建不出父目录，跳过重试直接交修复管线）·
 `OPENLIST_PREVIEW_LISTING_TIMEOUT`（F17 预览 listing 短超时，默认 240s，**必须带单位**）·
 `TASK_PREVIEW_ONLY` / `TASK_REGISTER_ONLY`（由 workflow 设置）
 
@@ -495,6 +497,12 @@ OpenList 对**新建**目录/文件的列表有缓存延迟（实测首次可见
 （`OPENLIST_SYNC_MIN_SLICE_SECONDS`=10min）时不再开新同步对/子目录/最终完整同步，
 做完当前即以 **success** 正常收场。跳过最终完整同步时不保存 pair 级成功 marker
 （任务确实未完整）。被跳过的子目录 marker 已各自落盘，进度零回退。
+🔒 **单批封顶（2026-11-04 补）**：批次 copy 的在途 timeout 此前只按「剩余预算 − 尾部预留」
+给值，轮初可拿到 ~16166s（4.5h）—— run 41750655316 实证一个慢批次独占整轮，两个并行 worker
+直到硬顶都没交回完成统计（收尾显示 0 个/0 B，却判 success）。现再对齐
+`_batch_slice_effective()`（默认预算下 7200s，短轮等比缩放）封到单片上限；到点由 timeout
+收掉后走巩固/修复/优雅收摊，剩余批次交下轮。硬顶放弃在途 worker 时同步对汇总行会显式
+报出被截断的对数；收尾修复成效分母为 0 时打印「无可评估成效」而不再默认 100%。
 
 **自续触发（P2 接力）**：GitHub 对高频 cron 限流严重（*/5 实测曾 4.5h 零触发），
 "常驻队列"假设不成立 → 本轮收场后「自续触发」step 用 GITHUB_TOKEN 立即 dispatch
@@ -530,7 +538,10 @@ API list），读得通但写不进的后端会被整轮放行——run #12616 �
    默认 30min）`_backend_write_probe_invalidate` 清缓存再探（复用预检里那次探测，不新增次数）。
    🔪 **同时补上止损（F10）**：单批日志 `405 Method Not Allowed` 计数达
    `OPENLIST_405_FAST_FAIL_MIN`（默认 20）即判"该目录本轮写不进"，**先于批次巩固**中止
-   剩余批次（历史一个坏目录逐文件烧 115min）。只数 405，**不数 409/423**（那两类重试可自愈）。
+   剩余批次（历史一个坏目录逐文件烧 115min）。只数 405；**409 单列判据**（2026-11-03 起）:
+   423 重试可自愈不判死，409 只在「计数达 `OPENLIST_409_FAST_FAIL_MIN` **且** 零字节零 Copied」
+   时判死目录（超长名父目录确定性建不出；反例见 run 41568255043 逐月su 子目录 sync 2h 仅
+   4 文件成功、487×409）。同一判据装在批次路径与子目录级 sync 两处。
    与 F5「后端写入全拒」（后端级、需触碰文件 100% 未落盘）互补：F10 目录级、更早更便宜。
 2. **目录连续不可写计数**（`file_fix.sh` `_BACKEND_DEAD`）：开跑后才暴露的后端
    （预检偶发放行）由「同一挂载根连续 N 个目录被**重启确认**判不可写」捕获；判定后该后端
