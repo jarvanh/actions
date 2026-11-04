@@ -2357,13 +2357,18 @@ jobs:
           # （2026.10.9→.10 升级，run 41599325596 实测主包 4.56GB→7.59GB、归档 402s→810s）。
           # 走普通 7 天窗会让每轮收尾白背 3GB 长达一周；24h 就剪（回滚靠重新触发迁移，
           # 且 bak 会随主包还原、mtime 跨轮连续，24h 后必被剪掉）。
+          # ⚠️ 2026-11-04 修正：GNU find `-mtime +1` 语义是「年龄整天数 > 1」即
+          # **>48h**，不是 24h —— 上一版（d202dbd）写成 +1 实测 30h 的 bak 一个
+          # 都没剪（本机 19 个 .bak 共 3.97GB，12 个迁移 bak 年龄 30h 全在）。
+          # 改用 -mmin +1440 精确表达 24h（分钟粒度，不受整天取整影响）。
           PRUNE_MIGRATION_BAK_DAYS="${OPENCLAW_PRUNE_MIGRATION_BAK_DAYS:-1}"
+          PRUNE_MIGRATION_BAK_MINS=$(( PRUNE_MIGRATION_BAK_DAYS * 1440 ))
           prune_victims="/tmp/openclaw-prune-victims.$$"
           {
             find "$SRC_DIR/backups" -mindepth 1 -maxdepth 1 -mtime +"$PRUNE_DAYS" -print0 2>/dev/null
             find "$SRC_DIR" -name '*.bak' -type f -mtime +"$PRUNE_DAYS" \
               ! -name '*.pre-startup-migration-*.bak' -print0 2>/dev/null
-            find "$SRC_DIR" -name '*.pre-startup-migration-*.bak' -type f -mtime +"$PRUNE_MIGRATION_BAK_DAYS" -print0 2>/dev/null
+            find "$SRC_DIR" -name '*.pre-startup-migration-*.bak' -type f -mmin +"$PRUNE_MIGRATION_BAK_MINS" -print0 2>/dev/null
           } > "$prune_victims" || true
           prune_bytes=0
           prune_count=0
