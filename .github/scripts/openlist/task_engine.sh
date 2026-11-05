@@ -1909,40 +1909,6 @@ _batch_consolidate() {
   local stubborn_n=0
   stubborn_n=$(wc -l < "$stubborn" | tr -d ' ')
 
-  # ===== 矛盾检测: 重试报了 Copied 却 100% 复核不到 → 先重试复核，别急着判死 =====
-  # run 41863829407 实证（2026-11-04）: 批次 1 串行重试 `重传 70/70`，紧接着重启复核
-  # 得 `后端写入全拒（70/70 全部未落盘）` ⇒ 中止剩余 14 个批次、整轮只传 367 MiB。
-  # 但同一后端**同一批**的修复管线随即 `70/70 个换方法落盘成功`，后续
-  # `✅ 落盘确认 尺寸匹配` 逐条通过 —— 后端完全可写，判死是**假阳性**。
-  # 成因: 70 个大文件刚写完，重启+refresh 后 10s 内后端列表尚未收敛（延迟持久化），
-  #   lsf 读到的仍是旧快照；"报 Copied 却一个都查不到"本身就是这种时滞的指纹。
-  # 处置: 命中矛盾时**不清空判据**，只追加一次更长的等待再复核；仍 100% 缺失才判死
-  #   （此后即属真拒收，F5 语义不变）。反证方向安全: 多等一轮的代价远小于误杀健康后端
-  #   （误判会把该后端写进 backend_dead.json 并在 TTL 内被整轮跳过）。
-  if [ "$retry_copied" -gt 0 ] && [ "${_truth_confirmed:-1}" = "1" ] \
-     && [ "$stubborn_n" -ge 3 ] && [ "$stubborn_n" -ge "$touched_n" ]; then
-    local _recheck_wait="${OPENLIST_F5_LAG_RECHECK_WAIT:-120}"
-    [[ "$_recheck_wait" =~ ^[0-9]+$ ]] || _recheck_wait=120
-    echo "🔍 ${label} 巩固: 重试报 Copied ${retry_copied} 个但复核 100% 未落盘（${stubborn_n}/${touched_n}）—— 疑似后端列表时滞，等 ${_recheck_wait}s 再复核一次"
-    sleep "$_recheck_wait"
-    local _truth3="${batch_dir}/dest_truth3_${batch_idx}.txt"
-    timeout 900 rclone lsf "$dest_path" -R --files-only > "$_truth3" 2>/dev/null || true
-    if [ -s "$_truth3" ]; then
-      sort -u "$_truth3" -o "$_truth3"
-      comm -23 "$retry_list" "$_truth3" > "$stubborn"
-      local _stubborn3=0
-      _stubborn3=$(wc -l < "$stubborn" | tr -d ' ')
-      if [ "$_stubborn3" -lt "$stubborn_n" ]; then
-        echo "✅ ${label} 巩固: 二次复核补上 $(( stubborn_n - _stubborn3 )) 个（时滞假设成立），顽固缺失降为 ${_stubborn3}"
-      else
-        echo "⚠️ ${label} 巩固: 二次复核仍 ${_stubborn3} 个缺失（时滞假设不成立）"
-      fi
-      stubborn_n=$_stubborn3
-    else
-      echo "⚠️ ${label} 巩固: 二次复核列表获取失败，按原清单继续（判据不改）"
-    fi
-  fi
-
   if [ "$stubborn_n" -eq 0 ]; then
     echo "✅ ${label} 巩固: 重试后顽固缺失 0 个，本批全部真实落盘"
     return 0

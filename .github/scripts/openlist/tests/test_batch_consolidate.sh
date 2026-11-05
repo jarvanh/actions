@@ -469,12 +469,11 @@ OUT=$(run_consolidate 0 "$LOG")
 [ "$(cat /tmp/bc_sync_backend_dead 2>/dev/null)" = "1" ] && ok "15d 全拒 → 置 SYNC_BACKEND_DEAD" || bad "15d: sync_dead=$(cat /tmp/bc_sync_backend_dead 2>/dev/null)"
 echo "$OUT" | grep -q "后端写入全拒" && ok "15c 全拒提示" || bad "15c: $OUT"
 
-# --- 场景16: 矛盾检测（2026-11-04 加，run 41863829407 实锤）---
-# 重试报 Copied 却 100% 复核不到 = 后端列表时滞指纹，须先等+二次复核再判死:
-#   16a 时滞成立（二次复核补上）→ 不熔断，顽固缺失降为真实值
-#   16b 时滞不成立（二次复核仍全缺）→ 仍熔断（F5 语义不变）
-# mock 口径: lsf 第 1 次 = 传输后复核（只有无关旧文件），第 2 次（二次复核）由
-# LSF_OUT2 提供 —— rclone mock 的 _n>=2 即切到 LSF_OUT2。
+# --- 场景16: 已由写探针反证取代（2026-11-05）---
+# 原"等 120s 再复核一次"被证明不足（41892829794: 141s 后仍全缺，判死后 26s
+# 同批文件全部落盘），且 15 批 × 120s 会白吃 ~30min 预算（占 320min 的 9%）。
+# 定长等待既不保证正确也不便宜 ⇒ 移除，改由场景 17 的写探针反证回答同一问题。
+# 保留一条回归锁: 该等待已删除，日志不得再出现旧提示（防止有人再把死等加回来）。
 setup
 BC_DEST="openlist:wopan176Crypt/0"
 cat > "$LOG" <<'EOF'
@@ -485,33 +484,8 @@ INFO  : lag/file4.mp4: Copied (new)
 EOF
 printf 'other/old.mp4\n' > "$LSF_OUT"
 RETRY_COPY_OK=1
-OPENLIST_F5_LAG_RECHECK_WAIT=1
-# lsf 序列: 第1次=传输后复核(旧快照) → 第2次=二次复核前无 restart? 否 —— 矛盾分支
-# 自身就是第2次 lsf（前面 retry_copied>0 时已做过第1次）。这里第1次=真值(旧快照)，
-# 第2次=矛盾检测的二次复核，走 LSF_OUT3（全补上）
-LSF_OUT3="/tmp/bc_lsf_out3.txt"; printf 'other/old.mp4\nlag/file1.mp4\nlag/file2.mp4\nlag/file3.mp4\nlag/file4.mp4\n' > "$LSF_OUT3"
 OUT=$(run_consolidate 0 "$LOG")
-echo "$OUT" | grep -q "疑似后端列表时滞" && ok "16a1 矛盾检测触发（等+二次复核）" || bad "16a1: $OUT"
-[ "$(cat /tmp/bc_backend_dead 2>/dev/null)" = "0" ] && ok "16a2 时滞成立 → 不熔断" || bad "16a2: dead=$(cat /tmp/bc_backend_dead 2>/dev/null)"
-[ "$(calls /tmp/bc_lsf_calls)" -ge 2 ] && ok "16a3 二次复核确已执行" || bad "16a3: lsf=$(calls /tmp/bc_lsf_calls)"
-echo "$OUT" | grep -q "顽固缺失降为 0" && ok "16a4 顽固缺失降为 0（4 个全部补上）" || bad "16a4: $OUT"
-
-setup
-BC_DEST="openlist:wopan176Crypt/0"
-cat > "$LOG" <<'EOF'
-INFO  : lag/file1.mp4: Copied (new)
-INFO  : lag/file2.mp4: Copied (new)
-INFO  : lag/file3.mp4: Copied (new)
-INFO  : lag/file4.mp4: Copied (new)
-EOF
-printf 'other/old.mp4\n' > "$LSF_OUT"
-RETRY_COPY_OK=1
-OPENLIST_F5_LAG_RECHECK_WAIT=1
-LSF_OUT3="/tmp/bc_lsf_out3.txt"; printf 'other/old.mp4\n' > "$LSF_OUT3"
-OUT=$(run_consolidate 0 "$LOG")
-[ "$(cat /tmp/bc_backend_dead 2>/dev/null)" = "1" ] && ok "16b1 时滞不成立（二次复核仍全缺）→ 仍熔断" || bad "16b1: dead=$(cat /tmp/bc_backend_dead 2>/dev/null)"
-echo "$OUT" | grep -q "时滞假设不成立" && ok "16b2 二次复核结论提示" || bad "16b2: $OUT"
-unset OPENLIST_F5_LAG_RECHECK_WAIT
+echo "$OUT" | grep -q "疑似后端列表时滞" && bad "16a 定长等待已移除（不应再出现二次复核等待）" || ok "16a 定长等待已移除（改由写探针反证）"
 
 # --- 场景17: 判死前写探针反证（2026-11-05 加，run 41892829794 实锤）---
 # `重传 9/9` → 141s 后复核仍 9/9 全缺（判死、中止 14 批），而修复管线在判死后
