@@ -1993,7 +1993,11 @@ _batch_consolidate() {
     # 探针结果按「后端 × 路径」整轮缓存，本分支只在 100% 缺失时触发，额外开销极小。
     local _f5_probe_ok=0
     if declare -F _backend_write_probe >/dev/null 2>&1; then
-      if _backend_write_probe "$dest_path" "$batch_log"; then
+      # 宽容模式: 探针"写成功但列表暂不可见"按非全拒放行。原因见该分支注释 ——
+      # 在 F5 这个特定判据下，真拒收的唯一可靠表现是 copyto exit≠0；而列表
+      # 不可见已被两轮生产实证为时滞（判死后 26s 同批文件全部落盘）。
+      # 不置此标志的话，探针会因同一份滞后列表再次返回"不可写"，等于没修。
+      if _F5_PROBE_LENIENT=1 _backend_write_probe "$dest_path" "$batch_log"; then
         _f5_probe_ok=1
       fi
     else
