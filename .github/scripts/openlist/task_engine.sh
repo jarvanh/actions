@@ -1981,6 +1981,32 @@ _batch_consolidate() {
   fi
 
   if [ "$_judge_dead" -eq 1 ] && [ "$_truth_confirmed" -eq 1 ] && [ "$stubborn_n" -ge 3 ] && [ "$touched_n" -gt 0 ] && [ "$stubborn_n" -ge "$touched_n" ]; then
+    # ===== 判死前最后一道反证: 真写一次探针（2026-11-05 加）=====
+    # run 41892829794 实证: `重传 9/9` 后 141s 复核仍报 9/9 全缺（判死、中止 14 批），
+    # 而修复管线在判死后 **26s** 就把同样 9 个文件全部落盘成功 —— 后端完全可写。
+    # 单靠"等更久再列一次"不可靠（时滞不可预测，可能超过任何固定等待）；而
+    # _backend_write_probe 是**真实 PUT + 刷新缓存后回读校验**，它能直接回答
+    # "这个路径现在能不能写"，正是"全拒"判据需要的反证。
+    # 探针判可写 ⇒ 本批的"复核不到"属于列表时滞/假成功形态，不是后端拒收，
+    # 不判死（仍走修复管线换方法，与既有语义一致）；探针判不可写 ⇒ 照常判死，
+    # 且此时的证据比之前更强（真写失败，而不只是列表缺失）。
+    # 探针结果按「后端 × 路径」整轮缓存，本分支只在 100% 缺失时触发，额外开销极小。
+    local _f5_probe_ok=0
+    if declare -F _backend_write_probe >/dev/null 2>&1; then
+      if _backend_write_probe "$dest_path" "$batch_log"; then
+        _f5_probe_ok=1
+      fi
+    else
+      # 无探针实现（单测/裁剪环境）→ 保守按"可写"处理，宁可多跑一批也不误杀
+      _f5_probe_ok=1
+    fi
+    if [ "$_f5_probe_ok" -eq 1 ]; then
+      _judge_dead=0
+      echo "⚠️ ${label} 巩固: 复核 100% 未落盘但写探针**判定该路径可写** → 不判「后端写入全拒」（列表时滞/假成功形态），${stubborn_n} 个文件照常交修复管线换方法"
+    fi
+  fi
+
+  if [ "$_judge_dead" -eq 1 ] && [ "$_truth_confirmed" -eq 1 ] && [ "$stubborn_n" -ge 3 ] && [ "$touched_n" -gt 0 ] && [ "$stubborn_n" -ge "$touched_n" ]; then
     BATCH_BACKEND_DEAD=1
     # 同时置 SYNC_BACKEND_DEAD: 这是全库可信度最高的"后端本轮不可写"证据
     # （容器重启后复核，本批触碰文件 100% 未落盘），比入口写探针更硬——run

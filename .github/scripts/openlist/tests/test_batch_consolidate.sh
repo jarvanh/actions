@@ -85,6 +85,16 @@ _short_path() { echo "$1"; }
 # RESTART_FAIL_FROM: 从第 N 次调用起开始失败（0/空 = 永不失败）
 # 用于"只让复核阶段重启失败"这类定向场景
 RESTART_FAIL_FROM=0
+# 写探针（F5 判死前最后一道反证，2026-11-05）: 真身是真实 PUT + 刷新缓存回读。
+# 默认 PROBE_RC=1（不可写）保持既有场景语义 —— 场景 10/13/15 描述的就是后端真拒写
+# （405 洪泛），探针在那种情形下同样写不进去，判死流程不变。
+# 场景 17 用 PROBE_RC=0 验证"探针可写 ⇒ 不判死"的豁免分支。
+PROBE_RC=1
+_bc_probe_calls() { cat /tmp/bc_probe_calls 2>/dev/null || echo 0; }
+_backend_write_probe() {
+  echo $(( $(_bc_probe_calls) + 1 )) > /tmp/bc_probe_calls
+  return "${PROBE_RC:-1}"
+}
 _restart_openlist_for_truth() {
   local _n
   _n=$(( $(cat /tmp/bc_restart_calls 2>/dev/null || echo 0) + 1 ))
@@ -149,6 +159,8 @@ setup() {
   echo 0 > /tmp/bc_refresher_starts
   echo 0 > /tmp/bc_refresher_stops
   echo 0 > /tmp/bc_fixpipe_calls
+  echo 0 > /tmp/bc_probe_calls
+  PROBE_RC=1
   RESTART_RC=0
   RESTART_FAIL_FROM=0
   RETRY_COPY_OK=1
@@ -499,6 +511,50 @@ LSF_OUT3="/tmp/bc_lsf_out3.txt"; printf 'other/old.mp4\n' > "$LSF_OUT3"
 OUT=$(run_consolidate 0 "$LOG")
 [ "$(cat /tmp/bc_backend_dead 2>/dev/null)" = "1" ] && ok "16b1 时滞不成立（二次复核仍全缺）→ 仍熔断" || bad "16b1: dead=$(cat /tmp/bc_backend_dead 2>/dev/null)"
 echo "$OUT" | grep -q "时滞假设不成立" && ok "16b2 二次复核结论提示" || bad "16b2: $OUT"
+unset OPENLIST_F5_LAG_RECHECK_WAIT
+
+# --- 场景17: 判死前写探针反证（2026-11-05 加，run 41892829794 实锤）---
+# `重传 9/9` → 141s 后复核仍 9/9 全缺（判死、中止 14 批），而修复管线在判死后
+# **26s** 就把同样 9 个文件全部落盘成功 ⇒ 后端完全可写，判死是假阳性。
+# 固定等待不可靠（时滞不可预测），故判死前必须真写一次探针:
+#   17a 探针可写 → 不判死（本批仍交修复管线换方法）
+#   17b 探针不可写 → 照常判死，且证据更强（真写失败 ≠ 列表缺失）
+setup
+BC_DEST="openlist:wopan176Crypt/0"
+cat > "$LOG" <<'EOF'
+INFO  : pr/file1.mp4: Copied (new)
+INFO  : pr/file2.mp4: Copied (new)
+INFO  : pr/file3.mp4: Copied (new)
+INFO  : pr/file4.mp4: Copied (new)
+EOF
+printf 'other/old.mp4\n' > "$LSF_OUT"
+RETRY_COPY_OK=1
+OPENLIST_F5_LAG_RECHECK_WAIT=1
+LSF_OUT3="/tmp/bc_lsf_out3.txt"; printf 'other/old.mp4\n' > "$LSF_OUT3"   # 复核仍全缺
+PROBE_RC=0                                                                 # 但真写能成功
+OUT=$(run_consolidate 0 "$LOG")
+[ "$(_bc_probe_calls)" -ge 1 ] && ok "17a1 判死前确实写了探针" || bad "17a1: probe=$(_bc_probe_calls)"
+echo "$OUT" | grep -q "写探针\*\*判定该路径可写\*\*" && ok "17a2 日志说明探针反证生效" || bad "17a2: $OUT"
+[ "$(cat /tmp/bc_backend_dead 2>/dev/null)" = "0" ] && ok "17a3 探针可写 → 不判后端全拒" || bad "17a3: dead=$(cat /tmp/bc_backend_dead 2>/dev/null)"
+[ "$(cat /tmp/bc_sync_backend_dead 2>/dev/null)" = "0" ] && ok "17a4 不置 SYNC_BACKEND_DEAD（不污染 F6 跨轮熔断）" || bad "17a4: sync_dead=$(cat /tmp/bc_sync_backend_dead 2>/dev/null)"
+[ "$(calls /tmp/bc_fixpipe_calls)" = "1" ] && ok "17a5 顽固缺失仍进修复管线换方法" || bad "17a5: fixpipe=$(calls /tmp/bc_fixpipe_calls)"
+
+setup
+BC_DEST="openlist:wopan176Crypt/0"
+cat > "$LOG" <<'EOF'
+INFO  : pr/file1.mp4: Copied (new)
+INFO  : pr/file2.mp4: Copied (new)
+INFO  : pr/file3.mp4: Copied (new)
+INFO  : pr/file4.mp4: Copied (new)
+EOF
+printf 'other/old.mp4\n' > "$LSF_OUT"
+RETRY_COPY_OK=1
+OPENLIST_F5_LAG_RECHECK_WAIT=1
+LSF_OUT3="/tmp/bc_lsf_out3.txt"; printf 'other/old.mp4\n' > "$LSF_OUT3"
+PROBE_RC=1                                                                 # 真写也失败
+OUT=$(run_consolidate 0 "$LOG")
+[ "$(cat /tmp/bc_backend_dead 2>/dev/null)" = "1" ] && ok "17b1 探针不可写 → 照常判死" || bad "17b1: dead=$(cat /tmp/bc_backend_dead 2>/dev/null)"
+[ "$(cat /tmp/bc_sync_backend_dead 2>/dev/null)" = "1" ] && ok "17b2 判死 → 置 SYNC_BACKEND_DEAD（供 F6）" || bad "17b2: sync_dead=$(cat /tmp/bc_sync_backend_dead 2>/dev/null)"
 unset OPENLIST_F5_LAG_RECHECK_WAIT
 
 echo "-----"
