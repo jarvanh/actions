@@ -14,6 +14,14 @@ RUN_OPENCLAW_META="/tmp/run-openclaw-meta.env"
 : > "$RUN_OPENCLAW_META"
 exec > >(tee -a "$RUN_OPENCLAW_STEP_LOG") 2>&1
 
+# 宿主机资源参数（swap 容量 / vm.swappiness）在网关起来前收敛。
+# 放在 install/start 之前：swap 必须在内存尖峰之前就位，否则网关一启动就可能
+# 撞上 3G swap 被占满的老形态（2026-11-05：swap 打满 + SQLite 37s 停顿）。
+# 非致命：脚本自身保证 exit 0，这里再兜一层，绝不因调优失败阻断 gateway。
+if [ -f "$(dirname "$0")/host-tuning.sh" ]; then
+  bash "$(dirname "$0")/host-tuning.sh" || echo "⚠️ host-tuning.sh 执行失败（非致命，继续启动）"
+fi
+
 CURRENT_OPENCLAW_VERSION="$(openclaw --version 2>/dev/null | head -n 1 || true)"
 CURRENT_OPENCLAW_SEMVER="$(printf '%s\n' "$CURRENT_OPENCLAW_VERSION" | grep -oE '[0-9]{4}\.[0-9]+\.[0-9]+' | head -n 1 || true)"
 KNOWN_GOOD_VERSION_FILE="$HOME/.openclaw/openclaw-known-good-version"
@@ -244,11 +252,14 @@ apply_gw_dropin() {
   fi
   # L4 内存护栏（2026-10-21 16:50 事故 10G peak）：仅在缺失时创建，
   # 已存在的运营者配置由上方回放保留，不覆盖。
+  # 2026-11-05：补 MemorySwapMax —— swap 扩到 25G 后，若无上限，单靠
+  # MemoryHigh/Max 无法阻止网关一个进程吃掉大部分 swap（实测曾占 1.17G/3G）。
   if [ ! -f "$GW_DROPIN_DIR/memory.conf" ]; then
     cat > "$GW_DROPIN_DIR/memory.conf" <<'EOF_MEM'
 [Service]
 MemoryHigh=9G
 MemoryMax=11G
+MemorySwapMax=4G
 EOF_MEM
     chmod 644 "$GW_DROPIN_DIR/memory.conf"
   fi
