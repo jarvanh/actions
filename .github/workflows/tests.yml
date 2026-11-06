@@ -8,8 +8,8 @@
 #     （sync_trend_budget）、无 docker（truth）、沙箱拦子进程（progress_no_orphans）。
 #     ubuntu runner 上这些都不存在，基线因此更硬（本域套件全绿）。
 # 结构: 按「域」分组，每域一个 job；新增域照抄同构 job 即可（域内一律串行）。
-# 现状: 目前**只有 openlist 一个 job**，即本载体当前只服务 openlist 域；
-#       proxy-speedtest 等域仍在各域本机/自查脚本里跑，未接入本载体。
+# 现状: 两个 job —— openlist 与 proxy-speedtest；其余域仍在其本机/自查脚本里跑。
+#       新增域时：在 inputs.domain 的说明里列上它、加一个同构 job（`if` 判 domain）。
 # 触发: 只 workflow_dispatch —— 仓库既有约定是「无任何 workflow 监听 push/pull_request」
 #       （main 有并行推送，加了会产生大量冗余运行）。需要验证时手动 dispatch。
 name: tests
@@ -18,7 +18,7 @@ on:
   workflow_dispatch:
     inputs:
       domain:
-        description: "只跑指定域（留空 = 全部；当前仅 openlist）"
+        description: "只跑指定域（留空 = 全部：openlist / proxy-speedtest）"
         required: false
         type: string
         default: ""
@@ -127,3 +127,93 @@ jobs:
             exit 1
           fi
           echo "✅ openlist 回归套件全绿（$pass/$pass）"
+
+  proxy-speedtest:
+    # 与 openlist 同构：域内串行、按 domain 选择。留空 = 两个域都跑。
+    if: ${{ github.event.inputs.domain == '' || github.event.inputs.domain == 'proxy-speedtest' }}
+    runs-on: ubuntu-latest
+    # 自检本身 ~15 秒（含两个真 curl 端到端，各 2–3 秒），给足 setup 余量
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        # 自检要 import speedtest_common / gist_nodes（它们 import yaml）；
+        # 业务 workflow 也是 pip install pyyaml，这里保持同一份依赖口径。
+        run: pip install pyyaml
+
+      - name: 静态检查（py_compile 全部脚本 + workflow YAML 解析）
+        run: |
+          set -u
+          fail=0
+          n=0
+          while IFS= read -r f; do
+            n=$((n + 1))
+            python3 -m py_compile "$f" || { echo "❌ py_compile 失败: $f"; fail=1; }
+          done < <(find .github/scripts/proxy-speedtest -name '*.py' -type f | sort)
+          echo "py_compile 通过 $n 个脚本"
+          # 只解析本域的四个 workflow：它们的 block scalar / env 表达式最容易写坏，
+          # 而业务 workflow 改动与测试载体无关（全量解析留给业务 workflow 自己的运行）。
+          python3 -c "
+          import glob, sys, yaml
+          bad = 0
+          for f in sorted(glob.glob('.github/workflows/proxy-speedtest-*.yml')):
+              try:
+                  yaml.safe_load(open(f, encoding='utf-8'))
+              except Exception as e:
+                  print('❌ YAML 解析失败: ' + f + ': ' + str(e)); bad = 1
+          print('proxy-speedtest YAML 全部通过' if not bad else 'proxy-speedtest YAML 有失败')
+          sys.exit(bad)
+          "
+          [ "$fail" -eq 0 ] || exit 1
+
+      - name: proxy-speedtest 回归套件（串行）
+        run: |
+          set -u
+          cd .github/scripts/proxy-speedtest || { echo "❌ 测试目录不存在"; exit 1; }
+          WORK=/tmp/ps_tests
+          rm -rf "$WORK"; mkdir -p "$WORK"
+          pass=0; fail=0; failed=""
+          # 串行是硬要求：`test_download_window.py` 会起本地限速 HTTP 服务，
+          # 并行跑会让端口/时序互相干扰（与本域其余套件的耗时判据同源）。
+          #
+          # PYTHONPATH=. ：`test_normalize_proxy_scalars.py` 是 pytest 风格（直接
+          # `from speedtest_common import ...`，没有自行插 sys.path）。本载体用
+          # `python3 文件` 直跑，不设它会在 import 阶段就 ModuleNotFoundError。
+          # 注意 runner 的 bash 带 -e：命令替换必须用 if 包住，否则第一套失败就
+          # 直接终止整个 step 且输出刷不出来（openlist job 里踩过同样的问题）。
+          for f in tests/test_*.py; do
+            if out=$(PYTHONPATH=. python3 "$f" </dev/null 2>&1); then rc=0; else rc=$?; fi
+            printf '%s\n' "$out" > "$WORK/$(basename "$f").out"
+            printf '%-46s EXIT=%s\n' "$f" "$rc" | tee -a "$WORK/summary.txt"
+            if [ "$rc" -eq 0 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); failed="$failed $f"; fi
+          done
+          echo "=== 汇总: PASS=$pass FAIL=$fail（共 $((pass + fail)) 套）==="
+
+          # 红线：任何测试输出里出现 ModuleNotFoundError 即失败——说明 PYTHONPATH /
+          # 依赖装漏了，而不是某条判据真的红（这两类失败必须区分开）。
+          mne=$(grep -h "ModuleNotFoundError" "$WORK"/*.out 2>/dev/null | wc -l | tr -d ' ')
+          echo "=== ModuleNotFoundError 命中: $mne（必须为 0）==="
+          if [ "$mne" -ne 0 ]; then
+            echo "❌ 有测试因缺模块失败:"
+            grep -h "ModuleNotFoundError" "$WORK"/*.out | sort -u | head -10
+            exit 1
+          fi
+
+          if [ "$fail" -ne 0 ]; then
+            for f in $failed; do
+              echo ""
+              echo "########## $f 输出尾部（最后 30 行）##########"
+              tail -30 "$WORK/$(basename "$f").out"
+            done
+            echo ""
+            echo "❌ 有 $fail 套失败"
+            exit 1
+          fi
+          echo "✅ proxy-speedtest 回归套件全绿（$pass/$pass）"

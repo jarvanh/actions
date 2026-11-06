@@ -10,7 +10,7 @@
 | 工作流 | 测速点 | 口径 | 引擎/链路 | 文档 |
 |---|---|---|---|---|
 | `proxy-speedtest-gitee` | Gitee 私有仓库 | 经代理 git push 上行 + clone 下行 + gitee.com HTTP 延迟 | `speedtest_gitee.py` | [gitee](proxy-speedtest-gitee.md) |
-| `proxy-speedtest-cdn` | 国内 CDN/镜像站 + baidu/taobao | 经代理单连接 curl 下载 + HTTP 计时延迟 | 本文 | — |
+| `proxy-speedtest-cdn` | 国内 CDN/镜像站 + baidu/taobao | 经代理单流定窗 curl 下载（8s，只计传输段）+ HTTP 计时延迟 | 本文 | — |
 | `proxy-speedtest-taier` | 泰尔三网（电信/联通/移动测速服务器） | taierspeedtest 延迟 + 单/多线程上下行 | `taier_speedtest.py` + mihomo TUN | [taier](proxy-speedtest-taier.md) |
 
 调度：UTC 22/02/06/10（北京 06/10/14/18），与 gitee（UTC 21/01/05/09 → 京 05/09/13/17）、taier（UTC 23/03/07/11 → 京 07/11/15/19）各错开 1 小时；三套都只排在北京时间 05:00–21:00（夜间 runner 排队 + 出口拥塞会让读数失真）。
@@ -24,18 +24,40 @@
 1. **延迟** `latency_probe`（实现在 `speedtest_common.py`，与 gitee 的 gitee.com 延迟探测共用）：
    经代理对 `baidu.com` / `taobao.com` 做 HTTP 完整请求计时，多次采样取中位数
    （反映"打开网页"的真实握手+响应体验）；
-2. **下载** `download_speedtest`：经 mixed-port（`127.0.0.1:17892`）**单连接** curl Range
-   拉取国内测速点，按耗时换算 MiB/s，多 URL 串行取最优；
+2. **下载** `download_speedtest`：经 mixed-port（`127.0.0.1:17892`）**单流、定窗** curl
+   Range 拉取国内测速点。每个测速点拉满 `PROXY_SPEEDTEST_DOWNLOAD_WINDOW` 秒（默认 8；
+   `SIZE_MIB`=10MiB 只是 Range 上界），到点由 curl 自己截断，用**真实传输字节 ÷ 传输段
+   耗时**换算 MiB/s；多 URL 串行取最优。
+
+   **口径对照（2026-11-05 改口径）**：
+
+   | 项 | 旧口径（≤2026-11-04） | 现口径 |
+   |---|---|---|
+   | 计时窗口 | 定长：必须拉满 10MiB，超时 30s | **定窗**：单个 URL 拉满 8 秒，传多少算多少；整节点总预算 12 秒 |
+   | 计时区间 | `size / time_total`（含握手/TTFB） | `size / (time_total - time_starttransfer)`（**只算传输段**） |
+   | 慢链路 | <0.33 MiB/s 直接判失败（`null`） | 有读数（只要 ≥ `DOWNLOAD_MIN_MIB`=0.5MiB） |
+   | 单节点耗时上界 | 30s + 握手 | 12s + 握手（`DOWNLOAD_TOTAL_SECONDS`） |
+
+   为什么改：旧口径在当轮 336 个节点里留下 62 个 `download: null`（慢但可用被判失败），
+   且把握手折进带宽 —— 用同轮 253 个样本量化，总耗时中位 3.51s、HTTP 延迟中位 0.84s，
+   握手占总耗时中位 **26%**（本地用「握手 0.6~0.8s + 限速传输」服务复现：旧式 0.80
+   MiB/s vs 只算传输段 1.00）。
+   ⚠️ **口径已变，与此前历史读数不可直接比**：同一条链路在新口径下读数会整体上浮；
+   TG 通知新增 `📐 口径` 行明示，订阅名里的兆数也会随之变化。
+
+   `curl` 在窗口到点截断时退出码是 28，且 `-w` 仍输出真实字节数与耗时，所以判据是
+   **`exit_code ∈ {0, 28}` 且 `http_code < 400` 且 `size ≥ min_bytes`**（见
+   `download_measurement`，回归钉在 `tests/test_download_window.py`）。
 3. **上行**（`PROXY_SPEEDTEST_ENABLE_PUSH=1` 时）：经共享实现
    `speedtest_gitee.upload_speedtest` 单流上传测速文件到 Gitee 私有仓库。可用
-   `PROXY_SPEEDTEST_UPLOAD_VIA_PROXY=0` 切成**直连**（测家庭宽带而非节点上行）；
-4. **直连基线**（`PROXY_SPEEDTEST_DIRECT_BASELINE=1`，默认开）：不经代理 push 一次，
-   给出「家庭宽带 vs 节点」的可比数字。失败**不打死整轮**，只记
+   `PROXY_SPEEDTEST_UPLOAD_VIA_PROXY=0` 切成**直连**（测 runner 直连出口而非节点上行；**不是**家庭宽带）；
+4. **runner 直连基线**（`PROXY_SPEEDTEST_DIRECT_BASELINE=1`，默认开）：不经代理 push 一次，
+   给出「runner 直连 vs 节点」的可比数字。失败**不打死整轮**，只记
    `direct_baseline.ok=false`；
 5. 每节点结果写 JSON/HTML，全部完成后 Telegram 推 `✅ CDN 测速完成`（TOP5），
    达标节点订阅导出到本工作流专属 Gist。
 
-上行与直连基线的实现**与 Gitee 共用同一份**（2026-09-17 统一，此前 CDN 自带
+上行与 runner 直连基线的实现**与 Gitee 共用同一份**（2026-09-17 统一，此前 CDN 自带
 `gitee_push_speedtest`/`_gitee_push_direct` 两份等价实现）。开关名、默认值、计时口径
 两套完全一致，详见 [gitee 文档 · 上行测速已统一](proxy-speedtest-gitee.md#上行测速cdn-与-gitee-已统一2026-09-17)。
 
@@ -82,11 +104,14 @@
 |---|---|---|
 | `PROXY_SPEEDTEST_LATENCY_TARGETS` | baidu,taobao | 延迟探测目标 |
 | `PROXY_SPEEDTEST_LATENCY_SAMPLES` / `_TIMEOUT` | 4 / 8 | 采样次数 / 单次超时 |
-| `PROXY_SPEEDTEST_SIZE_MIB` | 10 | 单次下载字节数（Range 精确拉取） |
-| `PROXY_SPEEDTEST_DOWNLOAD_TIMEOUT` / `_DURATION` | 30 / 0 | 单 URL 超时 / 单节点总时长上限 |
+| `PROXY_SPEEDTEST_SIZE_MIB` | 10 | 单次 Range 的**请求上界**（定窗下不要求拉满） |
+| `PROXY_SPEEDTEST_DOWNLOAD_WINDOW` | 8 | **定窗测法的窗口秒数**（单 URL，不是一个节点的总预算）。`≤0` 退回旧定长行为 |
+| `PROXY_SPEEDTEST_DOWNLOAD_MIN_MIB` | 0.5 | 有效样本下限：传输字节少于此值不算读数（错误页/刚建连就断） |
+| `PROXY_SPEEDTEST_DOWNLOAD_TOTAL_SECONDS` | 12 | **单节点**下载总预算（多个 URL 串行取最优的上界；窗口只约束单个 URL） |
+| `PROXY_SPEEDTEST_DOWNLOAD_TIMEOUT` | 30 | curl 硬超时（窗口 + 握手余量），只防 DNS/连接挂起 |
 | `PROXY_SPEEDTEST_ENABLE_PUSH` | 1（workflow 注入） | 是否测经代理上行 |
-| `PROXY_SPEEDTEST_UPLOAD_VIA_PROXY` | 1 | 1=经代理（节点上行）；0=直连（家庭宽带上行）。与 gitee 同名同默认 |
-| `PROXY_SPEEDTEST_DIRECT_BASELINE` | 1 | 是否跑直连基线（家庭宽带对照）。失败不影响整轮 |
+| `PROXY_SPEEDTEST_UPLOAD_VIA_PROXY` | 1 | 1=经代理（节点上行）；0=直连（runner 直连出口上行）。与 gitee 同名同默认 |
+| `PROXY_SPEEDTEST_DIRECT_BASELINE` | 1 | 是否跑 runner 直连基线（不是家庭宽带对照）。失败不影响整轮 |
 | `PROXY_SPEEDTEST_DIRECT_BASELINE_TIMEOUT` / `_MAX_ATTEMPTS` | 60 / 5 | 基线单次超时 / 重试次数（与 gitee 同名同默认） |
 | `PROXY_SPEEDTEST_SWITCH_SETTLE_SECONDS` | 1.5 | 切节点后等待 |
 | `PROXY_SPEEDTEST_MAX_NODES` | 0 | 0 = 不限 |

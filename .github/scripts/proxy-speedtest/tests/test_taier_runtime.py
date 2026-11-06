@@ -512,7 +512,7 @@ def main():
               f'{mod_name} 用的是节点名列表（不是别的参数）')
 
     print('== 10. 上行测速统一：CDN 与 Gitee 同一份实现 + 都能切直连 ==')
-    # 诉求（2026-09-17）：CDN / Gitee 的上行要么都经代理、要么都直连，且都能用直连基线对照。
+    # 诉求（2026-09-17）：CDN / Gitee 的上行要么都经代理、要么都直连，且都能用 runner 直连基线对照。
     # 此前 CDN 自带 gitee_push_speedtest/_gitee_push_direct 两份等价实现，靠人工与 Gitee
     # 对齐口径——改一处漏一处，且两套数值不可比（下的功夫都在「对齐」上）。
 
@@ -521,7 +521,7 @@ def main():
     check(d.upload_speedtest is g.upload_speedtest, 'cdn 用的就是 gitee 那份')
     check('def upload_speedtest' not in pathlib.Path(d.__file__).read_text(encoding='utf-8'),
           'cdn 不得再留本地副本')
-    check(d.run_direct_baseline is g.run_direct_baseline, 'cdn 与 gitee 共用直连基线')
+    check(d.run_direct_baseline is g.run_direct_baseline, 'cdn 与 gitee 共用 runner 直连基线')
     check(not hasattr(d, '_gitee_push_direct'),
           'CDN 的旧直连分支已删除（避免与新实现并存漂移）')
 
@@ -607,7 +607,7 @@ def main():
     check(d.CONFIG['PROXY_SPEEDTEST_UPLOAD_VIA_PROXY'] is True,
           'cdn 配置项解析为 True（默认经代理）')
     check(d.CONFIG['PROXY_SPEEDTEST_DIRECT_BASELINE'] is True,
-          'cdn 默认开启直连基线（与 gitee 一致）')
+          'cdn 默认开启 runner 直连基线（与 gitee 一致）')
 
     # 10f. 两套都真的调了共享上行实现（共用一份 ≠ 装了开关；不接调用点等于没统一）
     for mod_name, mod, marker in (('gitee', g, 'upload_speedtest('),
@@ -624,7 +624,7 @@ def main():
     # （--filter=blob:none ⇒ clone 只取元数据、checkout 才拉内容），于是只计 checkout。
     # 实测坐实 Gitee 私有仓库**不认这个 filter**：内容在 clone 段已全量落地
     # （size-pack 10.01 MiB、缺失 blob 0），checkout 退化成纯本地解包（13~56ms）
-    # ⇒ 所有节点乃至直连基线都测出同一个 ≈178 MiB/s（1417 兆）的常数假象。
+    # ⇒ 所有节点乃至 runner 直连基线都测出同一个 ≈178 MiB/s（1417 兆）的常数假象。
     #
     # 新实现：去掉 filter、clone 加 --no-checkout（只做网络传输、不碰工作区）、
     # **计时包住 clone**；checkout 保留，但只负责把文件落到工作区供取真实字节数。

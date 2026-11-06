@@ -9,7 +9,8 @@ baidu/taobao、下载测速点腾讯云/清华 TUNA 镜像 ISO 与 npmmirror 最
 Gist 上传）与 speedtest_gitee.py 的 mihomo 内核启动 / 节点快照 / 节点切换能力，新增：
   - latency_probe      : 经代理对目标 URL 做 HTTP 计时（延迟）
   - resolve_download_urls: 运行时自动发现国内测速点（滚动 ISO 软链 + npmmirror 最新版），规避写死版本号失效
-  - download_speedtest : 经 mixed-port 代理 curl Range 拉取测速点，换算 MiB/s（单连接，与 gitee 上行口径一致）
+  - download_speedtest : 经 mixed-port 代理 curl Range 拉取测速点，**单流定窗**（默认 8s）计时，
+    速度只算传输段（不含 TTFB）换算 MiB/s（2026-11-05 从定长 10MiB 改口径）
   - gitee_push_speedtest: 经代理 git push 到 Gitee 测上行（复用 speedtest_gitee.git_force_push_testfile）
   - build_html_report  : 生成自包含、可交互 HTML 可视化报告
   - 订阅导出 + Gist 上传: 复用 speedtest_common.build_subscription_bundle / build_target_network_section /
@@ -25,6 +26,7 @@ Gist 上传）与 speedtest_gitee.py 的 mihomo 内核启动 / 节点快照 / �
   - 兜底对齐 gitee：SIGTERM/SIGINT → ⛔ 通知；未捕获异常 → ❌ 通知（标题带原因摘要）。
 """
 import json
+import math
 import os
 import html
 import pathlib
@@ -80,7 +82,7 @@ from speedtest_gitee import (
     ensure_test_file,
     format_duration,
     git_force_push_testfile,
-    # 上行测速与直连基线（与 Gitee 共用同一份实现）
+    # 上行测速与 runner 直连基线（与 Gitee 共用同一份实现）
     run_direct_baseline,
     switch_proxy,
     # 开测前等 provider 展开（否则切节点会静默作用于上一个节点）
@@ -134,12 +136,31 @@ CONFIG = {
     # 下载测速
     'PROXY_SPEEDTEST_DOWNLOAD_URLS':
         (os.environ.get('PROXY_SPEEDTEST_DOWNLOAD_URLS', '') or ','.join(DEFAULT_DOWNLOAD_URLS)).split(','),
+    # 下载上限（MiB）：只作**单次 Range 的请求上界**，不是「必须拉满这么多」。定窗测法
+    # 到点就截断，所以这个值要显著大于窗口内能传完的量，否则快节点会先撞上界、把
+    # 读数压成「定长 / 定窗」的混合口径。
     'PROXY_SPEEDTEST_SIZE_MIB':
         int(os.environ.get('PROXY_SPEEDTEST_SIZE_MIB', '10')),
+    # 单次 curl 的硬超时（秒）：窗口 + 握手 + 收尾余量。窗口到点由 --max-time 截断，
+    # 这里只是防 curl 卡死（DNS/连接挂起）的最后一道闸。
     'PROXY_SPEEDTEST_DOWNLOAD_TIMEOUT':
         float(os.environ.get('PROXY_SPEEDTEST_DOWNLOAD_TIMEOUT', '30')),
-    'PROXY_SPEEDTEST_DOWNLOAD_DURATION':
-        float(os.environ.get('PROXY_SPEEDTEST_DOWNLOAD_DURATION', '0')),  # 0=用 SIZE_MIB/timeout 约束
+    # 定窗测法的窗口长度（秒，>0 启用）。**这是单 URL 的计时窗口，不是整轮总预算**
+    # （旧名 DOWNLOAD_DURATION 的语义其实是「多个 URL 的总预算」，与名字不符，容易
+    # 被误开——旧实现下窗口内没拉完 10MiB 会让 curl 退出 25/28 从而整条 URL 被丢弃，
+    # 越开越容易全失败）。见 download_speedtest 的说明。
+    'PROXY_SPEEDTEST_DOWNLOAD_WINDOW':
+        float(os.environ.get('PROXY_SPEEDTEST_DOWNLOAD_WINDOW', '8')),
+    # 定窗测法下「传输了多少字节才算有效样本」的下限（MiB）。低于它说明连接刚建好就断
+    # 或对端返回了极小的错误页，测出的「速度」没有意义，不能进最优值。
+    'PROXY_SPEEDTEST_DOWNLOAD_MIN_MIB':
+        float(os.environ.get('PROXY_SPEEDTEST_DOWNLOAD_MIN_MIB', '0.5')),
+    # **单节点**下载总预算（秒）：多个测速点串行取最优，窗口是单 URL 的上限，
+    # 这个是整个节点所有 URL 加起来的上限。没有它，窗口×URL 数会把单节点耗时推到
+    # 4×8=32s（比旧口径的 30s 还慢），与「同预算多测节点」的目标相反。
+    # 默认 12s：够测 2 个 URL（首个 8s + 次个 4s），单节点上界从 30s 降到 12s。
+    'PROXY_SPEEDTEST_DOWNLOAD_TOTAL_SECONDS':
+        float(os.environ.get('PROXY_SPEEDTEST_DOWNLOAD_TOTAL_SECONDS', '12')),
     # 节点切换
     'PROXY_SPEEDTEST_SWITCH_SETTLE_SECONDS':
         float(os.environ.get('PROXY_SPEEDTEST_SWITCH_SETTLE_SECONDS', '1.5')),
@@ -158,7 +179,7 @@ CONFIG = {
     # 可选 Gitee 上行
     'PROXY_SPEEDTEST_ENABLE_PUSH':
         (os.environ.get('PROXY_SPEEDTEST_ENABLE_PUSH', '0').strip().lower() in ('1', 'true', 'yes', 'on')),
-    # 上行是否经 mihomo 代理（True=反映代理节点上行带宽；False=直连 Gitee 反映家庭宽带上行）
+    # 上行是否经 mihomo 代理（True=反映代理节点上行带宽；False=直连 Gitee 反映 runner 直连出口上行）
     'PROXY_SPEEDTEST_UPLOAD_VIA_PROXY':
         (os.environ.get('PROXY_SPEEDTEST_UPLOAD_VIA_PROXY', '1').strip().lower() not in ('0', 'false', 'no', 'off')),
     'PROXY_SPEEDTEST_PUSH_TIMEOUT':
@@ -171,7 +192,7 @@ CONFIG = {
         os.environ.get('PROXY_SPEEDTEST_GITEE_REPO', 'proxy-speedtest-temp').strip() or 'proxy-speedtest-temp',
     'PROXY_SPEEDTEST_GITEE_BRANCH':
         os.environ.get('PROXY_SPEEDTEST_GITEE_BRANCH', DEFAULT_GITEE_BRANCH).strip() or DEFAULT_GITEE_BRANCH,
-    # 直连基线（家庭宽带对照，与 Gitee 同名同默认）。默认**开**：有些对照才有意义。
+    # runner 直连基线（**不是**家庭宽带对照，与 Gitee 同名同默认）。默认**开**：有些对照才有意义。
     # 单列开关，因为直连 push 会往 Gitee 仓库推东西，偶发超时较常见，必要时可关掉。
     'PROXY_SPEEDTEST_DIRECT_BASELINE':
         (os.environ.get('PROXY_SPEEDTEST_DIRECT_BASELINE', '1').strip().lower() not in ('0', 'false', 'no', 'off')),
@@ -271,55 +292,171 @@ def resolve_download_urls(proxy_env, catalogs, fallback_urls, enable_npmmirror=T
 
 
 # ----------------------------------------------------------------------------
-# 下载测速：curl 经 mixed-port 代理拉取测速点，按耗时换算 MiB/s
+# 下载测速：curl 经 mixed-port 代理拉取测速点，**定窗**计时换算 MiB/s
 # ----------------------------------------------------------------------------
-def download_speedtest(urls, proxy_env, timeout=30.0, size_hint_mib=10, max_duration=0.0):
-    """经代理 curl 拉取测速点，返回 {ok, mibps, bytes, seconds, error}。
+# curl 在 `--max-time` 到点截断时的退出码。**计时要收它**：定窗测法就是「拉满窗口
+# 然后自己掐断」，掐断是正常路径而不是失败。实测（本地限速 2MiB/s 服务 +
+# 100MiB Range + --max-time 2）：`curl: (28) Operation timed out ... with
+# 4194304 out of 104857600 bytes received`，退出码 28，但 `-w` 仍照常输出
+# `time_total` / `size_download` —— 所以「非零返回码一律丢弃」会把所有慢节点
+# 判成失败，正是定窗测法要解决的问题本身。
+CURL_EXIT_OPERATION_TIMEOUT = 28
+# 定窗测法可接受的返回码：0（在窗口内拉满上界）与 28（窗口到点截断）。
+CURL_DOWNLOAD_OK_EXITS = (0, CURL_EXIT_OPERATION_TIMEOUT)
 
-    对每个测速 URL 优先用 HTTP Range 单次精确拉取 size_hint_mib 字节（避免重复连接
-    开销、速度读数更准）；若目标不支持 Range（返回整文件），则按实际下载字节与耗时
-    换算速度。若指定 max_duration>0 则限制单节点总时长（多个 URL 串行取最优）。
+
+def download_measurement(exit_code, http_code, size_bytes, time_total, time_starttransfer,
+                         min_bytes=0, ok_exits=CURL_DOWNLOAD_OK_EXITS):
+    """把 curl 的 `-w` 输出判成一个可用样本；不可用返回 `(None, 原因)`。
+
+    拆成纯函数是为了能被自检直接驱动：这里每条判据的坏法都是**静默产出坏数字**
+    （把超时当成功、把错误页当测速、把握手当传输），只有边界能被构造时才看得出来。
+
+    判据四条，缺一不可：
+
+      1. `exit_code` 必须在 `ok_exits` 里（定窗默认 `{0, 28}`）。其余（6 DNS、7 连接
+         被拒、56 连接被重置、22 HTTP 错误……）都是真失败，不能因为「反正有字节数」
+         就收下。
+      2. `http_code < 400`。**这条独立于返回码**：curl 不带 `--fail` 时 HTTP 4xx/5xx
+         仍然返回 0，`size_download` 就是那几百字节错误页 —— 不挡的话会算出一个
+         「每秒几十字节」参与「多 URL 取最优」的候选（通常落选，但一旦所有测速点都
+         4xx，它就成了唯一「成功」值）。
+      3. 传输字节数 ≥ `min_bytes`。定窗截断下极小样本（刚建连就断）的
+         `bytes / 窗口` 没有意义。
+      4. 计时取**传输段**，不含 TTFB：`elapsed = time_total - time_starttransfer`。
+
+    **为什么必须扣掉 TTFB**（2026-11-05 实测）：旧口径 `size / time_total` 把握手算进
+    了传输。用当轮 cdn 真实日志（253 个同时有延迟与下载的样本）量化：总耗时中位
+    3.51s、HTTP 延迟中位 0.84s ⇒ 握手占总耗时中位 **26%**；本地用一个「握手 0.8s +
+    回环满速」的服务复现，同样 10MiB 下 `size/time_total` = 12.35 MiB/s 而
+    `size/(total-starttransfer)` = 1144 MiB/s（相差 99%）。代理节点延迟本来就是
+    0.5~1.7s 量级，这项污染不是小数。
+    """
+    if exit_code not in ok_exits:
+        return None, f'curl exit {exit_code}'
+    if http_code and http_code >= 400:
+        return None, f'HTTP {http_code}'
+    if size_bytes <= 0:
+        return None, 'empty download'
+    if min_bytes and size_bytes < int(min_bytes):
+        return None, f'too few bytes ({size_bytes} < {int(min_bytes)})'
+    transfer = float(time_total or 0) - float(time_starttransfer or 0)
+    if transfer <= 0:
+        # 传输段算不出来（starttransfer 缺失/等于 total）→ 退回总时长，但至少不能为 0。
+        transfer = float(time_total or 0)
+    if transfer <= 0:
+        return None, 'no elapsed time'
+    return {'bytes': size_bytes, 'transfer_seconds': round(transfer, 3),
+            'total_seconds': round(float(time_total or 0), 3),
+            'ttfb_seconds': round(float(time_starttransfer or 0), 3),
+            'mibps': round(size_bytes / 1024 / 1024 / transfer, 2),
+            'exit_code': exit_code, 'http_code': http_code}, None
+
+
+def download_speedtest(urls, proxy_env, timeout=30.0, size_hint_mib=10, window_seconds=0.0,
+                       min_mib=0.5, total_seconds=0.0):
+    """经代理 curl 拉取测速点，**定窗计时**换算 MiB/s，返回
+    {ok, mibps, bytes, seconds, ttfb_seconds, total_seconds, error}。
+
+    测法（2026-11-05 从「定长 10MiB」改为「定窗 8 秒」）：
+      * Range 请求上界仍由 `size_hint_mib` 给出，但它只是**上界**——窗口到点
+        curl 自己掐断，用已传输的真实字节数算速度；
+      * 计时取传输段（扣掉 TTFB），见 `download_measurement`；
+      * 每个 URL 串行各测一个窗口，取最优。
+
+    **为什么改成定窗**（旧口径的三个硬伤，都在真实日志里量化过）：
+      1. 旧实现「10MiB / 30s 超时」等价于要求节点 ≥0.33 MiB/s，慢但可用的节点被
+         整条判成失败（当轮 336 个节点里 62 个 download 为 null）。定窗下 8 秒传多少
+         算多少，慢节点也有读数。
+      2. 旧实现把 TTFB 算进传输段，系统性低估（实测中位 26%，见 `download_measurement`）。
+      3. 单节点下载总耗时上界由「30s」降到「`DOWNLOAD_TOTAL_SECONDS`=12s」
+         （窗口只约束单个 URL，整节点另有总预算），同预算能多测约 2 倍节点。
+
+    ⚠️ 口径已变，**与 2026-11-05 之前的历史读数不可直接比**：同一条链路在新口径下
+    读数会整体上浮（去掉握手 + 慢节点不再为 null）。订阅名里的兆数也会随之变化。
 
     ⚠️ curl 必须带 `-L`（2026-10-11 修）：npmmirror 的 node zip 直链返回 302 →
     cdn.npmmirror.com，不带 -L 时 size_download=90（就是 302 响应体本身），
     「10MiB ÷ 4s」换算出一个 0.00002 MiB/s 的假值——因取多 URL 最优它永远落选，
     该测速点自上线起从未真正生效。实测带 -L 后 206、size 精确等于请求量。
     """
-    proxy = f'http://127.0.0.1:{MIHOMO_MIXED_PORT}'
-    target_bytes = int(size_hint_mib * 1024 * 1024)
-    wall_deadline = time.monotonic() + (max_duration if max_duration and max_duration > 0 else timeout)
+    # 代理地址：显式传了 proxy_env 就用它（生产传 build_proxy_env 的结果，即同一个
+    # mixed-port）；**传空 dict 表示直连**（自检用本地服务端到端跑真 curl）；
+    # 完全不传（None）才退回默认 mixed-port。
+    if proxy_env is None:
+        proxy = f'http://127.0.0.1:{MIHOMO_MIXED_PORT}'
+    else:
+        proxy = (proxy_env.get('HTTP_PROXY') or proxy_env.get('HTTPS_PROXY') or '').strip()
+    cap_bytes = int(size_hint_mb * 1024 * 1024) if False else int(size_hint_mib * 1024 * 1024)
+    # `window_seconds<=0` 退回**旧定长行为**：要求拉满上界（截断即算失败）。这样文档里
+    # 「≤0 退回旧定长」与代码一致，出问题时有一个已知可用的逃生阀。
+    fixed_length = not (window_seconds and window_seconds > 0)
+    min_bytes = cap_bytes if fixed_length else int(float(min_mib or 0) * 1024 * 1024)
+    # **单节点**总预算：窗口只约束单个 URL，不约束整个节点。没有这个上限，窗口×URL 数
+    # （默认 8×4=32s）会比旧口径的 30s 还慢，与「同预算多测节点」的目标相反。
+    if fixed_length:
+        node_budget = timeout          # 旧语义：整节点共 timeout 秒
+        per_url_cap = timeout
+    else:
+        node_budget = total_seconds if total_seconds and total_seconds > 0 else window_seconds
+        per_url_cap = window_seconds
+    wall_deadline = time.monotonic() + node_budget
+    # 定长模式下截断即失败（只认 0）；定窗模式收 0 与 28。
+    accepted_exits = (0,) if fixed_length else CURL_DOWNLOAD_OK_EXITS
     best = None
     last_error = ''
     for u in urls:
         u = u.strip()
         if not u:
             continue
-        remaining = int(wall_deadline - time.monotonic())
+        remaining = wall_deadline - time.monotonic()
         if remaining <= 0:
             break
-        range_arg = f'0-{target_bytes - 1}'
-        cmd = [
-            'curl', '-sSL', '-x', proxy, '-o', '/dev/null',
-            '-w', '%{time_total},%{size_download}',
+        per_url_seconds = remaining if fixed_length else min(per_url_cap, remaining)
+        if per_url_seconds < 1:
+            # 剩余不足 1 秒测不出有意义的速度，不如不收（也避免 --max-time 0/负数）
+            break
+        # **向上取整**：`int()` 截断会把 2.99 秒变成 2 秒，凭空少测 1 秒（实测端到端
+        # 3 秒窗口只跑了 2 秒）。curl 的 --max-time 只接受整数秒。
+        curl_max_time = max(1, int(math.ceil(per_url_seconds)))
+        range_arg = f'0-{cap_bytes - 1}'
+        cmd = ['curl', '-sSL', '-o', '/dev/null']
+        if proxy:
+            cmd += ['-x', proxy]
+        cmd += [
+            # time_starttransfer = 首字节时间（≈握手+TTFB），用来把传输段切出来
+            '-w', '%{http_code},%{time_total},%{time_starttransfer},%{size_download}',
             '--connect-timeout', '10',
-            '--max-time', str(min(remaining, timeout)),
+            '--max-time', str(curl_max_time),
             '-r', range_arg,
             '-A', 'Mozilla/5.0', u,
         ]
         try:
-            out = subprocess.run(cmd, capture_output=True, text=True, timeout=min(remaining, timeout) + 10)
-            if out.returncode != 0:
-                last_error = out.stderr.strip() or f'curl exit {out.returncode}'
+            # 子进程超时给足余量：curl 自己会按 --max-time 退，这里只兜「curl 卡死」
+            out = subprocess.run(cmd, capture_output=True, text=True,
+                                 timeout=curl_max_time + 15)
+            fields = (out.stdout.strip().split(',') + ['0', '0', '0', '0'])[:4]
+            try:
+                http_code = int(fields[0] or 0)
+                time_total = float(fields[1] or 0)
+                time_starttransfer = float(fields[2] or 0)
+                size_bytes = int(fields[3] or 0)
+            except ValueError:
+                last_error = f'bad curl write-out: {out.stdout.strip()[:80]}'
                 continue
-            parts = (out.stdout.strip().split(',') + ['0', '0'])[:2]
-            dur = float(parts[0] or '0')
-            sz = int(parts[1] or '0')
-            if dur <= 0 or sz <= 0:
-                last_error = 'empty download'
+            measured, reason = download_measurement(
+                out.returncode, http_code, size_bytes, time_total, time_starttransfer,
+                min_bytes=min_bytes, ok_exits=accepted_exits)
+            if measured is None:
+                last_error = reason
+                # 仅对「真失败」附带 curl 自身的错误串，便于区分 DNS/拒连/重置
+                if out.returncode not in accepted_exits and out.stderr.strip():
+                    last_error = f'{reason}: {out.stderr.strip().splitlines()[-1][:120]}'
                 continue
-            mibps = sz / 1024 / 1024 / dur
-            cand = {'ok': True, 'mibps': round(mibps, 2), 'bytes': sz,
-                    'seconds': round(dur, 2), 'error': None}
+            cand = {'ok': True, 'mibps': measured['mibps'], 'bytes': measured['bytes'],
+                    'seconds': measured['transfer_seconds'],
+                    'ttfb_seconds': measured['ttfb_seconds'],
+                    'total_seconds': measured['total_seconds'], 'error': None}
             if best is None or cand['mibps'] > best['mibps']:
                 best = cand
         except Exception as e:
@@ -327,7 +464,6 @@ def download_speedtest(urls, proxy_env, timeout=30.0, size_hint_mib=10, max_dura
     if best is None:
         return {'ok': False, 'mibps': None, 'bytes': 0, 'seconds': None, 'error': last_error}
     return best
-
 
 # ----------------------------------------------------------------------------
 # 上行测速（经 mihomo 代理 git push，反映代理节点上行带宽）
@@ -344,7 +480,7 @@ def gitee_push_speedtest(env, size_mib, push_timeout, branch, via_proxy=True):
 
     - via_proxy=True（默认）：经 mihomo 代理 push，**真正反映代理节点的上行带宽**
       （端点位于中国，符合国内测速要求）；
-    - via_proxy=False：直连 Gitee，反映**家庭宽带直连上行**。
+    - via_proxy=False：直连 Gitee，反映 **runner 直连出口上行**（不是家庭宽带）。
     返回 {ok, mibps, bytes, seconds, error}。
     """
     token = env.get('GITEE_PRIVATE_TOKEN', '').strip()
@@ -427,7 +563,9 @@ def speedtest_single_node(item, proxy_env, cfg, download_urls, direct_ip=''):
                                  cfg['PROXY_SPEEDTEST_LATENCY_SAMPLES'], cfg['PROXY_SPEEDTEST_LATENCY_TIMEOUT']),
         'download': download_speedtest(download_urls, proxy_env,
                                        cfg['PROXY_SPEEDTEST_DOWNLOAD_TIMEOUT'], cfg['PROXY_SPEEDTEST_SIZE_MIB'],
-                                       cfg['PROXY_SPEEDTEST_DOWNLOAD_DURATION']),
+                                       cfg['PROXY_SPEEDTEST_DOWNLOAD_WINDOW'],
+                                       cfg['PROXY_SPEEDTEST_DOWNLOAD_MIN_MIB'],
+                                       cfg['PROXY_SPEEDTEST_DOWNLOAD_TOTAL_SECONDS']),
     }
     if cfg['PROXY_SPEEDTEST_ENABLE_PUSH']:
         via_proxy = cfg['PROXY_SPEEDTEST_UPLOAD_VIA_PROXY']
@@ -741,8 +879,12 @@ function drawCharts(rows){drawLatency(rows);drawDownload(rows);}
 
 document.getElementById('footer').innerHTML=
   '测速方法：延迟为经代理对目标 URL 的 HTTP 响应计时（多次取中位数）；下载速度为经 mihomo 代理 '+
-  'curl 拉取国内镜像站/软件源测速点的 MiB/s。节点逐节点串行测量。参数快照：'+
-  '<code>size_mib='+META.size_mib+'</code> <code>latency_samples='+META.latency_samples+
+  'curl 拉取国内镜像站/软件源测速点的 MiB/s——单流定窗：每个测速点拉满 '+
+  META.download_window+' 秒（上界 '+META.size_mib+'MiB），速度只算传输段'+
+  '（已扣掉首字节时间 TTFB，不把握手折进带宽），慢链路传多少算多少。'+
+  '节点逐节点串行测量。参数快照：'+
+  '<code>window='+META.download_window+'s</code> <code>size_mib='+META.size_mib+'</code> '+
+  '<code>latency_samples='+META.latency_samples+
   '</code> <code>download_timeout='+META.download_timeout+'s</code> <code>push='+(META.push?'on':'off')+'</code>。'+
   '数据仅供网络质量参考。';
 
@@ -768,6 +910,7 @@ def main():
         'latency_samples': CONFIG['PROXY_SPEEDTEST_LATENCY_SAMPLES'],
         'size_mib': CONFIG['PROXY_SPEEDTEST_SIZE_MIB'],
         'download_timeout': CONFIG['PROXY_SPEEDTEST_DOWNLOAD_TIMEOUT'],
+        'download_window': CONFIG['PROXY_SPEEDTEST_DOWNLOAD_WINDOW'],
         'push_enabled': CONFIG['PROXY_SPEEDTEST_ENABLE_PUSH'],
         'budget_seconds': budget_seconds,
     })
@@ -837,7 +980,7 @@ def main():
                                          for v in (provider_snapshot or {}).values()))
     results = []
 
-    # 直连基线（家庭宽带对照）：只测代理节点带宽、不知道家庭宽带是多少，就看不出
+    # runner 直连基线（不是家庭宽带对照）：只测代理节点带宽、不知道 runner 直连是多少，就看不出
     # 「节点比直连还慢」。与 Gitee 共用 run_direct_baseline。失败**不打死整轮**——
     # 基线是参考值，不是交付物；拿不到就记 ok=False，主体测速照常。
     direct_baseline = None
@@ -914,6 +1057,7 @@ def main():
         'size_mib': CONFIG['PROXY_SPEEDTEST_SIZE_MIB'],
         'latency_samples': CONFIG['PROXY_SPEEDTEST_LATENCY_SAMPLES'],
         'download_timeout': CONFIG['PROXY_SPEEDTEST_DOWNLOAD_TIMEOUT'],
+        'download_window': CONFIG['PROXY_SPEEDTEST_DOWNLOAD_WINDOW'],
         'push': CONFIG['PROXY_SPEEDTEST_ENABLE_PUSH'],
     }
     # 测速点域名（按下载 URL 去重提取，运行时解析的镜像站/软件源），
@@ -931,7 +1075,7 @@ def main():
         'mode': meta['mode'],
         'node_count': len(results),
         'results': results,
-        # 直连基线：供通知展示「家庭宽带 vs 节点」对照（拿不到时 ok=False，不带数字）
+        # runner 直连基线：供通知展示「runner 直连 vs 节点」对照（拿不到时 ok=False，不带数字）
         'direct_baseline': direct_baseline,
         # bypass 校验（与 taier 同口径）：命中数与直连出口，供通知展示「疑似未走代理」
         'direct_egress_ip': direct_ip,
@@ -1116,6 +1260,14 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None,
         targets.append((ip or '', h, fetch_ip_network_info(ip) if ip else None))
     lines.extend(build_target_network_section(targets))
     lines.append('')
+    # 口径行：下载测法（单流定窗 / 只算传输段）写进通知。2026-11-05 从「定长 10MiB」
+    # 改为「定窗」后口径与历史读数不可直接比，必须让读者在通知里就看到，而不是只写在
+    # 文档里——否则下轮读数整体上浮会被当成「网络变好了」。
+    _window = meta.get('download_window')
+    if _window:
+        lines.append(f"📐 口径：下载单流定窗 {tg_entry(str(_window) + 's')} 上界 "
+                     f"{tg_entry(str(meta.get('size_mib')) + 'MiB')} · 只计传输段（不含 TTFB）")
+        lines.append('')
     if top_results:
         top = top_results[:5]
         # 名次类分节用 🏆（规范 · 状态图标：禁 ⭐/🥇 自造前缀；名次类计数裸文本）；
@@ -1215,6 +1367,7 @@ def write_termination(started_at, reason):
             'size_mib': CONFIG['PROXY_SPEEDTEST_SIZE_MIB'],
             'latency_samples': CONFIG['PROXY_SPEEDTEST_LATENCY_SAMPLES'],
             'download_timeout': CONFIG['PROXY_SPEEDTEST_DOWNLOAD_TIMEOUT'],
+            'download_window': CONFIG['PROXY_SPEEDTEST_DOWNLOAD_WINDOW'],
             'push': CONFIG['PROXY_SPEEDTEST_ENABLE_PUSH'],
         }), encoding='utf-8')
     except Exception:
