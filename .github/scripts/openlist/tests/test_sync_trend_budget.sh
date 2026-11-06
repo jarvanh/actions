@@ -94,6 +94,30 @@ _v=$(_budget_slice_seconds 2700)
 [ "$_v" = "60" ] && ok "传输上限: 已过点→兜底 60s（不出现 0/负）" || bad "传输上限: 期望60实得 ${_v:-空}"
 unset OPENLIST_SYNC_DEADLINE_EPOCH
 
+# --- 1c-2. _slice_cap_seconds: 单片上限 = min(剩余预算−尾部预留, 批次片长) ---
+# 背景（2026-11-06，两轮生产实证）: 只按 _budget_slice_seconds 给值，轮初就是
+#   ~16130s（4.5h），单个工作单元能把整轮吃掉 —— run 41750655316 批次 1 独占整轮
+#   （收尾 0 个/0 B）、run 42141210516 子目录 house-of-ester 单目录跑 3.5h
+#   （34KiB/s、ETA 1 天，整轮净传 0.74 GiB）。批次与子目录两条路径必须同口径封顶。
+unset OPENLIST_SYNC_DEADLINE_EPOCH OPENLIST_BATCH_MIN_SLICE_SECONDS
+OPENLIST_SYNC_BUDGET_SECONDS=19200
+[ -z "$(_slice_cap_seconds)" ] && ok "单片上限: 无预算锚点→空（不加 timeout）" || bad "单片上限: 无锚点却给值"
+# 轮初: 剩余预算 19000s，片长 7200 ⇒ 必须被截到 7200（旧行为会给 ~16300）
+OPENLIST_SYNC_DEADLINE_EPOCH=$(( $(date +%s) + 19000 ))
+_v=$(_slice_cap_seconds)
+[ "$_v" = "7200" ] && ok "单片上限: 轮初 16300s → 被截到片长 7200" || bad "单片上限: 期望7200 实得 ${_v:-空}"
+# 预算将尽: 剩余 < 片长 ⇒ 取更短值，不放大
+OPENLIST_SYNC_DEADLINE_EPOCH=$(( $(date +%s) + 4000 ))
+_v=$(_slice_cap_seconds)
+[ "$_v" -gt 0 ] && [ "$_v" -lt 7200 ] && ok "单片上限: 预算将尽取更短值（${_v}s < 7200）" || bad "单片上限: 预算将尽实得 ${_v:-空}"
+# 短轮等比缩放: 60min 预算 → 片长 1350
+OPENLIST_SYNC_BUDGET_SECONDS=3600
+OPENLIST_SYNC_DEADLINE_EPOCH=$(( $(date +%s) + 3500 ))
+_v=$(_slice_cap_seconds)
+[ "$_v" -le 1350 ] && [ "$_v" -gt 0 ] && ok "单片上限: 60min 短轮 → ≤1350（${_v}s）" || bad "单片上限: 短轮实得 ${_v:-空}"
+unset OPENLIST_SYNC_DEADLINE_EPOCH
+OPENLIST_SYNC_BUDGET_SECONDS=19200
+
 # --- 1d. 预算派生阈值（支持"短轮快速迭代"，2026-09-15）---
 # 绝对阈值只在 320min 预算下自洽: 45min 预算 + 120min 批次片长 ⇒ 一个批次都不开，
 # 短轮退化成空轮（拿不到折叠/修复管线的日志）。故按比例缩放，且默认预算下精确还原。

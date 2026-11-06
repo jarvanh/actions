@@ -556,6 +556,29 @@ _budget_slice_seconds() {
   echo "$secs"
 }
 
+# ===== 单片传输时长上限（2026-11-06 抽函数，治"一个单元独占整轮"）=====
+# 语义: min(「剩余预算 − 尾部预留」, 批次片长 _batch_slice_effective)。
+# 为什么需要第二个上界: _budget_slice_seconds 在轮初就给出 ~16130s（4.5h），
+#   于是**单个工作单元**能把整轮吃掉。两轮实证:
+#     · run 41750655316 批次 1 拿到 16166s，独占整轮，收尾 0 个/0 B；
+#     · run 42141210516 子目录 house-of-ester 单目录跑 3.5h（34KiB/s、ETA 1 天），
+#       整轮只推进 20 个子目录、净传 0.74 GiB。
+# 为什么抽成函数: 这已经是**同一处逻辑的第二次**落地 —— 第一次只改了批次路径
+#   （6c38ccf），子目录级直连 sync 被漏掉，直到下一轮生产才暴露。集中一处，
+#   任何新增的在途传输调用点都只调本函数，不再各写一遍 min。
+# 未注入预算锚点（调试/还原/本机）→ 返回空串，调用方不加 timeout 包装，行为不变。
+_slice_cap_seconds() {
+  local tmo cap
+  tmo=$(_budget_slice_seconds)
+  [ -n "$tmo" ] || { echo ""; return 0; }
+  cap=$(_batch_slice_effective)
+  if [[ "$cap" =~ ^[0-9]+$ ]] && [ "$cap" -gt 0 ] \
+     && [[ "$tmo" =~ ^[0-9]+$ ]] && [ "$tmo" -gt "$cap" ]; then
+    tmo="$cap"
+  fi
+  echo "$tmo"
+}
+
 # ===== F22 写探针周期性重探 =====
 # 见 openlist_driver.sh · _backend_write_probe_invalidate 的完整动因。
 # 批次循环每开一批前调用: 距上次真探已隔 ≥OPENLIST_WRITE_REPROBE_INTERVAL（默认
@@ -2389,19 +2412,18 @@ sync_by_file_batches() {
       # 硬上限: 本次 copy 最多用到「预算剩余 − 尾部预留」，到点由 timeout 收掉
       # （rc=124 走失败分支 → 巩固 → 循环闸优雅收摊），不再拖到 330min 整轮被杀
       local _b_tmo="" _b_to=""
-      _b_tmo=$(_budget_slice_seconds)
-      # 批次 copy 的单片上限对齐 _batch_slice_effective（默认预算下 7200s）。
-      # 只看「剩余预算 − 尾部预留」会在轮初给出 ~16166s（run 41750655316
-      # 实测 05:14 开出 4.5h 的批次 1）: 一个慢批次独占整轮，两个并行 worker
-      # 直到 10:30 硬顶都没交回完成统计，父级收尾显示 0 个 / 0 B。
-      # 到点由 timeout 收掉后走巩固/修复/优雅收摊，剩余批次交下轮，不影响正确性。
+      # 单片上限统一走 _slice_cap_seconds（min(剩余预算−尾部预留, 批次片长)）。
+      # 此前批次路径自己写了一遍 min（6c38ccf），子目录级直连 sync 漏改 ——
+      # run 42141210516 的 house-of-ester 因没有上界独占 3.5h。集中到一处后，
+      # 两条路径不可能再漂移。
+      if declare -F _slice_cap_seconds >/dev/null 2>&1; then
+        _b_tmo=$(_slice_cap_seconds)
+      else
+        _b_tmo=$(_budget_slice_seconds)
+      fi
       if [ -n "$_b_tmo" ]; then
-        local _b_cap
-        _b_cap=$(_batch_slice_effective)
-        [[ "$_b_cap" =~ ^[0-9]+$ ]] && [ "$_b_cap" -gt 0 ] \
-          && [ "$_b_tmo" -gt "$_b_cap" ] && _b_tmo="$_b_cap"
         _b_to="timeout ${_b_tmo}"
-        echo "批次 $((i+1)): 本轮剩余预算内最多传输 ${_b_tmo}s（单片上限 ${_b_cap:-无}；超出由 timeout 收掉后走优雅收摊）"
+        echo "批次 $((i+1)): 本轮剩余预算内最多传输 ${_b_tmo}s（min(预算剩余−尾部预留, 单片片长)；超出由 timeout 收掉后走优雅收摊）"
       fi
       set +e
       ${_b_to} rclone copy "$source_path" "$dest_path" \
