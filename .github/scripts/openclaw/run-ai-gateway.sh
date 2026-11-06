@@ -106,7 +106,10 @@ BACKEND_STATE=/tmp/active-ai-backend.env
 OMNIROUTE_DIR=/home/runner/omniroute
 OMNIROUTE_TAR=/tmp/OmniRoute.tar.gz
 OMNIROUTE_ARCHIVE="dropbox:self-hosted/OmniRoute.tar.gz"
-OMNIROUTE_IMAGE="diegosouzapw/omniroute:3.8.51"
+# 2026-11-06（主人拍板）：不 pin 版本。恢复出来的 compose 才是真源
+# （上游发版会写回 3.8.52 之类），bootstrap 也用 latest，helper 容器与通知
+# 统一跟随；归档侧 create-omniroute-archive.sh 同口径从 compose 读。
+OMNIROUTE_IMAGE="diegosouzapw/omniroute:latest"
 OMNIROUTE_VOLUME="omniroute_omniroute-data"
 # 恢复路径观测标记：ARCHIVE_PRESENT=探测通过；ARCHIVE_SEEN=确认云端归档存在
 # （bootstrap 告警判据——归档存在却没恢复成 = 数据事故，见 restore 失败分支）
@@ -272,7 +275,7 @@ bootstrap_omniroute() {
   cat <<'OMNIROUTE_COMPOSE_EOF' | sed 's/^          //' > "$OMNIROUTE_DIR/docker-compose.yml"
 services:
   omniroute:
-    image: diegosouzapw/omniroute:3.8.51
+    image: diegosouzapw/omniroute:latest
     container_name: omniroute
     restart: unless-stopped
     stop_grace_period: 40s
@@ -603,6 +606,10 @@ start_omniroute() {
   fi
 }
 
+# 2026-11-06（主人拍板）：prestart 后台脚本已完成「归档恢复 + 起容器」时
+# 跳过这一整段（数据卷/镜像/compose 均已就位），只保留下方 P5b 等齐门 +
+# 健康判定 + 降级链。未预起 / 预起失败 → 走原同步路径，行为与改造前一致。
+if [ "${OMNIROUTE_PRESTART:-0}" != "1" ]; then
 cleanup_archive_workdir
 # 数据准备失败不终止（bootstrap 全新部署兜底，与旧 CliRelay 同口径）
 if ! restore_omniroute_data; then
@@ -622,6 +629,7 @@ if ! restore_omniroute_data; then
     fi
   fi
 fi
+fi
 
 # ---------- 主流程：三后端降级链 OmniRoute → CliRelay → CLIProxyAPI（2026-10-11 恢复自动降级） ----------
 # 统一端口方案：三个后端全部服务在宿主机 127.0.0.1:20128 —— OpenClaw 客户端
@@ -639,7 +647,7 @@ FALLBACK_REASON=""
 PINNED_BACKEND="${AI_BACKEND_INPUT:-auto}"
 
 if [ "$PINNED_BACKEND" = "omniroute" ]; then
-  if start_omniroute && wait_api_ready "omniroute" 150; then
+  if { [ "${OMNIROUTE_PRESTART:-0}" = "1" ] || start_omniroute; } && wait_api_ready "omniroute" 150; then
     ACTIVE_BACKEND=omniroute
     docker ps -a
     echo "✅ 当前生效 AI 网关: OmniRoute（pinned）"
@@ -676,7 +684,7 @@ elif [ "$PINNED_BACKEND" = "cliproxyapi" ]; then
     docker logs cliproxyapi --tail 100 || true
     exit 1
   fi
-elif start_omniroute && wait_api_ready "omniroute" 150; then
+elif { [ "${OMNIROUTE_PRESTART:-0}" = "1" ] || start_omniroute; } && wait_api_ready "omniroute" 150; then
   ACTIVE_BACKEND=omniroute
   docker ps -a
   echo "✅ 当前生效 AI 网关: OmniRoute"

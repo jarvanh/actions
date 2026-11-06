@@ -224,7 +224,6 @@ jobs:
             fi
             sleep 2
           done
-
       - name: Prefetch cold artifacts (后台并行)
         # 把「与本轮状态无关」的大块下载从串行关键路径上摘出去。实测一轮冷启动里
         # 主包下载 54s、omniroute 镜像 35.7s、rss 镜像 ~20s 都排在各自消费步骤里干
@@ -269,12 +268,31 @@ jobs:
           set +e
           # $1 = prefetch 目录（父 shell 的变量不会自动进子 shell，必须显式传）
           P="$1"
-          # qoder 用浮动 latest（实际部署步骤会按最新 release tag 再拉一次）；其余固定 tag 与步骤对齐。
-          for img in rongronggg9/rss-to-telegram:latest \
-                     diegosouzapw/omniroute:3.8.51 \
-                     ghcr.io/jarvanh/qoder2api-hub:latest; do
-            docker image pull "$img" >"$P/pull-$(printf '%s' "$img" | tr '/:.' '___').log" 2>&1
+          # qoder / rss 用浮动 latest（部署步骤会按实际 tag 再拉一次）。
+          # OmniRoute 不 pin 版本（2026-11-06，主人拍板）：真实 tag 在归档内
+          # docker-compose.yml，由下面的 pull-one-tar.sh 下载后本地解析到
+          # $P/omniroute-image.txt（不重复下载 540MB 整包、也不与 prestart 消费
+          # 归档抢文件）。等不到该文件就按 :latest 兜底，消费方同步拉取路径不变。
+          docker image pull rongronggg9/rss-to-telegram:latest >"$P/pull-rss.log" 2>&1 &
+          _rss_pid=$!
+          docker image pull ghcr.io/jarvanh/qoder2api-hub:latest >"$P/pull-qoder.log" 2>&1 &
+          _qoder_pid=$!
+          OMNI_IMG="diegosouzapw/omniroute:latest"
+          _waited=0
+          while [ ! -s "$P/omniroute-image.txt" ] && [ "$_waited" -lt 300 ]; do
+            sleep 2; _waited=$((_waited + 2))
           done
+          if [ -s "$P/omniroute-image.txt" ]; then
+            _img="$(cat "$P/omniroute-image.txt")"
+            case "${_img:-}" in
+              *omniroute:*) OMNI_IMG="$_img"; echo "✅ OmniRoute 归档 tag: $OMNI_IMG" ;;
+              *) echo "ℹ️ tag 文件内容异常（${_img:-empty}），按 :latest 预取" ;;
+            esac
+          else
+            echo "ℹ️ 未等到归档 tag 文件，按 :latest 预取"
+          fi
+          docker image pull "$OMNI_IMG" >"$P/pull-omniroute.log" 2>&1
+          wait "$_rss_pid" "$_qoder_pid"
           PF_EOF
           chmod +x "$P/pull-openclaw-tar.sh" "$P/pull-images.sh"
 
@@ -313,6 +331,21 @@ jobs:
           rc=$?
           if [ "$rc" -eq 0 ] && [ -s "$P/${NAME}.tar.gz.part" ]; then
             mv "$P/${NAME}.tar.gz.part" "$P/${NAME}.tar.gz"
+            # 2026-11-06：OmniRoute 归档内 compose 的 image: 才是真实版本
+            #（上游发版会写回，实测 3.8.51→3.8.52）。本地读 4KB 的 compose
+            # 成员落一个小文件，供 pull-images.sh 拉对应 tag；成员名带 ./
+            # 前缀（tar -tzf 实证），两种写法都试。读不到就不写，让预取按
+            # :latest 兜底。此文件不会 move，避免与 prestart 消费归档竞态。
+            if [ "$NAME" = "OmniRoute" ]; then
+              _compose="$(tar -xzOf "$P/${NAME}.tar.gz" ./docker-compose.yml 2>/dev/null || \
+                         tar -xzOf "$P/${NAME}.tar.gz" docker-compose.yml 2>/dev/null || true)"
+              _tag="$(printf '%s\n' "$_compose" | \
+                grep -m1 -E '^[[:space:]]*image:[[:space:]]*[^#[:space:]]+' | \
+                sed -E 's/^[[:space:]]*image:[[:space:]]*//; s/[[:space:]]*#.*$//; s/[[:space:]]*$//' || true)"
+              case "${_tag:-}" in
+                *omniroute:*) printf '%s\n' "$_tag" > "$P/omniroute-image.txt" ;;
+              esac
+            fi
           else
             rm -f "$P/${NAME}.tar.gz.part"
             [ "$rc" -eq 0 ] && rc=1
@@ -362,6 +395,29 @@ jobs:
           PF_EOF
           chmod +x "$P/pull-z2a-deps.sh"
           nohup bash "$P/pull-z2a-deps.sh" >"$P/z2a-deps.out" 2>&1 &
+
+
+      # ── 2026-11-06 启动提速（主人拍板）：OmniRoute 恢复+起容器后台化 ──
+      # 原先这两段全在 Run AI API gateway 关键路径里（数据恢复 20s + 镜像重拉
+      # 28s + 容器启动/健康 110s）。本步在 Mount Dropbox 之后立即后台起跑，
+      # 与 ZCode 还原 / Install OpenClaw / Tailscale 全程重叠；网关步按 rc 收口，
+      # 只保留 P5b 上游等齐门 + 20128 健康判定 + 降级链。
+      # 位置：Prefetch 之后 —— 归档本身由脚本内 fetch_via_prefetch 收货
+      # （消费 Prefetch 已拉起的 OmniRoute.tar.gz），等不到才回落同步下载。
+      - name: Start OmniRoute prestart (background, 与启动段重叠)
+        id: omniroute_prestart
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        env:
+          AI_BACKEND_INPUT: ${{ inputs.ai_backend || 'auto' }}
+        run: |
+          set -uo pipefail
+          rm -f /tmp/omniroute-prestart.rc /tmp/omniroute-prestart.log /tmp/omniroute-prestart.pid
+          nohup bash "$GITHUB_WORKSPACE/.github/scripts/openclaw/prestart-omniroute.sh" \
+            > /tmp/omniroute-prestart.out 2>&1 &
+          echo $! > /tmp/omniroute-prestart.pid
+          echo "🚀 已后台启动 OmniRoute 恢复+起容器（pid $!，收口在 Run AI API gateway）"
+
       # ── 2026-11-02 启动提速（P5）：OpenClaw 安装与 ZCode 还原并发 ──
       # 两段是启动段最大的两个 IO：ZCode 还原（4GB 包 → 12GB 解压，实测 191s）与
       # OpenClaw 主包恢复（4.3GB 包 → 解压 + CLI 安装，实测 78s）。原先两步串行，
@@ -1621,7 +1677,34 @@ jobs:
         # 2026-10-30 减重外置：脚本本体在 .github/scripts/openclaw/run-ai-gateway.sh
         #（原样搬移，零逻辑改动），P5b 等齐门消费 /tmp/upstream-rc-*（上游四脚本的
         # 标记，契约不变）。背景同 Install OpenClaw 的 500KB 注。
-        run: bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/run-ai-gateway.sh"
+        run: |
+          # 2026-11-06 收口：后台 prestart 已完成数据恢复+起容器，主流程跳过这两段。
+          # OMNIROUTE_PRESTART=1 让 run-ai-gateway.sh 只做 P5b 等齐 + 健康判定 +
+          # 降级链；rc 非 0 / 进程死亡无 rc → 不设该变量，脚本按原同步路径执行。
+          _ps_rc=none
+          if [ -f /tmp/omniroute-prestart.pid ]; then
+            _ps_waited=0
+            while [ ! -s /tmp/omniroute-prestart.rc ] && [ "$_ps_waited" -lt 600 ]; do
+              _ps_pid="$(cat /tmp/omniroute-prestart.pid 2>/dev/null | tr -dc '0-9')"
+              if [ -n "${_ps_pid:-}" ] && ! kill -0 "$_ps_pid" 2>/dev/null; then
+                sleep 2
+                [ -s /tmp/omniroute-prestart.rc ] || echo 1 > /tmp/omniroute-prestart.rc
+                break
+              fi
+              sleep 2
+              _ps_waited=$((_ps_waited + 2))
+            done
+            [ -s /tmp/omniroute-prestart.log ] && cat /tmp/omniroute-prestart.log || true
+            _ps_rc="$(cat /tmp/omniroute-prestart.rc 2>/dev/null || echo 1)"
+            case "$_ps_rc" in ''|*[!0-9]*) _ps_rc=1 ;; esac
+            echo "⏱️ OmniRoute 预起收口：rc=${_ps_rc}（等待 ${_ps_waited}s）"
+          fi
+          if [ "$_ps_rc" = "0" ]; then
+            export OMNIROUTE_PRESTART=1
+          else
+            echo "⚠️ 预起未就绪（rc=${_ps_rc}），网关步回落原同步恢复/启动路径"
+          fi
+          bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/run-ai-gateway.sh"
 
       - name: Run OpenClaw
         # 2026-10-31 重排（C1，主人拍板）：移到 AI 网关健康之后 —— OpenClaw 起来时
@@ -1826,32 +1909,44 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          set -euo pipefail
-          # 真源在 step 顶层 source 一次（规范 4.4）
-          source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
-          aux_fail_notify() {
-            local msg="" reason="${1:-安装失败}"
-            tg_add_title msg "⚠️ 辅助 CLI 安装失败"
-            tg_add_kv msg "原因" "$reason"
-            tg_add_kv msg "影响" "gemini-cli/clawhub 未装，相关技能降级；网关与 ZCode 数据不受影响"
-            tg_add_path msg "Run" "$TG_RUN_URL"
-            tg_add_footer msg
-            send_tg "$msg" alert || true
-          }
+          # 2026-11-06 启动提速（主人拍板）：健康后收尾并行化 ——
+          # 本步整体后台起跑（rc/log/pid 契约），由「Start background archive loop」前的
+          # 「Collect background post-health tasks」统一收口；脚本体零改动。
+          _bg_tag="aux"
+          rm -f "/tmp/post-health-${_bg_tag}.rc" "/tmp/post-health-${_bg_tag}.log" "/tmp/post-health-${_bg_tag}.pid"
           (
-            npm i -g @google/gemini-cli
-            npm i -g clawhub
-          ) > /tmp/aux-cli-install.log 2>&1 &
-          AUX_NPM_PID=$!
-          # 收口：GH 会回收 step 的子进程，npm 后台任务必须在本步骤结束前 wait
-          if wait "$AUX_NPM_PID"; then
-            echo "✅ 辅助 CLI 安装完成（gemini-cli / clawhub）"
-          else
-            echo "::warning::辅助 CLI 安装失败（gemini-cli / clawhub），日志尾部："
-            tail -n 20 /tmp/aux-cli-install.log 2>/dev/null || true
-            aux_fail_notify "gemini-cli/clawhub npm 安装失败"
-            exit 1
-          fi
+            (
+              set -euo pipefail
+              # 真源在 step 顶层 source 一次（规范 4.4）
+              source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+              aux_fail_notify() {
+                local msg="" reason="${1:-安装失败}"
+                tg_add_title msg "⚠️ 辅助 CLI 安装失败"
+                tg_add_kv msg "原因" "$reason"
+                tg_add_kv msg "影响" "gemini-cli/clawhub 未装，相关技能降级；网关与 ZCode 数据不受影响"
+                tg_add_path msg "Run" "$TG_RUN_URL"
+                tg_add_footer msg
+                send_tg "$msg" alert || true
+              }
+              (
+                npm i -g @google/gemini-cli
+                npm i -g clawhub
+              ) > /tmp/aux-cli-install.log 2>&1 &
+              AUX_NPM_PID=$!
+              # 收口：GH 会回收 step 的子进程，npm 后台任务必须在本步骤结束前 wait
+              if wait "$AUX_NPM_PID"; then
+                echo "✅ 辅助 CLI 安装完成（gemini-cli / clawhub）"
+              else
+                echo "::warning::辅助 CLI 安装失败（gemini-cli / clawhub），日志尾部："
+                tail -n 20 /tmp/aux-cli-install.log 2>/dev/null || true
+                aux_fail_notify "gemini-cli/clawhub npm 安装失败"
+                exit 1
+              fi
+            )
+            echo $? > "/tmp/post-health-${_bg_tag}.rc"
+          ) > "/tmp/post-health-${_bg_tag}.log" 2>&1 &
+          echo $! > "/tmp/post-health-${_bg_tag}.pid"
+          echo "🚀 已后台启动 Install auxiliary CLIs（pid $!，收口在 Collect background post-health tasks）"
       - name: Run Cloudflared Tunnel
         # 2026-10-29 下线优化（B1）：同 Install Cloudflared 护栏口径；隧道此刻才启动，
         # 网关（18789）已先就绪 —— 公网可达性恢复略晚于网关健康，换取下线关键路径缩短。
@@ -1866,10 +1961,15 @@ jobs:
           # Falls back to nohup only if the manager is unavailable.
           if [ -f "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ]; then
             bash "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ensure oc || true
+            # 2026-11-06：qb 隧道与 oc 串行执行（同一脚本 flock -n 抢不到会跳过），
+            # 原属后台 quota-board 步，为并发安全移到这里。
+            bash "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ensure qb || true
           else
             nohup cloudflared tunnel run --url http://127.0.0.1:18789 oc \
               > ~/.openclaw/logs/cloudflared_oc.log 2>&1 &
             echo $! > ~/.openclaw/logs/cloudflared_oc.pid
+            nohup cloudflared tunnel run --url http://127.0.0.1:8321 qb \
+              > ~/.openclaw/logs/cloudflared_qb.log 2>&1 &
           fi
 
           sleep 10
@@ -1884,197 +1984,217 @@ jobs:
           # rsstt 服务使用独立 bot，token 经同名 secret 注入（此前未接线导致容器 TOKEN 恒空）
           TELEGRAM_BOT_TOKEN_RSS_SB_BOT: ${{ secrets.TELEGRAM_BOT_TOKEN_RSS_SB_BOT }}
         run: |
-          set -euo pipefail
-          echo "Starting rss-to-telegram before OmniRoute..."
-          mkdir -p /dropbox/self-hosted/rsstt
-          cleanup_archive_workdir() {
-            rm -f /tmp/rsstt.tar.gz 2>/dev/null || true
-            rm -rf /tmp/rsstt-restore 2>/dev/null || true
-          }
-          free_kb() { df -Pk "${1:-/tmp}" | awk 'NR==2 {print $4}'; }
-          require_free_kb() {
-            local path="$1" min_kb="$2" label="$3"
-            local avail
-            avail=$(free_kb "$path")
-            if [ "${avail:-0}" -lt "$min_kb" ]; then
-              echo "❌ ${label}: insufficient free space at ${path}. available=${avail}KB required=${min_kb}KB" >&2
-              exit 1
-            fi
-            echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
-          }
-          require_free_kb /tmp $((1024 * 1024)) "rsstt restore preflight"
-          rm -rf /tmp/local_rsstt
-          cleanup_archive_workdir
-          mkdir -p /tmp/local_rsstt /tmp/rsstt-restore
-
-          # 门禁只看 rsstt 真正依赖的凭据（同名 secret 注入）：
-          # ~/.openclaw/.env 由 OpenClaw 自身维护、与 rsstt 无关，不能作为启动条件
-          if [ -n "${TELEGRAM_BOT_TOKEN_RSS_SB_BOT:-}" ]; then
-            if rclone ls dropbox:self-hosted/rsstt.tar.gz > /dev/null 2>&1; then
-              echo "📦 Found rsstt.tar.gz! Downloading and extracting..."
-              rclone copyto dropbox:self-hosted/rsstt.tar.gz /tmp/rsstt.tar.gz
-              archive_kb=$(du -sk /tmp/rsstt.tar.gz | awk '{print $1}')
-              if [ -z "${archive_kb:-}" ] || [ "$archive_kb" -le 0 ]; then
-                echo "❌ rsstt extract preflight: unable to calculate archive size" >&2
-                exit 1
-              fi
-              echo "rsstt.tar.gz 大小: ${archive_kb}KB"
-              require_free_kb /tmp $((archive_kb * 3 + 512 * 1024)) "rsstt extract preflight"
-              if [ -s /tmp/rsstt.tar.gz ] && tar -tzf /tmp/rsstt.tar.gz >/dev/null 2>&1; then
-                tar -xzf /tmp/rsstt.tar.gz -C /tmp/rsstt-restore
-                cp -a /tmp/rsstt-restore/. /tmp/local_rsstt/ || true
-              else
-                echo "⚠️ rsstt.tar.gz validation failed, skipping archive restore."
-              fi
+          # 2026-11-06 启动提速（主人拍板）：健康后收尾并行化 ——
+          # 本步整体后台起跑（rc/log/pid 契约），由「Start background archive loop」前的
+          # 「Collect background post-health tasks」统一收口；脚本体零改动。
+          _bg_tag="rss"
+          rm -f "/tmp/post-health-${_bg_tag}.rc" "/tmp/post-health-${_bg_tag}.log" "/tmp/post-health-${_bg_tag}.pid"
+          (
+            (
+              set -euo pipefail
+              echo "Starting rss-to-telegram before OmniRoute..."
+              mkdir -p /dropbox/self-hosted/rsstt
+              cleanup_archive_workdir() {
+                rm -f /tmp/rsstt.tar.gz 2>/dev/null || true
+                rm -rf /tmp/rsstt-restore 2>/dev/null || true
+              }
+              free_kb() { df -Pk "${1:-/tmp}" | awk 'NR==2 {print $4}'; }
+              require_free_kb() {
+                local path="$1" min_kb="$2" label="$3"
+                local avail
+                avail=$(free_kb "$path")
+                if [ "${avail:-0}" -lt "$min_kb" ]; then
+                  echo "❌ ${label}: insufficient free space at ${path}. available=${avail}KB required=${min_kb}KB" >&2
+                  exit 1
+                fi
+                echo "✅ ${label}: free space ok at ${path}. available=${avail}KB required=${min_kb}KB"
+              }
+              require_free_kb /tmp $((1024 * 1024)) "rsstt restore preflight"
+              rm -rf /tmp/local_rsstt
               cleanup_archive_workdir
-            else
-              echo "⚠️ No rsstt archive found. Falling back to sync from raw directory..."
-              rclone copy dropbox:self-hosted/rsstt /tmp/local_rsstt \
-                --retries 10 \
-                --low-level-retries 20 \
-                --timeout 1m \
-                --contimeout 15s \
-                --exclude "docker-compose.yml" \
-                -P || true
-            fi
+              mkdir -p /tmp/local_rsstt /tmp/rsstt-restore
 
-            mkdir -p /tmp/local_rsstt/config /tmp/local_rsstt/data
-            touch /tmp/local_rsstt/config/.keep /tmp/local_rsstt/data/.keep
+              # 门禁只看 rsstt 真正依赖的凭据（同名 secret 注入）：
+              # ~/.openclaw/.env 由 OpenClaw 自身维护、与 rsstt 无关，不能作为启动条件
+              if [ -n "${TELEGRAM_BOT_TOKEN_RSS_SB_BOT:-}" ]; then
+                if rclone ls dropbox:self-hosted/rsstt.tar.gz > /dev/null 2>&1; then
+                  echo "📦 Found rsstt.tar.gz! Downloading and extracting..."
+                  rclone copyto dropbox:self-hosted/rsstt.tar.gz /tmp/rsstt.tar.gz
+                  archive_kb=$(du -sk /tmp/rsstt.tar.gz | awk '{print $1}')
+                  if [ -z "${archive_kb:-}" ] || [ "$archive_kb" -le 0 ]; then
+                    echo "❌ rsstt extract preflight: unable to calculate archive size" >&2
+                    exit 1
+                  fi
+                  echo "rsstt.tar.gz 大小: ${archive_kb}KB"
+                  require_free_kb /tmp $((archive_kb * 3 + 512 * 1024)) "rsstt extract preflight"
+                  if [ -s /tmp/rsstt.tar.gz ] && tar -tzf /tmp/rsstt.tar.gz >/dev/null 2>&1; then
+                    tar -xzf /tmp/rsstt.tar.gz -C /tmp/rsstt-restore
+                    cp -a /tmp/rsstt-restore/. /tmp/local_rsstt/ || true
+                  else
+                    echo "⚠️ rsstt.tar.gz validation failed, skipping archive restore."
+                  fi
+                  cleanup_archive_workdir
+                else
+                  echo "⚠️ No rsstt archive found. Falling back to sync from raw directory..."
+                  rclone copy dropbox:self-hosted/rsstt /tmp/local_rsstt \
+                    --retries 10 \
+                    --low-level-retries 20 \
+                    --timeout 1m \
+                    --contimeout 15s \
+                    --exclude "docker-compose.yml" \
+                    -P || true
+                fi
 
-            echo "=== restored rss-to-telegram tree ==="
-            find /tmp/local_rsstt -maxdepth 3 | sort || true
+                mkdir -p /tmp/local_rsstt/config /tmp/local_rsstt/data
+                touch /tmp/local_rsstt/config/.keep /tmp/local_rsstt/data/.keep
 
-            start_rsstt_container() {
-              docker rm -f rss-to-telegram 2>/dev/null || true
-              docker run -d \
-                --name rss-to-telegram \
-                --restart unless-stopped \
-                -v /tmp/local_rsstt/config:/app/config \
-                -v /tmp/local_rsstt/data:/app/data \
-                -e TOKEN="$TELEGRAM_BOT_TOKEN_RSS_SB_BOT" \
-                -e MANAGER="83279194" \
-                -e MULTIUSER="0" \
-                rongronggg9/rss-to-telegram:latest
-            }
+                echo "=== restored rss-to-telegram tree ==="
+                find /tmp/local_rsstt -maxdepth 3 | sort || true
 
-            print_rsstt_status() {
-              echo "=== rss-to-telegram status ==="
-              docker ps -a --filter name=rss-to-telegram
-              container_status="$(docker inspect --format '{{.State.Status}}' rss-to-telegram)"
-              health_status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' rss-to-telegram)"
-              restart_count="$(docker inspect --format '{{.RestartCount}}' rss-to-telegram)"
-              echo "rss-to-telegram status=${container_status} health=${health_status} restarts=${restart_count}"
-            }
+                start_rsstt_container() {
+                  docker rm -f rss-to-telegram 2>/dev/null || true
+                  docker run -d \
+                    --name rss-to-telegram \
+                    --restart unless-stopped \
+                    -v /tmp/local_rsstt/config:/app/config \
+                    -v /tmp/local_rsstt/data:/app/data \
+                    -e TOKEN="$TELEGRAM_BOT_TOKEN_RSS_SB_BOT" \
+                    -e MANAGER="83279194" \
+                    -e MULTIUSER="0" \
+                    rongronggg9/rss-to-telegram:latest
+                }
 
-            validate_rsstt_container() {
-              print_rsstt_status
+                print_rsstt_status() {
+                  echo "=== rss-to-telegram status ==="
+                  docker ps -a --filter name=rss-to-telegram
+                  container_status="$(docker inspect --format '{{.State.Status}}' rss-to-telegram)"
+                  health_status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' rss-to-telegram)"
+                  restart_count="$(docker inspect --format '{{.RestartCount}}' rss-to-telegram)"
+                  echo "rss-to-telegram status=${container_status} health=${health_status} restarts=${restart_count}"
+                }
 
-              if [ "$container_status" != "running" ] || [ "$health_status" = "unhealthy" ]; then
-                echo "❌ rss-to-telegram failed to become healthy"
-                docker logs --tail 200 rss-to-telegram || true
-                return 1
-              fi
+                validate_rsstt_container() {
+                  print_rsstt_status
 
-              if docker logs --tail 200 rss-to-telegram 2>&1 | grep -Eqi 'LOGIN FAILED|Unknown error occurred during login'; then
-                echo "❌ rss-to-telegram encountered a Telegram login failure"
-                docker logs --tail 200 rss-to-telegram || true
-                return 1
-              fi
-            }
+                  if [ "$container_status" != "running" ] || [ "$health_status" = "unhealthy" ]; then
+                    echo "❌ rss-to-telegram failed to become healthy"
+                    docker logs --tail 200 rss-to-telegram || true
+                    return 1
+                  fi
 
-            archive_rsstt_state() {
-              local min_size=$((5 * 1024))
-              local actual_size
+                  if docker logs --tail 200 rss-to-telegram 2>&1 | grep -Eqi 'LOGIN FAILED|Unknown error occurred during login'; then
+                    echo "❌ rss-to-telegram encountered a Telegram login failure"
+                    docker logs --tail 200 rss-to-telegram || true
+                    return 1
+                  fi
+                }
 
-              echo "📦 Archiving repaired rss-to-telegram state immediately..."
-              rm -f /tmp/rsstt.tar.gz
-              tar -czf /tmp/rsstt.tar.gz -C /tmp/local_rsstt .
-              tar -tzf /tmp/rsstt.tar.gz >/dev/null
-              actual_size="$(stat -c%s /tmp/rsstt.tar.gz 2>/dev/null || echo 0)"
-              if [ "$actual_size" -lt "$min_size" ]; then
-                echo "❌ repaired rsstt archive is too small: size=${actual_size} min=${min_size}"
-                exit 1
-              fi
-              rclone copyto /tmp/rsstt.tar.gz dropbox:self-hosted/rsstt.tar.gz -v
-              rm -f /tmp/rsstt.tar.gz
-              echo "✅ Repaired rss-to-telegram state uploaded"
-            }
+                archive_rsstt_state() {
+                  local min_size=$((5 * 1024))
+                  local actual_size
 
-            echo "Waiting for rss-to-telegram container to stabilize..."
-            start_rsstt_container
-            sleep 12
+                  echo "📦 Archiving repaired rss-to-telegram state immediately..."
+                  rm -f /tmp/rsstt.tar.gz
+                  tar -czf /tmp/rsstt.tar.gz -C /tmp/local_rsstt .
+                  tar -tzf /tmp/rsstt.tar.gz >/dev/null
+                  actual_size="$(stat -c%s /tmp/rsstt.tar.gz 2>/dev/null || echo 0)"
+                  if [ "$actual_size" -lt "$min_size" ]; then
+                    echo "❌ repaired rsstt archive is too small: size=${actual_size} min=${min_size}"
+                    exit 1
+                  fi
+                  rclone copyto /tmp/rsstt.tar.gz dropbox:self-hosted/rsstt.tar.gz -v
+                  rm -f /tmp/rsstt.tar.gz
+                  echo "✅ Repaired rss-to-telegram state uploaded"
+                }
 
-            if ! validate_rsstt_container; then
-              if docker logs --tail 200 rss-to-telegram 2>&1 | grep -qi 'AuthKeyDuplicatedError'; then
-                echo "⚠️ rss-to-telegram session was invalidated by AuthKeyDuplicatedError; deleting session and retrying once."
-                docker rm -f rss-to-telegram 2>/dev/null || true
-                rm -f \
-                  /tmp/local_rsstt/config/bot.session \
-                  /tmp/local_rsstt/config/bot.session-journal \
-                  /tmp/local_rsstt/config/bot.session-shm \
-                  /tmp/local_rsstt/config/bot.session-wal
+                echo "Waiting for rss-to-telegram container to stabilize..."
                 start_rsstt_container
                 sleep 12
-                validate_rsstt_container
-                archive_rsstt_state
+
+                if ! validate_rsstt_container; then
+                  if docker logs --tail 200 rss-to-telegram 2>&1 | grep -qi 'AuthKeyDuplicatedError'; then
+                    echo "⚠️ rss-to-telegram session was invalidated by AuthKeyDuplicatedError; deleting session and retrying once."
+                    docker rm -f rss-to-telegram 2>/dev/null || true
+                    rm -f \
+                      /tmp/local_rsstt/config/bot.session \
+                      /tmp/local_rsstt/config/bot.session-journal \
+                      /tmp/local_rsstt/config/bot.session-shm \
+                      /tmp/local_rsstt/config/bot.session-wal
+                    start_rsstt_container
+                    sleep 12
+                    validate_rsstt_container
+                    archive_rsstt_state
+                  else
+                    exit 1
+                  fi
+                fi
+
+                echo "=== rss-to-telegram /app tree (for persistence verification) ==="
+                docker exec rss-to-telegram sh -lc 'find /app -maxdepth 3 \( -type f -o -type d \) | sort | sed -n "1,200p"'
+                echo "=== rss-to-telegram local bind tree after startup ==="
+                find /tmp/local_rsstt -maxdepth 3 | sort || true
               else
-                exit 1
+                echo "❌ TELEGRAM_BOT_TOKEN_RSS_SB_BOT 未配置，跳过 rss-to-telegram 启动；本轮无 rsstt 数据，最终归档会跳过上传"
               fi
-            fi
 
-            echo "=== rss-to-telegram /app tree (for persistence verification) ==="
-            docker exec rss-to-telegram sh -lc 'find /app -maxdepth 3 \( -type f -o -type d \) | sort | sed -n "1,200p"'
-            echo "=== rss-to-telegram local bind tree after startup ==="
-            find /tmp/local_rsstt -maxdepth 3 | sort || true
-          else
-            echo "❌ TELEGRAM_BOT_TOKEN_RSS_SB_BOT 未配置，跳过 rss-to-telegram 启动；本轮无 rsstt 数据，最终归档会跳过上传"
-          fi
-
+            )
+            echo $? > "/tmp/post-health-${_bg_tag}.rc"
+          ) > "/tmp/post-health-${_bg_tag}.log" 2>&1 &
+          echo $! > "/tmp/post-health-${_bg_tag}.pid"
+          echo "🚀 已后台启动 Run rss-to-telegram（pid $!，收口在 Collect background post-health tasks）"
       - name: Run quota-board (TG 额度看板 + Mini App)
         # 2026-10-22 步骤重排后位于 Run OpenClaw 之后：本步失败不得级联跳过
         if: ${{ !cancelled() }}
         run: |
-          set -euo pipefail
-          # psutil：看板「🖥 系统」段的数据源（2026-10-07 合并系统看板进主看板）。
-          # --user 安装落在 ~，runner 重置即丢，故每轮幂等补装（已装则秒过）。
-          python3 -c "import psutil" 2>/dev/null || pip3 install --user --quiet psutil || true
-          if [ -f "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" ]; then
-            bash "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" ensure quota-board || true
-          else
-            # 兜底：services.sh 缺失（仓库未 checkout）时退回旧路径，避免看板静默不起
-            echo "⚠️ services.sh 缺失，退回 Dropbox 副本安装 unit"
-            QB_DIR=/dropbox/self-hosted/quota-board
-            [ -f "$QB_DIR/quota-board.service" ] || { echo "quota-board unit 缺失，跳过"; exit 0; }
-            mkdir -p ~/.config/systemd/user
-            cp "$QB_DIR/quota-board.service" ~/.config/systemd/user/
-            systemctl --user daemon-reload || true
-            systemctl --user enable quota-board >/dev/null 2>&1 || true
-            systemctl --user restart quota-board
-          fi
-          sleep 3
-          systemctl --user is-active quota-board || true
-          # 隧道纳入统一管理器（幂等）
-          if [ -f "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ]; then
-            bash "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ensure qb || true
-          else
-            nohup cloudflared tunnel run --url http://127.0.0.1:8321 qb \
-              > ~/.openclaw/logs/cloudflared_qb.log 2>&1 &
-          fi
-          # Mini App 入口（TG 菜单按钮 web_app）—— 2026-10-19 迁到 @openclaw_sb_bot。
-          # 按钮本体在 Telegram 服务端，不在任何本地持久化载体里（实测 2026-10-09
-          # 丢过一次、靠人工重设），故每轮幂等重建：目标 bot 挂 web_app + 旧 bot
-          # @sbsbsbsbsb_openclaw_bot 清成 commands，避免留下双入口。
-          # ⚠️ 2026-10-22 修复：脚本本体此前从未入库（commit 1e30239 只有这 9 行调用，
-          # workspace 副本丢失后安全网空转 3 天）。真源改为本仓库 .github/scripts/telegram/，
-          # 与 tg_notify.sh 同级；workspace 路径仅作过渡期兜底。
-          if [ -f "$GITHUB_WORKSPACE/.github/scripts/telegram/ensure-miniapp-menu.sh" ]; then
-            bash "$GITHUB_WORKSPACE/.github/scripts/telegram/ensure-miniapp-menu.sh" || true
-          elif [ -f "$HOME/.openclaw/workspace/scripts/ensure-miniapp-menu.sh" ]; then
-            bash "$HOME/.openclaw/workspace/scripts/ensure-miniapp-menu.sh" || true
-          else
-            echo "⚠️ ensure-miniapp-menu.sh 缺失（仓库与 workspace 均无），跳过 Mini App 入口重建"
-          fi
+          # 2026-11-06 启动提速（主人拍板）：健康后收尾并行化 ——
+          # 本步整体后台起跑（rc/log/pid 契约），由「Start background archive loop」前的
+          # 「Collect background post-health tasks」统一收口；脚本体零改动。
+          _bg_tag="quota"
+          rm -f "/tmp/post-health-${_bg_tag}.rc" "/tmp/post-health-${_bg_tag}.log" "/tmp/post-health-${_bg_tag}.pid"
+          (
+            (
+              set -euo pipefail
+              # psutil：看板「🖥 系统」段的数据源（2026-10-07 合并系统看板进主看板）。
+              # --user 安装落在 ~，runner 重置即丢，故每轮幂等补装（已装则秒过）。
+              python3 -c "import psutil" 2>/dev/null || pip3 install --user --quiet psutil || true
+              if [ -f "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" ]; then
+                bash "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" ensure quota-board || true
+              else
+                # 兜底：services.sh 缺失（仓库未 checkout）时退回旧路径，避免看板静默不起
+                echo "⚠️ services.sh 缺失，退回 Dropbox 副本安装 unit"
+                QB_DIR=/dropbox/self-hosted/quota-board
+                [ -f "$QB_DIR/quota-board.service" ] || { echo "quota-board unit 缺失，跳过"; exit 0; }
+                mkdir -p ~/.config/systemd/user
+                cp "$QB_DIR/quota-board.service" ~/.config/systemd/user/
+                systemctl --user daemon-reload || true
+                systemctl --user enable quota-board >/dev/null 2>&1 || true
+                systemctl --user restart quota-board
+              fi
+              sleep 3
+              systemctl --user is-active quota-board || true
+              # ⚠️ 2026-11-06 并行化调整：ensure qb 已移入同步的
+              # 「Run Cloudflared Tunnel」步骤。tunnels.sh 用 flock -n
+              #（抢不到锁直接跳过），与 ensure oc 并发会让 qb 隧道被静默漏掉。
+              # Mini App 入口（TG 菜单按钮 web_app）—— 2026-10-19 迁到 @openclaw_sb_bot。
+              # 按钮本体在 Telegram 服务端，不在任何本地持久化载体里（实测 2026-10-09
+              # 丢过一次、靠人工重设），故每轮幂等重建：目标 bot 挂 web_app + 旧 bot
+              # @sbsbsbsbsb_openclaw_bot 清成 commands，避免留下双入口。
+              # ⚠️ 2026-10-22 修复：脚本本体此前从未入库（commit 1e30239 只有这 9 行调用，
+              # workspace 副本丢失后安全网空转 3 天）。真源改为本仓库 .github/scripts/telegram/，
+              # 与 tg_notify.sh 同级；workspace 路径仅作过渡期兜底。
+              if [ -f "$GITHUB_WORKSPACE/.github/scripts/telegram/ensure-miniapp-menu.sh" ]; then
+                bash "$GITHUB_WORKSPACE/.github/scripts/telegram/ensure-miniapp-menu.sh" || true
+              elif [ -f "$HOME/.openclaw/workspace/scripts/ensure-miniapp-menu.sh" ]; then
+                bash "$HOME/.openclaw/workspace/scripts/ensure-miniapp-menu.sh" || true
+              else
+                echo "⚠️ ensure-miniapp-menu.sh 缺失（仓库与 workspace 均无），跳过 Mini App 入口重建"
+              fi
 
+            )
+            echo $? > "/tmp/post-health-${_bg_tag}.rc"
+          ) > "/tmp/post-health-${_bg_tag}.log" 2>&1 &
+          echo $! > "/tmp/post-health-${_bg_tag}.pid"
+          echo "🚀 已后台启动 Run quota-board（pid $!，收口在 Collect background post-health tasks）"
       - name: Notify Tailscale SSH entry
         if: ${{ always() && steps.ts_ssh.outcome == 'success' }}
         continue-on-error: true
@@ -2219,6 +2339,37 @@ jobs:
             send_tg "$msg" alert || true
           fi
 
+
+      - name: Collect background post-health tasks
+        # 2026-11-06：上面三步已后台起跑，这里统一收口（GH 会回收 step 的
+        # 子进程，必须在 Keep alive 之前 wait）。rc 非 0 只发 warning，不级联
+        # 跳过 Keep alive —— 与三步原本 continue-on-error 语义一致。
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          _bad=0
+          for _tag in aux rss quota; do
+            _rcf="/tmp/post-health-${_tag}.rc"
+            _pidf="/tmp/post-health-${_tag}.pid"
+            _waited=0
+            [ -f "$_pidf" ] || continue
+            while [ ! -s "$_rcf" ] && [ "$_waited" -lt 600 ]; do
+              _p="$(cat "$_pidf" 2>/dev/null | tr -dc '0-9')"
+              if [ -n "${_p:-}" ] && ! kill -0 "$_p" 2>/dev/null; then
+                sleep 2
+                [ -s "$_rcf" ] || echo 1 > "$_rcf"
+                break
+              fi
+              sleep 2
+              _waited=$((_waited + 2))
+            done
+            [ -s "/tmp/post-health-${_tag}.log" ] && tail -n 30 "/tmp/post-health-${_tag}.log" || true
+            _rc="$(cat "$_rcf" 2>/dev/null || echo 1)"
+            case "$_rc" in ''|*[!0-9]*) _rc=1 ;; esac
+            [ "$_rc" = "0" ] || { echo "::warning::[post-health] ${_tag} 退出码 ${_rc}"; _bad=1; }
+            echo "⏱️ [post-health] ${_tag} rc=${_rc}（等待 ${_waited}s）"
+          done
+          echo "后台收尾汇总：$( [ "$_bad" = "0" ] && echo 全部成功 || echo 有步骤非 0，已告警不级联)"
 
       - name: Start background archive loop
         # 2026-10-23：只有 Install 与 Run 都成功才启动归档循环。Install 失败时
@@ -2827,7 +2978,14 @@ jobs:
           MIN_SIZE=$((1024 * 1024))
           SRC_DIR="/home/runner/omniroute"
           VOLUME="omniroute_omniroute-data"
-          IMAGE="diegosouzapw/omniroute:3.8.51"
+          # 2026-11-06（主人拍板）：helper 容器跟随部署目录 compose 的实际 tag，
+          # 不再 pin（prefetch / run-ai-gateway.sh 同口径）；读不到则 :latest 兜底。
+          IMAGE="$(grep -m1 -E '^[[:space:]]*image:[[:space:]]*[^#[:space:]]+' "$SRC_DIR/docker-compose.yml" 2>/dev/null | \
+            sed -E 's/^[[:space:]]*image:[[:space:]]*//; s/[[:space:]]*#.*$//; s/[[:space:]]*$//')"
+          case "${IMAGE:-}" in
+            *omniroute:*) : ;;
+            *) IMAGE="diegosouzapw/omniroute:latest" ;;
+          esac
           STAGE_DIR=""
 
           cleanup() {
