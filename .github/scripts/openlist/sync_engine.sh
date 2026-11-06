@@ -486,12 +486,19 @@ sync_with_logging() {
     # 长尾叠加就会撞 step 的 330min 硬杀（正是"预算闸只拦得住新开的工作、拦不住在途"
     # 那条教训的最后一处）。无预算锚点（调试/还原）时输出空串 = 不包装，行为不变。
     local _st_tmo="" _st_to=""
-    if declare -F _budget_slice_seconds >/dev/null 2>&1; then
+    # 单片上限统一走 _slice_cap_seconds（min(剩余预算−尾部预留, 批次片长)）。
+    #   run 42141210516 实证: 只按「剩余预算 − 尾部预留」在轮初给 16130s（4.5h），
+    #   task5-wopan175 的 `house-of-ester` 单目录跑 3.5h（速率掉到 34KiB/s、
+    #   ETA 1 天），整轮只推进 20 个子目录、净传 0.74 GiB。与批次路径同口径封顶后，
+    #   慢目录到点被 timeout 收掉，rclone sync 幂等、下轮续传，轮转名额不再被独占。
+    if declare -F _slice_cap_seconds >/dev/null 2>&1; then
+      _st_tmo=$(_slice_cap_seconds)
+    elif declare -F _budget_slice_seconds >/dev/null 2>&1; then
       _st_tmo=$(_budget_slice_seconds)
     fi
     if [ -n "$_st_tmo" ]; then
       _st_to="timeout ${_st_tmo}"
-      echo "本次 sync 硬上限 ${_st_tmo}s（预算剩余 − 尾部预留；超出由 timeout 收掉后走优雅收摊）" | tee -a "$LOG_FILENAME"
+      echo "本次 sync 硬上限 ${_st_tmo}s（min(预算剩余−尾部预留, 单片片长)；超出由 timeout 收掉后走优雅收摊）" | tee -a "$LOG_FILENAME"
     fi
     # openlist: 目标端用 copy 而非 sync（2026-11-01，run 41196672258/41219905962 实证）:
     #   sync 的清理阶段在 OpenList 上不可信，会删两类不该删的文件 ——
