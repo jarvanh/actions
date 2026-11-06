@@ -408,6 +408,23 @@ jobs:
       # 只保留 P5b 上游等齐门 + 20128 健康判定 + 降级链。
       # 位置：Prefetch 之后 —— 归档本身由脚本内 fetch_via_prefetch 收货
       # （消费 Prefetch 已拉起的 OmniRoute.tar.gz），等不到才回落同步下载。
+      # ── 2026-11-06 new-api 冷归档预取（独立对象）──
+      # 只下载 NewAPI.tar.gz，不参与 OmniRoute / 其他网关的 prefetch 判定；
+      # 部署步失败也只是额外网关不可用，continue-on-error 保证主流程不受影响。
+      - name: Prefetch NewAPI archive (extra gateway)
+        id: prefetch_newapi_archive
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          P="/tmp/openclaw-newapi-prefetch"
+          mkdir -p "$P"
+          nohup rclone copyto dropbox:self-hosted/NewAPI.tar.gz "$P/NewAPI.tar.gz" \
+            --retries 5 --low-level-retries 10 --timeout 1m --contimeout 15s \
+            > "$P/prefetch.log" 2>&1 &
+          echo $! > "$P/pid"
+          echo "🚀 NewAPI.tar.gz 预取已后台启动（pid $(cat "$P/pid")）"
+
       - name: Start OmniRoute prestart (background, 与启动段重叠)
         id: omniroute_prestart
         if: ${{ !cancelled() }}
@@ -960,7 +977,11 @@ jobs:
             || echo "⚠️ 8447 HTTPS serve 失败，HTTP 8084 仍可用"
           sudo tailscale serve --bg --https=8448 http://127.0.0.1:20128 2>/dev/null \
             || echo "⚠️ 8448 HTTPS serve 失败，OmniRoute 控制台将无入口"
-          echo "HTTPS 控制台: wb=8443 trae=8444 zcode=8445 autoclaw=8446 qoder=8447 omniroute=8448"
+          # 2026-11-06 额外网关 new-api 控制台（20129）。独立入口，不替换 8448/443；
+          # 失败只提示，不影响其他网关控制台与 AI API。
+          sudo tailscale serve --bg --https=8449 http://127.0.0.1:20129 2>/dev/null \
+            || echo "⚠️ 8449 HTTPS serve 失败，new-api 控制台将无入口（本地 127.0.0.1:20129 仍可用）"
+          echo "HTTPS 控制台: wb=8443 trae=8444 zcode=8445 autoclaw=8446 qoder=8447 omniroute=8448 newapi=8449"
           # OmniRoute AI API 无端口 HTTPS 入口：20128 → 443。
           # 公网 ai-api.derrick.eu.org 走 Cloudflare，有 100s 硬超时；tailnet 内这条
           # 前面没有 Cloudflare，慢请求（step-5-preview 深度思考实测单请求 18~330s）
@@ -1900,6 +1921,19 @@ jobs:
           else
             echo "⚠️ Telegram alert skipped: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is empty"
           fi
+
+      # ── 2026-11-06 额外部署 new-api（并行网关，不动任何现有网关）──
+      # 需求：尽量使用免费渠道。new-api 是额外实例，不参与 auto/omniroute/clirelay/
+      # cliproxyapi 的降级链，也不占用 20128；失败只告警，不级联影响后续 Run OpenClaw。
+      # 数据形态与 OmniRoute 同款：本地 POSIX 盘放 live SQLite，Dropbox 放冷归档
+      # NewAPI.tar.gz（部署文件 + sqlite online backup）。恢复时优先用归档备份。
+      - name: Deploy extra new-api gateway (free-channel priority)
+        id: deploy_new_api_extra
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        timeout-minutes: 12
+        run: |
+          bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/deploy-new-api.sh"
 
       - name: Install auxiliary CLIs (gemini-cli/clawhub)
         # 2026-11-01：ZCode 数据还原已前移为「Restore ZCode data (先于 Tailscale 接入)」
@@ -3080,6 +3114,44 @@ jobs:
           EOF
           chmod +x /tmp/create-omniroute-archive.sh
 
+          # 2026-11-06 额外网关 new-api 归档脚本：本地 live SQLite + Dropbox 冷备份。
+          # 不修改 AI 网关三选一归档逻辑；new-api 是独立对象，用独立锁/独立归档名。
+          cat > /tmp/create-new-api-archive.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          OUTPUT_TAR="${1:-}"
+          if [ -z "$OUTPUT_TAR" ]; then echo "Usage: $0 /path/to/NewAPI.tar.gz" >&2; exit 2; fi
+          MIN_SIZE=$((16 * 1024))
+          DIR="/dropbox/self-hosted/new-api"
+          DATA="${NEWAPI_DATA_DIR:-/home/runner/.local/share/new-api/data}"
+          DB="$DATA/one-api.db"
+          STAGE="$(mktemp -d /tmp/new-api-archive-stage.XXXXXX)"
+          trap 'rm -rf "$STAGE"' EXIT
+          rm -f "$OUTPUT_TAR"
+          if [ ! -f "$DIR/docker-compose.yml" ] || [ ! -f "$DIR/.env" ] || [ ! -s "$DB" ]; then
+            echo "new_api_dir_or_db_missing" >&2; exit 3
+          fi
+          python3 - "$DB" "$STAGE/one-api-backup.sqlite" <<'PYNEWAPI'
+          import sqlite3, sys
+          src = sqlite3.connect('file:' + sys.argv[1] + '?mode=ro', uri=True)
+          dst = sqlite3.connect(sys.argv[2])
+          try: src.backup(dst)
+          finally: dst.close(); src.close()
+          PYNEWAPI
+          cp -a "$DIR/docker-compose.yml" "$DIR/.env" "$DIR/CONSOLE.txt" "$DIR/README.md" "$STAGE/" 2>/dev/null || true
+          cp -a "$DIR/scripts" "$DIR/secrets" "$STAGE/" 2>/dev/null || true
+          chmod 600 "$STAGE/.env" 2>/dev/null || true
+          chmod 700 "$STAGE/secrets" 2>/dev/null || true
+          find "$STAGE/secrets" -type f -exec chmod 600 {} + 2>/dev/null || true
+          tar -C "$STAGE" -czf "$OUTPUT_TAR" .
+          actual_size=$(stat -c%s "$OUTPUT_TAR" 2>/dev/null || echo 0)
+          if [ "$actual_size" -lt "$MIN_SIZE" ] || ! tar -tzf "$OUTPUT_TAR" >/dev/null 2>&1; then
+            echo "new_api_archive_invalid size=$actual_size" >&2; exit 1
+          fi
+          echo "new_api_archive_ready size=$actual_size output=$OUTPUT_TAR"
+          EOF
+          chmod +x /tmp/create-new-api-archive.sh
+
           # ===== 回退后端归档脚本（2026-10-11 恢复自动降级，从 dcf418e 父版本移植） =====
           # 只在对应后端实际生效时被周期/Final 归档调用（见归档循环三选一），保持
           # 「生效后端的数据才进对应归档」的旧口径，防止降级态把 OmniRoute 空库刷进好包。
@@ -3536,6 +3608,7 @@ jobs:
           # 产物用 -periodic 后缀，与 Final Archive 的同名包区分，互不覆盖。
           TMP_RSSTT_TAR="/tmp/rsstt-periodic.tar.gz"
           TMP_Z2A_DATA_TAR="/tmp/zcode2api-data-periodic.tar.gz"
+          TMP_NEWAPI_TAR="/tmp/NewAPI-periodic.tar.gz"
           # 2026-10-22 对象级锁改造（与 Final Archive 同口径）：互斥粒度从一把大锁
           # 改为按对象分锁 —— 循环内各项本就串行执行，分锁只为与收尾的并行旁路
           # 归档精确互斥（收尾在归档主包时，小项不必等主包的锁，反之亦然）。
@@ -3544,6 +3617,7 @@ jobs:
           LOCK_ZCODE="/tmp/openclaw-archive.lock.zcode"
           LOCK_RSSTT="/tmp/openclaw-archive.lock.rsstt"
           LOCK_Z2A="/tmp/openclaw-archive.lock.zcode2api"
+          LOCK_NEWAPI="/tmp/openclaw-archive.lock.newapi"
 
           cleanup_archive_outputs() {
             # 产物文件（非 staging 目录）照常清理
@@ -3554,6 +3628,7 @@ jobs:
             rm -f "$TMP_ZCODE_TAR" 2>/dev/null || true
             sudo rm -f "$TMP_RSSTT_TAR" 2>/dev/null || true
             rm -f "$TMP_Z2A_DATA_TAR" 2>/dev/null || true
+            rm -f "$TMP_NEWAPI_TAR" 2>/dev/null || true
             # ── 2026-10-07 rc=23 根治：staging 目录绝不能在别人持锁写入时被抹 ──
             # 形态（run 37577681547）：最终归档持 /tmp/openclaw-archive.lock 跑 rsync
             # 期间，被 systemd(Restart=always) 拉回的循环新实例执行本函数，通配
@@ -3587,6 +3662,10 @@ jobs:
               flock -n 9 || exit 1
               rm -rf /tmp/zcode2api-data-archive-stage.* 2>/dev/null || true
             ) 9>>"$LOCK_Z2A" 2>/dev/null || echo "⚠️ zcode2api 归档锁被持有，跳过其 staging 清理" >&2
+            (
+              flock -n 9 || exit 1
+              rm -rf /tmp/new-api-archive-stage.* 2>/dev/null || true
+            ) 9>>"$LOCK_NEWAPI" 2>/dev/null || echo "⚠️ new-api 归档锁被持有，跳过其 staging 清理" >&2
           }
           cleanup_archive_outputs
           PID_FILE="/tmp/openclaw-archive.pid"
@@ -3799,6 +3878,33 @@ jobs:
             else
               echo "[$(date '+%F %T')] ℹ️ ~/.zcode/{cli,v2,server} 均不存在，跳过 zcode 归档"
             fi
+
+          # ===== new-api 额外网关归档（2026-11-06）=====
+          # 独立对象、独立锁、独立云端包；不改 AI 网关三选一，也不影响其他服务归档。
+          # 归档内容 = 部署目录关键文件 + 本地 SQLite online backup，冷数据放 Dropbox。
+          newapi_archive_output=""
+          if newapi_archive_output=$(flock -E 200 -n "$LOCK_NEWAPI" timeout 20m bash /tmp/create-new-api-archive.sh "$TMP_NEWAPI_TAR" 2>&1); then
+            echo "[$(date '+%F %T')] NewAPI archive ok, uploading... ${newapi_archive_output}"
+            newapi_upload_output=""
+            if newapi_upload_output=$(timeout 20m rclone copyto "$TMP_NEWAPI_TAR" "dropbox:self-hosted/NewAPI.tar.gz" 2>&1); then
+              echo "[$(date '+%F %T')] NewAPI upload ok"
+              rm -f "$TMP_NEWAPI_TAR"
+            else
+              rc=$?
+              echo "[$(date '+%F %T')] ⚠️ NewAPI.tar.gz upload failed (rc=$rc): ${newapi_upload_output}"
+              send_telegram_alert "NewAPI.tar.gz" "上传失败 · 退出码 $rc" "rclone 上传失败" "${newapi_upload_output:-无输出}"
+            fi
+          else
+            rc=$?
+            if [ "$rc" -eq 200 ]; then
+              echo "[$(date '+%F %T')] ⏭️ previous NewAPI archive still running, skip"
+            elif [ "$rc" -eq 3 ]; then
+              echo "[$(date '+%F %T')] ⏭️ new-api deployment or local DB missing, skip (rc=3)"
+            else
+              echo "[$(date '+%F %T')] ⚠️ NewAPI.tar.gz archive failed: ${newapi_archive_output}"
+              send_telegram_alert "NewAPI.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${newapi_archive_output:-归档脚本无输出}"
+            fi
+          fi
 
           # ===== rss-to-telegram 数据归档（2026-10-06 新增）=====
           # 原先只在 job 收尾打一次，cancel / 360m 强杀时那一步没机会跑 ——
@@ -4069,6 +4175,7 @@ jobs:
           LOCK_ZCODE="/tmp/openclaw-archive.lock.zcode"
           LOCK_RSSTT="/tmp/openclaw-archive.lock.rsstt"
           LOCK_Z2A="/tmp/openclaw-archive.lock.zcode2api"
+          LOCK_NEWAPI="/tmp/openclaw-archive.lock.newapi"
           echo "2. Killing background archive process..."
           if [ -f /tmp/openclaw-archive-loop.launcher.pid ]; then
             kill "$(cat /tmp/openclaw-archive-loop.launcher.pid)" 2>/dev/null || true
@@ -4286,6 +4393,7 @@ jobs:
             rm -f /tmp/openclaw-final.tar.gz /tmp/rsstt.tar.gz /tmp/zcode-final.tar.gz 2>/dev/null || true
             # -final 后缀产物（2026-10-06）：与周期归档同名解耦后，清理也要跟着改名
             rm -f /tmp/OmniRoute-final.tar.gz /tmp/CliRelay-final.tar.gz 2>/dev/null || true
+            rm -f /tmp/NewAPI-final.tar.gz /tmp/NewAPI-periodic.tar.gz 2>/dev/null || true
             sudo rm -f /tmp/CLIProxyAPI-final.tar.gz 2>/dev/null || true
             # 周期归档的同名产物仍照常清理（它可能残留自被 systemd 拉回的循环实例）
             rm -f /tmp/OmniRoute.tar.gz /tmp/CliRelay.tar.gz 2>/dev/null || true
@@ -4317,6 +4425,10 @@ jobs:
               flock -n 9 || exit 1
               rm -rf /tmp/zcode2api-data-archive-stage.* 2>/dev/null || true
             ) 9>>"$LOCK_Z2A" 2>/dev/null || echo "⚠️ zcode2api 归档锁被持有，跳过其 staging 清理" >&2
+            (
+              flock -n 9 || exit 1
+              rm -rf /tmp/new-api-archive-stage.* 2>/dev/null || true
+            ) 9>>"$LOCK_NEWAPI" 2>/dev/null || echo "⚠️ new-api 归档锁被持有，跳过其 staging 清理" >&2
           }
           free_kb() { df -Pk "${1:-/tmp}" | awk 'NR==2 {print $4}'; }
           require_free_kb() {
@@ -4591,6 +4703,26 @@ jobs:
             esac
           }
 
+          run_newapi_archive() {
+            # new-api 是额外网关：本地 live DB 只在本地盘；此处只上传冷归档。
+            # 不与 AI 网关三选一共用锁，失败只记录/告警，不级联影响主流程。
+            echo "Final archive: NewAPI.tar.gz"
+            if [ ! -f /tmp/create-new-api-archive.sh ]; then
+              echo "⚠️ /tmp/create-new-api-archive.sh 缺失，跳过 new-api 归档"
+              record_archive_result "NewAPI.tar.gz" fail 0 "归档脚本缺失"
+              return 0
+            fi
+            NEWAPI_FINAL_TAR="/tmp/NewAPI-final.tar.gz"
+            if newapi_final_output=$(flock -w 600 -E 200 "$LOCK_NEWAPI" timeout 20m bash /tmp/create-new-api-archive.sh "$NEWAPI_FINAL_TAR" 2>&1); then
+              upload_final_archive "NewAPI.tar.gz" "$NEWAPI_FINAL_TAR" "dropbox:self-hosted/NewAPI.tar.gz" "$MIN_SIZE" || true
+            else
+              rc=$?
+              echo "⚠️ final NewAPI.tar.gz archive failed (rc=$rc): ${newapi_final_output}"
+              record_archive_result "NewAPI.tar.gz" fail 0 "归档失败 · 退出码 $rc"
+              send_archive_alert "NewAPI.tar.gz" "归档失败 · 退出码 $rc" "归档脚本执行失败，详见原始输出" "${newapi_final_output:-归档脚本无输出}"
+            fi
+          }
+
           run_rsstt_archive() {
             # 6. rss-to-telegram 数据
             if [ -d /tmp/local_rsstt ]; then
@@ -4644,7 +4776,9 @@ jobs:
           run_zcode_archive & _arc_pid_zcode=$!
           run_aigateway_archive & _arc_pid_aigw=$!
           run_rsstt_archive & _arc_pid_rsstt=$!
-          echo "🚀 小对象归档三路并行开跑（zcode pid ${_arc_pid_zcode} / AI 网关 pid ${_arc_pid_aigw} / rsstt pid ${_arc_pid_rsstt}）"
+          run_newapi_archive & _arc_pid_newapi=$!
+          echo "🚀 归档并行开跑（zcode pid ${_arc_pid_zcode} / AI 网关 pid ${_arc_pid_aigw} / rsstt pid ${_arc_pid_rsstt} / new-api pid ${_arc_pid_newapi}）"
+          wait "$_arc_pid_newapi" || echo "⚠️ new-api 最终归档后台任务退出码非零（明细见上方分支日志）"
 
           # 汇合两路后台归档（子 shell 内失败已各自记结果 + 告警，这里只等齐）。
           # wait 的非零退出在 set -e 下以 || 兜住：单路失败不影响本 step 继续收尾。
