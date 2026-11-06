@@ -42,6 +42,7 @@ PYNEWAPI
 
 cp -a "$DIR/docker-compose.yml" "$DIR/.env" "$DIR/CONSOLE.txt" "$DIR/README.md" "$STAGE/" 2>/dev/null || true
 cp -a "$DIR/scripts" "$DIR/secrets" "$STAGE/" 2>/dev/null || true
+find "$STAGE/secrets" -name 'one-api.read.db*' -delete 2>/dev/null || true
 # do not archive the live data directory; only the cold sqlite backup
 chmod 600 "$STAGE/.env" 2>/dev/null || true
 chmod 700 "$STAGE/secrets" 2>/dev/null || true
