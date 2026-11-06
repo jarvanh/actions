@@ -245,6 +245,21 @@ workflow 会把 `*.sh` `*.py` `*.jq` 拷到 `/tmp` 再 `source /tmp/load_all.sh`
 
 例：`"task0|onedrive:0|openlist:wopan176Crypt/0|task0|--auto-split --1d-skip"`
 
+### `gd:` 同步对（2026-11-06 恢复）
+
+`backup-gd` / `task0-gd` … `task3-gd` 是 **Google Drive 镜像**对。**禁止给它们加
+`--auto-split`**：`sync_engine.sh` 对非 `openlist:*` 目标走 `rclone sync`（自带删除，
+才是真镜像），而 `--auto-split` 会进入 `sync_by_file_batches` 的
+`rclone copy --files-from`（**不删除**）⇒ 镜像会静默退化成只增不减，旧命名/两代重复的
+文件永远留着（task3 曾因此多出 90.68 GiB）。每项带 `--max-delete <N>` 作为硬闸
+（超限时 rclone abort，下轮继续，防止源端路径异常把 gd 清空）。
+
+`gd:` 目标不经过写探针 / F5 全拒闸 / 批次巩固 / `_sync_mirror_prune` / truth-check /
+修复管线 —— 这些都在 `[[ $dest_path == openlist:* ]]` 处提前返回。`file_split.sh`
+另有代码级硬闸：非 `openlist:*` 目标一律跳过 `split_on_sync_failure`，因为该路径会
+`rclone deletefile` **删除源端**原始大文件（"绝对不修改源端"红线），而 Drive 单文件
+上限 5 TiB 根本不需要切割。
+
 ---
 
 ## 环境变量

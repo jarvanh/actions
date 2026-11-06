@@ -678,6 +678,21 @@ preprocess_large_files() {
 split_on_sync_failure() {
   local source_path="$1"
   local task_name="$2"
+  # ===== 代码级硬闸（2026-11-06，恢复 gd 同步时补）=====
+  # 本函数最终会走到 preprocess_large_files → _delete_original_file，对
+  # **源端** `${remote_source}:...` 执行 rclone deletefile（file_split.sh:426/537）。
+  # 它原本只靠 OPENLIST_SPLIT_ON_SYNC_FAILURE 环境变量把关（默认 false），但
+  # 一旦有人手动开启 split_on_sync_failure，gd 首次全量 sync 超时就会进这条
+  # 路径去"切割并删除源端大文件" —— 直接违反「绝对不修改源端」红线。
+  # 大文件切割是为 OpenList/WebDAV 的单文件大小限制设计的；Google Drive 单文件
+  # 上限 5 TiB，根本不需要切。故非 openlist:* 目标一律拒绝执行。
+  # dest_path 由调用方（_sync_task_finalize / _sync_task_impl）动态作用域提供，
+  # 无需改调用签名；未设置时（单测/裁剪环境）按"非 openlist"保守跳过。
+  local _split_dest="${dest_path:-}"
+  if [[ "$_split_dest" != openlist:* ]]; then
+    echo "⛔ 大文件切割跳过: 目标端 ${_split_dest:-<未设置>} 非 openlist:*（切割会删除源端原文件，仅 OpenList 目标允许）task=${task_name}"
+    return 0
+  fi
   local switch_value="${OPENLIST_SPLIT_ON_SYNC_FAILURE:-false}"
   case "$switch_value" in
     true|TRUE|1|yes|YES|on|ON) ;;

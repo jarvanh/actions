@@ -368,6 +368,13 @@ jobs:
           rclone lsf onedrive:
           echo "==========dropbox==========="
           rclone lsf dropbox:
+          # gd 同步对恢复（2026-11-06）: 注册表中含 gd: 目标，前置校验必须覆盖，
+          # 否则凭据失效要到轮转到该同步对时才暴露，白白浪费整轮预算。
+          if rclone listremotes 2>/dev/null | grep -qxF 'gd:'; then
+            echo "==========gd==========="
+            rclone lsf gd: || { echo "::error::gd: 远端列举失败"; exit 1; }
+            rclone about gd: || true   # 容量快照只作留痕，不阻断（配额口径含 Other）
+          fi
 
       - name: 拉起 OpenList 容器（数据库本地化）
         run: |

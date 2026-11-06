@@ -36,25 +36,25 @@ readonly DEFAULT_SPLIT_THRESHOLD_BYTES="${SYNC_SPLIT_THRESHOLD_BYTES:-5000000000
 SYNC_TASK_REGISTRY=(
   "backup-aliyundrive|onedrive:backup|openlist:aliyundriveCrypt/backup|backup|--auto-split --1d-skip --exclude /notion/** --exclude notion/** --exclude /self-hosted_latest.tar.gz --exclude self-hosted_latest.tar.gz --exclude /github_repos_latest.tar.gz --exclude github_repos_latest.tar.gz"
   "backup|onedrive:backup|openlist:wopan176Crypt/backup|backup|--auto-split --1d-skip"
-  # "backup-gd|onedrive:backup|gd:backup|backup|--1d-skip"
+  "backup-gd|onedrive:backup|gd:backup|backup|--1d-skip --max-delete 700"
 
   "task0|onedrive:0|openlist:wopan176Crypt/0|task0|--auto-split --1d-skip"
   "task0-baidupan|onedrive:0|openlist:baidupanCrypt/0|task0|--auto-split --1d-skip"
   "task0-wopan175|onedrive:0/j-1024j-视频-pornhub-favorites|openlist:wopan175/0/j-1024j-视频-pornhub-favorites|task0|--auto-split --1d-skip"
-  # "task0-gd|onedrive:0|gd:0|task0|--1d-skip"
+  "task0-gd|onedrive:0|gd:0|task0|--1d-skip --max-delete 100"
 
   "task1|onedrive:1|openlist:wopan176Crypt/1|task1|--auto-split --1d-skip"
   "task1-baidupan|onedrive:1|openlist:baidupanCrypt/1|task1|--auto-split --1d-skip"
   "task1-wopan175|onedrive:1|openlist:wopan175/1|task1|--auto-split --1d-skip"
-  # "task1-gd|onedrive:1|gd:1|task1|--1d-skip"
+  "task1-gd|onedrive:1|gd:1|task1|--1d-skip --max-delete 12000"
 
   "task2|onedrive:2|openlist:wopan176Crypt/2|task2|--auto-split --1d-skip"
   "task2-wopan175|onedrive:2|openlist:wopan175/2|task2|--auto-split --1d-skip"
-  # "task2-gd|onedrive:2|gd:2|task2|--1d-skip"
+  "task2-gd|onedrive:2|gd:2|task2|--1d-skip --max-delete 3000"
 
   "task3|onedrive:3|openlist:wopan176Crypt/3|task3|--auto-split --1d-skip"
   "task3-wopan175|onedrive:3|openlist:wopan175/3|task3|--auto-split --1d-skip"
-  # "task3-gd|onedrive:3|gd:3|task3|--1d-skip"
+  "task3-gd|onedrive:3|gd:3|task3|--1d-skip --max-delete 2000"
 
   "task4|onedrive:4|openlist:wopan176Crypt/4|task4|--auto-split --1d-skip"
   "task4-wopan175|onedrive:4|openlist:wopan175/4|task4|--auto-split --1d-skip"
