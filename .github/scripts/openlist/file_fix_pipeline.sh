@@ -326,10 +326,12 @@ _rebuild_raw_baseline() {
     : > /tmp/.ol_raw_verify_disabled_alerted
     local _m=""
     tg_add_title _m "⚠️ 落盘即时校验已降级"
-    tg_add_kv _m "现象" "raw 计数持续为 0（容器重启后列表未就绪）"
-    tg_add_kv _m "处置" "本轮禁用落盘即时校验，改信任 rclone 退出码 + 重启复核兜底"
-    tg_add_kv _m "风险" "此窗口内的假成功只能靠事后 truth-check 暴露"
+    tg_add_kv _m "结论" "本轮无法核对文件是否真的写入，已关闭即时校验"
+    tg_add_kv _m "现象" "容器重启后目录列表一直为空，读不到文件数"
+    tg_add_kv _m "处置" "本轮改看同步命令的返回结果，并在重启后复核"
+    tg_add_kv _m "风险" "这期间若写入失败，只能靠事后核对发现"
     tg_add_note _m "详见本 run 日志「raw 计数持续为 0」"
+    tg_add_footer _m
     send_telegram_message "$_m" "" "alert" || true
   fi
   return 1
