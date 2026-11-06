@@ -253,6 +253,9 @@ workflow 会把 `*.sh` `*.py` `*.jq` 拷到 `/tmp` 再 `source /tmp/load_all.sh`
 `rclone copy --files-from`（**不删除**）⇒ 镜像会静默退化成只增不减，旧命名/两代重复的
 文件永远留着（task3 曾因此多出 90.68 GiB）。每项带 `--max-delete <N>` 作为硬闸
 （超限时 rclone abort，下轮继续，防止源端路径异常把 gd 清空）。
+**恢复范围只有 backup / 0 / 1 / 2 / 3 五项**：用户明确决定 `task4`、`task5` **不同步到
+gd**（两者源端合计 1527 GiB，而 gd 实际可用约 927 GiB，容量也不允许）。注册表里
+不应出现 `task4-gd` / `task5-gd`。
 
 `gd:` 目标不经过写探针 / F5 全拒闸 / 批次巩固 / `_sync_mirror_prune` / truth-check /
 修复管线 —— 这些都在 `[[ $dest_path == openlist:* ]]` 处提前返回。`file_split.sh`
