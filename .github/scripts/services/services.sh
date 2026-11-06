@@ -452,7 +452,11 @@ Type=simple
 # 参数画像："配置 / Docker 数据卷"——小文件随机读写，不需要大块顺序预读。
 #   --cache-dir        默认 ~/.cache/rclone 会落进根分区（≈14GB），必须指向 /mnt
 #   --attr-timeout 1m  原 10m：容器内文件频繁增删改，属性缓存 10 分钟有陈旧风险
-#   --poll-interval 0  run 期间远端目录不会自己变，关轮询省 API 配额
+#   --dir-cache-time 5m  原 72h：Dropbox 是多端共享目录（网页/手机/其它主机都会改），
+#                       72h 目录缓存会让远端删掉的文件本地长时间仍显示（2026-11-06 实测）；
+#                       5m 为 rclone 默认值，兼顾 API 配额与新鲜度
+#   --poll-interval 1m   原 0：dropbox 后端支持 ChangeNotify，开启后远端变更 1 分钟内自动
+#                       失效对应目录缓存，无需等 dir-cache-time 到期
 #   --buffer-size 16M  原 100M：每个打开的文件常驻一份，小文件场景用不到
 # 以 runner 身份挂载（不用 sudo）：root 挂载会在 token 刷新时把 rclone.conf
 # 回写成 root 属主 600，之后归档循环读它就 permission denied。
@@ -461,7 +465,7 @@ ExecStart=/usr/bin/rclone mount dropbox: /dropbox \\
   --cache-dir /mnt/vfs/dropbox \\
   --allow-other --umask 000 --no-gzip-encoding \\
   --attr-timeout 1m \\
-  --dir-cache-time 72h --poll-interval 0 \\
+  --dir-cache-time 5m --poll-interval 1m \\
   --vfs-cache-mode full \\
   --vfs-cache-max-size 2G --vfs-cache-max-age 1h \\
   --vfs-cache-min-free-space 2G \\
