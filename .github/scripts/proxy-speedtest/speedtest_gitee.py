@@ -17,7 +17,7 @@
 运行模式（PROXY_SPEEDTEST_MODE，2026-09-08 起默认 both）：
   both       ↑上传（git push）+ ↓下载（clone 拉回）+ gitee.com HTTP 延迟，三项全测
   push-only  只测经代理上行（历史模式，可用 env 退回）
-  直连基线（git_direct_speedtest）不受模式影响，作为「家庭宽带上行」对照单独执行
+  runner 直连基线（git_direct_speedtest）不受模式影响，作为「runner 直连出口上行」对照单独执行（**不是**家庭宽带）
 
 订阅拉取（`fetch_text`）**带指数退避重试**：几 MB 的订阅体会在
 `gist.githubusercontent.com` 上被中途掐断 TLS，而调用方对取文异常一律
@@ -1196,7 +1196,7 @@ def _inject_upload_nonce(path: pathlib.Path):
       * 大小不变（仅覆写前 16 字节）⇒ 字节数换算不受影响；
       * blob 哈希必变 ⇒ git 无法去重 ⇒ 每次 push 都真传 10MiB。
 
-    一处修改覆盖全部调用方：`upload_speedtest` 是 CDN / Gitee 单节点 / 直连基线三处
+    一处修改覆盖全部调用方：`upload_speedtest` 是 CDN / Gitee 单节点 / runner 直连基线三处
     的共享实现，最终都走到本文件的 `git_force_push_testfile`。
     """
     try:
@@ -1251,8 +1251,8 @@ def git_clone_testbranch(clone_dir: pathlib.Path, remote: str, env, timeout: int
     10.01 MiB、缺失 blob 0），checkout 退化成「把本地 .git 里现成的 blob 解包到工作区」，
     纯磁盘操作仅 13~56ms ⇒ 10MiB / 0.056s ≈ 178 MiB/s ≈ **1417 兆**。
 
-    后果不是「偏大」，是**恒定的假象**：所有节点、连直连基线都测出同一个 178 MiB/s
-    （实测直连基线 download_mibs=178.82、download_seconds=0.056），与代理质量完全无关，
+    后果不是「偏大」，是**恒定的假象**：所有节点、连 runner 直连基线都测出同一个 178 MiB/s
+    （实测 runner 直连基线 download_mibs=178.82、download_seconds=0.056），与代理质量完全无关，
     ↓列彻底失去分辨力，订阅排序也因此被污染。
 
     修法（已实测验证）：
@@ -1364,7 +1364,7 @@ def wait_provider_ready(names, timeout=None, total_loaded=None, provider_names=N
 
 
 def git_direct_speedtest(env, gitee, test_file: pathlib.Path, push_timeout: int, clone_timeout: int, speedtest_mode: str, max_attempts: int = 5):
-    """直连基线（本套的调用入口）。实现已抽到 `run_direct_baseline`，三套共用。
+    """runner 直连基线（本套的调用入口）。实现已抽到 `run_direct_baseline`，三套共用。
 
     保留本名是因为 workflow / 通知 / 文档都按它引用；行为与分目录前缀（无 label）
     保持不变，避免历史对照数据与新数据混不上。
@@ -1377,7 +1377,7 @@ def git_direct_speedtest(env, gitee, test_file: pathlib.Path, push_timeout: int,
 def strip_proxy_env(env):
     """剥掉全部代理变量，返回新 dict（不改原对象）。
 
-    为什么单独一个函数：直连路径有**三处**都要做同一件事（直连基线、直连上行、CDN 的
+    为什么单独一个函数：直连路径有**三处**都要做同一件事（runner 直连基线、直连上行、CDN 的
     直连切换），各写一遍必然漂移——漏一个变量（`all_proxy` 小写那对最容易被漏）就会
     发现「直连」其实还在走代理，测出来的是节点带宽而非家庭宽带，且**看不出异常**。
     """
@@ -1397,7 +1397,7 @@ def upload_speedtest(env, gitee, test_file: pathlib.Path, push_timeout: int,
     `git_force_push_testfile`），口径靠人工对齐，改一处漏一处。
 
     * `via_proxy=True`（默认）：带 mihomo 混合端口代理变量 push ⇒ 测**节点上行**；
-    * `via_proxy=False`：`strip_proxy_env` 剥净代理变量 ⇒ 测**家庭宽带直连上行**。
+    * `via_proxy=False`：`strip_proxy_env` 剥净代理变量 ⇒ 测**runner 直连出口上行**。
 
     两边的差别只剩「用不用代理」，其余（文件大小、计时区间、单位换算）完全同一份代码，
     因此**两种模式的数值可比**——这正是要切直连做对照的前提。
@@ -1425,9 +1425,9 @@ def upload_speedtest(env, gitee, test_file: pathlib.Path, push_timeout: int,
 
 def run_direct_baseline(env, gitee, test_file, push_timeout, clone_timeout,
                         speedtest_mode, max_attempts=5, label=''):
-    """直连基线：不经代理 push(+clone)，作为「家庭宽带」对照。**三套共用**。
+    """runner 直连基线：不经代理 push(+clone)，作为「runner 直连出口」对照。**三套共用**。
 
-    CDN 与 Gitee 都要这个对照（只测代理节点带宽，不知道家庭宽带是多少，就看不出
+    CDN 与 Gitee 都要这个对照（只测代理节点带宽，不知道 runner 直连是多少，就看不出
     「节点比直连还慢」）。失败**重试 `max_attempts` 次**：直连 Git push 偶发超时较常见，
     一次抖动不该让整轮基线缺失。全部失败才抛异常。
 
@@ -1485,7 +1485,7 @@ def run_direct_baseline(env, gitee, test_file, push_timeout, clone_timeout,
             if attempt < max_attempts:
                 time.sleep(min(2 * attempt, 10))
     joined = ' | '.join(f'第{i}次: {e}' for i, e in enumerate(attempt_errors, 1))
-    raise RuntimeError(f'本机直连基线测速连续 {max_attempts} 次失败: {joined[-1500:]}')
+    raise RuntimeError(f'本机 runner 直连基线测速连续 {max_attempts} 次失败: {joined[-1500:]}')
 
 def _proxied_egress_ip(proxy_env, timeout=8):
     """经 mihomo mixed-port 查当前节点的出口 IP（bypass 校验用，2026-10-11 新增）。
@@ -1550,7 +1550,7 @@ def speedtest_single_item(env, gitee, item: dict, test_file: pathlib.Path, push_
             'exit_ip': direct_ip,
             'error': f'疑似未走代理：出口 IP 与 runner 直连出口相同（{direct_ip}），测速流量未进节点',
         }
-    # 上行经共享实现（与 CDN 同一份）；`via_proxy=False` 时测的是家庭宽带直连上行
+    # 上行经共享实现（与 CDN 同一份）；`via_proxy=False` 时测的是 runner 直连出口上行
     upload_s, total = upload_speedtest(
         env=env, gitee=gitee, test_file=test_file, push_timeout=push_timeout,
         branch_name=branch_name, via_proxy=via_proxy, repo_dir=repo_dir)
@@ -1739,7 +1739,7 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
 
     2026-09-08 起 TOP 节点条目与四套统一为三项指标（↑上传 · ↓下载 · 延迟ms，
     build_node_metric_prefix 渲染，未测出的指标整项省略）。
-    Push 目标 / 直连基线等诊断信息保留在 RESULT_JSON，不再进通知。
+    Push 目标 / runner 直连基线等诊断信息保留在 RESULT_JSON，不再进通知。
     """
     started_text = str(started_at)[:19].replace('T', ' ')
     ended_text = str(ended_at)[:19].replace('T', ' ')
@@ -1967,7 +1967,7 @@ def main():
     max_nodes = int(env.get('PROXY_SPEEDTEST_MAX_NODES', '0'))
     switch_settle_seconds = float(env.get('PROXY_SPEEDTEST_SWITCH_SETTLE_SECONDS', '1.5'))
     # 墙钟预算（秒，0 = 不限）。**必须显著小于 job 的 timeout-minutes（默认 360 分钟）**，
-    # 留出前置准备（订阅拉取 / mihomo / 直连基线 / Gitee 准备）与收尾（通知 / Gist 上传）
+    # 留出前置准备（订阅拉取 / mihomo / runner 直连基线 / Gitee 准备）与收尾（通知 / Gist 上传）
     # 的余量：默认 5 小时。为什么需要它：逐节点串行、单节点几十秒，而 gistnodes 一轮可能
     # 交接几千个节点；撞 GitHub 的**硬取消**会把整轮工作全废且订阅来不及提交，到点收摊则
     # 退出码仍 0、能拿已测节点出订阅（见 should_stop_for_budget）。
@@ -1979,7 +1979,7 @@ def main():
     # push-only = 只测上行（历史模式，可用 env 退回）
     speedtest_mode = (env.get('PROXY_SPEEDTEST_MODE', 'both') or 'both').strip().lower()
     # 上行是否经代理（与 CDN 同名同默认，2026-09-17 统一）。
-    # `False` ⇒ 剥净代理变量直连 Gitee push，测的是**家庭宽带直连上行**而非节点带宽。
+    # `False` ⇒ 剥净代理变量直连 Gitee push，测的是**runner 直连出口上行**而非节点带宽。
     # 默认 True 保持既有口径不变：历史通知里的「上传」都指节点上行，改默认会让新旧不可比。
     upload_via_proxy = (env.get('PROXY_SPEEDTEST_UPLOAD_VIA_PROXY', '1')
                         or '1').strip().lower() not in ('0', 'false', 'no', 'off')
@@ -2068,7 +2068,7 @@ def main():
             err_text = str(e)
             result = None
             # 本轮首个 push/clone 就超时或被拒（Gitee 仓库超限/被回收时，git 常表现为
-            # 挂起超时而非明确报错，直连基线会同步失败）→ 重建仓库后重试该节点一次；
+            # 挂起超时而非明确报错，runner 直连基线会同步失败）→ 重建仓库后重试该节点一次；
             # 每轮最多重建一次，避免个别慢节点误触发反复删库。
             if not repo_rebuilt and ok_pushes == 0 and (
                     'timed out' in err_text or REPO_SIZE_LIMIT_PATTERN in err_text

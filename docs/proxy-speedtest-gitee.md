@@ -10,7 +10,7 @@
 | 工作流 | 测速点 | 口径 | 引擎/链路 | 文档 |
 |---|---|---|---|---|
 | `proxy-speedtest-gitee` | Gitee 私有仓库 | 经代理 git push 上行 + clone 下行 + gitee.com HTTP 延迟 | 本文 | — |
-| `proxy-speedtest-cdn` | 国内 CDN/镜像站 + baidu/taobao | 经代理单连接 curl 下载 + HTTP 计时延迟 | `speedtest.py` | [cdn](proxy-speedtest-cdn.md) |
+| `proxy-speedtest-cdn` | 国内 CDN/镜像站 + baidu/taobao | 经代理单流定窗 curl 下载（8s，只计传输段）+ HTTP 计时延迟 | `speedtest.py` | [cdn](proxy-speedtest-cdn.md) |
 | `proxy-speedtest-taier` | 泰尔三网（电信/联通/移动测速服务器） | taierspeedtest 延迟 + 单/多线程上下行 | `taier_speedtest.py` + mihomo TUN | [taier](proxy-speedtest-taier.md) |
 
 另有上游编排 `proxy-speedtest-gistnodes`（搜 gist + Sub-Store 去重 + `alive_filter` 探活后
@@ -31,7 +31,7 @@ commit 等一律排除，见下方「下载计时」）。
 | **探活** | ❌ 无（`ok = 延迟成功 or 下载成功`） | ❌ 无（push 成功即活） | ✅ 开测前一次 `GET /group/{组}/delay` 拿整组延迟表，逐节点查表 | ✅ 非惰性健康检查 + 轮询等结论 |
 | **延迟** | `latency_probe`：baidu+taobao，各 4 次，8s，**HTTP 首字节** | 同实现，目标只有 `gitee.com` | 引擎对运营商服务器打**原生 TCP** | — |
 | **上传** | git push→Gitee，**可切直连** | git push→Gitee，**可切直连** | 引擎发流（single/multi） | — |
-| **下载** | curl 单连接 Range 10MiB，多镜像取最优 | `--no-checkout` clone，**只计整段网络传输**（不含本地 checkout 解包） | 同一次引擎调用的「↓」列 | — |
+| **下载** | curl **单流定窗 8s**（Range 上界 10MiB，到点截断，**只计传输段、不含 TTFB**），多镜像取最优 | `--no-checkout` clone，**只计整段网络传输**（不含本地 checkout 解包） | 同一次引擎调用的「↓」列 | — |
 | **单位** | MiB/s | MiB/s | 原始 Mbps | — |
 
 ⚠️ **taier 的单位陷阱**：引擎输出 Mbps，导出时 ÷8.388608 转 MiB/s、展示时 ×8 转回「兆」，
@@ -72,19 +72,19 @@ commit 等一律排除，见下方「下载计时」）。
    回拉 Gist raw + 抽样验证」的步骤，见[运维与排查](#运维与排查)）；
 7. Telegram 推 `✅ Gitee 测速完成`（TOP 节点三项指标 + 订阅状态）。
 
-## 运行模式与直连基线
+## 运行模式与 runner 直连基线
 
 `PROXY_SPEEDTEST_MODE`（2026-09-08 起默认 `both`）：
 
 - `both`：↑上传（push）+ ↓下载（clone）+ 延迟三项全测，三套指标口径对齐；
 - `push-only`：只测经代理上行（历史模式，可用 env 退回）；
-- `git_direct_speedtest`：不经代理直连 Gitee push/clone，作为「家庭宽带上行」基线对比
+- `git_direct_speedtest`：不经代理直连 Gitee push/clone，作为「runner 直连出口上行」基线对比（**不是**家庭宽带）
   （`PROXY_SPEEDTEST_DIRECT_BASELINE_TIMEOUT` / `_MAX_ATTEMPTS` 控制），不受模式影响。
 
 ## 上行测速：CDN 与 Gitee 已统一（2026-09-17）
 
-**诉求**：两套的上行要么都经代理、要么都直连，且都能用直连基线做对照——否则「节点带宽」
-与「家庭宽带」两套数字混在一起，无法判断节点是否还不如直连。
+**诉求**：两套的上行要么都经代理、要么都直连，且都能用 runner 直连基线做对照——否则「节点带宽」
+与「runner 直连出口」两套数字混在一起，无法判断节点是否还不如直连。
 
 **改法**：实现收敛到本文件的 `upload_speedtest`，CDN 不再自带副本。一次调用由
 `via_proxy` 决定走哪条路：
@@ -92,7 +92,7 @@ commit 等一律排除，见下方「下载计时」）。
 | 模式 | 环境 | 测的是 |
 |---|---|---|
 | `via_proxy=True`（**默认**） | 带 mihomo 混合端口代理变量 | **代理节点上行** |
-| `via_proxy=False` | `strip_proxy_env` 剥净 6 个代理变量 | **家庭宽带直连上行** |
+| `via_proxy=False` | `strip_proxy_env` 剥净 6 个代理变量 | **runner 直连出口上行** |
 
 两套共用**同一份代码**（`speedtest_gitee.upload_speedtest` / `run_direct_baseline`），
 差别只剩「用不用代理」，因此**两种模式的数值可比**——这正是切直连做对照的前提。
@@ -104,12 +104,12 @@ commit 等一律排除，见下方「下载计时」）。
 | env | 默认 | 作用 |
 |---|---|---|
 | `PROXY_SPEEDTEST_UPLOAD_VIA_PROXY` | `1` | 上行经代理（`0` = 直连）。CDN 原有；Gitee 2026-09-17 补上 |
-| `PROXY_SPEEDTEST_DIRECT_BASELINE` | `1` | 是否跑直连基线（CDN 原有开关语义；Gitee 恒跑） |
+| `PROXY_SPEEDTEST_DIRECT_BASELINE` | `1` | 是否跑 runner 直连基线（CDN 原有开关语义；Gitee 恒跑） |
 | `PROXY_SPEEDTEST_DIRECT_BASELINE_TIMEOUT` | `60` | 基线单次 push/clone 超时 |
 | `PROXY_SPEEDTEST_DIRECT_BASELINE_MAX_ATTEMPTS` | `5` | 基线重试次数（直连 Git push 偶发超时，一次抖动不该让整轮基线缺失） |
 
 ⚠️ **默认保持「经代理」**：历史通知里的「上传」都指节点上行，改默认会让新旧数据不可比。
-要测家庭宽带，显式设 `PROXY_SPEEDTEST_UPLOAD_VIA_PROXY=0`。
+要测 runner 直连出口（非家庭宽带），显式设 `PROXY_SPEEDTEST_UPLOAD_VIA_PROXY=0`。
 
 ## 下载计时：只计 clone 网络传输（2026-10-07 修正）
 
@@ -121,7 +121,7 @@ commit 等一律排除，见下方「下载计时」）。
   **前提是错的**：实测（10-07）坐实 Gitee 私有仓库**不认 `--filter=blob:none`**——
   clone 阶段 10MiB 内容已全量落地（size-pack 10.01 MiB、缺失 blob 0），checkout 退化成
   「把本地 .git 里现成的 blob 解包到工作区」的纯磁盘操作（13~56ms）⇒ 10MiB / 0.056s ≈
-  178 MiB/s ≈ **1417 兆**。所有节点、连直连基线都测出同一个常数假象，↓列彻底失去分辨力。
+  178 MiB/s ≈ **1417 兆**。所有节点、连 runner 直连基线都测出同一个常数假象，↓列彻底失去分辨力。
 - **v3（现口径，10-07）**：
 
 | 段 | 命令 | 是否计时 |
@@ -200,8 +200,8 @@ commit 等一律排除，见下方「下载计时」）。
 | `PROXY_SPEEDTEST_SIZE_MIB` | 10 | 测速文件大小 |
 | `PROXY_SPEEDTEST_PUSH_TIMEOUT` / `CLONE_TIMEOUT` | 30 / 90 | 单次 push / clone 超时（下载超时 2026-10-07 上调，计时段已是真实网络传输） |
 | `PROXY_SPEEDTEST_LATENCY_SAMPLES` / `_TIMEOUT` | 4 / 8 | gitee.com 延迟采样次数 / 单次超时 |
-| `PROXY_SPEEDTEST_UPLOAD_VIA_PROXY` | 1 | 上行经代理（`0` = 直连 Gitee 测家庭宽带）。与 cdn 同名同默认 |
-| `PROXY_SPEEDTEST_DIRECT_BASELINE_TIMEOUT` / `_MAX_ATTEMPTS` | 60 / 5 | 直连基线 |
+| `PROXY_SPEEDTEST_UPLOAD_VIA_PROXY` | 1 | 上行经代理（`0` = 直连 Gitee 测 runner 直连出口，**不是**家庭宽带）。与 cdn 同名同默认 |
+| `PROXY_SPEEDTEST_DIRECT_BASELINE_TIMEOUT` / `_MAX_ATTEMPTS` | 60 / 5 | runner 直连基线 |
 | `PROXY_SPEEDTEST_SWITCH_SETTLE_SECONDS` | 1.5 | 切节点后等待 |
 | `PROXY_SPEEDTEST_BUDGET_SECONDS` | `18000` | **墙钟预算**（秒，`0` = 不限），从进程启动起算。到点不再开下一个节点，拿已测节点照常出订阅（退出码 0）。**与 job 的 `timeout-minutes` 成对**：默认 5 小时 < 360 分钟。workflow 里写死，不接仓库 Variables |
 | `PROXY_SPEEDTEST_DETACH` | 0（workflow 注入） | 1 = detach 后台自跑（本地手跑用） |
@@ -225,7 +225,7 @@ commit 等一律排除，见下方「下载计时」）。
 - **不是失败**：退出码仍是 `0`，照常出报告、导订阅、发通知——只是通知里会说明「本轮没测完」；
 - **起算点**：**进程启动**（不是节点循环），因为 job 的 `timeout-minutes` 也把前置准备算在内；
 - **与硬上限成对**：默认 `18000` 秒 = 5 小时，留 1 小时给前置准备（订阅拉取 / mihomo /
-  直连基线 / Gitee 准备）与收尾（报告 / 通知 / Gist 提交）。**改 `timeout-minutes` 前先确认
+  runner 直连基线 / Gitee 准备）与收尾（报告 / 通知 / Gist 提交）。**改 `timeout-minutes` 前先确认
   这个关系没被破**。
 
 通知表现：标题由 `✅` 降为 `⚠️`，并在「📊 节点」行**紧跟**一行
@@ -422,7 +422,7 @@ mihomo 对「组里不存在的成员」改为报错，gitee / cdn 会立刻把�
 | `nodes_collected: 0` 且 **`source_mapping_built entries: 0`** | 先找 `subscription_fetch_skipped` —— 那是**订阅根本没取到**（不是节点都判死了），`source_url` + `index` + `error` 三样齐；若 `error` 是 `SSL: UNEXPECTED_EOF_WHILE_READING` 一类，就是取文途中被掐断。几 MB 的订阅体（Gist raw）上这很常见，`fetch_text` 已带 4 次指数退避重试，中间会打 `subscription_fetch_retry`；**见到 retry 后成功属正常自愈**。重试全失败才 `skipped`，此时该 `exit`/产出的方向是「定位网络或订阅源」，不要去查解析与判据（判据没参与）。**这条以前是静默的**：一次抖动 = 整份订阅消失 = 零节点 + job 仍报成功 |
 | GitHub API 403/限流 | 匿名调用共享出口 IP 60 次/h；workflow 已带 `GITHUB_TOKEN`/`GH_TOKEN` 回退 |
 | Gitee 仓库体积超限 | `rebuild_gitee_repo` 自动重建私有仓库 `proxy-speedtest-temp` |
-| **节点 push 全部超时**（连直连基线也超时） | Gitee 仓库超限/被回收时 git 常表现为**挂起超时**而非明确报错（2026-09-08 实测连续三轮 0 成功）。引擎已自愈：本轮尚无成功 push 且节点失败为超时/被拒/size limit 时，自动 `rebuild_gitee_repo` 一次并重试该节点（日志 `repo_rebuild_on_push_timeout`，每轮限一次）；若重建后仍失败，多为 Gitee 账号级限流，等下一轮即可 |
+| **节点 push 全部超时**（连 runner 直连基线也超时） | Gitee 仓库超限/被回收时 git 常表现为**挂起超时**而非明确报错（2026-09-08 实测连续三轮 0 成功）。引擎已自愈：本轮尚无成功 push 且节点失败为超时/被拒/size limit 时，自动 `rebuild_gitee_repo` 一次并重试该节点（日志 `repo_rebuild_on_push_timeout`，每轮限一次）；若重建后仍失败，多为 Gitee 账号级限流，等下一轮即可 |
 | Gist 404 | **分两种**：真失效（重试仍 404 且 GET 也读不到）→ 新建并回填 secret；瞬时抖动（重试成功，或 404 但 GET 可见）→ 复用原 gist，绝不再建。见 [Gist 约定](#gist-约定三套各用各的)。日志 `gist_patch_404_retry` / `_recovered` / `_recreate` 三选一可定位 |
 | Gist 422（`missing_field: files`） | 2026-09-08 修：`update_gist` 曾在旧文件已删除后每轮仍发 `旧文件名: null`，GitHub 判 files 无有效字段。现在先 GET 探测旧文件是否存在才发删除项，且 422 会去掉删除项重试一次 |
 | 订阅可用性存疑 | 本工作流只负责导出达标节点、不做可用性回拉验证（2026-09-10 移除：抽检信息量低于本轮 push/clone 实测，且失败只制造误导性告警）。订阅端导入失败的排查重心回到「节点是否达标、订阅源本身是否可用」 |

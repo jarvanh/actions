@@ -152,8 +152,25 @@ jobs:
           # 该变量为逗号分隔的 URL 列表；设 PROXY_SPEEDTEST_NPMMIRROR_ENABLED=0 可关闭第 2 类。
           # PROXY_SPEEDTEST_DOWNLOAD_URLS: ''
           # PROXY_SPEEDTEST_NPMMIRROR_ENABLED: '1'
+          # 下载上限（MiB）：**只是单次 Range 的请求上界**，不是「必须拉满这么多」。
+          # 定窗测法（窗口 8 秒）到点就截断，快节点可能先拉满这个上界。
           PROXY_SPEEDTEST_SIZE_MIB: '10'
+          # 单次 curl 的硬超时（秒）：窗口 + 握手 + 收尾余量，只防 DNS/连接挂起卡死。
           PROXY_SPEEDTEST_DOWNLOAD_TIMEOUT: '30'
+          # 定窗测法的窗口（秒）：每个测速点拉满这么多秒，用真实传输字节 ÷ **传输段**
+          # 换算 MiB/s（已扣掉首字节时间 TTFB，不把握手折进带宽）。
+          # 为什么改（2026-11-05）：旧口径「拉满 10MiB、30s 超时」等价于要求节点
+          # ≥0.33 MiB/s，慢但可用的节点整条判失败（实测一轮 336 个里 62 个 null）；
+          # 且把握手算进传输段，实测中位低估 26%。定窗后慢节点也有读数、每节点耗时上界
+          # 从 30s 降到 8s+握手，同预算能多测 2~3 倍节点。
+          # ⚠️ 口径已变：与 2026-11-05 之前的读数不可直接比，订阅名里的兆数会整体上浮。
+          PROXY_SPEEDTEST_DOWNLOAD_WINDOW: '8'
+          # 有效样本下限（MiB）：低于它（刚建连就断/错误页）不算有效读数。
+          PROXY_SPEEDTEST_DOWNLOAD_MIN_MIB: '0.5'
+          # **单节点**下载总预算（秒）：窗口只约束单个 URL，多个测速点串行取最优时
+          # 还要有个整节点的上界，否则 8s×4 个 URL = 32s/节点，比旧口径 30s 还慢。
+          # 12s ≈ 首个 URL 8s + 第二个 4s；单节点上界由 30s 降到 12s。
+          PROXY_SPEEDTEST_DOWNLOAD_TOTAL_SECONDS: '12'
           PROXY_SPEEDTEST_SWITCH_SETTLE_SECONDS: '1.5'
           # 节点上限：编排按抓取量传入；定时运行不传 = 0 = 不限（与既有行为一致）
           PROXY_SPEEDTEST_MAX_NODES: ${{ inputs.max_nodes || '0' }}
@@ -166,16 +183,16 @@ jobs:
           # 携带代理环境变量向 Gitee 私有仓库 push 测速文件（反映代理节点上行带宽）。
           # 需先在仓库 Secrets 配置 GITEE_PRIVATE_TOKEN 与 PROXY_SPEEDTEST_GITEE_OWNER，
           # 并准备可写的私有仓库（默认 proxy-speedtest-temp）；仓库体积超限会自动重建。
-          # 设 ENABLE_PUSH=0 可关闭；设 UPLOAD_VIA_PROXY=0 则退化为直连 Gitee（家庭宽带上行）。
+          # 设 ENABLE_PUSH=0 可关闭；设 UPLOAD_VIA_PROXY=0 则退化为直连 Gitee（runner 直连出口上行）。
           PROXY_SPEEDTEST_ENABLE_PUSH: '1'
-          # 上行是否经代理：1=经代理（代理节点上行质量）；0=直连 Gitee（家庭宽带上行）
+          # 上行是否经代理：1=经代理（代理节点上行质量）；0=直连 Gitee（runner 直连出口上行）
           PROXY_SPEEDTEST_UPLOAD_VIA_PROXY: '1'
           GITEE_PRIVATE_TOKEN: ${{ secrets.GITEE_PRIVATE_TOKEN }}
           PROXY_SPEEDTEST_GITEE_OWNER: ${{ secrets.PROXY_SPEEDTEST_GITEE_OWNER }}
           PROXY_SPEEDTEST_GITEE_REPO: proxy-speedtest-temp
           PROXY_SPEEDTEST_PUSH_TIMEOUT: '30'
-          # 直连基线（家庭宽带对照，2026-09-17 与 gitee 统一）：不经代理 push 一次，
-          # 给出「家庭宽带 vs 节点」的可比数字——只看节点带宽无法判断节点是否还不如直连。
+          # runner 直连基线（**不是**家庭宽带对照，2026-09-17 与 gitee 统一）：不经代理 push 一次，
+          # 给出「runner 直连 vs 节点」的可比数字——只看节点带宽无法判断节点是否还不如直连。
           # 失败不打死整轮（基线是参考值）：拿不到只记 direct_baseline.ok=false。
           PROXY_SPEEDTEST_DIRECT_BASELINE: '1'
           PROXY_SPEEDTEST_DIRECT_BASELINE_TIMEOUT: '60'

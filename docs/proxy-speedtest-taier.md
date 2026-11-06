@@ -10,7 +10,7 @@
 | 工作流 | 测速点 | 口径 | 引擎/链路 | 文档 |
 |---|---|---|---|---|
 | `proxy-speedtest-gitee` | Gitee 私有仓库 | 经代理 git push 上行 + clone 下行 + gitee.com HTTP 延迟 | `speedtest_gitee.py` | [gitee](proxy-speedtest-gitee.md) |
-| `proxy-speedtest-cdn` | 国内 CDN/镜像站 + baidu/taobao | 经代理单连接 curl 下载 + HTTP 计时延迟 | `speedtest.py` | [cdn](proxy-speedtest-cdn.md) |
+| `proxy-speedtest-cdn` | 国内 CDN/镜像站 + baidu/taobao | 经代理单流定窗 curl 下载（8s，只计传输段）+ HTTP 计时延迟 | `speedtest.py` | [cdn](proxy-speedtest-cdn.md) |
 | `proxy-speedtest-taier` | 泰尔三网（电信/联通/移动测速服务器） | taierspeedtest 延迟 + 单/多线程上下行 | 本文 | — |
 
 调度：UTC 23/03/07/11（北京 07/11/15/19），与 gitee（UTC 21/01/05/09 → 京 05/09/13/17）、cdn（UTC 22/02/06/10 → 京 06/10/14/18）各错开 1 小时；三套都只排在北京时间 05:00–21:00（夜间 runner 排队 + 出口拥塞会让读数失真）。

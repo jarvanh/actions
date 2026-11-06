@@ -145,7 +145,7 @@ jobs:
           PROXY_SPEEDTEST_PUSH_TIMEOUT: '30'
           # 下载超时（2026-10-07 从 30 上调到 90）：下载计时段已从 checkout 挪回 clone（见
           # speedtest_gitee.git_clone_testbranch 的注释）—— 那段现在是**真实网络传输**，
-          # 不再是 13~56ms 的本地解包。实测家庭宽带直连拉 10MiB 需 14.4 秒，绕代理节点
+          # 不再是 13~56ms 的本地解包。实测 runner 直连拉 10MiB 需 14.4 秒，绕代理节点
           # （境外落地再回连 Gitee）只会更慢；沿用 30 秒会把「慢但可用」的节点误判为失败，
           # 恰好和这次修准的目的相悖（修准就是要让下载速度有分辨力）。
           # 90 秒 = 直连实测量级的 6 倍，容得下慢节点，又不至于让单个坏节点拖死整轮预算。
@@ -158,10 +158,10 @@ jobs:
           PROXY_SPEEDTEST_LATENCY_TIMEOUT: '8'
           # 上行是否经代理（2026-09-17 与 cdn 统一，同名同默认）：
           # 1=经代理（测代理节点上行质量，默认，保持既有口径不变）；
-          # 0=剥净代理变量直连 Gitee（测家庭宽带直连上行）。
-          # 与下面直连基线配套：切直连后两者应接近，偏差大说明有别的瓶颈。
+          # 0=剥净代理变量直连 Gitee（测 runner 直连出口上行，不是家庭宽带）。
+          # 与下面 runner 直连基线配套：切直连后两者应接近，偏差大说明有别的瓶颈。
           PROXY_SPEEDTEST_UPLOAD_VIA_PROXY: '1'
-          # 直连基线（家庭宽带对照）：不经代理 push+clone 一次，给出可比的家庭宽带数字
+          # runner 直连基线（**不是**家庭宽带对照）：不经代理 push+clone 一次，给出可比的 runner 直连数字
           PROXY_SPEEDTEST_DIRECT_BASELINE_TIMEOUT: '60'
           PROXY_SPEEDTEST_DIRECT_BASELINE_MAX_ATTEMPTS: '5'
           # 订阅导出策略（四套共用，脚本默认值；各脚本消费）：
