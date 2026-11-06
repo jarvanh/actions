@@ -145,9 +145,12 @@ on:
         # 固定开销占比升高 —— 60min 轮约 20%，320min 轮约 4%。
         # ⚠️ 上限 320: 同步 step 的 timeout-minutes 是 330，给更大只会被硬杀（脚本里
         # 有 clamp + 告警）。
+        # ⚠️ 实际生效值还会被 **job 剩余时间** 二次收敛（2026-11-06 加）: 6h 硬顶
+        # 从 job 开始算，前置步骤（rclone/OpenList/隧道）实测占 ~36min，故同步
+        # 实际拿到约 316min —— 日志会打印「job 已用 Xs，6h 硬顶下同步可用 Ys」。
         # ⚠️ 派生阈值（批次最小片长 / 尾部预留）会随预算等比缩放，见 task_engine.sh
         # _budget_scaled —— 否则短预算 + 固定 120min 片长会让批次一个都不开。
-        description: "同步模式: 时间预算（分钟，默认 320）。调短用于快速取日志/结论（如 30/60/90）；上限 320（同步 step 超时 330min）"
+        description: "同步模式: 时间预算（分钟，默认 320）。调短用于快速取日志/结论（如 30/60/90）；上限 320（同步 step 超时 330min），实际值再按 6h job 剩余收敛"
         required: false
         type: number
         default: 320
@@ -346,6 +349,16 @@ jobs:
       # 检出仓库，使 .github/scripts/openlist/ 下的脚本文件可用
       - name: Checkout repository
         uses: actions/checkout@v7
+
+      # 记录 job 起始时刻（2026-11-06 加）: GitHub 的 6h 硬顶是 **job 级**，
+      # 从 job 开始算；而同步预算此前从「同步 step 开始」起算，把前置步骤
+      # （rclone 安装/OpenList 容器/cloudflared 隧道）的耗时算漏了。
+      # run 42142711886 实测: job 06:32 起 → 前置 36min → 同步 322min →
+      # 收尾 5min = 363min，超 6h 三分钟，job 在收尾跑完之后被判 cancelled
+      # （收尾/Persist/自续都 success，属侥幸；前置再慢一点就会砍掉收尾，
+      # 丢掉 marker 打包与 db 回传）。同步 step 据此把预算收到 job 实际剩余。
+      - name: 记录 job 起始时刻
+        run: echo "OL_JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
 
       - name: rclone-install
         run: |
@@ -671,9 +684,21 @@ jobs:
           export OPENLIST_FIX_TEST_MODE=1
           export OPENLIST_MISSING_FIX_MAX="${FIX_PRIORITY_MAX}"
           # 预算锚点与正式同步同款（超时优雅收摊 + 平台硬顶闸），上限 320min
-          export OPENLIST_SYNC_BUDGET_SECONDS=$(( 320 * 60 ))
+          # 且同样按 job 剩余收敛（见同步 step 里同一段注释: 6h 是 job 级硬顶，
+          # 前置步骤耗时不算在「本 step 预算」里，需自己扣掉）。
+          _fp_budget=$(( 320 * 60 ))
+          _fp_hard=$(( 330 * 60 ))
+          if [ -n "${OL_JOB_START_EPOCH:-}" ]; then
+            _fp_elapsed=$(( $(date +%s) - OL_JOB_START_EPOCH ))
+            _fp_remain=$(( 360 * 60 - _fp_elapsed - 480 ))
+            [ "$_fp_remain" -lt 600 ] && _fp_remain=600
+            [ "$_fp_budget" -gt "$_fp_remain" ] && _fp_budget=$_fp_remain
+            [ "$_fp_hard" -gt "$_fp_remain" ] && _fp_hard=$_fp_remain
+            echo "修复优先: job 已用 ${_fp_elapsed}s，预算收敛为 $(( _fp_budget / 60 ))min"
+          fi
+          export OPENLIST_SYNC_BUDGET_SECONDS="$_fp_budget"
           export OPENLIST_SYNC_DEADLINE_EPOCH=$(( $(date +%s) + OPENLIST_SYNC_BUDGET_SECONDS ))
-          export OPENLIST_STEP_HARD_LIMIT_EPOCH=$(( $(date +%s) + 330 * 60 ))
+          export OPENLIST_STEP_HARD_LIMIT_EPOCH=$(( $(date +%s) + _fp_hard ))
           export OPENLIST_STEP_TAIL_RESERVE_SECONDS="${OPENLIST_STEP_TAIL_RESERVE_SECONDS:-480}"
           echo "=== 修复优先: 全量积压清理（单任务修复上限 ${OPENLIST_MISSING_FIX_MAX}）==="
           run_all_tasks
@@ -734,6 +759,27 @@ jobs:
             echo "⚠️ sync_budget_min=${SYNC_BUDGET_MIN} 超过上限 320（step 超时 330min），按 320 执行"
             SYNC_BUDGET_MIN=320
           fi
+          # ===== 按 job 实际剩余收敛预算（2026-11-06 加）=====
+          # 6h 硬顶是 job 级；预算若从「本 step 开始」算，就把前置步骤耗时算漏了。
+          # run 42142711886 实测: job 06:32 → 前置 36min → 同步 322min → 收尾 5min
+          # = 363min，超出 6h 三分钟，job 在收尾之后被判 cancelled（这次收尾/Persist/
+          # 自续都跑完了，属侥幸；前置再慢 2 分钟就会砍在收尾里，丢 marker 打包与
+          # db 回传）。故取 min(用户预算, 6h − 已用 − 收尾预留)。
+          local_job_remain=""
+          if [ -n "${OL_JOB_START_EPOCH:-}" ]; then
+            _elapsed=$(( $(date +%s) - OL_JOB_START_EPOCH ))
+            # 360min 硬顶 − 8min 收尾预留
+            _job_remain=$(( 360 * 60 - _elapsed - 480 ))
+            [ "$_job_remain" -lt 600 ] && _job_remain=600
+            echo "job 已用 ${_elapsed}s，6h 硬顶下同步可用 ${_job_remain}s（已扣 480s 收尾预留）"
+            if [ $(( SYNC_BUDGET_MIN * 60 )) -gt "$_job_remain" ]; then
+              SYNC_BUDGET_MIN=$(( _job_remain / 60 ))
+              echo "⚠️ 同步预算按 6h job 硬顶收敛为 ${SYNC_BUDGET_MIN}min（前置步骤已占 ${_elapsed}s）"
+            fi
+            local_job_remain="$_job_remain"
+          else
+            echo "⚠️ 未记录 job 起始时刻（OL_JOB_START_EPOCH 为空），预算沿用 ${SYNC_BUDGET_MIN}min"
+          fi
           export OPENLIST_SYNC_BUDGET_SECONDS=$(( SYNC_BUDGET_MIN * 60 ))
           # 平台硬顶锚点（2026-09-23 病灶 D）: 本 step 的 timeout-minutes=330 是
           # GitHub 侧的硬杀线，被杀 = conclusion=failure + 在途持久化复核成果白丢。
@@ -742,7 +788,13 @@ jobs:
           # ~11min 撞硬顶（run 35717590337 / 35773926579）。故把硬顶也下传，
           # 脚本据此在闸外长循环里做"距硬顶不足预留就强制停"，把收尾时间抢回来。
           # 留 8min 给收尾（持久化复核 + marker 打包 + 通知 + 接力）。
-          export OPENLIST_STEP_HARD_LIMIT_EPOCH=$(( $(date +%s) + 330 * 60 ))
+          # 同时受 job 剩余约束: 330min 的 step 超时在 6h job 硬顶前本就不可达
+          # （前置已占 36min ⇒ 实际只剩 324min），故取 min(330min, job 剩余)。
+          _hard=$(( 330 * 60 ))
+          if [ -n "$local_job_remain" ] && [ "$local_job_remain" -lt "$_hard" ]; then
+            _hard=$local_job_remain
+          fi
+          export OPENLIST_STEP_HARD_LIMIT_EPOCH=$(( $(date +%s) + _hard ))
           export OPENLIST_STEP_TAIL_RESERVE_SECONDS="${OPENLIST_STEP_TAIL_RESERVE_SECONDS:-480}"
           # 缓存刷新等待秒数（默认 40，与 input 默认一致；非正整数回落 40）
           case "${FS_REFRESH_SLEEP}" in
