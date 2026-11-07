@@ -34,6 +34,12 @@
     Z2A_SELFTEST_MODEL=""
     Z2A_SELFTEST_OUT=""
     Z2A_PLAN_BAD=0
+    # 失败分诊字段必须在 clone 之前就存在：clone/依赖失败时 z2a_selftest 从未
+    # 运行，这两个只在函数内赋值的变量保持未定义，通知块一引用就被 set -u
+    # 杀死 —— 告警无声蒸发（2026-11-07 实锤：clone 残骸整轮部署失败，降级
+    # TG 一条没发出去）。
+    Z2A_FAIL_CLASS=""
+    Z2A_MAIN_CLASS=""
 
     # 端口存活判定：/v1 带鉴权，未带 key 会拿 401，不能 curl -f；
     # 拿到任意 HTTP 码（非 000）即视为有进程在监听，链路可用性交给自检。
@@ -319,7 +325,13 @@
         echo "ℹ️ [zcode2api] 代码与依赖已由 Prefetch 就绪，跳过 clone 与依赖安装"
         Z2A_PREPPED=1
       fi
-      if [ "$Z2A_PREPPED" != "1" ]; then rm -rf "$Z2A_RUN_DIR"; fi
+      if [ "$Z2A_PREPPED" != "1" ] && [ -d "$Z2A_RUN_DIR" ]; then
+        # 先 mv（原子）再清：rm -rf 与仍在写入的残留进程赛跑会输 —— 2026-11-07
+        # 实锤：.venv 半删（pygments "Directory not empty"）→ clone 报
+        # destination exists → 整轮部署失败。残骸挪去 .stale.$$ 后尽力清除。
+        mv "$Z2A_RUN_DIR" "${Z2A_RUN_DIR}.stale.$$" 2>/dev/null || true
+        rm -rf "${Z2A_RUN_DIR}.stale.$$" 2>/dev/null || true
+      fi
       # 先 clone（目标必须为空目录），logs 目录随后补建
       if ! { [ "$Z2A_PREPPED" = "1" ] || git clone --quiet --depth 1 "$Z2A_REPO" "$Z2A_RUN_DIR"; }; then
         Z2A_REASON="代码克隆失败：$Z2A_REPO"
