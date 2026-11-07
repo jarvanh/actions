@@ -463,9 +463,11 @@ restore_omniroute_data()   ← Dropbox OmniRoute.tar.gz（缺失/无效 → boot
 20 分钟后台归档循环与最终归档（Stop OpenClaw and Final Archive）均按 `ACTIVE_BACKEND` 分支。
 
 - **OmniRoute（`/tmp/create-omniroute-archive.sh`）**：
-  1. **SQLite 在线一致性快照**：容器在跑时 `docker exec omniroute node -e` 调 better-sqlite3
+  1. **SQLite 在线一致性快照**：容器在跑时 `docker exec omniroute` 调 better-sqlite3
      `.backup()` 产出 `storage-backup.sqlite`，落在同一数据卷内（失败非致命，活库三件套兜底）。
      > 容器内**没有 sqlite3 CLI**，只有 better-sqlite3（node 模块）—— 看板读用量也是这条路径。
+     > 2026-11-07：备份/tar/pigz 三处突发一律 `nice -n 19 ionice -c3` 低优先级启动
+     > （空闲零损耗、忙时让路），避免归档周期把 4 核机 load1 顶过 100%。
   2. **数据卷快照**：helper 容器（root）`tar czf /stage/data.tar.gz -C /data .` 整卷打包
      `/app/data`。镜像偶发启动慢导致单次失败（实测约 1/4 概率），**重试 4 次、指数退避
      20/40/60s** —— 失败多发生在 openclaw 8GB 主包上传窗口（IO/内存争抢），短间隔会连撞。
