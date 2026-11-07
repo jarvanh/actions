@@ -3045,8 +3045,12 @@ jobs:
           # 1. SQLite 在线一致性快照（容器在跑时才做）：better-sqlite3 .backup() 产出
           #    storage-backup.sqlite 落在同一数据卷内，随第 2 步一起进包。
           #    失败非致命 —— 活库三件套（sqlite/-wal/-shm）仍在包里兜底。
+          #    2026-11-07 主人拍板：归档三处突发（备份/tar/pigz）一律以低优先级启动
+          #    （nice 19 + ionice -c3）：机器空闲时零损耗，忙时自动让路。此前备份每
+          #    20min 一轮独占一核数分钟，叠加常驻基线把 4 核机 load1 顶过 100%。
+          #    容器内 nice/ionice 可用已实测（coreutils 9.7）。
           if docker ps --format '{{.Names}}' | grep -q '^omniroute$'; then
-            if ! docker exec omniroute node -e "const Database=require('better-sqlite3');const db=new Database('/app/data/storage.sqlite');db.backup('/app/data/storage-backup.sqlite').then(()=>process.exit(0)).catch((e)=>{console.error(e.message);process.exit(1);})" 2>/tmp/omniroute-backup.err; then
+            if ! docker exec omniroute nice -n 19 ionice -c3 node -e "const Database=require('better-sqlite3');const db=new Database('/app/data/storage.sqlite');db.backup('/app/data/storage-backup.sqlite').then(()=>process.exit(0)).catch((e)=>{console.error(e.message);process.exit(1);})" 2>/tmp/omniroute-backup.err; then
               echo "⚠️ sqlite online backup 失败（非致命，活库文件兜底）: $(tail -n 2 /tmp/omniroute-backup.err 2>/dev/null || true)"
             fi
             rm -f /tmp/omniroute-backup.err
@@ -3065,8 +3069,8 @@ jobs:
           snap_ok=0
           for attempt in 1 2 3 4; do
             if docker run --rm --user root -v "$VOLUME:/data:ro" \
-              "$IMAGE" sh -c 'tar cf - -C /data storage-backup.sqlite server.env' 2>/tmp/omniroute-snap.err \
-              | pigz -p "$(nproc)" -1 > "$STAGE_DIR/data.tar.gz"; [ $? -le 1 ] && [ -s "$STAGE_DIR/data.tar.gz" ]; then
+              "$IMAGE" sh -c 'nice -n 19 ionice -c3 tar cf - -C /data storage-backup.sqlite server.env' 2>/tmp/omniroute-snap.err \
+              | nice -n 19 ionice -c3 pigz -p "$(nproc)" -1 > "$STAGE_DIR/data.tar.gz"; [ $? -le 1 ] && [ -s "$STAGE_DIR/data.tar.gz" ]; then
               snap_ok=1
               break
             fi
