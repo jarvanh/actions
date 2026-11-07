@@ -142,6 +142,18 @@
   openlist 域 2.1 表各通知落点；`TG_RUN_URL` 全库注入面（12 个发通知的
   workflow 全覆盖，无 `TG_RUN_STARTED_AT` 残留）；`render_preview.sh` 16 项全绿。
 
+## 3.4 2026-11-07 桥接冒烟基线（资产段 · 路线 B）
+
+- `smoke_assets_bridge.sh` 全绿（六源 CLI + board.log + 端到端渲染）。
+- 已知历史形态，冒烟必须能抓：`_assets_block` 曾把「📅 资产」节标题经
+  `tg_section` 追加语义放在数据行**之后**，通知里 kv 行悬进上一节、标题空挂
+  （2026-11-07 复现并修复，负向验证过会变红）。看板侧再动 `_assets_block`
+  结构时，先想它是否破坏「标题在前」契约。
+- `_DAYS_CACHE` 漏定义（2026-11-07）：缓存 decorator 给 `_api_ledger_days`
+  加缓存漏定义缓存字典 → 快照后台重算每轮 NameError、SWR 恒回旧值、
+  `/api/days` 500，通知侧完全无感。board.log 扫描项即为此设。
+- 空输出（任一源当日无数据、qingyan 回退快照）= 合法，非偏差。
+
 ## 4. 回归基线（改动触及 openlist 域时必跑）
 
 ```bash
