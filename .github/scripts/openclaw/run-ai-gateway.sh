@@ -106,9 +106,10 @@ BACKEND_STATE=/tmp/active-ai-backend.env
 OMNIROUTE_DIR=/home/runner/omniroute
 OMNIROUTE_TAR=/tmp/OmniRoute.tar.gz
 OMNIROUTE_ARCHIVE="dropbox:self-hosted/OmniRoute.tar.gz"
-# 2026-11-06（主人拍板）：不 pin 版本。恢复出来的 compose 才是真源
-# （上游发版会写回 3.8.52 之类），bootstrap 也用 latest，helper 容器与通知
-# 统一跟随；归档侧 create-omniroute-archive.sh 同口径从 compose 读。
+# 2026-11-07（主人拍板）：每次部署拉最新版。所有路径的镜像引用恒为
+# :latest（不 pin 具体 tag），启动时显式 compose pull 强制刷新 :latest；
+# 云端归档可能仍残留旧 pin（如 3.8.52），恢复时统一归一化成 :latest。
+# helper 容器与 bootstrap 走同一个 :latest，归档侧从 compose 读到的也是它。
 OMNIROUTE_IMAGE="diegosouzapw/omniroute:latest"
 OMNIROUTE_VOLUME="omniroute_omniroute-data"
 # 恢复路径观测标记：ARCHIVE_PRESENT=探测通过；ARCHIVE_SEEN=确认云端归档存在
@@ -240,6 +241,11 @@ restore_omniroute_data() {
   mkdir -p "$OMNIROUTE_DIR"
   cp -a /tmp/omniroute-restore/docker-compose.yml /tmp/omniroute-restore/.env "$OMNIROUTE_DIR/"
   chmod 600 "$OMNIROUTE_DIR/.env"
+  # 2026-11-07（主人拍板）：每次部署拉最新版。云端归档里的 compose 可能还
+  # pin 着旧 tag（3.8.52 等），恢复后把 image 行统一改写为 :latest，避免归档
+  # 把版本钉死；随后 start_omniroute 会 compose pull 刷新 :latest 到当下最新。
+  sed -i -E 's#(^[[:space:]]*image:[[:space:]]*[^[:space:]]*omniroute):[^[:space:]]+#\1:latest#' \
+    "$OMNIROUTE_DIR/docker-compose.yml"
   # 数据卷恢复：归档内 data.tar.gz → docker 卷。server.env（STORAGE_ENCRYPTION_KEY）
   # 与 storage.sqlite 必须同代，否则存量 key 解不开 —— 二者同一份归档，天然同代。
   # storage-backup.sqlite（归档侧 sqlite 在线一致性备份）优先于活库三件套。
@@ -569,12 +575,22 @@ start_omniroute() {
   docker rm -f omniroute 2>/dev/null || true
   docker volume create "$OMNIROUTE_VOLUME" >/dev/null
   if [ -f "$OMNIROUTE_DIR/docker-compose.yml" ]; then
-    docker compose -p omniroute -f "$OMNIROUTE_DIR/docker-compose.yml" --project-directory "$OMNIROUTE_DIR" up -d || return 1
+    # 2026-11-07（主人拍板）：每次部署都拉 :latest 的当下最新镜像。
+    # 单独 pull 而非 up --pull always：pull 失败只告警、不阻断 up（沿用本地
+    # 缓存镜像），避免 Docker Hub 抖动把整条网关降级链打挂。
+    docker compose -p omniroute -f "$OMNIROUTE_DIR/docker-compose.yml" \
+      --project-directory "$OMNIROUTE_DIR" pull omniroute \
+      || echo "⚠️ OmniRoute :latest 拉取失败，沿用本地缓存镜像（不阻断启动）"
+    docker compose -p omniroute -f "$OMNIROUTE_DIR/docker-compose.yml" \
+      --project-directory "$OMNIROUTE_DIR" up -d || return 1
   else
     # bootstrap 路径同样要带长上下文阈值 —— 与上方 compose heredoc
     # （restore 路径）保持同值，否则归档缺失的冷启动会被默认
     # readiness 80s + provider 失败计数 7/15 又快快打成熔断。
     # 阈值依据见 compose heredoc 处的注释块（2026-10-12 实测调参）。
+    # 2026-11-07（主人拍板）：冷启动同样先刷新 :latest，本地有旧缓存也不会用旧版。
+    docker image pull "$OMNIROUTE_IMAGE" \
+      || echo "⚠️ OmniRoute :latest 拉取失败，沿用本地缓存镜像（不阻断启动）"
     docker run -d \
       --name omniroute \
       --restart unless-stopped \

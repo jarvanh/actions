@@ -273,30 +273,16 @@ jobs:
           # $1 = prefetch 目录（父 shell 的变量不会自动进子 shell，必须显式传）
           P="$1"
           # qoder / rss 用浮动 latest（部署步骤会按实际 tag 再拉一次）。
-          # OmniRoute 不 pin 版本（2026-11-06，主人拍板）：真实 tag 在归档内
-          # docker-compose.yml，由下面的 pull-one-tar.sh 下载后本地解析到
-          # $P/omniroute-image.txt（不重复下载 540MB 整包、也不与 prestart 消费
-          # 归档抢文件）。等不到该文件就按 :latest 兜底，消费方同步拉取路径不变。
+          # 2026-11-07（主人拍板）：每次部署拉最新版。OmniRoute 的镜像引用恒为
+          # :latest，预取直接拉 :latest（与 start_omniroute 的 compose pull 同口径），
+          # 不再解析归档里可能残留的旧 pin tag；三个镜像并行拉，缩短启动关键路径。
           docker image pull rongronggg9/rss-to-telegram:latest >"$P/pull-rss.log" 2>&1 &
           _rss_pid=$!
           docker image pull ghcr.io/jarvanh/qoder2api-hub:latest >"$P/pull-qoder.log" 2>&1 &
           _qoder_pid=$!
-          OMNI_IMG="diegosouzapw/omniroute:latest"
-          _waited=0
-          while [ ! -s "$P/omniroute-image.txt" ] && [ "$_waited" -lt 300 ]; do
-            sleep 2; _waited=$((_waited + 2))
-          done
-          if [ -s "$P/omniroute-image.txt" ]; then
-            _img="$(cat "$P/omniroute-image.txt")"
-            case "${_img:-}" in
-              *omniroute:*) OMNI_IMG="$_img"; echo "✅ OmniRoute 归档 tag: $OMNI_IMG" ;;
-              *) echo "ℹ️ tag 文件内容异常（${_img:-empty}），按 :latest 预取" ;;
-            esac
-          else
-            echo "ℹ️ 未等到归档 tag 文件，按 :latest 预取"
-          fi
-          docker image pull "$OMNI_IMG" >"$P/pull-omniroute.log" 2>&1
-          wait "$_rss_pid" "$_qoder_pid"
+          docker image pull diegosouzapw/omniroute:latest >"$P/pull-omniroute.log" 2>&1 &
+          _omni_pid=$!
+          wait "$_rss_pid" "$_qoder_pid" "$_omni_pid"
           PF_EOF
           chmod +x "$P/pull-openclaw-tar.sh" "$P/pull-images.sh"
 
@@ -335,21 +321,8 @@ jobs:
           rc=$?
           if [ "$rc" -eq 0 ] && [ -s "$P/${NAME}.tar.gz.part" ]; then
             mv "$P/${NAME}.tar.gz.part" "$P/${NAME}.tar.gz"
-            # 2026-11-06：OmniRoute 归档内 compose 的 image: 才是真实版本
-            #（上游发版会写回，实测 3.8.51→3.8.52）。本地读 4KB 的 compose
-            # 成员落一个小文件，供 pull-images.sh 拉对应 tag；成员名带 ./
-            # 前缀（tar -tzf 实证），两种写法都试。读不到就不写，让预取按
-            # :latest 兜底。此文件不会 move，避免与 prestart 消费归档竞态。
-            if [ "$NAME" = "OmniRoute" ]; then
-              _compose="$(tar -xzOf "$P/${NAME}.tar.gz" ./docker-compose.yml 2>/dev/null || \
-                         tar -xzOf "$P/${NAME}.tar.gz" docker-compose.yml 2>/dev/null || true)"
-              _tag="$(printf '%s\n' "$_compose" | \
-                grep -m1 -E '^[[:space:]]*image:[[:space:]]*[^#[:space:]]+' | \
-                sed -E 's/^[[:space:]]*image:[[:space:]]*//; s/[[:space:]]*#.*$//; s/[[:space:]]*$//' || true)"
-              case "${_tag:-}" in
-                *omniroute:*) printf '%s\n' "$_tag" > "$P/omniroute-image.txt" ;;
-              esac
-            fi
+            # 2026-11-07（主人拍板）：每次部署拉最新版，预取已固定拉 :latest；
+            # 不再从归档 compose 解析旧 pin tag 写 omniroute-image.txt（已废弃）。
           else
             rm -f "$P/${NAME}.tar.gz.part"
             [ "$rc" -eq 0 ] && rc=1
@@ -2982,8 +2955,8 @@ jobs:
           MIN_SIZE=$((1024 * 1024))
           SRC_DIR="/home/runner/omniroute"
           VOLUME="omniroute_omniroute-data"
-          # 2026-11-06（主人拍板）：helper 容器跟随部署目录 compose 的实际 tag，
-          # 不再 pin（prefetch / run-ai-gateway.sh 同口径）；读不到则 :latest 兜底。
+          # 2026-11-07（主人拍板）：helper 容器跟随部署目录 compose 的 :latest，
+          # 不 pin 具体 tag（prefetch / run-ai-gateway.sh 同口径）；读不到则 :latest 兜底。
           IMAGE="$(grep -m1 -E '^[[:space:]]*image:[[:space:]]*[^#[:space:]]+' "$SRC_DIR/docker-compose.yml" 2>/dev/null | \
             sed -E 's/^[[:space:]]*image:[[:space:]]*//; s/[[:space:]]*#.*$//; s/[[:space:]]*$//')"
           case "${IMAGE:-}" in
