@@ -912,7 +912,13 @@ jobs:
             echo "🚨 ${FIX_EXHAUSTED} 个文件用尽全部修复方法仍未落盘（永久性失败）—— 这类文件不会被后续轮次自动修好，需人工看 fail_list 的原因（文件路径见 /tmp/ol_fix_events.log 的 EXHAUSTED 行）"
             grep '^EXHAUSTED|' /tmp/ol_fix_events.log 2>/dev/null | head -5 | cut -c1-200 || true
           elif [ "$FIX_DENOM" -gt 0 ] && [ "$FIX_RATE" -lt "${OPENLIST_FIX_RATE_WARN_PCT:-50}" ]; then
-            echo "⚠️ 修复成功率偏低（${FIX_RATE}% < ${OPENLIST_FIX_RATE_WARN_PCT:-50}%）: 本轮新落盘 ${ROUND_FIXED_NEW} / 需修 ${FIX_DENOM} —— 看 fail_list 的原因分布（可用 openlist-diag 的 big_mb 阶梯排查落盘形态）"
+            # ⚠️ 口径警示（run 42240519035 实测 16% 误报）: ROUND_FAILED 里混着
+            # **预算耗尽没轮到**的顺延项（同一轮日志有「修复管线预算将尽 → 剩余
+            # 387/395 个文件交下轮接力」），它们不是失败 —— 该轮 方法耗尽=0、
+            # 失败=0、探针反证 4 次全部正确放行。判读顺序: 先看上方「方法耗尽/
+            # 顺延下轮」，只有 方法耗尽>0 或 FIX_FAIL 高才代表后端拒收；
+            # 低成功率 + 零方法耗尽 = 大概率只是没轮到，勿按后端故障排查。
+            echo "⚠️ 修复成功率偏低（${FIX_RATE}% < ${OPENLIST_FIX_RATE_WARN_PCT:-50}%）: 本轮新落盘 ${ROUND_FIXED_NEW} / 需修 ${FIX_DENOM} —— 注意: 分母含预算耗尽顺延项（见上方「交下轮接力」行数），零方法耗尽时勿判后端故障；真失败看 fail_list 原因分布（可用 openlist-diag 的 big_mb 阶梯排查落盘形态）"
           fi
 
           actual_entries=0
