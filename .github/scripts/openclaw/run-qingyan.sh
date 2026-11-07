@@ -124,6 +124,26 @@
       fi
     fi
 
+    # 净额覆盖（2026-11-07）：fetch 的到期金额是上游「发放时原始额」，消费不会
+    # 减小它；看板 11-07 起已改用按流水分摊的净额（qingyan-live.json）。就绪
+    # 通知同口径：看板 CLI（assets qingyan，TSV：7天净过期/最近到期/该批净剩）
+    # 仅在实时净额命中时给值 —— 覆盖到期展示值并在标题标注（净额）；拿不到
+    # 就沿用 fetch 原值，不把 gross 冒充 net。⚠️ 只改展示：delta 落快照仍用
+    # fetch 原值（快照保持原始额口径，是净额重算的对照基准，不能混）。
+    # 余额行不换源：GL_SCORE 本就是通知发出那一刻的上游即时余额（净额真值）。
+    D_SOONEST="${GL_SOONEST:-}"
+    D_SOONEST_AMT="${GL_SOONEST_AMT:-}"
+    D_SOON_EXPIRE="${GL_SOON_EXPIRE:-}"
+    D_NET=""
+    if [ -n "${GL_SCORE:-}" ]; then
+      if _qyn="$(python3 /dropbox/self-hosted/quota-board/board.py assets qingyan 2>/dev/null)" && [ -n "$_qyn" ]; then
+        D_SOON_EXPIRE="$(printf '%s' "$_qyn" | cut -f1)"
+        D_SOONEST="$(printf '%s' "$_qyn" | cut -f2)"
+        D_SOONEST_AMT="$(printf '%s' "$_qyn" | cut -f3)"
+        D_NET=1
+      fi
+    fi
+
     if [ "$GL_OK" != "1" ]; then
       _m=""
       tg_add_title _m "❌ qingyan-proxy 启动失败"
@@ -156,7 +176,13 @@
       # 子行 = 明细）。只在采集成功时出现——接口失败时什么都不说，
       # 不把「没取到」谎报成「余额 0」。
       if [ -n "${GL_SCORE:-}" ]; then
-        tg_add_section _m "💳 积分 · 1"
+        # 标题注「净额」（2026-11-07）：到期两行来自看板实时净额时标注；沿用
+        # fetch 原值时不标（余额本就是通知发出那一刻的上游即时值）。
+        if [ -n "$D_NET" ]; then
+          tg_add_section _m "💳 积分（净额） · 1"
+        else
+          tg_add_section _m "💳 积分 · 1"
+        fi
         # 单条目结构：条目行手拼 tree_conn、子行手拼 tree_sub。
         # 不能用 tree_lines —— 它把每行都当兄弟条目，子行会被渲染成 ├─/└─
         # 与条目平级（规范 · 二层列表要求子行与条目正文同列）。
@@ -164,13 +190,22 @@
         _gl_rows+="$(tree_conn 1)$(tg_entry "$(printf '%s' "$GL_SCORE")" "今日已消耗 $(printf '%s' "$GL_DAY_TOTAL")")"$'\n'
         [ -n "${GL_ROUND_DELTA:-}" ] && _gl_rows+="$(tree_sub 1)$(escape_html "本轮消耗 ${GL_ROUND_DELTA}（自检产生）")"$'\n'
         # 到期：最近一批 + 7 天内将过期的总额。「-」表示没有带有效期的入账，
-        # 此时整行省略——不把「没取到」渲染成「00-00 到期」。
-        if [ -n "${GL_SOONEST:-}" ] && [ "$GL_SOONEST" != "-" ]; then
-          if [ -n "${GL_SOON_EXPIRE:-}" ] && [ "$GL_SOON_EXPIRE" != "0" ]; then
-            _gl_rows+="$(tree_sub 1)$(escape_html "最近到期 ${GL_SOONEST}（该批 ${GL_SOONEST_AMT}）· 7 天内将过期 ${GL_SOON_EXPIRE}")"$'\n'
-          else
-            _gl_rows+="$(tree_sub 1)$(escape_html "最近到期 ${GL_SOONEST}（该批 ${GL_SOONEST_AMT}）")"$'\n'
-          fi
+        # 此时整行省略——不把「没取到」渲染成「00-00 到期」。净额模式下数值
+        # 已按消费分摊（看板同口径），标签随之改「净过期/净剩」；7 天窗与该批
+        # 净剩都为 0 时整行省略（真有才显示 —— 批次还在但余额已被消费完，
+        # 没有「即将损失」可报）。
+        _batch_lbl="该批"; _exp_lbl="7 天内将过期"
+        if [ -n "$D_NET" ]; then
+          _batch_lbl="该批净剩"; _exp_lbl="7 天内净过期"
+        fi
+        _exp_zero="$(awk -v a="${D_SOON_EXPIRE:-0}" 'BEGIN{print (a+0==0)?1:0}' 2>/dev/null || echo 1)"
+        _amt_zero="$(awk -v a="${D_SOONEST_AMT:-0}" 'BEGIN{print (a+0==0)?1:0}' 2>/dev/null || echo 1)"
+        if [ "$_exp_zero" = "1" ] && [ "$_amt_zero" = "1" ]; then
+          true
+        elif [ "$_exp_zero" = "0" ]; then
+          _gl_rows+="$(tree_sub 1)$(escape_html "最近到期 ${D_SOONEST}（${_batch_lbl} ${D_SOONEST_AMT}）· ${_exp_lbl} ${D_SOON_EXPIRE}")"$'\n'
+        else
+          _gl_rows+="$(tree_sub 1)$(escape_html "最近到期 ${D_SOONEST}（${_batch_lbl} ${D_SOONEST_AMT}）")"$'\n'
         fi
         [ -n "${GL_SCORE_RULE:-}" ] && _gl_rows+="$(tree_sub 1)$(escape_html "${GL_SCORE_RULE}")"$'\n'
         tg_add_block _m "${_gl_rows%$'\n'}"
