@@ -145,6 +145,9 @@ agent_created: true
 ### scripts/
 
 - `render_preview.sh` —— 用真源助手渲染预览（对应规范 · 渲染预览），直接执行即可。
+- `smoke_assets_bridge.sh` —— 资产段桥接冒烟（对应规范 8.3）：看板 `board.py assets`
+  CLI → 各网关就绪通知的引用链契约检查。**本机跑看板改动后必须执行**；校验契约
+  不校验数据快照，空输出合法，真源缺失退出码 2=SKIP。
 
 ### references/
 
