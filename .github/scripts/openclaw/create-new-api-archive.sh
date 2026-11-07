@@ -48,7 +48,7 @@ chmod 600 "$STAGE/.env" 2>/dev/null || true
 chmod 700 "$STAGE/secrets" 2>/dev/null || true
 find "$STAGE/secrets" -type f -exec chmod 600 {} + 2>/dev/null || true
 
-tar -C "$STAGE" -czf "$OUTPUT_TAR" .
+nice -n 19 ionice -c3 tar -C "$STAGE" -czf "$OUTPUT_TAR" .
 chmod 644 "$OUTPUT_TAR" 2>/dev/null || true
 
 actual_size=$(stat -c%s "$OUTPUT_TAR" 2>/dev/null || echo 0)
