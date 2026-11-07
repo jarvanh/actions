@@ -400,8 +400,11 @@ tg_route() {
   _TG_TOKEN="${TELEGRAM_BOT_TOKEN}"
   _TG_CHAT="${TELEGRAM_CHAT_ID}"
   if [ "$tier" = "alert" ]; then
-    _TG_TOKEN="${TELEGRAM_BOT_TOKEN_ALERT}"
-    _TG_CHAT="${TELEGRAM_CHAT_ID_ALERT}"
+    # set -u 下未注入的 ALERT 凭据必须默认空串：让 _tg_send_once 的
+    # 「凭据缺失 → 失败留痕（不回落主 bot）」兜底接管，而不是整个 shell
+    # 在这里被 unbound 杀死（2026-11-07 实锤：手工重跑部署时告警路径炸死）。
+    _TG_TOKEN="${TELEGRAM_BOT_TOKEN_ALERT:-}"
+    _TG_CHAT="${TELEGRAM_CHAT_ID_ALERT:-}"
   fi
 }
 
