@@ -2463,6 +2463,16 @@ sync_by_file_batches() {
         grep 'ERROR.*object not found' "$batch_log" 2>/dev/null | head -50 | while IFS= read -r line; do
           echo "  ${line}"
         done
+      elif [ "$rc" -eq 124 ]; then
+        # rc=124 = 被单片上限/预算 timeout 收掉（2026-11-08 修，run 42471607159
+        # 实证: 第 4/21 对批次 2 被截断 → failed_batches++ → 尾部
+        # SYNC_FAILED_BATCH=1 → worker 报 failed·0 B，但该对实际传了 ~20 GiB、
+        # 358/358 持久化验证全过）。截断是我们自己的单片封顶在正常工作，
+        # 不是传输失败 —— rclone 幂等、未传部分下轮续传，语义等同"部分成功"。
+        # 不计 failed（避免洗白 marker/游标/通知三处口径），也不冒充 synced
+        # （本批确实没传完，剩余文件仍进巩固/下轮接力）。
+        synced_batches=$((synced_batches + 1))
+        echo "批次 $((i+1)) 被单片上限截断 (rc=124) → 部分成功，未传部分由巩固/下轮接力"
       else
         failed_batches=$((failed_batches + 1))
         # 英文 token 不直出通知（规范 · 失败与异常）: exit=N 改写为中文说明

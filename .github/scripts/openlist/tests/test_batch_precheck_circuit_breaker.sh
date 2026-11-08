@@ -236,6 +236,25 @@ chk "G5 最终全量同步照跑" "$SYNC_WITH_LOGGING_CALLS" "1"
 chk "G5 尾部归并 SYNC_FAILED=1" "${SYNC_FAILED}" "1"
 unset COPY_FAIL_RC_OVERRIDE
 
+# ---------- G5b: 批次被单片上限截断（rc=124）→ 部分成功，不算失败 ----------
+# 2026-11-08 修，run 42471607159 实证: 批次 2 被我们自己的单片封顶 timeout 收掉
+# → 旧代码落进 else 计 failed_batches++ → 尾部 SYNC_FAILED_BATCH=1 → worker 报
+# failed·0 B，但该对实际传了 ~20 GiB、358/358 持久化验证全过。rc=124 是截断
+# 机制在正常工作（rclone 幂等、下轮续传），等同"部分成功"而非失败。
+COPY_FAIL_RC_OVERRIDE=124
+SYNC_FAILED=0
+prepare_case
+G5B_OUT=$(sync_by_file_batches "/src" "openlist:crypt" "t_g5b" 2>&1 || true)
+chk "G5b return 0" "$?" "0"
+chk "G5b 三批均尝试传输" "$(copy_count)" "3"
+chk "G5b 尾部不归并 SYNC_FAILED（截断≠失败）" "${SYNC_FAILED}" "0"
+if echo "$G5B_OUT" | grep -q "被单片上限截断 (rc=124)"; then
+  chk "G5b 截断提示（部分成功口径）" "1" "1"
+else
+  chk "G5b 截断提示（部分成功口径）" "0" "1"
+fi
+unset COPY_FAIL_RC_OVERRIDE
+
 # ---------- G6: 批次循环预算闸（近几轮 330min 硬杀的直接根因） ----------
 # 旧行为: 批次循环完全不看 OPENLIST_SYNC_DEADLINE_EPOCH，只剩十几分钟也照开新批
 # → 320min 优雅到站永远拿不到，全被 timeout-minutes: 330 硬杀（run 34723502766 /
