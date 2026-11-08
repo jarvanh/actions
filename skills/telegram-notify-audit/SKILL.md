@@ -8,9 +8,10 @@ agent_created: true
 
 ## Overview
 
-`docs/telegram-notify.md` 是全库通知版式的唯一真源。核对基线**单独维护在**
-`references/audit-checklist.md`（逐轮累积的「已统一 N 项」），不写进规范文档——
-数字断言放在规范里必然腐化。本 skill 把核对流程固化下来：读真源 → 机械扫描 → 四域并行
+`docs/telegram-notify.md` 是全库通知**版式**的唯一真源；**逐条通知清单**（哪个通知
+在哪个文件、走什么档位）维护在 `docs/telegram-notify-registry.md`（台账）。核对基线
+**单独维护在** `references/audit-checklist.md`（逐轮累积的「已统一 N 项」），不写进
+规范文档——数字断言放在规范里必然腐化。本 skill 把核对流程固化下来：读真源 → 机械扫描 → 四域并行
 通读 → **逐条复核** → 渲染预览 → 回归验证 → 回写基线；**用户贴了具体通知时，先本地
 复现那条通知再动手**。
 
@@ -27,8 +28,10 @@ agent_created: true
 
 ### 第 0 步：读真源（不可跳过）
 
-先完整读 `docs/telegram-notify.md`，重点是「版式构件」一章、折叠规则判定、
-「发送层」（硬约束）、「验证与交付」；既有基线见 `references/audit-checklist.md`。
+先完整读 `docs/telegram-notify.md`（版式规范），需要「哪些通知存在」时查
+`docs/telegram-notify-registry.md`（台账，随实现更新）；重点是「版式构件」一章、
+折叠规则判定、「发送层」（硬约束）、「验证与交付」；既有基线见
+`references/audit-checklist.md`。
 
 判定「谁是真源」看三样：真源文件的注释、测试夹具、与平行实现的对照——
 **不看出现次数**。多处重复实现不代表它是规范。

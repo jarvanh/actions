@@ -9,7 +9,8 @@
 # 提供:
 #   Esc-Html <s>           HTML 实体转义（& < >）
 #   Get-TgFooter           收尾区字符串（⏱ 已运行 X · 🔗 运行日志；降级链与 tg_add_footer 同）
-#   Send-TgMessage <text>  单条发送（HTML；失败 throw，错误含响应体前 200 字符）
+#   Send-TgMessage <text> [tier]  单条发送（HTML；失败 throw，错误含响应体前 200 字符；
+#                             tier=alert 走 @SaberFuckBot，凭据缺失不回落主 bot）
 #   $TG_SEP                统一分隔线（18 个全角横线，勿手写）
 
 $TG_SEP = [string][char]0x2501 * 18
@@ -19,7 +20,7 @@ function Esc-Html([string]$s) {
   return ($s -replace '&','&amp;' -replace '<','&lt;' -replace '>','&gt;')
 }
 
-# 秒数 → 中文三段式（X 小时 Y 分 / X 分钟 / X 秒，与 bash tg_add_footer 逐字一致）
+# 秒数 → 中文三段式（X 小时 Y 分 / X 分钟 / X.XX 秒两位小数，与 bash tg_add_footer 逐字一致）
 function Format-TgDuration([int]$totalSec) {
   $hh = [int][math]::Floor($totalSec / 3600)
   $mm = [int][math]::Floor(($totalSec % 3600) / 60)

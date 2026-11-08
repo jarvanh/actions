@@ -6,8 +6,8 @@
 #   - parse_mode=HTML，动态内容必须经 escape_html 转义（tg_* 助手已内置）
 #   - HTML 解析失败（400 can't parse entities）直接报错、不重发：消息本来就没发出去，
 #     退化纯文本只会把版式 bug 藏起来；动态内容一律经 tg_* 助手转义即可避免
-#   - 429 限流按 retry_after 等待重试；长消息按 4000 字符分片（断在换行处，
-#     不切 UTF-8 多字节字符）
+#   - 429 限流按 retry_after 等待重试；长消息按 3800 UTF-16 码元分片（断在换行处、
+#     不切多字节，分片边界自动闭合/重开 HTML 标签——见 send_tg_chunked 注释）
 # 用法: source tg_notify.sh
 # 目录职责: 本目录 = 通知域（bash 真源 tg_notify.sh，pwsh 真源 tg_notify.ps1）。
 #   Telegram 频道内容管线（同步/上传/去重/清理）见 scripts/tg-channel/ ——

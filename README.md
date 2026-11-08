@@ -22,7 +22,8 @@ proxy-speedtest/            测速结果数据
 
 | 文档 | 内容 |
 |---|---|
-| [`docs/telegram-notify.md`](docs/telegram-notify.md) | **Telegram 通知规范**（全库唯一真源：版式模板、收尾区、禁止事项、检查清单） |
+| [`docs/telegram-notify.md`](docs/telegram-notify.md) | **Telegram 通知规范**（版式与发送规则的唯一真源：版式模板、收尾区、发送层硬约束、验证基线） |
+| [`docs/telegram-notify-registry.md`](docs/telegram-notify-registry.md) | **Telegram 通知台账**（全库通知逐条清单：在哪、何时发、走什么档位；随实现更新） |
 | [`docs/emby.md`](docs/emby.md) | Emby 媒体服务器 + 302 直链子系统（架构、凭据体系、通知、排查手册） |
 | [`docs/openclaw.md`](docs/openclaw.md) | OpenClaw Runner：自愈五层机制 + 常驻服务（rss-to-telegram / AI 网关）+ Tailscale 远程入口 |
 | [`docs/proxy-speedtest-gitee.md`](docs/proxy-speedtest-gitee.md) / [`-cdn.md`](docs/proxy-speedtest-cdn.md) / [`-taier.md`](docs/proxy-speedtest-taier.md) | 代理测速三套（按测速点命名）：Gitee 上行/下行/延迟 / 国内 CDN 延迟+下载 / 泰尔三网 |
@@ -93,7 +94,7 @@ proxy-speedtest/            测速结果数据
 | **task** | `task_preview.sh` | 任务预览（大小估算、跳过预判、未传量估算） |
 | | `task_engine.sh` | 任务注册表与编排（分批、轮转、阶段行生产 + 子任务分发前注入父级守卫，防「父级已修被子目录 sync 删」） |
 | **基础** | `utils.sh` | 通用工具（格式化、日志判定、`_norm_rel_path` 读取侧路径归一化（`./` 污染兜底）；转义/树形渲染已收敛到 `telegram/tg_notify.sh`） |
-| | `telegram.sh` | Telegram 进度面板（`send_telegram_message` + 原地编辑；排版/发送 source 真源） |
+| | `telegram.sh` | Telegram 进度面板（`send_telegram_message` + 删旧发新维护 message_id；排版/发送 source 真源） |
 | | `load_all.sh` | 统一加载入口（L0 通知真源 → L6 分层；注释含 §N.N 引用指引） |
 | **诊断**（`openlist-diag.yml` 调用） | `diag_common.sh` | 诊断族公共函数（`say/sec/http_code_of/is_409/_mk`） |
 | | `diag_backend.sh` | 后端可写性总诊断：多组写探针（挂载根/任务子路径/并发/大文件阶梯）+ 容器日志原始 `rsp_code` dump |

@@ -32,7 +32,7 @@ grep -nE '^(函数名)\(\)|^def 函数名|^function 函数名|\$?TG_SEP *=' 真�
 | 折叠（已构建条目流） | `tree_fold` | — | — |
 | 时长格式化（收尾三段式） | `tg_add_footer` 内置 | `Format-TgDuration` | `tg_format_elapsed` |
 | 耗时（正文单条，毫秒/秒双档） | `tg_format_ms` | —（无消费场景） | —（延迟走指标串例外） |
-| 发送 | `send_tg` / `send_tg_chunked` | `Send-TgMessage` | `send_telegram` / `send_telegram_chunked` |
+| 发送 | `send_tg` / `send_tg_chunked`（可选 `tier`） | `Send-TgMessage <text> [tier]` | `send_telegram` / `send_telegram_chunked`（可选 `tier`，alert 无回落与 bash 同语义） |
 | 原样追加（**不转义**） | `tg_append` | — | — |
 
 pwsh 侧**只有 5 个成员**（`$TG_SEP` / `Esc-Html` / `Format-TgDuration` / `Get-TgFooter` / `Send-TgMessage`），没有第六个。全库 dot-source 它的只有 `rdp.yml` 与 `tailscale-windows.yml`。
@@ -92,6 +92,10 @@ tree_code_fold <多行裸文本> [上限=8]          # 转义 + <code> + 截断
 
 已知例外：测速指标串里的延迟用紧凑 `NNms`（要和 `↑`/`↓` 并排）。
 
+**分片口径三套有意不同**（发送层硬约束，详见规范第 7 章）：bash >3900 UTF-16 码元触发、
+按 3800 UTF-16 码元切且**分片边界自动闭合/重开 HTML 标签**；python 按 4000 Python 码点切、
+**无**标签闭合（超长 `<pre>` 破版，故原始输出按尾部 1200 字节截断）；pwsh 无分片。
+
 **大小**：1024 进制 + 三位小数 + IEC 单位 → `1.150 GiB` / `800 MiB`。bash 侧唯一实现是通知真源 `tg_notify.sh` 的 `format_bytes`，source 真源后直接用；python 侧仍有两处同义实现（`add_uploaded_video.py`、`sync_to_tg.sh` 内嵌段），改口径时要同步。**不要用 `du -h` 的 `1G`，也不要输出裸字节。**
 
 **日期**：`YYYY-MM-DD HH:MM UTC` + ` · N 小时前`（解析失败保留原值）。
@@ -110,7 +114,7 @@ tree_code_fold <多行裸文本> [上限=8]          # 转义 + <code> + 截断
 
 ## 6. 状态图标语义
 
-`✅` 成功 · `⚠️` 部分失败/警告 · `❌` 失败 · `⏭️` 跳过 · `🔄` 进行中 · `⏳` 待处理 · `⛔` 中断 · `🚨` 危险警告 · `🆘` 灾难恢复 · `📍` 进度面板当前阶段
+`✅` 成功 · `⚠️` 部分失败/警告 · `❌` 失败 · `⏭️` 跳过 · `🔄` 进行中 · `⏳` 待处理 · `⛔` 中断 · `🚨` 危险警告 · `🆘` 灾难恢复 · `📍` 进度面板当前阶段 · `🟡` 降级但服务在 · `🟠` 需人工介入 · `🕒` 常驻服务报告时刻（只用于无 run 上下文的收尾区） · `🚫` 本轮中止（预期内收尾） · `🧯` 自动接力熔断 · `⏸️` 轮次收摊（预算到站）
 
 图标要与结论一致：0 成功 / 中止 / 数据缺失时标题应降级。**不要自造** `⭐` `🥇` 之类前缀。
 

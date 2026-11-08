@@ -64,7 +64,7 @@ source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 
 # 收集文件名与大小，用于通知（树形条目统一 ├─/└─；元数据 " · …"，禁括号）。
 # 每组上限 8 条 + 折叠行"还有 N 条…"并入条目流（规范 · 折叠规则：残留可能上百条，
-# 全量穷举会刷屏并顶到 4000 分片边界把收尾区切走；末条 └─ 由 tree_lines 统一决定）
+# 全量穷举会刷屏并顶到分片边界把收尾区切走；末条 └─ 由 tree_lines 统一决定）
 FILE_DETAILS=""
 for f in "${FRAG_FILES[@]}"; do
   fname=$(basename "$f")
@@ -95,7 +95,7 @@ send_tg_chunked "$msg"
 
 - 机器值（对象 / Run ID）走 `tg_add_path` 进 `<code>`，自然语言（结论 / 原因）走 `tg_add_kv` 裸文本；
 - 分节 `🧾 原始输出` **不带** ` · N`（计数只用于条目列表）；
-- `tg_add_pre full_msg "$(printf '%s' "$detail" | tail -c 1200)"` —— 尾部 1200 字节，超长会跨分片破版；
+- `tg_add_pre full_msg "$(printf '%s' "$detail" | tail -c 1200)"` —— 尾部 1200 字节（python 侧分片无标签闭合，超长 `<pre>` 跨分片会破版）；
 - `<pre>` 是正文最后一块，其后只跟收尾区。
 
 复制即用命令块的固定形态看 `openlist/sync_marker.sh` 的 `▸ 强制同步` 段：`tg_add_note "▸ 描述"` + `tg_add_pre "命令"` 成对出现（`file_split.sh` 的 `tg_add_pre` 同形态）。

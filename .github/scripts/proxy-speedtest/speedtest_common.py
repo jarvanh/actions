@@ -681,12 +681,27 @@ def build_target_network_section(targets):
 # ---------------------------------------------------------------------------
 # Telegram 发送层（统一 HTML 版式；400 不退化，429 重试）
 # ---------------------------------------------------------------------------
-def send_telegram(env, text):
+def send_telegram(env, text, tier=''):
     """发送 Telegram 消息（统一 HTML parse_mode；429 自动重试，其余失败直接返回
     {'sent': False, ...} 并带上响应体）。文本应使用全库统一 HTML 版式（emoji 标题 + ━━━
-    分隔线 + /<code>/ + 统一收尾行）；动态内容一律经 tg_* 助手转义。"""
-    bot = env.get('TELEGRAM_BOT_TOKEN') or env.get('TG_BOT_TOKEN')
-    chat = env.get('TELEGRAM_CHAT_ID') or env.get('TG_CHAT_ID')
+    分隔线 + /<code>/ + 统一收尾行）；动态内容一律经 tg_* 助手转义。
+
+    档位路由（与 bash 真源 tg_notify.sh 同语义，规范 · 发送层要求）：
+      tier='alert' → 重要通知 → TELEGRAM_BOT_TOKEN_ALERT / TELEGRAM_CHAT_ID_ALERT
+                     （无回落：凭据缺失即 {'sent': False} 留痕，绝不发到主 bot 会话）
+      其余/缺省    → 普通通知 → TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID
+    """
+    if tier == 'alert':
+        bot = env.get('TELEGRAM_BOT_TOKEN_ALERT')
+        chat = env.get('TELEGRAM_CHAT_ID_ALERT')
+        if not bot or not chat:
+            # 与 bash _tg_send_once 同语义：alert 档不回落主 bot——告警静默发到
+            # 错误会话比丢失更糟；凭据缺失就失败留痕，调用方 log_progress 记原因
+            return {'sent': False,
+                    'reason': 'alert 档凭据缺失（TELEGRAM_BOT_TOKEN_ALERT / TELEGRAM_CHAT_ID_ALERT），不回落主 bot'}
+    else:
+        bot = env.get('TELEGRAM_BOT_TOKEN') or env.get('TG_BOT_TOKEN')
+        chat = env.get('TELEGRAM_CHAT_ID') or env.get('TG_CHAT_ID')
     if not bot or not chat:
         return {'sent': False, 'reason': 'missing TELEGRAM_BOT_TOKEN/TG_BOT_TOKEN or TELEGRAM_CHAT_ID'}
 
@@ -739,13 +754,15 @@ TG_SEP = '━' * 18
 TG_CHUNK_SIZE = 4000
 
 
-def send_telegram_chunked(env, text):
-    """长消息按 4000 字符分片发送（规范 · 发送层：断在换行处，不切 UTF-8 多字节字符，
-    与 tg_notify.sh send_tg_chunked 同语义）；短消息直接走 send_telegram。"""
+def send_telegram_chunked(env, text, tier=''):
+    """长消息按 4000 字符分片发送（断在换行处，不切 UTF-8 多字节字符；口径与
+    tg_notify.sh 有意不同：bash 按 3800 UTF-16 码元且闭合 HTML 标签，这里按 Python
+    码点、无标签闭合——超长 <pre> 会在边界破版，调用方先按尾部 1200 字节截断）；
+    短消息直接走 send_telegram。tier 语义与 send_telegram 一致（每片同档位发送）。"""
     if not text:
         return {'sent': True}
     if len(text) <= TG_CHUNK_SIZE:
-        return send_telegram(env, text)
+        return send_telegram(env, text, tier)
     chunks = []
     i, n = 0, len(text)
     while i < n:
@@ -758,7 +775,7 @@ def send_telegram_chunked(env, text):
         i = end
     results = []
     for idx, chunk in enumerate(chunks):
-        results.append(send_telegram(env, chunk))
+        results.append(send_telegram(env, chunk, tier))
         if idx < len(chunks) - 1:
             time.sleep(2)
     # 顶层必须有 reason：三套主报告都走本函数，调用方统一读 tg_res['reason'] 记日志。
@@ -776,7 +793,7 @@ def send_telegram_chunked(env, text):
 def tg_format_elapsed(seconds):
     """已运行时长的中文三段式（与 tg_add_footer 同源同形态，勿再自造 40s/5h57m）。
 
-    规则: >=1h → "X 小时 Y 分"；>=1min → "X 分钟"；否则 → "X 秒"
+    规则: >=1h → "X 小时 Y 分"；>=1min → "X 分钟"；否则 → "X.XX 秒"（两位小数）
     注意与 format_duration 分工: 后者是「耗时」的紧凑写法，用于正文；
     本函数用于收尾区，必须与全库通知的 tg_add_footer 逐字一致。
     """

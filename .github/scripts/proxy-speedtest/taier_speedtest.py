@@ -896,8 +896,10 @@ def notify_best_effort(stage: str, msg: str):
     此前本文件多一个前置 env 参数，调用点随之出现 `notify_best_effort(env, ...)`
     与 `notify_best_effort(merged_env(), ...)` 两种写法（2026-09-12 收敛）。
     """
+    # 兜底分支（异常退出/信号终止/未捕获异常）=「必须动手」的告警 → alert 档
+    # （规范 · 发送层档位判定；python 发送层已支持 tier，无回落，凭据缺失留痕）
     try:
-        res = send_telegram(merged_env(), msg)
+        res = send_telegram(merged_env(), msg, 'alert')
         log_progress(stage, sent=bool(res.get('sent')), reason=res.get('reason', ''))
     except Exception as e:
         log_progress(f'{stage}_failed', error=str(e))

@@ -13,7 +13,8 @@ agent_created: true
 | 用途 | 路径 |
 |---|---|
 | 版式规范 | `docs/telegram-notify.md`（版式构件、发送层硬约束、助手速查表） |
-| bash 实现（最全，28 个函数） | `.github/scripts/telegram/tg_notify.sh` |
+| 通知清单 | `docs/telegram-notify-registry.md`（全库有哪些通知、在哪、走什么档位） |
+| bash 实现（最全） | `.github/scripts/telegram/tg_notify.sh` |
 | pwsh 实现（**只有 5 个成员**） | `.github/scripts/telegram/tg_notify.ps1` |
 | python 实现（镜像函数） | `.github/scripts/proxy-speedtest/speedtest_common.py` |
 
@@ -25,7 +26,7 @@ agent_created: true
 |---|---|---|
 | Linux / macOS runner 的 bash step | `source .../telegram/tg_notify.sh` | 助手最全：`tg_add_*` / `tg_entry*` / `tree_*` 全都有 |
 | Windows runner（pwsh） | `. ...\telegram\tg_notify.ps1` | **只有** `Esc-Html` / `Format-TgDuration` / `Get-TgFooter` / `Send-TgMessage` / `$TG_SEP`。**没有** kv 助手、条目助手、树形助手、分片发送——全部手拼 |
-| python 脚本 | `from speedtest_common import ...` | 有 `tg_entry` / `tg_entry_pair` / `tg_entry_codes` / `tg_pre_block` / `tg_footer_line` / `tg_format_elapsed` / `send_telegram(_chunked)`；**没有** `tg_add_*`（全是返回字符串，自己 `'\n'.join`） |
+| python 脚本 | `from speedtest_common import ...` | 有 `tg_entry` / `tg_entry_pair` / `tg_entry_codes` / `tg_pre_block` / `tg_footer_line` / `tg_format_elapsed` / `send_telegram(env, text, tier)`（tier 与 bash 同语义：alert 无回落、凭据缺失留痕）；**没有** `tg_add_*`（全是返回字符串，自己 `'\n'.join`） |
 | bash 里内嵌的 python 段（`python3 - <<'PY'`） | 不能 import 共享层 | 必须在本文件内同义实现 `esc` / `tg_entry` / `tg_pre_block`，漏实现会 `NameError` → 整轮通知丢失 |
 
 ## 第 2 步：接线（漏了 = 通知静默消失，最常被忽略）
@@ -45,7 +46,8 @@ agent_created: true
   平台没有该上下文（官方属性表只有 `run_id` / `run_number` / `run_attempt`），表达式对
   不存在的属性求值为空串；时长由助手侧的 `/proc/1` 开机时刻兜底，无需注入。
 - 凭据校验在**调用方**、且要放在 `source` **之前**：`if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then echo "未配置，跳过"; exit 0; fi`。真源本身不校验。
-- bash 真源有 `TG_BOT_TOKEN` / `TG_CHAT_ID` 别名回退（L48-49）；**pwsh 没有**，必须注入 `TELEGRAM_*`。
+- bash 真源有 `TG_BOT_TOKEN` / `TG_CHAT_ID` 别名回退（变量定义处搜 `TELEGRAM_BOT_TOKEN:=`）；**pwsh 没有**，必须注入 `TELEGRAM_*`。
+- **告警/入口/凭据类通知（alert 档）还要多注两行**：`TELEGRAM_BOT_TOKEN_ALERT` / `TELEGRAM_CHAT_ID_ALERT`（照上面主 bot 两行的格式换成 `_ALERT` 后缀）。alert 档**无回落**：凭据缺失直接发送失败留痕，通知静默丢失——不传 tier 的通知不需要这两行。哪些通知走 alert 见台账档位列。
 - python：凭据从传入的 `env` dict 读，但 `TG_RUN_URL` **只读 `os.environ`**，只给 dict 不够。
 - pwsh step 要 `shell: pwsh`。
 - **汇总类通知建议独立成 step**：业务步骤里常有 `exit 1` 早退（预检失败 / 磁盘不足），
@@ -95,8 +97,9 @@ send_tg "$msg" || echo "::warning::TG 通知发送失败（不影响任务）"
 
 | 函数 | 适用 |
 |---|---|
-| `send_tg "$msg"` | 短消息单条 |
-| `send_tg_chunked "$msg"` | 长消息（>4000 字符分片，断在换行处）。**依赖 runner 上有 python3**，且分片失败被 `|| true` 吞掉 |
+| `send_tg "$msg"` | 短消息单条（>3900 UTF-16 码元自动转分片） |
+| `send_tg_chunked "$msg"` | 长消息（按 3800 UTF-16 码元分片，断在换行处、分片边界自动闭合/重开 HTML 标签）。**依赖 runner 上有 python3**，且分片失败被 `|| true` 吞掉 |
+| `send_tg "$msg" alert` | **重要通知**（告警 + 信息：备份失败、归档告警、网关启动失败、入口/凭据等，档位清单见台账）。step 必须注入 `_ALERT` 凭据（第 2 步），否则失败留痕、通知丢失 |
 
 - 失败**不许吞**：用 `|| echo "::warning::..."` 或 `|| true`，**不要** `>/dev/null 2>&1`。
 - 已 source 发送层就**不得 curl 直发**。唯一例外是需要 `message_id` 的进度面板原地刷新（`openlist/telegram.sh`）。
@@ -131,7 +134,7 @@ send_tg "$msg" || echo "::warning::TG 通知发送失败（不影响任务）"
 4. **通知写在业务块末尾且无 `always()`**：任务失败时反而收不到通知——全库最常被忽略的接线坑。
 5. **pwsh 不自检**：dot-source 后要 `if (-not (Get-Command Send-TgMessage -ErrorAction SilentlyContinue)) { throw ... }`。调用未定义函数是终止错误，step 带 `continue-on-error` 时表现为**通知静默消失**。
 6. **python 兜底分支吞异常**：`try: send_telegram(...) except: pass` 会同时吞掉异常和返回值，400/429 完全没有痕迹。用 `notify_best_effort(stage, msg)`。
-7. **`<pre>` 超长**：原始输出取尾部 1200 字节（与 `file_split.sh` 同口径）——超长会让 `<pre>` 跨 4000 分片、标签断开即破版。
+7. **`<pre>` 超长**：原始输出取尾部 1200 字节（与 `file_split.sh` 同口径）——bash 分片虽会自动闭合标签，python 侧分片不闭合，截短后两套口径都不用操心。
 8. **大小口径**：用通知真源的 `format_bytes`（输出 `1.150 GiB`，1024 进制 + 三位小数），**不是** `du -h` 的 `1G`，也不要裸字节。python 侧两处同义实现改口径时要同步。
 9. **内嵌 python 段漏实现助手**：bash 里的 python 段无法 import 共享层，用到 `tg_entry` 却没在本文件定义 → NameError → 连整轮汇总通知一起丢。
 10. **通知写在会 `exit 1` 的步骤末尾**：步骤级 `always()` 只保证「任务失败时本步骤仍执行」，挡不住步骤**内部**早退——业务步骤在通知之前 `exit 1`，通知就整条不发。汇总类通知独立成 step，业务步骤只负责把结果落文件（`openclaw.yml` 的归档结果即此形态）。
