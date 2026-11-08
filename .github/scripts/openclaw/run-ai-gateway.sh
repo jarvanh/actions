@@ -757,47 +757,59 @@ fi
 
 # ── 就绪/降级 TG 通知（2026-11-01 补齐）：OMNIROUTE_NOTIFY=0 可关（pinned
 # 定点验证时免打扰）；降级带回退原因。版式与六网关脚本同款（title+footer）。
+# 2026-11-08（主人拍板）：OmniRoute 主用就绪的通知不阻塞部署收口，交给
+# notify-omniroute-deferred.sh 后台等首个容器健康结论再发；降级/全败仍立即发。
 if [ "${OMNIROUTE_NOTIFY:-1}" != "0" ]; then
-  _ai_m=""
-  # 自检先行：容器健康状态决定标题图标（规范 · 状态图标语义）——
-  # 2026-11-06 04:16 实拍「容器 starting」仍报 🟢「已就绪」，图标与结论矛盾。
-  _ai_hc="$(curl -s --connect-timeout 2 -o /dev/null -w '%{http_code}' http://127.0.0.1:20128/healthz 2>/dev/null || true)"
-  case "$ACTIVE_BACKEND" in
-    omniroute)   _ai_ct="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' omniroute 2>/dev/null || true)" ;;
-    clirelay)    _ai_ct="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' clirelay 2>/dev/null || true)" ;;
-    cliproxyapi) _ai_ct="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' cli-proxy-api 2>/dev/null || true)" ;;
-  esac
-  _ai_ct_bad=0
-  case "${_ai_ct:-none}" in
-    ""|none|healthy) ;;
-    *) _ai_ct_bad=1 ;;
-  esac
-  if [ -n "${FALLBACK_REASON:-}" ]; then
-    tg_add_title _ai_m "⚠️ AI 网关已降级 · ${ACTIVE_BACKEND}"
-    tg_add_kv _ai_m "回退原因" "${FALLBACK_REASON}"
-  elif [ "$_ai_ct_bad" = "1" ]; then
-    # 🟡 = 降级但服务在（等即可），不与 🟢 混用（规范 · 状态图标语义）
-    tg_add_title _ai_m "🟡 AI 网关已就绪 · ${ACTIVE_BACKEND}"
-    tg_add_kv _ai_m "结论" "服务已监听，容器健康检查未通过（${_ai_ct}），等即可"
+  if [ "$ACTIVE_BACKEND" = "omniroute" ] && [ -z "${FALLBACK_REASON:-}" ]; then
+    # starting = healthcheck start_period（120s）保护期正常态，同步通知必然
+    # 撞上它，每轮都出「🟡 健康检查未通过」假警报（run 42434537774 实锤）。
+    # 后台等待有界（300s 上限，超时按现值仍发），隧道/后续步骤照常先行。
+    nohup bash "${GITHUB_WORKSPACE}/.github/scripts/openclaw/notify-omniroute-deferred.sh" \
+      omniroute "${OMNIROUTE_IMAGE:-diegosouzapw/omniroute:latest}" \
+      > /tmp/omniroute-notify.out 2>&1 &
+    echo "📨 [notify] OmniRoute 就绪通知已后台化（pid $!）：等容器健康结论再发，不阻塞收口"
   else
-    tg_add_title _ai_m "🟢 AI 网关已就绪 · ${ACTIVE_BACKEND}"
-    tg_add_kv _ai_m "结论" "服务已就绪，健康检查通过"
+    _ai_m=""
+    # 自检先行：容器健康状态决定标题图标（规范 · 状态图标语义）——
+    # 2026-11-06 04:16 实拍「容器 starting」仍报 🟢「已就绪」，图标与结论矛盾。
+    _ai_hc="$(curl -s --connect-timeout 2 -o /dev/null -w '%{http_code}' http://127.0.0.1:20128/healthz 2>/dev/null || true)"
+    case "$ACTIVE_BACKEND" in
+      omniroute)   _ai_ct="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' omniroute 2>/dev/null || true)" ;;
+      clirelay)    _ai_ct="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' clirelay 2>/dev/null || true)" ;;
+      cliproxyapi) _ai_ct="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' cli-proxy-api 2>/dev/null || true)" ;;
+    esac
+    _ai_ct_bad=0
+    case "${_ai_ct:-none}" in
+      ""|none|healthy) ;;
+      *) _ai_ct_bad=1 ;;
+    esac
+    if [ -n "${FALLBACK_REASON:-}" ]; then
+      tg_add_title _ai_m "⚠️ AI 网关已降级 · ${ACTIVE_BACKEND}"
+      tg_add_kv _ai_m "回退原因" "${FALLBACK_REASON}"
+    elif [ "$_ai_ct_bad" = "1" ]; then
+      # 🟡 = 降级但服务在（等即可），不与 🟢 混用（规范 · 状态图标语义）
+      tg_add_title _ai_m "🟡 AI 网关已就绪 · ${ACTIVE_BACKEND}"
+      tg_add_kv _ai_m "结论" "服务已监听，容器健康检查未通过（${_ai_ct}），等即可"
+    else
+      tg_add_title _ai_m "🟢 AI 网关已就绪 · ${ACTIVE_BACKEND}"
+      tg_add_kv _ai_m "结论" "服务已就绪，健康检查通过"
+    fi
+    # 2026-11-01 首弹实拍（run 41351683271，主人转发反馈）：原版只有标题+footer，
+    # 比五网关就绪通知薄 —— 补齐 接口/镜像（omniroute）/自检 三件。统一端口方案：
+    # 三后端全部服务在 127.0.0.1:20128（降级不换端口），接口行恒同。OmniRoute 是
+    # token 口径无签到，无资产段（assets CLI 无此源）。
+    tg_add_path _ai_m "接口" "http://127.0.0.1:20128/v1"
+    if [ "$ACTIVE_BACKEND" = "omniroute" ]; then
+      tg_add_path _ai_m "镜像" "${OMNIROUTE_IMAGE:-未知}"
+    fi
+    # 自检是两个机器值（端口+HTTP 码、容器状态）→ 手拼 <code>（规范 · 取值行口径）
+    _ai_hc_txt="<code>20128 HTTP $(escape_html "${_ai_hc:-000}")</code>"
+    if [ -n "${_ai_ct:-}" ]; then
+      _ai_hc_txt="${_ai_hc_txt} · 容器 <code>$(escape_html "$_ai_ct")</code>"
+    fi
+    tg_add_block _ai_m "自检：${_ai_hc_txt}"
+    _ai_notify
   fi
-  # 2026-11-01 首弹实拍（run 41351683271，主人转发反馈）：原版只有标题+footer，
-  # 比五网关就绪通知薄 —— 补齐 接口/镜像（omniroute）/自检 三件。统一端口方案：
-  # 三后端全部服务在 127.0.0.1:20128（降级不换端口），接口行恒同。OmniRoute 是
-  # token 口径无签到，无资产段（assets CLI 无此源）。
-  tg_add_path _ai_m "接口" "http://127.0.0.1:20128/v1"
-  if [ "$ACTIVE_BACKEND" = "omniroute" ]; then
-    tg_add_path _ai_m "镜像" "${OMNIROUTE_IMAGE:-未知}"
-  fi
-  # 自检是两个机器值（端口+HTTP 码、容器状态）→ 手拼 <code>（规范 · 取值行口径）
-  _ai_hc_txt="<code>20128 HTTP $(escape_html "${_ai_hc:-000}")</code>"
-  if [ -n "${_ai_ct:-}" ]; then
-    _ai_hc_txt="${_ai_hc_txt} · 容器 <code>$(escape_html "$_ai_ct")</code>"
-  fi
-  tg_add_block _ai_m "自检：${_ai_hc_txt}"
-  _ai_notify
 fi
 
 # Hand off to the systemd unit (Restart=always) instead of a bare
