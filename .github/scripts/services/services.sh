@@ -282,8 +282,11 @@ EOF
 Description=zcode2api (GLM Anthropic+OpenAI gateway, 8319)
 After=network-online.target
 Wants=network-online.target
+# 2026-11-08 事故加上限：运行目录被踩空时 ExecStart 消失，原 Restart=always
+# 无上限每 5s 空转（实锤连续 233 次）且无新信息；改为 300s 内最多 3 次，
+# 超出进 failed 终态，哨兵/人更容易发现真问题。
 StartLimitIntervalSec=300
-StartLimitBurst=0
+StartLimitBurst=3
 
 [Service]
 Type=simple

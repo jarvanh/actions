@@ -332,10 +332,24 @@
         mv "$Z2A_RUN_DIR" "${Z2A_RUN_DIR}.stale.$$" 2>/dev/null || true
         rm -rf "${Z2A_RUN_DIR}.stale.$$" 2>/dev/null || true
       fi
-      # 先 clone（目标必须为空目录），logs 目录随后补建
+      # 先 clone（目标必须为空目录），logs 目录随后补建。
+      # 2026-11-08 补强：P5a prefetch 与本步骤（early dispatch）并发时可能撞目录
+      # （当日实锤：目录非空 → clone 报 destination exists → 服务从未起 →
+      #  systemd 203/EXEC 空转 233 次）。clone 失败先重查一次 prefetch 产物：
+      #  判据与上方 Z2A_PREPPED 完全一致，命中则按预就绪路径续走，仍不成才失败。
+      Z2A_CLONE_FAILED=0
       if ! { [ "$Z2A_PREPPED" = "1" ] || git clone --quiet --depth 1 "$Z2A_REPO" "$Z2A_RUN_DIR"; }; then
-        Z2A_REASON="代码克隆失败：$Z2A_REPO"
-      else
+        if [ -f "$Z2A_RUN_DIR/requirements.txt" ] && [ -x "$Z2A_RUN_DIR/.venv/bin/python" ] \
+           && [ -d "$Z2A_RUN_DIR/captcha_node/node_modules" ] \
+           && git -C "$Z2A_RUN_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+          echo "ℹ️ [zcode2api] clone 撞车但 Prefetch 产物已就绪，复用后继续"
+          Z2A_PREPPED=1
+        else
+          Z2A_CLONE_FAILED=1
+          Z2A_REASON="代码克隆失败：$Z2A_REPO"
+        fi
+      fi
+      if [ "$Z2A_CLONE_FAILED" != "1" ]; then
         mkdir -p "$Z2A_RUN_DIR/logs"
         if ! { rclone copyto "$Z2A_DATA_ARCHIVE" /tmp/zcode2api-data.tar.gz 2>/dev/null \
              && [ -s /tmp/zcode2api-data.tar.gz ] \

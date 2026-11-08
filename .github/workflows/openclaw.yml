@@ -354,24 +354,53 @@ jobs:
           # captcha_node npm ci）；消费方检测到就绪产物即跳过现场安装，数据快照
           # （.env + data/）仍由消费方从 Dropbox 恢复。rc 文件仅观测（消费方以产物
           # 就绪性为准：requirements + .venv/bin/python + node_modules + git 树）。
+          # 2026-11-08 竞态根治：原先直接 rm -rf 运行目录再 clone，与 early dispatch
+          # 的 run-zcode2api.sh 并发时把目录踩空 → 服务 203/EXEC 空转（当日实锤）。
+          # 改为私有 staging 构建 + 成品原子发布：全程不碰可能正被他人使用的运行目录，
+          # 仅当目录不存在时换入；rc 文件由 trap EXIT 恒写（0=发布成功 / 2=目录被
+          # 占用跳过 / 其他=构建失败），消费方不再因 rc 缺失等满轮询。
           cat > "$P/pull-z2a-deps.sh" <<'PF_EOF'
           #!/usr/bin/env bash
           set +e
+          P="$1"
           Z2A_REPO="https://github.com/jarvanh/zcode2api.git"
           Z2A_RUN_DIR="/tmp/local_zcode2api"
-          rm -rf "$Z2A_RUN_DIR"
-          if ! git clone --quiet --depth 1 "$Z2A_REPO" "$Z2A_RUN_DIR"; then
-            echo 1 > "$P/z2a-deps.rc"; exit 1
+          STAGE=""
+          PUBLISHED=0
+          publish_rc() {
+            rc="$1"
+            if [ "$PUBLISHED" = "1" ] && [ "$rc" -eq 0 ] \
+               && [ -f "$Z2A_RUN_DIR/requirements.txt" ] \
+               && [ -x "$Z2A_RUN_DIR/.venv/bin/python" ] \
+               && [ -d "$Z2A_RUN_DIR/captcha_node/node_modules" ]; then
+              echo 0 > "$P/z2a-deps.rc"
+            else
+              echo "$rc" > "$P/z2a-deps.rc"
+            fi
+            rm -rf "${STAGE:-}"
+          }
+          trap 'publish_rc $?' EXIT
+          STAGE="$(mktemp -d /tmp/z2a-deps-stage.XXXXXX)" || exit 1
+          if ! git clone --quiet --depth 1 "$Z2A_REPO" "$STAGE/repo"; then
+            exit 1
           fi
-          mkdir -p "$Z2A_RUN_DIR/logs"
-          python3 -m venv "$Z2A_RUN_DIR/.venv" \
-            && "$Z2A_RUN_DIR/.venv/bin/pip" install --quiet --disable-pip-version-check \
-                 -r "$Z2A_RUN_DIR/requirements.txt" 2>"$Z2A_RUN_DIR/logs/pip.log" \
-            && (cd "$Z2A_RUN_DIR/captcha_node" && npm ci --silent 2>"$Z2A_RUN_DIR/logs/npm.log")
-          echo "$?" > "$P/z2a-deps.rc"
+          mkdir -p "$STAGE/repo/logs"
+          python3 -m venv "$STAGE/repo/.venv" \
+            && "$STAGE/repo/.venv/bin/pip" install --quiet --disable-pip-version-check \
+                 -r "$STAGE/repo/requirements.txt" 2>"$STAGE/repo/logs/pip.log" \
+            && (cd "$STAGE/repo/captcha_node" && npm ci --silent 2>"$STAGE/repo/logs/npm.log") \
+            || exit 1
+          # 发布：运行目录不存在（刚重置、dispatch 未起）才换入；已被占用则不碰，
+          # 交给消费方处置（复用存活实例 / 清残骸现场重装），绝不与对手抢目录。
+          if [ -d "$Z2A_RUN_DIR" ]; then
+            exit 2
+          fi
+          mv "$STAGE/repo" "$Z2A_RUN_DIR" || exit 1
+          PUBLISHED=1
+          exit 0
           PF_EOF
           chmod +x "$P/pull-z2a-deps.sh"
-          nohup bash "$P/pull-z2a-deps.sh" >"$P/z2a-deps.out" 2>&1 &
+          nohup bash "$P/pull-z2a-deps.sh" "$P" >"$P/z2a-deps.out" 2>&1 &
 
 
       # ── 2026-11-06 启动提速（主人拍板）：OmniRoute 恢复+起容器后台化 ──
