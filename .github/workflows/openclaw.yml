@@ -3531,7 +3531,6 @@ jobs:
             rm -f "$TMP_ZCODE_TAR" 2>/dev/null || true
             sudo rm -f "$TMP_RSSTT_TAR" 2>/dev/null || true
             rm -f "$TMP_Z2A_DATA_TAR" 2>/dev/null || true
-            rm -f "$TMP_NEWAPI_TAR" 2>/dev/null || true
             # ── 2026-10-07 rc=23 根治：staging 目录绝不能在别人持锁写入时被抹 ──
             # 形态（run 37577681547）：最终归档持 /tmp/openclaw-archive.lock 跑 rsync
             # 期间，被 systemd(Restart=always) 拉回的循环新实例执行本函数，通配
