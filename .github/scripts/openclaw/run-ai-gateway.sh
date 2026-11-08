@@ -760,15 +760,17 @@ fi
 # 2026-11-08（主人拍板）：OmniRoute 主用就绪的通知不阻塞部署收口，交给
 # notify-omniroute-deferred.sh 后台等首个容器健康结论再发；降级/全败仍立即发。
 if [ "${OMNIROUTE_NOTIFY:-1}" != "0" ]; then
-  if [ "$ACTIVE_BACKEND" = "omniroute" ] && [ -z "${FALLBACK_REASON:-}" ]; then
+  _ai_deferred="${GITHUB_WORKSPACE}/.github/scripts/openclaw/notify-omniroute-deferred.sh"
+  if [ "$ACTIVE_BACKEND" = "omniroute" ] && [ -z "${FALLBACK_REASON:-}" ] && [ -f "$_ai_deferred" ]; then
     # starting = healthcheck start_period（120s）保护期正常态，同步通知必然
     # 撞上它，每轮都出「🟡 健康检查未通过」假警报（run 42434537774 实锤）。
     # 后台等待有界（300s 上限，超时按现值仍发），隧道/后续步骤照常先行。
-    nohup bash "${GITHUB_WORKSPACE}/.github/scripts/openclaw/notify-omniroute-deferred.sh" \
+    nohup bash "$_ai_deferred" \
       omniroute "${OMNIROUTE_IMAGE:-diegosouzapw/omniroute:latest}" \
       > /tmp/omniroute-notify.out 2>&1 &
     echo "📨 [notify] OmniRoute 就绪通知已后台化（pid $!）：等容器健康结论再发，不阻塞收口"
   else
+    # 延后脚本缺失（半包 checkout 等）→ 回落同步定性，绝不静默丢通知
     _ai_m=""
     # 自检先行：容器健康状态决定标题图标（规范 · 状态图标语义）——
     # 2026-11-06 04:16 实拍「容器 starting」仍报 🟢「已就绪」，图标与结论矛盾。
