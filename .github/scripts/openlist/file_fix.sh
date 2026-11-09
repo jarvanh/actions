@@ -404,6 +404,9 @@ declare -A FIXED_THIS_RUN=()
 # ⚠️ 契约: 只有 ok 视为"可写"。两个失败态都让 `_fix_probe_dir_writable` 返回非 0
 #   （保持旧调用方的 if 语义不变），区别靠全局 _DIR_PROBE_STATE 透出。
 declare -A _DIR_WRITE_CACHE=()
+# 本轮已对哪些「短哈希兜底目录」做过 409 退避重试（同目录只付一次等待，
+# 避免 40+ 个待修文件各自 sleep 15min 烧光预算）。见 _fix_switch_to_hash_dir。
+declare -A _FIX_HASHDIR_409_TRIED=()
 # _fix_probe_dir_writable 最近一次的三态结论（供调用方在不改 if 结构的前提下分档处理）
 _DIR_PROBE_STATE=""
 # 本轮目录探测已用掉的容器重启次数（预算 OPENLIST_DIR_PROBE_MAX_RESTART）
@@ -1355,6 +1358,53 @@ _fix_switch_to_hash_dir() {
     fi
   else
     log_fix "$fix_log" "   ⚠ rclone mkdir 失败 exit=${mkdir_status}，尝试 OpenList API..."
+  fi
+
+  # ===== 409 等退避重试（2026-11-09 加，用户告警实证）=====
+  # 问题: sync 层对 409 有 `OPENLIST_409_RETRY_ATTEMPTS(3) ×
+  #   OPENLIST_409_RETRY_SLEEP_SECONDS(300)` 的等待重试（409 常因并发争用/缓存
+  #   未收敛而自愈），而修复管线的 mkdir 只用 rclone 的**秒级**重试就判死 ——
+  #   两条路径对同一个 409 的耐心完全不同。
+  # 实证（run 42514192753，用户收到告警）: `task1_1024j_套图_女仆镂空胖次`
+  #   306/307/308.jpg 因"目标目录建不出来（换用编码目录后仍失败）"失败，而
+  #   **同一目录当轮另有 41 个文件成功落盘**（全轮 ✅通过 3019 次、❌失败仅这 3
+  #   个）⇒ 目录本身可写，409 是瞬态风暴，只是这 3 个恰好撞在坏窗口里且没有
+  #   等待重试的机会。
+  # 做法: 目录创建失败后，按与 sync 层同一组参数做退避重试（默认 3 次 × 300s，
+  #   可用同一环境变量调）。任一次成功即继续；全部失败才进入后续兜底/判死。
+  #   放在短哈希分支是因为它是最"便宜"的一次额外机会（目录名确定性，重试幂等）。
+  if [ "$hash_dir_ok" -ne 1 ] && [ "$mkdir_status" -ne 0 ]; then
+    local _409_att="${OPENLIST_409_RETRY_ATTEMPTS:-3}"
+    local _409_sleep="${OPENLIST_409_RETRY_SLEEP_SECONDS:-300}"
+    [[ "$_409_att" =~ ^[0-9]+$ ]] || _409_att=3
+    [[ "$_409_sleep" =~ ^[0-9]+$ ]] || _409_sleep=300
+    # 同一目录本轮只付一次等待: 40+ 个文件共用同一 hash 目录，若每个都等 15min
+    # 会直接烧光整轮预算（本目录实证有 44 个待修文件）。用目录键去重。
+    if [ "${_FIX_HASHDIR_409_TRIED[$hash_dst_dir]:-0}" = "1" ]; then
+      log_fix "$fix_log" "   ⏭ 该目录本轮已做过 409 退避重试，本次不再等待（结果已定）"
+    # 预算不足则放弃等待（不把整轮预算烧在一个目录上；下轮接力）
+    elif declare -F sync_hard_limit_stop >/dev/null 2>&1 \
+       && [ -n "${OPENLIST_SYNC_DEADLINE_EPOCH:-}" ] \
+       && [ $(( $(date +%s) + _409_sleep + 120 )) -ge "$OPENLIST_SYNC_DEADLINE_EPOCH" ]; then
+      log_fix "$fix_log" "   ⏰ 预算不足一个 409 退避窗（${_409_sleep}s），跳过等待重试（交下轮接力）"
+      _FIX_HASHDIR_409_TRIED["$hash_dst_dir"]=1
+    else
+      _FIX_HASHDIR_409_TRIED["$hash_dst_dir"]=1
+      local _409_i
+      for ((_409_i = 1; _409_i <= _409_att; _409_i++)); do
+        log_fix "$fix_log" "   ⏳ 短哈希目录 409，等待 ${_409_sleep}s 后重试 ${_409_i}/${_409_att}（并发争用/缓存未收敛通常可自愈）"
+        sleep "$_409_sleep"
+        rclone mkdir "$hash_dst_dir" "${RCLONE_RETRY_FLAGS[@]}" --timeout "${OPENLIST_MKDIR_TIMEOUT:-120}s" 2>&1 | \
+          _cmd_log "mkdir+hash(409 retry ${_409_i})" "$fix_log"
+        mkdir_status=${PIPESTATUS[0]}
+        if [ "$mkdir_status" -eq 0 ] \
+           && { rclone lsd "$hash_dst_dir" --retries 1 --timeout "${OPENLIST_MKDIR_TIMEOUT:-120}s" >/dev/null 2>&1; }; then
+          hash_dir_ok=1
+          log_fix "$fix_log" "   ✅ 409 退避后短哈希目录建成（第 ${_409_i} 次重试）"
+          break
+        fi
+      done
+    fi
   fi
 
   # 409 已存在语义: 短哈希目录名是确定性的（目录路径 md5 前 8 位），
