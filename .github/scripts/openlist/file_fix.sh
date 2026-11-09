@@ -1493,6 +1493,67 @@ _fix_switch_to_hash_dir() {
   return 0
 }
 
+# 推导 base64URL 兜底的两个最终目标（相对路径语义唯一，便于单测断言）
+# 用法: _fix_b64_targets_for <file_dir_rel> <dest_path>
+#   输出两行（均不含尾部换行歧义）:
+#     第 1 行 = 落盘目录远端路径（含 scheme，如 openlist:wopan175/1/x/5aWz...）
+#     第 2 行 = OpenList 内部路径（无 scheme，如 wopan175/1/x/5aWz...）
+#   返回非 0 = 无可编码目录名（调用方应跳过 base64 兜底）
+#
+# 语义（2026-11-09）:
+#   子目录情形: 只把 **最底层文件夹名** 换成 b64，父路径不变
+#     file_dir_rel=1024j/套图/女仆镂空胖次 → <dest>/1024j/套图/<b64>
+#   根目录情形（file_dir_rel="." 或空）: 文件就在同步对指向的那个子目录根部，
+#     要编码的是 **dest_path 末段**（子目录名），落点 = dest_path 的父 + <b64>
+#     dest_path=openlist:wopan175/1/1024j/套图/女仆镂空胖次
+#       → openlist:wopan175/1/1024j/套图/5aWz5LuG6ZWC56m66IOW5qyh
+#     生产实证 run 42588433890: 正是该路径 mkdir+lsd 成功、3 文件真值复核通过。
+#   为什么单独成函数: 该分支只在「目录真的建不出来」时才走到，主轮里属概率事件，
+#     无法按需在生产复现 ⇒ 纯字符串推导抽出来用单测确定性覆盖
+#     （tests/test_fix_b64_dir_rel.sh），避免"改了但没人验过"。
+_fix_b64_targets_for() {
+  local _dir_rel="${1:-}" _dest="${2:-}"
+  local _enc
+  [ -n "$_dest" ] || return 1
+  # 先去掉尾部斜杠（否则父路径会取成"带斜杠的自己"，多出一段）
+  local _dest_all="${_dest%/}"
+  [ -n "$_dest_all" ] || return 1
+  local _dest_ns="${_dest_all#*:}"
+  _dest_ns="${_dest_ns%/}"
+  [ -n "$_dest_ns" ] || return 1
+
+  if [ "$_dir_rel" = "." ] || [ -z "$_dir_rel" ]; then
+    # ---- 根目录情形: 编码 dest_path 末段，落点在其父下 ----
+    local _leaf="${_dest_ns##*/}"
+    # dest_path 只有一段（如 openlist:wopan175）⇒ 没有子目录名可编码
+    if [ -z "$_leaf" ] || [ "$_leaf" = "$_dest_ns" ]; then return 1; fi
+    local _parent_full="${_dest_all%/*}"
+    # 父级必须真的存在（dest_path 至少两段）
+    if [ -z "$_parent_full" ] || [ "$_parent_full" = "$_dest_all" ]; then return 1; fi
+    _enc=$(b64url_encode "$_leaf") || return 1
+    [ -n "$_enc" ] || return 1
+    printf '%s/%s\n' "$_parent_full" "$_enc"
+    printf '/%s/%s\n' "${_parent_full#*:}" "$_enc"
+    return 0
+  fi
+
+  # ---- 子目录情形: 只编码最底层目录名 ----
+  local _parent_rel _leaf2
+  _parent_rel="$(dirname -- "$_dir_rel")"
+  _leaf2="$(basename -- "$_dir_rel")"
+  if [ -z "$_leaf2" ] || [ "$_leaf2" = "." ]; then return 1; fi
+  _enc=$(b64url_encode "$_leaf2") || return 1
+  [ -n "$_enc" ] || return 1
+  if [ "$_parent_rel" = "." ] || [ -z "$_parent_rel" ]; then
+    printf '%s/%s\n' "$_dest" "$_enc"
+    printf '/%s/%s\n' "$_dest_ns" "$_enc"
+  else
+    printf '%s/%s/%s\n' "$_dest" "$_parent_rel" "$_enc"
+    printf '/%s/%s/%s\n' "$_dest_ns" "$_parent_rel" "$_enc"
+  fi
+  return 0
+}
+
 try_fix_failed_file() {
   local source_path="$1"
   local dest_path="$2"
@@ -1638,42 +1699,30 @@ try_fix_failed_file() {
     #   后 mkdir+lsd 成功，三个文件全部 `VERDICT|fixed|真值复核通过`。
     #   故根目录情形改为编码 **dest_path 末段**（同步对指向的那个子目录名），
     #   父路径取 dest_path 去掉末段的剩余部分 —— 与定点验证的成功路径完全同构。
+    # 目录名推导抽成 _fix_b64_dir_rel_for（供确定性单测，见
+    # tests/test_fix_b64_dir_rel.sh）: 该分支只在"目录真的建不出来"时才走到，
+    # 主轮里属概率事件，无法按需在生产复现。
     if [ "$dir_ok" -ne 1 ]; then
       log_fix "$fix_log" "目录创建失败，尝试 base64URL 编码文件夹名..."
 
-      local parent_dir leaf_dir encoded_leaf new_file_dir_rel
-      if [ "$file_dir_rel" = "." ] || [ -z "$file_dir_rel" ]; then
-        # 根目录: 编码 dest_path 末段（例如 .../套图/女仆镂空胖次 → .../套图/<b64>）
-        local _dst_noscheme="${dest_path#*:}"
-        _dst_noscheme="${_dst_noscheme%/}"
-        leaf_dir="${_dst_noscheme##*/}"
-        parent_dir="${_dst_noscheme%/*}"
-        if [ "$leaf_dir" = "$_dst_noscheme" ] || [ -z "$leaf_dir" ]; then
-          # dest_path 只有一段（如 openlist:wopan175）→ 没有可编码的子目录名
-          log_fix "$fix_log" "⚠ 目标路径无可编码的目录末段（dest_path=${dest_path}），跳过 base64URL 兜底"
-          dir_ok=0
-          leaf_dir=""
-        else
-          log_fix "$fix_log" "   根目录文件: 改为编码 dest_path 末段「${leaf_dir}」"
+      local _b64_dst="" _b64_ol=""
+      {
+        IFS= read -r _b64_dst
+        IFS= read -r _b64_ol
+      } < <(_fix_b64_targets_for "$file_dir_rel" "$dest_path" 2>/dev/null) || true
+      if [ -z "$_b64_dst" ] || [ -z "$_b64_ol" ]; then
+        log_fix "$fix_log" "⚠ 无可编码的目录名（file_dir_rel=${file_dir_rel:-空} dest_path=${dest_path:-空}），跳过 base64URL 兜底"
+        dir_ok=0
+      else
+        if [ "$file_dir_rel" = "." ] || [ -z "$file_dir_rel" ]; then
+          log_fix "$fix_log" "   根目录文件: 改为编码 dest_path 末段，落点=${_b64_dst}"
         fi
-      else
-        parent_dir="$(dirname -- "$file_dir_rel")"
-        leaf_dir="$(basename -- "$file_dir_rel")"
-      fi
+        actual_dst_dir="$_b64_dst"
+        actual_ol_dir="$_b64_ol"
+        local new_file_dir_rel="${_b64_dst#${dest_path}/}"
+        [ "$new_file_dir_rel" = "$_b64_dst" ] && new_file_dir_rel="${_b64_ol#/}"
 
-      if [ -n "$leaf_dir" ]; then
-      encoded_leaf=$(b64url_encode "$leaf_dir")
-
-      if [ "$parent_dir" = "." ] || [ -z "$parent_dir" ]; then
-        new_file_dir_rel="$encoded_leaf"
-      else
-        new_file_dir_rel="${parent_dir}/${encoded_leaf}"
-      fi
-
-      actual_dst_dir="${dest_path}/${new_file_dir_rel}"
-      actual_ol_dir="/${ol_dst_base:+${ol_dst_base}/}${new_file_dir_rel}"
-
-      log_fix "$fix_log" "原始目录: $file_dir_rel"
+        log_fix "$fix_log" "原始目录: ${file_dir_rel:-.}"
       log_fix "$fix_log" "base64URL 编码目录: $new_file_dir_rel"
 
       rclone mkdir "$actual_dst_dir" "${RCLONE_RETRY_FLAGS[@]}" --timeout "${OPENLIST_MKDIR_TIMEOUT:-120}s" 2>&1 | \
