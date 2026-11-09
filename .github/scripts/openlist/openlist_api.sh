@@ -28,21 +28,41 @@ _get_openlist_token() {
   # jq -n 构造请求体: 密码含引号/反斜杠等特殊字符时仍保证 JSON 合法
   body=$(jq -nc --arg u "$user" --arg p "$pass" \
     '{username:$u,password:$p}' 2>/dev/null) || return 1
-  for i in 1 2; do
+  # 重试策略（2026-11-09 修，run 42603463034 实证）:
+  #   旧版只有 2 次、间隔 2s（≈4s 窗口）—— 而 container 刚拉起时 `/ping` 可能
+  #   已经 200，但管理面还没就绪（数据库初始化 / admin 账号装载），此时
+  #   `api/auth/login` 是**无响应**（连接被拒或超时），不是密码错。
+  #   实测该轮: 容器 13:58:50 拉起、13:58:57 开始校验、13:59:29 判失败（32s），
+  #   日志 `第1次登录无响应 / 第2次登录无响应` → 整轮 failure、同步 step 被 skip。
+  #   故把「无响应」的重试窗口对齐阶段1 的耐心（默认 120s，可用
+  #   OPENLIST_LOGIN_WAIT_SECONDS 调），而**被拒（有响应但无 token）仍然
+  #   fail fast** —— 那才是密码不一致，等再久也没用。
+  local _login_wait="${OPENLIST_LOGIN_WAIT_SECONDS:-120}"
+  [[ "$_login_wait" =~ ^[0-9]+$ ]] || _login_wait=120
+  local _login_ticks=$(( _login_wait / 3 ))
+  [ "$_login_ticks" -lt 2 ] && _login_ticks=2
+  for i in $(seq 1 "$_login_ticks"); do
     resp=""
-    if [ "$i" -gt 1 ]; then sleep 2; fi
+    if [ "$i" -gt 1 ]; then sleep 3; fi
     resp=$(curl -s -m 15 -X POST "http://127.0.0.1:5244/api/auth/login" \
       -H 'Content-Type: application/json' \
       --data-binary "$body" 2>/dev/null) || resp=""
-    [ -n "$resp" ] || { echo "_get_openlist_token: 第${i}次登录无响应" >&2; continue; }
+    if [ -z "$resp" ]; then
+      # 无响应 = 服务/管理面尚未就绪 → 继续等（不判失败）
+      echo "_get_openlist_token: 第${i}/${_login_ticks}次登录无响应（管理面可能仍在初始化），继续等待" >&2
+      continue
+    fi
     tok=$(jq -r '.data.token // empty' <<<"$resp" 2>/dev/null) || tok=""
     code=$(jq -r '.code // 0' <<<"$resp" 2>/dev/null) || code=0
     if [ -n "$tok" ] && [ "$tok" != "null" ]; then
       printf '%s' "$tok"
       return 0
     fi
+    # 有响应但拿不到 token → 密码/账号问题，等再久也一样：fail fast
     echo "_get_openlist_token: 第${i}次登录被拒 (code=${code})，检查 OPENLIST_ADMIN_PASSWORD 是否与管理员密码一致" >&2
+    return 1
   done
+  echo "_get_openlist_token: ${_login_ticks} 次登录均无响应（约 ${_login_wait}s），管理面未就绪" >&2
   return 1
 }
 
