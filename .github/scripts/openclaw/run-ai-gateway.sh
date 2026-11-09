@@ -246,6 +246,19 @@ restore_omniroute_data() {
   # 把版本钉死；随后 start_omniroute 会 compose pull 刷新 :latest 到当下最新。
   sed -i -E 's#(^[[:space:]]*image:[[:space:]]*[^[:space:]]*omniroute):[^[:space:]]+#\1:latest#' \
     "$OMNIROUTE_DIR/docker-compose.yml"
+  # 2026-11-09：定价同步双门控（DB modelsDevSyncEnabled + env）。若归档里的
+  # compose 生成于该开关启用前，恢复后会静默回退为禁用 —— 与上方 image 改写
+  # 同思路在恢复期规范化补齐。已有该键则跳过（幂等）；CONTEXT 行缺失时退
+  # environment: 锚点。两锚点都无（compose 结构异常）保持原样，不影响启动。
+  if ! grep -qE '^[[:space:]]*PRICING_SYNC_ENABLED:' "$OMNIROUTE_DIR/docker-compose.yml"; then
+    awk '
+      !done && /^[[:space:]]*CONTEXT_WINDOW_RECONCILE_INTERVAL:/ { print; print "      PRICING_SYNC_ENABLED: \"true\""; done=1; next }
+      !done && /^    environment:/ { print; print "      PRICING_SYNC_ENABLED: \"true\""; done=1; next }
+      { print }
+    ' "$OMNIROUTE_DIR/docker-compose.yml" > "$OMNIROUTE_DIR/docker-compose.yml.tmp" \
+      && mv -f "$OMNIROUTE_DIR/docker-compose.yml.tmp" "$OMNIROUTE_DIR/docker-compose.yml" \
+      && echo "ℹ️ 已在恢复的 compose 中补上 PRICING_SYNC_ENABLED=true"
+  fi
   # 数据卷恢复：归档内 data.tar.gz → docker 卷。server.env（STORAGE_ENCRYPTION_KEY）
   # 与 storage.sqlite 必须同代，否则存量 key 解不开 —— 二者同一份归档，天然同代。
   # storage-backup.sqlite（归档侧 sqlite 在线一致性备份）优先于活库三件套。
@@ -297,6 +310,10 @@ services:
       # 上游 /v1/models 报窗口（context_length 等字段）→ 自动写 auto override；
       # model_context_overrides 里的 manual 行永不覆盖（跳过）。设 0 可关闭。
       CONTEXT_WINDOW_RECONCILE_INTERVAL: "86400"
+      # ---- 定价同步（2026-11-09 主人要求启用）----
+      # UI「定价同步」开关是双门控：DB settings.modelsDevSyncEnabled + 本 env，
+      # 缺 env 即显示「已禁用」。默认周期 86400s（24h），数据源 litellm。
+      PRICING_SYNC_ENABLED: "true"
       # ---- 长上下文容忍度（2026-10-12，按实测调；与 CliRelay 时代同口径）----
       # runner-autoclaw 承接 40 万 token 级上下文：上游实测 96 万字符
       # 请求 61s、常规长请求 25~27s。默认首事件 readiness 80s + provider
@@ -600,6 +617,7 @@ start_omniroute() {
       -e OMNIROUTE_MEMORY_MB=4096 \
       -e BASE_URL=http://omniroute:20128 \
       -e AUTH_COOKIE_SECURE=false \
+      -e PRICING_SYNC_ENABLED=true \
       -e REQUEST_TIMEOUT_MS=1800000 \
       -e OMNIROUTE_DIRECT_HEADERS_TIMEOUT_MS=150000 \
       -e OMNIROUTE_DIRECT_RESPONSE_RETRY_TIMEOUT_MS=600000 \
