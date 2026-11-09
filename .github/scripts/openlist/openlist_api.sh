@@ -25,6 +25,21 @@ _get_openlist_token() {
     echo "_get_openlist_token: 环境变量 OPENLIST_ADMIN_PASSWORD 未设置，无法登录管理面" >&2
     return 1
   fi
+  # 失败短路（2026-11-09）: 本函数在热路径被反复调用（每次 _refresh_openlist_cache、
+  #   每次取存储配置），而下面"无响应"的等待窗是 120s 量级 —— 管理面真的挂了时，
+  #   一轮里几十次调用会累积成数十分钟纯等待。故一旦判定"管理面未就绪"，
+  #   5 分钟内直接快速失败，只付一次等待（到期后自动重试，不长期压制恢复）。
+  # ⚠️ 状态必须落**文件**而不是全局变量: 绝大多数调用点是
+  #   `ol_token=$(_get_openlist_token)` / `... | ...`，命令替换与管道都会让函数
+  #   在子 shell 里跑，函数内赋的全局变量当场丢失（实测: 短路完全不生效）。
+  local _down_file="${OL_LOGIN_DOWN_FILE:-/tmp/ol_login_down_until}"
+  local _down_until=""
+  [ -f "$_down_file" ] && _down_until=$(head -1 "$_down_file" 2>/dev/null)
+  if [[ "$_down_until" =~ ^[0-9]+$ ]] && [ "$_down_until" -gt 0 ] \
+     && [ "$(date +%s)" -lt "$_down_until" ]; then
+    echo "_get_openlist_token: 管理面近 2 分钟内已判定不可用（短路中，剩余 $(( (_down_until - $(date +%s)) / 60 ))min），快速失败" >&2
+    return 1
+  fi
   # jq -n 构造请求体: 密码含引号/反斜杠等特殊字符时仍保证 JSON 合法
   body=$(jq -nc --arg u "$user" --arg p "$pass" \
     '{username:$u,password:$p}' 2>/dev/null) || return 1
@@ -55,6 +70,8 @@ _get_openlist_token() {
     tok=$(jq -r '.data.token // empty' <<<"$resp" 2>/dev/null) || tok=""
     code=$(jq -r '.code // 0' <<<"$resp" 2>/dev/null) || code=0
     if [ -n "$tok" ] && [ "$tok" != "null" ]; then
+      # 登录成功 = 管理面已恢复 → 清掉短路标记（下次不再快速失败）
+      rm -f "${OL_LOGIN_DOWN_FILE:-/tmp/ol_login_down_until}" 2>/dev/null || true
       printf '%s' "$tok"
       return 0
     fi
@@ -63,6 +80,10 @@ _get_openlist_token() {
     return 1
   done
   echo "_get_openlist_token: ${_login_ticks} 次登录均无响应（约 ${_login_wait}s），管理面未就绪" >&2
+  # 记下短路窗口（默认 5min，落文件以便子 shell 可见）
+  local _down_ttl="${OPENLIST_LOGIN_DOWN_TTL:-120}"
+  [[ "$_down_ttl" =~ ^[0-9]+$ ]] || _down_ttl=300
+  echo "$(( $(date +%s) + _down_ttl ))" > "${OL_LOGIN_DOWN_FILE:-/tmp/ol_login_down_until}" 2>/dev/null || true
   return 1
 }
 
