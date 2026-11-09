@@ -3735,6 +3735,12 @@ jobs:
           fi
 
           while true; do
+            # 2026-11-10 Phase 0 埋点：记「本份快照的内容时刻」（不是上传完成时刻）。
+            # 上传成功后落到 /tmp/openclaw-archive-marker.openclaw，供收尾 step 计算
+            # 「最后一次周期归档之后改动了多少字节」—— warm-standby/rsync 交接方案
+            # 的唯一未知量。取快照开始时刻而非上传完成时刻是保守口径：期间写入的文件
+            # 也会被算进增量（宁可高估）。
+            _oc_arch_start=$(date +%s)
             # 2026-10-11 失败现场包退役：不健康运行直接跳过 openclaw 包的归档/上传
             # （本轮状态本来就坏，没有保存价值；其余 rsstt/网关等数据包照常归档）。
             if [ "$UNHEALTHY_RUN" = "1" ]; then
@@ -3751,6 +3757,10 @@ jobs:
               openclaw_upload_output=""
               if openclaw_upload_output=$(timeout 30m rclone copyto "$TMP_OPENCLAW_TAR" "$ARCHIVE_DEST" --dropbox-chunk-size 128M 2>&1); then
                 echo "[$(date '+%F %T')] openclaw upload ok"
+                # 2026-11-10 Phase 0：只有「已落到 Dropbox 的那份包」才配当交接基座，
+                # 故 marker 在上传成功后写（失败/被锁跳过都不写，宁可让收尾那边报
+                # 「无 marker」而不是拿一个不存在的基座算增量）。
+                echo "${_oc_arch_start:-0}" > /tmp/openclaw-archive-marker.openclaw
                 rm -f "$TMP_OPENCLAW_TAR"
               else
                 rc=$?
@@ -4277,6 +4287,128 @@ jobs:
             echo "::warning::OpenClaw gateway 未能停止（unit 仍 active），本轮最终归档是在网关写盘状态下打的包"
             echo "⚠️ 网关未能停止，最终归档将对着活动状态打包"
           fi
+
+          # ── Phase 0 埋点（2026-11-10，warm-standby / rsync 交接可行性测量）──
+          # 纯观测：不参与任何判定、不改任何行为，失败只留在日志里。
+          # 要回答的唯一问题 —— 「零数据丢失 + 双 VM 交接」方案里最后一环是
+          # 「继任者从最近一次周期包起，再用 rsync 补齐到停机瞬间」。若该增量很小，
+          # 下线时长可从实测 466s 压到 ~90s（停网关 7s + 增量 + 起网关）；若增量
+          # 是 GB 级，整条路线的收益就不成立。所以先量一轮，再决定要不要写 Phase 1。
+          # 口径：
+          #   基座 = 周期循环最近一次**成功上传**的主包，其内容对应 marker 记录的
+          #          快照开始时刻（见 Start background archive loop 侧写入点）。
+          #   增量 = mtime 晚于该时刻的文件；rsync 默认判据同为 size+mtime，等价。
+          #   偏差 = 不统计删除（纯元数据，可忽略）与「mtime 变了内容没变」的误报
+          #          （偏高，保守）。排除清单按归档脚本镜像一份，改那边要同步改这里。
+          # 与阶段A归档并行执行 —— 不占收尾关键路径；代价是扫描耗时会被归档 IO
+          # 抬高（rsync_scan_ms 只作量级参考）。
+          PHASE0_LOG=/tmp/phase0-handoff-measure.log
+          PHASE0_PID=""
+          phase0_measure() {
+            set +e
+            local src="$HOME/.openclaw"
+            local marker_file="/tmp/openclaw-archive-marker.openclaw"
+            local marker delta_log delta_stats
+            local total_n=0 total_b=0 d_n=0 d_b=0
+            echo "[phase0] start $(date '+%F %T') src=$src"
+            if [ ! -d "$src" ]; then
+              echo "[phase0] skip: $src 不存在"
+              return 0
+            fi
+            marker="$(tr -dc '0-9' < "$marker_file" 2>/dev/null | head -c 12)"
+            [ -n "${marker:-}" ] || marker=""
+            if [ -n "$marker" ]; then
+              echo "[phase0] base_marker=$marker ($(date -d "@$marker" '+%F %T' 2>/dev/null || echo '?'))"
+            else
+              echo "[phase0] base_marker=<missing>"
+            fi
+            # 归档脚本 rsync 排除清单的镜像（logs/cache/browser 缓存/锁文件）。
+            # ⚠️ 判定必须在 awk 里按**路径字段**做：find 输出是 `size\tpath`，用
+            # grep '^logs/' 锚定会恒不匹配（行首是字节数）—— 2026-11-10 合成树实测：
+            # 5 个该被排除的文件全被算进增量（虚高 96%），差点据此把方案判死。
+            # 相对路径口径与 rsync 的 'logs/**' 一致（均锚定传输根，不含子目录同名项）。
+            read -r total_n total_b < <(find "$src" -type f -printf '%s\n' 2>/dev/null \
+              | awk '{n++; b+=$1} END {printf "%d %d\n", n+0, b+0}')
+            echo "[phase0] tree_files=$total_n tree_bytes=$total_b"
+            if [ -n "$marker" ]; then
+              delta_log="/tmp/phase0-delta.$$"
+              delta_stats="/tmp/phase0-delta-stats.$$"
+              nice -n 19 ionice -c3 find "$src" -type f -newermt "@$marker" -printf '%s\t%P\n' 2>/dev/null \
+                | awk -F'\t' -v stats="$delta_stats" '
+                    function excluded(p,   a, n, bn, t) {
+                      n = split(p, a, "/");
+                      if (a[1] == "logs" || a[1] == "cache") return 1;
+                      if (a[1] == "browser" && n >= 3) {
+                        t = a[3];
+                        if (t == "Crashpad" || t == "GPUCache" || t == "Code Cache" \
+                            || t == "GrShaderCache" || t == "GraphiteDawnCache") return 1;
+                      }
+                      bn = p; sub(/^.*\//, "", bn);
+                      if (bn == "SingletonLock" || bn == "SingletonSocket" \
+                          || bn == "SingletonCookie") return 1;
+                      if (bn ~ /\.(lock|pid)$/ || bn ~ /\.jsonl\.lock$/) return 1;
+                      return 0;
+                    }
+                    {
+                      if (excluded($2)) next;
+                      n++; b += $1;
+                      top = $2; sub(/\/.*/, "", top); s[top] += $1;
+                      print $1 "\t" $2;
+                    }
+                    END { printf "%d %d\n", n + 0, b + 0 > stats }
+                  ' > "$delta_log"
+              read -r d_n d_b < "$delta_stats"
+              echo "[phase0] delta_files=$d_n delta_bytes=$d_b"
+              echo "[phase0] delta_ratio=$(awk -v d="$d_b" -v t="$total_b" \
+                'BEGIN{printf "%.2f%%", (t>0 ? d*100/t : 0)}')"
+              echo "[phase0] delta_by_topdir (MB):"
+              awk -F'\t' '{p=$2; split(p, a, "/"); k=a[1]; if (k=="") k="."; s[k]+=$1}
+                END {for (k in s) printf "%.1f\t%s\n", s[k]/1048576, k}' "$delta_log" \
+                | sort -nr | head -10 | sed 's/^/[phase0]   /'
+              rm -f "$delta_log" "$delta_stats"
+            else
+              echo "[phase0] delta: 无 marker（本轮周期归档未成功上传过一次），跳过增量测量"
+            fi
+            # 元数据遍历成本 = rsync 建文件表的固定开销，与增量大小无关
+            if command -v rsync >/dev/null 2>&1; then
+              local t0 t1
+              mkdir -p /tmp/phase0-empty-ref
+              t0=$(date +%s%3N)
+              nice -n 19 ionice -c3 rsync -a --dry-run --stats --delete \
+                --exclude 'logs/**' \
+                --exclude 'cache/**' \
+                --exclude 'browser/*/Crashpad/**' \
+                --exclude 'browser/*/GPUCache/**' \
+                --exclude 'browser/*/Code Cache/**' \
+                --exclude 'browser/*/GrShaderCache/**' \
+                --exclude 'browser/*/GraphiteDawnCache/**' \
+                --exclude 'SingletonLock' \
+                --exclude 'SingletonSocket' \
+                --exclude 'SingletonCookie' \
+                --exclude '*.lock' \
+                --exclude '*.pid' \
+                --exclude '*.jsonl.lock' \
+                "$src"/ /tmp/phase0-empty-ref/ >/tmp/phase0-rsync-scan.txt 2>&1
+              t1=$(date +%s%3N)
+              echo "[phase0] rsync_scan_ms=$((t1 - t0))（元数据遍历成本；与归档 IO 并发，仅量级参考）"
+              # 只取「排除后剩多少」两项：dry-run 对空目录必然「全部传输」，
+              # Total transferred 那一项没有意义，取来只会误导
+              grep -E '^Number of files:|^Total file size:' \
+                /tmp/phase0-rsync-scan.txt | sed 's/^/[phase0]   /'
+              rm -rf /tmp/phase0-empty-ref
+            fi
+            # 两台 runner 之间能否直连 wireguard（决定 rsync 走直连还是 DERP 中继）
+            if command -v tailscale >/dev/null 2>&1; then
+              echo "[phase0] tailscale netcheck:"
+              timeout 30 tailscale netcheck 2>&1 | grep -Ev '^[[:space:]]*$' \
+                | head -12 | sed 's/^/[phase0]   /'
+            fi
+            echo "[phase0] done $(date '+%F %T')"
+          }
+          phase0_measure >"$PHASE0_LOG" 2>&1 &
+          PHASE0_PID=$!
+          echo "🔬 [phase0] 交接可行性埋点已后台开跑（pid ${PHASE0_PID}，日志 ${PHASE0_LOG}）"
+
           # 用法与版式同 send_telegram_alert（<对象> <结论> <原因> [原始输出]）；
           # 两个函数分处不同 step、无法共享定义，改版式时两处要一起改
           # （此前一个用 <i> 说明段、一个用 <b> kv，同一标题两种形态）
@@ -5027,6 +5159,14 @@ jobs:
             record_archive_result "zcode2api-data.tar.gz" skip 0 "本轮未部署"
           fi
 
+          # Phase 0 收口：等埋点跑完并把结果打进本 step 日志（否则只留在 /tmp，随 VM 回收消失）。
+          # 与阶段A归档并行，正常早已结束，wait 不额外耗时；失败只告警不掀桌。
+          if [ -n "${PHASE0_PID:-}" ]; then
+            wait "$PHASE0_PID" || echo "⚠️ [phase0] 埋点任务非零退出（仅观测，忽略）"
+            echo "===== [phase0] 交接可行性测量结果 ====="
+            cat "$PHASE0_LOG" 2>/dev/null || echo "[phase0] 日志缺失"
+            echo "===== [phase0] end ====="
+          fi
 
           # ── 2026-10-29 下线提速（A1）：网关停止从收尾第一步后置到最后一步 ──
           # 原顺序 = 停网关 → 停服/归档，网关下线窗口 = 整个收尾（实测 647s）。
