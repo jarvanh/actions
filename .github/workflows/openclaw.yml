@@ -3042,22 +3042,42 @@ jobs:
 
           STAGE_DIR=$(mktemp -d /tmp/omniroute-archive-stage.XXXXXX)
 
-          # 1. SQLite 在线一致性快照（容器在跑时才做）：better-sqlite3 .backup() 产出
-          #    storage-backup.sqlite 落在同一数据卷内，随第 2 步一起进包。
-          #    失败非致命 —— 活库三件套（sqlite/-wal/-shm）仍在包里兜底。
-          #    2026-11-07 主人拍板：归档三处突发（备份/tar/pigz）一律以低优先级启动
-          #    （nice 19 + ionice -c3）：机器空闲时零损耗，忙时自动让路。此前备份每
-          #    20min 一轮独占一核数分钟，叠加常驻基线把 4 核机 load1 顶过 100%。
-          #    容器内 nice/ionice 可用已实测（coreutils 9.7）。
+          # 1. SQLite 一致性快照（容器在跑时才做）。
+          #    2026-11-09 事故根治：better-sqlite3 的 db.backup() 在本机 ~2GB 库上会
+          #    卡死数小时并产出「全零字节」的 storage-backup.sqlite（文件头不是
+          #    "SQLite format 3"）；旧逻辑把失败当非致命 → 把上一轮/坏 backup 打进包，
+          #    恢复侧又优先消费它 → 配置整体回滚到旧快照 / 库直接打不开。
+          #    改为 VACUUM INTO（同步一致性快照）+ 超时 + 落盘后校验文件头/integrity，
+          #    任一环节失败即 exit 4：宁可本轮不上传，也绝不把坏包推上 Dropbox。
+          #    2026-11-07 主人拍板：归档三处突发一律低优先级（nice 19 + ionice -c3）。
           if docker ps --format '{{.Names}}' | grep -q '^omniroute$'; then
-            if ! docker exec omniroute nice -n 19 ionice -c3 node -e "const Database=require('better-sqlite3');const db=new Database('/app/data/storage.sqlite');db.backup('/app/data/storage-backup.sqlite').then(()=>process.exit(0)).catch((e)=>{console.error(e.message);process.exit(1);})" 2>/tmp/omniroute-backup.err; then
-              echo "⚠️ sqlite online backup 失败（非致命，活库文件兜底）: $(tail -n 2 /tmp/omniroute-backup.err 2>/dev/null || true)"
+            # 先删旧文件：VACUUM INTO 遇到已存在的目标会失败；也避免残留全零文件混进包
+            docker exec omniroute rm -f /app/data/storage-backup.sqlite 2>/dev/null || true
+            if ! docker exec omniroute nice -n 19 ionice -c3 timeout 600 node -e "const Database=require('better-sqlite3');const db=new Database('/app/data/storage.sqlite',{timeout:60000});db.exec(\"VACUUM INTO '/app/data/storage-backup.sqlite'\");process.exit(0)" 2>/tmp/omniroute-backup.err; then
+              echo "omniroute_sqlite_vacuum_failed: $(tail -n 2 /tmp/omniroute-backup.err 2>/dev/null || true)"
+              rm -f /tmp/omniroute-backup.err
+              exit 4
             fi
             rm -f /tmp/omniroute-backup.err
+            # 落盘校验：文件头必须是 SQLite 魔数，且 integrity_check 通过
+            if ! docker exec omniroute sh -c 'head -c 16 /app/data/storage-backup.sqlite | grep -q "SQLite format 3"' ; then
+              echo "omniroute_backup_bad_header"
+              exit 4
+            fi
+            if ! docker exec omniroute node -e "const Database=require('better-sqlite3');const db=new Database('/app/data/storage-backup.sqlite',{readonly:true});const r=db.prepare('PRAGMA integrity_check').get();if(!r||r.integrity_check!=='ok'){console.error(JSON.stringify(r));process.exit(1)}process.exit(0)" 2>/tmp/omniroute-backup-verify.err; then
+              echo "omniroute_backup_integrity_failed: $(tail -n 2 /tmp/omniroute-backup-verify.err 2>/dev/null || true)"
+              rm -f /tmp/omniroute-backup-verify.err
+              exit 4
+            fi
+            rm -f /tmp/omniroute-backup-verify.err
+          else
+            # 容器没跑：没有新快照可生成。绝不能沿用卷里可能过期的旧 backup（旧快照
+            # 会把面板改动回滚）；直接放弃本轮归档，云端保留上一份已知好包。
+            echo "omniroute_container_not_running_skip_archive"
+            exit 4
           fi
-
           # 2. 数据卷快照（2026-10-30 P3 重构）：只打包「真源 + 同代根钥」，不再全卷 tar。
-          #    恢复侧优先消费 storage-backup.sqlite（在线一致性备份）；server.env 是
+          #    恢复侧优先消费 storage-backup.sqlite（VACUUM INTO 一致性快照）；server.env 是
           #    STORAGE_ENCRYPTION_KEY，必须与 backup 同代 —— 卷内仅这两个是必需项。
           #    排除（卷内实测死重）：db_backups/ 975MB 预迁移快照、call_logs/ 670MB 请求
           #    日志、logs/ 116MB、storage.sqlite.broken-* 坏库残骸、cache/、omniroute.db

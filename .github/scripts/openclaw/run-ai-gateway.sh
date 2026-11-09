@@ -263,7 +263,31 @@ restore_omniroute_data() {
   # 与 storage.sqlite 必须同代，否则存量 key 解不开 —— 二者同一份归档，天然同代。
   # storage-backup.sqlite（归档侧 sqlite 在线一致性备份）优先于活库三件套。
   if [ -f /tmp/omniroute-restore/data.tar.gz ]; then
+    # 2026-11-09 事故根治（防线 1）：卷里已有 integrity ok 的活库时，绝不拿归档覆盖。
+    # 归档本就由活库快照生成，活库永远不比归档旧；无条件覆盖是「面板刚改的配置
+    # 被旧快照整体回滚」的直接原因（04:51 事故）。全新 runner 的卷是空的，正常恢复。
     docker volume create "$OMNIROUTE_VOLUME" >/dev/null
+    if docker run --rm --user root -v "$OMNIROUTE_VOLUME:/target:ro" "$OMNIROUTE_IMAGE" \
+      node -e "const D=require('better-sqlite3');const db=new D('/target/storage.sqlite',{readonly:true});const r=db.prepare('PRAGMA integrity_check').get();process.exit(r&&r.integrity_check==='ok'?0:1)" 2>/dev/null; then
+      echo "ℹ️ 卷内已有有效活库，跳过归档覆盖（避免旧档回滚新配置）"
+      cleanup_archive_workdir
+      return 0
+    fi
+    # 防线 2：坏档绝不覆盖。先在本地解包校验 sqlite 文件头 + integrity_check，
+    # 全零坏库 / 撕裂库 / 缺 server.env 一律拒绝恢复并告警（上层走 bootstrap 兜底）。
+    verify_dir=/tmp/omniroute-restore/verify
+    rm -rf "$verify_dir"; mkdir -p "$verify_dir"
+    if ! tar -xzf /tmp/omniroute-restore/data.tar.gz -C "$verify_dir" storage-backup.sqlite server.env 2>/dev/null; then
+      echo "❌ OmniRoute 归档缺 storage-backup.sqlite/server.env 或解包失败，拒绝恢复"
+      cleanup_archive_workdir
+      return 1
+    fi
+    if ! python3 -c "import sqlite3,sys;f=open(sys.argv[1],'rb');h=f.read(16);f.close();assert h==b'SQLite format 3\x00','bad header';db=sqlite3.connect(sys.argv[1]);r=db.execute('PRAGMA integrity_check').fetchone();assert r and r[0]=='ok','bad integrity: '+str(r)" "$verify_dir/storage-backup.sqlite"; then
+      echo "❌ OmniRoute 归档内 storage-backup.sqlite 校验失败（全零 / 撕裂 / 坏库），拒绝恢复"
+      cleanup_archive_workdir
+      return 1
+    fi
+    rm -rf "$verify_dir"
     docker run --rm --user root -v "$OMNIROUTE_VOLUME:/target" -v /tmp/omniroute-restore:/src:ro \
       "$OMNIROUTE_IMAGE" sh -c '
         tar xzf /src/data.tar.gz -C /target
