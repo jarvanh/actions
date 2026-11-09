@@ -4030,7 +4030,27 @@ jobs:
           send_shutdown_warning &
           echo $! > /tmp/openclaw-shutdown-warning.pid
 
-          sleep "${SLEEP_SECONDS}"
+          # ── 优雅重启出口（2026-11-09）──
+          # scripts/restart-runner.sh 写入 /tmp/openclaw-restart-request 后，这里在
+          # 一个轮询周期（≤15s）内发现并提前结束保活 → 正常走「用量报告 → 停网关 →
+          # 最终归档（五个对象）→ Trigger next」。
+          # 旧路径是直接 `gh run cancel`（硬杀 job）：GitHub 取消不会执行
+          # 「Stop OpenClaw and Final Archive」，归档被跳过，新 VM 只能回到上一轮
+          # 周期归档（20 分钟间隔）的状态，最坏丢 20 分钟写入。
+          REQUEST_FILE="/tmp/openclaw-restart-request"
+          _waited=0
+          while [ "$_waited" -lt "$SLEEP_SECONDS" ]; do
+            if [ -f "$REQUEST_FILE" ]; then
+              echo "🔄 收到重启请求（$(cat "$REQUEST_FILE" 2>/dev/null || echo 'no detail')），提前结束保活，进入最终归档"
+              # 预告/倒计时后台任务按原 SLEEP_SECONDS 计时，早退后会在归档中途
+              # 弹出误导性的「X 分钟后停机」通知 —— 必须杀掉
+              kill "$(cat /tmp/openclaw-final-archive-warning.pid 2>/dev/null)" 2>/dev/null || true
+              kill "$(cat /tmp/openclaw-shutdown-warning.pid 2>/dev/null)" 2>/dev/null || true
+              break
+            fi
+            sleep 15
+            _waited=$((_waited + 15))
+          done
 
       - name: Notify AI gateway usage report
         # 归档前发一份五网关用量汇总。插在 Keep alive 之后、最终归档之前：
