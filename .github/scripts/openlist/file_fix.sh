@@ -1625,15 +1625,46 @@ try_fix_failed_file() {
     fi
 
     # 目录创建仍失败 → base64URL 编码最底层文件夹名后重试
-    if [ "$dir_ok" -ne 1 ] && [ "$file_dir_rel" != "." ] && [ -n "$file_dir_rel" ]; then
+    # ★ 根目录文件（file_dir_rel="."）也要走这条路（2026-11-09 修，用户告警实证）:
+    #   此前条件里带 `file_dir_rel != "."`，把「子任务根目录下的文件」排除在外 ——
+    #   而这类文件恰恰是最常见的失败形态（叶子任务按子目录拆分后，文件就在
+    #   该子目录根部）。被排除后它们只剩「根目录折叠为短哈希目录」一条路，
+    #   而那条路在 wopan175 上会被 409 打死 ⇒ 无路可走。
+    #   生产实证（run 42514192753）: task1_1024j_套图_女仆镂空胖次 的 306/307/308.jpg
+    #   报「目标目录建不出来（换用编码目录后仍失败）」，日志显示它实际只试到
+    #   短哈希目录 5058f1af（409×3 → API 200 假成功）就终止，**从未尝试 base64**。
+    #   定点验证（run 42588433890，同一批文件跑生产同款修复管线）: 走
+    #   `1024j/套图/<b64(女仆镂空胖次)>` = 1024j/套图/5aWz5LuG6ZWC56m66IOW5qyh
+    #   后 mkdir+lsd 成功，三个文件全部 `VERDICT|fixed|真值复核通过`。
+    #   故根目录情形改为编码 **dest_path 末段**（同步对指向的那个子目录名），
+    #   父路径取 dest_path 去掉末段的剩余部分 —— 与定点验证的成功路径完全同构。
+    if [ "$dir_ok" -ne 1 ]; then
       log_fix "$fix_log" "目录创建失败，尝试 base64URL 编码文件夹名..."
 
       local parent_dir leaf_dir encoded_leaf new_file_dir_rel
-      parent_dir="$(dirname -- "$file_dir_rel")"
-      leaf_dir="$(basename -- "$file_dir_rel")"
+      if [ "$file_dir_rel" = "." ] || [ -z "$file_dir_rel" ]; then
+        # 根目录: 编码 dest_path 末段（例如 .../套图/女仆镂空胖次 → .../套图/<b64>）
+        local _dst_noscheme="${dest_path#*:}"
+        _dst_noscheme="${_dst_noscheme%/}"
+        leaf_dir="${_dst_noscheme##*/}"
+        parent_dir="${_dst_noscheme%/*}"
+        if [ "$leaf_dir" = "$_dst_noscheme" ] || [ -z "$leaf_dir" ]; then
+          # dest_path 只有一段（如 openlist:wopan175）→ 没有可编码的子目录名
+          log_fix "$fix_log" "⚠ 目标路径无可编码的目录末段（dest_path=${dest_path}），跳过 base64URL 兜底"
+          dir_ok=0
+          leaf_dir=""
+        else
+          log_fix "$fix_log" "   根目录文件: 改为编码 dest_path 末段「${leaf_dir}」"
+        fi
+      else
+        parent_dir="$(dirname -- "$file_dir_rel")"
+        leaf_dir="$(basename -- "$file_dir_rel")"
+      fi
+
+      if [ -n "$leaf_dir" ]; then
       encoded_leaf=$(b64url_encode "$leaf_dir")
 
-      if [ "$parent_dir" = "." ]; then
+      if [ "$parent_dir" = "." ] || [ -z "$parent_dir" ]; then
         new_file_dir_rel="$encoded_leaf"
       else
         new_file_dir_rel="${parent_dir}/${encoded_leaf}"
@@ -1703,6 +1734,7 @@ try_fix_failed_file() {
           fi
         fi
       fi
+      fi   # [ -n "$leaf_dir" ]
     fi
   fi
 
