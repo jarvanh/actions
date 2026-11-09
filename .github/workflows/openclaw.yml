@@ -5141,12 +5141,37 @@ jobs:
         if: ${{ always() && steps.keepalive.conclusion == 'success' && steps.install_openclaw.outcome == 'success' && steps.run_openclaw.outcome == 'success' }}
         env:
           GH_TOKEN: ${{ github.token }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           set -euo pipefail
           echo "Triggering next openclaw.yml run. GitHub Actions concurrency will keep it singleton."
           gh workflow run openclaw.yml \
             --repo "${{ github.repository }}" \
             --ref "${{ github.ref_name }}"
+          # 2026-11-09：把新 run 链接发出来。优雅重启路径下本 VM 即将销毁，
+          # 重启脚本无法等归档完成后取新 run id —— 只有这里知道新 run 是谁，
+          # 汇报链（USER.md 2026-11-09 定：必须给旧/新两个链接）靠它闭环。
+          # 刻意不 set -e 语义：发不出链不阻挡接力。
+          _new=""
+          for _i in $(seq 1 15); do
+            _new="$(gh run list --repo "${{ github.repository }}" --workflow openclaw.yml --limit 1 --json databaseId --jq '.[0].databaseId // empty' 2>/dev/null || true)"
+            [ -n "$_new" ] && break
+            sleep 2
+          done
+          if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ] && [ -n "$_new" ]; then
+            # 用 printf 拼多行：heredoc/多行字符串会把 YAML 块缩进打乱
+            _txt="$(printf '🔄 新 run 已启动\n\n旧 run: https://github.com/%s/actions/runs/%s\n新 run: https://github.com/%s/actions/runs/%s' \
+              "${{ github.repository }}" "${{ github.run_id }}" "${{ github.repository }}" "$_new")"
+            curl -sS --max-time 20 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+              --data-urlencode "text=${_txt}" \
+              --data-urlencode "disable_web_page_preview=true" >/dev/null \
+              && echo "✅ 新 run 链接已发送: #${_new}" \
+              || echo "::warning::新 run 链接发送失败（不影响接力）"
+          else
+            echo "::warning::未能解析新 run id 或 TG 凭据缺失，跳过链接通知"
+          fi
 
       # - name: Sync ~/.openclaw to Dropbox
       #   if: always()
