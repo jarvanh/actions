@@ -707,6 +707,34 @@ jobs:
           fi
           _dev="$(cat /tmp/ts-devices.json)"
           rm -f /tmp/ts-devices.json
+          # ⚠️ 2026-11-08 实锤心跳窗口竞态（run 42513044678/42517434977）：上一轮被
+          #    cancel 后其节点心跳还会延续 ~80s（23:11:14 cancel，节点
+          #    connectedToControl=true 拖到 23:12:34），而本步在 23:12:09 只看一眼 ——
+          #    窗口期内前任「装活」，被下面的安全过滤正确跳过；随后才真断联变僵尸，
+          #    本轮注册只能退化 openclaw-1，名字被占 4 小时。修复：发现仍连着的
+          #    openclaw* 前任时，每 10s 重拉设备列表轮询等待，最多 150s 等它断联。
+          #    超时仍连着的绝不硬删（singleton+concurrency 下可能是尚未退场的
+          #    前任，硬删有误伤风险），交给回收守护兜底（守护带 TS_API_KEY，
+          #    每轮删断联僵尸）。
+          _waited=0
+          while [ "${_waited}" -lt 150 ]; do
+            _alive="$(printf '%s' "${_dev}" | jq -r '
+              (.devices // [])[]?
+              | select(((.hostname // "") + " " + (.name // "")) | test("openclaw"))
+              | select(.connectedToControl == true)
+              | .id' 2>/dev/null | grep -c . || true)"
+            [ "${_alive:-0}" -eq 0 ] && break
+            sleep 10
+            _waited=$((_waited + 10))
+            _refresh_code="$(curl -s -o /tmp/ts-devices.json -w '%{http_code}' --max-time 20 \
+              "${_auth[@]}" \
+              https://api.tailscale.com/api/v2/tailnet/-/devices 2>/dev/null || true)"
+            if [ "${_refresh_code}" = "200" ]; then
+              _dev="$(cat /tmp/ts-devices.json)"
+            fi
+            echo "   ⏳ 前任 openclaw* 节点仍连着（cancel 后心跳窗口），已等待 ${_waited}s"
+          done
+          rm -f /tmp/ts-devices.json
           # 注册前运行：openclaw* 一律视为残留。按 hostname/name 双字段匹配，
           # 覆盖 openclaw / openclaw-1 / openclaw-tmp-* 全家族。
           #
@@ -903,13 +931,17 @@ jobs:
           # 故起一个脱离本步骤进程树的守护，在整个 job 生命周期内周期重试回收：
           #   名字一旦变回 openclaw → 重写 ts.env，RustDesk/通知/serve 地址随之自愈。
           # setsid + nohup 脱离进程树；job 结束随 runner 一起消失，无需收尾清理。
+          # 2026-11-08 升级：守护带 TS_API_KEY —— ① 每轮 API 删断联僵尸，不再干等
+          #   控制面几十分钟自动清理（Clean stale 步的心跳窗口等待只覆盖 ~150s，
+          #   更长的漏网由这里兜底）；② 收回名字后按 serve 现状重建全部端口，
+          #   消掉「名字切了、serve 还挂旧名证书」的断网窗口（run 42517434977 实锤）。
           mkdir -p "$HOME/.openclaw/logs"
           if [ "${TS_FQDN:-}" != "openclaw.${TS_SUFFIX}" ]; then
             echo "🔁 当前名为 ${TS_FQDN}，启动后台回收守护（每 120s 重试收回 openclaw）"
             # 守护脚本本体独立成文件（.github/scripts/tailscale/ts-reclaim-hostname.sh）：
             # 内联 heredoc 里的行不带 YAML 块缩进，会打断 run 的缩进层级（实测 YAML 解析报
             # "could not find expected ':'"）——脚本独立出去，workflow 里只剩一行调用。
-            setsid nohup bash "${GITHUB_WORKSPACE}/.github/scripts/tailscale/ts-reclaim-hostname.sh" \
+            TS_API_KEY="${TS_API_KEY:-}" setsid nohup bash "${GITHUB_WORKSPACE}/.github/scripts/tailscale/ts-reclaim-hostname.sh" \
               "${TS_SUFFIX}" "${GITHUB_RUN_ID:-0}" \
               >> "$HOME/.openclaw/logs/ts-reclaim.log" 2>&1 < /dev/null &
             disown 2>/dev/null || true
