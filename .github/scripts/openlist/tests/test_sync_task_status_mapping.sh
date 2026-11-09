@@ -31,9 +31,11 @@ chk() {
 # ---------- 抽取被测函数 ----------
 # 与 test_batch_precheck_circuit_breaker.sh 同策略: 单函数抽取 + 显式 stub，
 # 保持与 utils/sync/marker/progress 模块零耦合
-sed -n '/^sync_task()/,/^}/p' "$SCRIPT_DIR/../task_engine.sh" > extracted.sh
-echo "被测函数抽取: $(wc -l < extracted.sh) 行"
-source extracted.sh
+# 抽取文件放各自 WORK_DIR：tests/ 下多个套件共用 extracted.sh 文件名，
+# 全量串行跑时后跑的套件会覆写先跑的（2026-11-09 实锤 25 条假 command not found）
+sed -n '/^sync_task()/,/^}/p' "$SCRIPT_DIR/../task_engine.sh" > "$WORK_DIR/extracted.sh"
+echo "被测函数抽取: $(wc -l < "$WORK_DIR/extracted.sh") 行"
+source "$WORK_DIR/extracted.sh"
 
 # ---------- 协作者 stub ----------
 RCLONE_SYNC_TASK_FLAGS=()

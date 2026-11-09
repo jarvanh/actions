@@ -323,9 +323,13 @@ chmod -R u+w "$DEST/locked dir" 2>/dev/null || true
 #   短哈希体系里记录就是生命线（不可逆，original 丢了无法自愈），必须锁死。
 # ────────────────────────────────────────────────────────────
 echo "--- 场景8: 落盘链路三点连通（序列化 ↔ 真实落点 ↔ 还原）---"
-# ① 用场景 7 的真实输出按生产格式写 fix_list 行（file_fix_pipeline.sh:420 同款 8 段管道行）
+# ① 用场景 7 的真实输出按生产格式写 fix_list 行（file_fix_pipeline.sh:420 同款 8 段行）。
+#   分隔符是 OL_FIELD_SEP（0x1F，真源 file_fix_pipeline.sh:30）——restore_info.jq
+#   split("\u001f") 只认它；此前写 `|` 切不开字段，整条序列化成空数组，
+#   场景 8 六项断言恒 FAIL（b5ae551 合入时未本地跑过本套件，2026-11-09 实锤）
 SIZE7=$(wc -c < "$SRC7" | tr -d ' ')
-FIXLINE7="${ORIG7}|${TRY_FIX_ALTERNATIVE}|${TRY_FIX_METHOD}|${TRY_FIX_RESTORE}|${SIZE7}B|${SIZE7}|${TRY_FIX_METHOD_ID}|${TRY_FIX_MD5}"
+SEP7=$'\037'
+FIXLINE7="${ORIG7}${SEP7}${TRY_FIX_ALTERNATIVE}${SEP7}${TRY_FIX_METHOD}${SEP7}${TRY_FIX_RESTORE}${SEP7}${SIZE7}B${SEP7}${SIZE7}${SEP7}${TRY_FIX_METHOD_ID}${SEP7}${TRY_FIX_MD5}"
 FIXED_JSON7=$(printf '%s\n' "$FIXLINE7" \
   | jq -R -s --arg sp "$SRC7_BASE" --arg dp "$DEST" \
       -f "$REPO_ROOT/.github/scripts/openlist/restore_info.jq" 2>/dev/null || echo "[]")

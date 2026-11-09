@@ -29,8 +29,10 @@ ok_or() { if [ "$1" = yes ]; then chk "$2" ok ok; else chk "$2" fail ok; fi }
 has_substr() { printf '%s' "$2" | grep -qF "$1"; }
 
 # ---------- 抽取被测函数 ----------
-sed -n '/^_get_openlist_token()/,/^}/p' "$SCRIPT_DIR/../openlist_api.sh" > extracted.sh
-source extracted.sh
+# 抽取文件放各自 WORK_DIR：tests/ 下多个套件共用 extracted.sh 文件名，
+# 全量串行跑时后跑的套件会覆写先跑的（2026-11-09 实锤 25 条假 command not found）
+sed -n '/^_get_openlist_token()/,/^}/p' "$SCRIPT_DIR/../openlist_api.sh" > "$WORK_DIR/extracted.sh"
+source "$WORK_DIR/extracted.sh"
 export OPENLIST_ADMIN_PASSWORD="${OPENLIST_ADMIN_PASSWORD:-pw123}"
 
 # ---------- 假 curl：按 SCENARIO 输出 canned 响应并记录调用次数 ----------

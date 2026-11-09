@@ -174,6 +174,22 @@ grep -l "command not found" /tmp/x_*.log   # 必须为空（硬要求）
   - `test_marker_skip_guards.sh` 1b（macOS BSD `date` 无 `-d`）
 - `command not found` 扫描**必须为空**——套件 PASS 不等于通过。
 
+### 2026-11-09 实测后修订（两个历史假红来源已根治）
+
+- **共享 `extracted.sh` 污染已消除**：`test_get_openlist_token_login` /
+  `test_sync_task_status_mapping` / `test_batch_precheck_circuit_breaker` 三套
+  改把抽取文件写进各自 `WORK_DIR`（此前共用 tests/extracted.sh，串行跑时后跑的
+  覆写先跑的，产生过 25 条假 cnf）。上面「跑期间不要并发跑单个测试」的告诫对
+  cnf 维度已不再承重（时序敏感类仍适用）。
+- **`test_batch_precheck_circuit_breaker` 自身的 25 条假 cnf 已修**：c17e757 加
+  409 死目录闸（`_batch_409_deadlock` 定义 task_engine.sh:638）时漏给本测试补
+  stub——sed 只抽 `sync_by_file_batches()`（2155 行起），调用点 rc≠124 分支一走
+  就 cnf。已补 stub（返回 1 = 非 409），cnf 清零，PASS=53。
+- **假红名单更新**：`test_truth.sh`（依赖 docker——本机有 docker 时实际会 PASS，
+  2026-11-09 实测）、`test_marker_skip_guards.sh` 1b（macOS BSD `date` 无 `-d`）
+  仍是环境假红；`test_restore_real_local.sh` 场景 8 六连 FAIL 是 b5ae551 合入时
+  的分隔符 bug（FIXLINE 用 `|` 而 restore_info.jq 只认 0x1F），已修，不再在名单。
+
 ### flake 名单（单独复跑确认后再下结论，别急着改代码）
 
 - `test_progress_no_orphans.sh` T5「强杀路径有超时上限 <15s」：负载高即失败，

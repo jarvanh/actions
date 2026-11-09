@@ -41,9 +41,11 @@ chk() {
 # ---------- 抽取被测函数 ----------
 # sed 单函数抽取而非 source 整个 task_engine.sh: 保持与 utils/sync/marker 等模块零耦合，
 # 全部协作者用显式 stub 替代，行为断言不受无关改动影响
-sed -n '/^sync_by_file_batches()/,/^}/p' "$SCRIPT_DIR/../task_engine.sh" > extracted.sh
-echo "被测函数抽取: $(wc -l < extracted.sh) 行"
-source extracted.sh
+# 抽取文件放各自 WORK_DIR：tests/ 下多个套件共用 extracted.sh 文件名，
+# 全量串行跑时后跑的套件会覆写先跑的（2026-11-09 实锤 25 条假 command not found）
+sed -n '/^sync_by_file_batches()/,/^}/p' "$SCRIPT_DIR/../task_engine.sh" > "$WORK_DIR/extracted.sh"
+echo "被测函数抽取: $(wc -l < "$WORK_DIR/extracted.sh") 行"
+source "$WORK_DIR/extracted.sh"
 
 # ---------- 协作者 stub ----------
 DEFAULT_SPLIT_THRESHOLD_BYTES=$((50 * 1024 * 1024 * 1024))
@@ -103,6 +105,11 @@ _progress_batch_history_clear() { :; }
 _progress_batch_history_add() { :; }
 _start_batch_progress_thread() { :; }
 _stop_batch_progress_thread() { :; }
+# _batch_409_deadlock（409 死目录判据，task_engine.sh:638）定义在抽取段外
+# （sed 只抽 sync_by_file_batches()，在 2155 行起）；其调用点（rc≠124 分支）
+# 在多数 G-case 里都会走到——补 stub 消除假 command not found（c17e757 加闸时
+# 漏了本测试的 stub 清单，门禁要求日志零 cnf）
+_batch_409_deadlock() { return 1; }
 START_TR_CALLS=0
 _start_token_refresher() { START_TR_CALLS=$((START_TR_CALLS + 1)); }
 STOP_TR_CALLS=0
