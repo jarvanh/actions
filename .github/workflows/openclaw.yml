@@ -172,6 +172,12 @@ jobs:
 
 
       - name: Mount Dropbox
+        env:
+          # 健康看门狗用（写入 600 权限 EnvironmentFile，不进日志/命令行）
+          TELEGRAM_BOT_TOKEN_ALERT: ${{ secrets.TELEGRAM_BOT_TOKEN_ALERT }}
+          TELEGRAM_CHAT_ID_ALERT: ${{ secrets.TELEGRAM_CHAT_ID_ALERT }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           # 2026-10-29 下线优化（B3）：hosted runner 镜像自带 apt 索引，直接安装；
           # 索引过期导致失败时再补 update 重装（实测 apt-get update 占本步骤大半耗时）。
@@ -237,6 +243,13 @@ jobs:
             fi
             sleep 2
           done
+
+          # 常驻健康看门狗：每 5 分钟查挂载/隧道/看板/gateway，状态变化发 TG。
+          # 1033 事故里所有症状都能被它 5 分钟内抓到（当时无人知晓 3 小时）。
+          if [ -f "$GITHUB_WORKSPACE/.github/scripts/health/install_health_watchdog.sh" ]; then
+            bash "$GITHUB_WORKSPACE/.github/scripts/health/install_health_watchdog.sh" || \
+              echo "::warning::健康看门狗安装失败（不影响主流程）"
+          fi
           # 2026-11-10 教训：这步以前失败也静默放行，于是一整轮 run 都在「无持久化
           # 状态」下跑（凭据/看板/syncthing 全缺），远端只能看到一个 1033。现在直接
           # 失败并把诊断信息打出来，宁可早停也不要带病跑 6 小时。
@@ -245,6 +258,17 @@ jobs:
             tail -20 /opt/logs/rclone-dropbox.log 2>/dev/null || true
             sudo dmesg 2>/dev/null | grep -i apparmor | tail -5 || true
             journalctl --user -u rclone-dropbox -n 20 --no-pager 2>/dev/null || true
+            # 系统级故障必须主动告知（2026-11-10 1033 事故教训：挂了 3 小时无人知）
+            if [ -n "${{ secrets.TELEGRAM_BOT_TOKEN_ALERT }}" ]; then
+              source "$GITHUB_WORKSPACE/.github/scripts/telegram/tg_notify.sh"
+              msg=""
+              tg_add_title msg "🚨 Dropbox 挂载失败"
+              tg_add_kv msg "主机" "$(hostname)"
+              tg_add_kv msg "运行" "$GITHUB_RUN_ID"
+              tg_add_block msg "$(escape_html "$(tail -8 /opt/logs/rclone-dropbox.log 2>/dev/null)")"
+              tg_add_footer msg
+              send_tg "$msg" alert || true
+            fi
             exit 1
           fi
       - name: Prefetch cold artifacts (后台并行)
