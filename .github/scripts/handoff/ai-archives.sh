@@ -26,6 +26,20 @@ handoff_init
 
 GW="${GITHUB_WORKSPACE:-/home/runner/actions-repo}"
 LOG=/tmp/handoff-ai-archives.log
+# 2026-11-10 事故加固：本脚本会**停止真实服务**。两层保险：
+# ① 必须在已武装交接的旧轮上运行（状态目录有 successor-run-id 且 old.json
+#    归属本 run）；② 测试模式（HANDOFF_TEST=1）只走测试状态目录/测试远端，
+#    与生产彻底隔离。两者都不满足直接拒跑。
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=protocol.sh
+source "$here/protocol.sh"
+handoff_init
+_owner="$(handoff_get "$HANDOFF_OLD_REMOTE" '.old_run')"
+_sid_file="$HANDOFF_STATE_DIR/successor-run-id"
+if [ ! -f "$_sid_file" ] || [ "$_owner" != "${GITHUB_RUN_ID:-}" ]; then
+  echo "⛔ [ai-archives] 本机不是已武装交接的旧轮（owner=${_owner:-<无>} run=${GITHUB_RUN_ID:-<无>}），拒跑 —— 拒绝停任何服务"
+  exit 1
+fi
 # 测试模式：对象远端全部落到 handoff-test 前缀，不覆盖生产归档
 #（生产 omni/rsstt/z2a 包由测试机覆盖会污染真实恢复源 —— 这是测试对生产的
 #  最重的一类影响，2026-11-10 审计补）
