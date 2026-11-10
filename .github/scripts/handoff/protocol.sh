@@ -29,6 +29,8 @@
 HANDOFF_REMOTE_DIR="${HANDOFF_REMOTE_DIR:-dropbox:self-hosted/handoff}"
 HANDOFF_OLD_REMOTE="$HANDOFF_REMOTE_DIR/old.json"
 HANDOFF_NEW_REMOTE="$HANDOFF_REMOTE_DIR/new.json"
+# AI 栈快照的独立 marker（Phase 1.5）：与 old.json 分开写，避免两个写入方互踩
+HANDOFF_AI_REMOTE="$HANDOFF_REMOTE_DIR/ai.json"
 HANDOFF_STATE_DIR="/tmp/openclaw-handoff"
 HANDOFF_RSYNC_PORT="${HANDOFF_RSYNC_PORT:-8730}"
 HANDOFF_PROTOCOL=1
@@ -65,6 +67,15 @@ handoff_old_state() { # <old_run 期望值>
   owner="$(handoff_get "$HANDOFF_OLD_REMOTE" '.old_run')"
   [ "$owner" = "$1" ] || { printf ''; return 0; }
   state="$(handoff_get "$HANDOFF_OLD_REMOTE" '.state')"
+  printf '%s' "${state:-}"
+}
+
+# ai.json 的归属校验读法（旧轮写、继任者读）
+handoff_ai_state() { # <old_run 期望值>
+  local owner state
+  owner="$(handoff_get "$HANDOFF_AI_REMOTE" '.old_run')"
+  [ "$owner" = "$1" ] || { printf ''; return 0; }
+  state="$(handoff_get "$HANDOFF_AI_REMOTE" '.state')"
   printf '%s' "${state:-}"
 }
 

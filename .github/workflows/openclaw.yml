@@ -2123,7 +2123,8 @@ jobs:
         run: |
           set -uo pipefail
           OC_DIR="${GITHUB_WORKSPACE}/.github/scripts/openclaw"
-          bash "$GITHUB_WORKSPACE/.github/scripts/handoff/gate.sh" archives_done || true
+          # Phase 1.5：只等 AI 栈自己的快照（交出瞬间上传），不必等整段最终归档
+          bash "$GITHUB_WORKSPACE/.github/scripts/handoff/gate.sh" ai_archives_done || true
           # 派发六上游（run-*.sh 调用即返回，真实部署在脚本内后台子壳；与 early-dispatch 同款）
           _dispatched=0
           for _u in workbuddy trae2api zcode2api qingyan qoder2api autoclaw; do
@@ -2231,9 +2232,9 @@ jobs:
           # 2026-11-06 启动提速（主人拍板）：健康后收尾并行化 ——
           # 本步整体后台起跑（rc/log/pid 契约），由「Start background archive loop」前的
           # 「Collect background post-health tasks」统一收口；脚本体零改动。
-          # 2026-11-10 Phase 1：继任轮先等旧轮最终归档（rsstt.tar.gz 上传完）再恢复，
-          # 保证订阅/推送游标零丢失；serve 轮直通。
-          bash "$GITHUB_WORKSPACE/.github/scripts/handoff/gate.sh" archives_done || true
+          # 2026-11-10 Phase 1.5：等 AI 栈快照（含 rsstt.tar.gz，交出瞬间上传）即可，
+          # 不必等整段最终归档 —— 仍是「旧轮停机后」的静树，零丢失不变；serve 轮直通。
+          bash "$GITHUB_WORKSPACE/.github/scripts/handoff/gate.sh" ai_archives_done || true
           _bg_tag="rss"
           rm -f "/tmp/post-health-${_bg_tag}.rc" "/tmp/post-health-${_bg_tag}.log" "/tmp/post-health-${_bg_tag}.pid"
           (
@@ -2396,8 +2397,8 @@ jobs:
           # 2026-11-06 启动提速（主人拍板）：健康后收尾并行化 ——
           # 本步整体后台起跑（rc/log/pid 契约），由「Start background archive loop」前的
           # 「Collect background post-health tasks」统一收口；脚本体零改动。
-          # 2026-11-10 Phase 1：继任轮等旧轮最终归档后起看板；serve 轮直通。
-          bash "$GITHUB_WORKSPACE/.github/scripts/handoff/gate.sh" archives_done || true
+          # 2026-11-10 Phase 1.5：看板读网关数据，等 AI 栈快照即可；serve 轮直通。
+          bash "$GITHUB_WORKSPACE/.github/scripts/handoff/gate.sh" ai_archives_done || true
           _bg_tag="quota"
           rm -f "/tmp/post-health-${_bg_tag}.rc" "/tmp/post-health-${_bg_tag}.log" "/tmp/post-health-${_bg_tag}.pid"
           (
@@ -4972,6 +4973,14 @@ jobs:
           }
 
           run_aigateway_archive() {
+            # 2026-11-10 Phase 1.5：交接瞬间已由 ai-archives.sh 归档并上传过 AI 数据
+            #（那时服务刚停，静树更一致）。此处跳过，避免对已停止的 omniroute 容器
+            # 做 docker exec 在线备份（必然失败）并刷一条假告警。
+            if [ -f /tmp/handoff-ai-archives.ok ]; then
+              echo "⏭️ AI 网关数据已在交接瞬间归档（ai-archives.ok），跳过 stage A 重复归档"
+              record_archive_result "aigateway" skip 0 "已在交接瞬间归档"
+              return 0
+            fi
             # 5. AI 网关持久数据（backend-aware，三选一，口径同周期归档）
             ACTIVE_BACKEND="omniroute"
             if [ -f /tmp/active-ai-backend.env ]; then

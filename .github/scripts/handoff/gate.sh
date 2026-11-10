@@ -29,8 +29,9 @@ fi
 
 wait_state="$need"
 case "$need" in
-  cutover)       wait_sec=${HANDOFF_CUTOVER_WAIT_SEC} ;;
-  archives_done) wait_sec=${HANDOFF_ARCHIVES_WAIT_SEC} ;;
+  cutover)        wait_sec=${HANDOFF_CUTOVER_WAIT_SEC} ;;
+  ai_archives_done) wait_sec=${HANDOFF_ARCHIVES_WAIT_SEC} ;;
+  archives_done)  wait_sec=${HANDOFF_ARCHIVES_WAIT_SEC} ;;
   *) echo "[gate:$need] 未知闸门，直接放行"; exit 0 ;;
 esac
 
@@ -42,6 +43,12 @@ for _i in $(seq 1 $(( wait_sec / 5 ))); do
       ;;
     archives_done)
       case "$_st" in archives_done) : > "$PASS_FILE"; exit 0 ;; handoff_aborted) : > "$PASS_FILE"; exit 0 ;; esac
+      ;;
+    ai_archives_done)
+      # Phase 1.5：只等 AI 栈自己的快照（交出瞬间上传，与 rsync 并行），
+      # 不必等整段最终归档 —— 模型通道恢复时间从 ~8min 压到 ~1.5min。
+      _ai="$(handoff_ai_state "${HANDOFF_OF}")"
+      case "$_ai" in done) : > "$PASS_FILE"; exit 0 ;; esac
       ;;
   esac
   sleep 5

@@ -126,6 +126,16 @@ done
   || abort_handoff "rsync daemon 未监听 ${HANDOFF_RSYNC_PORT}（日志: $(tail -n 3 /tmp/rsyncd-handoff.log 2>/dev/null | tr '\n' ' '))"
 echo "✅ [cutover] rsync 源就绪（${TS_IP}:${HANDOFF_RSYNC_PORT}，只读，仅 tailnet 可达）"
 
+# ── 3.5 Phase 1.5：后台快照 AI 栈（停服+归档+上传），与继任者 rsync 并行 ──
+# 必须在 handing_over **之后**才可能被继任者消费，但启动可以提前：越早开跑，
+# 模型通道越早恢复。失败不影响交出本身（继任者 gate 超时降级）。
+if [ -f "$GITHUB_WORKSPACE/.github/scripts/handoff/ai-archives.sh" ]; then
+  setsid nohup bash "$GITHUB_WORKSPACE/.github/scripts/handoff/ai-archives.sh" \
+    >>/tmp/handoff-ai-archives.log 2>&1 < /dev/null &
+  disown 2>/dev/null || true
+  echo "🚀 [cutover] AI 栈快照已后台开跑（与 rsync 并行）"
+fi
+
 # ── 4. 交出标记 → 等 serving ──
 handoff_put "$HANDOFF_OLD_REMOTE" "$(handoff_old_json handing_over "$SID" "$TS_IP" "$CUTOVER_TS" "$BASE_MARKER")"
 echo "🤝 [cutover] 已交出（handing_over），等继任者 serving（≤${HANDOFF_SERVING_WAIT_SEC}s）…"
