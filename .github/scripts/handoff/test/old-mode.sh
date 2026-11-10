@@ -65,6 +65,15 @@ if bash "$HS/cutover.sh"; then
   echo "║ 停机→继任者 serving: $((DONE_EPOCH - STOP_EPOCH))s（轮询粒度 5s）"
   echo "║ 继任者 run: $(cat "$S/successor-run-id" 2>/dev/null || echo '?')"
   echo "╚══════════════════════════════════════════════"
+  # Phase 1.5 仿真：AI 栈快照（停服+归档+上传）在交出瞬间后台完成，约 50s
+  AI_SIM_SECONDS="${AI_SIM_SECONDS:-50}"
+  (
+    sleep "$AI_SIM_SECONDS"
+    printf '{"protocol":1,"old_run":%s,"state":"done","ts":%s}' \
+      "${GITHUB_RUN_ID}" "$(date +%s)" | rclone rcat "${HANDOFF_REMOTE_DIR}/ai.json" 2>/dev/null \
+      && echo "🧪 [old] ai.json=done（仿真 AI 快照 ${AI_SIM_SECONDS}s）"
+  ) &
+
   # 仿真旧轮最终归档耗时（生产实测：主包 243s + 其余 ~45s）
   ARCHIVE_SIM_SECONDS="${ARCHIVE_SIM_SECONDS:-300}"
   echo "═══ [old] 仿真最终归档 ${ARCHIVE_SIM_SECONDS}s（模型通道要等的就是这段）"

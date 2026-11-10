@@ -23,12 +23,16 @@ STOP_EPOCH=$(rclone cat "${HANDOFF_REMOTE_DIR}/timing.json" 2>/dev/null | jq -r 
 case "${STOP_EPOCH:-0}" in ''|*[!0-9]*) STOP_EPOCH=0 ;; esac
 [ "$STOP_EPOCH" -gt 0 ] && echo "📉 [chat] 旧轮停机 → 聊天路径恢复: $(( CHAT_READY - STOP_EPOCH ))s"
 
-echo "═══ [new] 闸门（真 gate.sh archives_done，应阻塞到旧轮推进）"
+echo "═══ [new] 模型通道闸门（真 gate.sh ai_archives_done = Phase 1.5 后的等待点）"
 GATE_T0=$(date +%s)
-bash "$HS/gate.sh" archives_done
-echo "gate 等待 $(( $(date +%s) - GATE_T0 ))s 后放行"
+bash "$HS/gate.sh" ai_archives_done
+echo "ai 闸门等待 $(( $(date +%s) - GATE_T0 ))s 后放行"
 MODEL_READY=$(date +%s)
-[ "${STOP_EPOCH:-0}" -gt 0 ] && echo "📉 [model] 旧轮停机 → 模型通道放行: $(( MODEL_READY - STOP_EPOCH ))s"
+[ "${STOP_EPOCH:-0}" -gt 0 ] && echo "📉 [model] 旧轮停机 → 模型通道恢复: $(( MODEL_READY - STOP_EPOCH ))s"
+
+echo "═══ [new] 归档循环闸门（真 gate.sh archives_done，仍需等整段归档）"
+bash "$HS/gate.sh" archives_done
+echo "archive 闸门放行（归档循环用，不影响服务可用性）"
 
 echo "═══ [new] 验收"
 fail=0
